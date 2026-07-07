@@ -2,6 +2,7 @@
 
 #include "../ArkDriverClient/ArkDriverClient.h"
 #include "../OtherDock/OtherDock.h"
+#include "../ksword/profile/ProfileJsonLoader.h"
 #include "../theme.h"
 
 #include <QAbstractItemView>
@@ -433,10 +434,17 @@ namespace
                 continue;
             }
 
-            const QStringList fileNames = directory.entryList(
-                QStringList{ QStringLiteral("win32k_gui_public_*_deep_offsets.json") },
+            QStringList fileNames = directory.entryList(
+                QStringList{ QStringLiteral("win32k_gui_public_*_deep_offsets.json.qz") },
                 QDir::Files,
                 QDir::Name);
+            if (fileNames.isEmpty())
+            {
+                fileNames = directory.entryList(
+                    QStringList{ QStringLiteral("win32k_gui_public_*_deep_offsets.json") },
+                    QDir::Files,
+                    QDir::Name);
+            }
             if (!fileNames.isEmpty())
             {
                 return directory.absoluteFilePath(fileNames.first());
@@ -640,22 +648,15 @@ namespace
                 "窗口详情只能显示 R0 readiness，无法展示 public symbol 事实库。"));
         }
 
-        QFile jsonFile(jsonPath);
-        if (!jsonFile.open(QIODevice::ReadOnly))
-        {
-            return storeAndReturn(QStringLiteral(
-                "[Win32K Public PDB Catalog]\n"
-                "无法读取 win32k public deep JSON：%1").arg(jsonPath));
-        }
-
         QJsonParseError parseError{};
-        const QJsonDocument document = QJsonDocument::fromJson(jsonFile.readAll(), &parseError);
+        QString readErrorText;
+        const QJsonDocument document = ks::profile::readProfileJsonDocument(jsonPath, &parseError, &readErrorText);
         if (parseError.error != QJsonParseError::NoError || !document.isObject())
         {
             return storeAndReturn(QStringLiteral(
                 "[Win32K Public PDB Catalog]\n"
                 "win32k public deep JSON 解析失败：%1；文件=%2")
-                .arg(parseError.errorString())
+                .arg(readErrorText.isEmpty() ? parseError.errorString() : readErrorText)
                 .arg(jsonPath));
         }
 

@@ -1,5 +1,7 @@
 #include "ProcessDetailWindow.InternalCommon.h"
 
+#include "../ksword/profile/ProfileJsonLoader.h"
+
 // ============================================================
 // ProcessDetailWindow.PdbCatalog.cpp
 // 作用：
@@ -73,10 +75,17 @@ namespace process_detail_window_internal
             }
 
             QDir directory(directoryText);
-            const QStringList fileNames = directory.entryList(
-                QStringList{ QStringLiteral("ntkrnlmp_*_deep_offsets.json") },
+            QStringList fileNames = directory.entryList(
+                QStringList{ QStringLiteral("ntkrnlmp_*_deep_offsets.json.qz") },
                 QDir::Files,
                 QDir::Name);
+            if (fileNames.isEmpty())
+            {
+                fileNames = directory.entryList(
+                    QStringList{ QStringLiteral("ntkrnlmp_*_deep_offsets.json") },
+                    QDir::Files,
+                    QDir::Name);
+            }
             if (fileNames.isEmpty())
             {
                 return QString();
@@ -109,9 +118,10 @@ namespace process_detail_window_internal
 
             for (const QString& pathText : candidatePaths)
             {
-                if (QFile::exists(pathText))
+                const QString resolvedPath = ks::profile::resolveProfileJsonPath(pathText);
+                if (!resolvedPath.isEmpty())
                 {
-                    return QFileInfo(pathText).absoluteFilePath();
+                    return QFileInfo(resolvedPath).absoluteFilePath();
                 }
             }
             return QString();
@@ -137,24 +147,15 @@ namespace process_detail_window_internal
         // - 返回：解析成功时返回 object，否则返回空 object 并写 detailTextOut。
         QJsonObject readJsonObjectFromFile(const QString& pathText, QString* detailTextOut)
         {
-            QFile jsonFile(pathText);
-            if (!jsonFile.open(QIODevice::ReadOnly))
-            {
-                if (detailTextOut != nullptr)
-                {
-                    *detailTextOut = QStringLiteral("无法读取 JSON：%1").arg(pathText);
-                }
-                return {};
-            }
-
             QJsonParseError parseError{};
-            const QJsonDocument document = QJsonDocument::fromJson(jsonFile.readAll(), &parseError);
+            QString readErrorText;
+            const QJsonDocument document = ks::profile::readProfileJsonDocument(pathText, &parseError, &readErrorText);
             if (parseError.error != QJsonParseError::NoError || !document.isObject())
             {
                 if (detailTextOut != nullptr)
                 {
                     *detailTextOut = QStringLiteral("JSON 解析失败：%1；文件=%2")
-                        .arg(parseError.errorString())
+                        .arg(readErrorText.isEmpty() ? parseError.errorString() : readErrorText)
                         .arg(pathText);
                 }
                 return {};
@@ -676,18 +677,13 @@ namespace process_detail_window_internal
             return storeAndReturn(QStringLiteral("PDB deep offset JSON 未找到；请确认 profiles/pdb_deep_offsets 已随构建复制到程序目录。"));
         }
 
-        QFile jsonFile(jsonPath);
-        if (!jsonFile.open(QIODevice::ReadOnly))
-        {
-            return storeAndReturn(QStringLiteral("PDB deep offset JSON 无法读取：%1").arg(jsonPath));
-        }
-
         QJsonParseError parseError{};
-        const QJsonDocument document = QJsonDocument::fromJson(jsonFile.readAll(), &parseError);
+        QString readErrorText;
+        const QJsonDocument document = ks::profile::readProfileJsonDocument(jsonPath, &parseError, &readErrorText);
         if (parseError.error != QJsonParseError::NoError || !document.isObject())
         {
             return storeAndReturn(QStringLiteral("PDB deep offset JSON 解析失败：%1；文件=%2")
-                .arg(parseError.errorString())
+                .arg(readErrorText.isEmpty() ? parseError.errorString() : readErrorText)
                 .arg(jsonPath));
         }
 
@@ -857,14 +853,8 @@ namespace process_detail_window_internal
             return items;
         }
 
-        QFile jsonFile(jsonPath);
-        if (!jsonFile.open(QIODevice::ReadOnly))
-        {
-            return items;
-        }
-
         QJsonParseError parseError{};
-        const QJsonDocument document = QJsonDocument::fromJson(jsonFile.readAll(), &parseError);
+        const QJsonDocument document = ks::profile::readProfileJsonDocument(jsonPath, &parseError);
         if (parseError.error != QJsonParseError::NoError || !document.isObject())
         {
             return items;

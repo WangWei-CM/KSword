@@ -2,6 +2,7 @@
 
 #include "../ArkDriverClient/ArkDriverClient.h"
 #include "../UI/CodeEditorWidget.h"
+#include "../ksword/profile/ProfileJsonLoader.h"
 #include "../theme.h"
 
 #include <QAbstractItemView>
@@ -1555,18 +1556,14 @@ namespace
         profile.sourceText = QStringLiteral("scattered-json");
         profile.pathText = QDir::toNativeSeparators(filePath);
 
-        QFile file(filePath);
-        if (!file.open(QIODevice::ReadOnly))
-        {
-            profile.diagnosticsText = QStringLiteral("无法打开 profile: %1").arg(file.errorString());
-            return profile;
-        }
-
         QJsonParseError parseError{};
-        const QJsonDocument document = QJsonDocument::fromJson(file.readAll(), &parseError);
+        QString readErrorText;
+        const QJsonDocument document = ks::profile::readProfileJsonDocument(filePath, &parseError, &readErrorText);
         if (parseError.error != QJsonParseError::NoError || !document.isObject())
         {
-            profile.diagnosticsText = QStringLiteral("JSON 解析失败: %1").arg(parseError.errorString());
+            profile.diagnosticsText = readErrorText.isEmpty()
+                ? QStringLiteral("JSON 解析失败: %1").arg(parseError.errorString())
+                : readErrorText;
             return profile;
         }
 
@@ -1882,18 +1879,14 @@ namespace
         bestProfile.sourceText = QStringLiteral("pack");
         bestProfile.pathText = QDir::toNativeSeparators(filePath);
 
-        QFile file(filePath);
-        if (!file.open(QIODevice::ReadOnly))
-        {
-            diagnosticsOut = QStringLiteral("无法打开 PDB profile pack: %1").arg(file.errorString());
-            return bestProfile;
-        }
-
         QJsonParseError parseError{};
-        const QJsonDocument document = QJsonDocument::fromJson(file.readAll(), &parseError);
+        QString readErrorText;
+        const QJsonDocument document = ks::profile::readProfileJsonDocument(filePath, &parseError, &readErrorText);
         if (parseError.error != QJsonParseError::NoError || !document.isObject())
         {
-            diagnosticsOut = QStringLiteral("PDB profile pack JSON 解析失败: %1").arg(parseError.errorString());
+            diagnosticsOut = readErrorText.isEmpty()
+                ? QStringLiteral("PDB profile pack JSON 解析失败: %1").arg(parseError.errorString())
+                : readErrorText;
             return bestProfile;
         }
 
@@ -1993,8 +1986,8 @@ namespace
 
         for (const QString& packPath : profilePackSearchPaths())
         {
-            QFileInfo fileInfo(packPath);
-            if (!fileInfo.exists() || !fileInfo.isFile())
+            const QString resolvedPackPath = ks::profile::resolveProfileJsonPath(packPath);
+            if (resolvedPackPath.isEmpty())
             {
                 diagnostics << QStringLiteral("pack 不存在: %1").arg(QDir::toNativeSeparators(packPath));
                 continue;
@@ -2002,7 +1995,7 @@ namespace
 
             existingPackCount += 1U;
             QString packDiagnostics;
-            LocalPdbProfile profile = loadPdbProfilePackFile(fileInfo.absoluteFilePath(), currentIdentity, packDiagnostics);
+            LocalPdbProfile profile = loadPdbProfilePackFile(resolvedPackPath, currentIdentity, packDiagnostics);
             diagnostics << packDiagnostics;
             if (profile.matched)
             {
@@ -2064,7 +2057,7 @@ namespace
             }
 
             const QFileInfoList files = directory.entryInfoList(
-                QStringList{ QStringLiteral("*.json") },
+                QStringList{ QStringLiteral("*.json"), QStringLiteral("*.json.qz") },
                 QDir::Files | QDir::Readable,
                 QDir::Name);
             for (const QFileInfo& fileInfo : files)

@@ -5,6 +5,8 @@ namespace apimon
 {
     namespace
     {
+        std::vector<std::wstring> SplitIniList(const std::wstring& listText);
+
         std::wstring QueryIniText(const std::wstring& iniPath, const wchar_t* keyName, const wchar_t* defaultText)
         {
             wchar_t textBuffer[4096] = {};
@@ -26,6 +28,216 @@ namespace apimon
                 defaultValue ? 1U : 0U,
                 iniPath.c_str());
             return rawValue != 0;
+        }
+
+        std::wstring TrimWideCopy(const std::wstring& textValue)
+        {
+            const auto firstIt = std::find_if_not(
+                textValue.begin(),
+                textValue.end(),
+                [](const wchar_t ch) { return ch == L' ' || ch == L'\t' || ch == L'\r' || ch == L'\n'; });
+            const auto lastIt = std::find_if_not(
+                textValue.rbegin(),
+                textValue.rend(),
+                [](const wchar_t ch) { return ch == L' ' || ch == L'\t' || ch == L'\r' || ch == L'\n'; }).base();
+            if (firstIt >= lastIt)
+            {
+                return std::wstring();
+            }
+            return std::wstring(firstIt, lastIt);
+        }
+
+        std::wstring ToLowerWideCopy(std::wstring textValue)
+        {
+            std::transform(
+                textValue.begin(),
+                textValue.end(),
+                textValue.begin(),
+                [](const wchar_t ch) { return static_cast<wchar_t>(std::towlower(ch)); });
+            return textValue;
+        }
+
+        std::vector<std::wstring> SplitWideText(const std::wstring& textValue, const wchar_t delimiter)
+        {
+            std::vector<std::wstring> partList;
+            std::wstring currentPart;
+            for (const wchar_t ch : textValue)
+            {
+                if (ch == delimiter)
+                {
+                    partList.push_back(TrimWideCopy(currentPart));
+                    currentPart.clear();
+                    continue;
+                }
+                currentPart.push_back(ch);
+            }
+            partList.push_back(TrimWideCopy(currentPart));
+            return partList;
+        }
+
+        bool ParseUnsignedInteger(const std::wstring& textValue, std::uint64_t* valueOut)
+        {
+            if (valueOut == nullptr)
+            {
+                return false;
+            }
+
+            const std::wstring normalizedText = TrimWideCopy(textValue);
+            if (normalizedText.empty())
+            {
+                return false;
+            }
+
+            wchar_t* endPointer = nullptr;
+            errno = 0;
+            if (!normalizedText.empty() && normalizedText.front() == L'-')
+            {
+                const long long parsedValue = std::wcstoll(normalizedText.c_str(), &endPointer, 0);
+                if (errno != 0 || endPointer == normalizedText.c_str() || (endPointer != nullptr && *endPointer != L'\0'))
+                {
+                    return false;
+                }
+                *valueOut = static_cast<std::uint64_t>(parsedValue);
+                return true;
+            }
+
+            const unsigned long long parsedValue = std::wcstoull(normalizedText.c_str(), &endPointer, 0);
+            if (errno != 0 || endPointer == normalizedText.c_str() || (endPointer != nullptr && *endPointer != L'\0'))
+            {
+                return false;
+            }
+
+            *valueOut = static_cast<std::uint64_t>(parsedValue);
+            return true;
+        }
+
+        FakeSuccessReturnType ParseFakeSuccessReturnType(const std::wstring& textValue)
+        {
+            const std::wstring lowerText = ToLowerWideCopy(TrimWideCopy(textValue));
+            if (lowerText == L"bool")
+            {
+                return FakeSuccessReturnType::Bool;
+            }
+            if (lowerText == L"handle" || lowerText == L"pvoid" || lowerText == L"pointer" || lowerText == L"ptr")
+            {
+                return FakeSuccessReturnType::Handle;
+            }
+            if (lowerText == L"dword" || lowerText == L"uint" || lowerText == L"int")
+            {
+                return FakeSuccessReturnType::Dword;
+            }
+            if (lowerText == L"ntstatus" || lowerText == L"status")
+            {
+                return FakeSuccessReturnType::NtStatus;
+            }
+            if (lowerText == L"hresult")
+            {
+                return FakeSuccessReturnType::HResult;
+            }
+            if (lowerText == L"lstatus")
+            {
+                return FakeSuccessReturnType::LStatus;
+            }
+            if (lowerText == L"socket" || lowerText == L"socketint" || lowerText == L"wsa")
+            {
+                return FakeSuccessReturnType::SocketInt;
+            }
+            return FakeSuccessReturnType::Scalar;
+        }
+
+        FakeSuccessLastErrorKind ParseFakeSuccessLastErrorKind(const std::wstring& textValue)
+        {
+            const std::wstring lowerText = ToLowerWideCopy(TrimWideCopy(textValue));
+            if (lowerText == L"win32" || lowerText == L"last_error" || lowerText == L"lasterror")
+            {
+                return FakeSuccessLastErrorKind::Win32;
+            }
+            if (lowerText == L"wsa" || lowerText == L"wsa_error" || lowerText == L"wsaerror")
+            {
+                return FakeSuccessLastErrorKind::Wsa;
+            }
+            return FakeSuccessLastErrorKind::None;
+        }
+
+        std::vector<FakeSuccessRule> ParseFakeSuccessRules(const std::wstring& ruleText)
+        {
+            std::vector<FakeSuccessRule> ruleList;
+            std::wstring normalizedText = ruleText;
+            std::size_t searchOffset = 0;
+            while ((searchOffset = normalizedText.find(L";;", searchOffset)) != std::wstring::npos)
+            {
+                normalizedText.replace(searchOffset, 2, L"\n");
+                searchOffset += 1;
+            }
+
+            for (const std::wstring& rawLine : SplitIniList(normalizedText))
+            {
+                const std::vector<std::wstring> partList = SplitWideText(rawLine, L'|');
+                if (partList.size() < 6)
+                {
+                    continue;
+                }
+
+                FakeSuccessRule ruleValue;
+                ruleValue.moduleName = TrimWideCopy(partList[0]);
+                ruleValue.apiName = TrimWideCopy(partList[1]);
+                ruleValue.returnType = ParseFakeSuccessReturnType(partList[2]);
+                if (ruleValue.moduleName.empty() || ruleValue.apiName.empty())
+                {
+                    continue;
+                }
+                if (!ParseUnsignedInteger(partList[3], &ruleValue.returnValue))
+                {
+                    continue;
+                }
+                ruleValue.lastErrorKind = ParseFakeSuccessLastErrorKind(partList[4]);
+
+                std::uint64_t lastErrorValue = 0;
+                if (ParseUnsignedInteger(partList[5], &lastErrorValue))
+                {
+                    ruleValue.lastErrorValue = static_cast<std::uint32_t>(lastErrorValue & 0xFFFFFFFFULL);
+                }
+
+                ruleList.push_back(std::move(ruleValue));
+            }
+            return ruleList;
+        }
+
+        // SplitIniList 作用：
+        // - 输入：INI 中以分号、逗号或换行分隔的列表文本；
+        // - 处理：去掉首尾空白并忽略空项，避免 UI 编辑后产生无效 Raw Hook 目标；
+        // - 返回：规范化后的字符串数组，不做大小写折叠，匹配阶段再统一处理。
+        std::vector<std::wstring> SplitIniList(const std::wstring& listText)
+        {
+            std::vector<std::wstring> itemList;
+            std::wstring currentItem;
+            const auto flushItem = [&itemList, &currentItem]() {
+                const auto firstIt = std::find_if_not(
+                    currentItem.begin(),
+                    currentItem.end(),
+                    [](const wchar_t ch) { return ch == L' ' || ch == L'\t' || ch == L'\r' || ch == L'\n'; });
+                const auto lastIt = std::find_if_not(
+                    currentItem.rbegin(),
+                    currentItem.rend(),
+                    [](const wchar_t ch) { return ch == L' ' || ch == L'\t' || ch == L'\r' || ch == L'\n'; }).base();
+                if (firstIt < lastIt)
+                {
+                    itemList.emplace_back(firstIt, lastIt);
+                }
+                currentItem.clear();
+            };
+
+            for (const wchar_t ch : listText)
+            {
+                if (ch == L';' || ch == L',' || ch == L'\r' || ch == L'\n')
+                {
+                    flushItem();
+                    continue;
+                }
+                currentItem.push_back(ch);
+            }
+            flushItem();
+            return itemList;
         }
     }
 
@@ -76,6 +288,27 @@ namespace apimon
         configValue.enableProcess = QueryIniBool(configValue.configPath, L"enable_process", true);
         configValue.enableLoader = QueryIniBool(configValue.configPath, L"enable_loader", true);
         configValue.autoInjectChild = QueryIniBool(configValue.configPath, L"auto_inject_child", false);
+        configValue.enableRawFallback = QueryIniBool(configValue.configPath, L"enable_raw_fallback", false);
+        configValue.rawUseDefaultDenyList = QueryIniBool(configValue.configPath, L"raw_use_default_denylist", true);
+        configValue.rawModuleList = SplitIniList(QueryIniText(
+            configValue.configPath,
+            L"raw_modules",
+            ks::winapi_monitor::kDefaultRawHookModules));
+        // rawDenyList 只读取用户额外规则：
+        // - 输入：会话 INI 的 raw_denylist；
+        // - 处理：不再把内置默认黑名单写入这里，避免 raw_use_default_denylist=false 时误伤用户自定义规则；
+        // - 返回：空配置表示“没有额外规则”，内置默认规则由 HookTargets.cpp 在匹配阶段单独合并。
+        configValue.rawDenyList = SplitIniList(QueryIniText(
+            configValue.configPath,
+            L"raw_denylist",
+            L""));
+        configValue.fakeSuccessEnabled = QueryIniBool(configValue.configPath, L"fake_success_enabled", false);
+        configValue.fakeSuccessRawFallback = QueryIniBool(configValue.configPath, L"fake_success_raw_fallback", false);
+        configValue.fakeSuccessRulesText = QueryIniText(
+            configValue.configPath,
+            L"fake_success_rules",
+            L"");
+        configValue.fakeSuccessRules = ParseFakeSuccessRules(configValue.fakeSuccessRulesText);
 
         const int rawDetailLimit = static_cast<int>(::GetPrivateProfileIntW(
             L"monitor",

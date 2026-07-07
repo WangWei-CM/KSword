@@ -22,6 +22,7 @@
 #include <vector>   // std::vector：进程快照与待刷新事件缓存。
 
 class QCheckBox;
+class QComboBox;
 class QLineEdit;
 class QLabel;
 class QPushButton;
@@ -29,6 +30,7 @@ class QSplitter;
 class QTableWidget;
 class QTableWidgetItem;
 class QTimer;
+class QToolButton;
 class QVBoxLayout;
 class QWidget;
 class QPoint;
@@ -51,18 +53,6 @@ public:
     void notifyPageActivated();
 
 public:
-    // ProcessColumn：
-    // - 作用：定义目标进程表列索引；
-    // - 调用：刷新进程列表和读取选中 PID 时统一复用。
-    enum ProcessColumn
-    {
-        ProcessColumnPid = 0,
-        ProcessColumnName,
-        ProcessColumnPath,
-        ProcessColumnUser,
-        ProcessColumnCount
-    };
-
     // EventColumn：
     // - 作用：定义 API 事件表列索引；
     // - 调用：插入事件、导出和右键菜单时统一按列访问。
@@ -75,6 +65,20 @@ public:
         EventColumnPidTid,
         EventColumnDetail,
         EventColumnCount
+    };
+
+    // FakeRuleColumn:
+    // - Purpose: keep the Fake Success rule table column indexes stable across UI, validation, and INI serialization.
+    // - Use: add/remove/serialize code reads table cells by these constants rather than repeating numeric indexes.
+    enum FakeRuleColumn
+    {
+        FakeRuleColumnModule = 0,
+        FakeRuleColumnApi,
+        FakeRuleColumnReturnType,
+        FakeRuleColumnReturnValue,
+        FakeRuleColumnLastErrorKind,
+        FakeRuleColumnLastErrorValue,
+        FakeRuleColumnCount
     };
 
     // EventRow：
@@ -98,8 +102,8 @@ private:
     void updateStatusLabel();
 
     void refreshProcessListAsync();
-    void populateProcessTable(const std::vector<ks::process::ProcessRecord>& processList);
-    void applyProcessFilter();
+    void populateProcessSelector(const std::vector<ks::process::ProcessRecord>& processList);
+    void updateProcessSelectorStatus();
     bool currentSelectedPid(std::uint32_t* pidOut) const;
     void browseAgentDllPath();
 
@@ -110,6 +114,10 @@ private:
     bool prepareSessionArtifacts(std::uint32_t pidValue, QString* errorTextOut);
     bool writeSessionConfigFile(QString* errorTextOut) const;
     void appendInternalEvent(const QString& categoryText, const QString& apiText, const QString& detailText);
+    QString fakeSuccessRulesIniText() const;
+    bool validateFakeSuccessRules(QString* errorTextOut) const;
+    void addFakeSuccessRuleFromInputs();
+    void removeSelectedFakeSuccessRule();
 
     void startPipeReadThread();
     void startChildPipeReadThread(std::uint32_t childPidValue);
@@ -123,6 +131,7 @@ private:
     void clearEventFilter();
     void exportVisibleRowsToTsv();
     void showEventContextMenu(const QPoint& position);
+    void showEventDetailDialog(int rowValue);
 
     static QString blueButtonStyle();
     static QString blueInputStyle();
@@ -135,6 +144,8 @@ private:
     static QString monitorIdleColorHex();
     static QString eventCategoryText(std::uint32_t categoryValue);
     static QString defaultDllPathHint();
+    static QString defaultRawHookModulesText();
+    static QString defaultRawHookDenyListText();
     static QString resultCodeText(std::int32_t resultCodeValue);
     static QString now100nsText();
     static bool tryParseUint32Text(const QString& textValue, std::uint32_t* valueOut);
@@ -142,17 +153,19 @@ private:
 
 private:
     QVBoxLayout* m_rootLayout = nullptr;               // m_rootLayout：根布局。
-    QSplitter* m_topSplitter = nullptr;                // m_topSplitter：上方左右分栏。
-    QWidget* m_processPanel = nullptr;                 // m_processPanel：进程列表面板。
-    QWidget* m_sessionPanel = nullptr;                 // m_sessionPanel：会话配置面板。
-    QWidget* m_filterPanel = nullptr;                  // m_filterPanel：事件筛选面板。
+    QToolButton* m_sessionCollapseButton = nullptr;    // m_sessionCollapseButton：唯一配置折叠标题按钮，统一收纳目标进程、Agent 与 Fake Success。
+    QWidget* m_sessionCollapseContent = nullptr;       // m_sessionCollapseContent：唯一折叠内容区，上部进程选择、下部左右配置。
+    QSplitter* m_topSplitter = nullptr;                // m_topSplitter：Agent 会话与 Fake Success 的左右分栏。
+    QWidget* m_processPanel = nullptr;                 // m_processPanel：顶部进程下拉选择面板。
+    QWidget* m_sessionPanel = nullptr;                 // m_sessionPanel：左侧 WinAPI Agent 会话配置面板。
+    QWidget* m_filterPanel = nullptr;                  // m_filterPanel：底部事件筛选面板。
 
-    QLineEdit* m_processFilterEdit = nullptr;          // m_processFilterEdit：进程过滤框。
+    QLabel* m_processIconLabel = nullptr;              // m_processIconLabel：显示当前候选/选中进程的系统图标。
+    QComboBox* m_processCombo = nullptr;               // m_processCombo：可编辑进程下拉框，用户输入进程名/PID 后从候选中选择。
     QPushButton* m_processRefreshButton = nullptr;     // m_processRefreshButton：刷新进程列表按钮。
-    QLabel* m_processStatusLabel = nullptr;            // m_processStatusLabel：进程列表状态文本。
-    QTableWidget* m_processTable = nullptr;            // m_processTable：系统进程表。
+    QLabel* m_processStatusLabel = nullptr;            // m_processStatusLabel：进程下拉框匹配/选择状态文本。
 
-    QLineEdit* m_manualPidEdit = nullptr;              // m_manualPidEdit：手动输入 PID 文本框。
+    QLineEdit* m_manualPidEdit = nullptr;              // m_manualPidEdit：手动输入 PID 的高级兜底文本框。
     QLineEdit* m_agentDllPathEdit = nullptr;           // m_agentDllPathEdit：Agent DLL 路径文本框。
     QPushButton* m_browseAgentDllButton = nullptr;     // m_browseAgentDllButton：浏览 DLL 按钮。
     QCheckBox* m_hookFileCheck = nullptr;              // m_hookFileCheck：是否启用文件 API 监控。
@@ -161,6 +174,23 @@ private:
     QCheckBox* m_hookProcessCheck = nullptr;           // m_hookProcessCheck：是否启用进程 API 监控。
     QCheckBox* m_hookLoaderCheck = nullptr;            // m_hookLoaderCheck：是否启用加载器 API 监控。
     QCheckBox* m_autoInjectChildCheck = nullptr;       // m_autoInjectChildCheck：是否在 CreateProcessW 成功后自动注入子进程。
+    QCheckBox* m_rawFallbackCheck = nullptr;           // m_rawFallbackCheck：是否启用未强类型覆盖导出的 Raw ABI 兜底 Hook。
+    QCheckBox* m_rawDefaultDenyListCheck = nullptr;    // m_rawDefaultDenyListCheck：是否启用默认高频/高风险 Raw 黑名单。
+    QLineEdit* m_rawModuleListEdit = nullptr;          // m_rawModuleListEdit：Raw 兜底扫描模块列表。
+    QLineEdit* m_rawDenyListEdit = nullptr;            // m_rawDenyListEdit：用户额外 Raw 黑名单，独立于内置默认黑名单。
+    QLineEdit* m_fakeModuleEdit = nullptr;             // m_fakeModuleEdit：Fake Success 精确匹配模块名。
+    QLineEdit* m_fakeApiEdit = nullptr;                // m_fakeApiEdit：Fake Success 精确匹配导出 API 名。
+    QComboBox* m_fakeReturnTypeCombo = nullptr;        // m_fakeReturnTypeCombo：Fake Success 返回值模板。
+    QLineEdit* m_fakeReturnValueEdit = nullptr;        // m_fakeReturnValueEdit：Fake Success 写入 RAX 的返回值。
+    QComboBox* m_fakeLastErrorKindCombo = nullptr;     // m_fakeLastErrorKindCombo：Fake Success 是否设置 LastError/WSAError。
+    QLineEdit* m_fakeLastErrorValueEdit = nullptr;     // m_fakeLastErrorValueEdit：Fake Success 错误码数值。
+    QCheckBox* m_fakeRawFallbackCheck = nullptr;       // m_fakeRawFallbackCheck：是否允许 Fake Success 对未强类型 API 使用 Raw 标量返回桩。
+    QPushButton* m_fakeAddRuleButton = nullptr;        // m_fakeAddRuleButton：把输入区内容应用到规则表。
+    QPushButton* m_fakeRemoveRuleButton = nullptr;     // m_fakeRemoveRuleButton：删除规则表当前选中行。
+    QPushButton* m_fakeApplyRuleButton = nullptr;      // m_fakeApplyRuleButton：按当前规则表启动并应用 Fake Success 会话。
+    QPushButton* m_fakeStopRuleButton = nullptr;       // m_fakeStopRuleButton：停止当前 Fake Success/WinAPI Agent 会话。
+    QLabel* m_fakeRuleStatusLabel = nullptr;           // m_fakeRuleStatusLabel：Fake Success 规则数量/限制说明。
+    QTableWidget* m_fakeRuleTable = nullptr;           // m_fakeRuleTable：Fake Success 精确规则表。
     QPushButton* m_startButton = nullptr;              // m_startButton：启动 WinAPI 监控按钮。
     QPushButton* m_stopButton = nullptr;               // m_stopButton：停止 WinAPI 监控按钮。
     QPushButton* m_terminateHookButton = nullptr;      // m_terminateHookButton：手动终止目标进程 Hook 按钮。

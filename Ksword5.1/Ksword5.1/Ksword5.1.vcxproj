@@ -172,6 +172,7 @@
     <ClCompile Include="Framework\StartupSplash.cpp" />
     <ClCompile Include="ksword\file\file_handle_tools.cpp" />
     <ClCompile Include="ksword\file\pe_analyzer.cpp" />
+    <ClCompile Include="ksword\profile\ProfileJsonLoader.cpp" />
     <ClCompile Include="KernelDock\KernelDock.cpp" />
     <ClCompile Include="KernelDock\KernelDock.CallbackIntercept.cpp" />
     <ClCompile Include="KernelDock\KernelDock.CallbackPromptManager.cpp" />
@@ -409,6 +410,7 @@
     <ClInclude Include="ksword\network\network_nids.h" />
     <ClInclude Include="ksword\network\network_request_tools.h" />
     <ClInclude Include="ksword\process\process.h" />
+    <ClInclude Include="ksword\profile\ProfileJsonLoader.h" />
     <ClInclude Include="ksword\service\service.h" />
     <ClInclude Include="ksword\startup\startup.h" />
     <ClInclude Include="ksword\string\string.h" />
@@ -492,50 +494,63 @@
   </ItemGroup>
   <ItemGroup>
     <None Include="qtvars.pro" />
+    <None Include="..\..\tools\compress_qt_profile_json.py" />
     <None Include="profiles\ark_dyndata_pack_v2.json" />
     <None Include="profiles\ark_dyndata_pack_v3.json" />
   </ItemGroup>
   <Target Name="CopyKswordArkDynDataProfilePack" AfterTargets="Build">
     <!-- v3 pack carries typed StructOffset items such as EpActiveProcessLinks; v2 is kept only as a callback-era fallback. -->
     <PropertyGroup>
+      <KswordProfileCompressor>$(MSBuildProjectDirectory)\..\..\tools\compress_qt_profile_json.py</KswordProfileCompressor>
+      <KswordProfilePythonExe Condition="'$(KswordProfilePythonExe)'==''">python</KswordProfilePythonExe>
       <KswordArkDynDataProfilePackV2Source>$(MSBuildProjectDirectory)\profiles\ark_dyndata_pack_v2.json</KswordArkDynDataProfilePackV2Source>
       <KswordArkDynDataProfilePackV3Source>$(MSBuildProjectDirectory)\profiles\ark_dyndata_pack_v3.json</KswordArkDynDataProfilePackV3Source>
       <KswordArkDynDataProfilePackTargetDir>$(TargetDir)profiles\</KswordArkDynDataProfilePackTargetDir>
       <KswordArkDynDataLegacyPack>$(KswordArkDynDataProfilePackTargetDir)ark_dyndata_pack_v1.json</KswordArkDynDataLegacyPack>
     </PropertyGroup>
     <MakeDir Directories="$(KswordArkDynDataProfilePackTargetDir)" Condition="Exists('$(KswordArkDynDataProfilePackV2Source)') Or Exists('$(KswordArkDynDataProfilePackV3Source)')" />
-    <Copy SourceFiles="$(KswordArkDynDataProfilePackV3Source)" DestinationFolder="$(KswordArkDynDataProfilePackTargetDir)" SkipUnchangedFiles="true" Condition="Exists('$(KswordArkDynDataProfilePackV3Source)')" />
-    <Copy SourceFiles="$(KswordArkDynDataProfilePackV2Source)" DestinationFolder="$(KswordArkDynDataProfilePackTargetDir)" SkipUnchangedFiles="true" Condition="Exists('$(KswordArkDynDataProfilePackV2Source)')" />
-    <Delete Files="$(KswordArkDynDataLegacyPack)" Condition="Exists('$(KswordArkDynDataLegacyPack)')" />
+    <Exec Command="&quot;$(KswordProfilePythonExe)&quot; &quot;$(KswordProfileCompressor)&quot; --file &quot;$(KswordArkDynDataProfilePackV3Source)&quot; --out &quot;$(KswordArkDynDataProfilePackTargetDir)ark_dyndata_pack_v3.json.qz&quot;" Condition="Exists('$(KswordProfileCompressor)') And Exists('$(KswordArkDynDataProfilePackV3Source)')" />
+    <Exec Command="&quot;$(KswordProfilePythonExe)&quot; &quot;$(KswordProfileCompressor)&quot; --file &quot;$(KswordArkDynDataProfilePackV2Source)&quot; --out &quot;$(KswordArkDynDataProfilePackTargetDir)ark_dyndata_pack_v2.json.qz&quot;" Condition="Exists('$(KswordProfileCompressor)') And Exists('$(KswordArkDynDataProfilePackV2Source)')" />
+    <Delete Files="$(KswordArkDynDataLegacyPack);$(KswordArkDynDataLegacyPack).qz" />
+    <Delete Files="$(KswordArkDynDataProfilePackTargetDir)ark_dyndata_pack_v2.json;$(KswordArkDynDataProfilePackTargetDir)ark_dyndata_pack_v3.json" Condition="Exists('$(KswordProfileCompressor)')" />
+    <Warning Condition="!Exists('$(KswordProfileCompressor)')" Text="Profile compressor was not found; compressed profile packs were not generated: $(KswordProfileCompressor)" />
     <Warning Condition="!Exists('$(KswordArkDynDataProfilePackV3Source)')" Text="KswordARK DynData v3 profile pack was not found: $(KswordArkDynDataProfilePackV3Source)" />
     <Warning Condition="!Exists('$(KswordArkDynDataProfilePackV2Source)')" Text="KswordARK DynData v2 profile pack was not found: $(KswordArkDynDataProfilePackV2Source)" />
   </Target>
   <Target Name="CopyRegistryOptimizationProfile" AfterTargets="Build">
-    <!-- 系统优化页运行时读取 profiles\registry_optimization_items.json；源文件是本地提取资产，已加入 .gitignore。 -->
+    <!-- 系统优化页运行时优先读取 profiles\registry_optimization_items.json.qz；源文件是本地提取资产，已加入 .gitignore。 -->
     <ItemGroup>
       <KswordRegistryOptimizationAsset Include="$(MSBuildProjectDirectory)\profiles\registry_optimization_assets\**\*.*" />
     </ItemGroup>
     <PropertyGroup>
+      <KswordProfileCompressor>$(MSBuildProjectDirectory)\..\..\tools\compress_qt_profile_json.py</KswordProfileCompressor>
+      <KswordProfilePythonExe Condition="'$(KswordProfilePythonExe)'==''">python</KswordProfilePythonExe>
       <KswordRegistryOptimizationProfileSource>$(MSBuildProjectDirectory)\profiles\registry_optimization_items.json</KswordRegistryOptimizationProfileSource>
       <KswordRegistryOptimizationProfileTargetDir>$(TargetDir)profiles\</KswordRegistryOptimizationProfileTargetDir>
       <KswordRegistryOptimizationAssetTargetDir>$(TargetDir)profiles\registry_optimization_assets\</KswordRegistryOptimizationAssetTargetDir>
     </PropertyGroup>
     <MakeDir Directories="$(KswordRegistryOptimizationProfileTargetDir)" Condition="Exists('$(KswordRegistryOptimizationProfileSource)')" />
-    <Copy SourceFiles="$(KswordRegistryOptimizationProfileSource)" DestinationFolder="$(KswordRegistryOptimizationProfileTargetDir)" SkipUnchangedFiles="true" Condition="Exists('$(KswordRegistryOptimizationProfileSource)')" />
+    <Exec Command="&quot;$(KswordProfilePythonExe)&quot; &quot;$(KswordProfileCompressor)&quot; --file &quot;$(KswordRegistryOptimizationProfileSource)&quot; --out &quot;$(KswordRegistryOptimizationProfileTargetDir)registry_optimization_items.json.qz&quot;" Condition="Exists('$(KswordProfileCompressor)') And Exists('$(KswordRegistryOptimizationProfileSource)')" />
+    <Delete Files="$(KswordRegistryOptimizationProfileTargetDir)registry_optimization_items.json" Condition="Exists('$(KswordProfileCompressor)')" />
     <MakeDir Directories="$(KswordRegistryOptimizationAssetTargetDir)" Condition="'@(KswordRegistryOptimizationAsset)' != ''" />
     <Copy SourceFiles="@(KswordRegistryOptimizationAsset)" DestinationFiles="@(KswordRegistryOptimizationAsset->'$(KswordRegistryOptimizationAssetTargetDir)%(RecursiveDir)%(Filename)%(Extension)')" SkipUnchangedFiles="true" Condition="'@(KswordRegistryOptimizationAsset)' != ''" />
+    <Warning Condition="!Exists('$(KswordProfileCompressor)')" Text="Profile compressor was not found; registry optimization profile was not compressed: $(KswordProfileCompressor)" />
     <Warning Condition="!Exists('$(KswordRegistryOptimizationProfileSource)')" Text="Registry optimization profile was not found; System Optimization tab will show an empty profile list: $(KswordRegistryOptimizationProfileSource)" />
   </Target>
   <Target Name="CopyKswordArkPdbDeepOffsetLibraries" AfterTargets="Build">
-    <!-- 深度 PDB 偏移库用于进程/线程/对象等详情页后续扩展；运行时读取本地 JSON，不依赖开发机 E: 符号缓存。 -->
+    <!-- 深度 PDB 偏移库用于进程/线程/对象等详情页后续扩展；运行时优先读取本地 .json.qz，不依赖开发机 E: 符号缓存。 -->
     <ItemGroup>
       <KswordArkPdbDeepOffsetLibrary Include="$(MSBuildProjectDirectory)\profiles\pdb_deep_offsets\*.json" />
     </ItemGroup>
     <PropertyGroup>
+      <KswordProfileCompressor>$(MSBuildProjectDirectory)\..\..\tools\compress_qt_profile_json.py</KswordProfileCompressor>
+      <KswordProfilePythonExe Condition="'$(KswordProfilePythonExe)'==''">python</KswordProfilePythonExe>
       <KswordArkPdbDeepOffsetTargetDir>$(TargetDir)profiles\pdb_deep_offsets\</KswordArkPdbDeepOffsetTargetDir>
     </PropertyGroup>
     <MakeDir Directories="$(KswordArkPdbDeepOffsetTargetDir)" Condition="'@(KswordArkPdbDeepOffsetLibrary)' != ''" />
-    <Copy SourceFiles="@(KswordArkPdbDeepOffsetLibrary)" DestinationFolder="$(KswordArkPdbDeepOffsetTargetDir)" SkipUnchangedFiles="true" Condition="'@(KswordArkPdbDeepOffsetLibrary)' != ''" />
+    <Exec Command="&quot;$(KswordProfilePythonExe)&quot; &quot;$(KswordProfileCompressor)&quot; --dir &quot;$(MSBuildProjectDirectory)\profiles\pdb_deep_offsets&quot; --pattern &quot;*.json&quot; --out-dir &quot;$(KswordArkPdbDeepOffsetTargetDir).&quot;" Condition="Exists('$(KswordProfileCompressor)') And '@(KswordArkPdbDeepOffsetLibrary)' != ''" />
+    <Delete Files="@(KswordArkPdbDeepOffsetLibrary->'$(KswordArkPdbDeepOffsetTargetDir)%(Filename)%(Extension)')" Condition="Exists('$(KswordProfileCompressor)') And '@(KswordArkPdbDeepOffsetLibrary)' != ''" />
+    <Warning Condition="!Exists('$(KswordProfileCompressor)')" Text="Profile compressor was not found; PDB deep offset libraries were not compressed: $(KswordProfileCompressor)" />
   </Target>
   <Target Name="CopyTaskmgrHijackScript" AfterTargets="Build">
     <PropertyGroup>

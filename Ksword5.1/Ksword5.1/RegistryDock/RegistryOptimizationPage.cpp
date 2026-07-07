@@ -2,6 +2,7 @@
 
 #include "../theme.h"
 #include "../UI/TableColumnAutoFit.h"
+#include "../ksword/profile/ProfileJsonLoader.h"
 
 #include <QAbstractItemView>
 #include <QAction>
@@ -1257,9 +1258,10 @@ void RegistryOptimizationPage::loadOptimizationProfile()
     QString selectedPath;
     for (const QString& candidatePath : profileCandidatePaths())
     {
-        if (QFileInfo::exists(candidatePath))
+        const QString resolvedPath = ks::profile::resolveProfileJsonPath(candidatePath);
+        if (!resolvedPath.isEmpty())
         {
-            selectedPath = QDir::cleanPath(candidatePath);
+            selectedPath = QDir::cleanPath(resolvedPath);
             break;
         }
     }
@@ -1270,18 +1272,13 @@ void RegistryOptimizationPage::loadOptimizationProfile()
         return;
     }
 
-    QFile jsonFile(selectedPath);
-    if (!jsonFile.open(QIODevice::ReadOnly))
-    {
-        updateStatusText(QStringLiteral("无法打开系统优化 JSON：%1").arg(selectedPath));
-        return;
-    }
-
     QJsonParseError parseError{};
-    const QJsonDocument document = QJsonDocument::fromJson(jsonFile.readAll(), &parseError);
+    QString readErrorText;
+    const QJsonDocument document = ks::profile::readProfileJsonDocument(selectedPath, &parseError, &readErrorText);
     if (parseError.error != QJsonParseError::NoError || !document.isArray())
     {
-        updateStatusText(QStringLiteral("系统优化 JSON 解析失败：%1 (%2)").arg(parseError.errorString(), selectedPath));
+        const QString reasonText = readErrorText.isEmpty() ? parseError.errorString() : readErrorText;
+        updateStatusText(QStringLiteral("系统优化 JSON 解析失败：%1 (%2)").arg(reasonText, selectedPath));
         return;
     }
 

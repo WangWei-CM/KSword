@@ -8,6 +8,7 @@ namespace apimon
     namespace
     {
         constexpr std::size_t kAbsoluteJumpSize = 14; // kAbsoluteJumpSize：FF 25 [rip+0] + 8 字节目标地址，不破坏通用寄存器。
+        thread_local std::uint32_t g_inlineHookInternalBypassDepth = 0; // g_inlineHookInternalBypassDepth：HookEngine 内部操作重入屏蔽深度。
 
         class ScopedOtherThreadsSuspender
         {
@@ -68,6 +69,7 @@ namespace apimon
             }
 
         private:
+            ScopedInlineHookInternalBypass m_hookBypass; // m_hookBypass：暂停/恢复线程期间屏蔽 OpenThread/SuspendThread 等自触发 hook。
             std::vector<HANDLE> m_suspendedThreadHandles;
         };
 
@@ -364,6 +366,37 @@ namespace apimon
         }
     }
 
+    bool IsInlineHookInternalBypassActive()
+    {
+        // IsInlineHookInternalBypassActive 作用：
+        // - 输入：无；
+        // - 处理：读取当前线程 HookEngine 内部操作深度；
+        // - 返回：深度大于 0 返回 true。
+        return g_inlineHookInternalBypassDepth != 0;
+    }
+
+    ScopedInlineHookInternalBypass::ScopedInlineHookInternalBypass()
+    {
+        // 构造函数：
+        // - 输入：无；
+        // - 处理：当前线程进入 HookEngine 内部区间，HookedXXX wrapper 将直接旁路；
+        // - 返回：无返回值。
+        ++g_inlineHookInternalBypassDepth;
+        m_entered = true;
+    }
+
+    ScopedInlineHookInternalBypass::~ScopedInlineHookInternalBypass()
+    {
+        // 析构函数：
+        // - 输入：无；
+        // - 处理：当前线程退出 HookEngine 内部区间，防止安装/卸载结束后继续旁路用户调用；
+        // - 返回：无返回值。
+        if (m_entered && g_inlineHookInternalBypassDepth != 0)
+        {
+            --g_inlineHookInternalBypassDepth;
+        }
+    }
+
     InlineHookInstallResult InstallInlineHook(
         const wchar_t* moduleName,
         const char* procName,
@@ -376,6 +409,8 @@ namespace apimon
         {
             errorTextOut->clear();
         }
+
+        ScopedInlineHookInternalBypass hookBypassScope;
         if (moduleName == nullptr || procName == nullptr || detourAddress == nullptr || hookOut == nullptr || originalOut == nullptr)
         {
             if (errorTextOut != nullptr)
@@ -462,6 +497,7 @@ namespace apimon
         hookOut->trampolineAddress = trampolinePointer;
         hookOut->patchSize = patchSize;
         hookOut->permanentlyDisabled = false;
+        *originalOut = trampolinePointer;
         std::memcpy(hookOut->originalBytes.data(), targetPointer, patchSize);
 
         unsigned char patchBuffer[32] = {};
@@ -473,12 +509,12 @@ namespace apimon
         DWORD unusedProtect = 0;
         ::VirtualProtect(targetPointer, patchSize, oldProtect, &unusedProtect);
         hookOut->installed = true;
-        *originalOut = trampolinePointer;
         return InlineHookInstallResult::Installed;
     }
 
     void UninstallInlineHook(InlineHookRecord* hookValue)
     {
+        ScopedInlineHookInternalBypass hookBypassScope;
         if (hookValue == nullptr || !hookValue->installed || hookValue->targetAddress == nullptr)
         {
             return;

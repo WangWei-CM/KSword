@@ -10,6 +10,8 @@
 
 #include <QAbstractItemView>
 #include <QCheckBox>
+#include <QComboBox>
+#include <QCompleter>
 #include <QFormLayout>
 #include <QFrame>
 #include <QHeaderView>
@@ -23,6 +25,7 @@
 #include <QStyle>
 #include <QTableWidget>
 #include <QTimer>
+#include <QToolButton>
 #include <QStringList>
 #include <QVBoxLayout>
 
@@ -30,7 +33,8 @@ namespace
 {
     // configureIconButton：
     // - 作用：统一设置“仅图标按钮”的图标、提示与尺寸；
-    // - 调用：刷新、浏览、开始、停止、导出等简单语义按钮都走这里。
+    // - 调用：刷新、浏览、开始、停止、导出等简单语义按钮都走这里；
+    // - 返回：无返回值，控件为空时直接跳过。
     void configureIconButton(
         QPushButton* buttonPointer,
         const QIcon& iconValue,
@@ -47,6 +51,32 @@ namespace
         buttonPointer->setFixedWidth(34);
         buttonPointer->setIconSize(QSize(18, 18));
     }
+
+    // createPanelFrame：
+    // - 作用：创建统一的浅边框面板，减少顶层布局中裸控件带来的视觉割裂；
+    // - 调用：顶部进程选择、左侧 Agent、右侧 Fake Success 三块配置区域复用；
+    // - 返回：已设置 StyledPanel 的 QFrame，父对象由调用方传入。
+    QFrame* createPanelFrame(QWidget* parentWidget)
+    {
+        QFrame* const framePointer = new QFrame(parentWidget);
+        framePointer->setFrameShape(QFrame::StyledPanel);
+        framePointer->setFrameShadow(QFrame::Plain);
+        return framePointer;
+    }
+
+    // createSectionTitle：
+    // - 作用：生成配置区标题标签；
+    // - 调用：Agent 会话和 Fake Success 面板顶部；
+    // - 返回：带统一强调色样式的 QLabel。
+    QLabel* createSectionTitle(
+        const QString& titleText,
+        QWidget* parentWidget,
+        const QString& styleSheetText)
+    {
+        QLabel* const titleLabel = new QLabel(titleText, parentWidget);
+        titleLabel->setStyleSheet(styleSheetText);
+        return titleLabel;
+    }
 }
 
 void WinAPIDock::initializeUi()
@@ -55,83 +85,104 @@ void WinAPIDock::initializeUi()
     m_rootLayout->setContentsMargins(8, 8, 8, 8);
     m_rootLayout->setSpacing(8);
 
-    m_topSplitter = new QSplitter(Qt::Horizontal, this);
-    m_topSplitter->setChildrenCollapsible(false);
-    m_rootLayout->addWidget(m_topSplitter, 0);
+    QFrame* const sessionCollapseFrame = createPanelFrame(this);
+    QVBoxLayout* const sessionCollapseLayout = new QVBoxLayout(sessionCollapseFrame);
+    sessionCollapseLayout->setContentsMargins(6, 6, 6, 6);
+    sessionCollapseLayout->setSpacing(8);
 
-    m_processPanel = new QWidget(m_topSplitter);
-    QVBoxLayout* processPanelLayout = new QVBoxLayout(m_processPanel);
-    processPanelLayout->setContentsMargins(0, 0, 0, 0);
-    processPanelLayout->setSpacing(6);
+    m_sessionCollapseButton = new QToolButton(sessionCollapseFrame);
+    m_sessionCollapseButton->setCheckable(true);
+    m_sessionCollapseButton->setChecked(true);
+    m_sessionCollapseButton->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+    m_sessionCollapseButton->setArrowType(Qt::DownArrow);
+    m_sessionCollapseButton->setText(QStringLiteral("WinAPI Monitor 配置（目标进程 / Agent / Fake Success）"));
+    m_sessionCollapseButton->setToolTip(QStringLiteral("展开或折叠上方所有配置；结果表始终保留在最下方。"));
+    sessionCollapseLayout->addWidget(m_sessionCollapseButton, 0);
 
-    QHBoxLayout* processControlLayout = new QHBoxLayout();
-    processControlLayout->setSpacing(6);
-    m_processFilterEdit = new QLineEdit(m_processPanel);
-    m_processFilterEdit->setPlaceholderText(QStringLiteral("过滤 PID / 进程名 / 路径 / 用户"));
-    m_processFilterEdit->setStyleSheet(blueInputStyle());
+    m_sessionCollapseContent = new QWidget(sessionCollapseFrame);
+    QVBoxLayout* const sessionCollapseContentLayout = new QVBoxLayout(m_sessionCollapseContent);
+    sessionCollapseContentLayout->setContentsMargins(0, 0, 0, 0);
+    sessionCollapseContentLayout->setSpacing(8);
+    sessionCollapseLayout->addWidget(m_sessionCollapseContent, 0);
+    m_rootLayout->addWidget(sessionCollapseFrame, 0);
+
+    // 顶部进程选择：用户先输入进程名/PID，再从带图标的下拉候选中选中目标。
+    m_processPanel = createPanelFrame(m_sessionCollapseContent);
+    QHBoxLayout* const processPanelLayout = new QHBoxLayout(m_processPanel);
+    processPanelLayout->setContentsMargins(8, 8, 8, 8);
+    processPanelLayout->setSpacing(8);
+
+    QLabel* const processTitleLabel = new QLabel(QStringLiteral("目标进程"), m_processPanel);
+    processTitleLabel->setStyleSheet(buildStatusStyle(monitorInfoColorHex()));
+
+    m_processIconLabel = new QLabel(m_processPanel);
+    m_processIconLabel->setFixedSize(24, 24);
+    m_processIconLabel->setAlignment(Qt::AlignCenter);
+    m_processIconLabel->setPixmap(QIcon(QStringLiteral(":/Icon/process_main.svg")).pixmap(20, 20));
+    m_processIconLabel->setToolTip(QStringLiteral("当前匹配/选中进程图标。"));
+
+    m_processCombo = new QComboBox(m_processPanel);
+    m_processCombo->setEditable(true);
+    m_processCombo->setInsertPolicy(QComboBox::NoInsert);
+    m_processCombo->setMaxVisibleItems(24);
+    m_processCombo->setMinimumWidth(360);
+    m_processCombo->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+    m_processCombo->setMinimumContentsLength(36);
+    m_processCombo->setStyleSheet(blueInputStyle());
+    m_processCombo->setToolTip(QStringLiteral("输入进程名、PID 或路径片段后选择目标。未选择候选时，也可直接输入数字 PID。"));
+    if (m_processCombo->lineEdit() != nullptr)
+    {
+        m_processCombo->lineEdit()->setPlaceholderText(QStringLiteral("输入进程名 / PID / 路径，然后从下拉列表选择"));
+        m_processCombo->lineEdit()->setClearButtonEnabled(true);
+    }
+    if (m_processCombo->completer() != nullptr)
+    {
+        m_processCombo->completer()->setCaseSensitivity(Qt::CaseInsensitive);
+        m_processCombo->completer()->setFilterMode(Qt::MatchContains);
+        m_processCombo->completer()->setCompletionMode(QCompleter::PopupCompletion);
+    }
 
     m_processRefreshButton = new QPushButton(m_processPanel);
     configureIconButton(
         m_processRefreshButton,
         style()->standardIcon(QStyle::SP_BrowserReload),
-        QStringLiteral("刷新进程列表"));
+        QStringLiteral("刷新进程候选列表"));
     m_processRefreshButton->setStyleSheet(blueButtonStyle());
 
-    processControlLayout->addWidget(m_processFilterEdit, 1);
-    processControlLayout->addWidget(m_processRefreshButton, 0);
-    processPanelLayout->addLayout(processControlLayout);
+    m_processStatusLabel = new QLabel(QStringLiteral("● 输入进程名或刷新候选列表"), m_processPanel);
+    m_processStatusLabel->setStyleSheet(buildStatusStyle(monitorIdleColorHex()));
 
-    m_processStatusLabel = new QLabel(QStringLiteral("● 正在准备进程列表..."), m_processPanel);
-    m_processStatusLabel->setStyleSheet(buildStatusStyle(monitorInfoColorHex()));
+    processPanelLayout->addWidget(processTitleLabel, 0);
+    processPanelLayout->addWidget(m_processIconLabel, 0);
+    processPanelLayout->addWidget(m_processCombo, 1);
+    processPanelLayout->addWidget(m_processRefreshButton, 0);
     processPanelLayout->addWidget(m_processStatusLabel, 0);
+    sessionCollapseContentLayout->addWidget(m_processPanel, 0);
 
-    m_processTable = new QTableWidget(m_processPanel);
-    m_processTable->setColumnCount(ProcessColumnCount);
-    m_processTable->setSelectionBehavior(QAbstractItemView::SelectRows);
-    m_processTable->setSelectionMode(QAbstractItemView::SingleSelection);
-    m_processTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
-    m_processTable->setAlternatingRowColors(true);
-    m_processTable->setContextMenuPolicy(Qt::CustomContextMenu);
-    m_processTable->setHorizontalHeaderLabels(
-        QStringList{ QStringLiteral("PID"), QStringLiteral("进程"), QStringLiteral("路径"), QStringLiteral("用户") });
-    m_processTable->horizontalHeader()->setStyleSheet(blueHeaderStyle());
-    m_processTable->horizontalHeader()->setStretchLastSection(false);
-    m_processTable->horizontalHeader()->setSectionResizeMode(ProcessColumnPid, QHeaderView::ResizeToContents);
-    m_processTable->horizontalHeader()->setSectionResizeMode(ProcessColumnName, QHeaderView::ResizeToContents);
-    m_processTable->horizontalHeader()->setSectionResizeMode(ProcessColumnPath, QHeaderView::Stretch);
-    m_processTable->horizontalHeader()->setSectionResizeMode(ProcessColumnUser, QHeaderView::ResizeToContents);
-    m_processTable->setStyleSheet(blueInputStyle());
-    m_processTable->setAutoFillBackground(false);
-    m_processTable->setAttribute(Qt::WA_StyledBackground, true);
-    if (m_processTable->viewport() != nullptr)
-    {
-        m_processTable->viewport()->setAutoFillBackground(false);
-        m_processTable->viewport()->setAttribute(Qt::WA_StyledBackground, true);
-    }
-    processPanelLayout->addWidget(m_processTable, 1);
+    // 下方左右布局：左侧是普通 WinAPI Agent 会话，右侧是 Fake Success 规则。
+    m_topSplitter = new QSplitter(Qt::Horizontal, m_sessionCollapseContent);
+    m_topSplitter->setChildrenCollapsible(false);
+    sessionCollapseContentLayout->addWidget(m_topSplitter, 0);
 
-    m_sessionPanel = new QWidget(m_topSplitter);
-    QVBoxLayout* sessionPanelLayout = new QVBoxLayout(m_sessionPanel);
-    sessionPanelLayout->setContentsMargins(0, 0, 0, 0);
+    m_sessionPanel = createPanelFrame(nullptr);
+    QVBoxLayout* const sessionPanelLayout = new QVBoxLayout(m_sessionPanel);
+    sessionPanelLayout->setContentsMargins(8, 8, 8, 8);
     sessionPanelLayout->setSpacing(8);
 
-    QLabel* sessionTitleLabel = new QLabel(QStringLiteral("WinAPI Agent 会话"), m_sessionPanel);
-    sessionTitleLabel->setStyleSheet(buildStatusStyle(monitorInfoColorHex()));
-    sessionPanelLayout->addWidget(sessionTitleLabel, 0);
+    sessionPanelLayout->addWidget(
+        createSectionTitle(
+            QStringLiteral("WinAPI Agent 会话"),
+            m_sessionPanel,
+            buildStatusStyle(monitorInfoColorHex())),
+        0);
 
-    QFormLayout* sessionFormLayout = new QFormLayout();
+    QFormLayout* const sessionFormLayout = new QFormLayout();
     sessionFormLayout->setContentsMargins(0, 0, 0, 0);
     sessionFormLayout->setHorizontalSpacing(8);
     sessionFormLayout->setVerticalSpacing(8);
 
-    m_manualPidEdit = new QLineEdit(m_sessionPanel);
-    m_manualPidEdit->setPlaceholderText(QStringLiteral("可留空；为空时取左侧选中进程"));
-    m_manualPidEdit->setToolTip(QStringLiteral("优先使用这里输入的 PID；为空时使用左侧表格当前选中行。"));
-    m_manualPidEdit->setStyleSheet(blueInputStyle());
-    sessionFormLayout->addRow(QStringLiteral("目标 PID"), m_manualPidEdit);
-
-    QWidget* dllPathRowWidget = new QWidget(m_sessionPanel);
-    QHBoxLayout* dllPathLayout = new QHBoxLayout(dllPathRowWidget);
+    QWidget* const dllPathRowWidget = new QWidget(m_sessionPanel);
+    QHBoxLayout* const dllPathLayout = new QHBoxLayout(dllPathRowWidget);
     dllPathLayout->setContentsMargins(0, 0, 0, 0);
     dllPathLayout->setSpacing(6);
     m_agentDllPathEdit = new QLineEdit(dllPathRowWidget);
@@ -149,15 +200,20 @@ void WinAPIDock::initializeUi()
     dllPathLayout->addWidget(m_agentDllPathEdit, 1);
     dllPathLayout->addWidget(m_browseAgentDllButton, 0);
     sessionFormLayout->addRow(QStringLiteral("Agent DLL"), dllPathRowWidget);
+
+    m_manualPidEdit = new QLineEdit(m_sessionPanel);
+    m_manualPidEdit->setPlaceholderText(QStringLiteral("可留空；填写后覆盖顶部进程选择"));
+    m_manualPidEdit->setToolTip(QStringLiteral("高级兜底：当下拉候选没有目标时，可直接输入 PID。填写后优先使用这里的 PID。"));
+    m_manualPidEdit->setStyleSheet(blueInputStyle());
+    sessionFormLayout->addRow(QStringLiteral("目标 PID（高级）"), m_manualPidEdit);
     sessionPanelLayout->addLayout(sessionFormLayout);
 
-    QFrame* categoryFrame = new QFrame(m_sessionPanel);
-    categoryFrame->setFrameShape(QFrame::StyledPanel);
-    QVBoxLayout* categoryLayout = new QVBoxLayout(categoryFrame);
+    QFrame* const categoryFrame = createPanelFrame(m_sessionPanel);
+    QVBoxLayout* const categoryLayout = new QVBoxLayout(categoryFrame);
     categoryLayout->setContentsMargins(8, 8, 8, 8);
     categoryLayout->setSpacing(6);
 
-    QLabel* categoryTitleLabel = new QLabel(QStringLiteral("Hook 分类"), categoryFrame);
+    QLabel* const categoryTitleLabel = new QLabel(QStringLiteral("Hook 分类"), categoryFrame);
     categoryLayout->addWidget(categoryTitleLabel, 0);
 
     m_hookFileCheck = new QCheckBox(QStringLiteral("文件 API"), categoryFrame);
@@ -166,6 +222,10 @@ void WinAPIDock::initializeUi()
     m_hookProcessCheck = new QCheckBox(QStringLiteral("进程 API"), categoryFrame);
     m_hookLoaderCheck = new QCheckBox(QStringLiteral("加载器 API"), categoryFrame);
     m_autoInjectChildCheck = new QCheckBox(QStringLiteral("自动注入子进程"), categoryFrame);
+    m_rawFallbackCheck = new QCheckBox(QStringLiteral("Raw 兜底 Hook（强类型优先）"), categoryFrame);
+    m_rawDefaultDenyListCheck = new QCheckBox(QStringLiteral("启用默认高频/高风险黑名单"), categoryFrame);
+    m_rawModuleListEdit = new QLineEdit(categoryFrame);
+    m_rawDenyListEdit = new QLineEdit(categoryFrame);
 
     m_hookFileCheck->setChecked(true);
     m_hookRegistryCheck->setChecked(true);
@@ -173,6 +233,14 @@ void WinAPIDock::initializeUi()
     m_hookProcessCheck->setChecked(true);
     m_hookLoaderCheck->setChecked(false);
     m_autoInjectChildCheck->setChecked(false);
+    m_rawFallbackCheck->setChecked(true);
+    m_rawDefaultDenyListCheck->setChecked(true);
+    m_rawModuleListEdit->setText(defaultRawHookModulesText());
+    m_rawDenyListEdit->clear();
+    m_rawModuleListEdit->setStyleSheet(blueInputStyle());
+    m_rawDenyListEdit->setStyleSheet(blueInputStyle());
+    m_rawModuleListEdit->setPlaceholderText(QStringLiteral("ntdll.dll;KernelBase.dll;ws2_32.dll;wininet.dll;..."));
+    m_rawDenyListEdit->setPlaceholderText(QStringLiteral("额外规则，例如 MyHotApi;SomePrefix*；默认黑名单由上方复选框控制"));
 
     m_hookFileCheck->setToolTip(QStringLiteral("CreateFileW / ReadFile / WriteFile 等文件访问相关 API。"));
     m_hookRegistryCheck->setToolTip(QStringLiteral("RegOpenKeyExW / RegQueryValueExW / RegSetValueExW / RegDeleteValueW / RegEnum* 等注册表相关 API。"));
@@ -180,6 +248,10 @@ void WinAPIDock::initializeUi()
     m_hookProcessCheck->setToolTip(QStringLiteral("CreateProcessW 等进程控制相关 API。"));
     m_hookLoaderCheck->setToolTip(QStringLiteral("LoadLibraryW / LoadLibraryExW 等模块加载相关 API。该类 Hook 对 GUI 进程稳定性风险更高，默认关闭。"));
     m_autoInjectChildCheck->setToolTip(QStringLiteral("启用后，Agent 会在 CreateProcessW 成功时把同一个 APIMonitor_x64.dll 注入到新子进程；仅支持 x64 子进程。"));
+    m_rawFallbackCheck->setToolTip(QStringLiteral("对强类型表未覆盖的已加载模块导出安装 Raw ABI 入口 Hook。强类型 Hook 优先，Raw 只记录模块/函数/地址等兜底信息。"));
+    m_rawDefaultDenyListCheck->setToolTip(QStringLiteral("Raw 黑名单只影响兜底 Hook；强类型 Hook 不受影响。建议长期保持开启，避免字符串、堆、锁、时间等高频基础 API 刷爆日志。关闭后，下方额外黑名单仍然生效。"));
+    m_rawModuleListEdit->setToolTip(QStringLiteral("分号分隔模块名。Agent 只扫描已加载模块，后续 LoadLibrary 后会重试补装。"));
+    m_rawDenyListEdit->setToolTip(QStringLiteral("用户额外黑名单，分号分隔函数名，支持 prefix*。内置默认黑名单由上方复选框控制，不需要复制到这里。当前内置默认：%1").arg(defaultRawHookDenyListText()));
 
     categoryLayout->addWidget(m_hookFileCheck, 0);
     categoryLayout->addWidget(m_hookRegistryCheck, 0);
@@ -187,9 +259,15 @@ void WinAPIDock::initializeUi()
     categoryLayout->addWidget(m_hookProcessCheck, 0);
     categoryLayout->addWidget(m_hookLoaderCheck, 0);
     categoryLayout->addWidget(m_autoInjectChildCheck, 0);
+    categoryLayout->addWidget(m_rawFallbackCheck, 0);
+    categoryLayout->addWidget(m_rawDefaultDenyListCheck, 0);
+    categoryLayout->addWidget(new QLabel(QStringLiteral("Raw 模块目录（; 分隔）"), categoryFrame), 0);
+    categoryLayout->addWidget(m_rawModuleListEdit, 0);
+    categoryLayout->addWidget(new QLabel(QStringLiteral("Raw 额外黑名单（exact / prefix*）"), categoryFrame), 0);
+    categoryLayout->addWidget(m_rawDenyListEdit, 0);
     sessionPanelLayout->addWidget(categoryFrame, 0);
 
-    QHBoxLayout* sessionButtonLayout = new QHBoxLayout();
+    QHBoxLayout* const sessionButtonLayout = new QHBoxLayout();
     sessionButtonLayout->setSpacing(6);
 
     m_startButton = new QPushButton(m_sessionPanel);
@@ -240,8 +318,137 @@ void WinAPIDock::initializeUi()
     sessionPanelLayout->addWidget(m_sessionStatusLabel, 0);
     sessionPanelLayout->addStretch(1);
 
+    QWidget* const fakeSuccessPanel = createPanelFrame(nullptr);
+    QVBoxLayout* const fakeSuccessLayout = new QVBoxLayout(fakeSuccessPanel);
+    fakeSuccessLayout->setContentsMargins(8, 8, 8, 8);
+    fakeSuccessLayout->setSpacing(6);
+
+    fakeSuccessLayout->addWidget(
+        createSectionTitle(
+            QStringLiteral("Fake Success（命中 API 直接伪返回）"),
+            fakeSuccessPanel,
+            buildStatusStyle(monitorInfoColorHex())),
+        0);
+
+    QLabel* const fakeHintLabel = new QLabel(
+        QStringLiteral("精确格式：模块名 + 导出名。示例：KernelBase.dll / CreateFileW。Fake 路径会上报事件，然后跳过原 API 并返回指定 RAX。"),
+        fakeSuccessPanel);
+    fakeHintLabel->setWordWrap(true);
+    fakeHintLabel->setStyleSheet(buildStatusStyle(monitorWarningColorHex()));
+    fakeSuccessLayout->addWidget(fakeHintLabel, 0);
+
+    QFormLayout* const fakeFormLayout = new QFormLayout();
+    fakeFormLayout->setContentsMargins(0, 0, 0, 0);
+    fakeFormLayout->setHorizontalSpacing(8);
+    fakeFormLayout->setVerticalSpacing(6);
+
+    m_fakeModuleEdit = new QLineEdit(fakeSuccessPanel);
+    m_fakeApiEdit = new QLineEdit(fakeSuccessPanel);
+    m_fakeReturnValueEdit = new QLineEdit(fakeSuccessPanel);
+    m_fakeLastErrorValueEdit = new QLineEdit(fakeSuccessPanel);
+    m_fakeReturnTypeCombo = new QComboBox(fakeSuccessPanel);
+    m_fakeLastErrorKindCombo = new QComboBox(fakeSuccessPanel);
+    m_fakeRawFallbackCheck = new QCheckBox(QStringLiteral("启用 Fake Raw 兜底（未强类型导出仅伪造 RAX）"), fakeSuccessPanel);
+
+    m_fakeModuleEdit->setPlaceholderText(QStringLiteral("KernelBase.dll"));
+    m_fakeApiEdit->setPlaceholderText(QStringLiteral("CreateFileW"));
+    m_fakeReturnValueEdit->setPlaceholderText(QStringLiteral("0 / 1 / 0x0 / 0xFFFFFFFFFFFFFFFF"));
+    m_fakeLastErrorValueEdit->setPlaceholderText(QStringLiteral("0 表示 ERROR_SUCCESS"));
+    m_fakeReturnValueEdit->setText(QStringLiteral("0"));
+    m_fakeLastErrorValueEdit->setText(QStringLiteral("0"));
+    m_fakeModuleEdit->setStyleSheet(blueInputStyle());
+    m_fakeApiEdit->setStyleSheet(blueInputStyle());
+    m_fakeReturnValueEdit->setStyleSheet(blueInputStyle());
+    m_fakeLastErrorValueEdit->setStyleSheet(blueInputStyle());
+
+    m_fakeReturnTypeCombo->addItem(QStringLiteral("Scalar / RAX"), QStringLiteral("scalar"));
+    m_fakeReturnTypeCombo->addItem(QStringLiteral("BOOL"), QStringLiteral("bool"));
+    m_fakeReturnTypeCombo->addItem(QStringLiteral("HANDLE / PVOID"), QStringLiteral("handle"));
+    m_fakeReturnTypeCombo->addItem(QStringLiteral("DWORD / UINT / int"), QStringLiteral("dword"));
+    m_fakeReturnTypeCombo->addItem(QStringLiteral("NTSTATUS"), QStringLiteral("ntstatus"));
+    m_fakeReturnTypeCombo->addItem(QStringLiteral("HRESULT"), QStringLiteral("hresult"));
+    m_fakeReturnTypeCombo->addItem(QStringLiteral("LSTATUS"), QStringLiteral("lstatus"));
+    m_fakeReturnTypeCombo->addItem(QStringLiteral("SOCKET / int (WSA)"), QStringLiteral("socket"));
+    m_fakeReturnTypeCombo->setToolTip(QStringLiteral("模板只影响展示和结果码语义；v1 只伪造标量返回值，不写 out 参数。"));
+    m_fakeReturnTypeCombo->setStyleSheet(blueInputStyle());
+
+    m_fakeLastErrorKindCombo->addItem(QStringLiteral("不修改 LastError"), QStringLiteral("none"));
+    m_fakeLastErrorKindCombo->addItem(QStringLiteral("SetLastError"), QStringLiteral("win32"));
+    m_fakeLastErrorKindCombo->addItem(QStringLiteral("WSASetLastError"), QStringLiteral("wsa"));
+    m_fakeLastErrorKindCombo->setToolTip(QStringLiteral("可选：Fake 返回前后设置 Win32 LastError 或 WSAError。"));
+    m_fakeLastErrorKindCombo->setStyleSheet(blueInputStyle());
+    m_fakeRawFallbackCheck->setChecked(false);
+    m_fakeRawFallbackCheck->setToolTip(QStringLiteral("关闭时，仅强类型表覆盖的 API 可 Fake Success；开启后，规则表里未强类型覆盖的 module!api 也会用通用 x64 RAX stub 直接返回。"));
+
+    fakeFormLayout->addRow(QStringLiteral("模块"), m_fakeModuleEdit);
+    fakeFormLayout->addRow(QStringLiteral("API"), m_fakeApiEdit);
+    fakeFormLayout->addRow(QStringLiteral("返回模板"), m_fakeReturnTypeCombo);
+    fakeFormLayout->addRow(QStringLiteral("返回值"), m_fakeReturnValueEdit);
+    fakeFormLayout->addRow(QStringLiteral("错误码类型"), m_fakeLastErrorKindCombo);
+    fakeFormLayout->addRow(QStringLiteral("错误码值"), m_fakeLastErrorValueEdit);
+    fakeSuccessLayout->addLayout(fakeFormLayout);
+    fakeSuccessLayout->addWidget(m_fakeRawFallbackCheck, 0);
+
+    QHBoxLayout* const fakeButtonLayout = new QHBoxLayout();
+    fakeButtonLayout->setContentsMargins(0, 0, 0, 0);
+    fakeButtonLayout->setSpacing(6);
+    m_fakeAddRuleButton = new QPushButton(QStringLiteral("添加规则"), fakeSuccessPanel);
+    m_fakeRemoveRuleButton = new QPushButton(QStringLiteral("删除选中"), fakeSuccessPanel);
+    m_fakeApplyRuleButton = new QPushButton(QStringLiteral("应用规则并启动"), fakeSuccessPanel);
+    m_fakeStopRuleButton = new QPushButton(QStringLiteral("停止会话"), fakeSuccessPanel);
+    m_fakeAddRuleButton->setToolTip(QStringLiteral("把上方输入加入规则表；启动 WinAPI 监控时写入 Agent 配置并生效。"));
+    m_fakeRemoveRuleButton->setToolTip(QStringLiteral("删除规则表当前选中的 Fake Success 规则。"));
+    m_fakeApplyRuleButton->setToolTip(QStringLiteral("用当前规则表写入配置并启动 WinAPI Agent。若会话已运行，请先停止再应用。"));
+    m_fakeStopRuleButton->setToolTip(QStringLiteral("停止当前 WinAPI Agent 会话；Fake Success 不支持运行中热更新。"));
+    m_fakeAddRuleButton->setStyleSheet(blueButtonStyle());
+    m_fakeRemoveRuleButton->setStyleSheet(blueButtonStyle());
+    m_fakeApplyRuleButton->setStyleSheet(blueButtonStyle());
+    m_fakeStopRuleButton->setStyleSheet(blueButtonStyle());
+    fakeButtonLayout->addWidget(m_fakeAddRuleButton, 0);
+    fakeButtonLayout->addWidget(m_fakeRemoveRuleButton, 0);
+    fakeButtonLayout->addWidget(m_fakeApplyRuleButton, 0);
+    fakeButtonLayout->addWidget(m_fakeStopRuleButton, 0);
+    fakeButtonLayout->addStretch(1);
+    fakeSuccessLayout->addLayout(fakeButtonLayout);
+
+    m_fakeRuleTable = new QTableWidget(fakeSuccessPanel);
+    m_fakeRuleTable->setColumnCount(FakeRuleColumnCount);
+    m_fakeRuleTable->setSelectionBehavior(QAbstractItemView::SelectRows);
+    m_fakeRuleTable->setSelectionMode(QAbstractItemView::SingleSelection);
+    m_fakeRuleTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    m_fakeRuleTable->setAlternatingRowColors(true);
+    m_fakeRuleTable->setHorizontalHeaderLabels(
+        QStringList{
+            QStringLiteral("模块"),
+            QStringLiteral("API"),
+            QStringLiteral("返回模板"),
+            QStringLiteral("返回值"),
+            QStringLiteral("错误类型"),
+            QStringLiteral("错误值")
+        });
+    m_fakeRuleTable->horizontalHeader()->setStyleSheet(blueHeaderStyle());
+    m_fakeRuleTable->horizontalHeader()->setSectionResizeMode(FakeRuleColumnModule, QHeaderView::ResizeToContents);
+    m_fakeRuleTable->horizontalHeader()->setSectionResizeMode(FakeRuleColumnApi, QHeaderView::ResizeToContents);
+    m_fakeRuleTable->horizontalHeader()->setSectionResizeMode(FakeRuleColumnReturnType, QHeaderView::ResizeToContents);
+    m_fakeRuleTable->horizontalHeader()->setSectionResizeMode(FakeRuleColumnReturnValue, QHeaderView::ResizeToContents);
+    m_fakeRuleTable->horizontalHeader()->setSectionResizeMode(FakeRuleColumnLastErrorKind, QHeaderView::ResizeToContents);
+    m_fakeRuleTable->horizontalHeader()->setSectionResizeMode(FakeRuleColumnLastErrorValue, QHeaderView::Stretch);
+    m_fakeRuleTable->setStyleSheet(blueInputStyle());
+    m_fakeRuleTable->setMaximumHeight(170);
+    fakeSuccessLayout->addWidget(m_fakeRuleTable, 0);
+
+    m_fakeRuleStatusLabel = new QLabel(QStringLiteral("规则：0 条；启动会话时应用。"), fakeSuccessPanel);
+    m_fakeRuleStatusLabel->setStyleSheet(buildStatusStyle(monitorIdleColorHex()));
+    fakeSuccessLayout->addWidget(m_fakeRuleStatusLabel, 0);
+    fakeSuccessLayout->addStretch(1);
+
+    m_topSplitter->addWidget(m_sessionPanel);
+    m_topSplitter->addWidget(fakeSuccessPanel);
+    m_topSplitter->setStretchFactor(0, 1);
+    m_topSplitter->setStretchFactor(1, 1);
+
     m_filterPanel = new QWidget(this);
-    QHBoxLayout* filterLayout = new QHBoxLayout(m_filterPanel);
+    QHBoxLayout* const filterLayout = new QHBoxLayout(m_filterPanel);
     filterLayout->setContentsMargins(0, 0, 0, 0);
     filterLayout->setSpacing(6);
 
@@ -305,6 +512,14 @@ void WinAPIDock::initializeUi()
     m_uiFlushTimer = new QTimer(this);
     m_uiFlushTimer->setInterval(120);
 
-    m_topSplitter->setStretchFactor(0, 3);
-    m_topSplitter->setStretchFactor(1, 2);
+    connect(m_sessionCollapseButton, &QToolButton::toggled, this, [this](const bool checked) {
+        if (m_sessionCollapseContent != nullptr)
+        {
+            m_sessionCollapseContent->setVisible(checked);
+        }
+        if (m_sessionCollapseButton != nullptr)
+        {
+            m_sessionCollapseButton->setArrowType(checked ? Qt::DownArrow : Qt::RightArrow);
+        }
+    });
 }

@@ -12,6 +12,34 @@
 
 namespace apimon
 {
+    // IsInlineHookInternalBypassActive 作用：
+    // - 输入：无；
+    // - 处理：查询当前线程是否处于 HookEngine 自身安装/卸载 inline hook 的内部区间；
+    // - 返回：true 表示 HookedXXX wrapper 应直接调用原始 trampoline，避免安装阶段自触发递归。
+    bool IsInlineHookInternalBypassActive();
+
+    class ScopedInlineHookInternalBypass final
+    {
+    public:
+        // ScopedInlineHookInternalBypass 构造：
+        // - 输入：无；
+        // - 处理：递增当前线程 HookEngine 内部 bypass 深度；
+        // - 返回：无返回值。
+        ScopedInlineHookInternalBypass();
+
+        // ScopedInlineHookInternalBypass 析构：
+        // - 输入：无；
+        // - 处理：递减当前线程 HookEngine 内部 bypass 深度；
+        // - 返回：无返回值。
+        ~ScopedInlineHookInternalBypass();
+
+        ScopedInlineHookInternalBypass(const ScopedInlineHookInternalBypass&) = delete;
+        ScopedInlineHookInternalBypass& operator=(const ScopedInlineHookInternalBypass&) = delete;
+
+    private:
+        bool m_entered = false; // m_entered：记录构造是否成功进入 bypass，防止异常路径下错误递减。
+    };
+
     enum class InlineHookInstallResult
     {
         Installed,

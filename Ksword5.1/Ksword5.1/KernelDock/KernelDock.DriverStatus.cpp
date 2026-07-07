@@ -2,6 +2,7 @@
 
 #include "../ArkDriverClient/ArkDriverClient.h"
 #include "../UI/CodeEditorWidget.h"
+#include "../ksword/profile/ProfileJsonLoader.h"
 #include "../theme.h"
 
 #include <QAbstractItemView>
@@ -560,8 +561,8 @@ namespace
 
         for (const QString& candidatePath : profilePackSearchPaths())
         {
-            const QFileInfo fileInfo(candidatePath);
-            if (!fileInfo.exists() || !fileInfo.isFile())
+            const QString resolvedCandidatePath = ks::profile::resolveProfileJsonPath(candidatePath);
+            if (resolvedCandidatePath.isEmpty())
             {
                 diagnostics << QStringLiteral("pack 不存在: %1").arg(QDir::toNativeSeparators(candidatePath));
                 continue;
@@ -569,20 +570,16 @@ namespace
 
             result.scanned = true;
             result.existingPackCount += 1U;
-            result.pathText = QDir::toNativeSeparators(fileInfo.absoluteFilePath());
-
-            QFile file(fileInfo.absoluteFilePath());
-            if (!file.open(QIODevice::ReadOnly))
-            {
-                diagnostics << QStringLiteral("无法打开 pack: %1 (%2)").arg(result.pathText, file.errorString());
-                continue;
-            }
+            result.pathText = QDir::toNativeSeparators(resolvedCandidatePath);
 
             QJsonParseError parseError{};
-            const QJsonDocument document = QJsonDocument::fromJson(file.readAll(), &parseError);
+            QString readErrorText;
+            const QJsonDocument document = ks::profile::readProfileJsonDocument(resolvedCandidatePath, &parseError, &readErrorText);
             if (parseError.error != QJsonParseError::NoError || !document.isObject())
             {
-                diagnostics << QStringLiteral("pack JSON 解析失败: %1 (%2)").arg(result.pathText, parseError.errorString());
+                diagnostics << (readErrorText.isEmpty()
+                    ? QStringLiteral("pack JSON 解析失败: %1 (%2)").arg(result.pathText, parseError.errorString())
+                    : QStringLiteral("pack JSON 读取失败: %1 (%2)").arg(result.pathText, readErrorText));
                 continue;
             }
 

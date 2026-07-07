@@ -1945,7 +1945,7 @@ namespace apimon
         public:
             ScopedHookGuard()
             {
-                m_bypass = g_hookReentryGuard;
+                m_bypass = g_hookReentryGuard || IsInlineHookInternalBypassActive();
                 if (!m_bypass)
                 {
                     g_hookReentryGuard = true;
@@ -1978,6 +1978,76 @@ namespace apimon
             void* hookAddress;                                      // hookAddress：Hooked wrapper 函数地址。
             void** originalOut;                                     // originalOut：Trampoline 返回地址。
         };
+
+        struct RawHookBinding
+        {
+            std::wstring moduleName;                                // moduleName：Raw Hook 目标模块名。
+            std::string procName;                                   // procName：Raw Hook 目标导出名。
+            std::wstring procNameWide;                              // procNameWide：事件上报使用的宽字符导出名。
+            ks::winapi_monitor::EventCategory categoryValue = ks::winapi_monitor::EventCategory::Process; // categoryValue：按模块粗略归类。
+            InlineHookRecord hookRecord{};                          // hookRecord：Raw Hook inline patch 状态。
+            void* originalAddress = nullptr;                        // originalAddress：InstallInlineHook 生成的 trampoline。
+            void* entryStubAddress = nullptr;                       // entryStubAddress：动态生成的通用入口 stub。
+        };
+
+        struct FakeSuccessRuntimeRule
+        {
+            std::wstring moduleName;                                // moduleName：事件上报使用的模块名。
+            std::wstring installModuleName;                         // installModuleName：传给 GetModuleHandleW 的模块名，默认补齐 .dll。
+            std::wstring apiName;                                   // apiName：事件上报使用的 API 名。
+            std::string apiNameAnsi;                                // apiNameAnsi：传给 GetProcAddress 的 ANSI 导出名。
+            std::wstring matchKey;                                  // matchKey：规范化 module!api 精确匹配键。
+            ks::winapi_monitor::EventCategory categoryValue = ks::winapi_monitor::EventCategory::Process; // categoryValue：事件分类。
+            FakeSuccessReturnType returnType = FakeSuccessReturnType::Scalar; // returnType：返回值模板。
+            FakeSuccessLastErrorKind lastErrorKind = FakeSuccessLastErrorKind::None; // lastErrorKind：错误码写入方式。
+            std::uint64_t returnValue = 0;                          // returnValue：写入 RAX 的返回值。
+            std::uint32_t lastErrorValue = 0;                       // lastErrorValue：Win32/WSA 错误码。
+            InlineHookRecord hookRecord{};                          // hookRecord：Fake 专用 inline patch 状态。
+            void* originalAddress = nullptr;                        // originalAddress：安装时仍生成 trampoline，但 fake 路径不会跳入。
+            void* entryStubAddress = nullptr;                       // entryStubAddress：动态生成的 fake return stub。
+        };
+
+        // RawBindings：
+        // - 输入：无；
+        // - 处理：返回进程内唯一 Raw Hook 动态绑定集合，集合本身故意泄漏到进程结束；
+        // - 返回：可手动 clear 的 vector 引用。
+        // - 原因：目标进程退出阶段仍可能有被 hook API 被 CRT/loader 调用，自动析构会让入口 stub 指向已释放上下文。
+        std::vector<std::unique_ptr<RawHookBinding>>& RawBindings()
+        {
+            static auto* const bindingList = new std::vector<std::unique_ptr<RawHookBinding>>();
+            return *bindingList;
+        }
+
+        // RawHookKeys：
+        // - 输入：无；
+        // - 处理：返回 Raw module!export 去重集合，集合本身故意泄漏到进程结束；
+        // - 返回：可手动 clear 的 unordered_set 引用。
+        std::unordered_set<std::wstring>& RawHookKeys()
+        {
+            static auto* const keySet = new std::unordered_set<std::wstring>();
+            return *keySet;
+        }
+
+        // FakeSuccessRules：
+        // - 输入：无；
+        // - 处理：返回 Fake Success 规则集合，集合本身不参与 C++ 静态析构；
+        // - 返回：可手动 clear 的 vector 引用。
+        // - 原因：fake entry stub 持有 FakeSuccessRuntimeRule*，进程退出未显式 Stop 时不能让自动析构提前释放该上下文。
+        std::vector<std::unique_ptr<FakeSuccessRuntimeRule>>& FakeSuccessRules()
+        {
+            static auto* const ruleList = new std::vector<std::unique_ptr<FakeSuccessRuntimeRule>>();
+            return *ruleList;
+        }
+
+        // FakeSuccessRuleMap：
+        // - 输入：无；
+        // - 处理：返回 module!api 到 Fake 规则的快速索引，映射本身不参与 C++ 静态析构；
+        // - 返回：可手动 clear 的 unordered_map 引用。
+        std::unordered_map<std::wstring, FakeSuccessRuntimeRule*>& FakeSuccessRuleMap()
+        {
+            static auto* const ruleMap = new std::unordered_map<std::wstring, FakeSuccessRuntimeRule*>();
+            return *ruleMap;
+        }
 
         std::wstring ProcNameToWide(const char* procNamePointer)
         {
@@ -2063,6 +2133,55 @@ namespace apimon
                 fallbackText.push_back(static_cast<wchar_t>(*scanPointer));
             }
             return fallbackText;
+        }
+
+        std::wstring ToLowerWide(std::wstring textValue)
+        {
+            std::transform(
+                textValue.begin(),
+                textValue.end(),
+                textValue.begin(),
+                [](const wchar_t ch) { return static_cast<wchar_t>(::towlower(ch)); });
+            return textValue;
+        }
+
+        std::string ToLowerAnsi(std::string textValue)
+        {
+            std::transform(
+                textValue.begin(),
+                textValue.end(),
+                textValue.begin(),
+                [](const unsigned char ch) { return static_cast<char>(::tolower(ch)); });
+            return textValue;
+        }
+
+        // MakeRawHookKey 作用：
+        // - 输入：模块名和导出名；
+        // - 处理：统一大小写并拼接成 module!api 键；
+        // - 返回：Raw 绑定去重和强类型覆盖判断使用的稳定 key。
+        std::wstring MakeRawHookKey(const std::wstring& moduleName, const std::string& procName)
+        {
+            return ToLowerWide(moduleName) + L"!" + ToLowerWide(AnsiToWide(procName.c_str()));
+        }
+
+        std::wstring NormalizeModuleNameForMatch(std::wstring moduleName)
+        {
+            moduleName = ToLowerWide(moduleName);
+            if (moduleName.size() > 4 && moduleName.substr(moduleName.size() - 4) == L".dll")
+            {
+                moduleName.resize(moduleName.size() - 4);
+            }
+            return moduleName;
+        }
+
+        std::wstring MakeFakeSuccessKey(const std::wstring& moduleName, const std::wstring& apiName)
+        {
+            return NormalizeModuleNameForMatch(moduleName) + L"!" + ToLowerWide(apiName);
+        }
+
+        std::wstring MakeFakeSuccessKey(const std::wstring& moduleName, const std::string& apiName)
+        {
+            return MakeFakeSuccessKey(moduleName, AnsiToWide(apiName.c_str()));
         }
 
         // UnicodeStringToWide 作用：
@@ -3021,8 +3140,524 @@ namespace apimon
                 detailText);
         }
 
+        ks::winapi_monitor::EventCategory InferRawHookCategory(const std::wstring& moduleName, const std::string& procName);
+        void EmitRawStubByte(unsigned char* codePointer, std::size_t& offsetValue, unsigned char byteValue);
+        void EmitRawStubU64(unsigned char* codePointer, std::size_t& offsetValue, std::uint64_t value);
+
+        std::string WideToAnsiExportName(const std::wstring& textValue)
+        {
+            // WideToAnsiExportName 作用：
+            // - 输入：UI/INI 中保存的 API 导出名宽字符串；
+            // - 处理：按系统代码页转成 GetProcAddress 需要的窄字符串，失败时仅保留 ASCII；
+            // - 返回：可传给 GetProcAddress 的导出名，无法转换时返回空串。
+            if (textValue.empty())
+            {
+                return std::string();
+            }
+
+            const int requiredBytes = ::WideCharToMultiByte(
+                CP_ACP,
+                0,
+                textValue.c_str(),
+                -1,
+                nullptr,
+                0,
+                nullptr,
+                nullptr);
+            if (requiredBytes > 0)
+            {
+                std::string ansiText(static_cast<std::size_t>(requiredBytes), '\0');
+                const int convertedBytes = ::WideCharToMultiByte(
+                    CP_ACP,
+                    0,
+                    textValue.c_str(),
+                    -1,
+                    ansiText.data(),
+                    requiredBytes,
+                    nullptr,
+                    nullptr);
+                if (convertedBytes > 0 && !ansiText.empty())
+                {
+                    ansiText.resize(static_cast<std::size_t>(convertedBytes - 1));
+                    return ansiText;
+                }
+            }
+
+            std::string fallbackText;
+            for (const wchar_t ch : textValue)
+            {
+                if (ch == L'\0')
+                {
+                    break;
+                }
+                if (ch < 0x20 || ch > 0x7E)
+                {
+                    return std::string();
+                }
+                fallbackText.push_back(static_cast<char>(ch));
+            }
+            return fallbackText;
+        }
+
+        std::wstring BuildInstallModuleName(const std::wstring& moduleName)
+        {
+            // BuildInstallModuleName 作用：
+            // - 输入：用户配置的模块名，可以含 .dll，也可以只写 KernelBase 这样的短名；
+            // - 处理：安装 Hook 时保留已有扩展名，无扩展名时补齐 .dll；
+            // - 返回：GetModuleHandleW 可直接尝试匹配的模块名。
+            std::wstring installName = moduleName;
+            if (installName.find(L'.') == std::wstring::npos)
+            {
+                installName.append(L".dll");
+            }
+            return installName;
+        }
+
+        FakeSuccessRuntimeRule* FindFakeSuccessRule(const std::wstring& moduleName, const std::string& procName)
+        {
+            const MonitorConfig& configValue = ActiveConfig();
+            auto& ruleMap = FakeSuccessRuleMap();
+            if (!configValue.fakeSuccessEnabled || ruleMap.empty())
+            {
+                return nullptr;
+            }
+
+            const auto iterator = ruleMap.find(MakeFakeSuccessKey(moduleName, procName));
+            return iterator != ruleMap.end() ? iterator->second : nullptr;
+        }
+
+        template <std::size_t kCount>
+        void AppendFakeSuccessDetail(wchar_t(&detailBuffer)[kCount], const FakeSuccessRuntimeRule& ruleValue)
+        {
+            AppendWideText(detailBuffer, L"FakeSuccess=1 original=skipped returnType=");
+            switch (ruleValue.returnType)
+            {
+            case FakeSuccessReturnType::Bool: AppendWideText(detailBuffer, L"BOOL"); break;
+            case FakeSuccessReturnType::Handle: AppendWideText(detailBuffer, L"HANDLE/PVOID"); break;
+            case FakeSuccessReturnType::Dword: AppendWideText(detailBuffer, L"DWORD/UINT/int"); break;
+            case FakeSuccessReturnType::NtStatus: AppendWideText(detailBuffer, L"NTSTATUS"); break;
+            case FakeSuccessReturnType::HResult: AppendWideText(detailBuffer, L"HRESULT"); break;
+            case FakeSuccessReturnType::LStatus: AppendWideText(detailBuffer, L"LSTATUS"); break;
+            case FakeSuccessReturnType::SocketInt: AppendWideText(detailBuffer, L"SOCKET/int(WSA)"); break;
+            default: AppendWideText(detailBuffer, L"Scalar"); break;
+            }
+            AppendWideText(detailBuffer, L" return=");
+            AppendHexText(detailBuffer, ruleValue.returnValue);
+            if (ruleValue.lastErrorKind != FakeSuccessLastErrorKind::None)
+            {
+                AppendWideText(detailBuffer, ruleValue.lastErrorKind == FakeSuccessLastErrorKind::Wsa ? L" WSAError=" : L" LastError=");
+                AppendUnsignedText(detailBuffer, ruleValue.lastErrorValue);
+            }
+        }
+
+        std::int32_t FakeSuccessResultCode(const FakeSuccessRuntimeRule& ruleValue)
+        {
+            if (ruleValue.lastErrorKind != FakeSuccessLastErrorKind::None && ruleValue.lastErrorValue != 0)
+            {
+                return static_cast<std::int32_t>(ruleValue.lastErrorValue);
+            }
+            if (ruleValue.returnType == FakeSuccessReturnType::Bool)
+            {
+                return ruleValue.returnValue != 0 ? 0 : static_cast<std::int32_t>(ruleValue.returnValue & 0xFFFFFFFFULL);
+            }
+            if (ruleValue.returnType == FakeSuccessReturnType::Handle)
+            {
+                return (ruleValue.returnValue != 0 && ruleValue.returnValue != 0xFFFFFFFFFFFFFFFFULL)
+                    ? 0
+                    : static_cast<std::int32_t>(ruleValue.returnValue & 0xFFFFFFFFULL);
+            }
+            if (ruleValue.returnType == FakeSuccessReturnType::SocketInt)
+            {
+                return static_cast<std::uint32_t>(ruleValue.returnValue & 0xFFFFFFFFULL) != 0xFFFFFFFFU
+                    ? 0
+                    : static_cast<std::int32_t>(ruleValue.returnValue & 0xFFFFFFFFULL);
+            }
+            return static_cast<std::int32_t>(ruleValue.returnValue & 0xFFFFFFFFULL);
+        }
+
+        std::uint64_t FakeSuccessEnter(FakeSuccessRuntimeRule* const ruleValue)
+        {
+            if (ruleValue == nullptr)
+            {
+                return 0;
+            }
+
+            const DWORD previousLastError = ::GetLastError();
+            ScopedHookGuard guardValue;
+            if (!guardValue.bypass())
+            {
+                wchar_t detailBuffer[ks::winapi_monitor::kMaxDetailChars] = {};
+                AppendFakeSuccessDetail(detailBuffer, *ruleValue);
+                SendRawEventWithStatus(
+                    ruleValue->categoryValue,
+                    ruleValue->moduleName.c_str(),
+                    ruleValue->apiName.c_str(),
+                    FakeSuccessResultCode(*ruleValue),
+                    detailBuffer);
+            }
+
+            if (ruleValue->lastErrorKind == FakeSuccessLastErrorKind::Win32)
+            {
+                ::SetLastError(ruleValue->lastErrorValue);
+            }
+            else if (ruleValue->lastErrorKind == FakeSuccessLastErrorKind::Wsa)
+            {
+                ::SetLastError(previousLastError);
+                ::WSASetLastError(static_cast<int>(ruleValue->lastErrorValue));
+            }
+            else
+            {
+                ::SetLastError(previousLastError);
+            }
+
+            return ruleValue->returnValue;
+        }
+
+        // BuildFakeSuccessRuleIndex 作用：
+        // - 输入：ActiveConfig 中由 UI 写入的 Fake Success 规则；
+        // - 处理：规范化 module!api 匹配键，补齐安装模块名，转换 ANSI 导出名，并按“首条规则优先”建立索引；
+        // - 返回：无返回值，FakeSuccessRules/FakeSuccessRuleMap 保存本会话可安装的运行时规则。
+        void BuildFakeSuccessRuleIndex()
+        {
+            auto& ruleList = FakeSuccessRules();
+            auto& ruleMap = FakeSuccessRuleMap();
+            ruleList.clear();
+            ruleMap.clear();
+
+            const MonitorConfig& configValue = ActiveConfig();
+            if (!configValue.fakeSuccessEnabled)
+            {
+                return;
+            }
+
+            for (const FakeSuccessRule& sourceRule : configValue.fakeSuccessRules)
+            {
+                const std::wstring matchKey = MakeFakeSuccessKey(sourceRule.moduleName, sourceRule.apiName);
+                if (matchKey.empty() || ruleMap.find(matchKey) != ruleMap.end())
+                {
+                    continue;
+                }
+
+                std::string ansiApiName = WideToAnsiExportName(sourceRule.apiName);
+                if (ansiApiName.empty())
+                {
+                    continue;
+                }
+
+                auto runtimeRule = std::make_unique<FakeSuccessRuntimeRule>();
+                runtimeRule->moduleName = sourceRule.moduleName;
+                runtimeRule->installModuleName = BuildInstallModuleName(sourceRule.moduleName);
+                runtimeRule->apiName = sourceRule.apiName;
+                runtimeRule->apiNameAnsi = std::move(ansiApiName);
+                runtimeRule->matchKey = matchKey;
+                runtimeRule->categoryValue = InferRawHookCategory(runtimeRule->installModuleName, runtimeRule->apiNameAnsi);
+                runtimeRule->returnType = sourceRule.returnType;
+                runtimeRule->returnValue = sourceRule.returnValue;
+                runtimeRule->lastErrorKind = sourceRule.lastErrorKind;
+                runtimeRule->lastErrorValue = sourceRule.lastErrorValue;
+
+                FakeSuccessRuntimeRule* const rulePointer = runtimeRule.get();
+                ruleMap.emplace(rulePointer->matchKey, rulePointer);
+                ruleList.push_back(std::move(runtimeRule));
+            }
+        }
+
+        // BuildFakeSuccessEntryStub 作用：
+        // - 输入：ruleValue 指向一条 Fake Success 运行时规则；
+        // - 处理：生成 x64 小型 detour stub，调用 FakeSuccessEnter(rule) 上报事件并取得 RAX 返回值；
+        // - 返回：可执行内存地址，作为 InstallInlineHook 的 detourAddress，失败返回 nullptr。
+        void* BuildFakeSuccessEntryStub(FakeSuccessRuntimeRule* const ruleValue)
+        {
+            if (ruleValue == nullptr)
+            {
+                return nullptr;
+            }
+
+            constexpr std::size_t kFakeStubBytes = 64;
+            unsigned char* const codePointer = static_cast<unsigned char*>(::VirtualAlloc(
+                nullptr,
+                kFakeStubBytes,
+                MEM_COMMIT | MEM_RESERVE,
+                PAGE_EXECUTE_READWRITE));
+            if (codePointer == nullptr)
+            {
+                return nullptr;
+            }
+
+            std::size_t offsetValue = 0;
+            const auto emit = [codePointer, &offsetValue](const unsigned char byteValue) {
+                EmitRawStubByte(codePointer, offsetValue, byteValue);
+            };
+
+            emit(0x48); emit(0x83); emit(0xEC); emit(0x28); // sub rsp, 0x28：对齐栈并提供 32 字节 shadow space。
+            emit(0x48); emit(0xB9);                         // mov rcx, ruleValue：Windows x64 第一个参数。
+            EmitRawStubU64(codePointer, offsetValue, reinterpret_cast<std::uint64_t>(ruleValue));
+            emit(0x48); emit(0xB8);                         // mov rax, FakeSuccessEnter。
+            EmitRawStubU64(codePointer, offsetValue, reinterpret_cast<std::uint64_t>(&FakeSuccessEnter));
+            emit(0xFF); emit(0xD0);                         // call rax：返回值留在 RAX。
+            emit(0x48); emit(0x83); emit(0xC4); emit(0x28); // add rsp, 0x28：恢复调用者栈。
+            emit(0xC3);                                     // ret：直接返回到原 API 调用者，原函数完全不执行。
+
+            ::FlushInstructionCache(::GetCurrentProcess(), codePointer, offsetValue);
+            return codePointer;
+        }
+
+        void FreeFakeSuccessEntryStub(void* const stubAddress)
+        {
+            // FreeFakeSuccessEntryStub 作用：
+            // - 输入：BuildFakeSuccessEntryStub 返回的可执行内存；
+            // - 处理：释放动态 stub，调用方必须先卸载 inline hook；
+            // - 返回：无返回值。
+            if (stubAddress != nullptr)
+            {
+                ::VirtualFree(stubAddress, 0, MEM_RELEASE);
+            }
+        }
+
+        void AppendFakeSuccessFailureText(
+            std::wstring* const detailTextOut,
+            const FakeSuccessRuntimeRule& ruleValue,
+            const InlineHookInstallResult installResult,
+            const std::wstring& errorText)
+        {
+            // AppendFakeSuccessFailureText 作用：
+            // - 输入：安装失败的规则、失败类型和 HookEngine 诊断文本；
+            // - 处理：追加到 InstallConfiguredHooks 的聚合错误里，便于 UI 内部事件显示；
+            // - 返回：无返回值，detailTextOut 为空时静默跳过。
+            if (detailTextOut == nullptr)
+            {
+                return;
+            }
+            if (!detailTextOut->empty())
+            {
+                detailTextOut->append(L" | ");
+            }
+
+            detailTextOut->append(ruleValue.moduleName);
+            detailTextOut->append(L"!");
+            detailTextOut->append(ruleValue.apiName);
+            detailTextOut->append(
+                installResult == InlineHookInstallResult::RetryableFailure
+                ? L": fake retryable failure - "
+                : L": fake disabled - ");
+            detailTextOut->append(errorText.empty() ? L"unknown reason" : errorText);
+        }
+
+        bool TryInstallFakeSuccessRule(
+            FakeSuccessRuntimeRule& ruleValue,
+            const std::optional<ks::winapi_monitor::EventCategory> categoryOverride,
+            std::wstring* const detailTextOut)
+        {
+            // TryInstallFakeSuccessRule 作用：
+            // - 输入：运行时规则，可选分类覆盖用于强类型绑定命中时保持分类更准确；
+            // - 处理：为规则生成 fake-return stub，并把目标导出 inline patch 到该 stub；
+            // - 返回：当前规则已安装或本次安装成功返回 true，失败返回 false。
+            if (categoryOverride.has_value())
+            {
+                ruleValue.categoryValue = categoryOverride.value();
+            }
+            if (ruleValue.hookRecord.installed || ruleValue.hookRecord.permanentlyDisabled)
+            {
+                return ruleValue.hookRecord.installed;
+            }
+            if (ruleValue.entryStubAddress == nullptr)
+            {
+                ruleValue.entryStubAddress = BuildFakeSuccessEntryStub(&ruleValue);
+                if (ruleValue.entryStubAddress == nullptr)
+                {
+                    ruleValue.hookRecord.permanentlyDisabled = true;
+                    AppendFakeSuccessFailureText(
+                        detailTextOut,
+                        ruleValue,
+                        InlineHookInstallResult::PermanentFailure,
+                        L"VirtualAlloc for fake-return stub failed.");
+                    return false;
+                }
+            }
+
+            std::wstring errorText;
+            const InlineHookInstallResult installResult = InstallInlineHook(
+                ruleValue.installModuleName.c_str(),
+                ruleValue.apiNameAnsi.c_str(),
+                ruleValue.entryStubAddress,
+                &ruleValue.hookRecord,
+                &ruleValue.originalAddress,
+                &errorText);
+            if (installResult == InlineHookInstallResult::Installed)
+            {
+                return true;
+            }
+            if (installResult == InlineHookInstallResult::PermanentFailure)
+            {
+                ruleValue.hookRecord.permanentlyDisabled = true;
+            }
+            AppendFakeSuccessFailureText(detailTextOut, ruleValue, installResult, errorText);
+            return false;
+        }
+
+        // RawHookEnter 作用：
+        // - 输入：bindingValue 为动态 stub 传入的 Raw Hook 元数据；
+        // - 处理：在不解析参数语义的前提下上报 module/api/target/trampoline，并用全局 reentry guard 避免日志链路递归；
+        // - 返回：无返回值，动态 stub 随后恢复寄存器并跳入 trampoline 继续执行原函数。
+        void RawHookEnter(RawHookBinding* const bindingValue)
+        {
+            if (bindingValue == nullptr)
+            {
+                return;
+            }
+
+            ScopedHookGuard guardValue;
+            if (guardValue.bypass())
+            {
+                return;
+            }
+
+            wchar_t detailBuffer[ks::winapi_monitor::kMaxDetailChars] = {};
+            AppendWideText(detailBuffer, L"Raw ABI fallback target=");
+            AppendHexText(detailBuffer, reinterpret_cast<std::uint64_t>(bindingValue->hookRecord.targetAddress));
+            AppendWideText(detailBuffer, L" trampoline=");
+            AppendHexText(detailBuffer, reinterpret_cast<std::uint64_t>(bindingValue->originalAddress));
+            AppendWideText(detailBuffer, L" strongTyped=0 params=unparsed");
+            SendRawEventWithStatus(
+                bindingValue->categoryValue,
+                bindingValue->moduleName.c_str(),
+                bindingValue->procNameWide.c_str(),
+                0,
+                detailBuffer);
+        }
+
+        // EmitRawStubByte/EmitRawStubU32/EmitRawStubU64 作用：
+        // - 输入：动态代码缓冲和待写入数值；
+        // - 处理：顺序写入 x64 Raw Hook stub 指令字节；
+        // - 返回：无返回值，offsetValue 推进到下一条指令位置。
+        void EmitRawStubByte(unsigned char* const codePointer, std::size_t& offsetValue, const unsigned char byteValue)
+        {
+            codePointer[offsetValue++] = byteValue;
+        }
+
+        void EmitRawStubU32(unsigned char* const codePointer, std::size_t& offsetValue, const std::uint32_t value)
+        {
+            std::memcpy(codePointer + offsetValue, &value, sizeof(value));
+            offsetValue += sizeof(value);
+        }
+
+        void EmitRawStubU64(unsigned char* const codePointer, std::size_t& offsetValue, const std::uint64_t value)
+        {
+            std::memcpy(codePointer + offsetValue, &value, sizeof(value));
+            offsetValue += sizeof(value);
+        }
+
+        void EmitRawStubMovdquStore(unsigned char* const codePointer, std::size_t& offsetValue, const unsigned char xmmIndex, const unsigned char stackOffset)
+        {
+            EmitRawStubByte(codePointer, offsetValue, 0xF3);
+            EmitRawStubByte(codePointer, offsetValue, 0x0F);
+            EmitRawStubByte(codePointer, offsetValue, 0x7F);
+            EmitRawStubByte(codePointer, offsetValue, static_cast<unsigned char>(0x44U + (xmmIndex * 0x08U)));
+            EmitRawStubByte(codePointer, offsetValue, 0x24);
+            EmitRawStubByte(codePointer, offsetValue, stackOffset);
+        }
+
+        void EmitRawStubMovdquLoad(unsigned char* const codePointer, std::size_t& offsetValue, const unsigned char xmmIndex, const unsigned char stackOffset)
+        {
+            EmitRawStubByte(codePointer, offsetValue, 0xF3);
+            EmitRawStubByte(codePointer, offsetValue, 0x0F);
+            EmitRawStubByte(codePointer, offsetValue, 0x6F);
+            EmitRawStubByte(codePointer, offsetValue, static_cast<unsigned char>(0x44U + (xmmIndex * 0x08U)));
+            EmitRawStubByte(codePointer, offsetValue, 0x24);
+            EmitRawStubByte(codePointer, offsetValue, stackOffset);
+        }
+
+        // BuildRawEntryStub 作用：
+        // - 输入：bindingValue 指向 Raw Hook 元数据，stub 通过该指针读取 trampoline；
+        // - 处理：生成 x64 通用入口桩，保存整数参数寄存器和 XMM0-XMM5，调用 RawHookEnter 后跳转到 trampoline；
+        // - 返回：可作为 InstallInlineHook hookAddress 的可执行内存地址，失败返回 nullptr。
+        void* BuildRawEntryStub(RawHookBinding* const bindingValue)
+        {
+            if (bindingValue == nullptr)
+            {
+                return nullptr;
+            }
+
+            constexpr std::size_t kRawStubBytes = 256;
+            unsigned char* const codePointer = static_cast<unsigned char*>(::VirtualAlloc(
+                nullptr,
+                kRawStubBytes,
+                MEM_COMMIT | MEM_RESERVE,
+                PAGE_EXECUTE_READWRITE));
+            if (codePointer == nullptr)
+            {
+                return nullptr;
+            }
+
+            std::size_t offsetValue = 0;
+            const auto emit = [codePointer, &offsetValue](const unsigned char byteValue) {
+                EmitRawStubByte(codePointer, offsetValue, byteValue);
+            };
+
+            emit(0x50);                         // push rax
+            emit(0x51);                         // push rcx
+            emit(0x52);                         // push rdx
+            emit(0x41); emit(0x50);             // push r8
+            emit(0x41); emit(0x51);             // push r9
+            emit(0x41); emit(0x52);             // push r10
+            emit(0x41); emit(0x53);             // push r11
+            emit(0x48); emit(0x81); emit(0xEC); // sub rsp, 0xA0
+            EmitRawStubU32(codePointer, offsetValue, 0x000000A0U);
+
+            EmitRawStubMovdquStore(codePointer, offsetValue, 0, 0x20);
+            EmitRawStubMovdquStore(codePointer, offsetValue, 1, 0x30);
+            EmitRawStubMovdquStore(codePointer, offsetValue, 2, 0x40);
+            EmitRawStubMovdquStore(codePointer, offsetValue, 3, 0x50);
+            EmitRawStubMovdquStore(codePointer, offsetValue, 4, 0x60);
+            EmitRawStubMovdquStore(codePointer, offsetValue, 5, 0x70);
+
+            emit(0x48); emit(0xB9);             // mov rcx, bindingValue
+            EmitRawStubU64(codePointer, offsetValue, reinterpret_cast<std::uint64_t>(bindingValue));
+            emit(0x48); emit(0xB8);             // mov rax, RawHookEnter
+            EmitRawStubU64(codePointer, offsetValue, reinterpret_cast<std::uint64_t>(&RawHookEnter));
+            emit(0xFF); emit(0xD0);             // call rax
+
+            EmitRawStubMovdquLoad(codePointer, offsetValue, 0, 0x20);
+            EmitRawStubMovdquLoad(codePointer, offsetValue, 1, 0x30);
+            EmitRawStubMovdquLoad(codePointer, offsetValue, 2, 0x40);
+            EmitRawStubMovdquLoad(codePointer, offsetValue, 3, 0x50);
+            EmitRawStubMovdquLoad(codePointer, offsetValue, 4, 0x60);
+            EmitRawStubMovdquLoad(codePointer, offsetValue, 5, 0x70);
+
+            emit(0x48); emit(0x81); emit(0xC4); // add rsp, 0xA0
+            EmitRawStubU32(codePointer, offsetValue, 0x000000A0U);
+            emit(0x41); emit(0x5B);             // pop r11
+            emit(0x41); emit(0x5A);             // pop r10
+            emit(0x41); emit(0x59);             // pop r9
+            emit(0x41); emit(0x58);             // pop r8
+            emit(0x5A);                         // pop rdx
+            emit(0x59);                         // pop rcx
+            emit(0x58);                         // pop rax
+            emit(0x49); emit(0xBB);             // mov r11, &bindingValue->originalAddress
+            EmitRawStubU64(codePointer, offsetValue, reinterpret_cast<std::uint64_t>(&bindingValue->originalAddress));
+            emit(0x4D); emit(0x8B); emit(0x1B); // mov r11, [r11]
+            emit(0x41); emit(0xFF); emit(0xE3); // jmp r11
+
+            ::FlushInstructionCache(::GetCurrentProcess(), codePointer, offsetValue);
+            return codePointer;
+        }
+
+        void FreeRawEntryStub(void* const stubAddress)
+        {
+            if (stubAddress != nullptr)
+            {
+                ::VirtualFree(stubAddress, 0, MEM_RELEASE);
+            }
+        }
+
         bool TryInstallBinding(HookBinding& bindingValue, std::wstring* detailTextOut)
         {
+            FakeSuccessRuntimeRule* const fakeRule = FindFakeSuccessRule(bindingValue.moduleName, bindingValue.procName);
+            if (fakeRule != nullptr)
+            {
+                return TryInstallFakeSuccessRule(*fakeRule, bindingValue.categoryValue, detailTextOut);
+            }
+
             if (!CategoryEnabled(bindingValue.categoryValue)
                 || bindingValue.hookRecord->installed
                 || bindingValue.hookRecord->permanentlyDisabled)
@@ -3072,6 +3707,28 @@ namespace apimon
                 apiName,
                 moduleHandle != nullptr ? 0 : static_cast<std::int32_t>(lastError),
                 TrimDetail(L"path=" + fileNameText + extraText));
+        }
+
+        // JoinIniList 作用：
+        // - 输入：MonitorConfig 中已拆分的 Raw 模块/黑名单列表；
+        // - 处理：按 INI 单行格式重新用分号拼接，供自动注入子进程继承父进程 Raw 配置；
+        // - 返回：可直接写入 config_<pid>.ini 的列表文本。
+        std::wstring JoinIniList(const std::vector<std::wstring>& itemList)
+        {
+            std::wstring joinedText;
+            for (const std::wstring& itemText : itemList)
+            {
+                if (itemText.empty())
+                {
+                    continue;
+                }
+                if (!joinedText.empty())
+                {
+                    joinedText.append(L";");
+                }
+                joinedText.append(itemText);
+            }
+            return joinedText;
         }
 
         // WriteChildMonitorConfig 作用：
@@ -3131,6 +3788,13 @@ namespace apimon
                 L"enable_process=" + std::to_wstring(configValue.enableProcess ? 1 : 0) + L"\r\n"
                 L"enable_loader=" + std::to_wstring(configValue.enableLoader ? 1 : 0) + L"\r\n"
                 L"auto_inject_child=" + std::to_wstring(configValue.autoInjectChild ? 1 : 0) + L"\r\n"
+                L"enable_raw_fallback=" + std::to_wstring(configValue.enableRawFallback ? 1 : 0) + L"\r\n"
+                L"raw_use_default_denylist=" + std::to_wstring(configValue.rawUseDefaultDenyList ? 1 : 0) + L"\r\n"
+                L"raw_modules=" + JoinIniList(configValue.rawModuleList) + L"\r\n"
+                L"raw_denylist=" + JoinIniList(configValue.rawDenyList) + L"\r\n"
+                L"fake_success_enabled=" + std::to_wstring(configValue.fakeSuccessEnabled ? 1 : 0) + L"\r\n"
+                L"fake_success_raw_fallback=" + std::to_wstring(configValue.fakeSuccessRawFallback ? 1 : 0) + L"\r\n"
+                L"fake_success_rules=" + configValue.fakeSuccessRulesText + L"\r\n"
                 L"detail_limit=" + std::to_wstring(configValue.detailLimitChars) + L"\r\n";
 
             const wchar_t unicodeBom = static_cast<wchar_t>(0xFEFF);
@@ -9136,6 +9800,439 @@ namespace apimon
             { L"ntdll.dll", "NtReleaseSemaphore", ks::winapi_monitor::EventCategory::Process, &g_ntReleaseSemaphoreHook, reinterpret_cast<void*>(&HookedNtReleaseSemaphore), reinterpret_cast<void**>(&g_ntReleaseSemaphoreOriginal) }
         };
 
+        bool StartsWithWide(const std::wstring& textValue, const std::wstring& prefixValue)
+        {
+            return textValue.size() >= prefixValue.size()
+                && std::equal(prefixValue.begin(), prefixValue.end(), textValue.begin());
+        }
+
+        bool IsStrongTypedExport(const std::wstring& moduleName, const std::string& procName)
+        {
+            const std::wstring targetKey = MakeRawHookKey(moduleName, procName);
+            for (const HookBinding& bindingValue : g_bindings)
+            {
+                if (bindingValue.moduleName == nullptr || bindingValue.procName == nullptr)
+                {
+                    continue;
+                }
+                if (MakeRawHookKey(bindingValue.moduleName, bindingValue.procName) == targetKey)
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        bool IsUnsafeRawFallbackModule(const std::wstring& moduleName)
+        {
+            // IsUnsafeRawFallbackModule 作用：
+            // - 输入：Raw Fallback 配置中的模块名；
+            // - 处理：识别不适合通用 ABI 兜底 hook 的底层模块；
+            // - 返回：true 表示 Raw 枚举应跳过该模块，强类型 hook 和精确 Fake Success 不受影响。
+            // - 原因：ntdll 导出包含 syscall、loader、运行时和内部调度面；即使排除 Nt/Rtl/Ldr 前缀，
+            //   剩余导出仍可能在 CRT/loader/异常处理路径被高频调用，通用 Raw trampoline 风险过高。
+            return NormalizeModuleNameForMatch(moduleName) == L"ntdll";
+        }
+
+        bool MatchesRawDenyPattern(const std::string& procName, const std::wstring& patternText)
+        {
+            if (procName.empty() || patternText.empty())
+            {
+                return false;
+            }
+
+            const std::wstring lowerProcName = ToLowerWide(AnsiToWide(procName.c_str()));
+            std::wstring lowerPattern = ToLowerWide(patternText);
+            if (!lowerPattern.empty() && lowerPattern.back() == L'*')
+            {
+                lowerPattern.pop_back();
+                return !lowerPattern.empty() && StartsWithWide(lowerProcName, lowerPattern);
+            }
+            return lowerProcName == lowerPattern;
+        }
+
+        std::vector<std::wstring> SplitRawDenyPatternText(const wchar_t* const patternText)
+        {
+            // SplitRawDenyPatternText 作用：
+            // - 输入：共享协议中的内置 Raw 黑名单文本；
+            // - 处理：按分号、逗号或换行拆分，并去掉每项首尾空白；
+            // - 返回：可供 MatchesRawDenyPattern 逐项匹配的规则列表。
+            std::vector<std::wstring> patternList;
+            if (patternText == nullptr || patternText[0] == L'\0')
+            {
+                return patternList;
+            }
+
+            std::wstring currentPattern;
+            const auto flushPattern = [&patternList, &currentPattern]() {
+                const auto firstIt = std::find_if_not(
+                    currentPattern.begin(),
+                    currentPattern.end(),
+                    [](const wchar_t ch) { return ch == L' ' || ch == L'\t' || ch == L'\r' || ch == L'\n'; });
+                const auto lastIt = std::find_if_not(
+                    currentPattern.rbegin(),
+                    currentPattern.rend(),
+                    [](const wchar_t ch) { return ch == L' ' || ch == L'\t' || ch == L'\r' || ch == L'\n'; }).base();
+                if (firstIt < lastIt)
+                {
+                    patternList.emplace_back(firstIt, lastIt);
+                }
+                currentPattern.clear();
+            };
+
+            for (const wchar_t ch : std::wstring(patternText))
+            {
+                if (ch == L';' || ch == L',' || ch == L'\r' || ch == L'\n')
+                {
+                    flushPattern();
+                    continue;
+                }
+                currentPattern.push_back(ch);
+            }
+            flushPattern();
+            return patternList;
+        }
+
+        const std::vector<std::wstring>& DefaultRawDenyPatterns()
+        {
+            // DefaultRawDenyPatterns 作用：
+            // - 输入：无；
+            // - 处理：懒加载共享默认黑名单，避免每次枚举导出都重复拆分字符串；
+            // - 返回：进程内只读规则列表，调用方不得修改。
+            static const std::vector<std::wstring> defaultPatternList =
+                SplitRawDenyPatternText(ks::winapi_monitor::kDefaultRawHookDenyList);
+            return defaultPatternList;
+        }
+
+        bool IsRawDeniedByConfig(const std::string& procName)
+        {
+            const MonitorConfig& configValue = ActiveConfig();
+            if (configValue.rawUseDefaultDenyList)
+            {
+                for (const std::wstring& patternText : DefaultRawDenyPatterns())
+                {
+                    if (MatchesRawDenyPattern(procName, patternText))
+                    {
+                        return true;
+                    }
+                }
+            }
+
+            // 用户额外黑名单始终生效：
+            // - 默认黑名单可以被用户关闭；
+            // - 下方自定义规则仍然用于兜底 Raw Hook，便于临时压制某个目标进程的噪声 API。
+            for (const std::wstring& patternText : configValue.rawDenyList)
+            {
+                if (MatchesRawDenyPattern(procName, patternText))
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        bool ExportNameLooksHookable(const std::string& procName)
+        {
+            if (procName.empty())
+            {
+                return false;
+            }
+            if (procName[0] == '?' || procName[0] == '_')
+            {
+                return false;
+            }
+            for (const unsigned char ch : procName)
+            {
+                if (ch < 0x20 || ch >= 0x7F)
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        ks::winapi_monitor::EventCategory InferRawHookCategory(const std::wstring& moduleName, const std::string& procName)
+        {
+            const std::wstring moduleLower = ToLowerWide(moduleName);
+            const std::string procLower = ToLowerAnsi(procName);
+            if (moduleLower == L"ws2_32.dll" || moduleLower == L"wininet.dll" || moduleLower == L"winhttp.dll"
+                || moduleLower == L"iphlpapi.dll" || moduleLower == L"dnsapi.dll" || moduleLower == L"netapi32.dll"
+                || moduleLower == L"urlmon.dll" || moduleLower == L"wldap32.dll")
+            {
+                return ks::winapi_monitor::EventCategory::Network;
+            }
+            if (procLower.rfind("reg", 0) == 0 || procLower.find("key") != std::string::npos)
+            {
+                return ks::winapi_monitor::EventCategory::Registry;
+            }
+            if (procLower.find("file") != std::string::npos || procLower.find("directory") != std::string::npos
+                || procLower.find("path") != std::string::npos || procLower.find("pipe") != std::string::npos)
+            {
+                return ks::winapi_monitor::EventCategory::File;
+            }
+            if (procLower.find("library") != std::string::npos || procLower.find("module") != std::string::npos
+                || procLower.rfind("ldr", 0) == 0)
+            {
+                return ks::winapi_monitor::EventCategory::Loader;
+            }
+            return ks::winapi_monitor::EventCategory::Process;
+        }
+
+        bool EnumerateNamedExports(HMODULE moduleHandle, std::vector<std::string>* exportNamesOut)
+        {
+            if (moduleHandle == nullptr || exportNamesOut == nullptr)
+            {
+                return false;
+            }
+            exportNamesOut->clear();
+
+            const auto* const basePointer = reinterpret_cast<const unsigned char*>(moduleHandle);
+            const auto* const dosHeader = reinterpret_cast<const IMAGE_DOS_HEADER*>(basePointer);
+            if (dosHeader->e_magic != IMAGE_DOS_SIGNATURE || dosHeader->e_lfanew <= 0)
+            {
+                return false;
+            }
+
+            const auto* const ntHeader = reinterpret_cast<const IMAGE_NT_HEADERS64*>(basePointer + dosHeader->e_lfanew);
+            if (ntHeader->Signature != IMAGE_NT_SIGNATURE)
+            {
+                return false;
+            }
+
+            const IMAGE_DATA_DIRECTORY& exportDirectory =
+                ntHeader->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
+            if (exportDirectory.VirtualAddress == 0 || exportDirectory.Size < sizeof(IMAGE_EXPORT_DIRECTORY))
+            {
+                return false;
+            }
+
+            const DWORD imageSize = ntHeader->OptionalHeader.SizeOfImage;
+            const auto rvaToPointer = [basePointer, imageSize](const DWORD rvaValue) -> const void* {
+                if (rvaValue == 0 || rvaValue >= imageSize)
+                {
+                    return nullptr;
+                }
+                return basePointer + rvaValue;
+            };
+
+            const auto* const exportTable = static_cast<const IMAGE_EXPORT_DIRECTORY*>(
+                rvaToPointer(exportDirectory.VirtualAddress));
+            if (exportTable == nullptr || exportTable->NumberOfNames == 0 || exportTable->AddressOfNames == 0)
+            {
+                return false;
+            }
+
+            const auto* const nameRvaList = static_cast<const DWORD*>(rvaToPointer(exportTable->AddressOfNames));
+            if (nameRvaList == nullptr)
+            {
+                return false;
+            }
+
+            exportNamesOut->reserve(exportTable->NumberOfNames);
+            for (DWORD indexValue = 0; indexValue < exportTable->NumberOfNames; ++indexValue)
+            {
+                const char* const namePointer = static_cast<const char*>(rvaToPointer(nameRvaList[indexValue]));
+                if (namePointer == nullptr || namePointer[0] == '\0')
+                {
+                    continue;
+                }
+                exportNamesOut->push_back(namePointer);
+            }
+
+            std::sort(exportNamesOut->begin(), exportNamesOut->end());
+            exportNamesOut->erase(
+                std::unique(exportNamesOut->begin(), exportNamesOut->end()),
+                exportNamesOut->end());
+            return !exportNamesOut->empty();
+        }
+
+        bool TryInstallRawHookBinding(RawHookBinding& bindingValue)
+        {
+            if (bindingValue.hookRecord.installed || bindingValue.hookRecord.permanentlyDisabled)
+            {
+                return bindingValue.hookRecord.installed;
+            }
+            if (bindingValue.entryStubAddress == nullptr)
+            {
+                bindingValue.entryStubAddress = BuildRawEntryStub(&bindingValue);
+                if (bindingValue.entryStubAddress == nullptr)
+                {
+                    bindingValue.hookRecord.permanentlyDisabled = true;
+                    return false;
+                }
+            }
+
+            std::wstring ignoredErrorText;
+            const InlineHookInstallResult installResult = InstallInlineHook(
+                bindingValue.moduleName.c_str(),
+                bindingValue.procName.c_str(),
+                bindingValue.entryStubAddress,
+                &bindingValue.hookRecord,
+                &bindingValue.originalAddress,
+                &ignoredErrorText);
+            if (installResult == InlineHookInstallResult::Installed)
+            {
+                return true;
+            }
+            if (installResult == InlineHookInstallResult::PermanentFailure)
+            {
+                bindingValue.hookRecord.permanentlyDisabled = true;
+            }
+            return false;
+        }
+
+        bool InstallFakeSuccessHooks(std::wstring* const detailTextOut)
+        {
+            // InstallFakeSuccessHooks 作用：
+            // - 输入：已由 BuildFakeSuccessRuleIndex 准备好的 Fake Success 规则集合；
+            // - 处理：仅在 fake_success_raw_fallback=1 时补装未被强类型表覆盖的精确 module!api 规则；
+            // - 返回：至少一条 Fake Success 规则已安装/安装成功时返回 true。
+            const MonitorConfig& configValue = ActiveConfig();
+            auto& ruleList = FakeSuccessRules();
+            if (!configValue.fakeSuccessEnabled || !configValue.fakeSuccessRawFallback || ruleList.empty())
+            {
+                return false;
+            }
+
+            bool installedAny = false;
+            for (std::unique_ptr<FakeSuccessRuntimeRule>& rulePointer : ruleList)
+            {
+                if (rulePointer == nullptr)
+                {
+                    continue;
+                }
+                installedAny = TryInstallFakeSuccessRule(*rulePointer, std::nullopt, detailTextOut) || installedAny;
+            }
+            return installedAny;
+        }
+
+        void UninstallFakeSuccessHooks()
+        {
+            // UninstallFakeSuccessHooks 作用：
+            // - 输入：无，使用当前 Fake Success 运行时规则表；
+            // - 处理：撤销 inline patch，释放 trampoline 和动态 fake-return stub，并清空索引；
+            // - 返回：无返回值。
+            auto& ruleList = FakeSuccessRules();
+            for (std::unique_ptr<FakeSuccessRuntimeRule>& rulePointer : ruleList)
+            {
+                if (rulePointer == nullptr)
+                {
+                    continue;
+                }
+                UninstallInlineHook(&rulePointer->hookRecord);
+                rulePointer->originalAddress = nullptr;
+                FreeFakeSuccessEntryStub(rulePointer->entryStubAddress);
+                rulePointer->entryStubAddress = nullptr;
+            }
+            ruleList.clear();
+            FakeSuccessRuleMap().clear();
+        }
+
+        void DiscoverRawHookBindingsForLoadedModules()
+        {
+            const MonitorConfig& configValue = ActiveConfig();
+            if (!configValue.enableRawFallback)
+            {
+                return;
+            }
+
+            constexpr std::size_t kMaxRawExportsPerModule = 768;
+            std::vector<std::string> exportNameList;
+            for (const std::wstring& moduleName : configValue.rawModuleList)
+            {
+                if (moduleName.empty())
+                {
+                    continue;
+                }
+                if (IsUnsafeRawFallbackModule(moduleName))
+                {
+                    continue;
+                }
+
+                HMODULE moduleHandle = ::GetModuleHandleW(moduleName.c_str());
+                if (moduleHandle == nullptr)
+                {
+                    continue;
+                }
+                if (!EnumerateNamedExports(moduleHandle, &exportNameList))
+                {
+                    continue;
+                }
+
+                std::size_t acceptedCount = 0;
+                for (const std::string& exportName : exportNameList)
+                {
+                    if (acceptedCount >= kMaxRawExportsPerModule)
+                    {
+                        break;
+                    }
+                    if (!ExportNameLooksHookable(exportName)
+                        || IsStrongTypedExport(moduleName, exportName)
+                        || (configValue.fakeSuccessRawFallback && FindFakeSuccessRule(moduleName, exportName) != nullptr)
+                        || IsRawDeniedByConfig(exportName))
+                    {
+                        continue;
+                    }
+
+                    const std::wstring rawKey = MakeRawHookKey(moduleName, exportName);
+                    auto& rawKeySet = RawHookKeys();
+                    auto& rawBindingList = RawBindings();
+                    if (rawKeySet.find(rawKey) != rawKeySet.end())
+                    {
+                        continue;
+                    }
+
+                    auto bindingPointer = std::make_unique<RawHookBinding>();
+                    bindingPointer->moduleName = moduleName;
+                    bindingPointer->procName = exportName;
+                    bindingPointer->procNameWide = AnsiToWide(exportName.c_str());
+                    bindingPointer->categoryValue = InferRawHookCategory(moduleName, exportName);
+                    rawKeySet.insert(rawKey);
+                    rawBindingList.push_back(std::move(bindingPointer));
+                    ++acceptedCount;
+                }
+            }
+        }
+
+        bool InstallRawFallbackHooks()
+        {
+            const MonitorConfig& configValue = ActiveConfig();
+            if (!configValue.enableRawFallback)
+            {
+                return false;
+            }
+
+            DiscoverRawHookBindingsForLoadedModules();
+
+            bool installedAny = false;
+            for (std::unique_ptr<RawHookBinding>& bindingPointer : RawBindings())
+            {
+                if (bindingPointer == nullptr)
+                {
+                    continue;
+                }
+                installedAny = TryInstallRawHookBinding(*bindingPointer) || installedAny;
+            }
+            return installedAny;
+        }
+
+        void UninstallRawFallbackHooks()
+        {
+            auto& rawBindingList = RawBindings();
+            for (std::unique_ptr<RawHookBinding>& bindingPointer : rawBindingList)
+            {
+                if (bindingPointer == nullptr)
+                {
+                    continue;
+                }
+                UninstallInlineHook(&bindingPointer->hookRecord);
+                bindingPointer->originalAddress = nullptr;
+                FreeRawEntryStub(bindingPointer->entryStubAddress);
+                bindingPointer->entryStubAddress = nullptr;
+            }
+            rawBindingList.clear();
+            RawHookKeys().clear();
+        }
 
         // RetryPendingHooksUnlocked 作用：
         // - 输入：无，使用全局绑定表；
@@ -9147,6 +10244,8 @@ namespace apimon
             {
                 (void)TryInstallBinding(bindingValue, nullptr);
             }
+            (void)InstallFakeSuccessHooks(nullptr);
+            (void)InstallRawFallbackHooks();
         }
 
         // RetryPendingHooksFromHook 作用：
@@ -9157,6 +10256,7 @@ namespace apimon
         {
             if (g_hookOperationMutex.try_lock())
             {
+                ScopedInlineHookInternalBypass hookOperationBypassScope;
                 RetryPendingHooksUnlocked();
                 g_hookOperationMutex.unlock();
             }
@@ -9167,6 +10267,7 @@ namespace apimon
     bool InstallConfiguredHooks(std::wstring* errorTextOut)
     {
         const std::lock_guard<std::mutex> lock(g_hookOperationMutex);
+        ScopedInlineHookInternalBypass hookOperationBypassScope;
         if (errorTextOut != nullptr)
         {
             errorTextOut->clear();
@@ -9175,11 +10276,17 @@ namespace apimon
         bool hasEnabledCategory = false;
         bool installedAny = false;
         std::wstring failureText;
+        BuildFakeSuccessRuleIndex();
         for (HookBinding& bindingValue : g_bindings)
         {
             hasEnabledCategory = CategoryEnabled(bindingValue.categoryValue) || hasEnabledCategory;
             installedAny = TryInstallBinding(bindingValue, &failureText) || installedAny;
         }
+        hasEnabledCategory = ActiveConfig().enableRawFallback
+            || (ActiveConfig().fakeSuccessEnabled && !FakeSuccessRules().empty())
+            || hasEnabledCategory;
+        installedAny = InstallFakeSuccessHooks(&failureText) || installedAny;
+        installedAny = InstallRawFallbackHooks() || installedAny;
         if (!hasEnabledCategory)
         {
             if (errorTextOut != nullptr)
@@ -9205,6 +10312,7 @@ namespace apimon
     void UninstallConfiguredHooks()
     {
         const std::lock_guard<std::mutex> lock(g_hookOperationMutex);
+        ScopedInlineHookInternalBypass hookOperationBypassScope;
         for (HookBinding& bindingValue : g_bindings)
         {
             UninstallInlineHook(bindingValue.hookRecord);
@@ -9213,11 +10321,13 @@ namespace apimon
                 *bindingValue.originalOut = nullptr;
             }
         }
+        UninstallRawFallbackHooks();
+        UninstallFakeSuccessHooks();
     }
-
     void RetryPendingHooks()
     {
         const std::lock_guard<std::mutex> lock(g_hookOperationMutex);
+        ScopedInlineHookInternalBypass hookOperationBypassScope;
         RetryPendingHooksUnlocked();
     }
 }

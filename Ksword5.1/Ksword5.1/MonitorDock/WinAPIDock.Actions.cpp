@@ -12,11 +12,17 @@
 #include <QApplication>
 #include <QCheckBox>
 #include <QClipboard>
+#include <QComboBox>
+#include <QCompleter>
 #include <QDateTime>
+#include <QDialog>
+#include <QDialogButtonBox>
 #include <QDir>
 #include <QFile>
 #include <QFileDialog>
+#include <QFileIconProvider>
 #include <QFileInfo>
+#include <QIcon>
 #include <QLabel>
 #include <QLineEdit>
 #include <QMetaObject>
@@ -24,13 +30,19 @@
 #include <QMessageBox>
 #include <QModelIndex>
 #include <QPointer>
+#include <QPlainTextEdit>
 #include <QPushButton>
+#include <QSet>
+#include <QSignalBlocker>
 #include <QTableWidget>
 #include <QTableWidgetItem>
 #include <QTextStream>
 #include <QTimer>
+#include <QVBoxLayout>
 
 #include <algorithm>
+#include <cerrno>
+#include <cwchar>
 
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -96,46 +108,184 @@ namespace
         return processList;
     }
 
-    // extractSelectedRowPid：
-    // - 作用：从进程表选中行提取 PID；
-    // - 调用：当手动 PID 输入为空时，启动监控会走该辅助函数。
-    bool extractSelectedRowPid(QTableWidget* tablePointer, std::uint32_t* pidOut)
+    // processIconForPath：
+    // - 作用：为进程下拉框解析系统文件图标；
+    // - 处理：优先按 imagePath 获取 shell 图标，失败时回退项目内置进程图标；
+    // - 返回：可直接设置到 QComboBox item 的 QIcon。
+    QIcon processIconForPath(const QString& imagePathText)
     {
-        if (tablePointer == nullptr || pidOut == nullptr)
+        static QFileIconProvider iconProvider;
+        if (!imagePathText.trimmed().isEmpty())
+        {
+            const QIcon fileIcon = iconProvider.icon(QFileInfo(imagePathText));
+            if (!fileIcon.isNull())
+            {
+                return fileIcon;
+            }
+        }
+        return QIcon(QStringLiteral(":/Icon/process_main.svg"));
+    }
+
+    // processDisplayName：
+    // - 作用：把进程快照转换成下拉框主显示文本；
+    // - 处理：保留 PID、进程名和路径，用户输入任意片段都能被 QCompleter/手动匹配命中；
+    // - 返回：面向用户的单行候选文本。
+    QString processDisplayName(const ks::process::ProcessRecord& record)
+    {
+        const QString processName = QString::fromStdString(
+            record.processName.empty() ? std::string("<Unknown>") : record.processName);
+        const QString imagePathText = QString::fromStdString(record.imagePath);
+        if (imagePathText.trimmed().isEmpty())
+        {
+            return QStringLiteral("%1  [PID %2]").arg(processName).arg(record.pid);
+        }
+        return QStringLiteral("%1  [PID %2]  %3").arg(processName).arg(record.pid).arg(imagePathText);
+    }
+
+    // comboIndexForPid：
+    // - 作用：根据 PID 在进程下拉框中定位候选行；
+    // - 处理：读取 Qt::UserRole 中保存的 PID；
+    // - 返回：命中的 item index，未命中返回 -1。
+    int comboIndexForPid(QComboBox* comboPointer, const std::uint32_t pidValue)
+    {
+        if (comboPointer == nullptr || pidValue == 0)
+        {
+            return -1;
+        }
+        for (int index = 0; index < comboPointer->count(); ++index)
+        {
+            if (comboPointer->itemData(index, Qt::UserRole).toUInt() == pidValue)
+            {
+                return index;
+            }
+        }
+        return -1;
+    }
+
+    QString tableCellText(QTableWidget* const tablePointer, const int rowValue, const int columnValue)
+    {
+        // tableCellText:
+        // - Input: a table pointer plus row/column coordinates.
+        // - Processing: safely reads the item text and trims user-visible whitespace.
+        // - Return: an empty string when the table/item is missing.
+        if (tablePointer == nullptr)
+        {
+            return QString();
+        }
+        QTableWidgetItem* const itemPointer = tablePointer->item(rowValue, columnValue);
+        return itemPointer != nullptr ? itemPointer->text().trimmed() : QString();
+    }
+
+    bool containsFakeRuleDelimiter(const QString& textValue)
+    {
+        // containsFakeRuleDelimiter:
+        // - Input: a field that will be serialized into fake_success_rules.
+        // - Processing: checks the delimiters used by the Agent parser.
+        // - Return: true when the field would corrupt the single-line INI format.
+        return textValue.contains('|')
+            || textValue.contains(';')
+            || textValue.contains(',')
+            || textValue.contains('\r')
+            || textValue.contains('\n');
+    }
+
+    bool parseFakeUnsigned64(const QString& textValue, quint64* valueOut)
+    {
+        // parseFakeUnsigned64:
+        // - Input: decimal or 0x-prefixed integer text; negative values are accepted for two's-complement masks.
+        // - Processing: uses wcstoull/wcstoll so 0xFFFFFFFFFFFFFFFF and -1 both become stable uint64 values.
+        // - Return: true on full-string parse success, false on empty/invalid text.
+        if (valueOut == nullptr)
         {
             return false;
         }
 
-        const QList<QTableWidgetItem*> selectedItemList = tablePointer->selectedItems();
-        if (selectedItemList.isEmpty())
+        const QString normalizedText = textValue.trimmed();
+        if (normalizedText.isEmpty())
         {
             return false;
         }
 
-        QTableWidgetItem* pidItem = tablePointer->item(selectedItemList.front()->row(), WinAPIDock::ProcessColumnPid);
-        if (pidItem == nullptr)
+        const std::wstring wideText = normalizedText.toStdWString();
+        wchar_t* endPointer = nullptr;
+        errno = 0;
+        if (wideText.front() == L'-')
+        {
+            const long long parsedValue = std::wcstoll(wideText.c_str(), &endPointer, 0);
+            if (errno != 0 || endPointer == wideText.c_str() || (endPointer != nullptr && *endPointer != L'\0'))
+            {
+                return false;
+            }
+            *valueOut = static_cast<quint64>(parsedValue);
+            return true;
+        }
+
+        const unsigned long long parsedValue = std::wcstoull(wideText.c_str(), &endPointer, 0);
+        if (errno != 0 || endPointer == wideText.c_str() || (endPointer != nullptr && *endPointer != L'\0'))
         {
             return false;
         }
-
-        bool parseOk = false;
-        const std::uint32_t pidValue = pidItem->text().trimmed().toUInt(&parseOk, 10);
-        if (!parseOk || pidValue == 0)
-        {
-            return false;
-        }
-
-        *pidOut = pidValue;
+        *valueOut = static_cast<quint64>(parsedValue);
         return true;
+    }
+
+    QString normalizeFakeIntegerText(const QString& textValue)
+    {
+        // normalizeFakeIntegerText:
+        // - Input: user-entered integer text.
+        // - Processing: parses through parseFakeUnsigned64 and emits a canonical decimal uint64 string.
+        // - Return: canonical decimal text, or the trimmed original text if parsing unexpectedly fails.
+        quint64 parsedValue = 0;
+        if (!parseFakeUnsigned64(textValue, &parsedValue))
+        {
+            return textValue.trimmed();
+        }
+        return QString::number(parsedValue);
+    }
+
+    QString comboCurrentDataText(QComboBox* const comboPointer, const QString& fallbackText)
+    {
+        // comboCurrentDataText:
+        // - Input: a combo box and fallback token.
+        // - Processing: returns item data first, then visible text if no data exists.
+        // - Return: a stable lower-case token for INI serialization.
+        if (comboPointer == nullptr)
+        {
+            return fallbackText;
+        }
+        const QString dataText = comboPointer->currentData().toString().trimmed();
+        if (!dataText.isEmpty())
+        {
+            return dataText;
+        }
+        return comboPointer->currentText().trimmed().toLower();
     }
 }
 
 void WinAPIDock::initializeConnections()
 {
-    if (m_processFilterEdit != nullptr)
+    if (m_processCombo != nullptr)
     {
-        connect(m_processFilterEdit, &QLineEdit::textChanged, this, [this]() {
-            applyProcessFilter();
+        connect(m_processCombo, &QComboBox::currentIndexChanged, this, [this](const int) {
+            updateProcessSelectorStatus();
+            updateActionState();
+        });
+        if (m_processCombo->lineEdit() != nullptr)
+        {
+            connect(m_processCombo->lineEdit(), &QLineEdit::textChanged, this, [this]() {
+                updateProcessSelectorStatus();
+                updateActionState();
+            });
+            connect(m_processCombo->lineEdit(), &QLineEdit::returnPressed, this, [this]() {
+                if (!m_pipeRunning.load())
+                {
+                    startMonitoring();
+                }
+            });
+        }
+        connect(m_processCombo, QOverload<int>::of(&QComboBox::activated), this, [this](const int) {
+            updateProcessSelectorStatus();
+            updateActionState();
         });
     }
     if (m_processRefreshButton != nullptr)
@@ -144,19 +294,6 @@ void WinAPIDock::initializeConnections()
             refreshProcessListAsync();
         });
     }
-    if (m_processTable != nullptr)
-    {
-        connect(m_processTable, &QTableWidget::itemSelectionChanged, this, [this]() {
-            updateActionState();
-        });
-        connect(m_processTable, &QTableWidget::itemDoubleClicked, this, [this](QTableWidgetItem*) {
-            if (!m_pipeRunning.load())
-            {
-                startMonitoring();
-            }
-        });
-    }
-
     if (m_browseAgentDllButton != nullptr)
     {
         connect(m_browseAgentDllButton, &QPushButton::clicked, this, [this]() {
@@ -176,6 +313,56 @@ void WinAPIDock::initializeConnections()
         });
         connect(m_manualPidEdit, &QLineEdit::returnPressed, this, [this]() {
             startMonitoring();
+        });
+    }
+    if (m_rawFallbackCheck != nullptr)
+    {
+        connect(m_rawFallbackCheck, &QCheckBox::toggled, this, [this]() {
+            updateActionState();
+        });
+    }
+    if (m_fakeAddRuleButton != nullptr)
+    {
+        connect(m_fakeAddRuleButton, &QPushButton::clicked, this, [this]() {
+            addFakeSuccessRuleFromInputs();
+        });
+    }
+    if (m_fakeRemoveRuleButton != nullptr)
+    {
+        connect(m_fakeRemoveRuleButton, &QPushButton::clicked, this, [this]() {
+            removeSelectedFakeSuccessRule();
+        });
+    }
+    if (m_fakeApplyRuleButton != nullptr)
+    {
+        connect(m_fakeApplyRuleButton, &QPushButton::clicked, this, [this]() {
+            if (m_pipeRunning.load())
+            {
+                QMessageBox::information(
+                    this,
+                    QStringLiteral("Fake Success"),
+                    QStringLiteral("当前 Agent 会话已运行。Fake Success 第一版不做热更新，请先停止会话后再应用规则。"));
+                return;
+            }
+            QString errorText;
+            if (!validateFakeSuccessRules(&errorText))
+            {
+                QMessageBox::warning(this, QStringLiteral("Fake Success"), errorText);
+                return;
+            }
+            startMonitoring();
+        });
+    }
+    if (m_fakeStopRuleButton != nullptr)
+    {
+        connect(m_fakeStopRuleButton, &QPushButton::clicked, this, [this]() {
+            stopMonitoring();
+        });
+    }
+    if (m_fakeRuleTable != nullptr)
+    {
+        connect(m_fakeRuleTable, &QTableWidget::itemSelectionChanged, this, [this]() {
+            updateActionState();
         });
     }
     if (m_startButton != nullptr)
@@ -233,6 +420,9 @@ void WinAPIDock::initializeConnections()
         connect(m_eventTable, &QTableWidget::customContextMenuRequested, this, [this](const QPoint& position) {
             showEventContextMenu(position);
         });
+        connect(m_eventTable, &QTableWidget::cellDoubleClicked, this, [this](const int row, const int) {
+            showEventDetailDialog(row);
+        });
     }
     if (m_uiFlushTimer != nullptr)
     {
@@ -269,85 +459,128 @@ void WinAPIDock::refreshProcessListAsync()
 
             guardThis->m_processRefreshPending.store(false);
             guardThis->m_lastProcessRefreshMs = QDateTime::currentMSecsSinceEpoch();
-            guardThis->populateProcessTable(processList);
+            guardThis->populateProcessSelector(processList);
             guardThis->updateActionState();
         }, Qt::QueuedConnection);
     }).detach();
 }
 
-void WinAPIDock::populateProcessTable(const std::vector<ks::process::ProcessRecord>& processList)
+void WinAPIDock::populateProcessSelector(const std::vector<ks::process::ProcessRecord>& processList)
 {
     m_processList = processList;
-    if (m_processTable == nullptr)
+    if (m_processCombo == nullptr)
     {
         return;
     }
 
-    m_processTable->setSortingEnabled(false);
-    m_processTable->clearContents();
-    m_processTable->setRowCount(static_cast<int>(m_processList.size()));
+    std::uint32_t previousPid = 0;
+    (void)currentSelectedPid(&previousPid);
+    const QString previousInputText = m_processCombo->currentText();
 
-    for (int row = 0; row < static_cast<int>(m_processList.size()); ++row)
     {
-        const ks::process::ProcessRecord& record = m_processList[static_cast<std::size_t>(row)];
-        m_processTable->setItem(row, ProcessColumnPid, createReadOnlyItem(QString::number(record.pid)));
-        m_processTable->setItem(
-            row,
-            ProcessColumnName,
-            createReadOnlyItem(QString::fromStdString(record.processName.empty() ? std::string("<Unknown>") : record.processName)));
-        m_processTable->setItem(row, ProcessColumnPath, createReadOnlyItem(QString::fromStdString(record.imagePath)));
-        m_processTable->setItem(row, ProcessColumnUser, createReadOnlyItem(QString::fromStdString(record.userName)));
+        const QSignalBlocker comboBlocker(m_processCombo);
+        QSignalBlocker lineEditBlocker(m_processCombo->lineEdit());
+        m_processCombo->clear();
+
+        for (const ks::process::ProcessRecord& record : m_processList)
+        {
+            const QString processName = QString::fromStdString(
+                record.processName.empty() ? std::string("<Unknown>") : record.processName);
+            const QString imagePathText = QString::fromStdString(record.imagePath);
+            const QIcon processIcon = processIconForPath(imagePathText);
+            const QString displayText = processDisplayName(record);
+            m_processCombo->addItem(processIcon, displayText, QVariant::fromValue(static_cast<quint32>(record.pid)));
+
+            const int itemIndex = m_processCombo->count() - 1;
+            m_processCombo->setItemData(itemIndex, processName, Qt::UserRole + 1);
+            m_processCombo->setItemData(itemIndex, imagePathText, Qt::UserRole + 2);
+            m_processCombo->setItemData(itemIndex, displayText, Qt::ToolTipRole);
+        }
+
+        const int previousIndex = comboIndexForPid(m_processCombo, previousPid);
+        if (previousIndex >= 0)
+        {
+            m_processCombo->setCurrentIndex(previousIndex);
+        }
+        else
+        {
+            m_processCombo->setCurrentIndex(-1);
+            if (m_processCombo->lineEdit() != nullptr)
+            {
+                m_processCombo->lineEdit()->setText(previousInputText);
+            }
+        }
     }
 
-    m_processTable->setSortingEnabled(true);
-    applyProcessFilter();
+    if (m_processCombo->completer() != nullptr)
+    {
+        m_processCombo->completer()->setCaseSensitivity(Qt::CaseInsensitive);
+        m_processCombo->completer()->setFilterMode(Qt::MatchContains);
+        m_processCombo->completer()->setCompletionMode(QCompleter::PopupCompletion);
+    }
 
     if (m_processStatusLabel != nullptr)
     {
         m_processStatusLabel->setText(QStringLiteral("● 已刷新 %1 个进程").arg(m_processList.size()));
         m_processStatusLabel->setStyleSheet(buildStatusStyle(monitorSuccessColorHex()));
     }
+    updateProcessSelectorStatus();
 }
 
-void WinAPIDock::applyProcessFilter()
+void WinAPIDock::updateProcessSelectorStatus()
 {
-    if (m_processTable == nullptr)
+    if (m_processCombo == nullptr)
     {
         return;
     }
 
-    const QString keywordText = m_processFilterEdit != nullptr
-        ? m_processFilterEdit->text().trimmed()
-        : QString();
-
-    int visibleRowCount = 0;
-    for (int row = 0; row < m_processTable->rowCount(); ++row)
+    std::uint32_t pidValue = 0;
+    const bool hasPid = currentSelectedPid(&pidValue);
+    const int selectedIndex = comboIndexForPid(m_processCombo, pidValue);
+    if (m_processIconLabel != nullptr)
     {
-        QStringList rowTextList;
-        for (int column = 0; column < ProcessColumnCount; ++column)
+        QIcon displayIcon(QStringLiteral(":/Icon/process_main.svg"));
+        if (selectedIndex >= 0)
         {
-            QTableWidgetItem* itemPointer = m_processTable->item(row, column);
-            rowTextList << (itemPointer != nullptr ? itemPointer->text() : QString());
+            const QIcon itemIcon = m_processCombo->itemIcon(selectedIndex);
+            if (!itemIcon.isNull())
+            {
+                displayIcon = itemIcon;
+            }
         }
-
-        const QString mergedText = rowTextList.join(QStringLiteral(" | "));
-        const bool visible = keywordText.isEmpty()
-            || mergedText.contains(keywordText, Qt::CaseInsensitive);
-        m_processTable->setRowHidden(row, !visible);
-        if (visible)
-        {
-            ++visibleRowCount;
-        }
+        m_processIconLabel->setPixmap(displayIcon.pixmap(20, 20));
     }
 
-    if (m_processStatusLabel != nullptr)
+    if (m_processStatusLabel == nullptr)
     {
-        m_processStatusLabel->setText(
-            QStringLiteral("● 可见 %1 / %2 个进程")
-            .arg(visibleRowCount)
-            .arg(m_processTable->rowCount()));
+        return;
+    }
+
+    if (hasPid)
+    {
+        if (selectedIndex >= 0)
+        {
+            const QString processName = m_processCombo->itemData(selectedIndex, Qt::UserRole + 1).toString();
+            m_processStatusLabel->setText(QStringLiteral("● 已选择 PID=%1 %2").arg(pidValue).arg(processName));
+            m_processStatusLabel->setStyleSheet(buildStatusStyle(monitorSuccessColorHex()));
+        }
+        else
+        {
+            m_processStatusLabel->setText(QStringLiteral("● 使用手动 PID=%1").arg(pidValue));
+            m_processStatusLabel->setStyleSheet(buildStatusStyle(monitorWarningColorHex()));
+        }
+        return;
+    }
+
+    const QString inputText = m_processCombo->currentText().trimmed();
+    if (inputText.isEmpty())
+    {
+        m_processStatusLabel->setText(QStringLiteral("● 候选 %1 个；输入进程名/PID 选择目标").arg(m_processCombo->count()));
         m_processStatusLabel->setStyleSheet(buildStatusStyle(monitorIdleColorHex()));
+        return;
     }
+    m_processStatusLabel->setText(QStringLiteral("● 未明确选中目标；请从下拉候选选择或输入数字 PID"));
+    m_processStatusLabel->setStyleSheet(buildStatusStyle(monitorWarningColorHex()));
 }
 
 bool WinAPIDock::currentSelectedPid(std::uint32_t* pidOut) const
@@ -367,7 +600,90 @@ bool WinAPIDock::currentSelectedPid(std::uint32_t* pidOut) const
         }
     }
 
-    return extractSelectedRowPid(m_processTable, pidOut);
+    if (m_processCombo == nullptr)
+    {
+        return false;
+    }
+
+    const QString inputText = m_processCombo->currentText().trimmed();
+    const int comboIndex = m_processCombo->currentIndex();
+    if (comboIndex >= 0 && m_processCombo->itemText(comboIndex).trimmed().compare(inputText, Qt::CaseInsensitive) == 0)
+    {
+        const std::uint32_t pidValue = static_cast<std::uint32_t>(
+            m_processCombo->itemData(comboIndex, Qt::UserRole).toUInt());
+        if (pidValue != 0)
+        {
+            *pidOut = pidValue;
+            return true;
+        }
+    }
+
+    if (inputText.isEmpty())
+    {
+        return false;
+    }
+
+    if (tryParseUint32Text(inputText, pidOut))
+    {
+        return true;
+    }
+
+    int matchedIndex = -1;
+    const QString normalizedInput = inputText.toLower();
+    int exactMatchCount = 0;
+    for (int index = 0; index < m_processCombo->count(); ++index)
+    {
+        const QString displayText = m_processCombo->itemText(index).trimmed().toLower();
+        const QString nameText = m_processCombo->itemData(index, Qt::UserRole + 1).toString().trimmed().toLower();
+        if (displayText == normalizedInput || nameText == normalizedInput)
+        {
+            matchedIndex = index;
+            ++exactMatchCount;
+            if (exactMatchCount > 1)
+            {
+                matchedIndex = -1;
+                break;
+            }
+        }
+    }
+
+    if (matchedIndex < 0)
+    {
+        int containsMatchCount = 0;
+        for (int index = 0; index < m_processCombo->count(); ++index)
+        {
+            const QString displayText = m_processCombo->itemText(index).trimmed().toLower();
+            const QString nameText = m_processCombo->itemData(index, Qt::UserRole + 1).toString().trimmed().toLower();
+            const QString pathText = m_processCombo->itemData(index, Qt::UserRole + 2).toString().trimmed().toLower();
+            if (displayText.contains(normalizedInput)
+                || nameText.contains(normalizedInput)
+                || pathText.contains(normalizedInput))
+            {
+                matchedIndex = index;
+                ++containsMatchCount;
+                if (containsMatchCount > 1)
+                {
+                    matchedIndex = -1;
+                    break;
+                }
+            }
+        }
+    }
+
+    if (matchedIndex < 0)
+    {
+        return false;
+    }
+
+    const std::uint32_t pidValue = static_cast<std::uint32_t>(
+        m_processCombo->itemData(matchedIndex, Qt::UserRole).toUInt());
+    if (pidValue == 0)
+    {
+        return false;
+    }
+
+    *pidOut = pidValue;
+    return true;
 }
 
 void WinAPIDock::browseAgentDllPath()
@@ -422,11 +738,270 @@ bool WinAPIDock::prepareSessionArtifacts(const std::uint32_t pidValue, QString* 
     return true;
 }
 
+QString WinAPIDock::fakeSuccessRulesIniText() const
+{
+    // fakeSuccessRulesIniText:
+    // - Input: the current Fake Success rule table.
+    // - Processing: serializes each exact rule as module|api|returnType|returnValue|lastErrorKind|lastErrorValue.
+    // - Return: a single INI-safe line; empty means Fake Success is disabled for the session.
+    if (m_fakeRuleTable == nullptr || m_fakeRuleTable->rowCount() == 0)
+    {
+        return QString();
+    }
+
+    const auto cellToken = [this](const int rowValue, const int columnValue) -> QString {
+        QTableWidgetItem* const itemPointer = m_fakeRuleTable->item(rowValue, columnValue);
+        if (itemPointer == nullptr)
+        {
+            return QString();
+        }
+        const QString dataText = itemPointer->data(Qt::UserRole).toString().trimmed();
+        return dataText.isEmpty() ? itemPointer->text().trimmed() : dataText;
+    };
+
+    QStringList serializedRuleList;
+    for (int row = 0; row < m_fakeRuleTable->rowCount(); ++row)
+    {
+        serializedRuleList << QStringList{
+            cellToken(row, FakeRuleColumnModule),
+            cellToken(row, FakeRuleColumnApi),
+            cellToken(row, FakeRuleColumnReturnType),
+            cellToken(row, FakeRuleColumnReturnValue),
+            cellToken(row, FakeRuleColumnLastErrorKind),
+            cellToken(row, FakeRuleColumnLastErrorValue)
+        }.join('|');
+    }
+    return serializedRuleList.join(QStringLiteral(";;"));
+}
+
+bool WinAPIDock::validateFakeSuccessRules(QString* errorTextOut) const
+{
+    // validateFakeSuccessRules:
+    // - Input: current table rows that will be serialized into the Agent INI.
+    // - Processing: checks required fields, delimiter safety, numeric ranges, and duplicate exact module!api keys.
+    // - Return: true when all rows can be parsed by APIMonitor_x64; false and an error message otherwise.
+    if (errorTextOut != nullptr)
+    {
+        errorTextOut->clear();
+    }
+    if (m_fakeRuleTable == nullptr || m_fakeRuleTable->rowCount() == 0)
+    {
+        return true;
+    }
+
+    const auto normalizedKey = [](QString moduleText, QString apiText) -> QString {
+        moduleText = moduleText.trimmed().toLower();
+        apiText = apiText.trimmed().toLower();
+        if (moduleText.endsWith(QStringLiteral(".dll")))
+        {
+            moduleText.chop(4);
+        }
+        return moduleText + QLatin1Char('!') + apiText;
+    };
+
+    QSet<QString> seenRuleKeys;
+    for (int row = 0; row < m_fakeRuleTable->rowCount(); ++row)
+    {
+        const QString moduleText = tableCellText(m_fakeRuleTable, row, FakeRuleColumnModule);
+        const QString apiText = tableCellText(m_fakeRuleTable, row, FakeRuleColumnApi);
+        const QString returnTypeText = tableCellText(m_fakeRuleTable, row, FakeRuleColumnReturnType);
+        const QString returnValueText = tableCellText(m_fakeRuleTable, row, FakeRuleColumnReturnValue);
+        const QString lastErrorKindText = tableCellText(m_fakeRuleTable, row, FakeRuleColumnLastErrorKind);
+        const QString lastErrorValueText = tableCellText(m_fakeRuleTable, row, FakeRuleColumnLastErrorValue);
+
+        if (moduleText.isEmpty() || apiText.isEmpty() || returnTypeText.isEmpty()
+            || returnValueText.isEmpty() || lastErrorKindText.isEmpty() || lastErrorValueText.isEmpty())
+        {
+            if (errorTextOut != nullptr)
+            {
+                *errorTextOut = QStringLiteral("Fake Success 第 %1 行存在空字段。").arg(row + 1);
+            }
+            return false;
+        }
+        if (containsFakeRuleDelimiter(moduleText)
+            || containsFakeRuleDelimiter(apiText)
+            || containsFakeRuleDelimiter(returnTypeText)
+            || containsFakeRuleDelimiter(returnValueText)
+            || containsFakeRuleDelimiter(lastErrorKindText)
+            || containsFakeRuleDelimiter(lastErrorValueText))
+        {
+            if (errorTextOut != nullptr)
+            {
+                *errorTextOut = QStringLiteral("Fake Success 第 %1 行包含非法分隔符（| ; , 或换行）。").arg(row + 1);
+            }
+            return false;
+        }
+
+        quint64 parsedReturnValue = 0;
+        if (!parseFakeUnsigned64(returnValueText, &parsedReturnValue))
+        {
+            if (errorTextOut != nullptr)
+            {
+                *errorTextOut = QStringLiteral("Fake Success 第 %1 行返回值不是有效整数。").arg(row + 1);
+            }
+            return false;
+        }
+
+        quint64 parsedLastErrorValue = 0;
+        if (!parseFakeUnsigned64(lastErrorValueText, &parsedLastErrorValue) || parsedLastErrorValue > 0xFFFFFFFFULL)
+        {
+            if (errorTextOut != nullptr)
+            {
+                *errorTextOut = QStringLiteral("Fake Success 第 %1 行错误码必须是 0 到 0xFFFFFFFF。").arg(row + 1);
+            }
+            return false;
+        }
+
+        const QString ruleKey = normalizedKey(moduleText, apiText);
+        if (seenRuleKeys.contains(ruleKey))
+        {
+            if (errorTextOut != nullptr)
+            {
+                *errorTextOut = QStringLiteral("Fake Success 存在重复规则：%1!%2。").arg(moduleText, apiText);
+            }
+            return false;
+        }
+        seenRuleKeys.insert(ruleKey);
+    }
+    return true;
+}
+
+void WinAPIDock::addFakeSuccessRuleFromInputs()
+{
+    // addFakeSuccessRuleFromInputs:
+    // - Input: module/API/return/error widgets in the Fake Success panel.
+    // - Processing: validates a single exact rule, rejects duplicates, then appends it to the rule table.
+    // - Return: no return value; user-facing errors are shown with QMessageBox.
+    if (m_fakeRuleTable == nullptr || m_pipeRunning.load())
+    {
+        return;
+    }
+
+    const QString moduleText = m_fakeModuleEdit != nullptr ? m_fakeModuleEdit->text().trimmed() : QString();
+    const QString apiText = m_fakeApiEdit != nullptr ? m_fakeApiEdit->text().trimmed() : QString();
+    const QString returnTypeToken = comboCurrentDataText(m_fakeReturnTypeCombo, QStringLiteral("scalar"));
+    const QString returnTypeDisplay = m_fakeReturnTypeCombo != nullptr
+        ? m_fakeReturnTypeCombo->currentText().trimmed()
+        : returnTypeToken;
+    const QString returnValueText = m_fakeReturnValueEdit != nullptr ? m_fakeReturnValueEdit->text().trimmed() : QString();
+    const QString lastErrorKindToken = comboCurrentDataText(m_fakeLastErrorKindCombo, QStringLiteral("none"));
+    const QString lastErrorKindDisplay = m_fakeLastErrorKindCombo != nullptr
+        ? m_fakeLastErrorKindCombo->currentText().trimmed()
+        : lastErrorKindToken;
+    const QString lastErrorValueText = m_fakeLastErrorValueEdit != nullptr ? m_fakeLastErrorValueEdit->text().trimmed() : QStringLiteral("0");
+
+    if (moduleText.isEmpty() || apiText.isEmpty())
+    {
+        QMessageBox::information(this, QStringLiteral("Fake Success"), QStringLiteral("请填写模块名和 API 导出名。"));
+        return;
+    }
+    if (containsFakeRuleDelimiter(moduleText) || containsFakeRuleDelimiter(apiText))
+    {
+        QMessageBox::warning(this, QStringLiteral("Fake Success"), QStringLiteral("模块名和 API 名不能包含 | ; , 或换行。"));
+        return;
+    }
+
+    quint64 parsedReturnValue = 0;
+    if (!parseFakeUnsigned64(returnValueText, &parsedReturnValue))
+    {
+        QMessageBox::warning(this, QStringLiteral("Fake Success"), QStringLiteral("返回值不是有效整数。支持十进制、0x 十六进制和 -1。"));
+        return;
+    }
+
+    quint64 parsedLastErrorValue = 0;
+    if (!parseFakeUnsigned64(lastErrorValueText, &parsedLastErrorValue) || parsedLastErrorValue > 0xFFFFFFFFULL)
+    {
+        QMessageBox::warning(this, QStringLiteral("Fake Success"), QStringLiteral("错误码必须是 0 到 0xFFFFFFFF。"));
+        return;
+    }
+
+    const auto normalizedKey = [](QString moduleValue, QString apiValue) -> QString {
+        moduleValue = moduleValue.trimmed().toLower();
+        apiValue = apiValue.trimmed().toLower();
+        if (moduleValue.endsWith(QStringLiteral(".dll")))
+        {
+            moduleValue.chop(4);
+        }
+        return moduleValue + QLatin1Char('!') + apiValue;
+    };
+    const QString newRuleKey = normalizedKey(moduleText, apiText);
+    for (int row = 0; row < m_fakeRuleTable->rowCount(); ++row)
+    {
+        if (normalizedKey(
+            tableCellText(m_fakeRuleTable, row, FakeRuleColumnModule),
+            tableCellText(m_fakeRuleTable, row, FakeRuleColumnApi)) == newRuleKey)
+        {
+            QMessageBox::warning(this, QStringLiteral("Fake Success"), QStringLiteral("已存在相同 module!api 的规则。"));
+            return;
+        }
+    }
+
+    const int row = m_fakeRuleTable->rowCount();
+    m_fakeRuleTable->insertRow(row);
+
+    QTableWidgetItem* moduleItem = createReadOnlyItem(moduleText);
+    QTableWidgetItem* apiItem = createReadOnlyItem(apiText);
+    QTableWidgetItem* returnTypeItem = createReadOnlyItem(returnTypeDisplay);
+    QTableWidgetItem* returnValueItem = createReadOnlyItem(QString::number(parsedReturnValue));
+    QTableWidgetItem* lastErrorKindItem = createReadOnlyItem(lastErrorKindDisplay);
+    QTableWidgetItem* lastErrorValueItem = createReadOnlyItem(QString::number(parsedLastErrorValue));
+
+    returnTypeItem->setData(Qt::UserRole, returnTypeToken);
+    returnValueItem->setData(Qt::UserRole, QString::number(parsedReturnValue));
+    lastErrorKindItem->setData(Qt::UserRole, lastErrorKindToken);
+    lastErrorValueItem->setData(Qt::UserRole, QString::number(parsedLastErrorValue));
+
+    m_fakeRuleTable->setItem(row, FakeRuleColumnModule, moduleItem);
+    m_fakeRuleTable->setItem(row, FakeRuleColumnApi, apiItem);
+    m_fakeRuleTable->setItem(row, FakeRuleColumnReturnType, returnTypeItem);
+    m_fakeRuleTable->setItem(row, FakeRuleColumnReturnValue, returnValueItem);
+    m_fakeRuleTable->setItem(row, FakeRuleColumnLastErrorKind, lastErrorKindItem);
+    m_fakeRuleTable->setItem(row, FakeRuleColumnLastErrorValue, lastErrorValueItem);
+    m_fakeRuleTable->selectRow(row);
+
+    if (m_fakeRuleStatusLabel != nullptr)
+    {
+        m_fakeRuleStatusLabel->setText(QStringLiteral("规则：%1 条；启动会话时应用。").arg(m_fakeRuleTable->rowCount()));
+        m_fakeRuleStatusLabel->setStyleSheet(buildStatusStyle(monitorInfoColorHex()));
+    }
+    updateActionState();
+}
+
+void WinAPIDock::removeSelectedFakeSuccessRule()
+{
+    // removeSelectedFakeSuccessRule:
+    // - Input: the current selected row in the Fake Success rule table.
+    // - Processing: removes the selected rule while monitoring is stopped.
+    // - Return: no return value; silently skips when no row is selected.
+    if (m_fakeRuleTable == nullptr || m_pipeRunning.load())
+    {
+        return;
+    }
+
+    const QList<QTableWidgetItem*> selectedItems = m_fakeRuleTable->selectedItems();
+    if (selectedItems.isEmpty())
+    {
+        return;
+    }
+
+    m_fakeRuleTable->removeRow(selectedItems.front()->row());
+    if (m_fakeRuleStatusLabel != nullptr)
+    {
+        m_fakeRuleStatusLabel->setText(QStringLiteral("规则：%1 条；启动会话时应用。").arg(m_fakeRuleTable->rowCount()));
+        m_fakeRuleStatusLabel->setStyleSheet(buildStatusStyle(monitorIdleColorHex()));
+    }
+    updateActionState();
+}
+
 bool WinAPIDock::writeSessionConfigFile(QString* errorTextOut) const
 {
     if (errorTextOut != nullptr)
     {
         errorTextOut->clear();
+    }
+    if (!validateFakeSuccessRules(errorTextOut))
+    {
+        return false;
     }
 
     QFile configFile(m_currentConfigPath);
@@ -450,6 +1025,13 @@ bool WinAPIDock::writeSessionConfigFile(QString* errorTextOut) const
     outputStream << "enable_process=" << ((m_hookProcessCheck != nullptr && m_hookProcessCheck->isChecked()) ? 1 : 0) << '\n';
     outputStream << "enable_loader=" << ((m_hookLoaderCheck != nullptr && m_hookLoaderCheck->isChecked()) ? 1 : 0) << '\n';
     outputStream << "auto_inject_child=" << ((m_autoInjectChildCheck != nullptr && m_autoInjectChildCheck->isChecked()) ? 1 : 0) << '\n';
+    outputStream << "enable_raw_fallback=" << ((m_rawFallbackCheck != nullptr && m_rawFallbackCheck->isChecked()) ? 1 : 0) << '\n';
+    outputStream << "raw_use_default_denylist=" << ((m_rawDefaultDenyListCheck != nullptr && m_rawDefaultDenyListCheck->isChecked()) ? 1 : 0) << '\n';
+    outputStream << "raw_modules=" << (m_rawModuleListEdit != nullptr ? m_rawModuleListEdit->text().trimmed() : defaultRawHookModulesText()) << '\n';
+    outputStream << "raw_denylist=" << (m_rawDenyListEdit != nullptr ? m_rawDenyListEdit->text().trimmed() : QString()) << '\n';
+    outputStream << "fake_success_enabled=" << ((m_fakeRuleTable != nullptr && m_fakeRuleTable->rowCount() > 0) ? 1 : 0) << '\n';
+    outputStream << "fake_success_raw_fallback=" << ((m_fakeRawFallbackCheck != nullptr && m_fakeRawFallbackCheck->isChecked()) ? 1 : 0) << '\n';
+    outputStream << "fake_success_rules=" << fakeSuccessRulesIniText() << '\n';
     outputStream << "detail_limit=" << static_cast<int>(ks::winapi_monitor::kMaxDetailChars - 1) << '\n';
     configFile.close();
     return true;
@@ -469,6 +1051,58 @@ void WinAPIDock::appendInternalEvent(const QString& categoryText, const QString&
     applyEventFilter();
     updateActionState();
     updateStatusLabel();
+}
+
+void WinAPIDock::showEventDetailDialog(const int rowValue)
+{
+    // showEventDetailDialog 作用：
+    // - 输入：rowValue 为事件表中的物理行号；
+    // - 处理：读取该行所有列，拼成可复制的多行详情文本并用模态窗口展示；
+    // - 返回：无返回值，行号无效或表格不存在时直接返回。
+    if (m_eventTable == nullptr || rowValue < 0 || rowValue >= m_eventTable->rowCount())
+    {
+        return;
+    }
+
+    const auto columnText = [this, rowValue](const int columnValue) -> QString {
+        QTableWidgetItem* const itemPointer = m_eventTable->item(rowValue, columnValue);
+        return itemPointer != nullptr ? itemPointer->text() : QString();
+    };
+
+    const QString detailText = QStringLiteral(
+        "时间(100ns): %1\n"
+        "分类: %2\n"
+        "API: %3\n"
+        "结果: %4\n"
+        "PID/TID: %5\n\n"
+        "详情:\n%6")
+        .arg(columnText(EventColumnTime100ns),
+            columnText(EventColumnCategory),
+            columnText(EventColumnApi),
+            columnText(EventColumnResult),
+            columnText(EventColumnPidTid),
+            columnText(EventColumnDetail));
+
+    QDialog dialog(this);
+    dialog.setWindowTitle(QStringLiteral("WinAPI 事件详情"));
+    dialog.resize(760, 420);
+
+    QVBoxLayout* const layout = new QVBoxLayout(&dialog);
+    layout->setContentsMargins(10, 10, 10, 10);
+    layout->setSpacing(8);
+
+    QPlainTextEdit* const detailEdit = new QPlainTextEdit(&dialog);
+    detailEdit->setReadOnly(true);
+    detailEdit->setPlainText(detailText);
+    detailEdit->setStyleSheet(blueInputStyle());
+    layout->addWidget(detailEdit, 1);
+
+    QDialogButtonBox* const buttonBox = new QDialogButtonBox(QDialogButtonBox::Ok, &dialog);
+    buttonBox->button(QDialogButtonBox::Ok)->setText(QStringLiteral("关闭"));
+    connect(buttonBox, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    layout->addWidget(buttonBox, 0);
+
+    dialog.exec();
 }
 
 void WinAPIDock::startMonitoring()

@@ -1,6 +1,7 @@
 ﻿#include "pch.h"
 #include "MonitorPipe.h"
 #include "../MonitorAgent.h"
+#include "../hook/HookEngine.h"
 
 namespace apimon
 {
@@ -18,11 +19,22 @@ namespace apimon
         std::array<ks::winapi_monitor::ApiMonitorEventPacket, kMaxPendingPacketCount> g_pendingPacketRing{}; // 固定事件环形缓冲。
         std::size_t g_pendingPacketHead = 0;                 // g_pendingPacketHead：下一条待发送事件所在槽位。
         std::size_t g_pendingPacketCount = 0;                // g_pendingPacketCount：当前环形队列中有效事件数量。
-        std::unique_ptr<std::thread> g_senderThread;   // g_senderThread：后台发送线程。
         std::atomic_bool g_senderStopFlag{ false };    // g_senderStopFlag：后台发送线程停止信号。
         HANDLE g_queueWakeEvent = nullptr;             // g_queueWakeEvent：待发送事件唤醒事件。
         constexpr DWORD kPipeConnectPollMs = 200;       // kPipeConnectPollMs：等待客户端连接时的轮询间隔。
         constexpr DWORD kPipeConnectTimeoutMs = 45000;  // kPipeConnectTimeoutMs：等待 UI 侧连入的最大时长。
+
+        // SenderThreadSlot 作用：
+        // - 输入：无；
+        // - 处理：返回后台发送线程的唯一持有槽位，槽位本身故意泄漏到进程结束；
+        // - 返回：std::unique_ptr<std::thread> 引用，正常 StopMonitorPipeServer 仍会 join/reset。
+        // - 原因：目标进程退出时 DLL 静态析构可能早于 worker 线程完成；若静态 std::thread 仍 joinable，
+        //   MSVC CRT 会调用 std::terminate，表现为 0xC0000409。泄漏槽位让显式 Stop 负责清理，异常退出交给 OS 回收。
+        std::unique_ptr<std::thread>& SenderThreadSlot()
+        {
+            static auto* const senderThreadPointer = new std::unique_ptr<std::thread>();
+            return *senderThreadPointer;
+        }
 
         // CopyWideTextRaw 作用：
         // - 输入：sourceText 为可空宽字符串，targetBuffer/charCount 为目标定长缓冲；
@@ -93,13 +105,20 @@ namespace apimon
                 g_queueWakeEvent = ::CreateEventW(nullptr, FALSE, FALSE, nullptr);
             }
 
-            if (g_senderThread != nullptr && g_senderThread->joinable())
+            std::unique_ptr<std::thread>& senderThread = SenderThreadSlot();
+            if (senderThread != nullptr && senderThread->joinable())
             {
                 return;
             }
 
             g_senderStopFlag.store(false);
-            g_senderThread = std::make_unique<std::thread>([]() {
+            senderThread = std::make_unique<std::thread>([]() {
+                // senderBypassScope：
+                // - 输入：无；
+                // - 处理：后台 pipe 发送线程的 WaitForSingleObject/WriteFile/CloseHandle 等基础 API 不进入监控事件流；
+                // - 返回：无返回值，作用域覆盖线程完整生命周期。
+                // - 原因：Agent 内部发送线程若被自身 hook 监控，会形成 NtWaitForSingleObject 等事件风暴，严重时拖垮目标进程。
+                ScopedInlineHookInternalBypass senderBypassScope;
                 while (!g_senderStopFlag.load())
                 {
                     (void)FlushPendingMonitorEvents(256);
@@ -280,11 +299,12 @@ namespace apimon
         {
             ::SetEvent(g_queueWakeEvent);
         }
-        if (g_senderThread != nullptr && g_senderThread->joinable())
+        std::unique_ptr<std::thread>& senderThread = SenderThreadSlot();
+        if (senderThread != nullptr && senderThread->joinable())
         {
-            g_senderThread->join();
+            senderThread->join();
         }
-        g_senderThread.reset();
+        senderThread.reset();
 
         ::AcquireSRWLockExclusive(&g_pipeLock);
         ClosePipeLocked();

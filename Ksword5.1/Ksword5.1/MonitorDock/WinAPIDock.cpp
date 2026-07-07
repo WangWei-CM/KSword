@@ -11,6 +11,8 @@
 #include "../theme.h"
 
 #include <QCoreApplication>
+#include <QCheckBox>
+#include <QComboBox>
 #include <QDateTime>
 #include <QDir>
 #include <QFileInfo>
@@ -162,6 +164,24 @@ QString WinAPIDock::defaultDllPathHint()
     return QDir::cleanPath(candidatePathList.front());
 }
 
+QString WinAPIDock::defaultRawHookModulesText()
+{
+    // defaultRawHookModulesText：
+    // - 输入：无；
+    // - 处理：从共享协议常量读取 Raw Fallback 默认模块目录；
+    // - 返回：分号分隔文本，供 UI 编辑框展示和会话 INI 写入。
+    return QString::fromWCharArray(ks::winapi_monitor::kDefaultRawHookModules);
+}
+
+QString WinAPIDock::defaultRawHookDenyListText()
+{
+    // defaultRawHookDenyListText：
+    // - 输入：无；
+    // - 处理：从共享协议常量读取 Raw Fallback 内置默认黑名单；
+    // - 返回：分号分隔文本，主要供 tooltip/说明展示；用户额外黑名单不应默认填入该值。
+    return QString::fromWCharArray(ks::winapi_monitor::kDefaultRawHookDenyList);
+}
+
 QString WinAPIDock::resultCodeText(const std::int32_t resultCodeValue)
 {
     if (resultCodeValue == 0)
@@ -227,6 +247,10 @@ void WinAPIDock::updateActionState()
     {
         m_processRefreshButton->setEnabled(!m_processRefreshPending.load() && !running);
     }
+    if (m_processCombo != nullptr)
+    {
+        m_processCombo->setEnabled(!running);
+    }
     if (m_browseAgentDllButton != nullptr)
     {
         m_browseAgentDllButton->setEnabled(!running);
@@ -238,6 +262,77 @@ void WinAPIDock::updateActionState()
     if (m_agentDllPathEdit != nullptr)
     {
         m_agentDllPathEdit->setEnabled(!running);
+    }
+    if (m_rawFallbackCheck != nullptr)
+    {
+        m_rawFallbackCheck->setEnabled(!running);
+    }
+    if (m_rawDefaultDenyListCheck != nullptr)
+    {
+        m_rawDefaultDenyListCheck->setEnabled(!running && m_rawFallbackCheck != nullptr && m_rawFallbackCheck->isChecked());
+    }
+    if (m_rawModuleListEdit != nullptr)
+    {
+        m_rawModuleListEdit->setEnabled(!running && m_rawFallbackCheck != nullptr && m_rawFallbackCheck->isChecked());
+    }
+    if (m_rawDenyListEdit != nullptr)
+    {
+        m_rawDenyListEdit->setEnabled(!running && m_rawFallbackCheck != nullptr && m_rawFallbackCheck->isChecked());
+    }
+    if (m_fakeModuleEdit != nullptr)
+    {
+        m_fakeModuleEdit->setEnabled(!running);
+    }
+    if (m_fakeApiEdit != nullptr)
+    {
+        m_fakeApiEdit->setEnabled(!running);
+    }
+    if (m_fakeReturnTypeCombo != nullptr)
+    {
+        m_fakeReturnTypeCombo->setEnabled(!running);
+    }
+    if (m_fakeReturnValueEdit != nullptr)
+    {
+        m_fakeReturnValueEdit->setEnabled(!running);
+    }
+    if (m_fakeLastErrorKindCombo != nullptr)
+    {
+        m_fakeLastErrorKindCombo->setEnabled(!running);
+    }
+    if (m_fakeLastErrorValueEdit != nullptr)
+    {
+        m_fakeLastErrorValueEdit->setEnabled(!running);
+    }
+    if (m_fakeRawFallbackCheck != nullptr)
+    {
+        m_fakeRawFallbackCheck->setEnabled(!running);
+    }
+    if (m_fakeAddRuleButton != nullptr)
+    {
+        m_fakeAddRuleButton->setEnabled(!running);
+    }
+    if (m_fakeRemoveRuleButton != nullptr)
+    {
+        m_fakeRemoveRuleButton->setEnabled(
+            !running
+            && m_fakeRuleTable != nullptr
+            && !m_fakeRuleTable->selectedItems().isEmpty());
+    }
+    if (m_fakeApplyRuleButton != nullptr)
+    {
+        m_fakeApplyRuleButton->setEnabled(
+            !running
+            && hasPid
+            && m_agentDllPathEdit != nullptr
+            && !m_agentDllPathEdit->text().trimmed().isEmpty());
+    }
+    if (m_fakeStopRuleButton != nullptr)
+    {
+        m_fakeStopRuleButton->setEnabled(running);
+    }
+    if (m_fakeRuleTable != nullptr)
+    {
+        m_fakeRuleTable->setEnabled(!running);
     }
     if (m_startButton != nullptr)
     {

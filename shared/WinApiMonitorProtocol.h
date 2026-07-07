@@ -35,6 +35,39 @@ namespace ks::winapi_monitor
     inline constexpr std::size_t kMaxApiNameChars = 64;
     inline constexpr std::size_t kMaxDetailChars = 320;
 
+    // kDefaultRawHookModules：
+    // - 输入：无；
+    // - 处理：作为 UI 和 Agent 共享的 Raw Fallback 默认模块目录，覆盖常见 Win32/网络/COM/加密/服务相关 DLL；
+    //   ntdll 的 syscall/CRT-adjacent 导出不适合通用 Raw hook，仍由强类型 Nt* 表和精确 Fake Success 规则覆盖。
+    // - 返回：以分号分隔的模块名文本，调用方按需拆分成可编辑列表。
+    inline constexpr const wchar_t* kDefaultRawHookModules =
+        L"KernelBase.dll;kernel32.dll;advapi32.dll;user32.dll;gdi32.dll;gdi32full.dll;"
+        L"ws2_32.dll;wininet.dll;winhttp.dll;iphlpapi.dll;dnsapi.dll;netapi32.dll;secur32.dll;"
+        L"rpcrt4.dll;ole32.dll;oleaut32.dll;combase.dll;shell32.dll;shlwapi.dll;crypt32.dll;"
+        L"bcrypt.dll;ncrypt.dll;wintrust.dll;urlmon.dll;psapi.dll;wtsapi32.dll;version.dll;"
+        L"userenv.dll;profapi.dll;samcli.dll;wldap32.dll;setupapi.dll;cfgmgr32.dll;wevtapi.dll;tdh.dll";
+
+    // kDefaultRawHookDenyList：
+    // - 输入：无；
+    // - 处理：Raw Fallback 默认排除高频/基础运行时/同步/loader/内存字符串类 API，支持调用方按 exact 或 prefix* 匹配；
+    // - 返回：以分号分隔的函数名/通配前缀列表；强类型 Hook 不受该黑名单影响。
+    // - 说明：该列表是“内置默认黑名单”，由 raw_use_default_denylist 单独控制；raw_denylist 仅承载用户额外规则。
+    inline constexpr const wchar_t* kDefaultRawHookDenyList =
+        L"Rtl*;Ldr*;memcpy;memmove;memset;memcmp;memchr;CopyMemory;MoveMemory;ZeroMemory;FillMemory;SecureZeroMemory;"
+        L"str*;_str*;wcs*;_wcs*;mbs*;_mbs*;lstr*;strlen;strcmp;strncmp;sprintf*;swprintf*;vsprintf*;vswprintf*;"
+        L"StringCch*;StringCb*;RtlAllocateHeap;RtlFreeHeap;RtlReAllocateHeap;HeapAlloc;HeapFree;HeapReAlloc;HeapSize;"
+        L"HeapValidate;HeapCompact;HeapWalk;GetProcessHeap;GetProcessHeaps;LocalAlloc;LocalFree;LocalReAlloc;"
+        L"GlobalAlloc;GlobalFree;GlobalReAlloc;malloc;free;calloc;realloc;GetLastError;SetLastError;RtlGetLastWin32Error;"
+        L"RtlSetLastWin32Error;EnterCriticalSection;LeaveCriticalSection;TryEnterCriticalSection;"
+        L"InitializeCriticalSection*;DeleteCriticalSection;AcquireSRWLock*;ReleaseSRWLock*;"
+        L"Nt*;Zw*;WaitForSingleObject;WaitForSingleObjectEx;WaitForMultipleObjects;WaitForMultipleObjectsEx;"
+        L"WaitOnAddress;WakeByAddress*;Sleep;SleepEx;"
+        L"QueryPerformanceCounter;QueryPerformanceFrequency;"
+        L"GetTickCount;GetTickCount64;GetSystemTime*;GetLocalTime;GetTimeZoneInformation*;"
+        L"TlsGetValue;TlsSetValue;FlsGetValue;FlsSetValue;Interlocked*;GetCurrentProcess*;GetCurrentThread*;"
+        L"GetModuleHandle*;GetModuleFileName*;CloseHandle;EncodePointer;DecodePointer;IsBad*;"
+        L"GetProcAddress;LoadLibrary*;FreeLibrary";
+
     // EventCategory：
     // - 作用：统一标记 API 事件所属大类；
     // - 调用：UI 侧按 category 渲染颜色、过滤和统计。

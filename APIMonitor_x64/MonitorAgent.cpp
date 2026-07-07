@@ -1,6 +1,7 @@
 ﻿#include "pch.h"
 #include "MonitorAgent.h"
 #include "core/MonitorPipe.h"
+#include "hook/HookEngine.h"
 #include "hook/HookTargets.h"
 
 namespace apimon
@@ -75,6 +76,12 @@ namespace apimon
                 0,
                 L"Configured inline hooks are now active.");
 
+            // agentBypassScope：
+            // - 输入：无；
+            // - 处理：Hook 生效后，Agent worker 线程自己的 stop-flag 轮询、事件发送和卸载流程不再进入监控事件流；
+            // - 返回：无返回值，作用域持续到 worker 退出。
+            // - 原因：内部控制线程不是被测业务线程，监控它会引入 Wait/File/Loader 自递归噪声，并可能放大为退出期崩溃。
+            ScopedInlineHookInternalBypass agentBypassScope;
             while (!StopRequested())
             {
                 if (IsStopFlagPresent(ActiveConfig()))

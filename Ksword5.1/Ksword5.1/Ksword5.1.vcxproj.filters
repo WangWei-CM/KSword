@@ -557,6 +557,9 @@
     <ClCompile Include="ksword\file\pe_analyzer.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="ksword\profile\ProfileJsonLoader.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="ksword\log\log.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -960,6 +963,9 @@
     <ClInclude Include="ksword\network\network_request_tools.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="ksword\profile\ProfileJsonLoader.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="ksword\process\process.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -1074,6 +1080,9 @@
   </ItemGroup>
   <ItemGroup>
     <None Include="qtvars.pro" />
+    <None Include="..\..\tools\compress_qt_profile_json.py">
+      <Filter>Profile Files</Filter>
+    </None>
     <None Include="profiles\ark_dyndata_pack_v2.json">
       <Filter>Profile Files</Filter>
     </None>

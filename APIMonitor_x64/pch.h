@@ -14,9 +14,13 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cerrno>
 #include <cstddef>
 #include <cstdint>
+#include <cctype>
+#include <cstdlib>
 #include <cwchar>
+#include <cwctype>
 #include <cstring>
 #include <limits>
 #include <memory>
@@ -24,6 +28,8 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #endif
