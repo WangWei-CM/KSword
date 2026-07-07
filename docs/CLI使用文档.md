@@ -1,0 +1,371 @@
+# KswordCLI 使用文档
+
+本文档覆盖 `KswordCLI.exe` 当前内置 help 元数据中的全部命令、别名和参数语法。多数命令需要管理员权限，并要求 KswordARK 驱动设备已经加载且可打开。
+
+## Help 查询
+
+```powershell
+KswordCLI.exe help
+KswordCLI.exe help <family>
+KswordCLI.exe help <family> <subcommand>
+KswordCLI.exe <family> help
+KswordCLI.exe <family> <subcommand> --help
+```
+
+维护要求：每新增、删除或调整一个 `KswordCLI` 命令、别名或参数，必须同步更新 `KswordCLI.cpp` 内置 help 元数据和本文档。
+
+## 参数约定
+
+- 数值参数支持十进制或 `0x` 前缀十六进制。
+- `--flags 0xN` 是按位标志；具体含义以 `shared/driver/` 中对应协议头为准。
+- `--limit N` 只限制 CLI 打印行数；`--max-*` 通常控制传给驱动的查询预算。
+- `--hex`/`--*-hex` 接收十六进制字节串；`--data-file`/`--*-file` 从文件读取原始字节；同一 payload 的 hex 和 file 形式互斥。
+- `--hexdump` 会把返回字节按十六进制展开打印。
+
+## 命令族总览
+
+| 命令族 | 用途 |
+| --- | --- |
+| `log` | Read bounded frames from the KswordARK log device. |
+| `process` | Inspect and control process visibility, PPL, DKOM, and cross-view state. |
+| `memory` | Query, read, write, translate, and audit virtual/physical memory. |
+| `file` | Inspect files, filters, storage evidence, and file-monitor runtime state. |
+| `kernel` | Inspect SSDT, hooks, driver objects, CPU, physical layout, CID, and IPC state. |
+| `callback` | Manage callback rules, pending decisions, callback inventory, and bypass PIDs. |
+| `dyn` | Query or apply dynamic kernel symbol/profile data. |
+| `thread` | Enumerate threads and compare R0/R3 thread evidence. |
+| `handle` | Enumerate process handles and inspect object metadata. |
+| `driver` | Driver integrity, device stack, and optional global evidence aliases. |
+| `hardware` | Device, input, USB, and PnP stack audit views. |
+| `window` | Win32k, GUI, GPU, display, and watchdog audit views. |
+| `misc` | Security, CI/VBS, Hyper-V, AppLocker/BAM, and driver trust posture. |
+| `alpc` | ALPC port diagnostics for a process handle. |
+| `section` | Process and file section mapping diagnostics. |
+| `trust` | Image trust and signing diagnostics. |
+| `safety` | Safety policy query and update controls. |
+| `preflight` | Release-readiness and driver capability preflight checks. |
+| `registry` | Registry read, enumeration, and mutation helpers. |
+| `redirect` | File/registry redirect rules and runtime status. |
+| `network` | Network rules, endpoints, WFP/NDIS evidence, and R3 fallbacks. |
+| `keyboard` | Keyboard hotkey and hook inventory. |
+| `mutation` | Prepare, commit, rollback, and audit bounded mutation transactions. |
+| `capability` | Unified driver feature capability query. |
+| `wsl` | WSL silo and Linux PID/TID diagnostics. |
+
+## 具体命令语法
+
+### `log`
+
+Read bounded frames from the KswordARK log device.
+
+| 命令 | 语法 | 用途 | 参数 | 备注 |
+| --- | --- | --- | --- | --- |
+| `log` | `KswordCLI.exe log [--max-frames N]` | Read up to N log frames from the shared log device. | --max-frames defaults to 64. | No subcommand is used for the log family. |
+
+### `process`
+
+Inspect and control process visibility, PPL, DKOM, and cross-view state.
+
+| 命令 | 语法 | 用途 | 参数 | 备注 |
+| --- | --- | --- | --- | --- |
+| `process terminate` | `KswordCLI.exe process terminate --pid PID [--exit-status NTSTATUS]` | Terminate one process through the driver. | Required: --pid. Optional: --exit-status defaults to 0xC000013A. |  |
+| `process suspend` | `KswordCLI.exe process suspend --pid PID` | Suspend one process. | Required: --pid. |  |
+| `process set-ppl` | `KswordCLI.exe process set-ppl --pid PID --level LEVEL` | Set the process protection level byte. | Required: --pid, --level. |  |
+| `process enum` | `KswordCLI.exe process enum [--flags 0xN] [--start-pid PID] [--end-pid PID] [--limit N]` | Enumerate processes from R0 evidence. | Optional: --flags, --start-pid, --end-pid, --limit. |  |
+| `process set-visibility` | `KswordCLI.exe process set-visibility --action ACTION [--pid PID] [--flags 0xN]` | Apply a process visibility action. | Required: --action. Optional: --pid defaults to 0, --flags. |  |
+| `process set-special-flags` | `KswordCLI.exe process set-special-flags --pid PID --action ACTION [--flags 0xN]` | Apply special process flags. | Required: --pid, --action. Optional: --flags. |  |
+| `process dkom` | `KswordCLI.exe process dkom --pid PID [--action ACTION] [--flags 0xN]` | Run the configured process DKOM action. | Required: --pid. Optional: --action, --flags. |  |
+| `process crossview` | `KswordCLI.exe process crossview [--flags 0xN] [--start-pid PID] [--end-pid PID] [--max-nodes N] [--limit N]` | Compare process evidence across supported sources. | Optional: --flags, --start-pid, --end-pid, --max-nodes, --limit. |  |
+| `process detail` | `KswordCLI.exe process detail --pid PID [--flags 0xN]` | Query fixed R0 EPROCESS runtime detail. | Required: --pid. Optional: --flags defaults to include-all. | Uses `IOCTL_KSWORD_ARK_QUERY_PROCESS_DETAIL`. |
+| `process runtime-fields` | `KswordCLI.exe process runtime-fields --pid PID --items id:offset:size[:flags][,id:offset:size[:flags]...] [--flags 0xN] [--hexdump] [--limit N]` | Sample bounded EPROCESS runtime fields by checked offsets. | Required: --pid, --items. Optional: --flags, --hexdump, --limit. | Uses `IOCTL_KSWORD_ARK_QUERY_PROCESS_RUNTIME_FIELDS`; each sample is capped by the shared protocol. |
+
+### `memory`
+
+Query, read, write, translate, and audit virtual/physical memory.
+
+| 命令 | 语法 | 用途 | 参数 | 备注 |
+| --- | --- | --- | --- | --- |
+| `memory query-va` | `KswordCLI.exe memory query-va --pid PID --address VA [--flags 0xN]` | Query virtual memory metadata for one address. | Required: --pid, --address. Optional: --flags. |  |
+| `memory read-va` | `KswordCLI.exe memory read-va --pid PID --address VA --bytes N [--flags 0xN] [--hexdump]` | Read virtual memory bytes. | Required: --pid, --address, --bytes. Optional: --flags, --hexdump. | With the kernel-address read flag, --pid may be omitted. |
+| `memory write-va` | `KswordCLI.exe memory write-va --pid PID --address VA (--hex HEX \| --data-file PATH) [--flags 0xN]` | Write virtual memory bytes. | Required: --pid, --address, and exactly one payload option. Optional: --flags. | With the kernel-address write flag, --pid may be omitted. |
+| `memory read-phys` | `KswordCLI.exe memory read-phys --address PA --bytes N [--hexdump]` | Read physical memory bytes. | Required: --address, --bytes. Optional: --hexdump. |  |
+| `memory write-phys` | `KswordCLI.exe memory write-phys --address PA (--hex HEX \| --data-file PATH) [--flags 0xN]` | Write physical memory bytes. | Required: --address and exactly one payload option. Optional: --flags. |  |
+| `memory translate-va` | `KswordCLI.exe memory translate-va --pid PID --address VA [--flags 0xN]` | Translate a virtual address to page-table evidence. | Required: --pid, --address. Optional: --flags. |  |
+| `memory query-pte` | `KswordCLI.exe memory query-pte --pid PID --address VA [--flags 0xN]` | Query page-table entries for one virtual address. | Required: --pid, --address. Optional: --flags. |  |
+| `memory scan-kexec` | `KswordCLI.exe memory scan-kexec [--flags 0xN] [--max-entries N] [--start VA] [--end VA] [--limit N]` | Scan executable kernel memory evidence. | Optional: --flags, --max-entries, --start, --end, --limit. |  |
+| `memory scan-evidence` | `KswordCLI.exe memory scan-evidence [--flags 0xN] [--max-rows N] [--start VA] [--end VA] [--max-bytes N] [--max-bigpool-rows N] [--sample-bytes N] [--limit N]` | Scan kernel memory evidence rows. | Optional: --flags, --max-rows, --start, --end, --max-bytes, --max-bigpool-rows, --sample-bytes, --limit. |  |
+
+### `file`
+
+Inspect files, filters, storage evidence, and file-monitor runtime state.
+
+| 命令 | 语法 | 用途 | 参数 | 备注 |
+| --- | --- | --- | --- | --- |
+| `file delete-path` | `KswordCLI.exe file delete-path --path PATH [--flags 0xN]` | Delete one path through the driver. | Required: --path. Optional: --flags. |  |
+| `file query-info` | `KswordCLI.exe file query-info --path PATH [--flags 0xN]` | Query file object and basic file metadata. | Required: --path. Optional: --flags. |  |
+| `file fileobject` | `KswordCLI.exe file fileobject --path PATH [--flags 0xN]` | Alias for file query-info. | Required: --path. Optional: --flags. | Prints an alias banner before query-info output. |
+| `file minifilter` | `KswordCLI.exe file minifilter [--flags 0xN] [--max-rows N] [--limit N]` | Enumerate minifilter inventory rows. | Optional: --flags, --max-rows, --limit. |  |
+| `file section` | `KswordCLI.exe file section` | Report that the file section alias is unsupported. | No options. | Use section query-file-mappings --path PATH for the implemented section protocol. |
+| `file bitlocker` | `KswordCLI.exe file bitlocker [--flags 0xN] [--max-rows N] [--max-depth N] [--volume PATH] [--limit N]` | Query BitLocker/FVE storage audit rows. | Optional: --flags, --max-rows, --max-depth, --volume, --limit. |  |
+| `file storage` | `KswordCLI.exe file storage [--flags 0xN] [--max-rows N] [--max-depth N] [--volume PATH] [--limit N]` | Query volume stack audit rows. | Optional: --flags, --max-rows, --max-depth, --volume, --limit. |  |
+| `file mountmgr` | `KswordCLI.exe file mountmgr [--flags 0xN] [--max-rows N] [--max-depth N] [--volume PATH] [--limit N]` | Query MountMgr mapping audit rows. | Optional: --flags, --max-rows, --max-depth, --volume, --limit. |  |
+| `file filesystem` | `KswordCLI.exe file filesystem [--flags 0xN] [--max-rows N] [--max-depth N] [--volume PATH] [--limit N]` | Query filesystem integrity audit rows. | Optional: --flags, --max-rows, --max-depth, --volume, --limit. |  |
+| `file monitor-control` | `KswordCLI.exe file monitor-control --action ACTION [--operation-mask 0xN] [--pid PID] [--flags 0xN]` | Control file monitor runtime state. | Required: --action. Optional: --operation-mask, --pid, --flags. |  |
+| `file monitor-drain` | `KswordCLI.exe file monitor-drain [--max-events N] [--flags 0xN]` | Drain file monitor events. | Optional: --max-events, --flags. |  |
+| `file monitor-status` | `KswordCLI.exe file monitor-status` | Query file monitor runtime status. | No options. |  |
+
+### `kernel`
+
+Inspect SSDT, hooks, driver objects, CPU, physical layout, CID, and IPC state.
+
+| 命令 | 语法 | 用途 | 参数 | 备注 |
+| --- | --- | --- | --- | --- |
+| `kernel ssdt` | `KswordCLI.exe kernel ssdt [--flags 0xN] [--limit N]` | Enumerate SSDT entries. | Optional: --flags, --limit. |  |
+| `kernel shadow-ssdt` | `KswordCLI.exe kernel shadow-ssdt [--flags 0xN] [--limit N]` | Enumerate shadow SSDT entries. | Optional: --flags, --limit. |  |
+| `kernel scan-inline-hooks` | `KswordCLI.exe kernel scan-inline-hooks [--flags 0xN] [--max-entries N] [--module NAME] [--limit N]` | Scan inline hook evidence. | Optional: --flags, --max-entries, --module, --limit. |  |
+| `kernel enum-iat-eat-hooks` | `KswordCLI.exe kernel enum-iat-eat-hooks [--flags 0xN] [--max-entries N] [--module NAME] [--limit N]` | Enumerate IAT/EAT hook evidence. | Optional: --flags, --max-entries, --module, --limit. |  |
+| `kernel patch-inline-hook` | `KswordCLI.exe kernel patch-inline-hook --mode MODE --function VA (--expected-hex HEX \| --expected-file PATH) [--restore-hex HEX \| --restore-file PATH] [--flags 0xN]` | Patch or restore an inline hook using bounded byte evidence. | Required: --mode, --function, and expected payload. Optional: restore payload, --flags. | Hex and file payload forms are mutually exclusive per payload. |
+| `kernel query-driver-object` | `KswordCLI.exe kernel query-driver-object --driver NAME [--flags 0xN] [--max-devices N] [--max-attached N] [--limit N]` | Query one DriverObject and device chain. | Required: --driver. Optional: --flags, --max-devices, --max-attached, --limit. |  |
+| `kernel query-driver-integrity` | `KswordCLI.exe kernel query-driver-integrity [--driver NAME] [--module-base VA] [--flags 0xN] [--max-rows N] [--max-idt-vectors N] [--max-devices N] [--max-attached N] [--limit N]` | Query driver integrity evidence rows. | Optional: --driver, --module-base, --flags, --max-rows, --max-idt-vectors, --max-devices, --max-attached, --limit. |  |
+| `kernel force-unload-driver` | `KswordCLI.exe kernel force-unload-driver --driver NAME [--module-base VA] [--timeout-ms N] [--flags 0xN]` | Force an unload path for one driver. | Required: --driver. Optional: --module-base, --timeout-ms, --flags. |  |
+| `kernel query-cpu` | `KswordCLI.exe kernel query-cpu` | Query CPU hardware summary. | No options. |  |
+| `kernel query-phys-layout` | `KswordCLI.exe kernel query-phys-layout` | Query physical memory layout summary. | No options. |  |
+| `kernel cid` | `KswordCLI.exe kernel cid [--flags 0xN] [--max-entries N] [--max-visits N] [--start-cid CID] [--end-cid CID] [--limit N]` | Enumerate CID table evidence. | Optional: --flags, --max-entries, --max-visits, --start-cid, --end-cid, --limit. |  |
+| `kernel object-summary` | `KswordCLI.exe kernel object-summary --target-kind KIND [--cid CID] [--object ADDRESS] [--flags 0xN]` | Query object header/type/counter summary for CID or object evidence. | Required: --target-kind. Optional: --cid, --object, --flags. | Uses `IOCTL_KSWORD_ARK_QUERY_KERNEL_OBJECT_SUMMARY`. |
+| `kernel ipc` | `KswordCLI.exe kernel ipc [--flags 0xN] [--pid PID] [--handle HANDLE] [--max-entries N]` | Query IPC summary for a process/handle context. | Optional: --flags, --pid, --handle, --max-entries. |  |
+| `kernel callbacks` | `KswordCLI.exe kernel callbacks [--flags 0xN] [--max-entries N] [--limit N]` | Alias for callback inventory. | Optional: --flags, --max-entries, --limit. |  |
+| `kernel hooks` | `KswordCLI.exe kernel hooks [--flags 0xN] [--max-entries N] [--module NAME] [--limit N]` | Alias-style inline hook scan. | Optional: --flags, --max-entries, --module, --limit. |  |
+
+### `callback`
+
+Manage callback rules, pending decisions, callback inventory, and bypass PIDs.
+
+| 命令 | 语法 | 用途 | 参数 | 备注 |
+| --- | --- | --- | --- | --- |
+| `callback set-rules` | `KswordCLI.exe callback set-rules --blob PATH` | Load callback rule bytes. | Required: --blob. |  |
+| `callback runtime-state` | `KswordCLI.exe callback runtime-state` | Query callback runtime state. | No options. |  |
+| `callback wait-event` | `KswordCLI.exe callback wait-event [--waiter-tag N]` | Wait for one callback event packet. | Optional: --waiter-tag. |  |
+| `callback answer-event` | `KswordCLI.exe callback answer-event --event-guid GUID --decision N --source-session-id N [--answered-at UTC100NS]` | Answer one pending callback event. | Required: --event-guid, --decision, --source-session-id. Optional: --answered-at. |  |
+| `callback cancel-pending` | `KswordCLI.exe callback cancel-pending` | Cancel all pending callback decisions. | No options. |  |
+| `callback remove` | `KswordCLI.exe callback remove --class N --callback VA [--flags 0xN]` | Remove an external callback by class/address. | Required: --class, --callback. Optional: --flags. |  |
+| `callback remove-ex` | `KswordCLI.exe callback remove-ex --class N --callback VA [--registration VA] [--raw-storage VA] [--generation N] [--identity-hash N] [--source N] [--operation-mask 0xN] [--object-type-mask 0xN] [--trust-flags 0xN] [--remove-behavior N] [--flags 0xN]` | Remove an external callback with extended identity hints. | Required: --class, --callback. Optional: extended identity, source, masks, trust, behavior, --flags. |  |
+| `callback set-minifilter-bypass-pids` | `KswordCLI.exe callback set-minifilter-bypass-pids --pids PID[,PID...] [--flags 0xN]` | Set minifilter bypass PID list. | Required: --pids. Optional: --flags. |  |
+| `callback query-minifilter-bypass-pids` | `KswordCLI.exe callback query-minifilter-bypass-pids` | Query minifilter bypass PID list. | No options. |  |
+| `callback enum` | `KswordCLI.exe callback enum [--flags 0xN] [--max-entries N] [--limit N]` | Enumerate callback inventory. | Optional: --flags, --max-entries, --limit. |  |
+
+### `dyn`
+
+Query or apply dynamic kernel symbol/profile data.
+
+| 命令 | 语法 | 用途 | 参数 | 备注 |
+| --- | --- | --- | --- | --- |
+| `dyn status` | `KswordCLI.exe dyn status` | Query DynData status. | No options. |  |
+| `dyn fields` | `KswordCLI.exe dyn fields [--limit N]` | List DynData fields. | Optional: --limit. |  |
+| `dyn capabilities` | `KswordCLI.exe dyn capabilities` | Query DynData capability mask. | No options. |  |
+| `dyn profile` | `KswordCLI.exe dyn profile [--limit N]` | List v4 DynData module profile rows. | Optional: --limit. | Alias: dyn v4-modules. |
+| `dyn v4-modules` | `KswordCLI.exe dyn v4-modules [--limit N]` | List v4 DynData module profile rows. | Optional: --limit. | Alias: dyn profile. |
+| `dyn v4-capabilities` | `KswordCLI.exe dyn v4-capabilities [--limit N]` | List v4 DynData capability groups. | Optional: --limit. | Alias: dyn capability-groups. |
+| `dyn capability-groups` | `KswordCLI.exe dyn capability-groups [--limit N]` | List v4 DynData capability groups. | Optional: --limit. | Alias: dyn v4-capabilities. |
+| `dyn v4-missing` | `KswordCLI.exe dyn v4-missing [--limit N]` | List missing v4 DynData items. | Optional: --limit. | Alias: dyn missing-items. |
+| `dyn missing-items` | `KswordCLI.exe dyn missing-items [--limit N]` | List missing v4 DynData items. | Optional: --limit. | Alias: dyn v4-missing. |
+| `dyn v4-items` | `KswordCLI.exe dyn v4-items [--limit N]` | List every applied v4 DynData item status row. | Optional: --limit. | Uses `IOCTL_KSWORD_ARK_QUERY_DYN_V4_ITEMS`. |
+| `dyn apply-profile-v4` | `KswordCLI.exe dyn apply-profile-v4 --blob PATH` | Apply a raw v4 DynData profile packet. | Required: --blob. |  |
+| `dyn apply-profile` | `KswordCLI.exe dyn apply-profile --blob PATH` | Apply a raw legacy DynData profile packet. | Required: --blob. |  |
+| `dyn apply-profile-ex` | `KswordCLI.exe dyn apply-profile-ex --blob PATH` | Apply a raw extended DynData profile packet. | Required: --blob. |  |
+
+### `thread`
+
+Enumerate threads and compare R0/R3 thread evidence.
+
+| 命令 | 语法 | 用途 | 参数 | 备注 |
+| --- | --- | --- | --- | --- |
+| `thread enum` | `KswordCLI.exe thread enum [--flags 0xN] [--pid PID] [--limit N]` | Enumerate threads. | Optional: --flags, --pid, --limit. |  |
+| `thread crossview` | `KswordCLI.exe thread crossview [--flags 0xN] [--pid PID] [--start-tid TID] [--end-tid TID] [--max-nodes N] [--limit N]` | Compare thread evidence across supported sources. | Optional: --flags, --pid, --start-tid, --end-tid, --max-nodes, --limit. |  |
+| `thread detail` | `KswordCLI.exe thread detail --tid TID [--pid PID] [--flags 0xN]` | Query fixed R0 ETHREAD/KTHREAD runtime detail. | Required: --tid. Optional: --pid, --flags defaults to include-all. | Uses `IOCTL_KSWORD_ARK_QUERY_THREAD_DETAIL`. |
+| `thread runtime-fields` | `KswordCLI.exe thread runtime-fields --tid TID [--pid PID] --items id:offset:size[:flags][,id:offset:size[:flags]...] [--flags 0xN] [--hexdump] [--limit N]` | Sample bounded ETHREAD/KTHREAD runtime fields by checked offsets. | Required: --tid, --items. Optional: --pid, --flags, --hexdump, --limit. | Uses `IOCTL_KSWORD_ARK_QUERY_THREAD_RUNTIME_FIELDS`; each sample is capped by the shared protocol. |
+
+### `handle`
+
+Enumerate process handles and inspect object metadata.
+
+| 命令 | 语法 | 用途 | 参数 | 备注 |
+| --- | --- | --- | --- | --- |
+| `handle enum` | `KswordCLI.exe handle enum --pid PID [--flags 0xN] [--limit N]` | Enumerate handles in one process. | Required: --pid. Optional: --flags, --limit. | Alias: handle object-table. |
+| `handle object-table` | `KswordCLI.exe handle object-table --pid PID [--flags 0xN] [--limit N]` | Enumerate handles in one process. | Required: --pid. Optional: --flags, --limit. | Alias: handle enum. |
+| `handle query-object` | `KswordCLI.exe handle query-object --pid PID --handle HANDLE [--access 0xN] [--flags 0xN]` | Query one handle object. | Required: --pid, --handle. Optional: --access, --flags. | Aliases: handle object-header, handle type-matrix. |
+| `handle object-header` | `KswordCLI.exe handle object-header --pid PID --handle HANDLE [--access 0xN] [--flags 0xN]` | Query one handle object header projection. | Required: --pid, --handle. Optional: --access, --flags. | Alias: handle query-object. |
+| `handle type-matrix` | `KswordCLI.exe handle type-matrix --pid PID --handle HANDLE [--access 0xN] [--flags 0xN]` | Query one handle object type projection. | Required: --pid, --handle. Optional: --access, --flags. | Alias: handle query-object. |
+
+### `driver`
+
+Driver integrity, device stack, and optional global evidence aliases.
+
+| 命令 | 语法 | 用途 | 参数 | 备注 |
+| --- | --- | --- | --- | --- |
+| `driver integrity` | `KswordCLI.exe driver integrity [--driver NAME] [--module-base VA] [--flags 0xN] [--max-rows N] [--max-idt-vectors N] [--max-devices N] [--max-attached N] [--limit N]` | Query driver integrity evidence. | Optional: --driver, --module-base, --flags, --max-rows, --max-idt-vectors, --max-devices, --max-attached, --limit. |  |
+| `driver detail` | `KswordCLI.exe driver detail --driver NAME [--flags 0xN] [--max-devices N] [--max-attached N] [--limit N]` | Query one DriverObject detail projection. | Required: --driver. Optional: --flags, --max-devices, --max-attached, --limit. |  |
+| `driver device` | `KswordCLI.exe driver device [--profile-flags 0xN] [--max-rows N] [--max-attached N] [--target NAME] [--limit N]` | Query driver device stack audit rows. | Optional: --profile-flags, --max-rows, --max-attached, --target, --limit. | Aliases: driver major, driver fastio. |
+| `driver major` | `KswordCLI.exe driver major [--profile-flags 0xN] [--max-rows N] [--max-attached N] [--target NAME] [--limit N]` | Alias for driver device audit rows. | Optional: --profile-flags, --max-rows, --max-attached, --target, --limit. | Alias: driver device. |
+| `driver fastio` | `KswordCLI.exe driver fastio [--profile-flags 0xN] [--max-rows N] [--max-attached N] [--target NAME] [--limit N]` | Alias for driver device audit rows. | Optional: --profile-flags, --max-rows, --max-attached, --target, --limit. | Alias: driver device. |
+| `driver unloaded` | `KswordCLI.exe driver unloaded [--flags 0xN] [--max-rows N] [--max-idt-vectors N] [--max-devices N] [--max-attached N] [--module-base VA] [--limit N]` | Project MmUnloadedDrivers optional-global evidence. | Optional: --flags, --max-rows, --max-idt-vectors, --max-devices, --max-attached, --module-base, --limit. |  |
+| `driver piddb` | `KswordCLI.exe driver piddb [--flags 0xN] [--max-rows N] [--max-idt-vectors N] [--max-devices N] [--max-attached N] [--module-base VA] [--limit N]` | Project PiDDBCacheTable optional-global evidence. | Optional: --flags, --max-rows, --max-idt-vectors, --max-devices, --max-attached, --module-base, --limit. |  |
+
+### `hardware`
+
+Device, input, USB, and PnP stack audit views.
+
+| 命令 | 语法 | 用途 | 参数 | 备注 |
+| --- | --- | --- | --- | --- |
+| `hardware audit` | `KswordCLI.exe hardware audit [--profile-flags 0xN] [--max-rows N] [--max-attached N] [--target NAME] [--limit N]` | Query generic hardware device stack audit rows. | Optional: --profile-flags, --max-rows, --max-attached, --target, --limit. | Alias: hardware pnp. |
+| `hardware pnp` | `KswordCLI.exe hardware pnp [--profile-flags 0xN] [--max-rows N] [--max-attached N] [--target NAME] [--limit N]` | Alias for hardware audit. | Optional: --profile-flags, --max-rows, --max-attached, --target, --limit. | Alias: hardware audit. |
+| `hardware input` | `KswordCLI.exe hardware input [--profile-flags 0xN] [--max-rows N] [--max-attached N] [--target NAME] [--limit N]` | Query input stack audit rows. | Optional: --profile-flags, --max-rows, --max-attached, --target, --limit. |  |
+| `hardware usb` | `KswordCLI.exe hardware usb [--profile-flags 0xN] [--max-rows N] [--max-attached N] [--target NAME] [--limit N]` | Query USB topology audit rows. | Optional: --profile-flags, --max-rows, --max-attached, --target, --limit. |  |
+
+### `window`
+
+Win32k, GUI, GPU, display, and watchdog audit views.
+
+| 命令 | 语法 | 用途 | 参数 | 备注 |
+| --- | --- | --- | --- | --- |
+| `window win32k` | `KswordCLI.exe window win32k [--flags 0xN] [--session-id N] [--pid PID] [--tid TID] [--max-entries N] [--limit N]` | Query win32k profile/session status. | Optional: --flags, --session-id, --pid, --tid, --max-entries, --limit. |  |
+| `window gui` | `KswordCLI.exe window gui [--flags 0xN] [--session-id N] [--pid PID] [--tid TID] [--max-entries N] [--limit N]` | Query GUI window snapshot rows. | Optional: --flags, --session-id, --pid, --tid, --max-entries, --limit. |  |
+| `window gui-threads` | `KswordCLI.exe window gui-threads [--flags 0xN] [--session-id N] [--pid PID] [--tid TID] [--max-entries N] [--limit N]` | Query GUI thread snapshot rows. | Optional: --flags, --session-id, --pid, --tid, --max-entries, --limit. |  |
+| `window hotkeys-pdb` | `KswordCLI.exe window hotkeys-pdb [--flags 0xN] [--session-id N] [--pid PID] [--tid TID] [--max-entries N] [--limit N]` | Query PDB-backed win32k hotkey chain rows. | Optional: --flags, --session-id, --pid, --tid, --max-entries, --limit. | Uses `IOCTL_KSWORD_ARK_QUERY_WIN32K_HOTKEYS_PDB`. |
+| `window hooks-pdb` | `KswordCLI.exe window hooks-pdb [--flags 0xN] [--session-id N] [--pid PID] [--tid TID] [--max-entries N] [--limit N]` | Query PDB-backed win32k hook chain rows. | Optional: --flags, --session-id, --pid, --tid, --max-entries, --limit. | Uses `IOCTL_KSWORD_ARK_QUERY_WIN32K_HOOKS_PDB`. |
+| `window detail` | `KswordCLI.exe window detail --hwnd HWND [--pid PID] [--tid TID] [--flags 0xN]` | Query one HWND/tagWND runtime detail packet. | Required: --hwnd. Optional: --pid, --tid, --flags. | Uses `IOCTL_KSWORD_ARK_QUERY_WIN32K_WINDOW_DETAIL`. |
+| `window gpu` | `KswordCLI.exe window gpu [--profile-flags 0xN] [--max-rows N] [--max-attached N] [--target NAME] [--limit N]` | Query GPU/display/watchdog audit rows. | Optional: --profile-flags, --max-rows, --max-attached, --target, --limit. | Aliases: window display, window watchdog. |
+| `window display` | `KswordCLI.exe window display [--profile-flags 0xN] [--max-rows N] [--max-attached N] [--target NAME] [--limit N]` | Alias for window gpu audit rows. | Optional: --profile-flags, --max-rows, --max-attached, --target, --limit. | Alias: window gpu. |
+| `window watchdog` | `KswordCLI.exe window watchdog [--profile-flags 0xN] [--max-rows N] [--max-attached N] [--target NAME] [--limit N]` | Alias for window gpu audit rows. | Optional: --profile-flags, --max-rows, --max-attached, --target, --limit. | Alias: window gpu. |
+
+### `misc`
+
+Security, CI/VBS, Hyper-V, AppLocker/BAM, and driver trust posture.
+
+| 命令 | 语法 | 用途 | 参数 | 备注 |
+| --- | --- | --- | --- | --- |
+| `misc security` | `KswordCLI.exe misc security [--flags 0xN]` | Query security/CI/VBS posture. | Optional: --flags. | Aliases: misc ci, misc vbs. |
+| `misc ci` | `KswordCLI.exe misc ci [--flags 0xN]` | Alias for misc security. | Optional: --flags. | Alias: misc security. |
+| `misc vbs` | `KswordCLI.exe misc vbs [--flags 0xN]` | Alias for misc security. | Optional: --flags. | Alias: misc security. |
+| `misc hyperv` | `KswordCLI.exe misc hyperv` | Query Hyper-V summary posture. | No options. |  |
+| `misc applocker` | `KswordCLI.exe misc applocker` | Query AppLocker/BAM posture. | No options. | Alias: misc bam. |
+| `misc bam` | `KswordCLI.exe misc bam` | Alias for misc applocker. | No options. | Alias: misc applocker. |
+| `misc driver-trust` | `KswordCLI.exe misc driver-trust [--flags 0xN] [--max-entries N] [--limit N]` | Query loaded-driver trust rows. | Optional: --flags, --max-entries, --limit. |  |
+
+### `alpc`
+
+ALPC port diagnostics for a process handle.
+
+| 命令 | 语法 | 用途 | 参数 | 备注 |
+| --- | --- | --- | --- | --- |
+| `alpc query-port` | `KswordCLI.exe alpc query-port --pid PID --handle HANDLE [--flags 0xN]` | Query ALPC port information for one handle. | Required: --pid, --handle. Optional: --flags. |  |
+
+### `section`
+
+Process and file section mapping diagnostics.
+
+| 命令 | 语法 | 用途 | 参数 | 备注 |
+| --- | --- | --- | --- | --- |
+| `section query-process` | `KswordCLI.exe section query-process --pid PID [--flags 0xN] [--max-mappings N] [--limit N]` | Query section mappings for one process. | Required: --pid. Optional: --flags, --max-mappings, --limit. |  |
+| `section query-file-mappings` | `KswordCLI.exe section query-file-mappings --path PATH [--flags 0xN] [--max-mappings N] [--limit N]` | Query section mappings for one file path. | Required: --path. Optional: --flags, --max-mappings, --limit. |  |
+
+### `trust`
+
+Image trust and signing diagnostics.
+
+| 命令 | 语法 | 用途 | 参数 | 备注 |
+| --- | --- | --- | --- | --- |
+| `trust query-image` | `KswordCLI.exe trust query-image --path PATH [--flags 0xN]` | Query image trust and signing evidence. | Required: --path. Optional: --flags. |  |
+
+### `safety`
+
+Safety policy query and update controls.
+
+| 命令 | 语法 | 用途 | 参数 | 备注 |
+| --- | --- | --- | --- | --- |
+| `safety query-policy` | `KswordCLI.exe safety query-policy [--flags 0xN]` | Query safety policy state. | Optional: --flags. |  |
+| `safety set-policy` | `KswordCLI.exe safety set-policy [--set-flags 0xN] [--clear-flags 0xN] [--expected-generation N]` | Update safety policy flags. | Optional: --set-flags, --clear-flags, --expected-generation. |  |
+
+### `preflight`
+
+Release-readiness and driver capability preflight checks.
+
+| 命令 | 语法 | 用途 | 参数 | 备注 |
+| --- | --- | --- | --- | --- |
+| `preflight query` | `KswordCLI.exe preflight query [--flags 0xN] [--limit N]` | Run release-readiness preflight checks. | Optional: --flags, --limit. |  |
+
+### `registry`
+
+Registry read, enumeration, and mutation helpers.
+
+| 命令 | 语法 | 用途 | 参数 | 备注 |
+| --- | --- | --- | --- | --- |
+| `registry read-value` | `KswordCLI.exe registry read-value --key KEY [--value NAME] [--max-data-bytes N] [--flags 0xN] [--hexdump]` | Read one registry value or default value. | Required: --key. Optional: --value, --max-data-bytes, --flags, --hexdump. |  |
+| `registry enum-key` | `KswordCLI.exe registry enum-key --key KEY [--flags 0xN] [--max-subkeys N] [--max-values N] [--max-value-data-bytes N] [--limit N]` | Enumerate registry subkeys and values. | Required: --key. Optional: --flags, --max-subkeys, --max-values, --max-value-data-bytes, --limit. |  |
+| `registry set-value` | `KswordCLI.exe registry set-value --key KEY --type TYPE --data-file PATH [--value NAME] [--flags 0xN]` | Set one registry value. | Required: --key, --type, --data-file. Optional: --value, --flags. |  |
+| `registry delete-value` | `KswordCLI.exe registry delete-value --key KEY [--value NAME] [--flags 0xN]` | Delete one registry value or default value. | Required: --key. Optional: --value, --flags. |  |
+| `registry create-key` | `KswordCLI.exe registry create-key --key KEY [--flags 0xN]` | Create one registry key. | Required: --key. Optional: --flags. |  |
+| `registry delete-key` | `KswordCLI.exe registry delete-key --key KEY [--flags 0xN]` | Delete one registry key. | Required: --key. Optional: --flags. |  |
+| `registry rename-value` | `KswordCLI.exe registry rename-value --key KEY --old-value NAME --new-value NAME [--flags 0xN]` | Rename one registry value. | Required: --key, --old-value, --new-value. Optional: --flags. |  |
+| `registry rename-key` | `KswordCLI.exe registry rename-key --key KEY --new-name NAME [--flags 0xN]` | Rename one registry key. | Required: --key, --new-name. Optional: --flags. |  |
+
+### `redirect`
+
+File/registry redirect rules and runtime status.
+
+| 命令 | 语法 | 用途 | 参数 | 备注 |
+| --- | --- | --- | --- | --- |
+| `redirect set-rules` | `KswordCLI.exe redirect set-rules --blob PATH` | Load file/registry redirect rules. | Required: --blob. |  |
+| `redirect query-status` | `KswordCLI.exe redirect query-status [--limit N]` | Query redirect runtime state and rules. | Optional: --limit. |  |
+
+### `network`
+
+Network rules, endpoints, WFP/NDIS evidence, and R3 fallbacks.
+
+| 命令 | 语法 | 用途 | 参数 | 备注 |
+| --- | --- | --- | --- | --- |
+| `network set-rules` | `KswordCLI.exe network set-rules --blob PATH` | Load network rule bytes. | Required: --blob. |  |
+| `network query-status` | `KswordCLI.exe network query-status [--limit N]` | Query network runtime state and rules. | Optional: --limit. |  |
+| `network audit` | `KswordCLI.exe network audit [--flags 0xN] [--max-rows N] [--limit N]` | Query TCP endpoint audit as the default network audit view. | Optional: --flags, --max-rows, --limit. | Use network wfp or network ndis for chain-specific views. |
+| `network tcp` | `KswordCLI.exe network tcp [--flags 0xN] [--max-rows N] [--limit N]` | Query TCP endpoint audit rows. | Optional: --flags, --max-rows, --limit. |  |
+| `network udp` | `KswordCLI.exe network udp [--flags 0xN] [--max-rows N] [--limit N]` | Query UDP endpoint audit rows. | Optional: --flags, --max-rows, --limit. |  |
+| `network wfp` | `KswordCLI.exe network wfp [--flags 0xN] [--max-rows N] [--limit N]` | Query WFP inventory rows. | Optional: --flags, --max-rows, --limit. |  |
+| `network ndis` | `KswordCLI.exe network ndis [--flags 0xN] [--max-rows N] [--limit N]` | Query NDIS chain rows. | Optional: --flags, --max-rows, --limit. |  |
+| `network afd` | `KswordCLI.exe network afd [--limit N]` | Print degraded R3 AFD endpoint fallback evidence. | Optional: --limit. | No dedicated R0 AFD audit IOCTL is used. |
+| `network nsi` | `KswordCLI.exe network nsi [--limit N]` | Print degraded R3 NSI adapter/address fallback evidence. | Optional: --limit. | No dedicated R0 NSI audit IOCTL is used. |
+
+### `keyboard`
+
+Keyboard hotkey and hook inventory.
+
+| 命令 | 语法 | 用途 | 参数 | 备注 |
+| --- | --- | --- | --- | --- |
+| `keyboard enum-hotkeys` | `KswordCLI.exe keyboard enum-hotkeys [--flags 0xN] [--pid PID] [--max-entries N] [--limit N]` | Enumerate keyboard hotkeys. | Optional: --flags, --pid, --max-entries, --limit. |  |
+| `keyboard enum-hooks` | `KswordCLI.exe keyboard enum-hooks [--flags 0xN] [--pid PID] [--max-entries N] [--limit N]` | Enumerate keyboard hooks. | Optional: --flags, --pid, --max-entries, --limit. |  |
+
+### `mutation`
+
+Prepare, commit, rollback, and audit bounded mutation transactions.
+
+| 命令 | 语法 | 用途 | 参数 | 备注 |
+| --- | --- | --- | --- | --- |
+| `mutation prepare` | `KswordCLI.exe mutation prepare --target-kind N (--after-hex HEX \| --after-file PATH) [--before-hex HEX \| --before-file PATH] [--pid PID] [--address VA] [--context N] [--flags 0xN]` | Prepare a bounded mutation transaction. | Required: --target-kind and after payload. Optional: before payload, --pid, --address, --context, --flags. | Hex and file payload forms are mutually exclusive per payload. |
+| `mutation commit` | `KswordCLI.exe mutation commit --transaction-id ID [--flags 0xN]` | Commit a prepared mutation transaction. | Required: --transaction-id. Optional: --flags. |  |
+| `mutation rollback` | `KswordCLI.exe mutation rollback --transaction-id ID [--flags 0xN]` | Rollback a prepared mutation transaction. | Required: --transaction-id. Optional: --flags. |  |
+| `mutation query-audit` | `KswordCLI.exe mutation query-audit [--flags 0xN] [--max-entries N] [--start-sequence N] [--limit N] [--hexdump]` | Query mutation audit ring entries. | Optional: --flags, --max-entries, --start-sequence, --limit, --hexdump. |  |
+
+### `capability`
+
+Unified driver feature capability query.
+
+| 命令 | 语法 | 用途 | 参数 | 备注 |
+| --- | --- | --- | --- | --- |
+| `capability query-driver-capabilities` | `KswordCLI.exe capability query-driver-capabilities [--limit N]` | Query unified driver feature capability rows. | Optional: --limit. |  |
+
+### `wsl`
+
+WSL silo and Linux PID/TID diagnostics.
+
+| 命令 | 语法 | 用途 | 参数 | 备注 |
+| --- | --- | --- | --- | --- |
+| `wsl query-silo` | `KswordCLI.exe wsl query-silo [--pid PID] [--tid TID] [--flags 0xN]` | Query WSL silo process/thread evidence. | Optional: --pid, --tid, --flags. |  |
+

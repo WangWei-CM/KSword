@@ -1081,49 +1081,397 @@ namespace
         return 0;
     }
 
+    // FamilyHelp describes one top-level command family for overview output.
+    // Inputs: name is argv[1] and summary is human-readable help text.
+    // Processing: entries are static metadata used only by help rendering.
+    // Returns: no behavior; callers read fields directly.
+    struct FamilyHelp
+    {
+        const wchar_t* name;
+        const wchar_t* summary;
+    };
+
+    // CommandHelp describes one concrete command or alias accepted by dispatch.
+    // Inputs: family/subcommand identify argv tokens; syntax/options/notes are display text.
+    // Processing: help lookup matches tokens exactly and never opens the driver.
+    // Returns: no behavior; callers read fields directly.
+    struct CommandHelp
+    {
+        const wchar_t* family;
+        const wchar_t* subcommand;
+        const wchar_t* syntax;
+        const wchar_t* summary;
+        const wchar_t* options;
+        const wchar_t* notes;
+    };
+
+    constexpr FamilyHelp kFamilyHelps[] = {
+        { L"log", L"Read bounded frames from the KswordARK log device." },
+        { L"process", L"Inspect and control process visibility, PPL, DKOM, and cross-view state." },
+        { L"memory", L"Query, read, write, translate, and audit virtual/physical memory." },
+        { L"file", L"Inspect files, filters, storage evidence, and file-monitor runtime state." },
+        { L"kernel", L"Inspect SSDT, hooks, driver objects, CPU, physical layout, CID, and IPC state." },
+        { L"callback", L"Manage callback rules, pending decisions, callback inventory, and bypass PIDs." },
+        { L"dyn", L"Query or apply dynamic kernel symbol/profile data." },
+        { L"thread", L"Enumerate threads and compare R0/R3 thread evidence." },
+        { L"handle", L"Enumerate process handles and inspect object metadata." },
+        { L"driver", L"Driver integrity, device stack, and optional global evidence aliases." },
+        { L"hardware", L"Device, input, USB, and PnP stack audit views." },
+        { L"window", L"Win32k, GUI, GPU, display, and watchdog audit views." },
+        { L"misc", L"Security, CI/VBS, Hyper-V, AppLocker/BAM, and driver trust posture." },
+        { L"alpc", L"ALPC port diagnostics for a process handle." },
+        { L"section", L"Process and file section mapping diagnostics." },
+        { L"trust", L"Image trust and signing diagnostics." },
+        { L"safety", L"Safety policy query and update controls." },
+        { L"preflight", L"Release-readiness and driver capability preflight checks." },
+        { L"registry", L"Registry read, enumeration, and mutation helpers." },
+        { L"redirect", L"File/registry redirect rules and runtime status." },
+        { L"network", L"Network rules, endpoints, WFP/NDIS evidence, and R3 fallbacks." },
+        { L"keyboard", L"Keyboard hotkey and hook inventory." },
+        { L"mutation", L"Prepare, commit, rollback, and audit bounded mutation transactions." },
+        { L"capability", L"Unified driver feature capability query." },
+        { L"wsl", L"WSL silo and Linux PID/TID diagnostics." },
+    };
+
+    constexpr CommandHelp kCommandHelps[] = {
+        { L"log", L"", L"KswordCLI.exe log [--max-frames N]", L"Read up to N log frames from the shared log device.", L"--max-frames defaults to 64.", L"No subcommand is used for the log family." },
+        { L"process", L"terminate", L"KswordCLI.exe process terminate --pid PID [--exit-status NTSTATUS]", L"Terminate one process through the driver.", L"Required: --pid. Optional: --exit-status defaults to 0xC000013A.", L"" },
+        { L"process", L"suspend", L"KswordCLI.exe process suspend --pid PID", L"Suspend one process.", L"Required: --pid.", L"" },
+        { L"process", L"set-ppl", L"KswordCLI.exe process set-ppl --pid PID --level LEVEL", L"Set the process protection level byte.", L"Required: --pid, --level.", L"" },
+        { L"process", L"enum", L"KswordCLI.exe process enum [--flags 0xN] [--start-pid PID] [--end-pid PID] [--limit N]", L"Enumerate processes from R0 evidence.", L"Optional: --flags, --start-pid, --end-pid, --limit.", L"" },
+        { L"process", L"set-visibility", L"KswordCLI.exe process set-visibility --action ACTION [--pid PID] [--flags 0xN]", L"Apply a process visibility action.", L"Required: --action. Optional: --pid defaults to 0, --flags.", L"" },
+        { L"process", L"set-special-flags", L"KswordCLI.exe process set-special-flags --pid PID --action ACTION [--flags 0xN]", L"Apply special process flags.", L"Required: --pid, --action. Optional: --flags.", L"" },
+        { L"process", L"dkom", L"KswordCLI.exe process dkom --pid PID [--action ACTION] [--flags 0xN]", L"Run the configured process DKOM action.", L"Required: --pid. Optional: --action, --flags.", L"" },
+        { L"process", L"crossview", L"KswordCLI.exe process crossview [--flags 0xN] [--start-pid PID] [--end-pid PID] [--max-nodes N] [--limit N]", L"Compare process evidence across supported sources.", L"Optional: --flags, --start-pid, --end-pid, --max-nodes, --limit.", L"" },
+        { L"process", L"detail", L"KswordCLI.exe process detail --pid PID [--flags 0xN]", L"Query fixed R0 process runtime detail.", L"Required: --pid. Optional: --flags defaults to include-all.", L"Backed by IOCTL_KSWORD_ARK_QUERY_PROCESS_DETAIL." },
+        { L"process", L"runtime-fields", L"KswordCLI.exe process runtime-fields --pid PID --items id:offset:size[:flags][,id:offset:size[:flags]...] [--flags 0xN] [--hexdump]", L"Sample bounded EPROCESS runtime fields by checked offsets.", L"Required: --pid, --items. Optional: --flags, --hexdump.", L"Backed by IOCTL_KSWORD_ARK_QUERY_PROCESS_RUNTIME_FIELDS; each item is bounded by KSWORD_ARK_RUNTIME_FIELD_SAMPLE_MAX_VALUE_BYTES." },
+        { L"memory", L"query-va", L"KswordCLI.exe memory query-va --pid PID --address VA [--flags 0xN]", L"Query virtual memory metadata for one address.", L"Required: --pid, --address. Optional: --flags.", L"" },
+        { L"memory", L"read-va", L"KswordCLI.exe memory read-va --pid PID --address VA --bytes N [--flags 0xN] [--hexdump]", L"Read virtual memory bytes.", L"Required: --pid, --address, --bytes. Optional: --flags, --hexdump.", L"With the kernel-address read flag, --pid may be omitted." },
+        { L"memory", L"write-va", L"KswordCLI.exe memory write-va --pid PID --address VA (--hex HEX | --data-file PATH) [--flags 0xN]", L"Write virtual memory bytes.", L"Required: --pid, --address, and exactly one payload option. Optional: --flags.", L"With the kernel-address write flag, --pid may be omitted." },
+        { L"memory", L"read-phys", L"KswordCLI.exe memory read-phys --address PA --bytes N [--hexdump]", L"Read physical memory bytes.", L"Required: --address, --bytes. Optional: --hexdump.", L"" },
+        { L"memory", L"write-phys", L"KswordCLI.exe memory write-phys --address PA (--hex HEX | --data-file PATH) [--flags 0xN]", L"Write physical memory bytes.", L"Required: --address and exactly one payload option. Optional: --flags.", L"" },
+        { L"memory", L"translate-va", L"KswordCLI.exe memory translate-va --pid PID --address VA [--flags 0xN]", L"Translate a virtual address to page-table evidence.", L"Required: --pid, --address. Optional: --flags.", L"" },
+        { L"memory", L"query-pte", L"KswordCLI.exe memory query-pte --pid PID --address VA [--flags 0xN]", L"Query page-table entries for one virtual address.", L"Required: --pid, --address. Optional: --flags.", L"" },
+        { L"memory", L"scan-kexec", L"KswordCLI.exe memory scan-kexec [--flags 0xN] [--max-entries N] [--start VA] [--end VA] [--limit N]", L"Scan executable kernel memory evidence.", L"Optional: --flags, --max-entries, --start, --end, --limit.", L"" },
+        { L"memory", L"scan-evidence", L"KswordCLI.exe memory scan-evidence [--flags 0xN] [--max-rows N] [--start VA] [--end VA] [--max-bytes N] [--max-bigpool-rows N] [--sample-bytes N] [--limit N]", L"Scan kernel memory evidence rows.", L"Optional: --flags, --max-rows, --start, --end, --max-bytes, --max-bigpool-rows, --sample-bytes, --limit.", L"" },
+        { L"file", L"delete-path", L"KswordCLI.exe file delete-path --path PATH [--flags 0xN]", L"Delete one path through the driver.", L"Required: --path. Optional: --flags.", L"" },
+        { L"file", L"query-info", L"KswordCLI.exe file query-info --path PATH [--flags 0xN]", L"Query file object and basic file metadata.", L"Required: --path. Optional: --flags.", L"" },
+        { L"file", L"fileobject", L"KswordCLI.exe file fileobject --path PATH [--flags 0xN]", L"Alias for file query-info.", L"Required: --path. Optional: --flags.", L"Prints an alias banner before query-info output." },
+        { L"file", L"minifilter", L"KswordCLI.exe file minifilter [--flags 0xN] [--max-rows N] [--limit N]", L"Enumerate minifilter inventory rows.", L"Optional: --flags, --max-rows, --limit.", L"" },
+        { L"file", L"section", L"KswordCLI.exe file section", L"Report that the file section alias is unsupported.", L"No options.", L"Use section query-file-mappings --path PATH for the implemented section protocol." },
+        { L"file", L"bitlocker", L"KswordCLI.exe file bitlocker [--flags 0xN] [--max-rows N] [--max-depth N] [--volume PATH] [--limit N]", L"Query BitLocker/FVE storage audit rows.", L"Optional: --flags, --max-rows, --max-depth, --volume, --limit.", L"" },
+        { L"file", L"storage", L"KswordCLI.exe file storage [--flags 0xN] [--max-rows N] [--max-depth N] [--volume PATH] [--limit N]", L"Query volume stack audit rows.", L"Optional: --flags, --max-rows, --max-depth, --volume, --limit.", L"" },
+        { L"file", L"mountmgr", L"KswordCLI.exe file mountmgr [--flags 0xN] [--max-rows N] [--max-depth N] [--volume PATH] [--limit N]", L"Query MountMgr mapping audit rows.", L"Optional: --flags, --max-rows, --max-depth, --volume, --limit.", L"" },
+        { L"file", L"filesystem", L"KswordCLI.exe file filesystem [--flags 0xN] [--max-rows N] [--max-depth N] [--volume PATH] [--limit N]", L"Query filesystem integrity audit rows.", L"Optional: --flags, --max-rows, --max-depth, --volume, --limit.", L"" },
+        { L"file", L"monitor-control", L"KswordCLI.exe file monitor-control --action ACTION [--operation-mask 0xN] [--pid PID] [--flags 0xN]", L"Control file monitor runtime state.", L"Required: --action. Optional: --operation-mask, --pid, --flags.", L"" },
+        { L"file", L"monitor-drain", L"KswordCLI.exe file monitor-drain [--max-events N] [--flags 0xN]", L"Drain file monitor events.", L"Optional: --max-events, --flags.", L"" },
+        { L"file", L"monitor-status", L"KswordCLI.exe file monitor-status", L"Query file monitor runtime status.", L"No options.", L"" },
+        { L"kernel", L"ssdt", L"KswordCLI.exe kernel ssdt [--flags 0xN] [--limit N]", L"Enumerate SSDT entries.", L"Optional: --flags, --limit.", L"" },
+        { L"kernel", L"shadow-ssdt", L"KswordCLI.exe kernel shadow-ssdt [--flags 0xN] [--limit N]", L"Enumerate shadow SSDT entries.", L"Optional: --flags, --limit.", L"" },
+        { L"kernel", L"scan-inline-hooks", L"KswordCLI.exe kernel scan-inline-hooks [--flags 0xN] [--max-entries N] [--module NAME] [--limit N]", L"Scan inline hook evidence.", L"Optional: --flags, --max-entries, --module, --limit.", L"" },
+        { L"kernel", L"enum-iat-eat-hooks", L"KswordCLI.exe kernel enum-iat-eat-hooks [--flags 0xN] [--max-entries N] [--module NAME] [--limit N]", L"Enumerate IAT/EAT hook evidence.", L"Optional: --flags, --max-entries, --module, --limit.", L"" },
+        { L"kernel", L"patch-inline-hook", L"KswordCLI.exe kernel patch-inline-hook --mode MODE --function VA (--expected-hex HEX | --expected-file PATH) [--restore-hex HEX | --restore-file PATH] [--flags 0xN]", L"Patch or restore an inline hook using bounded byte evidence.", L"Required: --mode, --function, and expected payload. Optional: restore payload, --flags.", L"Hex and file payload forms are mutually exclusive per payload." },
+        { L"kernel", L"query-driver-object", L"KswordCLI.exe kernel query-driver-object --driver NAME [--flags 0xN] [--max-devices N] [--max-attached N] [--limit N]", L"Query one DriverObject and device chain.", L"Required: --driver. Optional: --flags, --max-devices, --max-attached, --limit.", L"" },
+        { L"kernel", L"query-driver-integrity", L"KswordCLI.exe kernel query-driver-integrity [--driver NAME] [--module-base VA] [--flags 0xN] [--max-rows N] [--max-idt-vectors N] [--max-devices N] [--max-attached N] [--limit N]", L"Query driver integrity evidence rows.", L"Optional: --driver, --module-base, --flags, --max-rows, --max-idt-vectors, --max-devices, --max-attached, --limit.", L"" },
+        { L"kernel", L"force-unload-driver", L"KswordCLI.exe kernel force-unload-driver --driver NAME [--module-base VA] [--timeout-ms N] [--flags 0xN]", L"Force an unload path for one driver.", L"Required: --driver. Optional: --module-base, --timeout-ms, --flags.", L"" },
+        { L"kernel", L"query-cpu", L"KswordCLI.exe kernel query-cpu", L"Query CPU hardware summary.", L"No options.", L"" },
+        { L"kernel", L"query-phys-layout", L"KswordCLI.exe kernel query-phys-layout", L"Query physical memory layout summary.", L"No options.", L"" },
+        { L"kernel", L"cid", L"KswordCLI.exe kernel cid [--flags 0xN] [--max-entries N] [--max-visits N] [--start-cid CID] [--end-cid CID] [--limit N]", L"Enumerate CID table evidence.", L"Optional: --flags, --max-entries, --max-visits, --start-cid, --end-cid, --limit.", L"" },
+        { L"kernel", L"object-summary", L"KswordCLI.exe kernel object-summary --target-kind KIND [--cid CID] [--object ADDRESS] [--flags 0xN]", L"Query object header/type/counter summary for CID or object evidence.", L"Required: --target-kind. Optional: --cid, --object, --flags.", L"Backed by IOCTL_KSWORD_ARK_QUERY_KERNEL_OBJECT_SUMMARY." },
+        { L"kernel", L"ipc", L"KswordCLI.exe kernel ipc [--flags 0xN] [--pid PID] [--handle HANDLE] [--max-entries N]", L"Query IPC summary for a process/handle context.", L"Optional: --flags, --pid, --handle, --max-entries.", L"" },
+        { L"kernel", L"callbacks", L"KswordCLI.exe kernel callbacks [--flags 0xN] [--max-entries N] [--limit N]", L"Alias for callback inventory.", L"Optional: --flags, --max-entries, --limit.", L"" },
+        { L"kernel", L"hooks", L"KswordCLI.exe kernel hooks [--flags 0xN] [--max-entries N] [--module NAME] [--limit N]", L"Alias-style inline hook scan.", L"Optional: --flags, --max-entries, --module, --limit.", L"" },
+        { L"callback", L"set-rules", L"KswordCLI.exe callback set-rules --blob PATH", L"Load callback rule bytes.", L"Required: --blob.", L"" },
+        { L"callback", L"runtime-state", L"KswordCLI.exe callback runtime-state", L"Query callback runtime state.", L"No options.", L"" },
+        { L"callback", L"wait-event", L"KswordCLI.exe callback wait-event [--waiter-tag N]", L"Wait for one callback event packet.", L"Optional: --waiter-tag.", L"" },
+        { L"callback", L"answer-event", L"KswordCLI.exe callback answer-event --event-guid GUID --decision N --source-session-id N [--answered-at UTC100NS]", L"Answer one pending callback event.", L"Required: --event-guid, --decision, --source-session-id. Optional: --answered-at.", L"" },
+        { L"callback", L"cancel-pending", L"KswordCLI.exe callback cancel-pending", L"Cancel all pending callback decisions.", L"No options.", L"" },
+        { L"callback", L"remove", L"KswordCLI.exe callback remove --class N --callback VA [--flags 0xN]", L"Remove an external callback by class/address.", L"Required: --class, --callback. Optional: --flags.", L"" },
+        { L"callback", L"remove-ex", L"KswordCLI.exe callback remove-ex --class N --callback VA [--registration VA] [--raw-storage VA] [--generation N] [--identity-hash N] [--source N] [--operation-mask 0xN] [--object-type-mask 0xN] [--trust-flags 0xN] [--remove-behavior N] [--flags 0xN]", L"Remove an external callback with extended identity hints.", L"Required: --class, --callback. Optional: extended identity, source, masks, trust, behavior, --flags.", L"" },
+        { L"callback", L"set-minifilter-bypass-pids", L"KswordCLI.exe callback set-minifilter-bypass-pids --pids PID[,PID...] [--flags 0xN]", L"Set minifilter bypass PID list.", L"Required: --pids. Optional: --flags.", L"" },
+        { L"callback", L"query-minifilter-bypass-pids", L"KswordCLI.exe callback query-minifilter-bypass-pids", L"Query minifilter bypass PID list.", L"No options.", L"" },
+        { L"callback", L"enum", L"KswordCLI.exe callback enum [--flags 0xN] [--max-entries N] [--limit N]", L"Enumerate callback inventory.", L"Optional: --flags, --max-entries, --limit.", L"" },
+        { L"dyn", L"status", L"KswordCLI.exe dyn status", L"Query DynData status.", L"No options.", L"" },
+        { L"dyn", L"fields", L"KswordCLI.exe dyn fields [--limit N]", L"List DynData fields.", L"Optional: --limit.", L"" },
+        { L"dyn", L"capabilities", L"KswordCLI.exe dyn capabilities", L"Query DynData capability mask.", L"No options.", L"" },
+        { L"dyn", L"profile", L"KswordCLI.exe dyn profile [--limit N]", L"List v4 DynData module profile rows.", L"Optional: --limit.", L"Alias: dyn v4-modules." },
+        { L"dyn", L"v4-modules", L"KswordCLI.exe dyn v4-modules [--limit N]", L"List v4 DynData module profile rows.", L"Optional: --limit.", L"Alias: dyn profile." },
+        { L"dyn", L"v4-capabilities", L"KswordCLI.exe dyn v4-capabilities [--limit N]", L"List v4 DynData capability groups.", L"Optional: --limit.", L"Alias: dyn capability-groups." },
+        { L"dyn", L"capability-groups", L"KswordCLI.exe dyn capability-groups [--limit N]", L"List v4 DynData capability groups.", L"Optional: --limit.", L"Alias: dyn v4-capabilities." },
+        { L"dyn", L"v4-missing", L"KswordCLI.exe dyn v4-missing [--limit N]", L"List missing v4 DynData items.", L"Optional: --limit.", L"Alias: dyn missing-items." },
+        { L"dyn", L"missing-items", L"KswordCLI.exe dyn missing-items [--limit N]", L"List missing v4 DynData items.", L"Optional: --limit.", L"Alias: dyn v4-missing." },
+        { L"dyn", L"v4-items", L"KswordCLI.exe dyn v4-items [--limit N]", L"List every v4 DynData item status row.", L"Optional: --limit.", L"Backed by IOCTL_KSWORD_ARK_QUERY_DYN_V4_ITEMS." },
+        { L"dyn", L"apply-profile-v4", L"KswordCLI.exe dyn apply-profile-v4 --blob PATH", L"Apply a raw v4 DynData profile packet.", L"Required: --blob.", L"" },
+        { L"dyn", L"apply-profile", L"KswordCLI.exe dyn apply-profile --blob PATH", L"Apply a raw legacy DynData profile packet.", L"Required: --blob.", L"" },
+        { L"dyn", L"apply-profile-ex", L"KswordCLI.exe dyn apply-profile-ex --blob PATH", L"Apply a raw extended DynData profile packet.", L"Required: --blob.", L"" },
+        { L"capability", L"query-driver-capabilities", L"KswordCLI.exe capability query-driver-capabilities [--limit N]", L"Query unified driver feature capability rows.", L"Optional: --limit.", L"" },
+        { L"thread", L"enum", L"KswordCLI.exe thread enum [--flags 0xN] [--pid PID] [--limit N]", L"Enumerate threads.", L"Optional: --flags, --pid, --limit.", L"" },
+        { L"thread", L"crossview", L"KswordCLI.exe thread crossview [--flags 0xN] [--pid PID] [--start-tid TID] [--end-tid TID] [--max-nodes N] [--limit N]", L"Compare thread evidence across supported sources.", L"Optional: --flags, --pid, --start-tid, --end-tid, --max-nodes, --limit.", L"" },
+        { L"thread", L"detail", L"KswordCLI.exe thread detail --tid TID [--pid PID] [--flags 0xN]", L"Query fixed R0 ETHREAD/KTHREAD runtime detail.", L"Required: --tid. Optional: --pid, --flags defaults to include-all.", L"Backed by IOCTL_KSWORD_ARK_QUERY_THREAD_DETAIL." },
+        { L"thread", L"runtime-fields", L"KswordCLI.exe thread runtime-fields --tid TID [--pid PID] --items id:offset:size[:flags][,id:offset:size[:flags]...] [--flags 0xN] [--hexdump]", L"Sample bounded ETHREAD/KTHREAD runtime fields by checked offsets.", L"Required: --tid, --items. Optional: --pid, --flags, --hexdump.", L"Backed by IOCTL_KSWORD_ARK_QUERY_THREAD_RUNTIME_FIELDS; each item is bounded by KSWORD_ARK_RUNTIME_FIELD_SAMPLE_MAX_VALUE_BYTES." },
+        { L"handle", L"enum", L"KswordCLI.exe handle enum --pid PID [--flags 0xN] [--limit N]", L"Enumerate handles in one process.", L"Required: --pid. Optional: --flags, --limit.", L"Alias: handle object-table." },
+        { L"handle", L"object-table", L"KswordCLI.exe handle object-table --pid PID [--flags 0xN] [--limit N]", L"Enumerate handles in one process.", L"Required: --pid. Optional: --flags, --limit.", L"Alias: handle enum." },
+        { L"handle", L"query-object", L"KswordCLI.exe handle query-object --pid PID --handle HANDLE [--access 0xN] [--flags 0xN]", L"Query one handle object.", L"Required: --pid, --handle. Optional: --access, --flags.", L"Aliases: handle object-header, handle type-matrix." },
+        { L"handle", L"object-header", L"KswordCLI.exe handle object-header --pid PID --handle HANDLE [--access 0xN] [--flags 0xN]", L"Query one handle object header projection.", L"Required: --pid, --handle. Optional: --access, --flags.", L"Alias: handle query-object." },
+        { L"handle", L"type-matrix", L"KswordCLI.exe handle type-matrix --pid PID --handle HANDLE [--access 0xN] [--flags 0xN]", L"Query one handle object type projection.", L"Required: --pid, --handle. Optional: --access, --flags.", L"Alias: handle query-object." },
+        { L"alpc", L"query-port", L"KswordCLI.exe alpc query-port --pid PID --handle HANDLE [--flags 0xN]", L"Query ALPC port information for one handle.", L"Required: --pid, --handle. Optional: --flags.", L"" },
+        { L"section", L"query-process", L"KswordCLI.exe section query-process --pid PID [--flags 0xN] [--max-mappings N] [--limit N]", L"Query section mappings for one process.", L"Required: --pid. Optional: --flags, --max-mappings, --limit.", L"" },
+        { L"section", L"query-file-mappings", L"KswordCLI.exe section query-file-mappings --path PATH [--flags 0xN] [--max-mappings N] [--limit N]", L"Query section mappings for one file path.", L"Required: --path. Optional: --flags, --max-mappings, --limit.", L"" },
+        { L"wsl", L"query-silo", L"KswordCLI.exe wsl query-silo [--pid PID] [--tid TID] [--flags 0xN]", L"Query WSL silo process/thread evidence.", L"Optional: --pid, --tid, --flags.", L"" },
+        { L"trust", L"query-image", L"KswordCLI.exe trust query-image --path PATH [--flags 0xN]", L"Query image trust and signing evidence.", L"Required: --path. Optional: --flags.", L"" },
+        { L"safety", L"query-policy", L"KswordCLI.exe safety query-policy [--flags 0xN]", L"Query safety policy state.", L"Optional: --flags.", L"" },
+        { L"safety", L"set-policy", L"KswordCLI.exe safety set-policy [--set-flags 0xN] [--clear-flags 0xN] [--expected-generation N]", L"Update safety policy flags.", L"Optional: --set-flags, --clear-flags, --expected-generation.", L"" },
+        { L"preflight", L"query", L"KswordCLI.exe preflight query [--flags 0xN] [--limit N]", L"Run release-readiness preflight checks.", L"Optional: --flags, --limit.", L"" },
+        { L"registry", L"read-value", L"KswordCLI.exe registry read-value --key KEY [--value NAME] [--max-data-bytes N] [--flags 0xN] [--hexdump]", L"Read one registry value or default value.", L"Required: --key. Optional: --value, --max-data-bytes, --flags, --hexdump.", L"" },
+        { L"registry", L"enum-key", L"KswordCLI.exe registry enum-key --key KEY [--flags 0xN] [--max-subkeys N] [--max-values N] [--max-value-data-bytes N] [--limit N]", L"Enumerate registry subkeys and values.", L"Required: --key. Optional: --flags, --max-subkeys, --max-values, --max-value-data-bytes, --limit.", L"" },
+        { L"registry", L"set-value", L"KswordCLI.exe registry set-value --key KEY --type TYPE --data-file PATH [--value NAME] [--flags 0xN]", L"Set one registry value.", L"Required: --key, --type, --data-file. Optional: --value, --flags.", L"" },
+        { L"registry", L"delete-value", L"KswordCLI.exe registry delete-value --key KEY [--value NAME] [--flags 0xN]", L"Delete one registry value or default value.", L"Required: --key. Optional: --value, --flags.", L"" },
+        { L"registry", L"create-key", L"KswordCLI.exe registry create-key --key KEY [--flags 0xN]", L"Create one registry key.", L"Required: --key. Optional: --flags.", L"" },
+        { L"registry", L"delete-key", L"KswordCLI.exe registry delete-key --key KEY [--flags 0xN]", L"Delete one registry key.", L"Required: --key. Optional: --flags.", L"" },
+        { L"registry", L"rename-value", L"KswordCLI.exe registry rename-value --key KEY --old-value NAME --new-value NAME [--flags 0xN]", L"Rename one registry value.", L"Required: --key, --old-value, --new-value. Optional: --flags.", L"" },
+        { L"registry", L"rename-key", L"KswordCLI.exe registry rename-key --key KEY --new-name NAME [--flags 0xN]", L"Rename one registry key.", L"Required: --key, --new-name. Optional: --flags.", L"" },
+        { L"redirect", L"set-rules", L"KswordCLI.exe redirect set-rules --blob PATH", L"Load file/registry redirect rules.", L"Required: --blob.", L"" },
+        { L"redirect", L"query-status", L"KswordCLI.exe redirect query-status [--limit N]", L"Query redirect runtime state and rules.", L"Optional: --limit.", L"" },
+        { L"network", L"set-rules", L"KswordCLI.exe network set-rules --blob PATH", L"Load network rule bytes.", L"Required: --blob.", L"" },
+        { L"network", L"query-status", L"KswordCLI.exe network query-status [--limit N]", L"Query network runtime state and rules.", L"Optional: --limit.", L"" },
+        { L"network", L"audit", L"KswordCLI.exe network audit [--flags 0xN] [--max-rows N] [--limit N]", L"Query TCP endpoint audit as the default network audit view.", L"Optional: --flags, --max-rows, --limit.", L"Use network wfp or network ndis for chain-specific views." },
+        { L"network", L"tcp", L"KswordCLI.exe network tcp [--flags 0xN] [--max-rows N] [--limit N]", L"Query TCP endpoint audit rows.", L"Optional: --flags, --max-rows, --limit.", L"" },
+        { L"network", L"udp", L"KswordCLI.exe network udp [--flags 0xN] [--max-rows N] [--limit N]", L"Query UDP endpoint audit rows.", L"Optional: --flags, --max-rows, --limit.", L"" },
+        { L"network", L"wfp", L"KswordCLI.exe network wfp [--flags 0xN] [--max-rows N] [--limit N]", L"Query WFP inventory rows.", L"Optional: --flags, --max-rows, --limit.", L"" },
+        { L"network", L"ndis", L"KswordCLI.exe network ndis [--flags 0xN] [--max-rows N] [--limit N]", L"Query NDIS chain rows.", L"Optional: --flags, --max-rows, --limit.", L"" },
+        { L"network", L"afd", L"KswordCLI.exe network afd [--limit N]", L"Print degraded R3 AFD endpoint fallback evidence.", L"Optional: --limit.", L"No dedicated R0 AFD audit IOCTL is used." },
+        { L"network", L"nsi", L"KswordCLI.exe network nsi [--limit N]", L"Print degraded R3 NSI adapter/address fallback evidence.", L"Optional: --limit.", L"No dedicated R0 NSI audit IOCTL is used." },
+        { L"keyboard", L"enum-hotkeys", L"KswordCLI.exe keyboard enum-hotkeys [--flags 0xN] [--pid PID] [--max-entries N] [--limit N]", L"Enumerate keyboard hotkeys.", L"Optional: --flags, --pid, --max-entries, --limit.", L"" },
+        { L"keyboard", L"enum-hooks", L"KswordCLI.exe keyboard enum-hooks [--flags 0xN] [--pid PID] [--max-entries N] [--limit N]", L"Enumerate keyboard hooks.", L"Optional: --flags, --pid, --max-entries, --limit.", L"" },
+        { L"driver", L"integrity", L"KswordCLI.exe driver integrity [--driver NAME] [--module-base VA] [--flags 0xN] [--max-rows N] [--max-idt-vectors N] [--max-devices N] [--max-attached N] [--limit N]", L"Query driver integrity evidence.", L"Optional: --driver, --module-base, --flags, --max-rows, --max-idt-vectors, --max-devices, --max-attached, --limit.", L"" },
+        { L"driver", L"detail", L"KswordCLI.exe driver detail --driver NAME [--flags 0xN] [--max-devices N] [--max-attached N] [--limit N]", L"Query one DriverObject detail projection.", L"Required: --driver. Optional: --flags, --max-devices, --max-attached, --limit.", L"" },
+        { L"driver", L"device", L"KswordCLI.exe driver device [--profile-flags 0xN] [--max-rows N] [--max-attached N] [--target NAME] [--limit N]", L"Query driver device stack audit rows.", L"Optional: --profile-flags, --max-rows, --max-attached, --target, --limit.", L"Aliases: driver major, driver fastio." },
+        { L"driver", L"major", L"KswordCLI.exe driver major [--profile-flags 0xN] [--max-rows N] [--max-attached N] [--target NAME] [--limit N]", L"Alias for driver device audit rows.", L"Optional: --profile-flags, --max-rows, --max-attached, --target, --limit.", L"Alias: driver device." },
+        { L"driver", L"fastio", L"KswordCLI.exe driver fastio [--profile-flags 0xN] [--max-rows N] [--max-attached N] [--target NAME] [--limit N]", L"Alias for driver device audit rows.", L"Optional: --profile-flags, --max-rows, --max-attached, --target, --limit.", L"Alias: driver device." },
+        { L"driver", L"unloaded", L"KswordCLI.exe driver unloaded [--flags 0xN] [--max-rows N] [--max-idt-vectors N] [--max-devices N] [--max-attached N] [--module-base VA] [--limit N]", L"Project MmUnloadedDrivers optional-global evidence.", L"Optional: --flags, --max-rows, --max-idt-vectors, --max-devices, --max-attached, --module-base, --limit.", L"" },
+        { L"driver", L"piddb", L"KswordCLI.exe driver piddb [--flags 0xN] [--max-rows N] [--max-idt-vectors N] [--max-devices N] [--max-attached N] [--module-base VA] [--limit N]", L"Project PiDDBCacheTable optional-global evidence.", L"Optional: --flags, --max-rows, --max-idt-vectors, --max-devices, --max-attached, --module-base, --limit.", L"" },
+        { L"hardware", L"audit", L"KswordCLI.exe hardware audit [--profile-flags 0xN] [--max-rows N] [--max-attached N] [--target NAME] [--limit N]", L"Query generic hardware device stack audit rows.", L"Optional: --profile-flags, --max-rows, --max-attached, --target, --limit.", L"Alias: hardware pnp." },
+        { L"hardware", L"pnp", L"KswordCLI.exe hardware pnp [--profile-flags 0xN] [--max-rows N] [--max-attached N] [--target NAME] [--limit N]", L"Alias for hardware audit.", L"Optional: --profile-flags, --max-rows, --max-attached, --target, --limit.", L"Alias: hardware audit." },
+        { L"hardware", L"input", L"KswordCLI.exe hardware input [--profile-flags 0xN] [--max-rows N] [--max-attached N] [--target NAME] [--limit N]", L"Query input stack audit rows.", L"Optional: --profile-flags, --max-rows, --max-attached, --target, --limit.", L"" },
+        { L"hardware", L"usb", L"KswordCLI.exe hardware usb [--profile-flags 0xN] [--max-rows N] [--max-attached N] [--target NAME] [--limit N]", L"Query USB topology audit rows.", L"Optional: --profile-flags, --max-rows, --max-attached, --target, --limit.", L"" },
+        { L"window", L"win32k", L"KswordCLI.exe window win32k [--flags 0xN] [--session-id N] [--pid PID] [--tid TID] [--max-entries N] [--limit N]", L"Query win32k profile/session status.", L"Optional: --flags, --session-id, --pid, --tid, --max-entries, --limit.", L"" },
+        { L"window", L"gui", L"KswordCLI.exe window gui [--flags 0xN] [--session-id N] [--pid PID] [--tid TID] [--max-entries N] [--limit N]", L"Query GUI window snapshot rows.", L"Optional: --flags, --session-id, --pid, --tid, --max-entries, --limit.", L"" },
+        { L"window", L"gui-threads", L"KswordCLI.exe window gui-threads [--flags 0xN] [--session-id N] [--pid PID] [--tid TID] [--max-entries N] [--limit N]", L"Query GUI thread snapshot rows.", L"Optional: --flags, --session-id, --pid, --tid, --max-entries, --limit.", L"" },
+        { L"window", L"hotkeys-pdb", L"KswordCLI.exe window hotkeys-pdb [--flags 0xN] [--session-id N] [--pid PID] [--tid TID] [--max-entries N] [--limit N]", L"Query PDB-backed win32k hotkey chain rows.", L"Optional: --flags, --session-id, --pid, --tid, --max-entries, --limit.", L"Backed by IOCTL_KSWORD_ARK_QUERY_WIN32K_HOTKEYS_PDB." },
+        { L"window", L"hooks-pdb", L"KswordCLI.exe window hooks-pdb [--flags 0xN] [--session-id N] [--pid PID] [--tid TID] [--max-entries N] [--limit N]", L"Query PDB-backed win32k hook chain rows.", L"Optional: --flags, --session-id, --pid, --tid, --max-entries, --limit.", L"Backed by IOCTL_KSWORD_ARK_QUERY_WIN32K_HOOKS_PDB." },
+        { L"window", L"detail", L"KswordCLI.exe window detail --hwnd HWND [--pid PID] [--tid TID] [--flags 0xN]", L"Query one HWND/tagWND runtime detail packet.", L"Required: --hwnd. Optional: --pid, --tid, --flags.", L"Backed by IOCTL_KSWORD_ARK_QUERY_WIN32K_WINDOW_DETAIL." },
+        { L"window", L"gpu", L"KswordCLI.exe window gpu [--profile-flags 0xN] [--max-rows N] [--max-attached N] [--target NAME] [--limit N]", L"Query GPU/display/watchdog audit rows.", L"Optional: --profile-flags, --max-rows, --max-attached, --target, --limit.", L"Aliases: window display, window watchdog." },
+        { L"window", L"display", L"KswordCLI.exe window display [--profile-flags 0xN] [--max-rows N] [--max-attached N] [--target NAME] [--limit N]", L"Alias for window gpu audit rows.", L"Optional: --profile-flags, --max-rows, --max-attached, --target, --limit.", L"Alias: window gpu." },
+        { L"window", L"watchdog", L"KswordCLI.exe window watchdog [--profile-flags 0xN] [--max-rows N] [--max-attached N] [--target NAME] [--limit N]", L"Alias for window gpu audit rows.", L"Optional: --profile-flags, --max-rows, --max-attached, --target, --limit.", L"Alias: window gpu." },
+        { L"misc", L"security", L"KswordCLI.exe misc security [--flags 0xN]", L"Query security/CI/VBS posture.", L"Optional: --flags.", L"Aliases: misc ci, misc vbs." },
+        { L"misc", L"ci", L"KswordCLI.exe misc ci [--flags 0xN]", L"Alias for misc security.", L"Optional: --flags.", L"Alias: misc security." },
+        { L"misc", L"vbs", L"KswordCLI.exe misc vbs [--flags 0xN]", L"Alias for misc security.", L"Optional: --flags.", L"Alias: misc security." },
+        { L"misc", L"hyperv", L"KswordCLI.exe misc hyperv", L"Query Hyper-V summary posture.", L"No options.", L"" },
+        { L"misc", L"applocker", L"KswordCLI.exe misc applocker", L"Query AppLocker/BAM posture.", L"No options.", L"Alias: misc bam." },
+        { L"misc", L"bam", L"KswordCLI.exe misc bam", L"Alias for misc applocker.", L"No options.", L"Alias: misc applocker." },
+        { L"misc", L"driver-trust", L"KswordCLI.exe misc driver-trust [--flags 0xN] [--max-entries N] [--limit N]", L"Query loaded-driver trust rows.", L"Optional: --flags, --max-entries, --limit.", L"" },
+        { L"mutation", L"prepare", L"KswordCLI.exe mutation prepare --target-kind N (--after-hex HEX | --after-file PATH) [--before-hex HEX | --before-file PATH] [--pid PID] [--address VA] [--context N] [--flags 0xN]", L"Prepare a bounded mutation transaction.", L"Required: --target-kind and after payload. Optional: before payload, --pid, --address, --context, --flags.", L"Hex and file payload forms are mutually exclusive per payload." },
+        { L"mutation", L"commit", L"KswordCLI.exe mutation commit --transaction-id ID [--flags 0xN]", L"Commit a prepared mutation transaction.", L"Required: --transaction-id. Optional: --flags.", L"" },
+        { L"mutation", L"rollback", L"KswordCLI.exe mutation rollback --transaction-id ID [--flags 0xN]", L"Rollback a prepared mutation transaction.", L"Required: --transaction-id. Optional: --flags.", L"" },
+        { L"mutation", L"query-audit", L"KswordCLI.exe mutation query-audit [--flags 0xN] [--max-entries N] [--start-sequence N] [--limit N] [--hexdump]", L"Query mutation audit ring entries.", L"Optional: --flags, --max-entries, --start-sequence, --limit, --hexdump.", L"" },
+    };
+
+    // sameToken compares an argv token with a metadata token.
+    // Inputs: value may be null; expected is a static command token.
+    // Processing: uses exact case-sensitive comparison to match dispatch behavior.
+    // Returns: true when both tokens contain the same text.
+    bool sameToken(const wchar_t* value, const wchar_t* expected)
+    {
+        return value != nullptr && expected != nullptr && std::wcscmp(value, expected) == 0;
+    }
+
+    // isHelpToken reports whether a token requests CLI help.
+    // Inputs: raw argv token, possibly null.
+    // Processing: accepts the same spellings that dispatch historically treated as help.
+    // Returns: true for help, --help, -h, or /?.
+    bool isHelpToken(const wchar_t* token)
+    {
+        return sameToken(token, L"help") ||
+               sameToken(token, L"--help") ||
+               sameToken(token, L"-h") ||
+               sameToken(token, L"/?");
+    }
+
+    // findFamilyHelp returns metadata for one top-level family.
+    // Inputs: family token from argv.
+    // Processing: scans the static help table without side effects.
+    // Returns: pointer to metadata or nullptr when the family is unknown.
+    const FamilyHelp* findFamilyHelp(const std::wstring& family)
+    {
+        for (const FamilyHelp& entry : kFamilyHelps)
+        {
+            if (family == entry.name)
+            {
+                return &entry;
+            }
+        }
+        return nullptr;
+    }
+
+    // printCommandHelpEntry renders detailed help for one command row.
+    // Inputs: static CommandHelp metadata.
+    // Processing: writes syntax, summary, options, and optional notes to stdout.
+    // Returns: no value.
+    void printCommandHelpEntry(const CommandHelp& entry)
+    {
+        std::wcout << L"Command: " << entry.family;
+        if (entry.subcommand[0] != L'\0')
+        {
+            std::wcout << L" " << entry.subcommand;
+        }
+        std::wcout << L"\n"
+                   << L"Syntax:\n  " << entry.syntax << L"\n"
+                   << L"Summary:\n  " << entry.summary << L"\n";
+        if (entry.options[0] != L'\0')
+        {
+            std::wcout << L"Options:\n  " << entry.options << L"\n";
+        }
+        if (entry.notes[0] != L'\0')
+        {
+            std::wcout << L"Notes:\n  " << entry.notes << L"\n";
+        }
+    }
+
+    // printFamilyHelp renders all concrete commands for one family.
+    // Inputs: top-level family token.
+    // Processing: validates the family and lists matching command metadata.
+    // Returns: true when the family exists; false otherwise.
+    bool printFamilyHelp(const std::wstring& family)
+    {
+        const FamilyHelp* familyHelp = findFamilyHelp(family);
+        if (familyHelp == nullptr)
+        {
+            std::wcerr << L"error: unknown family '" << family << L"'\n";
+            return false;
+        }
+
+        std::wcout << L"Family: " << familyHelp->name << L"\n"
+                   << L"Summary: " << familyHelp->summary << L"\n"
+                   << L"Commands:\n";
+        for (const CommandHelp& command : kCommandHelps)
+        {
+            if (family == command.family)
+            {
+                std::wcout << L"  " << command.syntax << L"\n"
+                           << L"    " << command.summary << L"\n";
+            }
+        }
+        return true;
+    }
+
+    // printSpecificCommandHelp renders help for one family/subcommand pair.
+    // Inputs: exact family and subcommand tokens from argv.
+    // Processing: scans metadata and falls back to family help on misses.
+    // Returns: true when a concrete command was found.
+    bool printSpecificCommandHelp(const std::wstring& family, const std::wstring& subcommand)
+    {
+        for (const CommandHelp& command : kCommandHelps)
+        {
+            if (family == command.family && subcommand == command.subcommand)
+            {
+                printCommandHelpEntry(command);
+                return true;
+            }
+        }
+
+        std::wcerr << L"error: unknown command '" << family << L" " << subcommand << L"'\n";
+        if (findFamilyHelp(family) != nullptr)
+        {
+            printFamilyHelp(family);
+        }
+        return false;
+    }
+
     // printUsage prints the CLI command reference.
     // Inputs: none.
-    // Processing: groups all registered IOCTLs by command family.
+    // Processing: groups all registered commands by static command family metadata.
     // Returns: no value; output goes to stdout.
     void printUsage()
     {
         std::wcout
             << L"KswordCLI CLI\n"
-            << L"usage: KswordCLI.exe <family> <subcommand> [--named-options]\n\n"
-            << L"Families and subcommands:\n"
-            << L"  process   terminate | suspend | set-ppl | enum | set-visibility | set-special-flags | dkom | crossview\n"
-            << L"  memory    query-va | read-va | write-va | read-phys | write-phys | translate-va | query-pte | scan-kexec | scan-evidence\n"
-            << L"  file      delete-path | query-info | fileobject | minifilter | section | bitlocker | storage | mountmgr | filesystem | monitor-control | monitor-drain | monitor-status\n"
-            << L"  kernel    ssdt | shadow-ssdt | scan-inline-hooks | enum-iat-eat-hooks | query-driver-object | query-driver-integrity | query-cpu | query-phys-layout | cid | ipc | callbacks | hooks\n"
-            << L"  callback  set-rules | runtime-state | wait-event | answer-event | cancel-pending | remove | remove-ex | enum | set-minifilter-bypass-pids | query-minifilter-bypass-pids\n"
-            << L"  dyn       status | profile | fields | capabilities | v4-modules | v4-capabilities | v4-missing | apply-profile | apply-profile-ex | apply-profile-v4\n"
-            << L"  thread    enum | crossview\n"
-            << L"  handle    enum | object-table | query-object | object-header | type-matrix\n"
-            << L"  driver    integrity | detail | device | major | fastio | unloaded | piddb\n"
-            << L"  hardware  audit | input | usb | pnp\n"
-            << L"  window    win32k | gui | gui-threads | gpu | display | watchdog\n"
-            << L"  misc      security | ci | vbs | hyperv | applocker | bam | driver-trust\n"
-            << L"  alpc      query-port\n"
-            << L"  section   query-process | query-file-mappings\n"
-            << L"  trust     query-image\n"
-            << L"  safety    query-policy | set-policy\n"
-            << L"  preflight query\n"
-            << L"  registry  read-value | enum-key | set-value | delete-value | create-key | delete-key | rename-value | rename-key\n"
-            << L"  redirect  set-rules | query-status\n"
-            << L"  network   set-rules | query-status | audit | tcp | udp | afd | wfp | ndis | nsi\n"
-            << L"  keyboard  enum-hotkeys | enum-hooks\n"
-            << L"  mutation  prepare | commit | rollback | query-audit\n"
-            << L"  capability query-driver-capabilities\n"
-            << L"  wsl       query-silo\n"
-            << L"  log       [--max-frames N]\n\n"
-            << L"Common options: --flags 0xN --limit N --hexdump\n"
+            << L"usage: KswordCLI.exe <family> <subcommand> [--named-options]\n"
+            << L"       KswordCLI.exe log [--max-frames N]\n"
+            << L"       KswordCLI.exe help [family] [subcommand]\n\n"
+            << L"Help forms:\n"
+            << L"  KswordCLI.exe help\n"
+            << L"  KswordCLI.exe help process\n"
+            << L"  KswordCLI.exe help process enum\n"
+            << L"  KswordCLI.exe process help\n"
+            << L"  KswordCLI.exe process enum --help\n\n"
+            << L"Families and subcommands:\n";
+
+        for (const FamilyHelp& family : kFamilyHelps)
+        {
+            std::wcout << L"  " << std::left << std::setw(11) << family.name;
+            bool first = true;
+            for (const CommandHelp& command : kCommandHelps)
+            {
+                if (std::wcscmp(family.name, command.family) != 0)
+                {
+                    continue;
+                }
+                if (!first)
+                {
+                    std::wcout << L" | ";
+                }
+                std::wcout << ((command.subcommand[0] == L'\0') ? L"[no subcommand]" : command.subcommand);
+                first = false;
+            }
+            std::wcout << std::right << L"\n";
+        }
+
+        std::wcout
+            << L"\nCommon options: --flags 0xN --limit N --hexdump\n"
+            << L"Use 'KswordCLI.exe help <family> <subcommand>' for exact syntax.\n"
             << L"Examples:\n"
             << L"  KswordCLI.exe capability query-driver-capabilities\n"
             << L"  KswordCLI.exe process enum --flags 0x1 --limit 32\n"
             << L"  KswordCLI.exe memory read-va --pid 1234 --address 0x7ff700000000 --bytes 64 --hexdump\n"
-            << L"  KswordCLI.exe callback set-rules --blob rules.bin\n"
-            << L"  KswordCLI.exe callback set-minifilter-bypass-pids --pids 1234,5678\n"
-            << L"  KswordCLI.exe callback query-minifilter-bypass-pids\n";
+            << L"  KswordCLI.exe help memory read-va\n";
+    }
+
+    // printHelpForTarget handles help command argument routing.
+    // Inputs: argc/argv from wmain and index of the first help target token.
+    // Processing: prints overview, family help, or exact command help without IOCTLs.
+    // Returns: process exit code; zero means help text was found and printed.
+    int printHelpForTarget(int argc, wchar_t* argv[], int startIndex)
+    {
+        if (startIndex >= argc || argv[startIndex] == nullptr || isHelpToken(argv[startIndex]))
+        {
+            printUsage();
+            return 0;
+        }
+
+        const std::wstring family = argv[startIndex];
+        if (startIndex + 1 >= argc || argv[startIndex + 1] == nullptr || isHelpToken(argv[startIndex + 1]))
+        {
+            return printFamilyHelp(family) ? 0 : 1;
+        }
+
+        const std::wstring subcommand = argv[startIndex + 1];
+        return printSpecificCommandHelp(family, subcommand) ? 0 : 1;
+    }
+
+    // hasTrailingHelpToken detects inline help requests after a command target.
+    // Inputs: argc/argv plus the first token to inspect.
+    // Processing: scans remaining tokens for help spellings and does not parse options.
+    // Returns: true when any trailing token asks for help.
+    bool hasTrailingHelpToken(int argc, wchar_t* argv[], int startIndex)
+    {
+        for (int index = startIndex; index < argc; ++index)
+        {
+            if (isHelpToken(argv[index]))
+            {
+                return true;
+            }
+        }
+        return false;
     }
 
     // printCountHeader renders the common variable-response metadata.
@@ -1357,6 +1705,52 @@ namespace
         return 0;
     }
 
+    // queryDynV4Items prints every applied DynData v4 item packet.
+    // Inputs: parsed command options; --limit caps console output only.
+    // Processing: issues IOCTL_KSWORD_ARK_QUERY_DYN_V4_ITEMS and renders the
+    // module class, item identity, group membership, values and auxiliary words.
+    // Returns: CLI exit code; old drivers are reported through normalizeIoctlRc.
+    int queryDynV4Items(const NamedArgs& args)
+    {
+        IoctlResult io{};
+        std::vector<std::uint8_t> buffer(kSmallResponseBytes, 0U);
+        const int rc = sendRawIoctl(
+            L"IOCTL_KSWORD_ARK_QUERY_DYN_V4_ITEMS",
+            IOCTL_KSWORD_ARK_QUERY_DYN_V4_ITEMS,
+            nullptr,
+            0U,
+            buffer,
+            io);
+        if (rc != 0) return normalizeIoctlRc(L"dyn v4 items", io, rc);
+        constexpr std::size_t headerSize = KSW_QUERY_DYN_V4_ITEMS_RESPONSE_HEADER_SIZE;
+        const auto* response = reinterpret_cast<const KSW_QUERY_DYN_V4_ITEMS_RESPONSE*>(buffer.data());
+        std::size_t available = 0U;
+        try { available = validateVariable(io.bytesReturned, headerSize, response->entrySize, sizeof(KSW_DYN_V4_ITEM_STATUS_ENTRY), L"dyn v4 items"); }
+        catch (...) { return 4; }
+        printCountHeader(response->version, response->totalCount, response->returnedCount, response->entrySize, io.bytesReturned);
+        const std::size_t parsed = responseCountLimit(response->returnedCount, available, getOptionU32(args, L"--limit", 256U));
+        for (std::size_t i = 0; i < parsed; ++i)
+        {
+            const auto* entry = reinterpret_cast<const KSW_DYN_V4_ITEM_STATUS_ENTRY*>(buffer.data() + headerSize + (i * response->entrySize));
+            const KSW_DYN_V4_ITEM_PACKET& item = entry->item;
+            const std::uint64_t value64 =
+                (static_cast<std::uint64_t>(item.valueHigh) << 32) |
+                static_cast<std::uint64_t>(item.valueLow);
+            std::wcout << L"  [" << i << L"] moduleClass=" << entry->moduleClassId
+                       << L" itemIndex=" << entry->itemIndex
+                       << L" itemId=" << item.itemId
+                       << L" kind=" << item.itemKind
+                       << L" groupId=" << item.capabilityGroupId
+                       << L" flags=0x" << std::hex << item.flags
+                       << L" valueLow=0x" << item.valueLow
+                       << L" valueHigh=0x" << item.valueHigh
+                       << L" value64=" << hex64(value64)
+                       << L" aux=" << item.aux0 << L"/" << item.aux1 << L"/" << item.aux2 << L"/" << item.aux3
+                       << std::dec << L"\n";
+        }
+        return 0;
+    }
+
     // commandLogFamily reads the non-IOCTL log ReadFile channel.
     // Inputs: argc/argv from wmain.
     // Processing: reads bounded frames until END_OF_LOG or --max-frames.
@@ -1413,6 +1807,300 @@ namespace
         const std::wstring imagePath = fixedUtf16(entry.imagePath, KSWORD_ARK_PROCESS_IMAGE_PATH_CHARS);
         if (!imagePath.empty()) std::wcout << L" path='" << imagePath << L"'";
         std::wcout << L"\n";
+    }
+
+    // RuntimeFieldCliItem stores one CLI-requested bounded runtime field sample.
+    // Inputs: runtimeItemId, offset, size, and optional flags parsed from --items.
+    // Processing: command builders copy these values into process/thread request
+    // packets after enforcing the shared protocol limits.
+    // Returns: no behavior; this is a simple staging structure.
+    struct RuntimeFieldCliItem
+    {
+        std::uint32_t runtimeItemId = 0U;
+        std::uint32_t offset = 0U;
+        std::uint32_t size = 0U;
+        std::uint32_t flags = 0U;
+    };
+
+    // splitRuntimeFieldItem separates one "id:offset:size[:flags]" token.
+    // Inputs: a token from --items where values may be decimal or 0x-prefixed.
+    // Processing: validates the three required fields and the optional flags
+    // field before protocol bounds are applied by the caller.
+    // Returns: parsed item; throws on malformed text.
+    RuntimeFieldCliItem splitRuntimeFieldItem(const std::wstring& token)
+    {
+        std::vector<std::wstring> parts;
+        std::wstring current;
+        for (const wchar_t ch : token)
+        {
+            if (ch == L':')
+            {
+                parts.push_back(current);
+                current.clear();
+                continue;
+            }
+            current.push_back(ch);
+        }
+        parts.push_back(current);
+
+        if (parts.size() < 3U || parts.size() > 4U)
+        {
+            throw std::invalid_argument("runtime field item");
+        }
+
+        RuntimeFieldCliItem item{};
+        item.runtimeItemId = parseU32(parts[0].c_str(), "runtime item id");
+        item.offset = parseU32(parts[1].c_str(), "runtime item offset");
+        item.size = parseU32(parts[2].c_str(), "runtime item size");
+        item.flags = (parts.size() == 4U) ? parseU32(parts[3].c_str(), "runtime item flags") : 0U;
+        if (item.size == 0U || item.size > KSWORD_ARK_RUNTIME_FIELD_SAMPLE_MAX_VALUE_BYTES)
+        {
+            throw std::out_of_range("runtime item size");
+        }
+        if (item.offset > KSWORD_ARK_RUNTIME_FIELD_SAMPLE_MAX_OFFSET)
+        {
+            throw std::out_of_range("runtime item offset");
+        }
+        return item;
+    }
+
+    // parseRuntimeFieldItems parses the comma/semicolon/pipe separated --items list.
+    // Inputs: text such as "1:0x448:8,2:0x5a8:1".
+    // Processing: trims whitespace separators, validates each item, and caps the
+    // count at KSWORD_ARK_RUNTIME_FIELD_SAMPLE_MAX_ITEMS.
+    // Returns: ordered item vector used to build variable-sized IOCTL input.
+    std::vector<RuntimeFieldCliItem> parseRuntimeFieldItems(const std::wstring& text)
+    {
+        std::vector<RuntimeFieldCliItem> items;
+        std::wstring token;
+        const auto flush = [&]()
+        {
+            if (token.empty())
+            {
+                return;
+            }
+            if (items.size() >= KSWORD_ARK_RUNTIME_FIELD_SAMPLE_MAX_ITEMS)
+            {
+                throw std::out_of_range("runtime item count");
+            }
+            items.push_back(splitRuntimeFieldItem(token));
+            token.clear();
+        };
+
+        for (const wchar_t ch : text)
+        {
+            if (ch == L',' || ch == L';' || ch == L'|' || std::iswspace(ch) != 0)
+            {
+                flush();
+                continue;
+            }
+            token.push_back(ch);
+        }
+        flush();
+        if (items.empty())
+        {
+            throw std::invalid_argument("runtime items");
+        }
+        return items;
+    }
+
+    // printKernelGlobals renders the common process/thread runtime global packet.
+    // Inputs: kernelGlobals returned by process/thread detail IOCTLs.
+    // Processing: prints RVA/source/address triplets in a compact diagnostic form.
+    // Returns: no value.
+    void printKernelGlobals(const KSWORD_ARK_RUNTIME_KERNEL_GLOBALS& globals)
+    {
+        std::wcout << L"kernelGlobals"
+                   << L" pspCidTable=" << hex64(globals.pspCidTableAddress) << L"/rva=0x" << std::hex << globals.pspCidTableRva << L"/src=" << globals.pspCidTableSource
+                   << L" psLoadedModuleList=" << hex64(globals.psLoadedModuleListAddress) << L"/rva=0x" << globals.psLoadedModuleListRva << L"/src=" << globals.psLoadedModuleListSource
+                   << L" mmUnloadedDrivers=" << hex64(globals.mmUnloadedDriversAddress) << L"/rva=0x" << globals.mmUnloadedDriversRva << L"/src=" << globals.mmUnloadedDriversSource
+                   << L" piDdbCacheTable=" << hex64(globals.piDdbCacheTableAddress) << L"/rva=0x" << globals.piDdbCacheTableRva << L"/src=" << globals.piDdbCacheTableSource
+                   << L" shadowSsdt=" << hex64(globals.keServiceDescriptorTableShadowAddress) << L"/rva=0x" << globals.keServiceDescriptorTableShadowRva << L"/src=" << globals.keServiceDescriptorTableShadowSource
+                   << std::dec << L"\n";
+    }
+
+    // printRuntimeFieldSampleRows renders a variable process/thread sample response.
+    // Inputs: raw returned buffer and a label used for validation diagnostics.
+    // Processing: validates row size, prints object/capability metadata, and then
+    // prints every bounded sample row up to --limit.
+    // Returns: CLI exit code.
+    int printRuntimeFieldSampleRows(
+        const std::vector<std::uint8_t>& buffer,
+        const IoctlResult& io,
+        const NamedArgs& args,
+        const wchar_t* label)
+    {
+        constexpr std::size_t headerSize = sizeof(KSWORD_ARK_RUNTIME_FIELD_SAMPLE_RESPONSE) - sizeof(KSWORD_ARK_RUNTIME_FIELD_SAMPLE_ROW);
+        const auto* response = reinterpret_cast<const KSWORD_ARK_RUNTIME_FIELD_SAMPLE_RESPONSE*>(buffer.data());
+        std::size_t available = 0U;
+        try { available = validateVariable(io.bytesReturned, headerSize, response->entrySize, sizeof(KSWORD_ARK_RUNTIME_FIELD_SAMPLE_ROW), label); }
+        catch (...) { return 4; }
+
+        printResponseBanner(response->version, response->status, response->lastStatus, io.bytesReturned);
+        printCountHeader(response->version, response->totalCount, response->returnedCount, response->entrySize, io.bytesReturned);
+        std::wcout << L"object=" << hex64(response->objectAddress)
+                   << L" dyn=0x" << std::hex << response->dynDataCapabilityMask
+                   << std::dec << L" flags=0x" << std::hex << response->flags << std::dec << L"\n";
+
+        const bool dump = getOptionBool(args, L"--hexdump");
+        const std::size_t parsed = responseCountLimit(response->returnedCount, available, getOptionU32(args, L"--limit", 64U));
+        for (std::size_t i = 0U; i < parsed; ++i)
+        {
+            const auto* row = reinterpret_cast<const KSWORD_ARK_RUNTIME_FIELD_SAMPLE_ROW*>(buffer.data() + headerSize + (i * response->entrySize));
+            std::wcout << L"  [" << i << L"] item=" << row->runtimeItemId
+                       << L" offset=0x" << std::hex << row->offset
+                       << L" size=" << std::dec << row->size
+                       << L" status=" << row->status
+                       << L" bytesRead=" << row->bytesRead
+                       << L" last=0x" << std::hex << static_cast<unsigned long>(row->lastStatus)
+                       << L" value=" << hex64(row->valueU64)
+                       << std::dec << L"\n";
+            if (dump && row->bytesRead != 0U)
+            {
+                hexdump(row->sampleBytes, std::min<unsigned long>(row->bytesRead, KSWORD_ARK_RUNTIME_FIELD_SAMPLE_MAX_VALUE_BYTES));
+            }
+        }
+        return 0;
+    }
+
+    // printProcessDetail renders IOCTL_KSWORD_ARK_QUERY_PROCESS_DETAIL output.
+    // Inputs: fixed response and DeviceIoControl byte count.
+    // Processing: prints identity, object pointers, security bytes, offsets and
+    // source masks in a format suitable for scripts and manual triage.
+    // Returns: no value.
+    void printProcessDetail(const KSWORD_ARK_PROCESS_DETAIL_RESPONSE& response, DWORD bytesReturned)
+    {
+        printResponseBanner(response.version, response.status, response.lastStatus, bytesReturned);
+        std::wcout << L"pid=" << response.processId
+                   << L" fields=0x" << std::hex << response.fieldFlags
+                   << L" requested=0x" << response.requestedFlags
+                   << L" dyn=0x" << response.dynDataCapabilityMask
+                   << L" missing=0x" << response.missingCapabilityMask
+                   << L" eprocess=" << hex64(response.processObjectAddress)
+                   << L" uniquePidValue=" << hex64(response.uniqueProcessIdValue)
+                   << L" apl.flink=" << hex64(response.activeProcessLinksFlink)
+                   << L" apl.blink=" << hex64(response.activeProcessLinksBlink)
+                   << L" threadList.flink=" << hex64(response.threadListHeadFlink)
+                   << L" threadList.blink=" << hex64(response.threadListHeadBlink)
+                   << L" tokenFastRef=" << hex64(response.tokenFastRef)
+                   << L" tokenObject=" << hex64(response.tokenObjectAddress)
+                   << L" objectTable=" << hex64(response.objectTableAddress)
+                   << L" section=" << hex64(response.sectionObjectAddress)
+                   << std::dec << L"\n";
+        std::wcout << L"security protection=0x" << std::hex << static_cast<unsigned int>(response.protection)
+                   << L" signature=0x" << static_cast<unsigned int>(response.signatureLevel)
+                   << L" sectionSignature=0x" << static_cast<unsigned int>(response.sectionSignatureLevel)
+                   << std::dec << L" image='" << fixedAnsi(response.imageName, KSWORD_ARK_RUNTIME_IMAGE_NAME_CHARS).c_str() << L"'\n";
+        std::wcout << L"offsets uniquePid=0x" << std::hex << response.offsets.epUniqueProcessId
+                   << L" activeLinks=0x" << response.offsets.epActiveProcessLinks
+                   << L" threadList=0x" << response.offsets.epThreadListHead
+                   << L" image=0x" << response.offsets.epImageFileName
+                   << L" token=0x" << response.offsets.epToken
+                   << L" objectTable=0x" << response.offsets.epObjectTable
+                   << L" section=0x" << response.offsets.epSectionObject
+                   << L" protection=0x" << response.offsets.epProtection
+                   << L" signature=0x" << response.offsets.epSignatureLevel
+                   << L" sectionSignature=0x" << response.offsets.epSectionSignatureLevel
+                   << std::dec << L"\n";
+        printKernelGlobals(response.kernelGlobals);
+        dumpWideText(L"detail", fixedWide(response.detail, KSWORD_ARK_RUNTIME_DETAIL_TEXT_CHARS));
+    }
+
+    // printThreadDetail renders IOCTL_KSWORD_ARK_QUERY_THREAD_DETAIL output.
+    // Inputs: fixed response and DeviceIoControl byte count.
+    // Processing: prints ETHREAD/KTHREAD object pointers, start/stack/IO evidence,
+    // offsets, and human-readable detail text.
+    // Returns: no value.
+    void printThreadDetail(const KSWORD_ARK_THREAD_DETAIL_RESPONSE& response, DWORD bytesReturned)
+    {
+        printResponseBanner(response.version, response.status, response.lastStatus, bytesReturned);
+        std::wcout << L"tid=" << response.threadId
+                   << L" pid=" << response.processId
+                   << L" fields=0x" << std::hex << response.fieldFlags
+                   << L" requested=0x" << response.requestedFlags
+                   << L" dyn=0x" << response.dynDataCapabilityMask
+                   << L" missing=0x" << response.missingCapabilityMask
+                   << L" ethread=" << hex64(response.threadObjectAddress)
+                   << L" eprocess=" << hex64(response.processObjectAddress)
+                   << L" cidPid=" << hex64(response.cidUniqueProcess)
+                   << L" cidTid=" << hex64(response.cidUniqueThread)
+                   << L" list.flink=" << hex64(response.threadListEntryFlink)
+                   << L" list.blink=" << hex64(response.threadListEntryBlink)
+                   << L" start=" << hex64(response.startAddress)
+                   << L" win32Start=" << hex64(response.win32StartAddress)
+                   << L" ktProcess=" << hex64(response.kthreadProcessObject)
+                   << std::dec << L"\n";
+        std::wcout << L"stack initial=" << hex64(response.initialStack)
+                   << L" limit=" << hex64(response.stackLimit)
+                   << L" base=" << hex64(response.stackBase)
+                   << L" kernel=" << hex64(response.kernelStack)
+                   << L" io(read/write/other)=" << response.readOperationCount << L"/"
+                   << response.writeOperationCount << L"/" << response.otherOperationCount
+                   << L" bytes(read/write/other)=" << response.readTransferCount << L"/"
+                   << response.writeTransferCount << L"/" << response.otherTransferCount << L"\n";
+        std::wcout << L"offsets cid=0x" << std::hex << response.offsets.etCid
+                   << L" list=0x" << response.offsets.etThreadListEntry
+                   << L" start=0x" << response.offsets.etStartAddress
+                   << L" win32Start=0x" << response.offsets.etWin32StartAddress
+                   << L" ktProcess=0x" << response.offsets.ktProcess
+                   << L" initialStack=0x" << response.offsets.ktInitialStack
+                   << L" stackLimit=0x" << response.offsets.ktStackLimit
+                   << L" stackBase=0x" << response.offsets.ktStackBase
+                   << L" kernelStack=0x" << response.offsets.ktKernelStack
+                   << std::dec << L"\n";
+        printKernelGlobals(response.kernelGlobals);
+        dumpWideText(L"detail", fixedWide(response.detail, KSWORD_ARK_RUNTIME_DETAIL_TEXT_CHARS));
+    }
+
+    // buildProcessRuntimeFieldInput creates the variable input packet for EPROCESS sampling.
+    // Inputs: parsed CLI args with --pid, --items, and optional --flags.
+    // Processing: allocates a byte vector sized to the requested item count and
+    // copies each validated item into the protocol array.
+    // Returns: byte vector ready for DeviceIoControl input.
+    std::vector<std::uint8_t> buildProcessRuntimeFieldInput(const NamedArgs& args)
+    {
+        const std::vector<RuntimeFieldCliItem> items = parseRuntimeFieldItems(requireOptionText(args, L"--items"));
+        const std::size_t headerBytes = offsetof(KSWORD_ARK_PROCESS_RUNTIME_FIELD_SAMPLE_REQUEST, items);
+        std::vector<std::uint8_t> bytes(headerBytes + (items.size() * sizeof(KSWORD_ARK_RUNTIME_FIELD_SAMPLE_ITEM_REQUEST)), 0U);
+        auto* request = reinterpret_cast<KSWORD_ARK_PROCESS_RUNTIME_FIELD_SAMPLE_REQUEST*>(bytes.data());
+        request->version = KSWORD_ARK_RUNTIME_FIELD_SAMPLE_PROTOCOL_VERSION;
+        request->flags = getOptionU32(args, L"--flags", 0U);
+        request->processId = requireOptionU32(args, L"--pid");
+        request->itemCount = static_cast<unsigned long>(items.size());
+        for (std::size_t index = 0U; index < items.size(); ++index)
+        {
+            request->items[index].runtimeItemId = items[index].runtimeItemId;
+            request->items[index].offset = items[index].offset;
+            request->items[index].size = items[index].size;
+            request->items[index].flags = items[index].flags;
+        }
+        return bytes;
+    }
+
+    // buildThreadRuntimeFieldInput creates the variable input packet for ETHREAD sampling.
+    // Inputs: parsed CLI args with --tid, optional --pid, --items, and --flags.
+    // Processing: allocates a byte vector sized to the requested item count and
+    // copies each validated item into the protocol array.
+    // Returns: byte vector ready for DeviceIoControl input.
+    std::vector<std::uint8_t> buildThreadRuntimeFieldInput(const NamedArgs& args)
+    {
+        const std::vector<RuntimeFieldCliItem> items = parseRuntimeFieldItems(requireOptionText(args, L"--items"));
+        const std::size_t headerBytes = offsetof(KSWORD_ARK_THREAD_RUNTIME_FIELD_SAMPLE_REQUEST, items);
+        std::vector<std::uint8_t> bytes(headerBytes + (items.size() * sizeof(KSWORD_ARK_RUNTIME_FIELD_SAMPLE_ITEM_REQUEST)), 0U);
+        auto* request = reinterpret_cast<KSWORD_ARK_THREAD_RUNTIME_FIELD_SAMPLE_REQUEST*>(bytes.data());
+        request->version = KSWORD_ARK_RUNTIME_FIELD_SAMPLE_PROTOCOL_VERSION;
+        request->flags = getOptionU32(args, L"--flags", 0U);
+        request->threadId = requireOptionU32(args, L"--tid");
+        request->processId = getOptionU32(args, L"--pid", 0U);
+        request->itemCount = static_cast<unsigned long>(items.size());
+        for (std::size_t index = 0U; index < items.size(); ++index)
+        {
+            request->items[index].runtimeItemId = items[index].runtimeItemId;
+            request->items[index].offset = items[index].offset;
+            request->items[index].size = items[index].size;
+            request->items[index].flags = items[index].flags;
+        }
+        return bytes;
     }
 
     // commandProcessFamily implements all registered process IOCTLs.
@@ -1554,6 +2242,48 @@ namespace
                            << L"' detail='" << fixedAnsi(row->detail, sizeof(row->detail)).c_str() << L"'\n";
             }
             return 0;
+        }
+        if (sub == L"detail")
+        {
+            // process detail:
+            // - Inputs: --pid selects the process and --flags selects fixed
+            //   read-only EPROCESS detail groups.
+            // - Processing: sends the fixed detail request through the shared
+            //   protocol and prints every returned identity/object/global field.
+            // - Returns: CLI status from the transport/protocol parser.
+            KSWORD_ARK_PROCESS_DETAIL_REQUEST request{};
+            KSWORD_ARK_PROCESS_DETAIL_RESPONSE response{};
+            request.version = KSWORD_ARK_RUNTIME_DETAIL_PROTOCOL_VERSION;
+            request.flags = getOptionU32(args, L"--flags", KSWORD_ARK_PROCESS_DETAIL_FLAG_INCLUDE_ALL);
+            request.processId = requireOptionU32(args, L"--pid");
+            if (!sendFixedRequestResponse(IOCTL_KSWORD_ARK_QUERY_PROCESS_DETAIL, L"IOCTL_KSWORD_ARK_QUERY_PROCESS_DETAIL", request, response, io))
+            {
+                return normalizeIoctlRc(L"process detail", io, 3);
+            }
+            printProcessDetail(response, io.bytesReturned);
+            return 0;
+        }
+        if (sub == L"runtime-fields")
+        {
+            // process runtime-fields:
+            // - Inputs: --pid and --items id:offset:size[:flags] rows.
+            // - Processing: builds the variable METHOD_BUFFERED input packet
+            //   and receives a bounded array of field sample rows.
+            // - Returns: zero after printing rows, non-zero on parse/transport error.
+            std::vector<std::uint8_t> input = buildProcessRuntimeFieldInput(args);
+            std::vector<std::uint8_t> buffer(kSmallResponseBytes, 0U);
+            const int rc = sendRawIoctl(
+                L"IOCTL_KSWORD_ARK_QUERY_PROCESS_RUNTIME_FIELDS",
+                IOCTL_KSWORD_ARK_QUERY_PROCESS_RUNTIME_FIELDS,
+                input.data(),
+                checkedDwordSize(input.size()),
+                buffer,
+                io);
+            if (rc != 0)
+            {
+                return normalizeIoctlRc(L"process runtime-fields", io, rc);
+            }
+            return printRuntimeFieldSampleRows(buffer, io, args, L"process runtime-fields");
         }
         std::wcerr << L"error: unknown process subcommand '" << sub << L"'\n";
         return 1;
@@ -2634,6 +3364,157 @@ namespace
         return 0;
     }
 
+    // printWin32kModuleState renders one fixed win32k module/profile state.
+    // Inputs: display label and module state packet from a win32k response.
+    // Processing: prints load/profile state and image identity.
+    // Returns: no value.
+    void printWin32kModuleState(const wchar_t* label, const KSWORD_ARK_WIN32K_MODULE_STATE& module)
+    {
+        std::wcout << label
+                   << L" loaded=" << module.loaded
+                   << L" profileState=" << module.profileState
+                   << L" imageBase=" << hex64(module.imageBase)
+                   << L" imageSize=" << module.imageSize
+                   << L" name='" << fixedWide(module.moduleName, KSWORD_ARK_WIN32K_MODULE_NAME_CHARS) << L"'\n";
+    }
+
+    // queryWin32kHotkeysPdb prints PDB-backed win32k hotkey chain rows.
+    // Inputs: parsed window options for session/pid/tid/filter budgets.
+    // Processing: issues IOCTL_KSWORD_ARK_QUERY_WIN32K_HOTKEYS_PDB and renders
+    // diagnostic-only hotkey object rows.
+    // Returns: CLI exit code with old-driver normalization.
+    int queryWin32kHotkeysPdb(const NamedArgs& args)
+    {
+        KSWORD_ARK_WIN32K_QUERY_REQUEST request = buildWin32kRequest(args);
+        IoctlResult io{};
+        std::vector<std::uint8_t> buffer(kLargeResponseBytes, 0U);
+        const int rc = sendRawIoctl(L"IOCTL_KSWORD_ARK_QUERY_WIN32K_HOTKEYS_PDB", IOCTL_KSWORD_ARK_QUERY_WIN32K_HOTKEYS_PDB, &request, sizeof(request), buffer, io);
+        if (rc != 0) return normalizeIoctlRc(L"window hotkeys-pdb", io, rc);
+        constexpr std::size_t headerSize = sizeof(KSWORD_ARK_WIN32K_HOTKEY_SNAPSHOT_RESPONSE) - sizeof(KSWORD_ARK_WIN32K_HOTKEY_ENTRY);
+        const auto* response = reinterpret_cast<const KSWORD_ARK_WIN32K_HOTKEY_SNAPSHOT_RESPONSE*>(buffer.data());
+        std::size_t available = 0U;
+        try { available = validateVariable(io.bytesReturned, headerSize, response->entrySize, sizeof(KSWORD_ARK_WIN32K_HOTKEY_ENTRY), L"win32k hotkeys-pdb"); }
+        catch (...) { return 4; }
+        printResponseBanner(response->version, response->status, response->lastStatus, io.bytesReturned);
+        printCountHeader(response->version, response->totalCount, response->returnedCount, response->entrySize, io.bytesReturned);
+        std::wcout << L"capability=0x" << std::hex << response->capabilityMask
+                   << L" missing=0x" << response->missingCapabilityMask
+                   << std::dec << L"\n";
+        const std::size_t parsed = responseCountLimit(response->returnedCount, available, getOptionU32(args, L"--limit", 128U));
+        for (std::size_t i = 0; i < parsed; ++i)
+        {
+            const auto* row = reinterpret_cast<const KSWORD_ARK_WIN32K_HOTKEY_ENTRY*>(buffer.data() + headerSize + (i * response->entrySize));
+            std::wcout << L"  [" << i << L"] source=" << row->source
+                       << L" status=" << row->status
+                       << L" flags=0x" << std::hex << row->flags
+                       << L" hotkey=" << hex64(row->hotkeyObject)
+                       << L" next=" << hex64(row->nextHotkeyObject)
+                       << L" hwnd=" << hex64(row->hwnd)
+                       << L" tagWnd=" << hex64(row->tagWnd)
+                       << L" threadInfo=" << hex64(row->threadInfo)
+                       << L" desktop=" << hex64(row->desktopObject)
+                       << std::dec << L" session=" << row->sessionId
+                       << L" pid=" << row->processId
+                       << L" tid=" << row->threadId
+                       << L" modifiers=0x" << std::hex << row->modifiers
+                       << std::dec << L" vk=" << row->virtualKey
+                       << L" id=" << row->hotkeyId
+                       << L" depth=" << row->depth
+                       << L" last=0x" << std::hex << static_cast<unsigned long>(row->lastStatus)
+                       << std::dec << L" detail='" << fixedWide(row->detail, KSWORD_ARK_WIN32K_DETAIL_CHARS) << L"'\n";
+        }
+        return 0;
+    }
+
+    // queryWin32kHooksPdb prints PDB-backed win32k hook chain rows.
+    // Inputs: parsed window options for session/pid/tid/filter budgets.
+    // Processing: issues IOCTL_KSWORD_ARK_QUERY_WIN32K_HOOKS_PDB and renders
+    // diagnostic-only hook object/procedure rows.
+    // Returns: CLI exit code with old-driver normalization.
+    int queryWin32kHooksPdb(const NamedArgs& args)
+    {
+        KSWORD_ARK_WIN32K_QUERY_REQUEST request = buildWin32kRequest(args);
+        IoctlResult io{};
+        std::vector<std::uint8_t> buffer(kLargeResponseBytes, 0U);
+        const int rc = sendRawIoctl(L"IOCTL_KSWORD_ARK_QUERY_WIN32K_HOOKS_PDB", IOCTL_KSWORD_ARK_QUERY_WIN32K_HOOKS_PDB, &request, sizeof(request), buffer, io);
+        if (rc != 0) return normalizeIoctlRc(L"window hooks-pdb", io, rc);
+        constexpr std::size_t headerSize = sizeof(KSWORD_ARK_WIN32K_HOOK_SNAPSHOT_RESPONSE) - sizeof(KSWORD_ARK_WIN32K_HOOK_ENTRY);
+        const auto* response = reinterpret_cast<const KSWORD_ARK_WIN32K_HOOK_SNAPSHOT_RESPONSE*>(buffer.data());
+        std::size_t available = 0U;
+        try { available = validateVariable(io.bytesReturned, headerSize, response->entrySize, sizeof(KSWORD_ARK_WIN32K_HOOK_ENTRY), L"win32k hooks-pdb"); }
+        catch (...) { return 4; }
+        printResponseBanner(response->version, response->status, response->lastStatus, io.bytesReturned);
+        printCountHeader(response->version, response->totalCount, response->returnedCount, response->entrySize, io.bytesReturned);
+        std::wcout << L"capability=0x" << std::hex << response->capabilityMask
+                   << L" missing=0x" << response->missingCapabilityMask
+                   << std::dec << L"\n";
+        const std::size_t parsed = responseCountLimit(response->returnedCount, available, getOptionU32(args, L"--limit", 128U));
+        for (std::size_t i = 0; i < parsed; ++i)
+        {
+            const auto* row = reinterpret_cast<const KSWORD_ARK_WIN32K_HOOK_ENTRY*>(buffer.data() + headerSize + (i * response->entrySize));
+            std::wcout << L"  [" << i << L"] source=" << row->source
+                       << L" status=" << row->status
+                       << L" flags=0x" << std::hex << row->flags
+                       << L" hook=" << hex64(row->hookObject)
+                       << L" chainHead=" << hex64(row->chainHead)
+                       << L" next=" << hex64(row->nextHookObject)
+                       << L" threadInfo=" << hex64(row->threadInfo)
+                       << L" targetThreadInfo=" << hex64(row->targetThreadInfo)
+                       << L" desktop=" << hex64(row->desktopObject)
+                       << L" proc=" << hex64(row->procedureAddress)
+                       << L" moduleBase=" << hex64(row->moduleBase)
+                       << std::dec << L" session=" << row->sessionId
+                       << L" pid=" << row->processId
+                       << L" tid=" << row->threadId
+                       << L" type=" << row->hookType
+                       << L" scope=" << row->hookScope
+                       << L" last=0x" << std::hex << static_cast<unsigned long>(row->lastStatus)
+                       << std::dec << L" detail='" << fixedWide(row->detail, KSWORD_ARK_WIN32K_DETAIL_CHARS) << L"'\n";
+        }
+        return 0;
+    }
+
+    // queryWin32kWindowDetail prints one fixed HWND/tagWND detail packet.
+    // Inputs: --hwnd plus optional --pid/--tid context and --flags.
+    // Processing: never accepts a tagWND pointer from user mode; R0 resolves the
+    // requested HWND and returns stable profile/readiness evidence.
+    // Returns: CLI exit code with old-driver normalization.
+    int queryWin32kWindowDetail(const NamedArgs& args)
+    {
+        KSWORD_ARK_WIN32K_WINDOW_DETAIL_REQUEST request{};
+        KSWORD_ARK_WIN32K_WINDOW_DETAIL_RESPONSE response{};
+        request.version = KSWORD_ARK_WIN32K_PROTOCOL_VERSION;
+        request.flags = getOptionU32(args, L"--flags", KSWORD_ARK_WIN32K_QUERY_FLAG_INCLUDE_DIAGNOSTICS);
+        request.processId = getOptionU32(args, L"--pid", 0U);
+        request.threadId = getOptionU32(args, L"--tid", 0U);
+        request.hwnd = requireOptionU64(args, L"--hwnd");
+        IoctlResult io{};
+        if (!sendFixedRequestResponse(IOCTL_KSWORD_ARK_QUERY_WIN32K_WINDOW_DETAIL, L"IOCTL_KSWORD_ARK_QUERY_WIN32K_WINDOW_DETAIL", request, response, io))
+        {
+            return normalizeIoctlRc(L"window detail", io, 3);
+        }
+        printResponseBanner(response.version, response.status, response.lastStatus, io.bytesReturned);
+        std::wcout << L"hwnd=" << hex64(response.hwnd)
+                   << L" tagWnd=" << hex64(response.tagWnd)
+                   << L" threadInfo=" << hex64(response.threadInfo)
+                   << L" queue=" << hex64(response.queueObject)
+                   << L" desktop=" << hex64(response.desktopObject)
+                   << L" capability=0x" << std::hex << response.capabilityMask
+                   << L" missing=0x" << response.missingCapabilityMask
+                   << std::dec << L" pid=" << response.processId
+                   << L" tid=" << response.threadId
+                   << L" fields=0x" << std::hex << response.fieldFlags
+                   << L" flags=0x" << response.flags
+                   << std::dec << L"\n";
+        printWin32kModuleState(L"win32k", response.win32k);
+        printWin32kModuleState(L"win32kbase", response.win32kbase);
+        printWin32kModuleState(L"win32kfull", response.win32kfull);
+        dumpWideText(L"title", fixedWide(response.title, KSWORD_ARK_WIN32K_TITLE_CHARS));
+        dumpWideText(L"className", fixedWide(response.className, KSWORD_ARK_WIN32K_CLASS_CHARS));
+        dumpWideText(L"detail", fixedWide(response.detail, KSWORD_ARK_RUNTIME_DETAIL_TEXT_CHARS));
+        return 0;
+    }
+
     // querySecurityStatus prints CI/VBS/SKCI/test-signing posture.
     // Inputs: parsed args with optional flags.
     // Processing: sends the fixed read-only security status IOCTL.
@@ -3380,6 +4261,45 @@ namespace
             }
             return 0;
         }
+        if (sub == L"object-summary")
+        {
+            // kernel object-summary:
+            // - Inputs: --target-kind plus either --cid and/or --object evidence.
+            // - Processing: sends the fixed KernelObject summary protocol and
+            //   prints object header/type/counter status without mutating objects.
+            // - Returns: normalized CLI status for old-driver compatibility.
+            KSWORD_ARK_QUERY_KERNEL_OBJECT_SUMMARY_REQUEST request{};
+            KSWORD_ARK_QUERY_KERNEL_OBJECT_SUMMARY_RESPONSE response{};
+            request.version = KSWORD_ARK_KERNEL_OBJECT_PROTOCOL_VERSION;
+            request.flags = getOptionU32(args, L"--flags", KSWORD_ARK_OBJECT_SUMMARY_FLAG_INCLUDE_ALL);
+            request.targetKind = requireOptionU32(args, L"--target-kind");
+            request.cidValue = getOptionU32(args, L"--cid", 0U);
+            request.expectedObjectAddress = getOptionU64(args, L"--object", 0ULL);
+            if (!sendFixedRequestResponse(IOCTL_KSWORD_ARK_QUERY_KERNEL_OBJECT_SUMMARY, L"IOCTL_KSWORD_ARK_QUERY_KERNEL_OBJECT_SUMMARY", request, response, io))
+            {
+                return normalizeIoctlRc(L"kernel object-summary", io, 3);
+            }
+            printResponseBanner(response.version, response.status, response.lookupStatus, io.bytesReturned);
+            std::wcout << L"size=" << response.size
+                       << L" fields=0x" << std::hex << response.fieldFlags
+                       << L" object=" << hex64(response.objectAddress)
+                       << L" expected=" << hex64(response.expectedObjectAddress)
+                       << L" typeObject=" << hex64(response.objectTypeAddress)
+                       << L" dyn=0x" << response.dynDataCapabilityMask
+                       << std::dec << L" targetKind=" << response.targetKind
+                       << L" cid=" << response.cidValue
+                       << L" typeStatus=0x" << std::hex << static_cast<unsigned long>(response.typeStatus)
+                       << L" counterStatus=0x" << static_cast<unsigned long>(response.counterStatus)
+                       << std::dec << L" headerStatus=" << response.objectHeaderStatus
+                       << L" typeIndex=" << response.typeIndex
+                       << L" pointerCount=" << response.pointerCount
+                       << L" handleCount=" << response.handleCount
+                       << L" otNameOffset=0x" << std::hex << response.otNameOffset
+                       << L" otIndexOffset=0x" << response.otIndexOffset
+                       << std::dec << L" type='" << fixedWide(response.typeName, KSWORD_ARK_KERNEL_OBJECT_TYPE_NAME_CHARS)
+                       << L"' detail='" << fixedWide(response.detail, KSWORD_ARK_KERNEL_OBJECT_DETAIL_CHARS) << L"'\n";
+            return 0;
+        }
         if (sub == L"ipc")
         {
             KSWORD_ARK_QUERY_IPC_SUMMARY_REQUEST request{};
@@ -3783,6 +4703,10 @@ namespace
         {
             return queryDynV4MissingItems(args);
         }
+        if (sub == L"v4-items")
+        {
+            return queryDynV4Items(args);
+        }
         if (sub == L"apply-profile-v4")
         {
             // apply-profile-v4 用途：
@@ -3979,6 +4903,49 @@ namespace
                            << L"' detail='" << fixedAnsiWide(row->detail, KSWORD_ARK_CROSSVIEW_DETAIL_CHARS) << L"'\n";
             }
             return 0;
+        }
+        if (sub == L"detail")
+        {
+            // thread detail:
+            // - Inputs: --tid is required; --pid narrows the expected owner
+            //   process when the caller already has context.
+            // - Processing: requests fixed ETHREAD/KTHREAD runtime detail and
+            //   prints object, start, stack, I/O and global evidence fields.
+            // - Returns: normalized CLI status.
+            KSWORD_ARK_THREAD_DETAIL_REQUEST request{};
+            KSWORD_ARK_THREAD_DETAIL_RESPONSE response{};
+            request.version = KSWORD_ARK_RUNTIME_DETAIL_PROTOCOL_VERSION;
+            request.flags = getOptionU32(args, L"--flags", KSWORD_ARK_THREAD_DETAIL_FLAG_INCLUDE_ALL);
+            request.threadId = requireOptionU32(args, L"--tid");
+            request.processId = getOptionU32(args, L"--pid", 0U);
+            if (!sendFixedRequestResponse(IOCTL_KSWORD_ARK_QUERY_THREAD_DETAIL, L"IOCTL_KSWORD_ARK_QUERY_THREAD_DETAIL", request, response, io))
+            {
+                return normalizeIoctlRc(L"thread detail", io, 3);
+            }
+            printThreadDetail(response, io.bytesReturned);
+            return 0;
+        }
+        if (sub == L"runtime-fields")
+        {
+            // thread runtime-fields:
+            // - Inputs: --tid, optional --pid, and --items sample descriptors.
+            // - Processing: builds the variable ETHREAD/KTHREAD sample request
+            //   and prints the bounded response rows.
+            // - Returns: zero on printed rows, non-zero on parse/transport error.
+            std::vector<std::uint8_t> input = buildThreadRuntimeFieldInput(args);
+            std::vector<std::uint8_t> buffer(kSmallResponseBytes, 0U);
+            const int rc = sendRawIoctl(
+                L"IOCTL_KSWORD_ARK_QUERY_THREAD_RUNTIME_FIELDS",
+                IOCTL_KSWORD_ARK_QUERY_THREAD_RUNTIME_FIELDS,
+                input.data(),
+                checkedDwordSize(input.size()),
+                buffer,
+                io);
+            if (rc != 0)
+            {
+                return normalizeIoctlRc(L"thread runtime-fields", io, rc);
+            }
+            return printRuntimeFieldSampleRows(buffer, io, args, L"thread runtime-fields");
         }
         std::wcerr << L"error: unknown thread subcommand '" << sub << L"'\n";
         return 1;
@@ -5051,6 +6018,18 @@ namespace
         {
             return queryWin32kGuiThreads(args);
         }
+        if (sub == L"hotkeys-pdb")
+        {
+            return queryWin32kHotkeysPdb(args);
+        }
+        if (sub == L"hooks-pdb")
+        {
+            return queryWin32kHooksPdb(args);
+        }
+        if (sub == L"detail")
+        {
+            return queryWin32kWindowDetail(args);
+        }
         if (sub == L"gpu" || sub == L"display" || sub == L"watchdog")
         {
             return queryDeviceAudit(args, IOCTL_KSWORD_ARK_QUERY_GPU_DISPLAY_WATCHDOG_AUDIT, KSWORD_ARK_DEVICE_AUDIT_PROFILE_GPU_DISPLAY_WATCHDOG, L"IOCTL_KSWORD_ARK_QUERY_GPU_DISPLAY_WATCHDOG_AUDIT", L"window gpu/display/watchdog");
@@ -5222,10 +6201,17 @@ namespace
         }
 
         const std::wstring family = argv[1];
-        if (family == L"help" || family == L"--help" || family == L"-h" || family == L"/?")
+        if (isHelpToken(argv[1]))
         {
-            printUsage();
-            return 0;
+            return printHelpForTarget(argc, argv, 2);
+        }
+        if (argc >= 3 && isHelpToken(argv[2]))
+        {
+            return printHelpForTarget(argc, argv, 1);
+        }
+        if (argc >= 4 && hasTrailingHelpToken(argc, argv, 3))
+        {
+            return printSpecificCommandHelp(family, argv[2]) ? 0 : 1;
         }
         if (family == L"log") return commandLogFamily(argc, argv);
         if (family == L"process") return commandProcessFamily(argc, argv);

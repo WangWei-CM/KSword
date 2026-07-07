@@ -665,6 +665,109 @@ void AttachRepresentativeThreads(
     }
 }
 
+// AddR0AuditRow appends one read-only driver evidence row to the ProcessDetail
+// R0 tab. Inputs are the target vector and display-ready scalar fields;
+// processing preserves object addresses only for display and never feeds them
+// into write operations; there is no return value.
+void AddR0AuditRow(
+    std::vector<ProcessR0AuditInfo>& rows,
+    const std::wstring& scope,
+    DWORD processId,
+    DWORD threadId,
+    std::uint64_t objectAddress,
+    std::uint64_t relatedObjectAddress,
+    std::uint64_t startAddress,
+    const std::wstring& sourceText,
+    const std::wstring& statusText,
+    ULONG confidence,
+    const std::wstring& detailText) {
+    ProcessR0AuditInfo row{};
+    row.scope = scope;
+    row.processId = processId;
+    row.threadId = threadId;
+    row.objectAddress = static_cast<std::uintptr_t>(objectAddress);
+    row.relatedObjectAddress = static_cast<std::uintptr_t>(relatedObjectAddress);
+    row.startAddress = static_cast<std::uintptr_t>(startAddress);
+    row.confidence = confidence;
+    row.sourceText = sourceText;
+    row.anomalyText = statusText;
+    row.detailText = detailText;
+    rows.push_back(std::move(row));
+}
+
+// StatusHexText renders an NTSTATUS/LONG as fixed hexadecimal text. Input is a
+// signed status value from the driver protocol; output is a UI diagnostic token.
+std::wstring StatusHexText(long status) {
+    std::wostringstream stream;
+    stream << L"0x" << std::hex << std::uppercase << static_cast<unsigned long>(status);
+    return stream.str();
+}
+
+// BuildProcessRuntimeSampleItems derives safe field-sample requests from the
+// fixed process detail response. Inputs are offsets already returned by R0;
+// processing keeps only known, bounded EPROCESS fields; output is suitable for
+// ArkDriverClient::queryProcessRuntimeFieldSamples.
+std::vector<ksword::ark::RuntimeFieldSampleRequestItem> BuildProcessRuntimeSampleItems(
+    const KSWORD_ARK_PROCESS_DETAIL_RESPONSE& detail) {
+    std::vector<ksword::ark::RuntimeFieldSampleRequestItem> items;
+    const auto add = [&](std::uint32_t id, std::uint32_t offset, std::uint32_t size, const char* name, const char* type) {
+        if (offset == KSWORD_ARK_PROCESS_OFFSET_UNAVAILABLE || size == 0 || size > KSWORD_ARK_RUNTIME_FIELD_SAMPLE_MAX_VALUE_BYTES) {
+            return;
+        }
+        ksword::ark::RuntimeFieldSampleRequestItem item{};
+        item.runtimeItemId = id;
+        item.offset = offset;
+        item.size = size;
+        item.name = name;
+        item.type = type;
+        items.push_back(std::move(item));
+    };
+    add(KSW_DYN_FIELD_ID_EP_UNIQUE_PROCESS_ID, detail.offsets.epUniqueProcessId, sizeof(std::uint64_t), "EP.UniqueProcessId", "HANDLE");
+    add(KSW_DYN_FIELD_ID_EP_ACTIVE_PROCESS_LINKS, detail.offsets.epActiveProcessLinks, sizeof(std::uint64_t), "EP.ActiveProcessLinks", "LIST_ENTRY.Flink");
+    add(KSW_DYN_FIELD_ID_EP_THREAD_LIST_HEAD, detail.offsets.epThreadListHead, sizeof(std::uint64_t), "EP.ThreadListHead", "LIST_ENTRY.Flink");
+    add(KSW_DYN_FIELD_ID_EP_TOKEN, detail.offsets.epToken, sizeof(std::uint64_t), "EP.Token", "EX_FAST_REF");
+    add(KSW_DYN_FIELD_ID_EP_OBJECT_TABLE, detail.offsets.epObjectTable, sizeof(std::uint64_t), "EP.ObjectTable", "EXHANDLE_TABLE*");
+    add(KSW_DYN_FIELD_ID_EP_SECTION_OBJECT, detail.offsets.epSectionObject, sizeof(std::uint64_t), "EP.SectionObject", "SECTION_OBJECT*");
+    add(KSW_DYN_FIELD_ID_EP_PROTECTION, detail.offsets.epProtection, sizeof(std::uint8_t), "EP.Protection", "PS_PROTECTION");
+    add(KSW_DYN_FIELD_ID_EP_SIGNATURE_LEVEL, detail.offsets.epSignatureLevel, sizeof(std::uint8_t), "EP.SignatureLevel", "UCHAR");
+    add(KSW_DYN_FIELD_ID_EP_SECTION_SIGNATURE_LEVEL, detail.offsets.epSectionSignatureLevel, sizeof(std::uint8_t), "EP.SectionSignatureLevel", "UCHAR");
+    return items;
+}
+
+// BuildThreadRuntimeSampleItems derives safe field-sample requests from the
+// fixed thread detail response. Inputs are R0-provided ETHREAD/KTHREAD offsets;
+// processing keeps known field sizes under the protocol cap; output is suitable
+// for ArkDriverClient::queryThreadRuntimeFieldSamples.
+std::vector<ksword::ark::RuntimeFieldSampleRequestItem> BuildThreadRuntimeSampleItems(
+    const KSWORD_ARK_THREAD_DETAIL_RESPONSE& detail) {
+    std::vector<ksword::ark::RuntimeFieldSampleRequestItem> items;
+    const auto add = [&](std::uint32_t id, std::uint32_t offset, std::uint32_t size, const char* name, const char* type) {
+        if (offset == KSWORD_ARK_PROCESS_OFFSET_UNAVAILABLE || size == 0 || size > KSWORD_ARK_RUNTIME_FIELD_SAMPLE_MAX_VALUE_BYTES) {
+            return;
+        }
+        ksword::ark::RuntimeFieldSampleRequestItem item{};
+        item.runtimeItemId = id;
+        item.offset = offset;
+        item.size = size;
+        item.name = name;
+        item.type = type;
+        items.push_back(std::move(item));
+    };
+    add(KSW_DYN_FIELD_ID_ET_CID, detail.offsets.etCid, sizeof(std::uint64_t) * 2U, "ET.Cid", "CLIENT_ID");
+    add(KSW_DYN_FIELD_ID_ET_THREAD_LIST_ENTRY, detail.offsets.etThreadListEntry, sizeof(std::uint64_t), "ET.ThreadListEntry", "LIST_ENTRY.Flink");
+    add(KSW_DYN_FIELD_ID_ET_START_ADDRESS, detail.offsets.etStartAddress, sizeof(std::uint64_t), "ET.StartAddress", "PVOID");
+    add(KSW_DYN_FIELD_ID_ET_WIN32_START_ADDRESS, detail.offsets.etWin32StartAddress, sizeof(std::uint64_t), "ET.Win32StartAddress", "PVOID");
+    add(KSW_DYN_FIELD_ID_KT_PROCESS, detail.offsets.ktProcess, sizeof(std::uint64_t), "KT.Process", "KPROCESS*");
+    add(KSW_DYN_FIELD_ID_KT_INITIAL_STACK, detail.offsets.ktInitialStack, sizeof(std::uint64_t), "KT.InitialStack", "PVOID");
+    add(KSW_DYN_FIELD_ID_KT_STACK_LIMIT, detail.offsets.ktStackLimit, sizeof(std::uint64_t), "KT.StackLimit", "PVOID");
+    add(KSW_DYN_FIELD_ID_KT_STACK_BASE, detail.offsets.ktStackBase, sizeof(std::uint64_t), "KT.StackBase", "PVOID");
+    add(KSW_DYN_FIELD_ID_KT_KERNEL_STACK, detail.offsets.ktKernelStack, sizeof(std::uint64_t), "KT.KernelStack", "PVOID");
+    add(KSW_DYN_FIELD_ID_KT_READ_OPERATION_COUNT, detail.offsets.ktReadOperationCount, sizeof(std::uint64_t), "KT.ReadOperationCount", "ULONGLONG");
+    add(KSW_DYN_FIELD_ID_KT_WRITE_OPERATION_COUNT, detail.offsets.ktWriteOperationCount, sizeof(std::uint64_t), "KT.WriteOperationCount", "ULONGLONG");
+    add(KSW_DYN_FIELD_ID_KT_OTHER_OPERATION_COUNT, detail.offsets.ktOtherOperationCount, sizeof(std::uint64_t), "KT.OtherOperationCount", "ULONGLONG");
+    return items;
+}
+
 // CollectR0AuditRows queries process/thread cross-view through ArkDriverClient.
 // Inputs are a PID and status outputs; processing is read-only and bounded by
 // the shared cross-view max-node defaults; output rows are UI evidence only.
@@ -731,6 +834,192 @@ std::vector<ProcessR0AuditInfo> CollectR0AuditRows(DWORD processId, bool& succee
             row.anomalyText = CrossViewAnomalyText(row.anomalyFlags);
             row.detailText = NarrowToWide(entry.detail);
             rows.push_back(std::move(row));
+        }
+    }
+
+    const ksword::ark::ProcessRuntimeDetailResult processDetail =
+        driverClient.queryProcessRuntimeDetail(processId);
+    if (!processDetail.io.ok) {
+        AddR0AuditRow(
+            rows,
+            L"ProcessDetail",
+            processId,
+            0,
+            0,
+            0,
+            0,
+            L"ArkDriverClient::queryProcessRuntimeDetail",
+            processDetail.unsupported ? L"Unsupported" : L"Unavailable",
+            0,
+            NarrowToWide(processDetail.io.message));
+    } else {
+        const KSWORD_ARK_PROCESS_DETAIL_RESPONSE& detail = processDetail.response;
+        std::wostringstream text;
+        text << L"fields=" << HexMaskText(detail.fieldFlags)
+             << L"; requested=" << HexMaskText(detail.requestedFlags)
+             << L"; dyn=" << FormatHexPointer(static_cast<std::uintptr_t>(detail.dynDataCapabilityMask))
+             << L"; missing=" << FormatHexPointer(static_cast<std::uintptr_t>(detail.missingCapabilityMask))
+             << L"; token=" << FormatHexPointer(static_cast<std::uintptr_t>(detail.tokenObjectAddress))
+             << L"; objectTable=" << FormatHexPointer(static_cast<std::uintptr_t>(detail.objectTableAddress))
+             << L"; section=" << FormatHexPointer(static_cast<std::uintptr_t>(detail.sectionObjectAddress))
+             << L"; detail=" << std::wstring(detail.detail);
+        AddR0AuditRow(
+            rows,
+            L"ProcessDetail",
+            processId,
+            0,
+            detail.processObjectAddress,
+            detail.tokenObjectAddress,
+            0,
+            L"IOCTL_KSWORD_ARK_QUERY_PROCESS_DETAIL",
+            L"status=" + std::to_wstring(detail.status) + L", last=" + StatusHexText(detail.lastStatus),
+            100,
+            text.str());
+
+        const std::vector<ksword::ark::RuntimeFieldSampleRequestItem> sampleItems =
+            BuildProcessRuntimeSampleItems(detail);
+        if (!sampleItems.empty()) {
+            const ksword::ark::RuntimeFieldSampleResult samples =
+                driverClient.queryProcessRuntimeFieldSamples(processId, sampleItems);
+            AddR0AuditRow(
+                rows,
+                L"ProcessRuntimeFields",
+                processId,
+                0,
+                samples.objectAddress,
+                0,
+                0,
+                L"IOCTL_KSWORD_ARK_QUERY_PROCESS_RUNTIME_FIELDS",
+                samples.io.ok ? L"OK" : (samples.unsupported ? L"Unsupported" : L"Unavailable"),
+                samples.io.ok ? 100UL : 0UL,
+                L"returned=" + std::to_wstring(samples.returnedCount) +
+                    L"/" + std::to_wstring(samples.totalCount) +
+                    L"; status=" + std::to_wstring(samples.status) +
+                    L"; " + NarrowToWide(samples.io.message));
+            for (const ksword::ark::RuntimeFieldSampleEntry& entry : samples.entries) {
+                AddR0AuditRow(
+                    rows,
+                    L"ProcessField",
+                    processId,
+                    0,
+                    samples.objectAddress,
+                    0,
+                    0,
+                    NarrowToWide(entry.name.empty() ? std::string("runtime-field") : entry.name),
+                    L"rowStatus=" + std::to_wstring(entry.status),
+                    entry.status == KSWORD_ARK_RUNTIME_FIELD_SAMPLE_ROW_STATUS_OK ? 100UL : 50UL,
+                    L"id=" + std::to_wstring(entry.runtimeItemId) +
+                        L"; offset=" + HexMaskText(entry.offset) +
+                        L"; size=" + std::to_wstring(entry.size) +
+                        L"; bytesRead=" + std::to_wstring(entry.bytesRead) +
+                        L"; value=" + FormatHexPointer(static_cast<std::uintptr_t>(entry.valueU64)) +
+                        L"; last=" + StatusHexText(entry.lastStatus));
+            }
+        }
+    }
+
+    std::size_t threadDetailCount = 0U;
+    for (const ksword::ark::ThreadCrossViewEntry& entry : threadAudit.entries) {
+        if (entry.processId != processId || entry.threadId == 0U) {
+            continue;
+        }
+        if (threadDetailCount >= 128U) {
+            AddR0AuditRow(
+                rows,
+                L"ThreadDetail",
+                processId,
+                0,
+                0,
+                0,
+                0,
+                L"ArkDriverClient::queryThreadRuntimeDetail",
+                L"Truncated",
+                0,
+                L"Thread runtime detail rows are capped at 128 per refresh to keep the Light GUI responsive.");
+            break;
+        }
+        ++threadDetailCount;
+        const ksword::ark::ThreadRuntimeDetailResult threadDetail =
+            driverClient.queryThreadRuntimeDetail(entry.threadId, processId);
+        if (!threadDetail.io.ok) {
+            AddR0AuditRow(
+                rows,
+                L"ThreadDetail",
+                processId,
+                entry.threadId,
+                entry.objectAddress,
+                entry.processObjectAddress,
+                entry.startAddress,
+                L"ArkDriverClient::queryThreadRuntimeDetail",
+                threadDetail.unsupported ? L"Unsupported" : L"Unavailable",
+                0,
+                NarrowToWide(threadDetail.io.message));
+            continue;
+        }
+
+        const KSWORD_ARK_THREAD_DETAIL_RESPONSE& detail = threadDetail.response;
+        std::wostringstream text;
+        text << L"fields=" << HexMaskText(detail.fieldFlags)
+             << L"; requested=" << HexMaskText(detail.requestedFlags)
+             << L"; cidPid=" << FormatHexPointer(static_cast<std::uintptr_t>(detail.cidUniqueProcess))
+             << L"; cidTid=" << FormatHexPointer(static_cast<std::uintptr_t>(detail.cidUniqueThread))
+             << L"; start=" << FormatHexPointer(static_cast<std::uintptr_t>(detail.startAddress))
+             << L"; win32Start=" << FormatHexPointer(static_cast<std::uintptr_t>(detail.win32StartAddress))
+             << L"; stack=" << FormatHexPointer(static_cast<std::uintptr_t>(detail.stackLimit))
+             << L"-" << FormatHexPointer(static_cast<std::uintptr_t>(detail.stackBase))
+             << L"; detail=" << std::wstring(detail.detail);
+        AddR0AuditRow(
+            rows,
+            L"ThreadDetail",
+            processId,
+            detail.threadId,
+            detail.threadObjectAddress,
+            detail.processObjectAddress,
+            detail.startAddress,
+            L"IOCTL_KSWORD_ARK_QUERY_THREAD_DETAIL",
+            L"status=" + std::to_wstring(detail.status) + L", last=" + StatusHexText(detail.lastStatus),
+            100,
+            text.str());
+
+        const std::vector<ksword::ark::RuntimeFieldSampleRequestItem> sampleItems =
+            BuildThreadRuntimeSampleItems(detail);
+        if (!sampleItems.empty()) {
+            const ksword::ark::RuntimeFieldSampleResult samples =
+                driverClient.queryThreadRuntimeFieldSamples(detail.threadId, processId, sampleItems);
+            AddR0AuditRow(
+                rows,
+                L"ThreadRuntimeFields",
+                processId,
+                detail.threadId,
+                samples.objectAddress,
+                detail.processObjectAddress,
+                detail.startAddress,
+                L"IOCTL_KSWORD_ARK_QUERY_THREAD_RUNTIME_FIELDS",
+                samples.io.ok ? L"OK" : (samples.unsupported ? L"Unsupported" : L"Unavailable"),
+                samples.io.ok ? 100UL : 0UL,
+                L"returned=" + std::to_wstring(samples.returnedCount) +
+                    L"/" + std::to_wstring(samples.totalCount) +
+                    L"; status=" + std::to_wstring(samples.status) +
+                    L"; " + NarrowToWide(samples.io.message));
+            for (const ksword::ark::RuntimeFieldSampleEntry& sample : samples.entries) {
+                AddR0AuditRow(
+                    rows,
+                    L"ThreadField",
+                    processId,
+                    detail.threadId,
+                    samples.objectAddress,
+                    detail.processObjectAddress,
+                    detail.startAddress,
+                    NarrowToWide(sample.name.empty() ? std::string("runtime-field") : sample.name),
+                    L"rowStatus=" + std::to_wstring(sample.status),
+                    sample.status == KSWORD_ARK_RUNTIME_FIELD_SAMPLE_ROW_STATUS_OK ? 100UL : 50UL,
+                    L"id=" + std::to_wstring(sample.runtimeItemId) +
+                        L"; offset=" + HexMaskText(sample.offset) +
+                        L"; size=" + std::to_wstring(sample.size) +
+                        L"; bytesRead=" + std::to_wstring(sample.bytesRead) +
+                        L"; value=" + FormatHexPointer(static_cast<std::uintptr_t>(sample.valueU64)) +
+                        L"; last=" + StatusHexText(sample.lastStatus));
+            }
         }
     }
 

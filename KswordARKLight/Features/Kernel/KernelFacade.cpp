@@ -2499,6 +2499,38 @@ const wchar_t* DynV4MissingKindText(const std::uint32_t missingKind) {
     }
 }
 
+// DynV4ItemFlagsText expands v4 item flags into profile semantics. Input is a
+// KSW_DYN_V4_ITEM_FLAG_* mask; processing names required/optional bits and
+// preserves unknown bits as hexadecimal; output is display-only text.
+std::wstring DynV4ItemFlagsText(const std::uint32_t flags) {
+    std::vector<std::wstring> names;
+    AppendFlagName(names, flags, KSW_DYN_V4_ITEM_FLAG_REQUIRED, L"Required");
+    AppendFlagName(names, flags, KSW_DYN_V4_ITEM_FLAG_OPTIONAL, L"Optional");
+    const std::uint32_t knownFlags =
+        KSW_DYN_V4_ITEM_FLAG_REQUIRED |
+        KSW_DYN_V4_ITEM_FLAG_OPTIONAL;
+    if ((flags & ~knownFlags) != 0U) {
+        names.push_back(std::wstring(L"unknown=") + HexText(flags & ~knownFlags));
+    }
+    return JoinNames(names);
+}
+
+// DynV4ItemValueText formats the 64-bit value carried by one accepted v4 item.
+// Input is the shared item packet; processing combines valueHigh/valueLow and
+// keeps aux values visible; output is a compact table/detail string.
+std::wstring DynV4ItemValueText(const KSW_DYN_V4_ITEM_PACKET& item) {
+    const std::uint64_t value =
+        (static_cast<std::uint64_t>(item.valueHigh) << 32U) |
+        static_cast<std::uint64_t>(item.valueLow);
+    std::wostringstream stream;
+    stream << HexText(value)
+           << L" aux0=" << HexText(item.aux0)
+           << L" aux1=" << HexText(item.aux1)
+           << L" aux2=" << HexText(item.aux2)
+           << L" aux3=" << HexText(item.aux3);
+    return stream.str();
+}
+
 // CidObjectKindText names CID table object kinds. Input is R0 expectedObjectKind;
 // output is a compact label used by the CID table summary page.
 const wchar_t* CidObjectKindText(const std::uint32_t kind) {
@@ -2523,6 +2555,35 @@ const wchar_t* CidEnumStatusText(const std::uint32_t status) {
     case KSWORD_ARK_CID_ENUM_STATUS_BUFFER_TRUNCATED: return L"Buffer truncated";
     case KSWORD_ARK_CID_ENUM_STATUS_BUDGET_EXHAUSTED: return L"Budget exhausted";
     case KSWORD_ARK_CID_ENUM_STATUS_UNAVAILABLE:
+    default: return L"Unavailable";
+    }
+}
+
+// ObjectSummaryStatusText names the single-object metadata query status. Input
+// is KSWORD_ARK_OBJECT_SUMMARY_STATUS_*; output is used in the CID summary page
+// and does not alter object lifetime or reference counts.
+const wchar_t* ObjectSummaryStatusText(const std::uint32_t status) {
+    switch (status) {
+    case KSWORD_ARK_OBJECT_SUMMARY_STATUS_OK: return L"OK";
+    case KSWORD_ARK_OBJECT_SUMMARY_STATUS_PARTIAL: return L"Partial";
+    case KSWORD_ARK_OBJECT_SUMMARY_STATUS_UNSUPPORTED_TARGET: return L"Unsupported target";
+    case KSWORD_ARK_OBJECT_SUMMARY_STATUS_LOOKUP_FAILED: return L"Lookup failed";
+    case KSWORD_ARK_OBJECT_SUMMARY_STATUS_TYPE_QUERY_FAILED: return L"Type query failed";
+    case KSWORD_ARK_OBJECT_SUMMARY_STATUS_COUNTERS_UNAVAILABLE: return L"Counters unavailable";
+    case KSWORD_ARK_OBJECT_SUMMARY_STATUS_UNAVAILABLE:
+    default: return L"Unavailable";
+    }
+}
+
+// ObjectHeaderStatusText names ObjectHeader profile readiness. Input is
+// KSWORD_ARK_OBJECT_HEADER_STATUS_*; output explains whether type/counter
+// fields are trustworthy for read-only display.
+const wchar_t* ObjectHeaderStatusText(const std::uint32_t status) {
+    switch (status) {
+    case KSWORD_ARK_OBJECT_HEADER_STATUS_PROFILE_MISSING: return L"Profile missing";
+    case KSWORD_ARK_OBJECT_HEADER_STATUS_PARTIAL_PROFILE: return L"Partial profile";
+    case KSWORD_ARK_OBJECT_HEADER_STATUS_AVAILABLE: return L"Available";
+    case KSWORD_ARK_OBJECT_HEADER_STATUS_UNAVAILABLE:
     default: return L"Unavailable";
     }
 }
@@ -4162,6 +4223,7 @@ KernelOperationResult QueryPdbProfileStatus(const KernelRequest& request) {
     const ksword::ark::DynDataV4ModulesResult v4Modules = client.queryDynDataV4Modules();
     const ksword::ark::DynDataV4CapabilityGroupsResult v4Groups = client.queryDynDataV4CapabilityGroups();
     const ksword::ark::DynDataV4MissingItemsResult v4Missing = client.queryDynDataV4MissingItems();
+    const ksword::ark::DynDataV4ItemsResult v4Items = client.queryDynDataV4Items();
     const DynDataProfileMatch profileMatch = FindMatchingDynDataProfile(status.ntoskrnl);
 
     KernelOperationResult result;
@@ -4205,6 +4267,18 @@ KernelOperationResult QueryPdbProfileStatus(const KernelRequest& request) {
         { L"Identity", L"ArkDriverClient::queryDynDataV4Modules" },
         { L"Detail", Utf8ToWide(v4Modules.io.message) },
     }, Utf8ToWide(v4Modules.io.message)));
+    result.rows.push_back(Row({
+        { L"模块", L"v4-items" },
+        { L"Class", L"accepted-items" },
+        { L"Profile", L"profile-v4" },
+        { L"状态", v4Items.io.ok ? L"OK" : (v4Items.unsupported ? L"Unsupported" : L"Unavailable") },
+        { L"Capability", L"item status" },
+        { L"缺失", v4Items.io.ok ? L"" : Utf8ToWide(v4Items.io.message) },
+        { L"Identity", L"ArkDriverClient::queryDynDataV4Items" },
+        { L"Detail", L"returned=" + std::to_wstring(v4Items.returnedCount) +
+            L"/" + std::to_wstring(v4Items.totalCount) +
+            L"; " + Utf8ToWide(v4Items.io.message) },
+    }, Utf8ToWide(v4Items.io.message)));
     if (v4Modules.io.ok) {
         for (const KSW_DYN_V4_MODULE_STATUS_ENTRY& entry : v4Modules.entries) {
             const std::wstring moduleName = FixedWideText(entry.module.image.moduleName, KSW_DYN_MODULE_NAME_CHARS);
@@ -4235,6 +4309,32 @@ KernelOperationResult QueryPdbProfileStatus(const KernelRequest& request) {
                 { L"Identity", identity.str() },
                 { L"Detail", L"v4 module profile status row" },
             }, identity.str()));
+        }
+    }
+
+    if (v4Items.io.ok) {
+        for (const KSW_DYN_V4_ITEM_STATUS_ENTRY& entry : v4Items.entries) {
+            const KSW_DYN_V4_ITEM_PACKET& item = entry.item;
+            const std::wstring kindText = DynV4ItemKindText(item.itemKind);
+            const std::wstring flagsText = DynV4ItemFlagsText(item.flags);
+            result.rows.push_back(Row({
+                { L"模块", L"v4-item" },
+                { L"ModuleClassId", std::to_wstring(entry.moduleClassId) },
+                { L"Class", std::to_wstring(entry.moduleClassId) },
+                { L"Profile", L"ItemId=" + std::to_wstring(item.itemId) },
+                { L"状态", flagsText },
+                { L"Status", flagsText },
+                { L"Capability", L"group=" + std::to_wstring(item.capabilityGroupId) },
+                { L"Group", std::to_wstring(item.capabilityGroupId) },
+                { L"缺失", kindText },
+                { L"Identity", L"itemIndex=" + std::to_wstring(entry.itemIndex) },
+                { L"ItemIndex", std::to_wstring(entry.itemIndex) },
+                { L"ItemId", std::to_wstring(item.itemId) },
+                { L"ItemKind", kindText },
+                { L"Flags", HexText(item.flags) },
+                { L"Value", DynV4ItemValueText(item) },
+                { L"Detail", DynV4ItemValueText(item) },
+            }, DynV4ItemValueText(item)));
         }
     }
 
@@ -4327,6 +4427,60 @@ KernelOperationResult QueryCidTableSummary(const KernelRequest& request) {
             { L"ReferenceStatus", HexText(static_cast<std::uint32_t>(entry.referenceStatus)) },
             { L"HandleIndex", std::to_wstring(entry.handleIndex) },
             { L"Detail", CidEntryFlagsText(entry.flags) },
+        }));
+    }
+
+    const std::size_t objectSummaryLimit = cidFilter == 0U ? 16U : 64U;
+    const std::size_t objectSummaryCount = std::min(query.entries.size(), objectSummaryLimit);
+    for (std::size_t index = 0U; index < objectSummaryCount; ++index) {
+        const KSWORD_ARK_CID_TABLE_ENTRY& entry = query.entries[index];
+        if (entry.cidValue == 0U && entry.objectAddress == 0ULL) {
+            continue;
+        }
+        const ksword::ark::KernelObjectSummaryAuditResult summary =
+            client.queryKernelObjectSummary(entry.expectedObjectKind, entry.cidValue, entry.objectAddress);
+        const KSWORD_ARK_QUERY_KERNEL_OBJECT_SUMMARY_RESPONSE& response = summary.response;
+        const std::wstring transportStatus = summary.io.ok
+            ? ObjectSummaryStatusText(response.status)
+            : (summary.unsupported ? L"Unsupported" : L"Unavailable");
+        const std::wstring typeName = FixedWideText(response.typeName, KSWORD_ARK_KERNEL_OBJECT_TYPE_NAME_CHARS);
+        const std::wstring detailText = FixedWideText(response.detail, KSWORD_ARK_KERNEL_OBJECT_DETAIL_CHARS);
+        result.rows.push_back(Row({
+            { L"CID", std::to_wstring(entry.cidValue) },
+            { L"Cid", std::to_wstring(entry.cidValue) },
+            { L"对象", HexText(response.objectAddress != 0ULL ? response.objectAddress : entry.objectAddress) },
+            { L"Object", HexText(response.objectAddress != 0ULL ? response.objectAddress : entry.objectAddress) },
+            { L"ObjectAddress", HexText(response.objectAddress != 0ULL ? response.objectAddress : entry.objectAddress) },
+            { L"类型", typeName.empty() ? CidObjectKindText(entry.expectedObjectKind) : typeName },
+            { L"Kind", CidObjectKindText(response.targetKind != KSWORD_ARK_CID_OBJECT_KIND_UNKNOWN ? response.targetKind : entry.expectedObjectKind) },
+            { L"状态", transportStatus },
+            { L"Status", transportStatus },
+            { L"LookupStatus", NtStatusText(response.lookupStatus) },
+            { L"TypeStatus", NtStatusText(response.typeStatus) },
+            { L"CounterStatus", NtStatusText(response.counterStatus) },
+            { L"ObjectHeaderStatus", ObjectHeaderStatusText(response.objectHeaderStatus) },
+            { L"Flags", HexText(response.fieldFlags) },
+            { L"FieldFlags", HexText(response.fieldFlags) },
+            { L"引用", L"ptr=" + std::to_wstring(response.pointerCount) + L", handle=" + std::to_wstring(response.handleCount) },
+            { L"ReferenceStatus", L"ptr=" + std::to_wstring(response.pointerCount) + L", handle=" + std::to_wstring(response.handleCount) },
+            { L"HandleIndex", std::to_wstring(entry.handleIndex) },
+            { L"TypeIndex", std::to_wstring(response.typeIndex) },
+            { L"ObjectType", HexText(response.objectTypeAddress) },
+            { L"DynDataCapabilityMask", HexText(response.dynDataCapabilityMask) },
+            { L"OT.NameOffset", HexText(response.otNameOffset) },
+            { L"OT.IndexOffset", HexText(response.otIndexOffset) },
+            { L"Source", L"ArkDriverClient::queryKernelObjectSummary" },
+            { L"Detail", detailText.empty() ? Utf8ToWide(summary.io.message) : detailText },
+        }, detailText.empty() ? Utf8ToWide(summary.io.message) : detailText));
+    }
+    if (query.entries.size() > objectSummaryCount) {
+        result.rows.push_back(Row({
+            { L"CID", L"<summary-limit>" },
+            { L"对象", HexText(query.pspCidTableAddress) },
+            { L"类型", L"KernelObjectSummary" },
+            { L"状态", L"Truncated" },
+            { L"引用", std::to_wstring(objectSummaryCount) + L"/" + std::to_wstring(query.entries.size()) },
+            { L"Detail", L"未带筛选时仅查询前 16 条对象摘要；输入 PID/CID 筛选可扩大到 64 条，避免刷新页时过量 IOCTL。" },
         }));
     }
     return result;

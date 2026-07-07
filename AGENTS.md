@@ -92,5 +92,6 @@ $seven='C:\Users\Felix\CLionProjects\Wisdom-Weasel\7z.exe'
 - R0/R3 协议只在 `shared/driver/` 定义。
 - 驱动 IOCTL 分发只通过 `KswordARKDriver/src/dispatch/ioctl_registry.c` 注册 handler，`ioctl_dispatch.c` 不再承载业务 switch。
 - 用户态 KswordARK 设备访问只通过 `Ksword5.1/Ksword5.1/ArkDriverClient/`，Dock UI 不直接调用 KswordARK `DeviceIoControl`。
+- `KswordCLI` 每新增、删除或调整一个命令/别名/参数时，必须同步更新 `KswordCLI` 内置 `help` 命令元数据，并同步更新 `docs/CLI使用文档.md`。
 - 新增源码必须同步更新对应 `.vcxproj` 和 `.vcxproj.filters`。
 - 第三方代码接入必须带 LICENSE 和 NOTICE。

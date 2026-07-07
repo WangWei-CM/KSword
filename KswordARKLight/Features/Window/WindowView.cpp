@@ -95,6 +95,53 @@ std::wstring IoStateText(const bool ok, const bool unsupported) {
     return unsupported ? L"Unsupported" : L"Unavailable";
 }
 
+// FixedWideText copies bounded UTF-16 driver arrays into display strings.
+// Inputs are a protocol buffer and its element capacity; processing stops at
+// the first NUL without reading beyond the fixed packet field; output is empty
+// for absent text and otherwise safe for ListView cells.
+std::wstring FixedWideText(const wchar_t* text, const std::size_t maxChars) {
+    if (text == nullptr || maxChars == 0U) {
+        return {};
+    }
+    std::size_t length = 0U;
+    while (length < maxChars && text[length] != L'\0') {
+        ++length;
+    }
+    return std::wstring(text, text + length);
+}
+
+// Win32kRuntimeStatusText maps KSWORD_ARK_WIN32K_STATUS_* values to the same
+// short explanations used by the full WindowDock. Input is one R0 status code;
+// output is display-only text and never drives mutation.
+const wchar_t* Win32kRuntimeStatusText(const std::uint32_t status) {
+    switch (status) {
+    case KSWORD_ARK_WIN32K_STATUS_OK: return L"OK";
+    case KSWORD_ARK_WIN32K_STATUS_PARTIAL: return L"Partial";
+    case KSWORD_ARK_WIN32K_STATUS_UNSUPPORTED: return L"Unsupported";
+    case KSWORD_ARK_WIN32K_STATUS_PROFILE_MISSING: return L"ProfileMissing";
+    case KSWORD_ARK_WIN32K_STATUS_WIN32K_NOT_FOUND: return L"Win32kNotFound";
+    case KSWORD_ARK_WIN32K_STATUS_BUFFER_TRUNCATED: return L"BufferTruncated";
+    case KSWORD_ARK_WIN32K_STATUS_READ_FAILED: return L"ReadFailed";
+    case KSWORD_ARK_WIN32K_STATUS_ENUM_FAILED: return L"EnumFailed";
+    case KSWORD_ARK_WIN32K_STATUS_UNKNOWN:
+    default: return L"Unknown";
+    }
+}
+
+// Win32kModuleStateText formats a win32k module state packet. Inputs are the
+// shared module state and label; processing exposes loaded/profile/base/name
+// fields exactly as read from R0; output is one detail-pane row value.
+std::wstring Win32kModuleStateText(const wchar_t* label, const KSWORD_ARK_WIN32K_MODULE_STATE& state) {
+    std::wostringstream stream;
+    stream << label
+           << L": loaded=" << state.loaded
+           << L"; profile=" << state.profileState
+           << L"; base=" << HexText(state.imageBase)
+           << L"; size=" << HexText(state.imageSize)
+           << L"; name=" << FixedWideText(state.moduleName, KSWORD_ARK_WIN32K_MODULE_NAME_CHARS);
+    return stream.str();
+}
+
 // Width returns non-negative rectangle width. Input is a RECT; output is pixels
 // available for child controls.
 int Width(const RECT& rc) {
@@ -429,6 +476,60 @@ void ShowDetail(WindowViewState* state, int modelIndex) {
     AddDetailRow(state->detailList, detailRow++, L"Window", detail.title);
     for (const WindowProperty& property : detail.properties) {
         AddDetailRow(state->detailList, detailRow++, property.name, property.value);
+    }
+
+    // Mirror the full WindowDock single-HWND R0 detail path through
+    // ArkDriverClient. Inputs are the currently selected HWND/PID/TID; the
+    // wrapper keeps DeviceIoControl syntax centralized and returns one bounded
+    // response packet; this block appends read-only detail rows and returns no
+    // value to the caller.
+    const std::uint64_t hwndValue =
+        static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(row->hwnd));
+    const ksword::ark::Win32kWindowRuntimeDetailResult r0Detail =
+        ksword::ark::DriverClient().queryWin32kWindowDetail(
+            hwndValue,
+            static_cast<unsigned long>(row->processId),
+            static_cast<unsigned long>(row->threadId));
+    AddDetailRow(state->detailList, detailRow++, L"R0 Win32k Detail",
+        IoStateText(r0Detail.io.ok, r0Detail.unsupported) + L" - " + Utf8ToWideLossy(r0Detail.io.message));
+    if (r0Detail.io.ok) {
+        const KSWORD_ARK_WIN32K_WINDOW_DETAIL_RESPONSE& response = r0Detail.response;
+        AddDetailRow(state->detailList, detailRow++, L"R0 Status", Win32kRuntimeStatusText(response.status));
+        AddDetailRow(state->detailList, detailRow++, L"R0 HWND", HexText(response.hwnd));
+        AddDetailRow(state->detailList, detailRow++, L"R0 PID/TID",
+            std::to_wstring(response.processId) + L" / " + std::to_wstring(response.threadId));
+        AddDetailRow(state->detailList, detailRow++, L"R0 tagWND", HexText(response.tagWnd));
+        AddDetailRow(state->detailList, detailRow++, L"R0 threadInfo", HexText(response.threadInfo));
+        AddDetailRow(state->detailList, detailRow++, L"R0 queue", HexText(response.queueObject));
+        AddDetailRow(state->detailList, detailRow++, L"R0 desktop", HexText(response.desktopObject));
+        AddDetailRow(state->detailList, detailRow++, L"R0 capability", HexText(response.capabilityMask));
+        AddDetailRow(state->detailList, detailRow++, L"R0 missing capability", HexText(response.missingCapabilityMask));
+        AddDetailRow(state->detailList, detailRow++, L"R0 fieldFlags", HexText(response.fieldFlags));
+        AddDetailRow(state->detailList, detailRow++, L"R0 lastStatus", HexText(static_cast<std::uint32_t>(response.lastStatus)));
+        AddDetailRow(state->detailList, detailRow++, L"R0 Title",
+            FixedWideText(response.title, KSWORD_ARK_WIN32K_TITLE_CHARS));
+        AddDetailRow(state->detailList, detailRow++, L"R0 Class",
+            FixedWideText(response.className, KSWORD_ARK_WIN32K_CLASS_CHARS));
+        AddDetailRow(state->detailList, detailRow++, L"R0 Detail",
+            FixedWideText(response.detail, KSWORD_ARK_RUNTIME_DETAIL_TEXT_CHARS));
+        AddDetailRow(state->detailList, detailRow++, L"R0 win32k",
+            Win32kModuleStateText(L"win32k", response.win32k));
+        AddDetailRow(state->detailList, detailRow++, L"R0 win32kbase",
+            Win32kModuleStateText(L"win32kbase", response.win32kbase));
+        AddDetailRow(state->detailList, detailRow++, L"R0 win32kfull",
+            Win32kModuleStateText(L"win32kfull", response.win32kfull));
+        AddDetailRow(state->detailList, detailRow++, L"R0 offsets tagWND",
+            L"pti=" + HexText(response.fieldOffsets.tagWndThreadInfo) +
+            L"; style=" + HexText(response.fieldOffsets.tagWndStyle) +
+            L"; rect=" + HexText(response.fieldOffsets.tagWndRect) +
+            L"; title=" + HexText(response.fieldOffsets.tagWndTitle) +
+            L"; class=" + HexText(response.fieldOffsets.tagWndClass));
+        AddDetailRow(state->detailList, detailRow++, L"R0 offsets thread/queue",
+            L"queue=" + HexText(response.fieldOffsets.tagThreadInfoQueue) +
+            L"; desktop=" + HexText(response.fieldOffsets.tagThreadInfoDesktop) +
+            L"; active=" + HexText(response.fieldOffsets.tagQActiveWindow) +
+            L"; focus=" + HexText(response.fieldOffsets.tagQFocusWindow) +
+            L"; capture=" + HexText(response.fieldOffsets.tagQCaptureWindow));
     }
 }
 
