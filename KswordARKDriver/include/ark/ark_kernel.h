@@ -46,12 +46,34 @@ typedef struct _KSW_DRIVER_UNLOAD_DIAGNOSTICS
     BOOLEAN hasDeviceLoop;
     BOOLEAN hasAttachedDevice;
     BOOLEAN hasBusyDeviceReference;
+    BOOLEAN hasThreadScan;
+    BOOLEAN hasModuleResidentThreads;
+    BOOLEAN hasCallbackScan;
+    BOOLEAN hasModuleCallbacks;
+    BOOLEAN hasNonRemovableModuleCallbacks;
+    BOOLEAN hasLoaderLinkCheck;
+    BOOLEAN hasLoaderLinkMismatch;
+    BOOLEAN hasImageHeaderCheck;
+    BOOLEAN hasInvalidImageHeader;
     BOOLEAN isCoreKernelModule;
     BOOLEAN isSelfModule;
     ULONGLONG driverStart;
     ULONGLONG loaderEntryAddress;
     ULONGLONG loaderDllBase;
     ULONG loaderSizeOfImage;
+    ULONG scannedProcessCount;
+    ULONG scannedThreadCount;
+    ULONG moduleResidentThreadCount;
+    NTSTATUS threadScanStatus;
+    ULONG callbackEnumeratedCount;
+    ULONG moduleCallbackCount;
+    ULONG removableModuleCallbackCount;
+    ULONG nonRemovableModuleCallbackCount;
+    NTSTATUS callbackScanStatus;
+    NTSTATUS loaderLinkStatus;
+    NTSTATUS imageHeaderStatus;
+    ULONG imageHeaderSizeOfImage;
+    ULONG imageNtHeaderOffset;
 } KSW_DRIVER_UNLOAD_DIAGNOSTICS, *PKSW_DRIVER_UNLOAD_DIAGNOSTICS;
 
 NTSTATUS

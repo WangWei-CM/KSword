@@ -38,6 +38,10 @@ Environment:
 #define KSW_DRIVER_UNLOAD_DIRECTORY_MAX_ENTRIES 4096UL
 /* 中文说明：按模块基址强力清理最多尝试 256 个回调，防止异常枚举导致 IOCTL 长时间占用。 */
 #define KSW_DRIVER_UNLOAD_MAX_CALLBACK_CLEANUP_COUNT 256UL
+/* 中文说明：线程证据扫描最多遍历 4096 个进程，避免异常系统链路拖死 IOCTL。 */
+#define KSW_DRIVER_UNLOAD_THREAD_SCAN_MAX_PROCESSES 4096UL
+/* 中文说明：线程证据扫描最多遍历 65536 个线程，只做证据，不终止线程。 */
+#define KSW_DRIVER_UNLOAD_THREAD_SCAN_MAX_THREADS 65536UL
 
 /* 中文说明：SystemModuleInformation 用于把回调地址映射到内核模块基址。 */
 #define KSW_DRIVER_UNLOAD_SYSTEM_MODULE_CLASS 11UL
@@ -154,6 +158,17 @@ ZwQuerySystemInformation(
     _Out_opt_ PULONG ReturnLength
     );
 
+/* 中文说明：动态解析 PsGetNextProcess，供强卸载 preflight 只读扫描线程驻留证据。 */
+typedef PEPROCESS(NTAPI* KSW_DRIVER_UNLOAD_PS_GET_NEXT_PROCESS_FN)(
+    _In_opt_ PEPROCESS Process
+    );
+
+/* 中文说明：动态解析 PsGetNextProcessThread，供强卸载 preflight 只读扫描线程驻留证据。 */
+typedef PETHREAD(NTAPI* KSW_DRIVER_UNLOAD_PS_GET_NEXT_PROCESS_THREAD_FN)(
+    _In_ PEPROCESS Process,
+    _In_opt_ PETHREAD Thread
+    );
+
 /* 中文说明：卸载线程上下文在非分页池中分配，线程退出前释放。 */
 typedef struct _KSW_DRIVER_UNLOAD_CONTEXT
 {
@@ -206,6 +221,30 @@ typedef struct _KSW_DRIVER_UNLOAD_CALLBACK_CLEANUP_RESULT
     NTSTATUS LastStatus;
 } KSW_DRIVER_UNLOAD_CALLBACK_CLEANUP_RESULT, *PKSW_DRIVER_UNLOAD_CALLBACK_CLEANUP_RESULT;
 
+/* 中文说明：强卸载 preflight 的目标模块回调驻留证据，不直接改写回调表。 */
+typedef struct _KSW_DRIVER_UNLOAD_CALLBACK_EVIDENCE_RESULT
+{
+    ULONG Enumerated;
+    ULONG Matched;
+    ULONG Removable;
+    ULONG NonRemovable;
+    NTSTATUS LastStatus;
+    BOOLEAN Truncated;
+} KSW_DRIVER_UNLOAD_CALLBACK_EVIDENCE_RESULT, *PKSW_DRIVER_UNLOAD_CALLBACK_EVIDENCE_RESULT;
+
+/* 中文说明：loader 链和镜像 PE 头的只读一致性证据，不执行摘链或擦头。 */
+typedef struct _KSW_DRIVER_UNLOAD_LOADER_IMAGE_EVIDENCE
+{
+    NTSTATUS LoaderLinkStatus;
+    NTSTATUS ImageHeaderStatus;
+    ULONG ImageHeaderSizeOfImage;
+    ULONG ImageNtHeaderOffset;
+    BOOLEAN LoaderLinkChecked;
+    BOOLEAN LoaderLinkMismatch;
+    BOOLEAN ImageHeaderChecked;
+    BOOLEAN InvalidImageHeader;
+} KSW_DRIVER_UNLOAD_LOADER_IMAGE_EVIDENCE, *PKSW_DRIVER_UNLOAD_LOADER_IMAGE_EVIDENCE;
+
 /* 中文说明：卸载前预检结果，所有字段只用于决定是否允许执行破坏性步骤。 */
 typedef struct _KSW_DRIVER_UNLOAD_PREFLIGHT_RESULT
 {
@@ -223,6 +262,15 @@ typedef struct _KSW_DRIVER_UNLOAD_PREFLIGHT_RESULT
     BOOLEAN HasDeviceLoop;
     BOOLEAN HasAttachedDevice;
     BOOLEAN HasBusyDeviceReference;
+    BOOLEAN HasThreadScan;
+    BOOLEAN HasModuleResidentThreads;
+    BOOLEAN HasCallbackScan;
+    BOOLEAN HasModuleCallbacks;
+    BOOLEAN HasNonRemovableModuleCallbacks;
+    BOOLEAN HasLoaderLinkCheck;
+    BOOLEAN HasLoaderLinkMismatch;
+    BOOLEAN HasImageHeaderCheck;
+    BOOLEAN HasInvalidImageHeader;
     BOOLEAN IsCoreKernelModule;
     BOOLEAN IsSelfModule;
     ULONGLONG DriverStart;
@@ -230,6 +278,19 @@ typedef struct _KSW_DRIVER_UNLOAD_PREFLIGHT_RESULT
     ULONGLONG LoaderEntryAddress;
     ULONGLONG LoaderDllBase;
     ULONG LoaderSizeOfImage;
+    ULONG ScannedProcessCount;
+    ULONG ScannedThreadCount;
+    ULONG ModuleResidentThreadCount;
+    NTSTATUS ThreadScanStatus;
+    ULONG CallbackEnumeratedCount;
+    ULONG ModuleCallbackCount;
+    ULONG RemovableModuleCallbackCount;
+    ULONG NonRemovableModuleCallbackCount;
+    NTSTATUS CallbackScanStatus;
+    NTSTATUS LoaderLinkStatus;
+    NTSTATUS ImageHeaderStatus;
+    ULONG ImageHeaderSizeOfImage;
+    ULONG ImageNtHeaderOffset;
     NTSTATUS Status;
     WCHAR ServiceRegistryPath[KSWORD_ARK_DRIVER_IMAGE_PATH_CHARS];
 } KSW_DRIVER_UNLOAD_PREFLIGHT_RESULT, *PKSW_DRIVER_UNLOAD_PREFLIGHT_RESULT;
@@ -260,12 +321,34 @@ KswordARKDriverUnloadCapturePreflightDiagnostics(
     Diagnostics->hasDeviceLoop = Preflight->HasDeviceLoop;
     Diagnostics->hasAttachedDevice = Preflight->HasAttachedDevice;
     Diagnostics->hasBusyDeviceReference = Preflight->HasBusyDeviceReference;
+    Diagnostics->hasThreadScan = Preflight->HasThreadScan;
+    Diagnostics->hasModuleResidentThreads = Preflight->HasModuleResidentThreads;
+    Diagnostics->hasCallbackScan = Preflight->HasCallbackScan;
+    Diagnostics->hasModuleCallbacks = Preflight->HasModuleCallbacks;
+    Diagnostics->hasNonRemovableModuleCallbacks = Preflight->HasNonRemovableModuleCallbacks;
+    Diagnostics->hasLoaderLinkCheck = Preflight->HasLoaderLinkCheck;
+    Diagnostics->hasLoaderLinkMismatch = Preflight->HasLoaderLinkMismatch;
+    Diagnostics->hasImageHeaderCheck = Preflight->HasImageHeaderCheck;
+    Diagnostics->hasInvalidImageHeader = Preflight->HasInvalidImageHeader;
     Diagnostics->isCoreKernelModule = Preflight->IsCoreKernelModule;
     Diagnostics->isSelfModule = Preflight->IsSelfModule;
     Diagnostics->driverStart = Preflight->DriverStart;
     Diagnostics->loaderEntryAddress = Preflight->LoaderEntryAddress;
     Diagnostics->loaderDllBase = Preflight->LoaderDllBase;
     Diagnostics->loaderSizeOfImage = Preflight->LoaderSizeOfImage;
+    Diagnostics->scannedProcessCount = Preflight->ScannedProcessCount;
+    Diagnostics->scannedThreadCount = Preflight->ScannedThreadCount;
+    Diagnostics->moduleResidentThreadCount = Preflight->ModuleResidentThreadCount;
+    Diagnostics->threadScanStatus = Preflight->ThreadScanStatus;
+    Diagnostics->callbackEnumeratedCount = Preflight->CallbackEnumeratedCount;
+    Diagnostics->moduleCallbackCount = Preflight->ModuleCallbackCount;
+    Diagnostics->removableModuleCallbackCount = Preflight->RemovableModuleCallbackCount;
+    Diagnostics->nonRemovableModuleCallbackCount = Preflight->NonRemovableModuleCallbackCount;
+    Diagnostics->callbackScanStatus = Preflight->CallbackScanStatus;
+    Diagnostics->loaderLinkStatus = Preflight->LoaderLinkStatus;
+    Diagnostics->imageHeaderStatus = Preflight->ImageHeaderStatus;
+    Diagnostics->imageHeaderSizeOfImage = Preflight->ImageHeaderSizeOfImage;
+    Diagnostics->imageNtHeaderOffset = Preflight->ImageNtHeaderOffset;
 }
 
 /* 中文说明：进程 Ex notify 函数签名，供批量移除时调用公开 Ps* 移除 API。 */
@@ -1523,6 +1606,113 @@ KswordARKDriverUnloadRemoveOneCallbackEntry(
     }
 }
 
+/* 中文说明：按模块基址只读统计残留回调，作为是否允许强拆的证据。 */
+static NTSTATUS
+KswordARKDriverUnloadInspectCallbacksByModuleBase(
+    _In_ ULONGLONG TargetModuleBase,
+    _Out_ KSW_DRIVER_UNLOAD_CALLBACK_EVIDENCE_RESULT* EvidenceResult
+    )
+{
+    NTSTATUS status = STATUS_SUCCESS;
+    KSW_DRIVER_UNLOAD_SYSTEM_MODULE_INFORMATION* moduleInfo = NULL;
+    ULONG moduleInfoBytes = 0UL;
+    ULONG responseBytes = 0UL;
+    KSWORD_ARK_ENUM_CALLBACKS_RESPONSE* enumResponse = NULL;
+    ULONG entryIndex = 0UL;
+    ULONG parsedEntries = 0UL;
+
+    /*
+     * 输入：目标驱动模块基址和证据输出结构。
+     * 处理：复用现有回调枚举路径建立只读快照，按 moduleBase 或回调地址范围
+     *      判断归属目标模块，并区分可由受控 API 移除与不可安全移除的条目。
+     * 返回：基础枚举成功返回 STATUS_SUCCESS；内存/模块快照失败返回具体状态。
+     */
+    if (EvidenceResult == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    RtlZeroMemory(EvidenceResult, sizeof(*EvidenceResult));
+    EvidenceResult->LastStatus = STATUS_SUCCESS;
+    if (TargetModuleBase == 0ULL) {
+        EvidenceResult->LastStatus = STATUS_INVALID_PARAMETER;
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    status = KswordARKDriverUnloadBuildModuleSnapshot(&moduleInfo, &moduleInfoBytes);
+    if (!NT_SUCCESS(status)) {
+        EvidenceResult->LastStatus = status;
+        return status;
+    }
+
+    responseBytes = sizeof(KSWORD_ARK_ENUM_CALLBACKS_RESPONSE) +
+        ((KSW_DRIVER_UNLOAD_MAX_CALLBACK_CLEANUP_COUNT - 1UL) * sizeof(KSWORD_ARK_CALLBACK_ENUM_ENTRY));
+#pragma warning(push)
+#pragma warning(disable:4996)
+    enumResponse = (KSWORD_ARK_ENUM_CALLBACKS_RESPONSE*)ExAllocatePoolWithTag(
+        NonPagedPoolNx,
+        responseBytes,
+        KSW_DRIVER_UNLOAD_DIRECTORY_TAG);
+#pragma warning(pop)
+    if (enumResponse == NULL) {
+        ExFreePoolWithTag(moduleInfo, KSW_DRIVER_UNLOAD_DIRECTORY_TAG);
+        EvidenceResult->LastStatus = STATUS_INSUFFICIENT_RESOURCES;
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    RtlZeroMemory(enumResponse, responseBytes);
+    enumResponse->size = sizeof(KSWORD_ARK_ENUM_CALLBACKS_RESPONSE);
+    enumResponse->version = KSWORD_ARK_CALLBACK_ENUM_PROTOCOL_VERSION;
+    enumResponse->entrySize = sizeof(KSWORD_ARK_CALLBACK_ENUM_ENTRY);
+    enumResponse->lastStatus = STATUS_SUCCESS;
+
+    {
+        KSWORD_ARK_CALLBACK_ENUM_BUILDER builder;
+
+        RtlZeroMemory(&builder, sizeof(builder));
+        builder.Response = enumResponse;
+        builder.EntryCapacity = KSW_DRIVER_UNLOAD_MAX_CALLBACK_CLEANUP_COUNT;
+        builder.LastStatus = STATUS_SUCCESS;
+        KswordArkCallbackEnumAddMinifilters(&builder);
+        KswordArkCallbackEnumAddPrivateCallbacks(&builder);
+        KswordArkCallbackExternalAddCallbacks(&builder);
+        enumResponse->totalCount = builder.TotalCount;
+        enumResponse->returnedCount = builder.ReturnedCount;
+        enumResponse->flags = builder.Flags;
+        enumResponse->lastStatus = builder.LastStatus;
+    }
+
+    parsedEntries = enumResponse->returnedCount;
+    if (parsedEntries > KSW_DRIVER_UNLOAD_MAX_CALLBACK_CLEANUP_COUNT) {
+        parsedEntries = KSW_DRIVER_UNLOAD_MAX_CALLBACK_CLEANUP_COUNT;
+    }
+    EvidenceResult->Enumerated = parsedEntries;
+    EvidenceResult->Truncated =
+        (enumResponse->totalCount > enumResponse->returnedCount) ? TRUE : FALSE;
+    EvidenceResult->LastStatus = enumResponse->lastStatus;
+
+    for (entryIndex = 0UL; entryIndex < parsedEntries; ++entryIndex) {
+        const KSWORD_ARK_CALLBACK_ENUM_ENTRY* entry = &enumResponse->entries[entryIndex];
+
+        if (!KswordARKDriverUnloadCallbackEntryMatchesModuleBase(
+            entry,
+            moduleInfo,
+            TargetModuleBase)) {
+            continue;
+        }
+
+        EvidenceResult->Matched += 1UL;
+        if (KswordARKDriverUnloadCallbackEntryIsRemovable(entry)) {
+            EvidenceResult->Removable += 1UL;
+        }
+        else {
+            EvidenceResult->NonRemovable += 1UL;
+        }
+    }
+
+    ExFreePoolWithTag(enumResponse, KSW_DRIVER_UNLOAD_DIRECTORY_TAG);
+    ExFreePoolWithTag(moduleInfo, KSW_DRIVER_UNLOAD_DIRECTORY_TAG);
+    return STATUS_SUCCESS;
+}
+
 /* 中文说明：按模块基址枚举并移除可验证回调，避免目标残留模块继续靠回调运行。 */
 static NTSTATUS
 KswordARKDriverUnloadRemoveCallbacksByModuleBase(
@@ -1675,6 +1865,81 @@ KswordARKDriverUnloadClearUnloadPointerUnsafe(
     __except (EXCEPTION_EXECUTE_HANDLER) {
         (VOID)0;
     }
+}
+
+/* 中文说明：在删除设备或中和 DriverObject 前，先尽量阻断新的外部打开。 */
+static NTSTATUS
+KswordARKDriverUnloadBlockNewDeviceCreatesUnsafe(
+    _Inout_ PDRIVER_OBJECT DriverObject,
+    _Out_opt_ ULONG* BlockedDeviceCountOut
+    )
+{
+    PDEVICE_OBJECT deviceCursor = NULL;
+    PDEVICE_OBJECT deviceList[KSW_DRIVER_UNLOAD_MAX_DEVICE_DELETE_COUNT];
+    ULONG deviceCount = 0UL;
+    ULONG deviceIndex = 0UL;
+    NTSTATUS validationStatus = STATUS_SUCCESS;
+
+    /*
+     * 输入：仍被本线程引用的目标 DriverObject，以及可选的阻断计数输出。
+     * 处理：先快照并校验 DeviceObject->NextDevice 链，确认无环且每个节点仍属于
+     *      同一 DriverObject；随后设置公开的 DO_DEVICE_INITIALIZING 标志，作为
+     *      IoLockRemoveDevice 不可用时的 best-effort 访问阻断，不触碰私有 DeviceLock。
+     * 返回：链表校验和标记均成功时返回 STATUS_SUCCESS；否则返回具体失败码。
+     */
+    if (BlockedDeviceCountOut != NULL) {
+        *BlockedDeviceCountOut = 0UL;
+    }
+    if (DriverObject == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    RtlZeroMemory(deviceList, sizeof(deviceList));
+
+    __try {
+        deviceCursor = DriverObject->DeviceObject;
+        while (deviceCursor != NULL) {
+            ULONG previousIndex = 0UL;
+
+            if (deviceCount >= KSW_DRIVER_UNLOAD_MAX_DEVICE_DELETE_COUNT) {
+                validationStatus = STATUS_BUFFER_OVERFLOW;
+                break;
+            }
+            for (previousIndex = 0UL; previousIndex < deviceCount; ++previousIndex) {
+                if (deviceList[previousIndex] == deviceCursor) {
+                    validationStatus = STATUS_INVALID_DEVICE_REQUEST;
+                    break;
+                }
+            }
+            if (!NT_SUCCESS(validationStatus)) {
+                break;
+            }
+            if (deviceCursor->DriverObject != DriverObject) {
+                validationStatus = STATUS_OBJECT_TYPE_MISMATCH;
+                break;
+            }
+
+            deviceList[deviceCount] = deviceCursor;
+            deviceCount += 1UL;
+            deviceCursor = deviceCursor->NextDevice;
+        }
+
+        if (!NT_SUCCESS(validationStatus)) {
+            return validationStatus;
+        }
+
+        for (deviceIndex = 0UL; deviceIndex < deviceCount; ++deviceIndex) {
+            deviceList[deviceIndex]->Flags |= DO_DEVICE_INITIALIZING;
+        }
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        return GetExceptionCode();
+    }
+
+    if (BlockedDeviceCountOut != NULL) {
+        *BlockedDeviceCountOut = deviceCount;
+    }
+    return STATUS_SUCCESS;
 }
 
 /* 中文说明：目标没有 DriverUnload 时，按原始 DeviceObject->NextDevice 链删除设备。 */
@@ -1951,6 +2216,404 @@ KswordARKDriverUnloadHasPdbBackedDynData(
         DynState->KernelGlobalSources.PsLoadedModuleList == KSW_DYN_FIELD_SOURCE_PDB_PROFILE;
 }
 
+/* 中文说明：确认线程入口证据扫描依赖的 ETHREAD 偏移来自当前 PDB profile。 */
+static BOOLEAN
+KswordARKDriverUnloadHasPdbBackedThreadDynData(
+    _In_ const KSW_DYN_STATE* DynState
+    )
+{
+    /*
+     * 输入：当前 DynData 快照。
+     * 处理：强制要求 ETHREAD.StartAddress 来自 PDB；Win32StartAddress 可选，
+     *      但如果存在也必须来自 PDB，避免把错误偏移误判为目标模块线程。
+     * 返回：线程扫描可安全使用时 TRUE；缺少/非 PDB 来源时 FALSE。
+     */
+    if (DynState == NULL) {
+        return FALSE;
+    }
+    if (!DynState->PdbProfileActive ||
+        !KswordARKDriverIntegrityOffsetPresent(DynState->Kernel.EtStartAddress) ||
+        DynState->KernelSources.EtStartAddress != KSW_DYN_FIELD_SOURCE_PDB_PROFILE) {
+        return FALSE;
+    }
+    if (KswordARKDriverIntegrityOffsetPresent(DynState->Kernel.EtWin32StartAddress) &&
+        DynState->KernelSources.EtWin32StartAddress != KSW_DYN_FIELD_SOURCE_PDB_PROFILE) {
+        return FALSE;
+    }
+    return TRUE;
+}
+
+/* 中文说明：动态解析 PsGetNextProcess，失败时返回 NULL 而不是硬依赖导入。 */
+static KSW_DRIVER_UNLOAD_PS_GET_NEXT_PROCESS_FN
+KswordARKDriverUnloadResolvePsGetNextProcess(
+    VOID
+    )
+{
+    UNICODE_STRING routineName;
+
+    // 输入：无。
+    // 处理：通过 MmGetSystemRoutineAddress 查询公开导出，兼容不同 WDK/系统导出面。
+    // 返回：可调用函数指针；系统不支持时返回 NULL。
+    RtlInitUnicodeString(&routineName, L"PsGetNextProcess");
+    return (KSW_DRIVER_UNLOAD_PS_GET_NEXT_PROCESS_FN)MmGetSystemRoutineAddress(&routineName);
+}
+
+/* 中文说明：动态解析 PsGetNextProcessThread，失败时返回 NULL 而不是硬依赖导入。 */
+static KSW_DRIVER_UNLOAD_PS_GET_NEXT_PROCESS_THREAD_FN
+KswordARKDriverUnloadResolvePsGetNextProcessThread(
+    VOID
+    )
+{
+    UNICODE_STRING routineName;
+
+    // 输入：无。
+    // 处理：通过 MmGetSystemRoutineAddress 查询公开导出，只用于只读枚举线程。
+    // 返回：可调用函数指针；系统不支持时返回 NULL。
+    RtlInitUnicodeString(&routineName, L"PsGetNextProcessThread");
+    return (KSW_DRIVER_UNLOAD_PS_GET_NEXT_PROCESS_THREAD_FN)MmGetSystemRoutineAddress(&routineName);
+}
+
+/* 中文说明：按 DynData 偏移从 ETHREAD 读取 64 位地址字段。 */
+static BOOLEAN
+KswordARKDriverUnloadReadThreadAddressField(
+    _In_ PETHREAD ThreadObject,
+    _In_ ULONG FieldOffset,
+    _Out_ ULONGLONG* AddressOut
+    )
+{
+    const UCHAR* fieldAddress = NULL;
+
+    // 输入：已引用 ETHREAD、PDB-backed 字段偏移和输出地址槽。
+    // 处理：用安全内存读取包装访问 ETHREAD 字段，不直接信任指针可读性。
+    // 返回：完整读取到地址时 TRUE；参数无效、偏移缺失或读取失败时 FALSE。
+    if (ThreadObject == NULL ||
+        AddressOut == NULL ||
+        !KswordARKDriverIntegrityOffsetPresent(FieldOffset)) {
+        return FALSE;
+    }
+
+    *AddressOut = 0ULL;
+    fieldAddress = (const UCHAR*)ThreadObject + (SIZE_T)FieldOffset;
+    return KswordARKHookReadMemorySafe(fieldAddress, AddressOut, sizeof(*AddressOut));
+}
+
+/* 中文说明：判断线程入口地址是否落在目标驱动镜像范围内。 */
+static BOOLEAN
+KswordARKDriverUnloadAddressInImageRange(
+    _In_ ULONGLONG Address,
+    _In_ ULONGLONG ImageStart,
+    _In_ ULONGLONG ImageEnd
+    )
+{
+    // 输入：待判断地址和 [ImageStart, ImageEnd) 半开区间。
+    // 处理：只做整数范围判断，调用方保证范围来自 loader/DriverObject 交叉证据。
+    // 返回：地址落在目标模块镜像内时 TRUE，否则 FALSE。
+    if (Address == 0ULL || ImageStart == 0ULL || ImageEnd <= ImageStart) {
+        return FALSE;
+    }
+    return (Address >= ImageStart && Address < ImageEnd) ? TRUE : FALSE;
+}
+
+/* 中文说明：只读扫描仍从目标模块入口运行的线程，作为强卸载阻断证据。 */
+static NTSTATUS
+KswordARKDriverUnloadScanModuleResidentThreads(
+    _In_ const KSW_DYN_STATE* DynState,
+    _In_ ULONGLONG ImageStart,
+    _In_ ULONGLONG ImageEnd,
+    _Out_ ULONG* ScannedProcessCountOut,
+    _Out_ ULONG* ScannedThreadCountOut,
+    _Out_ ULONG* ResidentThreadCountOut
+    )
+{
+    KSW_DRIVER_UNLOAD_PS_GET_NEXT_PROCESS_FN psGetNextProcess = NULL;
+    KSW_DRIVER_UNLOAD_PS_GET_NEXT_PROCESS_THREAD_FN psGetNextProcessThread = NULL;
+    PEPROCESS processCursor = NULL;
+    ULONG scannedProcesses = 0UL;
+    ULONG scannedThreads = 0UL;
+    ULONG residentThreads = 0UL;
+    NTSTATUS status = STATUS_SUCCESS;
+    BOOLEAN stopScan = FALSE;
+
+    /*
+     * 输入：目标镜像范围和 PDB-backed ETHREAD 入口偏移。
+     * 处理：通过公开 PsGetNextProcess/PsGetNextProcessThread 遍历已引用线程，
+     *      读取 StartAddress/Win32StartAddress 并统计落在目标模块内的线程。
+     * 返回：扫描完成返回 STATUS_SUCCESS；导出/偏移不可用或达到上限返回对应状态。
+     *      本函数只产生证据，不终止线程、不改 ETHREAD、不触碰 CID 表。
+     */
+    if (ScannedProcessCountOut == NULL ||
+        ScannedThreadCountOut == NULL ||
+        ResidentThreadCountOut == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    *ScannedProcessCountOut = 0UL;
+    *ScannedThreadCountOut = 0UL;
+    *ResidentThreadCountOut = 0UL;
+
+    if (DynState == NULL || ImageStart == 0ULL || ImageEnd <= ImageStart) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    if (!KswordARKDriverUnloadHasPdbBackedThreadDynData(DynState)) {
+        return STATUS_REQUEST_NOT_ACCEPTED;
+    }
+
+    psGetNextProcess = KswordARKDriverUnloadResolvePsGetNextProcess();
+    psGetNextProcessThread = KswordARKDriverUnloadResolvePsGetNextProcessThread();
+    if (psGetNextProcess == NULL || psGetNextProcessThread == NULL) {
+        return STATUS_NOT_SUPPORTED;
+    }
+
+    processCursor = psGetNextProcess(NULL);
+    while (processCursor != NULL) {
+        PEPROCESS nextProcess = NULL;
+        PETHREAD threadCursor = NULL;
+
+        scannedProcesses += 1UL;
+        threadCursor = psGetNextProcessThread(processCursor, NULL);
+        while (threadCursor != NULL) {
+            PETHREAD nextThread = NULL;
+            ULONGLONG startAddress = 0ULL;
+            ULONGLONG win32StartAddress = 0ULL;
+            BOOLEAN matchesTarget = FALSE;
+
+            scannedThreads += 1UL;
+            if (KswordARKDriverUnloadReadThreadAddressField(
+                    threadCursor,
+                    DynState->Kernel.EtStartAddress,
+                    &startAddress) &&
+                KswordARKDriverUnloadAddressInImageRange(startAddress, ImageStart, ImageEnd)) {
+                matchesTarget = TRUE;
+            }
+            if (!matchesTarget &&
+                KswordARKDriverIntegrityOffsetPresent(DynState->Kernel.EtWin32StartAddress) &&
+                KswordARKDriverUnloadReadThreadAddressField(
+                    threadCursor,
+                    DynState->Kernel.EtWin32StartAddress,
+                    &win32StartAddress) &&
+                KswordARKDriverUnloadAddressInImageRange(win32StartAddress, ImageStart, ImageEnd)) {
+                matchesTarget = TRUE;
+            }
+            if (matchesTarget) {
+                residentThreads += 1UL;
+            }
+
+            if (scannedThreads >= KSW_DRIVER_UNLOAD_THREAD_SCAN_MAX_THREADS) {
+                status = STATUS_BUFFER_OVERFLOW;
+                ObDereferenceObject(threadCursor);
+                stopScan = TRUE;
+                break;
+            }
+
+            nextThread = psGetNextProcessThread(processCursor, threadCursor);
+            ObDereferenceObject(threadCursor);
+            threadCursor = nextThread;
+        }
+
+        if (scannedProcesses >= KSW_DRIVER_UNLOAD_THREAD_SCAN_MAX_PROCESSES) {
+            status = STATUS_BUFFER_OVERFLOW;
+            stopScan = TRUE;
+        }
+
+        if (!stopScan) {
+            nextProcess = psGetNextProcess(processCursor);
+        }
+        ObDereferenceObject(processCursor);
+        if (stopScan) {
+            break;
+        }
+        processCursor = nextProcess;
+    }
+
+    *ScannedProcessCountOut = scannedProcesses;
+    *ScannedThreadCountOut = scannedThreads;
+    *ResidentThreadCountOut = residentThreads;
+    return status;
+}
+
+/* 中文说明：只读校验 loader 链表节点的前后向链接是否仍互相指回目标节点。 */
+static NTSTATUS
+KswordARKDriverUnloadInspectLoaderLinkCoherence(
+    _In_ ULONGLONG LinkAddress,
+    _Out_ BOOLEAN* MismatchOut
+    )
+{
+    LIST_ENTRY selfLinks;
+    LIST_ENTRY flinkLinks;
+    LIST_ENTRY blinkLinks;
+    ULONGLONG flinkAddress = 0ULL;
+    ULONGLONG blinkAddress = 0ULL;
+
+    /*
+     * 输入：目标 KLDR_DATA_TABLE_ENTRY.InLoadOrderLinks 的内核地址。
+     * 处理：安全读取目标节点、Flink 节点和 Blink 节点；要求 Flink->Blink 与
+     *      Blink->Flink 均指回目标节点。这里仅做证据校验，不摘链、不修链。
+     * 返回：链路一致返回 STATUS_SUCCESS；读取失败或链路不一致返回具体状态。
+     */
+    if (MismatchOut == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    *MismatchOut = FALSE;
+    if (LinkAddress == 0ULL) {
+        *MismatchOut = TRUE;
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    RtlZeroMemory(&selfLinks, sizeof(selfLinks));
+    RtlZeroMemory(&flinkLinks, sizeof(flinkLinks));
+    RtlZeroMemory(&blinkLinks, sizeof(blinkLinks));
+    if (!KswordARKHookReadMemorySafe(
+            (const VOID*)(ULONG_PTR)LinkAddress,
+            &selfLinks,
+            sizeof(selfLinks))) {
+        *MismatchOut = TRUE;
+        return STATUS_ACCESS_VIOLATION;
+    }
+
+    flinkAddress = (ULONGLONG)(ULONG_PTR)selfLinks.Flink;
+    blinkAddress = (ULONGLONG)(ULONG_PTR)selfLinks.Blink;
+    if (flinkAddress == 0ULL || blinkAddress == 0ULL) {
+        *MismatchOut = TRUE;
+        return STATUS_OBJECT_TYPE_MISMATCH;
+    }
+    if (!KswordARKHookReadMemorySafe(
+            (const VOID*)(ULONG_PTR)flinkAddress,
+            &flinkLinks,
+            sizeof(flinkLinks)) ||
+        !KswordARKHookReadMemorySafe(
+            (const VOID*)(ULONG_PTR)blinkAddress,
+            &blinkLinks,
+            sizeof(blinkLinks))) {
+        *MismatchOut = TRUE;
+        return STATUS_ACCESS_VIOLATION;
+    }
+    if ((ULONGLONG)(ULONG_PTR)flinkLinks.Blink != LinkAddress ||
+        (ULONGLONG)(ULONG_PTR)blinkLinks.Flink != LinkAddress) {
+        *MismatchOut = TRUE;
+        return STATUS_OBJECT_TYPE_MISMATCH;
+    }
+
+    return STATUS_SUCCESS;
+}
+
+/* 中文说明：只读校验目标内核镜像 PE 头是否仍可解析，检测被擦头/损坏状态。 */
+static NTSTATUS
+KswordARKDriverUnloadInspectImageHeader(
+    _In_ ULONGLONG ImageBase,
+    _In_ ULONG ExpectedSizeOfImage,
+    _Out_ ULONG* HeaderSizeOfImageOut,
+    _Out_ ULONG* NtHeaderOffsetOut,
+    _Out_ BOOLEAN* InvalidHeaderOut
+    )
+{
+    IMAGE_DOS_HEADER dosHeader;
+    IMAGE_NT_HEADERS64 ntHeaders;
+    ULONG ntHeaderOffset = 0UL;
+
+    /*
+     * 输入：目标模块基址和 loader 记录的 SizeOfImage。
+     * 处理：安全读取 DOS/NT 头，校验 MZ/PE/PE32+ 与 SizeOfImage 一致性。
+     * 返回：PE 头有效返回 STATUS_SUCCESS；头被擦除、偏移异常或大小不一致时
+     *      返回失败状态。函数只读内存，不擦 PE 头、不修复头。
+     */
+    if (HeaderSizeOfImageOut == NULL ||
+        NtHeaderOffsetOut == NULL ||
+        InvalidHeaderOut == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    *HeaderSizeOfImageOut = 0UL;
+    *NtHeaderOffsetOut = 0UL;
+    *InvalidHeaderOut = FALSE;
+    if (ImageBase == 0ULL) {
+        *InvalidHeaderOut = TRUE;
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    RtlZeroMemory(&dosHeader, sizeof(dosHeader));
+    RtlZeroMemory(&ntHeaders, sizeof(ntHeaders));
+    if (!KswordARKHookReadMemorySafe(
+            (const VOID*)(ULONG_PTR)ImageBase,
+            &dosHeader,
+            sizeof(dosHeader))) {
+        *InvalidHeaderOut = TRUE;
+        return STATUS_ACCESS_VIOLATION;
+    }
+    if (dosHeader.e_magic != IMAGE_DOS_SIGNATURE ||
+        dosHeader.e_lfanew <= 0 ||
+        dosHeader.e_lfanew > 0x1000) {
+        *InvalidHeaderOut = TRUE;
+        return STATUS_INVALID_IMAGE_FORMAT;
+    }
+
+    ntHeaderOffset = (ULONG)dosHeader.e_lfanew;
+    if (!KswordARKHookReadMemorySafe(
+            (const VOID*)(ULONG_PTR)(ImageBase + (ULONGLONG)ntHeaderOffset),
+            &ntHeaders,
+            sizeof(ntHeaders))) {
+        *InvalidHeaderOut = TRUE;
+        return STATUS_ACCESS_VIOLATION;
+    }
+    if (ntHeaders.Signature != IMAGE_NT_SIGNATURE ||
+        ntHeaders.OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC ||
+        ntHeaders.OptionalHeader.SizeOfImage == 0UL) {
+        *InvalidHeaderOut = TRUE;
+        return STATUS_INVALID_IMAGE_FORMAT;
+    }
+
+    *HeaderSizeOfImageOut = ntHeaders.OptionalHeader.SizeOfImage;
+    *NtHeaderOffsetOut = ntHeaderOffset;
+    if (ExpectedSizeOfImage != 0UL &&
+        ntHeaders.OptionalHeader.SizeOfImage != ExpectedSizeOfImage) {
+        *InvalidHeaderOut = TRUE;
+        return STATUS_OBJECT_TYPE_MISMATCH;
+    }
+    return STATUS_SUCCESS;
+}
+
+/* 中文说明：聚合 loader 链和 PE 头一致性证据，供强卸载 preflight 使用。 */
+static VOID
+KswordARKDriverUnloadInspectLoaderAndImageEvidence(
+    _In_ const KSW_DRIVER_INTEGRITY_LDR_TARGET* LoaderTarget,
+    _In_ ULONGLONG ImageBase,
+    _In_ ULONG ExpectedSizeOfImage,
+    _Out_ KSW_DRIVER_UNLOAD_LOADER_IMAGE_EVIDENCE* EvidenceOut
+    )
+{
+    /*
+     * 输入：由 PsLoadedModuleList 找到的目标 loader 记录和镜像基址。
+     * 处理：分别做 loader link 双向一致性校验和 PE 头校验。
+     * 返回：通过 EvidenceOut 输出状态和计数；函数本身无返回值。
+     */
+    if (EvidenceOut == NULL) {
+        return;
+    }
+    RtlZeroMemory(EvidenceOut, sizeof(*EvidenceOut));
+    EvidenceOut->LoaderLinkStatus = STATUS_REQUEST_NOT_ACCEPTED;
+    EvidenceOut->ImageHeaderStatus = STATUS_REQUEST_NOT_ACCEPTED;
+
+    if (LoaderTarget != NULL && LoaderTarget->Found && LoaderTarget->LinkAddress != 0ULL) {
+        EvidenceOut->LoaderLinkChecked = TRUE;
+        EvidenceOut->LoaderLinkStatus = KswordARKDriverUnloadInspectLoaderLinkCoherence(
+            LoaderTarget->LinkAddress,
+            &EvidenceOut->LoaderLinkMismatch);
+        if (!NT_SUCCESS(EvidenceOut->LoaderLinkStatus)) {
+            EvidenceOut->LoaderLinkMismatch = TRUE;
+        }
+    }
+
+    if (ImageBase != 0ULL) {
+        EvidenceOut->ImageHeaderChecked = TRUE;
+        EvidenceOut->ImageHeaderStatus = KswordARKDriverUnloadInspectImageHeader(
+            ImageBase,
+            ExpectedSizeOfImage,
+            &EvidenceOut->ImageHeaderSizeOfImage,
+            &EvidenceOut->ImageNtHeaderOffset,
+            &EvidenceOut->InvalidImageHeader);
+        if (!NT_SUCCESS(EvidenceOut->ImageHeaderStatus)) {
+            EvidenceOut->InvalidImageHeader = TRUE;
+        }
+    }
+}
+
 /* 中文说明：读取卸载目标的只读前置证据，并决定是否允许系统卸载或强力清理。 */
 static NTSTATUS
 KswordARKDriverUnloadBuildPreflightResult(
@@ -1966,6 +2629,7 @@ KswordARKDriverUnloadBuildPreflightResult(
     ULONG moduleInfoBytes = 0UL;
     const KSW_HOOK_SYSTEM_MODULE_ENTRY* targetModule = NULL;
     KSW_DRIVER_INTEGRITY_LDR_TARGET ldrTarget;
+    KSW_DRIVER_UNLOAD_LOADER_IMAGE_EVIDENCE loaderImageEvidence;
     NTSTATUS status = STATUS_SUCCESS;
     NTSTATUS evidenceStatus = STATUS_SUCCESS;
     ULONGLONG driverStart = 0ULL;
@@ -1979,6 +2643,7 @@ KswordARKDriverUnloadBuildPreflightResult(
     RtlZeroMemory(Result, sizeof(*Result));
     RtlZeroMemory(&dynState, sizeof(dynState));
     RtlZeroMemory(&ldrTarget, sizeof(ldrTarget));
+    RtlZeroMemory(&loaderImageEvidence, sizeof(loaderImageEvidence));
 
     Result->AllowDirectUnload = FALSE;
     Result->AllowZwUnload = FALSE;
@@ -2107,11 +2772,77 @@ KswordARKDriverUnloadBuildPreflightResult(
         status = STATUS_SUCCESS;
     }
 
+    KswordARKDriverUnloadInspectLoaderAndImageEvidence(
+        Result->HasValidLoaderEvidence ? &ldrTarget : NULL,
+        driverStart,
+        Result->LoaderSizeOfImage != 0UL ? Result->LoaderSizeOfImage : (ULONG)DriverObject->DriverSize,
+        &loaderImageEvidence);
+    Result->HasLoaderLinkCheck = loaderImageEvidence.LoaderLinkChecked;
+    Result->HasLoaderLinkMismatch = loaderImageEvidence.LoaderLinkMismatch;
+    Result->HasImageHeaderCheck = loaderImageEvidence.ImageHeaderChecked;
+    Result->HasInvalidImageHeader = loaderImageEvidence.InvalidImageHeader;
+    Result->LoaderLinkStatus = loaderImageEvidence.LoaderLinkStatus;
+    Result->ImageHeaderStatus = loaderImageEvidence.ImageHeaderStatus;
+    Result->ImageHeaderSizeOfImage = loaderImageEvidence.ImageHeaderSizeOfImage;
+    Result->ImageNtHeaderOffset = loaderImageEvidence.ImageNtHeaderOffset;
+    if ((loaderImageEvidence.LoaderLinkMismatch ||
+            loaderImageEvidence.InvalidImageHeader) &&
+        evidenceStatus == STATUS_SUCCESS) {
+        evidenceStatus = STATUS_OBJECT_TYPE_MISMATCH;
+    }
+
     if (Result->HasValidDynData && Result->HasValidLoaderEvidence) {
         Result->HasValidDriverObjectOffsets =
             KswordARKDriverUnloadValidateDriverObjectOffsets(DriverObject, &dynState);
         if (!Result->HasValidDriverObjectOffsets && evidenceStatus == STATUS_SUCCESS) {
             evidenceStatus = STATUS_OBJECT_TYPE_MISMATCH;
+        }
+    }
+
+    Result->ThreadScanStatus = KswordARKDriverUnloadScanModuleResidentThreads(
+        &dynState,
+        driverStart,
+        driverEnd,
+        &Result->ScannedProcessCount,
+        &Result->ScannedThreadCount,
+        &Result->ModuleResidentThreadCount);
+    if (NT_SUCCESS(Result->ThreadScanStatus)) {
+        Result->HasThreadScan = TRUE;
+        if (Result->ModuleResidentThreadCount != 0UL) {
+            Result->HasModuleResidentThreads = TRUE;
+            if (evidenceStatus == STATUS_SUCCESS) {
+                evidenceStatus = STATUS_DEVICE_BUSY;
+            }
+        }
+    }
+    else if (evidenceStatus == STATUS_SUCCESS &&
+        Result->ThreadScanStatus == STATUS_BUFFER_OVERFLOW) {
+        evidenceStatus = Result->ThreadScanStatus;
+    }
+
+    {
+        KSW_DRIVER_UNLOAD_CALLBACK_EVIDENCE_RESULT callbackEvidence;
+
+        RtlZeroMemory(&callbackEvidence, sizeof(callbackEvidence));
+        Result->CallbackScanStatus = KswordARKDriverUnloadInspectCallbacksByModuleBase(
+            driverStart,
+            &callbackEvidence);
+        if (NT_SUCCESS(Result->CallbackScanStatus)) {
+            Result->HasCallbackScan = TRUE;
+            Result->CallbackEnumeratedCount = callbackEvidence.Enumerated;
+            Result->ModuleCallbackCount = callbackEvidence.Matched;
+            Result->RemovableModuleCallbackCount = callbackEvidence.Removable;
+            Result->NonRemovableModuleCallbackCount = callbackEvidence.NonRemovable;
+            if (callbackEvidence.Matched != 0UL) {
+                Result->HasModuleCallbacks = TRUE;
+            }
+            if (callbackEvidence.NonRemovable != 0UL) {
+                Result->HasNonRemovableModuleCallbacks = TRUE;
+            }
+        }
+        else if (evidenceStatus == STATUS_SUCCESS &&
+            Result->CallbackScanStatus == STATUS_BUFFER_OVERFLOW) {
+            evidenceStatus = Result->CallbackScanStatus;
         }
     }
 
@@ -2203,6 +2934,27 @@ KswordARKDriverUnloadBuildPreflightResult(
         Result->AllowDestructiveCleanup = FALSE;
         Result->AllowDirectUnload = FALSE;
     }
+    if (Result->HasModuleResidentThreads) {
+        if (evidenceStatus == STATUS_SUCCESS) {
+            evidenceStatus = STATUS_DEVICE_BUSY;
+        }
+        Result->AllowDestructiveCleanup = FALSE;
+    }
+    if (Result->HasNonRemovableModuleCallbacks ||
+        (Result->HasModuleCallbacks &&
+            (Flags & KSWORD_ARK_DRIVER_UNLOAD_FLAG_REMOVE_CALLBACKS_BY_MODULE_BASE) == 0UL)) {
+        if (evidenceStatus == STATUS_SUCCESS) {
+            evidenceStatus = STATUS_DEVICE_BUSY;
+        }
+        Result->AllowDestructiveCleanup = FALSE;
+    }
+    if (Result->HasLoaderLinkMismatch || Result->HasInvalidImageHeader) {
+        if (evidenceStatus == STATUS_SUCCESS) {
+            evidenceStatus = STATUS_OBJECT_TYPE_MISMATCH;
+        }
+        Result->AllowDestructiveCleanup = FALSE;
+        Result->AllowDirectUnload = FALSE;
+    }
 
     if (!Result->HasServiceRegistryPath) {
         Result->AllowZwUnload = FALSE;
@@ -2241,6 +2993,10 @@ KswordARKDriverUnloadApplyCleanupUnsafe(
     NTSTATUS cleanupStatus = STATUS_SUCCESS;
     BOOLEAN allowPersistentCleanup = FALSE;
     BOOLEAN deleteDeviceObjects = FALSE;
+    BOOLEAN clearDispatchForPath = FALSE;
+    BOOLEAN dispatchCleared = FALSE;
+    BOOLEAN blockNewDeviceAccess = FALSE;
+    ULONG clearDispatchFlag = 0UL;
 
     if (UnloadContext == NULL || UnloadContext->DriverObject == NULL) {
         return STATUS_INVALID_PARAMETER;
@@ -2260,6 +3016,39 @@ KswordARKDriverUnloadApplyCleanupUnsafe(
         ((UnloadContext->Flags & KSWORD_ARK_DRIVER_UNLOAD_FLAG_DELETE_DEVICE_OBJECTS_ALWAYS) != 0UL)
         ? TRUE
         : FALSE;
+
+    if (DriverUnloadWasCalled &&
+        (UnloadContext->Flags & KSWORD_ARK_DRIVER_UNLOAD_FLAG_CLEAR_DISPATCH_AFTER_UNLOAD) != 0UL) {
+        clearDispatchForPath = TRUE;
+        clearDispatchFlag = KSWORD_ARK_DRIVER_UNLOAD_FLAG_CLEAR_DISPATCH_AFTER_UNLOAD;
+    }
+    else if (!DriverUnloadWasCalled &&
+        (UnloadContext->Flags & KSWORD_ARK_DRIVER_UNLOAD_FLAG_CLEAR_DISPATCH_ON_NO_UNLOAD) != 0UL) {
+        clearDispatchForPath = TRUE;
+        clearDispatchFlag = KSWORD_ARK_DRIVER_UNLOAD_FLAG_CLEAR_DISPATCH_ON_NO_UNLOAD;
+    }
+
+    /*
+     * 中文说明：参考强卸载方案的“先阻断外部访问”阶段。公开 WDK 没有
+     * IoLockRemoveDevice，因此在显式 destructive fallback 中先用拒绝 IRP stub
+     * 中和 dispatch 表，并在删除设备前把设备重新标为 initializing，减少新的
+     * create/IRP 进入目标驱动代码窗口。
+     */
+    blockNewDeviceAccess = (clearDispatchForPath || deleteDeviceObjects) ? TRUE : FALSE;
+    if (clearDispatchForPath) {
+        KswordARKDriverUnloadClearDispatchUnsafe(UnloadContext->DriverObject);
+        UnloadContext->CleanupFlagsApplied |= clearDispatchFlag;
+        dispatchCleared = TRUE;
+    }
+    if (blockNewDeviceAccess) {
+        NTSTATUS blockStatus = KswordARKDriverUnloadBlockNewDeviceCreatesUnsafe(
+            UnloadContext->DriverObject,
+            NULL);
+        if (!NT_SUCCESS(blockStatus)) {
+            return blockStatus;
+        }
+    }
+
     if (deleteDeviceObjects) {
         ULONG deletedDeviceCount = 0UL;
         NTSTATUS deleteStatus = KswordARKDriverUnloadDeleteDeviceObjectsUnsafe(
@@ -2297,13 +3086,19 @@ KswordARKDriverUnloadApplyCleanupUnsafe(
     }
     if (DriverUnloadWasCalled &&
         (UnloadContext->Flags & KSWORD_ARK_DRIVER_UNLOAD_FLAG_CLEAR_DISPATCH_AFTER_UNLOAD) != 0UL) {
-        KswordARKDriverUnloadClearDispatchUnsafe(UnloadContext->DriverObject);
-        UnloadContext->CleanupFlagsApplied |= KSWORD_ARK_DRIVER_UNLOAD_FLAG_CLEAR_DISPATCH_AFTER_UNLOAD;
+        if (!dispatchCleared) {
+            KswordARKDriverUnloadClearDispatchUnsafe(UnloadContext->DriverObject);
+            UnloadContext->CleanupFlagsApplied |= KSWORD_ARK_DRIVER_UNLOAD_FLAG_CLEAR_DISPATCH_AFTER_UNLOAD;
+            dispatchCleared = TRUE;
+        }
     }
     if (!DriverUnloadWasCalled &&
         (UnloadContext->Flags & KSWORD_ARK_DRIVER_UNLOAD_FLAG_CLEAR_DISPATCH_ON_NO_UNLOAD) != 0UL) {
-        KswordARKDriverUnloadClearDispatchUnsafe(UnloadContext->DriverObject);
-        UnloadContext->CleanupFlagsApplied |= KSWORD_ARK_DRIVER_UNLOAD_FLAG_CLEAR_DISPATCH_ON_NO_UNLOAD;
+        if (!dispatchCleared) {
+            KswordARKDriverUnloadClearDispatchUnsafe(UnloadContext->DriverObject);
+            UnloadContext->CleanupFlagsApplied |= KSWORD_ARK_DRIVER_UNLOAD_FLAG_CLEAR_DISPATCH_ON_NO_UNLOAD;
+            dispatchCleared = TRUE;
+        }
     }
 
     return cleanupStatus;
@@ -2405,6 +3200,15 @@ KswordARKDriverUnloadPreflightDenyStatus(
     }
     if (Preflight->HasDeviceLoop || Preflight->HasCrossDriverAttach) {
         return STATUS_INVALID_DEVICE_REQUEST;
+    }
+    if (Preflight->HasModuleResidentThreads) {
+        return STATUS_DEVICE_BUSY;
+    }
+    if (Preflight->HasModuleCallbacks) {
+        return STATUS_DEVICE_BUSY;
+    }
+    if (Preflight->HasLoaderLinkMismatch || Preflight->HasInvalidImageHeader) {
+        return STATUS_OBJECT_TYPE_MISMATCH;
     }
     if (Preflight->HasAttachedDevice || Preflight->HasBusyDeviceReference) {
         return STATUS_DEVICE_BUSY;
@@ -3243,6 +4047,17 @@ Return Value:
      * 闭环。因此进入强制 fallback 后 R0 自动补上 MAKE_TEMPORARY_OBJECT。
      */
     requestSnapshot.flags |= KSWORD_ARK_DRIVER_UNLOAD_FLAG_MAKE_TEMPORARY_OBJECT;
+    if ((requestSnapshot.flags & KSWORD_ARK_DRIVER_UNLOAD_FLAG_REMOVE_CALLBACKS_BY_MODULE_BASE) != 0UL &&
+        requestSnapshot.targetModuleBase == 0ULL &&
+        preflightResult.DriverStart != 0ULL) {
+        /*
+         * 中文说明：R3 按 DriverObject 名称发起卸载时可能没有携带模块基址。
+         * preflight 已经用 DriverObject/loader 证据确认 DriverStart，因此这里把
+         * 可信的 DriverStart 作为内部回调清理目标，避免要求用户态重复传地址。
+         */
+        requestSnapshot.targetModuleBase = preflightResult.DriverStart;
+        requestSnapshot.flags |= KSWORD_ARK_DRIVER_UNLOAD_FLAG_TARGET_MODULE_BASE_PRESENT;
+    }
     if (Diagnostics != NULL) {
         Diagnostics->finalFlags = requestSnapshot.flags;
     }

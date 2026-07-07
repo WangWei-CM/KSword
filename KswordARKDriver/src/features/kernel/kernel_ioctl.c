@@ -1062,7 +1062,7 @@ Return Value:
         KswordARKKernelIoctlLog(
             Device,
             logLevel,
-            "R0 unload diag gates: allow=%u/%u/%u svc=%u unload=%u dyn=%u/%u/%u/%u dev=%u/%u/%u/%u/%u self=%u core=%u.",
+            "R0 unload diag gates: allow=%u/%u/%u svc=%u unload=%u dyn=%u/%u/%u/%u dev=%u/%u/%u/%u/%u threads=%u/%u callbacks=%u/%u/%u loader=%u/%u image=%u/%u self=%u core=%u.",
             unloadDiagnostics.allowZwUnload ? 1U : 0U,
             unloadDiagnostics.allowDirectUnload ? 1U : 0U,
             unloadDiagnostics.allowDestructiveCleanup ? 1U : 0U,
@@ -1077,8 +1077,45 @@ Return Value:
             unloadDiagnostics.hasBusyDeviceReference ? 1U : 0U,
             unloadDiagnostics.hasCrossDriverAttach ? 1U : 0U,
             unloadDiagnostics.hasDeviceLoop ? 1U : 0U,
+            unloadDiagnostics.hasThreadScan ? 1U : 0U,
+            unloadDiagnostics.hasModuleResidentThreads ? 1U : 0U,
+            unloadDiagnostics.hasCallbackScan ? 1U : 0U,
+            unloadDiagnostics.hasModuleCallbacks ? 1U : 0U,
+            unloadDiagnostics.hasNonRemovableModuleCallbacks ? 1U : 0U,
+            unloadDiagnostics.hasLoaderLinkCheck ? 1U : 0U,
+            unloadDiagnostics.hasLoaderLinkMismatch ? 1U : 0U,
+            unloadDiagnostics.hasImageHeaderCheck ? 1U : 0U,
+            unloadDiagnostics.hasInvalidImageHeader ? 1U : 0U,
             unloadDiagnostics.isSelfModule ? 1U : 0U,
             unloadDiagnostics.isCoreKernelModule ? 1U : 0U);
+
+        KswordARKKernelIoctlLog(
+            Device,
+            logLevel,
+            "R0 unload diag thread-evidence: status=0x%08X processes=%lu threads=%lu resident=%lu.",
+            (unsigned int)unloadDiagnostics.threadScanStatus,
+            (unsigned long)unloadDiagnostics.scannedProcessCount,
+            (unsigned long)unloadDiagnostics.scannedThreadCount,
+            (unsigned long)unloadDiagnostics.moduleResidentThreadCount);
+
+        KswordARKKernelIoctlLog(
+            Device,
+            logLevel,
+            "R0 unload diag callback-evidence: status=0x%08X enumerated=%lu module=%lu removable=%lu nonremovable=%lu.",
+            (unsigned int)unloadDiagnostics.callbackScanStatus,
+            (unsigned long)unloadDiagnostics.callbackEnumeratedCount,
+            (unsigned long)unloadDiagnostics.moduleCallbackCount,
+            (unsigned long)unloadDiagnostics.removableModuleCallbackCount,
+            (unsigned long)unloadDiagnostics.nonRemovableModuleCallbackCount);
+
+        KswordARKKernelIoctlLog(
+            Device,
+            logLevel,
+            "R0 unload diag loader-image: link=0x%08X image=0x%08X headerSize=0x%08X ntOff=0x%08X.",
+            (unsigned int)unloadDiagnostics.loaderLinkStatus,
+            (unsigned int)unloadDiagnostics.imageHeaderStatus,
+            (unsigned int)unloadDiagnostics.imageHeaderSizeOfImage,
+            (unsigned int)unloadDiagnostics.imageNtHeaderOffset);
 
         KswordARKKernelIoctlLog(
             Device,
