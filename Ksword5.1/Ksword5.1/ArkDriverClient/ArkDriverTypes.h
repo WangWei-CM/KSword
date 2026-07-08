@@ -32,6 +32,7 @@
 #include "../../../shared/driver/KswordArkDeviceAuditIoctl.h"
 #include "../../../shared/driver/KswordArkFilterIoctl.h"
 #include "../../../shared/driver/KswordArkKernelObjectIoctl.h"
+#include "../../../shared/driver/KswordArkHwidIoctl.h"
 
 namespace ksword::ark
 {
@@ -45,6 +46,17 @@ namespace ksword::ark
         long ntStatus = 0;
         std::string message;
         unsigned long bytesReturned = 0;
+    };
+
+    // HwidDispatchResult：
+    // - 输入：由 DriverClient 的 HWID Dispatch IOCTL wrapper 填充；
+    // - 处理：保留 R0 原始响应，UI 负责解释目标驱动状态和风险提示；
+    // - 返回行为：结构体无成员函数，io.ok 表示 DeviceIoControl 是否成功。
+    struct HwidDispatchResult
+    {
+        IoResult io;                                  // io：底层 DeviceIoControl 状态。
+        bool unsupported = false;                     // unsupported：旧驱动未注册新 IOCTL 时为 true。
+        KSWORD_ARK_HWID_DISPATCH_RESPONSE response{}; // response：R0 固定响应包。
     };
 
     // DriverHandle owns one KswordARK control-device handle. It is move-only so

@@ -1,0 +1,137 @@
+#pragma once
+
+#include "KswordArkProcessIoctl.h"
+
+// ============================================================
+// KswordArkHwidIoctl.h
+// 作用：
+// - 定义 EASY-HWID-SPOOFER Dispatch 派遣函数方案的 R3/R0 协议；
+// - 只覆盖“修改驱动程序 MajorFunction 派遣函数”路径；
+// - 不定义 SMBIOS 物理内存扫描/修改、卷引导扇区直写或 storport 内存直改协议。
+// ============================================================
+
+#define KSWORD_ARK_HWID_DISPATCH_PROTOCOL_VERSION 1UL
+
+#define KSWORD_ARK_IOCTL_FUNCTION_HWID_DISPATCH_QUERY   0x8F0UL
+#define KSWORD_ARK_IOCTL_FUNCTION_HWID_DISPATCH_CONTROL 0x8F1UL
+
+#define IOCTL_KSWORD_ARK_HWID_DISPATCH_QUERY \
+    CTL_CODE( \
+        KSWORD_ARK_IOCTL_DEVICE_TYPE, \
+        KSWORD_ARK_IOCTL_FUNCTION_HWID_DISPATCH_QUERY, \
+        METHOD_BUFFERED, \
+        FILE_ANY_ACCESS)
+
+#define IOCTL_KSWORD_ARK_HWID_DISPATCH_CONTROL \
+    CTL_CODE( \
+        KSWORD_ARK_IOCTL_DEVICE_TYPE, \
+        KSWORD_ARK_IOCTL_FUNCTION_HWID_DISPATCH_CONTROL, \
+        METHOD_BUFFERED, \
+        FILE_WRITE_ACCESS)
+
+#define KSWORD_ARK_HWID_DISPATCH_ACTION_QUERY    0UL
+#define KSWORD_ARK_HWID_DISPATCH_ACTION_ENABLE   1UL
+#define KSWORD_ARK_HWID_DISPATCH_ACTION_DISABLE  2UL
+#define KSWORD_ARK_HWID_DISPATCH_ACTION_DISABLE_ALL 3UL
+
+#define KSWORD_ARK_HWID_DISPATCH_REQUEST_FLAG_UI_CONFIRMED 0x00000001UL
+#define KSWORD_ARK_HWID_DISPATCH_REQUEST_FLAG_DRY_RUN      0x00000002UL
+
+#define KSWORD_ARK_HWID_DISPATCH_TARGET_DISK      0x00000001UL
+#define KSWORD_ARK_HWID_DISPATCH_TARGET_PARTMGR   0x00000002UL
+#define KSWORD_ARK_HWID_DISPATCH_TARGET_MOUNTMGR  0x00000004UL
+#define KSWORD_ARK_HWID_DISPATCH_TARGET_NVIDIA    0x00000008UL
+#define KSWORD_ARK_HWID_DISPATCH_TARGET_NSIPROXY  0x00000010UL
+
+#define KSWORD_ARK_HWID_DISPATCH_TARGET_STORAGE \
+    (KSWORD_ARK_HWID_DISPATCH_TARGET_DISK | \
+     KSWORD_ARK_HWID_DISPATCH_TARGET_PARTMGR | \
+     KSWORD_ARK_HWID_DISPATCH_TARGET_MOUNTMGR)
+
+#define KSWORD_ARK_HWID_DISPATCH_TARGET_NETWORK \
+    (KSWORD_ARK_HWID_DISPATCH_TARGET_NSIPROXY)
+
+#define KSWORD_ARK_HWID_DISPATCH_TARGET_ALL \
+    (KSWORD_ARK_HWID_DISPATCH_TARGET_STORAGE | \
+     KSWORD_ARK_HWID_DISPATCH_TARGET_NVIDIA | \
+     KSWORD_ARK_HWID_DISPATCH_TARGET_NETWORK)
+
+#define KSWORD_ARK_HWID_DISPATCH_DISK_MODE_CUSTOM 0UL
+#define KSWORD_ARK_HWID_DISPATCH_DISK_MODE_RANDOM 1UL
+#define KSWORD_ARK_HWID_DISPATCH_DISK_MODE_NULL   2UL
+
+#define KSWORD_ARK_HWID_DISPATCH_MAC_MODE_RANDOM  0UL
+#define KSWORD_ARK_HWID_DISPATCH_MAC_MODE_CUSTOM  1UL
+
+#define KSWORD_ARK_HWID_DISPATCH_FLAG_DISK_GUID_RANDOM   0x00000001UL
+#define KSWORD_ARK_HWID_DISPATCH_FLAG_VOLUME_ID_CLEAN    0x00000002UL
+#define KSWORD_ARK_HWID_DISPATCH_FLAG_ARP_TABLE_CLEAN    0x00000004UL
+
+#define KSWORD_ARK_HWID_DISPATCH_STATUS_UNKNOWN          0UL
+#define KSWORD_ARK_HWID_DISPATCH_STATUS_READY            1UL
+#define KSWORD_ARK_HWID_DISPATCH_STATUS_ACTIVE           2UL
+#define KSWORD_ARK_HWID_DISPATCH_STATUS_PARTIAL          3UL
+#define KSWORD_ARK_HWID_DISPATCH_STATUS_UNSUPPORTED      4UL
+#define KSWORD_ARK_HWID_DISPATCH_STATUS_DENIED           5UL
+#define KSWORD_ARK_HWID_DISPATCH_STATUS_FAILED           6UL
+
+#define KSWORD_ARK_HWID_DISPATCH_RESPONSE_FLAG_DRY_RUN        0x00000001UL
+#define KSWORD_ARK_HWID_DISPATCH_RESPONSE_FLAG_PARTIAL        0x00000002UL
+#define KSWORD_ARK_HWID_DISPATCH_RESPONSE_FLAG_FOREIGN_CHANGE 0x00000004UL
+
+#define KSWORD_ARK_HWID_DISPATCH_TEXT_CHARS 96U
+#define KSWORD_ARK_HWID_DISPATCH_ENTRY_COUNT 5U
+
+typedef struct _KSWORD_ARK_HWID_DISPATCH_PROFILE
+{
+    unsigned long size;
+    unsigned long version;
+    unsigned long targetFlags;
+    unsigned long behaviorFlags;
+    unsigned long diskMode;
+    unsigned long macMode;
+    wchar_t diskSerial[KSWORD_ARK_HWID_DISPATCH_TEXT_CHARS];
+    wchar_t diskProduct[KSWORD_ARK_HWID_DISPATCH_TEXT_CHARS];
+    wchar_t diskRevision[KSWORD_ARK_HWID_DISPATCH_TEXT_CHARS];
+    wchar_t gpuSerial[KSWORD_ARK_HWID_DISPATCH_TEXT_CHARS];
+    wchar_t permanentMac[KSWORD_ARK_HWID_DISPATCH_TEXT_CHARS];
+    wchar_t currentMac[KSWORD_ARK_HWID_DISPATCH_TEXT_CHARS];
+} KSWORD_ARK_HWID_DISPATCH_PROFILE;
+
+typedef struct _KSWORD_ARK_HWID_DISPATCH_CONTROL_REQUEST
+{
+    unsigned long size;
+    unsigned long version;
+    unsigned long action;
+    unsigned long requestFlags;
+    KSWORD_ARK_HWID_DISPATCH_PROFILE profile;
+} KSWORD_ARK_HWID_DISPATCH_CONTROL_REQUEST;
+
+typedef struct _KSWORD_ARK_HWID_DISPATCH_ENTRY
+{
+    unsigned long size;
+    unsigned long targetFlag;
+    unsigned long active;
+    unsigned long reserved;
+    long lastStatus;
+    unsigned long long driverObjectAddress;
+    unsigned long long originalDispatchAddress;
+    unsigned long long currentDispatchAddress;
+    wchar_t driverName[KSWORD_ARK_HWID_DISPATCH_TEXT_CHARS];
+} KSWORD_ARK_HWID_DISPATCH_ENTRY;
+
+typedef struct _KSWORD_ARK_HWID_DISPATCH_RESPONSE
+{
+    unsigned long size;
+    unsigned long version;
+    unsigned long overallStatus;
+    unsigned long responseFlags;
+    unsigned long supportedTargetFlags;
+    unsigned long requestedTargetFlags;
+    unsigned long activeTargetFlags;
+    unsigned long failedTargetFlags;
+    unsigned long generation;
+    long lastStatus;
+    KSWORD_ARK_HWID_DISPATCH_PROFILE activeProfile;
+    KSWORD_ARK_HWID_DISPATCH_ENTRY entries[KSWORD_ARK_HWID_DISPATCH_ENTRY_COUNT];
+} KSWORD_ARK_HWID_DISPATCH_RESPONSE;

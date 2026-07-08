@@ -164,6 +164,7 @@
     <ClCompile Include="HardwareDock\HardwareR0EvidencePage.cpp" />
     <ClCompile Include="HardwareDock\HardwareDeviceManagerPage.cpp" />
     <ClCompile Include="HardwareDock\HardwareOtherDevicesPage.cpp" />
+    <ClCompile Include="HardwareDock\HardwareHwidDispatchPage.cpp" />
     <ClCompile Include="Framework\Log.cpp" />
     <ClCompile Include="Framework\LogDockWidget.cpp" />
     <ClCompile Include="Framework\Progress.cpp" />
@@ -361,6 +362,7 @@
     <ClCompile Include="ArkDriverClient\ArkDriverKeyboard.cpp" />
     <ClCompile Include="ArkDriverClient\ArkDriverCallback.cpp" />
     <ClCompile Include="ArkDriverClient\ArkDriverMutation.cpp" />
+    <ClCompile Include="ArkDriverClient\ArkDriverHwid.cpp" />
   </ItemGroup>
   <ItemGroup>
     <QtMoc Include="MainWindow.h" />
@@ -429,6 +431,7 @@
     <ClInclude Include="HardwareDock\HardwareR0EvidencePage.h" />
     <QtMoc Include="HardwareDock\HardwareDeviceManagerPage.h" />
     <QtMoc Include="HardwareDock\HardwareOtherDevicesPage.h" />
+    <QtMoc Include="HardwareDock\HardwareHwidDispatchPage.h" />
     <QtMoc Include="KernelDock\KernelDock.h" />
     <QtMoc Include="KernelDock\KernelDock.CallbackPromptManager.h" />
     <QtMoc Include="MemoryDock\MemoryDock.h" />

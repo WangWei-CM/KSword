@@ -4,6 +4,7 @@
 #include "HardwareR0EvidencePage.h"
 #include "HardwareOtherDevicesPage.h"
 #include "HardwareDeviceManagerPage.h"
+#include "HardwareHwidDispatchPage.h"
 
 // ============================================================
 // HardwareDock.cpp
@@ -2746,6 +2747,7 @@ void HardwareDock::initializeUi()
     initializeMemoryTab();
     initializeDiskMonitorTab();
     initializeDeviceManagerTab();
+    initializeHwidDispatchTab();
     initializeOtherDevicesTab();
     initializeDeviceStackTab();
     initializeKeyboardMouseHidTab();
@@ -4014,6 +4016,16 @@ void HardwareDock::initializeDeviceManagerTab()
     // - 返回：无，作为硬件 Dock 的独立 Tab 呈现。
     m_deviceManagerPage = new HardwareDeviceManagerPage(m_sideTabWidget);
     m_sideTabWidget->addTab(m_deviceManagerPage, QStringLiteral("设备管理"));
+}
+
+void HardwareDock::initializeHwidDispatchTab()
+{
+    // initializeHwidDispatchTab：
+    // - 输入：无，依赖 m_sideTabWidget；
+    // - 处理：新增 EASY-HWID-SPOOFER Dispatch-only 集成页；
+    // - 返回：无返回值，页面由 Qt 父子树释放。
+    m_hwidDispatchPage = new HardwareHwidDispatchPage(m_sideTabWidget);
+    m_sideTabWidget->addTab(m_hwidDispatchPage, QStringLiteral("HWID派遣"));
 }
 
 void HardwareDock::initializeOtherDevicesTab()

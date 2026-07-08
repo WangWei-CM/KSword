@@ -24,6 +24,7 @@ class MemoryCompositionHistoryWidget;
 class HardwareR0EvidencePage;
 class HardwareDeviceManagerPage;
 class HardwareOtherDevicesPage;
+class HardwareHwidDispatchPage;
 class PerformanceNavCard;
 class QChartView;
 class QAreaSeries;
@@ -329,6 +330,7 @@ private:
     void initializeMemoryTab();
     void initializeDiskMonitorTab();
     void initializeDeviceManagerTab();
+    void initializeHwidDispatchTab();
     void initializeOtherDevicesTab();
     void initializeDeviceStackTab();
     void initializeKeyboardMouseHidTab();
@@ -606,6 +608,7 @@ private:
     CodeEditorWidget* m_memoryEditor = nullptr; // m_memoryEditor：内存详情文本。
     QWidget* m_diskMonitorHostPage = nullptr;      // m_diskMonitorHostPage：硬盘监控延迟加载宿主页。
     HardwareDeviceManagerPage* m_deviceManagerPage = nullptr; // m_deviceManagerPage：SetupAPI/CfgMgr 设备管理页。
+    HardwareHwidDispatchPage* m_hwidDispatchPage = nullptr; // m_hwidDispatchPage：HWID Dispatch 派遣函数页。
     QWidget* m_otherDevicesHostPage = nullptr;     // m_otherDevicesHostPage：其他设备延迟加载宿主页。
     DiskMonitorPage* m_diskMonitorPage = nullptr;  // m_diskMonitorPage：硬盘监控真实页面，首次进入子 Tab 后创建。
     HardwareOtherDevicesPage* m_otherDevicesPage = nullptr; // m_otherDevicesPage：其他硬件设备真实页面，首次进入子 Tab 后创建。
