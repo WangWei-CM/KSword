@@ -454,6 +454,7 @@ KswordARKHwidIoctlQueryDispatch(
 {
     KSWORD_ARK_HWID_DISPATCH_RESPONSE* response = NULL;
     NTSTATUS status = STATUS_SUCCESS;
+    size_t actualOutputLength = 0U;
 
     UNREFERENCED_PARAMETER(Device);
     UNREFERENCED_PARAMETER(InputBufferLength);
@@ -465,7 +466,7 @@ KswordARKHwidIoctlQueryDispatch(
     *BytesReturned = 0U;
     KswordARKHwidEnsureInitialized();
 
-    status = KswordARKRetrieveRequiredOutputBuffer(Request, sizeof(*response), (PVOID*)&response, NULL);
+    status = KswordARKRetrieveRequiredOutputBuffer(Request, sizeof(*response), (PVOID*)&response, &actualOutputLength);
     if (!NT_SUCCESS(status)) {
         return status;
     }
@@ -491,6 +492,8 @@ KswordARKHwidIoctlControlDispatch(
     KSWORD_ARK_HWID_DISPATCH_RESPONSE* response = NULL;
     KSWORD_ARK_SAFETY_CONTEXT safetyContext;
     NTSTATUS status = STATUS_SUCCESS;
+    size_t actualInputLength = 0U;
+    size_t actualOutputLength = 0U;
     static const WCHAR targetText[] = L"HWID dispatch MajorFunction hook";
 
     UNREFERENCED_PARAMETER(InputBufferLength);
@@ -506,12 +509,12 @@ KswordARKHwidIoctlControlDispatch(
         return STATUS_INVALID_DEVICE_STATE;
     }
 
-    status = KswordARKRetrieveRequiredInputBuffer(Request, sizeof(*controlRequest), (PVOID*)&controlRequest, NULL);
+    status = KswordARKRetrieveRequiredInputBuffer(Request, sizeof(*controlRequest), (PVOID*)&controlRequest, &actualInputLength);
     if (!NT_SUCCESS(status)) {
         return status;
     }
 
-    status = KswordARKRetrieveRequiredOutputBuffer(Request, sizeof(*response), (PVOID*)&response, NULL);
+    status = KswordARKRetrieveRequiredOutputBuffer(Request, sizeof(*response), (PVOID*)&response, &actualOutputLength);
     if (!NT_SUCCESS(status)) {
         return status;
     }
