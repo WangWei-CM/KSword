@@ -128,6 +128,8 @@
     <ClCompile Include="src\features\device_audit\device_audit_query.c" />
     <ClCompile Include="src\features\device_audit\device_audit_support.c" />
     <ClCompile Include="src\features\device_audit\device_audit_targets.c" />
+    <ClCompile Include="src\features\hwid\hwid_dispatch_hooks.c" />
+    <ClCompile Include="src\features\hwid\hwid_dispatch_ioctl.c" />
   <ClCompile Include="src\features\callback\callback_external_wfp.c" /><ClCompile Include="src\features\callback\callback_external_minifilter.c" /><ClCompile Include="src\features\callback\callback_external_safe.c" /><ClCompile Include="src\features\memory\memory_physical.c" /><ClCompile Include="src\features\memory\memory_physical_layout.c" /><ClCompile Include="src\features\memory\memory_pagetable.c" /><ClCompile Include="src\features\memory\memory_kernel_exec_scan.c" /><ClCompile Include="src\features\memory\memory_kernel_exec_scan_helpers.c" /><ClCompile Include="src\features\memory\memory_kernel_evidence.c" /><ClCompile Include="src\features\memory\memory_evidence_enrichment.c" /><ClCompile Include="src\features\memory\memory_ioctl.c" /></ItemGroup>
   <ItemGroup>
     <ClInclude Include="Device.h" />
@@ -186,6 +188,7 @@
     <ClInclude Include="..\shared\driver\KswordArkKernelObjectIoctl.h" />
     <ClInclude Include="..\shared\driver\KswordArkFilterIoctl.h" />
     <ClInclude Include="..\shared\driver\KswordArkDeviceAuditIoctl.h" />
+    <ClInclude Include="..\shared\driver\KswordArkHwidIoctl.h" />
     <ClInclude Include="..\shared\driver\KswordArkWin32kIoctl.h" />
     <ClInclude Include="src\features\redirect\redirect_internal.h" />
     <ClInclude Include="src\features\network\network_internal.h" />
@@ -199,6 +202,7 @@
     <ClInclude Include="src\features\win32k\win32k_support.h" />
     <ClInclude Include="src\features\win32k\win32k_query.h" />
     <ClInclude Include="src\features\device_audit\device_audit_internal.h" />
+    <ClInclude Include="src\features\hwid\hwid_dispatch_hooks.h" />
   <ClInclude Include="src\features\callback\callback_external_core.h" /><ClInclude Include="src\features\callback\callback_external_wfp.h" /><ClInclude Include="src\features\callback\callback_external_minifilter.h" /><ClInclude Include="src\features\callback\callback_external_safe.h" /></ItemGroup>
   <ItemGroup>
     <Inf Include="KswordARKDriver.inf">

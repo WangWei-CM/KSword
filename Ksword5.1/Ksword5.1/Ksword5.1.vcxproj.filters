@@ -677,6 +677,9 @@
     <ClCompile Include="ArkDriverClient\ArkDriverMutation.cpp">
       <Filter>Source Files\ArkDriverClient</Filter>
     </ClCompile>
+    <ClCompile Include="ArkDriverClient\ArkDriverHwid.cpp">
+      <Filter>Source Files\ArkDriverClient</Filter>
+    </ClCompile>
     <ClCompile Include="HardwareDock\MemoryCompositionHistoryWidget.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -690,6 +693,9 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="HardwareDock\HardwareOtherDevicesPage.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="HardwareDock\HardwareHwidDispatchPage.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>
@@ -827,6 +833,9 @@
       <Filter>Header Files</Filter>
     </QtMoc>
     <QtMoc Include="HardwareDock\HardwareOtherDevicesPage.h">
+      <Filter>Header Files</Filter>
+    </QtMoc>
+    <QtMoc Include="HardwareDock\HardwareHwidDispatchPage.h">
       <Filter>Header Files</Filter>
     </QtMoc>
     <QtMoc Include="句柄\HandleDock.h">

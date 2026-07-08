@@ -95,7 +95,9 @@
   <Filter Include="Source Files\Features\DeviceAudit"><UniqueIdentifier>{2C93F5C2-8C79-4F47-8E21-9B1A7F6C3A11}</UniqueIdentifier></Filter>
   <Filter Include="Source Files\Features\Memory"><UniqueIdentifier>{8F66C0B8-48D7-45BE-8D5E-6626DD52CFC4}</UniqueIdentifier></Filter>
   <Filter Include="Source Files\Features\Mutation"><UniqueIdentifier>{4A154CC7-EEB6-4B74-BA9D-3EB757F43024}</UniqueIdentifier></Filter>
-  <Filter Include="Source Files\Features\Storage"><UniqueIdentifier>{59DB6425-6467-4D55-A3D0-27E60FA746F0}</UniqueIdentifier></Filter></ItemGroup>
+  <Filter Include="Source Files\Features\Storage"><UniqueIdentifier>{59DB6425-6467-4D55-A3D0-27E60FA746F0}</UniqueIdentifier></Filter>
+  <Filter Include="Source Files\Features\Hwid"><UniqueIdentifier>{7E2E85D5-3E56-41A3-8E90-D7E7A1E85E41}</UniqueIdentifier></Filter>
+  </ItemGroup>
   <ItemGroup>
     <None Include="ReadMe.txt" />
   </ItemGroup>
@@ -258,6 +260,8 @@
     <ClInclude Include="..\shared\driver\KswordArkKernelObjectIoctl.h"><Filter>Header Files\Ark</Filter></ClInclude>
     <ClInclude Include="..\shared\driver\KswordArkFilterIoctl.h"><Filter>Header Files\Ark</Filter></ClInclude>
     <ClInclude Include="..\shared\driver\KswordArkDeviceAuditIoctl.h"><Filter>Header Files\Ark</Filter></ClInclude>
+    <ClInclude Include="..\shared\driver\KswordArkHwidIoctl.h"><Filter>Header Files\Ark</Filter></ClInclude>
+    <ClInclude Include="src\features\hwid\hwid_dispatch_hooks.h"><Filter>Source Files\Features\Hwid</Filter></ClInclude>
     <ClInclude Include="..\shared\driver\KswordArkWin32kIoctl.h"><Filter>Header Files\Ark</Filter></ClInclude>
     <ClInclude Include="include\ark\ark_thread_crossview.h"><Filter>Header Files\Ark</Filter></ClInclude>
     <ClInclude Include="src\features\process\process_crossview.h"><Filter>Header Files</Filter></ClInclude>
@@ -559,5 +563,7 @@
     <ClCompile Include="src\features\device_audit\device_audit_query.c"><Filter>Source Files\Features\DeviceAudit</Filter></ClCompile>
     <ClCompile Include="src\features\device_audit\device_audit_support.c"><Filter>Source Files\Features\DeviceAudit</Filter></ClCompile>
     <ClCompile Include="src\features\device_audit\device_audit_targets.c"><Filter>Source Files\Features\DeviceAudit</Filter></ClCompile>
+    <ClCompile Include="src\features\hwid\hwid_dispatch_hooks.c"><Filter>Source Files\Features\Hwid</Filter></ClCompile>
+    <ClCompile Include="src\features\hwid\hwid_dispatch_ioctl.c"><Filter>Source Files\Features\Hwid</Filter></ClCompile>
     <ClInclude Include="src\features\device_audit\device_audit_internal.h"><Filter>Header Files</Filter></ClInclude></ItemGroup>
 </Project>
