@@ -3,7 +3,7 @@
 // ============================================================
 // SandboxUploadActions.h
 // 作用：
-// - 为各 Dock 右键菜单提供统一的“上传到沙箱 -> VT”入口；
+// - 为各 Dock 右键菜单提供统一的“上传到沙箱 -> VT-*”入口；
 // - 调用方只负责把当前行解析成本地文件路径或 PID；
 // - 本文件不保存 API Key，VirusTotalOnlineScan 会继续读取设置中的 virustotal_api_key。
 // ============================================================
@@ -12,6 +12,8 @@
 #include <functional>
 
 #include <QString>
+
+#include "VirusTotalOnlineScan.h"
 
 class QAction;
 class QMenu;
@@ -35,7 +37,7 @@ namespace ks::online_scan
     using QFilePathResolver = std::function<SandboxUploadTarget()>;
 
     // addVirusTotalSandboxMenu 作用：
-    // - 在指定菜单中添加“上传到沙箱”子菜单和“VT”子项；
+    // - 在指定菜单中添加“上传到沙箱”子菜单和 5 个 VT 分析子项；
     // - 子项触发后调用 resolver 解析路径并启动 VirusTotal 上传；
     // - ThreatBook 本轮不添加、不显示灰色项。
     // 入参 menu：目标右键菜单。
@@ -53,6 +55,17 @@ namespace ks::online_scan
     // 入参 parentWidget：弹窗父控件。
     // 返回：无；错误通过统一弹窗提示，结果通过实时结果窗口展示。
     void uploadFileToVirusTotal(const QString& filePath, const QString& sourceText, QWidget* parentWidget);
+
+    // uploadFileToVirusTotal 作用：
+    // - 多 API 入口版本；
+    // - 校验文件后按 initialApi 打开对应 VT Tab 并启动对应分析。
+    // 入参 initialApi：浅分析、文件画像、IOC、沙箱或全部 API。
+    // 返回：无。
+    void uploadFileToVirusTotal(
+        const QString& filePath,
+        const QString& sourceText,
+        VirusTotalOnlineScan::VtApiKind initialApi,
+        QWidget* parentWidget);
 
     // uploadProcessImageByPid 作用：
     // - 根据 PID 调用 ks::process::QueryProcessPathByPid 解析 EXE；

@@ -222,42 +222,64 @@ QAction* ks::online_scan::addVirusTotalSandboxMenu(
         return nullptr;
     }
 
-    // 菜单结构必须固定为“上传到沙箱 -> VT”，ThreatBook 本轮不显示。
+    // 菜单结构固定为“上传到沙箱 -> VT-*”，ThreatBook 本轮不显示。
     QMenu* sandboxMenu = menu->addMenu(sandboxUploadIcon(), QStringLiteral("上传到沙箱"));
-    QAction* virusTotalAction = sandboxMenu->addAction(sandboxUploadIcon(), QStringLiteral("VT"));
-    QObject::connect(virusTotalAction, &QAction::triggered, menu, [resolver = std::move(resolver), parentWidget]()
+    const auto addVirusTotalAction =
+        [sandboxMenu, menu, parentWidget, &resolver](
+            const QString& actionText,
+            const VirusTotalOnlineScan::VtApiKind initialApi) -> QAction*
         {
-            // 输入：右键菜单触发时的当前 UI 状态。
-            // 处理：延迟解析路径并进入统一 VT 上传；解析异常用弹窗提示。
-            // 返回：无。
-            if (!resolver)
-            {
-                showErrorDialog(
-                    parentWidget,
-                    QStringLiteral("上传到沙箱"),
-                    QStringLiteral("当前入口没有提供文件路径解析器。"));
-                return;
-            }
+            QAction* action = sandboxMenu->addAction(sandboxUploadIcon(), actionText);
+            QObject::connect(action, &QAction::triggered, menu, [resolver, parentWidget, initialApi, actionText]()
+                {
+                    // 输入：右键菜单触发时的当前 UI 状态。
+                    // 处理：延迟解析路径并进入统一 VT 多 API 控制台；解析异常用弹窗提示。
+                    // 返回：无。
+                    if (!resolver)
+                    {
+                        showErrorDialog(
+                            parentWidget,
+                            QStringLiteral("上传到沙箱"),
+                            QStringLiteral("当前入口没有提供文件路径解析器。"));
+                        return;
+                    }
 
-            const SandboxUploadTarget target = resolver();
-            if (target.filePath.trimmed().isEmpty())
-            {
-                showErrorDialog(
-                    parentWidget,
-                    QStringLiteral("上传到沙箱 - VT"),
-                    target.errorText.trimmed().isEmpty()
-                        ? QStringLiteral("未解析到可上传文件路径。若来源是 PID，进程可能已退出，或当前权限不足。")
-                        : target.errorText.trimmed());
-                return;
-            }
-            uploadFileToVirusTotal(target.filePath, target.sourceText, parentWidget);
-        });
-    return virusTotalAction;
+                    const SandboxUploadTarget target = resolver();
+                    if (target.filePath.trimmed().isEmpty())
+                    {
+                        showErrorDialog(
+                            parentWidget,
+                            QStringLiteral("上传到沙箱 - %1").arg(actionText),
+                            target.errorText.trimmed().isEmpty()
+                                ? QStringLiteral("未解析到可上传文件路径。若来源是 PID，进程可能已退出，或当前权限不足。")
+                                : target.errorText.trimmed());
+                        return;
+                    }
+                    uploadFileToVirusTotal(target.filePath, target.sourceText, initialApi, parentWidget);
+                });
+            return action;
+        };
+
+    QAction* shallowAction = addVirusTotalAction(QStringLiteral("VT-浅分析"), VirusTotalOnlineScan::VtApiKind::ShallowAnalysis);
+    addVirusTotalAction(QStringLiteral("VT-文件画像"), VirusTotalOnlineScan::VtApiKind::FileProfile);
+    addVirusTotalAction(QStringLiteral("VT-IOC"), VirusTotalOnlineScan::VtApiKind::Ioc);
+    addVirusTotalAction(QStringLiteral("VT-沙箱"), VirusTotalOnlineScan::VtApiKind::Sandbox);
+    addVirusTotalAction(QStringLiteral("VT-全部API"), VirusTotalOnlineScan::VtApiKind::AllApis);
+    return shallowAction;
 }
 
 void ks::online_scan::uploadFileToVirusTotal(
     const QString& filePath,
     const QString& sourceText,
+    QWidget* parentWidget)
+{
+    uploadFileToVirusTotal(filePath, sourceText, VirusTotalOnlineScan::VtApiKind::ShallowAnalysis, parentWidget);
+}
+
+void ks::online_scan::uploadFileToVirusTotal(
+    const QString& filePath,
+    const QString& sourceText,
+    const VirusTotalOnlineScan::VtApiKind initialApi,
     QWidget* parentWidget)
 {
     const QString normalizedPath = extractExistingFilePathForUpload(filePath);
@@ -274,6 +296,7 @@ void ks::online_scan::uploadFileToVirusTotal(
     VirusTotalOnlineScan::scanFileAndAutoDelete(
         QFileInfo(normalizedPath).absoluteFilePath(),
         defaultSourceText(sourceText),
+        initialApi,
         parentWidget);
 }
 
