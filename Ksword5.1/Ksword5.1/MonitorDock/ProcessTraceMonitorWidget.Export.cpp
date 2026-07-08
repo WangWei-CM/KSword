@@ -10,6 +10,7 @@
 // ============================================================
 
 #include "MonitorTextViewer.h"
+#include "../OnlineScan/SandboxUploadActions.h"
 #include "../ProcessDock/ProcessDetailWindow.h"
 
 #include <QApplication>
@@ -106,6 +107,45 @@ void ProcessTraceMonitorWidget::showEventContextMenu(const QPoint& position)
     QAction* copyRowAction = menu.addAction(QIcon(":/Icon/log_clipboard.svg"), QStringLiteral("复制整行"));
     menu.addSeparator();
     QAction* gotoProcessAction = menu.addAction(QIcon(":/Icon/process_details.svg"), QStringLiteral("转到进程详细信息"));
+    ks::online_scan::addVirusTotalSandboxMenu(
+        &menu,
+        this,
+        [this, row]() -> ks::online_scan::SandboxUploadTarget {
+            // 输入：进程定向事件表当前右键行。
+            // 处理：优先从 PID/TID 列提取进程 PID；失败时再尝试 Root PID 列。
+            // 返回：PID 对应进程镜像路径和来源文本；无法解析时返回 errorText，统一菜单 helper 负责弹窗。
+            const auto itemTextAt = [this, row](const int column) -> QString {
+                QTableWidgetItem* itemPointer = m_eventTable != nullptr ? m_eventTable->item(row, column) : nullptr;
+                return itemPointer != nullptr ? itemPointer->text() : QString();
+            };
+
+            std::uint32_t pidValue = 0;
+            if (!extractPidFromPidTidText(itemTextAt(EventColumnPidTid), &pidValue) &&
+                !ks::online_scan::tryParsePidFromText(itemTextAt(EventColumnRootPid), &pidValue))
+            {
+                return {
+                    QString(),
+                    QStringLiteral("进程定向事件"),
+                    QStringLiteral("当前事件行未解析出有效 PID 或 Root PID，无法上传发起进程文件。")
+                };
+            }
+
+            const QString processPath = QString::fromStdString(ks::process::QueryProcessPathByPid(pidValue)).trimmed();
+            if (processPath.isEmpty())
+            {
+                return {
+                    QString(),
+                    QStringLiteral("进程定向事件 PID=%1").arg(pidValue),
+                    QStringLiteral("无法解析 PID=%1 的进程镜像路径。进程可能已退出，或当前权限不足。").arg(pidValue)
+                };
+            }
+
+            return {
+                processPath,
+                QStringLiteral("进程定向事件 PID=%1").arg(pidValue),
+                QString()
+            };
+        });
 
     QAction* selectedAction = menu.exec(m_eventTable->viewport()->mapToGlobal(position));
     if (selectedAction == nullptr)

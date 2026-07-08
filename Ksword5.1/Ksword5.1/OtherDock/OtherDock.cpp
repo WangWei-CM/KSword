@@ -9,6 +9,7 @@
 // ============================================================
 
 #include "../ProcessDock/ProcessDetailWindow.h"
+#include "../OnlineScan/SandboxUploadActions.h"
 #include "WindowCaptureProtection.h"
 #include "../theme.h"
 #include "../UI/CodeEditorWidget.h"
@@ -4130,6 +4131,26 @@ void OtherDock::showWindowContextMenu(const QPoint& localPos)
     QAction* processDetailAction = menu.addAction(QIcon(":/Icon/process_details.svg"), QStringLiteral("转到进程详细信息"));
     QAction* windowDetailAction = menu.addAction(QIcon(":/Icon/process_details.svg"), QStringLiteral("在详细信息中打开"));
     QAction* sendMessageAction = menu.addAction(QIcon(":/Icon/log_track.svg"), QStringLiteral("发送测试消息"));
+    QAction* uploadVirusTotalAction = ks::online_scan::addVirusTotalSandboxMenu(
+        &menu,
+        this,
+        [windowInfo]() -> ks::online_scan::SandboxUploadTarget
+        {
+            // 输入：窗口列表当前右键窗口快照。
+            // 处理：按 GUI 线程所属 PID 上传对应进程文件；窗口线程 ID 仅用于来源说明。
+            // 返回：VT 上传目标；PID 为空或进程路径无法解析时交由统一 helper 提示。
+            ks::online_scan::SandboxUploadTarget uploadTarget;
+            if (windowInfo == nullptr || windowInfo->processId == 0)
+            {
+                uploadTarget.errorText = QStringLiteral("当前窗口没有可解析的 GUI 线程进程 PID。");
+                return uploadTarget;
+            }
+            uploadTarget.filePath = QString::fromStdString(ks::process::QueryProcessPathByPid(windowInfo->processId));
+            uploadTarget.sourceText = QStringLiteral("窗口 GUI 线程 PID=%1 TID=%2")
+                .arg(windowInfo->processId)
+                .arg(windowInfo->threadId);
+            return uploadTarget;
+        });
     menu.addSeparator();
     QAction* terminateAction = menu.addAction(QIcon(":/Icon/process_terminate.svg"), QStringLiteral("结束进程"));
 
@@ -4251,6 +4272,10 @@ void OtherDock::showWindowContextMenu(const QPoint& localPos)
             1200,
             &resultValue);
         Q_UNUSED(resultValue);
+    }
+    else if (selectedAction == uploadVirusTotalAction)
+    {
+        return;
     }
     else if (selectedAction == terminateAction)
     {

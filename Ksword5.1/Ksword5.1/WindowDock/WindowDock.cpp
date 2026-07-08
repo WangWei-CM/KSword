@@ -1,6 +1,7 @@
 #include "WindowDock.h"
 
 #include "../ArkDriverClient/ArkDriverClient.h"
+#include "../OnlineScan/SandboxUploadActions.h"
 #include "../OtherDock/OtherDock.h"
 #include "../ksword/profile/ProfileJsonLoader.h"
 #include "../theme.h"
@@ -1293,6 +1294,7 @@ namespace
 
     // installTableCopyMenu 作用：
     // - 给只读表格安装“复制当前行”右键菜单；
+    // - 如果表格设置了 kswordSandboxPidColumn 属性，则额外添加“上传到沙箱 -> VT”并按该列 PID 上传进程 EXE；
     // - 输入 table：需要安装菜单的表格；
     // - 返回：无，菜单 action 只读，不触发任何系统修改。
     void installTableCopyMenu(QTableWidget* table)
@@ -1316,7 +1318,42 @@ namespace
             menu.setStyleSheet(tableCopyMenuStyle());
             QAction* copyRowAction = menu.addAction(QIcon(QStringLiteral(":/Icon/process_copy_row.svg")), QStringLiteral("复制当前行"));
             copyRowAction->setEnabled(table->currentRow() >= 0);
-            if (menu.exec(table->viewport()->mapToGlobal(localPosition)) == copyRowAction)
+            QAction* uploadVirusTotalAction = nullptr;
+            const int sandboxPidColumn = table->property("kswordSandboxPidColumn").toInt();
+            if (sandboxPidColumn >= 0 && sandboxPidColumn < table->columnCount())
+            {
+                menu.addSeparator();
+                uploadVirusTotalAction = ks::online_scan::addVirusTotalSandboxMenu(
+                    &menu,
+                    table,
+                    [table, sandboxPidColumn]() -> ks::online_scan::SandboxUploadTarget
+                    {
+                        // 输入：WindowDock 表格当前行和配置的 PID 列。
+                        // 处理：从 PID 列解析 GUI 线程/窗口所属进程。
+                        // 返回：空 filePath 表示让统一层按 PID 查询 EXE。
+                        ks::online_scan::SandboxUploadTarget uploadTarget;
+                        const int rowIndex = table != nullptr ? table->currentRow() : -1;
+                        const QTableWidgetItem* pidItem =
+                            (table != nullptr && rowIndex >= 0) ? table->item(rowIndex, sandboxPidColumn) : nullptr;
+                        std::uint32_t pidValue = 0;
+                        if (pidItem == nullptr || !ks::online_scan::tryParsePidFromText(pidItem->text(), &pidValue))
+                        {
+                            uploadTarget.errorText = QStringLiteral("当前窗口/GUI线程行没有可解析的 PID。");
+                            return uploadTarget;
+                        }
+
+                        uploadTarget.filePath = QString::fromStdString(ks::process::QueryProcessPathByPid(pidValue));
+                        uploadTarget.sourceText = QStringLiteral("窗口/GUI线程 PID=%1").arg(pidValue);
+                        return uploadTarget;
+                    });
+                if (uploadVirusTotalAction != nullptr)
+                {
+                    uploadVirusTotalAction->setEnabled(table->currentRow() >= 0);
+                }
+            }
+
+            QAction* selectedAction = menu.exec(table->viewport()->mapToGlobal(localPosition));
+            if (selectedAction == copyRowAction)
             {
                 copyTableCurrentRow(table);
             }
@@ -2281,6 +2318,14 @@ WindowDock::WindowDock(QWidget* parent)
     m_cachedDisplaySummary = QStringLiteral("[GPU / Display / Watchdog]\n%1\n").arg(manualRefreshText);
     m_cachedWindowsRows = buildPendingRows(m_windowsTable, QStringLiteral("<等待刷新>"), manualRefreshText);
     m_cachedGuiThreadRows = buildPendingRows(m_guiThreadsTable, QStringLiteral("<等待刷新>"), manualRefreshText);
+    if (m_windowsTable != nullptr)
+    {
+        m_windowsTable->setProperty("kswordSandboxPidColumn", 1);
+    }
+    if (m_guiThreadsTable != nullptr)
+    {
+        m_guiThreadsTable->setProperty("kswordSandboxPidColumn", 1);
+    }
     m_cachedSessionRows = buildPendingRows(m_sessionTable, QStringLiteral("<等待刷新>"), manualRefreshText);
     m_cachedHotkeyRows = buildPendingRows(m_hotkeysTable, QStringLiteral("<等待刷新>"), manualRefreshText);
     m_cachedHookRows = buildPendingRows(m_hooksTable, QStringLiteral("<等待刷新>"), manualRefreshText);

@@ -2,6 +2,7 @@
 
 #include "../ArkDriverClient/ArkDriverClient.h"
 #include "../FileDock/FilePropertyPeAnalyzer.h"
+#include "../OnlineScan/SandboxUploadActions.h"
 #include "../UI/CodeEditorWidget.h"
 #include "../theme.h"
 
@@ -1858,6 +1859,24 @@ void KernelDock::showCallbackEnumContextMenu(const QPoint& localPosition)
         QStringLiteral("模块文件详细信息"));
     openModuleFolderAction->setEnabled(hasModuleFile);
     moduleFileDetailAction->setEnabled(hasModuleFile);
+    QAction* uploadVirusTotalAction = ks::online_scan::addVirusTotalSandboxMenu(
+        &contextMenu,
+        this,
+        [clickedModulePath, actionEntry]() -> ks::online_scan::SandboxUploadTarget
+        {
+            // 输入：当前回调行已规范化的模块文件路径。
+            // 处理：直接上传命中的模块文件；无文件时交由统一错误提示。
+            // 返回：待上传路径和来源说明。
+            ks::online_scan::SandboxUploadTarget uploadTarget;
+            uploadTarget.filePath = clickedModulePath;
+            uploadTarget.sourceText = QStringLiteral("内核回调模块 %1")
+                .arg(actionEntry != nullptr ? actionEntry->nameText : QStringLiteral("<未知回调>"));
+            return uploadTarget;
+        });
+    if (uploadVirusTotalAction != nullptr)
+    {
+        uploadVirusTotalAction->setEnabled(hasModuleFile);
+    }
     contextMenu.addSeparator();
 
     QAction* safeRemoveAction = contextMenu.addAction(QStringLiteral("安全移除（公开 API）"));
@@ -1928,6 +1947,10 @@ void KernelDock::showCallbackEnumContextMenu(const QPoint& localPosition)
         {
             m_callbackEnumStatusLabel->setText(QStringLiteral("状态：已打开模块文件详细信息"));
         }
+        return;
+    }
+    if (selectedAction == uploadVirusTotalAction)
+    {
         return;
     }
 

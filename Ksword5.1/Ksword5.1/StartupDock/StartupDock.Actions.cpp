@@ -1,4 +1,5 @@
 #include "StartupDock.Internal.h"
+#include "../OnlineScan/SandboxUploadActions.h"
 
 #include <winsvc.h>
 
@@ -256,9 +257,26 @@ void StartupDock::showEntryContextMenu(
     QAction* filePropertiesAction = contextMenu.addAction(createBlueIcon(":/Icon/process_details.svg"), QStringLiteral("转到文件属性"));
     QAction* openRegistryAction = contextMenu.addAction(createBlueIcon(":/Icon/file_find.svg"), QStringLiteral("打开注册表位置"));
     QAction* gotoServiceAction = contextMenu.addAction(createBlueIcon(":/Icon/process_list.svg"), QStringLiteral("转到服务管理"));
+    QAction* uploadVirusTotalAction = ks::online_scan::addVirusTotalSandboxMenu(
+        &contextMenu,
+        this,
+        [entry]() -> ks::online_scan::SandboxUploadTarget
+        {
+            // 输入：启动项缓存行。
+            // 处理：把镜像路径或命令行交给统一路径提取器。
+            // 返回：待上传路径和来源说明。
+            ks::online_scan::SandboxUploadTarget uploadTarget;
+            uploadTarget.filePath = entry.imagePathText;
+            uploadTarget.sourceText = QStringLiteral("自启动项 %1").arg(entry.itemNameText);
+            return uploadTarget;
+        });
     QAction* deleteAction = contextMenu.addAction(createBlueIcon(":/Icon/log_clear.svg"), QStringLiteral("删除项"));
     openFileAction->setEnabled(entry.canOpenFileLocation);
     filePropertiesAction->setEnabled(entry.canOpenFileLocation);
+    if (uploadVirusTotalAction != nullptr)
+    {
+        uploadVirusTotalAction->setEnabled(entry.canOpenFileLocation && !entry.imagePathText.trimmed().isEmpty());
+    }
     openRegistryAction->setEnabled(entry.canOpenRegistryLocation);
     gotoServiceAction->setEnabled(
         entry.category == StartupCategory::Services
@@ -311,6 +329,10 @@ void StartupDock::showEntryContextMenu(
                 Q_ARG(QString, serviceNameText));
         }
     }
+    else if (selectedAction == uploadVirusTotalAction)
+    {
+        return;
+    }
     else if (selectedAction == deleteAction)
     {
         deleteSelectedEntry(category, tableWidget);
@@ -345,6 +367,28 @@ void StartupDock::showRegistryContextMenu(const QPoint& localPos)
     QAction* openFileAction = contextMenu.addAction(createBlueIcon(":/Icon/process_open_folder.svg"), QStringLiteral("打开文件位置"));
     QAction* filePropertiesAction = contextMenu.addAction(createBlueIcon(":/Icon/process_details.svg"), QStringLiteral("转到文件属性"));
     QAction* openRegistryAction = contextMenu.addAction(createBlueIcon(":/Icon/file_find.svg"), QStringLiteral("打开注册表位置"));
+    const StartupEntry* registryEntry =
+        (entryIndex >= 0 && entryIndex < static_cast<int>(m_entryList.size()))
+        ? &m_entryList[static_cast<std::size_t>(entryIndex)]
+        : nullptr;
+    QAction* uploadVirusTotalAction = ks::online_scan::addVirusTotalSandboxMenu(
+        &contextMenu,
+        this,
+        [registryEntry]() -> ks::online_scan::SandboxUploadTarget
+        {
+            // 输入：高级注册表树当前叶子条目。
+            // 处理：只有叶子条目才从 imagePathText 提取上传文件。
+            // 返回：待上传路径和来源说明。
+            ks::online_scan::SandboxUploadTarget uploadTarget;
+            if (registryEntry == nullptr)
+            {
+                uploadTarget.errorText = QStringLiteral("当前注册表节点不是可上传的启动项。");
+                return uploadTarget;
+            }
+            uploadTarget.filePath = registryEntry->imagePathText;
+            uploadTarget.sourceText = QStringLiteral("自启动注册表项 %1").arg(registryEntry->itemNameText);
+            return uploadTarget;
+        });
     QAction* deleteAction = contextMenu.addAction(createBlueIcon(":/Icon/log_clear.svg"), QStringLiteral("删除项"));
 
     if (nodeKind == StartupTreeNodeKind::Group
@@ -352,6 +396,10 @@ void StartupDock::showRegistryContextMenu(const QPoint& localPos)
     {
         openFileAction->setEnabled(false);
         filePropertiesAction->setEnabled(false);
+        if (uploadVirusTotalAction != nullptr)
+        {
+            uploadVirusTotalAction->setEnabled(false);
+        }
         openRegistryAction->setEnabled(!locationText.isEmpty());
         deleteAction->setEnabled(false);
     }
@@ -360,6 +408,10 @@ void StartupDock::showRegistryContextMenu(const QPoint& localPos)
         const StartupEntry& entry = m_entryList[static_cast<std::size_t>(entryIndex)];
         openFileAction->setEnabled(entry.canOpenFileLocation);
         filePropertiesAction->setEnabled(entry.canOpenFileLocation);
+        if (uploadVirusTotalAction != nullptr)
+        {
+            uploadVirusTotalAction->setEnabled(entry.canOpenFileLocation && !entry.imagePathText.trimmed().isEmpty());
+        }
         openRegistryAction->setEnabled(entry.canOpenRegistryLocation);
         deleteAction->setEnabled(entry.canDelete);
     }
@@ -367,6 +419,10 @@ void StartupDock::showRegistryContextMenu(const QPoint& localPos)
     {
         openFileAction->setEnabled(false);
         filePropertiesAction->setEnabled(false);
+        if (uploadVirusTotalAction != nullptr)
+        {
+            uploadVirusTotalAction->setEnabled(false);
+        }
         openRegistryAction->setEnabled(false);
         deleteAction->setEnabled(false);
     }
@@ -391,6 +447,10 @@ void StartupDock::showRegistryContextMenu(const QPoint& localPos)
     else if (selectedAction == openRegistryAction)
     {
         openSelectedRegistryLocation(StartupCategory::Registry, nullptr);
+    }
+    else if (selectedAction == uploadVirusTotalAction)
+    {
+        return;
     }
     else if (selectedAction == deleteAction)
     {

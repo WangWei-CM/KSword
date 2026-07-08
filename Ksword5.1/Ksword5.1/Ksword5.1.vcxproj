@@ -260,6 +260,7 @@
     <ClCompile Include="NetworkDock\NetworkFirewallPage.cpp" />
     <ClCompile Include="NetworkDock\NetworkAuditPage.cpp" />
     <ClCompile Include="NetworkDock\HttpsProxyService.cpp" />
+    <ClCompile Include="OnlineScan\SandboxUploadActions.cpp" />
     <ClCompile Include="OnlineScan\OnlineScanSupport.cpp" />
     <ClCompile Include="OnlineScan\ThreatBookScan.cpp" />
     <ClCompile Include="OnlineScan\VirusTotalOnlineScan.cpp" />
@@ -460,6 +461,7 @@
     <QtMoc Include="NetworkDock\NetworkFirewallPage.h" />
     <ClInclude Include="NetworkDock\NetworkAuditPage.h" />
     <ClInclude Include="NetworkDock\HttpsProxyService.h" />
+    <ClInclude Include="OnlineScan\SandboxUploadActions.h" />
     <ClInclude Include="OnlineScan\OnlineScanSupport.h" />
     <ClInclude Include="OnlineScan\ThreatBookScan.h" />
     <ClInclude Include="OnlineScan\VirusTotalOnlineScan.h" />

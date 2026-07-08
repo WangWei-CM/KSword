@@ -20,7 +20,7 @@ void SettingsDock::initializeOnlineScanTab()
     rootLayout->setSpacing(12);
 
     QLabel* hintLabel = new QLabel(
-        QStringLiteral("在线扫描模块会在运行时从本设置读取 API Key。当前仅准备 VirusTotal 与 ThreatBook 扫描类，尚未接入主界面入口。"),
+        QStringLiteral("在线扫描模块会在运行时从本设置读取 API Key。当前右键“上传到沙箱”仅接入 VirusTotal；ThreatBook 暂不显示入口。"),
         m_onlineScanTab);
     hintLabel->setWordWrap(true);
     rootLayout->addWidget(hintLabel, 0);

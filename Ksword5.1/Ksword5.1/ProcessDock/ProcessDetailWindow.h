@@ -308,6 +308,11 @@ private:
     // 参数：无。
     // 返回：无。
     void openSelectedThreadStackWindow();
+    // resolveSelectedThreadModulePathForUpload 作用：
+    // - 输入为线程表当前行；
+    // - 处理时读取 ThreadInspectItem 的 start/win32Start 地址，并在模块缓存中查找所属模块路径；
+    // - 返回：命中时为模块文件路径，未命中时返回空字符串且 errorTextOut 写入原因。
+    QString resolveSelectedThreadModulePathForUpload(QString* errorTextOut) const;
 
     // ======== 令牌页/PEB页刷新 ========
     void requestAsyncTokenRefresh();

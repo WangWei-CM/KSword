@@ -81,6 +81,12 @@
         <file alias="settings_background_browse.svg">Resource/Icon/file/folder_open_line.svg</file>
         <file alias="settings_background_reset.svg">Resource/Icon/design/background_line.svg</file>
 
+        <!-- VirusTotal 报告视图状态图标 -->
+        <file alias="vt_status_suspicious.svg">Resource/Icon/online_scan/vt_status_suspicious.svg</file>
+        <file alias="vt_status_undetected.svg">Resource/Icon/online_scan/vt_status_undetected.svg</file>
+        <file alias="vt_status_safe.svg">Resource/Icon/online_scan/vt_status_safe.svg</file>
+        <file alias="vt_status_threat.svg">Resource/Icon/online_scan/vt_status_threat.svg</file>
+
         <!-- 文本编辑器工具栏图标（全部使用 SVG 资源，禁止回退 MainLogo） -->
         <file alias="codeeditor_new.svg">Resource/Icon/file/file_new_line.svg</file>
         <file alias="codeeditor_open.svg">Resource/Icon/file/folder_open_line.svg</file>

@@ -3,6 +3,7 @@
 #include "../theme.h"
 #include "ProcessDetailWindow.h"
 #include "../ArkDriverClient/ArkDriverClient.h"
+#include "../OnlineScan/SandboxUploadActions.h"
 #include "../UI/FlatTableModel.h"
 #include "../UI/TableColumnAutoFit.h"
 #include "../ksword/network/network.h"
@@ -8293,6 +8294,36 @@ void ProcessDock::showTableContextMenu(const QPoint& localPosition)
 
     QAction* detailsAction = contextMenu.addAction(blueTintedIcon(":/Icon/process_details.svg"), "进程详细信息");
     detailsAction->setEnabled(!hasBatchSelection);
+    contextMenu.addSeparator();
+    QAction* uploadVirusTotalAction = ks::online_scan::addVirusTotalSandboxMenu(
+        &contextMenu,
+        this,
+        [contextActionTargets]() -> ks::online_scan::SandboxUploadTarget
+        {
+            // 输入：右键菜单冻结的进程动作目标。
+            // 处理：优先使用缓存 imagePath，若为空则交给 PID 解析兜底。
+            // 返回：待上传文件路径和结果窗口来源说明。
+            ks::online_scan::SandboxUploadTarget uploadTarget;
+            if (contextActionTargets.empty())
+            {
+                return uploadTarget;
+            }
+
+            const ks::process::ProcessRecord& record = contextActionTargets.front().record;
+            uploadTarget.filePath = QString::fromStdString(record.imagePath);
+            uploadTarget.sourceText = QStringLiteral("进程列表 PID=%1 %2")
+                .arg(record.pid)
+                .arg(QString::fromStdString(record.processName));
+            if (uploadTarget.filePath.trimmed().isEmpty() && record.pid != 0)
+            {
+                uploadTarget.filePath = QString::fromStdString(ks::process::QueryProcessPathByPid(record.pid));
+            }
+            return uploadTarget;
+        });
+    if (uploadVirusTotalAction != nullptr)
+    {
+        uploadVirusTotalAction->setEnabled(!contextActionTargets.empty());
+    }
 
     m_contextMenuVisible = true;
     QAction* selectedAction = contextMenu.exec(m_processTable->viewport()->mapToGlobal(localPosition));

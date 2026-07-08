@@ -1,6 +1,7 @@
 #include "KernelDock.h"
 
 #include "../ArkDriverClient/ArkDriverClient.h"
+#include "../OnlineScan/SandboxUploadActions.h"
 #include "../UI/CodeEditorWidget.h"
 #include "../theme.h"
 
@@ -2422,6 +2423,38 @@ void KernelDock::showInlineHookContextMenu(const QPoint& localPosition)
     QAction* refreshAction = menu.addAction(QIcon(":/Icon/process_refresh.svg"), QStringLiteral("重新扫描 Inline Hook"));
     QAction* patchAction = menu.addAction(QIcon(":/Icon/process_terminate.svg"), QStringLiteral("NOP 摘除当前 Hook"));
     patchAction->setEnabled(hasSelection);
+    const bool hasSingleInlineHook = selectedIndices.size() == 1U && selectedIndices.front() < m_inlineHookRows.size();
+    const QString inlineHookDiskPath = hasSingleInlineHook
+        ? m_inlineHookRows[selectedIndices.front()].diskBaselinePathText.trimmed()
+        : QString();
+    QAction* uploadVirusTotalAction = ks::online_scan::addVirusTotalSandboxMenu(
+        &menu,
+        this,
+        [this, hasSingleInlineHook, inlineHookDiskPath, selectedIndices]() -> ks::online_scan::SandboxUploadTarget
+        {
+            // 输入：Inline Hook 当前单选行。
+            // 处理：使用磁盘基线路径作为所属模块文件路径，不从模块名猜测路径。
+            // 返回：待上传路径和来源说明。
+            ks::online_scan::SandboxUploadTarget uploadTarget;
+            if (!hasSingleInlineHook || selectedIndices.front() >= m_inlineHookRows.size())
+            {
+                uploadTarget.errorText = QStringLiteral("请只选择一条 Inline Hook 记录。");
+                return uploadTarget;
+            }
+            const KernelInlineHookEntry& entry = m_inlineHookRows[selectedIndices.front()];
+            uploadTarget.filePath = inlineHookDiskPath;
+            uploadTarget.sourceText = QStringLiteral("Inline Hook 模块 %1!%2")
+                .arg(entry.moduleNameText, entry.functionNameText);
+            if (uploadTarget.filePath.trimmed().isEmpty())
+            {
+                uploadTarget.errorText = QStringLiteral("当前 Inline Hook 行没有可用磁盘基线路径。");
+            }
+            return uploadTarget;
+        });
+    if (uploadVirusTotalAction != nullptr)
+    {
+        uploadVirusTotalAction->setEnabled(hasSingleInlineHook && QFileInfo(inlineHookDiskPath).isFile());
+    }
     menu.addSeparator();
     QMenu* copyMenu = menu.addMenu(QIcon(":/Icon/process_copy_row.svg"), QStringLiteral("复制"));
     QAction* copyCurrentColumnAction = copyMenu->addAction(QIcon(":/Icon/process_copy_cell.svg"), QStringLiteral("复制当前列（选中行）"));
@@ -2454,6 +2487,10 @@ void KernelDock::showInlineHookContextMenu(const QPoint& localPosition)
     if (selectedAction == patchAction)
     {
         patchSelectedInlineHookWithNop();
+        return;
+    }
+    if (selectedAction == uploadVirusTotalAction)
+    {
         return;
     }
     if (!hasSelection)

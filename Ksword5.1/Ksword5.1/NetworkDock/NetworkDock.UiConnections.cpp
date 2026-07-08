@@ -1,4 +1,5 @@
 #include "NetworkDock.InternalCommon.h"
+#include "../OnlineScan/SandboxUploadActions.h"
 #include "../theme.h"
 
 #include <string>
@@ -92,6 +93,29 @@ void NetworkDock::initializeConnections()
             contextMenu.setStyleSheet(KswordTheme::ContextMenuStyle());
             QAction* detailAction = contextMenu.addAction(QIcon(":/Icon/process_details.svg"), QStringLiteral("查看关联报文详情"));
             QAction* copyRowAction = contextMenu.addAction(QIcon(":/Icon/process_copy_row.svg"), QStringLiteral("复制告警行"));
+            QAction* uploadVirusTotalAction = ks::online_scan::addVirusTotalSandboxMenu(
+                &contextMenu,
+                this,
+                [this, index]() -> ks::online_scan::SandboxUploadTarget
+                {
+                    // 输入：NIDS 告警表当前行。
+                    // 处理：从 PID 列解析关联进程并查询 EXE。
+                    // 返回：待上传路径和来源说明。
+                    ks::online_scan::SandboxUploadTarget uploadTarget;
+                    const QTableWidgetItem* pidItem =
+                        (m_nidsAlertTable != nullptr && index.isValid())
+                        ? m_nidsAlertTable->item(index.row(), toNidsAlertColumn(NidsAlertTableColumn::Pid))
+                        : nullptr;
+                    std::uint32_t targetPid = 0;
+                    if (pidItem == nullptr || !ks::online_scan::tryParsePidFromText(pidItem->text(), &targetPid))
+                    {
+                        uploadTarget.errorText = QStringLiteral("当前 NIDS 告警没有可解析 PID。");
+                        return uploadTarget;
+                    }
+                    uploadTarget.filePath = QString::fromStdString(ks::process::QueryProcessPathByPid(targetPid));
+                    uploadTarget.sourceText = QStringLiteral("NIDS 告警 PID=%1").arg(targetPid);
+                    return uploadTarget;
+                });
             QAction* selectedAction = contextMenu.exec(m_nidsAlertTable->viewport()->mapToGlobal(position));
             if (selectedAction == nullptr)
             {
@@ -121,6 +145,10 @@ void NetworkDock::initializeConnections()
                 {
                     QGuiApplication::clipboard()->setText(rowTextList.join('\t'));
                 }
+            }
+            if (selectedAction == uploadVirusTotalAction)
+            {
+                return;
             }
         });
 
@@ -347,6 +375,30 @@ void NetworkDock::initializeConnections()
             QAction* copyRowAction = contextMenu.addAction(QIcon(":/Icon/process_copy_row.svg"), QStringLiteral("复制行"));
             QAction* trackProcessAction = contextMenu.addAction(QIcon(":/Icon/log_track.svg"), QStringLiteral("跟踪此进程"));
             QAction* gotoProcessDetailAction = contextMenu.addAction(QIcon(":/Icon/process_details.svg"), QStringLiteral("转到进程详细信息"));
+            QAction* uploadVirusTotalAction = ks::online_scan::addVirusTotalSandboxMenu(
+                &contextMenu,
+                this,
+                [this, index, parsePidFromConnectionRow]() -> ks::online_scan::SandboxUploadTarget
+                {
+                    // 输入：TCP 连接表当前行。
+                    // 处理：解析 PID 并查询发起进程 EXE。
+                    // 返回：待上传路径和来源说明。
+                    ks::online_scan::SandboxUploadTarget uploadTarget;
+                    std::uint32_t targetPid = 0;
+                    if (!parsePidFromConnectionRow(
+                        m_tcpConnectionTable,
+                        index.row(),
+                        toTcpConnectionColumn(TcpConnectionTableColumn::Pid),
+                        targetPid,
+                        QStringLiteral("tcp_table_upload")))
+                    {
+                        uploadTarget.errorText = QStringLiteral("当前 TCP 行没有可解析 PID。");
+                        return uploadTarget;
+                    }
+                    uploadTarget.filePath = QString::fromStdString(ks::process::QueryProcessPathByPid(targetPid));
+                    uploadTarget.sourceText = QStringLiteral("网络 TCP 连接 PID=%1").arg(targetPid);
+                    return uploadTarget;
+                });
             QAction* selectedAction = contextMenu.exec(m_tcpConnectionTable->viewport()->mapToGlobal(position));
             if (selectedAction == terminateAction)
             {
@@ -396,6 +448,10 @@ void NetworkDock::initializeConnections()
                 }
                 openProcessDetailByPid(targetPid, QStringLiteral("tcp_table"));
             }
+            else if (selectedAction == uploadVirusTotalAction)
+            {
+                return;
+            }
         });
 
     // UDP 表右键菜单：
@@ -418,6 +474,30 @@ void NetworkDock::initializeConnections()
             QAction* copyRowAction = contextMenu.addAction(QIcon(":/Icon/process_copy_row.svg"), QStringLiteral("复制行"));
             QAction* trackProcessAction = contextMenu.addAction(QIcon(":/Icon/log_track.svg"), QStringLiteral("跟踪此进程"));
             QAction* gotoProcessDetailAction = contextMenu.addAction(QIcon(":/Icon/process_details.svg"), QStringLiteral("转到进程详细信息"));
+            QAction* uploadVirusTotalAction = ks::online_scan::addVirusTotalSandboxMenu(
+                &contextMenu,
+                this,
+                [this, index, parsePidFromConnectionRow]() -> ks::online_scan::SandboxUploadTarget
+                {
+                    // 输入：UDP 端点表当前行。
+                    // 处理：解析 PID 并查询发起进程 EXE。
+                    // 返回：待上传路径和来源说明。
+                    ks::online_scan::SandboxUploadTarget uploadTarget;
+                    std::uint32_t targetPid = 0;
+                    if (!parsePidFromConnectionRow(
+                        m_udpEndpointTable,
+                        index.row(),
+                        toUdpEndpointColumn(UdpEndpointTableColumn::Pid),
+                        targetPid,
+                        QStringLiteral("udp_table_upload")))
+                    {
+                        uploadTarget.errorText = QStringLiteral("当前 UDP 行没有可解析 PID。");
+                        return uploadTarget;
+                    }
+                    uploadTarget.filePath = QString::fromStdString(ks::process::QueryProcessPathByPid(targetPid));
+                    uploadTarget.sourceText = QStringLiteral("网络 UDP 端点 PID=%1").arg(targetPid);
+                    return uploadTarget;
+                });
             QAction* selectedAction = contextMenu.exec(m_udpEndpointTable->viewport()->mapToGlobal(position));
             if (selectedAction == copyRowAction)
             {
@@ -461,6 +541,10 @@ void NetworkDock::initializeConnections()
                     return;
                 }
                 openProcessDetailByPid(targetPid, QStringLiteral("udp_table"));
+            }
+            else if (selectedAction == uploadVirusTotalAction)
+            {
+                return;
             }
         });
 
@@ -711,6 +795,48 @@ void NetworkDock::initializeConnections()
             contextMenu.addSeparator();
             QAction* trackProcessAction = contextMenu.addAction(QIcon(":/Icon/log_track.svg"), QStringLiteral("跟踪此进程"));
             QAction* gotoProcessDetailAction = contextMenu.addAction(QIcon(":/Icon/process_details.svg"), QStringLiteral("转到进程详细信息"));
+            QAction* uploadVirusTotalAction = ks::online_scan::addVirusTotalSandboxMenu(
+                &contextMenu,
+                this,
+                [this, index]() -> ks::online_scan::SandboxUploadTarget
+                {
+                    // 输入：报文表右键锚定行或当前多选首行。
+                    // 处理：读取 PID 列并查询发起进程 EXE。
+                    // 返回：待上传路径和来源说明。
+                    ks::online_scan::SandboxUploadTarget uploadTarget;
+                    int rowIndex = -1;
+                    if (m_packetTable != nullptr && m_packetTable->selectionModel() != nullptr)
+                    {
+                        const QModelIndexList selectedRows =
+                            m_packetTable->selectionModel()->selectedRows(toPacketColumn(PacketTableColumn::Time));
+                        if (!selectedRows.isEmpty())
+                        {
+                            rowIndex = selectedRows.front().row();
+                        }
+                    }
+                    if (rowIndex < 0 && index.isValid())
+                    {
+                        rowIndex = index.row();
+                    }
+                    if (rowIndex < 0)
+                    {
+                        uploadTarget.errorText = QStringLiteral("当前报文选择为空，无法解析 PID。");
+                        return uploadTarget;
+                    }
+                    const QTableWidgetItem* pidItem =
+                        (m_packetTable != nullptr && rowIndex >= 0)
+                        ? m_packetTable->item(rowIndex, toPacketColumn(PacketTableColumn::Pid))
+                        : nullptr;
+                    std::uint32_t targetPid = 0;
+                    if (pidItem == nullptr || !ks::online_scan::tryParsePidFromText(pidItem->text(), &targetPid))
+                    {
+                        uploadTarget.errorText = QStringLiteral("当前报文行没有可解析 PID。");
+                        return uploadTarget;
+                    }
+                    uploadTarget.filePath = QString::fromStdString(ks::process::QueryProcessPathByPid(targetPid));
+                    uploadTarget.sourceText = QStringLiteral("网络报文 PID=%1").arg(targetPid);
+                    return uploadTarget;
+                });
 
             QAction* selectedAction = contextMenu.exec(m_packetTable->viewport()->mapToGlobal(position));
             if (selectedAction == nullptr)
@@ -856,6 +982,10 @@ void NetworkDock::initializeConnections()
                 {
                     gotoProcessDetailByTableRow(anchorRow);
                 }
+            }
+            else if (selectedAction == uploadVirusTotalAction)
+            {
+                return;
             }
         });
 

@@ -548,3 +548,120 @@ void ProcessDetailWindow::openSelectedThreadStackWindow()
         << target.threadId
         << eol;
 }
+
+QString ProcessDetailWindow::resolveSelectedThreadModulePathForUpload(QString* errorTextOut) const
+{
+    // 输入：线程表当前行和最近一次线程/模块刷新缓存。
+    // 处理：从 ThreadInspectItem 取 startAddress/win32StartAddress，按模块基址+大小做范围匹配。
+    // 返回：命中的模块路径；失败时返回空字符串且 errorTextOut 包含给用户看的原因。
+    if (errorTextOut != nullptr)
+    {
+        errorTextOut->clear();
+    }
+    if (m_threadInspectTable == nullptr)
+    {
+        if (errorTextOut != nullptr)
+        {
+            *errorTextOut = QStringLiteral("线程表尚未初始化。");
+        }
+        return QString();
+    }
+
+    const int currentRow = m_threadInspectTable->currentRow();
+    if (currentRow < 0)
+    {
+        if (errorTextOut != nullptr)
+        {
+            *errorTextOut = QStringLiteral("请先选择一个线程。");
+        }
+        return QString();
+    }
+
+    const QTableWidgetItem* threadIdItem = m_threadInspectTable->item(
+        currentRow,
+        toThreadColumnIndex(ThreadRowColumn::ThreadId));
+    if (threadIdItem == nullptr)
+    {
+        if (errorTextOut != nullptr)
+        {
+            *errorTextOut = QStringLiteral("当前线程行缺少 ThreadID。");
+        }
+        return QString();
+    }
+
+    const std::size_t cacheIndex = static_cast<std::size_t>(threadIdItem->data(Qt::UserRole).toULongLong());
+    const std::uint32_t selectedTid = static_cast<std::uint32_t>(threadIdItem->data(Qt::UserRole + 1).toUInt());
+    const ThreadInspectItem* selectedThread = nullptr;
+    if (cacheIndex < m_threadInspectRows.size())
+    {
+        selectedThread = &m_threadInspectRows[cacheIndex];
+    }
+    if (selectedThread == nullptr || selectedThread->threadId != selectedTid)
+    {
+        const auto foundIt = std::find_if(
+            m_threadInspectRows.begin(),
+            m_threadInspectRows.end(),
+            [selectedTid](const ThreadInspectItem& rowItem)
+            {
+                return rowItem.threadId == selectedTid;
+            });
+        if (foundIt != m_threadInspectRows.end())
+        {
+            selectedThread = &(*foundIt);
+        }
+    }
+    if (selectedThread == nullptr)
+    {
+        if (errorTextOut != nullptr)
+        {
+            *errorTextOut = QStringLiteral("线程缓存已过期，请先刷新线程列表。");
+        }
+        return QString();
+    }
+    if (m_moduleRecords.empty())
+    {
+        if (errorTextOut != nullptr)
+        {
+            *errorTextOut = QStringLiteral("模块缓存为空，请先刷新“模块”页后再上传线程模块。");
+        }
+        return QString();
+    }
+
+    const std::uint64_t addressCandidates[] =
+    {
+        selectedThread->win32StartAddress,
+        selectedThread->startAddress
+    };
+    for (const std::uint64_t addressValue : addressCandidates)
+    {
+        if (addressValue == 0)
+        {
+            continue;
+        }
+
+        for (const ks::process::ProcessModuleRecord& moduleRecord : m_moduleRecords)
+        {
+            if (moduleRecord.moduleBaseAddress == 0 || moduleRecord.moduleSizeBytes == 0)
+            {
+                continue;
+            }
+
+            const std::uint64_t moduleEnd =
+                moduleRecord.moduleBaseAddress + static_cast<std::uint64_t>(moduleRecord.moduleSizeBytes);
+            if (addressValue >= moduleRecord.moduleBaseAddress && addressValue < moduleEnd)
+            {
+                const QString modulePath = QString::fromStdString(moduleRecord.modulePath).trimmed();
+                if (!modulePath.isEmpty())
+                {
+                    return modulePath;
+                }
+            }
+        }
+    }
+
+    if (errorTextOut != nullptr)
+    {
+        *errorTextOut = QStringLiteral("无法根据线程起始地址解析所属模块；不会回退上传进程 EXE。");
+    }
+    return QString();
+}

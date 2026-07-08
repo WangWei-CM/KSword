@@ -9,6 +9,7 @@
 // ============================================================
 
 #include "MonitorTextViewer.h"
+#include "../OnlineScan/SandboxUploadActions.h"
 #include "../theme.h"
 
 #include <QAbstractItemView>
@@ -2037,6 +2038,43 @@ void DirectKernelCallMonitorWidget::showEventContextMenu(const QPoint& position)
     QAction* detailAction = menu.addAction(QStringLiteral("查看详情"));
     QAction* copyRowAction = menu.addAction(QStringLiteral("复制当前行"));
     QAction* copyDetailAction = menu.addAction(QStringLiteral("复制详情"));
+    menu.addSeparator();
+    ks::online_scan::addVirusTotalSandboxMenu(
+        &menu,
+        this,
+        [this, row]() -> ks::online_scan::SandboxUploadTarget {
+            // 输入：直接内核调用事件表当前右键行。
+            // 处理：从 PID/TID 列解析 PID，并查询该 PID 的进程镜像路径。
+            // 返回：可上传文件路径；无法解析或进程路径不可读时返回 errorText。
+            QTableWidgetItem* pidItem = m_eventTable != nullptr
+                ? m_eventTable->item(row, EventColumnPidTid)
+                : nullptr;
+            std::uint32_t pidValue = 0;
+            if (pidItem == nullptr || !ks::online_scan::tryParsePidFromText(pidItem->text(), &pidValue))
+            {
+                return {
+                    QString(),
+                    QStringLiteral("直接内核调用事件"),
+                    QStringLiteral("当前事件行未解析出有效 PID，无法上传发起进程文件。")
+                };
+            }
+
+            const QString processPath = QString::fromStdString(ks::process::QueryProcessPathByPid(pidValue)).trimmed();
+            if (processPath.isEmpty())
+            {
+                return {
+                    QString(),
+                    QStringLiteral("直接内核调用事件 PID=%1").arg(pidValue),
+                    QStringLiteral("无法解析 PID=%1 的进程镜像路径。进程可能已退出，或当前权限不足。").arg(pidValue)
+                };
+            }
+
+            return {
+                processPath,
+                QStringLiteral("直接内核调用事件 PID=%1").arg(pidValue),
+                QString()
+            };
+        });
     QAction* selectedAction = menu.exec(m_eventTable->viewport()->mapToGlobal(position));
     if (selectedAction == nullptr)
     {

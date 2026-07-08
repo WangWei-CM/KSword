@@ -6,6 +6,7 @@
 #include "WinAPIDock.h"
 
 // 监控页实现：包含 WMI/ETW 两个标签页，所有重活走异步线程。
+#include "../OnlineScan/SandboxUploadActions.h"
 #include "../ProcessDock/ProcessDetailWindow.h"
 #include "../theme.h"
 
@@ -8262,6 +8263,42 @@ void MonitorDock::showWmiEventContextMenu(const QPoint& position)
     QAction* copyRowAction = menu.addAction(QIcon(":/Icon/log_clipboard.svg"), QStringLiteral("复制整行"));
     menu.addSeparator();
     QAction* gotoProcessAction = menu.addAction(QIcon(":/Icon/process_details.svg"), QStringLiteral("转到进程详细信息"));
+    ks::online_scan::addVirusTotalSandboxMenu(
+        &menu,
+        this,
+        [this, row]() -> ks::online_scan::SandboxUploadTarget {
+            // 输入：WMI 事件表当前右键行。
+            // 处理：从 PID/TID 列解析 PID，并查询该进程 EXE 路径。
+            // 返回：VT 上传目标；解析失败时返回 errorText，避免重复弹窗逻辑散落各处。
+            QTableWidgetItem* pidItem = m_wmiEventTable != nullptr
+                ? m_wmiEventTable->item(row, 3)
+                : nullptr;
+            std::uint32_t pidValue = 0;
+            if (pidItem == nullptr || !ks::online_scan::tryParsePidFromText(pidItem->text(), &pidValue))
+            {
+                return {
+                    QString(),
+                    QStringLiteral("WMI 事件"),
+                    QStringLiteral("当前 WMI 事件行未解析出有效 PID，无法上传发起进程文件。")
+                };
+            }
+
+            const QString processPath = QString::fromStdString(ks::process::QueryProcessPathByPid(pidValue)).trimmed();
+            if (processPath.isEmpty())
+            {
+                return {
+                    QString(),
+                    QStringLiteral("WMI 事件 PID=%1").arg(pidValue),
+                    QStringLiteral("无法解析 PID=%1 的进程镜像路径。进程可能已退出，或当前权限不足。").arg(pidValue)
+                };
+            }
+
+            return {
+                processPath,
+                QStringLiteral("WMI 事件 PID=%1").arg(pidValue),
+                QString()
+            };
+        });
 
     QAction* action = menu.exec(m_wmiEventTable->viewport()->mapToGlobal(position));
     if (action == nullptr)
@@ -10170,6 +10207,42 @@ void MonitorDock::showEtwEventContextMenu(const QPoint& position)
     QAction* copyRowAction = menu.addAction(QIcon(":/Icon/log_clipboard.svg"), QStringLiteral("复制整行"));
     menu.addSeparator();
     QAction* gotoProcessAction = menu.addAction(QIcon(":/Icon/process_details.svg"), QStringLiteral("转到进程详细信息"));
+    ks::online_scan::addVirusTotalSandboxMenu(
+        &menu,
+        this,
+        [this, row]() -> ks::online_scan::SandboxUploadTarget {
+            // 输入：ETW 事件表当前右键行。
+            // 处理：从 PID/TID 列解析 PID，并查询该进程 EXE 路径。
+            // 返回：VT 上传目标；解析失败时由统一 helper 显示错误。
+            QTableWidgetItem* pidItem = m_etwEventTable != nullptr
+                ? m_etwEventTable->item(row, 4)
+                : nullptr;
+            std::uint32_t pidValue = 0;
+            if (pidItem == nullptr || !ks::online_scan::tryParsePidFromText(pidItem->text(), &pidValue))
+            {
+                return {
+                    QString(),
+                    QStringLiteral("ETW 事件"),
+                    QStringLiteral("当前 ETW 事件行未解析出有效 PID，无法上传发起进程文件。")
+                };
+            }
+
+            const QString processPath = QString::fromStdString(ks::process::QueryProcessPathByPid(pidValue)).trimmed();
+            if (processPath.isEmpty())
+            {
+                return {
+                    QString(),
+                    QStringLiteral("ETW 事件 PID=%1").arg(pidValue),
+                    QStringLiteral("无法解析 PID=%1 的进程镜像路径。进程可能已退出，或当前权限不足。").arg(pidValue)
+                };
+            }
+
+            return {
+                processPath,
+                QStringLiteral("ETW 事件 PID=%1").arg(pidValue),
+                QString()
+            };
+        });
 
     QAction* action = menu.exec(m_etwEventTable->viewport()->mapToGlobal(position));
     if (action == nullptr)

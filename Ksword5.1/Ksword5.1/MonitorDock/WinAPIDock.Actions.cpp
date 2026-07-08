@@ -1,4 +1,5 @@
 #include "WinAPIDock.h"
+#include "../OnlineScan/SandboxUploadActions.h"
 #include "../theme.h"
 
 // ============================================================
@@ -1419,6 +1420,43 @@ void WinAPIDock::showEventContextMenu(const QPoint& position)
     menu.setStyleSheet(KswordTheme::ContextMenuStyle());
     QAction* copyCellAction = menu.addAction(QStringLiteral("复制单元格"));
     QAction* copyRowAction = menu.addAction(QStringLiteral("复制整行"));
+    menu.addSeparator();
+    ks::online_scan::addVirusTotalSandboxMenu(
+        &menu,
+        this,
+        [this, row]() -> ks::online_scan::SandboxUploadTarget {
+            // 输入：WinAPI 监控事件表当前右键行。
+            // 处理：从 PID/TID 列解析进程 PID，再解析进程镜像路径。
+            // 返回：VT 上传目标；解析失败时返回 errorText 交给统一 helper 弹窗。
+            QTableWidgetItem* pidItem = m_eventTable != nullptr
+                ? m_eventTable->item(row, EventColumnPidTid)
+                : nullptr;
+            std::uint32_t pidValue = 0;
+            if (pidItem == nullptr || !ks::online_scan::tryParsePidFromText(pidItem->text(), &pidValue))
+            {
+                return {
+                    QString(),
+                    QStringLiteral("WinAPI 监控事件"),
+                    QStringLiteral("当前事件行未解析出有效 PID，无法上传发起进程文件。")
+                };
+            }
+
+            const QString processPath = QString::fromStdString(ks::process::QueryProcessPathByPid(pidValue)).trimmed();
+            if (processPath.isEmpty())
+            {
+                return {
+                    QString(),
+                    QStringLiteral("WinAPI 监控事件 PID=%1").arg(pidValue),
+                    QStringLiteral("无法解析 PID=%1 的进程镜像路径。进程可能已退出，或当前权限不足。").arg(pidValue)
+                };
+            }
+
+            return {
+                processPath,
+                QStringLiteral("WinAPI 监控事件 PID=%1").arg(pidValue),
+                QString()
+            };
+        });
 
     QAction* selectedAction = menu.exec(m_eventTable->viewport()->mapToGlobal(position));
     if (selectedAction == nullptr)

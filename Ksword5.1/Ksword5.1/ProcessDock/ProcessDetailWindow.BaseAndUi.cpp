@@ -1201,7 +1201,33 @@ void ProcessDetailWindow::initializeThreadTab()
             QIcon(QStringLiteral(":/Icon/process_copy_row.svg")),
             QStringLiteral("复制当前行"));
         copyRowAction->setEnabled(m_threadInspectTable->currentRow() >= 0);
-        if (menu.exec(m_threadInspectTable->viewport()->mapToGlobal(localPosition)) != copyRowAction)
+        menu.addSeparator();
+        QAction* uploadVirusTotalAction = ks::online_scan::addVirusTotalSandboxMenu(
+            &menu,
+            this,
+            [this]() -> ks::online_scan::SandboxUploadTarget
+            {
+                // 输入：线程表当前行。
+                // 处理：解析线程所属模块路径，不回退到进程 EXE。
+                // 返回：待上传模块路径和来源说明。
+                ks::online_scan::SandboxUploadTarget uploadTarget;
+                QString errorText;
+                uploadTarget.filePath = resolveSelectedThreadModulePathForUpload(&errorText);
+                uploadTarget.sourceText = QStringLiteral("进程详情线程模块 PID=%1").arg(m_baseRecord.pid);
+                uploadTarget.errorText = errorText;
+                return uploadTarget;
+            });
+        if (uploadVirusTotalAction != nullptr)
+        {
+            uploadVirusTotalAction->setEnabled(m_threadInspectTable->currentRow() >= 0);
+        }
+
+        QAction* selectedAction = menu.exec(m_threadInspectTable->viewport()->mapToGlobal(localPosition));
+        if (selectedAction == uploadVirusTotalAction)
+        {
+            return;
+        }
+        if (selectedAction != copyRowAction)
         {
             return;
         }

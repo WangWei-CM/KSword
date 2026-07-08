@@ -1,4 +1,5 @@
 #include "DriverDock.Internal.h"
+#include "../OnlineScan/SandboxUploadActions.h"
 
 // 说明：由原聚合式实现迁移为独立 .cpp，成员函数实现保持原样。
 using namespace ksword::driver_dock_internal;
@@ -572,6 +573,34 @@ void DriverDock::showModuleTableContextMenu(const QPoint& localPosition)
     QAction* copyRowAction = contextMenu.addAction(
         QIcon(":/Icon/process_copy_row.svg"),
         QStringLiteral("复制当前行"));
+    QAction* uploadVirusTotalAction = ks::online_scan::addVirusTotalSandboxMenu(
+        &contextMenu,
+        this,
+        [this]() -> ks::online_scan::SandboxUploadTarget
+        {
+            // 输入：DriverDock 已加载模块表当前行。
+            // 处理：读取路径列并规范化 \SystemRoot/\Device 等内核路径。
+            // 返回：待上传驱动文件路径和来源说明。
+            ks::online_scan::SandboxUploadTarget uploadTarget;
+            const int rowIndex = m_moduleTable != nullptr ? m_moduleTable->currentRow() : -1;
+            const QTableWidgetItem* pathItem =
+                (m_moduleTable != nullptr && rowIndex >= 0) ? m_moduleTable->item(rowIndex, 8) : nullptr;
+            const QTableWidgetItem* nameItem =
+                (m_moduleTable != nullptr && rowIndex >= 0) ? m_moduleTable->item(rowIndex, 0) : nullptr;
+            if (pathItem == nullptr)
+            {
+                uploadTarget.errorText = QStringLiteral("当前模块行没有可用路径。");
+                return uploadTarget;
+            }
+            uploadTarget.filePath = ks::online_scan::normalizeKernelImagePathForUpload(pathItem->text());
+            uploadTarget.sourceText = QStringLiteral("驱动模块 %1")
+                .arg(nameItem != nullptr ? nameItem->text() : QStringLiteral("<未知模块>"));
+            return uploadTarget;
+        });
+    if (uploadVirusTotalAction != nullptr)
+    {
+        uploadVirusTotalAction->setEnabled(!selectedRows.isEmpty());
+    }
     contextMenu.addSeparator();
     QAction* forceCleanupByBaseAction = contextMenu.addAction(
         QIcon(":/Icon/process_uncritical.svg"),
@@ -602,6 +631,10 @@ void DriverDock::showModuleTableContextMenu(const QPoint& localPosition)
     if (selectedAction == copyRowAction)
     {
         copyDriverOperationCurrentRow(m_moduleTable);
+        return;
+    }
+    if (selectedAction == uploadVirusTotalAction)
+    {
         return;
     }
     if (selectedAction == forceCleanupByBaseAction)

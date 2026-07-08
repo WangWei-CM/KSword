@@ -1,5 +1,6 @@
 #include "NetworkDock.InternalCommon.h"
 
+#include "../OnlineScan/SandboxUploadActions.h"
 #include "../theme.h"
 
 #include <QApplication>
@@ -213,11 +214,41 @@ void NetworkDock::initializeNidsTab()
         QAction* copyCellAction = menu.addAction(QIcon(QStringLiteral(":/Icon/log_copy.svg")), QStringLiteral("复制单元格"));
         QAction* copyRowAction = menu.addAction(QIcon(QStringLiteral(":/Icon/process_copy_row.svg")), QStringLiteral("复制当前行"));
         QAction* copySelectedRowsAction = menu.addAction(QIcon(QStringLiteral(":/Icon/log_clipboard.svg")), QStringLiteral("复制选中行"));
+        menu.addSeparator();
+        QAction* uploadVirusTotalAction = ks::online_scan::addVirusTotalSandboxMenu(
+            &menu,
+            this,
+            [this]() -> ks::online_scan::SandboxUploadTarget
+            {
+                // 输入：NIDS 告警表当前行。
+                // 处理：读取 PID 列并解析发起进程 EXE 路径。
+                // 返回：待上传路径和来源说明；PID 缺失或进程已退出时返回 errorText。
+                ks::online_scan::SandboxUploadTarget uploadTarget;
+                const int rowIndex = m_nidsAlertTable != nullptr ? m_nidsAlertTable->currentRow() : -1;
+                const QTableWidgetItem* pidItem =
+                    (m_nidsAlertTable != nullptr && rowIndex >= 0)
+                    ? m_nidsAlertTable->item(rowIndex, toNidsAlertColumn(NidsAlertTableColumn::Pid))
+                    : nullptr;
+                std::uint32_t targetPid = 0;
+                if (pidItem == nullptr || !ks::online_scan::tryParsePidFromText(pidItem->text(), &targetPid))
+                {
+                    uploadTarget.errorText = QStringLiteral("当前 NIDS 告警没有可解析 PID。");
+                    return uploadTarget;
+                }
+
+                uploadTarget.filePath = QString::fromStdString(ks::process::QueryProcessPathByPid(targetPid));
+                uploadTarget.sourceText = QStringLiteral("NIDS 告警 PID=%1").arg(targetPid);
+                return uploadTarget;
+            });
         const bool hasCurrentCell = m_nidsAlertTable->currentRow() >= 0 && m_nidsAlertTable->currentColumn() >= 0;
         const bool hasCurrentRow = m_nidsAlertTable->currentRow() >= 0;
         copyCellAction->setEnabled(hasCurrentCell);
         copyRowAction->setEnabled(hasCurrentRow);
         copySelectedRowsAction->setEnabled(!nidsSelectedRows(m_nidsAlertTable).empty());
+        if (uploadVirusTotalAction != nullptr)
+        {
+            uploadVirusTotalAction->setEnabled(hasCurrentRow);
+        }
 
         const QAction* selectedAction = menu.exec(m_nidsAlertTable->viewport()->mapToGlobal(localPosition));
         if (selectedAction == copyCellAction)
@@ -237,6 +268,10 @@ void NetworkDock::initializeNidsTab()
         else if (selectedAction == copySelectedRowsAction)
         {
             copyNidsRowsToClipboard(m_nidsAlertTable, nidsSelectedRows(m_nidsAlertTable));
+        }
+        else if (selectedAction == uploadVirusTotalAction)
+        {
+            return;
         }
     });
 
