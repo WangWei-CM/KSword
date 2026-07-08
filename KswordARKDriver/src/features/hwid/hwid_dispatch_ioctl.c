@@ -506,11 +506,6 @@ KswordARKHwidIoctlControlDispatch(
         return STATUS_INVALID_DEVICE_STATE;
     }
 
-    status = KswordARKValidateDeviceIoControlWriteAccess(Request);
-    if (!NT_SUCCESS(status)) {
-        return status;
-    }
-
     status = KswordARKRetrieveRequiredInputBuffer(Request, sizeof(*controlRequest), (PVOID*)&controlRequest, NULL);
     if (!NT_SUCCESS(status)) {
         return status;
