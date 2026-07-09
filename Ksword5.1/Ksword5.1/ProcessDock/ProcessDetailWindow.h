@@ -30,10 +30,12 @@ class QFormLayout;
 class QHBoxLayout;
 class QLabel;
 class QLineEdit;
+class QMenu;
 class QPlainTextEdit;
 class QPushButton;
 class QTabWidget;
 class QTableWidget;
+class QToolButton;
 class QTreeWidget;
 class QTreeWidgetItem;
 class QVBoxLayout;
@@ -255,6 +257,10 @@ private:
     // 参数：无。
     // 返回：无。
     void initializeKeyboardTab();
+    // initializePluginTab 作用：
+    // - 构建当前进程的独立插件入口；
+    // - 菜单直接扫描 plugin\<id>\plugin.json 动态重建，详情窗口不加载插件代码。
+    void initializePluginTab();
     // initializeTokenSwitchTab 作用：
     // - 构建“令牌开关”页面；
     // - 提供复选框批量控制 Token 开关位，并提供刷新/应用按钮。
@@ -517,7 +523,12 @@ private:
     QWidget* m_kernelObjectTab = nullptr;      // “Process Detail Evidence”页。
     QWidget* m_hotkeyTab = nullptr;            // “进程热键”页。
     QWidget* m_keyboardTab = nullptr;          // “键盘”页。
+    QWidget* m_pluginTab = nullptr;            // “插件”页。
     QWidget* m_pebTab = nullptr;               // “PEB”页。
+
+    // ======== 插件页控件 ========
+    QToolButton* m_pluginTargetMenuButton = nullptr; // 当前进程的“插件 → <插件名>”入口。
+    QMenu* m_pluginTargetMenu = nullptr;             // 由本地 plugin.json 动态重建。
 
     // ======== 详细信息页控件 ========
     QVBoxLayout* m_detailLayout = nullptr;     // 详细页总布局。

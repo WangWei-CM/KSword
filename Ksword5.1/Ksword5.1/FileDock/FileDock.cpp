@@ -14,6 +14,7 @@
 #include "../UI/HexEditorWidget.h"
 #include "../UI/TableColumnAutoFit.h"
 #include "../ArkDriverClient/ArkDriverClient.h"
+#include "../PluginHost.h"
 #include "../ksword/file/file_handle_tools.h"
 #include "../ksword/file/file.h"
 
@@ -68,6 +69,7 @@
 #include <QStandardItemModel>
 #include <QStatusBar>
 #include <QStorageInfo>
+#include <QStringList>
 #include <QStackedWidget>
 #include <QTabWidget>
 #include <QTableWidget>
@@ -6415,6 +6417,7 @@ bool FileDock::requestFileOplock(FileOplockEntry& entry, unsigned long& requestE
         entry.rearmWarningReported.store(false);
         return true;
     }
+
     return false;
 }
 
@@ -8954,9 +8957,14 @@ void FileDock::showPanelContextMenu(FilePanelWidgets& panel, const QPoint& local
     QAction* hexAction = menu.addAction(QIcon(":/Icon/process_details.svg"), QStringLiteral("十六进制查看"));
     QAction* peAction = menu.addAction(QIcon(":/Icon/process_list.svg"), QStringLiteral("在PE查看器中打开"));
     QAction* mappedProcessScanAction = menu.addAction(QIcon(":/Icon/process_tree.svg"), QStringLiteral("扫描映射进程(R0)"));
+    QMenu* pluginMenu = menu.addMenu(QIcon(":/Icon/process_start.svg"), QStringLiteral("插件"));
 
     // 结合选中集合动态启用菜单项，保证“多选”和“右键动作”行为一致。
     const bool singleFileOnly = isSingleSelection && QFileInfo(firstPath).isFile();
+    ks::plugin_host::InvocationContext pluginContext;
+    pluginContext.targetKind = ks::plugin_host::TargetKind::File;
+    pluginContext.filePath = firstPath;
+    ks::plugin_host::populateTargetMenu(pluginMenu, this, pluginContext);
     const bool firstPathHasOplock = singleFileOnly && hasActiveOplockForPath(firstPath);
     const std::uint64_t firstPathOplockBreakCount = firstPathHasOplock
         ? activeOplockBreakCountForPath(firstPath)
@@ -9002,6 +9010,7 @@ void FileDock::showPanelContextMenu(FilePanelWidgets& panel, const QPoint& local
     hexAction->setEnabled(singleFileOnly);
     peAction->setEnabled(singleFileOnly);
     mappedProcessScanAction->setEnabled(hasAnyFile);
+    pluginMenu->setEnabled(singleFileOnly);
 
     QAction* selectedAction = menu.exec(panel.fileView->viewport()->mapToGlobal(localPos));
     if (selectedAction == nullptr)

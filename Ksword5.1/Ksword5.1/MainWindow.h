@@ -260,7 +260,7 @@ private:
     QString buildTopActionButtonStyle() const;
 
     // refreshTopActionButtonStyles 作用：
-    // - 根据当前主题刷新“检查更新/许可证/退出/设置”四个顶部功能按钮；
+    // - 根据当前主题刷新“检查更新/许可证/退出/插件/设置”顶部功能按钮；
     // - 解决深色模式切换后旧浅色样式残留的问题。
     void refreshTopActionButtonStyles();
 
@@ -498,6 +498,7 @@ private:
     QToolButton* m_updateMenuButton = nullptr;   // m_updateMenuButton：功能条左侧“检查更新”按钮。
     QToolButton* m_licenseMenuButton = nullptr;  // m_licenseMenuButton：功能条左侧“许可证”按钮。
     QToolButton* m_exitMenuButton = nullptr;     // m_exitMenuButton：功能条左侧“退出”按钮。
+    QToolButton* m_pluginMenuButton = nullptr;   // m_pluginMenuButton：功能条左侧“插件管理”入口按钮。
     QToolButton* m_settingsMenuButton = nullptr; // m_settingsMenuButton：功能条左侧“设置”入口按钮。
     QPushButton* m_uiAccessStatusButton = nullptr; // m_uiAccessStatusButton：触发 UIAccess fallback 或降级回普通实例的入口。
     QPushButton* m_adminStatusButton = nullptr;

@@ -66,6 +66,7 @@
 #include "include/ads/FloatingDockContainer.h"
 #include "ArkDriverClient/ArkDriverClient.h"
 #include "KernelDock/KernelDock.CallbackPromptManager.h"
+#include "PluginHost.h"
 #include "UI/CodeEditorWidget.h"
 #include "UI/GlobalDialogTheme.h"
 #include "UI/ThemedMessageBox.h"
@@ -4652,6 +4653,17 @@ void MainWindow::initMenus()
     m_exitMenuButton->setShortcut(QKeySequence(QStringLiteral("Ctrl+Q")));
     connect(m_exitMenuButton, &QToolButton::clicked, this, &MainWindow::close);
 
+    m_pluginMenuButton = new QToolButton(m_topActionRowWidget);
+    m_pluginMenuButton->setObjectName(QStringLiteral("ksPluginMenuButton"));
+    m_pluginMenuButton->setText(QStringLiteral("插件管理"));
+    m_pluginMenuButton->setToolTip(QStringLiteral("打开插件管理；Ksword 直接以独立进程调用插件入口"));
+    m_pluginMenuButton->setToolButtonStyle(Qt::ToolButtonTextOnly);
+    m_pluginMenuButton->setAutoRaise(true);
+    m_pluginMenuButton->setFixedHeight(22);
+    connect(m_pluginMenuButton, &QToolButton::clicked, this, [this]() {
+        ks::plugin_host::showPluginManager(this);
+    });
+
     m_settingsMenuButton = new QToolButton(m_topActionRowWidget);
     m_settingsMenuButton->setObjectName(QStringLiteral("ksSettingsMenuButton"));
     m_settingsMenuButton->setText(QStringLiteral("设置"));
@@ -4668,6 +4680,7 @@ void MainWindow::initMenus()
     m_topActionRowLayout->addWidget(m_updateMenuButton, 0, Qt::AlignLeft | Qt::AlignVCenter);
     m_topActionRowLayout->addWidget(m_licenseMenuButton, 0, Qt::AlignLeft | Qt::AlignVCenter);
     m_topActionRowLayout->addWidget(m_exitMenuButton, 0, Qt::AlignLeft | Qt::AlignVCenter);
+    m_topActionRowLayout->addWidget(m_pluginMenuButton, 0, Qt::AlignLeft | Qt::AlignVCenter);
     m_topActionRowLayout->addWidget(m_settingsMenuButton, 0, Qt::AlignLeft | Qt::AlignVCenter);
     m_topActionRowLayout->addStretch(1);
 
@@ -4736,6 +4749,7 @@ void MainWindow::refreshTopActionButtonStyles()
         m_updateMenuButton,
         m_licenseMenuButton,
         m_exitMenuButton,
+        m_pluginMenuButton,
         m_settingsMenuButton
     };
     for (QToolButton* button : topActionButtonList)

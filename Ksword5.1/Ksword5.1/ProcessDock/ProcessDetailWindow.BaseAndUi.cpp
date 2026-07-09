@@ -1,4 +1,5 @@
 #include "ProcessDetailWindow.InternalCommon.h"
+#include "../PluginHost.h"
 
 using namespace process_detail_window_internal;
 
@@ -461,6 +462,7 @@ void ProcessDetailWindow::applyThemeStyle()
         m_kernelObjectTab,
         m_hotkeyTab,
         m_keyboardTab,
+        m_pluginTab,
         m_pebTab
     };
     for (QWidget* tabPage : tabPageList)
@@ -590,6 +592,7 @@ void ProcessDetailWindow::initializeUi()
     m_kernelObjectTab = new QWidget(m_tabWidget);
     m_hotkeyTab = new QWidget(m_tabWidget);
     m_keyboardTab = new QWidget(m_tabWidget);
+    m_pluginTab = new QWidget(m_tabWidget);
     m_pebTab = new QWidget(m_tabWidget);
 
     m_detailTab->setObjectName(QStringLiteral("ProcessDetailTab_Detail"));
@@ -601,6 +604,7 @@ void ProcessDetailWindow::initializeUi()
     m_kernelObjectTab->setObjectName(QStringLiteral("ProcessDetailTab_ProcessDetailEvidence"));
     m_hotkeyTab->setObjectName(QStringLiteral("ProcessDetailTab_Hotkey"));
     m_keyboardTab->setObjectName(QStringLiteral("ProcessDetailTab_Keyboard"));
+    m_pluginTab->setObjectName(QStringLiteral("ProcessDetailTab_Plugin"));
     m_pebTab->setObjectName(QStringLiteral("ProcessDetailTab_Peb"));
 
     initializeDetailTab();
@@ -612,6 +616,7 @@ void ProcessDetailWindow::initializeUi()
     initializeKernelObjectTab();
     initializeHotkeyTab();
     initializeKeyboardTab();
+    initializePluginTab();
     initializePebTab();
 
     // 为 Tab 指定图标与标题文本。
@@ -624,6 +629,7 @@ void ProcessDetailWindow::initializeUi()
     m_tabWidget->addTab(m_kernelObjectTab, QIcon(":/Icon/process_critical.svg"), "Process Detail Evidence");
     m_tabWidget->addTab(m_hotkeyTab, QIcon(":/Icon/process_hotkey.svg"), "进程热键");
     m_tabWidget->addTab(m_keyboardTab, QIcon(":/Icon/process_hotkey.svg"), "键盘");
+    m_tabWidget->addTab(m_pluginTab, QIcon(":/Icon/process_start.svg"), "插件");
     m_tabWidget->addTab(m_pebTab, QIcon(":/Icon/process_tree.svg"), "PEB");
     m_tabWidget->setCurrentWidget(m_detailTab);
 
@@ -631,6 +637,60 @@ void ProcessDetailWindow::initializeUi()
     applyThemeStyle();
 
     updateWindowTitle();
+}
+
+void ProcessDetailWindow::initializePluginTab()
+{
+    // 插件页只提供“进程上下文 -> 独立插件进程”这一条链路：
+    // - 只读取 plugin.json 的宿主清单字段；
+    // - 不把 Python、DLL 或模型载入详情窗口；
+    // - 每次展开菜单时由 Ksword 重新发现兼容插件，避免缓存过期。
+    auto* layout = new QVBoxLayout(m_pluginTab);
+    layout->setContentsMargins(14, 14, 14, 14);
+    layout->setSpacing(10);
+
+    auto* titleLabel = new QLabel(QStringLiteral("进程插件"), m_pluginTab);
+    titleLabel->setStyleSheet(QStringLiteral("font-size:16px; font-weight:700; color:%1;")
+        .arg(KswordTheme::TextPrimaryHex()));
+    layout->addWidget(titleLabel);
+
+    auto* descriptionLabel = new QLabel(
+        QStringLiteral("选择插件后，Ksword 直接启动独立插件入口，并传递当前 PID、进程名和映像路径。"),
+        m_pluginTab);
+    descriptionLabel->setWordWrap(true);
+    descriptionLabel->setStyleSheet(QStringLiteral("color:%1;").arg(KswordTheme::TextSecondaryHex()));
+    layout->addWidget(descriptionLabel);
+
+    auto* actionLayout = new QHBoxLayout();
+    m_pluginTargetMenuButton = new QToolButton(m_pluginTab);
+    m_pluginTargetMenuButton->setText(QStringLiteral("插件"));
+    m_pluginTargetMenuButton->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+    m_pluginTargetMenuButton->setPopupMode(QToolButton::InstantPopup);
+    m_pluginTargetMenuButton->setIcon(QIcon(":/Icon/process_start.svg"));
+    m_pluginTargetMenuButton->setStyleSheet(buildBlueButtonStyle());
+    m_pluginTargetMenu = new QMenu(m_pluginTargetMenuButton);
+    m_pluginTargetMenuButton->setMenu(m_pluginTargetMenu);
+    actionLayout->addWidget(m_pluginTargetMenuButton);
+
+    auto* managerButton = new QPushButton(QStringLiteral("插件管理"), m_pluginTab);
+    managerButton->setStyleSheet(buildBlueButtonStyle());
+    actionLayout->addWidget(managerButton);
+    actionLayout->addStretch(1);
+    layout->addLayout(actionLayout);
+    layout->addStretch(1);
+
+    connect(m_pluginTargetMenu, &QMenu::aboutToShow, this, [this]() {
+        ks::plugin_host::InvocationContext context;
+        context.targetKind = ks::plugin_host::TargetKind::Process;
+        context.processId = m_baseRecord.pid;
+        context.processName = QString::fromStdString(m_baseRecord.processName);
+        context.filePath = QString::fromStdString(
+            m_baseRecord.imagePath.empty() ? m_baseRecord.r0ImagePath : m_baseRecord.imagePath);
+        ks::plugin_host::populateTargetMenu(m_pluginTargetMenu, this, context);
+    });
+    connect(managerButton, &QPushButton::clicked, this, [this]() {
+        ks::plugin_host::showPluginManager(this);
+    });
 }
 
 void ProcessDetailWindow::showActionTab()

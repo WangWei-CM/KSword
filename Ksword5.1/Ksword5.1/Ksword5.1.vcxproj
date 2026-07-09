@@ -281,6 +281,7 @@
     <ClCompile Include="ProcessDock\ProcessDetailWindow.ActionAndUtil.cpp" />
     <ClCompile Include="ProcessDock\ProcessDetailWindow.ExtendedActions.cpp" />
     <ClCompile Include="ProcessDock\ProcessDetailWindow.AdvancedInfo.cpp" />
+    <ClCompile Include="PluginHost.cpp" />
     <ClCompile Include="ProcessDock\ProcessDock.cpp" />
     <ClCompile Include="ProcessDock\ProcessDock.CrossView.cpp" />
     <ClCompile Include="ProcessDock\ProcessDock.ThreadTab.cpp" />
@@ -372,6 +373,7 @@
   <ItemGroup>
     <ClInclude Include="Framework.h" />
     <ClInclude Include="Ksword.h" />
+    <ClInclude Include="PluginHost.h" />
     <ClInclude Include="FileDock\ManualFileSystemParser.h" />
     <ClInclude Include="FileDock\FileHandleUsageScanner.h" />
     <ClInclude Include="FileDock\FileHandleUsageWindow.h" />
