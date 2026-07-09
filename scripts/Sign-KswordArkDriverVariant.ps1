@@ -5,8 +5,10 @@
 .DESCRIPTION
     The driver build leaves an unsigned KswordARK.sys at the MSBuild target
     path.  This script signs that file in-place with .cert\CSignTool.exe first,
-    then uses .cert\AuthenticodeVariantGUI.exe to generate the final
-    Authenticode variant.  The final file replaces the original driver path.
+    immediately runs CSignTool a second time with /ac to add the Microsoft
+    kernel-mode cross-certificate, then uses .cert\AuthenticodeVariantGUI.exe to
+    generate the final Authenticode variant.  The final file replaces the
+    original driver path.
 
     The script intentionally keeps all repository-relative tool paths anchored
     to the repository root, so Visual Studio/MSBuild can call it from any current
@@ -244,8 +246,10 @@ function Invoke-LegacyDriverTestSign {
 
 # Invoke-KswordDriverVariantSign:
 # - Inputs: the generated driver path and optional signtool override.
-# - Processing: runs CSignTool, then AuthenticodeVariantGUI into a temporary output,
-#   then atomically replaces the original driver file with the generated variant.
+# - Processing: runs CSignTool once to write the embedded signature, runs
+#   CSignTool again with /ac to add the driver cross-certificate to the existing
+#   signature, then runs AuthenticodeVariantGUI into a temporary output and
+#   atomically replaces the original driver file with the generated variant.
 #   If any variant-signing step fails, restores the pre-signing file and falls
 #   back to scripts\Sign-KswordArkDriverTest.ps1 -NonFatal.
 # - Returns: no value; final driver path contains either the Authenticode variant or the legacy test signature.
@@ -293,6 +297,19 @@ function Invoke-KswordDriverVariantSign {
             -Arguments @('sign', '/r', '1', '/f', $driver) `
             -WorkingDirectory $certificateDirectory
         Write-SignatureSummary -Label 'After CSignTool' -Path $driver
+
+        # CSignTool /ac:
+        # - Inputs: the driver path after the first CSignTool signing pass.
+        # - Processing: appends the Microsoft Code Verification Root cross-certificate
+        #   used by legacy kernel-mode driver signing.  Direct /ac on an unsigned file
+        #   has been observed to hang and leave the file unsigned, so keep this as a
+        #   strict second pass after the ordinary embedded signature exists.
+        # - Returns: no script value; the driver is modified in place.
+        Invoke-NativeTool `
+            -FilePath $csignTool `
+            -Arguments @('sign', '/r', '1', '/f', $driver, '/ac') `
+            -WorkingDirectory $certificateDirectory
+        Write-SignatureSummary -Label 'After CSignTool /ac' -Path $driver
 
         Invoke-NativeTool `
             -FilePath $authVariantTool `
