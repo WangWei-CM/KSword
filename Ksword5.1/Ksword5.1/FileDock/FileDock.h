@@ -139,9 +139,16 @@ private:
         QString manualParsingPath;             // 当前后台解析正在处理的路径（用于避免同路径重复解析）。
     };
 
+    struct FileOplockAccessRecord;
     struct FileOplockEntry;
+    enum class FileOplockLevel
+    {
+        Level1,
+        Level2,
+        Batch,
+        Filter
+    };
 
-private:
     // ======================= UI 初始化 ========================
     // initializeUi：
     // - 作用：构建双栏分割布局并初始化左右面板。
@@ -308,27 +315,58 @@ private:
     void unlockSelectedItemsByDriver(FilePanelWidgets& panel);
 
     // addOplockToSelectedFile：
-    // - 作用：对当前单选文件请求并保持一个 R3 Oplock；
+    // - 作用：按指定级别对当前单选文件请求并保持一个 R3 Oplock；
     // - 说明：Oplock 生命周期由 FileDock 维护，直到被触发、手动释放或 FileDock 析构。
-    void addOplockToSelectedFile(FilePanelWidgets& panel);
+    void addOplockToSelectedFile(FilePanelWidgets& panel, FileOplockLevel level);
 
     // releaseSelectedFileOplock：
     // - 作用：释放当前单选文件上由 FileDock 持有的 Oplock。
     void releaseSelectedFileOplock(FilePanelWidgets& panel);
+
+    // showSelectedFileOplockAccessRecords：
+    // - 作用：展示当前单选文件 Oplock 已捕获的访问进程记录。
+    void showSelectedFileOplockAccessRecords(FilePanelWidgets& panel);
 
     // releaseAllActiveOplocks：
     // - 作用：释放 FileDock 当前持有的全部 Oplock。
     // - 参数 showMessage：为 true 时向用户显示释放数量。
     void releaseAllActiveOplocks(bool showMessage);
 
-    // hasActiveOplockForPath / activeOplockCount：
-    // - 作用：查询当前 Oplock 持有状态，用于右键菜单启停。
+    // hasActiveOplockForPath / activeOplockCount / activeOplockBreakCountForPath / activeOplockAccessProcessCountForPath：
+    // - 作用：查询当前 Oplock 持有和触发计数状态，用于右键菜单启停与展示。
     bool hasActiveOplockForPath(const QString& filePath) const;
     std::size_t activeOplockCount() const;
+    std::uint64_t activeOplockBreakCountForPath(const QString& filePath) const;
+    std::size_t activeOplockAccessProcessCountForPath(const QString& filePath) const;
 
     // handleOplockCompleted：
-    // - 作用：后台等待线程通知 UI：Oplock 已 break、被取消或失败。
-    void handleOplockCompleted(std::shared_ptr<FileOplockEntry> entry, bool completionOk, unsigned long completionError);
+    // - 作用：后台等待线程通知 UI：Oplock 已被访问触发并累计次数。
+    void handleOplockCompleted(
+        std::shared_ptr<FileOplockEntry> entry,
+        bool completionOk,
+        unsigned long completionError,
+        bool acknowledgeOk,
+        unsigned long acknowledgeError,
+        std::size_t capturedProcessCount);
+
+    // handleOplockRearmPending：
+    // - 作用：后台等待线程通知 UI：触发后重新挂起同级别 Oplock 暂时失败，线程会继续重试。
+    void handleOplockRearmPending(std::shared_ptr<FileOplockEntry> entry, unsigned long requestError);
+
+    // fileOplockLevelText / fileOplockControlCode：
+    // - 作用：把菜单选择映射到用户可见名称和 Windows FSCTL 请求码。
+    static QString fileOplockLevelText(FileOplockLevel level);
+    static unsigned long fileOplockControlCode(FileOplockLevel level);
+
+    // requestFileOplock / acknowledgeFileOplockBreak / cancelFileOplockRequest：
+    // - 作用：封装 Oplock 异步请求、break ACK 与手动取消，保证计数模式下只在手动释放时关闭句柄。
+    static bool requestFileOplock(FileOplockEntry& entry, unsigned long& requestError);
+    static bool acknowledgeFileOplockBreak(FileOplockEntry& entry, unsigned long& acknowledgeError);
+    static void cancelFileOplockRequest(FileOplockEntry& entry);
+
+    // recordFileOplockAccessPrograms：
+    // - 作用：Oplock 被触发后扫描并记录当前访问目标文件的进程候选。
+    static std::size_t recordFileOplockAccessPrograms(FileOplockEntry& entry, std::uint64_t breakSequence);
 
     // unlockPathsByDriver：
     // - 作用：执行“文件解锁器”核心流程（扫描占用 + 用户选择 + R3/R0 结束进程）；

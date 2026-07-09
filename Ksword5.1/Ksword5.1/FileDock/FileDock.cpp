@@ -6294,14 +6294,41 @@ namespace
     };
 }
 
+struct FileDock::FileOplockAccessRecord
+{
+    std::uint32_t processId = 0U;
+    QString processName;
+    QString processImagePath;
+    std::uint64_t hitCount = 0U;
+    std::uint64_t handleHitCount = 0U;
+    std::uint64_t firstBreakSequence = 0U;
+    std::uint64_t lastBreakSequence = 0U;
+    std::uint64_t lastHandleValue = 0U;
+    std::uint32_t lastGrantedAccess = 0U;
+    QString firstSeenText;
+    QString lastSeenText;
+    QStringList matchedTargetList;
+    QStringList matchRuleList;
+    QStringList enumerationSourceList;
+    QStringList objectNameList;
+};
+
 struct FileDock::FileOplockEntry
 {
     QString path;
+    FileOplockLevel level = FileOplockLevel::Level1;
     HANDLE fileHandle = INVALID_HANDLE_VALUE;
     HANDLE eventHandle = nullptr;
     OVERLAPPED overlapped{};
     std::thread waitThread;
+    std::mutex ioMutex;
+    std::mutex accessRecordMutex;
+    std::vector<FileOplockAccessRecord> accessRecords;
+    QString lastAccessScanDiagnostic;
+    std::uint64_t uncapturedBreakCount = 0U;
     std::atomic_bool releaseRequested{ false };
+    std::atomic_bool rearmWarningReported{ false };
+    std::atomic<std::uint64_t> breakCount{ 0 };
 
     ~FileOplockEntry()
     {
@@ -6309,6 +6336,273 @@ struct FileDock::FileOplockEntry
         closeWin32Handle(eventHandle);
     }
 };
+
+QString FileDock::fileOplockLevelText(const FileOplockLevel level)
+{
+    switch (level)
+    {
+    case FileOplockLevel::Level1:
+        return QStringLiteral("Level 1");
+    case FileOplockLevel::Level2:
+        return QStringLiteral("Level 2");
+    case FileOplockLevel::Batch:
+        return QStringLiteral("Batch");
+    case FileOplockLevel::Filter:
+        return QStringLiteral("Filter");
+    }
+    return QStringLiteral("Level 1");
+}
+
+unsigned long FileDock::fileOplockControlCode(const FileOplockLevel level)
+{
+    switch (level)
+    {
+    case FileOplockLevel::Level1:
+        return FSCTL_REQUEST_OPLOCK_LEVEL_1;
+    case FileOplockLevel::Level2:
+        return FSCTL_REQUEST_OPLOCK_LEVEL_2;
+    case FileOplockLevel::Batch:
+        return FSCTL_REQUEST_BATCH_OPLOCK;
+    case FileOplockLevel::Filter:
+        return FSCTL_REQUEST_FILTER_OPLOCK;
+    }
+    return FSCTL_REQUEST_OPLOCK_LEVEL_1;
+}
+
+bool FileDock::requestFileOplock(FileOplockEntry& entry, unsigned long& requestError)
+{
+    requestError = ERROR_SUCCESS;
+    if (entry.releaseRequested.load())
+    {
+        requestError = ERROR_OPERATION_ABORTED;
+        return false;
+    }
+
+    std::lock_guard<std::mutex> lock(entry.ioMutex);
+    if (entry.releaseRequested.load())
+    {
+        requestError = ERROR_OPERATION_ABORTED;
+        return false;
+    }
+    if (entry.fileHandle == nullptr ||
+        entry.fileHandle == INVALID_HANDLE_VALUE ||
+        entry.eventHandle == nullptr)
+    {
+        requestError = ERROR_INVALID_HANDLE;
+        return false;
+    }
+
+    (void)::ResetEvent(entry.eventHandle);
+    entry.overlapped = OVERLAPPED{};
+    entry.overlapped.hEvent = entry.eventHandle;
+
+    const BOOL requestOk = ::DeviceIoControl(
+        entry.fileHandle,
+        static_cast<DWORD>(fileOplockControlCode(entry.level)),
+        nullptr,
+        0,
+        nullptr,
+        0,
+        nullptr,
+        &entry.overlapped);
+    requestError = requestOk ? ERROR_SUCCESS : ::GetLastError();
+    if (requestOk != FALSE)
+    {
+        return false;
+    }
+    if (requestError == ERROR_IO_PENDING)
+    {
+        entry.rearmWarningReported.store(false);
+        return true;
+    }
+    return false;
+}
+
+bool FileDock::acknowledgeFileOplockBreak(FileOplockEntry& entry, unsigned long& acknowledgeError)
+{
+    acknowledgeError = ERROR_SUCCESS;
+    if (entry.level == FileOplockLevel::Level2 || entry.releaseRequested.load())
+    {
+        return true;
+    }
+    if (entry.fileHandle == nullptr || entry.fileHandle == INVALID_HANDLE_VALUE)
+    {
+        acknowledgeError = ERROR_INVALID_HANDLE;
+        return false;
+    }
+
+    HANDLE ackEvent = ::CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (ackEvent == nullptr)
+    {
+        acknowledgeError = ::GetLastError();
+        return false;
+    }
+
+    OVERLAPPED ackOverlapped{};
+    ackOverlapped.hEvent = ackEvent;
+    DWORD bytesReturned = 0;
+    BOOL acknowledgeOk = ::DeviceIoControl(
+        entry.fileHandle,
+        FSCTL_OPLOCK_BREAK_ACK_NO_2,
+        nullptr,
+        0,
+        nullptr,
+        0,
+        &bytesReturned,
+        &ackOverlapped);
+    acknowledgeError = acknowledgeOk ? ERROR_SUCCESS : ::GetLastError();
+    if (!acknowledgeOk && acknowledgeError == ERROR_IO_PENDING)
+    {
+        const DWORD waitResult = ::WaitForSingleObject(ackEvent, INFINITE);
+        if (waitResult == WAIT_OBJECT_0)
+        {
+            acknowledgeOk = ::GetOverlappedResult(
+                entry.fileHandle,
+                &ackOverlapped,
+                &bytesReturned,
+                FALSE);
+            acknowledgeError = acknowledgeOk ? ERROR_SUCCESS : ::GetLastError();
+        }
+        else
+        {
+            acknowledgeError = ::GetLastError();
+        }
+    }
+
+    closeWin32Handle(ackEvent);
+    return acknowledgeOk != FALSE;
+}
+
+void FileDock::cancelFileOplockRequest(FileOplockEntry& entry)
+{
+    std::lock_guard<std::mutex> lock(entry.ioMutex);
+    if (entry.fileHandle != nullptr && entry.fileHandle != INVALID_HANDLE_VALUE)
+    {
+        (void)::CancelIoEx(entry.fileHandle, &entry.overlapped);
+    }
+    if (entry.eventHandle != nullptr)
+    {
+        (void)::SetEvent(entry.eventHandle);
+    }
+}
+
+std::size_t FileDock::recordFileOplockAccessPrograms(
+    FileOplockEntry& entry,
+    const std::uint64_t breakSequence)
+{
+    if (entry.path.trimmed().isEmpty() || entry.releaseRequested.load())
+    {
+        return 0U;
+    }
+
+    const std::vector<QString> scanTargets{ entry.path };
+    const filedock::handleusage::HandleUsageScanResult scanResult =
+        filedock::handleusage::scanHandleUsageByPaths(scanTargets, 0, true);
+
+    const std::uint32_t currentProcessId = static_cast<std::uint32_t>(::GetCurrentProcessId());
+    const QString nowText = QDateTime::currentDateTime().toString(QStringLiteral("yyyy-MM-dd HH:mm:ss.zzz"));
+    std::map<std::uint32_t, FileOplockAccessRecord> scanRecordByPid;
+    for (const filedock::handleusage::HandleUsageEntry& scanEntry : scanResult.entries)
+    {
+        if (scanEntry.processId == 0U ||
+            scanEntry.processId <= 4U ||
+            scanEntry.processId == currentProcessId)
+        {
+            continue;
+        }
+
+        FileOplockAccessRecord& scanRecord = scanRecordByPid[scanEntry.processId];
+        if (scanRecord.processId == 0U)
+        {
+            scanRecord.processId = scanEntry.processId;
+            scanRecord.processName = scanEntry.processName.trimmed();
+            scanRecord.processImagePath = scanEntry.processImagePath.trimmed();
+            scanRecord.firstBreakSequence = breakSequence;
+            scanRecord.firstSeenText = nowText;
+        }
+        if (scanRecord.processName.isEmpty() && !scanEntry.processName.trimmed().isEmpty())
+        {
+            scanRecord.processName = scanEntry.processName.trimmed();
+        }
+        if (scanRecord.processImagePath.isEmpty() && !scanEntry.processImagePath.trimmed().isEmpty())
+        {
+            scanRecord.processImagePath = scanEntry.processImagePath.trimmed();
+        }
+
+        scanRecord.lastBreakSequence = breakSequence;
+        scanRecord.lastSeenText = nowText;
+        scanRecord.handleHitCount += 1U;
+        scanRecord.lastHandleValue = scanEntry.handleValue;
+        scanRecord.lastGrantedAccess = scanEntry.grantedAccess;
+        appendUniqueText(scanRecord.matchedTargetList, scanEntry.matchedTargetPath);
+        appendUniqueText(scanRecord.matchRuleList, scanEntry.matchRuleText);
+        appendUniqueText(scanRecord.enumerationSourceList, scanEntry.enumerationSource);
+        appendUniqueText(scanRecord.objectNameList, scanEntry.objectName);
+    }
+
+    std::lock_guard<std::mutex> lock(entry.accessRecordMutex);
+    entry.lastAccessScanDiagnostic = scanResult.diagnosticText.trimmed().isEmpty()
+        ? QStringLiteral("-")
+        : scanResult.diagnosticText.simplified();
+    if (scanRecordByPid.empty())
+    {
+        entry.uncapturedBreakCount += 1U;
+        return 0U;
+    }
+
+    for (const auto& scanPair : scanRecordByPid)
+    {
+        const FileOplockAccessRecord& scanRecord = scanPair.second;
+        auto existingIterator = std::find_if(
+            entry.accessRecords.begin(),
+            entry.accessRecords.end(),
+            [&scanRecord](const FileOplockAccessRecord& record) {
+                return record.processId == scanRecord.processId;
+            });
+
+        if (existingIterator == entry.accessRecords.end())
+        {
+            FileOplockAccessRecord newRecord = scanRecord;
+            newRecord.hitCount = 1U;
+            entry.accessRecords.push_back(newRecord);
+            continue;
+        }
+
+        FileOplockAccessRecord& existingRecord = *existingIterator;
+        existingRecord.hitCount += 1U;
+        existingRecord.handleHitCount += scanRecord.handleHitCount;
+        existingRecord.lastBreakSequence = scanRecord.lastBreakSequence;
+        existingRecord.lastSeenText = scanRecord.lastSeenText;
+        existingRecord.lastHandleValue = scanRecord.lastHandleValue;
+        existingRecord.lastGrantedAccess = scanRecord.lastGrantedAccess;
+        if (existingRecord.processName.isEmpty() && !scanRecord.processName.isEmpty())
+        {
+            existingRecord.processName = scanRecord.processName;
+        }
+        if (existingRecord.processImagePath.isEmpty() && !scanRecord.processImagePath.isEmpty())
+        {
+            existingRecord.processImagePath = scanRecord.processImagePath;
+        }
+        for (const QString& text : scanRecord.matchedTargetList)
+        {
+            appendUniqueText(existingRecord.matchedTargetList, text);
+        }
+        for (const QString& text : scanRecord.matchRuleList)
+        {
+            appendUniqueText(existingRecord.matchRuleList, text);
+        }
+        for (const QString& text : scanRecord.enumerationSourceList)
+        {
+            appendUniqueText(existingRecord.enumerationSourceList, text);
+        }
+        for (const QString& text : scanRecord.objectNameList)
+        {
+            appendUniqueText(existingRecord.objectNameList, text);
+        }
+    }
+
+    return scanRecordByPid.size();
+}
 
 FileDock::FileDock(QWidget* parent)
     : QWidget(parent)
@@ -8605,7 +8899,12 @@ void FileDock::showPanelContextMenu(FilePanelWidgets& panel, const QPoint& local
     QAction* deleteAction = menu.addAction(QIcon(":/Icon/process_terminate.svg"), QStringLiteral("删除(Delete)"));
     QAction* driverDeleteAction = menu.addAction(QIcon(":/Icon/process_terminate.svg"), QStringLiteral("驱动删除(R0)"));
     QAction* unlockByDriverAction = menu.addAction(QIcon(":/Icon/handle_refresh.svg"), QStringLiteral("文件解锁器(R3/R0)"));
-    QAction* addOplockAction = menu.addAction(QIcon(":/Icon/handle_refresh.svg"), QStringLiteral("添加 Oplock"));
+    QMenu* addOplockMenu = menu.addMenu(QIcon(":/Icon/handle_refresh.svg"), QStringLiteral("添加 Oplock（访问计数）"));
+    QAction* addOplockLevel1Action = addOplockMenu->addAction(QStringLiteral("Level 1 - 独占读写缓存，别人访问会计数"));
+    QAction* addOplockLevel2Action = addOplockMenu->addAction(QStringLiteral("Level 2 - 共享只读缓存，别人写入会计数"));
+    QAction* addOplockBatchAction = addOplockMenu->addAction(QStringLiteral("Batch - 缓存反复打开关闭，访问时计数"));
+    QAction* addOplockFilterAction = addOplockMenu->addAction(QStringLiteral("Filter - 扫描器/过滤器用，访问前计数"));
+    QAction* showOplockRecordsAction = menu.addAction(QIcon(":/Icon/process_list.svg"), QStringLiteral("查看 Oplock 访问记录"));
     QAction* releaseOplockAction = menu.addAction(QIcon(":/Icon/process_resume.svg"), QStringLiteral("释放当前 Oplock"));
     QAction* releaseAllOplocksAction = menu.addAction(QIcon(":/Icon/process_resume.svg"), QStringLiteral("释放全部 Oplock"));
     QAction* takeOwnerAction = menu.addAction(QIcon(":/Icon/file_owner.svg"), QStringLiteral("取得所有权"));
@@ -8659,6 +8958,12 @@ void FileDock::showPanelContextMenu(FilePanelWidgets& panel, const QPoint& local
     // 结合选中集合动态启用菜单项，保证“多选”和“右键动作”行为一致。
     const bool singleFileOnly = isSingleSelection && QFileInfo(firstPath).isFile();
     const bool firstPathHasOplock = singleFileOnly && hasActiveOplockForPath(firstPath);
+    const std::uint64_t firstPathOplockBreakCount = firstPathHasOplock
+        ? activeOplockBreakCountForPath(firstPath)
+        : 0U;
+    const std::size_t firstPathOplockAccessProcessCount = firstPathHasOplock
+        ? activeOplockAccessProcessCountForPath(firstPath)
+        : 0U;
     const std::size_t currentOplockCount = activeOplockCount();
     openAction->setEnabled(hasSelection);
     copyPathAction->setEnabled(hasSelection);
@@ -8673,7 +8978,20 @@ void FileDock::showPanelContextMenu(FilePanelWidgets& panel, const QPoint& local
     deleteAction->setEnabled(hasSelection);
     driverDeleteAction->setEnabled(hasSelection);
     unlockByDriverAction->setEnabled(isSingleSelection);
-    addOplockAction->setEnabled(singleFileOnly && !firstPathHasOplock);
+    const bool canAddOplock = singleFileOnly && !firstPathHasOplock;
+    addOplockMenu->setEnabled(canAddOplock);
+    addOplockLevel1Action->setEnabled(canAddOplock);
+    addOplockLevel2Action->setEnabled(canAddOplock);
+    addOplockBatchAction->setEnabled(canAddOplock);
+    addOplockFilterAction->setEnabled(canAddOplock);
+    if (firstPathHasOplock)
+    {
+        showOplockRecordsAction->setText(
+            QStringLiteral("查看 Oplock 访问记录（%1 个进程）").arg(firstPathOplockAccessProcessCount));
+        releaseOplockAction->setText(
+            QStringLiteral("释放当前 Oplock（已触发 %1 次）").arg(firstPathOplockBreakCount));
+    }
+    showOplockRecordsAction->setEnabled(firstPathHasOplock);
     releaseOplockAction->setEnabled(firstPathHasOplock);
     releaseAllOplocksAction->setEnabled(currentOplockCount > 0U);
     takeOwnerAction->setEnabled(hasSelection);
@@ -8816,9 +9134,29 @@ void FileDock::showPanelContextMenu(FilePanelWidgets& panel, const QPoint& local
         unlockSelectedItemsByDriver(panel);
         return;
     }
-    if (selectedAction == addOplockAction)
+    if (selectedAction == addOplockLevel1Action)
     {
-        addOplockToSelectedFile(panel);
+        addOplockToSelectedFile(panel, FileOplockLevel::Level1);
+        return;
+    }
+    if (selectedAction == addOplockLevel2Action)
+    {
+        addOplockToSelectedFile(panel, FileOplockLevel::Level2);
+        return;
+    }
+    if (selectedAction == addOplockBatchAction)
+    {
+        addOplockToSelectedFile(panel, FileOplockLevel::Batch);
+        return;
+    }
+    if (selectedAction == addOplockFilterAction)
+    {
+        addOplockToSelectedFile(panel, FileOplockLevel::Filter);
+        return;
+    }
+    if (selectedAction == showOplockRecordsAction)
+    {
+        showSelectedFileOplockAccessRecords(panel);
         return;
     }
     if (selectedAction == releaseOplockAction)
@@ -9979,8 +10317,10 @@ void FileDock::unlockSelectedItemsByDriver(FilePanelWidgets& panel)
     unlockPathsByDriver(paths, QStringLiteral("panel_context_menu"), &panel);
 }
 
-void FileDock::addOplockToSelectedFile(FilePanelWidgets& panel)
+void FileDock::addOplockToSelectedFile(FilePanelWidgets& panel, const FileOplockLevel level)
 {
+    const QString levelText = fileOplockLevelText(level);
+    const unsigned long controlCode = fileOplockControlCode(level);
     const std::vector<QString> paths = selectedPaths(panel);
     if (paths.size() != 1U)
     {
@@ -10026,11 +10366,16 @@ void FileDock::addOplockToSelectedFile(FilePanelWidgets& panel)
         QMessageBox::warning(
             this,
             QStringLiteral("添加 Oplock"),
-            QStringLiteral("打开文件失败，Win32=%1：\n%2").arg(errorCode).arg(normalizedPath));
+            QStringLiteral("打开文件失败，无法请求 %1 Oplock，Win32=%2：\n%3")
+                .arg(levelText)
+                .arg(errorCode)
+                .arg(normalizedPath));
         kLogEvent event;
         warn << event
             << "[FileDock] 添加 Oplock 失败：CreateFileW, path="
             << normalizedPath.toStdString()
+            << ", level="
+            << levelText.toStdString()
             << ", error="
             << errorCode
             << eol;
@@ -10039,6 +10384,7 @@ void FileDock::addOplockToSelectedFile(FilePanelWidgets& panel)
 
     auto oplockEntry = std::make_shared<FileOplockEntry>();
     oplockEntry->path = normalizedPath;
+    oplockEntry->level = level;
     oplockEntry->fileHandle = fileHandle;
     oplockEntry->eventHandle = ::CreateEventW(nullptr, TRUE, FALSE, nullptr);
     if (oplockEntry->eventHandle == nullptr)
@@ -10047,51 +10393,53 @@ void FileDock::addOplockToSelectedFile(FilePanelWidgets& panel)
         QMessageBox::warning(
             this,
             QStringLiteral("添加 Oplock"),
-            QStringLiteral("创建等待事件失败，Win32=%1。").arg(errorCode));
+            QStringLiteral("创建 %1 Oplock 等待事件失败，Win32=%2。").arg(levelText).arg(errorCode));
         kLogEvent event;
         warn << event
             << "[FileDock] 添加 Oplock 失败：CreateEventW, path="
             << normalizedPath.toStdString()
+            << ", level="
+            << levelText.toStdString()
             << ", error="
             << errorCode
             << eol;
         return;
     }
-    oplockEntry->overlapped.hEvent = oplockEntry->eventHandle;
+    unsigned long requestError = ERROR_SUCCESS;
+    if (!requestFileOplock(*oplockEntry, requestError))
+    {
+        if (requestError == ERROR_SUCCESS)
+        {
+            QMessageBox::information(
+                this,
+                QStringLiteral("添加 Oplock"),
+                QStringLiteral("%1 Oplock 请求已立即完成，没有保持中的 Oplock：\n%2")
+                    .arg(levelText, normalizedPath));
+            kLogEvent event;
+            info << event
+                << "[FileDock] 添加 Oplock：请求同步完成, path="
+                << normalizedPath.toStdString()
+                << ", level="
+                << levelText.toStdString()
+                << eol;
+            return;
+        }
 
-    const BOOL requestOk = ::DeviceIoControl(
-        oplockEntry->fileHandle,
-        FSCTL_REQUEST_OPLOCK_LEVEL_1,
-        nullptr,
-        0,
-        nullptr,
-        0,
-        nullptr,
-        &oplockEntry->overlapped);
-    const DWORD requestError = requestOk ? ERROR_SUCCESS : ::GetLastError();
-    if (requestOk != FALSE)
-    {
-        QMessageBox::information(
-            this,
-            QStringLiteral("添加 Oplock"),
-            QStringLiteral("Oplock 请求已立即完成，没有保持中的 Oplock：\n%1").arg(normalizedPath));
-        kLogEvent event;
-        info << event
-            << "[FileDock] 添加 Oplock：请求同步完成, path="
-            << normalizedPath.toStdString()
-            << eol;
-        return;
-    }
-    if (requestError != ERROR_IO_PENDING)
-    {
         QMessageBox::warning(
             this,
             QStringLiteral("添加 Oplock"),
-            QStringLiteral("请求 Oplock 失败，Win32=%1：\n%2").arg(requestError).arg(normalizedPath));
+            QStringLiteral("请求 %1 Oplock 失败，Win32=%2：\n%3")
+                .arg(levelText)
+                .arg(requestError)
+                .arg(normalizedPath));
         kLogEvent event;
         warn << event
             << "[FileDock] 添加 Oplock 失败：DeviceIoControl, path="
             << normalizedPath.toStdString()
+            << ", level="
+            << levelText.toStdString()
+            << ", controlCode=0x"
+            << QString::number(controlCode, 16).toStdString()
             << ", error="
             << requestError
             << eol;
@@ -10105,49 +10453,145 @@ void FileDock::addOplockToSelectedFile(FilePanelWidgets& panel)
 
     QPointer<FileDock> safeThis(this);
     oplockEntry->waitThread = std::thread([safeThis, oplockEntry]() {
-        bool completionOk = false;
-        DWORD completionError = ERROR_SUCCESS;
-        const DWORD waitResult = ::WaitForSingleObject(oplockEntry->eventHandle, INFINITE);
-        if (waitResult == WAIT_OBJECT_0)
+        for (;;)
         {
-            DWORD bytesTransferred = 0;
-            completionOk = (::GetOverlappedResult(
-                oplockEntry->fileHandle,
-                &oplockEntry->overlapped,
-                &bytesTransferred,
-                FALSE) != FALSE);
-            if (!completionOk)
+            bool completionOk = false;
+            DWORD completionError = ERROR_SUCCESS;
+            const DWORD waitResult = ::WaitForSingleObject(oplockEntry->eventHandle, INFINITE);
+            if (oplockEntry->releaseRequested.load())
+            {
+                break;
+            }
+
+            if (waitResult == WAIT_OBJECT_0)
+            {
+                DWORD bytesTransferred = 0;
+                {
+                    std::lock_guard<std::mutex> lock(oplockEntry->ioMutex);
+                    completionOk = (::GetOverlappedResult(
+                        oplockEntry->fileHandle,
+                        &oplockEntry->overlapped,
+                        &bytesTransferred,
+                        FALSE) != FALSE);
+                    if (!completionOk)
+                    {
+                        completionError = ::GetLastError();
+                    }
+                }
+            }
+            else
             {
                 completionError = ::GetLastError();
             }
-        }
-        else
-        {
-            completionError = ::GetLastError();
-        }
 
-        if (safeThis != nullptr)
-        {
-            QMetaObject::invokeMethod(
-                safeThis,
-                [safeThis, oplockEntry, completionOk, completionError]() {
-                    if (safeThis != nullptr)
-                    {
-                        safeThis->handleOplockCompleted(oplockEntry, completionOk, completionError);
-                    }
-                },
-                Qt::QueuedConnection);
+            if (oplockEntry->releaseRequested.load())
+            {
+                break;
+            }
+
+            const std::uint64_t breakSequence = oplockEntry->breakCount.fetch_add(1U) + 1U;
+            unsigned long acknowledgeError = ERROR_SUCCESS;
+            const bool acknowledgeOk = completionOk
+                ? FileDock::acknowledgeFileOplockBreak(*oplockEntry, acknowledgeError)
+                : false;
+            const std::size_t capturedProcessCount =
+                (completionOk && acknowledgeOk && !oplockEntry->releaseRequested.load())
+                ? FileDock::recordFileOplockAccessPrograms(*oplockEntry, breakSequence)
+                : 0U;
+
+            if (safeThis != nullptr)
+            {
+                QMetaObject::invokeMethod(
+                    safeThis,
+                    [
+                        safeThis,
+                        oplockEntry,
+                        completionOk,
+                        completionError,
+                        acknowledgeOk,
+                        acknowledgeError,
+                        capturedProcessCount
+                    ]() {
+                        if (safeThis != nullptr)
+                        {
+                            safeThis->handleOplockCompleted(
+                                oplockEntry,
+                                completionOk,
+                                completionError,
+                                acknowledgeOk,
+                                acknowledgeError,
+                                capturedProcessCount);
+                        }
+                    },
+                    Qt::QueuedConnection);
+            }
+
+            if (!completionOk || !acknowledgeOk)
+            {
+                break;
+            }
+
+            for (;;)
+            {
+                if (oplockEntry->releaseRequested.load())
+                {
+                    break;
+                }
+
+                unsigned long rearmError = ERROR_SUCCESS;
+                if (FileDock::requestFileOplock(*oplockEntry, rearmError))
+                {
+                    break;
+                }
+                if (oplockEntry->releaseRequested.load())
+                {
+                    break;
+                }
+
+                if (!oplockEntry->rearmWarningReported.exchange(true) && safeThis != nullptr)
+                {
+                    QMetaObject::invokeMethod(
+                        safeThis,
+                        [safeThis, oplockEntry, rearmError]() {
+                            if (safeThis != nullptr)
+                            {
+                                safeThis->handleOplockRearmPending(oplockEntry, rearmError);
+                            }
+                        },
+                        Qt::QueuedConnection);
+                }
+
+                if (oplockEntry->eventHandle != nullptr)
+                {
+                    (void)::ResetEvent(oplockEntry->eventHandle);
+                    (void)::WaitForSingleObject(oplockEntry->eventHandle, 250);
+                }
+                else
+                {
+                    ::Sleep(250);
+                }
+            }
+
+            if (oplockEntry->releaseRequested.load())
+            {
+                break;
+            }
         }
     });
 
     QMessageBox::information(
         this,
         QStringLiteral("添加 Oplock"),
-        QStringLiteral("已为文件添加 Oplock。保持期间如果其它进程触发 break，将自动提示并释放：\n%1").arg(normalizedPath));
+        QStringLiteral("已为文件添加 %1 Oplock。保持期间如果其它进程触发访问，将累计次数并自动重新挂起，直到手动释放：\n%2")
+            .arg(levelText, normalizedPath));
     kLogEvent event;
     info << event
         << "[FileDock] 添加 Oplock 成功, path="
         << normalizedPath.toStdString()
+        << ", level="
+        << levelText.toStdString()
+        << ", controlCode=0x"
+        << QString::number(controlCode, 16).toStdString()
         << ", activeCount="
         << activeOplockCount()
         << eol;
@@ -10191,15 +10635,17 @@ void FileDock::releaseSelectedFileOplock(FilePanelWidgets& panel)
         return;
     }
 
+    const std::uint64_t breakCount = targetEntry->breakCount.load();
+    std::size_t accessProcessCount = 0U;
+    std::uint64_t uncapturedBreakCount = 0U;
+    {
+        std::lock_guard<std::mutex> lock(targetEntry->accessRecordMutex);
+        accessProcessCount = targetEntry->accessRecords.size();
+        uncapturedBreakCount = targetEntry->uncapturedBreakCount;
+    }
+    const QString levelText = fileOplockLevelText(targetEntry->level);
     targetEntry->releaseRequested.store(true);
-    if (targetEntry->fileHandle != nullptr && targetEntry->fileHandle != INVALID_HANDLE_VALUE)
-    {
-        (void)::CancelIoEx(targetEntry->fileHandle, &targetEntry->overlapped);
-    }
-    if (targetEntry->eventHandle != nullptr)
-    {
-        (void)::SetEvent(targetEntry->eventHandle);
-    }
+    cancelFileOplockRequest(*targetEntry);
     if (targetEntry->waitThread.joinable() &&
         targetEntry->waitThread.get_id() != std::this_thread::get_id())
     {
@@ -10209,14 +10655,164 @@ void FileDock::releaseSelectedFileOplock(FilePanelWidgets& panel)
     QMessageBox::information(
         this,
         QStringLiteral("释放 Oplock"),
-        QStringLiteral("已释放 Oplock：\n%1").arg(normalizedPath));
+        QStringLiteral("已释放 %1 Oplock。\n触发次数：%2\n记录进程：%3\n未捕获触发：%4\n文件：%5")
+            .arg(levelText)
+            .arg(breakCount)
+            .arg(accessProcessCount)
+            .arg(uncapturedBreakCount)
+            .arg(normalizedPath));
     kLogEvent event;
     info << event
         << "[FileDock] 释放当前 Oplock, path="
         << normalizedPath.toStdString()
+        << ", level="
+        << levelText.toStdString()
+        << ", breakCount="
+        << breakCount
+        << ", accessProcessCount="
+        << accessProcessCount
+        << ", uncapturedBreakCount="
+        << uncapturedBreakCount
         << ", activeCount="
         << activeOplockCount()
         << eol;
+}
+
+void FileDock::showSelectedFileOplockAccessRecords(FilePanelWidgets& panel)
+{
+    const std::vector<QString> paths = selectedPaths(panel);
+    if (paths.size() != 1U)
+    {
+        QMessageBox::information(
+            this,
+            QStringLiteral("Oplock 访问记录"),
+            QStringLiteral("请只选择一个已添加 Oplock 的文件。"));
+        return;
+    }
+
+    const QString normalizedPath = normalizeFileDockPath(paths.front());
+    std::shared_ptr<FileOplockEntry> targetEntry;
+    {
+        std::lock_guard<std::mutex> lock(m_activeOplockMutex);
+        auto iterator = std::find_if(
+            m_activeOplocks.begin(),
+            m_activeOplocks.end(),
+            [&normalizedPath](const std::shared_ptr<FileOplockEntry>& entry) {
+                return entry != nullptr &&
+                    !entry->releaseRequested.load() &&
+                    pathEqualsCaseInsensitive(entry->path, normalizedPath);
+            });
+        if (iterator != m_activeOplocks.end())
+        {
+            targetEntry = *iterator;
+        }
+    }
+
+    if (targetEntry == nullptr)
+    {
+        QMessageBox::information(
+            this,
+            QStringLiteral("Oplock 访问记录"),
+            QStringLiteral("当前文件没有由 FileDock 持有的 Oplock：\n%1").arg(normalizedPath));
+        return;
+    }
+
+    std::vector<FileOplockAccessRecord> accessRecords;
+    QString diagnosticText;
+    std::uint64_t uncapturedBreakCount = 0U;
+    {
+        std::lock_guard<std::mutex> lock(targetEntry->accessRecordMutex);
+        accessRecords = targetEntry->accessRecords;
+        diagnosticText = targetEntry->lastAccessScanDiagnostic;
+        uncapturedBreakCount = targetEntry->uncapturedBreakCount;
+    }
+    std::sort(
+        accessRecords.begin(),
+        accessRecords.end(),
+        [](const FileOplockAccessRecord& left, const FileOplockAccessRecord& right) {
+            if (left.lastBreakSequence != right.lastBreakSequence)
+            {
+                return left.lastBreakSequence > right.lastBreakSequence;
+            }
+            return left.processId < right.processId;
+        });
+
+    QDialog dialog(this);
+    dialog.setWindowTitle(QStringLiteral("Oplock 访问记录"));
+    dialog.resize(1180, 620);
+
+    auto* layout = new QVBoxLayout(&dialog);
+    auto* summaryLabel = new QLabel(
+        QStringLiteral("文件：%1\n级别：%2 | 触发次数：%3 | 记录进程：%4 | 未捕获触发：%5\n最近扫描：%6")
+            .arg(normalizedPath)
+            .arg(fileOplockLevelText(targetEntry->level))
+            .arg(targetEntry->breakCount.load())
+            .arg(accessRecords.size())
+            .arg(uncapturedBreakCount)
+            .arg(diagnosticText.trimmed().isEmpty() ? QStringLiteral("-") : diagnosticText),
+        &dialog);
+    summaryLabel->setWordWrap(true);
+    layout->addWidget(summaryLabel);
+
+    auto* table = new QTableWidget(static_cast<int>(accessRecords.size()), 13, &dialog);
+    table->setHorizontalHeaderLabels(QStringList{
+        QStringLiteral("PID"),
+        QStringLiteral("进程名"),
+        QStringLiteral("触发命中"),
+        QStringLiteral("句柄命中"),
+        QStringLiteral("访问掩码"),
+        QStringLiteral("最近句柄"),
+        QStringLiteral("首次触发"),
+        QStringLiteral("最近触发"),
+        QStringLiteral("首次时间"),
+        QStringLiteral("最近时间"),
+        QStringLiteral("命中路径"),
+        QStringLiteral("规则/来源"),
+        QStringLiteral("镜像路径")
+    });
+    table->setSelectionBehavior(QAbstractItemView::SelectRows);
+    table->setSelectionMode(QAbstractItemView::SingleSelection);
+    table->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    table->verticalHeader()->setVisible(false);
+    table->horizontalHeader()->setStretchLastSection(true);
+    installFileTableCopyMenu(table);
+
+    auto makeItem = [](const QString& text) {
+        auto* item = new QTableWidgetItem(text);
+        item->setFlags(item->flags() & ~Qt::ItemIsEditable);
+        return item;
+    };
+
+    for (int row = 0; row < static_cast<int>(accessRecords.size()); ++row)
+    {
+        const FileOplockAccessRecord& record = accessRecords[static_cast<std::size_t>(row)];
+        const QStringList ruleAndSourceList = QStringList{
+            record.matchRuleList.join(QStringLiteral("\n")),
+            record.enumerationSourceList.join(QStringLiteral("\n")),
+            record.objectNameList.join(QStringLiteral("\n"))
+        };
+        table->setItem(row, 0, makeItem(QString::number(record.processId)));
+        table->setItem(row, 1, makeItem(record.processName.isEmpty() ? QStringLiteral("Unknown") : record.processName));
+        table->setItem(row, 2, makeItem(QString::number(record.hitCount)));
+        table->setItem(row, 3, makeItem(QString::number(record.handleHitCount)));
+        table->setItem(row, 4, makeItem(formatHandleValueText(record.lastGrantedAccess)));
+        table->setItem(row, 5, makeItem(formatHandleValueText(record.lastHandleValue)));
+        table->setItem(row, 6, makeItem(QString::number(record.firstBreakSequence)));
+        table->setItem(row, 7, makeItem(QString::number(record.lastBreakSequence)));
+        table->setItem(row, 8, makeItem(record.firstSeenText));
+        table->setItem(row, 9, makeItem(record.lastSeenText));
+        table->setItem(row, 10, makeItem(record.matchedTargetList.join(QStringLiteral("\n"))));
+        table->setItem(row, 11, makeItem(ruleAndSourceList.join(QStringLiteral("\n"))));
+        table->setItem(row, 12, makeItem(record.processImagePath));
+    }
+    table->resizeColumnsToContents();
+    layout->addWidget(table, 1);
+
+    auto* buttonBox = new QDialogButtonBox(QDialogButtonBox::Close, &dialog);
+    QObject::connect(buttonBox, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    layout->addWidget(buttonBox);
+
+    dialog.exec();
 }
 
 void FileDock::releaseAllActiveOplocks(const bool showMessage)
@@ -10227,21 +10823,23 @@ void FileDock::releaseAllActiveOplocks(const bool showMessage)
         entries.swap(m_activeOplocks);
     }
 
+    std::uint64_t totalBreakCount = 0;
+    std::uint64_t totalUncapturedBreakCount = 0;
+    std::size_t totalAccessProcessCount = 0U;
     for (const std::shared_ptr<FileOplockEntry>& entry : entries)
     {
         if (entry == nullptr)
         {
             continue;
         }
+        totalBreakCount += entry->breakCount.load();
+        {
+            std::lock_guard<std::mutex> lock(entry->accessRecordMutex);
+            totalAccessProcessCount += entry->accessRecords.size();
+            totalUncapturedBreakCount += entry->uncapturedBreakCount;
+        }
         entry->releaseRequested.store(true);
-        if (entry->fileHandle != nullptr && entry->fileHandle != INVALID_HANDLE_VALUE)
-        {
-            (void)::CancelIoEx(entry->fileHandle, &entry->overlapped);
-        }
-        if (entry->eventHandle != nullptr)
-        {
-            (void)::SetEvent(entry->eventHandle);
-        }
+        cancelFileOplockRequest(*entry);
     }
 
     for (const std::shared_ptr<FileOplockEntry>& entry : entries)
@@ -10259,7 +10857,11 @@ void FileDock::releaseAllActiveOplocks(const bool showMessage)
         QMessageBox::information(
             this,
             QStringLiteral("释放全部 Oplock"),
-            QStringLiteral("已释放 %1 个 Oplock。").arg(entries.size()));
+            QStringLiteral("已释放 %1 个 Oplock，累计触发 %2 次，记录进程 %3 个，未捕获触发 %4 次。")
+                .arg(entries.size())
+                .arg(totalBreakCount)
+                .arg(totalAccessProcessCount)
+                .arg(totalUncapturedBreakCount));
     }
     if (!entries.empty())
     {
@@ -10267,6 +10869,12 @@ void FileDock::releaseAllActiveOplocks(const bool showMessage)
         info << event
             << "[FileDock] 释放全部 Oplock, count="
             << entries.size()
+            << ", totalBreakCount="
+            << totalBreakCount
+            << ", totalAccessProcessCount="
+            << totalAccessProcessCount
+            << ", totalUncapturedBreakCount="
+            << totalUncapturedBreakCount
             << eol;
     }
 }
@@ -10296,10 +10904,60 @@ std::size_t FileDock::activeOplockCount() const
         }));
 }
 
+std::uint64_t FileDock::activeOplockBreakCountForPath(const QString& filePath) const
+{
+    const QString normalizedPath = normalizeFileDockPath(filePath);
+    std::lock_guard<std::mutex> lock(m_activeOplockMutex);
+    auto iterator = std::find_if(
+        m_activeOplocks.begin(),
+        m_activeOplocks.end(),
+        [&normalizedPath](const std::shared_ptr<FileOplockEntry>& entry) {
+            return entry != nullptr &&
+                !entry->releaseRequested.load() &&
+                pathEqualsCaseInsensitive(entry->path, normalizedPath);
+        });
+    if (iterator == m_activeOplocks.end() || *iterator == nullptr)
+    {
+        return 0U;
+    }
+    return (*iterator)->breakCount.load();
+}
+
+std::size_t FileDock::activeOplockAccessProcessCountForPath(const QString& filePath) const
+{
+    const QString normalizedPath = normalizeFileDockPath(filePath);
+    std::shared_ptr<FileOplockEntry> targetEntry;
+    {
+        std::lock_guard<std::mutex> lock(m_activeOplockMutex);
+        auto iterator = std::find_if(
+            m_activeOplocks.begin(),
+            m_activeOplocks.end(),
+            [&normalizedPath](const std::shared_ptr<FileOplockEntry>& entry) {
+                return entry != nullptr &&
+                    !entry->releaseRequested.load() &&
+                    pathEqualsCaseInsensitive(entry->path, normalizedPath);
+            });
+        if (iterator != m_activeOplocks.end())
+        {
+            targetEntry = *iterator;
+        }
+    }
+    if (targetEntry == nullptr)
+    {
+        return 0U;
+    }
+
+    std::lock_guard<std::mutex> lock(targetEntry->accessRecordMutex);
+    return targetEntry->accessRecords.size();
+}
+
 void FileDock::handleOplockCompleted(
     std::shared_ptr<FileOplockEntry> entry,
     const bool completionOk,
-    const unsigned long completionError)
+    const unsigned long completionError,
+    const bool acknowledgeOk,
+    const unsigned long acknowledgeError,
+    const std::size_t capturedProcessCount)
 {
     if (entry == nullptr)
     {
@@ -10307,51 +10965,60 @@ void FileDock::handleOplockCompleted(
     }
 
     const bool wasManualRelease = entry->releaseRequested.load();
-    bool removed = false;
-    {
-        std::lock_guard<std::mutex> lock(m_activeOplockMutex);
-        auto iterator = std::find(m_activeOplocks.begin(), m_activeOplocks.end(), entry);
-        if (iterator != m_activeOplocks.end())
-        {
-            m_activeOplocks.erase(iterator);
-            removed = true;
-        }
-    }
-
-    if (entry->waitThread.joinable() &&
-        entry->waitThread.get_id() != std::this_thread::get_id())
-    {
-        entry->waitThread.join();
-    }
-
-    if (!removed && wasManualRelease)
+    if (wasManualRelease)
     {
         return;
     }
 
     const QString stateText = oplockCompletionText(completionOk, completionError);
+    const QString levelText = fileOplockLevelText(entry->level);
+    const std::uint64_t breakCount = entry->breakCount.load();
     kLogEvent event;
     info << event
-        << "[FileDock] Oplock 完成, path="
+        << "[FileDock] Oplock 访问触发, path="
         << entry->path.toStdString()
-        << ", manualRelease="
-        << (wasManualRelease ? "true" : "false")
+        << ", level="
+        << levelText.toStdString()
+        << ", breakCount="
+        << breakCount
         << ", completionOk="
         << (completionOk ? "true" : "false")
         << ", completionError="
         << completionError
+        << ", state="
+        << stateText.toStdString()
+        << ", acknowledgeOk="
+        << (acknowledgeOk ? "true" : "false")
+        << ", acknowledgeError="
+        << acknowledgeError
+        << ", capturedProcessCount="
+        << capturedProcessCount
         << ", activeCount="
         << activeOplockCount()
         << eol;
+}
 
-    if (!wasManualRelease)
+void FileDock::handleOplockRearmPending(
+    std::shared_ptr<FileOplockEntry> entry,
+    const unsigned long requestError)
+{
+    if (entry == nullptr || entry->releaseRequested.load())
     {
-        QMessageBox::information(
-            this,
-            QStringLiteral("Oplock 已触发"),
-            QStringLiteral("文件 Oplock 已完成或被触发，并已释放。\n状态：%1\n文件：%2")
-                .arg(stateText, entry->path));
+        return;
     }
+
+    const QString levelText = fileOplockLevelText(entry->level);
+    kLogEvent event;
+    warn << event
+        << "[FileDock] Oplock 触发后重新挂起暂时失败，将后台重试, path="
+        << entry->path.toStdString()
+        << ", level="
+        << levelText.toStdString()
+        << ", breakCount="
+        << entry->breakCount.load()
+        << ", requestError="
+        << requestError
+        << eol;
 }
 
 void FileDock::unlockPathsByDriver(
