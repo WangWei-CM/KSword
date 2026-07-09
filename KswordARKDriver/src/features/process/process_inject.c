@@ -70,10 +70,15 @@ ZwFreeVirtualMemory(
     _In_ ULONG FreeType
     );
 
-NTSYSAPI
+/*
+ * KSWORD_ZW_CREATE_THREAD_EX_FN:
+ * - Inputs: the target process handle, user entry point, optional argument, and stack options.
+ * - Processing: matches the kernel ZwCreateThreadEx routine signature used to create the remote thread.
+ * - Returns: NTSTATUS and optionally writes the created thread handle.
+ */
+typedef
 NTSTATUS
-NTAPI
-ZwCreateThreadEx(
+(NTAPI* KSWORD_ZW_CREATE_THREAD_EX_FN)(
     _Out_ PHANDLE ThreadHandle,
     _In_ ACCESS_MASK DesiredAccess,
     _In_opt_ POBJECT_ATTRIBUTES ObjectAttributes,
@@ -85,6 +90,21 @@ ZwCreateThreadEx(
     _In_ SIZE_T StackSize,
     _In_ SIZE_T MaximumStackSize,
     _In_opt_ PVOID AttributeList
+    );
+
+/*
+ * ZwWaitForSingleObject:
+ * - Inputs: a kernel handle, alertable-wait flag, and optional relative timeout.
+ * - Processing: waits for the remote thread handle created by ZwCreateThreadEx.
+ * - Returns: NTSTATUS from the kernel wait operation.
+ */
+NTSYSAPI
+NTSTATUS
+NTAPI
+ZwWaitForSingleObject(
+    _In_ HANDLE Handle,
+    _In_ BOOLEAN Alertable,
+    _In_opt_ PLARGE_INTEGER Timeout
     );
 
 #ifndef OBJ_KERNEL_HANDLE
@@ -145,6 +165,23 @@ KswordARKInjectIsUserAddress(
 {
     return Address != 0ULL &&
         Address <= (ULONG64)(ULONG_PTR)MmHighestUserAddress;
+}
+
+/*
+ * KswordARKInjectResolveZwCreateThreadEx:
+ * - Inputs: none.
+ * - Processing: resolves ZwCreateThreadEx at runtime because some WDK import libraries do not expose it.
+ * - Returns: callable routine pointer, or NULL when the running kernel does not export the routine.
+ */
+static KSWORD_ZW_CREATE_THREAD_EX_FN
+KswordARKInjectResolveZwCreateThreadEx(
+    VOID
+    )
+{
+    UNICODE_STRING routineName;
+
+    RtlInitUnicodeString(&routineName, L"ZwCreateThreadEx");
+    return (KSWORD_ZW_CREATE_THREAD_EX_FN)MmGetSystemRoutineAddress(&routineName);
 }
 
 static NTSTATUS
@@ -231,6 +268,7 @@ KswordARKDriverInjectProcess(
     PVOID parameterAddress = NULL;
     ULONG allocationProtect = PAGE_READWRITE;
     BOOLEAN freeRemoteRegionOnFailure = FALSE;
+    KSWORD_ZW_CREATE_THREAD_EX_FN createThreadEx = NULL;
     NTSTATUS status = STATUS_SUCCESS;
 
     if (Response == NULL || Request == NULL || BytesWrittenOut == NULL) {
@@ -343,7 +381,14 @@ KswordARKDriverInjectProcess(
         goto Exit;
     }
 
-    status = ZwCreateThreadEx(
+    createThreadEx = KswordARKInjectResolveZwCreateThreadEx();
+    if (createThreadEx == NULL) {
+        Response->status = KSWORD_ARK_PROCESS_INJECT_STATUS_THREAD_FAILED;
+        Response->lastStatus = STATUS_NOT_SUPPORTED;
+        goto Exit;
+    }
+
+    status = createThreadEx(
         &threadHandle,
         THREAD_ALL_ACCESS,
         NULL,

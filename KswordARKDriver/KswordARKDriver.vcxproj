@@ -376,21 +376,21 @@
   <ItemGroup>
     <FilesToPackage Include="$(TargetPath)" />
   </ItemGroup>
-  <Target Name="KswordArkCopyCleanDriverBeforeTestSign" BeforeTargets="KswordArkAutoTestSignAfterBuild" Condition="'$(ConfigurationType)'=='Driver' and Exists('$(TargetPath)')">
+  <Target Name="KswordArkCopyCleanDriverBeforeVariantSign" BeforeTargets="KswordArkAutoVariantSignAfterBuild" Condition="'$(ConfigurationType)'=='Driver' and Exists('$(TargetPath)') and '$(KswordArkSkipAutoVariantSign)'!='true' and '$(KswordArkSkipAutoTestSign)'!='true'">
     <PropertyGroup>
       <KswordArkCleanDriverPath>$(TargetDir)KswordARK_Clean$(TargetExt)</KswordArkCleanDriverPath>
     </PropertyGroup>
-    <Message Importance="High" Text="KswordARK: copying unsigned clean driver before test-sign: $(TargetPath) -> $(KswordArkCleanDriverPath)" />
+    <Message Importance="High" Text="KswordARK: copying unsigned clean driver before post-build variant signing: $(TargetPath) -> $(KswordArkCleanDriverPath)" />
     <Copy SourceFiles="$(TargetPath)" DestinationFiles="$(KswordArkCleanDriverPath)" SkipUnchangedFiles="false" />
   </Target>
-  <Target Name="KswordArkAutoTestSignAfterBuild" AfterTargets="Build" Condition="'$(ConfigurationType)'=='Driver' and Exists('$(TargetPath)') and '$(KswordArkSkipAutoTestSign)'!='true'">
+  <Target Name="KswordArkAutoVariantSignAfterBuild" AfterTargets="Build" Condition="'$(ConfigurationType)'=='Driver' and Exists('$(TargetPath)') and '$(KswordArkSkipAutoVariantSign)'!='true' and '$(KswordArkSkipAutoTestSign)'!='true'">
     <PropertyGroup>
-      <KswordArkSignScript>$(MSBuildThisFileDirectory)..\scripts\Sign-KswordArkDriverTest.ps1</KswordArkSignScript>
+      <KswordArkSignScript>$(MSBuildThisFileDirectory)..\scripts\Sign-KswordArkDriverVariant.ps1</KswordArkSignScript>
       <KswordArkPowerShellExe Condition="'$(KswordArkPowerShellExe)'==''">powershell</KswordArkPowerShellExe>
     </PropertyGroup>
-    <Message Importance="High" Text="KswordARK: attempting non-fatal test-sign for $(TargetPath). Set /p:KswordArkSkipAutoTestSign=true to skip." />
-    <Exec Command="&quot;$(KswordArkPowerShellExe)&quot; -ExecutionPolicy Bypass -File &quot;$(KswordArkSignScript)&quot; -DriverPath &quot;$(TargetPath)&quot; -NonFatal" ContinueOnError="WarnAndContinue" IgnoreStandardErrorWarningFormat="true" Condition="Exists('$(KswordArkSignScript)')" />
-    <Warning Condition="!Exists('$(KswordArkSignScript)')" Text="KswordARK auto test-sign skipped because script was not found: $(KswordArkSignScript)" />
+    <Message Importance="High" Text="KswordARK: applying post-build driver variant signing for $(TargetPath). Set /p:KswordArkSkipAutoVariantSign=true to skip." />
+    <Exec Command="&quot;$(KswordArkPowerShellExe)&quot; -NoProfile -ExecutionPolicy Bypass -File &quot;$(KswordArkSignScript)&quot; -DriverPath &quot;$(TargetPath)&quot;" IgnoreStandardErrorWarningFormat="true" Condition="Exists('$(KswordArkSignScript)')" />
+    <Error Condition="!Exists('$(KswordArkSignScript)')" Text="KswordARK driver variant signing script was not found: $(KswordArkSignScript)" />
   </Target>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
