@@ -59,6 +59,7 @@
     <ClCompile Include="src\features\process\process_terminate.c" />
     <ClCompile Include="src\features\process\process_terminate_memory.c" />
     <ClCompile Include="src\features\process\process_extended.c" />
+    <ClCompile Include="src\features\process\process_inject.c" />
     <ClCompile Include="src\features\process\process_memory.c" />
     <ClCompile Include="src\features\process\process_memory_ioctl.c" />
     <ClCompile Include="src\features\registry\registry_query.c" />

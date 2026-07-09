@@ -397,6 +397,9 @@
     <ClCompile Include="src\features\process\process_extended.c">
       <Filter>Source Files\Features</Filter>
     </ClCompile>
+    <ClCompile Include="src\features\process\process_inject.c">
+      <Filter>Source Files\Features</Filter>
+    </ClCompile>
     <ClCompile Include="src\features\process\process_memory.c">
       <Filter>Source Files\Features</Filter>
     </ClCompile>

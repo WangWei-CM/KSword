@@ -454,6 +454,11 @@ private:
     // - 自动切换到“进程热键”页并启动热键扫描；
     // - 仅支持单进程，避免批量菜单误触发多个扫描窗口。
     void openSelectedProcessHotkeyScanner();
+    // openSelectedProcessInjectionPage 作用：
+    // - 从进程列表右键菜单打开当前进程详情窗口；
+    // - 自动切换到“操作”页，直达 DLL/Shellcode 注入区域；
+    // - 仅支持单进程，避免批量菜单误触发多个详情窗口。
+    void openSelectedProcessInjectionPage();
     void openProcessDetailWindowByPid(std::uint32_t pid);
     void openThreadOwnerProcessDetails();
     // openThreadStackWindow 作用：
@@ -586,6 +591,8 @@ private:
     // 参数 title：动作标题；actionOk：动作是否成功；detailText：动作详情；actionEvent：本次动作全链路事件对象。
     // 返回值：无。
     void showActionResultMessage(const QString& title, bool actionOk, const std::string& detailText, const kLogEvent& actionEvent);
+    QObject* mainWindowActionReceiver() const;
+    bool invokeMainWindowPidSlot(const char* methodName, std::uint32_t pid) const;
     ks::process::CreateProcessRequest buildCreateProcessRequestFromUi(bool* buildOk, QString* errorTextOut) const;
     // buildTokenPrivilegeEditRequestFromUi 作用：
     // - 只读取 Token 模式和特权表字段，不解析 CreateProcessW 其它输入；
@@ -641,6 +648,8 @@ private:
     std::unordered_map<std::uint32_t, NetworkTrafficCounters> snapshotProcessNetworkTrafficCounters() const;
 
 private:
+    QPointer<QObject> m_mainWindowActionReceiver; // 构造时的 MainWindow 接收者，避免 ADS 重挂载后 parent() 变成 Dock 容器。
+
     // ======== 顶层布局 ========
     QVBoxLayout* m_rootLayout = nullptr;      // 根布局：只包含侧边栏 Tab。
     QTabWidget* m_sideTabWidget = nullptr;    // 左侧 tab 栏（West），包含“进程列表”页。

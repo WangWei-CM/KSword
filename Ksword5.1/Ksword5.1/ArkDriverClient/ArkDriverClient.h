@@ -45,6 +45,14 @@ namespace ksword::ark
         ProcessVisibilityResult setProcessVisibility(std::uint32_t processId, unsigned long action, unsigned long flags = 0UL) const;
         ProcessSpecialFlagsResult setProcessSpecialFlags(std::uint32_t processId, unsigned long action, unsigned long flags = 0UL) const;
         ProcessDkomResult dkomProcess(std::uint32_t processId, unsigned long action, unsigned long flags = 0UL) const;
+        ProcessInjectResult injectProcessDll(
+            std::uint32_t processId,
+            const std::wstring& dllPath,
+            unsigned long flags = KSWORD_ARK_PROCESS_INJECT_FLAG_UI_CONFIRMED | KSWORD_ARK_PROCESS_INJECT_FLAG_WAIT_THREAD) const;
+        ProcessInjectResult injectProcessShellcode(
+            std::uint32_t processId,
+            const std::vector<std::uint8_t>& shellcode,
+            unsigned long flags = KSWORD_ARK_PROCESS_INJECT_FLAG_UI_CONFIRMED) const;
 
         ProcessEnumResult enumerateProcesses(unsigned long flags) const;
         ThreadEnumResult enumerateThreads(unsigned long flags, std::uint32_t processId = 0) const;

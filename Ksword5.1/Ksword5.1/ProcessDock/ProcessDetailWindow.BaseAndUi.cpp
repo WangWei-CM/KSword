@@ -633,6 +633,29 @@ void ProcessDetailWindow::initializeUi()
     updateWindowTitle();
 }
 
+void ProcessDetailWindow::showActionTab()
+{
+    // 进程列表右键直达入口：
+    // - 输入：无，目标进程来自当前详情窗口绑定的 m_baseRecord；
+    // - 处理：切到“操作”页，并把焦点放到 DLL 路径输入框，便于直接选择注入文件；
+    // - 返回：无。若控件尚未初始化，则只记录日志并保持当前页。
+    if (m_tabWidget != nullptr && m_actionTab != nullptr)
+    {
+        m_tabWidget->setCurrentWidget(m_actionTab);
+    }
+
+    if (m_dllPathLineEdit != nullptr)
+    {
+        m_dllPathLineEdit->setFocus(Qt::OtherFocusReason);
+    }
+
+    kLogEvent actionTabEntryEvent;
+    info << actionTabEntryEvent
+        << "[ProcessDetailWindow] showActionTab: pid="
+        << m_baseRecord.pid
+        << eol;
+}
+
 void ProcessDetailWindow::requestInitialRefreshForCurrentTab()
 {
     // 懒加载策略：
@@ -1429,6 +1452,14 @@ void ProcessDetailWindow::initializeActionTab()
     injectLayout->setHorizontalSpacing(8);
     injectLayout->setVerticalSpacing(8);
 
+    m_injectionModeCombo = new QComboBox(injectGroup);
+    m_injectionModeCombo->addItem(QStringLiteral("R3"), 0);
+    m_injectionModeCombo->addItem(
+        buildProcessDetailR0ActionIcon(QStringLiteral(":/Icon/process_details.svg")),
+        QStringLiteral("R0驱动"),
+        1);
+    m_injectionModeCombo->setToolTip(QStringLiteral("选择 DLL / Shellcode 注入执行方式。R0驱动模式通过 KswordARK 驱动完成远端分配、写入和建线程。"));
+
     m_dllPathLineEdit = new QLineEdit(injectGroup);
     m_dllPathLineEdit->setPlaceholderText("请选择要注入的 DLL 路径");
     m_browseDllButton = buildTextActionButton(
@@ -1451,14 +1482,16 @@ void ProcessDetailWindow::initializeActionTab()
         QStringLiteral("执行 shellcode 注入"),
         injectGroup);
 
-    injectLayout->addWidget(new QLabel("DLL", injectGroup), 0, 0);
-    injectLayout->addWidget(m_dllPathLineEdit, 0, 1);
-    injectLayout->addWidget(m_browseDllButton, 0, 2);
-    injectLayout->addWidget(m_injectDllButton, 0, 3);
-    injectLayout->addWidget(new QLabel("Shellcode", injectGroup), 1, 0);
-    injectLayout->addWidget(m_shellcodePathLineEdit, 1, 1);
-    injectLayout->addWidget(m_browseShellcodeButton, 1, 2);
-    injectLayout->addWidget(m_injectShellcodeButton, 1, 3);
+    injectLayout->addWidget(new QLabel("模式", injectGroup), 0, 0);
+    injectLayout->addWidget(m_injectionModeCombo, 0, 1, 1, 3);
+    injectLayout->addWidget(new QLabel("DLL", injectGroup), 1, 0);
+    injectLayout->addWidget(m_dllPathLineEdit, 1, 1);
+    injectLayout->addWidget(m_browseDllButton, 1, 2);
+    injectLayout->addWidget(m_injectDllButton, 1, 3);
+    injectLayout->addWidget(new QLabel("Shellcode", injectGroup), 2, 0);
+    injectLayout->addWidget(m_shellcodePathLineEdit, 2, 1);
+    injectLayout->addWidget(m_browseShellcodeButton, 2, 2);
+    injectLayout->addWidget(m_injectShellcodeButton, 2, 3);
     m_actionLayout->addWidget(injectGroup);
 
     m_actionLayout->addStretch(1);
@@ -1495,6 +1528,7 @@ void ProcessDetailWindow::initializeActionTab()
         .arg(KswordTheme::PrimaryBlueHex);
     m_terminateActionCombo->setStyleSheet(comboStyle);
     m_priorityCombo->setStyleSheet(comboStyle);
+    m_injectionModeCombo->setStyleSheet(comboStyle);
 
     const std::vector<QPushButton*> actionButtons{
         m_executeTerminateActionButton,

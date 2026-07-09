@@ -67,6 +67,13 @@ public:
     // 返回：无。
     void showHotkeyTabAndRefresh();
 
+    // showActionTab 作用：
+    // - 将详情窗口切换到“操作”页；
+    // - 供进程列表右键菜单直达 DLL/Shellcode 注入区域。
+    // 参数：无。
+    // 返回：无。
+    void showActionTab();
+
 signals:
     // requestOpenProcessByPid 作用：
     // - 在“转到父进程”按钮点击时发出；
@@ -569,6 +576,7 @@ private:
     QPushButton* m_r0DangerFlagsButton = nullptr; // R0 危险标志/DKOM 菜单按钮。
 
     QLineEdit* m_dllPathLineEdit = nullptr;    // DLL 路径输入框。
+    QComboBox* m_injectionModeCombo = nullptr; // 注入模式：R3 或 R0 驱动。
     QPushButton* m_browseDllButton = nullptr;  // 浏览 DLL 按钮。
     QPushButton* m_injectDllButton = nullptr;  // 执行 DLL 注入按钮。
 

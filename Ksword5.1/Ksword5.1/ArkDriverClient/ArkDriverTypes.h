@@ -161,6 +161,24 @@ namespace ksword::ark
         std::uint64_t processObjectAddress = 0; // processObjectAddress：诊断地址。
     };
 
+    // ProcessInjectResult 承载 R0 DLL / Shellcode 注入响应。
+    struct ProcessInjectResult
+    {
+        IoResult io;                         // io：DeviceIoControl 调用状态。
+        std::uint32_t version = 0;           // version：协议版本。
+        std::uint32_t processId = 0;         // processId：目标 PID。
+        std::uint32_t injectType = 0;        // injectType：DLL 路径或 shellcode。
+        std::uint32_t status = KSWORD_ARK_PROCESS_INJECT_STATUS_UNKNOWN; // status：R0 聚合状态。
+        std::uint32_t flags = 0;             // flags：请求标志回显。
+        std::uint32_t bytesWritten = 0;      // bytesWritten：写入目标进程的 payload 字节数。
+        long lastStatus = 0;                 // lastStatus：底层 NTSTATUS。
+        long waitStatus = 0;                 // waitStatus：可选等待远端线程的状态。
+        std::uint64_t entryPointAddress = 0; // entryPointAddress：远端线程入口。
+        std::uint64_t parameterAddress = 0;  // parameterAddress：远端线程参数。
+        std::uint64_t remoteBaseAddress = 0; // remoteBaseAddress：远端 payload 区域。
+        std::uint64_t remoteRegionSize = 0;  // remoteRegionSize：远端分配区域大小。
+    };
+
     // ThreadEntry 是 R0 KTHREAD 扩展字段的 R3 侧模型。
     // 输入：ArkDriverProcess.cpp 从 KSWORD_ARK_THREAD_ENTRY 逐字段复制。
     // 处理：flags 保留 KSWORD_ARK_THREAD_FLAG_* cross-view 结果，fieldFlags 保留字段可用性。
