@@ -27,6 +27,11 @@ Environment:
 #define KSWORD_ARK_ENUM_RESPONSE_HEADER_SIZE \
     (sizeof(KSWORD_ARK_ENUM_PROCESS_RESPONSE) - sizeof(KSWORD_ARK_PROCESS_ENTRY))
 
+#define KSWORD_ARK_INJECT_REQUEST_HEADER_SIZE \
+    FIELD_OFFSET(KSWORD_ARK_INJECT_PROCESS_REQUEST, payload)
+
+#define KSWORD_ARK_PROCESS_INJECT_IOCTL_POOL_TAG 'jIsK'
+
 static VOID
 KswordARKProcessIoctlLog(
     _In_ WDFDEVICE Device,
@@ -806,4 +811,196 @@ Return Value:
         pspCidTableAddress,
         (unsigned int)status);
     return status;
+}
+
+NTSTATUS
+KswordARKProcessIoctlInjectProcess(
+    _In_ WDFDEVICE Device,
+    _In_ WDFREQUEST Request,
+    _In_ size_t InputBufferLength,
+    _In_ size_t OutputBufferLength,
+    _Out_ size_t* BytesReturned
+    )
+/*++
+
+Routine Description:
+
+    Handle IOCTL_KSWORD_ARK_INJECT_PROCESS. The METHOD_BUFFERED input carries a
+    variable-length DLL path or shellcode blob, so the handler copies it before
+    retrieving the output buffer.
+
+Arguments:
+
+    Device - WDF device used for logging and safety policy.
+    Request - Current IOCTL request.
+    InputBufferLength - Input length supplied by WDF; validation uses the
+        retrieved buffer length.
+    OutputBufferLength - Output length supplied by WDF; validation uses the
+        retrieved buffer length.
+    BytesReturned - Receives sizeof(KSWORD_ARK_INJECT_PROCESS_RESPONSE) when a
+        semantic response is produced.
+
+Return Value:
+
+    STATUS_SUCCESS when the response contains the semantic injection status, or
+    validation/safety NTSTATUS when the request cannot be executed.
+
+--*/
+{
+    KSWORD_ARK_INJECT_PROCESS_REQUEST* injectRequest = NULL;
+    KSWORD_ARK_INJECT_PROCESS_REQUEST* injectRequestCopy = NULL;
+    KSWORD_ARK_INJECT_PROCESS_RESPONSE* injectResponse = NULL;
+    PVOID inputBuffer = NULL;
+    PVOID outputBuffer = NULL;
+    size_t actualInputLength = 0U;
+    size_t actualOutputLength = 0U;
+    size_t requiredInputLength = 0U;
+    size_t bytesWritten = 0U;
+    const ULONG allowedFlags =
+        KSWORD_ARK_PROCESS_INJECT_FLAG_UI_CONFIRMED |
+        KSWORD_ARK_PROCESS_INJECT_FLAG_WAIT_THREAD;
+    NTSTATUS status = STATUS_SUCCESS;
+
+    UNREFERENCED_PARAMETER(InputBufferLength);
+    UNREFERENCED_PARAMETER(OutputBufferLength);
+
+    if (BytesReturned == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    *BytesReturned = 0U;
+
+    status = KswordARKValidateDeviceIoControlWriteAccess(Request);
+    if (!NT_SUCCESS(status)) {
+        KswordARKProcessIoctlLog(Device, "Warn", "R0 inject denied: write access required, status=0x%08X.", (unsigned int)status);
+        return status;
+    }
+
+    status = KswordARKRetrieveRequiredInputBuffer(
+        Request,
+        KSWORD_ARK_INJECT_REQUEST_HEADER_SIZE,
+        &inputBuffer,
+        &actualInputLength);
+    if (!NT_SUCCESS(status)) {
+        KswordARKProcessIoctlLog(Device, "Error", "R0 inject ioctl: input invalid, status=0x%08X.", (unsigned int)status);
+        return status;
+    }
+
+    injectRequest = (KSWORD_ARK_INJECT_PROCESS_REQUEST*)inputBuffer;
+    if (injectRequest->version != KSWORD_ARK_PROCESS_INJECT_PROTOCOL_VERSION ||
+        (injectRequest->flags & ~allowedFlags) != 0UL ||
+        (injectRequest->injectType != KSWORD_ARK_PROCESS_INJECT_TYPE_DLL_PATH &&
+            injectRequest->injectType != KSWORD_ARK_PROCESS_INJECT_TYPE_SHELLCODE) ||
+        injectRequest->payloadBytes == 0UL ||
+        injectRequest->payloadBytes > KSWORD_ARK_PROCESS_INJECT_MAX_PAYLOAD_BYTES ||
+        (SIZE_T)injectRequest->payloadBytes > (MAXSIZE_T - KSWORD_ARK_INJECT_REQUEST_HEADER_SIZE)) {
+        KswordARKProcessIoctlLog(
+            Device,
+            "Warn",
+            "R0 inject ioctl: request rejected, pid=%lu, type=%lu, flags=0x%08X, bytes=%lu.",
+            (unsigned long)injectRequest->processId,
+            (unsigned long)injectRequest->injectType,
+            (unsigned int)injectRequest->flags,
+            (unsigned long)injectRequest->payloadBytes);
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    status = KswordARKValidateUserPid((ULONG)injectRequest->processId);
+    if (!NT_SUCCESS(status)) {
+        KswordARKProcessIoctlLog(Device, "Warn", "R0 inject ioctl: pid rejected, pid=%lu.", (unsigned long)injectRequest->processId);
+        return status;
+    }
+
+    requiredInputLength =
+        KSWORD_ARK_INJECT_REQUEST_HEADER_SIZE +
+        (SIZE_T)injectRequest->payloadBytes;
+    if (actualInputLength < requiredInputLength) {
+        KswordARKProcessIoctlLog(
+            Device,
+            "Warn",
+            "R0 inject ioctl: input truncated, actual=%Iu, required=%Iu.",
+            actualInputLength,
+            requiredInputLength);
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    injectRequestCopy = (KSWORD_ARK_INJECT_PROCESS_REQUEST*)ExAllocatePool2(
+        POOL_FLAG_NON_PAGED,
+        requiredInputLength,
+        KSWORD_ARK_PROCESS_INJECT_IOCTL_POOL_TAG);
+    if (injectRequestCopy == NULL) {
+        KswordARKProcessIoctlLog(Device, "Error", "R0 inject ioctl: input copy allocation failed, bytes=%Iu.", requiredInputLength);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+    RtlCopyMemory(injectRequestCopy, injectRequest, requiredInputLength);
+    injectRequest = injectRequestCopy;
+
+    status = KswordARKRetrieveRequiredOutputBuffer(
+        Request,
+        sizeof(KSWORD_ARK_INJECT_PROCESS_RESPONSE),
+        &outputBuffer,
+        &actualOutputLength);
+    if (!NT_SUCCESS(status)) {
+        KswordARKProcessIoctlLog(Device, "Error", "R0 inject ioctl: output invalid, status=0x%08X.", (unsigned int)status);
+        ExFreePoolWithTag(injectRequestCopy, KSWORD_ARK_PROCESS_INJECT_IOCTL_POOL_TAG);
+        return status;
+    }
+
+    {
+        KSWORD_ARK_SAFETY_CONTEXT safetyContext;
+        RtlZeroMemory(&safetyContext, sizeof(safetyContext));
+        safetyContext.Operation = KSWORD_ARK_SAFETY_OPERATION_PROCESS_INJECT;
+        safetyContext.TargetProcessId = (ULONG)injectRequest->processId;
+        safetyContext.ContextFlags =
+            ((injectRequest->flags & KSWORD_ARK_PROCESS_INJECT_FLAG_UI_CONFIRMED) != 0UL) ?
+            KSWORD_ARK_SAFETY_CONTEXT_FLAG_UI_CONFIRMED :
+            0UL;
+        status = KswordARKSafetyEvaluate(Device, &safetyContext);
+        if (!NT_SUCCESS(status)) {
+            KswordARKProcessIoctlLog(
+                Device,
+                "Warn",
+                "R0 inject denied by safety policy: pid=%lu, type=%lu, status=0x%08X.",
+                (unsigned long)injectRequest->processId,
+                (unsigned long)injectRequest->injectType,
+                (unsigned int)status);
+            ExFreePoolWithTag(injectRequestCopy, KSWORD_ARK_PROCESS_INJECT_IOCTL_POOL_TAG);
+            return status;
+        }
+    }
+
+    injectResponse = (KSWORD_ARK_INJECT_PROCESS_RESPONSE*)outputBuffer;
+    status = KswordARKDriverInjectProcess(
+        injectResponse,
+        actualOutputLength,
+        injectRequest,
+        requiredInputLength,
+        &bytesWritten);
+    *BytesReturned = bytesWritten;
+    if (!NT_SUCCESS(status)) {
+        KswordARKProcessIoctlLog(
+            Device,
+            "Error",
+            "R0 inject backend failed: pid=%lu, type=%lu, status=0x%08X.",
+            (unsigned long)injectRequest->processId,
+            (unsigned long)injectRequest->injectType,
+            (unsigned int)status);
+        ExFreePoolWithTag(injectRequestCopy, KSWORD_ARK_PROCESS_INJECT_IOCTL_POOL_TAG);
+        return status;
+    }
+
+    if (*BytesReturned >= sizeof(KSWORD_ARK_INJECT_PROCESS_RESPONSE)) {
+        KswordARKProcessIoctlLog(
+            Device,
+            injectResponse->status == KSWORD_ARK_PROCESS_INJECT_STATUS_INJECTED ? "Info" : "Error",
+            "R0 inject result: pid=%lu, type=%lu, status=%lu, written=%lu, remote=0x%I64X, nt=0x%08X.",
+            (unsigned long)injectResponse->processId,
+            (unsigned long)injectResponse->injectType,
+            (unsigned long)injectResponse->status,
+            (unsigned long)injectResponse->bytesWritten,
+            injectResponse->remoteBaseAddress,
+            (unsigned int)injectResponse->lastStatus);
+    }
+
+    ExFreePoolWithTag(injectRequestCopy, KSWORD_ARK_PROCESS_INJECT_IOCTL_POOL_TAG);
+    return STATUS_SUCCESS;
 }

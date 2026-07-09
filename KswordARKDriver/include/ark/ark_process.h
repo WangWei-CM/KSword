@@ -62,6 +62,24 @@ KswordARKDriverDkomProcess(
     _Out_ ULONG64* ProcessObjectAddressOut
     );
 
+NTSTATUS
+KswordARKDriverInjectProcess(
+    _Out_writes_bytes_(OutputBufferLength) KSWORD_ARK_INJECT_PROCESS_RESPONSE* Response,
+    _In_ size_t OutputBufferLength,
+    _In_reads_bytes_(InputBufferLength) const KSWORD_ARK_INJECT_PROCESS_REQUEST* Request,
+    _In_ size_t InputBufferLength,
+    _Out_ size_t* BytesWrittenOut
+    );
+
+NTSTATUS
+KswordARKProcessIoctlInjectProcess(
+    _In_ WDFDEVICE Device,
+    _In_ WDFREQUEST Request,
+    _In_ size_t InputBufferLength,
+    _In_ size_t OutputBufferLength,
+    _Out_ size_t* BytesReturned
+    );
+
 /*
  * KswordARKDriverQueryProcessCrossView
  * Inputs:

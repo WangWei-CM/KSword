@@ -87,6 +87,7 @@
 #define NOMINMAX
 #endif
 #include <Windows.h>
+#include <winioctl.h>
 #include <Wbemidl.h>
 #include <fltUser.h>
 #include <atlbase.h>
@@ -1624,6 +1625,44 @@ namespace
             return QString();
         }
         return QString::fromWCharArray(shortPathBuffer.data(), static_cast<int>(copiedChars));
+    }
+
+    QString normalizeFileDockPath(const QString& path)
+    {
+        return QDir::toNativeSeparators(QDir::cleanPath(path.trimmed()));
+    }
+
+    bool pathEqualsCaseInsensitive(const QString& left, const QString& right)
+    {
+        return normalizeFileDockPath(left).compare(
+            normalizeFileDockPath(right),
+            Qt::CaseInsensitive) == 0;
+    }
+
+    void closeWin32Handle(HANDLE& handleValue)
+    {
+        if (handleValue != nullptr && handleValue != INVALID_HANDLE_VALUE)
+        {
+            ::CloseHandle(handleValue);
+            handleValue = INVALID_HANDLE_VALUE;
+        }
+    }
+
+    QString oplockCompletionText(const bool completionOk, const unsigned long completionError)
+    {
+        if (completionOk)
+        {
+            return QStringLiteral("已触发/完成");
+        }
+        if (completionError == ERROR_OPERATION_ABORTED)
+        {
+            return QStringLiteral("已取消");
+        }
+        if (completionError == ERROR_HANDLE_EOF)
+        {
+            return QStringLiteral("目标句柄已关闭");
+        }
+        return QStringLiteral("完成失败，Win32=%1").arg(completionError);
     }
 
     // openKswordArkDriverHandle：
@@ -5756,6 +5795,22 @@ namespace
     };
 }
 
+struct FileDock::FileOplockEntry
+{
+    QString path;
+    HANDLE fileHandle = INVALID_HANDLE_VALUE;
+    HANDLE eventHandle = nullptr;
+    OVERLAPPED overlapped{};
+    std::thread waitThread;
+    std::atomic_bool releaseRequested{ false };
+
+    ~FileOplockEntry()
+    {
+        closeWin32Handle(fileHandle);
+        closeWin32Handle(eventHandle);
+    }
+};
+
 FileDock::FileDock(QWidget* parent)
     : QWidget(parent)
 {
@@ -5768,7 +5823,8 @@ FileDock::FileDock(QWidget* parent)
 
 FileDock::~FileDock()
 {
-    // 析构阶段只发出停止信号，避免后台线程继续等待新的 UI 选择结果。
+    // 析构阶段先释放持有型 Oplock，再停止解锁器后台线程。
+    releaseAllActiveOplocks(false);
     m_unlockerWorkerStopRequested.store(true);
     std::thread workerThread;
     {
@@ -8041,6 +8097,9 @@ void FileDock::showPanelContextMenu(FilePanelWidgets& panel, const QPoint& local
     QAction* deleteAction = menu.addAction(QIcon(":/Icon/process_terminate.svg"), QStringLiteral("删除(Delete)"));
     QAction* driverDeleteAction = menu.addAction(QIcon(":/Icon/process_terminate.svg"), QStringLiteral("驱动删除(R0)"));
     QAction* unlockByDriverAction = menu.addAction(QIcon(":/Icon/handle_refresh.svg"), QStringLiteral("文件解锁器(R3/R0)"));
+    QAction* addOplockAction = menu.addAction(QIcon(":/Icon/handle_refresh.svg"), QStringLiteral("添加 Oplock"));
+    QAction* releaseOplockAction = menu.addAction(QIcon(":/Icon/process_resume.svg"), QStringLiteral("释放当前 Oplock"));
+    QAction* releaseAllOplocksAction = menu.addAction(QIcon(":/Icon/process_resume.svg"), QStringLiteral("释放全部 Oplock"));
     QAction* takeOwnerAction = menu.addAction(QIcon(":/Icon/file_owner.svg"), QStringLiteral("取得所有权"));
     menu.addSeparator();
     QAction* newFileAction = menu.addAction(QIcon(":/Icon/process_details.svg"), QStringLiteral("新建文件"));
@@ -8061,6 +8120,8 @@ void FileDock::showPanelContextMenu(FilePanelWidgets& panel, const QPoint& local
 
     // 结合选中集合动态启用菜单项，保证“多选”和“右键动作”行为一致。
     const bool singleFileOnly = isSingleSelection && QFileInfo(firstPath).isFile();
+    const bool firstPathHasOplock = singleFileOnly && hasActiveOplockForPath(firstPath);
+    const std::size_t currentOplockCount = activeOplockCount();
     openAction->setEnabled(hasSelection);
     copyPathAction->setEnabled(hasSelection);
     copyKernelPathAction->setEnabled(hasSelection);
@@ -8074,6 +8135,9 @@ void FileDock::showPanelContextMenu(FilePanelWidgets& panel, const QPoint& local
     deleteAction->setEnabled(hasSelection);
     driverDeleteAction->setEnabled(hasSelection);
     unlockByDriverAction->setEnabled(isSingleSelection);
+    addOplockAction->setEnabled(singleFileOnly && !firstPathHasOplock);
+    releaseOplockAction->setEnabled(firstPathHasOplock);
+    releaseAllOplocksAction->setEnabled(currentOplockCount > 0U);
     takeOwnerAction->setEnabled(hasSelection);
     detailAction->setEnabled(hasSelection);
     hashAction->setEnabled(hasAnyFile);
@@ -8203,6 +8267,21 @@ void FileDock::showPanelContextMenu(FilePanelWidgets& panel, const QPoint& local
             return;
         }
         unlockSelectedItemsByDriver(panel);
+        return;
+    }
+    if (selectedAction == addOplockAction)
+    {
+        addOplockToSelectedFile(panel);
+        return;
+    }
+    if (selectedAction == releaseOplockAction)
+    {
+        releaseSelectedFileOplock(panel);
+        return;
+    }
+    if (selectedAction == releaseAllOplocksAction)
+    {
+        releaseAllActiveOplocks(true);
         return;
     }
     if (selectedAction == takeOwnerAction)
@@ -9351,6 +9430,381 @@ void FileDock::unlockSelectedItemsByDriver(FilePanelWidgets& panel)
     }
 
     unlockPathsByDriver(paths, QStringLiteral("panel_context_menu"), &panel);
+}
+
+void FileDock::addOplockToSelectedFile(FilePanelWidgets& panel)
+{
+    const std::vector<QString> paths = selectedPaths(panel);
+    if (paths.size() != 1U)
+    {
+        QMessageBox::information(
+            this,
+            QStringLiteral("添加 Oplock"),
+            QStringLiteral("请只选择一个文件。"));
+        return;
+    }
+
+    const QFileInfo fileInfo(paths.front());
+    if (!fileInfo.isFile())
+    {
+        QMessageBox::information(
+            this,
+            QStringLiteral("添加 Oplock"),
+            QStringLiteral("Oplock 入口当前只支持普通文件。"));
+        return;
+    }
+
+    const QString normalizedPath = normalizeFileDockPath(fileInfo.absoluteFilePath());
+    if (hasActiveOplockForPath(normalizedPath))
+    {
+        QMessageBox::information(
+            this,
+            QStringLiteral("添加 Oplock"),
+            QStringLiteral("该文件已经由 FileDock 持有 Oplock：\n%1").arg(normalizedPath));
+        return;
+    }
+
+    std::wstring nativePath = normalizedPath.toStdWString();
+    HANDLE fileHandle = ::CreateFileW(
+        nativePath.c_str(),
+        GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr,
+        OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED,
+        nullptr);
+    if (fileHandle == INVALID_HANDLE_VALUE)
+    {
+        const DWORD errorCode = ::GetLastError();
+        QMessageBox::warning(
+            this,
+            QStringLiteral("添加 Oplock"),
+            QStringLiteral("打开文件失败，Win32=%1：\n%2").arg(errorCode).arg(normalizedPath));
+        kLogEvent event;
+        warn << event
+            << "[FileDock] 添加 Oplock 失败：CreateFileW, path="
+            << normalizedPath.toStdString()
+            << ", error="
+            << errorCode
+            << eol;
+        return;
+    }
+
+    auto oplockEntry = std::make_shared<FileOplockEntry>();
+    oplockEntry->path = normalizedPath;
+    oplockEntry->fileHandle = fileHandle;
+    oplockEntry->eventHandle = ::CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (oplockEntry->eventHandle == nullptr)
+    {
+        const DWORD errorCode = ::GetLastError();
+        QMessageBox::warning(
+            this,
+            QStringLiteral("添加 Oplock"),
+            QStringLiteral("创建等待事件失败，Win32=%1。").arg(errorCode));
+        kLogEvent event;
+        warn << event
+            << "[FileDock] 添加 Oplock 失败：CreateEventW, path="
+            << normalizedPath.toStdString()
+            << ", error="
+            << errorCode
+            << eol;
+        return;
+    }
+    oplockEntry->overlapped.hEvent = oplockEntry->eventHandle;
+
+    const BOOL requestOk = ::DeviceIoControl(
+        oplockEntry->fileHandle,
+        FSCTL_REQUEST_OPLOCK_LEVEL_1,
+        nullptr,
+        0,
+        nullptr,
+        0,
+        nullptr,
+        &oplockEntry->overlapped);
+    const DWORD requestError = requestOk ? ERROR_SUCCESS : ::GetLastError();
+    if (requestOk != FALSE)
+    {
+        QMessageBox::information(
+            this,
+            QStringLiteral("添加 Oplock"),
+            QStringLiteral("Oplock 请求已立即完成，没有保持中的 Oplock：\n%1").arg(normalizedPath));
+        kLogEvent event;
+        info << event
+            << "[FileDock] 添加 Oplock：请求同步完成, path="
+            << normalizedPath.toStdString()
+            << eol;
+        return;
+    }
+    if (requestError != ERROR_IO_PENDING)
+    {
+        QMessageBox::warning(
+            this,
+            QStringLiteral("添加 Oplock"),
+            QStringLiteral("请求 Oplock 失败，Win32=%1：\n%2").arg(requestError).arg(normalizedPath));
+        kLogEvent event;
+        warn << event
+            << "[FileDock] 添加 Oplock 失败：DeviceIoControl, path="
+            << normalizedPath.toStdString()
+            << ", error="
+            << requestError
+            << eol;
+        return;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(m_activeOplockMutex);
+        m_activeOplocks.push_back(oplockEntry);
+    }
+
+    QPointer<FileDock> safeThis(this);
+    oplockEntry->waitThread = std::thread([safeThis, oplockEntry]() {
+        bool completionOk = false;
+        DWORD completionError = ERROR_SUCCESS;
+        const DWORD waitResult = ::WaitForSingleObject(oplockEntry->eventHandle, INFINITE);
+        if (waitResult == WAIT_OBJECT_0)
+        {
+            DWORD bytesTransferred = 0;
+            completionOk = (::GetOverlappedResult(
+                oplockEntry->fileHandle,
+                &oplockEntry->overlapped,
+                &bytesTransferred,
+                FALSE) != FALSE);
+            if (!completionOk)
+            {
+                completionError = ::GetLastError();
+            }
+        }
+        else
+        {
+            completionError = ::GetLastError();
+        }
+
+        if (safeThis != nullptr)
+        {
+            QMetaObject::invokeMethod(
+                safeThis,
+                [safeThis, oplockEntry, completionOk, completionError]() {
+                    if (safeThis != nullptr)
+                    {
+                        safeThis->handleOplockCompleted(oplockEntry, completionOk, completionError);
+                    }
+                },
+                Qt::QueuedConnection);
+        }
+    });
+
+    QMessageBox::information(
+        this,
+        QStringLiteral("添加 Oplock"),
+        QStringLiteral("已为文件添加 Oplock。保持期间如果其它进程触发 break，将自动提示并释放：\n%1").arg(normalizedPath));
+    kLogEvent event;
+    info << event
+        << "[FileDock] 添加 Oplock 成功, path="
+        << normalizedPath.toStdString()
+        << ", activeCount="
+        << activeOplockCount()
+        << eol;
+}
+
+void FileDock::releaseSelectedFileOplock(FilePanelWidgets& panel)
+{
+    const std::vector<QString> paths = selectedPaths(panel);
+    if (paths.size() != 1U)
+    {
+        QMessageBox::information(
+            this,
+            QStringLiteral("释放 Oplock"),
+            QStringLiteral("请只选择一个已添加 Oplock 的文件。"));
+        return;
+    }
+
+    const QString normalizedPath = normalizeFileDockPath(paths.front());
+    std::shared_ptr<FileOplockEntry> targetEntry;
+    {
+        std::lock_guard<std::mutex> lock(m_activeOplockMutex);
+        auto iterator = std::find_if(
+            m_activeOplocks.begin(),
+            m_activeOplocks.end(),
+            [&normalizedPath](const std::shared_ptr<FileOplockEntry>& entry) {
+                return entry != nullptr && pathEqualsCaseInsensitive(entry->path, normalizedPath);
+            });
+        if (iterator != m_activeOplocks.end())
+        {
+            targetEntry = *iterator;
+            m_activeOplocks.erase(iterator);
+        }
+    }
+
+    if (targetEntry == nullptr)
+    {
+        QMessageBox::information(
+            this,
+            QStringLiteral("释放 Oplock"),
+            QStringLiteral("当前文件没有由 FileDock 持有的 Oplock：\n%1").arg(normalizedPath));
+        return;
+    }
+
+    targetEntry->releaseRequested.store(true);
+    if (targetEntry->fileHandle != nullptr && targetEntry->fileHandle != INVALID_HANDLE_VALUE)
+    {
+        (void)::CancelIoEx(targetEntry->fileHandle, &targetEntry->overlapped);
+    }
+    if (targetEntry->eventHandle != nullptr)
+    {
+        (void)::SetEvent(targetEntry->eventHandle);
+    }
+    if (targetEntry->waitThread.joinable() &&
+        targetEntry->waitThread.get_id() != std::this_thread::get_id())
+    {
+        targetEntry->waitThread.join();
+    }
+
+    QMessageBox::information(
+        this,
+        QStringLiteral("释放 Oplock"),
+        QStringLiteral("已释放 Oplock：\n%1").arg(normalizedPath));
+    kLogEvent event;
+    info << event
+        << "[FileDock] 释放当前 Oplock, path="
+        << normalizedPath.toStdString()
+        << ", activeCount="
+        << activeOplockCount()
+        << eol;
+}
+
+void FileDock::releaseAllActiveOplocks(const bool showMessage)
+{
+    std::vector<std::shared_ptr<FileOplockEntry>> entries;
+    {
+        std::lock_guard<std::mutex> lock(m_activeOplockMutex);
+        entries.swap(m_activeOplocks);
+    }
+
+    for (const std::shared_ptr<FileOplockEntry>& entry : entries)
+    {
+        if (entry == nullptr)
+        {
+            continue;
+        }
+        entry->releaseRequested.store(true);
+        if (entry->fileHandle != nullptr && entry->fileHandle != INVALID_HANDLE_VALUE)
+        {
+            (void)::CancelIoEx(entry->fileHandle, &entry->overlapped);
+        }
+        if (entry->eventHandle != nullptr)
+        {
+            (void)::SetEvent(entry->eventHandle);
+        }
+    }
+
+    for (const std::shared_ptr<FileOplockEntry>& entry : entries)
+    {
+        if (entry != nullptr &&
+            entry->waitThread.joinable() &&
+            entry->waitThread.get_id() != std::this_thread::get_id())
+        {
+            entry->waitThread.join();
+        }
+    }
+
+    if (showMessage)
+    {
+        QMessageBox::information(
+            this,
+            QStringLiteral("释放全部 Oplock"),
+            QStringLiteral("已释放 %1 个 Oplock。").arg(entries.size()));
+    }
+    if (!entries.empty())
+    {
+        kLogEvent event;
+        info << event
+            << "[FileDock] 释放全部 Oplock, count="
+            << entries.size()
+            << eol;
+    }
+}
+
+bool FileDock::hasActiveOplockForPath(const QString& filePath) const
+{
+    const QString normalizedPath = normalizeFileDockPath(filePath);
+    std::lock_guard<std::mutex> lock(m_activeOplockMutex);
+    return std::any_of(
+        m_activeOplocks.begin(),
+        m_activeOplocks.end(),
+        [&normalizedPath](const std::shared_ptr<FileOplockEntry>& entry) {
+            return entry != nullptr &&
+                !entry->releaseRequested.load() &&
+                pathEqualsCaseInsensitive(entry->path, normalizedPath);
+        });
+}
+
+std::size_t FileDock::activeOplockCount() const
+{
+    std::lock_guard<std::mutex> lock(m_activeOplockMutex);
+    return static_cast<std::size_t>(std::count_if(
+        m_activeOplocks.begin(),
+        m_activeOplocks.end(),
+        [](const std::shared_ptr<FileOplockEntry>& entry) {
+            return entry != nullptr && !entry->releaseRequested.load();
+        }));
+}
+
+void FileDock::handleOplockCompleted(
+    std::shared_ptr<FileOplockEntry> entry,
+    const bool completionOk,
+    const unsigned long completionError)
+{
+    if (entry == nullptr)
+    {
+        return;
+    }
+
+    const bool wasManualRelease = entry->releaseRequested.load();
+    bool removed = false;
+    {
+        std::lock_guard<std::mutex> lock(m_activeOplockMutex);
+        auto iterator = std::find(m_activeOplocks.begin(), m_activeOplocks.end(), entry);
+        if (iterator != m_activeOplocks.end())
+        {
+            m_activeOplocks.erase(iterator);
+            removed = true;
+        }
+    }
+
+    if (entry->waitThread.joinable() &&
+        entry->waitThread.get_id() != std::this_thread::get_id())
+    {
+        entry->waitThread.join();
+    }
+
+    if (!removed && wasManualRelease)
+    {
+        return;
+    }
+
+    const QString stateText = oplockCompletionText(completionOk, completionError);
+    kLogEvent event;
+    info << event
+        << "[FileDock] Oplock 完成, path="
+        << entry->path.toStdString()
+        << ", manualRelease="
+        << (wasManualRelease ? "true" : "false")
+        << ", completionOk="
+        << (completionOk ? "true" : "false")
+        << ", completionError="
+        << completionError
+        << ", activeCount="
+        << activeOplockCount()
+        << eol;
+
+    if (!wasManualRelease)
+    {
+        QMessageBox::information(
+            this,
+            QStringLiteral("Oplock 已触发"),
+            QStringLiteral("文件 Oplock 已完成或被触发，并已释放。\n状态：%1\n文件：%2")
+                .arg(stateText, entry->path));
+    }
 }
 
 void FileDock::unlockPathsByDriver(

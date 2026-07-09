@@ -45,6 +45,7 @@
 #define KSWORD_ARK_IOCTL_FUNCTION_SET_PROCESS_VISIBILITY 0x822UL
 #define KSWORD_ARK_IOCTL_FUNCTION_SET_PROCESS_SPECIAL_FLAGS 0x824UL
 #define KSWORD_ARK_IOCTL_FUNCTION_DKOM_PROCESS 0x825UL
+#define KSWORD_ARK_IOCTL_FUNCTION_INJECT_PROCESS 0x833UL
 #define KSWORD_ARK_IOCTL_FUNCTION_QUERY_PROCESS_CROSSVIEW 0x836UL
 #define KSWORD_ARK_IOCTL_FUNCTION_QUERY_PROCESS_DETAIL 0x83CUL
 #define KSWORD_ARK_IOCTL_FUNCTION_QUERY_PROCESS_RUNTIME_FIELDS 0x83EUL
@@ -717,3 +718,57 @@ typedef struct _KSWORD_ARK_DKOM_PROCESS_RESPONSE
     unsigned long long pspCidTableAddress;
     unsigned long long processObjectAddress;
 } KSWORD_ARK_DKOM_PROCESS_RESPONSE;
+
+#define IOCTL_KSWORD_ARK_INJECT_PROCESS \
+    CTL_CODE( \
+        KSWORD_ARK_IOCTL_DEVICE_TYPE, \
+        KSWORD_ARK_IOCTL_FUNCTION_INJECT_PROCESS, \
+        METHOD_BUFFERED, \
+        FILE_WRITE_ACCESS)
+
+#define KSWORD_ARK_PROCESS_INJECT_PROTOCOL_VERSION 1UL
+#define KSWORD_ARK_PROCESS_INJECT_MAX_PAYLOAD_BYTES (256UL * 1024UL)
+
+#define KSWORD_ARK_PROCESS_INJECT_TYPE_DLL_PATH   1UL
+#define KSWORD_ARK_PROCESS_INJECT_TYPE_SHELLCODE  2UL
+
+#define KSWORD_ARK_PROCESS_INJECT_FLAG_UI_CONFIRMED 0x00000001UL
+#define KSWORD_ARK_PROCESS_INJECT_FLAG_WAIT_THREAD  0x00000002UL
+
+#define KSWORD_ARK_PROCESS_INJECT_STATUS_UNKNOWN             0UL
+#define KSWORD_ARK_PROCESS_INJECT_STATUS_INJECTED            1UL
+#define KSWORD_ARK_PROCESS_INJECT_STATUS_INVALID_REQUEST     2UL
+#define KSWORD_ARK_PROCESS_INJECT_STATUS_PROCESS_OPEN_FAILED 3UL
+#define KSWORD_ARK_PROCESS_INJECT_STATUS_ALLOC_FAILED        4UL
+#define KSWORD_ARK_PROCESS_INJECT_STATUS_WRITE_FAILED        5UL
+#define KSWORD_ARK_PROCESS_INJECT_STATUS_THREAD_FAILED       6UL
+#define KSWORD_ARK_PROCESS_INJECT_STATUS_WAIT_FAILED         7UL
+
+typedef struct _KSWORD_ARK_INJECT_PROCESS_REQUEST
+{
+    unsigned long version;
+    unsigned long processId;
+    unsigned long injectType;
+    unsigned long flags;
+    unsigned long payloadBytes;
+    unsigned long reserved;
+    unsigned long long entryPointAddress;
+    unsigned long long parameterAddress;
+    unsigned char payload[1];
+} KSWORD_ARK_INJECT_PROCESS_REQUEST;
+
+typedef struct _KSWORD_ARK_INJECT_PROCESS_RESPONSE
+{
+    unsigned long version;
+    unsigned long processId;
+    unsigned long injectType;
+    unsigned long status;
+    unsigned long flags;
+    unsigned long bytesWritten;
+    long lastStatus;
+    long waitStatus;
+    unsigned long long entryPointAddress;
+    unsigned long long parameterAddress;
+    unsigned long long remoteBaseAddress;
+    unsigned long long remoteRegionSize;
+} KSWORD_ARK_INJECT_PROCESS_RESPONSE;

@@ -196,6 +196,9 @@ void ProcessDetailWindow::executeSetPriorityAction()
 void ProcessDetailWindow::executeInjectDllAction()
 {
     const QString dllPath = m_dllPathLineEdit->text().trimmed();
+    const bool useR0Injection =
+        m_injectionModeCombo != nullptr &&
+        m_injectionModeCombo->currentData().toInt() == 1;
     if (dllPath.isEmpty())
     {
         kLogEvent injectDllEmptyPathEvent;
@@ -211,22 +214,40 @@ void ProcessDetailWindow::executeInjectDllAction()
     info << actionEvent
         << "[ProcessDetailWindow] executeInjectDllAction: pid="
         << m_baseRecord.pid
+        << ", mode="
+        << (useR0Injection ? "R0" : "R3")
         << ", dllPath="
         << dllPath.toStdString()
         << eol;
 
     std::string detailText;
-    const bool actionOk = ks::process::InjectDllByPath(
-        m_baseRecord.pid,
-        dllPath.toStdString(),
-        &detailText);
+    bool actionOk = false;
+    if (useR0Injection)
+    {
+        ksword::ark::DriverClient driverClient;
+        const ksword::ark::ProcessInjectResult injectResult =
+            driverClient.injectProcessDll(
+                static_cast<std::uint32_t>(m_baseRecord.pid),
+                dllPath.toStdWString());
+        detailText = injectResult.io.message;
+        actionOk =
+            injectResult.io.ok &&
+            injectResult.status == KSWORD_ARK_PROCESS_INJECT_STATUS_INJECTED;
+    }
+    else
+    {
+        actionOk = ks::process::InjectDllByPath(
+            m_baseRecord.pid,
+            dllPath.toStdString(),
+            &detailText);
+    }
     (actionOk ? info : err) << actionEvent
         << "[ProcessDetailWindow] executeInjectDllAction: actionOk="
         << (actionOk ? "true" : "false")
         << ", detail="
         << detailText
         << eol;
-    showActionResultMessage("DLL 注入", actionOk, detailText, actionEvent);
+    showActionResultMessage(useR0Injection ? QStringLiteral("DLL 注入(R0)") : QStringLiteral("DLL 注入"), actionOk, detailText, actionEvent);
     if (actionOk)
     {
         requestAsyncModuleRefresh(true);
@@ -236,6 +257,9 @@ void ProcessDetailWindow::executeInjectDllAction()
 void ProcessDetailWindow::executeInjectShellcodeAction()
 {
     const QString shellcodePath = m_shellcodePathLineEdit->text().trimmed();
+    const bool useR0Injection =
+        m_injectionModeCombo != nullptr &&
+        m_injectionModeCombo->currentData().toInt() == 1;
     if (shellcodePath.isEmpty())
     {
         kLogEvent injectShellcodeEmptyPathEvent;
@@ -251,6 +275,8 @@ void ProcessDetailWindow::executeInjectShellcodeAction()
     info << actionEvent
         << "[ProcessDetailWindow] executeInjectShellcodeAction: pid="
         << m_baseRecord.pid
+        << ", mode="
+        << (useR0Injection ? "R0" : "R3")
         << ", filePath="
         << shellcodePath.toStdString()
         << eol;
@@ -268,10 +294,26 @@ void ProcessDetailWindow::executeInjectShellcodeAction()
     }
 
     std::string detailText;
-    const bool actionOk = ks::process::InjectShellcodeBuffer(
-        m_baseRecord.pid,
-        shellcodeBuffer,
-        &detailText);
+    bool actionOk = false;
+    if (useR0Injection)
+    {
+        ksword::ark::DriverClient driverClient;
+        const ksword::ark::ProcessInjectResult injectResult =
+            driverClient.injectProcessShellcode(
+                static_cast<std::uint32_t>(m_baseRecord.pid),
+                shellcodeBuffer);
+        detailText = injectResult.io.message;
+        actionOk =
+            injectResult.io.ok &&
+            injectResult.status == KSWORD_ARK_PROCESS_INJECT_STATUS_INJECTED;
+    }
+    else
+    {
+        actionOk = ks::process::InjectShellcodeBuffer(
+            m_baseRecord.pid,
+            shellcodeBuffer,
+            &detailText);
+    }
     (actionOk ? info : err) << actionEvent
         << "[ProcessDetailWindow] executeInjectShellcodeAction: actionOk="
         << (actionOk ? "true" : "false")
@@ -280,7 +322,7 @@ void ProcessDetailWindow::executeInjectShellcodeAction()
         << ", detail="
         << detailText
         << eol;
-    showActionResultMessage("Shellcode 注入", actionOk, detailText, actionEvent);
+    showActionResultMessage(useR0Injection ? QStringLiteral("Shellcode 注入(R0)") : QStringLiteral("Shellcode 注入"), actionOk, detailText, actionEvent);
 }
 
 QIcon ProcessDetailWindow::resolveProcessIcon(const std::string& processPath, const int iconPixelSize)
