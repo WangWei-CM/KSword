@@ -15,6 +15,7 @@
 
 #include <cstdint>     // std::uint64_t：文件大小统计。
 #include <atomic>
+#include <memory>
 #include <mutex>
 #include <thread>
 #include <vector>      // std::vector：导航历史记录容器。
@@ -137,6 +138,8 @@ private:
         int manualParseRequestSerial = 0;      // 手动解析请求序列号（用于丢弃过期结果）。
         QString manualParsingPath;             // 当前后台解析正在处理的路径（用于避免同路径重复解析）。
     };
+
+    struct FileOplockEntry;
 
 private:
     // ======================= UI 初始化 ========================
@@ -295,6 +298,29 @@ private:
     // - 说明：用于“文件解锁器”右键动作，不直接删除文件。
     void unlockSelectedItemsByDriver(FilePanelWidgets& panel);
 
+    // addOplockToSelectedFile：
+    // - 作用：对当前单选文件请求并保持一个 R3 Oplock；
+    // - 说明：Oplock 生命周期由 FileDock 维护，直到被触发、手动释放或 FileDock 析构。
+    void addOplockToSelectedFile(FilePanelWidgets& panel);
+
+    // releaseSelectedFileOplock：
+    // - 作用：释放当前单选文件上由 FileDock 持有的 Oplock。
+    void releaseSelectedFileOplock(FilePanelWidgets& panel);
+
+    // releaseAllActiveOplocks：
+    // - 作用：释放 FileDock 当前持有的全部 Oplock。
+    // - 参数 showMessage：为 true 时向用户显示释放数量。
+    void releaseAllActiveOplocks(bool showMessage);
+
+    // hasActiveOplockForPath / activeOplockCount：
+    // - 作用：查询当前 Oplock 持有状态，用于右键菜单启停。
+    bool hasActiveOplockForPath(const QString& filePath) const;
+    std::size_t activeOplockCount() const;
+
+    // handleOplockCompleted：
+    // - 作用：后台等待线程通知 UI：Oplock 已 break、被取消或失败。
+    void handleOplockCompleted(std::shared_ptr<FileOplockEntry> entry, bool completionOk, unsigned long completionError);
+
     // unlockPathsByDriver：
     // - 作用：执行“文件解锁器”核心流程（扫描占用 + 用户选择 + R3/R0 结束进程）；
     // - 参数 triggerTag：触发来源标签（右键菜单/系统右键）。
@@ -387,4 +413,8 @@ private:
     std::atomic_bool m_unlockerWorkerStopRequested{ false };
     std::atomic_bool m_unlockerWorkerRunning{ false };
     mutable std::mutex m_unlockerWorkerMutex;
+
+    // Oplock 持有状态。
+    std::vector<std::shared_ptr<FileOplockEntry>> m_activeOplocks;
+    mutable std::mutex m_activeOplockMutex;
 };
