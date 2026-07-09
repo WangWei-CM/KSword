@@ -134,6 +134,21 @@ namespace ksword::ark
         long lastStatus = 0;
     };
 
+    // ProcessIntegrityResult 承载 R0 进程完整性写入响应。
+    // 输入：由 DriverClient::setProcessIntegrity 填充，processId/integrityRid 回显目标。
+    // 处理：io.ok 只代表驱动通信和固定响应解析成功，status/lastStatus 表示 R0 内核 API 执行结果。
+    // 返回行为：unsupported=true 表示旧驱动缺少 IOCTL，调用方可以按策略回退到 R3。
+    struct ProcessIntegrityResult
+    {
+        IoResult io;                         // io：底层 DeviceIoControl 状态和响应 NTSTATUS。
+        bool unsupported = false;            // unsupported：旧驱动未注册 IOCTL 或返回不支持。
+        std::uint32_t version = 0;           // version：协议版本。
+        std::uint32_t processId = 0;         // processId：目标 PID。
+        std::uint32_t integrityRid = 0;      // integrityRid：S-1-16-* mandatory label RID。
+        std::uint32_t status = KSWORD_ARK_PROCESS_INTEGRITY_STATUS_UNKNOWN; // status：R0 聚合状态。
+        long lastStatus = 0;                 // lastStatus：Zw* token API 或 R0 DynData Token 兜底路径 NTSTATUS。
+    };
+
     // ProcessSpecialFlagsResult 承载 BreakOnTermination/APC 插入控制响应。
     struct ProcessSpecialFlagsResult
     {
@@ -422,6 +437,22 @@ namespace ksword::ark
         std::uint64_t imageSectionObjectAddress = 0;    // 诊断展示。
         std::wstring ntPath;            // 请求 NT 路径回显。
         std::wstring objectName;        // ObQueryNameString 文件对象名。
+    };
+
+    // FileIntegrityResult 承载 R0 文件 Mandatory Label 写入响应。
+    // 输入：由 DriverClient::setFileIntegrity 填充，flags/integrityRid/pathLengthChars 回显请求。
+    // 处理：io.ok 只代表驱动通信和响应解析成功，status/lastStatus 表示 ZwCreateFile/ZwSetSecurityObject 结果。
+    // 返回行为：unsupported=true 表示旧驱动缺少 IOCTL，调用方可以按策略回退到 R3。
+    struct FileIntegrityResult
+    {
+        IoResult io;                         // io：底层 DeviceIoControl 状态和响应 NTSTATUS。
+        bool unsupported = false;            // unsupported：旧驱动未注册 IOCTL 或返回不支持。
+        std::uint32_t version = 0;           // version：协议版本。
+        std::uint32_t flags = 0;             // flags：KSWORD_ARK_FILE_INTEGRITY_FLAG_* 回显。
+        std::uint32_t integrityRid = 0;      // integrityRid：S-1-16-* mandatory label RID。
+        std::uint32_t status = KSWORD_ARK_FILE_INTEGRITY_STATUS_UNKNOWN; // status：R0 聚合状态。
+        long lastStatus = 0;                 // lastStatus：ZwCreateFile/ZwSetSecurityObject 等 NTSTATUS。
+        std::uint32_t pathLengthChars = 0;   // pathLengthChars：驱动接收的 NT 路径字符数。
     };
 
     // FileMonitorStatusResult 是 R0 文件系统 minifilter 运行状态的 R3 模型。

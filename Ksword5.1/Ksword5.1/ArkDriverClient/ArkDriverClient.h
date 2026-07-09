@@ -43,6 +43,12 @@ namespace ksword::ark
         IoResult suspendProcess(std::uint32_t processId) const;
         IoResult setProcessProtection(std::uint32_t processId, std::uint8_t protectionLevel) const;
         ProcessVisibilityResult setProcessVisibility(std::uint32_t processId, unsigned long action, unsigned long flags = 0UL) const;
+        // setProcessIntegrity：
+        // - 输入：PID 和 S-1-16-* mandatory label RID；
+        // - 处理：封装 R0 进程完整性 IOCTL；驱动端先走 Zw* token API，
+        //   必要时由 R0 DynData/PDB 私有 Token 字段兜底；
+        // - 返回：ProcessIntegrityResult；io.ok 与 status/lastStatus 分别表示通信和语义结果。
+        ProcessIntegrityResult setProcessIntegrity(std::uint32_t processId, unsigned long integrityRid) const;
         ProcessSpecialFlagsResult setProcessSpecialFlags(std::uint32_t processId, unsigned long action, unsigned long flags = 0UL) const;
         ProcessDkomResult dkomProcess(std::uint32_t processId, unsigned long action, unsigned long flags = 0UL) const;
         ProcessInjectResult injectProcessDll(
@@ -77,6 +83,11 @@ namespace ksword::ark
             unsigned long sampleBytes = KSWORD_ARK_MEMORY_EVIDENCE_DEFAULT_SAMPLE_BYTES) const;
         FileInfoQueryResult queryFileInfo(const std::wstring& ntPath, unsigned long flags = KSWORD_ARK_QUERY_FILE_INFO_FLAG_INCLUDE_ALL) const;
         FileInfoQueryResult queryFileInfo(DriverHandle& handle, const std::wstring& ntPath, unsigned long flags = KSWORD_ARK_QUERY_FILE_INFO_FLAG_INCLUDE_ALL) const;
+        // setFileIntegrity：
+        // - 输入：驱动可打开的 NT 路径、目录标志和 S-1-16-* mandatory label RID；
+        // - 处理：封装 R0 文件 Mandatory Label IOCTL，驱动端只调用 ZwCreateFile/ZwSetSecurityObject；
+        // - 返回：FileIntegrityResult；io.ok 与 status/lastStatus 分别表示通信和语义结果。
+        FileIntegrityResult setFileIntegrity(const std::wstring& ntPath, bool isDirectory, unsigned long integrityRid) const;
         IoResult controlFileMonitor(unsigned long action, unsigned long operationMask = KSWORD_ARK_FILE_MONITOR_OPERATION_ALL, unsigned long processId = 0UL, unsigned long flags = 0UL) const;
         FileMonitorStatusResult queryFileMonitorStatus() const;
         FileMonitorDrainResult drainFileMonitor(unsigned long maxEvents = 128UL, unsigned long flags = 0UL) const;

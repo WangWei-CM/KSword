@@ -318,6 +318,174 @@ Return Value:
 
     return status;
 }
+
+NTSTATUS
+KswordARKProcessIoctlSetIntegrity(
+    _In_ WDFDEVICE Device,
+    _In_ WDFREQUEST Request,
+    _In_ size_t InputBufferLength,
+    _In_ size_t OutputBufferLength,
+    _Out_ size_t* BytesReturned
+    )
+/*++
+
+Routine Description:
+
+    Handle IOCTL_KSWORD_ARK_SET_PROCESS_INTEGRITY. 中文说明：handler 只负责
+    访问校验、固定包解析与 safety policy；后端先通过 Zw* token API 设置
+    TokenIntegrityLevel，API 拒绝时可在 DynData/PDB 校验后执行 Token SID
+    原地覆盖兜底。
+
+Arguments:
+
+    Device - WDF device used for logging and safety policy.
+    Request - Current IOCTL request.
+    InputBufferLength - Input length; validated through WDF helper.
+    OutputBufferLength - Output length; validated through WDF helper.
+    BytesReturned - Receives sizeof(response) when output is available.
+
+Return Value:
+
+    STATUS_SUCCESS once the response packet is valid. Per-target operation
+    status is reported in response->status/lastStatus.
+
+--*/
+{
+    KSWORD_ARK_SET_PROCESS_INTEGRITY_REQUEST* integrityRequest = NULL;
+    KSWORD_ARK_SET_PROCESS_INTEGRITY_REQUEST integrityRequestSnapshot;
+    KSWORD_ARK_SET_PROCESS_INTEGRITY_RESPONSE* integrityResponse = NULL;
+    PVOID inputBuffer = NULL;
+    PVOID outputBuffer = NULL;
+    size_t actualInputLength = 0U;
+    size_t actualOutputLength = 0U;
+    NTSTATUS status = STATUS_SUCCESS;
+    NTSTATUS operationStatus = STATUS_SUCCESS;
+
+    UNREFERENCED_PARAMETER(InputBufferLength);
+    UNREFERENCED_PARAMETER(OutputBufferLength);
+
+    if (BytesReturned == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    *BytesReturned = 0U;
+
+    status = KswordARKValidateDeviceIoControlWriteAccess(Request);
+    if (!NT_SUCCESS(status)) {
+        KswordARKProcessIoctlLog(Device, "Warn", "R0 process-integrity denied: write access required, status=0x%08X.", (unsigned int)status);
+        return status;
+    }
+
+    status = KswordARKRetrieveRequiredInputBuffer(
+        Request,
+        sizeof(KSWORD_ARK_SET_PROCESS_INTEGRITY_REQUEST),
+        &inputBuffer,
+        &actualInputLength);
+    if (!NT_SUCCESS(status)) {
+        KswordARKProcessIoctlLog(Device, "Error", "R0 process-integrity ioctl: input invalid, status=0x%08X.", (unsigned int)status);
+        return status;
+    }
+
+    /*
+     * METHOD_BUFFERED can expose the same system buffer for input and output.
+     * Snapshot the request before the response buffer is zeroed; otherwise
+     * clearing the response aliases and erases processId/integrityRid.
+     */
+    integrityRequest = (KSWORD_ARK_SET_PROCESS_INTEGRITY_REQUEST*)inputBuffer;
+    RtlCopyMemory(&integrityRequestSnapshot, integrityRequest, sizeof(integrityRequestSnapshot));
+
+    status = KswordARKRetrieveRequiredOutputBuffer(
+        Request,
+        sizeof(KSWORD_ARK_SET_PROCESS_INTEGRITY_RESPONSE),
+        &outputBuffer,
+        &actualOutputLength);
+    if (!NT_SUCCESS(status)) {
+        KswordARKProcessIoctlLog(Device, "Error", "R0 process-integrity ioctl: output invalid, status=0x%08X.", (unsigned int)status);
+        return status;
+    }
+
+    integrityResponse = (KSWORD_ARK_SET_PROCESS_INTEGRITY_RESPONSE*)outputBuffer;
+    RtlZeroMemory(integrityResponse, sizeof(*integrityResponse));
+    integrityResponse->size = sizeof(*integrityResponse);
+    integrityResponse->version = KSWORD_ARK_PROCESS_INTEGRITY_PROTOCOL_VERSION;
+    integrityResponse->processId = integrityRequestSnapshot.processId;
+    integrityResponse->integrityRid = integrityRequestSnapshot.integrityRid;
+    integrityResponse->status = KSWORD_ARK_PROCESS_INTEGRITY_STATUS_FAILED;
+    integrityResponse->lastStatus = STATUS_INVALID_PARAMETER;
+    *BytesReturned = sizeof(*integrityResponse);
+
+    if (integrityRequestSnapshot.size != sizeof(integrityRequestSnapshot) ||
+        integrityRequestSnapshot.version != KSWORD_ARK_PROCESS_INTEGRITY_PROTOCOL_VERSION) {
+        KswordARKProcessIoctlLog(
+            Device,
+            "Warn",
+            "R0 process-integrity ioctl: protocol rejected, size=%lu, version=%lu.",
+            (unsigned long)integrityRequestSnapshot.size,
+            (unsigned long)integrityRequestSnapshot.version);
+        return STATUS_SUCCESS;
+    }
+
+    status = KswordARKValidateUserPid((ULONG)integrityRequestSnapshot.processId);
+    if (!NT_SUCCESS(status)) {
+        integrityResponse->lastStatus = status;
+        KswordARKProcessIoctlLog(Device, "Warn", "R0 process-integrity ioctl: pid=%lu rejected.", (unsigned long)integrityRequestSnapshot.processId);
+        return STATUS_SUCCESS;
+    }
+
+    {
+        KSWORD_ARK_SAFETY_CONTEXT safetyContext;
+        RtlZeroMemory(&safetyContext, sizeof(safetyContext));
+        safetyContext.Operation = KSWORD_ARK_SAFETY_OPERATION_PROCESS_SET_PROTECTION;
+        safetyContext.TargetProcessId = (ULONG)integrityRequestSnapshot.processId;
+        safetyContext.ContextFlags = KSWORD_ARK_SAFETY_CONTEXT_FLAG_UI_CONFIRMED;
+        status = KswordARKSafetyEvaluate(Device, &safetyContext);
+        if (!NT_SUCCESS(status)) {
+            integrityResponse->lastStatus = status;
+            KswordARKProcessIoctlLog(Device, "Warn", "R0 process-integrity denied by safety policy: pid=%lu, status=0x%08X.", (unsigned long)integrityRequestSnapshot.processId, (unsigned int)status);
+            return STATUS_SUCCESS;
+        }
+    }
+
+    operationStatus = KswordARKDriverSetProcessIntegrityByPid(
+        (ULONG)integrityRequestSnapshot.processId,
+        (ULONG)integrityRequestSnapshot.integrityRid);
+    integrityResponse->lastStatus = operationStatus;
+    integrityResponse->status = NT_SUCCESS(operationStatus)
+        ? KSWORD_ARK_PROCESS_INTEGRITY_STATUS_APPLIED
+        : KSWORD_ARK_PROCESS_INTEGRITY_STATUS_FAILED;
+
+    {
+        CHAR diagnosticText[512] = { 0 };
+        if (NT_SUCCESS(KswordARKDriverDescribeLastProcessIntegrityAttempt(
+            diagnosticText,
+            sizeof(diagnosticText)))) {
+            KswordARKProcessIoctlLog(
+                Device,
+                NT_SUCCESS(operationStatus) ? "Info" : "Warn",
+                "R0 process-integrity detail: %s",
+                diagnosticText);
+        }
+    }
+
+    if (NT_SUCCESS(operationStatus)) {
+        KswordARKProcessIoctlLog(
+            Device,
+            "Info",
+            "R0 process-integrity success: pid=%lu, rid=0x%08lX.",
+            (unsigned long)integrityRequestSnapshot.processId,
+            (unsigned long)integrityRequestSnapshot.integrityRid);
+    }
+    else {
+        KswordARKProcessIoctlLog(
+            Device,
+            "Error",
+            "R0 process-integrity failed: pid=%lu, rid=0x%08lX, status=0x%08X.",
+            (unsigned long)integrityRequestSnapshot.processId,
+            (unsigned long)integrityRequestSnapshot.integrityRid,
+            (unsigned int)operationStatus);
+    }
+
+    return STATUS_SUCCESS;
+}
 NTSTATUS
 KswordARKProcessIoctlEnumProcess(
     _In_ WDFDEVICE Device,

@@ -27,6 +27,16 @@ namespace ksword::ark
             return std::wstring(textBuffer, textBuffer + length);
         }
 
+        bool isUnsupportedIoctlError(const unsigned long win32Error)
+        {
+            // 输入：DeviceIoControl 失败后的 Win32 错误码。
+            // 处理：匹配旧驱动未注册文件完整性 IOCTL 时的常见返回。
+            // 返回：true 表示 UI 可按策略回退 R3；false 表示应保留 R0/通信失败诊断。
+            return win32Error == ERROR_INVALID_FUNCTION ||
+                win32Error == ERROR_NOT_SUPPORTED ||
+                win32Error == ERROR_INVALID_PARAMETER;
+        }
+
         template <typename TValue>
         void copyFileMonitorFieldIfPresent(
             const unsigned char* entryBytes,
@@ -171,6 +181,78 @@ namespace ksword::ark
             << std::dec << ", bytesReturned=" << queryResult.io.bytesReturned;
         queryResult.io.message = stream.str();
         return queryResult;
+    }
+
+    FileIntegrityResult DriverClient::setFileIntegrity(
+        const std::wstring& ntPath,
+        const bool isDirectory,
+        const unsigned long integrityRid) const
+    {
+        // 输入：驱动可直接打开的 NT 路径、目录标志和 Mandatory Label RID。
+        // 处理：封装 IOCTL_KSWORD_ARK_SET_FILE_INTEGRITY，R0 端调用 ZwCreateFile/ZwSetSecurityObject。
+        // 返回：FileIntegrityResult，io.ok 表示通信成功，status/lastStatus 表示文件安全 API 结果。
+        FileIntegrityResult integrityResult{};
+        if (ntPath.empty() || ntPath.size() >= KSWORD_ARK_FILE_INTEGRITY_PATH_MAX_CHARS)
+        {
+            integrityResult.io.ok = false;
+            integrityResult.io.win32Error = ERROR_INVALID_PARAMETER;
+            integrityResult.io.message =
+                "file-integrity path invalid, chars=" + std::to_string(ntPath.size());
+            return integrityResult;
+        }
+
+        KSWORD_ARK_SET_FILE_INTEGRITY_REQUEST request{};
+        KSWORD_ARK_SET_FILE_INTEGRITY_RESPONSE response{};
+        request.size = static_cast<unsigned long>(sizeof(request));
+        request.version = KSWORD_ARK_FILE_INTEGRITY_PROTOCOL_VERSION;
+        request.flags = KSWORD_ARK_FILE_INTEGRITY_FLAG_UI_CONFIRMED |
+            (isDirectory ? KSWORD_ARK_FILE_INTEGRITY_FLAG_DIRECTORY : 0UL);
+        request.integrityRid = integrityRid;
+        request.pathLengthChars = static_cast<unsigned short>(ntPath.size());
+        std::copy(ntPath.begin(), ntPath.end(), request.path);
+        request.path[request.pathLengthChars] = L'\0';
+
+        integrityResult.io = deviceIoControl(
+            IOCTL_KSWORD_ARK_SET_FILE_INTEGRITY,
+            &request,
+            static_cast<unsigned long>(sizeof(request)),
+            &response,
+            static_cast<unsigned long>(sizeof(response)));
+        if (!integrityResult.io.ok)
+        {
+            integrityResult.unsupported = isUnsupportedIoctlError(integrityResult.io.win32Error);
+            integrityResult.io.message = integrityResult.unsupported
+                ? "IOCTL_KSWORD_ARK_SET_FILE_INTEGRITY unsupported or driver version is too old"
+                : "DeviceIoControl(IOCTL_KSWORD_ARK_SET_FILE_INTEGRITY) failed, error=" +
+                    std::to_string(integrityResult.io.win32Error);
+            return integrityResult;
+        }
+        if (integrityResult.io.bytesReturned < sizeof(response))
+        {
+            integrityResult.io.ok = false;
+            integrityResult.io.message =
+                "file-integrity response too small, bytesReturned=" +
+                std::to_string(integrityResult.io.bytesReturned);
+            return integrityResult;
+        }
+
+        integrityResult.version = static_cast<std::uint32_t>(response.version);
+        integrityResult.flags = static_cast<std::uint32_t>(response.flags);
+        integrityResult.integrityRid = static_cast<std::uint32_t>(response.integrityRid);
+        integrityResult.status = static_cast<std::uint32_t>(response.status);
+        integrityResult.lastStatus = static_cast<long>(response.lastStatus);
+        integrityResult.pathLengthChars = static_cast<std::uint32_t>(response.pathLengthChars);
+        integrityResult.io.ntStatus = integrityResult.lastStatus;
+
+        std::ostringstream stream;
+        stream << "pathChars=" << integrityResult.pathLengthChars
+            << ", directory=" << (isDirectory ? 1 : 0)
+            << ", rid=0x" << std::hex << std::uppercase << integrityResult.integrityRid
+            << std::dec << ", status=" << integrityResult.status
+            << ", lastStatus=0x" << std::hex << static_cast<unsigned long>(integrityResult.lastStatus)
+            << std::dec << ", bytesReturned=" << integrityResult.io.bytesReturned;
+        integrityResult.io.message = stream.str();
+        return integrityResult;
     }
 
     IoResult DriverClient::deletePath(const std::wstring& ntPath, const bool isDirectory) const

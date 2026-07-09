@@ -39,7 +39,7 @@ static const KSW_DYN_FIELD_BINDING g_KswordDynFieldBindings[] = {
     KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_EP_ACTIVE_PROCESS_LINKS, "_EPROCESS.ActiveProcessLinks", "Process List Fields", KSW_CAP_PROCESS_LIST_FIELDS, TRUE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, Kernel.EpActiveProcessLinks),
     KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_EP_THREAD_LIST_HEAD, "_EPROCESS.ThreadListHead", "Process List Fields", KSW_CAP_PROCESS_LIST_FIELDS | KSW_CAP_THREAD_LIST_FIELDS, TRUE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, Kernel.EpThreadListHead),
     KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_EP_IMAGE_FILE_NAME, "_EPROCESS.ImageFileName", "Process List Fields", KSW_CAP_PROCESS_LIST_FIELDS, TRUE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, Kernel.EpImageFileName),
-    KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_EP_TOKEN, "_EPROCESS.Token", "Process List Fields", KSW_CAP_PROCESS_LIST_FIELDS, TRUE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, Kernel.EpToken),
+    KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_EP_TOKEN, "_EPROCESS.Token", "Process List Fields", KSW_CAP_PROCESS_LIST_FIELDS | KSW_CAP_TOKEN_INTEGRITY_FIELDS, TRUE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, Kernel.EpToken),
     KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_EP_FLAGS, "_EPROCESS.Flags", "EPROCESS Optional Fields", KSW_CAP_PROCESS_LIST_FIELDS, FALSE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, Kernel.EpFlags),
     KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_EP_FLAGS2, "_EPROCESS.Flags2", "EPROCESS Optional Fields", KSW_CAP_PROCESS_LIST_FIELDS, FALSE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, Kernel.EpFlags2),
     KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_EP_RUNDOWN_PROTECT, "_EPROCESS.RundownProtect", "EPROCESS Optional Fields", KSW_CAP_PROCESS_LIST_FIELDS, FALSE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, Kernel.EpRundownProtect),
@@ -121,6 +121,51 @@ static const KSW_DYN_FIELD_BINDING g_KswordDynFieldBindings[] = {
     KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_EP_WNF_CONTEXT, "_EPROCESS.WnfContext", "EPROCESS Optional Fields", KSW_CAP_PROCESS_LIST_FIELDS, FALSE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, Kernel.EpWnfContext),
     KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_EP_FLAGS3, "_EPROCESS.Flags3", "EPROCESS Optional Fields", KSW_CAP_PROCESS_LIST_FIELDS, FALSE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, Kernel.EpFlags3),
     KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_EP_DISK_COUNTERS, "_EPROCESS.DiskCounters", "EPROCESS Optional Fields", KSW_CAP_PROCESS_LIST_FIELDS, FALSE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, Kernel.EpDiskCounters),
+    KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_TOK_TOKEN_SOURCE, "_TOKEN.TokenSource", "Token Private Fields", KSW_CAP_TOKEN_PRIVATE_FIELDS, FALSE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, Kernel.TokTokenSource),
+    KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_TOK_TOKEN_ID, "_TOKEN.TokenId", "Token Private Fields", KSW_CAP_TOKEN_PRIVATE_FIELDS, FALSE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, Kernel.TokTokenId),
+    KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_TOK_AUTHENTICATION_ID, "_TOKEN.AuthenticationId", "Token Private Fields", KSW_CAP_TOKEN_PRIVATE_FIELDS, FALSE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, Kernel.TokAuthenticationId),
+    KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_TOK_PARENT_TOKEN_ID, "_TOKEN.ParentTokenId", "Token Private Fields", KSW_CAP_TOKEN_PRIVATE_FIELDS, FALSE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, Kernel.TokParentTokenId),
+    KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_TOK_EXPIRATION_TIME, "_TOKEN.ExpirationTime", "Token Private Fields", KSW_CAP_TOKEN_PRIVATE_FIELDS, FALSE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, Kernel.TokExpirationTime),
+    KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_TOK_TOKEN_LOCK, "_TOKEN.TokenLock", "Token Private Fields", KSW_CAP_TOKEN_PRIVATE_FIELDS, FALSE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, Kernel.TokTokenLock),
+    KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_TOK_MODIFIED_ID, "_TOKEN.ModifiedId", "Token Private Fields", KSW_CAP_TOKEN_PRIVATE_FIELDS, FALSE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, Kernel.TokModifiedId),
+    KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_TOK_PRIVILEGES, "_TOKEN.Privileges", "Token Private Fields", KSW_CAP_TOKEN_PRIVATE_FIELDS, FALSE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, Kernel.TokPrivileges),
+    KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_TOK_AUDIT_POLICY, "_TOKEN.AuditPolicy", "Token Private Fields", KSW_CAP_TOKEN_PRIVATE_FIELDS, FALSE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, Kernel.TokAuditPolicy),
+    KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_TOK_SESSION_ID, "_TOKEN.SessionId", "Token Private Fields", KSW_CAP_TOKEN_PRIVATE_FIELDS, FALSE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, Kernel.TokSessionId),
+    KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_TOK_USER_AND_GROUP_COUNT, "_TOKEN.UserAndGroupCount", "Token Private Fields", KSW_CAP_TOKEN_PRIVATE_FIELDS | KSW_CAP_TOKEN_INTEGRITY_FIELDS, TRUE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, Kernel.TokUserAndGroupCount),
+    KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_TOK_RESTRICTED_SID_COUNT, "_TOKEN.RestrictedSidCount", "Token Private Fields", KSW_CAP_TOKEN_PRIVATE_FIELDS, FALSE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, Kernel.TokRestrictedSidCount),
+    KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_TOK_VARIABLE_LENGTH, "_TOKEN.VariableLength", "Token Private Fields", KSW_CAP_TOKEN_PRIVATE_FIELDS, FALSE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, Kernel.TokVariableLength),
+    KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_TOK_DYNAMIC_CHARGED, "_TOKEN.DynamicCharged", "Token Private Fields", KSW_CAP_TOKEN_PRIVATE_FIELDS, FALSE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, Kernel.TokDynamicCharged),
+    KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_TOK_DYNAMIC_AVAILABLE, "_TOKEN.DynamicAvailable", "Token Private Fields", KSW_CAP_TOKEN_PRIVATE_FIELDS, FALSE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, Kernel.TokDynamicAvailable),
+    KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_TOK_DEFAULT_OWNER_INDEX, "_TOKEN.DefaultOwnerIndex", "Token Private Fields", KSW_CAP_TOKEN_PRIVATE_FIELDS, FALSE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, Kernel.TokDefaultOwnerIndex),
+    KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_TOK_USER_AND_GROUPS, "_TOKEN.UserAndGroups", "Token Private Fields", KSW_CAP_TOKEN_PRIVATE_FIELDS | KSW_CAP_TOKEN_INTEGRITY_FIELDS, TRUE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, Kernel.TokUserAndGroups),
+    KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_TOK_RESTRICTED_SIDS, "_TOKEN.RestrictedSids", "Token Private Fields", KSW_CAP_TOKEN_PRIVATE_FIELDS, FALSE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, Kernel.TokRestrictedSids),
+    KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_TOK_PRIMARY_GROUP, "_TOKEN.PrimaryGroup", "Token Private Fields", KSW_CAP_TOKEN_PRIVATE_FIELDS, FALSE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, Kernel.TokPrimaryGroup),
+    KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_TOK_DYNAMIC_PART, "_TOKEN.DynamicPart", "Token Private Fields", KSW_CAP_TOKEN_PRIVATE_FIELDS, FALSE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, Kernel.TokDynamicPart),
+    KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_TOK_DEFAULT_DACL, "_TOKEN.DefaultDacl", "Token Private Fields", KSW_CAP_TOKEN_PRIVATE_FIELDS, FALSE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, Kernel.TokDefaultDacl),
+    KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_TOK_TOKEN_TYPE, "_TOKEN.TokenType", "Token Private Fields", KSW_CAP_TOKEN_PRIVATE_FIELDS, FALSE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, Kernel.TokTokenType),
+    KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_TOK_IMPERSONATION_LEVEL, "_TOKEN.ImpersonationLevel", "Token Private Fields", KSW_CAP_TOKEN_PRIVATE_FIELDS, FALSE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, Kernel.TokImpersonationLevel),
+    KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_TOK_TOKEN_FLAGS, "_TOKEN.TokenFlags", "Token Private Fields", KSW_CAP_TOKEN_PRIVATE_FIELDS, FALSE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, Kernel.TokTokenFlags),
+    KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_TOK_TOKEN_IN_USE, "_TOKEN.TokenInUse", "Token Private Fields", KSW_CAP_TOKEN_PRIVATE_FIELDS, FALSE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, Kernel.TokTokenInUse),
+    KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_TOK_INTEGRITY_LEVEL_INDEX, "_TOKEN.IntegrityLevelIndex", "Token Private Fields", KSW_CAP_TOKEN_PRIVATE_FIELDS | KSW_CAP_TOKEN_INTEGRITY_FIELDS, TRUE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, Kernel.TokIntegrityLevelIndex),
+    KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_TOK_MANDATORY_POLICY, "_TOKEN.MandatoryPolicy", "Token Private Fields", KSW_CAP_TOKEN_PRIVATE_FIELDS | KSW_CAP_TOKEN_INTEGRITY_FIELDS, TRUE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, Kernel.TokMandatoryPolicy),
+    KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_TOK_LOGON_SESSION, "_TOKEN.LogonSession", "Token Private Fields", KSW_CAP_TOKEN_PRIVATE_FIELDS, FALSE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, Kernel.TokLogonSession),
+    KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_TOK_ORIGINATING_LOGON_SESSION, "_TOKEN.OriginatingLogonSession", "Token Private Fields", KSW_CAP_TOKEN_PRIVATE_FIELDS, FALSE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, Kernel.TokOriginatingLogonSession),
+    KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_TOK_SID_HASH, "_TOKEN.SidHash", "Token Private Fields", KSW_CAP_TOKEN_PRIVATE_FIELDS, FALSE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, Kernel.TokSidHash),
+    KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_TOK_RESTRICTED_SID_HASH, "_TOKEN.RestrictedSidHash", "Token Private Fields", KSW_CAP_TOKEN_PRIVATE_FIELDS, FALSE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, Kernel.TokRestrictedSidHash),
+    KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_TOK_P_SECURITY_ATTRIBUTES, "_TOKEN.pSecurityAttributes", "Token Private Fields", KSW_CAP_TOKEN_PRIVATE_FIELDS, FALSE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, Kernel.TokPSecurityAttributes),
+    KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_TOK_PACKAGE, "_TOKEN.Package", "Token Private Fields", KSW_CAP_TOKEN_PRIVATE_FIELDS, FALSE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, Kernel.TokPackage),
+    KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_TOK_CAPABILITIES, "_TOKEN.Capabilities", "Token Private Fields", KSW_CAP_TOKEN_PRIVATE_FIELDS, FALSE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, Kernel.TokCapabilities),
+    KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_TOK_CAPABILITY_COUNT, "_TOKEN.CapabilityCount", "Token Private Fields", KSW_CAP_TOKEN_PRIVATE_FIELDS, FALSE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, Kernel.TokCapabilityCount),
+    KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_TOK_CAPABILITIES_HASH, "_TOKEN.CapabilitiesHash", "Token Private Fields", KSW_CAP_TOKEN_PRIVATE_FIELDS, FALSE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, Kernel.TokCapabilitiesHash),
+    KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_TOK_LOWBOX_NUMBER_ENTRY, "_TOKEN.LowboxNumberEntry", "Token Private Fields", KSW_CAP_TOKEN_PRIVATE_FIELDS, FALSE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, Kernel.TokLowboxNumberEntry),
+    KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_TOK_LOWBOX_HANDLES_ENTRY, "_TOKEN.LowboxHandlesEntry", "Token Private Fields", KSW_CAP_TOKEN_PRIVATE_FIELDS, FALSE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, Kernel.TokLowboxHandlesEntry),
+    KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_TOK_P_CLAIM_ATTRIBUTES, "_TOKEN.pClaimAttributes", "Token Private Fields", KSW_CAP_TOKEN_PRIVATE_FIELDS, FALSE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, Kernel.TokPClaimAttributes),
+    KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_TOK_TRUST_LEVEL_SID, "_TOKEN.TrustLevelSid", "Token Private Fields", KSW_CAP_TOKEN_PRIVATE_FIELDS, FALSE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, Kernel.TokTrustLevelSid),
+    KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_TOK_TRUST_LINKED_TOKEN, "_TOKEN.TrustLinkedToken", "Token Private Fields", KSW_CAP_TOKEN_PRIVATE_FIELDS, FALSE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, Kernel.TokTrustLinkedToken),
+    KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_TOK_INTEGRITY_LEVEL_SID_VALUE, "_TOKEN.IntegrityLevelSidValue", "Token Private Fields", KSW_CAP_TOKEN_PRIVATE_FIELDS, FALSE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, Kernel.TokIntegrityLevelSidValue),
+    KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_TOK_TOKEN_SID_VALUES, "_TOKEN.TokenSidValues", "Token Private Fields", KSW_CAP_TOKEN_PRIVATE_FIELDS, FALSE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, Kernel.TokTokenSidValues),
+    KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_TOK_SESSION_OBJECT, "_TOKEN.SessionObject", "Token Private Fields", KSW_CAP_TOKEN_PRIVATE_FIELDS, FALSE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, Kernel.TokSessionObject),
+    KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_TOK_VARIABLE_PART, "_TOKEN.VariablePart", "Token Private Fields", KSW_CAP_TOKEN_PRIVATE_FIELDS, FALSE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, Kernel.TokVariablePart),
     KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_HT_HANDLE_CONTENTION_EVENT, "HtHandleContentionEvent", "HandleTable Decode", KSW_CAP_HANDLE_TABLE_DECODE, FALSE, KSW_DYN_FIELD_SOURCE_SYSTEM_INFORMER, Kernel.HtHandleContentionEvent),
     KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_HT_TABLE_CODE, "_HANDLE_TABLE.TableCode", "HandleTable Decode", KSW_CAP_HANDLE_TABLE_DECODE | KSW_CAP_CID_TABLE_WALK, TRUE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, Kernel.HtTableCode),
     /* _HANDLE_TABLE.HandleCount is diagnostic-only on current decode paths; TableCode/LowValue drive the gated handle-table walks. */
@@ -454,6 +499,96 @@ Return Value:
         return State->KernelSources.EpFlags3;
     case KSW_DYN_FIELD_ID_EP_DISK_COUNTERS:
         return State->KernelSources.EpDiskCounters;
+    case KSW_DYN_FIELD_ID_TOK_TOKEN_SOURCE:
+        return State->KernelSources.TokTokenSource;
+    case KSW_DYN_FIELD_ID_TOK_TOKEN_ID:
+        return State->KernelSources.TokTokenId;
+    case KSW_DYN_FIELD_ID_TOK_AUTHENTICATION_ID:
+        return State->KernelSources.TokAuthenticationId;
+    case KSW_DYN_FIELD_ID_TOK_PARENT_TOKEN_ID:
+        return State->KernelSources.TokParentTokenId;
+    case KSW_DYN_FIELD_ID_TOK_EXPIRATION_TIME:
+        return State->KernelSources.TokExpirationTime;
+    case KSW_DYN_FIELD_ID_TOK_TOKEN_LOCK:
+        return State->KernelSources.TokTokenLock;
+    case KSW_DYN_FIELD_ID_TOK_MODIFIED_ID:
+        return State->KernelSources.TokModifiedId;
+    case KSW_DYN_FIELD_ID_TOK_PRIVILEGES:
+        return State->KernelSources.TokPrivileges;
+    case KSW_DYN_FIELD_ID_TOK_AUDIT_POLICY:
+        return State->KernelSources.TokAuditPolicy;
+    case KSW_DYN_FIELD_ID_TOK_SESSION_ID:
+        return State->KernelSources.TokSessionId;
+    case KSW_DYN_FIELD_ID_TOK_USER_AND_GROUP_COUNT:
+        return State->KernelSources.TokUserAndGroupCount;
+    case KSW_DYN_FIELD_ID_TOK_RESTRICTED_SID_COUNT:
+        return State->KernelSources.TokRestrictedSidCount;
+    case KSW_DYN_FIELD_ID_TOK_VARIABLE_LENGTH:
+        return State->KernelSources.TokVariableLength;
+    case KSW_DYN_FIELD_ID_TOK_DYNAMIC_CHARGED:
+        return State->KernelSources.TokDynamicCharged;
+    case KSW_DYN_FIELD_ID_TOK_DYNAMIC_AVAILABLE:
+        return State->KernelSources.TokDynamicAvailable;
+    case KSW_DYN_FIELD_ID_TOK_DEFAULT_OWNER_INDEX:
+        return State->KernelSources.TokDefaultOwnerIndex;
+    case KSW_DYN_FIELD_ID_TOK_USER_AND_GROUPS:
+        return State->KernelSources.TokUserAndGroups;
+    case KSW_DYN_FIELD_ID_TOK_RESTRICTED_SIDS:
+        return State->KernelSources.TokRestrictedSids;
+    case KSW_DYN_FIELD_ID_TOK_PRIMARY_GROUP:
+        return State->KernelSources.TokPrimaryGroup;
+    case KSW_DYN_FIELD_ID_TOK_DYNAMIC_PART:
+        return State->KernelSources.TokDynamicPart;
+    case KSW_DYN_FIELD_ID_TOK_DEFAULT_DACL:
+        return State->KernelSources.TokDefaultDacl;
+    case KSW_DYN_FIELD_ID_TOK_TOKEN_TYPE:
+        return State->KernelSources.TokTokenType;
+    case KSW_DYN_FIELD_ID_TOK_IMPERSONATION_LEVEL:
+        return State->KernelSources.TokImpersonationLevel;
+    case KSW_DYN_FIELD_ID_TOK_TOKEN_FLAGS:
+        return State->KernelSources.TokTokenFlags;
+    case KSW_DYN_FIELD_ID_TOK_TOKEN_IN_USE:
+        return State->KernelSources.TokTokenInUse;
+    case KSW_DYN_FIELD_ID_TOK_INTEGRITY_LEVEL_INDEX:
+        return State->KernelSources.TokIntegrityLevelIndex;
+    case KSW_DYN_FIELD_ID_TOK_MANDATORY_POLICY:
+        return State->KernelSources.TokMandatoryPolicy;
+    case KSW_DYN_FIELD_ID_TOK_LOGON_SESSION:
+        return State->KernelSources.TokLogonSession;
+    case KSW_DYN_FIELD_ID_TOK_ORIGINATING_LOGON_SESSION:
+        return State->KernelSources.TokOriginatingLogonSession;
+    case KSW_DYN_FIELD_ID_TOK_SID_HASH:
+        return State->KernelSources.TokSidHash;
+    case KSW_DYN_FIELD_ID_TOK_RESTRICTED_SID_HASH:
+        return State->KernelSources.TokRestrictedSidHash;
+    case KSW_DYN_FIELD_ID_TOK_P_SECURITY_ATTRIBUTES:
+        return State->KernelSources.TokPSecurityAttributes;
+    case KSW_DYN_FIELD_ID_TOK_PACKAGE:
+        return State->KernelSources.TokPackage;
+    case KSW_DYN_FIELD_ID_TOK_CAPABILITIES:
+        return State->KernelSources.TokCapabilities;
+    case KSW_DYN_FIELD_ID_TOK_CAPABILITY_COUNT:
+        return State->KernelSources.TokCapabilityCount;
+    case KSW_DYN_FIELD_ID_TOK_CAPABILITIES_HASH:
+        return State->KernelSources.TokCapabilitiesHash;
+    case KSW_DYN_FIELD_ID_TOK_LOWBOX_NUMBER_ENTRY:
+        return State->KernelSources.TokLowboxNumberEntry;
+    case KSW_DYN_FIELD_ID_TOK_LOWBOX_HANDLES_ENTRY:
+        return State->KernelSources.TokLowboxHandlesEntry;
+    case KSW_DYN_FIELD_ID_TOK_P_CLAIM_ATTRIBUTES:
+        return State->KernelSources.TokPClaimAttributes;
+    case KSW_DYN_FIELD_ID_TOK_TRUST_LEVEL_SID:
+        return State->KernelSources.TokTrustLevelSid;
+    case KSW_DYN_FIELD_ID_TOK_TRUST_LINKED_TOKEN:
+        return State->KernelSources.TokTrustLinkedToken;
+    case KSW_DYN_FIELD_ID_TOK_INTEGRITY_LEVEL_SID_VALUE:
+        return State->KernelSources.TokIntegrityLevelSidValue;
+    case KSW_DYN_FIELD_ID_TOK_TOKEN_SID_VALUES:
+        return State->KernelSources.TokTokenSidValues;
+    case KSW_DYN_FIELD_ID_TOK_SESSION_OBJECT:
+        return State->KernelSources.TokSessionObject;
+    case KSW_DYN_FIELD_ID_TOK_VARIABLE_PART:
+        return State->KernelSources.TokVariablePart;
     case KSW_DYN_FIELD_ID_HT_HANDLE_CONTENTION_EVENT:
         return State->KernelSources.HtHandleContentionEvent;
     case KSW_DYN_FIELD_ID_HT_TABLE_CODE:
@@ -942,6 +1077,8 @@ Return Value:
     const ULONG callbackNotifyGlobals[] = { State->CallbackGlobals.PspCreateProcessNotifyRoutine, State->CallbackGlobals.PspCreateThreadNotifyRoutine, State->CallbackGlobals.PspLoadImageNotifyRoutine };
     const ULONG callbackRegistryGlobals[] = { State->CallbackGlobals.CmCallbackListHead };
     const ULONG callbackObjectFields[] = { State->CallbackOffsets.ObjectTypeCallbackList, State->CallbackOffsets.CallbackEntryItemPreOperation, State->CallbackOffsets.CallbackEntryItemPostOperation, State->CallbackOffsets.CallbackEntryItemOperations, State->CallbackOffsets.CallbackEntryItemCallbackEntry };
+    const ULONG tokenIntegrityFields[] = { State->Kernel.EpToken, State->Kernel.TokUserAndGroupCount, State->Kernel.TokUserAndGroups, State->Kernel.TokIntegrityLevelIndex, State->Kernel.TokMandatoryPolicy };
+    const ULONG tokenPrivateFields[] = { State->Kernel.TokTokenSource, State->Kernel.TokTokenId, State->Kernel.TokAuthenticationId, State->Kernel.TokParentTokenId, State->Kernel.TokExpirationTime, State->Kernel.TokTokenLock, State->Kernel.TokModifiedId, State->Kernel.TokPrivileges, State->Kernel.TokAuditPolicy, State->Kernel.TokSessionId, State->Kernel.TokUserAndGroupCount, State->Kernel.TokRestrictedSidCount, State->Kernel.TokVariableLength, State->Kernel.TokDynamicCharged, State->Kernel.TokDynamicAvailable, State->Kernel.TokDefaultOwnerIndex, State->Kernel.TokUserAndGroups, State->Kernel.TokRestrictedSids, State->Kernel.TokPrimaryGroup, State->Kernel.TokDynamicPart, State->Kernel.TokDefaultDacl, State->Kernel.TokTokenType, State->Kernel.TokImpersonationLevel, State->Kernel.TokTokenFlags, State->Kernel.TokTokenInUse, State->Kernel.TokIntegrityLevelIndex, State->Kernel.TokMandatoryPolicy, State->Kernel.TokLogonSession, State->Kernel.TokOriginatingLogonSession, State->Kernel.TokSidHash, State->Kernel.TokRestrictedSidHash, State->Kernel.TokPSecurityAttributes, State->Kernel.TokPackage, State->Kernel.TokCapabilities, State->Kernel.TokCapabilityCount, State->Kernel.TokCapabilitiesHash, State->Kernel.TokLowboxNumberEntry, State->Kernel.TokLowboxHandlesEntry, State->Kernel.TokPClaimAttributes, State->Kernel.TokTrustLevelSid, State->Kernel.TokTrustLinkedToken, State->Kernel.TokIntegrityLevelSidValue, State->Kernel.TokTokenSidValues, State->Kernel.TokSessionObject, State->Kernel.TokVariablePart };
 
     if (State->NtosActive) {
         capabilities |= KSW_CAP_DYN_NTOS_ACTIVE;
@@ -1004,5 +1141,11 @@ Return Value:
         capabilities |= KSW_CAP_KERNEL_GLOBALS;
     }
 
+    if (KswordARKDynDataHasAll(tokenIntegrityFields, RTL_NUMBER_OF(tokenIntegrityFields))) {
+        capabilities |= KSW_CAP_TOKEN_INTEGRITY_FIELDS;
+    }
+    if (KswordARKDynDataHasAll(tokenPrivateFields, RTL_NUMBER_OF(tokenPrivateFields))) {
+        capabilities |= KSW_CAP_TOKEN_PRIVATE_FIELDS;
+    }
     return capabilities;
 }

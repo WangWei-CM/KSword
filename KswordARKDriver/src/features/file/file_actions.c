@@ -15,12 +15,65 @@ Environment:
 
 --*/
 
+#include <ntifs.h>
 #include "ark/ark_driver.h"
 
 #include <ntstrsafe.h>
 
 #ifndef FILE_OPEN_REPARSE_POINT
 #define FILE_OPEN_REPARSE_POINT 0x00200000UL
+#endif
+
+#ifndef FILE_OPEN_FOR_BACKUP_INTENT
+#define FILE_OPEN_FOR_BACKUP_INTENT 0x00004000UL
+#endif
+
+#ifndef FILE_DIRECTORY_FILE
+#define FILE_DIRECTORY_FILE 0x00000001UL
+#endif
+
+#ifndef FILE_NON_DIRECTORY_FILE
+#define FILE_NON_DIRECTORY_FILE 0x00000040UL
+#endif
+
+#ifndef ACCESS_SYSTEM_SECURITY
+#define ACCESS_SYSTEM_SECURITY 0x01000000L
+#endif
+
+#ifndef LABEL_SECURITY_INFORMATION
+#define LABEL_SECURITY_INFORMATION 0x00000010L
+#endif
+
+#ifndef STATUS_INVALID_SID
+#define STATUS_INVALID_SID ((NTSTATUS)0xC0000078L)
+#endif
+
+#ifndef STATUS_INVALID_LABEL
+#define STATUS_INVALID_LABEL ((NTSTATUS)0xC0000446L)
+#endif
+
+#ifndef SECURITY_MANDATORY_UNTRUSTED_RID
+#define SECURITY_MANDATORY_UNTRUSTED_RID 0x00000000UL
+#endif
+
+#ifndef SECURITY_MANDATORY_LOW_RID
+#define SECURITY_MANDATORY_LOW_RID 0x00001000UL
+#endif
+
+#ifndef SECURITY_MANDATORY_MEDIUM_RID
+#define SECURITY_MANDATORY_MEDIUM_RID 0x00002000UL
+#endif
+
+#ifndef SECURITY_MANDATORY_MEDIUM_PLUS_RID
+#define SECURITY_MANDATORY_MEDIUM_PLUS_RID (SECURITY_MANDATORY_MEDIUM_RID + 0x100UL)
+#endif
+
+#ifndef SECURITY_MANDATORY_HIGH_RID
+#define SECURITY_MANDATORY_HIGH_RID 0x00003000UL
+#endif
+
+#ifndef SECURITY_MANDATORY_SYSTEM_RID
+#define SECURITY_MANDATORY_SYSTEM_RID 0x00004000UL
 #endif
 
 #ifndef FILE_DISPOSITION_DELETE
@@ -429,6 +482,323 @@ Return Value:
         NULL,
         0U);
 
+    return status;
+}
+
+typedef struct _KSWORD_ARK_FILE_LABEL_SD_BUFFER
+{
+    SECURITY_DESCRIPTOR_RELATIVE SecurityDescriptor;
+    UCHAR AclBuffer[sizeof(ACL) + sizeof(SYSTEM_MANDATORY_LABEL_ACE) + SECURITY_MAX_SID_SIZE];
+} KSWORD_ARK_FILE_LABEL_SD_BUFFER, *PKSWORD_ARK_FILE_LABEL_SD_BUFFER;
+
+static BOOLEAN
+KswordARKDriverIsSupportedFileMandatoryIntegrityRid(
+    _In_ ULONG IntegrityRid
+    )
+/*++
+
+Routine Description:
+
+    Validate a mandatory-integrity RID before building a file-object label.
+    中文说明：ProtectedProcess/SecureProcess 这类 RID 是令牌/进程完整性语义，
+    不是文件 SACL 可接受的 Mandatory Label。提前拒绝可避免把无效 SID 交给
+    ZwSetSecurityObject 后只得到较晚的 STATUS_INVALID_LABEL。
+
+Arguments:
+
+    IntegrityRid - S-1-16-* 的最后一级 RID。
+
+Return Value:
+
+    TRUE 表示该 RID 可用于文件/目录 LABEL_SECURITY_INFORMATION；FALSE 表示
+    请求方传入了不适合文件对象的完整性级别。
+
+--*/
+{
+    switch (IntegrityRid) {
+    case SECURITY_MANDATORY_UNTRUSTED_RID:
+    case SECURITY_MANDATORY_LOW_RID:
+    case SECURITY_MANDATORY_MEDIUM_RID:
+    case SECURITY_MANDATORY_MEDIUM_PLUS_RID:
+    case SECURITY_MANDATORY_HIGH_RID:
+    case SECURITY_MANDATORY_SYSTEM_RID:
+        return TRUE;
+    default:
+        return FALSE;
+    }
+}
+
+static NTSTATUS
+KswordARKDriverBuildFileMandatoryIntegritySid(
+    _In_ ULONG IntegrityRid,
+    _Out_writes_bytes_(SECURITY_MAX_SID_SIZE) PSID SidBuffer
+    )
+/*++
+
+Routine Description:
+
+    Build an S-1-16-* mandatory integrity SID for file-object label assignment.
+
+Arguments:
+
+    IntegrityRid - Mandatory label RID.
+    SidBuffer - Caller-provided SECURITY_MAX_SID_SIZE storage.
+
+Return Value:
+
+    STATUS_SUCCESS or an RTL SID construction status.
+
+--*/
+{
+    SID_IDENTIFIER_AUTHORITY mandatoryLabelAuthority = SECURITY_MANDATORY_LABEL_AUTHORITY;
+    PULONG subAuthority = NULL;
+    NTSTATUS status = STATUS_SUCCESS;
+
+    if (SidBuffer == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    if (!KswordARKDriverIsSupportedFileMandatoryIntegrityRid(IntegrityRid)) {
+        return STATUS_INVALID_LABEL;
+    }
+
+    RtlZeroMemory(SidBuffer, SECURITY_MAX_SID_SIZE);
+    status = RtlInitializeSid(SidBuffer, &mandatoryLabelAuthority, 1);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+
+    subAuthority = RtlSubAuthoritySid(SidBuffer, 0);
+    if (subAuthority == NULL) {
+        return STATUS_INVALID_SID;
+    }
+    *subAuthority = IntegrityRid;
+
+    return RtlValidSid(SidBuffer) ? STATUS_SUCCESS : STATUS_INVALID_SID;
+}
+
+static NTSTATUS
+KswordARKDriverBuildLabelSecurityDescriptor(
+    _In_ ULONG IntegrityRid,
+    _Inout_ KSWORD_ARK_FILE_LABEL_SD_BUFFER* DescriptorBuffer
+    )
+/*++
+
+Routine Description:
+
+    Build a self-relative security descriptor containing only a SACL with one
+    SYSTEM_MANDATORY_LABEL_ACE. 中文说明：该描述符只用于
+    ZwSetSecurityObject(LABEL_SECURITY_INFORMATION)，不会携带 Owner/DACL。
+
+Arguments:
+
+    IntegrityRid - Mandatory label RID.
+    DescriptorBuffer - Writable descriptor+ACL storage.
+
+Return Value:
+
+    STATUS_SUCCESS or RTL ACL/SID construction failure.
+
+--*/
+{
+    UCHAR sidBuffer[SECURITY_MAX_SID_SIZE] = { 0 };
+    UCHAR aceBuffer[sizeof(SYSTEM_MANDATORY_LABEL_ACE) + SECURITY_MAX_SID_SIZE] = { 0 };
+    PACL sacl = NULL;
+    PSYSTEM_MANDATORY_LABEL_ACE mandatoryAce = (PSYSTEM_MANDATORY_LABEL_ACE)aceBuffer;
+    ULONG sidLength = 0UL;
+    ULONG aceLength = 0UL;
+    ULONG aclLength = 0UL;
+    NTSTATUS status = STATUS_SUCCESS;
+
+    if (DescriptorBuffer == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    RtlZeroMemory(DescriptorBuffer, sizeof(*DescriptorBuffer));
+    status = KswordARKDriverBuildFileMandatoryIntegritySid(IntegrityRid, (PSID)sidBuffer);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+
+    sidLength = RtlLengthSid((PSID)sidBuffer);
+    aceLength = FIELD_OFFSET(SYSTEM_MANDATORY_LABEL_ACE, SidStart) + sidLength;
+    aclLength = sizeof(ACL) + aceLength;
+    if (aclLength > sizeof(DescriptorBuffer->AclBuffer) || aceLength > 0xFFFFUL) {
+        return STATUS_BUFFER_TOO_SMALL;
+    }
+
+    sacl = (PACL)DescriptorBuffer->AclBuffer;
+    status = RtlCreateAcl(sacl, aclLength, ACL_REVISION);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+
+    mandatoryAce->Header.AceType = SYSTEM_MANDATORY_LABEL_ACE_TYPE;
+    mandatoryAce->Header.AceFlags = 0;
+    mandatoryAce->Header.AceSize = (USHORT)aceLength;
+    mandatoryAce->Mask = SYSTEM_MANDATORY_LABEL_NO_WRITE_UP;
+    status = RtlCopySid(
+        sidLength,
+        (PSID)&mandatoryAce->SidStart,
+        (PSID)sidBuffer);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+
+    status = RtlAddAce(sacl, ACL_REVISION, MAXULONG, mandatoryAce, aceLength);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+
+    /*
+     * Build SECURITY_DESCRIPTOR_RELATIVE manually instead of depending on
+     * RtlCreateSecurityDescriptorRelative, which is not present in every WDK
+     * header set.  The descriptor carries only a SACL because
+     * ZwSetSecurityObject(LABEL_SECURITY_INFORMATION) consumes just the
+     * mandatory-label information for this operation.
+     */
+    DescriptorBuffer->SecurityDescriptor.Revision = SECURITY_DESCRIPTOR_REVISION;
+    DescriptorBuffer->SecurityDescriptor.Sbz1 = 0;
+    DescriptorBuffer->SecurityDescriptor.Control =
+        (SECURITY_DESCRIPTOR_CONTROL)(SE_SELF_RELATIVE | SE_SACL_PRESENT);
+    DescriptorBuffer->SecurityDescriptor.Owner = 0;
+    DescriptorBuffer->SecurityDescriptor.Group = 0;
+    DescriptorBuffer->SecurityDescriptor.Sacl =
+        FIELD_OFFSET(KSWORD_ARK_FILE_LABEL_SD_BUFFER, AclBuffer);
+    DescriptorBuffer->SecurityDescriptor.Dacl = 0;
+    return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+KswordARKDriverOpenFileForIntegritySet(
+    _In_reads_(PathLengthChars) PCWSTR PathText,
+    _In_ USHORT PathLengthChars,
+    _In_ ULONG Flags,
+    _Out_ HANDLE* FileHandleOut
+    )
+/*++
+
+Routine Description:
+
+    Open a file or directory for mandatory label writes.
+
+Arguments:
+
+    PathText - NT path.
+    PathLengthChars - Character length excluding NUL.
+    Flags - KSWORD_ARK_FILE_INTEGRITY_FLAG_*.
+    FileHandleOut - Receives a kernel handle.
+
+Return Value:
+
+    ZwCreateFile status.
+
+--*/
+{
+    UNICODE_STRING targetPath;
+    OBJECT_ATTRIBUTES objectAttributes;
+    IO_STATUS_BLOCK ioStatusBlock;
+    ULONG createOptions = 0UL;
+    NTSTATUS status = STATUS_SUCCESS;
+
+    if (FileHandleOut == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    *FileHandleOut = NULL;
+    if (PathText == NULL || PathLengthChars == 0U) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    RtlZeroMemory(&targetPath, sizeof(targetPath));
+    targetPath.Buffer = (PWCH)PathText;
+    targetPath.Length = (USHORT)(PathLengthChars * sizeof(WCHAR));
+    targetPath.MaximumLength = targetPath.Length + sizeof(WCHAR);
+
+    InitializeObjectAttributes(
+        &objectAttributes,
+        &targetPath,
+        OBJ_KERNEL_HANDLE | OBJ_CASE_INSENSITIVE,
+        NULL,
+        NULL);
+
+    createOptions = FILE_SYNCHRONOUS_IO_NONALERT | FILE_OPEN_FOR_BACKUP_INTENT | FILE_OPEN_REPARSE_POINT;
+    if ((Flags & KSWORD_ARK_FILE_INTEGRITY_FLAG_DIRECTORY) != 0UL) {
+        createOptions |= FILE_DIRECTORY_FILE;
+    }
+    else {
+        createOptions |= FILE_NON_DIRECTORY_FILE;
+    }
+
+    RtlZeroMemory(&ioStatusBlock, sizeof(ioStatusBlock));
+    status = ZwCreateFile(
+        FileHandleOut,
+        WRITE_OWNER | READ_CONTROL | ACCESS_SYSTEM_SECURITY | SYNCHRONIZE,
+        &objectAttributes,
+        &ioStatusBlock,
+        NULL,
+        FILE_ATTRIBUTE_NORMAL,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        FILE_OPEN,
+        createOptions,
+        NULL,
+        0U);
+    return status;
+}
+
+NTSTATUS
+KswordARKDriverSetFileIntegrity(
+    _In_ const KSWORD_ARK_SET_FILE_INTEGRITY_REQUEST* Request
+    )
+/*++
+
+Routine Description:
+
+    Set a file or directory mandatory integrity label using kernel security
+    APIs. 中文说明：本函数只调用 ZwCreateFile 与
+    ZwSetSecurityObject(LABEL_SECURITY_INFORMATION)，不改文件系统私有结构。
+
+Arguments:
+
+    Request - Validated IOCTL request.
+
+Return Value:
+
+    NTSTATUS from open, descriptor construction, or ZwSetSecurityObject.
+
+--*/
+{
+    HANDLE fileHandle = NULL;
+    KSWORD_ARK_FILE_LABEL_SD_BUFFER descriptorBuffer;
+    NTSTATUS status = STATUS_SUCCESS;
+
+    if (Request == NULL ||
+        Request->pathLengthChars == 0U ||
+        Request->pathLengthChars >= KSWORD_ARK_FILE_INTEGRITY_PATH_MAX_CHARS ||
+        Request->path[Request->pathLengthChars] != L'\0') {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    status = KswordARKDriverBuildLabelSecurityDescriptor(
+        Request->integrityRid,
+        &descriptorBuffer);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+
+    status = KswordARKDriverOpenFileForIntegritySet(
+        Request->path,
+        Request->pathLengthChars,
+        Request->flags,
+        &fileHandle);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+
+    status = ZwSetSecurityObject(
+        fileHandle,
+        LABEL_SECURITY_INFORMATION,
+        &descriptorBuffer.SecurityDescriptor);
+
+    ZwClose(fileHandle);
     return status;
 }
 

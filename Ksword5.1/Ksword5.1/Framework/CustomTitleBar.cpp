@@ -536,7 +536,7 @@ namespace ks::ui
             m_minButton,
             m_maxButton,
             m_closeButton
-        };
+        };\
         for (QPushButton* buttonObject : controlButtons)
         {
             if (buttonObject == nullptr)

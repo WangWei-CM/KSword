@@ -66,6 +66,16 @@ namespace ksword::ark
             return sizeof(KSWORD_ARK_INJECT_PROCESS_REQUEST) - sizeof(unsigned char);
         }
 
+        bool isUnsupportedIoctlError(const unsigned long win32Error)
+        {
+            // 输入：DeviceIoControl 失败后的 Win32 错误码。
+            // 处理：匹配旧驱动未注册 IOCTL 或 KMDF 分发拒绝未知控制码时的常见返回值。
+            // 返回：true 表示调用方可将其视为“驱动过旧/缺入口”，而不是 R0 语义失败。
+            return win32Error == ERROR_INVALID_FUNCTION ||
+                win32Error == ERROR_NOT_SUPPORTED ||
+                win32Error == ERROR_INVALID_PARAMETER;
+        }
+
         ProcessInjectResult makeProcessInjectInputFailure(
             const std::uint32_t processId,
             const std::uint32_t injectType,
@@ -336,6 +346,64 @@ namespace ksword::ark
         stream << (result.ok ? ", ioctl=ok" : ", ioctl=fail, error=" + std::to_string(result.win32Error));
         result.message = stream.str();
         return result;
+    }
+
+    ProcessIntegrityResult DriverClient::setProcessIntegrity(
+        const std::uint32_t processId,
+        const unsigned long integrityRid) const
+    {
+        // 输入：目标 PID 和 Mandatory Label RID。
+        // 处理：构造固定 R0 协议包；驱动端先通过 ZwOpenProcessTokenEx/ZwSetInformationToken 写 TokenIntegrityLevel，
+        // 失败时可由 R0 DynData/PDB 私有 Token 字段路径兜底。
+        // 返回：ProcessIntegrityResult，io.ok 代表通信成功，status/lastStatus 代表 R0 语义结果。
+        ProcessIntegrityResult integrityResult{};
+        KSWORD_ARK_SET_PROCESS_INTEGRITY_REQUEST request{};
+        KSWORD_ARK_SET_PROCESS_INTEGRITY_RESPONSE response{};
+        request.size = static_cast<unsigned long>(sizeof(request));
+        request.version = KSWORD_ARK_PROCESS_INTEGRITY_PROTOCOL_VERSION;
+        request.processId = processId;
+        request.integrityRid = integrityRid;
+        request.flags = KSWORD_ARK_PROCESS_INTEGRITY_FLAG_UI_CONFIRMED;
+
+        integrityResult.io = deviceIoControl(
+            IOCTL_KSWORD_ARK_SET_PROCESS_INTEGRITY,
+            &request,
+            static_cast<unsigned long>(sizeof(request)),
+            &response,
+            static_cast<unsigned long>(sizeof(response)));
+        if (!integrityResult.io.ok)
+        {
+            integrityResult.unsupported = isUnsupportedIoctlError(integrityResult.io.win32Error);
+            integrityResult.io.message = integrityResult.unsupported
+                ? "IOCTL_KSWORD_ARK_SET_PROCESS_INTEGRITY unsupported or driver version is too old"
+                : "DeviceIoControl(IOCTL_KSWORD_ARK_SET_PROCESS_INTEGRITY) failed, error=" +
+                    std::to_string(integrityResult.io.win32Error);
+            return integrityResult;
+        }
+        if (integrityResult.io.bytesReturned < sizeof(response))
+        {
+            integrityResult.io.ok = false;
+            integrityResult.io.message =
+                "process-integrity response too small, bytesReturned=" +
+                std::to_string(integrityResult.io.bytesReturned);
+            return integrityResult;
+        }
+
+        integrityResult.version = static_cast<std::uint32_t>(response.version);
+        integrityResult.processId = static_cast<std::uint32_t>(response.processId);
+        integrityResult.integrityRid = static_cast<std::uint32_t>(response.integrityRid);
+        integrityResult.status = static_cast<std::uint32_t>(response.status);
+        integrityResult.lastStatus = static_cast<long>(response.lastStatus);
+        integrityResult.io.ntStatus = integrityResult.lastStatus;
+
+        std::ostringstream stream;
+        stream << "pid=" << integrityResult.processId
+            << ", rid=0x" << std::hex << std::uppercase << integrityResult.integrityRid
+            << std::dec << ", status=" << integrityResult.status
+            << ", lastStatus=0x" << std::hex << static_cast<unsigned long>(integrityResult.lastStatus)
+            << std::dec << ", bytesReturned=" << integrityResult.io.bytesReturned;
+        integrityResult.io.message = stream.str();
+        return integrityResult;
     }
 
     ProcessVisibilityResult DriverClient::setProcessVisibility(

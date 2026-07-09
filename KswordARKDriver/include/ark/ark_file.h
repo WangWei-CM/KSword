@@ -20,4 +20,20 @@ KswordARKDriverQueryFileInfo(
     _Out_ size_t* BytesWrittenOut
     );
 
+/*
+ * KswordARKDriverSetFileIntegrity
+ * Inputs:
+ * - Request contains a kernel/NT-style path and target S-1-16-* RID.
+ * Processing:
+ * - Opens the file object and calls ZwSetSecurityObject with
+ *   LABEL_SECURITY_INFORMATION. It does not patch filesystem/private objects.
+ * Return behavior:
+ * - Returns the NTSTATUS from path open, security descriptor construction, or
+ *   ZwSetSecurityObject.
+ */
+NTSTATUS
+KswordARKDriverSetFileIntegrity(
+    _In_ const KSWORD_ARK_SET_FILE_INTEGRITY_REQUEST* Request
+    );
+
 EXTERN_C_END

@@ -49,6 +49,7 @@
 #define KSWORD_ARK_IOCTL_FUNCTION_QUERY_PROCESS_CROSSVIEW 0x836UL
 #define KSWORD_ARK_IOCTL_FUNCTION_QUERY_PROCESS_DETAIL 0x83CUL
 #define KSWORD_ARK_IOCTL_FUNCTION_QUERY_PROCESS_RUNTIME_FIELDS 0x83EUL
+#define KSWORD_ARK_IOCTL_FUNCTION_SET_PROCESS_INTEGRITY 0x84CUL
 
 #define IOCTL_KSWORD_ARK_TERMINATE_PROCESS \
     CTL_CODE( \
@@ -88,6 +89,41 @@ typedef struct _KSWORD_ARK_SET_PPL_LEVEL_REQUEST
     unsigned char protectionLevel;
     unsigned char reserved[3];
 } KSWORD_ARK_SET_PPL_LEVEL_REQUEST;
+
+#define IOCTL_KSWORD_ARK_SET_PROCESS_INTEGRITY \
+    CTL_CODE( \
+        KSWORD_ARK_IOCTL_DEVICE_TYPE, \
+        KSWORD_ARK_IOCTL_FUNCTION_SET_PROCESS_INTEGRITY, \
+        METHOD_BUFFERED, \
+        FILE_WRITE_ACCESS)
+
+#define KSWORD_ARK_PROCESS_INTEGRITY_PROTOCOL_VERSION 1UL
+
+#define KSWORD_ARK_PROCESS_INTEGRITY_FLAG_UI_CONFIRMED 0x00000001UL
+
+#define KSWORD_ARK_PROCESS_INTEGRITY_STATUS_UNKNOWN 0UL
+#define KSWORD_ARK_PROCESS_INTEGRITY_STATUS_APPLIED 1UL
+#define KSWORD_ARK_PROCESS_INTEGRITY_STATUS_FAILED 2UL
+
+typedef struct _KSWORD_ARK_SET_PROCESS_INTEGRITY_REQUEST
+{
+    unsigned long size;
+    unsigned long version;
+    unsigned long processId;
+    unsigned long integrityRid;
+    unsigned long flags;
+    unsigned long reserved;
+} KSWORD_ARK_SET_PROCESS_INTEGRITY_REQUEST;
+
+typedef struct _KSWORD_ARK_SET_PROCESS_INTEGRITY_RESPONSE
+{
+    unsigned long size;
+    unsigned long version;
+    unsigned long processId;
+    unsigned long integrityRid;
+    unsigned long status;
+    long lastStatus;
+} KSWORD_ARK_SET_PROCESS_INTEGRITY_RESPONSE;
 
 #define IOCTL_KSWORD_ARK_ENUM_PROCESS \
     CTL_CODE( \

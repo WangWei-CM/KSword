@@ -99,6 +99,20 @@
 #include <Windows.h>
 #include <TlHelp32.h>
 
+#pragma comment(lib, "Advapi32.lib")
+
+#ifndef SECURITY_MANDATORY_MEDIUM_PLUS_RID
+#define SECURITY_MANDATORY_MEDIUM_PLUS_RID (SECURITY_MANDATORY_MEDIUM_RID + 0x100UL)
+#endif
+
+#ifndef SECURITY_MANDATORY_PROTECTED_PROCESS_RID
+#define SECURITY_MANDATORY_PROTECTED_PROCESS_RID 0x5000UL
+#endif
+
+#ifndef SE_GROUP_INTEGRITY
+#define SE_GROUP_INTEGRITY 0x00000020L
+#endif
+
 namespace
 {
     // 列标题文本常量，索引与 ProcessDock::TableColumn 一一对应。
@@ -141,6 +155,24 @@ namespace
     const QString KernelBadgeImagePath = QStringLiteral(
         ":/Image/kernel_badge.png");
 
+    struct ProcessIntegrityLevelPreset
+    {
+        DWORD rid;              // rid：S-1-16-* Mandatory Label 的最后一级 RID。
+        const char* nameText;   // nameText：菜单与结果提示中的稳定英文名称。
+        const char* detailText; // detailText：面向用户的中文说明。
+    };
+
+    const ProcessIntegrityLevelPreset ProcessIntegrityLevelPresets[] =
+    {
+        { SECURITY_MANDATORY_UNTRUSTED_RID, "Untrusted", "不受信任完整性" },
+        { SECURITY_MANDATORY_LOW_RID, "Low", "低完整性" },
+        { SECURITY_MANDATORY_MEDIUM_RID, "Medium", "中完整性" },
+        { SECURITY_MANDATORY_MEDIUM_PLUS_RID, "MediumPlus", "中高完整性" },
+        { SECURITY_MANDATORY_HIGH_RID, "High", "高完整性" },
+        { SECURITY_MANDATORY_SYSTEM_RID, "System", "系统完整性" },
+        { SECURITY_MANDATORY_PROTECTED_PROCESS_RID, "ProtectedProcess", "受保护进程完整性" }
+    };
+
     // 默认按钮图标尺寸。
     constexpr QSize DefaultIconSize(18, 18);
     constexpr QSize SideTabIconSize(22, 22);
@@ -158,6 +190,287 @@ namespace
     constexpr int ProcessTableMinimumIntervalMilliseconds = 500;
     constexpr int ProcessTableMaximumIntervalMilliseconds = 60000;
     constexpr std::size_t ActivityMaximumSampleCount = 1800;
+
+    // formatProcessWin32Error 作用：
+    // - 输入：stepText 表示失败步骤，errorCode 为 Win32 错误码；
+    // - 处理：拼接稳定英文步骤名与十进制错误码，避免跨语言系统 FormatMessage 文本差异；
+    // - 返回：可直接写入批量动作 detailText 的 UTF-8 字符串。
+    std::string formatProcessWin32Error(const char* stepText, const DWORD errorCode)
+    {
+        std::ostringstream stream;
+        stream << (stepText == nullptr ? "Win32 call" : stepText)
+            << " failed, error=" << errorCode;
+        return stream.str();
+    }
+
+    // enableProcessContextPrivilege 作用：
+    // - 输入：privilegeName 为当前进程需要临时启用的特权名；
+    // - 处理：打开当前进程 Token 并调用 AdjustTokenPrivileges；
+    // - 返回：true 表示特权已成功启用；false 表示当前令牌不具备或启用失败。
+    bool enableProcessContextPrivilege(const wchar_t* privilegeName)
+    {
+        if (privilegeName == nullptr)
+        {
+            return false;
+        }
+
+        HANDLE tokenHandle = nullptr;
+        if (::OpenProcessToken(::GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &tokenHandle) == FALSE)
+        {
+            return false;
+        }
+
+        LUID privilegeLuid{};
+        if (::LookupPrivilegeValueW(nullptr, privilegeName, &privilegeLuid) == FALSE)
+        {
+            ::CloseHandle(tokenHandle);
+            return false;
+        }
+
+        TOKEN_PRIVILEGES tokenPrivileges{};
+        tokenPrivileges.PrivilegeCount = 1;
+        tokenPrivileges.Privileges[0].Luid = privilegeLuid;
+        tokenPrivileges.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+        const BOOL adjustOk = ::AdjustTokenPrivileges(
+            tokenHandle,
+            FALSE,
+            &tokenPrivileges,
+            sizeof(tokenPrivileges),
+            nullptr,
+            nullptr);
+        const DWORD adjustError = ::GetLastError();
+        ::CloseHandle(tokenHandle);
+        return adjustOk != FALSE && adjustError == ERROR_SUCCESS;
+    }
+
+    // allocateMandatoryIntegritySid 作用：
+    // - 输入：integrityRid 为 Mandatory Label RID，例如 Low/Medium/High；
+    // - 处理：构造 S-1-16-integrityRid SID，调用方负责 FreeSid；
+    // - 返回：成功时 true 并写入 sidOut；失败时 false 并输出 detailText。
+    bool allocateMandatoryIntegritySid(
+        const DWORD integrityRid,
+        PSID* sidOut,
+        std::string* detailText)
+    {
+        if (sidOut == nullptr)
+        {
+            if (detailText != nullptr)
+            {
+                *detailText = "sidOut is null";
+            }
+            return false;
+        }
+        *sidOut = nullptr;
+
+        SID_IDENTIFIER_AUTHORITY mandatoryLabelAuthority = SECURITY_MANDATORY_LABEL_AUTHORITY;
+        if (::AllocateAndInitializeSid(
+            &mandatoryLabelAuthority,
+            1,
+            integrityRid,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            sidOut) == FALSE)
+        {
+            if (detailText != nullptr)
+            {
+                *detailText = formatProcessWin32Error("AllocateAndInitializeSid", ::GetLastError());
+            }
+            return false;
+        }
+        return true;
+    }
+
+    // processIntegrityNameFromRid 作用：
+    // - 输入：Mandatory Label RID；
+    // - 处理：优先匹配右键菜单预设，否则退化为 RID 十六进制文本；
+    // - 返回：用于提示、日志、菜单 tooltip 的显示文本。
+    QString processIntegrityNameFromRid(const DWORD integrityRid)
+    {
+        for (const ProcessIntegrityLevelPreset& preset : ProcessIntegrityLevelPresets)
+        {
+            if (preset.rid == integrityRid)
+            {
+                return QString::fromLatin1(preset.nameText);
+            }
+        }
+        return QStringLiteral("RID=0x%1").arg(integrityRid, 0, 16).toUpper();
+    }
+
+    // queryProcessIntegrityRid 作用：
+    // - 输入：pid 为目标进程 ID；
+    // - 处理：打开进程 Token 并读取 TokenIntegrityLevel，解析 S-1-16-* 的最后一级 RID；
+    // - 返回：成功时 true 并写入 ridOut；失败时 false 并输出 Win32 诊断文本。
+    bool queryProcessIntegrityRid(
+        const DWORD pid,
+        DWORD* ridOut,
+        std::string* detailText)
+    {
+        if (ridOut == nullptr)
+        {
+            if (detailText != nullptr)
+            {
+                *detailText = "ridOut is null";
+            }
+            return false;
+        }
+        *ridOut = 0;
+
+        (void)enableProcessContextPrivilege(SE_DEBUG_NAME);
+
+        HANDLE processHandle = ::OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+        if (processHandle == nullptr)
+        {
+            if (detailText != nullptr)
+            {
+                *detailText = formatProcessWin32Error("OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)", ::GetLastError());
+            }
+            return false;
+        }
+
+        HANDLE tokenHandle = nullptr;
+        if (::OpenProcessToken(processHandle, TOKEN_QUERY, &tokenHandle) == FALSE)
+        {
+            const DWORD openTokenError = ::GetLastError();
+            ::CloseHandle(processHandle);
+            if (detailText != nullptr)
+            {
+                *detailText = formatProcessWin32Error("OpenProcessToken(TOKEN_QUERY)", openTokenError);
+            }
+            return false;
+        }
+
+        DWORD requiredLength = 0;
+        (void)::GetTokenInformation(tokenHandle, TokenIntegrityLevel, nullptr, 0, &requiredLength);
+        if (requiredLength == 0)
+        {
+            const DWORD lengthError = ::GetLastError();
+            ::CloseHandle(tokenHandle);
+            ::CloseHandle(processHandle);
+            if (detailText != nullptr)
+            {
+                *detailText = formatProcessWin32Error("GetTokenInformation(TokenIntegrityLevel length)", lengthError);
+            }
+            return false;
+        }
+
+        std::vector<BYTE> tokenBuffer(requiredLength);
+        const BOOL queryOk = ::GetTokenInformation(
+            tokenHandle,
+            TokenIntegrityLevel,
+            tokenBuffer.data(),
+            requiredLength,
+            &requiredLength);
+        const DWORD queryError = ::GetLastError();
+        ::CloseHandle(tokenHandle);
+        ::CloseHandle(processHandle);
+        if (queryOk == FALSE)
+        {
+            if (detailText != nullptr)
+            {
+                *detailText = formatProcessWin32Error("GetTokenInformation(TokenIntegrityLevel)", queryError);
+            }
+            return false;
+        }
+
+        const TOKEN_MANDATORY_LABEL* mandatoryLabel =
+            reinterpret_cast<const TOKEN_MANDATORY_LABEL*>(tokenBuffer.data());
+        if (mandatoryLabel->Label.Sid == nullptr ||
+            ::IsValidSid(mandatoryLabel->Label.Sid) == FALSE ||
+            *::GetSidSubAuthorityCount(mandatoryLabel->Label.Sid) == 0)
+        {
+            if (detailText != nullptr)
+            {
+                *detailText = "TokenIntegrityLevel returned an invalid SID";
+            }
+            return false;
+        }
+
+        *ridOut = *::GetSidSubAuthority(
+            mandatoryLabel->Label.Sid,
+            static_cast<DWORD>(*::GetSidSubAuthorityCount(mandatoryLabel->Label.Sid) - 1));
+        return true;
+    }
+
+    // setProcessIntegrityLevelByPid 作用：
+    // - 输入：pid 为目标进程，integrityRid 为目标 Mandatory Label RID；
+    // - 处理：打开目标 Token，构造 TOKEN_MANDATORY_LABEL，并调用 SetTokenInformation；
+    // - 返回：true 表示 API 接受写入；失败时 false 并输出具体步骤错误。
+    bool setProcessIntegrityLevelByPid(
+        const DWORD pid,
+        const DWORD integrityRid,
+        std::string* detailText)
+    {
+        (void)enableProcessContextPrivilege(SE_DEBUG_NAME);
+
+        HANDLE processHandle = ::OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+        if (processHandle == nullptr)
+        {
+            if (detailText != nullptr)
+            {
+                *detailText = formatProcessWin32Error("OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)", ::GetLastError());
+            }
+            return false;
+        }
+
+        HANDLE tokenHandle = nullptr;
+        if (::OpenProcessToken(processHandle, TOKEN_ADJUST_DEFAULT | TOKEN_QUERY, &tokenHandle) == FALSE)
+        {
+            const DWORD openTokenError = ::GetLastError();
+            ::CloseHandle(processHandle);
+            if (detailText != nullptr)
+            {
+                *detailText = formatProcessWin32Error("OpenProcessToken(TOKEN_ADJUST_DEFAULT)", openTokenError);
+            }
+            return false;
+        }
+
+        PSID integritySid = nullptr;
+        if (!allocateMandatoryIntegritySid(integrityRid, &integritySid, detailText))
+        {
+            ::CloseHandle(tokenHandle);
+            ::CloseHandle(processHandle);
+            return false;
+        }
+
+        TOKEN_MANDATORY_LABEL mandatoryLabel{};
+        mandatoryLabel.Label.Attributes = SE_GROUP_INTEGRITY;
+        mandatoryLabel.Label.Sid = integritySid;
+        const DWORD informationLength =
+            static_cast<DWORD>(sizeof(mandatoryLabel) + ::GetLengthSid(integritySid));
+        const BOOL setOk = ::SetTokenInformation(
+            tokenHandle,
+            TokenIntegrityLevel,
+            &mandatoryLabel,
+            informationLength);
+        const DWORD setError = ::GetLastError();
+        ::FreeSid(integritySid);
+        ::CloseHandle(tokenHandle);
+        ::CloseHandle(processHandle);
+
+        if (setOk == FALSE)
+        {
+            if (detailText != nullptr)
+            {
+                *detailText = formatProcessWin32Error("SetTokenInformation(TokenIntegrityLevel)", setError);
+            }
+            return false;
+        }
+
+        if (detailText != nullptr)
+        {
+            std::ostringstream stream;
+            stream << "pid=" << pid
+                << ", integrity=" << processIntegrityNameFromRid(integrityRid).toStdString()
+                << ", rid=0x" << std::hex << integrityRid;
+            *detailText = stream.str();
+        }
+        return true;
+    }
 
     // clampPercentValue 作用：
     // - 把所有图表输入值统一夹到 0~100；
@@ -1748,6 +2061,86 @@ namespace
             *detailTextOut = processDockIoMessageStdString(result.message);
         }
         return result.ok;
+    }
+
+    bool shouldFallbackProcessIntegrityToR3(
+        const ksword::ark::IoResult& io,
+        const bool unsupported)
+    {
+        // 输入：ArkDriverClient 的通信结果和 unsupported 标记。
+        // 处理：只把“驱动未装载/旧驱动无此 IOCTL”归类为 R3 fallback 条件。
+        // 返回：true 表示可以尝试 R3；R0 已通信但语义失败时返回 false，避免掩盖内核 API 失败原因。
+        if (io.ok)
+        {
+            return false;
+        }
+        if (unsupported)
+        {
+            return true;
+        }
+
+        return io.win32Error == ERROR_FILE_NOT_FOUND ||
+            io.win32Error == ERROR_PATH_NOT_FOUND ||
+            io.win32Error == ERROR_SERVICE_DOES_NOT_EXIST ||
+            io.win32Error == ERROR_INVALID_FUNCTION ||
+            io.win32Error == ERROR_NOT_SUPPORTED ||
+            io.win32Error == ERROR_INVALID_PARAMETER;
+    }
+
+    bool setProcessIntegrityLevelByR0ThenR3(
+        const DWORD pid,
+        const DWORD integrityRid,
+        std::string* const detailText)
+    {
+        // 输入：目标 PID 和 Mandatory Label RID。
+        // 处理：先调用 R0 IOCTL；只有驱动不可用/旧驱动缺入口时才回退 R3 SetTokenInformation。
+        // 返回：true 表示 R0 或 fallback R3 成功；false 时 detailText 保留 R0 语义失败或 R3 失败诊断。
+        const ksword::ark::DriverClient driverClient;
+        const ksword::ark::ProcessIntegrityResult r0Result =
+            driverClient.setProcessIntegrity(static_cast<std::uint32_t>(pid), integrityRid);
+        const bool r0Applied = r0Result.io.ok &&
+            r0Result.status == KSWORD_ARK_PROCESS_INTEGRITY_STATUS_APPLIED &&
+            r0Result.lastStatus >= 0;
+        if (r0Applied)
+        {
+            if (detailText != nullptr)
+            {
+                std::ostringstream stream;
+                stream << "R0 ok: "
+                    << processDockIoMessageStdString(r0Result.io.message);
+                *detailText = stream.str();
+            }
+            return true;
+        }
+
+        if (shouldFallbackProcessIntegrityToR3(r0Result.io, r0Result.unsupported))
+        {
+            std::string r3DetailText;
+            const bool r3Ok = setProcessIntegrityLevelByPid(pid, integrityRid, &r3DetailText);
+            if (detailText != nullptr)
+            {
+                std::ostringstream stream;
+                stream << "R0 unavailable/unsupported: "
+                    << processDockIoMessageStdString(r0Result.io.message)
+                    << " | R3 "
+                    << (r3Ok ? "ok: " : "failed: ")
+                    << (r3DetailText.empty() ? "no detail" : r3DetailText);
+                *detailText = stream.str();
+            }
+            return r3Ok;
+        }
+
+        if (detailText != nullptr)
+        {
+            std::ostringstream stream;
+            stream << "R0 failed: "
+                << processDockIoMessageStdString(r0Result.io.message)
+                << ", status=" << r0Result.status
+                << ", nt=0x" << std::hex << static_cast<unsigned long>(r0Result.lastStatus)
+                << ", win32=" << std::dec << r0Result.io.win32Error;
+            *detailText = stream.str();
+        }
+        return false;
     }
 
     // activeProcessLinksDynDataDiagnostic 前置声明：
@@ -8108,6 +8501,13 @@ void ProcessDock::showTableContextMenu(const QPoint& localPosition)
     const bool hasBatchSelection = contextActionTargets.size() > 1;
     const ks::process::ProcessRecord* contextProcessRecord =
         contextActionTargets.empty() ? nullptr : &contextActionTargets.front().record;
+    DWORD contextIntegrityRid = 0;
+    std::string contextIntegrityDetailText;
+    const bool contextIntegrityKnown = contextProcessRecord != nullptr &&
+        queryProcessIntegrityRid(
+            contextProcessRecord->pid,
+            &contextIntegrityRid,
+            &contextIntegrityDetailText);
 
     QMenu contextMenu(this);
     // 右键菜单显式样式：避免浅色模式在透明父控件下出现黑底黑字。
@@ -8323,6 +8723,34 @@ void ProcessDock::showTableContextMenu(const QPoint& localPosition)
     highPriority->setData(4);
     realtimePriority->setData(5);
 
+    // 完整性二级菜单：
+    // - 读取右键目标（批量时取第一个目标）的 TokenIntegrityLevel；
+    // - 用前缀圆点标出当前 RID，避免 Qt 平台 checkmark 在不同主题下不可见；
+    // - 执行动作仍支持批量，所有选中进程都会尝试写入同一 Mandatory Label。
+    QMenu* integritySubMenu = contextMenu.addMenu(
+        blueTintedIcon(":/Icon/process_critical.svg"),
+        QStringLiteral("完整性"));
+    integritySubMenu->setToolTipsVisible(true);
+    if (!contextIntegrityKnown && contextProcessRecord != nullptr)
+    {
+        integritySubMenu->setToolTip(QStringLiteral("当前完整性读取失败：%1")
+            .arg(QString::fromStdString(contextIntegrityDetailText)));
+    }
+    for (const ProcessIntegrityLevelPreset& preset : ProcessIntegrityLevelPresets)
+    {
+        const bool isCurrentLevel = contextIntegrityKnown && contextIntegrityRid == preset.rid;
+        QAction* integrityAction = integritySubMenu->addAction(
+            blueTintedIcon(":/Icon/process_critical.svg"),
+            QStringLiteral("%1 %2 - %3")
+                .arg(isCurrentLevel ? QStringLiteral("●") : QStringLiteral(" "))
+                .arg(QString::fromLatin1(preset.nameText))
+                .arg(QString::fromUtf8(preset.detailText)));
+        integrityAction->setData(static_cast<unsigned int>(preset.rid));
+        integrityAction->setToolTip(QStringLiteral("R0 内核 API 优先修改 TokenIntegrityLevel 为 S-1-16-%1；驱动不可用时回退 R3%2")
+            .arg(static_cast<unsigned int>(preset.rid))
+            .arg(isCurrentLevel ? QStringLiteral("（当前）") : QString()));
+    }
+
     QAction* detailsAction = contextMenu.addAction(blueTintedIcon(":/Icon/process_details.svg"), "进程详细信息");
     detailsAction->setEnabled(!hasBatchSelection);
     contextMenu.addSeparator();
@@ -8408,6 +8836,13 @@ void ProcessDock::showTableContextMenu(const QPoint& localPosition)
         else if (selectedAction->parent() == prioritySubMenu)
         {
             executeSetPriorityAction(selectedAction->data().toInt());
+        }
+        else if (selectedAction->parent() == integritySubMenu)
+        {
+            const DWORD integrityRid = selectedAction->data().toUInt();
+            executeSetProcessIntegrityAction(
+                integrityRid,
+                processIntegrityNameFromRid(integrityRid));
         }
         else if (selectedAction->parent() == r0PplLevelSubMenu)
         {
@@ -10984,6 +11419,36 @@ void ProcessDock::executeSetPriorityAction(const int priorityActionId)
         [priorityLevel](const ProcessActionTarget& actionTarget, std::string* detailTextOut)
         {
             return ks::process::SetProcessPriority(actionTarget.record.pid, priorityLevel, detailTextOut);
+        },
+        false);
+}
+
+void ProcessDock::executeSetProcessIntegrityAction(
+    const unsigned long integrityRid,
+    const QString& levelDisplayText)
+{
+    // 输入：完整性 RID 与菜单显示文本。
+    // 处理：把选中进程快照交给统一批量执行器；每个目标先走 R0 内核 API，驱动不可用/旧驱动时回退 R3。
+    // 返回：无返回值；成功/失败由 dispatchProcessActionTargetsInParallel 写入日志。
+    const std::vector<ProcessActionTarget> actionTargets = selectedActionTargets();
+    if (actionTargets.empty())
+    {
+        kLogEvent logEvent;
+        warn << logEvent << "[ProcessDock] executeSetProcessIntegrityAction 被忽略：当前没有选中进程。" << eol;
+        return;
+    }
+
+    const DWORD targetIntegrityRid = static_cast<DWORD>(integrityRid);
+    const QString actionTitle = QStringLiteral("设置进程完整性(%1)").arg(levelDisplayText);
+    dispatchProcessActionTargetsInParallel(
+        actionTitle,
+        actionTargets,
+        [targetIntegrityRid](const ProcessActionTarget& actionTarget, std::string* detailTextOut)
+        {
+            return setProcessIntegrityLevelByR0ThenR3(
+                actionTarget.record.pid,
+                targetIntegrityRid,
+                detailTextOut);
         },
         false);
 }

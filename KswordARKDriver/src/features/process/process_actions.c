@@ -14,6 +14,7 @@ Environment:
 
 --*/
 
+#include <ntifs.h>
 #include "ark/ark_driver.h"
 #include "..\..\platform\process_resolver.h"
 #include "process_crossview.h"
@@ -45,6 +46,18 @@ PsGetProcessImageFileName(
 
 #ifndef PROCESS_SUSPEND_RESUME
 #define PROCESS_SUSPEND_RESUME (0x0800)
+#endif
+
+#ifndef PROCESS_QUERY_INFORMATION
+#define PROCESS_QUERY_INFORMATION (0x0400)
+#endif
+
+#ifndef SE_GROUP_INTEGRITY
+#define SE_GROUP_INTEGRITY 0x00000020L
+#endif
+
+#ifndef STATUS_INVALID_SID
+#define STATUS_INVALID_SID ((NTSTATUS)0xC0000078L)
 #endif
 
 #ifndef SE_SIGNING_LEVEL_UNCHECKED
@@ -97,14 +110,47 @@ PsGetProcessImageFileName(
 #define KSWORD_ARK_PROCESS_OFFSET_SCAN_LIMIT 0x2000UL
 #define KSWORD_ARK_PROCESS_HIDDEN_PID_TAG 0xE0000000UL
 #define KSWORD_ARK_PROCESS_HIDDEN_PID_MASK 0x0FFFFFFCUL
+#if defined(_WIN64)
+#define KSWORD_ARK_EX_FAST_REF_MASK ((ULONG_PTR)0x0FULL)
+#else
+#define KSWORD_ARK_EX_FAST_REF_MASK ((ULONG_PTR)0x07UL)
+#endif
+#define KSWORD_ARK_TOKEN_INTEGRITY_MAX_GROUPS 1024UL
+#define KSWORD_ARK_PROCESS_INTEGRITY_DIAG_CHARS 512UL
 
 #ifndef STATUS_NOT_FOUND
 #define STATUS_NOT_FOUND ((NTSTATUS)0xC0000225L)
 #endif
 
+#ifndef STATUS_INVALID_DEVICE_STATE
+#define STATUS_INVALID_DEVICE_STATE ((NTSTATUS)0xC0000184L)
+#endif
+
 #ifndef STATUS_BUFFER_OVERFLOW
 #define STATUS_BUFFER_OVERFLOW ((NTSTATUS)0x80000005L)
 #endif
+
+typedef struct _KSWORD_ARK_PROCESS_INTEGRITY_ATTEMPT_DIAG
+{
+    ULONG ProcessId;
+    ULONG IntegrityRid;
+    NTSTATUS ApiStatus;
+    NTSTATUS FallbackStatus;
+    NTSTATUS FinalStatus;
+    ULONG64 CapabilityMask;
+    ULONG EpToken;
+    ULONG TokUserAndGroupCount;
+    ULONG TokUserAndGroups;
+    ULONG TokIntegrityLevelIndex;
+    ULONG TokMandatoryPolicy;
+    ULONG EpTokenSource;
+    ULONG TokUserAndGroupCountSource;
+    ULONG TokUserAndGroupsSource;
+    ULONG TokIntegrityLevelIndexSource;
+    ULONG TokMandatoryPolicySource;
+} KSWORD_ARK_PROCESS_INTEGRITY_ATTEMPT_DIAG, *PKSWORD_ARK_PROCESS_INTEGRITY_ATTEMPT_DIAG;
+
+static KSWORD_ARK_PROCESS_INTEGRITY_ATTEMPT_DIAG g_KswordProcessIntegrityDiag;
 
 extern POBJECT_TYPE* PsProcessType;
 
@@ -1808,6 +1854,633 @@ Return Value:
     }
 
     return KswordARKDriverPatchProcessProtectionStateByPid(processId, protectionLevel);
+}
+
+static NTSTATUS
+KswordARKDriverBuildMandatoryIntegritySid(
+    _In_ ULONG IntegrityRid,
+    _Out_writes_bytes_(SECURITY_MAX_SID_SIZE) PSID SidBuffer
+    )
+/*++
+
+Routine Description:
+
+    Build an S-1-16-* mandatory integrity SID in caller-provided storage.
+
+Arguments:
+
+    IntegrityRid - Mandatory label RID.
+    SidBuffer - SECURITY_MAX_SID_SIZE writable storage.
+
+Return Value:
+
+    STATUS_SUCCESS or an RTL SID construction failure.
+
+--*/
+{
+    SID_IDENTIFIER_AUTHORITY mandatoryLabelAuthority = SECURITY_MANDATORY_LABEL_AUTHORITY;
+    NTSTATUS status = STATUS_SUCCESS;
+    PULONG subAuthority = NULL;
+
+    if (SidBuffer == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    RtlZeroMemory(SidBuffer, SECURITY_MAX_SID_SIZE);
+    status = RtlInitializeSid(SidBuffer, &mandatoryLabelAuthority, 1);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+
+    subAuthority = RtlSubAuthoritySid(SidBuffer, 0);
+    if (subAuthority == NULL) {
+        return STATUS_INVALID_SID;
+    }
+
+    *subAuthority = IntegrityRid;
+    return RtlValidSid(SidBuffer) ? STATUS_SUCCESS : STATUS_INVALID_SID;
+}
+
+static BOOLEAN
+KswordARKDriverDynOffsetPresent(
+    _In_ ULONG Offset
+    )
+/*++
+
+Routine Description:
+
+    Test whether one DynData offset is usable by a private-field consumer.
+
+Arguments:
+
+    Offset - Normalized KSW_DYN offset value.
+
+Return Value:
+
+    TRUE when the offset is neither unavailable nor the legacy 0xffff sentinel;
+    otherwise FALSE.
+
+--*/
+{
+    return (Offset != KSW_DYN_OFFSET_UNAVAILABLE && Offset != 0x0000FFFFUL) ? TRUE : FALSE;
+}
+
+static BOOLEAN
+KswordARKDriverTokenIntegrityDynDataReady(
+    _In_ const KSW_DYN_STATE* State
+    )
+/*++
+
+Routine Description:
+
+    Validate the exact DynData dependencies required to patch a process token
+    mandatory-label SID. 中文说明：这里不接受猜测来源；_EPROCESS.Token 与
+    _TOKEN.UserAndGroupCount/UserAndGroups/IntegrityLevelIndex 必须来自当前
+    ntoskrnl PDB profile，并且 capability 已经由 DynData 计算为可用。
+
+Arguments:
+
+    State - Immutable DynData snapshot captured by the caller.
+
+Return Value:
+
+    TRUE when the private token integrity path may run; otherwise FALSE.
+
+--*/
+{
+    if (State == NULL) {
+        return FALSE;
+    }
+    if ((State->CapabilityMask & KSW_CAP_TOKEN_INTEGRITY_FIELDS) == 0ULL) {
+        return FALSE;
+    }
+    if (!KswordARKDriverDynOffsetPresent(State->Kernel.EpToken) ||
+        !KswordARKDriverDynOffsetPresent(State->Kernel.TokUserAndGroupCount) ||
+        !KswordARKDriverDynOffsetPresent(State->Kernel.TokUserAndGroups) ||
+        !KswordARKDriverDynOffsetPresent(State->Kernel.TokIntegrityLevelIndex)) {
+        return FALSE;
+    }
+
+    return State->KernelSources.EpToken == KSW_DYN_FIELD_SOURCE_PDB_PROFILE &&
+        State->KernelSources.TokUserAndGroupCount == KSW_DYN_FIELD_SOURCE_PDB_PROFILE &&
+        State->KernelSources.TokUserAndGroups == KSW_DYN_FIELD_SOURCE_PDB_PROFILE &&
+        State->KernelSources.TokIntegrityLevelIndex == KSW_DYN_FIELD_SOURCE_PDB_PROFILE;
+}
+
+static BOOLEAN
+KswordARKDriverSidHasMandatoryAuthority(
+    _In_ PSID Sid
+    )
+/*++
+
+Routine Description:
+
+    Check whether a SID uses SECURITY_MANDATORY_LABEL_AUTHORITY. This confirms
+    the token entry being overwritten is the integrity label rather than a user,
+    group, capability, or restricted SID.
+
+Arguments:
+
+    Sid - Candidate SID pointer from the token's SID_AND_ATTRIBUTES array.
+
+Return Value:
+
+    TRUE when the SID authority is S-1-16; otherwise FALSE.
+
+--*/
+{
+    SID_IDENTIFIER_AUTHORITY mandatoryLabelAuthority = SECURITY_MANDATORY_LABEL_AUTHORITY;
+    SID* sidBody = NULL;
+
+    if (Sid == NULL) {
+        return FALSE;
+    }
+
+    if (!RtlValidSid(Sid)) {
+        return FALSE;
+    }
+
+    sidBody = (SID*)Sid;
+    return RtlCompareMemory(
+        sidBody->IdentifierAuthority.Value,
+        mandatoryLabelAuthority.Value,
+        sizeof(mandatoryLabelAuthority.Value)) == sizeof(mandatoryLabelAuthority.Value) ? TRUE : FALSE;
+}
+
+static NTSTATUS
+KswordARKDriverCopyMandatorySidInPlace(
+    _Inout_ PSID ExistingSid,
+    _In_ PSID NewSid
+    )
+/*++
+
+Routine Description:
+
+    Replace an existing token integrity SID by copying a caller-built
+    S-1-16-* SID into the existing SID storage. 中文说明：本函数绝不把 Token
+    中的 Sid 指针改成栈/临时缓冲区；只在现有 SID 有效、是 mandatory
+    label authority、且目标缓冲区长度足够时原地覆盖 SID 字节。
+
+Arguments:
+
+    ExistingSid - SID pointer currently stored in the target token's integrity
+        SID_AND_ATTRIBUTES entry.
+    NewSid - Caller-built mandatory integrity SID.
+
+Return Value:
+
+    STATUS_SUCCESS when the copy completed; validation or exception status on
+    failure.
+
+--*/
+{
+    NTSTATUS status = STATUS_SUCCESS;
+    ULONG existingSidLength = 0UL;
+    ULONG newSidLength = 0UL;
+    PUCHAR existingSubAuthorityCount = NULL;
+
+    if (ExistingSid == NULL || NewSid == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    __try {
+        if (!RtlValidSid(ExistingSid) || !RtlValidSid(NewSid)) {
+            status = STATUS_INVALID_SID;
+            __leave;
+        }
+        if (!KswordARKDriverSidHasMandatoryAuthority(ExistingSid) ||
+            !KswordARKDriverSidHasMandatoryAuthority(NewSid)) {
+            status = STATUS_INVALID_SID;
+            __leave;
+        }
+
+        existingSubAuthorityCount = RtlSubAuthorityCountSid(ExistingSid);
+        if (existingSubAuthorityCount == NULL || *existingSubAuthorityCount == 0U) {
+            status = STATUS_INVALID_SID;
+            __leave;
+        }
+
+        existingSidLength = RtlLengthSid(ExistingSid);
+        newSidLength = RtlLengthSid(NewSid);
+        if (existingSidLength < newSidLength) {
+            status = STATUS_BUFFER_TOO_SMALL;
+            __leave;
+        }
+
+        RtlCopyMemory(ExistingSid, NewSid, newSidLength);
+        status = RtlValidSid(ExistingSid) ? STATUS_SUCCESS : STATUS_INVALID_SID;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        status = GetExceptionCode();
+    }
+
+    return status;
+}
+
+static NTSTATUS
+KswordARKDriverSetProcessIntegrityByPrivateTokenOffsets(
+    _In_ ULONG ProcessId,
+    _In_ PSID MandatorySid
+    )
+/*++
+
+Routine Description:
+
+    Patch a process primary token's integrity SID through current-kernel PDB
+    offsets. Processing steps:
+    1. Snapshot DynData and require PDB-sourced _EPROCESS.Token plus _TOKEN
+       integrity fields.
+    2. Reference the target process with PsLookupProcessByProcessId.
+    3. Decode the EX_FAST_REF stored at EPROCESS.Token to obtain the token
+       object pointer.
+    4. Read UserAndGroupCount, UserAndGroups, and IntegrityLevelIndex from the
+       token, bounds-check the index, then copy the new S-1-16-* SID into the
+       existing SID storage.
+
+Arguments:
+
+    ProcessId - Target process ID.
+    MandatorySid - Caller-built S-1-16-* SID that remains valid for this call.
+
+Return Value:
+
+    STATUS_SUCCESS when the private fallback applied; validation, DynData, or
+    guarded-memory access status on failure.
+
+--*/
+{
+    KSW_DYN_STATE dynState;
+    PEPROCESS processObject = NULL;
+    NTSTATUS status = STATUS_SUCCESS;
+    ULONG_PTR tokenFastRef = 0U;
+    PVOID tokenObject = NULL;
+    ULONG userAndGroupCount = 0UL;
+    ULONG integrityLevelIndex = 0UL;
+    SID_AND_ATTRIBUTES* userAndGroups = NULL;
+    SID_AND_ATTRIBUTES* integrityEntry = NULL;
+    PSID existingSid = NULL;
+    ULONG existingAttributes = 0UL;
+
+    if (ProcessId == 0U || MandatorySid == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    if (KeGetCurrentIrql() > APC_LEVEL) {
+        return STATUS_INVALID_DEVICE_STATE;
+    }
+    if (!RtlValidSid(MandatorySid) || !KswordARKDriverSidHasMandatoryAuthority(MandatorySid)) {
+        return STATUS_INVALID_SID;
+    }
+
+    RtlZeroMemory(&dynState, sizeof(dynState));
+    KswordARKDynDataSnapshot(&dynState);
+    g_KswordProcessIntegrityDiag.CapabilityMask = dynState.CapabilityMask;
+    g_KswordProcessIntegrityDiag.EpToken = dynState.Kernel.EpToken;
+    g_KswordProcessIntegrityDiag.TokUserAndGroupCount = dynState.Kernel.TokUserAndGroupCount;
+    g_KswordProcessIntegrityDiag.TokUserAndGroups = dynState.Kernel.TokUserAndGroups;
+    g_KswordProcessIntegrityDiag.TokIntegrityLevelIndex = dynState.Kernel.TokIntegrityLevelIndex;
+    g_KswordProcessIntegrityDiag.TokMandatoryPolicy = dynState.Kernel.TokMandatoryPolicy;
+    g_KswordProcessIntegrityDiag.EpTokenSource = dynState.KernelSources.EpToken;
+    g_KswordProcessIntegrityDiag.TokUserAndGroupCountSource = dynState.KernelSources.TokUserAndGroupCount;
+    g_KswordProcessIntegrityDiag.TokUserAndGroupsSource = dynState.KernelSources.TokUserAndGroups;
+    g_KswordProcessIntegrityDiag.TokIntegrityLevelIndexSource = dynState.KernelSources.TokIntegrityLevelIndex;
+    g_KswordProcessIntegrityDiag.TokMandatoryPolicySource = dynState.KernelSources.TokMandatoryPolicy;
+    if (!KswordARKDriverTokenIntegrityDynDataReady(&dynState)) {
+        return STATUS_NOT_SUPPORTED;
+    }
+
+    status = PsLookupProcessByProcessId(ULongToHandle(ProcessId), &processObject);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+
+    __try {
+        tokenFastRef = *(volatile ULONG_PTR*)((UCHAR*)processObject + dynState.Kernel.EpToken);
+        tokenObject = (PVOID)(tokenFastRef & ~KSWORD_ARK_EX_FAST_REF_MASK);
+        if (tokenObject == NULL) {
+            status = STATUS_NOT_FOUND;
+            __leave;
+        }
+
+        userAndGroupCount = *(volatile ULONG*)((UCHAR*)tokenObject + dynState.Kernel.TokUserAndGroupCount);
+        integrityLevelIndex = *(volatile ULONG*)((UCHAR*)tokenObject + dynState.Kernel.TokIntegrityLevelIndex);
+        userAndGroups = *(SID_AND_ATTRIBUTES**)((UCHAR*)tokenObject + dynState.Kernel.TokUserAndGroups);
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        status = GetExceptionCode();
+    }
+    if (!NT_SUCCESS(status)) {
+        ObDereferenceObject(processObject);
+        return status;
+    }
+
+    if (userAndGroupCount == 0UL ||
+        userAndGroupCount > KSWORD_ARK_TOKEN_INTEGRITY_MAX_GROUPS ||
+        integrityLevelIndex >= userAndGroupCount ||
+        userAndGroups == NULL) {
+        ObDereferenceObject(processObject);
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    __try {
+        integrityEntry = &userAndGroups[integrityLevelIndex];
+        existingSid = integrityEntry->Sid;
+        existingAttributes = integrityEntry->Attributes;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        status = GetExceptionCode();
+    }
+    if (!NT_SUCCESS(status)) {
+        ObDereferenceObject(processObject);
+        return status;
+    }
+
+    status = KswordARKDriverCopyMandatorySidInPlace(existingSid, MandatorySid);
+    if (NT_SUCCESS(status)) {
+        __try {
+            integrityEntry->Attributes = existingAttributes | SE_GROUP_INTEGRITY;
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER) {
+            status = GetExceptionCode();
+        }
+    }
+
+    ObDereferenceObject(processObject);
+    return status;
+}
+
+static NTSTATUS
+KswordARKDriverSelectProcessIntegrityStatus(
+    _In_ NTSTATUS ApiStatus,
+    _In_ NTSTATUS FallbackStatus
+    )
+/*++
+
+Routine Description:
+
+    Select the final status after the documented token API path failed and the
+    private DynData fallback was attempted. 中文说明：如果私有路径不可用，保留
+    原始 API 错误，避免把“系统拒绝标签”误报成“功能不支持”；如果私有
+    路径实际运行并给出校验/访问错误，则返回该错误便于定位偏移问题。
+
+Arguments:
+
+    ApiStatus - Failure status from the documented process/token API path.
+    FallbackStatus - Status from the private token-offset fallback.
+
+Return Value:
+
+    STATUS_SUCCESS if the fallback succeeded; ApiStatus when fallback was not
+    available; otherwise FallbackStatus.
+
+--*/
+{
+    if (NT_SUCCESS(FallbackStatus)) {
+        return FallbackStatus;
+    }
+
+    return (FallbackStatus == STATUS_NOT_SUPPORTED) ? ApiStatus : FallbackStatus;
+}
+
+static VOID
+KswordARKDriverRecordProcessIntegrityResult(
+    _In_ ULONG ProcessId,
+    _In_ ULONG IntegrityRid,
+    _In_ NTSTATUS ApiStatus,
+    _In_ NTSTATUS FallbackStatus,
+    _In_ NTSTATUS FinalStatus
+    )
+/*++
+
+Routine Description:
+
+    Store the final status tuple for the latest process-integrity request. This
+    best-effort diagnostic is read by the IOCTL layer immediately after the
+    action returns so R0 logs can show why private-token fallback did or did not
+    run.
+
+Arguments:
+
+    ProcessId - Target PID.
+    IntegrityRid - Requested S-1-16-* RID.
+    ApiStatus - Documented token API path status.
+    FallbackStatus - Private offset fallback status, or STATUS_NOT_SUPPORTED.
+    FinalStatus - Status returned to the IOCTL response.
+
+Return Value:
+
+    None.
+
+--*/
+{
+    g_KswordProcessIntegrityDiag.ProcessId = ProcessId;
+    g_KswordProcessIntegrityDiag.IntegrityRid = IntegrityRid;
+    g_KswordProcessIntegrityDiag.ApiStatus = ApiStatus;
+    g_KswordProcessIntegrityDiag.FallbackStatus = FallbackStatus;
+    g_KswordProcessIntegrityDiag.FinalStatus = FinalStatus;
+}
+
+NTSTATUS
+KswordARKDriverDescribeLastProcessIntegrityAttempt(
+    _Out_writes_bytes_(BufferBytes) CHAR* Buffer,
+    _In_ SIZE_T BufferBytes
+    )
+/*++
+
+Routine Description:
+
+    Format the latest process-integrity attempt diagnostic into caller storage.
+
+Arguments:
+
+    Buffer - Writable ANSI output buffer.
+    BufferBytes - Size of Buffer in bytes.
+
+Return Value:
+
+    STATUS_SUCCESS when text was written; STATUS_INVALID_PARAMETER or
+    STATUS_BUFFER_TOO_SMALL when storage is invalid.
+
+--*/
+{
+    const KSWORD_ARK_PROCESS_INTEGRITY_ATTEMPT_DIAG diag = g_KswordProcessIntegrityDiag;
+
+    if (Buffer == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    if (BufferBytes == 0U) {
+        return STATUS_BUFFER_TOO_SMALL;
+    }
+
+    Buffer[0] = '\0';
+    return RtlStringCbPrintfA(
+        Buffer,
+        BufferBytes,
+        "pid=%lu, rid=0x%08lX, api=0x%08X, fallback=0x%08X, final=0x%08X, caps=0x%I64X, "
+        "off={epToken=0x%lX,uagCount=0x%lX,uag=0x%lX,ilIndex=0x%lX,mandatory=0x%lX}, "
+        "src={epToken=%lu,uagCount=%lu,uag=%lu,ilIndex=%lu,mandatory=%lu}.",
+        (unsigned long)diag.ProcessId,
+        (unsigned long)diag.IntegrityRid,
+        (unsigned int)diag.ApiStatus,
+        (unsigned int)diag.FallbackStatus,
+        (unsigned int)diag.FinalStatus,
+        diag.CapabilityMask,
+        (unsigned long)diag.EpToken,
+        (unsigned long)diag.TokUserAndGroupCount,
+        (unsigned long)diag.TokUserAndGroups,
+        (unsigned long)diag.TokIntegrityLevelIndex,
+        (unsigned long)diag.TokMandatoryPolicy,
+        (unsigned long)diag.EpTokenSource,
+        (unsigned long)diag.TokUserAndGroupCountSource,
+        (unsigned long)diag.TokUserAndGroupsSource,
+        (unsigned long)diag.TokIntegrityLevelIndexSource,
+        (unsigned long)diag.TokMandatoryPolicySource);
+}
+
+NTSTATUS
+KswordARKDriverSetProcessIntegrityByPid(
+    _In_ ULONG ProcessId,
+    _In_ ULONG IntegrityRid
+    )
+/*++
+
+Routine Description:
+
+    Set a process primary-token mandatory integrity label. The preferred path
+    calls documented kernel token APIs. If Windows rejects a syntactically valid
+    mandatory label (for example System/ProtectedProcess raises), the routine
+    falls back to PDB/DynData-validated private token offsets and overwrites the
+    existing mandatory SID in place.
+
+Arguments:
+
+    ProcessId - Target process ID.
+    IntegrityRid - S-1-16-* mandatory label RID.
+
+Return Value:
+
+    NTSTATUS from process open, token open, SID construction, or token update.
+
+--*/
+{
+    OBJECT_ATTRIBUTES objectAttributes;
+    CLIENT_ID clientId;
+    HANDLE processHandle = NULL;
+    HANDLE tokenHandle = NULL;
+    UCHAR sidBuffer[SECURITY_MAX_SID_SIZE] = { 0 };
+    TOKEN_MANDATORY_LABEL mandatoryLabel;
+    ULONG tokenInformationLength = 0UL;
+    NTSTATUS status = STATUS_SUCCESS;
+    NTSTATUS apiStatus = STATUS_SUCCESS;
+    NTSTATUS fallbackStatus = STATUS_SUCCESS;
+    NTSTATUS finalStatus = STATUS_SUCCESS;
+
+    RtlZeroMemory(&g_KswordProcessIntegrityDiag, sizeof(g_KswordProcessIntegrityDiag));
+    g_KswordProcessIntegrityDiag.ProcessId = ProcessId;
+    g_KswordProcessIntegrityDiag.IntegrityRid = IntegrityRid;
+    g_KswordProcessIntegrityDiag.ApiStatus = STATUS_UNSUCCESSFUL;
+    g_KswordProcessIntegrityDiag.FallbackStatus = STATUS_NOT_SUPPORTED;
+    g_KswordProcessIntegrityDiag.FinalStatus = STATUS_UNSUCCESSFUL;
+
+    if (ProcessId == 0U || ProcessId <= 4U) {
+        KswordARKDriverRecordProcessIntegrityResult(
+            ProcessId,
+            IntegrityRid,
+            STATUS_INVALID_PARAMETER,
+            STATUS_NOT_SUPPORTED,
+            STATUS_INVALID_PARAMETER);
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    status = KswordARKDriverBuildMandatoryIntegritySid(IntegrityRid, (PSID)sidBuffer);
+    if (!NT_SUCCESS(status)) {
+        KswordARKDriverRecordProcessIntegrityResult(
+            ProcessId,
+            IntegrityRid,
+            status,
+            STATUS_NOT_SUPPORTED,
+            status);
+        return status;
+    }
+
+    InitializeObjectAttributes(&objectAttributes, NULL, OBJ_KERNEL_HANDLE, NULL, NULL);
+    clientId.UniqueProcess = ULongToHandle(ProcessId);
+    clientId.UniqueThread = NULL;
+    status = ZwOpenProcess(
+        &processHandle,
+        PROCESS_QUERY_INFORMATION,
+        &objectAttributes,
+        &clientId);
+    if (!NT_SUCCESS(status)) {
+        fallbackStatus = KswordARKDriverSetProcessIntegrityByPrivateTokenOffsets(
+            ProcessId,
+            (PSID)sidBuffer);
+        finalStatus = KswordARKDriverSelectProcessIntegrityStatus(status, fallbackStatus);
+        KswordARKDriverRecordProcessIntegrityResult(
+            ProcessId,
+            IntegrityRid,
+            status,
+            fallbackStatus,
+            finalStatus);
+        return finalStatus;
+    }
+
+    status = ZwOpenProcessTokenEx(
+        processHandle,
+        TOKEN_ADJUST_DEFAULT | TOKEN_QUERY,
+        OBJ_KERNEL_HANDLE,
+        &tokenHandle);
+    if (!NT_SUCCESS(status)) {
+        ZwClose(processHandle);
+        fallbackStatus = KswordARKDriverSetProcessIntegrityByPrivateTokenOffsets(
+            ProcessId,
+            (PSID)sidBuffer);
+        finalStatus = KswordARKDriverSelectProcessIntegrityStatus(status, fallbackStatus);
+        KswordARKDriverRecordProcessIntegrityResult(
+            ProcessId,
+            IntegrityRid,
+            status,
+            fallbackStatus,
+            finalStatus);
+        return finalStatus;
+    }
+
+    RtlZeroMemory(&mandatoryLabel, sizeof(mandatoryLabel));
+    mandatoryLabel.Label.Attributes = SE_GROUP_INTEGRITY;
+    mandatoryLabel.Label.Sid = (PSID)sidBuffer;
+    tokenInformationLength =
+        (ULONG)(sizeof(mandatoryLabel) + RtlLengthSid((PSID)sidBuffer));
+
+    status = ZwSetInformationToken(
+        tokenHandle,
+        TokenIntegrityLevel,
+        &mandatoryLabel,
+        tokenInformationLength);
+    apiStatus = status;
+
+    ZwClose(tokenHandle);
+    ZwClose(processHandle);
+
+    if (NT_SUCCESS(apiStatus)) {
+        KswordARKDriverRecordProcessIntegrityResult(
+            ProcessId,
+            IntegrityRid,
+            apiStatus,
+            STATUS_NOT_SUPPORTED,
+            apiStatus);
+        return apiStatus;
+    }
+
+    fallbackStatus = KswordARKDriverSetProcessIntegrityByPrivateTokenOffsets(
+        ProcessId,
+        (PSID)sidBuffer);
+    finalStatus = KswordARKDriverSelectProcessIntegrityStatus(apiStatus, fallbackStatus);
+    KswordARKDriverRecordProcessIntegrityResult(
+        ProcessId,
+        IntegrityRid,
+        apiStatus,
+        fallbackStatus,
+        finalStatus);
+    return finalStatus;
 }
 
 NTSTATUS

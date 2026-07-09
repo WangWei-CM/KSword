@@ -115,6 +115,22 @@
 #pragma comment(lib, "wbemuuid.lib")
 #pragma comment(lib, "FltLib.lib")
 
+#ifndef SECURITY_MANDATORY_MEDIUM_PLUS_RID
+#define SECURITY_MANDATORY_MEDIUM_PLUS_RID (SECURITY_MANDATORY_MEDIUM_RID + 0x100UL)
+#endif
+
+#ifndef SECURITY_MANDATORY_PROTECTED_PROCESS_RID
+#define SECURITY_MANDATORY_PROTECTED_PROCESS_RID 0x5000UL
+#endif
+
+#ifndef SYSTEM_MANDATORY_LABEL_NO_WRITE_UP
+#define SYSTEM_MANDATORY_LABEL_NO_WRITE_UP 0x1UL
+#endif
+
+#ifndef LABEL_SECURITY_INFORMATION
+#define LABEL_SECURITY_INFORMATION 0x00000010L
+#endif
+
 namespace
 {
     struct DriverDeleteTarget
@@ -181,6 +197,366 @@ namespace
         bool completed = false;                   // completed：标记 UI 选择流程是否已经写入结果。
         UnlockSelectionResult result;             // result：保存用户选择的操作方式及句柄/PID 目标。
     };
+
+    struct FileIntegrityLevelPreset
+    {
+        DWORD rid;              // rid：S-1-16-* Mandatory Label 的最后一级 RID。
+        const char* nameText;   // nameText：菜单与日志中的稳定英文名。
+        const char* detailText; // detailText：面向用户的中文说明。
+    };
+
+    const FileIntegrityLevelPreset FileIntegrityLevelPresets[] =
+    {
+        { SECURITY_MANDATORY_UNTRUSTED_RID, "Untrusted", "不受信任完整性" },
+        { SECURITY_MANDATORY_LOW_RID, "Low", "低完整性" },
+        { SECURITY_MANDATORY_MEDIUM_RID, "Medium", "中完整性" },
+        { SECURITY_MANDATORY_MEDIUM_PLUS_RID, "MediumPlus", "中高完整性" },
+        { SECURITY_MANDATORY_HIGH_RID, "High", "高完整性" },
+        { SECURITY_MANDATORY_SYSTEM_RID, "System", "系统完整性" }
+    };
+
+    // isSupportedFileMandatoryIntegrityRid 作用：
+    // - 输入：integrityRid 为准备写入文件/目录 Mandatory Label 的 S-1-16-* RID；
+    // - 处理：只允许 Windows 文件对象可接受的 MIC 等级。ProtectedProcess/SecureProcess
+    //   属于令牌/进程语义，写入文件 SACL 会被内核安全 API 拒绝为 STATUS_INVALID_LABEL；
+    // - 返回：true 表示可继续调用 R0/R3 写 LABEL_SECURITY_INFORMATION，false 表示前端应直接拒绝。
+    bool isSupportedFileMandatoryIntegrityRid(const DWORD integrityRid)
+    {
+        for (const FileIntegrityLevelPreset& preset : FileIntegrityLevelPresets)
+        {
+            if (preset.rid == integrityRid)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // formatFileWin32Error 作用：
+    // - 输入：stepText 表示失败步骤，errorCode 为 Win32 错误码；
+    // - 处理：生成稳定错误文本，避免不同系统语言下 FormatMessage 文案不一致；
+    // - 返回：可直接展示和写入日志的 QString。
+    QString formatFileWin32Error(const QString& stepText, const DWORD errorCode)
+    {
+        return QStringLiteral("%1 failed, error=%2").arg(stepText).arg(errorCode);
+    }
+
+    // enableFileContextPrivilege 作用：
+    // - 输入：privilegeName 为当前进程令牌中的特权名，例如 SeSecurityPrivilege；
+    // - 处理：临时启用当前进程 Token 上已有特权，不具备该特权时静默失败；
+    // - 返回：true 表示 AdjustTokenPrivileges 成功启用，false 表示无法启用。
+    bool enableFileContextPrivilege(const wchar_t* privilegeName)
+    {
+        if (privilegeName == nullptr)
+        {
+            return false;
+        }
+
+        HANDLE tokenHandle = nullptr;
+        if (::OpenProcessToken(::GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &tokenHandle) == FALSE)
+        {
+            return false;
+        }
+
+        LUID privilegeLuid{};
+        if (::LookupPrivilegeValueW(nullptr, privilegeName, &privilegeLuid) == FALSE)
+        {
+            ::CloseHandle(tokenHandle);
+            return false;
+        }
+
+        TOKEN_PRIVILEGES tokenPrivileges{};
+        tokenPrivileges.PrivilegeCount = 1;
+        tokenPrivileges.Privileges[0].Luid = privilegeLuid;
+        tokenPrivileges.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+        const BOOL adjustOk = ::AdjustTokenPrivileges(
+            tokenHandle,
+            FALSE,
+            &tokenPrivileges,
+            sizeof(tokenPrivileges),
+            nullptr,
+            nullptr);
+        const DWORD adjustError = ::GetLastError();
+        ::CloseHandle(tokenHandle);
+        return adjustOk != FALSE && adjustError == ERROR_SUCCESS;
+    }
+
+    // allocateFileMandatoryIntegritySid 作用：
+    // - 输入：integrityRid 为 Mandatory Label RID；
+    // - 处理：构造 S-1-16-integrityRid SID，调用者负责 FreeSid；
+    // - 返回：成功时 true 并写入 sidOut，失败时 false 并输出 detailText。
+    bool allocateFileMandatoryIntegritySid(
+        const DWORD integrityRid,
+        PSID* sidOut,
+        QString* detailText)
+    {
+        if (sidOut == nullptr)
+        {
+            if (detailText != nullptr)
+            {
+                *detailText = QStringLiteral("sidOut is null");
+            }
+            return false;
+        }
+        *sidOut = nullptr;
+
+        SID_IDENTIFIER_AUTHORITY mandatoryLabelAuthority = SECURITY_MANDATORY_LABEL_AUTHORITY;
+        if (::AllocateAndInitializeSid(
+            &mandatoryLabelAuthority,
+            1,
+            integrityRid,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            sidOut) == FALSE)
+        {
+            if (detailText != nullptr)
+            {
+                *detailText = formatFileWin32Error(
+                    QStringLiteral("AllocateAndInitializeSid"),
+                    ::GetLastError());
+            }
+            return false;
+        }
+        return true;
+    }
+
+    // fileIntegrityNameFromRid 作用：
+    // - 输入：Mandatory Label RID；
+    // - 处理：优先匹配菜单预设，否则退化为十六进制 RID；
+    // - 返回：用于菜单、提示框和日志的短名称。
+    QString fileIntegrityNameFromRid(const DWORD integrityRid)
+    {
+        for (const FileIntegrityLevelPreset& preset : FileIntegrityLevelPresets)
+        {
+            if (preset.rid == integrityRid)
+            {
+                return QString::fromLatin1(preset.nameText);
+            }
+        }
+        return QStringLiteral("RID=0x%1").arg(integrityRid, 0, 16).toUpper();
+    }
+
+    // queryFileIntegrityRid 作用：
+    // - 输入：filePath 为文件或目录路径；
+    // - 处理：读取 LABEL_SECURITY_INFORMATION，扫描 SYSTEM_MANDATORY_LABEL_ACE_TYPE；
+    // - 返回：成功时 true 并写入 ridOut；没有显式标签时按 Windows 默认 Medium 处理。
+    bool queryFileIntegrityRid(
+        const QString& filePath,
+        DWORD* ridOut,
+        bool* implicitMediumOut,
+        QString* detailText)
+    {
+        if (ridOut == nullptr)
+        {
+            if (detailText != nullptr)
+            {
+                *detailText = QStringLiteral("ridOut is null");
+            }
+            return false;
+        }
+        *ridOut = 0;
+        if (implicitMediumOut != nullptr)
+        {
+            *implicitMediumOut = false;
+        }
+
+        (void)enableFileContextPrivilege(SE_SECURITY_NAME);
+
+        std::wstring pathBuffer = QDir::toNativeSeparators(filePath).toStdWString();
+        PACL labelAcl = nullptr;
+        PSECURITY_DESCRIPTOR securityDescriptor = nullptr;
+        const DWORD queryResult = ::GetNamedSecurityInfoW(
+            pathBuffer.data(),
+            SE_FILE_OBJECT,
+            LABEL_SECURITY_INFORMATION,
+            nullptr,
+            nullptr,
+            nullptr,
+            &labelAcl,
+            &securityDescriptor);
+        if (queryResult != ERROR_SUCCESS)
+        {
+            if (detailText != nullptr)
+            {
+                *detailText = formatFileWin32Error(
+                    QStringLiteral("GetNamedSecurityInfoW(LABEL_SECURITY_INFORMATION)"),
+                    queryResult);
+            }
+            return false;
+        }
+
+        bool foundLabel = false;
+        DWORD foundRid = SECURITY_MANDATORY_MEDIUM_RID;
+        if (labelAcl != nullptr)
+        {
+            ACL_SIZE_INFORMATION aclSizeInfo{};
+            if (::GetAclInformation(
+                labelAcl,
+                &aclSizeInfo,
+                static_cast<DWORD>(sizeof(aclSizeInfo)),
+                AclSizeInformation) != FALSE)
+            {
+                for (DWORD aceIndex = 0; aceIndex < aclSizeInfo.AceCount; ++aceIndex)
+                {
+                    LPVOID acePointer = nullptr;
+                    if (::GetAce(labelAcl, aceIndex, &acePointer) == FALSE || acePointer == nullptr)
+                    {
+                        continue;
+                    }
+
+                    const ACE_HEADER* aceHeader = reinterpret_cast<const ACE_HEADER*>(acePointer);
+                    if (aceHeader->AceType != SYSTEM_MANDATORY_LABEL_ACE_TYPE)
+                    {
+                        continue;
+                    }
+
+                    const ACCESS_ALLOWED_ACE* mandatoryAce =
+                        reinterpret_cast<const ACCESS_ALLOWED_ACE*>(acePointer);
+                    PSID labelSid = const_cast<DWORD*>(&mandatoryAce->SidStart);
+                    if (labelSid == nullptr ||
+                        ::IsValidSid(labelSid) == FALSE ||
+                        *::GetSidSubAuthorityCount(labelSid) == 0)
+                    {
+                        continue;
+                    }
+
+                    foundRid = *::GetSidSubAuthority(
+                        labelSid,
+                        static_cast<DWORD>(*::GetSidSubAuthorityCount(labelSid) - 1));
+                    foundLabel = true;
+                    break;
+                }
+            }
+        }
+
+        if (securityDescriptor != nullptr)
+        {
+            ::LocalFree(securityDescriptor);
+        }
+
+        *ridOut = foundRid;
+        if (!foundLabel && implicitMediumOut != nullptr)
+        {
+            *implicitMediumOut = true;
+        }
+        if (detailText != nullptr)
+        {
+            *detailText = foundLabel
+                ? QStringLiteral("explicit label=%1").arg(fileIntegrityNameFromRid(foundRid))
+                : QStringLiteral("no explicit mandatory label; using implicit Medium");
+        }
+        return true;
+    }
+
+    // setFileIntegrityLevelByPath 作用：
+    // - 输入：filePath 为文件或目录路径，integrityRid 为目标 Mandatory Label RID；
+    // - 处理：构造只包含 Mandatory Label ACE 的 ACL，并通过 LABEL_SECURITY_INFORMATION 写入；
+    // - 返回：ERROR_SUCCESS 表示写入成功，失败时 detailText 包含 Win32 诊断。
+    DWORD setFileIntegrityLevelByPath(
+        const QString& filePath,
+        const DWORD integrityRid,
+        QString* detailText)
+    {
+        if (!isSupportedFileMandatoryIntegrityRid(integrityRid))
+        {
+            if (detailText != nullptr)
+            {
+                *detailText = QStringLiteral("unsupported file mandatory label RID=0x%1; "
+                    "ProtectedProcess/SecureProcess labels are token-only and cannot be written to file objects")
+                    .arg(integrityRid, 0, 16);
+            }
+            return ERROR_INVALID_PARAMETER;
+        }
+
+        (void)enableFileContextPrivilege(SE_SECURITY_NAME);
+        (void)enableFileContextPrivilege(SE_RESTORE_NAME);
+
+        PSID integritySid = nullptr;
+        QString sidDetailText;
+        if (!allocateFileMandatoryIntegritySid(integrityRid, &integritySid, &sidDetailText))
+        {
+            DWORD sidError = ::GetLastError();
+            if (sidError == ERROR_SUCCESS)
+            {
+                sidError = ERROR_INVALID_SID;
+            }
+            if (detailText != nullptr)
+            {
+                *detailText = sidDetailText;
+            }
+            return sidError;
+        }
+
+        const DWORD sidLength = ::GetLengthSid(integritySid);
+        const DWORD aclBytes = static_cast<DWORD>(
+            sizeof(ACL) + sizeof(ACCESS_ALLOWED_ACE) - sizeof(DWORD) + sidLength);
+        PACL labelAcl = reinterpret_cast<PACL>(::LocalAlloc(LPTR, aclBytes));
+        if (labelAcl == nullptr)
+        {
+            const DWORD allocError = ::GetLastError();
+            ::FreeSid(integritySid);
+            if (detailText != nullptr)
+            {
+                *detailText = formatFileWin32Error(QStringLiteral("LocalAlloc(ACL)"), allocError);
+            }
+            return allocError;
+        }
+
+        DWORD result = ERROR_SUCCESS;
+        if (::InitializeAcl(labelAcl, aclBytes, ACL_REVISION) == FALSE)
+        {
+            result = ::GetLastError();
+            if (detailText != nullptr)
+            {
+                *detailText = formatFileWin32Error(QStringLiteral("InitializeAcl"), result);
+            }
+        }
+        else if (::AddMandatoryAce(
+            labelAcl,
+            ACL_REVISION,
+            0,
+            SYSTEM_MANDATORY_LABEL_NO_WRITE_UP,
+            integritySid) == FALSE)
+        {
+            result = ::GetLastError();
+            if (detailText != nullptr)
+            {
+                *detailText = formatFileWin32Error(QStringLiteral("AddMandatoryAce"), result);
+            }
+        }
+        else
+        {
+            std::wstring pathBuffer = QDir::toNativeSeparators(filePath).toStdWString();
+            result = ::SetNamedSecurityInfoW(
+                pathBuffer.data(),
+                SE_FILE_OBJECT,
+                LABEL_SECURITY_INFORMATION,
+                nullptr,
+                nullptr,
+                nullptr,
+                labelAcl);
+            if (detailText != nullptr)
+            {
+                *detailText = result == ERROR_SUCCESS
+                    ? QStringLiteral("已写入文件完整性：%1，RID=0x%2，路径=%3")
+                        .arg(fileIntegrityNameFromRid(integrityRid))
+                        .arg(integrityRid, 0, 16)
+                        .arg(QDir::toNativeSeparators(filePath))
+                    : formatFileWin32Error(
+                        QStringLiteral("SetNamedSecurityInfoW(LABEL_SECURITY_INFORMATION)"),
+                        result);
+            }
+        }
+
+        ::LocalFree(labelAcl);
+        ::FreeSid(integritySid);
+        return result;
+    }
 
     // resolveVisibleDialogParent 作用：
     // - 为文件解锁器选择一个可见父窗口；
@@ -1751,6 +2127,115 @@ namespace
         return result.ok;
     }
 
+    bool shouldFallbackFileIntegrityToR3(
+        const ksword::ark::IoResult& io,
+        const bool unsupported)
+    {
+        // 输入：ArkDriverClient 的通信结果和 unsupported 标记。
+        // 处理：只把驱动未装载、旧驱动缺 IOCTL 或请求无法通过当前 R0 协议发送归类为 R3 fallback。
+        // 返回：true 表示可尝试 R3；R0 已返回语义失败时返回 false，避免掩盖 ZwSetSecurityObject 失败原因。
+        if (io.ok)
+        {
+            return false;
+        }
+        if (unsupported)
+        {
+            return true;
+        }
+
+        return io.win32Error == ERROR_FILE_NOT_FOUND ||
+            io.win32Error == ERROR_PATH_NOT_FOUND ||
+            io.win32Error == ERROR_SERVICE_DOES_NOT_EXIST ||
+            io.win32Error == ERROR_INVALID_FUNCTION ||
+            io.win32Error == ERROR_NOT_SUPPORTED ||
+            io.win32Error == ERROR_INVALID_PARAMETER;
+    }
+
+    DWORD setFileIntegrityLevelByR0ThenR3(
+        const QString& filePath,
+        const DWORD integrityRid,
+        QString* const detailText)
+    {
+        // 输入：Win32/Qt 文件路径和 Mandatory Label RID。
+        // 处理：先将路径转换为驱动 NT 路径并调用 R0；驱动不可用/旧驱动时回退 SetNamedSecurityInfoW。
+        // 返回：ERROR_SUCCESS 表示 R0 或 fallback R3 成功；失败时返回 Win32 或 NTSTATUS 数值并写入 detailText。
+        if (!isSupportedFileMandatoryIntegrityRid(integrityRid))
+        {
+            if (detailText != nullptr)
+            {
+                *detailText = QStringLiteral("unsupported file mandatory label RID=0x%1; "
+                    "file objects only support Untrusted/Low/Medium/MediumPlus/High/System")
+                    .arg(integrityRid, 0, 16);
+            }
+            return ERROR_INVALID_PARAMETER;
+        }
+
+        const QString driverNtPath = buildDriverNtPath(filePath);
+        if (driverNtPath.isEmpty())
+        {
+            if (detailText != nullptr)
+            {
+                *detailText = QStringLiteral("empty path");
+            }
+            return ERROR_INVALID_PARAMETER;
+        }
+
+        const QFileInfo fileInfo(filePath);
+        const bool isDirectory = fileInfo.isDir();
+        const ksword::ark::DriverClient driverClient;
+        const ksword::ark::FileIntegrityResult r0Result =
+            driverClient.setFileIntegrity(driverNtPath.toStdWString(), isDirectory, integrityRid);
+        const bool r0Applied = r0Result.io.ok &&
+            r0Result.status == KSWORD_ARK_FILE_INTEGRITY_STATUS_APPLIED &&
+            r0Result.lastStatus >= 0;
+        if (r0Applied)
+        {
+            if (detailText != nullptr)
+            {
+                *detailText = QStringLiteral("R0 ok: %1, ntPath=%2")
+                    .arg(QString::fromStdString(r0Result.io.message))
+                    .arg(driverNtPath);
+            }
+            return ERROR_SUCCESS;
+        }
+
+        if (shouldFallbackFileIntegrityToR3(r0Result.io, r0Result.unsupported))
+        {
+            QString r3DetailText;
+            const DWORD r3Result = setFileIntegrityLevelByPath(
+                filePath,
+                integrityRid,
+                &r3DetailText);
+            if (detailText != nullptr)
+            {
+                *detailText = QStringLiteral("R0 unavailable/unsupported: %1 | R3 %2: %3")
+                    .arg(QString::fromStdString(r0Result.io.message))
+                    .arg(r3Result == ERROR_SUCCESS ? QStringLiteral("ok") : QStringLiteral("failed"))
+                    .arg(r3DetailText.isEmpty() ? QStringLiteral("no detail") : r3DetailText);
+            }
+            return r3Result;
+        }
+
+        if (detailText != nullptr)
+        {
+            *detailText = QStringLiteral("R0 failed: %1, status=%2, nt=0x%3, win32=%4, ntPath=%5")
+                .arg(QString::fromStdString(r0Result.io.message))
+                .arg(r0Result.status)
+                .arg(static_cast<unsigned long>(r0Result.lastStatus), 0, 16)
+                .arg(r0Result.io.win32Error)
+                .arg(driverNtPath);
+        }
+        if (!r0Result.io.ok)
+        {
+            return r0Result.io.win32Error == ERROR_SUCCESS
+                ? ERROR_GEN_FAILURE
+                : r0Result.io.win32Error;
+        }
+        return r0Result.lastStatus == 0
+            ? ERROR_GEN_FAILURE
+            : static_cast<DWORD>(r0Result.lastStatus);
+    }
+
     // terminateProcessByR0Driver：
     // - 作用：复用同一个 ArkDriverClient 句柄发送结束进程 IOCTL；
     // - 返回值：true=驱动返回成功，false=驱动返回失败或句柄无效。
@@ -2915,6 +3400,13 @@ namespace
                 aceSid = reinterpret_cast<PSID>(&aceBody->SidStart);
                 break;
             }
+            case SYSTEM_MANDATORY_LABEL_ACE_TYPE:
+            {
+                ACCESS_ALLOWED_ACE* aceBody = reinterpret_cast<ACCESS_ALLOWED_ACE*>(acePointer);
+                accessMask = aceBody->Mask;
+                aceSid = reinterpret_cast<PSID>(&aceBody->SidStart);
+                break;
+            }
             default:
                 break;
             }
@@ -3032,6 +3524,13 @@ namespace
             case SYSTEM_AUDIT_OBJECT_ACE_TYPE:
             {
                 SYSTEM_AUDIT_OBJECT_ACE* aceBody = reinterpret_cast<SYSTEM_AUDIT_OBJECT_ACE*>(acePointer);
+                accessMask = aceBody->Mask;
+                aceSid = reinterpret_cast<PSID>(&aceBody->SidStart);
+                break;
+            }
+            case SYSTEM_MANDATORY_LABEL_ACE_TYPE:
+            {
+                ACCESS_ALLOWED_ACE* aceBody = reinterpret_cast<ACCESS_ALLOWED_ACE*>(acePointer);
                 accessMask = aceBody->Mask;
                 aceSid = reinterpret_cast<PSID>(&aceBody->SidStart);
                 break;
@@ -8052,6 +8551,15 @@ void FileDock::showPanelContextMenu(FilePanelWidgets& panel, const QPoint& local
     const bool hasSelection = !menuPaths.empty();
     const bool isSingleSelection = menuPaths.size() == 1;
     const QString firstPath = isSingleSelection ? menuPaths.front() : QString();
+    DWORD firstFileIntegrityRid = 0;
+    bool firstFileIntegrityImplicitMedium = false;
+    QString firstFileIntegrityDetailText;
+    const bool firstFileIntegrityKnown = hasSelection &&
+        queryFileIntegrityRid(
+            menuPaths.front(),
+            &firstFileIntegrityRid,
+            &firstFileIntegrityImplicitMedium,
+            &firstFileIntegrityDetailText);
 
     // 统计选中内容类型：用于控制菜单可用状态，避免多选时误触单文件功能。
     bool hasAnyFile = false;
@@ -8101,6 +8609,36 @@ void FileDock::showPanelContextMenu(FilePanelWidgets& panel, const QPoint& local
     QAction* releaseOplockAction = menu.addAction(QIcon(":/Icon/process_resume.svg"), QStringLiteral("释放当前 Oplock"));
     QAction* releaseAllOplocksAction = menu.addAction(QIcon(":/Icon/process_resume.svg"), QStringLiteral("释放全部 Oplock"));
     QAction* takeOwnerAction = menu.addAction(QIcon(":/Icon/file_owner.svg"), QStringLiteral("取得所有权"));
+    QMenu* fileIntegritySubMenu = menu.addMenu(QIcon(":/Icon/file_owner.svg"), QStringLiteral("文件完整性"));
+    fileIntegritySubMenu->setToolTipsVisible(true);
+    fileIntegritySubMenu->setEnabled(hasSelection);
+    if (!firstFileIntegrityKnown && hasSelection)
+    {
+        fileIntegritySubMenu->setToolTip(QStringLiteral("当前文件完整性读取失败：%1")
+            .arg(firstFileIntegrityDetailText));
+    }
+    else if (firstFileIntegrityKnown && firstFileIntegrityImplicitMedium)
+    {
+        fileIntegritySubMenu->setToolTip(QStringLiteral("当前未设置显式 Mandatory Label，Windows 按 Medium 处理。"));
+    }
+    else if (hasSelection && menuPaths.size() > 1U)
+    {
+        fileIntegritySubMenu->setToolTip(QStringLiteral("多选时圆点按第一项的文件完整性显示，执行时会批量写入所有选中项。"));
+    }
+    for (const FileIntegrityLevelPreset& preset : FileIntegrityLevelPresets)
+    {
+        const bool isCurrentLevel = firstFileIntegrityKnown && firstFileIntegrityRid == preset.rid;
+        QAction* integrityAction = fileIntegritySubMenu->addAction(
+            QIcon(":/Icon/file_owner.svg"),
+            QStringLiteral("%1 %2 - %3")
+                .arg(isCurrentLevel ? QStringLiteral("●") : QStringLiteral(" "))
+                .arg(QString::fromLatin1(preset.nameText))
+                .arg(QString::fromUtf8(preset.detailText)));
+        integrityAction->setData(static_cast<unsigned int>(preset.rid));
+        integrityAction->setToolTip(QStringLiteral("R0 内核 API 优先写入文件 Mandatory Label：S-1-16-%1；驱动不可用时回退 R3%2")
+            .arg(static_cast<unsigned int>(preset.rid))
+            .arg(isCurrentLevel ? QStringLiteral("（当前）") : QString()));
+    }
     menu.addSeparator();
     QAction* newFileAction = menu.addAction(QIcon(":/Icon/process_details.svg"), QStringLiteral("新建文件"));
     QAction* newFolderAction = menu.addAction(QIcon(":/Icon/process_open_folder.svg"), QStringLiteral("新建文件夹"));
@@ -8170,6 +8708,15 @@ void FileDock::showPanelContextMenu(FilePanelWidgets& panel, const QPoint& local
             << eol;
     }
 
+    if (selectedAction->parent() == fileIntegritySubMenu)
+    {
+        const DWORD integrityRid = selectedAction->data().toUInt();
+        setSelectedFileIntegrityLevel(
+            panel,
+            integrityRid,
+            fileIntegrityNameFromRid(integrityRid));
+        return;
+    }
     if (selectedAction == openAction)
     {
         openSelectedItems(panel);
@@ -10362,6 +10909,119 @@ void FileDock::takeOwnershipSelectedItems(FilePanelWidgets& panel)
         << ", successCount="
         << paths.size()
         << eol;
+}
+
+void FileDock::setSelectedFileIntegrityLevel(
+    FilePanelWidgets& panel,
+    const unsigned long integrityRid,
+    const QString& levelDisplayText)
+{
+    // 输入：当前面板选中项、目标完整性 RID 和显示文本。
+    // 处理：逐个先调用 R0 内核 API 写入 LABEL_SECURITY_INFORMATION，驱动不可用/旧驱动时回退 R3，并汇总失败项。
+    // 返回：无返回值；成功/失败通过日志、进度条和消息框反馈。
+    const std::vector<QString> paths = selectedPaths(panel);
+    if (paths.empty())
+    {
+        kLogEvent emptyEvent;
+        warn << emptyEvent
+            << "[FileDock] 设置文件完整性被忽略：未选中路径, panel="
+            << panel.panelNameText.toStdString()
+            << eol;
+        return;
+    }
+
+    const QMessageBox::StandardButton userChoice = QMessageBox::question(
+        this,
+        QStringLiteral("设置文件完整性"),
+        QStringLiteral("将对选中的 %1 项写入文件 Mandatory Label：%2。\n"
+            "该操作会影响低/中/高完整性进程对对象的写入权限，可能需要管理员权限。是否继续？")
+            .arg(paths.size())
+            .arg(levelDisplayText),
+        QMessageBox::Yes | QMessageBox::No,
+        QMessageBox::No);
+    if (userChoice != QMessageBox::Yes)
+    {
+        return;
+    }
+
+    const DWORD targetIntegrityRid = static_cast<DWORD>(integrityRid);
+    const int progressPid = kPro.add("文件", "设置文件完整性");
+    kPro.set(progressPid, "准备执行", 0, 5.0f);
+
+    QStringList failureDetails;
+    std::size_t successCount = 0U;
+    for (std::size_t index = 0; index < paths.size(); ++index)
+    {
+        const QString& targetPath = paths[index];
+        QString detailText;
+        const DWORD result = setFileIntegrityLevelByR0ThenR3(
+            targetPath,
+            targetIntegrityRid,
+            &detailText);
+        if (result == ERROR_SUCCESS)
+        {
+            successCount += 1U;
+            kLogEvent itemEvent;
+            info << itemEvent
+                << "[FileDock] 设置文件完整性成功, panel="
+                << panel.panelNameText.toStdString()
+                << ", path="
+                << QDir::toNativeSeparators(targetPath).toStdString()
+                << ", rid=0x"
+                << QString::number(targetIntegrityRid, 16).toStdString()
+                << ", detail="
+                << detailText.toStdString()
+                << eol;
+        }
+        else
+        {
+            failureDetails.push_back(QStringLiteral("%1 | code=%2 | %3")
+                .arg(QDir::toNativeSeparators(targetPath))
+                .arg(result)
+                .arg(detailText));
+        }
+
+        const float progress = 5.0f + (static_cast<float>(index + 1) / static_cast<float>(paths.size())) * 90.0f;
+        kPro.set(progressPid, "处理中", 0, progress);
+    }
+
+    refreshPanel(panel);
+    kPro.set(progressPid, "完成", 0, 100.0f);
+
+    const QString summaryText = QStringLiteral("文件完整性设置完成：成功 %1，失败 %2，目标=%3。")
+        .arg(successCount)
+        .arg(failureDetails.size())
+        .arg(levelDisplayText);
+    if (!failureDetails.isEmpty())
+    {
+        kLogEvent failEvent;
+        warn << failEvent
+            << "[FileDock] 设置文件完整性部分失败, panel="
+            << panel.panelNameText.toStdString()
+            << ", successCount="
+            << successCount
+            << ", failCount="
+            << failureDetails.size()
+            << ", detailPreview=\n"
+            << buildLogPreviewText(failureDetails).toStdString()
+            << eol;
+        QMessageBox::warning(
+            this,
+            QStringLiteral("设置文件完整性"),
+            summaryText + QStringLiteral("\n\n失败明细：\n") + failureDetails.join('\n'));
+        return;
+    }
+
+    kLogEvent finishEvent;
+    info << finishEvent
+        << "[FileDock] 设置文件完整性完成, panel="
+        << panel.panelNameText.toStdString()
+        << ", successCount="
+        << successCount
+        << ", target="
+        << levelDisplayText.toStdString()
+        << eol;
+    QMessageBox::information(this, QStringLiteral("设置文件完整性"), summaryText);
 }
 
 void FileDock::showColumnManagerDialog(FilePanelWidgets& panel)

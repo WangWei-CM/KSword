@@ -190,6 +190,51 @@ Return Value:
     Offsets->EpWnfContext = KSW_DYN_OFFSET_UNAVAILABLE;
     Offsets->EpFlags3 = KSW_DYN_OFFSET_UNAVAILABLE;
     Offsets->EpDiskCounters = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->TokTokenSource = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->TokTokenId = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->TokAuthenticationId = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->TokParentTokenId = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->TokExpirationTime = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->TokTokenLock = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->TokModifiedId = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->TokPrivileges = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->TokAuditPolicy = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->TokSessionId = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->TokUserAndGroupCount = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->TokRestrictedSidCount = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->TokVariableLength = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->TokDynamicCharged = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->TokDynamicAvailable = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->TokDefaultOwnerIndex = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->TokUserAndGroups = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->TokRestrictedSids = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->TokPrimaryGroup = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->TokDynamicPart = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->TokDefaultDacl = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->TokTokenType = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->TokImpersonationLevel = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->TokTokenFlags = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->TokTokenInUse = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->TokIntegrityLevelIndex = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->TokMandatoryPolicy = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->TokLogonSession = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->TokOriginatingLogonSession = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->TokSidHash = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->TokRestrictedSidHash = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->TokPSecurityAttributes = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->TokPackage = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->TokCapabilities = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->TokCapabilityCount = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->TokCapabilitiesHash = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->TokLowboxNumberEntry = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->TokLowboxHandlesEntry = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->TokPClaimAttributes = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->TokTrustLevelSid = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->TokTrustLinkedToken = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->TokIntegrityLevelSidValue = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->TokTokenSidValues = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->TokSessionObject = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->TokVariablePart = KSW_DYN_OFFSET_UNAVAILABLE;
     Offsets->EtCid = KSW_DYN_OFFSET_UNAVAILABLE;
     Offsets->EtThreadListEntry = KSW_DYN_OFFSET_UNAVAILABLE;
     Offsets->EtStartAddress = KSW_DYN_OFFSET_UNAVAILABLE;
@@ -1661,6 +1706,186 @@ Return Value:
     case KSW_DYN_FIELD_ID_EP_DISK_COUNTERS:
         *OffsetOut = &State->Kernel.EpDiskCounters;
         *SourceOut = &State->KernelSources.EpDiskCounters;
+        break;
+    case KSW_DYN_FIELD_ID_TOK_TOKEN_SOURCE:
+        *OffsetOut = &State->Kernel.TokTokenSource;
+        *SourceOut = &State->KernelSources.TokTokenSource;
+        break;
+    case KSW_DYN_FIELD_ID_TOK_TOKEN_ID:
+        *OffsetOut = &State->Kernel.TokTokenId;
+        *SourceOut = &State->KernelSources.TokTokenId;
+        break;
+    case KSW_DYN_FIELD_ID_TOK_AUTHENTICATION_ID:
+        *OffsetOut = &State->Kernel.TokAuthenticationId;
+        *SourceOut = &State->KernelSources.TokAuthenticationId;
+        break;
+    case KSW_DYN_FIELD_ID_TOK_PARENT_TOKEN_ID:
+        *OffsetOut = &State->Kernel.TokParentTokenId;
+        *SourceOut = &State->KernelSources.TokParentTokenId;
+        break;
+    case KSW_DYN_FIELD_ID_TOK_EXPIRATION_TIME:
+        *OffsetOut = &State->Kernel.TokExpirationTime;
+        *SourceOut = &State->KernelSources.TokExpirationTime;
+        break;
+    case KSW_DYN_FIELD_ID_TOK_TOKEN_LOCK:
+        *OffsetOut = &State->Kernel.TokTokenLock;
+        *SourceOut = &State->KernelSources.TokTokenLock;
+        break;
+    case KSW_DYN_FIELD_ID_TOK_MODIFIED_ID:
+        *OffsetOut = &State->Kernel.TokModifiedId;
+        *SourceOut = &State->KernelSources.TokModifiedId;
+        break;
+    case KSW_DYN_FIELD_ID_TOK_PRIVILEGES:
+        *OffsetOut = &State->Kernel.TokPrivileges;
+        *SourceOut = &State->KernelSources.TokPrivileges;
+        break;
+    case KSW_DYN_FIELD_ID_TOK_AUDIT_POLICY:
+        *OffsetOut = &State->Kernel.TokAuditPolicy;
+        *SourceOut = &State->KernelSources.TokAuditPolicy;
+        break;
+    case KSW_DYN_FIELD_ID_TOK_SESSION_ID:
+        *OffsetOut = &State->Kernel.TokSessionId;
+        *SourceOut = &State->KernelSources.TokSessionId;
+        break;
+    case KSW_DYN_FIELD_ID_TOK_USER_AND_GROUP_COUNT:
+        *OffsetOut = &State->Kernel.TokUserAndGroupCount;
+        *SourceOut = &State->KernelSources.TokUserAndGroupCount;
+        break;
+    case KSW_DYN_FIELD_ID_TOK_RESTRICTED_SID_COUNT:
+        *OffsetOut = &State->Kernel.TokRestrictedSidCount;
+        *SourceOut = &State->KernelSources.TokRestrictedSidCount;
+        break;
+    case KSW_DYN_FIELD_ID_TOK_VARIABLE_LENGTH:
+        *OffsetOut = &State->Kernel.TokVariableLength;
+        *SourceOut = &State->KernelSources.TokVariableLength;
+        break;
+    case KSW_DYN_FIELD_ID_TOK_DYNAMIC_CHARGED:
+        *OffsetOut = &State->Kernel.TokDynamicCharged;
+        *SourceOut = &State->KernelSources.TokDynamicCharged;
+        break;
+    case KSW_DYN_FIELD_ID_TOK_DYNAMIC_AVAILABLE:
+        *OffsetOut = &State->Kernel.TokDynamicAvailable;
+        *SourceOut = &State->KernelSources.TokDynamicAvailable;
+        break;
+    case KSW_DYN_FIELD_ID_TOK_DEFAULT_OWNER_INDEX:
+        *OffsetOut = &State->Kernel.TokDefaultOwnerIndex;
+        *SourceOut = &State->KernelSources.TokDefaultOwnerIndex;
+        break;
+    case KSW_DYN_FIELD_ID_TOK_USER_AND_GROUPS:
+        *OffsetOut = &State->Kernel.TokUserAndGroups;
+        *SourceOut = &State->KernelSources.TokUserAndGroups;
+        break;
+    case KSW_DYN_FIELD_ID_TOK_RESTRICTED_SIDS:
+        *OffsetOut = &State->Kernel.TokRestrictedSids;
+        *SourceOut = &State->KernelSources.TokRestrictedSids;
+        break;
+    case KSW_DYN_FIELD_ID_TOK_PRIMARY_GROUP:
+        *OffsetOut = &State->Kernel.TokPrimaryGroup;
+        *SourceOut = &State->KernelSources.TokPrimaryGroup;
+        break;
+    case KSW_DYN_FIELD_ID_TOK_DYNAMIC_PART:
+        *OffsetOut = &State->Kernel.TokDynamicPart;
+        *SourceOut = &State->KernelSources.TokDynamicPart;
+        break;
+    case KSW_DYN_FIELD_ID_TOK_DEFAULT_DACL:
+        *OffsetOut = &State->Kernel.TokDefaultDacl;
+        *SourceOut = &State->KernelSources.TokDefaultDacl;
+        break;
+    case KSW_DYN_FIELD_ID_TOK_TOKEN_TYPE:
+        *OffsetOut = &State->Kernel.TokTokenType;
+        *SourceOut = &State->KernelSources.TokTokenType;
+        break;
+    case KSW_DYN_FIELD_ID_TOK_IMPERSONATION_LEVEL:
+        *OffsetOut = &State->Kernel.TokImpersonationLevel;
+        *SourceOut = &State->KernelSources.TokImpersonationLevel;
+        break;
+    case KSW_DYN_FIELD_ID_TOK_TOKEN_FLAGS:
+        *OffsetOut = &State->Kernel.TokTokenFlags;
+        *SourceOut = &State->KernelSources.TokTokenFlags;
+        break;
+    case KSW_DYN_FIELD_ID_TOK_TOKEN_IN_USE:
+        *OffsetOut = &State->Kernel.TokTokenInUse;
+        *SourceOut = &State->KernelSources.TokTokenInUse;
+        break;
+    case KSW_DYN_FIELD_ID_TOK_INTEGRITY_LEVEL_INDEX:
+        *OffsetOut = &State->Kernel.TokIntegrityLevelIndex;
+        *SourceOut = &State->KernelSources.TokIntegrityLevelIndex;
+        break;
+    case KSW_DYN_FIELD_ID_TOK_MANDATORY_POLICY:
+        *OffsetOut = &State->Kernel.TokMandatoryPolicy;
+        *SourceOut = &State->KernelSources.TokMandatoryPolicy;
+        break;
+    case KSW_DYN_FIELD_ID_TOK_LOGON_SESSION:
+        *OffsetOut = &State->Kernel.TokLogonSession;
+        *SourceOut = &State->KernelSources.TokLogonSession;
+        break;
+    case KSW_DYN_FIELD_ID_TOK_ORIGINATING_LOGON_SESSION:
+        *OffsetOut = &State->Kernel.TokOriginatingLogonSession;
+        *SourceOut = &State->KernelSources.TokOriginatingLogonSession;
+        break;
+    case KSW_DYN_FIELD_ID_TOK_SID_HASH:
+        *OffsetOut = &State->Kernel.TokSidHash;
+        *SourceOut = &State->KernelSources.TokSidHash;
+        break;
+    case KSW_DYN_FIELD_ID_TOK_RESTRICTED_SID_HASH:
+        *OffsetOut = &State->Kernel.TokRestrictedSidHash;
+        *SourceOut = &State->KernelSources.TokRestrictedSidHash;
+        break;
+    case KSW_DYN_FIELD_ID_TOK_P_SECURITY_ATTRIBUTES:
+        *OffsetOut = &State->Kernel.TokPSecurityAttributes;
+        *SourceOut = &State->KernelSources.TokPSecurityAttributes;
+        break;
+    case KSW_DYN_FIELD_ID_TOK_PACKAGE:
+        *OffsetOut = &State->Kernel.TokPackage;
+        *SourceOut = &State->KernelSources.TokPackage;
+        break;
+    case KSW_DYN_FIELD_ID_TOK_CAPABILITIES:
+        *OffsetOut = &State->Kernel.TokCapabilities;
+        *SourceOut = &State->KernelSources.TokCapabilities;
+        break;
+    case KSW_DYN_FIELD_ID_TOK_CAPABILITY_COUNT:
+        *OffsetOut = &State->Kernel.TokCapabilityCount;
+        *SourceOut = &State->KernelSources.TokCapabilityCount;
+        break;
+    case KSW_DYN_FIELD_ID_TOK_CAPABILITIES_HASH:
+        *OffsetOut = &State->Kernel.TokCapabilitiesHash;
+        *SourceOut = &State->KernelSources.TokCapabilitiesHash;
+        break;
+    case KSW_DYN_FIELD_ID_TOK_LOWBOX_NUMBER_ENTRY:
+        *OffsetOut = &State->Kernel.TokLowboxNumberEntry;
+        *SourceOut = &State->KernelSources.TokLowboxNumberEntry;
+        break;
+    case KSW_DYN_FIELD_ID_TOK_LOWBOX_HANDLES_ENTRY:
+        *OffsetOut = &State->Kernel.TokLowboxHandlesEntry;
+        *SourceOut = &State->KernelSources.TokLowboxHandlesEntry;
+        break;
+    case KSW_DYN_FIELD_ID_TOK_P_CLAIM_ATTRIBUTES:
+        *OffsetOut = &State->Kernel.TokPClaimAttributes;
+        *SourceOut = &State->KernelSources.TokPClaimAttributes;
+        break;
+    case KSW_DYN_FIELD_ID_TOK_TRUST_LEVEL_SID:
+        *OffsetOut = &State->Kernel.TokTrustLevelSid;
+        *SourceOut = &State->KernelSources.TokTrustLevelSid;
+        break;
+    case KSW_DYN_FIELD_ID_TOK_TRUST_LINKED_TOKEN:
+        *OffsetOut = &State->Kernel.TokTrustLinkedToken;
+        *SourceOut = &State->KernelSources.TokTrustLinkedToken;
+        break;
+    case KSW_DYN_FIELD_ID_TOK_INTEGRITY_LEVEL_SID_VALUE:
+        *OffsetOut = &State->Kernel.TokIntegrityLevelSidValue;
+        *SourceOut = &State->KernelSources.TokIntegrityLevelSidValue;
+        break;
+    case KSW_DYN_FIELD_ID_TOK_TOKEN_SID_VALUES:
+        *OffsetOut = &State->Kernel.TokTokenSidValues;
+        *SourceOut = &State->KernelSources.TokTokenSidValues;
+        break;
+    case KSW_DYN_FIELD_ID_TOK_SESSION_OBJECT:
+        *OffsetOut = &State->Kernel.TokSessionObject;
+        *SourceOut = &State->KernelSources.TokSessionObject;
+        break;
+    case KSW_DYN_FIELD_ID_TOK_VARIABLE_PART:
+        *OffsetOut = &State->Kernel.TokVariablePart;
+        *SourceOut = &State->KernelSources.TokVariablePart;
         break;
     case KSW_DYN_FIELD_ID_ET_CID:
         *OffsetOut = &State->Kernel.EtCid;

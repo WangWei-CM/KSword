@@ -24,6 +24,44 @@ KswordARKDriverSetProcessPplLevelByPid(
     _In_ UCHAR protectionLevel
     );
 
+/*
+ * KswordARKDriverSetProcessIntegrityByPid
+ * Inputs:
+ * - ProcessId selects the target process by PID.
+ * - IntegrityRid is the S-1-16-* mandatory label RID to assign.
+ * Processing:
+ * - First opens the process primary token through kernel Zw* token APIs and
+ *   calls ZwSetInformationToken(TokenIntegrityLevel).
+ * - If the documented API rejects the label and current-kernel PDB DynData has
+ *   _EPROCESS.Token plus _TOKEN integrity offsets, falls back to in-place
+ *   mandatory SID replacement inside the token's UserAndGroups array.
+ * Return behavior:
+ * - Returns STATUS_SUCCESS when either path applies the label; otherwise
+ *   returns the relevant API, DynData, validation, or guarded-access status.
+ */
+NTSTATUS
+KswordARKDriverSetProcessIntegrityByPid(
+    _In_ ULONG ProcessId,
+    _In_ ULONG IntegrityRid
+    );
+
+/*
+ * KswordARKDriverDescribeLastProcessIntegrityAttempt
+ * Inputs:
+ * - Buffer/BufferBytes provide caller-owned ANSI storage for a diagnostic line.
+ * Processing:
+ * - Copies the last process-integrity API/fallback status snapshot captured in
+ *   this driver instance; the data is best-effort and intended for logs.
+ * Return behavior:
+ * - Returns STATUS_SUCCESS when text was copied; otherwise returns a buffer or
+ *   parameter status. The routine does not modify process or token state.
+ */
+NTSTATUS
+KswordARKDriverDescribeLastProcessIntegrityAttempt(
+    _Out_writes_bytes_(BufferBytes) CHAR* Buffer,
+    _In_ SIZE_T BufferBytes
+    );
+
 NTSTATUS
 KswordARKDriverEnumerateProcesses(
     _Out_writes_bytes_to_(outputBufferLength, *bytesWrittenOut) PVOID outputBuffer,

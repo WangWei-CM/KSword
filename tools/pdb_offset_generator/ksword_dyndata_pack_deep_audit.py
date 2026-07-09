@@ -77,6 +77,14 @@ MODULE_DRIVER_REQUIRED = [
     "DoDriverUnload",
 ]
 
+TOKEN_INTEGRITY_REQUIRED = [
+    "EpToken",
+    "TokUserAndGroupCount",
+    "TokUserAndGroups",
+    "TokIntegrityLevelIndex",
+    "TokMandatoryPolicy",
+]
+
 
 @dataclass(frozen=True)
 class PackProfileView:
@@ -425,6 +433,7 @@ def audit_deep_library(pack: dict[str, Any], deep_path: Path, deep_library: dict
             "processDetail": required_status(view, PROCESS_DETAIL_REQUIRED),
             "threadDetail": required_status(view, THREAD_DETAIL_REQUIRED),
             "moduleDriverDetail": required_status(view, MODULE_DRIVER_REQUIRED),
+            "tokenIntegrity": required_status(view, TOKEN_INTEGRITY_REQUIRED),
         })
 
     return {

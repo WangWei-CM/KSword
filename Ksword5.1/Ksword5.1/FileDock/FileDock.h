@@ -293,6 +293,15 @@ private:
     // - 说明：调用系统 takeown/icacls，失败信息会汇总提示。
     void takeOwnershipSelectedItems(FilePanelWidgets& panel);
 
+    // setSelectedFileIntegrityLevel：
+    // - 输入：panel 为右键菜单来源面板，integrityRid 为目标 S-1-16-* Mandatory Label RID；
+    // - 处理：R0 内核 API 优先写入文件/目录完整性标签，驱动不可用/旧驱动时回退 R3；
+    // - 返回：无返回值，执行结果通过日志和消息框反馈。
+    void setSelectedFileIntegrityLevel(
+        FilePanelWidgets& panel,
+        unsigned long integrityRid,
+        const QString& levelDisplayText);
+
     // unlockSelectedItemsByDriver：
     // - 作用：扫描选中路径占用进程，列出候选进程并按用户选择用 R3/R0 结束；
     // - 说明：用于“文件解锁器”右键动作，不直接删除文件。
