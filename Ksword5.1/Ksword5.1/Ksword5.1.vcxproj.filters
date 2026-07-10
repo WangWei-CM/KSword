@@ -422,6 +422,9 @@
     <ClCompile Include="ProcessDock\ProcessDetailWindow.AdvancedInfo.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="PluginHost.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="ProcessDock\ProcessDock.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -793,6 +796,9 @@
     <QtMoc Include="ProcessDock\ProcessDetailWindow.h">
       <Filter>Header Files</Filter>
     </QtMoc>
+    <ClInclude Include="PluginHost.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="ProcessDock\ProcessDetailWindow.InternalCommon.h">
       <Filter>Header Files</Filter>
     </ClInclude>

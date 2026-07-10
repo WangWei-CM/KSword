@@ -62,6 +62,7 @@
 #include <QTableWidgetItem>
 #include <QTabWidget>
 #include <QThreadPool>
+#include <QToolButton>
 #include <QTreeWidget>
 #include <QTreeWidgetItem>
 #include <QtGlobal>
