@@ -50,6 +50,7 @@
 #include <QShowEvent>
 #include <QSizePolicy>
 #include <QStackedWidget>
+#include <QTabBar>
 #include <QTabWidget>
 #include <QTableWidget>
 #include <QTableWidgetItem>
@@ -2733,22 +2734,35 @@ void HardwareDock::initializeUi()
     m_rootLayout->setContentsMargins(4, 4, 4, 4);
     m_rootLayout->setSpacing(6);
 
+    // 顶部横向页签：
+    // - 外层只负责硬件功能分类，不再占用左侧内容宽度；
+    // - 页签按内容宽度排列，空间不足时使用滚动按钮，避免强行压缩文字；
+    // - 用户可见名称统一使用清晰中文，内部协议缩写放到页面说明中。
     m_sideTabWidget = new QTabWidget(this);
     configureCompressibleWidget(m_sideTabWidget, QSizePolicy::Expanding, QSizePolicy::Expanding);
-    m_sideTabWidget->setTabPosition(QTabWidget::West);
+    m_sideTabWidget->setTabPosition(QTabWidget::North);
+    m_sideTabWidget->setDocumentMode(true);
+    m_sideTabWidget->setUsesScrollButtons(true);
+    m_sideTabWidget->setElideMode(Qt::ElideNone);
+    if (m_sideTabWidget->tabBar() != nullptr)
+    {
+        m_sideTabWidget->tabBar()->setExpanding(false);
+        m_sideTabWidget->tabBar()->setMovable(false);
+    }
     m_rootLayout->addWidget(m_sideTabWidget, 1);
 
-    // 页签优先级：先注册“利用率”，让硬件 Dock 初次打开时默认进入性能监控页。
+    // 页签顺序：性能与硬件信息 -> 设备管理 -> 底层诊断。
+    // 先注册“性能监控”，让硬件 Dock 初次打开时直接显示实时数据。
     initializeUtilizationTab();
     initializeOverviewTab();
     initializeCpuTab();
-    initializeR0EvidenceTab();
     initializeGpuTab();
     initializeMemoryTab();
     initializeDiskMonitorTab();
     initializeDeviceManagerTab();
-    initializeHwidDispatchTab();
     initializeOtherDevicesTab();
+    initializeHwidDispatchTab();
+    initializeR0EvidenceTab();
     initializeDeviceStackTab();
     initializeKeyboardMouseHidTab();
     initializeUsbTopologyTab();
@@ -2823,7 +2837,8 @@ void HardwareDock::initializeOverviewTab()
     m_overviewEditor->setReadOnly(true);
     m_overviewLayout->addWidget(m_overviewEditor, 1);
 
-    m_sideTabWidget->addTab(m_overviewPage, QStringLiteral("概览"));
+    const int tabIndex = m_sideTabWidget->addTab(m_overviewPage, QStringLiteral("硬件概览"));
+    m_sideTabWidget->setTabToolTip(tabIndex, QStringLiteral("查看处理器、内存、显卡和系统硬件摘要"));
 }
 
 void HardwareDock::initializeUtilizationTab()
@@ -2886,7 +2901,8 @@ void HardwareDock::initializeUtilizationTab()
     m_utilizationSidebarList->setCurrentRow(0);
     syncUtilizationSidebarSelection(0);
 
-    m_sideTabWidget->addTab(m_utilizationPage, QStringLiteral("利用率"));
+    const int tabIndex = m_sideTabWidget->addTab(m_utilizationPage, QStringLiteral("性能监控"));
+    m_sideTabWidget->setTabToolTip(tabIndex, QStringLiteral("实时查看处理器、内存、磁盘、网络和显卡使用情况"));
 }
 
 void HardwareDock::initializeUtilizationSidebarCards()
@@ -3948,20 +3964,23 @@ void HardwareDock::initializeCpuTab()
     installHardwareAuditCopyMenu(m_cpuDetailTable);
     m_cpuLayout->addWidget(m_cpuDetailTable, 1);
 
-    m_sideTabWidget->addTab(m_cpuPage, QStringLiteral("CPU"));
+    const int tabIndex = m_sideTabWidget->addTab(m_cpuPage, QStringLiteral("处理器"));
+    m_sideTabWidget->setTabToolTip(tabIndex, QStringLiteral("查看处理器型号、核心利用率、频率、温度和电压"));
 }
 
 void HardwareDock::initializeR0EvidenceTab()
 {
-    // R0 硬件证据页：
+    // 底层硬件检查页：
     // - 输入：无，依赖 HardwareR0EvidencePage 内部通过 ArkDriverClient 访问驱动；
-    // - 处理：把 CPU/MSR/IDT/GDT 只读证据作为硬件 Dock 的独立侧边页；
+    // - 处理：把 CPU/MSR/IDT/GDT 只读证据作为硬件 Dock 的独立顶部页签；
     // - 返回：无，页面由 Qt 父子树托管。
     m_r0EvidencePage = new HardwareR0EvidencePage(m_sideTabWidget);
-    m_sideTabWidget->addTab(
+    const int tabIndex = m_sideTabWidget->addTab(
         m_r0EvidencePage,
-        QIcon(QStringLiteral(":/Icon/process_critical.svg")),
-        QStringLiteral("R0证据"));
+        QStringLiteral("底层硬件检查"));
+    m_sideTabWidget->setTabToolTip(
+        tabIndex,
+        QStringLiteral("查看处理器寄存器与系统表的底层只读检查结果"));
 }
 
 void HardwareDock::initializeGpuTab()
@@ -3975,7 +3994,8 @@ void HardwareDock::initializeGpuTab()
     m_gpuEditor->setReadOnly(true);
     m_gpuLayout->addWidget(m_gpuEditor, 1);
 
-    m_sideTabWidget->addTab(m_gpuPage, QStringLiteral("显卡"));
+    const int tabIndex = m_sideTabWidget->addTab(m_gpuPage, QStringLiteral("显卡"));
+    m_sideTabWidget->setTabToolTip(tabIndex, QStringLiteral("查看显卡型号、显存与驱动信息"));
 }
 
 void HardwareDock::initializeMemoryTab()
@@ -3989,7 +4009,8 @@ void HardwareDock::initializeMemoryTab()
     m_memoryEditor->setReadOnly(true);
     m_memoryLayout->addWidget(m_memoryEditor, 1);
 
-    m_sideTabWidget->addTab(m_memoryPage, QStringLiteral("内存"));
+    const int tabIndex = m_sideTabWidget->addTab(m_memoryPage, QStringLiteral("内存"));
+    m_sideTabWidget->setTabToolTip(tabIndex, QStringLiteral("查看内存容量、模组与使用情况"));
 }
 
 void HardwareDock::initializeDiskMonitorTab()
@@ -4005,7 +4026,8 @@ void HardwareDock::initializeDiskMonitorTab()
             QStringLiteral("硬盘监控待加载"),
             QStringLiteral("切换到本页后再启动文件 ETW 与进程 IO 采样，避免拖慢硬件页首次打开。")),
         1);
-    m_sideTabWidget->addTab(m_diskMonitorHostPage, QStringLiteral("硬盘监控"));
+    const int tabIndex = m_sideTabWidget->addTab(m_diskMonitorHostPage, QStringLiteral("磁盘活动"));
+    m_sideTabWidget->setTabToolTip(tabIndex, QStringLiteral("查看文件访问与进程磁盘读写活动"));
 }
 
 void HardwareDock::initializeDeviceManagerTab()
@@ -4015,7 +4037,8 @@ void HardwareDock::initializeDeviceManagerTab()
     // - 处理：直接创建页面，页面自身控制后台刷新和搜索；
     // - 返回：无，作为硬件 Dock 的独立 Tab 呈现。
     m_deviceManagerPage = new HardwareDeviceManagerPage(m_sideTabWidget);
-    m_sideTabWidget->addTab(m_deviceManagerPage, QStringLiteral("设备管理"));
+    const int tabIndex = m_sideTabWidget->addTab(m_deviceManagerPage, QStringLiteral("设备管理"));
+    m_sideTabWidget->setTabToolTip(tabIndex, QStringLiteral("搜索、查看和管理 Windows 设备"));
 }
 
 void HardwareDock::initializeHwidDispatchTab()
@@ -4025,7 +4048,8 @@ void HardwareDock::initializeHwidDispatchTab()
     // - 处理：新增 EASY-HWID-SPOOFER Dispatch-only 集成页；
     // - 返回：无返回值，页面由 Qt 父子树释放。
     m_hwidDispatchPage = new HardwareHwidDispatchPage(m_sideTabWidget);
-    m_sideTabWidget->addTab(m_hwidDispatchPage, QStringLiteral("HWID派遣"));
+    const int tabIndex = m_sideTabWidget->addTab(m_hwidDispatchPage, QStringLiteral("硬件标识设置"));
+    m_sideTabWidget->setTabToolTip(tabIndex, QStringLiteral("查看和调整支持的磁盘与网络硬件标识"));
 }
 
 void HardwareDock::initializeOtherDevicesTab()
@@ -4041,50 +4065,55 @@ void HardwareDock::initializeOtherDevicesTab()
             QStringLiteral("其他设备待加载"),
             QStringLiteral("切换到本页后再异步枚举设备清单，减少硬件 Dock 初次点击耗时。")),
         1);
-    m_sideTabWidget->addTab(m_otherDevicesHostPage, QStringLiteral("其他设备"));
+    const int tabIndex = m_sideTabWidget->addTab(m_otherDevicesHostPage, QStringLiteral("其他设备"));
+    m_sideTabWidget->setTabToolTip(tabIndex, QStringLiteral("查看处理器、内存和显卡之外的硬件清单"));
 }
 
 void HardwareDock::initializeDeviceStackTab()
 {
     m_deviceStackPage = createDeviceAuditPage(
         m_sideTabWidget,
-        QStringLiteral("DevNode / Device Stack"),
+        QStringLiteral("设备节点与驱动链"),
         QStringLiteral("只读 cross-view：上方保留 DevNode/WMI 视角，下方表格展开 R0 DeviceObject/DriverObject、attached/next 关系和 PDB/DynData readiness。"),
         &m_deviceStackEditor,
         &m_deviceStackTable);
-    m_sideTabWidget->addTab(m_deviceStackPage, QStringLiteral("DevNode栈"));
+    const int tabIndex = m_sideTabWidget->addTab(m_deviceStackPage, QStringLiteral("设备驱动链"));
+    m_sideTabWidget->setTabToolTip(tabIndex, QStringLiteral("检查设备节点、驱动对象与附加驱动关系"));
 }
 
 void HardwareDock::initializeKeyboardMouseHidTab()
 {
     m_keyboardMouseHidPage = createDeviceAuditPage(
         m_sideTabWidget,
-        QStringLiteral("Keyboard / Mouse / HID"),
+        QStringLiteral("键盘、鼠标与其他输入设备"),
         QStringLiteral("只读审计：键盘、鼠标、HID 与输入设备状态，默认不做消息截获与输入抓取。"),
         &m_keyboardMouseHidEditor,
         &m_keyboardMouseHidTable);
-    m_sideTabWidget->addTab(m_keyboardMouseHidPage, QStringLiteral("键鼠/HID"));
+    const int tabIndex = m_sideTabWidget->addTab(m_keyboardMouseHidPage, QStringLiteral("键盘与鼠标"));
+    m_sideTabWidget->setTabToolTip(tabIndex, QStringLiteral("检查键盘、鼠标与其他输入设备状态"));
 }
 
 void HardwareDock::initializeUsbTopologyTab()
 {
     m_usbTopologyPage = createDeviceAuditPage(
         m_sideTabWidget,
-        QStringLiteral("USB Topology"),
+        QStringLiteral("USB 设备关系"),
         QStringLiteral("只读审计：USB 拓扑、控制器、Hub、端口与设备树关系。"),
         &m_usbTopologyEditor,
         &m_usbTopologyTable);
-    m_sideTabWidget->addTab(m_usbTopologyPage, QStringLiteral("USB拓扑"));
+    const int tabIndex = m_sideTabWidget->addTab(m_usbTopologyPage, QStringLiteral("USB 设备"));
+    m_sideTabWidget->setTabToolTip(tabIndex, QStringLiteral("检查 USB 控制器、集线器、端口与设备关系"));
 }
 
 void HardwareDock::initializePnpAcpiPciTab()
 {
     m_pnpAcpiPciPage = createReadOnlyTextPage(
         m_sideTabWidget,
-        QStringLiteral("PnP / ACPI / PCI"),
+        QStringLiteral("即插即用与系统总线"),
         QStringLiteral("只读审计：PnP、ACPI、PCI、DevNode 状态与 cross-view 风险标记。"),
         &m_pnpAcpiPciEditor);
-    m_sideTabWidget->addTab(m_pnpAcpiPciPage, QStringLiteral("PnP/ACPI/PCI"));
+    const int tabIndex = m_sideTabWidget->addTab(m_pnpAcpiPciPage, QStringLiteral("系统总线"));
+    m_sideTabWidget->setTabToolTip(tabIndex, QStringLiteral("查看即插即用、电源管理与 PCI 总线设备状态"));
 }
 
 void HardwareDock::ensureDiskMonitorTabInitialized()

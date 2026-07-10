@@ -3,7 +3,7 @@
 // ============================================================
 // HardwareDock.h
 // 作用：
-// 1) 提供“利用率/概览/CPU/显卡/内存/硬盘监控/设备审计”等侧边 Tab，并让利用率拥有最高优先级；
+// 1) 提供“性能监控/硬件概览/处理器/显卡/内存/磁盘活动/设备检查”等顶部 Tab，并让性能监控拥有最高优先级；
 // 2) 利用率页按任务管理器风格实现“左侧缩略卡片 + 右侧详情页”；
 // 3) 新增的设备审计页默认只读，面向 DevNode、USB、HID、PCI、ACPI 与显示链路 cross-view。
 // ============================================================
@@ -496,7 +496,7 @@ private:
 private:
     // 顶层结构。
     QVBoxLayout* m_rootLayout = nullptr;    // m_rootLayout：根布局。
-    QTabWidget* m_sideTabWidget = nullptr;  // m_sideTabWidget：侧边页签容器。
+    QTabWidget* m_sideTabWidget = nullptr;  // m_sideTabWidget：顶部横向硬件页签容器（保留旧成员名避免无关重构）。
     QTimer* m_refreshTimer = nullptr;       // m_refreshTimer：1 秒采样定时器。
 
     // 概览页。
