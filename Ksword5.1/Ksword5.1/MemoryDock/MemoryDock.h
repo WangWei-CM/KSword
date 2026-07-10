@@ -622,6 +622,17 @@ private:
         const QString& filterText,
         int& comboIndexOut) const;
 
+    // resolveDriverMemoryModuleExpression：
+    // - 作用：把“模块名+十六进制偏移”解析为当前附加进程中的绝对地址。
+    // - 参数 expressionText：模块偏移表达式，例如 client.dll+C125D9。
+    // - 参数 resolvedBaseOut：输出模块基址与偏移相加后的绝对地址。
+    // - 参数 errorTextOut：失败时输出可展示给用户的精确原因。
+    // - 返回：true 解析并命中唯一模块；false 表示格式、进程或模块匹配失败。
+    bool resolveDriverMemoryModuleExpression(
+        const QString& expressionText,
+        std::uint64_t& resolvedBaseOut,
+        QString& errorTextOut) const;
+
     // collectDriverMemoryDiffBlocks：
     // - 作用：生成连续差异块列表，供一次或多次 R0 写入请求使用。
     // - 参数 diffBlocksOut：输出差异块集合。

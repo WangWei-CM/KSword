@@ -669,13 +669,14 @@ void MemoryDock::initializeDriverMemoryRwTab()
     m_driverMemoryBaseCombo->setMinimumWidth(260);
     m_driverMemoryBaseCombo->setStyleSheet(buildBlueComboStyle());
     m_driverMemoryBaseCombo->setToolTip(
-        "可输入 0 或 0x... 作为偏移基址；输入非 0x 文本时按进程名/PID 从下拉列表筛选目标进程。"
+        "可输入 0、0x... 数值基址，或“模块名+十六进制偏移”（例如 client.dll+C125D9）；"
+        "其它非 0x 文本按进程名/PID 从下拉列表筛选目标进程。模块偏移使用当前附加进程的模块列表。"
         "中心地址为 0xFFFF... 高半区时自动按内核虚拟地址读取，并忽略 PID。");
     m_driverMemoryBaseCombo->addItem("0", QVariant::fromValue(static_cast<uint>(0U)));
     m_driverMemoryBaseCombo->setItemData(0, QString(), Qt::UserRole + 1);
     if (m_driverMemoryBaseCombo->lineEdit() != nullptr)
     {
-        m_driverMemoryBaseCombo->lineEdit()->setPlaceholderText("0 / 0x基址 / 进程名或PID");
+        m_driverMemoryBaseCombo->lineEdit()->setPlaceholderText("0 / 0x基址 / 模块+偏移 / 进程名或PID");
     }
 
     m_driverMemoryAddressEdit = new QLineEdit(requestGroup);
@@ -700,7 +701,7 @@ void MemoryDock::initializeDriverMemoryRwTab()
     m_driverMemoryResetButton->setStyleSheet(buttonStyle);
     m_driverMemoryApplyButton->setEnabled(false);
 
-    requestLayout->addWidget(new QLabel("偏移基址/进程", requestGroup), 0, 0);
+    requestLayout->addWidget(new QLabel("基址/模块偏移/进程", requestGroup), 0, 0);
     requestLayout->addWidget(m_driverMemoryBaseCombo, 0, 1, 1, 4);
     requestLayout->addWidget(new QLabel("中心地址", requestGroup), 1, 0);
     requestLayout->addWidget(m_driverMemoryAddressEdit, 1, 1, 1, 4);
@@ -723,7 +724,7 @@ void MemoryDock::initializeDriverMemoryRwTab()
     m_driverMemoryHexEditor->setEditable(true);
     tabLayout->addWidget(m_driverMemoryHexEditor, 1);
 
-    m_driverMemoryStatusLabel = new QLabel("用户态地址建议从“内存区域”右键 R0读取；输入 0xFFFF... 高半区地址会走内核虚拟地址读取。", m_tabDriverMemoryRw);
+    m_driverMemoryStatusLabel = new QLabel("支持 client.dll+C125D9 模块偏移；用户态地址也可从“内存区域”右键 R0读取；0xFFFF... 高半区地址走内核读取。", m_tabDriverMemoryRw);
     m_driverMemoryStatusLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
     tabLayout->addWidget(m_driverMemoryStatusLabel);
 

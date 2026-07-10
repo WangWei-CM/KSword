@@ -5,6 +5,7 @@
 
 #include <QByteArray>
 #include <QComboBox>
+#include <QFileInfo>
 #include <QLabel>
 #include <QLineEdit>
 #include <QMessageBox>
@@ -242,6 +243,108 @@ bool MemoryDock::findDriverMemoryProcessComboMatch(
     return false;
 }
 
+bool MemoryDock::resolveDriverMemoryModuleExpression(
+    const QString& expressionText,
+    std::uint64_t& resolvedBaseOut,
+    QString& errorTextOut) const
+{
+    resolvedBaseOut = 0ULL;
+    errorTextOut.clear();
+
+    // 使用最后一个加号分隔模块与偏移，兼容模块路径中偶尔包含加号的情况。
+    const QString trimmedExpression = expressionText.trimmed();
+    const int plusIndex = trimmedExpression.lastIndexOf(QLatin1Char('+'));
+    if (plusIndex <= 0 || plusIndex >= trimmedExpression.size() - 1)
+    {
+        errorTextOut = QStringLiteral(
+            "模块偏移格式无效。请使用“模块名+十六进制偏移”，例如 client.dll+C125D9。");
+        return false;
+    }
+
+    QString moduleToken = trimmedExpression.left(plusIndex).trimmed();
+    QString offsetToken = trimmedExpression.mid(plusIndex + 1).trimmed();
+    if (moduleToken.size() >= 2 &&
+        ((moduleToken.startsWith(QLatin1Char('"')) && moduleToken.endsWith(QLatin1Char('"'))) ||
+         (moduleToken.startsWith(QLatin1Char('\'')) && moduleToken.endsWith(QLatin1Char('\'')))))
+    {
+        moduleToken = moduleToken.mid(1, moduleToken.size() - 2).trimmed();
+    }
+    if (offsetToken.startsWith(QStringLiteral("0x"), Qt::CaseInsensitive))
+    {
+        offsetToken.remove(0, 2);
+    }
+
+    // 模块偏移遵循调试器常用写法：无论是否带 0x，始终按十六进制解析。
+    bool offsetOk = false;
+    const qulonglong parsedOffset = offsetToken.toULongLong(&offsetOk, 16);
+    if (moduleToken.isEmpty() || offsetToken.isEmpty() || !offsetOk)
+    {
+        errorTextOut = QStringLiteral(
+            "模块偏移格式无效。偏移必须是十六进制数，例如 client.dll+C125D9 或 client.dll+0xC125D9。");
+        return false;
+    }
+
+    if (m_attachedPid == 0U)
+    {
+        errorTextOut = QStringLiteral("解析模块偏移前请先附加目标进程。");
+        return false;
+    }
+    if (m_moduleRefreshInProgress.load())
+    {
+        errorTextOut = QStringLiteral("当前进程的模块列表仍在刷新，请等待刷新完成后重试。");
+        return false;
+    }
+    if (m_moduleCache.empty())
+    {
+        errorTextOut = QStringLiteral("当前进程没有可用的模块缓存，请先在“进程与模块”页刷新模块。");
+        return false;
+    }
+
+    QString normalizedInputPath = moduleToken;
+    normalizedInputPath.replace(QLatin1Char('/'), QLatin1Char('\\'));
+    const bool inputContainsPath = normalizedInputPath.contains(QLatin1Char('\\'));
+    const QString inputFileName = QFileInfo(moduleToken).fileName();
+    std::vector<const ModuleEntry*> matches;
+    for (const ModuleEntry& entry : m_moduleCache)
+    {
+        QString normalizedModulePath = entry.fullPath;
+        normalizedModulePath.replace(QLatin1Char('/'), QLatin1Char('\\'));
+        const bool matched = inputContainsPath
+            ? normalizedModulePath.compare(normalizedInputPath, Qt::CaseInsensitive) == 0
+            : entry.moduleName.compare(inputFileName, Qt::CaseInsensitive) == 0;
+        if (matched)
+        {
+            matches.push_back(&entry);
+        }
+    }
+
+    if (matches.empty())
+    {
+        errorTextOut = QString("当前附加进程 PID=%1 中未找到模块：%2。请刷新模块列表并确认模块名。")
+            .arg(m_attachedPid)
+            .arg(moduleToken);
+        return false;
+    }
+    if (matches.size() > 1U)
+    {
+        errorTextOut = QString("模块名 %1 匹配到 %2 个模块，请输入模块完整路径以消除歧义。")
+            .arg(moduleToken)
+            .arg(static_cast<qulonglong>(matches.size()));
+        return false;
+    }
+
+    const ModuleEntry& matchedModule = *matches.front();
+    const std::uint64_t moduleOffset = static_cast<std::uint64_t>(parsedOffset);
+    if (matchedModule.baseAddress > (std::numeric_limits<std::uint64_t>::max)() - moduleOffset)
+    {
+        errorTextOut = QStringLiteral("模块基址与偏移相加发生地址回绕，已拒绝。");
+        return false;
+    }
+
+    resolvedBaseOut = matchedModule.baseAddress + moduleOffset;
+    return true;
+}
+
 bool MemoryDock::resolveDriverMemoryRequestFromUi(
     std::uint32_t& targetPidOut,
     QString& targetNameOut,
@@ -258,10 +361,11 @@ bool MemoryDock::resolveDriverMemoryRequestFromUi(
     effectiveCenterAddressOut = 0ULL;
     errorTextOut.clear();
 
-    // 偏移基址为空或 0 时表示不加基址；0x 前缀才按数值基址解析。
+    // 偏移基址为空或 0 时表示不加基址；还支持数值基址、目标进程和模块+偏移。
     const QString baseText = (m_driverMemoryBaseCombo == nullptr) ?
         QStringLiteral("0") :
         m_driverMemoryBaseCombo->currentText().trimmed();
+    bool moduleExpressionResolved = false;
     if (baseText.isEmpty() || baseText.compare("0", Qt::CaseInsensitive) == 0)
     {
         offsetBaseOut = 0ULL;
@@ -274,13 +378,27 @@ bool MemoryDock::resolveDriverMemoryRequestFromUi(
             return false;
         }
     }
+    else if (baseText.contains(QLatin1Char('+')))
+    {
+        if (!resolveDriverMemoryModuleExpression(
+            baseText,
+            offsetBaseOut,
+            errorTextOut))
+        {
+            return false;
+        }
+
+        targetPidOut = m_attachedPid;
+        targetNameOut = m_attachedProcessName;
+        moduleExpressionResolved = true;
+    }
     else
     {
         // 非 0x 输入按进程筛选，命中后把下拉框切到真实进程项。
         int matchedIndex = -1;
         if (!findDriverMemoryProcessComboMatch(baseText, matchedIndex))
         {
-            errorTextOut = QString("未找到匹配进程：%1。请输入 0、0x基址，或进程名/PID。").arg(baseText);
+            errorTextOut = QString("未找到匹配进程：%1。请输入 0、0x基址、模块名+偏移，或进程名/PID。").arg(baseText);
             return false;
         }
 
@@ -308,11 +426,19 @@ bool MemoryDock::resolveDriverMemoryRequestFromUi(
             targetNameOut = m_processCombo->itemData(processIndex, Qt::UserRole + 1).toString();
         }
     }
-    // 中心地址仍按原有地址解析规则处理；配合 offsetBase 得到最终 R0 地址。
-    if (m_driverMemoryAddressEdit == nullptr ||
-        !parseAddressText(m_driverMemoryAddressEdit->text().trimmed(), centerAddressOut))
+    // 模块表达式已经提供完整定位时允许中心地址留空，等价于额外偏移 0。
+    const QString centerAddressText = (m_driverMemoryAddressEdit == nullptr)
+        ? QString()
+        : m_driverMemoryAddressEdit->text().trimmed();
+    if (moduleExpressionResolved && centerAddressText.isEmpty())
     {
-        errorTextOut = "中心地址格式无效。";
+        centerAddressOut = 0ULL;
+    }
+    else if (!parseAddressText(centerAddressText, centerAddressOut))
+    {
+        errorTextOut = moduleExpressionResolved
+            ? QStringLiteral("中心地址格式无效；可留空，或输入要叠加到模块偏移上的数值。")
+            : QStringLiteral("中心地址格式无效。");
         return false;
     }
     if (centerAddressOut > (std::numeric_limits<std::uint64_t>::max)() - offsetBaseOut)
@@ -392,13 +518,17 @@ void MemoryDock::prepareDriverMemoryReadAtAddress(
 
 void MemoryDock::driverReadMemoryFromUi()
 {
+    const QString baseInputText = (m_driverMemoryBaseCombo == nullptr)
+        ? QString()
+        : m_driverMemoryBaseCombo->currentText().trimmed();
+
     // 读取入口日志：记录当前附加 PID 和地址文本。
     kLogEvent readStartEvent;
     info << readStartEvent
         << "[MemoryDock] driverReadMemoryFromUi: 开始读取, attachedPid="
         << m_attachedPid
         << ", baseText="
-        << ((m_driverMemoryBaseCombo == nullptr) ? "" : m_driverMemoryBaseCombo->currentText().trimmed().toStdString())
+        << baseInputText.toStdString()
         << ", text="
         << m_driverMemoryAddressEdit->text().trimmed().toStdString()
         << eol;
@@ -481,7 +611,7 @@ void MemoryDock::driverReadMemoryFromUi()
     }
 
     // 调用 ArkDriverClient，Dock 不直接 DeviceIoControl。
-    const QString requestRangeText = QString("范围: %1 - %2 | 请求: %3 字节 | %4 | 中心: %5")
+    QString requestRangeText = QString("范围: %1 - %2 | 请求: %3 字节 | %4 | 中心: %5")
         .arg(formatAddress(baseAddress))
         .arg(formatAddress(endAddress - 1ULL))
         .arg(totalBytes64)
@@ -491,6 +621,12 @@ void MemoryDock::driverReadMemoryFromUi()
                 .arg(targetPid)
                 .arg(targetProcessName.isEmpty() ? QString() : QString(" (%1)").arg(targetProcessName)))
         .arg(formatAddress(centerAddress));
+    if (baseInputText.contains(QLatin1Char('+')))
+    {
+        requestRangeText += QString(" | 模块定位: %1 -> %2")
+            .arg(baseInputText)
+            .arg(formatAddress(offsetBase));
+    }
     if (m_driverMemoryRangeLabel != nullptr)
     {
         m_driverMemoryRangeLabel->setText(requestRangeText + QStringLiteral(" | R0读取中..."));
