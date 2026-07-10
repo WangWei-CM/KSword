@@ -4656,7 +4656,7 @@ void MainWindow::initMenus()
     m_pluginMenuButton = new QToolButton(m_topActionRowWidget);
     m_pluginMenuButton->setObjectName(QStringLiteral("ksPluginMenuButton"));
     m_pluginMenuButton->setText(QStringLiteral("插件管理"));
-    m_pluginMenuButton->setToolTip(QStringLiteral("打开插件管理；Ksword 直接以独立进程调用插件入口"));
+    m_pluginMenuButton->setToolTip(QStringLiteral("浏览、安装和管理插件"));
     m_pluginMenuButton->setToolButtonStyle(Qt::ToolButtonTextOnly);
     m_pluginMenuButton->setAutoRaise(true);
     m_pluginMenuButton->setFixedHeight(22);

@@ -3,7 +3,10 @@
 #include "theme.h"
 
 #include <QAbstractItemView>
+#include <QBrush>
 #include <QCheckBox>
+#include <QCloseEvent>
+#include <QColor>
 #include <QCoreApplication>
 #include <QCryptographicHash>
 #include <QDesktopServices>
@@ -11,10 +14,11 @@
 #include <QDialogButtonBox>
 #include <QDir>
 #include <QFile>
-#include <QFileDialog>
 #include <QFileInfo>
+#include <QHash>
 #include <QHBoxLayout>
 #include <QHeaderView>
+#include <QIcon>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -27,25 +31,55 @@
 #include <QPlainTextEdit>
 #include <QProcess>
 #include <QProcessEnvironment>
+#include <QProgressBar>
 #include <QPushButton>
 #include <QRegularExpression>
+#include <QSaveFile>
 #include <QStandardPaths>
 #include <QTableWidget>
 #include <QTableWidgetItem>
 #include <QTabWidget>
-#include <QTemporaryFile>
+#include <QTimer>
 #include <QUrl>
 #include <QUuid>
 #include <QVBoxLayout>
 
-#include <memory>
-
 namespace
 {
     constexpr qint64 kMaxManifestBytes = 64 * 1024;
-    constexpr int kMaxVisibleOutputCharacters = 12000;
     constexpr qint64 kMaxMarketplaceArchiveBytes = 256LL * 1024LL * 1024LL;
+    constexpr int kMaxVisualizationColumns = 8;
+    constexpr int kMaxVisualizationSummaryItems = 8;
+    constexpr int kMaxVisualizationRows = 10000;
+    constexpr int kMaxBufferedStdoutBytes = 1024 * 1024;
     constexpr char kMarketplaceCatalogUrl[] = "https://raw.githubusercontent.com/KSwordDEV/Plugins/main/catalog.json";
+
+    struct VisualizationValueStyle
+    {
+        QString label;
+        QString tone;
+    };
+
+    struct VisualizationField
+    {
+        QString field;
+        QString label;
+        QString format;
+        QHash<QString, VisualizationValueStyle> valueStyles;
+    };
+
+    struct PluginVisualization
+    {
+        bool enabled = false;
+        QString type;
+        QString title;
+        QString startEvent;
+        QString resultEvent;
+        QString completeEvent;
+        QString totalField;
+        QList<VisualizationField> columns;
+        QList<VisualizationField> summary;
+    };
 
     struct PluginDescriptor
     {
@@ -58,6 +92,7 @@ namespace
         QString defaultCommand;
         QString pluginDirectory;
         QStringList targets;
+        PluginVisualization visualization;
     };
 
     struct PluginListResult
@@ -193,6 +228,205 @@ namespace
             return false;
         }
         *valueOut = value;
+        return true;
+    }
+
+    bool isValidProtocolName(const QString& value)
+    {
+        static const QRegularExpression pattern(QStringLiteral("^[A-Za-z_][A-Za-z0-9_.-]{0,63}$"));
+        return pattern.match(value).hasMatch();
+    }
+
+    bool isAllowedVisualizationFormat(const QString& format)
+    {
+        return format == QStringLiteral("text") ||
+            format == QStringLiteral("path") ||
+            format == QStringLiteral("percent") ||
+            format == QStringLiteral("integer") ||
+            format == QStringLiteral("number") ||
+            format == QStringLiteral("badge");
+    }
+
+    bool isAllowedVisualizationTone(const QString& tone)
+    {
+        return tone == QStringLiteral("success") ||
+            tone == QStringLiteral("danger") ||
+            tone == QStringLiteral("warning") ||
+            tone == QStringLiteral("info") ||
+            tone == QStringLiteral("muted");
+    }
+
+    bool parseVisualizationField(
+        const QJsonValue& value,
+        VisualizationField* fieldOut,
+        QString* errorOut)
+    {
+        if (fieldOut == nullptr || errorOut == nullptr || !value.isObject())
+        {
+            if (errorOut != nullptr) *errorOut = QStringLiteral("visualization 字段定义必须是对象。");
+            return false;
+        }
+
+        const QJsonObject object = value.toObject();
+        VisualizationField field;
+        if (!readRequiredString(object, "field", &field.field, errorOut) ||
+            !readRequiredString(object, "label", &field.label, errorOut) ||
+            !readRequiredString(object, "format", &field.format, errorOut))
+        {
+            return false;
+        }
+        field.format = field.format.toLower();
+        if (!isValidProtocolName(field.field) || field.label.size() > 64 ||
+            !isAllowedVisualizationFormat(field.format))
+        {
+            *errorOut = QStringLiteral("visualization 字段名、标签或 format 不合法。");
+            return false;
+        }
+
+        const QJsonValue valuesValue = object.value(QStringLiteral("values"));
+        if (!valuesValue.isUndefined())
+        {
+            if (field.format != QStringLiteral("badge") || !valuesValue.isObject())
+            {
+                *errorOut = QStringLiteral("visualization.values 仅允许用于 badge，且必须是对象。");
+                return false;
+            }
+            const QJsonObject values = valuesValue.toObject();
+            if (values.size() > 32)
+            {
+                *errorOut = QStringLiteral("visualization.values 最多允许 32 个映射。");
+                return false;
+            }
+            for (auto iterator = values.constBegin(); iterator != values.constEnd(); ++iterator)
+            {
+                if (!isValidProtocolName(iterator.key()) || !iterator.value().isObject())
+                {
+                    *errorOut = QStringLiteral("visualization.values 的键或值不合法。");
+                    return false;
+                }
+                VisualizationValueStyle style;
+                const QJsonObject styleObject = iterator.value().toObject();
+                if (!readRequiredString(styleObject, "label", &style.label, errorOut) ||
+                    !readRequiredString(styleObject, "tone", &style.tone, errorOut))
+                {
+                    return false;
+                }
+                style.tone = style.tone.toLower();
+                if (style.label.size() > 64 || !isAllowedVisualizationTone(style.tone))
+                {
+                    *errorOut = QStringLiteral("visualization.values 的 label 或 tone 不合法。");
+                    return false;
+                }
+                field.valueStyles.insert(iterator.key(), style);
+            }
+        }
+        if (field.format == QStringLiteral("badge") && field.valueStyles.isEmpty())
+        {
+            *errorOut = QStringLiteral("badge 字段必须提供非空 values 映射。");
+            return false;
+        }
+
+        *fieldOut = field;
+        return true;
+    }
+
+    bool parseVisualization(
+        const QJsonObject& manifest,
+        PluginVisualization* visualizationOut,
+        QString* errorOut)
+    {
+        if (visualizationOut == nullptr || errorOut == nullptr)
+        {
+            return false;
+        }
+
+        *visualizationOut = {};
+        const QJsonValue visualizationValue = manifest.value(QStringLiteral("visualization"));
+        if (visualizationValue.isUndefined())
+        {
+            return true;
+        }
+        if (!visualizationValue.isObject())
+        {
+            *errorOut = QStringLiteral("visualization 必须是对象。");
+            return false;
+        }
+
+        const QJsonObject object = visualizationValue.toObject();
+        PluginVisualization visualization;
+        if (!readRequiredString(object, "type", &visualization.type, errorOut) ||
+            !readRequiredString(object, "title", &visualization.title, errorOut) ||
+            !readRequiredString(object, "start_event", &visualization.startEvent, errorOut) ||
+            !readRequiredString(object, "result_event", &visualization.resultEvent, errorOut) ||
+            !readRequiredString(object, "complete_event", &visualization.completeEvent, errorOut) ||
+            !readRequiredString(object, "total_field", &visualization.totalField, errorOut))
+        {
+            return false;
+        }
+        visualization.type = visualization.type.toLower();
+        if (visualization.type != QStringLiteral("scan-table") ||
+            visualization.title.size() > 96 ||
+            !isValidProtocolName(visualization.startEvent) ||
+            !isValidProtocolName(visualization.resultEvent) ||
+            !isValidProtocolName(visualization.completeEvent) ||
+            !isValidProtocolName(visualization.totalField))
+        {
+            *errorOut = QStringLiteral("visualization 的类型、标题、事件名或 total_field 不合法。");
+            return false;
+        }
+
+        const QJsonArray columns = object.value(QStringLiteral("columns")).toArray();
+        if (columns.isEmpty() || columns.size() > kMaxVisualizationColumns)
+        {
+            *errorOut = QStringLiteral("scan-table 必须定义 1 到 %1 个 columns。").arg(kMaxVisualizationColumns);
+            return false;
+        }
+        QStringList columnNames;
+        for (const QJsonValue& columnValue : columns)
+        {
+            VisualizationField field;
+            if (!parseVisualizationField(columnValue, &field, errorOut))
+            {
+                return false;
+            }
+            if (columnNames.contains(field.field))
+            {
+                *errorOut = QStringLiteral("visualization.columns 不能包含重复 field。");
+                return false;
+            }
+            columnNames.push_back(field.field);
+            visualization.columns.push_back(field);
+        }
+
+        const QJsonValue summaryValue = object.value(QStringLiteral("summary"));
+        if (!summaryValue.isUndefined())
+        {
+            if (!summaryValue.isArray() || summaryValue.toArray().size() > kMaxVisualizationSummaryItems)
+            {
+                *errorOut = QStringLiteral("visualization.summary 必须是数组，且最多 %1 项。")
+                    .arg(kMaxVisualizationSummaryItems);
+                return false;
+            }
+            QStringList summaryNames;
+            for (const QJsonValue& summaryFieldValue : summaryValue.toArray())
+            {
+                VisualizationField field;
+                if (!parseVisualizationField(summaryFieldValue, &field, errorOut))
+                {
+                    return false;
+                }
+                if (summaryNames.contains(field.field))
+                {
+                    *errorOut = QStringLiteral("visualization.summary 不能包含重复 field。");
+                    return false;
+                }
+                summaryNames.push_back(field.field);
+                visualization.summary.push_back(field);
+            }
+        }
+
+        visualization.enabled = true;
+        *visualizationOut = visualization;
         return true;
     }
 
@@ -357,6 +591,10 @@ namespace
             *errorOut = QStringLiteral("targets 必须包含 file 和/或 process。");
             return false;
         }
+        if (!parseVisualization(object, &descriptor.visualization, errorOut))
+        {
+            return false;
+        }
 
         descriptor.pluginDirectory = QDir(pluginDirectory).absolutePath();
         descriptor.entrypointPath = QDir(descriptor.pluginDirectory).filePath(entrypoint);
@@ -405,20 +643,6 @@ namespace
         }
         resultOut->pluginRoot = pluginRoot;
         return true;
-    }
-
-    QString formatConsoleOutput(const QString& outputText)
-    {
-        const QString trimmed = outputText.trimmed();
-        if (trimmed.isEmpty())
-        {
-            return QStringLiteral("<插件未输出内容>");
-        }
-        if (trimmed.size() <= kMaxVisibleOutputCharacters)
-        {
-            return trimmed;
-        }
-        return trimmed.left(9000) + QStringLiteral("\n\n...（插件输出已截断）...\n\n") + trimmed.right(2500);
     }
 
     QString targetName(const ks::plugin_host::TargetKind targetKind)
@@ -514,6 +738,503 @@ namespace
         return true;
     }
 
+    QString visualizationValueText(const QJsonValue& value, const QString& format)
+    {
+        if (value.isUndefined() || value.isNull())
+        {
+            return QStringLiteral("—");
+        }
+        if (format == QStringLiteral("percent") && value.isDouble())
+        {
+            double percent = value.toDouble();
+            if (qAbs(percent) <= 1.0) percent *= 100.0;
+            if (percent > 0.0 && percent < 0.01) return QStringLiteral("<0.01%");
+            return QStringLiteral("%1%").arg(percent, 0, 'f', 2);
+        }
+        if (format == QStringLiteral("integer") && value.isDouble())
+        {
+            return QString::number(qRound64(value.toDouble()));
+        }
+        if (format == QStringLiteral("number") && value.isDouble())
+        {
+            return QString::number(value.toDouble(), 'g', 8);
+        }
+        if (value.isString())
+        {
+            return value.toString();
+        }
+        if (value.isDouble())
+        {
+            return QString::number(value.toDouble(), 'g', 12);
+        }
+        if (value.isBool())
+        {
+            return value.toBool() ? QStringLiteral("是") : QStringLiteral("否");
+        }
+        if (value.isArray())
+        {
+            return QString::fromUtf8(QJsonDocument(value.toArray()).toJson(QJsonDocument::Compact));
+        }
+        if (value.isObject())
+        {
+            return QString::fromUtf8(QJsonDocument(value.toObject()).toJson(QJsonDocument::Compact));
+        }
+        return QStringLiteral("—");
+    }
+
+    QColor visualizationToneColor(const QString& tone)
+    {
+        if (tone == QStringLiteral("success")) return QColor(QStringLiteral("#3BCF8E"));
+        if (tone == QStringLiteral("danger")) return QColor(QStringLiteral("#FF6464"));
+        if (tone == QStringLiteral("warning")) return QColor(QStringLiteral("#FFB74D"));
+        if (tone == QStringLiteral("info")) return QColor(QStringLiteral("#4DA3FF"));
+        if (tone == QStringLiteral("muted")) return QColor(QStringLiteral("#9AA9BD"));
+        return QColor(KswordTheme::TextPrimaryHex());
+    }
+
+    class PluginRunDialog final : public QDialog
+    {
+    public:
+        PluginRunDialog(
+            QWidget* parent,
+            const PluginDescriptor& descriptor,
+            const ks::plugin_host::InvocationContext& context,
+            const QString& program,
+            const QStringList& arguments)
+            : QDialog(parent),
+              m_descriptor(descriptor)
+        {
+            setAttribute(Qt::WA_DeleteOnClose, true);
+            setWindowTitle(descriptor.visualization.enabled
+                ? descriptor.visualization.title
+                : descriptor.name);
+            setWindowIcon(QIcon(QStringLiteral(":/Icon/process_start.svg")));
+            resize(920, 620);
+            setModal(false);
+
+            auto* rootLayout = new QVBoxLayout(this);
+            rootLayout->setContentsMargins(16, 16, 16, 16);
+            rootLayout->setSpacing(10);
+
+            auto* titleLabel = new QLabel(
+                descriptor.visualization.enabled ? descriptor.visualization.title : descriptor.name,
+                this);
+            titleLabel->setStyleSheet(QStringLiteral("font-size:18px;font-weight:700;color:%1;")
+                .arg(KswordTheme::TextPrimaryHex()));
+            rootLayout->addWidget(titleLabel);
+
+            QString targetText;
+            if (context.targetKind == ks::plugin_host::TargetKind::File)
+            {
+                targetText = QStringLiteral("目标文件：%1").arg(QDir::toNativeSeparators(context.filePath));
+            }
+            else
+            {
+                targetText = QStringLiteral("目标进程：%1  PID %2")
+                    .arg(context.processName.trimmed().isEmpty() ? QStringLiteral("未知进程") : context.processName)
+                    .arg(context.processId);
+                if (!context.filePath.trimmed().isEmpty())
+                {
+                    targetText += QStringLiteral("\n映像路径：%1").arg(QDir::toNativeSeparators(context.filePath));
+                }
+            }
+            auto* targetLabel = new QLabel(targetText, this);
+            targetLabel->setWordWrap(true);
+            targetLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
+            targetLabel->setStyleSheet(QStringLiteral("color:%1;").arg(KswordTheme::TextSecondaryHex()));
+            rootLayout->addWidget(targetLabel);
+
+            m_progress = new QProgressBar(this);
+            m_progress->setRange(0, 0);
+            m_progress->setTextVisible(true);
+            rootLayout->addWidget(m_progress);
+
+            if (!descriptor.visualization.summary.isEmpty())
+            {
+                auto* summaryLayout = new QHBoxLayout();
+                summaryLayout->setSpacing(18);
+                for (const VisualizationField& field : descriptor.visualization.summary)
+                {
+                    auto* label = new QLabel(QStringLiteral("%1：—").arg(field.label), this);
+                    label->setStyleSheet(QStringLiteral("font-weight:600;color:%1;")
+                        .arg(KswordTheme::TextPrimaryHex()));
+                    summaryLayout->addWidget(label);
+                    m_summaryLabels.insert(field.field, label);
+                }
+                summaryLayout->addStretch(1);
+                rootLayout->addLayout(summaryLayout);
+            }
+
+            m_tabs = new QTabWidget(this);
+            if (descriptor.visualization.enabled)
+            {
+                m_resultTable = new QTableWidget(m_tabs);
+                m_resultTable->setColumnCount(descriptor.visualization.columns.size());
+                QStringList labels;
+                for (const VisualizationField& field : descriptor.visualization.columns) labels.push_back(field.label);
+                m_resultTable->setHorizontalHeaderLabels(labels);
+                m_resultTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+                m_resultTable->setSelectionBehavior(QAbstractItemView::SelectRows);
+                m_resultTable->setSelectionMode(QAbstractItemView::SingleSelection);
+                m_resultTable->setAlternatingRowColors(true);
+                m_resultTable->setWordWrap(false);
+                m_resultTable->setSortingEnabled(false);
+                m_resultTable->verticalHeader()->setVisible(false);
+                QHeaderView* header = m_resultTable->horizontalHeader();
+                header->setStretchLastSection(false);
+                for (int column = 0; column < descriptor.visualization.columns.size(); ++column)
+                {
+                    const QString format = descriptor.visualization.columns.at(column).format;
+                    if (format == QStringLiteral("path"))
+                    {
+                        header->setSectionResizeMode(column, QHeaderView::Stretch);
+                    }
+                    else if (format == QStringLiteral("text"))
+                    {
+                        header->setSectionResizeMode(column, QHeaderView::Interactive);
+                        m_resultTable->setColumnWidth(column, 180);
+                    }
+                    else
+                    {
+                        header->setSectionResizeMode(column, QHeaderView::ResizeToContents);
+                    }
+                }
+                m_tabs->addTab(m_resultTable, QStringLiteral("扫描结果"));
+            }
+            else
+            {
+                m_plainOutput = new QPlainTextEdit(m_tabs);
+                m_plainOutput->setReadOnly(true);
+                m_plainOutput->setMaximumBlockCount(2000);
+                m_tabs->addTab(m_plainOutput, QStringLiteral("插件输出"));
+            }
+
+            m_diagnostics = new QPlainTextEdit(m_tabs);
+            m_diagnostics->setReadOnly(true);
+            m_diagnostics->setMaximumBlockCount(2000);
+            m_diagnostics->setPlaceholderText(QStringLiteral("插件错误和协议诊断会显示在这里。"));
+            m_tabs->addTab(m_diagnostics, QStringLiteral("诊断"));
+            rootLayout->addWidget(m_tabs, 1);
+
+            auto* footer = new QHBoxLayout();
+            m_status = new QLabel(QStringLiteral("正在启动…"), this);
+            m_status->setWordWrap(true);
+            footer->addWidget(m_status, 1);
+            m_closeButton = new QPushButton(QStringLiteral("取消"), this);
+            footer->addWidget(m_closeButton);
+            rootLayout->addLayout(footer);
+
+            m_process = new QProcess(this);
+            m_process->setProgram(program);
+            m_process->setArguments(arguments);
+            m_process->setWorkingDirectory(descriptor.pluginDirectory);
+            m_process->setProcessChannelMode(QProcess::SeparateChannels);
+            QProcessEnvironment environment = QProcessEnvironment::systemEnvironment();
+            environment.insert(QStringLiteral("KSWORD_PLUGIN_ROOT"), findPluginRoot());
+            m_process->setProcessEnvironment(environment);
+
+            connect(m_closeButton, &QPushButton::clicked, this, [this]() {
+                if (m_process->state() == QProcess::NotRunning) close();
+                else cancelRun();
+            });
+            connect(m_process, &QProcess::started, this, [this]() {
+                setStatus(QStringLiteral("正在扫描…"), QStringLiteral("info"));
+            });
+            connect(m_process, &QProcess::readyReadStandardOutput, this, [this]() {
+                consumeStandardOutput(false);
+            });
+            connect(m_process, &QProcess::readyReadStandardError, this, [this]() {
+                consumeStandardError();
+            });
+            connect(m_process, &QProcess::errorOccurred, this, [this](const QProcess::ProcessError error) {
+                if (error != QProcess::FailedToStart || m_finished) return;
+                m_finished = true;
+                m_progress->setRange(0, 1);
+                m_progress->setValue(0);
+                appendDiagnostic(QStringLiteral("无法启动插件入口：%1").arg(m_process->errorString()));
+                setStatus(QStringLiteral("启动失败"), QStringLiteral("danger"));
+                m_closeButton->setText(QStringLiteral("关闭"));
+                m_closeButton->setEnabled(true);
+                if (m_tabs->count() > 1) m_tabs->setCurrentIndex(1);
+            });
+            connect(m_process, qOverload<int, QProcess::ExitStatus>(&QProcess::finished), this,
+                [this](const int exitCode, const QProcess::ExitStatus exitStatus) {
+                    if (m_finished) return;
+                    m_finished = true;
+                    consumeStandardOutput(true);
+                    consumeStandardError();
+                    const bool protocolComplete = !m_descriptor.visualization.enabled || m_completeSeen;
+                    const bool succeeded = exitStatus == QProcess::NormalExit && exitCode == 0 &&
+                        !m_protocolError && protocolComplete && !m_cancelRequested;
+                    if (m_cancelRequested)
+                    {
+                        setStatus(QStringLiteral("扫描已取消"), QStringLiteral("warning"));
+                    }
+                    else if (succeeded)
+                    {
+                        if (m_totalItems > 0)
+                        {
+                            m_progress->setRange(0, m_totalItems);
+                            m_progress->setValue(qMin(m_completedItems, m_totalItems));
+                        }
+                        else
+                        {
+                            m_progress->setRange(0, 1);
+                            m_progress->setValue(1);
+                        }
+                        setStatus(QStringLiteral("扫描完成，共处理 %1 项").arg(m_completedItems),
+                            QStringLiteral("success"));
+                    }
+                    else
+                    {
+                        if (!protocolComplete)
+                        {
+                            appendDiagnostic(QStringLiteral("插件未发送声明的完成事件：%1")
+                                .arg(m_descriptor.visualization.completeEvent));
+                        }
+                        setStatus(QStringLiteral("扫描失败（退出码 %1）").arg(exitCode),
+                            QStringLiteral("danger"));
+                        if (m_tabs->count() > 1) m_tabs->setCurrentIndex(1);
+                    }
+                    m_closeButton->setText(QStringLiteral("关闭"));
+                    m_closeButton->setEnabled(true);
+                    if (m_resultTable != nullptr) m_resultTable->setSortingEnabled(true);
+                });
+        }
+
+        void start()
+        {
+            m_process->start();
+        }
+
+    protected:
+        void closeEvent(QCloseEvent* event) override
+        {
+            if (m_process != nullptr && m_process->state() != QProcess::NotRunning)
+            {
+                cancelRun();
+                event->ignore();
+                return;
+            }
+            QDialog::closeEvent(event);
+        }
+
+    private:
+        void cancelRun()
+        {
+            if (m_process == nullptr || m_process->state() == QProcess::NotRunning) return;
+            m_cancelRequested = true;
+            setStatus(QStringLiteral("正在取消扫描…"), QStringLiteral("warning"));
+            m_closeButton->setEnabled(false);
+            m_process->terminate();
+            QTimer::singleShot(2000, m_process, [process = m_process]() {
+                if (process->state() != QProcess::NotRunning) process->kill();
+            });
+        }
+
+        void setStatus(const QString& text, const QString& tone)
+        {
+            m_status->setText(text);
+            m_status->setStyleSheet(QStringLiteral("font-weight:600;color:%1;")
+                .arg(visualizationToneColor(tone).name()));
+        }
+
+        void appendDiagnostic(const QString& text)
+        {
+            if (!text.trimmed().isEmpty()) m_diagnostics->appendPlainText(text.trimmed());
+        }
+
+        void consumeStandardError()
+        {
+            const QString text = QString::fromLocal8Bit(m_process->readAllStandardError());
+            appendDiagnostic(text);
+        }
+
+        void consumeStandardOutput(const bool flushRemainder)
+        {
+            m_stdoutBuffer += m_process->readAllStandardOutput();
+            int newlineIndex = -1;
+            while ((newlineIndex = m_stdoutBuffer.indexOf('\n')) >= 0)
+            {
+                QByteArray line = m_stdoutBuffer.left(newlineIndex);
+                m_stdoutBuffer.remove(0, newlineIndex + 1);
+                if (line.endsWith('\r')) line.chop(1);
+                processOutputLine(line);
+            }
+            if (m_stdoutBuffer.size() > kMaxBufferedStdoutBytes)
+            {
+                appendDiagnostic(QStringLiteral("插件输出存在超过 1 MiB 的无换行记录，已拒绝解析。"));
+                m_stdoutBuffer.clear();
+                m_protocolError = true;
+            }
+            if (flushRemainder && !m_stdoutBuffer.isEmpty())
+            {
+                processOutputLine(m_stdoutBuffer);
+                m_stdoutBuffer.clear();
+            }
+        }
+
+        void processOutputLine(const QByteArray& lineBytes)
+        {
+            const QString line = QString::fromUtf8(lineBytes).trimmed();
+            if (line.isEmpty()) return;
+            if (!m_descriptor.visualization.enabled)
+            {
+                m_plainOutput->appendPlainText(line);
+                return;
+            }
+
+            QJsonParseError parseError;
+            const QJsonDocument document = QJsonDocument::fromJson(lineBytes, &parseError);
+            if (parseError.error != QJsonParseError::NoError || !document.isObject())
+            {
+                appendDiagnostic(QStringLiteral("无法解析插件 JSON Lines：%1\n%2")
+                    .arg(parseError.errorString(), line));
+                m_protocolError = true;
+                return;
+            }
+            const QJsonObject object = document.object();
+            if (object.value(QStringLiteral("protocol")).toString() != QStringLiteral("ksword-plugin/1") ||
+                object.value(QStringLiteral("plugin_id")).toString() != m_descriptor.id)
+            {
+                appendDiagnostic(QStringLiteral("插件输出的 protocol 或 plugin_id 与清单不一致。"));
+                m_protocolError = true;
+                return;
+            }
+
+            const QString event = object.value(QStringLiteral("event")).toString();
+            if (event == QStringLiteral("error"))
+            {
+                m_protocolError = true;
+                appendDiagnostic(QStringLiteral("%1：%2")
+                    .arg(object.value(QStringLiteral("code")).toString(QStringLiteral("plugin_error")),
+                         object.value(QStringLiteral("message")).toString(QStringLiteral("插件报告错误"))));
+                setStatus(QStringLiteral("插件报告错误"), QStringLiteral("danger"));
+                return;
+            }
+            if (event == m_descriptor.visualization.startEvent)
+            {
+                m_totalItems = qMax(0, object.value(m_descriptor.visualization.totalField).toInt());
+                if (m_totalItems > 0)
+                {
+                    m_progress->setRange(0, m_totalItems);
+                    m_progress->setValue(0);
+                    m_progress->setFormat(QStringLiteral("%v / %m"));
+                }
+                setStatus(m_totalItems > 0
+                    ? QStringLiteral("正在扫描 0 / %1").arg(m_totalItems)
+                    : QStringLiteral("正在扫描…"), QStringLiteral("info"));
+                return;
+            }
+            if (event == m_descriptor.visualization.resultEvent)
+            {
+                appendResult(object);
+                ++m_completedItems;
+                if (m_totalItems > 0)
+                {
+                    m_progress->setValue(qMin(m_completedItems, m_totalItems));
+                    setStatus(QStringLiteral("正在扫描 %1 / %2").arg(m_completedItems).arg(m_totalItems),
+                        QStringLiteral("info"));
+                }
+                else
+                {
+                    setStatus(QStringLiteral("已处理 %1 项").arg(m_completedItems), QStringLiteral("info"));
+                }
+                return;
+            }
+            if (event == m_descriptor.visualization.completeEvent)
+            {
+                m_completeSeen = true;
+                updateSummary(object);
+                if (m_totalItems > 0) m_progress->setValue(qMin(m_completedItems, m_totalItems));
+                setStatus(QStringLiteral("正在完成扫描…"), QStringLiteral("info"));
+            }
+        }
+
+        void appendResult(const QJsonObject& object)
+        {
+            if (m_resultTable == nullptr) return;
+            if (m_resultTable->rowCount() >= kMaxVisualizationRows)
+            {
+                if (!m_rowLimitReported)
+                {
+                    appendDiagnostic(QStringLiteral("扫描结果超过 %1 行，后续结果不再显示。")
+                        .arg(kMaxVisualizationRows));
+                    m_rowLimitReported = true;
+                }
+                return;
+            }
+
+            const int row = m_resultTable->rowCount();
+            m_resultTable->insertRow(row);
+            for (int column = 0; column < m_descriptor.visualization.columns.size(); ++column)
+            {
+                const VisualizationField& field = m_descriptor.visualization.columns.at(column);
+                const QJsonValue value = object.value(field.field);
+                QString text = visualizationValueText(value, field.format);
+                QString tone;
+                if (field.format == QStringLiteral("badge"))
+                {
+                    const VisualizationValueStyle style = field.valueStyles.value(value.toString());
+                    if (!style.label.isEmpty()) text = style.label;
+                    tone = style.tone;
+                }
+                auto* item = new QTableWidgetItem(text);
+                if (!tone.isEmpty()) item->setForeground(QBrush(visualizationToneColor(tone)));
+                if (field.format == QStringLiteral("path") || text.size() > 80) item->setToolTip(text);
+                if (field.format == QStringLiteral("integer") ||
+                    field.format == QStringLiteral("number") ||
+                    field.format == QStringLiteral("percent"))
+                {
+                    item->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
+                }
+                m_resultTable->setItem(row, column, item);
+            }
+        }
+
+        void updateSummary(const QJsonObject& object)
+        {
+            for (const VisualizationField& field : m_descriptor.visualization.summary)
+            {
+                QLabel* label = m_summaryLabels.value(field.field, nullptr);
+                if (label == nullptr) continue;
+                const QJsonValue value = object.value(field.field);
+                QString text = visualizationValueText(value, field.format);
+                QString tone;
+                if (field.format == QStringLiteral("badge"))
+                {
+                    const VisualizationValueStyle style = field.valueStyles.value(value.toString());
+                    if (!style.label.isEmpty()) text = style.label;
+                    tone = style.tone;
+                }
+                label->setText(QStringLiteral("%1：%2").arg(field.label, text));
+                label->setStyleSheet(QStringLiteral("font-weight:600;color:%1;")
+                    .arg(tone.isEmpty()
+                        ? QColor(KswordTheme::TextPrimaryHex()).name()
+                        : visualizationToneColor(tone).name()));
+            }
+        }
+
+        PluginDescriptor m_descriptor;
+        QProcess* m_process = nullptr;
+        QProgressBar* m_progress = nullptr;
+        QTabWidget* m_tabs = nullptr;
+        QTableWidget* m_resultTable = nullptr;
+        QPlainTextEdit* m_plainOutput = nullptr;
+        QPlainTextEdit* m_diagnostics = nullptr;
+        QLabel* m_status = nullptr;
+        QPushButton* m_closeButton = nullptr;
+        QHash<QString, QLabel*> m_summaryLabels;
+        QByteArray m_stdoutBuffer;
+        int m_totalItems = 0;
+        int m_completedItems = 0;
+        bool m_completeSeen = false;
+        bool m_protocolError = false;
+        bool m_cancelRequested = false;
+        bool m_finished = false;
+        bool m_rowLimitReported = false;
+    };
+
     void launchPlugin(QWidget* owner, const PluginDescriptor& descriptor, const ks::plugin_host::InvocationContext& context)
     {
         QString contextError;
@@ -532,46 +1253,11 @@ namespace
             return;
         }
 
-        auto* process = new QProcess(owner);
-        QProcessEnvironment environment = QProcessEnvironment::systemEnvironment();
-        environment.insert(QStringLiteral("KSWORD_PLUGIN_ROOT"), findPluginRoot());
-        process->setProcessEnvironment(environment);
-        process->setProgram(program);
-        process->setArguments(arguments);
-        process->setWorkingDirectory(descriptor.pluginDirectory);
-        process->setProcessChannelMode(QProcess::SeparateChannels);
-        const QString title = QStringLiteral("插件：%1").arg(descriptor.name);
-        QObject::connect(process, &QProcess::errorOccurred, owner, [owner, process, title](const QProcess::ProcessError error) {
-            if (error == QProcess::FailedToStart)
-            {
-                QMessageBox::warning(owner, title, QStringLiteral("无法启动插件入口：%1").arg(process->errorString()));
-                process->deleteLater();
-            }
-        });
-        QObject::connect(process, qOverload<int, QProcess::ExitStatus>(&QProcess::finished), owner,
-            [owner, process, title](const int exitCode, const QProcess::ExitStatus exitStatus) {
-                QString detail = formatConsoleOutput(QString::fromUtf8(process->readAllStandardOutput()));
-                const QString stderrText = QString::fromLocal8Bit(process->readAllStandardError());
-                if (!stderrText.trimmed().isEmpty())
-                {
-                    detail += QStringLiteral("\n\n[stderr]\n") + formatConsoleOutput(stderrText);
-                }
-                const bool succeeded = exitStatus == QProcess::NormalExit && exitCode == 0;
-                const QString message = QStringLiteral("%1\n退出码：%2\n\n%3")
-                    .arg(succeeded ? QStringLiteral("插件已完成。") : QStringLiteral("插件执行失败。"))
-                    .arg(exitCode)
-                    .arg(detail);
-                if (succeeded)
-                {
-                    QMessageBox::information(owner, title, message);
-                }
-                else
-                {
-                    QMessageBox::warning(owner, title, message);
-                }
-                process->deleteLater();
-            });
-        process->start();
+        auto* dialog = new PluginRunDialog(owner, descriptor, context, program, arguments);
+        dialog->show();
+        dialog->raise();
+        dialog->activateWindow();
+        dialog->start();
     }
 
     bool promoteExtractedPlugin(
@@ -640,10 +1326,6 @@ namespace
             resize(900, 520);
             setModal(false);
             auto* layout = new QVBoxLayout(this);
-            auto* introduction = new QLabel(
-                QStringLiteral("插件是独立进程。Ksword 只读取 plugin.json 发现其命令行入口，并直接启动入口程序；不会经过 KswordCLI，也不会加载插件代码。"), this);
-            introduction->setWordWrap(true);
-            layout->addWidget(introduction);
 
             m_networkManager = new QNetworkAccessManager(this);
             auto* tabWidget = new QTabWidget(this);
@@ -751,13 +1433,14 @@ namespace
                 return;
             }
             const PluginDescriptor& descriptor = m_plugins.at(row);
-            const QString detailText = QStringLiteral("id=%1\nversion=%2\nruntime=%3\nentrypoint=%4\ndefault_command=%5\ntargets=%6\ndirectory=%7\n\n%8")
+            const QString detailText = QStringLiteral("id=%1\nversion=%2\nruntime=%3\nentrypoint=%4\ndefault_command=%5\ntargets=%6\nvisualization=%7\ndirectory=%8\n\n%9")
                 .arg(descriptor.id)
                 .arg(descriptor.version)
                 .arg(descriptor.runtime)
                 .arg(descriptor.entrypointPath)
                 .arg(descriptor.defaultCommand)
                 .arg(descriptor.targets.join(QStringLiteral(", ")))
+                .arg(descriptor.visualization.enabled ? descriptor.visualization.type : QStringLiteral("none"))
                 .arg(descriptor.pluginDirectory)
                 .arg(descriptor.description);
             QMessageBox::information(this, QStringLiteral("插件清单：%1").arg(descriptor.name), detailText);
@@ -908,7 +1591,7 @@ namespace
                 const QString actualSha256 = QString::fromLatin1(QCryptographicHash::hash(archiveBytes, QCryptographicHash::Sha256).toHex());
                 if (actualSha256.compare(plugin.sha256, Qt::CaseInsensitive) != 0)
                 {
-                    QMessageBox::warning(this, QStringLiteral("插件商城"), QStringLiteral("SHA-256 校验失败，已拒绝保存插件包。"));
+                    QMessageBox::warning(this, QStringLiteral("插件商城"), QStringLiteral("SHA-256 校验失败，已拒绝安装插件。"));
                     return;
                 }
                 installMarketplaceArchive(plugin, archiveBytes);
@@ -925,23 +1608,35 @@ namespace
                 return;
             }
 
-            auto archiveFile = std::make_shared<QTemporaryFile>(
-                QDir(pluginRoot).filePath(QStringLiteral(".ksword-plugin-download-XXXXXX.zip")));
-            archiveFile->setAutoRemove(true);
-            if (!archiveFile->open() || archiveFile->write(archiveBytes) != archiveBytes.size() || !archiveFile->flush())
             {
-                QMessageBox::warning(this, QStringLiteral("插件商城"), QStringLiteral("无法准备已验证的插件包：%1")
-                    .arg(archiveFile->errorString()));
-                return;
+                const QString archivePath = QDir(pluginRoot).filePath(
+                    QStringLiteral(".ksword-plugin-download-%1.zip")
+                        .arg(QUuid::createUuid().toString(QUuid::WithoutBraces)));
+                QSaveFile archiveFile(archivePath);
+                if (!archiveFile.open(QIODevice::WriteOnly) ||
+                    archiveFile.write(archiveBytes) != archiveBytes.size() ||
+                    !archiveFile.commit())
+                {
+                    QMessageBox::warning(this, QStringLiteral("插件商城"),
+                        QStringLiteral("无法准备已验证的插件包：%1").arg(archiveFile.errorString()));
+                    QFile::remove(archivePath);
+                    return;
+                }
+                installVerifiedMarketplaceArchive(plugin, pluginRoot, archivePath);
             }
-            const QString archivePath = archiveFile->fileName();
-            archiveFile->close();
+        }
 
+        void installVerifiedMarketplaceArchive(
+            const MarketplacePlugin& plugin,
+            const QString& pluginRoot,
+            const QString& archivePath)
+        {
             const QString stagingName = QStringLiteral(".ksword-plugin-stage-%1-%2")
                 .arg(plugin.installDirectory, QUuid::createUuid().toString(QUuid::WithoutBraces));
             const QString stagingPath = QDir(pluginRoot).filePath(stagingName);
             if (!QDir().mkpath(stagingPath))
             {
+                QFile::remove(archivePath);
                 QMessageBox::warning(this, QStringLiteral("插件商城"), QStringLiteral("无法创建插件安装暂存目录。"));
                 return;
             }
@@ -950,6 +1645,7 @@ namespace
             if (powerShell.isEmpty())
             {
                 QDir(stagingPath).removeRecursively();
+                QFile::remove(archivePath);
                 QMessageBox::warning(this, QStringLiteral("插件商城"), QStringLiteral("未找到 Windows PowerShell，无法解压插件包。"));
                 return;
             }
@@ -964,22 +1660,29 @@ namespace
                 QStringLiteral("-Command"), command });
             m_status->setText(QStringLiteral("已验证 %1，正在安全解压并安装…").arg(plugin.name));
             connect(extractor, &QProcess::errorOccurred, this,
-                [this, extractor, archiveFile, stagingPath](const QProcess::ProcessError error) {
+                [this, extractor, archivePath, stagingPath](const QProcess::ProcessError error) {
                     if (error != QProcess::FailedToStart) return;
                     QDir(stagingPath).removeRecursively();
+                    QFile::remove(archivePath);
                     QMessageBox::warning(this, QStringLiteral("插件商城"), QStringLiteral("无法启动插件解压器：%1")
                         .arg(extractor->errorString()));
                     extractor->deleteLater();
                 });
             connect(extractor, qOverload<int, QProcess::ExitStatus>(&QProcess::finished), this,
-                [this, extractor, archiveFile, plugin, pluginRoot, stagingPath](const int exitCode, const QProcess::ExitStatus exitStatus) {
+                [this, extractor, archivePath, plugin, pluginRoot, stagingPath](const int exitCode, const QProcess::ExitStatus exitStatus) {
                     const QString details = QString::fromLocal8Bit(extractor->readAllStandardError()).trimmed();
                     extractor->deleteLater();
+                    QFile::remove(archivePath);
                     if (exitStatus != QProcess::NormalExit || exitCode != 0)
                     {
                         QDir(stagingPath).removeRecursively();
-                        QMessageBox::warning(this, QStringLiteral("插件商城"), QStringLiteral("插件包解压失败：%1")
-                            .arg(details.isEmpty() ? QStringLiteral("PowerShell 退出码 %1").arg(exitCode) : details));
+                        QMessageBox errorBox(QMessageBox::Warning,
+                            QStringLiteral("插件商城"),
+                            QStringLiteral("插件包解压失败（退出码 %1）。").arg(exitCode),
+                            QMessageBox::Ok,
+                            this);
+                        if (!details.isEmpty()) errorBox.setDetailedText(details);
+                        errorBox.exec();
                         return;
                     }
 

@@ -655,7 +655,7 @@ void ProcessDetailWindow::initializePluginTab()
     layout->addWidget(titleLabel);
 
     auto* descriptionLabel = new QLabel(
-        QStringLiteral("选择插件后，Ksword 直接启动独立插件入口，并传递当前 PID、进程名和映像路径。"),
+        QStringLiteral("选择适用于当前进程的插件进行分析。"),
         m_pluginTab);
     descriptionLabel->setWordWrap(true);
     descriptionLabel->setStyleSheet(QStringLiteral("color:%1;").arg(KswordTheme::TextSecondaryHex()));
