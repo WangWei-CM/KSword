@@ -1,7 +1,31 @@
-<p align="center">
-  <img src="https://github.com/WangWei-CM/KSword/blob/main/Ksword5.1/Ksword5.1/Resource/Logo/MainLogo.png" alt="Ksword Logo" width="420" />
-  <img width="2560" height="1392" alt="image" src="https://github.com/user-attachments/assets/25a3b2e2-4ee0-49aa-bd90-ee6e3ba01fe4" />
-</p>
+<div align="center">
+
+  <img
+    src="./Ksword5.1/Ksword5.1/Resource/Logo/MainLogo.png"
+    alt="KSword ARK Logo"
+    width="520"
+  />
+
+  <a href="https://github.com/user-attachments/assets/25a3b2e2-4ee0-49aa-bd90-ee6e3ba01fe4">
+    <img
+      src="https://github.com/user-attachments/assets/25a3b2e2-4ee0-49aa-bd90-ee6e3ba01fe4"
+      alt="KSword ARK Dark Interface"
+      width="49%"
+    />
+  </a>
+  <a href="https://github.com/user-attachments/assets/217769a2-0521-41f9-9933-ca7c2fbb1d13">
+    <img
+      src="https://github.com/user-attachments/assets/217769a2-0521-41f9-9933-ca7c2fbb1d13"
+      alt="KSword ARK Light Interface"
+      width="49%"
+    />
+  </a>
+
+  <br>
+
+  <sub>深色模式 · Dark Mode　｜　浅色模式 · Light Mode</sub>
+
+</div>
 
 <h1 align="center">Ksword5.1</h1>
 <p align="center"><strong>全国最强开源 Windows ARK / 内核调试工具集</strong></p>
