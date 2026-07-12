@@ -95,8 +95,6 @@ private:
     {
         Time = 0,       // 抓包时间（毫秒精度）。
         Protocol,       // 协议（TCP/UDP）。
-        ApplicationProtocol, // nDPI 应用协议/服务。
-        ApplicationCategory, // nDPI 应用分类。
         Direction,      // 方向（Outbound/Inbound）。
         Pid,            // 归属进程 PID。
         ProcessName,    // 进程名（带图标）。

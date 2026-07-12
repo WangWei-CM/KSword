@@ -36,10 +36,6 @@
 // - TCP 连接终止（DELETE_TCB）。
 #include "network_connection_tools.h"
 
-// nDPI application-protocol classifier. The capture thread owns one stateful
-// instance and enriches PacketRecord before it reaches the UI.
-#include "network_ndpi.h"
-
 // 手动请求工具：
 // - 提供可配置的 Winsock 请求执行封装。
 #include "network_request_tools.h"
@@ -104,17 +100,6 @@ namespace ks::network
         std::uint32_t totalPacketSize = 0;    // IP 报文总长度（字节）。
         std::uint32_t payloadSize = 0;        // L4 负载长度（字节）。
         std::size_t payloadOffset = 0;        // 在 packetBytes 中 payload 起始偏移。
-
-        bool ndpiAvailable = false;           // nDPI 引擎是否成功初始化。
-        bool ndpiClassified = false;          // 当前流是否已有可用分类结果。
-        bool ndpiFinalResult = false;          // 当前结果是否为 nDPI 最终分类。
-        std::uint16_t ndpiMasterProtocolId = 0;// nDPI 主协议编号。
-        std::uint16_t ndpiApplicationProtocolId = 0;// nDPI 应用协议编号。
-        std::uint16_t ndpiCategoryId = 0;      // nDPI 分类编号。
-        std::string applicationProtocol = "Unknown"; // 应用层协议/服务名称。
-        std::string applicationCategory = "Unspecified"; // 应用类别。
-        std::string applicationBreed = "Unknown"; // nDPI breed（安全/风险倾向）。
-        std::string ndpiClassificationState = "Unavailable"; // 识别状态。
 
         bool localToLocalAmbiguous = false;   // true 表示源/目的都属于本机（本地环回或本机双地址通信），方向需后续二次判定。
         bool packetBytesTruncated = false;    // true 表示 packetBytes 被截断保存。
@@ -1794,7 +1779,6 @@ namespace ks::network
 
             detail::ConnectionPidResolver pidResolver;
             detail::ProcessNameResolver processNameResolver;
-            NdpiPacketClassifier ndpiClassifier;
             std::vector<std::uint8_t> receiveBuffer(65536, 0);
 
             // 抓包循环：select 等待 + recv 读取 + 解析 + 回调。
@@ -1897,23 +1881,6 @@ namespace ks::network
 
                         // captureTickMs 用途：同一原始报文衍生出的多条记录（本机双端点场景）共享同一采集时刻。
                         const std::uint64_t captureTickMs = detail::NowTickMs();
-
-                        // 应用层分类只对原始 L3 报文执行一次；本机双端点场景拆出的
-                        // Outbound/Inbound 记录随后复制同一结果，避免把同一包重复送入流状态机。
-                        const NdpiClassification ndpiResult = ndpiClassifier.ClassifyPacket(
-                            receiveBuffer.data(),
-                            static_cast<std::size_t>(receivedLength),
-                            captureTickMs);
-                        packetRecord.ndpiAvailable = ndpiResult.engineAvailable;
-                        packetRecord.ndpiClassified = ndpiResult.classified;
-                        packetRecord.ndpiFinalResult = ndpiResult.finalResult;
-                        packetRecord.ndpiMasterProtocolId = ndpiResult.masterProtocolId;
-                        packetRecord.ndpiApplicationProtocolId = ndpiResult.applicationProtocolId;
-                        packetRecord.ndpiCategoryId = ndpiResult.categoryId;
-                        packetRecord.applicationProtocol = ndpiResult.protocolName;
-                        packetRecord.applicationCategory = ndpiResult.categoryName;
-                        packetRecord.applicationBreed = ndpiResult.breedName;
-                        packetRecord.ndpiClassificationState = ndpiResult.stateName;
 
                         // finalizeAndEmitRecord 用途：
                         // - 为记录分配序号与时间戳；

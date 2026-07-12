@@ -578,9 +578,6 @@
     <ClCompile Include="ksword\network\network_format_tools.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="ksword\network\network_ndpi.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
     <ClCompile Include="ksword\network\network_nids.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -976,9 +973,6 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="ksword\network\network_format_tools.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="ksword\network\network_ndpi.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="ksword\network\network_nids.h">

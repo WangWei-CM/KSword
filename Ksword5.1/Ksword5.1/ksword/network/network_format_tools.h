@@ -83,8 +83,7 @@ namespace ks::network
         std::size_t bytesPerRow = 16);
 
     // BuildPacketCopyHeaderLine returns one metadata line for clipboard packet exports.
-    // The line contains sequence, timestamp, PID, transport/application protocols,
-    // nDPI category/state, direction, endpoints, and sizes.
+    // The line contains sequence, timestamp, PID, protocol, direction, endpoints, and sizes.
     [[nodiscard]] std::string BuildPacketCopyHeaderLine(const PacketRecord& packetRecord);
 
     // FormatIpv4HostOrder converts a host-order IPv4 integer into dotted decimal text.

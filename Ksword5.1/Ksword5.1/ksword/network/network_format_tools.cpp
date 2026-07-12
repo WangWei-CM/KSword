@@ -464,9 +464,6 @@ namespace ks::network
             << " | time=" << FormatUnixTimestampMs(packetRecord.captureTimestampMs, true)
             << " | pid=" << packetRecord.processId
             << " | protocol=" << PacketProtocolToString(packetRecord.protocol)
-            << " | application=" << packetRecord.applicationProtocol
-            << " | category=" << packetRecord.applicationCategory
-            << " | ndpi_state=" << packetRecord.ndpiClassificationState
             << " | direction=" << PacketDirectionToString(packetRecord.direction)
             << " | local=" << FormatEndpointText(packetRecord.localAddress, packetRecord.localPort)
             << " | remote=" << FormatEndpointText(packetRecord.remoteAddress, packetRecord.remotePort)
