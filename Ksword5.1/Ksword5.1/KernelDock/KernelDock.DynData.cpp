@@ -1,4 +1,5 @@
 #include "KernelDock.h"
+#include "../UI/VisibleTableWidget.h"
 
 #include "../ArkDriverClient/ArkDriverClient.h"
 #include "../UI/CodeEditorWidget.h"
@@ -2880,7 +2881,7 @@ void KernelDock::initializeDynDataTab()
     QSplitter* verticalSplitter = new QSplitter(Qt::Vertical, m_dynDataOverviewPage);
     m_dynDataOverviewLayout->addWidget(verticalSplitter, 1);
 
-    m_dynDataSummaryTable = new QTableWidget(verticalSplitter);
+    m_dynDataSummaryTable = new ks::ui::VisibleTableWidget(verticalSplitter);
     m_dynDataSummaryTable->setColumnCount(static_cast<int>(SummaryColumn::Count));
     m_dynDataSummaryTable->setHorizontalHeaderLabels(QStringList{ QStringLiteral("项目"), QStringLiteral("值") });
     m_dynDataSummaryTable->setSelectionMode(QAbstractItemView::NoSelection);
@@ -2898,7 +2899,7 @@ void KernelDock::initializeDynDataTab()
 
     QSplitter* lowerSplitter = new QSplitter(Qt::Horizontal, verticalSplitter);
 
-    m_dynDataFieldTable = new QTableWidget(lowerSplitter);
+    m_dynDataFieldTable = new ks::ui::VisibleTableWidget(lowerSplitter);
     m_dynDataFieldTable->setColumnCount(static_cast<int>(DynDataColumn::Count));
     m_dynDataFieldTable->setHorizontalHeaderLabels(QStringList{
         QStringLiteral("字段"),
@@ -2951,7 +2952,7 @@ void KernelDock::initializeDynDataTab()
     QSplitter* profileSplitter = new QSplitter(Qt::Vertical, m_dynDataProfilePage);
     m_dynDataProfileLayout->addWidget(profileSplitter, 1);
 
-    m_dynDataProfileSummaryTable = new QTableWidget(profileSplitter);
+    m_dynDataProfileSummaryTable = new ks::ui::VisibleTableWidget(profileSplitter);
     m_dynDataProfileSummaryTable->setColumnCount(2);
     m_dynDataProfileSummaryTable->setHorizontalHeaderLabels(QStringList{ QStringLiteral("项目"), QStringLiteral("值") });
     m_dynDataProfileSummaryTable->setSelectionMode(QAbstractItemView::NoSelection);
@@ -2965,7 +2966,7 @@ void KernelDock::initializeDynDataTab()
     m_dynDataProfileSummaryTable->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
     installDynDataCopyMenu(m_dynDataProfileSummaryTable);
 
-    m_dynDataV4ItemTable = new QTableWidget(profileSplitter);
+    m_dynDataV4ItemTable = new ks::ui::VisibleTableWidget(profileSplitter);
     m_dynDataV4ItemTable->setColumnCount(9);
     m_dynDataV4ItemTable->setHorizontalHeaderLabels(QStringList{
         QStringLiteral("模块"),

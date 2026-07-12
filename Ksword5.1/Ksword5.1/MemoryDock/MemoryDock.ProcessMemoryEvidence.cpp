@@ -1,4 +1,5 @@
 #include "MemoryDock.Internal.h"
+#include "../UI/VisibleTableWidget.h"
 #include "../UI/TableColumnAutoFit.h"
 
 using namespace ksword::memory_dock_internal;
@@ -347,7 +348,7 @@ void MemoryDock::initializeProcessMemoryEvidenceTab()
     QSplitter* splitter = new QSplitter(Qt::Vertical, m_tabProcessMemoryEvidence);
     tabLayout->addWidget(splitter, 1);
 
-    m_processMemoryEvidenceTable = new QTableWidget(splitter);
+    m_processMemoryEvidenceTable = new ks::ui::VisibleTableWidget(splitter);
     m_processMemoryEvidenceTable->setColumnCount(evidenceColumnIndex(ProcessMemoryEvidenceColumn::Count));
     m_processMemoryEvidenceTable->setHorizontalHeaderLabels(QStringList{
         QStringLiteral("VA"),

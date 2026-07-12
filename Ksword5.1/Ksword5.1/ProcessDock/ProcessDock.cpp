@@ -1,4 +1,5 @@
 #include "ProcessDock.h"
+#include "../UI/VisibleTableWidget.h"
 
 #include "../theme.h"
 #include "ProcessDetailWindow.h"
@@ -3956,7 +3957,7 @@ void ProcessDock::initializeProcessTable()
 {
     // 进程列表迁移到 QTableView + FlatTableModel：
     // - 行数据只保存在模型的轻量 ProcessTableRow 中；
-    // - 每轮刷新通过 setRows 批量替换快照，避免大量旧 item 创建/销毁；
+    // - 每轮刷新通过稳定行键增量发布删除/插入/重排/数据变化，避免 reset 整张表；
     // - 树状视图仍通过 Name 列缩进文本模拟，保持旧外观和交互语义。
     m_processTable = new QTableView(this);
     // 进程表刷新频率和行数都较高：
@@ -3995,6 +3996,17 @@ void ProcessDock::initializeProcessTable()
             return tableRow.rowKind == ProcessDock::ProcessTableRowKind::Process
                 ? (Qt::ItemIsEnabled | Qt::ItemIsSelectable)
                 : Qt::ItemIsEnabled;
+        },
+        [](const ProcessTableRow& tableRow) -> std::string
+        {
+            if (tableRow.rowKind == ProcessDock::ProcessTableRowKind::Process)
+            {
+                return std::string("process:") + tableRow.identityKey;
+            }
+            return std::string("synthetic:")
+                + std::to_string(static_cast<int>(tableRow.rowKind))
+                + ":"
+                + tableRow.expansionKey.toUtf8().toStdString();
         });
     m_processSortProxy = new ProcessTableSortProxy(this);
     m_processSortProxy->setSourceModel(m_processTableModel);
@@ -4423,7 +4435,7 @@ void ProcessDock::initializeCreateProcessPage()
     QGroupBox* tokenPrivilegeGroup = new QGroupBox("Token 特权调整（AdjustTokenPrivileges）", contentWidget);
     applyTransparentContainerStyle(tokenPrivilegeGroup);
     QVBoxLayout* tokenPrivilegeLayout = new QVBoxLayout(tokenPrivilegeGroup);
-    m_tokenPrivilegeTable = new QTableWidget(CommonPrivilegeNames.size(), 2, tokenPrivilegeGroup);
+    m_tokenPrivilegeTable = new ks::ui::VisibleTableWidget(CommonPrivilegeNames.size(), 2, tokenPrivilegeGroup);
     m_tokenPrivilegeTable->setHorizontalHeaderLabels(QStringList{ "Privilege", "Action" });
     m_tokenPrivilegeTable->horizontalHeader()->setStretchLastSection(true);
     m_tokenPrivilegeTable->verticalHeader()->setVisible(false);
@@ -5534,10 +5546,10 @@ void ProcessDock::requestAsyncRefresh(const bool forceRefresh)
         ? (isFirstRefresh ? 96 : 48)   // 详细视图也做预算控制，避免首轮全量静态查询导致 UI 抖动。
         : (isFirstRefresh ? 8 : 4);    // 监视视图优先速度，预算更小。
     const std::uint32_t cpuCount = m_logicalCpuCount;
-    const auto previousCache = m_cacheByIdentity;
-    const auto previousCounters = m_counterSampleByIdentity;
+    auto previousCache = m_cacheByIdentity;
+    auto previousCounters = m_counterSampleByIdentity;
     ensureProcessNetworkTrafficCaptureStarted();
-    const auto networkTrafficSnapshot = snapshotProcessNetworkTrafficCounters();
+    auto networkTrafficSnapshot = snapshotProcessNetworkTrafficCounters();
 
     // ticket 用于丢弃过期结果（防止乱序覆盖）。
     const std::uint64_t localTicket = ++m_refreshTicket;
@@ -5585,10 +5597,10 @@ void ProcessDock::requestAsyncRefresh(const bool forceRefresh)
         cpuCount,
         progressPid,
         forceUiRefresh,
-        previousCache,
-        previousCounters,
-        networkTrafficSnapshot]() mutable {
-        const ProcessDock::RefreshResult refreshResult = ProcessDock::buildRefreshResult(
+        previousCache = std::move(previousCache),
+        previousCounters = std::move(previousCounters),
+        networkTrafficSnapshot = std::move(networkTrafficSnapshot)]() mutable {
+        ProcessDock::RefreshResult refreshResult = ProcessDock::buildRefreshResult(
             strategyIndex,
             detailModeEnabled,
             queryKernelProcessList,
@@ -5606,7 +5618,11 @@ void ProcessDock::requestAsyncRefresh(const bool forceRefresh)
         }
 
         // 结果通过队列连接回主线程更新 UI。
-        QMetaObject::invokeMethod(guard, [guard, localTicket, refreshResult, forceUiRefresh]() {
+        QMetaObject::invokeMethod(guard, [
+            guard,
+            localTicket,
+            refreshResult = std::move(refreshResult),
+            forceUiRefresh]() mutable {
             if (guard == nullptr)
             {
                 return;
@@ -5619,7 +5635,7 @@ void ProcessDock::requestAsyncRefresh(const bool forceRefresh)
                 return;
             }
 
-            guard->applyRefreshResult(refreshResult, forceUiRefresh);
+            guard->applyRefreshResult(std::move(refreshResult), forceUiRefresh);
             guard->m_refreshInProgress = false;
         }, Qt::QueuedConnection);
     });
@@ -5628,7 +5644,7 @@ void ProcessDock::requestAsyncRefresh(const bool forceRefresh)
     QThreadPool::globalInstance()->start(backgroundTask);
 }
 
-void ProcessDock::applyRefreshResult(const RefreshResult& refreshResult, const bool forceUiRefresh)
+void ProcessDock::applyRefreshResult(RefreshResult refreshResult, const bool forceUiRefresh)
 {
     // 计算主线程观测耗时，用于“刷新状态标签”和日志输出。
     const auto nowTime = std::chrono::steady_clock::now();
@@ -5682,8 +5698,8 @@ void ProcessDock::applyRefreshResult(const RefreshResult& refreshResult, const b
     }
 
     // 用新结果替换缓存；表格重绘由独立“列表刷新(s)”节流，避免高频打点拖垮 UI。
-    m_cacheByIdentity = refreshResult.nextCache;
-    m_counterSampleByIdentity = refreshResult.nextCounters;
+    m_cacheByIdentity = std::move(refreshResult.nextCache);
+    m_counterSampleByIdentity = std::move(refreshResult.nextCounters);
 
     appendProcessActivitySample();
     if (isProcessActivityTableSnapshotActive())
@@ -6378,6 +6394,7 @@ void ProcessDock::rebuildTable()
     {
         return;
     }
+    const auto tableRebuildStartTime = std::chrono::steady_clock::now();
 
     if (isProcessActivityTableSnapshotActive())
     {
@@ -6497,7 +6514,7 @@ void ProcessDock::rebuildTable()
         tableRows.push_back(std::move(tableRow));
     }
 
-    // 刷新期间临时冻结视图和选择信号，减少 setRows/resetModel 的中间态重绘。
+    // 刷新期间临时冻结视图和选择信号，合并增量模型变更的中间态重绘。
     QSignalBlocker tableSignalBlocker(m_processTable);
     std::unique_ptr<QSignalBlocker> selectionSignalBlocker;
     if (QItemSelectionModel* selectionModel = m_processTable->selectionModel())
@@ -6506,8 +6523,13 @@ void ProcessDock::rebuildTable()
     }
     m_processTable->setUpdatesEnabled(false);
 
-    m_processTableModel->setRows(std::move(tableRows));
+    const auto modelApplyStartTime = std::chrono::steady_clock::now();
+    const ProcessTableModel::UpdateStats modelUpdateStats =
+        m_processTableModel->setRows(std::move(tableRows));
+    const auto modelApplyElapsedUs = std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now() - modelApplyStartTime).count();
 
+    const auto sortStartTime = std::chrono::steady_clock::now();
     m_processTable->setSortingEnabled(enableSorting);
     if (enableSorting)
     {
@@ -6528,6 +6550,8 @@ void ProcessDock::rebuildTable()
             headerView->setSortIndicator(m_friendlySortColumn, m_friendlySortOrder);
         }
     }
+    const auto sortElapsedUs = std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now() - sortStartTime).count();
 
     // 按 identityKey 恢复用户之前选中的进程：
     // - Ctrl 多选集合逐行用 Select|Rows 写回，避免刷新后丢失批量选择；
@@ -6601,6 +6625,8 @@ void ProcessDock::rebuildTable()
     // 表格重建完成后恢复刷新绘制。
     m_processTable->setUpdatesEnabled(true);
     m_processTable->viewport()->update();
+    const auto tableRebuildElapsedUs = std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now() - tableRebuildStartTime).count();
 
     // 重建完成后输出一条细粒度日志，便于分析 UI 刷新开销与排序状态。
     kLogEvent logEvent;
@@ -6610,6 +6636,13 @@ void ProcessDock::rebuildTable()
         << ", friendlyView=" << (isFriendlyViewEnabled() ? "true" : "false")
         << ", sortingEnabled=" << (enableSorting ? "true" : "false")
         << ", sortColumn=" << (enableSorting && headerView != nullptr ? headerView->sortIndicatorSection() : -1)
+        << ", modelInserted=" << modelUpdateStats.insertedRowCount
+        << ", modelRemoved=" << modelUpdateStats.removedRowCount
+        << ", modelReordered=" << (modelUpdateStats.orderChanged ? "true" : "false")
+        << ", modelReset=" << (modelUpdateStats.modelReset ? "true" : "false")
+        << ", modelApplyUs=" << modelApplyElapsedUs
+        << ", sortUs=" << sortElapsedUs
+        << ", totalUiRebuildUs=" << tableRebuildElapsedUs
         << eol;
 }
 
@@ -6693,7 +6726,7 @@ void ProcessDock::applyR0ColumnAvailability(const std::vector<DisplayRow>& displ
     const bool shouldAutoHide = !hasVisibleR0Extension;
     const bool stateChanged = (m_autoHideUnavailableR0Columns != shouldAutoHide);
     m_autoHideUnavailableR0Columns = shouldAutoHide;
-    if (!stateChanged && !shouldAutoHide)
+    if (!stateChanged)
     {
         return;
     }
@@ -6721,11 +6754,6 @@ void ProcessDock::applyR0ColumnAvailability(const std::vector<DisplayRow>& displ
     }
 
     applyAdaptiveColumnWidths();
-
-    if (!stateChanged)
-    {
-        return;
-    }
 
     kLogEvent logEvent;
     info << logEvent

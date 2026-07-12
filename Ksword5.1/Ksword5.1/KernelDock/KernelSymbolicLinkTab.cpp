@@ -1,4 +1,5 @@
 #include "KernelSymbolicLinkTab.h"
+#include "../UI/VisibleTableWidget.h"
 
 // ============================================================
 // KernelSymbolicLinkTab.cpp
@@ -117,7 +118,7 @@ void KernelSymbolicLinkTab::initializeUi()
     m_noteLabel->setStyleSheet(QStringLiteral("color:%1;").arg(KswordTheme::TextSecondaryHex()));
     rootLayout->addWidget(m_noteLabel, 0);
 
-    m_table = new QTableWidget(this);
+    m_table = new ks::ui::VisibleTableWidget(this);
     m_table->setColumnCount(static_cast<int>(Column::Count));
     m_table->setHorizontalHeaderLabels(QStringList{
         QStringLiteral("sourceDirectory"),

@@ -1,4 +1,5 @@
 #include "KernelDock.h"
+#include "../UI/VisibleTableWidget.h"
 
 #include "../ArkDriverClient/ArkDriverClient.h"
 #include "../OnlineScan/SandboxUploadActions.h"
@@ -1488,7 +1489,7 @@ void KernelDock::initializeShadowSsdtTab()
     QSplitter* splitter = new QSplitter(Qt::Vertical, m_shadowSsdtPage);
     m_shadowSsdtLayout->addWidget(splitter, 1);
 
-    m_shadowSsdtTable = new QTableWidget(splitter);
+    m_shadowSsdtTable = new ks::ui::VisibleTableWidget(splitter);
     m_shadowSsdtTable->setColumnCount(static_cast<int>(ShadowSsdtColumn::Count));
     m_shadowSsdtTable->setHorizontalHeaderLabels(QStringList{
         shadowSsdtColumnHeader(ShadowSsdtColumn::Index),
@@ -1576,7 +1577,7 @@ void KernelDock::initializeInlineHookTab()
     QSplitter* splitter = new QSplitter(Qt::Vertical, m_inlineHookPage);
     m_inlineHookLayout->addWidget(splitter, 1);
 
-    m_inlineHookTable = new QTableWidget(splitter);
+    m_inlineHookTable = new ks::ui::VisibleTableWidget(splitter);
     m_inlineHookTable->setColumnCount(static_cast<int>(InlineHookColumn::Count));
     m_inlineHookTable->setHorizontalHeaderLabels(QStringList{
         inlineHookColumnHeader(InlineHookColumn::Module),
@@ -1667,7 +1668,7 @@ void KernelDock::initializeIatEatHookTab()
     QSplitter* splitter = new QSplitter(Qt::Vertical, m_iatEatHookPage);
     m_iatEatHookLayout->addWidget(splitter, 1);
 
-    m_iatEatHookTable = new QTableWidget(splitter);
+    m_iatEatHookTable = new ks::ui::VisibleTableWidget(splitter);
     m_iatEatHookTable->setColumnCount(static_cast<int>(IatEatHookColumn::Count));
     m_iatEatHookTable->setHorizontalHeaderLabels(QStringList{
         iatEatColumnHeader(IatEatHookColumn::Class),

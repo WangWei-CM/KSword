@@ -1,4 +1,5 @@
 #include "KernelCommunicationEndpointTab.h"
+#include "../UI/VisibleTableWidget.h"
 
 // ============================================================
 // KernelCommunicationEndpointTab.cpp
@@ -98,7 +99,7 @@ void KernelCommunicationEndpointTab::initializeUi()
     toolbarLayout->addWidget(m_statusLabel, 0);
     rootLayout->addLayout(toolbarLayout);
 
-    m_table = new QTableWidget(this);
+    m_table = new ks::ui::VisibleTableWidget(this);
     m_table->setColumnCount(static_cast<int>(CommunicationEndpointColumn::Count));
     m_table->setHorizontalHeaderLabels(QStringList{
         QStringLiteral("来源目录"),

@@ -1,4 +1,5 @@
 #include "PrivilegeDock.h"
+#include "../UI/VisibleTableWidget.h"
 
 // ============================================================
 // PrivilegeDock.cpp
@@ -227,7 +228,7 @@ void PrivilegeDock::initializeAccountTab()
     m_accountToolbarLayout->addWidget(m_accountStatusLabel, 1);
     m_accountLayout->addLayout(m_accountToolbarLayout, 0);
 
-    m_accountTable = new QTableWidget(m_accountPage);
+    m_accountTable = new ks::ui::VisibleTableWidget(m_accountPage);
     m_accountTable->setColumnCount(4);
     m_accountTable->setHorizontalHeaderLabels({
         QStringLiteral("用户名"),
@@ -318,7 +319,7 @@ void PrivilegeDock::initializePermissionTab()
     m_permissionToolbarLayout->addWidget(m_permissionStatusLabel, 1);
     m_permissionLayout->addLayout(m_permissionToolbarLayout, 0);
 
-    m_permissionTable = new QTableWidget(m_permissionPage);
+    m_permissionTable = new ks::ui::VisibleTableWidget(m_permissionPage);
     m_permissionTable->setColumnCount(4);
     m_permissionTable->setHorizontalHeaderLabels({
         QStringLiteral("类型"),

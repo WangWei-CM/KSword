@@ -1,4 +1,5 @@
 #include "PluginHost.h"
+#include "UI/VisibleTableWidget.h"
 
 #include "theme.h"
 
@@ -884,7 +885,7 @@ namespace
             m_tabs = new QTabWidget(this);
             if (descriptor.visualization.enabled)
             {
-                m_resultTable = new QTableWidget(m_tabs);
+                m_resultTable = new ks::ui::VisibleTableWidget(m_tabs);
                 m_resultTable->setColumnCount(descriptor.visualization.columns.size());
                 QStringList labels;
                 for (const VisualizationField& field : descriptor.visualization.columns) labels.push_back(field.label);
@@ -1347,7 +1348,7 @@ namespace
             auto* tabWidget = new QTabWidget(this);
             auto* localPage = new QWidget(tabWidget);
             auto* localLayout = new QVBoxLayout(localPage);
-            m_table = new QTableWidget(this);
+            m_table = new ks::ui::VisibleTableWidget(this);
             m_table->setColumnCount(4);
             m_table->setHorizontalHeaderLabels(QStringList{ QStringLiteral("名称"), QStringLiteral("版本"), QStringLiteral("目标"), QStringLiteral("说明") });
             m_table->setEditTriggers(QAbstractItemView::NoEditTriggers);
@@ -1360,7 +1361,7 @@ namespace
 
             auto* marketplacePage = new QWidget(tabWidget);
             auto* marketplaceLayout = new QVBoxLayout(marketplacePage);
-            m_marketplaceTable = new QTableWidget(marketplacePage);
+            m_marketplaceTable = new ks::ui::VisibleTableWidget(marketplacePage);
             m_marketplaceTable->setColumnCount(5);
             m_marketplaceTable->setHorizontalHeaderLabels(QStringList{
                 QStringLiteral("名称"), QStringLiteral("版本"), QStringLiteral("目标"), QStringLiteral("许可证"), QStringLiteral("说明") });

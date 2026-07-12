@@ -1,4 +1,5 @@
 #include "VirusTotalOnlineScan.h"
+#include "../UI/VisibleTableWidget.h"
 
 #include "OnlineScanSupport.h"
 #include "../Framework.h"
@@ -2913,7 +2914,7 @@ void VirusTotalOnlineScan::ensureResultDialog()
                 QVBoxLayout* fileInfoLayout = new QVBoxLayout(fileInfoGroup);
                 fileInfoLayout->setContentsMargins(0, 2, 0, 2);
                 fileInfoLayout->setSpacing(0);
-                QTableWidget* fileInfoTable = new QTableWidget(fileInfoGroup);
+                QTableWidget* fileInfoTable = new ks::ui::VisibleTableWidget(fileInfoGroup);
                 fileInfoTable->setObjectName(QStringLiteral("vtFileInfoTable"));
                 fileInfoTable->setColumnCount(2);
                 configureBorderlessInfoTable(fileInfoTable);
@@ -2929,7 +2930,7 @@ void VirusTotalOnlineScan::ensureResultDialog()
 
                 QGroupBox* engineGroup = new QGroupBox(QStringLiteral("多引擎检测"), reportContent);
                 QVBoxLayout* engineLayout = new QVBoxLayout(engineGroup);
-                QTableWidget* engineTable = new QTableWidget(engineGroup);
+                QTableWidget* engineTable = new ks::ui::VisibleTableWidget(engineGroup);
                 engineTable->setColumnCount(4);
                 engineTable->setHorizontalHeaderLabels(QStringList()
                     << QStringLiteral("引擎")

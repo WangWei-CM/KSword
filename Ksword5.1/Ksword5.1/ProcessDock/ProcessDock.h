@@ -405,7 +405,7 @@ private:
 
     // ======== 刷新与渲染 ========
     void requestAsyncRefresh(bool forceRefresh);
-    void applyRefreshResult(const RefreshResult& refreshResult, bool forceUiRefresh);
+    void applyRefreshResult(RefreshResult refreshResult, bool forceUiRefresh);
     void rebuildTable();
     bool shouldRebuildProcessTableForRefresh(bool forceUiRefresh) const;
     void requestAsyncThreadRefresh(bool forceRefresh);

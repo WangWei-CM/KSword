@@ -1,4 +1,5 @@
 #include "ContextMenuCleanerTab.h"
+#include "../../UI/VisibleTableWidget.h"
 
 #include "ContextMenuCleanerTab.Internal.h"
 #include "../../theme.h"
@@ -100,7 +101,7 @@ void ContextMenuCleanerTab::createAreaPage(const MenuArea area)
     toolbarLayout->addWidget(areaWidgets->copyButton);
     toolbarLayout->addWidget(areaWidgets->filterEdit, 1);
 
-    areaWidgets->table = new QTableWidget(areaWidgets->page);
+    areaWidgets->table = new ks::ui::VisibleTableWidget(areaWidgets->page);
     areaWidgets->table->setColumnCount(kColumnCount);
     areaWidgets->table->setHorizontalHeaderLabels(QStringList{
         QStringLiteral("名称"),

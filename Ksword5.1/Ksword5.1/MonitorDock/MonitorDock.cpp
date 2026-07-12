@@ -1,5 +1,6 @@
 
 #include "MonitorDock.h"
+#include "../UI/VisibleTableWidget.h"
 #include "DirectKernelCallMonitorWidget.h"
 #include "MonitorTextViewer.h"
 #include "ProcessTraceMonitorWidget.h"
@@ -4872,7 +4873,7 @@ void MonitorDock::initializeWmiTab()
     m_wmiEventClassControlLayout->addWidget(m_wmiSelectNoneClassesButton);
     m_wmiEventClassControlLayout->addWidget(m_wmiSelectWin32ClassesButton);
 
-    m_wmiEventClassTable = new QTableWidget(m_wmiSubscribePanel);
+    m_wmiEventClassTable = new ks::ui::VisibleTableWidget(m_wmiSubscribePanel);
     m_wmiEventClassTable->setColumnCount(3);
     m_wmiEventClassTable->setHorizontalHeaderLabels(QStringList{
         QStringLiteral("启用"),
@@ -4974,7 +4975,7 @@ void MonitorDock::initializeWmiTab()
     m_wmiLayout->addWidget(m_wmiTopConfigPanel, 0);
 
     // 结果表。
-    m_wmiEventTable = new QTableWidget(m_wmiPage);
+    m_wmiEventTable = new ks::ui::VisibleTableWidget(m_wmiPage);
     m_wmiEventTable->setColumnCount(5);
     m_wmiEventTable->setHorizontalHeaderLabels(QStringList{
         QStringLiteral("时间戳(ms)"),
@@ -5292,7 +5293,7 @@ void MonitorDock::initializeEtwTab()
     m_etwSessionControlLayout->addWidget(m_etwSessionStatusLabel);
     m_etwSessionPanelLayout->addLayout(m_etwSessionControlLayout);
 
-    m_etwSessionTable = new QTableWidget(m_etwSessionPanel);
+    m_etwSessionTable = new ks::ui::VisibleTableWidget(m_etwSessionPanel);
     m_etwSessionTable->setColumnCount(5);
     m_etwSessionTable->setHorizontalHeaderLabels(QStringList{
         QStringLiteral("会话名"),
@@ -5433,7 +5434,7 @@ void MonitorDock::initializeEtwTab()
     m_etwLayout->addWidget(m_etwTimelineWidget, 0);
 
     // 结果表。
-    m_etwEventTable = new QTableWidget(m_etwPage);
+    m_etwEventTable = new ks::ui::VisibleTableWidget(m_etwPage);
     m_etwEventTable->setColumnCount(7);
     m_etwEventTable->setHorizontalHeaderLabels(QStringList{
         QStringLiteral("时间戳(100ns)"),

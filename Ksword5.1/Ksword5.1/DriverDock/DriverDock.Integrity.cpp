@@ -1,4 +1,5 @@
 #include "DriverDock.Internal.h"
+#include "../UI/VisibleTableWidget.h"
 #include "../UI/TableColumnAutoFit.h"
 
 #include <QPointer>
@@ -481,7 +482,7 @@ void DriverDock::initializeIntegrityTab()
     QSplitter* splitter = new QSplitter(Qt::Vertical, m_integrityPage);
     m_integrityLayout->addWidget(splitter, 1);
 
-    m_integrityTable = new QTableWidget(splitter);
+    m_integrityTable = new ks::ui::VisibleTableWidget(splitter);
     m_integrityTable->setColumnCount(integrityColumnIndex(IntegrityColumn::Count));
     m_integrityTable->setHorizontalHeaderLabels(QStringList{
         QStringLiteral("类别"),

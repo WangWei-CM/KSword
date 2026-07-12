@@ -1,4 +1,5 @@
 #include "NetworkDock.InternalCommon.h"
+#include "../UI/VisibleTableWidget.h"
 
 // ============================================================
 // NetworkDock.MultiThreadDownload.cpp
@@ -828,7 +829,7 @@ void NetworkDock::initializeMultiThreadDownloadTab()
     captureSettingsLayout->addWidget(captureHintLabel, 2, 0, 1, 3);
     m_multiThreadDownloadLayout->addWidget(captureSettingsGroup);
 
-    m_multiDownloadTaskTable = new QTableWidget(m_multiThreadDownloadPage);
+    m_multiDownloadTaskTable = new ks::ui::VisibleTableWidget(m_multiThreadDownloadPage);
     m_multiDownloadTaskTable->setColumnCount(MultiDownloadTaskColumnCount);
     m_multiDownloadTaskTable->setHorizontalHeaderLabels({
         QStringLiteral("任务ID"),
@@ -862,7 +863,7 @@ void NetworkDock::initializeMultiThreadDownloadTab()
     m_multiDownloadTotalProgressLabel = new QLabel(QStringLiteral("总进度：0.00%"), m_multiThreadDownloadPage);
     m_multiThreadDownloadLayout->addWidget(m_multiDownloadTotalProgressLabel);
 
-    m_multiDownloadSegmentTable = new QTableWidget(m_multiThreadDownloadPage);
+    m_multiDownloadSegmentTable = new ks::ui::VisibleTableWidget(m_multiThreadDownloadPage);
     m_multiDownloadSegmentTable->setColumnCount(MultiDownloadSegmentColumnCount);
     m_multiDownloadSegmentTable->setHorizontalHeaderLabels({
         QStringLiteral("分段"),

@@ -1,5 +1,6 @@
 
 #include "KernelDeviceDriverObjectsTab.h"
+#include "../UI/VisibleTableWidget.h"
 
 // ============================================================
 // KernelDeviceDriverObjectsTab.cpp
@@ -200,7 +201,7 @@ void KernelDeviceDriverObjectsTab::initializeUi()
     filterLayout->addWidget(m_keywordEdit, 1);
     m_rootLayout->addWidget(m_filterWidget, 0);
 
-    m_tableWidget = new QTableWidget(this);
+    m_tableWidget = new ks::ui::VisibleTableWidget(this);
     m_tableWidget->setColumnCount(7);
     m_tableWidget->setHorizontalHeaderLabels({
         QStringLiteral("目录路径"),

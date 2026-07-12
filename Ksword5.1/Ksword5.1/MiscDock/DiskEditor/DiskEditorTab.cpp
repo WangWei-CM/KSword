@@ -1,4 +1,5 @@
 #include "DiskEditorTab.h"
+#include "../../UI/VisibleTableWidget.h"
 
 // ============================================================
 // DiskEditorTab.cpp
@@ -256,7 +257,7 @@ namespace
     // - 返回 QTableWidget 指针，所有权交给 parent。
     QTableWidget* createReadOnlyTable(QWidget* parent, const QStringList& headers)
     {
-        QTableWidget* table = new QTableWidget(parent);
+        QTableWidget* table = new ks::ui::VisibleTableWidget(parent);
         table->setColumnCount(headers.size());
         table->setHorizontalHeaderLabels(headers);
         table->setSelectionBehavior(QAbstractItemView::SelectRows);
@@ -427,7 +428,7 @@ namespace ks::misc
         m_diskMapWidget = new DiskMapWidget(leftPanel);
         leftLayout->addWidget(m_diskMapWidget, 0);
 
-        m_partitionTable = new QTableWidget(leftPanel);
+        m_partitionTable = new ks::ui::VisibleTableWidget(leftPanel);
         m_partitionTable->setColumnCount(7);
         m_partitionTable->setHorizontalHeaderLabels({
             QStringLiteral("#"),

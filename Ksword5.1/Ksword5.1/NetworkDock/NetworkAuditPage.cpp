@@ -1,4 +1,5 @@
 #include "NetworkAuditPage.h"
+#include "../UI/VisibleTableWidget.h"
 
 // ============================================================
 // NetworkAuditPage.cpp
@@ -643,7 +644,7 @@ void NetworkAuditPage::initializeUi()
     m_crossViewSplitter = new QSplitter(Qt::Vertical, m_crossViewPage);
     m_crossViewTopSplitter = new QSplitter(Qt::Horizontal, m_crossViewSplitter);
 
-    m_tcpTable = new QTableWidget(m_crossViewTopSplitter);
+    m_tcpTable = new ks::ui::VisibleTableWidget(m_crossViewTopSplitter);
     m_tcpTable->setColumnCount(6);
     m_tcpTable->setHorizontalHeaderLabels({
         QStringLiteral("PID"),
@@ -661,7 +662,7 @@ void NetworkAuditPage::initializeUi()
     m_tcpTable->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
     installCopyMenu(m_tcpTable);
 
-    m_udpTable = new QTableWidget(m_crossViewTopSplitter);
+    m_udpTable = new ks::ui::VisibleTableWidget(m_crossViewTopSplitter);
     m_udpTable->setColumnCount(5);
     m_udpTable->setHorizontalHeaderLabels({
         QStringLiteral("PID"),
@@ -678,7 +679,7 @@ void NetworkAuditPage::initializeUi()
     m_udpTable->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
     installCopyMenu(m_udpTable);
 
-    m_crossSummaryTable = new QTableWidget(m_crossViewSplitter);
+    m_crossSummaryTable = new ks::ui::VisibleTableWidget(m_crossViewSplitter);
     m_crossSummaryTable->setColumnCount(5);
     m_crossSummaryTable->setHorizontalHeaderLabels({ QStringLiteral("PID"), QStringLiteral("进程"), QStringLiteral("TCP"), QStringLiteral("UDP"), QStringLiteral("摘要") });
     m_crossSummaryTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
@@ -701,7 +702,7 @@ void NetworkAuditPage::initializeUi()
     QVBoxLayout* afdLayout = new QVBoxLayout(m_afdPage);
     afdLayout->setContentsMargins(4, 4, 4, 4);
     afdLayout->setSpacing(6);
-    m_afdTable = new QTableWidget(m_afdPage);
+    m_afdTable = new ks::ui::VisibleTableWidget(m_afdPage);
     m_afdTable->setColumnCount(8);
     m_afdTable->setHorizontalHeaderLabels({
         QStringLiteral("PID"),
@@ -734,7 +735,7 @@ void NetworkAuditPage::initializeUi()
 
     auto buildWfpTable = [](QWidget* parent, const QStringList& headers) -> QTableWidget*
     {
-        QTableWidget* table = new QTableWidget(parent);
+        QTableWidget* table = new ks::ui::VisibleTableWidget(parent);
         table->setColumnCount(headers.size());
         table->setHorizontalHeaderLabels(headers);
         table->setEditTriggers(QAbstractItemView::NoEditTriggers);
@@ -777,7 +778,7 @@ void NetworkAuditPage::initializeUi()
     QVBoxLayout* nsiLayout = new QVBoxLayout(m_nsiPage);
     nsiLayout->setContentsMargins(4, 4, 4, 4);
     nsiLayout->setSpacing(6);
-    m_nsiSummaryTable = new QTableWidget(m_nsiPage);
+    m_nsiSummaryTable = new ks::ui::VisibleTableWidget(m_nsiPage);
     m_nsiSummaryTable->setColumnCount(5);
     m_nsiSummaryTable->setHorizontalHeaderLabels({
         QStringLiteral("指标"),

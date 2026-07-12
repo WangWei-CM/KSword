@@ -6,6 +6,9 @@
 
 #include <cstddef>
 #include <functional>
+#include <string>
+#include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -33,6 +36,20 @@ namespace ks::ui
         // - 进程友好视图会用它让分类标题和应用聚合行不可选，避免误触发进程动作。
         using FlagsResolver = std::function<Qt::ItemFlags(const RowType& row, int column)>;
 
+        // KeyResolver 作用：
+        // - 为支持增量更新的长表返回稳定且唯一的行键；
+        // - 未提供时保持原有 reset 模式，适配日志这类没有稳定 identity 的快照。
+        using KeyResolver = std::function<std::string(const RowType& row)>;
+
+        struct UpdateStats
+        {
+            int insertedRowCount = 0;
+            int removedRowCount = 0;
+            int updatedRowCount = 0;
+            bool orderChanged = false;
+            bool modelReset = false;
+        };
+
         // ColumnSpec 作用：
         // - 保存横向表头文本和默认对齐方式；
         // - 真正的数据由 DataResolver 提供。
@@ -49,23 +66,28 @@ namespace ks::ui
             std::vector<ColumnSpec> columns,
             DataResolver resolver,
             QObject* parent = nullptr,
-            FlagsResolver flagsResolver = FlagsResolver())
+            FlagsResolver flagsResolver = FlagsResolver(),
+            KeyResolver keyResolver = KeyResolver())
             : QAbstractTableModel(parent)
             , m_columns(std::move(columns))
             , m_dataResolver(std::move(resolver))
             , m_flagsResolver(std::move(flagsResolver))
+            , m_keyResolver(std::move(keyResolver))
         {
         }
 
         // setRows 作用：
         // - 用一批新行替换当前快照；
-        // - 调用 beginResetModel/endResetModel 让视图一次性刷新。
+        // - 有稳定键时按删除/插入/layout/dataChanged 增量发布；
+        // - 没有稳定键或键重复时回退 beginResetModel/endResetModel。
         // 参数 rows：新的可见行集合。
-        void setRows(std::vector<RowType> rows)
+        UpdateStats setRows(std::vector<RowType> rows)
         {
-            beginResetModel();
-            m_rows = std::move(rows);
-            endResetModel();
+            if (!m_keyResolver)
+            {
+                return resetRows(std::move(rows));
+            }
+            return setRowsIncrementally(std::move(rows));
         }
 
         // clearRows 作用：
@@ -194,6 +216,152 @@ namespace ks::ui
         std::vector<ColumnSpec> m_columns;  // m_columns：固定横向列定义。
         DataResolver m_dataResolver;        // m_dataResolver：单元格角色解析器。
         FlagsResolver m_flagsResolver;      // m_flagsResolver：可选行 flags 解析器，未设置时保持默认可选。
+        KeyResolver m_keyResolver;          // m_keyResolver：可选稳定行键，启用按键增量更新。
         std::vector<RowType> m_rows;        // m_rows：当前可见行快照。
+
+        UpdateStats resetRows(std::vector<RowType> rows)
+        {
+            UpdateStats stats;
+            stats.updatedRowCount = static_cast<int>(rows.size());
+            stats.modelReset = true;
+            beginResetModel();
+            m_rows = std::move(rows);
+            endResetModel();
+            return stats;
+        }
+
+        bool collectUniqueKeys(
+            const std::vector<RowType>& rows,
+            std::vector<std::string>& keyList,
+            std::unordered_set<std::string>& keySet) const
+        {
+            keyList.clear();
+            keySet.clear();
+            keyList.reserve(rows.size());
+            keySet.reserve(rows.size());
+            for (const RowType& row : rows)
+            {
+                std::string key = m_keyResolver(row);
+                if (key.empty() || !keySet.insert(key).second)
+                {
+                    return false;
+                }
+                keyList.push_back(std::move(key));
+            }
+            return true;
+        }
+
+        UpdateStats setRowsIncrementally(std::vector<RowType> rows)
+        {
+            std::vector<std::string> newKeys;
+            std::unordered_set<std::string> newKeySet;
+            std::vector<std::string> oldKeys;
+            std::unordered_set<std::string> oldKeySet;
+            if (!collectUniqueKeys(rows, newKeys, newKeySet) ||
+                !collectUniqueKeys(m_rows, oldKeys, oldKeySet))
+            {
+                return resetRows(std::move(rows));
+            }
+
+            UpdateStats stats;
+
+            // 先按连续区间删除新快照中已经不存在的键。倒序处理保证剩余行号稳定。
+            for (int lastRow = static_cast<int>(m_rows.size()) - 1; lastRow >= 0;)
+            {
+                const std::string& key = oldKeys[static_cast<std::size_t>(lastRow)];
+                if (newKeySet.find(key) != newKeySet.end())
+                {
+                    --lastRow;
+                    continue;
+                }
+
+                int firstRow = lastRow;
+                while (firstRow > 0 &&
+                    newKeySet.find(oldKeys[static_cast<std::size_t>(firstRow - 1)]) == newKeySet.end())
+                {
+                    --firstRow;
+                }
+                beginRemoveRows(QModelIndex(), firstRow, lastRow);
+                m_rows.erase(m_rows.begin() + firstRow, m_rows.begin() + lastRow + 1);
+                oldKeys.erase(oldKeys.begin() + firstRow, oldKeys.begin() + lastRow + 1);
+                endRemoveRows();
+                stats.removedRowCount += lastRow - firstRow + 1;
+                lastRow = firstRow - 1;
+            }
+
+            // 新键先追加到末尾，随后通过一次 layout 变更放到最终位置。
+            oldKeySet.clear();
+            oldKeySet.insert(oldKeys.cbegin(), oldKeys.cend());
+            std::vector<std::size_t> insertedNewRowIndexes;
+            for (std::size_t newRow = 0; newRow < newKeys.size(); ++newRow)
+            {
+                if (oldKeySet.find(newKeys[newRow]) != oldKeySet.end())
+                {
+                    continue;
+                }
+                insertedNewRowIndexes.push_back(newRow);
+                oldKeySet.insert(newKeys[newRow]);
+            }
+            if (!insertedNewRowIndexes.empty())
+            {
+                const int firstInsertRow = static_cast<int>(m_rows.size());
+                const int lastInsertRow = firstInsertRow + static_cast<int>(insertedNewRowIndexes.size()) - 1;
+                beginInsertRows(QModelIndex(), firstInsertRow, lastInsertRow);
+                for (const std::size_t newRow : insertedNewRowIndexes)
+                {
+                    m_rows.push_back(rows[newRow]);
+                    oldKeys.push_back(newKeys[newRow]);
+                }
+                endInsertRows();
+                stats.insertedRowCount = static_cast<int>(insertedNewRowIndexes.size());
+            }
+
+            stats.orderChanged = (oldKeys != newKeys);
+            if (stats.orderChanged)
+            {
+                std::unordered_map<std::string, int> newRowByKey;
+                newRowByKey.reserve(newKeys.size());
+                for (int row = 0; row < static_cast<int>(newKeys.size()); ++row)
+                {
+                    newRowByKey.emplace(newKeys[static_cast<std::size_t>(row)], row);
+                }
+
+                const QModelIndexList oldPersistentIndexes = persistentIndexList();
+                QModelIndexList newPersistentIndexes;
+                newPersistentIndexes.reserve(oldPersistentIndexes.size());
+                for (const QModelIndex& oldIndex : oldPersistentIndexes)
+                {
+                    if (!oldIndex.isValid() || oldIndex.row() < 0 ||
+                        oldIndex.row() >= static_cast<int>(oldKeys.size()))
+                    {
+                        newPersistentIndexes.push_back(QModelIndex());
+                        continue;
+                    }
+                    const auto targetIt = newRowByKey.find(oldKeys[static_cast<std::size_t>(oldIndex.row())]);
+                    newPersistentIndexes.push_back(
+                        targetIt == newRowByKey.end()
+                        ? QModelIndex()
+                        : createIndex(targetIt->second, oldIndex.column()));
+                }
+
+                emit layoutAboutToBeChanged({}, QAbstractItemModel::VerticalSortHint);
+                m_rows = std::move(rows);
+                changePersistentIndexList(oldPersistentIndexes, newPersistentIndexes);
+                emit layoutChanged({}, QAbstractItemModel::VerticalSortHint);
+            }
+            else
+            {
+                m_rows = std::move(rows);
+            }
+
+            stats.updatedRowCount = static_cast<int>(m_rows.size());
+            if (!m_rows.empty() && !m_columns.empty())
+            {
+                emit dataChanged(
+                    index(0, 0),
+                    index(static_cast<int>(m_rows.size()) - 1, static_cast<int>(m_columns.size()) - 1));
+            }
+            return stats;
+        }
     };
 }

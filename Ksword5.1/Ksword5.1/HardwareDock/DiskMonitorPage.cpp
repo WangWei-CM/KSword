@@ -1,4 +1,5 @@
 #include "DiskMonitorPage.h"
+#include "../UI/VisibleTableWidget.h"
 
 // ============================================================
 // DiskMonitorPage.cpp
@@ -840,7 +841,7 @@ void DiskMonitorPage::initializeUi()
     m_splitter = new QSplitter(Qt::Vertical, this);
     m_rootLayout->addWidget(m_splitter, 1);
 
-    m_processTable = new QTableWidget(this);
+    m_processTable = new ks::ui::VisibleTableWidget(this);
     configureTableWidget(m_processTable);
     m_processTable->setColumnCount(ProcessColumnCount);
     m_processTable->setHorizontalHeaderLabels({
@@ -861,7 +862,7 @@ void DiskMonitorPage::initializeUi()
     m_processTable->horizontalHeader()->setSectionResizeMode(ProcessColumnPath, QHeaderView::Stretch);
     m_splitter->addWidget(m_processTable);
 
-    m_activityTable = new QTableWidget(this);
+    m_activityTable = new ks::ui::VisibleTableWidget(this);
     configureTableWidget(m_activityTable);
     m_activityTable->setColumnCount(ActivityColumnCount);
     m_activityTable->setHorizontalHeaderLabels({

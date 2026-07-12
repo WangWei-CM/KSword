@@ -1,4 +1,5 @@
 #include "KernelDock.h"
+#include "../UI/VisibleTableWidget.h"
 
 #include "KernelDockSsdtWorker.h"
 #include "../UI/CodeEditorWidget.h"
@@ -156,7 +157,7 @@ void KernelDock::initializeSsdtTab()
     QSplitter* splitter = new QSplitter(Qt::Vertical, m_ssdtPage);
     m_ssdtLayout->addWidget(splitter, 1);
 
-    m_ssdtTable = new QTableWidget(splitter);
+    m_ssdtTable = new ks::ui::VisibleTableWidget(splitter);
     m_ssdtTable->setColumnCount(static_cast<int>(SsdtColumn::Count));
     m_ssdtTable->setHorizontalHeaderLabels(QStringList{
         QStringLiteral("索引"),

@@ -1,4 +1,5 @@
 #include "HardwareR0EvidencePage.h"
+#include "../UI/VisibleTableWidget.h"
 
 #include "../ArkDriverClient/ArkDriverClient.h"
 #include "../theme.h"
@@ -1035,7 +1036,7 @@ void HardwareR0EvidencePage::initializeUi()
     QSplitter* splitter = new QSplitter(Qt::Vertical, this);
     m_rootLayout->addWidget(splitter, 1);
 
-    m_evidenceTable = new QTableWidget(splitter);
+    m_evidenceTable = new ks::ui::VisibleTableWidget(splitter);
     m_evidenceTable->setColumnCount(columnIndex(R0EvidenceColumn::Count));
     m_evidenceTable->setHorizontalHeaderLabels(QStringList{
         QStringLiteral("类别"),

@@ -1,4 +1,5 @@
 #include "NetworkDock.InternalCommon.h"
+#include "../UI/VisibleTableWidget.h"
 
 #include "../UI/CodeEditorWidget.h"
 #include <QDir>
@@ -49,7 +50,7 @@ void NetworkDock::initializeArpCacheTab()
     m_arpCacheControlLayout->addWidget(m_arpStatusLabel, 1);
     m_arpCacheLayout->addLayout(m_arpCacheControlLayout);
 
-    m_arpTable = new QTableWidget(m_arpCachePage);
+    m_arpTable = new ks::ui::VisibleTableWidget(m_arpCachePage);
     m_arpTable->setColumnCount(4);
     m_arpTable->setHorizontalHeaderLabels({
         QStringLiteral("IPv4地址"),
@@ -105,7 +106,7 @@ void NetworkDock::initializeDnsCacheTab()
     m_dnsCacheControlLayout->addWidget(m_dnsStatusLabel, 1);
     m_dnsCacheLayout->addLayout(m_dnsCacheControlLayout);
 
-    m_dnsTable = new QTableWidget(m_dnsCachePage);
+    m_dnsTable = new ks::ui::VisibleTableWidget(m_dnsCachePage);
     m_dnsTable->setColumnCount(3);
     m_dnsTable->setHorizontalHeaderLabels({
         QStringLiteral("域名"),
@@ -177,7 +178,7 @@ void NetworkDock::initializeAliveHostScanTab()
     m_aliveScanStatusLabel = new QLabel(QStringLiteral("状态：待机"), m_aliveScanPage);
     m_aliveScanLayout->addWidget(m_aliveScanStatusLabel);
 
-    m_aliveScanTable = new QTableWidget(m_aliveScanPage);
+    m_aliveScanTable = new ks::ui::VisibleTableWidget(m_aliveScanPage);
     m_aliveScanTable->setColumnCount(4);
     m_aliveScanTable->setHorizontalHeaderLabels({
         QStringLiteral("IP"),

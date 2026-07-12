@@ -1,4 +1,5 @@
 #include "BootEditorTab.h"
+#include "../../UI/VisibleTableWidget.h"
 
 #include "../../theme.h"
 
@@ -228,7 +229,7 @@ void BootEditorTab::initializeCenterPane()
     m_rootLayout->addWidget(m_mainSplitter, 1);
 
     // 上方表格：展示当前 BCD 条目列表。
-    m_entryTable = new QTableWidget(m_mainSplitter);
+    m_entryTable = new ks::ui::VisibleTableWidget(m_mainSplitter);
     m_entryTable->setColumnCount(6);
     m_entryTable->setHorizontalHeaderLabels(QStringList{
         QStringLiteral("标识符"),

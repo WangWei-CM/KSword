@@ -1,4 +1,5 @@
 #include "NetworkDock.InternalCommon.h"
+#include "../UI/VisibleTableWidget.h"
 
 #include "../OnlineScan/SandboxUploadActions.h"
 #include "../theme.h"
@@ -168,7 +169,7 @@ void NetworkDock::initializeNidsTab()
     m_nidsControlLayout->addWidget(m_nidsStatusLabel, 1);
     m_nidsLayout->addLayout(m_nidsControlLayout);
 
-    m_nidsAlertTable = new QTableWidget(m_nidsPage);
+    m_nidsAlertTable = new ks::ui::VisibleTableWidget(m_nidsPage);
     m_nidsAlertTable->setColumnCount(toNidsAlertColumn(NidsAlertTableColumn::Count));
     m_nidsAlertTable->setHorizontalHeaderLabels({
         QStringLiteral("时间"),

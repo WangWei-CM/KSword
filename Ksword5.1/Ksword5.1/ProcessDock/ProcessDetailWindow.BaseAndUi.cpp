@@ -1,4 +1,5 @@
 #include "ProcessDetailWindow.InternalCommon.h"
+#include "../UI/VisibleTableWidget.h"
 #include "../PluginHost.h"
 
 using namespace process_detail_window_internal;
@@ -1130,7 +1131,7 @@ void ProcessDetailWindow::initializeThreadTab()
     // 线程表格：
     // - 继续沿用原有列定义和刷新逻辑；
     // - 仅把显示位置从“详细信息页底部”迁移到独立标签。
-    m_threadInspectTable = new QTableWidget(threadGroup);
+    m_threadInspectTable = new ks::ui::VisibleTableWidget(threadGroup);
     m_threadInspectTable->setColumnCount(toThreadColumnIndex(ThreadRowColumn::Count));
     m_threadInspectTable->setHorizontalHeaderLabels(ThreadInspectHeaders);
     m_threadInspectTable->setSelectionBehavior(QAbstractItemView::SelectRows);

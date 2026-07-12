@@ -1,4 +1,5 @@
 #include "KernelDock.h"
+#include "../UI/VisibleTableWidget.h"
 
 #include "../ArkDriverClient/ArkDriverClient.h"
 #include "../FileDock/FilePropertyPeAnalyzer.h"
@@ -1422,7 +1423,7 @@ void KernelDock::initializeCallbackEnumTab()
     QSplitter* splitter = new QSplitter(Qt::Vertical, m_callbackEnumPage);
     m_callbackEnumLayout->addWidget(splitter, 1);
 
-    m_callbackEnumTable = new QTableWidget(splitter);
+    m_callbackEnumTable = new ks::ui::VisibleTableWidget(splitter);
     m_callbackEnumTable->setColumnCount(static_cast<int>(CallbackEnumColumn::Count));
     m_callbackEnumTable->setHorizontalHeaderLabels(QStringList{
         QStringLiteral("类别"),

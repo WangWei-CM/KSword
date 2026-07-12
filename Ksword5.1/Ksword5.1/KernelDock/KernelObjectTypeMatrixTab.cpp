@@ -1,4 +1,5 @@
 #include "KernelObjectTypeMatrixTab.h"
+#include "../UI/VisibleTableWidget.h"
 
 // ============================================================
 // KernelObjectTypeMatrixTab.cpp
@@ -111,7 +112,7 @@ void KernelObjectTypeMatrixTab::initializeUi()
     toolbarLayout->addWidget(m_statusLabel, 0);
     rootLayout->addLayout(toolbarLayout);
 
-    m_table = new QTableWidget(this);
+    m_table = new ks::ui::VisibleTableWidget(this);
     m_table->setColumnCount(static_cast<int>(ObjectTypeMatrixColumn::Count));
     m_table->setHorizontalHeaderLabels(QStringList{
         QStringLiteral("类型编号"),

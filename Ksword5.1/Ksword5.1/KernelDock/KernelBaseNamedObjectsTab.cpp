@@ -1,4 +1,5 @@
 #include "KernelBaseNamedObjectsTab.h"
+#include "../UI/VisibleTableWidget.h"
 
 // ============================================================
 // KernelBaseNamedObjectsTab.cpp
@@ -222,7 +223,7 @@ void KernelBaseNamedObjectsTab::initializeUi()
     toolbarLayout->addWidget(m_statusLabel, 0);
     m_rootLayout->addLayout(toolbarLayout, 0);
 
-    m_table = new QTableWidget(this);
+    m_table = new ks::ui::VisibleTableWidget(this);
     m_table->setColumnCount(static_cast<int>(BaseNamedObjectsColumn::Count));
     m_table->setHorizontalHeaderLabels(QStringList{
         QStringLiteral("scope"),

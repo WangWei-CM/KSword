@@ -1,4 +1,5 @@
 #include "MemoryDock.Internal.h"
+#include "../UI/VisibleTableWidget.h"
 #include "../UI/TableColumnAutoFit.h"
 
 using namespace ksword::memory_dock_internal;
@@ -291,7 +292,7 @@ void MemoryDock::initializeProcessPteTranslateTab()
     QSplitter* splitter = new QSplitter(Qt::Vertical, m_tabProcessPteTranslate);
     tabLayout->addWidget(splitter, 1);
 
-    m_processPteTranslateTable = new QTableWidget(splitter);
+    m_processPteTranslateTable = new ks::ui::VisibleTableWidget(splitter);
     m_processPteTranslateTable->setColumnCount(pteTranslateColumnIndex(PteTranslateColumn::Count));
     m_processPteTranslateTable->setHorizontalHeaderLabels(QStringList{
         QStringLiteral("VA"),

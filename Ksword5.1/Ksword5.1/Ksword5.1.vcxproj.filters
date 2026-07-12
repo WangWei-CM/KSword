@@ -882,6 +882,9 @@
     <ClInclude Include="UI\TableColumnAutoFit.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="UI\VisibleTableWidget.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="ProcessDock\Process_Tool.h">
       <Filter>Header Files</Filter>
     </ClInclude>

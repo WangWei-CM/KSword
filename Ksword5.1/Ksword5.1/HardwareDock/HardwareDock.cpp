@@ -1,4 +1,5 @@
 #include "HardwareDock.h"
+#include "../UI/VisibleTableWidget.h"
 #include "DiskMonitorPage.h"
 #include "MemoryCompositionHistoryWidget.h"
 #include "HardwareR0EvidencePage.h"
@@ -570,7 +571,7 @@ namespace
     // - 返回：QTableWidget 指针，由 Qt 父子树释放。
     QTableWidget* createDeviceAuditTable(QWidget* parentWidget)
     {
-        QTableWidget* table = new QTableWidget(parentWidget);
+        QTableWidget* table = new ks::ui::VisibleTableWidget(parentWidget);
         const QStringList headers = hardwareDeviceAuditTableHeaders();
         table->setColumnCount(headers.size());
         table->setHorizontalHeaderLabels(headers);
@@ -3939,7 +3940,7 @@ void HardwareDock::initializeCpuTab()
         QStringLiteral("color:%1;font-weight:600;").arg(buildStatusColor().name()));
     m_cpuLayout->addWidget(m_cpuDetailLabel, 0);
 
-    m_cpuDetailTable = new QTableWidget(m_cpuPage);
+    m_cpuDetailTable = new ks::ui::VisibleTableWidget(m_cpuPage);
     m_cpuDetailTable->setColumnCount(7);
     m_cpuDetailTable->setHorizontalHeaderLabels({
         QStringLiteral("逻辑处理器"),

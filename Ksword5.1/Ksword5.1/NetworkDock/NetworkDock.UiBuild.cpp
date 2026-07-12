@@ -1,4 +1,5 @@
 #include "NetworkDock.InternalCommon.h"
+#include "../UI/VisibleTableWidget.h"
 #include "NetworkFirewallPage.h"
 #include "NetworkAuditPage.h"
 
@@ -180,7 +181,7 @@ void NetworkDock::initializeTrafficMonitorTab()
     m_trafficMonitorLayout->addWidget(m_packetTimelineWidget, 0);
 
     // 报文主表：展示“全部发送 UDP/TCP 包”。
-    m_packetTable = new QTableWidget(m_trafficMonitorPage);
+    m_packetTable = new ks::ui::VisibleTableWidget(m_trafficMonitorPage);
     m_packetTable->setColumnCount(toPacketColumn(PacketTableColumn::Count));
     m_packetTable->setHorizontalHeaderLabels({
         QStringLiteral("时间"),
@@ -265,7 +266,7 @@ void NetworkDock::initializeRateLimitTab()
     m_rateLimitLayout->addLayout(m_rateLimitControlLayout);
 
     // 规则表：展示 PID、阈值、触发计数、当前状态。
-    m_rateLimitTable = new QTableWidget(m_rateLimitPage);
+    m_rateLimitTable = new ks::ui::VisibleTableWidget(m_rateLimitPage);
     m_rateLimitTable->setColumnCount(toRateLimitColumn(RateLimitTableColumn::Count));
     m_rateLimitTable->setHorizontalHeaderLabels({
         QStringLiteral("PID"),
@@ -345,7 +346,7 @@ void NetworkDock::initializeConnectionManageTab()
     m_connectionManageLayout->addWidget(m_connectionSubTabWidget, 1);
 
     // TCP 表：状态、PID、进程、本地端点、远端端点。
-    m_tcpConnectionTable = new QTableWidget(m_connectionManagePage);
+    m_tcpConnectionTable = new ks::ui::VisibleTableWidget(m_connectionManagePage);
     m_tcpConnectionTable->setColumnCount(toTcpConnectionColumn(TcpConnectionTableColumn::Count));
     m_tcpConnectionTable->setHorizontalHeaderLabels({
         QStringLiteral("状态"),
@@ -364,7 +365,7 @@ void NetworkDock::initializeConnectionManageTab()
     m_connectionSubTabWidget->addTab(m_tcpConnectionTable, QIcon(":/Icon/process_main.svg"), QStringLiteral("TCP"));
 
     // UDP 表：PID、进程、本地端点。
-    m_udpEndpointTable = new QTableWidget(m_connectionManagePage);
+    m_udpEndpointTable = new ks::ui::VisibleTableWidget(m_connectionManagePage);
     m_udpEndpointTable->setColumnCount(toUdpEndpointColumn(UdpEndpointTableColumn::Count));
     m_udpEndpointTable->setHorizontalHeaderLabels({
         QStringLiteral("PID"),

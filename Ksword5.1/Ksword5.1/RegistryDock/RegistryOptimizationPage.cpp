@@ -1,4 +1,5 @@
 #include "RegistryOptimizationPage.h"
+#include "../UI/VisibleTableWidget.h"
 
 #include "../theme.h"
 #include "../UI/TableColumnAutoFit.h"
@@ -1166,7 +1167,7 @@ void RegistryOptimizationPage::initializeUi()
     rightLayout->setContentsMargins(0, 0, 0, 0);
     rightLayout->setSpacing(6);
 
-    m_itemTable = new QTableWidget(rightWidget);
+    m_itemTable = new ks::ui::VisibleTableWidget(rightWidget);
     m_itemTable->setColumnCount(7);
     m_itemTable->setHorizontalHeaderLabels(QStringList{
         QStringLiteral("项目"),

@@ -1,4 +1,5 @@
 #include "ProcessDock.h"
+#include "../UI/VisibleTableWidget.h"
 
 #include "../ArkDriverClient/ArkDriverClient.h"
 #include "../UI/CodeEditorWidget.h"
@@ -428,8 +429,8 @@ void ProcessDock::initializeCrossViewPage()
     m_crossViewPageLayout->addWidget(splitter, 1);
 
     QTabWidget* innerTabs = new QTabWidget(splitter);
-    m_processCrossViewTable = new QTableWidget(innerTabs);
-    m_threadCrossViewTable = new QTableWidget(innerTabs);
+    m_processCrossViewTable = new ks::ui::VisibleTableWidget(innerTabs);
+    m_threadCrossViewTable = new ks::ui::VisibleTableWidget(innerTabs);
     for (QTableWidget* table : { m_processCrossViewTable, m_threadCrossViewTable })
     {
         table->setColumnCount(columnIndex(CrossViewColumn::Count));

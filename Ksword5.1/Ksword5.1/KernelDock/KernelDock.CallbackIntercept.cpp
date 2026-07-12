@@ -1,4 +1,5 @@
 #include "KernelDock.h"
+#include "../UI/VisibleTableWidget.h"
 
 #include "KernelDock.CallbackIntercept.h"
 #include "KernelDock.CallbackPromptManager.h"
@@ -1519,7 +1520,7 @@ private:
         groupButtonLayout->addStretch(1);
         groupLayout->addLayout(groupButtonLayout, 0);
 
-        m_groupTable = new QTableWidget(groupPane);
+        m_groupTable = new ks::ui::VisibleTableWidget(groupPane);
         m_groupTable->setColumnCount(static_cast<int>(GroupColumn::Count));
         m_groupTable->setHorizontalHeaderLabels(QStringList{
             QStringLiteral("groupId"),
@@ -1629,7 +1630,7 @@ private:
         fileMonitorToolbar->addWidget(m_fileMonitorStatusLabel, 0);
         fileMonitorLayout->addLayout(fileMonitorToolbar, 0);
 
-        m_fileMonitorTable = new QTableWidget(fileMonitorFrame);
+        m_fileMonitorTable = new ks::ui::VisibleTableWidget(fileMonitorFrame);
         m_fileMonitorTable->setColumnCount(static_cast<int>(FileMonitorColumn::Count));
         m_fileMonitorTable->setHorizontalHeaderLabels(QStringList{
             QStringLiteral("时间"),
@@ -2043,7 +2044,7 @@ private:
         inputLayout->addWidget(m_minifilterBypassRefreshButton, 0);
         tabLayout->addLayout(inputLayout, 0);
 
-        m_minifilterBypassPidTable = new QTableWidget(tabPage);
+        m_minifilterBypassPidTable = new ks::ui::VisibleTableWidget(tabPage);
         m_minifilterBypassPidTable->setColumnCount(static_cast<int>(MinifilterBypassPidColumn::Count));
         m_minifilterBypassPidTable->setHorizontalHeaderLabels(QStringList{
             QStringLiteral("PID"),
@@ -2367,7 +2368,7 @@ private:
         tabLayout->setContentsMargins(0, 0, 0, 0);
         tabLayout->setSpacing(0);
 
-        auto* ruleTable = new QTableWidget(tabPage);
+        auto* ruleTable = new ks::ui::VisibleTableWidget(tabPage);
         ruleTable->setColumnCount(static_cast<int>(RuleColumn::Count));
         ruleTable->setHorizontalHeaderLabels(QStringList{
             QStringLiteral("启用"),

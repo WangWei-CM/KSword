@@ -1,4 +1,5 @@
 #include "WinAPIDock.h"
+#include "../UI/VisibleTableWidget.h"
 
 // ============================================================
 // WinAPIDock.Ui.cpp
@@ -411,7 +412,7 @@ void WinAPIDock::initializeUi()
     fakeButtonLayout->addStretch(1);
     fakeSuccessLayout->addLayout(fakeButtonLayout);
 
-    m_fakeRuleTable = new QTableWidget(fakeSuccessPanel);
+    m_fakeRuleTable = new ks::ui::VisibleTableWidget(fakeSuccessPanel);
     m_fakeRuleTable->setColumnCount(FakeRuleColumnCount);
     m_fakeRuleTable->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_fakeRuleTable->setSelectionMode(QAbstractItemView::SingleSelection);
@@ -476,7 +477,7 @@ void WinAPIDock::initializeUi()
     filterLayout->addWidget(m_eventFilterStatusLabel, 0);
     m_rootLayout->addWidget(m_filterPanel, 0);
 
-    m_eventTable = new QTableWidget(this);
+    m_eventTable = new ks::ui::VisibleTableWidget(this);
     m_eventTable->setColumnCount(EventColumnCount);
     m_eventTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_eventTable->setSelectionBehavior(QAbstractItemView::SelectRows);

@@ -1,4 +1,5 @@
 #include "WindowDock.h"
+#include "../UI/VisibleTableWidget.h"
 
 #include "../ArkDriverClient/ArkDriverClient.h"
 #include "../OnlineScan/SandboxUploadActions.h"
@@ -2444,7 +2445,7 @@ void WindowDock::initializeUi()
         presetLayout->addStretch(1);
         groupLayout->addLayout(presetLayout, 0);
 
-        QTableWidget* table = new QTableWidget(group);
+        QTableWidget* table = new ks::ui::VisibleTableWidget(group);
         table->setColumnCount(headers.size());
         table->setHorizontalHeaderLabels(headers);
         configureTable(table);

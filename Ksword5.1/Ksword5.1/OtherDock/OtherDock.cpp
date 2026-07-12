@@ -1,4 +1,5 @@
 #include "OtherDock.h"
+#include "../UI/VisibleTableWidget.h"
 
 // ============================================================
 // OtherDock.cpp
@@ -1686,7 +1687,7 @@ private:
         hookLayout->addLayout(monitorControlLayout);
 
         // 消息表：按行展示捕获数据，接近 Spy++ 的消息流视角。
-        m_messageTable = new QTableWidget(hookPage);
+        m_messageTable = new ks::ui::VisibleTableWidget(hookPage);
         m_messageTable->setColumnCount(8);
         m_messageTable->setHorizontalHeaderLabels(QStringList{
             QStringLiteral("时间"),
@@ -3098,7 +3099,7 @@ void OtherDock::initializeUi()
     m_desktopToolLayout->addWidget(m_desktopStatusLabel, 1);
     m_desktopPageLayout->addLayout(m_desktopToolLayout, 0);
 
-    m_desktopTable = new QTableWidget(m_desktopPage);
+    m_desktopTable = new ks::ui::VisibleTableWidget(m_desktopPage);
     m_desktopTable->setColumnCount(13);
     m_desktopTable->setHorizontalHeaderLabels({
         QStringLiteral("窗口站"),

@@ -424,6 +424,7 @@
     <ClInclude Include="theme.h" />
     <ClInclude Include="UI\FlatTableModel.h" />
     <ClInclude Include="UI\TableColumnAutoFit.h" />
+    <ClInclude Include="UI\VisibleTableWidget.h" />
     <ClInclude Include="UI\UI_All.h" />
     <QtMoc Include="DriverDock\DriverDock.h" />
     <ClInclude Include="DriverDock\DriverDock.Internal.h" />

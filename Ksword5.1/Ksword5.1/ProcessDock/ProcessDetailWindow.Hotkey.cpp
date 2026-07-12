@@ -1,4 +1,5 @@
 #include "ProcessDetailWindow.InternalCommon.h"
+#include "../UI/VisibleTableWidget.h"
 
 using namespace process_detail_window_internal;
 
@@ -1314,7 +1315,7 @@ void ProcessDetailWindow::initializeHotkeyTab()
     topBarLayout->addWidget(m_hotkeyStatusLabel, 1);
     hotkeyGroupLayout->addLayout(topBarLayout);
 
-    m_hotkeyTable = new QTableWidget(hotkeyGroup);
+    m_hotkeyTable = new ks::ui::VisibleTableWidget(hotkeyGroup);
     m_hotkeyTable->setColumnCount(9);
     m_hotkeyTable->setHorizontalHeaderLabels(QStringList{
         QStringLiteral("对象"),
@@ -1612,7 +1613,7 @@ void ProcessDetailWindow::initializeKeyboardTab()
     hotkeyLayout->setContentsMargins(0, 0, 0, 0);
     hookLayout->setContentsMargins(0, 0, 0, 0);
 
-    m_keyboardHotkeyTable = new QTableWidget(hotkeyPage);
+    m_keyboardHotkeyTable = new ks::ui::VisibleTableWidget(hotkeyPage);
     m_keyboardHotkeyTable->setColumnCount(9);
     m_keyboardHotkeyTable->setHorizontalHeaderLabels(QStringList{
         QStringLiteral("对象"),
@@ -1643,7 +1644,7 @@ void ProcessDetailWindow::initializeKeyboardTab()
     installHotkeyTableCopyMenu(m_keyboardHotkeyTable);
     hotkeyLayout->addWidget(m_keyboardHotkeyTable, 1);
 
-    m_keyboardHookTable = new QTableWidget(hookPage);
+    m_keyboardHookTable = new ks::ui::VisibleTableWidget(hookPage);
     m_keyboardHookTable->setColumnCount(10);
     m_keyboardHookTable->setHorizontalHeaderLabels(QStringList{
         QStringLiteral("对象"),

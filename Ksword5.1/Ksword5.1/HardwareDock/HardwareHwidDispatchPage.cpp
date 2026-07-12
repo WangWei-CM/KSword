@@ -1,4 +1,5 @@
 #include "HardwareHwidDispatchPage.h"
+#include "../UI/VisibleTableWidget.h"
 
 #include "../ArkDriverClient/ArkDriverClient.h"
 #include "../theme.h"
@@ -251,7 +252,7 @@ void HardwareHwidDispatchPage::initializeUi()
     buttonLayout->addStretch(1);
     m_rootLayout->addLayout(buttonLayout, 0);
 
-    m_statusTable = new QTableWidget(this);
+    m_statusTable = new ks::ui::VisibleTableWidget(this);
     m_statusTable->setColumnCount(7);
     m_statusTable->setHorizontalHeaderLabels(QStringList{
         QStringLiteral("目标"),

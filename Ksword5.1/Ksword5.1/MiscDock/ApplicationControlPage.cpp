@@ -1,4 +1,5 @@
 #include "ApplicationControlPage.h"
+#include "../UI/VisibleTableWidget.h"
 
 #include "../UI/CodeEditorWidget.h"
 
@@ -492,7 +493,7 @@ namespace ks::misc
         m_appLockerSummary->setText(QStringLiteral("AppLocker 摘要会在后台刷新后显示。"));
         m_appLockerSummary->setMaximumHeight(160);
 
-        m_appLockerTable = new QTableWidget(page);
+        m_appLockerTable = new ks::ui::VisibleTableWidget(page);
         initializeTable(m_appLockerTable, true);
 
         layout->addWidget(m_appLockerSummary, 0);
@@ -512,10 +513,10 @@ namespace ks::misc
         m_wdacSummary->setText(QStringLiteral("WDAC / Code Integrity 摘要会在后台刷新后显示。"));
         m_wdacSummary->setMaximumHeight(160);
 
-        m_policyFileTable = new QTableWidget(page);
+        m_policyFileTable = new ks::ui::VisibleTableWidget(page);
         initializeTable(m_policyFileTable, true);
 
-        m_codeIntegrityEventTable = new QTableWidget(page);
+        m_codeIntegrityEventTable = new ks::ui::VisibleTableWidget(page);
         initializeTable(m_codeIntegrityEventTable, true);
 
         layout->addWidget(m_wdacSummary, 0);
@@ -536,7 +537,7 @@ namespace ks::misc
         m_defenderSummary->setText(QStringLiteral("Defender 状态会在后台刷新后显示。"));
         m_defenderSummary->setMaximumHeight(160);
 
-        m_defenderTable = new QTableWidget(page);
+        m_defenderTable = new ks::ui::VisibleTableWidget(page);
         initializeTable(m_defenderTable, true);
 
         layout->addWidget(m_defenderSummary, 0);
@@ -556,7 +557,7 @@ namespace ks::misc
         m_platformSummary->setText(QStringLiteral("CI / VBS / Hyper-V / Driver Trust / BAM 摘要会在后台刷新后显示。"));
         m_platformSummary->setMaximumHeight(160);
 
-        m_platformTable = new QTableWidget(page);
+        m_platformTable = new ks::ui::VisibleTableWidget(page);
         initializeTable(m_platformTable, true);
 
         layout->addWidget(m_platformSummary, 0);
@@ -608,7 +609,7 @@ namespace ks::misc
         m_eventSummary->setText(QStringLiteral("Code Integrity 事件摘要会在后台刷新后显示。"));
         m_eventSummary->setMaximumHeight(150);
 
-        m_eventTable = new QTableWidget(page);
+        m_eventTable = new ks::ui::VisibleTableWidget(page);
         initializeTable(m_eventTable, true);
         m_eventTable->setMinimumHeight(220);
 
@@ -651,7 +652,7 @@ namespace ks::misc
         m_fileDiagnosisSummary->setText(QStringLiteral("文件诊断结果会在运行后显示。"));
         m_fileDiagnosisSummary->setMaximumHeight(180);
 
-        m_fileDiagnosisTable = new QTableWidget(page);
+        m_fileDiagnosisTable = new ks::ui::VisibleTableWidget(page);
         initializeTable(m_fileDiagnosisTable, true);
 
         layout->addWidget(inputRow, 0);

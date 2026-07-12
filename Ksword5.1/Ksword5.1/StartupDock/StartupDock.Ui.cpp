@@ -1,4 +1,5 @@
 #include "StartupDock.Internal.h"
+#include "../UI/VisibleTableWidget.h"
 
 #include <QColor>
 
@@ -30,7 +31,7 @@ namespace
     // - 供六个分类页复用。
     QTableWidget* createStartupTable(QWidget* parentWidget)
     {
-        QTableWidget* tableWidget = new QTableWidget(parentWidget);
+        QTableWidget* tableWidget = new ks::ui::VisibleTableWidget(parentWidget);
         tableWidget->setColumnCount(StartupDock::toStartupColumn(StartupDock::StartupColumn::Count));
         tableWidget->setHorizontalHeaderLabels({
             QStringLiteral("名称"),

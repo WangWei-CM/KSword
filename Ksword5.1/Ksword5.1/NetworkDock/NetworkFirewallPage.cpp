@@ -1,4 +1,5 @@
 #include "NetworkFirewallPage.h"
+#include "../UI/VisibleTableWidget.h"
 
 // ============================================================
 // NetworkFirewallPage.cpp
@@ -1122,7 +1123,7 @@ void NetworkFirewallPage::initializeEventMonitorUi()
     toolbarLayout->addWidget(m_dropOnlyCheck, 0);
     pageLayout->addLayout(toolbarLayout, 0);
 
-    m_eventTable = new QTableWidget(m_eventMonitorPage);
+    m_eventTable = new ks::ui::VisibleTableWidget(m_eventMonitorPage);
     m_eventTable->setColumnCount(ColumnCount);
     m_eventTable->setHorizontalHeaderLabels({
         QStringLiteral("Name"),
@@ -1201,7 +1202,7 @@ void NetworkFirewallPage::initializeRuleManagerUi()
     toolbarLayout->addWidget(m_ruleEnabledOnlyCheck, 0);
     pageLayout->addLayout(toolbarLayout, 0);
 
-    m_ruleTable = new QTableWidget(m_ruleManagerPage);
+    m_ruleTable = new ks::ui::VisibleTableWidget(m_ruleManagerPage);
     m_ruleTable->setColumnCount(RuleColumnCount);
     m_ruleTable->setHorizontalHeaderLabels({
         QStringLiteral("Name"),

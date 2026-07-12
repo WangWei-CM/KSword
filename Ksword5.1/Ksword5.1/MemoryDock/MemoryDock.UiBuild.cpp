@@ -1,4 +1,5 @@
 #include "MemoryDock.Internal.h"
+#include "../UI/VisibleTableWidget.h"
 
 // 说明：由原聚合式实现迁移为独立 .cpp，成员函数实现保持原样。
 using namespace ksword::memory_dock_internal;
@@ -230,7 +231,7 @@ void MemoryDock::initializeProcessModuleTab()
     processLayout->setSpacing(4);
     processLayout->addWidget(new QLabel("进程列表（双击自动附加）", processPanel));
 
-    m_processTable = new QTableWidget(processPanel);
+    m_processTable = new ks::ui::VisibleTableWidget(processPanel);
     m_processTable->setColumnCount(5);
     m_processTable->setHorizontalHeaderLabels(QStringList{ "进程名", "PID", "会话ID", "CPU(可选)", "工作集" });
     m_processTable->setSelectionBehavior(QAbstractItemView::SelectRows);
@@ -341,7 +342,7 @@ void MemoryDock::initializeMemoryRegionTab()
     filterLayout->addStretch(1);
     tabLayout->addLayout(filterLayout);
 
-    m_regionTable = new QTableWidget(m_tabRegions);
+    m_regionTable = new ks::ui::VisibleTableWidget(m_tabRegions);
     m_regionTable->setColumnCount(6);
     m_regionTable->setHorizontalHeaderLabels(QStringList{
         "基址", "大小", "保护属性", "状态", "类型", "映射文件"
@@ -478,7 +479,7 @@ void MemoryDock::initializeMemorySearchTab()
     compareLayout->addWidget(m_nextScanValueBEdit, 1);
     tabLayout->addWidget(compareGroup);
 
-    m_searchResultTable = new QTableWidget(m_tabSearch);
+    m_searchResultTable = new ks::ui::VisibleTableWidget(m_tabSearch);
     m_searchResultTable->setColumnCount(4);
     m_searchResultTable->setHorizontalHeaderLabels(QStringList{ "地址", "当前值", "前次值", "备注" });
     m_searchResultTable->setSelectionBehavior(QAbstractItemView::SelectRows);
@@ -584,7 +585,7 @@ void MemoryDock::initializeBreakpointBookmarkTab()
     bpButtonLayout->addStretch(1);
     breakpointLayout->addLayout(bpButtonLayout);
 
-    m_breakpointTable = new QTableWidget(breakpointPanel);
+    m_breakpointTable = new ks::ui::VisibleTableWidget(breakpointPanel);
     m_breakpointTable->setColumnCount(5);
     m_breakpointTable->setHorizontalHeaderLabels(QStringList{ "地址", "原字节", "状态", "命中次数", "描述" });
     m_breakpointTable->setSelectionBehavior(QAbstractItemView::SelectRows);
@@ -620,7 +621,7 @@ void MemoryDock::initializeBreakpointBookmarkTab()
     bmButtonLayout->addStretch(1);
     bookmarkLayout->addLayout(bmButtonLayout);
 
-    m_bookmarkTable = new QTableWidget(bookmarkPanel);
+    m_bookmarkTable = new ks::ui::VisibleTableWidget(bookmarkPanel);
     m_bookmarkTable->setColumnCount(4);
     m_bookmarkTable->setHorizontalHeaderLabels(QStringList{ "地址", "当前值", "备注", "添加时间" });
     m_bookmarkTable->setSelectionBehavior(QAbstractItemView::SelectRows);

@@ -1,4 +1,5 @@
 #include "DirectKernelCallMonitorWidget.h"
+#include "../UI/VisibleTableWidget.h"
 
 // ============================================================
 // DirectKernelCallMonitorWidget.cpp
@@ -804,7 +805,7 @@ void DirectKernelCallMonitorWidget::initializeUi()
     filterLayout->addWidget(m_filterStatusLabel, 2, 3, 1, 3);
     m_rootLayout->addWidget(m_filterPanel, 0);
 
-    m_eventTable = new QTableWidget(this);
+    m_eventTable = new ks::ui::VisibleTableWidget(this);
     m_eventTable->setColumnCount(EventColumnCount);
     m_eventTable->setHorizontalHeaderLabels(QStringList{
         QStringLiteral("时间(100ns)"),

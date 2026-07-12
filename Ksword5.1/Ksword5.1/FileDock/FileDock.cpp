@@ -1,4 +1,5 @@
 #include "FileDock.h"
+#include "../UI/VisibleTableWidget.h"
 #include "FilePropertyPeAnalyzer.h"
 #include "FileHandleUsageScanner.h"
 
@@ -2374,7 +2375,7 @@ namespace
         rootLayout->addLayout(modeLayout);
 
         QStackedWidget* const tableStack = new QStackedWidget(&dialog);
-        QTableWidget* const handleTable = new QTableWidget(static_cast<int>(handleCandidateList.size()), 7, &dialog);
+        QTableWidget* const handleTable = new ks::ui::VisibleTableWidget(static_cast<int>(handleCandidateList.size()), 7, &dialog);
         handleTable->setHorizontalHeaderLabels(QStringList{
             QStringLiteral("选择"),
             QStringLiteral("PID"),
@@ -2390,7 +2391,7 @@ namespace
         handleTable->horizontalHeader()->setStretchLastSection(true);
         installFileTableCopyMenu(handleTable);
 
-        QTableWidget* const processTable = new QTableWidget(static_cast<int>(processCandidateList.size()), 6, &dialog);
+        QTableWidget* const processTable = new ks::ui::VisibleTableWidget(static_cast<int>(processCandidateList.size()), 6, &dialog);
         processTable->setHorizontalHeaderLabels(QStringList{
             QStringLiteral("选择"),
             QStringLiteral("PID"),
@@ -5688,7 +5689,7 @@ namespace
             layout->addWidget(statusLabel, 0);
 
             QSplitter* splitter = new QSplitter(Qt::Vertical, page);
-            QTableWidget* aceTable = new QTableWidget(splitter);
+            QTableWidget* aceTable = new ks::ui::VisibleTableWidget(splitter);
             aceTable->setColumnCount(9);
             aceTable->setHorizontalHeaderLabels(QStringList{
                 QStringLiteral("范围"),
@@ -6162,7 +6163,7 @@ namespace
             statusLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
             layout->addWidget(statusLabel, 0);
 
-            QTableWidget* table = new QTableWidget(page);
+            QTableWidget* table = new ks::ui::VisibleTableWidget(page);
             table->setColumnCount(6);
             table->setHorizontalHeaderLabels(QStringList{
                 QStringLiteral("DLL 名称"),
@@ -8396,7 +8397,7 @@ void FileDock::initializeRecoveryPage()
     toolLayout->addWidget(m_recoveryExportButton, 0);
     recoveryLayout->addWidget(toolWidget, 0);
 
-    m_recoveryTable = new QTableWidget(m_fileRecoveryPage);
+    m_recoveryTable = new ks::ui::VisibleTableWidget(m_fileRecoveryPage);
     m_recoveryTable->setColumnCount(7);
     m_recoveryTable->setHorizontalHeaderLabels(QStringList{
         QStringLiteral("文件名"),
@@ -10763,7 +10764,7 @@ void FileDock::showSelectedFileOplockAccessRecords(FilePanelWidgets& panel)
     summaryLabel->setWordWrap(true);
     layout->addWidget(summaryLabel);
 
-    auto* table = new QTableWidget(static_cast<int>(accessRecords.size()), 13, &dialog);
+    auto* table = new ks::ui::VisibleTableWidget(static_cast<int>(accessRecords.size()), 13, &dialog);
     table->setHorizontalHeaderLabels(QStringList{
         QStringLiteral("PID"),
         QStringLiteral("进程名"),

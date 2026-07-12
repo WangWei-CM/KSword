@@ -1,4 +1,5 @@
 #include "HexEditorWidget.Internal.h"
+#include "VisibleTableWidget.h"
 
 // 说明：由原聚合式实现迁移为独立 .cpp，成员函数实现保持原样。
 using namespace ksword::ui::hex_editor_internal;
@@ -152,7 +153,7 @@ void HexEditorWidget::initializeUi()
     hexPageLayout->setSpacing(0);
 
     // HEX 页面主表：地址列 + 字节列 + ASCII 列。
-    m_hexTable = new QTableWidget(m_hexViewPage);
+    m_hexTable = new ks::ui::VisibleTableWidget(m_hexViewPage);
     m_hexTable->setColumnCount(m_bytesPerRow + 2);
     m_hexTable->setRowCount(1);
     // 使用 ExtendedSelection：

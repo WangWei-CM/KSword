@@ -1,4 +1,5 @@
 #include "ServiceDock.Internal.h"
+#include "../UI/VisibleTableWidget.h"
 
 using namespace service_dock_detail;
 
@@ -10,7 +11,7 @@ namespace
     // createServiceTable 作用：创建服务主列表控件并配置列结构。
     QTableWidget* createServiceTable(QWidget* parentWidget)
     {
-        QTableWidget* tableWidget = new QTableWidget(parentWidget);
+        QTableWidget* tableWidget = new ks::ui::VisibleTableWidget(parentWidget);
         tableWidget->setColumnCount(ServiceDock::toServiceColumn(ServiceDock::ServiceColumn::Count));
         tableWidget->setHorizontalHeaderLabels({
             QStringLiteral("服务名"),

@@ -1,4 +1,5 @@
 #include "KernelDock.h"
+#include "../UI/VisibleTableWidget.h"
 
 #include "../ArkDriverClient/ArkDriverClient.h"
 #include "../UI/CodeEditorWidget.h"
@@ -1323,7 +1324,7 @@ void KernelDock::initializeDriverStatusTab()
     QSplitter* verticalSplitter = new QSplitter(Qt::Vertical, m_driverStatusPage);
     m_driverStatusLayout->addWidget(verticalSplitter, 1);
 
-    m_driverStatusSummaryTable = new QTableWidget(verticalSplitter);
+    m_driverStatusSummaryTable = new ks::ui::VisibleTableWidget(verticalSplitter);
     m_driverStatusSummaryTable->setColumnCount(static_cast<int>(DriverSummaryColumn::Count));
     m_driverStatusSummaryTable->setHorizontalHeaderLabels(QStringList{ QStringLiteral("项目"), QStringLiteral("值") });
     m_driverStatusSummaryTable->setSelectionMode(QAbstractItemView::NoSelection);
@@ -1339,7 +1340,7 @@ void KernelDock::initializeDriverStatusTab()
     installDriverStatusCopyMenu(m_driverStatusSummaryTable);
 
     QSplitter* lowerSplitter = new QSplitter(Qt::Horizontal, verticalSplitter);
-    m_driverCapabilityTable = new QTableWidget(lowerSplitter);
+    m_driverCapabilityTable = new ks::ui::VisibleTableWidget(lowerSplitter);
     m_driverCapabilityTable->setColumnCount(static_cast<int>(DriverCapabilityColumn::Count));
     m_driverCapabilityTable->setHorizontalHeaderLabels(QStringList{
         QStringLiteral("功能"), QStringLiteral("状态"), QStringLiteral("策略"),

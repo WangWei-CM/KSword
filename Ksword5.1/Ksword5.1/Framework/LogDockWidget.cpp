@@ -1,6 +1,7 @@
 #include "LogDockWidget.h"
 #include "../theme.h"
 #include "../UI/FlatTableModel.h"
+#include "../UI/VisibleTableWidget.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -421,7 +422,9 @@ void LogDockWidget::initializeUi()
     m_logTable->verticalHeader()->setDefaultSectionSize(28);
     m_logTable->verticalHeader()->setMinimumSectionSize(24);
     m_logTable->verticalHeader()->setMaximumSectionSize(120);
-    m_logTable->verticalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
+    // 长日志只测量当前视口内的可变行高；滚动后再按需测量新出现的行。
+    // 模型仍持有完整日志快照，过滤/复制等全量逻辑不受影响。
+    ks::ui::InstallVisibleRowHeightRefresh(m_logTable);
 
     // 默认关闭详细信息模式，仅显示等级/时间/内容。
     applyDetailColumnVisibility();
@@ -533,7 +536,7 @@ void LogDockWidget::rebuildTable(std::vector<kEvent> filteredEvents)
     // setRows 内部使用 beginResetModel/endResetModel。
     // 对日志这种周期性整体刷新场景，模型 reset 比逐单元格 item 更新更稳定且更少堆分配。
     m_logModel->setRows(std::move(filteredEvents));
-    m_logTable->resizeRowsToContents();
+    ks::ui::RefreshVisibleRowHeights(m_logTable);
 
     // 根据“保持滚动到底端”开关决定刷新后的滚动行为。
     if (m_autoScrollCheck->isChecked())

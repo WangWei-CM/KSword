@@ -1,4 +1,5 @@
 #include "MemoryDock.Internal.h"
+#include "../UI/VisibleTableWidget.h"
 
 #include <QPixmap>
 
@@ -416,7 +417,7 @@ void MemoryDock::initializeKernelExecutableMemoryScanTab()
     QSplitter* splitter = new QSplitter(Qt::Vertical, m_tabKernelExecutableMemory);
     tabLayout->addWidget(splitter, 1);
 
-    m_kernelExecutableTable = new QTableWidget(splitter);
+    m_kernelExecutableTable = new ks::ui::VisibleTableWidget(splitter);
     m_kernelExecutableTable->setColumnCount(kernelExecutableColumnIndex(KernelExecutableColumn::Count));
     m_kernelExecutableTable->setHorizontalHeaderLabels(QStringList{
         QStringLiteral("VA"),

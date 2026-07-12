@@ -1,4 +1,5 @@
 #include "NetworkDock.InternalCommon.h"
+#include "../UI/VisibleTableWidget.h"
 
 #include <QCompleter>
 #include <QCoreApplication>
@@ -422,7 +423,7 @@ void NetworkDock::addMonitorFilterRuleGroup()
     processTopLayout->addWidget(groupState->removeInvalidProcessButton);
     processTopLayout->addWidget(groupState->clearProcessButton);
 
-    groupState->processTable = new QTableWidget(processBlock);
+    groupState->processTable = new ks::ui::VisibleTableWidget(processBlock);
     groupState->processTable->setMinimumHeight(56);
     groupState->processTable->setMaximumHeight(86);
     configureRuleValueTable(groupState->processTable, {
@@ -464,7 +465,7 @@ void NetworkDock::addMonitorFilterRuleGroup()
             topLayout->addWidget(fieldState.addButton);
             topLayout->addWidget(fieldState.clearButton);
 
-            fieldState.tableWidget = new QTableWidget(block);
+            fieldState.tableWidget = new ks::ui::VisibleTableWidget(block);
             fieldState.tableWidget->setMinimumHeight(56);
             fieldState.tableWidget->setMaximumHeight(86);
             configureRuleValueTable(fieldState.tableWidget, {

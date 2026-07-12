@@ -1,4 +1,5 @@
 #include "DriverDock.Internal.h"
+#include "../UI/VisibleTableWidget.h"
 
 // 说明：由原聚合式实现迁移为独立 .cpp，成员函数实现保持原样。
 using namespace ksword::driver_dock_internal;
@@ -146,7 +147,7 @@ void DriverDock::initializeOverviewTab()
     serviceLayout->setSpacing(4);
     serviceLayout->addWidget(new QLabel(QStringLiteral("驱动服务（SCM）"), serviceContainer));
 
-    m_serviceTable = new QTableWidget(serviceContainer);
+    m_serviceTable = new ks::ui::VisibleTableWidget(serviceContainer);
     m_serviceTable->setColumnCount(7);
     m_serviceTable->setHorizontalHeaderLabels(QStringList{
         QStringLiteral("服务名"),
@@ -176,7 +177,7 @@ void DriverDock::initializeOverviewTab()
     moduleLayout->setSpacing(4);
     moduleLayout->addWidget(new QLabel(QStringLiteral("已加载内核模块（EnumDeviceDrivers + R0 证据聚合）"), moduleContainer));
 
-    m_moduleTable = new QTableWidget(moduleContainer);
+    m_moduleTable = new ks::ui::VisibleTableWidget(moduleContainer);
     m_moduleTable->setColumnCount(9);
     m_moduleTable->setHorizontalHeaderLabels(QStringList{
         QStringLiteral("模块名"),
@@ -472,7 +473,7 @@ void DriverDock::initializeObjectInfoTab()
     m_driverObjectPageSummaryEdit->setText(QStringLiteral("DriverObject 页摘要显示在这里。"));
     driverObjectLayout->addWidget(m_driverObjectPageSummaryEdit);
 
-    m_driverObjectEvidenceTable = new QTableWidget(m_driverObjectPage);
+    m_driverObjectEvidenceTable = new ks::ui::VisibleTableWidget(m_driverObjectPage);
     m_driverObjectEvidenceTable->setColumnCount(2);
     m_driverObjectEvidenceTable->setHorizontalHeaderLabels(QStringList{
         QStringLiteral("字段"),
@@ -490,7 +491,7 @@ void DriverDock::initializeObjectInfoTab()
     deviceLayout->setSpacing(4);
     deviceLayout->addWidget(new QLabel(QStringLiteral("DeviceObject / AttachedDevice 链"), m_deviceObjectPage));
 
-    m_deviceObjectTable = new QTableWidget(m_deviceObjectPage);
+    m_deviceObjectTable = new ks::ui::VisibleTableWidget(m_deviceObjectPage);
     m_deviceObjectTable->setColumnCount(10);
     m_deviceObjectTable->setHorizontalHeaderLabels(QStringList{
         QStringLiteral("关系"),
@@ -517,7 +518,7 @@ void DriverDock::initializeObjectInfoTab()
     m_driverExtensionStatusLabel = new QLabel(QStringLiteral("状态：等待 DriverObject 查询。"), m_driverExtensionPage);
     m_driverExtensionStatusLabel->setWordWrap(true);
     driverExtensionLayout->addWidget(m_driverExtensionStatusLabel);
-    m_driverExtensionEvidenceTable = new QTableWidget(m_driverExtensionPage);
+    m_driverExtensionEvidenceTable = new ks::ui::VisibleTableWidget(m_driverExtensionPage);
     m_driverExtensionEvidenceTable->setColumnCount(6);
     m_driverExtensionEvidenceTable->setHorizontalHeaderLabels(QStringList{
         QStringLiteral("证据"),
@@ -540,7 +541,7 @@ void DriverDock::initializeObjectInfoTab()
     majorLayout->setSpacing(4);
     majorLayout->addWidget(new QLabel(QStringLiteral("MajorFunction 表"), m_majorFunctionPage));
 
-    m_majorFunctionTable = new QTableWidget(m_majorFunctionPage);
+    m_majorFunctionTable = new ks::ui::VisibleTableWidget(m_majorFunctionPage);
     m_majorFunctionTable->setColumnCount(5);
     m_majorFunctionTable->setHorizontalHeaderLabels(QStringList{
         QStringLiteral("IRP_MJ"),
@@ -562,7 +563,7 @@ void DriverDock::initializeObjectInfoTab()
     m_fastIoStatusLabel = new QLabel(QStringLiteral("状态：等待 Driver Integrity 证据。"), m_fastIoPage);
     m_fastIoStatusLabel->setWordWrap(true);
     fastIoLayout->addWidget(m_fastIoStatusLabel);
-    m_fastIoEvidenceTable = new QTableWidget(m_fastIoPage);
+    m_fastIoEvidenceTable = new ks::ui::VisibleTableWidget(m_fastIoPage);
     m_fastIoEvidenceTable->setColumnCount(6);
     m_fastIoEvidenceTable->setHorizontalHeaderLabels(QStringList{
         QStringLiteral("证据"),
@@ -614,7 +615,7 @@ void DriverDock::initializeModuleCrossViewTab()
     m_moduleCrossViewToolLayout->addWidget(m_moduleCrossViewStatusLabel, 1);
     m_moduleCrossViewLayout->addLayout(m_moduleCrossViewToolLayout);
 
-    m_moduleCrossViewTable = new QTableWidget(m_moduleCrossViewPage);
+    m_moduleCrossViewTable = new ks::ui::VisibleTableWidget(m_moduleCrossViewPage);
     m_moduleCrossViewTable->setColumnCount(7);
     m_moduleCrossViewTable->setHorizontalHeaderLabels(QStringList{
         QStringLiteral("证据"),
@@ -675,7 +676,7 @@ void DriverDock::initializeUnloadedPiddbTab()
     m_unloadedPiddbToolLayout->addWidget(m_unloadedPiddbStatusLabel, 1);
     m_unloadedPiddbLayout->addLayout(m_unloadedPiddbToolLayout);
 
-    m_unloadedPiddbTable = new QTableWidget(m_unloadedPiddbPage);
+    m_unloadedPiddbTable = new ks::ui::VisibleTableWidget(m_unloadedPiddbPage);
     m_unloadedPiddbTable->setColumnCount(7);
     m_unloadedPiddbTable->setHorizontalHeaderLabels(QStringList{
         QStringLiteral("证据"),

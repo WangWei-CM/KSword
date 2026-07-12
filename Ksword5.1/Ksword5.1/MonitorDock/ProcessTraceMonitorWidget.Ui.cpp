@@ -1,4 +1,5 @@
 #include "ProcessTraceMonitorWidget.h"
+#include "../UI/VisibleTableWidget.h"
 
 // ============================================================
 // ProcessTraceMonitorWidget.Ui.cpp
@@ -216,7 +217,7 @@ void ProcessTraceMonitorWidget::initializeUi()
     m_availableStatusLabel->setStyleSheet(buildStatusStyle(monitorIdleColorHex()));
     availableLayout->addWidget(m_availableStatusLabel, 0);
 
-    m_availableTable = new QTableWidget(m_availablePanel);
+    m_availableTable = new ks::ui::VisibleTableWidget(m_availablePanel);
     m_availableTable->setColumnCount(AvailableProcessColumnCount);
     m_availableTable->setHorizontalHeaderLabels(QStringList{
         QStringLiteral("PID"),
@@ -283,7 +284,7 @@ void ProcessTraceMonitorWidget::initializeUi()
     m_targetStatusLabel->setStyleSheet(buildStatusStyle(monitorIdleColorHex()));
     targetLayout->addWidget(m_targetStatusLabel, 0);
 
-    m_targetTable = new QTableWidget(m_targetPanel);
+    m_targetTable = new ks::ui::VisibleTableWidget(m_targetPanel);
     m_targetTable->setColumnCount(TargetProcessColumnCount);
     m_targetTable->setHorizontalHeaderLabels(QStringList{
         QStringLiteral("状态"),
@@ -472,7 +473,7 @@ void ProcessTraceMonitorWidget::initializeUi()
     // 事件表：
     // - 单独保留类型、Provider、根 PID、关系等列，便于后续筛选；
     // - Detail 列尽量保存属性摘要，便于用户再做文本二次过滤。
-    m_eventTable = new QTableWidget(this);
+    m_eventTable = new ks::ui::VisibleTableWidget(this);
     m_eventTable->setColumnCount(EventColumnCount);
     m_eventTable->setHorizontalHeaderLabels(QStringList{
         QStringLiteral("时间(100ns)"),

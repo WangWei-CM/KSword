@@ -1,4 +1,5 @@
 #include "KernelDockCidTab.h"
+#include "../UI/VisibleTableWidget.h"
 
 // ============================================================
 // KernelDockCidTab.cpp
@@ -195,7 +196,7 @@ void KernelDockCidTab::initializeUi()
     m_toolbarLayout->addWidget(m_kernelBadgeLabel, 0);
     rootLayout->addLayout(m_toolbarLayout);
 
-    m_table = new QTableWidget(this);
+    m_table = new ks::ui::VisibleTableWidget(this);
     m_table->setColumnCount(static_cast<int>(CidColumn::Count));
     m_table->setHorizontalHeaderLabels(QStringList{
         QStringLiteral("类型"),

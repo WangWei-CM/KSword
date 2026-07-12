@@ -1,4 +1,5 @@
 #include "MonitorDock.h"
+#include "../UI/VisibleTableWidget.h"
 
 #include "../ArkDriverClient/ArkDriverClient.h"
 #include "../UI/CodeEditorWidget.h"
@@ -734,7 +735,7 @@ void MonitorDock::initializeArkRiskCenterTab()
     QSplitter* splitter = new QSplitter(Qt::Vertical, m_arkRiskCenterPage);
     pageLayout->addWidget(splitter, 1);
 
-    m_arkRiskTable = new QTableWidget(splitter);
+    m_arkRiskTable = new ks::ui::VisibleTableWidget(splitter);
     m_arkRiskTable->setColumnCount(riskColumnIndex(RiskColumn::Count));
     m_arkRiskTable->setHorizontalHeaderLabels(QStringList{
         QStringLiteral("riskScore"),

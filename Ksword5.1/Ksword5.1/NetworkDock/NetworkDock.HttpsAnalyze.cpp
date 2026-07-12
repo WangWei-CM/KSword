@@ -1,4 +1,5 @@
 #include "NetworkDock.InternalCommon.h"
+#include "../UI/VisibleTableWidget.h"
 #include "HttpsProxyService.h"
 #include "../theme.h"
 
@@ -316,7 +317,7 @@ void NetworkDock::initializeHttpsAnalyzeTab()
     m_httpsAnalyzeControlLayout->addWidget(m_httpsProxyStatusLabel, 1);
     m_httpsAnalyzeLayout->addLayout(m_httpsAnalyzeControlLayout);
 
-    m_httpsParsedTable = new QTableWidget(m_httpsAnalyzePage);
+    m_httpsParsedTable = new ks::ui::VisibleTableWidget(m_httpsAnalyzePage);
     m_httpsParsedTable->setColumnCount(HttpsParsedColumnCount);
     m_httpsParsedTable->setHorizontalHeaderLabels({
         QStringLiteral("时间"),

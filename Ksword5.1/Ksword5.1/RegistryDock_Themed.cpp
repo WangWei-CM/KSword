@@ -1,4 +1,5 @@
 #include "RegistryDock/RegistryDock.h"
+#include "UI/VisibleTableWidget.h"
 
 #include "ArkDriverClient/ArkDriverClient.h"
 #include "RegistryDock/RegistryOptimizationPage.h"
@@ -906,7 +907,7 @@ void RegistryDock::initializeUi()
 
     m_rightTabWidget = new QTabWidget(m_mainSplitter);
 
-    m_valueTable = new QTableWidget(m_rightTabWidget);
+    m_valueTable = new ks::ui::VisibleTableWidget(m_rightTabWidget);
     m_valueTable->setColumnCount(3);
     m_valueTable->setHorizontalHeaderLabels(QStringList{ QStringLiteral("名称"), QStringLiteral("类型"), QStringLiteral("数据") });
     m_valueTable->setSelectionBehavior(QAbstractItemView::SelectRows);
@@ -921,7 +922,7 @@ void RegistryDock::initializeUi()
     m_valueTable->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
     m_valueTable->horizontalHeader()->setSectionResizeMode(2, QHeaderView::Stretch);
 
-    m_searchResultTable = new QTableWidget(m_rightTabWidget);
+    m_searchResultTable = new ks::ui::VisibleTableWidget(m_rightTabWidget);
     m_searchResultTable->setColumnCount(5);
     m_searchResultTable->setHorizontalHeaderLabels(QStringList{
         QStringLiteral("键路径"), QStringLiteral("值名"), QStringLiteral("类型"), QStringLiteral("数据预览"), QStringLiteral("命中来源")

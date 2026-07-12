@@ -1,4 +1,5 @@
 #include "KernelDockIpcTab.h"
+#include "../UI/VisibleTableWidget.h"
 
 // ============================================================
 // KernelDockIpcTab.cpp
@@ -349,7 +350,7 @@ void KernelDockIpcTab::initializeAlpcPage()
     m_alpcToolbarLayout->addWidget(m_alpcStatusLabel, 0);
     layout->addLayout(m_alpcToolbarLayout);
 
-    m_ipcSummaryTable = new QTableWidget(m_alpcPage);
+    m_ipcSummaryTable = new ks::ui::VisibleTableWidget(m_alpcPage);
     m_ipcSummaryTable->setColumnCount(static_cast<int>(IpcSummaryColumn::CountColumn));
     m_ipcSummaryTable->setHorizontalHeaderLabels(QStringList{
         QStringLiteral("类别"),
@@ -371,7 +372,7 @@ void KernelDockIpcTab::initializeAlpcPage()
     m_ipcSummaryTable->setToolTip(QStringLiteral("R0 IPC summary：通过 ArkDriverClient::queryIpcSummary 只读查询，复用上方 PID/Handle；为空时查询全局摘要。"));
     layout->addWidget(m_ipcSummaryTable, 0);
 
-    m_alpcTable = new QTableWidget(m_alpcPage);
+    m_alpcTable = new ks::ui::VisibleTableWidget(m_alpcPage);
     m_alpcTable->setColumnCount(static_cast<int>(AlpcColumn::Count));
     m_alpcTable->setHorizontalHeaderLabels(QStringList{
         QStringLiteral("角色"),

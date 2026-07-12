@@ -1,5 +1,6 @@
 
 #include "KernelDock.h"
+#include "../UI/VisibleTableWidget.h"
 
 // ============================================================
 // KernelDock.cpp
@@ -752,7 +753,7 @@ void KernelDock::initializeObjectNamespaceTab()
     m_objectNamespaceTree->header()->setSectionResizeMode(QHeaderView::Stretch);
     m_objectNamespaceTree->setToolTip(QStringLiteral("文件管理器式对象命名空间树，支持逐级展开与右键操作"));
 
-    m_objectNamespacePropertyTable = new QTableWidget(horizontalSplitter);
+    m_objectNamespacePropertyTable = new ks::ui::VisibleTableWidget(horizontalSplitter);
     m_objectNamespacePropertyTable->setColumnCount(2);
     m_objectNamespacePropertyTable->setHorizontalHeaderLabels(QStringList{
         QStringLiteral("属性项"),
@@ -835,7 +836,7 @@ void KernelDock::initializeAtomTableTab()
     QSplitter* splitter = new QSplitter(Qt::Vertical, m_atomPage);
     m_atomLayout->addWidget(splitter, 1);
 
-    m_atomTable = new QTableWidget(splitter);
+    m_atomTable = new ks::ui::VisibleTableWidget(splitter);
     m_atomTable->setColumnCount(static_cast<int>(AtomColumn::Count));
     m_atomTable->setHorizontalHeaderLabels(QStringList{
         QStringLiteral("Atom值"),
@@ -912,7 +913,7 @@ void KernelDock::initializeNtQueryTab()
     QSplitter* splitter = new QSplitter(Qt::Vertical, m_ntQueryPage);
     m_ntQueryLayout->addWidget(splitter, 1);
 
-    m_ntQueryTable = new QTableWidget(splitter);
+    m_ntQueryTable = new ks::ui::VisibleTableWidget(splitter);
     m_ntQueryTable->setColumnCount(static_cast<int>(NtQueryColumn::Count));
     m_ntQueryTable->setHorizontalHeaderLabels(QStringList{
         QStringLiteral("类别"),
