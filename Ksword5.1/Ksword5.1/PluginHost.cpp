@@ -489,7 +489,8 @@ namespace
         for (const QJsonValue& value : targetValues)
         {
             const QString target = value.toString().trimmed().toLower();
-            if ((target == QStringLiteral("file") || target == QStringLiteral("process")) &&
+            if ((target == QStringLiteral("file") || target == QStringLiteral("process") ||
+                target == QStringLiteral("network")) &&
                 !plugin.targets.contains(target))
             {
                 plugin.targets.push_back(target);
@@ -497,7 +498,7 @@ namespace
         }
         if (plugin.targets.isEmpty())
         {
-            *errorOut = QStringLiteral("商城条目的 targets 必须包含 file 和/或 process。");
+            *errorOut = QStringLiteral("商城条目的 targets 必须包含 file、process 和/或 network。");
             return false;
         }
         *pluginOut = plugin;
@@ -580,7 +581,8 @@ namespace
         for (const QJsonValue& target : targets)
         {
             const QString targetText = target.toString().trimmed().toLower();
-            if ((targetText == QStringLiteral("file") || targetText == QStringLiteral("process")) &&
+            if ((targetText == QStringLiteral("file") || targetText == QStringLiteral("process") ||
+                targetText == QStringLiteral("network")) &&
                 !descriptor.targets.contains(targetText))
             {
                 descriptor.targets.push_back(targetText);
@@ -588,7 +590,7 @@ namespace
         }
         if (descriptor.targets.isEmpty())
         {
-            *errorOut = QStringLiteral("targets 必须包含 file 和/或 process。");
+            *errorOut = QStringLiteral("targets 必须包含 file、process 和/或 network。");
             return false;
         }
         if (!parseVisualization(object, &descriptor.visualization, errorOut))
@@ -647,7 +649,13 @@ namespace
 
     QString targetName(const ks::plugin_host::TargetKind targetKind)
     {
-        return targetKind == ks::plugin_host::TargetKind::File ? QStringLiteral("file") : QStringLiteral("process");
+        switch (targetKind)
+        {
+        case ks::plugin_host::TargetKind::File: return QStringLiteral("file");
+        case ks::plugin_host::TargetKind::Process: return QStringLiteral("process");
+        case ks::plugin_host::TargetKind::Network: return QStringLiteral("network");
+        }
+        return QString();
     }
 
     bool isUsableContext(const ks::plugin_host::InvocationContext& context, QString* errorOut)
@@ -660,6 +668,10 @@ namespace
             }
             *errorOut = QStringLiteral("插件入口仅支持单个常规文件。");
             return false;
+        }
+        if (context.targetKind == ks::plugin_host::TargetKind::Network)
+        {
+            return true;
         }
         if (context.processId != 0)
         {
@@ -722,7 +734,7 @@ namespace
         {
             arguments << QStringLiteral("--path") << context.filePath;
         }
-        else
+        else if (context.targetKind == ks::plugin_host::TargetKind::Process)
         {
             arguments << QStringLiteral("--pid") << QString::number(context.processId);
             if (!context.filePath.trimmed().isEmpty())
@@ -828,7 +840,7 @@ namespace
             {
                 targetText = QStringLiteral("目标文件：%1").arg(QDir::toNativeSeparators(context.filePath));
             }
-            else
+            else if (context.targetKind == ks::plugin_host::TargetKind::Process)
             {
                 targetText = QStringLiteral("目标进程：%1  PID %2")
                     .arg(context.processName.trimmed().isEmpty() ? QStringLiteral("未知进程") : context.processName)
@@ -837,6 +849,10 @@ namespace
                 {
                     targetText += QStringLiteral("\n映像路径：%1").arg(QDir::toNativeSeparators(context.filePath));
                 }
+            }
+            else
+            {
+                targetText = QStringLiteral("目标：实时网络流量");
             }
             auto* targetLabel = new QLabel(targetText, this);
             targetLabel->setWordWrap(true);
@@ -1749,9 +1765,14 @@ void ks::plugin_host::populateTargetMenu(QMenu* menu, QWidget* owner, const Invo
     }
     if (addedActions == 0)
     {
-        QAction* action = menu->addAction(context.targetKind == TargetKind::File
-            ? QStringLiteral("没有声明支持文件目标的插件")
-            : QStringLiteral("没有声明支持进程目标的插件"));
+        QString emptyText;
+        switch (context.targetKind)
+        {
+        case TargetKind::File: emptyText = QStringLiteral("没有声明支持文件目标的插件"); break;
+        case TargetKind::Process: emptyText = QStringLiteral("没有声明支持进程目标的插件"); break;
+        case TargetKind::Network: emptyText = QStringLiteral("没有声明支持网络目标的插件"); break;
+        }
+        QAction* action = menu->addAction(emptyText);
         action->setEnabled(false);
     }
 }
