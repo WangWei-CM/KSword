@@ -19,4 +19,10 @@ void ResizeProcessFeaturePage(HWND page, const RECT& bounds) {
     ResizeProcessView(page, bounds);
 }
 
+void RequestProcessFeatureRefresh(HWND page) {
+    // page 用途：MainWindow 保存的进程页 HWND；调用方式为驱动状态变化后异步刷新。
+    // 处理过程：转发给 ProcessView，避免 MainWindow 直接依赖页面内部消息号。
+    RequestProcessViewRefresh(page);
+}
+
 } // namespace Ksword::Features::Process

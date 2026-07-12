@@ -16,4 +16,8 @@ HWND CreateProcessFeaturePage(HWND parent, const RECT& bounds);
 // to ProcessView and returns no value.
 void ResizeProcessFeaturePage(HWND page, const RECT& bounds);
 
+// RequestProcessFeatureRefresh 用途：向已物化的进程功能页投递刷新请求。
+// 调用场景：R0 驱动变为可用后，让查隐藏进程逻辑立刻跑一次。
+void RequestProcessFeatureRefresh(HWND page);
+
 } // namespace Ksword::Features::Process

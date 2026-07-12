@@ -115,6 +115,7 @@
     <ClCompile Include="Features\File\PathNavigator.cpp" />
     <ClCompile Include="Features\Hardware\HardwareEnumerator.cpp" />
     <ClCompile Include="Features\Hardware\HardwareFeature.cpp" />
+    <ClCompile Include="Features\Hardware\HardwareHwidDispatchView.cpp" />
     <ClCompile Include="Features\Hardware\HardwareModel.cpp" />
     <ClCompile Include="Features\Hardware\HardwareView.cpp" />
     <ClCompile Include="Features\Handle\HandleClient.cpp" />
@@ -201,6 +202,7 @@
     <ClCompile Include="..\Ksword5.1\Ksword5.1\ArkDriverClient\ArkDriverDynData.cpp" />
     <ClCompile Include="..\Ksword5.1\Ksword5.1\ArkDriverClient\ArkDriverError.cpp" />
     <ClCompile Include="..\Ksword5.1\Ksword5.1\ArkDriverClient\ArkDriverFile.cpp" />
+    <ClCompile Include="..\Ksword5.1\Ksword5.1\ArkDriverClient\ArkDriverHwid.cpp" />
     <ClCompile Include="..\Ksword5.1\Ksword5.1\ArkDriverClient\ArkDriverKernel.cpp" />
     <ClCompile Include="..\Ksword5.1\Ksword5.1\ArkDriverClient\ArkDriverKeyboard.cpp" />
     <ClCompile Include="..\Ksword5.1\Ksword5.1\ArkDriverClient\ArkDriverMemory.cpp" />
@@ -238,6 +240,7 @@
     <ClInclude Include="Features\File\PathNavigator.h" />
     <ClInclude Include="Features\Hardware\HardwareEnumerator.h" />
     <ClInclude Include="Features\Hardware\HardwareFeature.h" />
+    <ClInclude Include="Features\Hardware\HardwareHwidDispatchView.h" />
     <ClInclude Include="Features\Hardware\HardwareModel.h" />
     <ClInclude Include="Features\Hardware\HardwareView.h" />
     <ClInclude Include="Features\Handle\HandleClient.h" />
@@ -331,6 +334,7 @@
     <ClInclude Include="..\shared\driver\KswordArkFileIoctl.h" />
     <ClInclude Include="..\shared\driver\KswordArkFilterIoctl.h" />
     <ClInclude Include="..\shared\driver\KswordArkDeviceAuditIoctl.h" />
+    <ClInclude Include="..\shared\driver\KswordArkHwidIoctl.h" />
     <ClInclude Include="..\shared\driver\KswordArkKernelIoctl.h" />
     <ClInclude Include="..\shared\driver\KswordArkKeyboardIoctl.h" />
     <ClInclude Include="..\shared\driver\KswordArkMemoryIoctl.h" />

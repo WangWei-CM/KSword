@@ -23,6 +23,14 @@ enum class ProcessActionId {
     R0DisableBreakOnTermination,
     R0DisableApcInsertion,
     R0DkomRemoveFromCidTable,
+    R0SetIntegrityUntrusted,
+    R0SetIntegrityLow,
+    R0SetIntegrityMedium,
+    R0SetIntegrityMediumPlus,
+    R0SetIntegrityHigh,
+    R0SetIntegritySystem,
+    R0InjectDll,
+    R0InjectShellcode,
     RefreshPplProtectionLevel,
     SuspendProcess,
     ResumeProcess,
@@ -72,5 +80,18 @@ ProcessActionResult ExecuteProcessAction(
 // PriorityClassForAction maps menu priority actions to Win32 priority classes.
 // Input is a ProcessActionId; output is zero when the id is not a priority item.
 DWORD PriorityClassForAction(ProcessActionId actionId);
+
+// ExecuteR0ProcessDllInjection / ExecuteR0ProcessShellcodeInjection mirror the
+// full Ksword5.1 ArkDriverClient process injection calls. Inputs are the selected
+// PID list and a user-picked payload path; processing validates single selection,
+// reads shellcode when needed, and calls the R0 injection IOCTL wrapper; output
+// is a display-ready operation result.
+ProcessActionResult ExecuteR0ProcessDllInjection(
+    const std::vector<DWORD>& selectedPids,
+    const std::wstring& dllPath);
+
+ProcessActionResult ExecuteR0ProcessShellcodeInjection(
+    const std::vector<DWORD>& selectedPids,
+    const std::wstring& shellcodePath);
 
 } // namespace Ksword::Features::Process

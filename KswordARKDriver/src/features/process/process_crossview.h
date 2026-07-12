@@ -112,6 +112,27 @@ KswordARKCrossViewWalkCidTable(
     _Out_opt_ ULONG* VisitedEntriesOut
     );
 
+/*
+ * KswordARKCrossViewReferenceProcessByActiveList
+ * Inputs:
+ * - DynState supplies EPROCESS.ActiveProcessLinks and UniqueProcessId offsets.
+ * - ProcessId is matched against ActiveProcessLinks process identity evidence.
+ * Processing:
+ * - Walks the kernel active process list, type-checks each candidate, and
+ *   returns a referenced EPROCESS without calling NtOpenProcess/ZwOpenProcess.
+ * Return behavior:
+ * - On STATUS_SUCCESS ProcessOut owns one reference; caller must dereference it.
+ */
+NTSTATUS
+KswordARKCrossViewReferenceProcessByActiveList(
+    _In_ const KSW_DYN_STATE* DynState,
+    _In_ ULONG ProcessId,
+    _In_ ULONG MaxNodes,
+    _Outptr_ PEPROCESS* ProcessOut,
+    _Out_opt_ ULONG* UniqueProcessIdOut,
+    _Out_opt_ ULONG* VisitedEntriesOut
+    );
+
 NTSTATUS
 KswordARKDriverQueryProcessCrossView(
     _Out_writes_bytes_to_(OutputBufferLength, *BytesWrittenOut) PVOID OutputBuffer,

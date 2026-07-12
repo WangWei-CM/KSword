@@ -4,6 +4,7 @@
 #include "../Core/DriverService.h"
 #include "../Core/Privilege.h"
 #include "../Features/FeatureRegistry.h"
+#include "../Features/Process/ProcessFeature.h"
 #include "../Ui/Controls.h"
 #include "../Ui/Theme.h"
 #include "../resource.h"
@@ -26,6 +27,7 @@ constexpr int kCommandEditHeight = 22;
 constexpr int kCommandEditMenuGap = 8;
 constexpr int kStatusHeight = 18;
 constexpr int kWindowMenuDockBaseId = 42000;
+constexpr int kProcessModuleCommandId = 40001;
 constexpr UINT kMsgQueryDriverStatus = WM_APP + 101;
 constexpr UINT kMsgDockActivated = WM_APP + 102;
 
@@ -658,6 +660,33 @@ void MainWindow::queryDriverStatusDeferred() {
     driverStatus_ = Ksword::Core::QueryDriverStatus();
     driverStatusKnown_ = true;
     refreshDriverText(driverStatus_);
+    if (driverStatus_.serviceRunning || driverStatus_.controlDeviceOpen) {
+        requestProcessDockRefreshIfLoaded();
+    }
+}
+
+void MainWindow::requestProcessDockRefreshIfLoaded() {
+    if (dockSlots_.empty() || modules_.empty()) {
+        return;
+    }
+
+    for (int moduleIndex = 0; moduleIndex < static_cast<int>(modules_.size()); ++moduleIndex) {
+        if (modules_[moduleIndex].commandId != kProcessModuleCommandId) {
+            continue;
+        }
+        if (moduleIndex >= static_cast<int>(dockSlots_.size())) {
+            return;
+        }
+
+        const DockSlot& slot = dockSlots_[moduleIndex];
+        if (!slot.materialized || !slot.page) {
+            return;
+        }
+
+        // slot.page 用途：已物化的进程页 HWND；驱动装载后立即触发一次默认 R0 查隐藏刷新。
+        Ksword::Features::Process::RequestProcessFeatureRefresh(slot.page);
+        return;
+    }
 }
 
 void MainWindow::handleUiAccessButtonClicked() {
@@ -702,6 +731,9 @@ void MainWindow::installDriverFromButton() {
 
     driverStatus_ = Ksword::Core::InstallAndStartDriver();
     refreshDriverText(driverStatus_);
+    if (driverStatus_.serviceRunning || driverStatus_.controlDeviceOpen) {
+        requestProcessDockRefreshIfLoaded();
+    }
     if (!driverStatus_.serviceRunning && !driverStatus_.controlDeviceOpen) {
         ::MessageBoxW(hwnd_, driverStatus_.message.c_str(), L"KswordARKLight R0 Driver", MB_ICONWARNING | MB_OK);
     }

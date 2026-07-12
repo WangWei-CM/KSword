@@ -16,6 +16,7 @@ Environment:
 
 #include "ark/ark_driver.h"
 #include "../../platform/process_resolver.h"
+#include "process_crossview.h"
 
 /* 中文说明：PsLookupProcessByProcessId 用于引用目标 EPROCESS。 */
 NTSYSAPI
@@ -25,6 +26,20 @@ PsLookupProcessByProcessId(
     _In_ HANDLE ProcessId,
     _Outptr_ PEPROCESS* Process
     );
+
+NTKERNELAPI
+NTSTATUS
+ObOpenObjectByPointer(
+    _In_ PVOID Object,
+    _In_ ULONG HandleAttributes,
+    _In_opt_ PACCESS_STATE PassedAccessState,
+    _In_opt_ ACCESS_MASK DesiredAccess,
+    _In_opt_ POBJECT_TYPE ObjectType,
+    _In_ KPROCESSOR_MODE AccessMode,
+    _Out_ PHANDLE Handle
+    );
+
+extern POBJECT_TYPE* PsProcessType;
 
 /* 中文说明：ProcessBreakOnTermination 是 ZwSetInformationProcess 的信息类 29。 */
 #define KSWORD_ARK_PROCESS_INFORMATION_BREAK_ON_TERMINATION 29UL
@@ -48,6 +63,15 @@ typedef PETHREAD(NTAPI* KSWORD_PS_GET_NEXT_PROCESS_THREAD_FN)(
     _In_opt_ PETHREAD Thread
     );
 
+typedef struct _KSWORD_PROCESS_FLAGS_CID_MATCH_CONTEXT
+{
+    const KSW_DYN_STATE* DynState;
+    ULONG ProcessId;
+    PEPROCESS ProcessObject;
+    ULONG UniqueProcessId;
+    NTSTATUS LastStatus;
+} KSWORD_PROCESS_FLAGS_CID_MATCH_CONTEXT;
+
 /* 中文说明：运行时解析 PsGetNextProcessThread，避免链接期依赖差异。 */
 static KSWORD_PS_GET_NEXT_PROCESS_THREAD_FN
 KswordARKProcessFlagsResolvePsGetNextProcessThread(
@@ -62,16 +86,179 @@ KswordARKProcessFlagsResolvePsGetNextProcessThread(
     return (KSWORD_PS_GET_NEXT_PROCESS_THREAD_FN)MmGetSystemRoutineAddress(&routineName);
 }
 
+static VOID
+KswordARKProcessFlagsCidMatchCallback(
+    _In_ const KSW_CROSSVIEW_CID_ENTRY* Entry,
+    _Inout_opt_ PVOID Context
+    )
+{
+    KSWORD_PROCESS_FLAGS_CID_MATCH_CONTEXT* matchContext =
+        (KSWORD_PROCESS_FLAGS_CID_MATCH_CONTEXT*)Context;
+    PVOID uniqueProcessIdPointer = NULL;
+    ULONG uniqueProcessId = 0UL;
+
+    if (matchContext == NULL ||
+        matchContext->ProcessObject != NULL ||
+        Entry == NULL ||
+        !Entry->Referenced ||
+        Entry->Object == NULL) {
+        return;
+    }
+
+    uniqueProcessId = HandleToULong(PsGetProcessId((PEPROCESS)Entry->Object));
+    if (matchContext->DynState != NULL &&
+        KswordARKCrossViewOffsetPresent(matchContext->DynState->Kernel.EpUniqueProcessId)) {
+        NTSTATUS readStatus = KswordARKCrossViewReadPointerField(
+            Entry->Object,
+            matchContext->DynState->Kernel.EpUniqueProcessId,
+            &uniqueProcessIdPointer);
+        if (NT_SUCCESS(readStatus)) {
+            uniqueProcessId = HandleToULong(uniqueProcessIdPointer);
+        }
+        else if (NT_SUCCESS(matchContext->LastStatus)) {
+            matchContext->LastStatus = readStatus;
+        }
+    }
+
+    if (Entry->CidValue != matchContext->ProcessId &&
+        uniqueProcessId != matchContext->ProcessId &&
+        HandleToULong(PsGetProcessId((PEPROCESS)Entry->Object)) != matchContext->ProcessId) {
+        return;
+    }
+
+    ObReferenceObject(Entry->Object);
+    matchContext->ProcessObject = (PEPROCESS)Entry->Object;
+    matchContext->UniqueProcessId = uniqueProcessId;
+    matchContext->LastStatus = STATUS_SUCCESS;
+}
+
+static NTSTATUS
+KswordARKProcessFlagsReferenceProcessByCidTable(
+    _In_ const KSW_DYN_STATE* DynState,
+    _In_ ULONG ProcessId,
+    _Outptr_ PEPROCESS* ProcessObjectOut
+    )
+{
+    KSWORD_ARK_CROSSVIEW_FIELD_OFFSETS fieldOffsets;
+    KSWORD_PROCESS_FLAGS_CID_MATCH_CONTEXT matchContext;
+    PVOID pspCidTableAddress = NULL;
+    ULONG64 missingCapabilityMask = 0ULL;
+    ULONG visitedEntries = 0UL;
+    BOOLEAN usedDynDataGlobal = FALSE;
+    NTSTATUS status = STATUS_SUCCESS;
+
+    if (DynState == NULL || ProcessObjectOut == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    *ProcessObjectOut = NULL;
+    if (PsProcessType == NULL || *PsProcessType == NULL) {
+        return STATUS_PROCEDURE_NOT_FOUND;
+    }
+
+    RtlZeroMemory(&fieldOffsets, sizeof(fieldOffsets));
+    RtlZeroMemory(&matchContext, sizeof(matchContext));
+    KswordARKCrossViewFillFieldOffsets(DynState, &fieldOffsets);
+    status = KswordARKCrossViewResolvePspCidTableAddress(
+        DynState,
+        &fieldOffsets,
+        &pspCidTableAddress,
+        &missingCapabilityMask,
+        &usedDynDataGlobal);
+    UNREFERENCED_PARAMETER(missingCapabilityMask);
+    UNREFERENCED_PARAMETER(usedDynDataGlobal);
+    if (!NT_SUCCESS(status) || pspCidTableAddress == NULL) {
+        return NT_SUCCESS(status) ? STATUS_NOT_FOUND : status;
+    }
+
+    matchContext.DynState = DynState;
+    matchContext.ProcessId = ProcessId;
+    matchContext.LastStatus = STATUS_NOT_FOUND;
+    status = KswordARKCrossViewWalkCidTable(
+        DynState,
+        pspCidTableAddress,
+        *PsProcessType,
+        0x00100000UL,
+        KswordARKProcessFlagsCidMatchCallback,
+        &matchContext,
+        &visitedEntries);
+    UNREFERENCED_PARAMETER(visitedEntries);
+
+    if (matchContext.ProcessObject != NULL) {
+        *ProcessObjectOut = matchContext.ProcessObject;
+        return STATUS_SUCCESS;
+    }
+    if (!NT_SUCCESS(status) && status != STATUS_BUFFER_OVERFLOW) {
+        return status;
+    }
+    return matchContext.LastStatus;
+}
+
+static NTSTATUS
+KswordARKProcessFlagsReferenceProcessObject(
+    _In_ ULONG ProcessId,
+    _Outptr_ PEPROCESS* ProcessObjectOut
+    )
+{
+    KSW_DYN_STATE dynState;
+    ULONG uniqueProcessId = 0UL;
+    ULONG visitedEntries = 0UL;
+    NTSTATUS cidStatus = STATUS_SUCCESS;
+    NTSTATUS activeStatus = STATUS_SUCCESS;
+    NTSTATUS lookupStatus = STATUS_SUCCESS;
+
+    if (ProcessObjectOut == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    *ProcessObjectOut = NULL;
+    RtlZeroMemory(&dynState, sizeof(dynState));
+    KswordARKDynDataSnapshot(&dynState);
+
+    cidStatus = KswordARKProcessFlagsReferenceProcessByCidTable(
+        &dynState,
+        ProcessId,
+        ProcessObjectOut);
+    if (NT_SUCCESS(cidStatus)) {
+        return STATUS_SUCCESS;
+    }
+
+    activeStatus = KswordARKCrossViewReferenceProcessByActiveList(
+        &dynState,
+        ProcessId,
+        0x00100000UL,
+        ProcessObjectOut,
+        &uniqueProcessId,
+        &visitedEntries);
+    UNREFERENCED_PARAMETER(uniqueProcessId);
+    UNREFERENCED_PARAMETER(visitedEntries);
+    if (NT_SUCCESS(activeStatus)) {
+        return STATUS_SUCCESS;
+    }
+
+    lookupStatus = PsLookupProcessByProcessId(ULongToHandle(ProcessId), ProcessObjectOut);
+    if (NT_SUCCESS(lookupStatus)) {
+        return STATUS_SUCCESS;
+    }
+    if (cidStatus != STATUS_PROCEDURE_NOT_FOUND &&
+        cidStatus != STATUS_NOT_FOUND &&
+        cidStatus != STATUS_NOT_SUPPORTED) {
+        return cidStatus;
+    }
+    if (activeStatus != STATUS_PROCEDURE_NOT_FOUND &&
+        activeStatus != STATUS_NOT_FOUND &&
+        activeStatus != STATUS_NOT_SUPPORTED) {
+        return activeStatus;
+    }
+    return lookupStatus;
+}
+
 /* 中文说明：打开目标进程句柄，只用于 ZwSetInformationProcess 官方入口。 */
 static NTSTATUS
-KswordARKProcessFlagsOpenProcessHandle(
-    _In_ ULONG ProcessId,
+KswordARKProcessFlagsOpenProcessHandleByObject(
+    _In_ PEPROCESS ProcessObject,
     _In_ ACCESS_MASK DesiredAccess,
     _Out_ HANDLE* ProcessHandleOut
     )
 {
-    CLIENT_ID clientId;
-    OBJECT_ATTRIBUTES objectAttributes;
     NTSTATUS status = STATUS_SUCCESS;
 
     /* 中文说明：输出参数先清空，失败分支不会留下无效句柄。 */
@@ -80,29 +267,26 @@ KswordARKProcessFlagsOpenProcessHandle(
     }
     *ProcessHandleOut = NULL;
 
-    /* 中文说明：PID 0/4 等系统目标由 handler 统一挡住，这里再做一层保护。 */
-    if (ProcessId == 0UL || ProcessId <= 4UL) {
+    if (ProcessObject == NULL || PsProcessType == NULL || *PsProcessType == NULL) {
         return STATUS_INVALID_PARAMETER;
     }
 
-    /* 中文说明：OBJ_KERNEL_HANDLE 确保句柄只在内核上下文可见。 */
-    InitializeObjectAttributes(&objectAttributes, NULL, OBJ_KERNEL_HANDLE, NULL, NULL);
-    clientId.UniqueProcess = ULongToHandle(ProcessId);
-    clientId.UniqueThread = NULL;
-
     /* 中文说明：PROCESS_SET_INFORMATION 足够设置 BreakOnTermination。 */
-    status = ZwOpenProcess(
-        ProcessHandleOut,
+    status = ObOpenObjectByPointer(
+        ProcessObject,
+        OBJ_KERNEL_HANDLE,
+        NULL,
         DesiredAccess,
-        &objectAttributes,
-        &clientId);
+        *PsProcessType,
+        KernelMode,
+        ProcessHandleOut);
     return status;
 }
 
 /* 中文说明：通过 ZwSetInformationProcess 设置或清除 BreakOnTermination。 */
 static NTSTATUS
 KswordARKProcessFlagsSetBreakOnTerminationByZw(
-    _In_ ULONG ProcessId,
+    _In_ PEPROCESS ProcessObject,
     _In_ BOOLEAN EnableBreakOnTermination
     )
 {
@@ -118,8 +302,8 @@ KswordARKProcessFlagsSetBreakOnTerminationByZw(
     }
 
     /* 中文说明：官方入口需要进程句柄，避免依赖未公开 EPROCESS 位布局。 */
-    status = KswordARKProcessFlagsOpenProcessHandle(
-        ProcessId,
+    status = KswordARKProcessFlagsOpenProcessHandleByObject(
+        ProcessObject,
         PROCESS_SET_INFORMATION,
         &processHandle);
     if (!NT_SUCCESS(status)) {
@@ -172,14 +356,17 @@ KswordARKProcessFlagsResolveEprocessFlagsOffset(
 /* 中文说明：通过直接写 EPROCESS.Flags 兜底设置 BreakOnTermination。 */
 static NTSTATUS
 KswordARKProcessFlagsSetBreakOnTerminationByEprocess(
-    _In_ ULONG ProcessId,
+    _In_ PEPROCESS ProcessObject,
     _In_ BOOLEAN EnableBreakOnTermination
     )
 {
-    PEPROCESS processObject = NULL;
     ULONG flagsOffset = 0UL;
     volatile LONG* flagsAddress = NULL;
     NTSTATUS status = STATUS_SUCCESS;
+
+    if (ProcessObject == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
 
     /* 中文说明：偏移解析失败时不猜测，避免误写 EPROCESS 其它字段。 */
     status = KswordARKProcessFlagsResolveEprocessFlagsOffset(&flagsOffset);
@@ -190,14 +377,8 @@ KswordARKProcessFlagsSetBreakOnTerminationByEprocess(
         return STATUS_NOT_SUPPORTED;
     }
 
-    /* 中文说明：引用目标 EPROCESS，确保硬写期间对象不会被释放。 */
-    status = PsLookupProcessByProcessId(ULongToHandle(ProcessId), &processObject);
-    if (!NT_SUCCESS(status)) {
-        return status;
-    }
-
     __try {
-        flagsAddress = (volatile LONG*)((PUCHAR)processObject + flagsOffset);
+        flagsAddress = (volatile LONG*)((PUCHAR)ProcessObject + flagsOffset);
         if (EnableBreakOnTermination) {
             (VOID)InterlockedOr(
                 flagsAddress,
@@ -213,8 +394,6 @@ KswordARKProcessFlagsSetBreakOnTerminationByEprocess(
         status = GetExceptionCode();
     }
 
-    /* 中文说明：硬写完成后释放目标 EPROCESS 引用。 */
-    ObDereferenceObject(processObject);
     return status;
 }
 
@@ -225,20 +404,28 @@ KswordARKProcessFlagsSetBreakOnTermination(
     _In_ BOOLEAN EnableBreakOnTermination
     )
 {
+    PEPROCESS processObject = NULL;
     NTSTATUS zwStatus = STATUS_SUCCESS;
     NTSTATUS directStatus = STATUS_SUCCESS;
 
+    zwStatus = KswordARKProcessFlagsReferenceProcessObject(ProcessId, &processObject);
+    if (!NT_SUCCESS(zwStatus)) {
+        return zwStatus;
+    }
+
     zwStatus = KswordARKProcessFlagsSetBreakOnTerminationByZw(
-        ProcessId,
+        processObject,
         EnableBreakOnTermination);
     if (NT_SUCCESS(zwStatus)) {
+        ObDereferenceObject(processObject);
         return zwStatus;
     }
 
     /* 中文说明：PPL/受限句柄路径可能拒绝 ZwOpenProcess，因此使用 R0 直写作为补强。 */
     directStatus = KswordARKProcessFlagsSetBreakOnTerminationByEprocess(
-        ProcessId,
+        processObject,
         EnableBreakOnTermination);
+    ObDereferenceObject(processObject);
     if (NT_SUCCESS(directStatus)) {
         return directStatus;
     }
@@ -343,7 +530,7 @@ KswordARKProcessFlagsDisableApcInsertion(
     }
 
     /* 中文说明：引用目标 EPROCESS，确保线程枚举期间进程对象有效。 */
-    status = PsLookupProcessByProcessId(ULongToHandle(ProcessId), &processObject);
+    status = KswordARKProcessFlagsReferenceProcessObject(ProcessId, &processObject);
     if (!NT_SUCCESS(status)) {
         return status;
     }

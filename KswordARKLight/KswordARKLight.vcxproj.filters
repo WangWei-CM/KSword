@@ -164,6 +164,9 @@
     <ClCompile Include="Features\Hardware\HardwareFeature.cpp">
       <Filter>Features\Hardware</Filter>
     </ClCompile>
+    <ClCompile Include="Features\Hardware\HardwareHwidDispatchView.cpp">
+      <Filter>Features\Hardware</Filter>
+    </ClCompile>
     <ClCompile Include="Features\Hardware\HardwareModel.cpp">
       <Filter>Features\Hardware</Filter>
     </ClCompile>
@@ -422,6 +425,9 @@
     <ClCompile Include="..\Ksword5.1\Ksword5.1\ArkDriverClient\ArkDriverFile.cpp">
       <Filter>ArkDriverClient</Filter>
     </ClCompile>
+    <ClCompile Include="..\Ksword5.1\Ksword5.1\ArkDriverClient\ArkDriverHwid.cpp">
+      <Filter>ArkDriverClient</Filter>
+    </ClCompile>
     <ClCompile Include="..\Ksword5.1\Ksword5.1\ArkDriverClient\ArkDriverKernel.cpp">
       <Filter>ArkDriverClient</Filter>
     </ClCompile>
@@ -527,6 +533,9 @@
       <Filter>Features\Hardware</Filter>
     </ClInclude>
     <ClInclude Include="Features\Hardware\HardwareFeature.h">
+      <Filter>Features\Hardware</Filter>
+    </ClInclude>
+    <ClInclude Include="Features\Hardware\HardwareHwidDispatchView.h">
       <Filter>Features\Hardware</Filter>
     </ClInclude>
     <ClInclude Include="Features\Hardware\HardwareModel.h">
@@ -806,6 +815,9 @@
       <Filter>Shared\driver</Filter>
     </ClInclude>
     <ClInclude Include="..\shared\driver\KswordArkDeviceAuditIoctl.h">
+      <Filter>Shared\driver</Filter>
+    </ClInclude>
+    <ClInclude Include="..\shared\driver\KswordArkHwidIoctl.h">
       <Filter>Shared\driver</Filter>
     </ClInclude>
     <ClInclude Include="..\shared\driver\KswordArkKernelIoctl.h">

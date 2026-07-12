@@ -2,6 +2,7 @@
 
 #include "FileView.h"
 
+#include "../AuditCommon/AuditTable.h"
 #include "../../Ui/Controls.h"
 #include "../../Ui/ListViewUtil.h"
 #include "../../Ui/TabUtil.h"
@@ -44,12 +45,23 @@ constexpr int kAuditRefreshButtonId = 52611;
 constexpr int kAuditInnerTabId = 52612;
 constexpr int kAuditListId = 52613;
 constexpr int kAuditStatusId = 52614;
+constexpr int kAuditIntegrityButtonId = 52615;
 constexpr int kAuditMinifilterTabIndex = 0;
 constexpr int kAuditFileObjectTabIndex = 1;
 constexpr int kAuditSectionTabIndex = 2;
 constexpr int kAuditStorageTabIndex = 3;
 constexpr int kAuditBitLockerTabIndex = 4;
 constexpr unsigned long kAuditMaxSectionMappings = 256UL;
+constexpr UINT kIntegrityMenuUntrusted = 52701;
+constexpr UINT kIntegrityMenuLow = 52702;
+constexpr UINT kIntegrityMenuMedium = 52703;
+constexpr UINT kIntegrityMenuMediumPlus = 52704;
+constexpr UINT kIntegrityMenuHigh = 52705;
+constexpr UINT kIntegrityMenuSystem = 52706;
+
+#ifndef SECURITY_MANDATORY_MEDIUM_PLUS_RID
+#define SECURITY_MANDATORY_MEDIUM_PLUS_RID (0x00002100L)
+#endif
 
 // AuditRow is the common table model for every read-only file audit subpage.
 // Inputs are collected by R3 public APIs or ArkDriverClient; processing only
@@ -80,6 +92,7 @@ struct FileAuditPageState {
     HWND hwnd = nullptr;
     HWND targetEdit = nullptr;
     HWND refreshButton = nullptr;
+    HWND integrityButton = nullptr;
     HWND tab = nullptr;
     HWND list = nullptr;
     HWND status = nullptr;
@@ -247,6 +260,69 @@ std::wstring BuildDriverNtPath(const std::wstring& path) {
         return L"\\??\\UNC\\" + nativePath.substr(2);
     }
     return L"\\??\\" + nativePath;
+}
+
+// ProbeWin32PathForAttributes converts driver-style \??\ paths back to Win32
+// form for a best-effort directory check. Input is the user target text; output
+// may still be an NT path when no lossless Win32 projection exists.
+std::wstring ProbeWin32PathForAttributes(const std::wstring& path) {
+    std::wstring trimmed = TrimmedPath(path);
+    for (wchar_t& ch : trimmed) {
+        if (ch == L'/') {
+            ch = L'\\';
+        }
+    }
+    if (trimmed.rfind(L"\\??\\UNC\\", 0) == 0) {
+        return L"\\\\" + trimmed.substr(8);
+    }
+    if (trimmed.rfind(L"\\??\\", 0) == 0) {
+        return trimmed.substr(4);
+    }
+    return trimmed;
+}
+
+// IntegrityRidFromMenu maps the popup preset to a mandatory label RID. Input is
+// the command id selected from the File page menu; output false means unknown id.
+bool IntegrityRidFromMenu(const UINT command, unsigned long& ridOut, std::wstring& labelOut) {
+    switch (command) {
+    case kIntegrityMenuUntrusted:
+        ridOut = SECURITY_MANDATORY_UNTRUSTED_RID;
+        labelOut = L"Untrusted";
+        return true;
+    case kIntegrityMenuLow:
+        ridOut = SECURITY_MANDATORY_LOW_RID;
+        labelOut = L"Low";
+        return true;
+    case kIntegrityMenuMedium:
+        ridOut = SECURITY_MANDATORY_MEDIUM_RID;
+        labelOut = L"Medium";
+        return true;
+    case kIntegrityMenuMediumPlus:
+        ridOut = SECURITY_MANDATORY_MEDIUM_PLUS_RID;
+        labelOut = L"Medium Plus";
+        return true;
+    case kIntegrityMenuHigh:
+        ridOut = SECURITY_MANDATORY_HIGH_RID;
+        labelOut = L"High";
+        return true;
+    case kIntegrityMenuSystem:
+        ridOut = SECURITY_MANDATORY_SYSTEM_RID;
+        labelOut = L"System";
+        return true;
+    default:
+        ridOut = 0;
+        labelOut.clear();
+        return false;
+    }
+}
+
+// NtStatusText formats signed NTSTATUS values from R0 responses. Input is the
+// status value; output is an uppercase hex string for stable troubleshooting.
+std::wstring NtStatusText(const long status) {
+    std::wostringstream stream;
+    stream << L"0x" << std::uppercase << std::hex << std::setw(8) << std::setfill(L'0')
+           << static_cast<std::uint32_t>(status);
+    return stream.str();
 }
 
 // DefaultAuditTarget chooses a harmless existing target for initial display.
@@ -1105,6 +1181,100 @@ void RefreshAuditRows(FileAuditPageState& state) {
     SetAuditStatus(state, L"状态：" + tabName + L" 只读审计完成，行数=" + std::to_wstring(state.rows.size()) + L"。灰/黄状态表示驱动不支持、数据不可用或权限不足。");
 }
 
+// ApplyFileIntegrityPreset mirrors Ksword5.1's ArkDriverClient file-integrity
+// call. Inputs are the audit page and a mandatory-label preset; processing
+// normalizes to the driver NT path, asks for explicit confirmation, calls the R0
+// wrapper, and appends the operation result to the visible table.
+void ApplyFileIntegrityPreset(FileAuditPageState& state, const unsigned long rid, const std::wstring& label) {
+    const std::wstring target = TrimmedPath(TextFromWindow(state.targetEdit));
+    if (target.empty()) {
+        SetAuditStatus(state, L"状态：文件完整性设置失败，目标路径为空。");
+        return;
+    }
+
+    const std::wstring ntPath = BuildDriverNtPath(target);
+    const std::wstring probePath = ProbeWin32PathForAttributes(target);
+    const DWORD attributes = ::GetFileAttributesW(probePath.c_str());
+    const bool attributesKnown = attributes != INVALID_FILE_ATTRIBUTES;
+    const bool isDirectory = attributesKnown && (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+
+    std::wstring prompt = L"将通过 KswordARK R0 文件完整性协议设置 Mandatory Label。\r\n\r\n目标: ";
+    prompt += target;
+    prompt += L"\r\n驱动路径: " + ntPath;
+    prompt += L"\r\n级别: " + label + L" (RID=" + HexText(rid) + L")";
+    prompt += L"\r\n类型: ";
+    prompt += attributesKnown ? (isDirectory ? L"目录" : L"文件") : L"无法通过 Win32 预判，按文件提交";
+    prompt += L"\r\n\r\n该操作会修改文件/目录安全标签，是否继续？";
+    if (::MessageBoxW(state.hwnd, prompt.c_str(), L"确认 R0 文件完整性设置", MB_YESNO | MB_DEFBUTTON2 | MB_ICONWARNING) != IDYES) {
+        SetAuditStatus(state, L"状态：用户取消文件完整性设置。");
+        return;
+    }
+
+    const ksword::ark::DriverClient client;
+    const ksword::ark::FileIntegrityResult result = client.setFileIntegrity(ntPath, isDirectory, rid);
+    const bool ok = result.io.ok &&
+        !result.unsupported &&
+        result.lastStatus >= 0 &&
+        result.status == KSWORD_ARK_FILE_INTEGRITY_STATUS_APPLIED;
+
+    std::wostringstream value;
+    value << label << L", RID=0x" << std::hex << std::uppercase << rid
+          << L", directory=" << (isDirectory ? 1 : 0);
+    std::wostringstream detail;
+    detail << Utf8ToWide(result.io.message)
+           << L"; status=" << result.status
+           << L"; lastStatus=" << NtStatusText(result.lastStatus)
+           << L"; bytes=" << result.io.bytesReturned;
+    if (result.unsupported) {
+        detail << L"; unsupported";
+    }
+    AddRow(
+        state.rows,
+        L"IOCTL_KSWORD_ARK_SET_FILE_INTEGRITY",
+        L"ArkDriverClient::setFileIntegrity",
+        ok ? L"OK" : L"失败",
+        value.str(),
+        detail.str());
+    PopulateAuditList(state);
+    SetAuditStatus(state, ok
+        ? L"状态：R0 文件完整性设置成功，结果已追加到表格。"
+        : L"状态：R0 文件完整性设置失败，结果已追加到表格。");
+    if (!ok) {
+        ::MessageBoxW(state.hwnd, detail.str().c_str(), L"R0 文件完整性设置失败", MB_OK | MB_ICONINFORMATION);
+    }
+}
+
+// ShowFileIntegrityMenu displays mandatory-label presets for the current target.
+// Input is page state and a screen point; processing maps the selected item to a
+// RID and delegates to ApplyFileIntegrityPreset.
+void ShowFileIntegrityMenu(FileAuditPageState& state, POINT screenPoint) {
+    HMENU menu = ::CreatePopupMenu();
+    if (!menu) {
+        return;
+    }
+    ::AppendMenuW(menu, MF_STRING, kIntegrityMenuUntrusted, L"Untrusted (S-1-16-0)");
+    ::AppendMenuW(menu, MF_STRING, kIntegrityMenuLow, L"Low (S-1-16-4096)");
+    ::AppendMenuW(menu, MF_STRING, kIntegrityMenuMedium, L"Medium (S-1-16-8192)");
+    ::AppendMenuW(menu, MF_STRING, kIntegrityMenuMediumPlus, L"Medium Plus (S-1-16-8448)");
+    ::AppendMenuW(menu, MF_STRING, kIntegrityMenuHigh, L"High (S-1-16-12288)");
+    ::AppendMenuW(menu, MF_STRING, kIntegrityMenuSystem, L"System (S-1-16-16384)");
+    const UINT command = ::TrackPopupMenu(
+        menu,
+        TPM_RETURNCMD | TPM_RIGHTBUTTON,
+        screenPoint.x,
+        screenPoint.y,
+        0,
+        state.hwnd,
+        nullptr);
+    ::DestroyMenu(menu);
+
+    unsigned long rid = 0;
+    std::wstring label;
+    if (IntegrityRidFromMenu(command, rid, label)) {
+        ApplyFileIntegrityPreset(state, rid, label);
+    }
+}
+
 // LayoutAuditChildren sizes the audit controls. Input is audit state; processing
 // uses the current client rectangle and tab display area; no value is returned.
 void LayoutAuditChildren(FileAuditPageState& state) {
@@ -1112,12 +1282,14 @@ void LayoutAuditChildren(FileAuditPageState& state) {
     ::GetClientRect(state.hwnd, &rc);
     const int margin = 8;
     const int buttonW = 82;
+    const int integrityButtonW = 108;
     const int topH = 26;
     const int statusH = 22;
     const int gap = 6;
-    const int editW = std::max(160, Width(rc) - margin * 2 - buttonW - gap);
+    const int editW = std::max(160, Width(rc) - margin * 2 - buttonW - integrityButtonW - gap * 2);
     ::MoveWindow(state.targetEdit, margin, margin, editW, topH, TRUE);
     ::MoveWindow(state.refreshButton, margin + editW + gap, margin, buttonW, topH, TRUE);
+    ::MoveWindow(state.integrityButton, margin + editW + gap + buttonW + gap, margin, integrityButtonW, topH, TRUE);
 
     const int tabTop = margin + topH + gap;
     const int tabH = std::max(80, Height(rc) - tabTop - statusH - margin);
@@ -1134,10 +1306,11 @@ bool CreateAuditControls(FileAuditPageState& state) {
     state.targetEdit = ::CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", DefaultAuditTarget().c_str(), WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
         0, 0, 0, 0, state.hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kAuditTargetEditId)), ::GetModuleHandleW(nullptr), nullptr);
     state.refreshButton = Ksword::Ui::CreateButton(state.hwnd, kAuditRefreshButtonId, L"刷新", 0, 0, 0, 0);
+    state.integrityButton = Ksword::Ui::CreateButton(state.hwnd, kAuditIntegrityButtonId, L"设置完整性", 0, 0, 0, 0);
     state.tab = Ksword::Ui::CreateTabControl(state.hwnd, kAuditInnerTabId, 0, 0, 0, 0);
     state.list = Ksword::Ui::CreateReportListView(state.tab, kAuditListId, 0, 0, 0, 0);
     state.status = Ksword::Ui::CreateText(state.hwnd, kAuditStatusId, L"状态：等待刷新。", 0, 0, 0, 0);
-    if (!state.targetEdit || !state.refreshButton || !state.tab || !state.list || !state.status) {
+    if (!state.targetEdit || !state.refreshButton || !state.integrityButton || !state.tab || !state.list || !state.status) {
         return false;
     }
     ::SendMessageW(state.targetEdit, WM_SETFONT, reinterpret_cast<WPARAM>(Ksword::Ui::SystemUIFont()), TRUE);
@@ -1190,6 +1363,19 @@ bool RegisterAuditClass() {
                 RefreshAuditRows(*state);
                 return 0;
             }
+            if (state && LOWORD(wParam) == kAuditIntegrityButtonId) {
+                POINT pt{};
+                if (state->integrityButton) {
+                    RECT rc{};
+                    ::GetWindowRect(state->integrityButton, &rc);
+                    pt.x = rc.left;
+                    pt.y = rc.bottom;
+                } else {
+                    ::GetCursorPos(&pt);
+                }
+                ShowFileIntegrityMenu(*state, pt);
+                return 0;
+            }
             if (state && LOWORD(wParam) == kAuditTargetEditId && HIWORD(wParam) == EN_UPDATE) {
                 SetAuditStatus(*state, L"状态：目标路径已修改，点击刷新重新采集只读审计数据。");
                 return 0;
@@ -1206,6 +1392,25 @@ bool RegisterAuditClass() {
                     RefreshAuditRows(*state);
                     return 0;
                 }
+                if (header && header->hwndFrom == state->list && header->code == NM_RCLICK) {
+                    POINT pt{};
+                    ::GetCursorPos(&pt);
+                    Ksword::Features::AuditCommon::ShowAuditTableContextMenu(state->hwnd, state->list, pt);
+                    return 0;
+                }
+            }
+            break;
+        case WM_CONTEXTMENU:
+            if (state && reinterpret_cast<HWND>(wParam) == state->list) {
+                POINT pt{ GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+                if (pt.x == -1 && pt.y == -1) {
+                    RECT rc{};
+                    ::GetWindowRect(state->list, &rc);
+                    pt.x = rc.left + 24;
+                    pt.y = rc.top + 24;
+                }
+                Ksword::Features::AuditCommon::ShowAuditTableContextMenu(state->hwnd, state->list, pt);
+                return 0;
             }
             break;
         case WM_CTLCOLORSTATIC: {

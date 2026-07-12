@@ -10,6 +10,7 @@
 #include "../../../Ksword5.1/Ksword5.1/ArkDriverClient/ArkDriverClient.h"
 
 #include <commctrl.h>
+#include <commdlg.h>
 #include <shellapi.h>
 #include <windowsx.h>
 
@@ -20,6 +21,7 @@
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 namespace Ksword::Features::Process {
@@ -36,6 +38,7 @@ constexpr int kRefreshSliderId = 52007;
 constexpr UINT kContextMenuBaseId = 53000;
 constexpr UINT_PTR kRefreshTimerId = 52008;
 constexpr UINT kMsgInitialRefresh = WM_APP + 520;
+constexpr UINT kMsgRequestRefresh = WM_APP + 521;
 constexpr int kTreeIndentPixels = 18;
 constexpr int kTreeIconGap = 4;
 constexpr int kTreeTextGap = 4;
@@ -47,6 +50,7 @@ struct NotifyResult {
 
 enum class ProcessRowVisualState {
     Normal,
+    KernelOnly,
     Added,
     Removed
 };
@@ -178,6 +182,28 @@ struct ProcessViewState {
     std::unordered_map<DWORD, ProcessSnapshotRow> lastActiveRowsByPid;
     std::unordered_map<DWORD, ProcessRowVisualState> visualStateByPid;
     bool hasLastActiveSnapshot = false;
+};
+
+// KernelProcessSnapshotEntry 用途：保存 ArkDriverClient R0 枚举返回的一行进程证据。
+// 调用方式：EnumerateProcessesByR0Driver 填充，ApplyDefaultHiddenProcessAudit 合并到 R3 行。
+struct KernelProcessSnapshotEntry {
+    std::uint32_t processId = 0;
+    std::uint32_t parentProcessId = 0;
+    std::uint32_t flags = 0;
+    std::uint32_t sessionId = 0;
+    std::uint32_t fieldFlags = 0;
+    std::uint32_t r0Status = KSWORD_ARK_PROCESS_R0_STATUS_UNAVAILABLE;
+    std::string imageName;
+    std::string imagePath;
+};
+
+// HiddenProcessAuditResult 用途：汇总默认 R0 查隐藏进程结果，最终追加到状态栏。
+// 返回值语义：querySucceeded=false 表示驱动不可用或 IOCTL 失败，但普通 R3 刷新继续执行。
+struct HiddenProcessAuditResult {
+    bool querySucceeded = false;
+    std::size_t kernelEnumeratedCount = 0;
+    std::size_t kernelOnlyCount = 0;
+    std::wstring detailText;
 };
 
 // ColumnSet returns the report columns for a process view mode. Input is the
@@ -553,6 +579,9 @@ ProcessRowVisualState VisualStateForDisplayRow(ProcessViewState& state, const Pr
     if (!row) {
         return ProcessRowVisualState::Normal;
     }
+    if (row->r0KernelOnly) {
+        return ProcessRowVisualState::KernelOnly;
+    }
     const auto found = state.visualStateByPid.find(row->processId);
     return found != state.visualStateByPid.end() ? found->second : ProcessRowVisualState::Normal;
 }
@@ -563,6 +592,9 @@ ProcessRowVisualState VisualStateForDisplayRow(ProcessViewState& state, const Pr
 COLORREF RowBackgroundColor(bool selected, ProcessRowVisualState visualState) {
     if (selected) {
         return ::GetSysColor(COLOR_HIGHLIGHT);
+    }
+    if (visualState == ProcessRowVisualState::KernelOnly) {
+        return RGB(255, 226, 226);
     }
     if (visualState == ProcessRowVisualState::Added) {
         return RGB(216, 248, 216);
@@ -579,6 +611,9 @@ COLORREF RowBackgroundColor(bool selected, ProcessRowVisualState visualState) {
 COLORREF RowTextColor(bool selected, ProcessRowVisualState visualState) {
     if (selected) {
         return ::GetSysColor(COLOR_HIGHLIGHTTEXT);
+    }
+    if (visualState == ProcessRowVisualState::KernelOnly) {
+        return RGB(150, 0, 0);
     }
     if (visualState == ProcessRowVisualState::Removed) {
         return ::GetSysColor(COLOR_GRAYTEXT);
@@ -798,6 +833,187 @@ std::wstring FlagHexText(ULONG value) {
     return stream.str();
 }
 
+// ProcessR0StatusText 用途：把 R0 枚举行状态转换成状态栏/表格可读文本。
+// 输入 statusValue 为 KSWORD_ARK_PROCESS_R0_STATUS_*；返回中文短语，未知值保留数字。
+std::wstring ProcessR0StatusText(const std::uint32_t statusValue) {
+    switch (statusValue) {
+    case KSWORD_ARK_PROCESS_R0_STATUS_OK:
+        return L"OK";
+    case KSWORD_ARK_PROCESS_R0_STATUS_PARTIAL:
+        return L"Partial";
+    case KSWORD_ARK_PROCESS_R0_STATUS_DYNDATA_MISSING:
+        return L"DynData missing";
+    case KSWORD_ARK_PROCESS_R0_STATUS_READ_FAILED:
+        return L"Read failed";
+    default:
+        return L"Unavailable";
+    }
+}
+
+// EnumerateProcessesByR0Driver 用途：复用 Ksword5.1 的 R0 进程枚举方式查隐藏进程。
+// 参数 processListOut 接收 R0 行；detailTextOut 接收 ArkDriverClient 诊断文本；返回 true 表示可对比。
+bool EnumerateProcessesByR0Driver(
+    std::vector<KernelProcessSnapshotEntry>* const processListOut,
+    std::wstring* const detailTextOut) {
+    if (processListOut == nullptr) {
+        return false;
+    }
+    processListOut->clear();
+    if (detailTextOut != nullptr) {
+        detailTextOut->clear();
+    }
+
+    const ksword::ark::DriverClient driverClient;
+    const ksword::ark::ProcessEnumResult enumResult = driverClient.enumerateProcesses(
+        KSWORD_ARK_ENUM_PROCESS_FLAG_SCAN_CID_TABLE);
+    if (!enumResult.io.ok) {
+        if (detailTextOut != nullptr) {
+            *detailTextOut = NarrowToWide(enumResult.io.message);
+        }
+        return false;
+    }
+
+    processListOut->reserve(enumResult.entries.size());
+    for (const ksword::ark::ProcessEntry& entry : enumResult.entries) {
+        KernelProcessSnapshotEntry processEntry{};
+        processEntry.processId = entry.processId;
+        processEntry.parentProcessId = entry.parentProcessId;
+        processEntry.flags = entry.flags;
+        processEntry.sessionId = entry.sessionId;
+        processEntry.fieldFlags = entry.fieldFlags;
+        processEntry.r0Status = entry.r0Status;
+        processEntry.imageName = entry.imageName;
+        processEntry.imagePath = entry.imagePath;
+        processListOut->push_back(std::move(processEntry));
+    }
+
+    if (detailTextOut != nullptr) {
+        *detailTextOut = NarrowToWide(enumResult.io.message);
+    }
+    return true;
+}
+
+// PromptOpenPayloadFile shows a common open-file dialog for R0 injection payloads.
+// Inputs are owner/filter/title; processing never changes the current directory;
+// output is empty when the user cancels.
+std::wstring PromptOpenPayloadFile(HWND owner, const wchar_t* filter, const wchar_t* title) {
+    wchar_t path[32768]{};
+    OPENFILENAMEW ofn{};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = owner;
+    ofn.lpstrFilter = filter;
+    ofn.lpstrFile = path;
+    ofn.nMaxFile = static_cast<DWORD>(std::size(path));
+    ofn.lpstrTitle = title;
+    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+    return ::GetOpenFileNameW(&ofn) ? std::wstring(path) : std::wstring();
+}
+
+// ConfirmR0Injection asks for the explicit UI confirmation expected by the
+// shared R0 injection protocol. Inputs are owner/action/pid/path; output is true
+// only when the user accepts the high-risk operation.
+bool ConfirmR0Injection(HWND owner, const wchar_t* action, DWORD pid, const std::wstring& path) {
+    std::wstring message = L"将通过 KswordARK R0 进程注入协议执行操作：";
+    message += action ? action : L"注入";
+    message += L"\r\n\r\n目标 PID: " + std::to_wstring(pid);
+    message += L"\r\nPayload: " + path;
+    message += L"\r\n\r\n该操作会在目标进程创建远程线程，可能导致目标崩溃或系统不稳定。是否继续？";
+    return ::MessageBoxW(owner, message.c_str(), L"确认 R0 注入", MB_YESNO | MB_DEFBUTTON2 | MB_ICONWARNING) == IDYES;
+}
+
+// MergeKernelProcessExtension 用途：把 R0 枚举字段合并到 Light 进程行，不覆盖 R3 公开 API 的基础信息。
+// 参数 row 是目标 UI 行，kernelProcess 是 R0 行；无返回值，调用方继续决定是否合成隐藏行。
+void MergeKernelProcessExtension(
+    ProcessSnapshotRow& row,
+    const KernelProcessSnapshotEntry& kernelProcess) {
+    row.r0EnumFlags = kernelProcess.flags;
+    row.r0EnumStatus = kernelProcess.r0Status;
+    row.r0EnumImagePath = NarrowToWide(kernelProcess.imagePath);
+    if ((kernelProcess.fieldFlags & KSWORD_ARK_PROCESS_FIELD_SESSION_PRESENT) != 0U) {
+        row.sessionId = kernelProcess.sessionId;
+    }
+    if (!row.r0EnumImagePath.empty() && row.imagePath.empty()) {
+        row.imagePath = row.r0EnumImagePath;
+    }
+}
+
+// BuildKernelOnlyRow 用途：构造 R0 有、R3 无的合成行，和 Ksword5.1 的隐藏进程文案保持一致。
+// 输入 kernelProcess 为 R0 枚举行；返回可直接追加到 ProcessModel 的 ProcessSnapshotRow。
+ProcessSnapshotRow BuildKernelOnlyRow(const KernelProcessSnapshotEntry& kernelProcess) {
+    ProcessSnapshotRow row{};
+    row.processId = static_cast<DWORD>(kernelProcess.processId);
+    row.parentProcessId = static_cast<DWORD>(kernelProcess.parentProcessId);
+    row.r0KernelOnly = true;
+    MergeKernelProcessExtension(row, kernelProcess);
+
+    const std::wstring imageName = NarrowToWide(kernelProcess.imageName);
+    row.imageName = imageName.empty() ? L"[R0] Unknown" : (L"[R0] " + imageName);
+    const bool cidTableWeakEvidence =
+        (kernelProcess.flags &
+            (KSWORD_ARK_PROCESS_FLAG_CID_TABLE_REFERENCE_FAILED |
+                KSWORD_ARK_PROCESS_FLAG_TERMINATING_OR_EXITED)) != 0U;
+    row.imagePath = cidTableWeakEvidence
+        ? L"[CID Table命中：对象引用失败或已退出]"
+        : L"[仅内核枚举可见]";
+    row.r0AuditSummary = L"KernelOnly(Hidden?)";
+    row.r0AuditDetail = cidTableWeakEvidence
+        ? L"CID Table命中：保留显示，可尝试R0结束"
+        : L"仅内核枚举可见";
+    row.r0AuditDetail += L"; flags=" + FlagHexText(kernelProcess.flags);
+    row.r0AuditDetail += L"; status=" + ProcessR0StatusText(kernelProcess.r0Status);
+    return row;
+}
+
+// ApplyDefaultHiddenProcessAudit 用途：默认执行 R0/R3 进程列表差异对比，找出疑似隐藏进程。
+// 返回值包含状态栏摘要；驱动不可用时只返回失败摘要，不影响 rows 中的 R3 枚举结果。
+HiddenProcessAuditResult ApplyDefaultHiddenProcessAudit(std::vector<ProcessSnapshotRow>& rows) {
+    HiddenProcessAuditResult result{};
+    std::vector<KernelProcessSnapshotEntry> kernelRows;
+    std::wstring queryDetail;
+    if (!EnumerateProcessesByR0Driver(&kernelRows, &queryDetail)) {
+        result.detailText = L"R0隐藏检查: 待驱动装载/查询失败";
+        if (!queryDetail.empty()) {
+            result.detailText += L" " + queryDetail;
+        }
+        return result;
+    }
+
+    result.querySucceeded = true;
+    result.kernelEnumeratedCount = kernelRows.size();
+
+    std::unordered_map<DWORD, const KernelProcessSnapshotEntry*> kernelByPid;
+    kernelByPid.reserve(kernelRows.size() * 2U + 1U);
+    for (const KernelProcessSnapshotEntry& kernelProcess : kernelRows) {
+        kernelByPid[static_cast<DWORD>(kernelProcess.processId)] = &kernelProcess;
+    }
+
+    std::unordered_set<DWORD> userPidSet;
+    userPidSet.reserve(rows.size() * 2U + 1U);
+    for (ProcessSnapshotRow& row : rows) {
+        userPidSet.insert(row.processId);
+        const auto found = kernelByPid.find(row.processId);
+        if (found != kernelByPid.end()) {
+            MergeKernelProcessExtension(row, *found->second);
+        }
+    }
+
+    for (const KernelProcessSnapshotEntry& kernelProcess : kernelRows) {
+        const DWORD processId = static_cast<DWORD>(kernelProcess.processId);
+        if (userPidSet.find(processId) != userPidSet.end()) {
+            continue;
+        }
+        rows.push_back(BuildKernelOnlyRow(kernelProcess));
+        userPidSet.insert(processId);
+        ++result.kernelOnlyCount;
+    }
+
+    result.detailText = L"R0隐藏检查: 内核返回 " +
+        std::to_wstring(result.kernelEnumeratedCount) +
+        L"，疑似隐藏 " +
+        std::to_wstring(result.kernelOnlyCount);
+    return result;
+}
+
 // SourceMaskText renders the process cross-view source matrix. Input is the raw
 // sourceMask from R0; processing keeps names aligned with the shared protocol.
 std::wstring SourceMaskText(ULONG sourceMask) {
@@ -875,6 +1091,15 @@ void ApplyR0ProcessAuditRows(std::vector<ProcessSnapshotRow>& rows, std::wstring
     if (!audit.io.ok) {
         statusSuffix = L"；R0审计不可用: " + NarrowToWide(audit.io.message);
         for (ProcessSnapshotRow& row : rows) {
+            if (row.r0KernelOnly) {
+                row.r0AuditSummary = row.r0AuditSummary.empty() ? L"KernelOnly(Hidden?)" : row.r0AuditSummary;
+                if (!row.r0AuditDetail.empty()) {
+                    row.r0AuditDetail += L"; CrossView不可用";
+                } else {
+                    row.r0AuditDetail = audit.unsupported ? L"驱动不支持CrossView" : L"CrossView查询失败";
+                }
+                continue;
+            }
             row.r0AuditSummary = L"不可用";
             row.r0AuditDetail = audit.unsupported ? L"驱动不支持" : L"查询失败";
         }
@@ -892,6 +1117,15 @@ void ApplyR0ProcessAuditRows(std::vector<ProcessSnapshotRow>& rows, std::wstring
     for (ProcessSnapshotRow& row : rows) {
         const auto found = auditByPid.find(row.processId);
         if (found == auditByPid.end()) {
+            if (row.r0KernelOnly) {
+                row.r0AuditSummary = row.r0AuditSummary.empty() ? L"KernelOnly(Hidden?)" : row.r0AuditSummary;
+                if (!row.r0AuditDetail.empty()) {
+                    row.r0AuditDetail += L"; CrossView未返回";
+                } else {
+                    row.r0AuditDetail = L"仅 R0 枚举返回，CrossView未返回";
+                }
+                continue;
+            }
             row.r0AuditSummary = L"R3-only";
             row.r0AuditDetail = L"R0未返回";
             continue;
@@ -970,8 +1204,9 @@ void RefreshProcesses(ProcessViewState& state) {
     }
 
     std::vector<ProcessSnapshotRow> rows = result.rows;
-    std::wstring r0StatusSuffix;
-    ApplyR0ProcessAuditRows(rows, r0StatusSuffix);
+    const HiddenProcessAuditResult hiddenAudit = ApplyDefaultHiddenProcessAudit(rows);
+    std::wstring crossViewStatusSuffix;
+    ApplyR0ProcessAuditRows(rows, crossViewStatusSuffix);
     const ULONGLONG nowMs = ::GetTickCount64();
     const ULONGLONG elapsedMs = state.previousSampleTickMs == 0 ? 0 : nowMs - state.previousSampleTickMs;
     const DWORD processorCount = std::max<DWORD>(1, ::GetActiveProcessorCount(ALL_PROCESSOR_GROUPS));
@@ -1028,7 +1263,7 @@ void RefreshProcesses(ProcessViewState& state) {
         L" 个进程；新增 " + std::to_wstring(addedCount) +
         L"，退出 " + std::to_wstring(removedCount) +
         L" 个进程；刷新 " + std::to_wstring(state.refreshIntervalSeconds) +
-        L"s" + r0StatusSuffix +
+        L"s；" + hiddenAudit.detailText + crossViewStatusSuffix +
         L"；左 Ctrl 按下时跳过自动刷新。");
 }
 
@@ -1151,6 +1386,37 @@ void ExecuteMenuItem(ProcessViewState& state, ProcessActionId actionId) {
         return;
     }
 
+    if (actionId == ProcessActionId::R0InjectDll || actionId == ProcessActionId::R0InjectShellcode) {
+        const std::vector<DWORD> pids = SelectedPids(state);
+        if (pids.size() != 1) {
+            SetStatus(state, L"R0 注入需要单选一个进程。");
+            return;
+        }
+
+        const bool dllMode = actionId == ProcessActionId::R0InjectDll;
+        const std::wstring payloadPath = PromptOpenPayloadFile(
+            state.hwnd,
+            dllMode ? L"DLL 文件 (*.dll)\0*.dll\0所有文件 (*.*)\0*.*\0" : L"Shellcode/二进制文件 (*.*)\0*.*\0",
+            dllMode ? L"选择要注入的 DLL" : L"选择要注入的 Shellcode 二进制文件");
+        if (payloadPath.empty()) {
+            SetStatus(state, L"已取消 R0 注入。");
+            return;
+        }
+        if (!ConfirmR0Injection(state.hwnd, dllMode ? L"DLL 注入" : L"Shellcode 注入", pids.front(), payloadPath)) {
+            SetStatus(state, L"用户取消 R0 注入。");
+            return;
+        }
+
+        const ProcessActionResult result = dllMode
+            ? ExecuteR0ProcessDllInjection(pids, payloadPath)
+            : ExecuteR0ProcessShellcodeInjection(pids, payloadPath);
+        SetStatus(state, result.title + L": " + result.detail);
+        if (!result.success) {
+            ::MessageBoxW(state.hwnd, result.detail.c_str(), result.title.c_str(), MB_OK | MB_ICONINFORMATION);
+        }
+        return;
+    }
+
     const ProcessActionResult result = ExecuteProcessAction(actionId, SelectedPids(state), state.model.rows());
     SetStatus(state, result.title + L": " + result.detail);
     if (!result.success) {
@@ -1232,6 +1498,15 @@ void ShowContextMenu(ProcessViewState& state, POINT screenPoint) {
     appendAction(pplMenu, ProcessActionId::R0SetPplWinTcb, L"WinTcb (0x61)", hasProcessSelection);
     appendPopup(r0Menu, pplMenu, L"设置PPL");
 
+    HMENU integrityMenu = ::CreatePopupMenu();
+    appendAction(integrityMenu, ProcessActionId::R0SetIntegrityUntrusted, L"Untrusted (S-1-16-0)", hasProcessSelection);
+    appendAction(integrityMenu, ProcessActionId::R0SetIntegrityLow, L"Low (S-1-16-4096)", hasProcessSelection);
+    appendAction(integrityMenu, ProcessActionId::R0SetIntegrityMedium, L"Medium (S-1-16-8192)", hasProcessSelection);
+    appendAction(integrityMenu, ProcessActionId::R0SetIntegrityMediumPlus, L"Medium Plus (S-1-16-8448)", hasProcessSelection);
+    appendAction(integrityMenu, ProcessActionId::R0SetIntegrityHigh, L"High (S-1-16-12288)", hasProcessSelection);
+    appendAction(integrityMenu, ProcessActionId::R0SetIntegritySystem, L"System (S-1-16-16384)", hasProcessSelection);
+    appendPopup(r0Menu, integrityMenu, L"设置完整性");
+
     HMENU hideMenu = ::CreatePopupMenu();
     appendAction(hideMenu, ProcessActionId::R0HideUnlinkOnly, L"只断链", hasProcessSelection);
     appendAction(hideMenu, ProcessActionId::R0HidePatchPidOnly, L"只改PID", hasProcessSelection);
@@ -1246,6 +1521,11 @@ void ShowContextMenu(ProcessViewState& state, POINT screenPoint) {
     appendAction(specialMenu, ProcessActionId::R0DisableApcInsertion, L"禁止APC插入(现有线程)", hasProcessSelection);
     appendAction(specialMenu, ProcessActionId::R0DkomRemoveFromCidTable, L"DKOM从PspCidTable删除", hasProcessSelection);
     appendPopup(r0Menu, specialMenu, L"特殊/DKOM");
+
+    HMENU injectMenu = ::CreatePopupMenu();
+    appendAction(injectMenu, ProcessActionId::R0InjectDll, L"DLL 注入...", singleProcess);
+    appendAction(injectMenu, ProcessActionId::R0InjectShellcode, L"Shellcode 注入...", singleProcess);
+    appendPopup(r0Menu, injectMenu, L"注入(需确认)");
     appendPopup(menu, r0Menu, L"R0");
 
     if (!hasVisibleSelection && !hasProcessSelection) {
@@ -1377,6 +1657,7 @@ LRESULT CALLBACK ProcessViewWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         }
         return 0;
     case kMsgInitialRefresh:
+    case kMsgRequestRefresh:
         if (state) {
             RefreshProcesses(*state);
             RestartRefreshTimer(*state);
@@ -1564,6 +1845,13 @@ void ResizeProcessView(HWND view, const RECT& bounds) {
             bounds.right - bounds.left,
             bounds.bottom - bounds.top,
             TRUE);
+    }
+}
+
+void RequestProcessViewRefresh(HWND view) {
+    if (view) {
+        // view 用途：已创建的进程页窗口；PostMessage 避免驱动状态回调同步阻塞主窗口。
+        ::PostMessageW(view, kMsgRequestRefresh, 0, 0);
     }
 }
 

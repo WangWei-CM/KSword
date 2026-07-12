@@ -16,4 +16,8 @@ HWND CreateProcessView(HWND parent, const RECT& bounds);
 // there is no return value because invalid HWNDs are ignored by Win32.
 void ResizeProcessView(HWND view, const RECT& bounds);
 
+// RequestProcessViewRefresh 用途：向已有进程页投递轻量刷新请求。
+// 参数 view 是进程页 HWND；处理会复用普通刷新路径，并默认执行 R0 查隐藏。
+void RequestProcessViewRefresh(HWND view);
+
 } // namespace Ksword::Features::Process

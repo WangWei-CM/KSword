@@ -33,6 +33,13 @@ struct ProcessSnapshotRow {
     ULONG r0SourceMask = 0;
     ULONG r0AnomalyFlags = 0;
     ULONG r0Confidence = 0;
+    // r0KernelOnly 用途：标记该行只由 R0 枚举返回，R3 公开列表不可见。
+    bool r0KernelOnly = false;
+    // r0EnumFlags/r0EnumStatus 用途：保存 R0 进程枚举协议中的 flags/status，供隐藏进程诊断和高亮使用。
+    std::uint32_t r0EnumFlags = 0;
+    std::uint32_t r0EnumStatus = 0;
+    // r0EnumImagePath 用途：保存 R0 读取到的映像路径，R3 无路径或合成隐藏行时作为诊断证据。
+    std::wstring r0EnumImagePath;
     std::wstring r0AuditSummary;
     std::wstring r0AuditDetail;
 };

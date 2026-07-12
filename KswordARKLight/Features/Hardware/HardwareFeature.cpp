@@ -1,5 +1,6 @@
 #include "HardwareFeature.h"
 
+#include "HardwareHwidDispatchView.h"
 #include "HardwareView.h"
 #include "../Kernel/KernelFeature.h"
 #include "../../Ui/Controls.h"
@@ -16,6 +17,7 @@ constexpr int kTabId = 61101;
 constexpr int kDeviceManagerTabIndex = 0;
 constexpr int kCpuIntegrityTabIndex = 1;
 constexpr int kCpuSnapshotTabIndex = 2;
+constexpr int kHwidDispatchTabIndex = 3;
 constexpr int kEmbeddedKernelPrimaryTabId = 51001;
 constexpr int kEmbeddedKernelSecondaryTabId = 51002;
 
@@ -28,6 +30,7 @@ struct HardwareFeaturePageState {
     HWND deviceManagerView = nullptr;
     HWND cpuIntegrityView = nullptr;
     HWND cpuSnapshotView = nullptr;
+    HWND hwidDispatchView = nullptr;
     int currentTab = kDeviceManagerTabIndex;
 };
 
@@ -55,6 +58,7 @@ void ShowPages(HardwareFeaturePageState& state) {
     const bool deviceVisible = state.currentTab == kDeviceManagerTabIndex;
     const bool cpuIntegrityVisible = state.currentTab == kCpuIntegrityTabIndex;
     const bool cpuVisible = state.currentTab == kCpuSnapshotTabIndex;
+    const bool hwidVisible = state.currentTab == kHwidDispatchTabIndex;
     if (state.deviceManagerView) {
         ::ShowWindow(state.deviceManagerView, deviceVisible ? SW_SHOW : SW_HIDE);
     }
@@ -63,6 +67,9 @@ void ShowPages(HardwareFeaturePageState& state) {
     }
     if (state.cpuSnapshotView) {
         ::ShowWindow(state.cpuSnapshotView, cpuVisible ? SW_SHOW : SW_HIDE);
+    }
+    if (state.hwidDispatchView) {
+        ::ShowWindow(state.hwidDispatchView, hwidVisible ? SW_SHOW : SW_HIDE);
     }
 }
 
@@ -112,6 +119,9 @@ void LayoutChildren(HardwareFeaturePageState& state) {
         ::MoveWindow(state.cpuSnapshotView, display.left, display.top, pageWidth, pageHeight, TRUE);
         HideEmbeddedKernelNavigationTabs(state.cpuSnapshotView);
     }
+    if (state.hwidDispatchView) {
+        ::MoveWindow(state.hwidDispatchView, display.left, display.top, pageWidth, pageHeight, TRUE);
+    }
     ShowPages(state);
 }
 
@@ -127,6 +137,7 @@ bool CreateChildControls(HardwareFeaturePageState& state) {
     Ksword::Ui::AddTabPage(state.tab, kDeviceManagerTabIndex, { L"设备/输入链审计" });
     Ksword::Ui::AddTabPage(state.tab, kCpuIntegrityTabIndex, { L"CPU/IDT 完整性" });
     Ksword::Ui::AddTabPage(state.tab, kCpuSnapshotTabIndex, { L"CPU 硬件快照" });
+    Ksword::Ui::AddTabPage(state.tab, kHwidDispatchTabIndex, { L"HWID Dispatch" });
     ::SendMessageW(state.tab, TCM_SETCURSEL, static_cast<WPARAM>(kDeviceManagerTabIndex), 0);
 
     RECT display = Ksword::Ui::GetTabDisplayRect(state.tab);
@@ -142,11 +153,13 @@ bool CreateChildControls(HardwareFeaturePageState& state) {
         61103,
         childBounds,
         Ksword::Features::Kernel::KernelFeatureId::CpuHardwareSnapshot);
+    state.hwidDispatchView = CreateHardwareHwidDispatchView(state.tab, childBounds);
     HideEmbeddedKernelNavigationTabs(state.cpuIntegrityView);
     HideEmbeddedKernelNavigationTabs(state.cpuSnapshotView);
     return state.deviceManagerView != nullptr &&
         state.cpuIntegrityView != nullptr &&
-        state.cpuSnapshotView != nullptr;
+        state.cpuSnapshotView != nullptr &&
+        state.hwidDispatchView != nullptr;
 }
 
 // RegisterHardwareFeatureClass registers the host window class once. There is

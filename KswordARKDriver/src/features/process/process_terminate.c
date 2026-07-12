@@ -122,7 +122,8 @@ typedef enum _KSWORD_ARK_TERMINATE_PROCESS_RESOLVE_SOURCE
     KswordArkTerminateResolveUnknown = 0,
     KswordArkTerminateResolveDirectCid = 1,
     KswordArkTerminateResolveCidTableCid = 2,
-    KswordArkTerminateResolveCidTableUniquePid = 3
+    KswordArkTerminateResolveCidTableUniquePid = 3,
+    KswordArkTerminateResolveActiveList = 4
 } KSWORD_ARK_TERMINATE_PROCESS_RESOLVE_SOURCE;
 
 typedef struct _KSWORD_ARK_TERMINATE_PROCESS_TARGET
@@ -487,6 +488,8 @@ Return Value:
         return "CidTableCid";
     case KswordArkTerminateResolveCidTableUniquePid:
         return "CidTableUniquePid";
+    case KswordArkTerminateResolveActiveList:
+        return "ActiveList";
     default:
         return "Unknown";
     }
@@ -759,6 +762,75 @@ Return Value:
 }
 
 static NTSTATUS
+KswordARKDriverResolveTerminateTargetByActiveList(
+    _In_opt_ WDFDEVICE Device,
+    _In_ ULONG ProcessId,
+    _Out_ KSWORD_ARK_TERMINATE_PROCESS_TARGET* Target
+    )
+/*++
+
+Routine Description:
+
+    Resolve a termination target through ActiveProcessLinks. 中文说明：当对方
+    hook/篡改 NtOpenProcess、ZwOpenProcess、PsLookupProcessByProcessId 或
+    PspCidTable 证据不完整时，本路径仍可从活动进程链表取得 EPROCESS 引用。
+
+Arguments:
+
+    Device - Optional device used for diagnostic logging.
+    ProcessId - PID-like identity supplied through the existing IOCTL.
+    Target - Receives a referenced process object and resolved identities.
+
+Return Value:
+
+    STATUS_SUCCESS when a process object was found; otherwise list-walk status.
+
+--*/
+{
+    KSW_DYN_STATE dynState;
+    PEPROCESS processObject = NULL;
+    ULONG uniqueProcessId = 0UL;
+    ULONG visitedEntries = 0UL;
+    NTSTATUS status = STATUS_SUCCESS;
+
+    if (Target == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    RtlZeroMemory(&dynState, sizeof(dynState));
+    KswordARKDynDataSnapshot(&dynState);
+
+    status = KswordARKCrossViewReferenceProcessByActiveList(
+        &dynState,
+        ProcessId,
+        KSWORD_ARK_TERMINATE_CID_WALK_MAX_NODES,
+        &processObject,
+        &uniqueProcessId,
+        &visitedEntries);
+
+    KswordARKDriverLogTerminateMessage(
+        Device,
+        NT_SUCCESS(status) ? "Info" : "Warn",
+        "R0 terminate active-list resolver: requestPid=%lu, visited=%lu, status=0x%08X, match=%p, unique=%lu.",
+        (unsigned long)ProcessId,
+        (unsigned long)visitedEntries,
+        (unsigned int)status,
+        processObject,
+        (unsigned long)uniqueProcessId);
+
+    if (!NT_SUCCESS(status) || processObject == NULL) {
+        return NT_SUCCESS(status) ? STATUS_NOT_FOUND : status;
+    }
+
+    Target->ProcessObject = processObject;
+    Target->RequestedProcessId = ProcessId;
+    Target->CidProcessId = HandleToULong(PsGetProcessId(processObject));
+    Target->UniqueProcessId = uniqueProcessId;
+    Target->ResolveSource = KswordArkTerminateResolveActiveList;
+    return STATUS_SUCCESS;
+}
+
+static NTSTATUS
 KswordARKDriverResolveTerminateTarget(
     _In_opt_ WDFDEVICE Device,
     _In_ ULONG ProcessId,
@@ -789,6 +861,7 @@ Return Value:
     KSW_DYN_STATE dynState;
     NTSTATUS status = STATUS_SUCCESS;
     NTSTATUS cidTableStatus = STATUS_SUCCESS;
+    NTSTATUS activeListStatus = STATUS_SUCCESS;
     NTSTATUS directLookupStatus = STATUS_SUCCESS;
 
     if (Target == NULL) {
@@ -814,9 +887,24 @@ Return Value:
     KswordARKDriverLogTerminateMessage(
         Device,
         "Warn",
-        "R0 terminate CID-first resolver failed: requestPid=%lu, status=0x%08X; falling back to PsLookup.",
+        "R0 terminate CID-first resolver failed: requestPid=%lu, status=0x%08X; falling back to ActiveProcessLinks.",
         (unsigned long)ProcessId,
         (unsigned int)cidTableStatus);
+
+    activeListStatus = KswordARKDriverResolveTerminateTargetByActiveList(
+        Device,
+        ProcessId,
+        Target);
+    if (NT_SUCCESS(activeListStatus)) {
+        return STATUS_SUCCESS;
+    }
+
+    KswordARKDriverLogTerminateMessage(
+        Device,
+        "Warn",
+        "R0 terminate active-list resolver failed: requestPid=%lu, status=0x%08X; falling back to PsLookup.",
+        (unsigned long)ProcessId,
+        (unsigned int)activeListStatus);
 
     directLookupStatus = PsLookupProcessByProcessId(ULongToHandle(ProcessId), &processObject);
     if (NT_SUCCESS(directLookupStatus)) {
@@ -841,12 +929,18 @@ Return Value:
     KswordARKDriverLogTerminateMessage(
         Device,
         "Warn",
-        "R0 terminate direct CID lookup failed: requestPid=%lu, status=0x%08X; falling back to CID-table unique-pid scan.",
+        "R0 terminate direct CID lookup failed: requestPid=%lu, status=0x%08X; returning best resolver failure.",
         (unsigned long)ProcessId,
         (unsigned int)directLookupStatus);
 
     status = directLookupStatus;
-    return NT_SUCCESS(cidTableStatus) ? status : cidTableStatus;
+    if (!KswordARKDriverIsResolverMissingStatus(cidTableStatus)) {
+        return cidTableStatus;
+    }
+    if (!KswordARKDriverIsResolverMissingStatus(activeListStatus)) {
+        return activeListStatus;
+    }
+    return status;
 }
 
 static NTSTATUS

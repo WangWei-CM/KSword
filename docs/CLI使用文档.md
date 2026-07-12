@@ -37,6 +37,7 @@ KswordCLI.exe <family> <subcommand> --help
 | `handle` | Enumerate process handles and inspect object metadata. |
 | `driver` | Driver integrity, device stack, and optional global evidence aliases. |
 | `hardware` | Device, input, USB, and PnP stack audit views. |
+| `hwid` | HWID Dispatch query and guarded control operations. |
 | `window` | Win32k, GUI, GPU, display, and watchdog audit views. |
 | `misc` | Security, CI/VBS, Hyper-V, AppLocker/BAM, and driver trust posture. |
 | `alpc` | ALPC port diagnostics for a process handle. |
@@ -71,6 +72,9 @@ Inspect and control process visibility, PPL, DKOM, and cross-view state.
 | `process terminate` | `KswordCLI.exe process terminate --pid PID [--exit-status NTSTATUS]` | Terminate one process through the driver. | Required: --pid. Optional: --exit-status defaults to 0xC000013A. |  |
 | `process suspend` | `KswordCLI.exe process suspend --pid PID` | Suspend one process. | Required: --pid. |  |
 | `process set-ppl` | `KswordCLI.exe process set-ppl --pid PID --level LEVEL` | Set the process protection level byte. | Required: --pid, --level. |  |
+| `process set-integrity` | `KswordCLI.exe process set-integrity --pid PID (--rid RID \| --level untrusted\|low\|medium\|medium-plus\|high\|system) [--flags 0xN] [--confirm]` | Set a process mandatory integrity label through R0. | Required: --pid and one integrity selector. Optional: --flags, --confirm. | Uses `IOCTL_KSWORD_ARK_SET_PROCESS_INTEGRITY`. |
+| `process inject-dll` | `KswordCLI.exe process inject-dll --pid PID --dll PATH [--flags 0xN] [--wait-thread] --confirm` | Inject a DLL path through the R0 process injection protocol. | Required: --pid, --dll, --confirm. Optional: --flags, --wait-thread. | Uses `IOCTL_KSWORD_ARK_INJECT_PROCESS` with `LoadLibraryW`. |
+| `process inject-shellcode` | `KswordCLI.exe process inject-shellcode --pid PID --blob PATH [--flags 0xN] --confirm` | Inject a raw shellcode blob through the R0 process injection protocol. | Required: --pid, --blob, --confirm. Optional: --flags. | Uses `IOCTL_KSWORD_ARK_INJECT_PROCESS`; payload is capped by shared protocol. |
 | `process enum` | `KswordCLI.exe process enum [--flags 0xN] [--start-pid PID] [--end-pid PID] [--limit N]` | Enumerate processes from R0 evidence. | Optional: --flags, --start-pid, --end-pid, --limit. |  |
 | `process set-visibility` | `KswordCLI.exe process set-visibility --action ACTION [--pid PID] [--flags 0xN]` | Apply a process visibility action. | Required: --action. Optional: --pid defaults to 0, --flags. |  |
 | `process set-special-flags` | `KswordCLI.exe process set-special-flags --pid PID --action ACTION [--flags 0xN]` | Apply special process flags. | Required: --pid, --action. Optional: --flags. |  |
@@ -103,6 +107,7 @@ Inspect files, filters, storage evidence, and file-monitor runtime state.
 | --- | --- | --- | --- | --- |
 | `file delete-path` | `KswordCLI.exe file delete-path --path PATH [--flags 0xN]` | Delete one path through the driver. | Required: --path. Optional: --flags. |  |
 | `file query-info` | `KswordCLI.exe file query-info --path PATH [--flags 0xN]` | Query file object and basic file metadata. | Required: --path. Optional: --flags. |  |
+| `file set-integrity` | `KswordCLI.exe file set-integrity --path PATH (--rid RID \| --level untrusted\|low\|medium\|medium-plus\|high\|system) [--directory] [--flags 0xN] [--confirm]` | Set a file or directory mandatory integrity label through R0. | Required: --path and one integrity selector. Optional: --directory, --flags, --confirm. | Win32/UNC paths are normalized to driver NT paths before `IOCTL_KSWORD_ARK_SET_FILE_INTEGRITY`. |
 | `file fileobject` | `KswordCLI.exe file fileobject --path PATH [--flags 0xN]` | Alias for file query-info. | Required: --path. Optional: --flags. | Prints an alias banner before query-info output. |
 | `file minifilter` | `KswordCLI.exe file minifilter [--flags 0xN] [--max-rows N] [--limit N]` | Enumerate minifilter inventory rows. | Optional: --flags, --max-rows, --limit. |  |
 | `file section` | `KswordCLI.exe file section` | Report that the file section alias is unsupported. | No options. | Use section query-file-mappings --path PATH for the implemented section protocol. |
@@ -220,6 +225,15 @@ Device, input, USB, and PnP stack audit views.
 | `hardware pnp` | `KswordCLI.exe hardware pnp [--profile-flags 0xN] [--max-rows N] [--max-attached N] [--target NAME] [--limit N]` | Alias for hardware audit. | Optional: --profile-flags, --max-rows, --max-attached, --target, --limit. | Alias: hardware audit. |
 | `hardware input` | `KswordCLI.exe hardware input [--profile-flags 0xN] [--max-rows N] [--max-attached N] [--target NAME] [--limit N]` | Query input stack audit rows. | Optional: --profile-flags, --max-rows, --max-attached, --target, --limit. |  |
 | `hardware usb` | `KswordCLI.exe hardware usb [--profile-flags 0xN] [--max-rows N] [--max-attached N] [--target NAME] [--limit N]` | Query USB topology audit rows. | Optional: --profile-flags, --max-rows, --max-attached, --target, --limit. |  |
+
+### `hwid`
+
+HWID Dispatch query and guarded control operations.
+
+| 命令 | 语法 | 用途 | 参数 | 备注 |
+| --- | --- | --- | --- | --- |
+| `hwid dispatch-query` | `KswordCLI.exe hwid dispatch-query` | Query HWID Dispatch hook state. | No options. | Uses `IOCTL_KSWORD_ARK_HWID_DISPATCH_QUERY`. |
+| `hwid dispatch-control` | `KswordCLI.exe hwid dispatch-control --action query\|enable\|disable\|disable-all [--targets LIST] [--dry-run] [--flags 0xN] [--disk-mode custom\|random\|null] [--mac-mode random\|custom] [--disk-serial TEXT] [--disk-product TEXT] [--disk-revision TEXT] [--gpu-serial TEXT] [--permanent-mac TEXT] [--current-mac TEXT] --confirm` | Control HWID Dispatch hook targets with explicit confirmation. | Required: --action; --confirm is required for non-query actions. Optional: targets/profile/dry-run/flags. | Targets: disk, partmgr, mountmgr, nvidia, nsiproxy, storage, network, all. Uses `IOCTL_KSWORD_ARK_HWID_DISPATCH_CONTROL`. |
 
 ### `window`
 

@@ -31,6 +31,8 @@ Environment:
 #define KSW_CROSSVIEW_CID_ENTRY_BYTES 16ULL
 #define KSW_CROSSVIEW_CID_HANDLE_VALUE_STRIDE 4ULL
 #define KSW_CROSSVIEW_PSP_CID_SCAN_BYTES 0x180UL
+#define KSW_CROSSVIEW_FALLBACK_HT_TABLE_CODE_OFFSET ((ULONG)sizeof(PVOID))
+#define KSW_CROSSVIEW_FALLBACK_HTE_LOW_VALUE_OFFSET 0UL
 
 #ifndef STATUS_OBJECT_TYPE_MISMATCH
 #define STATUS_OBJECT_TYPE_MISMATCH ((NTSTATUS)0xC0000024L)
@@ -271,6 +273,79 @@ Return Value:
     return ((Address & (sizeof(PVOID) - 1U)) == 0U) ? TRUE : FALSE;
 }
 
+static ULONG
+KswordARKCrossViewEffectiveHtTableCodeOffset(
+    _In_opt_ const KSW_DYN_STATE* DynState,
+    _Out_opt_ BOOLEAN* UsedFallbackOut
+    )
+/*++
+
+Routine Description:
+
+    Pick the HANDLE_TABLE.TableCode offset used by the CID-table walker.
+    中文说明：终止进程路径不能因为当前 DynData 缺少 HtTableCode 就回退到
+    PsLookupProcessByProcessId；现代 x64 Windows 的 TableCode 位于
+    HANDLE_TABLE + sizeof(PVOID)，这里作为只读兜底偏移。
+
+Arguments:
+
+    DynState - Optional DynData snapshot.
+    UsedFallbackOut - Receives whether the built-in fallback offset was used.
+
+Return Value:
+
+    A bounded offset used only for reading the kernel-owned HANDLE_TABLE.
+
+--*/
+{
+    if (UsedFallbackOut != NULL) {
+        *UsedFallbackOut = FALSE;
+    }
+    if (DynState != NULL && KswordARKCrossViewOffsetPresent(DynState->Kernel.HtTableCode)) {
+        return DynState->Kernel.HtTableCode;
+    }
+    if (UsedFallbackOut != NULL) {
+        *UsedFallbackOut = TRUE;
+    }
+    return KSW_CROSSVIEW_FALLBACK_HT_TABLE_CODE_OFFSET;
+}
+
+static ULONG
+KswordARKCrossViewEffectiveHteLowValueOffset(
+    _In_opt_ const KSW_DYN_STATE* DynState,
+    _Out_opt_ BOOLEAN* UsedFallbackOut
+    )
+/*++
+
+Routine Description:
+
+    Pick the HANDLE_TABLE_ENTRY.LowValue offset used by the CID-table walker.
+    中文说明：LowValue 是 entry 起始字段；当 DynData 没带该字段时仍可只读
+    解码 PspCidTable，避免再调用可被 hook 的 PID/TID lookup 兜底。
+
+Arguments:
+
+    DynState - Optional DynData snapshot.
+    UsedFallbackOut - Receives whether the built-in fallback offset was used.
+
+Return Value:
+
+    A bounded offset inside one HANDLE_TABLE_ENTRY.
+
+--*/
+{
+    if (UsedFallbackOut != NULL) {
+        *UsedFallbackOut = FALSE;
+    }
+    if (DynState != NULL && KswordARKCrossViewOffsetPresent(DynState->Kernel.HteLowValue)) {
+        return DynState->Kernel.HteLowValue;
+    }
+    if (UsedFallbackOut != NULL) {
+        *UsedFallbackOut = TRUE;
+    }
+    return KSW_CROSSVIEW_FALLBACK_HTE_LOW_VALUE_OFFSET;
+}
+
 VOID
 KswordARKCrossViewFillFieldOffsets(
     _In_ const KSW_DYN_STATE* DynState,
@@ -325,8 +400,12 @@ Return Value:
     Offsets->etStartAddress = KswordARKCrossViewNormalizeOffset(DynState->Kernel.EtStartAddress);
     Offsets->etWin32StartAddress = KswordARKCrossViewNormalizeOffset(DynState->Kernel.EtWin32StartAddress);
     Offsets->ktProcess = KswordARKCrossViewNormalizeOffset(DynState->Kernel.KtProcess);
-    Offsets->htTableCode = KswordARKCrossViewNormalizeOffset(DynState->Kernel.HtTableCode);
-    Offsets->hteLowValue = KswordARKCrossViewNormalizeOffset(DynState->Kernel.HteLowValue);
+    Offsets->htTableCode = KswordARKCrossViewOffsetPresent(DynState->Kernel.HtTableCode)
+        ? DynState->Kernel.HtTableCode
+        : KSW_CROSSVIEW_FALLBACK_HT_TABLE_CODE_OFFSET;
+    Offsets->hteLowValue = KswordARKCrossViewOffsetPresent(DynState->Kernel.HteLowValue)
+        ? DynState->Kernel.HteLowValue
+        : KSW_CROSSVIEW_FALLBACK_HTE_LOW_VALUE_OFFSET;
     Offsets->pspCidTableRva = KswordARKCrossViewGlobalRvaPresent(DynState->KernelGlobals.PspCidTable)
         ? DynState->KernelGlobals.PspCidTable
         : KSWORD_ARK_PROCESS_OFFSET_UNAVAILABLE;
@@ -339,8 +418,12 @@ Return Value:
     Offsets->etStartAddressSource = DynState->KernelSources.EtStartAddress;
     Offsets->etWin32StartAddressSource = DynState->KernelSources.EtWin32StartAddress;
     Offsets->ktProcessSource = DynState->KernelSources.KtProcess;
-    Offsets->htTableCodeSource = DynState->KernelSources.HtTableCode;
-    Offsets->hteLowValueSource = DynState->KernelSources.HteLowValue;
+    Offsets->htTableCodeSource = KswordARKCrossViewOffsetPresent(DynState->Kernel.HtTableCode)
+        ? DynState->KernelSources.HtTableCode
+        : KSWORD_ARK_CROSSVIEW_FIELD_SOURCE_RUNTIME_PATTERN;
+    Offsets->hteLowValueSource = KswordARKCrossViewOffsetPresent(DynState->Kernel.HteLowValue)
+        ? DynState->KernelSources.HteLowValue
+        : KSWORD_ARK_CROSSVIEW_FIELD_SOURCE_RUNTIME_PATTERN;
     Offsets->pspCidTableSource = DynState->KernelGlobalSources.PspCidTable;
 }
 
@@ -1693,6 +1776,7 @@ Return Value:
 {
     PVOID handleTable = NULL;
     ULONGLONG tableCode = 0ULL;
+    ULONG tableCodeOffset = 0UL;
     NTSTATUS status = STATUS_SUCCESS;
 
     if (DynState == NULL || PspCidTableAddress == NULL || TableRootOut == NULL || TableLevelOut == NULL) {
@@ -1701,9 +1785,7 @@ Return Value:
     *TableRootOut = 0ULL;
     *TableLevelOut = 0UL;
 
-    if (!KswordARKCrossViewOffsetPresent(DynState->Kernel.HtTableCode)) {
-        return STATUS_PROCEDURE_NOT_FOUND;
-    }
+    tableCodeOffset = KswordARKCrossViewEffectiveHtTableCodeOffset(DynState, NULL);
 
     status = KswordARKCrossViewReadPointerAddress(PspCidTableAddress, &handleTable);
     if (!NT_SUCCESS(status)) {
@@ -1713,7 +1795,7 @@ Return Value:
         return STATUS_NOT_FOUND;
     }
 
-    status = KswordARKCrossViewReadUlong64Address((PUCHAR)handleTable + DynState->Kernel.HtTableCode, &tableCode);
+    status = KswordARKCrossViewReadUlong64Address((PUCHAR)handleTable + tableCodeOffset, &tableCode);
     if (!NT_SUCCESS(status)) {
         return status;
     }
@@ -1814,6 +1896,7 @@ Return Value:
 --*/
 {
     ULONG entryIndex = 0UL;
+    ULONG lowValueOffset = 0UL;
     NTSTATUS lastStatus = STATUS_SUCCESS;
 
     if (Context == NULL || TableAddress == 0ULL) {
@@ -1822,9 +1905,7 @@ Return Value:
     if (!KswordARKCrossViewPointerAligned((ULONG_PTR)TableAddress)) {
         return STATUS_DATATYPE_MISALIGNMENT;
     }
-    if (!KswordARKCrossViewOffsetPresent(Context->DynState->Kernel.HteLowValue)) {
-        return STATUS_PROCEDURE_NOT_FOUND;
-    }
+    lowValueOffset = KswordARKCrossViewEffectiveHteLowValueOffset(Context->DynState, NULL);
 
     for (entryIndex = 0UL; entryIndex < KSW_CROSSVIEW_CID_LEVEL0_ENTRY_COUNT; ++entryIndex) {
         ULONGLONG lowValue = 0ULL;
@@ -1835,7 +1916,7 @@ Return Value:
         PVOID lowValueAddress = (PVOID)(ULONG_PTR)(
             TableAddress +
             ((ULONGLONG)entryIndex * KSW_CROSSVIEW_CID_ENTRY_BYTES) +
-            (ULONGLONG)Context->DynState->Kernel.HteLowValue);
+            (ULONGLONG)lowValueOffset);
 
         if (Context->VisitedEntries >= Context->MaxNodes) {
             Context->LastStatus = STATUS_BUFFER_OVERFLOW;
@@ -2043,11 +2124,6 @@ Return Value:
     if (DynState == NULL || PspCidTableAddress == NULL || ExpectedObjectType == NULL || Callback == NULL || MaxNodes == 0UL) {
         return STATUS_INVALID_PARAMETER;
     }
-    if (!KswordARKCrossViewOffsetPresent(DynState->Kernel.HtTableCode) ||
-        !KswordARKCrossViewOffsetPresent(DynState->Kernel.HteLowValue)) {
-        return STATUS_PROCEDURE_NOT_FOUND;
-    }
-
     status = KswordARKCrossViewReadCidTableRoot(DynState, PspCidTableAddress, &tableRoot, &tableLevel);
     if (!NT_SUCCESS(status)) {
         return status;
@@ -2081,6 +2157,166 @@ Return Value:
         status = walkContext.LastStatus;
     }
     return status;
+}
+
+NTSTATUS
+KswordARKCrossViewReferenceProcessByActiveList(
+    _In_ const KSW_DYN_STATE* DynState,
+    _In_ ULONG ProcessId,
+    _In_ ULONG MaxNodes,
+    _Outptr_ PEPROCESS* ProcessOut,
+    _Out_opt_ ULONG* UniqueProcessIdOut,
+    _Out_opt_ ULONG* VisitedEntriesOut
+    )
+/*++
+
+Routine Description:
+
+    Resolve one process object from ActiveProcessLinks and return a stable
+    reference to the caller. 中文说明：这是终止流程的 hook-resistant 解析后端；
+    它只走内核链表和 ObReferenceObjectByPointer，不调用 NtOpenProcess、
+    ZwOpenProcess 或 PsLookupProcessByProcessId。
+
+Arguments:
+
+    DynState - DynData snapshot with process list offsets.
+    ProcessId - PID-like value requested by R3.
+    MaxNodes - Maximum ActiveProcessLinks nodes to inspect.
+    ProcessOut - Receives a referenced EPROCESS on success.
+    UniqueProcessIdOut - Optionally receives the matched UniqueProcessId field.
+    VisitedEntriesOut - Optionally receives the number of inspected nodes.
+
+Return Value:
+
+    STATUS_SUCCESS when a referenced EPROCESS was found; otherwise a validation,
+    capability, read, or not-found status.
+
+--*/
+{
+    LIST_ENTRY* head = NULL;
+    LIST_ENTRY* current = NULL;
+    KSW_CROSSVIEW_VISITED_SET visited;
+    ULONG walked = 0UL;
+    NTSTATUS status = STATUS_SUCCESS;
+    NTSTATUS lastStatus = STATUS_NOT_FOUND;
+
+    if (ProcessOut == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    *ProcessOut = NULL;
+    if (UniqueProcessIdOut != NULL) {
+        *UniqueProcessIdOut = 0UL;
+    }
+    if (VisitedEntriesOut != NULL) {
+        *VisitedEntriesOut = 0UL;
+    }
+    if (DynState == NULL || ProcessId == 0UL || MaxNodes == 0UL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    if (!KswordARKCrossViewOffsetPresent(DynState->Kernel.EpActiveProcessLinks) ||
+        !KswordARKCrossViewOffsetPresent(DynState->Kernel.EpUniqueProcessId) ||
+        PsInitialSystemProcess == NULL ||
+        PsProcessType == NULL ||
+        *PsProcessType == NULL) {
+        return STATUS_PROCEDURE_NOT_FOUND;
+    }
+
+    RtlZeroMemory(&visited, sizeof(visited));
+    status = KswordARKCrossViewVisitedInitialize(&visited, MaxNodes);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+
+    head = (LIST_ENTRY*)((PUCHAR)PsInitialSystemProcess + DynState->Kernel.EpActiveProcessLinks);
+    if (!KswordARKCrossViewPointerAligned((ULONG_PTR)head)) {
+        KswordARKCrossViewVisitedDestroy(&visited);
+        return STATUS_DATATYPE_MISALIGNMENT;
+    }
+
+    status = KswordARKCrossViewReadPointerAddress(&head->Flink, (PVOID*)&current);
+    if (!NT_SUCCESS(status)) {
+        KswordARKCrossViewVisitedDestroy(&visited);
+        return status;
+    }
+
+    while (current != NULL && current != head) {
+        LIST_ENTRY* next = NULL;
+        PVOID candidateObject = NULL;
+        PVOID uniqueProcessIdPointer = NULL;
+        ULONG uniqueProcessId = 0UL;
+        BOOLEAN typeMatched = FALSE;
+        BOOLEAN referenced = FALSE;
+        NTSTATUS referenceStatus = STATUS_SUCCESS;
+
+        if (walked >= MaxNodes) {
+            lastStatus = STATUS_BUFFER_OVERFLOW;
+            break;
+        }
+        walked += 1UL;
+
+        if (!KswordARKCrossViewPointerAligned((ULONG_PTR)current) ||
+            KswordARKCrossViewVisitedCheckAndAdd(&visited, (ULONG_PTR)current)) {
+            lastStatus = STATUS_DATATYPE_MISALIGNMENT;
+            break;
+        }
+
+        status = KswordARKCrossViewReadPointerAddress(&current->Flink, (PVOID*)&next);
+        if (!NT_SUCCESS(status)) {
+            lastStatus = status;
+            break;
+        }
+
+        candidateObject = (PVOID)((PUCHAR)current - DynState->Kernel.EpActiveProcessLinks);
+        referenceStatus = KswordARKCrossViewTryReferenceTypedObject(
+            candidateObject,
+            *PsProcessType,
+            &typeMatched,
+            &referenced);
+        if (!typeMatched) {
+            lastStatus = referenceStatus;
+            current = next;
+            continue;
+        }
+        if (!referenced) {
+            lastStatus = referenceStatus;
+            current = next;
+            continue;
+        }
+
+        status = KswordARKCrossViewReadPointerField(
+            candidateObject,
+            DynState->Kernel.EpUniqueProcessId,
+            &uniqueProcessIdPointer);
+        if (NT_SUCCESS(status)) {
+            uniqueProcessId = HandleToULong(uniqueProcessIdPointer);
+        }
+        else {
+            uniqueProcessId = HandleToULong(PsGetProcessId((PEPROCESS)candidateObject));
+            lastStatus = status;
+        }
+
+        if (uniqueProcessId == ProcessId ||
+            HandleToULong(PsGetProcessId((PEPROCESS)candidateObject)) == ProcessId) {
+            *ProcessOut = (PEPROCESS)candidateObject;
+            if (UniqueProcessIdOut != NULL) {
+                *UniqueProcessIdOut = uniqueProcessId;
+            }
+            if (VisitedEntriesOut != NULL) {
+                *VisitedEntriesOut = walked;
+            }
+            KswordARKCrossViewVisitedDestroy(&visited);
+            return STATUS_SUCCESS;
+        }
+
+        ObDereferenceObject(candidateObject);
+        current = next;
+    }
+
+    if (VisitedEntriesOut != NULL) {
+        *VisitedEntriesOut = walked;
+    }
+    KswordARKCrossViewVisitedDestroy(&visited);
+    return lastStatus;
 }
 
 static VOID

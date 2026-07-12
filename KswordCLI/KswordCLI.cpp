@@ -38,6 +38,7 @@
 #include "../shared/driver/KswordArkFileMonitorIoctl.h"
 #include "../shared/driver/KswordArkFilterIoctl.h"
 #include "../shared/driver/KswordArkHandleIoctl.h"
+#include "../shared/driver/KswordArkHwidIoctl.h"
 #include "../shared/driver/KswordArkKeyboardIoctl.h"
 #include "../shared/driver/KswordArkKernelIoctl.h"
 #include "../shared/driver/KswordArkKernelObjectIoctl.h"
@@ -1117,6 +1118,7 @@ namespace
         { L"handle", L"Enumerate process handles and inspect object metadata." },
         { L"driver", L"Driver integrity, device stack, and optional global evidence aliases." },
         { L"hardware", L"Device, input, USB, and PnP stack audit views." },
+        { L"hwid", L"HWID Dispatch query and guarded control operations." },
         { L"window", L"Win32k, GUI, GPU, display, and watchdog audit views." },
         { L"misc", L"Security, CI/VBS, Hyper-V, AppLocker/BAM, and driver trust posture." },
         { L"alpc", L"ALPC port diagnostics for a process handle." },
@@ -1138,6 +1140,9 @@ namespace
         { L"process", L"terminate", L"KswordCLI.exe process terminate --pid PID [--exit-status NTSTATUS]", L"Terminate one process through the driver.", L"Required: --pid. Optional: --exit-status defaults to 0xC000013A.", L"" },
         { L"process", L"suspend", L"KswordCLI.exe process suspend --pid PID", L"Suspend one process.", L"Required: --pid.", L"" },
         { L"process", L"set-ppl", L"KswordCLI.exe process set-ppl --pid PID --level LEVEL", L"Set the process protection level byte.", L"Required: --pid, --level.", L"" },
+        { L"process", L"set-integrity", L"KswordCLI.exe process set-integrity --pid PID (--rid RID | --level untrusted|low|medium|medium-plus|high|system) [--flags 0xN] [--confirm]", L"Set a process mandatory integrity label through R0.", L"Required: --pid and one integrity selector. Optional: --flags, --confirm adds UI-confirmed protocol bit.", L"Backed by IOCTL_KSWORD_ARK_SET_PROCESS_INTEGRITY." },
+        { L"process", L"inject-dll", L"KswordCLI.exe process inject-dll --pid PID --dll PATH [--flags 0xN] [--wait-thread] --confirm", L"Inject a DLL path through the R0 process injection protocol.", L"Required: --pid, --dll, --confirm. Optional: --flags overrides request flags; --wait-thread adds wait flag.", L"Backed by IOCTL_KSWORD_ARK_INJECT_PROCESS with LoadLibraryW entrypoint." },
+        { L"process", L"inject-shellcode", L"KswordCLI.exe process inject-shellcode --pid PID --blob PATH [--flags 0xN] --confirm", L"Inject a raw shellcode blob through the R0 process injection protocol.", L"Required: --pid, --blob, --confirm. Optional: --flags overrides request flags.", L"Payload is capped by KSWORD_ARK_PROCESS_INJECT_MAX_PAYLOAD_BYTES." },
         { L"process", L"enum", L"KswordCLI.exe process enum [--flags 0xN] [--start-pid PID] [--end-pid PID] [--limit N]", L"Enumerate processes from R0 evidence.", L"Optional: --flags, --start-pid, --end-pid, --limit.", L"" },
         { L"process", L"set-visibility", L"KswordCLI.exe process set-visibility --action ACTION [--pid PID] [--flags 0xN]", L"Apply a process visibility action.", L"Required: --action. Optional: --pid defaults to 0, --flags.", L"" },
         { L"process", L"set-special-flags", L"KswordCLI.exe process set-special-flags --pid PID --action ACTION [--flags 0xN]", L"Apply special process flags.", L"Required: --pid, --action. Optional: --flags.", L"" },
@@ -1156,6 +1161,7 @@ namespace
         { L"memory", L"scan-evidence", L"KswordCLI.exe memory scan-evidence [--flags 0xN] [--max-rows N] [--start VA] [--end VA] [--max-bytes N] [--max-bigpool-rows N] [--sample-bytes N] [--limit N]", L"Scan kernel memory evidence rows.", L"Optional: --flags, --max-rows, --start, --end, --max-bytes, --max-bigpool-rows, --sample-bytes, --limit.", L"" },
         { L"file", L"delete-path", L"KswordCLI.exe file delete-path --path PATH [--flags 0xN]", L"Delete one path through the driver.", L"Required: --path. Optional: --flags.", L"" },
         { L"file", L"query-info", L"KswordCLI.exe file query-info --path PATH [--flags 0xN]", L"Query file object and basic file metadata.", L"Required: --path. Optional: --flags.", L"" },
+        { L"file", L"set-integrity", L"KswordCLI.exe file set-integrity --path PATH (--rid RID | --level untrusted|low|medium|medium-plus|high|system) [--directory] [--flags 0xN] [--confirm]", L"Set a file or directory mandatory integrity label through R0.", L"Required: --path and one integrity selector. Optional: --directory, --flags, --confirm adds UI-confirmed protocol bit.", L"Win32/UNC paths are normalized to the driver NT path convention before IOCTL_KSWORD_ARK_SET_FILE_INTEGRITY." },
         { L"file", L"fileobject", L"KswordCLI.exe file fileobject --path PATH [--flags 0xN]", L"Alias for file query-info.", L"Required: --path. Optional: --flags.", L"Prints an alias banner before query-info output." },
         { L"file", L"minifilter", L"KswordCLI.exe file minifilter [--flags 0xN] [--max-rows N] [--limit N]", L"Enumerate minifilter inventory rows.", L"Optional: --flags, --max-rows, --limit.", L"" },
         { L"file", L"section", L"KswordCLI.exe file section", L"Report that the file section alias is unsupported.", L"No options.", L"Use section query-file-mappings --path PATH for the implemented section protocol." },
@@ -1254,6 +1260,8 @@ namespace
         { L"hardware", L"pnp", L"KswordCLI.exe hardware pnp [--profile-flags 0xN] [--max-rows N] [--max-attached N] [--target NAME] [--limit N]", L"Alias for hardware audit.", L"Optional: --profile-flags, --max-rows, --max-attached, --target, --limit.", L"Alias: hardware audit." },
         { L"hardware", L"input", L"KswordCLI.exe hardware input [--profile-flags 0xN] [--max-rows N] [--max-attached N] [--target NAME] [--limit N]", L"Query input stack audit rows.", L"Optional: --profile-flags, --max-rows, --max-attached, --target, --limit.", L"" },
         { L"hardware", L"usb", L"KswordCLI.exe hardware usb [--profile-flags 0xN] [--max-rows N] [--max-attached N] [--target NAME] [--limit N]", L"Query USB topology audit rows.", L"Optional: --profile-flags, --max-rows, --max-attached, --target, --limit.", L"" },
+        { L"hwid", L"dispatch-query", L"KswordCLI.exe hwid dispatch-query", L"Query HWID Dispatch hook state.", L"No options.", L"Backed by IOCTL_KSWORD_ARK_HWID_DISPATCH_QUERY." },
+        { L"hwid", L"dispatch-control", L"KswordCLI.exe hwid dispatch-control --action query|enable|disable|disable-all [--targets LIST] [--dry-run] [--flags 0xN] [--disk-mode custom|random|null] [--mac-mode random|custom] [--disk-serial TEXT] [--disk-product TEXT] [--disk-revision TEXT] [--gpu-serial TEXT] [--permanent-mac TEXT] [--current-mac TEXT] --confirm", L"Control HWID Dispatch hook targets with an explicit confirmation flag.", L"Required: --action and --confirm for non-query actions. Optional: --targets defaults to storage; --dry-run sets request dry-run.", L"Targets: disk, partmgr, mountmgr, nvidia, nsiproxy, storage, network, all. Behavior bits can be passed through --flags." },
         { L"window", L"win32k", L"KswordCLI.exe window win32k [--flags 0xN] [--session-id N] [--pid PID] [--tid TID] [--max-entries N] [--limit N]", L"Query win32k profile/session status.", L"Optional: --flags, --session-id, --pid, --tid, --max-entries, --limit.", L"" },
         { L"window", L"gui", L"KswordCLI.exe window gui [--flags 0xN] [--session-id N] [--pid PID] [--tid TID] [--max-entries N] [--limit N]", L"Query GUI window snapshot rows.", L"Optional: --flags, --session-id, --pid, --tid, --max-entries, --limit.", L"" },
         { L"window", L"gui-threads", L"KswordCLI.exe window gui-threads [--flags 0xN] [--session-id N] [--pid PID] [--tid TID] [--max-entries N] [--limit N]", L"Query GUI thread snapshot rows.", L"Optional: --flags, --session-id, --pid, --tid, --max-entries, --limit.", L"" },
@@ -2103,6 +2111,227 @@ namespace
         return bytes;
     }
 
+
+    // lowerWide returns a lowercase copy for command option tokens.
+    // Inputs: arbitrary wide string from argv.
+    // Processing: applies towlower one code unit at a time for stable ASCII-like
+    // protocol option matching.
+    // Returns: lowercase text used by integrity/HWID parsers.
+    std::wstring lowerWide(std::wstring text)
+    {
+        for (wchar_t& ch : text)
+        {
+            ch = static_cast<wchar_t>(std::towlower(ch));
+        }
+        return text;
+    }
+
+    // parseMandatoryIntegrityRid parses --rid or --level into a SID mandatory RID.
+    // Inputs: named CLI args; accepted levels mirror Ksword5.1 UI presets.
+    // Processing: --rid wins over --level; named levels map to SECURITY_MANDATORY_*.
+    // Returns: RID value for R0 process/file integrity IOCTLs.
+    std::uint32_t parseMandatoryIntegrityRid(const NamedArgs& args)
+    {
+        const std::wstring* ridText = getOptionText(args, L"--rid");
+        if (ridText != nullptr)
+        {
+            return parseU32(ridText->c_str(), "integrity rid");
+        }
+
+        const std::wstring level = lowerWide(requireOptionText(args, L"--level"));
+        if (level == L"untrusted") return SECURITY_MANDATORY_UNTRUSTED_RID;
+        if (level == L"low") return SECURITY_MANDATORY_LOW_RID;
+        if (level == L"medium") return SECURITY_MANDATORY_MEDIUM_RID;
+        if (level == L"medium-plus" || level == L"mediumplus") return SECURITY_MANDATORY_MEDIUM_PLUS_RID;
+        if (level == L"high") return SECURITY_MANDATORY_HIGH_RID;
+        if (level == L"system") return SECURITY_MANDATORY_SYSTEM_RID;
+        if (level == L"protected") return SECURITY_MANDATORY_PROTECTED_PROCESS_RID;
+        throw std::invalid_argument("integrity level");
+    }
+
+    // normalizeFilePathForDriver converts Win32/UNC paths into the driver NT path
+    // convention used by Ksword5.1 FileDock before sending file integrity IOCTLs.
+    // Inputs: path from --path.
+    // Processing: normalizes slashes and preserves already-normalized NT paths.
+    // Returns: a non-empty path or throws when the input is empty.
+    std::wstring normalizeFilePathForDriver(std::wstring path)
+    {
+        while (!path.empty() && std::iswspace(path.back()) != 0)
+        {
+            path.pop_back();
+        }
+        std::size_t first = 0U;
+        while (first < path.size() && std::iswspace(path[first]) != 0)
+        {
+            ++first;
+        }
+        if (first != 0U)
+        {
+            path.erase(0U, first);
+        }
+        for (wchar_t& ch : path)
+        {
+            if (ch == L'/')
+            {
+                ch = L'\\';
+            }
+        }
+        if (path.empty())
+        {
+            throw std::invalid_argument("path");
+        }
+        if (path.rfind(L"\\??\\", 0U) == 0U || path.rfind(L"\\Device\\", 0U) == 0U)
+        {
+            return path;
+        }
+        if (path.rfind(L"\\\\?\\", 0U) == 0U)
+        {
+            return L"\\??\\" + path.substr(4U);
+        }
+        if (path.rfind(L"\\\\", 0U) == 0U)
+        {
+            return L"\\??\\UNC\\" + path.substr(2U);
+        }
+        return L"\\??\\" + path;
+    }
+
+    // printProcessIntegrityResponse renders the fixed process-integrity response.
+    // Inputs: shared response packet and DeviceIoControl byte count.
+    // Processing: prints status, NTSTATUS and target RID.
+    // Returns: no value.
+    void printProcessIntegrityResponse(const KSWORD_ARK_SET_PROCESS_INTEGRITY_RESPONSE& response, DWORD bytesReturned)
+    {
+        printResponseBanner(response.version, response.status, response.lastStatus, bytesReturned);
+        std::wcout << L"pid=" << response.processId
+                   << L" integrityRid=0x" << std::hex << response.integrityRid
+                   << L" lastStatus=0x" << static_cast<unsigned long>(response.lastStatus)
+                   << std::dec << L"\n";
+    }
+
+
+    // printFileIntegrityResponse renders the fixed file-integrity response.
+    // Inputs: shared response packet and bytesReturned.
+    // Processing: prints status, NTSTATUS, target flags and path length.
+    // Returns: no value.
+    void printFileIntegrityResponse(const KSWORD_ARK_SET_FILE_INTEGRITY_RESPONSE& response, DWORD bytesReturned)
+    {
+        printResponseBanner(response.version, response.status, response.lastStatus, bytesReturned);
+        std::wcout << L"flags=0x" << std::hex << response.flags
+                   << L" integrityRid=0x" << response.integrityRid
+                   << L" lastStatus=0x" << static_cast<unsigned long>(response.lastStatus)
+                   << std::dec << L" pathLengthChars=" << response.pathLengthChars << L"\n";
+    }
+
+    // buildInjectRequestBuffer creates a METHOD_BUFFERED process injection packet.
+    // Inputs: parsed args, inject type and payload bytes/entrypoint values.
+    // Processing: allocates exactly header+payload bytes and fills the shared
+    // protocol fields.
+    // Returns: byte vector ready for IOCTL_KSWORD_ARK_INJECT_PROCESS.
+    std::vector<std::uint8_t> buildInjectRequestBuffer(
+        const NamedArgs& args,
+        std::uint32_t injectType,
+        const std::vector<std::uint8_t>& payload,
+        std::uint64_t entryPointAddress,
+        std::uint64_t parameterAddress,
+        unsigned long defaultFlags)
+    {
+        if (payload.empty() || payload.size() > KSWORD_ARK_PROCESS_INJECT_MAX_PAYLOAD_BYTES)
+        {
+            throw std::out_of_range("inject payload");
+        }
+        const std::size_t headerSize = sizeof(KSWORD_ARK_INJECT_PROCESS_REQUEST) - sizeof(unsigned char);
+        std::vector<std::uint8_t> buffer(headerSize + payload.size(), 0U);
+        auto* request = reinterpret_cast<KSWORD_ARK_INJECT_PROCESS_REQUEST*>(buffer.data());
+        request->version = KSWORD_ARK_PROCESS_INJECT_PROTOCOL_VERSION;
+        request->processId = requireOptionU32(args, L"--pid");
+        request->injectType = injectType;
+        request->flags = getOptionU32(args, L"--flags", defaultFlags);
+        if (getOptionBool(args, L"--confirm"))
+        {
+            request->flags |= KSWORD_ARK_PROCESS_INJECT_FLAG_UI_CONFIRMED;
+        }
+        if (getOptionBool(args, L"--wait-thread"))
+        {
+            request->flags |= KSWORD_ARK_PROCESS_INJECT_FLAG_WAIT_THREAD;
+        }
+        request->payloadBytes = static_cast<unsigned long>(payload.size());
+        request->entryPointAddress = entryPointAddress;
+        request->parameterAddress = parameterAddress;
+        std::memcpy(request->payload, payload.data(), payload.size());
+        return buffer;
+    }
+
+    // requireConfirmOption gates high-risk process injection and HWID control paths.
+    // Inputs: parsed args and a command label.
+    // Processing: throws when --confirm is absent.
+    // Returns: no value when confirmation is present.
+    void requireConfirmOption(const NamedArgs& args, const char* label)
+    {
+        if (!getOptionBool(args, L"--confirm"))
+        {
+            throw std::invalid_argument(label);
+        }
+    }
+
+    // printInjectResponse renders the fixed process injection response.
+    // Inputs: response packet and bytesReturned.
+    // Processing: prints remote allocation and thread entry diagnostics.
+    // Returns: no value.
+    void printInjectResponse(const KSWORD_ARK_INJECT_PROCESS_RESPONSE& response, DWORD bytesReturned)
+    {
+        printResponseBanner(response.version, response.status, response.lastStatus, bytesReturned);
+        std::wcout << L"pid=" << response.processId
+                   << L" type=" << response.injectType
+                   << L" flags=0x" << std::hex << response.flags
+                   << L" entry=" << hex64(response.entryPointAddress)
+                   << L" parameter=" << hex64(response.parameterAddress)
+                   << L" remoteBase=" << hex64(response.remoteBaseAddress)
+                   << L" remoteSize=" << hex64(response.remoteRegionSize)
+                   << L" lastStatus=0x" << static_cast<unsigned long>(response.lastStatus)
+                   << L" waitStatus=0x" << static_cast<unsigned long>(response.waitStatus)
+                   << std::dec << L" bytesWritten=" << response.bytesWritten << L"\n";
+    }
+
+    // buildDllInjectPayload builds the UTF-16 LoadLibraryW payload.
+    // Inputs: --dll path string.
+    // Processing: includes the trailing NUL exactly like ArkDriverClient.
+    // Returns: raw byte payload for R0 remote write.
+    std::vector<std::uint8_t> buildDllInjectPayload(const std::wstring& dllPath)
+    {
+        if (dllPath.empty())
+        {
+            throw std::invalid_argument("dll path");
+        }
+        const std::size_t payloadBytes = (dllPath.size() + 1U) * sizeof(wchar_t);
+        if (payloadBytes > KSWORD_ARK_PROCESS_INJECT_MAX_PAYLOAD_BYTES)
+        {
+            throw std::out_of_range("dll path payload");
+        }
+        std::vector<std::uint8_t> payload(payloadBytes, 0U);
+        std::memcpy(payload.data(), dllPath.c_str(), payloadBytes);
+        return payload;
+    }
+
+    // resolveLoadLibraryW returns the current process LoadLibraryW address used by
+    // the existing ArkDriverClient DLL-injection wrapper.
+    // Inputs: none.
+    // Processing: resolves kernel32!LoadLibraryW in this process.
+    // Returns: function address as an integer or throws on failure.
+    std::uint64_t resolveLoadLibraryW()
+    {
+        HMODULE kernel32 = ::GetModuleHandleW(L"kernel32.dll");
+        if (kernel32 == nullptr)
+        {
+            throw std::runtime_error("kernel32.dll");
+        }
+        FARPROC loadLibrary = ::GetProcAddress(kernel32, "LoadLibraryW");
+        if (loadLibrary == nullptr)
+        {
+            throw std::runtime_error("LoadLibraryW");
+        }
+        return static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(loadLibrary));
+    }
+
     // commandProcessFamily implements all registered process IOCTLs.
     // Inputs: argc/argv from wmain.
     // Processing: builds fixed or variable protocol requests from named args.
@@ -2133,6 +2362,101 @@ namespace
             request.processId = requireOptionU32(args, L"--pid");
             request.protectionLevel = static_cast<unsigned char>(requireOptionU32(args, L"--level") & 0xFFU);
             return runNoOutputIoctl(L"IOCTL_KSWORD_ARK_SET_PPL_LEVEL", IOCTL_KSWORD_ARK_SET_PPL_LEVEL, &request, sizeof(request));
+        }
+        if (sub == L"set-integrity")
+        {
+            KSWORD_ARK_SET_PROCESS_INTEGRITY_REQUEST request{};
+            KSWORD_ARK_SET_PROCESS_INTEGRITY_RESPONSE response{};
+            request.size = sizeof(request);
+            request.version = KSWORD_ARK_PROCESS_INTEGRITY_PROTOCOL_VERSION;
+            request.processId = requireOptionU32(args, L"--pid");
+            request.integrityRid = parseMandatoryIntegrityRid(args);
+            request.flags = getOptionU32(args, L"--flags", 0U);
+            if (getOptionBool(args, L"--confirm"))
+            {
+                request.flags |= KSWORD_ARK_PROCESS_INTEGRITY_FLAG_UI_CONFIRMED;
+            }
+            if (!sendFixedRequestResponse(
+                    IOCTL_KSWORD_ARK_SET_PROCESS_INTEGRITY,
+                    L"IOCTL_KSWORD_ARK_SET_PROCESS_INTEGRITY",
+                    request,
+                    response,
+                    io,
+                    GENERIC_READ | GENERIC_WRITE))
+            {
+                return normalizeIoctlRc(L"process set-integrity", io, 3);
+            }
+            printProcessIntegrityResponse(response, io.bytesReturned);
+            return 0;
+        }
+        if (sub == L"inject-dll")
+        {
+            requireConfirmOption(args, "process inject-dll requires --confirm");
+            KSWORD_ARK_INJECT_PROCESS_RESPONSE response{};
+            const std::wstring& dllPath = requireOptionText(args, L"--dll");
+            std::vector<std::uint8_t> payload = buildDllInjectPayload(dllPath);
+            std::vector<std::uint8_t> request = buildInjectRequestBuffer(
+                args,
+                KSWORD_ARK_PROCESS_INJECT_TYPE_DLL_PATH,
+                payload,
+                resolveLoadLibraryW(),
+                0ULL,
+                KSWORD_ARK_PROCESS_INJECT_FLAG_WAIT_THREAD);
+            std::vector<std::uint8_t> output(sizeof(response), 0U);
+            const int rc = sendRawIoctl(
+                L"IOCTL_KSWORD_ARK_INJECT_PROCESS",
+                IOCTL_KSWORD_ARK_INJECT_PROCESS,
+                request.data(),
+                checkedDwordSize(request.size()),
+                output,
+                io,
+                GENERIC_READ | GENERIC_WRITE);
+            if (rc != 0)
+            {
+                return normalizeIoctlRc(L"process inject-dll", io, rc);
+            }
+            if (io.bytesReturned < sizeof(response))
+            {
+                std::wcerr << L"error: process inject-dll response too small: " << io.bytesReturned << L" bytes\n";
+                return 4;
+            }
+            std::memcpy(&response, output.data(), sizeof(response));
+            printInjectResponse(response, io.bytesReturned);
+            return 0;
+        }
+        if (sub == L"inject-shellcode")
+        {
+            requireConfirmOption(args, "process inject-shellcode requires --confirm");
+            KSWORD_ARK_INJECT_PROCESS_RESPONSE response{};
+            std::vector<std::uint8_t> payload = readFileBytes(requireOptionText(args, L"--blob"), KSWORD_ARK_PROCESS_INJECT_MAX_PAYLOAD_BYTES);
+            std::vector<std::uint8_t> request = buildInjectRequestBuffer(
+                args,
+                KSWORD_ARK_PROCESS_INJECT_TYPE_SHELLCODE,
+                payload,
+                0ULL,
+                0ULL,
+                0UL);
+            std::vector<std::uint8_t> output(sizeof(response), 0U);
+            const int rc = sendRawIoctl(
+                L"IOCTL_KSWORD_ARK_INJECT_PROCESS",
+                IOCTL_KSWORD_ARK_INJECT_PROCESS,
+                request.data(),
+                checkedDwordSize(request.size()),
+                output,
+                io,
+                GENERIC_READ | GENERIC_WRITE);
+            if (rc != 0)
+            {
+                return normalizeIoctlRc(L"process inject-shellcode", io, rc);
+            }
+            if (io.bytesReturned < sizeof(response))
+            {
+                std::wcerr << L"error: process inject-shellcode response too small: " << io.bytesReturned << L" bytes\n";
+                return 4;
+            }
+            std::memcpy(&response, output.data(), sizeof(response));
+            printInjectResponse(response, io.bytesReturned);
+            return 0;
         }
         if (sub == L"enum")
         {
@@ -3680,6 +4004,39 @@ namespace
             copyWideToFixed(request.path, KSWORD_ARK_FILE_INFO_PATH_MAX_CHARS, pathText);
             if (!sendFixedRequestResponse(IOCTL_KSWORD_ARK_QUERY_FILE_INFO, L"IOCTL_KSWORD_ARK_QUERY_FILE_INFO", request, response, io)) return 3;
             printFileInfoResponse(response, io.bytesReturned);
+            return 0;
+        }
+        if (sub == L"set-integrity")
+        {
+            KSWORD_ARK_SET_FILE_INTEGRITY_REQUEST request{};
+            KSWORD_ARK_SET_FILE_INTEGRITY_RESPONSE response{};
+            request.size = sizeof(request);
+            request.version = KSWORD_ARK_FILE_INTEGRITY_PROTOCOL_VERSION;
+            request.flags = getOptionU32(args, L"--flags", 0U);
+            if (getOptionBool(args, L"--directory"))
+            {
+                request.flags |= KSWORD_ARK_FILE_INTEGRITY_FLAG_DIRECTORY;
+            }
+            if (getOptionBool(args, L"--confirm"))
+            {
+                request.flags |= KSWORD_ARK_FILE_INTEGRITY_FLAG_UI_CONFIRMED;
+            }
+            request.integrityRid = parseMandatoryIntegrityRid(args);
+            const std::wstring ntPath = normalizeFilePathForDriver(requireOptionText(args, L"--path"));
+            request.pathLengthChars = boundedPathLength(ntPath, KSWORD_ARK_FILE_INTEGRITY_PATH_MAX_CHARS);
+            copyWideToFixed(request.path, KSWORD_ARK_FILE_INTEGRITY_PATH_MAX_CHARS, ntPath);
+            if (!sendFixedRequestResponse(
+                    IOCTL_KSWORD_ARK_SET_FILE_INTEGRITY,
+                    L"IOCTL_KSWORD_ARK_SET_FILE_INTEGRITY",
+                    request,
+                    response,
+                    io,
+                    GENERIC_READ | GENERIC_WRITE))
+            {
+                return normalizeIoctlRc(L"file set-integrity", io, 3);
+            }
+            printFileIntegrityResponse(response, io.bytesReturned);
+            dumpWideText(L"ntPath", ntPath);
             return 0;
         }
         if (sub == L"fileobject")
@@ -5997,6 +6354,206 @@ namespace
         return 1;
     }
 
+
+    // parseHwidDispatchAction converts action names into shared HWID constants.
+    // Inputs: --action text or numeric token.
+    // Processing: accepts query/enable/disable/disable-all and decimal/hex values.
+    // Returns: KSWORD_ARK_HWID_DISPATCH_ACTION_* value.
+    std::uint32_t parseHwidDispatchAction(const std::wstring& text)
+    {
+        const std::wstring lowered = lowerWide(text);
+        if (lowered == L"query") return KSWORD_ARK_HWID_DISPATCH_ACTION_QUERY;
+        if (lowered == L"enable") return KSWORD_ARK_HWID_DISPATCH_ACTION_ENABLE;
+        if (lowered == L"disable") return KSWORD_ARK_HWID_DISPATCH_ACTION_DISABLE;
+        if (lowered == L"disable-all" || lowered == L"disableall") return KSWORD_ARK_HWID_DISPATCH_ACTION_DISABLE_ALL;
+        return parseU32(text.c_str(), "hwid action");
+    }
+
+    // addHwidTargetToken ORs one target token into a HWID target mask.
+    // Inputs: token and mutable mask.
+    // Processing: recognizes individual target and group names.
+    // Returns: no value; throws on unknown target names.
+    void addHwidTargetToken(const std::wstring& token, std::uint32_t& flags)
+    {
+        const std::wstring lowered = lowerWide(token);
+        if (lowered.empty()) return;
+        if (lowered == L"disk") { flags |= KSWORD_ARK_HWID_DISPATCH_TARGET_DISK; return; }
+        if (lowered == L"partmgr" || lowered == L"partition") { flags |= KSWORD_ARK_HWID_DISPATCH_TARGET_PARTMGR; return; }
+        if (lowered == L"mountmgr" || lowered == L"volume") { flags |= KSWORD_ARK_HWID_DISPATCH_TARGET_MOUNTMGR; return; }
+        if (lowered == L"nvidia" || lowered == L"gpu") { flags |= KSWORD_ARK_HWID_DISPATCH_TARGET_NVIDIA; return; }
+        if (lowered == L"nsiproxy" || lowered == L"nsi" || lowered == L"network") { flags |= KSWORD_ARK_HWID_DISPATCH_TARGET_NETWORK; return; }
+        if (lowered == L"storage") { flags |= KSWORD_ARK_HWID_DISPATCH_TARGET_STORAGE; return; }
+        if (lowered == L"all") { flags |= KSWORD_ARK_HWID_DISPATCH_TARGET_ALL; return; }
+        flags |= parseU32(token.c_str(), "hwid target");
+    }
+
+    // parseHwidTargetFlags parses --targets into a target mask.
+    // Inputs: parsed args.
+    // Processing: accepts comma/semicolon/pipe/space separated target names.
+    // Returns: target mask; storage is the default to match the main UI defaults.
+    std::uint32_t parseHwidTargetFlags(const NamedArgs& args)
+    {
+        const std::wstring* text = getOptionText(args, L"--targets");
+        if (text == nullptr || text->empty())
+        {
+            return KSWORD_ARK_HWID_DISPATCH_TARGET_STORAGE;
+        }
+        std::uint32_t flags = 0U;
+        std::wstring token;
+        const auto flush = [&]()
+        {
+            addHwidTargetToken(token, flags);
+            token.clear();
+        };
+        for (const wchar_t ch : *text)
+        {
+            if (ch == L',' || ch == L';' || ch == L'|' || std::iswspace(ch) != 0)
+            {
+                flush();
+                continue;
+            }
+            token.push_back(ch);
+        }
+        flush();
+        return flags;
+    }
+
+    // parseHwidDiskMode maps disk mode text to protocol constants.
+    // Inputs: optional --disk-mode value.
+    // Processing: accepts custom/random/null or numeric values.
+    // Returns: protocol disk mode.
+    std::uint32_t parseHwidDiskMode(const NamedArgs& args)
+    {
+        const std::wstring* text = getOptionText(args, L"--disk-mode");
+        if (text == nullptr || text->empty()) return KSWORD_ARK_HWID_DISPATCH_DISK_MODE_CUSTOM;
+        const std::wstring lowered = lowerWide(*text);
+        if (lowered == L"custom") return KSWORD_ARK_HWID_DISPATCH_DISK_MODE_CUSTOM;
+        if (lowered == L"random") return KSWORD_ARK_HWID_DISPATCH_DISK_MODE_RANDOM;
+        if (lowered == L"null" || lowered == L"empty") return KSWORD_ARK_HWID_DISPATCH_DISK_MODE_NULL;
+        return parseU32(text->c_str(), "hwid disk mode");
+    }
+
+    // parseHwidMacMode maps MAC mode text to protocol constants.
+    // Inputs: optional --mac-mode value.
+    // Processing: accepts random/custom or numeric values.
+    // Returns: protocol MAC mode.
+    std::uint32_t parseHwidMacMode(const NamedArgs& args)
+    {
+        const std::wstring* text = getOptionText(args, L"--mac-mode");
+        if (text == nullptr || text->empty()) return KSWORD_ARK_HWID_DISPATCH_MAC_MODE_RANDOM;
+        const std::wstring lowered = lowerWide(*text);
+        if (lowered == L"random") return KSWORD_ARK_HWID_DISPATCH_MAC_MODE_RANDOM;
+        if (lowered == L"custom") return KSWORD_ARK_HWID_DISPATCH_MAC_MODE_CUSTOM;
+        return parseU32(text->c_str(), "hwid mac mode");
+    }
+
+    // printHwidDispatchResponse renders HWID Dispatch state/control packets.
+    // Inputs: response packet and bytesReturned.
+    // Processing: prints summary, active profile and per-target dispatch rows.
+    // Returns: no value.
+    void printHwidDispatchResponse(const KSWORD_ARK_HWID_DISPATCH_RESPONSE& response, DWORD bytesReturned)
+    {
+        printResponseBanner(response.version, response.overallStatus, response.lastStatus, bytesReturned);
+        std::wcout << L"responseFlags=0x" << std::hex << response.responseFlags
+                   << L" supported=0x" << response.supportedTargetFlags
+                   << L" requested=0x" << response.requestedTargetFlags
+                   << L" active=0x" << response.activeTargetFlags
+                   << L" failed=0x" << response.failedTargetFlags
+                   << L" generation=0x" << response.generation
+                   << std::dec << L"\n";
+        const KSWORD_ARK_HWID_DISPATCH_PROFILE& profile = response.activeProfile;
+        std::wcout << L"profile targetFlags=0x" << std::hex << profile.targetFlags
+                   << L" behaviorFlags=0x" << profile.behaviorFlags
+                   << std::dec << L" diskMode=" << profile.diskMode
+                   << L" macMode=" << profile.macMode << L"\n";
+        dumpWideText(L"diskSerial", fixedWide(profile.diskSerial, KSWORD_ARK_HWID_DISPATCH_TEXT_CHARS));
+        dumpWideText(L"diskProduct", fixedWide(profile.diskProduct, KSWORD_ARK_HWID_DISPATCH_TEXT_CHARS));
+        dumpWideText(L"diskRevision", fixedWide(profile.diskRevision, KSWORD_ARK_HWID_DISPATCH_TEXT_CHARS));
+        dumpWideText(L"gpuSerial", fixedWide(profile.gpuSerial, KSWORD_ARK_HWID_DISPATCH_TEXT_CHARS));
+        dumpWideText(L"permanentMac", fixedWide(profile.permanentMac, KSWORD_ARK_HWID_DISPATCH_TEXT_CHARS));
+        dumpWideText(L"currentMac", fixedWide(profile.currentMac, KSWORD_ARK_HWID_DISPATCH_TEXT_CHARS));
+        for (std::size_t index = 0U; index < KSWORD_ARK_HWID_DISPATCH_ENTRY_COUNT; ++index)
+        {
+            const KSWORD_ARK_HWID_DISPATCH_ENTRY& entry = response.entries[index];
+            std::wcout << L"  [" << index << L"] target=0x" << std::hex << entry.targetFlag
+                       << L" driverObject=" << hex64(entry.driverObjectAddress)
+                       << L" original=" << hex64(entry.originalDispatchAddress)
+                       << L" current=" << hex64(entry.currentDispatchAddress)
+                       << L" lastStatus=0x" << static_cast<unsigned long>(entry.lastStatus)
+                       << std::dec << L" active=" << entry.active
+                       << L" driver='" << fixedWide(entry.driverName, KSWORD_ARK_HWID_DISPATCH_TEXT_CHARS) << L"'\n";
+        }
+    }
+
+    // commandHwidFamily exposes HWID Dispatch query/control IOCTLs.
+    // Inputs: argc/argv from wmain.
+    // Processing: routes fixed query and guarded control requests.
+    // Returns: process exit code.
+    int commandHwidFamily(int argc, wchar_t* argv[])
+    {
+        if (argc < 3) { std::wcerr << L"error: hwid requires a subcommand\n"; return 1; }
+        const std::wstring sub = argv[2];
+        const NamedArgs args = parseNamedArgs(argc, argv, 3);
+        IoctlResult io{};
+
+        if (sub == L"dispatch-query")
+        {
+            KSWORD_ARK_HWID_DISPATCH_RESPONSE response{};
+            if (!sendFixedNoInput(IOCTL_KSWORD_ARK_HWID_DISPATCH_QUERY, L"IOCTL_KSWORD_ARK_HWID_DISPATCH_QUERY", response, io))
+            {
+                return normalizeIoctlRc(L"hwid dispatch-query", io, 3);
+            }
+            printHwidDispatchResponse(response, io.bytesReturned);
+            return 0;
+        }
+        if (sub == L"dispatch-control")
+        {
+            KSWORD_ARK_HWID_DISPATCH_CONTROL_REQUEST request{};
+            KSWORD_ARK_HWID_DISPATCH_RESPONSE response{};
+            request.size = sizeof(request);
+            request.version = KSWORD_ARK_HWID_DISPATCH_PROTOCOL_VERSION;
+            request.action = parseHwidDispatchAction(requireOptionText(args, L"--action"));
+            if (request.action != KSWORD_ARK_HWID_DISPATCH_ACTION_QUERY)
+            {
+                requireConfirmOption(args, "hwid dispatch-control requires --confirm");
+            }
+            if (getOptionBool(args, L"--confirm"))
+            {
+                request.requestFlags |= KSWORD_ARK_HWID_DISPATCH_REQUEST_FLAG_UI_CONFIRMED;
+            }
+            if (getOptionBool(args, L"--dry-run"))
+            {
+                request.requestFlags |= KSWORD_ARK_HWID_DISPATCH_REQUEST_FLAG_DRY_RUN;
+            }
+            request.profile.size = sizeof(request.profile);
+            request.profile.version = KSWORD_ARK_HWID_DISPATCH_PROTOCOL_VERSION;
+            request.profile.targetFlags = parseHwidTargetFlags(args);
+            request.profile.behaviorFlags = getOptionU32(args, L"--flags", 0U);
+            request.profile.diskMode = parseHwidDiskMode(args);
+            request.profile.macMode = parseHwidMacMode(args);
+            copyOptionalWideOption(args, L"--disk-serial", request.profile.diskSerial, KSWORD_ARK_HWID_DISPATCH_TEXT_CHARS);
+            copyOptionalWideOption(args, L"--disk-product", request.profile.diskProduct, KSWORD_ARK_HWID_DISPATCH_TEXT_CHARS);
+            copyOptionalWideOption(args, L"--disk-revision", request.profile.diskRevision, KSWORD_ARK_HWID_DISPATCH_TEXT_CHARS);
+            copyOptionalWideOption(args, L"--gpu-serial", request.profile.gpuSerial, KSWORD_ARK_HWID_DISPATCH_TEXT_CHARS);
+            copyOptionalWideOption(args, L"--permanent-mac", request.profile.permanentMac, KSWORD_ARK_HWID_DISPATCH_TEXT_CHARS);
+            copyOptionalWideOption(args, L"--current-mac", request.profile.currentMac, KSWORD_ARK_HWID_DISPATCH_TEXT_CHARS);
+            if (!sendFixedRequestResponse(
+                    IOCTL_KSWORD_ARK_HWID_DISPATCH_CONTROL,
+                    L"IOCTL_KSWORD_ARK_HWID_DISPATCH_CONTROL",
+                    request,
+                    response,
+                    io,
+                    GENERIC_READ | GENERIC_WRITE))
+            {
+                return normalizeIoctlRc(L"hwid dispatch-control", io, 3);
+            }
+            printHwidDispatchResponse(response, io.bytesReturned);
+            return 0;
+        }
+        std::wcerr << L"error: unknown hwid subcommand '" << sub << L"'\n";
+        return 1;
+    }
+
     // commandWindowFamily exposes read-only win32k/GUI/GPU/display commands.
     // Inputs: argc/argv from wmain.
     // Processing: uses win32k and device-audit protocols; unsupported pieces report clearly.
@@ -6224,6 +6781,7 @@ namespace
         if (family == L"handle") return commandHandleFamily(argc, argv);
         if (family == L"driver") return commandDriverFamily(argc, argv);
         if (family == L"hardware") return commandHardwareFamily(argc, argv);
+        if (family == L"hwid") return commandHwidFamily(argc, argv);
         if (family == L"window") return commandWindowFamily(argc, argv);
         if (family == L"misc") return commandMiscFamily(argc, argv);
         if (family == L"alpc") return commandAlpcFamily(argc, argv);

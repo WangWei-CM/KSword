@@ -6,10 +6,15 @@
 #include <algorithm>
 #include <cstring>
 #include <cstdint>
+#include <fstream>
 #include <iomanip>
 #include <shellapi.h>
 #include <sstream>
 #include <string>
+
+#ifndef SECURITY_MANDATORY_MEDIUM_PLUS_RID
+#define SECURITY_MANDATORY_MEDIUM_PLUS_RID (0x00002100L)
+#endif
 
 namespace Ksword::Features::Process {
 namespace {
@@ -366,6 +371,90 @@ bool ProtectionLevelForAction(ProcessActionId actionId, std::uint8_t& levelOut) 
     case ProcessActionId::R0SetPplWinTcb: levelOut = 0x61; return true;
     default: levelOut = 0; return false;
     }
+}
+
+// IntegrityRidForAction maps the new R0 mandatory-label menu entries to the
+// standard S-1-16-* RID values. Input is a context menu id; output is false when
+// another action family should handle the command.
+bool IntegrityRidForAction(ProcessActionId actionId, unsigned long& ridOut) {
+    switch (actionId) {
+    case ProcessActionId::R0SetIntegrityUntrusted: ridOut = SECURITY_MANDATORY_UNTRUSTED_RID; return true;
+    case ProcessActionId::R0SetIntegrityLow: ridOut = SECURITY_MANDATORY_LOW_RID; return true;
+    case ProcessActionId::R0SetIntegrityMedium: ridOut = SECURITY_MANDATORY_MEDIUM_RID; return true;
+    case ProcessActionId::R0SetIntegrityMediumPlus: ridOut = SECURITY_MANDATORY_MEDIUM_PLUS_RID; return true;
+    case ProcessActionId::R0SetIntegrityHigh: ridOut = SECURITY_MANDATORY_HIGH_RID; return true;
+    case ProcessActionId::R0SetIntegritySystem: ridOut = SECURITY_MANDATORY_SYSTEM_RID; return true;
+    default: ridOut = 0; return false;
+    }
+}
+
+// IntegrityResultDetail renders the fixed response fields returned by
+// DriverClient::setProcessIntegrity. Inputs are the parsed wrapper result;
+// output is a compact Chinese/hex diagnostic for the context-menu status area.
+std::wstring IntegrityResultDetail(const ksword::ark::ProcessIntegrityResult& io) {
+    std::wostringstream stream;
+    stream << Utf8ToWide(io.io.message)
+           << L"; status=" << io.status
+           << L"; lastStatus=" << Hex32(io.lastStatus)
+           << L"; rid=0x" << std::hex << std::uppercase << io.integrityRid;
+    if (io.unsupported) {
+        stream << L"; unsupported";
+    }
+    return stream.str();
+}
+
+// InjectResultDetail renders the R0 injection response without exposing any
+// reusable primitive beyond what the driver already returned. Input is the
+// ArkDriverClient parsed result; output is display-only status text.
+std::wstring InjectResultDetail(const ksword::ark::ProcessInjectResult& io) {
+    std::wostringstream stream;
+    stream << Utf8ToWide(io.io.message)
+           << L"; status=" << io.status
+           << L"; lastStatus=" << Hex32(io.lastStatus)
+           << L"; waitStatus=" << Hex32(io.waitStatus)
+           << L"; bytesWritten=" << std::dec << io.bytesWritten
+           << L"; remoteBase=" << Hex64(io.remoteBaseAddress)
+           << L"; entry=" << Hex64(io.entryPointAddress);
+    return stream.str();
+}
+
+// ReadBinaryFileForInjection loads a selected shellcode blob into memory. Input
+// is a Win32 file path; processing enforces the shared R0 payload cap before
+// returning bytes; output false includes a concrete diagnostic.
+bool ReadBinaryFileForInjection(
+    const std::wstring& path,
+    std::vector<std::uint8_t>& bytes,
+    std::wstring& errorText) {
+    bytes.clear();
+    if (path.empty()) {
+        errorText = L"shellcode file path is empty";
+        return false;
+    }
+
+    std::ifstream file(path, std::ios::binary | std::ios::ate);
+    if (!file) {
+        errorText = L"无法打开 shellcode 文件。";
+        return false;
+    }
+    const std::streamoff size = file.tellg();
+    if (size <= 0) {
+        errorText = L"shellcode 文件为空。";
+        return false;
+    }
+    if (static_cast<unsigned long long>(size) > KSWORD_ARK_PROCESS_INJECT_MAX_PAYLOAD_BYTES) {
+        errorText = L"shellcode 文件超过 R0 注入协议上限 " +
+            std::to_wstring(KSWORD_ARK_PROCESS_INJECT_MAX_PAYLOAD_BYTES) + L" 字节。";
+        return false;
+    }
+
+    bytes.resize(static_cast<std::size_t>(size));
+    file.seekg(0, std::ios::beg);
+    if (!file.read(reinterpret_cast<char*>(bytes.data()), size)) {
+        errorText = L"读取 shellcode 文件失败。";
+        bytes.clear();
+        return false;
+    }
+    return true;
 }
 
 // VisibilityRequestForAction maps R0 process-hide menu ids onto the shared
@@ -736,6 +825,30 @@ ProcessActionResult ExecuteProcessAction(
         return result;
     }
 
+    unsigned long integrityRid = 0;
+    if (IntegrityRidForAction(actionId, integrityRid)) {
+        ProcessActionResult result;
+        result.title = L"R0设置进程完整性";
+        result.success = true;
+        const ksword::ark::DriverClient driverClient;
+        for (DWORD pid : selectedPids) {
+            if (IsProtectedSystemPid(pid)) {
+                AppendIoLine(result.detail, pid, L"set integrity", false, L"protected system PID");
+                result.success = false;
+                continue;
+            }
+            const ksword::ark::ProcessIntegrityResult io =
+                driverClient.setProcessIntegrity(static_cast<std::uint32_t>(pid), integrityRid);
+            const bool ok = io.io.ok &&
+                !io.unsupported &&
+                io.lastStatus >= 0 &&
+                io.status == KSWORD_ARK_PROCESS_INTEGRITY_STATUS_APPLIED;
+            AppendIoLine(result.detail, pid, L"set integrity", ok, IntegrityResultDetail(io));
+            result.success = result.success && ok;
+        }
+        return result;
+    }
+
     unsigned long visibilityAction = 0;
     unsigned long visibilityFlags = 0;
     if (VisibilityRequestForAction(actionId, visibilityAction, visibilityFlags)) {
@@ -836,6 +949,71 @@ ProcessActionResult ExecuteProcessAction(
     default:
         return FailureResult(L"进程动作", selectedPids, L"未知进程动作。");
     }
+}
+
+ProcessActionResult ExecuteR0ProcessDllInjection(
+    const std::vector<DWORD>& selectedPids,
+    const std::wstring& dllPath) {
+    if (selectedPids.size() != 1) {
+        return FailureResult(L"R0 DLL注入", selectedPids, L"R0 DLL 注入需要单选一个进程。");
+    }
+    if (dllPath.empty()) {
+        return FailureResult(L"R0 DLL注入", selectedPids, L"未选择 DLL 文件。");
+    }
+
+    ProcessActionResult result;
+    result.title = L"R0 DLL注入";
+    const DWORD pid = selectedPids.front();
+    if (IsProtectedSystemPid(pid)) {
+        result.success = false;
+        AppendIoLine(result.detail, pid, L"inject DLL", false, L"protected system PID");
+        return result;
+    }
+
+    const ksword::ark::DriverClient driverClient;
+    const ksword::ark::ProcessInjectResult io = driverClient.injectProcessDll(
+        static_cast<std::uint32_t>(pid),
+        dllPath,
+        KSWORD_ARK_PROCESS_INJECT_FLAG_UI_CONFIRMED | KSWORD_ARK_PROCESS_INJECT_FLAG_WAIT_THREAD);
+    result.success = io.io.ok &&
+        io.lastStatus >= 0 &&
+        io.status == KSWORD_ARK_PROCESS_INJECT_STATUS_INJECTED;
+    AppendIoLine(result.detail, pid, L"inject DLL", result.success, InjectResultDetail(io));
+    return result;
+}
+
+ProcessActionResult ExecuteR0ProcessShellcodeInjection(
+    const std::vector<DWORD>& selectedPids,
+    const std::wstring& shellcodePath) {
+    if (selectedPids.size() != 1) {
+        return FailureResult(L"R0 Shellcode注入", selectedPids, L"R0 Shellcode 注入需要单选一个进程。");
+    }
+
+    std::vector<std::uint8_t> shellcode;
+    std::wstring readError;
+    if (!ReadBinaryFileForInjection(shellcodePath, shellcode, readError)) {
+        return FailureResult(L"R0 Shellcode注入", selectedPids, readError.c_str());
+    }
+
+    ProcessActionResult result;
+    result.title = L"R0 Shellcode注入";
+    const DWORD pid = selectedPids.front();
+    if (IsProtectedSystemPid(pid)) {
+        result.success = false;
+        AppendIoLine(result.detail, pid, L"inject shellcode", false, L"protected system PID");
+        return result;
+    }
+
+    const ksword::ark::DriverClient driverClient;
+    const ksword::ark::ProcessInjectResult io = driverClient.injectProcessShellcode(
+        static_cast<std::uint32_t>(pid),
+        shellcode,
+        KSWORD_ARK_PROCESS_INJECT_FLAG_UI_CONFIRMED);
+    result.success = io.io.ok &&
+        io.lastStatus >= 0 &&
+        io.status == KSWORD_ARK_PROCESS_INJECT_STATUS_INJECTED;
+    AppendIoLine(result.detail, pid, L"inject shellcode", result.success, InjectResultDetail(io));
+    return result;
 }
 
 DWORD PriorityClassForAction(ProcessActionId actionId) {

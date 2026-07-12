@@ -101,6 +101,9 @@ private:
     void queryDriverStatusDeferred();
     void handleUiAccessButtonClicked();
     void installDriverFromButton();
+    // requestProcessDockRefreshIfLoaded 用途：R0 驱动可用后通知已物化进程页重新枚举。
+    // 处理过程：只投递刷新消息，不直接访问进程页内部控件或 R0 IOCTL。
+    void requestProcessDockRefreshIfLoaded();
     void paint(HDC dc);
 
 private:
