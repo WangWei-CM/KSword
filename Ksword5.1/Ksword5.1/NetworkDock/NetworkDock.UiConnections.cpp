@@ -1,4 +1,5 @@
 #include "NetworkDock.InternalCommon.h"
+#include "../PluginHost.h"
 #include "../OnlineScan/SandboxUploadActions.h"
 #include "../theme.h"
 
@@ -19,6 +20,12 @@ void NetworkDock::initializeConnections()
     connect(m_clearPacketButton, &QPushButton::clicked, this, [this]()
         {
             clearAllPacketRows();
+        });
+    connect(m_networkPluginMenu, &QMenu::aboutToShow, this, [this]()
+        {
+            ks::plugin_host::InvocationContext context;
+            context.targetKind = ks::plugin_host::TargetKind::Network;
+            ks::plugin_host::populateTargetMenu(m_networkPluginMenu, this, context);
         });
 
     // NIDS 控制连接：实时检测开关、等级过滤和清空。

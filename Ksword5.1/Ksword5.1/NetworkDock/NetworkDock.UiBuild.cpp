@@ -62,6 +62,12 @@ void NetworkDock::initializeTrafficMonitorTab()
     m_clearPacketButton->setIcon(QIcon(":/Icon/log_clear.svg"));
     m_clearPacketButton->setToolTip(QStringLiteral("清空当前流量列表"));
 
+    m_networkPluginButton = new QPushButton(QStringLiteral("插件"), m_trafficMonitorPage);
+    m_networkPluginButton->setIcon(QIcon(":/Icon/process_start.svg"));
+    m_networkPluginButton->setToolTip(QStringLiteral("运行声明支持网络目标的独立插件"));
+    m_networkPluginMenu = new QMenu(m_networkPluginButton);
+    m_networkPluginButton->setMenu(m_networkPluginMenu);
+
     m_monitorStatusLabel = new QLabel(QStringLiteral("状态：未启动"), m_trafficMonitorPage);
     // 状态标签不再设置较大最小宽度，避免窗口变窄时挤出横向滚动条。
     m_monitorStatusLabel->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
@@ -69,6 +75,7 @@ void NetworkDock::initializeTrafficMonitorTab()
     m_monitorControlLayout->addWidget(m_startMonitorButton);
     m_monitorControlLayout->addWidget(m_stopMonitorButton);
     m_monitorControlLayout->addWidget(m_clearPacketButton);
+    m_monitorControlLayout->addWidget(m_networkPluginButton);
     m_monitorControlLayout->addWidget(m_monitorStatusLabel);
     m_monitorControlLayout->addStretch(1);
 

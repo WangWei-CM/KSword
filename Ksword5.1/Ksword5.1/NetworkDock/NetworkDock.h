@@ -36,6 +36,7 @@ class QComboBox;
 class QHBoxLayout;
 class QLabel;
 class QLineEdit;
+class QMenu;
 class QPlainTextEdit;
 class QProgressBar;
 class QPushButton;
@@ -1164,6 +1165,8 @@ private:
     QPushButton* m_startMonitorButton = nullptr; // 启动监控按钮。
     QPushButton* m_stopMonitorButton = nullptr;  // 停止监控按钮。
     QPushButton* m_clearPacketButton = nullptr;  // 清空报文按钮。
+    QPushButton* m_networkPluginButton = nullptr; // 网络目标插件菜单按钮。
+    QMenu* m_networkPluginMenu = nullptr;         // 动态发现 targets=network 的插件。
     QLabel* m_monitorStatusLabel = nullptr;      // 抓包状态标签。
 
     QPushButton* m_monitorFilterToggleButton = nullptr;     // 漏斗按钮（展开/收起过滤配置）。
