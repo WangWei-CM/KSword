@@ -1,4 +1,4 @@
-﻿#include "RegistryDock/RegistryDock.h"
+#include "RegistryDock/RegistryDock.h"
 
 #include "ArkDriverClient/ArkDriverClient.h"
 #include "RegistryDock/RegistryOptimizationPage.h"

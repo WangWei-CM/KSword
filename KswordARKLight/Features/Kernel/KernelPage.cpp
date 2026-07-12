@@ -1,4 +1,4 @@
-﻿#include "KernelPage.h"
+#include "KernelPage.h"
 
 #include "KernelCatalog.h"
 #include "KernelPageLayout.h"

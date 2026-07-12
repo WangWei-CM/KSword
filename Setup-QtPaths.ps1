@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 [CmdletBinding(SupportsShouldProcess = $true)]
 param(
     # Optional explicit Qt install prefix, for example: C:\Qt\6.9.3\msvc2022_64.

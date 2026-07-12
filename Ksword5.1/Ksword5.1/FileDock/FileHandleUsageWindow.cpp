@@ -1,4 +1,4 @@
-﻿#include "FileHandleUsageWindow.h"
+#include "FileHandleUsageWindow.h"
 
 // ============================================================
 // FileHandleUsageWindow.cpp

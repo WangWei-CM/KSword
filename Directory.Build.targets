@@ -1,0 +1,12 @@
+<Project>
+  <!--
+    Keep every MSVC project independent of the machine's active code page.
+    This is imported after project-local settings, so it also covers Qt/WDK
+    projects and future projects added below this repository root.
+  -->
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+  </ItemDefinitionGroup>
+</Project>

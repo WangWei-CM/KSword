@@ -61,5 +61,5 @@ if __name__ == "__main__":
     except ImportError:
         print("❌ 未找到chardet库，请先安装：pip install chardet")
         exit(1)
-    
+
     main()

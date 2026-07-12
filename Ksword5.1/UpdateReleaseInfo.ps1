@@ -1,4 +1,4 @@
-$ErrorActionPreference = 'Stop'
+﻿$ErrorActionPreference = 'Stop'
 
 # Write-Stage 作用：
 # - 输出统一格式的阶段日志，方便观察脚本执行过程；

@@ -1,4 +1,4 @@
-﻿#ifndef TASKBAR_H
+#ifndef TASKBAR_H
 #define TASKBAR_H
 
 #include <QMainWindow>

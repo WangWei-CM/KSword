@@ -1,4 +1,4 @@
-﻿#include "MemoryDock.h"
+#include "MemoryDock.h"
 
 #include "../ArkDriverClient/ArkDriverClient.h"
 #include "../UI/HexEditorWidget.h"

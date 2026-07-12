@@ -1,4 +1,4 @@
-﻿#include "RegistryDock.h"
+#include "RegistryDock.h"
 
 // ============================================================
 // RegistryDock.cpp

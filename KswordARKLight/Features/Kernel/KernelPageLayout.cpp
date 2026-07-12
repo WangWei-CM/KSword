@@ -1,4 +1,4 @@
-﻿#include "KernelPageLayout.h"
+#include "KernelPageLayout.h"
 
 namespace Ksword::Features::Kernel {
 namespace {

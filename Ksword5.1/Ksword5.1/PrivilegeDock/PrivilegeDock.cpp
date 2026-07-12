@@ -1,4 +1,4 @@
-﻿#include "PrivilegeDock.h"
+#include "PrivilegeDock.h"
 
 // ============================================================
 // PrivilegeDock.cpp

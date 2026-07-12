@@ -1,4 +1,4 @@
-﻿#include <QPushButton>
+#include <QPushButton>
 #include <QGraphicsDropShadowEffect>
 #include <QEnterEvent>
 #include <QIcon>

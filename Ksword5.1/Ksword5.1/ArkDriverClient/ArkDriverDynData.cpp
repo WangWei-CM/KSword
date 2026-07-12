@@ -1,4 +1,4 @@
-﻿#include "ArkDriverClient.h"
+#include "ArkDriverClient.h"
 
 #include <algorithm>
 #include <cstring>

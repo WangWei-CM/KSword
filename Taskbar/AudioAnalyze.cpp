@@ -1,4 +1,4 @@
-﻿#include "AudioAnalyze.h"
+#include "AudioAnalyze.h"
 #include <cmath>
 #include <complex>
 #include <thread>
@@ -559,7 +559,7 @@ void AudioSpectrumAnalyzer::calculateFrequencyBands() {
         m_spectrumData[band] = count > 0 ? sum / count : 0.0f
             ;
 
-        
+
     }
 
     // 调试输出频带数据

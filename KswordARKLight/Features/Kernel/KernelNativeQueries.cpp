@@ -1,4 +1,4 @@
-﻿#include "KernelNativeQueries.h"
+#include "KernelNativeQueries.h"
 
 #include "../../Core/Win32Lean.h"
 

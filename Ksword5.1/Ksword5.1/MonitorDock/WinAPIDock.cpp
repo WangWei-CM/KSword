@@ -1,4 +1,4 @@
-﻿#include "WinAPIDock.h"
+#include "WinAPIDock.h"
 
 // ============================================================
 // WinAPIDock.cpp

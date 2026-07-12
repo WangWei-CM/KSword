@@ -1,4 +1,4 @@
-﻿#include "ThemedMessageBox.h"
+#include "ThemedMessageBox.h"
 
 #include "../theme.h"
 

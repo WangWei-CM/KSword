@@ -1,4 +1,4 @@
-﻿
+
 #include "MonitorDock.h"
 #include "DirectKernelCallMonitorWidget.h"
 #include "MonitorTextViewer.h"

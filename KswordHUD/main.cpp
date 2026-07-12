@@ -1,4 +1,4 @@
-﻿//#include "stdafx.h"
+//#include "stdafx.h"
 #include "KswordHUD.h"
 #include <QtWidgets/QApplication>
 

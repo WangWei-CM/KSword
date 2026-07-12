@@ -1,4 +1,4 @@
-﻿#include "OtherDock.h"
+#include "OtherDock.h"
 
 // ============================================================
 // OtherDock.cpp

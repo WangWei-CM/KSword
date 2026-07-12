@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include <QtWidgets/QMainWindow>
 #include <QWidget>
@@ -61,7 +61,7 @@ private:
 class KswordHUD : public QMainWindow
 {
     Q_OBJECT
-        
+
         Q_PROPERTY(qreal windowOpacity READ windowOpacity WRITE setWindowOpacity)
 
 public:

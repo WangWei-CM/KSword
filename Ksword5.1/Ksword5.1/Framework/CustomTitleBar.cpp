@@ -1,4 +1,4 @@
-﻿#include "CustomTitleBar.h"
+#include "CustomTitleBar.h"
 
 #include "../theme.h"
 

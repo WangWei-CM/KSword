@@ -1,4 +1,4 @@
-﻿#include "pch.h"
+#include "pch.h"
 #include "MonitorAgent.h"
 #include "core/MonitorPipe.h"
 #include "hook/HookEngine.h"

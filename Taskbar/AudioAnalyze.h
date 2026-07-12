@@ -40,24 +40,24 @@ private:
     void calculateFrequencyBands();
     void applySmoothing();
 
-    // Windows Core Audio Ïà¹Ø³ÉÔ±
+    // Windows Core Audio ç›¸å…³æˆå‘˜
     IMMDeviceEnumerator* m_deviceEnumerator = nullptr;
     IMMDevice* m_audioDevice = nullptr;
     IAudioClient* m_audioClient = nullptr;
     IAudioCaptureClient* m_captureClient = nullptr;
     WAVEFORMATEX* m_waveFormat = nullptr;
 
-    // ÒôÆµ´¦ÀíÏà¹Ø³ÉÔ±
+    // éŸ³é¢‘å¤„ç†ç›¸å…³æˆå‘˜
     QVector<float> m_audioBuffer;
     QVector<float> m_spectrumData;
     QVector<float> m_previousSpectrum;
-    QVector<float> m_magnitudes;  // Ìí¼ÓÈ±Ê§µÄÉùÃ÷
+    QVector<float> m_magnitudes;  // æ·»åŠ ç¼ºå¤±çš„å£°æ˜
 
-    // Ïß³Ì¿ØÖÆ
+    // çº¿ç¨‹æ§åˆ¶
     std::atomic<bool> m_isCapturing{ false };
     HANDLE m_captureThread = nullptr;
 
-    // FFT ´°¿Úº¯Êı
+    // FFT çª—å£å‡½æ•°
     QVector<float> m_hanningWindow;
     void createWindowFunction();
 };

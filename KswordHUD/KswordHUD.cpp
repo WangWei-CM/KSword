@@ -1,4 +1,4 @@
-﻿//#include "stdafx.h"
+//#include "stdafx.h"
 
 #include <windows.h>
 #include <QApplication>
@@ -573,7 +573,7 @@ void KswordHUD::paintEvent(QPaintEvent* event)
         debugOutput(QString("paintEvent [正常帧 %1] - 透明度: %2")
             .arg(m_paintFrameCount)
             .arg(m_windowOpacity, 0, 'f', 3));
-                //clearCache(); 
+                //clearCache();
         QMainWindow::paintEvent(event);
     }
 }

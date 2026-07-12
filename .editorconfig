@@ -1,0 +1,35 @@
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+[*.{c,cc,cpp,cxx,h,hh,hpp,rc,def,inf,sln,vcxproj,filters,props,targets,user,qrc,ui,pro,pri,bat,cmd}]
+end_of_line = crlf
+
+[*.ps1]
+charset = utf-8-bom
+end_of_line = crlf
+
+[*.md]
+trim_trailing_whitespace = false
+
+[*.svg]
+charset = unset
+end_of_line = unset
+insert_final_newline = unset
+trim_trailing_whitespace = unset
+
+[third_party/**]
+charset = unset
+end_of_line = unset
+insert_final_newline = unset
+trim_trailing_whitespace = unset
+
+[KswordSetup/fltk/**]
+charset = unset
+end_of_line = unset
+insert_final_newline = unset
+trim_trailing_whitespace = unset

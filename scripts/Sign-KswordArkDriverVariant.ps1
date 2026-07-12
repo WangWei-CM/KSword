@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Applies the KswordARK driver post-build signing chain.
 

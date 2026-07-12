@@ -1,4 +1,4 @@
-﻿#include "KernelFacade.h"
+#include "KernelFacade.h"
 
 #include "KernelDynDataProfiles.h"
 #include "KernelNativeQueries.h"

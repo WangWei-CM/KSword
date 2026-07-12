@@ -1,4 +1,4 @@
-﻿#include "pch.h"
+#include "pch.h"
 #include "HookEngine.h"
 
 #include <TlHelp32.h>

@@ -1,4 +1,4 @@
-﻿#include "KernelDock.h"
+#include "KernelDock.h"
 
 #include "../ArkDriverClient/ArkDriverClient.h"
 #include "../UI/CodeEditorWidget.h"

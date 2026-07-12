@@ -1,4 +1,4 @@
-﻿#include "ProcessDetailWindow.InternalCommon.h"
+#include "ProcessDetailWindow.InternalCommon.h"
 
 using namespace process_detail_window_internal;
 

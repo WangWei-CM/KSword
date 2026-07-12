@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 // ============================================================
 // APIMonitor_x64/WinApiMonitorProtocol.h

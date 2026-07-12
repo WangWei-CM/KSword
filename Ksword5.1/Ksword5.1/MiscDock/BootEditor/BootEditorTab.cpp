@@ -1,4 +1,4 @@
-﻿#include "BootEditorTab.h"
+#include "BootEditorTab.h"
 
 #include "../../theme.h"
 
