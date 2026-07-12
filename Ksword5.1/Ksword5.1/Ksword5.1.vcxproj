@@ -331,6 +331,7 @@
     <ClCompile Include="ksword\network\network_diagnostics_tools.cpp" />
     <ClCompile Include="ksword\network\network_download_tools.cpp" />
     <ClCompile Include="ksword\network\network_format_tools.cpp" />
+    <ClCompile Include="ksword\network\network_ndpi.cpp" />
     <ClCompile Include="ksword\network\network_nids.cpp" />
     <ClCompile Include="ksword\process\process.cpp" />
     <ClCompile Include="ksword\service\service.cpp" />
@@ -412,6 +413,7 @@
     <ClInclude Include="ksword\network\network_diagnostics_tools.h" />
     <ClInclude Include="ksword\network\network_download_tools.h" />
     <ClInclude Include="ksword\network\network_format_tools.h" />
+    <ClInclude Include="ksword\network\network_ndpi.h" />
     <ClInclude Include="ksword\network\network_nids.h" />
     <ClInclude Include="ksword\network\network_request_tools.h" />
     <ClInclude Include="ksword\process\process.h" />
@@ -498,6 +500,12 @@
     <ClInclude Include="ArkDriverClient\ArkDriverTypes.h" />
     <ClInclude Include="ArkDriverClient\ArkDriverError.h" />
     <ClInclude Include="ArkDriverClient\ArkDriverCapabilities.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\third_party\nDPI\nDPI.vcxproj">
+      <Project>{92E2252E-A3C7-47ED-9D10-6FBB1178A0D1}</Project>
+      <LinkLibraryDependencies>true</LinkLibraryDependencies>
+    </ProjectReference>
   </ItemGroup>
   <ItemGroup>
     <None Include="qtvars.pro" />

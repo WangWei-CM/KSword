@@ -178,6 +178,8 @@ void NetworkDock::initializeTrafficMonitorTab()
     m_packetTable->setHorizontalHeaderLabels({
         QStringLiteral("时间"),
         QStringLiteral("协议"),
+        QStringLiteral("应用协议"),
+        QStringLiteral("应用分类"),
         QStringLiteral("方向"),
         QStringLiteral("PID"),
         QStringLiteral("进程"),

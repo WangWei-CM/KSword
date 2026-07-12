@@ -183,10 +183,14 @@ namespace network_dock_detail
                 const QString timeText = toQString(
                     ks::network::FormatUnixTimestampMs(packetRecord.captureTimestampMs, true));
                 metaLabel->setText(QStringLiteral(
-                    "时间: %1\n协议: %2  方向: %3\nPID: %4  进程: %5\n本地: %6\n远端: %7\n总长度: %8 bytes, 负载: %9 bytes")
+                    "时间: %1\n传输协议: %2  方向: %3\nnDPI: %4  分类: %5  状态: %6  Breed: %7\nPID: %8  进程: %9\n本地: %10\n远端: %11\n总长度: %12 bytes, 负载: %13 bytes")
                     .arg(timeText)
                     .arg(toQString(ks::network::PacketProtocolToString(packetRecord.protocol)))
                     .arg(toQString(ks::network::PacketDirectionToString(packetRecord.direction)))
+                    .arg(toQString(packetRecord.applicationProtocol))
+                    .arg(toQString(packetRecord.applicationCategory))
+                    .arg(toQString(packetRecord.ndpiClassificationState))
+                    .arg(toQString(packetRecord.applicationBreed))
                     .arg(packetRecord.processId)
                     .arg(toQString(packetRecord.processName))
                     .arg(formatEndpointText(packetRecord.localAddress, packetRecord.localPort))
@@ -351,6 +355,8 @@ namespace network_dock_detail
         const QString timeText = toQString(
             ks::network::FormatUnixTimestampMs(packetRecord.captureTimestampMs, false));
         const QString protocolText = toQString(ks::network::PacketProtocolToString(packetRecord.protocol));
+        const QString applicationProtocolText = toQString(packetRecord.applicationProtocol);
+        const QString applicationCategoryText = toQString(packetRecord.applicationCategory);
         const QString directionText = toQString(ks::network::PacketDirectionToString(packetRecord.direction));
         const QString pidText = QString::number(packetRecord.processId);
         const QString processNameText = toQString(packetRecord.processName);
@@ -364,16 +370,27 @@ namespace network_dock_detail
         timeItem->setData(Qt::UserRole, static_cast<qulonglong>(sequenceId));
         tableWidget->setItem(rowIndex, 0, timeItem);
         tableWidget->setItem(rowIndex, 1, createPacketCell(protocolText));
-        tableWidget->setItem(rowIndex, 2, createPacketCell(directionText));
-        tableWidget->setItem(rowIndex, 3, createPacketCell(pidText));
+        QTableWidgetItem* applicationProtocolItem = createPacketCell(applicationProtocolText);
+        applicationProtocolItem->setToolTip(QStringLiteral("nDPI 协议 ID: master=%1, app=%2; state=%3")
+            .arg(packetRecord.ndpiMasterProtocolId)
+            .arg(packetRecord.ndpiApplicationProtocolId)
+            .arg(toQString(packetRecord.ndpiClassificationState)));
+        tableWidget->setItem(rowIndex, 2, applicationProtocolItem);
+        QTableWidgetItem* applicationCategoryItem = createPacketCell(applicationCategoryText);
+        applicationCategoryItem->setToolTip(QStringLiteral("nDPI category=%1; breed=%2")
+            .arg(packetRecord.ndpiCategoryId)
+            .arg(toQString(packetRecord.applicationBreed)));
+        tableWidget->setItem(rowIndex, 3, applicationCategoryItem);
+        tableWidget->setItem(rowIndex, 4, createPacketCell(directionText));
+        tableWidget->setItem(rowIndex, 5, createPacketCell(pidText));
         QTableWidgetItem* processNameItem = createPacketCell(processNameText);
         processNameItem->setIcon(processIcon);
-        tableWidget->setItem(rowIndex, 4, processNameItem);
-        tableWidget->setItem(rowIndex, 5, createPacketCell(localEndpointText));
-        tableWidget->setItem(rowIndex, 6, createPacketCell(remoteEndpointText));
-        tableWidget->setItem(rowIndex, 7, createPacketCell(packetSizeText));
-        tableWidget->setItem(rowIndex, 8, createPacketCell(payloadSizeText));
-        tableWidget->setItem(rowIndex, 9, createPacketCell(previewText));
+        tableWidget->setItem(rowIndex, 6, processNameItem);
+        tableWidget->setItem(rowIndex, 7, createPacketCell(localEndpointText));
+        tableWidget->setItem(rowIndex, 8, createPacketCell(remoteEndpointText));
+        tableWidget->setItem(rowIndex, 9, createPacketCell(packetSizeText));
+        tableWidget->setItem(rowIndex, 10, createPacketCell(payloadSizeText));
+        tableWidget->setItem(rowIndex, 11, createPacketCell(previewText));
     }
 
     void showPacketDetailWindow(const ks::network::PacketRecord& packetRecord)
