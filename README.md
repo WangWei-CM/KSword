@@ -1,5 +1,6 @@
 <p align="center">
   <img src="https://github.com/WangWei-CM/KSword/blob/main/Ksword5.1/Ksword5.1/Resource/Logo/MainLogo.png" alt="Ksword Logo" width="420" />
+  <img width="2560" height="1392" alt="image" src="https://github.com/user-attachments/assets/25a3b2e2-4ee0-49aa-bd90-ee6e3ba01fe4" />
 </p>
 
 <h1 align="center">Ksword5.1</h1>
