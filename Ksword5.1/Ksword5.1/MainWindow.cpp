@@ -67,6 +67,7 @@
 #include "ArkDriverClient/ArkDriverClient.h"
 #include "KernelDock/KernelDock.CallbackPromptManager.h"
 #include "PluginHost.h"
+#include "Internationalization/LanguageManager.h"
 #include "UI/CodeEditorWidget.h"
 #include "UI/GlobalDialogTheme.h"
 #include "UI/ThemedMessageBox.h"
@@ -4629,6 +4630,8 @@ void MainWindow::initMenus()
     m_updateMenuButton->setObjectName(QStringLiteral("ksUpdateMenuButton"));
     m_updateMenuButton->setText(QStringLiteral("检查更新"));
     m_updateMenuButton->setToolTip(QStringLiteral("打开 GitHub Releases 页面"));
+    ks::i18n::LanguageManager::instance().bindText(m_updateMenuButton, QStringLiteral("menu.update"), QStringLiteral("检查更新"));
+    ks::i18n::LanguageManager::instance().bindToolTip(m_updateMenuButton, QStringLiteral("menu.update.tooltip"), QStringLiteral("打开 GitHub Releases 页面"));
     m_updateMenuButton->setToolButtonStyle(Qt::ToolButtonTextOnly);
     m_updateMenuButton->setAutoRaise(true);
     m_updateMenuButton->setFixedHeight(22);
@@ -4638,6 +4641,8 @@ void MainWindow::initMenus()
     m_licenseMenuButton->setObjectName(QStringLiteral("ksLicenseMenuButton"));
     m_licenseMenuButton->setText(QStringLiteral("许可证"));
     m_licenseMenuButton->setToolTip(QStringLiteral("查看同目录 license 文件"));
+    ks::i18n::LanguageManager::instance().bindText(m_licenseMenuButton, QStringLiteral("menu.license"), QStringLiteral("许可证"));
+    ks::i18n::LanguageManager::instance().bindToolTip(m_licenseMenuButton, QStringLiteral("menu.license.tooltip"), QStringLiteral("查看同目录 license 文件"));
     m_licenseMenuButton->setToolButtonStyle(Qt::ToolButtonTextOnly);
     m_licenseMenuButton->setAutoRaise(true);
     m_licenseMenuButton->setFixedHeight(22);
@@ -4647,6 +4652,8 @@ void MainWindow::initMenus()
     m_exitMenuButton->setObjectName(QStringLiteral("ksExitMenuButton"));
     m_exitMenuButton->setText(QStringLiteral("退出"));
     m_exitMenuButton->setToolTip(QStringLiteral("退出程序 (Ctrl+Q)"));
+    ks::i18n::LanguageManager::instance().bindText(m_exitMenuButton, QStringLiteral("menu.exit"), QStringLiteral("退出"));
+    ks::i18n::LanguageManager::instance().bindToolTip(m_exitMenuButton, QStringLiteral("menu.exit.tooltip"), QStringLiteral("退出程序 (Ctrl+Q)"));
     m_exitMenuButton->setToolButtonStyle(Qt::ToolButtonTextOnly);
     m_exitMenuButton->setAutoRaise(true);
     m_exitMenuButton->setFixedHeight(22);
@@ -4657,6 +4664,8 @@ void MainWindow::initMenus()
     m_pluginMenuButton->setObjectName(QStringLiteral("ksPluginMenuButton"));
     m_pluginMenuButton->setText(QStringLiteral("插件管理"));
     m_pluginMenuButton->setToolTip(QStringLiteral("浏览、安装和管理插件"));
+    ks::i18n::LanguageManager::instance().bindText(m_pluginMenuButton, QStringLiteral("menu.plugins"), QStringLiteral("插件管理"));
+    ks::i18n::LanguageManager::instance().bindToolTip(m_pluginMenuButton, QStringLiteral("menu.plugins.tooltip"), QStringLiteral("浏览、安装和管理插件"));
     m_pluginMenuButton->setToolButtonStyle(Qt::ToolButtonTextOnly);
     m_pluginMenuButton->setAutoRaise(true);
     m_pluginMenuButton->setFixedHeight(22);
@@ -4668,6 +4677,8 @@ void MainWindow::initMenus()
     m_settingsMenuButton->setObjectName(QStringLiteral("ksSettingsMenuButton"));
     m_settingsMenuButton->setText(QStringLiteral("设置"));
     m_settingsMenuButton->setToolTip(QStringLiteral("打开界面与启动设置"));
+    ks::i18n::LanguageManager::instance().bindText(m_settingsMenuButton, QStringLiteral("menu.settings"), QStringLiteral("设置"));
+    ks::i18n::LanguageManager::instance().bindToolTip(m_settingsMenuButton, QStringLiteral("menu.settings.tooltip"), QStringLiteral("打开界面、语言与启动设置"));
     m_settingsMenuButton->setToolButtonStyle(Qt::ToolButtonTextOnly);
     m_settingsMenuButton->setAutoRaise(true);
     m_settingsMenuButton->setFixedHeight(22);
@@ -7448,6 +7459,10 @@ void MainWindow::initDockWidgets()
         const bool isKernelDock = (dockKey == QStringLiteral("kernel"));
         ads::CDockWidget* dock = new ads::CDockWidget(title);
         configureDockWidgetPersistentIdentity(dock, dockKey);
+        ks::i18n::LanguageManager::instance().bindWindowTitle(
+            dock,
+            QStringLiteral("dock.%1").arg(dockKey),
+            title);
         dock->setWidget(widget, insertMode);
         // DockWidgetClosable 禁用：统一去掉每个 Dock 标签旁边的关闭叉。
         dock->setFeature(ads::CDockWidget::DockWidgetClosable, false);
@@ -7533,29 +7548,29 @@ void MainWindow::initDockWidgets()
     };
 
     // 创建所有 Dock 壳；重页面若未预加载，则先挂占位页并排入显示后补载队列。
-    m_dockWelcome = createDockWidget(m_welcomeWidget, "欢迎", QStringLiteral("welcome"));
-    createLazyDockWidget(m_dockProcess, m_processWidget, "进程", QStringLiteral("process"));
-    createLazyDockWidget(m_dockNetwork, m_networkWidget, "网络", QStringLiteral("network"));
-    createLazyDockWidget(m_dockMemory, m_memoryWidget, "内存", QStringLiteral("memory"));
-    createLazyDockWidget(m_dockFile, m_fileWidget, "文件", QStringLiteral("file"));
-    createLazyDockWidget(m_dockDriver, m_driverWidget, "驱动", QStringLiteral("driver"));
-    createLazyDockWidget(m_dockKernel, m_kernelWidget, "内核", QStringLiteral("kernel"));
-    createLazyDockWidget(m_dockMonitorTab, m_monitorWidget, "监控", QStringLiteral("monitor"));
-    createLazyDockWidget(m_dockHardware, m_hardwareWidget, "硬件", QStringLiteral("hardware"));
-    createLazyDockWidget(m_dockPrivilege, m_privilegeWidget, "权限", QStringLiteral("privilege"));
-    createLazyDockWidget(m_dockWindow, m_windowWidget, "窗口", QStringLiteral("window"));
-    createLazyDockWidget(m_dockRegistry, m_registryWidget, "注册表", QStringLiteral("registry"));
-    createLazyDockWidget(m_dockHandle, m_handleWidget, "句柄", QStringLiteral("handle"));
-    createLazyDockWidget(m_dockStartup, m_startupWidget, "启动项", QStringLiteral("startup"));
-    createLazyDockWidget(m_dockService, m_serviceWidget, "服务", QStringLiteral("service"));
-    createLazyDockWidget(m_dockMisc, m_miscWidget, "杂项", QStringLiteral("misc"));
+    m_dockWelcome = createDockWidget(m_welcomeWidget, ks::i18n::text(QStringLiteral("dock.welcome"), QStringLiteral("欢迎")), QStringLiteral("welcome"));
+    createLazyDockWidget(m_dockProcess, m_processWidget, ks::i18n::text(QStringLiteral("dock.process"), QStringLiteral("进程")), QStringLiteral("process"));
+    createLazyDockWidget(m_dockNetwork, m_networkWidget, ks::i18n::text(QStringLiteral("dock.network"), QStringLiteral("网络")), QStringLiteral("network"));
+    createLazyDockWidget(m_dockMemory, m_memoryWidget, ks::i18n::text(QStringLiteral("dock.memory"), QStringLiteral("内存")), QStringLiteral("memory"));
+    createLazyDockWidget(m_dockFile, m_fileWidget, ks::i18n::text(QStringLiteral("dock.file"), QStringLiteral("文件")), QStringLiteral("file"));
+    createLazyDockWidget(m_dockDriver, m_driverWidget, ks::i18n::text(QStringLiteral("dock.driver"), QStringLiteral("驱动")), QStringLiteral("driver"));
+    createLazyDockWidget(m_dockKernel, m_kernelWidget, ks::i18n::text(QStringLiteral("dock.kernel"), QStringLiteral("内核")), QStringLiteral("kernel"));
+    createLazyDockWidget(m_dockMonitorTab, m_monitorWidget, ks::i18n::text(QStringLiteral("dock.monitor"), QStringLiteral("监控")), QStringLiteral("monitor"));
+    createLazyDockWidget(m_dockHardware, m_hardwareWidget, ks::i18n::text(QStringLiteral("dock.hardware"), QStringLiteral("硬件")), QStringLiteral("hardware"));
+    createLazyDockWidget(m_dockPrivilege, m_privilegeWidget, ks::i18n::text(QStringLiteral("dock.privilege"), QStringLiteral("权限")), QStringLiteral("privilege"));
+    createLazyDockWidget(m_dockWindow, m_windowWidget, ks::i18n::text(QStringLiteral("dock.window"), QStringLiteral("窗口")), QStringLiteral("window"));
+    createLazyDockWidget(m_dockRegistry, m_registryWidget, ks::i18n::text(QStringLiteral("dock.registry"), QStringLiteral("注册表")), QStringLiteral("registry"));
+    createLazyDockWidget(m_dockHandle, m_handleWidget, ks::i18n::text(QStringLiteral("dock.handle"), QStringLiteral("句柄")), QStringLiteral("handle"));
+    createLazyDockWidget(m_dockStartup, m_startupWidget, ks::i18n::text(QStringLiteral("dock.startup"), QStringLiteral("启动项")), QStringLiteral("startup"));
+    createLazyDockWidget(m_dockService, m_serviceWidget, ks::i18n::text(QStringLiteral("dock.service"), QStringLiteral("服务")), QStringLiteral("service"));
+    createLazyDockWidget(m_dockMisc, m_miscWidget, ks::i18n::text(QStringLiteral("dock.misc"), QStringLiteral("杂项")), QStringLiteral("misc"));
 
     // 创建右侧和底部的基本Widgets
-    m_dockCurrentOp = createDockWidget(m_progressWidget, "当前操作", QStringLiteral("current_op"));
-    m_dockLog = createDockWidget(m_logWidget, "日志输出", QStringLiteral("log"));
-    m_dockImmediate = createDockWidget(m_immediateEditorWidget, "即时窗口", QStringLiteral("immediate"));
+    m_dockCurrentOp = createDockWidget(m_progressWidget, ks::i18n::text(QStringLiteral("dock.current_op"), QStringLiteral("当前操作")), QStringLiteral("current_op"));
+    m_dockLog = createDockWidget(m_logWidget, ks::i18n::text(QStringLiteral("dock.log"), QStringLiteral("日志输出")), QStringLiteral("log"));
+    m_dockImmediate = createDockWidget(m_immediateEditorWidget, ks::i18n::text(QStringLiteral("dock.immediate"), QStringLiteral("即时窗口")), QStringLiteral("immediate"));
     // 左下角“监视面板”接入独立性能图组件（CPU每核/内存/磁盘/网络）。
-    m_dockMonitor = createDockWidget(m_monitorPanelWidget, "监视面板", QStringLiteral("monitor_panel"));
+    m_dockMonitor = createDockWidget(m_monitorPanelWidget, ks::i18n::text(QStringLiteral("dock.monitor_panel"), QStringLiteral("监视面板")), QStringLiteral("monitor_panel"));
 
     // 当前操作 Dock 专项透明策略：
     // - Dock 自身背景透明；

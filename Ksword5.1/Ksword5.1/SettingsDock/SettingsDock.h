@@ -33,6 +33,9 @@ public:
     // 返回：AppearanceSettings 配置结构体副本。
     ks::settings::AppearanceSettings currentAppearanceSettings() const;
 
+protected:
+    void changeEvent(QEvent* event) override;
+
 signals:
     // appearanceSettingsChanged 作用：
     // - 当用户点击“应用”并保存成功后通知主窗口；
@@ -164,6 +167,9 @@ private:
 
     // m_themeButtonGroup 作用：三种主题按钮的互斥分组。
     QButtonGroup* m_themeButtonGroup = nullptr;
+
+    // m_languageCombo 作用：列出 languages 目录中发现并通过校验的语言包。
+    QComboBox* m_languageCombo = nullptr;
 
     // m_followSystemButton 作用：选择“跟随系统主题”模式。
     QToolButton* m_followSystemButton = nullptr;

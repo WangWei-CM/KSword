@@ -287,6 +287,7 @@
     <ClCompile Include="ProcessDock\ProcessDock.ThreadTab.cpp" />
     <ClCompile Include="ProcessDock\ThreadStackWindow.cpp" />
     <ClCompile Include="ProcessDock\Process_Tool.cpp" />
+    <ClCompile Include="Internationalization\LanguageManager.cpp" />
     <ClCompile Include="SettingsDock\AppearanceSettings.cpp" />
     <ClCompile Include="SettingsDock\SettingsDock.OnlineScan.cpp" />
     <ClCompile Include="SettingsDock\SettingsDock.cpp" />
@@ -374,6 +375,7 @@
     <ClInclude Include="Framework.h" />
     <ClInclude Include="Ksword.h" />
     <ClInclude Include="PluginHost.h" />
+    <ClInclude Include="Internationalization\LanguageManager.h" />
     <ClInclude Include="FileDock\ManualFileSystemParser.h" />
     <ClInclude Include="FileDock\FileHandleUsageScanner.h" />
     <ClInclude Include="FileDock\FileHandleUsageWindow.h" />
@@ -504,7 +506,17 @@
     <None Include="..\..\tools\compress_qt_profile_json.py" />
     <None Include="profiles\ark_dyndata_pack_v2.json" />
     <None Include="profiles\ark_dyndata_pack_v3.json" />
+    <None Include="languages\en-US.json" />
+    <None Include="languages\zh-CN.json" />
   </ItemGroup>
+  <Target Name="CopyKswordLanguagePacks" AfterTargets="Build">
+    <ItemGroup>
+      <KswordLanguagePack Include="$(MSBuildProjectDirectory)\languages\*.json" />
+    </ItemGroup>
+    <MakeDir Directories="$(TargetDir)languages\" Condition="'@(KswordLanguagePack)' != ''" />
+    <Copy SourceFiles="@(KswordLanguagePack)" DestinationFolder="$(TargetDir)languages\" SkipUnchangedFiles="true" Condition="'@(KswordLanguagePack)' != ''" />
+    <Warning Condition="'@(KswordLanguagePack)' == ''" Text="No KSword language packs were found under $(MSBuildProjectDirectory)\languages." />
+  </Target>
   <Target Name="CopyKswordArkDynDataProfilePack" AfterTargets="Build">
     <!-- v3 pack carries typed StructOffset items such as EpActiveProcessLinks; v2 is kept only as a callback-era fallback. -->
     <PropertyGroup>

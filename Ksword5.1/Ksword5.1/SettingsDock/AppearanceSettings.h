@@ -40,6 +40,7 @@ namespace ks::settings
     struct AppearanceSettings
     {
         ThemeMode themeMode = ThemeMode::FollowSystem;
+        QString uiLanguage = QStringLiteral("zh-CN");
         QString backgroundImagePath = QStringLiteral("Style/ksword_background.png");
         int backgroundOpacityPercent = 35;
         QString startupDefaultTabKey = QStringLiteral("welcome");

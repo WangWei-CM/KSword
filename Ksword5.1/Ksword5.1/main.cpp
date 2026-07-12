@@ -14,6 +14,7 @@
 #include "UI/ThemedMessageBox.h"
 #include "UI/GlobalDialogTheme.h"
 #include "UI/TableColumnAutoFit.h"
+#include "Internationalization/LanguageManager.h"
 
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -1440,6 +1441,23 @@ int main(int argc, char* argv[])
     startupTraceRaw("before QApplication construction");
     QApplication app(argc, argv);
     startupTraceRaw("QApplication constructed");
+    QString languageLoadMessage;
+    const bool languagePackLoaded = ks::i18n::LanguageManager::instance().initialize(
+        startupSettings.uiLanguage,
+        &languageLoadMessage);
+    {
+        kLogEvent languageEvent;
+        info << languageEvent
+            << "[main] Language system initialized. requested="
+            << startupSettings.uiLanguage
+            << ", active="
+            << ks::i18n::LanguageManager::instance().currentLanguageId()
+            << ", loaded="
+            << (languagePackLoaded ? "true" : "false")
+            << ", detail="
+            << languageLoadMessage
+            << eol;
+    }
     ks::ui::InstallGlobalMessageBoxTheme(&app);
     startupTraceRaw("InstallGlobalMessageBoxTheme finished");
     ks::ui::InstallGlobalDialogTheme(&app);
