@@ -17,6 +17,7 @@
 #include "DriverDock.h"
 #include "../theme.h"
 #include "../UI/CodeEditorWidget.h"
+#include "../Internationalization/LanguageManager.h"
 
 #include <QAbstractItemView>
 #include <QAction>
@@ -29,6 +30,7 @@
 #include <QDateTime>
 #include <QDialog>
 #include <QDialogButtonBox>
+#include <QEvent>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QGridLayout>
@@ -80,6 +82,21 @@
 
 namespace ksword::driver_dock_internal
 {
+    // driverText：
+    // - 输入：稳定上下文键与中文源文本；
+    // - 处理：中文保持调用点原文，英文按 DriverDock 场景解析上下文翻译；
+    // - 返回：当前语言下的界面文本。
+    QString driverText(const char* contextKey, const QString& sourceText);
+
+    // DriverDock 表头工厂：集中维护各只读表格的列语义，便于语言切换时重绘。
+    QStringList driverServiceTableHeaders();
+    QStringList driverModuleTableHeaders();
+    QStringList driverObjectEvidenceTableHeaders();
+    QStringList driverDeviceObjectTableHeaders();
+    QStringList driverEvidenceTableHeaders();
+    QStringList driverMajorFunctionTableHeaders();
+    QStringList driverModuleCrossViewTableHeaders();
+
     // ModuleRecordIndexRole：
     // - 输入：写入已加载模块表格的第一列单元格；
     // - 处理：保存该行对应 m_loadedModuleCache/m_loadedModuleEvidenceCache 的源索引；

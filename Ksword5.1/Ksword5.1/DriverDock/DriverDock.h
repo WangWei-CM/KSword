@@ -28,6 +28,7 @@ class QCheckBox;
 class QComboBox;
 class CodeEditorWidget;
 class QColor;
+class QEvent;
 class QHBoxLayout;
 class QLabel;
 class QLineEdit;
@@ -63,6 +64,12 @@ protected:
     // - 首次显示时再执行驱动服务/模块枚举；
     // - 避免主窗口启动阶段同步扫描 SCM 和内核模块。
     void showEvent(QShowEvent* event) override;
+
+    // changeEvent：
+    // - 作用：语言切换后重绘 DriverDock 的表头；
+    // - 处理：控件文本由 LanguageManager 绑定更新，表头由本类集中重建；
+    // - 返回：无。
+    void changeEvent(QEvent* event) override;
 
 private:
     // DriverServiceRecord：
@@ -161,6 +168,9 @@ private:
     // initializeConnections：
     // - 作用：连接全部控件信号与业务槽函数。
     void initializeConnections();
+
+    // applyTranslatedHeaders：按当前语言重建 DriverDock 所有已创建表格的列标题。
+    void applyTranslatedHeaders();
 
     // ========================= 数据刷新 =========================
     // refreshDriverServiceRecords：
