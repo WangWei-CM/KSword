@@ -141,7 +141,7 @@ Ksword5.1 是面向 Windows 的开源 ARK、内核调试与系统取证分析工
 - `tools/pdb_offset_generator/`：PDB offset/profile pack 生成与校验工具。
 - `docs/pdb_r0_audit_prep/`：PDB/R0 审计能力准备、接入和验收文档。
 - `third_party/systeminformer_dyn/`：System Informer DynData 快照、LICENSE/NOTICE 和 Ksword 包装头。
-- `Website/`：项目官网和模块介绍页面。
+- [KSwordDEV/Website](https://github.com/KSwordDEV/Website)：独立维护的项目官网和模块介绍页面。
 
 ### 构建环境
 - Windows 10/11 x64（驱动构建需要匹配 WDK；用户态组件可单独构建）。
@@ -227,7 +227,7 @@ The current codebase focuses on R3/R0 cross-view evidence, PDB/DynData-driven of
 - `tools/pdb_offset_generator/`: PDB offset/profile generation tools.
 - `docs/pdb_r0_audit_prep/`: PDB/R0 audit preparation and acceptance documents.
 - `third_party/systeminformer_dyn/`: vendored DynData snapshot with license/notice files.
-- `Website/`: product website and module documentation.
+- [KSwordDEV/Website](https://github.com/KSwordDEV/Website): independently maintained product website and module documentation.
 
 ### Build Requirements
 - Windows 10/11 x64.
