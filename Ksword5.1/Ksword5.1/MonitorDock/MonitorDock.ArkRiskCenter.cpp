@@ -1,5 +1,6 @@
 #include "MonitorDock.h"
 #include "../UI/VisibleTableWidget.h"
+#include "../Internationalization/LanguageManager.h"
 
 #include "../ArkDriverClient/ArkDriverClient.h"
 #include "../UI/CodeEditorWidget.h"
@@ -770,6 +771,11 @@ void MonitorDock::initializeArkRiskCenterTab()
     connect(m_arkRiskExportCsvButton, &QPushButton::clicked, this, [this]() { exportArkRiskCenterAsCsv(); });
 
     m_sideTabWidget->addTab(m_arkRiskCenterPage, QIcon(QStringLiteral(":/Icon/process_critical.svg")), QStringLiteral("ARK 风险中心"));
+    ks::i18n::LanguageManager::instance().bindTab(
+        m_sideTabWidget,
+        m_arkRiskCenterPage,
+        QStringLiteral("monitor.tab.ark_risk_center"),
+        QStringLiteral("ARK 风险中心"));
 }
 
 void MonitorDock::refreshArkRiskCenterAsync()

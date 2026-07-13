@@ -860,7 +860,7 @@ namespace
         painter.drawText(
             fallbackPixmap.rect(),
             Qt::AlignCenter,
-            ks::i18n::source(QStringLiteral("无可用缩略图")));
+            ks::i18n::contextText(QStringLiteral("other.thumbnail.none"), QStringLiteral("无可用缩略图")));
         painter.end();
         return fallbackPixmap;
     }
@@ -1626,6 +1626,8 @@ private:
             applyStyleCheckBoxChanges(true);
         });
         m_tabWidget->addTab(basicPage, QStringLiteral("基础属性"));
+        ks::i18n::LanguageManager::instance().bindTab(
+            m_tabWidget, basicPage, QStringLiteral("window.detail.tab.basic"), QStringLiteral("基础属性"));
 
         // ==================== 2. 进程线程 Tab ====================
         QWidget* processPage = new QWidget(m_tabWidget);
@@ -1634,6 +1636,8 @@ private:
         m_processThreadText->setReadOnly(true);
         processLayout->addWidget(m_processThreadText, 1);
         m_tabWidget->addTab(processPage, QStringLiteral("进程与线程"));
+        ks::i18n::LanguageManager::instance().bindTab(
+            m_tabWidget, processPage, QStringLiteral("window.detail.tab.process"), QStringLiteral("进程与线程"));
 
         // ==================== 3. 类信息 Tab ====================
         QWidget* classPage = new QWidget(m_tabWidget);
@@ -1642,6 +1646,8 @@ private:
         m_classText->setReadOnly(true);
         classLayout->addWidget(m_classText, 1);
         m_tabWidget->addTab(classPage, QStringLiteral("类信息"));
+        ks::i18n::LanguageManager::instance().bindTab(
+            m_tabWidget, classPage, QStringLiteral("window.detail.tab.class"), QStringLiteral("类信息"));
 
         // ==================== 4. 消息钩子 Tab ====================
         QWidget* hookPage = new QWidget(m_tabWidget);
@@ -1759,6 +1765,8 @@ private:
         });
 
         m_tabWidget->addTab(hookPage, QStringLiteral("消息钩子"));
+        ks::i18n::LanguageManager::instance().bindTab(
+            m_tabWidget, hookPage, QStringLiteral("window.detail.tab.hooks"), QStringLiteral("消息钩子"));
 
         // ==================== 5. 高级属性 Tab ====================
         QWidget* advancedPage = new QWidget(m_tabWidget);
@@ -1767,6 +1775,8 @@ private:
         m_advancedText->setReadOnly(true);
         advancedLayout->addWidget(m_advancedText, 1);
         m_tabWidget->addTab(advancedPage, QStringLiteral("高级属性"));
+        ks::i18n::LanguageManager::instance().bindTab(
+            m_tabWidget, advancedPage, QStringLiteral("window.detail.tab.advanced"), QStringLiteral("高级属性"));
 
         // ==================== 底部按钮 ====================
         QHBoxLayout* buttonLayout = new QHBoxLayout();
@@ -3063,6 +3073,8 @@ void OtherDock::initializeUi()
     m_mainSplitter->setStretchFactor(0, 4);
     m_mainSplitter->setStretchFactor(1, 1);
     m_contentTabWidget->addTab(m_windowListPage, QStringLiteral("窗口列表"));
+    ks::i18n::LanguageManager::instance().bindTab(
+        m_contentTabWidget, m_windowListPage, QStringLiteral("window.tab.list"), QStringLiteral("窗口列表"));
 
     // 桌面管理页：列出窗口站与桌面，并补充 SessionId / SID / 权限状态等上下文。
     m_desktopPage = new QWidget(m_contentTabWidget);
@@ -3139,6 +3151,8 @@ void OtherDock::initializeUi()
     m_desktopPageLayout->addWidget(m_desktopTable, 1);
 
     m_contentTabWidget->addTab(m_desktopPage, QStringLiteral("桌面管理"));
+    ks::i18n::LanguageManager::instance().bindTab(
+        m_contentTabWidget, m_desktopPage, QStringLiteral("window.tab.desktop"), QStringLiteral("桌面管理"));
 
     // 底部状态栏：展示总数、可见数、系统窗口数和当前选中信息。
     m_statusBar = new QStatusBar(this);

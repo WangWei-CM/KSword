@@ -1,4 +1,5 @@
 #include "MonitorPanelWidget.h"
+#include "../Internationalization/LanguageManager.h"
 
 // ============================================================
 // MonitorPanelWidget.cpp
@@ -211,7 +212,8 @@ void MonitorPanelWidget::initializeUi()
     m_compactSummaryLabel->setAlignment(Qt::AlignCenter);
     m_compactSummaryLabel->setWordWrap(true);
     m_compactSummaryLabel->setVisible(false);
-    m_compactSummaryLabel->setText(QStringLiteral("监视面板高度过低，已隐藏图表。"));
+    m_compactSummaryLabel->setText(ks::i18n::contextText(
+        QStringLiteral("monitor.panel.compact.hidden"), QStringLiteral("监视面板高度过低，已隐藏图表。")));
     m_rootLayout->addWidget(m_compactSummaryLabel, 1);
 
     m_chartGridLayout = new QGridLayout();
@@ -226,13 +228,15 @@ void MonitorPanelWidget::initializeUi()
     QStringList cpuCategoryTextList;
     cpuCategoryTextList.reserve(logicalCoreCount);
 
-    m_cpuCoreHistoryBarSet = new QBarSet(QStringLiteral("历史"));
+    m_cpuCoreHistoryBarSet = new QBarSet(ks::i18n::contextText(
+        QStringLiteral("monitor.panel.cpu.history"), QStringLiteral("历史")));
     QColor cpuHistoryColor = cpuBarColor();
     cpuHistoryColor.setAlpha(86);
     m_cpuCoreHistoryBarSet->setColor(cpuHistoryColor);
     m_cpuCoreHistoryBarSet->setBorderColor(Qt::transparent);
 
-    m_cpuCoreBarSet = new QBarSet(QStringLiteral("当前"));
+    m_cpuCoreBarSet = new QBarSet(ks::i18n::contextText(
+        QStringLiteral("monitor.panel.cpu.current"), QStringLiteral("当前")));
     m_cpuCoreBarSet->setColor(cpuBarColor());
     m_cpuCoreBarSet->setBorderColor(cpuBarColor());
 
@@ -254,7 +258,8 @@ void MonitorPanelWidget::initializeUi()
     cpuChart->setBackgroundVisible(false);
     cpuChart->setBackgroundRoundness(0);
     cpuChart->setMargins(QMargins(0, 0, 0, 0));
-    cpuChart->setTitle(QStringLiteral("CPU 每核心利用率"));
+    cpuChart->setTitle(ks::i18n::contextText(
+        QStringLiteral("monitor.panel.cpu.title"), QStringLiteral("CPU 每核心利用率")));
 
     QBarCategoryAxis* cpuAxisX = new QBarCategoryAxis(cpuChart);
     cpuAxisX->append(cpuCategoryTextList);
@@ -281,10 +286,14 @@ void MonitorPanelWidget::initializeUi()
     m_memoryAvailableBaseSeries = new QLineSeries(this);
     m_memoryUsageSeries = new QLineSeries(this);
 
-    m_memoryUsedSeries->setName(QStringLiteral("已用"));
-    m_memoryStandbyTopSeries->setName(QStringLiteral("提交/缓存"));
-    m_memoryAvailableTopSeries->setName(QStringLiteral("可用"));
-    m_memoryUsageSeries->setName(QStringLiteral("占用"));
+    m_memoryUsedSeries->setName(ks::i18n::contextText(
+        QStringLiteral("monitor.panel.memory.used"), QStringLiteral("已用")));
+    m_memoryStandbyTopSeries->setName(ks::i18n::contextText(
+        QStringLiteral("monitor.panel.memory.cached"), QStringLiteral("提交/缓存")));
+    m_memoryAvailableTopSeries->setName(ks::i18n::contextText(
+        QStringLiteral("monitor.panel.memory.available"), QStringLiteral("可用")));
+    m_memoryUsageSeries->setName(ks::i18n::contextText(
+        QStringLiteral("monitor.panel.memory.usage"), QStringLiteral("占用")));
 
     const QColor memoryUsedColor(86, 166, 255);
     const QColor memoryStandbyColor(255, 184, 92);
@@ -305,17 +314,20 @@ void MonitorPanelWidget::initializeUi()
     m_memoryUsageSeries->setPen(memoryTrendPen);
 
     QAreaSeries* usedAreaSeries = new QAreaSeries(m_memoryUsedSeries);
-    usedAreaSeries->setName(QStringLiteral("已用"));
+    usedAreaSeries->setName(ks::i18n::contextText(
+        QStringLiteral("monitor.panel.memory.used"), QStringLiteral("已用")));
     usedAreaSeries->setPen(memoryUsedPen);
     usedAreaSeries->setBrush(QBrush(translucentAreaColor(memoryUsedColor, 82)));
 
     QAreaSeries* standbyAreaSeries = new QAreaSeries(m_memoryStandbyTopSeries, m_memoryStandbyBaseSeries);
-    standbyAreaSeries->setName(QStringLiteral("提交/缓存"));
+    standbyAreaSeries->setName(ks::i18n::contextText(
+        QStringLiteral("monitor.panel.memory.cached"), QStringLiteral("提交/缓存")));
     standbyAreaSeries->setPen(memoryStandbyPen);
     standbyAreaSeries->setBrush(QBrush(translucentAreaColor(memoryStandbyColor, 76)));
 
     QAreaSeries* availableAreaSeries = new QAreaSeries(m_memoryAvailableTopSeries, m_memoryAvailableBaseSeries);
-    availableAreaSeries->setName(QStringLiteral("可用"));
+    availableAreaSeries->setName(ks::i18n::contextText(
+        QStringLiteral("monitor.panel.memory.available"), QStringLiteral("可用")));
     availableAreaSeries->setPen(memoryAvailablePen);
     availableAreaSeries->setBrush(QBrush(translucentAreaColor(memoryAvailableColor, 58)));
 
@@ -328,7 +340,8 @@ void MonitorPanelWidget::initializeUi()
     memoryTrendChart->setBackgroundVisible(false);
     memoryTrendChart->setBackgroundRoundness(0);
     memoryTrendChart->setMargins(QMargins(0, 0, 0, 0));
-    memoryTrendChart->setTitle(QStringLiteral("内存占用与组成"));
+    memoryTrendChart->setTitle(ks::i18n::contextText(
+        QStringLiteral("monitor.panel.memory.title"), QStringLiteral("内存占用与组成")));
 
     m_memoryTrendAxisX = new QValueAxis(memoryTrendChart);
     m_memoryTrendAxisX->setRange(0, m_historyLength);
@@ -449,11 +462,11 @@ void MonitorPanelWidget::initializeUi()
 
     // 磁盘折线图：读/写双线。
     createLineChartView(
-        QStringLiteral("磁盘读写速率"),
+        ks::i18n::contextText(QStringLiteral("monitor.panel.disk.title"), QStringLiteral("磁盘读写速率")),
         QColor(65, 173, 255),
         QColor(86, 216, 150),
-        QStringLiteral("读取"),
-        QStringLiteral("写入"),
+        ks::i18n::contextText(QStringLiteral("monitor.panel.disk.read"), QStringLiteral("读取")),
+        ks::i18n::contextText(QStringLiteral("monitor.panel.disk.write"), QStringLiteral("写入")),
         &m_diskReadSeries,
         &m_diskWriteSeries,
         &m_diskAxisX,
@@ -462,11 +475,11 @@ void MonitorPanelWidget::initializeUi()
 
     // 网络折线图：下/上行双线。
     createLineChartView(
-        QStringLiteral("网络收发速率"),
+        ks::i18n::contextText(QStringLiteral("monitor.panel.network.title"), QStringLiteral("网络收发速率")),
         QColor(105, 173, 255),
         QColor(255, 177, 92),
-        QStringLiteral("下行"),
-        QStringLiteral("上行"),
+        ks::i18n::contextText(QStringLiteral("monitor.panel.network.down"), QStringLiteral("下行")),
+        ks::i18n::contextText(QStringLiteral("monitor.panel.network.up"), QStringLiteral("上行")),
         &m_networkRxSeries,
         &m_networkTxSeries,
         &m_networkAxisX,
@@ -611,7 +624,10 @@ void MonitorPanelWidget::refreshMetrics()
     if (m_cpuChartView != nullptr && m_cpuChartView->chart() != nullptr)
     {
         m_cpuChartView->chart()->setTitle(
-            QStringLiteral("CPU 每核心利用率（总体 %1%）").arg(totalCpuUsage, 0, 'f', 1));
+            ks::i18n::contextText(
+                QStringLiteral("monitor.panel.cpu.title.dynamic"),
+                QStringLiteral("CPU 每核心利用率（总体 %1%）"))
+            .arg(totalCpuUsage, 0, 'f', 1));
     }
 
     // 采样并更新内存合并图：折线表示总占用，面积颜色表示当前时刻组成比例。
@@ -632,7 +648,9 @@ void MonitorPanelWidget::refreshMetrics()
     if (m_memoryTrendChartView != nullptr && m_memoryTrendChartView->chart() != nullptr)
     {
         m_memoryTrendChartView->chart()->setTitle(
-            QStringLiteral("内存占用/组成  占用:%1%  缓存:%2%  可用:%3%")
+            ks::i18n::contextText(
+                QStringLiteral("monitor.panel.memory.title.dynamic"),
+                QStringLiteral("内存占用/组成  占用:%1%  缓存:%2%  可用:%3%"))
             .arg(memorySample.usedPercent, 0, 'f', 1)
             .arg(memorySample.standbyPercent, 0, 'f', 1)
             .arg(memorySample.availablePercent, 0, 'f', 1));
@@ -700,20 +718,25 @@ void MonitorPanelWidget::refreshMetrics()
     if (m_diskChartView != nullptr && m_diskChartView->chart() != nullptr)
     {
         m_diskChartView->chart()->setTitle(
-            QStringLiteral("磁盘读写速率  读:%1  写:%2")
+            ks::i18n::contextText(
+                QStringLiteral("monitor.panel.disk.title.dynamic"),
+                QStringLiteral("磁盘读写速率  读:%1  写:%2"))
             .arg(bytesPerSecondToText(diskReadBytesPerSec))
             .arg(bytesPerSecondToText(diskWriteBytesPerSec)));
     }
     if (m_networkChartView != nullptr && m_networkChartView->chart() != nullptr)
     {
         m_networkChartView->chart()->setTitle(
-            QStringLiteral("网络收发速率  下:%1  上:%2")
+            ks::i18n::contextText(
+                QStringLiteral("monitor.panel.network.title.dynamic"),
+                QStringLiteral("网络收发速率  下:%1  上:%2"))
             .arg(bytesPerSecondToText(networkRxBytesPerSec))
             .arg(bytesPerSecondToText(networkTxBytesPerSec)));
     }
 
-    m_lastCompactSummaryText = QStringLiteral(
-        "CPU %1% | 内存 %2% | 磁盘 读 %3 / 写 %4 | 网络 下 %5 / 上 %6")
+    m_lastCompactSummaryText = ks::i18n::contextText(
+        QStringLiteral("monitor.panel.compact.summary"),
+        QStringLiteral("CPU %1% | 内存 %2% | 磁盘 读 %3 / 写 %4 | 网络 下 %5 / 上 %6"))
         .arg(totalCpuUsage, 0, 'f', 1)
         .arg(memorySample.usedPercent, 0, 'f', 1)
         .arg(bytesPerSecondToText(diskReadBytesPerSec))

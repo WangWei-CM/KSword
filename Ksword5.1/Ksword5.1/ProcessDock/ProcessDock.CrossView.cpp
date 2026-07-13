@@ -1,4 +1,5 @@
 #include "ProcessDock.h"
+#include "../Internationalization/LanguageManager.h"
 #include "../UI/VisibleTableWidget.h"
 
 #include "../ArkDriverClient/ArkDriverClient.h"
@@ -456,6 +457,16 @@ void ProcessDock::initializeCrossViewPage()
     }
     innerTabs->addTab(m_processCrossViewTable, QStringLiteral("Process Cross-View"));
     innerTabs->addTab(m_threadCrossViewTable, QStringLiteral("Thread Cross-View"));
+    ks::i18n::LanguageManager::instance().bindTab(
+        innerTabs,
+        m_processCrossViewTable,
+        QStringLiteral("process.cross_view.process_tab"),
+        QStringLiteral("Process Cross-View"));
+    ks::i18n::LanguageManager::instance().bindTab(
+        innerTabs,
+        m_threadCrossViewTable,
+        QStringLiteral("process.cross_view.thread_tab"),
+        QStringLiteral("Thread Cross-View"));
     splitter->addWidget(innerTabs);
 
     // Cross-View 详情区使用项目统一 CodeEditorWidget，保留查找/复制能力并避免普通文本框样式漂移。
@@ -467,6 +478,11 @@ void ProcessDock::initializeCrossViewPage()
     splitter->setStretchFactor(1, 2);
 
     m_sideTabWidget->addTab(m_crossViewPage, blueTintedIcon(":/Icon/process_tree.svg"), QStringLiteral("Process Cross-View"));
+    ks::i18n::LanguageManager::instance().bindTab(
+        m_sideTabWidget,
+        m_crossViewPage,
+        QStringLiteral("process.tab.cross_view"),
+        QStringLiteral("Process Cross-View"));
 }
 
 void ProcessDock::initializeCrossViewConnections()

@@ -1,5 +1,6 @@
 #include "RegistryDock/RegistryDock.h"
 #include "UI/VisibleTableWidget.h"
+#include "Internationalization/LanguageManager.h"
 
 #include "ArkDriverClient/ArkDriverClient.h"
 #include "RegistryDock/RegistryOptimizationPage.h"
@@ -942,6 +943,10 @@ void RegistryDock::initializeUi()
 
     m_rightTabWidget->addTab(m_valueTable, QStringLiteral("值列表"));
     m_rightTabWidget->addTab(m_searchResultTable, QStringLiteral("搜索结果"));
+    ks::i18n::LanguageManager::instance().bindTab(
+        m_rightTabWidget, m_valueTable, QStringLiteral("registry.tab.values"), QStringLiteral("值列表"));
+    ks::i18n::LanguageManager::instance().bindTab(
+        m_rightTabWidget, m_searchResultTable, QStringLiteral("registry.tab.search_results"), QStringLiteral("搜索结果"));
 
     m_mainSplitter->setStretchFactor(0, 1);
     m_mainSplitter->setStretchFactor(1, 2);
@@ -961,6 +966,10 @@ void RegistryDock::initializeUi()
     m_optimizationPage = new RegistryOptimizationPage(m_registryTabWidget);
     m_registryTabWidget->addTab(m_registryEditorPage, QStringLiteral("注册表编辑"));
     m_registryTabWidget->addTab(m_optimizationPage, QStringLiteral("系统优化"));
+    ks::i18n::LanguageManager::instance().bindTab(
+        m_registryTabWidget, m_registryEditorPage, QStringLiteral("registry.tab.editor"), QStringLiteral("注册表编辑"));
+    ks::i18n::LanguageManager::instance().bindTab(
+        m_registryTabWidget, m_optimizationPage, QStringLiteral("registry.tab.optimization"), QStringLiteral("系统优化"));
 }
 
 void RegistryDock::initializeConnections()

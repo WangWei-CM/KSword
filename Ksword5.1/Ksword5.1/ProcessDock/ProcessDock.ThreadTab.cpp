@@ -1,6 +1,8 @@
 #include "ProcessDock.h"
 #include "ThreadStackWindow.h"
 
+#include "../Internationalization/LanguageManager.h"
+
 #include "../ArkDriverClient/ArkDriverClient.h"
 #include "../theme.h"
 
@@ -557,6 +559,11 @@ void ProcessDock::initializeThreadPage()
 
     m_threadPageLayout->addWidget(m_threadTable, 1);
     m_sideTabWidget->addTab(m_threadPage, blueTintedIcon(IconThreadTab), "线程列表");
+    ks::i18n::LanguageManager::instance().bindTab(
+        m_sideTabWidget,
+        m_threadPage,
+        QStringLiteral("process.tab.threads"),
+        QStringLiteral("线程列表"));
     refreshSideTabIconContrast();
 }
 

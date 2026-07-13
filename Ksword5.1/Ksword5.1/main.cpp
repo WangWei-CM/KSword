@@ -438,7 +438,8 @@ namespace
         const std::wstring baseDrive = L"Software\\Classes\\Drive\\shell\\" + std::wstring(kUnlockerKeyName);
         const std::wstring baseBackground =
             L"Software\\Classes\\Directory\\Background\\shell\\" + std::wstring(kUnlockerKeyName);
-        const std::wstring menuText = ks::i18n::source(
+        const std::wstring menuText = ks::i18n::contextText(
+            QStringLiteral("main.unlocker.menu"),
             QStringLiteral("使用 Ksword 文件解锁器(R3/R0)")).toStdWString();
 
         const bool starOk =
@@ -895,22 +896,27 @@ namespace
 
         const std::wstring currentScaleText = buildPercentText(currentScaleFactor);
         const std::wstring recommendedScaleText = buildPercentText(recommendedScaleFactor);
-        const std::wstring dialogContentSourceText =
-            L"当前可用宽度约 " + std::to_wstring(logicalClientWidth) + L"px，小于推荐的 "
-            + std::to_wstring(kStartupScaleRecommendedLogicalWidth) + L"px。\n"
-            L"当前缩放：" + currentScaleText + L"\n"
-            L"推荐缩放：" + recommendedScaleText + L"\n\n"
-            L"是否应用推荐缩放？Ksword 将保存设置并立即重启。";
-        const std::wstring dialogContentText = ks::i18n::source(
-            QString::fromStdWString(dialogContentSourceText)).toStdWString();
-        const std::wstring applyAndRestartText = ks::i18n::source(
-            QStringLiteral("应用并重启")).toStdWString();
-        const std::wstring keepCurrentSettingsText = ks::i18n::source(
-            QStringLiteral("保持当前设置")).toStdWString();
-        const std::wstring dialogTitleText = ks::i18n::source(
-            QStringLiteral("Ksword5.1 启动缩放建议")).toStdWString();
-        const std::wstring mainInstructionText = ks::i18n::source(
-            QStringLiteral("检测到当前显示可用宽度偏小")).toStdWString();
+        const QString dialogContentSourceTemplate = QStringLiteral(
+            "当前可用宽度约 %1px，小于推荐的 %2px。\n"
+            "当前缩放：%3\n"
+            "推荐缩放：%4\n\n"
+            "是否应用推荐缩放？Ksword 将保存设置并立即重启。" );
+        const QString dialogContentText = ks::i18n::contextText(
+            QStringLiteral("main.scale.dialog.content"),
+            dialogContentSourceTemplate)
+            .arg(logicalClientWidth)
+            .arg(kStartupScaleRecommendedLogicalWidth)
+            .arg(QString::fromStdWString(currentScaleText))
+            .arg(QString::fromStdWString(recommendedScaleText));
+        const std::wstring applyAndRestartText = ks::i18n::contextText(
+            QStringLiteral("main.scale.dialog.apply"), QStringLiteral("应用并重启")).toStdWString();
+        const std::wstring keepCurrentSettingsText = ks::i18n::contextText(
+            QStringLiteral("main.scale.dialog.keep"), QStringLiteral("保持当前设置")).toStdWString();
+        const std::wstring dialogContentTextWide = dialogContentText.toStdWString();
+        const std::wstring dialogTitleText = ks::i18n::contextText(
+            QStringLiteral("main.scale.dialog.title"), QStringLiteral("Ksword5.1 启动缩放建议")).toStdWString();
+        const std::wstring mainInstructionText = ks::i18n::contextText(
+            QStringLiteral("main.scale.dialog.instruction"), QStringLiteral("检测到当前显示可用宽度偏小")).toStdWString();
 
         // dialogButtons 作用：TaskDialog 自定义按钮集合。
         TASKDIALOG_BUTTON dialogButtons[] =
@@ -925,7 +931,7 @@ namespace
         dialogConfig.dwFlags = TDF_ALLOW_DIALOG_CANCELLATION | TDF_POSITION_RELATIVE_TO_WINDOW;
         dialogConfig.pszWindowTitle = dialogTitleText.c_str();
         dialogConfig.pszMainInstruction = mainInstructionText.c_str();
-        dialogConfig.pszContent = dialogContentText.c_str();
+        dialogConfig.pszContent = dialogContentTextWide.c_str();
         dialogConfig.pButtons = dialogButtons;
         dialogConfig.cButtons = ARRAYSIZE(dialogButtons);
         dialogConfig.nDefaultButton = IDYES;

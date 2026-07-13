@@ -132,7 +132,8 @@ namespace
         const std::wstring baseDrive = L"Software\\Classes\\Drive\\shell\\" + std::wstring(kUnlockerKeyName);
         const std::wstring baseBackground =
             L"Software\\Classes\\Directory\\Background\\shell\\" + std::wstring(kUnlockerKeyName);
-        const std::wstring menuText = ks::i18n::source(
+        const std::wstring menuText = ks::i18n::contextText(
+            QStringLiteral("main.unlocker.menu"),
             QStringLiteral("使用 Ksword 文件解锁器(R3/R0)")).toStdWString();
 
         return

@@ -1,4 +1,5 @@
 #include "RegistryDock.h"
+#include "../Internationalization/LanguageManager.h"
 #include "../UI/VisibleTableWidget.h"
 
 // ============================================================
@@ -264,6 +265,10 @@ void RegistryDock::initializeUi()
 
     m_rightTabWidget->addTab(m_valueTable, QStringLiteral("值列表"));
     m_rightTabWidget->addTab(m_searchResultTable, QStringLiteral("搜索结果"));
+    ks::i18n::LanguageManager::instance().bindTab(
+        m_rightTabWidget, m_valueTable, QStringLiteral("registry.tab.values"), QStringLiteral("值列表"));
+    ks::i18n::LanguageManager::instance().bindTab(
+        m_rightTabWidget, m_searchResultTable, QStringLiteral("registry.tab.search_results"), QStringLiteral("搜索结果"));
 
     m_mainSplitter->setStretchFactor(0, 1);
     m_mainSplitter->setStretchFactor(1, 2);

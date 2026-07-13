@@ -15,21 +15,13 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QLocale>
-#include <QMenu>
-#include <QPlainTextEdit>
-#include <QProgressBar>
-#include <QProxyStyle>
 #include <QRegularExpression>
 #include <QSet>
-#include <QStyleOption>
 #include <QTabWidget>
-#include <QTextEdit>
 #include <QSpinBox>
-#include <QDoubleSpinBox>
 #include <QWidget>
 
 #include <algorithm>
-#include <functional>
 
 #ifdef Q_OS_WIN
 #ifndef NOMINMAX
@@ -52,74 +44,14 @@ namespace
     constexpr auto kToolTipFallbackProperty = "ks_i18n_tooltip_fallback";
     constexpr auto kPlaceholderKeyProperty = "ks_i18n_placeholder_key";
     constexpr auto kPlaceholderFallbackProperty = "ks_i18n_placeholder_fallback";
+    constexpr auto kSuffixKeyProperty = "ks_i18n_suffix_key";
+    constexpr auto kSuffixFallbackProperty = "ks_i18n_suffix_fallback";
     constexpr auto kWindowTitleKeyProperty = "ks_i18n_window_title_key";
     constexpr auto kWindowTitleFallbackProperty = "ks_i18n_window_title_fallback";
     constexpr auto kTabKeyProperty = "ks_i18n_tab_key";
     constexpr auto kTabFallbackProperty = "ks_i18n_tab_fallback";
-    constexpr auto kAutoTextSourceProperty = "ks_i18n_auto_text_source";
-    constexpr auto kAutoTextLastProperty = "ks_i18n_auto_text_last";
-    constexpr auto kAutoToolTipSourceProperty = "ks_i18n_auto_tooltip_source";
-    constexpr auto kAutoToolTipLastProperty = "ks_i18n_auto_tooltip_last";
-    constexpr auto kAutoPlaceholderSourceProperty = "ks_i18n_auto_placeholder_source";
-    constexpr auto kAutoPlaceholderLastProperty = "ks_i18n_auto_placeholder_last";
-    constexpr auto kAutoWindowTitleSourceProperty = "ks_i18n_auto_window_title_source";
-    constexpr auto kAutoWindowTitleLastProperty = "ks_i18n_auto_window_title_last";
-    constexpr auto kAutoTabSourceProperty = "ks_i18n_auto_tab_source";
-    constexpr auto kAutoTabLastProperty = "ks_i18n_auto_tab_last";
-    constexpr auto kAutoPrefixSourceProperty = "ks_i18n_auto_prefix_source";
-    constexpr auto kAutoPrefixLastProperty = "ks_i18n_auto_prefix_last";
-    constexpr auto kAutoSuffixSourceProperty = "ks_i18n_auto_suffix_source";
-    constexpr auto kAutoSuffixLastProperty = "ks_i18n_auto_suffix_last";
-    constexpr auto kAutoSpecialSourceProperty = "ks_i18n_auto_special_source";
-    constexpr auto kAutoSpecialLastProperty = "ks_i18n_auto_special_last";
-    constexpr auto kAutoDocumentSourceProperty = "ks_i18n_auto_document_source";
-    constexpr auto kAutoDocumentLastProperty = "ks_i18n_auto_document_last";
-    constexpr int kAutoComboSourceRole = Qt::UserRole + 0x4B50;
-    constexpr int kAutoComboLastRole = Qt::UserRole + 0x4B51;
-
-    bool containsHanText(const QString& text)
-    {
-        static const QRegularExpression hanExpression(QStringLiteral("[\\x{3400}-\\x{4DBF}\\x{4E00}-\\x{9FFF}]"));
-        return hanExpression.match(text).hasMatch();
-    }
-
-    class LanguageProxyStyle final : public QProxyStyle
-    {
-    public:
-        explicit LanguageProxyStyle(QStyle* baseStyle)
-            : QProxyStyle(baseStyle)
-        {
-        }
-
-        void drawControl(
-            const ControlElement element,
-            const QStyleOption* option,
-            QPainter* painter,
-            const QWidget* widget = nullptr) const override
-        {
-            if (element == CE_ItemViewItem)
-            {
-                if (const QStyleOptionViewItem* itemOption = qstyleoption_cast<const QStyleOptionViewItem*>(option))
-                {
-                    QStyleOptionViewItem translatedOption(*itemOption);
-                    translatedOption.text = ks::i18n::LanguageManager::instance().translateSource(itemOption->text);
-                    QProxyStyle::drawControl(element, &translatedOption, painter, widget);
-                    return;
-                }
-            }
-            else if (element == CE_HeaderLabel)
-            {
-                if (const QStyleOptionHeader* headerOption = qstyleoption_cast<const QStyleOptionHeader*>(option))
-                {
-                    QStyleOptionHeader translatedOption(*headerOption);
-                    translatedOption.text = ks::i18n::LanguageManager::instance().translateSource(headerOption->text);
-                    QProxyStyle::drawControl(element, &translatedOption, painter, widget);
-                    return;
-                }
-            }
-            QProxyStyle::drawControl(element, option, painter, widget);
-        }
-    };
+    constexpr auto kTabToolTipKeyProperty = "ks_i18n_tab_tooltip_key";
+    constexpr auto kTabToolTipFallbackProperty = "ks_i18n_tab_tooltip_fallback";
 
     void appendUniqueDirectory(QStringList* directoryList, const QString& directoryPath)
     {
@@ -183,6 +115,13 @@ namespace
             QStringLiteral("^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$"));
         return languageIdExpression.match(languageId).hasMatch();
     }
+
+    bool isHistoricalChineseLanguage(const QString& languageId)
+    {
+        // zh-CN is the checked-in source-language baseline. Other zh-* packs
+        // remain extensible and must be allowed to provide their own values.
+        return languageId.compare(QStringLiteral("zh-CN"), Qt::CaseInsensitive) == 0;
+    }
 }
 
 ks::i18n::LanguageManager& ks::i18n::LanguageManager::instance()
@@ -199,20 +138,6 @@ bool ks::i18n::LanguageManager::initialize(
     if (m_languagePacks.isEmpty())
     {
         discoverLanguagePacks(&warningList);
-    }
-
-    if (QApplication* application = qobject_cast<QApplication*>(QCoreApplication::instance()))
-    {
-        if (!m_eventFilterInstalled)
-        {
-            application->installEventFilter(this);
-            m_eventFilterInstalled = true;
-        }
-        if (!application->property("ks_i18n_proxy_style_installed").toBool())
-        {
-            application->setStyle(new LanguageProxyStyle(application->style()));
-            application->setProperty("ks_i18n_proxy_style_installed", true);
-        }
     }
 
     if (m_languagePacks.isEmpty())
@@ -299,7 +224,6 @@ bool ks::i18n::LanguageManager::setLanguage(
     }
 
     m_currentLanguageId = packIterator->info.id;
-    m_runtimeSourceCache.clear();
     applyApplicationDirection();
     retranslateAll();
     if (errorTextOut != nullptr)
@@ -333,47 +257,24 @@ QString ks::i18n::LanguageManager::text(
     return resolveText(m_currentLanguageId, key, fallbackText, &visitedLanguageIds);
 }
 
-QString ks::i18n::LanguageManager::translateSource(const QString& sourceText) const
+QString ks::i18n::LanguageManager::contextText(
+    const QString& contextKey,
+    const QString& sourceText) const
 {
-    if (sourceText.isEmpty() || m_currentLanguageId.isEmpty())
+    if (contextKey.trimmed().isEmpty() || sourceText.isEmpty())
     {
         return sourceText;
     }
 
-    const QString cacheKey = m_currentLanguageId + QChar(0x001F) + sourceText;
-    const auto cachedIterator = m_runtimeSourceCache.constFind(cacheKey);
-    if (cachedIterator != m_runtimeSourceCache.constEnd())
-    {
-        return cachedIterator.value();
-    }
-
-    const auto packIterator = std::find_if(
-        m_languagePacks.cbegin(),
-        m_languagePacks.cend(),
-        [this](const LanguagePack& pack) {
-            return pack.info.id.compare(m_currentLanguageId, Qt::CaseInsensitive) == 0;
-        });
-    if (packIterator == m_languagePacks.cend())
+    // Chinese is the historical source language. Returning the call-site
+    // fallback makes a language switch incapable of rewriting the old UI.
+    if (isHistoricalChineseLanguage(m_currentLanguageId))
     {
         return sourceText;
     }
 
-    QString translatedText = resolveSourceText(*packIterator, sourceText);
-    if (translatedText == sourceText && !packIterator->fallbackLanguageId.isEmpty())
-    {
-        const auto fallbackIterator = std::find_if(
-            m_languagePacks.cbegin(),
-            m_languagePacks.cend(),
-            [&packIterator](const LanguagePack& pack) {
-                return pack.info.id.compare(packIterator->fallbackLanguageId, Qt::CaseInsensitive) == 0;
-            });
-        if (fallbackIterator != m_languagePacks.cend())
-        {
-            translatedText = resolveSourceText(*fallbackIterator, sourceText);
-        }
-    }
-    m_runtimeSourceCache.insert(cacheKey, translatedText);
-    return translatedText;
+    QStringList visitedLanguageIds;
+    return resolveContextText(m_currentLanguageId, contextKey, sourceText, &visitedLanguageIds);
 }
 
 void ks::i18n::LanguageManager::bindText(
@@ -418,6 +319,20 @@ void ks::i18n::LanguageManager::bindPlaceholder(
     applyBindings(lineEdit);
 }
 
+void ks::i18n::LanguageManager::bindSuffix(
+    QSpinBox* spinBox,
+    const QString& key,
+    const QString& fallbackText)
+{
+    if (spinBox == nullptr)
+    {
+        return;
+    }
+    spinBox->setProperty(kSuffixKeyProperty, key);
+    spinBox->setProperty(kSuffixFallbackProperty, fallbackText);
+    applyBindings(spinBox);
+}
+
 void ks::i18n::LanguageManager::bindWindowTitle(
     QWidget* widget,
     const QString& key,
@@ -444,6 +359,21 @@ void ks::i18n::LanguageManager::bindTab(
     }
     page->setProperty(kTabKeyProperty, key);
     page->setProperty(kTabFallbackProperty, fallbackText);
+    applyBindings(tabWidget);
+}
+
+void ks::i18n::LanguageManager::bindTabToolTip(
+    QTabWidget* tabWidget,
+    QWidget* page,
+    const QString& key,
+    const QString& fallbackText)
+{
+    if (tabWidget == nullptr || page == nullptr || tabWidget->indexOf(page) < 0)
+    {
+        return;
+    }
+    page->setProperty(kTabToolTipKeyProperty, key);
+    page->setProperty(kTabToolTipFallbackProperty, fallbackText);
     applyBindings(tabWidget);
 }
 
@@ -481,37 +411,6 @@ void ks::i18n::LanguageManager::retranslateAll()
         QCoreApplication::sendEvent(widget, &languageChangeEvent);
         applyBindings(widget);
     }
-}
-
-bool ks::i18n::LanguageManager::eventFilter(QObject* watchedObject, QEvent* event)
-{
-    if (watchedObject == nullptr || event == nullptr || m_applyingAutomaticTranslation)
-    {
-        return QObject::eventFilter(watchedObject, event);
-    }
-
-    switch (event->type())
-    {
-    case QEvent::Show:
-    case QEvent::Polish:
-    case QEvent::LanguageChange:
-        applyBindings(watchedObject);
-        break;
-    case QEvent::ActionChanged:
-    case QEvent::ToolTipChange:
-    case QEvent::WindowTitleChange:
-        applyAutomaticTranslation(watchedObject);
-        break;
-    case QEvent::Paint:
-        applyAutomaticTranslation(watchedObject);
-        // QAbstractScrollArea and QTabWidget paint through child widgets. Translating
-        // the direct parent keeps dynamically replaced document/tab text current.
-        applyAutomaticTranslation(watchedObject->parent());
-        break;
-    default:
-        break;
-    }
-    return QObject::eventFilter(watchedObject, event);
 }
 
 void ks::i18n::LanguageManager::discoverLanguagePacks(QStringList* warningListOut)
@@ -612,7 +511,7 @@ bool ks::i18n::LanguageManager::loadLanguagePack(
     const QString name = rootObject.value(QStringLiteral("name")).toString().trimmed();
     const QString nativeName = rootObject.value(QStringLiteral("native_name")).toString().trimmed();
     const QJsonObject translationObject = rootObject.value(QStringLiteral("translations")).toObject();
-    const QJsonObject sourceTranslationObject = rootObject.value(QStringLiteral("source_translations")).toObject();
+    const QJsonObject contextTranslationObject = rootObject.value(QStringLiteral("context_translations")).toObject();
 
     if (schema != QString::fromLatin1(kLanguagePackSchema)
         || formatVersion != kLanguagePackFormatVersion
@@ -661,20 +560,19 @@ bool ks::i18n::LanguageManager::loadLanguagePack(
         loadedPack.translations.insert(iterator.key(), iterator.value().toString());
     }
 
-    for (auto iterator = sourceTranslationObject.constBegin(); iterator != sourceTranslationObject.constEnd(); ++iterator)
+    for (auto iterator = contextTranslationObject.constBegin(); iterator != contextTranslationObject.constEnd(); ++iterator)
     {
-        if (!iterator.value().isString() || iterator.key().isEmpty())
+        if (!iterator.value().isString() || iterator.key().trimmed().isEmpty())
         {
             if (errorTextOut != nullptr)
             {
-                *errorTextOut = QStringLiteral("Language pack contains an invalid source translation: %1")
+                *errorTextOut = QStringLiteral("Language pack contains an invalid context translation: %1")
                     .arg(filePath);
             }
             return false;
         }
-        loadedPack.sourceTranslations.insert(iterator.key(), iterator.value().toString());
+        loadedPack.contextTranslations.insert(iterator.key(), iterator.value().toString());
     }
-    rebuildSourceIndexes(&loadedPack);
 
     *packOut = std::move(loadedPack);
     return true;
@@ -698,6 +596,13 @@ QString ks::i18n::LanguageManager::resolveText(
     }
     visitedLanguageIds->append(normalizedLanguageId);
 
+    // zh-CN is the source-language baseline. The fallback at the original
+    // call site is authoritative so a generated/edited pack cannot alter it.
+    if (isHistoricalChineseLanguage(normalizedLanguageId) && !fallbackText.isEmpty())
+    {
+        return fallbackText;
+    }
+
     const auto packIterator = std::find_if(
         m_languagePacks.cbegin(),
         m_languagePacks.cend(),
@@ -714,6 +619,11 @@ QString ks::i18n::LanguageManager::resolveText(
     {
         return translationIterator.value();
     }
+    const auto contextIterator = packIterator->contextTranslations.constFind(key);
+    if (contextIterator != packIterator->contextTranslations.constEnd())
+    {
+        return contextIterator.value();
+    }
     if (!packIterator->fallbackLanguageId.isEmpty())
     {
         return resolveText(
@@ -725,92 +635,55 @@ QString ks::i18n::LanguageManager::resolveText(
     return fallbackText.isEmpty() ? key : fallbackText;
 }
 
-void ks::i18n::LanguageManager::rebuildSourceIndexes(LanguagePack* pack) const
+QString ks::i18n::LanguageManager::resolveContextText(
+    const QString& languageId,
+    const QString& contextKey,
+    const QString& sourceText,
+    QStringList* visitedLanguageIds) const
 {
-    if (pack == nullptr)
+    if (visitedLanguageIds == nullptr || languageId.trimmed().isEmpty())
     {
-        return;
+        return sourceText;
     }
 
-    pack->sourceTemplates.clear();
-    static const QRegularExpression placeholderExpression(QStringLiteral("%(?:L?\\d+|n)"));
-
-    for (auto iterator = pack->sourceTranslations.constBegin(); iterator != pack->sourceTranslations.constEnd(); ++iterator)
+    const QString normalizedLanguageId = languageId.trimmed().toLower();
+    if (visitedLanguageIds->contains(normalizedLanguageId))
     {
-        const QString& sourceText = iterator.key();
-        QRegularExpressionMatchIterator matchIterator = placeholderExpression.globalMatch(sourceText);
-        int cursor = 0;
-        QString patternText = QStringLiteral("^");
-        QStringList placeholderList;
-        while (matchIterator.hasNext())
-        {
-            const QRegularExpressionMatch placeholderMatch = matchIterator.next();
-            patternText += QRegularExpression::escape(sourceText.mid(cursor, placeholderMatch.capturedStart() - cursor));
-            patternText += QStringLiteral("(.*?)");
-            placeholderList.append(placeholderMatch.captured());
-            cursor = placeholderMatch.capturedEnd();
-        }
-
-        if (!placeholderList.isEmpty())
-        {
-            patternText += QRegularExpression::escape(sourceText.mid(cursor));
-            patternText += QStringLiteral("$");
-            LanguagePack::SourceTemplate sourceTemplate;
-            sourceTemplate.expression = QRegularExpression(
-                patternText,
-                QRegularExpression::DotMatchesEverythingOption);
-            sourceTemplate.translatedTemplate = iterator.value();
-            sourceTemplate.placeholders = placeholderList;
-            if (sourceTemplate.expression.isValid())
-            {
-                pack->sourceTemplates.append(std::move(sourceTemplate));
-            }
-        }
+        return sourceText;
     }
-}
+    visitedLanguageIds->append(normalizedLanguageId);
 
-QString ks::i18n::LanguageManager::resolveSourceText(
-    const LanguagePack& pack,
-    const QString& sourceText) const
-{
-    const auto exactIterator = pack.sourceTranslations.constFind(sourceText);
-    if (exactIterator != pack.sourceTranslations.constEnd())
+    // Keep the historical Chinese fallback authoritative even when a third
+    // language reaches zh-CN through its fallback chain.
+    if (isHistoricalChineseLanguage(normalizedLanguageId))
     {
-        return exactIterator.value();
+        return sourceText;
     }
 
-    for (const LanguagePack::SourceTemplate& sourceTemplate : pack.sourceTemplates)
+    const auto packIterator = std::find_if(
+        m_languagePacks.cbegin(),
+        m_languagePacks.cend(),
+        [&normalizedLanguageId](const LanguagePack& pack) {
+            return pack.info.id.compare(normalizedLanguageId, Qt::CaseInsensitive) == 0;
+        });
+    if (packIterator == m_languagePacks.cend())
     {
-        const QRegularExpressionMatch match = sourceTemplate.expression.match(sourceText);
-        if (!match.hasMatch())
-        {
-            continue;
-        }
-
-        QHash<QString, QString> capturedValues;
-        for (int index = 0; index < sourceTemplate.placeholders.size(); ++index)
-        {
-            const QString& placeholder = sourceTemplate.placeholders.at(index);
-            if (!capturedValues.contains(placeholder))
-            {
-                capturedValues.insert(placeholder, match.captured(index + 1));
-            }
-        }
-        QStringList placeholderKeys = capturedValues.keys();
-        std::sort(
-            placeholderKeys.begin(),
-            placeholderKeys.end(),
-            [](const QString& left, const QString& right) {
-                return left.size() > right.size();
-            });
-        QString translatedText = sourceTemplate.translatedTemplate;
-        for (const QString& placeholder : placeholderKeys)
-        {
-            translatedText.replace(placeholder, capturedValues.value(placeholder));
-        }
-        return translatedText;
+        return sourceText;
     }
 
+    const auto translationIterator = packIterator->contextTranslations.constFind(contextKey);
+    if (translationIterator != packIterator->contextTranslations.constEnd())
+    {
+        return translationIterator.value();
+    }
+    if (!packIterator->fallbackLanguageId.isEmpty())
+    {
+        return resolveContextText(
+            packIterator->fallbackLanguageId,
+            contextKey,
+            sourceText,
+            visitedLanguageIds);
+    }
     return sourceText;
 }
 
@@ -820,8 +693,6 @@ void ks::i18n::LanguageManager::applyBindings(QObject* object) const
     {
         return;
     }
-
-    applyAutomaticTranslation(object);
 
     const QString textKey = object->property(kTextKeyProperty).toString();
     if (!textKey.isEmpty())
@@ -873,6 +744,17 @@ void ks::i18n::LanguageManager::applyBindings(QObject* object) const
         }
     }
 
+    if (QSpinBox* spinBox = qobject_cast<QSpinBox*>(object))
+    {
+        const QString suffixKey = spinBox->property(kSuffixKeyProperty).toString();
+        if (!suffixKey.isEmpty())
+        {
+            spinBox->setSuffix(text(
+                suffixKey,
+                spinBox->property(kSuffixFallbackProperty).toString()));
+        }
+    }
+
     if (QComboBox* comboBox = qobject_cast<QComboBox*>(object))
     {
         for (int index = 0; index < comboBox->count(); ++index)
@@ -899,6 +781,13 @@ void ks::i18n::LanguageManager::applyBindings(QObject* object) const
             {
                 tabWidget->setTabText(index, text(tabKey, page->property(kTabFallbackProperty).toString()));
             }
+            const QString tabToolTipKey = page->property(kTabToolTipKeyProperty).toString();
+            if (!tabToolTipKey.isEmpty())
+            {
+                tabWidget->setTabToolTip(
+                    index,
+                    text(tabToolTipKey, page->property(kTabToolTipFallbackProperty).toString()));
+            }
         }
     }
 
@@ -907,273 +796,6 @@ void ks::i18n::LanguageManager::applyBindings(QObject* object) const
     {
         applyBindings(childObject);
     }
-}
-
-void ks::i18n::LanguageManager::applyAutomaticTranslation(QObject* object) const
-{
-    if (object == nullptr || m_applyingAutomaticTranslation)
-    {
-        return;
-    }
-
-    m_applyingAutomaticTranslation = true;
-    const auto isSourceTextForCurrentLanguage = [this](const QString& value) {
-        if (value.isEmpty())
-        {
-            return false;
-        }
-        const bool targetIsChinese = m_currentLanguageId.startsWith(QStringLiteral("zh"), Qt::CaseInsensitive);
-        return targetIsChinese ? !containsHanText(value) : containsHanText(value);
-    };
-    const auto applyTrackedText = [this, object, &isSourceTextForCurrentLanguage](
-        const QString& currentText,
-        const char* sourcePropertyName,
-        const char* lastPropertyName,
-        const std::function<void(const QString&)>& setter) {
-        QString sourceText = object->property(sourcePropertyName).toString();
-        const QString lastTranslatedText = object->property(lastPropertyName).toString();
-
-        if (sourceText.isEmpty())
-        {
-            if (!isSourceTextForCurrentLanguage(currentText))
-            {
-                return;
-            }
-            sourceText = currentText;
-        }
-        else if (currentText != lastTranslatedText && isSourceTextForCurrentLanguage(currentText))
-        {
-            sourceText = currentText;
-        }
-        else if (currentText != lastTranslatedText && !isSourceTextForCurrentLanguage(currentText))
-        {
-            return;
-        }
-
-        const QString translatedText = translateSource(sourceText);
-        object->setProperty(sourcePropertyName, sourceText);
-        object->setProperty(lastPropertyName, translatedText);
-        if (translatedText != currentText)
-        {
-            setter(translatedText);
-        }
-    };
-
-    if (object->property(kTextKeyProperty).toString().isEmpty())
-    {
-        if (QAbstractButton* button = qobject_cast<QAbstractButton*>(object))
-        {
-            applyTrackedText(
-                button->text(),
-                kAutoTextSourceProperty,
-                kAutoTextLastProperty,
-                [button](const QString& value) { button->setText(value); });
-        }
-        else if (QLabel* label = qobject_cast<QLabel*>(object))
-        {
-            applyTrackedText(
-                label->text(),
-                kAutoTextSourceProperty,
-                kAutoTextLastProperty,
-                [label](const QString& value) { label->setText(value); });
-        }
-        else if (QGroupBox* groupBox = qobject_cast<QGroupBox*>(object))
-        {
-            applyTrackedText(
-                groupBox->title(),
-                kAutoTextSourceProperty,
-                kAutoTextLastProperty,
-                [groupBox](const QString& value) { groupBox->setTitle(value); });
-        }
-        else if (QAction* action = qobject_cast<QAction*>(object))
-        {
-            applyTrackedText(
-                action->text(),
-                kAutoTextSourceProperty,
-                kAutoTextLastProperty,
-                [action](const QString& value) { action->setText(value); });
-        }
-    }
-
-    if (QWidget* widget = qobject_cast<QWidget*>(object))
-    {
-        if (widget->property(kToolTipKeyProperty).toString().isEmpty())
-        {
-            applyTrackedText(
-                widget->toolTip(),
-                kAutoToolTipSourceProperty,
-                kAutoToolTipLastProperty,
-                [widget](const QString& value) { widget->setToolTip(value); });
-        }
-        if (widget->property(kWindowTitleKeyProperty).toString().isEmpty())
-        {
-            applyTrackedText(
-                widget->windowTitle(),
-                kAutoWindowTitleSourceProperty,
-                kAutoWindowTitleLastProperty,
-                [widget](const QString& value) { widget->setWindowTitle(value); });
-        }
-    }
-
-    if (QLineEdit* lineEdit = qobject_cast<QLineEdit*>(object))
-    {
-        if (lineEdit->property(kPlaceholderKeyProperty).toString().isEmpty())
-        {
-            applyTrackedText(
-                lineEdit->placeholderText(),
-                kAutoPlaceholderSourceProperty,
-                kAutoPlaceholderLastProperty,
-                [lineEdit](const QString& value) { lineEdit->setPlaceholderText(value); });
-        }
-    }
-
-    if (QAction* action = qobject_cast<QAction*>(object))
-    {
-        applyTrackedText(
-            action->toolTip(),
-            kAutoToolTipSourceProperty,
-            kAutoToolTipLastProperty,
-            [action](const QString& value) { action->setToolTip(value); });
-    }
-
-    if (QPlainTextEdit* plainTextEdit = qobject_cast<QPlainTextEdit*>(object))
-    {
-        applyTrackedText(
-            plainTextEdit->placeholderText(),
-            kAutoPlaceholderSourceProperty,
-            kAutoPlaceholderLastProperty,
-            [plainTextEdit](const QString& value) { plainTextEdit->setPlaceholderText(value); });
-        if (plainTextEdit->isReadOnly())
-        {
-            applyTrackedText(
-                plainTextEdit->toPlainText(),
-                kAutoDocumentSourceProperty,
-                kAutoDocumentLastProperty,
-                [plainTextEdit](const QString& value) { plainTextEdit->setPlainText(value); });
-        }
-    }
-
-    if (QTextEdit* textEdit = qobject_cast<QTextEdit*>(object))
-    {
-        applyTrackedText(
-            textEdit->placeholderText(),
-            kAutoPlaceholderSourceProperty,
-            kAutoPlaceholderLastProperty,
-            [textEdit](const QString& value) { textEdit->setPlaceholderText(value); });
-        if (textEdit->isReadOnly())
-        {
-            applyTrackedText(
-                textEdit->toHtml(),
-                kAutoDocumentSourceProperty,
-                kAutoDocumentLastProperty,
-                [textEdit](const QString& value) { textEdit->setHtml(value); });
-        }
-    }
-
-    if (QSpinBox* spinBox = qobject_cast<QSpinBox*>(object))
-    {
-        applyTrackedText(spinBox->prefix(), kAutoPrefixSourceProperty, kAutoPrefixLastProperty,
-            [spinBox](const QString& value) { spinBox->setPrefix(value); });
-        applyTrackedText(spinBox->suffix(), kAutoSuffixSourceProperty, kAutoSuffixLastProperty,
-            [spinBox](const QString& value) { spinBox->setSuffix(value); });
-        applyTrackedText(spinBox->specialValueText(), kAutoSpecialSourceProperty, kAutoSpecialLastProperty,
-            [spinBox](const QString& value) { spinBox->setSpecialValueText(value); });
-    }
-    else if (QDoubleSpinBox* spinBox = qobject_cast<QDoubleSpinBox*>(object))
-    {
-        applyTrackedText(spinBox->prefix(), kAutoPrefixSourceProperty, kAutoPrefixLastProperty,
-            [spinBox](const QString& value) { spinBox->setPrefix(value); });
-        applyTrackedText(spinBox->suffix(), kAutoSuffixSourceProperty, kAutoSuffixLastProperty,
-            [spinBox](const QString& value) { spinBox->setSuffix(value); });
-        applyTrackedText(spinBox->specialValueText(), kAutoSpecialSourceProperty, kAutoSpecialLastProperty,
-            [spinBox](const QString& value) { spinBox->setSpecialValueText(value); });
-    }
-
-    if (QProgressBar* progressBar = qobject_cast<QProgressBar*>(object))
-    {
-        applyTrackedText(
-            progressBar->format(),
-            kAutoTextSourceProperty,
-            kAutoTextLastProperty,
-            [progressBar](const QString& value) { progressBar->setFormat(value); });
-    }
-
-    if (QMenu* menu = qobject_cast<QMenu*>(object))
-    {
-        applyTrackedText(
-            menu->title(),
-            kAutoTextSourceProperty,
-            kAutoTextLastProperty,
-            [menu](const QString& value) { menu->setTitle(value); });
-    }
-
-    if (QComboBox* comboBox = qobject_cast<QComboBox*>(object))
-    {
-        for (int index = 0; index < comboBox->count(); ++index)
-        {
-            if (!comboBox->itemData(index, kComboKeyRole).toString().isEmpty())
-            {
-                continue;
-            }
-            const QString currentText = comboBox->itemText(index);
-            QString sourceText = comboBox->itemData(index, kAutoComboSourceRole).toString();
-            const QString lastText = comboBox->itemData(index, kAutoComboLastRole).toString();
-            if (sourceText.isEmpty() && isSourceTextForCurrentLanguage(currentText))
-            {
-                sourceText = currentText;
-            }
-            else if (!sourceText.isEmpty() && currentText != lastText && isSourceTextForCurrentLanguage(currentText))
-            {
-                sourceText = currentText;
-            }
-            if (sourceText.isEmpty())
-            {
-                continue;
-            }
-            const QString translatedText = translateSource(sourceText);
-            comboBox->setItemData(index, sourceText, kAutoComboSourceRole);
-            comboBox->setItemData(index, translatedText, kAutoComboLastRole);
-            if (currentText == lastText || isSourceTextForCurrentLanguage(currentText))
-            {
-                comboBox->setItemText(index, translatedText);
-            }
-        }
-    }
-
-    if (QTabWidget* tabWidget = qobject_cast<QTabWidget*>(object))
-    {
-        for (int index = 0; index < tabWidget->count(); ++index)
-        {
-            QWidget* page = tabWidget->widget(index);
-            if (page == nullptr || !page->property(kTabKeyProperty).toString().isEmpty())
-            {
-                continue;
-            }
-            const QString currentText = tabWidget->tabText(index);
-            QString sourceText = page->property(kAutoTabSourceProperty).toString();
-            const QString lastText = page->property(kAutoTabLastProperty).toString();
-            if (sourceText.isEmpty() && isSourceTextForCurrentLanguage(currentText))
-            {
-                sourceText = currentText;
-            }
-            else if (!sourceText.isEmpty() && currentText != lastText && isSourceTextForCurrentLanguage(currentText))
-            {
-                sourceText = currentText;
-            }
-            if (sourceText.isEmpty())
-            {
-                continue;
-            }
-            const QString translatedText = translateSource(sourceText);
-            page->setProperty(kAutoTabSourceProperty, sourceText);
-            page->setProperty(kAutoTabLastProperty, translatedText);
-            if (currentText == lastText || isSourceTextForCurrentLanguage(currentText))
-            {
-                tabWidget->setTabText(index, translatedText);
-            }
-        }
-    }
-    m_applyingAutomaticTranslation = false;
 }
 
 void ks::i18n::LanguageManager::applyApplicationDirection() const

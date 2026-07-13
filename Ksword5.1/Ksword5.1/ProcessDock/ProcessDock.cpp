@@ -142,6 +142,59 @@ namespace
         "R0状态"
     };
 
+    const char* const ProcessTableHeaderKeys[] = {
+        "process.table.header.process_name",
+        "process.table.header.pid",
+        "process.table.header.cpu",
+        "process.table.header.ram",
+        "process.table.header.disk",
+        "process.table.header.gpu",
+        "process.table.header.net",
+        "process.table.header.signature",
+        "process.table.header.path",
+        "process.table.header.parent",
+        "process.table.header.command_line",
+        "process.table.header.user",
+        "process.table.header.start_time",
+        "process.table.header.admin",
+        "process.table.header.ppl_protection",
+        "process.table.header.protection",
+        "process.table.header.ppl",
+        "process.table.header.handle_count",
+        "process.table.header.handle_table",
+        "process.table.header.section_object",
+        "process.table.header.r0_status"
+    };
+
+    QString processContextText(const char* const key, const QString& sourceText)
+    {
+        return ks::i18n::contextText(QString::fromLatin1(key), sourceText);
+    }
+
+    QString processContextText(const QString& key, const QString& sourceText)
+    {
+        return ks::i18n::contextText(key, sourceText);
+    }
+
+    QString translatedProcessHeader(const int section, const QString& sourceText)
+    {
+        if (section < 0 || section >= ProcessTableHeaders.size())
+        {
+            return sourceText;
+        }
+        const QString translatedBase = processContextText(ProcessTableHeaderKeys[section], ProcessTableHeaders.at(section));
+        const QString sourceBase = ProcessTableHeaders.at(section);
+        if (sourceText == sourceBase)
+        {
+            return translatedBase;
+        }
+        if (sourceText.startsWith(sourceBase + QChar(' ')))
+        {
+            return translatedBase + sourceText.mid(sourceBase.size());
+        }
+        return sourceText;
+    }
+
     // 常用图标路径常量（全部来自 qrc 的 /Icon 前缀资源）。
     constexpr const char* IconProcessMain = ":/Icon/process_main.svg";
     constexpr const char* IconRefresh = ":/Icon/process_refresh.svg";
@@ -510,15 +563,15 @@ namespace
         case ProcessDock::ProcessActivityMetric::Cpu:
             return QStringLiteral("CPU");
         case ProcessDock::ProcessActivityMetric::Memory:
-            return ks::i18n::source(QStringLiteral("内存"));
+            return processContextText("process.activity.metric.memory", QStringLiteral("内存"));
         case ProcessDock::ProcessActivityMetric::Disk:
-            return ks::i18n::source(QStringLiteral("磁盘"));
+            return processContextText("process.activity.metric.disk", QStringLiteral("磁盘"));
         case ProcessDock::ProcessActivityMetric::Network:
-            return ks::i18n::source(QStringLiteral("网络"));
+            return processContextText("process.activity.metric.network", QStringLiteral("网络"));
         case ProcessDock::ProcessActivityMetric::Gpu:
             return QStringLiteral("GPU");
         default:
-            return ks::i18n::source(QStringLiteral("未知"));
+            return processContextText("process.activity.metric.unknown", QStringLiteral("未知"));
         }
     }
 
@@ -656,7 +709,7 @@ namespace
                 section >= 0 &&
                 section < m_headerTexts.size())
             {
-                return m_headerTexts.at(section);
+                return translatedProcessHeader(section, m_headerTexts.at(section));
             }
             return QSortFilterProxyModel::headerData(section, orientation, role);
         }
@@ -895,7 +948,10 @@ protected:
         if (m_ownerDock == nullptr || m_ownerDock->m_activitySamples.empty())
         {
             painter.setPen(textColor);
-            painter.drawText(plotRect, Qt::AlignCenter, ks::i18n::source(QStringLiteral("未开始刷新进程列表活动")));
+            painter.drawText(
+                plotRect,
+                Qt::AlignCenter,
+                processContextText("process.activity.empty", QStringLiteral("未开始刷新进程列表活动")));
             return;
         }
 
@@ -903,7 +959,12 @@ protected:
         if (enabledMetrics.empty())
         {
             painter.setPen(textColor);
-            painter.drawText(plotRect, Qt::AlignCenter, ks::i18n::source(QStringLiteral("未选择任何指标，请勾选 CPU / 内存 / 磁盘 / 网络 / GPU")));
+            painter.drawText(
+                plotRect,
+                Qt::AlignCenter,
+                processContextText(
+                    "process.activity.no_metric",
+                    QStringLiteral("未选择任何指标，请勾选 CPU / 内存 / 磁盘 / 网络 / GPU")));
             return;
         }
 
@@ -1712,7 +1773,9 @@ namespace
                 cursorX += iconTextGap;
             }
 
-            const QString textValue = ks::i18n::source(index.data(Qt::DisplayRole).toString());
+            // Process names and cell values are data, not UI labels. Never
+            // translate them through a global source-string table.
+            const QString textValue = index.data(Qt::DisplayRole).toString();
             QRect textRect(
                 cursorX,
                 contentRect.top(),
@@ -3561,6 +3624,7 @@ void ProcessDock::initializeTopControls()
     m_statusLayout = new QHBoxLayout();
     m_statusLayout->setContentsMargins(0, 0, 0, 0);
     m_statusLayout->setSpacing(8);
+    ks::i18n::LanguageManager& languageManager = ks::i18n::LanguageManager::instance();
 
     // 遍历策略下拉框：
     // 1) Toolhelp（CreateToolhelp32Snapshot + Process32First/Next）
@@ -3570,8 +3634,22 @@ void ProcessDock::initializeTopControls()
     m_strategyCombo->setObjectName(QStringLiteral("ProcessDockStrategyCombo"));
     m_strategyCombo->addItem(QIcon(IconRefresh), "Toolhelp Snapshot / Process32First / Process32Next");
     m_strategyCombo->addItem(QIcon(IconRefresh), "NtQuerySystemInformation");
+    languageManager.bindComboBoxItem(
+        m_strategyCombo,
+        0,
+        QStringLiteral("process.strategy.toolhelp"),
+        QStringLiteral("Toolhelp Snapshot / Process32First / Process32Next"));
+    languageManager.bindComboBoxItem(
+        m_strategyCombo,
+        1,
+        QStringLiteral("process.strategy.ntquery"),
+        QStringLiteral("NtQuerySystemInformation"));
     m_strategyCombo->setCurrentIndex(1);
     m_strategyCombo->setToolTip("指定进程遍历方案");
+    languageManager.bindToolTip(
+        m_strategyCombo,
+        QStringLiteral("process.tooltip.strategy"),
+        QStringLiteral("指定进程遍历方案"));
     // 自适应宽度策略：避免长文本把 Dock 顶出横向滚动条。
     m_strategyCombo->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
     m_strategyCombo->setMinimumContentsLength(18);
@@ -3584,6 +3662,10 @@ void ProcessDock::initializeTopControls()
     m_treeToggleButton->setCheckable(true);
     m_treeToggleButton->setChecked(false);
     m_treeToggleButton->setToolTip("切换为树状视图");
+    languageManager.bindToolTip(
+        m_treeToggleButton,
+        QStringLiteral("process.tooltip.tree"),
+        QStringLiteral("切换为树状视图"));
 
     // 进程友好视图：
     // - 默认勾选，优先按“应用/后台进程/系统”三类展示；
@@ -3593,14 +3675,36 @@ void ProcessDock::initializeTopControls()
     m_friendlyViewCheck->setToolTip(QStringLiteral(
         "默认开启：按应用、后台进程、系统分类；应用下按根进程聚合并树状缩进。"
         "搜索或查看历史活动快照时会自动回退为普通扁平列表。"));
+    languageManager.bindText(
+        m_friendlyViewCheck,
+        QStringLiteral("process.toolbar.friendly"),
+        QStringLiteral("进程友好视图"));
+    languageManager.bindToolTip(
+        m_friendlyViewCheck,
+        QStringLiteral("process.tooltip.friendly"),
+        QStringLiteral("默认开启：按应用、后台进程、系统分类；应用下按根进程聚合并树状缩进。搜索或查看历史活动快照时会自动回退为普通扁平列表。"));
 
     // 视图模式下拉框：默认监视视图。
     m_viewModeCombo = new QComboBox(this);
     m_viewModeCombo->setObjectName(QStringLiteral("ProcessDockViewModeCombo"));
     m_viewModeCombo->addItem(QIcon(IconList), "监视视图");
     m_viewModeCombo->addItem(QIcon(IconProcessMain), "详细信息视图");
+    languageManager.bindComboBoxItem(
+        m_viewModeCombo,
+        0,
+        QStringLiteral("process.view.monitor"),
+        QStringLiteral("监视视图"));
+    languageManager.bindComboBoxItem(
+        m_viewModeCombo,
+        1,
+        QStringLiteral("process.view.detail"),
+        QStringLiteral("详细信息视图"));
     m_viewModeCombo->setCurrentIndex(static_cast<int>(ViewMode::Monitor));
     m_viewModeCombo->setToolTip("切换监视视图 / 详细信息视图");
+    languageManager.bindToolTip(
+        m_viewModeCombo,
+        QStringLiteral("process.tooltip.view_mode"),
+        QStringLiteral("切换监视视图 / 详细信息视图"));
     m_viewModeCombo->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
     m_viewModeCombo->setMinimumContentsLength(8);
     m_viewModeCombo->setMaximumWidth(180);
@@ -3617,17 +3721,30 @@ void ProcessDock::initializeTopControls()
     m_pauseButton->setFixedSize(CompactIconButtonSize);
     m_startButton->setToolTip("开始周期性刷新进程列表，并同步记录进程活动");
     m_pauseButton->setToolTip("暂停周期性刷新进程列表，并同步停止记录");
+    languageManager.bindToolTip(
+        m_startButton,
+        QStringLiteral("process.tooltip.start"),
+        QStringLiteral("开始周期性刷新进程列表，并同步记录进程活动"));
+    languageManager.bindToolTip(
+        m_pauseButton,
+        QStringLiteral("process.tooltip.pause"),
+        QStringLiteral("暂停周期性刷新进程列表，并同步停止记录"));
 
     // 进程表刷新间隔：
     // - 该间隔只控制下方进程表格重绘频率，默认 2 秒；
     // - 后台监视和活动打点默认走 1 秒采样，避免表格渲染成本影响记录精度。
     m_refreshLabel = new QLabel("列表刷新(s):", this);
+    languageManager.bindText(m_refreshLabel, QStringLiteral("process.label.refresh_interval"), QStringLiteral("列表刷新(s):"));
     m_tableRefreshIntervalEdit = new QLineEdit(this);
     m_tableRefreshIntervalEdit->setText(QStringLiteral("2.0"));
     m_tableRefreshIntervalEdit->setFixedWidth(64);
     m_tableRefreshIntervalEdit->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
     m_tableRefreshIntervalEdit->setValidator(new QDoubleValidator(0.5, 60.0, 2, m_tableRefreshIntervalEdit));
     m_tableRefreshIntervalEdit->setToolTip("只控制下方进程表格刷新频率，默认 2 秒。");
+    languageManager.bindToolTip(
+        m_tableRefreshIntervalEdit,
+        QStringLiteral("process.tooltip.table_interval"),
+        QStringLiteral("只控制下方进程表格刷新频率，默认 2 秒。"));
     m_tableRefreshIntervalEdit->setStyleSheet(buildBlueLineEditStyle());
     m_tableRefreshIntervalEdit->setEnabled(false);
 
@@ -3635,21 +3752,31 @@ void ProcessDock::initializeTopControls()
     // - 允许小数秒，默认 1s；
     // - 该间隔驱动后台监视刷新和活动记录采样。
     m_sampleIntervalLabel = new QLabel("记录打点(s):", this);
+    languageManager.bindText(m_sampleIntervalLabel, QStringLiteral("process.label.sample_interval"), QStringLiteral("记录打点(s):"));
     m_refreshIntervalEdit = new QLineEdit(this);
     m_refreshIntervalEdit->setText(QStringLiteral("1.0"));
     m_refreshIntervalEdit->setFixedWidth(64);
     m_refreshIntervalEdit->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
     m_refreshIntervalEdit->setValidator(new QDoubleValidator(0.05, 60.0, 3, m_refreshIntervalEdit));
     m_refreshIntervalEdit->setToolTip("记录打点间隔，允许输入小数秒，默认 1；过小间隔会提高系统枚举开销。");
+    languageManager.bindToolTip(
+        m_refreshIntervalEdit,
+        QStringLiteral("process.tooltip.sample_interval"),
+        QStringLiteral("记录打点间隔，允许输入小数秒，默认 1；过小间隔会提高系统枚举开销。"));
     m_refreshIntervalEdit->setStyleSheet(buildBlueLineEditStyle());
     m_refreshIntervalEdit->setEnabled(false);
 
     // 刷新状态标签：明确告诉用户当前是否在刷新，以及最后耗时。
     m_refreshStateLabel = new QLabel("● 空闲", this);
+    languageManager.bindText(m_refreshStateLabel, QStringLiteral("process.state.idle"), QStringLiteral("● 空闲"));
     m_refreshStateLabel->setStyleSheet(
         QStringLiteral("color:%1; font-weight:600;")
         .arg(KswordTheme::TextSecondaryHex()));
     m_refreshStateLabel->setToolTip("当前刷新状态");
+    languageManager.bindToolTip(
+        m_refreshStateLabel,
+        QStringLiteral("process.tooltip.refresh_state"),
+        QStringLiteral("当前刷新状态"));
 
     // 进程搜索框：
     // - 直接基于当前缓存做本地过滤，不额外触发系统查询；
@@ -3658,6 +3785,14 @@ void ProcessDock::initializeTopControls()
     m_processSearchLineEdit->setClearButtonEnabled(true);
     m_processSearchLineEdit->setPlaceholderText("搜索 PID / 名称 / 路径 / 命令行 / 用户");
     m_processSearchLineEdit->setToolTip("切到进程列表页后可直接输入搜索词");
+    languageManager.bindPlaceholder(
+        m_processSearchLineEdit,
+        QStringLiteral("process.placeholder.search"),
+        QStringLiteral("搜索 PID / 名称 / 路径 / 命令行 / 用户"));
+    languageManager.bindToolTip(
+        m_processSearchLineEdit,
+        QStringLiteral("process.tooltip.search"),
+        QStringLiteral("切到进程列表页后可直接输入搜索词"));
     m_processSearchLineEdit->setStyleSheet(buildBlueLineEditStyle());
     m_processSearchLineEdit->setMaximumWidth(320);
 
@@ -3667,6 +3802,14 @@ void ProcessDock::initializeTopControls()
     m_kernelCompareCheck = new QCheckBox("刷新时对比内核进程（查隐藏）", this);
     m_kernelCompareCheck->setChecked(false);
     m_kernelCompareCheck->setToolTip("勾选后刷新会额外请求驱动进程列表，并显示仅内核可见的进程。");
+    languageManager.bindText(
+        m_kernelCompareCheck,
+        QStringLiteral("process.toolbar.kernel_compare"),
+        QStringLiteral("刷新时对比内核进程（查隐藏）"));
+    languageManager.bindToolTip(
+        m_kernelCompareCheck,
+        QStringLiteral("process.tooltip.kernel_compare"),
+        QStringLiteral("勾选后刷新会额外请求驱动进程列表，并显示仅内核可见的进程。"));
 
     // Ksword 可恢复隐藏显示开关：
     // - 默认不显示 R0 标记隐藏的进程；
@@ -3674,6 +3817,14 @@ void ProcessDock::initializeTopControls()
     m_showKswordHiddenProcessCheck = new QCheckBox(QStringLiteral("显示Ksword隐藏项"), this);
     m_showKswordHiddenProcessCheck->setChecked(false);
     m_showKswordHiddenProcessCheck->setToolTip(QStringLiteral("显示由 R0 摘链后仍可通过内核扫描读取的 Ksword 隐藏项。"));
+    languageManager.bindText(
+        m_showKswordHiddenProcessCheck,
+        QStringLiteral("process.toolbar.hidden"),
+        QStringLiteral("显示Ksword隐藏项"));
+    languageManager.bindToolTip(
+        m_showKswordHiddenProcessCheck,
+        QStringLiteral("process.tooltip.hidden"),
+        QStringLiteral("显示由 R0 摘链后仍可通过内核扫描读取的 Ksword 隐藏项。"));
 
     // 按钮统一蓝色风格（图标按钮版本）。
     const QString buttonStyle = buildBlueButtonStyle(true);
@@ -3722,6 +3873,7 @@ void ProcessDock::initializeProcessActivityPanel()
         "  border-radius:4px;"
         "}")
         .arg(KswordTheme::BorderHex()));
+    ks::i18n::LanguageManager& languageManager = ks::i18n::LanguageManager::instance();
 
     QVBoxLayout* panelLayout = new QVBoxLayout(m_activityPanelWidget);
     panelLayout->setContentsMargins(6, 6, 6, 6);
@@ -3733,13 +3885,34 @@ void ProcessDock::initializeProcessActivityPanel()
 
     m_activityClearButton = new QPushButton(QStringLiteral("清空"), m_activityPanelWidget);
     m_activityClearButton->setToolTip(QStringLiteral("清空当前刷新同步记录的进程活动样本。"));
+    languageManager.bindText(m_activityClearButton, QStringLiteral("process.activity.clear"), QStringLiteral("清空"));
+    languageManager.bindToolTip(
+        m_activityClearButton,
+        QStringLiteral("process.activity.tooltip.clear"),
+        QStringLiteral("清空当前刷新同步记录的进程活动样本。"));
     m_activityClearButton->setStyleSheet(buildBlueButtonStyle(false));
 
     m_activityBackgroundRecordCheck = new QCheckBox(QStringLiteral("后台保持刷新/记录"), m_activityPanelWidget);
     m_activityBackgroundRecordCheck->setToolTip(QStringLiteral("默认仅进程列表 Tab 显示时刷新和记录；勾选后切到其它 Tab 仍继续刷新并记录。"));
+    languageManager.bindText(
+        m_activityBackgroundRecordCheck,
+        QStringLiteral("process.activity.background"),
+        QStringLiteral("后台保持刷新/记录"));
+    languageManager.bindToolTip(
+        m_activityBackgroundRecordCheck,
+        QStringLiteral("process.activity.tooltip.background"),
+        QStringLiteral("默认仅进程列表 Tab 显示时刷新和记录；勾选后切到其它 Tab 仍继续刷新并记录。"));
 
     m_activityListOnlyRefreshCheck = new QCheckBox(QStringLiteral("只刷新列表"), m_activityPanelWidget);
     m_activityListOnlyRefreshCheck->setToolTip(QStringLiteral("勾选后周期刷新仍会更新进程列表，但不会向上方时间轴写入新的活动记录。"));
+    languageManager.bindText(
+        m_activityListOnlyRefreshCheck,
+        QStringLiteral("process.activity.list_only"),
+        QStringLiteral("只刷新列表"));
+    languageManager.bindToolTip(
+        m_activityListOnlyRefreshCheck,
+        QStringLiteral("process.activity.tooltip.list_only"),
+        QStringLiteral("勾选后周期刷新仍会更新进程列表，但不会向上方时间轴写入新的活动记录。"));
 
     const QString metricButtonStyle = QStringLiteral(
         "QPushButton {"
@@ -3780,6 +3953,23 @@ void ProcessDock::initializeProcessActivityPanel()
     m_activityDiskButton = createMetricButton(QStringLiteral("磁盘"), true);
     m_activityNetworkButton = createMetricButton(QStringLiteral("网络"), true);
     m_activityGpuButton = createMetricButton(QStringLiteral("GPU"), true);
+    languageManager.bindText(m_activityCpuButton, QStringLiteral("process.activity.metric.cpu"), QStringLiteral("CPU"));
+    languageManager.bindText(m_activityMemoryButton, QStringLiteral("process.activity.metric.memory"), QStringLiteral("内存"));
+    languageManager.bindText(m_activityDiskButton, QStringLiteral("process.activity.metric.disk"), QStringLiteral("磁盘"));
+    languageManager.bindText(m_activityNetworkButton, QStringLiteral("process.activity.metric.network"), QStringLiteral("网络"));
+    languageManager.bindText(m_activityGpuButton, QStringLiteral("process.activity.metric.gpu"), QStringLiteral("GPU"));
+    for (QPushButton* metricButton : {
+             m_activityCpuButton,
+             m_activityMemoryButton,
+             m_activityDiskButton,
+             m_activityNetworkButton,
+             m_activityGpuButton })
+    {
+        languageManager.bindToolTip(
+            metricButton,
+            QStringLiteral("process.activity.tooltip.metric"),
+            QStringLiteral("切换该指标是否绘制在上方百分比折线图中。"));
+    }
 
     // 准星按钮放在“网络/GPU”等时间轴指标按钮右侧：
     // - 交互与窗口页拾取按钮一致，必须按住拖到目标窗口后松开；
@@ -3790,19 +3980,32 @@ void ProcessDock::initializeProcessActivityPanel()
     processPickerButton->setFixedSize(CompactIconButtonSize);
     processPickerButton->setStyleSheet(buildBlueButtonStyle(true));
     processPickerButton->setToolTip(QStringLiteral("按住并拖拽准星到目标窗口，松开后按该窗口 PID 筛选进程并打开进程详细信息"));
+    languageManager.bindToolTip(
+        processPickerButton,
+        QStringLiteral("process.activity.tooltip.picker"),
+        QStringLiteral("按住并拖拽准星到目标窗口，松开后按该窗口 PID 筛选进程并打开进程详细信息"));
     processPickerButton->setReleaseCallback([this](const QPoint& globalPos) {
         handleProcessWindowPickerRelease(globalPos);
     });
     m_activityProcessPickerButton = processPickerButton;
 
-    m_activityStatusLabel = new QLabel(QStringLiteral("进程活动：未开始刷新 | 样本 0"), m_activityPanelWidget);
+    m_activityStatusLabel = new QLabel(
+        processContextText(
+            "process.activity.status.initial",
+            QStringLiteral("进程活动：未开始刷新 | 样本 0")),
+        m_activityPanelWidget);
     m_activityStatusLabel->setStyleSheet(QStringLiteral("color:%1; font-weight:600;").arg(KswordTheme::TextSecondaryHex()));
 
     toolbarLayout->addWidget(m_activityClearButton);
     toolbarLayout->addWidget(m_activityBackgroundRecordCheck);
     toolbarLayout->addWidget(m_activityListOnlyRefreshCheck);
     toolbarLayout->addSpacing(8);
-    toolbarLayout->addWidget(new QLabel(QStringLiteral("显示:"), m_activityPanelWidget));
+    QLabel* activityDisplayLabel = new QLabel(QStringLiteral("显示:"), m_activityPanelWidget);
+    languageManager.bindText(
+        activityDisplayLabel,
+        QStringLiteral("process.activity.display"),
+        QStringLiteral("显示:"));
+    toolbarLayout->addWidget(activityDisplayLabel);
     toolbarLayout->addWidget(m_activityCpuButton);
     toolbarLayout->addWidget(m_activityMemoryButton);
     toolbarLayout->addWidget(m_activityDiskButton);
@@ -4090,6 +4293,11 @@ void ProcessDock::initializeProcessTable()
 
     // 满足需求 3.1：侧边栏 Tab 中包含“进程列表”页签。
     m_sideTabWidget->addTab(m_processListPage, blueTintedIcon(IconProcessMain), "进程列表");
+    ks::i18n::LanguageManager::instance().bindTab(
+        m_sideTabWidget,
+        m_processListPage,
+        QStringLiteral("process.tab.list"),
+        QStringLiteral("进程列表"));
     m_sideTabWidget->setCurrentIndex(0);
     refreshSideTabIconContrast();
 }
@@ -4555,6 +4763,11 @@ void ProcessDock::initializeCreateProcessPage()
     m_tokenDesiredAccessEdit->setToolTip("Token DesiredAccess：令牌访问掩码；可在下方复选框组合。");
 
     m_sideTabWidget->addTab(m_createProcessPage, blueTintedIcon(IconStart), "创建进程");
+    ks::i18n::LanguageManager::instance().bindTab(
+        m_sideTabWidget,
+        m_createProcessPage,
+        QStringLiteral("process.tab.create"),
+        QStringLiteral("创建进程"));
     refreshSideTabIconContrast();
     initializeCreateProcessConnections();
 }
@@ -4603,8 +4816,10 @@ void ProcessDock::initializeConnections()
         {
             m_treeToggleButton->setEnabled(!checked);
             m_treeToggleButton->setToolTip(checked
-                ? QStringLiteral("进程友好视图开启时暂不使用普通树状排序")
-                : QStringLiteral("切换为树状视图"));
+                ? processContextText(
+                    "process.tooltip.friendly_tree_disabled",
+                    QStringLiteral("进程友好视图开启时暂不使用普通树状排序"))
+                : processContextText("process.tooltip.tree", QStringLiteral("切换为树状视图")));
         }
         kLogEvent logEvent;
         info << logEvent
@@ -4618,7 +4833,9 @@ void ProcessDock::initializeConnections()
         m_treeToggleButton->setEnabled(!m_friendlyViewCheck->isChecked());
         if (m_friendlyViewCheck->isChecked())
         {
-            m_treeToggleButton->setToolTip(QStringLiteral("进程友好视图开启时暂不使用普通树状排序"));
+            m_treeToggleButton->setToolTip(processContextText(
+                "process.tooltip.friendly_tree_disabled",
+                QStringLiteral("进程友好视图开启时暂不使用普通树状排序")));
         }
     }
 
@@ -4629,12 +4846,14 @@ void ProcessDock::initializeConnections()
         if (checked)
         {
             m_treeToggleButton->setIcon(QIcon(IconList));
-            m_treeToggleButton->setToolTip("切换为列表视图");
+            m_treeToggleButton->setToolTip(processContextText(
+                "process.tooltip.list", QStringLiteral("切换为列表视图")));
         }
         else
         {
             m_treeToggleButton->setIcon(QIcon(IconTree));
-            m_treeToggleButton->setToolTip("切换为树状视图");
+            m_treeToggleButton->setToolTip(processContextText(
+                "process.tooltip.tree", QStringLiteral("切换为树状视图")));
         }
         kLogEvent logEvent;
         info << logEvent
@@ -4710,7 +4929,9 @@ void ProcessDock::initializeConnections()
             m_refreshTimer->stop();
         }
         stopProcessNetworkTrafficCapture();
-        updateRefreshStateUi(false, "● 已暂停刷新/记录");
+        updateRefreshStateUi(
+            false,
+            processContextText("process.refresh.state.paused", QStringLiteral("● 已暂停刷新/记录")));
         updateProcessActivityStatusLabel();
     });
 
@@ -4738,7 +4959,9 @@ void ProcessDock::initializeConnections()
         updateProcessActivityStatusLabel();
         if (m_activitySnapshotLabel != nullptr)
         {
-            m_activitySnapshotLabel->setText(QStringLiteral("时间轴快照：暂无样本"));
+            m_activitySnapshotLabel->setText(processContextText(
+                "process.activity.snapshot.empty",
+                QStringLiteral("时间轴快照：暂无样本")));
         }
     });
 
@@ -4897,7 +5120,11 @@ void ProcessDock::initializeConnections()
             m_refreshTimer != nullptr)
         {
             m_refreshTimer->stop();
-            updateRefreshStateUi(false, "● 进程页隐藏，刷新/记录自动暂停");
+            updateRefreshStateUi(
+                false,
+                processContextText(
+                    "process.refresh.state.hidden",
+                    QStringLiteral("● 进程页隐藏，刷新/记录自动暂停")));
         }
         if (currentPage == m_threadPage)
         {
@@ -5478,7 +5705,9 @@ void ProcessDock::requestAsyncRefresh(const bool forceRefresh)
     {
         kLogEvent logEvent;
         dbg << logEvent << "[ProcessDock] 检测到 Ctrl 按下，本轮刷新跳过。" << eol;
-        updateRefreshStateUi(false, "● Ctrl 按下，跳过本轮刷新");
+            updateRefreshStateUi(
+                false,
+                processContextText("process.refresh.state.ctrl_skip", QStringLiteral("● Ctrl 按下，跳过本轮刷新")));
         return;
     }
 
@@ -5490,7 +5719,9 @@ void ProcessDock::requestAsyncRefresh(const bool forceRefresh)
         {
             kLogEvent logEvent;
             dbg << logEvent << "[ProcessDock] 右键菜单处于打开状态，本轮刷新跳过。" << eol;
-            updateRefreshStateUi(false, "● 菜单打开中，跳过本轮刷新");
+            updateRefreshStateUi(
+                false,
+                processContextText("process.refresh.state.menu_skip", QStringLiteral("● 菜单打开中，跳过本轮刷新")));
             return;
         }
 
@@ -5512,7 +5743,11 @@ void ProcessDock::requestAsyncRefresh(const bool forceRefresh)
         {
             kLogEvent logEvent;
             dbg << logEvent << "[ProcessDock] 跳过非强制刷新：进程页不可见且未启用后台保持刷新/记录。" << eol;
-            updateRefreshStateUi(false, "● 进程页隐藏，刷新/记录自动暂停");
+            updateRefreshStateUi(
+                false,
+                processContextText(
+                    "process.refresh.state.hidden",
+                    QStringLiteral("● 进程页隐藏，刷新/记录自动暂停")));
             updateProcessActivityStatusLabel();
             return;
         }
@@ -5559,11 +5794,11 @@ void ProcessDock::requestAsyncRefresh(const bool forceRefresh)
 
     // 刷新前先更新 UI 状态与日志，给出明显“刷新中”提示。
     const QString forceReasonText = (!forceRefresh && m_monitoringEnabled && !isProcessActivityRefreshAllowedNow())
-        ? QStringLiteral(" | 刷新/记录=自动暂停")
+        ? processContextText("process.refresh.state.auto_paused_suffix", QStringLiteral(" | 刷新/记录=自动暂停"))
         : QString();
     updateRefreshStateUi(
         true,
-        QString("● 正在刷新... 策略=%1%2")
+        processContextText("process.refresh.state.refreshing", QStringLiteral("● 正在刷新... 策略=%1%2"))
         .arg(QString::fromUtf8(strategyToText(toStrategy(strategyIndex))))
         .arg(queryKernelProcessList ? " | 内核对比=ON" : "")
         + forceReasonText);
@@ -5724,7 +5959,9 @@ void ProcessDock::applyRefreshResult(RefreshResult refreshResult, const bool for
     }
 
     // 刷新状态标签展示详细统计，明确告诉用户“刷新已完成”。
-    QString refreshStatusText = QString("● 刷新完成 %1 ms | 方法:%2 | 枚举:%3 新增:%4 退出:%5")
+    QString refreshStatusText = processContextText(
+        "process.refresh.state.completed",
+        QStringLiteral("● 刷新完成 %1 ms | 方法:%2 | 枚举:%3 新增:%4 退出:%5"))
         .arg(elapsedMs)
         .arg(QString::fromUtf8(strategyToText(refreshResult.actualStrategy)))
         .arg(refreshResult.enumeratedCount)
@@ -5734,13 +5971,15 @@ void ProcessDock::applyRefreshResult(RefreshResult refreshResult, const bool for
     {
         if (refreshResult.kernelQuerySucceeded)
         {
-            refreshStatusText += QString(" | 内核:%1 隐藏:%2")
+            refreshStatusText += processContextText("process.refresh.state.kernel", QStringLiteral(" | 内核:%1 隐藏:%2"))
                 .arg(refreshResult.kernelEnumeratedCount)
                 .arg(refreshResult.kernelOnlyCount);
         }
         else
         {
-            refreshStatusText += " | 内核查询失败";
+            refreshStatusText += processContextText(
+                "process.refresh.state.kernel_error",
+                QStringLiteral(" | 内核查询失败"));
         }
     }
     updateRefreshStateUi(false, refreshStatusText);
@@ -7079,39 +7318,45 @@ void ProcessDock::updateProcessActivityStatusLabel()
     m_activityRecordingEnabled = recordingAllowed;
     if (!m_monitoringEnabled)
     {
-        stateText = QStringLiteral("已暂停刷新/记录");
+        stateText = processContextText("process.activity.state.paused", QStringLiteral("已暂停刷新/记录"));
     }
     else if (!refreshAllowed)
     {
-        stateText = QStringLiteral("进程页隐藏，刷新/记录自动暂停");
+        stateText = processContextText(
+            "process.activity.state.hidden",
+            QStringLiteral("进程页隐藏，刷新/记录自动暂停"));
     }
     else if (!recordingAllowed)
     {
-        stateText = QStringLiteral("刷新中，不写记录");
+        stateText = processContextText("process.activity.state.no_record", QStringLiteral("刷新中，不写记录"));
     }
     else if (m_activityBackgroundRecordCheck != nullptr && m_activityBackgroundRecordCheck->isChecked())
     {
-        stateText = QStringLiteral("后台刷新，同步记录");
+        stateText = processContextText("process.activity.state.background", QStringLiteral("后台刷新，同步记录"));
     }
     else
     {
-        stateText = QStringLiteral("刷新中，同步记录");
+        stateText = processContextText("process.activity.state.recording", QStringLiteral("刷新中，同步记录"));
     }
 
     const int intervalMs = refreshIntervalMillisecondsFromInput();
     const int tableIntervalMs = tableRefreshIntervalMillisecondsFromInput();
-    m_activityStatusLabel->setText(QStringLiteral("进程活动：%1 | 样本 %2 | 打点 %3s | 列表 %4s%5%6%7")
+    m_activityStatusLabel->setText(processContextText(
+        "process.activity.status.template",
+        QStringLiteral("进程活动：%1 | 样本 %2 | 打点 %3s | 列表 %4s%5%6%7"))
         .arg(stateText)
         .arg(static_cast<qulonglong>(m_activitySamples.size()))
         .arg(static_cast<double>(intervalMs) / 1000.0, 0, 'f', intervalMs < 1000 ? 2 : 1)
         .arg(static_cast<double>(tableIntervalMs) / 1000.0, 0, 'f', tableIntervalMs < 1000 ? 2 : 1)
         .arg((m_activityBackgroundRecordCheck != nullptr && m_activityBackgroundRecordCheck->isChecked())
-            ? QStringLiteral(" | 后台")
+            ? processContextText("process.activity.status.background_suffix", QStringLiteral(" | 后台"))
             : QString())
         .arg((m_activityListOnlyRefreshCheck != nullptr && m_activityListOnlyRefreshCheck->isChecked())
-            ? QStringLiteral(" | 不记录")
+            ? processContextText("process.activity.status.no_record_suffix", QStringLiteral(" | 不记录"))
             : QString())
-        .arg(isProcessActivityTableSnapshotActive() ? QStringLiteral(" | 表格=历史快照") : QStringLiteral(" | 表格=实时")));
+        .arg(isProcessActivityTableSnapshotActive()
+            ? processContextText("process.activity.status.snapshot_suffix", QStringLiteral(" | 表格=历史快照"))
+            : processContextText("process.activity.status.live_suffix", QStringLiteral(" | 表格=实时"))));
 }
 
 void ProcessDock::previewProcessActivitySnapshotForIndex(const int sampleIndex)
@@ -7122,7 +7367,9 @@ void ProcessDock::previewProcessActivitySnapshotForIndex(const int sampleIndex)
         m_activityTableSnapshotRecords.clear();
         if (m_activitySnapshotLabel != nullptr)
         {
-            m_activitySnapshotLabel->setText(QStringLiteral("时间轴快照：暂无样本"));
+            m_activitySnapshotLabel->setText(processContextText(
+                "process.activity.snapshot.empty",
+                QStringLiteral("时间轴快照：暂无样本")));
         }
         if (m_activityChartWidget != nullptr)
         {
@@ -7272,12 +7519,15 @@ QString ProcessDock::buildProcessActivitySnapshotText(const int sampleIndex) con
     }
 
     const QDateTime sampleDateTime = QDateTime::fromMSecsSinceEpoch(sample.unixMilliseconds);
-    QString text = QStringLiteral("时间轴快照：%1 / +%2 | 范围:%3 | CPU %4% | 内存 %5% (%6 MB) | 磁盘 %7% (%8 MB/s) | 网络 %9% (%10 KB/s) | GPU %11%")
+    QString text = processContextText(
+        "process.activity.snapshot.template",
+        QStringLiteral("时间轴快照：%1 / +%2 | 范围:%3 | CPU %4% | 内存 %5% (%6 MB) | 磁盘 %7% (%8 MB/s) | 网络 %9% (%10 KB/s) | GPU %11%"))
         .arg(sampleDateTime.toString(QStringLiteral("HH:mm:ss.zzz")))
         .arg(formatActivityElapsedText(sample.elapsedMs))
         .arg(selectionKeys.empty()
-            ? QStringLiteral("总体")
-            : QStringLiteral("选中%1个进程").arg(static_cast<qulonglong>(selectionKeys.size())))
+            ? processContextText("process.activity.snapshot.scope.total", QStringLiteral("总体"))
+            : processContextText("process.activity.snapshot.scope.selected", QStringLiteral("选中%1个进程"))
+                .arg(static_cast<qulonglong>(selectionKeys.size())))
         .arg(clampPercentValue(cpuValue), 0, 'f', 2)
         .arg(memoryPercent, 0, 'f', 2)
         .arg(memoryValue, 0, 'f', 1)
@@ -8576,14 +8826,20 @@ void ProcessDock::showTableContextMenu(const QPoint& localPosition)
         return QIcon(iconPixmap);
     };
 
-    QAction* copyCellAction = contextMenu.addAction(blueTintedIcon(":/Icon/process_copy_cell.svg"), "复制单元格");
-    QAction* copyRowAction = contextMenu.addAction(blueTintedIcon(":/Icon/process_copy_row.svg"), "复制行");
+    QAction* copyCellAction = contextMenu.addAction(
+        blueTintedIcon(":/Icon/process_copy_cell.svg"),
+        processContextText("process.menu.copy_cell", QStringLiteral("复制单元格")));
+    QAction* copyRowAction = contextMenu.addAction(
+        blueTintedIcon(":/Icon/process_copy_row.svg"),
+        processContextText("process.menu.copy_row", QStringLiteral("复制行")));
     contextMenu.addSeparator();
     if (hasBatchSelection)
     {
         QAction* batchHintAction = contextMenu.addAction(
             blueTintedIcon(":/Icon/process_list.svg"),
-            QStringLiteral("已选择 %1 个进程，支持批量动作").arg(contextActionTargets.size()));
+            processContextText(
+                "process.menu.batch_hint",
+                QStringLiteral("已选择 %1 个进程，支持批量动作")).arg(contextActionTargets.size()));
         batchHintAction->setEnabled(false);
         contextMenu.addSeparator();
     }
@@ -8593,23 +8849,23 @@ void ProcessDock::showTableContextMenu(const QPoint& localPosition)
     // - “结束进程”会按顺序执行 TerminateProcess + TerminateThread(全部线程)。
     QAction* terminateProcessAction = contextMenu.addAction(
         blueTintedIcon(":/Icon/process_terminate.svg"),
-        "结束进程");
+        processContextText("process.menu.terminate", QStringLiteral("结束进程")));
     QAction* r0TerminateAction = contextMenu.addAction(
         buildR0ActionIcon(":/Icon/process_terminate.svg"),
-        "R0结束进程");
+        processContextText("process.menu.r0_terminate", QStringLiteral("R0结束进程")));
     QAction* r0SuspendAction = contextMenu.addAction(
         buildR0ActionIcon(":/Icon/process_suspend.svg"),
-        "R0挂起进程");
+        processContextText("process.menu.r0_suspend", QStringLiteral("R0挂起进程")));
     QAction* refreshPplLevelAction = contextMenu.addAction(
         blueTintedIcon(":/Icon/process_refresh.svg"),
-        "手动刷新PPL保护级别");
+        processContextText("process.menu.refresh_ppl", QStringLiteral("手动刷新PPL保护级别")));
     refreshPplLevelAction->setToolTip(QStringLiteral("查询 ProcessProtectionLevelInfo；结果只更新当前列表快照，不写入跨轮缓存。"));
     QMenu* r0PplLevelSubMenu = contextMenu.addMenu(
         buildR0ActionIcon(":/Icon/process_critical.svg"),
-        "R0设置PPL层级");
+        processContextText("process.menu.set_ppl", QStringLiteral("R0设置PPL层级")));
     QAction* r0PplNoneAction = r0PplLevelSubMenu->addAction(
         buildR0ActionIcon(":/Icon/process_critical.svg"),
-        "关闭PPL保护 (0x00)");
+        processContextText("process.menu.close_ppl", QStringLiteral("关闭PPL保护 (0x00)")));
     r0PplNoneAction->setData(0x00U);
     r0PplLevelSubMenu->addSeparator();
     // PPL 预设签名器列表：
@@ -8654,23 +8910,23 @@ void ProcessDock::showTableContextMenu(const QPoint& localPosition)
     }
     QMenu* r0VisibilitySubMenu = contextMenu.addMenu(
         buildR0ActionIcon(":/Icon/process_details.svg"),
-        QStringLiteral("R0进程隐藏(可恢复)"));
+        processContextText("process.menu.hide", QStringLiteral("R0进程隐藏(可恢复)")));
     QAction* r0HideUnlinkOnlyAction = r0VisibilitySubMenu->addAction(
         buildR0ActionIcon(":/Icon/process_suspend.svg"),
-        QStringLiteral("隐藏选中进程：只断链"));
+        processContextText("process.menu.hide_unlink", QStringLiteral("隐藏选中进程：只断链")));
     QAction* r0HidePatchPidOnlyAction = r0VisibilitySubMenu->addAction(
         buildR0ActionIcon(":/Icon/process_uncritical.svg"),
-        QStringLiteral("隐藏选中进程：只改PID"));
+        processContextText("process.menu.hide_pid", QStringLiteral("隐藏选中进程：只改PID")));
     QAction* r0HideLegacyBothAction = r0VisibilitySubMenu->addAction(
         buildR0ActionIcon(":/Icon/process_critical.svg"),
-        QStringLiteral("隐藏选中进程：改PID+断链(旧版高风险)"));
+        processContextText("process.menu.hide_legacy", QStringLiteral("隐藏选中进程：改PID+断链(旧版高风险)")));
     r0VisibilitySubMenu->addSeparator();
     QAction* r0UnhideProcessAction = r0VisibilitySubMenu->addAction(
         buildR0ActionIcon(":/Icon/process_resume.svg"),
-        QStringLiteral("取消隐藏选中进程"));
+        processContextText("process.menu.unhide", QStringLiteral("取消隐藏选中进程")));
     QAction* r0ClearHiddenProcessAction = r0VisibilitySubMenu->addAction(
         buildR0ActionIcon(":/Icon/process_refresh.svg"),
-        QStringLiteral("清空全部隐藏标记"));
+        processContextText("process.menu.clear_hidden", QStringLiteral("清空全部隐藏标记")));
     r0HideUnlinkOnlyAction->setToolTip(QStringLiteral("只摘除 ActiveProcessLinks，不修改 PID；Ksword 更容易按原 PID 找回和恢复。"));
     r0HidePatchPidOnlyAction->setToolTip(QStringLiteral("只修改 UniqueProcessId，不摘链；高风险，可能影响按原 PID 查找目标。"));
     r0HideLegacyBothAction->setToolTip(QStringLiteral("兼容旧版：同时修改 UniqueProcessId 并摘除 ActiveProcessLinks；风险最高，仅用于复现实验。"));
@@ -8678,67 +8934,75 @@ void ProcessDock::showTableContextMenu(const QPoint& localPosition)
     r0ClearHiddenProcessAction->setToolTip(QStringLiteral("恢复所有由 Ksword 摘链的进程，并清空驱动内记录。"));
     QMenu* criticalProcessSubMenu = contextMenu.addMenu(
         blueTintedIcon(":/Icon/process_critical.svg"),
-        QStringLiteral("关键进程 / BreakOnTermination"));
+        processContextText("process.menu.critical", QStringLiteral("关键进程 / BreakOnTermination")));
     QAction* setCriticalAction = criticalProcessSubMenu->addAction(
         blueTintedIcon(":/Icon/process_critical.svg"),
-        QStringLiteral("R3设为关键进程"));
+        processContextText("process.menu.r3_critical", QStringLiteral("R3设为关键进程")));
     QAction* clearCriticalAction = criticalProcessSubMenu->addAction(
         blueTintedIcon(":/Icon/process_uncritical.svg"),
-        QStringLiteral("R3取消关键进程"));
+        processContextText("process.menu.r3_uncritical", QStringLiteral("R3取消关键进程")));
     criticalProcessSubMenu->addSeparator();
     QAction* r0EnableBreakAction = criticalProcessSubMenu->addAction(
         buildR0ActionIcon(":/Icon/process_critical.svg"),
-        QStringLiteral("R0启用 BreakOnTermination"));
+        processContextText("process.menu.r0_break", QStringLiteral("R0启用 BreakOnTermination")));
     QAction* r0DisableBreakAction = criticalProcessSubMenu->addAction(
         buildR0ActionIcon(":/Icon/process_uncritical.svg"),
-        QStringLiteral("R0关闭 BreakOnTermination"));
+        processContextText("process.menu.r0_unbreak", QStringLiteral("R0关闭 BreakOnTermination")));
     setCriticalAction->setToolTip(QStringLiteral("R3 调用 NtSetInformationProcess(ProcessBreakOnTermination=1)。"));
     clearCriticalAction->setToolTip(QStringLiteral("R3 调用 NtSetInformationProcess(ProcessBreakOnTermination=0)。"));
     r0EnableBreakAction->setToolTip(QStringLiteral("R0 优先 ZwSetInformationProcess，失败后按 PDB DynData 的 _EPROCESS.Flags 偏移置位。"));
     r0DisableBreakAction->setToolTip(QStringLiteral("R0 优先 ZwSetInformationProcess，失败后按 PDB DynData 的 _EPROCESS.Flags 偏移清位。"));
     QMenu* r0DangerSubMenu = contextMenu.addMenu(
         buildR0ActionIcon(":/Icon/process_uncritical.svg"),
-        QStringLiteral("R0危险进程标志/DKOM"));
+        processContextText("process.menu.danger", QStringLiteral("R0危险进程标志/DKOM")));
     QAction* r0DisableApcAction = r0DangerSubMenu->addAction(
         buildR0ActionIcon(":/Icon/process_suspend.svg"),
-        QStringLiteral("禁止APC插入(现有线程)"));
+        processContextText("process.menu.disable_apc", QStringLiteral("禁止APC插入(现有线程)")));
     QAction* r0DkomCidRemoveAction = r0DangerSubMenu->addAction(
         buildR0ActionIcon(":/Icon/process_uncritical.svg"),
-        QStringLiteral("DKOM从PspCidTable删除"));
+        processContextText("process.menu.remove_cid", QStringLiteral("DKOM从PspCidTable删除")));
     r0DisableApcAction->setToolTip(QStringLiteral("清除目标进程现有线程 ETHREAD ApcQueueable 位；新建线程不自动继承。"));
     r0DkomCidRemoveAction->setToolTip(QStringLiteral("从 PspCidTable 清零目标 EPROCESS 的 CID 表项；高风险且不可通过本菜单恢复。"));
     contextMenu.addSeparator();
 
-    QAction* suspendAction = contextMenu.addAction(blueTintedIcon(":/Icon/process_suspend.svg"), "挂起进程");
-    QAction* resumeAction = contextMenu.addAction(blueTintedIcon(":/Icon/process_resume.svg"), "恢复进程");
+    QAction* suspendAction = contextMenu.addAction(
+        blueTintedIcon(":/Icon/process_suspend.svg"),
+        processContextText("process.menu.suspend", QStringLiteral("挂起进程")));
+    QAction* resumeAction = contextMenu.addAction(
+        blueTintedIcon(":/Icon/process_resume.svg"),
+        processContextText("process.menu.resume", QStringLiteral("恢复进程")));
     QAction* enableEfficiencyAction = contextMenu.addAction(
         blueTintedIcon(":/Icon/process_resume.svg"),
-        "开启效率模式（绿叶）");
+        processContextText("process.menu.efficiency_on", QStringLiteral("开启效率模式（绿叶）")));
     QAction* disableEfficiencyAction = contextMenu.addAction(
         blueTintedIcon(":/Icon/process_suspend.svg"),
-        "关闭效率模式");
+        processContextText("process.menu.efficiency_off", QStringLiteral("关闭效率模式")));
     if (contextProcessRecord != nullptr && contextProcessRecord->efficiencyModeSupported)
     {
         enableEfficiencyAction->setEnabled(!contextProcessRecord->efficiencyModeEnabled);
         disableEfficiencyAction->setEnabled(contextProcessRecord->efficiencyModeEnabled);
     }
-    QAction* openFolderAction = contextMenu.addAction(blueTintedIcon(":/Icon/process_open_folder.svg"), "打开所在目录");
+    QAction* openFolderAction = contextMenu.addAction(
+        blueTintedIcon(":/Icon/process_open_folder.svg"),
+        processContextText("process.menu.open_folder", QStringLiteral("打开所在目录")));
     QAction* openMemoryAction = contextMenu.addAction(
         blueTintedIcon(":/Icon/process_details.svg"),
-        "跳转到内存操作（可在此处转储）");
+        processContextText("process.menu.open_memory", QStringLiteral("跳转到内存操作（可在此处转储）")));
     QAction* injectionPageAction = contextMenu.addAction(
         blueTintedIcon(":/Icon/process_priority.svg"),
-        QStringLiteral("DLL/Shellcode 注入"));
+        processContextText("process.menu.injection", QStringLiteral("DLL/Shellcode 注入")));
     injectionPageAction->setToolTip(QStringLiteral("打开进程详细信息并直达“操作”页的 DLL/Shellcode 注入区域。"));
     injectionPageAction->setEnabled(!hasBatchSelection);
     QAction* scanHotkeyAction = contextMenu.addAction(
         blueTintedIcon(":/Icon/process_refresh.svg"),
-        QStringLiteral("扫描进程热键"));
+        processContextText("process.menu.hotkeys", QStringLiteral("扫描进程热键")));
     scanHotkeyAction->setToolTip(QStringLiteral("打开进程详细信息并直达“进程热键”页，扫描窗口热键、菜单快捷键、Accelerator、快捷方式和R0热键表。"));
     scanHotkeyAction->setEnabled(!hasBatchSelection);
 
     // 优先级二级菜单。
-    QMenu* prioritySubMenu = contextMenu.addMenu(blueTintedIcon(":/Icon/process_priority.svg"), "设置进程优先级");
+    QMenu* prioritySubMenu = contextMenu.addMenu(
+        blueTintedIcon(":/Icon/process_priority.svg"),
+        processContextText("process.menu.priority", QStringLiteral("设置进程优先级")));
     QAction* idlePriority = prioritySubMenu->addAction(blueTintedIcon(":/Icon/process_priority.svg"), "Idle");
     QAction* belowNormalPriority = prioritySubMenu->addAction(blueTintedIcon(":/Icon/process_priority.svg"), "Below Normal");
     QAction* normalPriority = prioritySubMenu->addAction(blueTintedIcon(":/Icon/process_priority.svg"), "Normal");
@@ -8758,7 +9022,7 @@ void ProcessDock::showTableContextMenu(const QPoint& localPosition)
     // - 执行动作仍支持批量，所有选中进程都会尝试写入同一 Mandatory Label。
     QMenu* integritySubMenu = contextMenu.addMenu(
         blueTintedIcon(":/Icon/process_critical.svg"),
-        QStringLiteral("完整性"));
+        processContextText("process.menu.integrity", QStringLiteral("完整性")));
     integritySubMenu->setToolTipsVisible(true);
     if (!contextIntegrityKnown && contextProcessRecord != nullptr)
     {
@@ -8773,14 +9037,18 @@ void ProcessDock::showTableContextMenu(const QPoint& localPosition)
             QStringLiteral("%1 %2 - %3")
                 .arg(isCurrentLevel ? QStringLiteral("●") : QStringLiteral(" "))
                 .arg(QString::fromLatin1(preset.nameText))
-                .arg(QString::fromUtf8(preset.detailText)));
+                .arg(processContextText(
+                    QStringLiteral("process.integrity.") + QString::fromLatin1(preset.nameText),
+                    QString::fromUtf8(preset.detailText))));
         integrityAction->setData(static_cast<unsigned int>(preset.rid));
         integrityAction->setToolTip(QStringLiteral("R0 内核 API 优先修改 TokenIntegrityLevel 为 S-1-16-%1；驱动不可用时回退 R3%2")
             .arg(static_cast<unsigned int>(preset.rid))
             .arg(isCurrentLevel ? QStringLiteral("（当前）") : QString()));
     }
 
-    QAction* detailsAction = contextMenu.addAction(blueTintedIcon(":/Icon/process_details.svg"), "进程详细信息");
+    QAction* detailsAction = contextMenu.addAction(
+        blueTintedIcon(":/Icon/process_details.svg"),
+        processContextText("process.menu.details", QStringLiteral("进程详细信息")));
     detailsAction->setEnabled(!hasBatchSelection);
     contextMenu.addSeparator();
     QAction* uploadVirusTotalAction = ks::online_scan::addVirusTotalSandboxMenu(
@@ -8909,7 +9177,8 @@ void ProcessDock::showHeaderContextMenu(const QPoint& localPosition)
     columnMenu.setStyleSheet(KswordTheme::ContextMenuStyle());
     for (int columnIndex = 0; columnIndex < static_cast<int>(TableColumn::Count); ++columnIndex)
     {
-        QAction* toggleAction = columnMenu.addAction(ProcessTableHeaders.at(columnIndex));
+        QAction* toggleAction = columnMenu.addAction(
+            translatedProcessHeader(columnIndex, ProcessTableHeaders.at(columnIndex)));
         toggleAction->setCheckable(true);
         toggleAction->setChecked(!m_processTable->isColumnHidden(columnIndex));
         toggleAction->setData(columnIndex);
@@ -9425,7 +9694,7 @@ QString ProcessDock::formatColumnText(const ks::process::ProcessRecord& processR
         // CPU 改为两位小数，避免低占用进程全部显示 0.0 的视觉误差。
         return QString::number(processRecord.cpuPercent, 'f', 2) + "%";
     case TableColumn::Ram:
-        return QStringLiteral("使用 %1 MB / 申请 %2 MB")
+        return processContextText("process.table.cell.ram", QStringLiteral("使用 %1 MB / 申请 %2 MB"))
             .arg(processRecord.workingSetMB, 0, 'f', 1)
             .arg(processRecord.ramMB, 0, 'f', 1);
     case TableColumn::Disk:
@@ -9451,7 +9720,9 @@ QString ProcessDock::formatColumnText(const ks::process::ProcessRecord& processR
         return QString::fromStdString(processRecord.startTimeText);
     case TableColumn::IsAdmin:
         // 用方块 + 文本表示管理员状态（颜色在重建表格时设置）。
-        return processRecord.isAdmin ? "■ 是" : "■ 否";
+        return processRecord.isAdmin
+            ? processContextText("process.table.cell.admin_yes", QStringLiteral("■ 是"))
+            : processContextText("process.table.cell.admin_no", QStringLiteral("■ 否"));
     case TableColumn::PplLevel:
         // PPL 保护级别枚举只由用户手动刷新，不从缓存继承。
         if (!processRecord.protectionLevelKnown)
@@ -9993,12 +10264,12 @@ QString ProcessDock::friendlyGroupTitle(const FriendlyProcessGroupType groupType
     switch (groupType)
     {
     case FriendlyProcessGroupType::Application:
-        return QStringLiteral("应用 (%1)").arg(entryCount);
+        return processContextText("process.group.application", QStringLiteral("应用 (%1)")).arg(entryCount);
     case FriendlyProcessGroupType::WindowsSystem:
-        return QStringLiteral("系统 (%1)").arg(entryCount);
+        return processContextText("process.group.system", QStringLiteral("系统 (%1)")).arg(entryCount);
     case FriendlyProcessGroupType::Background:
     default:
-        return QStringLiteral("后台进程 (%1)").arg(entryCount);
+        return processContextText("process.group.background", QStringLiteral("后台进程 (%1)")).arg(entryCount);
     }
 }
 

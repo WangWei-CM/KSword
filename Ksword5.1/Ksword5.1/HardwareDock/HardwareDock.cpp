@@ -6,6 +6,7 @@
 #include "HardwareOtherDevicesPage.h"
 #include "HardwareDeviceManagerPage.h"
 #include "HardwareHwidDispatchPage.h"
+#include "../Internationalization/LanguageManager.h"
 
 // ============================================================
 // HardwareDock.cpp
@@ -2829,7 +2830,9 @@ void HardwareDock::initializeOverviewTab()
     m_overviewLayout->setContentsMargins(4, 4, 4, 4);
     m_overviewLayout->setSpacing(6);
 
-    m_overviewSummaryLabel = new QLabel(QStringLiteral("采样中..."), m_overviewPage);
+    m_overviewSummaryLabel = new QLabel(
+        ks::i18n::contextText(QStringLiteral("hardware.overview.sampling"), QStringLiteral("采样中...")),
+        m_overviewPage);
     m_overviewSummaryLabel->setStyleSheet(
         QStringLiteral("color:%1;font-weight:600;").arg(buildStatusColor().name()));
     m_overviewLayout->addWidget(m_overviewSummaryLabel, 0);
@@ -2839,7 +2842,11 @@ void HardwareDock::initializeOverviewTab()
     m_overviewLayout->addWidget(m_overviewEditor, 1);
 
     const int tabIndex = m_sideTabWidget->addTab(m_overviewPage, QStringLiteral("硬件概览"));
+    ks::i18n::LanguageManager::instance().bindTab(
+        m_sideTabWidget, m_overviewPage, QStringLiteral("hardware.tab.overview"), QStringLiteral("硬件概览"));
     m_sideTabWidget->setTabToolTip(tabIndex, QStringLiteral("查看处理器、内存、显卡和系统硬件摘要"));
+    ks::i18n::LanguageManager::instance().bindTabToolTip(
+        m_sideTabWidget, m_overviewPage, QStringLiteral("hardware.tooltip.overview"), QStringLiteral("查看处理器、内存、显卡和系统硬件摘要"));
 }
 
 void HardwareDock::initializeUtilizationTab()
@@ -2903,7 +2910,11 @@ void HardwareDock::initializeUtilizationTab()
     syncUtilizationSidebarSelection(0);
 
     const int tabIndex = m_sideTabWidget->addTab(m_utilizationPage, QStringLiteral("性能监控"));
+    ks::i18n::LanguageManager::instance().bindTab(
+        m_sideTabWidget, m_utilizationPage, QStringLiteral("hardware.tab.utilization"), QStringLiteral("性能监控"));
     m_sideTabWidget->setTabToolTip(tabIndex, QStringLiteral("实时查看处理器、内存、磁盘、网络和显卡使用情况"));
+    ks::i18n::LanguageManager::instance().bindTabToolTip(
+        m_sideTabWidget, m_utilizationPage, QStringLiteral("hardware.tooltip.utilization"), QStringLiteral("实时查看处理器、内存、磁盘、网络和显卡使用情况"));
 }
 
 void HardwareDock::initializeUtilizationSidebarCards()
@@ -2915,13 +2926,13 @@ void HardwareDock::initializeUtilizationSidebarCards()
 
     m_cpuNavCard = addUtilizationSidebarCard(
         m_utilizationCpuSubPage,
-        QStringLiteral("CPU"),
+        ks::i18n::contextText(QStringLiteral("hardware.utilization.card.cpu"), QStringLiteral("CPU")),
         QColor(90, 178, 255),
         UtilizationDeviceKind::Cpu,
         -1);
     m_memoryNavCard = addUtilizationSidebarCard(
         m_utilizationMemorySubPage,
-        QStringLiteral("内存"),
+        ks::i18n::contextText(QStringLiteral("hardware.utilization.card.memory"), QStringLiteral("内存")),
         QColor(184, 99, 255),
         UtilizationDeviceKind::Memory,
         -1);
@@ -2955,7 +2966,10 @@ PerformanceNavCard* HardwareDock::addUtilizationSidebarCard(
     // cardPointer 用途：实际绘制任务管理器风格缩略卡片。
     PerformanceNavCard* cardPointer = new PerformanceNavCard(m_utilizationSidebarList);
     cardPointer->setTitleText(titleText);
-    cardPointer->setSubtitleText(QStringLiteral("采样中..."));
+    cardPointer->setSubtitleText(
+        ks::i18n::contextText(
+            QStringLiteral("hardware.utilization.card.sampling"),
+            QStringLiteral("采样中...")));
     cardPointer->setAccentColor(accentColor);
     itemPointer->setSizeHint(cardPointer->sizeHint());
     m_utilizationSidebarList->addItem(itemPointer);
@@ -3419,7 +3433,9 @@ void HardwareDock::initializeUtilizationCpuSubTab()
     cpuSubLayout->setSpacing(6);
 
     QHBoxLayout* headerLayout = new QHBoxLayout();
-    QLabel* titleLabel = new QLabel(QStringLiteral("CPU"), m_utilizationCpuSubPage);
+    QLabel* titleLabel = new QLabel(
+        ks::i18n::contextText(QStringLiteral("hardware.utilization.cpu.title"), QStringLiteral("CPU")),
+        m_utilizationCpuSubPage);
     configurePersistentHeaderLabel(titleLabel);
     titleLabel->setStyleSheet(
         QStringLiteral("font-size:46px;font-weight:700;color:%1;")
@@ -3437,7 +3453,11 @@ void HardwareDock::initializeUtilizationCpuSubTab()
     headerLayout->addWidget(m_cpuModelLabel, 0);
     cpuSubLayout->addLayout(headerLayout, 0);
 
-    m_utilizationSummaryLabel = new QLabel(QStringLiteral("30 秒内的利用率 %"), m_utilizationCpuSubPage);
+    m_utilizationSummaryLabel = new QLabel(
+        ks::i18n::contextText(
+            QStringLiteral("hardware.utilization.cpu.summary.initial"),
+            QStringLiteral("30 秒内的利用率 %")),
+        m_utilizationCpuSubPage);
     configureCompressibleLabel(m_utilizationSummaryLabel);
     m_utilizationSummaryLabel->setStyleSheet(
         QStringLiteral("color:%1;font-size:14px;font-weight:600;").arg(buildStatusColor().name()));
@@ -3460,7 +3480,11 @@ void HardwareDock::initializeUtilizationCpuSubTab()
     m_coreChartGridLayout->setHorizontalSpacing(kCpuCoreChartGridSpacingPx);
     m_coreChartGridLayout->setVerticalSpacing(kCpuCoreChartGridSpacingPx);
     // coreChartPlaceholderLabel 用途：首帧前暂时代替大量 QChartView，避免构造硬件页时一次性创建每核心图表。
-    QLabel* coreChartPlaceholderLabel = new QLabel(QStringLiteral("CPU 核心图将在首帧后加载..."), m_coreChartHostWidget);
+    QLabel* coreChartPlaceholderLabel = new QLabel(
+        ks::i18n::contextText(
+            QStringLiteral("hardware.utilization.cpu.chart_placeholder"),
+            QStringLiteral("CPU 核心图将在首帧后加载...")),
+        m_coreChartHostWidget);
     coreChartPlaceholderLabel->setAlignment(Qt::AlignCenter);
     coreChartPlaceholderLabel->setStyleSheet(
         QStringLiteral("font-size:13px;color:%1;")
@@ -3471,8 +3495,16 @@ void HardwareDock::initializeUtilizationCpuSubTab()
 
     QHBoxLayout* detailLayout = new QHBoxLayout();
     detailLayout->setSpacing(16);
-    m_cpuUtilPrimaryDetailLabel = new QLabel(QStringLiteral("CPU 详情采样中..."), m_utilizationCpuSubPage);
-    m_cpuUtilSecondaryDetailLabel = new QLabel(QStringLiteral("硬件参数读取中..."), m_utilizationCpuSubPage);
+    m_cpuUtilPrimaryDetailLabel = new QLabel(
+        ks::i18n::contextText(
+            QStringLiteral("hardware.utilization.cpu.detail.primary_sampling"),
+            QStringLiteral("CPU 详情采样中...")),
+        m_utilizationCpuSubPage);
+    m_cpuUtilSecondaryDetailLabel = new QLabel(
+        ks::i18n::contextText(
+            QStringLiteral("hardware.utilization.cpu.detail.secondary_sampling"),
+            QStringLiteral("硬件参数读取中...")),
+        m_utilizationCpuSubPage);
     configureCompressibleLabel(m_cpuUtilPrimaryDetailLabel);
     configureCompressibleLabel(m_cpuUtilSecondaryDetailLabel);
     m_cpuUtilPrimaryDetailLabel->setWordWrap(false);
@@ -3498,13 +3530,17 @@ void HardwareDock::initializeUtilizationMemorySubTab()
     memorySubLayout->setSpacing(6);
 
     QHBoxLayout* headerLayout = new QHBoxLayout();
-    QLabel* titleLabel = new QLabel(QStringLiteral("内存"), m_utilizationMemorySubPage);
+    QLabel* titleLabel = new QLabel(
+        ks::i18n::contextText(QStringLiteral("hardware.utilization.memory.title"), QStringLiteral("内存")),
+        m_utilizationMemorySubPage);
     configurePersistentHeaderLabel(titleLabel);
     titleLabel->setStyleSheet(
         QStringLiteral("font-size:46px;font-weight:700;color:%1;")
         .arg(KswordTheme::TextPrimaryHex()));
     lockLabelHeightToFont(titleLabel, 14);
-    m_memoryCapacityLabel = new QLabel(QStringLiteral("读取中..."), m_utilizationMemorySubPage);
+    m_memoryCapacityLabel = new QLabel(
+        ks::i18n::contextText(QStringLiteral("hardware.utilization.memory.capacity_sampling"), QStringLiteral("读取中...")),
+        m_utilizationMemorySubPage);
     configurePersistentHeaderLabel(m_memoryCapacityLabel, QSizePolicy::Ignored);
     m_memoryCapacityLabel->setStyleSheet(
         QStringLiteral("font-size:31px;font-weight:500;color:%1;")
@@ -3515,7 +3551,9 @@ void HardwareDock::initializeUtilizationMemorySubTab()
     headerLayout->addWidget(m_memoryCapacityLabel, 0);
     memorySubLayout->addLayout(headerLayout, 0);
 
-    m_memoryUtilSummaryLabel = new QLabel(QStringLiteral("内存使用量"), m_utilizationMemorySubPage);
+    m_memoryUtilSummaryLabel = new QLabel(
+        ks::i18n::contextText(QStringLiteral("hardware.utilization.memory.summary.initial"), QStringLiteral("内存使用量")),
+        m_utilizationMemorySubPage);
     configureCompressibleLabel(m_memoryUtilSummaryLabel);
     m_memoryUtilSummaryLabel->setStyleSheet(
         QStringLiteral("color:%1;font-size:14px;font-weight:600;").arg(buildStatusColor().name()));
@@ -3527,8 +3565,16 @@ void HardwareDock::initializeUtilizationMemorySubTab()
 
     QHBoxLayout* detailLayout = new QHBoxLayout();
     detailLayout->setSpacing(16);
-    m_memoryUtilPrimaryDetailLabel = new QLabel(QStringLiteral("内存参数采样中..."), m_utilizationMemorySubPage);
-    m_memoryUtilSecondaryDetailLabel = new QLabel(QStringLiteral("硬件参数读取中..."), m_utilizationMemorySubPage);
+    m_memoryUtilPrimaryDetailLabel = new QLabel(
+        ks::i18n::contextText(
+            QStringLiteral("hardware.utilization.memory.detail.primary_sampling"),
+            QStringLiteral("内存参数采样中...")),
+        m_utilizationMemorySubPage);
+    m_memoryUtilSecondaryDetailLabel = new QLabel(
+        ks::i18n::contextText(
+            QStringLiteral("hardware.utilization.memory.detail.secondary_sampling"),
+            QStringLiteral("硬件参数读取中...")),
+        m_utilizationMemorySubPage);
     configureCompressibleLabel(m_memoryUtilPrimaryDetailLabel);
     configureCompressibleLabel(m_memoryUtilSecondaryDetailLabel);
     m_memoryUtilPrimaryDetailLabel->setWordWrap(false);
@@ -3553,7 +3599,9 @@ void HardwareDock::initializeUtilizationDiskSubTab()
     diskSubLayout->setContentsMargins(4, 4, 4, 4);
     diskSubLayout->setSpacing(6);
 
-    QLabel* titleLabel = new QLabel(QStringLiteral("磁盘"), m_utilizationDiskSubPage);
+    QLabel* titleLabel = new QLabel(
+        ks::i18n::contextText(QStringLiteral("hardware.utilization.disk.title"), QStringLiteral("磁盘")),
+        m_utilizationDiskSubPage);
     configurePersistentHeaderLabel(titleLabel);
     titleLabel->setStyleSheet(
         QStringLiteral("font-size:46px;font-weight:700;color:%1;")
@@ -3561,20 +3609,26 @@ void HardwareDock::initializeUtilizationDiskSubTab()
     lockLabelHeightToFont(titleLabel, 14);
     diskSubLayout->addWidget(titleLabel, 0);
 
-    m_diskUtilSummaryLabel = new QLabel(QStringLiteral("磁盘采样初始化中..."), m_utilizationDiskSubPage);
+    m_diskUtilSummaryLabel = new QLabel(
+        ks::i18n::contextText(
+            QStringLiteral("hardware.utilization.disk.sampling"),
+            QStringLiteral("磁盘采样初始化中...")),
+        m_utilizationDiskSubPage);
     configureCompressibleLabel(m_diskUtilSummaryLabel);
     m_diskUtilSummaryLabel->setStyleSheet(
         QStringLiteral("color:%1;font-size:14px;font-weight:600;").arg(buildStatusColor().name()));
     diskSubLayout->addWidget(m_diskUtilSummaryLabel, 0);
 
     m_diskReadLineSeries = new QLineSeries(m_utilizationDiskSubPage);
-    m_diskReadLineSeries->setName(QStringLiteral("读取"));
+    m_diskReadLineSeries->setName(ks::i18n::contextText(
+        QStringLiteral("hardware.utilization.disk.read"), QStringLiteral("读取")));
     const QColor diskReadColor(80, 170, 255);
     const QColor diskWriteColor(255, 190, 105);
     m_diskReadLineSeries->setColor(diskReadColor);
     m_diskReadBaselineSeries = createBaselineSeries(m_utilizationDiskSubPage, m_historyLength);
     m_diskWriteLineSeries = new QLineSeries(m_utilizationDiskSubPage);
-    m_diskWriteLineSeries->setName(QStringLiteral("写入"));
+    m_diskWriteLineSeries->setName(ks::i18n::contextText(
+        QStringLiteral("hardware.utilization.disk.write"), QStringLiteral("写入")));
     m_diskWriteLineSeries->setColor(diskWriteColor);
     m_diskWriteBaselineSeries = createBaselineSeries(m_utilizationDiskSubPage, m_historyLength);
     initializeLineSeriesHistory(m_diskReadLineSeries, m_historyLength);
@@ -3596,7 +3650,9 @@ void HardwareDock::initializeUtilizationDiskSubTab()
     configureUtilizationPlotChart(
         diskChart,
         diskReadColor,
-        QStringLiteral("磁盘读写速率趋势"),
+        ks::i18n::contextText(
+            QStringLiteral("hardware.utilization.disk.chart_title"),
+            QStringLiteral("磁盘读写速率趋势")),
         true);
 
     m_diskUtilAxisX = new QValueAxis(diskChart);
@@ -3621,7 +3677,11 @@ void HardwareDock::initializeUtilizationDiskSubTab()
     m_diskUtilChartView = createPlotBackgroundChartView(diskChart, m_utilizationDiskSubPage);
     diskSubLayout->addWidget(m_diskUtilChartView, 1);
 
-    m_diskUtilDetailLabel = new QLabel(QStringLiteral("磁盘参数采样中..."), m_utilizationDiskSubPage);
+    m_diskUtilDetailLabel = new QLabel(
+        ks::i18n::contextText(
+            QStringLiteral("hardware.utilization.disk.detail_sampling"),
+            QStringLiteral("磁盘参数采样中...")),
+        m_utilizationDiskSubPage);
     configureCompressibleLabel(m_diskUtilDetailLabel);
     m_diskUtilDetailLabel->setWordWrap(false);
     m_diskUtilDetailLabel->setStyleSheet(
@@ -3640,7 +3700,9 @@ void HardwareDock::initializeUtilizationNetworkSubTab()
     networkSubLayout->setContentsMargins(4, 4, 4, 4);
     networkSubLayout->setSpacing(6);
 
-    QLabel* titleLabel = new QLabel(QStringLiteral("以太网"), m_utilizationNetworkSubPage);
+    QLabel* titleLabel = new QLabel(
+        ks::i18n::contextText(QStringLiteral("hardware.utilization.network.title"), QStringLiteral("以太网")),
+        m_utilizationNetworkSubPage);
     configurePersistentHeaderLabel(titleLabel);
     titleLabel->setStyleSheet(
         QStringLiteral("font-size:46px;font-weight:700;color:%1;")
@@ -3648,20 +3710,26 @@ void HardwareDock::initializeUtilizationNetworkSubTab()
     lockLabelHeightToFont(titleLabel, 14);
     networkSubLayout->addWidget(titleLabel, 0);
 
-    m_networkUtilSummaryLabel = new QLabel(QStringLiteral("网络采样初始化中..."), m_utilizationNetworkSubPage);
+    m_networkUtilSummaryLabel = new QLabel(
+        ks::i18n::contextText(
+            QStringLiteral("hardware.utilization.network.sampling"),
+            QStringLiteral("网络采样初始化中...")),
+        m_utilizationNetworkSubPage);
     configureCompressibleLabel(m_networkUtilSummaryLabel);
     m_networkUtilSummaryLabel->setStyleSheet(
         QStringLiteral("color:%1;font-size:14px;font-weight:600;").arg(buildStatusColor().name()));
     networkSubLayout->addWidget(m_networkUtilSummaryLabel, 0);
 
     m_networkRxLineSeries = new QLineSeries(m_utilizationNetworkSubPage);
-    m_networkRxLineSeries->setName(QStringLiteral("下行"));
+    m_networkRxLineSeries->setName(ks::i18n::contextText(
+        QStringLiteral("hardware.utilization.network.down"), QStringLiteral("下行")));
     const QColor networkRxColor(92, 190, 255);
     const QColor networkTxColor(153, 129, 255);
     m_networkRxLineSeries->setColor(networkRxColor);
     m_networkRxBaselineSeries = createBaselineSeries(m_utilizationNetworkSubPage, m_historyLength);
     m_networkTxLineSeries = new QLineSeries(m_utilizationNetworkSubPage);
-    m_networkTxLineSeries->setName(QStringLiteral("上行"));
+    m_networkTxLineSeries->setName(ks::i18n::contextText(
+        QStringLiteral("hardware.utilization.network.up"), QStringLiteral("上行")));
     m_networkTxLineSeries->setColor(networkTxColor);
     m_networkTxBaselineSeries = createBaselineSeries(m_utilizationNetworkSubPage, m_historyLength);
     initializeLineSeriesHistory(m_networkRxLineSeries, m_historyLength);
@@ -3683,7 +3751,9 @@ void HardwareDock::initializeUtilizationNetworkSubTab()
     configureUtilizationPlotChart(
         networkChart,
         networkRxColor,
-        QStringLiteral("网络收发速率趋势"),
+        ks::i18n::contextText(
+            QStringLiteral("hardware.utilization.network.chart_title"),
+            QStringLiteral("网络收发速率趋势")),
         true);
 
     m_networkUtilAxisX = new QValueAxis(networkChart);
@@ -3708,7 +3778,11 @@ void HardwareDock::initializeUtilizationNetworkSubTab()
     m_networkUtilChartView = createPlotBackgroundChartView(networkChart, m_utilizationNetworkSubPage);
     networkSubLayout->addWidget(m_networkUtilChartView, 1);
 
-    m_networkUtilDetailLabel = new QLabel(QStringLiteral("网络参数采样中..."), m_utilizationNetworkSubPage);
+    m_networkUtilDetailLabel = new QLabel(
+        ks::i18n::contextText(
+            QStringLiteral("hardware.utilization.network.detail_sampling"),
+            QStringLiteral("网络参数采样中...")),
+        m_utilizationNetworkSubPage);
     configureCompressibleLabel(m_networkUtilDetailLabel);
     m_networkUtilDetailLabel->setWordWrap(false);
     m_networkUtilDetailLabel->setStyleSheet(
@@ -3728,13 +3802,19 @@ void HardwareDock::initializeUtilizationGpuSubTab()
     gpuSubLayout->setSpacing(6);
 
     QHBoxLayout* headerLayout = new QHBoxLayout();
-    QLabel* titleLabel = new QLabel(QStringLiteral("GPU"), m_utilizationGpuSubPage);
+    QLabel* titleLabel = new QLabel(
+        ks::i18n::contextText(QStringLiteral("hardware.utilization.gpu.title"), QStringLiteral("GPU")),
+        m_utilizationGpuSubPage);
     configurePersistentHeaderLabel(titleLabel);
     titleLabel->setStyleSheet(
         QStringLiteral("font-size:46px;font-weight:700;color:%1;")
         .arg(KswordTheme::TextPrimaryHex()));
     lockLabelHeightToFont(titleLabel, 14);
-    m_gpuAdapterTitleLabel = new QLabel(QStringLiteral("适配器读取中..."), m_utilizationGpuSubPage);
+    m_gpuAdapterTitleLabel = new QLabel(
+        ks::i18n::contextText(
+            QStringLiteral("hardware.utilization.gpu.adapter_sampling"),
+            QStringLiteral("适配器读取中...")),
+        m_utilizationGpuSubPage);
     configurePersistentHeaderLabel(m_gpuAdapterTitleLabel, QSizePolicy::Ignored);
     m_gpuAdapterTitleLabel->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
     m_gpuAdapterTitleLabel->setStyleSheet(
@@ -3746,7 +3826,11 @@ void HardwareDock::initializeUtilizationGpuSubTab()
     headerLayout->addWidget(m_gpuAdapterTitleLabel, 0);
     gpuSubLayout->addLayout(headerLayout, 0);
 
-    m_gpuUtilSummaryLabel = new QLabel(QStringLiteral("GPU采样初始化中..."), m_utilizationGpuSubPage);
+    m_gpuUtilSummaryLabel = new QLabel(
+        ks::i18n::contextText(
+            QStringLiteral("hardware.utilization.gpu.sampling"),
+            QStringLiteral("GPU采样初始化中...")),
+        m_utilizationGpuSubPage);
     configureCompressibleLabel(m_gpuUtilSummaryLabel);
     m_gpuUtilSummaryLabel->setStyleSheet(
         QStringLiteral("color:%1;font-size:14px;font-weight:600;").arg(buildStatusColor().name()));
@@ -3918,7 +4002,11 @@ void HardwareDock::initializeUtilizationGpuSubTab()
     gpuSubLayout->addWidget(m_gpuDedicatedMemoryChartView, 0);
     gpuSubLayout->addWidget(m_gpuSharedMemoryChartView, 0);
 
-    m_gpuUtilDetailLabel = new QLabel(QStringLiteral("GPU参数采样中..."), m_utilizationGpuSubPage);
+    m_gpuUtilDetailLabel = new QLabel(
+        ks::i18n::contextText(
+            QStringLiteral("hardware.utilization.gpu.detail_sampling"),
+            QStringLiteral("GPU参数采样中...")),
+        m_utilizationGpuSubPage);
     configureCompressibleLabel(m_gpuUtilDetailLabel);
     m_gpuUtilDetailLabel->setWordWrap(false);
     m_gpuUtilDetailLabel->setStyleSheet(
@@ -3966,7 +4054,11 @@ void HardwareDock::initializeCpuTab()
     m_cpuLayout->addWidget(m_cpuDetailTable, 1);
 
     const int tabIndex = m_sideTabWidget->addTab(m_cpuPage, QStringLiteral("处理器"));
+    ks::i18n::LanguageManager::instance().bindTab(
+        m_sideTabWidget, m_cpuPage, QStringLiteral("hardware.tab.cpu"), QStringLiteral("处理器"));
     m_sideTabWidget->setTabToolTip(tabIndex, QStringLiteral("查看处理器型号、核心利用率、频率、温度和电压"));
+    ks::i18n::LanguageManager::instance().bindTabToolTip(
+        m_sideTabWidget, m_cpuPage, QStringLiteral("hardware.tooltip.cpu"), QStringLiteral("查看处理器型号、核心利用率、频率、温度和电压"));
 }
 
 void HardwareDock::initializeR0EvidenceTab()
@@ -3979,9 +4071,13 @@ void HardwareDock::initializeR0EvidenceTab()
     const int tabIndex = m_sideTabWidget->addTab(
         m_r0EvidencePage,
         QStringLiteral("底层硬件检查"));
+    ks::i18n::LanguageManager::instance().bindTab(
+        m_sideTabWidget, m_r0EvidencePage, QStringLiteral("hardware.tab.r0_evidence"), QStringLiteral("底层硬件检查"));
     m_sideTabWidget->setTabToolTip(
         tabIndex,
         QStringLiteral("查看处理器寄存器与系统表的底层只读检查结果"));
+    ks::i18n::LanguageManager::instance().bindTabToolTip(
+        m_sideTabWidget, m_r0EvidencePage, QStringLiteral("hardware.tooltip.r0_evidence"), QStringLiteral("查看处理器寄存器与系统表的底层只读检查结果"));
 }
 
 void HardwareDock::initializeGpuTab()
@@ -3996,7 +4092,11 @@ void HardwareDock::initializeGpuTab()
     m_gpuLayout->addWidget(m_gpuEditor, 1);
 
     const int tabIndex = m_sideTabWidget->addTab(m_gpuPage, QStringLiteral("显卡"));
+    ks::i18n::LanguageManager::instance().bindTab(
+        m_sideTabWidget, m_gpuPage, QStringLiteral("hardware.tab.gpu"), QStringLiteral("显卡"));
     m_sideTabWidget->setTabToolTip(tabIndex, QStringLiteral("查看显卡型号、显存与驱动信息"));
+    ks::i18n::LanguageManager::instance().bindTabToolTip(
+        m_sideTabWidget, m_gpuPage, QStringLiteral("hardware.tooltip.gpu"), QStringLiteral("查看显卡型号、显存与驱动信息"));
 }
 
 void HardwareDock::initializeMemoryTab()
@@ -4011,7 +4111,11 @@ void HardwareDock::initializeMemoryTab()
     m_memoryLayout->addWidget(m_memoryEditor, 1);
 
     const int tabIndex = m_sideTabWidget->addTab(m_memoryPage, QStringLiteral("内存"));
+    ks::i18n::LanguageManager::instance().bindTab(
+        m_sideTabWidget, m_memoryPage, QStringLiteral("hardware.tab.memory"), QStringLiteral("内存"));
     m_sideTabWidget->setTabToolTip(tabIndex, QStringLiteral("查看内存容量、模组与使用情况"));
+    ks::i18n::LanguageManager::instance().bindTabToolTip(
+        m_sideTabWidget, m_memoryPage, QStringLiteral("hardware.tooltip.memory"), QStringLiteral("查看内存容量、模组与使用情况"));
 }
 
 void HardwareDock::initializeDiskMonitorTab()
@@ -4028,7 +4132,11 @@ void HardwareDock::initializeDiskMonitorTab()
             QStringLiteral("切换到本页后再启动文件 ETW 与进程 IO 采样，避免拖慢硬件页首次打开。")),
         1);
     const int tabIndex = m_sideTabWidget->addTab(m_diskMonitorHostPage, QStringLiteral("磁盘活动"));
+    ks::i18n::LanguageManager::instance().bindTab(
+        m_sideTabWidget, m_diskMonitorHostPage, QStringLiteral("hardware.tab.disk_activity"), QStringLiteral("磁盘活动"));
     m_sideTabWidget->setTabToolTip(tabIndex, QStringLiteral("查看文件访问与进程磁盘读写活动"));
+    ks::i18n::LanguageManager::instance().bindTabToolTip(
+        m_sideTabWidget, m_diskMonitorHostPage, QStringLiteral("hardware.tooltip.disk_activity"), QStringLiteral("查看文件访问与进程磁盘读写活动"));
 }
 
 void HardwareDock::initializeDeviceManagerTab()
@@ -4039,7 +4147,11 @@ void HardwareDock::initializeDeviceManagerTab()
     // - 返回：无，作为硬件 Dock 的独立 Tab 呈现。
     m_deviceManagerPage = new HardwareDeviceManagerPage(m_sideTabWidget);
     const int tabIndex = m_sideTabWidget->addTab(m_deviceManagerPage, QStringLiteral("设备管理"));
+    ks::i18n::LanguageManager::instance().bindTab(
+        m_sideTabWidget, m_deviceManagerPage, QStringLiteral("hardware.tab.device_manager"), QStringLiteral("设备管理"));
     m_sideTabWidget->setTabToolTip(tabIndex, QStringLiteral("搜索、查看和管理 Windows 设备"));
+    ks::i18n::LanguageManager::instance().bindTabToolTip(
+        m_sideTabWidget, m_deviceManagerPage, QStringLiteral("hardware.tooltip.device_manager"), QStringLiteral("搜索、查看和管理 Windows 设备"));
 }
 
 void HardwareDock::initializeHwidDispatchTab()
@@ -4050,7 +4162,11 @@ void HardwareDock::initializeHwidDispatchTab()
     // - 返回：无返回值，页面由 Qt 父子树释放。
     m_hwidDispatchPage = new HardwareHwidDispatchPage(m_sideTabWidget);
     const int tabIndex = m_sideTabWidget->addTab(m_hwidDispatchPage, QStringLiteral("硬件标识设置"));
+    ks::i18n::LanguageManager::instance().bindTab(
+        m_sideTabWidget, m_hwidDispatchPage, QStringLiteral("hardware.tab.hwid"), QStringLiteral("硬件标识设置"));
     m_sideTabWidget->setTabToolTip(tabIndex, QStringLiteral("查看和调整支持的磁盘与网络硬件标识"));
+    ks::i18n::LanguageManager::instance().bindTabToolTip(
+        m_sideTabWidget, m_hwidDispatchPage, QStringLiteral("hardware.tooltip.hwid"), QStringLiteral("查看和调整支持的磁盘与网络硬件标识"));
 }
 
 void HardwareDock::initializeOtherDevicesTab()
@@ -4067,7 +4183,11 @@ void HardwareDock::initializeOtherDevicesTab()
             QStringLiteral("切换到本页后再异步枚举设备清单，减少硬件 Dock 初次点击耗时。")),
         1);
     const int tabIndex = m_sideTabWidget->addTab(m_otherDevicesHostPage, QStringLiteral("其他设备"));
+    ks::i18n::LanguageManager::instance().bindTab(
+        m_sideTabWidget, m_otherDevicesHostPage, QStringLiteral("hardware.tab.other_devices"), QStringLiteral("其他设备"));
     m_sideTabWidget->setTabToolTip(tabIndex, QStringLiteral("查看处理器、内存和显卡之外的硬件清单"));
+    ks::i18n::LanguageManager::instance().bindTabToolTip(
+        m_sideTabWidget, m_otherDevicesHostPage, QStringLiteral("hardware.tooltip.other_devices"), QStringLiteral("查看处理器、内存和显卡之外的硬件清单"));
 }
 
 void HardwareDock::initializeDeviceStackTab()
@@ -4079,7 +4199,11 @@ void HardwareDock::initializeDeviceStackTab()
         &m_deviceStackEditor,
         &m_deviceStackTable);
     const int tabIndex = m_sideTabWidget->addTab(m_deviceStackPage, QStringLiteral("设备驱动链"));
+    ks::i18n::LanguageManager::instance().bindTab(
+        m_sideTabWidget, m_deviceStackPage, QStringLiteral("hardware.tab.device_stack"), QStringLiteral("设备驱动链"));
     m_sideTabWidget->setTabToolTip(tabIndex, QStringLiteral("检查设备节点、驱动对象与附加驱动关系"));
+    ks::i18n::LanguageManager::instance().bindTabToolTip(
+        m_sideTabWidget, m_deviceStackPage, QStringLiteral("hardware.tooltip.device_stack"), QStringLiteral("检查设备节点、驱动对象与附加驱动关系"));
 }
 
 void HardwareDock::initializeKeyboardMouseHidTab()
@@ -4091,7 +4215,11 @@ void HardwareDock::initializeKeyboardMouseHidTab()
         &m_keyboardMouseHidEditor,
         &m_keyboardMouseHidTable);
     const int tabIndex = m_sideTabWidget->addTab(m_keyboardMouseHidPage, QStringLiteral("键盘与鼠标"));
+    ks::i18n::LanguageManager::instance().bindTab(
+        m_sideTabWidget, m_keyboardMouseHidPage, QStringLiteral("hardware.tab.keyboard_mouse"), QStringLiteral("键盘与鼠标"));
     m_sideTabWidget->setTabToolTip(tabIndex, QStringLiteral("检查键盘、鼠标与其他输入设备状态"));
+    ks::i18n::LanguageManager::instance().bindTabToolTip(
+        m_sideTabWidget, m_keyboardMouseHidPage, QStringLiteral("hardware.tooltip.keyboard_mouse"), QStringLiteral("检查键盘、鼠标与其他输入设备状态"));
 }
 
 void HardwareDock::initializeUsbTopologyTab()
@@ -4103,7 +4231,11 @@ void HardwareDock::initializeUsbTopologyTab()
         &m_usbTopologyEditor,
         &m_usbTopologyTable);
     const int tabIndex = m_sideTabWidget->addTab(m_usbTopologyPage, QStringLiteral("USB 设备"));
+    ks::i18n::LanguageManager::instance().bindTab(
+        m_sideTabWidget, m_usbTopologyPage, QStringLiteral("hardware.tab.usb"), QStringLiteral("USB 设备"));
     m_sideTabWidget->setTabToolTip(tabIndex, QStringLiteral("检查 USB 控制器、集线器、端口与设备关系"));
+    ks::i18n::LanguageManager::instance().bindTabToolTip(
+        m_sideTabWidget, m_usbTopologyPage, QStringLiteral("hardware.tooltip.usb"), QStringLiteral("检查 USB 控制器、集线器、端口与设备关系"));
 }
 
 void HardwareDock::initializePnpAcpiPciTab()
@@ -4114,7 +4246,11 @@ void HardwareDock::initializePnpAcpiPciTab()
         QStringLiteral("只读审计：PnP、ACPI、PCI、DevNode 状态与 cross-view 风险标记。"),
         &m_pnpAcpiPciEditor);
     const int tabIndex = m_sideTabWidget->addTab(m_pnpAcpiPciPage, QStringLiteral("系统总线"));
+    ks::i18n::LanguageManager::instance().bindTab(
+        m_sideTabWidget, m_pnpAcpiPciPage, QStringLiteral("hardware.tab.system_bus"), QStringLiteral("系统总线"));
     m_sideTabWidget->setTabToolTip(tabIndex, QStringLiteral("查看即插即用、电源管理与 PCI 总线设备状态"));
+    ks::i18n::LanguageManager::instance().bindTabToolTip(
+        m_sideTabWidget, m_pnpAcpiPciPage, QStringLiteral("hardware.tooltip.system_bus"), QStringLiteral("查看即插即用、电源管理与 PCI 总线设备状态"));
 }
 
 void HardwareDock::ensureDiskMonitorTabInitialized()
@@ -4334,9 +4470,16 @@ int HardwareDock::ensureDiskUtilizationDevice(
     // device 用途：为新发现的物理磁盘实例保留 UI 控件和历史采样。
     DiskUtilizationDevice device;
     device.instanceNameText = sample.instanceNameText;
-    device.displayNameText = sample.displayNameText.isEmpty()
+    const bool useDefaultDisplayName = sample.displayNameText.isEmpty();
+    device.displayNameText = useDefaultDisplayName
         ? QStringLiteral("磁盘 %1").arg(ordinalIndex)
         : sample.displayNameText;
+    if (useDefaultDisplayName)
+    {
+        device.displayNameText = ks::i18n::contextText(
+            QStringLiteral("hardware.utilization.card.disk.prefix"),
+            QStringLiteral("磁盘")) + device.displayNameText.mid(QStringLiteral("磁盘").size());
+    }
     createDiskUtilizationDevicePage(&device);
     m_diskUtilDevices.push_back(device);
 
@@ -4383,9 +4526,16 @@ int HardwareDock::ensureNetworkUtilizationDevice(
     // device 用途：为新发现的网卡接口保留 UI 控件和增量采样基线。
     NetworkUtilizationDevice device;
     device.interfaceKey = sample.interfaceKey;
-    device.displayNameText = sample.displayNameText.isEmpty()
+    const bool useDefaultDisplayName = sample.displayNameText.isEmpty();
+    device.displayNameText = useDefaultDisplayName
         ? QStringLiteral("以太网 %1").arg(ordinalIndex)
         : sample.displayNameText;
+    if (useDefaultDisplayName)
+    {
+        device.displayNameText = ks::i18n::contextText(
+            QStringLiteral("hardware.utilization.card.network.prefix"),
+            QStringLiteral("以太网")) + device.displayNameText.mid(QStringLiteral("以太网").size());
+    }
     device.linkBitsPerSecond = sample.linkBitsPerSecond;
     device.lastRxBytes = sample.totalRxBytes;
     device.lastTxBytes = sample.totalTxBytes;
@@ -4439,7 +4589,10 @@ int HardwareDock::ensureGpuUtilizationDevice(
     device.adapterKey = sample.adapterKey;
     device.adapterKeyAssigned = true;
     device.adapterIndex = sample.adapterIndex;
-    device.displayNameText = QStringLiteral("GPU %1").arg(ordinalIndex);
+    device.displayNameText = ks::i18n::contextText(
+        QStringLiteral("hardware.utilization.card.gpu.prefix"),
+        QStringLiteral("GPU"))
+        + QStringLiteral(" %1").arg(ordinalIndex);
     createGpuUtilizationDevicePage(&device);
     m_gpuUtilDevices.push_back(device);
 
@@ -4476,20 +4629,26 @@ void HardwareDock::createDiskUtilizationDevicePage(DiskUtilizationDevice* device
     lockLabelHeightToFont(titleLabel, 14);
     pageLayout->addWidget(titleLabel, 0);
 
-    devicePointer->summaryLabel = new QLabel(QStringLiteral("磁盘采样初始化中..."), devicePointer->pageWidget);
+    devicePointer->summaryLabel = new QLabel(
+        ks::i18n::contextText(
+            QStringLiteral("hardware.utilization.device.disk.sampling"),
+            QStringLiteral("磁盘采样初始化中...")),
+        devicePointer->pageWidget);
     configureCompressibleLabel(devicePointer->summaryLabel);
     devicePointer->summaryLabel->setStyleSheet(
         QStringLiteral("color:%1;font-size:14px;font-weight:600;").arg(buildStatusColor().name()));
     pageLayout->addWidget(devicePointer->summaryLabel, 0);
 
     devicePointer->readLineSeries = new QLineSeries(devicePointer->pageWidget);
-    devicePointer->readLineSeries->setName(QStringLiteral("读取"));
+    devicePointer->readLineSeries->setName(ks::i18n::contextText(
+        QStringLiteral("hardware.utilization.disk.read"), QStringLiteral("读取")));
     const QColor readColor(80, 170, 255);
     const QColor writeColor(255, 190, 105);
     devicePointer->readLineSeries->setColor(readColor);
     devicePointer->readBaselineSeries = createBaselineSeries(devicePointer->pageWidget, m_historyLength);
     devicePointer->writeLineSeries = new QLineSeries(devicePointer->pageWidget);
-    devicePointer->writeLineSeries->setName(QStringLiteral("写入"));
+    devicePointer->writeLineSeries->setName(ks::i18n::contextText(
+        QStringLiteral("hardware.utilization.disk.write"), QStringLiteral("写入")));
     devicePointer->writeLineSeries->setColor(writeColor);
     devicePointer->writeBaselineSeries = createBaselineSeries(devicePointer->pageWidget, m_historyLength);
     initializeLineSeriesHistory(devicePointer->readLineSeries, m_historyLength);
@@ -4511,7 +4670,11 @@ void HardwareDock::createDiskUtilizationDevicePage(DiskUtilizationDevice* device
     configureUtilizationPlotChart(
         chart,
         readColor,
-        QStringLiteral("%1 读写速率趋势").arg(devicePointer->displayNameText),
+        QStringLiteral("%1 %2")
+            .arg(devicePointer->displayNameText)
+            .arg(ks::i18n::contextText(
+                QStringLiteral("hardware.utilization.disk.rate_suffix"),
+                QStringLiteral("读写速率趋势"))),
         true);
     devicePointer->axisX = new QValueAxis(chart);
     configureUtilizationValueAxis(devicePointer->axisX, readColor, 0.0, static_cast<double>(m_historyLength));
@@ -4532,7 +4695,11 @@ void HardwareDock::createDiskUtilizationDevicePage(DiskUtilizationDevice* device
     devicePointer->chartView = createPlotBackgroundChartView(chart, devicePointer->pageWidget);
     pageLayout->addWidget(devicePointer->chartView, 1);
 
-    devicePointer->detailLabel = new QLabel(QStringLiteral("磁盘参数采样中..."), devicePointer->pageWidget);
+    devicePointer->detailLabel = new QLabel(
+        ks::i18n::contextText(
+            QStringLiteral("hardware.utilization.device.disk.detail_sampling"),
+            QStringLiteral("磁盘参数采样中...")),
+        devicePointer->pageWidget);
     configureCompressibleLabel(devicePointer->detailLabel);
     devicePointer->detailLabel->setWordWrap(false);
     devicePointer->detailLabel->setStyleSheet(
@@ -4564,20 +4731,26 @@ void HardwareDock::createNetworkUtilizationDevicePage(NetworkUtilizationDevice* 
     lockLabelHeightToFont(titleLabel, 14);
     pageLayout->addWidget(titleLabel, 0);
 
-    devicePointer->summaryLabel = new QLabel(QStringLiteral("网络采样初始化中..."), devicePointer->pageWidget);
+    devicePointer->summaryLabel = new QLabel(
+        ks::i18n::contextText(
+            QStringLiteral("hardware.utilization.device.network.sampling"),
+            QStringLiteral("网络采样初始化中...")),
+        devicePointer->pageWidget);
     configureCompressibleLabel(devicePointer->summaryLabel);
     devicePointer->summaryLabel->setStyleSheet(
         QStringLiteral("color:%1;font-size:14px;font-weight:600;").arg(buildStatusColor().name()));
     pageLayout->addWidget(devicePointer->summaryLabel, 0);
 
     devicePointer->rxLineSeries = new QLineSeries(devicePointer->pageWidget);
-    devicePointer->rxLineSeries->setName(QStringLiteral("下行"));
+    devicePointer->rxLineSeries->setName(ks::i18n::contextText(
+        QStringLiteral("hardware.utilization.network.down"), QStringLiteral("下行")));
     const QColor rxColor(92, 190, 255);
     const QColor txColor(255, 190, 105);
     devicePointer->rxLineSeries->setColor(rxColor);
     devicePointer->rxBaselineSeries = createBaselineSeries(devicePointer->pageWidget, m_historyLength);
     devicePointer->txLineSeries = new QLineSeries(devicePointer->pageWidget);
-    devicePointer->txLineSeries->setName(QStringLiteral("上行"));
+    devicePointer->txLineSeries->setName(ks::i18n::contextText(
+        QStringLiteral("hardware.utilization.network.up"), QStringLiteral("上行")));
     devicePointer->txLineSeries->setColor(txColor);
     devicePointer->txBaselineSeries = createBaselineSeries(devicePointer->pageWidget, m_historyLength);
     initializeLineSeriesHistory(devicePointer->rxLineSeries, m_historyLength);
@@ -4599,7 +4772,11 @@ void HardwareDock::createNetworkUtilizationDevicePage(NetworkUtilizationDevice* 
     configureUtilizationPlotChart(
         chart,
         rxColor,
-        QStringLiteral("%1 收发速率趋势").arg(devicePointer->displayNameText),
+        QStringLiteral("%1 %2")
+            .arg(devicePointer->displayNameText)
+            .arg(ks::i18n::contextText(
+                QStringLiteral("hardware.utilization.network.rate_suffix"),
+                QStringLiteral("收发速率趋势"))),
         true);
     devicePointer->axisX = new QValueAxis(chart);
     configureUtilizationValueAxis(devicePointer->axisX, rxColor, 0.0, static_cast<double>(m_historyLength));
@@ -4778,7 +4955,9 @@ void HardwareDock::createGpuUtilizationDevicePage(GpuUtilizationDevice* devicePo
         };
 
     createMemoryChart(
-        QStringLiteral("专用 GPU 内存利用率"),
+        ks::i18n::contextText(
+            QStringLiteral("hardware.utilization.gpu.dedicated_memory_label"),
+            QStringLiteral("专用 GPU 内存利用率")),
         &devicePointer->dedicatedMemoryLineSeries,
         &devicePointer->dedicatedMemoryBaselineSeries,
         &devicePointer->dedicatedMemoryAreaSeries,
@@ -4787,7 +4966,9 @@ void HardwareDock::createGpuUtilizationDevicePage(GpuUtilizationDevice* devicePo
         &devicePointer->dedicatedMemoryAxisY,
         &devicePointer->dedicatedMemoryChartView);
     createMemoryChart(
-        QStringLiteral("共享 GPU 内存利用率"),
+        ks::i18n::contextText(
+            QStringLiteral("hardware.utilization.gpu.shared_memory_label"),
+            QStringLiteral("共享 GPU 内存利用率")),
         &devicePointer->sharedMemoryLineSeries,
         &devicePointer->sharedMemoryBaselineSeries,
         &devicePointer->sharedMemoryAreaSeries,
@@ -4798,7 +4979,11 @@ void HardwareDock::createGpuUtilizationDevicePage(GpuUtilizationDevice* devicePo
     pageLayout->addWidget(devicePointer->dedicatedMemoryChartView, 0);
     pageLayout->addWidget(devicePointer->sharedMemoryChartView, 0);
 
-    devicePointer->detailLabel = new QLabel(QStringLiteral("GPU参数采样中..."), devicePointer->pageWidget);
+    devicePointer->detailLabel = new QLabel(
+        ks::i18n::contextText(
+            QStringLiteral("hardware.utilization.device.gpu.detail_sampling"),
+            QStringLiteral("GPU参数采样中...")),
+        devicePointer->pageWidget);
     configureCompressibleLabel(devicePointer->detailLabel);
     devicePointer->detailLabel->setWordWrap(false);
     devicePointer->detailLabel->setStyleSheet(
@@ -6059,8 +6244,9 @@ void HardwareDock::updateOverviewText(const double cpuUsagePercent, const double
     memoryStatus.dwLength = sizeof(memoryStatus);
     ::GlobalMemoryStatusEx(&memoryStatus);
 
-    const QString summaryText = QStringLiteral(
-        "CPU总体利用率: %1%    内存利用率: %2%    可用内存: %3 / 总内存: %4    %5")
+    const QString summaryText = ks::i18n::contextText(
+        QStringLiteral("hardware.overview.summary"),
+        QStringLiteral("CPU总体利用率: %1%    内存利用率: %2%    可用内存: %3 / 总内存: %4    %5"))
         .arg(cpuUsagePercent, 0, 'f', 1)
         .arg(memoryUsagePercent, 0, 'f', 1)
         .arg(bytesToGiBText(memoryStatus.ullAvailPhys))
@@ -6093,7 +6279,9 @@ void HardwareDock::updateUtilizationView(
     {
         const UtilizationStatisticSnapshot cpuStats = buildStatisticSnapshot(m_cpuUsageHistoryPercent);
         m_utilizationSummaryLabel->setText(
-            QStringLiteral("CPU 总体：%1%    均值：%2%    峰值：%3%    趋势：%4    逻辑处理器：%5    %6    %7")
+            ks::i18n::contextText(
+                QStringLiteral("hardware.utilization.cpu.summary"),
+                QStringLiteral("CPU 总体：%1%    均值：%2%    峰值：%3%    趋势：%4    逻辑处理器：%5    %6    %7"))
             .arg(averageCpuUsage, 0, 'f', 1)
             .arg(cpuStats.averageValue, 0, 'f', 1)
             .arg(cpuStats.peakValue, 0, 'f', 1)
@@ -6127,7 +6315,9 @@ void HardwareDock::updateUtilizationView(
     {
         const UtilizationStatisticSnapshot memoryStats = buildStatisticSnapshot(m_memoryUsageHistoryPercent);
         m_memoryUtilSummaryLabel->setText(
-            QStringLiteral("当前内存占用：%1%    均值：%2%    峰值：%3%    趋势：%4    %5")
+            ks::i18n::contextText(
+                QStringLiteral("hardware.utilization.memory.summary"),
+                QStringLiteral("当前内存占用：%1%    均值：%2%    峰值：%3%    趋势：%4    %5"))
             .arg(memoryUsagePercent, 0, 'f', 1)
             .arg(memoryStats.averageValue, 0, 'f', 1)
             .arg(memoryStats.peakValue, 0, 'f', 1)
@@ -6159,7 +6349,9 @@ void HardwareDock::updateUtilizationView(
     {
         const UtilizationStatisticSnapshot diskStats = buildStatisticSnapshot(m_diskAggregateHistoryBytesPerSec);
         m_diskUtilSummaryLabel->setText(
-            QStringLiteral("读取：%1    写入：%2    合计均值：%3    峰值：%4")
+            ks::i18n::contextText(
+                QStringLiteral("hardware.utilization.disk.summary"),
+                QStringLiteral("读取：%1    写入：%2    合计均值：%3    峰值：%4"))
             .arg(formatRateText(diskReadBytesPerSec))
             .arg(formatRateText(diskWriteBytesPerSec))
             .arg(formatRateText(diskStats.averageValue))
@@ -6191,7 +6383,9 @@ void HardwareDock::updateUtilizationView(
     {
         const UtilizationStatisticSnapshot networkStats = buildStatisticSnapshot(m_networkAggregateHistoryBytesPerSec);
         m_networkUtilSummaryLabel->setText(
-            QStringLiteral("接收：%1    发送：%2    合计均值：%3    峰值：%4")
+            ks::i18n::contextText(
+                QStringLiteral("hardware.utilization.network.summary"),
+                QStringLiteral("接收：%1    发送：%2    合计均值：%3    峰值：%4"))
             .arg(formatRateText(networkRxBytesPerSec))
             .arg(formatRateText(networkTxBytesPerSec))
             .arg(formatRateText(networkStats.averageValue))
@@ -6223,7 +6417,9 @@ void HardwareDock::updateUtilizationView(
     {
         const UtilizationStatisticSnapshot gpuStats = buildStatisticSnapshot(m_gpuUsageHistoryPercent);
         m_gpuUtilSummaryLabel->setText(
-            QStringLiteral("GPU 当前：%1%    均值：%2%    峰值：%3%    3D：%4%    Copy：%5%")
+            ks::i18n::contextText(
+                QStringLiteral("hardware.utilization.gpu.summary"),
+                QStringLiteral("GPU 当前：%1%    均值：%2%    峰值：%3%    3D：%4%    Copy：%5%"))
             .arg(gpuUsagePercent, 0, 'f', 1)
             .arg(gpuStats.averageValue, 0, 'f', 1)
             .arg(gpuStats.peakValue, 0, 'f', 1)
@@ -6315,7 +6511,9 @@ void HardwareDock::updateUtilizationSidebarCards(
     if (m_cpuNavCard != nullptr)
     {
         m_cpuNavCard->setSubtitleText(
-            QStringLiteral("%1%  %2 GHz")
+            ks::i18n::contextText(
+                QStringLiteral("hardware.utilization.card.cpu.summary"),
+                QStringLiteral("%1%  %2 GHz"))
             .arg(cpuUsagePercent, 0, 'f', 0)
             .arg(m_lastCpuSpeedGhz, 0, 'f', 2));
         m_cpuNavCard->appendSample(cpuUsagePercent);
@@ -6358,7 +6556,9 @@ void HardwareDock::updateUtilizationSidebarCards(
         }
 
         m_memoryNavCard->setSubtitleText(
-            QStringLiteral("用 %1/%2 GB / 余 %3%")
+            ks::i18n::contextText(
+                QStringLiteral("hardware.utilization.card.memory.summary"),
+                QStringLiteral("用 %1/%2 GB / 余 %3%"))
             .arg(usedGiB, 0, 'f', 1)
             .arg(totalGiB, 0, 'f', 1)
             .arg(cachedPercent, 0, 'f', 0));
@@ -6374,7 +6574,9 @@ void HardwareDock::updateUtilizationSidebarCards(
             diskReadBytesPerSec,
             diskWriteBytesPerSec,
             &m_diskNavAutoScaleBytesPerSec,
-            QStringLiteral("读 %1 / 写 %2")
+            ks::i18n::contextText(
+                QStringLiteral("hardware.utilization.card.disk.summary"),
+                QStringLiteral("读 %1 / 写 %2"))
             .arg(formatRateText(diskReadBytesPerSec))
             .arg(formatRateText(diskWriteBytesPerSec)));
     }
@@ -6388,7 +6590,9 @@ void HardwareDock::updateUtilizationSidebarCards(
             networkRxBytesPerSec,
             networkTxBytesPerSec,
             &m_networkNavAutoScaleBytesPerSec,
-            QStringLiteral("下 %1 / 上 %2")
+            ks::i18n::contextText(
+                QStringLiteral("hardware.utilization.card.network.summary"),
+                QStringLiteral("下 %1 / 上 %2"))
             .arg(formatRateText(networkRxBytesPerSec))
             .arg(formatRateText(networkTxBytesPerSec)));
     }
@@ -6396,7 +6600,9 @@ void HardwareDock::updateUtilizationSidebarCards(
     if (m_gpuNavCard != nullptr)
     {
         m_gpuNavCard->setSubtitleText(
-            QStringLiteral("%1%  %2/%3 GB")
+            ks::i18n::contextText(
+                QStringLiteral("hardware.utilization.card.gpu.summary"),
+                QStringLiteral("%1%  %2/%3 GB"))
             .arg(gpuUsagePercent, 0, 'f', 0)
             .arg(m_gpuDedicatedUsedGiB, 0, 'f', 1)
             .arg((m_gpuDedicatedBudgetGiB > 0.0 ? m_gpuDedicatedBudgetGiB : m_gpuDedicatedMemoryGiB), 0, 'f', 1));
@@ -6453,7 +6659,9 @@ void HardwareDock::updateDiskUtilizationDevice(
     if (device.summaryLabel != nullptr)
     {
         device.summaryLabel->setText(
-            QStringLiteral("读取：%1    写入：%2")
+            ks::i18n::contextText(
+                QStringLiteral("hardware.utilization.device.disk.summary"),
+                QStringLiteral("读取：%1    写入：%2"))
             .arg(formatRateText(sample.readBytesPerSec))
             .arg(formatRateText(sample.writeBytesPerSec)));
     }
@@ -6488,7 +6696,9 @@ void HardwareDock::updateDiskUtilizationDevice(
             sample.readBytesPerSec,
             sample.writeBytesPerSec,
             &device.navAutoScaleBytesPerSec,
-            QStringLiteral("读 %1 / 写 %2")
+            ks::i18n::contextText(
+                QStringLiteral("hardware.utilization.card.disk.summary"),
+                QStringLiteral("读 %1 / 写 %2"))
             .arg(formatRateText(sample.readBytesPerSec))
             .arg(formatRateText(sample.writeBytesPerSec)));
     }
@@ -6502,11 +6712,13 @@ void HardwareDock::updateDiskUtilizationDevice(
             0.0,
             100.0);
         device.detailLabel->setText(
-            QStringLiteral(
+            ks::i18n::contextText(
+                QStringLiteral("hardware.utilization.device.disk.detail"),
+                QStringLiteral(
                 "活动时间(近似): %1%\n"
                 "读取速度: %2\n"
                 "写入速度: %3\n"
-                "性能计数器实例: %4")
+                "性能计数器实例: %4"))
             .arg(approxPercent, 0, 'f', 1)
             .arg(formatRateText(sample.readBytesPerSec))
             .arg(formatRateText(sample.writeBytesPerSec))
@@ -6521,7 +6733,9 @@ void HardwareDock::updateNetworkUtilizationDevice(
     if (device.summaryLabel != nullptr)
     {
         device.summaryLabel->setText(
-            QStringLiteral("接收：%1    发送：%2")
+            ks::i18n::contextText(
+                QStringLiteral("hardware.utilization.device.network.summary"),
+                QStringLiteral("接收：%1    发送：%2"))
             .arg(formatRateText(sample.rxBytesPerSec))
             .arg(formatRateText(sample.txBytesPerSec)));
     }
@@ -6556,7 +6770,9 @@ void HardwareDock::updateNetworkUtilizationDevice(
             sample.rxBytesPerSec,
             sample.txBytesPerSec,
             &device.navAutoScaleBytesPerSec,
-            QStringLiteral("下 %1 / 上 %2")
+            ks::i18n::contextText(
+                QStringLiteral("hardware.utilization.card.network.summary"),
+                QStringLiteral("下 %1 / 上 %2"))
             .arg(formatRateText(sample.rxBytesPerSec))
             .arg(formatRateText(sample.txBytesPerSec)));
     }
@@ -6565,11 +6781,13 @@ void HardwareDock::updateNetworkUtilizationDevice(
     {
         const double linkMbps = static_cast<double>(sample.linkBitsPerSecond) / (1000.0 * 1000.0);
         device.detailLabel->setText(
-            QStringLiteral(
+            ks::i18n::contextText(
+                QStringLiteral("hardware.utilization.device.network.detail"),
+                QStringLiteral(
                 "适配器: %1\n"
                 "发送: %2\n"
                 "接收: %3\n"
-                "链路速度: %4 Mbps")
+                "链路速度: %4 Mbps"))
             .arg(sample.displayNameText.isEmpty() ? QStringLiteral("N/A") : sample.displayNameText)
             .arg(formatRateText(sample.txBytesPerSec))
             .arg(formatRateText(sample.rxBytesPerSec))
@@ -6589,7 +6807,9 @@ void HardwareDock::updateGpuUtilizationDevice(
     if (device.summaryLabel != nullptr)
     {
         device.summaryLabel->setText(
-            QStringLiteral("GPU 当前利用率：%1%    3D：%2%    Copy：%3%")
+            ks::i18n::contextText(
+                QStringLiteral("hardware.utilization.device.gpu.summary"),
+                QStringLiteral("GPU 当前利用率：%1%    3D：%2%    Copy：%3%"))
             .arg(sample.overallUsagePercent, 0, 'f', 1)
             .arg(sample.usage3DPercent, 0, 'f', 1)
             .arg(sample.usageCopyPercent, 0, 'f', 1));
@@ -6659,7 +6879,9 @@ void HardwareDock::updateGpuUtilizationDevice(
         && device.dedicatedMemoryChartView->chart() != nullptr)
     {
         device.dedicatedMemoryChartView->chart()->setTitle(
-            QStringLiteral("专用 GPU 内存利用率  %1 / %2 GiB")
+            ks::i18n::contextText(
+                QStringLiteral("hardware.utilization.gpu.dedicated_memory_title"),
+                QStringLiteral("专用 GPU 内存利用率  %1 / %2 GiB"))
             .arg(sample.dedicatedUsedGiB, 0, 'f', 2)
             .arg((sample.dedicatedBudgetGiB > 0.0 ? sample.dedicatedBudgetGiB : sample.dedicatedMemoryGiB), 0, 'f', 2));
     }
@@ -6667,19 +6889,23 @@ void HardwareDock::updateGpuUtilizationDevice(
         && device.sharedMemoryChartView->chart() != nullptr)
     {
         device.sharedMemoryChartView->chart()->setTitle(
-            QStringLiteral("共享 GPU 内存利用率  %1 / %2 GiB")
+            ks::i18n::contextText(
+                QStringLiteral("hardware.utilization.gpu.shared_memory_title"),
+                QStringLiteral("共享 GPU 内存利用率  %1 / %2 GiB"))
             .arg(sample.sharedUsedGiB, 0, 'f', 2)
             .arg(sample.sharedBudgetGiB, 0, 'f', 2));
     }
     if (device.detailLabel != nullptr)
     {
         device.detailLabel->setText(
-            QStringLiteral(
+            ks::i18n::contextText(
+                QStringLiteral("hardware.utilization.device.gpu.detail"),
+                QStringLiteral(
                 "利用率: %1%\n"
                 "3D: %2%   Copy: %3%   Video Encode: %4%   Video Decode: %5%\n"
                 "专用显存: %6 / %7 GiB\n"
                 "共享显存: %8 / %9 GiB\n"
-                "适配器索引: %10")
+                "适配器索引: %10"))
             .arg(sample.overallUsagePercent, 0, 'f', 1)
             .arg(sample.usage3DPercent, 0, 'f', 1)
             .arg(sample.usageCopyPercent, 0, 'f', 1)
@@ -6694,7 +6920,9 @@ void HardwareDock::updateGpuUtilizationDevice(
     if (device.navCard != nullptr)
     {
         device.navCard->setSubtitleText(
-            QStringLiteral("%1%  %2/%3 GB")
+            ks::i18n::contextText(
+                QStringLiteral("hardware.utilization.card.gpu.summary"),
+                QStringLiteral("%1%  %2/%3 GB"))
             .arg(sample.overallUsagePercent, 0, 'f', 0)
             .arg(sample.dedicatedUsedGiB, 0, 'f', 1)
             .arg((sample.dedicatedBudgetGiB > 0.0 ? sample.dedicatedBudgetGiB : sample.dedicatedMemoryGiB), 0, 'f', 1));
@@ -6757,14 +6985,16 @@ void HardwareDock::updateTaskManagerDetailLabels(
     if (m_cpuUtilPrimaryDetailLabel != nullptr)
     {
         m_cpuUtilPrimaryDetailLabel->setText(
-            QStringLiteral(
+            ks::i18n::contextText(
+                QStringLiteral("hardware.utilization.cpu.detail.primary"),
+                QStringLiteral(
                 "利用率: %1%\n"
                 "均值: %2%   峰值: %3%   趋势: %4\n"
                 "速度: %5 GHz\n"
                 "进程: %6\n"
                 "线程: %7\n"
                 "句柄: %8\n"
-                "正常运行时间: %9")
+                "正常运行时间: %9"))
             .arg(averageCpuUsage, 0, 'f', 1)
             .arg(cpuStats.averageValue, 0, 'f', 1)
             .arg(cpuStats.peakValue, 0, 'f', 1)
@@ -6779,7 +7009,9 @@ void HardwareDock::updateTaskManagerDetailLabels(
     if (m_cpuUtilSecondaryDetailLabel != nullptr)
     {
         m_cpuUtilSecondaryDetailLabel->setText(
-            QStringLiteral(
+            ks::i18n::contextText(
+                QStringLiteral("hardware.utilization.cpu.detail.secondary"),
+                QStringLiteral(
                 "基准速度: %1 GHz\n"
                 "压力等级: %2\n"
                 "%3\n"
@@ -6789,7 +7021,7 @@ void HardwareDock::updateTaskManagerDetailLabels(
                 "逻辑处理器: %7\n"
                 "L1缓存: %8\n"
                 "L2缓存: %9\n"
-                "L3缓存: %10")
+                "L3缓存: %10"))
             .arg(baseCpuGhz, 0, 'f', 2)
             .arg(buildPressureLevelText(averageCpuUsage))
             .arg(m_r0HardwareHealthDetailText)
@@ -6818,14 +7050,16 @@ void HardwareDock::updateTaskManagerDetailLabels(
         {
             const UtilizationStatisticSnapshot memoryStats = buildStatisticSnapshot(m_memoryUsageHistoryPercent);
             m_memoryUtilPrimaryDetailLabel->setText(
-                QStringLiteral(
+                ks::i18n::contextText(
+                    QStringLiteral("hardware.utilization.memory.detail.primary"),
+                    QStringLiteral(
                     "使用中(含缓存): %1 GB\n"
                     "当前利用率: %2%\n"
                     "均值: %3%   峰值: %4%   趋势: %5\n"
                     "已提交: %6 / %7\n"
                     "已缓存: %8\n"
                     "分页池: %9\n"
-                    "非分页池: %10")
+                    "非分页池: %10"))
                 .arg(usedGiB, 0, 'f', 1)
                 .arg(memoryUsagePercent, 0, 'f', 1)
                 .arg(memoryStats.averageValue, 0, 'f', 1)
@@ -6848,12 +7082,14 @@ void HardwareDock::updateTaskManagerDetailLabels(
             ? std::max(0.0, installedBytes - static_cast<double>(memoryStatus.ullTotalPhys))
             : 0.0;
         m_memoryUtilSecondaryDetailLabel->setText(
-            QStringLiteral(
+            ks::i18n::contextText(
+                QStringLiteral("hardware.utilization.memory.detail.secondary"),
+                QStringLiteral(
                 "速度: %1 MHz\n"
                 "已使用插槽: %2/%3\n"
                 "外形规格: %4\n"
                 "硬件保留内存: %5\n"
-                "%6")
+                "%6"))
             .arg(m_memorySpeedMhz > 0 ? QString::number(m_memorySpeedMhz) : QStringLiteral("N/A"))
             .arg(m_memorySlotUsed > 0 ? QString::number(m_memorySlotUsed) : QStringLiteral("N/A"))
             .arg(m_memorySlotTotal > 0 ? QString::number(m_memorySlotTotal) : QStringLiteral("N/A"))
@@ -6875,7 +7111,9 @@ void HardwareDock::updateTaskManagerDetailLabels(
             100.0);
         const UtilizationStatisticSnapshot diskStats = buildStatisticSnapshot(m_diskAggregateHistoryBytesPerSec);
         m_diskUtilDetailLabel->setText(
-            QStringLiteral(
+            ks::i18n::contextText(
+                QStringLiteral("hardware.utilization.disk.detail"),
+                QStringLiteral(
                 "活动时间(近似): %1%\n"
                 "当前合计: %2\n"
                 "均值: %3\n"
@@ -6883,7 +7121,7 @@ void HardwareDock::updateTaskManagerDetailLabels(
                 "趋势: %5\n"
                 "系统卷: %6\n"
                 "总容量: %7\n"
-                "可用: %8")
+                "可用: %8"))
             .arg(diskApproxPercent, 0, 'f', 1)
             .arg(formatRateText(diskTotalRate))
             .arg(formatRateText(diskStats.averageValue))
@@ -6906,7 +7144,9 @@ void HardwareDock::updateTaskManagerDetailLabels(
         const double linkMbps = static_cast<double>(m_primaryNetworkLinkBitsPerSecond) / (1000.0 * 1000.0);
         const UtilizationStatisticSnapshot networkStats = buildStatisticSnapshot(m_networkAggregateHistoryBytesPerSec);
         m_networkUtilDetailLabel->setText(
-            QStringLiteral(
+            ks::i18n::contextText(
+                QStringLiteral("hardware.utilization.network.detail"),
+                QStringLiteral(
                 "适配器: %1\n"
                 "发送: %2\n"
                 "接收: %3\n"
@@ -6914,7 +7154,7 @@ void HardwareDock::updateTaskManagerDetailLabels(
                 "均值: %5\n"
                 "峰值: %6\n"
                 "趋势: %7\n"
-                "链路速度: %8 Mbps")
+                "链路速度: %8 Mbps"))
             .arg(adapterText)
             .arg(formatRateText(networkTxBytesPerSec))
             .arg(formatRateText(networkRxBytesPerSec))
@@ -6934,7 +7174,9 @@ void HardwareDock::updateTaskManagerDetailLabels(
         && m_gpuDedicatedMemoryChartView->chart() != nullptr)
     {
         m_gpuDedicatedMemoryChartView->chart()->setTitle(
-            QStringLiteral("专用 GPU 内存利用率  %1 / %2 GiB")
+            ks::i18n::contextText(
+                QStringLiteral("hardware.utilization.gpu.dedicated_memory_title"),
+                QStringLiteral("专用 GPU 内存利用率  %1 / %2 GiB"))
             .arg(m_gpuDedicatedUsedGiB, 0, 'f', 2)
             .arg(m_gpuDedicatedBudgetGiB > 0.0 ? m_gpuDedicatedBudgetGiB : m_gpuDedicatedMemoryGiB, 0, 'f', 2));
     }
@@ -6942,7 +7184,9 @@ void HardwareDock::updateTaskManagerDetailLabels(
         && m_gpuSharedMemoryChartView->chart() != nullptr)
     {
         m_gpuSharedMemoryChartView->chart()->setTitle(
-            QStringLiteral("共享 GPU 内存利用率  %1 / %2 GiB")
+            ks::i18n::contextText(
+                QStringLiteral("hardware.utilization.gpu.shared_memory_title"),
+                QStringLiteral("共享 GPU 内存利用率  %1 / %2 GiB"))
             .arg(m_gpuSharedUsedGiB, 0, 'f', 2)
             .arg(m_gpuSharedBudgetGiB, 0, 'f', 2));
     }
@@ -6951,7 +7195,9 @@ void HardwareDock::updateTaskManagerDetailLabels(
     {
         const UtilizationStatisticSnapshot gpuStats = buildStatisticSnapshot(m_gpuUsageHistoryPercent);
         m_gpuUtilDetailLabel->setText(
-            QStringLiteral(
+            ks::i18n::contextText(
+                QStringLiteral("hardware.utilization.gpu.detail"),
+                QStringLiteral(
                 "利用率: %1%\n"
                 "均值: %2%   峰值: %3%   趋势: %4\n"
                 "3D: %5%   Copy: %6%   Video Encode: %7%   Video Decode: %8%\n"
@@ -6959,7 +7205,7 @@ void HardwareDock::updateTaskManagerDetailLabels(
                 "共享显存: %11 / %12 GiB\n"
                 "驱动版本: %13\n"
                 "驱动日期: %14\n"
-                "PNP: %15")
+                "PNP: %15"))
             .arg(gpuUsagePercent, 0, 'f', 1)
             .arg(gpuStats.averageValue, 0, 'f', 1)
             .arg(gpuStats.peakValue, 0, 'f', 1)

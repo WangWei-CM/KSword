@@ -1,7 +1,9 @@
 #include "StartupDock.Internal.h"
 #include "../UI/VisibleTableWidget.h"
+#include "../Internationalization/LanguageManager.h"
 
 #include <QColor>
+#include <QPair>
 
 using namespace startup_dock_detail;
 
@@ -219,6 +221,23 @@ void StartupDock::initializeTabs()
     m_sideTabWidget->addTab(m_tasksPage, QIcon(":/Icon/process_refresh.svg"), QStringLiteral("计划任务"));
     m_sideTabWidget->addTab(m_registryPage, QIcon(":/Icon/file_find.svg"), QStringLiteral("高级注册表"));
     m_sideTabWidget->addTab(m_wmiPage, QIcon(":/Icon/process_tree.svg"), QStringLiteral("WMI"));
+    const QList<QPair<QWidget*, QPair<QString, QString>>> tabTranslations{
+        {m_allPage, {QStringLiteral("startup.tab.overview"), QStringLiteral("总览")}},
+        {m_logonPage, {QStringLiteral("startup.tab.logon"), QStringLiteral("登录")}},
+        {m_servicesPage, {QStringLiteral("startup.tab.services"), QStringLiteral("服务")}},
+        {m_driversPage, {QStringLiteral("startup.tab.drivers"), QStringLiteral("驱动")}},
+        {m_tasksPage, {QStringLiteral("startup.tab.tasks"), QStringLiteral("计划任务")}},
+        {m_registryPage, {QStringLiteral("startup.tab.registry"), QStringLiteral("高级注册表")}},
+        {m_wmiPage, {QStringLiteral("startup.tab.wmi"), QStringLiteral("WMI")}}
+    };
+    for (const auto& tabTranslation : tabTranslations)
+    {
+        ks::i18n::LanguageManager::instance().bindTab(
+            m_sideTabWidget,
+            tabTranslation.first,
+            tabTranslation.second.first,
+            tabTranslation.second.second);
+    }
 }
 
 void StartupDock::rebuildAllTables()

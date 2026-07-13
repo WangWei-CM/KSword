@@ -2,6 +2,7 @@
 #include "../UI/VisibleTableWidget.h"
 #include "NetworkFirewallPage.h"
 #include "NetworkAuditPage.h"
+#include "../Internationalization/LanguageManager.h"
 
 #include <QFrame>
 #include <QScrollArea>
@@ -209,6 +210,8 @@ void NetworkDock::initializeTrafficMonitorTab()
 
     m_trafficMonitorLayout->addWidget(m_packetTable, 1);
     m_sideTabWidget->addTab(m_trafficMonitorPage, QIcon(":/Icon/process_main.svg"), QStringLiteral("流量监控"));
+    ks::i18n::LanguageManager::instance().bindTab(
+        m_sideTabWidget, m_trafficMonitorPage, QStringLiteral("network.tab.traffic"), QStringLiteral("流量监控"));
 }
 
 void NetworkDock::initializeRateLimitTab()
@@ -298,6 +301,8 @@ void NetworkDock::initializeRateLimitTab()
     m_rateLimitLayout->addWidget(m_rateLimitLogOutput, 1);
 
     m_sideTabWidget->addTab(m_rateLimitPage, QIcon(":/Icon/process_priority.svg"), QStringLiteral("进程限速"));
+    ks::i18n::LanguageManager::instance().bindTab(
+        m_sideTabWidget, m_rateLimitPage, QStringLiteral("network.tab.rate_limit"), QStringLiteral("进程限速"));
 }
 
 void NetworkDock::initializeConnectionManageTab()
@@ -363,6 +368,11 @@ void NetworkDock::initializeConnectionManageTab()
     m_tcpConnectionTable->horizontalHeader()->setStretchLastSection(true);
     m_tcpConnectionTable->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
     m_connectionSubTabWidget->addTab(m_tcpConnectionTable, QIcon(":/Icon/process_main.svg"), QStringLiteral("TCP"));
+    ks::i18n::LanguageManager::instance().bindTab(
+        m_connectionSubTabWidget,
+        m_tcpConnectionTable,
+        QStringLiteral("network.tab.tcp"),
+        QStringLiteral("TCP"));
 
     // UDP 表：PID、进程、本地端点。
     m_udpEndpointTable = new ks::ui::VisibleTableWidget(m_connectionManagePage);
@@ -380,8 +390,15 @@ void NetworkDock::initializeConnectionManageTab()
     m_udpEndpointTable->horizontalHeader()->setStretchLastSection(true);
     m_udpEndpointTable->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
     m_connectionSubTabWidget->addTab(m_udpEndpointTable, QIcon(":/Icon/process_main.svg"), QStringLiteral("UDP"));
+    ks::i18n::LanguageManager::instance().bindTab(
+        m_connectionSubTabWidget,
+        m_udpEndpointTable,
+        QStringLiteral("network.tab.udp"),
+        QStringLiteral("UDP"));
 
     m_sideTabWidget->addTab(m_connectionManagePage, QIcon(":/Icon/process_details.svg"), QStringLiteral("连接管理"));
+    ks::i18n::LanguageManager::instance().bindTab(
+        m_sideTabWidget, m_connectionManagePage, QStringLiteral("network.tab.connections"), QStringLiteral("连接管理"));
 
     kLogEvent initConnectionTabEvent;
     info << initConnectionTabEvent << "[NetworkDock] 连接管理页初始化完成（TCP/UDP）。" << eol;
@@ -398,6 +415,8 @@ void NetworkDock::initializeFirewallTab()
         m_firewallPage,
         QIcon(QStringLiteral(":/Icon/process_critical.svg")),
         QStringLiteral("防火墙"));
+    ks::i18n::LanguageManager::instance().bindTab(
+        m_sideTabWidget, m_firewallPage, QStringLiteral("network.tab.firewall"), QStringLiteral("防火墙"));
 }
 
 void NetworkDock::initializeNetworkAuditTab()
@@ -411,6 +430,8 @@ void NetworkDock::initializeNetworkAuditTab()
         m_networkAuditPage,
         QIcon(QStringLiteral(":/Icon/process_details.svg")),
         QStringLiteral("网络审计"));
+    ks::i18n::LanguageManager::instance().bindTab(
+        m_sideTabWidget, m_networkAuditPage, QStringLiteral("network.tab.audit"), QStringLiteral("网络审计"));
 }
 
 void NetworkDock::initializeManualRequestTab()
@@ -599,6 +620,8 @@ void NetworkDock::initializeManualRequestTab()
     resetManualRequestForm();
 
     m_sideTabWidget->addTab(m_manualRequestPage, QIcon(":/Icon/process_main.svg"), QStringLiteral("请求构造"));
+    ks::i18n::LanguageManager::instance().bindTab(
+        m_sideTabWidget, m_manualRequestPage, QStringLiteral("network.tab.manual_request"), QStringLiteral("请求构造"));
 
     kLogEvent initManualTabEvent;
     info << initManualTabEvent << "[NetworkDock] 请求构造页初始化完成。" << eol;

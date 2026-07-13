@@ -2,6 +2,7 @@
 #include "../UI/VisibleTableWidget.h"
 #include "FilePropertyPeAnalyzer.h"
 #include "FileHandleUsageScanner.h"
+#include "../Internationalization/LanguageManager.h"
 
 // ============================================================
 // FileDock.cpp
@@ -54,6 +55,7 @@
 #include <QModelIndex>
 #include <QMouseEvent>
 #include <QPlainTextEdit>
+#include <QPair>
 #include <QTextEdit>
 #include <QPointer>
 #include <QProgressBar>
@@ -3594,6 +3596,31 @@ namespace
             tabWidget->addTab(buildDeferredTab(QStringLiteral("strings")), QStringLiteral("字符串"));
             tabWidget->addTab(buildDeferredTab(QStringLiteral("hex")), QStringLiteral("十六进制"));
 
+            const QList<QPair<QString, QString>> detailTabTranslations{
+                {QStringLiteral("file.detail.tab.general"), QStringLiteral("常规信息")},
+                {QStringLiteral("file.detail.tab.reparse"), QStringLiteral("重解析点 / 符号链接")},
+                {QStringLiteral("file.detail.tab.security"), QStringLiteral("安全与权限")},
+                {QStringLiteral("file.detail.tab.hash"), QStringLiteral("哈希与完整性")},
+                {QStringLiteral("file.detail.tab.usage"), QStringLiteral("文件占用")},
+                {QStringLiteral("file.detail.tab.fileobject"), QStringLiteral("FileObject / Section / ControlArea")},
+                {QStringLiteral("file.detail.tab.storage"), QStringLiteral("Storage / MountMgr / FVE")},
+                {QStringLiteral("file.detail.tab.filters"), QStringLiteral("Minifilter / Instance / Volume")},
+                {QStringLiteral("file.detail.tab.signature"), QStringLiteral("数字签名")},
+                {QStringLiteral("file.detail.tab.pe"), QStringLiteral("PE信息")},
+                {QStringLiteral("file.detail.tab.dependencies"), QStringLiteral("依赖 DLL")},
+                {QStringLiteral("file.detail.tab.strings"), QStringLiteral("字符串")},
+                {QStringLiteral("file.detail.tab.hex"), QStringLiteral("十六进制")}
+            };
+            for (int tabIndex = 0; tabIndex < detailTabTranslations.size(); ++tabIndex)
+            {
+                const auto& translation = detailTabTranslations.at(tabIndex);
+                ks::i18n::LanguageManager::instance().bindTab(
+                    tabWidget,
+                    tabWidget->widget(tabIndex),
+                    translation.first,
+                    translation.second);
+            }
+
             connect(tabWidget, &QTabWidget::currentChanged, this, [this, tabWidget](const int tabIndex)
                 {
                     activateDeferredTab(tabWidget, tabIndex);
@@ -6718,6 +6745,13 @@ void FileDock::initializeUi()
     if (m_fileRecoveryPage != nullptr)
     {
         m_rootTabWidget->addTab(m_fileRecoveryPage, QStringLiteral("文件恢复"));
+    }
+    ks::i18n::LanguageManager::instance().bindTab(
+        m_rootTabWidget, m_fileManagerPage, QStringLiteral("file.tab.manager"), QStringLiteral("文件管理"));
+    if (m_fileRecoveryPage != nullptr)
+    {
+        ks::i18n::LanguageManager::instance().bindTab(
+            m_rootTabWidget, m_fileRecoveryPage, QStringLiteral("file.tab.recovery"), QStringLiteral("文件恢复"));
     }
 }
 

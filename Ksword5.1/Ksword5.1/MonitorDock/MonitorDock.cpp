@@ -5,6 +5,7 @@
 #include "MonitorTextViewer.h"
 #include "ProcessTraceMonitorWidget.h"
 #include "WinAPIDock.h"
+#include "../Internationalization/LanguageManager.h"
 
 // 监控页实现：包含 WMI/ETW 两个标签页，所有重活走异步线程。
 #include "../OnlineScan/SandboxUploadActions.h"
@@ -4237,6 +4238,8 @@ void MonitorDock::initializeUi()
         m_processTraceWidget,
         QIcon(QStringLiteral(":/Icon/process_main.svg")),
         QStringLiteral("进程定向"));
+    ks::i18n::LanguageManager::instance().bindTab(
+        m_sideTabWidget, m_processTraceWidget, QStringLiteral("monitor.tab.process_trace"), QStringLiteral("进程定向"));
 
     m_directKernelCallHostPage = new QWidget(m_sideTabWidget);
     QVBoxLayout* directKernelCallHostLayout = new QVBoxLayout(m_directKernelCallHostPage);
@@ -4252,6 +4255,11 @@ void MonitorDock::initializeUi()
         m_directKernelCallHostPage,
         QIcon(QStringLiteral(":/Icon/process_threads.svg")),
         QStringLiteral("直接内核调用"));
+    ks::i18n::LanguageManager::instance().bindTab(
+        m_sideTabWidget,
+        m_directKernelCallHostPage,
+        QStringLiteral("monitor.tab.direct_kernel_call"),
+        QStringLiteral("直接内核调用"));
 
     m_winApiPage = new QWidget(m_sideTabWidget);
     QVBoxLayout* winApiPageLayout = new QVBoxLayout(m_winApiPage);
@@ -4261,6 +4269,8 @@ void MonitorDock::initializeUi()
         m_winApiPage,
         QIcon(QStringLiteral(":/Icon/process_details.svg")),
         QStringLiteral("WinAPI"));
+    ks::i18n::LanguageManager::instance().bindTab(
+        m_sideTabWidget, m_winApiPage, QStringLiteral("monitor.tab.winapi"), QStringLiteral("WinAPI"));
 
     initializeWmiTab();
     initializeEtwTab();
@@ -5062,6 +5072,8 @@ void MonitorDock::initializeWmiTab()
     m_wmiLayout->setStretch(1, 0);
     m_wmiLayout->setStretch(2, 1);
     m_sideTabWidget->addTab(m_wmiPage, QStringLiteral("WMI"));
+    ks::i18n::LanguageManager::instance().bindTab(
+        m_sideTabWidget, m_wmiPage, QStringLiteral("monitor.tab.wmi"), QStringLiteral("WMI"));
 }
 
 void MonitorDock::updateWmiSubscribePanelCompactLayout()
@@ -5467,6 +5479,8 @@ void MonitorDock::initializeEtwTab()
     updateEtwCollapseHeight();
 
     m_sideTabWidget->addTab(m_etwPage, QStringLiteral("ETW监控"));
+    ks::i18n::LanguageManager::instance().bindTab(
+        m_sideTabWidget, m_etwPage, QStringLiteral("monitor.tab.etw"), QStringLiteral("ETW监控"));
 }
 
 void MonitorDock::initializeEtwFilterPanels()

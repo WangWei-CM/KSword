@@ -141,7 +141,9 @@ void MemoryCompositionHistoryWidget::paintEvent(QPaintEvent* paintEventPointer)
         painter.drawText(
             plotRect.adjusted(6.0, 4.0, -6.0, -4.0),
             Qt::AlignTop | Qt::AlignLeft,
-            ks::i18n::source(QStringLiteral("内存占用历史 / 构成填充")));
+            ks::i18n::contextText(
+                QStringLiteral("hardware.memory.history.title"),
+                QStringLiteral("内存占用历史 / 构成填充")));
         drawLegend(painter, plotRect);
     }
 }
@@ -267,10 +269,18 @@ void MemoryCompositionHistoryWidget::drawLegend(QPainter& painter, const QRectF&
     {
         const QRectF colorRect(xValue, yValue, 10.0, 7.0);
         painter.fillRect(colorRect, colorEntry.color);
+        const QString sourceLabel = QString::fromUtf8(colorEntry.labelText);
+        const QString labelKey = sourceLabel == QStringLiteral("活跃")
+            ? QStringLiteral("hardware.memory.legend.active")
+            : sourceLabel == QStringLiteral("缓存")
+                ? QStringLiteral("hardware.memory.legend.cached")
+                : sourceLabel == QStringLiteral("分页池")
+                    ? QStringLiteral("hardware.memory.legend.paged_pool")
+                    : QStringLiteral("hardware.memory.legend.non_paged_pool");
         painter.drawText(
             QRectF(xValue + 13.0, yValue - 4.0, 58.0, 16.0),
             Qt::AlignLeft | Qt::AlignVCenter,
-            ks::i18n::source(QString::fromUtf8(colorEntry.labelText)));
+            ks::i18n::contextText(labelKey, sourceLabel));
         xValue += 68.0;
     }
 }

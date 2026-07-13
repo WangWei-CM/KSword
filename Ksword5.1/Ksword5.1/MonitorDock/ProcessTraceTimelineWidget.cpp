@@ -364,9 +364,15 @@ void ProcessTraceTimelineWidget::paintEvent(QPaintEvent* eventPointer)
             legendFont.setPointSizeF(std::max(7.0, originalFont.pointSizeF() - 1.0));
             painter.setFont(legendFont);
             painter.setPen(uploadLineColor);
-            painter.drawText(axisRect.adjusted(54.0, 1.0, -54.0, 0.0), Qt::AlignTop | Qt::AlignHCenter, ks::i18n::source(QStringLiteral("上行")));
+            painter.drawText(
+                axisRect.adjusted(54.0, 1.0, -54.0, 0.0),
+                Qt::AlignTop | Qt::AlignHCenter,
+                ks::i18n::contextText(QStringLiteral("network.timeline.upload"), QStringLiteral("上行")));
             painter.setPen(downloadLineColor);
-            painter.drawText(axisRect.adjusted(96.0, 1.0, -12.0, 0.0), Qt::AlignTop | Qt::AlignLeft, ks::i18n::source(QStringLiteral("下行")));
+            painter.drawText(
+                axisRect.adjusted(96.0, 1.0, -12.0, 0.0),
+                Qt::AlignTop | Qt::AlignLeft,
+                ks::i18n::contextText(QStringLiteral("network.timeline.download"), QStringLiteral("下行")));
             painter.setFont(originalFont);
         }
     }

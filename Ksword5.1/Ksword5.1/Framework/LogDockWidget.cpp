@@ -310,6 +310,25 @@ void LogDockWidget::initializeUi()
     m_autoScrollCheck->setToolTip("开启后表格刷新将自动滚动到最后一行");
     m_visibleLimitSpin->setToolTip("仅限制界面显示的最近日志条数；内部日志仍保留全量，调大后会立即显示已记录的旧日志。");
 
+    ks::i18n::LanguageManager& languageManager = ks::i18n::LanguageManager::instance();
+    languageManager.bindText(m_debugCheck, QStringLiteral("log.level.debug"), QStringLiteral("Debug"));
+    languageManager.bindText(m_infoCheck, QStringLiteral("log.level.info"), QStringLiteral("Info"));
+    languageManager.bindText(m_warnCheck, QStringLiteral("log.level.warn"), QStringLiteral("Warn"));
+    languageManager.bindText(m_errorCheck, QStringLiteral("log.level.error"), QStringLiteral("Error"));
+    languageManager.bindText(m_fatalCheck, QStringLiteral("log.level.fatal"), QStringLiteral("Fatal"));
+    languageManager.bindText(m_detailCheck, QStringLiteral("log.detail"), QStringLiteral("详细信息"));
+    languageManager.bindText(m_autoScrollCheck, QStringLiteral("log.autoscroll"), QStringLiteral("保持滚动到最底端"));
+    languageManager.bindSuffix(
+        m_visibleLimitSpin,
+        QStringLiteral("log.suffix.entries"),
+        QStringLiteral(" 条"));
+    languageManager.bindToolTip(m_exportButton, QStringLiteral("log.tooltip.export"), QStringLiteral("导出全部日志到 .txt 文件"));
+    languageManager.bindToolTip(m_clearButton, QStringLiteral("log.tooltip.clear"), QStringLiteral("清空日志管理器中的全部日志（双重确认）"));
+    languageManager.bindToolTip(m_copyVisibleButton, QStringLiteral("log.tooltip.copy_visible"), QStringLiteral("复制当前可见列表内容（支持追踪过滤状态）"));
+    languageManager.bindToolTip(m_detailCheck, QStringLiteral("log.tooltip.detail"), QStringLiteral("显示文件列和函数列"));
+    languageManager.bindToolTip(m_autoScrollCheck, QStringLiteral("log.tooltip.autoscroll"), QStringLiteral("开启后表格刷新将自动滚动到最后一行"));
+    languageManager.bindToolTip(m_visibleLimitSpin, QStringLiteral("log.tooltip.visible_limit"), QStringLiteral("仅限制界面显示的最近日志条数；内部日志仍保留全量，调大后会立即显示已记录的旧日志。"));
+
     // 图标尺寸与按钮尺寸统一，保证工具栏视觉紧凑并保持纯图标风格。
     m_exportButton->setIconSize(DefaultButtonIconSize);
     m_clearButton->setIconSize(DefaultButtonIconSize);
@@ -359,6 +378,7 @@ void LogDockWidget::initializeUi()
     m_actionLayout->addSpacing(8);
 
     QLabel* visibleLimitLabel = new QLabel(QStringLiteral("展示最近日志条数:"), this);
+    languageManager.bindText(visibleLimitLabel, QStringLiteral("log.label.visible_limit"), QStringLiteral("展示最近日志条数:"));
     visibleLimitLabel->setToolTip(m_visibleLimitSpin->toolTip());
     visibleLimitLabel->setStyleSheet(buildBlueInputStyleSheet());
     m_actionLayout->addWidget(visibleLimitLabel);
@@ -584,7 +604,7 @@ QVariant LogDockWidget::resolveLogTableData(const kEvent& logItem, const int col
         case LevelColumn:
             return getLevelText(logItem.level);
         case ContentColumn:
-            return ks::i18n::source(QString::fromStdString(logItem.content));
+            return QString::fromStdString(logItem.content);
         case FileColumn:
             return QString::fromStdString(logItem.fileLocation);
         case FunctionColumn:
@@ -607,7 +627,7 @@ QVariant LogDockWidget::resolveLogTableData(const kEvent& logItem, const int col
     case TimeColumn:
         return QString::fromStdString(FormatTimeToString(logItem.timestamp));
     case ContentColumn:
-        return ks::i18n::source(QString::fromStdString(logItem.content));
+        return QString::fromStdString(logItem.content);
     case FileColumn:
         return QString::fromStdString(logItem.fileLocation);
     case FunctionColumn:
@@ -757,7 +777,9 @@ void LogDockWidget::showTableContextMenu(const QPoint& position)
     // - 复制范围固定为所有选中行，避免跟踪/单元格复制造成歧义。
     if (selectedRowIndexes.size() > 1)
     {
-        QAction* copySelectedRowsAction = contextMenu.addAction(createBlueThemedIcon(IconCopyPath), "复制");
+        QAction* copySelectedRowsAction = contextMenu.addAction(
+            createBlueThemedIcon(IconCopyPath),
+            ks::i18n::contextText(QStringLiteral("log.menu.copy"), QStringLiteral("复制")));
         copySelectedRowsAction->setEnabled(!selectedRowIndexes.empty());
 
         QAction* selectedAction = contextMenu.exec(m_logTable->viewport()->mapToGlobal(position));
@@ -768,8 +790,12 @@ void LogDockWidget::showTableContextMenu(const QPoint& position)
         return;
     }
 
-    QAction* copyCellAction = contextMenu.addAction(createBlueThemedIcon(IconCopyPath), "复制单元格");
-    QAction* copyRowAction = contextMenu.addAction(createBlueThemedIcon(IconClipboardPath), "复制行");
+    QAction* copyCellAction = contextMenu.addAction(
+        createBlueThemedIcon(IconCopyPath),
+        ks::i18n::contextText(QStringLiteral("log.menu.copy_cell"), QStringLiteral("复制单元格")));
+    QAction* copyRowAction = contextMenu.addAction(
+        createBlueThemedIcon(IconClipboardPath),
+        ks::i18n::contextText(QStringLiteral("log.menu.copy_row"), QStringLiteral("复制行")));
 
     // 若未点中有效单元格，则复制操作不可用。
     copyCellAction->setEnabled(hasValidCell);
@@ -779,11 +805,15 @@ void LogDockWidget::showTableContextMenu(const QPoint& position)
     QAction* trackAction = nullptr;
     if (m_isTracking)
     {
-        trackAction = contextMenu.addAction(createBlueThemedIcon(IconCancelTrackPath), "取消追踪");
+        trackAction = contextMenu.addAction(
+            createBlueThemedIcon(IconCancelTrackPath),
+            ks::i18n::contextText(QStringLiteral("log.menu.cancel_track"), QStringLiteral("取消追踪")));
     }
     else
     {
-        trackAction = contextMenu.addAction(createBlueThemedIcon(IconTrackPath), "跟踪事件");
+        trackAction = contextMenu.addAction(
+            createBlueThemedIcon(IconTrackPath),
+            ks::i18n::contextText(QStringLiteral("log.menu.track"), QStringLiteral("跟踪事件")));
         trackAction->setEnabled(hasValidCell);
     }
 
@@ -838,7 +868,7 @@ void LogDockWidget::copySingleCell(const int row, const int column)
             textToCopy = QString::fromStdString(FormatTimeToString(logItem->timestamp));
             break;
         case ContentColumn:
-            textToCopy = ks::i18n::source(QString::fromStdString(logItem->content));
+            textToCopy = QString::fromStdString(logItem->content);
             break;
         case FileColumn:
             textToCopy = QString::fromStdString(logItem->fileLocation);
@@ -972,7 +1002,7 @@ QString LogDockWidget::buildVisibleRowText(const kEvent& logItem) const
     // 始终输出基础三列；详细信息开启时再追加文件/函数列。
     visibleFieldList.push_back(getLevelText(logItem.level));
     visibleFieldList.push_back(QString::fromStdString(FormatTimeToString(logItem.timestamp)));
-    visibleFieldList.push_back(ks::i18n::source(QString::fromStdString(logItem.content)));
+    visibleFieldList.push_back(QString::fromStdString(logItem.content));
 
     // detailVisible 用途：记录当前是否应输出详细列文本。
     const bool detailVisible = (m_detailCheck != nullptr) && m_detailCheck->isChecked();

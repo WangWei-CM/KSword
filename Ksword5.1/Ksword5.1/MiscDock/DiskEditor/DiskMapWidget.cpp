@@ -142,7 +142,7 @@ namespace ks::misc
         painter.drawText(
             cardRect.adjusted(kOuterMargin, 8, -kOuterMargin, 0),
             Qt::AlignLeft | Qt::AlignTop,
-            ks::i18n::source(titleText));
+            titleText);
 
         const QRect mapFrame(
             cardRect.left() + kOuterMargin,
@@ -157,7 +157,12 @@ namespace ks::misc
         if (!m_hasDisk || m_diskInfo.sizeBytes == 0)
         {
             painter.setPen(KswordTheme::TextSecondaryColor());
-            painter.drawText(mapFrame, Qt::AlignCenter, ks::i18n::source(QStringLiteral("无法读取磁盘布局，请刷新或以管理员权限运行")));
+            painter.drawText(
+                mapFrame,
+                Qt::AlignCenter,
+                ks::i18n::contextText(
+                    QStringLiteral("disk_map.unreadable"),
+                    QStringLiteral("无法读取磁盘布局，请刷新或以管理员权限运行")));
             return;
         }
 
@@ -180,9 +185,9 @@ namespace ks::misc
             painter.setBrush(QBrush(gradient));
             painter.drawRoundedRect(segment.rect, 6, 6);
 
-            const QString labelText = ks::i18n::source(segment.partition.name.isEmpty()
+            const QString labelText = segment.partition.name.isEmpty()
                 ? segment.partition.typeText
-                : segment.partition.name);
+                : segment.partition.name;
             const QString sizeText = formatBytesForDiskMap(segment.partition.lengthBytes);
             const QString visibleText = labelText.isEmpty()
                 ? sizeText
@@ -207,14 +212,16 @@ namespace ks::misc
 
         painter.setFont(QWidget::font());
         painter.setPen(KswordTheme::TextSecondaryColor());
-        const QString footerText = QStringLiteral("0  ·  扇区 %1 B  ·  共 %2 个分区块  ·  末尾 %3")
+        const QString footerTemplate = QStringLiteral("0  ·  扇区 %1 B  ·  共 %2 个分区块  ·  末尾 %3");
+        const QString footerText = ks::i18n::contextText(
+            QStringLiteral("disk_map.footer"), footerTemplate)
             .arg(m_diskInfo.bytesPerSector)
             .arg(static_cast<int>(segments.size()))
             .arg(formatBytesForDiskMap(m_diskInfo.sizeBytes));
         painter.drawText(
             QRect(mapFrame.left(), mapFrame.bottom() + 7, mapFrame.width(), 18),
             Qt::AlignLeft | Qt::AlignVCenter,
-            ks::i18n::source(footerText));
+            footerText);
     }
 
     void DiskMapWidget::mousePressEvent(QMouseEvent* event)

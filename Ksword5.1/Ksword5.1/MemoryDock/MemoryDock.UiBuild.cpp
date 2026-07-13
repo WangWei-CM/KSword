@@ -1,5 +1,6 @@
 #include "MemoryDock.Internal.h"
 #include "../UI/VisibleTableWidget.h"
+#include "../Internationalization/LanguageManager.h"
 
 // 说明：由原聚合式实现迁移为独立 .cpp，成员函数实现保持原样。
 using namespace ksword::memory_dock_internal;
@@ -312,6 +313,8 @@ void MemoryDock::initializeProcessModuleTab()
 
     tabLayout->addWidget(splitter, 1);
     m_tabWidget->addTab(m_tabProcessModule, "进程与模块");
+    ks::i18n::LanguageManager::instance().bindTab(
+        m_tabWidget, m_tabProcessModule, QStringLiteral("memory.tab.process_module"), QStringLiteral("进程与模块"));
 }
 
 void MemoryDock::initializeMemoryRegionTab()
@@ -359,6 +362,8 @@ void MemoryDock::initializeMemoryRegionTab()
     tabLayout->addWidget(m_regionTable, 1);
 
     m_tabWidget->addTab(m_tabRegions, "内存区域");
+    ks::i18n::LanguageManager::instance().bindTab(
+        m_tabWidget, m_tabRegions, QStringLiteral("memory.tab.regions"), QStringLiteral("内存区域"));
 }
 
 void MemoryDock::initializeMemorySearchTab()
@@ -503,6 +508,8 @@ void MemoryDock::initializeMemorySearchTab()
     tabLayout->addLayout(progressLayout);
 
     m_tabWidget->addTab(m_tabSearch, "内存搜索");
+    ks::i18n::LanguageManager::instance().bindTab(
+        m_tabWidget, m_tabSearch, QStringLiteral("memory.tab.search"), QStringLiteral("内存搜索"));
 }
 
 void MemoryDock::initializeMemoryViewerTab()
@@ -546,6 +553,8 @@ void MemoryDock::initializeMemoryViewerTab()
     tabLayout->addWidget(m_viewerStatusLabel);
 
     m_tabWidget->addTab(m_tabViewer, "内存查看器");
+    ks::i18n::LanguageManager::instance().bindTab(
+        m_tabWidget, m_tabViewer, QStringLiteral("memory.tab.viewer"), QStringLiteral("内存查看器"));
 }
 
 void MemoryDock::initializeBreakpointBookmarkTab()
@@ -641,6 +650,8 @@ void MemoryDock::initializeBreakpointBookmarkTab()
     tabLayout->addWidget(splitter, 1);
 
     m_tabWidget->addTab(m_tabBpBookmark, "断点与书签");
+    ks::i18n::LanguageManager::instance().bindTab(
+        m_tabWidget, m_tabBpBookmark, QStringLiteral("memory.tab.breakpoints_bookmarks"), QStringLiteral("断点与书签"));
 }
 
 void MemoryDock::initializeDriverMemoryRwTab()
@@ -730,4 +741,6 @@ void MemoryDock::initializeDriverMemoryRwTab()
     tabLayout->addWidget(m_driverMemoryStatusLabel);
 
     m_tabWidget->addTab(m_tabDriverMemoryRw, "驱动内存读写");
+    ks::i18n::LanguageManager::instance().bindTab(
+        m_tabWidget, m_tabDriverMemoryRw, QStringLiteral("memory.tab.driver_memory_rw"), QStringLiteral("驱动内存读写"));
 }
