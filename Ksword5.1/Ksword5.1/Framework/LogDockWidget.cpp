@@ -1,4 +1,5 @@
 #include "LogDockWidget.h"
+#include "../Internationalization/LanguageManager.h"
 #include "../theme.h"
 #include "../UI/FlatTableModel.h"
 #include "../UI/VisibleTableWidget.h"
@@ -583,7 +584,7 @@ QVariant LogDockWidget::resolveLogTableData(const kEvent& logItem, const int col
         case LevelColumn:
             return getLevelText(logItem.level);
         case ContentColumn:
-            return QString::fromStdString(logItem.content);
+            return ks::i18n::source(QString::fromStdString(logItem.content));
         case FileColumn:
             return QString::fromStdString(logItem.fileLocation);
         case FunctionColumn:
@@ -606,7 +607,7 @@ QVariant LogDockWidget::resolveLogTableData(const kEvent& logItem, const int col
     case TimeColumn:
         return QString::fromStdString(FormatTimeToString(logItem.timestamp));
     case ContentColumn:
-        return QString::fromStdString(logItem.content);
+        return ks::i18n::source(QString::fromStdString(logItem.content));
     case FileColumn:
         return QString::fromStdString(logItem.fileLocation);
     case FunctionColumn:
@@ -837,7 +838,7 @@ void LogDockWidget::copySingleCell(const int row, const int column)
             textToCopy = QString::fromStdString(FormatTimeToString(logItem->timestamp));
             break;
         case ContentColumn:
-            textToCopy = QString::fromStdString(logItem->content);
+            textToCopy = ks::i18n::source(QString::fromStdString(logItem->content));
             break;
         case FileColumn:
             textToCopy = QString::fromStdString(logItem->fileLocation);
@@ -971,7 +972,7 @@ QString LogDockWidget::buildVisibleRowText(const kEvent& logItem) const
     // 始终输出基础三列；详细信息开启时再追加文件/函数列。
     visibleFieldList.push_back(getLevelText(logItem.level));
     visibleFieldList.push_back(QString::fromStdString(FormatTimeToString(logItem.timestamp)));
-    visibleFieldList.push_back(QString::fromStdString(logItem.content));
+    visibleFieldList.push_back(ks::i18n::source(QString::fromStdString(logItem.content)));
 
     // detailVisible 用途：记录当前是否应输出详细列文本。
     const bool detailVisible = (m_detailCheck != nullptr) && m_detailCheck->isChecked();

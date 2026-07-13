@@ -1,4 +1,5 @@
 #include "OtherDock.h"
+#include "../Internationalization/LanguageManager.h"
 #include "../UI/VisibleTableWidget.h"
 
 // ============================================================
@@ -859,7 +860,7 @@ namespace
         painter.drawText(
             fallbackPixmap.rect(),
             Qt::AlignCenter,
-            QStringLiteral("无可用缩略图"));
+            ks::i18n::source(QStringLiteral("无可用缩略图")));
         painter.end();
         return fallbackPixmap;
     }

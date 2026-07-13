@@ -438,21 +438,23 @@ namespace
         const std::wstring baseDrive = L"Software\\Classes\\Drive\\shell\\" + std::wstring(kUnlockerKeyName);
         const std::wstring baseBackground =
             L"Software\\Classes\\Directory\\Background\\shell\\" + std::wstring(kUnlockerKeyName);
+        const std::wstring menuText = ks::i18n::source(
+            QStringLiteral("使用 Ksword 文件解锁器(R3/R0)")).toStdWString();
 
         const bool starOk =
-            writeRegistryString(HKEY_CURRENT_USER, baseStar, nullptr, L"使用 Ksword 文件解锁器(R3/R0)")
+            writeRegistryString(HKEY_CURRENT_USER, baseStar, nullptr, menuText.c_str())
             && writeRegistryString(HKEY_CURRENT_USER, baseStar, L"Icon", executablePath)
             && writeRegistryString(HKEY_CURRENT_USER, baseStar + L"\\command", nullptr, commandForFile);
         const bool directoryOk =
-            writeRegistryString(HKEY_CURRENT_USER, baseDirectory, nullptr, L"使用 Ksword 文件解锁器(R3/R0)")
+            writeRegistryString(HKEY_CURRENT_USER, baseDirectory, nullptr, menuText.c_str())
             && writeRegistryString(HKEY_CURRENT_USER, baseDirectory, L"Icon", executablePath)
             && writeRegistryString(HKEY_CURRENT_USER, baseDirectory + L"\\command", nullptr, commandForFile);
         const bool driveOk =
-            writeRegistryString(HKEY_CURRENT_USER, baseDrive, nullptr, L"使用 Ksword 文件解锁器(R3/R0)")
+            writeRegistryString(HKEY_CURRENT_USER, baseDrive, nullptr, menuText.c_str())
             && writeRegistryString(HKEY_CURRENT_USER, baseDrive, L"Icon", executablePath)
             && writeRegistryString(HKEY_CURRENT_USER, baseDrive + L"\\command", nullptr, commandForFile);
         const bool backgroundOk =
-            writeRegistryString(HKEY_CURRENT_USER, baseBackground, nullptr, L"使用 Ksword 文件解锁器(R3/R0)")
+            writeRegistryString(HKEY_CURRENT_USER, baseBackground, nullptr, menuText.c_str())
             && writeRegistryString(HKEY_CURRENT_USER, baseBackground, L"Icon", executablePath)
             && writeRegistryString(HKEY_CURRENT_USER, baseBackground + L"\\command", nullptr, commandForBackground);
 
@@ -893,26 +895,36 @@ namespace
 
         const std::wstring currentScaleText = buildPercentText(currentScaleFactor);
         const std::wstring recommendedScaleText = buildPercentText(recommendedScaleFactor);
-        const std::wstring dialogContentText =
+        const std::wstring dialogContentSourceText =
             L"当前可用宽度约 " + std::to_wstring(logicalClientWidth) + L"px，小于推荐的 "
             + std::to_wstring(kStartupScaleRecommendedLogicalWidth) + L"px。\n"
             L"当前缩放：" + currentScaleText + L"\n"
             L"推荐缩放：" + recommendedScaleText + L"\n\n"
             L"是否应用推荐缩放？Ksword 将保存设置并立即重启。";
+        const std::wstring dialogContentText = ks::i18n::source(
+            QString::fromStdWString(dialogContentSourceText)).toStdWString();
+        const std::wstring applyAndRestartText = ks::i18n::source(
+            QStringLiteral("应用并重启")).toStdWString();
+        const std::wstring keepCurrentSettingsText = ks::i18n::source(
+            QStringLiteral("保持当前设置")).toStdWString();
+        const std::wstring dialogTitleText = ks::i18n::source(
+            QStringLiteral("Ksword5.1 启动缩放建议")).toStdWString();
+        const std::wstring mainInstructionText = ks::i18n::source(
+            QStringLiteral("检测到当前显示可用宽度偏小")).toStdWString();
 
         // dialogButtons 作用：TaskDialog 自定义按钮集合。
         TASKDIALOG_BUTTON dialogButtons[] =
         {
-            { IDYES, L"应用并重启" },
-            { IDNO, L"保持当前设置" }
+            { IDYES, applyAndRestartText.c_str() },
+            { IDNO, keepCurrentSettingsText.c_str() }
         };
 
         TASKDIALOGCONFIG dialogConfig = {};
         dialogConfig.cbSize = sizeof(dialogConfig);
         dialogConfig.hInstance = ::GetModuleHandleW(nullptr);
         dialogConfig.dwFlags = TDF_ALLOW_DIALOG_CANCELLATION | TDF_POSITION_RELATIVE_TO_WINDOW;
-        dialogConfig.pszWindowTitle = L"Ksword5.1 启动缩放建议";
-        dialogConfig.pszMainInstruction = L"检测到当前显示可用宽度偏小";
+        dialogConfig.pszWindowTitle = dialogTitleText.c_str();
+        dialogConfig.pszMainInstruction = mainInstructionText.c_str();
         dialogConfig.pszContent = dialogContentText.c_str();
         dialogConfig.pButtons = dialogButtons;
         dialogConfig.cButtons = ARRAYSIZE(dialogButtons);
@@ -1356,6 +1368,10 @@ int main(int argc, char* argv[])
         + (settingsFileExists ? "true" : "false"));
 
     ks::settings::AppearanceSettings startupSettings = ks::settings::loadAppearanceSettings();
+    QString preQtLanguageMessage;
+    (void)ks::i18n::LanguageManager::instance().initialize(
+        startupSettings.uiLanguage,
+        &preQtLanguageMessage);
     startupTraceRaw(
         std::string("startup settings loaded: scale_factor=")
         + std::to_string(startupSettings.startupWindowScaleFactor)

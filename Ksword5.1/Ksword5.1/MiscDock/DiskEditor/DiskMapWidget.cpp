@@ -9,6 +9,7 @@
 // ============================================================
 
 #include "../../theme.h"
+#include "../../Internationalization/LanguageManager.h"
 
 #include <QBrush>
 #include <QFontMetrics>
@@ -141,7 +142,7 @@ namespace ks::misc
         painter.drawText(
             cardRect.adjusted(kOuterMargin, 8, -kOuterMargin, 0),
             Qt::AlignLeft | Qt::AlignTop,
-            titleText);
+            ks::i18n::source(titleText));
 
         const QRect mapFrame(
             cardRect.left() + kOuterMargin,
@@ -156,7 +157,7 @@ namespace ks::misc
         if (!m_hasDisk || m_diskInfo.sizeBytes == 0)
         {
             painter.setPen(KswordTheme::TextSecondaryColor());
-            painter.drawText(mapFrame, Qt::AlignCenter, QStringLiteral("无法读取磁盘布局，请刷新或以管理员权限运行"));
+            painter.drawText(mapFrame, Qt::AlignCenter, ks::i18n::source(QStringLiteral("无法读取磁盘布局，请刷新或以管理员权限运行")));
             return;
         }
 
@@ -179,9 +180,9 @@ namespace ks::misc
             painter.setBrush(QBrush(gradient));
             painter.drawRoundedRect(segment.rect, 6, 6);
 
-            const QString labelText = segment.partition.name.isEmpty()
+            const QString labelText = ks::i18n::source(segment.partition.name.isEmpty()
                 ? segment.partition.typeText
-                : segment.partition.name;
+                : segment.partition.name);
             const QString sizeText = formatBytesForDiskMap(segment.partition.lengthBytes);
             const QString visibleText = labelText.isEmpty()
                 ? sizeText
@@ -213,7 +214,7 @@ namespace ks::misc
         painter.drawText(
             QRect(mapFrame.left(), mapFrame.bottom() + 7, mapFrame.width(), 18),
             Qt::AlignLeft | Qt::AlignVCenter,
-            footerText);
+            ks::i18n::source(footerText));
     }
 
     void DiskMapWidget::mousePressEvent(QMouseEvent* event)

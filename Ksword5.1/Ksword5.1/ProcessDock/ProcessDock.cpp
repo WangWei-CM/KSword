@@ -7,6 +7,7 @@
 #include "../OnlineScan/SandboxUploadActions.h"
 #include "../UI/FlatTableModel.h"
 #include "../UI/TableColumnAutoFit.h"
+#include "../Internationalization/LanguageManager.h"
 #include "../ksword/network/network.h"
 
 #include <QAbstractItemModel>
@@ -509,15 +510,15 @@ namespace
         case ProcessDock::ProcessActivityMetric::Cpu:
             return QStringLiteral("CPU");
         case ProcessDock::ProcessActivityMetric::Memory:
-            return QStringLiteral("内存");
+            return ks::i18n::source(QStringLiteral("内存"));
         case ProcessDock::ProcessActivityMetric::Disk:
-            return QStringLiteral("磁盘");
+            return ks::i18n::source(QStringLiteral("磁盘"));
         case ProcessDock::ProcessActivityMetric::Network:
-            return QStringLiteral("网络");
+            return ks::i18n::source(QStringLiteral("网络"));
         case ProcessDock::ProcessActivityMetric::Gpu:
             return QStringLiteral("GPU");
         default:
-            return QStringLiteral("未知");
+            return ks::i18n::source(QStringLiteral("未知"));
         }
     }
 
@@ -894,7 +895,7 @@ protected:
         if (m_ownerDock == nullptr || m_ownerDock->m_activitySamples.empty())
         {
             painter.setPen(textColor);
-            painter.drawText(plotRect, Qt::AlignCenter, QStringLiteral("未开始刷新进程列表活动"));
+            painter.drawText(plotRect, Qt::AlignCenter, ks::i18n::source(QStringLiteral("未开始刷新进程列表活动")));
             return;
         }
 
@@ -902,7 +903,7 @@ protected:
         if (enabledMetrics.empty())
         {
             painter.setPen(textColor);
-            painter.drawText(plotRect, Qt::AlignCenter, QStringLiteral("未选择任何指标，请勾选 CPU / 内存 / 磁盘 / 网络 / GPU"));
+            painter.drawText(plotRect, Qt::AlignCenter, ks::i18n::source(QStringLiteral("未选择任何指标，请勾选 CPU / 内存 / 磁盘 / 网络 / GPU")));
             return;
         }
 
@@ -1711,7 +1712,7 @@ namespace
                 cursorX += iconTextGap;
             }
 
-            const QString textValue = index.data(Qt::DisplayRole).toString();
+            const QString textValue = ks::i18n::source(index.data(Qt::DisplayRole).toString());
             QRect textRect(
                 cursorX,
                 contentRect.top(),

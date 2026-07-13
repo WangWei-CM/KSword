@@ -1,4 +1,5 @@
 #include "PerformanceNavCard.h"
+#include "../Internationalization/LanguageManager.h"
 
 // ============================================================
 // PerformanceNavCard.cpp
@@ -301,8 +302,10 @@ void PerformanceNavCard::paintEvent(QPaintEvent* paintEventPointer)
     titleFont.setBold(true);
     painter.setFont(titleFont);
     painter.setPen(KswordTheme::IsDarkModeEnabled() ? QColor(240, 240, 240) : QColor(26, 32, 38));
-    const QString elidedTitleText =
-        QFontMetrics(titleFont).elidedText(m_titleText, Qt::ElideRight, titleRect.width());
+    const QString elidedTitleText = QFontMetrics(titleFont).elidedText(
+        ks::i18n::source(m_titleText),
+        Qt::ElideRight,
+        titleRect.width());
     painter.drawText(titleRect, Qt::AlignLeft | Qt::AlignVCenter, elidedTitleText);
 
     QFont subtitleFont = painter.font();
@@ -310,7 +313,9 @@ void PerformanceNavCard::paintEvent(QPaintEvent* paintEventPointer)
     subtitleFont.setBold(false);
     painter.setFont(subtitleFont);
     painter.setPen(KswordTheme::IsDarkModeEnabled() ? QColor(198, 212, 225) : QColor(63, 83, 102));
-    const QString elidedSubtitleText =
-        QFontMetrics(subtitleFont).elidedText(m_subtitleText, Qt::ElideRight, subtitleRect.width());
+    const QString elidedSubtitleText = QFontMetrics(subtitleFont).elidedText(
+        ks::i18n::source(m_subtitleText),
+        Qt::ElideRight,
+        subtitleRect.width());
     painter.drawText(subtitleRect, Qt::AlignLeft | Qt::AlignVCenter, elidedSubtitleText);
 }

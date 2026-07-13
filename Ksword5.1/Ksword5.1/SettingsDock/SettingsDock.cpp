@@ -132,18 +132,20 @@ namespace
         const std::wstring baseDrive = L"Software\\Classes\\Drive\\shell\\" + std::wstring(kUnlockerKeyName);
         const std::wstring baseBackground =
             L"Software\\Classes\\Directory\\Background\\shell\\" + std::wstring(kUnlockerKeyName);
+        const std::wstring menuText = ks::i18n::source(
+            QStringLiteral("使用 Ksword 文件解锁器(R3/R0)")).toStdWString();
 
         return
-            writeRegistryString(HKEY_CURRENT_USER, baseStar, nullptr, L"使用 Ksword 文件解锁器(R3/R0)")
+            writeRegistryString(HKEY_CURRENT_USER, baseStar, nullptr, menuText.c_str())
             && writeRegistryString(HKEY_CURRENT_USER, baseStar, L"Icon", executablePath)
             && writeRegistryString(HKEY_CURRENT_USER, baseStar + L"\\command", nullptr, commandForFile)
-            && writeRegistryString(HKEY_CURRENT_USER, baseDirectory, nullptr, L"使用 Ksword 文件解锁器(R3/R0)")
+            && writeRegistryString(HKEY_CURRENT_USER, baseDirectory, nullptr, menuText.c_str())
             && writeRegistryString(HKEY_CURRENT_USER, baseDirectory, L"Icon", executablePath)
             && writeRegistryString(HKEY_CURRENT_USER, baseDirectory + L"\\command", nullptr, commandForFile)
-            && writeRegistryString(HKEY_CURRENT_USER, baseDrive, nullptr, L"使用 Ksword 文件解锁器(R3/R0)")
+            && writeRegistryString(HKEY_CURRENT_USER, baseDrive, nullptr, menuText.c_str())
             && writeRegistryString(HKEY_CURRENT_USER, baseDrive, L"Icon", executablePath)
             && writeRegistryString(HKEY_CURRENT_USER, baseDrive + L"\\command", nullptr, commandForFile)
-            && writeRegistryString(HKEY_CURRENT_USER, baseBackground, nullptr, L"使用 Ksword 文件解锁器(R3/R0)")
+            && writeRegistryString(HKEY_CURRENT_USER, baseBackground, nullptr, menuText.c_str())
             && writeRegistryString(HKEY_CURRENT_USER, baseBackground, L"Icon", executablePath)
             && writeRegistryString(HKEY_CURRENT_USER, baseBackground + L"\\command", nullptr, commandForBackground);
     }
@@ -244,10 +246,15 @@ void SettingsDock::initializeAppearanceTab()
     const QList<ks::i18n::LanguageInfo> availableLanguages = languageManager.availableLanguages();
     for (const ks::i18n::LanguageInfo& languageInfo : availableLanguages)
     {
-        const QString displayName = languageInfo.nativeName == languageInfo.name
-            ? languageInfo.nativeName
-            : QStringLiteral("%1 - %2").arg(languageInfo.nativeName, languageInfo.name);
+        const QString displayName = languageInfo.nativeName.isEmpty()
+            ? languageInfo.name
+            : languageInfo.nativeName;
         m_languageCombo->addItem(displayName, languageInfo.id);
+        languageManager.bindComboBoxItem(
+            m_languageCombo,
+            m_languageCombo->count() - 1,
+            QStringLiteral("language.name.%1").arg(languageInfo.id),
+            displayName);
     }
     languageManager.bindToolTip(
         m_languageCombo,

@@ -1,4 +1,5 @@
 #include "MemoryCompositionHistoryWidget.h"
+#include "../Internationalization/LanguageManager.h"
 
 #include "../theme.h"
 
@@ -140,7 +141,7 @@ void MemoryCompositionHistoryWidget::paintEvent(QPaintEvent* paintEventPointer)
         painter.drawText(
             plotRect.adjusted(6.0, 4.0, -6.0, -4.0),
             Qt::AlignTop | Qt::AlignLeft,
-            QStringLiteral("内存占用历史 / 构成填充"));
+            ks::i18n::source(QStringLiteral("内存占用历史 / 构成填充")));
         drawLegend(painter, plotRect);
     }
 }
@@ -269,7 +270,7 @@ void MemoryCompositionHistoryWidget::drawLegend(QPainter& painter, const QRectF&
         painter.drawText(
             QRectF(xValue + 13.0, yValue - 4.0, 58.0, 16.0),
             Qt::AlignLeft | Qt::AlignVCenter,
-            QString::fromUtf8(colorEntry.labelText));
+            ks::i18n::source(QString::fromUtf8(colorEntry.labelText)));
         xValue += 68.0;
     }
 }

@@ -1113,10 +1113,28 @@
     <None Include="..\..\tools\compress_qt_profile_json.py">
       <Filter>Profile Files</Filter>
     </None>
+    <None Include="..\..\tools\i18n_language_pack.py">
+      <Filter>Profile Files</Filter>
+    </None>
+    <None Include="..\..\tools\i18n_language_pack.py">
+      <Filter>Profile Files</Filter>
+    </None>
     <None Include="profiles\ark_dyndata_pack_v2.json">
       <Filter>Profile Files</Filter>
     </None>
     <None Include="profiles\ark_dyndata_pack_v3.json">
+      <Filter>Profile Files</Filter>
+    </None>
+    <None Include="languages\en-US.json">
+      <Filter>Profile Files</Filter>
+    </None>
+    <None Include="languages\zh-CN.json">
+      <Filter>Profile Files</Filter>
+    </None>
+    <None Include="languages\en-US.json">
+      <Filter>Profile Files</Filter>
+    </None>
+    <None Include="languages\zh-CN.json">
       <Filter>Profile Files</Filter>
     </None>
   </ItemGroup>

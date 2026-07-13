@@ -99,3 +99,4 @@ $seven='C:\Users\Felix\CLionProjects\Wisdom-Weasel\7z.exe'
 - `KswordCLI` 每新增、删除或调整一个命令/别名/参数时，必须同步更新 `KswordCLI` 内置 `help` 命令元数据，并同步更新 `docs/CLI使用文档.md`。
 - 新增源码必须同步更新对应 `.vcxproj` 和 `.vcxproj.filters`。
 - 第三方代码接入必须带 LICENSE 和 NOTICE。
+- 新增、删除或修改主程序用户可见文本时，必须同步 `Ksword5.1/Ksword5.1/languages/zh-CN.json` 与 `Ksword5.1/Ksword5.1/languages/en-US.json`，并通过 `python tools/i18n_language_pack.py audit --source-root Ksword5.1/Ksword5.1 --zh-pack Ksword5.1/Ksword5.1/languages/zh-CN.json --en-pack Ksword5.1/Ksword5.1/languages/en-US.json`。
