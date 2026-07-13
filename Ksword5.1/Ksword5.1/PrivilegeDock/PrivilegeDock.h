@@ -15,6 +15,7 @@
 #include <vector>  // std::vector：缓存本地账号与权限快照信息。
 
 class QHBoxLayout;
+class QEvent;
 class QLabel;
 class QLineEdit;
 class QPushButton;
@@ -38,6 +39,7 @@ protected:
     // - 首次显示时再刷新账号与权限快照；
     // - 避免主窗口启动阶段同步访问本地账号与权限信息。
     void showEvent(QShowEvent* event) override;
+    void changeEvent(QEvent* event) override;
 
 private:
     // LocalUserEntry：
@@ -68,6 +70,7 @@ private:
     void initializeAccountTab();
     void initializePermissionTab();
     void initializeConnections();
+    void applyTranslatedHeaders();
 
     // ===================== 账号功能 =====================
     void refreshLocalUserList();

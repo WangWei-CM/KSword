@@ -10,6 +10,7 @@
 
 #include "StartupDock.h"
 #include "../theme.h"
+#include "../Internationalization/LanguageManager.h"
 #include "../ksword/startup/startup.h"
 
 #include <QApplication>
@@ -20,6 +21,7 @@
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QDir>
+#include <QEvent>
 #include <QFileDialog>
 #include <QFileIconProvider>
 #include <QFileInfo>
@@ -57,6 +59,16 @@
 
 namespace startup_dock_detail
 {
+    // startupText 作用：
+    // - 按启动项界面的具体场景读取中英文文本；
+    // - 中文模式保留调用点回退文本，英文模式读取场景翻译。
+    QString startupText(const char* key, const QString& sourceText);
+
+    // startupTableHeaders 作用：
+    // - 生成启动项表格和高级注册表树共用的本地化表头；
+    // - 语言切换后由 StartupDock 重新应用到所有视图。
+    QStringList startupTableHeaders();
+
     // StartupTreeNodeKind：
     // - 作用：区分注册表树中的“位置节点 / 条目节点 / 占位节点”。
     enum class StartupTreeNodeKind : int

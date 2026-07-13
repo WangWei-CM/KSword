@@ -13,7 +13,10 @@ StartupDock::StartupDock(QWidget* parent)
     initializeConnections();
 
     kLogEvent initEvent;
-    info << initEvent << "[StartupDock] 启动项页初始化完成。" << eol;
+    info << initEvent
+        << startupText("startup.log.initialized", QStringLiteral("[StartupDock] 启动项页初始化完成。"))
+               .toStdString()
+        << eol;
 }
 
 StartupDock::~StartupDock()
@@ -28,7 +31,22 @@ StartupDock::~StartupDock()
     }
 
     kLogEvent destroyEvent;
-    info << destroyEvent << "[StartupDock] 启动项页已析构。" << eol;
+    info << destroyEvent
+        << startupText("startup.log.destroyed", QStringLiteral("[StartupDock] 启动项页已析构。"))
+               .toStdString()
+        << eol;
+}
+
+void StartupDock::changeEvent(QEvent* event)
+{
+    QWidget::changeEvent(event);
+    if (event == nullptr || event->type() != QEvent::LanguageChange)
+    {
+        return;
+    }
+
+    applyTranslatedHeaders();
+    rebuildAllTables();
 }
 
 int StartupDock::toStartupColumn(const StartupColumn column)
@@ -41,21 +59,21 @@ QString StartupDock::categoryToText(const StartupCategory category)
     switch (category)
     {
     case StartupCategory::All:
-        return QStringLiteral("总览");
+        return startupText("startup.category.overview", QStringLiteral("总览"));
     case StartupCategory::Logon:
-        return QStringLiteral("登录");
+        return startupText("startup.category.logon", QStringLiteral("登录"));
     case StartupCategory::Services:
-        return QStringLiteral("服务");
+        return startupText("startup.category.services", QStringLiteral("服务"));
     case StartupCategory::Drivers:
-        return QStringLiteral("驱动");
+        return startupText("startup.category.drivers", QStringLiteral("驱动"));
     case StartupCategory::Tasks:
-        return QStringLiteral("计划任务");
+        return startupText("startup.category.tasks", QStringLiteral("计划任务"));
     case StartupCategory::Registry:
-        return QStringLiteral("高级注册表");
+        return startupText("startup.category.registry", QStringLiteral("高级注册表"));
     case StartupCategory::Wmi:
-        return QStringLiteral("WMI");
+        return startupText("startup.category.wmi", QStringLiteral("WMI"));
     default:
-        return QStringLiteral("未知");
+        return startupText("startup.category.unknown", QStringLiteral("未知"));
     }
 }
 
@@ -71,7 +89,8 @@ void StartupDock::showEvent(QShowEvent* event)
     m_initialRefreshDone = true;
     if (m_statusLabel != nullptr)
     {
-        m_statusLabel->setText(QStringLiteral("状态：首次打开，正在加载启动项..."));
+        m_statusLabel->setText(
+            startupText("startup.status.first_load", QStringLiteral("状态：首次打开，正在加载启动项...")));
     }
 
     // 延迟到事件循环末尾再发起首次后台枚举：
@@ -199,7 +218,10 @@ void StartupDock::requestAsyncRefresh(const bool forceRefresh)
         }
         if (m_statusLabel != nullptr)
         {
-            m_statusLabel->setText(QStringLiteral("状态：后台刷新进行中，已记录新的刷新请求"));
+            m_statusLabel->setText(
+                startupText(
+                    "startup.status.refresh_queued",
+                    QStringLiteral("状态：后台刷新进行中，已记录新的刷新请求")));
         }
         return;
     }
@@ -211,11 +233,18 @@ void StartupDock::requestAsyncRefresh(const bool forceRefresh)
 
     m_refreshInProgress = true;
     m_refreshQueued = false;
-    m_progressPid = kPro.add("启动项", "枚举自启动项");
-    kPro.set(m_progressPid, "准备枚举登录项", 0, 5.0f);
+    m_progressPid = kPro.add(
+        startupText("startup.progress.title", QStringLiteral("启动项")).toStdString(),
+        startupText("startup.progress.enumerate", QStringLiteral("枚举自启动项")).toStdString());
+    kPro.set(
+        m_progressPid,
+        startupText("startup.progress.prepare_logon", QStringLiteral("准备枚举登录项")).toStdString(),
+        0,
+        5.0f);
     if (m_statusLabel != nullptr)
     {
-        m_statusLabel->setText(QStringLiteral("状态：后台正在枚举启动项..."));
+        m_statusLabel->setText(
+            startupText("startup.status.refreshing", QStringLiteral("状态：后台正在枚举启动项...")));
     }
 
     const QPointer<StartupDock> safeThis(this);
@@ -229,11 +258,23 @@ void StartupDock::requestAsyncRefresh(const bool forceRefresh)
             std::vector<StartupEntry> entryList;
             entryList.reserve(256);
 
-            kPro.set(safeThis->m_progressPid, "调用 ks::startup 后端枚举启动项", 0, 15.0f);
+            kPro.set(
+                safeThis->m_progressPid,
+                startupText(
+                    "startup.progress.enumerate_backend",
+                    QStringLiteral("调用 ks::startup 后端枚举启动项")).toStdString(),
+                0,
+                15.0f);
             appendBackendStartupEntries(
                 &entryList,
                 ks::startup::EnumerateAllStartupEntries());
-            kPro.set(safeThis->m_progressPid, "ks::startup 后端枚举完成", 0, 96.0f);
+            kPro.set(
+                safeThis->m_progressPid,
+                startupText(
+                    "startup.progress.backend_completed",
+                    QStringLiteral("ks::startup 后端枚举完成")).toStdString(),
+                0,
+                96.0f);
 
             if (safeThis.isNull())
             {
@@ -277,20 +318,29 @@ void StartupDock::applyRefreshResult(std::vector<StartupEntry> entryList)
 
     if (m_statusLabel != nullptr)
     {
-        m_statusLabel->setText(QStringLiteral("状态：共 %1 条，当前分类 %2")
+        m_statusLabel->setText(
+            startupText("startup.status.summary", QStringLiteral("状态：共 %1 条，当前分类 %2"))
             .arg(m_entryList.size())
             .arg(categoryToText(currentCategory())));
     }
 
     if (m_progressPid != 0)
     {
-        kPro.set(m_progressPid, "启动项刷新完成", 0, 100.0f);
+        kPro.set(
+            m_progressPid,
+            startupText("startup.progress.completed", QStringLiteral("启动项刷新完成")).toStdString(),
+            0,
+            100.0f);
     }
 
     m_refreshInProgress = false;
 
     kLogEvent refreshEvent;
-    info << refreshEvent << "[StartupDock] 后台刷新完成, count=" << m_entryList.size() << eol;
+    info << refreshEvent
+        << startupText("startup.log.refresh.completed", QStringLiteral("[StartupDock] 后台刷新完成, count="))
+               .toStdString()
+        << m_entryList.size()
+        << eol;
 
     if (m_refreshQueued)
     {

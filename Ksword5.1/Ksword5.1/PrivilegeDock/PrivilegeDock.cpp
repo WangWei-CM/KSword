@@ -1,5 +1,6 @@
 #include "PrivilegeDock.h"
 #include "../UI/VisibleTableWidget.h"
+#include "../Internationalization/LanguageManager.h"
 
 // ============================================================
 // PrivilegeDock.cpp
@@ -16,6 +17,7 @@
 #include <QApplication>
 #include <QClipboard>
 #include <QDateTime>
+#include <QEvent>
 #include <QFormLayout>
 #include <QHeaderView>
 #include <QHBoxLayout>
@@ -33,6 +35,7 @@
 #include <QVBoxLayout>
 
 #include <algorithm>
+#include <string>
 #include <vector>
 
 #ifndef NOMINMAX
@@ -45,6 +48,16 @@
 
 namespace
 {
+    QString privilegeText(const char* const key, const QString& sourceText)
+    {
+        return ks::i18n::contextText(QString::fromLatin1(key), sourceText);
+    }
+
+    std::string privilegeLogText(const char* const key, const QString& sourceText)
+    {
+        return privilegeText(key, sourceText).toStdString();
+    }
+
     // blueButtonStyle 作用：
     // - 统一按钮风格，保证权限页视觉与其他 Dock 一致。
     QString blueButtonStyle()
@@ -79,7 +92,9 @@ namespace
     // - 把布尔状态统一转换成“是/否”中文文本。
     QString boolText(const bool value)
     {
-        return value ? QStringLiteral("是") : QStringLiteral("否");
+        return value
+            ? privilegeText("privilege.bool.yes", QStringLiteral("是"))
+            : privilegeText("privilege.bool.no", QStringLiteral("否"));
     }
 
     QString privilegeTableMenuStyle()
@@ -145,7 +160,8 @@ namespace
 
             QMenu menu(table);
             menu.setStyleSheet(privilegeTableMenuStyle());
-            QAction* copyRowAction = menu.addAction(QStringLiteral("复制当前行"));
+            QAction* copyRowAction = menu.addAction(privilegeText(
+                "privilege.menu.copy_row", QStringLiteral("复制当前行")));
             copyRowAction->setEnabled(table->currentRow() >= 0);
             if (menu.exec(table->viewport()->mapToGlobal(localPosition)) == copyRowAction)
             {
@@ -159,12 +175,16 @@ PrivilegeDock::PrivilegeDock(QWidget* parent)
     : QWidget(parent)
 {
     kLogEvent event;
-    info << event << "[PrivilegeDock] 构造开始。" << eol;
+    info << event
+        << privilegeLogText("privilege.log.construct.start", QStringLiteral("[PrivilegeDock] 构造开始。"))
+        << eol;
 
     initializeUi();
     initializeConnections();
 
-    info << event << "[PrivilegeDock] 构造完成。" << eol;
+    info << event
+        << privilegeLogText("privilege.log.construct.completed", QStringLiteral("[PrivilegeDock] 构造完成。"))
+        << eol;
 }
 
 void PrivilegeDock::showEvent(QShowEvent* event)
@@ -179,11 +199,15 @@ void PrivilegeDock::showEvent(QShowEvent* event)
     m_initialRefreshDone = true;
     if (m_accountStatusLabel != nullptr)
     {
-        m_accountStatusLabel->setText(QStringLiteral("状态：首次打开，正在加载账号列表..."));
+        m_accountStatusLabel->setText(privilegeText(
+            "privilege.account.status.first_load",
+            QStringLiteral("状态：首次打开，正在加载账号列表...")));
     }
     if (m_permissionStatusLabel != nullptr)
     {
-        m_permissionStatusLabel->setText(QStringLiteral("状态：首次打开，正在加载权限快照..."));
+        m_permissionStatusLabel->setText(privilegeText(
+            "privilege.permission.status.first_load",
+            QStringLiteral("状态：首次打开，正在加载权限快照...")));
     }
 
     QTimer::singleShot(0, this, [this]()
@@ -191,6 +215,19 @@ void PrivilegeDock::showEvent(QShowEvent* event)
             refreshLocalUserList();
             refreshPermissionSnapshot();
         });
+}
+
+void PrivilegeDock::changeEvent(QEvent* event)
+{
+    QWidget::changeEvent(event);
+    if (event == nullptr || event->type() != QEvent::LanguageChange)
+    {
+        return;
+    }
+
+    applyTranslatedHeaders();
+    refreshLocalUserTable();
+    refreshPermissionSnapshot();
 }
 
 void PrivilegeDock::initializeUi()
@@ -209,6 +246,7 @@ void PrivilegeDock::initializeUi()
 
 void PrivilegeDock::initializeAccountTab()
 {
+    ks::i18n::LanguageManager& languageManager = ks::i18n::LanguageManager::instance();
     m_accountPage = new QWidget(m_tabWidget);
     m_accountLayout = new QVBoxLayout(m_accountPage);
     m_accountLayout->setContentsMargins(4, 4, 4, 4);
@@ -219,23 +257,22 @@ void PrivilegeDock::initializeAccountTab()
     m_accountToolbarLayout->setSpacing(6);
 
     m_accountRefreshButton = new QPushButton(QIcon(":/Icon/process_refresh.svg"), QString(), m_accountPage);
-    m_accountRefreshButton->setToolTip(QStringLiteral("刷新本地账号列表"));
+    languageManager.bindToolTip(
+        m_accountRefreshButton,
+        QStringLiteral("privilege.account.refresh.tooltip"),
+        QStringLiteral("刷新本地账号列表"));
     m_accountRefreshButton->setStyleSheet(blueButtonStyle());
     m_accountRefreshButton->setFixedWidth(34);
 
-    m_accountStatusLabel = new QLabel(QStringLiteral("状态：待刷新"), m_accountPage);
+    m_accountStatusLabel = new QLabel(privilegeText(
+        "privilege.account.status.pending", QStringLiteral("状态：待刷新")), m_accountPage);
     m_accountToolbarLayout->addWidget(m_accountRefreshButton, 0);
     m_accountToolbarLayout->addWidget(m_accountStatusLabel, 1);
     m_accountLayout->addLayout(m_accountToolbarLayout, 0);
 
     m_accountTable = new ks::ui::VisibleTableWidget(m_accountPage);
     m_accountTable->setColumnCount(4);
-    m_accountTable->setHorizontalHeaderLabels({
-        QStringLiteral("用户名"),
-        QStringLiteral("全名"),
-        QStringLiteral("已禁用"),
-        QStringLiteral("最后登录")
-        });
+    applyTranslatedHeaders();
     m_accountTable->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_accountTable->setSelectionMode(QAbstractItemView::SingleSelection);
     m_accountTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
@@ -254,19 +291,37 @@ void PrivilegeDock::initializeAccountTab()
     m_createPasswordConfirmEdit = new QLineEdit(m_accountPage);
     m_createPasswordEdit->setEchoMode(QLineEdit::Password);
     m_createPasswordConfirmEdit->setEchoMode(QLineEdit::Password);
-    m_createUserNameEdit->setPlaceholderText(QStringLiteral("输入新用户名"));
-    m_createPasswordEdit->setPlaceholderText(QStringLiteral("输入密码"));
-    m_createPasswordConfirmEdit->setPlaceholderText(QStringLiteral("再次输入密码"));
+    languageManager.bindPlaceholder(
+        m_createUserNameEdit,
+        QStringLiteral("privilege.account.create.username.placeholder"),
+        QStringLiteral("输入新用户名"));
+    languageManager.bindPlaceholder(
+        m_createPasswordEdit,
+        QStringLiteral("privilege.account.create.password.placeholder"),
+        QStringLiteral("输入密码"));
+    languageManager.bindPlaceholder(
+        m_createPasswordConfirmEdit,
+        QStringLiteral("privilege.account.create.confirm_password.placeholder"),
+        QStringLiteral("再次输入密码"));
     m_createUserNameEdit->setStyleSheet(blueInputStyle());
     m_createPasswordEdit->setStyleSheet(blueInputStyle());
     m_createPasswordConfirmEdit->setStyleSheet(blueInputStyle());
-    createLayout->addRow(QStringLiteral("新用户"), m_createUserNameEdit);
-    createLayout->addRow(QStringLiteral("密码"), m_createPasswordEdit);
-    createLayout->addRow(QStringLiteral("确认密码"), m_createPasswordConfirmEdit);
+    QLabel* createUserLabel = new QLabel(QStringLiteral("新用户"), m_accountPage);
+    QLabel* createPasswordLabel = new QLabel(QStringLiteral("密码"), m_accountPage);
+    QLabel* createConfirmPasswordLabel = new QLabel(QStringLiteral("确认密码"), m_accountPage);
+    languageManager.bindText(createUserLabel, QStringLiteral("privilege.account.create.username.label"), QStringLiteral("新用户"));
+    languageManager.bindText(createPasswordLabel, QStringLiteral("privilege.account.create.password.label"), QStringLiteral("密码"));
+    languageManager.bindText(createConfirmPasswordLabel, QStringLiteral("privilege.account.create.confirm_password.label"), QStringLiteral("确认密码"));
+    createLayout->addRow(createUserLabel, m_createUserNameEdit);
+    createLayout->addRow(createPasswordLabel, m_createPasswordEdit);
+    createLayout->addRow(createConfirmPasswordLabel, m_createPasswordConfirmEdit);
     m_accountLayout->addLayout(createLayout, 0);
 
     m_createUserButton = new QPushButton(QIcon(":/Icon/process_start.svg"), QString(), m_accountPage);
-    m_createUserButton->setToolTip(QStringLiteral("创建本地用户（会弹出二次确认）"));
+    languageManager.bindToolTip(
+        m_createUserButton,
+        QStringLiteral("privilege.account.create.tooltip"),
+        QStringLiteral("创建本地用户（会弹出二次确认）"));
     m_createUserButton->setStyleSheet(blueButtonStyle());
     m_createUserButton->setFixedWidth(34);
     m_accountLayout->addWidget(m_createUserButton, 0, Qt::AlignLeft);
@@ -278,28 +333,52 @@ void PrivilegeDock::initializeAccountTab()
     m_resetPasswordConfirmEdit = new QLineEdit(m_accountPage);
     m_resetPasswordEdit->setEchoMode(QLineEdit::Password);
     m_resetPasswordConfirmEdit->setEchoMode(QLineEdit::Password);
-    m_resetUserNameEdit->setPlaceholderText(QStringLiteral("输入要重置密码的用户名"));
-    m_resetPasswordEdit->setPlaceholderText(QStringLiteral("输入新密码"));
-    m_resetPasswordConfirmEdit->setPlaceholderText(QStringLiteral("再次输入新密码"));
+    languageManager.bindPlaceholder(
+        m_resetUserNameEdit,
+        QStringLiteral("privilege.account.reset.username.placeholder"),
+        QStringLiteral("输入要重置密码的用户名"));
+    languageManager.bindPlaceholder(
+        m_resetPasswordEdit,
+        QStringLiteral("privilege.account.reset.password.placeholder"),
+        QStringLiteral("输入新密码"));
+    languageManager.bindPlaceholder(
+        m_resetPasswordConfirmEdit,
+        QStringLiteral("privilege.account.reset.confirm_password.placeholder"),
+        QStringLiteral("再次输入新密码"));
     m_resetUserNameEdit->setStyleSheet(blueInputStyle());
     m_resetPasswordEdit->setStyleSheet(blueInputStyle());
     m_resetPasswordConfirmEdit->setStyleSheet(blueInputStyle());
-    resetLayout->addRow(QStringLiteral("目标用户"), m_resetUserNameEdit);
-    resetLayout->addRow(QStringLiteral("新密码"), m_resetPasswordEdit);
-    resetLayout->addRow(QStringLiteral("确认新密码"), m_resetPasswordConfirmEdit);
+    QLabel* resetUserLabel = new QLabel(QStringLiteral("目标用户"), m_accountPage);
+    QLabel* resetPasswordLabel = new QLabel(QStringLiteral("新密码"), m_accountPage);
+    QLabel* resetConfirmPasswordLabel = new QLabel(QStringLiteral("确认新密码"), m_accountPage);
+    languageManager.bindText(resetUserLabel, QStringLiteral("privilege.account.reset.username.label"), QStringLiteral("目标用户"));
+    languageManager.bindText(resetPasswordLabel, QStringLiteral("privilege.account.reset.password.label"), QStringLiteral("新密码"));
+    languageManager.bindText(resetConfirmPasswordLabel, QStringLiteral("privilege.account.reset.confirm_password.label"), QStringLiteral("确认新密码"));
+    resetLayout->addRow(resetUserLabel, m_resetUserNameEdit);
+    resetLayout->addRow(resetPasswordLabel, m_resetPasswordEdit);
+    resetLayout->addRow(resetConfirmPasswordLabel, m_resetPasswordConfirmEdit);
     m_accountLayout->addLayout(resetLayout, 0);
 
     m_resetPasswordButton = new QPushButton(QIcon(":/Icon/process_priority.svg"), QString(), m_accountPage);
-    m_resetPasswordButton->setToolTip(QStringLiteral("重置用户密码（会弹出二次确认）"));
+    languageManager.bindToolTip(
+        m_resetPasswordButton,
+        QStringLiteral("privilege.account.reset.tooltip"),
+        QStringLiteral("重置用户密码（会弹出二次确认）"));
     m_resetPasswordButton->setStyleSheet(blueButtonStyle());
     m_resetPasswordButton->setFixedWidth(34);
     m_accountLayout->addWidget(m_resetPasswordButton, 0, Qt::AlignLeft);
 
     m_tabWidget->addTab(m_accountPage, QStringLiteral("账号"));
+    languageManager.bindTab(
+        m_tabWidget,
+        m_accountPage,
+        QStringLiteral("privilege.tab.accounts"),
+        QStringLiteral("账号"));
 }
 
 void PrivilegeDock::initializePermissionTab()
 {
+    ks::i18n::LanguageManager& languageManager = ks::i18n::LanguageManager::instance();
     m_permissionPage = new QWidget(m_tabWidget);
     m_permissionLayout = new QVBoxLayout(m_permissionPage);
     m_permissionLayout->setContentsMargins(4, 4, 4, 4);
@@ -310,23 +389,22 @@ void PrivilegeDock::initializePermissionTab()
     m_permissionToolbarLayout->setSpacing(6);
 
     m_permissionRefreshButton = new QPushButton(QIcon(":/Icon/process_refresh.svg"), QString(), m_permissionPage);
-    m_permissionRefreshButton->setToolTip(QStringLiteral("刷新用户/组/权限快照"));
+    languageManager.bindToolTip(
+        m_permissionRefreshButton,
+        QStringLiteral("privilege.permission.refresh.tooltip"),
+        QStringLiteral("刷新用户/组/权限快照"));
     m_permissionRefreshButton->setStyleSheet(blueButtonStyle());
     m_permissionRefreshButton->setFixedWidth(34);
 
-    m_permissionStatusLabel = new QLabel(QStringLiteral("状态：待刷新"), m_permissionPage);
+    m_permissionStatusLabel = new QLabel(privilegeText(
+        "privilege.permission.status.pending", QStringLiteral("状态：待刷新")), m_permissionPage);
     m_permissionToolbarLayout->addWidget(m_permissionRefreshButton, 0);
     m_permissionToolbarLayout->addWidget(m_permissionStatusLabel, 1);
     m_permissionLayout->addLayout(m_permissionToolbarLayout, 0);
 
     m_permissionTable = new ks::ui::VisibleTableWidget(m_permissionPage);
     m_permissionTable->setColumnCount(4);
-    m_permissionTable->setHorizontalHeaderLabels({
-        QStringLiteral("类型"),
-        QStringLiteral("名称"),
-        QStringLiteral("状态"),
-        QStringLiteral("详情")
-        });
+    applyTranslatedHeaders();
     m_permissionTable->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_permissionTable->setSelectionMode(QAbstractItemView::SingleSelection);
     m_permissionTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
@@ -340,6 +418,33 @@ void PrivilegeDock::initializePermissionTab()
     m_permissionLayout->addWidget(m_permissionTable, 1);
 
     m_tabWidget->addTab(m_permissionPage, QStringLiteral("权限"));
+    languageManager.bindTab(
+        m_tabWidget,
+        m_permissionPage,
+        QStringLiteral("privilege.tab.permissions"),
+        QStringLiteral("权限"));
+}
+
+void PrivilegeDock::applyTranslatedHeaders()
+{
+    if (m_accountTable != nullptr)
+    {
+        m_accountTable->setHorizontalHeaderLabels({
+            privilegeText("privilege.account.header.username", QStringLiteral("用户名")),
+            privilegeText("privilege.account.header.full_name", QStringLiteral("全名")),
+            privilegeText("privilege.account.header.disabled", QStringLiteral("已禁用")),
+            privilegeText("privilege.account.header.last_logon", QStringLiteral("最后登录"))
+            });
+    }
+    if (m_permissionTable != nullptr)
+    {
+        m_permissionTable->setHorizontalHeaderLabels({
+            privilegeText("privilege.permission.header.type", QStringLiteral("类型")),
+            privilegeText("privilege.permission.header.name", QStringLiteral("名称")),
+            privilegeText("privilege.permission.header.status", QStringLiteral("状态")),
+            privilegeText("privilege.permission.header.detail", QStringLiteral("详情"))
+            });
+    }
 }
 
 void PrivilegeDock::initializeConnections()
@@ -370,7 +475,11 @@ void PrivilegeDock::refreshLocalUserList()
 {
     // accountEvent 复用整条刷新日志链路。
     kLogEvent accountEvent;
-    info << accountEvent << "[PrivilegeDock] 开始刷新本地用户列表。" << eol;
+    info << accountEvent
+        << privilegeLogText(
+            "privilege.log.refresh_users.start",
+            QStringLiteral("[PrivilegeDock] 开始刷新本地用户列表。"))
+        << eol;
 
     m_localUserList.clear();
 
@@ -394,12 +503,16 @@ void PrivilegeDock::refreshLocalUserList()
     {
         const QString errorText = winErrorText(enumStatus);
         err << accountEvent
-            << "[PrivilegeDock] 刷新用户失败, status="
+            << privilegeLogText(
+                "privilege.log.refresh_users.failed",
+                QStringLiteral("[PrivilegeDock] 刷新用户失败, status="))
             << enumStatus
             << ", error="
             << errorText.toStdString()
             << eol;
-        m_accountStatusLabel->setText(QStringLiteral("状态：刷新失败 - %1").arg(errorText));
+        m_accountStatusLabel->setText(privilegeText(
+            "privilege.account.status.refresh_failed",
+            QStringLiteral("状态：刷新失败 - %1")).arg(errorText));
         if (userInfo != nullptr)
         {
             ::NetApiBufferFree(userInfo);
@@ -429,12 +542,16 @@ void PrivilegeDock::refreshLocalUserList()
     }
 
     refreshLocalUserTable();
-    m_accountStatusLabel->setText(QStringLiteral("状态：已加载 %1 / %2 个账号")
+    m_accountStatusLabel->setText(privilegeText(
+        "privilege.account.status.loaded",
+        QStringLiteral("状态：已加载 %1 / %2 个账号"))
         .arg(entriesRead)
         .arg(totalEntries));
 
     info << accountEvent
-        << "[PrivilegeDock] 用户列表刷新完成, entriesRead="
+        << privilegeLogText(
+            "privilege.log.refresh_users.completed",
+            QStringLiteral("[PrivilegeDock] 用户列表刷新完成, entriesRead="))
         << entriesRead
         << ", totalEntries="
         << totalEntries
@@ -483,7 +600,9 @@ bool PrivilegeDock::createLocalUser(
     {
         if (errorTextOut != nullptr)
         {
-            *errorTextOut = QStringLiteral("NetUserAdd失败: %1, 参数索引=%2")
+            *errorTextOut = privilegeText(
+                "privilege.error.net_user_add",
+                QStringLiteral("NetUserAdd失败: %1, 参数索引=%2"))
                 .arg(winErrorText(status))
                 .arg(paramError);
         }
@@ -516,7 +635,9 @@ bool PrivilegeDock::resetLocalUserPassword(
     {
         if (errorTextOut != nullptr)
         {
-            *errorTextOut = QStringLiteral("NetUserSetInfo失败: %1").arg(winErrorText(status));
+            *errorTextOut = privilegeText(
+                "privilege.error.net_user_set_info",
+                QStringLiteral("NetUserSetInfo失败: %1")).arg(winErrorText(status));
         }
         return false;
     }
@@ -531,25 +652,36 @@ void PrivilegeDock::createUserByInputs()
 
     if (userName.isEmpty())
     {
-        QMessageBox::warning(this, QStringLiteral("创建用户"), QStringLiteral("用户名不能为空。"));
+        QMessageBox::warning(
+            this,
+            privilegeText("privilege.dialog.create.title", QStringLiteral("创建用户")),
+            privilegeText("privilege.dialog.create.username_empty", QStringLiteral("用户名不能为空。")));
         return;
     }
     if (password.isEmpty())
     {
-        QMessageBox::warning(this, QStringLiteral("创建用户"), QStringLiteral("密码不能为空。"));
+        QMessageBox::warning(
+            this,
+            privilegeText("privilege.dialog.create.title", QStringLiteral("创建用户")),
+            privilegeText("privilege.dialog.create.password_empty", QStringLiteral("密码不能为空。")));
         return;
     }
     if (password != confirmPassword)
     {
-        QMessageBox::warning(this, QStringLiteral("创建用户"), QStringLiteral("两次密码输入不一致。"));
+        QMessageBox::warning(
+            this,
+            privilegeText("privilege.dialog.create.title", QStringLiteral("创建用户")),
+            privilegeText("privilege.dialog.create.password_mismatch", QStringLiteral("两次密码输入不一致。")));
         return;
     }
 
     // 二次确认：避免误触导致系统新增账号。
     const int confirm = QMessageBox::question(
         this,
-        QStringLiteral("创建用户"),
-        QStringLiteral("确定创建本地用户“%1”吗？").arg(userName),
+        privilegeText("privilege.dialog.create.title", QStringLiteral("创建用户")),
+        privilegeText(
+            "privilege.dialog.create.confirm",
+            QStringLiteral("确定创建本地用户“%1”吗？")).arg(userName),
         QMessageBox::Yes | QMessageBox::No,
         QMessageBox::No);
     if (confirm != QMessageBox::Yes)
@@ -559,7 +691,9 @@ void PrivilegeDock::createUserByInputs()
 
     kLogEvent actionEvent;
     info << actionEvent
-        << "[PrivilegeDock] 创建用户请求, user="
+        << privilegeLogText(
+            "privilege.log.create_user.request",
+            QStringLiteral("[PrivilegeDock] 创建用户请求, user="))
         << userName.toStdString()
         << eol;
 
@@ -567,20 +701,30 @@ void PrivilegeDock::createUserByInputs()
     if (!createLocalUser(userName, password, &errorText))
     {
         err << actionEvent
-            << "[PrivilegeDock] 创建用户失败, user="
+            << privilegeLogText(
+                "privilege.log.create_user.failed",
+                QStringLiteral("[PrivilegeDock] 创建用户失败, user="))
             << userName.toStdString()
             << ", error="
             << errorText.toStdString()
             << eol;
-        QMessageBox::warning(this, QStringLiteral("创建用户"), errorText);
+        QMessageBox::warning(
+            this,
+            privilegeText("privilege.dialog.create.title", QStringLiteral("创建用户")),
+            errorText);
         return;
     }
 
     info << actionEvent
-        << "[PrivilegeDock] 创建用户成功, user="
+        << privilegeLogText(
+            "privilege.log.create_user.succeeded",
+            QStringLiteral("[PrivilegeDock] 创建用户成功, user="))
         << userName.toStdString()
         << eol;
-    QMessageBox::information(this, QStringLiteral("创建用户"), QStringLiteral("创建成功。"));
+    QMessageBox::information(
+        this,
+        privilegeText("privilege.dialog.create.title", QStringLiteral("创建用户")),
+        privilegeText("privilege.dialog.create.succeeded", QStringLiteral("创建成功。")));
     refreshLocalUserList();
     refreshPermissionSnapshot();
 }
@@ -593,24 +737,35 @@ void PrivilegeDock::resetPasswordByInputs()
 
     if (userName.isEmpty())
     {
-        QMessageBox::warning(this, QStringLiteral("重置密码"), QStringLiteral("目标用户名不能为空。"));
+        QMessageBox::warning(
+            this,
+            privilegeText("privilege.dialog.reset.title", QStringLiteral("重置密码")),
+            privilegeText("privilege.dialog.reset.username_empty", QStringLiteral("目标用户名不能为空。")));
         return;
     }
     if (password.isEmpty())
     {
-        QMessageBox::warning(this, QStringLiteral("重置密码"), QStringLiteral("新密码不能为空。"));
+        QMessageBox::warning(
+            this,
+            privilegeText("privilege.dialog.reset.title", QStringLiteral("重置密码")),
+            privilegeText("privilege.dialog.reset.password_empty", QStringLiteral("新密码不能为空。")));
         return;
     }
     if (password != confirmPassword)
     {
-        QMessageBox::warning(this, QStringLiteral("重置密码"), QStringLiteral("两次密码输入不一致。"));
+        QMessageBox::warning(
+            this,
+            privilegeText("privilege.dialog.reset.title", QStringLiteral("重置密码")),
+            privilegeText("privilege.dialog.reset.password_mismatch", QStringLiteral("两次密码输入不一致。")));
         return;
     }
 
     const int confirm = QMessageBox::question(
         this,
-        QStringLiteral("重置密码"),
-        QStringLiteral("确定为“%1”重置密码吗？").arg(userName),
+        privilegeText("privilege.dialog.reset.title", QStringLiteral("重置密码")),
+        privilegeText(
+            "privilege.dialog.reset.confirm",
+            QStringLiteral("确定为“%1”重置密码吗？")).arg(userName),
         QMessageBox::Yes | QMessageBox::No,
         QMessageBox::No);
     if (confirm != QMessageBox::Yes)
@@ -620,7 +775,9 @@ void PrivilegeDock::resetPasswordByInputs()
 
     kLogEvent actionEvent;
     info << actionEvent
-        << "[PrivilegeDock] 重置密码请求, user="
+        << privilegeLogText(
+            "privilege.log.reset_password.request",
+            QStringLiteral("[PrivilegeDock] 重置密码请求, user="))
         << userName.toStdString()
         << eol;
 
@@ -628,39 +785,56 @@ void PrivilegeDock::resetPasswordByInputs()
     if (!resetLocalUserPassword(userName, password, &errorText))
     {
         err << actionEvent
-            << "[PrivilegeDock] 重置密码失败, user="
+            << privilegeLogText(
+                "privilege.log.reset_password.failed",
+                QStringLiteral("[PrivilegeDock] 重置密码失败, user="))
             << userName.toStdString()
             << ", error="
             << errorText.toStdString()
             << eol;
-        QMessageBox::warning(this, QStringLiteral("重置密码"), errorText);
+        QMessageBox::warning(
+            this,
+            privilegeText("privilege.dialog.reset.title", QStringLiteral("重置密码")),
+            errorText);
         return;
     }
 
     info << actionEvent
-        << "[PrivilegeDock] 重置密码成功, user="
+        << privilegeLogText(
+            "privilege.log.reset_password.succeeded",
+            QStringLiteral("[PrivilegeDock] 重置密码成功, user="))
         << userName.toStdString()
         << eol;
-    QMessageBox::information(this, QStringLiteral("重置密码"), QStringLiteral("重置成功。"));
+    QMessageBox::information(
+        this,
+        privilegeText("privilege.dialog.reset.title", QStringLiteral("重置密码")),
+        privilegeText("privilege.dialog.reset.succeeded", QStringLiteral("重置成功。")));
 }
 
 void PrivilegeDock::refreshPermissionSnapshot()
 {
     kLogEvent event;
-    info << event << "[PrivilegeDock] 开始刷新权限快照。" << eol;
+    info << event
+        << privilegeLogText(
+            "privilege.log.refresh_privileges.start",
+            QStringLiteral("[PrivilegeDock] 开始刷新权限快照。"))
+        << eol;
 
     std::vector<PermissionSnapshotRow> rowList;
     appendLocalUserAndGroupRows(&rowList);
     appendCurrentProcessPrivilegeRows(&rowList);
     refreshPermissionTable(rowList);
 
-    m_permissionStatusLabel->setText(
-        QStringLiteral("状态：%1 刷新完成，共 %2 项")
+    m_permissionStatusLabel->setText(privilegeText(
+        "privilege.permission.status.completed",
+        QStringLiteral("状态：%1 刷新完成，共 %2 项"))
         .arg(QDateTime::currentDateTime().toString(QStringLiteral("HH:mm:ss")))
         .arg(static_cast<int>(rowList.size())));
 
     info << event
-        << "[PrivilegeDock] 权限快照刷新完成, rows="
+        << privilegeLogText(
+            "privilege.log.refresh_privileges.completed",
+            QStringLiteral("[PrivilegeDock] 权限快照刷新完成, rows="))
         << rowList.size()
         << eol;
 }
@@ -676,14 +850,16 @@ void PrivilegeDock::appendLocalUserAndGroupRows(std::vector<PermissionSnapshotRo
     for (const LocalUserEntry& entry : m_localUserList)
     {
         PermissionSnapshotRow row;
-        row.type = QStringLiteral("用户");
+        row.type = privilegeText("privilege.row.type.user", QStringLiteral("用户"));
         row.name = entry.name;
-        row.status = QStringLiteral("禁用:%1  最后登录:%2")
+        row.status = privilegeText(
+            "privilege.row.user.status",
+            QStringLiteral("禁用:%1  最后登录:%2"))
             .arg(boolText(entry.disabled))
             .arg(entry.lastLogonText);
         row.detail = entry.fullName.isEmpty()
-            ? QStringLiteral("<无全名>")
-            : QStringLiteral("全名:%1").arg(entry.fullName);
+            ? privilegeText("privilege.row.no_full_name", QStringLiteral("<无全名>"))
+            : privilegeText("privilege.row.full_name", QStringLiteral("全名:%1")).arg(entry.fullName);
         rowsOut->push_back(row);
     }
 
@@ -712,11 +888,11 @@ void PrivilegeDock::appendLocalUserAndGroupRows(std::vector<PermissionSnapshotRo
                 ? QString::fromWCharArray(group.lgrpi1_comment)
                 : QString();
             PermissionSnapshotRow row;
-            row.type = QStringLiteral("组");
+            row.type = privilegeText("privilege.row.type.group", QStringLiteral("组"));
             row.name = groupName;
-            row.status = QStringLiteral("本地组");
+            row.status = privilegeText("privilege.row.group.local", QStringLiteral("本地组"));
             row.detail = groupComment.isEmpty()
-                ? QStringLiteral("<无说明>")
+                ? privilegeText("privilege.row.no_description", QStringLiteral("<无说明>"))
                 : groupComment;
             rowsOut->push_back(row);
         }
@@ -724,9 +900,9 @@ void PrivilegeDock::appendLocalUserAndGroupRows(std::vector<PermissionSnapshotRo
     else
     {
         PermissionSnapshotRow row;
-        row.type = QStringLiteral("组");
-        row.name = QStringLiteral("<读取失败>");
-        row.status = QStringLiteral("错误");
+        row.type = privilegeText("privilege.row.type.group", QStringLiteral("组"));
+        row.name = privilegeText("privilege.row.read_failed", QStringLiteral("<读取失败>"));
+        row.status = privilegeText("privilege.row.error", QStringLiteral("错误"));
         row.detail = winErrorText(status);
         rowsOut->push_back(row);
     }
@@ -748,10 +924,12 @@ void PrivilegeDock::appendCurrentProcessPrivilegeRows(std::vector<PermissionSnap
     if (::OpenProcessToken(::GetCurrentProcess(), TOKEN_QUERY, &tokenHandle) == FALSE)
     {
         PermissionSnapshotRow row;
-        row.type = QStringLiteral("进程权限");
-        row.name = QStringLiteral("<读取失败>");
-        row.status = QStringLiteral("错误");
-        row.detail = QStringLiteral("OpenProcessToken失败: %1").arg(winErrorText(::GetLastError()));
+        row.type = privilegeText("privilege.row.type.process_privilege", QStringLiteral("进程权限"));
+        row.name = privilegeText("privilege.row.read_failed", QStringLiteral("<读取失败>"));
+        row.status = privilegeText("privilege.row.error", QStringLiteral("错误"));
+        row.detail = privilegeText(
+            "privilege.error.open_process_token",
+            QStringLiteral("OpenProcessToken失败: %1")).arg(winErrorText(::GetLastError()));
         rowsOut->push_back(row);
         return;
     }
@@ -761,10 +939,12 @@ void PrivilegeDock::appendCurrentProcessPrivilegeRows(std::vector<PermissionSnap
     if (bytesNeeded == 0)
     {
         PermissionSnapshotRow row;
-        row.type = QStringLiteral("进程权限");
-        row.name = QStringLiteral("<读取失败>");
-        row.status = QStringLiteral("错误");
-        row.detail = QStringLiteral("GetTokenInformation失败: %1").arg(winErrorText(::GetLastError()));
+        row.type = privilegeText("privilege.row.type.process_privilege", QStringLiteral("进程权限"));
+        row.name = privilegeText("privilege.row.read_failed", QStringLiteral("<读取失败>"));
+        row.status = privilegeText("privilege.row.error", QStringLiteral("错误"));
+        row.detail = privilegeText(
+            "privilege.error.get_token_information",
+            QStringLiteral("GetTokenInformation失败: %1")).arg(winErrorText(::GetLastError()));
         rowsOut->push_back(row);
         ::CloseHandle(tokenHandle);
         return;
@@ -780,10 +960,12 @@ void PrivilegeDock::appendCurrentProcessPrivilegeRows(std::vector<PermissionSnap
     {
         const QString errorText = winErrorText(::GetLastError());
         PermissionSnapshotRow row;
-        row.type = QStringLiteral("进程权限");
-        row.name = QStringLiteral("<读取失败>");
-        row.status = QStringLiteral("错误");
-        row.detail = QStringLiteral("GetTokenInformation失败: %1").arg(errorText);
+        row.type = privilegeText("privilege.row.type.process_privilege", QStringLiteral("进程权限"));
+        row.name = privilegeText("privilege.row.read_failed", QStringLiteral("<读取失败>"));
+        row.status = privilegeText("privilege.row.error", QStringLiteral("错误"));
+        row.detail = privilegeText(
+            "privilege.error.get_token_information",
+            QStringLiteral("GetTokenInformation失败: %1")).arg(errorText);
         rowsOut->push_back(row);
         ::CloseHandle(tokenHandle);
         return;
@@ -795,7 +977,9 @@ void PrivilegeDock::appendCurrentProcessPrivilegeRows(std::vector<PermissionSnap
         const LUID_AND_ATTRIBUTES& privilege = privileges->Privileges[index];
         wchar_t nameBuffer[256] = {};
         DWORD nameLength = static_cast<DWORD>(std::size(nameBuffer));
-        QString privilegeName = QStringLiteral("<LookupPrivilegeName失败>");
+        QString privilegeName = privilegeText(
+            "privilege.row.lookup_privilege_name_failed",
+            QStringLiteral("<LookupPrivilegeName失败>"));
         if (::LookupPrivilegeNameW(nullptr, const_cast<PLUID>(&privilege.Luid), nameBuffer, &nameLength) != FALSE)
         {
             privilegeName = QString::fromWCharArray(nameBuffer, static_cast<int>(nameLength));
@@ -804,7 +988,7 @@ void PrivilegeDock::appendCurrentProcessPrivilegeRows(std::vector<PermissionSnap
         wchar_t displayNameBuffer[512] = {};
         DWORD displayNameLength = static_cast<DWORD>(std::size(displayNameBuffer));
         DWORD languageId = 0;
-        QString displayName = QStringLiteral("<无显示名>");
+        QString displayName = privilegeText("privilege.row.no_display_name", QStringLiteral("<无显示名>"));
         if (::LookupPrivilegeDisplayNameW(
             nullptr,
             reinterpret_cast<LPCWSTR>(privilegeName.utf16()),
@@ -821,9 +1005,11 @@ void PrivilegeDock::appendCurrentProcessPrivilegeRows(std::vector<PermissionSnap
         const bool removed = (privilege.Attributes & SE_PRIVILEGE_REMOVED) != 0;
 
         PermissionSnapshotRow row;
-        row.type = QStringLiteral("进程权限");
+        row.type = privilegeText("privilege.row.type.process_privilege", QStringLiteral("进程权限"));
         row.name = privilegeName;
-        row.status = QStringLiteral("启用:%1 默认:%2 移除:%3")
+        row.status = privilegeText(
+            "privilege.row.process_privilege.status",
+            QStringLiteral("启用:%1 默认:%2 移除:%3"))
             .arg(boolText(enabled))
             .arg(boolText(enabledByDefault))
             .arg(boolText(removed));
@@ -836,10 +1022,12 @@ void PrivilegeDock::appendCurrentProcessPrivilegeRows(std::vector<PermissionSnap
     if (privileges->PrivilegeCount == 0)
     {
         PermissionSnapshotRow row;
-        row.type = QStringLiteral("进程权限");
-        row.name = QStringLiteral("<空>");
-        row.status = QStringLiteral("无权限项");
-        row.detail = QStringLiteral("当前进程令牌未返回任何权限条目。");
+        row.type = privilegeText("privilege.row.type.process_privilege", QStringLiteral("进程权限"));
+        row.name = privilegeText("privilege.row.empty", QStringLiteral("<空>"));
+        row.status = privilegeText("privilege.row.no_privileges", QStringLiteral("无权限项"));
+        row.detail = privilegeText(
+            "privilege.row.no_privileges.detail",
+            QStringLiteral("当前进程令牌未返回任何权限条目。"));
         rowsOut->push_back(row);
     }
 
@@ -868,7 +1056,7 @@ QString PrivilegeDock::fileTimeToDateTimeText(const std::uint32_t secondsSince19
 {
     if (secondsSince1970 == 0)
     {
-        return QStringLiteral("从未");
+        return privilegeText("privilege.time.never", QStringLiteral("从未"));
     }
     return QDateTime::fromSecsSinceEpoch(secondsSince1970).toString(QStringLiteral("yyyy-MM-dd HH:mm:ss"));
 }
@@ -892,7 +1080,7 @@ QString PrivilegeDock::winErrorText(const DWORD code) const
     }
     if (messageText.isEmpty())
     {
-        return QStringLiteral("错误码 %1").arg(code);
+        return privilegeText("privilege.error.code", QStringLiteral("错误码 %1")).arg(code);
     }
     return QStringLiteral("%1 (code=%2)").arg(messageText).arg(code);
 }

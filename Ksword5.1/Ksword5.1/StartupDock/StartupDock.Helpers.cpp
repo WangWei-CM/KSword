@@ -62,7 +62,9 @@ namespace startup_dock_detail
 
     QString buildStatusText(const bool enabled)
     {
-        return enabled ? QStringLiteral("启用") : QStringLiteral("禁用");
+        return enabled
+            ? startupText("startup.value.enabled", QStringLiteral("启用"))
+            : startupText("startup.value.disabled", QStringLiteral("禁用"));
     }
 
     QStringList parseCsvLine(const QString& csvLineText)

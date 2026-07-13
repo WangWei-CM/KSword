@@ -11,7 +11,9 @@ namespace
     // - 调用：启动项详细信息文本拼装时复用。
     QString boolText(const bool value)
     {
-        return value ? QStringLiteral("是") : QStringLiteral("否");
+        return value
+            ? startupText("startup.value.yes", QStringLiteral("是"))
+            : startupText("startup.value.no", QStringLiteral("否"));
     }
 
     // buildEntryDetailText：
@@ -22,23 +24,38 @@ namespace
     QString buildEntryDetailText(const StartupDock::StartupEntry& entry)
     {
         QString detailText;
-        detailText += QStringLiteral("名称：%1\n").arg(entry.itemNameText);
-        detailText += QStringLiteral("分类：%1\n").arg(entry.categoryText);
-        detailText += QStringLiteral("发布者：%1\n").arg(entry.publisherText.isEmpty() ? QStringLiteral("<空>") : entry.publisherText);
-        detailText += QStringLiteral("镜像路径：%1\n").arg(entry.imagePathText.isEmpty() ? QStringLiteral("<空>") : entry.imagePathText);
-        detailText += QStringLiteral("命令：%1\n").arg(entry.commandText.isEmpty() ? QStringLiteral("<空>") : entry.commandText);
-        detailText += QStringLiteral("来源位置：%1\n").arg(entry.locationText.isEmpty() ? QStringLiteral("<空>") : entry.locationText);
-        detailText += QStringLiteral("分组位置：%1\n").arg(entry.locationGroupText.isEmpty() ? QStringLiteral("<空>") : entry.locationGroupText);
-        detailText += QStringLiteral("注册表值名：%1\n").arg(entry.registryValueNameText.isEmpty() ? QStringLiteral("<空>") : entry.registryValueNameText);
-        detailText += QStringLiteral("用户/上下文：%1\n").arg(entry.userText.isEmpty() ? QStringLiteral("<空>") : entry.userText);
-        detailText += QStringLiteral("类型：%1\n").arg(entry.sourceTypeText.isEmpty() ? QStringLiteral("<空>") : entry.sourceTypeText);
-        detailText += QStringLiteral("状态：%1\n").arg(buildStatusText(entry.enabled));
-        detailText += QStringLiteral("补充说明：%1\n").arg(entry.detailText.isEmpty() ? QStringLiteral("<空>") : entry.detailText);
-        detailText += QStringLiteral("可打开文件位置：%1\n").arg(boolText(entry.canOpenFileLocation));
-        detailText += QStringLiteral("可打开注册表位置：%1\n").arg(boolText(entry.canOpenRegistryLocation));
-        detailText += QStringLiteral("可删除：%1\n").arg(boolText(entry.canDelete));
-        detailText += QStringLiteral("删除整棵注册表子键：%1\n").arg(boolText(entry.deleteRegistryTree));
-        detailText += QStringLiteral("唯一标识：%1\n").arg(entry.uniqueIdText.isEmpty() ? QStringLiteral("<空>") : entry.uniqueIdText);
+        detailText += startupText("startup.detail.name", QStringLiteral("名称：%1\n")).arg(entry.itemNameText);
+        detailText += startupText("startup.detail.category", QStringLiteral("分类：%1\n")).arg(entry.categoryText);
+        detailText += startupText("startup.detail.publisher", QStringLiteral("发布者：%1\n"))
+            .arg(entry.publisherText.isEmpty() ? QStringLiteral("<空>") : entry.publisherText);
+        detailText += startupText("startup.detail.image_path", QStringLiteral("镜像路径：%1\n"))
+            .arg(entry.imagePathText.isEmpty() ? QStringLiteral("<空>") : entry.imagePathText);
+        detailText += startupText("startup.detail.command", QStringLiteral("命令：%1\n"))
+            .arg(entry.commandText.isEmpty() ? QStringLiteral("<空>") : entry.commandText);
+        detailText += startupText("startup.detail.location", QStringLiteral("来源位置：%1\n"))
+            .arg(entry.locationText.isEmpty() ? QStringLiteral("<空>") : entry.locationText);
+        detailText += startupText("startup.detail.group_location", QStringLiteral("分组位置：%1\n"))
+            .arg(entry.locationGroupText.isEmpty() ? QStringLiteral("<空>") : entry.locationGroupText);
+        detailText += startupText("startup.detail.registry_value", QStringLiteral("注册表值名：%1\n"))
+            .arg(entry.registryValueNameText.isEmpty() ? QStringLiteral("<空>") : entry.registryValueNameText);
+        detailText += startupText("startup.detail.user_context", QStringLiteral("用户/上下文：%1\n"))
+            .arg(entry.userText.isEmpty() ? QStringLiteral("<空>") : entry.userText);
+        detailText += startupText("startup.detail.type", QStringLiteral("类型：%1\n"))
+            .arg(entry.sourceTypeText.isEmpty() ? QStringLiteral("<空>") : entry.sourceTypeText);
+        detailText += startupText("startup.detail.status", QStringLiteral("状态：%1\n"))
+            .arg(buildStatusText(entry.enabled));
+        detailText += startupText("startup.detail.description", QStringLiteral("补充说明：%1\n"))
+            .arg(entry.detailText.isEmpty() ? QStringLiteral("<空>") : entry.detailText);
+        detailText += startupText("startup.detail.file_location", QStringLiteral("可打开文件位置：%1\n"))
+            .arg(boolText(entry.canOpenFileLocation));
+        detailText += startupText("startup.detail.registry_location", QStringLiteral("可打开注册表位置：%1\n"))
+            .arg(boolText(entry.canOpenRegistryLocation));
+        detailText += startupText("startup.detail.deletable", QStringLiteral("可删除：%1\n"))
+            .arg(boolText(entry.canDelete));
+        detailText += startupText("startup.detail.delete_registry_tree", QStringLiteral("删除整棵注册表子键：%1\n"))
+            .arg(boolText(entry.deleteRegistryTree));
+        detailText += startupText("startup.detail.unique_id", QStringLiteral("唯一标识：%1\n"))
+            .arg(entry.uniqueIdText.isEmpty() ? QStringLiteral("<空>") : entry.uniqueIdText);
         return detailText;
     }
 
@@ -51,21 +68,28 @@ namespace
     {
         if (treeItem == nullptr)
         {
-            return QStringLiteral("<空节点>");
+            return startupText("startup.detail.node.empty", QStringLiteral("<空节点>"));
         }
 
         const StartupTreeNodeKind nodeKind = static_cast<StartupTreeNodeKind>(
             treeItem->data(0, kStartupTreeNodeKindRole).toInt());
         const QString kindText =
-            nodeKind == StartupTreeNodeKind::Group ? QStringLiteral("注册表位置节点")
-            : (nodeKind == StartupTreeNodeKind::Placeholder ? QStringLiteral("占位节点") : QStringLiteral("条目节点"));
+            nodeKind == StartupTreeNodeKind::Group
+            ? startupText("startup.detail.node.registry_group", QStringLiteral("注册表位置节点"))
+            : (nodeKind == StartupTreeNodeKind::Placeholder
+                ? startupText("startup.detail.node.placeholder", QStringLiteral("占位节点"))
+                : startupText("startup.detail.node.entry", QStringLiteral("条目节点")));
 
         QString detailText;
-        detailText += QStringLiteral("节点类型：%1\n").arg(kindText);
-        detailText += QStringLiteral("显示文本：%1\n").arg(treeItem->text(StartupDock::toStartupColumn(StartupDock::StartupColumn::Name)));
-        detailText += QStringLiteral("注册表位置：%1\n").arg(treeItem->data(0, kStartupTreeLocationRole).toString());
-        detailText += QStringLiteral("详情列：%1\n").arg(treeItem->text(StartupDock::toStartupColumn(StartupDock::StartupColumn::Detail)));
-        detailText += QStringLiteral("子节点数量：%1\n").arg(treeItem->childCount());
+        detailText += startupText("startup.detail.node.type", QStringLiteral("节点类型：%1\n")).arg(kindText);
+        detailText += startupText("startup.detail.node.display_text", QStringLiteral("显示文本：%1\n"))
+            .arg(treeItem->text(StartupDock::toStartupColumn(StartupDock::StartupColumn::Name)));
+        detailText += startupText("startup.detail.node.registry_location", QStringLiteral("注册表位置：%1\n"))
+            .arg(treeItem->data(0, kStartupTreeLocationRole).toString());
+        detailText += startupText("startup.detail.node.detail_column", QStringLiteral("详情列：%1\n"))
+            .arg(treeItem->text(StartupDock::toStartupColumn(StartupDock::StartupColumn::Detail)));
+        detailText += startupText("startup.detail.node.children_count", QStringLiteral("子节点数量：%1\n"))
+            .arg(treeItem->childCount());
         return detailText;
     }
 
@@ -108,7 +132,9 @@ namespace
         {
             if (errorTextOut != nullptr)
             {
-                *errorTextOut = QStringLiteral("文件路径为空。");
+                *errorTextOut = startupText(
+                    "startup.dialog.file_properties.error.empty_path",
+                    QStringLiteral("文件路径为空。"));
             }
             return false;
         }
@@ -124,7 +150,9 @@ namespace
         {
             if (errorTextOut != nullptr)
             {
-                *errorTextOut = QStringLiteral("ShellExecute(properties) 失败，返回值=%1")
+                *errorTextOut = startupText(
+                    "startup.dialog.file_properties.error.failed",
+                    QStringLiteral("ShellExecute(properties) 失败，返回值=%1"))
                     .arg(reinterpret_cast<INT_PTR>(shellResult));
             }
             return false;
@@ -149,14 +177,15 @@ void StartupDock::showSelectedEntryDetails(const StartupCategory category, QTabl
             const StartupEntry& entry = m_entryList[static_cast<std::size_t>(entryIndex)];
             showStartupDetailDialog(
                 this,
-                QStringLiteral("启动项详细信息 - %1").arg(entry.itemNameText),
+                startupText("startup.dialog.entry_detail.title", QStringLiteral("启动项详细信息 - %1"))
+                    .arg(entry.itemNameText),
                 buildEntryDetailText(entry));
         }
         else
         {
             showStartupDetailDialog(
                 this,
-                QStringLiteral("注册表位置详细信息"),
+                startupText("startup.dialog.registry_detail.title", QStringLiteral("注册表位置详细信息")),
                 buildRegistryNodeDetailText(currentItem));
         }
         return;
@@ -176,7 +205,8 @@ void StartupDock::showSelectedEntryDetails(const StartupCategory category, QTabl
     const StartupEntry& entry = m_entryList[static_cast<std::size_t>(entryIndex)];
     showStartupDetailDialog(
         this,
-        QStringLiteral("启动项详细信息 - %1").arg(entry.itemNameText),
+        startupText("startup.dialog.entry_detail.title", QStringLiteral("启动项详细信息 - %1"))
+            .arg(entry.itemNameText),
         buildEntryDetailText(entry));
 }
 
@@ -200,13 +230,22 @@ void StartupDock::openSelectedFileProperties(const StartupCategory category, QTa
     const StartupEntry& entry = m_entryList[static_cast<std::size_t>(entryIndex)];
     if (!entry.canOpenFileLocation || entry.imagePathText.trimmed().isEmpty())
     {
-        QMessageBox::information(this, QStringLiteral("启动项"), QStringLiteral("该条目没有可查看属性的文件路径。"));
+        QMessageBox::information(
+            this,
+            startupText("startup.dialog.title", QStringLiteral("启动项")),
+            startupText(
+                "startup.dialog.file_properties.no_path",
+                QStringLiteral("该条目没有可查看属性的文件路径。")));
         return;
     }
 
     QString errorText;
     if (!openFilePropertiesByPath(entry.imagePathText, &errorText))
     {
-        QMessageBox::warning(this, QStringLiteral("启动项"), QStringLiteral("打开文件属性失败：%1").arg(errorText));
+        QMessageBox::warning(
+            this,
+            startupText("startup.dialog.title", QStringLiteral("启动项")),
+            startupText("startup.dialog.file_properties.failed", QStringLiteral("打开文件属性失败：%1"))
+                .arg(errorText));
     }
 }

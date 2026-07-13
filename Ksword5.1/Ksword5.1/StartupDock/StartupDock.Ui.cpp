@@ -7,6 +7,29 @@
 
 using namespace startup_dock_detail;
 
+namespace startup_dock_detail
+{
+    QString startupText(const char* const key, const QString& sourceText)
+    {
+        return ks::i18n::contextText(QString::fromLatin1(key), sourceText);
+    }
+
+    QStringList startupTableHeaders()
+    {
+        return {
+            startupText("startup.header.name", QStringLiteral("名称")),
+            startupText("startup.header.publisher", QStringLiteral("发布者")),
+            startupText("startup.header.image_path", QStringLiteral("镜像路径")),
+            startupText("startup.header.command", QStringLiteral("命令")),
+            startupText("startup.header.location", QStringLiteral("来源位置")),
+            startupText("startup.header.user", QStringLiteral("用户")),
+            startupText("startup.header.status", QStringLiteral("状态")),
+            startupText("startup.header.type", QStringLiteral("类型")),
+            startupText("startup.header.detail", QStringLiteral("详情"))
+        };
+    }
+}
+
 namespace
 {
     // kToolbarIconSize 作用：
@@ -35,17 +58,7 @@ namespace
     {
         QTableWidget* tableWidget = new ks::ui::VisibleTableWidget(parentWidget);
         tableWidget->setColumnCount(StartupDock::toStartupColumn(StartupDock::StartupColumn::Count));
-        tableWidget->setHorizontalHeaderLabels({
-            QStringLiteral("名称"),
-            QStringLiteral("发布者"),
-            QStringLiteral("镜像路径"),
-            QStringLiteral("命令"),
-            QStringLiteral("来源位置"),
-            QStringLiteral("用户"),
-            QStringLiteral("状态"),
-            QStringLiteral("类型"),
-            QStringLiteral("详情")
-            });
+        tableWidget->setHorizontalHeaderLabels(startupTableHeaders());
         tableWidget->setSelectionBehavior(QAbstractItemView::SelectRows);
         tableWidget->setSelectionMode(QAbstractItemView::SingleSelection);
         tableWidget->setEditTriggers(QAbstractItemView::NoEditTriggers);
@@ -91,17 +104,7 @@ namespace
     {
         QTreeWidget* treeWidget = new QTreeWidget(parentWidget);
         treeWidget->setColumnCount(StartupDock::toStartupColumn(StartupDock::StartupColumn::Count));
-        treeWidget->setHeaderLabels({
-            QStringLiteral("名称"),
-            QStringLiteral("发布者"),
-            QStringLiteral("镜像路径"),
-            QStringLiteral("命令"),
-            QStringLiteral("来源位置"),
-            QStringLiteral("用户"),
-            QStringLiteral("状态"),
-            QStringLiteral("类型"),
-            QStringLiteral("详情")
-            });
+        treeWidget->setHeaderLabels(startupTableHeaders());
         treeWidget->setSelectionMode(QAbstractItemView::SingleSelection);
         treeWidget->setSelectionBehavior(QAbstractItemView::SelectRows);
         treeWidget->setContextMenuPolicy(Qt::CustomContextMenu);
@@ -158,6 +161,7 @@ void StartupDock::initializeUi()
 
 void StartupDock::initializeToolbar()
 {
+    ks::i18n::LanguageManager& languageManager = ks::i18n::LanguageManager::instance();
     m_toolbarWidget = new QWidget(this);
     m_toolbarLayout = new QHBoxLayout(m_toolbarWidget);
     m_toolbarLayout->setContentsMargins(0, 0, 0, 0);
@@ -165,30 +169,65 @@ void StartupDock::initializeToolbar()
 
     m_refreshButton = new QPushButton(m_toolbarWidget);
     m_refreshButton->setIcon(createBlueIcon(":/Icon/process_refresh.svg", kToolbarIconSize));
-    m_refreshButton->setToolTip(QStringLiteral("刷新当前启动项视图"));
+    languageManager.bindToolTip(
+        m_refreshButton,
+        QStringLiteral("startup.toolbar.refresh.tooltip"),
+        QStringLiteral("刷新当前启动项视图"));
     m_refreshButton->setFixedSize(28, 28);
 
     m_exportButton = new QPushButton(m_toolbarWidget);
     m_exportButton->setIcon(createBlueIcon(":/Icon/log_export.svg", kToolbarIconSize));
-    m_exportButton->setToolTip(QStringLiteral("导出当前视图为制表符文本"));
+    languageManager.bindToolTip(
+        m_exportButton,
+        QStringLiteral("startup.toolbar.export.tooltip"),
+        QStringLiteral("导出当前视图为制表符文本"));
     m_exportButton->setFixedSize(28, 28);
 
     m_copyButton = new QPushButton(m_toolbarWidget);
     m_copyButton->setIcon(createBlueIcon(":/Icon/log_copy.svg", kToolbarIconSize));
-    m_copyButton->setToolTip(QStringLiteral("复制当前选中启动项"));
+    languageManager.bindToolTip(
+        m_copyButton,
+        QStringLiteral("startup.toolbar.copy.tooltip"),
+        QStringLiteral("复制当前选中启动项"));
     m_copyButton->setFixedSize(28, 28);
 
     m_filterEdit = new QLineEdit(m_toolbarWidget);
-    m_filterEdit->setPlaceholderText(QStringLiteral("过滤名称/发布者/路径/位置"));
-    m_filterEdit->setToolTip(QStringLiteral("按名称、发布者、路径、位置和类型做模糊筛选。"));
+    languageManager.bindPlaceholder(
+        m_filterEdit,
+        QStringLiteral("startup.toolbar.filter.placeholder"),
+        QStringLiteral("过滤名称/发布者/路径/位置"));
+    languageManager.bindToolTip(
+        m_filterEdit,
+        QStringLiteral("startup.toolbar.filter.tooltip"),
+        QStringLiteral("按名称、发布者、路径、位置和类型做模糊筛选。"));
 
-    m_hideMicrosoftCheck = new QCheckBox(QStringLiteral("隐藏微软项"), m_toolbarWidget);
-    m_hideMicrosoftCheck->setToolTip(QStringLiteral("隐藏发布者包含 Microsoft/Windows 的条目。"));
+    m_hideMicrosoftCheck = new QCheckBox(
+        startupText("startup.toolbar.hide_microsoft", QStringLiteral("隐藏微软项")),
+        m_toolbarWidget);
+    languageManager.bindText(
+        m_hideMicrosoftCheck,
+        QStringLiteral("startup.toolbar.hide_microsoft"),
+        QStringLiteral("隐藏微软项"));
+    languageManager.bindToolTip(
+        m_hideMicrosoftCheck,
+        QStringLiteral("startup.toolbar.hide_microsoft.tooltip"),
+        QStringLiteral("隐藏发布者包含 Microsoft/Windows 的条目。"));
 
-    m_hideEmptyPathCheck = new QCheckBox(QStringLiteral("隐藏空路径"), m_toolbarWidget);
-    m_hideEmptyPathCheck->setToolTip(QStringLiteral("在高级注册表树中隐藏当前没有任何条目的注册表位置。"));
+    m_hideEmptyPathCheck = new QCheckBox(
+        startupText("startup.toolbar.hide_empty_path", QStringLiteral("隐藏空路径")),
+        m_toolbarWidget);
+    languageManager.bindText(
+        m_hideEmptyPathCheck,
+        QStringLiteral("startup.toolbar.hide_empty_path"),
+        QStringLiteral("隐藏空路径"));
+    languageManager.bindToolTip(
+        m_hideEmptyPathCheck,
+        QStringLiteral("startup.toolbar.hide_empty_path.tooltip"),
+        QStringLiteral("在高级注册表树中隐藏当前没有任何条目的注册表位置。"));
 
-    m_statusLabel = new QLabel(QStringLiteral("状态：首次打开该页时加载启动项"), m_toolbarWidget);
+    m_statusLabel = new QLabel(
+        startupText("startup.status.initial", QStringLiteral("状态：首次打开该页时加载启动项")),
+        m_toolbarWidget);
     m_statusLabel->setWordWrap(true);
     m_statusLabel->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
 
@@ -214,13 +253,34 @@ void StartupDock::initializeTabs()
     m_registryPage = createRegistryTreePage(&m_registryTree, m_sideTabWidget);
     m_wmiPage = createSingleTablePage(&m_wmiTable, m_sideTabWidget);
 
-    m_sideTabWidget->addTab(m_allPage, QIcon(":/Icon/process_list.svg"), QStringLiteral("总览"));
-    m_sideTabWidget->addTab(m_logonPage, QIcon(":/Icon/process_main.svg"), QStringLiteral("登录"));
-    m_sideTabWidget->addTab(m_servicesPage, QIcon(":/Icon/process_start.svg"), QStringLiteral("服务"));
-    m_sideTabWidget->addTab(m_driversPage, QIcon(":/Icon/process_details.svg"), QStringLiteral("驱动"));
-    m_sideTabWidget->addTab(m_tasksPage, QIcon(":/Icon/process_refresh.svg"), QStringLiteral("计划任务"));
-    m_sideTabWidget->addTab(m_registryPage, QIcon(":/Icon/file_find.svg"), QStringLiteral("高级注册表"));
-    m_sideTabWidget->addTab(m_wmiPage, QIcon(":/Icon/process_tree.svg"), QStringLiteral("WMI"));
+    m_sideTabWidget->addTab(
+        m_allPage,
+        QIcon(":/Icon/process_list.svg"),
+        startupText("startup.tab.overview", QStringLiteral("总览")));
+    m_sideTabWidget->addTab(
+        m_logonPage,
+        QIcon(":/Icon/process_main.svg"),
+        startupText("startup.tab.logon", QStringLiteral("登录")));
+    m_sideTabWidget->addTab(
+        m_servicesPage,
+        QIcon(":/Icon/process_start.svg"),
+        startupText("startup.tab.services", QStringLiteral("服务")));
+    m_sideTabWidget->addTab(
+        m_driversPage,
+        QIcon(":/Icon/process_details.svg"),
+        startupText("startup.tab.drivers", QStringLiteral("驱动")));
+    m_sideTabWidget->addTab(
+        m_tasksPage,
+        QIcon(":/Icon/process_refresh.svg"),
+        startupText("startup.tab.tasks", QStringLiteral("计划任务")));
+    m_sideTabWidget->addTab(
+        m_registryPage,
+        QIcon(":/Icon/file_find.svg"),
+        startupText("startup.tab.registry", QStringLiteral("高级注册表")));
+    m_sideTabWidget->addTab(
+        m_wmiPage,
+        QIcon(":/Icon/process_tree.svg"),
+        startupText("startup.tab.wmi", QStringLiteral("WMI")));
     const QList<QPair<QWidget*, QPair<QString, QString>>> tabTranslations{
         {m_allPage, {QStringLiteral("startup.tab.overview"), QStringLiteral("总览")}},
         {m_logonPage, {QStringLiteral("startup.tab.logon"), QStringLiteral("登录")}},
@@ -237,6 +297,30 @@ void StartupDock::initializeTabs()
             tabTranslation.first,
             tabTranslation.second.first,
             tabTranslation.second.second);
+    }
+}
+
+void StartupDock::applyTranslatedHeaders()
+{
+    const QStringList headerList = startup_dock_detail::startupTableHeaders();
+    const QList<QTableWidget*> tableList{
+        m_allTable,
+        m_logonTable,
+        m_servicesTable,
+        m_driversTable,
+        m_tasksTable,
+        m_wmiTable
+    };
+    for (QTableWidget* tableWidget : tableList)
+    {
+        if (tableWidget != nullptr)
+        {
+            tableWidget->setHorizontalHeaderLabels(headerList);
+        }
+    }
+    if (m_registryTree != nullptr)
+    {
+        m_registryTree->setHeaderLabels(headerList);
     }
 }
 
@@ -452,7 +536,7 @@ void StartupDock::rebuildRegistryTree()
         {
             groupItem->setText(
                 toStartupColumn(StartupColumn::Name),
-                QStringLiteral("%1    匹配 %2 项 / 总计 %3 项")
+                startupText("startup.registry.group.match_summary", QStringLiteral("%1    匹配 %2 项 / 总计 %3 项"))
                     .arg(groupLocationText)
                     .arg(visibleEntryIndexList.size())
                     .arg(totalEntryIndexList.size()));
@@ -469,8 +553,11 @@ void StartupDock::rebuildRegistryTree()
             groupItem->setText(
                 toStartupColumn(StartupColumn::Name),
                 totalEntryIndexList.empty()
-                ? QStringLiteral("%1    无条目").arg(groupLocationText)
-                : QStringLiteral("%1    当前过滤下无匹配项（总计 %2 项）")
+                ? startupText("startup.registry.group.no_entries", QStringLiteral("%1    无条目"))
+                    .arg(groupLocationText)
+                : startupText(
+                    "startup.registry.group.no_filter_matches",
+                    QStringLiteral("%1    当前过滤下无匹配项（总计 %2 项）"))
                     .arg(groupLocationText)
                     .arg(totalEntryIndexList.size()));
 
@@ -480,12 +567,18 @@ void StartupDock::rebuildRegistryTree()
             placeholderItem->setData(0, kStartupTreeLocationRole, groupLocationText);
             placeholderItem->setText(
                 toStartupColumn(StartupColumn::Name),
-                totalEntryIndexList.empty() ? QStringLiteral("(无条目)") : QStringLiteral("(无匹配项)"));
+                totalEntryIndexList.empty()
+                    ? startupText("startup.registry.placeholder.no_entries", QStringLiteral("(无条目)"))
+                    : startupText("startup.registry.placeholder.no_matches", QStringLiteral("(无匹配项)")));
             placeholderItem->setText(
                 toStartupColumn(StartupColumn::Detail),
                 totalEntryIndexList.empty()
-                ? QStringLiteral("该位置当前未发现启动项")
-                : QStringLiteral("存在条目，但被当前过滤条件隐藏"));
+                ? startupText(
+                    "startup.registry.placeholder.not_found",
+                    QStringLiteral("该位置当前未发现启动项"))
+                : startupText(
+                    "startup.registry.placeholder.filtered",
+                    QStringLiteral("存在条目，但被当前过滤条件隐藏")));
         }
 
         groupItem->setExpanded(true);

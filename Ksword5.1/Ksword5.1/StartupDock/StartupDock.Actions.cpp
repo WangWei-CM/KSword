@@ -251,12 +251,24 @@ void StartupDock::showEntryContextMenu(
     QMenu contextMenu(this);
     // 显式填充菜单背景，避免浅色模式下继承透明样式出现黑底。
     contextMenu.setStyleSheet(KswordTheme::ContextMenuStyle());
-    QAction* detailAction = contextMenu.addAction(createBlueIcon(":/Icon/process_details.svg"), QStringLiteral("查看启动项详细信息"));
-    QAction* copyAction = contextMenu.addAction(createBlueIcon(":/Icon/log_copy.svg"), QStringLiteral("复制整行"));
-    QAction* openFileAction = contextMenu.addAction(createBlueIcon(":/Icon/process_open_folder.svg"), QStringLiteral("打开文件位置"));
-    QAction* filePropertiesAction = contextMenu.addAction(createBlueIcon(":/Icon/process_details.svg"), QStringLiteral("转到文件属性"));
-    QAction* openRegistryAction = contextMenu.addAction(createBlueIcon(":/Icon/file_find.svg"), QStringLiteral("打开注册表位置"));
-    QAction* gotoServiceAction = contextMenu.addAction(createBlueIcon(":/Icon/process_list.svg"), QStringLiteral("转到服务管理"));
+    QAction* detailAction = contextMenu.addAction(
+        createBlueIcon(":/Icon/process_details.svg"),
+        startupText("startup.menu.entry_details", QStringLiteral("查看启动项详细信息")));
+    QAction* copyAction = contextMenu.addAction(
+        createBlueIcon(":/Icon/log_copy.svg"),
+        startupText("startup.menu.copy_row", QStringLiteral("复制整行")));
+    QAction* openFileAction = contextMenu.addAction(
+        createBlueIcon(":/Icon/process_open_folder.svg"),
+        startupText("startup.menu.open_file", QStringLiteral("打开文件位置")));
+    QAction* filePropertiesAction = contextMenu.addAction(
+        createBlueIcon(":/Icon/process_details.svg"),
+        startupText("startup.menu.file_properties", QStringLiteral("转到文件属性")));
+    QAction* openRegistryAction = contextMenu.addAction(
+        createBlueIcon(":/Icon/file_find.svg"),
+        startupText("startup.menu.open_registry", QStringLiteral("打开注册表位置")));
+    QAction* gotoServiceAction = contextMenu.addAction(
+        createBlueIcon(":/Icon/process_list.svg"),
+        startupText("startup.menu.goto_service", QStringLiteral("转到服务管理")));
     QAction* uploadVirusTotalAction = ks::online_scan::addVirusTotalSandboxMenu(
         &contextMenu,
         this,
@@ -267,10 +279,15 @@ void StartupDock::showEntryContextMenu(
             // 返回：待上传路径和来源说明。
             ks::online_scan::SandboxUploadTarget uploadTarget;
             uploadTarget.filePath = entry.imagePathText;
-            uploadTarget.sourceText = QStringLiteral("自启动项 %1").arg(entry.itemNameText);
+            uploadTarget.sourceText = startupText(
+                "startup.source.autostart",
+                QStringLiteral("自启动项 %1"))
+                .arg(entry.itemNameText);
             return uploadTarget;
         });
-    QAction* deleteAction = contextMenu.addAction(createBlueIcon(":/Icon/log_clear.svg"), QStringLiteral("删除项"));
+    QAction* deleteAction = contextMenu.addAction(
+        createBlueIcon(":/Icon/log_clear.svg"),
+        startupText("startup.menu.delete", QStringLiteral("删除项")));
     openFileAction->setEnabled(entry.canOpenFileLocation);
     filePropertiesAction->setEnabled(entry.canOpenFileLocation);
     if (uploadVirusTotalAction != nullptr)
@@ -362,11 +379,21 @@ void StartupDock::showRegistryContextMenu(const QPoint& localPos)
     QMenu contextMenu(this);
     // 显式填充菜单背景，避免浅色模式下继承透明样式出现黑底。
     contextMenu.setStyleSheet(KswordTheme::ContextMenuStyle());
-    QAction* detailAction = contextMenu.addAction(createBlueIcon(":/Icon/process_details.svg"), QStringLiteral("查看启动项详细信息"));
-    QAction* copyAction = contextMenu.addAction(createBlueIcon(":/Icon/log_copy.svg"), QStringLiteral("复制"));
-    QAction* openFileAction = contextMenu.addAction(createBlueIcon(":/Icon/process_open_folder.svg"), QStringLiteral("打开文件位置"));
-    QAction* filePropertiesAction = contextMenu.addAction(createBlueIcon(":/Icon/process_details.svg"), QStringLiteral("转到文件属性"));
-    QAction* openRegistryAction = contextMenu.addAction(createBlueIcon(":/Icon/file_find.svg"), QStringLiteral("打开注册表位置"));
+    QAction* detailAction = contextMenu.addAction(
+        createBlueIcon(":/Icon/process_details.svg"),
+        startupText("startup.menu.entry_details", QStringLiteral("查看启动项详细信息")));
+    QAction* copyAction = contextMenu.addAction(
+        createBlueIcon(":/Icon/log_copy.svg"),
+        startupText("startup.menu.copy", QStringLiteral("复制")));
+    QAction* openFileAction = contextMenu.addAction(
+        createBlueIcon(":/Icon/process_open_folder.svg"),
+        startupText("startup.menu.open_file", QStringLiteral("打开文件位置")));
+    QAction* filePropertiesAction = contextMenu.addAction(
+        createBlueIcon(":/Icon/process_details.svg"),
+        startupText("startup.menu.file_properties", QStringLiteral("转到文件属性")));
+    QAction* openRegistryAction = contextMenu.addAction(
+        createBlueIcon(":/Icon/file_find.svg"),
+        startupText("startup.menu.open_registry", QStringLiteral("打开注册表位置")));
     const StartupEntry* registryEntry =
         (entryIndex >= 0 && entryIndex < static_cast<int>(m_entryList.size()))
         ? &m_entryList[static_cast<std::size_t>(entryIndex)]
@@ -382,14 +409,21 @@ void StartupDock::showRegistryContextMenu(const QPoint& localPos)
             ks::online_scan::SandboxUploadTarget uploadTarget;
             if (registryEntry == nullptr)
             {
-                uploadTarget.errorText = QStringLiteral("当前注册表节点不是可上传的启动项。");
+                uploadTarget.errorText = startupText(
+                    "startup.upload.error.invalid_node",
+                    QStringLiteral("当前注册表节点不是可上传的启动项。"));
                 return uploadTarget;
             }
             uploadTarget.filePath = registryEntry->imagePathText;
-            uploadTarget.sourceText = QStringLiteral("自启动注册表项 %1").arg(registryEntry->itemNameText);
+            uploadTarget.sourceText = startupText(
+                "startup.source.autostart_registry",
+                QStringLiteral("自启动注册表项 %1"))
+                .arg(registryEntry->itemNameText);
             return uploadTarget;
         });
-    QAction* deleteAction = contextMenu.addAction(createBlueIcon(":/Icon/log_clear.svg"), QStringLiteral("删除项"));
+    QAction* deleteAction = contextMenu.addAction(
+        createBlueIcon(":/Icon/log_clear.svg"),
+        startupText("startup.menu.delete", QStringLiteral("删除项")));
 
     if (nodeKind == StartupTreeNodeKind::Group
         || nodeKind == StartupTreeNodeKind::Placeholder)
@@ -478,7 +512,12 @@ void StartupDock::openSelectedFileLocation(const StartupCategory category, QTabl
     const StartupEntry& entry = m_entryList[static_cast<std::size_t>(entryIndex)];
     if (!entry.canOpenFileLocation || entry.imagePathText.trimmed().isEmpty())
     {
-        QMessageBox::information(this, QStringLiteral("启动项"), QStringLiteral("该条目没有可打开的文件路径。"));
+        QMessageBox::information(
+            this,
+            startupText("startup.dialog.title", QStringLiteral("启动项")),
+            startupText(
+                "startup.dialog.open_file.no_path",
+                QStringLiteral("该条目没有可打开的文件路径。")));
         return;
     }
 
@@ -523,7 +562,12 @@ void StartupDock::openSelectedRegistryLocation(const StartupCategory category, Q
     }
     if (locationText.trimmed().isEmpty())
     {
-        QMessageBox::information(this, QStringLiteral("启动项"), QStringLiteral("该条目没有可打开的注册表位置。"));
+        QMessageBox::information(
+            this,
+            startupText("startup.dialog.title", QStringLiteral("启动项")),
+            startupText(
+                "startup.dialog.open_registry.no_path",
+                QStringLiteral("该条目没有可打开的注册表位置。")));
         return;
     }
 
@@ -531,8 +575,10 @@ void StartupDock::openSelectedRegistryLocation(const StartupCategory category, Q
     QProcess::startDetached(QStringLiteral("regedit.exe"), {});
     QMessageBox::information(
         this,
-        QStringLiteral("启动项"),
-        QStringLiteral("已复制注册表路径到剪贴板，并尝试打开 regedit。"));
+        startupText("startup.dialog.title", QStringLiteral("启动项")),
+        startupText(
+            "startup.dialog.open_registry.success",
+            QStringLiteral("已复制注册表路径到剪贴板，并尝试打开 regedit。")));
 }
 
 void StartupDock::copySelectedRow(const StartupCategory category, QTableWidget* tableWidget)
@@ -603,7 +649,7 @@ void StartupDock::exportCurrentView()
 {
     const QString outputPath = QFileDialog::getSaveFileName(
         this,
-        QStringLiteral("导出启动项"),
+        startupText("startup.dialog.export.title", QStringLiteral("导出启动项")),
         QStringLiteral("StartupEntries.txt"),
         QStringLiteral("Text Files (*.txt);;All Files (*.*)"));
     if (outputPath.trimmed().isEmpty())
@@ -614,13 +660,17 @@ void StartupDock::exportCurrentView()
     QFile outputFile(outputPath);
     if (!outputFile.open(QIODevice::WriteOnly | QIODevice::Text))
     {
-        QMessageBox::warning(this, QStringLiteral("启动项"), QStringLiteral("导出失败：%1").arg(outputFile.errorString()));
+        QMessageBox::warning(
+            this,
+            startupText("startup.dialog.title", QStringLiteral("启动项")),
+            startupText("startup.dialog.export.failed", QStringLiteral("导出失败：%1"))
+                .arg(outputFile.errorString()));
         return;
     }
 
     QTextStream outputStream(&outputFile);
     outputStream.setEncoding(QStringConverter::Utf8);
-    outputStream << "名称\t发布者\t镜像路径\t命令\t来源位置\t用户\t状态\t类型\t详情\n";
+    outputStream << startupTableHeaders().join(QChar('\t')) << '\n';
     if (currentCategory() == StartupCategory::Registry)
     {
         if (m_registryTree == nullptr)
@@ -695,9 +745,10 @@ void StartupDock::applyFilterAndRefresh()
     rebuildAllTables();
     if (m_statusLabel != nullptr)
     {
-        m_statusLabel->setText(QStringLiteral("状态：共 %1 条，当前分类 %2")
-            .arg(m_entryList.size())
-            .arg(categoryToText(currentCategory())));
+        m_statusLabel->setText(
+            startupText("startup.status.summary", QStringLiteral("状态：共 %1 条，当前分类 %2"))
+                .arg(m_entryList.size())
+                .arg(categoryToText(currentCategory())));
     }
 }
 
@@ -721,14 +772,17 @@ void StartupDock::deleteSelectedEntry(const StartupCategory category, QTableWidg
     const StartupEntry& entry = m_entryList[static_cast<std::size_t>(entryIndex)];
     if (!entry.canDelete)
     {
-        QMessageBox::information(this, QStringLiteral("启动项"), QStringLiteral("该条目当前不支持删除。"));
+        QMessageBox::information(
+            this,
+            startupText("startup.dialog.title", QStringLiteral("启动项")),
+            startupText("startup.dialog.delete.unsupported", QStringLiteral("该条目当前不支持删除。")));
         return;
     }
 
     const QMessageBox::StandardButton confirmButton = QMessageBox::warning(
         this,
-        QStringLiteral("删除启动项"),
-        QStringLiteral("确定删除以下条目？\n\n%1\n来源：%2")
+        startupText("startup.dialog.delete.confirm.title", QStringLiteral("删除启动项")),
+        startupText("startup.dialog.delete.confirm.message", QStringLiteral("确定删除以下条目？\n\n%1\n来源：%2"))
             .arg(entry.itemNameText)
             .arg(entry.locationText),
         QMessageBox::Yes | QMessageBox::No,
@@ -746,7 +800,8 @@ void StartupDock::deleteSelectedEntry(const StartupCategory category, QTableWidg
         deleteOk = QFile::remove(entry.imagePathText);
         if (!deleteOk)
         {
-            errorText = QStringLiteral("删除文件失败：%1").arg(entry.imagePathText);
+            errorText = startupText("startup.delete.file_failed", QStringLiteral("删除文件失败：%1"))
+                .arg(entry.imagePathText);
         }
     }
     else if (entry.category == StartupCategory::Logon || entry.category == StartupCategory::Registry)
@@ -755,7 +810,9 @@ void StartupDock::deleteSelectedEntry(const StartupCategory category, QTableWidg
         QString subKeyText;
         if (!splitRegistryLocation(entry.locationText, &rootKey, &subKeyText))
         {
-            errorText = QStringLiteral("解析注册表位置失败。");
+            errorText = startupText(
+                "startup.delete.registry_location_failed",
+                QStringLiteral("解析注册表位置失败。"));
             deleteOk = false;
         }
         else if (entry.deleteRegistryTree)
@@ -772,7 +829,9 @@ void StartupDock::deleteSelectedEntry(const StartupCategory category, QTableWidg
 
         if (!deleteOk && errorText.isEmpty())
         {
-            errorText = QStringLiteral("删除注册表启动项失败。");
+            errorText = startupText(
+                "startup.delete.registry_failed",
+                QStringLiteral("删除注册表启动项失败。"));
         }
     }
     else if (entry.sourceTypeText == QStringLiteral("AutoService")
@@ -807,20 +866,27 @@ void StartupDock::deleteSelectedEntry(const StartupCategory category, QTableWidg
             }
             if (errorText.isEmpty())
             {
-                errorText = QStringLiteral("schtasks 删除失败。");
+                errorText = startupText("startup.delete.schtasks_failed", QStringLiteral("schtasks 删除失败。"));
             }
         }
     }
 
     if (!deleteOk)
     {
-        QMessageBox::warning(this, QStringLiteral("启动项"), QStringLiteral("删除失败：%1").arg(errorText));
+        QMessageBox::warning(
+            this,
+            startupText("startup.dialog.title", QStringLiteral("启动项")),
+            startupText("startup.dialog.delete.failed", QStringLiteral("删除失败：%1"))
+                .arg(errorText));
         return;
     }
 
     kLogEvent deleteEvent;
     info << deleteEvent
-        << "[StartupDock] 删除启动项成功, type="
+        << startupText(
+            "startup.log.delete.succeeded",
+            QStringLiteral("[StartupDock] 删除启动项成功, type="))
+               .toStdString()
         << entry.sourceTypeText.toStdString()
         << ", name="
         << entry.itemNameText.toStdString()

@@ -26,6 +26,7 @@ class QHBoxLayout;
 class QLabel;
 class QLineEdit;
 class QPushButton;
+class QEvent;
 class QShowEvent;
 class QTabWidget;
 class QTableWidget;
@@ -54,6 +55,7 @@ protected:
     // - 作用：在页签首次真正显示时再触发首轮枚举；
     // - 避免主窗口启动阶段被启动项全量扫描阻塞。
     void showEvent(QShowEvent* event) override;
+    void changeEvent(QEvent* event) override;
 
 public:
     // StartupCategory：
@@ -121,6 +123,7 @@ private:
     void initializeToolbar();
     void initializeTabs();
     void initializeConnections();
+    void applyTranslatedHeaders();
 
     // ===================== 枚举与刷新 =====================
     void refreshAllStartupEntries();
