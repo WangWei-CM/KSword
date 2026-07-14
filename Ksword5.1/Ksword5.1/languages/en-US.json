@@ -2432,7 +2432,12 @@
     "kernel.callback.intercept.validation.rule_priority_invalid": "Rule %1 has an invalid priority.",
     "kernel.callback.intercept.validation.rule_table_or_list_null": "Internal error: ruleTable or ruleListOut is null.",
     "kernel.callback.intercept.validation.runtime_state_out_null": "Internal error: runtimeStateOut is null.",
-    "kernel.callback.intercept.validation.timeout_invalid": "Rule %1 has an invalid timeoutMs."
+    "kernel.callback.intercept.validation.timeout_invalid": "Rule %1 has an invalid timeoutMs.",
+    "kernel.object_directory.header.depth": "Depth",
+    "kernel.object_directory.header.full_path": "Full path",
+    "kernel.object_directory.header.name": "Name",
+    "kernel.object_directory.header.status": "Status",
+    "kernel.object_directory.header.type": "Type"
   },
   "source_translations": {
     "\n\n--- 日志 ---\n": "\n\n--- Log ---\n",

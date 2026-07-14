@@ -2433,7 +2433,12 @@
     "kernel.callback.intercept.validation.rule_priority_invalid": "规则 %1 的优先级非法。",
     "kernel.callback.intercept.validation.rule_table_or_list_null": "内部错误：ruleTable 或 ruleListOut 为空。",
     "kernel.callback.intercept.validation.runtime_state_out_null": "内部错误：runtimeStateOut 为空。",
-    "kernel.callback.intercept.validation.timeout_invalid": "规则 %1 的 timeoutMs 非法。"
+    "kernel.callback.intercept.validation.timeout_invalid": "规则 %1 的 timeoutMs 非法。",
+    "kernel.object_directory.header.depth": "深度",
+    "kernel.object_directory.header.full_path": "完整路径",
+    "kernel.object_directory.header.name": "名称",
+    "kernel.object_directory.header.status": "状态",
+    "kernel.object_directory.header.type": "类型"
   },
   "source_translations": {
     "\n\n--- 日志 ---\n": "\n\n--- 日志 ---\n",
