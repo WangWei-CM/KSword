@@ -31,6 +31,8 @@
 #include <limits>    // std::numeric_limits：定义树节点哨兵值。
 #include <thread>    // std::thread：后台刷新任务。
 
+using ksword::kernel_dock_internal::kernelText;
+
 namespace
 {
     // statusLabelStyle：
@@ -42,9 +44,19 @@ namespace
 
     // safeText：
     // - 作用：把空文本替换为占位符，避免详情区出现空白字段。
-    QString safeText(const QString& valueText, const QString& fallbackText = QStringLiteral("<空>"))
+    QString safeText(const QString& valueText, const QString& fallbackText)
     {
         return valueText.trimmed().isEmpty() ? fallbackText : valueText;
+    }
+
+    QString safeText(const QString& valueText)
+    {
+        return safeText(valueText, kernelText("kernel.runtime.placeholder.empty", QStringLiteral("<空>")));
+    }
+
+    QString emptyText()
+    {
+        return kernelText("kernel.runtime.placeholder.empty", QStringLiteral("<空>"));
     }
 
     // ObjectNamespaceColumn：对象命名空间树列索引。
@@ -197,7 +209,7 @@ void KernelDock::refreshObjectNamespaceAsync()
     }
 
     m_refreshObjectNamespaceButton->setEnabled(false);
-    m_objectNamespaceStatusLabel->setText(QStringLiteral("状态：刷新中..."));
+    m_objectNamespaceStatusLabel->setText(kernelText("kernel.runtime.object_namespace.status.refreshing", QStringLiteral("状态：刷新中...")));
     m_objectNamespaceStatusLabel->setStyleSheet(statusLabelStyle(KswordTheme::PrimaryBlueHex));
 
     QPointer<KernelDock> guardThis(this);
@@ -217,7 +229,7 @@ void KernelDock::refreshObjectNamespaceAsync()
 
             if (!success)
             {
-                guardThis->m_objectNamespaceStatusLabel->setText(QStringLiteral("状态：刷新失败"));
+                guardThis->m_objectNamespaceStatusLabel->setText(kernelText("kernel.runtime.object_namespace.status.failed", QStringLiteral("状态：刷新失败")));
                 guardThis->m_objectNamespaceStatusLabel->setStyleSheet(statusLabelStyle(QStringLiteral("#B23A3A")));
                 guardThis->m_objectNamespaceDetailEditor->setText(errorText);
 
@@ -241,7 +253,7 @@ void KernelDock::refreshObjectNamespaceAsync()
                     }));
 
             guardThis->m_objectNamespaceStatusLabel->setText(
-                QStringLiteral("状态：已刷新 %1 项，异常 %2 项")
+                kernelText("kernel.runtime.object_namespace.status.summary", QStringLiteral("状态：已刷新 %1 项，异常 %2 项"))
                 .arg(guardThis->m_objectNamespaceRows.size())
                 .arg(failedCount));
             guardThis->m_objectNamespaceStatusLabel->setStyleSheet(
@@ -255,11 +267,11 @@ void KernelDock::refreshObjectNamespaceAsync()
             {
                 guardThis->rebuildObjectNamespacePropertyTable(
                     nullptr,
-                    QStringLiteral("<无可见节点>"),
-                    QStringLiteral("提示"),
-                    QStringLiteral("<无>"),
-                    QStringLiteral("当前筛选条件下无可见对象记录。"));
-                guardThis->m_objectNamespaceDetailEditor->setText(QStringLiteral("当前筛选条件下无可见对象记录。"));
+                    kernelText("kernel.runtime.placeholder.no_visible_nodes", QStringLiteral("<无可见节点>")),
+                    kernelText("kernel.runtime.placeholder.hint", QStringLiteral("提示")),
+                    kernelText("kernel.runtime.placeholder.none", QStringLiteral("<无>")),
+                    kernelText("kernel.runtime.object_namespace.empty.filtered", QStringLiteral("当前筛选条件下无可见对象记录。")));
+                guardThis->m_objectNamespaceDetailEditor->setText(kernelText("kernel.runtime.object_namespace.empty.filtered", QStringLiteral("当前筛选条件下无可见对象记录。")));
             }
 
             kLogEvent doneEvent;
@@ -283,7 +295,7 @@ void KernelDock::refreshAtomTableAsync()
     }
 
     m_refreshAtomButton->setEnabled(false);
-    m_atomStatusLabel->setText(QStringLiteral("状态：刷新中..."));
+    m_atomStatusLabel->setText(kernelText("kernel.runtime.atom.status.refreshing", QStringLiteral("状态：刷新中...")));
     m_atomStatusLabel->setStyleSheet(statusLabelStyle(KswordTheme::PrimaryBlueHex));
 
     QPointer<KernelDock> guardThis(this);
@@ -303,7 +315,7 @@ void KernelDock::refreshAtomTableAsync()
 
             if (!success)
             {
-                guardThis->m_atomStatusLabel->setText(QStringLiteral("状态：刷新失败"));
+                guardThis->m_atomStatusLabel->setText(kernelText("kernel.runtime.atom.status.failed", QStringLiteral("状态：刷新失败")));
                 guardThis->m_atomStatusLabel->setStyleSheet(statusLabelStyle(QStringLiteral("#B23A3A")));
                 guardThis->m_atomDetailEditor->setText(errorText);
 
@@ -318,7 +330,7 @@ void KernelDock::refreshAtomTableAsync()
             guardThis->m_atomRows = std::move(resultRows);
             guardThis->rebuildAtomTable(guardThis->m_atomFilterEdit->text().trimmed());
             guardThis->m_atomStatusLabel->setText(
-                QStringLiteral("状态：已刷新 %1 项")
+                kernelText("kernel.runtime.atom.status.summary", QStringLiteral("状态：已刷新 %1 项"))
                 .arg(guardThis->m_atomRows.size()));
             guardThis->m_atomStatusLabel->setStyleSheet(statusLabelStyle(QStringLiteral("#3A8F3A")));
 
@@ -328,7 +340,7 @@ void KernelDock::refreshAtomTableAsync()
             }
             else
             {
-                guardThis->m_atomDetailEditor->setText(QStringLiteral("当前环境未发现可见原子记录。"));
+                guardThis->m_atomDetailEditor->setText(kernelText("kernel.runtime.atom.empty", QStringLiteral("当前环境未发现可见原子记录。")));
             }
 
             kLogEvent doneEvent;
@@ -350,7 +362,7 @@ void KernelDock::refreshNtQueryAsync()
     }
 
     m_refreshNtQueryButton->setEnabled(false);
-    m_ntQueryStatusLabel->setText(QStringLiteral("状态：刷新中..."));
+    m_ntQueryStatusLabel->setText(kernelText("kernel.runtime.nt_query.status.refreshing", QStringLiteral("状态：刷新中...")));
     m_ntQueryStatusLabel->setStyleSheet(statusLabelStyle(KswordTheme::PrimaryBlueHex));
 
     QPointer<KernelDock> guardThis(this);
@@ -370,7 +382,7 @@ void KernelDock::refreshNtQueryAsync()
 
             if (!success)
             {
-                guardThis->m_ntQueryStatusLabel->setText(QStringLiteral("状态：刷新失败"));
+                guardThis->m_ntQueryStatusLabel->setText(kernelText("kernel.runtime.nt_query.status.failed", QStringLiteral("状态：刷新失败")));
                 guardThis->m_ntQueryStatusLabel->setStyleSheet(statusLabelStyle(QStringLiteral("#B23A3A")));
                 guardThis->m_ntQueryDetailEditor->setText(errorText);
 
@@ -395,7 +407,7 @@ void KernelDock::refreshNtQueryAsync()
             }
 
             guardThis->m_ntQueryStatusLabel->setText(
-                QStringLiteral("状态：已刷新 %1 项，成功 %2 项")
+                kernelText("kernel.runtime.nt_query.status.summary", QStringLiteral("状态：已刷新 %1 项，成功 %2 项"))
                 .arg(guardThis->m_ntQueryResults.size())
                 .arg(successCount));
             guardThis->m_ntQueryStatusLabel->setStyleSheet(statusLabelStyle(QStringLiteral("#3A8F3A")));
@@ -406,7 +418,7 @@ void KernelDock::refreshNtQueryAsync()
             }
             else
             {
-                guardThis->m_ntQueryDetailEditor->setText(QStringLiteral("无可展示的 NtQuery 结果。"));
+                guardThis->m_ntQueryDetailEditor->setText(kernelText("kernel.runtime.nt_query.empty", QStringLiteral("无可展示的 NtQuery 结果。")));
             }
 
             kLogEvent doneEvent;
@@ -457,10 +469,10 @@ void KernelDock::rebuildObjectNamespaceTable(const QString& filterKeyword)
         {
             rootItem = new QTreeWidgetItem(m_objectNamespaceTree);
             rootItem->setText(static_cast<int>(ObjectNamespaceColumn::Name), entry.rootPathText);
-            rootItem->setText(static_cast<int>(ObjectNamespaceColumn::Type), QStringLiteral("根目录"));
+            rootItem->setText(static_cast<int>(ObjectNamespaceColumn::Type), kernelText("kernel.runtime.object_namespace.node.root_directory", QStringLiteral("根目录")));
             rootItem->setText(static_cast<int>(ObjectNamespaceColumn::PathOrScope), safeText(entry.scopeDescriptionText));
-            rootItem->setText(static_cast<int>(ObjectNamespaceColumn::Status), QStringLiteral("根节点"));
-            rootItem->setText(static_cast<int>(ObjectNamespaceColumn::SymbolicTarget), QStringLiteral("<无>"));
+            rootItem->setText(static_cast<int>(ObjectNamespaceColumn::Status), kernelText("kernel.runtime.object_namespace.node.root", QStringLiteral("根节点")));
+            rootItem->setText(static_cast<int>(ObjectNamespaceColumn::SymbolicTarget), kernelText("kernel.runtime.placeholder.none", QStringLiteral("<无>")));
             rootItem->setData(0, SourceIndexRole, kInvalidSourceIndex);
             rootItem->setData(0, NodeKindRole, static_cast<int>(ObjectNamespaceNodeKind::Root));
             rootItem->setData(0, NodePathRole, entry.rootPathText);
@@ -480,10 +492,10 @@ void KernelDock::rebuildObjectNamespaceTable(const QString& filterKeyword)
             directoryItem->setText(
                 static_cast<int>(ObjectNamespaceColumn::Name),
                 leafNameFromObjectPath(entry.directoryPathText));
-            directoryItem->setText(static_cast<int>(ObjectNamespaceColumn::Type), QStringLiteral("目录"));
+            directoryItem->setText(static_cast<int>(ObjectNamespaceColumn::Type), kernelText("kernel.runtime.object_namespace.node.directory", QStringLiteral("目录")));
             directoryItem->setText(static_cast<int>(ObjectNamespaceColumn::PathOrScope), entry.directoryPathText);
-            directoryItem->setText(static_cast<int>(ObjectNamespaceColumn::Status), QStringLiteral("已展开枚举"));
-            directoryItem->setText(static_cast<int>(ObjectNamespaceColumn::SymbolicTarget), QStringLiteral("<无>"));
+            directoryItem->setText(static_cast<int>(ObjectNamespaceColumn::Status), kernelText("kernel.runtime.object_namespace.node.enumerated", QStringLiteral("已展开枚举")));
+            directoryItem->setText(static_cast<int>(ObjectNamespaceColumn::SymbolicTarget), kernelText("kernel.runtime.placeholder.none", QStringLiteral("<无>")));
             directoryItem->setData(0, SourceIndexRole, kInvalidSourceIndex);
             directoryItem->setData(0, NodeKindRole, static_cast<int>(ObjectNamespaceNodeKind::Directory));
             directoryItem->setData(0, NodePathRole, entry.directoryPathText);
@@ -497,7 +509,7 @@ void KernelDock::rebuildObjectNamespaceTable(const QString& filterKeyword)
 
         auto* objectItem = new QTreeWidgetItem(directoryItem);
         const QString objectNameText = entry.objectNameText.trimmed().isEmpty()
-            ? QStringLiteral("<未命名对象>")
+            ? kernelText("kernel.runtime.placeholder.unnamed_object", QStringLiteral("<未命名对象>"))
             : entry.objectNameText;
         objectItem->setText(static_cast<int>(ObjectNamespaceColumn::Name), objectNameText);
         objectItem->setText(static_cast<int>(ObjectNamespaceColumn::Type), safeText(entry.objectTypeText));
@@ -572,68 +584,68 @@ void KernelDock::rebuildObjectNamespacePropertyTable(
 
     if (entry == nullptr)
     {
-        appendPropertyRow(m_objectNamespacePropertyTable, QStringLiteral("节点名称"), safeText(nodeNameText));
-        appendPropertyRow(m_objectNamespacePropertyTable, QStringLiteral("节点类型"), safeText(nodeTypeText));
-        appendPropertyRow(m_objectNamespacePropertyTable, QStringLiteral("节点路径"), safeText(nodePathText));
-        appendPropertyRow(m_objectNamespacePropertyTable, QStringLiteral("节点说明"), safeText(nodeDescriptionText));
+        appendPropertyRow(m_objectNamespacePropertyTable, kernelText("kernel.runtime.object_namespace.property.node_name", QStringLiteral("节点名称")), safeText(nodeNameText));
+        appendPropertyRow(m_objectNamespacePropertyTable, kernelText("kernel.runtime.object_namespace.property.node_type", QStringLiteral("节点类型")), safeText(nodeTypeText));
+        appendPropertyRow(m_objectNamespacePropertyTable, kernelText("kernel.runtime.object_namespace.property.node_path", QStringLiteral("节点路径")), safeText(nodePathText));
+        appendPropertyRow(m_objectNamespacePropertyTable, kernelText("kernel.runtime.object_namespace.property.node_description", QStringLiteral("节点说明")), safeText(nodeDescriptionText));
         appendPropertyRow(
             m_objectNamespacePropertyTable,
-            QStringLiteral("提示"),
-            QStringLiteral("当前节点是树层级摘要，展开下级并选择对象项可查看完整字段。"));
+            kernelText("kernel.runtime.placeholder.hint", QStringLiteral("提示")),
+            kernelText("kernel.runtime.object_namespace.property.tree_summary", QStringLiteral("当前节点是树层级摘要，展开下级并选择对象项可查看完整字段。")));
         return;
     }
 
     appendPropertyRow(
         m_objectNamespacePropertyTable,
-        QStringLiteral("rootPathText（根目录）"),
+        kernelText("kernel.runtime.object_namespace.property.root_path", QStringLiteral("rootPathText（根目录）")),
         safeText(entry->rootPathText));
     appendPropertyRow(
         m_objectNamespacePropertyTable,
-        QStringLiteral("scopeDescriptionText（作用说明）"),
+        kernelText("kernel.runtime.object_namespace.property.scope_description", QStringLiteral("scopeDescriptionText（作用说明）")),
         safeText(entry->scopeDescriptionText));
     appendPropertyRow(
         m_objectNamespacePropertyTable,
-        QStringLiteral("directoryPathText（当前目录）"),
+        kernelText("kernel.runtime.object_namespace.property.directory_path", QStringLiteral("directoryPathText（当前目录）")),
         safeText(entry->directoryPathText));
     appendPropertyRow(
         m_objectNamespacePropertyTable,
-        QStringLiteral("objectNameText（对象名）"),
+        kernelText("kernel.runtime.object_namespace.property.object_name", QStringLiteral("objectNameText（对象名）")),
         safeText(entry->objectNameText));
     appendPropertyRow(
         m_objectNamespacePropertyTable,
-        QStringLiteral("objectTypeText（对象类型）"),
+        kernelText("kernel.runtime.object_namespace.property.object_type", QStringLiteral("objectTypeText（对象类型）")),
         safeText(entry->objectTypeText));
     appendPropertyRow(
         m_objectNamespacePropertyTable,
-        QStringLiteral("fullPathText（完整路径）"),
+        kernelText("kernel.runtime.object_namespace.property.full_path", QStringLiteral("fullPathText（完整路径）")),
         safeText(entry->fullPathText));
     appendPropertyRow(
         m_objectNamespacePropertyTable,
-        QStringLiteral("enumApiText（枚举API）"),
+        kernelText("kernel.runtime.object_namespace.property.enum_api", QStringLiteral("enumApiText（枚举API）")),
         safeText(entry->enumApiText));
     appendPropertyRow(
         m_objectNamespacePropertyTable,
-        QStringLiteral("symbolicLinkTargetText（符号链接目标）"),
+        kernelText("kernel.runtime.object_namespace.property.symbolic_target", QStringLiteral("symbolicLinkTargetText（符号链接目标）")),
         safeText(entry->symbolicLinkTargetText));
     appendPropertyRow(
         m_objectNamespacePropertyTable,
-        QStringLiteral("statusText（状态）"),
+        kernelText("kernel.runtime.object_namespace.property.status_text", QStringLiteral("statusText（状态）")),
         safeText(entry->statusText));
     appendPropertyRow(
         m_objectNamespacePropertyTable,
-        QStringLiteral("statusCode（NTSTATUS）"),
+        kernelText("kernel.runtime.object_namespace.property.status_code", QStringLiteral("statusCode（NTSTATUS）")),
         QStringLiteral("0x%1").arg(static_cast<unsigned int>(entry->statusCode), 8, 16, QChar('0')).toUpper());
     appendPropertyRow(
         m_objectNamespacePropertyTable,
-        QStringLiteral("querySucceeded（查询成功）"),
+        kernelText("kernel.runtime.object_namespace.property.query_succeeded", QStringLiteral("querySucceeded（查询成功）")),
         entry->querySucceeded ? QStringLiteral("true") : QStringLiteral("false"));
     appendPropertyRow(
         m_objectNamespacePropertyTable,
-        QStringLiteral("isDirectory（是否目录）"),
+        kernelText("kernel.runtime.object_namespace.property.is_directory", QStringLiteral("isDirectory（是否目录）")),
         entry->isDirectory ? QStringLiteral("true") : QStringLiteral("false"));
     appendPropertyRow(
         m_objectNamespacePropertyTable,
-        QStringLiteral("isSymbolicLink（是否符号链接）"),
+        kernelText("kernel.runtime.object_namespace.property.is_symbolic_link", QStringLiteral("isSymbolicLink（是否符号链接）")),
         entry->isSymbolicLink ? QStringLiteral("true") : QStringLiteral("false"));
 }
 
@@ -659,11 +671,11 @@ void KernelDock::selectFirstObjectNamespaceEntryItem()
 
     rebuildObjectNamespacePropertyTable(
         nullptr,
-        QStringLiteral("<无节点>"),
-        QStringLiteral("提示"),
-        QStringLiteral("<无>"),
-        QStringLiteral("当前对象命名空间树为空。"));
-    m_objectNamespaceDetailEditor->setText(QStringLiteral("当前对象命名空间树为空。"));
+        kernelText("kernel.runtime.placeholder.no_node", QStringLiteral("<无节点>")),
+        kernelText("kernel.runtime.placeholder.hint", QStringLiteral("提示")),
+        kernelText("kernel.runtime.placeholder.none", QStringLiteral("<无>")),
+        kernelText("kernel.runtime.object_namespace.empty.tree", QStringLiteral("当前对象命名空间树为空。")));
+    m_objectNamespaceDetailEditor->setText(kernelText("kernel.runtime.object_namespace.empty.tree", QStringLiteral("当前对象命名空间树为空。")));
 }
 
 void KernelDock::rebuildAtomTable(const QString& filterKeyword)
@@ -853,11 +865,11 @@ void KernelDock::showObjectNamespaceDetailByCurrentRow()
     {
         rebuildObjectNamespacePropertyTable(
             nullptr,
-            QStringLiteral("<未选择节点>"),
-            QStringLiteral("提示"),
-            QStringLiteral("<无>"),
-            QStringLiteral("请选择左侧树节点查看对象字段。"));
-        m_objectNamespaceDetailEditor->setText(QStringLiteral("请选择对象命名空间树节点查看详情。"));
+            kernelText("kernel.runtime.placeholder.unselected_node", QStringLiteral("<未选择节点>")),
+            kernelText("kernel.runtime.placeholder.hint", QStringLiteral("提示")),
+            kernelText("kernel.runtime.placeholder.none", QStringLiteral("<无>")),
+            kernelText("kernel.runtime.object_namespace.detail.select_node", QStringLiteral("请选择左侧树节点查看对象字段。")));
+        m_objectNamespaceDetailEditor->setText(kernelText("kernel.runtime.object_namespace.detail.initial", QStringLiteral("请选择对象命名空间树节点查看详情。")));
         return;
     }
 
@@ -876,12 +888,12 @@ void KernelDock::showObjectNamespaceDetailByCurrentRow()
             nodePathText,
             nodeDescriptionText);
         m_objectNamespaceDetailEditor->setText(
-            QStringLiteral(
+            kernelText("kernel.runtime.object_namespace.detail.node_summary", QStringLiteral(
                 "当前节点名称: %1\n"
                 "当前节点类型: %2\n"
                 "当前节点路径: %3\n"
                 "节点说明: %4\n\n"
-                "提示: 请选择目录下具体对象项以查看完整对象字段。")
+                "提示: 请选择目录下具体对象项以查看完整对象字段。"))
             .arg(nodeNameText, nodeTypeText, nodePathText, nodeDescriptionText));
         return;
     }
@@ -893,7 +905,7 @@ void KernelDock::showObjectNamespaceDetailByCurrentRow()
         nodePathText,
         nodeDescriptionText);
 
-    const QString detailText = QStringLiteral(
+    const QString detailText = kernelText("kernel.runtime.object_namespace.detail.full", QStringLiteral(
         "树节点名称: %1\n"
         "树节点类型: %2\n"
         "目录路径: %3\n"
@@ -907,7 +919,7 @@ void KernelDock::showObjectNamespaceDetailByCurrentRow()
         "状态: %11\n"
         "是否目录: %12\n"
         "是否符号链接: %13\n\n"
-        "Worker详情:\n%14")
+        "Worker详情:\n%14"))
         .arg(
             nodeNameText,
             nodeTypeText,
@@ -920,8 +932,12 @@ void KernelDock::showObjectNamespaceDetailByCurrentRow()
             safeText(entry->enumApiText),
             safeText(entry->symbolicLinkTargetText),
             safeText(entry->statusText),
-            entry->isDirectory ? QStringLiteral("是") : QStringLiteral("否"),
-            entry->isSymbolicLink ? QStringLiteral("是") : QStringLiteral("否"),
+            entry->isDirectory
+                ? kernelText("kernel.runtime.value.yes", QStringLiteral("是"))
+                : kernelText("kernel.runtime.value.no", QStringLiteral("否")),
+            entry->isSymbolicLink
+                ? kernelText("kernel.runtime.value.yes", QStringLiteral("是"))
+                : kernelText("kernel.runtime.value.no", QStringLiteral("否")),
             safeText(entry->detailText));
 
     m_objectNamespaceDetailEditor->setText(detailText);
@@ -937,17 +953,17 @@ void KernelDock::showAtomDetailByCurrentRow()
     const KernelAtomEntry* entry = currentAtomEntry();
     if (entry == nullptr)
     {
-        m_atomDetailEditor->setText(QStringLiteral("请选择一条原子记录查看详情。"));
+        m_atomDetailEditor->setText(kernelText("kernel.runtime.atom.detail.initial", QStringLiteral("请选择一条原子记录查看详情。")));
         return;
     }
 
-    const QString detailText = QStringLiteral(
+    const QString detailText = kernelText("kernel.runtime.atom.detail.full", QStringLiteral(
         "Atom值: %1\n"
         "十六进制: 0x%2\n"
         "名称: %3\n"
         "来源: %4\n"
         "状态: %5\n\n"
-        "Worker详情:\n%6")
+        "Worker详情:\n%6"))
         .arg(entry->atomValue)
         .arg(static_cast<unsigned int>(entry->atomValue), 4, 16, QChar('0'))
         .arg(safeText(entry->atomNameText))
@@ -968,32 +984,32 @@ void KernelDock::showNtQueryDetailByCurrentRow()
     const int currentRow = m_ntQueryTable->currentRow();
     if (currentRow < 0)
     {
-        m_ntQueryDetailEditor->setText(QStringLiteral("请选择一条 NtQuery 结果查看详情。"));
+        m_ntQueryDetailEditor->setText(kernelText("kernel.runtime.nt_query.detail.initial", QStringLiteral("请选择一条 NtQuery 结果查看详情。")));
         return;
     }
 
     QTableWidgetItem* categoryItem = m_ntQueryTable->item(currentRow, static_cast<int>(NtQueryColumn::Category));
     if (categoryItem == nullptr)
     {
-        m_ntQueryDetailEditor->setText(QStringLiteral("当前行无有效数据。"));
+        m_ntQueryDetailEditor->setText(kernelText("kernel.runtime.nt_query.detail.no_row", QStringLiteral("当前行无有效数据。")));
         return;
     }
 
     const std::size_t sourceIndex = static_cast<std::size_t>(categoryItem->data(Qt::UserRole).toULongLong());
     if (sourceIndex >= m_ntQueryResults.size())
     {
-        m_ntQueryDetailEditor->setText(QStringLiteral("索引越界。"));
+        m_ntQueryDetailEditor->setText(kernelText("kernel.runtime.nt_query.detail.out_of_range", QStringLiteral("索引越界。")));
         return;
     }
 
     const KernelNtQueryResultEntry& entry = m_ntQueryResults[sourceIndex];
-    const QString detailText = QStringLiteral(
+    const QString detailText = kernelText("kernel.runtime.nt_query.detail.full", QStringLiteral(
         "类别: %1\n"
         "函数: %2\n"
         "查询项: %3\n"
         "状态: %4\n"
         "摘要: %5\n\n"
-        "详细输出:\n%6")
+        "详细输出:\n%6"))
         .arg(entry.categoryText)
         .arg(entry.functionNameText)
         .arg(entry.queryItemText)

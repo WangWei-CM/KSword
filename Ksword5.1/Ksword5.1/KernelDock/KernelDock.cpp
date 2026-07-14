@@ -52,6 +52,8 @@
 #include <QTreeWidget>
 #include <QVBoxLayout>
 
+using ksword::kernel_dock_internal::kernelText;
+
 namespace
 {
     // blueButtonStyle：
@@ -113,7 +115,7 @@ namespace
             const QTableWidgetItem* cellItem = tableWidget->item(rowIndex, columnIndex);
             fieldList.push_back(cellItem != nullptr && !cellItem->text().trimmed().isEmpty()
                 ? cellItem->text()
-                : QStringLiteral("<空>"));
+                : kernelText("kernel.main.placeholder.empty", QStringLiteral("<空>")));
         }
         return fieldList.join('\t');
     }
@@ -145,7 +147,7 @@ namespace
 
         QAction* copyRowAction = contextMenu.addAction(
             QIcon(QStringLiteral(":/Icon/process_copy_row.svg")),
-            QStringLiteral("复制当前行"));
+            kernelText("kernel.main.menu.copy_row", QStringLiteral("复制当前行")));
         copyRowAction->setEnabled(rowIndex >= 0);
 
         const QAction* selectedAction = contextMenu.exec(tableWidget->viewport()->mapToGlobal(localPosition));
@@ -425,7 +427,7 @@ void KernelDock::initializeUi()
     m_rootLayout->setSpacing(4);
 
     // 初始化进度条默认隐藏，仅在惰性 Tab 开始构建时短暂显示。
-    m_tabInitializingStatusLabel = new QLabel(QStringLiteral("页面就绪"), this);
+    m_tabInitializingStatusLabel = new QLabel(kernelText("kernel.main.status.ready", QStringLiteral("页面就绪")), this);
     m_tabInitializingStatusLabel->setStyleSheet(statusLabelStyle(KswordTheme::TextSecondaryHex()));
     m_tabInitializingStatusLabel->setVisible(false);
 
@@ -463,80 +465,80 @@ void KernelDock::initializeUi()
     m_objectNamespaceTabIndex = m_tabWidget->addTab(
         m_objectNamespacePage,
         tabIcon(QStringLiteral(":/Icon/process_tree.svg")),
-        QStringLiteral("对象命名空间"));
-    m_tabWidget->setTabToolTip(m_objectNamespaceTabIndex, QStringLiteral("对象管理器命名空间遍历（默认页）"));
+        kernelText("kernel.main.tab.object_namespace.title", QStringLiteral("对象命名空间")));
+    m_tabWidget->setTabToolTip(m_objectNamespaceTabIndex, kernelText("kernel.main.tab.object_namespace.tooltip", QStringLiteral("对象管理器命名空间遍历（默认页）")));
 
     m_atomTabIndex = m_tabWidget->addTab(
         m_atomPage,
         tabIcon(QStringLiteral(":/Icon/process_threads.svg")),
-        QStringLiteral("原子表遍历"));
-    m_tabWidget->setTabToolTip(m_atomTabIndex, QStringLiteral("遍历全局原子范围并提供校验操作"));
+        kernelText("kernel.main.tab.atom.title", QStringLiteral("原子表遍历")));
+    m_tabWidget->setTabToolTip(m_atomTabIndex, kernelText("kernel.main.tab.atom.tooltip", QStringLiteral("遍历全局原子范围并提供校验操作")));
 
     m_ntQueryTabIndex = m_tabWidget->addTab(
         m_ntQueryPage,
         tabIcon(QStringLiteral(":/Icon/process_details.svg")),
-        QStringLiteral("历史NtQuery"));
-    m_tabWidget->setTabToolTip(m_ntQueryTabIndex, QStringLiteral("旧版内核 NtQuery 信息页"));
+        kernelText("kernel.main.tab.nt_query.title", QStringLiteral("历史NtQuery")));
+    m_tabWidget->setTabToolTip(m_ntQueryTabIndex, kernelText("kernel.main.tab.nt_query.tooltip", QStringLiteral("旧版内核 NtQuery 信息页")));
 
     m_ssdtTabIndex = m_tabWidget->addTab(
         m_ssdtPage,
         tabIcon(QStringLiteral(":/Icon/process_list.svg")),
         QStringLiteral("SSDT"));
-    m_tabWidget->setTabToolTip(m_ssdtTabIndex, QStringLiteral("驱动侧 SSDT 服务索引遍历结果"));
+    m_tabWidget->setTabToolTip(m_ssdtTabIndex, kernelText("kernel.main.tab.ssdt.tooltip", QStringLiteral("驱动侧 SSDT 服务索引遍历结果")));
 
     m_shadowSsdtTabIndex = m_tabWidget->addTab(
         m_shadowSsdtPage,
         tabIcon(QStringLiteral(":/Icon/process_list.svg")),
         QStringLiteral("SSSDT"));
-    m_tabWidget->setTabToolTip(m_shadowSsdtTabIndex, QStringLiteral("参考 System Informer 的 win32k/win32u shadow syscall 解析"));
+    m_tabWidget->setTabToolTip(m_shadowSsdtTabIndex, kernelText("kernel.main.tab.shadow_ssdt.tooltip", QStringLiteral("参考 System Informer 的 win32k/win32u shadow syscall 解析")));
 
     m_inlineHookTabIndex = m_tabWidget->addTab(
         m_inlineHookPage,
         tabIcon(QStringLiteral(":/Icon/process_critical.svg")),
         QStringLiteral("Inline Hook"));
-    m_tabWidget->setTabToolTip(m_inlineHookTabIndex, QStringLiteral("扫描内核模块导出函数头部跳转补丁，并提供 force 后 NOP 摘除"));
+    m_tabWidget->setTabToolTip(m_inlineHookTabIndex, kernelText("kernel.main.tab.inline_hook.tooltip", QStringLiteral("扫描内核模块导出函数头部跳转补丁，并提供 force 后 NOP 摘除")));
 
     m_iatEatHookTabIndex = m_tabWidget->addTab(
         m_iatEatHookPage,
         tabIcon(QStringLiteral(":/Icon/process_details.svg")),
         QStringLiteral("IAT/EAT"));
-    m_tabWidget->setTabToolTip(m_iatEatHookTabIndex, QStringLiteral("检测内核模块导入表和导出表可疑目标指针"));
+    m_tabWidget->setTabToolTip(m_iatEatHookTabIndex, kernelText("kernel.main.tab.iat_eat.tooltip", QStringLiteral("检测内核模块导入表和导出表可疑目标指针")));
 
     m_crossViewTabIndex = m_tabWidget->addTab(
         m_crossViewPage,
         tabIcon(QStringLiteral(":/Icon/process_list.svg")),
-        QStringLiteral("CID表"));
-    m_tabWidget->setTabToolTip(m_crossViewTabIndex, QStringLiteral("只读 CID / cross-view 证据聚合"));
+        kernelText("kernel.main.tab.cid.title", QStringLiteral("CID表")));
+    m_tabWidget->setTabToolTip(m_crossViewTabIndex, kernelText("kernel.main.tab.cid.tooltip", QStringLiteral("只读 CID / cross-view 证据聚合")));
 
     m_ipcTabIndex = m_tabWidget->addTab(
         m_ipcPage,
         tabIcon(QStringLiteral(":/Icon/process_details.svg")),
         QStringLiteral("IPC"));
-    m_tabWidget->setTabToolTip(m_ipcTabIndex, QStringLiteral("只读 NamedPipe / ALPC / 通信对象"));
+    m_tabWidget->setTabToolTip(m_ipcTabIndex, kernelText("kernel.main.tab.ipc.tooltip", QStringLiteral("只读 NamedPipe / ALPC / 通信对象")));
 
     m_dynDataTabIndex = m_tabWidget->addTab(
         m_dynDataPage,
         tabIcon(QStringLiteral(":/Icon/process_priority.svg")),
-        QStringLiteral("动态偏移"));
-    m_tabWidget->setTabToolTip(m_dynDataTabIndex, QStringLiteral("System Informer DynData 精确匹配状态与字段列表"));
+        kernelText("kernel.main.tab.dyn_data.title", QStringLiteral("动态偏移")));
+    m_tabWidget->setTabToolTip(m_dynDataTabIndex, kernelText("kernel.main.tab.dyn_data.tooltip", QStringLiteral("System Informer DynData 精确匹配状态与字段列表")));
 
     m_driverStatusTabIndex = m_tabWidget->addTab(
         m_driverStatusPage,
         tabIcon(QStringLiteral(":/Icon/process_details.svg")),
-        QStringLiteral("驱动状态"));
-    m_tabWidget->setTabToolTip(m_driverStatusTabIndex, QStringLiteral("KswordARK 驱动加载、协议、安全策略、DynData 和功能能力矩阵"));
+        kernelText("kernel.main.tab.driver_status.title", QStringLiteral("驱动状态")));
+    m_tabWidget->setTabToolTip(m_driverStatusTabIndex, kernelText("kernel.main.tab.driver_status.tooltip", QStringLiteral("KswordARK 驱动加载、协议、安全策略、DynData 和功能能力矩阵")));
 
     m_callbackTabIndex = m_tabWidget->addTab(
         m_callbackInterceptPage,
         tabIcon(QStringLiteral(":/Icon/process_critical.svg")),
-        QStringLiteral("驱动回调"));
-    m_tabWidget->setTabToolTip(m_callbackTabIndex, QStringLiteral("驱动回调拦截规则管理与询问事件处理"));
+        kernelText("kernel.main.tab.callback.title", QStringLiteral("驱动回调")));
+    m_tabWidget->setTabToolTip(m_callbackTabIndex, kernelText("kernel.main.tab.callback.tooltip", QStringLiteral("驱动回调拦截规则管理与询问事件处理")));
 
     m_callbackEnumTabIndex = m_tabWidget->addTab(
         m_callbackEnumPage,
         tabIcon(QStringLiteral(":/Icon/process_list.svg")),
-        QStringLiteral("回调遍历"));
-    m_tabWidget->setTabToolTip(m_callbackEnumTabIndex, QStringLiteral("遍历 KswordARK 可见的系统回调、minifilter 和 System Informer DynData 诊断项"));
+        kernelText("kernel.main.tab.callback_enum.title", QStringLiteral("回调遍历")));
+    m_tabWidget->setTabToolTip(m_callbackEnumTabIndex, kernelText("kernel.main.tab.callback_enum.tooltip", QStringLiteral("遍历 KswordARK 可见的系统回调、minifilter 和 System Informer DynData 诊断项")));
 
     m_tabWidget->setCurrentIndex(m_objectNamespaceTabIndex);
     updateTabIconContrast();
@@ -555,7 +557,7 @@ void KernelDock::showTabInitializingProgress(const int tabIndex, const QString& 
         return;
     }
 
-    m_tabInitializingStatusLabel->setText(QStringLiteral("正在初始化 %1 页面...").arg(titleText));
+    m_tabInitializingStatusLabel->setText(kernelText("kernel.main.status.initializing", QStringLiteral("正在初始化 %1 页面...")).arg(titleText));
     m_tabInitializingStatusLabel->setVisible(true);
     m_tabInitializingProgressBar->setVisible(true);
     QApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
@@ -673,15 +675,15 @@ void KernelDock::initializeObjectNamespaceTab()
     m_objectNamespaceInnerTabWidget->addTab(
         m_objectNamespaceOverviewPage,
         tabIcon(QStringLiteral(":/Icon/process_tree.svg")),
-        QStringLiteral("总览"));
+        kernelText("kernel.main.inner_tab.overview", QStringLiteral("总览")));
     m_objectNamespaceInnerTabWidget->addTab(
         new KernelObjectDirectoryDeepTab(m_objectNamespaceInnerTabWidget),
         tabIcon(QStringLiteral(":/Icon/process_tree.svg")),
-        QStringLiteral("目录递归"));
+        kernelText("kernel.main.inner_tab.directory_recursion", QStringLiteral("目录递归")));
     m_objectNamespaceInnerTabWidget->addTab(
         new KernelNamedPipeTab(m_objectNamespaceInnerTabWidget),
         tabIcon(QStringLiteral(":/Icon/process_details.svg")),
-        QStringLiteral("命名管道"));
+        kernelText("kernel.main.inner_tab.named_pipe", QStringLiteral("命名管道")));
     m_objectNamespaceInnerTabWidget->addTab(
         new KernelBaseNamedObjectsTab(m_objectNamespaceInnerTabWidget),
         tabIcon(QStringLiteral(":/Icon/process_threads.svg")),
@@ -689,36 +691,36 @@ void KernelDock::initializeObjectNamespaceTab()
     m_objectNamespaceInnerTabWidget->addTab(
         new KernelSymbolicLinkTab(m_objectNamespaceInnerTabWidget),
         tabIcon(QStringLiteral(":/Icon/process_refresh.svg")),
-        QStringLiteral("符号链接"));
+        kernelText("kernel.main.inner_tab.symbolic_link", QStringLiteral("符号链接")));
     m_objectNamespaceInnerTabWidget->addTab(
         new KernelDeviceDriverObjectsTab(m_objectNamespaceInnerTabWidget),
         tabIcon(QStringLiteral(":/Icon/process_details.svg")),
-        QStringLiteral("设备与驱动"));
+        kernelText("kernel.main.inner_tab.device_driver", QStringLiteral("设备与驱动")));
     m_objectNamespaceInnerTabWidget->addTab(
         new KernelObjectTypeMatrixTab(m_objectNamespaceInnerTabWidget),
         tabIcon(QStringLiteral(":/Icon/process_list.svg")),
-        QStringLiteral("对象类型"));
+        kernelText("kernel.main.inner_tab.object_type", QStringLiteral("对象类型")));
     m_objectNamespaceInnerTabWidget->addTab(
         new KernelCommunicationEndpointTab(m_objectNamespaceInnerTabWidget),
         tabIcon(QStringLiteral(":/Icon/process_critical.svg")),
-        QStringLiteral("通信端点"));
+        kernelText("kernel.main.inner_tab.communication_endpoint", QStringLiteral("通信端点")));
 
     m_objectNamespaceToolLayout = new QHBoxLayout();
     m_objectNamespaceToolLayout->setContentsMargins(0, 0, 0, 0);
     m_objectNamespaceToolLayout->setSpacing(6);
 
     m_refreshObjectNamespaceButton = new QPushButton(QIcon(":/Icon/process_refresh.svg"), QString(), m_objectNamespaceOverviewPage);
-    m_refreshObjectNamespaceButton->setToolTip(QStringLiteral("刷新对象命名空间枚举结果"));
+    m_refreshObjectNamespaceButton->setToolTip(kernelText("kernel.main.object_namespace.refresh.tooltip", QStringLiteral("刷新对象命名空间枚举结果")));
     m_refreshObjectNamespaceButton->setStyleSheet(blueButtonStyle());
     m_refreshObjectNamespaceButton->setFixedWidth(34);
 
     m_objectNamespaceFilterEdit = new QLineEdit(m_objectNamespaceOverviewPage);
-    m_objectNamespaceFilterEdit->setPlaceholderText(QStringLiteral("按根目录/目录路径/对象名/对象类型/状态筛选"));
-    m_objectNamespaceFilterEdit->setToolTip(QStringLiteral("输入关键字后实时过滤对象命名空间树"));
+    m_objectNamespaceFilterEdit->setPlaceholderText(kernelText("kernel.main.object_namespace.filter.placeholder", QStringLiteral("按根目录/目录路径/对象名/对象类型/状态筛选")));
+    m_objectNamespaceFilterEdit->setToolTip(kernelText("kernel.main.object_namespace.filter.tooltip", QStringLiteral("输入关键字后实时过滤对象命名空间树")));
     m_objectNamespaceFilterEdit->setClearButtonEnabled(true);
     m_objectNamespaceFilterEdit->setStyleSheet(blueInputStyle());
 
-    m_objectNamespaceStatusLabel = new QLabel(QStringLiteral("状态：等待刷新"), m_objectNamespaceOverviewPage);
+    m_objectNamespaceStatusLabel = new QLabel(kernelText("kernel.main.object_namespace.status.waiting", QStringLiteral("状态：等待刷新")), m_objectNamespaceOverviewPage);
     m_objectNamespaceStatusLabel->setStyleSheet(statusLabelStyle(KswordTheme::TextSecondaryHex()));
 
     m_objectNamespaceToolLayout->addWidget(m_refreshObjectNamespaceButton, 0);
@@ -734,11 +736,11 @@ void KernelDock::initializeObjectNamespaceTab()
     m_objectNamespaceTree = new QTreeWidget(horizontalSplitter);
     m_objectNamespaceTree->setColumnCount(static_cast<int>(ObjectNamespaceColumn::Count));
     m_objectNamespaceTree->setHeaderLabels(QStringList{
-        QStringLiteral("名称"),
-        QStringLiteral("类型"),
-        QStringLiteral("路径/说明"),
-        QStringLiteral("状态"),
-        QStringLiteral("符号链接目标")
+        kernelText("kernel.main.object_namespace.header.name", QStringLiteral("名称")),
+        kernelText("kernel.main.object_namespace.header.type", QStringLiteral("类型")),
+        kernelText("kernel.main.object_namespace.header.path_scope", QStringLiteral("路径/说明")),
+        kernelText("kernel.main.object_namespace.header.status", QStringLiteral("状态")),
+        kernelText("kernel.main.object_namespace.header.symbolic_target", QStringLiteral("符号链接目标"))
         });
     m_objectNamespaceTree->setSelectionMode(QAbstractItemView::SingleSelection);
     m_objectNamespaceTree->setAlternatingRowColors(true);
@@ -751,13 +753,13 @@ void KernelDock::initializeObjectNamespaceTab()
     // - 初始布局仍交给全局 TableColumnAutoFit 压入可见宽度；
     // - 不强制隐藏横向滚动条，用户拖宽列后允许 Qt 按需显示。
     m_objectNamespaceTree->header()->setSectionResizeMode(QHeaderView::Stretch);
-    m_objectNamespaceTree->setToolTip(QStringLiteral("文件管理器式对象命名空间树，支持逐级展开与右键操作"));
+    m_objectNamespaceTree->setToolTip(kernelText("kernel.main.object_namespace.tree.tooltip", QStringLiteral("文件管理器式对象命名空间树，支持逐级展开与右键操作")));
 
     m_objectNamespacePropertyTable = new ks::ui::VisibleTableWidget(horizontalSplitter);
     m_objectNamespacePropertyTable->setColumnCount(2);
     m_objectNamespacePropertyTable->setHorizontalHeaderLabels(QStringList{
-        QStringLiteral("属性项"),
-        QStringLiteral("值")
+        kernelText("kernel.main.object_namespace.property.header", QStringLiteral("属性项")),
+        kernelText("kernel.main.object_namespace.property.value", QStringLiteral("值"))
         });
     m_objectNamespacePropertyTable->setSelectionMode(QAbstractItemView::NoSelection);
     m_objectNamespacePropertyTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
@@ -770,11 +772,11 @@ void KernelDock::initializeObjectNamespaceTab()
     m_objectNamespacePropertyTable->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
     m_objectNamespacePropertyTable->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
     m_objectNamespacePropertyTable->setColumnWidth(0, 220);
-    m_objectNamespacePropertyTable->setToolTip(QStringLiteral("当前选中节点的字段详情（字段名 + 字段值）"));
+    m_objectNamespacePropertyTable->setToolTip(kernelText("kernel.main.object_namespace.property.tooltip", QStringLiteral("当前选中节点的字段详情（字段名 + 字段值）")));
 
     m_objectNamespaceDetailEditor = new CodeEditorWidget(verticalSplitter);
     m_objectNamespaceDetailEditor->setReadOnly(true);
-    m_objectNamespaceDetailEditor->setText(QStringLiteral("请选择对象命名空间节点查看详情。"));
+    m_objectNamespaceDetailEditor->setText(kernelText("kernel.main.object_namespace.detail.initial", QStringLiteral("请选择对象命名空间节点查看详情。")));
 
     horizontalSplitter->setStretchFactor(0, 3);
     horizontalSplitter->setStretchFactor(1, 2);
@@ -815,17 +817,17 @@ void KernelDock::initializeAtomTableTab()
     m_atomToolLayout->setSpacing(6);
 
     m_refreshAtomButton = new QPushButton(QIcon(":/Icon/process_refresh.svg"), QString(), m_atomPage);
-    m_refreshAtomButton->setToolTip(QStringLiteral("刷新原子表遍历结果"));
+    m_refreshAtomButton->setToolTip(kernelText("kernel.main.atom.refresh.tooltip", QStringLiteral("刷新原子表遍历结果")));
     m_refreshAtomButton->setStyleSheet(blueButtonStyle());
     m_refreshAtomButton->setFixedWidth(34);
 
     m_atomFilterEdit = new QLineEdit(m_atomPage);
-    m_atomFilterEdit->setPlaceholderText(QStringLiteral("按 Atom 值/十六进制/名称/来源筛选"));
-    m_atomFilterEdit->setToolTip(QStringLiteral("输入关键字后实时过滤原子表"));
+    m_atomFilterEdit->setPlaceholderText(kernelText("kernel.main.atom.filter.placeholder", QStringLiteral("按 Atom 值/十六进制/名称/来源筛选")));
+    m_atomFilterEdit->setToolTip(kernelText("kernel.main.atom.filter.tooltip", QStringLiteral("输入关键字后实时过滤原子表")));
     m_atomFilterEdit->setClearButtonEnabled(true);
     m_atomFilterEdit->setStyleSheet(blueInputStyle());
 
-    m_atomStatusLabel = new QLabel(QStringLiteral("状态：等待刷新"), m_atomPage);
+    m_atomStatusLabel = new QLabel(kernelText("kernel.main.atom.status.waiting", QStringLiteral("状态：等待刷新")), m_atomPage);
     m_atomStatusLabel->setStyleSheet(statusLabelStyle(KswordTheme::TextSecondaryHex()));
 
     m_atomToolLayout->addWidget(m_refreshAtomButton, 0);
@@ -839,11 +841,11 @@ void KernelDock::initializeAtomTableTab()
     m_atomTable = new ks::ui::VisibleTableWidget(splitter);
     m_atomTable->setColumnCount(static_cast<int>(AtomColumn::Count));
     m_atomTable->setHorizontalHeaderLabels(QStringList{
-        QStringLiteral("Atom值"),
-        QStringLiteral("十六进制"),
-        QStringLiteral("名称"),
-        QStringLiteral("来源"),
-        QStringLiteral("状态")
+        kernelText("kernel.main.atom.header.value", QStringLiteral("Atom值")),
+        kernelText("kernel.main.atom.header.hex", QStringLiteral("十六进制")),
+        kernelText("kernel.main.atom.header.name", QStringLiteral("名称")),
+        kernelText("kernel.main.atom.header.source", QStringLiteral("来源")),
+        kernelText("kernel.main.atom.header.status", QStringLiteral("状态"))
         });
     m_atomTable->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_atomTable->setSelectionMode(QAbstractItemView::SingleSelection);
@@ -863,7 +865,7 @@ void KernelDock::initializeAtomTableTab()
 
     m_atomDetailEditor = new CodeEditorWidget(splitter);
     m_atomDetailEditor->setReadOnly(true);
-    m_atomDetailEditor->setText(QStringLiteral("请选择一条原子记录查看详情。"));
+    m_atomDetailEditor->setText(kernelText("kernel.main.atom.detail.initial", QStringLiteral("请选择一条原子记录查看详情。")));
 
     splitter->setStretchFactor(0, 3);
     splitter->setStretchFactor(1, 2);
@@ -899,11 +901,11 @@ void KernelDock::initializeNtQueryTab()
     m_ntQueryToolLayout->setSpacing(6);
 
     m_refreshNtQueryButton = new QPushButton(QIcon(":/Icon/process_refresh.svg"), QString(), m_ntQueryPage);
-    m_refreshNtQueryButton->setToolTip(QStringLiteral("刷新历史 NtQuery 信息"));
+    m_refreshNtQueryButton->setToolTip(kernelText("kernel.main.nt_query.refresh.tooltip", QStringLiteral("刷新历史 NtQuery 信息")));
     m_refreshNtQueryButton->setStyleSheet(blueButtonStyle());
     m_refreshNtQueryButton->setFixedWidth(34);
 
-    m_ntQueryStatusLabel = new QLabel(QStringLiteral("状态：等待刷新"), m_ntQueryPage);
+    m_ntQueryStatusLabel = new QLabel(kernelText("kernel.main.nt_query.status.waiting", QStringLiteral("状态：等待刷新")), m_ntQueryPage);
     m_ntQueryStatusLabel->setStyleSheet(statusLabelStyle(KswordTheme::TextSecondaryHex()));
 
     m_ntQueryToolLayout->addWidget(m_refreshNtQueryButton, 0);
@@ -916,11 +918,11 @@ void KernelDock::initializeNtQueryTab()
     m_ntQueryTable = new ks::ui::VisibleTableWidget(splitter);
     m_ntQueryTable->setColumnCount(static_cast<int>(NtQueryColumn::Count));
     m_ntQueryTable->setHorizontalHeaderLabels(QStringList{
-        QStringLiteral("类别"),
-        QStringLiteral("函数"),
-        QStringLiteral("查询项"),
-        QStringLiteral("状态"),
-        QStringLiteral("摘要")
+        kernelText("kernel.main.nt_query.header.category", QStringLiteral("类别")),
+        kernelText("kernel.main.nt_query.header.function", QStringLiteral("函数")),
+        kernelText("kernel.main.nt_query.header.item", QStringLiteral("查询项")),
+        kernelText("kernel.main.nt_query.header.status", QStringLiteral("状态")),
+        kernelText("kernel.main.nt_query.header.summary", QStringLiteral("摘要"))
         });
     m_ntQueryTable->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_ntQueryTable->setSelectionMode(QAbstractItemView::SingleSelection);
@@ -936,7 +938,7 @@ void KernelDock::initializeNtQueryTab()
 
     m_ntQueryDetailEditor = new CodeEditorWidget(splitter);
     m_ntQueryDetailEditor->setReadOnly(true);
-    m_ntQueryDetailEditor->setText(QStringLiteral("请选择一条 NtQuery 结果查看详情。"));
+    m_ntQueryDetailEditor->setText(kernelText("kernel.main.nt_query.detail.initial", QStringLiteral("请选择一条 NtQuery 结果查看详情。")));
 
     splitter->setStretchFactor(0, 3);
     splitter->setStretchFactor(1, 2);
@@ -998,7 +1000,7 @@ void KernelDock::ensureTabInitialized(const int tabIndex)
 {
     if (tabIndex == m_objectNamespaceTabIndex && !m_objectNamespaceTabInitialized)
     {
-        showTabInitializingProgress(tabIndex, QStringLiteral("对象命名空间"));
+        showTabInitializingProgress(tabIndex, kernelText("kernel.main.tab.object_namespace.title", QStringLiteral("对象命名空间")));
         initializeObjectNamespaceTab();
         m_objectNamespaceTabInitialized = true;
         hideTabInitializingProgress();
@@ -1008,7 +1010,7 @@ void KernelDock::ensureTabInitialized(const int tabIndex)
 
     if (tabIndex == m_atomTabIndex && !m_atomTabInitialized)
     {
-        showTabInitializingProgress(tabIndex, QStringLiteral("全局原子表"));
+        showTabInitializingProgress(tabIndex, kernelText("kernel.main.progress.global_atom", QStringLiteral("全局原子表")));
         initializeAtomTableTab();
         m_atomTabInitialized = true;
         hideTabInitializingProgress();
@@ -1018,7 +1020,7 @@ void KernelDock::ensureTabInitialized(const int tabIndex)
 
     if (tabIndex == m_ntQueryTabIndex && !m_ntQueryTabInitialized)
     {
-        showTabInitializingProgress(tabIndex, QStringLiteral("历史 NtQuery"));
+        showTabInitializingProgress(tabIndex, kernelText("kernel.main.tab.nt_query.progress", QStringLiteral("历史 NtQuery")));
         initializeNtQueryTab();
         m_ntQueryTabInitialized = true;
         hideTabInitializingProgress();
@@ -1068,7 +1070,7 @@ void KernelDock::ensureTabInitialized(const int tabIndex)
 
     if (tabIndex == m_crossViewTabIndex && !m_crossViewTabInitialized)
     {
-        showTabInitializingProgress(tabIndex, QStringLiteral("CID表"));
+        showTabInitializingProgress(tabIndex, kernelText("kernel.main.tab.cid.title", QStringLiteral("CID表")));
         initializeCrossViewTab();
         m_crossViewTabInitialized = true;
         hideTabInitializingProgress();
@@ -1086,7 +1088,7 @@ void KernelDock::ensureTabInitialized(const int tabIndex)
 
     if (tabIndex == m_dynDataTabIndex && !m_dynDataTabInitialized)
     {
-        showTabInitializingProgress(tabIndex, QStringLiteral("动态偏移"));
+        showTabInitializingProgress(tabIndex, kernelText("kernel.main.tab.dyn_data.title", QStringLiteral("动态偏移")));
         initializeDynDataTab();
         m_dynDataTabInitialized = true;
         hideTabInitializingProgress();
@@ -1096,7 +1098,7 @@ void KernelDock::ensureTabInitialized(const int tabIndex)
 
     if (tabIndex == m_driverStatusTabIndex && !m_driverStatusTabInitialized)
     {
-        showTabInitializingProgress(tabIndex, QStringLiteral("驱动状态"));
+        showTabInitializingProgress(tabIndex, kernelText("kernel.main.tab.driver_status.title", QStringLiteral("驱动状态")));
         initializeDriverStatusTab();
         m_driverStatusTabInitialized = true;
         hideTabInitializingProgress();
@@ -1106,7 +1108,7 @@ void KernelDock::ensureTabInitialized(const int tabIndex)
 
     if (tabIndex == m_callbackTabIndex && !m_callbackTabInitialized)
     {
-        showTabInitializingProgress(tabIndex, QStringLiteral("驱动回调"));
+        showTabInitializingProgress(tabIndex, kernelText("kernel.main.tab.callback.title", QStringLiteral("驱动回调")));
         initializeCallbackInterceptTab();
         m_callbackTabInitialized = true;
         hideTabInitializingProgress();
@@ -1115,7 +1117,7 @@ void KernelDock::ensureTabInitialized(const int tabIndex)
 
     if (tabIndex == m_callbackEnumTabIndex && !m_callbackEnumTabInitialized)
     {
-        showTabInitializingProgress(tabIndex, QStringLiteral("回调遍历"));
+        showTabInitializingProgress(tabIndex, kernelText("kernel.main.tab.callback_enum.title", QStringLiteral("回调遍历")));
         initializeCallbackEnumTab();
         m_callbackEnumTabInitialized = true;
         hideTabInitializingProgress();
