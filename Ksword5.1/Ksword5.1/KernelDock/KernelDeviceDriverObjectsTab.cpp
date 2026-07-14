@@ -1,5 +1,6 @@
 
 #include "KernelDeviceDriverObjectsTab.h"
+#include "KernelDock.h"
 #include "../UI/VisibleTableWidget.h"
 
 // ============================================================
@@ -39,6 +40,8 @@
 #include <algorithm> // std::find/std::sort/std::unique：筛选与排序。
 #include <utility>   // std::move：移动后台结果。
 #include <thread>    // std::thread：后台枚举线程。
+
+using ksword::kernel_dock_internal::kernelText;
 
 namespace
 {
@@ -159,13 +162,13 @@ void KernelDeviceDriverObjectsTab::initializeUi()
     toolbarLayout->setContentsMargins(0, 0, 0, 0);
     toolbarLayout->setSpacing(6);
 
-    m_refreshButton = new QPushButton(QStringLiteral("刷新"), m_toolbarWidget);
+    m_refreshButton = new QPushButton(kernelText("kernel.device_driver.toolbar.refresh", QStringLiteral("刷新")), m_toolbarWidget);
     m_refreshButton->setStyleSheet(blueButtonStyle());
-    m_refreshButton->setToolTip(QStringLiteral("重新枚举 \\Device、\\Driver、\\FileSystem 等对象目录"));
-    m_exportButton = new QPushButton(QStringLiteral("导出 TSV"), m_toolbarWidget);
+    m_refreshButton->setToolTip(kernelText("kernel.device_driver.toolbar.refresh.tooltip", QStringLiteral("重新枚举 \\Device、\\Driver、\\FileSystem 等对象目录")));
+    m_exportButton = new QPushButton(kernelText("kernel.device_driver.toolbar.export", QStringLiteral("导出 TSV")), m_toolbarWidget);
     m_exportButton->setStyleSheet(blueButtonStyle());
-    m_exportButton->setToolTip(QStringLiteral("把当前可见结果导出为 TSV"));
-    m_statusLabel = new QLabel(QStringLiteral("状态：首次打开后正在加载设备与驱动对象..."), m_toolbarWidget);
+    m_exportButton->setToolTip(kernelText("kernel.device_driver.toolbar.export.tooltip", QStringLiteral("把当前可见结果导出为 TSV")));
+    m_statusLabel = new QLabel(kernelText("kernel.device_driver.status.initial", QStringLiteral("状态：首次打开后正在加载设备与驱动对象...")), m_toolbarWidget);
     m_statusLabel->setStyleSheet(statusLabelStyle(KswordTheme::TextSecondaryHex()));
     m_statusLabel->setWordWrap(true);
     m_statusLabel->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
@@ -183,34 +186,34 @@ void KernelDeviceDriverObjectsTab::initializeUi()
     m_directoryFilterCombo = new QComboBox(m_filterWidget);
     m_directoryFilterCombo->setEditable(false);
     m_directoryFilterCombo->setMinimumWidth(190);
-    m_directoryFilterCombo->setToolTip(QStringLiteral("按对象目录过滤"));
+    m_directoryFilterCombo->setToolTip(kernelText("kernel.device_driver.filter.directory.tooltip", QStringLiteral("按对象目录过滤")));
     m_typeFilterCombo = new QComboBox(m_filterWidget);
     m_typeFilterCombo->setEditable(false);
     m_typeFilterCombo->setMinimumWidth(160);
-    m_typeFilterCombo->setToolTip(QStringLiteral("按对象类型过滤"));
+    m_typeFilterCombo->setToolTip(kernelText("kernel.device_driver.filter.type.tooltip", QStringLiteral("按对象类型过滤")));
     m_keywordEdit = new QLineEdit(m_filterWidget);
-    m_keywordEdit->setPlaceholderText(QStringLiteral("关键字过滤：名称 / 类型 / 路径 / 目标 / 提示"));
+    m_keywordEdit->setPlaceholderText(kernelText("kernel.device_driver.filter.keyword.placeholder", QStringLiteral("关键字过滤：名称 / 类型 / 路径 / 目标 / 提示")));
     m_keywordEdit->setClearButtonEnabled(true);
     m_keywordEdit->setStyleSheet(blueInputStyle());
 
-    filterLayout->addWidget(makeLabel(QStringLiteral("目录："), m_filterWidget), 0);
+    filterLayout->addWidget(makeLabel(kernelText("kernel.device_driver.filter.directory.label", QStringLiteral("目录：")), m_filterWidget), 0);
     filterLayout->addWidget(m_directoryFilterCombo, 0);
-    filterLayout->addWidget(makeLabel(QStringLiteral("类型："), m_filterWidget), 0);
+    filterLayout->addWidget(makeLabel(kernelText("kernel.device_driver.filter.type.label", QStringLiteral("类型：")), m_filterWidget), 0);
     filterLayout->addWidget(m_typeFilterCombo, 0);
-    filterLayout->addWidget(makeLabel(QStringLiteral("关键字："), m_filterWidget), 0);
+    filterLayout->addWidget(makeLabel(kernelText("kernel.device_driver.filter.keyword.label", QStringLiteral("关键字：")), m_filterWidget), 0);
     filterLayout->addWidget(m_keywordEdit, 1);
     m_rootLayout->addWidget(m_filterWidget, 0);
 
     m_tableWidget = new ks::ui::VisibleTableWidget(this);
     m_tableWidget->setColumnCount(7);
     m_tableWidget->setHorizontalHeaderLabels({
-        QStringLiteral("目录路径"),
-        QStringLiteral("对象名称"),
-        QStringLiteral("对象类型"),
-        QStringLiteral("完整路径"),
-        QStringLiteral("目标路径"),
-        QStringLiteral("状态"),
-        QStringLiteral("能力提示"),
+        kernelText("kernel.device_driver.header.directory", QStringLiteral("目录路径")),
+        kernelText("kernel.device_driver.header.object_name", QStringLiteral("对象名称")),
+        kernelText("kernel.device_driver.header.object_type", QStringLiteral("对象类型")),
+        kernelText("kernel.device_driver.header.full_path", QStringLiteral("完整路径")),
+        kernelText("kernel.device_driver.header.target_path", QStringLiteral("目标路径")),
+        kernelText("kernel.device_driver.header.status", QStringLiteral("状态")),
+        kernelText("kernel.device_driver.header.capability", QStringLiteral("能力提示")),
     });
     m_tableWidget->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_tableWidget->setSelectionMode(QAbstractItemView::SingleSelection);
@@ -270,7 +273,7 @@ void KernelDeviceDriverObjectsTab::refreshAsync()
     {
         if (m_statusLabel != nullptr)
         {
-            m_statusLabel->setText(QStringLiteral("状态：刷新进行中，重复请求已忽略。"));
+            m_statusLabel->setText(kernelText("kernel.device_driver.status.already_refreshing", QStringLiteral("状态：刷新进行中，重复请求已忽略。")));
             m_statusLabel->setStyleSheet(statusLabelStyle(KswordTheme::PrimaryBlueHex));
         }
         return;
@@ -349,7 +352,7 @@ void KernelDeviceDriverObjectsTab::populateFilterCombos(const std::vector<Kernel
     {
         QSignalBlocker blocker(m_directoryFilterCombo);
         m_directoryFilterCombo->clear();
-        m_directoryFilterCombo->addItem(QStringLiteral("全部目录"));
+        m_directoryFilterCombo->addItem(kernelText("kernel.device_driver.filter.all_directories", QStringLiteral("全部目录")), QStringLiteral("*"));
         for (const RootDirectorySpec& spec : kRootDirectorySpecs)
         {
             m_directoryFilterCombo->addItem(spec.displayText, spec.pathText);
@@ -363,7 +366,7 @@ void KernelDeviceDriverObjectsTab::populateFilterCombos(const std::vector<Kernel
     {
         QSignalBlocker blocker(m_typeFilterCombo);
         m_typeFilterCombo->clear();
-        m_typeFilterCombo->addItem(QStringLiteral("全部类型"));
+        m_typeFilterCombo->addItem(kernelText("kernel.device_driver.filter.all_types", QStringLiteral("全部类型")), QStringLiteral("*"));
 
         QStringList uniqueTypes;
         uniqueTypes.reserve(static_cast<int>(rows.size()));
@@ -381,7 +384,7 @@ void KernelDeviceDriverObjectsTab::populateFilterCombos(const std::vector<Kernel
 
         for (const QString& typeText : uniqueTypes)
         {
-            m_typeFilterCombo->addItem(typeText);
+            m_typeFilterCombo->addItem(typeText, typeText);
         }
 
         const int matchIndex = m_typeFilterCombo->findText(currentTypeText);
@@ -395,11 +398,15 @@ void KernelDeviceDriverObjectsTab::populateFilterCombos(const std::vector<Kernel
 // - 返回：true 表示该行应保留显示。
 bool KernelDeviceDriverObjectsTab::matchesCurrentFilters(const KernelDeviceDriverObjectEntry& entry) const
 {
-    const QString directoryFilterText = m_directoryFilterCombo != nullptr ? m_directoryFilterCombo->currentText().trimmed() : QString();
-    const QString typeFilterText = m_typeFilterCombo != nullptr ? m_typeFilterCombo->currentText().trimmed() : QString();
+    const QString directoryFilterText = m_directoryFilterCombo != nullptr
+        ? m_directoryFilterCombo->currentData().toString().trimmed()
+        : QString();
+    const QString typeFilterText = m_typeFilterCombo != nullptr
+        ? m_typeFilterCombo->currentData().toString().trimmed()
+        : QString();
     const QString keywordText = m_keywordEdit != nullptr ? m_keywordEdit->text().trimmed() : QString();
 
-    if (!directoryFilterText.isEmpty() && directoryFilterText != QStringLiteral("全部目录"))
+    if (!directoryFilterText.isEmpty() && directoryFilterText != QStringLiteral("*"))
     {
         if (entry.directoryPathText.compare(directoryFilterText, Qt::CaseInsensitive) != 0)
         {
@@ -407,7 +414,7 @@ bool KernelDeviceDriverObjectsTab::matchesCurrentFilters(const KernelDeviceDrive
         }
     }
 
-    if (!typeFilterText.isEmpty() && typeFilterText != QStringLiteral("全部类型"))
+    if (!typeFilterText.isEmpty() && typeFilterText != QStringLiteral("*"))
     {
         if (entry.objectTypeText.compare(typeFilterText, Qt::CaseInsensitive) != 0)
         {
@@ -474,7 +481,9 @@ void KernelDeviceDriverObjectsTab::rebuildTableWidget()
     for (int rowIndex = 0; rowIndex < static_cast<int>(m_visibleRows.size()); ++rowIndex)
     {
         const KernelDeviceDriverObjectEntry& entry = m_visibleRows[static_cast<std::size_t>(rowIndex)];
-        const QString targetText = entry.targetPathText.isEmpty() ? QStringLiteral("<无>") : entry.targetPathText;
+        const QString targetText = entry.targetPathText.isEmpty()
+            ? kernelText("kernel.device_driver.placeholder.no_target", QStringLiteral("<无>"))
+            : entry.targetPathText;
 
         m_tableWidget->setItem(rowIndex, 0, makeReadOnlyItem(entry.directoryPathText));
         m_tableWidget->setItem(rowIndex, 1, makeReadOnlyItem(entry.objectNameText));
@@ -501,34 +510,34 @@ void KernelDeviceDriverObjectsTab::updateStatusText(const QString& errorText)
 
     if (!errorText.isEmpty())
     {
-        m_statusLabel->setText(QStringLiteral("状态：刷新失败 - %1").arg(errorText));
+        m_statusLabel->setText(kernelText("kernel.device_driver.status.failed", QStringLiteral("状态：刷新失败 - %1")).arg(errorText));
         m_statusLabel->setStyleSheet(statusLabelStyle(QStringLiteral("#B23A3A")));
         return;
     }
 
     if (m_refreshRunning.load())
     {
-        m_statusLabel->setText(QStringLiteral("状态：刷新中..."));
+        m_statusLabel->setText(kernelText("kernel.device_driver.status.refreshing", QStringLiteral("状态：刷新中...")));
         m_statusLabel->setStyleSheet(statusLabelStyle(KswordTheme::PrimaryBlueHex));
         return;
     }
 
     if (m_allRows.empty())
     {
-        m_statusLabel->setText(QStringLiteral("状态：暂无结果，点击刷新开始枚举对象目录。"));
+        m_statusLabel->setText(kernelText("kernel.device_driver.status.no_results", QStringLiteral("状态：暂无结果，点击刷新开始枚举对象目录。")));
         m_statusLabel->setStyleSheet(statusLabelStyle(KswordTheme::TextSecondaryHex()));
         return;
     }
 
     if (m_visibleRows.empty())
     {
-        m_statusLabel->setText(QStringLiteral("状态：已加载 %1 条，当前过滤后无可见结果。").arg(m_allRows.size()));
+        m_statusLabel->setText(kernelText("kernel.device_driver.status.filter_empty", QStringLiteral("状态：已加载 %1 条，当前过滤后无可见结果。")).arg(m_allRows.size()));
         m_statusLabel->setStyleSheet(statusLabelStyle(QStringLiteral("#D77A00")));
         return;
     }
 
     m_statusLabel->setText(
-        QStringLiteral("状态：已加载 %1 条，当前显示 %2 条。")
+        kernelText("kernel.device_driver.status.summary", QStringLiteral("状态：已加载 %1 条，当前显示 %2 条。"))
         .arg(m_allRows.size())
         .arg(m_visibleRows.size()));
     m_statusLabel->setStyleSheet(statusLabelStyle(QStringLiteral("#3A8F3A")));
@@ -556,10 +565,10 @@ void KernelDeviceDriverObjectsTab::showTableContextMenu(const QPoint& localPosit
 
     QMenu menu(this);
     menu.setStyleSheet(KswordTheme::ContextMenuStyle());
-    QAction* copyCellAction = menu.addAction(QStringLiteral("复制单元格"));
-    QAction* copyRowAction = menu.addAction(QStringLiteral("复制当前行"));
-    QAction* copyTsvAction = menu.addAction(QStringLiteral("复制可见结果 TSV"));
-    QAction* exportAction = menu.addAction(QStringLiteral("导出 TSV"));
+    QAction* copyCellAction = menu.addAction(kernelText("kernel.device_driver.menu.copy_cell", QStringLiteral("复制单元格")));
+    QAction* copyRowAction = menu.addAction(kernelText("kernel.device_driver.menu.copy_row", QStringLiteral("复制当前行")));
+    QAction* copyTsvAction = menu.addAction(kernelText("kernel.device_driver.menu.copy_visible_tsv", QStringLiteral("复制可见结果 TSV")));
+    QAction* exportAction = menu.addAction(kernelText("kernel.device_driver.menu.export_tsv", QStringLiteral("导出 TSV")));
 
     copyCellAction->setEnabled(row >= 0 && column >= 0);
     copyRowAction->setEnabled(row >= 0);
@@ -646,15 +655,15 @@ void KernelDeviceDriverObjectsTab::exportVisibleRowsAsTsv()
 {
     if (m_visibleRows.empty())
     {
-        QMessageBox::information(this, QStringLiteral("导出 TSV"), QStringLiteral("当前没有可导出的可见结果。"));
+        QMessageBox::information(this, kernelText("kernel.device_driver.export.title", QStringLiteral("导出 TSV")), kernelText("kernel.device_driver.export.no_rows", QStringLiteral("当前没有可导出的可见结果。")));
         return;
     }
 
     const QString outputPath = QFileDialog::getSaveFileName(
         this,
-        QStringLiteral("导出 TSV"),
+        kernelText("kernel.device_driver.export.title", QStringLiteral("导出 TSV")),
         QStringLiteral("kernel_device_driver_objects.tsv"),
-        QStringLiteral("TSV 文件 (*.tsv)"));
+        kernelText("kernel.device_driver.export.file_filter", QStringLiteral("TSV 文件 (*.tsv)")));
     if (outputPath.isEmpty())
     {
         return;
@@ -663,13 +672,13 @@ void KernelDeviceDriverObjectsTab::exportVisibleRowsAsTsv()
     QFile outputFile(outputPath);
     if (!outputFile.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text))
     {
-        QMessageBox::warning(this, QStringLiteral("导出 TSV"), QStringLiteral("无法写入：%1").arg(outputPath));
+        QMessageBox::warning(this, kernelText("kernel.device_driver.export.title", QStringLiteral("导出 TSV")), kernelText("kernel.device_driver.export.write_failed", QStringLiteral("无法写入：%1")).arg(outputPath));
         return;
     }
 
     outputFile.write(rowsToTsv(true).toUtf8());
     outputFile.close();
-    QMessageBox::information(this, QStringLiteral("导出 TSV"), QStringLiteral("已导出：%1").arg(outputPath));
+    QMessageBox::information(this, kernelText("kernel.device_driver.export.title", QStringLiteral("导出 TSV")), kernelText("kernel.device_driver.export.completed", QStringLiteral("已导出：%1")).arg(outputPath));
 }
 
 // rowsToTsv：
@@ -682,13 +691,13 @@ QString KernelDeviceDriverObjectsTab::rowsToTsv(const bool includeHeader) const
     if (includeHeader)
     {
         lines.push_back(QStringList{
-            QStringLiteral("目录路径"),
-            QStringLiteral("对象名称"),
-            QStringLiteral("对象类型"),
-            QStringLiteral("完整路径"),
-            QStringLiteral("目标路径"),
-            QStringLiteral("状态"),
-            QStringLiteral("能力提示"),
+            kernelText("kernel.device_driver.header.directory", QStringLiteral("目录路径")),
+            kernelText("kernel.device_driver.header.object_name", QStringLiteral("对象名称")),
+            kernelText("kernel.device_driver.header.object_type", QStringLiteral("对象类型")),
+            kernelText("kernel.device_driver.header.full_path", QStringLiteral("完整路径")),
+            kernelText("kernel.device_driver.header.target_path", QStringLiteral("目标路径")),
+            kernelText("kernel.device_driver.header.status", QStringLiteral("状态")),
+            kernelText("kernel.device_driver.header.capability", QStringLiteral("能力提示")),
         }.join(QStringLiteral("\t")));
     }
 
@@ -699,7 +708,9 @@ QString KernelDeviceDriverObjectsTab::rowsToTsv(const bool includeHeader) const
             sanitizeTsvField(entry.objectNameText),
             sanitizeTsvField(entry.objectTypeText),
             sanitizeTsvField(entry.fullPathText),
-            sanitizeTsvField(entry.targetPathText.isEmpty() ? QStringLiteral("<无>") : entry.targetPathText),
+            sanitizeTsvField(entry.targetPathText.isEmpty()
+                ? kernelText("kernel.device_driver.placeholder.no_target", QStringLiteral("<无>"))
+                : entry.targetPathText),
             sanitizeTsvField(entry.statusText),
             sanitizeTsvField(entry.capabilityHintText),
         }.join(QStringLiteral("\t")));

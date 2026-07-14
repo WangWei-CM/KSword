@@ -1,5 +1,6 @@
 
 #include "KernelDeviceDriverObjectsWorker.h"
+#include "KernelDock.h"
 
 // ============================================================
 // KernelDeviceDriverObjectsWorker.cpp
@@ -20,6 +21,8 @@
 #include <limits>    // std::numeric_limits：UNION_STRING 长度约束。
 #include <utility>   // std::move：移动枚举结果条目。
 #include <vector>    // std::vector：枚举结果与临时缓冲。
+
+using ksword::kernel_dock_internal::kernelText;
 
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -266,7 +269,7 @@ namespace
         }
         if (apiOut.ntdllModule == nullptr)
         {
-            errorTextOut = QStringLiteral("加载 ntdll.dll 失败。");
+            errorTextOut = kernelText("kernel.device_driver.worker.load_ntdll_failed", QStringLiteral("加载 ntdll.dll 失败。"));
             return false;
         }
 
@@ -284,7 +287,7 @@ namespace
             || apiOut.openSymbolicLinkObject == nullptr
             || apiOut.querySymbolicLinkObject == nullptr)
         {
-            errorTextOut = QStringLiteral("解析 NtOpen/NtQuery Directory 或 SymbolicLink API 失败。");
+            errorTextOut = kernelText("kernel.device_driver.worker.resolve_api_failed", QStringLiteral("解析 NtOpen/NtQuery Directory 或 SymbolicLink API 失败。"));
             return false;
         }
         return true;
@@ -395,7 +398,7 @@ namespace
                 static_cast<ULONG>(returnLength / sizeof(wchar_t) + 8U));
         }
 
-        statusTextOut = QStringLiteral("符号链接目标解析重试达到上限。");
+        statusTextOut = kernelText("kernel.device_driver.worker.symbolic_link_retry_limit", QStringLiteral("符号链接目标解析重试达到上限。"));
         return false;
     }
 
@@ -491,18 +494,20 @@ namespace
             KernelDeviceDriverObjectEntry entry;
             entry.directoryPathText = normalizePathText(directoryPathText);
             entry.objectNameText = objectNameText;
-            entry.objectTypeText = objectTypeText.isEmpty() ? QStringLiteral("<未知>") : objectTypeText;
+            entry.objectTypeText = objectTypeText.isEmpty()
+                ? kernelText("kernel.device_driver.worker.placeholder.unknown", QStringLiteral("<未知>"))
+                : objectTypeText;
             entry.fullPathText = joinObjectPath(entry.directoryPathText, entry.objectNameText);
             entry.querySucceeded = true;
             entry.statusCode = queryStatus;
             entry.isDirectory = entry.objectTypeText.compare(QStringLiteral("Directory"), Qt::CaseInsensitive) == 0;
             entry.isSymbolicLink = entry.objectTypeText.compare(QStringLiteral("SymbolicLink"), Qt::CaseInsensitive) == 0;
-            entry.statusText = QStringLiteral("已枚举");
-            entry.capabilityHintText = QStringLiteral("叶子对象，建议查属性");
+            entry.statusText = kernelText("kernel.device_driver.worker.status.enumerated", QStringLiteral("已枚举"));
+            entry.capabilityHintText = kernelText("kernel.device_driver.worker.capability.inspect_properties", QStringLiteral("叶子对象，建议查属性"));
 
             if (entry.isDirectory)
             {
-                entry.capabilityHintText = QStringLiteral("可用目录递归继续展开（本 tab 不做深递归）");
+                entry.capabilityHintText = kernelText("kernel.device_driver.worker.capability.directory_recursive", QStringLiteral("可用目录递归继续展开（本 tab 不做深递归）"));
             }
             else if (entry.isSymbolicLink)
             {
@@ -511,43 +516,47 @@ namespace
                 if (querySymbolicLinkTargetInternal(api, entry.fullPathText, targetText, targetStatusText))
                 {
                     entry.targetPathText = targetText;
-                    entry.statusText = QStringLiteral("已枚举，符号链接目标已解析");
-                    entry.capabilityHintText = QStringLiteral("可解析符号链接，用于理解设备路径");
+                    entry.statusText = kernelText("kernel.device_driver.worker.status.symbolic_link_resolved", QStringLiteral("已枚举，符号链接目标已解析"));
+                    entry.capabilityHintText = kernelText("kernel.device_driver.worker.capability.symbolic_link", QStringLiteral("可解析符号链接，用于理解设备路径"));
                 }
                 else
                 {
                     entry.targetPathText = QString();
-                    entry.statusText = QStringLiteral("已枚举，符号链接目标解析失败：%1").arg(targetStatusText);
-                    entry.capabilityHintText = QStringLiteral("可解析符号链接，用于理解设备路径");
+                    entry.statusText = kernelText("kernel.device_driver.worker.status.symbolic_link_failed", QStringLiteral("已枚举，符号链接目标解析失败：%1")).arg(targetStatusText);
+                    entry.capabilityHintText = kernelText("kernel.device_driver.worker.capability.symbolic_link", QStringLiteral("可解析符号链接，用于理解设备路径"));
                 }
             }
             else if (entry.objectTypeText.compare(QStringLiteral("Device"), Qt::CaseInsensitive) == 0)
             {
-                entry.capabilityHintText = QStringLiteral("叶子对象，建议查属性");
+                entry.capabilityHintText = kernelText("kernel.device_driver.worker.capability.inspect_properties", QStringLiteral("叶子对象，建议查属性"));
             }
             else if (entry.objectTypeText.compare(QStringLiteral("Driver"), Qt::CaseInsensitive) == 0)
             {
-                entry.capabilityHintText = QStringLiteral("叶子对象，建议结合服务名和加载顺序分析");
+                entry.capabilityHintText = kernelText("kernel.device_driver.worker.capability.driver_analysis", QStringLiteral("叶子对象，建议结合服务名和加载顺序分析"));
             }
             else if (entry.objectTypeText.compare(QStringLiteral("FileSystem"), Qt::CaseInsensitive) == 0)
             {
-                entry.capabilityHintText = QStringLiteral("叶子对象，建议结合挂载卷与过滤器链路分析");
+                entry.capabilityHintText = kernelText("kernel.device_driver.worker.capability.filesystem_analysis", QStringLiteral("叶子对象，建议结合挂载卷与过滤器链路分析"));
             }
 
-            entry.detailText = QStringLiteral(
-                "目录路径: %1\n"
-                "对象名称: %2\n"
-                "对象类型: %3\n"
-                "完整路径: %4\n"
-                "符号链接目标: %5\n"
-                "状态: %6\n"
-                "能力提示: %7")
+            entry.detailText = kernelText(
+                "kernel.device_driver.worker.detail.entry",
+                QStringLiteral(
+                    "目录路径: %1\n"
+                    "对象名称: %2\n"
+                    "对象类型: %3\n"
+                    "完整路径: %4\n"
+                    "符号链接目标: %5\n"
+                    "状态: %6\n"
+                    "能力提示: %7"))
                 .arg(
                     entry.directoryPathText,
                     entry.objectNameText,
                     entry.objectTypeText,
                     entry.fullPathText,
-                    entry.targetPathText.isEmpty() ? QStringLiteral("<无>") : entry.targetPathText,
+                    entry.targetPathText.isEmpty()
+                        ? kernelText("kernel.device_driver.worker.placeholder.no_target", QStringLiteral("<无>"))
+                        : entry.targetPathText,
                     entry.statusText,
                     entry.capabilityHintText);
             rowsOut.push_back(std::move(entry));
@@ -582,14 +591,18 @@ namespace
         entry.isDirectory = true;
         entry.isSymbolicLink = false;
         entry.isScopeEntry = true;
-        entry.statusText = querySucceeded ? QStringLiteral("目录已打开，可继续枚举") : ntStatusToText(::GetModuleHandleW(L"ntdll.dll"), statusCode);
-        entry.capabilityHintText = QStringLiteral("可用目录递归继续展开（本 tab 不做深递归）");
-        entry.detailText = QStringLiteral(
-            "目录路径: %1\n"
-            "目录标题: %2\n"
-            "目录说明: %3\n"
-            "状态: %4\n"
-            "能力提示: %5")
+        entry.statusText = querySucceeded
+            ? kernelText("kernel.device_driver.worker.status.directory_opened", QStringLiteral("目录已打开，可继续枚举"))
+            : ntStatusToText(::GetModuleHandleW(L"ntdll.dll"), statusCode);
+        entry.capabilityHintText = kernelText("kernel.device_driver.worker.capability.directory_recursive", QStringLiteral("可用目录递归继续展开（本 tab 不做深递归）"));
+        entry.detailText = kernelText(
+            "kernel.device_driver.worker.detail.scope",
+            QStringLiteral(
+                "目录路径: %1\n"
+                "目录标题: %2\n"
+                "目录说明: %3\n"
+                "状态: %4\n"
+                "能力提示: %5"))
             .arg(
                 entry.directoryPathText,
                 rootSpec.displayNameText,
@@ -609,22 +622,22 @@ namespace
             {
                 QStringLiteral("\\Device"),
                 QStringLiteral("Device"),
-                QStringLiteral("设备对象与设备符号链接"),
+                kernelText("kernel.device_driver.worker.scope.device", QStringLiteral("设备对象与设备符号链接")),
             },
             {
                 QStringLiteral("\\Driver"),
                 QStringLiteral("Driver"),
-                QStringLiteral("已加载驱动对象"),
+                kernelText("kernel.device_driver.worker.scope.driver", QStringLiteral("已加载驱动对象")),
             },
             {
                 QStringLiteral("\\FileSystem"),
                 QStringLiteral("FileSystem"),
-                QStringLiteral("文件系统驱动对象"),
+                kernelText("kernel.device_driver.worker.scope.filesystem", QStringLiteral("文件系统驱动对象")),
             },
             {
                 QStringLiteral("\\FileSystem\\Filters"),
                 QStringLiteral("FileSystem\\Filters"),
-                QStringLiteral("文件系统过滤器对象"),
+                kernelText("kernel.device_driver.worker.scope.filters", QStringLiteral("文件系统过滤器对象")),
             },
         };
     }
@@ -693,20 +706,24 @@ bool runKernelDeviceDriverObjectsSnapshotTask(
 
         for (KernelDeviceDriverObjectEntry& entry : directoryRows)
         {
-            entry.detailText = QStringLiteral(
-                "目录路径: %1\n"
-                "对象名称: %2\n"
-                "对象类型: %3\n"
-                "完整路径: %4\n"
-                "符号链接目标: %5\n"
-                "状态: %6\n"
-                "能力提示: %7")
+            entry.detailText = kernelText(
+                "kernel.device_driver.worker.detail.entry",
+                QStringLiteral(
+                    "目录路径: %1\n"
+                    "对象名称: %2\n"
+                    "对象类型: %3\n"
+                    "完整路径: %4\n"
+                    "符号链接目标: %5\n"
+                    "状态: %6\n"
+                    "能力提示: %7"))
                 .arg(
                     entry.directoryPathText,
                     entry.objectNameText,
                     entry.objectTypeText,
                     entry.fullPathText,
-                    entry.targetPathText.isEmpty() ? QStringLiteral("<无>") : entry.targetPathText,
+                    entry.targetPathText.isEmpty()
+                        ? kernelText("kernel.device_driver.worker.placeholder.no_target", QStringLiteral("<无>"))
+                        : entry.targetPathText,
                     entry.statusText,
                     entry.capabilityHintText);
             resultRows.push_back(std::move(entry));
@@ -716,7 +733,7 @@ bool runKernelDeviceDriverObjectsSnapshotTask(
         {
             KernelDeviceDriverObjectEntry truncatedEntry;
             truncatedEntry.directoryPathText = normalizePathText(rootSpec.directoryPathText);
-            truncatedEntry.objectNameText = QStringLiteral("<已截断>");
+            truncatedEntry.objectNameText = kernelText("kernel.device_driver.worker.placeholder.truncated", QStringLiteral("<已截断>"));
             truncatedEntry.objectTypeText = QStringLiteral("<Info>");
             truncatedEntry.fullPathText = rootSpec.directoryPathText;
             truncatedEntry.targetPathText = QString();
@@ -725,11 +742,13 @@ bool runKernelDeviceDriverObjectsSnapshotTask(
             truncatedEntry.isDirectory = false;
             truncatedEntry.isSymbolicLink = false;
             truncatedEntry.isScopeEntry = false;
-            truncatedEntry.statusText = QStringLiteral("达到单目录上限 %1 项").arg(kMaxEntriesPerDirectory);
-            truncatedEntry.capabilityHintText = QStringLiteral("可继续筛选当前结果，避免一次性加载更大范围");
-            truncatedEntry.detailText = QStringLiteral(
-                "目录路径: %1\n"
-                "提示: 为避免 UI 卡顿，单目录结果已截断到 %2 项。")
+            truncatedEntry.statusText = kernelText("kernel.device_driver.worker.status.directory_limit", QStringLiteral("达到单目录上限 %1 项")).arg(kMaxEntriesPerDirectory);
+            truncatedEntry.capabilityHintText = kernelText("kernel.device_driver.worker.capability.filter_current", QStringLiteral("可继续筛选当前结果，避免一次性加载更大范围"));
+            truncatedEntry.detailText = kernelText(
+                "kernel.device_driver.worker.detail.truncated",
+                QStringLiteral(
+                    "目录路径: %1\n"
+                    "提示: 为避免 UI 卡顿，单目录结果已截断到 %2 项。"))
                 .arg(
                     truncatedEntry.directoryPathText,
                     QString::number(kMaxEntriesPerDirectory));
