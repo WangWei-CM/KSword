@@ -1,3 +1,4 @@
+#include "KernelDock.h"
 #include "KernelDock.CallbackPromptManager.h"
 
 #include "../theme.h"
@@ -29,6 +30,8 @@
 #include <QWindow>
 
 #include <chrono>
+
+using ksword::kernel_dock_internal::kernelText;
 
 namespace
 {
@@ -253,15 +256,17 @@ namespace
         const qint64 remainingTimeoutMs)
     {
         const QString baseText = (buttonDecision == KSWORD_ARK_DECISION_DENY)
-            ? QStringLiteral("拒绝")
-            : QStringLiteral("允许");
+            ? kernelText("kernel.callback.prompt.decision.deny", QStringLiteral("拒绝"))
+            : kernelText("kernel.callback.prompt.decision.allow", QStringLiteral("允许"));
         if (buttonDecision != defaultDecision)
         {
             return baseText;
         }
 
         const qint64 remainingSeconds = qMax<qint64>(0, (remainingTimeoutMs + 999LL) / 1000LL);
-        return QStringLiteral("%1（%2）").arg(baseText).arg(remainingSeconds);
+        return kernelText("kernel.callback.prompt.decision.countdown", QStringLiteral("%1（%2）"))
+            .arg(baseText)
+            .arg(remainingSeconds);
     }
 }
 
@@ -382,7 +387,7 @@ void CallbackPromptManager::start()
         return;
     }
 
-    appendManagerLog(QStringLiteral("驱动回调全局弹窗管理器已启动。"));
+    appendManagerLog(kernelText("kernel.callback.prompt.log.manager_started", QStringLiteral("驱动回调全局弹窗管理器已启动。")));
     startWorkersIfNeeded();
 }
 
@@ -413,7 +418,7 @@ void CallbackPromptManager::stop()
         m_popupDialog->hide();
     }
 
-    appendManagerLog(QStringLiteral("驱动回调全局弹窗管理器已停止。"));
+    appendManagerLog(kernelText("kernel.callback.prompt.log.manager_stopped", QStringLiteral("驱动回调全局弹窗管理器已停止。")));
 }
 
 void CallbackPromptManager::initializePopupUi()
@@ -448,7 +453,7 @@ void CallbackPromptManager::initializePopupUi()
             Qt::SmoothTransformation));
     }
 
-    auto* titleLabel = new QLabel(QStringLiteral("驱动回调决策"), popupDialog);
+    auto* titleLabel = new QLabel(kernelText("kernel.callback.prompt.title", QStringLiteral("驱动回调决策")), popupDialog);
     titleLabel->setObjectName(QStringLiteral("KswordCallbackTitleLabel"));
 
     headerLayout->addWidget(logoLabel, 0, Qt::AlignVCenter);
@@ -476,12 +481,12 @@ void CallbackPromptManager::initializePopupUi()
         ++rowIndex;
     };
 
-    appendRow(QStringLiteral("事件GUID"), &m_eventGuidValueLabel);
-    appendRow(QStringLiteral("回调类型"), &m_callbackTypeValueLabel);
-    appendRow(QStringLiteral("操作类型"), &m_operationValueLabel);
-    appendRow(QStringLiteral("目标"), &m_targetValueLabel);
+    appendRow(kernelText("kernel.callback.prompt.label.event_guid", QStringLiteral("事件GUID")), &m_eventGuidValueLabel);
+    appendRow(kernelText("kernel.callback.prompt.label.callback_type", QStringLiteral("回调类型")), &m_callbackTypeValueLabel);
+    appendRow(kernelText("kernel.callback.prompt.label.operation_type", QStringLiteral("操作类型")), &m_operationValueLabel);
+    appendRow(kernelText("kernel.callback.prompt.label.target", QStringLiteral("目标")), &m_targetValueLabel);
 
-    auto* initiatorNameLabel = new QLabel(QStringLiteral("发起进程"), popupDialog);
+    auto* initiatorNameLabel = new QLabel(kernelText("kernel.callback.prompt.label.initiator", QStringLiteral("发起进程")), popupDialog);
     initiatorNameLabel->setObjectName(QStringLiteral("KswordCallbackSectionLabel"));
     auto* initiatorRowWidget = new QWidget(popupDialog);
     auto* initiatorRowLayout = new QHBoxLayout(initiatorRowWidget);
@@ -497,15 +502,15 @@ void CallbackPromptManager::initializePopupUi()
     m_initiatorValueLabel->setOpenExternalLinks(false);
     m_initiatorValueLabel->setWordWrap(false);
     m_initiatorValueLabel->setCursor(Qt::PointingHandCursor);
-    m_initiatorValueLabel->setToolTip(QStringLiteral("点击发起进程文本可打开进程详细信息"));
+    m_initiatorValueLabel->setToolTip(kernelText("kernel.callback.prompt.initiator.tooltip", QStringLiteral("点击发起进程文本可打开进程详细信息")));
     initiatorRowLayout->addWidget(m_initiatorIconLabel, 0, Qt::AlignVCenter);
     initiatorRowLayout->addWidget(m_initiatorValueLabel, 1, Qt::AlignVCenter);
     detailGrid->addWidget(initiatorNameLabel, rowIndex, 0, 1, 1);
     detailGrid->addWidget(initiatorRowWidget, rowIndex, 1, 1, 1);
     ++rowIndex;
 
-    appendRow(QStringLiteral("会话ID"), &m_sessionIdValueLabel);
-    appendRow(QStringLiteral("规则"), &m_ruleValueLabel);
+    appendRow(kernelText("kernel.callback.prompt.label.session_id", QStringLiteral("会话ID")), &m_sessionIdValueLabel);
+    appendRow(kernelText("kernel.callback.prompt.label.rule", QStringLiteral("规则")), &m_ruleValueLabel);
     detailGrid->setColumnStretch(0, 0);
     detailGrid->setColumnStretch(1, 1);
     rootLayout->addLayout(detailGrid, 1);
@@ -514,11 +519,11 @@ void CallbackPromptManager::initializePopupUi()
     actionLayout->setContentsMargins(0, 2, 0, 0);
     actionLayout->setSpacing(8);
 
-    m_allowButton = new QPushButton(QStringLiteral("允许"), popupDialog);
+    m_allowButton = new QPushButton(kernelText("kernel.callback.prompt.decision.allow", QStringLiteral("允许")), popupDialog);
     m_allowButton->setObjectName(QStringLiteral("KswordCallbackAllowButton"));
-    m_denyButton = new QPushButton(QStringLiteral("拒绝"), popupDialog);
+    m_denyButton = new QPushButton(kernelText("kernel.callback.prompt.decision.deny", QStringLiteral("拒绝")), popupDialog);
     m_denyButton->setObjectName(QStringLiteral("KswordCallbackDenyButton"));
-    m_detailButton = new QPushButton(QStringLiteral("查看详情"), popupDialog);
+    m_detailButton = new QPushButton(kernelText("kernel.callback.prompt.button.details", QStringLiteral("查看详情")), popupDialog);
     m_detailButton->setObjectName(QStringLiteral("KswordCallbackDetailButton"));
 
     actionLayout->addStretch(1);
@@ -571,7 +576,7 @@ void CallbackPromptManager::initializePopupConnections()
             }
             if (invokeTarget == nullptr)
             {
-                appendManagerLog(QStringLiteral("无法打开进程详情：主窗口对象为空。"));
+                appendManagerLog(kernelText("kernel.callback.prompt.log.process_detail_no_window", QStringLiteral("无法打开进程详情：主窗口对象为空。")));
                 return;
             }
 
@@ -581,9 +586,11 @@ void CallbackPromptManager::initializePopupConnections()
                 Qt::QueuedConnection,
                 Q_ARG(quint32, m_currentEvent.originatingPid));
             appendManagerLog(
-                QStringLiteral("发起进程超链接被点击: pid=%1, 跳转=%2。")
+                kernelText("kernel.callback.prompt.log.process_link_clicked", QStringLiteral("发起进程超链接被点击: pid=%1, 跳转=%2。"))
                 .arg(m_currentEvent.originatingPid)
-                .arg(invokeOk ? QStringLiteral("成功") : QStringLiteral("失败")));
+                .arg(invokeOk
+                    ? kernelText("kernel.callback.prompt.result.success", QStringLiteral("成功"))
+                    : kernelText("kernel.callback.prompt.result.failure", QStringLiteral("失败"))));
         });
     }
 
@@ -595,7 +602,7 @@ void CallbackPromptManager::initializePopupConnections()
                 return;
             }
 
-            const QString detailText = QStringLiteral(
+            const QString detailText = kernelText("kernel.callback.prompt.detail.full", QStringLiteral(
                 "事件GUID: %1\n"
                 "回调类型: %2\n"
                 "操作类型: %3\n"
@@ -611,7 +618,7 @@ void CallbackPromptManager::initializePopupConnections()
                 "规则发起匹配: %15\n"
                 "规则目标匹配: %16\n"
                 "默认决策: %17\n"
-                "超时毫秒: %18")
+                "超时毫秒: %18"))
                 .arg(callbackGuidToString(m_currentEvent.eventGuid))
                 .arg(callbackTypeToDisplayText(m_currentEvent.callbackType))
                 .arg(operationToDisplayText(m_currentEvent))
@@ -633,7 +640,7 @@ void CallbackPromptManager::initializePopupConnections()
 
             QMessageBox::information(
                 m_popupDialog,
-                QStringLiteral("驱动回调详情"),
+                kernelText("kernel.callback.prompt.detail.title", QStringLiteral("驱动回调详情")),
                 detailText);
         });
     }
@@ -882,9 +889,11 @@ void CallbackPromptManager::onEventArrivedOnUiThread(const KSWORD_ARK_CALLBACK_E
     {
         const bool answerOk = sendAnswerToDriver(eventPacket.eventGuid, KSWORD_ARK_DECISION_ALLOW);
         appendManagerLog(
-            QStringLiteral("事件 %1 触发 Regex 二次确认自动放行（%2）。")
+            kernelText("kernel.callback.prompt.log.regex_auto_allow", QStringLiteral("事件 %1 触发 Regex 二次确认自动放行（%2）。"))
             .arg(callbackGuidToString(eventPacket.eventGuid))
-            .arg(answerOk ? QStringLiteral("回传成功") : QStringLiteral("回传失败")));
+            .arg(answerOk
+                ? kernelText("kernel.callback.prompt.result.reply_success", QStringLiteral("回传成功"))
+                : kernelText("kernel.callback.prompt.result.reply_failure", QStringLiteral("回传失败"))));
         return;
     }
 
@@ -899,7 +908,7 @@ void CallbackPromptManager::enqueueEvent(const KSWORD_ARK_CALLBACK_EVENT_PACKET&
     }
 
     appendManagerLog(
-        QStringLiteral("收到待决策事件 %1，当前队列长度=%2。")
+        kernelText("kernel.callback.prompt.log.event_queued", QStringLiteral("收到待决策事件 %1，当前队列长度=%2。"))
         .arg(callbackGuidToString(eventPacket.eventGuid))
         .arg(static_cast<int>(m_eventQueue.size())));
     tryShowNextEvent();
@@ -1156,11 +1165,15 @@ void CallbackPromptManager::finishCurrentEventWithDecision(quint32 decision, boo
 
     const bool answerOk = sendAnswerToDriver(m_currentEvent.eventGuid, finalDecision);
     appendManagerLog(
-        QStringLiteral("事件 %1 已决策为“%2”（来源=%3，回传=%4）。")
+        kernelText("kernel.callback.prompt.log.event_decided", QStringLiteral("事件 %1 已决策为“%2”（来源=%3，回传=%4）。"))
         .arg(callbackGuidToString(m_currentEvent.eventGuid))
         .arg(callbackDecisionToDisplayText(finalDecision))
-        .arg(fromTimeoutOrClose ? QStringLiteral("超时/关闭") : QStringLiteral("用户点击"))
-        .arg(answerOk ? QStringLiteral("成功") : QStringLiteral("失败")));
+        .arg(fromTimeoutOrClose
+            ? kernelText("kernel.callback.prompt.result.timeout_or_close", QStringLiteral("超时/关闭"))
+            : kernelText("kernel.callback.prompt.result.user_click", QStringLiteral("用户点击")))
+        .arg(answerOk
+            ? kernelText("kernel.callback.prompt.result.success", QStringLiteral("成功"))
+            : kernelText("kernel.callback.prompt.result.failure", QStringLiteral("失败"))));
 
     m_hasCurrentEvent = false;
     m_remainingTimeoutMs = 0;
