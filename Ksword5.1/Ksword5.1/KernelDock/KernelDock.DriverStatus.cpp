@@ -43,6 +43,8 @@
 #include <thread>
 #include <utility>
 
+using ksword::kernel_dock_internal::kernelText;
+
 namespace
 {
     // DriverSummaryColumn and DriverCapabilityColumn keep table layout explicit.
@@ -54,6 +56,7 @@ namespace
         std::uint64_t mask = 0;
         const char* name = nullptr;
         const wchar_t* title = nullptr;
+        const char* contextKey = nullptr;
     };
 
     struct PolicyDisplay
@@ -61,6 +64,7 @@ namespace
         std::uint32_t mask = 0;
         const char* name = nullptr;
         const wchar_t* title = nullptr;
+        const char* contextKey = nullptr;
     };
 
     // LocalPdbPackMatch：
@@ -91,39 +95,39 @@ namespace
     // - 作用：列出所有可由 R0 DynData 暴露的 capability bit；
     // - 处理逻辑：驱动状态页、能力详情和筛选都复用该表。
     constexpr std::array<CapabilityDisplay, 23> kDynCapabilities{ {
-        { KSW_CAP_DYN_NTOS_ACTIVE, "KSW_CAP_DYN_NTOS_ACTIVE", L"ntoskrnl profile 已激活" },
-        { KSW_CAP_DYN_LXCORE_ACTIVE, "KSW_CAP_DYN_LXCORE_ACTIVE", L"lxcore profile 已激活" },
-        { KSW_CAP_OBJECT_TYPE_FIELDS, "KSW_CAP_OBJECT_TYPE_FIELDS", L"对象类型字段" },
-        { KSW_CAP_HANDLE_TABLE_DECODE, "KSW_CAP_HANDLE_TABLE_DECODE", L"句柄表解码" },
-        { KSW_CAP_PROCESS_OBJECT_TABLE, "KSW_CAP_PROCESS_OBJECT_TABLE", L"进程 ObjectTable" },
-        { KSW_CAP_THREAD_STACK_FIELDS, "KSW_CAP_THREAD_STACK_FIELDS", L"线程栈字段" },
-        { KSW_CAP_THREAD_IO_COUNTERS, "KSW_CAP_THREAD_IO_COUNTERS", L"线程 I/O 计数" },
-        { KSW_CAP_ALPC_FIELDS, "KSW_CAP_ALPC_FIELDS", L"ALPC 字段" },
-        { KSW_CAP_SECTION_CONTROL_AREA, "KSW_CAP_SECTION_CONTROL_AREA", L"Section/ControlArea" },
-        { KSW_CAP_PROCESS_PROTECTION_PATCH, "KSW_CAP_PROCESS_PROTECTION_PATCH", L"进程保护修改" },
-        { KSW_CAP_WSL_LXCORE_FIELDS, "KSW_CAP_WSL_LXCORE_FIELDS", L"WSL/lxcore 字段" },
-        { KSW_CAP_ETW_GUID_FIELDS, "KSW_CAP_ETW_GUID_FIELDS", L"ETW GUID/Registration 字段" },
-        { KSW_CAP_CALLBACK_NOTIFY_GLOBALS, "KSW_CAP_CALLBACK_NOTIFY_GLOBALS", L"Callback Notify 全局 RVA" },
-        { KSW_CAP_CALLBACK_REGISTRY_GLOBALS, "KSW_CAP_CALLBACK_REGISTRY_GLOBALS", L"Registry Callback 全局 RVA" },
-        { KSW_CAP_CALLBACK_OBJECT_FIELDS, "KSW_CAP_CALLBACK_OBJECT_FIELDS", L"Object Callback 结构偏移" },
-        { KSW_CAP_PROCESS_LIST_FIELDS, "KSW_CAP_PROCESS_LIST_FIELDS", L"进程链表字段" },
-        { KSW_CAP_THREAD_LIST_FIELDS, "KSW_CAP_THREAD_LIST_FIELDS", L"线程链表字段" },
-        { KSW_CAP_CID_TABLE_WALK, "KSW_CAP_CID_TABLE_WALK", L"CID 表遍历" },
-        { KSW_CAP_KERNEL_MODULE_LIST_FIELDS, "KSW_CAP_KERNEL_MODULE_LIST_FIELDS", L"内核模块链表字段" },
-        { KSW_CAP_DRIVER_OBJECT_FIELDS, "KSW_CAP_DRIVER_OBJECT_FIELDS", L"驱动对象字段" },
-        { KSW_CAP_KERNEL_GLOBALS, "KSW_CAP_KERNEL_GLOBALS", L"内核全局 RVA" },
-        { KSW_CAP_TOKEN_INTEGRITY_FIELDS, "KSW_CAP_TOKEN_INTEGRITY_FIELDS", L"Token 完整性字段" },
-        { KSW_CAP_TOKEN_PRIVATE_FIELDS, "KSW_CAP_TOKEN_PRIVATE_FIELDS", L"Token 私有字段" }
+        { KSW_CAP_DYN_NTOS_ACTIVE, "KSW_CAP_DYN_NTOS_ACTIVE", L"ntoskrnl profile 已激活", "kernel.driver_status.capability.ntos_active" },
+        { KSW_CAP_DYN_LXCORE_ACTIVE, "KSW_CAP_DYN_LXCORE_ACTIVE", L"lxcore profile 已激活", "kernel.driver_status.capability.lxcore_active" },
+        { KSW_CAP_OBJECT_TYPE_FIELDS, "KSW_CAP_OBJECT_TYPE_FIELDS", L"对象类型字段", "kernel.driver_status.capability.object_type_fields" },
+        { KSW_CAP_HANDLE_TABLE_DECODE, "KSW_CAP_HANDLE_TABLE_DECODE", L"句柄表解码", "kernel.driver_status.capability.handle_table_decode" },
+        { KSW_CAP_PROCESS_OBJECT_TABLE, "KSW_CAP_PROCESS_OBJECT_TABLE", L"进程 ObjectTable", "kernel.driver_status.capability.process_object_table" },
+        { KSW_CAP_THREAD_STACK_FIELDS, "KSW_CAP_THREAD_STACK_FIELDS", L"线程栈字段", "kernel.driver_status.capability.thread_stack_fields" },
+        { KSW_CAP_THREAD_IO_COUNTERS, "KSW_CAP_THREAD_IO_COUNTERS", L"线程 I/O 计数", "kernel.driver_status.capability.thread_io_counters" },
+        { KSW_CAP_ALPC_FIELDS, "KSW_CAP_ALPC_FIELDS", L"ALPC 字段", "kernel.driver_status.capability.alpc_fields" },
+        { KSW_CAP_SECTION_CONTROL_AREA, "KSW_CAP_SECTION_CONTROL_AREA", L"Section/ControlArea", "kernel.driver_status.capability.section_control_area" },
+        { KSW_CAP_PROCESS_PROTECTION_PATCH, "KSW_CAP_PROCESS_PROTECTION_PATCH", L"进程保护修改", "kernel.driver_status.capability.process_protection" },
+        { KSW_CAP_WSL_LXCORE_FIELDS, "KSW_CAP_WSL_LXCORE_FIELDS", L"WSL/lxcore 字段", "kernel.driver_status.capability.wsl_lxcore_fields" },
+        { KSW_CAP_ETW_GUID_FIELDS, "KSW_CAP_ETW_GUID_FIELDS", L"ETW GUID/Registration 字段", "kernel.driver_status.capability.etw_guid_fields" },
+        { KSW_CAP_CALLBACK_NOTIFY_GLOBALS, "KSW_CAP_CALLBACK_NOTIFY_GLOBALS", L"Callback Notify 全局 RVA", "kernel.driver_status.capability.callback_notify_globals" },
+        { KSW_CAP_CALLBACK_REGISTRY_GLOBALS, "KSW_CAP_CALLBACK_REGISTRY_GLOBALS", L"Registry Callback 全局 RVA", "kernel.driver_status.capability.callback_registry_globals" },
+        { KSW_CAP_CALLBACK_OBJECT_FIELDS, "KSW_CAP_CALLBACK_OBJECT_FIELDS", L"Object Callback 结构偏移", "kernel.driver_status.capability.callback_object_fields" },
+        { KSW_CAP_PROCESS_LIST_FIELDS, "KSW_CAP_PROCESS_LIST_FIELDS", L"进程链表字段", "kernel.driver_status.capability.process_list_fields" },
+        { KSW_CAP_THREAD_LIST_FIELDS, "KSW_CAP_THREAD_LIST_FIELDS", L"线程链表字段", "kernel.driver_status.capability.thread_list_fields" },
+        { KSW_CAP_CID_TABLE_WALK, "KSW_CAP_CID_TABLE_WALK", L"CID 表遍历", "kernel.driver_status.capability.cid_table_walk" },
+        { KSW_CAP_KERNEL_MODULE_LIST_FIELDS, "KSW_CAP_KERNEL_MODULE_LIST_FIELDS", L"内核模块链表字段", "kernel.driver_status.capability.kernel_module_list_fields" },
+        { KSW_CAP_DRIVER_OBJECT_FIELDS, "KSW_CAP_DRIVER_OBJECT_FIELDS", L"驱动对象字段", "kernel.driver_status.capability.driver_object_fields" },
+        { KSW_CAP_KERNEL_GLOBALS, "KSW_CAP_KERNEL_GLOBALS", L"内核全局 RVA", "kernel.driver_status.capability.kernel_globals" },
+        { KSW_CAP_TOKEN_INTEGRITY_FIELDS, "KSW_CAP_TOKEN_INTEGRITY_FIELDS", L"Token 完整性字段", "kernel.driver_status.capability.token_integrity_fields" },
+        { KSW_CAP_TOKEN_PRIVATE_FIELDS, "KSW_CAP_TOKEN_PRIVATE_FIELDS", L"Token 私有字段", "kernel.driver_status.capability.token_private_fields" }
     } };
 
     // kSecurityPolicies lists every policy bit currently surfaced by Phase 1.
     constexpr std::array<PolicyDisplay, 6> kSecurityPolicies{ {
-        { KSWORD_ARK_SECURITY_POLICY_FLAG_ACTIVE, "POLICY_ACTIVE", L"安全策略启用" },
-        { KSWORD_ARK_SECURITY_POLICY_ALLOW_MUTATING_ACTIONS, "ALLOW_MUTATING_ACTIONS", L"允许进程修改动作" },
-        { KSWORD_ARK_SECURITY_POLICY_ALLOW_FILE_DELETE, "ALLOW_FILE_DELETE", L"允许文件删除" },
-        { KSWORD_ARK_SECURITY_POLICY_ALLOW_CALLBACK_CONTROL, "ALLOW_CALLBACK_CONTROL", L"允许回调控制" },
-        { KSWORD_ARK_SECURITY_POLICY_ALLOW_PROCESS_PROTECTION, "ALLOW_PROCESS_PROTECTION", L"允许进程保护修改" },
-        { KSWORD_ARK_SECURITY_POLICY_ALLOW_KERNEL_SNAPSHOTS, "ALLOW_KERNEL_SNAPSHOTS", L"允许内核快照" }
+        { KSWORD_ARK_SECURITY_POLICY_FLAG_ACTIVE, "POLICY_ACTIVE", L"安全策略启用", "kernel.driver_status.policy.active" },
+        { KSWORD_ARK_SECURITY_POLICY_ALLOW_MUTATING_ACTIONS, "ALLOW_MUTATING_ACTIONS", L"允许进程修改动作", "kernel.driver_status.policy.mutating_actions" },
+        { KSWORD_ARK_SECURITY_POLICY_ALLOW_FILE_DELETE, "ALLOW_FILE_DELETE", L"允许文件删除", "kernel.driver_status.policy.file_delete" },
+        { KSWORD_ARK_SECURITY_POLICY_ALLOW_CALLBACK_CONTROL, "ALLOW_CALLBACK_CONTROL", L"允许回调控制", "kernel.driver_status.policy.callback_control" },
+        { KSWORD_ARK_SECURITY_POLICY_ALLOW_PROCESS_PROTECTION, "ALLOW_PROCESS_PROTECTION", L"允许进程保护修改", "kernel.driver_status.policy.process_protection" },
+        { KSWORD_ARK_SECURITY_POLICY_ALLOW_KERNEL_SNAPSHOTS, "ALLOW_KERNEL_SNAPSHOTS", L"允许内核快照", "kernel.driver_status.policy.kernel_snapshots" }
     } };
 
     QString blueButtonStyle() { return KswordTheme::ThemedButtonStyle(); }
@@ -216,7 +220,7 @@ namespace
             menu.setStyleSheet(driverStatusCopyMenuStyle());
             QAction* copyRowAction = menu.addAction(
                 QIcon(QStringLiteral(":/Icon/process_copy_row.svg")),
-                QStringLiteral("复制当前行"));
+                kernelText("kernel.driver_status.menu.copy_row", QStringLiteral("复制当前行")));
             copyRowAction->setEnabled(rowIndex >= 0 && rowIndex < table->rowCount());
             if (menu.exec(table->viewport()->mapToGlobal(localPosition)) == copyRowAction)
             {
@@ -234,9 +238,14 @@ namespace
         return QStringLiteral("color:%1;font-weight:600;").arg(colorHex);
     }
 
-    QString safeText(const QString& valueText, const QString& fallbackText = QStringLiteral("<空>"))
+    QString safeText(const QString& valueText, const QString& fallbackText)
     {
         return valueText.trimmed().isEmpty() ? fallbackText : valueText;
+    }
+
+    QString safeText(const QString& valueText)
+    {
+        return safeText(valueText, kernelText("kernel.driver_status.placeholder.empty", QStringLiteral("<空>")));
     }
 
     QString stringToQString(const std::string& valueText)
@@ -253,21 +262,21 @@ namespace
         const QString rawText = stringToQString(valueText).trimmed();
         if (rawText.isEmpty())
         {
-            return QStringLiteral("驱动未返回额外说明。");
+            return kernelText("kernel.driver_status.message.no_driver_message", QStringLiteral("驱动未返回额外说明。"));
         }
         if (rawText.contains(QStringLiteral("DeviceIoControl"), Qt::CaseInsensitive))
         {
-            return QStringLiteral("驱动通信失败或当前驱动版本不支持该状态查询入口。");
+            return kernelText("kernel.driver_status.message.communication_failure", QStringLiteral("驱动通信失败或当前驱动版本不支持该状态查询入口。"));
         }
         if (rawText.contains(QStringLiteral("unsupported"), Qt::CaseInsensitive) ||
             rawText.contains(QStringLiteral("not supported"), Qt::CaseInsensitive))
         {
-            return QStringLiteral("当前驱动不支持该状态/能力查询入口。");
+            return kernelText("kernel.driver_status.message.unsupported", QStringLiteral("当前驱动不支持该状态/能力查询入口。"));
         }
         if (rawText.contains(QStringLiteral("capability"), Qt::CaseInsensitive) ||
             rawText.contains(QStringLiteral("DynData"), Qt::CaseInsensitive))
         {
-            return QStringLiteral("动态偏移能力不足，部分驱动能力会显示为不可用。");
+            return kernelText("kernel.driver_status.message.capability", QStringLiteral("动态偏移能力不足，部分驱动能力会显示为不可用。"));
         }
         return rawText;
     }
@@ -284,7 +293,12 @@ namespace
     QString formatHex32(const std::uint32_t value) { return QStringLiteral("0x%1").arg(value, 8, 16, QChar('0')).toUpper(); }
     QString formatHex64(const std::uint64_t value) { return QStringLiteral("0x%1").arg(value, 16, 16, QChar('0')).toUpper(); }
     QString formatNtStatus(const long value) { return formatHex32(static_cast<std::uint32_t>(value)); }
-    QString boolText(const bool value) { return value ? QStringLiteral("是") : QStringLiteral("否"); }
+    QString boolText(const bool value)
+    {
+        return value
+            ? kernelText("kernel.driver_status.value.yes", QStringLiteral("是"))
+            : kernelText("kernel.driver_status.value.no", QStringLiteral("否"));
+    }
     bool flagEnabled(const std::uint32_t flags, const std::uint32_t flag) { return (flags & flag) == flag; }
 
     // fieldOffsetPresent：
@@ -315,7 +329,7 @@ namespace
     {
         if (!offsetAvailable(offset))
         {
-            return QStringLiteral("<不可用>");
+            return kernelText("kernel.driver_status.placeholder.unavailable", QStringLiteral("<不可用>"));
         }
         return QStringLiteral("%1 (%2)").arg(formatHex32(offset)).arg(offset);
     }
@@ -558,7 +572,7 @@ namespace
 
         if (!currentIdentity.present)
         {
-            result.messageText = QStringLiteral("当前 ntoskrnl identity 不可用，无法匹配本地 PDB profile pack。");
+            result.messageText = kernelText("kernel.driver_status.pdb.identity_unavailable", QStringLiteral("当前 ntoskrnl identity 不可用，无法匹配本地 PDB profile pack。"));
             return result;
         }
 
@@ -567,7 +581,7 @@ namespace
             const QString resolvedCandidatePath = ks::profile::resolveProfileJsonPath(candidatePath);
             if (resolvedCandidatePath.isEmpty())
             {
-                diagnostics << QStringLiteral("pack 不存在: %1").arg(QDir::toNativeSeparators(candidatePath));
+                diagnostics << kernelText("kernel.driver_status.pdb.pack_missing", QStringLiteral("pack 不存在: %1")).arg(QDir::toNativeSeparators(candidatePath));
                 continue;
             }
 
@@ -581,8 +595,8 @@ namespace
             if (parseError.error != QJsonParseError::NoError || !document.isObject())
             {
                 diagnostics << (readErrorText.isEmpty()
-                    ? QStringLiteral("pack JSON 解析失败: %1 (%2)").arg(result.pathText, parseError.errorString())
-                    : QStringLiteral("pack JSON 读取失败: %1 (%2)").arg(result.pathText, readErrorText));
+                    ? kernelText("kernel.driver_status.pdb.json_parse_failed", QStringLiteral("pack JSON 解析失败: %1 (%2)")).arg(result.pathText, parseError.errorString())
+                    : kernelText("kernel.driver_status.pdb.json_read_failed", QStringLiteral("pack JSON 读取失败: %1 (%2)")).arg(result.pathText, readErrorText));
                 continue;
             }
 
@@ -594,7 +608,7 @@ namespace
                 schemaVersion != 1U ||
                 (packVersion != 1U && packVersion != 2U && packVersion != 3U))
             {
-                diagnostics << QStringLiteral("pack schemaVersion/packVersion 不支持: %1").arg(result.pathText);
+                diagnostics << kernelText("kernel.driver_status.pdb.version_unsupported", QStringLiteral("pack schemaVersion/packVersion 不支持: %1")).arg(result.pathText);
                 continue;
             }
 
@@ -602,7 +616,7 @@ namespace
             result.profileCount = static_cast<std::uint32_t>(profilesArray.size());
             if (profilesArray.isEmpty())
             {
-                diagnostics << QStringLiteral("pack profile 列表为空: %1").arg(result.pathText);
+                diagnostics << kernelText("kernel.driver_status.pdb.profile_list_empty", QStringLiteral("pack profile 列表为空: %1")).arg(result.pathText);
                 continue;
             }
 
@@ -656,22 +670,22 @@ namespace
                 result.profileNameText = profileObject.value(QStringLiteral("profileName")).toString(QStringLiteral("pack-profile"));
                 result.versionText = extractVersionFromProfileName(result.profileNameText);
                 result.messageText = result.valid
-                    ? QStringLiteral("本地 PDB profile pack 命中；profiles=%1，扫描=%2，字段=%3，typedItems=%4，callbackItems=%5，ActiveProcessLinks=%6，覆盖率=%7。")
+                    ? kernelText("kernel.driver_status.pdb.matched", QStringLiteral("本地 PDB profile pack 命中；profiles=%1，扫描=%2，字段=%3，typedItems=%4，callbackItems=%5，ActiveProcessLinks=%6，覆盖率=%7。"))
                         .arg(result.profileCount)
                         .arg(result.scannedProfileCount)
                         .arg(result.fieldCount)
                         .arg(result.typedItemCount)
                         .arg(result.callbackItemCount)
-                        .arg(result.activeProcessLinksPresent ? formatOffset32(result.activeProcessLinksOffset) : QStringLiteral("<缺失>"))
-                        .arg(result.coveragePercent >= 0.0 ? QStringLiteral("%1%").arg(result.coveragePercent, 0, 'f', 1) : QStringLiteral("<未知>"))
-                    : QStringLiteral("本地 PDB profile pack 命中 identity，但 fields/items 均为空，已视为无效。");
+                        .arg(result.activeProcessLinksPresent ? formatOffset32(result.activeProcessLinksOffset) : kernelText("kernel.driver_status.placeholder.missing", QStringLiteral("<缺失>")))
+                        .arg(result.coveragePercent >= 0.0 ? QStringLiteral("%1%").arg(result.coveragePercent, 0, 'f', 1) : kernelText("kernel.driver_status.placeholder.unknown", QStringLiteral("<未知>")))
+                    : kernelText("kernel.driver_status.pdb.matched_invalid", QStringLiteral("本地 PDB profile pack 命中 identity，但 fields/items 均为空，已视为无效。"));
                 return result;
             }
 
-            diagnostics << QStringLiteral("pack 未命中: %1 (profiles=%2)").arg(result.pathText).arg(result.profileCount);
+            diagnostics << kernelText("kernel.driver_status.pdb.not_matched", QStringLiteral("pack 未命中: %1 (profiles=%2)")).arg(result.pathText).arg(result.profileCount);
         }
 
-        result.messageText = QStringLiteral("未找到匹配 PDB profile pack；检查 %1 个存在的 pack。%2")
+        result.messageText = kernelText("kernel.driver_status.pdb.no_match", QStringLiteral("未找到匹配 PDB profile pack；检查 %1 个存在的 pack。%2"))
             .arg(result.existingPackCount)
             .arg(diagnostics.join(QStringLiteral(" | ")));
         return result;
@@ -684,7 +698,9 @@ namespace
         {
             if ((mask & item.mask) == item.mask)
             {
-                names << QStringLiteral("%1 (%2)").arg(QString::fromLatin1(item.name)).arg(QString::fromWCharArray(item.title));
+                names << QStringLiteral("%1 (%2)")
+                    .arg(QString::fromLatin1(item.name))
+                    .arg(kernelText(item.contextKey, QString::fromWCharArray(item.title)));
             }
         }
         return names.isEmpty() ? QStringLiteral("None") : names.join(QStringLiteral(", "));
@@ -697,7 +713,9 @@ namespace
         {
             if ((mask & item.mask) == item.mask)
             {
-                names << QStringLiteral("%1 (%2)").arg(QString::fromLatin1(item.name)).arg(QString::fromWCharArray(item.title));
+                names << QStringLiteral("%1 (%2)")
+                    .arg(QString::fromLatin1(item.name))
+                    .arg(kernelText(item.contextKey, QString::fromWCharArray(item.title)));
             }
         }
         return names.isEmpty() ? QStringLiteral("None") : names.join(QStringLiteral(", "));
@@ -711,10 +729,10 @@ namespace
     {
         if (!summary.ntoskrnlIdentityPresent)
         {
-            return QStringLiteral("<未识别>");
+            return kernelText("kernel.driver_status.placeholder.unrecognized", QStringLiteral("<未识别>"));
         }
 
-        return QStringLiteral("%1，Class=%2 (%3)，Machine=%4，TimeDateStamp=%5，SizeOfImage=%6，Base=%7")
+        return kernelText("kernel.driver_status.kernel_identity", QStringLiteral("%1，Class=%2 (%3)，Machine=%4，TimeDateStamp=%5，SizeOfImage=%6，Base=%7"))
             .arg(safeText(summary.ntoskrnlModuleNameText))
             .arg(moduleClassText(summary.ntoskrnlClassId))
             .arg(summary.ntoskrnlClassId)
@@ -735,8 +753,8 @@ namespace
             return summary.localPdbProfileVersionText;
         }
         return summary.ntoskrnlIdentityPresent
-            ? QStringLiteral("<identity 已识别，版本号需匹配 PDB profile 后确认>")
-            : QStringLiteral("<未识别>");
+            ? kernelText("kernel.driver_status.placeholder.identity_version", QStringLiteral("<identity 已识别，版本号需匹配 PDB profile 后确认>"))
+            : kernelText("kernel.driver_status.placeholder.unrecognized", QStringLiteral("<未识别>"));
     }
 
     // fieldCoverageText：
@@ -745,14 +763,14 @@ namespace
     // - 返回：用户可读字段覆盖率文本。
     QString fieldCoverageText(const KernelDriverStatusSummary& summary)
     {
-        QString coverageText = QStringLiteral("可用 %1 / 返回 %2 / R0声明 %3，必需缺失 %4")
+        QString coverageText = kernelText("kernel.driver_status.field_coverage", QStringLiteral("可用 %1 / 返回 %2 / R0声明 %3，必需缺失 %4"))
             .arg(summary.dynDataPresentFieldCount)
             .arg(summary.dynDataReturnedFieldCount)
             .arg(summary.dynDataFieldCount)
             .arg(summary.dynDataRequiredMissingCount);
         if (summary.localPdbProfileCoveragePercent >= 0.0)
         {
-            coverageText += QStringLiteral("，pack覆盖率 %1%")
+            coverageText += kernelText("kernel.driver_status.field_coverage.pack", QStringLiteral("，pack覆盖率 %1%"))
                 .arg(summary.localPdbProfileCoveragePercent, 0, 'f', 1);
         }
         return coverageText;
@@ -764,7 +782,7 @@ namespace
     // - 返回：字段来源分布文本。
     QString fieldSourceSummaryText(const KernelDriverStatusSummary& summary)
     {
-        return QStringLiteral("PDB=%1，RuntimePattern=%2，SystemInformer=%3，Extra=%4，不可用=%5")
+        return kernelText("kernel.driver_status.field_sources", QStringLiteral("PDB=%1，RuntimePattern=%2，SystemInformer=%3，Extra=%4，不可用=%5"))
             .arg(summary.dynDataPdbProfileFieldCount)
             .arg(summary.dynDataRuntimePatternFieldCount)
             .arg(summary.dynDataSystemInformerFieldCount)
@@ -780,21 +798,21 @@ namespace
     {
         if (summary.localPdbProfileMatched)
         {
-            return QStringLiteral("命中：%1，版本=%2，字段=%3，typedItems=%4，callbackItems=%5，ActiveProcessLinks=%6，coverage=%7，packProfiles=%8，路径=%9")
+            return kernelText("kernel.driver_status.pdb.summary.matched", QStringLiteral("命中：%1，版本=%2，字段=%3，typedItems=%4，callbackItems=%5，ActiveProcessLinks=%6，coverage=%7，packProfiles=%8，路径=%9"))
                 .arg(safeText(summary.localPdbProfileNameText))
-                .arg(safeText(summary.localPdbProfileVersionText, QStringLiteral("<未提取>")))
+                .arg(safeText(summary.localPdbProfileVersionText, kernelText("kernel.driver_status.placeholder.not_extracted", QStringLiteral("<未提取>"))))
                 .arg(summary.localPdbProfileFieldCount)
                 .arg(summary.localPdbProfileTypedItemCount)
                 .arg(summary.localPdbProfileCallbackItemCount)
                 .arg(summary.localPdbProfileActiveProcessLinksPresent
                     ? formatOffset32(summary.localPdbProfileActiveProcessLinksOffset)
-                    : QStringLiteral("<缺失>"))
-                .arg(summary.localPdbProfileCoveragePercent >= 0.0 ? QStringLiteral("%1%").arg(summary.localPdbProfileCoveragePercent, 0, 'f', 1) : QStringLiteral("<未知>"))
+                    : kernelText("kernel.driver_status.placeholder.missing", QStringLiteral("<缺失>")))
+                .arg(summary.localPdbProfileCoveragePercent >= 0.0 ? QStringLiteral("%1%").arg(summary.localPdbProfileCoveragePercent, 0, 'f', 1) : kernelText("kernel.driver_status.placeholder.unknown", QStringLiteral("<未知>")))
                 .arg(summary.localPdbProfilePackProfileCount)
                 .arg(safeText(summary.localPdbProfilePathText));
         }
 
-        return safeText(summary.localPdbProfileMessageText, QStringLiteral("未命中或未扫描。"));
+        return safeText(summary.localPdbProfileMessageText, kernelText("kernel.driver_status.pdb.summary.not_matched", QStringLiteral("未命中或未扫描。")));
     }
 
     // activeProcessLinksOffsetText：
@@ -805,11 +823,11 @@ namespace
     {
         const QString localText = summary.localPdbProfileActiveProcessLinksPresent
             ? formatOffset32(summary.localPdbProfileActiveProcessLinksOffset)
-            : QStringLiteral("<缺失>");
+            : kernelText("kernel.driver_status.placeholder.missing", QStringLiteral("<缺失>"));
         const QString r0Text = summary.dynDataActiveProcessLinksPresent
             ? formatOffset32(summary.dynDataActiveProcessLinksOffset)
-            : QStringLiteral("<未应用>");
-        return QStringLiteral("LocalPack=%1；R0=%2；R0Source=%3")
+            : kernelText("kernel.driver_status.placeholder.not_applied", QStringLiteral("<未应用>"));
+        return kernelText("kernel.driver_status.active_process_links", QStringLiteral("LocalPack=%1；R0=%2；R0Source=%3"))
             .arg(localText)
             .arg(r0Text)
             .arg(sourceText(summary.dynDataActiveProcessLinksSource));
@@ -821,7 +839,7 @@ namespace
     // - 返回：用户可直接判断 notify/registry/object 是否走可信 PDB 数据的文本。
     QString callbackProfileCoverageText(const KernelDriverStatusSummary& summary)
     {
-        return QStringLiteral("Active=%1，Notify=%2，Registry=%3，Object=%4，packCallbackItems=%5，packTypedItems=%6")
+        return kernelText("kernel.driver_status.callback_coverage", QStringLiteral("Active=%1，Notify=%2，Registry=%3，Object=%4，packCallbackItems=%5，packTypedItems=%6"))
             .arg(boolText(summary.callbackProfileActive))
             .arg(boolText(summary.callbackNotifyTrusted))
             .arg(boolText(summary.callbackRegistryTrusted))
@@ -838,22 +856,24 @@ namespace
     {
         if (summary.trustedPdbOffsetsActive)
         {
-            return QStringLiteral("已启用可信 PDB 偏移；PDB字段 %1 / 可用字段 %2，pack=%3，callback=%4。")
+            return kernelText("kernel.driver_status.trusted_offsets.active", QStringLiteral("已启用可信 PDB 偏移；PDB字段 %1 / 可用字段 %2，pack=%3，callback=%4。"))
                 .arg(summary.dynDataPdbProfileFieldCount)
                 .arg(summary.dynDataPresentFieldCount)
-                .arg(summary.localPdbProfileMatched ? QStringLiteral("命中") : QStringLiteral("未确认"))
+                .arg(summary.localPdbProfileMatched
+                    ? kernelText("kernel.driver_status.value.matched", QStringLiteral("命中"))
+                    : kernelText("kernel.driver_status.value.unconfirmed", QStringLiteral("未确认")))
                 .arg(callbackProfileCoverageText(summary));
         }
         if (summary.localPdbProfileMatched)
         {
-            return QStringLiteral("本地 pack 已匹配当前内核，但 R0 当前字段来源尚未切换到 PDB profile。");
+            return kernelText("kernel.driver_status.trusted_offsets.pack_matched", QStringLiteral("本地 pack 已匹配当前内核，但 R0 当前字段来源尚未切换到 PDB profile。"));
         }
         if (summary.dynDataPresentFieldCount != 0U)
         {
-            return QStringLiteral("当前有可用 DynData 字段，但未发现 PDB profile 字段；来源=%1。")
+            return kernelText("kernel.driver_status.trusted_offsets.dyndata_only", QStringLiteral("当前有可用 DynData 字段，但未发现 PDB profile 字段；来源=%1。"))
                 .arg(fieldSourceSummaryText(summary));
         }
-        return QStringLiteral("暂无可用可信偏移。");
+        return kernelText("kernel.driver_status.trusted_offsets.none", QStringLiteral("暂无可用可信偏移。"));
     }
 
     // dynDataIoText：
@@ -862,7 +882,7 @@ namespace
     // - 返回：R3/R0 通信诊断文本。
     QString dynDataIoText(const KernelDriverStatusSummary& summary)
     {
-        return QStringLiteral("Status=%1 (%2)；Fields=%3 (%4)")
+        return kernelText("kernel.driver_status.dyndata_io", QStringLiteral("Status=%1 (%2)；Fields=%3 (%4)"))
             .arg(boolText(summary.dynDataStatusQueryOk))
             .arg(safeText(summary.dynDataStatusIoMessageText))
             .arg(boolText(summary.dynDataFieldsQueryOk))
@@ -951,30 +971,30 @@ namespace
     QString buildCapabilityDetail(const KernelDriverCapabilityEntry& entry, const KernelDriverStatusSummary& summary)
     {
         QStringList lines;
-        lines << QStringLiteral("功能: %1").arg(safeText(entry.featureNameText));
+        lines << kernelText("kernel.driver_status.detail.feature", QStringLiteral("功能: %1")).arg(safeText(entry.featureNameText));
         lines << QStringLiteral("FeatureId: %1").arg(entry.featureId);
-        lines << QStringLiteral("状态: %1").arg(stateText(entry.state, entry.stateNameText));
-        lines << QStringLiteral("功能标志: %1 (%2)").arg(formatHex32(entry.flags), featureFlagText(entry.flags));
+        lines << kernelText("kernel.driver_status.detail.state", QStringLiteral("状态: %1")).arg(stateText(entry.state, entry.stateNameText));
+        lines << kernelText("kernel.driver_status.detail.feature_flags", QStringLiteral("功能标志: %1 (%2)")).arg(formatHex32(entry.flags), featureFlagText(entry.flags));
         lines << QStringLiteral("");
-        lines << QStringLiteral("依赖字段: %1").arg(safeText(entry.dependencyText, QStringLiteral("None")));
-        lines << QStringLiteral("状态原因: %1").arg(safeText(entry.reasonText, QStringLiteral("Feature is available.")));
+        lines << kernelText("kernel.driver_status.detail.dependencies", QStringLiteral("依赖字段: %1")).arg(safeText(entry.dependencyText, QStringLiteral("None")));
+        lines << kernelText("kernel.driver_status.detail.reason", QStringLiteral("状态原因: %1")).arg(safeText(entry.reasonText, QStringLiteral("Feature is available.")));
         lines << QStringLiteral("");
-        lines << QStringLiteral("所需安全策略: %1 (%2)").arg(formatHex32(entry.requiredPolicyFlags), policyNames(entry.requiredPolicyFlags));
-        lines << QStringLiteral("被拒绝策略位: %1 (%2)").arg(formatHex32(entry.deniedPolicyFlags), policyNames(entry.deniedPolicyFlags));
-        lines << QStringLiteral("所需 DynData capability: %1 (%2)").arg(formatHex64(entry.requiredDynDataMask), capabilityNames(entry.requiredDynDataMask));
-        lines << QStringLiteral("已满足 DynData capability: %1 (%2)").arg(formatHex64(entry.presentDynDataMask), capabilityNames(entry.presentDynDataMask));
-        lines << QStringLiteral("全局 DynData capability: %1 (%2)").arg(formatHex64(summary.dynDataCapabilityMask), capabilityNames(summary.dynDataCapabilityMask));
+        lines << kernelText("kernel.driver_status.detail.required_policy", QStringLiteral("所需安全策略: %1 (%2)")).arg(formatHex32(entry.requiredPolicyFlags), policyNames(entry.requiredPolicyFlags));
+        lines << kernelText("kernel.driver_status.detail.denied_policy", QStringLiteral("被拒绝策略位: %1 (%2)")).arg(formatHex32(entry.deniedPolicyFlags), policyNames(entry.deniedPolicyFlags));
+        lines << kernelText("kernel.driver_status.detail.required_capability", QStringLiteral("所需 DynData capability: %1 (%2)")).arg(formatHex64(entry.requiredDynDataMask), capabilityNames(entry.requiredDynDataMask));
+        lines << kernelText("kernel.driver_status.detail.present_capability", QStringLiteral("已满足 DynData capability: %1 (%2)")).arg(formatHex64(entry.presentDynDataMask), capabilityNames(entry.presentDynDataMask));
+        lines << kernelText("kernel.driver_status.detail.global_capability", QStringLiteral("全局 DynData capability: %1 (%2)")).arg(formatHex64(summary.dynDataCapabilityMask), capabilityNames(summary.dynDataCapabilityMask));
         lines << QStringLiteral("");
-        lines << QStringLiteral("当前内核: %1").arg(kernelIdentityText(summary));
-        lines << QStringLiteral("识别版本: %1").arg(kernelVersionText(summary));
-        lines << QStringLiteral("本地 PDB profile: %1").arg(localPdbProfileText(summary));
-        lines << QStringLiteral("ActiveProcessLinks 偏移: %1").arg(activeProcessLinksOffsetText(summary));
-        lines << QStringLiteral("可信偏移: %1").arg(trustedOffsetText(summary));
-        lines << QStringLiteral("字段覆盖: %1").arg(fieldCoverageText(summary));
-        lines << QStringLiteral("字段来源: %1").arg(fieldSourceSummaryText(summary));
+        lines << kernelText("kernel.driver_status.detail.current_kernel", QStringLiteral("当前内核: %1")).arg(kernelIdentityText(summary));
+        lines << kernelText("kernel.driver_status.detail.recognized_version", QStringLiteral("识别版本: %1")).arg(kernelVersionText(summary));
+        lines << kernelText("kernel.driver_status.detail.local_pdb", QStringLiteral("本地 PDB profile: %1")).arg(localPdbProfileText(summary));
+        lines << kernelText("kernel.driver_status.detail.active_process_links", QStringLiteral("ActiveProcessLinks 偏移: %1")).arg(activeProcessLinksOffsetText(summary));
+        lines << kernelText("kernel.driver_status.detail.trusted_offsets", QStringLiteral("可信偏移: %1")).arg(trustedOffsetText(summary));
+        lines << kernelText("kernel.driver_status.detail.field_coverage", QStringLiteral("字段覆盖: %1")).arg(fieldCoverageText(summary));
+        lines << kernelText("kernel.driver_status.detail.field_sources", QStringLiteral("字段来源: %1")).arg(fieldSourceSummaryText(summary));
         lines << QStringLiteral("");
-        lines << QStringLiteral("驱动状态: %1").arg(statusBadges(summary));
-        lines << QStringLiteral("最近 R0 错误: %1 / %2 / %3")
+        lines << kernelText("kernel.driver_status.detail.driver_status", QStringLiteral("驱动状态: %1")).arg(statusBadges(summary));
+        lines << kernelText("kernel.driver_status.detail.last_r0_error", QStringLiteral("最近 R0 错误: %1 / %2 / %3"))
             .arg(formatNtStatus(summary.lastErrorStatus))
             .arg(safeText(summary.lastErrorSourceText, QStringLiteral("None")))
             .arg(safeText(summary.lastErrorSummaryText, QStringLiteral("None")));
@@ -1040,40 +1060,40 @@ namespace
         if (table == nullptr) { return; }
         table->setSortingEnabled(false);
         table->setRowCount(0);
-        appendSummaryRow(table, QStringLiteral("状态栏"), statusBadges(summary));
+        appendSummaryRow(table, kernelText("kernel.driver_status.summary.status_bar", QStringLiteral("状态栏")), statusBadges(summary));
         appendSummaryRow(table, QStringLiteral("Driver Loaded"), boolText(summary.driverLoaded));
         appendSummaryRow(table, QStringLiteral("Protocol OK"), boolText(summary.protocolOk));
         appendSummaryRow(table, QStringLiteral("DynData Missing"), boolText(summary.dynDataMissing));
         appendSummaryRow(table, QStringLiteral("Limited"), boolText(summary.limited));
-        appendSummaryRow(table, QStringLiteral("当前内核"), kernelIdentityText(summary));
-        appendSummaryRow(table, QStringLiteral("识别版本"), kernelVersionText(summary));
-        appendSummaryRow(table, QStringLiteral("本地 PDB profile"), localPdbProfileText(summary));
-        appendSummaryRow(table, QStringLiteral("ActiveProcessLinks 偏移"), activeProcessLinksOffsetText(summary));
-        appendSummaryRow(table, QStringLiteral("Callback profile 覆盖"), callbackProfileCoverageText(summary));
-        appendSummaryRow(table, QStringLiteral("可信偏移"), trustedOffsetText(summary));
-        appendSummaryRow(table, QStringLiteral("字段覆盖"), fieldCoverageText(summary));
-        appendSummaryRow(table, QStringLiteral("字段来源"), fieldSourceSummaryText(summary));
-        appendSummaryRow(table, QStringLiteral("缺失必需字段"), QString::number(summary.dynDataRequiredMissingCount));
-        appendSummaryRow(table, QStringLiteral("能力协议版本"), QString::number(summary.version));
-        appendSummaryRow(table, QStringLiteral("驱动协议版本"), formatHex32(summary.driverProtocolVersion));
-        appendSummaryRow(table, QStringLiteral("期望协议版本"), formatHex32(KSWORD_ARK_DRIVER_PROTOCOL_VERSION));
-        appendSummaryRow(table, QStringLiteral("状态位"), formatHex32(summary.statusFlags));
-        appendSummaryRow(table, QStringLiteral("安全策略位"), QStringLiteral("%1 (%2)").arg(formatHex32(summary.securityPolicyFlags)).arg(policyNames(summary.securityPolicyFlags)));
-        appendSummaryRow(table, QStringLiteral("DynData 状态位"), QStringLiteral("%1 (%2)").arg(formatHex32(summary.dynDataStatusFlags)).arg(dynDataStatusText(summary.dynDataStatusFlags)));
-        appendSummaryRow(table, QStringLiteral("DynData 能力位"), QStringLiteral("%1 (%2)").arg(formatHex64(summary.dynDataCapabilityMask)).arg(capabilityNames(summary.dynDataCapabilityMask)));
-        appendSummaryRow(table, QStringLiteral("System Informer 数据"), QStringLiteral("version=%1 length=%2")
+        appendSummaryRow(table, kernelText("kernel.driver_status.summary.current_kernel", QStringLiteral("当前内核")), kernelIdentityText(summary));
+        appendSummaryRow(table, kernelText("kernel.driver_status.summary.recognized_version", QStringLiteral("识别版本")), kernelVersionText(summary));
+        appendSummaryRow(table, kernelText("kernel.driver_status.summary.local_pdb", QStringLiteral("本地 PDB profile")), localPdbProfileText(summary));
+        appendSummaryRow(table, kernelText("kernel.driver_status.summary.active_process_links", QStringLiteral("ActiveProcessLinks 偏移")), activeProcessLinksOffsetText(summary));
+        appendSummaryRow(table, kernelText("kernel.driver_status.summary.callback_coverage", QStringLiteral("Callback profile 覆盖")), callbackProfileCoverageText(summary));
+        appendSummaryRow(table, kernelText("kernel.driver_status.summary.trusted_offsets", QStringLiteral("可信偏移")), trustedOffsetText(summary));
+        appendSummaryRow(table, kernelText("kernel.driver_status.summary.field_coverage", QStringLiteral("字段覆盖")), fieldCoverageText(summary));
+        appendSummaryRow(table, kernelText("kernel.driver_status.summary.field_sources", QStringLiteral("字段来源")), fieldSourceSummaryText(summary));
+        appendSummaryRow(table, kernelText("kernel.driver_status.summary.required_missing", QStringLiteral("缺失必需字段")), QString::number(summary.dynDataRequiredMissingCount));
+        appendSummaryRow(table, kernelText("kernel.driver_status.summary.capability_version", QStringLiteral("能力协议版本")), QString::number(summary.version));
+        appendSummaryRow(table, kernelText("kernel.driver_status.summary.driver_protocol", QStringLiteral("驱动协议版本")), formatHex32(summary.driverProtocolVersion));
+        appendSummaryRow(table, kernelText("kernel.driver_status.summary.expected_protocol", QStringLiteral("期望协议版本")), formatHex32(KSWORD_ARK_DRIVER_PROTOCOL_VERSION));
+        appendSummaryRow(table, kernelText("kernel.driver_status.summary.status_flags", QStringLiteral("状态位")), formatHex32(summary.statusFlags));
+        appendSummaryRow(table, kernelText("kernel.driver_status.summary.security_policy", QStringLiteral("安全策略位")), QStringLiteral("%1 (%2)").arg(formatHex32(summary.securityPolicyFlags)).arg(policyNames(summary.securityPolicyFlags)));
+        appendSummaryRow(table, kernelText("kernel.driver_status.summary.dyndata_status", QStringLiteral("DynData 状态位")), QStringLiteral("%1 (%2)").arg(formatHex32(summary.dynDataStatusFlags)).arg(dynDataStatusText(summary.dynDataStatusFlags)));
+        appendSummaryRow(table, kernelText("kernel.driver_status.summary.dyndata_capability", QStringLiteral("DynData 能力位")), QStringLiteral("%1 (%2)").arg(formatHex64(summary.dynDataCapabilityMask)).arg(capabilityNames(summary.dynDataCapabilityMask)));
+        appendSummaryRow(table, kernelText("kernel.driver_status.summary.system_informer", QStringLiteral("System Informer 数据")), QStringLiteral("version=%1 length=%2")
             .arg(summary.dynDataSystemInformerDataVersion)
             .arg(summary.dynDataSystemInformerDataLength));
-        appendSummaryRow(table, QStringLiteral("匹配内置 Profile"), QStringLiteral("class=%1 (%2) offset=%3 fieldsId=%4")
+        appendSummaryRow(table, kernelText("kernel.driver_status.summary.matched_profile", QStringLiteral("匹配内置 Profile")), QStringLiteral("class=%1 (%2) offset=%3 fieldsId=%4")
             .arg(moduleClassText(summary.dynDataMatchedProfileClass))
             .arg(summary.dynDataMatchedProfileClass)
             .arg(formatHex32(summary.dynDataMatchedProfileOffset))
             .arg(summary.dynDataMatchedFieldsId));
-        appendSummaryRow(table, QStringLiteral("Callback profile 可信覆盖"), callbackProfileCoverageText(summary));
+        appendSummaryRow(table, kernelText("kernel.driver_status.summary.callback_trusted", QStringLiteral("Callback profile 可信覆盖")), callbackProfileCoverageText(summary));
         appendSummaryRow(table, QStringLiteral("DynData R3 IO"), dynDataIoText(summary));
-        appendSummaryRow(table, QStringLiteral("DynData 不可用原因"), safeText(summary.dynDataUnavailableReasonText, QStringLiteral("None")));
-        appendSummaryRow(table, QStringLiteral("功能数"), QStringLiteral("显示 %1 / 返回 %2 / 总计 %3").arg(visibleRows).arg(summary.returnedFeatureCount).arg(summary.totalFeatureCount));
-        appendSummaryRow(table, QStringLiteral("最近错误"), QStringLiteral("%1 / %2 / %3").arg(formatNtStatus(summary.lastErrorStatus)).arg(safeText(summary.lastErrorSourceText, QStringLiteral("None"))).arg(safeText(summary.lastErrorSummaryText, QStringLiteral("None"))));
+        appendSummaryRow(table, kernelText("kernel.driver_status.summary.dyndata_unavailable_reason", QStringLiteral("DynData 不可用原因")), safeText(summary.dynDataUnavailableReasonText, QStringLiteral("None")));
+        appendSummaryRow(table, kernelText("kernel.driver_status.summary.feature_count", QStringLiteral("功能数")), kernelText("kernel.driver_status.summary.feature_count_value", QStringLiteral("显示 %1 / 返回 %2 / 总计 %3")).arg(visibleRows).arg(summary.returnedFeatureCount).arg(summary.totalFeatureCount));
+        appendSummaryRow(table, kernelText("kernel.driver_status.summary.last_error", QStringLiteral("最近错误")), QStringLiteral("%1 / %2 / %3").arg(formatNtStatus(summary.lastErrorStatus)).arg(safeText(summary.lastErrorSourceText, QStringLiteral("None"))).arg(safeText(summary.lastErrorSummaryText, QStringLiteral("None"))));
         appendSummaryRow(table, QStringLiteral("R3 IO"), safeText(summary.ioMessageText));
     }
 
@@ -1083,18 +1103,18 @@ namespace
     // - 返回：适合 QLabel 直接显示的状态文本。
     QString buildDriverStatusLabelText(const KernelDriverStatusSummary& summary, const std::size_t capabilityCount)
     {
-        const QString kernelText = summary.ntoskrnlIdentityPresent
+        const QString kernelSummaryText = summary.ntoskrnlIdentityPresent
             ? QStringLiteral("%1 / %2").arg(safeText(summary.ntoskrnlModuleNameText), kernelVersionText(summary))
-            : QStringLiteral("内核未识别");
+            : kernelText("kernel.driver_status.placeholder.kernel_unrecognized", QStringLiteral("内核未识别"));
         const QString offsetText = trustedOffsetText(summary);
         if (!summary.queryOk && !summary.dynDataStatusQueryOk)
         {
-            return QStringLiteral("状态：驱动与 DynData 查询均失败");
+            return kernelText("kernel.driver_status.status.both_queries_failed", QStringLiteral("状态：驱动与 DynData 查询均失败"));
         }
 
-        return QStringLiteral("状态：%1；%2；功能 %3 项；可信偏移 %4")
+        return kernelText("kernel.driver_status.status.summary", QStringLiteral("状态：%1；%2；功能 %3 项；可信偏移 %4"))
             .arg(statusBadges(summary))
-            .arg(kernelText)
+            .arg(kernelSummaryText)
             .arg(capabilityCount)
             .arg(offsetText);
     }
@@ -1298,21 +1318,21 @@ void KernelDock::initializeDriverStatusTab()
     m_driverStatusToolLayout->setSpacing(6);
 
     m_refreshDriverStatusButton = new QPushButton(QIcon(QStringLiteral(":/Icon/process_refresh.svg")), QString(), m_driverStatusPage);
-    m_refreshDriverStatusButton->setToolTip(QStringLiteral("刷新 KswordARK 驱动状态、协议、安全策略和能力矩阵"));
+    m_refreshDriverStatusButton->setToolTip(kernelText("kernel.driver_status.toolbar.refresh.tooltip", QStringLiteral("刷新 KswordARK 驱动状态、协议、安全策略和能力矩阵")));
     m_refreshDriverStatusButton->setStyleSheet(blueButtonStyle());
     m_refreshDriverStatusButton->setFixedWidth(34);
 
-    m_copyDriverStatusReportButton = new QPushButton(QIcon(QStringLiteral(":/Icon/process_copy_row.svg")), QStringLiteral("复制诊断"), m_driverStatusPage);
-    m_copyDriverStatusReportButton->setToolTip(QStringLiteral("复制统一驱动状态和能力矩阵诊断报告"));
+    m_copyDriverStatusReportButton = new QPushButton(QIcon(QStringLiteral(":/Icon/process_copy_row.svg")), kernelText("kernel.driver_status.toolbar.copy_report", QStringLiteral("复制诊断")), m_driverStatusPage);
+    m_copyDriverStatusReportButton->setToolTip(kernelText("kernel.driver_status.toolbar.copy_report.tooltip", QStringLiteral("复制统一驱动状态和能力矩阵诊断报告")));
     m_copyDriverStatusReportButton->setStyleSheet(blueButtonStyle());
 
     m_driverStatusFilterEdit = new QLineEdit(m_driverStatusPage);
-    m_driverStatusFilterEdit->setPlaceholderText(QStringLiteral("按功能/状态/策略/DynData capability/依赖字段筛选"));
-    m_driverStatusFilterEdit->setToolTip(QStringLiteral("输入关键字后实时过滤驱动能力矩阵"));
+    m_driverStatusFilterEdit->setPlaceholderText(kernelText("kernel.driver_status.toolbar.filter.placeholder", QStringLiteral("按功能/状态/策略/DynData capability/依赖字段筛选")));
+    m_driverStatusFilterEdit->setToolTip(kernelText("kernel.driver_status.toolbar.filter.tooltip", QStringLiteral("输入关键字后实时过滤驱动能力矩阵")));
     m_driverStatusFilterEdit->setClearButtonEnabled(true);
     m_driverStatusFilterEdit->setStyleSheet(blueInputStyle());
 
-    m_driverStatusLabel = new QLabel(QStringLiteral("状态：等待刷新"), m_driverStatusPage);
+    m_driverStatusLabel = new QLabel(kernelText("kernel.driver_status.status.waiting", QStringLiteral("状态：等待刷新")), m_driverStatusPage);
     m_driverStatusLabel->setStyleSheet(statusLabelStyle(KswordTheme::TextSecondaryHex()));
 
     m_driverStatusToolLayout->addWidget(m_refreshDriverStatusButton, 0);
@@ -1326,7 +1346,9 @@ void KernelDock::initializeDriverStatusTab()
 
     m_driverStatusSummaryTable = new ks::ui::VisibleTableWidget(verticalSplitter);
     m_driverStatusSummaryTable->setColumnCount(static_cast<int>(DriverSummaryColumn::Count));
-    m_driverStatusSummaryTable->setHorizontalHeaderLabels(QStringList{ QStringLiteral("项目"), QStringLiteral("值") });
+    m_driverStatusSummaryTable->setHorizontalHeaderLabels(QStringList{
+        kernelText("kernel.driver_status.summary.header.item", QStringLiteral("项目")),
+        kernelText("kernel.driver_status.summary.header.value", QStringLiteral("值")) });
     m_driverStatusSummaryTable->setSelectionMode(QAbstractItemView::NoSelection);
     m_driverStatusSummaryTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_driverStatusSummaryTable->setAlternatingRowColors(true);
@@ -1343,8 +1365,13 @@ void KernelDock::initializeDriverStatusTab()
     m_driverCapabilityTable = new ks::ui::VisibleTableWidget(lowerSplitter);
     m_driverCapabilityTable->setColumnCount(static_cast<int>(DriverCapabilityColumn::Count));
     m_driverCapabilityTable->setHorizontalHeaderLabels(QStringList{
-        QStringLiteral("功能"), QStringLiteral("状态"), QStringLiteral("策略"),
-        QStringLiteral("所需DynData"), QStringLiteral("已满足DynData"), QStringLiteral("依赖字段"), QStringLiteral("原因") });
+        kernelText("kernel.driver_status.capability.header.feature", QStringLiteral("功能")),
+        kernelText("kernel.driver_status.capability.header.state", QStringLiteral("状态")),
+        kernelText("kernel.driver_status.capability.header.policy", QStringLiteral("策略")),
+        kernelText("kernel.driver_status.capability.header.required_dyndata", QStringLiteral("所需DynData")),
+        kernelText("kernel.driver_status.capability.header.present_dyndata", QStringLiteral("已满足DynData")),
+        kernelText("kernel.driver_status.capability.header.dependency", QStringLiteral("依赖字段")),
+        kernelText("kernel.driver_status.capability.header.reason", QStringLiteral("原因")) });
     m_driverCapabilityTable->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_driverCapabilityTable->setSelectionMode(QAbstractItemView::SingleSelection);
     m_driverCapabilityTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
@@ -1363,7 +1390,7 @@ void KernelDock::initializeDriverStatusTab()
 
     m_driverCapabilityDetailEditor = new CodeEditorWidget(lowerSplitter);
     m_driverCapabilityDetailEditor->setReadOnly(true);
-    m_driverCapabilityDetailEditor->setText(QStringLiteral("请选择一条驱动功能能力查看依赖字段和诊断详情。"));
+    m_driverCapabilityDetailEditor->setText(kernelText("kernel.driver_status.detail.initial", QStringLiteral("请选择一条驱动功能能力查看依赖字段和诊断详情。")));
 
     verticalSplitter->setStretchFactor(0, 2);
     verticalSplitter->setStretchFactor(1, 5);
@@ -1376,7 +1403,7 @@ void KernelDock::initializeDriverStatusTab()
         if (clipboard != nullptr)
         {
             clipboard->setText(buildDriverStatusReport(m_driverStatusSummary, m_driverCapabilityRows));
-            m_driverStatusLabel->setText(QStringLiteral("状态：诊断报告已复制"));
+            m_driverStatusLabel->setText(kernelText("kernel.driver_status.status.report_copied", QStringLiteral("状态：诊断报告已复制")));
         }
     });
     connect(m_driverStatusFilterEdit, &QLineEdit::textChanged, this, [this](const QString& filterText) {
@@ -1397,7 +1424,7 @@ void KernelDock::refreshDriverStatusAsync()
     }
 
     m_refreshDriverStatusButton->setEnabled(false);
-    m_driverStatusLabel->setText(QStringLiteral("状态：刷新中..."));
+    m_driverStatusLabel->setText(kernelText("kernel.driver_status.status.refreshing", QStringLiteral("状态：刷新中...")));
     m_driverStatusLabel->setStyleSheet(statusLabelStyle(KswordTheme::PrimaryBlueHex));
 
     QPointer<KernelDock> guardThis(this);
@@ -1444,7 +1471,7 @@ void KernelDock::refreshDriverStatusAsync()
             }
             else
             {
-                guardThis->m_driverCapabilityDetailEditor->setText(QStringLiteral("当前筛选条件下没有驱动能力记录。"));
+                guardThis->m_driverCapabilityDetailEditor->setText(kernelText("kernel.driver_status.empty.filtered", QStringLiteral("当前筛选条件下没有驱动能力记录。")));
             }
         }, Qt::QueuedConnection);
     }).detach();
@@ -1525,7 +1552,7 @@ void KernelDock::showDriverCapabilityDetailByCurrentRow()
         return;
     }
 
-    m_driverCapabilityDetailEditor->setText(QStringLiteral(
+    m_driverCapabilityDetailEditor->setText(kernelText("kernel.driver_status.detail.report", QStringLiteral(
         "%1\n\n当前状态摘要:\n"
         "  %2\n"
         "  当前内核: %3\n"
@@ -1547,5 +1574,5 @@ void KernelDock::showDriverCapabilityDetailByCurrentRow()
         .arg(fieldSourceSummaryText(m_driverStatusSummary))
         .arg(formatHex32(m_driverStatusSummary.securityPolicyFlags)).arg(policyNames(m_driverStatusSummary.securityPolicyFlags))
         .arg(formatHex32(m_driverStatusSummary.dynDataStatusFlags)).arg(dynDataStatusText(m_driverStatusSummary.dynDataStatusFlags))
-        .arg(formatHex64(m_driverStatusSummary.dynDataCapabilityMask)).arg(capabilityNames(m_driverStatusSummary.dynDataCapabilityMask)));
+        .arg(formatHex64(m_driverStatusSummary.dynDataCapabilityMask)).arg(capabilityNames(m_driverStatusSummary.dynDataCapabilityMask))));
 }
