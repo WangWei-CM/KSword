@@ -1,4 +1,5 @@
 #include "KernelSymbolicLinkWorker.h"
+#include "KernelDock.h"
 
 // ============================================================
 // KernelSymbolicLinkWorker.cpp
@@ -17,6 +18,8 @@
 #include <iterator>
 #include <limits>
 #include <vector>
+
+using ksword::kernel_dock_internal::kernelText;
 
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -187,7 +190,7 @@ namespace
         }
         if (apiOut.ntdllModule == nullptr)
         {
-            errorTextOut = QStringLiteral("加载 ntdll.dll 失败。");
+            errorTextOut = kernelText("kernel.symbolic_link.worker.load_ntdll_failed", QStringLiteral("加载 ntdll.dll 失败。"));
             return false;
         }
 
@@ -205,7 +208,7 @@ namespace
             || apiOut.openSymbolicLinkObject == nullptr
             || apiOut.querySymbolicLinkObject == nullptr)
         {
-            errorTextOut = QStringLiteral("解析 NtOpen/NtQuery Directory 或 SymbolicLink API 失败。");
+            errorTextOut = kernelText("kernel.symbolic_link.worker.resolve_api_failed", QStringLiteral("解析 NtOpen/NtQuery Directory 或 SymbolicLink API 失败。"));
             return false;
         }
         return true;
@@ -366,7 +369,7 @@ namespace
                 static_cast<ULONG>(returnLength / sizeof(wchar_t) + 8U));
         }
 
-        statusTextOut = QStringLiteral("NtQuerySymbolicLinkObject: 缓冲区重试达到上限。");
+        statusTextOut = kernelText("kernel.symbolic_link.worker.query_buffer_retry_limit", QStringLiteral("NtQuerySymbolicLinkObject: 缓冲区重试达到上限。"));
         return false;
     }
 
@@ -445,7 +448,7 @@ namespace
     {
         KernelSymbolicLinkEntry entry;
         entry.sourceDirectory = normalizeObjectPath(directoryPathText);
-        entry.linkName = QStringLiteral("<目录打开失败>");
+        entry.linkName = kernelText("kernel.symbolic_link.worker.placeholder.directory_open_failed", QStringLiteral("<目录打开失败>"));
         entry.fullPath = entry.sourceDirectory;
         entry.statusText = QStringLiteral("NtOpenDirectoryObject: %1")
             .arg(ntStatusToText(api.ntdllModule, status));
@@ -512,9 +515,9 @@ bool runKernelSymbolicLinkSnapshotTask(
         {
             KernelSymbolicLinkEntry entry;
             entry.sourceDirectory = normalizeObjectPath(directoryPath);
-            entry.linkName = QStringLiteral("<目录枚举截断>");
+            entry.linkName = kernelText("kernel.symbolic_link.worker.placeholder.directory_truncated", QStringLiteral("<目录枚举截断>"));
             entry.fullPath = entry.sourceDirectory;
-            entry.statusText = QStringLiteral("目录项超过本页 R3 安全上限 %1。").arg(kMaxEntriesPerDirectory);
+            entry.statusText = kernelText("kernel.symbolic_link.worker.directory_limit", QStringLiteral("目录项超过本页 R3 安全上限 %1。")).arg(kMaxEntriesPerDirectory);
             rows.push_back(std::move(entry));
         }
     }

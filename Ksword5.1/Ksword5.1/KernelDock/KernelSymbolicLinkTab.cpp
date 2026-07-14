@@ -1,4 +1,5 @@
 #include "KernelSymbolicLinkTab.h"
+#include "KernelDock.h"
 #include "../UI/VisibleTableWidget.h"
 
 // ============================================================
@@ -33,6 +34,8 @@
 
 #include <algorithm>
 #include <utility>
+
+using ksword::kernel_dock_internal::kernelText;
 
 namespace
 {
@@ -82,26 +85,26 @@ void KernelSymbolicLinkTab::initializeUi()
     toolLayout->setSpacing(6);
 
     m_refreshButton = new QPushButton(this);
-    m_refreshButton->setText(QStringLiteral("刷新"));
-    m_refreshButton->setToolTip(QStringLiteral("枚举常见对象目录中的 SymbolicLink。"));
+    m_refreshButton->setText(kernelText("kernel.symbolic_link.toolbar.refresh", QStringLiteral("刷新")));
+    m_refreshButton->setToolTip(kernelText("kernel.symbolic_link.toolbar.refresh.tooltip", QStringLiteral("枚举常见对象目录中的 SymbolicLink。")));
     m_refreshButton->setStyleSheet(buttonStyle());
 
     m_copyTargetButton = new QPushButton(this);
-    m_copyTargetButton->setText(QStringLiteral("复制目标"));
-    m_copyTargetButton->setToolTip(QStringLiteral("复制当前选中符号链接的 targetPath。"));
+    m_copyTargetButton->setText(kernelText("kernel.symbolic_link.toolbar.copy_target", QStringLiteral("复制目标")));
+    m_copyTargetButton->setToolTip(kernelText("kernel.symbolic_link.toolbar.copy_target.tooltip", QStringLiteral("复制当前选中符号链接的 targetPath。")));
     m_copyTargetButton->setStyleSheet(buttonStyle());
 
     m_filterEdit = new QLineEdit(this);
-    m_filterEdit->setPlaceholderText(QStringLiteral("过滤目录 / 名称 / 完整路径 / 状态"));
+    m_filterEdit->setPlaceholderText(kernelText("kernel.symbolic_link.toolbar.filter.placeholder", QStringLiteral("过滤目录 / 名称 / 完整路径 / 状态")));
     m_filterEdit->setClearButtonEnabled(true);
     m_filterEdit->setStyleSheet(inputStyle());
 
     m_targetFilterEdit = new QLineEdit(this);
-    m_targetFilterEdit->setPlaceholderText(QStringLiteral("按目标路径 / DOS 候选过滤"));
+    m_targetFilterEdit->setPlaceholderText(kernelText("kernel.symbolic_link.toolbar.target_filter.placeholder", QStringLiteral("按目标路径 / DOS 候选过滤")));
     m_targetFilterEdit->setClearButtonEnabled(true);
     m_targetFilterEdit->setStyleSheet(inputStyle());
 
-    m_statusLabel = new QLabel(QStringLiteral("状态：等待刷新"), this);
+    m_statusLabel = new QLabel(kernelText("kernel.symbolic_link.status.waiting", QStringLiteral("状态：等待刷新")), this);
     m_statusLabel->setStyleSheet(QStringLiteral("color:%1;font-weight:600;").arg(KswordTheme::TextSecondaryHex()));
 
     toolLayout->addWidget(m_refreshButton, 0);
@@ -112,7 +115,7 @@ void KernelSymbolicLinkTab::initializeUi()
     rootLayout->addLayout(toolLayout);
 
     m_noteLabel = new QLabel(
-        QStringLiteral("说明：SymbolicLink 本身不是可递归容器，本页只解析目标；若目标指向 Directory，后续由目录递归 tab 处理。"),
+        kernelText("kernel.symbolic_link.note", QStringLiteral("说明：SymbolicLink 本身不是可递归容器，本页只解析目标；若目标指向 Directory，后续由目录递归 tab 处理。")),
         this);
     m_noteLabel->setWordWrap(true);
     m_noteLabel->setStyleSheet(QStringLiteral("color:%1;").arg(KswordTheme::TextSecondaryHex()));
@@ -172,7 +175,7 @@ void KernelSymbolicLinkTab::refreshAsync()
 
     m_refreshing = true;
     m_refreshButton->setEnabled(false);
-    m_statusLabel->setText(QStringLiteral("状态：正在枚举 SymbolicLink..."));
+    m_statusLabel->setText(kernelText("kernel.symbolic_link.status.enumerating", QStringLiteral("状态：正在枚举 SymbolicLink...")));
 
     QPointer<KernelSymbolicLinkTab> guardThis(this);
     auto* task = QRunnable::create([guardThis]() {
@@ -205,7 +208,7 @@ void KernelSymbolicLinkTab::applySnapshotResult(
         m_allRows.clear();
         m_visibleRows.clear();
         rebuildTable();
-        m_statusLabel->setText(QStringLiteral("状态：失败 | %1").arg(errorText));
+        m_statusLabel->setText(kernelText("kernel.symbolic_link.status.failed", QStringLiteral("状态：失败 | %1")).arg(errorText));
         return;
     }
 
@@ -246,7 +249,7 @@ void KernelSymbolicLinkTab::applyFilters()
 
     rebuildTable();
     m_statusLabel->setText(
-        QStringLiteral("状态：显示 %1 / %2")
+        kernelText("kernel.symbolic_link.status.summary", QStringLiteral("状态：显示 %1 / %2"))
         .arg(m_visibleRows.size())
         .arg(m_allRows.size()));
 }
@@ -308,11 +311,11 @@ void KernelSymbolicLinkTab::showContextMenu(const QPoint& position)
 
     QMenu menu(this);
     menu.setStyleSheet(KswordTheme::ContextMenuStyle());
-    QAction* copyCellAction = menu.addAction(QStringLiteral("复制单元格"));
-    QAction* copyTargetAction = menu.addAction(QStringLiteral("复制 targetPath"));
-    QAction* copyDosAction = menu.addAction(QStringLiteral("复制 dosCandidate"));
-    QAction* copyRowAction = menu.addAction(QStringLiteral("复制整行"));
-    QAction* filterTargetAction = menu.addAction(QStringLiteral("按此目标路径过滤"));
+    QAction* copyCellAction = menu.addAction(kernelText("kernel.symbolic_link.menu.copy_cell", QStringLiteral("复制单元格")));
+    QAction* copyTargetAction = menu.addAction(kernelText("kernel.symbolic_link.menu.copy_target", QStringLiteral("复制 targetPath")));
+    QAction* copyDosAction = menu.addAction(kernelText("kernel.symbolic_link.menu.copy_dos_candidate", QStringLiteral("复制 dosCandidate")));
+    QAction* copyRowAction = menu.addAction(kernelText("kernel.symbolic_link.menu.copy_row", QStringLiteral("复制整行")));
+    QAction* filterTargetAction = menu.addAction(kernelText("kernel.symbolic_link.menu.filter_target", QStringLiteral("按此目标路径过滤")));
 
     const QAction* selectedAction = menu.exec(m_table->viewport()->mapToGlobal(position));
     if (selectedAction == nullptr)
