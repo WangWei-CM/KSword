@@ -26,13 +26,20 @@
 #include <QTreeWidget>
 #include <QTreeWidgetItem>
 
+using ksword::kernel_dock_internal::kernelText;
+
 namespace
 {
     // safeText：
     // - 作用：复制时将空文本替换为占位符，避免 TSV 字段错位。
-    QString safeText(const QString& valueText, const QString& fallbackText = QStringLiteral("<空>"))
+    QString safeText(const QString& valueText, const QString& fallbackText)
     {
         return valueText.trimmed().isEmpty() ? fallbackText : valueText;
+    }
+
+    QString safeText(const QString& valueText)
+    {
+        return safeText(valueText, kernelText("kernel.context.placeholder.empty", QStringLiteral("<空>")));
     }
 
     // isNtDevicePath：
@@ -143,18 +150,18 @@ void KernelDock::showObjectNamespaceContextMenu(const QPoint& localPosition)
     QMenu contextMenu(this);
     contextMenu.setStyleSheet(KswordTheme::ContextMenuStyle());
 
-    QAction* refreshAction = contextMenu.addAction(QIcon(":/Icon/process_refresh.svg"), QStringLiteral("刷新对象命名空间"));
+    QAction* refreshAction = contextMenu.addAction(QIcon(":/Icon/process_refresh.svg"), kernelText("kernel.context.object.refresh", QStringLiteral("刷新对象命名空间")));
     contextMenu.addSeparator();
 
-    QMenu* copyMenu = contextMenu.addMenu(QIcon(":/Icon/process_copy_row.svg"), QStringLiteral("复制"));
-    QAction* copyCellAction = copyMenu->addAction(QIcon(":/Icon/process_copy_cell.svg"), QStringLiteral("复制当前单元格"));
-    QAction* copyObjectNameAction = copyMenu->addAction(QStringLiteral("复制对象名"));
-    QAction* copyObjectTypeAction = copyMenu->addAction(QStringLiteral("复制对象类型"));
-    QAction* copyFullPathAction = copyMenu->addAction(QStringLiteral("复制完整路径"));
-    QAction* copySymbolicTargetAction = copyMenu->addAction(QStringLiteral("复制符号链接目标"));
-    QAction* copyEnumApiAction = copyMenu->addAction(QStringLiteral("复制枚举 API"));
-    QAction* copyRowAction = copyMenu->addAction(QIcon(":/Icon/process_copy_row.svg"), QStringLiteral("复制当前行"));
-    QAction* copySameRootRowsAction = copyMenu->addAction(QStringLiteral("复制同目录路径全部行"));
+    QMenu* copyMenu = contextMenu.addMenu(QIcon(":/Icon/process_copy_row.svg"), kernelText("kernel.context.menu.copy", QStringLiteral("复制")));
+    QAction* copyCellAction = copyMenu->addAction(QIcon(":/Icon/process_copy_cell.svg"), kernelText("kernel.context.menu.copy_cell", QStringLiteral("复制当前单元格")));
+    QAction* copyObjectNameAction = copyMenu->addAction(kernelText("kernel.context.object.copy_name", QStringLiteral("复制对象名")));
+    QAction* copyObjectTypeAction = copyMenu->addAction(kernelText("kernel.context.object.copy_type", QStringLiteral("复制对象类型")));
+    QAction* copyFullPathAction = copyMenu->addAction(kernelText("kernel.context.object.copy_full_path", QStringLiteral("复制完整路径")));
+    QAction* copySymbolicTargetAction = copyMenu->addAction(kernelText("kernel.context.object.copy_symbolic_target", QStringLiteral("复制符号链接目标")));
+    QAction* copyEnumApiAction = copyMenu->addAction(kernelText("kernel.context.object.copy_enum_api", QStringLiteral("复制枚举 API")));
+    QAction* copyRowAction = copyMenu->addAction(QIcon(":/Icon/process_copy_row.svg"), kernelText("kernel.context.menu.copy_row", QStringLiteral("复制当前行")));
+    QAction* copySameRootRowsAction = copyMenu->addAction(kernelText("kernel.context.object.copy_same_directory", QStringLiteral("复制同目录路径全部行")));
 
     copyObjectNameAction->setEnabled(hasEntry);
     copyObjectTypeAction->setEnabled(hasEntry);
@@ -164,12 +171,12 @@ void KernelDock::showObjectNamespaceContextMenu(const QPoint& localPosition)
     copyRowAction->setEnabled(hasTreeNode);
     copySameRootRowsAction->setEnabled(hasEntry);
 
-    QMenu* operationMenu = contextMenu.addMenu(QIcon(":/Icon/process_tree.svg"), QStringLiteral("对象操作"));
-    QAction* filterByRootAction = operationMenu->addAction(QStringLiteral("用目录路径过滤"));
-    QAction* filterByDirectoryAction = operationMenu->addAction(QStringLiteral("用当前目录过滤"));
-    QAction* filterByObjectNameAction = operationMenu->addAction(QStringLiteral("用对象名过滤"));
-    QAction* resolveSymbolicLinkAction = operationMenu->addAction(QStringLiteral("解析符号链接目标"));
-    QAction* mapDosPathAction = operationMenu->addAction(QStringLiteral("尝试映射为 DOS 路径"));
+    QMenu* operationMenu = contextMenu.addMenu(QIcon(":/Icon/process_tree.svg"), kernelText("kernel.context.object.operation", QStringLiteral("对象操作")));
+    QAction* filterByRootAction = operationMenu->addAction(kernelText("kernel.context.object.filter_root", QStringLiteral("用目录路径过滤")));
+    QAction* filterByDirectoryAction = operationMenu->addAction(kernelText("kernel.context.object.filter_directory", QStringLiteral("用当前目录过滤")));
+    QAction* filterByObjectNameAction = operationMenu->addAction(kernelText("kernel.context.object.filter_name", QStringLiteral("用对象名过滤")));
+    QAction* resolveSymbolicLinkAction = operationMenu->addAction(kernelText("kernel.context.object.resolve_symbolic_target", QStringLiteral("解析符号链接目标")));
+    QAction* mapDosPathAction = operationMenu->addAction(kernelText("kernel.context.object.map_dos_path", QStringLiteral("尝试映射为 DOS 路径")));
 
     filterByRootAction->setEnabled(hasEntry);
     filterByDirectoryAction->setEnabled(hasEntry);
@@ -289,13 +296,13 @@ void KernelDock::showObjectNamespaceContextMenu(const QPoint& localPosition)
         QString statusText;
         const bool resolveOk = queryObjectNamespaceSymbolicLinkTarget(entry->fullPathText, targetText, statusText);
 
-        QString resultText = QStringLiteral(
+        QString resultText = kernelText("kernel.context.object.resolve_detail", QStringLiteral(
             "符号链接路径: %1\n"
             "解析状态: %2\n"
-            "目标路径: %3")
+            "目标路径: %3"))
             .arg(entry->fullPathText)
             .arg(statusText)
-            .arg(resolveOk ? targetText : QStringLiteral("<解析失败>"));
+            .arg(resolveOk ? targetText : kernelText("kernel.context.placeholder.resolve_failed", QStringLiteral("<解析失败>")));
 
         std::size_t sourceIndex = 0;
         if (resolveOk && currentObjectNamespaceSourceIndex(sourceIndex))
@@ -328,7 +335,7 @@ void KernelDock::showObjectNamespaceContextMenu(const QPoint& localPosition)
         if (candidateList.empty())
         {
             m_objectNamespaceDetailEditor->setText(
-                QStringLiteral("路径: %1\n未找到可用 DOS 路径映射。")
+                kernelText("kernel.context.object.dos_mapping.none", QStringLiteral("路径: %1\n未找到可用 DOS 路径映射。"))
                 .arg(sourcePathText));
             return;
         }
@@ -342,7 +349,7 @@ void KernelDock::showObjectNamespaceContextMenu(const QPoint& localPosition)
         const QString joinedText = candidateTextList.join('\n');
         copyTextToClipboard(joinedText);
         m_objectNamespaceDetailEditor->setText(
-            QStringLiteral("路径: %1\n已找到 DOS 路径映射（并已复制）：\n%2")
+            kernelText("kernel.context.object.dos_mapping.found", QStringLiteral("路径: %1\n已找到 DOS 路径映射（并已复制）：\n%2"))
             .arg(sourcePathText, joinedText));
         return;
     }
@@ -367,16 +374,16 @@ void KernelDock::showAtomContextMenu(const QPoint& localPosition)
     QMenu contextMenu(this);
     contextMenu.setStyleSheet(KswordTheme::ContextMenuStyle());
 
-    QAction* refreshAction = contextMenu.addAction(QIcon(":/Icon/process_refresh.svg"), QStringLiteral("刷新原子表"));
+    QAction* refreshAction = contextMenu.addAction(QIcon(":/Icon/process_refresh.svg"), kernelText("kernel.context.atom.refresh", QStringLiteral("刷新原子表")));
     contextMenu.addSeparator();
 
-    QMenu* copyMenu = contextMenu.addMenu(QIcon(":/Icon/process_copy_row.svg"), QStringLiteral("复制"));
-    QAction* copyCellAction = copyMenu->addAction(QIcon(":/Icon/process_copy_cell.svg"), QStringLiteral("复制当前单元格"));
-    QAction* copyValueAction = copyMenu->addAction(QStringLiteral("复制Atom值"));
-    QAction* copyHexAction = copyMenu->addAction(QStringLiteral("复制十六进制"));
-    QAction* copyNameAction = copyMenu->addAction(QStringLiteral("复制名称"));
-    QAction* copySourceAction = copyMenu->addAction(QStringLiteral("复制来源"));
-    QAction* copyRowAction = copyMenu->addAction(QIcon(":/Icon/process_copy_row.svg"), QStringLiteral("复制当前行"));
+    QMenu* copyMenu = contextMenu.addMenu(QIcon(":/Icon/process_copy_row.svg"), kernelText("kernel.context.menu.copy", QStringLiteral("复制")));
+    QAction* copyCellAction = copyMenu->addAction(QIcon(":/Icon/process_copy_cell.svg"), kernelText("kernel.context.menu.copy_cell", QStringLiteral("复制当前单元格")));
+    QAction* copyValueAction = copyMenu->addAction(kernelText("kernel.context.atom.copy_value", QStringLiteral("复制Atom值")));
+    QAction* copyHexAction = copyMenu->addAction(kernelText("kernel.context.atom.copy_hex", QStringLiteral("复制十六进制")));
+    QAction* copyNameAction = copyMenu->addAction(kernelText("kernel.context.atom.copy_name", QStringLiteral("复制名称")));
+    QAction* copySourceAction = copyMenu->addAction(kernelText("kernel.context.atom.copy_source", QStringLiteral("复制来源")));
+    QAction* copyRowAction = copyMenu->addAction(QIcon(":/Icon/process_copy_row.svg"), kernelText("kernel.context.menu.copy_row", QStringLiteral("复制当前行")));
 
     copyValueAction->setEnabled(hasEntry);
     copyHexAction->setEnabled(hasEntry);
@@ -384,10 +391,10 @@ void KernelDock::showAtomContextMenu(const QPoint& localPosition)
     copySourceAction->setEnabled(hasEntry);
     copyRowAction->setEnabled(hasEntry);
 
-    QMenu* operationMenu = contextMenu.addMenu(QIcon(":/Icon/process_threads.svg"), QStringLiteral("原子操作"));
-    QAction* filterByNameAction = operationMenu->addAction(QStringLiteral("用名称过滤"));
-    QAction* verifyByNameAction = operationMenu->addAction(QStringLiteral("使用GlobalFindAtomW校验"));
-    QAction* copySnippetAction = operationMenu->addAction(QStringLiteral("复制调用代码片段"));
+    QMenu* operationMenu = contextMenu.addMenu(QIcon(":/Icon/process_threads.svg"), kernelText("kernel.context.atom.operation", QStringLiteral("原子操作")));
+    QAction* filterByNameAction = operationMenu->addAction(kernelText("kernel.context.atom.filter_name", QStringLiteral("用名称过滤")));
+    QAction* verifyByNameAction = operationMenu->addAction(kernelText("kernel.context.atom.verify_global_find", QStringLiteral("使用GlobalFindAtomW校验")));
+    QAction* copySnippetAction = operationMenu->addAction(kernelText("kernel.context.atom.copy_snippet", QStringLiteral("复制调用代码片段")));
 
     filterByNameAction->setEnabled(hasEntry && !entry->atomNameText.trimmed().isEmpty());
     verifyByNameAction->setEnabled(hasEntry && !entry->atomNameText.trimmed().isEmpty());
@@ -503,7 +510,7 @@ void KernelDock::showAtomContextMenu(const QPoint& localPosition)
 
         copyTextToClipboard(snippetText);
         m_atomDetailEditor->setText(
-            QStringLiteral("已复制调用代码片段：\n%1")
+            kernelText("kernel.context.atom.snippet_copied", QStringLiteral("已复制调用代码片段：\n%1"))
             .arg(snippetText));
         return;
     }

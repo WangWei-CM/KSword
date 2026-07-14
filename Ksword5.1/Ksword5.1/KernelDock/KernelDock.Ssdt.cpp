@@ -28,6 +28,8 @@
 
 #include <thread>
 
+using ksword::kernel_dock_internal::kernelText;
+
 namespace
 {
     QString blueButtonStyle()
@@ -75,9 +77,19 @@ namespace
         return KswordTheme::ContextMenuStyle();
     }
 
-    QString safeText(const QString& valueText, const QString& fallbackText = QStringLiteral("<空>"))
+    QString safeText(const QString& valueText, const QString& fallbackText)
     {
         return valueText.trimmed().isEmpty() ? fallbackText : valueText;
+    }
+
+    QString safeText(const QString& valueText)
+    {
+        return safeText(valueText, kernelText("kernel.ssdt.placeholder.empty", QStringLiteral("<空>")));
+    }
+
+    QString emptyText()
+    {
+        return kernelText("kernel.ssdt.placeholder.empty", QStringLiteral("<空>"));
     }
 
     QString formatAddressHex(const std::uint64_t addressValue)
@@ -103,7 +115,7 @@ namespace
         for (int columnIndex = 0; columnIndex < tableWidget->columnCount(); ++columnIndex)
         {
             const QTableWidgetItem* cellItem = tableWidget->item(rowIndex, columnIndex);
-            fieldList.push_back(cellItem != nullptr ? safeText(cellItem->text()) : QStringLiteral("<空>"));
+            fieldList.push_back(cellItem != nullptr ? safeText(cellItem->text()) : emptyText());
         }
         return fieldList.join('\t');
     }
@@ -136,17 +148,17 @@ void KernelDock::initializeSsdtTab()
     m_ssdtToolLayout->setSpacing(6);
 
     m_refreshSsdtButton = new QPushButton(QIcon(":/Icon/process_refresh.svg"), QString(), m_ssdtPage);
-    m_refreshSsdtButton->setToolTip(QStringLiteral("刷新 SSDT 遍历结果"));
+    m_refreshSsdtButton->setToolTip(kernelText("kernel.ssdt.toolbar.refresh.tooltip", QStringLiteral("刷新 SSDT 遍历结果")));
     m_refreshSsdtButton->setStyleSheet(blueButtonStyle());
     m_refreshSsdtButton->setFixedWidth(34);
 
     m_ssdtFilterEdit = new QLineEdit(m_ssdtPage);
-    m_ssdtFilterEdit->setPlaceholderText(QStringLiteral("按索引/服务名/地址/模块/状态筛选"));
-    m_ssdtFilterEdit->setToolTip(QStringLiteral("输入关键字后实时过滤 SSDT 结果"));
+    m_ssdtFilterEdit->setPlaceholderText(kernelText("kernel.ssdt.toolbar.filter.placeholder", QStringLiteral("按索引/服务名/地址/模块/状态筛选")));
+    m_ssdtFilterEdit->setToolTip(kernelText("kernel.ssdt.toolbar.filter.tooltip", QStringLiteral("输入关键字后实时过滤 SSDT 结果")));
     m_ssdtFilterEdit->setClearButtonEnabled(true);
     m_ssdtFilterEdit->setStyleSheet(blueInputStyle());
 
-    m_ssdtStatusLabel = new QLabel(QStringLiteral("状态：等待刷新"), m_ssdtPage);
+    m_ssdtStatusLabel = new QLabel(kernelText("kernel.ssdt.status.waiting", QStringLiteral("状态：等待刷新")), m_ssdtPage);
     m_ssdtStatusLabel->setStyleSheet(statusLabelStyle(KswordTheme::TextSecondaryHex()));
 
     m_ssdtToolLayout->addWidget(m_refreshSsdtButton, 0);
@@ -160,12 +172,12 @@ void KernelDock::initializeSsdtTab()
     m_ssdtTable = new ks::ui::VisibleTableWidget(splitter);
     m_ssdtTable->setColumnCount(static_cast<int>(SsdtColumn::Count));
     m_ssdtTable->setHorizontalHeaderLabels(QStringList{
-        QStringLiteral("索引"),
-        QStringLiteral("服务名"),
-        QStringLiteral("Zw导出地址"),
-        QStringLiteral("表项地址"),
-        QStringLiteral("模块"),
-        QStringLiteral("状态")
+        kernelText("kernel.ssdt.header.index", QStringLiteral("索引")),
+        kernelText("kernel.ssdt.header.service_name", QStringLiteral("服务名")),
+        kernelText("kernel.ssdt.header.zw_address", QStringLiteral("Zw导出地址")),
+        kernelText("kernel.ssdt.header.service_address", QStringLiteral("表项地址")),
+        kernelText("kernel.ssdt.header.module", QStringLiteral("模块")),
+        kernelText("kernel.ssdt.header.status", QStringLiteral("状态"))
         });
     m_ssdtTable->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_ssdtTable->setSelectionMode(QAbstractItemView::SingleSelection);
@@ -185,7 +197,7 @@ void KernelDock::initializeSsdtTab()
 
     m_ssdtDetailEditor = new CodeEditorWidget(splitter);
     m_ssdtDetailEditor->setReadOnly(true);
-    m_ssdtDetailEditor->setText(QStringLiteral("请选择一条 SSDT 记录查看详情。"));
+    m_ssdtDetailEditor->setText(kernelText("kernel.ssdt.detail.initial", QStringLiteral("请选择一条 SSDT 记录查看详情。")));
 
     splitter->setStretchFactor(0, 3);
     splitter->setStretchFactor(1, 2);
@@ -217,7 +229,7 @@ void KernelDock::initializeSsdtTab()
 
         QAction* copyRowAction = contextMenu.addAction(
             QIcon(QStringLiteral(":/Icon/process_copy_row.svg")),
-            QStringLiteral("复制当前行"));
+            kernelText("kernel.ssdt.menu.copy_row", QStringLiteral("复制当前行")));
         copyRowAction->setEnabled(currentRow >= 0);
 
         QAction* selectedAction = contextMenu.exec(m_ssdtTable->viewport()->mapToGlobal(localPosition));
@@ -245,7 +257,7 @@ void KernelDock::refreshSsdtAsync()
     }
 
     m_refreshSsdtButton->setEnabled(false);
-    m_ssdtStatusLabel->setText(QStringLiteral("状态：刷新中..."));
+    m_ssdtStatusLabel->setText(kernelText("kernel.ssdt.status.refreshing", QStringLiteral("状态：刷新中...")));
     m_ssdtStatusLabel->setStyleSheet(statusLabelStyle(KswordTheme::PrimaryBlueHex));
 
     QPointer<KernelDock> guardThis(this);
@@ -265,7 +277,7 @@ void KernelDock::refreshSsdtAsync()
 
             if (!success)
             {
-                guardThis->m_ssdtStatusLabel->setText(QStringLiteral("状态：刷新失败"));
+                guardThis->m_ssdtStatusLabel->setText(kernelText("kernel.ssdt.status.failed", QStringLiteral("状态：刷新失败")));
                 guardThis->m_ssdtStatusLabel->setStyleSheet(statusLabelStyle(QStringLiteral("#B23A3A")));
                 guardThis->m_ssdtDetailEditor->setText(errorText);
                 return;
@@ -284,7 +296,7 @@ void KernelDock::refreshSsdtAsync()
             }
 
             guardThis->m_ssdtStatusLabel->setText(
-                QStringLiteral("状态：已刷新 %1 项，未解析索引 %2 项")
+                kernelText("kernel.ssdt.status.summary", QStringLiteral("状态：已刷新 %1 项，未解析索引 %2 项"))
                 .arg(guardThis->m_ssdtRows.size())
                 .arg(unresolvedCount));
             guardThis->m_ssdtStatusLabel->setStyleSheet(
@@ -296,7 +308,7 @@ void KernelDock::refreshSsdtAsync()
             }
             else
             {
-                guardThis->m_ssdtDetailEditor->setText(QStringLiteral("当前环境未返回可见 SSDT 条目。"));
+                guardThis->m_ssdtDetailEditor->setText(kernelText("kernel.ssdt.empty", QStringLiteral("当前环境未返回可见 SSDT 条目。")));
             }
         }, Qt::QueuedConnection);
     }).detach();
@@ -317,7 +329,7 @@ void KernelDock::rebuildSsdtTable(const QString& filterKeyword)
         const KernelSsdtEntry& entry = m_ssdtRows[sourceIndex];
         const QString indexText = entry.indexResolved
             ? QString::number(entry.serviceIndex)
-            : QStringLiteral("<未知>");
+            : kernelText("kernel.ssdt.placeholder.unknown", QStringLiteral("<未知>"));
         const QString zwAddressText = formatAddressHex(entry.zwRoutineAddress);
         const QString serviceAddressText = formatAddressHex(entry.serviceRoutineAddress);
 
@@ -412,11 +424,11 @@ void KernelDock::showSsdtDetailByCurrentRow()
     const KernelSsdtEntry* entry = currentSsdtEntry();
     if (entry == nullptr)
     {
-        m_ssdtDetailEditor->setText(QStringLiteral("请选择一条 SSDT 记录查看详情。"));
+        m_ssdtDetailEditor->setText(kernelText("kernel.ssdt.detail.initial", QStringLiteral("请选择一条 SSDT 记录查看详情。")));
         return;
     }
 
-    const QString detailText = QStringLiteral(
+    const QString detailText = kernelText("kernel.ssdt.detail.full", QStringLiteral(
         "服务索引: %1\n"
         "服务名: %2\n"
         "模块: %3\n"
@@ -425,8 +437,8 @@ void KernelDock::showSsdtDetailByCurrentRow()
         "表项服务地址: %6\n"
         "状态: %7\n"
         "标志: 0x%8\n\n"
-        "Worker详情:\n%9")
-        .arg(entry->indexResolved ? QString::number(entry->serviceIndex) : QStringLiteral("<未知>"))
+        "Worker详情:\n%9"))
+        .arg(entry->indexResolved ? QString::number(entry->serviceIndex) : kernelText("kernel.ssdt.placeholder.unknown", QStringLiteral("<未知>")))
         .arg(safeText(entry->serviceNameText))
         .arg(safeText(entry->moduleNameText))
         .arg(formatAddressHex(entry->zwRoutineAddress))
