@@ -1,4 +1,5 @@
 #include "KernelDockIpcTab.h"
+#include "KernelDock.h"
 #include "../UI/VisibleTableWidget.h"
 
 // ============================================================
@@ -37,6 +38,8 @@
 #include <QVBoxLayout>
 
 #include <thread>
+
+using ksword::kernel_dock_internal::kernelText;
 
 namespace
 {
@@ -101,9 +104,14 @@ namespace
         return QStringLiteral("color:%1;font-weight:600;").arg(colorHex);
     }
 
-    QString safeText(const QString& valueText, const QString& fallbackText = QStringLiteral("<空>"))
+    QString safeText(const QString& valueText, const QString& fallbackText)
     {
         return valueText.trimmed().isEmpty() ? fallbackText : valueText;
+    }
+
+    QString safeText(const QString& valueText)
+    {
+        return safeText(valueText, kernelText("kernel.ipc.placeholder.empty", QStringLiteral("<空>")));
     }
 
     QString formatRelationText(std::uint32_t relation)
@@ -129,7 +137,7 @@ namespace
         case KSWORD_ARK_IPC_SUMMARY_STATUS_UNAVAILABLE: return QStringLiteral("Unavailable");
         case KSWORD_ARK_IPC_SUMMARY_STATUS_OK: return QStringLiteral("OK");
         case KSWORD_ARK_IPC_SUMMARY_STATUS_PARTIAL: return QStringLiteral("Partial");
-        case KSWORD_ARK_IPC_SUMMARY_STATUS_STUB: return QStringLiteral("LegacyStub（旧驱动占位）");
+        case KSWORD_ARK_IPC_SUMMARY_STATUS_STUB: return kernelText("kernel.ipc.status.legacy_stub", QStringLiteral("LegacyStub（旧驱动占位）"));
         case KSWORD_ARK_IPC_SUMMARY_STATUS_FAILED: return QStringLiteral("Failed");
         default: return QStringLiteral("Status(%1)").arg(statusValue);
         }
@@ -153,21 +161,21 @@ namespace
         const QString trimmedText = messageText.trimmed();
         if (trimmedText.isEmpty())
         {
-            return QStringLiteral("无额外驱动消息。");
+            return kernelText("kernel.ipc.message.no_driver_message", QStringLiteral("无额外驱动消息。"));
         }
         if (trimmedText.contains(QStringLiteral("DeviceIoControl"), Qt::CaseInsensitive))
         {
-            return QStringLiteral("驱动接口调用失败或当前驱动版本不支持该 IPC 摘要入口。");
+            return kernelText("kernel.ipc.message.device_io_failure", QStringLiteral("驱动接口调用失败或当前驱动版本不支持该 IPC 摘要入口。"));
         }
         if (trimmedText.contains(QStringLiteral("unsupported"), Qt::CaseInsensitive) ||
             trimmedText.contains(QStringLiteral("not supported"), Qt::CaseInsensitive))
         {
-            return QStringLiteral("当前驱动不支持该 IPC/ALPC 只读查询入口。");
+            return kernelText("kernel.ipc.message.unsupported", QStringLiteral("当前驱动不支持该 IPC/ALPC 只读查询入口。"));
         }
         if (trimmedText.contains(QStringLiteral("capability"), Qt::CaseInsensitive) ||
             trimmedText.contains(QStringLiteral("DynData"), Qt::CaseInsensitive))
         {
-            return QStringLiteral("动态偏移能力未满足，IPC/ALPC 详情暂不可用。");
+            return kernelText("kernel.ipc.message.capability", QStringLiteral("动态偏移能力未满足，IPC/ALPC 详情暂不可用。"));
         }
         if (trimmedText.contains(QStringLiteral("version mismatch"), Qt::CaseInsensitive) ||
             trimmedText.contains(QStringLiteral("invalid parameter"), Qt::CaseInsensitive))
@@ -176,22 +184,22 @@ namespace
             // - 输入：R0/R3 参数或版本不匹配的底层消息；
             // - 处理：转换为同步 shared/driver/client 的操作建议；
             // - 返回：详情列可直接展示的中文说明。
-            return QStringLiteral("IPC/ALPC 协议版本或参数不兼容，请同步 shared、R0 驱动与 ArkDriverClient。");
+            return kernelText("kernel.ipc.message.protocol_mismatch", QStringLiteral("IPC/ALPC 协议版本或参数不兼容，请同步 shared、R0 驱动与 ArkDriverClient。"));
         }
         if (trimmedText.contains(QStringLiteral("buffer"), Qt::CaseInsensitive) ||
             trimmedText.contains(QStringLiteral("too small"), Qt::CaseInsensitive) ||
             trimmedText.contains(QStringLiteral("trunc"), Qt::CaseInsensitive))
         {
-            return QStringLiteral("IPC/ALPC 返回缓冲区不完整，当前只展示已解析到的证据。");
+            return kernelText("kernel.ipc.message.incomplete_buffer", QStringLiteral("IPC/ALPC 返回缓冲区不完整，当前只展示已解析到的证据。"));
         }
         if (trimmedText.contains(QStringLiteral("access denied"), Qt::CaseInsensitive) ||
             trimmedText.contains(QStringLiteral("privilege"), Qt::CaseInsensitive))
         {
-            return QStringLiteral("权限不足，当前进程无法完成 IPC/ALPC 只读查询。");
+            return kernelText("kernel.ipc.message.access_denied", QStringLiteral("权限不足，当前进程无法完成 IPC/ALPC 只读查询。"));
         }
         if (trimmedText.contains(QStringLiteral("skipped"), Qt::CaseInsensitive))
         {
-            return QStringLiteral("未输入完整 PID/Handle，因此只显示全局 IPC 摘要。");
+            return kernelText("kernel.ipc.message.skipped_incomplete_target", QStringLiteral("未输入完整 PID/Handle，因此只显示全局 IPC 摘要。"));
         }
         return trimmedText;
     }
@@ -267,20 +275,20 @@ void KernelDockIpcTab::initializeUi()
         new KernelNamedPipeTab(m_innerTabWidget),
         QIcon(QStringLiteral(":/Icon/process_list.svg")),
         QStringLiteral("NamedPipe"));
-    m_innerTabWidget->setTabToolTip(0, QStringLiteral("只读 NPFS NamedPipe 目录枚举"));
+    m_innerTabWidget->setTabToolTip(0, kernelText("kernel.ipc.tab.named_pipe.tooltip", QStringLiteral("只读 NPFS NamedPipe 目录枚举")));
 
     initializeAlpcPage();
     m_innerTabWidget->addTab(
         m_alpcPage,
         QIcon(QStringLiteral(":/Icon/process_details.svg")),
         QStringLiteral("ALPC"));
-    m_innerTabWidget->setTabToolTip(1, QStringLiteral("只读 ALPC 端口关系查询"));
+    m_innerTabWidget->setTabToolTip(1, kernelText("kernel.ipc.tab.alpc.tooltip", QStringLiteral("只读 ALPC 端口关系查询")));
 
     m_innerTabWidget->addTab(
         new KernelCommunicationEndpointTab(m_innerTabWidget),
         QIcon(QStringLiteral(":/Icon/process_critical.svg")),
-        QStringLiteral("通信对象"));
-    m_innerTabWidget->setTabToolTip(2, QStringLiteral("只读 ALPC/RPC 通信端点聚合"));
+        kernelText("kernel.ipc.tab.communication.title", QStringLiteral("通信对象")));
+    m_innerTabWidget->setTabToolTip(2, kernelText("kernel.ipc.tab.communication.tooltip", QStringLiteral("只读 ALPC/RPC 通信端点聚合")));
 }
 
 void KernelDockIpcTab::initializeConnections()
@@ -328,7 +336,7 @@ void KernelDockIpcTab::initializeAlpcPage()
 
     m_alpcRefreshButton = new QPushButton(QIcon(":/Icon/process_refresh.svg"), QString(), m_alpcPage);
     m_alpcRefreshButton->setFixedWidth(34);
-    m_alpcRefreshButton->setToolTip(QStringLiteral("刷新 ALPC 端口查询"));
+    m_alpcRefreshButton->setToolTip(kernelText("kernel.ipc.toolbar.refresh.tooltip", QStringLiteral("刷新 ALPC 端口查询")));
     m_alpcRefreshButton->setStyleSheet(blueButtonStyle());
 
     m_alpcProcessIdEdit = new QLineEdit(m_alpcPage);
@@ -337,11 +345,11 @@ void KernelDockIpcTab::initializeAlpcPage()
     m_alpcProcessIdEdit->setStyleSheet(blueInputStyle());
 
     m_alpcHandleEdit = new QLineEdit(m_alpcPage);
-    m_alpcHandleEdit->setPlaceholderText(QStringLiteral("句柄值（十六进制）"));
+    m_alpcHandleEdit->setPlaceholderText(kernelText("kernel.ipc.toolbar.handle.placeholder", QStringLiteral("句柄值（十六进制）")));
     m_alpcHandleEdit->setClearButtonEnabled(true);
     m_alpcHandleEdit->setStyleSheet(blueInputStyle());
 
-    m_alpcStatusLabel = new QLabel(QStringLiteral("状态：等待查询"), m_alpcPage);
+    m_alpcStatusLabel = new QLabel(kernelText("kernel.ipc.status.waiting", QStringLiteral("状态：等待查询")), m_alpcPage);
     m_alpcStatusLabel->setStyleSheet(statusLabelStyle(KswordTheme::TextSecondaryHex()));
 
     m_alpcToolbarLayout->addWidget(m_alpcRefreshButton, 0);
@@ -353,11 +361,11 @@ void KernelDockIpcTab::initializeAlpcPage()
     m_ipcSummaryTable = new ks::ui::VisibleTableWidget(m_alpcPage);
     m_ipcSummaryTable->setColumnCount(static_cast<int>(IpcSummaryColumn::CountColumn));
     m_ipcSummaryTable->setHorizontalHeaderLabels(QStringList{
-        QStringLiteral("类别"),
-        QStringLiteral("状态"),
+        kernelText("kernel.ipc.header.category", QStringLiteral("类别")),
+        kernelText("kernel.ipc.header.status", QStringLiteral("状态")),
         QStringLiteral("Count"),
-        QStringLiteral("来源"),
-        QStringLiteral("详情")
+        kernelText("kernel.ipc.header.source", QStringLiteral("来源")),
+        kernelText("kernel.ipc.header.detail", QStringLiteral("详情"))
         });
     m_ipcSummaryTable->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_ipcSummaryTable->setSelectionMode(QAbstractItemView::SingleSelection);
@@ -369,13 +377,13 @@ void KernelDockIpcTab::initializeAlpcPage()
     m_ipcSummaryTable->horizontalHeader()->setStyleSheet(headerStyle());
     m_ipcSummaryTable->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
     m_ipcSummaryTable->horizontalHeader()->setSectionResizeMode(static_cast<int>(IpcSummaryColumn::Detail), QHeaderView::Stretch);
-    m_ipcSummaryTable->setToolTip(QStringLiteral("R0 IPC summary：通过 ArkDriverClient::queryIpcSummary 只读查询，复用上方 PID/Handle；为空时查询全局摘要。"));
+    m_ipcSummaryTable->setToolTip(kernelText("kernel.ipc.summary.tooltip", QStringLiteral("R0 IPC summary：通过 ArkDriverClient::queryIpcSummary 只读查询，复用上方 PID/Handle；为空时查询全局摘要。")));
     layout->addWidget(m_ipcSummaryTable, 0);
 
     m_alpcTable = new ks::ui::VisibleTableWidget(m_alpcPage);
     m_alpcTable->setColumnCount(static_cast<int>(AlpcColumn::Count));
     m_alpcTable->setHorizontalHeaderLabels(QStringList{
-        QStringLiteral("角色"),
+        kernelText("kernel.ipc.header.role", QStringLiteral("角色")),
         QStringLiteral("Relation"),
         QStringLiteral("Owner PID"),
         QStringLiteral("Flags"),
@@ -401,7 +409,7 @@ void KernelDockIpcTab::initializeAlpcPage()
 
     m_alpcDetailEditor = new CodeEditorWidget(m_alpcPage);
     m_alpcDetailEditor->setReadOnly(true);
-    m_alpcDetailEditor->setText(QStringLiteral("输入 PID + ALPC 句柄后查询，或刷新后查看结果。"));
+    m_alpcDetailEditor->setText(kernelText("kernel.ipc.detail.initial", QStringLiteral("输入 PID + ALPC 句柄后查询，或刷新后查看结果。")));
     layout->addWidget(m_alpcDetailEditor, 1);
 
     connect(m_alpcTable, &QTableWidget::currentCellChanged, this, [this](const int currentRow, int, int, int) {
@@ -431,7 +439,7 @@ void KernelDockIpcTab::initializeAlpcPage()
         }
         QMenu menu(this);
         menu.setStyleSheet(KswordTheme::ContextMenuStyle());
-        QAction* copyRowAction = menu.addAction(QStringLiteral("复制当前行"));
+        QAction* copyRowAction = menu.addAction(kernelText("kernel.ipc.menu.copy_row", QStringLiteral("复制当前行")));
         copyRowAction->setEnabled(m_ipcSummaryTable->currentRow() >= 0);
         if (menu.exec(m_ipcSummaryTable->viewport()->mapToGlobal(localPosition)) == copyRowAction)
         {
@@ -447,7 +455,7 @@ void KernelDockIpcTab::initializeAlpcPage()
         }
         QMenu menu(this);
         menu.setStyleSheet(KswordTheme::ContextMenuStyle());
-        QAction* copyRowAction = menu.addAction(QStringLiteral("复制当前行"));
+        QAction* copyRowAction = menu.addAction(kernelText("kernel.ipc.menu.copy_row", QStringLiteral("复制当前行")));
         copyRowAction->setEnabled(m_alpcTable->currentRow() >= 0);
         if (menu.exec(m_alpcTable->viewport()->mapToGlobal(localPosition)) == copyRowAction)
         {
@@ -464,7 +472,7 @@ void KernelDockIpcTab::refreshAlpcQuery()
     }
 
     m_alpcRefreshButton->setEnabled(false);
-    m_alpcStatusLabel->setText(QStringLiteral("状态：查询中..."));
+    m_alpcStatusLabel->setText(kernelText("kernel.ipc.status.querying", QStringLiteral("状态：查询中...")));
     m_alpcStatusLabel->setStyleSheet(statusLabelStyle(KswordTheme::PrimaryBlueHex));
 
     const std::uint32_t pid = m_alpcProcessIdEdit != nullptr ? m_alpcProcessIdEdit->text().trimmed().toUInt() : 0U;
@@ -476,7 +484,7 @@ void KernelDockIpcTab::refreshAlpcQuery()
     const bool hasAlpcTarget = ok && pid != 0U && handleValue != 0ULL;
     if (!hasAlpcTarget)
     {
-        m_alpcStatusLabel->setText(QStringLiteral("状态：查询全局 R0 IPC summary；ALPC 详情需输入 PID 与十六进制句柄"));
+        m_alpcStatusLabel->setText(kernelText("kernel.ipc.status.global_query", QStringLiteral("状态：查询全局 R0 IPC summary；ALPC 详情需输入 PID 与十六进制句柄")));
         m_alpcStatusLabel->setStyleSheet(statusLabelStyle(QStringLiteral("#D77A00")));
     }
 
@@ -514,7 +522,7 @@ void KernelDockIpcTab::refreshAlpcQuery()
             guardThis->applyAlpcQueryResult();
             if (!hasAlpcTarget)
             {
-                guardThis->m_alpcStatusLabel->setText(QStringLiteral("状态：已刷新 R0 IPC summary；ALPC 详情等待 PID/Handle"));
+                guardThis->m_alpcStatusLabel->setText(kernelText("kernel.ipc.status.global_refreshed", QStringLiteral("状态：已刷新 R0 IPC summary；ALPC 详情等待 PID/Handle")));
                 guardThis->m_alpcStatusLabel->setStyleSheet(statusLabelStyle(QStringLiteral("#D77A00")));
             }
         }, Qt::QueuedConnection);
@@ -568,7 +576,7 @@ void KernelDockIpcTab::applyIpcSummaryResult()
             m_lastIpcSummaryResult.unsupported ? QStringLiteral("Unsupported") : QStringLiteral("Unavailable"),
             QStringLiteral("N/A"),
             QStringLiteral("ArkDriverClient::queryIpcSummary"),
-            QStringLiteral("IPC 摘要暂不可用。Win32=%1；驱动返回字节=%2；%3")
+            kernelText("kernel.ipc.summary.error_detail", QStringLiteral("IPC 摘要暂不可用。Win32=%1；驱动返回字节=%2；%3"))
                 .arg(m_lastIpcSummaryResult.io.win32Error)
                 .arg(m_lastIpcSummaryResult.io.bytesReturned)
                 .arg(readableIoMessage));
@@ -582,28 +590,28 @@ void KernelDockIpcTab::applyIpcSummaryResult()
     }
 
     const auto& response = m_lastIpcSummaryResult.response;
-    const QString countUnavailableText = QStringLiteral("N/A（固定摘要协议未返回 count）");
+    const QString countUnavailableText = kernelText("kernel.ipc.summary.count_unavailable", QStringLiteral("N/A（固定摘要协议未返回 count）"));
     const QString commonSourceText = QStringLiteral("R0 queryIpcSummary PID=%1 Handle=%2")
         .arg(response.processId)
         .arg(formatHex64(response.handleValue));
     const QString responseDetailText = safeText(
         fixedWideText(response.detail, KSWORD_ARK_KERNEL_OBJECT_DETAIL_CHARS),
-        QStringLiteral("驱动未提供额外对象详情"));
-    const QString commonDetailText = QStringLiteral(
+        kernelText("kernel.ipc.summary.object_detail_unavailable", QStringLiteral("驱动未提供额外对象详情")));
+    const QString commonDetailText = kernelText("kernel.ipc.summary.common_detail", QStringLiteral(
         "IPC 摘要状态：%1；字段覆盖：%2；最近状态：%3；驱动返回字节：%4；%5；对象说明：%6")
         .arg(ipcSummaryStatusText(response.status))
         .arg(formatHex32(response.fieldFlags))
         .arg(statusText(response.lastStatus))
         .arg(m_lastIpcSummaryResult.io.bytesReturned)
         .arg(readableIoMessage)
-        .arg(responseDetailText);
+        .arg(responseDetailText));
 
     appendSummaryRow(
         QStringLiteral("ALPC"),
         ipcSummaryStatusText(response.alpcStatus),
         countUnavailableText,
         commonSourceText,
-        QStringLiteral("ALPC 对象地址：%1；对象类型：%2；DynData 能力：%3；%4")
+        kernelText("kernel.ipc.summary.alpc_detail", QStringLiteral("ALPC 对象地址：%1；对象类型：%2；DynData 能力：%3；%4"))
             .arg(formatHex64(response.alpcObjectAddress))
             .arg(safeText(fixedWideText(response.alpcTypeName, KSWORD_ARK_KERNEL_OBJECT_TYPE_NAME_CHARS)))
             .arg(formatHex64(response.dynDataCapabilityMask))
@@ -622,16 +630,16 @@ void KernelDockIpcTab::applyIpcSummaryResult()
         commonDetailText);
     appendSummaryRow(
         QStringLiteral("SMB/IPC"),
-        QStringLiteral("提示"),
+        kernelText("kernel.ipc.summary.smb_hint_title", QStringLiteral("提示")),
         QStringLiteral("N/A"),
         QStringLiteral("UI hint"),
-        QStringLiteral("当前固定 R0 IPC summary 协议未返回 SMB/IPC 专用字段；如需 SMB named pipe/IPC$ 归因，应后续扩展 ArkDriverClient 协议字段。"));
+        kernelText("kernel.ipc.summary.smb_hint", QStringLiteral("当前固定 R0 IPC summary 协议未返回 SMB/IPC 专用字段；如需 SMB named pipe/IPC$ 归因，应后续扩展 ArkDriverClient 协议字段。")));
     appendSummaryRow(
         QStringLiteral("Transport"),
         QStringLiteral("OK"),
-        QStringLiteral("固定摘要响应"),
+        kernelText("kernel.ipc.summary.transport_count", QStringLiteral("固定摘要响应")),
         QStringLiteral("ArkDriverClient"),
-        QStringLiteral("驱动 IPC 摘要调用成功；返回字节=%1；%2")
+        kernelText("kernel.ipc.summary.transport_detail", QStringLiteral("驱动 IPC 摘要调用成功；返回字节=%1；%2"))
             .arg(m_lastIpcSummaryResult.io.bytesReturned)
             .arg(readableIoMessage));
 
@@ -675,22 +683,28 @@ void KernelDockIpcTab::applyAlpcQueryResult()
         // - 处理：保留一行可复制的表格证据，避免 IPC 页某个表格完全空白；
         // - 返回：无返回值，详情区仍按 summary/错误文本展示。
         m_alpcTable->setRowCount(1);
-        setDiagnosticItem(AlpcColumn::Role, skippedByInput ? QStringLiteral("ALPC 未请求") : QStringLiteral("ALPC 查询失败"));
+        setDiagnosticItem(AlpcColumn::Role, skippedByInput
+            ? kernelText("kernel.ipc.alpc.diagnostic.not_requested", QStringLiteral("ALPC 未请求"))
+            : kernelText("kernel.ipc.alpc.diagnostic.query_failed", QStringLiteral("ALPC 查询失败")));
         setDiagnosticItem(AlpcColumn::Relation, QStringLiteral("Diagnostic"));
-        setDiagnosticItem(AlpcColumn::OwnerProcessId, m_alpcProcessIdEdit != nullptr ? safeText(m_alpcProcessIdEdit->text().trimmed(), QStringLiteral("<未输入>")) : QStringLiteral("<未知>"));
+        setDiagnosticItem(AlpcColumn::OwnerProcessId, m_alpcProcessIdEdit != nullptr
+            ? safeText(m_alpcProcessIdEdit->text().trimmed(), kernelText("kernel.ipc.alpc.placeholder.pid", QStringLiteral("<未输入>")))
+            : kernelText("kernel.ipc.alpc.placeholder.unknown", QStringLiteral("<未知>")));
         setDiagnosticItem(AlpcColumn::Flags, QStringLiteral("-"));
         setDiagnosticItem(AlpcColumn::State, QStringLiteral("-"));
         setDiagnosticItem(AlpcColumn::SequenceNo, QStringLiteral("-"));
         setDiagnosticItem(AlpcColumn::ObjectAddress, QStringLiteral("0x0000000000000000"));
         setDiagnosticItem(AlpcColumn::PortContext, QStringLiteral("0x0000000000000000"));
-        setDiagnosticItem(AlpcColumn::PortName, skippedByInput ? QStringLiteral("请输入 PID + 十六进制 ALPC 句柄") : QStringLiteral("<不可用>"));
+        setDiagnosticItem(AlpcColumn::PortName, skippedByInput
+            ? kernelText("kernel.ipc.alpc.diagnostic.handle_hint", QStringLiteral("请输入 PID + 十六进制 ALPC 句柄"))
+            : kernelText("kernel.ipc.alpc.placeholder.unavailable", QStringLiteral("<不可用>")));
         setDiagnosticItem(AlpcColumn::Status, readableAlpcMessage);
         m_alpcTable->setSortingEnabled(true);
         m_alpcTable->setCurrentCell(0, static_cast<int>(AlpcColumn::Role));
 
         m_alpcStatusLabel->setText(skippedByInput
-            ? QStringLiteral("状态：R0 IPC summary 已刷新；ALPC 详情未请求")
-            : QStringLiteral("状态：ALPC 查询失败 - %1").arg(readableAlpcMessage));
+            ? kernelText("kernel.ipc.alpc.status.not_requested", QStringLiteral("状态：R0 IPC summary 已刷新；ALPC 详情未请求"))
+            : kernelText("kernel.ipc.alpc.status.query_failed", QStringLiteral("状态：ALPC 查询失败 - %1")).arg(readableAlpcMessage));
         m_alpcStatusLabel->setStyleSheet(statusLabelStyle(skippedByInput ? QStringLiteral("#D77A00") : QStringLiteral("#B23A3A")));
         if (skippedByInput)
         {
@@ -709,7 +723,7 @@ void KernelDockIpcTab::applyAlpcQueryResult()
         }
         else
         {
-            m_alpcDetailEditor->setText(QStringLiteral("ALPC 查询失败。\n%1").arg(readableAlpcMessage));
+            m_alpcDetailEditor->setText(kernelText("kernel.ipc.alpc.detail.query_failed", QStringLiteral("ALPC 查询失败。\n%1")).arg(readableAlpcMessage));
         }
         return;
     }
@@ -732,7 +746,7 @@ void KernelDockIpcTab::applyAlpcQueryResult()
         m_alpcTable->insertRow(rowIndex);
 
         auto* roleItem = new QTableWidgetItem(view.role);
-        auto* relationItem = new QTableWidgetItem(view.port != nullptr ? formatRelationText(view.port->relation) : QStringLiteral("<空>"));
+        auto* relationItem = new QTableWidgetItem(view.port != nullptr ? formatRelationText(view.port->relation) : kernelText("kernel.ipc.placeholder.empty", QStringLiteral("<空>")));
         auto* ownerItem = new QTableWidgetItem(view.port != nullptr ? QString::number(view.port->ownerProcessId) : QString());
         auto* flagsItem = new QTableWidgetItem(view.port != nullptr ? formatHex32(view.port->flags) : QString());
         auto* stateItem = new QTableWidgetItem(view.port != nullptr ? QString::number(view.port->state) : QString());
@@ -766,7 +780,7 @@ void KernelDockIpcTab::applyAlpcQueryResult()
     }
 
     m_alpcTable->setSortingEnabled(true);
-    m_alpcStatusLabel->setText(QStringLiteral("状态：PID=%1 Handle=%2 | Query=%3 Connection=%4 Server=%5 Client=%6")
+    m_alpcStatusLabel->setText(kernelText("kernel.ipc.alpc.status.success", QStringLiteral("状态：PID=%1 Handle=%2 | Query=%3 Connection=%4 Server=%5 Client=%6"))
         .arg(m_lastAlpcResult.processId)
         .arg(formatHex64(m_lastAlpcResult.handleValue))
         .arg(statusText(m_lastAlpcResult.queryStatus))
@@ -794,12 +808,12 @@ QString KernelDockIpcTab::buildAlpcDetail(const int rowIndex) const
     // - 返回：QString，多行说明当前行端口、状态和动态偏移。
     if (!m_lastAlpcResult.io.ok)
     {
-        return QStringLiteral("ALPC 查询暂不可用。\n%1")
+        return kernelText("kernel.ipc.alpc.detail.unavailable", QStringLiteral("ALPC 查询暂不可用。\n%1"))
             .arg(friendlyIpcIoMessage(stdStringToQString(m_lastAlpcResult.io.message)));
     }
 
-    QString selectedRoleText = QStringLiteral("<未选择>");
-    QString selectedPortDetailText = QStringLiteral("请在 ALPC 表中选择一行查看端口详情。");
+    QString selectedRoleText = kernelText("kernel.ipc.placeholder.unselected", QStringLiteral("<未选择>"));
+    QString selectedPortDetailText = kernelText("kernel.ipc.alpc.detail.select_row", QStringLiteral("请在 ALPC 表中选择一行查看端口详情。"));
     if (m_alpcTable != nullptr && rowIndex >= 0 && rowIndex < m_alpcTable->rowCount())
     {
         // 当前行解析：
@@ -807,7 +821,7 @@ QString KernelDockIpcTab::buildAlpcDetail(const int rowIndex) const
         // - 处理：映射到 ArkDriverClient 返回的四个端口快照；
         // - 返回：当前行的单端口详情。
         const QTableWidgetItem* roleItem = m_alpcTable->item(rowIndex, static_cast<int>(AlpcColumn::Role));
-        selectedRoleText = roleItem != nullptr ? roleItem->text() : QStringLiteral("<未知角色>");
+        selectedRoleText = roleItem != nullptr ? roleItem->text() : kernelText("kernel.ipc.alpc.placeholder.unknown_role", QStringLiteral("<未知角色>"));
         if (selectedRoleText == QStringLiteral("Query"))
         {
             selectedPortDetailText = buildPortDetail(selectedRoleText, m_lastAlpcResult.queryPort);
@@ -830,7 +844,7 @@ QString KernelDockIpcTab::buildAlpcDetail(const int rowIndex) const
     // - 输入：端口快照、状态码和 DynData offset；
     // - 处理：按“当前行 + 汇总状态 + 全量端口”组织，避免只给摘要；
     // - 返回：给 CodeEditorWidget 展示的稳定文本。
-    return QStringLiteral(
+    return kernelText("kernel.ipc.alpc.detail.full", QStringLiteral(
         "ALPC Port Detail\n"
         "当前角色: %1\n\n"
         "[Selected]\n%2\n\n"
@@ -844,7 +858,7 @@ QString KernelDockIpcTab::buildAlpcDetail(const int rowIndex) const
         "DynDataCapabilityMask: %9\n"
         "Offsets: CommunicationInfo=%10 OwnerProcess=%11 ConnectionPort=%12 ServerCommunicationPort=%13 ClientCommunicationPort=%14 HandleTable=%15 HandleTableLock=%16 Attributes=%17 AttributesFlags=%18 PortContext=%19 PortObjectLock=%20 SequenceNo=%21 State=%22\n\n"
         "[All Ports]\n"
-        "[Query]\n%23\n\n[Connection]\n%24\n\n[Server]\n%25\n\n[Client]\n%26")
+        "[Query]\n%23\n\n[Connection]\n%24\n\n[Server]\n%25\n\n[Client]\n%26"))
         .arg(selectedRoleText)
         .arg(selectedPortDetailText)
         .arg(statusText(m_lastAlpcResult.queryStatus))
@@ -893,11 +907,11 @@ QString KernelDockIpcTab::buildIpcSummaryDetail(const int rowIndex) const
     // - 作用：把固定 IPC summary 响应和表格当前行组合成详情区文本；
     // - 输入：summary 表当前行号，-1 或越界时仅输出响应级信息；
     // - 返回：QString，多行只读文本，不触发任何驱动查询。
-    QString categoryText = QStringLiteral("<未选择>");
-    QString statusTextValue = QStringLiteral("<未选择>");
-    QString countText = QStringLiteral("<未选择>");
-    QString sourceText = QStringLiteral("<未选择>");
-    QString rowDetailText = QStringLiteral("<未选择 IPC summary 行>");
+    QString categoryText = kernelText("kernel.ipc.placeholder.unselected", QStringLiteral("<未选择>"));
+    QString statusTextValue = kernelText("kernel.ipc.placeholder.unselected", QStringLiteral("<未选择>"));
+    QString countText = kernelText("kernel.ipc.placeholder.unselected", QStringLiteral("<未选择>"));
+    QString sourceText = kernelText("kernel.ipc.placeholder.unselected", QStringLiteral("<未选择>"));
+    QString rowDetailText = kernelText("kernel.ipc.summary.placeholder.unselected_row", QStringLiteral("<未选择 IPC summary 行>"));
 
     if (m_ipcSummaryTable != nullptr && rowIndex >= 0 && rowIndex < m_ipcSummaryTable->rowCount())
     {
@@ -925,7 +939,7 @@ QString KernelDockIpcTab::buildIpcSummaryDetail(const int rowIndex) const
         // - 输入：ArkDriverClient 的 IO 结果；
         // - 处理：转换为用户可读状态，不直接展示底层 DeviceIoControl 噪声；
         // - 返回：包含 Win32/字节数/unsupported 的诊断文本。
-        return QStringLiteral(
+        return kernelText("kernel.ipc.summary.detail.failure", QStringLiteral(
             "IPC Summary Detail\n"
             "当前行: %1\n"
             "行状态: %2\n"
@@ -936,14 +950,16 @@ QString KernelDockIpcTab::buildIpcSummaryDetail(const int rowIndex) const
             "Unsupported: %7\n"
             "Win32Error: %8\n"
             "BytesReturned: %9\n"
-            "说明: %10")
+            "说明: %10"))
             .arg(categoryText)
             .arg(statusTextValue)
             .arg(countText)
             .arg(sourceText)
             .arg(rowDetailText)
             .arg(m_lastIpcSummaryResult.io.ok ? QStringLiteral("OK") : QStringLiteral("Unavailable"))
-            .arg(m_lastIpcSummaryResult.unsupported ? QStringLiteral("是") : QStringLiteral("否"))
+            .arg(m_lastIpcSummaryResult.unsupported
+                ? kernelText("kernel.ipc.value.yes", QStringLiteral("是"))
+                : kernelText("kernel.ipc.value.no", QStringLiteral("否")))
             .arg(m_lastIpcSummaryResult.io.win32Error)
             .arg(m_lastIpcSummaryResult.io.bytesReturned)
             .arg(readableIoMessage);
@@ -952,16 +968,16 @@ QString KernelDockIpcTab::buildIpcSummaryDetail(const int rowIndex) const
     const auto& response = m_lastIpcSummaryResult.response;
     const QString objectDetailText = safeText(
         fixedWideText(response.detail, KSWORD_ARK_KERNEL_OBJECT_DETAIL_CHARS),
-        QStringLiteral("驱动未提供额外对象详情"));
+        kernelText("kernel.ipc.summary.object_detail_unavailable", QStringLiteral("驱动未提供额外对象详情")));
     const QString alpcTypeText = safeText(
         fixedWideText(response.alpcTypeName, KSWORD_ARK_KERNEL_OBJECT_TYPE_NAME_CHARS),
-        QStringLiteral("<未返回类型名>"));
+        kernelText("kernel.ipc.summary.placeholder.type_name", QStringLiteral("<未返回类型名>")));
 
     // 成功详情：
     // - 输入：R0 固定 summary 响应、当前表格行和友好化 IO 文本；
     // - 处理：把摘要行扩展为 response/status/identity/dyndata 四组信息；
     // - 返回：详情区文本，避免用户只能看到一行摘要。
-    return QStringLiteral(
+    return kernelText("kernel.ipc.summary.detail.success", QStringLiteral(
         "IPC Summary Detail\n"
         "当前行: %1\n"
         "行状态: %2\n"
@@ -984,7 +1000,7 @@ QString KernelDockIpcTab::buildIpcSummaryDetail(const int rowIndex) const
         "AlpcTypeName: %17\n"
         "DynDataCapabilityMask: %18\n\n"
         "[ObjectDetail]\n"
-        "%19")
+        "%19"))
         .arg(categoryText)
         .arg(statusTextValue)
         .arg(countText)
