@@ -1,5 +1,6 @@
 
 #include "KernelObjectDirectoryDeepWorker.h"
+#include "KernelDock.h"
 
 // ============================================================
 // KernelObjectDirectoryDeepWorker.cpp
@@ -18,6 +19,8 @@
 #include <queue>
 #include <string>
 #include <vector>
+
+using ksword::kernel_dock_internal::kernelText;
 
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -260,7 +263,7 @@ namespace
         }
         if (apiOut.ntdllModule == nullptr)
         {
-            errorTextOut = QStringLiteral("加载 ntdll.dll 失败。");
+            errorTextOut = kernelText("kernel.object_directory.worker.load_ntdll_failed", QStringLiteral("加载 ntdll.dll 失败。"));
             return false;
         }
 
@@ -270,7 +273,7 @@ namespace
             ::GetProcAddress(apiOut.ntdllModule, "NtQueryDirectoryObject"));
         if (apiOut.openDirectoryObject == nullptr || apiOut.queryDirectoryObject == nullptr)
         {
-            errorTextOut = QStringLiteral("解析 NtOpenDirectoryObject 或 NtQueryDirectoryObject 失败。");
+            errorTextOut = kernelText("kernel.object_directory.worker.resolve_api_failed", QStringLiteral("解析 NtOpenDirectoryObject 或 NtQueryDirectoryObject 失败。"));
             return false;
         }
         return true;
@@ -501,7 +504,7 @@ KernelObjectDirectoryDeepResult runKernelObjectDirectoryDeepSnapshotTask(
                     currentDirectory.rootPath,
                     currentDirectory.directoryPath,
                     currentDirectory.depth,
-                    QStringLiteral("目录访问失败：%1").arg(ntStatusToText(api.ntdllModule, queryStatus))));
+                    kernelText("kernel.object_directory.worker.directory_access_failed", QStringLiteral("目录访问失败：%1")).arg(ntStatusToText(api.ntdllModule, queryStatus))));
             continue;
         }
 
@@ -528,8 +531,8 @@ KernelObjectDirectoryDeepResult runKernelObjectDirectoryDeepSnapshotTask(
             row.querySucceeded = true;
             row.isDirectory = childIsDirectory;
             row.statusText = childIsDirectory
-                ? QStringLiteral("Directory 已发现")
-                : QStringLiteral("叶子对象");
+                ? kernelText("kernel.object_directory.worker.directory_found", QStringLiteral("Directory 已发现"))
+                : kernelText("kernel.object_directory.worker.leaf_object", QStringLiteral("叶子对象"));
 
             if (!appendRowWithTotalLimit(result, options, std::move(row)))
             {
@@ -562,7 +565,7 @@ KernelObjectDirectoryDeepResult runKernelObjectDirectoryDeepSnapshotTask(
         limitRow.objectType = QStringLiteral("Diagnostic");
         limitRow.fullPath = options.rootPath;
         limitRow.depth = 0;
-        limitRow.statusText = QStringLiteral("达到总条目上限 %1，递归已停止。").arg(options.maxTotalEntries);
+        limitRow.statusText = kernelText("kernel.object_directory.worker.total_limit", QStringLiteral("达到总条目上限 %1，递归已停止。")).arg(options.maxTotalEntries);
         limitRow.querySucceeded = false;
         limitRow.isDirectory = false;
         if (result.rows.size() < options.maxTotalEntries)

@@ -1,4 +1,5 @@
 #include "KernelCommunicationEndpointTab.h"
+#include "KernelDock.h"
 #include "../UI/VisibleTableWidget.h"
 
 // ============================================================
@@ -32,6 +33,8 @@
 #include <algorithm>
 #include <thread>
 #include <utility>
+
+using ksword::kernel_dock_internal::kernelText;
 
 namespace
 {
@@ -84,14 +87,14 @@ void KernelCommunicationEndpointTab::initializeUi()
 
     m_refreshButton = new QPushButton(QIcon(":/Icon/process_refresh.svg"), QString(), this);
     m_refreshButton->setFixedWidth(34);
-    m_refreshButton->setToolTip(QStringLiteral("刷新通信端点对象"));
+    m_refreshButton->setToolTip(kernelText("kernel.communication_endpoint.toolbar.refresh.tooltip", QStringLiteral("刷新通信端点对象")));
     m_refreshButton->setStyleSheet(KswordTheme::ThemedButtonStyle());
 
     m_filterEdit = new QLineEdit(this);
-    m_filterEdit->setPlaceholderText(QStringLiteral("按名称、类型、路径筛选"));
+    m_filterEdit->setPlaceholderText(kernelText("kernel.communication_endpoint.toolbar.filter.placeholder", QStringLiteral("按名称、类型、路径筛选")));
     m_filterEdit->setClearButtonEnabled(true);
 
-    m_statusLabel = new QLabel(QStringLiteral("状态：等待刷新"), this);
+    m_statusLabel = new QLabel(kernelText("kernel.communication_endpoint.status.waiting", QStringLiteral("状态：等待刷新")), this);
     m_statusLabel->setStyleSheet(statusLabelStyle(KswordTheme::TextSecondaryHex()));
 
     toolbarLayout->addWidget(m_refreshButton, 0);
@@ -102,11 +105,11 @@ void KernelCommunicationEndpointTab::initializeUi()
     m_table = new ks::ui::VisibleTableWidget(this);
     m_table->setColumnCount(static_cast<int>(CommunicationEndpointColumn::Count));
     m_table->setHorizontalHeaderLabels(QStringList{
-        QStringLiteral("来源目录"),
-        QStringLiteral("名称"),
-        QStringLiteral("类型"),
-        QStringLiteral("完整路径"),
-        QStringLiteral("状态")
+        kernelText("kernel.communication_endpoint.header.source", QStringLiteral("来源目录")),
+        kernelText("kernel.communication_endpoint.header.name", QStringLiteral("名称")),
+        kernelText("kernel.communication_endpoint.header.type", QStringLiteral("类型")),
+        kernelText("kernel.communication_endpoint.header.full_path", QStringLiteral("完整路径")),
+        kernelText("kernel.communication_endpoint.header.status", QStringLiteral("状态"))
         });
     m_table->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_table->setSelectionMode(QAbstractItemView::SingleSelection);
@@ -141,7 +144,7 @@ void KernelCommunicationEndpointTab::refreshAsync()
     }
 
     m_refreshButton->setEnabled(false);
-    m_statusLabel->setText(QStringLiteral("状态：刷新中..."));
+    m_statusLabel->setText(kernelText("kernel.communication_endpoint.status.refreshing", QStringLiteral("状态：刷新中...")));
     m_statusLabel->setStyleSheet(statusLabelStyle(KswordTheme::PrimaryBlueHex));
 
     QPointer<KernelCommunicationEndpointTab> guardThis(this);
@@ -155,11 +158,11 @@ void KernelCommunicationEndpointTab::refreshAsync()
 
         if (!rootResult.success)
         {
-            errorText += QStringLiteral("\\ 枚举失败：%1\n").arg(rootResult.errorText);
+            errorText += kernelText("kernel.communication_endpoint.error.root_failed", QStringLiteral("\\ 枚举失败：%1\n")).arg(rootResult.errorText);
         }
         if (!rpcResult.success)
         {
-            errorText += QStringLiteral("\\RPC Control 枚举失败：%1\n").arg(rpcResult.errorText);
+            errorText += kernelText("kernel.communication_endpoint.error.rpc_failed", QStringLiteral("\\RPC Control 枚举失败：%1\n")).arg(rpcResult.errorText);
         }
 
         for (const KernelObjectDirectoryDeepEntry& row : rootResult.rows)
@@ -214,11 +217,11 @@ void KernelCommunicationEndpointTab::applyRefreshResult(
 
     if (!success)
     {
-        m_statusLabel->setText(QStringLiteral("状态：刷新失败 - %1").arg(errorText));
+        m_statusLabel->setText(kernelText("kernel.communication_endpoint.status.failed", QStringLiteral("状态：刷新失败 - %1")).arg(errorText));
         m_statusLabel->setStyleSheet(statusLabelStyle(QStringLiteral("#B23A3A")));
         insertDiagnosticRow(
-            QStringLiteral("<刷新失败>"),
-            buildDiagnosticText(QStringLiteral("通信对象枚举失败：%1").arg(errorText)));
+            kernelText("kernel.communication_endpoint.placeholder.refresh_failed", QStringLiteral("<刷新失败>")),
+            buildDiagnosticText(kernelText("kernel.communication_endpoint.diagnostic.refresh_failed", QStringLiteral("通信对象枚举失败：%1")).arg(errorText)));
     }
 }
 
@@ -251,7 +254,7 @@ void KernelCommunicationEndpointTab::rebuildTable()
     }
 
     m_table->setSortingEnabled(true);
-    m_statusLabel->setText(QStringLiteral("状态：已加载 %1 项，显示 %2 项")
+    m_statusLabel->setText(kernelText("kernel.communication_endpoint.status.summary", QStringLiteral("状态：已加载 %1 项，显示 %2 项"))
         .arg(static_cast<qulonglong>(m_rows.size()))
         .arg(static_cast<qulonglong>(visibleCount)));
     m_statusLabel->setStyleSheet(statusLabelStyle(QStringLiteral("#3A8F3A")));
@@ -263,10 +266,12 @@ void KernelCommunicationEndpointTab::rebuildTable()
         // - 处理：插入可复制诊断行，避免新页看起来没有实现；
         // - 返回：无返回值，仅更新表格。
         const QString reasonText = m_rows.empty()
-            ? QStringLiteral("\\ 和 \\RPC Control 未返回可显示通信端点。")
-            : QStringLiteral("当前筛选条件没有命中通信端点。");
+            ? kernelText("kernel.communication_endpoint.diagnostic.no_records", QStringLiteral("\\ 和 \\RPC Control 未返回可显示通信端点。"))
+            : kernelText("kernel.communication_endpoint.diagnostic.filter_empty", QStringLiteral("当前筛选条件没有命中通信端点。"));
         insertDiagnosticRow(
-            m_rows.empty() ? QStringLiteral("<无通信对象>") : QStringLiteral("<筛选无结果>"),
+            m_rows.empty()
+                ? kernelText("kernel.communication_endpoint.placeholder.no_records", QStringLiteral("<无通信对象>"))
+                : kernelText("kernel.communication_endpoint.placeholder.filter_empty", QStringLiteral("<筛选无结果>")),
             buildDiagnosticText(reasonText));
         m_table->setCurrentCell(0, static_cast<int>(CommunicationEndpointColumn::Name));
     }
@@ -287,7 +292,7 @@ void KernelCommunicationEndpointTab::showContextMenu(const QPoint& localPosition
 
     QMenu menu(this);
     menu.setStyleSheet(KswordTheme::ContextMenuStyle());
-    QAction* copyRowAction = menu.addAction(QStringLiteral("复制当前行"));
+    QAction* copyRowAction = menu.addAction(kernelText("kernel.communication_endpoint.menu.copy_row", QStringLiteral("复制当前行")));
     copyRowAction->setEnabled(m_table->currentRow() >= 0);
     const QAction* selectedAction = menu.exec(m_table->viewport()->mapToGlobal(localPosition));
     if (selectedAction == copyRowAction)
@@ -325,15 +330,15 @@ QString KernelCommunicationEndpointTab::buildDiagnosticText(const QString& reaso
     // - 处理：补充当前筛选、数据来源和排查建议；
     // - 返回：适合放在表格状态列和复制文本中的诊断说明。
     QStringList lines;
-    lines << QStringLiteral("原因：%1").arg(reasonText.trimmed().isEmpty()
-        ? QStringLiteral("<未提供>")
+    lines << kernelText("kernel.communication_endpoint.diagnostic.reason", QStringLiteral("原因：%1")).arg(reasonText.trimmed().isEmpty()
+        ? kernelText("kernel.communication_endpoint.placeholder.not_provided", QStringLiteral("<未提供>"))
         : reasonText.trimmed());
-    lines << QStringLiteral("当前筛选：%1").arg(m_filterEdit != nullptr && !m_filterEdit->text().trimmed().isEmpty()
+    lines << kernelText("kernel.communication_endpoint.diagnostic.current_filter", QStringLiteral("当前筛选：%1")).arg(m_filterEdit != nullptr && !m_filterEdit->text().trimmed().isEmpty()
         ? m_filterEdit->text().trimmed()
-        : QStringLiteral("<无筛选>"));
-    lines << QStringLiteral("源记录总数：%1").arg(static_cast<qulonglong>(m_rows.size()));
-    lines << QStringLiteral("数据来源：Object Manager 目录枚举根目录与 \\RPC Control，只读聚合 ALPC/Port/RPC 相关对象。");
-    lines << QStringLiteral("建议：清空筛选，或切换到 Object Directory Deep / ALPC 页查看更具体的目录与端口关系。");
+        : kernelText("kernel.communication_endpoint.placeholder.no_filter", QStringLiteral("<无筛选>")));
+    lines << kernelText("kernel.communication_endpoint.diagnostic.source_count", QStringLiteral("源记录总数：%1")).arg(static_cast<qulonglong>(m_rows.size()));
+    lines << kernelText("kernel.communication_endpoint.diagnostic.source", QStringLiteral("数据来源：Object Manager 目录枚举根目录与 \\RPC Control，只读聚合 ALPC/Port/RPC 相关对象。"));
+    lines << kernelText("kernel.communication_endpoint.diagnostic.next_step", QStringLiteral("建议：清空筛选，或切换到 Object Directory Deep / ALPC 页查看更具体的目录与端口关系。"));
     return lines.join(QStringLiteral(" | "));
 }
 
@@ -350,10 +355,10 @@ void KernelCommunicationEndpointTab::insertDiagnosticRow(const QString& titleTex
 
     m_table->setSortingEnabled(false);
     m_table->setRowCount(1);
-    m_table->setItem(0, static_cast<int>(CommunicationEndpointColumn::Source), readOnlyItem(QStringLiteral("<诊断>")));
+    m_table->setItem(0, static_cast<int>(CommunicationEndpointColumn::Source), readOnlyItem(kernelText("kernel.communication_endpoint.placeholder.diagnostic", QStringLiteral("<诊断>"))));
     m_table->setItem(0, static_cast<int>(CommunicationEndpointColumn::Name), readOnlyItem(titleText));
     m_table->setItem(0, static_cast<int>(CommunicationEndpointColumn::Type), readOnlyItem(QStringLiteral("Diagnostic")));
-    m_table->setItem(0, static_cast<int>(CommunicationEndpointColumn::FullPath), readOnlyItem(QStringLiteral("<无路径>")));
+    m_table->setItem(0, static_cast<int>(CommunicationEndpointColumn::FullPath), readOnlyItem(kernelText("kernel.communication_endpoint.placeholder.no_path", QStringLiteral("<无路径>"))));
     m_table->setItem(0, static_cast<int>(CommunicationEndpointColumn::Status), readOnlyItem(detailText));
     m_table->setSortingEnabled(true);
     m_table->setCurrentCell(0, static_cast<int>(CommunicationEndpointColumn::Name));

@@ -1,5 +1,6 @@
 
 #include "KernelObjectDirectoryDeepTab.h"
+#include "KernelDock.h"
 
 // ============================================================
 // KernelObjectDirectoryDeepTab.cpp
@@ -36,6 +37,8 @@
 #include <algorithm>
 #include <limits>
 #include <thread>
+
+using ksword::kernel_dock_internal::kernelText;
 
 namespace
 {
@@ -145,7 +148,7 @@ namespace
             newItem->setText(static_cast<int>(DirectoryDeepColumn::Type), QStringLiteral("Directory"));
             newItem->setText(static_cast<int>(DirectoryDeepColumn::FullPath), QStringLiteral("\\"));
             newItem->setText(static_cast<int>(DirectoryDeepColumn::Depth), QStringLiteral("0"));
-            newItem->setText(static_cast<int>(DirectoryDeepColumn::Status), QStringLiteral("根目录"));
+            newItem->setText(static_cast<int>(DirectoryDeepColumn::Status), kernelText("kernel.object_directory.tree.root_status", QStringLiteral("根目录")));
         }
         else
         {
@@ -158,7 +161,7 @@ namespace
             newItem->setText(static_cast<int>(DirectoryDeepColumn::Type), QStringLiteral("Directory"));
             newItem->setText(static_cast<int>(DirectoryDeepColumn::FullPath), normalizedPath);
             newItem->setText(static_cast<int>(DirectoryDeepColumn::Depth), QStringLiteral("-"));
-            newItem->setText(static_cast<int>(DirectoryDeepColumn::Status), QStringLiteral("父目录占位"));
+            newItem->setText(static_cast<int>(DirectoryDeepColumn::Status), kernelText("kernel.object_directory.tree.parent_placeholder", QStringLiteral("父目录占位")));
         }
         newItem->setData(0, SourceIndexRole, InvalidSourceIndex);
         itemByPath.insert(normalizedPath, newItem);
@@ -180,7 +183,7 @@ namespace
         for (int columnIndex = 0; columnIndex < treeWidget->columnCount(); ++columnIndex)
         {
             const QString cellText = treeItem->text(columnIndex).trimmed();
-            fieldList.push_back(cellText.isEmpty() ? QStringLiteral("<空>") : cellText);
+            fieldList.push_back(cellText.isEmpty() ? kernelText("kernel.object_directory.placeholder.empty", QStringLiteral("<空>")) : cellText);
         }
         return fieldList.join('\t');
     }
@@ -208,7 +211,7 @@ namespace
 
         QAction* copyRowAction = contextMenu.addAction(
             QIcon(QStringLiteral(":/Icon/process_copy_row.svg")),
-            QStringLiteral("复制当前行"));
+            kernelText("kernel.object_directory.menu.copy_row", QStringLiteral("复制当前行")));
         copyRowAction->setEnabled(currentItem != nullptr);
 
         const QAction* selectedAction = contextMenu.exec(treeWidget->viewport()->mapToGlobal(localPosition));
@@ -242,22 +245,22 @@ void KernelObjectDirectoryDeepTab::initializeUi()
     toolLayout->setContentsMargins(0, 0, 0, 0);
     toolLayout->setSpacing(6);
 
-    auto* rootPathLabel = new QLabel(QStringLiteral("根路径:"), this);
+    auto* rootPathLabel = new QLabel(kernelText("kernel.object_directory.toolbar.root_path.label", QStringLiteral("根路径:")), this);
     m_rootPathEdit = new QLineEdit(this);
     m_rootPathEdit->setText(QStringLiteral("\\"));
-    m_rootPathEdit->setPlaceholderText(QStringLiteral("\\、\\Device、\\BaseNamedObjects、\\Sessions"));
-    m_rootPathEdit->setToolTip(QStringLiteral("Object Manager Directory 根路径，必须是 Directory 对象。"));
+    m_rootPathEdit->setPlaceholderText(kernelText("kernel.object_directory.toolbar.root_path.placeholder", QStringLiteral("\\、\\Device、\\BaseNamedObjects、\\Sessions")));
+    m_rootPathEdit->setToolTip(kernelText("kernel.object_directory.toolbar.root_path.tooltip", QStringLiteral("Object Manager Directory 根路径，必须是 Directory 对象。")));
 
-    auto* depthLabel = new QLabel(QStringLiteral("最大深度:"), this);
+    auto* depthLabel = new QLabel(kernelText("kernel.object_directory.toolbar.max_depth.label", QStringLiteral("最大深度:")), this);
     m_maxDepthSpinBox = new QSpinBox(this);
     m_maxDepthSpinBox->setRange(0, 32);
     m_maxDepthSpinBox->setValue(4);
-    m_maxDepthSpinBox->setToolTip(QStringLiteral("只对 TypeName == Directory 的对象继续下钻，达到深度后停止。"));
+    m_maxDepthSpinBox->setToolTip(kernelText("kernel.object_directory.toolbar.max_depth.tooltip", QStringLiteral("只对 TypeName == Directory 的对象继续下钻，达到深度后停止。")));
 
-    m_refreshButton = new QPushButton(QStringLiteral("刷新"), this);
-    m_refreshButton->setToolTip(QStringLiteral("后台递归枚举指定 Object Manager Directory。"));
+    m_refreshButton = new QPushButton(kernelText("kernel.object_directory.toolbar.refresh", QStringLiteral("刷新")), this);
+    m_refreshButton->setToolTip(kernelText("kernel.object_directory.toolbar.refresh.tooltip", QStringLiteral("后台递归枚举指定 Object Manager Directory。")));
 
-    m_statusLabel = new QLabel(QStringLiteral("状态：等待刷新"), this);
+    m_statusLabel = new QLabel(kernelText("kernel.object_directory.status.waiting", QStringLiteral("状态：等待刷新")), this);
     m_statusLabel->setStyleSheet(statusLabelStyle(QStringLiteral("#6B7280")));
 
     toolLayout->addWidget(rootPathLabel, 0);
@@ -274,11 +277,11 @@ void KernelObjectDirectoryDeepTab::initializeUi()
     m_resultTree = new QTreeWidget(splitter);
     m_resultTree->setColumnCount(static_cast<int>(DirectoryDeepColumn::Count));
     m_resultTree->setHeaderLabels(QStringList{
-        QStringLiteral("名称"),
-        QStringLiteral("类型"),
-        QStringLiteral("完整路径"),
-        QStringLiteral("深度"),
-        QStringLiteral("状态")
+        kernelText("kernel.object_directory.header.name", QStringLiteral("名称")),
+        kernelText("kernel.object_directory.header.type", QStringLiteral("类型")),
+        kernelText("kernel.object_directory.header.full_path", QStringLiteral("完整路径")),
+        kernelText("kernel.object_directory.header.depth", QStringLiteral("深度")),
+        kernelText("kernel.object_directory.header.status", QStringLiteral("状态"))
         });
     m_resultTree->setAlternatingRowColors(true);
     m_resultTree->setSelectionMode(QAbstractItemView::SingleSelection);
@@ -292,7 +295,7 @@ void KernelObjectDirectoryDeepTab::initializeUi()
 
     m_detailEditor = new CodeEditorWidget(splitter);
     m_detailEditor->setReadOnly(true);
-    m_detailEditor->setText(QStringLiteral("输入根路径后点击刷新。"));
+    m_detailEditor->setText(kernelText("kernel.object_directory.detail.initial", QStringLiteral("输入根路径后点击刷新。")));
 
     splitter->setStretchFactor(0, 4);
     splitter->setStretchFactor(1, 2);
@@ -327,7 +330,9 @@ void KernelObjectDirectoryDeepTab::setRefreshRunning(const bool running)
     }
     if (m_statusLabel != nullptr)
     {
-        m_statusLabel->setText(running ? QStringLiteral("状态：递归枚举中...") : QStringLiteral("状态：空闲"));
+        m_statusLabel->setText(running
+            ? kernelText("kernel.object_directory.status.enumerating", QStringLiteral("状态：递归枚举中..."))
+            : kernelText("kernel.object_directory.status.idle", QStringLiteral("状态：空闲")));
         m_statusLabel->setStyleSheet(statusLabelStyle(running ? QStringLiteral("#2563EB") : QStringLiteral("#6B7280")));
     }
 }
@@ -352,7 +357,7 @@ void KernelObjectDirectoryDeepTab::startRefresh()
     }
     if (m_detailEditor != nullptr)
     {
-        m_detailEditor->setText(QStringLiteral("正在后台递归枚举：%1").arg(options.rootPath));
+        m_detailEditor->setText(kernelText("kernel.object_directory.detail.background", QStringLiteral("正在后台递归枚举：%1")).arg(options.rootPath));
     }
 
     QPointer<KernelObjectDirectoryDeepTab> guardThis(this);
@@ -374,7 +379,7 @@ void KernelObjectDirectoryDeepTab::startRefresh()
                 guardThis->m_rows.clear();
                 if (guardThis->m_statusLabel != nullptr)
                 {
-                    guardThis->m_statusLabel->setText(QStringLiteral("状态：刷新失败"));
+                    guardThis->m_statusLabel->setText(kernelText("kernel.object_directory.status.failed", QStringLiteral("状态：刷新失败")));
                     guardThis->m_statusLabel->setStyleSheet(statusLabelStyle(QStringLiteral("#B23A3A")));
                 }
                 if (guardThis->m_detailEditor != nullptr)
@@ -387,21 +392,21 @@ void KernelObjectDirectoryDeepTab::startRefresh()
             guardThis->m_rows = std::move(result.rows);
             guardThis->rebuildTree();
 
-            QString statusText = QStringLiteral("状态：已枚举 %1 项，目录 %2 个，失败目录 %3 个")
+            QString statusText = kernelText("kernel.object_directory.status.summary", QStringLiteral("状态：已枚举 %1 项，目录 %2 个，失败目录 %3 个"))
                 .arg(guardThis->m_rows.size())
                 .arg(result.visitedDirectoryCount)
                 .arg(result.failedDirectoryCount);
             if (result.depthLimitReached)
             {
-                statusText += QStringLiteral("，触达深度上限");
+                statusText += kernelText("kernel.object_directory.status.depth_limit", QStringLiteral("，触达深度上限"));
             }
             if (result.perDirectoryLimitReached)
             {
-                statusText += QStringLiteral("，触达单目录上限");
+                statusText += kernelText("kernel.object_directory.status.per_directory_limit", QStringLiteral("，触达单目录上限"));
             }
             if (result.totalLimitReached)
             {
-                statusText += QStringLiteral("，触达总上限");
+                statusText += kernelText("kernel.object_directory.status.total_limit", QStringLiteral("，触达总上限"));
             }
 
             if (guardThis->m_statusLabel != nullptr)
@@ -417,7 +422,7 @@ void KernelObjectDirectoryDeepTab::startRefresh()
             }
             else if (guardThis->m_detailEditor != nullptr)
             {
-                guardThis->m_detailEditor->setText(QStringLiteral("当前根路径没有返回可显示记录。"));
+                guardThis->m_detailEditor->setText(kernelText("kernel.object_directory.detail.no_records", QStringLiteral("当前根路径没有返回可显示记录。")));
             }
         }, Qt::QueuedConnection);
     }).detach();
@@ -466,7 +471,7 @@ void KernelObjectDirectoryDeepTab::showCurrentItemDetail()
     QTreeWidgetItem* currentItem = m_resultTree->currentItem();
     if (currentItem == nullptr)
     {
-        m_detailEditor->setText(QStringLiteral("请选择目录递归结果节点。"));
+        m_detailEditor->setText(kernelText("kernel.object_directory.detail.select_hint", QStringLiteral("请选择目录递归结果节点。")));
         return;
     }
 
@@ -475,10 +480,10 @@ void KernelObjectDirectoryDeepTab::showCurrentItemDetail()
     if (!convertOk || sourceIndex == InvalidSourceIndex || sourceIndex >= m_rows.size())
     {
         QString detailText;
-        detailText += QStringLiteral("节点名称: %1\n").arg(currentItem->text(static_cast<int>(DirectoryDeepColumn::Name)));
-        detailText += QStringLiteral("节点类型: %1\n").arg(currentItem->text(static_cast<int>(DirectoryDeepColumn::Type)));
-        detailText += QStringLiteral("完整路径: %1\n").arg(currentItem->text(static_cast<int>(DirectoryDeepColumn::FullPath)));
-        detailText += QStringLiteral("说明: 该节点为 UI 父目录占位，未直接绑定 Worker 返回记录。\n");
+        detailText += kernelText("kernel.object_directory.detail.parent_node.name", QStringLiteral("节点名称: %1\n")).arg(currentItem->text(static_cast<int>(DirectoryDeepColumn::Name)));
+        detailText += kernelText("kernel.object_directory.detail.parent_node.type", QStringLiteral("节点类型: %1\n")).arg(currentItem->text(static_cast<int>(DirectoryDeepColumn::Type)));
+        detailText += kernelText("kernel.object_directory.detail.parent_node.full_path", QStringLiteral("完整路径: %1\n")).arg(currentItem->text(static_cast<int>(DirectoryDeepColumn::FullPath)));
+        detailText += kernelText("kernel.object_directory.detail.parent_node.explanation", QStringLiteral("说明: 该节点为 UI 父目录占位，未直接绑定 Worker 返回记录。\n"));
         m_detailEditor->setText(detailText);
         return;
     }
