@@ -94,6 +94,7 @@ namespace ksword::driver_dock_internal
     QStringList driverObjectEvidenceTableHeaders();
     QStringList driverDeviceObjectTableHeaders();
     QStringList driverEvidenceTableHeaders();
+    QStringList driverIntegrityTableHeaders();
     QStringList driverMajorFunctionTableHeaders();
     QStringList driverModuleCrossViewTableHeaders();
 

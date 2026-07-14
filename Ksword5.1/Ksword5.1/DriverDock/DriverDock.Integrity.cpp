@@ -91,29 +91,49 @@ namespace
         // 返回：无风险返回“正常”。
         if (flags == 0U)
         {
-            return QStringLiteral("正常");
+            return driverText("driver.integrity.risk.normal", QStringLiteral("正常"));
         }
         QStringList parts;
-        if (flags & KSWORD_ARK_DRIVER_INTEGRITY_RISK_UNAVAILABLE) parts << QStringLiteral("不可用");
-        if (flags & KSWORD_ARK_DRIVER_INTEGRITY_RISK_QUERY_FAILED) parts << QStringLiteral("查询失败");
-        if (flags & KSWORD_ARK_DRIVER_INTEGRITY_RISK_MODULE_UNRESOLVED) parts << QStringLiteral("模块未解析");
-        if (flags & KSWORD_ARK_DRIVER_INTEGRITY_RISK_OWNER_MISMATCH) parts << QStringLiteral("Owner不匹配");
-        if (flags & KSWORD_ARK_DRIVER_INTEGRITY_RISK_OUTSIDE_DRIVER_IMAGE) parts << QStringLiteral("外跳");
-        if (flags & KSWORD_ARK_DRIVER_INTEGRITY_RISK_SECTION_MISMATCH) parts << QStringLiteral("Section不匹配");
-        if (flags & KSWORD_ARK_DRIVER_INTEGRITY_RISK_SERVICE_MISSING) parts << QStringLiteral("服务缺失");
-        if (flags & KSWORD_ARK_DRIVER_INTEGRITY_RISK_EMPTY_UNLOAD) parts << QStringLiteral("Unload为空");
-        if (flags & KSWORD_ARK_DRIVER_INTEGRITY_RISK_DEVICE_LOOP) parts << QStringLiteral("Device环");
-        if (flags & KSWORD_ARK_DRIVER_INTEGRITY_RISK_ATTACHED_LOOP) parts << QStringLiteral("Attached环");
-        if (flags & KSWORD_ARK_DRIVER_INTEGRITY_RISK_CROSS_DRIVER_ATTACH) parts << QStringLiteral("跨驱动挂接");
-        if (flags & KSWORD_ARK_DRIVER_INTEGRITY_RISK_NULL_POINTER) parts << QStringLiteral("空指针");
-        if (flags & KSWORD_ARK_DRIVER_INTEGRITY_RISK_IDT_NON_CORE_OWNER) parts << QStringLiteral("IDT外部Owner");
-        if (flags & KSWORD_ARK_DRIVER_INTEGRITY_RISK_CPU_WP_DISABLED) parts << QStringLiteral("WP关闭");
-        if (flags & KSWORD_ARK_DRIVER_INTEGRITY_RISK_CPU_NXE_DISABLED) parts << QStringLiteral("NXE关闭");
-        if (flags & KSWORD_ARK_DRIVER_INTEGRITY_RISK_CPU_SMEP_DISABLED) parts << QStringLiteral("SMEP关闭");
-        if (flags & KSWORD_ARK_DRIVER_INTEGRITY_RISK_CPU_SMAP_DISABLED) parts << QStringLiteral("SMAP关闭");
-        if (flags & KSWORD_ARK_DRIVER_INTEGRITY_RISK_DESCRIPTOR_INVALID) parts << QStringLiteral("描述符异常");
-        if (flags & KSWORD_ARK_DRIVER_INTEGRITY_RISK_DYNDATA_UNAVAILABLE) parts << QStringLiteral("DynData缺失");
-        if (flags & KSWORD_ARK_DRIVER_INTEGRITY_RISK_TRUNCATED) parts << QStringLiteral("截断");
+        if (flags & KSWORD_ARK_DRIVER_INTEGRITY_RISK_UNAVAILABLE)
+            parts << driverText("driver.integrity.risk.unavailable", QStringLiteral("不可用"));
+        if (flags & KSWORD_ARK_DRIVER_INTEGRITY_RISK_QUERY_FAILED)
+            parts << driverText("driver.integrity.risk.query_failed", QStringLiteral("查询失败"));
+        if (flags & KSWORD_ARK_DRIVER_INTEGRITY_RISK_MODULE_UNRESOLVED)
+            parts << driverText("driver.integrity.risk.module_unresolved", QStringLiteral("模块未解析"));
+        if (flags & KSWORD_ARK_DRIVER_INTEGRITY_RISK_OWNER_MISMATCH)
+            parts << driverText("driver.integrity.risk.owner_mismatch", QStringLiteral("Owner不匹配"));
+        if (flags & KSWORD_ARK_DRIVER_INTEGRITY_RISK_OUTSIDE_DRIVER_IMAGE)
+            parts << driverText("driver.integrity.risk.outside_image", QStringLiteral("外跳"));
+        if (flags & KSWORD_ARK_DRIVER_INTEGRITY_RISK_SECTION_MISMATCH)
+            parts << driverText("driver.integrity.risk.section_mismatch", QStringLiteral("Section不匹配"));
+        if (flags & KSWORD_ARK_DRIVER_INTEGRITY_RISK_SERVICE_MISSING)
+            parts << driverText("driver.integrity.risk.service_missing", QStringLiteral("服务缺失"));
+        if (flags & KSWORD_ARK_DRIVER_INTEGRITY_RISK_EMPTY_UNLOAD)
+            parts << driverText("driver.integrity.risk.empty_unload", QStringLiteral("Unload为空"));
+        if (flags & KSWORD_ARK_DRIVER_INTEGRITY_RISK_DEVICE_LOOP)
+            parts << driverText("driver.integrity.risk.device_loop", QStringLiteral("Device环"));
+        if (flags & KSWORD_ARK_DRIVER_INTEGRITY_RISK_ATTACHED_LOOP)
+            parts << driverText("driver.integrity.risk.attached_loop", QStringLiteral("Attached环"));
+        if (flags & KSWORD_ARK_DRIVER_INTEGRITY_RISK_CROSS_DRIVER_ATTACH)
+            parts << driverText("driver.integrity.risk.cross_driver_attach", QStringLiteral("跨驱动挂接"));
+        if (flags & KSWORD_ARK_DRIVER_INTEGRITY_RISK_NULL_POINTER)
+            parts << driverText("driver.integrity.risk.null_pointer", QStringLiteral("空指针"));
+        if (flags & KSWORD_ARK_DRIVER_INTEGRITY_RISK_IDT_NON_CORE_OWNER)
+            parts << driverText("driver.integrity.risk.idt_external_owner", QStringLiteral("IDT外部Owner"));
+        if (flags & KSWORD_ARK_DRIVER_INTEGRITY_RISK_CPU_WP_DISABLED)
+            parts << driverText("driver.integrity.risk.wp_disabled", QStringLiteral("WP关闭"));
+        if (flags & KSWORD_ARK_DRIVER_INTEGRITY_RISK_CPU_NXE_DISABLED)
+            parts << driverText("driver.integrity.risk.nxe_disabled", QStringLiteral("NXE关闭"));
+        if (flags & KSWORD_ARK_DRIVER_INTEGRITY_RISK_CPU_SMEP_DISABLED)
+            parts << driverText("driver.integrity.risk.smep_disabled", QStringLiteral("SMEP关闭"));
+        if (flags & KSWORD_ARK_DRIVER_INTEGRITY_RISK_CPU_SMAP_DISABLED)
+            parts << driverText("driver.integrity.risk.smap_disabled", QStringLiteral("SMAP关闭"));
+        if (flags & KSWORD_ARK_DRIVER_INTEGRITY_RISK_DESCRIPTOR_INVALID)
+            parts << driverText("driver.integrity.risk.descriptor_invalid", QStringLiteral("描述符异常"));
+        if (flags & KSWORD_ARK_DRIVER_INTEGRITY_RISK_DYNDATA_UNAVAILABLE)
+            parts << driverText("driver.integrity.risk.dyndata_unavailable", QStringLiteral("DynData缺失"));
+        if (flags & KSWORD_ARK_DRIVER_INTEGRITY_RISK_TRUNCATED)
+            parts << driverText("driver.integrity.risk.truncated", QStringLiteral("截断"));
         return parts.join(QStringLiteral(" | "));
     }
 
@@ -141,7 +161,7 @@ namespace
         // 返回：来源文本。
         if (sourceMask == 0U)
         {
-            return QStringLiteral("无来源");
+            return driverText("driver.integrity.source.none", QStringLiteral("无来源"));
         }
 
         QStringList parts;
@@ -271,7 +291,7 @@ namespace
             contextMenu.setStyleSheet(KswordTheme::ContextMenuStyle());
             QAction* copyRowAction = contextMenu.addAction(
                 QIcon(QStringLiteral(":/Icon/process_copy_row.svg")),
-                QStringLiteral("复制当前行"));
+                driverText("driver.menu.copy_row", QStringLiteral("复制当前行")));
             copyRowAction->setEnabled(table->currentRow() >= 0);
             if (contextMenu.exec(table->viewport()->mapToGlobal(localPosition)) == copyRowAction)
             {
@@ -350,7 +370,7 @@ namespace
         // 处理：展开所有关键字段。
         // 返回：详情文本。
         QString text;
-        text += QStringLiteral("驱动完整性证据详情\n");
+        text += driverText("driver.integrity.detail.title", QStringLiteral("驱动完整性证据详情\n"));
         text += QStringLiteral("Class: %1 (%2)\n").arg(classText(row.evidenceClass)).arg(row.evidenceClass);
         text += QStringLiteral("RiskFlags: %1 (0x%2)\n").arg(riskText(row.riskFlags)).arg(row.riskFlags, 8, 16, QChar('0'));
         text += QStringLiteral("SourceMask: 0x%1\n").arg(row.sourceMask, 8, 16, QChar('0'));
@@ -388,9 +408,9 @@ namespace
         // 返回：一行中文说明；完整原始 detail 保留在详情编辑器/弹窗。
         const QString rawDetailText = QString::fromStdWString(row.detail).trimmed();
         const QString detailSummaryText = rawDetailText.isEmpty()
-            ? QStringLiteral("驱动未返回额外说明")
+            ? driverText("driver.integrity.detail.no_extra_detail", QStringLiteral("驱动未返回额外说明"))
             : rawDetailText.left(160);
-        return QStringLiteral("%1；状态=%2；来源=%3；%4")
+        return driverText("driver.integrity.detail.summary", QStringLiteral("%1；状态=%2；来源=%3；%4"))
             .arg(riskText(row.riskFlags))
             .arg(entryStatusText(row.entryStatus))
             .arg(integritySourceText(row.sourceMask))
@@ -439,32 +459,44 @@ void DriverDock::initializeIntegrityTab()
     toolLayout->setSpacing(6);
 
     m_integrityDriverNameEdit = new QLineEdit(m_integrityPage);
-    m_integrityDriverNameEdit->setPlaceholderText(QStringLiteral("\\Driver\\Name（可选）"));
+    m_integrityDriverNameEdit->setPlaceholderText(
+        driverText("driver.integrity.form.driver_name.placeholder", QStringLiteral("\\Driver\\Name（可选）")));
     m_integrityModuleBaseEdit = new QLineEdit(m_integrityPage);
-    m_integrityModuleBaseEdit->setPlaceholderText(QStringLiteral("模块基址（可选）"));
+    m_integrityModuleBaseEdit->setPlaceholderText(
+        driverText("driver.integrity.form.module_base.placeholder", QStringLiteral("模块基址（可选）")));
     m_integrityModuleBaseEdit->setMaximumWidth(150);
 
     m_integrityFillFromSelectionButton = new QPushButton(QIcon(QStringLiteral(":/Icon/process_details.svg")), QString(), m_integrityPage);
     m_integrityFillFromSelectionButton->setFixedWidth(34);
-    m_integrityFillFromSelectionButton->setToolTip(QStringLiteral("从当前服务选择填充 DriverObject 名称"));
+    m_integrityFillFromSelectionButton->setToolTip(
+        driverText("driver.integrity.form.fill.tooltip", QStringLiteral("从当前服务选择填充 DriverObject 名称")));
 
     m_integrityRefreshButton = new QPushButton(QIcon(QStringLiteral(":/Icon/process_refresh.svg")), QString(), m_integrityPage);
     m_integrityRefreshButton->setFixedWidth(34);
-    m_integrityRefreshButton->setToolTip(QStringLiteral("查询 DriverObject/LDR/FastIo/CPU 完整性证据"));
+    m_integrityRefreshButton->setToolTip(
+        driverText(
+            "driver.integrity.form.refresh.tooltip",
+            QStringLiteral("查询 DriverObject/LDR/FastIo/CPU 完整性证据")));
 
     m_integrityCpuOnlyButton = new QPushButton(QIcon(QStringLiteral(":/Icon/process_threads.svg")), QString(), m_integrityPage);
     m_integrityCpuOnlyButton->setFixedWidth(34);
-    m_integrityCpuOnlyButton->setToolTip(QStringLiteral("仅查询 CPU entry / IDT / MSR 证据"));
+    m_integrityCpuOnlyButton->setToolTip(
+        driverText("driver.integrity.form.cpu_only.tooltip", QStringLiteral("仅查询 CPU entry / IDT / MSR 证据")));
 
-    m_integrityRiskOnlyCheck = new QCheckBox(QStringLiteral("仅风险项"), m_integrityPage);
+    m_integrityRiskOnlyCheck = new QCheckBox(
+        driverText("driver.integrity.form.risk_only", QStringLiteral("仅风险项")),
+        m_integrityPage);
     m_integrityRiskOnlyCheck->setChecked(false);
 
     m_integrityMaxRowsSpin = new QSpinBox(m_integrityPage);
     m_integrityMaxRowsSpin->setRange(64, static_cast<int>(KSWORD_ARK_DRIVER_INTEGRITY_DEFAULT_MAX_ROWS));
     m_integrityMaxRowsSpin->setValue(1024);
-    m_integrityMaxRowsSpin->setToolTip(QStringLiteral("最大返回证据行数"));
+    m_integrityMaxRowsSpin->setToolTip(
+        driverText("driver.integrity.form.max_rows.tooltip", QStringLiteral("最大返回证据行数")));
 
-    m_integrityStatusLabel = new QLabel(QStringLiteral("状态：等待查询"), m_integrityPage);
+    m_integrityStatusLabel = new QLabel(
+        driverText("driver.integrity.status.waiting", QStringLiteral("状态：等待查询")),
+        m_integrityPage);
     m_integrityStatusLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
 
     toolLayout->addWidget(new QLabel(QStringLiteral("DriverObject:"), m_integrityPage));
@@ -474,7 +506,9 @@ void DriverDock::initializeIntegrityTab()
     toolLayout->addWidget(m_integrityRefreshButton);
     toolLayout->addWidget(m_integrityCpuOnlyButton);
     toolLayout->addWidget(m_integrityRiskOnlyCheck);
-    toolLayout->addWidget(new QLabel(QStringLiteral("行数:"), m_integrityPage));
+    toolLayout->addWidget(new QLabel(
+        driverText("driver.integrity.form.rows_label", QStringLiteral("行数:")),
+        m_integrityPage));
     toolLayout->addWidget(m_integrityMaxRowsSpin);
     toolLayout->addWidget(m_integrityStatusLabel, 1);
     m_integrityLayout->addLayout(toolLayout);
@@ -484,16 +518,7 @@ void DriverDock::initializeIntegrityTab()
 
     m_integrityTable = new ks::ui::VisibleTableWidget(splitter);
     m_integrityTable->setColumnCount(integrityColumnIndex(IntegrityColumn::Count));
-    m_integrityTable->setHorizontalHeaderLabels(QStringList{
-        QStringLiteral("类别"),
-        QStringLiteral("对象"),
-        QStringLiteral("目标"),
-        QStringLiteral("Owner"),
-        QStringLiteral("CPU/Vector"),
-        QStringLiteral("风险"),
-        QStringLiteral("置信度"),
-        QStringLiteral("说明")
-        });
+    m_integrityTable->setHorizontalHeaderLabels(driverIntegrityTableHeaders());
     m_integrityTable->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_integrityTable->setSelectionMode(QAbstractItemView::SingleSelection);
     m_integrityTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
@@ -508,12 +533,17 @@ void DriverDock::initializeIntegrityTab()
     // 完整性详情区使用项目统一 CodeEditorWidget，方便复制、查找和查看多行 R0 证据。
     m_integrityDetailEdit = new CodeEditorWidget(splitter);
     m_integrityDetailEdit->setReadOnly(true);
-    m_integrityDetailEdit->setText(QStringLiteral("选择一条完整性证据查看 DriverObject / MajorFunction / FastIo / LDR / CPU entry 详情。"));
+    m_integrityDetailEdit->setText(driverText(
+        "driver.integrity.detail.initial",
+        QStringLiteral("选择一条完整性证据查看 DriverObject / MajorFunction / FastIo / LDR / CPU entry 详情。")));
     splitter->addWidget(m_integrityDetailEdit);
     splitter->setStretchFactor(0, 3);
     splitter->setStretchFactor(1, 2);
 
-    m_tabWidget->addTab(m_integrityPage, QIcon(QStringLiteral(":/Icon/process_critical.svg")), QStringLiteral("驱动完整性"));
+    m_tabWidget->addTab(
+        m_integrityPage,
+        QIcon(QStringLiteral(":/Icon/process_critical.svg")),
+        driverText("driver.tab.integrity", QStringLiteral("驱动完整性")));
 
     rebuildModuleCrossViewTable();
     rebuildUnloadedPiddbTable();
@@ -533,7 +563,8 @@ void DriverDock::refreshDriverIntegrityAsync(const bool cpuOnly)
     {
         if (m_integrityStatusLabel != nullptr)
         {
-            m_integrityStatusLabel->setText(QStringLiteral("状态：模块基址解析失败"));
+            m_integrityStatusLabel->setText(
+                driverText("driver.integrity.status.module_base_invalid", QStringLiteral("状态：模块基址解析失败")));
         }
         return;
     }
@@ -548,7 +579,11 @@ void DriverDock::refreshDriverIntegrityAsync(const bool cpuOnly)
     const std::uint64_t ticket = ++m_integrityQueryTicket;
     if (m_integrityRefreshButton != nullptr) m_integrityRefreshButton->setEnabled(false);
     if (m_integrityCpuOnlyButton != nullptr) m_integrityCpuOnlyButton->setEnabled(false);
-    if (m_integrityStatusLabel != nullptr) m_integrityStatusLabel->setText(QStringLiteral("状态：查询中..."));
+    if (m_integrityStatusLabel != nullptr)
+    {
+        m_integrityStatusLabel->setText(
+            driverText("driver.integrity.status.querying", QStringLiteral("状态：查询中...")));
+    }
 
     QPointer<DriverDock> guardThis(this);
     QRunnable* task = QRunnable::create([guardThis, ticket, driverName, moduleBase, maxRows, cpuOnly]() {
@@ -586,8 +621,13 @@ void DriverDock::refreshDriverIntegrityAsync(const bool cpuOnly)
                 if (!result.io.ok)
                 {
                     guardThis->m_integrityStatusLabel->setText(result.unsupported
-                        ? QStringLiteral("状态：未集成/驱动过旧，等待 R0 支持")
-                        : QStringLiteral("状态：查询失败 %1").arg(friendlyDriverIoMessage(result.io.message)));
+                        ? driverText(
+                            "driver.integrity.status.not_integrated",
+                            QStringLiteral("状态：未集成/驱动过旧，等待 R0 支持"))
+                        : driverText(
+                            "driver.integrity.status.query_failed",
+                            QStringLiteral("状态：查询失败 %1"))
+                            .arg(friendlyDriverIoMessage(result.io.message)));
                     guardThis->m_integrityStatusLabel->setStyleSheet(QStringLiteral("color:#B23A3A; font-weight:700;"));
                 }
                 else
@@ -599,7 +639,9 @@ void DriverDock::refreshDriverIntegrityAsync(const bool cpuOnly)
                                 KSWORD_ARK_DRIVER_INTEGRITY_STATUS_FLAG_TRUNCATED |
                                 KSWORD_ARK_DRIVER_INTEGRITY_STATUS_FLAG_PDB_REQUIRED)) != 0U;
                     guardThis->m_integrityStatusLabel->setText(
-                        QStringLiteral("状态：%1，返回 %2/%3，CPU %4，模块 %5，FieldFlags=0x%6，StatusFlags=0x%7")
+                        driverText(
+                            "driver.integrity.status.summary",
+                            QStringLiteral("状态：%1，返回 %2/%3，CPU %4，模块 %5，FieldFlags=0x%6，StatusFlags=0x%7"))
                         .arg(degraded ? QStringLiteral("Partial/Degraded") : QStringLiteral("OK"))
                         .arg(result.entries.size())
                         .arg(result.totalCount)
@@ -716,15 +758,20 @@ void DriverDock::rebuildModuleCrossViewTable()
             QStringLiteral("ModuleView"),
             QStringLiteral("Unavailable"),
             QStringLiteral("-"),
-            QStringLiteral("正常"),
+            driverText("driver.integrity.risk.normal", QStringLiteral("正常")),
             QStringLiteral("0"),
-            QStringLiteral("当前完整性缓存没有可投影的模块交叉视图证据。"));
+            driverText(
+                "driver.integrity.cross_view.empty",
+                QStringLiteral("当前完整性缓存没有可投影的模块交叉视图证据。")));
     }
 
     if (m_moduleCrossViewStatusLabel != nullptr)
     {
         m_moduleCrossViewStatusLabel->setText(
-            QStringLiteral("状态：模块 Cross-View 已更新，显示 %1 条。").arg(m_moduleCrossViewTable->rowCount()));
+            driverText(
+                "driver.integrity.cross_view.updated",
+                QStringLiteral("状态：模块 Cross-View 已更新，显示 %1 条。"))
+            .arg(m_moduleCrossViewTable->rowCount()));
     }
     m_moduleCrossViewTable->setSortingEnabled(true);
 }
@@ -788,19 +835,33 @@ void DriverDock::rebuildUnloadedPiddbTable()
         m_unloadedPiddbTable->setItem(0, unloadedPiddbColumnIndex(UnloadedPiddbColumn::Evidence), textItem(QStringLiteral("OptionalGlobal")));
         m_unloadedPiddbTable->setItem(0, unloadedPiddbColumnIndex(UnloadedPiddbColumn::Object), textItem(QStringLiteral("Unavailable")));
         m_unloadedPiddbTable->setItem(0, unloadedPiddbColumnIndex(UnloadedPiddbColumn::Target), textItem(QStringLiteral("-")));
-        m_unloadedPiddbTable->setItem(0, unloadedPiddbColumnIndex(UnloadedPiddbColumn::Risk), textItem(QStringLiteral("正常")));
+        m_unloadedPiddbTable->setItem(
+            0,
+            unloadedPiddbColumnIndex(UnloadedPiddbColumn::Risk),
+            textItem(driverText("driver.integrity.risk.normal", QStringLiteral("正常"))));
         m_unloadedPiddbTable->setItem(0, unloadedPiddbColumnIndex(UnloadedPiddbColumn::Source), textItem(QStringLiteral("-")));
         m_unloadedPiddbTable->setItem(0, unloadedPiddbColumnIndex(UnloadedPiddbColumn::Confidence), textItem(QStringLiteral("0")));
-        m_unloadedPiddbTable->setItem(0, unloadedPiddbColumnIndex(UnloadedPiddbColumn::Detail), textItem(QStringLiteral("当前完整性缓存没有可投影的 Unloaded / PiDDB 证据。")));
+        m_unloadedPiddbTable->setItem(
+            0,
+            unloadedPiddbColumnIndex(UnloadedPiddbColumn::Detail),
+            textItem(driverText(
+                "driver.integrity.unloaded.empty",
+                QStringLiteral("当前完整性缓存没有可投影的 Unloaded / PiDDB 证据。"))));
     }
 
     if (m_unloadedPiddbStatusLabel != nullptr)
     {
         m_unloadedPiddbStatusLabel->setText(
-            QStringLiteral("状态：Unloaded / PiDDB 已更新，显示 %1 条，过滤=\"%2\"，风险/降级=%3。")
+            driverText(
+                "driver.integrity.unloaded.status.updated",
+                QStringLiteral("状态：Unloaded / PiDDB 已更新，显示 %1 条，过滤=\"%2\"，风险/降级=%3。"))
             .arg(m_unloadedPiddbTable->rowCount())
-            .arg(keywordText.isEmpty() ? QStringLiteral("<无>") : keywordText)
-            .arg(riskOnly ? QStringLiteral("开") : QStringLiteral("关")));
+            .arg(keywordText.isEmpty()
+                ? driverText("driver.integrity.unloaded.filter.empty", QStringLiteral("<无>"))
+                : keywordText)
+            .arg(riskOnly
+                ? driverText("driver.integrity.unloaded.filter.enabled", QStringLiteral("开"))
+                : driverText("driver.integrity.unloaded.filter.disabled", QStringLiteral("关"))));
     }
     m_unloadedPiddbTable->setSortingEnabled(true);
 }
@@ -825,13 +886,13 @@ void DriverDock::showUnloadedPiddbContextMenu(const QPoint& localPosition)
     contextMenu.setStyleSheet(KswordTheme::ContextMenuStyle());
     QAction* detailAction = contextMenu.addAction(
         QIcon(QStringLiteral(":/Icon/process_details.svg")),
-        QStringLiteral("查看完整证据详情"));
+        driverText("driver.menu.view_evidence_detail", QStringLiteral("查看完整证据详情")));
     QAction* copyRowAction = contextMenu.addAction(
         QIcon(QStringLiteral(":/Icon/process_copy_row.svg")),
         QStringLiteral("复制当前行"));
     QAction* copyVisibleAction = contextMenu.addAction(
         QIcon(QStringLiteral(":/Icon/log_copy.svg")),
-        QStringLiteral("复制可见行"));
+        driverText("driver.menu.copy_visible_rows", QStringLiteral("复制可见行")));
 
     QAction* selectedAction = contextMenu.exec(m_unloadedPiddbTable->viewport()->mapToGlobal(localPosition));
     if (selectedAction == detailAction)
@@ -880,7 +941,8 @@ void DriverDock::showSelectedUnloadedPiddbDetailDialog()
 
     QDialog detailDialog(this);
     detailDialog.setObjectName(QStringLiteral("driverDockUnloadedPiddbDetailDialog"));
-    detailDialog.setWindowTitle(QStringLiteral("Unloaded / PiDDB 证据详情"));
+    detailDialog.setWindowTitle(
+        driverText("driver.dialog.unloaded_detail.title", QStringLiteral("Unloaded / PiDDB 证据详情")));
     detailDialog.resize(860, 620);
     detailDialog.setStyleSheet(KswordTheme::OpaqueDialogStyle(detailDialog.objectName()));
 
@@ -894,7 +956,9 @@ void DriverDock::showSelectedUnloadedPiddbDetailDialog()
     dialogLayout->addWidget(detailEditor, 1);
 
     QDialogButtonBox* buttonBox = new QDialogButtonBox(QDialogButtonBox::Close, &detailDialog);
-    QPushButton* copyButton = buttonBox->addButton(QStringLiteral("复制详情"), QDialogButtonBox::ActionRole);
+    QPushButton* copyButton = buttonBox->addButton(
+        driverText("driver.dialog.copy_detail", QStringLiteral("复制详情")),
+        QDialogButtonBox::ActionRole);
     QObject::connect(copyButton, &QPushButton::clicked, &detailDialog, [detailEditor]()
         {
             if (detailEditor != nullptr && QGuiApplication::clipboard() != nullptr)
@@ -974,7 +1038,8 @@ void DriverDock::showSelectedDriverIntegrityDetail()
     const int currentRow = m_integrityTable->currentRow();
     if (currentRow < 0)
     {
-        m_integrityDetailEdit->setText(QStringLiteral("请选择一条驱动完整性证据。"));
+        m_integrityDetailEdit->setText(
+            driverText("driver.integrity.detail.select_row", QStringLiteral("请选择一条驱动完整性证据。")));
         return;
     }
     const QTableWidgetItem* classItem = m_integrityTable->item(currentRow, integrityColumnIndex(IntegrityColumn::Class));

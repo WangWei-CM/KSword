@@ -7,11 +7,13 @@ void DriverDock::startDebugOutputCapture()
 {
     if (m_dbwinCaptureRunning.exchange(true))
     {
-        appendDebugOutputLine(QStringLiteral("捕获线程已在运行。"));
+        appendDebugOutputLine(
+            driverText("driver.debug.capture.already_running", QStringLiteral("捕获线程已在运行。")));
         return;
     }
 
-    appendDebugOutputLine(QStringLiteral("正在启动调试输出捕获线程..."));
+    appendDebugOutputLine(
+        driverText("driver.debug.capture.starting", QStringLiteral("正在启动调试输出捕获线程...")));
     try
     {
         m_dbwinCaptureThread = std::make_unique<std::thread>([this]()
@@ -23,7 +25,8 @@ void DriverDock::startDebugOutputCapture()
     {
         m_dbwinCaptureRunning.store(false);
         m_dbwinCaptureThread.reset();
-        appendDebugOutputLine(QStringLiteral("启动失败：无法创建后台线程。"));
+        appendDebugOutputLine(
+            driverText("driver.debug.capture.thread_create_failed", QStringLiteral("启动失败：无法创建后台线程。")));
     }
 
     updateDebugCaptureButtonState();
@@ -171,7 +174,10 @@ void DriverDock::runDbwinCaptureLoop()
                 {
                     return;
                 }
-                guardThis->appendDebugOutputLine(QStringLiteral("启动失败：DBWIN 句柄初始化失败（Global/Local均不可用）。"));
+                guardThis->appendDebugOutputLine(
+                    driverText(
+                        "driver.debug.capture.dbwin_init_failed",
+                        QStringLiteral("启动失败：DBWIN 句柄初始化失败（Global/Local均不可用）。")));
                 guardThis->updateDebugCaptureButtonState();
             }, Qt::QueuedConnection);
 
@@ -208,7 +214,10 @@ void DriverDock::runDbwinCaptureLoop()
                 {
                     return;
                 }
-                guardThis->appendDebugOutputLine(QStringLiteral("启动失败：映射 DBWIN 共享内存失败。"));
+                guardThis->appendDebugOutputLine(
+                    driverText(
+                        "driver.debug.capture.mapping_failed",
+                        QStringLiteral("启动失败：映射 DBWIN 共享内存失败。")));
                 guardThis->updateDebugCaptureButtonState();
             }, Qt::QueuedConnection);
         m_dbwinCaptureRunning.store(false);
@@ -222,7 +231,10 @@ void DriverDock::runDbwinCaptureLoop()
                 return;
             }
             guardThis->appendDebugOutputLine(
-                QStringLiteral("捕获线程已启动（命名空间=%1），等待调试输出...").arg(objectScopeText));
+                driverText(
+                    "driver.debug.capture.started",
+                    QStringLiteral("捕获线程已启动（命名空间=%1），等待调试输出...")
+                .arg(objectScopeText)));
             guardThis->updateDebugCaptureButtonState();
         }, Qt::QueuedConnection);
 
@@ -273,7 +285,8 @@ void DriverDock::runDbwinCaptureLoop()
             {
                 return;
             }
-            guardThis->appendDebugOutputLine(QStringLiteral("捕获线程已退出。"));
+            guardThis->appendDebugOutputLine(
+                driverText("driver.debug.capture.exited", QStringLiteral("捕获线程已退出。")));
             guardThis->updateDebugCaptureButtonState();
         }, Qt::QueuedConnection);
 }
@@ -292,7 +305,9 @@ void DriverDock::updateDebugCaptureButtonState()
     if (m_debugCaptureStatusLabel != nullptr)
     {
         m_debugCaptureStatusLabel->setText(
-            running ? QStringLiteral("状态：捕获运行中") : QStringLiteral("状态：未启动"));
+            running
+                ? driverText("driver.debug.status.running", QStringLiteral("状态：捕获运行中"))
+                : driverText("driver.debug.status.not_started", QStringLiteral("状态：未启动")));
     }
 }
 
@@ -460,14 +475,23 @@ QString DriverDock::serviceStateToText(const std::uint32_t stateValue)
 {
     switch (stateValue)
     {
-    case SERVICE_STOPPED:          return QStringLiteral("已停止");
-    case SERVICE_START_PENDING:    return QStringLiteral("启动中");
-    case SERVICE_STOP_PENDING:     return QStringLiteral("停止中");
-    case SERVICE_RUNNING:          return QStringLiteral("运行中");
-    case SERVICE_CONTINUE_PENDING: return QStringLiteral("继续中");
-    case SERVICE_PAUSE_PENDING:    return QStringLiteral("暂停中");
-    case SERVICE_PAUSED:           return QStringLiteral("已暂停");
-    default:                       return QStringLiteral("未知状态(%1)").arg(stateValue);
+    case SERVICE_STOPPED:
+        return driverText("driver.service.state.stopped", QStringLiteral("已停止"));
+    case SERVICE_START_PENDING:
+        return driverText("driver.service.state.start_pending", QStringLiteral("启动中"));
+    case SERVICE_STOP_PENDING:
+        return driverText("driver.service.state.stop_pending", QStringLiteral("停止中"));
+    case SERVICE_RUNNING:
+        return driverText("driver.service.state.running", QStringLiteral("运行中"));
+    case SERVICE_CONTINUE_PENDING:
+        return driverText("driver.service.state.continue_pending", QStringLiteral("继续中"));
+    case SERVICE_PAUSE_PENDING:
+        return driverText("driver.service.state.pause_pending", QStringLiteral("暂停中"));
+    case SERVICE_PAUSED:
+        return driverText("driver.service.state.paused", QStringLiteral("已暂停"));
+    default:
+        return driverText("driver.service.state.unknown", QStringLiteral("未知状态(%1)"))
+            .arg(stateValue);
     }
 }
 

@@ -43,23 +43,23 @@ namespace
         switch (statusValue)
         {
         case KSWORD_ARK_KERNEL_HOOK_STATUS_CLEAN:
-            return QStringLiteral("干净");
+            return driverText("driver.evidence.hook.clean", QStringLiteral("干净"));
         case KSWORD_ARK_KERNEL_HOOK_STATUS_SUSPICIOUS:
-            return QStringLiteral("可疑外跳");
+            return driverText("driver.evidence.hook.suspicious_external", QStringLiteral("可疑外跳"));
         case KSWORD_ARK_KERNEL_HOOK_STATUS_INTERNAL_BRANCH:
-            return QStringLiteral("模块内跳转");
+            return driverText("driver.evidence.hook.internal_branch", QStringLiteral("模块内跳转"));
         case KSWORD_ARK_KERNEL_HOOK_STATUS_READ_FAILED:
-            return QStringLiteral("读取失败");
+            return driverText("driver.evidence.hook.read_failed", QStringLiteral("读取失败"));
         case KSWORD_ARK_KERNEL_HOOK_STATUS_PARSE_FAILED:
-            return QStringLiteral("解析失败");
+            return driverText("driver.evidence.hook.parse_failed", QStringLiteral("解析失败"));
         case KSWORD_ARK_KERNEL_HOOK_STATUS_FORCE_REQUIRED:
-            return QStringLiteral("需要强制确认");
+            return driverText("driver.evidence.hook.force_required", QStringLiteral("需要强制确认"));
         case KSWORD_ARK_KERNEL_HOOK_STATUS_PATCHED:
-            return QStringLiteral("已修复/摘除");
+            return driverText("driver.evidence.hook.patched", QStringLiteral("已修复/摘除"));
         case KSWORD_ARK_KERNEL_HOOK_STATUS_PATCH_FAILED:
-            return QStringLiteral("修复失败");
+            return driverText("driver.evidence.hook.patch_failed", QStringLiteral("修复失败"));
         default:
-            return QStringLiteral("未知(%1)").arg(statusValue);
+            return driverText("driver.evidence.hook.unknown", QStringLiteral("未知(%1)")).arg(statusValue);
         }
     }
 
@@ -70,7 +70,7 @@ namespace
         switch (hookType)
         {
         case KSWORD_ARK_INLINE_HOOK_TYPE_NONE:
-            return QStringLiteral("无明显补丁");
+            return driverText("driver.evidence.inline.none", QStringLiteral("无明显补丁"));
         case KSWORD_ARK_INLINE_HOOK_TYPE_JMP_REL32:
             return QStringLiteral("JMP rel32");
         case KSWORD_ARK_INLINE_HOOK_TYPE_JMP_REL8:
@@ -82,13 +82,13 @@ namespace
         case KSWORD_ARK_INLINE_HOOK_TYPE_MOV_R11_JMP_R11:
             return QStringLiteral("MOV R11; JMP R11");
         case KSWORD_ARK_INLINE_HOOK_TYPE_RET_PATCH:
-            return QStringLiteral("RET 补丁");
+            return driverText("driver.evidence.inline.ret_patch", QStringLiteral("RET 补丁"));
         case KSWORD_ARK_INLINE_HOOK_TYPE_INT3_PATCH:
-            return QStringLiteral("INT3 补丁");
+            return driverText("driver.evidence.inline.int3_patch", QStringLiteral("INT3 补丁"));
         case KSWORD_ARK_INLINE_HOOK_TYPE_UNKNOWN_PATCH:
-            return QStringLiteral("未知补丁");
+            return driverText("driver.evidence.inline.unknown_patch", QStringLiteral("未知补丁"));
         default:
-            return QStringLiteral("未知(%1)").arg(hookType);
+            return driverText("driver.evidence.inline.unknown", QStringLiteral("未知(%1)")).arg(hookType);
         }
     }
 
@@ -103,7 +103,7 @@ namespace
         case KSWORD_ARK_IAT_EAT_HOOK_CLASS_EAT:
             return QStringLiteral("EAT");
         default:
-            return QStringLiteral("未知(%1)").arg(hookClass);
+            return driverText("driver.evidence.iat_eat.unknown", QStringLiteral("未知(%1)")).arg(hookClass);
         }
     }
 
@@ -114,13 +114,13 @@ namespace
         switch (callbackClass)
         {
         case KSWORD_ARK_CALLBACK_ENUM_CLASS_REGISTRY:
-            return QStringLiteral("注册表 CmCallback");
+            return driverText("driver.evidence.callback.class.registry", QStringLiteral("注册表 CmCallback"));
         case KSWORD_ARK_CALLBACK_ENUM_CLASS_PROCESS:
-            return QStringLiteral("进程 Notify");
+            return driverText("driver.evidence.callback.class.process", QStringLiteral("进程 Notify"));
         case KSWORD_ARK_CALLBACK_ENUM_CLASS_THREAD:
-            return QStringLiteral("线程 Notify");
+            return driverText("driver.evidence.callback.class.thread", QStringLiteral("线程 Notify"));
         case KSWORD_ARK_CALLBACK_ENUM_CLASS_IMAGE:
-            return QStringLiteral("镜像加载 Notify");
+            return driverText("driver.evidence.callback.class.image", QStringLiteral("镜像加载 Notify"));
         case KSWORD_ARK_CALLBACK_ENUM_CLASS_OBJECT:
             return QStringLiteral("Object Callback");
         case KSWORD_ARK_CALLBACK_ENUM_CLASS_MINIFILTER:
@@ -130,7 +130,7 @@ namespace
         case KSWORD_ARK_CALLBACK_ENUM_CLASS_ETW_PROVIDER:
             return QStringLiteral("ETW Provider/Consumer");
         default:
-            return QStringLiteral("未知(%1)").arg(callbackClass);
+            return driverText("driver.evidence.callback.class.unknown", QStringLiteral("未知(%1)")).arg(callbackClass);
         }
     }
 
@@ -141,17 +141,19 @@ namespace
         switch (statusValue)
         {
         case KSWORD_ARK_CALLBACK_ENUM_STATUS_OK:
-            return QStringLiteral("可见/成功");
+            return driverText("driver.evidence.callback.status.ok", QStringLiteral("可见/成功"));
         case KSWORD_ARK_CALLBACK_ENUM_STATUS_NOT_REGISTERED:
-            return QStringLiteral("未注册");
+            return driverText("driver.evidence.callback.status.not_registered", QStringLiteral("未注册"));
         case KSWORD_ARK_CALLBACK_ENUM_STATUS_UNSUPPORTED:
-            return QStringLiteral("当前不支持");
+            return driverText("driver.evidence.callback.status.unsupported", QStringLiteral("当前不支持"));
         case KSWORD_ARK_CALLBACK_ENUM_STATUS_QUERY_FAILED:
-            return QStringLiteral("查询失败(%1)").arg(formatNtStatusText(lastStatus));
+            return driverText("driver.evidence.callback.status.query_failed", QStringLiteral("查询失败(%1)"))
+                .arg(formatNtStatusText(lastStatus));
         case KSWORD_ARK_CALLBACK_ENUM_STATUS_BUFFER_TRUNCATED:
-            return QStringLiteral("缓冲截断");
+            return driverText("driver.evidence.callback.status.truncated", QStringLiteral("缓冲截断"));
         default:
-            return QStringLiteral("未知(%1)").arg(statusValue);
+            return driverText("driver.evidence.callback.status.unknown", QStringLiteral("未知(%1)"))
+                .arg(statusValue);
         }
     }
 
@@ -163,7 +165,7 @@ namespace
         const ksword::ark::IoResult& ioResult)
     {
         detailLines << QStringLiteral("[%1]").arg(titleText);
-        detailLines << QStringLiteral("ok=%1 win32=%2 nt=%3 bytes=%4 说明=%5")
+        detailLines << driverText("driver.evidence.io_summary", QStringLiteral("ok=%1 win32=%2 nt=%3 bytes=%4 说明=%5"))
             .arg(ioResult.ok ? QStringLiteral("true") : QStringLiteral("false"))
             .arg(ioResult.win32Error)
             .arg(formatNtStatusText(ioResult.ntStatus))
@@ -202,13 +204,16 @@ DriverDock::LoadedModuleEvidenceRecord DriverDock::buildPendingModuleEvidenceRec
     // 输入：模块记录；处理：填充各列等待文本；返回：占位证据记录。
     LoadedModuleEvidenceRecord evidence;
     evidence.moduleName = moduleRecord.moduleName;
-    evidence.driverObjectStatusText = QStringLiteral("待扫描");
-    evidence.driverStartMatchText = QStringLiteral("待扫描");
-    evidence.majorFunctionStatusText = QStringLiteral("待扫描");
-    evidence.iatEatStatusText = QStringLiteral("待扫描");
-    evidence.inlineHookStatusText = QStringLiteral("待扫描");
-    evidence.callbackStatusText = QStringLiteral("待扫描");
-    evidence.detailText = QStringLiteral("模块 %1 尚未执行证据聚合。\n点击工具栏证据刷新按钮后，后台线程会只读查询 DriverObject / Hook / Callback。")
+    const QString pendingScanText = driverText("driver.evidence.pending", QStringLiteral("待扫描"));
+    evidence.driverObjectStatusText = pendingScanText;
+    evidence.driverStartMatchText = pendingScanText;
+    evidence.majorFunctionStatusText = pendingScanText;
+    evidence.iatEatStatusText = pendingScanText;
+    evidence.inlineHookStatusText = pendingScanText;
+    evidence.callbackStatusText = pendingScanText;
+    evidence.detailText = driverText(
+        "driver.evidence.pending.detail",
+        QStringLiteral("模块 %1 尚未执行证据聚合。\n点击工具栏证据刷新按钮后，后台线程会只读查询 DriverObject / Hook / Callback。"))
         .arg(moduleRecord.moduleName);
     return evidence;
 }
@@ -248,7 +253,7 @@ bool DriverDock::queryDriverObjectForModuleEvidence(
     const QString stemText = evidenceModuleStem(moduleRecord.moduleName);
     if (stemText.isEmpty())
     {
-        attemptedNamesTextOut = QStringLiteral("<模块名为空>");
+        attemptedNamesTextOut = driverText("driver.evidence.module_name.empty", QStringLiteral("<模块名为空>"));
         return false;
     }
 
@@ -316,11 +321,15 @@ std::vector<DriverDock::LoadedModuleEvidenceRecord> DriverDock::collectEvidenceF
         evidence.queryAttempted = true;
 
         QStringList detailLines;
-        detailLines << QStringLiteral("模块证据聚合")
-                    << QStringLiteral("模块: %1").arg(moduleRecord.moduleName)
-                    << QStringLiteral("基址: %1").arg(formatCompactAddress(moduleRecord.baseAddress))
-                    << QStringLiteral("映像路径: %1").arg(moduleRecord.imagePath)
-                    << QStringLiteral("说明: 本结果仅聚合证据，不执行卸载、移除或修复。")
+        detailLines << driverText("driver.evidence.detail.title", QStringLiteral("模块证据聚合"))
+                    << driverText("driver.evidence.detail.module", QStringLiteral("模块: %1")).arg(moduleRecord.moduleName)
+                    << driverText("driver.evidence.detail.base", QStringLiteral("基址: %1"))
+                        .arg(formatCompactAddress(moduleRecord.baseAddress))
+                    << driverText("driver.evidence.detail.image_path", QStringLiteral("映像路径: %1"))
+                        .arg(moduleRecord.imagePath)
+                    << driverText(
+                        "driver.evidence.detail.read_only_note",
+                        QStringLiteral("说明: 本结果仅聚合证据，不执行卸载、移除或修复。"))
                     << QString();
 
         ksword::ark::DriverObjectQueryResult objectResult;
@@ -329,8 +338,12 @@ std::vector<DriverDock::LoadedModuleEvidenceRecord> DriverDock::collectEvidenceF
             moduleRecord,
             objectResult,
             attemptedNamesText);
-        evidenceAppendIoSummary(detailLines, QStringLiteral("DriverObject 查询"), objectResult.io);
-        detailLines << QStringLiteral("候选名称: %1").arg(attemptedNamesText);
+        evidenceAppendIoSummary(
+            detailLines,
+            driverText("driver.evidence.detail.driver_object_query", QStringLiteral("DriverObject 查询")),
+            objectResult.io);
+        detailLines << driverText("driver.evidence.detail.candidate_names", QStringLiteral("候选名称: %1"))
+            .arg(attemptedNamesText);
         detailLines << QStringLiteral("QueryStatus: %1").arg(driverObjectQueryStatusText(objectResult.queryStatus));
         detailLines << QStringLiteral("DriverName: %1").arg(QString::fromStdWString(objectResult.driverName));
         detailLines << QStringLiteral("DriverObject: %1").arg(formatCompactAddress(objectResult.driverObjectAddress));
@@ -341,17 +354,17 @@ std::vector<DriverDock::LoadedModuleEvidenceRecord> DriverDock::collectEvidenceF
 
         evidence.driverObjectName = QString::fromStdWString(objectResult.driverName);
         evidence.driverObjectStatusText = evidence.driverObjectResolved
-            ? QStringLiteral("已解析")
-            : QStringLiteral("未解析");
+            ? driverText("driver.evidence.status.resolved", QStringLiteral("已解析"))
+            : driverText("driver.evidence.status.unresolved", QStringLiteral("未解析"));
         evidence.driverStartKnown = objectResult.driverStart != 0U;
         evidence.driverStartMatchesBase = evidence.driverStartKnown &&
             objectResult.driverStart == moduleRecord.baseAddress;
         evidence.driverStartMatchText = !evidence.driverStartKnown
-            ? QStringLiteral("未知")
+            ? driverText("driver.evidence.status.unknown", QStringLiteral("未知"))
             : evidenceYesNo(
                 evidence.driverStartMatchesBase,
-                QStringLiteral("匹配"),
-                QStringLiteral("不匹配"));
+                driverText("driver.evidence.status.match", QStringLiteral("匹配")),
+                driverText("driver.evidence.status.mismatch", QStringLiteral("不匹配")));
         if (!objectResult.io.ok)
         {
             evidence.hasScanError = true;
@@ -360,7 +373,9 @@ std::vector<DriverDock::LoadedModuleEvidenceRecord> DriverDock::collectEvidenceF
         detailLines << QStringLiteral("[MajorFunction]");
         if (objectResult.majorFunctions.empty())
         {
-            detailLines << QStringLiteral("未返回 MajorFunction 表。") << QString();
+            detailLines << driverText(
+                "driver.evidence.detail.major_function_missing",
+                QStringLiteral("未返回 MajorFunction 表。")) << QString();
         }
         else
         {
@@ -370,7 +385,9 @@ std::vector<DriverDock::LoadedModuleEvidenceRecord> DriverDock::collectEvidenceF
                 if (outsideOwnImage)
                 {
                     ++evidence.majorFunctionExternalCount;
-                    detailLines << QStringLiteral("外跳: %1 dispatch=%2 module=%3 moduleBase=%4 location=%5")
+                    detailLines << driverText(
+                        "driver.evidence.detail.major_function_external",
+                        QStringLiteral("外跳: %1 dispatch=%2 module=%3 moduleBase=%4 location=%5"))
                         .arg(driverMajorFunctionName(entry.majorFunction))
                         .arg(formatCompactAddress(entry.dispatchAddress))
                         .arg(QString::fromStdWString(entry.moduleName))
@@ -380,7 +397,9 @@ std::vector<DriverDock::LoadedModuleEvidenceRecord> DriverDock::collectEvidenceF
             }
             if (evidence.majorFunctionExternalCount == 0U)
             {
-                detailLines << QStringLiteral("未发现 MajorFunction 外跳。") << QString();
+                detailLines << driverText(
+                    "driver.evidence.detail.major_function_clean",
+                    QStringLiteral("未发现 MajorFunction 外跳。")) << QString();
             }
             else
             {
@@ -389,14 +408,16 @@ std::vector<DriverDock::LoadedModuleEvidenceRecord> DriverDock::collectEvidenceF
         }
         evidence.hasMajorFunctionExternalJump = evidence.majorFunctionExternalCount != 0U;
         evidence.majorFunctionStatusText = evidence.hasMajorFunctionExternalJump
-            ? QStringLiteral("外跳 %1").arg(evidence.majorFunctionExternalCount)
-            : QStringLiteral("未见外跳");
+            ? driverText("driver.evidence.status.external_count", QStringLiteral("外跳 %1"))
+                .arg(evidence.majorFunctionExternalCount)
+            : driverText("driver.evidence.status.no_external", QStringLiteral("未见外跳"));
 
         detailLines << QStringLiteral("[IAT/EAT]");
         if (!iatEatResult.io.ok)
         {
             evidence.hasScanError = true;
-            detailLines << QStringLiteral("扫描失败: %1").arg(friendlyDriverIoMessage(iatEatResult.io.message));
+            detailLines << driverText("driver.evidence.detail.scan_failed", QStringLiteral("扫描失败: %1"))
+                .arg(friendlyDriverIoMessage(iatEatResult.io.message));
         }
         else
         {
@@ -409,7 +430,9 @@ std::vector<DriverDock::LoadedModuleEvidenceRecord> DriverDock::collectEvidenceF
                     continue;
                 }
                 ++evidence.iatEatSuspiciousCount;
-                detailLines << QStringLiteral("可疑: %1 module=%2 import=%3 func=%4 thunk=%5 current=%6 expected=%7 targetModule=%8 status=%9")
+                detailLines << driverText(
+                    "driver.evidence.detail.iat_eat_suspicious",
+                    QStringLiteral("可疑: %1 module=%2 import=%3 func=%4 thunk=%5 current=%6 expected=%7 targetModule=%8 status=%9"))
                     .arg(evidenceIatEatClassText(entry.hookClass))
                     .arg(QString::fromStdWString(entry.moduleName))
                     .arg(QString::fromStdWString(entry.importModuleName))
@@ -422,7 +445,9 @@ std::vector<DriverDock::LoadedModuleEvidenceRecord> DriverDock::collectEvidenceF
             }
             if (evidence.iatEatSuspiciousCount == 0U)
             {
-                detailLines << QStringLiteral("未发现该模块 IAT/EAT 可疑项。") << QString();
+                detailLines << driverText(
+                    "driver.evidence.detail.iat_eat_clean",
+                    QStringLiteral("未发现该模块 IAT/EAT 可疑项。")) << QString();
             }
             else
             {
@@ -431,14 +456,18 @@ std::vector<DriverDock::LoadedModuleEvidenceRecord> DriverDock::collectEvidenceF
         }
         evidence.hasIatEatSuspicious = evidence.iatEatSuspiciousCount != 0U;
         evidence.iatEatStatusText = evidence.hasIatEatSuspicious
-            ? QStringLiteral("可疑 %1").arg(evidence.iatEatSuspiciousCount)
-            : (iatEatResult.io.ok ? QStringLiteral("未见可疑") : QStringLiteral("扫描失败"));
+            ? driverText("driver.evidence.status.suspicious_count", QStringLiteral("可疑 %1"))
+                .arg(evidence.iatEatSuspiciousCount)
+            : (iatEatResult.io.ok
+                ? driverText("driver.evidence.status.no_suspicious", QStringLiteral("未见可疑"))
+                : driverText("driver.evidence.status.scan_failed", QStringLiteral("扫描失败")));
 
         detailLines << QStringLiteral("[Inline Hook]");
         if (!inlineResult.io.ok)
         {
             evidence.hasScanError = true;
-            detailLines << QStringLiteral("扫描失败: %1").arg(friendlyDriverIoMessage(inlineResult.io.message));
+            detailLines << driverText("driver.evidence.detail.scan_failed", QStringLiteral("扫描失败: %1"))
+                .arg(friendlyDriverIoMessage(inlineResult.io.message));
         }
         else
         {
@@ -451,7 +480,9 @@ std::vector<DriverDock::LoadedModuleEvidenceRecord> DriverDock::collectEvidenceF
                     continue;
                 }
                 ++evidence.inlineHookSuspiciousCount;
-                detailLines << QStringLiteral("可疑: module=%1 function=%2 address=%3 type=%4 target=%5 targetModule=%6 status=%7")
+                detailLines << driverText(
+                    "driver.evidence.detail.inline_suspicious",
+                    QStringLiteral("可疑: module=%1 function=%2 address=%3 type=%4 target=%5 targetModule=%6 status=%7"))
                     .arg(QString::fromStdWString(entry.moduleName))
                     .arg(QString::fromLocal8Bit(entry.functionName.data(), static_cast<int>(entry.functionName.size())))
                     .arg(formatCompactAddress(entry.functionAddress))
@@ -462,7 +493,9 @@ std::vector<DriverDock::LoadedModuleEvidenceRecord> DriverDock::collectEvidenceF
             }
             if (evidence.inlineHookSuspiciousCount == 0U)
             {
-                detailLines << QStringLiteral("未发现该模块 Inline Hook 可疑项。") << QString();
+                detailLines << driverText(
+                    "driver.evidence.detail.inline_clean",
+                    QStringLiteral("未发现该模块 Inline Hook 可疑项。")) << QString();
             }
             else
             {
@@ -471,14 +504,18 @@ std::vector<DriverDock::LoadedModuleEvidenceRecord> DriverDock::collectEvidenceF
         }
         evidence.hasInlineHookSuspicious = evidence.inlineHookSuspiciousCount != 0U;
         evidence.inlineHookStatusText = evidence.hasInlineHookSuspicious
-            ? QStringLiteral("可疑 %1").arg(evidence.inlineHookSuspiciousCount)
-            : (inlineResult.io.ok ? QStringLiteral("未见可疑") : QStringLiteral("扫描失败"));
+            ? driverText("driver.evidence.status.suspicious_count", QStringLiteral("可疑 %1"))
+                .arg(evidence.inlineHookSuspiciousCount)
+            : (inlineResult.io.ok
+                ? driverText("driver.evidence.status.no_suspicious", QStringLiteral("未见可疑"))
+                : driverText("driver.evidence.status.scan_failed", QStringLiteral("扫描失败")));
 
         detailLines << QStringLiteral("[Callback]");
         if (!callbackResult.io.ok)
         {
             evidence.hasScanError = true;
-            detailLines << QStringLiteral("枚举失败: %1").arg(friendlyDriverIoMessage(callbackResult.io.message));
+            detailLines << driverText("driver.evidence.detail.enumeration_failed", QStringLiteral("枚举失败: %1"))
+                .arg(friendlyDriverIoMessage(callbackResult.io.message));
         }
         else
         {
@@ -493,7 +530,9 @@ std::vector<DriverDock::LoadedModuleEvidenceRecord> DriverDock::collectEvidenceF
                     continue;
                 }
                 ++evidence.callbackReferenceCount;
-                detailLines << QStringLiteral("引用: class=%1 status=%2 callback=%3 context=%4 registration=%5 moduleBase=%6 modulePath=%7 name=%8 altitude=%9 detail=%10")
+                detailLines << driverText(
+                    "driver.evidence.detail.callback_reference",
+                    QStringLiteral("引用: class=%1 status=%2 callback=%3 context=%4 registration=%5 moduleBase=%6 modulePath=%7 name=%8 altitude=%9 detail=%10"))
                     .arg(evidenceCallbackClassText(entry.callbackClass))
                     .arg(evidenceCallbackStatusText(entry.status, entry.lastStatus))
                     .arg(formatCompactAddress(entry.callbackAddress))
@@ -507,7 +546,9 @@ std::vector<DriverDock::LoadedModuleEvidenceRecord> DriverDock::collectEvidenceF
             }
             if (evidence.callbackReferenceCount == 0U)
             {
-                detailLines << QStringLiteral("未发现 Callback 引用该模块。") << QString();
+                detailLines << driverText(
+                    "driver.evidence.detail.callback_clean",
+                    QStringLiteral("未发现 Callback 引用该模块。")) << QString();
             }
             else
             {
@@ -516,24 +557,33 @@ std::vector<DriverDock::LoadedModuleEvidenceRecord> DriverDock::collectEvidenceF
         }
         evidence.hasCallbackReference = evidence.callbackReferenceCount != 0U;
         evidence.callbackStatusText = evidence.hasCallbackReference
-            ? QStringLiteral("引用 %1").arg(evidence.callbackReferenceCount)
-            : (callbackResult.io.ok ? QStringLiteral("未见引用") : QStringLiteral("枚举失败"));
+            ? driverText("driver.evidence.status.reference_count", QStringLiteral("引用 %1"))
+                .arg(evidence.callbackReferenceCount)
+            : (callbackResult.io.ok
+                ? driverText("driver.evidence.status.no_reference", QStringLiteral("未见引用"))
+                : driverText("driver.evidence.status.enumeration_failed", QStringLiteral("枚举失败")));
 
-        detailLines << QStringLiteral("[全局扫描摘要]");
+        detailLines << driverText("driver.evidence.detail.global_summary", QStringLiteral("[全局扫描摘要]"));
         evidenceAppendIoSummary(detailLines, QStringLiteral("Inline Hook"), inlineResult.io);
-        detailLines << QStringLiteral("Inline returned=%1 total=%2 modules=%3 last=%4")
+        detailLines << driverText(
+            "driver.evidence.detail.inline_summary",
+            QStringLiteral("Inline returned=%1 total=%2 modules=%3 last=%4"))
             .arg(inlineResult.entries.size())
             .arg(inlineResult.totalCount)
             .arg(inlineResult.moduleCount)
             .arg(formatNtStatusText(inlineResult.lastStatus));
         evidenceAppendIoSummary(detailLines, QStringLiteral("IAT/EAT"), iatEatResult.io);
-        detailLines << QStringLiteral("IAT/EAT returned=%1 total=%2 modules=%3 last=%4")
+        detailLines << driverText(
+            "driver.evidence.detail.iat_eat_summary",
+            QStringLiteral("IAT/EAT returned=%1 total=%2 modules=%3 last=%4"))
             .arg(iatEatResult.entries.size())
             .arg(iatEatResult.totalCount)
             .arg(iatEatResult.moduleCount)
             .arg(formatNtStatusText(iatEatResult.lastStatus));
         evidenceAppendIoSummary(detailLines, QStringLiteral("Callback"), callbackResult.io);
-        detailLines << QStringLiteral("Callback returned=%1 total=%2 last=%3")
+        detailLines << driverText(
+            "driver.evidence.detail.callback_summary",
+            QStringLiteral("Callback returned=%1 total=%2 last=%3"))
             .arg(callbackResult.entries.size())
             .arg(callbackResult.totalCount)
             .arg(formatNtStatusText(callbackResult.lastStatus));
@@ -560,7 +610,9 @@ void DriverDock::refreshLoadedModuleEvidenceAsync()
         // - 返回：无；避免空列表环境下模块刷新和证据刷新互相递归。
         if (m_moduleEvidenceStatusLabel != nullptr)
         {
-            m_moduleEvidenceStatusLabel->setText(QStringLiteral("证据：没有可聚合的模块，请先刷新已加载模块。"));
+            m_moduleEvidenceStatusLabel->setText(driverText(
+                "driver.evidence.status.no_modules",
+                QStringLiteral("证据：没有可聚合的模块，请先刷新已加载模块。")));
         }
         return;
     }
@@ -573,7 +625,9 @@ void DriverDock::refreshLoadedModuleEvidenceAsync()
     }
     if (m_moduleEvidenceStatusLabel != nullptr)
     {
-        m_moduleEvidenceStatusLabel->setText(QStringLiteral("证据：后台聚合中，UI 不会阻塞..."));
+        m_moduleEvidenceStatusLabel->setText(driverText(
+            "driver.evidence.status.aggregating",
+            QStringLiteral("证据：后台聚合中，UI 不会阻塞...")));
     }
 
     const std::vector<LoadedKernelModuleRecord> moduleSnapshot = m_loadedModuleCache;
@@ -624,7 +678,9 @@ void DriverDock::refreshLoadedModuleEvidenceAsync()
                     if (guardThis->m_moduleEvidenceStatusLabel != nullptr)
                     {
                         guardThis->m_moduleEvidenceStatusLabel->setText(
-                            QStringLiteral("证据：已聚合 %1 个模块，可疑=%2，Callback引用=%3，错误=%4")
+                            driverText(
+                                "driver.evidence.status.completed",
+                                QStringLiteral("证据：已聚合 %1 个模块，可疑=%2，Callback引用=%3，错误=%4"))
                             .arg(guardThis->m_loadedModuleEvidenceCache.size())
                             .arg(suspiciousCount)
                             .arg(callbackCount)
@@ -699,14 +755,17 @@ void DriverDock::showSelectedModuleEvidenceDetail()
     }
     if (m_moduleTable == nullptr || m_moduleTable->selectionModel() == nullptr)
     {
-        m_moduleEvidenceDetailEditor->setText(QStringLiteral("模块表不可用。"));
+        m_moduleEvidenceDetailEditor->setText(
+            driverText("driver.evidence.detail.table_unavailable", QStringLiteral("模块表不可用。")));
         return;
     }
 
     const QModelIndexList selectedRows = m_moduleTable->selectionModel()->selectedRows(0);
     if (selectedRows.isEmpty())
     {
-        m_moduleEvidenceDetailEditor->setText(QStringLiteral("请选择一条已加载模块查看聚合证据。"));
+        m_moduleEvidenceDetailEditor->setText(driverText(
+            "driver.evidence.detail.select_module",
+            QStringLiteral("请选择一条已加载模块查看聚合证据。")));
         return;
     }
 
@@ -714,7 +773,8 @@ void DriverDock::showSelectedModuleEvidenceDetail()
     QTableWidgetItem* moduleItem = m_moduleTable->item(rowIndex, 0);
     if (moduleItem == nullptr)
     {
-        m_moduleEvidenceDetailEditor->setText(QStringLiteral("当前行没有模块名。"));
+        m_moduleEvidenceDetailEditor->setText(
+            driverText("driver.evidence.detail.module_name_missing", QStringLiteral("当前行没有模块名。")));
         return;
     }
 
@@ -723,7 +783,7 @@ void DriverDock::showSelectedModuleEvidenceDetail()
     if (sourceIndex >= m_loadedModuleEvidenceCache.size())
     {
         m_moduleEvidenceDetailEditor->setText(
-            QStringLiteral("模块 %1 尚未生成证据详情。")
+            driverText("driver.evidence.detail.not_generated", QStringLiteral("模块 %1 尚未生成证据详情。"))
             .arg(moduleItem->text()));
         return;
     }

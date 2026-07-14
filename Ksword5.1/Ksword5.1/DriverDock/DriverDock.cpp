@@ -68,21 +68,27 @@ namespace ksword::driver_dock_internal
         const QString rawText = QString::fromUtf8(rawMessage.data(), static_cast<int>(rawMessage.size())).trimmed();
         if (rawText.isEmpty())
         {
-            return QStringLiteral("无额外驱动消息");
+            return driverText("driver.io.empty", QStringLiteral("无额外驱动消息"));
         }
         if (rawText.contains(QStringLiteral("DeviceIoControl"), Qt::CaseInsensitive))
         {
-            return QStringLiteral("驱动接口调用失败或当前驱动版本不匹配");
+            return driverText(
+                "driver.io.device_control_failed",
+                QStringLiteral("驱动接口调用失败或当前驱动版本不匹配"));
         }
         if (rawText.contains(QStringLiteral("unsupported"), Qt::CaseInsensitive) ||
             rawText.contains(QStringLiteral("not supported"), Qt::CaseInsensitive))
         {
-            return QStringLiteral("当前驱动不支持该只读查询入口");
+            return driverText(
+                "driver.io.unsupported",
+                QStringLiteral("当前驱动不支持该只读查询入口"));
         }
         if (rawText.contains(QStringLiteral("capability"), Qt::CaseInsensitive) ||
             rawText.contains(QStringLiteral("DynData"), Qt::CaseInsensitive))
         {
-            return QStringLiteral("动态偏移能力未满足，请查看内核 DynData/Capability 状态");
+            return driverText(
+                "driver.io.capability_missing",
+                QStringLiteral("动态偏移能力未满足，请查看内核 DynData/Capability 状态"));
         }
         return rawText;
     }
@@ -123,10 +129,10 @@ namespace ksword::driver_dock_internal
         }
         if (messageText.isEmpty())
         {
-            messageText = QStringLiteral("未知错误");
+            messageText = driverText("driver.error.unknown", QStringLiteral("未知错误"));
         }
 
-        return QStringLiteral("%1：%2")
+        return driverText("driver.error.code", QStringLiteral("%1：%2"))
             .arg(static_cast<unsigned long>(errorCode))
             .arg(messageText);
     }
@@ -140,19 +146,21 @@ namespace ksword::driver_dock_internal
         const QString& serviceNameText,
         const QString& binaryPathText)
     {
-        QString adviceText = QStringLiteral(
-            "挂载失败：StartServiceW 返回签名/镜像校验错误（%1）。\n"
-            "服务：%2\n"
-            "驱动路径：%3\n"
-            "说明：测试模式并不会放行完全未签名的 x64 .sys；"
-            "KswordARK.sys 必须带测试签名，并且测试证书要被本机信任。\n"
-            "修复：管理员 PowerShell 进入仓库根目录后执行：\n"
-            "powershell -ExecutionPolicy Bypass -File scripts\\Sign-KswordArkDriverTest.ps1 -EnableTestSigning\n"
-            "执行后重启，并确认服务 ImagePath 指向刚签名的 KswordARK.sys。")
+        QString adviceText = driverText(
+            "driver.load_advice.signature_error",
+            QStringLiteral(
+                "挂载失败：StartServiceW 返回签名/镜像校验错误（%1）。\n"
+                "服务：%2\n"
+                "驱动路径：%3\n"
+                "说明：测试模式并不会放行完全未签名的 x64 .sys；"
+                "KswordARK.sys 必须带测试签名，并且测试证书要被本机信任。\n"
+                "修复：管理员 PowerShell 进入仓库根目录后执行：\n"
+                "powershell -ExecutionPolicy Bypass -File scripts\\Sign-KswordArkDriverTest.ps1 -EnableTestSigning\n"
+                "执行后重启，并确认服务 ImagePath 指向刚签名的 KswordARK.sys。"))
             .arg(formatWin32ErrorTextForAdvice(errorCode))
             .arg(serviceNameText)
             .arg(binaryPathText.trimmed().isEmpty()
-                ? QStringLiteral("<未从表单读取到路径>")
+                ? driverText("driver.load_advice.path_missing", QStringLiteral("<未从表单读取到路径>"))
                 : binaryPathText);
         return adviceText;
     }
@@ -191,23 +199,23 @@ namespace ksword::driver_dock_internal
         switch (statusValue)
         {
         case KSWORD_ARK_DRIVER_UNLOAD_STATUS_UNLOADED:
-            return QStringLiteral("已调用 DriverUnload");
+            return driverText("driver.unload.status.called", QStringLiteral("已调用 DriverUnload"));
         case KSWORD_ARK_DRIVER_UNLOAD_STATUS_UNLOAD_ROUTINE_MISSING:
-            return QStringLiteral("缺少 DriverUnload");
+            return driverText("driver.unload.status.missing_routine", QStringLiteral("缺少 DriverUnload"));
         case KSWORD_ARK_DRIVER_UNLOAD_STATUS_REFERENCE_FAILED:
-            return QStringLiteral("引用 DriverObject 失败");
+            return driverText("driver.unload.status.reference_failed", QStringLiteral("引用 DriverObject 失败"));
         case KSWORD_ARK_DRIVER_UNLOAD_STATUS_THREAD_FAILED:
-            return QStringLiteral("系统线程失败");
+            return driverText("driver.unload.status.thread_failed", QStringLiteral("系统线程失败"));
         case KSWORD_ARK_DRIVER_UNLOAD_STATUS_WAIT_TIMEOUT:
-            return QStringLiteral("等待超时");
+            return driverText("driver.unload.status.wait_timeout", QStringLiteral("等待超时"));
         case KSWORD_ARK_DRIVER_UNLOAD_STATUS_OPERATION_FAILED:
-            return QStringLiteral("操作失败");
+            return driverText("driver.unload.status.operation_failed", QStringLiteral("操作失败"));
         case KSWORD_ARK_DRIVER_UNLOAD_STATUS_FORCED_CLEANUP:
-            return QStringLiteral("已强制清理");
+            return driverText("driver.unload.status.forced_cleanup", QStringLiteral("已强制清理"));
         case KSWORD_ARK_DRIVER_UNLOAD_STATUS_CLEANUP_FAILED:
-            return QStringLiteral("清理失败");
+            return driverText("driver.unload.status.cleanup_failed", QStringLiteral("清理失败"));
         default:
-            return QStringLiteral("未知状态");
+            return driverText("driver.unload.status.unknown", QStringLiteral("未知状态"));
         }
     }
 
@@ -278,13 +286,13 @@ namespace ksword::driver_dock_internal
         const bool insideOwnImage = (flags & 0x00000002U) != 0U;
         if (insideOwnImage)
         {
-            return QStringLiteral("自身镜像内");
+            return driverText("driver.location.inside_image", QStringLiteral("自身镜像内"));
         }
         if (resolvedModule)
         {
-            return QStringLiteral("外部模块");
+            return driverText("driver.location.external_module", QStringLiteral("外部模块"));
         }
-        return QStringLiteral("未解析模块");
+        return driverText("driver.location.unresolved_module", QStringLiteral("未解析模块"));
     }
 
 }
@@ -297,13 +305,17 @@ DriverDock::DriverDock(QWidget* parent)
 {
     // initEvent 用途：贯穿整个构造流程，便于按同一 GUID 追踪初始化链路。
     kLogEvent initEvent;
-    info << initEvent << "[DriverDock] 开始初始化驱动页。" << eol;
+    info << initEvent
+        << driverText("driver.log.initializing", QStringLiteral("[DriverDock] 开始初始化驱动页。"))
+        << eol;
 
     initializeUi();
     initializeConnections();
     updateDebugCaptureButtonState();
 
-    info << initEvent << "[DriverDock] 驱动页初始化完成。" << eol;
+    info << initEvent
+        << driverText("driver.log.initialized", QStringLiteral("[DriverDock] 驱动页初始化完成。"))
+        << eol;
 }
 
 void DriverDock::showEvent(QShowEvent* event)
@@ -318,7 +330,10 @@ void DriverDock::showEvent(QShowEvent* event)
     m_initialRefreshDone = true;
     if (m_overviewStatusLabel != nullptr)
     {
-        m_overviewStatusLabel->setText(QStringLiteral("状态：首次打开，正在加载驱动服务与模块..."));
+        m_overviewStatusLabel->setText(
+            driverText(
+                "driver.status.first_open",
+                QStringLiteral("状态：首次打开，正在加载驱动服务与模块...")));
     }
 
     QTimer::singleShot(0, this, [this]()
@@ -333,5 +348,7 @@ DriverDock::~DriverDock()
     stopDebugOutputCapture();
 
     kLogEvent destroyEvent;
-    info << destroyEvent << "[DriverDock] 驱动页已析构。" << eol;
+    info << destroyEvent
+        << driverText("driver.log.destroyed", QStringLiteral("[DriverDock] 驱动页已析构。"))
+        << eol;
 }

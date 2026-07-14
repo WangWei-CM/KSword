@@ -75,6 +75,20 @@ namespace ksword::driver_dock_internal
         };
     }
 
+    QStringList driverIntegrityTableHeaders()
+    {
+        return {
+            driverText("driver.header.class", QStringLiteral("类别")),
+            driverText("driver.header.object", QStringLiteral("对象")),
+            driverText("driver.header.target", QStringLiteral("目标")),
+            driverText("driver.header.owner", QStringLiteral("Owner")),
+            driverText("driver.header.cpu_vector", QStringLiteral("CPU/Vector")),
+            driverText("driver.header.risk", QStringLiteral("风险")),
+            driverText("driver.header.confidence", QStringLiteral("置信度")),
+            driverText("driver.header.explanation", QStringLiteral("说明"))
+        };
+    }
+
     QStringList driverMajorFunctionTableHeaders()
     {
         return {
@@ -214,6 +228,10 @@ void DriverDock::applyTranslatedHeaders()
     if (m_fastIoEvidenceTable != nullptr)
     {
         m_fastIoEvidenceTable->setHorizontalHeaderLabels(driverEvidenceTableHeaders());
+    }
+    if (m_integrityTable != nullptr)
+    {
+        m_integrityTable->setHorizontalHeaderLabels(driverIntegrityTableHeaders());
     }
     if (m_moduleCrossViewTable != nullptr)
     {

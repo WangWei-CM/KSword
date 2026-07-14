@@ -79,29 +79,49 @@ namespace
     {
         if (flags == 0U)
         {
-            return QStringLiteral("正常");
+            return driverText("driver.integrity.risk.normal", QStringLiteral("正常"));
         }
         QStringList parts;
-        if (flags & KSWORD_ARK_DRIVER_INTEGRITY_RISK_UNAVAILABLE) parts << QStringLiteral("不可用");
-        if (flags & KSWORD_ARK_DRIVER_INTEGRITY_RISK_QUERY_FAILED) parts << QStringLiteral("查询失败");
-        if (flags & KSWORD_ARK_DRIVER_INTEGRITY_RISK_MODULE_UNRESOLVED) parts << QStringLiteral("模块未解析");
-        if (flags & KSWORD_ARK_DRIVER_INTEGRITY_RISK_OWNER_MISMATCH) parts << QStringLiteral("Owner不匹配");
-        if (flags & KSWORD_ARK_DRIVER_INTEGRITY_RISK_OUTSIDE_DRIVER_IMAGE) parts << QStringLiteral("外跳");
-        if (flags & KSWORD_ARK_DRIVER_INTEGRITY_RISK_SECTION_MISMATCH) parts << QStringLiteral("Section不匹配");
-        if (flags & KSWORD_ARK_DRIVER_INTEGRITY_RISK_SERVICE_MISSING) parts << QStringLiteral("服务缺失");
-        if (flags & KSWORD_ARK_DRIVER_INTEGRITY_RISK_EMPTY_UNLOAD) parts << QStringLiteral("Unload为空");
-        if (flags & KSWORD_ARK_DRIVER_INTEGRITY_RISK_DEVICE_LOOP) parts << QStringLiteral("Device环");
-        if (flags & KSWORD_ARK_DRIVER_INTEGRITY_RISK_ATTACHED_LOOP) parts << QStringLiteral("Attached环");
-        if (flags & KSWORD_ARK_DRIVER_INTEGRITY_RISK_CROSS_DRIVER_ATTACH) parts << QStringLiteral("跨驱动挂接");
-        if (flags & KSWORD_ARK_DRIVER_INTEGRITY_RISK_NULL_POINTER) parts << QStringLiteral("空指针");
-        if (flags & KSWORD_ARK_DRIVER_INTEGRITY_RISK_IDT_NON_CORE_OWNER) parts << QStringLiteral("IDT外部Owner");
-        if (flags & KSWORD_ARK_DRIVER_INTEGRITY_RISK_CPU_WP_DISABLED) parts << QStringLiteral("WP关闭");
-        if (flags & KSWORD_ARK_DRIVER_INTEGRITY_RISK_CPU_NXE_DISABLED) parts << QStringLiteral("NXE关闭");
-        if (flags & KSWORD_ARK_DRIVER_INTEGRITY_RISK_CPU_SMEP_DISABLED) parts << QStringLiteral("SMEP关闭");
-        if (flags & KSWORD_ARK_DRIVER_INTEGRITY_RISK_CPU_SMAP_DISABLED) parts << QStringLiteral("SMAP关闭");
-        if (flags & KSWORD_ARK_DRIVER_INTEGRITY_RISK_DESCRIPTOR_INVALID) parts << QStringLiteral("描述符异常");
-        if (flags & KSWORD_ARK_DRIVER_INTEGRITY_RISK_DYNDATA_UNAVAILABLE) parts << QStringLiteral("DynData缺失");
-        if (flags & KSWORD_ARK_DRIVER_INTEGRITY_RISK_TRUNCATED) parts << QStringLiteral("截断");
+        if (flags & KSWORD_ARK_DRIVER_INTEGRITY_RISK_UNAVAILABLE)
+            parts << driverText("driver.integrity.risk.unavailable", QStringLiteral("不可用"));
+        if (flags & KSWORD_ARK_DRIVER_INTEGRITY_RISK_QUERY_FAILED)
+            parts << driverText("driver.integrity.risk.query_failed", QStringLiteral("查询失败"));
+        if (flags & KSWORD_ARK_DRIVER_INTEGRITY_RISK_MODULE_UNRESOLVED)
+            parts << driverText("driver.integrity.risk.module_unresolved", QStringLiteral("模块未解析"));
+        if (flags & KSWORD_ARK_DRIVER_INTEGRITY_RISK_OWNER_MISMATCH)
+            parts << driverText("driver.integrity.risk.owner_mismatch", QStringLiteral("Owner不匹配"));
+        if (flags & KSWORD_ARK_DRIVER_INTEGRITY_RISK_OUTSIDE_DRIVER_IMAGE)
+            parts << driverText("driver.integrity.risk.outside_image", QStringLiteral("外跳"));
+        if (flags & KSWORD_ARK_DRIVER_INTEGRITY_RISK_SECTION_MISMATCH)
+            parts << driverText("driver.integrity.risk.section_mismatch", QStringLiteral("Section不匹配"));
+        if (flags & KSWORD_ARK_DRIVER_INTEGRITY_RISK_SERVICE_MISSING)
+            parts << driverText("driver.integrity.risk.service_missing", QStringLiteral("服务缺失"));
+        if (flags & KSWORD_ARK_DRIVER_INTEGRITY_RISK_EMPTY_UNLOAD)
+            parts << driverText("driver.integrity.risk.empty_unload", QStringLiteral("Unload为空"));
+        if (flags & KSWORD_ARK_DRIVER_INTEGRITY_RISK_DEVICE_LOOP)
+            parts << driverText("driver.integrity.risk.device_loop", QStringLiteral("Device环"));
+        if (flags & KSWORD_ARK_DRIVER_INTEGRITY_RISK_ATTACHED_LOOP)
+            parts << driverText("driver.integrity.risk.attached_loop", QStringLiteral("Attached环"));
+        if (flags & KSWORD_ARK_DRIVER_INTEGRITY_RISK_CROSS_DRIVER_ATTACH)
+            parts << driverText("driver.integrity.risk.cross_driver_attach", QStringLiteral("跨驱动挂接"));
+        if (flags & KSWORD_ARK_DRIVER_INTEGRITY_RISK_NULL_POINTER)
+            parts << driverText("driver.integrity.risk.null_pointer", QStringLiteral("空指针"));
+        if (flags & KSWORD_ARK_DRIVER_INTEGRITY_RISK_IDT_NON_CORE_OWNER)
+            parts << driverText("driver.integrity.risk.idt_external_owner", QStringLiteral("IDT外部Owner"));
+        if (flags & KSWORD_ARK_DRIVER_INTEGRITY_RISK_CPU_WP_DISABLED)
+            parts << driverText("driver.integrity.risk.wp_disabled", QStringLiteral("WP关闭"));
+        if (flags & KSWORD_ARK_DRIVER_INTEGRITY_RISK_CPU_NXE_DISABLED)
+            parts << driverText("driver.integrity.risk.nxe_disabled", QStringLiteral("NXE关闭"));
+        if (flags & KSWORD_ARK_DRIVER_INTEGRITY_RISK_CPU_SMEP_DISABLED)
+            parts << driverText("driver.integrity.risk.smep_disabled", QStringLiteral("SMEP关闭"));
+        if (flags & KSWORD_ARK_DRIVER_INTEGRITY_RISK_CPU_SMAP_DISABLED)
+            parts << driverText("driver.integrity.risk.smap_disabled", QStringLiteral("SMAP关闭"));
+        if (flags & KSWORD_ARK_DRIVER_INTEGRITY_RISK_DESCRIPTOR_INVALID)
+            parts << driverText("driver.integrity.risk.descriptor_invalid", QStringLiteral("描述符异常"));
+        if (flags & KSWORD_ARK_DRIVER_INTEGRITY_RISK_DYNDATA_UNAVAILABLE)
+            parts << driverText("driver.integrity.risk.dyndata_unavailable", QStringLiteral("DynData缺失"));
+        if (flags & KSWORD_ARK_DRIVER_INTEGRITY_RISK_TRUNCATED)
+            parts << driverText("driver.integrity.risk.truncated", QStringLiteral("截断"));
         return parts.join(QStringLiteral(" | "));
     }
 
@@ -135,7 +155,9 @@ namespace
 void DriverDock::refreshDriverServiceRecords()
 {
     kLogEvent refreshEvent;
-    info << refreshEvent << "[DriverDock] 开始刷新驱动服务列表。" << eol;
+    info << refreshEvent
+        << driverText("driver.log.refresh_services_start", QStringLiteral("[DriverDock] 开始刷新驱动服务列表。"))
+        << eol;
 
     std::vector<DriverServiceRecord> serviceRecordList;
     std::string errorText;
@@ -143,13 +165,20 @@ void DriverDock::refreshDriverServiceRecords()
     {
         m_driverServiceCache.clear();
         rebuildDriverServiceTableByFilter();
-        appendOperateLogLine(QStringLiteral("刷新服务失败：%1").arg(QString::fromUtf8(errorText.c_str())));
+        appendOperateLogLine(
+            driverText("driver.operation.refresh.service_failed", QStringLiteral("刷新服务失败：%1"))
+            .arg(QString::fromUtf8(errorText.c_str())));
         if (m_overviewStatusLabel != nullptr)
         {
             m_overviewStatusLabel->setText(
-                QStringLiteral("状态：服务刷新失败（%1）").arg(QString::fromUtf8(errorText.c_str())));
+                driverText(
+                    "driver.operation.refresh.service_failed_status",
+                    QStringLiteral("状态：服务刷新失败（%1）"))
+                .arg(QString::fromUtf8(errorText.c_str())));
         }
-        warn << refreshEvent << "[DriverDock] 刷新服务失败, detail=" << errorText << eol;
+        warn << refreshEvent
+            << driverText("driver.log.refresh_services_failed", QStringLiteral("[DriverDock] 刷新服务失败, detail="))
+            << errorText << eol;
         return;
     }
 
@@ -159,18 +188,22 @@ void DriverDock::refreshDriverServiceRecords()
     if (m_overviewStatusLabel != nullptr)
     {
         m_overviewStatusLabel->setText(
-            QStringLiteral("状态：驱动服务 %1 条，模块 %2 条")
+            driverText("driver.overview.count", QStringLiteral("状态：驱动服务 %1 条，模块 %2 条"))
             .arg(m_driverServiceCache.size())
             .arg(m_loadedModuleCache.size()));
     }
 
-    info << refreshEvent << "[DriverDock] 刷新服务完成, count=" << m_driverServiceCache.size() << eol;
+    info << refreshEvent
+        << driverText("driver.log.refresh_services_completed", QStringLiteral("[DriverDock] 刷新服务完成, count="))
+        << m_driverServiceCache.size() << eol;
 }
 
 void DriverDock::refreshLoadedKernelModuleRecords()
 {
     kLogEvent refreshEvent;
-    info << refreshEvent << "[DriverDock] 开始刷新已加载模块列表。" << eol;
+    info << refreshEvent
+        << driverText("driver.log.refresh_modules_start", QStringLiteral("[DriverDock] 开始刷新已加载模块列表。"))
+        << eol;
 
     std::vector<LoadedKernelModuleRecord> moduleRecordList;
     std::string errorText;
@@ -185,13 +218,20 @@ void DriverDock::refreshLoadedKernelModuleRecords()
         m_loadedModuleCache.clear();
         m_loadedModuleEvidenceCache.clear();
         rebuildLoadedModuleTable();
-        appendOperateLogLine(QStringLiteral("刷新模块失败：%1").arg(QString::fromUtf8(errorText.c_str())));
+        appendOperateLogLine(
+            driverText("driver.operation.refresh.module_failed", QStringLiteral("刷新模块失败：%1"))
+            .arg(QString::fromUtf8(errorText.c_str())));
         if (m_overviewStatusLabel != nullptr)
         {
             m_overviewStatusLabel->setText(
-                QStringLiteral("状态：模块刷新失败（%1）").arg(QString::fromUtf8(errorText.c_str())));
+                driverText(
+                    "driver.operation.refresh.module_failed_status",
+                    QStringLiteral("状态：模块刷新失败（%1）"))
+                .arg(QString::fromUtf8(errorText.c_str())));
         }
-        warn << refreshEvent << "[DriverDock] 刷新模块失败, detail=" << errorText << eol;
+        warn << refreshEvent
+            << driverText("driver.log.refresh_modules_failed", QStringLiteral("[DriverDock] 刷新模块失败, detail="))
+            << errorText << eol;
         return;
     }
 
@@ -214,13 +254,14 @@ void DriverDock::refreshLoadedKernelModuleRecords()
     if (m_overviewStatusLabel != nullptr)
     {
         m_overviewStatusLabel->setText(
-            QStringLiteral("状态：驱动服务 %1 条，模块 %2 条")
+            driverText("driver.overview.count", QStringLiteral("状态：驱动服务 %1 条，模块 %2 条"))
             .arg(m_driverServiceCache.size())
             .arg(m_loadedModuleCache.size()));
     }
     if (m_moduleEvidenceStatusLabel != nullptr)
     {
-        m_moduleEvidenceStatusLabel->setText(QStringLiteral("证据：模块已刷新，等待后台聚合。"));
+        m_moduleEvidenceStatusLabel->setText(
+            driverText("driver.evidence.status.modules_refreshed", QStringLiteral("证据：模块已刷新，等待后台聚合。")));
     }
     if (!m_loadedModuleCache.empty())
     {
@@ -232,10 +273,13 @@ void DriverDock::refreshLoadedKernelModuleRecords()
     }
     else if (m_moduleEvidenceStatusLabel != nullptr)
     {
-        m_moduleEvidenceStatusLabel->setText(QStringLiteral("证据：没有可聚合的模块。"));
+        m_moduleEvidenceStatusLabel->setText(
+            driverText("driver.evidence.status.no_modules_short", QStringLiteral("证据：没有可聚合的模块。")));
     }
 
-    info << refreshEvent << "[DriverDock] 刷新模块完成, count=" << m_loadedModuleCache.size() << eol;
+    info << refreshEvent
+        << driverText("driver.log.refresh_modules_completed", QStringLiteral("[DriverDock] 刷新模块完成, count="))
+        << m_loadedModuleCache.size() << eol;
 }
 
 void DriverDock::fillObjectDriverNameFromSelection()
@@ -253,7 +297,8 @@ void DriverDock::fillObjectDriverNameFromSelection()
     const QModelIndexList rowList = m_serviceTable->selectionModel()->selectedRows(0);
     if (rowList.isEmpty())
     {
-        m_objectInfoStatusLabel->setText(QStringLiteral("状态：请先在驱动服务表选中一行。"));
+        m_objectInfoStatusLabel->setText(
+            driverText("driver.object.status.select_service", QStringLiteral("状态：请先在驱动服务表选中一行。")));
         return;
     }
 
@@ -305,26 +350,35 @@ void DriverDock::showServiceTableContextMenu(const QPoint& localPosition)
     contextMenu.setStyleSheet(KswordTheme::ContextMenuStyle());
     QAction* fillObjectNameAction = contextMenu.addAction(
         QIcon(":/Icon/process_details.svg"),
-        QStringLiteral("填充 DriverObject 名称"));
+        driverText("driver.menu.fill_driver_object", QStringLiteral("填充 DriverObject 名称")));
     QAction* queryObjectAction = contextMenu.addAction(
         QIcon(":/Icon/process_refresh.svg"),
-        QStringLiteral("查询 DriverObject 信息"));
+        driverText("driver.menu.query_driver_object", QStringLiteral("查询 DriverObject 信息")));
     QAction* copyRowAction = contextMenu.addAction(
         QIcon(":/Icon/process_copy_row.svg"),
-        QStringLiteral("复制当前行"));
+        driverText("driver.menu.copy_row", QStringLiteral("复制当前行")));
     contextMenu.addSeparator();
     QAction* stopServiceAction = contextMenu.addAction(
         QIcon(":/Icon/process_uncritical.svg"),
-        QStringLiteral("停止驱动服务（SCM 安全路径）"));
-    stopServiceAction->setToolTip(QStringLiteral("通过服务控制管理器发送 SERVICE_CONTROL_STOP；不直接调用 DriverObject->DriverUnload。"));
+        driverText("driver.menu.stop_service", QStringLiteral("停止驱动服务（SCM 安全路径）")));
+    stopServiceAction->setToolTip(
+        driverText(
+            "driver.menu.stop_service.tooltip",
+            QStringLiteral("通过服务控制管理器发送 SERVICE_CONTROL_STOP；不直接调用 DriverObject->DriverUnload。")));
     QAction* forceUnloadAction = contextMenu.addAction(
         QIcon(":/Icon/process_uncritical.svg"),
-        QStringLiteral("R0 强制卸载 DriverObject"));
-    forceUnloadAction->setToolTip(QStringLiteral("仅调用 DriverObject->DriverUnload，不清 dispatch/unload/device；高危后处理需二次确认。"));
+        driverText("driver.menu.force_unload_driver_object", QStringLiteral("R0 强制卸载 DriverObject")));
+    forceUnloadAction->setToolTip(
+        driverText(
+            "driver.menu.force_unload_driver_object.tooltip",
+            QStringLiteral("仅调用 DriverObject->DriverUnload，不清 dispatch/unload/device；高危后处理需二次确认。")));
     QAction* forceDestructiveUnloadAction = contextMenu.addAction(
         QIcon(":/Icon/process_uncritical.svg"),
-        QStringLiteral("R0 实验性破坏强拆 DriverObject"));
-    forceDestructiveUnloadAction->setToolTip(QStringLiteral("允许中和 DriverObject；目标无 DriverUnload 时才删 DeviceObject。仅用于恶意驱动且可能蓝屏。"));
+        driverText("driver.menu.destructive_unload_driver_object", QStringLiteral("R0 实验性破坏强拆 DriverObject")));
+    forceDestructiveUnloadAction->setToolTip(
+        driverText(
+            "driver.menu.destructive_unload_driver_object.tooltip",
+            QStringLiteral("允许中和 DriverObject；目标无 DriverUnload 时才删 DeviceObject。仅用于恶意驱动且可能蓝屏。")));
 
     QAction* selectedAction = contextMenu.exec(m_serviceTable->viewport()->mapToGlobal(localPosition));
     if (selectedAction == nullptr)
@@ -362,8 +416,10 @@ void DriverDock::showServiceTableContextMenu(const QPoint& localPosition)
     {
         const QMessageBox::StandardButton confirmResult = QMessageBox::warning(
             this,
-            QStringLiteral("R0 实验性破坏强拆"),
-            QStringLiteral("该操作会绕过 SCM/PnP 生命周期，允许 R0 中和目标 DriverObject；目标缺少 DriverUnload 时还会尝试删除 DeviceObject 并将 DriverObject 临时化。\n\n这可能立即导致蓝屏，仅建议用于确认恶意驱动且普通强制卸载无效的场景。\n\n是否继续？"),
+            driverText("driver.confirm.destructive_unload.title", QStringLiteral("R0 实验性破坏强拆")),
+            driverText(
+                "driver.confirm.destructive_unload.body",
+                QStringLiteral("该操作会绕过 SCM/PnP 生命周期，允许 R0 中和目标 DriverObject；目标缺少 DriverUnload 时还会尝试删除 DeviceObject 并将 DriverObject 临时化。\n\n这可能立即导致蓝屏，仅建议用于确认恶意驱动且普通强制卸载无效的场景。\n\n是否继续？")),
             QMessageBox::Yes | QMessageBox::No,
             QMessageBox::No);
         if (confirmResult == QMessageBox::Yes)
@@ -397,11 +453,14 @@ void DriverDock::stopDriverServiceFromServiceRow(const int rowIndex)
     const QString serviceNameText = serviceNameItem->data(Qt::UserRole).toString().trimmed();
     if (serviceNameText.isEmpty())
     {
-        appendOperateLogLine(QStringLiteral("停止服务失败：服务名为空。"));
+        appendOperateLogLine(
+            driverText("driver.operation.stop.empty_name", QStringLiteral("停止服务失败：服务名为空。")));
         return;
     }
 
-    appendOperateLogLine(QStringLiteral("开始停止驱动服务（SCM）：%1").arg(serviceNameText));
+    appendOperateLogLine(
+        driverText("driver.operation.stop.starting", QStringLiteral("开始停止驱动服务（SCM）：%1"))
+        .arg(serviceNameText));
 
     QPointer<DriverDock> guardThis(this);
     const std::wstring serviceNameWide = toWideString(serviceNameText);
@@ -431,15 +490,20 @@ void DriverDock::stopDriverServiceFromServiceRow(const int rowIndex)
                     {
                         guardThis->appendOperateLogLine(
                             finalStatus.currentState == SERVICE_STOPPED
-                            ? QStringLiteral("停止服务成功：service=%1").arg(serviceNameText)
-                            : QStringLiteral("停止服务结束：service=%1，当前状态=%2")
+                            ? driverText("driver.operation.stop.success", QStringLiteral("停止服务成功：service=%1"))
+                                .arg(serviceNameText)
+                            : driverText(
+                                "driver.operation.stop.completed",
+                                QStringLiteral("停止服务结束：service=%1，当前状态=%2"))
                             .arg(serviceNameText)
                             .arg(guardThis->serviceStateToText(finalStatus.currentState)));
                     }
                     else
                     {
                         guardThis->appendOperateLogLine(
-                            QStringLiteral("停止服务失败：service=%1，error=%2，detail=%3")
+                            driverText(
+                                "driver.operation.stop.failed",
+                                QStringLiteral("停止服务失败：service=%1，error=%2，detail=%3"))
                             .arg(serviceNameText)
                             .arg(errorCode)
                             .arg(QString::fromUtf8(errorText.c_str())));
@@ -474,12 +538,15 @@ void DriverDock::forceUnloadDriverFromServiceRow(const int rowIndex, const bool 
     const QString serviceNameText = serviceNameItem->data(Qt::UserRole).toString().trimmed();
     if (serviceNameText.isEmpty())
     {
-        appendOperateLogLine(QStringLiteral("强制卸载失败：服务名为空。"));
+        appendOperateLogLine(
+            driverText("driver.operation.force_unload.empty_name", QStringLiteral("强制卸载失败：服务名为空。")));
         return;
     }
 
     const QString driverObjectNameText = QStringLiteral("\\Driver\\%1").arg(serviceNameText);
-    appendOperateLogLine(QStringLiteral("开始 R0 强制卸载：%1").arg(driverObjectNameText));
+    appendOperateLogLine(
+        driverText("driver.operation.force_unload.starting", QStringLiteral("开始 R0 强制卸载：%1"))
+        .arg(driverObjectNameText));
 
     QPointer<DriverDock> guardThis(this);
     const std::wstring driverObjectNameWide = driverObjectNameText.toStdWString();
@@ -510,8 +577,10 @@ void DriverDock::forceUnloadDriverFromServiceRow(const int rowIndex, const bool 
                         return;
                     }
 
-                    const QString resultLine = QStringLiteral(
-                        "R0 强制卸载完成：%1 | IO说明=%2 | Status=%3 | Flags=%4 | Applied=%5 | Deleted=%6 | Last=%7 | Wait=%8 | Object=%9 | Unload=%10 | Name=%11")
+                    const QString resultLine = driverText(
+                        "driver.operation.force_unload.result",
+                        QStringLiteral(
+                            "R0 强制卸载完成：%1 | IO说明=%2 | Status=%3 | Flags=%4 | Applied=%5 | Deleted=%6 | Last=%7 | Wait=%8 | Object=%9 | Unload=%10 | Name=%11"))
                         .arg(driverObjectNameText)
                         .arg(friendlyDriverIoMessage(result.io.message))
                         .arg(driverForceUnloadStatusText(result.status))
@@ -526,7 +595,10 @@ void DriverDock::forceUnloadDriverFromServiceRow(const int rowIndex, const bool 
                     guardThis->appendOperateLogLine(resultLine);
                     if (destructiveCleanup)
                     {
-                        guardThis->appendOperateLogLine(QStringLiteral("已请求实验性高危后处理：允许 DriverObject 中和 / 删 DeviceObject / 临时对象。"));
+                        guardThis->appendOperateLogLine(
+                            driverText(
+                                "driver.operation.high_risk_notice",
+                                QStringLiteral("已请求实验性高危后处理：允许 DriverObject 中和 / 删 DeviceObject / 临时对象。")));
                     }
                     guardThis->refreshDriverServiceRecords();
                     guardThis->refreshLoadedKernelModuleRecords();
@@ -566,13 +638,13 @@ void DriverDock::showModuleTableContextMenu(const QPoint& localPosition)
     contextMenu.setStyleSheet(KswordTheme::ContextMenuStyle());
     QAction* refreshEvidenceAction = contextMenu.addAction(
         QIcon(":/Icon/process_refresh.svg"),
-        QStringLiteral("刷新模块证据聚合"));
+        driverText("driver.menu.refresh_module_evidence", QStringLiteral("刷新模块证据聚合")));
     QAction* copyEvidenceAction = contextMenu.addAction(
         QIcon(":/Icon/process_copy_row.svg"),
-        QStringLiteral("复制当前模块证据详情"));
+        driverText("driver.menu.copy_module_evidence", QStringLiteral("复制当前模块证据详情")));
     QAction* copyRowAction = contextMenu.addAction(
         QIcon(":/Icon/process_copy_row.svg"),
-        QStringLiteral("复制当前行"));
+        driverText("driver.menu.copy_row", QStringLiteral("复制当前行")));
     QAction* uploadVirusTotalAction = ks::online_scan::addVirusTotalSandboxMenu(
         &contextMenu,
         this,
@@ -589,11 +661,13 @@ void DriverDock::showModuleTableContextMenu(const QPoint& localPosition)
                 (m_moduleTable != nullptr && rowIndex >= 0) ? m_moduleTable->item(rowIndex, 0) : nullptr;
             if (pathItem == nullptr)
             {
-                uploadTarget.errorText = QStringLiteral("当前模块行没有可用路径。");
+                uploadTarget.errorText = driverText(
+                    "driver.upload.module_path_missing",
+                    QStringLiteral("当前模块行没有可用路径。"));
                 return uploadTarget;
             }
             uploadTarget.filePath = ks::online_scan::normalizeKernelImagePathForUpload(pathItem->text());
-            uploadTarget.sourceText = QStringLiteral("驱动模块 %1")
+            uploadTarget.sourceText = driverText("driver.upload.module_source", QStringLiteral("驱动模块 %1"))
                 .arg(nameItem != nullptr ? nameItem->text() : QStringLiteral("<未知模块>"));
             return uploadTarget;
         });
@@ -604,14 +678,18 @@ void DriverDock::showModuleTableContextMenu(const QPoint& localPosition)
     contextMenu.addSeparator();
     QAction* forceCleanupByBaseAction = contextMenu.addAction(
         QIcon(":/Icon/process_uncritical.svg"),
-        QStringLiteral("R0 按模块基址强制卸载 DriverObject"));
+        driverText("driver.menu.force_unload_by_base", QStringLiteral("R0 按模块基址强制卸载 DriverObject")));
     forceCleanupByBaseAction->setToolTip(
-        QStringLiteral("按模块基址反查 DriverObject，仅调用 DriverUnload；高危后处理需二次确认。"));
+        driverText(
+            "driver.menu.force_unload_by_base.tooltip",
+            QStringLiteral("按模块基址反查 DriverObject，仅调用 DriverUnload；高危后处理需二次确认。")));
     QAction* forceDeepCleanupByBaseAction = contextMenu.addAction(
         QIcon(":/Icon/process_uncritical.svg"),
-        QStringLiteral("R0 强力清理模块回调 + DriverObject"));
+        driverText("driver.menu.deep_cleanup_by_base", QStringLiteral("R0 强力清理模块回调 + DriverObject")));
     forceDeepCleanupByBaseAction->setToolTip(
-        QStringLiteral("DriverObject 处理成功后再移除可验证回调；该路径有明显系统不稳定风险。"));
+        driverText(
+            "driver.menu.deep_cleanup_by_base.tooltip",
+            QStringLiteral("DriverObject 处理成功后再移除可验证回调；该路径有明显系统不稳定风险。")));
 
     QAction* selectedAction = contextMenu.exec(m_moduleTable->viewport()->mapToGlobal(localPosition));
     if (selectedAction == refreshEvidenceAction)
@@ -650,8 +728,10 @@ void DriverDock::showModuleTableContextMenu(const QPoint& localPosition)
         // - 这里可以恢复使用标准按钮返回值，避免业务层绕过全局弹窗语义。
         const QMessageBox::StandardButton confirmResult = QMessageBox::warning(
             this,
-            QStringLiteral("R0 强力清理"),
-            QStringLiteral("该操作会按模块基址清理 DriverObject；仅在 DriverObject 处理成功后，才继续移除进程/线程/镜像/Minifilter/WFP 等可验证回调。\n\n不会摘 PsLoadedModuleList，但目标驱动若正在处理请求仍可能导致系统不稳定。\n\n是否继续？"),
+            driverText("driver.confirm.deep_cleanup.title", QStringLiteral("R0 强力清理")),
+            driverText(
+                "driver.confirm.deep_cleanup.body",
+                QStringLiteral("该操作会按模块基址清理 DriverObject；仅在 DriverObject 处理成功后，才继续移除进程/线程/镜像/Minifilter/WFP 等可验证回调。\n\n不会摘 PsLoadedModuleList，但目标驱动若正在处理请求仍可能导致系统不稳定。\n\n是否继续？")),
             QMessageBox::Yes | QMessageBox::No,
             QMessageBox::No);
         if (confirmResult == QMessageBox::Yes)
@@ -689,7 +769,8 @@ void DriverDock::forceUnloadDriverFromModuleRow(
     const std::uint64_t moduleBaseValue = moduleBaseItem->data(Qt::UserRole).toULongLong();
     if (moduleBaseValue == 0U)
     {
-        appendOperateLogLine(QStringLiteral("模块基址清理失败：模块基址为空。"));
+        appendOperateLogLine(
+            driverText("driver.operation.module_cleanup.empty_base", QStringLiteral("模块基址清理失败：模块基址为空。")));
         return;
     }
 
@@ -699,8 +780,15 @@ void DriverDock::forceUnloadDriverFromModuleRow(
         fallbackNameText.chop(4);
     }
 
-    appendOperateLogLine(QStringLiteral("开始 R0 按模块基址%1：%2 | base=%3")
-        .arg(removeCallbacksFirst ? QStringLiteral("强力清理回调+DriverObject") : QStringLiteral("强制卸载 DriverObject"))
+    appendOperateLogLine(
+        driverText("driver.operation.module_cleanup.starting", QStringLiteral("开始 R0 按模块基址%1：%2 | base=%3"))
+        .arg(removeCallbacksFirst
+            ? driverText(
+                "driver.operation.module_cleanup.mode.callbacks",
+                QStringLiteral("强力清理回调+DriverObject"))
+            : driverText(
+                "driver.operation.module_cleanup.mode.force_unload",
+                QStringLiteral("强制卸载 DriverObject")))
         .arg(moduleNameText, formatCompactAddress(moduleBaseValue)));
 
     QPointer<DriverDock> guardThis(this);
@@ -738,9 +826,13 @@ void DriverDock::forceUnloadDriverFromModuleRow(
                         return;
                     }
 
-                    const QString resultLine = QStringLiteral(
-                        "R0 模块基址%1完成：%2 | Base=%3 | IO说明=%4 | Status=%5 | Flags=%6 | Applied=%7 | Deleted=%8 | Last=%9 | Wait=%10 | Object=%11 | Unload=%12 | Callbacks=%13/%14 fail=%15 last=%16 | Name=%17")
-                        .arg(removeCallbacksFirst ? QStringLiteral("强力清理") : QStringLiteral("清理"))
+                    const QString resultLine = driverText(
+                        "driver.operation.module_cleanup.result",
+                        QStringLiteral(
+                            "R0 模块基址%1完成：%2 | Base=%3 | IO说明=%4 | Status=%5 | Flags=%6 | Applied=%7 | Deleted=%8 | Last=%9 | Wait=%10 | Object=%11 | Unload=%12 | Callbacks=%13/%14 fail=%15 last=%16 | Name=%17"))
+                        .arg(removeCallbacksFirst
+                            ? driverText("driver.operation.module_cleanup.mode.deep", QStringLiteral("强力清理"))
+                            : driverText("driver.operation.module_cleanup.mode.clean", QStringLiteral("清理")))
                         .arg(moduleNameText)
                         .arg(formatCompactAddress(moduleBaseValue))
                         .arg(friendlyDriverIoMessage(result.io.message))
@@ -760,7 +852,10 @@ void DriverDock::forceUnloadDriverFromModuleRow(
                     guardThis->appendOperateLogLine(resultLine);
                     if (destructiveCleanup)
                     {
-                        guardThis->appendOperateLogLine(QStringLiteral("已请求实验性高危后处理：允许 DriverObject 中和 / 删 DeviceObject / 临时对象。"));
+                        guardThis->appendOperateLogLine(
+                            driverText(
+                                "driver.operation.high_risk_notice",
+                                QStringLiteral("已请求实验性高危后处理：允许 DriverObject 中和 / 删 DeviceObject / 临时对象。")));
                     }
                     guardThis->refreshDriverServiceRecords();
                     guardThis->refreshLoadedKernelModuleRecords();
@@ -786,7 +881,8 @@ void DriverDock::querySelectedDriverObjectInfo()
     {
         if (m_objectInfoStatusLabel != nullptr)
         {
-            m_objectInfoStatusLabel->setText(QStringLiteral("状态：DriverObject 名称不能为空。"));
+            m_objectInfoStatusLabel->setText(
+                driverText("driver.object.status.name_empty", QStringLiteral("状态：DriverObject 名称不能为空。")));
         }
         return;
     }
@@ -799,7 +895,8 @@ void DriverDock::querySelectedDriverObjectInfo()
     }
     if (m_objectInfoStatusLabel != nullptr)
     {
-        m_objectInfoStatusLabel->setText(QStringLiteral("状态：正在查询 DriverObject..."));
+        m_objectInfoStatusLabel->setText(
+            driverText("driver.object.status.querying", QStringLiteral("状态：正在查询 DriverObject...")));
     }
 
     QPointer<DriverDock> guardThis(this);
@@ -846,7 +943,8 @@ void DriverDock::applyDriverObjectQueryResult(const ksword::ark::DriverObjectQue
     if (m_objectInfoStatusLabel != nullptr)
     {
         const QString readableIoText = friendlyDriverIoMessage(result.io.message);
-        m_objectInfoStatusLabel->setText(QStringLiteral("状态：%1 | %2")
+        m_objectInfoStatusLabel->setText(
+            driverText("driver.object.status.io", QStringLiteral("状态：%1 | %2"))
             .arg(result.io.ok ? driverObjectQueryStatusText(result.queryStatus) : QStringLiteral("IO failed"))
             .arg(readableIoText));
     }
@@ -856,7 +954,8 @@ void DriverDock::applyDriverObjectQueryResult(const ksword::ark::DriverObjectQue
         const QString readableIoText = friendlyDriverIoMessage(result.io.message);
         QStringList summaryLines;
         summaryLines << QStringLiteral("[DriverObject]");
-        summaryLines << QStringLiteral("IO说明: %1").arg(readableIoText);
+        summaryLines << driverText("driver.object.summary.io_note", QStringLiteral("IO说明: %1"))
+            .arg(readableIoText);
         summaryLines << QStringLiteral("QueryStatus: %1").arg(driverObjectQueryStatusText(result.queryStatus));
         summaryLines << QStringLiteral("LastStatus: %1").arg(formatNtStatusText(result.lastStatus));
         summaryLines << QStringLiteral("DriverName: %1").arg(QString::fromStdWString(result.driverName));
@@ -889,15 +988,22 @@ void DriverDock::rebuildDriverObjectEvidenceViews()
     {
         if (m_driverObjectPageSummaryEdit != nullptr)
         {
-            m_driverObjectPageSummaryEdit->setText(QStringLiteral("请先执行 DriverObject 查询。"));
+            m_driverObjectPageSummaryEdit->setText(
+                driverText("driver.object.page_summary.query_first", QStringLiteral("请先执行 DriverObject 查询。")));
         }
         if (m_driverExtensionStatusLabel != nullptr)
         {
-            m_driverExtensionStatusLabel->setText(QStringLiteral("状态：等待 DriverObject 查询。"));
+            m_driverExtensionStatusLabel->setText(
+                driverText(
+                    "driver.object.driver_extension.status.waiting",
+                    QStringLiteral("状态：等待 DriverObject 查询。")));
         }
         if (m_fastIoStatusLabel != nullptr)
         {
-            m_fastIoStatusLabel->setText(QStringLiteral("状态：等待 Driver Integrity 证据。"));
+            m_fastIoStatusLabel->setText(
+                driverText(
+                    "driver.object.fast_io.status.waiting",
+                    QStringLiteral("状态：等待 Driver Integrity 证据。")));
         }
         return;
     }
@@ -953,9 +1059,9 @@ void DriverDock::rebuildDriverObjectEvidenceViews()
                 rows[index],
                 values[index],
                 QStringLiteral("-"),
-                QStringLiteral("正常"),
+                driverText("driver.integrity.risk.normal", QStringLiteral("正常")),
                 QStringLiteral("100"),
-                QStringLiteral("DriverObject 只读摘要"));
+                driverText("driver.object.evidence.read_only_summary", QStringLiteral("DriverObject 只读摘要")));
         }
         m_driverObjectEvidenceTable->setSortingEnabled(true);
     }
@@ -983,7 +1089,10 @@ void DriverDock::rebuildDriverObjectEvidenceViews()
                     QTableWidgetItem* cellItem = m_majorFunctionTable->item(rowIndex, columnIndex);
                     if (cellItem != nullptr)
                     {
-                        cellItem->setToolTip(QStringLiteral("Dispatch 不在 DriverObject 自身镜像范围内。"));
+                        cellItem->setToolTip(
+                            driverText(
+                                "driver.object.major_function.external_tooltip",
+                                QStringLiteral("Dispatch 不在 DriverObject 自身镜像范围内。")));
                     }
                 }
             }
@@ -1023,7 +1132,9 @@ void DriverDock::rebuildDriverObjectEvidenceViews()
     if (m_driverExtensionStatusLabel != nullptr)
     {
         m_driverExtensionStatusLabel->setText(
-            QStringLiteral("状态：DriverExtension 未直接暴露；当前仅展示 DriverObject / DeviceChain / FastIo 关联证据。"));
+            driverText(
+                "driver.object.driver_extension.status.projected",
+                QStringLiteral("状态：DriverExtension 未直接暴露；当前仅展示 DriverObject / DeviceChain / FastIo 关联证据。")));
     }
     if (m_driverExtensionEvidenceTable != nullptr)
     {
@@ -1037,10 +1148,18 @@ void DriverDock::rebuildDriverObjectEvidenceViews()
             QStringLiteral("FastIo")
         };
         const QStringList detailTexts = {
-            QStringLiteral("当前 R3 协议未直接返回 DriverExtension 指针。"),
-            QStringLiteral("DeviceObject 链已由对象页展示。"),
-            QStringLiteral("MajorFunction 表已由对象页展示。"),
-            QStringLiteral("FastIo 仅在完整性页中作为证据归档。")
+            driverText(
+                "driver.object.driver_extension.detail.unavailable",
+                QStringLiteral("当前 R3 协议未直接返回 DriverExtension 指针。")),
+            driverText(
+                "driver.object.driver_extension.detail.device_chain",
+                QStringLiteral("DeviceObject 链已由对象页展示。")),
+            driverText(
+                "driver.object.driver_extension.detail.major_function",
+                QStringLiteral("MajorFunction 表已由对象页展示。")),
+            driverText(
+                "driver.object.driver_extension.detail.fast_io",
+                QStringLiteral("FastIo 仅在完整性页中作为证据归档。"))
         };
         m_driverExtensionEvidenceTable->setRowCount(evidenceNames.size());
         for (int index = 0; index < evidenceNames.size(); ++index)
@@ -1051,7 +1170,7 @@ void DriverDock::rebuildDriverObjectEvidenceViews()
                 evidenceNames[index],
                 QStringLiteral("Unavailable"),
                 QStringLiteral("-"),
-                QStringLiteral("未知"),
+                driverText("driver.evidence.status.unknown", QStringLiteral("未知")),
                 QStringLiteral("0"),
                 detailTexts[index]);
         }
@@ -1061,7 +1180,9 @@ void DriverDock::rebuildDriverObjectEvidenceViews()
     if (m_fastIoStatusLabel != nullptr)
     {
         m_fastIoStatusLabel->setText(
-            QStringLiteral("状态：FastIo 关联证据由 Driver Integrity 页回填，当前记录数 %1。")
+            driverText(
+                "driver.object.fast_io.status.projected",
+                QStringLiteral("状态：FastIo 关联证据由 Driver Integrity 页回填，当前记录数 %1。"))
             .arg(m_driverIntegrityCache.size()));
     }
     if (m_fastIoEvidenceTable != nullptr)
@@ -1101,9 +1222,11 @@ void DriverDock::rebuildDriverObjectEvidenceViews()
                 QStringLiteral("FastIo"),
                 QStringLiteral("Unavailable"),
                 QStringLiteral("-"),
-                QStringLiteral("正常"),
+                driverText("driver.integrity.risk.normal", QStringLiteral("正常")),
                 QStringLiteral("0"),
-                QStringLiteral("当前 Driver Integrity 缓存未返回 FastIo 证据。"));
+                driverText(
+                    "driver.object.fast_io.empty",
+                    QStringLiteral("当前 Driver Integrity 缓存未返回 FastIo 证据。")));
         }
         m_fastIoEvidenceTable->setSortingEnabled(true);
     }
@@ -1171,7 +1294,7 @@ void DriverDock::rebuildDriverServiceTableByFilter()
     if (m_overviewStatusLabel != nullptr)
     {
         m_overviewStatusLabel->setText(
-            QStringLiteral("状态：驱动服务 %1 条（显示 %2 条），模块 %3 条")
+            driverText("driver.overview.count.filtered", QStringLiteral("状态：驱动服务 %1 条（显示 %2 条），模块 %3 条"))
             .arg(m_driverServiceCache.size())
             .arg(visibleCount)
             .arg(m_loadedModuleCache.size()));
@@ -1202,7 +1325,10 @@ void DriverDock::rebuildLoadedModuleTable()
         m_moduleTable->setItem(rowIndex, 1, baseItem);
         for (int evidenceColumn = 2; evidenceColumn <= 7; ++evidenceColumn)
         {
-            m_moduleTable->setItem(rowIndex, evidenceColumn, createReadOnlyItem(QStringLiteral("待扫描")));
+            m_moduleTable->setItem(
+                rowIndex,
+                evidenceColumn,
+                createReadOnlyItem(driverText("driver.evidence.pending", QStringLiteral("待扫描"))));
         }
         QTableWidgetItem* pathItem = createReadOnlyItem(moduleRecord.imagePath);
         pathItem->setToolTip(moduleRecord.imagePath);
@@ -1294,8 +1420,11 @@ void DriverDock::refreshSelectedServiceStateToForm()
     const QString serviceNameText = m_serviceNameEdit->text().trimmed();
     if (serviceNameText.isEmpty())
     {
-        appendOperateLogLine(QStringLiteral("查询失败：服务名不能为空。"));
-        warn << queryEvent << "[DriverDock] 查询状态失败：服务名为空。" << eol;
+        appendOperateLogLine(
+            driverText("driver.operation.query.empty_name", QStringLiteral("查询失败：服务名不能为空。")));
+        warn << queryEvent
+            << driverText("driver.log.query.empty_name", QStringLiteral("[DriverDock] 查询状态失败：服务名为空。"))
+            << eol;
         return;
     }
 
@@ -1309,9 +1438,11 @@ void DriverDock::refreshSelectedServiceStateToForm()
         &errorText,
         &errorCode))
     {
-        appendOperateLogLine(QStringLiteral("查询失败：%1").arg(QString::fromUtf8(errorText.c_str())));
+        appendOperateLogLine(
+            driverText("driver.operation.query.failed", QStringLiteral("查询失败：%1"))
+            .arg(QString::fromUtf8(errorText.c_str())));
         warn << queryEvent
-            << "[DriverDock] 查询状态失败, service="
+            << driverText("driver.log.query.failed", QStringLiteral("[DriverDock] 查询状态失败, service="))
             << serviceNameText.toStdString()
             << ", error=" << errorCode
             << ", detail=" << errorText
@@ -1320,12 +1451,13 @@ void DriverDock::refreshSelectedServiceStateToForm()
     }
 
     appendOperateLogLine(
-        QStringLiteral("服务 %1 当前状态：%2")
+        driverText("driver.operation.query.status", QStringLiteral("服务 %1 当前状态：%2"))
         .arg(serviceNameText)
         .arg(serviceStateToText(statusInfo.currentState)));
 
     info << queryEvent
-        << "[DriverDock] 查询状态成功, service=" << serviceNameText.toStdString()
+        << driverText("driver.log.query.succeeded", QStringLiteral("[DriverDock] 查询状态成功, service="))
+        << serviceNameText.toStdString()
         << ", state=" << statusInfo.currentState
         << eol;
 }
@@ -1353,14 +1485,20 @@ void DriverDock::registerOrUpdateDriverService()
 
     if (serviceNameText.isEmpty())
     {
-        appendOperateLogLine(QStringLiteral("注册/更新失败：服务名不能为空。"));
-        warn << operationEvent << "[DriverDock] 注册/更新失败：服务名为空。" << eol;
+        appendOperateLogLine(
+            driverText("driver.operation.register.empty_service", QStringLiteral("注册/更新失败：服务名不能为空。")));
+        warn << operationEvent
+            << driverText("driver.log.register.empty_service", QStringLiteral("[DriverDock] 注册/更新失败：服务名为空。"))
+            << eol;
         return;
     }
     if (binaryPathText.isEmpty())
     {
-        appendOperateLogLine(QStringLiteral("注册/更新失败：驱动路径不能为空。"));
-        warn << operationEvent << "[DriverDock] 注册/更新失败：路径为空。" << eol;
+        appendOperateLogLine(
+            driverText("driver.operation.register.empty_path", QStringLiteral("注册/更新失败：驱动路径不能为空。")));
+        warn << operationEvent
+            << driverText("driver.log.register.empty_path", QStringLiteral("[DriverDock] 注册/更新失败：路径为空。"))
+            << eol;
         return;
     }
 
@@ -1369,7 +1507,10 @@ void DriverDock::registerOrUpdateDriverService()
         !unquotedPathText.startsWith(QStringLiteral("\\SystemRoot\\"), Qt::CaseInsensitive) &&
         !unquotedPathText.startsWith(QStringLiteral("%SystemRoot%"), Qt::CaseInsensitive))
     {
-        appendOperateLogLine(QStringLiteral("警告：驱动路径当前不可访问，仍将尝试注册。"));
+        appendOperateLogLine(
+            driverText(
+                "driver.operation.register.path_unavailable",
+                QStringLiteral("警告：驱动路径当前不可访问，仍将尝试注册。")));
     }
 
     ks::service::KernelDriverServiceConfig serviceConfig;
@@ -1389,21 +1530,28 @@ void DriverDock::registerOrUpdateDriverService()
         &errorText,
         &errorCode))
     {
-        appendOperateLogLine(QStringLiteral("注册/更新失败：%1").arg(QString::fromUtf8(errorText.c_str())));
+        appendOperateLogLine(
+            driverText("driver.operation.register.failed", QStringLiteral("注册/更新失败：%1"))
+            .arg(QString::fromUtf8(errorText.c_str())));
         err << operationEvent
-            << "[DriverDock] 注册/更新失败, service=" << serviceNameText.toStdString()
+            << driverText("driver.log.register.failed", QStringLiteral("[DriverDock] 注册/更新失败, service="))
+            << serviceNameText.toStdString()
             << ", error=" << errorCode
             << ", detail=" << errorText
             << eol;
         return;
     }
 
-    appendOperateLogLine(QStringLiteral("%1成功：service=%2")
-        .arg(created ? QStringLiteral("注册") : QStringLiteral("更新"))
+    appendOperateLogLine(
+        driverText("driver.operation.register.succeeded", QStringLiteral("%1成功：service=%2"))
+        .arg(created
+            ? driverText("driver.operation.register.created", QStringLiteral("注册"))
+            : driverText("driver.operation.register.updated", QStringLiteral("更新")))
         .arg(serviceNameText));
 
     info << operationEvent
-        << "[DriverDock] 注册/更新成功, created=" << (created ? "true" : "false")
+        << driverText("driver.log.register.succeeded", QStringLiteral("[DriverDock] 注册/更新成功, created="))
+        << (created ? "true" : "false")
         << ", service=" << serviceNameText.toStdString()
         << eol;
 
@@ -1422,8 +1570,11 @@ void DriverDock::loadSelectedDriverService()
     const QString serviceNameText = m_serviceNameEdit->text().trimmed();
     if (serviceNameText.isEmpty())
     {
-        appendOperateLogLine(QStringLiteral("挂载失败：服务名不能为空。"));
-        warn << operationEvent << "[DriverDock] 挂载失败：服务名为空。" << eol;
+        appendOperateLogLine(
+            driverText("driver.operation.load.empty_name", QStringLiteral("挂载失败：服务名不能为空。")));
+        warn << operationEvent
+            << driverText("driver.log.load.empty_name", QStringLiteral("[DriverDock] 挂载失败：服务名为空。"))
+            << eol;
         return;
     }
 
@@ -1446,7 +1597,9 @@ void DriverDock::loadSelectedDriverService()
                 buildDriverSignatureLoadAdvice(static_cast<DWORD>(errorCode), serviceNameText, binaryPathText);
             appendOperateLogLine(adviceText);
             err << operationEvent
-                << "[DriverDock] 挂载失败：驱动签名/镜像校验失败, service="
+                << driverText(
+                    "driver.log.load.signature_failed",
+                    QStringLiteral("[DriverDock] 挂载失败：驱动签名/镜像校验失败, service="))
                 << serviceNameText.toStdString()
                 << ", error=" << errorCode
                 << ", path=" << binaryPathText.toStdString()
@@ -1454,9 +1607,12 @@ void DriverDock::loadSelectedDriverService()
             return;
         }
 
-        appendOperateLogLine(QStringLiteral("挂载失败：%1").arg(QString::fromUtf8(errorText.c_str())));
+        appendOperateLogLine(
+            driverText("driver.operation.load.failed", QStringLiteral("挂载失败：%1"))
+            .arg(QString::fromUtf8(errorText.c_str())));
         err << operationEvent
-            << "[DriverDock] 挂载失败, service=" << serviceNameText.toStdString()
+            << driverText("driver.log.load.failed", QStringLiteral("[DriverDock] 挂载失败, service="))
+            << serviceNameText.toStdString()
             << ", error=" << errorCode
             << ", detail=" << errorText
             << eol;
@@ -1464,11 +1620,14 @@ void DriverDock::loadSelectedDriverService()
     }
 
     appendOperateLogLine(finalStatus.currentState == SERVICE_RUNNING
-        ? QStringLiteral("挂载成功：service=%1").arg(serviceNameText)
-        : QStringLiteral("挂载结束：当前状态=%1").arg(serviceStateToText(finalStatus.currentState)));
+        ? driverText("driver.operation.load.success", QStringLiteral("挂载成功：service=%1"))
+            .arg(serviceNameText)
+        : driverText("driver.operation.load.completed", QStringLiteral("挂载结束：当前状态=%1"))
+            .arg(serviceStateToText(finalStatus.currentState)));
 
     info << operationEvent
-        << "[DriverDock] 挂载执行完成, service=" << serviceNameText.toStdString()
+        << driverText("driver.log.load.completed", QStringLiteral("[DriverDock] 挂载执行完成, service="))
+        << serviceNameText.toStdString()
         << ", finalState=" << finalStatus.currentState
         << eol;
 
@@ -1488,8 +1647,11 @@ void DriverDock::unloadSelectedDriverService()
     const QString serviceNameText = m_serviceNameEdit->text().trimmed();
     if (serviceNameText.isEmpty())
     {
-        appendOperateLogLine(QStringLiteral("卸载失败：服务名不能为空。"));
-        warn << operationEvent << "[DriverDock] 卸载失败：服务名为空。" << eol;
+        appendOperateLogLine(
+            driverText("driver.operation.unload.empty_name", QStringLiteral("卸载失败：服务名不能为空。")));
+        warn << operationEvent
+            << driverText("driver.log.unload.empty_name", QStringLiteral("[DriverDock] 卸载失败：服务名为空。"))
+            << eol;
         return;
     }
 
@@ -1504,9 +1666,12 @@ void DriverDock::unloadSelectedDriverService()
         &errorText,
         &errorCode))
     {
-        appendOperateLogLine(QStringLiteral("卸载失败：%1").arg(QString::fromUtf8(errorText.c_str())));
+        appendOperateLogLine(
+            driverText("driver.operation.unload.failed", QStringLiteral("卸载失败：%1"))
+            .arg(QString::fromUtf8(errorText.c_str())));
         err << operationEvent
-            << "[DriverDock] 卸载失败, service=" << serviceNameText.toStdString()
+            << driverText("driver.log.unload.failed", QStringLiteral("[DriverDock] 卸载失败, service="))
+            << serviceNameText.toStdString()
             << ", error=" << errorCode
             << ", detail=" << errorText
             << eol;
@@ -1514,11 +1679,14 @@ void DriverDock::unloadSelectedDriverService()
     }
 
     appendOperateLogLine(finalStatus.currentState == SERVICE_STOPPED
-        ? QStringLiteral("卸载成功：service=%1").arg(serviceNameText)
-        : QStringLiteral("卸载结束：当前状态=%1").arg(serviceStateToText(finalStatus.currentState)));
+        ? driverText("driver.operation.unload.success", QStringLiteral("卸载成功：service=%1"))
+            .arg(serviceNameText)
+        : driverText("driver.operation.unload.completed", QStringLiteral("卸载结束：当前状态=%1"))
+            .arg(serviceStateToText(finalStatus.currentState)));
 
     info << operationEvent
-        << "[DriverDock] 卸载执行完成, service=" << serviceNameText.toStdString()
+        << driverText("driver.log.unload.completed", QStringLiteral("[DriverDock] 卸载执行完成, service="))
+        << serviceNameText.toStdString()
         << ", finalState=" << finalStatus.currentState
         << eol;
 
@@ -1538,8 +1706,11 @@ void DriverDock::deleteSelectedDriverService()
     const QString serviceNameText = m_serviceNameEdit->text().trimmed();
     if (serviceNameText.isEmpty())
     {
-        appendOperateLogLine(QStringLiteral("删除失败：服务名不能为空。"));
-        warn << operationEvent << "[DriverDock] 删除失败：服务名为空。" << eol;
+        appendOperateLogLine(
+            driverText("driver.operation.delete.empty_name", QStringLiteral("删除失败：服务名不能为空。")));
+        warn << operationEvent
+            << driverText("driver.log.delete.empty_name", QStringLiteral("[DriverDock] 删除失败：服务名为空。"))
+            << eol;
         return;
     }
 
@@ -1552,17 +1723,24 @@ void DriverDock::deleteSelectedDriverService()
         &errorText,
         &errorCode))
     {
-        appendOperateLogLine(QStringLiteral("删除失败：%1").arg(QString::fromUtf8(errorText.c_str())));
+        appendOperateLogLine(
+            driverText("driver.operation.delete.failed", QStringLiteral("删除失败：%1"))
+            .arg(QString::fromUtf8(errorText.c_str())));
         err << operationEvent
-            << "[DriverDock] 删除失败, service=" << serviceNameText.toStdString()
+            << driverText("driver.log.delete.failed", QStringLiteral("[DriverDock] 删除失败, service="))
+            << serviceNameText.toStdString()
             << ", error=" << errorCode
             << ", detail=" << errorText
             << eol;
         return;
     }
 
-    appendOperateLogLine(QStringLiteral("删除成功（或已标记删除）：service=%1").arg(serviceNameText));
-    info << operationEvent << "[DriverDock] 删除执行完成, service=" << serviceNameText.toStdString() << eol;
+    appendOperateLogLine(
+        driverText("driver.operation.delete.succeeded", QStringLiteral("删除成功（或已标记删除）：service=%1"))
+        .arg(serviceNameText));
+    info << operationEvent
+        << driverText("driver.log.delete.completed", QStringLiteral("[DriverDock] 删除执行完成, service="))
+        << serviceNameText.toStdString() << eol;
     refreshDriverServiceRecords();
     refreshLoadedKernelModuleRecords();
 }
