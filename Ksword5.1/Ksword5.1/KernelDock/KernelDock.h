@@ -11,6 +11,7 @@
 // ============================================================
 
 #include "../Framework.h"
+#include "../Internationalization/LanguageManager.h"
 
 #include <QWidget>
 #include <QString>
@@ -18,6 +19,18 @@
 #include <atomic>   // std::atomic_bool：控制异步刷新互斥。
 #include <cstdint>  // std::uintXX_t：固定宽度整数。
 #include <vector>   // std::vector：缓存表格快照行。
+
+namespace ksword::kernel_dock_internal
+{
+    // kernelText：
+    // - 输入：稳定语境键与中文源文本；
+    // - 处理：中文继续返回调用点原文，英文按 KernelDock 具体页面语境解析；
+    // - 返回：当前语言下的界面或诊断文本。
+    inline QString kernelText(const char* const contextKey, const QString& sourceText)
+    {
+        return ks::i18n::contextText(QString::fromLatin1(contextKey), sourceText);
+    }
+}
 
 // Qt 前置声明：减少头文件耦合。
 class QPoint;
