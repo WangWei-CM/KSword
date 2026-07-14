@@ -1,7 +1,10 @@
+#include "KernelDock.h"
 #include "KernelDock.CallbackIntercept.h"
 
 #include <QHash>
 #include <QSet>
+
+using ksword::kernel_dock_internal::kernelText;
 
 namespace
 {
@@ -90,7 +93,7 @@ CallbackValidationResult validateCallbackConfig(const CallbackConfigDocument& co
     if (configDocument.schemaVersion != KSWORD_ARK_CALLBACK_RULE_SCHEMA_VERSION)
     {
         result.errorList.push_back(
-            QStringLiteral("schemaVersion=%1 与当前版本 %2 不兼容。")
+            kernelText("kernel.callback.rules.validation.schema_mismatch", QStringLiteral("schemaVersion=%1 与当前版本 %2 不兼容。"))
             .arg(configDocument.schemaVersion)
             .arg(KSWORD_ARK_CALLBACK_RULE_SCHEMA_VERSION));
     }
@@ -99,12 +102,13 @@ CallbackValidationResult validateCallbackConfig(const CallbackConfigDocument& co
     {
         if (groupModel.groupId == 0U)
         {
-            result.errorList.push_back(QStringLiteral("存在 groupId=0 的规则组。"));
+            result.errorList.push_back(kernelText("kernel.callback.rules.validation.group_zero", QStringLiteral("存在 groupId=0 的规则组。")));
             continue;
         }
         if (groupIdSet.contains(groupModel.groupId))
         {
-            result.errorList.push_back(QStringLiteral("规则组 ID 重复：%1").arg(groupModel.groupId));
+            result.errorList.push_back(kernelText("kernel.callback.rules.validation.duplicate_group", QStringLiteral("规则组 ID 重复：%1"))
+                .arg(groupModel.groupId));
             continue;
         }
         groupIdSet.insert(groupModel.groupId);
@@ -112,7 +116,8 @@ CallbackValidationResult validateCallbackConfig(const CallbackConfigDocument& co
 
         if (groupModel.groupName.trimmed().isEmpty())
         {
-            result.warningList.push_back(QStringLiteral("规则组 %1 名称为空。").arg(groupModel.groupId));
+            result.warningList.push_back(kernelText("kernel.callback.rules.validation.empty_group_name", QStringLiteral("规则组 %1 名称为空。"))
+                .arg(groupModel.groupId));
         }
     }
 
@@ -120,12 +125,13 @@ CallbackValidationResult validateCallbackConfig(const CallbackConfigDocument& co
     {
         if (ruleModel.ruleId == 0U)
         {
-            result.errorList.push_back(QStringLiteral("存在 ruleId=0 的规则。"));
+            result.errorList.push_back(kernelText("kernel.callback.rules.validation.rule_zero", QStringLiteral("存在 ruleId=0 的规则。")));
             continue;
         }
         if (ruleIdSet.contains(ruleModel.ruleId))
         {
-            result.errorList.push_back(QStringLiteral("规则 ID 重复：%1").arg(ruleModel.ruleId));
+            result.errorList.push_back(kernelText("kernel.callback.rules.validation.duplicate_rule", QStringLiteral("规则 ID 重复：%1"))
+                .arg(ruleModel.ruleId));
             continue;
         }
         ruleIdSet.insert(ruleModel.ruleId);
@@ -133,7 +139,7 @@ CallbackValidationResult validateCallbackConfig(const CallbackConfigDocument& co
         if (!groupById.contains(ruleModel.groupId))
         {
             result.errorList.push_back(
-                QStringLiteral("规则 %1 引用了不存在的 groupId=%2。")
+                kernelText("kernel.callback.rules.validation.missing_group", QStringLiteral("规则 %1 引用了不存在的 groupId=%2。"))
                 .arg(ruleModel.ruleId)
                 .arg(ruleModel.groupId));
         }
@@ -141,21 +147,21 @@ CallbackValidationResult validateCallbackConfig(const CallbackConfigDocument& co
         if (!isSupportedCallbackType(ruleModel.callbackType))
         {
             result.errorList.push_back(
-                QStringLiteral("规则 %1 callbackType=%2 不受支持。")
+                kernelText("kernel.callback.rules.validation.unsupported_callback_type", QStringLiteral("规则 %1 callbackType=%2 不受支持。"))
                 .arg(ruleModel.ruleId)
                 .arg(ruleModel.callbackType));
         }
         if (!isSupportedMatchMode(ruleModel.matchMode))
         {
             result.errorList.push_back(
-                QStringLiteral("规则 %1 matchMode=%2 不受支持。")
+                kernelText("kernel.callback.rules.validation.unsupported_match_mode", QStringLiteral("规则 %1 matchMode=%2 不受支持。"))
                 .arg(ruleModel.ruleId)
                 .arg(ruleModel.matchMode));
         }
         if (!isActionValidForType(ruleModel.callbackType, ruleModel.action, ruleModel.matchMode))
         {
             result.errorList.push_back(
-                QStringLiteral("规则 %1 动作组合非法：%2 + %3 + %4。")
+                kernelText("kernel.callback.rules.validation.invalid_action_combo", QStringLiteral("规则 %1 动作组合非法：%2 + %3 + %4。"))
                 .arg(ruleModel.ruleId)
                 .arg(callbackTypeToDisplayText(ruleModel.callbackType))
                 .arg(callbackActionToDisplayText(ruleModel.action))
@@ -168,7 +174,7 @@ CallbackValidationResult validateCallbackConfig(const CallbackConfigDocument& co
                 ruleModel.action == KSWORD_ARK_RULE_ACTION_ASK_USER))
         {
             result.errorList.push_back(
-                QStringLiteral("规则 %1 使用 Regex 仅允许“注册表/文件系统微过滤器 + 询问用户”。")
+                kernelText("kernel.callback.rules.validation.regex_restriction", QStringLiteral("规则 %1 使用 Regex 仅允许“注册表/文件系统微过滤器 + 询问用户”。"))
                 .arg(ruleModel.ruleId));
         }
 
@@ -177,7 +183,7 @@ CallbackValidationResult validateCallbackConfig(const CallbackConfigDocument& co
             ruleModel.callbackType != KSWORD_ARK_CALLBACK_TYPE_MINIFILTER)
         {
             result.errorList.push_back(
-                QStringLiteral("规则 %1 使用“询问用户”仅允许注册表或文件系统微过滤器回调。")
+                kernelText("kernel.callback.rules.validation.ask_user_restriction", QStringLiteral("规则 %1 使用“询问用户”仅允许注册表或文件系统微过滤器回调。"))
                 .arg(ruleModel.ruleId));
         }
 
@@ -185,13 +191,14 @@ CallbackValidationResult validateCallbackConfig(const CallbackConfigDocument& co
         {
             if (ruleModel.timeoutMs == 0U)
             {
-                result.errorList.push_back(QStringLiteral("规则 %1 询问超时必须大于 0。").arg(ruleModel.ruleId));
+                result.errorList.push_back(kernelText("kernel.callback.rules.validation.ask_timeout_zero", QStringLiteral("规则 %1 询问超时必须大于 0。"))
+                    .arg(ruleModel.ruleId));
             }
             if (ruleModel.timeoutDefaultDecision != KSWORD_ARK_DECISION_ALLOW &&
                 ruleModel.timeoutDefaultDecision != KSWORD_ARK_DECISION_DENY)
             {
                 result.errorList.push_back(
-                    QStringLiteral("规则 %1 询问超时默认决策非法：%2")
+                    kernelText("kernel.callback.rules.validation.invalid_timeout_decision", QStringLiteral("规则 %1 询问超时默认决策非法：%2"))
                     .arg(ruleModel.ruleId)
                     .arg(ruleModel.timeoutDefaultDecision));
             }
@@ -202,7 +209,7 @@ CallbackValidationResult validateCallbackConfig(const CallbackConfigDocument& co
                 ruleModel.timeoutMs != 5000U)
             {
                 result.warningList.push_back(
-                    QStringLiteral("规则 %1 非询问动作设置了 timeoutMs=%2，将被忽略。")
+                    kernelText("kernel.callback.rules.validation.timeout_ignored", QStringLiteral("规则 %1 非询问动作设置了 timeoutMs=%2，将被忽略。"))
                     .arg(ruleModel.ruleId)
                     .arg(ruleModel.timeoutMs));
             }
@@ -210,7 +217,8 @@ CallbackValidationResult validateCallbackConfig(const CallbackConfigDocument& co
 
         if (ruleModel.ruleName.trimmed().isEmpty())
         {
-            result.warningList.push_back(QStringLiteral("规则 %1 名称为空。").arg(ruleModel.ruleId));
+            result.warningList.push_back(kernelText("kernel.callback.rules.validation.empty_rule_name", QStringLiteral("规则 %1 名称为空。"))
+                .arg(ruleModel.ruleId));
         }
     }
 

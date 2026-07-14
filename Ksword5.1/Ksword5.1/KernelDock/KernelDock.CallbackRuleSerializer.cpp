@@ -1,3 +1,4 @@
+#include "KernelDock.h"
 #include "KernelDock.CallbackIntercept.h"
 
 #include <QDateTime>
@@ -9,6 +10,8 @@
 #include <QtGlobal>
 
 #include <algorithm>
+
+using ksword::kernel_dock_internal::kernelText;
 
 namespace
 {
@@ -92,7 +95,8 @@ namespace
         {
             if (!supportedKeys.contains(iterator.key()) && warningListOut != nullptr)
             {
-                warningListOut->push_back(QStringLiteral("忽略未知 group 字段：%1").arg(iterator.key()));
+                warningListOut->push_back(kernelText("kernel.callback.rules.warning.unknown_group_field", QStringLiteral("忽略未知 group 字段：%1"))
+                    .arg(iterator.key()));
             }
         }
 
@@ -134,7 +138,8 @@ namespace
         {
             if (!supportedKeys.contains(iterator.key()) && warningListOut != nullptr)
             {
-                warningListOut->push_back(QStringLiteral("忽略未知 rule 字段：%1").arg(iterator.key()));
+                warningListOut->push_back(kernelText("kernel.callback.rules.warning.unknown_rule_field", QStringLiteral("忽略未知 rule 字段：%1"))
+                    .arg(iterator.key()));
             }
         }
 
@@ -190,13 +195,13 @@ QString callbackTypeToDisplayText(const quint32 callbackType)
 {
     switch (callbackType)
     {
-    case KSWORD_ARK_CALLBACK_TYPE_REGISTRY: return QStringLiteral("注册表");
-    case KSWORD_ARK_CALLBACK_TYPE_PROCESS_CREATE: return QStringLiteral("进程创建");
-    case KSWORD_ARK_CALLBACK_TYPE_THREAD_CREATE: return QStringLiteral("线程创建");
-    case KSWORD_ARK_CALLBACK_TYPE_IMAGE_LOAD: return QStringLiteral("镜像加载");
-    case KSWORD_ARK_CALLBACK_TYPE_OBJECT: return QStringLiteral("对象管理器");
-    case KSWORD_ARK_CALLBACK_TYPE_MINIFILTER: return QStringLiteral("文件系统微过滤器");
-    default: return QStringLiteral("未知");
+    case KSWORD_ARK_CALLBACK_TYPE_REGISTRY: return kernelText("kernel.callback.rules.type.registry", QStringLiteral("注册表"));
+    case KSWORD_ARK_CALLBACK_TYPE_PROCESS_CREATE: return kernelText("kernel.callback.rules.type.process", QStringLiteral("进程创建"));
+    case KSWORD_ARK_CALLBACK_TYPE_THREAD_CREATE: return kernelText("kernel.callback.rules.type.thread", QStringLiteral("线程创建"));
+    case KSWORD_ARK_CALLBACK_TYPE_IMAGE_LOAD: return kernelText("kernel.callback.rules.type.image", QStringLiteral("镜像加载"));
+    case KSWORD_ARK_CALLBACK_TYPE_OBJECT: return kernelText("kernel.callback.rules.type.object", QStringLiteral("对象管理器"));
+    case KSWORD_ARK_CALLBACK_TYPE_MINIFILTER: return kernelText("kernel.callback.rules.type.minifilter", QStringLiteral("文件系统微过滤器"));
+    default: return kernelText("kernel.callback.rules.placeholder.unknown", QStringLiteral("未知"));
     }
 }
 
@@ -204,12 +209,12 @@ QString callbackActionToDisplayText(const quint32 actionType)
 {
     switch (actionType)
     {
-    case KSWORD_ARK_RULE_ACTION_ALLOW: return QStringLiteral("允许");
-    case KSWORD_ARK_RULE_ACTION_DENY: return QStringLiteral("拒绝");
-    case KSWORD_ARK_RULE_ACTION_ASK_USER: return QStringLiteral("询问用户");
-    case KSWORD_ARK_RULE_ACTION_LOG_ONLY: return QStringLiteral("记录日志");
-    case KSWORD_ARK_RULE_ACTION_STRIP_ACCESS: return QStringLiteral("降权拦截");
-    default: return QStringLiteral("未知");
+    case KSWORD_ARK_RULE_ACTION_ALLOW: return kernelText("kernel.callback.rules.action.allow", QStringLiteral("允许"));
+    case KSWORD_ARK_RULE_ACTION_DENY: return kernelText("kernel.callback.rules.action.deny", QStringLiteral("拒绝"));
+    case KSWORD_ARK_RULE_ACTION_ASK_USER: return kernelText("kernel.callback.rules.action.ask_user", QStringLiteral("询问用户"));
+    case KSWORD_ARK_RULE_ACTION_LOG_ONLY: return kernelText("kernel.callback.rules.action.log_only", QStringLiteral("记录日志"));
+    case KSWORD_ARK_RULE_ACTION_STRIP_ACCESS: return kernelText("kernel.callback.rules.action.strip_access", QStringLiteral("降权拦截"));
+    default: return kernelText("kernel.callback.rules.placeholder.unknown", QStringLiteral("未知"));
     }
 }
 
@@ -217,11 +222,11 @@ QString callbackMatchModeToDisplayText(const quint32 matchMode)
 {
     switch (matchMode)
     {
-    case KSWORD_ARK_MATCH_MODE_EXACT: return QStringLiteral("精确匹配");
-    case KSWORD_ARK_MATCH_MODE_PREFIX: return QStringLiteral("前缀匹配");
-    case KSWORD_ARK_MATCH_MODE_WILDCARD: return QStringLiteral("通配符匹配");
-    case KSWORD_ARK_MATCH_MODE_REGEX: return QStringLiteral("正则匹配");
-    default: return QStringLiteral("未知");
+    case KSWORD_ARK_MATCH_MODE_EXACT: return kernelText("kernel.callback.rules.match.exact", QStringLiteral("精确匹配"));
+    case KSWORD_ARK_MATCH_MODE_PREFIX: return kernelText("kernel.callback.rules.match.prefix", QStringLiteral("前缀匹配"));
+    case KSWORD_ARK_MATCH_MODE_WILDCARD: return kernelText("kernel.callback.rules.match.wildcard", QStringLiteral("通配符匹配"));
+    case KSWORD_ARK_MATCH_MODE_REGEX: return kernelText("kernel.callback.rules.match.regex", QStringLiteral("正则匹配"));
+    default: return kernelText("kernel.callback.rules.placeholder.unknown", QStringLiteral("未知"));
     }
 }
 
@@ -229,9 +234,9 @@ QString callbackDecisionToDisplayText(const quint32 decision)
 {
     switch (decision)
     {
-    case KSWORD_ARK_DECISION_ALLOW: return QStringLiteral("允许");
-    case KSWORD_ARK_DECISION_DENY: return QStringLiteral("拒绝");
-    default: return QStringLiteral("未知");
+    case KSWORD_ARK_DECISION_ALLOW: return kernelText("kernel.callback.rules.action.allow", QStringLiteral("允许"));
+    case KSWORD_ARK_DECISION_DENY: return kernelText("kernel.callback.rules.action.deny", QStringLiteral("拒绝"));
+    default: return kernelText("kernel.callback.rules.placeholder.unknown", QStringLiteral("未知"));
     }
 }
 
@@ -288,7 +293,7 @@ bool exportCallbackConfigToJson(
     {
         if (errorTextOut != nullptr)
         {
-            *errorTextOut = QStringLiteral("导出失败：输出缓冲区为空。");
+            *errorTextOut = kernelText("kernel.callback.rules.export.output_empty", QStringLiteral("导出失败：输出缓冲区为空。"));
         }
         return false;
     }
@@ -319,7 +324,7 @@ bool importCallbackConfigFromJson(
     {
         if (errorTextOut != nullptr)
         {
-            *errorTextOut = QStringLiteral("导入失败：输出配置对象为空。");
+            *errorTextOut = kernelText("kernel.callback.rules.import.config_empty", QStringLiteral("导入失败：输出配置对象为空。"));
         }
         return false;
     }
@@ -330,7 +335,8 @@ bool importCallbackConfigFromJson(
     {
         if (errorTextOut != nullptr)
         {
-            *errorTextOut = QStringLiteral("导入失败：JSON 解析错误（%1）。").arg(parseError.errorString());
+            *errorTextOut = kernelText("kernel.callback.rules.import.json_parse", QStringLiteral("导入失败：JSON 解析错误（%1）。"))
+                .arg(parseError.errorString());
         }
         return false;
     }
@@ -349,7 +355,8 @@ bool importCallbackConfigFromJson(
     {
         if (!rootKeys.contains(iterator.key()) && warningListOut != nullptr)
         {
-            warningListOut->push_back(QStringLiteral("忽略未知顶层字段：%1").arg(iterator.key()));
+            warningListOut->push_back(kernelText("kernel.callback.rules.warning.unknown_root_field", QStringLiteral("忽略未知顶层字段：%1"))
+                .arg(iterator.key()));
         }
     }
 
@@ -361,7 +368,7 @@ bool importCallbackConfigFromJson(
     {
         if (errorTextOut != nullptr)
         {
-            *errorTextOut = QStringLiteral("导入失败：schemaVersion=%1 与当前版本 %2 不兼容。")
+            *errorTextOut = kernelText("kernel.callback.rules.import.schema_mismatch", QStringLiteral("导入失败：schemaVersion=%1 与当前版本 %2 不兼容。"))
                 .arg(importedDocument.schemaVersion)
                 .arg(KSWORD_ARK_CALLBACK_RULE_SCHEMA_VERSION);
         }
@@ -375,7 +382,7 @@ bool importCallbackConfigFromJson(
     {
         if (errorTextOut != nullptr)
         {
-            *errorTextOut = QStringLiteral("导入失败：globalSettings 字段缺失或格式错误。");
+            *errorTextOut = kernelText("kernel.callback.rules.import.global_settings_invalid", QStringLiteral("导入失败：globalSettings 字段缺失或格式错误。"));
         }
         return false;
     }
@@ -388,7 +395,7 @@ bool importCallbackConfigFromJson(
     {
         if (errorTextOut != nullptr)
         {
-            *errorTextOut = QStringLiteral("导入失败：groups 或 rules 字段缺失或格式错误。");
+            *errorTextOut = kernelText("kernel.callback.rules.import.groups_rules_invalid", QStringLiteral("导入失败：groups 或 rules 字段缺失或格式错误。"));
         }
         return false;
     }
@@ -429,7 +436,7 @@ bool importCallbackConfigFromJson(
         {
             if (errorTextOut != nullptr)
             {
-                *errorTextOut = QStringLiteral("导入失败：CRC32 校验不通过（expected=%1, actual=%2）。")
+                *errorTextOut = kernelText("kernel.callback.rules.import.crc_mismatch", QStringLiteral("导入失败：CRC32 校验不通过（expected=%1, actual=%2）。"))
                     .arg(importedDocument.crc32)
                     .arg(calculatedCrc);
             }
@@ -450,7 +457,7 @@ bool buildCallbackRuleBlobFromConfig(
     {
         if (errorTextOut != nullptr)
         {
-            *errorTextOut = QStringLiteral("编译失败：输出缓冲区为空。");
+            *errorTextOut = kernelText("kernel.callback.rules.compile.output_empty", QStringLiteral("编译失败：输出缓冲区为空。"));
         }
         return false;
     }
@@ -460,7 +467,8 @@ bool buildCallbackRuleBlobFromConfig(
     {
         if (errorTextOut != nullptr)
         {
-            *errorTextOut = QStringLiteral("编译失败：%1").arg(validationResult.errorList.join(QStringLiteral("；")));
+            *errorTextOut = kernelText("kernel.callback.rules.compile.validation_failed", QStringLiteral("编译失败：%1"))
+                .arg(validationResult.errorList.join(QStringLiteral("；")));
         }
         return false;
     }
@@ -513,7 +521,7 @@ bool buildCallbackRuleBlobFromConfig(
         {
             if (errorTextOut != nullptr)
             {
-                *errorTextOut = QStringLiteral("编译失败：写入 group 字符串池失败。");
+                *errorTextOut = kernelText("kernel.callback.rules.compile.group_pool_failed", QStringLiteral("编译失败：写入 group 字符串池失败。"));
             }
             return false;
         }
@@ -547,7 +555,7 @@ bool buildCallbackRuleBlobFromConfig(
         {
             if (errorTextOut != nullptr)
             {
-                *errorTextOut = QStringLiteral("编译失败：写入 rule 字符串池失败。");
+                *errorTextOut = kernelText("kernel.callback.rules.compile.rule_pool_failed", QStringLiteral("编译失败：写入 rule 字符串池失败。"));
             }
             return false;
         }
@@ -610,7 +618,7 @@ bool buildCallbackRuleBlobFromConfig(
     {
         if (errorTextOut != nullptr)
         {
-            *errorTextOut = QStringLiteral("编译失败：blob 大小不一致。");
+            *errorTextOut = kernelText("kernel.callback.rules.compile.blob_size_mismatch", QStringLiteral("编译失败：blob 大小不一致。"));
         }
         return false;
     }
