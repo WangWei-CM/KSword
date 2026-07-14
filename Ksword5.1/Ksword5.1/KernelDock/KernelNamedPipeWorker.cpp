@@ -3,6 +3,7 @@
 #endif
 
 #include "KernelNamedPipeWorker.h"
+#include "KernelDock.h"
 
 // ============================================================
 // KernelNamedPipeWorker.cpp
@@ -24,6 +25,8 @@
 #include <limits>
 #include <set>
 #include <vector>
+
+using ksword::kernel_dock_internal::kernelText;
 
 #include <Windows.h>
 #include <Winternl.h>
@@ -255,7 +258,7 @@ namespace
         }
         if (apiOut.ntdllModule == nullptr)
         {
-            errorTextOut = QStringLiteral("加载 ntdll.dll 失败。");
+            errorTextOut = kernelText("kernel.named_pipe.worker.load_ntdll_failed", QStringLiteral("加载 ntdll.dll 失败。"));
             return false;
         }
 
@@ -265,7 +268,7 @@ namespace
             ::GetProcAddress(apiOut.ntdllModule, "NtQueryDirectoryFile"));
         if (apiOut.openFile == nullptr || apiOut.queryDirectoryFile == nullptr)
         {
-            errorTextOut = QStringLiteral("解析 NtOpenFile/NtQueryDirectoryFile 失败。");
+            errorTextOut = kernelText("kernel.named_pipe.worker.resolve_api_failed", QStringLiteral("解析 NtOpenFile/NtQueryDirectoryFile 失败。"));
             return false;
         }
         return true;
@@ -316,7 +319,7 @@ namespace
         errorTextOut.clear();
         if (validBytes < sizeof(KsFileDirectoryInformation))
         {
-            errorTextOut = QStringLiteral("NtQueryDirectoryFile 返回缓冲区过小。");
+            errorTextOut = kernelText("kernel.named_pipe.worker.buffer_too_small", QStringLiteral("NtQueryDirectoryFile 返回缓冲区过小。"));
             return false;
         }
 
@@ -326,7 +329,7 @@ namespace
         {
             if (++guardCount > kMaximumPipeRowsPerDirectory)
             {
-                errorTextOut = QStringLiteral("目录项数量超过保护上限。");
+                errorTextOut = kernelText("kernel.named_pipe.worker.row_limit", QStringLiteral("目录项数量超过保护上限。"));
                 return false;
             }
 
@@ -335,7 +338,7 @@ namespace
             const std::size_t recordMinimumBytes = offsetof(KsFileDirectoryInformation, FileName) + fileNameBytes;
             if (offset + recordMinimumBytes > validBytes)
             {
-                errorTextOut = QStringLiteral("目录项文件名越过返回缓冲区。");
+                errorTextOut = kernelText("kernel.named_pipe.worker.filename_out_of_bounds", QStringLiteral("目录项文件名越过返回缓冲区。"));
                 return false;
             }
 
@@ -424,7 +427,7 @@ namespace
             if (queryStatus == kStatusNoMoreFiles)
             {
                 directoryStatusOut.querySucceeded = true;
-                directoryStatusOut.statusText = QStringLiteral("%1 (枚举完成)")
+                directoryStatusOut.statusText = kernelText("kernel.named_pipe.worker.directory_completed", QStringLiteral("%1 (枚举完成)"))
                     .arg(ntStatusToText(api.ntdllModule, queryStatus));
                 directoryStatusOut.returnedRows = emittedRows;
                 return true;
@@ -435,7 +438,7 @@ namespace
                 if (bufferSize >= kMaximumDirectoryBufferBytes)
                 {
                     directoryStatusOut.querySucceeded = false;
-                    directoryStatusOut.statusText = QStringLiteral("%1 (缓冲区已达上限)")
+                    directoryStatusOut.statusText = kernelText("kernel.named_pipe.worker.buffer_limit", QStringLiteral("%1 (缓冲区已达上限)"))
                         .arg(ntStatusToText(api.ntdllModule, queryStatus));
                     directoryStatusOut.returnedRows = emittedRows;
                     return false;
@@ -469,7 +472,7 @@ namespace
             if (emittedRows >= kMaximumPipeRowsPerDirectory)
             {
                 directoryStatusOut.querySucceeded = true;
-                directoryStatusOut.statusText = QStringLiteral("达到单目录保护上限，结果已截断。");
+                directoryStatusOut.statusText = kernelText("kernel.named_pipe.worker.directory_row_limit", QStringLiteral("达到单目录保护上限，结果已截断。"));
                 directoryStatusOut.returnedRows = emittedRows;
                 return true;
             }
@@ -546,7 +549,7 @@ KernelNamedPipeSnapshot runKernelNamedPipeSnapshotTask()
     snapshot.elapsedMs = static_cast<std::uint64_t>(
         std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - beginTime).count());
-    snapshot.summaryText = QStringLiteral("候选路径:%1 | 成功路径:%2 | 管道:%3 | %4 ms")
+    snapshot.summaryText = kernelText("kernel.named_pipe.worker.summary", QStringLiteral("候选路径:%1 | 成功路径:%2 | 管道:%3 | %4 ms"))
         .arg(static_cast<qulonglong>(snapshot.directories.size()))
         .arg(static_cast<qulonglong>(std::count_if(
             snapshot.directories.begin(),
@@ -556,7 +559,7 @@ KernelNamedPipeSnapshot runKernelNamedPipeSnapshotTask()
         .arg(static_cast<qulonglong>(snapshot.elapsedMs));
     if (!snapshot.anyQuerySucceeded)
     {
-        snapshot.errorText = QStringLiteral("所有 Named Pipe 候选目录均未成功枚举，请查看详情面板中的 NTSTATUS。");
+        snapshot.errorText = kernelText("kernel.named_pipe.worker.all_candidates_failed", QStringLiteral("所有 Named Pipe 候选目录均未成功枚举，请查看详情面板中的 NTSTATUS。"));
     }
     return snapshot;
 }

@@ -1,4 +1,5 @@
 #include "KernelNamedPipeTab.h"
+#include "KernelDock.h"
 
 // ============================================================
 // KernelNamedPipeTab.cpp
@@ -36,6 +37,8 @@
 
 #include <algorithm>
 
+using ksword::kernel_dock_internal::kernelText;
+
 namespace
 {
     QString tableColumnText(const KernelNamedPipeEntry& row, const KernelNamedPipeTab::TableColumn column)
@@ -62,7 +65,7 @@ namespace
     QString buildDirectoryStatusText(const KernelNamedPipeSnapshot& snapshot)
     {
         QStringList lines;
-        lines << QStringLiteral("[路径候选状态]");
+        lines << kernelText("kernel.named_pipe.detail.directory_status_heading", QStringLiteral("[路径候选状态]"));
         for (const KernelNamedPipeDirectoryStatus& status : snapshot.directories)
         {
             lines << QStringLiteral("- %1 | open=%2 | query=%3 | rows=%4 | status=%5")
@@ -79,11 +82,11 @@ namespace
     {
         if (row == nullptr)
         {
-            return QStringLiteral("[当前行]\n<未选择>");
+            return kernelText("kernel.named_pipe.detail.no_selection", QStringLiteral("[当前行]\n<未选择>"));
         }
 
         QStringList lines;
-        lines << QStringLiteral("[当前行]");
+        lines << kernelText("kernel.named_pipe.detail.current_row_heading", QStringLiteral("[当前行]"));
         lines << QStringLiteral("Pipe Name: %1").arg(row->pipeName);
         lines << QStringLiteral("NT Path: %1").arg(row->ntPath);
         lines << QStringLiteral("Source Directory: %1").arg(row->sourceDirectory);
@@ -125,28 +128,28 @@ void KernelNamedPipeTab::initializeUi()
     m_refreshButton->setIcon(QIcon(":/Icon/handle_refresh.svg"));
     m_refreshButton->setIconSize(QSize(16, 16));
     m_refreshButton->setFixedSize(28, 28);
-    m_refreshButton->setToolTip(QStringLiteral("刷新命名管道列表"));
+    m_refreshButton->setToolTip(kernelText("kernel.named_pipe.toolbar.refresh.tooltip", QStringLiteral("刷新命名管道列表")));
     m_refreshButton->setStyleSheet(KswordTheme::ThemedButtonStyle());
 
     m_copyButton = new QPushButton(this);
     m_copyButton->setIcon(QIcon(":/Icon/handle_copy_row.svg"));
     m_copyButton->setIconSize(QSize(16, 16));
     m_copyButton->setFixedSize(28, 28);
-    m_copyButton->setToolTip(QStringLiteral("复制当前行"));
+    m_copyButton->setToolTip(kernelText("kernel.named_pipe.toolbar.copy.tooltip", QStringLiteral("复制当前行")));
     m_copyButton->setStyleSheet(KswordTheme::ThemedButtonStyle());
 
     m_detailButton = new QPushButton(this);
     m_detailButton->setIcon(QIcon(":/Icon/process_details.svg"));
     m_detailButton->setIconSize(QSize(16, 16));
     m_detailButton->setFixedSize(28, 28);
-    m_detailButton->setToolTip(QStringLiteral("刷新详情面板"));
+    m_detailButton->setToolTip(kernelText("kernel.named_pipe.toolbar.detail.tooltip", QStringLiteral("刷新详情面板")));
     m_detailButton->setStyleSheet(KswordTheme::ThemedButtonStyle());
 
     m_filterEdit = new QLineEdit(this);
-    m_filterEdit->setPlaceholderText(QStringLiteral("过滤管道名、NT路径、状态"));
+    m_filterEdit->setPlaceholderText(kernelText("kernel.named_pipe.toolbar.filter.placeholder", QStringLiteral("过滤管道名、NT路径、状态")));
     m_filterEdit->setClearButtonEnabled(true);
 
-    m_statusLabel = new QLabel(QStringLiteral("● 等待刷新"), this);
+    m_statusLabel = new QLabel(kernelText("kernel.named_pipe.status.waiting", QStringLiteral("● 等待刷新")), this);
     m_statusLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
     m_statusLabel->setStyleSheet(QStringLiteral("color:%1;font-weight:600;").arg(KswordTheme::TextSecondaryHex()));
 
@@ -188,9 +191,11 @@ void KernelNamedPipeTab::initializeUi()
     m_detailEdit = new CodeEditorWidget(this);
     m_detailEdit->setReadOnly(true);
     m_detailEdit->setMinimumHeight(150);
-    m_detailEdit->setText(QStringLiteral(
-        "说明：命名管道属于 NPFS 文件系统目录枚举，本页使用 NtOpenFile + NtQueryDirectoryFile 读取 \\Device\\NamedPipe。"
-        "\n这不是 NtQueryDirectoryObject 下钻，也不是系统句柄表枚举。"));
+    m_detailEdit->setText(kernelText(
+        "kernel.named_pipe.detail.intro",
+        QStringLiteral(
+            "说明：命名管道属于 NPFS 文件系统目录枚举，本页使用 NtOpenFile + NtQueryDirectoryFile 读取 \\Device\\NamedPipe。"
+            "\n这不是 NtQueryDirectoryObject 下钻，也不是系统句柄表枚举。")));
 
     m_rootLayout->addWidget(m_resultTable, 1);
     m_rootLayout->addWidget(m_detailEdit, 0);
@@ -239,7 +244,7 @@ void KernelNamedPipeTab::requestRefresh(const bool forceRefresh)
     const std::uint64_t currentTicket = ++m_refreshTicket;
     m_refreshInProgress = true;
     m_refreshButton->setEnabled(false);
-    m_statusLabel->setText(QStringLiteral("● 正在枚举 NPFS Named Pipe 目录..."));
+    m_statusLabel->setText(kernelText("kernel.named_pipe.status.enumerating", QStringLiteral("● 正在枚举 NPFS Named Pipe 目录...")));
     m_statusLabel->setStyleSheet(QStringLiteral("color:%1;font-weight:700;").arg(KswordTheme::PrimaryBlueHex));
 
     QPointer<KernelNamedPipeTab> guardThis(this);
@@ -286,11 +291,11 @@ void KernelNamedPipeTab::applySnapshot(
     m_refreshButton->setEnabled(true);
 
     QString statusText = snapshot.taskSucceeded
-        ? QStringLiteral("● 刷新完成 | %1").arg(snapshot.summaryText)
-        : QStringLiteral("● 刷新失败 | %1").arg(snapshot.errorText);
+        ? kernelText("kernel.named_pipe.status.completed", QStringLiteral("● 刷新完成 | %1")).arg(snapshot.summaryText)
+        : kernelText("kernel.named_pipe.status.failed", QStringLiteral("● 刷新失败 | %1")).arg(snapshot.errorText);
     if (!snapshot.errorText.trimmed().isEmpty() && snapshot.taskSucceeded)
     {
-        statusText += QStringLiteral(" | %1").arg(snapshot.errorText);
+        statusText += kernelText("kernel.named_pipe.status.additional_error", QStringLiteral(" | %1")).arg(snapshot.errorText);
     }
     m_statusLabel->setText(statusText);
     m_statusLabel->setStyleSheet(
@@ -374,9 +379,9 @@ void KernelNamedPipeTab::updateDetailPanel()
     }
 
     QStringList detailLines;
-    detailLines << QStringLiteral("[说明]");
-    detailLines << QStringLiteral("命名管道属于 NPFS 文件系统目录枚举，本页使用 NtOpenFile + NtQueryDirectoryFile 读取 \\Device\\NamedPipe 或等价路径。");
-    detailLines << QStringLiteral("这不是 NtQueryDirectoryObject 下钻，也不是系统句柄表枚举；因此不会列出持有管道句柄的进程。");
+    detailLines << kernelText("kernel.named_pipe.detail.explanation_heading", QStringLiteral("[说明]"));
+    detailLines << kernelText("kernel.named_pipe.detail.explanation.enumeration", QStringLiteral("命名管道属于 NPFS 文件系统目录枚举，本页使用 NtOpenFile + NtQueryDirectoryFile 读取 \\Device\\NamedPipe 或等价路径。"));
+    detailLines << kernelText("kernel.named_pipe.detail.explanation.scope", QStringLiteral("这不是 NtQueryDirectoryObject 下钻，也不是系统句柄表枚举；因此不会列出持有管道句柄的进程。"));
     detailLines << QString();
     detailLines << buildDirectoryStatusText(m_lastSnapshot);
     detailLines << QString();
@@ -415,8 +420,8 @@ void KernelNamedPipeTab::showContextMenu(const QPoint& localPosition)
 
     QMenu menu(this);
     menu.setStyleSheet(KswordTheme::ContextMenuStyle());
-    QAction* copyRowAction = menu.addAction(QIcon(":/Icon/handle_copy_row.svg"), QStringLiteral("复制当前行"));
-    QAction* detailAction = menu.addAction(QIcon(":/Icon/process_details.svg"), QStringLiteral("刷新详情"));
+    QAction* copyRowAction = menu.addAction(QIcon(":/Icon/handle_copy_row.svg"), kernelText("kernel.named_pipe.menu.copy_row", QStringLiteral("复制当前行")));
+    QAction* detailAction = menu.addAction(QIcon(":/Icon/process_details.svg"), kernelText("kernel.named_pipe.menu.refresh_detail", QStringLiteral("刷新详情")));
 
     QAction* selectedAction = menu.exec(m_resultTable->viewport()->mapToGlobal(localPosition));
     if (selectedAction == nullptr)
