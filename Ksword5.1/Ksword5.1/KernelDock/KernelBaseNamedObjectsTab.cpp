@@ -1,4 +1,5 @@
 #include "KernelBaseNamedObjectsTab.h"
+#include "KernelDock.h"
 #include "../UI/VisibleTableWidget.h"
 
 // ============================================================
@@ -35,6 +36,8 @@
 #include <set>
 #include <thread>
 #include <utility>
+
+using ksword::kernel_dock_internal::kernelText;
 
 namespace
 {
@@ -163,7 +166,7 @@ namespace
             menu.setStyleSheet(tableMenuStyle());
             QAction* copyRowAction = menu.addAction(
                 QIcon(QStringLiteral(":/Icon/process_copy_row.svg")),
-                QStringLiteral("复制当前行"));
+                kernelText("kernel.base_named_objects.menu.copy_row", QStringLiteral("复制当前行")));
             copyRowAction->setEnabled(rowIndex >= 0 && rowIndex < table->rowCount());
             if (menu.exec(table->viewport()->mapToGlobal(localPosition)) == copyRowAction)
             {
@@ -197,28 +200,28 @@ void KernelBaseNamedObjectsTab::initializeUi()
         .arg(KswordTheme::TextPrimaryHex()));
     toolbarLayout->addWidget(titleLabel, 0);
 
-    m_refreshButton = new QPushButton(QStringLiteral("刷新"), this);
-    m_refreshButton->setToolTip(QStringLiteral("重新枚举 Global 与 Session BaseNamedObjects"));
+    m_refreshButton = new QPushButton(kernelText("kernel.base_named_objects.toolbar.refresh", QStringLiteral("刷新")), this);
+    m_refreshButton->setToolTip(kernelText("kernel.base_named_objects.toolbar.refresh.tooltip", QStringLiteral("重新枚举 Global 与 Session BaseNamedObjects")));
     m_refreshButton->setStyleSheet(buttonStyle());
     toolbarLayout->addWidget(m_refreshButton, 0);
 
     m_sessionFilterCombo = new QComboBox(this);
-    m_sessionFilterCombo->setToolTip(QStringLiteral("按 Global / Session 过滤"));
+    m_sessionFilterCombo->setToolTip(kernelText("kernel.base_named_objects.toolbar.session_filter.tooltip", QStringLiteral("按 Global / Session 过滤")));
     m_sessionFilterCombo->setStyleSheet(inputStyle());
     toolbarLayout->addWidget(m_sessionFilterCombo, 0);
 
     m_typeFilterCombo = new QComboBox(this);
-    m_typeFilterCombo->setToolTip(QStringLiteral("按对象类型过滤"));
+    m_typeFilterCombo->setToolTip(kernelText("kernel.base_named_objects.toolbar.type_filter.tooltip", QStringLiteral("按对象类型过滤")));
     m_typeFilterCombo->setStyleSheet(inputStyle());
     toolbarLayout->addWidget(m_typeFilterCombo, 0);
 
     m_keywordFilterEdit = new QLineEdit(this);
-    m_keywordFilterEdit->setPlaceholderText(QStringLiteral("过滤 scope / 目录 / 名称 / 类型 / 目标 / 状态"));
+    m_keywordFilterEdit->setPlaceholderText(kernelText("kernel.base_named_objects.toolbar.keyword_filter.placeholder", QStringLiteral("过滤 scope / 目录 / 名称 / 类型 / 目标 / 状态")));
     m_keywordFilterEdit->setClearButtonEnabled(true);
     m_keywordFilterEdit->setStyleSheet(inputStyle());
     toolbarLayout->addWidget(m_keywordFilterEdit, 1);
 
-    m_statusLabel = new QLabel(QStringLiteral("等待刷新"), this);
+    m_statusLabel = new QLabel(kernelText("kernel.base_named_objects.status.waiting", QStringLiteral("等待刷新")), this);
     m_statusLabel->setStyleSheet(QStringLiteral("color:%1;").arg(KswordTheme::TextSecondaryHex()));
     toolbarLayout->addWidget(m_statusLabel, 0);
     m_rootLayout->addLayout(toolbarLayout, 0);
@@ -270,7 +273,7 @@ void KernelBaseNamedObjectsTab::refreshSnapshotAsync(const bool forceRefresh)
     {
         if (forceRefresh)
         {
-            setStatusText(QStringLiteral("正在刷新，请稍候。"));
+            setStatusText(kernelText("kernel.base_named_objects.status.already_refreshing", QStringLiteral("正在刷新，请稍候。")));
         }
         return;
     }
@@ -279,7 +282,9 @@ void KernelBaseNamedObjectsTab::refreshSnapshotAsync(const bool forceRefresh)
     {
         m_refreshButton->setEnabled(false);
     }
-    setStatusText(forceRefresh ? QStringLiteral("正在刷新...") : QStringLiteral("正在加载..."));
+    setStatusText(forceRefresh
+        ? kernelText("kernel.base_named_objects.status.refreshing", QStringLiteral("正在刷新..."))
+        : kernelText("kernel.base_named_objects.status.loading", QStringLiteral("正在加载...")));
 
     QPointer<KernelBaseNamedObjectsTab> safeThis(this);
     std::thread([safeThis]() {
@@ -307,7 +312,7 @@ void KernelBaseNamedObjectsTab::refreshSnapshotAsync(const bool forceRefresh)
                 }
                 if (!success)
                 {
-                    safeThis->setStatusText(QStringLiteral("刷新失败：%1").arg(errorText));
+                    safeThis->setStatusText(kernelText("kernel.base_named_objects.status.refresh_failed", QStringLiteral("刷新失败：%1")).arg(errorText));
                     return;
                 }
                 safeThis->populateTable(rows);
@@ -359,8 +364,8 @@ void KernelBaseNamedObjectsTab::rebuildFilterOptions()
     m_typeFilterCombo->blockSignals(true);
     m_sessionFilterCombo->clear();
     m_typeFilterCombo->clear();
-    m_sessionFilterCombo->addItem(QStringLiteral("全部 Session"), QStringLiteral("*"));
-    m_typeFilterCombo->addItem(QStringLiteral("全部类型"), QStringLiteral("*"));
+    m_sessionFilterCombo->addItem(kernelText("kernel.base_named_objects.filter.all_sessions", QStringLiteral("全部 Session")), QStringLiteral("*"));
+    m_typeFilterCombo->addItem(kernelText("kernel.base_named_objects.filter.all_types", QStringLiteral("全部类型")), QStringLiteral("*"));
 
     std::set<QString> sessionKeys;
     std::set<QString> typeKeys;
@@ -419,7 +424,9 @@ void KernelBaseNamedObjectsTab::applyFilters()
         }
     }
 
-    setStatusText(QStringLiteral("共 %1 项，当前显示 %2 项").arg(m_rows.size()).arg(visibleCount));
+    setStatusText(kernelText("kernel.base_named_objects.status.summary", QStringLiteral("共 %1 项，当前显示 %2 项"))
+        .arg(m_rows.size())
+        .arg(visibleCount));
 }
 
 bool KernelBaseNamedObjectsTab::rowMatchesFilters(const KernelBaseNamedObjectEntry& entry) const

@@ -1,4 +1,5 @@
 #include "KernelBaseNamedObjectsWorker.h"
+#include "KernelDock.h"
 
 // ============================================================
 // KernelBaseNamedObjectsWorker.cpp
@@ -15,6 +16,8 @@
 #include <set>
 #include <utility>
 #include <vector>
+
+using ksword::kernel_dock_internal::kernelText;
 
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -215,7 +218,7 @@ namespace
         }
         if (apiOut.ntdllModule == nullptr)
         {
-            errorTextOut = QStringLiteral("加载 ntdll.dll 失败。");
+        errorTextOut = kernelText("kernel.base_named_objects.worker.load_ntdll_failed", QStringLiteral("加载 ntdll.dll 失败。"));
             return false;
         }
 
@@ -233,7 +236,7 @@ namespace
             || apiOut.openSymbolicLinkObject == nullptr
             || apiOut.querySymbolicLinkObject == nullptr)
         {
-            errorTextOut = QStringLiteral("解析对象目录 Nt API 失败。");
+        errorTextOut = kernelText("kernel.base_named_objects.worker.resolve_api_failed", QStringLiteral("解析对象目录 Nt API 失败。"));
             return false;
         }
         return true;
@@ -349,7 +352,7 @@ namespace
             }
         }
 
-        statusTextOut = QStringLiteral("目录项超过上限，结果已截断。");
+        statusTextOut = kernelText("kernel.base_named_objects.worker.directory_limit", QStringLiteral("目录项超过上限，结果已截断。"));
         return true;
     }
 
@@ -403,7 +406,7 @@ namespace
                 static_cast<ULONG>(returnLength / sizeof(wchar_t) + 8U));
         }
 
-        statusTextOut = QStringLiteral("符号链接目标解析重试达到上限。");
+        statusTextOut = kernelText("kernel.base_named_objects.worker.symbolic_link_retry_limit", QStringLiteral("符号链接目标解析重试达到上限。"));
         return false;
     }
 
@@ -534,7 +537,7 @@ bool runBaseNamedObjectsSnapshotTask(
             failureEntry.objectTypeText = QStringLiteral("Directory");
             failureEntry.typeCategoryText = QStringLiteral("Directory");
             failureEntry.fullPathText = spec.pathText;
-            failureEntry.statusText = QStringLiteral("目录枚举失败：%1").arg(directoryStatusText);
+            failureEntry.statusText = kernelText("kernel.base_named_objects.worker.directory_failed", QStringLiteral("目录枚举失败：%1")).arg(directoryStatusText);
             failureEntry.sessionId = spec.sessionId;
             failureEntry.hasSessionId = spec.hasSessionId;
             resultRows.push_back(std::move(failureEntry));
@@ -557,7 +560,7 @@ bool runBaseNamedObjectsSnapshotTask(
 
             if (entry.typeCategoryText == QStringLiteral("Directory"))
             {
-                entry.statusText = QStringLiteral("%1；Directory，可继续枚举").arg(directoryStatusText);
+                entry.statusText = kernelText("kernel.base_named_objects.worker.directory_enumerable", QStringLiteral("%1；Directory，可继续枚举")).arg(directoryStatusText);
             }
             else if (entry.typeCategoryText == QStringLiteral("SymbolicLink"))
             {
