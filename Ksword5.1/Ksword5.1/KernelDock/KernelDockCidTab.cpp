@@ -1,4 +1,5 @@
 #include "KernelDockCidTab.h"
+#include "KernelDock.h"
 #include "../UI/VisibleTableWidget.h"
 
 // ============================================================
@@ -40,6 +41,8 @@
 #include <cstddef>
 #include <thread>
 #include <utility>
+
+using ksword::kernel_dock_internal::kernelText;
 
 namespace
 {
@@ -107,9 +110,19 @@ namespace
         return QStringLiteral("color:%1;font-weight:600;").arg(colorHex);
     }
 
-    QString safeText(const QString& valueText, const QString& fallbackText = QStringLiteral("<空>"))
+    QString safeText(const QString& valueText, const QString& fallbackText)
     {
         return valueText.trimmed().isEmpty() ? fallbackText : valueText;
+    }
+
+    QString safeText(const QString& valueText)
+    {
+        return safeText(valueText, kernelText("kernel.cid.placeholder.empty", QStringLiteral("<空>")));
+    }
+
+    QString emptyText()
+    {
+        return kernelText("kernel.cid.placeholder.empty", QStringLiteral("<空>"));
     }
 
     QString friendlyIoMessage(const QString& messageText)
@@ -121,21 +134,21 @@ namespace
         const QString trimmedText = messageText.trimmed();
         if (trimmedText.isEmpty())
         {
-            return QStringLiteral("无额外驱动消息");
+            return kernelText("kernel.cid.message.no_driver_message", QStringLiteral("无额外驱动消息"));
         }
         if (trimmedText.contains(QStringLiteral("DeviceIoControl"), Qt::CaseInsensitive))
         {
-            return QStringLiteral("驱动接口调用失败或当前驱动版本不匹配");
+            return kernelText("kernel.cid.message.device_io_failure", QStringLiteral("驱动接口调用失败或当前驱动版本不匹配"));
         }
         if (trimmedText.contains(QStringLiteral("unsupported"), Qt::CaseInsensitive) ||
             trimmedText.contains(QStringLiteral("not supported"), Qt::CaseInsensitive))
         {
-            return QStringLiteral("当前驱动不支持该 CID/cross-view 查询入口");
+            return kernelText("kernel.cid.message.unsupported", QStringLiteral("当前驱动不支持该 CID/cross-view 查询入口"));
         }
         if (trimmedText.contains(QStringLiteral("capability"), Qt::CaseInsensitive) ||
             trimmedText.contains(QStringLiteral("DynData"), Qt::CaseInsensitive))
         {
-            return QStringLiteral("动态偏移能力未满足，请先查看 DynData/Capability 状态");
+            return kernelText("kernel.cid.message.capability", QStringLiteral("动态偏移能力未满足，请先查看 DynData/Capability 状态"));
         }
         return trimmedText;
     }
@@ -170,19 +183,19 @@ void KernelDockCidTab::initializeUi()
 
     m_refreshButton = new QPushButton(QIcon(":/Icon/process_refresh.svg"), QString(), this);
     m_refreshButton->setFixedWidth(34);
-    m_refreshButton->setToolTip(QStringLiteral("刷新 CID / cross-view 证据"));
+    m_refreshButton->setToolTip(kernelText("kernel.cid.toolbar.refresh.tooltip", QStringLiteral("刷新 CID / cross-view 证据")));
     m_refreshButton->setStyleSheet(blueButtonStyle());
 
     m_filterEdit = new QLineEdit(this);
-    m_filterEdit->setPlaceholderText(QStringLiteral("按类型/PID/TID/地址/状态/异常/详情筛选"));
+    m_filterEdit->setPlaceholderText(kernelText("kernel.cid.toolbar.filter.placeholder", QStringLiteral("按类型/PID/TID/地址/状态/异常/详情筛选")));
     m_filterEdit->setClearButtonEnabled(true);
     m_filterEdit->setStyleSheet(blueInputStyle());
 
-    m_statusLabel = new QLabel(QStringLiteral("状态：等待刷新"), this);
+    m_statusLabel = new QLabel(kernelText("kernel.cid.status.waiting", QStringLiteral("状态：等待刷新")), this);
     m_statusLabel->setStyleSheet(statusLabelStyle(KswordTheme::TextSecondaryHex()));
 
     m_kernelBadgeLabel = new QLabel(this);
-    m_kernelBadgeLabel->setToolTip(QStringLiteral("Kernel/R0 CID 表和对象摘要查询入口标识"));
+    m_kernelBadgeLabel->setToolTip(kernelText("kernel.cid.badge.tooltip", QStringLiteral("Kernel/R0 CID 表和对象摘要查询入口标识")));
     m_kernelBadgeLabel->setPixmap(QPixmap(QStringLiteral(":/Image/kernel_badge.png")).scaled(
         20,
         20,
@@ -199,20 +212,20 @@ void KernelDockCidTab::initializeUi()
     m_table = new ks::ui::VisibleTableWidget(this);
     m_table->setColumnCount(static_cast<int>(CidColumn::Count));
     m_table->setHorizontalHeaderLabels(QStringList{
-        QStringLiteral("类型"),
+        kernelText("kernel.cid.header.kind", QStringLiteral("类型")),
         QStringLiteral("CID"),
         QStringLiteral("PID"),
         QStringLiteral("TID"),
-        QStringLiteral("图像"),
-        QStringLiteral("对象地址"),
-        QStringLiteral("起始地址"),
+        kernelText("kernel.cid.header.image", QStringLiteral("图像")),
+        kernelText("kernel.cid.header.object_address", QStringLiteral("对象地址")),
+        kernelText("kernel.cid.header.start_address", QStringLiteral("起始地址")),
         QStringLiteral("SourceMask"),
         QStringLiteral("AnomalyFlags"),
         QStringLiteral("CID Flags"),
         QStringLiteral("Confidence"),
         QStringLiteral("DetailStatus"),
         QStringLiteral("Denoise"),
-        QStringLiteral("状态")
+        kernelText("kernel.cid.header.status", QStringLiteral("状态"))
         });
     m_table->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_table->setSelectionMode(QAbstractItemView::SingleSelection);
@@ -229,7 +242,7 @@ void KernelDockCidTab::initializeUi()
 
     m_detailEditor = new CodeEditorWidget(this);
     m_detailEditor->setReadOnly(true);
-    m_detailEditor->setText(QStringLiteral("请选择一条 cross-view 记录查看详情。"));
+    m_detailEditor->setText(kernelText("kernel.cid.detail.initial", QStringLiteral("请选择一条 cross-view 记录查看详情。")));
     rootLayout->addWidget(m_detailEditor, 1);
 }
 
@@ -261,7 +274,7 @@ void KernelDockCidTab::refreshAsync()
     }
 
     m_refreshButton->setEnabled(false);
-    m_statusLabel->setText(QStringLiteral("状态：刷新中..."));
+    m_statusLabel->setText(kernelText("kernel.cid.status.refreshing", QStringLiteral("状态：刷新中...")));
     m_statusLabel->setStyleSheet(statusLabelStyle(KswordTheme::PrimaryBlueHex));
 
     QPointer<KernelDockCidTab> guardThis(this);
@@ -323,7 +336,7 @@ void KernelDockCidTab::refreshAsync()
         }
         else
         {
-            errorText += QStringLiteral("进程 cross-view 失败: %1\n")
+            errorText += kernelText("kernel.cid.error.process", QStringLiteral("进程 cross-view 失败: %1\n"))
                 .arg(friendlyIoMessage(QString::fromStdString(processResult.io.message)));
         }
 
@@ -362,7 +375,7 @@ void KernelDockCidTab::refreshAsync()
         }
         else
         {
-            errorText += QStringLiteral("线程 cross-view 失败: %1\n")
+            errorText += kernelText("kernel.cid.error.thread", QStringLiteral("线程 cross-view 失败: %1\n"))
                 .arg(friendlyIoMessage(QString::fromStdString(threadResult.io.message)));
         }
 
@@ -401,7 +414,7 @@ void KernelDockCidTab::refreshAsync()
                     row.anomalyFlags |= KSWORD_ARK_CROSSVIEW_ANOMALY_PID_FIELD_MISMATCH;
                 }
                 row.imageNameText = cidKindText(entry.expectedObjectKind);
-                row.detailText = QStringLiteral("R0 CID table row：handleIndex=%1，lookupStatus=%2，referenceStatus=%3，flags=%4")
+                row.detailText = kernelText("kernel.cid.detail.raw_row", QStringLiteral("R0 CID table row：handleIndex=%1，lookupStatus=%2，referenceStatus=%3，flags=%4"))
                     .arg(entry.handleIndex)
                     .arg(statusLabelText(entry.lookupStatus))
                     .arg(statusLabelText(entry.referenceStatus))
@@ -411,7 +424,7 @@ void KernelDockCidTab::refreshAsync()
         }
         else
         {
-            errorText += QStringLiteral("R0 CID 表枚举失败: %1\n")
+            errorText += kernelText("kernel.cid.error.cid_table", QStringLiteral("R0 CID 表枚举失败: %1\n"))
                 .arg(friendlyIoMessage(QString::fromStdString(cidTableResult.io.message)));
         }
 
@@ -457,7 +470,7 @@ void KernelDockCidTab::applyRefreshResult(std::vector<CidEvidenceRow> rows, cons
 
     if (!success)
     {
-        m_statusLabel->setText(QStringLiteral("状态：刷新失败 - %1").arg(errorText));
+        m_statusLabel->setText(kernelText("kernel.cid.status.failed", QStringLiteral("状态：刷新失败 - %1")).arg(errorText));
         m_statusLabel->setStyleSheet(statusLabelStyle(QStringLiteral("#B23A3A")));
     }
 }
@@ -487,9 +500,9 @@ void KernelDockCidTab::rebuildTable()
         auto* kindItem = readOnlyItem(row.isRawCid
             ? QStringLiteral("CID/%1").arg(cidKindText(row.cidExpectedKind))
             : roleText(row.isThread));
-        auto* cidValueItem = readOnlyItem(row.cidValue == 0U ? QStringLiteral("<空>") : QString::number(row.cidValue));
-        auto* pidItem = readOnlyItem(row.processId == 0U ? QStringLiteral("<空>") : QString::number(row.processId));
-        auto* tidItem = readOnlyItem(row.isThread ? QString::number(row.threadId) : QStringLiteral("<空>"));
+        auto* cidValueItem = readOnlyItem(row.cidValue == 0U ? emptyText() : QString::number(row.cidValue));
+        auto* pidItem = readOnlyItem(row.processId == 0U ? emptyText() : QString::number(row.processId));
+        auto* tidItem = readOnlyItem(row.isThread ? QString::number(row.threadId) : emptyText());
         auto* imageItem = readOnlyItem(safeText(row.imageNameText));
         auto* objectItem = readOnlyItem(formatHex64(row.objectAddress));
         auto* startItem = readOnlyItem(formatHex64(row.startAddress));
@@ -532,16 +545,18 @@ void KernelDockCidTab::rebuildTable()
 
     m_table->setSortingEnabled(true);
     const QString cidSummaryText = m_cidSummary.queried
-        ? QStringLiteral("；PspCidTable=%1；CID returned/total=%2/%3；status=%4；truncated=%5；visited=%6/%7")
+        ? kernelText("kernel.cid.status.summary_detail", QStringLiteral("；PspCidTable=%1；CID returned/total=%2/%3；status=%4；truncated=%5；visited=%6/%7"))
             .arg(formatHex64(m_cidSummary.pspCidTableAddress))
             .arg(m_cidSummary.returnedCount)
             .arg(m_cidSummary.totalCount)
             .arg(cidEnumStatusText(m_cidSummary.status))
-            .arg(cidSummaryTruncated(m_cidSummary) ? QStringLiteral("是") : QStringLiteral("否"))
+            .arg(cidSummaryTruncated(m_cidSummary)
+                ? kernelText("kernel.cid.value.yes", QStringLiteral("是"))
+                : kernelText("kernel.cid.value.no", QStringLiteral("否")))
             .arg(m_cidSummary.visitedCount)
             .arg(m_cidSummary.maxVisitCount)
         : QString();
-    m_statusLabel->setText(QStringLiteral("状态：已加载 %1 项，显示 %2 项%3")
+    m_statusLabel->setText(kernelText("kernel.cid.status.loaded", QStringLiteral("状态：已加载 %1 项，显示 %2 项%3"))
         .arg(static_cast<qulonglong>(m_rows.size()))
         .arg(static_cast<qulonglong>(visibleCount))
         .arg(cidSummaryText));
@@ -554,11 +569,13 @@ void KernelDockCidTab::rebuildTable()
         // - 处理：插入一行可复制、可选中的诊断行，避免 CID 页看起来像渲染失败；
         // - 返回：无返回值，详情面板会从 UserRole + 2 读取展开文本。
         const QString reasonText = m_rows.empty()
-            ? QStringLiteral("本轮未返回任何 CID / cross-view 记录。")
-            : QStringLiteral("当前筛选条件没有命中 CID / cross-view 记录。");
+            ? kernelText("kernel.cid.empty.no_records", QStringLiteral("本轮未返回任何 CID / cross-view 记录。"))
+            : kernelText("kernel.cid.empty.no_matches", QStringLiteral("当前筛选条件没有命中 CID / cross-view 记录。"));
         const QString detailText = buildDiagnosticDetailText(reasonText);
         insertDiagnosticRow(
-            m_rows.empty() ? QStringLiteral("<无 CID 记录>") : QStringLiteral("<筛选无结果>"),
+            m_rows.empty()
+                ? kernelText("kernel.cid.placeholder.no_records", QStringLiteral("<无 CID 记录>"))
+                : kernelText("kernel.cid.placeholder.no_matches", QStringLiteral("<筛选无结果>")),
             reasonText,
             detailText);
         m_table->setCurrentCell(0, static_cast<int>(CidColumn::Kind));
@@ -592,7 +609,7 @@ void KernelDockCidTab::showContextMenu(const QPoint& localPosition)
 
     QMenu menu(this);
     menu.setStyleSheet(menuStyle());
-    QAction* copyRowAction = menu.addAction(QStringLiteral("复制当前行"));
+    QAction* copyRowAction = menu.addAction(kernelText("kernel.cid.menu.copy_row", QStringLiteral("复制当前行")));
     copyRowAction->setEnabled(m_table->currentRow() >= 0);
     const QAction* selectedAction = menu.exec(m_table->viewport()->mapToGlobal(localPosition));
     if (selectedAction == copyRowAction)
@@ -664,7 +681,7 @@ QString KernelDockCidTab::buildDetailText(const CidEvidenceRow* row) const
                 return diagnosticText;
             }
         }
-        return QStringLiteral("请选择一条 cross-view 记录查看详情。");
+        return kernelText("kernel.cid.detail.unavailable", QStringLiteral("请选择一条 cross-view 记录查看详情。"));
     }
 
     QStringList lines;
@@ -675,30 +692,32 @@ QString KernelDockCidTab::buildDetailText(const CidEvidenceRow* row) const
         lines << QStringLiteral("PspCidTable address：%1").arg(formatHex64(m_cidSummary.pspCidTableAddress));
         lines << QStringLiteral("returnedCount / totalCount：%1 / %2").arg(m_cidSummary.returnedCount).arg(m_cidSummary.totalCount);
         lines << QStringLiteral("status：%1 (%2)").arg(formatHex32(m_cidSummary.status), cidEnumStatusText(m_cidSummary.status));
-        lines << QStringLiteral("truncated：%1").arg(cidSummaryTruncated(m_cidSummary) ? QStringLiteral("是") : QStringLiteral("否"));
+        lines << kernelText("kernel.cid.detail.truncated", QStringLiteral("truncated：%1")).arg(cidSummaryTruncated(m_cidSummary)
+            ? kernelText("kernel.cid.value.yes", QStringLiteral("是"))
+            : kernelText("kernel.cid.value.no", QStringLiteral("否")));
         lines << QStringLiteral("visitedCount / maxVisitCount：%1 / %2").arg(m_cidSummary.visitedCount).arg(m_cidSummary.maxVisitCount);
         lines << QStringLiteral("responseFlags：%1").arg(formatHex32(m_cidSummary.flags));
         lines << QStringLiteral("lastStatus：%1").arg(statusLabelText(m_cidSummary.lastStatus));
         lines << QStringLiteral("DynDataCapabilityMask：%1").arg(formatHex64(m_cidSummary.dynDataCapabilityMask));
         lines << QStringLiteral("HtTableCodeOffset：%1").arg(formatHex32(m_cidSummary.htTableCodeOffset));
         lines << QStringLiteral("HteLowValueOffset：%1").arg(formatHex32(m_cidSummary.hteLowValueOffset));
-        lines << QStringLiteral("R3/R0 说明：%1").arg(safeText(m_cidSummary.messageText));
+        lines << kernelText("kernel.cid.detail.r3r0_note", QStringLiteral("R3/R0 说明：%1")).arg(safeText(m_cidSummary.messageText));
         lines << QStringLiteral("");
     }
-    lines << QStringLiteral("类型：%1").arg(roleText(row->isThread));
-    lines << QStringLiteral("来源：%1").arg(row->isRawCid ? QStringLiteral("R0 enumCidTable") : QStringLiteral("Process/Thread cross-view"));
-    lines << QStringLiteral("CID：%1").arg(row->cidValue == 0U ? QStringLiteral("<空>") : QString::number(row->cidValue));
-    lines << QStringLiteral("CID HandleIndex：%1").arg(row->cidHandleIndex);
-    lines << QStringLiteral("CID EntryKind：%1 (%2)").arg(formatHex32(row->cidExpectedKind), cidKindText(row->cidExpectedKind));
-    lines << QStringLiteral("CID EntryFlags：%1 (%2)").arg(formatHex32(row->cidEntryFlags), cidEntryFlagsText(row->cidEntryFlags));
-    lines << QStringLiteral("CID ReferenceStatus：%1").arg(statusLabelText(row->cidReferenceStatus));
+    lines << kernelText("kernel.cid.detail.kind", QStringLiteral("类型：%1")).arg(roleText(row->isThread));
+    lines << kernelText("kernel.cid.detail.source", QStringLiteral("来源：%1")).arg(row->isRawCid ? QStringLiteral("R0 enumCidTable") : QStringLiteral("Process/Thread cross-view"));
+    lines << kernelText("kernel.cid.detail.cid", QStringLiteral("CID：%1")).arg(row->cidValue == 0U ? emptyText() : QString::number(row->cidValue));
+    lines << kernelText("kernel.cid.detail.cid_handle_index", QStringLiteral("CID HandleIndex：%1")).arg(row->cidHandleIndex);
+    lines << kernelText("kernel.cid.detail.cid_entry_kind", QStringLiteral("CID EntryKind：%1 (%2)")).arg(formatHex32(row->cidExpectedKind), cidKindText(row->cidExpectedKind));
+    lines << kernelText("kernel.cid.detail.cid_entry_flags", QStringLiteral("CID EntryFlags：%1 (%2)")).arg(formatHex32(row->cidEntryFlags), cidEntryFlagsText(row->cidEntryFlags));
+    lines << kernelText("kernel.cid.detail.cid_reference_status", QStringLiteral("CID ReferenceStatus：%1")).arg(statusLabelText(row->cidReferenceStatus));
     lines << QStringLiteral("PID：%1").arg(row->processId);
-    lines << QStringLiteral("TID：%1").arg(row->threadId == 0U ? QStringLiteral("<空>") : QString::number(row->threadId));
-    lines << QStringLiteral("父 PID：%1").arg(row->parentProcessId == 0U ? QStringLiteral("<空>") : QString::number(row->parentProcessId));
-    lines << QStringLiteral("对象地址：%1").arg(formatHex64(row->objectAddress));
-    lines << QStringLiteral("进程对象地址：%1").arg(formatHex64(row->processObjectAddress));
-    lines << QStringLiteral("起始地址：%1").arg(formatHex64(row->startAddress));
-    lines << QStringLiteral("图像名：%1").arg(safeText(row->imageNameText));
+    lines << kernelText("kernel.cid.detail.tid", QStringLiteral("TID：%1")).arg(row->threadId == 0U ? emptyText() : QString::number(row->threadId));
+    lines << kernelText("kernel.cid.detail.parent_pid", QStringLiteral("父 PID：%1")).arg(row->parentProcessId == 0U ? emptyText() : QString::number(row->parentProcessId));
+    lines << kernelText("kernel.cid.detail.object_address", QStringLiteral("对象地址：%1")).arg(formatHex64(row->objectAddress));
+    lines << kernelText("kernel.cid.detail.process_object_address", QStringLiteral("进程对象地址：%1")).arg(formatHex64(row->processObjectAddress));
+    lines << kernelText("kernel.cid.detail.start_address", QStringLiteral("起始地址：%1")).arg(formatHex64(row->startAddress));
+    lines << kernelText("kernel.cid.detail.image", QStringLiteral("图像名：%1")).arg(safeText(row->imageNameText));
     lines << QStringLiteral("SourceMask：%1 (%2)").arg(formatHex32(row->sourceMask), sourceMaskText(row->sourceMask));
     lines << QStringLiteral("AnomalyFlags：%1 (%2)").arg(formatHex32(row->anomalyFlags), anomalyFlagsText(row->anomalyFlags));
     lines << QStringLiteral("Confidence：%1").arg(row->confidence);
@@ -706,21 +725,21 @@ QString KernelDockCidTab::buildDetailText(const CidEvidenceRow* row) const
     lines << QStringLiteral("DenoiseFlags：%1 (%2)").arg(formatHex32(row->denoiseFlags), denoiseFlagsText(row->denoiseFlags));
     lines << QStringLiteral("LastStatus：%1").arg(statusLabelText(row->lastStatus));
     lines << QStringLiteral("DynDataCapabilityMask：%1").arg(formatHex64(row->dynDataCapabilityMask));
-    lines << QStringLiteral("PublicProcessId：%1").arg(row->publicProcessId == 0U ? QStringLiteral("<空>") : QString::number(row->publicProcessId));
-    lines << QStringLiteral("ActiveListProcessId：%1").arg(row->activeListProcessId == 0U ? QStringLiteral("<空>") : QString::number(row->activeListProcessId));
-    lines << QStringLiteral("CidTableProcessId：%1").arg(row->cidTableProcessId == 0U ? QStringLiteral("<空>") : QString::number(row->cidTableProcessId));
-    lines << QStringLiteral("PublicThreadId：%1").arg(row->publicThreadId == 0U ? QStringLiteral("<空>") : QString::number(row->publicThreadId));
-    lines << QStringLiteral("ThreadListThreadId：%1").arg(row->threadListThreadId == 0U ? QStringLiteral("<空>") : QString::number(row->threadListThreadId));
-    lines << QStringLiteral("CidTableThreadId：%1").arg(row->cidTableThreadId == 0U ? QStringLiteral("<空>") : QString::number(row->cidTableThreadId));
-    lines << QStringLiteral("ThreadListProcessId：%1").arg(row->threadListProcessId == 0U ? QStringLiteral("<空>") : QString::number(row->threadListProcessId));
+    lines << QStringLiteral("PublicProcessId: %1").arg(row->publicProcessId == 0U ? emptyText() : QString::number(row->publicProcessId));
+    lines << QStringLiteral("ActiveListProcessId: %1").arg(row->activeListProcessId == 0U ? emptyText() : QString::number(row->activeListProcessId));
+    lines << QStringLiteral("CidTableProcessId: %1").arg(row->cidTableProcessId == 0U ? emptyText() : QString::number(row->cidTableProcessId));
+    lines << QStringLiteral("PublicThreadId: %1").arg(row->publicThreadId == 0U ? emptyText() : QString::number(row->publicThreadId));
+    lines << QStringLiteral("ThreadListThreadId: %1").arg(row->threadListThreadId == 0U ? emptyText() : QString::number(row->threadListThreadId));
+    lines << QStringLiteral("CidTableThreadId: %1").arg(row->cidTableThreadId == 0U ? emptyText() : QString::number(row->cidTableThreadId));
+    lines << QStringLiteral("ThreadListProcessId: %1").arg(row->threadListProcessId == 0U ? emptyText() : QString::number(row->threadListProcessId));
     lines << QStringLiteral("PublicWalkStatus：%1").arg(statusLabelText(row->publicWalkStatus));
     lines << QStringLiteral("ActiveListStatus：%1").arg(statusLabelText(row->activeListStatus));
     lines << QStringLiteral("ThreadListStatus：%1").arg(statusLabelText(row->threadListStatus));
     lines << QStringLiteral("CidTableStatus：%1").arg(statusLabelText(row->cidTableStatus));
     lines << QStringLiteral("StartAddressStatus：%1").arg(statusLabelText(row->startAddressStatus));
     lines << QStringLiteral("");
-    lines << QStringLiteral("详情：");
-    lines << safeText(row->detailText, QStringLiteral("<无详情>"));
+    lines << kernelText("kernel.cid.detail.detail_header", QStringLiteral("详情："));
+    lines << safeText(row->detailText, kernelText("kernel.cid.placeholder.no_detail", QStringLiteral("<无详情>")));
 
     const unsigned long targetKind = row->cidExpectedKind != KSWORD_ARK_CID_OBJECT_KIND_UNKNOWN
         ? row->cidExpectedKind
@@ -736,7 +755,7 @@ QString KernelDockCidTab::buildDetailText(const CidEvidenceRow* row) const
         const auto& response = summary.response;
         lines << QStringLiteral("");
         lines << QStringLiteral("[KernelObjectSummary]");
-        lines << QStringLiteral("IO：%1，unsupported=%2，说明=%3")
+        lines << kernelText("kernel.cid.detail.io_summary", QStringLiteral("IO：%1，unsupported=%2，说明=%3"))
             .arg(summary.io.ok ? QStringLiteral("OK") : QStringLiteral("FAIL"))
             .arg(summary.unsupported ? QStringLiteral("true") : QStringLiteral("false"))
             .arg(friendlyIoMessage(QString::fromStdString(summary.io.message)));
@@ -771,31 +790,35 @@ QString KernelDockCidTab::buildDiagnosticDetailText(const QString& reasonText) c
     // - 返回：给详情面板和诊断行复用的多行文本。
     QStringList lines;
     lines << QStringLiteral("[CID / CrossView Diagnostic]");
-    lines << QStringLiteral("原因：%1").arg(safeText(reasonText));
-    lines << QStringLiteral("当前筛选：%1").arg(m_filterEdit != nullptr
-        ? safeText(m_filterEdit->text().trimmed(), QStringLiteral("<无筛选>"))
-        : QStringLiteral("<无筛选控件>"));
-    lines << QStringLiteral("源记录总数：%1").arg(static_cast<qulonglong>(m_rows.size()));
+    lines << kernelText("kernel.cid.diagnostic.reason", QStringLiteral("原因：%1")).arg(safeText(reasonText));
+    lines << kernelText("kernel.cid.diagnostic.filter", QStringLiteral("当前筛选：%1")).arg(m_filterEdit != nullptr
+        ? safeText(m_filterEdit->text().trimmed(), kernelText("kernel.cid.placeholder.no_filter", QStringLiteral("<无筛选>")))
+        : kernelText("kernel.cid.placeholder.no_filter_widget", QStringLiteral("<无筛选控件>")));
+    lines << kernelText("kernel.cid.diagnostic.source_total", QStringLiteral("源记录总数：%1")).arg(static_cast<qulonglong>(m_rows.size()));
     if (m_cidSummary.queried)
     {
         lines << QStringLiteral("");
         lines << QStringLiteral("[R0 CID Table Summary]");
         lines << QStringLiteral("IO：%1").arg(m_cidSummary.ok ? QStringLiteral("OK") : QStringLiteral("Unavailable"));
-        lines << QStringLiteral("Unsupported：%1").arg(m_cidSummary.unsupported ? QStringLiteral("是") : QStringLiteral("否"));
+        lines << kernelText("kernel.cid.diagnostic.unsupported", QStringLiteral("Unsupported：%1")).arg(m_cidSummary.unsupported
+            ? kernelText("kernel.cid.value.yes", QStringLiteral("是"))
+            : kernelText("kernel.cid.value.no", QStringLiteral("否")));
         lines << QStringLiteral("PspCidTable：%1").arg(formatHex64(m_cidSummary.pspCidTableAddress));
         lines << QStringLiteral("returnedCount / totalCount：%1 / %2").arg(m_cidSummary.returnedCount).arg(m_cidSummary.totalCount);
         lines << QStringLiteral("visitedCount / maxVisitCount：%1 / %2").arg(m_cidSummary.visitedCount).arg(m_cidSummary.maxVisitCount);
         lines << QStringLiteral("status：%1 (%2)").arg(formatHex32(m_cidSummary.status), cidEnumStatusText(m_cidSummary.status));
-        lines << QStringLiteral("truncated：%1").arg(cidSummaryTruncated(m_cidSummary) ? QStringLiteral("是") : QStringLiteral("否"));
+        lines << kernelText("kernel.cid.diagnostic.truncated", QStringLiteral("truncated：%1")).arg(cidSummaryTruncated(m_cidSummary)
+            ? kernelText("kernel.cid.value.yes", QStringLiteral("是"))
+            : kernelText("kernel.cid.value.no", QStringLiteral("否")));
         lines << QStringLiteral("lastStatus：%1").arg(statusLabelText(m_cidSummary.lastStatus));
         lines << QStringLiteral("DynDataCapabilityMask：%1").arg(formatHex64(m_cidSummary.dynDataCapabilityMask));
-        lines << QStringLiteral("R3/R0 说明：%1").arg(safeText(m_cidSummary.messageText));
+        lines << kernelText("kernel.cid.detail.r3r0_note", QStringLiteral("R3/R0 说明：%1")).arg(safeText(m_cidSummary.messageText));
     }
     lines << QStringLiteral("");
-    lines << QStringLiteral("[排查建议]");
-    lines << QStringLiteral("1. 若显示 capability/DynData 不足，请先查看 Kernel -> DynData 页确认 Process/Thread/CID 相关能力位。");
-    lines << QStringLiteral("2. 若当前筛选不为空，清空筛选框后再确认是否有源记录。");
-    lines << QStringLiteral("3. 若 returnedCount 为 0 或 PspCidTable 为空，说明当前驱动/动态偏移还没有提供可用 CID 表证据。");
+    lines << kernelText("kernel.cid.diagnostic.recommendations", QStringLiteral("[排查建议]"));
+    lines << kernelText("kernel.cid.diagnostic.recommendation1", QStringLiteral("1. 若显示 capability/DynData 不足，请先查看 Kernel -> DynData 页确认 Process/Thread/CID 相关能力位。"));
+    lines << kernelText("kernel.cid.diagnostic.recommendation2", QStringLiteral("2. 若当前筛选不为空，清空筛选框后再确认是否有源记录。"));
+    lines << kernelText("kernel.cid.diagnostic.recommendation3", QStringLiteral("3. 若 returnedCount 为 0 或 PspCidTable 为空，说明当前驱动/动态偏移还没有提供可用 CID 表证据。"));
     return lines.join('\n');
 }
 
@@ -819,18 +842,18 @@ void KernelDockCidTab::insertDiagnosticRow(
     auto* kindItem = readOnlyItem(titleText);
     kindItem->setData(Qt::UserRole + 2, detailText);
     m_table->setItem(0, static_cast<int>(CidColumn::Kind), kindItem);
-    m_table->setItem(0, static_cast<int>(CidColumn::CidValue), readOnlyItem(QStringLiteral("<诊断>")));
-    m_table->setItem(0, static_cast<int>(CidColumn::ProcessId), readOnlyItem(QStringLiteral("<空>")));
-    m_table->setItem(0, static_cast<int>(CidColumn::ThreadId), readOnlyItem(QStringLiteral("<空>")));
+    m_table->setItem(0, static_cast<int>(CidColumn::CidValue), readOnlyItem(kernelText("kernel.cid.placeholder.diagnostic", QStringLiteral("<诊断>"))));
+    m_table->setItem(0, static_cast<int>(CidColumn::ProcessId), readOnlyItem(emptyText()));
+    m_table->setItem(0, static_cast<int>(CidColumn::ThreadId), readOnlyItem(emptyText()));
     m_table->setItem(0, static_cast<int>(CidColumn::Image), readOnlyItem(QStringLiteral("CID / CrossView")));
     m_table->setItem(0, static_cast<int>(CidColumn::ObjectAddress), readOnlyItem(formatHex64(0)));
     m_table->setItem(0, static_cast<int>(CidColumn::StartAddress), readOnlyItem(formatHex64(0)));
-    m_table->setItem(0, static_cast<int>(CidColumn::SourceMask), readOnlyItem(QStringLiteral("<无源>")));
-    m_table->setItem(0, static_cast<int>(CidColumn::AnomalyFlags), readOnlyItem(QStringLiteral("<无>")));
-    m_table->setItem(0, static_cast<int>(CidColumn::CidEntryFlags), readOnlyItem(QStringLiteral("<无>")));
+    m_table->setItem(0, static_cast<int>(CidColumn::SourceMask), readOnlyItem(kernelText("kernel.cid.placeholder.no_source", QStringLiteral("<无源>"))));
+    m_table->setItem(0, static_cast<int>(CidColumn::AnomalyFlags), readOnlyItem(kernelText("kernel.cid.placeholder.none", QStringLiteral("<无>"))));
+    m_table->setItem(0, static_cast<int>(CidColumn::CidEntryFlags), readOnlyItem(kernelText("kernel.cid.placeholder.none", QStringLiteral("<无>"))));
     m_table->setItem(0, static_cast<int>(CidColumn::Confidence), readOnlyItem(QStringLiteral("0")));
     m_table->setItem(0, static_cast<int>(CidColumn::DetailStatus), readOnlyItem(QStringLiteral("Diagnostic")));
-    m_table->setItem(0, static_cast<int>(CidColumn::Denoise), readOnlyItem(QStringLiteral("<无>")));
+    m_table->setItem(0, static_cast<int>(CidColumn::Denoise), readOnlyItem(kernelText("kernel.cid.placeholder.none", QStringLiteral("<无>"))));
     m_table->setItem(0, static_cast<int>(CidColumn::Status), readOnlyItem(statusText));
     m_table->setSortingEnabled(true);
 }
@@ -889,7 +912,7 @@ QString KernelDockCidTab::sourceMaskText(const std::uint32_t mask)
     if ((mask & KSWORD_ARK_CROSSVIEW_SOURCE_ACTIVE_LIST) != 0U) { parts << QStringLiteral("ActiveList"); }
     if ((mask & KSWORD_ARK_CROSSVIEW_SOURCE_CID_TABLE) != 0U) { parts << QStringLiteral("CidTable"); }
     if ((mask & KSWORD_ARK_CROSSVIEW_SOURCE_THREAD_LIST) != 0U) { parts << QStringLiteral("ThreadList"); }
-    if (parts.isEmpty()) { parts << QStringLiteral("<空>"); }
+    if (parts.isEmpty()) { parts << emptyText(); }
     return QStringLiteral("%1 [%2]").arg(formatHex32(mask), parts.join(QStringLiteral(", ")));
 }
 
@@ -905,7 +928,7 @@ QString KernelDockCidTab::anomalyFlagsText(const std::uint32_t flags)
     if ((flags & KSWORD_ARK_CROSSVIEW_ANOMALY_START_ADDRESS_OUTSIDE_MODULE) != 0U) { parts << QStringLiteral("START_ADDRESS_OUTSIDE_MODULE"); }
     if ((flags & KSWORD_ARK_CROSSVIEW_ANOMALY_DANGLING_OBJECT) != 0U) { parts << QStringLiteral("DANGLING_OBJECT"); }
     if ((flags & KSWORD_ARK_CROSSVIEW_ANOMALY_PID_FIELD_MISMATCH) != 0U) { parts << QStringLiteral("PID_FIELD_MISMATCH"); }
-    if (parts.isEmpty()) { parts << QStringLiteral("<空>"); }
+    if (parts.isEmpty()) { parts << emptyText(); }
     return QStringLiteral("%1 [%2]").arg(formatHex32(flags), parts.join(QStringLiteral(", ")));
 }
 
@@ -917,7 +940,7 @@ QString KernelDockCidTab::denoiseFlagsText(const std::uint32_t flags)
     if ((flags & KSWORD_ARK_CROSSVIEW_DENOISE_REFERENCE_FAILURE) != 0U) { parts << QStringLiteral("REFERENCE_FAILURE"); }
     if ((flags & KSWORD_ARK_CROSSVIEW_DENOISE_POSSIBLE_TERMINATING) != 0U) { parts << QStringLiteral("POSSIBLE_TERMINATING"); }
     if ((flags & KSWORD_ARK_CROSSVIEW_DENOISE_UNSUPPORTED_PDB_FIELD) != 0U) { parts << QStringLiteral("UNSUPPORTED_PDB_FIELD"); }
-    if (parts.isEmpty()) { parts << QStringLiteral("<空>"); }
+    if (parts.isEmpty()) { parts << emptyText(); }
     return QStringLiteral("%1 [%2]").arg(formatHex32(flags), parts.join(QStringLiteral(", ")));
 }
 
@@ -957,7 +980,7 @@ QString KernelDockCidTab::cidEntryFlagsText(const std::uint32_t flags)
     if ((flags & KSWORD_ARK_CID_ENTRY_FLAG_DANGLING) != 0U) { parts << QStringLiteral("DANGLING"); }
     if ((flags & KSWORD_ARK_CID_ENTRY_FLAG_TYPE_MISMATCH) != 0U) { parts << QStringLiteral("TYPE_MISMATCH"); }
     if ((flags & KSWORD_ARK_CID_ENTRY_FLAG_REFERENCED) != 0U) { parts << QStringLiteral("REFERENCED"); }
-    if (parts.isEmpty()) { parts << QStringLiteral("<空>"); }
+    if (parts.isEmpty()) { parts << emptyText(); }
     return QStringLiteral("%1 [%2]").arg(formatHex32(flags), parts.join(QStringLiteral(", ")));
 }
 
