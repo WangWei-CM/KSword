@@ -52,6 +52,8 @@
 #include <limits>
 #include <vector>
 
+using ksword::kernel_dock_internal::kernelText;
+
 namespace
 {
     enum class GroupColumn : int
@@ -202,34 +204,34 @@ namespace
         {
         case KSWORD_ARK_CALLBACK_TYPE_REGISTRY:
             return {
-                { QStringLiteral("允许"), KSWORD_ARK_RULE_ACTION_ALLOW },
-                { QStringLiteral("拒绝"), KSWORD_ARK_RULE_ACTION_DENY },
-                { QStringLiteral("询问用户"), KSWORD_ARK_RULE_ACTION_ASK_USER },
-                { QStringLiteral("记录日志"), KSWORD_ARK_RULE_ACTION_LOG_ONLY }
+                { kernelText("kernel.callback.intercept.action.allow", QStringLiteral("允许")), KSWORD_ARK_RULE_ACTION_ALLOW },
+                { kernelText("kernel.callback.intercept.action.deny", QStringLiteral("拒绝")), KSWORD_ARK_RULE_ACTION_DENY },
+                { kernelText("kernel.callback.intercept.action.ask_user", QStringLiteral("询问用户")), KSWORD_ARK_RULE_ACTION_ASK_USER },
+                { kernelText("kernel.callback.intercept.action.log_only", QStringLiteral("记录日志")), KSWORD_ARK_RULE_ACTION_LOG_ONLY }
             };
         case KSWORD_ARK_CALLBACK_TYPE_PROCESS_CREATE:
             return {
-                { QStringLiteral("允许"), KSWORD_ARK_RULE_ACTION_ALLOW },
-                { QStringLiteral("拒绝"), KSWORD_ARK_RULE_ACTION_DENY },
-                { QStringLiteral("记录日志"), KSWORD_ARK_RULE_ACTION_LOG_ONLY }
+                { kernelText("kernel.callback.intercept.action.allow", QStringLiteral("允许")), KSWORD_ARK_RULE_ACTION_ALLOW },
+                { kernelText("kernel.callback.intercept.action.deny", QStringLiteral("拒绝")), KSWORD_ARK_RULE_ACTION_DENY },
+                { kernelText("kernel.callback.intercept.action.log_only", QStringLiteral("记录日志")), KSWORD_ARK_RULE_ACTION_LOG_ONLY }
             };
         case KSWORD_ARK_CALLBACK_TYPE_THREAD_CREATE:
         case KSWORD_ARK_CALLBACK_TYPE_IMAGE_LOAD:
             return {
-                { QStringLiteral("记录日志"), KSWORD_ARK_RULE_ACTION_LOG_ONLY }
+                { kernelText("kernel.callback.intercept.action.log_only", QStringLiteral("记录日志")), KSWORD_ARK_RULE_ACTION_LOG_ONLY }
             };
         case KSWORD_ARK_CALLBACK_TYPE_OBJECT:
             return {
-                { QStringLiteral("允许"), KSWORD_ARK_RULE_ACTION_ALLOW },
-                { QStringLiteral("降权拦截"), KSWORD_ARK_RULE_ACTION_STRIP_ACCESS },
-                { QStringLiteral("记录日志"), KSWORD_ARK_RULE_ACTION_LOG_ONLY }
+                { kernelText("kernel.callback.intercept.action.allow", QStringLiteral("允许")), KSWORD_ARK_RULE_ACTION_ALLOW },
+                { kernelText("kernel.callback.intercept.action.strip_access", QStringLiteral("降权拦截")), KSWORD_ARK_RULE_ACTION_STRIP_ACCESS },
+                { kernelText("kernel.callback.intercept.action.log_only", QStringLiteral("记录日志")), KSWORD_ARK_RULE_ACTION_LOG_ONLY }
             };
         case KSWORD_ARK_CALLBACK_TYPE_MINIFILTER:
             return {
-                { QStringLiteral("允许"), KSWORD_ARK_RULE_ACTION_ALLOW },
-                { QStringLiteral("拒绝"), KSWORD_ARK_RULE_ACTION_DENY },
-                { QStringLiteral("询问用户"), KSWORD_ARK_RULE_ACTION_ASK_USER },
-                { QStringLiteral("记录日志"), KSWORD_ARK_RULE_ACTION_LOG_ONLY }
+                { kernelText("kernel.callback.intercept.action.allow", QStringLiteral("允许")), KSWORD_ARK_RULE_ACTION_ALLOW },
+                { kernelText("kernel.callback.intercept.action.deny", QStringLiteral("拒绝")), KSWORD_ARK_RULE_ACTION_DENY },
+                { kernelText("kernel.callback.intercept.action.ask_user", QStringLiteral("询问用户")), KSWORD_ARK_RULE_ACTION_ASK_USER },
+                { kernelText("kernel.callback.intercept.action.log_only", QStringLiteral("记录日志")), KSWORD_ARK_RULE_ACTION_LOG_ONLY }
             };
         default:
             return {};
@@ -244,17 +246,17 @@ namespace
             callbackType == KSWORD_ARK_CALLBACK_TYPE_MINIFILTER)
         {
             return {
-                { QStringLiteral("精确匹配"), KSWORD_ARK_MATCH_MODE_EXACT },
-                { QStringLiteral("前缀匹配"), KSWORD_ARK_MATCH_MODE_PREFIX },
-                { QStringLiteral("通配符匹配"), KSWORD_ARK_MATCH_MODE_WILDCARD },
-                { QStringLiteral("正则匹配"), KSWORD_ARK_MATCH_MODE_REGEX }
+                { kernelText("kernel.callback.intercept.match.exact", QStringLiteral("精确匹配")), KSWORD_ARK_MATCH_MODE_EXACT },
+                { kernelText("kernel.callback.intercept.match.prefix", QStringLiteral("前缀匹配")), KSWORD_ARK_MATCH_MODE_PREFIX },
+                { kernelText("kernel.callback.intercept.match.wildcard", QStringLiteral("通配符匹配")), KSWORD_ARK_MATCH_MODE_WILDCARD },
+                { kernelText("kernel.callback.intercept.match.regex", QStringLiteral("正则匹配")), KSWORD_ARK_MATCH_MODE_REGEX }
             };
         }
 
         return {
-            { QStringLiteral("精确匹配"), KSWORD_ARK_MATCH_MODE_EXACT },
-            { QStringLiteral("前缀匹配"), KSWORD_ARK_MATCH_MODE_PREFIX },
-            { QStringLiteral("通配符匹配"), KSWORD_ARK_MATCH_MODE_WILDCARD }
+            { kernelText("kernel.callback.intercept.match.exact", QStringLiteral("精确匹配")), KSWORD_ARK_MATCH_MODE_EXACT },
+            { kernelText("kernel.callback.intercept.match.prefix", QStringLiteral("前缀匹配")), KSWORD_ARK_MATCH_MODE_PREFIX },
+            { kernelText("kernel.callback.intercept.match.wildcard", QStringLiteral("通配符匹配")), KSWORD_ARK_MATCH_MODE_WILDCARD }
         };
     }
 
@@ -299,8 +301,8 @@ namespace
     QList<QPair<QString, quint32>> decisionOptionList()
     {
         return {
-            { QStringLiteral("允许"), KSWORD_ARK_DECISION_ALLOW },
-            { QStringLiteral("拒绝"), KSWORD_ARK_DECISION_DENY }
+            { kernelText("kernel.callback.intercept.decision.allow", QStringLiteral("允许")), KSWORD_ARK_DECISION_ALLOW },
+            { kernelText("kernel.callback.intercept.decision.deny", QStringLiteral("拒绝")), KSWORD_ARK_DECISION_DENY }
         };
     }
 
@@ -359,49 +361,49 @@ namespace
         {
         case KSWORD_ARK_CALLBACK_TYPE_REGISTRY:
             return {
-                { QStringLiteral("创建键"), KSWORD_ARK_REG_OP_CREATE_KEY },
-                { QStringLiteral("打开键"), KSWORD_ARK_REG_OP_OPEN_KEY },
-                { QStringLiteral("删除键"), KSWORD_ARK_REG_OP_DELETE_KEY },
-                { QStringLiteral("写入值"), KSWORD_ARK_REG_OP_SET_VALUE },
-                { QStringLiteral("删除值"), KSWORD_ARK_REG_OP_DELETE_VALUE },
-                { QStringLiteral("重命名键"), KSWORD_ARK_REG_OP_RENAME_KEY },
-                { QStringLiteral("设置键信息"), KSWORD_ARK_REG_OP_SET_INFO },
-                { QStringLiteral("查询值"), KSWORD_ARK_REG_OP_QUERY_VALUE }
+                { kernelText("kernel.callback.intercept.operation.registry.create_key", QStringLiteral("创建键")), KSWORD_ARK_REG_OP_CREATE_KEY },
+                { kernelText("kernel.callback.intercept.operation.registry.open_key", QStringLiteral("打开键")), KSWORD_ARK_REG_OP_OPEN_KEY },
+                { kernelText("kernel.callback.intercept.operation.registry.delete_key", QStringLiteral("删除键")), KSWORD_ARK_REG_OP_DELETE_KEY },
+                { kernelText("kernel.callback.intercept.operation.registry.set_value", QStringLiteral("写入值")), KSWORD_ARK_REG_OP_SET_VALUE },
+                { kernelText("kernel.callback.intercept.operation.registry.delete_value", QStringLiteral("删除值")), KSWORD_ARK_REG_OP_DELETE_VALUE },
+                { kernelText("kernel.callback.intercept.operation.registry.rename_key", QStringLiteral("重命名键")), KSWORD_ARK_REG_OP_RENAME_KEY },
+                { kernelText("kernel.callback.intercept.operation.registry.set_info", QStringLiteral("设置键信息")), KSWORD_ARK_REG_OP_SET_INFO },
+                { kernelText("kernel.callback.intercept.operation.registry.query_value", QStringLiteral("查询值")), KSWORD_ARK_REG_OP_QUERY_VALUE }
             };
 
         case KSWORD_ARK_CALLBACK_TYPE_PROCESS_CREATE:
             return {
-                { QStringLiteral("进程创建"), KSWORD_ARK_PROCESS_OP_CREATE }
+                { kernelText("kernel.callback.intercept.operation.process.create", QStringLiteral("进程创建")), KSWORD_ARK_PROCESS_OP_CREATE }
             };
 
         case KSWORD_ARK_CALLBACK_TYPE_THREAD_CREATE:
             return {
-                { QStringLiteral("线程创建"), KSWORD_ARK_THREAD_OP_CREATE },
-                { QStringLiteral("线程退出"), KSWORD_ARK_THREAD_OP_EXIT }
+                { kernelText("kernel.callback.intercept.operation.thread.create", QStringLiteral("线程创建")), KSWORD_ARK_THREAD_OP_CREATE },
+                { kernelText("kernel.callback.intercept.operation.thread.exit", QStringLiteral("线程退出")), KSWORD_ARK_THREAD_OP_EXIT }
             };
 
         case KSWORD_ARK_CALLBACK_TYPE_IMAGE_LOAD:
             return {
-                { QStringLiteral("镜像加载"), KSWORD_ARK_IMAGE_OP_LOAD }
+                { kernelText("kernel.callback.intercept.operation.image.load", QStringLiteral("镜像加载")), KSWORD_ARK_IMAGE_OP_LOAD }
             };
 
         case KSWORD_ARK_CALLBACK_TYPE_OBJECT:
             return {
-                { QStringLiteral("句柄创建"), KSWORD_ARK_OBJECT_OP_HANDLE_CREATE },
-                { QStringLiteral("句柄复制"), KSWORD_ARK_OBJECT_OP_HANDLE_DUPLICATE },
-                { QStringLiteral("进程对象"), KSWORD_ARK_OBJECT_OP_TYPE_PROCESS },
-                { QStringLiteral("线程对象"), KSWORD_ARK_OBJECT_OP_TYPE_THREAD }
+                { kernelText("kernel.callback.intercept.operation.object.handle_create", QStringLiteral("句柄创建")), KSWORD_ARK_OBJECT_OP_HANDLE_CREATE },
+                { kernelText("kernel.callback.intercept.operation.object.handle_duplicate", QStringLiteral("句柄复制")), KSWORD_ARK_OBJECT_OP_HANDLE_DUPLICATE },
+                { kernelText("kernel.callback.intercept.operation.object.process", QStringLiteral("进程对象")), KSWORD_ARK_OBJECT_OP_TYPE_PROCESS },
+                { kernelText("kernel.callback.intercept.operation.object.thread", QStringLiteral("线程对象")), KSWORD_ARK_OBJECT_OP_TYPE_THREAD }
             };
         case KSWORD_ARK_CALLBACK_TYPE_MINIFILTER:
             return {
-                { QStringLiteral("创建/打开"), KSWORD_ARK_MINIFILTER_OP_CREATE },
-                { QStringLiteral("读取"), KSWORD_ARK_MINIFILTER_OP_READ },
-                { QStringLiteral("写入"), KSWORD_ARK_MINIFILTER_OP_WRITE },
-                { QStringLiteral("设置信息"), KSWORD_ARK_MINIFILTER_OP_SETINFO },
-                { QStringLiteral("重命名/硬链"), KSWORD_ARK_MINIFILTER_OP_RENAME },
-                { QStringLiteral("删除"), KSWORD_ARK_MINIFILTER_OP_DELETE },
-                { QStringLiteral("清理"), KSWORD_ARK_MINIFILTER_OP_CLEANUP },
-                { QStringLiteral("关闭"), KSWORD_ARK_MINIFILTER_OP_CLOSE }
+                { kernelText("kernel.callback.intercept.operation.minifilter.create", QStringLiteral("创建/打开")), KSWORD_ARK_MINIFILTER_OP_CREATE },
+                { kernelText("kernel.callback.intercept.operation.minifilter.read", QStringLiteral("读取")), KSWORD_ARK_MINIFILTER_OP_READ },
+                { kernelText("kernel.callback.intercept.operation.minifilter.write", QStringLiteral("写入")), KSWORD_ARK_MINIFILTER_OP_WRITE },
+                { kernelText("kernel.callback.intercept.operation.minifilter.set_info", QStringLiteral("设置信息")), KSWORD_ARK_MINIFILTER_OP_SETINFO },
+                { kernelText("kernel.callback.intercept.operation.minifilter.rename", QStringLiteral("重命名/硬链")), KSWORD_ARK_MINIFILTER_OP_RENAME },
+                { kernelText("kernel.callback.intercept.operation.minifilter.delete", QStringLiteral("删除")), KSWORD_ARK_MINIFILTER_OP_DELETE },
+                { kernelText("kernel.callback.intercept.operation.minifilter.cleanup", QStringLiteral("清理")), KSWORD_ARK_MINIFILTER_OP_CLEANUP },
+                { kernelText("kernel.callback.intercept.operation.minifilter.close", QStringLiteral("关闭")), KSWORD_ARK_MINIFILTER_OP_CLOSE }
             };
 
         default:
@@ -538,34 +540,34 @@ namespace
         const QString trimmedText = rawMessageText.trimmed();
         if (trimmedText.isEmpty())
         {
-            return QStringLiteral("驱动未返回额外说明。");
+            return kernelText("kernel.callback.intercept.message.no_driver_details", QStringLiteral("驱动未返回额外说明。"));
         }
 
         const QString lowerText = trimmedText.toLower();
         if (lowerText.contains(QStringLiteral("deviceiocontrol")))
         {
-            return QStringLiteral("驱动 IOCTL 调用失败或当前驱动版本不匹配。");
+            return kernelText("kernel.callback.intercept.message.io_failure", QStringLiteral("驱动 IOCTL 调用失败或当前驱动版本不匹配。"));
         }
         if (lowerText.contains(QStringLiteral("unsupported")) ||
             lowerText.contains(QStringLiteral("not supported")) ||
             lowerText.contains(QStringLiteral("status=0xc00000bb")))
         {
-            return QStringLiteral("当前驱动暂不支持该回调/文件监控接口。");
+            return kernelText("kernel.callback.intercept.message.unsupported", QStringLiteral("当前驱动暂不支持该回调/文件监控接口。"));
         }
         if (lowerText.contains(QStringLiteral("capability")) ||
             lowerText.contains(QStringLiteral("dyndata")))
         {
-            return QStringLiteral("动态偏移能力未满足，相关回调或文件监控字段暂不可用。");
+            return kernelText("kernel.callback.intercept.message.capability", QStringLiteral("动态偏移能力未满足，相关回调或文件监控字段暂不可用。"));
         }
         if (lowerText.contains(QStringLiteral("version mismatch")) ||
             lowerText.contains(QStringLiteral("protocol")))
         {
-            return QStringLiteral("R3/R0 协议版本不匹配，请同步 shared 协议与驱动。");
+            return kernelText("kernel.callback.intercept.message.protocol", QStringLiteral("R3/R0 协议版本不匹配，请同步 shared 协议与驱动。"));
         }
         if (lowerText.contains(QStringLiteral("buffer")) &&
             (lowerText.contains(QStringLiteral("small")) || lowerText.contains(QStringLiteral("trunc"))))
         {
-            return QStringLiteral("驱动返回缓冲区不足，当前结果可能被截断。");
+            return kernelText("kernel.callback.intercept.message.buffer_short", QStringLiteral("驱动返回缓冲区不足，当前结果可能被截断。"));
         }
         return trimmedText;
     }
@@ -594,7 +596,7 @@ namespace
             contextMenu.setStyleSheet(callbackRuleContextMenuStyle());
             QAction* copyRowAction = contextMenu.addAction(
                 QIcon(QStringLiteral(":/Icon/process_copy_row.svg")),
-                QStringLiteral("复制当前行"));
+                kernelText("kernel.callback.intercept.menu.copy_current_row", QStringLiteral("复制当前行")));
             copyRowAction->setEnabled(tableWidget->currentRow() >= 0);
             if (contextMenu.exec(tableWidget->viewport()->mapToGlobal(localPosition)) != copyRowAction)
             {
@@ -663,19 +665,19 @@ namespace
         switch (callbackType)
         {
         case KSWORD_ARK_CALLBACK_TYPE_REGISTRY:
-            return QStringLiteral("例如：* 或 C:\\Windows\\System32\\reg.exe（支持自动转换）");
+            return kernelText("kernel.callback.intercept.placeholder.initiator.registry", QStringLiteral("例如：* 或 C:\\Windows\\System32\\reg.exe（支持自动转换）"));
         case KSWORD_ARK_CALLBACK_TYPE_PROCESS_CREATE:
-            return QStringLiteral("例如：* 或 C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe（支持自动转换）");
+            return kernelText("kernel.callback.intercept.placeholder.initiator.process", QStringLiteral("例如：* 或 C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe（支持自动转换）"));
         case KSWORD_ARK_CALLBACK_TYPE_THREAD_CREATE:
-            return QStringLiteral("例如：* 或 C:\\Windows\\System32\\notepad.exe（支持自动转换）");
+            return kernelText("kernel.callback.intercept.placeholder.initiator.thread", QStringLiteral("例如：* 或 C:\\Windows\\System32\\notepad.exe（支持自动转换）"));
         case KSWORD_ARK_CALLBACK_TYPE_IMAGE_LOAD:
-            return QStringLiteral("例如：* 或 C:\\Windows\\System32\\notepad.exe（支持自动转换）");
+            return kernelText("kernel.callback.intercept.placeholder.initiator.image", QStringLiteral("例如：* 或 C:\\Windows\\System32\\notepad.exe（支持自动转换）"));
         case KSWORD_ARK_CALLBACK_TYPE_OBJECT:
-            return QStringLiteral("例如：* 或 C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe（支持自动转换）");
+            return kernelText("kernel.callback.intercept.placeholder.initiator.object", QStringLiteral("例如：* 或 C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe（支持自动转换）"));
         case KSWORD_ARK_CALLBACK_TYPE_MINIFILTER:
-            return QStringLiteral("例如：* 或 C:\\Windows\\System32\\notepad.exe（支持自动转换）");
+            return kernelText("kernel.callback.intercept.placeholder.initiator.minifilter", QStringLiteral("例如：* 或 C:\\Windows\\System32\\notepad.exe（支持自动转换）"));
         default:
-            return QStringLiteral("例如：*");
+            return kernelText("kernel.callback.intercept.placeholder.initiator.default", QStringLiteral("例如：*"));
         }
     }
 
@@ -684,19 +686,19 @@ namespace
         switch (callbackType)
         {
         case KSWORD_ARK_CALLBACK_TYPE_REGISTRY:
-            return QStringLiteral("例如：HKCU\\Software\\KswordDemo 或 \\REGISTRY\\USER\\*\\Software\\KswordDemo");
+            return kernelText("kernel.callback.intercept.placeholder.target.registry", QStringLiteral("例如：HKCU\\Software\\KswordDemo 或 \\REGISTRY\\USER\\*\\Software\\KswordDemo"));
         case KSWORD_ARK_CALLBACK_TYPE_PROCESS_CREATE:
-            return QStringLiteral("例如：C:\\Windows\\System32\\notepad.exe（支持自动转换）");
+            return kernelText("kernel.callback.intercept.placeholder.target.process", QStringLiteral("例如：C:\\Windows\\System32\\notepad.exe（支持自动转换）"));
         case KSWORD_ARK_CALLBACK_TYPE_THREAD_CREATE:
-            return QStringLiteral("例如：C:\\Windows\\System32\\notepad.exe（目标进程镜像，支持自动转换）");
+            return kernelText("kernel.callback.intercept.placeholder.target.thread", QStringLiteral("例如：C:\\Windows\\System32\\notepad.exe（目标进程镜像，支持自动转换）"));
         case KSWORD_ARK_CALLBACK_TYPE_IMAGE_LOAD:
-            return QStringLiteral("例如：C:\\Windows\\System32\\kernel32.dll（支持自动转换）");
+            return kernelText("kernel.callback.intercept.placeholder.target.image", QStringLiteral("例如：C:\\Windows\\System32\\kernel32.dll（支持自动转换）"));
         case KSWORD_ARK_CALLBACK_TYPE_OBJECT:
-            return QStringLiteral("例如：C:\\Windows\\System32\\notepad.exe（被打开句柄的目标进程，支持自动转换）");
+            return kernelText("kernel.callback.intercept.placeholder.target.object", QStringLiteral("例如：C:\\Windows\\System32\\notepad.exe（被打开句柄的目标进程，支持自动转换）"));
         case KSWORD_ARK_CALLBACK_TYPE_MINIFILTER:
-            return QStringLiteral("例如：C:\\Users\\*\\Documents\\*.docx 或 \\Device\\HarddiskVolume*\\*.sys");
+            return kernelText("kernel.callback.intercept.placeholder.target.minifilter", QStringLiteral("例如：C:\\Users\\*\\Documents\\*.docx 或 \\Device\\HarddiskVolume*\\*.sys"));
         default:
-            return QStringLiteral("例如：*");
+            return kernelText("kernel.callback.intercept.placeholder.target.default", QStringLiteral("例如：*"));
         }
     }
 
@@ -1213,7 +1215,7 @@ namespace
         {
             if (errorTextOut != nullptr)
             {
-                *errorTextOut = QStringLiteral("解析失败：ruleOut 为空。");
+                *errorTextOut = kernelText("kernel.callback.intercept.clipboard.parse.rule_out_null", QStringLiteral("解析失败：ruleOut 为空。"));
             }
             return false;
         }
@@ -1226,7 +1228,7 @@ namespace
         {
             if (errorTextOut != nullptr)
             {
-                *errorTextOut = QStringLiteral("解析失败：不是支持的规则文本格式。");
+                *errorTextOut = kernelText("kernel.callback.intercept.clipboard.parse.unsupported_format", QStringLiteral("解析失败：不是支持的规则文本格式。"));
             }
             return false;
         }
@@ -1263,7 +1265,7 @@ namespace
         {
             if (errorTextOut != nullptr)
             {
-                *errorTextOut = QStringLiteral("解析失败：数值字段不合法。");
+                *errorTextOut = kernelText("kernel.callback.intercept.clipboard.parse.numeric_invalid", QStringLiteral("解析失败：数值字段不合法。"));
             }
             return false;
         }
@@ -1274,7 +1276,7 @@ namespace
         {
             if (errorTextOut != nullptr)
             {
-                *errorTextOut = QStringLiteral("解析失败：priority 不合法。");
+                *errorTextOut = kernelText("kernel.callback.intercept.clipboard.parse.priority_invalid", QStringLiteral("解析失败：priority 不合法。"));
             }
             return false;
         }
@@ -1396,7 +1398,7 @@ public:
                     appendEventLog(logText);
                 });
             m_promptManager->start();
-            appendAppLog(QStringLiteral("驱动回调询问管理器已启动。"));
+            appendAppLog(kernelText("kernel.callback.intercept.log.prompt_manager_started", QStringLiteral("驱动回调询问管理器已启动。")));
         }
     }
 
@@ -1456,12 +1458,12 @@ private:
         topBarLayout->setContentsMargins(0, 0, 0, 0);
         topBarLayout->setSpacing(6);
 
-        m_globalEnabledCheck = new QCheckBox(QStringLiteral("全局启用"), scrollContent);
+        m_globalEnabledCheck = new QCheckBox(kernelText("kernel.callback.intercept.toolbar.global_enabled", QStringLiteral("全局启用")), scrollContent);
         m_globalEnabledCheck->setChecked(true);
-        m_applyButton = new QPushButton(QStringLiteral("应用"), scrollContent);
-        m_reloadStateButton = new QPushButton(QStringLiteral("重新加载驱动状态"), scrollContent);
-        m_importButton = new QPushButton(QStringLiteral("导入配置"), scrollContent);
-        m_exportButton = new QPushButton(QStringLiteral("导出配置"), scrollContent);
+        m_applyButton = new QPushButton(kernelText("kernel.callback.intercept.toolbar.apply", QStringLiteral("应用")), scrollContent);
+        m_reloadStateButton = new QPushButton(kernelText("kernel.callback.intercept.toolbar.reload_state", QStringLiteral("重新加载驱动状态")), scrollContent);
+        m_importButton = new QPushButton(kernelText("kernel.callback.intercept.toolbar.import", QStringLiteral("导入配置")), scrollContent);
+        m_exportButton = new QPushButton(kernelText("kernel.callback.intercept.toolbar.export", QStringLiteral("导出配置")), scrollContent);
 
         const auto setupIconButton = [this](QPushButton* button, const QIcon& iconValue, const QString& tipText) {
             if (button == nullptr || m_hostPage == nullptr)
@@ -1474,10 +1476,10 @@ private:
             button->setFixedSize(30, 26);
             button->setIconSize(QSize(16, 16));
         };
-        setupIconButton(m_applyButton, QIcon(QStringLiteral(":/Icon/process_start.svg")), QStringLiteral("应用规则"));
-        setupIconButton(m_reloadStateButton, QIcon(QStringLiteral(":/Icon/process_refresh.svg")), QStringLiteral("重新加载驱动状态"));
-        setupIconButton(m_importButton, QIcon(QStringLiteral(":/Icon/codeeditor_open.svg")), QStringLiteral("导入配置"));
-        setupIconButton(m_exportButton, QIcon(QStringLiteral(":/Icon/log_export.svg")), QStringLiteral("导出配置"));
+        setupIconButton(m_applyButton, QIcon(QStringLiteral(":/Icon/process_start.svg")), kernelText("kernel.callback.intercept.tooltip.apply", QStringLiteral("应用规则")));
+        setupIconButton(m_reloadStateButton, QIcon(QStringLiteral(":/Icon/process_refresh.svg")), kernelText("kernel.callback.intercept.tooltip.reload_state", QStringLiteral("重新加载驱动状态")));
+        setupIconButton(m_importButton, QIcon(QStringLiteral(":/Icon/codeeditor_open.svg")), kernelText("kernel.callback.intercept.tooltip.import", QStringLiteral("导入配置")));
+        setupIconButton(m_exportButton, QIcon(QStringLiteral(":/Icon/log_export.svg")), kernelText("kernel.callback.intercept.tooltip.export", QStringLiteral("导出配置")));
 
         topBarLayout->addWidget(m_globalEnabledCheck, 0);
         topBarLayout->addWidget(m_applyButton, 0);
@@ -1487,7 +1489,7 @@ private:
         topBarLayout->addStretch(1);
         rootLayout->addLayout(topBarLayout, 0);
 
-        m_statusLabel = new QLabel(QStringLiteral("状态：等待刷新"), scrollContent);
+        m_statusLabel = new QLabel(kernelText("kernel.callback.intercept.status.waiting_refresh", QStringLiteral("状态：等待刷新")), scrollContent);
         m_statusLabel->setStyleSheet(QStringLiteral("color:%1;font-weight:600;").arg(KswordTheme::TextSecondaryHex()));
         rootLayout->addWidget(m_statusLabel, 0);
 
@@ -1502,16 +1504,16 @@ private:
         auto* groupButtonLayout = new QHBoxLayout();
         groupButtonLayout->setContentsMargins(0, 0, 0, 0);
         groupButtonLayout->setSpacing(6);
-        m_addGroupButton = new QPushButton(QStringLiteral("新增组"), groupPane);
-        m_removeGroupButton = new QPushButton(QStringLiteral("删除组"), groupPane);
-        m_renameGroupButton = new QPushButton(QStringLiteral("重命名"), groupPane);
-        m_moveGroupUpButton = new QPushButton(QStringLiteral("上移"), groupPane);
-        m_moveGroupDownButton = new QPushButton(QStringLiteral("下移"), groupPane);
-        setupIconButton(m_addGroupButton, QIcon(QStringLiteral(":/Icon/plus.svg")), QStringLiteral("新增规则组"));
-        setupIconButton(m_removeGroupButton, QIcon(QStringLiteral(":/Icon/log_clear.svg")), QStringLiteral("删除当前规则组"));
-        setupIconButton(m_renameGroupButton, QIcon(QStringLiteral(":/Icon/process_details.svg")), QStringLiteral("重命名当前规则组"));
-        setupIconButton(m_moveGroupUpButton, QIcon(QStringLiteral(":/Icon/file_nav_up.svg")), QStringLiteral("规则组上移"));
-        setupIconButton(m_moveGroupDownButton, QIcon(QStringLiteral(":/Icon/codeeditor_goto.svg")), QStringLiteral("规则组下移"));
+        m_addGroupButton = new QPushButton(kernelText("kernel.callback.intercept.group.add", QStringLiteral("新增组")), groupPane);
+        m_removeGroupButton = new QPushButton(kernelText("kernel.callback.intercept.group.remove", QStringLiteral("删除组")), groupPane);
+        m_renameGroupButton = new QPushButton(kernelText("kernel.callback.intercept.group.rename", QStringLiteral("重命名")), groupPane);
+        m_moveGroupUpButton = new QPushButton(kernelText("kernel.callback.intercept.group.move_up_short", QStringLiteral("上移")), groupPane);
+        m_moveGroupDownButton = new QPushButton(kernelText("kernel.callback.intercept.group.move_down_short", QStringLiteral("下移")), groupPane);
+        setupIconButton(m_addGroupButton, QIcon(QStringLiteral(":/Icon/plus.svg")), kernelText("kernel.callback.intercept.group.add_tooltip", QStringLiteral("新增规则组")));
+        setupIconButton(m_removeGroupButton, QIcon(QStringLiteral(":/Icon/log_clear.svg")), kernelText("kernel.callback.intercept.group.remove_tooltip", QStringLiteral("删除当前规则组")));
+        setupIconButton(m_renameGroupButton, QIcon(QStringLiteral(":/Icon/process_details.svg")), kernelText("kernel.callback.intercept.group.rename_tooltip", QStringLiteral("重命名当前规则组")));
+        setupIconButton(m_moveGroupUpButton, QIcon(QStringLiteral(":/Icon/file_nav_up.svg")), kernelText("kernel.callback.intercept.group.move_up_tooltip", QStringLiteral("规则组上移")));
+        setupIconButton(m_moveGroupDownButton, QIcon(QStringLiteral(":/Icon/codeeditor_goto.svg")), kernelText("kernel.callback.intercept.group.move_down_tooltip", QStringLiteral("规则组下移")));
         groupButtonLayout->addWidget(m_addGroupButton, 0);
         groupButtonLayout->addWidget(m_removeGroupButton, 0);
         groupButtonLayout->addWidget(m_renameGroupButton, 0);
@@ -1524,10 +1526,10 @@ private:
         m_groupTable->setColumnCount(static_cast<int>(GroupColumn::Count));
         m_groupTable->setHorizontalHeaderLabels(QStringList{
             QStringLiteral("groupId"),
-            QStringLiteral("组名称"),
-            QStringLiteral("启用"),
-            QStringLiteral("优先级"),
-            QStringLiteral("备注")
+            kernelText("kernel.callback.intercept.group.header.name", QStringLiteral("组名称")),
+            kernelText("kernel.callback.intercept.group.header.enabled", QStringLiteral("启用")),
+            kernelText("kernel.callback.intercept.group.header.priority", QStringLiteral("优先级")),
+            kernelText("kernel.callback.intercept.group.header.comment", QStringLiteral("备注"))
             });
         m_groupTable->setSelectionBehavior(QAbstractItemView::SelectRows);
         m_groupTable->setSelectionMode(QAbstractItemView::SingleSelection);
@@ -1552,14 +1554,14 @@ private:
         auto* ruleToolbarLayout = new QHBoxLayout();
         ruleToolbarLayout->setContentsMargins(0, 0, 0, 0);
         ruleToolbarLayout->setSpacing(6);
-        m_addRuleButton = new QPushButton(QStringLiteral("新增规则"), rightPane);
-        m_removeRuleButton = new QPushButton(QStringLiteral("删除规则"), rightPane);
-        m_moveRuleUpButton = new QPushButton(QStringLiteral("规则上移"), rightPane);
-        m_moveRuleDownButton = new QPushButton(QStringLiteral("规则下移"), rightPane);
-        setupIconButton(m_addRuleButton, QIcon(QStringLiteral(":/Icon/plus.svg")), QStringLiteral("新增规则"));
-        setupIconButton(m_removeRuleButton, QIcon(QStringLiteral(":/Icon/log_clear.svg")), QStringLiteral("删除当前规则"));
-        setupIconButton(m_moveRuleUpButton, QIcon(QStringLiteral(":/Icon/file_nav_up.svg")), QStringLiteral("规则上移"));
-        setupIconButton(m_moveRuleDownButton, QIcon(QStringLiteral(":/Icon/codeeditor_goto.svg")), QStringLiteral("规则下移"));
+        m_addRuleButton = new QPushButton(kernelText("kernel.callback.intercept.rule.add", QStringLiteral("新增规则")), rightPane);
+        m_removeRuleButton = new QPushButton(kernelText("kernel.callback.intercept.rule.remove", QStringLiteral("删除规则")), rightPane);
+        m_moveRuleUpButton = new QPushButton(kernelText("kernel.callback.intercept.rule.move_up", QStringLiteral("规则上移")), rightPane);
+        m_moveRuleDownButton = new QPushButton(kernelText("kernel.callback.intercept.rule.move_down", QStringLiteral("规则下移")), rightPane);
+        setupIconButton(m_addRuleButton, QIcon(QStringLiteral(":/Icon/plus.svg")), kernelText("kernel.callback.intercept.rule.add_tooltip", QStringLiteral("新增规则")));
+        setupIconButton(m_removeRuleButton, QIcon(QStringLiteral(":/Icon/log_clear.svg")), kernelText("kernel.callback.intercept.rule.remove_tooltip", QStringLiteral("删除当前规则")));
+        setupIconButton(m_moveRuleUpButton, QIcon(QStringLiteral(":/Icon/file_nav_up.svg")), kernelText("kernel.callback.intercept.rule.move_up_tooltip", QStringLiteral("规则上移")));
+        setupIconButton(m_moveRuleDownButton, QIcon(QStringLiteral(":/Icon/codeeditor_goto.svg")), kernelText("kernel.callback.intercept.rule.move_down_tooltip", QStringLiteral("规则下移")));
         ruleToolbarLayout->addWidget(m_addRuleButton, 0);
         ruleToolbarLayout->addWidget(m_removeRuleButton, 0);
         ruleToolbarLayout->addWidget(m_moveRuleUpButton, 0);
@@ -1570,12 +1572,12 @@ private:
         m_ruleTabWidget = new QTabWidget(rightPane);
         rightLayout->addWidget(m_ruleTabWidget, 1);
 
-        createRuleTableTab(KSWORD_ARK_CALLBACK_TYPE_REGISTRY, QStringLiteral("注册表"));
-        createRuleTableTab(KSWORD_ARK_CALLBACK_TYPE_PROCESS_CREATE, QStringLiteral("进程创建"));
-        createRuleTableTab(KSWORD_ARK_CALLBACK_TYPE_THREAD_CREATE, QStringLiteral("线程创建"));
-        createRuleTableTab(KSWORD_ARK_CALLBACK_TYPE_IMAGE_LOAD, QStringLiteral("镜像加载"));
-        createRuleTableTab(KSWORD_ARK_CALLBACK_TYPE_OBJECT, QStringLiteral("对象管理器"));
-        createRuleTableTab(KSWORD_ARK_CALLBACK_TYPE_MINIFILTER, QStringLiteral("文件系统微过滤器"));
+        createRuleTableTab(KSWORD_ARK_CALLBACK_TYPE_REGISTRY, kernelText("kernel.callback.intercept.tab.registry", QStringLiteral("注册表")));
+        createRuleTableTab(KSWORD_ARK_CALLBACK_TYPE_PROCESS_CREATE, kernelText("kernel.callback.intercept.tab.process", QStringLiteral("进程创建")));
+        createRuleTableTab(KSWORD_ARK_CALLBACK_TYPE_THREAD_CREATE, kernelText("kernel.callback.intercept.tab.thread", QStringLiteral("线程创建")));
+        createRuleTableTab(KSWORD_ARK_CALLBACK_TYPE_IMAGE_LOAD, kernelText("kernel.callback.intercept.tab.image", QStringLiteral("镜像加载")));
+        createRuleTableTab(KSWORD_ARK_CALLBACK_TYPE_OBJECT, kernelText("kernel.callback.intercept.tab.object", QStringLiteral("对象管理器")));
+        createRuleTableTab(KSWORD_ARK_CALLBACK_TYPE_MINIFILTER, kernelText("kernel.callback.intercept.tab.minifilter", QStringLiteral("文件系统微过滤器")));
         createMinifilterBypassPidTab(m_ruleTabWidget);
 
         auto* logTabWidget = new QTabWidget(scrollContent);
@@ -1583,8 +1585,8 @@ private:
         m_eventLogEditor = new QPlainTextEdit(logTabWidget);
         m_appLogEditor->setReadOnly(true);
         m_eventLogEditor->setReadOnly(true);
-        logTabWidget->addTab(m_appLogEditor, QStringLiteral("应用日志"));
-        logTabWidget->addTab(m_eventLogEditor, QStringLiteral("事件日志"));
+        logTabWidget->addTab(m_appLogEditor, kernelText("kernel.callback.intercept.log_tab.application", QStringLiteral("应用日志")));
+        logTabWidget->addTab(m_eventLogEditor, kernelText("kernel.callback.intercept.log_tab.events", QStringLiteral("事件日志")));
         rootLayout->addWidget(logTabWidget, 0);
 
         auto* fileMonitorFrame = new QFrame(scrollContent);
@@ -1605,19 +1607,19 @@ private:
         auto* fileMonitorToolbar = new QHBoxLayout();
         fileMonitorToolbar->setContentsMargins(0, 0, 0, 0);
         fileMonitorToolbar->setSpacing(6);
-        auto* fileMonitorTitleLabel = new QLabel(QStringLiteral("文件监控：Oplock / FSCTL"), fileMonitorFrame);
+        auto* fileMonitorTitleLabel = new QLabel(kernelText("kernel.callback.intercept.file_monitor.title", QStringLiteral("文件监控：Oplock / FSCTL")), fileMonitorFrame);
         fileMonitorTitleLabel->setStyleSheet(QStringLiteral("color:%1;font-weight:600;").arg(KswordTheme::TextPrimaryHex()));
         m_startFileMonitorFsctlButton = new QPushButton(fileMonitorFrame);
         m_drainFileMonitorButton = new QPushButton(fileMonitorFrame);
         m_clearFileMonitorButton = new QPushButton(fileMonitorFrame);
         m_exportFileMonitorButton = new QPushButton(fileMonitorFrame);
-        setupIconButton(m_startFileMonitorFsctlButton, QIcon(QStringLiteral(":/Icon/process_start.svg")), QStringLiteral("启动/补充 FSCTL 文件监控"));
-        setupIconButton(m_drainFileMonitorButton, QIcon(QStringLiteral(":/Icon/process_refresh.svg")), QStringLiteral("读取文件监控事件"));
-        setupIconButton(m_clearFileMonitorButton, QIcon(QStringLiteral(":/Icon/log_clear.svg")), QStringLiteral("清空当前文件监控表格"));
-        setupIconButton(m_exportFileMonitorButton, QIcon(QStringLiteral(":/Icon/log_export.svg")), QStringLiteral("导出当前可见文件监控事件"));
-        m_fileMonitorFsctlOnlyCheck = new QCheckBox(QStringLiteral("仅显示 Oplock / FSCTL"), fileMonitorFrame);
+        setupIconButton(m_startFileMonitorFsctlButton, QIcon(QStringLiteral(":/Icon/process_start.svg")), kernelText("kernel.callback.intercept.file_monitor.start_tooltip", QStringLiteral("启动/补充 FSCTL 文件监控")));
+        setupIconButton(m_drainFileMonitorButton, QIcon(QStringLiteral(":/Icon/process_refresh.svg")), kernelText("kernel.callback.intercept.file_monitor.read_tooltip", QStringLiteral("读取文件监控事件")));
+        setupIconButton(m_clearFileMonitorButton, QIcon(QStringLiteral(":/Icon/log_clear.svg")), kernelText("kernel.callback.intercept.file_monitor.clear_tooltip", QStringLiteral("清空当前文件监控表格")));
+        setupIconButton(m_exportFileMonitorButton, QIcon(QStringLiteral(":/Icon/log_export.svg")), kernelText("kernel.callback.intercept.file_monitor.export_tooltip", QStringLiteral("导出当前可见文件监控事件")));
+        m_fileMonitorFsctlOnlyCheck = new QCheckBox(kernelText("kernel.callback.intercept.file_monitor.fsctl_only", QStringLiteral("仅显示 Oplock / FSCTL")), fileMonitorFrame);
         m_fileMonitorFsctlOnlyCheck->setChecked(true);
-        m_fileMonitorStatusLabel = new QLabel(QStringLiteral("等待启动或读取事件"), fileMonitorFrame);
+        m_fileMonitorStatusLabel = new QLabel(kernelText("kernel.callback.intercept.file_monitor.waiting", QStringLiteral("等待启动或读取事件")), fileMonitorFrame);
         m_fileMonitorStatusLabel->setStyleSheet(QStringLiteral("color:%1;").arg(KswordTheme::TextSecondaryHex()));
 
         fileMonitorToolbar->addWidget(fileMonitorTitleLabel, 0);
@@ -1633,13 +1635,13 @@ private:
         m_fileMonitorTable = new ks::ui::VisibleTableWidget(fileMonitorFrame);
         m_fileMonitorTable->setColumnCount(static_cast<int>(FileMonitorColumn::Count));
         m_fileMonitorTable->setHorizontalHeaderLabels(QStringList{
-            QStringLiteral("时间"),
+            kernelText("kernel.callback.intercept.file_monitor.header.time", QStringLiteral("时间")),
             QStringLiteral("PID"),
-            QStringLiteral("进程"),
-            QStringLiteral("文件路径"),
-            QStringLiteral("FSCTL 名称"),
-            QStringLiteral("控制码"),
-            QStringLiteral("状态码"),
+            kernelText("kernel.callback.intercept.file_monitor.header.process", QStringLiteral("进程")),
+            kernelText("kernel.callback.intercept.file_monitor.header.path", QStringLiteral("文件路径")),
+            kernelText("kernel.callback.intercept.file_monitor.header.fsctl", QStringLiteral("FSCTL 名称")),
+            kernelText("kernel.callback.intercept.file_monitor.header.control_code", QStringLiteral("控制码")),
+            kernelText("kernel.callback.intercept.file_monitor.header.status", QStringLiteral("状态码")),
             QStringLiteral("FileObject"),
             QStringLiteral("In"),
             QStringLiteral("Out")
@@ -1665,7 +1667,7 @@ private:
         kernelBadgeLayout->setContentsMargins(0, 0, 0, 0);
         kernelBadgeLayout->setSpacing(0);
         m_kernelBadgeLabel = new QLabel(scrollContent);
-        m_kernelBadgeLabel->setToolTip(QStringLiteral("Kernel/R0 功能入口标识"));
+        m_kernelBadgeLabel->setToolTip(kernelText("kernel.callback.intercept.tooltip.kernel_badge", QStringLiteral("Kernel/R0 功能入口标识")));
         m_kernelBadgeLabel->setPixmap(QPixmap(QStringLiteral(":/Image/kernel_badge.png")).scaled(
             20,
             20,
@@ -1842,14 +1844,14 @@ private:
         if (!startResult.ok)
         {
             const QString detailText = callbackRuleIoMessageText(QString::fromStdString(startResult.message));
-            m_fileMonitorStatusLabel->setText(QStringLiteral("启动失败：error=%1").arg(startResult.win32Error));
-            appendAppLog(QStringLiteral("文件监控 FSCTL 启动失败：%1").arg(detailText));
+            m_fileMonitorStatusLabel->setText(kernelText("kernel.callback.intercept.file_monitor.status.start_failed", QStringLiteral("启动失败：error=%1")).arg(startResult.win32Error));
+            appendAppLog(kernelText("kernel.callback.intercept.file_monitor.log.start_failed", QStringLiteral("文件监控 FSCTL 启动失败：%1")).arg(detailText));
             return;
         }
 
-        m_fileMonitorStatusLabel->setText(QStringLiteral("FSCTL 文件监控已启动，mask=0x%1")
+        m_fileMonitorStatusLabel->setText(kernelText("kernel.callback.intercept.file_monitor.status.started", QStringLiteral("FSCTL 文件监控已启动，mask=0x%1"))
             .arg(requestedMask, 8, 16, QChar('0')).toUpper());
-        appendAppLog(QStringLiteral("文件监控 FSCTL 已启动：mask=0x%1")
+        appendAppLog(kernelText("kernel.callback.intercept.file_monitor.log.started", QStringLiteral("文件监控 FSCTL 已启动：mask=0x%1"))
             .arg(requestedMask, 8, 16, QChar('0')).toUpper());
         if (m_fileMonitorDrainTimer != nullptr && !m_fileMonitorDrainTimer->isActive())
         {
@@ -1869,7 +1871,7 @@ private:
         const ksword::ark::FileMonitorDrainResult drainResult = driverClient.drainFileMonitor(128UL, 0UL);
         if (!drainResult.io.ok)
         {
-            m_fileMonitorStatusLabel->setText(QStringLiteral("读取失败：error=%1").arg(drainResult.io.win32Error));
+            m_fileMonitorStatusLabel->setText(kernelText("kernel.callback.intercept.file_monitor.status.read_failed", QStringLiteral("读取失败：error=%1")).arg(drainResult.io.win32Error));
             return;
         }
 
@@ -1879,7 +1881,7 @@ private:
         }
         applyFileMonitorEventFilter();
         m_fileMonitorStatusLabel->setText(
-            QStringLiteral("读取 %1 条，队列前=%2，丢弃=%3")
+            kernelText("kernel.callback.intercept.file_monitor.status.drained", QStringLiteral("读取 %1 条，队列前=%2，丢弃=%3"))
             .arg(drainResult.events.size())
             .arg(drainResult.totalQueuedBeforeDrain)
             .arg(drainResult.droppedCount));
@@ -1938,7 +1940,7 @@ private:
         }
         if (m_fileMonitorStatusLabel != nullptr)
         {
-            m_fileMonitorStatusLabel->setText(QStringLiteral("当前表格已清空"));
+            m_fileMonitorStatusLabel->setText(kernelText("kernel.callback.intercept.file_monitor.status.cleared", QStringLiteral("当前表格已清空")));
         }
     }
 
@@ -1951,9 +1953,9 @@ private:
 
         const QString filePath = QFileDialog::getSaveFileName(
             m_hostPage,
-            QStringLiteral("导出文件监控事件"),
+            kernelText("kernel.callback.intercept.file_monitor.dialog.export_title", QStringLiteral("导出文件监控事件")),
             QStringLiteral("file_monitor_fsctl.tsv"),
-            QStringLiteral("TSV 文件 (*.tsv);;所有文件 (*.*)"));
+            kernelText("kernel.callback.intercept.file_monitor.dialog.file_filter", QStringLiteral("TSV 文件 (*.tsv);;所有文件 (*.*)")));
         if (filePath.isEmpty())
         {
             return;
@@ -1962,7 +1964,9 @@ private:
         QFile outputFile(filePath);
         if (!outputFile.open(QIODevice::WriteOnly | QIODevice::Text | QIODevice::Truncate))
         {
-            QMessageBox::warning(m_hostPage, QStringLiteral("文件监控"), QStringLiteral("无法写入导出文件：%1").arg(filePath));
+            QMessageBox::warning(m_hostPage,
+                kernelText("kernel.callback.intercept.file_monitor.dialog.title", QStringLiteral("文件监控")),
+                kernelText("kernel.callback.intercept.file_monitor.status.export_failed", QStringLiteral("无法写入导出文件：%1")).arg(filePath));
             return;
         }
 
@@ -1996,7 +2000,7 @@ private:
 
         outputFile.write(lines.join(QLatin1Char('\n')).toUtf8());
         outputFile.write("\n");
-        m_fileMonitorStatusLabel->setText(QStringLiteral("已导出：%1").arg(filePath));
+        m_fileMonitorStatusLabel->setText(kernelText("kernel.callback.intercept.file_monitor.status.exported", QStringLiteral("已导出：%1")).arg(filePath));
     }
 
     void createMinifilterBypassPidTab(QWidget* parentWidget)
@@ -2014,7 +2018,7 @@ private:
         tabLayout->setSpacing(8);
 
         auto* hintLabel = new QLabel(
-            QStringLiteral("白名单 PID 的文件系统请求会在 minifilter 入口直接放行，跳过回调规则、重定向和文件监控采集。"),
+            kernelText("kernel.callback.intercept.minifilter.hint", QStringLiteral("白名单 PID 的文件系统请求会在 minifilter 入口直接放行，跳过回调规则、重定向和文件监控采集。")),
             tabPage);
         hintLabel->setWordWrap(true);
         hintLabel->setStyleSheet(QStringLiteral("color:%1;").arg(KswordTheme::TextSecondaryHex()));
@@ -2024,16 +2028,16 @@ private:
         inputLayout->setContentsMargins(0, 0, 0, 0);
         inputLayout->setSpacing(6);
 
-        auto* pidLabel = new QLabel(QStringLiteral("PID 白名单"), tabPage);
+        auto* pidLabel = new QLabel(kernelText("kernel.callback.intercept.minifilter.pid_allowlist", QStringLiteral("PID 白名单")), tabPage);
         pidLabel->setStyleSheet(QStringLiteral("color:%1;font-weight:600;").arg(KswordTheme::TextPrimaryHex()));
         m_minifilterBypassPidEdit = new QLineEdit(tabPage);
-        m_minifilterBypassPidEdit->setPlaceholderText(QStringLiteral("输入 PID，支持 1234 / 0x4D2；多个 PID 用空格、逗号或换行分隔"));
+        m_minifilterBypassPidEdit->setPlaceholderText(kernelText("kernel.callback.intercept.minifilter.input_placeholder", QStringLiteral("输入 PID，支持 1234 / 0x4D2；多个 PID 用空格、逗号或换行分隔")));
         applyRuleLineEditStyle(m_minifilterBypassPidEdit);
-        m_minifilterBypassAddButton = new QPushButton(QStringLiteral("添加"), tabPage);
-        m_minifilterBypassRemoveButton = new QPushButton(QStringLiteral("移除选中"), tabPage);
-        m_minifilterBypassApplyButton = new QPushButton(QStringLiteral("应用到驱动"), tabPage);
-        m_minifilterBypassClearButton = new QPushButton(QStringLiteral("清空并应用"), tabPage);
-        m_minifilterBypassRefreshButton = new QPushButton(QStringLiteral("从驱动刷新"), tabPage);
+        m_minifilterBypassAddButton = new QPushButton(kernelText("kernel.callback.intercept.minifilter.add", QStringLiteral("添加")), tabPage);
+        m_minifilterBypassRemoveButton = new QPushButton(kernelText("kernel.callback.intercept.minifilter.remove_selected", QStringLiteral("移除选中")), tabPage);
+        m_minifilterBypassApplyButton = new QPushButton(kernelText("kernel.callback.intercept.minifilter.apply", QStringLiteral("应用到驱动")), tabPage);
+        m_minifilterBypassClearButton = new QPushButton(kernelText("kernel.callback.intercept.minifilter.clear_apply", QStringLiteral("清空并应用")), tabPage);
+        m_minifilterBypassRefreshButton = new QPushButton(kernelText("kernel.callback.intercept.minifilter.refresh", QStringLiteral("从驱动刷新")), tabPage);
 
         inputLayout->addWidget(pidLabel, 0);
         inputLayout->addWidget(m_minifilterBypassPidEdit, 1);
@@ -2048,7 +2052,7 @@ private:
         m_minifilterBypassPidTable->setColumnCount(static_cast<int>(MinifilterBypassPidColumn::Count));
         m_minifilterBypassPidTable->setHorizontalHeaderLabels(QStringList{
             QStringLiteral("PID"),
-            QStringLiteral("进程")
+            kernelText("kernel.callback.intercept.minifilter.header.process", QStringLiteral("进程"))
             });
         m_minifilterBypassPidTable->setSelectionBehavior(QAbstractItemView::SelectRows);
         m_minifilterBypassPidTable->setSelectionMode(QAbstractItemView::SingleSelection);
@@ -2063,11 +2067,11 @@ private:
         installCallbackTableCopyMenu(m_minifilterBypassPidTable);
         tabLayout->addWidget(m_minifilterBypassPidTable, 1);
 
-        m_minifilterBypassStatusLabel = new QLabel(QStringLiteral("尚未从驱动刷新；编辑后点击“应用到驱动”生效。"), tabPage);
+        m_minifilterBypassStatusLabel = new QLabel(kernelText("kernel.callback.intercept.minifilter.status.not_refreshed", QStringLiteral("尚未从驱动刷新；编辑后点击“应用到驱动”生效。")), tabPage);
         m_minifilterBypassStatusLabel->setStyleSheet(QStringLiteral("color:%1;").arg(KswordTheme::TextSecondaryHex()));
         tabLayout->addWidget(m_minifilterBypassStatusLabel, 0);
 
-        m_ruleTabWidget->addTab(tabPage, QStringLiteral("Minifilter PID 放行"));
+        m_ruleTabWidget->addTab(tabPage, kernelText("kernel.callback.intercept.minifilter.tab", QStringLiteral("Minifilter PID 放行")));
     }
 
     QList<quint32> parseMinifilterBypassPidText(const QString& rawText, QString* errorTextOut) const
@@ -2087,7 +2091,7 @@ private:
         {
             if (errorTextOut != nullptr)
             {
-                *errorTextOut = QStringLiteral("请输入至少一个 PID。");
+                *errorTextOut = kernelText("kernel.callback.intercept.minifilter.error.empty", QStringLiteral("请输入至少一个 PID。"));
             }
             return {};
         }
@@ -2099,7 +2103,7 @@ private:
             {
                 if (errorTextOut != nullptr)
                 {
-                    *errorTextOut = QStringLiteral("PID 无效：%1").arg(tokenText);
+                    *errorTextOut = kernelText("kernel.callback.intercept.minifilter.error.invalid_pid", QStringLiteral("PID 无效：%1")).arg(tokenText);
                 }
                 return {};
             }
@@ -2174,9 +2178,9 @@ private:
         {
             if (m_minifilterBypassStatusLabel != nullptr)
             {
-                m_minifilterBypassStatusLabel->setText(QStringLiteral("添加失败：%1").arg(errorText));
+                m_minifilterBypassStatusLabel->setText(kernelText("kernel.callback.intercept.minifilter.status.add_failed", QStringLiteral("添加失败：%1")).arg(errorText));
             }
-            QMessageBox::warning(m_hostPage, QStringLiteral("Minifilter PID 放行"), errorText);
+            QMessageBox::warning(m_hostPage, kernelText("kernel.callback.intercept.minifilter.title", QStringLiteral("Minifilter PID 放行")), errorText);
             return;
         }
 
@@ -2195,8 +2199,8 @@ private:
         {
             QMessageBox::warning(
                 m_hostPage,
-                QStringLiteral("Minifilter PID 放行"),
-                QStringLiteral("白名单最多 %1 个 PID，超出的项目未添加。")
+                kernelText("kernel.callback.intercept.minifilter.title", QStringLiteral("Minifilter PID 放行")),
+                kernelText("kernel.callback.intercept.minifilter.warning.limit", QStringLiteral("白名单最多 %1 个 PID，超出的项目未添加。"))
                 .arg(KSWORD_ARK_MINIFILTER_BYPASS_PID_MAX_COUNT));
         }
 
@@ -2206,7 +2210,7 @@ private:
         }
         if (m_minifilterBypassStatusLabel != nullptr)
         {
-            m_minifilterBypassStatusLabel->setText(QStringLiteral("已添加 %1 个 PID；点击“应用到驱动”后生效。").arg(addedCount));
+            m_minifilterBypassStatusLabel->setText(kernelText("kernel.callback.intercept.minifilter.status.added", QStringLiteral("已添加 %1 个 PID；点击“应用到驱动”后生效。")).arg(addedCount));
         }
     }
 
@@ -2228,7 +2232,7 @@ private:
         m_minifilterBypassPidTable->removeRow(rowIndex);
         if (m_minifilterBypassStatusLabel != nullptr)
         {
-            m_minifilterBypassStatusLabel->setText(QStringLiteral("已移除选中 PID；点击“应用到驱动”后生效。"));
+            m_minifilterBypassStatusLabel->setText(kernelText("kernel.callback.intercept.minifilter.status.removed", QStringLiteral("已移除选中 PID；点击“应用到驱动”后生效。")));
         }
     }
 
@@ -2289,23 +2293,23 @@ private:
             const QString detailText = callbackRuleIoMessageText(QString::fromStdString(ioResult.message));
             if (m_minifilterBypassStatusLabel != nullptr)
             {
-                m_minifilterBypassStatusLabel->setText(QStringLiteral("应用失败：error=%1").arg(ioResult.win32Error));
+                m_minifilterBypassStatusLabel->setText(kernelText("kernel.callback.intercept.minifilter.status.apply_failed", QStringLiteral("应用失败：error=%1")).arg(ioResult.win32Error));
             }
-            appendAppLog(QStringLiteral("Minifilter PID 放行应用失败：error=%1，detail=%2")
+            appendAppLog(kernelText("kernel.callback.intercept.minifilter.log.apply_failed", QStringLiteral("Minifilter PID 放行应用失败：error=%1，detail=%2"))
                 .arg(ioResult.win32Error)
                 .arg(detailText));
             QMessageBox::warning(
                 m_hostPage,
-                QStringLiteral("Minifilter PID 放行"),
-                QStringLiteral("应用到驱动失败，error=%1。").arg(ioResult.win32Error));
+                kernelText("kernel.callback.intercept.minifilter.title", QStringLiteral("Minifilter PID 放行")),
+                kernelText("kernel.callback.intercept.minifilter.error.apply_to_driver", QStringLiteral("应用到驱动失败，error=%1。")).arg(ioResult.win32Error));
             return;
         }
 
         if (m_minifilterBypassStatusLabel != nullptr)
         {
-            m_minifilterBypassStatusLabel->setText(QStringLiteral("已应用到驱动：%1 个 PID。").arg(static_cast<qulonglong>(processIds.size())));
+            m_minifilterBypassStatusLabel->setText(kernelText("kernel.callback.intercept.minifilter.status.applied", QStringLiteral("已应用到驱动：%1 个 PID。")).arg(static_cast<qulonglong>(processIds.size())));
         }
-        appendAppLog(QStringLiteral("Minifilter PID 放行已应用：count=%1。").arg(static_cast<qulonglong>(processIds.size())));
+        appendAppLog(kernelText("kernel.callback.intercept.minifilter.log.applied", QStringLiteral("Minifilter PID 放行已应用：count=%1。")).arg(static_cast<qulonglong>(processIds.size())));
     }
 
     void clearMinifilterBypassPidsAndApply()
@@ -2331,9 +2335,9 @@ private:
             const QString detailText = callbackRuleIoMessageText(QString::fromStdString(queryResult.io.message));
             if (m_minifilterBypassStatusLabel != nullptr)
             {
-                m_minifilterBypassStatusLabel->setText(QStringLiteral("刷新失败：error=%1").arg(queryResult.io.win32Error));
+                m_minifilterBypassStatusLabel->setText(kernelText("kernel.callback.intercept.minifilter.status.refresh_failed", QStringLiteral("刷新失败：error=%1")).arg(queryResult.io.win32Error));
             }
-            appendAppLog(QStringLiteral("Minifilter PID 放行刷新失败：error=%1，detail=%2")
+            appendAppLog(kernelText("kernel.callback.intercept.minifilter.log.refresh_failed", QStringLiteral("Minifilter PID 放行刷新失败：error=%1，detail=%2"))
                 .arg(queryResult.io.win32Error)
                 .arg(detailText));
             return;
@@ -2356,9 +2360,9 @@ private:
         populateMinifilterBypassPids(processIds);
         if (m_minifilterBypassStatusLabel != nullptr)
         {
-            m_minifilterBypassStatusLabel->setText(QStringLiteral("已从驱动刷新：%1 个 PID。").arg(static_cast<qulonglong>(processIds.size())));
+            m_minifilterBypassStatusLabel->setText(kernelText("kernel.callback.intercept.minifilter.status.refreshed", QStringLiteral("已从驱动刷新：%1 个 PID。")).arg(static_cast<qulonglong>(processIds.size())));
         }
-        appendAppLog(QStringLiteral("Minifilter PID 放行已刷新：count=%1。").arg(static_cast<qulonglong>(processIds.size())));
+        appendAppLog(kernelText("kernel.callback.intercept.minifilter.log.refreshed", QStringLiteral("Minifilter PID 放行已刷新：count=%1。")).arg(static_cast<qulonglong>(processIds.size())));
     }
 
     void createRuleTableTab(quint32 callbackType, const QString& titleText)
@@ -2371,16 +2375,16 @@ private:
         auto* ruleTable = new ks::ui::VisibleTableWidget(tabPage);
         ruleTable->setColumnCount(static_cast<int>(RuleColumn::Count));
         ruleTable->setHorizontalHeaderLabels(QStringList{
-            QStringLiteral("启用"),
+            kernelText("kernel.callback.intercept.rule.header.enabled", QStringLiteral("启用")),
             QStringLiteral("RuleID"),
             QStringLiteral("GroupID"),
-            QStringLiteral("规则名称"),
-            QStringLiteral("操作类型"),
-            QStringLiteral("匹配模式"),
-            QStringLiteral("动作"),
-            QStringLiteral("超时毫秒"),
-            QStringLiteral("超时决策"),
-            QStringLiteral("优先级")
+            kernelText("kernel.callback.intercept.rule.header.name", QStringLiteral("规则名称")),
+            kernelText("kernel.callback.intercept.rule.header.operation", QStringLiteral("操作类型")),
+            kernelText("kernel.callback.intercept.rule.header.match_mode", QStringLiteral("匹配模式")),
+            kernelText("kernel.callback.intercept.rule.header.action", QStringLiteral("动作")),
+            kernelText("kernel.callback.intercept.rule.header.timeout_ms", QStringLiteral("超时毫秒")),
+            kernelText("kernel.callback.intercept.rule.header.timeout_decision", QStringLiteral("超时决策")),
+            kernelText("kernel.callback.intercept.rule.header.priority", QStringLiteral("优先级"))
             });
         ruleTable->setSelectionBehavior(QAbstractItemView::SelectRows);
         ruleTable->setSelectionMode(QAbstractItemView::SingleSelection);
@@ -2442,7 +2446,7 @@ private:
         {
             if (errorTextOut != nullptr)
             {
-                *errorTextOut = QStringLiteral("内部错误：ruleOut 为空。");
+                *errorTextOut = kernelText("kernel.callback.intercept.validation.rule_out_null", QStringLiteral("内部错误：ruleOut 为空。"));
             }
             return false;
         }
@@ -2450,7 +2454,7 @@ private:
         {
             if (errorTextOut != nullptr)
             {
-                *errorTextOut = QStringLiteral("内部错误：ruleTable 为空。");
+                *errorTextOut = kernelText("kernel.callback.intercept.validation.rule_table_null", QStringLiteral("内部错误：ruleTable 为空。"));
             }
             return false;
         }
@@ -2464,7 +2468,7 @@ private:
         {
             if (errorTextOut != nullptr)
             {
-                *errorTextOut = QStringLiteral("当前未选中有效规则。");
+                *errorTextOut = kernelText("kernel.callback.intercept.validation.no_selected_rule", QStringLiteral("当前未选中有效规则。"));
             }
             return false;
         }
@@ -2499,22 +2503,22 @@ private:
         {
             QMessageBox::warning(
                 m_hostPage,
-                QStringLiteral("驱动回调"),
-                QStringLiteral("复制规则失败：%1").arg(errorText));
-            appendAppLog(QStringLiteral("复制规则失败：%1").arg(errorText));
+                kernelText("kernel.callback.intercept.dialog.title", QStringLiteral("驱动回调")),
+                kernelText("kernel.callback.intercept.clipboard.copy_failed", QStringLiteral("复制规则失败：%1")).arg(errorText));
+            appendAppLog(kernelText("kernel.callback.intercept.clipboard.copy_failed", QStringLiteral("复制规则失败：%1")).arg(errorText));
             return;
         }
 
         QClipboard* clipboard = QApplication::clipboard();
         if (clipboard == nullptr)
         {
-            appendAppLog(QStringLiteral("复制规则失败：系统剪贴板不可用。"));
+            appendAppLog(kernelText("kernel.callback.intercept.clipboard.unavailable_copy", QStringLiteral("复制规则失败：系统剪贴板不可用。")));
             return;
         }
 
         clipboard->setText(serializeRuleToClipboardText(selectedRuleModel));
         appendAppLog(
-            QStringLiteral("已复制规则到剪贴板：ruleId=%1，类型=%2")
+            kernelText("kernel.callback.intercept.clipboard.copy_success", QStringLiteral("已复制规则到剪贴板：ruleId=%1，类型=%2"))
             .arg(selectedRuleModel.ruleId)
             .arg(callbackTypeToDisplayText(callbackType)));
     }
@@ -2533,9 +2537,9 @@ private:
         {
             QMessageBox::warning(
                 m_hostPage,
-                QStringLiteral("驱动回调"),
-                QStringLiteral("粘贴失败：系统剪贴板不可用。"));
-            appendAppLog(QStringLiteral("粘贴失败：系统剪贴板不可用。"));
+                kernelText("kernel.callback.intercept.dialog.title", QStringLiteral("驱动回调")),
+                kernelText("kernel.callback.intercept.clipboard.unavailable_paste", QStringLiteral("粘贴失败：系统剪贴板不可用。")));
+            appendAppLog(kernelText("kernel.callback.intercept.clipboard.unavailable_paste", QStringLiteral("粘贴失败：系统剪贴板不可用。")));
             return;
         }
 
@@ -2544,8 +2548,8 @@ private:
         {
             QMessageBox::information(
                 m_hostPage,
-                QStringLiteral("驱动回调"),
-                QStringLiteral("剪贴板为空，无法粘贴规则。"));
+                kernelText("kernel.callback.intercept.dialog.title", QStringLiteral("驱动回调")),
+                kernelText("kernel.callback.intercept.clipboard.empty", QStringLiteral("剪贴板为空，无法粘贴规则。")));
             return;
         }
 
@@ -2555,9 +2559,9 @@ private:
         {
             QMessageBox::warning(
                 m_hostPage,
-                QStringLiteral("驱动回调"),
-                QStringLiteral("粘贴失败：%1").arg(parseErrorText));
-            appendAppLog(QStringLiteral("粘贴失败：%1").arg(parseErrorText));
+                kernelText("kernel.callback.intercept.dialog.title", QStringLiteral("驱动回调")),
+                kernelText("kernel.callback.intercept.clipboard.paste_failed", QStringLiteral("粘贴失败：%1")).arg(parseErrorText));
+            appendAppLog(kernelText("kernel.callback.intercept.clipboard.paste_failed", QStringLiteral("粘贴失败：%1")).arg(parseErrorText));
             return;
         }
 
@@ -2568,11 +2572,11 @@ private:
         pastedRuleModel.targetPattern = normalizeMatchAllPattern(pastedRuleModel.targetPattern);
         if (pastedRuleModel.ruleName.trimmed().isEmpty())
         {
-            pastedRuleModel.ruleName = QStringLiteral("规则%1").arg(pastedRuleModel.ruleId);
+            pastedRuleModel.ruleName = kernelText("kernel.callback.intercept.clipboard.default_rule_name", QStringLiteral("规则%1")).arg(pastedRuleModel.ruleId);
         }
         if (pastedRuleModel.comment.trimmed().isEmpty())
         {
-            pastedRuleModel.comment = QStringLiteral("粘贴规则");
+            pastedRuleModel.comment = kernelText("kernel.callback.intercept.clipboard.pasted_rule_comment", QStringLiteral("粘贴规则"));
         }
 
         addDefaultGroupIfNeeded();
@@ -2584,9 +2588,9 @@ private:
         {
             QMessageBox::warning(
                 m_hostPage,
-                QStringLiteral("驱动回调"),
-                QStringLiteral("粘贴失败：当前没有可用规则组。"));
-            appendAppLog(QStringLiteral("粘贴失败：当前没有可用规则组。"));
+                kernelText("kernel.callback.intercept.dialog.title", QStringLiteral("驱动回调")),
+                kernelText("kernel.callback.intercept.clipboard.no_group", QStringLiteral("粘贴失败：当前没有可用规则组。")));
+            appendAppLog(kernelText("kernel.callback.intercept.clipboard.no_group", QStringLiteral("粘贴失败：当前没有可用规则组。")));
             return;
         }
 
@@ -2653,11 +2657,11 @@ private:
         if (sourceCallbackType != callbackType)
         {
             appendAppLog(
-                QStringLiteral("剪贴板规则类型已转换：%1 -> %2")
+                kernelText("kernel.callback.intercept.clipboard.type_converted", QStringLiteral("剪贴板规则类型已转换：%1 -> %2"))
                 .arg(callbackTypeToDisplayText(sourceCallbackType))
                 .arg(callbackTypeToDisplayText(callbackType)));
         }
-        appendAppLog(QStringLiteral("已从剪贴板粘贴规则：newRuleId=%1").arg(pastedRuleModel.ruleId));
+        appendAppLog(kernelText("kernel.callback.intercept.clipboard.paste_success", QStringLiteral("已从剪贴板粘贴规则：newRuleId=%1")).arg(pastedRuleModel.ruleId));
     }
 
     void showRuleTableContextMenu(
@@ -2688,23 +2692,23 @@ private:
         contextMenu.setStyleSheet(callbackRuleContextMenuStyle());
         QAction* addRuleAction = contextMenu.addAction(
             QIcon(QStringLiteral(":/Icon/plus.svg")),
-            QStringLiteral("新增规则"));
+            kernelText("kernel.callback.intercept.context_menu.add_rule", QStringLiteral("新增规则")));
         QAction* removeRuleAction = contextMenu.addAction(
             QIcon(QStringLiteral(":/Icon/log_clear.svg")),
-            QStringLiteral("删除当前规则"));
+            kernelText("kernel.callback.intercept.context_menu.remove_rule", QStringLiteral("删除当前规则")));
         QAction* moveUpRuleAction = contextMenu.addAction(
             QIcon(QStringLiteral(":/Icon/file_nav_up.svg")),
-            QStringLiteral("上移当前规则"));
+            kernelText("kernel.callback.intercept.context_menu.move_up", QStringLiteral("上移当前规则")));
         QAction* moveDownRuleAction = contextMenu.addAction(
             QIcon(QStringLiteral(":/Icon/codeeditor_goto.svg")),
-            QStringLiteral("下移当前规则"));
+            kernelText("kernel.callback.intercept.context_menu.move_down", QStringLiteral("下移当前规则")));
         contextMenu.addSeparator();
         QAction* copyRuleAction = contextMenu.addAction(
             QIcon(QStringLiteral(":/Icon/process_copy_row.svg")),
-            QStringLiteral("复制规则文本"));
+            kernelText("kernel.callback.intercept.context_menu.copy_rule", QStringLiteral("复制规则文本")));
         QAction* pasteRuleAction = contextMenu.addAction(
             QIcon(QStringLiteral(":/Icon/codeeditor_paste.svg")),
-            QStringLiteral("粘贴为新规则"));
+            kernelText("kernel.callback.intercept.context_menu.paste_rule", QStringLiteral("粘贴为新规则")));
 
         removeRuleAction->setEnabled(hasCurrentRule);
         moveUpRuleAction->setEnabled(hasCurrentRule && logicalRuleIndex > 0);
@@ -2769,10 +2773,10 @@ private:
 
         CallbackRuleGroupModel defaultGroup;
         defaultGroup.groupId = 1U;
-        defaultGroup.groupName = QStringLiteral("默认组");
+        defaultGroup.groupName = kernelText("kernel.callback.intercept.default_group.name", QStringLiteral("默认组"));
         defaultGroup.enabled = true;
         defaultGroup.priority = 10;
-        defaultGroup.comment = QStringLiteral("默认规则组");
+        defaultGroup.comment = kernelText("kernel.callback.intercept.default_group.comment", QStringLiteral("默认规则组"));
         appendGroupRow(defaultGroup);
         m_groupTable->setCurrentCell(0, static_cast<int>(GroupColumn::Name));
     }
@@ -3011,7 +3015,7 @@ private:
             checkBox->setProperty("operationMaskBit", QVariant::fromValue(bitPair.second));
             checkBox->setChecked((operationMask & bitPair.second) == bitPair.second);
             checkBox->setToolTip(
-                QStringLiteral("%1：%2")
+                kernelText("kernel.callback.intercept.operation.tooltip", QStringLiteral("%1：%2"))
                 .arg(bitPair.first, operationMaskToText(bitPair.second)));
             connect(checkBox, &QCheckBox::toggled, m_hostPage, [this](bool) {
                 if (!m_ignoreUiSignal)
@@ -3037,9 +3041,9 @@ private:
         const quint32 customMask = operationMask & ~checkedOperationMask;
         auto* customMaskEdit = new QLineEdit(operationPanel);
         customMaskEdit->setObjectName(QStringLiteral("ksCallbackRuleCustomMaskEdit"));
-        customMaskEdit->setPlaceholderText(QStringLiteral("自定义掩码"));
+        customMaskEdit->setPlaceholderText(kernelText("kernel.callback.intercept.operation.custom_mask", QStringLiteral("自定义掩码")));
         customMaskEdit->setText(customMask != 0U ? operationMaskToText(customMask) : QString());
-        customMaskEdit->setToolTip(QStringLiteral("输入十六进制或十进制掩码；缺少 0x/0X 时会自动补全。"));
+        customMaskEdit->setToolTip(kernelText("kernel.callback.intercept.operation.custom_mask_tooltip", QStringLiteral("输入十六进制或十进制掩码；缺少 0x/0X 时会自动补全。")));
         applyRuleLineEditStyle(customMaskEdit);
 
         connect(customMaskEdit, &QLineEdit::textEdited, m_hostPage, [this](const QString&) {
@@ -3055,7 +3059,7 @@ private:
         // customRowIndex 作用：小类型把自定义掩码放在第一排；注册表等多位类型放在第二排右侧。
         const int operationBitCount = static_cast<int>(operationBitList.size());
         const int customRowIndex = (operationBitCount > kOperationCheckColumns) ? 1 : 0;
-        auto* customMaskLabel = new QLabel(QStringLiteral("自定义掩码"), operationPanel);
+        auto* customMaskLabel = new QLabel(kernelText("kernel.callback.intercept.operation.custom_mask", QStringLiteral("自定义掩码")), operationPanel);
         customMaskLabel->setObjectName(QStringLiteral("ksCallbackRuleFieldTitle"));
         panelLayout->addWidget(customMaskLabel, customRowIndex, 4, 1, 1);
         panelLayout->addWidget(customMaskEdit, customRowIndex, 5, 1, 1);
@@ -3104,9 +3108,9 @@ private:
         detailLayout->setVerticalSpacing(3);
 
         const QStringList titleList{
-            QStringLiteral("发起程序匹配"),
-            QStringLiteral("目标程序匹配"),
-            QStringLiteral("备注")
+            kernelText("kernel.callback.intercept.detail.initiator", QStringLiteral("发起程序匹配")),
+            kernelText("kernel.callback.intercept.detail.target", QStringLiteral("目标程序匹配")),
+            kernelText("kernel.callback.intercept.detail.comment", QStringLiteral("备注"))
         };
         for (int columnIndex = 0; columnIndex < titleList.size(); ++columnIndex)
         {
@@ -3134,7 +3138,7 @@ private:
             detailPanel,
             titleList.at(2),
             ruleModel.comment,
-            QStringLiteral("备注"));
+            kernelText("kernel.callback.intercept.detail.comment_placeholder", QStringLiteral("备注")));
         commentEdit->setObjectName(QStringLiteral("ksCallbackRuleCommentEdit"));
 
         const QList<QLineEdit*> editList{ initiatorEdit, targetEdit, commentEdit };
@@ -3189,10 +3193,10 @@ private:
     {
         CallbackRuleGroupModel newGroup;
         newGroup.groupId = (preferredId == 0U) ? allocateNextGroupId() : preferredId;
-        newGroup.groupName = QStringLiteral("规则组%1").arg(newGroup.groupId);
+        newGroup.groupName = kernelText("kernel.callback.intercept.group.default_name", QStringLiteral("规则组%1")).arg(newGroup.groupId);
         newGroup.enabled = true;
         newGroup.priority = (m_groupTable->rowCount() + 1) * 10;
-        newGroup.comment = QStringLiteral("新建规则组");
+        newGroup.comment = kernelText("kernel.callback.intercept.group.default_comment", QStringLiteral("新建规则组"));
 
         m_ignoreUiSignal = true;
         appendGroupRow(newGroup);
@@ -3200,7 +3204,7 @@ private:
 
         refreshRuleGroupComboOptions();
         setDirtyState(true);
-        appendAppLog(QStringLiteral("新增规则组成功：groupId=%1").arg(newGroup.groupId));
+        appendAppLog(kernelText("kernel.callback.intercept.group.added_log", QStringLiteral("新增规则组成功：groupId=%1")).arg(newGroup.groupId));
     }
 
     void removeCurrentGroup()
@@ -3227,7 +3231,7 @@ private:
         QString ruleErrorText;
         if (!collectAllRulesFromUi(&allRuleList, &ruleErrorText))
         {
-            QMessageBox::warning(m_hostPage, QStringLiteral("驱动回调"), ruleErrorText);
+            QMessageBox::warning(m_hostPage, kernelText("kernel.callback.intercept.dialog.title", QStringLiteral("驱动回调")), ruleErrorText);
             return;
         }
         allRuleList.erase(
@@ -3262,7 +3266,7 @@ private:
         refreshRuleGroupComboOptions();
         addDefaultGroupIfNeeded();
         setDirtyState(true);
-        appendAppLog(QStringLiteral("删除规则组成功：groupId=%1").arg(groupId));
+        appendAppLog(kernelText("kernel.callback.intercept.group.removed_log", QStringLiteral("删除规则组成功：groupId=%1")).arg(groupId));
     }
 
     void renameCurrentGroup()
@@ -3282,8 +3286,8 @@ private:
         bool okPressed = false;
         const QString newNameText = QInputDialog::getText(
             m_hostPage,
-            QStringLiteral("重命名规则组"),
-            QStringLiteral("请输入组名称："),
+            kernelText("kernel.callback.intercept.group.rename_dialog.title", QStringLiteral("重命名规则组")),
+            kernelText("kernel.callback.intercept.group.rename_dialog.prompt", QStringLiteral("请输入组名称：")),
             QLineEdit::Normal,
             groupNameItem->text(),
             &okPressed).trimmed();
@@ -3295,7 +3299,7 @@ private:
         groupNameItem->setText(newNameText);
         refreshRuleGroupComboOptions();
         setDirtyState(true);
-        appendAppLog(QStringLiteral("规则组重命名成功：%1").arg(newNameText));
+        appendAppLog(kernelText("kernel.callback.intercept.group.renamed_log", QStringLiteral("规则组重命名成功：%1")).arg(newNameText));
     }
 
     void moveCurrentGroup(const int direction)
@@ -3316,7 +3320,7 @@ private:
         QString errorText;
         if (!collectGroupsFromUi(&groupList, &errorText))
         {
-            QMessageBox::warning(m_hostPage, QStringLiteral("驱动回调"), errorText);
+            QMessageBox::warning(m_hostPage, kernelText("kernel.callback.intercept.dialog.title", QStringLiteral("驱动回调")), errorText);
             return;
         }
 
@@ -3351,7 +3355,7 @@ private:
         CallbackRuleModel ruleModel;
         ruleModel.ruleId = allocateNextRuleId();
         ruleModel.groupId = firstGroupId();
-        ruleModel.ruleName = QStringLiteral("规则%1").arg(ruleModel.ruleId);
+        ruleModel.ruleName = kernelText("kernel.callback.intercept.rule.default_name", QStringLiteral("规则%1")).arg(ruleModel.ruleId);
         ruleModel.enabled = true;
         ruleModel.callbackType = callbackType;
         ruleModel.operationMask = defaultOperationMaskByType(callbackType);
@@ -3366,7 +3370,7 @@ private:
         ruleModel.timeoutMs = (ruleModel.action == KSWORD_ARK_RULE_ACTION_ASK_USER) ? 5000U : 0U;
         ruleModel.timeoutDefaultDecision = KSWORD_ARK_DECISION_ALLOW;
         ruleModel.priority = (ruleCountOfTable(ruleTable) + 1) * 10;
-        ruleModel.comment = QStringLiteral("新建规则");
+        ruleModel.comment = kernelText("kernel.callback.intercept.rule.default_comment", QStringLiteral("新建规则"));
 
         m_ignoreUiSignal = true;
         appendRuleRow(ruleTable, callbackType, ruleModel);
@@ -3375,7 +3379,7 @@ private:
         ruleTable->setCurrentCell(ruleTable->rowCount() - 2, static_cast<int>(RuleColumn::RuleName));
         setDirtyState(true);
         appendAppLog(
-            QStringLiteral("新增规则成功：ruleId=%1，类型=%2")
+            kernelText("kernel.callback.intercept.rule.added_log", QStringLiteral("新增规则成功：ruleId=%1，类型=%2"))
             .arg(ruleModel.ruleId)
             .arg(callbackTypeToDisplayText(callbackType)));
     }
@@ -3393,7 +3397,7 @@ private:
         QString errorText;
         if (!collectRuleListFromTable(ruleTable, callbackType, &ruleList, &errorText))
         {
-            QMessageBox::warning(m_hostPage, QStringLiteral("驱动回调"), errorText);
+            QMessageBox::warning(m_hostPage, kernelText("kernel.callback.intercept.dialog.title", QStringLiteral("驱动回调")), errorText);
             return;
         }
 
@@ -3418,7 +3422,7 @@ private:
             ruleTable->setCurrentCell(targetRuleIndex * 2, static_cast<int>(RuleColumn::RuleName));
         }
         setDirtyState(true);
-        appendAppLog(QStringLiteral("删除规则成功。"));
+        appendAppLog(kernelText("kernel.callback.intercept.rule.removed_log", QStringLiteral("删除规则成功。")));
     }
 
     void moveCurrentRule(const int direction)
@@ -3440,7 +3444,7 @@ private:
         QString errorText;
         if (!collectRuleListFromTable(ruleTable, callbackType, &ruleList, &errorText))
         {
-            QMessageBox::warning(m_hostPage, QStringLiteral("驱动回调"), errorText);
+            QMessageBox::warning(m_hostPage, kernelText("kernel.callback.intercept.dialog.title", QStringLiteral("驱动回调")), errorText);
             return;
         }
 
@@ -3739,7 +3743,7 @@ private:
         {
             if (errorTextOut != nullptr)
             {
-                *errorTextOut = QStringLiteral("内部错误：groupListOut 为空。");
+                *errorTextOut = kernelText("kernel.callback.intercept.validation.group_list_out_null", QStringLiteral("内部错误：groupListOut 为空。"));
             }
             return false;
         }
@@ -3762,7 +3766,7 @@ private:
             {
                 if (errorTextOut != nullptr)
                 {
-                    *errorTextOut = QStringLiteral("规则组行 %1 的 groupId 非法。").arg(rowIndex + 1);
+                    *errorTextOut = kernelText("kernel.callback.intercept.validation.group_id_invalid", QStringLiteral("规则组行 %1 的 groupId 非法。")).arg(rowIndex + 1);
                 }
                 return false;
             }
@@ -3773,7 +3777,7 @@ private:
             {
                 if (errorTextOut != nullptr)
                 {
-                    *errorTextOut = QStringLiteral("规则组行 %1 的优先级非法。").arg(rowIndex + 1);
+                    *errorTextOut = kernelText("kernel.callback.intercept.validation.group_priority_invalid", QStringLiteral("规则组行 %1 的优先级非法。")).arg(rowIndex + 1);
                 }
                 return false;
             }
@@ -3797,7 +3801,7 @@ private:
         {
             if (errorTextOut != nullptr)
             {
-                *errorTextOut = QStringLiteral("内部错误：ruleTable 或 ruleListOut 为空。");
+                *errorTextOut = kernelText("kernel.callback.intercept.validation.rule_table_or_list_null", QStringLiteral("内部错误：ruleTable 或 ruleListOut 为空。"));
             }
             return false;
         }
@@ -3844,7 +3848,7 @@ private:
             {
                 if (errorTextOut != nullptr)
                 {
-                    *errorTextOut = QStringLiteral("规则 %1 的 ruleId 非法。").arg(logicalRuleIndex + 1);
+                    *errorTextOut = kernelText("kernel.callback.intercept.validation.rule_id_invalid", QStringLiteral("规则 %1 的 ruleId 非法。")).arg(logicalRuleIndex + 1);
                 }
                 return false;
             }
@@ -3854,7 +3858,7 @@ private:
             {
                 if (errorTextOut != nullptr)
                 {
-                    *errorTextOut = QStringLiteral("规则 %1 未选择有效规则组。").arg(logicalRuleIndex + 1);
+                    *errorTextOut = kernelText("kernel.callback.intercept.validation.rule_group_invalid", QStringLiteral("规则 %1 未选择有效规则组。")).arg(logicalRuleIndex + 1);
                 }
                 return false;
             }
@@ -3865,7 +3869,7 @@ private:
             {
                 if (errorTextOut != nullptr)
                 {
-                    *errorTextOut = QStringLiteral("规则 %1 的 operationMask 非法。").arg(logicalRuleIndex + 1);
+                    *errorTextOut = kernelText("kernel.callback.intercept.validation.operation_mask_invalid", QStringLiteral("规则 %1 的 operationMask 非法。")).arg(logicalRuleIndex + 1);
                 }
                 return false;
             }
@@ -3876,7 +3880,7 @@ private:
             {
                 if (errorTextOut != nullptr)
                 {
-                    *errorTextOut = QStringLiteral("规则 %1 的 timeoutMs 非法。").arg(logicalRuleIndex + 1);
+                    *errorTextOut = kernelText("kernel.callback.intercept.validation.timeout_invalid", QStringLiteral("规则 %1 的 timeoutMs 非法。")).arg(logicalRuleIndex + 1);
                 }
                 return false;
             }
@@ -3887,7 +3891,7 @@ private:
             {
                 if (errorTextOut != nullptr)
                 {
-                    *errorTextOut = QStringLiteral("规则 %1 的优先级非法。").arg(logicalRuleIndex + 1);
+                    *errorTextOut = kernelText("kernel.callback.intercept.validation.rule_priority_invalid", QStringLiteral("规则 %1 的优先级非法。")).arg(logicalRuleIndex + 1);
                 }
                 return false;
             }
@@ -3941,7 +3945,7 @@ private:
         {
             if (errorTextOut != nullptr)
             {
-                *errorTextOut = QStringLiteral("内部错误：ruleListOut 为空。");
+                *errorTextOut = kernelText("kernel.callback.intercept.validation.rule_list_out_null", QStringLiteral("内部错误：ruleListOut 为空。"));
             }
             return false;
         }
@@ -3970,7 +3974,7 @@ private:
         {
             if (errorTextOut != nullptr)
             {
-                *errorTextOut = QStringLiteral("内部错误：configOut 为空。");
+                *errorTextOut = kernelText("kernel.callback.intercept.validation.config_out_null", QStringLiteral("内部错误：configOut 为空。"));
             }
             return false;
         }
@@ -4003,7 +4007,7 @@ private:
 
         for (const QString& warningText : validationResult.warningList)
         {
-            appendAppLog(QStringLiteral("配置警告：%1").arg(warningText));
+            appendAppLog(kernelText("kernel.callback.intercept.config.warning", QStringLiteral("配置警告：%1")).arg(warningText));
         }
 
         *configOut = configDocument;
@@ -4017,16 +4021,22 @@ private:
             return;
         }
 
-        const QString statusText = QStringLiteral(
-            "状态：%1 | 驱动%2 | 规则版本=%3 | 规则数=%4 | 等待接收者=%5 | 待决策=%6 | 生效时间=%7 | 未应用修改=%8")
-            .arg(m_rulesApplied ? QStringLiteral("已应用") : QStringLiteral("未应用"))
-            .arg(m_runtimeState.driverOnline != 0U ? QStringLiteral("在线") : QStringLiteral("离线"))
+        const QString statusText = kernelText("kernel.callback.intercept.status.runtime", QStringLiteral(
+            "状态：%1 | 驱动%2 | 规则版本=%3 | 规则数=%4 | 等待接收者=%5 | 待决策=%6 | 生效时间=%7 | 未应用修改=%8"))
+            .arg(m_rulesApplied
+                ? kernelText("kernel.callback.intercept.status.applied", QStringLiteral("已应用"))
+                : kernelText("kernel.callback.intercept.status.not_applied", QStringLiteral("未应用")))
+            .arg(m_runtimeState.driverOnline != 0U
+                ? kernelText("kernel.callback.intercept.status.online", QStringLiteral("在线"))
+                : kernelText("kernel.callback.intercept.status.offline", QStringLiteral("离线")))
             .arg(m_runtimeState.appliedRuleVersion)
             .arg(m_runtimeState.ruleCount)
             .arg(m_runtimeState.waitingReceiverCount)
             .arg(m_runtimeState.pendingDecisionCount)
             .arg(utc100nsToDisplayText(m_runtimeState.appliedAtUtc100ns))
-            .arg(m_dirty ? QStringLiteral("是") : QStringLiteral("否"));
+            .arg(m_dirty
+                ? kernelText("kernel.callback.intercept.status.yes", QStringLiteral("是"))
+                : kernelText("kernel.callback.intercept.status.no", QStringLiteral("否")));
         m_statusLabel->setText(statusText);
         m_statusLabel->setStyleSheet(
             QStringLiteral("color:%1;font-weight:600;")
@@ -4041,7 +4051,7 @@ private:
         {
             if (errorTextOut != nullptr)
             {
-                *errorTextOut = QStringLiteral("内部错误：runtimeStateOut 为空。");
+                *errorTextOut = kernelText("kernel.callback.intercept.validation.runtime_state_out_null", QStringLiteral("内部错误：runtimeStateOut 为空。"));
             }
             return false;
         }
@@ -4052,7 +4062,7 @@ private:
         {
             if (errorTextOut != nullptr)
             {
-                *errorTextOut = QStringLiteral("获取驱动状态失败，error=%1，detail=%2")
+                *errorTextOut = kernelText("kernel.callback.intercept.runtime.query_failed", QStringLiteral("获取驱动状态失败，error=%1，detail=%2"))
                     .arg(runtimeResult.io.win32Error)
                     .arg(callbackRuleIoMessageText(QString::fromStdString(runtimeResult.io.message)));
             }
@@ -4070,7 +4080,7 @@ private:
         if (!queryRuntimeState(&runtimeState, &errorText))
         {
             RtlZeroMemory(&m_runtimeState, sizeof(m_runtimeState));
-            appendAppLog(QStringLiteral("重新加载驱动状态失败：%1").arg(errorText));
+            appendAppLog(kernelText("kernel.callback.intercept.runtime.reload_failed", QStringLiteral("重新加载驱动状态失败：%1")).arg(errorText));
             updateStatusLabel();
             return;
         }
@@ -4083,7 +4093,7 @@ private:
         }
 
         appendAppLog(
-            QStringLiteral("驱动状态已刷新：online=%1, groups=%2, rules=%3, pending=%4, waiting=%5")
+            kernelText("kernel.callback.intercept.runtime.refreshed", QStringLiteral("驱动状态已刷新：online=%1, groups=%2, rules=%3, pending=%4, waiting=%5"))
             .arg(m_runtimeState.driverOnline)
             .arg(m_runtimeState.groupCount)
             .arg(m_runtimeState.ruleCount)
@@ -4110,7 +4120,7 @@ private:
             (beforeStatus.runtimeFlags & KSWORD_ARK_FILE_MONITOR_RUNTIME_STARTED) != 0U)
         {
             appendAppLog(
-                QStringLiteral("文件系统微过滤器已处于启动状态：mask=0x%1, queued=%2, dropped=%3。")
+                kernelText("kernel.callback.intercept.runtime.minifilter.already_started", QStringLiteral("文件系统微过滤器已处于启动状态：mask=0x%1, queued=%2, dropped=%3。"))
                 .arg(beforeStatus.operationMask, 8, 16, QChar('0')).toUpper()
                 .arg(beforeStatus.queuedCount)
                 .arg(beforeStatus.droppedCount));
@@ -4120,7 +4130,7 @@ private:
         if (!beforeStatus.io.ok)
         {
             appendAppLog(
-                QStringLiteral("查询文件系统微过滤器状态失败，仍尝试启动：error=%1，detail=%2")
+                kernelText("kernel.callback.intercept.runtime.minifilter.query_failed", QStringLiteral("查询文件系统微过滤器状态失败，仍尝试启动：error=%1，detail=%2"))
                 .arg(beforeStatus.io.win32Error)
                 .arg(callbackRuleIoMessageText(QString::fromStdString(beforeStatus.io.message))));
         }
@@ -4142,7 +4152,7 @@ private:
             if (legacyStartResult.ok)
             {
                 appendAppLog(
-                    QStringLiteral("文件系统微过滤器以旧掩码启动：mask=0x%1；当前驱动可能尚未支持 FSCTL 事件。")
+                    kernelText("kernel.callback.intercept.runtime.minifilter.legacy_started", QStringLiteral("文件系统微过滤器以旧掩码启动：mask=0x%1；当前驱动可能尚未支持 FSCTL 事件。"))
                     .arg(legacyOperationMask, 8, 16, QChar('0')).toUpper());
                 startResult = legacyStartResult;
             }
@@ -4152,7 +4162,7 @@ private:
             const ksword::ark::FileMonitorStatusResult failStatus =
                 driverClient.queryFileMonitorStatus();
             const QString statusSuffix = failStatus.io.ok
-                ? QStringLiteral("；status=%1，flags=0x%2，mask=0x%3，register=%4，start=%5，last=%6，queued=%7，dropped=%8")
+                ? kernelText("kernel.callback.intercept.runtime.minifilter.status_suffix", QStringLiteral("；status=%1，flags=0x%2，mask=0x%3，register=%4，start=%5，last=%6，queued=%7，dropped=%8"))
                     .arg(callbackRuleIoMessageText(QString::fromStdString(failStatus.io.message)))
                     .arg(failStatus.runtimeFlags, 8, 16, QChar('0')).toUpper()
                     .arg(failStatus.operationMask, 8, 16, QChar('0')).toUpper()
@@ -4161,11 +4171,11 @@ private:
                     .arg(formatCallbackNtStatusHex(failStatus.lastErrorStatus))
                     .arg(failStatus.queuedCount)
                     .arg(failStatus.droppedCount)
-                : QStringLiteral("；status-query-failed error=%1，detail=%2")
+                : kernelText("kernel.callback.intercept.runtime.minifilter.status_query_failed", QStringLiteral("；status-query-failed error=%1，detail=%2"))
                     .arg(failStatus.io.win32Error)
                     .arg(callbackRuleIoMessageText(QString::fromStdString(failStatus.io.message)));
             appendAppLog(
-                QStringLiteral("警告：文件系统微过滤器启动失败，Minifilter 自定义规则暂时不会收到文件事件：error=%1，detail=%2%3")
+                kernelText("kernel.callback.intercept.runtime.minifilter.start_warning", QStringLiteral("警告：文件系统微过滤器启动失败，Minifilter 自定义规则暂时不会收到文件事件：error=%1，detail=%2%3"))
                 .arg(startResult.win32Error)
                 .arg(callbackRuleIoMessageText(QString::fromStdString(startResult.message)))
                 .arg(statusSuffix));
@@ -4177,7 +4187,7 @@ private:
         if (afterStatus.io.ok)
         {
             appendAppLog(
-                QStringLiteral("文件系统微过滤器已启动：flags=0x%1, mask=0x%2, register=%3, start=%4, last=%5。")
+                kernelText("kernel.callback.intercept.runtime.minifilter.started", QStringLiteral("文件系统微过滤器已启动：flags=0x%1, mask=0x%2, register=%3, start=%4, last=%5。"))
                 .arg(afterStatus.runtimeFlags, 8, 16, QChar('0')).toUpper()
                 .arg(afterStatus.operationMask, 8, 16, QChar('0')).toUpper()
                 .arg(formatCallbackNtStatusHex(afterStatus.registerStatus))
@@ -4187,7 +4197,7 @@ private:
         else
         {
             appendAppLog(
-                QStringLiteral("文件系统微过滤器启动命令已下发，但状态复查失败：error=%1，detail=%2")
+                kernelText("kernel.callback.intercept.runtime.minifilter.post_check_failed", QStringLiteral("文件系统微过滤器启动命令已下发，但状态复查失败：error=%1，detail=%2"))
                 .arg(afterStatus.io.win32Error)
                 .arg(callbackRuleIoMessageText(QString::fromStdString(afterStatus.io.message))));
         }
@@ -4199,16 +4209,20 @@ private:
         QString errorText;
         if (!collectConfigFromUi(&configDocument, &errorText))
         {
-            QMessageBox::warning(m_hostPage, QStringLiteral("驱动回调"), QStringLiteral("应用失败：%1").arg(errorText));
-            appendAppLog(QStringLiteral("应用失败：%1").arg(errorText));
+            QMessageBox::warning(m_hostPage,
+                kernelText("kernel.callback.intercept.dialog.title", QStringLiteral("驱动回调")),
+                kernelText("kernel.callback.intercept.apply.failed", QStringLiteral("应用失败：%1")).arg(errorText));
+            appendAppLog(kernelText("kernel.callback.intercept.apply.failed", QStringLiteral("应用失败：%1")).arg(errorText));
             return;
         }
 
         QByteArray blobBytes;
         if (!buildCallbackRuleBlobFromConfig(configDocument, &blobBytes, &errorText))
         {
-            QMessageBox::warning(m_hostPage, QStringLiteral("驱动回调"), QStringLiteral("规则编译失败：%1").arg(errorText));
-            appendAppLog(QStringLiteral("规则编译失败：%1").arg(errorText));
+            QMessageBox::warning(m_hostPage,
+                kernelText("kernel.callback.intercept.dialog.title", QStringLiteral("驱动回调")),
+                kernelText("kernel.callback.intercept.apply.compile_failed", QStringLiteral("规则编译失败：%1")).arg(errorText));
+            appendAppLog(kernelText("kernel.callback.intercept.apply.compile_failed", QStringLiteral("规则编译失败：%1")).arg(errorText));
             return;
         }
 
@@ -4221,9 +4235,9 @@ private:
         {
             QMessageBox::warning(
                 m_hostPage,
-                QStringLiteral("驱动回调"),
-                QStringLiteral("应用到驱动失败，error=%1。").arg(applyResult.win32Error));
-            appendAppLog(QStringLiteral("应用到驱动失败，error=%1，detail=%2")
+                kernelText("kernel.callback.intercept.dialog.title", QStringLiteral("驱动回调")),
+                kernelText("kernel.callback.intercept.apply.error", QStringLiteral("应用到驱动失败，error=%1。")).arg(applyResult.win32Error));
+            appendAppLog(kernelText("kernel.callback.intercept.apply.log_failed", QStringLiteral("应用到驱动失败，error=%1，detail=%2"))
                 .arg(applyResult.win32Error)
                 .arg(callbackRuleIoMessageText(QString::fromStdString(applyResult.message))));
             return;
@@ -4234,7 +4248,7 @@ private:
         m_nextRuleVersion = configDocument.ruleVersion + 1ULL;
 
         appendAppLog(
-            QStringLiteral("应用成功：ruleVersion=%1, groupCount=%2, ruleCount=%3, blobBytes=%4")
+            kernelText("kernel.callback.intercept.apply.success", QStringLiteral("应用成功：ruleVersion=%1, groupCount=%2, ruleCount=%3, blobBytes=%4"))
             .arg(configDocument.ruleVersion)
             .arg(configDocument.groups.size())
             .arg(configDocument.rules.size())
@@ -4254,8 +4268,7 @@ private:
         if (hasAskUserRule && m_runtimeState.waitingReceiverCount == 0U)
         {
             appendAppLog(
-                QStringLiteral("警告：检测到“询问用户”规则，但当前等待接收者为 0。")
-                + QStringLiteral("请确认弹窗管理器已启动，否则驱动将按默认决策回退。"));
+                kernelText("kernel.callback.intercept.apply.ask_user_warning", QStringLiteral("警告：检测到“询问用户”规则，但当前等待接收者为 0。请确认弹窗管理器已启动，否则驱动将按默认决策回退。")));
         }
         updateStatusLabel();
     }
@@ -4264,7 +4277,7 @@ private:
     {
         const QString filePath = QFileDialog::getOpenFileName(
             m_hostPage,
-            QStringLiteral("导入回调规则"),
+            kernelText("kernel.callback.intercept.import.dialog_title", QStringLiteral("导入回调规则")),
             QString(),
             QStringLiteral("Ksword Rule File (*.kswrules);;JSON (*.json);;All Files (*)"));
         if (filePath.trimmed().isEmpty())
@@ -4275,9 +4288,9 @@ private:
         QFile inputFile(filePath);
         if (!inputFile.open(QIODevice::ReadOnly))
         {
-            const QString errorText = QStringLiteral("打开文件失败：%1").arg(inputFile.errorString());
-            QMessageBox::warning(m_hostPage, QStringLiteral("驱动回调"), errorText);
-            appendAppLog(QStringLiteral("导入失败：%1").arg(errorText));
+            const QString errorText = kernelText("kernel.callback.intercept.import.open_failed", QStringLiteral("打开文件失败：%1")).arg(inputFile.errorString());
+            QMessageBox::warning(m_hostPage, kernelText("kernel.callback.intercept.dialog.title", QStringLiteral("驱动回调")), errorText);
+            appendAppLog(kernelText("kernel.callback.intercept.import.failed", QStringLiteral("导入失败：%1")).arg(errorText));
             return;
         }
 
@@ -4289,8 +4302,8 @@ private:
         QString errorText;
         if (!importCallbackConfigFromJson(jsonBytes, &importedDocument, &warningList, &errorText))
         {
-            QMessageBox::warning(m_hostPage, QStringLiteral("驱动回调"), errorText);
-            appendAppLog(QStringLiteral("导入失败：%1").arg(errorText));
+            QMessageBox::warning(m_hostPage, kernelText("kernel.callback.intercept.dialog.title", QStringLiteral("驱动回调")), errorText);
+            appendAppLog(kernelText("kernel.callback.intercept.import.failed", QStringLiteral("导入失败：%1")).arg(errorText));
             return;
         }
 
@@ -4298,24 +4311,26 @@ private:
         if (!validationResult.success)
         {
             const QString validateError = validationResult.errorList.join(QStringLiteral("；"));
-            QMessageBox::warning(m_hostPage, QStringLiteral("驱动回调"), QStringLiteral("导入配置不合法：%1").arg(validateError));
-            appendAppLog(QStringLiteral("导入配置不合法：%1").arg(validateError));
+            QMessageBox::warning(m_hostPage,
+                kernelText("kernel.callback.intercept.dialog.title", QStringLiteral("驱动回调")),
+                kernelText("kernel.callback.intercept.import.invalid", QStringLiteral("导入配置不合法：%1")).arg(validateError));
+            appendAppLog(kernelText("kernel.callback.intercept.import.invalid", QStringLiteral("导入配置不合法：%1")).arg(validateError));
             return;
         }
 
         for (const QString& warningText : warningList)
         {
-            appendAppLog(QStringLiteral("导入警告：%1").arg(warningText));
+            appendAppLog(kernelText("kernel.callback.intercept.import.warning", QStringLiteral("导入警告：%1")).arg(warningText));
         }
         for (const QString& warningText : validationResult.warningList)
         {
-            appendAppLog(QStringLiteral("配置警告：%1").arg(warningText));
+            appendAppLog(kernelText("kernel.callback.intercept.config.warning", QStringLiteral("配置警告：%1")).arg(warningText));
         }
 
         populateUiFromConfig(importedDocument);
         m_nextRuleVersion = std::max(m_nextRuleVersion, importedDocument.ruleVersion + 1ULL);
         setDirtyState(true);
-        appendAppLog(QStringLiteral("导入成功：%1").arg(filePath));
+        appendAppLog(kernelText("kernel.callback.intercept.import.success", QStringLiteral("导入成功：%1")).arg(filePath));
     }
 
     void exportConfigToFile()
@@ -4324,14 +4339,16 @@ private:
         QString errorText;
         if (!collectConfigFromUi(&configDocument, &errorText))
         {
-            QMessageBox::warning(m_hostPage, QStringLiteral("驱动回调"), QStringLiteral("导出失败：%1").arg(errorText));
-            appendAppLog(QStringLiteral("导出失败：%1").arg(errorText));
+            QMessageBox::warning(m_hostPage,
+                kernelText("kernel.callback.intercept.dialog.title", QStringLiteral("驱动回调")),
+                kernelText("kernel.callback.intercept.export.failed", QStringLiteral("导出失败：%1")).arg(errorText));
+            appendAppLog(kernelText("kernel.callback.intercept.export.failed", QStringLiteral("导出失败：%1")).arg(errorText));
             return;
         }
 
         const QString filePath = QFileDialog::getSaveFileName(
             m_hostPage,
-            QStringLiteral("导出回调规则"),
+            kernelText("kernel.callback.intercept.export.dialog_title", QStringLiteral("导出回调规则")),
             QStringLiteral("callback_rules.kswrules"),
             QStringLiteral("Ksword Rule File (*.kswrules);;JSON (*.json);;All Files (*)"));
         if (filePath.trimmed().isEmpty())
@@ -4342,23 +4359,25 @@ private:
         QByteArray jsonBytes;
         if (!exportCallbackConfigToJson(configDocument, &jsonBytes, &errorText))
         {
-            QMessageBox::warning(m_hostPage, QStringLiteral("驱动回调"), QStringLiteral("导出失败：%1").arg(errorText));
-            appendAppLog(QStringLiteral("导出失败：%1").arg(errorText));
+            QMessageBox::warning(m_hostPage,
+                kernelText("kernel.callback.intercept.dialog.title", QStringLiteral("驱动回调")),
+                kernelText("kernel.callback.intercept.export.failed", QStringLiteral("导出失败：%1")).arg(errorText));
+            appendAppLog(kernelText("kernel.callback.intercept.export.failed", QStringLiteral("导出失败：%1")).arg(errorText));
             return;
         }
 
         QFile outputFile(filePath);
         if (!outputFile.open(QIODevice::WriteOnly | QIODevice::Truncate))
         {
-            const QString ioError = QStringLiteral("写入失败：%1").arg(outputFile.errorString());
-            QMessageBox::warning(m_hostPage, QStringLiteral("驱动回调"), ioError);
-            appendAppLog(QStringLiteral("导出失败：%1").arg(ioError));
+            const QString ioError = kernelText("kernel.callback.intercept.export.write_failed", QStringLiteral("写入失败：%1")).arg(outputFile.errorString());
+            QMessageBox::warning(m_hostPage, kernelText("kernel.callback.intercept.dialog.title", QStringLiteral("驱动回调")), ioError);
+            appendAppLog(kernelText("kernel.callback.intercept.export.failed", QStringLiteral("导出失败：%1")).arg(ioError));
             return;
         }
         outputFile.write(jsonBytes);
         outputFile.close();
 
-        appendAppLog(QStringLiteral("导出成功：%1").arg(filePath));
+        appendAppLog(kernelText("kernel.callback.intercept.export.success", QStringLiteral("导出成功：%1")).arg(filePath));
     }
 
     void populateUiFromConfig(const CallbackConfigDocument& configDocument)
