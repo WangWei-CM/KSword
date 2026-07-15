@@ -10,7 +10,7 @@ namespace
     // kReleaseVersionText 作用：
     // - 欢迎页显示的版本号文本；
     // - 由发布脚本按注释标记替换。
-    const QString kReleaseVersionText = QStringLiteral("5.1.2.2评估版本-4"); // RELEASE_META_VERSION_MARKER
+    const QString kReleaseVersionText = QStringLiteral("5.1.2.3评估版本"); // RELEASE_META_VERSION_MARKER
 
     // kReleaseBuildTimeText 作用：
     // - 欢迎页显示的精确编译时间；
