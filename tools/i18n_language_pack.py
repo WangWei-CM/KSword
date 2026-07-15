@@ -17,6 +17,11 @@ HAN_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]")
 LATIN_RE = re.compile(r"[A-Za-z]")
 PLACEHOLDER_RE = re.compile(r"%(?:L?\d+|n)|\{\d+\}")
 SOURCE_SUFFIXES = {".cpp", ".h", ".hpp", ".cc", ".cxx", ".ui"}
+SKIPPED_SOURCE_DIRS = {"backup"}
+SKIPPED_SOURCE_LINE_MARKERS = {
+    "RELEASE_META_BUILD_TIME_MARKER",
+    "RELEASE_META_VERSION_MARKER",
+}
 
 
 @dataclass
@@ -238,6 +243,9 @@ def extract_ui_strings(source_text: str) -> Iterable[tuple[str, int]]:
 def extract_source_strings(source_root: Path) -> dict[str, ExtractedString]:
     extracted: dict[str, ExtractedString] = {}
     for source_path in sorted(source_root.rglob("*")):
+        relative_parts = source_path.relative_to(source_root).parts[:-1]
+        if any(part.lower() in SKIPPED_SOURCE_DIRS for part in relative_parts):
+            continue
         if not source_path.is_file() or source_path.suffix.lower() not in SOURCE_SUFFIXES:
             continue
         try:
@@ -249,8 +257,12 @@ def extract_source_strings(source_root: Path) -> dict[str, ExtractedString]:
             if source_path.suffix.lower() == ".ui"
             else extract_cpp_literals(source_text)
         )
+        source_lines = source_text.splitlines()
         relative_path = source_path.relative_to(source_root).as_posix()
         for text, line in iterator:
+            line_text = source_lines[line - 1] if 0 < line <= len(source_lines) else ""
+            if any(marker in line_text for marker in SKIPPED_SOURCE_LINE_MARKERS):
+                continue
             entry = extracted.setdefault(text, ExtractedString(text=text))
             entry.occurrences.append(Occurrence(relative_path, line))
     return extracted
