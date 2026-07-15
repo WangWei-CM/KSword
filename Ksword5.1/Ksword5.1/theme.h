@@ -24,9 +24,26 @@ namespace KswordTheme
         int blue = 0;
     };
 
+    // ThemeRgbOffset 作用：把同一颜色角色的深色、浅色偏移量绑定为一组。
+    // 两组数值必须相对于同一个基础色计算，调用方不能只传一套数值复用到两个主题。
+    struct ThemeRgbOffset
+    {
+        RgbOffset dark;
+        RgbOffset light;
+    };
+
     inline constexpr RgbOffset UniformOffset(const int value)
     {
         return { value, value, value };
+    }
+
+    // UniformThemeOffset 作用：生成深浅主题各自独立的等量 RGB 偏移。
+    // 入参分别是深色与浅色模式数值，返回可交给 ThemeOffsetColor 的成对配置。
+    inline constexpr ThemeRgbOffset UniformThemeOffset(
+        const int darkValue,
+        const int lightValue)
+    {
+        return { UniformOffset(darkValue), UniformOffset(lightValue) };
     }
 
     inline int ClampChannel(const int channelValue)
@@ -50,6 +67,23 @@ namespace KswordTheme
         return adjustedColor;
     }
 
+    // ActiveThemeOffset 作用：根据当前主题只选择对应的一套 RGB 偏移量。
+    // 入参为成对配置，返回深色或浅色分支，不执行任何颜色运算。
+    inline RgbOffset ActiveThemeOffset(const ThemeRgbOffset& themeOffset)
+    {
+        return IsDarkModeEnabled() ? themeOffset.dark : themeOffset.light;
+    }
+
+    // ThemeOffsetColor 作用：使用同一基础色和两套独立偏移量生成当前主题颜色。
+    // alphaOverride 为负数时保留基础色透明度，非负时覆盖透明度。
+    inline QColor ThemeOffsetColor(
+        const QColor& baseColor,
+        const ThemeRgbOffset& themeOffset,
+        const int alphaOverride = -1)
+    {
+        return OffsetColor(baseColor, ActiveThemeOffset(themeOffset), alphaOverride);
+    }
+
     inline QColor OffsetColor(const QColor& baseColor, const int uniformOffset)
     {
         return OffsetColor(baseColor, UniformOffset(uniformOffset));
@@ -62,12 +96,12 @@ namespace KswordTheme
 
     inline QColor ThemeLighterColor(const QColor& baseColor)
     {
-        return OffsetColor(baseColor, IsDarkModeEnabled() ? 10 : 18);
+        return ThemeOffsetColor(baseColor, UniformThemeOffset(10, 18));
     }
 
     inline QColor ThemeDarkerColor(const QColor& baseColor)
     {
-        return OffsetColor(baseColor, IsDarkModeEnabled() ? -22 : -28);
+        return ThemeOffsetColor(baseColor, UniformThemeOffset(-22, -28));
     }
 
     inline QColor WhiteColor(const int alphaValue = 255)
@@ -192,93 +226,99 @@ namespace KswordTheme
         return qApp != nullptr && qApp->property(DarkModePropertyKey).toBool();
     }
 
-    inline constexpr RgbOffset WindowDarkOffset{ -245, -240, -233 };
-    inline constexpr RgbOffset WindowLightOffset{ -7, -4, 0 };
-    inline constexpr RgbOffset SurfaceDarkOffset{ -238, -230, -219 };
-    inline constexpr RgbOffset SurfaceLightOffset{ 0, 0, 0 };
-    inline constexpr RgbOffset SurfaceAltDarkOffset{ 7, 10, 14 };
-    inline constexpr RgbOffset SurfaceAltLightOffset{ -12, -7, 0 };
-    inline constexpr RgbOffset SurfaceMutedDarkOffset{ 13, 18, 24 };
-    inline constexpr RgbOffset SurfaceMutedLightOffset{ -29, -14, 0 };
-    inline constexpr RgbOffset BorderDarkOffset{ 38, 55, 70 };
-    inline constexpr RgbOffset BorderLightOffset{ -65, -44, -22 };
-    inline constexpr RgbOffset BorderStrongDarkOffset{ 55, 80, 102 };
-    inline constexpr RgbOffset BorderStrongLightOffset{ -104, -65, -24 };
-    inline constexpr RgbOffset TextPrimaryDarkOffset{ -18, -9, 0 };
-    inline constexpr RgbOffset TextPrimaryLightOffset{ -239, -220, -201 };
-    inline constexpr RgbOffset TextSecondaryDarkOffset{ -76, -52, -11 };
-    inline constexpr RgbOffset TextSecondaryLightOffset{ -176, -156, -135 };
-    inline constexpr RgbOffset TextDisabledDarkOffset{ -130, -109, -84 };
-    inline constexpr RgbOffset TextDisabledLightOffset{ -129, -113, -95 };
+    // 以下配置的 dark/light 分别是深色与浅色模式的独立数字。
+    // 每个配置必须与其颜色函数使用的基础色保持一致，避免通道截断后变成纯黑或纯白。
+    inline constexpr ThemeRgbOffset WindowOffset{
+        { -245, -240, -233 },
+        { -7, -4, 0 }
+    };
+    inline constexpr ThemeRgbOffset SurfaceOffset{
+        { -238, -230, -219 },
+        { 0, 0, 0 }
+    };
+    inline constexpr ThemeRgbOffset SurfaceAltOffset{
+        { 7, 10, 14 },
+        { -12, -7, 0 }
+    };
+    inline constexpr ThemeRgbOffset SurfaceMutedOffset{
+        { 13, 18, 24 },
+        { -29, -14, 0 }
+    };
+    inline constexpr ThemeRgbOffset BorderOffset{
+        { 38, 55, 70 },
+        { -65, -44, -22 }
+    };
+    inline constexpr ThemeRgbOffset BorderStrongOffset{
+        { 55, 80, 102 },
+        { -104, -65, -24 }
+    };
+    inline constexpr ThemeRgbOffset TextPrimaryOffset{
+        { -18, -9, 0 },
+        { -239, -220, -201 }
+    };
+    inline constexpr ThemeRgbOffset TextSecondaryOffset{
+        { -76, -52, -11 },
+        { -176, -156, -135 }
+    };
+    inline constexpr ThemeRgbOffset TextDisabledOffset{
+        { -130, -109, -84 },
+        { -129, -113, -95 }
+    };
+    inline constexpr ThemeRgbOffset PaletteDarkOffset{
+        { 3, 5, 6 },
+        { -111, -90, -67 }
+    };
 
     inline QColor WindowColor()
     {
-        return OffsetColor(
-            WhiteColor(),
-            IsDarkModeEnabled() ? WindowDarkOffset : WindowLightOffset);
+        return ThemeOffsetColor(WhiteColor(), WindowOffset);
     }
 
     inline QColor SurfaceColor()
     {
-        return OffsetColor(
-            WhiteColor(),
-            IsDarkModeEnabled() ? SurfaceDarkOffset : SurfaceLightOffset);
+        return ThemeOffsetColor(WhiteColor(), SurfaceOffset);
     }
 
     inline QColor SurfaceAltColor()
     {
-        return OffsetColor(
-            SurfaceColor(),
-            IsDarkModeEnabled() ? SurfaceAltDarkOffset : SurfaceAltLightOffset);
+        return ThemeOffsetColor(SurfaceColor(), SurfaceAltOffset);
     }
 
     inline QColor SurfaceMutedColor()
     {
-        return OffsetColor(
-            WhiteColor(),
-            IsDarkModeEnabled() ? SurfaceMutedDarkOffset : SurfaceMutedLightOffset);
+        // SurfaceMutedOffset 的两组数字都相对于 SurfaceColor 计算。
+        return ThemeOffsetColor(SurfaceColor(), SurfaceMutedOffset);
     }
 
     inline QColor BorderColor()
     {
-        return OffsetColor(
-            SurfaceColor(),
-            IsDarkModeEnabled() ? BorderDarkOffset : BorderLightOffset);
+        return ThemeOffsetColor(SurfaceColor(), BorderOffset);
     }
 
     inline QColor BorderStrongColor()
     {
-        return OffsetColor(
-            SurfaceColor(),
-            IsDarkModeEnabled() ? BorderStrongDarkOffset : BorderStrongLightOffset);
+        return ThemeOffsetColor(SurfaceColor(), BorderStrongOffset);
     }
 
     inline QColor PaletteDarkColor()
     {
-        return OffsetColor(
-            SurfaceColor(),
-            IsDarkModeEnabled() ? RgbOffset{ 3, 5, 6 } : RgbOffset{ -111, -90, -67 });
+        return ThemeOffsetColor(SurfaceColor(), PaletteDarkOffset);
     }
 
     inline QColor TextPrimaryColor()
     {
-        return OffsetColor(
-            SurfaceColor(),
-            IsDarkModeEnabled() ? TextPrimaryDarkOffset : TextPrimaryLightOffset);
+        // 文字偏移量以白色为统一基准，深色模式由此得到亮色文字。
+        return ThemeOffsetColor(WhiteColor(), TextPrimaryOffset);
     }
 
     inline QColor TextSecondaryColor()
     {
-        return OffsetColor(
-            SurfaceColor(),
-            IsDarkModeEnabled() ? TextSecondaryDarkOffset : TextSecondaryLightOffset);
+        return ThemeOffsetColor(WhiteColor(), TextSecondaryOffset);
     }
 
     inline QColor TextDisabledColor()
     {
-        return OffsetColor(
-            SurfaceColor(),
-            IsDarkModeEnabled() ? TextDisabledDarkOffset : TextDisabledLightOffset);
+        return ThemeOffsetColor(WhiteColor(), TextDisabledOffset);
     }
 
     inline QString WindowColorHex() { return ThemeColorName(WindowColor()); }
@@ -333,12 +373,31 @@ namespace KswordTheme
         return QColor(67, 160, 255);
     }
 
-    inline QColor AccentColor(const AccentRole role, const int brightnessOffset = 0)
+    // AccentColor 作用：按深色、浅色两套独立亮度偏移生成强调色。
+    // 调用方需要自定义亮度时必须同时传入 darkOffset 与 lightOffset，禁止复用单一数字。
+    inline QColor AccentColor(
+        const AccentRole role,
+        const int darkOffset,
+        const int lightOffset)
     {
-        // Dark surfaces need a lighter accent; light surfaces need a slightly
-        // deeper accent. The caller may add a small role-specific offset.
-        const int themeOffset = IsDarkModeEnabled() ? 18 : -8;
-        return OffsetColor(AccentSeed(role), themeOffset + brightnessOffset);
+        return ThemeOffsetColor(
+            AccentSeed(role),
+            UniformThemeOffset(darkOffset, lightOffset));
+    }
+
+    // 兼容旧调用点：把原有的相对调整量立即展开成深色、浅色两套总偏移。
+    // 新增颜色必须优先调用三参数版本，直接写明两种主题的独立数字。
+    inline QColor AccentColor(
+        const AccentRole role,
+        const int legacyAdjustment)
+    {
+        return AccentColor(role, 18 + legacyAdjustment, -8 + legacyAdjustment);
+    }
+
+    // 默认强调色也明确保留两套数字：深色背景提高亮度，浅色背景略微压低亮度。
+    inline QColor AccentColor(const AccentRole role)
+    {
+        return AccentColor(role, 18, -8);
     }
 
     inline QColor AccentTextColor(
@@ -351,9 +410,25 @@ namespace KswordTheme
         return EnsureTextContrast(AccentColor(role), effectiveBackground);
     }
 
-    inline QString AccentHex(const AccentRole role, const int brightnessOffset = 0)
+    inline QString AccentHex(
+        const AccentRole role,
+        const int darkOffset,
+        const int lightOffset)
     {
-        return ThemeColorName(AccentColor(role, brightnessOffset));
+        return ThemeColorName(AccentColor(role, darkOffset, lightOffset));
+    }
+
+    // 兼容旧样式构建器，内部仍然转换为两套独立总偏移后再取当前主题。
+    inline QString AccentHex(
+        const AccentRole role,
+        const int legacyAdjustment)
+    {
+        return ThemeColorName(AccentColor(role, legacyAdjustment));
+    }
+
+    inline QString AccentHex(const AccentRole role)
+    {
+        return ThemeColorName(AccentColor(role));
     }
 
     inline QColor SuccessColor() { return AccentTextColor(AccentRole::Green); }
@@ -365,44 +440,56 @@ namespace KswordTheme
     inline QString ErrorHex() { return ThemeColorName(ErrorColor()); }
     inline QString InfoHex() { return ThemeColorName(InfoColor()); }
 
+    // 语义背景与编辑器状态色都使用独立的深浅 RGB 偏移，基础色统一为 SurfaceColor。
+    inline constexpr ThemeRgbOffset SuccessBackgroundOffset{
+        { 8, 32, 14 },
+        { -32, 0, -28 }
+    };
+    inline constexpr ThemeRgbOffset WarningBackgroundOffset{
+        { 38, 24, 4 },
+        { 0, -24, -62 }
+    };
+    inline constexpr ThemeRgbOffset ErrorBackgroundOffset{
+        { 36, 4, 4 },
+        { 0, -31, -31 }
+    };
+    inline constexpr ThemeRgbOffset EditorMatchOffset{
+        { 10, 28, 6 },
+        { -8, -10, -42 }
+    };
+    inline constexpr ThemeRgbOffset EditorCurrentMatchOffset{
+        { 20, 62, 10 },
+        { -8, -42, -1 }
+    };
+
     inline QColor SuccessBackgroundColor()
     {
-        return OffsetColor(
-            SurfaceColor(),
-            IsDarkModeEnabled() ? RgbOffset{ 8, 32, 14 } : RgbOffset{ -32, 0, -28 });
+        return ThemeOffsetColor(SurfaceColor(), SuccessBackgroundOffset);
     }
 
     inline QColor WarningBackgroundColor()
     {
-        return OffsetColor(
-            SurfaceColor(),
-            IsDarkModeEnabled() ? RgbOffset{ 38, 24, 4 } : RgbOffset{ 0, -24, -62 });
+        return ThemeOffsetColor(SurfaceColor(), WarningBackgroundOffset);
     }
 
     inline QColor ErrorBackgroundColor()
     {
-        return OffsetColor(
-            SurfaceColor(),
-            IsDarkModeEnabled() ? RgbOffset{ 36, 4, 4 } : RgbOffset{ 0, -31, -31 });
+        return ThemeOffsetColor(SurfaceColor(), ErrorBackgroundOffset);
     }
 
     inline QColor EditorMatchColor()
     {
-        return OffsetColor(
-            SurfaceColor(),
-            IsDarkModeEnabled() ? RgbOffset{ 10, 28, 6 } : RgbOffset{ -8, -10, -42 });
+        return ThemeOffsetColor(SurfaceColor(), EditorMatchOffset);
     }
 
     inline QColor EditorCurrentMatchColor()
     {
-        return OffsetColor(
-            SurfaceColor(),
-            IsDarkModeEnabled() ? RgbOffset{ 20, 62, 10 } : RgbOffset{ -8, -42, -1 });
+        return ThemeOffsetColor(SurfaceColor(), EditorCurrentMatchOffset);
     }
 
     inline QColor EditorSelectionColor()
     {
-        return AccentColor(AccentRole::Blue, -20);
+        return AccentColor(AccentRole::Blue, -2, -28);
     }
 
     inline QColor OnAccentColor()
@@ -433,20 +520,21 @@ namespace KswordTheme
 
     inline QColor PerformanceColor(const PerformanceRole role)
     {
+        // 每个性能角色显式写出深色/浅色两套总偏移，避免共享亮度参数导致主题失真。
         switch (role)
         {
-        case PerformanceRole::Cpu: return AccentColor(AccentRole::Blue, 22);
+        case PerformanceRole::Cpu: return AccentColor(AccentRole::Blue, 40, 14);
         case PerformanceRole::Memory: return AccentColor(AccentRole::Purple);
-        case PerformanceRole::Disk: return AccentColor(AccentRole::Green, 22);
-        case PerformanceRole::Network: return AccentColor(AccentRole::Orange, 8);
-        case PerformanceRole::Gpu: return AccentColor(AccentRole::Blue, 8);
-        case PerformanceRole::Read: return AccentColor(AccentRole::Blue, 12);
-        case PerformanceRole::Write: return AccentColor(AccentRole::Orange, 22);
-        case PerformanceRole::DedicatedMemory: return AccentColor(AccentRole::Blue, 12);
-        case PerformanceRole::SharedMemory: return AccentColor(AccentRole::Cyan, 4);
-        case PerformanceRole::VideoEncode: return AccentColor(AccentRole::Blue, 18);
-        case PerformanceRole::VideoDecode: return AccentColor(AccentRole::Blue, 30);
-        case PerformanceRole::Copy: return AccentColor(AccentRole::Cyan, 18);
+        case PerformanceRole::Disk: return AccentColor(AccentRole::Green, 40, 14);
+        case PerformanceRole::Network: return AccentColor(AccentRole::Orange, 26, 0);
+        case PerformanceRole::Gpu: return AccentColor(AccentRole::Blue, 26, 0);
+        case PerformanceRole::Read: return AccentColor(AccentRole::Blue, 30, 4);
+        case PerformanceRole::Write: return AccentColor(AccentRole::Orange, 40, 14);
+        case PerformanceRole::DedicatedMemory: return AccentColor(AccentRole::Blue, 30, 4);
+        case PerformanceRole::SharedMemory: return AccentColor(AccentRole::Cyan, 22, -4);
+        case PerformanceRole::VideoEncode: return AccentColor(AccentRole::Blue, 36, 10);
+        case PerformanceRole::VideoDecode: return AccentColor(AccentRole::Blue, 48, 22);
+        case PerformanceRole::Copy: return AccentColor(AccentRole::Cyan, 36, 10);
         }
         return AccentColor(AccentRole::Blue);
     }
@@ -469,20 +557,21 @@ namespace KswordTheme
 
     inline QColor TimelineColor(const TimelineRole role)
     {
+        // 时间线角色同样独立配置两种主题，所有数值都是相对于 AccentSeed 的总偏移。
         switch (role)
         {
-        case TimelineRole::Process: return AccentColor(AccentRole::Green, 22);
-        case TimelineRole::Thread: return AccentColor(AccentRole::Lime, 8);
-        case TimelineRole::Image: return AccentColor(AccentRole::Cyan, 10);
-        case TimelineRole::File: return AccentColor(AccentRole::Blue, 18);
-        case TimelineRole::Registry: return AccentColor(AccentRole::Purple, -10);
-        case TimelineRole::Network: return AccentColor(AccentRole::Orange, 18);
-        case TimelineRole::Dns: return AccentColor(AccentRole::Yellow, 8);
-        case TimelineRole::PowerShell: return AccentColor(AccentRole::Indigo, 18);
-        case TimelineRole::Wmi: return AccentColor(AccentRole::Teal, 10);
-        case TimelineRole::Security: return AccentColor(AccentRole::Red, 0);
-        case TimelineRole::Storage: return AccentColor(AccentRole::Brown, 8);
-        case TimelineRole::Kernel: return AccentColor(AccentRole::Slate, 8);
+        case TimelineRole::Process: return AccentColor(AccentRole::Green, 40, 14);
+        case TimelineRole::Thread: return AccentColor(AccentRole::Lime, 26, 0);
+        case TimelineRole::Image: return AccentColor(AccentRole::Cyan, 28, 2);
+        case TimelineRole::File: return AccentColor(AccentRole::Blue, 36, 10);
+        case TimelineRole::Registry: return AccentColor(AccentRole::Purple, 8, -18);
+        case TimelineRole::Network: return AccentColor(AccentRole::Orange, 36, 10);
+        case TimelineRole::Dns: return AccentColor(AccentRole::Yellow, 26, 0);
+        case TimelineRole::PowerShell: return AccentColor(AccentRole::Indigo, 36, 10);
+        case TimelineRole::Wmi: return AccentColor(AccentRole::Teal, 28, 2);
+        case TimelineRole::Security: return AccentColor(AccentRole::Red);
+        case TimelineRole::Storage: return AccentColor(AccentRole::Brown, 26, 0);
+        case TimelineRole::Kernel: return AccentColor(AccentRole::Slate, 26, 0);
         }
         return AccentColor(AccentRole::Blue);
     }
@@ -500,11 +589,22 @@ namespace KswordTheme
     inline const QString PrimaryBlueBorderHex = QStringLiteral("palette(highlight)");
     inline const QString PrimaryBlueActiveHex = QStringLiteral("palette(highlight)");
 
+    inline constexpr ThemeRgbOffset PrimaryBlueSubtleOffset{
+        { 6, 28, 47 },
+        { -21, -11, 0 }
+    };
+    inline constexpr ThemeRgbOffset PrimaryBlueSurfacePressedOffset{
+        { -1, -1, 26 },
+        { -41, -19, 0 }
+    };
+    inline constexpr ThemeRgbOffset ExitedRowBackgroundOffset{
+        { 26, 28, 28 },
+        { -19, -13, -7 }
+    };
+
     inline QColor PrimaryBlueSubtleColor()
     {
-        return OffsetColor(
-            SurfaceColor(),
-            IsDarkModeEnabled() ? RgbOffset{ 6, 28, 47 } : RgbOffset{ -21, -11, 0 });
+        return ThemeOffsetColor(SurfaceColor(), PrimaryBlueSubtleOffset);
     }
 
     inline QString PrimaryBlueSubtleHex()
@@ -514,14 +614,12 @@ namespace KswordTheme
 
     inline QString PrimaryBlueSolidHoverHex()
     {
-        return AccentHex(AccentRole::Blue, -12);
+        return AccentHex(AccentRole::Blue, 6, -20);
     }
 
     inline QColor PrimaryBlueSurfacePressedColor()
     {
-        return OffsetColor(
-            SurfaceColor(),
-            IsDarkModeEnabled() ? RgbOffset{ -1, -1, 26 } : RgbOffset{ -41, -19, 0 });
+        return ThemeOffsetColor(SurfaceColor(), PrimaryBlueSurfacePressedOffset);
     }
 
     inline QString SurfaceHex() { return QStringLiteral("palette(base)"); }
@@ -588,9 +686,7 @@ namespace KswordTheme
     inline QColor NewRowBackgroundColor() { return SuccessBackgroundColor(); }
     inline QColor ExitedRowBackgroundColor()
     {
-        return OffsetColor(
-            SurfaceColor(),
-            IsDarkModeEnabled() ? RgbOffset{ 26, 28, 28 } : RgbOffset{ -19, -13, -7 });
+        return ThemeOffsetColor(SurfaceColor(), ExitedRowBackgroundOffset);
     }
     inline QColor ExitedRowForegroundColor() { return TextSecondaryColor(); }
     inline QColor WarningAccentColor() { return WarningColor(); }

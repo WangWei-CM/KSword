@@ -1081,15 +1081,14 @@ namespace
 
     // createReadOnlyAuditTextPage：创建一个只读文本页，统一文本可选与布局风格。
     // 输入：parent 为页面父对象，content 为页面文本。
-    // 返回：承载 QTextEdit 的 QWidget 页面；没有返回值以外副作用。
+    // 返回：承载 CodeEditorWidget 的 QWidget 页面；没有返回值以外副作用。
     QWidget* createReadOnlyAuditTextPage(QWidget* parent, const QString& content)
     {
         QWidget* page = new QWidget(parent);
         QVBoxLayout* layout = new QVBoxLayout(page);
-        QTextEdit* editor = new QTextEdit(page);
+        CodeEditorWidget* editor = new CodeEditorWidget(page);
         editor->setReadOnly(true);
-        editor->setTextInteractionFlags(Qt::TextSelectableByMouse);
-        editor->setText(content);
+        editor->setLocalizedText(content);
         layout->addWidget(editor, 1);
         return page;
     }
@@ -1905,11 +1904,20 @@ namespace
                 return baseValue;
             }
 
+            QVariant localizedBaseValue = baseValue;
+            if (role == Qt::DisplayRole &&
+                (index.column() == 1 || index.column() == 2) &&
+                baseValue.metaType().id() == QMetaType::QString)
+            {
+                localizedBaseValue = ks::i18n::displayText(baseValue.toString());
+            }
+
             const QString markerText = reparseKindMarkerForPath(filePath(index));
             if (markerText.isEmpty())
             {
-                return baseValue;
+                return localizedBaseValue;
             }
+            const QString localizedMarkerText = ks::i18n::displayText(markerText);
 
             if (role == Qt::ToolTipRole)
             {
@@ -1918,22 +1926,23 @@ namespace
                 {
                     toolTipText += QLatin1Char('\n');
                 }
-                toolTipText += QStringLiteral("重解析点: %1").arg(markerText);
+                toolTipText += ks::i18n::displayText(QStringLiteral("重解析点: %1"))
+                    .arg(localizedMarkerText);
                 return toolTipText;
             }
 
             if (index.column() == 0)
             {
-                return QStringLiteral("%1 [%2]").arg(baseValue.toString(), markerText);
+                return QStringLiteral("%1 [%2]").arg(baseValue.toString(), localizedMarkerText);
             }
             if (index.column() == 2)
             {
-                const QString typeText = baseValue.toString().trimmed();
+                const QString typeText = localizedBaseValue.toString().trimmed();
                 return typeText.isEmpty()
-                    ? markerText
-                    : QStringLiteral("%1 / %2").arg(markerText, typeText);
+                    ? localizedMarkerText
+                    : QStringLiteral("%1 / %2").arg(localizedMarkerText, typeText);
             }
-            return baseValue;
+            return localizedBaseValue;
         }
 
         QVariant headerData(
@@ -3002,7 +3011,7 @@ namespace
             "}")
             .arg(KswordTheme::TextPrimaryColorHex())
             .arg(KswordTheme::SurfaceAltColorHex())
-            .arg(KswordTheme::AccentHex(KswordTheme::AccentRole::Blue, -32))
+            .arg(KswordTheme::AccentHex(KswordTheme::AccentRole::Blue, -14, -40))
             .arg(KswordTheme::OnAccentHex());
     }
 
@@ -3642,6 +3651,18 @@ namespace
                 });
         }
 
+    protected:
+        void changeEvent(QEvent* event) override
+        {
+            QDialog::changeEvent(event);
+            if (event != nullptr && event->type() == QEvent::LanguageChange)
+            {
+                setWindowTitle(ks::i18n::displayText(QStringLiteral("文件属性 - %1"))
+                    .arg(QFileInfo(m_filePath).fileName()));
+                refreshGeneralTabText();
+            }
+        }
+
     private:
         struct HashCalculationResult
         {
@@ -3651,7 +3672,13 @@ namespace
             qint64 readBytes = 0;      // readBytes：实际读取字节数。
             qint64 elapsedMs = 0;      // elapsedMs：耗时毫秒。
             QString sha256Text;        // sha256Text：十六进制 SHA256。
-            QString errorText;         // errorText：失败原因。
+            QFileDevice::FileError fileError = QFileDevice::NoError; // fileError：稳定、与系统 UI 语言无关的错误码。
+        };
+
+        struct PrintableStringsPreview
+        {
+            QString sourcePrefixText;  // sourcePrefixText：应用生成且需要翻译的说明。
+            QString rawStringText;     // rawStringText：从文件提取的原始字符串，不得翻译。
         };
 
         static QString formatHex64(const std::uint64_t value)
@@ -4107,6 +4134,131 @@ namespace
             return content;
         }
 
+        QString formatLocalizedR0FileInfoText(const ksword::ark::FileInfoQueryResult& result) const
+        {
+            const auto translated = [](const QString& sourceText)
+                {
+                    return ks::i18n::displayText(sourceText);
+                };
+
+            QString content;
+            if (!result.io.ok)
+            {
+                content += translated(QStringLiteral("状态: Unavailable\n"));
+                content += translated(QStringLiteral("原因: %1\n"))
+                    .arg(translated(friendlyFileIoMessage(result.io.message)));
+                content += translated(QStringLiteral("Win32错误: %1\n"))
+                    .arg(result.io.win32Error);
+                return content;
+            }
+
+            content += translated(QStringLiteral("协议版本: %1\n")).arg(result.version);
+            content += translated(QStringLiteral("查询状态: %1 (%2)\n"))
+                .arg(fileInfoStatusText(result.queryStatus))
+                .arg(result.queryStatus);
+            content += translated(QStringLiteral("字段标志: 0x%1\n"))
+                .arg(result.fieldFlags, 8, 16, QChar('0')).toUpper();
+            content += QStringLiteral("OpenStatus: %1\n").arg(formatNtStatus(result.openStatus));
+            content += QStringLiteral("BasicStatus: %1\n").arg(formatNtStatus(result.basicStatus));
+            content += QStringLiteral("StandardStatus: %1\n").arg(formatNtStatus(result.standardStatus));
+            content += QStringLiteral("ObjectStatus: %1\n").arg(formatNtStatus(result.objectStatus));
+            content += QStringLiteral("NameStatus: %1\n").arg(formatNtStatus(result.nameStatus));
+            content += translated(QStringLiteral("大小(EndOfFile): %1 字节\n"))
+                .arg(static_cast<qlonglong>(result.endOfFile));
+            content += translated(QStringLiteral("分配大小: %1 字节\n"))
+                .arg(static_cast<qlonglong>(result.allocationSize));
+            content += translated(QStringLiteral("属性: %1\n"))
+                .arg(translated(fileAttributesToText(result.fileAttributes)));
+            content += translated(QStringLiteral("创建时间: %1\n")).arg(fileTimeToText(result.creationTime));
+            content += translated(QStringLiteral("最后访问: %1\n")).arg(fileTimeToText(result.lastAccessTime));
+            content += translated(QStringLiteral("最后写入: %1\n")).arg(fileTimeToText(result.lastWriteTime));
+            content += QStringLiteral("ChangeTime: %1\n").arg(fileTimeToText(result.changeTime));
+            content += QStringLiteral("FileObject: %1\n").arg(formatHex64(result.fileObjectAddress));
+            content += QStringLiteral("SectionObjectPointers: %1\n").arg(formatHex64(result.sectionObjectPointersAddress));
+            content += QStringLiteral("DataSectionObject: %1\n").arg(formatHex64(result.dataSectionObjectAddress));
+            content += QStringLiteral("ImageSectionObject: %1\n").arg(formatHex64(result.imageSectionObjectAddress));
+            content += translated(QStringLiteral("R0说明: %1\n"))
+                .arg(translated(friendlyFileIoMessage(result.io.message)));
+            return content;
+        }
+
+        void refreshGeneralTabText()
+        {
+            if (m_generalTextEditor == nullptr)
+            {
+                return;
+            }
+
+            const auto translated = [](const QString& sourceText)
+                {
+                    return ks::i18n::displayText(sourceText);
+                };
+            auto& languageManager = ks::i18n::LanguageManager::instance();
+            const QFileInfo info(m_filePath);
+            const QString nativePath = QDir::toNativeSeparators(info.absoluteFilePath());
+            const QString ntPathText = m_generalNtPathText.isEmpty()
+                ? translated(QStringLiteral("<转换失败>"))
+                : m_generalNtPathText;
+            const QString yesText = languageManager.contextText(
+                QStringLiteral("file.detail.value.yes"), QStringLiteral("是"));
+            const QString noText = languageManager.contextText(
+                QStringLiteral("file.detail.value.no"), QStringLiteral("否"));
+
+            QString content;
+            content += translated(QStringLiteral("[路径]\n"));
+            content += translated(QStringLiteral("Win32路径: %1\n")).arg(nativePath);
+            content += translated(QStringLiteral("NT路径: %1\n")).arg(ntPathText);
+            if (!m_generalR0Loaded)
+            {
+                content += translated(QStringLiteral("查询来源: R3 QFileInfo（R0 信息后台加载）\n\n"));
+            }
+            else if (m_generalR0Info.io.ok)
+            {
+                content += translated(QStringLiteral("查询来源: R0 KswordARK + R3 QFileInfo\n\n"));
+            }
+            else
+            {
+                content += translated(QStringLiteral("查询来源: R3 QFileInfo（R0 不可用）\n\n"));
+            }
+
+            content += translated(QStringLiteral("[R3 QFileInfo]\n"));
+            content += translated(QStringLiteral("完整路径: %1\n")).arg(info.absoluteFilePath());
+            content += translated(QStringLiteral("文件名: %1\n")).arg(info.fileName());
+            content += translated(QStringLiteral("类型: %1\n")).arg(info.suffix());
+            content += translated(QStringLiteral("大小: %1 字节\n")).arg(info.size());
+            content += translated(QStringLiteral("创建时间: %1\n"))
+                .arg(info.birthTime().toString(QStringLiteral("yyyy-MM-dd HH:mm:ss")));
+            content += translated(QStringLiteral("修改时间: %1\n"))
+                .arg(info.lastModified().toString(QStringLiteral("yyyy-MM-dd HH:mm:ss")));
+            content += translated(QStringLiteral("访问时间: %1\n"))
+                .arg(info.lastRead().toString(QStringLiteral("yyyy-MM-dd HH:mm:ss")));
+            content += translated(QStringLiteral("是否可执行: %1\n"))
+                .arg(info.isExecutable() ? yesText : noText);
+            content += translated(QStringLiteral("是否隐藏: %1\n"))
+                .arg(info.isHidden() ? yesText : noText);
+            content += translated(QStringLiteral("是否可写: %1\n"))
+                .arg(info.isWritable() ? yesText : noText);
+            content += translated(isPathReparsePoint(info.absoluteFilePath())
+                ? QStringLiteral("重解析点: 是（首屏仅做属性位判断，不同步追踪链接目标）\n")
+                : QStringLiteral("重解析点: 否\n"));
+
+            content += translated(QStringLiteral("\n[R0 文件基础信息]\n"));
+            if (!m_generalR0Loaded)
+            {
+                content += translated(QStringLiteral("正在后台加载，属性窗口首屏不会等待驱动查询完成...\n"));
+            }
+            else
+            {
+                if (!m_generalR0Info.objectName.empty())
+                {
+                    content += translated(QStringLiteral("R0对象名: %1\n"))
+                        .arg(QString::fromStdWString(m_generalR0Info.objectName));
+                }
+                content += formatLocalizedR0FileInfoText(m_generalR0Info);
+            }
+            m_generalTextEditor->setText(content);
+        }
+
         void startHashCalculation(
             CodeEditorWidget* textEditorWidget,
             QProgressBar* progressBar,
@@ -4132,7 +4284,7 @@ namespace
             cancelButton->setEnabled(true);
             cancelButton->setText(QStringLiteral("取消"));
             progressBar->setValue(0);
-            textEditorWidget->setText(QStringLiteral("正在计算 SHA256，请等待...\n目标: %1")
+            textEditorWidget->setLocalizedText(QStringLiteral("正在计算 SHA256，请等待...\n目标: %1")
                 .arg(QDir::toNativeSeparators(m_filePath)));
 
             const QString filePathSnapshot = m_filePath;
@@ -4152,7 +4304,7 @@ namespace
 
                     if (!file.open(QIODevice::ReadOnly))
                     {
-                        result.errorText = file.errorString();
+                        result.fileError = file.error();
                     }
                     else
                     {
@@ -4174,7 +4326,7 @@ namespace
                             {
                                 if (file.error() != QFileDevice::NoError)
                                 {
-                                    result.errorText = file.errorString();
+                                    result.fileError = file.error();
                                 }
                                 break;
                             }
@@ -4209,7 +4361,7 @@ namespace
                             }
                         }
 
-                        if (!result.cancelled && result.errorText.isEmpty())
+                        if (!result.cancelled && result.fileError == QFileDevice::NoError)
                         {
                             result.sha256Text = QString::fromLatin1(sha256.result().toHex());
                         }
@@ -4256,15 +4408,16 @@ namespace
                             content += QStringLiteral("耗时: %1 ms\n").arg(result.elapsedMs);
                             content += QStringLiteral("速度: %1 MiB/s\n").arg(QString::number(speedMiB, 'f', 2));
                             content += QStringLiteral("是否取消: %1\n").arg(result.cancelled ? QStringLiteral("是") : QStringLiteral("否"));
-                            if (!result.errorText.isEmpty())
+                            if (result.fileError != QFileDevice::NoError)
                             {
-                                content += QStringLiteral("错误: %1\n").arg(result.errorText);
+                                content += QStringLiteral("QFile错误码: %1\n")
+                                    .arg(static_cast<int>(result.fileError));
                             }
                             if (!result.sha256Text.isEmpty())
                             {
                                 content += QStringLiteral("SHA256: %1\n").arg(result.sha256Text);
                             }
-                            editorGuard->setText(content);
+                            editorGuard->setLocalizedText(content);
                         },
                         Qt::QueuedConnection);
                 });
@@ -4384,20 +4537,19 @@ namespace
             QThreadPool::globalInstance()->start(task);
         }
 
-        void startR0FileInfoLoad(CodeEditorWidget* textEditorWidget, const QFileInfo& info, const QString& ntPathText, const QString& baseContent)
+        void startR0FileInfoLoad(const QFileInfo& info, const QString& ntPathText)
         {
             // 用途：后台读取 R0 文件基础信息，避免常规页构建时阻塞属性窗口打开。
-            // 输入：textEditorWidget 为 UI 回填目标，info/ntPathText/baseContent 为首屏已生成的 R3 信息。
-            // 处理：工作线程调用 ArkDriverClient；UI 线程只追加最终文本。
+            // 输入：info/ntPathText 为查询目标；界面数据由成员保存，便于语言切换时完整重绘。
+            // 处理：工作线程调用 ArkDriverClient；UI 线程保存结果并按当前语言重建正文。
             // 返回：无；对话框关闭或控件释放后自动丢弃结果。
-            if (textEditorWidget == nullptr)
+            if (m_generalTextEditor == nullptr)
             {
                 return;
             }
 
             QPointer<FileDetailDialog> guardThis(this);
-            QPointer<CodeEditorWidget> editorGuard(textEditorWidget);
-            auto* task = QRunnable::create([guardThis, editorGuard, info, ntPathText, baseContent]()
+            auto* task = QRunnable::create([guardThis, info, ntPathText]()
                 {
                     FileDetailDialog* targetDialog = guardThis.data();
                     if (targetDialog == nullptr)
@@ -4415,26 +4567,16 @@ namespace
 
                     QMetaObject::invokeMethod(
                         targetDialog,
-                        [guardThis, editorGuard, baseContent, r0Info]()
+                        [guardThis, r0Info]()
                         {
-                            if (guardThis == nullptr || editorGuard == nullptr)
+                            if (guardThis == nullptr)
                             {
                                 return;
                             }
 
-                            QString content = baseContent;
-                            content.replace(
-                                QStringLiteral("查询来源: R3 QFileInfo（R0 信息后台加载）"),
-                                QStringLiteral("查询来源: %1").arg(r0Info.io.ok
-                                    ? QStringLiteral("R0 KswordARK + R3 QFileInfo")
-                                    : QStringLiteral("R3 QFileInfo (R0不可用)")));
-                            content += QStringLiteral("\n[R0 文件基础信息]\n");
-                            if (!r0Info.objectName.empty())
-                            {
-                                content += QStringLiteral("R0对象名: %1\n").arg(QString::fromStdWString(r0Info.objectName));
-                            }
-                            content += guardThis->formatR0FileInfoText(r0Info);
-                            editorGuard->setText(content);
+                            guardThis->m_generalR0Info = r0Info;
+                            guardThis->m_generalR0Loaded = true;
+                            guardThis->refreshGeneralTabText();
                         },
                         Qt::QueuedConnection);
                 });
@@ -4593,7 +4735,7 @@ namespace
                         .arg(snapshot.groupSidText);
                 }
                 detailText += snapshot.detailText;
-                detailEditor->setText(detailText);
+                detailEditor->setLocalizedText(detailText);
             }
 
             if (statusLabel != nullptr)
@@ -5045,77 +5187,46 @@ namespace
 
         void startSignatureLoad(CodeEditorWidget* textEditorWidget)
         {
-            // 用途：后台调用 PowerShell Get-AuthenticodeSignature。
+            // 用途：后台通过 KswordARK 读取 PE Security Directory、完整
+            // WIN_CERTIFICATE 外层结构和内核 CI 缓存签名等级。
             // 输入：textEditorWidget 为签名页显示目标。
-            // 处理：外部进程最多等待 15 秒，超时会终止并回填错误文本。
+            // 处理：只调用 ArkDriverClient；不经过 PowerShell/WinTrust。
             // 返回：无。
             if (textEditorWidget == nullptr)
             {
                 return;
             }
 
-            textEditorWidget->setText(QStringLiteral("正在后台读取 Authenticode 签名信息...\n目标: %1")
-                .arg(QDir::toNativeSeparators(m_filePath)));
+            textEditorWidget->setLocalizedText(
+                QStringLiteral("正在通过 KswordARK R0 读取签名证据...\n目标: %1")
+                    .arg(QDir::toNativeSeparators(m_filePath)));
 
             const QString filePathSnapshot = m_filePath;
+            const QString ntPathSnapshot = buildDriverNtPath(filePathSnapshot);
             QPointer<FileDetailDialog> guardThis(this);
             QPointer<CodeEditorWidget> editorGuard(textEditorWidget);
-            auto* task = QRunnable::create([guardThis, editorGuard, filePathSnapshot]()
+            auto* task = QRunnable::create([guardThis, editorGuard, filePathSnapshot, ntPathSnapshot]()
                 {
-                    QProcess process;
-                    process.setProgram(QStringLiteral("powershell.exe"));
-                    QString escapedPath = filePathSnapshot;
-                    escapedPath.replace(QStringLiteral("'"), QStringLiteral("''"));
-                    const QString scriptText = QStringLiteral(
-                        "$sig=Get-AuthenticodeSignature -LiteralPath '%1';"
-                        "$cert=$sig.SignerCertificate;"
-                        "$subj=if($cert){$cert.Subject}else{'<无证书>'};"
-                        "$issuer=if($cert){$cert.Issuer}else{'<无证书>'};"
-                        "$thumb=if($cert){$cert.Thumbprint}else{'<无证书>'};"
-                        "$from=if($cert){$cert.NotBefore}else{'<无证书>'};"
-                        "$to=if($cert){$cert.NotAfter}else{'<无证书>'};"
-                        "$statusMsg=if($sig.StatusMessage){$sig.StatusMessage}else{'<无附加消息>'};"
-                        "Write-Output ('状态: ' + $sig.Status);"
-                        "Write-Output ('状态说明: ' + $statusMsg);"
-                        "Write-Output ('签名者主题: ' + $subj);"
-                        "Write-Output ('签名者颁发者: ' + $issuer);"
-                        "Write-Output ('证书指纹: ' + $thumb);"
-                        "Write-Output ('证书生效: ' + $from);"
-                        "Write-Output ('证书失效: ' + $to);"
-                        "Write-Output ('是否含时间戳: ' + ([bool]$sig.TimeStamperCertificate));")
-                        .arg(escapedPath);
-                    process.setArguments(QStringList{
-                        QStringLiteral("-NoProfile"),
-                        QStringLiteral("-ExecutionPolicy"),
-                        QStringLiteral("Bypass"),
-                        QStringLiteral("-Command"),
-                        scriptText
-                        });
-                    process.start();
-                    const bool finished = process.waitForFinished(15000);
-                    if (!finished)
-                    {
-                        process.kill();
-                        process.waitForFinished(1000);
-                    }
-
-                    const QString stdOutText = QString::fromLocal8Bit(process.readAllStandardOutput()).trimmed();
-                    const QString stdErrText = QString::fromLocal8Bit(process.readAllStandardError()).trimmed();
                     QString finalText;
-                    if (!finished)
+                    if (ntPathSnapshot.isEmpty())
                     {
-                        finalText = QStringLiteral("签名检查超时，已终止 PowerShell。");
-                    }
-                    else if (process.exitStatus() != QProcess::NormalExit || process.exitCode() != 0 || stdOutText.isEmpty())
-                    {
-                        finalText = QStringLiteral("签名检查失败。\n退出码: %1\n").arg(process.exitCode());
-                        finalText += stdErrText.isEmpty()
-                            ? QStringLiteral("错误输出为空，可能系统未启用 PowerShell 或文件不可访问。")
-                            : QStringLiteral("错误输出:\n%1").arg(stdErrText);
+                        finalText += QStringLiteral("无法生成供内核使用的 NT 路径。\n");
+                        finalText += QStringLiteral("目标: %1")
+                            .arg(QDir::toNativeSeparators(filePathSnapshot));
                     }
                     else
                     {
-                        finalText = stdOutText;
+                        const ksword::ark::ImageSignatureQueryResult signatureResult =
+                            ksword::ark::DriverClient().queryImageSignature(ntPathSnapshot.toStdWString());
+                        finalText += QStringLiteral("[R0 内核签名证据]\n");
+                        finalText += QStringLiteral("目标: %1\n")
+                            .arg(QDir::toNativeSeparators(filePathSnapshot));
+                        finalText += QStringLiteral("NT 路径: %1\n\n").arg(ntPathSnapshot);
+                        finalText += QString::fromStdString(
+                            ksword::ark::formatImageSignatureEvidence(signatureResult));
+                        finalText += QStringLiteral("\n");
+                        finalText += QStringLiteral(
+                            "结论边界：PE 证书表及 WIN_CERTIFICATE 记录属于磁盘结构证据，不等于证书链可信；CI cached signing level 是独立的内核缓存结果。此页未调用 WinTrust。");
                     }
 
                     FileDetailDialog* targetDialog = guardThis.data();
@@ -5129,7 +5240,7 @@ namespace
                         {
                             if (editorGuard != nullptr)
                             {
-                                editorGuard->setText(finalText);
+                                editorGuard->setLocalizedText(finalText);
                             }
                         },
                         Qt::QueuedConnection);
@@ -5149,7 +5260,7 @@ namespace
                 return;
             }
 
-            textEditorWidget->setText(QStringLiteral("PE 信息加载中...\n目标: %1")
+            textEditorWidget->setLocalizedText(QStringLiteral("PE 信息加载中...\n目标: %1")
                 .arg(QDir::toNativeSeparators(m_filePath)));
             const QString filePathSnapshot = m_filePath;
             QPointer<FileDetailDialog> guardThis(this);
@@ -5168,7 +5279,7 @@ namespace
                         {
                             if (editorGuard != nullptr)
                             {
-                                editorGuard->setText(peText);
+                                editorGuard->setLocalizedText(peText);
                             }
                         },
                         Qt::QueuedConnection);
@@ -5177,16 +5288,19 @@ namespace
             QThreadPool::globalInstance()->start(task);
         }
 
-        static QString extractPrintableStringsPreview(const QString& filePath)
+        static PrintableStringsPreview extractPrintableStringsPreview(const QString& filePath)
         {
             // 用途：以分块方式提取可打印 ASCII 字符串，替代 readAll。
             // 输入：filePath 为目标文件路径。
             // 处理：最多输出 2000 条字符串，最多扫描 128MiB，避免超大文件长时间占用线程。
-            // 返回：可直接显示的字符串列表或错误/截断说明。
+            // 返回：可翻译的程序说明与必须逐字保留的文件字符串分开承载。
+            PrintableStringsPreview preview{};
             QFile file(filePath);
             if (!file.open(QIODevice::ReadOnly))
             {
-                return QStringLiteral("无法读取文件，无法提取字符串。错误: %1").arg(file.errorString());
+                preview.sourcePrefixText = QStringLiteral("无法读取文件，无法提取字符串。\nQFile错误码: %1")
+                    .arg(static_cast<int>(file.error()));
+                return preview;
             }
 
             constexpr qint64 kChunkBytes = 1024 * 1024;
@@ -5228,18 +5342,22 @@ namespace
                 result.append(current);
             }
 
-            QString rawStringText = result.join('\n');
-            if (rawStringText.trimmed().isEmpty())
+            preview.rawStringText = result.join('\n');
+            if (preview.rawStringText.trimmed().isEmpty())
             {
-                rawStringText = QStringLiteral("<未提取到可打印字符串，或文件内容全部为二进制不可见字符。>");
+                preview.sourcePrefixText = QStringLiteral("<未提取到可打印字符串，或文件内容全部为二进制不可见字符。>");
             }
             if (!file.atEnd())
             {
-                rawStringText += QStringLiteral("\n\n[提示] 已达到扫描/显示上限：扫描 %1 字节，显示 %2 条。")
+                if (!preview.sourcePrefixText.isEmpty())
+                {
+                    preview.sourcePrefixText += QStringLiteral("\n\n");
+                }
+                preview.sourcePrefixText += QStringLiteral("[提示] 已达到扫描/显示上限：扫描 %1 字节，显示 %2 条。\n\n")
                     .arg(scannedBytes)
                     .arg(result.size());
             }
-            return rawStringText;
+            return preview;
         }
 
         void startStringsLoad(CodeEditorWidget* textEditorWidget)
@@ -5253,14 +5371,14 @@ namespace
                 return;
             }
 
-            textEditorWidget->setText(QStringLiteral("字符串扫描中...\n目标: %1")
+            textEditorWidget->setLocalizedText(QStringLiteral("字符串扫描中...\n目标: %1")
                 .arg(QDir::toNativeSeparators(m_filePath)));
             const QString filePathSnapshot = m_filePath;
             QPointer<FileDetailDialog> guardThis(this);
             QPointer<CodeEditorWidget> editorGuard(textEditorWidget);
             auto* task = QRunnable::create([guardThis, editorGuard, filePathSnapshot]()
                 {
-                    const QString stringsText = FileDetailDialog::extractPrintableStringsPreview(filePathSnapshot);
+                    const PrintableStringsPreview preview = FileDetailDialog::extractPrintableStringsPreview(filePathSnapshot);
                     FileDetailDialog* targetDialog = guardThis.data();
                     if (targetDialog == nullptr)
                     {
@@ -5268,11 +5386,13 @@ namespace
                     }
                     QMetaObject::invokeMethod(
                         targetDialog,
-                        [editorGuard, stringsText]()
+                        [editorGuard, preview]()
                         {
                             if (editorGuard != nullptr)
                             {
-                                editorGuard->setText(stringsText);
+                                editorGuard->setLocalizedTextWithRawSuffix(
+                                    preview.sourcePrefixText,
+                                    preview.rawStringText);
                             }
                         },
                         Qt::QueuedConnection);
@@ -5413,7 +5533,7 @@ namespace
             }
 
             statusLabel->setText(QStringLiteral("● 正在后台读取 Import Directory..."));
-            detailEditor->setText(QStringLiteral("依赖 DLL 加载中...\n目标: %1")
+            detailEditor->setLocalizedText(QStringLiteral("依赖 DLL 加载中...\n目标: %1")
                 .arg(QDir::toNativeSeparators(m_filePath)));
 
             const QString filePathSnapshot = m_filePath;
@@ -5460,7 +5580,7 @@ namespace
                                     detailText += QStringLiteral("  - %1\n").arg(dllName);
                                 }
                             }
-                            detailGuard->setText(detailText);
+                            detailGuard->setLocalizedText(detailText);
                         },
                         Qt::QueuedConnection);
                 });
@@ -5574,44 +5694,17 @@ namespace
         {
             QWidget* page = new QWidget(this);
             QVBoxLayout* layout = new QVBoxLayout(page);
-            CodeEditorWidget* textEditorWidget = new CodeEditorWidget(page);
-            textEditorWidget->setReadOnly(true);
+            m_generalTextEditor = new CodeEditorWidget(page);
+            m_generalTextEditor->setReadOnly(true);
 
             const QFileInfo info(m_filePath);
-            const QString ntPathText = buildDriverNtPath(info.absoluteFilePath());
-            QString content;
-            content += QStringLiteral("[路径]\n");
-            content += QStringLiteral("Win32路径: %1\n").arg(QDir::toNativeSeparators(info.absoluteFilePath()));
-            content += QStringLiteral("NT路径: %1\n").arg(ntPathText.isEmpty() ? QStringLiteral("<转换失败>") : ntPathText);
-            content += QStringLiteral("查询来源: R3 QFileInfo（R0 信息后台加载）\n\n");
+            m_generalNtPathText = buildDriverNtPath(info.absoluteFilePath());
+            m_generalR0Loaded = false;
+            m_generalR0Info = {};
+            refreshGeneralTabText();
 
-            content += QStringLiteral("[R3 QFileInfo]\n");
-            content += QStringLiteral("完整路径: %1\n").arg(info.absoluteFilePath());
-            content += QStringLiteral("文件名: %1\n").arg(info.fileName());
-            content += QStringLiteral("类型: %1\n").arg(info.suffix());
-            content += QStringLiteral("大小: %1 字节\n").arg(info.size());
-            content += QStringLiteral("创建时间: %1\n").arg(info.birthTime().toString("yyyy-MM-dd HH:mm:ss"));
-            content += QStringLiteral("修改时间: %1\n").arg(info.lastModified().toString("yyyy-MM-dd HH:mm:ss"));
-            content += QStringLiteral("访问时间: %1\n").arg(info.lastRead().toString("yyyy-MM-dd HH:mm:ss"));
-            content += QStringLiteral("是否可执行: %1\n").arg(info.isExecutable() ? QStringLiteral("是") : QStringLiteral("否"));
-            content += QStringLiteral("是否隐藏: %1\n").arg(info.isHidden() ? QStringLiteral("是") : QStringLiteral("否"));
-            content += QStringLiteral("是否可写: %1\n").arg(info.isWritable() ? QStringLiteral("是") : QStringLiteral("否"));
-            if (isPathReparsePoint(info.absoluteFilePath()))
-            {
-                content += QStringLiteral("重解析点: 是（首屏仅做属性位判断，不同步追踪链接目标）\n");
-            }
-            else
-            {
-                content += QStringLiteral("重解析点: 否\n");
-            }
-
-            const QString baseContent = content;
-            content += QStringLiteral("\n[R0 文件基础信息]\n");
-            content += QStringLiteral("正在后台加载，属性窗口首屏不会等待驱动查询完成...\n");
-            textEditorWidget->setText(content);
-
-            layout->addWidget(textEditorWidget, 1);
-            startR0FileInfoLoad(textEditorWidget, info, ntPathText, baseContent);
+            layout->addWidget(m_generalTextEditor, 1);
+            startR0FileInfoLoad(info, m_generalNtPathText);
             return page;
         }
 
@@ -5633,7 +5726,7 @@ namespace
                 content += formatReparsePointText(m_filePath);
             }
 
-            textEditorWidget->setText(content);
+            textEditorWidget->setLocalizedText(content);
             layout->addWidget(textEditorWidget, 1);
             return page;
         }
@@ -5757,7 +5850,7 @@ namespace
 
             CodeEditorWidget* detailEditor = new CodeEditorWidget(splitter);
             detailEditor->setReadOnly(true);
-            detailEditor->setText(baseContent + QStringLiteral(
+            detailEditor->setLocalizedText(baseContent + QStringLiteral(
                 "\n深层 Owner/Group/DACL/SACL 正在后台加载...\n"
                 "\n操作说明：\n"
                 "- 上方表格用于结构化展示 ACE；继承 ACE、SACL、对象 ACE 默认只读展示。\n"
@@ -5798,7 +5891,7 @@ namespace
                     }
                     if (detailEditor != nullptr)
                     {
-                        detailEditor->setText(baseContent + QStringLiteral("\n深层 Owner/Group/DACL/SACL 正在后台加载...\n"));
+                        detailEditor->setLocalizedText(baseContent + QStringLiteral("\n深层 Owner/Group/DACL/SACL 正在后台加载...\n"));
                     }
                     startSecurityDeepLoad(aceTable, detailEditor, statusLabel, baseContent, nativePath);
                 };
@@ -5917,7 +6010,7 @@ namespace
             textEditorWidget->setReadOnly(true);
             layout->addWidget(textEditorWidget, 1);
 
-            textEditorWidget->setText(QStringLiteral(
+            textEditorWidget->setLocalizedText(QStringLiteral(
                 "Phase 10 哈希页：\n"
                 "- SHA256 使用用户态流式读取，避免一次性读入大文件。\n"
                 "- 点击“取消”会在下一个块读取边界停止。\n"
@@ -6005,7 +6098,7 @@ namespace
             if (fileHandle == INVALID_HANDLE_VALUE)
             {
                 content += QStringLiteral("打开失败: %1\n").arg(::GetLastError());
-                editor->setText(content);
+                editor->setLocalizedText(content);
                 return page;
             }
 
@@ -6050,7 +6143,7 @@ namespace
             content += QStringLiteral("R3 DeletePending/Share: 通过 FileStandardInfo 和共享只读打开侧写。\n");
             content += QStringLiteral("R3 Shared flags: 采集句柄使用 READ|WRITE|DELETE 共享，仅用于只读探测。\n");
             ::CloseHandle(fileHandle);
-            editor->setText(content);
+            editor->setLocalizedText(content);
             return page;
         }
 
@@ -6128,7 +6221,7 @@ namespace
                 bitlockerAudit.responseFlags,
                 false);
             content += formatBitlockerFveAuditRows(bitlockerAudit);
-            editor->setText(content);
+            editor->setLocalizedText(content);
             return page;
         }
 
@@ -6165,7 +6258,7 @@ namespace
                 minifilterAudit.responseFlags,
                 (minifilterAudit.responseFlags & KSWORD_ARK_MINIFILTER_INVENTORY_RESPONSE_FLAG_TRUNCATED) != 0U);
             content += formatMinifilterInventoryRows(minifilterAudit);
-            editor->setText(content);
+            editor->setLocalizedText(content);
             return page;
         }
 
@@ -6335,6 +6428,10 @@ namespace
 
     private:
         QString m_filePath;   // 当前详情窗口对应的文件路径。
+        CodeEditorWidget* m_generalTextEditor = nullptr; // 常规页正文，语言切换时原位重建。
+        QString m_generalNtPathText; // 常规页复用的 NT 路径，避免切换语言时重复查询。
+        bool m_generalR0Loaded = false; // R0 文件信息是否已完成后台读取。
+        ksword::ark::FileInfoQueryResult m_generalR0Info{}; // 保留原始 R0 数据供双语重绘。
         std::shared_ptr<std::atomic_bool> m_hashCancelRequested; // 哈希计算取消标记，后台线程共享。
     };
 }
@@ -6677,6 +6774,27 @@ FileDock::~FileDock()
     {
         workerThread.join();
     }
+}
+
+void FileDock::changeEvent(QEvent* event)
+{
+    QWidget::changeEvent(event);
+    if (event == nullptr || event->type() != QEvent::LanguageChange)
+    {
+        return;
+    }
+
+    const auto refreshPanelView = [](FilePanelWidgets& panel)
+        {
+            if (panel.fileView != nullptr && panel.fileView->viewport() != nullptr)
+            {
+                // ReparseAwareFileSystemModel::data() 按当前语言即时生成大小和类型；
+                // 主动刷新 viewport，避免等待目录变化或重新启动后才重新取数。
+                panel.fileView->viewport()->update();
+            }
+        };
+    refreshPanelView(m_leftPanel);
+    refreshPanelView(m_rightPanel);
 }
 
 bool FileDock::eventFilter(QObject* watched, QEvent* event)
@@ -8933,8 +9051,11 @@ void FileDock::showPanelContextMenu(FilePanelWidgets& panel, const QPoint& local
     const QString transferTargetText = (transferTargetPanel != nullptr)
         ? transferTargetPanel->panelNameText
         : QStringLiteral("对侧面板");
-    const QString copyToPanelText = QStringLiteral("复制到%1").arg(transferTargetText);
-    const QString moveToPanelText = QStringLiteral("移动到%1").arg(transferTargetText);
+    const QString localizedTransferTargetText = ks::i18n::displayText(transferTargetText);
+    const QString copyToPanelText = ks::i18n::displayText(QStringLiteral("复制到%1"))
+        .arg(localizedTransferTargetText);
+    const QString moveToPanelText = ks::i18n::displayText(QStringLiteral("移动到%1"))
+        .arg(localizedTransferTargetText);
 
     QMenu menu(this);
     menu.setStyleSheet(buildContextMenuStyle());
@@ -9831,9 +9952,10 @@ void FileDock::transferSelectedItemsToOppositePanel(FilePanelWidgets& sourcePane
 
     // 复制/剪切在双栏中改为“源面板 -> 对侧面板当前目录”的直接动作，不再经过内部粘贴缓存。
     // 进度标题沿用右键菜单的目标面板文案，避免再出现容易误解的“剪切到对侧”。
+    const QString localizedTargetPanelText = ks::i18n::displayText(targetPanel->panelNameText);
     const QString progressTitle = moveItems
-        ? QStringLiteral("移动到%1").arg(targetPanel->panelNameText)
-        : QStringLiteral("复制到%1").arg(targetPanel->panelNameText);
+        ? ks::i18n::displayText(QStringLiteral("移动到%1")).arg(localizedTargetPanelText)
+        : ks::i18n::displayText(QStringLiteral("复制到%1")).arg(localizedTargetPanelText);
     const int progressPid = kPro.add("文件", progressTitle.toStdString());
     kPro.set(progressPid, moveItems ? "准备移动" : "准备复制", 0, 5.0f);
 

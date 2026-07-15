@@ -755,7 +755,7 @@ void DriverDock::showSelectedModuleEvidenceDetail()
     }
     if (m_moduleTable == nullptr || m_moduleTable->selectionModel() == nullptr)
     {
-        m_moduleEvidenceDetailEditor->setText(
+        m_moduleEvidenceDetailEditor->setLocalizedText(
             driverText("driver.evidence.detail.table_unavailable", QStringLiteral("模块表不可用。")));
         return;
     }
@@ -763,7 +763,7 @@ void DriverDock::showSelectedModuleEvidenceDetail()
     const QModelIndexList selectedRows = m_moduleTable->selectionModel()->selectedRows(0);
     if (selectedRows.isEmpty())
     {
-        m_moduleEvidenceDetailEditor->setText(driverText(
+        m_moduleEvidenceDetailEditor->setLocalizedText(driverText(
             "driver.evidence.detail.select_module",
             QStringLiteral("请选择一条已加载模块查看聚合证据。")));
         return;
@@ -773,7 +773,7 @@ void DriverDock::showSelectedModuleEvidenceDetail()
     QTableWidgetItem* moduleItem = m_moduleTable->item(rowIndex, 0);
     if (moduleItem == nullptr)
     {
-        m_moduleEvidenceDetailEditor->setText(
+        m_moduleEvidenceDetailEditor->setLocalizedText(
             driverText("driver.evidence.detail.module_name_missing", QStringLiteral("当前行没有模块名。")));
         return;
     }
@@ -782,11 +782,11 @@ void DriverDock::showSelectedModuleEvidenceDetail()
         moduleItem->data(ModuleRecordIndexRole).toULongLong());
     if (sourceIndex >= m_loadedModuleEvidenceCache.size())
     {
-        m_moduleEvidenceDetailEditor->setText(
+        m_moduleEvidenceDetailEditor->setLocalizedText(
             driverText("driver.evidence.detail.not_generated", QStringLiteral("模块 %1 尚未生成证据详情。"))
             .arg(moduleItem->text()));
         return;
     }
 
-    m_moduleEvidenceDetailEditor->setText(m_loadedModuleEvidenceCache[sourceIndex].detailText);
+    m_moduleEvidenceDetailEditor->setLocalizedText(m_loadedModuleEvidenceCache[sourceIndex].detailText);
 }

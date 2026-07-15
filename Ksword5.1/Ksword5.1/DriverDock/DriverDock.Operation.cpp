@@ -46,6 +46,31 @@ namespace
         QGuiApplication::clipboard()->setText(fields.join(QLatin1Char('\t')));
     }
 
+    QString buildKernelSignatureNtPath(const QString& rawPathText)
+    {
+        QString pathText = ks::online_scan::normalizeKernelImagePathForUpload(rawPathText).trimmed();
+        pathText.replace(QLatin1Char('/'), QLatin1Char('\\'));
+        if (pathText.isEmpty())
+        {
+            return QString();
+        }
+        if (pathText.startsWith(QStringLiteral("\\??\\")) ||
+            pathText.startsWith(QStringLiteral("\\Device\\"), Qt::CaseInsensitive) ||
+            pathText.startsWith(QStringLiteral("\\SystemRoot\\"), Qt::CaseInsensitive))
+        {
+            return pathText;
+        }
+        if (pathText.startsWith(QStringLiteral("\\\\?\\")))
+        {
+            return QStringLiteral("\\??\\") + pathText.mid(4);
+        }
+        if (pathText.startsWith(QStringLiteral("\\\\")))
+        {
+            return QStringLiteral("\\??\\UNC\\") + pathText.mid(2);
+        }
+        return QStringLiteral("\\??\\") + pathText;
+    }
+
     // integrityClassText：
     // - 输入：Driver Integrity 证据类别常量；
     // - 处理：把类别映射为 DriverDock 侧可读文本；
@@ -645,6 +670,8 @@ void DriverDock::showModuleTableContextMenu(const QPoint& localPosition)
     QAction* copyRowAction = contextMenu.addAction(
         QIcon(":/Icon/process_copy_row.svg"),
         driverText("driver.menu.copy_row", QStringLiteral("复制当前行")));
+    QAction* queryKernelSignatureAction = contextMenu.addAction(
+        driverText("driver.menu.query_kernel_signature", QStringLiteral("R0 读取内核签名证据")));
     QAction* uploadVirusTotalAction = ks::online_scan::addVirusTotalSandboxMenu(
         &contextMenu,
         this,
@@ -711,6 +738,11 @@ void DriverDock::showModuleTableContextMenu(const QPoint& localPosition)
         copyDriverOperationCurrentRow(m_moduleTable);
         return;
     }
+    if (selectedAction == queryKernelSignatureAction)
+    {
+        querySelectedModuleKernelSignature();
+        return;
+    }
     if (selectedAction == uploadVirusTotalAction)
     {
         return;
@@ -740,6 +772,98 @@ void DriverDock::showModuleTableContextMenu(const QPoint& localPosition)
         }
         return;
     }
+}
+
+void DriverDock::querySelectedModuleKernelSignature()
+{
+    if (m_moduleTable == nullptr)
+    {
+        return;
+    }
+    const int rowIndex = m_moduleTable->currentRow();
+    const QTableWidgetItem* nameItem = rowIndex >= 0 ? m_moduleTable->item(rowIndex, 0) : nullptr;
+    const QTableWidgetItem* baseItem = rowIndex >= 0 ? m_moduleTable->item(rowIndex, 1) : nullptr;
+    const QTableWidgetItem* pathItem = rowIndex >= 0 ? m_moduleTable->item(rowIndex, 8) : nullptr;
+    const QString moduleName = nameItem != nullptr ? nameItem->text().trimmed() : QString();
+    const QString rawPath = pathItem != nullptr ? pathItem->text().trimmed() : QString();
+    const QString ntPath = buildKernelSignatureNtPath(rawPath);
+    const std::uint64_t moduleBase = baseItem != nullptr
+        ? baseItem->data(Qt::UserRole).toULongLong()
+        : 0U;
+    if (rowIndex < 0 || ntPath.isEmpty() || moduleBase == 0U)
+    {
+        if (m_moduleEvidenceStatusLabel != nullptr)
+        {
+            m_moduleEvidenceStatusLabel->setText(driverText(
+                "driver.signature.status.invalid_selection",
+                QStringLiteral("内核签名查询失败：当前模块缺少有效路径或基址。")));
+        }
+        return;
+    }
+
+    if (m_moduleEvidenceStatusLabel != nullptr)
+    {
+        m_moduleEvidenceStatusLabel->setText(driverText(
+            "driver.signature.status.querying",
+            QStringLiteral("正在通过 R0 读取模块签名证据：%1"))
+            .arg(moduleName));
+    }
+    if (m_moduleEvidenceDetailEditor != nullptr)
+    {
+        m_moduleEvidenceDetailEditor->setLocalizedText(
+            QStringLiteral("R0 签名证据查询中..."));
+    }
+
+    QPointer<DriverDock> guardThis(this);
+    auto* queryTask = QRunnable::create([guardThis, moduleName, rawPath, ntPath, moduleBase]()
+        {
+            const ksword::ark::ImageSignatureQueryResult signatureResult =
+                ksword::ark::DriverClient().queryImageSignature(ntPath.toStdWString(), moduleBase);
+            DriverDock* targetDock = guardThis.data();
+            if (targetDock == nullptr)
+            {
+                return;
+            }
+
+            QMetaObject::invokeMethod(
+                targetDock,
+                [guardThis, moduleName, rawPath, ntPath, moduleBase, signatureResult]()
+                {
+                    if (guardThis == nullptr)
+                    {
+                        return;
+                    }
+                    QString report;
+                    report += QStringLiteral("[R0 内核签名证据]\n");
+                    report += QStringLiteral("模块: %1\n").arg(moduleName);
+                    report += QStringLiteral("原始路径: %1\n").arg(rawPath);
+                    report += QStringLiteral("NT 路径: %1\n").arg(ntPath);
+                    report += QStringLiteral("模块基址: %1\n\n").arg(formatCompactAddress(moduleBase));
+                    report += QString::fromStdString(ksword::ark::formatImageSignatureEvidence(signatureResult));
+                    report += QStringLiteral("\n");
+                    report += QStringLiteral("结论边界：PE 证书表结构不等于证书链可信；CI cached signing level 是独立的内核缓存结果。此查询未调用 WinTrust。已加载模块绑定仅核对枚举基址和文件名；证书表仍来自当前磁盘文件。");
+                    if (guardThis->m_moduleEvidenceDetailEditor != nullptr)
+                    {
+                        guardThis->m_moduleEvidenceDetailEditor->setLocalizedText(report);
+                    }
+                    if (guardThis->m_moduleEvidenceStatusLabel != nullptr)
+                    {
+                        guardThis->m_moduleEvidenceStatusLabel->setText(signatureResult.io.ok
+                            ? driverText(
+                                "driver.signature.status.complete",
+                                QStringLiteral("R0 内核签名证据读取完成：%1"))
+                                .arg(moduleName)
+                            : driverText(
+                                "driver.signature.status.failed",
+                                QStringLiteral("R0 内核签名证据读取失败：%1（Win32=%2）"))
+                                .arg(moduleName)
+                                .arg(signatureResult.io.win32Error));
+                    }
+                },
+                Qt::QueuedConnection);
+        });
+    queryTask->setAutoDelete(true);
+    QThreadPool::globalInstance()->start(queryTask);
 }
 
 void DriverDock::forceUnloadDriverFromModuleRow(

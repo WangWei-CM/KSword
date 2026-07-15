@@ -28,6 +28,7 @@
 #include "../../../shared/driver/KswordArkNetworkIoctl.h"
 #include "../../../shared/driver/KswordArkStorageIoctl.h"
 #include "../../../shared/driver/KswordArkSecurityAuditIoctl.h"
+#include "../../../shared/driver/KswordArkTrustIoctl.h"
 #include "../../../shared/driver/KswordArkWin32kIoctl.h"
 #include "../../../shared/driver/KswordArkDeviceAuditIoctl.h"
 #include "../../../shared/driver/KswordArkFilterIoctl.h"
@@ -438,6 +439,16 @@ namespace ksword::ark
         std::uint64_t imageSectionObjectAddress = 0;    // 诊断展示。
         std::wstring ntPath;            // 请求 NT 路径回显。
         std::wstring objectName;        // ObQueryNameString 文件对象名。
+    };
+
+    // ImageSignatureQueryResult preserves the complete fixed R0 response so
+    // callers can distinguish PE certificate-table structure from the
+    // independent Code Integrity cached-signing-level result.
+    struct ImageSignatureQueryResult
+    {
+        IoResult io;
+        bool unsupported = false;
+        KSWORD_ARK_QUERY_IMAGE_SIGNATURE_RESPONSE response{};
     };
 
     // FileIntegrityResult 承载 R0 文件 Mandatory Label 写入响应。

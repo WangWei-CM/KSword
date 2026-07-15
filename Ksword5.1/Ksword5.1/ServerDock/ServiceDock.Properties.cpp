@@ -393,7 +393,7 @@ void ServiceDock::initializeDependencyTab()
 
     m_dependencyEditor = new CodeEditorWidget(m_dependencyTabPage);
     m_dependencyEditor->setReadOnly(true);
-    m_dependencyEditor->setText(QStringLiteral("未选择服务"));
+    m_dependencyEditor->setLocalizedText(QStringLiteral("未选择服务"));
     rootLayout->addWidget(m_dependencyEditor, 1);
 }
 
@@ -405,7 +405,7 @@ void ServiceDock::initializeAuditTab()
 
     m_auditEditor = new CodeEditorWidget(m_auditTabPage);
     m_auditEditor->setReadOnly(true);
-    m_auditEditor->setText(QStringLiteral("未选择服务"));
+    m_auditEditor->setLocalizedText(QStringLiteral("未选择服务"));
     rootLayout->addWidget(m_auditEditor, 1);
 }
 
@@ -568,7 +568,7 @@ void ServiceDock::populateDependencyTab(const ServiceEntry& entry)
 {
     if (m_dependencyEditor != nullptr)
     {
-        m_dependencyEditor->setText(buildDependencyDetailText(entry));
+        m_dependencyEditor->setLocalizedText(buildDependencyDetailText(entry));
     }
 }
 
@@ -576,7 +576,7 @@ void ServiceDock::populateAuditTab(const ServiceEntry& entry)
 {
     if (m_auditEditor != nullptr)
     {
-        m_auditEditor->setText(buildAuditTabText(entry));
+        m_auditEditor->setLocalizedText(buildAuditTabText(entry));
     }
 }
 
@@ -615,8 +615,8 @@ void ServiceDock::updateDetailViewsFromSelection()
         m_recoveryArgumentsEdit->clear();
         m_recoveryAppendFailCountCheck->setChecked(false);
 
-        if (m_dependencyEditor != nullptr) { m_dependencyEditor->setText(QStringLiteral("未选择服务")); }
-        if (m_auditEditor != nullptr) { m_auditEditor->setText(QStringLiteral("未选择服务")); }
+        if (m_dependencyEditor != nullptr) { m_dependencyEditor->setLocalizedText(QStringLiteral("未选择服务")); }
+        if (m_auditEditor != nullptr) { m_auditEditor->setLocalizedText(QStringLiteral("未选择服务")); }
     }
     else
     {

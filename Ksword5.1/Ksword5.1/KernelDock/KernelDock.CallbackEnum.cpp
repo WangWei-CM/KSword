@@ -260,13 +260,11 @@ namespace
         // 作用：生成模块文件详情窗口的常规信息页。
         // 返回：包含路径、大小和时间戳的纯文本。
         const QFileInfo fileInfo(filePath);
-        const QString unavailableText = kernelText("kernel.callback.enum.placeholder.unavailable", QStringLiteral("<不可用>"));
+        const QString unavailableText = QStringLiteral("<不可用>");
         const auto yesNoText = [](const bool value) {
-            return kernelText(
-                value ? "kernel.callback.enum.boolean.yes" : "kernel.callback.enum.boolean.no",
-                value ? QStringLiteral("是") : QStringLiteral("否"));
+            return value ? QStringLiteral("是") : QStringLiteral("否");
         };
-        return kernelText("kernel.callback.enum.file.general_detail", QStringLiteral(
+        return QStringLiteral(
             "文件路径：%1\n"
             "文件名：%2\n"
             "所在目录：%3\n"
@@ -277,7 +275,7 @@ namespace
             "访问时间：%8\n"
             "可读：%9\n"
             "可写：%10\n"
-            "可执行：%11"))
+            "可执行：%11")
             .arg(QDir::toNativeSeparators(fileInfo.absoluteFilePath()))
             .arg(fileInfo.fileName())
             .arg(QDir::toNativeSeparators(fileInfo.absolutePath()))
@@ -308,12 +306,12 @@ namespace
 
         CodeEditorWidget* generalEditor = new CodeEditorWidget(&detailDialog);
         generalEditor->setReadOnly(true);
-        generalEditor->setText(callbackEnumBuildModuleFileGeneralText(filePath));
+        generalEditor->setLocalizedText(callbackEnumBuildModuleFileGeneralText(filePath));
         tabWidget->addTab(generalEditor, kernelText("kernel.callback.enum.file.tab.general", QStringLiteral("常规信息")));
 
         CodeEditorWidget* peEditor = new CodeEditorWidget(&detailDialog);
         peEditor->setReadOnly(true);
-        peEditor->setText(file_dock_detail::buildPeAnalysisText(filePath));
+        peEditor->setLocalizedText(file_dock_detail::buildPeAnalysisText(filePath));
         tabWidget->addTab(peEditor, kernelText("kernel.callback.enum.file.tab.pe", QStringLiteral("PE信息")));
 
         QDialogButtonBox* buttonBox = new QDialogButtonBox(QDialogButtonBox::Close, &detailDialog);
@@ -1018,7 +1016,7 @@ namespace
             driverClient.removeExternalCallbackEx(requestPacket);
         if (detailEditor != nullptr)
         {
-            detailEditor->setText(callbackEnumExRemoveDetailText(entry, requestPacket, removeResult));
+            detailEditor->setLocalizedText(callbackEnumExRemoveDetailText(entry, requestPacket, removeResult));
         }
 
         if (!removeResult.io.ok)
@@ -1127,7 +1125,7 @@ namespace
             driverClient.removeExternalCallbackEx(requestPacket);
         if (detailEditor != nullptr)
         {
-            detailEditor->setText(callbackEnumExRemoveDetailText(entry, requestPacket, removeResult));
+            detailEditor->setLocalizedText(callbackEnumExRemoveDetailText(entry, requestPacket, removeResult));
         }
         if (statusLabel != nullptr)
         {

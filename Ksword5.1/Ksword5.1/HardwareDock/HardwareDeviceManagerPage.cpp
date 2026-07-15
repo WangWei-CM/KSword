@@ -657,32 +657,32 @@ namespace
     QString buildDevicePropertiesText(const HardwareDeviceManagerPage::DeviceEntry& entry)
     {
         return QStringLiteral(
-            "[General]\n"
-            "Name: %1\n"
-            "Manufacturer: %2\n"
-            "Class: %3\n"
+            "[常规]\n"
+            "名称: %1\n"
+            "制造商: %2\n"
+            "设备类: %3\n"
             "Class GUID: %4\n"
-            "Enumerator: %5\n"
-            "Location: %6\n"
-            "Installed: %7\n"
-            "Present: %8\n"
-            "HasProblem: %9\n"
-            "Problem: %10\n"
-            "Status: %11\n\n"
-            "[Identity]\n"
-            "Instance ID:\n%12\n\n"
-            "Parent Instance ID:\n%13\n\n"
-            "Hardware IDs:\n%14\n\n"
-            "Compatible IDs:\n%15\n\n"
-            "[Driver Binding]\n"
-            "Service: %16\n"
-            "Driver Key: %17\n"
-            "Driver Registry Path: %18\n"
-            "Driver INF: %19\n"
-            "Provider: %20\n"
-            "Version: %21\n"
-            "Date: %22\n"
-            "Service ImagePath: %23\n")
+            "枚举器: %5\n"
+            "位置: %6\n"
+            "已安装: %7\n"
+            "当前存在: %8\n"
+            "存在问题: %9\n"
+            "问题: %10\n"
+            "状态: %11\n\n"
+            "[标识]\n"
+            "实例 ID:\n%12\n\n"
+            "父实例 ID:\n%13\n\n"
+            "硬件 ID:\n%14\n\n"
+            "兼容 ID:\n%15\n\n"
+            "[驱动绑定]\n"
+            "服务: %16\n"
+            "驱动键: %17\n"
+            "驱动注册表路径: %18\n"
+            "驱动 INF: %19\n"
+            "提供商: %20\n"
+            "版本: %21\n"
+            "日期: %22\n"
+            "服务 ImagePath: %23\n")
             .arg(safeDisplayText(entry.nameText))
             .arg(safeDisplayText(entry.manufacturerText))
             .arg(safeDisplayText(entry.classText))
@@ -715,23 +715,23 @@ namespace
     QString buildDriverDetailsText(const HardwareDeviceManagerPage::DeviceEntry& entry)
     {
         return QStringLiteral(
-            "[Driver]\n"
-            "Device: %1\n"
-            "Instance ID:\n%2\n\n"
-            "Service: %3\n"
-            "Service ImagePath: %4\n"
-            "Driver Key: %5\n"
-            "Driver Registry Path: %6\n"
-            "Driver INF: %7\n"
-            "Provider: %8\n"
-            "Version: %9\n"
-            "Date: %10\n"
-            "Class: %11\n"
+            "[驱动]\n"
+            "设备: %1\n"
+            "实例 ID:\n%2\n\n"
+            "服务: %3\n"
+            "服务 ImagePath: %4\n"
+            "驱动键: %5\n"
+            "驱动注册表路径: %6\n"
+            "驱动 INF: %7\n"
+            "提供商: %8\n"
+            "版本: %9\n"
+            "日期: %10\n"
+            "设备类: %11\n"
             "Class GUID: %12\n\n"
-            "[Matching IDs]\n"
-            "Hardware IDs:\n%13\n\n"
-            "Compatible IDs:\n%14\n\n"
-            "[Notes]\n"
+            "[匹配 ID]\n"
+            "硬件 ID:\n%13\n\n"
+            "兼容 ID:\n%14\n\n"
+            "[说明]\n"
             "- 卸载设备会移除当前 DevNode，可能要求重启或重新扫描硬件。\n"
             "- 删除驱动包只支持 oem*.inf；系统内置 INF 或正在使用的驱动包通常会失败。\n")
             .arg(safeDisplayText(entry.nameText))
@@ -763,7 +763,7 @@ namespace
         QVBoxLayout* layout = new QVBoxLayout(&dialog);
         CodeEditorWidget* editor = new CodeEditorWidget(&dialog);
         editor->setReadOnly(true);
-        editor->setText(bodyText);
+        editor->setLocalizedText(bodyText);
         layout->addWidget(editor, 1);
 
         QPushButton* closeButton = new QPushButton(QStringLiteral("关闭"), &dialog);
@@ -979,7 +979,7 @@ void HardwareDeviceManagerPage::initializeUi()
 
     m_detailEditor = new CodeEditorWidget(m_splitter);
     m_detailEditor->setReadOnly(true);
-    m_detailEditor->setText(QStringLiteral("选择一个设备查看详细属性。"));
+    m_detailEditor->setLocalizedText(QStringLiteral("选择一个设备查看详细属性。"));
     m_splitter->addWidget(m_detailEditor);
     m_splitter->setStretchFactor(0, 4);
     m_splitter->setStretchFactor(1, 1);
@@ -1156,7 +1156,7 @@ void HardwareDeviceManagerPage::rebuildDeviceTree(const std::vector<DeviceEntry>
     {
         if (m_detailEditor != nullptr)
         {
-            m_detailEditor->setText(QStringLiteral("未枚举到设备。"));
+            m_detailEditor->setLocalizedText(QStringLiteral("未枚举到设备。"));
         }
         return;
     }
@@ -1293,7 +1293,7 @@ void HardwareDeviceManagerPage::updateDetailForItem(QTreeWidgetItem* itemPointer
     }
     if (itemPointer == nullptr)
     {
-        m_detailEditor->setText(QStringLiteral("选择一个设备查看详细属性。"));
+        m_detailEditor->setLocalizedText(QStringLiteral("选择一个设备查看详细属性。"));
         return;
     }
 
@@ -1301,12 +1301,12 @@ void HardwareDeviceManagerPage::updateDetailForItem(QTreeWidgetItem* itemPointer
     const DeviceEntry* entryPointer = reinterpret_cast<const DeviceEntry*>(rawPointer);
     if (entryPointer == nullptr)
     {
-        m_detailEditor->setText(QStringLiteral("当前设备节点没有详情。"));
+        m_detailEditor->setLocalizedText(QStringLiteral("当前设备节点没有详情。"));
         return;
     }
 
     const DeviceEntry& entry = *entryPointer;
-    m_detailEditor->setText(buildDevicePropertiesText(entry));
+    m_detailEditor->setLocalizedText(buildDevicePropertiesText(entry));
 }
 
 const HardwareDeviceManagerPage::DeviceEntry* HardwareDeviceManagerPage::selectedDeviceEntry() const

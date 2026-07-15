@@ -955,7 +955,7 @@ void DriverDock::showSelectedUnloadedPiddbDetailDialog()
 
     CodeEditorWidget* detailEditor = new CodeEditorWidget(&detailDialog);
     detailEditor->setReadOnly(true);
-    detailEditor->setText(detailText(m_driverIntegrityCache[static_cast<std::size_t>(cacheIndex)]));
+    detailEditor->setLocalizedText(detailText(m_driverIntegrityCache[static_cast<std::size_t>(cacheIndex)]));
     dialogLayout->addWidget(detailEditor, 1);
 
     QDialogButtonBox* buttonBox = new QDialogButtonBox(QDialogButtonBox::Close, &detailDialog);

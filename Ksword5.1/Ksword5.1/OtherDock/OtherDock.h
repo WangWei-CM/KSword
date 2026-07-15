@@ -17,6 +17,7 @@
 
 // Qt 前置声明：降低头文件编译耦合。
 class QCheckBox;
+class CodeEditorWidget;
 class QComboBox;
 class QLineEdit;
 class QPushButton;
@@ -198,7 +199,7 @@ private:
     QVBoxLayout* m_previewLayout = nullptr;       // 右侧预览布局。
     QLabel* m_thumbnailLabel = nullptr;           // 窗口缩略图。
     QPushButton* m_captureButton = nullptr;       // 截图按钮。
-    QTextEdit* m_quickInfoText = nullptr;         // 关键属性摘要文本。
+    CodeEditorWidget* m_quickInfoText = nullptr;  // 关键属性摘要文本，支持即时语言重绘。
 
     // 桌面管理页：枚举窗口站与桌面清单，并展示 SessionId / SID / 切换能力等上下文。
     QWidget* m_desktopPage = nullptr;             // 桌面管理页容器。

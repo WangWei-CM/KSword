@@ -1,6 +1,7 @@
 #include "NetworkDock.InternalCommon.h"
 #include "../UI/VisibleTableWidget.h"
 #include "../theme.h"
+#include "../Internationalization/LanguageManager.h"
 
 #include "../UI/CodeEditorWidget.h"
 #include <QDir>
@@ -229,10 +230,10 @@ void NetworkDock::initializeHostsFileEditorTab()
     else
     {
         m_hostsFileEditor->setCurrentFilePath(hostsFilePath);
-        m_hostsFileEditor->setText(QStringLiteral(
+        m_hostsFileEditor->setRawText(ks::i18n::displayText(QStringLiteral(
             "# hosts 文件读取失败。\n"
             "# 目标路径: %1\n"
-            "# 如需直接保存系统 hosts，请以管理员权限运行程序。").arg(hostsFilePath));
+            "# 如需直接保存系统 hosts，请以管理员权限运行程序。")).arg(hostsFilePath));
 
         kLogEvent openHostsFailEvent;
         warn << openHostsFailEvent

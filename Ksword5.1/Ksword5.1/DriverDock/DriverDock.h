@@ -124,6 +124,15 @@ private:
         std::uint32_t callbackReferenceCount = 0; // callbackReferenceCount：引用该模块的回调数量。
     };
 
+    // DebugOutputLineRecord：区分应用生成的本地化提示与驱动原始输出。
+    struct DebugOutputLineRecord
+    {
+        QString timePrefix;
+        QString sourceText;
+        QString localizedSuffixSource;
+        bool translateSourceText = false;
+    };
+
 private:
     // ========================= UI 初始化 =========================
     // initializeUi：
@@ -284,6 +293,11 @@ private:
     // - 模块证据仍可刷新/复制；R0 强卸载默认使用非破坏性清理 flags。
     void showModuleTableContextMenu(const QPoint& localPosition);
 
+    // querySelectedModuleKernelSignature：
+    // - 使用模块表路径和基址调用 R0 签名证据查询；
+    // - 结果写入模块证据详情区，不调用 WinTrust。
+    void querySelectedModuleKernelSignature();
+
     // stopDriverServiceFromServiceRow：
     // - 从服务列表选中行读取 SCM 服务名并通过 ControlService(SERVICE_CONTROL_STOP) 停止；
     // - 不调用 R0 DriverObject 强卸载，避免对活动驱动执行不安全强拆。
@@ -386,9 +400,19 @@ private:
     void appendOperateLogLine(const QString& logText);
 
     // appendDebugOutputLine：
-    // - 作用：向“调试输出”窗口追加一行带时间戳文本。
-    // - 参数 debugText：待追加的调试输出正文。
-    void appendDebugOutputLine(const QString& debugText);
+    // - 作用：追加驱动原始输出；仅可选后缀参与语言切换。
+    void appendDebugOutputLine(
+        const QString& debugText,
+        const QString& localizedSuffixSource = QString());
+
+    // appendLocalizedDebugOutputLine：追加应用生成的提示，并保留规范源文本供热切换。
+    void appendLocalizedDebugOutputLine(const QString& sourceText);
+
+    // refreshDebugOutputLines：按当前语言重建应用提示，驱动原始消息保持不变。
+    void refreshDebugOutputLines();
+
+    // clearDebugOutputLines：同步清空界面与用于重翻译的记录。
+    void clearDebugOutputLines();
 
     // ========================= 静态工具函数 =========================
     // queryDriverServiceRecords：
@@ -482,6 +506,7 @@ private:
     QPushButton* m_copyDebugOutputButton = nullptr;   // 复制输出按钮。
     QLabel* m_debugCaptureStatusLabel = nullptr;      // 捕获状态标签。
     QPlainTextEdit* m_debugOutputEdit = nullptr;      // 调试输出文本框。
+    std::vector<DebugOutputLineRecord> m_debugOutputLines; // 调试输出原始记录，最多保留 2000 行。
 
     // ========================= 页签4：对象信息 =========================
     QWidget* m_objectInfoPage = nullptr;              // 对象信息页容器。

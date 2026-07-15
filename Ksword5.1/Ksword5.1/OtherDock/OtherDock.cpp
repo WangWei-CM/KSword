@@ -3051,7 +3051,7 @@ void OtherDock::initializeUi()
     m_captureButton->setStyleSheet(blueButtonStyle());
     m_captureButton->setFixedWidth(34);
 
-    m_quickInfoText = new QTextEdit(m_previewWidget);
+    m_quickInfoText = new CodeEditorWidget(m_previewWidget);
     m_quickInfoText->setReadOnly(true);
     m_quickInfoText->setStyleSheet(blueInputStyle());
 
@@ -3954,7 +3954,7 @@ void OtherDock::updatePreviewPanel(const WindowInfo* info)
     if (info == nullptr)
     {
         m_thumbnailLabel->setPixmap(QPixmap());
-        m_quickInfoText->setPlainText(QStringLiteral("请选择左侧窗口项查看预览。"));
+        m_quickInfoText->setText(QStringLiteral("请选择左侧窗口项查看预览。"));
         kLogEvent event;
         dbg << event
             << "[OtherDock] 预览面板清空（无有效选中项）。"
@@ -3999,7 +3999,7 @@ void OtherDock::updatePreviewPanel(const WindowInfo* info)
         quickText += QStringLiteral("DisplayAffinity: 未知（错误码=%1）\n")
             .arg(info->displayAffinityError);
     }
-    m_quickInfoText->setPlainText(quickText);
+    m_quickInfoText->setText(quickText);
 
     kLogEvent event;
     dbg << event

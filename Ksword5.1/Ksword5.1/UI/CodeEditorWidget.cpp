@@ -8,8 +8,10 @@
 // ============================================================
 
 #include "../theme.h"
+#include "../Internationalization/LanguageManager.h"
 
 #include <QBuffer>
+#include <QEvent>
 #include <QFile>
 #include <QFileDialog>
 #include <QFontDatabase>
@@ -24,6 +26,7 @@
 #include <QPlainTextEdit>
 #include <QPixmap>
 #include <QResizeEvent>
+#include <QScrollBar>
 #include <QShortcut>
 #include <QSize>
 #include <QSvgRenderer>
@@ -41,6 +44,117 @@
 
 namespace
 {
+    // localizeReportValueCore：翻译报告字段值；复合权限/标志按竖线逐项翻译。
+    QString localizeReportValueCore(const QString& valueCore)
+    {
+        const QString localizedWholeValue = ks::i18n::displayText(valueCore);
+        if (localizedWholeValue != valueCore || !valueCore.contains(QLatin1Char('|')))
+        {
+            return localizedWholeValue;
+        }
+
+        QStringList valueParts = valueCore.split(QLatin1Char('|'), Qt::KeepEmptyParts);
+        bool anyPartChanged = false;
+        for (QString& valuePart : valueParts)
+        {
+            qsizetype startIndex = 0;
+            while (startIndex < valuePart.size() && valuePart.at(startIndex).isSpace())
+            {
+                ++startIndex;
+            }
+            qsizetype endIndex = valuePart.size();
+            while (endIndex > startIndex && valuePart.at(endIndex - 1).isSpace())
+            {
+                --endIndex;
+            }
+
+            const QString partCore = valuePart.mid(startIndex, endIndex - startIndex);
+            const QString localizedPartCore = ks::i18n::displayText(partCore);
+            if (localizedPartCore == partCore)
+            {
+                continue;
+            }
+            valuePart = valuePart.left(startIndex) + localizedPartCore + valuePart.mid(endIndex);
+            anyPartChanged = true;
+        }
+        return anyPartChanged ? valueParts.join(QLatin1Char('|')) : valueCore;
+    }
+
+    // localizeEmbeddedReportValue：翻译“标签: 动态状态”中的状态值。
+    // 模板翻译会原样保留 %1 捕获内容；这里仅处理冒号后的可翻译状态，路径和哈希会自然保持不变。
+    QString localizeEmbeddedReportValue(const QString& sourceLine, const QString& localizedLine)
+    {
+        const bool hasNewline = sourceLine.endsWith(QLatin1Char('\n'));
+        const bool localizedHasNewline = localizedLine.endsWith(QLatin1Char('\n'));
+        const QString sourceBody = hasNewline ? sourceLine.chopped(1) : sourceLine;
+        QString localizedBody = localizedHasNewline ? localizedLine.chopped(1) : localizedLine;
+
+        qsizetype separatorIndex = sourceBody.indexOf(QLatin1Char(':'));
+        const qsizetype fullWidthSeparatorIndex = sourceBody.indexOf(QChar(0xFF1A));
+        if (separatorIndex < 0 ||
+            (fullWidthSeparatorIndex >= 0 && fullWidthSeparatorIndex < separatorIndex))
+        {
+            separatorIndex = fullWidthSeparatorIndex;
+        }
+        if (separatorIndex < 0)
+        {
+            return localizedLine;
+        }
+
+        const QString sourceValue = sourceBody.mid(separatorIndex + 1);
+        qsizetype valueStart = 0;
+        while (valueStart < sourceValue.size() && sourceValue.at(valueStart).isSpace())
+        {
+            ++valueStart;
+        }
+        qsizetype valueEnd = sourceValue.size();
+        while (valueEnd > valueStart && sourceValue.at(valueEnd - 1).isSpace())
+        {
+            --valueEnd;
+        }
+        const QString valueCore = sourceValue.mid(valueStart, valueEnd - valueStart);
+        const QString localizedValueCore = localizeReportValueCore(valueCore);
+        if (valueCore.isEmpty() || localizedValueCore == valueCore || !localizedBody.endsWith(sourceValue))
+        {
+            return localizedLine;
+        }
+
+        localizedBody.chop(sourceValue.size());
+        localizedBody += sourceValue.left(valueStart);
+        localizedBody += localizedValueCore;
+        localizedBody += sourceValue.mid(valueEnd);
+        return hasNewline ? localizedBody + QLatin1Char('\n') : localizedBody;
+    }
+
+    // localizeGeneratedReport：只处理应用生成报告的逐行模板。
+    // 路径、哈希、证书内容等动态值由占位符原样保留；用户文件正文不会调用此函数。
+    QString localizeGeneratedReport(const QString& sourceText)
+    {
+        QString localizedText;
+        localizedText.reserve(sourceText.size());
+
+        qsizetype lineStart = 0;
+        while (lineStart < sourceText.size())
+        {
+            const qsizetype newlineIndex = sourceText.indexOf(QLatin1Char('\n'), lineStart);
+            const bool hasNewline = newlineIndex >= 0;
+            const qsizetype lineLength = hasNewline
+                ? (newlineIndex - lineStart + 1)
+                : (sourceText.size() - lineStart);
+            const QString sourceLine = sourceText.mid(lineStart, lineLength);
+            QString localizedLine = ks::i18n::displayText(sourceLine);
+            if (localizedLine == sourceLine && hasNewline)
+            {
+                localizedLine = ks::i18n::displayText(sourceLine.left(sourceLine.size() - 1));
+                localizedLine += QLatin1Char('\n');
+            }
+            localizedLine = localizeEmbeddedReportValue(sourceLine, localizedLine);
+            localizedText += localizedLine;
+            lineStart += lineLength;
+        }
+        return localizedText;
+    }
+
     // buildToolButtonStyle：
     // - 统一工具按钮样式，去掉边框让图标本体更突出；
     // - hover/pressed 仅保留轻量底色反馈，避免 SVG 被边框吃掉。
@@ -856,6 +970,20 @@ QString CodeEditorWidget::text() const
 
 void CodeEditorWidget::setText(const QString& plainText)
 {
+    if (m_readOnlyMode)
+    {
+        setLocalizedText(plainText);
+        return;
+    }
+
+    setRawText(plainText);
+}
+
+void CodeEditorWidget::setRawText(const QString& plainText)
+{
+    m_localizedSourceText.clear();
+    m_localizedRawSuffix.clear();
+    m_localizedTextActive = false;
     if (m_editor == nullptr)
     {
         return;
@@ -863,6 +991,58 @@ void CodeEditorWidget::setText(const QString& plainText)
 
     m_editor->setPlainText(applyStructuredAutoFormatIfNeeded(plainText));
     resetFileSessionMetadata();
+    updateStatusText();
+}
+
+void CodeEditorWidget::setLocalizedText(const QString& sourceText)
+{
+    m_localizedSourceText = sourceText;
+    m_localizedRawSuffix.clear();
+    m_localizedTextActive = true;
+    if (m_editor == nullptr)
+    {
+        return;
+    }
+
+    m_editor->setPlainText(applyStructuredAutoFormatIfNeeded(
+        localizeGeneratedReport(m_localizedSourceText) + m_localizedRawSuffix));
+    resetFileSessionMetadata();
+    updateStatusText();
+}
+
+void CodeEditorWidget::setLocalizedTextWithRawSuffix(
+    const QString& sourceText,
+    const QString& rawSuffix)
+{
+    m_localizedSourceText = sourceText;
+    m_localizedRawSuffix = rawSuffix;
+    m_localizedTextActive = true;
+    if (m_editor == nullptr)
+    {
+        return;
+    }
+
+    m_editor->setPlainText(applyStructuredAutoFormatIfNeeded(
+        localizeGeneratedReport(m_localizedSourceText) + m_localizedRawSuffix));
+    resetFileSessionMetadata();
+    updateStatusText();
+}
+
+void CodeEditorWidget::changeEvent(QEvent* event)
+{
+    QWidget::changeEvent(event);
+    if (event == nullptr || event->type() != QEvent::LanguageChange ||
+        !m_localizedTextActive || m_editor == nullptr)
+    {
+        return;
+    }
+
+    const int verticalScrollValue = m_editor->verticalScrollBar()->value();
+    const int horizontalScrollValue = m_editor->horizontalScrollBar()->value();
+    m_editor->setPlainText(applyStructuredAutoFormatIfNeeded(
+        localizeGeneratedReport(m_localizedSourceText) + m_localizedRawSuffix));
+    m_editor->verticalScrollBar()->setValue(verticalScrollValue);
+    m_editor->horizontalScrollBar()->setValue(horizontalScrollValue);
     updateStatusText();
 }
 

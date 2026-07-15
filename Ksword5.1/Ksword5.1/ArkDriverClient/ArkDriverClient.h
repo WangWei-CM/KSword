@@ -5,6 +5,11 @@
 
 namespace ksword::ark
 {
+    // Format the immutable R0 evidence packet as a stable diagnostic block.
+    // UI layers may prepend localized context, but should not reinterpret a
+    // present certificate table as a successful trust-chain validation.
+    std::string formatImageSignatureEvidence(const ImageSignatureQueryResult& result);
+
     // DriverClient centralizes all KswordARK control-device access. Docks should
     // call this class instead of opening \\.\KswordARKLog or invoking
     // DeviceIoControl directly.
@@ -83,6 +88,12 @@ namespace ksword::ark
             unsigned long sampleBytes = KSWORD_ARK_MEMORY_EVIDENCE_DEFAULT_SAMPLE_BYTES) const;
         FileInfoQueryResult queryFileInfo(const std::wstring& ntPath, unsigned long flags = KSWORD_ARK_QUERY_FILE_INFO_FLAG_INCLUDE_ALL) const;
         FileInfoQueryResult queryFileInfo(DriverHandle& handle, const std::wstring& ntPath, unsigned long flags = KSWORD_ARK_QUERY_FILE_INFO_FLAG_INCLUDE_ALL) const;
+        // Read Authenticode PE certificate-table structure and cached Code
+        // Integrity state through the driver. No WinTrust API is used.
+        ImageSignatureQueryResult queryImageSignature(
+            const std::wstring& ntPath,
+            std::uint64_t expectedModuleBase = 0,
+            unsigned long flags = KSWORD_ARK_IMAGE_SIGNATURE_QUERY_FLAG_DEFAULT) const;
         // setFileIntegrity：
         // - 输入：驱动可打开的 NT 路径、目录标志和 S-1-16-* mandatory label RID；
         // - 处理：封装 R0 文件 Mandatory Label IOCTL，驱动端只调用 ZwCreateFile/ZwSetSecurityObject；

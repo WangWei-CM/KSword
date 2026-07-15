@@ -14,6 +14,7 @@
 
 class QLabel;
 class QLineEdit;
+class QEvent;
 class QToolButton;
 class QVBoxLayout;
 class QHBoxLayout;
@@ -42,9 +43,28 @@ public:
     QString text() const;
 
     // setText：
-    // - 覆盖设置编辑器文本内容。
+    // - 覆盖设置编辑器文本内容；
+    // - 只读模式默认视为应用生成报告并支持即时语言切换；
+    // - 原始日志、JSON、文件/字节内容必须显式调用 setRawText。
     // 入参 plainText：目标文本。
     void setText(const QString& plainText);
+
+    // setRawText：
+    // - 无条件按原文覆盖内容，不翻译，也不在 LanguageChange 时重绘；
+    // - 用于用户文件、原始日志、API JSON 与字节 ASCII 视图。
+    void setRawText(const QString& plainText);
+
+    // setLocalizedText：
+    // - 用于应用生成的只读报告，而不是用户文件原文；
+    // - 保存中文规范源文本，并在 LanguageChange 时按当前语言重新渲染；
+    // - 普通 setText 会退出该模式，避免误翻译用户打开的源码或日志原文。
+    void setLocalizedText(const QString& sourceText);
+
+    // setLocalizedTextWithRawSuffix：
+    // - sourceText 为应用生成、需要随语言切换重绘的报告前缀；
+    // - rawSuffix 为文件或系统返回的原始内容，始终逐字保留，不参与翻译；
+    // - 适用于“程序提示 + 原始字符串/日志”混合展示。
+    void setLocalizedTextWithRawSuffix(const QString& sourceText, const QString& rawSuffix);
 
     // currentFilePath：
     // - 返回当前文件路径（未保存时为空）。
@@ -87,6 +107,10 @@ public:
     // - 当前文件路径为空时会直接失败。
     // 返回：true=成功，false=失败。
     bool reopenCurrentFileWithEncoding(QStringConverter::Encoding encoding);
+
+protected:
+    // changeEvent：语言切换时重新渲染 setLocalizedText 保存的生成报告。
+    void changeEvent(QEvent* event) override;
 
 private:
     // initializeUi：
@@ -262,6 +286,15 @@ private:
 
     // m_currentFilePath：当前文件路径（用于保存覆盖）。
     QString m_currentFilePath;
+
+    // m_localizedSourceText：setLocalizedText 保存的中文规范源报告。
+    QString m_localizedSourceText;
+
+    // m_localizedRawSuffix：混合报告中必须逐字保留、不得翻译的原始后缀。
+    QString m_localizedRawSuffix;
+
+    // m_localizedTextActive：true 时 LanguageChange 会重新渲染生成报告正文。
+    bool m_localizedTextActive = false;
 
     // m_fileEncoding：当前文件编码（仅在文件加载后有效）。
     QStringConverter::Encoding m_fileEncoding = QStringConverter::Utf8;

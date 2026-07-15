@@ -110,7 +110,7 @@ namespace
         QVBoxLayout* layout = new QVBoxLayout(&detailDialog);
         CodeEditorWidget* detailEditor = new CodeEditorWidget(&detailDialog);
         detailEditor->setReadOnly(true);
-        detailEditor->setText(detailText);
+        detailEditor->setLocalizedText(detailText);
 
         QDialogButtonBox* buttonBox = new QDialogButtonBox(QDialogButtonBox::Close, &detailDialog);
         QObject::connect(buttonBox, &QDialogButtonBox::rejected, &detailDialog, &QDialog::reject);

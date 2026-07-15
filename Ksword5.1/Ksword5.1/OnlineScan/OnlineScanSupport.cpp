@@ -242,7 +242,7 @@ void ks::online_scan::showResultDialog(
 
     CodeEditorWidget* resultEditor = new CodeEditorWidget(&resultDialog);
     resultEditor->setReadOnly(true);
-    resultEditor->setText(detailJsonText);
+    resultEditor->setRawText(detailJsonText);
     dialogLayout->addWidget(resultEditor, 1);
 
     QDialogButtonBox* buttonBox = new QDialogButtonBox(QDialogButtonBox::Close, &resultDialog);

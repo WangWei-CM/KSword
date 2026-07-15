@@ -40,7 +40,7 @@ namespace monitor_text_viewer
         // - 只读展示 ETW/WMI 等返回详情文本。
         CodeEditorWidget* editorWidget = new CodeEditorWidget(dialogPointer);
         editorWidget->setReadOnly(true);
-        editorWidget->setText(contentText);
+        editorWidget->setRawText(contentText);
         editorWidget->setToolTip(virtualPathText.trimmed().isEmpty() ? titleText : virtualPathText);
 
         QDialogButtonBox* buttonBoxPointer = new QDialogButtonBox(QDialogButtonBox::Close, dialogPointer);

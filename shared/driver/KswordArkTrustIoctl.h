@@ -6,13 +6,16 @@
 // KswordArkTrustIoctl.h
 // 作用：
 // - 定义 Phase-14 镜像信任与 Code Integrity 只读查询协议；
-// - R0 仅返回内核可观察的加载/缓存信任状态；
-// - Authenticode 证书链、Catalog 和吊销检查后续由 R3 WinVerifyTrust 完成。
+// - 旧查询返回内核可观察的加载/缓存信任状态；
+// - image-signature 查询由 R0 直接读取 PE Security Directory 和证书表结构；
+// - 证书链、Catalog 和吊销状态不由本协议推断。
 // ============================================================
 
 #define KSWORD_ARK_TRUST_PROTOCOL_VERSION 1UL
+#define KSWORD_ARK_IMAGE_SIGNATURE_PROTOCOL_VERSION 1UL
 
 #define KSWORD_ARK_IOCTL_FUNCTION_QUERY_IMAGE_TRUST 0x819UL
+#define KSWORD_ARK_IOCTL_FUNCTION_QUERY_IMAGE_SIGNATURE 0x84EUL
 
 #define IOCTL_KSWORD_ARK_QUERY_IMAGE_TRUST \
     CTL_CODE( \
@@ -20,6 +23,13 @@
         KSWORD_ARK_IOCTL_FUNCTION_QUERY_IMAGE_TRUST, \
         METHOD_BUFFERED, \
         FILE_ANY_ACCESS)
+
+#define IOCTL_KSWORD_ARK_QUERY_IMAGE_SIGNATURE \
+    CTL_CODE( \
+        KSWORD_ARK_IOCTL_DEVICE_TYPE, \
+        KSWORD_ARK_IOCTL_FUNCTION_QUERY_IMAGE_SIGNATURE, \
+        METHOD_BUFFERED, \
+        FILE_READ_ACCESS | FILE_WRITE_ACCESS)
 
 #define KSWORD_ARK_TRUST_QUERY_FLAG_INCLUDE_GLOBAL_CI          0x00000001UL
 #define KSWORD_ARK_TRUST_QUERY_FLAG_INCLUDE_FILE_SIGNING_LEVEL 0x00000002UL
@@ -86,6 +96,141 @@
 #define KSWORD_ARK_TRUST_PATH_MAX_CHARS 1024U
 #define KSWORD_ARK_TRUST_THUMBPRINT_MAX_BYTES 64U
 
+// Kernel image-signature query. The PE certificate table is read directly by
+// R0 and never routed through WinTrust. A present WIN_CERTIFICATE record is
+// structural evidence only; cached signing level is reported separately as
+// the kernel Code Integrity view. Read+write device access is required because
+// the kernel open intentionally is not constrained by the caller's file ACL.
+#define KSWORD_ARK_IMAGE_SIGNATURE_QUERY_FLAG_INCLUDE_PE_CERTIFICATE_TABLE 0x00000001UL
+#define KSWORD_ARK_IMAGE_SIGNATURE_QUERY_FLAG_INCLUDE_CACHED_SIGNING_LEVEL 0x00000002UL
+#define KSWORD_ARK_IMAGE_SIGNATURE_QUERY_FLAG_MATCH_LOADED_MODULE          0x00000004UL
+#define KSWORD_ARK_IMAGE_SIGNATURE_QUERY_FLAG_OPEN_REPARSE_POINT           0x00000008UL
+#define KSWORD_ARK_IMAGE_SIGNATURE_QUERY_FLAG_DEFAULT \
+    (KSWORD_ARK_IMAGE_SIGNATURE_QUERY_FLAG_INCLUDE_PE_CERTIFICATE_TABLE | \
+     KSWORD_ARK_IMAGE_SIGNATURE_QUERY_FLAG_INCLUDE_CACHED_SIGNING_LEVEL)
+
+#define KSWORD_ARK_IMAGE_SIGNATURE_FIELD_REQUEST_PATH              0x00000001UL
+#define KSWORD_ARK_IMAGE_SIGNATURE_FIELD_FILE_OPENED               0x00000002UL
+#define KSWORD_ARK_IMAGE_SIGNATURE_FIELD_FILE_SIZE                 0x00000004UL
+#define KSWORD_ARK_IMAGE_SIGNATURE_FIELD_FILE_OBJECT_RESERVED      0x00000008UL
+#define KSWORD_ARK_IMAGE_SIGNATURE_FIELD_DOS_HEADER                0x00000010UL
+#define KSWORD_ARK_IMAGE_SIGNATURE_FIELD_NT_HEADERS                0x00000020UL
+#define KSWORD_ARK_IMAGE_SIGNATURE_FIELD_SECURITY_DIRECTORY        0x00000040UL
+#define KSWORD_ARK_IMAGE_SIGNATURE_FIELD_CERTIFICATE_TABLE         0x00000080UL
+#define KSWORD_ARK_IMAGE_SIGNATURE_FIELD_CERTIFICATES_ENUMERATED   0x00000100UL
+#define KSWORD_ARK_IMAGE_SIGNATURE_FIELD_SIGNING_LEVEL             0x00000200UL
+#define KSWORD_ARK_IMAGE_SIGNATURE_FIELD_THUMBPRINT                0x00000400UL
+#define KSWORD_ARK_IMAGE_SIGNATURE_FIELD_LOADED_MODULE             0x00000800UL
+#define KSWORD_ARK_IMAGE_SIGNATURE_FIELD_LOADED_MODULE_NAME_MATCH  0x00001000UL
+
+#define KSWORD_ARK_IMAGE_SIGNATURE_STATUS_UNAVAILABLE       0UL
+#define KSWORD_ARK_IMAGE_SIGNATURE_STATUS_OK                1UL
+#define KSWORD_ARK_IMAGE_SIGNATURE_STATUS_PARTIAL           2UL
+#define KSWORD_ARK_IMAGE_SIGNATURE_STATUS_FILE_OPEN_FAILED  3UL
+#define KSWORD_ARK_IMAGE_SIGNATURE_STATUS_NOT_PE            4UL
+#define KSWORD_ARK_IMAGE_SIGNATURE_STATUS_MALFORMED_PE      5UL
+#define KSWORD_ARK_IMAGE_SIGNATURE_STATUS_INVALID_REQUEST   6UL
+
+#define KSWORD_ARK_IMAGE_SIGNATURE_STRUCT_CERT_TABLE_UNALIGNED        0x00000001UL
+#define KSWORD_ARK_IMAGE_SIGNATURE_STRUCT_CERT_TABLE_OUT_OF_RANGE     0x00000002UL
+#define KSWORD_ARK_IMAGE_SIGNATURE_STRUCT_ENTRY_HEADER_TRUNCATED      0x00000004UL
+#define KSWORD_ARK_IMAGE_SIGNATURE_STRUCT_ENTRY_LENGTH_INVALID        0x00000008UL
+#define KSWORD_ARK_IMAGE_SIGNATURE_STRUCT_ENTRY_RANGE_INVALID         0x00000010UL
+#define KSWORD_ARK_IMAGE_SIGNATURE_STRUCT_UNKNOWN_REVISION            0x00000020UL
+#define KSWORD_ARK_IMAGE_SIGNATURE_STRUCT_UNKNOWN_TYPE                0x00000040UL
+#define KSWORD_ARK_IMAGE_SIGNATURE_STRUCT_ENTRY_OUTPUT_TRUNCATED      0x00000080UL
+#define KSWORD_ARK_IMAGE_SIGNATURE_STRUCT_TRAILING_BYTES              0x00000100UL
+#define KSWORD_ARK_IMAGE_SIGNATURE_STRUCT_CERT_PADDING_NONZERO        0x00000200UL
+#define KSWORD_ARK_IMAGE_SIGNATURE_STRUCT_SCAN_LIMIT_REACHED          0x00000400UL
+#define KSWORD_ARK_IMAGE_SIGNATURE_STRUCT_NESTED_SIGNATURE_PRESENT    0x00000800UL
+#define KSWORD_ARK_IMAGE_SIGNATURE_STRUCT_MULTIPLE_PKCS7_ENTRIES      0x00001000UL
+#define KSWORD_ARK_IMAGE_SIGNATURE_STRUCT_CERTIFICATE_READ_FAILED     0x00002000UL
+#define KSWORD_ARK_IMAGE_SIGNATURE_STRUCT_LOADED_NAME_MISMATCH        0x00004000UL
+#define KSWORD_ARK_IMAGE_SIGNATURE_STRUCT_CERT_TABLE_OVERLAPS_HEADERS 0x00008000UL
+
+#define KSWORD_ARK_IMAGE_SIGNATURE_ENTRY_REVISION_VALID       0x00000001UL
+#define KSWORD_ARK_IMAGE_SIGNATURE_ENTRY_PKCS_SIGNED_DATA     0x00000002UL
+#define KSWORD_ARK_IMAGE_SIGNATURE_ENTRY_CONTENT_READ         0x00000004UL
+#define KSWORD_ARK_IMAGE_SIGNATURE_ENTRY_NESTED_SIGNATURE_OID 0x00000008UL
+#define KSWORD_ARK_IMAGE_SIGNATURE_ENTRY_DER_SEQUENCE         0x00000010UL
+#define KSWORD_ARK_IMAGE_SIGNATURE_ENTRY_PADDING_NONZERO      0x00000020UL
+#define KSWORD_ARK_IMAGE_SIGNATURE_ENTRY_LENGTH_ALIGNED       0x00000040UL
+#define KSWORD_ARK_IMAGE_SIGNATURE_ENTRY_SCAN_LIMITED         0x00000080UL
+
+#define KSWORD_ARK_IMAGE_SIGNATURE_WIN_CERT_REVISION_1_0 0x0100U
+#define KSWORD_ARK_IMAGE_SIGNATURE_WIN_CERT_REVISION_2_0 0x0200U
+#define KSWORD_ARK_IMAGE_SIGNATURE_WIN_CERT_TYPE_X509 0x0001U
+#define KSWORD_ARK_IMAGE_SIGNATURE_WIN_CERT_TYPE_PKCS_SIGNED_DATA 0x0002U
+#define KSWORD_ARK_IMAGE_SIGNATURE_WIN_CERT_TYPE_RESERVED_1 0x0003U
+#define KSWORD_ARK_IMAGE_SIGNATURE_WIN_CERT_TYPE_TS_STACK_SIGNED 0x0004U
+#define KSWORD_ARK_IMAGE_SIGNATURE_WIN_CERT_TYPE_PKCS1_SIGN 0x0009U
+
+#define KSWORD_ARK_IMAGE_SIGNATURE_MAX_ENTRIES 32U
+#define KSWORD_ARK_IMAGE_SIGNATURE_MAX_SCAN_BYTES (16UL * 1024UL * 1024UL)
+
+typedef struct _KSWORD_ARK_IMAGE_SIGNATURE_CERTIFICATE_ENTRY
+{
+    unsigned long long fileOffset;
+    unsigned long long contentHashFnv1a64;
+    unsigned long length;
+    unsigned long alignedLength;
+    unsigned long flags;
+    unsigned long nestedSignatureCount;
+    unsigned long contentBytesScanned;
+    unsigned short revision;
+    unsigned short certificateType;
+    long readStatus;
+} KSWORD_ARK_IMAGE_SIGNATURE_CERTIFICATE_ENTRY;
+
+typedef struct _KSWORD_ARK_QUERY_IMAGE_SIGNATURE_REQUEST
+{
+    unsigned long flags;
+    unsigned short pathLengthChars;
+    unsigned short reserved;
+    unsigned long long expectedModuleBase;
+    wchar_t path[KSWORD_ARK_TRUST_PATH_MAX_CHARS];
+} KSWORD_ARK_QUERY_IMAGE_SIGNATURE_REQUEST;
+
+typedef struct _KSWORD_ARK_QUERY_IMAGE_SIGNATURE_RESPONSE
+{
+    unsigned long version;
+    unsigned long size;
+    unsigned long requestFlags;
+    unsigned long fieldFlags;
+    unsigned long queryStatus;
+    unsigned long structuralFlags;
+    long openStatus;
+    long fileSizeStatus;
+    long objectStatus;
+    long parseStatus;
+    long certificateStatus;
+    long signingLevelStatus;
+    long loadedModuleStatus;
+    unsigned long reservedStatus;
+    unsigned long long fileSize;
+    unsigned long long fileObjectAddress; // Reserved; R0 does not expose the kernel pointer.
+    unsigned long long peHeaderOffset;
+    unsigned long long certificateTableOffset;
+    unsigned long long certificateTableSize;
+    unsigned long long expectedModuleBase;
+    unsigned long long matchedModuleBase;
+    unsigned long matchedModuleSize;
+    unsigned long peMachine;
+    unsigned long optionalHeaderMagic;
+    unsigned long sizeOfHeaders;
+    unsigned long certificateCount;
+    unsigned long returnedCertificateCount;
+    unsigned long pkcs7CertificateCount;
+    unsigned long nestedSignatureCount;
+    unsigned long certificateBytesScanned;
+    unsigned long signingLevel;
+    unsigned long signingLevelFlags;
+    unsigned long thumbprintAlgorithm;
+    unsigned long thumbprintSize;
+    unsigned char thumbprint[KSWORD_ARK_TRUST_THUMBPRINT_MAX_BYTES];
+    wchar_t ntPath[KSWORD_ARK_TRUST_PATH_MAX_CHARS];
+    KSWORD_ARK_IMAGE_SIGNATURE_CERTIFICATE_ENTRY certificates[KSWORD_ARK_IMAGE_SIGNATURE_MAX_ENTRIES];
+} KSWORD_ARK_QUERY_IMAGE_SIGNATURE_RESPONSE;
 typedef struct _KSWORD_ARK_QUERY_IMAGE_TRUST_REQUEST
 {
     unsigned long flags;

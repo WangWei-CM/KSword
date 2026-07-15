@@ -224,7 +224,7 @@ void HexEditorWidget::initializeUi()
     asciiPageLayout->setSpacing(0);
     m_asciiEditor = new CodeEditorWidget(m_asciiViewPage);
     m_asciiEditor->setReadOnly(true);
-    m_asciiEditor->setText(QStringLiteral("当前无数据。"));
+    m_asciiEditor->setLocalizedText(QStringLiteral("当前无数据。"));
     asciiPageLayout->addWidget(m_asciiEditor, 1);
     m_viewTabWidget->addTab(m_asciiViewPage, QStringLiteral("ASCII"));
 
@@ -768,7 +768,7 @@ void HexEditorWidget::refreshAsciiTabText()
 
     if (m_buffer.isEmpty())
     {
-        m_asciiEditor->setText(QStringLiteral("当前无数据。"));
+        m_asciiEditor->setLocalizedText(QStringLiteral("当前无数据。"));
         return;
     }
 
@@ -788,7 +788,7 @@ void HexEditorWidget::refreshAsciiTabText()
         }
     }
 
-    m_asciiEditor->setText(asciiText);
+    m_asciiEditor->setRawText(asciiText);
 }
 
 void HexEditorWidget::updateAsciiCellByRow(const int rowIndex)

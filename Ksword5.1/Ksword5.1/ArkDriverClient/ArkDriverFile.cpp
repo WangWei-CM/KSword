@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstring>
+#include <iomanip>
 #include <sstream>
 #include <string>
 
@@ -94,12 +95,224 @@ namespace ksword::ark
         }
     }
 
+    std::string formatImageSignatureEvidence(const ImageSignatureQueryResult& result)
+    {
+        std::ostringstream stream;
+        stream << "source=R0 direct PE Security Directory (WinTrust not used)\n";
+        stream << "communication.ok=" << (result.io.ok ? "true" : "false")
+               << "\ncommunication.win32_error=" << result.io.win32Error
+               << "\ncommunication.bytes_returned=" << result.io.bytesReturned
+               << "\ncommunication.unsupported=" << (result.unsupported ? "true" : "false")
+               << "\ncommunication.detail=" << result.io.message << '\n';
+        if (!result.io.ok)
+        {
+            return stream.str();
+        }
+
+        const KSWORD_ARK_QUERY_IMAGE_SIGNATURE_RESPONSE& response = result.response;
+        const auto writeStatus = [&stream](const char* name, const long status)
+        {
+            stream << name << "=0x"
+                   << std::hex << std::setw(8) << std::setfill('0')
+                   << static_cast<unsigned long>(status)
+                   << std::dec << std::setfill(' ') << '\n';
+        };
+        stream << "protocol.version=" << response.version
+               << "\nprotocol.size=" << response.size
+               << "\nquery.status=" << response.queryStatus
+               << "\nquery.flags=0x" << std::hex << response.requestFlags
+               << "\nquery.field_flags=0x" << response.fieldFlags
+               << "\npe.structural_flags=0x" << response.structuralFlags
+               << std::dec << '\n';
+        stream << "pe.certificate_table_present="
+               << ((response.fieldFlags & KSWORD_ARK_IMAGE_SIGNATURE_FIELD_CERTIFICATE_TABLE) != 0UL ? "true" : "false")
+               << "\npe.nested_signature_oid_present="
+               << ((response.structuralFlags & KSWORD_ARK_IMAGE_SIGNATURE_STRUCT_NESTED_SIGNATURE_PRESENT) != 0UL ? "true" : "false")
+               << "\nloaded.module_base_match="
+               << ((response.fieldFlags & KSWORD_ARK_IMAGE_SIGNATURE_FIELD_LOADED_MODULE) != 0UL ? "true" : "false")
+               << "\nloaded.module_name_match="
+               << ((response.fieldFlags & KSWORD_ARK_IMAGE_SIGNATURE_FIELD_LOADED_MODULE_NAME_MATCH) != 0UL ? "true" : "false")
+               << "\nci.cached_signing_level_present="
+               << ((response.fieldFlags & KSWORD_ARK_IMAGE_SIGNATURE_FIELD_SIGNING_LEVEL) != 0UL ? "true" : "false")
+               << "\npe.structural_findings=";
+        bool firstFinding = true;
+        const auto appendFinding = [&stream, &firstFinding, &response](const unsigned long flag, const char* name)
+        {
+            if ((response.structuralFlags & flag) == 0UL)
+            {
+                return;
+            }
+            stream << (firstFinding ? "" : ",") << name;
+            firstFinding = false;
+        };
+        appendFinding(KSWORD_ARK_IMAGE_SIGNATURE_STRUCT_CERT_TABLE_UNALIGNED, "cert_table_unaligned");
+        appendFinding(KSWORD_ARK_IMAGE_SIGNATURE_STRUCT_CERT_TABLE_OUT_OF_RANGE, "cert_table_out_of_range");
+        appendFinding(KSWORD_ARK_IMAGE_SIGNATURE_STRUCT_ENTRY_HEADER_TRUNCATED, "entry_header_truncated");
+        appendFinding(KSWORD_ARK_IMAGE_SIGNATURE_STRUCT_ENTRY_LENGTH_INVALID, "entry_length_invalid");
+        appendFinding(KSWORD_ARK_IMAGE_SIGNATURE_STRUCT_ENTRY_RANGE_INVALID, "entry_range_invalid");
+        appendFinding(KSWORD_ARK_IMAGE_SIGNATURE_STRUCT_UNKNOWN_REVISION, "unknown_revision");
+        appendFinding(KSWORD_ARK_IMAGE_SIGNATURE_STRUCT_UNKNOWN_TYPE, "unknown_certificate_type");
+        appendFinding(KSWORD_ARK_IMAGE_SIGNATURE_STRUCT_ENTRY_OUTPUT_TRUNCATED, "entry_output_truncated");
+        appendFinding(KSWORD_ARK_IMAGE_SIGNATURE_STRUCT_TRAILING_BYTES, "trailing_bytes");
+        appendFinding(KSWORD_ARK_IMAGE_SIGNATURE_STRUCT_CERT_PADDING_NONZERO, "certificate_padding_nonzero");
+        appendFinding(KSWORD_ARK_IMAGE_SIGNATURE_STRUCT_SCAN_LIMIT_REACHED, "scan_limit_reached");
+        appendFinding(KSWORD_ARK_IMAGE_SIGNATURE_STRUCT_NESTED_SIGNATURE_PRESENT, "nested_signature_oid_present");
+        appendFinding(KSWORD_ARK_IMAGE_SIGNATURE_STRUCT_MULTIPLE_PKCS7_ENTRIES, "multiple_pkcs7_entries");
+        appendFinding(KSWORD_ARK_IMAGE_SIGNATURE_STRUCT_CERTIFICATE_READ_FAILED, "certificate_read_failed");
+        appendFinding(KSWORD_ARK_IMAGE_SIGNATURE_STRUCT_LOADED_NAME_MISMATCH, "loaded_name_mismatch");
+        appendFinding(KSWORD_ARK_IMAGE_SIGNATURE_STRUCT_CERT_TABLE_OVERLAPS_HEADERS, "cert_table_overlaps_headers");
+        if (firstFinding)
+        {
+            stream << "none";
+        }
+        stream << '\n';
+        writeStatus("status.open", response.openStatus);
+        writeStatus("status.file_size", response.fileSizeStatus);
+        writeStatus("status.file_object", response.objectStatus);
+        writeStatus("status.pe_parse", response.parseStatus);
+        writeStatus("status.certificate_table", response.certificateStatus);
+        writeStatus("status.cached_signing_level", response.signingLevelStatus);
+        writeStatus("status.loaded_module_match", response.loadedModuleStatus);
+        stream << "file.size=" << response.fileSize
+               << "\npe.header_offset=0x" << std::hex << response.peHeaderOffset
+               << "\npe.machine=0x" << response.peMachine
+               << "\npe.optional_magic=0x" << response.optionalHeaderMagic
+               << "\npe.size_of_headers=0x" << response.sizeOfHeaders
+               << "\ncertificate_table.file_offset=0x" << response.certificateTableOffset
+               << "\ncertificate_table.size=0x" << response.certificateTableSize
+               << std::dec
+               << "\ncertificate_table.count=" << response.certificateCount
+               << "\ncertificate_table.returned_count=" << response.returnedCertificateCount
+               << "\ncertificate_table.pkcs7_count=" << response.pkcs7CertificateCount
+               << "\ncertificate_table.nested_signature_oid_count=" << response.nestedSignatureCount
+               << "\ncertificate_table.bytes_scanned=" << response.certificateBytesScanned
+               << "\nloaded.expected_base=0x" << std::hex << response.expectedModuleBase
+               << "\nloaded.matched_base=0x" << response.matchedModuleBase
+               << "\nloaded.matched_size=0x" << response.matchedModuleSize
+               << std::dec
+               << "\nci.cached_signing_level=" << response.signingLevel
+               << "\nci.cached_signing_flags=0x" << std::hex << response.signingLevelFlags
+               << "\nci.thumbprint_algorithm=0x" << response.thumbprintAlgorithm
+               << std::dec
+               << "\nci.thumbprint=";
+        const std::size_t thumbprintSize = std::min<std::size_t>(
+            response.thumbprintSize,
+            sizeof(response.thumbprint));
+        if (thumbprintSize == 0U)
+        {
+            stream << "<unavailable>";
+        }
+        else
+        {
+            for (std::size_t index = 0U; index < thumbprintSize; ++index)
+            {
+                stream << std::hex << std::setw(2) << std::setfill('0')
+                       << static_cast<unsigned int>(response.thumbprint[index]);
+            }
+            stream << std::dec << std::setfill(' ');
+        }
+        stream << '\n';
+
+        const std::size_t entryCount = std::min<std::size_t>(
+            response.returnedCertificateCount,
+            KSWORD_ARK_IMAGE_SIGNATURE_MAX_ENTRIES);
+        for (std::size_t index = 0U; index < entryCount; ++index)
+        {
+            const KSWORD_ARK_IMAGE_SIGNATURE_CERTIFICATE_ENTRY& entry = response.certificates[index];
+            stream << "certificate[" << index << "].file_offset=0x" << std::hex << entry.fileOffset
+                   << "\ncertificate[" << index << "].length=0x" << entry.length
+                   << "\ncertificate[" << index << "].aligned_length=0x" << entry.alignedLength
+                   << "\ncertificate[" << index << "].revision=0x" << entry.revision
+                   << "\ncertificate[" << index << "].type=0x" << entry.certificateType
+                   << "\ncertificate[" << index << "].flags=0x" << entry.flags
+                   << "\ncertificate[" << index << "].content_fnv1a64_noncrypto=0x" << entry.contentHashFnv1a64
+                   << std::dec
+                   << "\ncertificate[" << index << "].nested_signature_oid_count=" << entry.nestedSignatureCount
+                   << "\ncertificate[" << index << "].content_bytes_scanned=" << entry.contentBytesScanned
+                   << "\ncertificate[" << index << "].read_status=0x" << std::hex
+                   << static_cast<unsigned long>(entry.readStatus) << std::dec << '\n';
+        }
+        return stream.str();
+    }
+
     FileInfoQueryResult DriverClient::queryFileInfo(const std::wstring& ntPath, const unsigned long flags) const
     {
         // 作用：用独立控制句柄查询 R0 文件基础信息。
         // 返回：FileInfoQueryResult，失败时 io.message 包含 Win32/协议诊断。
         DriverHandle handle = open();
         return queryFileInfo(handle, ntPath, flags);
+    }
+
+    ImageSignatureQueryResult DriverClient::queryImageSignature(
+        const std::wstring& ntPath,
+        const std::uint64_t expectedModuleBase,
+        const unsigned long flags) const
+    {
+        ImageSignatureQueryResult queryResult{};
+        if (ntPath.empty() || ntPath.size() >= KSWORD_ARK_TRUST_PATH_MAX_CHARS)
+        {
+            queryResult.io.ok = false;
+            queryResult.io.win32Error = ERROR_INVALID_PARAMETER;
+            queryResult.io.message = "image-signature path invalid, chars=" + std::to_string(ntPath.size());
+            return queryResult;
+        }
+
+        KSWORD_ARK_QUERY_IMAGE_SIGNATURE_REQUEST request{};
+        request.flags = (flags == 0UL)
+            ? KSWORD_ARK_IMAGE_SIGNATURE_QUERY_FLAG_DEFAULT
+            : flags;
+        if (expectedModuleBase != 0U)
+        {
+            request.flags |= KSWORD_ARK_IMAGE_SIGNATURE_QUERY_FLAG_MATCH_LOADED_MODULE;
+        }
+        request.pathLengthChars = static_cast<unsigned short>(ntPath.size());
+        request.expectedModuleBase = expectedModuleBase;
+        std::copy(ntPath.begin(), ntPath.end(), request.path);
+        request.path[request.pathLengthChars] = L'\0';
+
+        queryResult.io = deviceIoControl(
+            IOCTL_KSWORD_ARK_QUERY_IMAGE_SIGNATURE,
+            &request,
+            static_cast<unsigned long>(sizeof(request)),
+            &queryResult.response,
+            static_cast<unsigned long>(sizeof(queryResult.response)));
+        if (!queryResult.io.ok)
+        {
+            queryResult.unsupported = isUnsupportedIoctlError(queryResult.io.win32Error);
+            queryResult.io.message =
+                "DeviceIoControl(IOCTL_KSWORD_ARK_QUERY_IMAGE_SIGNATURE) failed, error=" +
+                std::to_string(queryResult.io.win32Error);
+            return queryResult;
+        }
+        if (queryResult.io.bytesReturned < sizeof(KSWORD_ARK_QUERY_IMAGE_SIGNATURE_RESPONSE))
+        {
+            queryResult.io.ok = false;
+            queryResult.io.win32Error = ERROR_INVALID_DATA;
+            queryResult.io.message =
+                "image-signature response too small, bytesReturned=" +
+                std::to_string(queryResult.io.bytesReturned);
+            return queryResult;
+        }
+        if (queryResult.response.version != KSWORD_ARK_IMAGE_SIGNATURE_PROTOCOL_VERSION ||
+            queryResult.response.size < sizeof(KSWORD_ARK_QUERY_IMAGE_SIGNATURE_RESPONSE))
+        {
+            queryResult.io.ok = false;
+            queryResult.io.win32Error = ERROR_REVISION_MISMATCH;
+            queryResult.io.message =
+                "image-signature protocol mismatch, version=" +
+                std::to_string(queryResult.response.version) +
+                ", size=" + std::to_string(queryResult.response.size);
+            return queryResult;
+        }
+
+        std::ostringstream stream;
+        stream << "queryStatus=" << queryResult.response.queryStatus
+               << ", fieldFlags=0x" << std::hex << queryResult.response.fieldFlags
+               << ", structuralFlags=0x" << queryResult.response.structuralFlags
+               << std::dec << ", certificates=" << queryResult.response.certificateCount
+               << ", nestedSignatures=" << queryResult.response.nestedSignatureCount;
+        queryResult.io.message = stream.str();
+        return queryResult;
     }
 
     FileInfoQueryResult DriverClient::queryFileInfo(

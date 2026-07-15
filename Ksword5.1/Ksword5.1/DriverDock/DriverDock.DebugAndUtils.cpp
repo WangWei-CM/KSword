@@ -1,5 +1,8 @@
 #include "DriverDock.Internal.h"
 
+#include <QScrollBar>
+#include <QStringList>
+
 // 说明：由原聚合式实现迁移为独立 .cpp，成员函数实现保持原样。
 using namespace ksword::driver_dock_internal;
 
@@ -7,8 +10,7 @@ void DriverDock::startDebugOutputCapture()
 {
     if (m_kernelDebugCaptureRunning.exchange(true))
     {
-        appendDebugOutputLine(
-            driverText("driver.debug.capture.already_running", QStringLiteral("捕获线程已在运行。")));
+        appendLocalizedDebugOutputLine(QStringLiteral("捕获线程已在运行。"));
         return;
     }
 
@@ -19,8 +21,7 @@ void DriverDock::startDebugOutputCapture()
     }
     m_kernelDebugCaptureThread.reset();
 
-    appendDebugOutputLine(
-        driverText("driver.debug.capture.starting", QStringLiteral("正在注册 R0 内核调试输出回调...")));
+    appendLocalizedDebugOutputLine(QStringLiteral("正在注册 R0 内核调试输出回调..."));
     try
     {
         m_kernelDebugCaptureThread = std::make_unique<std::thread>([this]()
@@ -32,8 +33,7 @@ void DriverDock::startDebugOutputCapture()
     {
         m_kernelDebugCaptureRunning.store(false);
         m_kernelDebugCaptureThread.reset();
-        appendDebugOutputLine(
-            driverText("driver.debug.capture.thread_create_failed", QStringLiteral("启动失败：无法创建后台线程。")));
+        appendLocalizedDebugOutputLine(QStringLiteral("启动失败：无法创建后台线程。"));
     }
 
     updateDebugCaptureButtonState();
@@ -66,11 +66,9 @@ void DriverDock::runKernelDebugOutputCaptureLoop()
                 {
                     return;
                 }
-                guardThis->appendDebugOutputLine(
-                    driverText(
-                        "driver.debug.capture.open_failed",
-                        QStringLiteral("启动失败：无法打开 KswordARK 控制设备（Win32=%1）。"))
-                    .arg(openError));
+                guardThis->appendLocalizedDebugOutputLine(
+                    QStringLiteral("启动失败：无法打开 KswordARK 控制设备（Win32=%1）。")
+                        .arg(openError));
                 guardThis->updateDebugCaptureButtonState();
             }, Qt::QueuedConnection);
         return;
@@ -90,14 +88,10 @@ void DriverDock::runKernelDebugOutputCaptureLoop()
                 {
                     return;
                 }
-                guardThis->appendDebugOutputLine(
+                guardThis->appendLocalizedDebugOutputLine(
                     unsupported
-                        ? driverText(
-                            "driver.debug.capture.unsupported",
-                            QStringLiteral("启动失败：当前 KswordARK 驱动版本不支持内核调试输出 IOCTL。"))
-                        : driverText(
-                            "driver.debug.capture.register_failed",
-                            QStringLiteral("启动失败：R0 调试输出回调注册失败：%1"))
+                        ? QStringLiteral("启动失败：当前 KswordARK 驱动版本不支持内核调试输出 IOCTL。")
+                        : QStringLiteral("启动失败：R0 调试输出回调注册失败：%1")
                             .arg(errorDetail));
                 guardThis->updateDebugCaptureButtonState();
             }, Qt::QueuedConnection);
@@ -110,10 +104,8 @@ void DriverDock::runKernelDebugOutputCaptureLoop()
             {
                 return;
             }
-            guardThis->appendDebugOutputLine(
-                driverText(
-                    "driver.debug.capture.started",
-                    QStringLiteral("R0 内核调试输出回调已启动，等待 DbgPrint/DbgPrintEx/KdPrintEx 消息...")));
+            guardThis->appendLocalizedDebugOutputLine(
+                QStringLiteral("R0 内核调试输出回调已启动，等待 DbgPrint/DbgPrintEx/KdPrintEx 消息..."));
             guardThis->updateDebugCaptureButtonState();
         }, Qt::QueuedConnection);
 
@@ -134,10 +126,8 @@ void DriverDock::runKernelDebugOutputCaptureLoop()
                     {
                         return;
                     }
-                    guardThis->appendDebugOutputLine(
-                        driverText(
-                            "driver.debug.capture.drain_failed",
-                            QStringLiteral("读取 R0 调试输出失败：%1"))
+                    guardThis->appendLocalizedDebugOutputLine(
+                        QStringLiteral("读取 R0 调试输出失败：%1")
                         .arg(errorDetail));
                 }, Qt::QueuedConnection);
             break;
@@ -152,10 +142,8 @@ void DriverDock::runKernelDebugOutputCaptureLoop()
                 {
                     if (guardThis != nullptr)
                     {
-                        guardThis->appendDebugOutputLine(
-                            driverText(
-                                "driver.debug.capture.overflow",
-                                QStringLiteral("警告：读取游标落后，已有 %1 条内核调试消息被环形缓冲区覆盖。"))
+                        guardThis->appendLocalizedDebugOutputLine(
+                            QStringLiteral("警告：读取游标落后，已有 %1 条内核调试消息被环形缓冲区覆盖。")
                             .arg(lostCount));
                     }
                 }, Qt::QueuedConnection);
@@ -169,10 +157,8 @@ void DriverDock::runKernelDebugOutputCaptureLoop()
                 {
                     if (guardThis != nullptr)
                     {
-                        guardThis->appendDebugOutputLine(
-                            driverText(
-                                "driver.debug.capture.dropped",
-                                QStringLiteral("警告：高 IRQL 并发写入期间丢弃了 %1 条内核调试消息。"))
+                        guardThis->appendLocalizedDebugOutputLine(
+                            QStringLiteral("警告：高 IRQL 并发写入期间丢弃了 %1 条内核调试消息。")
                             .arg(droppedDelta));
                     }
                 }, Qt::QueuedConnection);
@@ -202,14 +188,9 @@ void DriverDock::runKernelDebugOutputCaptureLoop()
                 {
                     if (guardThis != nullptr)
                     {
-                        QString displayLine = outputLine;
-                        if (textTruncated)
-                        {
-                            displayLine += driverText(
-                                "driver.debug.record.truncated",
-                                QStringLiteral(" [已截断]"));
-                        }
-                        guardThis->appendDebugOutputLine(displayLine);
+                        guardThis->appendDebugOutputLine(
+                            outputLine,
+                            textTruncated ? QStringLiteral(" [已截断]") : QString());
                     }
                 }, Qt::QueuedConnection);
         }
@@ -231,10 +212,10 @@ void DriverDock::runKernelDebugOutputCaptureLoop()
             {
                 return;
             }
-            guardThis->appendDebugOutputLine(
+            guardThis->appendLocalizedDebugOutputLine(
                 stopOk
-                    ? driverText("driver.debug.capture.exited", QStringLiteral("R0 调试输出回调已停止。"))
-                    : driverText("driver.debug.capture.stop_failed", QStringLiteral("捕获线程已退出，但 R0 回调注销返回失败。")));
+                    ? QStringLiteral("R0 调试输出回调已停止。")
+                    : QStringLiteral("捕获线程已退出，但 R0 回调注销返回失败。"));
             guardThis->updateDebugCaptureButtonState();
         }, Qt::QueuedConnection);
 }
@@ -270,15 +251,92 @@ void DriverDock::appendOperateLogLine(const QString& logText)
     m_operateLogOutput->appendPlainText(QStringLiteral("[%1] %2").arg(timePrefix, logText));
 }
 
-void DriverDock::appendDebugOutputLine(const QString& debugText)
+void DriverDock::appendDebugOutputLine(
+    const QString& debugText,
+    const QString& localizedSuffixSource)
 {
     if (m_debugOutputEdit == nullptr)
     {
         return;
     }
 
-    const QString timePrefix = QDateTime::currentDateTime().toString("HH:mm:ss.zzz");
-    m_debugOutputEdit->appendPlainText(QStringLiteral("[%1] %2").arg(timePrefix, debugText));
+    constexpr std::size_t kMaximumDebugOutputLines = 2000U;
+    if (m_debugOutputLines.size() >= kMaximumDebugOutputLines)
+    {
+        m_debugOutputLines.erase(m_debugOutputLines.begin());
+    }
+
+    DebugOutputLineRecord record;
+    record.timePrefix = QDateTime::currentDateTime().toString("HH:mm:ss.zzz");
+    record.sourceText = debugText;
+    record.localizedSuffixSource = localizedSuffixSource;
+    record.translateSourceText = false;
+    m_debugOutputLines.push_back(record);
+
+    m_debugOutputEdit->appendPlainText(QStringLiteral("[%1] %2%3")
+        .arg(record.timePrefix, record.sourceText, ks::i18n::displayText(record.localizedSuffixSource)));
+}
+
+void DriverDock::appendLocalizedDebugOutputLine(const QString& sourceText)
+{
+    if (m_debugOutputEdit == nullptr)
+    {
+        return;
+    }
+
+    constexpr std::size_t kMaximumDebugOutputLines = 2000U;
+    if (m_debugOutputLines.size() >= kMaximumDebugOutputLines)
+    {
+        m_debugOutputLines.erase(m_debugOutputLines.begin());
+    }
+
+    DebugOutputLineRecord record;
+    record.timePrefix = QDateTime::currentDateTime().toString("HH:mm:ss.zzz");
+    record.sourceText = sourceText;
+    record.translateSourceText = true;
+    m_debugOutputLines.push_back(record);
+    m_debugOutputEdit->appendPlainText(QStringLiteral("[%1] %2")
+        .arg(record.timePrefix, ks::i18n::displayText(record.sourceText)));
+}
+
+void DriverDock::refreshDebugOutputLines()
+{
+    if (m_debugOutputEdit == nullptr)
+    {
+        return;
+    }
+
+    const QScrollBar* const verticalScrollBar = m_debugOutputEdit->verticalScrollBar();
+    const bool keepAtBottom = verticalScrollBar != nullptr &&
+        verticalScrollBar->value() >= verticalScrollBar->maximum();
+    QStringList renderedLines;
+    renderedLines.reserve(static_cast<int>(m_debugOutputLines.size()));
+    for (const DebugOutputLineRecord& record : m_debugOutputLines)
+    {
+        const QString lineText = record.translateSourceText
+            ? ks::i18n::displayText(record.sourceText)
+            : record.sourceText;
+        renderedLines.push_back(QStringLiteral("[%1] %2%3")
+            .arg(
+                record.timePrefix,
+                lineText,
+                ks::i18n::displayText(record.localizedSuffixSource)));
+    }
+    m_debugOutputEdit->setPlainText(renderedLines.join(QLatin1Char('\n')));
+    if (keepAtBottom && m_debugOutputEdit->verticalScrollBar() != nullptr)
+    {
+        m_debugOutputEdit->verticalScrollBar()->setValue(
+            m_debugOutputEdit->verticalScrollBar()->maximum());
+    }
+}
+
+void DriverDock::clearDebugOutputLines()
+{
+    m_debugOutputLines.clear();
+    if (m_debugOutputEdit != nullptr)
+    {
+        m_debugOutputEdit->clear();
+    }
 }
 
 bool DriverDock::queryDriverServiceRecords(

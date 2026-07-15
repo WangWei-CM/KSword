@@ -699,7 +699,7 @@ QColor LogDockWidget::getLevelColor(const kLogLevel level) const
     switch (level)
     {
     case kLogLevel::Debug:
-        return KswordTheme::AccentColor(KswordTheme::AccentRole::Blue, -30);
+        return KswordTheme::AccentColor(KswordTheme::AccentRole::Blue, -12, -38);
     case kLogLevel::Info:
         return KswordTheme::SuccessColor();
     case kLogLevel::Warn:

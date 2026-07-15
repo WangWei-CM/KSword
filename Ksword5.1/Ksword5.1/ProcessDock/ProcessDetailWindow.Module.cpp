@@ -394,17 +394,17 @@ void ProcessDetailWindow::showCurrentModuleDetailDialog()
 
     const QString modulePathText = QString::fromStdString(moduleRecord->modulePath);
     const QString detailText = QStringList({
-        QStringLiteral("ProcessId: %1").arg(m_baseRecord.pid),
-        QStringLiteral("ProcessName: %1").arg(QString::fromStdString(m_baseRecord.processName)),
-        QStringLiteral("ModulePath: %1").arg(modulePathText),
-        QStringLiteral("ModuleBase: %1").arg(formatHexText(moduleRecord->moduleBaseAddress)),
-        QStringLiteral("ModuleSize: %1").arg(formatModuleSizeText(moduleRecord->moduleSizeBytes)),
-        QStringLiteral("EntryPointRva: %1").arg(formatHexText(moduleRecord->entryPointRva)),
-        QStringLiteral("SignatureState: %1").arg(QString::fromStdString(moduleRecord->signatureState)),
-        QStringLiteral("SignatureTrusted: %1").arg(moduleRecord->signatureTrusted ? QStringLiteral("true") : QStringLiteral("false")),
-        QStringLiteral("RunningState: %1").arg(QString::fromStdString(moduleRecord->runningState)),
-        QStringLiteral("RepresentativeThreadId: %1").arg(moduleRecord->representativeThreadId),
-        QStringLiteral("ThreadIdText: %1").arg(QString::fromStdString(moduleRecord->threadIdText))
+        QStringLiteral("进程 ID: %1").arg(m_baseRecord.pid),
+        QStringLiteral("进程名: %1").arg(QString::fromStdString(m_baseRecord.processName)),
+        QStringLiteral("模块路径: %1").arg(modulePathText),
+        QStringLiteral("模块基址: %1").arg(formatHexText(moduleRecord->moduleBaseAddress)),
+        QStringLiteral("模块大小: %1").arg(formatModuleSizeText(moduleRecord->moduleSizeBytes)),
+        QStringLiteral("入口点 RVA: %1").arg(formatHexText(moduleRecord->entryPointRva)),
+        QStringLiteral("签名状态: %1").arg(QString::fromStdString(moduleRecord->signatureState)),
+        QStringLiteral("签名可信: %1").arg(moduleRecord->signatureTrusted ? QStringLiteral("true") : QStringLiteral("false")),
+        QStringLiteral("运行状态: %1").arg(QString::fromStdString(moduleRecord->runningState)),
+        QStringLiteral("代表线程 ID: %1").arg(moduleRecord->representativeThreadId),
+        QStringLiteral("线程 ID 文本: %1").arg(QString::fromStdString(moduleRecord->threadIdText))
     }).join(QChar('\n'));
 
     QDialog detailDialog(this);
@@ -435,7 +435,7 @@ void ProcessDetailWindow::showCurrentModuleDetailDialog()
 
     CodeEditorWidget* detailEditor = new CodeEditorWidget(&detailDialog);
     detailEditor->setReadOnly(true);
-    detailEditor->setText(detailText);
+    detailEditor->setLocalizedText(detailText);
     dialogLayout->addWidget(detailEditor, 1);
 
     QHBoxLayout* buttonLayout = new QHBoxLayout();
@@ -454,9 +454,9 @@ void ProcessDetailWindow::showCurrentModuleDetailDialog()
     buttonLayout->addWidget(closeButton);
     dialogLayout->addLayout(buttonLayout);
 
-    connect(copyButton, &QPushButton::clicked, &detailDialog, [detailText]()
+    connect(copyButton, &QPushButton::clicked, &detailDialog, [detailEditor]()
     {
-        QApplication::clipboard()->setText(detailText);
+        QApplication::clipboard()->setText(detailEditor->text());
     });
     connect(openFolderButton, &QPushButton::clicked, &detailDialog, [modulePathText]()
     {

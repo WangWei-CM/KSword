@@ -196,6 +196,8 @@ void DriverDock::changeEvent(QEvent* event)
     if (event != nullptr && event->type() == QEvent::LanguageChange)
     {
         applyTranslatedHeaders();
+        updateDebugCaptureButtonState();
+        refreshDebugOutputLines();
     }
 }
 
@@ -565,6 +567,11 @@ void DriverDock::initializeDebugOutputTab()
                            "仅显示通过当前内核调试筛选器的消息。")),
         m_debugOutputPage);
     hintLabel->setWordWrap(true);
+    ks::i18n::LanguageManager::instance().bindText(
+        hintLabel,
+        QStringLiteral("driver.debug.hint"),
+        QStringLiteral("说明：此页通过 KswordARK R0 回调捕获 DbgPrint/DbgPrintEx/KdPrintEx。"
+                       "仅显示通过当前内核调试筛选器的消息。"));
     m_debugOutputLayout->addWidget(hintLabel);
 
     m_debugToolLayout = new QHBoxLayout();
@@ -617,10 +624,10 @@ void DriverDock::initializeDebugOutputTab()
     // R0 功能页右下角统一显示 Kernel.png 标识，明确数据来源于内核驱动。
     QLabel* debugKernelBadgeLabel = new QLabel(m_debugOutputPage);
     debugKernelBadgeLabel->setObjectName(QStringLiteral("driverDebugOutputKernelBadgeLabel"));
-    debugKernelBadgeLabel->setToolTip(
-        driverText(
-            "driver.debug.r0_badge.tooltip",
-            QStringLiteral("R0 功能标识：调试消息来自 KswordARK 内核回调")));
+    ks::i18n::LanguageManager::instance().bindToolTip(
+        debugKernelBadgeLabel,
+        QStringLiteral("driver.debug.r0_badge.tooltip"),
+        QStringLiteral("R0 功能标识：调试消息来自 KswordARK 内核回调"));
     const QPixmap debugKernelBadgePixmap(QStringLiteral(":/Image/kernel_badge.png"));
     if (!debugKernelBadgePixmap.isNull())
     {
@@ -1049,10 +1056,7 @@ void DriverDock::initializeConnections()
         });
     connect(m_clearDebugOutputButton, &QPushButton::clicked, this, [this]()
         {
-            if (m_debugOutputEdit != nullptr)
-            {
-                m_debugOutputEdit->clear();
-            }
+            clearDebugOutputLines();
         });
     connect(m_copyDebugOutputButton, &QPushButton::clicked, this, [this]()
         {

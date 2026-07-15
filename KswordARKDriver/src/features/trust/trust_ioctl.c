@@ -164,3 +164,108 @@ Return Value:
 
     return STATUS_SUCCESS;
 }
+
+NTSTATUS
+KswordARKTrustIoctlQueryImageSignature(
+    _In_ WDFDEVICE Device,
+    _In_ WDFREQUEST Request,
+    _In_ size_t InputBufferLength,
+    _In_ size_t OutputBufferLength,
+    _Out_ size_t* BytesReturned
+    )
+/*++
+
+Routine Description:
+
+    Handle the bounded R0 PE certificate-table and cached signing-level query.
+    The handler validates only protocol fields; all file reads and parsing live
+    in trust_query.c.
+
+--*/
+{
+    KSWORD_ARK_QUERY_IMAGE_SIGNATURE_REQUEST* queryRequest = NULL;
+    PVOID inputBuffer = NULL;
+    PVOID outputBuffer = NULL;
+    size_t actualInputLength = 0U;
+    size_t actualOutputLength = 0U;
+    const ULONG allowedFlags =
+        KSWORD_ARK_IMAGE_SIGNATURE_QUERY_FLAG_INCLUDE_PE_CERTIFICATE_TABLE |
+        KSWORD_ARK_IMAGE_SIGNATURE_QUERY_FLAG_INCLUDE_CACHED_SIGNING_LEVEL |
+        KSWORD_ARK_IMAGE_SIGNATURE_QUERY_FLAG_MATCH_LOADED_MODULE |
+        KSWORD_ARK_IMAGE_SIGNATURE_QUERY_FLAG_OPEN_REPARSE_POINT;
+    NTSTATUS status = STATUS_SUCCESS;
+
+    UNREFERENCED_PARAMETER(InputBufferLength);
+    UNREFERENCED_PARAMETER(OutputBufferLength);
+
+    if (BytesReturned == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    *BytesReturned = 0U;
+
+    status = KswordARKRetrieveRequiredInputBuffer(
+        Request,
+        sizeof(KSWORD_ARK_QUERY_IMAGE_SIGNATURE_REQUEST),
+        &inputBuffer,
+        &actualInputLength);
+    if (!NT_SUCCESS(status)) {
+        KswordARKTrustIoctlLog(Device, "Error", "R0 query-image-signature: input invalid, status=0x%08X.", (unsigned int)status);
+        return status;
+    }
+
+    queryRequest = (KSWORD_ARK_QUERY_IMAGE_SIGNATURE_REQUEST*)inputBuffer;
+    if (queryRequest->reserved != 0U) {
+        KswordARKTrustIoctlLog(Device, "Warn", "R0 query-image-signature: reserved field is nonzero.");
+        return STATUS_INVALID_PARAMETER;
+    }
+    if ((queryRequest->flags & ~allowedFlags) != 0UL) {
+        KswordARKTrustIoctlLog(Device, "Warn", "R0 query-image-signature: flags rejected, flags=0x%08X.", (unsigned int)queryRequest->flags);
+        return STATUS_INVALID_PARAMETER;
+    }
+    if (queryRequest->pathLengthChars == 0U ||
+        queryRequest->pathLengthChars >= KSWORD_ARK_TRUST_PATH_MAX_CHARS ||
+        queryRequest->path[queryRequest->pathLengthChars] != L'\0') {
+        KswordARKTrustIoctlLog(Device, "Warn", "R0 query-image-signature: path rejected, chars=%u.", (unsigned int)queryRequest->pathLengthChars);
+        return STATUS_INVALID_PARAMETER;
+    }
+    if ((queryRequest->flags & KSWORD_ARK_IMAGE_SIGNATURE_QUERY_FLAG_MATCH_LOADED_MODULE) != 0UL &&
+        queryRequest->expectedModuleBase == 0ULL) {
+        KswordARKTrustIoctlLog(Device, "Warn", "R0 query-image-signature: loaded-module match requested without base.");
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    status = KswordARKRetrieveRequiredOutputBuffer(
+        Request,
+        sizeof(KSWORD_ARK_QUERY_IMAGE_SIGNATURE_RESPONSE),
+        &outputBuffer,
+        &actualOutputLength);
+    if (!NT_SUCCESS(status)) {
+        KswordARKTrustIoctlLog(Device, "Error", "R0 query-image-signature: output invalid, status=0x%08X.", (unsigned int)status);
+        return status;
+    }
+
+    status = KswordARKDriverQueryImageSignature(
+        outputBuffer,
+        actualOutputLength,
+        queryRequest,
+        BytesReturned);
+    if (!NT_SUCCESS(status)) {
+        KswordARKTrustIoctlLog(Device, "Error", "R0 query-image-signature failed: chars=%u, status=0x%08X.", (unsigned int)queryRequest->pathLengthChars, (unsigned int)status);
+        return status;
+    }
+
+    if (*BytesReturned >= sizeof(KSWORD_ARK_QUERY_IMAGE_SIGNATURE_RESPONSE)) {
+        KSWORD_ARK_QUERY_IMAGE_SIGNATURE_RESPONSE* response =
+            (KSWORD_ARK_QUERY_IMAGE_SIGNATURE_RESPONSE*)outputBuffer;
+        KswordARKTrustIoctlLog(
+            Device,
+            "Info",
+            "R0 query-image-signature success: status=%lu, fields=0x%08X, structural=0x%08X, certs=%lu.",
+            (unsigned long)response->queryStatus,
+            (unsigned int)response->fieldFlags,
+            (unsigned int)response->structuralFlags,
+            (unsigned long)response->certificateCount);
+    }
+
+    return STATUS_SUCCESS;
+}

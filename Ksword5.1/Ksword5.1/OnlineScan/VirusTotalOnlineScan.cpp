@@ -3270,7 +3270,7 @@ void VirusTotalOnlineScan::appendRawJsonSection(
     ApiPaneUi& pane = m_apiPanes[static_cast<std::size_t>(index)];
     if (!pane.rawEditor.isNull())
     {
-        pane.rawEditor->setText(rawText);
+        pane.rawEditor->setRawText(rawText);
     }
     QJsonObject treeObject = jsonObject;
     if (!responseMetadata.isEmpty())
@@ -3334,7 +3334,7 @@ void VirusTotalOnlineScan::appendRawTextSection(
     ApiPaneUi& pane = m_apiPanes[static_cast<std::size_t>(index)];
     if (!pane.rawEditor.isNull())
     {
-        pane.rawEditor->setText(rawText);
+        pane.rawEditor->setRawText(rawText);
     }
     appendResponseTreeTextSection(apiKind, titleText, timestampText, detailText);
 }

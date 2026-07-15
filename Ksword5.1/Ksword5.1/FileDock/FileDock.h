@@ -74,6 +74,9 @@ public:
     void unlockFileByPath(const QString& targetPath);
 
 protected:
+    // changeEvent：语言切换后立即重绘文件模型的本地化大小/类型文本。
+    void changeEvent(QEvent* event) override;
+
     // eventFilter：
     // - 输入：watched 为被过滤对象，event 为 Qt 事件对象；
     // - 处理：仅拦截文件列表 viewport 的右键按下事件，用于保留多选集合或切换到右键命中的单行；
