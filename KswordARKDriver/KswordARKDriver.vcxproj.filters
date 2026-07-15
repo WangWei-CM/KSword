@@ -32,6 +32,9 @@
     <Filter Include="Source Files\\Features\\Kernel">
       <UniqueIdentifier>{3C9A808C-7B1F-4E1A-9A24-2A70C4FA2287}</UniqueIdentifier>
     </Filter>
+    <Filter Include="Source Files\Features\DebugOutput">
+      <UniqueIdentifier>{654E78AA-7742-498B-9C45-9A875F5DD5C3}</UniqueIdentifier>
+    </Filter>
     <Filter Include="Source Files\\Features\\Thread">
       <UniqueIdentifier>{9C5A3C0C-2B91-4E39-85C3-92FC8804AA8A}</UniqueIdentifier>
     </Filter>
@@ -135,6 +138,12 @@
       <Filter>Header Files\Ark</Filter>
     </ClInclude>
     <ClInclude Include="include\ark\ark_log.h">
+      <Filter>Header Files\Ark</Filter>
+    </ClInclude>
+    <ClInclude Include="include\ark\ark_debug_output.h">
+      <Filter>Header Files\Ark</Filter>
+    </ClInclude>
+    <ClInclude Include="..\shared\driver\KswordArkDebugOutputIoctl.h">
       <Filter>Header Files\Ark</Filter>
     </ClInclude>
     <ClInclude Include="include\ark\ark_process.h">
@@ -372,6 +381,12 @@
     </ClCompile>
     <ClCompile Include="src\features\log\log_channel.c">
       <Filter>Source Files\Features</Filter>
+    </ClCompile>
+    <ClCompile Include="src\features\debug_output\debug_output_capture.c">
+      <Filter>Source Files\Features\DebugOutput</Filter>
+    </ClCompile>
+    <ClCompile Include="src\features\debug_output\debug_output_ioctl.c">
+      <Filter>Source Files\Features\DebugOutput</Filter>
     </ClCompile>
     <ClCompile Include="src\features\process\process_actions.c">
       <Filter>Source Files\Features</Filter>

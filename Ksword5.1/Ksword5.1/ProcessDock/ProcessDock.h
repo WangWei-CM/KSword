@@ -198,6 +198,14 @@ private:
         Count              // 列总数。
     };
 
+    // ThreadColumnLayout：线程表 A/B 紧凑列预设；Custom 表示用户已手动调整。
+    enum class ThreadColumnLayout : int
+    {
+        PresetA = 0, // 调度概览：身份、优先级、状态、等待与 CPU/切换统计。
+        PresetB,     // 地址诊断：身份、启动/TEB/内核栈地址与 R0 状态。
+        Custom       // 表头菜单、拖动或缩放后的自定义布局。
+    };
+
     // ViewMode：两种视图模式。
     enum class ViewMode : int
     {
@@ -410,6 +418,9 @@ private:
     bool shouldRebuildProcessTableForRefresh(bool forceUiRefresh) const;
     void requestAsyncThreadRefresh(bool forceRefresh);
     void rebuildThreadTable();
+    void applyThreadColumnLayout(ThreadColumnLayout layout);
+    void clearThreadColumnPresetSelection();
+    void updateThreadColumnPresetButtons();
     // refreshCrossViewAsync 作用：
     // - 异步查询 R0 process/thread cross-view 证据；
     // - 结果回填到 m_processCrossViewCache / m_threadCrossViewCache；
@@ -443,6 +454,7 @@ private:
     // ======== 表格交互 ========
     void showTableContextMenu(const QPoint& localPosition);
     void showThreadTableContextMenu(const QPoint& localPosition);
+    void showThreadHeaderContextMenu(const QPoint& localPosition);
     void showHeaderContextMenu(const QPoint& localPosition);
     void copyCurrentCell();
     void copyCurrentRow();
@@ -722,9 +734,15 @@ private:
     // ======== 线程页控件 ========
     QHBoxLayout* m_threadTopLayout = nullptr; // 线程页顶部操作栏。
     QPushButton* m_threadRefreshButton = nullptr; // 线程页刷新按钮（图标按钮）。
+    QWidget* m_threadColumnPresetWidget = nullptr; // A/B 紧凑预设的相邻按钮容器。
+    QHBoxLayout* m_threadColumnPresetLayout = nullptr; // 预设按钮零间距布局。
+    QPushButton* m_threadColumnPresetAButton = nullptr; // A：调度概览列。
+    QPushButton* m_threadColumnPresetBButton = nullptr; // B：地址/诊断列。
     QLineEdit* m_threadSearchLineEdit = nullptr; // 线程页搜索框（按 TID/PID/名称过滤）。
     QLabel* m_threadStatusLabel = nullptr;    // 线程页刷新状态标签。
     QTreeWidget* m_threadTable = nullptr;     // 线程列表表格（支持右键动作）。
+    ThreadColumnLayout m_threadColumnLayout = ThreadColumnLayout::PresetA; // 当前高亮预设，默认 A。
+    bool m_threadApplyingColumnLayout = false; // 程序应用预设时屏蔽 header 手动变化信号。
 
     // ======== Cross-View 页控件 ========
     QHBoxLayout* m_crossViewTopLayout = nullptr; // Cross-View 顶部操作栏。

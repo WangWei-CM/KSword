@@ -103,6 +103,14 @@ Return Value:
         return status;
     }
 
+    // 初始化内核调试输出环形缓冲区；只有用户显式开始捕获时才注册系统回调。
+    status = KswordARKDebugOutputInitialize(device);
+    if (!NT_SUCCESS(status)) {
+        TraceEvents(TRACE_LEVEL_ERROR, TRACE_DEVICE, "KswordARKDebugOutputInitialize failed %!STATUS!", status);
+        WdfObjectDelete(device);
+        return status;
+    }
+
     status = WdfDeviceCreateSymbolicLink(device, &symbolicName);
     if (!NT_SUCCESS(status)) {
         TraceEvents(TRACE_LEVEL_ERROR, TRACE_DEVICE, "WdfDeviceCreateSymbolicLink failed %!STATUS!", status);
@@ -179,6 +187,12 @@ Return Value:
     deviceContext->PrivateDeviceData = 0U;
 
     status = KswordARKDriverInitializeLogChannel(device);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+
+    // 兼容 PnP 设备路径也必须拥有完整的调试输出上下文，避免 IOCTL 访问未初始化状态。
+    status = KswordARKDebugOutputInitialize(device);
     if (!NT_SUCCESS(status)) {
         return status;
     }

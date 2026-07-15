@@ -139,6 +139,8 @@ Return Value:
 
     PAGED_CODE();
 
+    // 必须先注销内核调试回调，防止后续卸载阶段再次进入本驱动代码。
+    KswordARKDebugOutputUninitialize();
     TraceEvents(TRACE_LEVEL_INFORMATION, TRACE_DRIVER, "%!FUNC! Entry");
     KswordARKNetworkUninitialize();
     KswordARKRedirectUninitialize();

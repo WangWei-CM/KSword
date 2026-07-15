@@ -33,6 +33,7 @@
 #include "../../../shared/driver/KswordArkFilterIoctl.h"
 #include "../../../shared/driver/KswordArkKernelObjectIoctl.h"
 #include "../../../shared/driver/KswordArkHwidIoctl.h"
+#include "../../../shared/driver/KswordArkDebugOutputIoctl.h"
 
 namespace ksword::ark
 {
@@ -511,6 +512,48 @@ namespace ksword::ark
         std::uint32_t runtimeFlags = 0;  // runtimeFlags：REGISTERED/STARTED/DROPPED。
         std::uint32_t ringCapacity = 0;  // ringCapacity：R0 ring 容量。
         std::vector<FileMonitorEventRow> events; // events：已解析事件列表。
+    };
+
+    // DebugOutputControlResult 保存 R0 调试输出回调的注册、捕获与丢弃状态。
+    struct DebugOutputControlResult
+    {
+        IoResult io;                         // io：DeviceIoControl 与固定响应解析状态。
+        bool unsupported = false;            // unsupported：当前驱动尚未注册调试输出 IOCTL。
+        std::uint32_t version = 0;           // version：共享协议版本。
+        std::uint32_t runtimeFlags = 0;      // runtimeFlags：REGISTERED/CAPTURING/DROPPED。
+        std::uint32_t ringCapacity = 0;      // ringCapacity：R0 固定环形缓冲区容量。
+        std::uint32_t queuedCount = 0;       // queuedCount：当前仍可读取的记录数量。
+        std::uint64_t latestSequence = 0;    // latestSequence：最近提交的单调序号。
+        std::uint64_t droppedCount = 0;      // droppedCount：高 IRQL 并发写入时累计丢弃数。
+        long registrationStatus = 0;         // registrationStatus：DbgSetDebugPrintCallback 状态。
+        long lastStatus = 0;                 // lastStatus：最近控制动作的 NTSTATUS。
+    };
+
+    // DebugOutputRecord 是一条已经稳定复制到 R3 的内核调试消息。
+    struct DebugOutputRecord
+    {
+        std::uint64_t sequence = 0;          // sequence：R0 单调序号。
+        std::uint64_t interruptTime100ns = 0;// interruptTime100ns：KeQueryInterruptTime 时间戳。
+        std::uint32_t componentId = 0;       // componentId：DbgPrintEx 组件 ID。
+        std::uint32_t level = 0;             // level：DbgPrintEx 级别。
+        std::uint32_t flags = 0;             // flags：TEXT_TRUNCATED 等记录标志。
+        std::string text;                    // text：按协议长度复制的 UTF-8/ANSI 调试文本。
+    };
+
+    // DebugOutputDrainResult 是按游标增量读取调试输出环形缓冲区的结果。
+    struct DebugOutputDrainResult
+    {
+        IoResult io;                         // io：DeviceIoControl 与变长响应解析状态。
+        bool unsupported = false;            // unsupported：当前驱动不支持该 IOCTL。
+        std::uint32_t runtimeFlags = 0;      // runtimeFlags：当前回调运行时标志。
+        std::uint32_t responseFlags = 0;     // responseFlags：OVERFLOW/MORE/SNAPSHOT_RACE。
+        std::uint32_t ringCapacity = 0;      // ringCapacity：R0 环形容量。
+        std::uint64_t firstAvailableSequence = 0; // firstAvailableSequence：最早未覆盖序号。
+        std::uint64_t latestSequence = 0;    // latestSequence：读取快照时的最新序号。
+        std::uint64_t nextSequence = 0;      // nextSequence：下次请求应携带的游标。
+        std::uint64_t droppedCount = 0;      // droppedCount：回调 try-lock 累计丢弃数。
+        std::uint64_t lostBeforeFirst = 0;   // lostBeforeFirst：调用方游标落后导致的覆盖数。
+        std::vector<DebugOutputRecord> records; // records：本次成功解析的升序记录。
     };
 
     // RegistryReadResult 是 R0 注册表值读取响应的 R3 模型。

@@ -5,26 +5,33 @@ using namespace ksword::driver_dock_internal;
 
 void DriverDock::startDebugOutputCapture()
 {
-    if (m_dbwinCaptureRunning.exchange(true))
+    if (m_kernelDebugCaptureRunning.exchange(true))
     {
         appendDebugOutputLine(
             driverText("driver.debug.capture.already_running", QStringLiteral("捕获线程已在运行。")));
         return;
     }
 
+    // 上一轮线程可能已自行退出；重新启动前必须回收 joinable 对象。
+    if (m_kernelDebugCaptureThread != nullptr && m_kernelDebugCaptureThread->joinable())
+    {
+        m_kernelDebugCaptureThread->join();
+    }
+    m_kernelDebugCaptureThread.reset();
+
     appendDebugOutputLine(
-        driverText("driver.debug.capture.starting", QStringLiteral("正在启动调试输出捕获线程...")));
+        driverText("driver.debug.capture.starting", QStringLiteral("正在注册 R0 内核调试输出回调...")));
     try
     {
-        m_dbwinCaptureThread = std::make_unique<std::thread>([this]()
+        m_kernelDebugCaptureThread = std::make_unique<std::thread>([this]()
             {
-                runDbwinCaptureLoop();
+                runKernelDebugOutputCaptureLoop();
             });
     }
     catch (...)
     {
-        m_dbwinCaptureRunning.store(false);
-        m_dbwinCaptureThread.reset();
+        m_kernelDebugCaptureRunning.store(false);
+        m_kernelDebugCaptureThread.reset();
         appendDebugOutputLine(
             driverText("driver.debug.capture.thread_create_failed", QStringLiteral("启动失败：无法创建后台线程。")));
     }
@@ -34,141 +41,26 @@ void DriverDock::startDebugOutputCapture()
 
 void DriverDock::stopDebugOutputCapture()
 {
-    m_dbwinCaptureRunning.store(false);
-    if (m_dbwinCaptureThread != nullptr && m_dbwinCaptureThread->joinable())
+    m_kernelDebugCaptureRunning.store(false);
+    if (m_kernelDebugCaptureThread != nullptr && m_kernelDebugCaptureThread->joinable())
     {
-        m_dbwinCaptureThread->join();
+        m_kernelDebugCaptureThread->join();
     }
-    m_dbwinCaptureThread.reset();
+    m_kernelDebugCaptureThread.reset();
     updateDebugCaptureButtonState();
 }
 
-void DriverDock::runDbwinCaptureLoop()
+void DriverDock::runKernelDebugOutputCaptureLoop()
 {
     // guardThis 用途：回投 UI 更新时判空，避免析构后访问悬空对象。
     QPointer<DriverDock> guardThis(this);
-
-    // ============================================================
-    // DBWIN 句柄初始化策略：
-    // 1) 先尝试 Global\ 前缀（服务/内核侧更常用）；
-    // 2) 失败再回退无前缀名称（兼容旧程序）；
-    // 3) 事件与共享内存都优先 Open，再 Create，减少“重复实例冲突”。
-    // ============================================================
-    const auto openOrCreateEventByName = [](const wchar_t* objectName) -> HANDLE
-        {
-            if (objectName == nullptr)
-            {
-                return nullptr;
-            }
-
-            // 先尝试打开已存在对象，便于附着到同机已有 DBWIN 会话。
-            HANDLE eventHandle = ::OpenEventW(
-                EVENT_MODIFY_STATE | SYNCHRONIZE,
-                FALSE,
-                objectName);
-            if (eventHandle != nullptr)
-            {
-                return eventHandle;
-            }
-
-            // 创建安全描述符：空 DACL 允许 SYSTEM/服务进程写入，降低“内核输出丢失”概率。
-            SECURITY_ATTRIBUTES securityAttr{};
-            SECURITY_DESCRIPTOR securityDesc{};
-            securityAttr.nLength = static_cast<DWORD>(sizeof(securityAttr));
-            securityAttr.bInheritHandle = FALSE;
-            securityAttr.lpSecurityDescriptor = nullptr;
-            if (::InitializeSecurityDescriptor(&securityDesc, SECURITY_DESCRIPTOR_REVISION) != FALSE &&
-                ::SetSecurityDescriptorDacl(&securityDesc, TRUE, nullptr, FALSE) != FALSE)
-            {
-                securityAttr.lpSecurityDescriptor = &securityDesc;
-            }
-
-            eventHandle = ::CreateEventW(
-                &securityAttr,
-                FALSE,
-                FALSE,
-                objectName);
-            return eventHandle;
-        };
-
-    // openOrCreateMappingByName 作用：
-    // - 先打开现有 DBWIN 共享内存，再按需创建；
-    // - 复用已存在缓冲可减少与其它捕获器的抢占冲突。
-    const auto openOrCreateMappingByName = [](const wchar_t* objectName) -> HANDLE
-        {
-            if (objectName == nullptr)
-            {
-                return nullptr;
-            }
-
-            HANDLE mappingHandle = ::OpenFileMappingW(
-                FILE_MAP_READ | FILE_MAP_WRITE,
-                FALSE,
-                objectName);
-            if (mappingHandle != nullptr)
-            {
-                return mappingHandle;
-            }
-
-            SECURITY_ATTRIBUTES securityAttr{};
-            SECURITY_DESCRIPTOR securityDesc{};
-            securityAttr.nLength = static_cast<DWORD>(sizeof(securityAttr));
-            securityAttr.bInheritHandle = FALSE;
-            securityAttr.lpSecurityDescriptor = nullptr;
-            if (::InitializeSecurityDescriptor(&securityDesc, SECURITY_DESCRIPTOR_REVISION) != FALSE &&
-                ::SetSecurityDescriptorDacl(&securityDesc, TRUE, nullptr, FALSE) != FALSE)
-            {
-                securityAttr.lpSecurityDescriptor = &securityDesc;
-            }
-
-            mappingHandle = ::CreateFileMappingW(
-                INVALID_HANDLE_VALUE,
-                &securityAttr,
-                PAGE_READWRITE,
-                0,
-                static_cast<DWORD>(sizeof(DbwinBufferPacket)),
-                objectName);
-            return mappingHandle;
-        };
-
-    HANDLE bufferReadyEventHandle = nullptr; // bufferReadyEventHandle：通知写入方“缓冲可写”事件句柄。
-    HANDLE dataReadyEventHandle = nullptr;   // dataReadyEventHandle：通知读取方“数据可读”事件句柄。
-    HANDLE sharedBufferHandle = nullptr;     // sharedBufferHandle：DBWIN 共享内存句柄。
-    QString objectScopeText = QStringLiteral("Global"); // objectScopeText：记录当前成功附着的命名空间。
-
-    // 第一轮：Global\ 前缀（优先覆盖系统服务/会话隔离场景）。
-    bufferReadyEventHandle = openOrCreateEventByName(L"Global\\DBWIN_BUFFER_READY");
-    dataReadyEventHandle = openOrCreateEventByName(L"Global\\DBWIN_DATA_READY");
-    sharedBufferHandle = openOrCreateMappingByName(L"Global\\DBWIN_BUFFER");
-
-    // 第二轮：无前缀回退（兼容旧工具或权限不允许创建 Global 对象的环境）。
-    if (bufferReadyEventHandle == nullptr || dataReadyEventHandle == nullptr || sharedBufferHandle == nullptr)
+    ksword::ark::DriverClient driverClient;
+    ksword::ark::DriverHandle driverHandle = driverClient.open();
+    if (!driverHandle.isValid())
     {
-        if (sharedBufferHandle != nullptr)
-        {
-            ::CloseHandle(sharedBufferHandle);
-            sharedBufferHandle = nullptr;
-        }
-        if (dataReadyEventHandle != nullptr)
-        {
-            ::CloseHandle(dataReadyEventHandle);
-            dataReadyEventHandle = nullptr;
-        }
-        if (bufferReadyEventHandle != nullptr)
-        {
-            ::CloseHandle(bufferReadyEventHandle);
-            bufferReadyEventHandle = nullptr;
-        }
-
-        objectScopeText = QStringLiteral("Local");
-        bufferReadyEventHandle = openOrCreateEventByName(L"DBWIN_BUFFER_READY");
-        dataReadyEventHandle = openOrCreateEventByName(L"DBWIN_DATA_READY");
-        sharedBufferHandle = openOrCreateMappingByName(L"DBWIN_BUFFER");
-    }
-
-    if (bufferReadyEventHandle == nullptr || dataReadyEventHandle == nullptr || sharedBufferHandle == nullptr)
-    {
-        QMetaObject::invokeMethod(this, [guardThis]()
+        const unsigned long openError = ::GetLastError();
+        m_kernelDebugCaptureRunning.store(false);
+        QMetaObject::invokeMethod(this, [guardThis, openError]()
             {
                 if (guardThis == nullptr)
                 {
@@ -176,55 +68,43 @@ void DriverDock::runDbwinCaptureLoop()
                 }
                 guardThis->appendDebugOutputLine(
                     driverText(
-                        "driver.debug.capture.dbwin_init_failed",
-                        QStringLiteral("启动失败：DBWIN 句柄初始化失败（Global/Local均不可用）。")));
+                        "driver.debug.capture.open_failed",
+                        QStringLiteral("启动失败：无法打开 KswordARK 控制设备（Win32=%1）。"))
+                    .arg(openError));
                 guardThis->updateDebugCaptureButtonState();
             }, Qt::QueuedConnection);
-
-        if (sharedBufferHandle != nullptr)
-        {
-            ::CloseHandle(sharedBufferHandle);
-        }
-        if (dataReadyEventHandle != nullptr)
-        {
-            ::CloseHandle(dataReadyEventHandle);
-        }
-        if (bufferReadyEventHandle != nullptr)
-        {
-            ::CloseHandle(bufferReadyEventHandle);
-        }
-        m_dbwinCaptureRunning.store(false);
         return;
     }
 
-    void* mappedView = ::MapViewOfFile(
-        sharedBufferHandle,
-        FILE_MAP_READ,
-        0,
-        0,
-        static_cast<SIZE_T>(sizeof(DbwinBufferPacket)));
-    if (mappedView == nullptr)
+    const ksword::ark::DebugOutputControlResult startResult = driverClient.controlDebugOutput(
+        driverHandle,
+        KSWORD_ARK_DEBUG_OUTPUT_ACTION_START);
+    if (!startResult.io.ok)
     {
-        ::CloseHandle(sharedBufferHandle);
-        ::CloseHandle(dataReadyEventHandle);
-        ::CloseHandle(bufferReadyEventHandle);
-        QMetaObject::invokeMethod(this, [guardThis]()
+        const QString errorDetail = QString::fromStdString(startResult.io.message);
+        const bool unsupported = startResult.unsupported;
+        m_kernelDebugCaptureRunning.store(false);
+        QMetaObject::invokeMethod(this, [guardThis, errorDetail, unsupported]()
             {
                 if (guardThis == nullptr)
                 {
                     return;
                 }
                 guardThis->appendDebugOutputLine(
-                    driverText(
-                        "driver.debug.capture.mapping_failed",
-                        QStringLiteral("启动失败：映射 DBWIN 共享内存失败。")));
+                    unsupported
+                        ? driverText(
+                            "driver.debug.capture.unsupported",
+                            QStringLiteral("启动失败：当前 KswordARK 驱动版本不支持内核调试输出 IOCTL。"))
+                        : driverText(
+                            "driver.debug.capture.register_failed",
+                            QStringLiteral("启动失败：R0 调试输出回调注册失败：%1"))
+                            .arg(errorDetail));
                 guardThis->updateDebugCaptureButtonState();
             }, Qt::QueuedConnection);
-        m_dbwinCaptureRunning.store(false);
         return;
     }
 
-    QMetaObject::invokeMethod(this, [guardThis, objectScopeText]()
+    QMetaObject::invokeMethod(this, [guardThis]()
         {
             if (guardThis == nullptr)
             {
@@ -233,67 +113,135 @@ void DriverDock::runDbwinCaptureLoop()
             guardThis->appendDebugOutputLine(
                 driverText(
                     "driver.debug.capture.started",
-                    QStringLiteral("捕获线程已启动（命名空间=%1），等待调试输出...")
-                .arg(objectScopeText)));
+                    QStringLiteral("R0 内核调试输出回调已启动，等待 DbgPrint/DbgPrintEx/KdPrintEx 消息...")));
             guardThis->updateDebugCaptureButtonState();
         }, Qt::QueuedConnection);
 
-    (void)::SetEvent(bufferReadyEventHandle);
-    while (m_dbwinCaptureRunning.load())
+    std::uint64_t nextSequence = 0;
+    std::uint64_t reportedDroppedCount = 0;
+    while (m_kernelDebugCaptureRunning.load())
     {
-        const DWORD waitResult = ::WaitForSingleObject(dataReadyEventHandle, 200);
-        if (waitResult == WAIT_TIMEOUT)
+        const ksword::ark::DebugOutputDrainResult drainResult = driverClient.drainDebugOutput(
+            driverHandle,
+            nextSequence,
+            KSWORD_ARK_DEBUG_OUTPUT_DEFAULT_DRAIN_RECORDS);
+        if (!drainResult.io.ok)
         {
-            (void)::SetEvent(bufferReadyEventHandle);
-            continue;
-        }
-        if (waitResult != WAIT_OBJECT_0)
-        {
-            break;
-        }
-
-        DbwinBufferPacket packetSnapshot{};
-        std::memcpy(&packetSnapshot, mappedView, sizeof(packetSnapshot));
-        packetSnapshot.messageBuffer[sizeof(packetSnapshot.messageBuffer) - 1] = '\0';
-        const QString messageText = QString::fromLocal8Bit(packetSnapshot.messageBuffer).trimmed();
-        if (!messageText.isEmpty())
-        {
-            const QString outputLine = QStringLiteral("[PID=%1] %2")
-                .arg(packetSnapshot.processId)
-                .arg(messageText);
-            QMetaObject::invokeMethod(this, [guardThis, outputLine]()
+            const QString errorDetail = QString::fromStdString(drainResult.io.message);
+            QMetaObject::invokeMethod(this, [guardThis, errorDetail]()
                 {
                     if (guardThis == nullptr)
                     {
                         return;
                     }
-                    guardThis->appendDebugOutputLine(outputLine);
+                    guardThis->appendDebugOutputLine(
+                        driverText(
+                            "driver.debug.capture.drain_failed",
+                            QStringLiteral("读取 R0 调试输出失败：%1"))
+                        .arg(errorDetail));
+                }, Qt::QueuedConnection);
+            break;
+        }
+
+        nextSequence = drainResult.nextSequence;
+        if ((drainResult.responseFlags & KSWORD_ARK_DEBUG_OUTPUT_DRAIN_FLAG_OVERFLOW) != 0U &&
+            drainResult.lostBeforeFirst != 0U)
+        {
+            const qulonglong lostCount = static_cast<qulonglong>(drainResult.lostBeforeFirst);
+            QMetaObject::invokeMethod(this, [guardThis, lostCount]()
+                {
+                    if (guardThis != nullptr)
+                    {
+                        guardThis->appendDebugOutputLine(
+                            driverText(
+                                "driver.debug.capture.overflow",
+                                QStringLiteral("警告：读取游标落后，已有 %1 条内核调试消息被环形缓冲区覆盖。"))
+                            .arg(lostCount));
+                    }
                 }, Qt::QueuedConnection);
         }
-        (void)::SetEvent(bufferReadyEventHandle);
+        if (drainResult.droppedCount > reportedDroppedCount)
+        {
+            const qulonglong droppedDelta = static_cast<qulonglong>(
+                drainResult.droppedCount - reportedDroppedCount);
+            reportedDroppedCount = drainResult.droppedCount;
+            QMetaObject::invokeMethod(this, [guardThis, droppedDelta]()
+                {
+                    if (guardThis != nullptr)
+                    {
+                        guardThis->appendDebugOutputLine(
+                            driverText(
+                                "driver.debug.capture.dropped",
+                                QStringLiteral("警告：高 IRQL 并发写入期间丢弃了 %1 条内核调试消息。"))
+                            .arg(droppedDelta));
+                    }
+                }, Qt::QueuedConnection);
+        }
+
+        for (const ksword::ark::DebugOutputRecord& record : drainResult.records)
+        {
+            QString messageText = QString::fromUtf8(
+                record.text.data(),
+                static_cast<int>(record.text.size())).trimmed();
+            if (messageText.isEmpty())
+            {
+                continue;
+            }
+            const bool textTruncated =
+                (record.flags & KSWORD_ARK_DEBUG_OUTPUT_RECORD_FLAG_TEXT_TRUNCATED) != 0U;
+            const QString componentText = QString::number(record.componentId, 16)
+                .toUpper()
+                .rightJustified(8, QLatin1Char('0'));
+            const QString levelText = QString::number(record.level, 16)
+                .toUpper()
+                .rightJustified(8, QLatin1Char('0'));
+            const QString outputLine = QStringLiteral("[Seq=%1][Component=0x%2][Level=0x%3] %4")
+                .arg(static_cast<qulonglong>(record.sequence))
+                .arg(componentText, levelText, messageText);
+            QMetaObject::invokeMethod(this, [guardThis, outputLine, textTruncated]()
+                {
+                    if (guardThis != nullptr)
+                    {
+                        QString displayLine = outputLine;
+                        if (textTruncated)
+                        {
+                            displayLine += driverText(
+                                "driver.debug.record.truncated",
+                                QStringLiteral(" [已截断]"));
+                        }
+                        guardThis->appendDebugOutputLine(displayLine);
+                    }
+                }, Qt::QueuedConnection);
+        }
+
+        // 有更多记录时立即继续读取，否则短暂休眠以降低空轮询开销。
+        if ((drainResult.responseFlags & KSWORD_ARK_DEBUG_OUTPUT_DRAIN_FLAG_MORE_AVAILABLE) == 0U)
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
     }
 
-    ::UnmapViewOfFile(mappedView);
-    ::CloseHandle(sharedBufferHandle);
-    ::CloseHandle(dataReadyEventHandle);
-    ::CloseHandle(bufferReadyEventHandle);
-
-    m_dbwinCaptureRunning.store(false);
-    QMetaObject::invokeMethod(this, [guardThis]()
+    const ksword::ark::DebugOutputControlResult stopResult = driverClient.controlDebugOutput(
+        driverHandle,
+        KSWORD_ARK_DEBUG_OUTPUT_ACTION_STOP);
+    m_kernelDebugCaptureRunning.store(false);
+    QMetaObject::invokeMethod(this, [guardThis, stopOk = stopResult.io.ok]()
         {
             if (guardThis == nullptr)
             {
                 return;
             }
             guardThis->appendDebugOutputLine(
-                driverText("driver.debug.capture.exited", QStringLiteral("捕获线程已退出。")));
+                stopOk
+                    ? driverText("driver.debug.capture.exited", QStringLiteral("R0 调试输出回调已停止。"))
+                    : driverText("driver.debug.capture.stop_failed", QStringLiteral("捕获线程已退出，但 R0 回调注销返回失败。")));
             guardThis->updateDebugCaptureButtonState();
         }, Qt::QueuedConnection);
 }
 
 void DriverDock::updateDebugCaptureButtonState()
 {
-    const bool running = m_dbwinCaptureRunning.load();
+    const bool running = m_kernelDebugCaptureRunning.load();
     if (m_startCaptureButton != nullptr)
     {
         m_startCaptureButton->setEnabled(!running);

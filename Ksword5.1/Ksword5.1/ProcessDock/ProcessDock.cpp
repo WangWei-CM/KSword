@@ -3540,6 +3540,7 @@ void ProcessDock::refreshThemeVisuals()
     // 用途：深浅色切换后，立即刷新“新增/退出”行的主题高亮色。
     applyBlueComboBoxRuntimeStyle(m_strategyCombo);
     applyBlueComboBoxRuntimeStyle(m_viewModeCombo);
+    updateThreadColumnPresetButtons();
     rebuildTable();
     rebuildThreadTable();
 }
