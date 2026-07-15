@@ -4,7 +4,7 @@
 // DriverDock.Internal.h
 // 作用：
 // - 汇总 DriverDock 多个 .cpp 共享的 Qt/Win32 include 与内部工具声明；
-// - 替代旧的文本拼接式实现，保持概览、操作和 DBWIN 逻辑独立编译；
+// - 替代旧的文本拼接式实现，保持概览、操作和 R0 调试捕获逻辑独立编译；
 // - 仅供 DriverDock 内部实现使用，不改变 DriverDock 对外接口。
 // ============================================================
 
@@ -103,13 +103,6 @@ namespace ksword::driver_dock_internal
     // - 处理：保存该行对应 m_loadedModuleCache/m_loadedModuleEvidenceCache 的源索引；
     // - 返回：常量本身无返回值，读取时用于从 UI 行反查缓存。
     constexpr int ModuleRecordIndexRole = Qt::UserRole + 41;
-
-    // DbwinBufferPacket：DBWIN 共享内存中的固定布局。
-    struct DbwinBufferPacket
-    {
-        DWORD processId = 0;
-        char messageBuffer[4096 - sizeof(DWORD)] = {};
-    };
 
     // DriverDock 内部工具：输入 UI/Win32 数据，返回格式化文本或操作状态。
     std::wstring toWideString(const QString& textValue);

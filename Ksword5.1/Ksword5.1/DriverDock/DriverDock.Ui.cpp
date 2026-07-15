@@ -561,8 +561,8 @@ void DriverDock::initializeDebugOutputTab()
     QLabel* hintLabel = new QLabel(
         driverText(
             "driver.debug.hint",
-            QStringLiteral("说明：调试输出使用 DBWIN 机制。该机制主要捕获 OutputDebugString，"
-                           "驱动 DbgPrint 是否可见依赖系统调试配置。")),
+            QStringLiteral("说明：此页通过 KswordARK R0 回调捕获 DbgPrint/DbgPrintEx/KdPrintEx。"
+                           "仅显示通过当前内核调试筛选器的消息。")),
         m_debugOutputPage);
     hintLabel->setWordWrap(true);
     m_debugOutputLayout->addWidget(hintLabel);
@@ -613,6 +613,24 @@ void DriverDock::initializeDebugOutputTab()
     m_debugOutputEdit->setPlaceholderText(
         driverText("driver.debug.output.placeholder", QStringLiteral("调试输出会实时显示在这里。")));
     m_debugOutputLayout->addWidget(m_debugOutputEdit, 1);
+
+    // R0 功能页右下角统一显示 Kernel.png 标识，明确数据来源于内核驱动。
+    QLabel* debugKernelBadgeLabel = new QLabel(m_debugOutputPage);
+    debugKernelBadgeLabel->setObjectName(QStringLiteral("driverDebugOutputKernelBadgeLabel"));
+    debugKernelBadgeLabel->setToolTip(
+        driverText(
+            "driver.debug.r0_badge.tooltip",
+            QStringLiteral("R0 功能标识：调试消息来自 KswordARK 内核回调")));
+    const QPixmap debugKernelBadgePixmap(QStringLiteral(":/Image/kernel_badge.png"));
+    if (!debugKernelBadgePixmap.isNull())
+    {
+        debugKernelBadgeLabel->setPixmap(debugKernelBadgePixmap.scaled(
+            36,
+            36,
+            Qt::KeepAspectRatio,
+            Qt::SmoothTransformation));
+    }
+    m_debugOutputLayout->addWidget(debugKernelBadgeLabel, 0, Qt::AlignRight | Qt::AlignBottom);
 
     m_tabWidget->addTab(
         m_debugOutputPage,

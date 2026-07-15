@@ -4,6 +4,7 @@
 #include <wdfusb.h>
 
 #include "ark_log.h"
+#include "ark_debug_output.h"
 #include "Public.h"
 
 EXTERN_C_START
@@ -19,6 +20,13 @@ typedef struct _DEVICE_CONTEXT {
     ULONG LogQueueCount;
     ULONG LogEntryLength[KSWORD_ARK_LOG_RING_CAPACITY];
     CHAR LogEntryText[KSWORD_ARK_LOG_RING_CAPACITY][KSWORD_ARK_LOG_ENTRY_MAX_BYTES];
+    volatile LONG DebugOutputCaptureEnabled;
+    volatile LONG DebugOutputWriterLock;
+    volatile LONG64 DebugOutputLatestSequence;
+    volatile LONG64 DebugOutputDroppedCount;
+    NTSTATUS DebugOutputRegistrationStatus;
+    NTSTATUS DebugOutputLastStatus;
+    KSWORD_ARK_DEBUG_OUTPUT_SLOT DebugOutputSlots[KSWORD_ARK_DEBUG_OUTPUT_RING_CAPACITY];
 
 } DEVICE_CONTEXT, *PDEVICE_CONTEXT;
 

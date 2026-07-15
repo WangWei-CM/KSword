@@ -51,6 +51,8 @@
     <ClCompile Include="src\features\file_monitor\file_monitor_ioctl.c" />
     <ClCompile Include="src\dispatch\ioctl_dispatch.c" />
     <ClCompile Include="src\features\log\log_channel.c" />
+    <ClCompile Include="src\features\debug_output\debug_output_capture.c" />
+    <ClCompile Include="src\features\debug_output\debug_output_ioctl.c" />
     <ClCompile Include="src\features\process\process_actions.c" />
     <ClCompile Include="src\features\process\process_crossview.c" />
     <ClCompile Include="src\features\process\process_detail.c" />
@@ -140,6 +142,8 @@
     <ClInclude Include="include\ark\ark_file.h" />
     <ClInclude Include="include\ark\ark_ioctl.h" />
     <ClInclude Include="include\ark\ark_log.h" />
+    <ClInclude Include="include\ark\ark_debug_output.h" />
+    <ClInclude Include="..\shared\driver\KswordArkDebugOutputIoctl.h" />
     <ClInclude Include="include\ark\ark_process.h" />
     <ClInclude Include="include\ark\ark_queue.h" />
     <ClInclude Include="include\ark\ark_callback.h" />

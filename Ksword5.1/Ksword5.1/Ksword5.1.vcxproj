@@ -366,6 +366,7 @@
     <ClCompile Include="ArkDriverClient\ArkDriverCallback.cpp" />
     <ClCompile Include="ArkDriverClient\ArkDriverMutation.cpp" />
     <ClCompile Include="ArkDriverClient\ArkDriverHwid.cpp" />
+    <ClCompile Include="ArkDriverClient\ArkDriverDebugOutput.cpp" />
   </ItemGroup>
   <ItemGroup>
     <QtMoc Include="MainWindow.h" />

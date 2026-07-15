@@ -6,7 +6,7 @@
 // 1) 提供驱动服务枚举与状态查看能力；
 // 2) 提供驱动服务注册、更新、挂载、卸载、删除能力；
 // 3) 提供已加载内核模块枚举能力；
-// 4) 提供调试输出捕获（DBWIN 兼容）能力；
+// 4) 通过 KswordARK R0 回调捕获内核 DbgPrint/DbgPrintEx/KdPrintEx 输出；
 // 5) 提供只读 DriverObject / DeviceObject / MajorFunction / FastIo 诊断页；
 // 6) 提供 Module Cross-View、Driver Integrity 和 Unloaded/PiDDB 证据页。
 // ============================================================
@@ -139,7 +139,7 @@ private:
     void initializeOperateTab();
 
     // initializeDebugOutputTab：
-    // - 作用：构建“调试输出”页（DBWIN 捕获控制与输出框）。
+    // - 作用：构建“调试输出”页（R0 回调控制与输出框）。
     void initializeDebugOutputTab();
 
     // initializeObjectInfoTab：
@@ -364,16 +364,16 @@ private:
 
     // ========================= 调试输出 =========================
     // startDebugOutputCapture：
-    // - 作用：启动 DBWIN 调试输出捕获线程。
+    // - 作用：启动 R0 内核调试输出捕获线程。
     void startDebugOutputCapture();
 
     // stopDebugOutputCapture：
-    // - 作用：停止 DBWIN 调试输出捕获线程。
+    // - 作用：停止 R0 内核调试输出捕获线程。
     void stopDebugOutputCapture();
 
-    // runDbwinCaptureLoop：
-    // - 作用：线程函数，循环读取 DBWIN 共享缓冲。
-    void runDbwinCaptureLoop();
+    // runKernelDebugOutputCaptureLoop：
+    // - 作用：线程函数，通过 ArkDriverClient 增量读取 R0 环形缓冲区。
+    void runKernelDebugOutputCaptureLoop();
 
     // updateDebugCaptureButtonState：
     // - 作用：刷新调试捕获按钮启用状态与提示文本。
@@ -556,6 +556,6 @@ private:
     bool m_initialRefreshDone = false;                          // 首次显示时是否已完成首轮刷新。
 
     // ========================= 调试捕获线程状态 =========================
-    std::atomic_bool m_dbwinCaptureRunning{ false };       // 捕获线程运行标记。
-    std::unique_ptr<std::thread> m_dbwinCaptureThread;     // 捕获线程对象。
+    std::atomic_bool m_kernelDebugCaptureRunning{ false };   // R0 捕获线程运行标记。
+    std::unique_ptr<std::thread> m_kernelDebugCaptureThread; // R0 捕获线程对象。
 };

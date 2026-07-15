@@ -27,6 +27,7 @@
 #include <QVBoxLayout>
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <limits>
 #include <sstream>
@@ -451,6 +452,32 @@ namespace
             .arg(KswordTheme::SurfaceColorHex())
             .arg(KswordTheme::TextPrimaryHex());
     }
+
+    // buildThreadPresetButtonStyle：A/B 相邻按钮共用 checked 高亮，仅圆化外侧边角。
+    QString buildThreadPresetButtonStyle(const bool leftButton)
+    {
+        const QString outerRadius = leftButton
+            ? QStringLiteral("border-top-left-radius:3px;border-bottom-left-radius:3px;")
+            : QStringLiteral("border-top-right-radius:3px;border-bottom-right-radius:3px;border-left:0px;");
+        return QStringLiteral(
+            "QPushButton{"
+            "  min-width:27px;max-width:27px;min-height:26px;max-height:26px;"
+            "  padding:0px;font-weight:700;"
+            "  color:%1;background:%2;border:1px solid %3;"
+            "  border-radius:0px;%4"
+            "}"
+            "QPushButton:hover:!checked{background:%5;color:%1;}"
+            "QPushButton:checked{background:%6;color:%7;border-color:%6;}"
+            "QPushButton:pressed{background:%8;color:%7;}")
+            .arg(KswordTheme::TextPrimaryColorHex())
+            .arg(KswordTheme::SurfaceColorHex())
+            .arg(KswordTheme::BorderColorHex())
+            .arg(outerRadius)
+            .arg(KswordTheme::PrimaryBlueSubtleHex())
+            .arg(KswordTheme::AccentHex(KswordTheme::AccentRole::Blue))
+            .arg(KswordTheme::OnAccentHex())
+            .arg(KswordTheme::AccentHex(KswordTheme::AccentRole::Blue, -28));
+    }
 }
 
 int ProcessDock::toThreadColumnIndex(const ThreadTableColumn column)
@@ -479,6 +506,26 @@ void ProcessDock::initializeThreadPage()
     m_threadRefreshButton->setToolTip("刷新系统线程列表（优先 NtQuerySystemInformation）");
     m_threadRefreshButton->setStyleSheet(buildThreadButtonStyle(true));
 
+    // A/B 按钮必须相邻：A 默认高亮，B 提供地址与 R0 诊断列。
+    m_threadColumnPresetWidget = new QWidget(m_threadPage);
+    m_threadColumnPresetLayout = new QHBoxLayout(m_threadColumnPresetWidget);
+    m_threadColumnPresetLayout->setContentsMargins(0, 0, 0, 0);
+    m_threadColumnPresetLayout->setSpacing(0);
+    m_threadColumnPresetAButton = new QPushButton(QStringLiteral("A"), m_threadColumnPresetWidget);
+    m_threadColumnPresetBButton = new QPushButton(QStringLiteral("B"), m_threadColumnPresetWidget);
+    m_threadColumnPresetAButton->setCheckable(true);
+    m_threadColumnPresetBButton->setCheckable(true);
+    m_threadColumnPresetLayout->addWidget(m_threadColumnPresetAButton);
+    m_threadColumnPresetLayout->addWidget(m_threadColumnPresetBButton);
+    ks::i18n::LanguageManager::instance().bindToolTip(
+        m_threadColumnPresetAButton,
+        QStringLiteral("process.thread.columns.preset_a.tooltip"),
+        QStringLiteral("线程列预设 A：调度概览"));
+    ks::i18n::LanguageManager::instance().bindToolTip(
+        m_threadColumnPresetBButton,
+        QStringLiteral("process.thread.columns.preset_b.tooltip"),
+        QStringLiteral("线程列预设 B：地址与 R0 诊断"));
+
     m_threadSearchLineEdit = new QLineEdit(m_threadPage);
     m_threadSearchLineEdit->setClearButtonEnabled(true);
     m_threadSearchLineEdit->setPlaceholderText("搜索 TID / PID / 进程名 / 状态 / 启动地址");
@@ -493,6 +540,7 @@ void ProcessDock::initializeThreadPage()
         .arg(KswordTheme::TextSecondaryHex()));
 
     m_threadTopLayout->addWidget(m_threadRefreshButton);
+    m_threadTopLayout->addWidget(m_threadColumnPresetWidget);
     m_threadTopLayout->addWidget(m_threadSearchLineEdit);
     m_threadTopLayout->addStretch(1);
     m_threadTopLayout->addWidget(m_threadStatusLabel);
@@ -515,6 +563,7 @@ void ProcessDock::initializeThreadPage()
     QHeaderView* threadHeaderView = m_threadTable->header();
     threadHeaderView->setSectionsMovable(true);
     threadHeaderView->setStretchLastSection(false);
+    threadHeaderView->setContextMenuPolicy(Qt::CustomContextMenu);
     threadHeaderView->setStyleSheet(QStringLiteral(
         "QHeaderView::section {"
         "  color: %1;"
@@ -558,6 +607,9 @@ void ProcessDock::initializeThreadPage()
     m_threadTable->setColumnWidth(toThreadColumnIndex(ThreadTableColumn::CreateTime), 170);
     m_threadTable->setColumnWidth(toThreadColumnIndex(ThreadTableColumn::ProcessPath), 360);
 
+    // Issue #33 指定默认使用 A；此处在所有初始列宽设置完成后应用隐藏集合。
+    applyThreadColumnLayout(ThreadColumnLayout::PresetA);
+
     m_threadPageLayout->addWidget(m_threadTable, 1);
     m_sideTabWidget->addTab(m_threadPage, blueTintedIcon(IconThreadTab), "线程列表");
     ks::i18n::LanguageManager::instance().bindTab(
@@ -566,6 +618,122 @@ void ProcessDock::initializeThreadPage()
         QStringLiteral("process.tab.threads"),
         QStringLiteral("线程列表"));
     refreshSideTabIconContrast();
+}
+
+void ProcessDock::applyThreadColumnLayout(const ThreadColumnLayout layout)
+{
+    if (m_threadTable == nullptr || layout == ThreadColumnLayout::Custom)
+    {
+        m_threadColumnLayout = layout;
+        updateThreadColumnPresetButtons();
+        return;
+    }
+
+    static constexpr std::array<ThreadTableColumn, 8> PresetAColumns{
+        ThreadTableColumn::ThreadId,
+        ThreadTableColumn::OwnerPid,
+        ThreadTableColumn::ProcessName,
+        ThreadTableColumn::Priority,
+        ThreadTableColumn::ThreadState,
+        ThreadTableColumn::WaitReason,
+        ThreadTableColumn::CpuTimeMs,
+        ThreadTableColumn::ContextSwitches
+    };
+    static constexpr std::array<ThreadTableColumn, 8> PresetBColumns{
+        ThreadTableColumn::ThreadId,
+        ThreadTableColumn::OwnerPid,
+        ThreadTableColumn::ProcessName,
+        ThreadTableColumn::StartAddress,
+        ThreadTableColumn::Win32StartAddress,
+        ThreadTableColumn::TebBaseAddress,
+        ThreadTableColumn::KernelStack,
+        ThreadTableColumn::ThreadR0Status
+    };
+    const auto& visibleColumns = layout == ThreadColumnLayout::PresetA
+        ? PresetAColumns
+        : PresetBColumns;
+
+    m_threadApplyingColumnLayout = true;
+    for (int columnIndex = 0; columnIndex < static_cast<int>(ThreadTableColumn::Count); ++columnIndex)
+    {
+        const ThreadTableColumn column = static_cast<ThreadTableColumn>(columnIndex);
+        const bool visible = std::find(visibleColumns.begin(), visibleColumns.end(), column) != visibleColumns.end();
+        m_threadTable->setColumnHidden(columnIndex, !visible);
+    }
+
+    // 两套预设各自控制在约一屏宽度内，避免横向滚动才能看完核心信息。
+    m_threadTable->setColumnWidth(toThreadColumnIndex(ThreadTableColumn::ThreadId), 78);
+    m_threadTable->setColumnWidth(toThreadColumnIndex(ThreadTableColumn::OwnerPid), 78);
+    m_threadTable->setColumnWidth(toThreadColumnIndex(ThreadTableColumn::ProcessName), 180);
+    if (layout == ThreadColumnLayout::PresetA)
+    {
+        m_threadTable->setColumnWidth(toThreadColumnIndex(ThreadTableColumn::Priority), 88);
+        m_threadTable->setColumnWidth(toThreadColumnIndex(ThreadTableColumn::ThreadState), 125);
+        m_threadTable->setColumnWidth(toThreadColumnIndex(ThreadTableColumn::WaitReason), 145);
+        m_threadTable->setColumnWidth(toThreadColumnIndex(ThreadTableColumn::CpuTimeMs), 105);
+        m_threadTable->setColumnWidth(toThreadColumnIndex(ThreadTableColumn::ContextSwitches), 115);
+    }
+    else
+    {
+        m_threadTable->setColumnWidth(toThreadColumnIndex(ThreadTableColumn::StartAddress), 132);
+        m_threadTable->setColumnWidth(toThreadColumnIndex(ThreadTableColumn::Win32StartAddress), 132);
+        m_threadTable->setColumnWidth(toThreadColumnIndex(ThreadTableColumn::TebBaseAddress), 132);
+        m_threadTable->setColumnWidth(toThreadColumnIndex(ThreadTableColumn::KernelStack), 132);
+        m_threadTable->setColumnWidth(toThreadColumnIndex(ThreadTableColumn::ThreadR0Status), 130);
+    }
+    m_threadApplyingColumnLayout = false;
+    m_threadColumnLayout = layout;
+    updateThreadColumnPresetButtons();
+}
+
+void ProcessDock::clearThreadColumnPresetSelection()
+{
+    if (m_threadApplyingColumnLayout)
+    {
+        return;
+    }
+    m_threadColumnLayout = ThreadColumnLayout::Custom;
+    updateThreadColumnPresetButtons();
+}
+
+void ProcessDock::updateThreadColumnPresetButtons()
+{
+    if (m_threadColumnPresetAButton == nullptr || m_threadColumnPresetBButton == nullptr)
+    {
+        return;
+    }
+
+    const QSignalBlocker presetABlocker(m_threadColumnPresetAButton);
+    const QSignalBlocker presetBBlocker(m_threadColumnPresetBButton);
+    m_threadColumnPresetAButton->setStyleSheet(buildThreadPresetButtonStyle(true));
+    m_threadColumnPresetBButton->setStyleSheet(buildThreadPresetButtonStyle(false));
+    m_threadColumnPresetAButton->setChecked(m_threadColumnLayout == ThreadColumnLayout::PresetA);
+    m_threadColumnPresetBButton->setChecked(m_threadColumnLayout == ThreadColumnLayout::PresetB);
+}
+
+void ProcessDock::showThreadHeaderContextMenu(const QPoint& localPosition)
+{
+    if (m_threadTable == nullptr || m_threadTable->header() == nullptr)
+    {
+        return;
+    }
+
+    // 表头菜单显式使用不透明主题样式；每列均可独立显示/隐藏。
+    QMenu columnMenu(m_threadTable);
+    columnMenu.setStyleSheet(buildThreadContextMenuStyle());
+    for (int columnIndex = 0; columnIndex < static_cast<int>(ThreadTableColumn::Count); ++columnIndex)
+    {
+        QAction* columnAction = columnMenu.addAction(
+            ks::i18n::displayText(ThreadTableHeaders.value(columnIndex)));
+        columnAction->setCheckable(true);
+        columnAction->setChecked(!m_threadTable->isColumnHidden(columnIndex));
+        connect(columnAction, &QAction::toggled, &columnMenu, [this, columnIndex](const bool visible)
+            {
+                m_threadTable->setColumnHidden(columnIndex, !visible);
+                clearThreadColumnPresetSelection();
+            });
+    }
+    columnMenu.exec(m_threadTable->header()->mapToGlobal(localPosition));
 }
 
 void ProcessDock::initializeThreadPageConnections()
@@ -586,11 +754,35 @@ void ProcessDock::initializeThreadPageConnections()
         });
     }
 
+    if (m_threadColumnPresetAButton != nullptr)
+    {
+        connect(m_threadColumnPresetAButton, &QPushButton::clicked, this, [this]() {
+            applyThreadColumnLayout(ThreadColumnLayout::PresetA);
+        });
+    }
+    if (m_threadColumnPresetBButton != nullptr)
+    {
+        connect(m_threadColumnPresetBButton, &QPushButton::clicked, this, [this]() {
+            applyThreadColumnLayout(ThreadColumnLayout::PresetB);
+        });
+    }
+
     // 线程表右键菜单：挂起/恢复/结束线程 + 转到进程详情。
     if (m_threadTable != nullptr)
     {
         connect(m_threadTable, &QTreeWidget::customContextMenuRequested, this, [this](const QPoint& localPosition) {
             showThreadTableContextMenu(localPosition);
+        });
+
+        QHeaderView* threadHeader = m_threadTable->header();
+        connect(threadHeader, &QHeaderView::customContextMenuRequested, this, [this](const QPoint& localPosition) {
+            showThreadHeaderContextMenu(localPosition);
+        });
+        connect(threadHeader, &QHeaderView::sectionMoved, this, [this](int, int, int) {
+            clearThreadColumnPresetSelection();
+        });
+        connect(threadHeader, &QHeaderView::sectionResized, this, [this](int, int, int) {
+            clearThreadColumnPresetSelection();
         });
     }
 }

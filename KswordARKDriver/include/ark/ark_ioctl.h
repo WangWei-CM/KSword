@@ -27,3 +27,4 @@
 #include "driver/KswordArkFilterIoctl.h"
 #include "driver/KswordArkDeviceAuditIoctl.h"
 #include "driver/KswordArkHwidIoctl.h"
+#include "driver/KswordArkDebugOutputIoctl.h"
