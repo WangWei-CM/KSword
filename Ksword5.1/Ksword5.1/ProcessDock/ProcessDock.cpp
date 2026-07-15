@@ -198,17 +198,11 @@ namespace
     // 常用图标路径常量（全部来自 qrc 的 /Icon 前缀资源）。
     constexpr const char* IconProcessMain = ":/Icon/process_main.svg";
     constexpr const char* IconRefresh = ":/Icon/process_refresh.svg";
-    constexpr const char* IconTree = ":/Icon/process_tree.svg";
     constexpr const char* IconList = ":/Icon/process_list.svg";
     constexpr const char* IconStart = ":/Icon/process_start.svg";
     constexpr const char* IconPause = ":/Icon/process_pause.svg";
     constexpr const char* IconThreadTab = ":/Icon/process_threads.svg";
     constexpr const char* IconWindowPickerTarget = ":/Icon/window_picker_target.svg";
-    // Kernel 标识图路径：
-    // - 使用 qrc 资源路径，避免把开发机绝对路径写入源码；
-    // - 实际文件仍由 Ksword5.qrc 映射到 Resource/Kernel.png。
-    const QString KernelBadgeImagePath = QStringLiteral(
-        ":/Image/kernel_badge.png");
 
     struct ProcessIntegrityLevelPreset
     {
@@ -245,6 +239,8 @@ namespace
     constexpr int ProcessTableMinimumIntervalMilliseconds = 500;
     constexpr int ProcessTableMaximumIntervalMilliseconds = 60000;
     constexpr std::size_t ActivityMaximumSampleCount = 1800;
+    constexpr qsizetype ProcessIconCacheMaximumCount = 4096;
+    constexpr qsizetype ActivityIconCacheMaximumCount = 8192;
 
     // formatProcessWin32Error 作用：
     // - 输入：stepText 表示失败步骤，errorCode 为 Win32 错误码；
@@ -969,10 +965,13 @@ protected:
         }
 
         std::vector<std::string> selectionKeys = m_ownerDock->currentProcessActivitySelectionKeys();
-        const MetricScale metricScale = calculateMetricScale(enabledMetrics, selectionKeys);
+        const std::unordered_set<std::string> selectionKeySet(
+            selectionKeys.cbegin(),
+            selectionKeys.cend());
+        const MetricScale metricScale = calculateMetricScale(enabledMetrics, selectionKeySet);
 
         drawGrid(painter, plotRect, borderColor, textColor);
-        drawLines(painter, plotRect, enabledMetrics, selectionKeys, metricScale);
+        drawLines(painter, plotRect, enabledMetrics, selectionKeySet, metricScale);
         drawLegend(painter, enabledMetrics, textColor);
         drawFocusLine(painter, plotRect);
     }
@@ -1115,13 +1114,13 @@ private:
 
     // sampleRawMetricValue：
     // - 读取某个采样点的原始单项指标；
-    // - selectionKeys 为空时返回总体聚合，否则返回选中进程之和。
+    // - selectionKeySet 为空时返回总体聚合，否则通过哈希集合返回选中进程之和。
     double sampleRawMetricValue(
         const ProcessDock::ProcessActivitySample& sample,
         const ProcessDock::ProcessActivityMetric metric,
-        const std::vector<std::string>& selectionKeys) const
+        const std::unordered_set<std::string>& selectionKeySet) const
     {
-        if (selectionKeys.empty())
+        if (selectionKeySet.empty())
         {
             switch (metric)
             {
@@ -1143,7 +1142,7 @@ private:
         double value = 0.0;
         for (const ProcessDock::ProcessActivityProcessPoint& processPoint : sample.processes)
         {
-            if (std::find(selectionKeys.begin(), selectionKeys.end(), processPoint.identityKey) == selectionKeys.end())
+            if (selectionKeySet.find(processPoint.identityKey) == selectionKeySet.end())
             {
                 continue;
             }
@@ -1176,7 +1175,7 @@ private:
     // - 当磁盘/网络出现新峰值时，本轮立刻重算百分比并重绘。
     MetricScale calculateMetricScale(
         const std::vector<ProcessDock::ProcessActivityMetric>& metricList,
-        const std::vector<std::string>& selectionKeys) const
+        const std::unordered_set<std::string>& selectionKeySet) const
     {
         MetricScale scale{};
         if (m_ownerDock == nullptr)
@@ -1190,9 +1189,9 @@ private:
         double maxNetworkKBps = 0.0;
         for (const ProcessDock::ProcessActivitySample& sample : m_ownerDock->m_activitySamples)
         {
-            maxMemoryMB = std::max(maxMemoryMB, sampleRawMetricValue(sample, ProcessDock::ProcessActivityMetric::Memory, selectionKeys));
-            maxDiskMBps = std::max(maxDiskMBps, sampleRawMetricValue(sample, ProcessDock::ProcessActivityMetric::Disk, selectionKeys));
-            maxNetworkKBps = std::max(maxNetworkKBps, sampleRawMetricValue(sample, ProcessDock::ProcessActivityMetric::Network, selectionKeys));
+            maxMemoryMB = std::max(maxMemoryMB, sampleRawMetricValue(sample, ProcessDock::ProcessActivityMetric::Memory, selectionKeySet));
+            maxDiskMBps = std::max(maxDiskMBps, sampleRawMetricValue(sample, ProcessDock::ProcessActivityMetric::Disk, selectionKeySet));
+            maxNetworkKBps = std::max(maxNetworkKBps, sampleRawMetricValue(sample, ProcessDock::ProcessActivityMetric::Network, selectionKeySet));
         }
         if (scale.memoryDenominatorMB <= 1.0 && maxMemoryMB > 0.0)
         {
@@ -1210,10 +1209,10 @@ private:
     double samplePercentMetricValue(
         const ProcessDock::ProcessActivitySample& sample,
         const ProcessDock::ProcessActivityMetric metric,
-        const std::vector<std::string>& selectionKeys,
+        const std::unordered_set<std::string>& selectionKeySet,
         const MetricScale& scale) const
     {
-        const double rawValue = sampleRawMetricValue(sample, metric, selectionKeys);
+        const double rawValue = sampleRawMetricValue(sample, metric, selectionKeySet);
         switch (metric)
         {
         case ProcessDock::ProcessActivityMetric::Cpu:
@@ -1311,7 +1310,7 @@ private:
         QPainter& painter,
         const QRectF& plotRect,
         const std::vector<ProcessDock::ProcessActivityMetric>& metricList,
-        const std::vector<std::string>& selectionKeys,
+        const std::unordered_set<std::string>& selectionKeySet,
         const MetricScale& metricScale) const
     {
         if (m_ownerDock == nullptr || m_ownerDock->m_activitySamples.empty())
@@ -1320,16 +1319,24 @@ private:
         }
 
         const std::size_t sampleCount = m_ownerDock->m_activitySamples.size();
+        const std::size_t maximumRenderedPointCount = static_cast<std::size_t>(
+            std::max(2.0, std::floor(plotRect.width())));
+        const std::size_t sampleStride = sampleCount > maximumRenderedPointCount
+            ? std::max<std::size_t>(
+                1U,
+                ((sampleCount - 1U) + (maximumRenderedPointCount - 2U)) /
+                    (maximumRenderedPointCount - 1U))
+            : 1U;
         for (const ProcessDock::ProcessActivityMetric metric : metricList)
         {
             QPainterPath metricPath;
             bool hasPoint = false;
             std::vector<QPointF> pointList;
-            pointList.reserve(sampleCount);
-            for (std::size_t sampleIndex = 0; sampleIndex < sampleCount; ++sampleIndex)
+            pointList.reserve(std::min(sampleCount, maximumRenderedPointCount + 1U));
+            const auto appendSamplePoint = [&](const std::size_t sampleIndex)
             {
                 const ProcessDock::ProcessActivitySample& sample = m_ownerDock->m_activitySamples[sampleIndex];
-                const double percentValue = samplePercentMetricValue(sample, metric, selectionKeys, metricScale);
+                const double percentValue = samplePercentMetricValue(sample, metric, selectionKeySet, metricScale);
                 const double xValue = sampleIndexToX(static_cast<int>(sampleIndex), plotRect);
                 const double yValue = plotRect.bottom() - (percentValue / 100.0) * plotRect.height();
                 const QPointF point(xValue, yValue);
@@ -1343,6 +1350,16 @@ private:
                 {
                     metricPath.lineTo(point);
                 }
+            };
+            std::size_t lastRenderedSampleIndex = 0U;
+            for (std::size_t sampleIndex = 0; sampleIndex < sampleCount; sampleIndex += sampleStride)
+            {
+                appendSamplePoint(sampleIndex);
+                lastRenderedSampleIndex = sampleIndex;
+            }
+            if (lastRenderedSampleIndex != sampleCount - 1U)
+            {
+                appendSamplePoint(sampleCount - 1U);
             }
 
             QColor lineColor = processActivityMetricColor(metric);
@@ -1357,7 +1374,7 @@ private:
             pointColor.setAlpha(245);
             painter.setBrush(pointColor);
             painter.setPen(Qt::NoPen);
-            const int pointStride = static_cast<int>(std::max<std::size_t>(1U, sampleCount / 80U));
+            const int pointStride = static_cast<int>(std::max<std::size_t>(1U, pointList.size() / 80U));
             for (std::size_t pointIndex = 0; pointIndex < pointList.size(); pointIndex += static_cast<std::size_t>(pointStride))
             {
                 painter.drawEllipse(pointList[pointIndex], 2.2, 2.2);
@@ -3415,6 +3432,33 @@ void ProcessDock::stopProcessNetworkTrafficCapture()
     m_processNetworkTrafficCaptureStarted = false;
 }
 
+void ProcessDock::pruneProcessNetworkTrafficCounters()
+{
+    // 只保留当前仍存活的 PID，阻止抓包累计表随进程创建/退出次数永久增长。
+    std::unordered_set<std::uint32_t> livePidSet;
+    livePidSet.reserve(m_cacheByIdentity.size());
+    for (const auto& cachePair : m_cacheByIdentity)
+    {
+        if (!cachePair.second.isExitedInLatestRound)
+        {
+            livePidSet.insert(cachePair.second.record.pid);
+        }
+    }
+
+    std::lock_guard<std::mutex> guard(m_processNetworkTrafficMutex);
+    for (auto counterIt = m_processNetworkTrafficByPid.begin(); counterIt != m_processNetworkTrafficByPid.end();)
+    {
+        if (livePidSet.find(counterIt->first) == livePidSet.end())
+        {
+            counterIt = m_processNetworkTrafficByPid.erase(counterIt);
+        }
+        else
+        {
+            ++counterIt;
+        }
+    }
+}
+
 std::unordered_map<std::uint32_t, ProcessDock::NetworkTrafficCounters>
 ProcessDock::snapshotProcessNetworkTrafficCounters() const
 {
@@ -3636,26 +3680,12 @@ void ProcessDock::initializeTopControls()
     m_strategyCombo->setMinimumContentsLength(18);
     m_strategyCombo->setMaximumWidth(260);
 
-    // 树/列表切换按钮：按需求仅显示图标。
-    m_treeToggleButton = new QPushButton(QIcon(IconTree), "", this);
-    m_treeToggleButton->setIconSize(DefaultIconSize);
-    m_treeToggleButton->setFixedSize(CompactIconButtonSize);
-    m_treeToggleButton->setCheckable(true);
-    m_treeToggleButton->setChecked(false);
-    m_treeToggleButton->setToolTip("切换为树状视图");
-    languageManager.bindToolTip(
-        m_treeToggleButton,
-        QStringLiteral("process.tooltip.tree"),
-        QStringLiteral("切换为树状视图"));
-
     // 进程友好视图：
-    // - 默认勾选，优先按“应用/后台进程/系统”三类展示；
-    // - 关闭后恢复原有列表/树状按钮行为，避免改变老用户的定位习惯。
+    // - 唯一复选框同时承担两种互斥视图的切换；
+    // - 勾选为友好视图，取消勾选为参照 KswordARKLight 父子关系构建的树状视图。
     m_friendlyViewCheck = new QCheckBox(QStringLiteral("进程友好视图"), this);
     m_friendlyViewCheck->setChecked(true);
-    m_friendlyViewCheck->setToolTip(QStringLiteral(
-        "默认开启：按应用、后台进程、系统分类；应用下按根进程聚合并树状缩进。"
-        "搜索或查看历史活动快照时会自动回退为普通扁平列表。"));
+    m_friendlyViewCheck->setToolTip(QStringLiteral("勾选：友好视图（默认）；取消勾选：树状视图。搜索或查看历史活动快照时自动使用扁平结果。"));
     languageManager.bindText(
         m_friendlyViewCheck,
         QStringLiteral("process.toolbar.friendly"),
@@ -3663,7 +3693,7 @@ void ProcessDock::initializeTopControls()
     languageManager.bindToolTip(
         m_friendlyViewCheck,
         QStringLiteral("process.tooltip.friendly"),
-        QStringLiteral("默认开启：按应用、后台进程、系统分类；应用下按根进程聚合并树状缩进。搜索或查看历史活动快照时会自动回退为普通扁平列表。"));
+        QStringLiteral("勾选：友好视图（默认）；取消勾选：树状视图。搜索或查看历史活动快照时自动使用扁平结果。"));
 
     // 视图模式下拉框：默认监视视图。
     m_viewModeCombo = new QComboBox(this);
@@ -3809,13 +3839,11 @@ void ProcessDock::initializeTopControls()
 
     // 按钮统一蓝色风格（图标按钮版本）。
     const QString buttonStyle = buildBlueButtonStyle(true);
-    m_treeToggleButton->setStyleSheet(buttonStyle);
     m_startButton->setStyleSheet(buttonStyle);
     m_pauseButton->setStyleSheet(buttonStyle);
 
     // 第一行放“操作按钮 + 刷新间隔”。
     m_controlLayout->addWidget(m_strategyCombo);
-    m_controlLayout->addWidget(m_treeToggleButton);
     m_controlLayout->addWidget(m_friendlyViewCheck);
     m_controlLayout->addWidget(m_viewModeCombo);
     m_controlLayout->addWidget(m_startButton);
@@ -4177,11 +4205,11 @@ void ProcessDock::initializeProcessTable()
         [](const ProcessTableRow& tableRow, const int) -> Qt::ItemFlags
         {
             // Inputs: one ProcessTableRow and the requested column.
-            // Processing: synthetic rows stay enabled for hover/paint but are not selectable.
+            // Processing: group headers are display-only; application aggregates are selectable batch targets.
             // Return: item flags used by Qt selection and context menu targeting.
-            return tableRow.rowKind == ProcessDock::ProcessTableRowKind::Process
-                ? (Qt::ItemIsEnabled | Qt::ItemIsSelectable)
-                : Qt::ItemIsEnabled;
+            return tableRow.rowKind == ProcessDock::ProcessTableRowKind::GroupHeader
+                ? Qt::ItemIsEnabled
+                : (Qt::ItemIsEnabled | Qt::ItemIsSelectable);
         },
         [](const ProcessTableRow& tableRow) -> std::string
         {
@@ -4252,26 +4280,6 @@ void ProcessDock::initializeProcessTable()
     applyViewMode(ViewMode::Monitor);
     applyAdaptiveColumnWidths();
     m_processPageLayout->addWidget(m_processTable, 1);
-
-    // R0 功能标识：
-    // - 进程页包含“R0结束进程”动作，因此在右下角固定放置内核标识图；
-    // - 路径按项目规范使用固定 Kernel.png 资源文件。
-    QLabel* r0KernelBadgeLabel = new QLabel(m_processListPage);
-    r0KernelBadgeLabel->setObjectName(QStringLiteral("r0KernelBadgeLabel"));
-    r0KernelBadgeLabel->setToolTip(QStringLiteral("R0 功能标识"));
-    const QPixmap kernelBadgePixmap(KernelBadgeImagePath);
-    if (!kernelBadgePixmap.isNull())
-    {
-        r0KernelBadgeLabel->setPixmap(kernelBadgePixmap.scaled(
-            52,
-            52,
-            Qt::KeepAspectRatio,
-            Qt::SmoothTransformation));
-    }
-    m_processPageLayout->addWidget(
-        r0KernelBadgeLabel,
-        0,
-        Qt::AlignRight | Qt::AlignBottom);
 
     // 满足需求 3.1：侧边栏 Tab 中包含“进程列表”页签。
     m_sideTabWidget->addTab(m_processListPage, blueTintedIcon(IconProcessMain), "进程列表");
@@ -4789,57 +4797,15 @@ void ProcessDock::initializeConnections()
     });
 
     // 进程友好视图：
-    // - 勾选时 buildDisplayOrder 优先使用应用/后台/系统分类；
-    // - 原树状按钮状态被保留但不参与友好视图排序，关闭后立即恢复旧行为。
+    // - 勾选时 buildDisplayOrder 使用应用/后台/系统分类；
+    // - 取消勾选时直接切换为树状视图，两种状态互斥且无需第二个按钮。
     connect(m_friendlyViewCheck, &QCheckBox::toggled, this, [this](const bool checked) {
         m_activityTableSnapshotIndex = -1;
         m_activityTableSnapshotRecords.clear();
-        if (m_treeToggleButton != nullptr)
-        {
-            m_treeToggleButton->setEnabled(!checked);
-            m_treeToggleButton->setToolTip(checked
-                ? processContextText(
-                    "process.tooltip.friendly_tree_disabled",
-                    QStringLiteral("进程友好视图开启时暂不使用普通树状排序"))
-                : processContextText("process.tooltip.tree", QStringLiteral("切换为树状视图")));
-        }
         kLogEvent logEvent;
         info << logEvent
             << "[ProcessDock] 进程友好视图开关变更, friendlyView="
             << (checked ? "true" : "false")
-            << eol;
-        rebuildTable();
-    });
-    if (m_treeToggleButton != nullptr && m_friendlyViewCheck != nullptr)
-    {
-        m_treeToggleButton->setEnabled(!m_friendlyViewCheck->isChecked());
-        if (m_friendlyViewCheck->isChecked())
-        {
-            m_treeToggleButton->setToolTip(processContextText(
-                "process.tooltip.friendly_tree_disabled",
-                QStringLiteral("进程友好视图开启时暂不使用普通树状排序")));
-        }
-    }
-
-    // 树/列表切换：仅图标切换（不显示文字），并立即重建表格。
-    connect(m_treeToggleButton, &QPushButton::toggled, this, [this](const bool checked) {
-        m_activityTableSnapshotIndex = -1;
-        m_activityTableSnapshotRecords.clear();
-        if (checked)
-        {
-            m_treeToggleButton->setIcon(QIcon(IconList));
-            m_treeToggleButton->setToolTip(processContextText(
-                "process.tooltip.list", QStringLiteral("切换为列表视图")));
-        }
-        else
-        {
-            m_treeToggleButton->setIcon(QIcon(IconTree));
-            m_treeToggleButton->setToolTip(processContextText(
-                "process.tooltip.tree", QStringLiteral("切换为树状视图")));
-        }
-        kLogEvent logEvent;
-        info << logEvent
-            << "[ProcessDock] 树状显示开关变更, treeMode=" << (checked ? "true" : "false")
             << eol;
         rebuildTable();
     });
@@ -5916,6 +5882,7 @@ void ProcessDock::applyRefreshResult(RefreshResult refreshResult, const bool for
     // 用新结果替换缓存；表格重绘由独立“列表刷新(s)”节流，避免高频打点拖垮 UI。
     m_cacheByIdentity = std::move(refreshResult.nextCache);
     m_counterSampleByIdentity = std::move(refreshResult.nextCounters);
+    pruneProcessNetworkTrafficCounters();
 
     appendProcessActivitySample();
     if (isProcessActivityTableSnapshotActive())
@@ -6705,6 +6672,7 @@ void ProcessDock::rebuildTable()
         tableRow.friendlyGroupType = displayRow.friendlyGroupType;
         tableRow.syntheticTitle = displayRow.syntheticTitle;
         tableRow.expansionKey = displayRow.expansionKey;
+        tableRow.actionIdentityKeys = displayRow.actionIdentityKeys;
         tableRow.identityKey = displayRow.rowKind == ProcessTableRowKind::Process
             ? ks::process::BuildProcessIdentityKey(processRecord.pid, processRecord.creationTime100ns)
             : std::string();
@@ -7182,6 +7150,10 @@ void ProcessDock::appendProcessActivitySample()
             const QString iconKey = QString::fromStdString(processPoint.iconCacheKey);
             if (!m_activityIconCacheByProcessKey.contains(iconKey))
             {
+                if (m_activityIconCacheByProcessKey.size() >= ActivityIconCacheMaximumCount)
+                {
+                    m_activityIconCacheByProcessKey.erase(m_activityIconCacheByProcessKey.begin());
+                }
                 m_activityIconCacheByProcessKey.insert(iconKey, resolveProcessIcon(processRecord));
             }
         }
@@ -7209,7 +7181,10 @@ bool ProcessDock::trimProcessActivitySamples()
     }
 
     const std::size_t removeCount = m_activitySamples.size() - ActivityMaximumSampleCount;
-    m_activitySamples.erase(m_activitySamples.begin(), m_activitySamples.begin() + static_cast<std::ptrdiff_t>(removeCount));
+    for (std::size_t removeIndex = 0; removeIndex < removeCount; ++removeIndex)
+    {
+        m_activitySamples.pop_front();
+    }
     if (m_activityTableSnapshotIndex >= 0)
     {
         m_activityTableSnapshotIndex -= static_cast<int>(removeCount);
@@ -7345,7 +7320,7 @@ void ProcessDock::previewProcessActivitySnapshotForIndex(const int sampleIndex)
     {
         m_activityTableSnapshotIndex = -1;
         m_activityTableSnapshotRecords.clear();
-        if (m_activitySnapshotLabel != nullptr)
+        if (m_activitySnapshotLabel != nullptr && m_activitySnapshotLabel->isVisible())
         {
             m_activitySnapshotLabel->setText(processContextText(
                 "process.activity.snapshot.empty",
@@ -7363,7 +7338,7 @@ void ProcessDock::previewProcessActivitySnapshotForIndex(const int sampleIndex)
     {
         m_activityChartWidget->setFocusedSampleIndex(safeIndex);
     }
-    if (m_activitySnapshotLabel != nullptr)
+    if (m_activitySnapshotLabel != nullptr && m_activitySnapshotLabel->isVisible())
     {
         m_activitySnapshotLabel->setText(buildProcessActivitySnapshotText(safeIndex));
     }
@@ -7607,6 +7582,13 @@ std::vector<std::string> ProcessDock::currentProcessActivitySelectionKeys() cons
             {
                 selectionKeys.push_back(tableRow->identityKey);
             }
+            for (const std::string& aggregateIdentityKey : tableRow->actionIdentityKeys)
+            {
+                if (!aggregateIdentityKey.empty() && visitedSet.insert(aggregateIdentityKey).second)
+                {
+                    selectionKeys.push_back(aggregateIdentityKey);
+                }
+            }
         }
     }
     if (isProcessActivityTableSnapshotActive() && selectionKeys.empty())
@@ -7721,8 +7703,8 @@ QVariant ProcessDock::processTableData(const ProcessTableRow& tableRow, const in
     {
         // ApplicationAggregate is a synthetic application parent row:
         // - name comes from syntheticTitle and metrics come from the aggregate record;
-        // - the row is enabled for expand/collapse but intentionally not selectable/actionable;
-        // - children below it remain normal process rows.
+        // - the row is selectable and expands actions to every real process in this application;
+        // - double-click still controls expand/collapse and children remain normal process rows.
         if (role == Qt::DisplayRole)
         {
             if (tableColumn == TableColumn::Name)
@@ -7737,7 +7719,9 @@ QVariant ProcessDock::processTableData(const ProcessTableRow& tableRow, const in
         }
         if (role == Qt::ToolTipRole && tableColumn == TableColumn::Name)
         {
-            return QStringLiteral("应用聚合行：汇总该应用进程树的 CPU/RAM/DISK/GPU/NET；双击可折叠/展开，不作为进程操作目标。");
+            return processContextText(
+                "process.friendly.aggregate.tooltip",
+                QStringLiteral("应用聚合行：汇总该应用进程树；选中或右键后，进程动作会应用到全部成员；双击可折叠/展开。"));
         }
         if (role == Qt::FontRole)
         {
@@ -8026,6 +8010,52 @@ ProcessDock::ProcessActionTarget ProcessDock::processActionTargetFromTableRow(co
     return actionTarget;
 }
 
+void ProcessDock::appendProcessActionTargetsFromTableRow(
+    const ProcessTableRow& tableRow,
+    std::vector<ProcessActionTarget>& actionTargets,
+    std::unordered_set<std::string>& visitedIdentitySet) const
+{
+    // 真实进程行追加一个目标；应用聚合行展开全部成员，保持和 Ctrl 多选完全相同的动作语义。
+    const auto appendIdentityTarget = [this, &tableRow, &actionTargets, &visitedIdentitySet](const std::string& identityKey)
+    {
+        if (identityKey.empty() || !visitedIdentitySet.insert(identityKey).second)
+        {
+            return;
+        }
+
+        ProcessActionTarget actionTarget{};
+        actionTarget.identityKey = identityKey;
+        const auto cacheIt = m_cacheByIdentity.find(identityKey);
+        if (cacheIt != m_cacheByIdentity.end())
+        {
+            actionTarget.record = cacheIt->second.record;
+        }
+        else if (tableRow.rowKind == ProcessTableRowKind::Process && identityKey == tableRow.identityKey)
+        {
+            actionTarget.record = tableRow.record;
+        }
+        else
+        {
+            visitedIdentitySet.erase(identityKey);
+            return;
+        }
+        actionTargets.push_back(std::move(actionTarget));
+    };
+
+    if (tableRow.rowKind == ProcessTableRowKind::Process)
+    {
+        appendIdentityTarget(tableRow.identityKey);
+        return;
+    }
+    if (tableRow.rowKind == ProcessTableRowKind::ApplicationAggregate)
+    {
+        for (const std::string& identityKey : tableRow.actionIdentityKeys)
+        {
+            appendIdentityTarget(identityKey);
+        }
+    }
+}
+
 std::vector<ProcessDock::DisplayRow> ProcessDock::buildDisplayOrder() const
 {
     if (isProcessActivityTableSnapshotActive())
@@ -8146,41 +8176,83 @@ std::vector<ProcessDock::DisplayRow> ProcessDock::buildTreeDisplayOrder() const
         nodes.push_back(Node{ &cachePair.first, &cachePair.second });
     }
 
-    // Step2：构建 parentPid -> child 节点列表。
+    // Step2：参照 KswordARKLight 的 ProcessModel，先建立 PID 来源索引，再关联有效父节点。
     std::unordered_map<std::uint32_t, std::vector<Node>> childrenByParentPid;
-    std::unordered_set<std::uint32_t> existingPidSet;
+    std::unordered_map<std::uint32_t, const Node*> sourceNodeByPid;
+    sourceNodeByPid.reserve(nodes.size());
     for (const Node& node : nodes)
     {
         if (node.cacheEntry == nullptr)
         {
             continue;
         }
-        existingPidSet.insert(node.cacheEntry->record.pid);
-        childrenByParentPid[node.cacheEntry->record.parentPid].push_back(node);
+        const std::uint32_t processId = node.cacheEntry->record.pid;
+        const auto existingSourceIt = sourceNodeByPid.find(processId);
+        if (existingSourceIt == sourceNodeByPid.end() ||
+            (existingSourceIt->second->cacheEntry->isExitedInLatestRound && !node.cacheEntry->isExitedInLatestRound) ||
+            node.cacheEntry->record.creationTime100ns > existingSourceIt->second->cacheEntry->record.creationTime100ns)
+        {
+            sourceNodeByPid[processId] = &node;
+        }
     }
 
-    // 子列表按 PID 排序，保证同层稳定顺序。
+    const auto nodeLess = [](const Node& leftNode, const Node& rightNode)
+    {
+        if (leftNode.cacheEntry == nullptr || rightNode.cacheEntry == nullptr)
+        {
+            return leftNode.cacheEntry != nullptr;
+        }
+        const QString leftName = QString::fromStdString(leftNode.cacheEntry->record.processName);
+        const QString rightName = QString::fromStdString(rightNode.cacheEntry->record.processName);
+        const int nameResult = leftName.compare(rightName, Qt::CaseInsensitive);
+        if (nameResult != 0)
+        {
+            return nameResult < 0;
+        }
+        if (leftNode.cacheEntry->record.pid != rightNode.cacheEntry->record.pid)
+        {
+            return leftNode.cacheEntry->record.pid < rightNode.cacheEntry->record.pid;
+        }
+        return leftNode.cacheEntry->record.creationTime100ns < rightNode.cacheEntry->record.creationTime100ns;
+    };
+
+    for (const Node& node : nodes)
+    {
+        if (node.cacheEntry == nullptr)
+        {
+            continue;
+        }
+        const std::uint32_t processId = node.cacheEntry->record.pid;
+        const std::uint32_t parentPid = node.cacheEntry->record.parentPid;
+        if (parentPid != 0U && parentPid != processId && sourceNodeByPid.find(parentPid) != sourceNodeByPid.end())
+        {
+            childrenByParentPid[parentPid].push_back(node);
+        }
+    }
+
+    // 子列表按“名称（不区分大小写）+ PID”排序，与 KswordARKLight 的稳定顺序一致。
     for (auto& pair : childrenByParentPid)
     {
         auto& childNodes = pair.second;
-        std::sort(childNodes.begin(), childNodes.end(), [](const Node& leftNode, const Node& rightNode) {
-            return leftNode.cacheEntry->record.pid < rightNode.cacheEntry->record.pid;
-        });
+        std::sort(childNodes.begin(), childNodes.end(), nodeLess);
     }
 
-    // Step3：找到根节点（父 PID 不存在或为 0）。
+    // Step3：父 PID 不存在、为 0 或自引用时视为根节点。
     std::vector<Node> rootNodes;
     for (const Node& node : nodes)
     {
+        if (node.cacheEntry == nullptr)
+        {
+            continue;
+        }
+        const std::uint32_t processId = node.cacheEntry->record.pid;
         const std::uint32_t parentPid = node.cacheEntry->record.parentPid;
-        if (parentPid == 0 || existingPidSet.find(parentPid) == existingPidSet.end())
+        if (parentPid == 0U || parentPid == processId || sourceNodeByPid.find(parentPid) == sourceNodeByPid.end())
         {
             rootNodes.push_back(node);
         }
     }
-    std::sort(rootNodes.begin(), rootNodes.end(), [](const Node& leftNode, const Node& rightNode) {
-        return leftNode.cacheEntry->record.pid < rightNode.cacheEntry->record.pid;
-    });
+    std::sort(rootNodes.begin(), rootNodes.end(), nodeLess);
 
     // Step4：DFS 生成“树状列表顺序 + 缩进深度”。
     std::vector<DisplayRow> displayRows;
@@ -8500,6 +8572,7 @@ std::vector<ProcessDock::DisplayRow> ProcessDock::buildFriendlyDisplayOrder() co
             const FriendlyProcessGroupType groupType,
             const QString& title,
             const QString& expansionKey,
+            const std::vector<std::string>& actionIdentityKeys,
             const int depth)
         {
             // Inputs: prepared synthetic ProcessRecord and row metadata.
@@ -8513,6 +8586,7 @@ std::vector<ProcessDock::DisplayRow> ProcessDock::buildFriendlyDisplayOrder() co
             displayRow.friendlyGroupType = groupType;
             displayRow.syntheticTitle = title;
             displayRow.expansionKey = expansionKey;
+            displayRow.actionIdentityKeys = actionIdentityKeys;
             displayRow.depth = depth;
             displayRow.hasChildren = rowKind == ProcessTableRowKind::GroupHeader ||
                 rowKind == ProcessTableRowKind::ApplicationAggregate;
@@ -8531,6 +8605,7 @@ std::vector<ProcessDock::DisplayRow> ProcessDock::buildFriendlyDisplayOrder() co
                 groupType,
                 friendlyGroupTitle(groupType, entryCount),
                 friendlyExpansionKeyForGroup(groupType),
+                {},
                 0);
         };
 
@@ -8617,12 +8692,24 @@ std::vector<ProcessDock::DisplayRow> ProcessDock::buildFriendlyDisplayOrder() co
 
             const ks::process::ProcessRecord aggregateRecord =
                 aggregateApplicationBucket(bucketNodes, rootPid);
+            std::vector<std::string> aggregateActionIdentityKeys;
+            aggregateActionIdentityKeys.reserve(bucketNodes.size());
+            for (const FriendlyNode* bucketNode : bucketNodes)
+            {
+                if (bucketNode != nullptr &&
+                    bucketNode->identityKey != nullptr &&
+                    !bucketNode->identityKey->empty())
+                {
+                    aggregateActionIdentityKeys.push_back(*bucketNode->identityKey);
+                }
+            }
             appendSyntheticRecordRow(
                 aggregateRecord,
                 ProcessTableRowKind::ApplicationAggregate,
                 FriendlyProcessGroupType::Application,
                 QStringLiteral("%1 (%2)").arg(QString::fromStdString(aggregateRecord.processName)).arg(bucketNodes.size()),
                 friendlyExpansionKeyForApplication(rootPid),
+                aggregateActionIdentityKeys,
                 1);
 
             if (!m_friendlyExpandedStateByKey.value(friendlyExpansionKeyForApplication(rootPid), false))
@@ -8731,7 +8818,7 @@ void ProcessDock::showTableContextMenu(const QPoint& localPosition)
     }
 
     const ProcessTableRow* clickedTableRow = processTableRowForViewIndex(clickedIndex);
-    if (clickedTableRow == nullptr || clickedTableRow->rowKind != ProcessTableRowKind::Process)
+    if (clickedTableRow == nullptr || clickedTableRow->rowKind == ProcessTableRowKind::GroupHeader)
     {
         clearContextActionBinding();
         return;
@@ -8768,38 +8855,10 @@ void ProcessDock::showTableContextMenu(const QPoint& localPosition)
     // 右键菜单显式样式：避免浅色模式在透明父控件下出现黑底黑字。
     contextMenu.setStyleSheet(buildThreadContextMenuStyle());
 
-    // R0 动作图标构造器：
-    // - 基础图标仍沿用主题蓝；
-    // - 在图标右下角叠加 Kernel.png，作为 R0 入口统一视觉标识。
+    // R0 动作继续使用对应业务图标；动作文字和分组已经明确标注 R0 来源。
     const auto buildR0ActionIcon = [this](const char* iconPath) -> QIcon
     {
-        QPixmap iconPixmap = blueTintedIcon(iconPath).pixmap(DefaultIconSize);
-        if (iconPixmap.isNull())
-        {
-            iconPixmap = QPixmap(DefaultIconSize);
-            iconPixmap.fill(Qt::transparent);
-        }
-
-        const QPixmap kernelPixmap(KernelBadgeImagePath);
-        if (!kernelPixmap.isNull())
-        {
-            const int badgeSide = std::max(8, std::min(iconPixmap.width(), iconPixmap.height()) / 2);
-            const QPixmap scaledBadge = kernelPixmap.scaled(
-                badgeSide,
-                badgeSide,
-                Qt::KeepAspectRatio,
-                Qt::SmoothTransformation);
-
-            QPainter painter(&iconPixmap);
-            painter.setRenderHint(QPainter::Antialiasing, true);
-            painter.drawPixmap(
-                iconPixmap.width() - scaledBadge.width(),
-                iconPixmap.height() - scaledBadge.height(),
-                scaledBadge);
-            painter.end();
-        }
-
-        return QIcon(iconPixmap);
+        return blueTintedIcon(iconPath);
     };
 
     QAction* copyCellAction = contextMenu.addAction(
@@ -9313,22 +9372,11 @@ void ProcessDock::bindContextActionToIndex(const QModelIndex& clickedIndex)
     for (const QModelIndex& rowIndex : effectiveRows)
     {
         const ProcessTableRow* tableRow = processTableRowForViewIndex(rowIndex);
-        if (tableRow == nullptr ||
-            tableRow->rowKind != ProcessTableRowKind::Process ||
-            tableRow->identityKey.empty())
+        if (tableRow == nullptr)
         {
             continue;
         }
-        if (!visitedIdentitySet.insert(tableRow->identityKey).second)
-        {
-            continue;
-        }
-
-        ProcessActionTarget actionTarget = processActionTargetFromTableRow(*tableRow);
-        if (!actionTarget.identityKey.empty())
-        {
-            m_contextActionRecords.push_back(std::move(actionTarget));
-        }
+        appendProcessActionTargetsFromTableRow(*tableRow, m_contextActionRecords, visitedIdentitySet);
     }
 
     if (m_contextActionRecords.empty())
@@ -9368,6 +9416,12 @@ std::string ProcessDock::selectedIdentityKey() const
         if (tableRow != nullptr && tableRow->rowKind == ProcessTableRowKind::Process)
         {
             return tableRow->identityKey;
+        }
+        if (tableRow != nullptr &&
+            tableRow->rowKind == ProcessTableRowKind::ApplicationAggregate &&
+            tableRow->actionIdentityKeys.size() == 1U)
+        {
+            return tableRow->actionIdentityKeys.front();
         }
     }
     return std::string();
@@ -9410,22 +9464,11 @@ std::vector<ProcessDock::ProcessActionTarget> ProcessDock::selectedActionTargets
         for (const QModelIndex& rowIndex : selectedRows)
         {
             const ProcessTableRow* tableRow = processTableRowForViewIndex(rowIndex);
-            if (tableRow == nullptr ||
-                tableRow->rowKind != ProcessTableRowKind::Process ||
-                tableRow->identityKey.empty())
+            if (tableRow == nullptr)
             {
                 continue;
             }
-            if (!visitedIdentitySet.insert(tableRow->identityKey).second)
-            {
-                continue;
-            }
-
-            ProcessActionTarget actionTarget = processActionTargetFromTableRow(*tableRow);
-            if (!actionTarget.identityKey.empty())
-            {
-                actionTargets.push_back(std::move(actionTarget));
-            }
+            appendProcessActionTargetsFromTableRow(*tableRow, actionTargets, visitedIdentitySet);
         }
     }
 
@@ -9783,9 +9826,17 @@ QIcon ProcessDock::resolveProcessIcon(const ks::process::ProcessRecord& processR
     {
         processIcon = QIcon(":/Icon/process_main.svg");
     }
+    if (m_iconCacheByPath.size() >= ProcessIconCacheMaximumCount)
+    {
+        m_iconCacheByPath.erase(m_iconCacheByPath.begin());
+    }
     m_iconCacheByPath.insert(pathText, processIcon);
     if (!activityIconKey.trimmed().isEmpty())
     {
+        if (m_activityIconCacheByProcessKey.size() >= ActivityIconCacheMaximumCount)
+        {
+            m_activityIconCacheByProcessKey.erase(m_activityIconCacheByProcessKey.begin());
+        }
         m_activityIconCacheByProcessKey.insert(activityIconKey, processIcon);
     }
     return processIcon;
@@ -10868,7 +10919,8 @@ void ProcessDock::executeCreateProcessRequest()
 
 bool ProcessDock::isTreeModeEnabled() const
 {
-    return m_treeToggleButton != nullptr && m_treeToggleButton->isChecked();
+    // 单复选框定义互斥状态：未勾选友好视图时即为树状视图。
+    return m_friendlyViewCheck != nullptr && !m_friendlyViewCheck->isChecked();
 }
 
 bool ProcessDock::isFriendlyViewEnabled() const

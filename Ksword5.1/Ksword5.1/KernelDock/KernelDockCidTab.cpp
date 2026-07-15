@@ -194,19 +194,9 @@ void KernelDockCidTab::initializeUi()
     m_statusLabel = new QLabel(kernelText("kernel.cid.status.waiting", QStringLiteral("状态：等待刷新")), this);
     m_statusLabel->setStyleSheet(statusLabelStyle(KswordTheme::TextSecondaryHex()));
 
-    m_kernelBadgeLabel = new QLabel(this);
-    m_kernelBadgeLabel->setToolTip(kernelText("kernel.cid.badge.tooltip", QStringLiteral("Kernel/R0 CID 表和对象摘要查询入口标识")));
-    m_kernelBadgeLabel->setPixmap(QPixmap(QStringLiteral(":/Image/kernel_badge.png")).scaled(
-        20,
-        20,
-        Qt::KeepAspectRatio,
-        Qt::SmoothTransformation));
-    m_kernelBadgeLabel->setFixedSize(22, 22);
-
     m_toolbarLayout->addWidget(m_refreshButton, 0);
     m_toolbarLayout->addWidget(m_filterEdit, 1);
     m_toolbarLayout->addWidget(m_statusLabel, 0);
-    m_toolbarLayout->addWidget(m_kernelBadgeLabel, 0);
     rootLayout->addLayout(m_toolbarLayout);
 
     m_table = new ks::ui::VisibleTableWidget(this);

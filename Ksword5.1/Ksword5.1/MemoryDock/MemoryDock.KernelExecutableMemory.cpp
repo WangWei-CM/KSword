@@ -373,7 +373,7 @@ namespace
 void MemoryDock::initializeKernelExecutableMemoryScanTab()
 {
     // 输入：无，由 initializeTabs 调用。
-    // 处理：构建内核可执行页扫描页面，包含刷新入口、风险/路径过滤、表格、详情编辑器和右下角 Kernel.png。
+    // 处理：构建内核可执行页扫描页面，包含刷新入口、风险/路径过滤、表格和详情编辑器。
     // 返回：无。
     kLogEvent tab7InitEvent;
     info << tab7InitEvent
@@ -453,20 +453,6 @@ void MemoryDock::initializeKernelExecutableMemoryScanTab()
     m_kernelExecutableDetailEditor->setReadOnly(true);
     m_kernelExecutableDetailEditor->setText(QStringLiteral("请选择一条内核可执行页记录查看详情。"));
     detailLayout->addWidget(m_kernelExecutableDetailEditor, 1);
-
-    QVBoxLayout* badgeLayout = new QVBoxLayout();
-    badgeLayout->setContentsMargins(0, 0, 0, 0);
-    badgeLayout->addStretch(1);
-    m_kernelExecutableBadgeLabel = new QLabel(detailPanel);
-    m_kernelExecutableBadgeLabel->setToolTip(QStringLiteral("R0 功能入口：内核可执行页扫描"));
-    m_kernelExecutableBadgeLabel->setPixmap(QPixmap(QStringLiteral(":/Image/kernel_badge.png")).scaled(
-        36,
-        36,
-        Qt::KeepAspectRatio,
-        Qt::SmoothTransformation));
-    m_kernelExecutableBadgeLabel->setAlignment(Qt::AlignRight | Qt::AlignBottom);
-    badgeLayout->addWidget(m_kernelExecutableBadgeLabel, 0, Qt::AlignRight | Qt::AlignBottom);
-    detailLayout->addLayout(badgeLayout);
     splitter->addWidget(detailPanel);
 
     splitter->setStretchFactor(0, 3);

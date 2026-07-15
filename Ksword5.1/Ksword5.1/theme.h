@@ -475,30 +475,18 @@ namespace KswordTheme
         return AccentColor(AccentRole::Blue, -2, -28);
     }
 
-    // OnAccentTextOffset 作用：为亮强调色背景提供深浅主题各自独立的深色文字。
-    // 该角色用于菜单、表格和按钮的亮蓝选中背景，不能与深色活动标签文字共用。
-    inline constexpr ThemeRgbOffset OnAccentTextOffset{
-        { -248, -229, -210 },
-        { -239, -220, -201 }
-    };
-
+    // 强调色选中背景统一使用白字，保证进程详情页和菜单的蓝色选中态清晰可读。
     inline QColor OnAccentColor()
     {
-        return ThemeOffsetColor(WhiteColor(), OnAccentTextOffset);
+        return WhiteColor();
     }
     inline QString OnAccentHex() { return ThemeColorName(OnAccentColor()); }
 
-    // 活动标签使用比强调色更深的主题背景：深色模式配白字，浅色模式配深色字。
-    // 背景与文字各自保留两套数字，避免再次把亮强调色的前景规则误用到深色标签上。
+    // 活动标签使用比强调色更深的主题背景，并在深浅主题都使用白字。
     inline constexpr ThemeRgbOffset ActiveTabBackgroundOffset{
         { 38, 55, 70 },
         { -65, -44, -22 }
     };
-    inline constexpr ThemeRgbOffset ActiveTabTextOffset{
-        { 0, 0, 0 },
-        { -239, -220, -201 }
-    };
-
     inline QColor ActiveTabBackgroundColor()
     {
         return ThemeOffsetColor(SurfaceColor(), ActiveTabBackgroundOffset);
@@ -506,7 +494,7 @@ namespace KswordTheme
 
     inline QColor ActiveTabTextColor()
     {
-        return ThemeOffsetColor(WhiteColor(), ActiveTabTextOffset);
+        return WhiteColor();
     }
 
     inline QString ActiveTabBackgroundHex() { return ThemeColorName(ActiveTabBackgroundColor()); }

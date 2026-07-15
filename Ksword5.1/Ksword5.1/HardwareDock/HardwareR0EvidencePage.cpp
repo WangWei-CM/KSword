@@ -1101,20 +1101,6 @@ void HardwareR0EvidencePage::initializeUi()
     m_detailEditor->setReadOnly(true);
     m_detailEditor->setText(QStringLiteral("请选择一条 R0 CPU/MSR/IDT/GDT 证据查看详情。"));
     detailLayout->addWidget(m_detailEditor, 1);
-
-    QVBoxLayout* badgeLayout = new QVBoxLayout();
-    badgeLayout->setContentsMargins(0, 0, 0, 0);
-    badgeLayout->addStretch(1);
-    m_kernelBadgeLabel = new QLabel(detailPanel);
-    m_kernelBadgeLabel->setToolTip(QStringLiteral("R0 功能入口：硬件 CPU/IDT/MSR 内核证据"));
-    m_kernelBadgeLabel->setPixmap(QPixmap(QStringLiteral(":/Image/kernel_badge.png")).scaled(
-        36,
-        36,
-        Qt::KeepAspectRatio,
-        Qt::SmoothTransformation));
-    m_kernelBadgeLabel->setAlignment(Qt::AlignRight | Qt::AlignBottom);
-    badgeLayout->addWidget(m_kernelBadgeLabel, 0, Qt::AlignRight | Qt::AlignBottom);
-    detailLayout->addLayout(badgeLayout, 0);
     splitter->addWidget(detailPanel);
 
     splitter->setStretchFactor(0, 3);

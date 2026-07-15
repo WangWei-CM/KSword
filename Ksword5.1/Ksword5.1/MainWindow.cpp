@@ -254,7 +254,7 @@ namespace
 
     // dockTabTextColor 作用：
     // - 返回 ADS Dock 标签文字的最终颜色；
-    // - 选中标签在浅色模式使用深色字，在深色模式使用白字；
+    // - 选中标签在深浅模式都使用白字，匹配深色活动背景；
     // - 未选中标签沿用当前主题主文字色。
     // 入参 activeTab：true=当前选中标签；false=普通标签。
     // 返回：可直接写入 QWidget/QLabel palette 与局部样式表的 QColor。
@@ -8459,7 +8459,7 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
         darkModeEnabled ? KswordTheme::PrimaryBlueSubtleColor() : KswordTheme::SurfaceMutedColor());
     // dockActiveTabTextColor 作用：
     // - 只控制 ADS Dock 选中标签文字；
-    // - 浅色模式按需求使用黑色/深色字，避免“蓝底白字”；
+    // - 深浅模式统一使用白字，修复深色活动背景上的低对比文字；
     // - 普通 QTabBar 仍沿用 activeTabTextColor，避免扩大样式影响面。
     const QString dockActiveTabTextColor = KswordTheme::ThemeColorName(
         dockTabTextColor(true));

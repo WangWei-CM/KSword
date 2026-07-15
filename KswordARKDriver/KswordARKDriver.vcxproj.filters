@@ -170,6 +170,9 @@
     <ClInclude Include="src\platform\kernel_module_identity.h">
       <Filter>Header Files\Platform</Filter>
     </ClInclude>
+    <ClInclude Include="src\platform\pool_compat.h">
+      <Filter>Header Files\Platform</Filter>
+    </ClInclude>
     <ClInclude Include="include\ark\ark_dyndata.h">
       <Filter>Header Files\Ark</Filter>
     </ClInclude>
@@ -431,6 +434,9 @@
       <Filter>Source Files\Platform</Filter>
     </ClCompile>
     <ClCompile Include="src\platform\kernel_module_identity.c">
+      <Filter>Source Files\Platform</Filter>
+    </ClCompile>
+    <ClCompile Include="src\platform\pool_compat.c">
       <Filter>Source Files\Platform</Filter>
     </ClCompile>
     <ClCompile Include="src\features\dyndata\dyndata_loader.c">

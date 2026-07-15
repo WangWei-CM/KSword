@@ -2886,15 +2886,9 @@ void KernelDock::initializeDynDataTab()
     m_dynDataStatusLabel = new QLabel(kernelText("kernel.dyndata.status.waiting", QStringLiteral("状态：等待刷新")), m_dynDataOverviewPage);
     m_dynDataStatusLabel->setStyleSheet(statusLabelStyle(KswordTheme::TextSecondaryHex()));
 
-    m_dynDataKernelBadge = new QLabel(m_dynDataOverviewPage);
-    m_dynDataKernelBadge->setToolTip(kernelText("kernel.dyndata.toolbar.kernel_badge.tooltip", QStringLiteral("Kernel/R0 数据来源标识")));
-    m_dynDataKernelBadge->setPixmap(QPixmap(QStringLiteral(":/Image/kernel_badge.png")).scaled(20, 20, Qt::KeepAspectRatio, Qt::SmoothTransformation));
-    m_dynDataKernelBadge->setFixedSize(24, 24);
-
     m_dynDataToolLayout->addWidget(m_refreshDynDataButton, 0);
     m_dynDataToolLayout->addWidget(m_copyDynDataReportButton, 0);
     m_dynDataToolLayout->addWidget(m_dynDataFilterEdit, 1);
-    m_dynDataToolLayout->addWidget(m_dynDataKernelBadge, 0);
     m_dynDataToolLayout->addWidget(m_dynDataStatusLabel, 0);
     m_dynDataOverviewLayout->addLayout(m_dynDataToolLayout);
 

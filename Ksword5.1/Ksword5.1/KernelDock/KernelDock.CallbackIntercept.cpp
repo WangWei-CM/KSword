@@ -1659,21 +1659,6 @@ private:
         m_fileMonitorDrainTimer = new QTimer(m_hostPage);
         m_fileMonitorDrainTimer->setInterval(1500);
 
-        auto* kernelBadgeLayout = new QHBoxLayout();
-        kernelBadgeLayout->setContentsMargins(0, 0, 0, 0);
-        kernelBadgeLayout->setSpacing(0);
-        m_kernelBadgeLabel = new QLabel(scrollContent);
-        m_kernelBadgeLabel->setToolTip(kernelText("kernel.callback.intercept.tooltip.kernel_badge", QStringLiteral("Kernel/R0 功能入口标识")));
-        m_kernelBadgeLabel->setPixmap(QPixmap(QStringLiteral(":/Image/kernel_badge.png")).scaled(
-            20,
-            20,
-            Qt::KeepAspectRatio,
-            Qt::SmoothTransformation));
-        m_kernelBadgeLabel->setFixedSize(24, 24);
-        kernelBadgeLayout->addStretch(1);
-        kernelBadgeLayout->addWidget(m_kernelBadgeLabel, 0);
-        rootLayout->addLayout(kernelBadgeLayout, 0);
-
         mainSplitter->setStretchFactor(0, 3);
         mainSplitter->setStretchFactor(1, 7);
     }
@@ -4445,8 +4430,6 @@ private:
     QPushButton* m_importButton = nullptr;
     QPushButton* m_exportButton = nullptr;
     QLabel* m_statusLabel = nullptr;
-    QLabel* m_kernelBadgeLabel = nullptr;
-
     QPushButton* m_addGroupButton = nullptr;
     QPushButton* m_removeGroupButton = nullptr;
     QPushButton* m_renameGroupButton = nullptr;

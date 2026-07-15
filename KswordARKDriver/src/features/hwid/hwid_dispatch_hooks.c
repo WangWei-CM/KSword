@@ -15,6 +15,7 @@ Environment:
 --*/
 
 #include "hwid_dispatch_hooks.h"
+#include "../../platform/pool_compat.h"
 
 #include <ata.h>
 #include <mountdev.h>
@@ -679,8 +680,7 @@ KswordARKHwidPrepareDispatchCompletion(
         return FALSE;
     }
 
-    completionContext = (PKSW_HWID_COMPLETION_CONTEXT)ExAllocatePool2(
-        POOL_FLAG_NON_PAGED,
+    completionContext = (PKSW_HWID_COMPLETION_CONTEXT)KswordARKAllocateNonPagedPool(
         sizeof(*completionContext),
         KSW_HWID_POOL_TAG);
     if (completionContext == NULL) {

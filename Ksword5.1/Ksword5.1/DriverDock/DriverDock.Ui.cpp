@@ -378,23 +378,6 @@ void DriverDock::initializeOverviewTab()
             QStringLiteral("请选择一条已加载模块，或点击证据刷新按钮开始后台聚合。")));
     moduleLayout->addWidget(m_moduleEvidenceDetailEditor, 2);
 
-    QLabel* r0KernelBadgeLabel = new QLabel(moduleContainer);
-    r0KernelBadgeLabel->setObjectName(QStringLiteral("driverDockR0KernelBadgeLabel"));
-    r0KernelBadgeLabel->setToolTip(
-        driverText(
-            "driver.overview.r0_badge.tooltip",
-            QStringLiteral("R0 功能标识：本区证据来自 KswordARK 驱动只读查询")));
-    const QPixmap kernelBadgePixmap(QStringLiteral(":/Image/kernel_badge.png"));
-    if (!kernelBadgePixmap.isNull())
-    {
-        r0KernelBadgeLabel->setPixmap(kernelBadgePixmap.scaled(
-            42,
-            42,
-            Qt::KeepAspectRatio,
-            Qt::SmoothTransformation));
-    }
-    moduleLayout->addWidget(r0KernelBadgeLabel, 0, Qt::AlignRight | Qt::AlignBottom);
-
     m_overviewSplitter->addWidget(serviceContainer);
     m_overviewSplitter->addWidget(moduleContainer);
     m_overviewSplitter->setStretchFactor(0, 3);
@@ -620,24 +603,6 @@ void DriverDock::initializeDebugOutputTab()
     m_debugOutputEdit->setPlaceholderText(
         driverText("driver.debug.output.placeholder", QStringLiteral("调试输出会实时显示在这里。")));
     m_debugOutputLayout->addWidget(m_debugOutputEdit, 1);
-
-    // R0 功能页右下角统一显示 Kernel.png 标识，明确数据来源于内核驱动。
-    QLabel* debugKernelBadgeLabel = new QLabel(m_debugOutputPage);
-    debugKernelBadgeLabel->setObjectName(QStringLiteral("driverDebugOutputKernelBadgeLabel"));
-    ks::i18n::LanguageManager::instance().bindToolTip(
-        debugKernelBadgeLabel,
-        QStringLiteral("driver.debug.r0_badge.tooltip"),
-        QStringLiteral("R0 功能标识：调试消息来自 KswordARK 内核回调"));
-    const QPixmap debugKernelBadgePixmap(QStringLiteral(":/Image/kernel_badge.png"));
-    if (!debugKernelBadgePixmap.isNull())
-    {
-        debugKernelBadgeLabel->setPixmap(debugKernelBadgePixmap.scaled(
-            36,
-            36,
-            Qt::KeepAspectRatio,
-            Qt::SmoothTransformation));
-    }
-    m_debugOutputLayout->addWidget(debugKernelBadgeLabel, 0, Qt::AlignRight | Qt::AlignBottom);
 
     m_tabWidget->addTab(
         m_debugOutputPage,

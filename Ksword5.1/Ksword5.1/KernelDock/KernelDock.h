@@ -1007,7 +1007,6 @@ private:
     QPushButton* m_copyDynDataReportButton = nullptr;  // m_copyDynDataReportButton：复制诊断报告按钮。
     QLineEdit* m_dynDataFilterEdit = nullptr;          // m_dynDataFilterEdit：动态偏移字段筛选输入框。
     QLabel* m_dynDataStatusLabel = nullptr;            // m_dynDataStatusLabel：动态偏移状态文本。
-    QLabel* m_dynDataKernelBadge = nullptr;            // m_dynDataKernelBadge：R0/Kernel 视觉标识。
     QTableWidget* m_dynDataSummaryTable = nullptr;     // m_dynDataSummaryTable：动态偏移摘要表。
     QTableWidget* m_dynDataFieldTable = nullptr;       // m_dynDataFieldTable：动态偏移字段表。
     CodeEditorWidget* m_dynDataDetailEditor = nullptr; // m_dynDataDetailEditor：动态偏移详情编辑器（只读）。

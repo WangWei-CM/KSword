@@ -23,6 +23,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -216,7 +217,7 @@ private:
     // ProcessTableRowKind：
     // - Process 表示真实进程行，可作为右键、双击、R0/R3 操作目标；
     // - GroupHeader 表示“应用/后台进程/系统”分类标题，只负责展示和展开；
-    // - ApplicationAggregate 表示某个应用的聚合父行，展示汇总指标但不直接执行进程动作。
+    // - ApplicationAggregate 表示某个应用的聚合父行，展示汇总指标并把动作展开到全部成员进程。
     enum class ProcessTableRowKind : int
     {
         Process = 0,
@@ -240,6 +241,7 @@ private:
         FriendlyProcessGroupType friendlyGroupType = FriendlyProcessGroupType::Background; // friendlyGroupType：友好视图分类。
         QString syntheticTitle;                       // syntheticTitle：合成行名称列显示文本；真实进程为空。
         QString expansionKey;                         // expansionKey：合成行展开状态键；真实进程通常为空。
+        std::vector<std::string> actionIdentityKeys;   // actionIdentityKeys：应用聚合行对应的全部真实进程标识。
         int depth = 0;                                // 树状列表下的缩进深度。
         bool hasChildren = false;                     // hasChildren：真实树状/友好视图下是否存在子进程。
         bool isNew = false;                           // 本轮新增进程（绿色高亮）。
@@ -259,6 +261,7 @@ private:
         FriendlyProcessGroupType friendlyGroupType = FriendlyProcessGroupType::Background; // friendlyGroupType：合成行所属分类。
         QString syntheticTitle;                       // syntheticTitle：分类/聚合行的展示标题。
         QString expansionKey;                         // expansionKey：分类/聚合行展开状态键。
+        std::vector<std::string> actionIdentityKeys;   // actionIdentityKeys：应用聚合行批量动作的成员标识。
         int depth = 0;                                // depth：树状显示时的缩进层级。
         bool hasChildren = false;                     // hasChildren：供表示层绘制树状展开提示。
         bool isNew = false;                           // isNew：新增行高亮标记。
@@ -436,7 +439,7 @@ private:
     // - 参数 preferThreadTable 为 true 时优先读取线程表；
     // - 返回值：无。
     void showCrossViewDetailForCurrentRow(bool preferThreadTable);
-    void applyThreadStatusUi(bool refreshing, const QString& stateText);
+    void applyThreadStatusUi(bool refreshing, const QString& stateText, const QString& detailText = QString());
     std::vector<DisplayRow> buildDisplayOrder() const;
     std::vector<DisplayRow> buildTreeDisplayOrder() const;
     std::vector<DisplayRow> buildListDisplayOrder() const;
@@ -581,6 +584,10 @@ private:
     QModelIndex processTableViewIndexForIdentityKey(const std::string& identityKey, int column) const;
     std::vector<QModelIndex> selectedProcessTableRowIndexes(bool includeCurrentFallback) const;
     ProcessActionTarget processActionTargetFromTableRow(const ProcessTableRow& tableRow) const;
+    void appendProcessActionTargetsFromTableRow(
+        const ProcessTableRow& tableRow,
+        std::vector<ProcessActionTarget>& actionTargets,
+        std::unordered_set<std::string>& visitedIdentitySet) const;
     void dispatchProcessActionTargetsInParallel(
         const QString& actionTitle,
         const std::vector<ProcessActionTarget>& actionTargets,
@@ -662,6 +669,7 @@ private:
     // ======== 进程网络吞吐采样 ========
     void ensureProcessNetworkTrafficCaptureStarted();
     void stopProcessNetworkTrafficCapture();
+    void pruneProcessNetworkTrafficCounters();
     std::unordered_map<std::uint32_t, NetworkTrafficCounters> snapshotProcessNetworkTrafficCounters() const;
 
 private:
@@ -683,7 +691,6 @@ private:
     QHBoxLayout* m_controlLayout = nullptr;   // 上方“操作按钮”行布局。
     QHBoxLayout* m_statusLayout = nullptr;    // 下方“监控状态”行布局。
     QComboBox* m_strategyCombo = nullptr;     // 进程遍历方案下拉框。
-    QPushButton* m_treeToggleButton = nullptr;// 树/列表切换按钮。
     QComboBox* m_viewModeCombo = nullptr;     // 监视视图/详细视图下拉框。
     QPushButton* m_startButton = nullptr;     // 开始监视按钮。
     QPushButton* m_pauseButton = nullptr;     // 暂停监视按钮。
@@ -719,7 +726,7 @@ private:
     std::uint64_t m_activityNextSequence = 0;       // 记录样本序号。
     std::uint64_t m_activityRecordingStartTick100ns = 0; // 本次记录开始 steady tick。
     double m_activityTotalPhysicalMemoryMB = 0.0;    // 物理内存总量，用于把内存指标转换为百分比。
-    std::vector<ProcessActivitySample> m_activitySamples; // 有界环形记录缓存。
+    std::deque<ProcessActivitySample> m_activitySamples; // 有界双端记录缓存，淘汰旧样本时不搬移整个序列。
     std::vector<ks::process::ProcessRecord> m_activityTableSnapshotRecords; // 历史样本映射出的进程表记录。
 
     // ======== 进程表格 ========

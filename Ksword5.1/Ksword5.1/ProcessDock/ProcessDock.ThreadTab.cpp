@@ -20,6 +20,7 @@
 #include <QPushButton>
 #include <QRunnable>
 #include <QSignalBlocker>
+#include <QSizePolicy>
 #include <QThreadPool>
 #include <QTreeWidget>
 #include <QTreeWidgetItem>
@@ -535,6 +536,11 @@ void ProcessDock::initializeThreadPage()
 
     m_threadStatusLabel = new QLabel("● 等待刷新线程列表", m_threadPage);
     m_threadStatusLabel->setToolTip("展示线程列表刷新状态与诊断路径");
+    // 状态标签只展示紧凑摘要，完整诊断保留在 tooltip，避免长文本撑宽整个 Dock。
+    m_threadStatusLabel->setMinimumWidth(0);
+    m_threadStatusLabel->setMaximumWidth(420);
+    m_threadStatusLabel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+    m_threadStatusLabel->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
     m_threadStatusLabel->setStyleSheet(
         QStringLiteral("color:%1; font-weight:600;")
         .arg(KswordTheme::TextSecondaryHex()));
@@ -787,7 +793,10 @@ void ProcessDock::initializeThreadPageConnections()
     }
 }
 
-void ProcessDock::applyThreadStatusUi(const bool refreshing, const QString& stateText)
+void ProcessDock::applyThreadStatusUi(
+    const bool refreshing,
+    const QString& stateText,
+    const QString& detailText)
 {
     if (m_threadStatusLabel == nullptr)
     {
@@ -808,6 +817,7 @@ void ProcessDock::applyThreadStatusUi(const bool refreshing, const QString& stat
             QStringLiteral("color:%1; font-weight:600;").arg(idleColor));
     }
     m_threadStatusLabel->setText(stateText);
+    m_threadStatusLabel->setToolTip(detailText.isEmpty() ? stateText : detailText);
 }
 
 void ProcessDock::requestAsyncThreadRefresh(const bool forceRefresh)
@@ -879,17 +889,30 @@ void ProcessDock::requestAsyncThreadRefresh(const bool forceRefresh)
             const QString strategyText = usedNtQuery
                 ? QStringLiteral("NtQuerySystemInformation")
                 : QStringLiteral("Toolhelp Fallback");
-            QString statusText = QString("● 刷新完成 | 线程:%1 | 方法:%2")
+            const QString r0StateText = r0ThreadExtensionMerged
+                ? ks::i18n::contextText(
+                    QStringLiteral("process.thread.status.r0_merged"),
+                    QStringLiteral("已合并"))
+                : ks::i18n::contextText(
+                    QStringLiteral("process.thread.status.r0_unavailable"),
+                    QStringLiteral("不可用"));
+            const QString statusText = ks::i18n::contextText(
+                QStringLiteral("process.thread.status.completed"),
+                QStringLiteral("● 完成 · %1 线程 · %2 · R0:%3"))
                 .arg(guardThis->m_threadRecordList.size())
-                .arg(strategyText);
-            statusText += r0ThreadExtensionMerged
-                ? QStringLiteral(" | R0扩展:已合并")
-                : QStringLiteral(" | R0扩展:Unavailable");
+                .arg(strategyText)
+                .arg(r0StateText);
+            QString detailText = ks::i18n::contextText(
+                QStringLiteral("process.thread.status.detail"),
+                QStringLiteral("刷新完成 | 线程:%1 | 方法:%2 | R0扩展:%3"))
+                .arg(guardThis->m_threadRecordList.size())
+                .arg(strategyText)
+                .arg(r0StateText);
             if (!guardThis->m_threadDiagnosticText.empty())
             {
-                statusText += QString(" | %1").arg(QString::fromStdString(guardThis->m_threadDiagnosticText));
+                detailText += QStringLiteral("\n%1").arg(QString::fromStdString(guardThis->m_threadDiagnosticText));
             }
-            guardThis->applyThreadStatusUi(false, statusText);
+            guardThis->applyThreadStatusUi(false, statusText, detailText);
 
             {
                 kLogEvent logEvent;

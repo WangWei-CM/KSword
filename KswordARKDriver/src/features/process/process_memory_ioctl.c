@@ -16,6 +16,7 @@ Environment:
 
 #include "ark/ark_driver.h"
 #include "../../dispatch/ioctl_validation.h"
+#include "../../platform/pool_compat.h"
 
 #include <ntstrsafe.h>
 #include <stdarg.h>
@@ -386,8 +387,7 @@ Return Value:
      * variable-length write request before retrieving/clearing the output
      * buffer, otherwise RtlZeroMemory(outputBuffer) can erase request->data.
      */
-    writeRequestCopy = (KSWORD_ARK_WRITE_VIRTUAL_MEMORY_REQUEST*)ExAllocatePool2(
-        POOL_FLAG_NON_PAGED,
+    writeRequestCopy = (KSWORD_ARK_WRITE_VIRTUAL_MEMORY_REQUEST*)KswordARKAllocateNonPagedPool(
         requiredInputLength,
         KSWORD_ARK_MEMORY_IOCTL_POOL_TAG);
     if (writeRequestCopy == NULL) {

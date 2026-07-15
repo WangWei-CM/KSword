@@ -883,7 +883,6 @@ private:
     QLabel* m_kernelExecutableStatusLabel = nullptr;         // 刷新状态标签。
     QTableWidget* m_kernelExecutableTable = nullptr;         // 可执行页扫描表。
     CodeEditorWidget* m_kernelExecutableDetailEditor = nullptr; // 详情编辑器。
-    QLabel* m_kernelExecutableBadgeLabel = nullptr;          // 右下角 Kernel.png 标识。
 
     // ========================================================
     // Tab8：内核内存证据

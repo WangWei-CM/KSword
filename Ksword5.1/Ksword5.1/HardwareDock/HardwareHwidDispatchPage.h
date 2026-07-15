@@ -139,6 +139,5 @@ private:
     QPushButton* m_copyPlanButton = nullptr;  // m_copyPlanButton：复制计划按钮。
     QTableWidget* m_statusTable = nullptr;    // m_statusTable：目标驱动状态表。
     CodeEditorWidget* m_planEditor = nullptr; // m_planEditor：只读计划/日志文本。
-    QLabel* m_kernelBadgeLabel = nullptr;     // m_kernelBadgeLabel：R0 功能入口统一 Kernel.png 标识。
     bool m_warningShown = false;              // m_warningShown：首次进入弹窗状态。
 };

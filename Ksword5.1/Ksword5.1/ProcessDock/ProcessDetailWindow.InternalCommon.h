@@ -161,9 +161,8 @@ namespace process_detail_window_internal
     QString buildProcessDetailMenuStyle();
 
     // buildProcessDetailR0ActionIcon 作用：
-    // - 基于普通功能图标叠加 Kernel.png 角标；
-    // - 输入 iconPath 为 qrc 图标路径，处理时在右下角绘制 R0 标识；
-    // - 返回带 R0 标识的 QIcon，供按钮和菜单项使用。
+    // - 输入 iconPath 为 qrc 业务图标路径；
+    // - 返回统一尺寸的 QIcon，供已明确标注 R0 的按钮和菜单项使用。
     QIcon buildProcessDetailR0ActionIcon(const QString& iconPath);
 
     // buildStateLabelStyle 作用：生成状态标签样式文本。

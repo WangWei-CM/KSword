@@ -795,19 +795,6 @@ void NetworkAuditPage::initializeUi()
     m_nsiSummaryTable->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
     installCopyMenu(m_nsiSummaryTable);
     nsiLayout->addWidget(m_nsiSummaryTable, 1);
-
-    // R0 视觉标识：
-    // - 输入：项目资源中的 Kernel.png；
-    // - 处理：放在网络审计摘要页右下角，提示下方包含 R0 审计结果；
-    // - 返回：无，Qt 父子关系负责释放。
-    QHBoxLayout* kernelBadgeLayout = new QHBoxLayout();
-    kernelBadgeLayout->setContentsMargins(0, 0, 0, 0);
-    kernelBadgeLayout->addStretch(1);
-    m_kernelBadgeLabel = new QLabel(m_nsiPage);
-    m_kernelBadgeLabel->setPixmap(QPixmap(QStringLiteral(":/Image/kernel_badge.png")).scaled(24, 24, Qt::KeepAspectRatio, Qt::SmoothTransformation));
-    m_kernelBadgeLabel->setToolTip(QStringLiteral("本页 R0 TCP/UDP/WFP/NDIS 摘要来自 ArkDriverClient，只读审计，不直接调用 DeviceIoControl。"));
-    kernelBadgeLayout->addWidget(m_kernelBadgeLabel);
-    nsiLayout->addLayout(kernelBadgeLayout);
     m_sectionTabWidget->addTab(m_nsiPage, QStringLiteral("NSI"));
 }
 

@@ -357,12 +357,12 @@ namespace
         defaultSettings.backgroundImagePath = QStringLiteral("Style/ksword_background.png");
         defaultSettings.backgroundOpacityPercent = 35;
         defaultSettings.startupDefaultTabKey = QStringLiteral("welcome");
-        defaultSettings.launchMaximizedOnStartup = false;
-        defaultSettings.startupTopMostEnabled = true;
-        defaultSettings.autoRequestAdminOnStartup = false;
+        defaultSettings.launchMaximizedOnStartup = true;
+        defaultSettings.startupTopMostEnabled = false;
+        defaultSettings.autoRequestAdminOnStartup = true;
         defaultSettings.startupWindowScaleFactor = 1.0;
         defaultSettings.startupScaleRecommendPromptDisabled = false;
-        defaultSettings.unlockerShellContextMenuEnabled = false;
+        defaultSettings.unlockerShellContextMenuEnabled = true;
         defaultSettings.useWideScrollBars = false;
         defaultSettings.scrollBarAutoHideEnabled = false;
         defaultSettings.sliderWheelAdjustEnabled = false;
@@ -501,11 +501,11 @@ ks::settings::AppearanceSettings ks::settings::loadAppearanceSettings()
             .toBool(loadedSettings.launchMaximizedOnStartup);
     }
 
-    // startupTopMostEnabled 作用：读取“启动后自动最高级置顶”开关，缺失时默认开启。
+    // startupTopMostEnabled 作用：读取“启动后自动最高级置顶”开关，缺失时默认关闭。
     loadedSettings.startupTopMostEnabled = rootObject.value(QStringLiteral("startup_topmost_enabled"))
         .toBool(loadedSettings.startupTopMostEnabled);
 
-    // autoRequestAdminOnStartup 作用：读取“启动时自动请求管理员权限”开关，缺失时回退 false。
+    // autoRequestAdminOnStartup 作用：读取“启动时自动请求管理员权限”开关，缺失时回退 true。
     loadedSettings.autoRequestAdminOnStartup = rootObject.value(QStringLiteral("startup_auto_request_admin"))
         .toBool(loadedSettings.autoRequestAdminOnStartup);
 

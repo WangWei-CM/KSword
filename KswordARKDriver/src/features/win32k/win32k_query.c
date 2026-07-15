@@ -16,6 +16,7 @@ Environment:
 
 #include "win32k_query.h"
 #include "win32k_support.h"
+#include "../../platform/pool_compat.h"
 #include "ark/ark_keyboard.h"
 
 #include <ntstrsafe.h>
@@ -661,8 +662,7 @@ Return Value:
 
     keyboardBufferLength = sizeof(KSWORD_ARK_ENUM_KEYBOARD_HOTKEYS_RESPONSE) +
         ((size_t)keyboardRequest.maxEntries * sizeof(KSWORD_ARK_KEYBOARD_HOTKEY_ENTRY));
-    keyboardResponse = (KSWORD_ARK_ENUM_KEYBOARD_HOTKEYS_RESPONSE*)ExAllocatePool2(
-        POOL_FLAG_NON_PAGED,
+    keyboardResponse = (KSWORD_ARK_ENUM_KEYBOARD_HOTKEYS_RESPONSE*)KswordARKAllocateNonPagedPool(
         keyboardBufferLength,
         KSWORD_ARK_WIN32K_BRIDGE_TAG);
     if (keyboardResponse == NULL) {
@@ -808,8 +808,7 @@ Return Value:
 
     keyboardBufferLength = sizeof(KSWORD_ARK_ENUM_KEYBOARD_HOOKS_RESPONSE) +
         ((size_t)keyboardRequest.maxEntries * sizeof(KSWORD_ARK_KEYBOARD_HOOK_ENTRY));
-    keyboardResponse = (KSWORD_ARK_ENUM_KEYBOARD_HOOKS_RESPONSE*)ExAllocatePool2(
-        POOL_FLAG_NON_PAGED,
+    keyboardResponse = (KSWORD_ARK_ENUM_KEYBOARD_HOOKS_RESPONSE*)KswordARKAllocateNonPagedPool(
         keyboardBufferLength,
         KSWORD_ARK_WIN32K_BRIDGE_TAG);
     if (keyboardResponse == NULL) {

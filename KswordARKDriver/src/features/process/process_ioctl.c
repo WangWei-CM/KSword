@@ -16,6 +16,7 @@ Environment:
 
 #include "ark/ark_driver.h"
 #include "../../dispatch/ioctl_validation.h"
+#include "../../platform/pool_compat.h"
 
 #include <ntstrsafe.h>
 #include <stdarg.h>
@@ -1091,8 +1092,7 @@ Return Value:
         return STATUS_INVALID_PARAMETER;
     }
 
-    injectRequestCopy = (KSWORD_ARK_INJECT_PROCESS_REQUEST*)ExAllocatePool2(
-        POOL_FLAG_NON_PAGED,
+    injectRequestCopy = (KSWORD_ARK_INJECT_PROCESS_REQUEST*)KswordARKAllocateNonPagedPool(
         requiredInputLength,
         KSWORD_ARK_PROCESS_INJECT_IOCTL_POOL_TAG);
     if (injectRequestCopy == NULL) {

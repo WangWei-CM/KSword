@@ -45,7 +45,7 @@ public:
 private:
     // initializeUi 作用：
     // - 输入：无；
-    // - 处理：创建工具栏、证据表、详情区和右下角 Kernel.png 标识；
+    // - 处理：创建工具栏、证据表和详情区；
     // - 返回：无。
     void initializeUi();
 
@@ -89,7 +89,6 @@ private:
     QLabel* m_statusLabel = nullptr;           // m_statusLabel：展示 R0 查询状态摘要。
     QTableWidget* m_evidenceTable = nullptr;   // m_evidenceTable：CPU/MSR/IDT/GDT 证据表。
     CodeEditorWidget* m_detailEditor = nullptr;// m_detailEditor：证据详情文本编辑器。
-    QLabel* m_kernelBadgeLabel = nullptr;      // m_kernelBadgeLabel：R0 功能入口统一 Kernel.png 标识。
 
     ksword::ark::DriverCapabilitiesQueryResult m_lastCapabilityResult; // m_lastCapabilityResult：最近一次驱动能力快照。
     ksword::ark::DynDataCapabilitiesResult m_lastDynDataResult; // m_lastDynDataResult：最近一次 DynData 能力快照。

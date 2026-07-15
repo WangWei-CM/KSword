@@ -179,7 +179,6 @@ private:
     QPushButton* m_refreshButton = nullptr;
     QLineEdit* m_filterEdit = nullptr;
     QLabel* m_statusLabel = nullptr;
-    QLabel* m_kernelBadgeLabel = nullptr;
     QTableWidget* m_table = nullptr;
     CodeEditorWidget* m_detailEditor = nullptr;
 

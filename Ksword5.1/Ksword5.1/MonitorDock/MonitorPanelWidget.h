@@ -22,6 +22,7 @@ class QLabel;
 class QLineSeries;
 class QResizeEvent;
 class QShowEvent;
+class QEvent;
 class QTimer;
 class QValueAxis;
 class QVBoxLayout;
@@ -50,6 +51,9 @@ protected:
     // - 首次展示后触发一次延迟重排；
     // - 解决初始 geometry 尚未稳定时的高度估算偏差。
     void showEvent(QShowEvent* showEventPointer) override;
+
+    // changeEvent 作用：主题、样式或应用调色板变化后立即重刷图表文字颜色。
+    void changeEvent(QEvent* eventPointer) override;
 
 private:
     // initializeUi 作用：

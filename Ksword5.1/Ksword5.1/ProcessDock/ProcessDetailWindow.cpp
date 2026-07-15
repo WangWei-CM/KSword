@@ -249,9 +249,7 @@ namespace process_detail_window_internal
 
     QIcon buildProcessDetailR0ActionIcon(const QString& iconPath)
     {
-        // R0 图标构造：
-        // - 先加载普通业务图标；
-        // - 再叠加 qrc 中的 Kernel.png，满足 R0 入口统一视觉标识要求。
+        // R0 按钮使用对应业务图标；按钮文字本身明确标出 R0 来源。
         constexpr QSize detailR0IconSize(18, 18);
         QPixmap iconPixmap(iconPath);
         if (!iconPixmap.isNull())
@@ -265,25 +263,6 @@ namespace process_detail_window_internal
         {
             iconPixmap = QPixmap(detailR0IconSize);
             iconPixmap.fill(Qt::transparent);
-        }
-
-        const QPixmap kernelPixmap(QStringLiteral(":/Image/kernel_badge.png"));
-        if (!kernelPixmap.isNull())
-        {
-            const int badgeSide = std::max(8, std::min(iconPixmap.width(), iconPixmap.height()) / 2);
-            const QPixmap scaledBadge = kernelPixmap.scaled(
-                badgeSide,
-                badgeSide,
-                Qt::KeepAspectRatio,
-                Qt::SmoothTransformation);
-
-            QPainter painter(&iconPixmap);
-            painter.setRenderHint(QPainter::Antialiasing, true);
-            painter.drawPixmap(
-                iconPixmap.width() - scaledBadge.width(),
-                iconPixmap.height() - scaledBadge.height(),
-                scaledBadge);
-            painter.end();
         }
 
         return QIcon(iconPixmap);

@@ -277,20 +277,6 @@ void HardwareHwidDispatchPage::initializeUi()
     m_planEditor = new CodeEditorWidget(editorPanel);
     m_planEditor->setReadOnly(true);
     editorLayout->addWidget(m_planEditor, 1);
-
-    QVBoxLayout* badgeLayout = new QVBoxLayout();
-    badgeLayout->setContentsMargins(0, 0, 0, 0);
-    badgeLayout->addStretch(1);
-    m_kernelBadgeLabel = new QLabel(editorPanel);
-    m_kernelBadgeLabel->setToolTip(QStringLiteral("R0 功能入口：HWID Dispatch 派遣函数控制"));
-    m_kernelBadgeLabel->setPixmap(QPixmap(QStringLiteral(":/Image/kernel_badge.png")).scaled(
-        36,
-        36,
-        Qt::KeepAspectRatio,
-        Qt::SmoothTransformation));
-    m_kernelBadgeLabel->setAlignment(Qt::AlignRight | Qt::AlignBottom);
-    badgeLayout->addWidget(m_kernelBadgeLabel, 0, Qt::AlignRight | Qt::AlignBottom);
-    editorLayout->addLayout(badgeLayout, 0);
     m_rootLayout->addWidget(editorPanel, 1);
 }
 

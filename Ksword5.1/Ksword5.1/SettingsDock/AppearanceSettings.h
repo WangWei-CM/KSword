@@ -44,12 +44,12 @@ namespace ks::settings
         QString backgroundImagePath = QStringLiteral("Style/ksword_background.png");
         int backgroundOpacityPercent = 35;
         QString startupDefaultTabKey = QStringLiteral("welcome");
-        bool launchMaximizedOnStartup = false;
-        bool startupTopMostEnabled = true;
-        bool autoRequestAdminOnStartup = false;
+        bool launchMaximizedOnStartup = true;
+        bool startupTopMostEnabled = false;
+        bool autoRequestAdminOnStartup = true;
         double startupWindowScaleFactor = 1.0;
         bool startupScaleRecommendPromptDisabled = false;
-        bool unlockerShellContextMenuEnabled = false;
+        bool unlockerShellContextMenuEnabled = true;
         bool useWideScrollBars = false;
         bool scrollBarAutoHideEnabled = false;
         bool sliderWheelAdjustEnabled = false;

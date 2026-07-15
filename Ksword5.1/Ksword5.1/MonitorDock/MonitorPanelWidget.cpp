@@ -12,6 +12,7 @@
 #include "../theme.h"
 
 #include <QDateTime>
+#include <QEvent>
 #include <QFrame>
 #include <QGridLayout>
 #include <QFont>
@@ -106,13 +107,17 @@ namespace
     // monitorPanelTextColor 作用：返回监视器图表标题/图例/轴标签颜色。
     QColor monitorPanelTextColor()
     {
-        return KswordTheme::TextPrimaryColor();
+        return KswordTheme::IsDarkModeEnabled()
+            ? KswordTheme::WhiteColor()
+            : KswordTheme::TextPrimaryColor();
     }
 
     // monitorPanelMutedTextColor 作用：返回监视器坐标轴次级文字颜色。
     QColor monitorPanelMutedTextColor()
     {
-        return KswordTheme::TextSecondaryColor();
+        return KswordTheme::IsDarkModeEnabled()
+            ? KswordTheme::WhiteColor()
+            : KswordTheme::TextSecondaryColor();
     }
 }
 
@@ -187,6 +192,23 @@ void MonitorPanelWidget::showEvent(QShowEvent* showEventPointer)
     {
         adjustChartCellHeights();
     });
+}
+
+void MonitorPanelWidget::changeEvent(QEvent* eventPointer)
+{
+    QWidget::changeEvent(eventPointer);
+    if (eventPointer == nullptr)
+    {
+        return;
+    }
+
+    const QEvent::Type eventType = eventPointer->type();
+    if (eventType == QEvent::PaletteChange ||
+        eventType == QEvent::ApplicationPaletteChange ||
+        eventType == QEvent::StyleChange)
+    {
+        applyChartTextTheme();
+    }
 }
 
 void MonitorPanelWidget::initializeUi()
@@ -1065,8 +1087,8 @@ void MonitorPanelWidget::applyChartTextTheme()
             }
             axis->setLabelsBrush(mutedTextBrush);
             axis->setTitleBrush(mutedTextBrush);
-            axis->setLinePenColor(mutedTextColor);
-            axis->setGridLineColor(mutedTextColor);
+            axis->setLinePenColor(KswordTheme::BorderStrongColor());
+            axis->setGridLineColor(KswordTheme::BorderColor());
         }
     }
 }

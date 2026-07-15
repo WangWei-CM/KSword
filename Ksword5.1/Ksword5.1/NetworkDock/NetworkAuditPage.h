@@ -344,7 +344,6 @@ private:
     // NSI summary.
     QWidget* m_nsiPage = nullptr;
     QTableWidget* m_nsiSummaryTable = nullptr;
-    QLabel* m_kernelBadgeLabel = nullptr;
 
     std::atomic_bool m_refreshInProgress{ false };
 };

@@ -1423,7 +1423,7 @@ void ProcessDetailWindow::initializeActionTab()
 
     // 补充操作组：
     // - 与进程列表右键菜单对齐，把详情页原先遗漏的效率模式、PPL 刷新和 R0 能力放进来；
-    // - R0 按钮统一叠加 Kernel.png 角标，菜单弹出项在点击时动态生成。
+    // - R0 按钮使用明确文字和对应业务图标，菜单弹出项在点击时动态生成。
     QGroupBox* extendedActionGroup = new QGroupBox(QStringLiteral("右键菜单同步能力"), m_actionTab);
     QGridLayout* extendedActionLayout = new QGridLayout(extendedActionGroup);
     extendedActionLayout->setHorizontalSpacing(8);
@@ -1447,8 +1447,8 @@ void ProcessDetailWindow::initializeActionTab()
         extendedActionGroup);
 
     // buildR0MenuButton 作用：
-    // - 为 R0 功能创建“文字 + Kernel.png 角标”的按钮；
-    // - 输入 buttonText 为可见文字，iconPath 用于生成 R0 角标图标，toolTipText 为补充说明；
+    // - 为 R0 功能创建“明确文字 + 业务图标”的按钮；
+    // - 输入 buttonText 为可见文字，iconPath 为业务图标，toolTipText 为补充说明；
     // - 返回按钮对象，调用方负责接入布局和 clicked 处理。
     const auto buildR0MenuButton =
         [](const QString& buttonText, const QString& iconPath, const QString& toolTipText, QWidget* parentWidget) -> QPushButton*
