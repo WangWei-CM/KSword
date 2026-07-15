@@ -30,4 +30,10 @@ public:
     QVBoxLayout* m_leftLayout;      // 左侧垂直布局：按 Logo、发布信息、按钮区和扩展信息排列。
     QHBoxLayout* m_btnLayout;       // 按钮水平布局：放置 Github 与 QQ 群按钮。
     QHBoxLayout* m_referenceLayout; // 参考项目布局：横向放置外部参考仓库按钮。
+
+protected:
+    void changeEvent(QEvent* event) override;
+
+private:
+    void retranslateUi();
 };

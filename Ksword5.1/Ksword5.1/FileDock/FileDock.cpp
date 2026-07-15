@@ -1935,6 +1935,21 @@ namespace
             }
             return baseValue;
         }
+
+        QVariant headerData(
+            const int section,
+            const Qt::Orientation orientation,
+            const int role = Qt::DisplayRole) const override
+        {
+            const QVariant baseValue = QFileSystemModel::headerData(section, orientation, role);
+            if (orientation == Qt::Horizontal
+                && role == Qt::DisplayRole
+                && baseValue.metaType().id() == QMetaType::QString)
+            {
+                return ks::i18n::displayText(baseValue.toString());
+            }
+            return baseValue;
+        }
     };
 
     // buildDriverNtPath：

@@ -3,6 +3,7 @@
 #include <QList>
 #include <QHash>
 #include <QObject>
+#include <QRegularExpression>
 #include <QString>
 #include <QStringList>
 
@@ -36,6 +37,9 @@ namespace ks::i18n
         QList<LanguageInfo> availableLanguages() const;
         QString text(const QString& key, const QString& fallbackText = QString()) const;
         QString contextText(const QString& contextKey, const QString& sourceText) const;
+        QString sourceText(const QString& sourceText) const;
+        QString sourceForRenderedText(const QString& renderedText) const;
+        QString displayText(const QString& renderedOrSourceText) const;
 
         void bindText(QObject* object, const QString& key, const QString& fallbackText);
         void bindToolTip(QWidget* widget, const QString& key, const QString& fallbackText);
@@ -57,10 +61,23 @@ namespace ks::i18n
 
         struct LanguagePack
         {
+            struct SourceTemplate
+            {
+                QRegularExpression expression;
+                QHash<QString, int> placeholderCaptureGroups;
+                QString translatedPattern;
+                QString requiredPrefix;
+                QString requiredSuffix;
+                int literalLength = 0;
+            };
+
             LanguageInfo info;
             QString fallbackLanguageId;
             QHash<QString, QString> translations;
             QHash<QString, QString> contextTranslations;
+            QHash<QString, QString> sourceTranslations;
+            QHash<QString, QString> renderedSources;
+            QList<SourceTemplate> sourceTemplates;
         };
 
         void discoverLanguagePacks(QStringList* warningListOut);
@@ -75,11 +92,21 @@ namespace ks::i18n
             const QString& contextKey,
             const QString& sourceText,
             QStringList* visitedLanguageIds) const;
+        QString resolveSourceText(
+            const QString& languageId,
+            const QString& sourceText,
+            QStringList* visitedLanguageIds) const;
+        void ensureApplicationEventFilter();
+        void scheduleRuntimeTranslation(QObject* object);
+        void applyRuntimeTranslations(QObject* object);
         void applyBindings(QObject* object) const;
         void applyApplicationDirection() const;
+        bool eventFilter(QObject* watched, QEvent* event) override;
 
         QList<LanguagePack> m_languagePacks;
         QString m_currentLanguageId;
+        bool m_applicationEventFilterInstalled = false;
+        bool m_applyingRuntimeTranslations = false;
     };
 
     inline QString text(const QString& key, const QString& fallbackText = QString())
@@ -90,6 +117,16 @@ namespace ks::i18n
     inline QString contextText(const QString& contextKey, const QString& sourceText)
     {
         return LanguageManager::instance().contextText(contextKey, sourceText);
+    }
+
+    inline QString sourceText(const QString& sourceText)
+    {
+        return LanguageManager::instance().sourceText(sourceText);
+    }
+
+    inline QString displayText(const QString& renderedOrSourceText)
+    {
+        return LanguageManager::instance().displayText(renderedOrSourceText);
     }
 
 }

@@ -295,7 +295,7 @@ void PerformanceNavCard::paintEvent(QPaintEvent* paintEventPointer)
     painter.setFont(titleFont);
     painter.setPen(KswordTheme::TextPrimaryColor());
     const QString elidedTitleText = QFontMetrics(titleFont).elidedText(
-        m_titleText,
+        ks::i18n::displayText(m_titleText),
         Qt::ElideRight,
         titleRect.width());
     painter.drawText(titleRect, Qt::AlignLeft | Qt::AlignVCenter, elidedTitleText);
@@ -306,7 +306,7 @@ void PerformanceNavCard::paintEvent(QPaintEvent* paintEventPointer)
     painter.setFont(subtitleFont);
     painter.setPen(KswordTheme::TextSecondaryColor());
     const QString elidedSubtitleText = QFontMetrics(subtitleFont).elidedText(
-        m_subtitleText,
+        ks::i18n::displayText(m_subtitleText),
         Qt::ElideRight,
         subtitleRect.width());
     painter.drawText(subtitleRect, Qt::AlignLeft | Qt::AlignVCenter, elidedSubtitleText);

@@ -1,6 +1,8 @@
 #include "WelcomeDock.h"
+#include "../Internationalization/LanguageManager.h"
 #include "../UI/UI.css/UI_css.h"
 #include "../theme.h"
+#include <QEvent>
 #include <QPixmap>
 
 namespace
@@ -163,6 +165,8 @@ WelcomeDock::WelcomeDock(QWidget* parent) : QWidget(parent) {
     m_mainLayout->setContentsMargins(0, 0, 0, 0); // 主布局无边距（消除白边）
     setLayout(m_mainLayout);
 
+    // 构造期直接按当前语言生成欢迎页；后续 LanguageChange 会走同一入口。
+    retranslateUi();
 
     // ==== 3. 信号连接 ====
     // Github 按钮：点击后交给系统默认浏览器打开项目仓库；无返回值。
@@ -189,4 +193,101 @@ WelcomeDock::WelcomeDock(QWidget* parent) : QWidget(parent) {
     connect(m_skt64Btn, &QPushButton::clicked, this, [=]() {
         QDesktopServices::openUrl(QUrl(kSkt64RepositoryUrl));
         });
+}
+
+void WelcomeDock::changeEvent(QEvent* event)
+{
+    QWidget::changeEvent(event);
+    if (event != nullptr && event->type() == QEvent::LanguageChange)
+    {
+        retranslateUi();
+    }
+}
+
+void WelcomeDock::retranslateUi()
+{
+    const auto welcomeText = [](const char* key, const QString& sourceText) {
+        return ks::i18n::contextText(QString::fromLatin1(key), sourceText);
+    };
+
+    if (m_leftImage != nullptr && m_leftImage->pixmap(Qt::ReturnByValue).isNull())
+    {
+        m_leftImage->setText(welcomeText(
+            "welcome.logo_fallback",
+            QStringLiteral("左侧图片区域")));
+    }
+
+    if (m_copyright != nullptr)
+    {
+        m_copyright->setText(
+            welcomeText(
+                "welcome.release_info",
+                QStringLiteral(
+                    "Ksword Dev 卡利剑ARK工具开发团队 保留所有权利。<br>"
+                    "<span style='font-size:18px;font-weight:700;'>当前版本：%1</span><br>"
+                    "<span style='font-size:12px;'>编译时间：%2</span><br>"))
+            .arg(kReleaseVersionText, kReleaseBuildTimeText));
+    }
+    if (m_contributors != nullptr)
+    {
+        m_contributors->setText(
+            welcomeText(
+                "welcome.contributors",
+                QStringLiteral("<b>贡献者：</b>%1"))
+            .arg(QStringLiteral("WangWei_CM.，OB_BUFF，PipExitThread")));
+    }
+    if (m_referenceTitle != nullptr)
+    {
+        m_referenceTitle->setText(welcomeText(
+            "welcome.reference_projects",
+            QStringLiteral("<b>参考项目：</b>")));
+    }
+    if (m_donors != nullptr)
+    {
+        m_donors->setText(
+            welcomeText(
+                "welcome.donors",
+                QStringLiteral("<b>捐赠者：</b>%1"))
+            .arg(QStringLiteral("Mapleleaf,存钱买油条（云舟API）,Extrella_Explorer,NtKrnl64,一花一树叶,hzh")));
+    }
+
+    if (m_githubBtn != nullptr)
+    {
+        m_githubBtn->setText(welcomeText(
+            "welcome.github",
+            QStringLiteral("Github仓库")));
+        m_githubBtn->setToolTip(welcomeText(
+            "welcome.github.tooltip",
+            QStringLiteral("打开项目 Github 仓库主页")));
+    }
+    if (m_qqBtn != nullptr)
+    {
+        m_qqBtn->setText(welcomeText(
+            "welcome.qq_group",
+            QStringLiteral("QQ群")));
+        m_qqBtn->setToolTip(welcomeText(
+            "welcome.qq_group.tooltip",
+            QStringLiteral("加入项目 QQ 交流群")));
+    }
+    if (m_pplControlBtn != nullptr)
+    {
+        m_pplControlBtn->setText(QStringLiteral("PPLcontrol"));
+        m_pplControlBtn->setToolTip(welcomeText(
+            "welcome.pplcontrol.tooltip",
+            QStringLiteral("打开 PPLcontrol 参考项目仓库")));
+    }
+    if (m_systemInformerBtn != nullptr)
+    {
+        m_systemInformerBtn->setText(QStringLiteral("System Informer"));
+        m_systemInformerBtn->setToolTip(welcomeText(
+            "welcome.system_informer.tooltip",
+            QStringLiteral("打开 System Informer 参考项目仓库")));
+    }
+    if (m_skt64Btn != nullptr)
+    {
+        m_skt64Btn->setText(QStringLiteral("SKT64"));
+        m_skt64Btn->setToolTip(welcomeText(
+            "welcome.skt64.tooltip",
+            QStringLiteral("打开 SKT64 参考项目仓库")));
+    }
 }

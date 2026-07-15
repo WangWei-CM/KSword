@@ -1,6 +1,8 @@
 #include "ProgressDockWidget.h"
+#include "../Internationalization/LanguageManager.h"
 #include "../theme.h"
 
+#include <QEvent>
 #include <QFrame>        // 任务卡片容器
 #include <QLabel>        // 任务与步骤文本
 #include <QProgressBar>  // 进度条显示
@@ -55,7 +57,11 @@ void ProgressDockWidget::initializeUi()
     applyTransparentBackgroundPolicy();
 
     // 空列表提示：无任务时展示，提升可读性。
-    m_emptyTipLabel = new QLabel(QStringLiteral("当前没有进行中的任务。"), m_scrollContent);
+    m_emptyTipLabel = new QLabel(
+        ks::i18n::contextText(
+            QStringLiteral("progress.empty"),
+            QStringLiteral("当前没有进行中的任务。")),
+        m_scrollContent);
     m_emptyTipLabel->setAlignment(Qt::AlignCenter);
     m_emptyTipLabel->setStyleSheet(
         QStringLiteral("color:%1; font-size:13px; background:transparent;")
@@ -123,6 +129,26 @@ void ProgressDockWidget::refreshThemeVisuals()
         m_emptyTipLabel->setStyleSheet(
             QStringLiteral("color:%1; font-size:13px; background:transparent;")
             .arg(buildHighContrastTextHex()));
+    }
+    refreshTaskCards(true);
+}
+
+void ProgressDockWidget::changeEvent(QEvent* event)
+{
+    QWidget::changeEvent(event);
+    if (event != nullptr && event->type() == QEvent::LanguageChange)
+    {
+        retranslateUi();
+    }
+}
+
+void ProgressDockWidget::retranslateUi()
+{
+    if (m_emptyTipLabel != nullptr)
+    {
+        m_emptyTipLabel->setText(ks::i18n::contextText(
+            QStringLiteral("progress.empty"),
+            QStringLiteral("当前没有进行中的任务。")));
     }
     refreshTaskCards(true);
 }
@@ -203,9 +229,13 @@ QWidget* ProgressDockWidget::createTaskCardWidget(const kProgressTask& taskItem)
     cardLayout->setSpacing(6);
 
     // 顶部标题：展示任务名与 PID，便于排查/定位。
+    const QString translatedTaskName = ks::i18n::sourceText(
+        QString::fromUtf8(taskItem.taskName.c_str()));
     QLabel* titleLabel = new QLabel(
-        QStringLiteral("%1  (PID:%2)")
-        .arg(QString::fromUtf8(taskItem.taskName.c_str()))
+        ks::i18n::contextText(
+            QStringLiteral("progress.task.title"),
+            QStringLiteral("%1  (PID:%2)"))
+        .arg(translatedTaskName)
         .arg(taskItem.pid),
         cardFrame);
     titleLabel->setStyleSheet(
@@ -214,9 +244,13 @@ QWidget* ProgressDockWidget::createTaskCardWidget(const kProgressTask& taskItem)
     cardLayout->addWidget(titleLabel);
 
     // 第二行：步骤文本改为与标题同级的高对比颜色，避免灰字看不清。
+    const QString translatedStepName = ks::i18n::sourceText(
+        QString::fromUtf8(taskItem.stepName.c_str()));
     QLabel* stepLabel = new QLabel(
-        QStringLiteral("步骤：%1")
-        .arg(QString::fromUtf8(taskItem.stepName.c_str())),
+        ks::i18n::contextText(
+            QStringLiteral("progress.task.step"),
+            QStringLiteral("步骤：%1"))
+        .arg(translatedStepName),
         cardFrame);
     stepLabel->setStyleSheet(
         QStringLiteral("color:%1; background:transparent;")

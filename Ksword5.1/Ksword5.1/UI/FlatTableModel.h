@@ -1,8 +1,11 @@
 #pragma once
 
 #include <QAbstractTableModel>
+#include <QMetaType>
 #include <QString>
 #include <QVariant>
+
+#include "../Internationalization/LanguageManager.h"
 
 #include <cstddef>
 #include <functional>
@@ -164,7 +167,16 @@ namespace ks::ui
                 return {};
             }
 
-            return m_dataResolver(m_rows[static_cast<std::size_t>(row)], column, role);
+            const QVariant resolvedData = m_dataResolver(
+                m_rows[static_cast<std::size_t>(row)],
+                column,
+                role);
+            if ((role == Qt::DisplayRole || role == Qt::ToolTipRole)
+                && resolvedData.metaType().id() == QMetaType::QString)
+            {
+                return ks::i18n::sourceText(resolvedData.toString());
+            }
+            return resolvedData;
         }
 
         // headerData 作用：
@@ -182,7 +194,8 @@ namespace ks::ui
                 return {};
             }
 
-            return m_columns[static_cast<std::size_t>(section)].headerText;
+            return ks::i18n::displayText(
+                m_columns[static_cast<std::size_t>(section)].headerText);
         }
 
         // flags 作用：

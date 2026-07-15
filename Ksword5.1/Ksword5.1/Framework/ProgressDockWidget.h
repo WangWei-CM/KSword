@@ -81,6 +81,12 @@ private:
     // 返回值：QProgressBar 样式表文本。
     QString buildProgressBarStyleSheet() const;
 
+    // retranslateUi 作用：切换语言后立即重建空状态和进行中任务卡片。
+    void retranslateUi();
+
+protected:
+    void changeEvent(QEvent* event) override;
+
 private:
     QVBoxLayout* m_rootLayout = nullptr;        // 根布局。
     QScrollArea* m_scrollArea = nullptr;        // 滚动容器。

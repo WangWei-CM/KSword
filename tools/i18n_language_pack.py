@@ -271,6 +271,15 @@ def placeholders(text: str) -> list[str]:
     return sorted(PLACEHOLDER_RE.findall(text))
 
 
+def allows_han_in_english_source(source_text: str) -> bool:
+    """Allow identity data or embedded matching rules that intentionally keep Han text."""
+    return (
+        source_text
+        == "Mapleleaf,存钱买油条（云舟API）,Extrella_Explorer,NtKrnl64,一花一树叶,hzh"
+        or source_text.lstrip().startswith("$verdict = if($lower -match 'audit|审计|")
+    )
+
+
 def build_report(extracted: dict[str, ExtractedString]) -> dict:
     return {
         "schema": "ksword-i18n-source-report",
@@ -300,6 +309,8 @@ def audit(
             errors.append(f"missing zh-CN semantic translation: {semantic_key!r}")
         if semantic_key not in en_semantic:
             errors.append(f"missing en-US semantic translation: {semantic_key!r}")
+        elif isinstance(en_semantic[semantic_key], str) and HAN_RE.search(en_semantic[semantic_key]):
+            errors.append(f"en-US semantic translation still contains Han text: {semantic_key!r}")
     zh_context = zh_pack.get("context_translations", {})
     en_context = en_pack.get("context_translations", {})
     for context_key in sorted(set(zh_context) | set(en_context)):
@@ -318,9 +329,53 @@ def audit(
                 errors.append(f"context placeholder mismatch: {context_key!r}")
             if zh_value.count("\n") != en_value.count("\n"):
                 errors.append(f"context newline mismatch: {context_key!r}")
-    # source_translations is a legacy compatibility section. It is deliberately
-    # excluded from audit: a bare source string has no location/semantic owner
-    # and must never be used as the correctness contract for the UI.
+            if HAN_RE.search(en_value):
+                errors.append(f"en-US context translation still contains Han text: {context_key!r}")
+
+    # Runtime UI translation uses source_translations only as a controlled
+    # fallback for otherwise-unbound widget properties and model headers. Every
+    # extractable source string must therefore exist in both packs with matching
+    # placeholders/newlines; explicit context keys remain the preferred contract.
+    zh_source = zh_pack.get("source_translations", {})
+    en_source = en_pack.get("source_translations", {})
+    if not isinstance(zh_source, dict):
+        errors.append("zh-CN source_translations must be an object")
+        zh_source = {}
+    if not isinstance(en_source, dict):
+        errors.append("en-US source_translations must be an object")
+        en_source = {}
+
+    for source_text in sorted(extracted):
+        if source_text not in zh_source:
+            errors.append(f"missing zh-CN source translation: {source_text!r}")
+        if source_text not in en_source:
+            errors.append(f"missing en-US source translation: {source_text!r}")
+        if source_text not in zh_source or source_text not in en_source:
+            continue
+
+        zh_value = zh_source[source_text]
+        en_value = en_source[source_text]
+        if not isinstance(zh_value, str):
+            errors.append(f"non-string zh-CN source translation: {source_text!r}")
+            continue
+        if not isinstance(en_value, str):
+            errors.append(f"non-string en-US source translation: {source_text!r}")
+            continue
+        source_placeholders = placeholders(source_text)
+        if placeholders(zh_value) != source_placeholders:
+            errors.append(f"zh-CN source placeholder mismatch: {source_text!r}")
+        if placeholders(en_value) != source_placeholders:
+            errors.append(f"en-US source placeholder mismatch: {source_text!r}")
+        if zh_value.count("\n") != source_text.count("\n"):
+            errors.append(f"zh-CN source newline mismatch: {source_text!r}")
+        if en_value.count("\n") != source_text.count("\n"):
+            errors.append(f"en-US source newline mismatch: {source_text!r}")
+        if (
+            HAN_RE.search(source_text)
+            and HAN_RE.search(en_value)
+            and not allows_han_in_english_source(source_text)
+        ):
+            errors.append(f"en-US source translation still contains Han text: {source_text!r}")
     return errors
 
 
