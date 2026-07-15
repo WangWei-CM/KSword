@@ -492,9 +492,16 @@ namespace KswordTheme
         return AccentColor(AccentRole::Blue, -2, -28);
     }
 
+    // OnAccentTextOffset 作用：为强调色背景提供深浅主题各自独立的文字颜色。
+    // 深色模式固定白字；浅色模式使用 #102336 深色字，避免自动对比算法把深色主题文字压成蓝黑色。
+    inline constexpr ThemeRgbOffset OnAccentTextOffset{
+        { 0, 0, 0 },
+        { -239, -220, -201 }
+    };
+
     inline QColor OnAccentColor()
     {
-        return EnsureTextContrast(WhiteColor(), AccentColor(AccentRole::Blue));
+        return ThemeOffsetColor(WhiteColor(), OnAccentTextOffset);
     }
     inline QString OnAccentHex() { return ThemeColorName(OnAccentColor()); }
 

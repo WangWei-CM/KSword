@@ -265,10 +265,9 @@ namespace
             return KswordTheme::TextPrimaryColor();
         }
 
-        return KswordTheme::EnsureTextContrast(
-            KswordTheme::TextPrimaryColor(),
-            KswordTheme::AccentColor(KswordTheme::AccentRole::Blue),
-            3.0);
+        // 选中态前景色必须直接使用深浅主题成对配置：
+        // 深色模式固定白字，浅色模式固定深色字，不再让自动对比算法反向压暗深色主题文字。
+        return KswordTheme::OnAccentColor();
     }
 
     // shouldTemporarilyDropTopMostForDockSwitch：
