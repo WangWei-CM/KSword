@@ -39,7 +39,7 @@ namespace ksword::ui::hex_editor_internal
             .arg(KswordTheme::TextPrimaryColorHex())
             .arg(KswordTheme::AccentHex(KswordTheme::AccentRole::Blue))
             .arg(KswordTheme::AccentHex(KswordTheme::AccentRole::Blue))
-            .arg(KswordTheme::AccentHex(KswordTheme::AccentRole::Blue, -32))
+            .arg(KswordTheme::AccentHex(KswordTheme::AccentRole::Blue, -14, -40))
             .arg(KswordTheme::OnAccentHex());
     }
 

@@ -67,13 +67,13 @@ protected:
     void highlightBlock(const QString& textValue) override
     {
         QTextCharFormat roundFormat;
-        roundFormat.setForeground(KswordTheme::AccentColor(KswordTheme::AccentRole::Blue, 4));
+        roundFormat.setForeground(KswordTheme::AccentColor(KswordTheme::AccentRole::Blue, 22, -4));
 
         QTextCharFormat squareFormat;
-        squareFormat.setForeground(KswordTheme::AccentColor(KswordTheme::AccentRole::Green, 24));
+        squareFormat.setForeground(KswordTheme::AccentColor(KswordTheme::AccentRole::Green, 42, 16));
 
         QTextCharFormat braceFormat;
-        braceFormat.setForeground(KswordTheme::AccentColor(KswordTheme::AccentRole::Orange, 20));
+        braceFormat.setForeground(KswordTheme::AccentColor(KswordTheme::AccentRole::Orange, 38, 12));
 
         for (int index = 0; index < textValue.size(); ++index)
         {

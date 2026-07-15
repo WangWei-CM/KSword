@@ -247,7 +247,7 @@ namespace
     {
         if (activeTab)
         {
-            return KswordTheme::PrimaryBlueColor;
+            return KswordTheme::ActiveTabBackgroundColor();
         }
         return KswordTheme::PrimaryBlueSubtleColor();
     }
@@ -265,9 +265,8 @@ namespace
             return KswordTheme::TextPrimaryColor();
         }
 
-        // 选中态前景色必须直接使用深浅主题成对配置：
-        // 深色模式固定白字，浅色模式固定深色字，不再让自动对比算法反向压暗深色主题文字。
-        return KswordTheme::OnAccentColor();
+        // 活动标签使用专用前景色，不能复用亮强调色背景的 OnAccentColor。
+        return KswordTheme::ActiveTabTextColor();
     }
 
     // shouldTemporarilyDropTopMostForDockSwitch：
@@ -8450,8 +8449,8 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
     const QString panelBorderColor = borderColorText;
     const QString inactiveTabColor = surfaceAltBackgroundText;
     const QString inactiveTabTextColor = primaryTextColor;
-    const QString activeTabColor = activeThemeColor;
-    const QString activeTabTextColor = selectedTextColor;
+    const QString activeTabColor = KswordTheme::ActiveTabBackgroundHex();
+    const QString activeTabTextColor = KswordTheme::ActiveTabTextHex();
     // normalTabHoverColor 作用：
     // - 只控制普通 QTabBar 的未选中悬停态；
     // - 浅色模式使用明确的浅灰色，避免继承/回退到黑色背景；

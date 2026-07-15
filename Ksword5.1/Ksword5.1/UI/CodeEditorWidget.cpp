@@ -178,7 +178,7 @@ namespace
             "}")
             .arg(KswordTheme::TextPrimaryHex())
             .arg(KswordTheme::AccentHex(KswordTheme::AccentRole::Blue))
-            .arg(KswordTheme::AccentHex(KswordTheme::AccentRole::Blue, -32))
+            .arg(KswordTheme::AccentHex(KswordTheme::AccentRole::Blue, -14, -40))
             .arg(KswordTheme::OnAccentHex());
     }
 
@@ -637,13 +637,13 @@ protected:
     void highlightBlock(const QString& text) override
     {
         QTextCharFormat roundFormat;
-        roundFormat.setForeground(KswordTheme::AccentColor(KswordTheme::AccentRole::Blue, 4));
+        roundFormat.setForeground(KswordTheme::AccentColor(KswordTheme::AccentRole::Blue, 22, -4));
 
         QTextCharFormat squareFormat;
-        squareFormat.setForeground(KswordTheme::AccentColor(KswordTheme::AccentRole::Green, 24));
+        squareFormat.setForeground(KswordTheme::AccentColor(KswordTheme::AccentRole::Green, 42, 16));
 
         QTextCharFormat braceFormat;
-        braceFormat.setForeground(KswordTheme::AccentColor(KswordTheme::AccentRole::Orange, 20));
+        braceFormat.setForeground(KswordTheme::AccentColor(KswordTheme::AccentRole::Orange, 38, 12));
 
         for (int index = 0; index < text.size(); ++index)
         {

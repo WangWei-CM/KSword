@@ -426,8 +426,8 @@ namespace
             "}")
             .arg(KswordTheme::AccentHex(KswordTheme::AccentRole::Blue))
             .arg(KswordTheme::AccentHex(KswordTheme::AccentRole::Blue))
-            .arg(KswordTheme::AccentHex(KswordTheme::AccentRole::Blue, -18))
-            .arg(KswordTheme::AccentHex(KswordTheme::AccentRole::Blue, -32))
+            .arg(KswordTheme::AccentHex(KswordTheme::AccentRole::Blue, 0, -26))
+            .arg(KswordTheme::AccentHex(KswordTheme::AccentRole::Blue, -14, -40))
             .arg(paddingText)
             .arg(KswordTheme::SurfaceColorHex())
             .arg(KswordTheme::OnAccentHex());
@@ -476,7 +476,7 @@ namespace
             .arg(KswordTheme::PrimaryBlueSubtleHex())
             .arg(KswordTheme::AccentHex(KswordTheme::AccentRole::Blue))
             .arg(KswordTheme::OnAccentHex())
-            .arg(KswordTheme::AccentHex(KswordTheme::AccentRole::Blue, -28));
+            .arg(KswordTheme::AccentHex(KswordTheme::AccentRole::Blue, -10, -36));
     }
 }
 

@@ -467,7 +467,7 @@ void MonitorPanelWidget::initializeUi()
     createLineChartView(
         ks::i18n::contextText(QStringLiteral("monitor.panel.network.title"), QStringLiteral("网络收发速率")),
         KswordTheme::PerformanceColor(KswordTheme::PerformanceRole::Network),
-        KswordTheme::AccentColor(KswordTheme::AccentRole::Orange, 30),
+        KswordTheme::AccentColor(KswordTheme::AccentRole::Orange, 48, 22),
         ks::i18n::contextText(QStringLiteral("monitor.panel.network.down"), QStringLiteral("下行")),
         ks::i18n::contextText(QStringLiteral("monitor.panel.network.up"), QStringLiteral("上行")),
         &m_networkRxSeries,

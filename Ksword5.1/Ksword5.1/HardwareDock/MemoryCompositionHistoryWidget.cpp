@@ -28,9 +28,9 @@ namespace
     {
         return {
             CompositionColor{ "活跃", KswordTheme::WithAlpha(KswordTheme::AccentColor(KswordTheme::AccentRole::Purple), 145) },
-            CompositionColor{ "缓存", KswordTheme::WithAlpha(KswordTheme::AccentColor(KswordTheme::AccentRole::Cyan, 6), 120) },
+            CompositionColor{ "缓存", KswordTheme::WithAlpha(KswordTheme::AccentColor(KswordTheme::AccentRole::Cyan, 24, -2), 120) },
             CompositionColor{ "分页池", KswordTheme::WithAlpha(KswordTheme::AccentColor(KswordTheme::AccentRole::Yellow), 120) },
-            CompositionColor{ "非分页池", KswordTheme::WithAlpha(KswordTheme::AccentColor(KswordTheme::AccentRole::Orange, 18), 130) },
+            CompositionColor{ "非分页池", KswordTheme::WithAlpha(KswordTheme::AccentColor(KswordTheme::AccentRole::Orange, 36, 10), 130) },
         };
     }
 }

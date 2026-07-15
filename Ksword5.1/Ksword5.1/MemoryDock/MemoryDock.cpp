@@ -27,8 +27,8 @@ namespace ksword::memory_dock_internal
             "}")
             .arg(KswordTheme::AccentHex(KswordTheme::AccentRole::Blue))
             .arg(KswordTheme::AccentHex(KswordTheme::AccentRole::Blue))
-            .arg(KswordTheme::AccentHex(KswordTheme::AccentRole::Blue, -18))
-            .arg(KswordTheme::AccentHex(KswordTheme::AccentRole::Blue, -32))
+            .arg(KswordTheme::AccentHex(KswordTheme::AccentRole::Blue, 0, -26))
+            .arg(KswordTheme::AccentHex(KswordTheme::AccentRole::Blue, -14, -40))
             .arg(KswordTheme::SurfaceColorHex())
             .arg(KswordTheme::OnAccentHex());
     }
