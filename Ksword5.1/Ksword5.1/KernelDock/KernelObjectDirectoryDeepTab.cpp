@@ -261,7 +261,7 @@ void KernelObjectDirectoryDeepTab::initializeUi()
     m_refreshButton->setToolTip(kernelText("kernel.object_directory.toolbar.refresh.tooltip", QStringLiteral("后台递归枚举指定 Object Manager Directory。")));
 
     m_statusLabel = new QLabel(kernelText("kernel.object_directory.status.waiting", QStringLiteral("状态：等待刷新")), this);
-    m_statusLabel->setStyleSheet(statusLabelStyle(QStringLiteral("#6B7280")));
+    m_statusLabel->setStyleSheet(statusLabelStyle(KswordTheme::TextSecondaryColorHex()));
 
     toolLayout->addWidget(rootPathLabel, 0);
     toolLayout->addWidget(m_rootPathEdit, 1);
@@ -333,7 +333,7 @@ void KernelObjectDirectoryDeepTab::setRefreshRunning(const bool running)
         m_statusLabel->setText(running
             ? kernelText("kernel.object_directory.status.enumerating", QStringLiteral("状态：递归枚举中..."))
             : kernelText("kernel.object_directory.status.idle", QStringLiteral("状态：空闲")));
-        m_statusLabel->setStyleSheet(statusLabelStyle(running ? QStringLiteral("#2563EB") : QStringLiteral("#6B7280")));
+        m_statusLabel->setStyleSheet(statusLabelStyle(running ? KswordTheme::InfoHex() : KswordTheme::TextSecondaryColorHex()));
     }
 }
 
@@ -380,7 +380,7 @@ void KernelObjectDirectoryDeepTab::startRefresh()
                 if (guardThis->m_statusLabel != nullptr)
                 {
                     guardThis->m_statusLabel->setText(kernelText("kernel.object_directory.status.failed", QStringLiteral("状态：刷新失败")));
-                    guardThis->m_statusLabel->setStyleSheet(statusLabelStyle(QStringLiteral("#B23A3A")));
+                    guardThis->m_statusLabel->setStyleSheet(statusLabelStyle(KswordTheme::ErrorHex()));
                 }
                 if (guardThis->m_detailEditor != nullptr)
                 {
@@ -413,7 +413,7 @@ void KernelObjectDirectoryDeepTab::startRefresh()
             {
                 guardThis->m_statusLabel->setText(statusText);
                 guardThis->m_statusLabel->setStyleSheet(
-                    statusLabelStyle(result.failedDirectoryCount == 0 ? QStringLiteral("#3A8F3A") : QStringLiteral("#D77A00")));
+                    statusLabelStyle(result.failedDirectoryCount == 0 ? KswordTheme::SuccessHex() : KswordTheme::WarningHex()));
             }
             if (guardThis->m_resultTree != nullptr && guardThis->m_resultTree->topLevelItemCount() > 0)
             {

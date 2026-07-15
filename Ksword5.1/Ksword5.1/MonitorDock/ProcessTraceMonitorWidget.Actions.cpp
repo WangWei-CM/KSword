@@ -938,11 +938,11 @@ void ProcessTraceMonitorWidget::refreshTargetTable()
         if (entry.alive)
         {
             ++aliveCount;
-            stateItem->setForeground(QBrush(QColor(QStringLiteral("#2F7D32"))));
+            stateItem->setForeground(QBrush(KswordTheme::SuccessColor()));
         }
         else
         {
-            stateItem->setForeground(QBrush(QColor(QStringLiteral("#7A7A7A"))));
+            stateItem->setForeground(QBrush(KswordTheme::TextSecondaryColor()));
         }
 
         m_targetTable->setItem(row, TargetProcessColumnState, stateItem);

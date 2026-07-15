@@ -83,9 +83,9 @@ namespace
     QString tableHeaderStyle()
     {
         return QStringLiteral("QHeaderView::section{color:%1;background:%2;border:1px solid %3;font-weight:600;}")
-            .arg(KswordTheme::PrimaryBlueHex)
-            .arg(KswordTheme::SurfaceHex())
-            .arg(KswordTheme::BorderHex());
+            .arg(KswordTheme::AccentHex(KswordTheme::AccentRole::Blue))
+            .arg(KswordTheme::SurfaceColorHex())
+            .arg(KswordTheme::BorderColorHex());
     }
 
     // boolText 作用：
@@ -105,13 +105,14 @@ namespace
         return QStringLiteral(
             "QMenu{background:%1;color:%2;border:1px solid %3;}"
             "QMenu::item{padding:5px 24px 5px 24px;background:transparent;}"
-            "QMenu::item:selected{background:%4;color:#FFFFFF;}"
+            "QMenu::item:selected{background:%4;color:%6;}"
             "QMenu::item:disabled{color:%5;}")
-            .arg(KswordTheme::SurfaceHex())
-            .arg(KswordTheme::TextPrimaryHex())
-            .arg(KswordTheme::BorderHex())
-            .arg(KswordTheme::PrimaryBlueHex)
-            .arg(KswordTheme::TextSecondaryHex());
+            .arg(KswordTheme::SurfaceColorHex())
+            .arg(KswordTheme::TextPrimaryColorHex())
+            .arg(KswordTheme::BorderColorHex())
+            .arg(KswordTheme::AccentHex(KswordTheme::AccentRole::Blue))
+            .arg(KswordTheme::TextSecondaryColorHex())
+            .arg(KswordTheme::OnAccentHex());
     }
 
     void copyPrivilegeTableCurrentRow(QTableWidget* table)

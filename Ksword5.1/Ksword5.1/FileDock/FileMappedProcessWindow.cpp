@@ -546,7 +546,8 @@ void FileMappedProcessWindow::applyRefreshResult(
     m_statusLabel->setText(statusText);
     m_statusLabel->setStyleSheet(
         QStringLiteral("color:%1;font-weight:600;")
-        .arg(m_rows.empty() ? QStringLiteral("#D77A00") : QStringLiteral("#3A8F3A")));
+        .arg((m_rows.empty() ? KswordTheme::WarningColor() : KswordTheme::SuccessColor())
+            .name(QColor::HexRgb)));
 
     if (m_refreshPending)
     {

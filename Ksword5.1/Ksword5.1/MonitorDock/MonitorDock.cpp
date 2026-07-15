@@ -113,10 +113,10 @@ namespace
         return QStringLiteral(
             "QLineEdit,QPlainTextEdit,QComboBox,QSpinBox{border:1px solid %2;border-radius:3px;background:%3;color:%4;padding:2px 6px;}"
             "QLineEdit:focus,QPlainTextEdit:focus,QComboBox:focus,QSpinBox:focus{border:1px solid %1;}")
-            .arg(KswordTheme::PrimaryBlueHex)
-            .arg(KswordTheme::BorderHex())
-            .arg(KswordTheme::SurfaceHex())
-            .arg(KswordTheme::TextPrimaryHex());
+            .arg(KswordTheme::AccentHex(KswordTheme::AccentRole::Blue))
+            .arg(KswordTheme::BorderColorHex())
+            .arg(KswordTheme::SurfaceColorHex())
+            .arg(KswordTheme::TextPrimaryColorHex());
     }
 
     void installMonitorTableCopyMenu(QTableWidget* tableWidget)
@@ -506,33 +506,25 @@ namespace
     // monitorInfoColorHex 作用：返回“信息态”颜色。
     QString monitorInfoColorHex()
     {
-        return KswordTheme::IsDarkModeEnabled()
-            ? QStringLiteral("#8FC7FF")
-            : QStringLiteral("#1F4E7A");
+        return KswordTheme::InfoColor().name(QColor::HexRgb);
     }
 
     // monitorSuccessColorHex 作用：返回“成功态”颜色。
     QString monitorSuccessColorHex()
     {
-        return KswordTheme::IsDarkModeEnabled()
-            ? QStringLiteral("#7EDC8A")
-            : QStringLiteral("#2F7D32");
+        return KswordTheme::SuccessColor().name(QColor::HexRgb);
     }
 
     // monitorWarningColorHex 作用：返回“警告态”颜色。
     QString monitorWarningColorHex()
     {
-        return KswordTheme::IsDarkModeEnabled()
-            ? QStringLiteral("#FFD48A")
-            : QStringLiteral("#AA7B1C");
+        return KswordTheme::WarningColor().name(QColor::HexRgb);
     }
 
     // monitorErrorColorHex 作用：返回“错误态”颜色。
     QString monitorErrorColorHex()
     {
-        return KswordTheme::IsDarkModeEnabled()
-            ? QStringLiteral("#FF9B9B")
-            : QStringLiteral("#A43434");
+        return KswordTheme::ErrorColor().name(QColor::HexRgb);
     }
 
     // monitorIdleColorHex 作用：返回“空闲态”颜色。
@@ -4414,18 +4406,18 @@ void MonitorDock::initializePerformancePanel()
 
     createBarChartView(
         QStringLiteral("CPU 占用率"),
-        QColor(KswordTheme::PrimaryBlueHex),
+        KswordTheme::PerformanceColor(KswordTheme::PerformanceRole::Cpu),
         &m_cpuBarSet,
         &m_cpuChartView);
     createBarChartView(
         QStringLiteral("内存利用率"),
-        QColor(QStringLiteral("#53C39B")),
+        KswordTheme::PerformanceColor(KswordTheme::PerformanceRole::Memory),
         &m_memoryBarSet,
         &m_memoryChartView);
     createLineChartView(
         QStringLiteral("系统盘读写速率"),
-        QColor(QStringLiteral("#6FA8FF")),
-        QColor(QStringLiteral("#FFB66E")),
+        KswordTheme::PerformanceColor(KswordTheme::PerformanceRole::Read),
+        KswordTheme::PerformanceColor(KswordTheme::PerformanceRole::Write),
         QStringLiteral("读取"),
         QStringLiteral("写入"),
         &m_diskReadSeries,
@@ -4435,8 +4427,8 @@ void MonitorDock::initializePerformancePanel()
         &m_diskChartView);
     createLineChartView(
         QStringLiteral("网络收发速率"),
-        QColor(QStringLiteral("#7EDC8A")),
-        QColor(QStringLiteral("#F58A8A")),
+        KswordTheme::SuccessColor(),
+        KswordTheme::ErrorColor(),
         QStringLiteral("下载"),
         QStringLiteral("上传"),
         &m_networkRxSeries,

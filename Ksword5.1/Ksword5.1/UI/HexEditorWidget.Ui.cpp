@@ -184,7 +184,7 @@ void HexEditorWidget::initializeUi()
             "  alternate-background-color:%2;"
             "  color:%3;"
             "  selection-background-color:%4;"
-            "  selection-color:#FFFFFF;"
+            "  selection-color:%5;"
             "}"
             "QTableView::item{"
             "  border:none;"
@@ -192,16 +192,17 @@ void HexEditorWidget::initializeUi()
             "}"
             "QTableView::item:selected{"
             "  background:%4;"
-            "  color:#FFFFFF;"
+            "  color:%5;"
             "}"
             "QTableCornerButton::section{"
             "  background:%1;"
             "  border:none;"
             "}")
-        .arg(KswordTheme::SurfaceHex())
-        .arg(KswordTheme::SurfaceAltHex())
-        .arg(KswordTheme::TextPrimaryHex())
-        .arg(KswordTheme::PrimaryBlueHex));
+        .arg(KswordTheme::SurfaceColorHex())
+        .arg(KswordTheme::SurfaceAltColorHex())
+        .arg(KswordTheme::TextPrimaryColorHex())
+        .arg(KswordTheme::AccentHex(KswordTheme::AccentRole::Blue))
+        .arg(KswordTheme::OnAccentHex()));
 
     // 表格字体加大并固定等宽，便于编辑十六进制内容。
     QFont fixedFont = QFontDatabase::systemFont(QFontDatabase::FixedFont);

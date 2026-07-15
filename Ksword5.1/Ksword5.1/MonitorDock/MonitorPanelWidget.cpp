@@ -88,41 +88,31 @@ namespace
     // cpuBarColor 作用：返回 CPU 每核柱状图主色。
     QColor cpuBarColor()
     {
-        return KswordTheme::IsDarkModeEnabled()
-            ? QColor(96, 172, 255)
-            : QColor(67, 160, 255);
+        return KswordTheme::PerformanceColor(KswordTheme::PerformanceRole::Cpu);
     }
 
     // memoryBarColor 作用：返回内存历史折线主色。
     QColor memoryBarColor()
     {
-        return KswordTheme::IsDarkModeEnabled()
-            ? QColor(151, 122, 255)
-            : QColor(121, 76, 210);
+        return KswordTheme::PerformanceColor(KswordTheme::PerformanceRole::Memory);
     }
 
     // translucentAreaColor 作用：按主题和透明度生成内存组成面积填充色。
     QColor translucentAreaColor(const QColor& baseColor, const int alphaValue)
     {
-        QColor colorValue = baseColor;
-        colorValue.setAlpha(alphaValue);
-        return colorValue;
+        return KswordTheme::WithAlpha(baseColor, alphaValue);
     }
 
     // monitorPanelTextColor 作用：返回监视器图表标题/图例/轴标签颜色。
     QColor monitorPanelTextColor()
     {
-        return KswordTheme::IsDarkModeEnabled()
-            ? QColor(245, 249, 255)
-            : QColor(25, 39, 55);
+        return KswordTheme::TextPrimaryColor();
     }
 
     // monitorPanelMutedTextColor 作用：返回监视器坐标轴次级文字颜色。
     QColor monitorPanelMutedTextColor()
     {
-        return KswordTheme::IsDarkModeEnabled()
-            ? QColor(185, 202, 222)
-            : QColor(80, 96, 115);
+        return KswordTheme::TextSecondaryColor();
     }
 }
 
@@ -463,8 +453,8 @@ void MonitorPanelWidget::initializeUi()
     // 磁盘折线图：读/写双线。
     createLineChartView(
         ks::i18n::contextText(QStringLiteral("monitor.panel.disk.title"), QStringLiteral("磁盘读写速率")),
-        QColor(65, 173, 255),
-        QColor(86, 216, 150),
+        KswordTheme::PerformanceColor(KswordTheme::PerformanceRole::Read),
+        KswordTheme::PerformanceColor(KswordTheme::PerformanceRole::Write),
         ks::i18n::contextText(QStringLiteral("monitor.panel.disk.read"), QStringLiteral("读取")),
         ks::i18n::contextText(QStringLiteral("monitor.panel.disk.write"), QStringLiteral("写入")),
         &m_diskReadSeries,
@@ -476,8 +466,8 @@ void MonitorPanelWidget::initializeUi()
     // 网络折线图：下/上行双线。
     createLineChartView(
         ks::i18n::contextText(QStringLiteral("monitor.panel.network.title"), QStringLiteral("网络收发速率")),
-        QColor(105, 173, 255),
-        QColor(255, 177, 92),
+        KswordTheme::PerformanceColor(KswordTheme::PerformanceRole::Network),
+        KswordTheme::AccentColor(KswordTheme::AccentRole::Orange, 30),
         ks::i18n::contextText(QStringLiteral("monitor.panel.network.down"), QStringLiteral("下行")),
         ks::i18n::contextText(QStringLiteral("monitor.panel.network.up"), QStringLiteral("上行")),
         &m_networkRxSeries,

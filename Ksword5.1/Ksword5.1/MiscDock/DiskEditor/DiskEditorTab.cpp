@@ -109,10 +109,10 @@ namespace
             "QLineEdit:focus,QComboBox:focus,QSpinBox:focus{"
             "  border:1px solid %4;"
             "}")
-            .arg(KswordTheme::BorderHex())
-            .arg(KswordTheme::SurfaceHex())
-            .arg(KswordTheme::TextPrimaryHex())
-            .arg(KswordTheme::PrimaryBlueHex);
+            .arg(KswordTheme::BorderColorHex())
+            .arg(KswordTheme::SurfaceColorHex())
+            .arg(KswordTheme::TextPrimaryColorHex())
+            .arg(KswordTheme::AccentHex(KswordTheme::AccentRole::Blue));
     }
 
     // buildTableStyle：
@@ -131,7 +131,7 @@ namespace
             "}"
             "QTableWidget::item:selected{"
             "  background:%5;"
-            "  color:#FFFFFF;"
+            "  color:%6;"
             "}"
             "QHeaderView::section{"
             "  border:none;"
@@ -141,11 +141,12 @@ namespace
             "  padding:5px;"
             "  font-weight:700;"
             "}")
-            .arg(KswordTheme::BorderHex())
-            .arg(KswordTheme::SurfaceHex())
-            .arg(KswordTheme::SurfaceAltHex())
-            .arg(KswordTheme::TextPrimaryHex())
-            .arg(KswordTheme::PrimaryBlueHex);
+            .arg(KswordTheme::BorderColorHex())
+            .arg(KswordTheme::SurfaceColorHex())
+            .arg(KswordTheme::SurfaceAltColorHex())
+            .arg(KswordTheme::TextPrimaryColorHex())
+            .arg(KswordTheme::AccentHex(KswordTheme::AccentRole::Blue))
+            .arg(KswordTheme::OnAccentHex());
     }
 
     // buildInfoCardStyle：
@@ -167,8 +168,8 @@ namespace
             "  left:10px;"
             "  padding:0 4px;"
             "}")
-            .arg(KswordTheme::BorderHex())
-            .arg(KswordTheme::TextPrimaryHex());
+            .arg(KswordTheme::BorderColorHex())
+            .arg(KswordTheme::TextPrimaryColorHex());
     }
 
     // setReadOnlyItem：
@@ -285,11 +286,11 @@ namespace
         }
         if (severity == ks::misc::DiskStructureSeverity::Error)
         {
-            item->setForeground(QBrush(QColor(239, 68, 68)));
+            item->setForeground(QBrush(KswordTheme::ErrorColor()));
         }
         else if (severity == ks::misc::DiskStructureSeverity::Warning)
         {
-            item->setForeground(QBrush(QColor(245, 158, 11)));
+            item->setForeground(QBrush(KswordTheme::WarningColor()));
         }
     }
 
@@ -490,8 +491,8 @@ namespace ks::misc
         m_logEdit->setReadOnly(true);
         m_logEdit->setStyleSheet(
             QStringLiteral("QPlainTextEdit{border:none;background:%1;color:%2;}")
-            .arg(KswordTheme::SurfaceHex())
-            .arg(KswordTheme::TextPrimaryHex()));
+            .arg(KswordTheme::SurfaceColorHex())
+            .arg(KswordTheme::TextPrimaryColorHex()));
         logLayout->addWidget(m_logEdit, 1);
         rightLayout->addWidget(logGroup, 1);
 

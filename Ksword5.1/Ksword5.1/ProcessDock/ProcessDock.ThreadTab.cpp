@@ -416,19 +416,20 @@ namespace
             "}"
             "QPushButton:hover {"
             "  background: %3;"
-            "  color: #FFFFFF;"
+            "  color: %7;"
             "  border: 1px solid %3;"
             "}"
             "QPushButton:pressed {"
             "  background: %4;"
-            "  color: #FFFFFF;"
+            "  color: %7;"
             "}")
-            .arg(KswordTheme::PrimaryBlueHex)
-            .arg(KswordTheme::PrimaryBlueBorderHex)
-            .arg(KswordTheme::PrimaryBlueSolidHoverHex())
-            .arg(KswordTheme::PrimaryBluePressedHex)
+            .arg(KswordTheme::AccentHex(KswordTheme::AccentRole::Blue))
+            .arg(KswordTheme::AccentHex(KswordTheme::AccentRole::Blue))
+            .arg(KswordTheme::AccentHex(KswordTheme::AccentRole::Blue, -18))
+            .arg(KswordTheme::AccentHex(KswordTheme::AccentRole::Blue, -32))
             .arg(paddingText)
-            .arg(KswordTheme::SurfaceHex());
+            .arg(KswordTheme::SurfaceColorHex())
+            .arg(KswordTheme::OnAccentHex());
     }
 
     // buildThreadSearchStyle 作用：统一线程页搜索框边框与焦点色。
@@ -445,9 +446,9 @@ namespace
             "QLineEdit:focus {"
             "  border: 1px solid %1;"
             "}")
-            .arg(KswordTheme::PrimaryBlueHex)
-            .arg(KswordTheme::BorderHex())
-            .arg(KswordTheme::SurfaceHex())
+            .arg(KswordTheme::AccentHex(KswordTheme::AccentRole::Blue))
+            .arg(KswordTheme::BorderColorHex())
+            .arg(KswordTheme::SurfaceColorHex())
             .arg(KswordTheme::TextPrimaryHex());
     }
 }
@@ -609,8 +610,8 @@ void ProcessDock::applyThreadStatusUi(const bool refreshing, const QString& stat
     else
     {
         const QString idleColor = KswordTheme::IsDarkModeEnabled()
-            ? QStringLiteral("#6ECF7A")
-            : QStringLiteral("#2F7D32");
+            ? KswordTheme::SuccessColor().name(QColor::HexRgb)
+            : KswordTheme::SuccessColor().name(QColor::HexRgb);
         m_threadStatusLabel->setStyleSheet(
             QStringLiteral("color:%1; font-weight:600;").arg(idleColor));
     }
@@ -844,12 +845,10 @@ void ProcessDock::rebuildThreadTable()
         if (threadRecord.isR0OnlyThread ||
             (threadRecord.r0ThreadFlags & KSWORD_ARK_THREAD_FLAG_HIDDEN_FROM_ACTIVE_THREAD_LIST) != 0U)
         {
-            const QColor suspectForeground = KswordTheme::IsDarkModeEnabled()
-                ? QColor(255, 140, 140)
-                : QColor(200, 32, 32);
-            const QColor suspectBackground = KswordTheme::IsDarkModeEnabled()
-                ? QColor(110, 28, 28, 140)
-                : QColor(255, 224, 224);
+            const QColor suspectForeground = KswordTheme::ErrorColor();
+            const QColor suspectBackground = KswordTheme::WithAlpha(
+                KswordTheme::ErrorBackgroundColor(),
+                KswordTheme::IsDarkModeEnabled() ? 140 : 255);
             for (int columnIndex = 0; columnIndex < static_cast<int>(ThreadTableColumn::Count); ++columnIndex)
             {
                 rowItem->setForeground(columnIndex, QBrush(suspectForeground));
@@ -1110,7 +1109,7 @@ QString ProcessDock::buildThreadContextMenuStyle() const
         "}"
         "QMenu::item:selected{"
         "  background:%4;"
-        "  color:#FFFFFF;"
+        "  color:%6;"
         "}"
         "QMenu::item:disabled{"
         "  color:%5;"
@@ -1124,8 +1123,9 @@ QString ProcessDock::buildThreadContextMenuStyle() const
         .arg(menuBackgroundColor)
         .arg(menuTextColor)
         .arg(menuBorderColor)
-        .arg(KswordTheme::PrimaryBlueHex)
-        .arg(menuDisabledColor);
+        .arg(KswordTheme::AccentHex(KswordTheme::AccentRole::Blue))
+        .arg(menuDisabledColor)
+        .arg(KswordTheme::OnAccentHex());
 }
 
 void ProcessDock::bindThreadContextActionToItem(QTreeWidgetItem* clickedItem)

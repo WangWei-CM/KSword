@@ -577,7 +577,9 @@ void ProcessDock::refreshCrossViewAsync()
                 statusText = QStringLiteral("状态：%1 / %2")
                     .arg(processMessageText)
                     .arg(threadMessageText);
-                guardThis->m_crossViewStatusLabel->setStyleSheet(QStringLiteral("color:#B23A3A; font-weight:700;"));
+                guardThis->m_crossViewStatusLabel->setStyleSheet(
+                    QStringLiteral("color:%1; font-weight:700;")
+                        .arg(KswordTheme::ErrorColor().name(QColor::HexRgb)));
             }
             else
             {
@@ -588,7 +590,9 @@ void ProcessDock::refreshCrossViewAsync()
                     .arg(threadResult.totalCount)
                     .arg(static_cast<qulonglong>(processResult.missingCapabilityMask), 0, 16)
                     .arg(static_cast<qulonglong>(threadResult.missingCapabilityMask), 0, 16);
-                guardThis->m_crossViewStatusLabel->setStyleSheet(QStringLiteral("color:#2F7D32; font-weight:700;"));
+                guardThis->m_crossViewStatusLabel->setStyleSheet(
+                    QStringLiteral("color:%1; font-weight:700;")
+                        .arg(KswordTheme::SuccessColor().name(QColor::HexRgb)));
             }
             guardThis->m_crossViewStatusLabel->setText(statusText);
             guardThis->showCrossViewDetailForCurrentRow(false);

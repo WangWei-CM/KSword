@@ -282,7 +282,9 @@ void MemoryDock::initializeProcessModuleTab()
     moduleTopBarLayout->addWidget(m_moduleFilterEdit, 1);
 
     m_moduleStatusLabel = new QLabel("● 待刷新", modulePanel);
-    m_moduleStatusLabel->setStyleSheet("color:#5F5F5F; font-weight:600;");
+    m_moduleStatusLabel->setStyleSheet(
+        QStringLiteral("color:%1; font-weight:600;")
+            .arg(KswordTheme::TextSecondaryColor().name(QColor::HexRgb)));
     moduleTopBarLayout->addWidget(m_moduleStatusLabel);
     moduleLayout->addLayout(moduleTopBarLayout);
 

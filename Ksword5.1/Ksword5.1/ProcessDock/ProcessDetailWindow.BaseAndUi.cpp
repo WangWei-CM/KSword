@@ -438,14 +438,14 @@ void ProcessDetailWindow::applyThemeStyle()
     // - Win11 下必须手动强制窗口背景，避免被系统自动接管为亮色。
     const bool darkModeEnabled = KswordTheme::IsDarkModeEnabled();
     QPalette themedPalette = (qApp != nullptr) ? qApp->palette() : palette();
-    themedPalette.setColor(QPalette::Window, darkModeEnabled ? QColor(0, 0, 0) : QColor(255, 255, 255));
-    themedPalette.setColor(QPalette::WindowText, darkModeEnabled ? QColor(255, 255, 255) : QColor(0, 0, 0));
-    themedPalette.setColor(QPalette::Base, darkModeEnabled ? QColor(22, 22, 22) : QColor(255, 255, 255));
-    themedPalette.setColor(QPalette::AlternateBase, darkModeEnabled ? QColor(30, 30, 30) : QColor(247, 249, 252));
-    themedPalette.setColor(QPalette::Text, darkModeEnabled ? QColor(255, 255, 255) : QColor(0, 0, 0));
-    themedPalette.setColor(QPalette::Mid, darkModeEnabled ? QColor(86, 86, 86) : QColor(180, 180, 180));
-    themedPalette.setColor(QPalette::Highlight, KswordTheme::PrimaryBlueColor);
-    themedPalette.setColor(QPalette::HighlightedText, QColor(255, 255, 255));
+    themedPalette.setColor(QPalette::Window, KswordTheme::WindowColor());
+    themedPalette.setColor(QPalette::WindowText, KswordTheme::TextPrimaryColor());
+    themedPalette.setColor(QPalette::Base, KswordTheme::SurfaceColor());
+    themedPalette.setColor(QPalette::AlternateBase, KswordTheme::SurfaceAltColor());
+    themedPalette.setColor(QPalette::Text, KswordTheme::TextPrimaryColor());
+    themedPalette.setColor(QPalette::Mid, KswordTheme::BorderColor());
+    themedPalette.setColor(QPalette::Highlight, KswordTheme::AccentColor(KswordTheme::AccentRole::Blue));
+    themedPalette.setColor(QPalette::HighlightedText, KswordTheme::OnAccentColor());
 
     setPalette(themedPalette);
     setAutoFillBackground(true);
@@ -545,12 +545,12 @@ void ProcessDetailWindow::applyThemeStyle()
             "  color:%2;"
             "  border:1px solid %1;"
             "  selection-background-color:%4;"
-            "  selection-color:#FFFFFF;"
+            "  selection-color:palette(highlighted-text);"
             "}")
-            .arg(KswordTheme::BorderHex())
-            .arg(KswordTheme::TextPrimaryHex())
-            .arg(KswordTheme::SurfaceHex())
-            .arg(KswordTheme::PrimaryBlueHex);
+            .arg(KswordTheme::BorderColorHex())
+            .arg(KswordTheme::TextPrimaryColorHex())
+            .arg(KswordTheme::SurfaceColorHex())
+            .arg(KswordTheme::AccentHex(KswordTheme::AccentRole::Blue));
         if (m_tokenRawInfoClassCombo != nullptr)
         {
             m_tokenRawInfoClassCombo->setStyleSheet(comboStyle);
@@ -1581,12 +1581,12 @@ void ProcessDetailWindow::initializeActionTab()
         "  color:%2;"
         "  border:1px solid %1;"
         "  selection-background-color:%4;"
-        "  selection-color:#FFFFFF;"
+        "  selection-color:palette(highlighted-text);"
         "}")
-        .arg(KswordTheme::BorderHex())
-        .arg(KswordTheme::TextPrimaryHex())
-        .arg(KswordTheme::SurfaceHex())
-        .arg(KswordTheme::PrimaryBlueHex);
+        .arg(KswordTheme::BorderColorHex())
+        .arg(KswordTheme::TextPrimaryColorHex())
+        .arg(KswordTheme::SurfaceColorHex())
+        .arg(KswordTheme::AccentHex(KswordTheme::AccentRole::Blue));
     m_terminateActionCombo->setStyleSheet(comboStyle);
     m_priorityCombo->setStyleSheet(comboStyle);
     m_injectionModeCombo->setStyleSheet(comboStyle);
@@ -2109,12 +2109,12 @@ void ProcessDetailWindow::initializeTokenSwitchTab()
         "  color:%2;"
         "  border:1px solid %1;"
         "  selection-background-color:%4;"
-        "  selection-color:#FFFFFF;"
+        "  selection-color:palette(highlighted-text);"
         "}")
-        .arg(KswordTheme::BorderHex())
-        .arg(KswordTheme::TextPrimaryHex())
-        .arg(KswordTheme::SurfaceHex())
-        .arg(KswordTheme::PrimaryBlueHex);
+        .arg(KswordTheme::BorderColorHex())
+        .arg(KswordTheme::TextPrimaryColorHex())
+        .arg(KswordTheme::SurfaceColorHex())
+        .arg(KswordTheme::AccentHex(KswordTheme::AccentRole::Blue));
     m_tokenRawInfoClassCombo->setStyleSheet(comboStyle);
     m_tokenRawInputModeCombo->setStyleSheet(comboStyle);
 }

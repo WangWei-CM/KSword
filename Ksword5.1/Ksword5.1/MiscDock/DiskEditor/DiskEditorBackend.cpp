@@ -1,4 +1,5 @@
 #include "DiskEditorBackend.h"
+#include "../../theme.h"
 
 // ============================================================
 // DiskEditorBackend.cpp
@@ -273,15 +274,21 @@ namespace
     {
         switch (kind)
         {
-        case DiskPartitionKind::BasicData: return QColor(67, 160, 255);
-        case DiskPartitionKind::System: return QColor(34, 197, 94);
-        case DiskPartitionKind::Reserved: return QColor(148, 163, 184);
-        case DiskPartitionKind::Recovery: return QColor(245, 158, 11);
-        case DiskPartitionKind::Linux: return QColor(168, 85, 247);
-        case DiskPartitionKind::Unallocated: return QColor(107, 114, 128);
+        case DiskPartitionKind::BasicData:
+            return KswordTheme::AccentColor(KswordTheme::AccentRole::Blue);
+        case DiskPartitionKind::System:
+            return KswordTheme::SuccessColor();
+        case DiskPartitionKind::Reserved:
+            return KswordTheme::AccentColor(KswordTheme::AccentRole::Slate);
+        case DiskPartitionKind::Recovery:
+            return KswordTheme::WarningColor();
+        case DiskPartitionKind::Linux:
+            return KswordTheme::AccentColor(KswordTheme::AccentRole::Purple);
+        case DiskPartitionKind::Unallocated:
+            return KswordTheme::TextSecondaryColor();
         default: break;
         }
-        return QColor(20, 184, 166);
+        return KswordTheme::AccentColor(KswordTheme::AccentRole::Teal);
     }
 
     // openDiskHandle：

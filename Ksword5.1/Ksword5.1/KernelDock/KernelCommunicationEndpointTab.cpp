@@ -116,7 +116,10 @@ void KernelCommunicationEndpointTab::initializeUi()
     m_table->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_table->setAlternatingRowColors(true);
     m_table->setContextMenuPolicy(Qt::CustomContextMenu);
-    m_table->setStyleSheet(QStringLiteral("QTableWidget::item:selected{background:%1;color:#FFFFFF;}").arg(KswordTheme::PrimaryBlueHex));
+    m_table->setStyleSheet(
+        QStringLiteral("QTableWidget::item:selected{background:%1;color:%2;}")
+            .arg(KswordTheme::AccentHex(KswordTheme::AccentRole::Blue))
+            .arg(KswordTheme::OnAccentHex()));
     m_table->verticalHeader()->setVisible(false);
     m_table->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
     m_table->horizontalHeader()->setSectionResizeMode(static_cast<int>(CommunicationEndpointColumn::FullPath), QHeaderView::Stretch);
@@ -218,7 +221,7 @@ void KernelCommunicationEndpointTab::applyRefreshResult(
     if (!success)
     {
         m_statusLabel->setText(kernelText("kernel.communication_endpoint.status.failed", QStringLiteral("状态：刷新失败 - %1")).arg(errorText));
-        m_statusLabel->setStyleSheet(statusLabelStyle(QStringLiteral("#B23A3A")));
+        m_statusLabel->setStyleSheet(statusLabelStyle(KswordTheme::ErrorHex()));
         insertDiagnosticRow(
             kernelText("kernel.communication_endpoint.placeholder.refresh_failed", QStringLiteral("<刷新失败>")),
             buildDiagnosticText(kernelText("kernel.communication_endpoint.diagnostic.refresh_failed", QStringLiteral("通信对象枚举失败：%1")).arg(errorText)));
@@ -257,7 +260,7 @@ void KernelCommunicationEndpointTab::rebuildTable()
     m_statusLabel->setText(kernelText("kernel.communication_endpoint.status.summary", QStringLiteral("状态：已加载 %1 项，显示 %2 项"))
         .arg(static_cast<qulonglong>(m_rows.size()))
         .arg(static_cast<qulonglong>(visibleCount)));
-    m_statusLabel->setStyleSheet(statusLabelStyle(QStringLiteral("#3A8F3A")));
+    m_statusLabel->setStyleSheet(statusLabelStyle(KswordTheme::SuccessHex()));
 
     if (visibleCount == 0U)
     {

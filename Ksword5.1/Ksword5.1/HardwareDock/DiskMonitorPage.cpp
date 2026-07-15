@@ -422,12 +422,13 @@ namespace
             "}"
             "QTableWidget::item:selected{"
             "  background:%5;"
-            "  color:#FFFFFF;"
+            "  color:%6;"
             "}")
-            .arg(KswordTheme::TextPrimaryHex())
-            .arg(KswordTheme::SurfaceAltHex())
-            .arg(KswordTheme::BorderHex())
-            .arg(KswordTheme::PrimaryBlueHex);
+            .arg(KswordTheme::TextPrimaryColorHex())
+            .arg(KswordTheme::SurfaceAltColorHex())
+            .arg(KswordTheme::BorderColorHex())
+            .arg(KswordTheme::AccentHex(KswordTheme::AccentRole::Blue))
+            .arg(KswordTheme::OnAccentHex());
     }
 
     // trimWideString：

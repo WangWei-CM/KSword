@@ -847,15 +847,9 @@ namespace
         }
 
         QPixmap fallbackPixmap(targetSize);
-        fallbackPixmap.fill(
-            KswordTheme::IsDarkModeEnabled()
-            ? QColor(35, 35, 35)
-            : QColor(246, 248, 252));
+        fallbackPixmap.fill(KswordTheme::SurfaceColor());
         QPainter painter(&fallbackPixmap);
-        painter.setPen(
-            KswordTheme::IsDarkModeEnabled()
-            ? QColor(190, 190, 190)
-            : QColor(120, 120, 120));
+        painter.setPen(KswordTheme::TextSecondaryColor());
         painter.drawRect(fallbackPixmap.rect().adjusted(0, 0, -1, -1));
         painter.drawText(
             fallbackPixmap.rect(),

@@ -283,16 +283,22 @@ void MemoryDock::rebuildModuleTableFromCache()
         // 签名列颜色策略：可信绿、未知灰、不可信红。
         if (entry.signatureTrusted)
         {
-            rowItem->setForeground(toModuleTreeColumnIndex(ModuleTreeColumn::Signature), QColor(34, 139, 34));
+            rowItem->setForeground(
+                toModuleTreeColumnIndex(ModuleTreeColumn::Signature),
+                KswordTheme::SuccessColor());
         }
         else if (entry.signatureState.compare("Pending", Qt::CaseInsensitive) == 0 ||
             entry.signatureState.compare("Unknown", Qt::CaseInsensitive) == 0)
         {
-            rowItem->setForeground(toModuleTreeColumnIndex(ModuleTreeColumn::Signature), QColor(120, 120, 120));
+            rowItem->setForeground(
+                toModuleTreeColumnIndex(ModuleTreeColumn::Signature),
+                KswordTheme::TextSecondaryColor());
         }
         else
         {
-            rowItem->setForeground(toModuleTreeColumnIndex(ModuleTreeColumn::Signature), QColor(220, 50, 47));
+            rowItem->setForeground(
+                toModuleTreeColumnIndex(ModuleTreeColumn::Signature),
+                KswordTheme::ErrorColor());
         }
 
         m_moduleTable->addTopLevelItem(rowItem);
@@ -331,7 +337,9 @@ bool MemoryDock::refreshModuleListForPid(const std::uint32_t pid)
         if (m_moduleStatusLabel != nullptr)
         {
             m_moduleStatusLabel->setText("● 未选择有效进程");
-            m_moduleStatusLabel->setStyleSheet("color:#DC322F; font-weight:700;");
+            m_moduleStatusLabel->setStyleSheet(
+                QStringLiteral("color:%1; font-weight:700;")
+                    .arg(KswordTheme::ErrorColor().name(QColor::HexRgb)));
         }
         return false;
     }
@@ -449,9 +457,12 @@ bool MemoryDock::refreshModuleListForPid(const std::uint32_t pid)
                         statusText += QString(" | %1").arg(diagnosticText);
                     }
                     selfGuard->m_moduleStatusLabel->setText(statusText);
-                    selfGuard->m_moduleStatusLabel->setStyleSheet(moduleCount == 0
-                        ? "color:#DC322F; font-weight:700;"
-                        : "color:#2F7D32; font-weight:600;");
+                    selfGuard->m_moduleStatusLabel->setStyleSheet(
+                        QStringLiteral("color:%1; font-weight:%2;")
+                            .arg(moduleCount == 0
+                                ? KswordTheme::ErrorColor().name(QColor::HexRgb)
+                                : KswordTheme::SuccessColor().name(QColor::HexRgb))
+                            .arg(moduleCount == 0 ? 700 : 600));
                 }
 
                 // 刷新完成日志：包含耗时、总数、过滤后数量和诊断文本。
@@ -660,7 +671,9 @@ void MemoryDock::detachProcess()
     if (m_moduleStatusLabel != nullptr)
     {
         m_moduleStatusLabel->setText("● 未附加进程");
-        m_moduleStatusLabel->setStyleSheet("color:#5F5F5F; font-weight:600;");
+        m_moduleStatusLabel->setStyleSheet(
+            QStringLiteral("color:%1; font-weight:600;")
+                .arg(KswordTheme::TextSecondaryColor().name(QColor::HexRgb)));
     }
     m_regionTable->setRowCount(0);
     m_searchResultTable->setRowCount(0);

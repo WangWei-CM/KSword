@@ -82,7 +82,7 @@ namespace
 
     QString callbackEnumSelectionStyle()
     {
-        return QStringLiteral("QTableWidget::item:selected{background:%1;color:#FFFFFF;}")
+        return QStringLiteral("QTableWidget::item:selected{background:%1;color:palette(highlighted-text);}")
             .arg(KswordTheme::PrimaryBlueHex);
     }
 
@@ -1569,7 +1569,7 @@ void KernelDock::refreshCallbackEnumAsync()
             if (!success)
             {
                 guardThis->m_callbackEnumStatusLabel->setText(kernelText("kernel.callback.enum.status.failed", QStringLiteral("状态：刷新失败")));
-                guardThis->m_callbackEnumStatusLabel->setStyleSheet(callbackEnumStatusLabelStyle(QStringLiteral("#B23A3A")));
+                guardThis->m_callbackEnumStatusLabel->setStyleSheet(callbackEnumStatusLabelStyle(KswordTheme::ErrorHex()));
                 guardThis->m_callbackEnumDetailEditor->setText(errorText);
                 return;
             }
@@ -1593,7 +1593,7 @@ void KernelDock::refreshCallbackEnumAsync()
                 .arg(unsupportedCount)
                 .arg(truncated ? kernelText("kernel.callback.enum.status.truncated_suffix", QStringLiteral("，响应截断")) : QString()));
             guardThis->m_callbackEnumStatusLabel->setStyleSheet(callbackEnumStatusLabelStyle(
-                truncated ? QStringLiteral("#D77A00") : QStringLiteral("#3A8F3A")));
+                truncated ? KswordTheme::WarningHex() : KswordTheme::SuccessHex()));
 
             if (guardThis->m_callbackEnumTable->rowCount() > 0)
             {
@@ -1656,38 +1656,38 @@ void KernelDock::rebuildCallbackEnumTable(const QString& filterKeyword)
 
         if (callbackEnumIsTrustedSource(entry))
         {
-            trustItem->setForeground(QBrush(QColor(QStringLiteral("#3A8F3A"))));
+            trustItem->setForeground(QBrush(KswordTheme::SuccessColor()));
         }
         else if (entry.fallbackPatternOnly)
         {
-            trustItem->setForeground(QBrush(QColor(QStringLiteral("#D77A00"))));
+            trustItem->setForeground(QBrush(KswordTheme::WarningColor()));
         }
         else if (callbackEnumIsUnsupportedSource(entry))
         {
-            trustItem->setForeground(QBrush(QColor(QStringLiteral("#8A8A8A"))));
+            trustItem->setForeground(QBrush(KswordTheme::TextSecondaryColor()));
         }
 
         if (entry.status == KSWORD_ARK_CALLBACK_ENUM_STATUS_UNSUPPORTED)
         {
-            statusItem->setForeground(QBrush(QColor(QStringLiteral("#D77A00"))));
+            statusItem->setForeground(QBrush(KswordTheme::WarningColor()));
         }
         else if (entry.status == KSWORD_ARK_CALLBACK_ENUM_STATUS_QUERY_FAILED)
         {
-            statusItem->setForeground(QBrush(QColor(QStringLiteral("#B23A3A"))));
+            statusItem->setForeground(QBrush(KswordTheme::ErrorColor()));
         }
 
         switch (callbackEnumRemovePolicyKind(entry))
         {
         case CallbackEnumRemovePolicyKind::RemovableVerified:
-            removePolicyItem->setForeground(QBrush(QColor(QStringLiteral("#3A8F3A"))));
+            removePolicyItem->setForeground(QBrush(KswordTheme::SuccessColor()));
             break;
         case CallbackEnumRemovePolicyKind::RemovableCandidate:
         case CallbackEnumRemovePolicyKind::ExperimentalOnly:
-            removePolicyItem->setForeground(QBrush(QColor(QStringLiteral("#D77A00"))));
+            removePolicyItem->setForeground(QBrush(KswordTheme::WarningColor()));
             break;
         case CallbackEnumRemovePolicyKind::NotRemovable:
         default:
-            removePolicyItem->setForeground(QBrush(QColor(QStringLiteral("#8A8A8A"))));
+            removePolicyItem->setForeground(QBrush(KswordTheme::TextSecondaryColor()));
             break;
         }
 

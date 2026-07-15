@@ -255,13 +255,14 @@ namespace
         return QStringLiteral(
             "QMenu{background:%1;color:%2;border:1px solid %3;}"
             "QMenu::item{padding:5px 24px 5px 24px;background:transparent;}"
-            "QMenu::item:selected{background:%4;color:#FFFFFF;}"
+            "QMenu::item:selected{background:%4;color:%6;}"
             "QMenu::item:disabled{color:%5;}")
-            .arg(KswordTheme::SurfaceHex())
-            .arg(KswordTheme::TextPrimaryHex())
-            .arg(KswordTheme::BorderHex())
-            .arg(KswordTheme::PrimaryBlueHex)
-            .arg(KswordTheme::TextSecondaryHex());
+            .arg(KswordTheme::SurfaceColorHex())
+            .arg(KswordTheme::TextPrimaryColorHex())
+            .arg(KswordTheme::BorderColorHex())
+            .arg(KswordTheme::AccentHex(KswordTheme::AccentRole::Blue))
+            .arg(KswordTheme::TextSecondaryColorHex())
+            .arg(KswordTheme::OnAccentHex());
     }
 
     QString evidenceRowText(QTableWidget* table, const int rowIndex)
@@ -572,7 +573,8 @@ void MemoryDock::refreshKernelMemoryEvidenceAsync()
             if (m_kernelMemoryEvidenceStatusLabel != nullptr)
             {
                 m_kernelMemoryEvidenceStatusLabel->setText(QStringLiteral("状态：非模块执行范围需要有效的起始/结束 VA。"));
-                m_kernelMemoryEvidenceStatusLabel->setStyleSheet(statusStyle(QStringLiteral("#B23A3A")));
+                m_kernelMemoryEvidenceStatusLabel->setStyleSheet(
+                    statusStyle(KswordTheme::ErrorColor().name(QColor::HexRgb)));
             }
             return;
         }
@@ -633,7 +635,8 @@ void MemoryDock::refreshKernelMemoryEvidenceAsync()
                     if (guardThis->m_kernelMemoryEvidenceStatusLabel != nullptr)
                     {
                         guardThis->m_kernelMemoryEvidenceStatusLabel->setText(QStringLiteral("状态：%1").arg(message));
-                        guardThis->m_kernelMemoryEvidenceStatusLabel->setStyleSheet(statusStyle(QStringLiteral("#B23A3A")));
+                        guardThis->m_kernelMemoryEvidenceStatusLabel->setStyleSheet(
+                            statusStyle(KswordTheme::ErrorColor().name(QColor::HexRgb)));
                     }
                     if (guardThis->m_kernelMemoryEvidenceDetailEditor != nullptr)
                     {
@@ -654,7 +657,8 @@ void MemoryDock::refreshKernelMemoryEvidenceAsync()
                         .arg(guardThis->m_kernelMemoryEvidenceVisibleCount)
                         .arg(result.moduleCount)
                         .arg(result.bigPoolRowsSeen));
-                    guardThis->m_kernelMemoryEvidenceStatusLabel->setStyleSheet(statusStyle(QStringLiteral("#2F7D32")));
+                    guardThis->m_kernelMemoryEvidenceStatusLabel->setStyleSheet(
+                        statusStyle(KswordTheme::SuccessColor().name(QColor::HexRgb)));
                 }
             },
             Qt::QueuedConnection);

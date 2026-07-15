@@ -230,7 +230,7 @@ void KernelDock::refreshObjectNamespaceAsync()
             if (!success)
             {
                 guardThis->m_objectNamespaceStatusLabel->setText(kernelText("kernel.runtime.object_namespace.status.failed", QStringLiteral("状态：刷新失败")));
-                guardThis->m_objectNamespaceStatusLabel->setStyleSheet(statusLabelStyle(QStringLiteral("#B23A3A")));
+                guardThis->m_objectNamespaceStatusLabel->setStyleSheet(statusLabelStyle(KswordTheme::ErrorHex()));
                 guardThis->m_objectNamespaceDetailEditor->setText(errorText);
 
                 kLogEvent failEvent;
@@ -257,7 +257,7 @@ void KernelDock::refreshObjectNamespaceAsync()
                 .arg(guardThis->m_objectNamespaceRows.size())
                 .arg(failedCount));
             guardThis->m_objectNamespaceStatusLabel->setStyleSheet(
-                statusLabelStyle(failedCount == 0 ? QStringLiteral("#3A8F3A") : QStringLiteral("#D77A00")));
+                statusLabelStyle(failedCount == 0 ? KswordTheme::SuccessHex() : KswordTheme::WarningHex()));
 
             if (guardThis->m_objectNamespaceTree->topLevelItemCount() > 0)
             {
@@ -316,7 +316,7 @@ void KernelDock::refreshAtomTableAsync()
             if (!success)
             {
                 guardThis->m_atomStatusLabel->setText(kernelText("kernel.runtime.atom.status.failed", QStringLiteral("状态：刷新失败")));
-                guardThis->m_atomStatusLabel->setStyleSheet(statusLabelStyle(QStringLiteral("#B23A3A")));
+                guardThis->m_atomStatusLabel->setStyleSheet(statusLabelStyle(KswordTheme::ErrorHex()));
                 guardThis->m_atomDetailEditor->setText(errorText);
 
                 kLogEvent failEvent;
@@ -332,7 +332,7 @@ void KernelDock::refreshAtomTableAsync()
             guardThis->m_atomStatusLabel->setText(
                 kernelText("kernel.runtime.atom.status.summary", QStringLiteral("状态：已刷新 %1 项"))
                 .arg(guardThis->m_atomRows.size()));
-            guardThis->m_atomStatusLabel->setStyleSheet(statusLabelStyle(QStringLiteral("#3A8F3A")));
+            guardThis->m_atomStatusLabel->setStyleSheet(statusLabelStyle(KswordTheme::SuccessHex()));
 
             if (guardThis->m_atomTable->rowCount() > 0)
             {
@@ -383,7 +383,7 @@ void KernelDock::refreshNtQueryAsync()
             if (!success)
             {
                 guardThis->m_ntQueryStatusLabel->setText(kernelText("kernel.runtime.nt_query.status.failed", QStringLiteral("状态：刷新失败")));
-                guardThis->m_ntQueryStatusLabel->setStyleSheet(statusLabelStyle(QStringLiteral("#B23A3A")));
+                guardThis->m_ntQueryStatusLabel->setStyleSheet(statusLabelStyle(KswordTheme::ErrorHex()));
                 guardThis->m_ntQueryDetailEditor->setText(errorText);
 
                 kLogEvent failEvent;
@@ -410,7 +410,7 @@ void KernelDock::refreshNtQueryAsync()
                 kernelText("kernel.runtime.nt_query.status.summary", QStringLiteral("状态：已刷新 %1 项，成功 %2 项"))
                 .arg(guardThis->m_ntQueryResults.size())
                 .arg(successCount));
-            guardThis->m_ntQueryStatusLabel->setStyleSheet(statusLabelStyle(QStringLiteral("#3A8F3A")));
+            guardThis->m_ntQueryStatusLabel->setStyleSheet(statusLabelStyle(KswordTheme::SuccessHex()));
 
             if (guardThis->m_ntQueryTable->rowCount() > 0)
             {

@@ -44,7 +44,7 @@ namespace
     // - 深色模式固定黑色，浅色模式固定白色。
     QColor pureDialogBackgroundColor(const bool darkModeEnabled)
     {
-        return darkModeEnabled ? QColor(0, 0, 0) : QColor(255, 255, 255);
+        return darkModeEnabled ? KswordTheme::BlackColor() : KswordTheme::WhiteColor();
     }
 
     // pureDialogTextColor 作用：
@@ -52,7 +52,7 @@ namespace
     // - 保证输入框、标签、按钮文字在两种主题下可读。
     QColor pureDialogTextColor(const bool darkModeEnabled)
     {
-        return darkModeEnabled ? QColor(255, 255, 255) : QColor(0, 0, 0);
+        return darkModeEnabled ? KswordTheme::WhiteColor() : KswordTheme::BlackColor();
     }
 
     // pureDialogBorderColor 作用：
@@ -60,7 +60,9 @@ namespace
     // - 纯黑/纯白背景下使用中性灰边框做层次区分。
     QColor pureDialogBorderColor(const bool darkModeEnabled)
     {
-        return darkModeEnabled ? QColor(74, 74, 74) : QColor(208, 208, 208);
+        return KswordTheme::OffsetColor(
+            darkModeEnabled ? KswordTheme::BlackColor() : KswordTheme::WhiteColor(),
+            darkModeEnabled ? KswordTheme::UniformOffset(74) : KswordTheme::UniformOffset(-47));
     }
 
     // buildDialogPalette 作用：
@@ -82,7 +84,7 @@ namespace
         dialogPalette.setColor(QPalette::ButtonText, textColor);
         dialogPalette.setColor(QPalette::Mid, borderColor);
         dialogPalette.setColor(QPalette::Highlight, KswordTheme::PrimaryBlueColor);
-        dialogPalette.setColor(QPalette::HighlightedText, QColor(255, 255, 255));
+        dialogPalette.setColor(QPalette::HighlightedText, KswordTheme::OnAccentColor());
         return dialogPalette;
     }
 
@@ -121,7 +123,7 @@ namespace
             "  border-radius:3px;"
             "  padding:3px 6px;"
             "  selection-background-color:%6;"
-            "  selection-color:#FFFFFF;"
+            "  selection-color:%8;"
             "}"
             "QDialog[%2=\"true\"] QAbstractScrollArea,"
             "QDialog[%2=\"true\"] QAbstractScrollArea::viewport,"
@@ -130,7 +132,7 @@ namespace
             "  color:%4 !important;"
             "  border:1px solid %5;"
             "  selection-background-color:%6;"
-            "  selection-color:#FFFFFF;"
+            "  selection-color:%8;"
             "}"
             "QDialog[%2=\"true\"] QGroupBox{"
             "  background-color:%3 !important;"
@@ -151,7 +153,7 @@ namespace
             "}"
             "QDialog[%2=\"true\"] QTabBar::tab:selected{"
             "  background-color:%6 !important;"
-            "  color:#FFFFFF !important;"
+            "  color:%8 !important;"
             "}"
             "QDialog[%2=\"true\"] QMenu{"
             "  background-color:%3 !important;"
@@ -160,7 +162,7 @@ namespace
             "}"
             "QDialog[%2=\"true\"] QMenu::item:selected{"
             "  background-color:%6 !important;"
-            "  color:#FFFFFF !important;"
+            "  color:%8 !important;"
             "}"
             "%7")
             .arg(QString::fromLatin1(kGlobalDialogStyleMarker))
@@ -169,6 +171,7 @@ namespace
             .arg(textColorText)
             .arg(borderColorText)
             .arg(KswordTheme::PrimaryBlueHex)
+            .arg(KswordTheme::OnAccentHex())
             .arg(KswordTheme::ThemedButtonStyle());
     }
 

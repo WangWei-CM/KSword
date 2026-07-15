@@ -50,19 +50,20 @@ namespace
             "}"
             "QPushButton:hover {"
             "  background: %3;"
-            "  color: #FFFFFF;"
+            "  color: %7;"
             "  border: 1px solid %3;"
             "}"
             "QPushButton:pressed {"
             "  background: %4;"
-            "  color: #FFFFFF;"
+            "  color: %7;"
             "}")
-            .arg(KswordTheme::PrimaryBlueHex)
-            .arg(KswordTheme::PrimaryBlueBorderHex)
-            .arg(KswordTheme::PrimaryBlueSolidHoverHex())
-            .arg(KswordTheme::PrimaryBluePressedHex)
+            .arg(KswordTheme::AccentHex(KswordTheme::AccentRole::Blue))
+            .arg(KswordTheme::AccentHex(KswordTheme::AccentRole::Blue))
+            .arg(KswordTheme::AccentHex(KswordTheme::AccentRole::Blue, -18))
+            .arg(KswordTheme::AccentHex(KswordTheme::AccentRole::Blue, -32))
             .arg(paddingText)
-            .arg(KswordTheme::SurfaceHex());
+            .arg(KswordTheme::SurfaceColorHex())
+            .arg(KswordTheme::OnAccentHex());
     }
 
     // installReadOnlyTreeCopyMenu 作用：
@@ -1031,18 +1032,14 @@ void HandleDock::rebuildHandleTable()
         // 占位状态统一弱化显示，并附带 tooltip 解释来源，避免用户把“无名称”和“未查到”误看成同一种状态。
         if (!row.objectNameAvailable || row.objectName.trimmed().isEmpty())
         {
-            const QColor secondaryTextColor = KswordTheme::IsDarkModeEnabled()
-                ? QColor(178, 178, 178)
-                : QColor(92, 92, 92);
+            const QColor secondaryTextColor = KswordTheme::TextSecondaryColor();
             item->setForeground(
                 static_cast<int>(HandleTableColumn::ObjectName),
                 secondaryTextColor);
         }
         if (!row.basicInfoAvailable)
         {
-            const QColor secondaryTextColor = KswordTheme::IsDarkModeEnabled()
-                ? QColor(178, 178, 178)
-                : QColor(92, 92, 92);
+            const QColor secondaryTextColor = KswordTheme::TextSecondaryColor();
             item->setForeground(static_cast<int>(HandleTableColumn::HandleCount), secondaryTextColor);
             item->setForeground(static_cast<int>(HandleTableColumn::PointerCount), secondaryTextColor);
             item->setToolTip(static_cast<int>(HandleTableColumn::HandleCount), QStringLiteral("ObjectBasicInformation 未查到。"));

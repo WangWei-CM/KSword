@@ -149,12 +149,13 @@ namespace
         return QStringLiteral(
             "QPushButton{border:1px solid %1;border-radius:4px;padding:4px 10px;color:%2;background:transparent;}"
             "QPushButton:hover{background:%3;}"
-            "QPushButton:pressed{background:%1;color:#FFFFFF;}"
+            "QPushButton:pressed{background:%1;color:%5;}"
             "QPushButton:disabled{color:%4;border-color:%4;background:transparent;}")
-            .arg(KswordTheme::PrimaryBlueHex)
-            .arg(KswordTheme::TextPrimaryHex())
-            .arg(KswordTheme::IsDarkModeEnabled() ? KswordTheme::PrimaryBlueSubtleDarkHex : KswordTheme::PrimaryBlueSubtleLightHex)
-            .arg(KswordTheme::TextDisabledColor().name());
+            .arg(KswordTheme::AccentHex(KswordTheme::AccentRole::Blue))
+            .arg(KswordTheme::TextPrimaryColorHex())
+            .arg(KswordTheme::PrimaryBlueSubtleHex())
+            .arg(KswordTheme::TextDisabledColorHex())
+            .arg(KswordTheme::OnAccentHex());
     }
 
     QString buildBlueInputStyle()
@@ -166,9 +167,9 @@ namespace
             "QLineEdit{border:1px solid %1;border-radius:4px;padding:4px 6px;color:%2;background:%3;}"
             "QLineEdit:focus{border:1px solid %4;}")
             .arg(KswordTheme::BorderColorHex())
-            .arg(KswordTheme::TextPrimaryHex())
+            .arg(KswordTheme::TextPrimaryColorHex())
             .arg(KswordTheme::SurfaceColorHex())
-            .arg(KswordTheme::PrimaryBlueHex);
+            .arg(KswordTheme::AccentHex(KswordTheme::AccentRole::Blue));
     }
 
     QString buildHeaderStyle()
@@ -177,7 +178,7 @@ namespace
         // 处理：构造表头蓝色强调样式。
         // 返回：stylesheet 文本。
         return QStringLiteral("QHeaderView::section{color:%1;font-weight:700;}")
-            .arg(KswordTheme::PrimaryBlueHex);
+            .arg(KswordTheme::AccentHex(KswordTheme::AccentRole::Blue));
     }
 
     QString statusStyle(const QString& colorText)
@@ -253,18 +254,25 @@ namespace
         // 输入：按钮是否代表当前列预设。
         // 处理：选中时使用主题主色背景，未选中时保持透明和主题文字色。
         // 返回：stylesheet 文本。
-        const QString backgroundText = selected ? KswordTheme::PrimaryBlueHex : QStringLiteral("transparent");
-        const QString borderText = selected ? KswordTheme::PrimaryBlueHex : KswordTheme::BorderColorHex();
-        const QString textColor = selected ? QStringLiteral("#FFFFFF") : KswordTheme::TextPrimaryHex();
+        const QString backgroundText = selected
+            ? KswordTheme::AccentHex(KswordTheme::AccentRole::Blue)
+            : QStringLiteral("transparent");
+        const QString borderText = selected
+            ? KswordTheme::AccentHex(KswordTheme::AccentRole::Blue)
+            : KswordTheme::BorderColorHex();
+        const QString textColor = selected
+            ? KswordTheme::OnAccentHex()
+            : KswordTheme::TextPrimaryColorHex();
         return QStringLiteral(
             "QPushButton{min-width:24px;max-width:24px;padding:3px 0;border:1px solid %1;"
             "border-radius:0;color:%2;background:%3;font-weight:700;}"
             "QPushButton:hover{border-color:%4;}"
-            "QPushButton:pressed{background:%4;color:#FFFFFF;}")
+            "QPushButton:pressed{background:%4;color:%5;}")
             .arg(borderText)
             .arg(textColor)
             .arg(backgroundText)
-            .arg(KswordTheme::PrimaryBlueHex);
+            .arg(KswordTheme::AccentHex(KswordTheme::AccentRole::Blue))
+            .arg(KswordTheme::OnAccentHex());
     }
 
     void updateColumnPresetButtons(
@@ -1209,7 +1217,7 @@ void HardwareR0EvidencePage::refreshEvidenceAsync(const bool forceRefresh)
                 const QString message = bundle.integrityResult.unsupported
                     ? QStringLiteral("状态：当前 R0 驱动未支持 CPU Integrity IOCTL")
                     : QStringLiteral("状态：R0 查询不可用：%1").arg(friendlyHardwareIoMessage(bundle.integrityResult.io.message));
-                safeThis->setStatusText(message, QStringLiteral("#B23A3A"));
+                safeThis->setStatusText(message, KswordTheme::ErrorColor().name(QColor::HexRgb));
                 return;
             }
 

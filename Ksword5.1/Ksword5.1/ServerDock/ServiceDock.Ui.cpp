@@ -1,5 +1,6 @@
 #include "ServiceDock.Internal.h"
 #include "../UI/VisibleTableWidget.h"
+#include "../theme.h"
 
 using namespace service_dock_detail;
 
@@ -66,7 +67,9 @@ namespace
     {
         QWidget* separatorWidget = new QWidget(parentWidget);
         separatorWidget->setFixedSize(1, 20);
-        separatorWidget->setStyleSheet(QStringLiteral("background-color: rgba(120,120,120,120);"));
+        separatorWidget->setStyleSheet(
+            QStringLiteral("background-color:%1;")
+                .arg(KswordTheme::RgbaColorName(KswordTheme::TextSecondaryColor(), 120)));
         return separatorWidget;
     }
 
@@ -391,19 +394,20 @@ void ServiceDock::rebuildServiceTable()
         QColor rowColor;
         if (entry.currentState == SERVICE_RUNNING)
         {
-            rowColor = QColor(66, 170, 99, 70);
+            rowColor = KswordTheme::WithAlpha(KswordTheme::SuccessColor(), 70);
         }
         else if (isServiceStatePending(entry.currentState))
         {
-            rowColor = QColor(222, 145, 54, 70);
+            rowColor = KswordTheme::WithAlpha(KswordTheme::WarningColor(), 70);
         }
         else if (entry.startTypeValue == SERVICE_AUTO_START)
         {
-            rowColor = QColor(67, 160, 255, 45);
+            rowColor = KswordTheme::WithAlpha(
+                KswordTheme::AccentColor(KswordTheme::AccentRole::Blue), 45);
         }
         if (entry.hasRisk)
         {
-            rowColor = QColor(220, 70, 70, 68);
+            rowColor = KswordTheme::WithAlpha(KswordTheme::ErrorColor(), 68);
         }
 
         if (rowColor.isValid())

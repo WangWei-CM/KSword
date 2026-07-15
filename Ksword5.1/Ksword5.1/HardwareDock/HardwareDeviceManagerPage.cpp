@@ -1167,10 +1167,8 @@ void HardwareDeviceManagerPage::rebuildDeviceTree(const std::vector<DeviceEntry>
     std::vector<std::unique_ptr<QTreeWidgetItem>> itemOwnerList;
     itemOwnerList.reserve(deviceList.size());
 
-    const QColor problemForeground = QColor(235, 77, 92);
-    const QColor missingForeground = KswordTheme::IsDarkModeEnabled()
-        ? QColor(150, 160, 170)
-        : QColor(120, 120, 120);
+    const QColor problemForeground = KswordTheme::ErrorColor();
+    const QColor missingForeground = KswordTheme::TextSecondaryColor();
     const QColor normalForeground = QColor();
 
     for (const DeviceEntry& entry : deviceList)

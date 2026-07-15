@@ -34,16 +34,16 @@ const QString QSS_MainWindow_TabWidget = R"(
     }
 
     QTabBar::tab:selected {
-        background-color: #43A0FF;
-        color: #FFFFFF;
+        background-color: palette(highlight);
+        color: palette(highlighted-text);
         font-weight: 700;
     }
 
     QTabBar::tab:selected:hover,
     QTabBar::tab:selected:pressed {
-        background-color: #43A0FF !important;
-        background: #43A0FF !important;
-        color: #FFFFFF;
+        background-color: palette(highlight) !important;
+        background: palette(highlight) !important;
+        color: palette(highlighted-text);
     }
 
     QTabBar::tab:hover:!selected,
@@ -100,16 +100,16 @@ const QString QSS_MainWindow_dockStyle = R"(
     }
 
     QMainWindow QTabBar::tab:selected {
-        background-color: #43A0FF;
-        color: #FFFFFF;
+        background-color: palette(highlight);
+        color: palette(highlighted-text);
         font-weight: 700;
     }
 
     QMainWindow QTabBar::tab:selected:hover,
     QMainWindow QTabBar::tab:selected:pressed {
-        background-color: #43A0FF !important;
-        background: #43A0FF !important;
-        color: #FFFFFF;
+        background-color: palette(highlight) !important;
+        background: palette(highlight) !important;
+        color: palette(highlighted-text);
     }
 
     QMainWindow QTabBar::tab:hover:!selected,
@@ -151,14 +151,14 @@ const QString QSS_MainWindow_dockStyle = R"(
 
     ads--CDockWidgetTab[activeTab="true"],
     ads--CAutoHideTab[activeTab="true"] {
-        background-color: #43A0FF;
-        background: #43A0FF;
-        color: #FFFFFF;
+        background-color: palette(highlight);
+        background: palette(highlight);
+        color: palette(highlighted-text);
     }
 
     ads--CDockWidgetTab[activeTab="true"] QLabel,
     ads--CAutoHideTab[activeTab="true"] QLabel {
-        color: #FFFFFF;
+        color: palette(highlighted-text);
         font-weight: 600;
     }
 
@@ -166,8 +166,8 @@ const QString QSS_MainWindow_dockStyle = R"(
     ads--CDockWidgetTab[activeTab="true"]:hover,
     ads--CDockWidgetTab[kswordDockTab="true"]:hover,
     ads--CAutoHideTab:hover {
-        background-color: #173553 !important;
-        background: #173553 !important;
+        background-color: palette(alternate-base) !important;
+        background: palette(alternate-base) !important;
         color: palette(text);
         border: none !important;
     }
@@ -178,8 +178,8 @@ const QString QSS_MainWindow_dockStyle = R"(
     ads--CDockWidgetTab[kswordDockTab="true"]:hover QWidget,
     ads--CAutoHideTab:hover QLabel,
     ads--CAutoHideTab:hover QWidget {
-        background-color: #173553 !important;
-        background: #173553 !important;
+        background-color: palette(alternate-base) !important;
+        background: palette(alternate-base) !important;
         color: palette(text);
     }
 
@@ -193,9 +193,9 @@ const QString QSS_MainWindow_dockStyle = R"(
 
     ads--CDockAreaTitleBar QToolButton:hover,
     ads--CDockAreaTitleBar QPushButton:hover {
-        background-color: #43A0FF;
-        color: #FFFFFF;
-        border-color: #43A0FF;
+        background-color: palette(highlight);
+        color: palette(highlighted-text);
+        border-color: palette(highlight);
     }
 
     QScrollBar:vertical {
@@ -206,13 +206,13 @@ const QString QSS_MainWindow_dockStyle = R"(
     }
 
     QScrollBar::handle:vertical {
-        background-color: #43A0FF;
+        background-color: palette(highlight);
         min-height: 20px;
         border-radius: 2px;
     }
 
     QScrollBar::handle:vertical:hover {
-        background-color: #2F92FF;
+        background-color: palette(highlight);
     }
 
     QScrollBar:horizontal {
@@ -223,13 +223,13 @@ const QString QSS_MainWindow_dockStyle = R"(
     }
 
     QScrollBar::handle:horizontal {
-        background-color: #43A0FF;
+        background-color: palette(highlight);
         min-width: 20px;
         border-radius: 2px;
     }
 
     QScrollBar::handle:horizontal:hover {
-        background-color: #2F92FF;
+        background-color: palette(highlight);
     }
 
     QScrollBar::add-line,
@@ -251,9 +251,9 @@ const QString QSS_MainWindow_dockStyle = R"(
 // - 默认和悬停都不使用白色背景，避免高亮发白。
 const QString QSS_Buttons_Light = R"(
     QPushButton {
-        background-color: #43A0FF !important;
-        color: #FFFFFF !important;
-        border: 1px solid #43A0FF !important;
+        background-color: palette(highlight) !important;
+        color: palette(highlighted-text) !important;
+        border: 1px solid palette(highlight) !important;
         padding: 6px 16px;
         border-radius: 1px;
         font-weight: 500;
@@ -261,21 +261,21 @@ const QString QSS_Buttons_Light = R"(
     }
 
     QPushButton:hover {
-        background-color: #2F92FF !important;
-        color: #FFFFFF !important;
-        border-color: #2F92FF !important;
+        background-color: palette(highlight) !important;
+        color: palette(highlighted-text) !important;
+        border-color: palette(highlight) !important;
     }
 
     QPushButton:pressed {
-        background-color: #1F7FD9 !important;
-        color: #FFFFFF !important;
-        border-color: #1F7FD9 !important;
+        background-color: palette(highlight) !important;
+        color: palette(highlighted-text) !important;
+        border-color: palette(highlight) !important;
     }
 
     QPushButton:disabled {
-        background-color: #B8DCFF !important;
-        color: #F3F8FF !important;
-        border: 1px solid #B8DCFF !important;
+        background-color: palette(button) !important;
+        color: palette(disabled, text) !important;
+        border: 1px solid palette(mid) !important;
         font-weight: normal;
     }
 )";
@@ -285,9 +285,9 @@ const QString QSS_Buttons_Light = R"(
 // - 避免出现白色 hover 背景。
 const QString QSS_Buttons_Dark = R"(
     QPushButton {
-        background-color: #43A0FF !important;
-        color: #FFFFFF !important;
-        border: 1px solid #43A0FF !important;
+        background-color: palette(highlight) !important;
+        color: palette(highlighted-text) !important;
+        border: 1px solid palette(highlight) !important;
         padding: 6px 16px;
         border-radius: 1px;
         font-weight: 500;
@@ -295,21 +295,21 @@ const QString QSS_Buttons_Dark = R"(
     }
 
     QPushButton:hover {
-        background-color: #2F92FF !important;
-        color: #FFFFFF !important;
-        border-color: #2F92FF !important;
+        background-color: palette(highlight) !important;
+        color: palette(highlighted-text) !important;
+        border-color: palette(highlight) !important;
     }
 
     QPushButton:pressed {
-        background-color: #1F7FD9 !important;
-        color: #FFFFFF !important;
-        border-color: #1F7FD9 !important;
+        background-color: palette(highlight) !important;
+        color: palette(highlighted-text) !important;
+        border-color: palette(highlight) !important;
     }
 
     QPushButton:disabled {
-        background-color: #1E2B3C !important;
-        color: #7C92A9 !important;
-        border: 1px solid #37506A !important;
+        background-color: palette(button) !important;
+        color: palette(disabled, text) !important;
+        border: 1px solid palette(mid) !important;
         font-weight: normal;
     }
 )";

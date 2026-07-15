@@ -27,10 +27,10 @@ namespace
     std::array<CompositionColor, 4> buildCompositionColorList()
     {
         return {
-            CompositionColor{ "活跃", QColor(184, 99, 255, 145) },
-            CompositionColor{ "缓存", QColor(79, 195, 247, 120) },
-            CompositionColor{ "分页池", QColor(255, 193, 7, 120) },
-            CompositionColor{ "非分页池", QColor(255, 112, 67, 130) },
+            CompositionColor{ "活跃", KswordTheme::WithAlpha(KswordTheme::AccentColor(KswordTheme::AccentRole::Purple), 145) },
+            CompositionColor{ "缓存", KswordTheme::WithAlpha(KswordTheme::AccentColor(KswordTheme::AccentRole::Cyan, 6), 120) },
+            CompositionColor{ "分页池", KswordTheme::WithAlpha(KswordTheme::AccentColor(KswordTheme::AccentRole::Yellow), 120) },
+            CompositionColor{ "非分页池", KswordTheme::WithAlpha(KswordTheme::AccentColor(KswordTheme::AccentRole::Orange, 18), 130) },
         };
     }
 }
@@ -101,15 +101,11 @@ void MemoryCompositionHistoryWidget::paintEvent(QPaintEvent* paintEventPointer)
     QPainter painter(this);
     painter.setRenderHint(QPainter::Antialiasing, true);
 
-    const QColor textColor = KswordTheme::IsDarkModeEnabled()
-        ? QColor(235, 242, 250)
-        : QColor(25, 42, 60);
-    const QColor borderColor = KswordTheme::IsDarkModeEnabled()
-        ? QColor(95, 120, 148, 130)
-        : QColor(145, 175, 210, 150);
-    const QColor gridColor = KswordTheme::IsDarkModeEnabled()
-        ? QColor(184, 99, 255, 38)
-        : QColor(67, 160, 255, 45);
+    const QColor textColor = KswordTheme::TextPrimaryColor();
+    const QColor borderColor = KswordTheme::WithAlpha(KswordTheme::BorderColor(), 138);
+    const QColor gridColor = KswordTheme::WithAlpha(
+        KswordTheme::AccentColor(KswordTheme::AccentRole::Purple),
+        42);
 
     painter.fillRect(rect(), Qt::transparent);
     // 图例空间随高度缩放；低高度时舍弃下方图例，优先保留折线和构成填充。
@@ -249,16 +245,14 @@ void MemoryCompositionHistoryWidget::drawUsageLine(QPainter& painter, const QRec
         }
     }
 
-    painter.setPen(QPen(QColor(184, 99, 255), 2.0));
+    painter.setPen(QPen(KswordTheme::AccentColor(KswordTheme::AccentRole::Purple), 2.0));
     painter.drawPath(linePath);
 }
 
 void MemoryCompositionHistoryWidget::drawLegend(QPainter& painter, const QRectF& plotRect) const
 {
     const std::array<CompositionColor, 4> colorList = buildCompositionColorList();
-    const QColor textColor = KswordTheme::IsDarkModeEnabled()
-        ? QColor(235, 242, 250)
-        : QColor(25, 42, 60);
+    const QColor textColor = KswordTheme::TextPrimaryColor();
 
     painter.setFont(QFont(painter.font().family(), 8));
     painter.setPen(textColor);

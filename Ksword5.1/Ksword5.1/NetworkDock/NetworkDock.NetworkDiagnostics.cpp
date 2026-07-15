@@ -1,5 +1,6 @@
 #include "NetworkDock.InternalCommon.h"
 #include "../UI/VisibleTableWidget.h"
+#include "../theme.h"
 
 #include "../UI/CodeEditorWidget.h"
 #include <QDir>
@@ -1083,7 +1084,7 @@ void NetworkDock::appendAliveHostRow(
     m_aliveScanTable->insertRow(row);
     m_aliveScanTable->setItem(row, 0, new QTableWidgetItem(ipText));
     auto* stateItem = new QTableWidgetItem(QStringLiteral("Alive"));
-    stateItem->setForeground(QColor("#228B22"));
+    stateItem->setForeground(KswordTheme::SuccessColor());
     stateItem->setTextAlignment(Qt::AlignCenter);
     m_aliveScanTable->setItem(row, 1, stateItem);
     m_aliveScanTable->setItem(row, 2, new QTableWidgetItem(QString::number(rttMs)));

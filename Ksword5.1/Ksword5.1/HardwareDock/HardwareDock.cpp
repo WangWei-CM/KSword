@@ -381,18 +381,25 @@ namespace
     // - 返回：QPushButton stylesheet 文本。
     QString buildColumnPresetButtonStyle(const bool selected)
     {
-        const QString backgroundText = selected ? KswordTheme::PrimaryBlueHex : QStringLiteral("transparent");
-        const QString borderText = selected ? KswordTheme::PrimaryBlueHex : KswordTheme::BorderColorHex();
-        const QString textColor = selected ? QStringLiteral("#FFFFFF") : KswordTheme::TextPrimaryHex();
+        const QString backgroundText = selected
+            ? KswordTheme::AccentHex(KswordTheme::AccentRole::Blue)
+            : QStringLiteral("transparent");
+        const QString borderText = selected
+            ? KswordTheme::AccentHex(KswordTheme::AccentRole::Blue)
+            : KswordTheme::BorderColorHex();
+        const QString textColor = selected
+            ? KswordTheme::OnAccentHex()
+            : KswordTheme::TextPrimaryColorHex();
         return QStringLiteral(
             "QPushButton{min-width:24px;max-width:24px;padding:3px 0;border:1px solid %1;"
             "border-radius:0;color:%2;background:%3;font-weight:700;}"
             "QPushButton:hover{border-color:%4;}"
-            "QPushButton:pressed{background:%4;color:#FFFFFF;}")
+            "QPushButton:pressed{background:%4;color:%5;}")
             .arg(borderText)
             .arg(textColor)
             .arg(backgroundText)
-            .arg(KswordTheme::PrimaryBlueHex);
+            .arg(KswordTheme::AccentHex(KswordTheme::AccentRole::Blue))
+            .arg(KswordTheme::OnAccentHex());
     }
 
     // updateColumnPresetButtons 作用：
@@ -673,9 +680,7 @@ namespace
     // - 深浅色模式下返回统一可读的次级文本颜色。
     QColor buildStatusColor()
     {
-        return KswordTheme::IsDarkModeEnabled()
-            ? QColor(185, 205, 225)
-            : QColor(55, 80, 105);
+        return KswordTheme::TextSecondaryColor();
     }
 
     // formatHardwareAuditHex32 作用：
@@ -2927,13 +2932,13 @@ void HardwareDock::initializeUtilizationSidebarCards()
     m_cpuNavCard = addUtilizationSidebarCard(
         m_utilizationCpuSubPage,
         ks::i18n::contextText(QStringLiteral("hardware.utilization.card.cpu"), QStringLiteral("CPU")),
-        QColor(90, 178, 255),
+        KswordTheme::PerformanceColor(KswordTheme::PerformanceRole::Cpu),
         UtilizationDeviceKind::Cpu,
         -1);
     m_memoryNavCard = addUtilizationSidebarCard(
         m_utilizationMemorySubPage,
         ks::i18n::contextText(QStringLiteral("hardware.utilization.card.memory"), QStringLiteral("内存")),
-        QColor(184, 99, 255),
+        KswordTheme::PerformanceColor(KswordTheme::PerformanceRole::Memory),
         UtilizationDeviceKind::Memory,
         -1);
     // 磁盘、网卡、GPU 不再注册固定聚合卡片：
@@ -2945,7 +2950,9 @@ void HardwareDock::initializeUtilizationSidebarCards()
 
     if (m_memoryNavCard != nullptr)
     {
-        m_memoryNavCard->setSeriesColors(QColor(184, 99, 255), QColor(79, 195, 247));
+        m_memoryNavCard->setSeriesColors(
+            KswordTheme::PerformanceColor(KswordTheme::PerformanceRole::Memory),
+            KswordTheme::PerformanceColor(KswordTheme::PerformanceRole::SharedMemory));
     }
 }
 
@@ -3910,16 +3917,26 @@ void HardwareDock::initializeUtilizationGpuSubTab()
             m_gpuEngineCharts.push_back(chartEntry);
         };
 
-    addGpuEngineChart(QStringLiteral("3d"), QStringLiteral("3D"), QColor(105, 173, 255), 0, 0);
-    addGpuEngineChart(QStringLiteral("copy"), QStringLiteral("Copy"), QColor(110, 196, 247), 0, 1);
-    addGpuEngineChart(QStringLiteral("video_encode"), QStringLiteral("Video Encode"), QColor(125, 184, 255), 1, 0);
-    addGpuEngineChart(QStringLiteral("video_decode"), QStringLiteral("Video Decode"), QColor(137, 178, 255), 1, 1);
+    addGpuEngineChart(
+        QStringLiteral("3d"), QStringLiteral("3D"),
+        KswordTheme::PerformanceColor(KswordTheme::PerformanceRole::Gpu), 0, 0);
+    addGpuEngineChart(
+        QStringLiteral("copy"), QStringLiteral("Copy"),
+        KswordTheme::PerformanceColor(KswordTheme::PerformanceRole::Copy), 0, 1);
+    addGpuEngineChart(
+        QStringLiteral("video_encode"), QStringLiteral("Video Encode"),
+        KswordTheme::PerformanceColor(KswordTheme::PerformanceRole::VideoEncode), 1, 0);
+    addGpuEngineChart(
+        QStringLiteral("video_decode"), QStringLiteral("Video Decode"),
+        KswordTheme::PerformanceColor(KswordTheme::PerformanceRole::VideoDecode), 1, 1);
     gpuSubLayout->addWidget(m_gpuEngineHostWidget, 1);
 
     // 显存曲线：专用显存 + 共享显存。
     m_gpuDedicatedMemoryLineSeries = new QLineSeries(m_utilizationGpuSubPage);
-    const QColor gpuDedicatedMemoryColor(92, 167, 255);
-    const QColor gpuSharedMemoryColor(113, 185, 255);
+    const QColor gpuDedicatedMemoryColor =
+        KswordTheme::PerformanceColor(KswordTheme::PerformanceRole::DedicatedMemory);
+    const QColor gpuSharedMemoryColor =
+        KswordTheme::PerformanceColor(KswordTheme::PerformanceRole::SharedMemory);
     m_gpuDedicatedMemoryLineSeries->setColor(gpuDedicatedMemoryColor);
     m_gpuDedicatedMemoryBaselineSeries = createBaselineSeries(m_utilizationGpuSubPage, m_historyLength);
     m_gpuSharedMemoryLineSeries = new QLineSeries(m_utilizationGpuSubPage);
@@ -4366,7 +4383,8 @@ void HardwareDock::initializeCoreCharts()
         containerLayout->addWidget(chartEntry.titleLabel, 0);
 
         chartEntry.lineSeries = new QLineSeries(chartEntry.containerWidget);
-        chartEntry.lineSeries->setColor(QColor(KswordTheme::PrimaryBlueHex));
+        chartEntry.lineSeries->setColor(
+            KswordTheme::PerformanceColor(KswordTheme::PerformanceRole::Cpu));
         chartEntry.baselineSeries = new QLineSeries(chartEntry.containerWidget);
         for (int indexValue = 0; indexValue < m_historyLength; ++indexValue)
         {
@@ -4376,17 +4394,19 @@ void HardwareDock::initializeCoreCharts()
 
         QChart* chart = new QChart();
         chartEntry.areaSeries = new QAreaSeries(chartEntry.lineSeries, chartEntry.baselineSeries);
-        chartEntry.areaSeries->setColor(QColor(45, 125, 255, 46));
-        chartEntry.areaSeries->setBorderColor(QColor(KswordTheme::PrimaryBlueHex));
-        chartEntry.areaSeries->setPen(QPen(QColor(KswordTheme::PrimaryBlueHex), 1.6));
+        const QColor cpuChartColor =
+            KswordTheme::PerformanceColor(KswordTheme::PerformanceRole::Cpu);
+        chartEntry.areaSeries->setColor(KswordTheme::WithAlpha(cpuChartColor, 46));
+        chartEntry.areaSeries->setBorderColor(cpuChartColor);
+        chartEntry.areaSeries->setPen(QPen(cpuChartColor, 1.6));
         chart->addSeries(chartEntry.areaSeries);
         chart->legend()->hide();
         chart->setBackgroundVisible(false);
         chart->setBackgroundRoundness(0);
         chart->setMargins(QMargins(0, 0, 0, 0));
         chart->setPlotAreaBackgroundVisible(true);
-        chart->setPlotAreaBackgroundBrush(QBrush(QColor(45, 125, 255, 18)));
-        chart->setPlotAreaBackgroundPen(QPen(QColor(45, 125, 255, 150), 1.0));
+        chart->setPlotAreaBackgroundBrush(QBrush(KswordTheme::WithAlpha(cpuChartColor, 18)));
+        chart->setPlotAreaBackgroundPen(QPen(KswordTheme::WithAlpha(cpuChartColor, 150), 1.0));
 
         chartEntry.axisX = new QValueAxis(chart);
         chartEntry.axisX->setRange(0, m_historyLength - 1);
@@ -4394,8 +4414,8 @@ void HardwareDock::initializeCoreCharts()
         chartEntry.axisX->setGridLineVisible(true);
         chartEntry.axisX->setMinorGridLineVisible(false);
         chartEntry.axisX->setLineVisible(true);
-        chartEntry.axisX->setLinePen(QPen(QColor(45, 125, 255, 140), 1.0));
-        chartEntry.axisX->setGridLinePen(QPen(QColor(45, 125, 255, 46), 1.0));
+        chartEntry.axisX->setLinePen(QPen(KswordTheme::WithAlpha(cpuChartColor, 140), 1.0));
+        chartEntry.axisX->setGridLinePen(QPen(KswordTheme::WithAlpha(cpuChartColor, 46), 1.0));
 
         chartEntry.axisY = new QValueAxis(chart);
         chartEntry.axisY->setRange(0.0, 100.0);
@@ -4403,8 +4423,8 @@ void HardwareDock::initializeCoreCharts()
         chartEntry.axisY->setGridLineVisible(true);
         chartEntry.axisY->setMinorGridLineVisible(false);
         chartEntry.axisY->setLineVisible(true);
-        chartEntry.axisY->setLinePen(QPen(QColor(45, 125, 255, 140), 1.0));
-        chartEntry.axisY->setGridLinePen(QPen(QColor(45, 125, 255, 46), 1.0));
+        chartEntry.axisY->setLinePen(QPen(KswordTheme::WithAlpha(cpuChartColor, 140), 1.0));
+        chartEntry.axisY->setGridLinePen(QPen(KswordTheme::WithAlpha(cpuChartColor, 46), 1.0));
 
         chart->addAxis(chartEntry.axisX, Qt::AlignBottom);
         chart->addAxis(chartEntry.axisY, Qt::AlignLeft);
@@ -4487,14 +4507,14 @@ int HardwareDock::ensureDiskUtilizationDevice(
     m_diskUtilDevices[static_cast<std::size_t>(deviceIndex)].navCard = addUtilizationSidebarCard(
         m_diskUtilDevices[static_cast<std::size_t>(deviceIndex)].pageWidget,
         m_diskUtilDevices[static_cast<std::size_t>(deviceIndex)].displayNameText,
-        QColor(104, 204, 116),
+        KswordTheme::PerformanceColor(KswordTheme::PerformanceRole::Disk),
         UtilizationDeviceKind::Disk,
         deviceIndex);
     if (m_diskUtilDevices[static_cast<std::size_t>(deviceIndex)].navCard != nullptr)
     {
         m_diskUtilDevices[static_cast<std::size_t>(deviceIndex)].navCard->setSeriesColors(
-            QColor(80, 170, 255),
-            QColor(255, 190, 105));
+            KswordTheme::PerformanceColor(KswordTheme::PerformanceRole::Read),
+            KswordTheme::PerformanceColor(KswordTheme::PerformanceRole::Write));
     }
     scheduleUtilizationLayoutRefresh();
     return deviceIndex;
@@ -4548,14 +4568,14 @@ int HardwareDock::ensureNetworkUtilizationDevice(
     m_networkUtilDevices[static_cast<std::size_t>(deviceIndex)].navCard = addUtilizationSidebarCard(
         m_networkUtilDevices[static_cast<std::size_t>(deviceIndex)].pageWidget,
         m_networkUtilDevices[static_cast<std::size_t>(deviceIndex)].displayNameText,
-        QColor(230, 149, 76),
+        KswordTheme::PerformanceColor(KswordTheme::PerformanceRole::Network),
         UtilizationDeviceKind::Network,
         deviceIndex);
     if (m_networkUtilDevices[static_cast<std::size_t>(deviceIndex)].navCard != nullptr)
     {
         m_networkUtilDevices[static_cast<std::size_t>(deviceIndex)].navCard->setSeriesColors(
-            QColor(80, 170, 255),
-            QColor(255, 190, 105));
+            KswordTheme::PerformanceColor(KswordTheme::PerformanceRole::Read),
+            KswordTheme::PerformanceColor(KswordTheme::PerformanceRole::Write));
     }
     scheduleUtilizationLayoutRefresh();
     return deviceIndex;
@@ -4600,7 +4620,7 @@ int HardwareDock::ensureGpuUtilizationDevice(
     m_gpuUtilDevices[static_cast<std::size_t>(deviceIndex)].navCard = addUtilizationSidebarCard(
         m_gpuUtilDevices[static_cast<std::size_t>(deviceIndex)].pageWidget,
         m_gpuUtilDevices[static_cast<std::size_t>(deviceIndex)].displayNameText,
-        QColor(105, 173, 255),
+        KswordTheme::PerformanceColor(KswordTheme::PerformanceRole::Gpu),
         UtilizationDeviceKind::Gpu,
         deviceIndex);
     scheduleUtilizationLayoutRefresh();
@@ -4910,10 +4930,18 @@ void HardwareDock::createGpuUtilizationDevicePage(GpuUtilizationDevice* devicePo
             devicePointer->engineCharts.push_back(chartEntry);
         };
 
-    addEngineChart(QStringLiteral("3d"), QStringLiteral("3D"), QColor(105, 173, 255), 0, 0);
-    addEngineChart(QStringLiteral("copy"), QStringLiteral("Copy"), QColor(110, 196, 247), 0, 1);
-    addEngineChart(QStringLiteral("video_encode"), QStringLiteral("Video Encode"), QColor(125, 184, 255), 1, 0);
-    addEngineChart(QStringLiteral("video_decode"), QStringLiteral("Video Decode"), QColor(137, 178, 255), 1, 1);
+    addEngineChart(
+        QStringLiteral("3d"), QStringLiteral("3D"),
+        KswordTheme::PerformanceColor(KswordTheme::PerformanceRole::Gpu), 0, 0);
+    addEngineChart(
+        QStringLiteral("copy"), QStringLiteral("Copy"),
+        KswordTheme::PerformanceColor(KswordTheme::PerformanceRole::Copy), 0, 1);
+    addEngineChart(
+        QStringLiteral("video_encode"), QStringLiteral("Video Encode"),
+        KswordTheme::PerformanceColor(KswordTheme::PerformanceRole::VideoEncode), 1, 0);
+    addEngineChart(
+        QStringLiteral("video_decode"), QStringLiteral("Video Decode"),
+        KswordTheme::PerformanceColor(KswordTheme::PerformanceRole::VideoDecode), 1, 1);
     pageLayout->addWidget(devicePointer->engineHostWidget, 1);
 
     auto createMemoryChart =
@@ -4961,7 +4989,7 @@ void HardwareDock::createGpuUtilizationDevicePage(GpuUtilizationDevice* devicePo
         &devicePointer->dedicatedMemoryLineSeries,
         &devicePointer->dedicatedMemoryBaselineSeries,
         &devicePointer->dedicatedMemoryAreaSeries,
-        QColor(92, 167, 255),
+        KswordTheme::PerformanceColor(KswordTheme::PerformanceRole::DedicatedMemory),
         &devicePointer->dedicatedMemoryAxisX,
         &devicePointer->dedicatedMemoryAxisY,
         &devicePointer->dedicatedMemoryChartView);
@@ -4972,7 +5000,7 @@ void HardwareDock::createGpuUtilizationDevicePage(GpuUtilizationDevice* devicePo
         &devicePointer->sharedMemoryLineSeries,
         &devicePointer->sharedMemoryBaselineSeries,
         &devicePointer->sharedMemoryAreaSeries,
-        QColor(113, 185, 255),
+        KswordTheme::PerformanceColor(KswordTheme::PerformanceRole::SharedMemory),
         &devicePointer->sharedMemoryAxisX,
         &devicePointer->sharedMemoryAxisY,
         &devicePointer->sharedMemoryChartView);

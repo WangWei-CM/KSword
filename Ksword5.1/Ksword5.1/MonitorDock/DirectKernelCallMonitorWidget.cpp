@@ -86,10 +86,10 @@ namespace
         return QStringLiteral(
             "QLineEdit,QComboBox,QSpinBox{border:1px solid %2;border-radius:3px;background:%3;color:%4;padding:2px 6px;}"
             "QLineEdit:focus,QComboBox:focus,QSpinBox:focus{border:1px solid %1;}")
-            .arg(KswordTheme::PrimaryBlueHex)
-            .arg(KswordTheme::BorderHex())
-            .arg(KswordTheme::SurfaceHex())
-            .arg(KswordTheme::TextPrimaryHex());
+            .arg(KswordTheme::AccentHex(KswordTheme::AccentRole::Blue))
+            .arg(KswordTheme::BorderColorHex())
+            .arg(KswordTheme::SurfaceColorHex())
+            .arg(KswordTheme::TextPrimaryColorHex());
     }
 
     QString blueHeaderStyle()
@@ -108,27 +108,27 @@ namespace
 
     QString monitorInfoColorHex()
     {
-        return KswordTheme::PrimaryBlueHex;
+        return KswordTheme::InfoColor().name(QColor::HexRgb);
     }
 
     QString monitorSuccessColorHex()
     {
-        return QStringLiteral("#16A34A");
+        return KswordTheme::SuccessColor().name(QColor::HexRgb);
     }
 
     QString monitorWarningColorHex()
     {
-        return QStringLiteral("#D97706");
+        return KswordTheme::WarningColor().name(QColor::HexRgb);
     }
 
     QString monitorErrorColorHex()
     {
-        return QStringLiteral("#DC2626");
+        return KswordTheme::ErrorColor().name(QColor::HexRgb);
     }
 
     QString monitorIdleColorHex()
     {
-        return KswordTheme::TextSecondaryHex();
+        return KswordTheme::TextSecondaryColorHex();
     }
 
     QPushButton* createIconButton(QWidget* parentWidget, const QString& iconPath, const QString& tooltipText)

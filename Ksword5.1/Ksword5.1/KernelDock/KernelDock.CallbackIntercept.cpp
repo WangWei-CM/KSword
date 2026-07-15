@@ -481,7 +481,7 @@ namespace
             "}"
             "QTableWidget::item:selected{"
             "  background:%5;"
-            "  color:#FFFFFF;"
+            "  color:palette(highlighted-text);"
             "}"
             "QHeaderView::section{"
             "  background:%2;"
@@ -514,7 +514,7 @@ namespace
             "}"
             "QMenu::item:selected{"
             "  background:%4;"
-            "  color:#FFFFFF;"
+            "  color:palette(highlighted-text);"
             "}"
             "QMenu::item:disabled{"
             "  color:%5;"
@@ -1292,16 +1292,12 @@ namespace
 
     QString callbackRuleComboBackgroundHex()
     {
-        return KswordTheme::IsDarkModeEnabled()
-            ? QStringLiteral("#182334")
-            : QStringLiteral("#FFFFFF");
+        return KswordTheme::SurfaceColorHex();
     }
 
     QString callbackRuleComboTextHex()
     {
-        return KswordTheme::IsDarkModeEnabled()
-            ? QStringLiteral("#F3F7FF")
-            : QStringLiteral("#162A42");
+        return KswordTheme::TextPrimaryColorHex();
     }
 
     QString callbackRuleComboStyle()
@@ -1324,7 +1320,7 @@ namespace
             "  color:%2;"
             "  border:1px solid %3;"
             "  selection-background-color:%4;"
-            "  selection-color:#FFFFFF;"
+            "  selection-color:palette(highlighted-text);"
             "}"
             "QComboBox QAbstractItemView::item{"
             "  background:%1;"
@@ -1336,7 +1332,7 @@ namespace
             "}"
             "QComboBox QAbstractItemView::item:selected{"
             "  background:%4;"
-            "  color:#FFFFFF;"
+            "  color:palette(highlighted-text);"
             "}")
             .arg(backgroundHex)
             .arg(textHex)
@@ -1362,7 +1358,7 @@ namespace
                     "  color:%2;"
                     "  border:1px solid %3;"
                     "  selection-background-color:%4;"
-                    "  selection-color:#FFFFFF;"
+                    "  selection-color:palette(highlighted-text);"
                     "}")
                 .arg(callbackRuleComboBackgroundHex())
                 .arg(callbackRuleComboTextHex())
@@ -4041,7 +4037,7 @@ private:
         m_statusLabel->setStyleSheet(
             QStringLiteral("color:%1;font-weight:600;")
             .arg(m_runtimeState.driverOnline != 0U
-                ? QStringLiteral("#3A8F3A")
+                ? KswordTheme::SuccessHex()
                 : KswordTheme::WarningAccentColor().name()));
     }
 

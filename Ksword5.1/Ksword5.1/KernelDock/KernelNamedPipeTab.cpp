@@ -300,7 +300,7 @@ void KernelNamedPipeTab::applySnapshot(
     m_statusLabel->setText(statusText);
     m_statusLabel->setStyleSheet(
         QStringLiteral("color:%1;font-weight:600;")
-        .arg(snapshot.anyQuerySucceeded ? QStringLiteral("#3A8F3A") : QStringLiteral("#D77A00")));
+        .arg(snapshot.anyQuerySucceeded ? KswordTheme::SuccessHex() : KswordTheme::WarningHex()));
 
     if (m_refreshPending)
     {

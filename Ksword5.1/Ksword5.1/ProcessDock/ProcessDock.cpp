@@ -583,17 +583,17 @@ namespace
         switch (metric)
         {
         case ProcessDock::ProcessActivityMetric::Cpu:
-            return QColor(56, 132, 255);
+            return KswordTheme::PerformanceColor(KswordTheme::PerformanceRole::Cpu);
         case ProcessDock::ProcessActivityMetric::Memory:
-            return QColor(104, 196, 112);
+            return KswordTheme::PerformanceColor(KswordTheme::PerformanceRole::Memory);
         case ProcessDock::ProcessActivityMetric::Disk:
-            return QColor(255, 172, 64);
+            return KswordTheme::PerformanceColor(KswordTheme::PerformanceRole::Disk);
         case ProcessDock::ProcessActivityMetric::Network:
-            return QColor(92, 204, 230);
+            return KswordTheme::PerformanceColor(KswordTheme::PerformanceRole::Network);
         case ProcessDock::ProcessActivityMetric::Gpu:
-            return QColor(172, 112, 255);
+            return KswordTheme::PerformanceColor(KswordTheme::PerformanceRole::Gpu);
         default:
-            return QColor(120, 132, 148);
+            return KswordTheme::TextSecondaryColor();
         }
     }
 
@@ -935,11 +935,11 @@ protected:
 
         const QRectF plotRect = chartRect();
         const QColor borderColor = themeColorFromText(
-            KswordTheme::BorderHex(),
-            KswordTheme::IsDarkModeEnabled() ? QColor(76, 84, 96) : QColor(210, 216, 224));
+            KswordTheme::BorderColorHex(),
+            KswordTheme::BorderColor());
         const QColor textColor = themeColorFromText(
-            KswordTheme::TextSecondaryHex(),
-            KswordTheme::IsDarkModeEnabled() ? QColor(180, 190, 205) : QColor(88, 96, 108));
+            KswordTheme::TextSecondaryColorHex(),
+            KswordTheme::TextSecondaryColor());
 
         painter.setPen(QPen(borderColor, 1.0));
         painter.setBrush(Qt::NoBrush);
@@ -1628,9 +1628,7 @@ namespace
                     option.rect.center().y() - iconSize / 2,
                     iconSize,
                     iconSize);
-                const QColor leafColor = KswordTheme::IsDarkModeEnabled()
-                    ? QColor(101, 216, 120)
-                    : QColor(32, 166, 72);
+                const QColor leafColor = KswordTheme::SuccessColor();
                 QPainterPath leafPath;
                 leafPath.moveTo(leafRect.left() + leafRect.width() * 0.18, leafRect.center().y());
                 leafPath.cubicTo(
@@ -1648,7 +1646,7 @@ namespace
                     leafRect.left() + leafRect.width() * 0.18,
                     leafRect.center().y());
                 painter->fillPath(leafPath, leafColor);
-                painter->setPen(QPen(QColor(255, 255, 255, 210), 1.2));
+                painter->setPen(QPen(KswordTheme::WithAlpha(KswordTheme::OnAccentColor(), 210), 1.2));
                 painter->drawLine(
                     QPointF(leafRect.left() + leafRect.width() * 0.28, leafRect.bottom() - leafRect.height() * 0.25),
                     QPointF(leafRect.right() - leafRect.width() * 0.20, leafRect.top() + leafRect.height() * 0.22));
@@ -1706,9 +1704,7 @@ namespace
             const int iconSize = std::min(18, std::max(12, itemOption.rect.height() - 6));
             const int iconTextGap = 6;
             const int treeAreaWidth = safeDepth * levelWidth;
-            const QColor lineColor = KswordTheme::IsDarkModeEnabled()
-                ? QColor(124, 145, 172, 160)
-                : QColor(112, 132, 158, 170);
+            const QColor lineColor = KswordTheme::WithAlpha(KswordTheme::BorderStrongColor(), 165);
 
             painter->save();
             painter->setRenderHint(QPainter::Antialiasing, true);
@@ -2940,33 +2936,28 @@ namespace
             "}"
             "QPushButton:hover {"
             "  background: %3;"
-            "  color: #FFFFFF;"
+            "  color: %7;"
             "  border: 1px solid %3;"
             "}"
             "QPushButton:pressed {"
             "  background: %4;"
-            "  color: #FFFFFF;"
+            "  color: %7;"
             "}")
-            .arg(KswordTheme::PrimaryBlueHex)
-            .arg(KswordTheme::PrimaryBlueBorderHex)
-            .arg(KswordTheme::PrimaryBlueSolidHoverHex())
-            .arg(KswordTheme::PrimaryBluePressedHex)
+            .arg(KswordTheme::AccentHex(KswordTheme::AccentRole::Blue))
+            .arg(KswordTheme::AccentHex(KswordTheme::AccentRole::Blue))
+            .arg(KswordTheme::AccentHex(KswordTheme::AccentRole::Blue, -18))
+            .arg(KswordTheme::AccentHex(KswordTheme::AccentRole::Blue, -32))
             .arg(paddingText)
-            .arg(KswordTheme::SurfaceHex());
+            .arg(KswordTheme::SurfaceColorHex())
+            .arg(KswordTheme::OnAccentHex());
     }
 
     // 下拉框主题描边样式，保持与按钮同色系。
     QString buildBlueComboBoxStyle()
     {
-        const QString comboBackgroundColor = KswordTheme::IsDarkModeEnabled()
-            ? QStringLiteral("#172232")
-            : QStringLiteral("#FFFFFF");
-        const QString comboTextColor = KswordTheme::IsDarkModeEnabled()
-            ? QStringLiteral("#F4F8FF")
-            : QStringLiteral("#172B43");
-        const QString comboBorderColor = KswordTheme::IsDarkModeEnabled()
-            ? QStringLiteral("#34506D")
-            : QStringLiteral("#AFC4DC");
+        const QString comboBackgroundColor = KswordTheme::SurfaceColorHex();
+        const QString comboTextColor = KswordTheme::TextPrimaryColorHex();
+        const QString comboBorderColor = KswordTheme::BorderColorHex();
 
         return QStringLiteral(
             "QComboBox#ProcessDockStrategyCombo,QComboBox#ProcessDockViewModeCombo{"
@@ -3008,7 +2999,7 @@ namespace
             "  color:%2 !important;"
             "  border:1px solid %3 !important;"
             "  selection-background-color:%4 !important;"
-            "  selection-color:#FFFFFF !important;"
+            "  selection-color:%6 !important;"
             "  outline:0;"
             "}"
             "QComboBox#ProcessDockStrategyCombo QAbstractItemView::item,QComboBox#ProcessDockViewModeCombo QAbstractItemView::item{"
@@ -3021,15 +3012,14 @@ namespace
             "}"
             "QComboBox#ProcessDockStrategyCombo QAbstractItemView::item:selected,QComboBox#ProcessDockViewModeCombo QAbstractItemView::item:selected{"
             "  background-color:%4 !important;"
-            "  color:#FFFFFF !important;"
+            "  color:%6 !important;"
             "}")
             .arg(comboBackgroundColor)
             .arg(comboTextColor)
             .arg(comboBorderColor)
-            .arg(KswordTheme::PrimaryBlueHex)
-            .arg(KswordTheme::IsDarkModeEnabled()
-                ? QStringLiteral("#203753")
-                : QStringLiteral("#EAF4FF"));
+            .arg(KswordTheme::AccentHex(KswordTheme::AccentRole::Blue))
+            .arg(KswordTheme::PrimaryBlueSubtleHex())
+            .arg(KswordTheme::OnAccentHex());
     }
 
     // buildBlueComboBoxPopupViewStyle 作用：
@@ -3038,18 +3028,10 @@ namespace
     // - 返回：仅作用于 popup view 的 QSS，主框样式仍由 buildBlueComboBoxStyle 负责。
     QString buildBlueComboBoxPopupViewStyle()
     {
-        const QString comboBackgroundColor = KswordTheme::IsDarkModeEnabled()
-            ? QStringLiteral("#172232")
-            : QStringLiteral("#FFFFFF");
-        const QString comboHoverColor = KswordTheme::IsDarkModeEnabled()
-            ? QStringLiteral("#203753")
-            : QStringLiteral("#EAF4FF");
-        const QString comboTextColor = KswordTheme::IsDarkModeEnabled()
-            ? QStringLiteral("#F4F8FF")
-            : QStringLiteral("#172B43");
-        const QString comboBorderColor = KswordTheme::IsDarkModeEnabled()
-            ? QStringLiteral("#34506D")
-            : QStringLiteral("#AFC4DC");
+        const QString comboBackgroundColor = KswordTheme::SurfaceColorHex();
+        const QString comboHoverColor = KswordTheme::PrimaryBlueSubtleHex();
+        const QString comboTextColor = KswordTheme::TextPrimaryColorHex();
+        const QString comboBorderColor = KswordTheme::BorderColorHex();
 
         return QStringLiteral(
             "QAbstractItemView,QListView{"
@@ -3072,13 +3054,14 @@ namespace
             "}"
             "QAbstractItemView::item:selected,QListView::item:selected{"
             "  background-color:%4 !important;"
-            "  color:#FFFFFF !important;"
+            "  color:%6 !important;"
             "}")
             .arg(comboBackgroundColor)
             .arg(comboTextColor)
             .arg(comboBorderColor)
-            .arg(KswordTheme::PrimaryBlueHex)
-            .arg(comboHoverColor);
+            .arg(KswordTheme::AccentHex(KswordTheme::AccentRole::Blue))
+            .arg(comboHoverColor)
+            .arg(KswordTheme::OnAccentHex());
     }
 
     // applyBlueComboBoxRuntimeStyle 作用：
@@ -3092,12 +3075,8 @@ namespace
             return;
         }
 
-        const QString comboBackgroundColor = KswordTheme::IsDarkModeEnabled()
-            ? QStringLiteral("#172232")
-            : QStringLiteral("#FFFFFF");
-        const QString comboTextColor = KswordTheme::IsDarkModeEnabled()
-            ? QStringLiteral("#F4F8FF")
-            : QStringLiteral("#172B43");
+        const QString comboBackgroundColor = KswordTheme::SurfaceColorHex();
+        const QString comboTextColor = KswordTheme::TextPrimaryColorHex();
 
         comboBoxPointer->setStyleSheet(buildBlueComboBoxStyle());
 
@@ -3107,8 +3086,8 @@ namespace
         comboPalette.setColor(QPalette::Button, QColor(comboBackgroundColor));
         comboPalette.setColor(QPalette::Text, QColor(comboTextColor));
         comboPalette.setColor(QPalette::ButtonText, QColor(comboTextColor));
-        comboPalette.setColor(QPalette::Highlight, KswordTheme::PrimaryBlueColor);
-        comboPalette.setColor(QPalette::HighlightedText, QColor(QStringLiteral("#FFFFFF")));
+        comboPalette.setColor(QPalette::Highlight, KswordTheme::AccentColor(KswordTheme::AccentRole::Blue));
+        comboPalette.setColor(QPalette::HighlightedText, KswordTheme::OnAccentColor());
         comboBoxPointer->setPalette(comboPalette);
 
         QAbstractItemView* popupView = comboBoxPointer->view();
@@ -3145,10 +3124,10 @@ namespace
             "QLineEdit:focus, QPlainTextEdit:focus, QTextEdit:focus {"
             "  border: 1px solid %1;"
             "}")
-            .arg(KswordTheme::PrimaryBlueHex)
-            .arg(KswordTheme::BorderHex())
-            .arg(KswordTheme::SurfaceHex())
-            .arg(KswordTheme::TextPrimaryHex());
+            .arg(KswordTheme::AccentHex(KswordTheme::AccentRole::Blue))
+            .arg(KswordTheme::BorderColorHex())
+            .arg(KswordTheme::SurfaceColorHex())
+            .arg(KswordTheme::TextPrimaryColorHex());
     }
 
     // applyTransparentContainerStyle 作用：
@@ -3586,12 +3565,13 @@ void ProcessDock::initializeUi()
         m_sideTabWidget->tabBar()->setStyleSheet(QStringLiteral(
             "QTabBar{background:transparent;border:none;}"
             "QTabBar::tab{min-height:%1px;padding:5px 5px;margin:0px;border:none;border-radius:0px;}"
-            "QTabBar::tab:selected{background-color:%2;color:#FFFFFF;font-weight:700;}"
+            "QTabBar::tab:selected{background-color:%2;color:%5;font-weight:700;}"
             "QTabBar::tab:hover:!selected{background-color:%3;color:%4;}" )
             .arg(ProcessSideTabMinHeightPx)
-            .arg(KswordTheme::PrimaryBlueHex)
+            .arg(KswordTheme::AccentHex(KswordTheme::AccentRole::Blue))
             .arg(KswordTheme::PrimaryBlueSubtleHex())
-            .arg(KswordTheme::TextPrimaryHex()));
+            .arg(KswordTheme::TextPrimaryColorHex())
+            .arg(KswordTheme::OnAccentHex()));
     }
 
     // “进程列表”页是本模块核心页面。
@@ -3923,17 +3903,18 @@ void ProcessDock::initializeProcessActivityPanel()
         "  padding:3px 8px;"
         "}"
         "QPushButton:checked {"
-        "  color:#FFFFFF;"
+        "  color:%5;"
         "  background:%4;"
         "  border:1px solid %4;"
         "}"
         "QPushButton:hover {"
         "  border:1px solid %4;"
         "}")
-        .arg(KswordTheme::TextPrimaryHex())
-        .arg(KswordTheme::SurfaceHex())
-        .arg(KswordTheme::BorderHex())
-        .arg(KswordTheme::PrimaryBlueHex);
+        .arg(KswordTheme::TextPrimaryColorHex())
+        .arg(KswordTheme::SurfaceColorHex())
+        .arg(KswordTheme::BorderColorHex())
+        .arg(KswordTheme::AccentHex(KswordTheme::AccentRole::Blue))
+        .arg(KswordTheme::OnAccentHex());
 
     // 指标按钮必须可独立开关：
     // - 默认全部点亮，用户打开页面即可看到 CPU/内存/磁盘/网络/GPU 全部曲线；
@@ -5568,13 +5549,11 @@ void ProcessDock::updateRefreshStateUi(const bool refreshing, const QString& sta
     if (refreshing)
     {
         m_refreshStateLabel->setStyleSheet(
-            QStringLiteral("color:%1; font-weight:700;").arg(KswordTheme::PrimaryBlueHex));
+            QStringLiteral("color:%1; font-weight:700;").arg(KswordTheme::AccentHex(KswordTheme::AccentRole::Blue)));
     }
     else
     {
-        const QString idleColor = KswordTheme::IsDarkModeEnabled()
-            ? QStringLiteral("#6ECF7A")
-            : QStringLiteral("#2F7D32");
+        const QString idleColor = KswordTheme::SuccessColor().name(QColor::HexRgb);
         m_refreshStateLabel->setStyleSheet(
             QStringLiteral("color:%1; font-weight:600;").arg(idleColor));
     }
@@ -7726,9 +7705,9 @@ QVariant ProcessDock::processTableData(const ProcessTableRow& tableRow, const in
         }
         if (role == Qt::BackgroundRole)
         {
-            const QColor backgroundColor = KswordTheme::IsDarkModeEnabled()
-                ? QColor(24, 42, 70, 180)
-                : QColor(225, 239, 255);
+            const QColor backgroundColor = KswordTheme::WithAlpha(
+                KswordTheme::PrimaryBlueSubtleColor(),
+                KswordTheme::IsDarkModeEnabled() ? 180 : 255);
             return QBrush(backgroundColor);
         }
         if (role == ProcessNumericSortRole)
@@ -7845,12 +7824,8 @@ QVariant ProcessDock::processTableData(const ProcessTableRow& tableRow, const in
         return {};
     }
 
-    const QColor adminYesColor = KswordTheme::IsDarkModeEnabled()
-        ? QColor(130, 210, 140)
-        : QColor(34, 139, 34);
-    const QColor adminNoColor = KswordTheme::IsDarkModeEnabled()
-        ? QColor(255, 140, 140)
-        : QColor(220, 50, 47);
+    const QColor adminYesColor = KswordTheme::SuccessColor();
+    const QColor adminNoColor = KswordTheme::ErrorColor();
 
     // 退出保留进程灰色高亮；CID 表弱引用/terminating 行灰色高亮；
     // 仅内核可见进程红色高亮；普通新增进程绿色高亮。
@@ -7870,12 +7845,10 @@ QVariant ProcessDock::processTableData(const ProcessTableRow& tableRow, const in
     }
     if (tableRow.isKernelOnly)
     {
-        const QColor kernelOnlyForeground = KswordTheme::IsDarkModeEnabled()
-            ? QColor(255, 140, 140)
-            : QColor(200, 32, 32);
-        const QColor kernelOnlyBackground = KswordTheme::IsDarkModeEnabled()
-            ? QColor(110, 28, 28, 140)
-            : QColor(255, 224, 224);
+        const QColor kernelOnlyForeground = KswordTheme::ErrorColor();
+        const QColor kernelOnlyBackground = KswordTheme::WithAlpha(
+            KswordTheme::ErrorBackgroundColor(),
+            KswordTheme::IsDarkModeEnabled() ? 140 : 255);
         return role == Qt::BackgroundRole
             ? QVariant(QBrush(kernelOnlyBackground))
             : QVariant(QBrush(kernelOnlyForeground));
@@ -7907,7 +7880,9 @@ QVariant ProcessDock::processTableData(const ProcessTableRow& tableRow, const in
 
         const auto highUsageForeground = [](const double usageRatio) -> QVariant
         {
-            return usageRatio >= 0.70 ? QVariant(QBrush(QColor(255, 255, 255))) : QVariant();
+            return usageRatio >= 0.70
+                ? QVariant(QBrush(KswordTheme::OnAccentColor()))
+                : QVariant();
         };
         switch (tableColumn)
         {

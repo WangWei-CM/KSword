@@ -153,7 +153,7 @@ namespace
 
     QString itemSelectionStyle()
     {
-        return QStringLiteral("QTableWidget::item:selected{background:%1;color:#FFFFFF;}").arg(KswordTheme::PrimaryBlueHex);
+        return QStringLiteral("QTableWidget::item:selected{background:%1;color:palette(highlighted-text);}").arg(KswordTheme::PrimaryBlueHex);
     }
 
     // driverStatusCopyMenuStyle：
@@ -165,7 +165,7 @@ namespace
         return QStringLiteral(
             "QMenu{background:%1;color:%2;border:1px solid %3;}"
             "QMenu::item{padding:5px 24px 5px 24px;background:transparent;}"
-            "QMenu::item:selected{background:%4;color:#FFFFFF;}"
+            "QMenu::item:selected{background:%4;color:palette(highlighted-text);}"
             "QMenu::item:disabled{color:%5;}")
             .arg(KswordTheme::SurfaceHex())
             .arg(KswordTheme::TextPrimaryHex())
@@ -942,10 +942,10 @@ namespace
 
     QBrush stateBrush(const std::uint32_t state)
     {
-        if (state == KSWORD_ARK_FEATURE_STATE_AVAILABLE) { return QBrush(QColor(QStringLiteral("#3A8F3A"))); }
-        if (state == KSWORD_ARK_FEATURE_STATE_DEGRADED) { return QBrush(QColor(QStringLiteral("#D77A00"))); }
-        if (state == KSWORD_ARK_FEATURE_STATE_DENIED_BY_POLICY) { return QBrush(QColor(QStringLiteral("#7A4DB3"))); }
-        return QBrush(QColor(QStringLiteral("#B23A3A")));
+        if (state == KSWORD_ARK_FEATURE_STATE_AVAILABLE) { return QBrush(KswordTheme::SuccessColor()); }
+        if (state == KSWORD_ARK_FEATURE_STATE_DEGRADED) { return QBrush(KswordTheme::WarningColor()); }
+        if (state == KSWORD_ARK_FEATURE_STATE_DENIED_BY_POLICY) { return QBrush(KswordTheme::AccentColor(KswordTheme::AccentRole::Purple)); }
+        return QBrush(KswordTheme::ErrorColor());
     }
 
     void appendSummaryRow(QTableWidget* table, const QString& nameText, const QString& valueText)
@@ -1448,7 +1448,7 @@ void KernelDock::refreshDriverStatusAsync()
                 guardThis->m_driverStatusLabel->setText(buildDriverStatusLabelText(
                     guardThis->m_driverStatusSummary,
                     guardThis->m_driverCapabilityRows.size()));
-                guardThis->m_driverStatusLabel->setStyleSheet(statusLabelStyle(QStringLiteral("#B23A3A")));
+                guardThis->m_driverStatusLabel->setStyleSheet(statusLabelStyle(KswordTheme::ErrorHex()));
                 guardThis->m_driverCapabilityDetailEditor->setText(buildDriverStatusReport(guardThis->m_driverStatusSummary, guardThis->m_driverCapabilityRows));
                 return;
             }
@@ -1463,7 +1463,7 @@ void KernelDock::refreshDriverStatusAsync()
             const bool healthyOffsets = guardThis->m_driverStatusSummary.trustedPdbOffsetsActive &&
                 guardThis->m_driverStatusSummary.dynDataRequiredMissingCount == 0U;
             guardThis->m_driverStatusLabel->setStyleSheet(statusLabelStyle(
-                unavailableCount == 0U && healthyOffsets ? QStringLiteral("#3A8F3A") : QStringLiteral("#D77A00")));
+            unavailableCount == 0U && healthyOffsets ? KswordTheme::SuccessHex() : KswordTheme::WarningHex()));
 
             if (guardThis->m_driverCapabilityTable->rowCount() > 0)
             {
@@ -1501,10 +1501,10 @@ void KernelDock::rebuildDriverCapabilityTable(const QString& filterKeyword)
 
         featureItem->setData(Qt::UserRole, static_cast<qulonglong>(sourceIndex));
         stateItem->setForeground(stateBrush(entry.state));
-        if (entry.deniedPolicyFlags != 0U) { policyItem->setForeground(QBrush(QColor(QStringLiteral("#B23A3A")))); }
+        if (entry.deniedPolicyFlags != 0U) { policyItem->setForeground(QBrush(KswordTheme::ErrorColor())); }
         if (entry.requiredDynDataMask != 0ULL && entry.presentDynDataMask != entry.requiredDynDataMask)
         {
-            presentItem->setForeground(QBrush(QColor(QStringLiteral("#B23A3A"))));
+            presentItem->setForeground(QBrush(KswordTheme::ErrorColor()));
         }
 
         setReadonlyItem(m_driverCapabilityTable, row, DriverCapabilityColumn::Feature, featureItem);

@@ -445,7 +445,7 @@ namespace
     // - 返回：表格 selection 样式文本。
     QString itemSelectionStyle()
     {
-        return QStringLiteral("QTableWidget::item:selected{background:%1;color:#FFFFFF;}")
+        return QStringLiteral("QTableWidget::item:selected{background:%1;color:palette(highlighted-text);}")
             .arg(KswordTheme::PrimaryBlueHex);
     }
 
@@ -458,7 +458,7 @@ namespace
         return QStringLiteral(
             "QMenu{background:%1;color:%2;border:1px solid %3;}"
             "QMenu::item{padding:5px 24px 5px 24px;background:transparent;}"
-            "QMenu::item:selected{background:%4;color:#FFFFFF;}"
+            "QMenu::item:selected{background:%4;color:palette(highlighted-text);}"
             "QMenu::item:disabled{color:%5;}")
             .arg(KswordTheme::SurfaceHex())
             .arg(KswordTheme::TextPrimaryHex())
@@ -3112,13 +3112,13 @@ void KernelDock::refreshDynDataAsync()
             if (!success)
             {
                 guardThis->m_dynDataStatusLabel->setText(kernelText("kernel.dyndata.status.refresh_failed", QStringLiteral("状态：刷新失败")));
-                guardThis->m_dynDataStatusLabel->setStyleSheet(statusLabelStyle(QStringLiteral("#B23A3A")));
+                guardThis->m_dynDataStatusLabel->setStyleSheet(statusLabelStyle(KswordTheme::ErrorHex()));
                 guardThis->m_dynDataDetailEditor->setText(buildDynDataReport(guardThis->m_dynDataSummary, guardThis->m_dynDataRows));
                 populateProfileStatusTable(guardThis->m_dynDataProfileSummaryTable, guardThis->m_dynDataSummary);
                 if (guardThis->m_dynDataProfileStatusLabel != nullptr)
                 {
                     guardThis->m_dynDataProfileStatusLabel->setText(kernelText("kernel.dyndata.profile_status.failed", QStringLiteral("状态：profile 诊断失败，保留现有摘要")));
-                    guardThis->m_dynDataProfileStatusLabel->setStyleSheet(statusLabelStyle(QStringLiteral("#B23A3A")));
+                    guardThis->m_dynDataProfileStatusLabel->setStyleSheet(statusLabelStyle(KswordTheme::ErrorHex()));
                 }
                 if (guardThis->m_dynDataProfileDetailEditor != nullptr)
                 {
@@ -3138,7 +3138,7 @@ void KernelDock::refreshDynDataAsync()
                     .arg(static_cast<qulonglong>(guardThis->m_dynDataRows.size()))
                     .arg(static_cast<qulonglong>(missingRequiredCount)));
                 guardThis->m_dynDataStatusLabel->setStyleSheet(
-                    statusLabelStyle(ntosActive && pdbProfileActive && missingRequiredCount == 0U ? QStringLiteral("#3A8F3A") : QStringLiteral("#D77A00")));
+                    statusLabelStyle(ntosActive && pdbProfileActive && missingRequiredCount == 0U ? KswordTheme::SuccessHex() : KswordTheme::WarningHex()));
 
                 if (guardThis->m_dynDataFieldTable->rowCount() > 0)
                 {
@@ -3157,7 +3157,7 @@ void KernelDock::refreshDynDataAsync()
                         .arg(ntosActive ? kernelText("kernel.dyndata.status.ntos_hit", QStringLiteral("ntos profile 已命中")) : kernelText("kernel.dyndata.status.ntos_miss", QStringLiteral("ntos profile 未命中")))
                         .arg(pdbProfileActive ? kernelText("kernel.dyndata.status.enabled", QStringLiteral("已启用")) : kernelText("kernel.dyndata.status.disabled", QStringLiteral("未启用"))));
                     guardThis->m_dynDataProfileStatusLabel->setStyleSheet(
-                        statusLabelStyle(ntosActive && pdbProfileActive ? QStringLiteral("#3A8F3A") : QStringLiteral("#D77A00")));
+                        statusLabelStyle(ntosActive && pdbProfileActive ? KswordTheme::SuccessHex() : KswordTheme::WarningHex()));
                 }
                 if (guardThis->m_dynDataProfileDetailEditor != nullptr)
                 {
@@ -3212,12 +3212,12 @@ void KernelDock::rebuildDynDataFieldTable(const QString& filterKeyword)
         if (!fieldPresent(entry.flags, entry.offset))
         {
             statusItem->setForeground(QBrush((entry.flags & KSW_DYN_FIELD_FLAG_REQUIRED) != 0U
-                ? QColor(QStringLiteral("#B23A3A"))
+                ? KswordTheme::ErrorColor()
                 : KswordTheme::WarningAccentColor()));
         }
         else
         {
-            statusItem->setForeground(QBrush(QColor(QStringLiteral("#3A8F3A"))));
+            statusItem->setForeground(QBrush(KswordTheme::SuccessColor()));
         }
 
         setReadonlyItem(m_dynDataFieldTable, rowIndex, DynDataColumn::Field, fieldItem);

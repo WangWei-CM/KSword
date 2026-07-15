@@ -409,7 +409,9 @@ void MemoryDock::initializeConnections()
                 .arg(m_moduleTable->topLevelItemCount()));
             if (!m_moduleRefreshInProgress.load())
             {
-                m_moduleStatusLabel->setStyleSheet("color:#2F7D32; font-weight:600;");
+                m_moduleStatusLabel->setStyleSheet(
+                    QStringLiteral("color:%1; font-weight:600;")
+                        .arg(KswordTheme::SuccessColor().name(QColor::HexRgb)));
             }
         }
         });

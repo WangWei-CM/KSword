@@ -92,7 +92,7 @@ namespace
 
     QString itemSelectionStyle()
     {
-        return QStringLiteral("QTableWidget::item:selected{background:%1;color:#FFFFFF;}")
+        return QStringLiteral("QTableWidget::item:selected{background:%1;color:palette(highlighted-text);}")
             .arg(KswordTheme::PrimaryBlueHex);
     }
 
@@ -471,7 +471,7 @@ void KernelDockCidTab::applyRefreshResult(std::vector<CidEvidenceRow> rows, cons
     if (!success)
     {
         m_statusLabel->setText(kernelText("kernel.cid.status.failed", QStringLiteral("状态：刷新失败 - %1")).arg(errorText));
-        m_statusLabel->setStyleSheet(statusLabelStyle(QStringLiteral("#B23A3A")));
+        m_statusLabel->setStyleSheet(statusLabelStyle(KswordTheme::ErrorHex()));
     }
 }
 
@@ -518,12 +518,12 @@ void KernelDockCidTab::rebuildTable()
         if ((row.anomalyFlags & KSWORD_ARK_CROSSVIEW_ANOMALY_DANGLING_OBJECT) != 0U ||
             (row.anomalyFlags & KSWORD_ARK_CROSSVIEW_ANOMALY_THREAD_ORPHAN) != 0U)
         {
-            anomalyItem->setForeground(QBrush(QColor(QStringLiteral("#D77A00"))));
+            anomalyItem->setForeground(QBrush(KswordTheme::WarningColor()));
         }
         if ((row.anomalyFlags & KSWORD_ARK_CROSSVIEW_ANOMALY_PID_FIELD_MISMATCH) != 0U ||
             (row.anomalyFlags & KSWORD_ARK_CROSSVIEW_ANOMALY_START_ADDRESS_OUTSIDE_MODULE) != 0U)
         {
-            anomalyItem->setForeground(QBrush(QColor(QStringLiteral("#B23A3A"))));
+            anomalyItem->setForeground(QBrush(KswordTheme::ErrorColor()));
         }
 
         m_table->setItem(rowIndex, static_cast<int>(CidColumn::Kind), kindItem);
@@ -560,7 +560,7 @@ void KernelDockCidTab::rebuildTable()
         .arg(static_cast<qulonglong>(m_rows.size()))
         .arg(static_cast<qulonglong>(visibleCount))
         .arg(cidSummaryText));
-    m_statusLabel->setStyleSheet(statusLabelStyle(QStringLiteral("#3A8F3A")));
+    m_statusLabel->setStyleSheet(statusLabelStyle(KswordTheme::SuccessHex()));
 
     if (visibleCount == 0U)
     {

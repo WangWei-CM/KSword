@@ -18,18 +18,19 @@ namespace ksword::memory_dock_internal
             "}"
             "QPushButton:hover {"
             "  background: %3;"
-            "  color: #FFFFFF;"
+            "  color: %6;"
             "  border: 1px solid %3;"
             "}"
             "QPushButton:pressed {"
             "  background: %4;"
-            "  color: #FFFFFF;"
+            "  color: %6;"
             "}")
-            .arg(KswordTheme::PrimaryBlueHex)
-            .arg(KswordTheme::PrimaryBlueBorderHex)
-            .arg(KswordTheme::PrimaryBlueSolidHoverHex())
-            .arg(KswordTheme::PrimaryBluePressedHex)
-            .arg(KswordTheme::SurfaceHex());
+            .arg(KswordTheme::AccentHex(KswordTheme::AccentRole::Blue))
+            .arg(KswordTheme::AccentHex(KswordTheme::AccentRole::Blue))
+            .arg(KswordTheme::AccentHex(KswordTheme::AccentRole::Blue, -18))
+            .arg(KswordTheme::AccentHex(KswordTheme::AccentRole::Blue, -32))
+            .arg(KswordTheme::SurfaceColorHex())
+            .arg(KswordTheme::OnAccentHex());
     }
 
     QString buildBlueComboStyle()
@@ -48,10 +49,10 @@ namespace ksword::memory_dock_internal
             "QComboBox::drop-down {"
             "  border: none;"
             "}")
-            .arg(KswordTheme::PrimaryBlueBorderHex)
-            .arg(KswordTheme::PrimaryBlueHex)
-            .arg(KswordTheme::SurfaceHex())
-            .arg(KswordTheme::TextPrimaryHex());
+            .arg(KswordTheme::BorderColorHex())
+            .arg(KswordTheme::AccentHex(KswordTheme::AccentRole::Blue))
+            .arg(KswordTheme::SurfaceColorHex())
+            .arg(KswordTheme::TextPrimaryColorHex());
     }
 
     QString buildBlueInputStyle()

@@ -28,18 +28,19 @@ namespace ksword::ui::hex_editor_internal
             "QToolButton:hover {"
             "  border:1px solid %4;"
             "  background:%5;"
-            "  color:#FFFFFF;"
+            "  color:%7;"
             "}"
             "QToolButton:pressed {"
             "  background:%6;"
-            "  color:#FFFFFF;"
+            "  color:%7;"
             "}")
-            .arg(KswordTheme::BorderHex())
-            .arg(KswordTheme::SurfaceHex())
-            .arg(KswordTheme::TextPrimaryHex())
-            .arg(KswordTheme::PrimaryBlueHex)
-            .arg(KswordTheme::PrimaryBlueHex)
-            .arg(KswordTheme::PrimaryBluePressedHex);
+            .arg(KswordTheme::BorderColorHex())
+            .arg(KswordTheme::SurfaceColorHex())
+            .arg(KswordTheme::TextPrimaryColorHex())
+            .arg(KswordTheme::AccentHex(KswordTheme::AccentRole::Blue))
+            .arg(KswordTheme::AccentHex(KswordTheme::AccentRole::Blue))
+            .arg(KswordTheme::AccentHex(KswordTheme::AccentRole::Blue, -32))
+            .arg(KswordTheme::OnAccentHex());
     }
 
     // buildInputStyle：
@@ -57,10 +58,10 @@ namespace ksword::ui::hex_editor_internal
             "QLineEdit:focus,QComboBox:focus {"
             "  border:1px solid %4;"
             "}")
-            .arg(KswordTheme::BorderHex())
-            .arg(KswordTheme::SurfaceHex())
-            .arg(KswordTheme::TextPrimaryHex())
-            .arg(KswordTheme::PrimaryBlueHex);
+            .arg(KswordTheme::BorderColorHex())
+            .arg(KswordTheme::SurfaceColorHex())
+            .arg(KswordTheme::TextPrimaryColorHex())
+            .arg(KswordTheme::AccentHex(KswordTheme::AccentRole::Blue));
     }
 
     // buildHeaderStyle：
@@ -75,8 +76,8 @@ namespace ksword::ui::hex_editor_internal
             "  padding:4px;"
             "  font-weight:600;"
             "}")
-            .arg(KswordTheme::PrimaryBlueHex)
-            .arg(KswordTheme::SurfaceHex());
+            .arg(KswordTheme::AccentHex(KswordTheme::AccentRole::Blue))
+            .arg(KswordTheme::SurfaceColorHex());
     }
 
     // buildMenuStyle：
@@ -96,17 +97,18 @@ namespace ksword::ui::hex_editor_internal
             "}"
             "QMenu::item:selected{"
             "  background:%4;"
-            "  color:#FFFFFF;"
+            "  color:%5;"
             "}"
             "QMenu::separator{"
             "  height:1px;"
             "  background:%3;"
             "  margin:4px 8px;"
             "}")
-            .arg(KswordTheme::SurfaceHex())
-            .arg(KswordTheme::TextPrimaryHex())
-            .arg(KswordTheme::BorderHex())
-            .arg(KswordTheme::PrimaryBlueHex);
+            .arg(KswordTheme::SurfaceColorHex())
+            .arg(KswordTheme::TextPrimaryColorHex())
+            .arg(KswordTheme::BorderColorHex())
+            .arg(KswordTheme::AccentHex(KswordTheme::AccentRole::Blue))
+            .arg(KswordTheme::OnAccentHex());
     }
 
     // buildMatchColor：
@@ -116,9 +118,9 @@ namespace ksword::ui::hex_editor_internal
     {
         if (KswordTheme::IsDarkModeEnabled())
         {
-            return QColor(60, 78, 46);
+            return KswordTheme::EditorMatchColor();
         }
-        return QColor(255, 245, 196);
+        return KswordTheme::EditorMatchColor();
     }
 
     // buildCurrentMatchColor：
@@ -128,9 +130,9 @@ namespace ksword::ui::hex_editor_internal
     {
         if (KswordTheme::IsDarkModeEnabled())
         {
-            return QColor(76, 112, 52);
+            return KswordTheme::EditorCurrentMatchColor();
         }
-        return QColor(255, 213, 107);
+        return KswordTheme::EditorCurrentMatchColor();
     }
 
     // buildSelectionColor：
@@ -140,9 +142,9 @@ namespace ksword::ui::hex_editor_internal
     {
         if (KswordTheme::IsDarkModeEnabled())
         {
-            return QColor(49, 92, 166);
+            return KswordTheme::EditorSelectionColor();
         }
-        return QColor(153, 205, 255);
+        return KswordTheme::EditorSelectionColor();
     }
 
     // byteToHexText：

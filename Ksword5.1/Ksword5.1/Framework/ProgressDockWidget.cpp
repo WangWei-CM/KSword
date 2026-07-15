@@ -242,9 +242,7 @@ QString ProgressDockWidget::buildHighContrastTextHex() const
     // - 深色主题使用项目主文本白蓝色；
     // - 浅色主题使用深墨色；
     // 避免透明背景叠加后 palette(mid) 灰字对比不足。
-    return KswordTheme::IsDarkModeEnabled()
-        ? KswordTheme::TextPrimaryColorHex()
-        : KswordTheme::TextPrimaryColorHex();
+    return KswordTheme::TextPrimaryColorHex();
 }
 
 QString ProgressDockWidget::buildCardBackgroundHex() const
@@ -252,9 +250,11 @@ QString ProgressDockWidget::buildCardBackgroundHex() const
     // 卡片底色策略：
     // - 仅保留轻微半透明底色提升可读性；
     // - 不绘制任何边框，满足“取消框线”的要求。
-    return KswordTheme::IsDarkModeEnabled()
-        ? QStringLiteral("rgba(0, 0, 0, 96)")
-        : QStringLiteral("rgba(255, 255, 255, 176)");
+    return KswordTheme::RgbaColorName(
+        KswordTheme::IsDarkModeEnabled()
+            ? KswordTheme::BlackColor()
+            : KswordTheme::WhiteColor(),
+        KswordTheme::IsDarkModeEnabled() ? 96 : 176);
 }
 
 QString ProgressDockWidget::buildProgressBarStyleSheet() const
@@ -263,9 +263,11 @@ QString ProgressDockWidget::buildProgressBarStyleSheet() const
     // - 底轨不画边框；
     // - 文本颜色与主题一致；
     // - 蓝色进度块维持全局主色一致性。
-    const QString progressTrackColor = KswordTheme::IsDarkModeEnabled()
-        ? QStringLiteral("rgba(255, 255, 255, 48)")
-        : QStringLiteral("rgba(0, 0, 0, 28)");
+    const QString progressTrackColor = KswordTheme::RgbaColorName(
+        KswordTheme::IsDarkModeEnabled()
+            ? KswordTheme::WhiteColor()
+            : KswordTheme::BlackColor(),
+        KswordTheme::IsDarkModeEnabled() ? 48 : 28);
 
     return QStringLiteral(
         "QProgressBar{"

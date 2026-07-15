@@ -1,5 +1,6 @@
 #include "NetworkDock.InternalCommon.h"
 #include "../UI/VisibleTableWidget.h"
+#include "../theme.h"
 
 // ============================================================
 // NetworkDock.MultiThreadDownload.cpp
@@ -696,15 +697,16 @@ protected:
         painter.setRenderHint(QPainter::Antialiasing, true);
 
         const QRectF outerRect = rect().adjusted(1.0, 1.0, -1.0, -1.0);
-        painter.setPen(QPen(QColor(138, 166, 196), 1.0));
-        painter.setBrush(QColor(29, 37, 49));
+        painter.setPen(QPen(KswordTheme::BorderStrongColor(), 1.0));
+        painter.setBrush(KswordTheme::SurfaceColor());
         painter.drawRoundedRect(outerRect, 4.0, 4.0);
 
         const QRectF contentRect = outerRect.adjusted(2.0, 2.0, -2.0, -2.0);
         if (m_segmentRatios.isEmpty())
         {
             painter.setPen(Qt::NoPen);
-            painter.setBrush(QColor(56, 153, 255, 180));
+            painter.setBrush(KswordTheme::WithAlpha(
+                KswordTheme::AccentColor(KswordTheme::AccentRole::Blue), 180));
             painter.drawRect(QRectF(contentRect.left(), contentRect.top(), contentRect.width() * m_totalRatio, contentRect.height()));
             return;
         }
@@ -722,13 +724,13 @@ protected:
                 eachWidth,
                 contentRect.height());
             painter.setPen(Qt::NoPen);
-            painter.setBrush(QColor(67, 86, 108));
+            painter.setBrush(KswordTheme::SurfaceAltColor());
             painter.drawRect(segmentRect);
 
             const double ratioValue = std::clamp(m_segmentRatios.at(index), 0.0, 1.0);
             if (ratioValue > 0.0)
             {
-                painter.setBrush(QColor(56, 153, 255));
+                painter.setBrush(KswordTheme::AccentColor(KswordTheme::AccentRole::Blue));
                 painter.drawRect(QRectF(segmentRect.left(), segmentRect.top(), segmentRect.width() * ratioValue, segmentRect.height()));
             }
         }
@@ -820,7 +822,8 @@ void NetworkDock::initializeMultiThreadDownloadTab()
         QStringLiteral("提示：剪贴板询问框为非阻塞窗口，不会阻塞主界面操作。"),
         captureSettingsGroup); // captureHintLabel：下载捕获设置使用提示标签。
     captureHintLabel->setWordWrap(true);
-    captureHintLabel->setStyleSheet(QStringLiteral("color:#7A8798;"));
+    captureHintLabel->setStyleSheet(
+        QStringLiteral("color:%1;").arg(KswordTheme::TextSecondaryColorHex()));
 
     captureSettingsLayout->addWidget(m_multiDownloadAutoCaptureClipboardCheck, 0, 0, 1, 3);
     captureSettingsLayout->addWidget(suffixLabel, 1, 0);

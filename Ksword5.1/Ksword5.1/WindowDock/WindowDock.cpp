@@ -1216,7 +1216,7 @@ namespace
             "  color:%3;"
             "  gridline-color:%4;"
             "  selection-background-color:%5;"
-            "  selection-color:#FFFFFF;"
+            "  selection-color:%6;"
             "}"
             "QTableWidget::item{"
             "  color:%3;"
@@ -1224,7 +1224,7 @@ namespace
             "}"
             "QTableWidget::item:selected{"
             "  background-color:%5;"
-            "  color:#FFFFFF;"
+            "  color:%6;"
             "}"
             "QHeaderView::section{"
             "  background-color:%2;"
@@ -1236,7 +1236,8 @@ namespace
             .arg(surfaceAltColor)
             .arg(textColor)
             .arg(borderColor)
-            .arg(KswordTheme::PrimaryBlueHex);
+            .arg(KswordTheme::AccentHex(KswordTheme::AccentRole::Blue))
+            .arg(KswordTheme::OnAccentHex());
     }
 
     // applyAuditTablePalette 作用：
@@ -1255,8 +1256,8 @@ namespace
         tablePalette.setColor(QPalette::AlternateBase, KswordTheme::SurfaceAltColor());
         tablePalette.setColor(QPalette::Text, KswordTheme::TextPrimaryColor());
         tablePalette.setColor(QPalette::WindowText, KswordTheme::TextPrimaryColor());
-        tablePalette.setColor(QPalette::HighlightedText, QColor(QStringLiteral("#FFFFFF")));
-        tablePalette.setColor(QPalette::Highlight, QColor(KswordTheme::PrimaryBlueHex));
+        tablePalette.setColor(QPalette::HighlightedText, KswordTheme::OnAccentColor());
+        tablePalette.setColor(QPalette::Highlight, KswordTheme::AccentColor(KswordTheme::AccentRole::Blue));
         table->setPalette(tablePalette);
         table->setAutoFillBackground(true);
         if (table->viewport() != nullptr)
@@ -1376,18 +1377,25 @@ namespace
     // - 返回：QPushButton stylesheet 文本。
     QString buildColumnPresetButtonStyle(const bool selected)
     {
-        const QString backgroundText = selected ? KswordTheme::PrimaryBlueHex : QStringLiteral("transparent");
-        const QString borderText = selected ? KswordTheme::PrimaryBlueHex : KswordTheme::BorderColorHex();
-        const QString textColor = selected ? QStringLiteral("#FFFFFF") : KswordTheme::TextPrimaryHex();
+        const QString backgroundText = selected
+            ? KswordTheme::AccentHex(KswordTheme::AccentRole::Blue)
+            : QStringLiteral("transparent");
+        const QString borderText = selected
+            ? KswordTheme::AccentHex(KswordTheme::AccentRole::Blue)
+            : KswordTheme::BorderColorHex();
+        const QString textColor = selected
+            ? KswordTheme::OnAccentHex()
+            : KswordTheme::TextPrimaryColorHex();
         return QStringLiteral(
             "QPushButton{min-width:24px;max-width:24px;padding:3px 0;border:1px solid %1;"
             "border-radius:0;color:%2;background:%3;font-weight:700;}"
             "QPushButton:hover{border-color:%4;}"
-            "QPushButton:pressed{background:%4;color:#FFFFFF;}")
+            "QPushButton:pressed{background:%4;color:%5;}")
             .arg(borderText)
             .arg(textColor)
             .arg(backgroundText)
-            .arg(KswordTheme::PrimaryBlueHex);
+            .arg(KswordTheme::AccentHex(KswordTheme::AccentRole::Blue))
+            .arg(KswordTheme::OnAccentHex());
     }
 
     // updateColumnPresetButtons 作用：

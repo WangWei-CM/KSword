@@ -129,7 +129,7 @@ void KernelObjectTypeMatrixTab::initializeUi()
     m_table->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_table->setAlternatingRowColors(true);
     m_table->setContextMenuPolicy(Qt::CustomContextMenu);
-    m_table->setStyleSheet(QStringLiteral("QTableWidget::item:selected{background:%1;color:#FFFFFF;}").arg(KswordTheme::PrimaryBlueHex));
+    m_table->setStyleSheet(QStringLiteral("QTableWidget::item:selected{background:%1;color:palette(highlighted-text);}").arg(KswordTheme::PrimaryBlueHex));
     m_table->verticalHeader()->setVisible(false);
     m_table->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
     m_table->horizontalHeader()->setSectionResizeMode(static_cast<int>(ObjectTypeMatrixColumn::Strategy), QHeaderView::Stretch);
@@ -206,7 +206,7 @@ void KernelObjectTypeMatrixTab::applyRefreshResult(
     {
         m_rows.clear();
         m_statusLabel->setText(kernelText("kernel.object_type.status.refresh_failed", QStringLiteral("状态：刷新失败 - %1")).arg(errorText));
-        m_statusLabel->setStyleSheet(statusLabelStyle(QStringLiteral("#B23A3A")));
+        m_statusLabel->setStyleSheet(statusLabelStyle(KswordTheme::ErrorHex()));
         insertDiagnosticRow(
             kernelText("kernel.object_type.placeholder.refresh_failed", QStringLiteral("<刷新失败>")),
             buildDiagnosticDetailText(kernelText("kernel.object_type.diagnostic.refresh_failed", QStringLiteral("对象类型矩阵刷新失败：%1")).arg(errorText)));
@@ -255,7 +255,7 @@ void KernelObjectTypeMatrixTab::rebuildTable()
     m_statusLabel->setText(kernelText("kernel.object_type.status.summary", QStringLiteral("状态：已加载 %1 类，显示 %2 类"))
         .arg(static_cast<qulonglong>(m_rows.size()))
         .arg(static_cast<qulonglong>(visibleCount)));
-    m_statusLabel->setStyleSheet(statusLabelStyle(QStringLiteral("#3A8F3A")));
+    m_statusLabel->setStyleSheet(statusLabelStyle(KswordTheme::SuccessHex()));
 
     if (m_table->rowCount() > 0)
     {

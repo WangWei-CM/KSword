@@ -79,21 +79,22 @@ QString WinAPIDock::blueInputStyle()
         "QLineEdit{border:1px solid %2;border-radius:3px;background:%3;color:%4;padding:2px 6px;}"
         "QTableWidget{border:1px solid %2;border-radius:3px;background:transparent;background-color:transparent;color:%4;padding:2px 6px;gridline-color:%2;alternate-background-color:transparent;}"
         "QTableWidget::viewport{background:transparent;background-color:transparent;}"
-        "QTableWidget::item:selected{background:%1;color:#FFFFFF;}"
+        "QTableWidget::item:selected{background:%1;color:%5;}"
         "QLineEdit:focus{border:1px solid %1;}")
-        .arg(KswordTheme::PrimaryBlueHex)
-        .arg(KswordTheme::BorderHex())
-        .arg(KswordTheme::SurfaceHex())
-        .arg(KswordTheme::TextPrimaryHex());
+        .arg(KswordTheme::AccentHex(KswordTheme::AccentRole::Blue))
+        .arg(KswordTheme::BorderColorHex())
+        .arg(KswordTheme::SurfaceColorHex())
+        .arg(KswordTheme::TextPrimaryColorHex())
+        .arg(KswordTheme::OnAccentHex());
 }
 
 QString WinAPIDock::blueHeaderStyle()
 {
     return QStringLiteral(
         "QHeaderView::section{color:%1;background:%2;border:1px solid %3;padding:4px;font-weight:600;}")
-        .arg(KswordTheme::PrimaryBlueHex)
-        .arg(KswordTheme::SurfaceHex())
-        .arg(KswordTheme::BorderHex());
+        .arg(KswordTheme::AccentHex(KswordTheme::AccentRole::Blue))
+        .arg(KswordTheme::SurfaceColorHex())
+        .arg(KswordTheme::BorderColorHex());
 }
 
 QString WinAPIDock::buildStatusStyle(const QString& colorHex)
@@ -103,30 +104,22 @@ QString WinAPIDock::buildStatusStyle(const QString& colorHex)
 
 QString WinAPIDock::monitorInfoColorHex()
 {
-    return KswordTheme::IsDarkModeEnabled()
-        ? QStringLiteral("#8FC7FF")
-        : QStringLiteral("#1F4E7A");
+    return KswordTheme::InfoColor().name(QColor::HexRgb);
 }
 
 QString WinAPIDock::monitorSuccessColorHex()
 {
-    return KswordTheme::IsDarkModeEnabled()
-        ? QStringLiteral("#7EDC8A")
-        : QStringLiteral("#2F7D32");
+    return KswordTheme::SuccessColor().name(QColor::HexRgb);
 }
 
 QString WinAPIDock::monitorWarningColorHex()
 {
-    return KswordTheme::IsDarkModeEnabled()
-        ? QStringLiteral("#FFD48A")
-        : QStringLiteral("#AA7B1C");
+    return KswordTheme::WarningColor().name(QColor::HexRgb);
 }
 
 QString WinAPIDock::monitorErrorColorHex()
 {
-    return KswordTheme::IsDarkModeEnabled()
-        ? QStringLiteral("#FF9B9B")
-        : QStringLiteral("#A43434");
+    return KswordTheme::ErrorColor().name(QColor::HexRgb);
 }
 
 QString WinAPIDock::monitorIdleColorHex()

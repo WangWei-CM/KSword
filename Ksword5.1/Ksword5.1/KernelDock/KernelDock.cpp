@@ -92,8 +92,8 @@ namespace
     QString itemSelectionStyle()
     {
         return QStringLiteral(
-            "QTableWidget::item:selected{background:%1;color:#FFFFFF;}"
-            "QTreeWidget::item:selected{background:%1;color:#FFFFFF;}")
+            "QTableWidget::item:selected{background:%1;color:palette(highlighted-text);}"
+            "QTreeWidget::item:selected{background:%1;color:palette(highlighted-text);}")
             .arg(KswordTheme::PrimaryBlueHex);
     }
 
@@ -269,7 +269,7 @@ namespace
     // - 作用：返回白色 Tab 图标，避免选中蓝底时出现蓝底蓝图标。
     QIcon selectedTabIcon(const QString& iconPath)
     {
-        return tintedSvgIcon(iconPath, QColor(255, 255, 255));
+        return tintedSvgIcon(iconPath, KswordTheme::OnAccentColor());
     }
 
 }

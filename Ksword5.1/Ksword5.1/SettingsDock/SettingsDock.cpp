@@ -1010,7 +1010,7 @@ void SettingsDock::updateThemeButtonStyle()
             "}")
             .arg(KswordTheme::BorderColorHex())
             .arg(KswordTheme::PrimaryBlueSubtleHex())
-            .arg(QStringLiteral("#D6ECFF"));
+            .arg(KswordTheme::PrimaryBlueSubtleHex());
 
     const QString checkedStyle = darkModeEnabled
         ? QStringLiteral(

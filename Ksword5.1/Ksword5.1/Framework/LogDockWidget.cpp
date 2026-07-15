@@ -194,14 +194,18 @@ namespace
             "  padding: 4px;"
             "}"
             "QPushButton:hover {"
-            "  background: rgba(67, 160, 255, 28);"
-            "  border: 1px solid rgba(67, 160, 255, 96);"
+            "  background: %2;"
+            "  border: 1px solid %3;"
             "}"
             "QPushButton:pressed {"
-            "  background: rgba(67, 160, 255, 46);"
-            "  border: 1px solid rgba(67, 160, 255, 136);"
+            "  background: %4;"
+            "  border: 1px solid %5;"
             "}")
-            .arg(KswordTheme::TextPrimaryHex());
+            .arg(KswordTheme::TextPrimaryHex())
+            .arg(KswordTheme::RgbaColorName(KswordTheme::AccentColor(KswordTheme::AccentRole::Blue), 28))
+            .arg(KswordTheme::RgbaColorName(KswordTheme::AccentColor(KswordTheme::AccentRole::Blue), 96))
+            .arg(KswordTheme::RgbaColorName(KswordTheme::AccentColor(KswordTheme::AccentRole::Blue), 46))
+            .arg(KswordTheme::RgbaColorName(KswordTheme::AccentColor(KswordTheme::AccentRole::Blue), 136));
     }
 
     // buildBlueHeaderStyleSheet 作用：
@@ -648,18 +652,16 @@ QVariant LogDockWidget::getRowHighlightBrush(const kEvent& logItem, const int ro
     if (logItem.level == kLogLevel::Fatal)
     {
         return role == Qt::BackgroundRole
-            ? QVariant(QBrush(QColor(0, 0, 0)))          // Fatal 整行黑底。
-            : QVariant(QBrush(QColor(255, 255, 255)));  // Fatal 整行白字。
+            ? QVariant(QBrush(KswordTheme::BlackColor()))
+            : QVariant(QBrush(KswordTheme::WhiteColor()));
     }
 
     if (logItem.level == kLogLevel::Error)
     {
-        const QColor rowBackground = KswordTheme::IsDarkModeEnabled()
-            ? QColor(138, 48, 48)
-            : QColor(220, 72, 72);                      // Error 深浅色分支红底。
+        const QColor rowBackground = KswordTheme::ErrorBackgroundColor();
         return role == Qt::BackgroundRole
             ? QVariant(QBrush(rowBackground))
-            : QVariant(QBrush(QColor(255, 255, 255)));  // Error 统一白字保证可读。
+            : QVariant(QBrush(KswordTheme::OnAccentColor()));
     }
 
     return {};
@@ -697,17 +699,17 @@ QColor LogDockWidget::getLevelColor(const kLogLevel level) const
     switch (level)
     {
     case kLogLevel::Debug:
-        return QColor(52, 127, 235);
+        return KswordTheme::AccentColor(KswordTheme::AccentRole::Blue, -30);
     case kLogLevel::Info:
-        return KswordTheme::IsDarkModeEnabled() ? QColor(104, 204, 116) : QColor(64, 173, 74);
+        return KswordTheme::SuccessColor();
     case kLogLevel::Warn:
-        return KswordTheme::IsDarkModeEnabled() ? QColor(245, 196, 94) : QColor(232, 176, 42);
+        return KswordTheme::WarningColor();
     case kLogLevel::Error:
-        return KswordTheme::IsDarkModeEnabled() ? QColor(228, 120, 120) : QColor(214, 66, 66);
+        return KswordTheme::ErrorColor();
     case kLogLevel::Fatal:
-        return KswordTheme::IsDarkModeEnabled() ? QColor(200, 80, 80) : QColor(170, 20, 20);
+        return KswordTheme::AccentTextColor(KswordTheme::AccentRole::Red, KswordTheme::BlackColor());
     default:
-        return QColor(128, 128, 128);
+        return KswordTheme::TextDisabledColor();
     }
 }
 

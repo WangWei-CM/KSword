@@ -797,12 +797,12 @@ namespace
 
     QColor visualizationToneColor(const QString& tone)
     {
-        if (tone == QStringLiteral("success")) return QColor(QStringLiteral("#3BCF8E"));
-        if (tone == QStringLiteral("danger")) return QColor(QStringLiteral("#FF6464"));
-        if (tone == QStringLiteral("warning")) return QColor(QStringLiteral("#FFB74D"));
-        if (tone == QStringLiteral("info")) return QColor(QStringLiteral("#4DA3FF"));
-        if (tone == QStringLiteral("muted")) return QColor(QStringLiteral("#9AA9BD"));
-        return QColor(KswordTheme::TextPrimaryHex());
+        if (tone == QStringLiteral("success")) return KswordTheme::SuccessColor();
+        if (tone == QStringLiteral("danger")) return KswordTheme::ErrorColor();
+        if (tone == QStringLiteral("warning")) return KswordTheme::WarningColor();
+        if (tone == QStringLiteral("info")) return KswordTheme::InfoColor();
+        if (tone == QStringLiteral("muted")) return KswordTheme::TextSecondaryColor();
+        return KswordTheme::TextPrimaryColor();
     }
 
     class PluginRunDialog final : public QDialog

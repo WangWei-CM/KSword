@@ -229,16 +229,16 @@ QColor DriverDock::moduleEvidenceStatusColor(const LoadedModuleEvidenceRecord& e
         evidence.hasIatEatSuspicious ||
         evidence.hasInlineHookSuspicious)
     {
-        return QColor(QStringLiteral("#B23A3A"));
+        return KswordTheme::ErrorColor();
     }
     if (evidence.hasScanError ||
         !evidence.driverObjectResolved ||
         (evidence.driverStartKnown && !evidence.driverStartMatchesBase) ||
         evidence.hasCallbackReference)
     {
-        return QColor(QStringLiteral("#D77A00"));
+        return KswordTheme::WarningColor();
     }
-    return QColor(QStringLiteral("#3A8F3A"));
+    return KswordTheme::SuccessColor();
 }
 
 bool DriverDock::queryDriverObjectForModuleEvidence(

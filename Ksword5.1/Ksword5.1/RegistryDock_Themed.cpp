@@ -1267,16 +1267,20 @@ void RegistryDock::refreshRegistryDriverModeIndicator()
     {
         m_driverRegistryModeLabel->setText(QStringLiteral("R0读写: 开启"));
         m_driverRegistryModeLabel->setStyleSheet(QStringLiteral(
-            "QLabel{border:1px solid #2E7D32;border-radius:3px;"
-            "background:rgba(46,125,50,0.16);color:#2E7D32;padding:2px 6px;font-weight:600;}"));
+            "QLabel{border:1px solid %1;border-radius:3px;"
+            "background:%2;color:%1;padding:2px 6px;font-weight:600;}"
+        ).arg(KswordTheme::SuccessColor().name(QColor::HexRgb))
+         .arg(KswordTheme::RgbaColorName(KswordTheme::SuccessColor(), 41)));
         m_driverRegistryModeLabel->setToolTip(QStringLiteral("驱动设备在线：注册表浏览和编辑将优先使用 R0。"));
         return;
     }
 
     m_driverRegistryModeLabel->setText(QStringLiteral("R0读写: 关闭"));
     m_driverRegistryModeLabel->setStyleSheet(QStringLiteral(
-        "QLabel{border:1px solid #9E9E9E;border-radius:3px;"
-        "background:rgba(158,158,158,0.14);color:#757575;padding:2px 6px;font-weight:600;}"));
+        "QLabel{border:1px solid %1;border-radius:3px;"
+        "background:%2;color:%1;padding:2px 6px;font-weight:600;}"
+    ).arg(KswordTheme::BorderColorHex())
+     .arg(KswordTheme::RgbaColorName(KswordTheme::SurfaceAltColor(), 36)));
     m_driverRegistryModeLabel->setToolTip(QStringLiteral("驱动设备未在线或不可打开：注册表操作回退到 Win32 API。"));
 }
 

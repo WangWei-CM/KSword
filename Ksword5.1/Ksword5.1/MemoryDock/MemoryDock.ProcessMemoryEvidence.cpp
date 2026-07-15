@@ -152,13 +152,14 @@ namespace
         return QStringLiteral(
             "QMenu{background:%1;color:%2;border:1px solid %3;}"
             "QMenu::item{padding:5px 24px 5px 24px;background:transparent;}"
-            "QMenu::item:selected{background:%4;color:#FFFFFF;}"
+            "QMenu::item:selected{background:%4;color:%6;}"
             "QMenu::item:disabled{color:%5;}")
-            .arg(KswordTheme::SurfaceHex())
-            .arg(KswordTheme::TextPrimaryHex())
-            .arg(KswordTheme::BorderHex())
-            .arg(KswordTheme::PrimaryBlueHex)
-            .arg(KswordTheme::TextSecondaryHex());
+            .arg(KswordTheme::SurfaceColorHex())
+            .arg(KswordTheme::TextPrimaryColorHex())
+            .arg(KswordTheme::BorderColorHex())
+            .arg(KswordTheme::AccentHex(KswordTheme::AccentRole::Blue))
+            .arg(KswordTheme::TextSecondaryColorHex())
+            .arg(KswordTheme::OnAccentHex());
     }
 
     void copyEvidenceCurrentRow(QTableWidget* table)
@@ -404,7 +405,9 @@ void MemoryDock::refreshProcessMemoryEvidenceAsync()
         if (m_processMemoryEvidenceStatusLabel != nullptr)
         {
             m_processMemoryEvidenceStatusLabel->setText(QStringLiteral("状态：请先附加进程。"));
-            m_processMemoryEvidenceStatusLabel->setStyleSheet(QStringLiteral("color:#B23A3A; font-weight:600;"));
+            m_processMemoryEvidenceStatusLabel->setStyleSheet(
+                QStringLiteral("color:%1; font-weight:600;")
+                    .arg(KswordTheme::ErrorColor().name(QColor::HexRgb)));
         }
         return;
     }
@@ -556,7 +559,9 @@ void MemoryDock::refreshProcessMemoryEvidenceAsync()
                         QStringLiteral("状态：采样 %1 行").arg(guardThis->m_processMemoryEvidenceCache.size()));
                     guardThis->m_processMemoryEvidenceStatusLabel->setStyleSheet(QStringLiteral(
                         "color:%1; font-weight:600;")
-                        .arg(guardThis->m_processMemoryEvidenceCache.empty() ? QStringLiteral("#B23A3A") : QStringLiteral("#2F7D32")));
+                        .arg(guardThis->m_processMemoryEvidenceCache.empty()
+                            ? KswordTheme::ErrorColor().name(QColor::HexRgb)
+                            : KswordTheme::SuccessColor().name(QColor::HexRgb)));
                 }
             },
             Qt::QueuedConnection);

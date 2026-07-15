@@ -249,8 +249,8 @@ void HandleDock::updateHandleStatusLabel(const QString& statusText, const bool r
         statusText.contains(QStringLiteral("异常")) ||
         statusText.contains(QStringLiteral("截断"));
     const QString textColor = hasDiagnostic
-        ? QStringLiteral("#D77A00")
-        : QStringLiteral("#3A8F3A");
+        ? KswordTheme::WarningColor().name(QColor::HexRgb)
+        : KswordTheme::SuccessColor().name(QColor::HexRgb);
     m_statusLabel->setStyleSheet(
         QStringLiteral("color:%1;font-weight:600;")
         .arg(textColor));
@@ -273,8 +273,8 @@ void HandleDock::updateObjectTypeStatusLabel(const QString& statusText, const bo
 
     const bool hasDiagnostic = statusText.contains(QStringLiteral("失败"));
     const QString textColor = hasDiagnostic
-        ? QStringLiteral("#D77A00")
-        : QStringLiteral("#3A8F3A");
+        ? KswordTheme::WarningColor().name(QColor::HexRgb)
+        : KswordTheme::SuccessColor().name(QColor::HexRgb);
     m_objectTypeStatusLabel->setStyleSheet(
         QStringLiteral("color:%1;font-weight:600;")
         .arg(textColor));

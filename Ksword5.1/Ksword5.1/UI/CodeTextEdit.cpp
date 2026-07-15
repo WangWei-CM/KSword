@@ -67,13 +67,13 @@ protected:
     void highlightBlock(const QString& textValue) override
     {
         QTextCharFormat roundFormat;
-        roundFormat.setForeground(QColor(95, 175, 255));
+        roundFormat.setForeground(KswordTheme::AccentColor(KswordTheme::AccentRole::Blue, 4));
 
         QTextCharFormat squareFormat;
-        squareFormat.setForeground(QColor(120, 200, 90));
+        squareFormat.setForeground(KswordTheme::AccentColor(KswordTheme::AccentRole::Green, 24));
 
         QTextCharFormat braceFormat;
-        braceFormat.setForeground(QColor(255, 170, 90));
+        braceFormat.setForeground(KswordTheme::AccentColor(KswordTheme::AccentRole::Orange, 20));
 
         for (int index = 0; index < textValue.size(); ++index)
         {
@@ -208,7 +208,7 @@ int CodeTextEdit::lineNumberAreaWidth() const
 void CodeTextEdit::paintLineNumberArea(QPaintEvent* event)
 {
     QPainter painter(m_lineNumberArea);
-    painter.fillRect(event->rect(), KswordTheme::IsDarkModeEnabled() ? QColor(30, 30, 30) : QColor(242, 246, 252));
+    painter.fillRect(event->rect(), KswordTheme::SurfaceMutedColor());
 
     QTextBlock block = firstVisibleBlock();
     int blockNumber = block.blockNumber();
@@ -219,7 +219,7 @@ void CodeTextEdit::paintLineNumberArea(QPaintEvent* event)
     {
         if (block.isVisible() && bottom >= event->rect().top())
         {
-            painter.setPen(KswordTheme::IsDarkModeEnabled() ? QColor(170, 170, 170) : QColor(98, 106, 120));
+            painter.setPen(KswordTheme::TextSecondaryColor());
             painter.drawText(
                 0,
                 top,
@@ -356,7 +356,7 @@ void CodeTextEdit::refreshExtraSelections()
     lineSelection.cursor = textCursor();
     lineSelection.cursor.clearSelection();
     lineSelection.format.setProperty(QTextFormat::FullWidthSelection, true);
-    lineSelection.format.setBackground(KswordTheme::IsDarkModeEnabled() ? QColor(42, 42, 42) : QColor(232, 241, 255));
+    lineSelection.format.setBackground(KswordTheme::PrimaryBlueSubtleColor());
     extraSelections.push_back(lineSelection);
 
     const int totalChars = std::max(0, document()->characterCount() - 1);
@@ -396,13 +396,13 @@ void CodeTextEdit::refreshExtraSelections()
                 selection.cursor = textCursor();
                 selection.cursor.setPosition(pos);
                 selection.cursor.movePosition(QTextCursor::NextCharacter, QTextCursor::KeepAnchor);
-                selection.format.setForeground(QColor(255, 255, 255));
+                selection.format.setForeground(KswordTheme::OnAccentColor());
                 selection.format.setBackground(bg);
                 extraSelections.push_back(selection);
             };
 
-        const QColor matchedBg = QColor(62, 142, 240);
-        appendBracketSelection(bracketPos, pairPos >= 0 ? matchedBg : QColor(196, 67, 67));
+        const QColor matchedBg = KswordTheme::EditorSelectionColor();
+        appendBracketSelection(bracketPos, pairPos >= 0 ? matchedBg : KswordTheme::ErrorColor());
         if (pairPos >= 0)
         {
             appendBracketSelection(pairPos, matchedBg);

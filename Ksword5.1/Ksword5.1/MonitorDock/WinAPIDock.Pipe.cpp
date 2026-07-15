@@ -1,4 +1,5 @@
 #include "WinAPIDock.h"
+#include "../theme.h"
 
 // ============================================================
 // WinAPIDock.Pipe.cpp
@@ -570,13 +571,13 @@ void WinAPIDock::appendEventRow(const EventRow& rowValue)
 
     if (rowValue.internalEvent)
     {
-        const QBrush internalBrush(QColor(QStringLiteral("#4B7FB8")));
+        const QBrush internalBrush(KswordTheme::InfoColor());
         categoryItem->setForeground(internalBrush);
         apiItem->setForeground(internalBrush);
     }
     else if (rowValue.resultText != QStringLiteral("OK"))
     {
-        const QBrush errorBrush(QColor(QStringLiteral("#B74343")));
+        const QBrush errorBrush(KswordTheme::ErrorColor());
         resultItem->setForeground(errorBrush);
     }
 

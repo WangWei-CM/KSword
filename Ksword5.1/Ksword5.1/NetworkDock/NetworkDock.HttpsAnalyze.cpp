@@ -34,17 +34,13 @@ namespace
     // - 重点覆盖 QPlainTextEdit/QTabWidget/QLabel，修复深色模式下残留白底。
     QString buildHttpsDetailWindowStyle()
     {
-        const QString windowBackground = KswordTheme::SurfaceHex();
-        const QString panelBackground = KswordTheme::IsDarkModeEnabled()
-            ? QStringLiteral("#141414")
-            : QStringLiteral("#F8FAFC");
-        const QString inputBackground = KswordTheme::IsDarkModeEnabled()
-            ? QStringLiteral("#101010")
-            : QStringLiteral("#FFFFFF");
-        const QString borderColor = KswordTheme::BorderHex();
-        const QString textColor = KswordTheme::TextPrimaryHex();
-        const QString secondaryTextColor = KswordTheme::TextSecondaryHex();
-        const QString accentColor = KswordTheme::PrimaryBlueHex;
+        const QString windowBackground = KswordTheme::SurfaceColorHex();
+        const QString panelBackground = KswordTheme::SurfaceAltColorHex();
+        const QString inputBackground = KswordTheme::SurfaceMutedColorHex();
+        const QString borderColor = KswordTheme::BorderColorHex();
+        const QString textColor = KswordTheme::TextPrimaryColorHex();
+        const QString secondaryTextColor = KswordTheme::TextSecondaryColorHex();
+        const QString accentColor = KswordTheme::AccentHex(KswordTheme::AccentRole::Blue);
 
         return QStringLiteral(
             "QWidget{"
@@ -79,7 +75,7 @@ namespace
             "  color:%2;"
             "  border:1px solid %4;"
             "  selection-background-color:%7;"
-            "  selection-color:#FFFFFF;"
+            "  selection-color:%8;"
             "}"
             "QMenu{"
             "  background:%6;"
@@ -88,7 +84,7 @@ namespace
             "}"
             "QMenu::item:selected{"
             "  background:%7;"
-            "  color:#FFFFFF;"
+            "  color:%8;"
             "}"
             "QMenu::separator{"
             "  height:1px;"
@@ -107,7 +103,8 @@ namespace
             .arg(borderColor)
             .arg(secondaryTextColor)
             .arg(inputBackground)
-            .arg(accentColor);
+            .arg(accentColor)
+            .arg(KswordTheme::OnAccentHex());
     }
 
     class HttpsParsedDetailWindow final : public QWidget

@@ -291,7 +291,8 @@ void FileHandleUsageWindow::applyRefreshResult(
     const bool hasDiagnostic = !refreshResult.diagnosticText.trimmed().isEmpty();
     m_statusLabel->setStyleSheet(
         QStringLiteral("color:%1;font-weight:600;")
-        .arg(hasDiagnostic ? QStringLiteral("#D77A00") : QStringLiteral("#3A8F3A")));
+        .arg((hasDiagnostic ? KswordTheme::WarningColor() : KswordTheme::SuccessColor())
+            .name(QColor::HexRgb)));
 
     kLogEvent doneEvent;
     info << doneEvent

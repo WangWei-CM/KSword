@@ -56,15 +56,16 @@ namespace
             "}"
             "QToolButton:hover{"
             "  background:%2;"
-            "  color:#FFFFFF;"
+            "  color:%4;"
             "}"
             "QToolButton:pressed{"
             "  background:%3;"
-            "  color:#FFFFFF;"
+            "  color:%4;"
             "}")
             .arg(KswordTheme::TextPrimaryHex())
-            .arg(KswordTheme::PrimaryBlueHex)
-            .arg(KswordTheme::PrimaryBluePressedHex);
+            .arg(KswordTheme::AccentHex(KswordTheme::AccentRole::Blue))
+            .arg(KswordTheme::AccentHex(KswordTheme::AccentRole::Blue, -32))
+            .arg(KswordTheme::OnAccentHex());
     }
 
     // buildInputStyle：
@@ -74,10 +75,10 @@ namespace
         return QStringLiteral(
             "QLineEdit{border:1px solid %1;border-radius:3px;padding:2px 6px;background:%2;color:%3;}"
             "QLineEdit:focus{border:1px solid %4;}")
-            .arg(KswordTheme::BorderHex())
-            .arg(KswordTheme::SurfaceHex())
-            .arg(KswordTheme::TextPrimaryHex())
-            .arg(KswordTheme::PrimaryBlueHex);
+            .arg(KswordTheme::BorderColorHex())
+            .arg(KswordTheme::SurfaceColorHex())
+            .arg(KswordTheme::TextPrimaryColorHex())
+            .arg(KswordTheme::AccentHex(KswordTheme::AccentRole::Blue));
     }
 
     // buildToolbarSvgIcon：
@@ -522,13 +523,13 @@ protected:
     void highlightBlock(const QString& text) override
     {
         QTextCharFormat roundFormat;
-        roundFormat.setForeground(QColor(95, 175, 255));
+        roundFormat.setForeground(KswordTheme::AccentColor(KswordTheme::AccentRole::Blue, 4));
 
         QTextCharFormat squareFormat;
-        squareFormat.setForeground(QColor(120, 200, 90));
+        squareFormat.setForeground(KswordTheme::AccentColor(KswordTheme::AccentRole::Green, 24));
 
         QTextCharFormat braceFormat;
-        braceFormat.setForeground(QColor(255, 170, 90));
+        braceFormat.setForeground(KswordTheme::AccentColor(KswordTheme::AccentRole::Orange, 20));
 
         for (int index = 0; index < text.size(); ++index)
         {
@@ -647,7 +648,7 @@ public:
     void paintLineNumberArea(QPaintEvent* event)
     {
         QPainter painter(m_lineNumberArea);
-        painter.fillRect(event->rect(), KswordTheme::IsDarkModeEnabled() ? QColor(30, 30, 30) : QColor(242, 246, 252));
+        painter.fillRect(event->rect(), KswordTheme::SurfaceMutedColor());
 
         QTextBlock block = firstVisibleBlock();
         int blockNumber = block.blockNumber();
@@ -658,7 +659,7 @@ public:
         {
             if (block.isVisible() && bottom >= event->rect().top())
             {
-                painter.setPen(KswordTheme::IsDarkModeEnabled() ? QColor(170, 170, 170) : QColor(98, 106, 120));
+                painter.setPen(KswordTheme::TextSecondaryColor());
                 painter.drawText(
                     0,
                     top,
@@ -715,7 +716,7 @@ private:
         lineSelection.cursor = textCursor();
         lineSelection.cursor.clearSelection();
         lineSelection.format.setProperty(QTextFormat::FullWidthSelection, true);
-        lineSelection.format.setBackground(KswordTheme::IsDarkModeEnabled() ? QColor(42, 42, 42) : QColor(232, 241, 255));
+        lineSelection.format.setBackground(KswordTheme::PrimaryBlueSubtleColor());
         extraSelections.push_back(lineSelection);
 
         const QString allText = toPlainText();
@@ -775,13 +776,13 @@ private:
                         sel.cursor = textCursor();
                         sel.cursor.setPosition(pos);
                         sel.cursor.movePosition(QTextCursor::NextCharacter, QTextCursor::KeepAnchor);
-                        sel.format.setForeground(QColor(255, 255, 255));
+                        sel.format.setForeground(KswordTheme::OnAccentColor());
                         sel.format.setBackground(bg);
                         extraSelections.push_back(sel);
                     };
 
-                const QColor matchedBg = QColor(62, 142, 240);
-                appendBracketSelection(bracketPos, pairPos >= 0 ? matchedBg : QColor(196, 67, 67));
+                const QColor matchedBg = KswordTheme::EditorSelectionColor();
+                appendBracketSelection(bracketPos, pairPos >= 0 ? matchedBg : KswordTheme::ErrorColor());
                 if (pairPos >= 0)
                 {
                     appendBracketSelection(pairPos, matchedBg);

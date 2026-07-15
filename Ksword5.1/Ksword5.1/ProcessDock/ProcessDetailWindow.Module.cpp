@@ -299,17 +299,18 @@ void ProcessDetailWindow::showModuleContextMenu(const QPoint& localPosition)
         "}"
         "QMenu::item:selected{"
         "  background:%4;"
-        "  color:#FFFFFF;"
+        "  color:%5;"
         "}"
         "QMenu::separator{"
         "  height:1px;"
         "  background:%3;"
         "  margin:4px 8px;"
         "}")
-        .arg(KswordTheme::SurfaceHex())
-        .arg(KswordTheme::TextPrimaryHex())
-        .arg(KswordTheme::BorderHex())
-        .arg(KswordTheme::PrimaryBlueHex));
+        .arg(KswordTheme::SurfaceColorHex())
+        .arg(KswordTheme::TextPrimaryColorHex())
+        .arg(KswordTheme::BorderColorHex())
+        .arg(KswordTheme::AccentHex(KswordTheme::AccentRole::Blue))
+        .arg(KswordTheme::OnAccentHex()));
 
     QAction* copyCellAction = contextMenu.addAction(QIcon(":/Icon/process_copy_cell.svg"), "复制单元格");
     QAction* copyRowAction = contextMenu.addAction(QIcon(":/Icon/process_copy_row.svg"), "复制行");

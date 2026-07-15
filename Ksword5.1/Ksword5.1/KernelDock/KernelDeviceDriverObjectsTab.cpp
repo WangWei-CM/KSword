@@ -511,7 +511,7 @@ void KernelDeviceDriverObjectsTab::updateStatusText(const QString& errorText)
     if (!errorText.isEmpty())
     {
         m_statusLabel->setText(kernelText("kernel.device_driver.status.failed", QStringLiteral("状态：刷新失败 - %1")).arg(errorText));
-        m_statusLabel->setStyleSheet(statusLabelStyle(QStringLiteral("#B23A3A")));
+        m_statusLabel->setStyleSheet(statusLabelStyle(KswordTheme::ErrorHex()));
         return;
     }
 
@@ -532,7 +532,7 @@ void KernelDeviceDriverObjectsTab::updateStatusText(const QString& errorText)
     if (m_visibleRows.empty())
     {
         m_statusLabel->setText(kernelText("kernel.device_driver.status.filter_empty", QStringLiteral("状态：已加载 %1 条，当前过滤后无可见结果。")).arg(m_allRows.size()));
-        m_statusLabel->setStyleSheet(statusLabelStyle(QStringLiteral("#D77A00")));
+        m_statusLabel->setStyleSheet(statusLabelStyle(KswordTheme::WarningHex()));
         return;
     }
 
@@ -540,7 +540,7 @@ void KernelDeviceDriverObjectsTab::updateStatusText(const QString& errorText)
         kernelText("kernel.device_driver.status.summary", QStringLiteral("状态：已加载 %1 条，当前显示 %2 条。"))
         .arg(m_allRows.size())
         .arg(m_visibleRows.size()));
-    m_statusLabel->setStyleSheet(statusLabelStyle(QStringLiteral("#3A8F3A")));
+    m_statusLabel->setStyleSheet(statusLabelStyle(KswordTheme::SuccessHex()));
 }
 
 // showTableContextMenu：

@@ -1,4 +1,5 @@
 #include "OtherDock.h"
+#include "../theme.h"
 
 // ============================================================
 // OtherDock.Desktop.cpp
@@ -589,19 +590,19 @@ namespace
             QFont currentFont = item->font();
             currentFont.setBold(true);
             item->setFont(currentFont);
-            item->setBackground(QColor(223, 246, 232));
-            item->setForeground(QColor(22, 92, 54));
+            item->setBackground(KswordTheme::SuccessBackgroundColor());
+            item->setForeground(KswordTheme::SuccessColor());
             return;
         }
 
         if (rowData.isCurrentWindowStation)
         {
-            item->setBackground(QColor(231, 241, 255));
+            item->setBackground(KswordTheme::PrimaryBlueSubtleColor());
         }
 
         if (rowData.readCapability == DesktopCapabilityState::No)
         {
-            item->setForeground(QColor(168, 52, 52));
+            item->setForeground(KswordTheme::ErrorColor());
         }
     }
 

@@ -55,9 +55,12 @@ namespace
 
     QString buttonStyle()
     {
-        return QStringLiteral("QPushButton{background:%1;color:#FFFFFF;border-radius:3px;padding:4px 10px;}"
-                              "QPushButton:disabled{background:#9AA8B7;color:#EDF2F7;}")
-            .arg(KswordTheme::PrimaryBlueHex);
+        return QStringLiteral("QPushButton{background:%1;color:%2;border-radius:3px;padding:4px 10px;}"
+                              "QPushButton:disabled{background:%3;color:%4;}")
+            .arg(KswordTheme::AccentHex(KswordTheme::AccentRole::Blue))
+            .arg(KswordTheme::OnAccentHex())
+            .arg(KswordTheme::SurfaceMutedColorHex())
+            .arg(KswordTheme::TextDisabledColorHex());
     }
 
     QString inputStyle()
@@ -71,12 +74,13 @@ namespace
     QString tableStyle()
     {
         return QStringLiteral("QTableWidget{background:%1;color:%2;alternate-background-color:%3;gridline-color:%4;}"
-                              "QTableWidget::item:selected{background:%5;color:#FFFFFF;}")
-            .arg(KswordTheme::SurfaceHex())
-            .arg(KswordTheme::TextPrimaryHex())
-            .arg(KswordTheme::SurfaceAltHex())
-            .arg(KswordTheme::BorderHex())
-            .arg(KswordTheme::PrimaryBlueHex);
+                              "QTableWidget::item:selected{background:%5;color:palette(highlighted-text);}")
+            .arg(KswordTheme::SurfaceColorHex())
+            .arg(KswordTheme::TextPrimaryColorHex())
+            .arg(KswordTheme::SurfaceAltColorHex())
+            .arg(KswordTheme::BorderColorHex())
+            .arg(KswordTheme::AccentHex(KswordTheme::AccentRole::Blue))
+            .arg(KswordTheme::OnAccentHex());
     }
 
     QTableWidgetItem* readOnlyItem(const QString& textValue)
@@ -107,13 +111,14 @@ namespace
         return QStringLiteral(
             "QMenu{background:%1;color:%2;border:1px solid %3;}"
             "QMenu::item{padding:5px 24px 5px 24px;background:transparent;}"
-            "QMenu::item:selected{background:%4;color:#FFFFFF;}"
+            "QMenu::item:selected{background:%4;color:%6;}"
             "QMenu::item:disabled{color:%5;}")
-            .arg(KswordTheme::SurfaceHex())
-            .arg(KswordTheme::TextPrimaryHex())
-            .arg(KswordTheme::BorderHex())
-            .arg(KswordTheme::PrimaryBlueHex)
-            .arg(KswordTheme::TextSecondaryHex());
+            .arg(KswordTheme::SurfaceColorHex())
+            .arg(KswordTheme::TextPrimaryColorHex())
+            .arg(KswordTheme::BorderColorHex())
+            .arg(KswordTheme::AccentHex(KswordTheme::AccentRole::Blue))
+            .arg(KswordTheme::TextSecondaryColorHex())
+            .arg(KswordTheme::OnAccentHex());
     }
 
     // copyTableRow 作用：

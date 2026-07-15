@@ -35,15 +35,15 @@ namespace
         switch (severity)
         {
         case ks::network::NidsAlertSeverity::Low:
-            return QColor(99, 102, 106);
+            return KswordTheme::TextSecondaryColor();
         case ks::network::NidsAlertSeverity::Medium:
-            return QColor(202, 138, 4);
+            return KswordTheme::WarningColor();
         case ks::network::NidsAlertSeverity::High:
-            return QColor(220, 38, 38);
+            return KswordTheme::ErrorColor();
         case ks::network::NidsAlertSeverity::Critical:
-            return QColor(147, 51, 234);
+            return KswordTheme::AccentColor(KswordTheme::AccentRole::Purple);
         default:
-            return QColor(99, 102, 106);
+            return KswordTheme::TextSecondaryColor();
         }
     }
 

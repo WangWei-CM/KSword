@@ -95,7 +95,7 @@ namespace
 
     QString itemSelectionStyle()
     {
-        return QStringLiteral("QTableWidget::item:selected{background:%1;color:#FFFFFF;}")
+        return QStringLiteral("QTableWidget::item:selected{background:%1;color:palette(highlighted-text);}")
             .arg(KswordTheme::PrimaryBlueHex);
     }
 
@@ -485,7 +485,7 @@ void KernelDockIpcTab::refreshAlpcQuery()
     if (!hasAlpcTarget)
     {
         m_alpcStatusLabel->setText(kernelText("kernel.ipc.status.global_query", QStringLiteral("状态：查询全局 R0 IPC summary；ALPC 详情需输入 PID 与十六进制句柄")));
-        m_alpcStatusLabel->setStyleSheet(statusLabelStyle(QStringLiteral("#D77A00")));
+        m_alpcStatusLabel->setStyleSheet(statusLabelStyle(KswordTheme::WarningHex()));
     }
 
     QPointer<KernelDockIpcTab> guardThis(this);
@@ -523,7 +523,7 @@ void KernelDockIpcTab::refreshAlpcQuery()
             if (!hasAlpcTarget)
             {
                 guardThis->m_alpcStatusLabel->setText(kernelText("kernel.ipc.status.global_refreshed", QStringLiteral("状态：已刷新 R0 IPC summary；ALPC 详情等待 PID/Handle")));
-                guardThis->m_alpcStatusLabel->setStyleSheet(statusLabelStyle(QStringLiteral("#D77A00")));
+                guardThis->m_alpcStatusLabel->setStyleSheet(statusLabelStyle(KswordTheme::WarningHex()));
             }
         }, Qt::QueuedConnection);
     }).detach();
@@ -705,7 +705,7 @@ void KernelDockIpcTab::applyAlpcQueryResult()
         m_alpcStatusLabel->setText(skippedByInput
             ? kernelText("kernel.ipc.alpc.status.not_requested", QStringLiteral("状态：R0 IPC summary 已刷新；ALPC 详情未请求"))
             : kernelText("kernel.ipc.alpc.status.query_failed", QStringLiteral("状态：ALPC 查询失败 - %1")).arg(readableAlpcMessage));
-        m_alpcStatusLabel->setStyleSheet(statusLabelStyle(skippedByInput ? QStringLiteral("#D77A00") : QStringLiteral("#B23A3A")));
+        m_alpcStatusLabel->setStyleSheet(statusLabelStyle(skippedByInput ? KswordTheme::WarningHex() : KswordTheme::ErrorHex()));
         if (skippedByInput)
         {
             // 无 ALPC 目标时：
@@ -787,7 +787,7 @@ void KernelDockIpcTab::applyAlpcQueryResult()
         .arg(statusText(m_lastAlpcResult.communicationStatus))
         .arg(statusText(m_lastAlpcResult.basicStatus))
         .arg(statusText(m_lastAlpcResult.nameStatus)));
-    m_alpcStatusLabel->setStyleSheet(statusLabelStyle(QStringLiteral("#3A8F3A")));
+    m_alpcStatusLabel->setStyleSheet(statusLabelStyle(KswordTheme::SuccessHex()));
 
     const int currentRow = m_alpcTable->currentRow();
     const QTableWidgetItem* roleItem = currentRow >= 0 ? m_alpcTable->item(currentRow, static_cast<int>(AlpcColumn::Role)) : nullptr;

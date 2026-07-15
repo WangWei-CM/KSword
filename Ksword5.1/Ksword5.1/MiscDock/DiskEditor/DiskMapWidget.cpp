@@ -68,9 +68,7 @@ namespace
     // - 返回略暗的 QColor。
     QColor darkerColor(const QColor& color)
     {
-        QColor result = color.darker(KswordTheme::IsDarkModeEnabled() ? 130 : 112);
-        result.setAlpha(255);
-        return result;
+        return KswordTheme::ThemeDarkerColor(color);
     }
 }
 
@@ -173,14 +171,16 @@ namespace ks::misc
             const bool hovered = segment.partition.tableIndex == m_hoverPartitionIndex;
             const QColor baseColor = segment.partition.color.isValid()
                 ? segment.partition.color
-                : KswordTheme::PrimaryBlueColor;
+                : KswordTheme::AccentColor(KswordTheme::AccentRole::Blue);
 
             QLinearGradient gradient(segment.rect.topLeft(), segment.rect.bottomLeft());
-            gradient.setColorAt(0.0, baseColor.lighter(KswordTheme::IsDarkModeEnabled() ? 115 : 130));
+            gradient.setColorAt(0.0, KswordTheme::ThemeLighterColor(baseColor));
             gradient.setColorAt(0.58, baseColor);
             gradient.setColorAt(1.0, darkerColor(baseColor));
 
-            painter.setPen(QPen(selected || hovered ? KswordTheme::PrimaryBlueColor : darkerColor(baseColor),
+            painter.setPen(QPen(selected || hovered
+                    ? KswordTheme::AccentColor(KswordTheme::AccentRole::Blue)
+                    : darkerColor(baseColor),
                 selected ? 3 : (hovered ? 2 : 1)));
             painter.setBrush(QBrush(gradient));
             painter.drawRoundedRect(segment.rect, 6, 6);

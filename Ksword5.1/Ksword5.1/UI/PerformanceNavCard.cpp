@@ -21,8 +21,8 @@
 
 PerformanceNavCard::PerformanceNavCard(QWidget* parent)
     : QWidget(parent)
-    , m_accentColor(67, 160, 255)
-    , m_primarySeriesColor(67, 160, 255)
+    , m_accentColor(KswordTheme::PrimaryBlueColor)
+    , m_primarySeriesColor(KswordTheme::PrimaryBlueColor)
 {
     setAttribute(Qt::WA_StyledBackground, true);
     setAutoFillBackground(false);
@@ -164,10 +164,8 @@ void PerformanceNavCard::paintEvent(QPaintEvent* paintEventPointer)
     // 卡片区域：改成透明底，仅保留边框高亮，避免计数器页左侧卡片遮住背景。
     const QRect cardRect = rect().adjusted(1, 1, -1, -1);
     // cardBorderColor 用途：当前卡片边框颜色；选中时更亮，不选中时仅保留弱轮廓。
-    const QColor cardBorderColor = QColor(
-        m_accentColor.red(),
-        m_accentColor.green(),
-        m_accentColor.blue(),
+    const QColor cardBorderColor = KswordTheme::WithAlpha(
+        m_accentColor,
         m_selected ? 210 : 86);
     QPen cardBorderPen(cardBorderColor);
     cardBorderPen.setWidthF(m_selected ? 1.2 : 0.8);
@@ -186,10 +184,8 @@ void PerformanceNavCard::paintEvent(QPaintEvent* paintEventPointer)
         sparkWidth,
         std::max(1, cardRect.height() - sparkInset * 2));
     // sparkBorderColor 用途：缩略图边框颜色；选中时使用实色，未选中时降低透明度。
-    const QColor sparkBorderColor = QColor(
-        m_accentColor.red(),
-        m_accentColor.green(),
-        m_accentColor.blue(),
+    const QColor sparkBorderColor = KswordTheme::WithAlpha(
+        m_accentColor,
         m_selected ? 220 : 150);
     painter.setBrush(Qt::NoBrush);
     QPen sparkBorderPen(sparkBorderColor);
@@ -200,7 +196,7 @@ void PerformanceNavCard::paintEvent(QPaintEvent* paintEventPointer)
     // 网格线：浅色辅助线，提升趋势可读性但不喧宾夺主。
     QPen gridPen(m_accentColor);
     gridPen.setWidthF(0.8);
-    gridPen.setColor(QColor(m_accentColor.red(), m_accentColor.green(), m_accentColor.blue(), 45));
+    gridPen.setColor(KswordTheme::WithAlpha(m_accentColor, 45));
     painter.setPen(gridPen);
     for (int rowIndex = 1; rowIndex < 4; ++rowIndex)
     {
@@ -226,11 +222,7 @@ void PerformanceNavCard::paintEvent(QPaintEvent* paintEventPointer)
             {
                 const double yRatio = sampleList.at(0) / 100.0;
                 const double yValue = sparkRect.bottom() - yRatio * static_cast<double>(sparkRect.height());
-                QColor fillColor(
-                    seriesColor.red(),
-                    seriesColor.green(),
-                    seriesColor.blue(),
-                    34);
+                const QColor fillColor = KswordTheme::WithAlpha(seriesColor, 34);
                 painter.fillRect(
                     QRectF(
                         QPointF(sparkRect.left(), yValue),
@@ -272,7 +264,7 @@ void PerformanceNavCard::paintEvent(QPaintEvent* paintEventPointer)
             fillPath.closeSubpath();
             painter.fillPath(
                 fillPath,
-                QColor(seriesColor.red(), seriesColor.green(), seriesColor.blue(), 34));
+                KswordTheme::WithAlpha(seriesColor, 34));
             painter.setPen(trendPen);
             painter.setBrush(Qt::NoBrush);
             painter.drawPath(path);
@@ -301,7 +293,7 @@ void PerformanceNavCard::paintEvent(QPaintEvent* paintEventPointer)
     titleFont.setPointSizeF(compactMode ? 11.0 : 12.5);
     titleFont.setBold(true);
     painter.setFont(titleFont);
-    painter.setPen(KswordTheme::IsDarkModeEnabled() ? QColor(240, 240, 240) : QColor(26, 32, 38));
+    painter.setPen(KswordTheme::TextPrimaryColor());
     const QString elidedTitleText = QFontMetrics(titleFont).elidedText(
         m_titleText,
         Qt::ElideRight,
@@ -312,7 +304,7 @@ void PerformanceNavCard::paintEvent(QPaintEvent* paintEventPointer)
     subtitleFont.setPointSizeF(compactMode ? 8.5 : 9.5);
     subtitleFont.setBold(false);
     painter.setFont(subtitleFont);
-    painter.setPen(KswordTheme::IsDarkModeEnabled() ? QColor(198, 212, 225) : QColor(63, 83, 102));
+    painter.setPen(KswordTheme::TextSecondaryColor());
     const QString elidedSubtitleText = QFontMetrics(subtitleFont).elidedText(
         m_subtitleText,
         Qt::ElideRight,

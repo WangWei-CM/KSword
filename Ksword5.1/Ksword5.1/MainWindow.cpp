@@ -212,7 +212,7 @@ namespace
             QPainter painter(this);
             painter.setRenderHint(QPainter::Antialiasing, false);
             painter.setPen(Qt::NoPen);
-            painter.setBrush(QColor(KswordTheme::PrimaryBlueBorderHex));
+            painter.setBrush(KswordTheme::AccentColor(KswordTheme::AccentRole::Blue));
 
             const int right = std::max(0, width() - 1);
             const int bottom = std::max(0, height() - 1);
@@ -247,11 +247,9 @@ namespace
     {
         if (activeTab)
         {
-            return QColor(KswordTheme::PrimaryBlueHex);
+            return KswordTheme::PrimaryBlueColor;
         }
-        return QColor(KswordTheme::IsDarkModeEnabled()
-            ? KswordTheme::PrimaryBlueSubtleDarkHex
-            : KswordTheme::PrimaryBlueSubtleLightHex);
+        return KswordTheme::PrimaryBlueSubtleColor();
     }
 
     // dockTabTextColor 作用：
@@ -267,9 +265,10 @@ namespace
             return KswordTheme::TextPrimaryColor();
         }
 
-        return KswordTheme::IsDarkModeEnabled()
-            ? QColor(255, 255, 255)
-            : QColor(16, 35, 54);
+        return KswordTheme::EnsureTextContrast(
+            KswordTheme::TextPrimaryColor(),
+            KswordTheme::AccentColor(KswordTheme::AccentRole::Blue),
+            3.0);
     }
 
     // shouldTemporarilyDropTopMostForDockSwitch：
@@ -1109,7 +1108,7 @@ namespace
         painter.setRenderHint(QPainter::Antialiasing, true);
         painter.drawPixmap(0, 0, sourcePixmap);
         painter.setCompositionMode(QPainter::CompositionMode_SourceIn);
-        painter.fillRect(contrastPixmap.rect(), QColor(255, 255, 255));
+        painter.fillRect(contrastPixmap.rect(), KswordTheme::OnAccentColor());
         painter.end();
         return QIcon(contrastPixmap);
     }
@@ -2643,7 +2642,7 @@ namespace
             ? KswordTheme::PrimaryBlueHex
             : KswordTheme::SurfaceHex();
         const QString textColor = activeState
-            ? QStringLiteral("#FFFFFF")
+            ? KswordTheme::OnAccentHex()
             : (KswordTheme::IsDarkModeEnabled() ? KswordTheme::TextPrimaryHex() : KswordTheme::PrimaryBlueHex);
         const QString hoverColor = activeState
             ? KswordTheme::PrimaryBlueSolidHoverHex()
@@ -2659,18 +2658,19 @@ namespace
             "}"
             "QPushButton:hover {"
             "  background:%4;"
-            "  color:#FFFFFF;"
+            "  color:%6;"
             "  border:1px solid %4;"
             "}"
             "QPushButton:pressed {"
             "  background:%5;"
-            "  color:#FFFFFF;"
+            "  color:%6;"
             "}")
             .arg(backgroundColor)
             .arg(textColor)
             .arg(KswordTheme::PrimaryBlueBorderHex)
             .arg(hoverColor)
-            .arg(KswordTheme::PrimaryBluePressedHex);
+            .arg(KswordTheme::PrimaryBluePressedHex)
+            .arg(KswordTheme::OnAccentHex());
     }
 
     // buildR0ButtonStyle 作用：
@@ -2679,8 +2679,7 @@ namespace
     // - false -> 黑/白底蓝字。
     QString buildR0ButtonStyle(const bool activeState)
     {
-        const bool darkModeEnabled = KswordTheme::IsDarkModeEnabled();
-        const QString adaptiveTextColor = QStringLiteral("#FFFFFF");
+        const QString adaptiveTextColor = KswordTheme::OnAccentHex();
         const QString backgroundColor = activeState
             ? KswordTheme::PrimaryBlueHex
             : KswordTheme::SurfaceHex();
@@ -2692,7 +2691,7 @@ namespace
             : KswordTheme::PrimaryBlueSubtleHex();
         const QString pressedColor = activeState
             ? KswordTheme::PrimaryBluePressedHex
-            : (darkModeEnabled ? QStringLiteral("#10283E") : QStringLiteral("#D6ECFF"));
+            : KswordTheme::ThemeColorName(KswordTheme::PrimaryBlueSurfacePressedColor());
         return QStringLiteral(
             "QPushButton {"
             "  background:%1;"
@@ -2840,6 +2839,7 @@ namespace
     // 返回：可直接拼接到 QApplication 样式表的 Tooltip 片段。
     QString buildGlobalTooltipStyleBlock(const bool darkModeEnabled)
     {
+        Q_UNUSED(darkModeEnabled);
         // tooltipRule 作用：QToolTip 规则本体，统一深浅色背景与文字。
         const QString tooltipRule = QStringLiteral(
             "QToolTip{"
@@ -2849,8 +2849,8 @@ namespace
             "  padding:4px 6px;"
             "  border-radius:3px;"
             "}")
-            .arg(darkModeEnabled ? QStringLiteral("#101923") : QStringLiteral("#FFFFFF"))
-            .arg(darkModeEnabled ? QStringLiteral("#EDF6FF") : QStringLiteral("#102336"))
+            .arg(KswordTheme::SurfaceColorHex())
+            .arg(KswordTheme::TextPrimaryColorHex())
             .arg(KswordTheme::BorderColorHex());
 
         return QStringLiteral("\n%1\n%2\n%3\n")
@@ -2867,18 +2867,11 @@ namespace
     // 返回：可直接拼接到 QApplication 样式表的 QMenu 片段。
     QString buildGlobalContextMenuStyleBlock(const bool darkModeEnabled)
     {
-        const QString menuBackgroundColor = darkModeEnabled
-            ? QStringLiteral("#111924")
-            : QStringLiteral("#FFFFFF");
-        const QString menuTextColor = darkModeEnabled
-            ? QStringLiteral("#EDF6FF")
-            : QStringLiteral("#102336");
-        const QString menuBorderColor = darkModeEnabled
-            ? QStringLiteral("#37506A")
-            : QStringLiteral("#BED3E9");
-        const QString disabledTextColor = darkModeEnabled
-            ? QStringLiteral("#7C92A9")
-            : QStringLiteral("#7E8EA0");
+        Q_UNUSED(darkModeEnabled);
+        const QString menuBackgroundColor = KswordTheme::SurfaceColorHex();
+        const QString menuTextColor = KswordTheme::TextPrimaryColorHex();
+        const QString menuBorderColor = KswordTheme::BorderColorHex();
+        const QString disabledTextColor = KswordTheme::TextDisabledColorHex();
 
         const QString contextMenuRule = QStringLiteral(
             "QMenu{"
@@ -2894,7 +2887,7 @@ namespace
             "}"
             "QMenu::item:selected{"
             "  background-color:%4 !important;"
-            "  color:#FFFFFF !important;"
+            "  color:%6 !important;"
             "}"
             "QMenu::item:disabled{"
             "  color:%5 !important;"
@@ -2909,7 +2902,8 @@ namespace
             .arg(menuTextColor)
             .arg(menuBorderColor)
             .arg(KswordTheme::PrimaryBlueHex)
-            .arg(disabledTextColor);
+            .arg(disabledTextColor)
+            .arg(KswordTheme::OnAccentHex());
 
         return QStringLiteral("\n%1\n%2\n%3\n")
             .arg(QString::fromLatin1(kContextMenuStyleBeginMarker))
@@ -4706,18 +4700,16 @@ QString MainWindow::buildTopActionButtonStyle() const
 {
     // 顶部功能按钮样式按当前主题实时生成，避免主题切换后保留旧颜色。
     const bool darkModeEnabled = KswordTheme::IsDarkModeEnabled();
-    const QString hoverColor = darkModeEnabled
-        ? QStringLiteral("rgba(67,160,255,0.22)")
-        : QStringLiteral("#DCEBFB");
-    const QString pressedColor = darkModeEnabled
-        ? QStringLiteral("rgba(67,160,255,0.34)")
-        : QStringLiteral("#C7DFF8");
-    const QString textColor = darkModeEnabled
-        ? KswordTheme::TextPrimaryColorHex()
-        : QStringLiteral("#173554");
-    const QString borderColor = darkModeEnabled
-        ? QStringLiteral("rgba(83,167,255,0.46)")
-        : QStringLiteral("#A8C9EA");
+    const QString hoverColor = KswordTheme::RgbaColorName(
+        KswordTheme::PrimaryBlueColor,
+        darkModeEnabled ? 56 : 36);
+    const QString pressedColor = KswordTheme::RgbaColorName(
+        KswordTheme::PrimaryBlueColor,
+        darkModeEnabled ? 87 : 62);
+    const QString textColor = KswordTheme::TextPrimaryColorHex();
+    const QString borderColor = KswordTheme::RgbaColorName(
+        KswordTheme::PrimaryBlueColor,
+        darkModeEnabled ? 117 : 82);
 
     return QStringLiteral(
         "QToolButton{"
@@ -4834,22 +4826,11 @@ void MainWindow::showSettingsPanelFromMenu()
     settingsDialog.setWindowTitle(QStringLiteral("设置"));
     settingsDialog.setModal(false);
     settingsDialog.resize(760, 640);
-    const bool settingsDialogDarkModeEnabled = KswordTheme::IsDarkModeEnabled();
-    const QString settingsComboBackgroundColor = settingsDialogDarkModeEnabled
-        ? QStringLiteral("#182334")
-        : QStringLiteral("#FFFFFF");
-    const QString settingsComboTextColor = settingsDialogDarkModeEnabled
-        ? QStringLiteral("#F3F7FF")
-        : QStringLiteral("#162A42");
-    const QString settingsComboBorderColor = settingsDialogDarkModeEnabled
-        ? QStringLiteral("#3D5775")
-        : QStringLiteral("#9CB8D8");
-    const QString settingsComboPopupBackgroundColor = settingsDialogDarkModeEnabled
-        ? QStringLiteral("#142032")
-        : QStringLiteral("#FFFFFF");
-    const QString settingsComboSelectionBackgroundColor = settingsDialogDarkModeEnabled
-        ? QStringLiteral("#27466A")
-        : QStringLiteral("#E6F2FF");
+    const QString settingsComboBackgroundColor = KswordTheme::SurfaceColorHex();
+    const QString settingsComboTextColor = KswordTheme::TextPrimaryColorHex();
+    const QString settingsComboBorderColor = KswordTheme::BorderColorHex();
+    const QString settingsComboPopupBackgroundColor = KswordTheme::SurfaceColorHex();
+    const QString settingsComboSelectionBackgroundColor = KswordTheme::PrimaryBlueSubtleHex();
     settingsDialog.setStyleSheet(QStringLiteral(
         "QDialog{background:%1;color:%2;}"
         "QDialog QComboBox{"
@@ -4869,7 +4850,7 @@ void MainWindow::showSettingsPanelFromMenu()
         "  color:%4 !important;"
         "  border:1px solid %5 !important;"
         "  selection-background-color:%7 !important;"
-        "  selection-color:#FFFFFF !important;"
+        "  selection-color:%8 !important;"
         "  outline:0;"
         "}"
         "QDialog QComboBox QAbstractItemView::item{"
@@ -4878,11 +4859,11 @@ void MainWindow::showSettingsPanelFromMenu()
         "}"
         "QDialog QComboBox QAbstractItemView::item:hover{"
         "  background-color:%7 !important;"
-        "  color:#FFFFFF !important;"
+        "  color:%8 !important;"
         "}"
         "QDialog QComboBox QAbstractItemView::item:selected{"
         "  background-color:%7 !important;"
-        "  color:#FFFFFF !important;"
+        "  color:%8 !important;"
         "}")
         .arg(KswordTheme::SurfaceHex())
         .arg(KswordTheme::TextPrimaryHex())
@@ -4890,7 +4871,8 @@ void MainWindow::showSettingsPanelFromMenu()
         .arg(settingsComboTextColor)
         .arg(settingsComboBorderColor)
         .arg(settingsComboPopupBackgroundColor)
-        .arg(settingsComboSelectionBackgroundColor));
+        .arg(settingsComboSelectionBackgroundColor)
+        .arg(KswordTheme::OnAccentHex()));
 
     QVBoxLayout dialogLayout(&settingsDialog);
     dialogLayout.setContentsMargins(8, 8, 8, 8);
@@ -6239,7 +6221,7 @@ bool MainWindow::showUnsignedDriverFailureDialog(
 {
     const DWORD win32ErrorCode = static_cast<DWORD>(errorCode);
     const bool darkModeEnabled = KswordTheme::IsDarkModeEnabled();
-    const QString adaptiveTextColor = QStringLiteral("#FFFFFF");
+    const QString adaptiveTextColor = KswordTheme::OnAccentHex();
 
     QDialog decisionDialog(this);
     decisionDialog.setModal(true);
@@ -6344,7 +6326,7 @@ bool MainWindow::showUnsignedDriverFailureDialog(
         .arg(KswordTheme::SurfaceHex())
         .arg(KswordTheme::PrimaryBlueHex)
         .arg(KswordTheme::PrimaryBlueSubtleHex())
-        .arg(darkModeEnabled ? QStringLiteral("#10283E") : QStringLiteral("#D6ECFF")));
+        .arg(KswordTheme::ThemeColorName(KswordTheme::PrimaryBlueSurfacePressedColor())));
     rootLayout->addWidget(enableTestModeButton);
 
     bool enableTestMode = false;
@@ -8124,14 +8106,14 @@ void MainWindow::applyAppearanceSettings(
     mainPalette.setColor(QPalette::AlternateBase, alternateBaseColor);
     mainPalette.setColor(QPalette::Mid, midColor);
     mainPalette.setColor(QPalette::Midlight, KswordTheme::BorderStrongColor());
-    mainPalette.setColor(QPalette::Dark, darkModeEnabled ? QColor(20, 30, 42) : QColor(144, 165, 188));
+    mainPalette.setColor(QPalette::Dark, KswordTheme::PaletteDarkColor());
     mainPalette.setColor(QPalette::Text, textColor);
     mainPalette.setColor(QPalette::Button, alternateBaseColor);
     mainPalette.setColor(QPalette::ButtonText, textColor);
     mainPalette.setColor(QPalette::ToolTipBase, baseColor);
     mainPalette.setColor(QPalette::ToolTipText, textColor);
     mainPalette.setColor(QPalette::Highlight, KswordTheme::PrimaryBlueColor);
-    mainPalette.setColor(QPalette::HighlightedText, QColor(255, 255, 255));
+    mainPalette.setColor(QPalette::HighlightedText, KswordTheme::OnAccentColor());
     QApplication::setPalette(mainPalette);
     setPalette(mainPalette);
     setAutoFillBackground(true);
@@ -8334,7 +8316,7 @@ bool MainWindow::isDarkModeEffective(const ks::settings::AppearanceSettings& set
 void MainWindow::rebuildWindowBackgroundBrush(const bool includeBackgroundImage)
 {
     const bool darkModeEnabled = isDarkModeEffective(m_currentAppearanceSettings);
-    const QColor baseColor = darkModeEnabled ? QColor(0, 0, 0) : QColor(255, 255, 255);
+    const QColor baseColor = darkModeEnabled ? KswordTheme::BlackColor() : KswordTheme::WhiteColor();
 
     // resolvedImagePath 作用：把配置路径解析成可加载的绝对路径。
     const QString resolvedImagePath = includeBackgroundImage
@@ -8385,7 +8367,7 @@ void MainWindow::applyFloatingDockContainerAppearance(ads::CFloatingDockContaine
     }
 
     const bool darkModeEnabled = isDarkModeEffective(m_currentAppearanceSettings);
-    const QColor baseColor = darkModeEnabled ? QColor(0, 0, 0) : QColor(255, 255, 255);
+    const QColor baseColor = darkModeEnabled ? KswordTheme::BlackColor() : KswordTheme::WhiteColor();
     const QString resolvedImagePath = ks::settings::resolveBackgroundImagePathForLoad(
         m_currentAppearanceSettings.backgroundImagePath);
     const bool enableDockTransparencyForBackgroundImage =
@@ -8402,7 +8384,9 @@ void MainWindow::applyFloatingDockContainerAppearance(ads::CFloatingDockContaine
     QPalette floatingPalette = floatingWidget->palette();
     floatingPalette.setColor(QPalette::Window, baseColor);
     floatingPalette.setBrush(QPalette::Window, backgroundBrush);
-    floatingPalette.setColor(QPalette::WindowText, darkModeEnabled ? QColor(255, 255, 255) : QColor(0, 0, 0));
+    floatingPalette.setColor(
+        QPalette::WindowText,
+        darkModeEnabled ? KswordTheme::WhiteColor() : KswordTheme::BlackColor());
     floatingWidget->setPalette(floatingPalette);
     floatingWidget->setAutoFillBackground(true);
     floatingWidget->setAttribute(Qt::WA_StyledBackground, false);
@@ -8450,18 +8434,20 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
     const QString borderStrongColorText = KswordTheme::BorderStrongColorHex();
     const QString primaryTextColor = KswordTheme::TextPrimaryColorHex();
     const QString disabledTextColor = KswordTheme::TextDisabledColorHex();
-    const QString selectedTextColor = QStringLiteral("#FFFFFF");
+    const QString selectedTextColor = KswordTheme::OnAccentHex();
     const QString activeThemeColor = KswordTheme::PrimaryBlueHex;
     const QString activeThemeHoverColor = KswordTheme::PrimaryBlueSolidHoverHex();
     const QString activeThemePressedColor = KswordTheme::PrimaryBluePressedHex;
     const QString subtleThemeColor = KswordTheme::PrimaryBlueSubtleHex();
-    const QString scrollBarHandleColor = settings.scrollBarAutoHideEnabled
-        ? QStringLiteral("rgba(67,160,255,0.42)")
-        : QStringLiteral("rgba(67,160,255,0.78)");
-    const QString scrollBarHandleHoverColor = QStringLiteral("rgba(67,160,255,0.92)");
-    const QString panelBackgroundColor = darkModeEnabled
-        ? QStringLiteral("rgba(17,25,36,0.94)")
-        : QStringLiteral("rgba(255,255,255,0.95)");
+    const QString scrollBarHandleColor = KswordTheme::RgbaColorName(
+        KswordTheme::PrimaryBlueColor,
+        settings.scrollBarAutoHideEnabled ? 107 : 199);
+    const QString scrollBarHandleHoverColor = KswordTheme::RgbaColorName(
+        KswordTheme::PrimaryBlueColor,
+        235);
+    const QString panelBackgroundColor = KswordTheme::RgbaColorName(
+        KswordTheme::SurfaceColor(),
+        darkModeEnabled ? 240 : 242);
     const QString panelBorderColor = borderColorText;
     const QString inactiveTabColor = surfaceAltBackgroundText;
     const QString inactiveTabTextColor = primaryTextColor;
@@ -8471,18 +8457,16 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
     // - 只控制普通 QTabBar 的未选中悬停态；
     // - 浅色模式使用明确的浅灰色，避免继承/回退到黑色背景；
     // - ADS Dock tab 继续使用下面的 dockTabChildHoverColor，不在这里改动。
-    const QString normalTabHoverColor = darkModeEnabled
-        ? QStringLiteral("#173553")
-        : QStringLiteral("#F1F3F5");
+    const QString normalTabHoverColor = KswordTheme::ThemeColorName(
+        darkModeEnabled ? KswordTheme::PrimaryBlueSubtleColor() : KswordTheme::SurfaceMutedColor());
     // dockActiveTabTextColor 作用：
     // - 只控制 ADS Dock 选中标签文字；
     // - 浅色模式按需求使用黑色/深色字，避免“蓝底白字”；
     // - 普通 QTabBar 仍沿用 activeTabTextColor，避免扩大样式影响面。
-    const QString dockActiveTabTextColor = darkModeEnabled
-        ? QStringLiteral("#FFFFFF")
-        : QStringLiteral("#102336");
+    const QString dockActiveTabTextColor = KswordTheme::ThemeColorName(
+        dockTabTextColor(true));
     const QString tabHoverColor = darkModeEnabled
-        ? QStringLiteral("#173553")
+        ? KswordTheme::ThemeColorName(KswordTheme::PrimaryBlueSubtleColor())
         : subtleThemeColor;
     // dockTabChildHoverColor 作用：
     // - ADS Dock 标签内部常由 QLabel/QWidget 组合绘制；
@@ -8676,9 +8660,9 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
         .arg(activeThemePressedColor)
         .arg(selectedTextColor)
         .arg(darkModeEnabled ? surfaceAltBackgroundText : subtleThemeColor)
-        .arg(darkModeEnabled ? primaryTextColor : QStringLiteral("#174A79"))
-        .arg(darkModeEnabled ? borderStrongColorText : QStringLiteral("#9BC7F2"))
-        .arg(darkModeEnabled ? surfaceMutedBackgroundText : QStringLiteral("#EDF4FC"))
+        .arg(primaryTextColor)
+        .arg(borderStrongColorText)
+        .arg(surfaceMutedBackgroundText)
         .arg(disabledTextColor);
 
     const QString comboBoxStyle = QStringLiteral(
@@ -9035,8 +9019,8 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
     // - 深色模式使用深灰、浅色模式使用浅灰，避免基础 QSS 或平台 palette 反向回退；
     // - 选择器刻意避开 ads--CDockWidgetTab/ads--CAutoHideTab，所以不影响 ADS Dock 标签。
     const QString ordinaryTabHoverColor = darkModeEnabled
-        ? QStringLiteral("#263241")
-        : QStringLiteral("#F1F3F5");
+        ? KswordTheme::SurfaceMutedColorHex()
+        : KswordTheme::SurfaceAltColorHex();
     const QString finalOrdinaryTabHoverStyle = QStringLiteral(
         "QMainWindow QTabWidget QTabBar::tab:hover:!selected,"
         "QMainWindow QTabWidget QTabBar::tab:pressed:!selected,"
@@ -9075,7 +9059,7 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
                 "}"
                 "QPushButton,QToolButton{"
                 "  background-color:%2 !important;"
-                "  color:#174A79 !important;"
+                "  color:%3 !important;"
                 "  border:1px solid %5 !important;"
                 "}"
                 "QTableView,QTableWidget,QTreeView,QTreeWidget,QListView,QListWidget{"
@@ -9123,8 +9107,8 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
         + QStringLiteral(
             "QMenuBar{background-color:%1;color:%3;}"
             "QMenuBar::item{background:transparent;color:%3;padding:2px 7px;}"
-            "QMenuBar::item:selected{background:rgba(67,160,255,0.28);color:%3;}"
-            "QMenuBar::item:pressed{background:rgba(67,160,255,0.38);color:%8;}"
+            "QMenuBar::item:selected{background:%9;color:%3;}"
+            "QMenuBar::item:pressed{background:%10;color:%8;}"
             "QStatusBar{background-color:%1;color:%3;}"
             "QLineEdit,QTextEdit,QPlainTextEdit,QTableWidget,QTreeWidget,QListWidget,QSpinBox,QDoubleSpinBox{"
             "  background-color:%2 !important;"
@@ -9167,6 +9151,8 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
             .arg(surfaceAltBackgroundText)
             .arg(activeThemeColor)
             .arg(selectedTextColor)
+            .arg(KswordTheme::RgbaColorName(KswordTheme::PrimaryBlueColor, 71))
+            .arg(KswordTheme::RgbaColorName(KswordTheme::PrimaryBlueColor, 97))
         + sharedOverlayStyle
         + tooltipStyle
         + dockContentTransparentStyle

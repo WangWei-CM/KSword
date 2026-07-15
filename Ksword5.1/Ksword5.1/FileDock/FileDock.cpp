@@ -2766,10 +2766,10 @@ namespace
             "}"
             "QLineEdit:focus,QComboBox:focus,QPlainTextEdit:focus,QTextEdit:focus{"
             "  border:1px solid %1;}")
-            .arg(KswordTheme::PrimaryBlueHex)
-            .arg(KswordTheme::BorderHex())
-            .arg(KswordTheme::SurfaceHex())
-            .arg(KswordTheme::TextPrimaryHex());
+            .arg(KswordTheme::AccentHex(KswordTheme::AccentRole::Blue))
+            .arg(KswordTheme::BorderColorHex())
+            .arg(KswordTheme::SurfaceColorHex())
+            .arg(KswordTheme::TextPrimaryColorHex());
     }
 
     // buildContextMenuStyle 作用：
@@ -2777,9 +2777,7 @@ namespace
     // - 修复浅色主题下菜单背景错误保持黑色，导致文字不可见的问题。
     QString buildContextMenuStyle()
     {
-        const QString disabledTextColor = KswordTheme::IsDarkModeEnabled()
-            ? QStringLiteral("#8C8C8C")
-            : QStringLiteral("#7A8694");
+        const QString disabledTextColor = KswordTheme::TextDisabledColorHex();
 
         return QStringLiteral(
             "QMenu{"
@@ -2793,7 +2791,7 @@ namespace
             "}"
             "QMenu::item:selected{"
             "  background:%4;"
-            "  color:#FFFFFF;"
+            "  color:%6;"
             "}"
             "QMenu::item:disabled{"
             "  color:%5;"
@@ -2804,11 +2802,12 @@ namespace
             "  background:%3;"
             "  margin:2px 6px;"
             "}")
-            .arg(KswordTheme::SurfaceHex())
-            .arg(KswordTheme::TextPrimaryHex())
-            .arg(KswordTheme::BorderHex())
-            .arg(KswordTheme::PrimaryBlueHex)
-            .arg(disabledTextColor);
+            .arg(KswordTheme::SurfaceColorHex())
+            .arg(KswordTheme::TextPrimaryColorHex())
+            .arg(KswordTheme::BorderColorHex())
+            .arg(KswordTheme::AccentHex(KswordTheme::AccentRole::Blue))
+            .arg(disabledTextColor)
+            .arg(KswordTheme::OnAccentHex());
     }
 
     void installFileTableCopyMenu(QTableWidget* tableWidget)
@@ -2984,11 +2983,12 @@ namespace
             "}"
             "QToolButton:pressed{"
             "  background:%3;"
-            "  color:#FFFFFF;"
+            "  color:%4;"
             "}")
-            .arg(KswordTheme::TextPrimaryHex())
-            .arg(KswordTheme::SurfaceAltHex())
-            .arg(KswordTheme::PrimaryBluePressedHex);
+            .arg(KswordTheme::TextPrimaryColorHex())
+            .arg(KswordTheme::SurfaceAltColorHex())
+            .arg(KswordTheme::AccentHex(KswordTheme::AccentRole::Blue, -32))
+            .arg(KswordTheme::OnAccentHex());
     }
 
     // 递归复制目录：用于跨面板复制目录场景。

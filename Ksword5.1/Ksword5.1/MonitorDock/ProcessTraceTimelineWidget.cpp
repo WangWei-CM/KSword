@@ -237,14 +237,14 @@ void ProcessTraceTimelineWidget::paintEvent(QPaintEvent* eventPointer)
     // themeColorFromText 用途：KswordTheme 可能返回 palette(mid) 这类样式表文本，
     // 绘图 API 需要真实 QColor，因此这里统一提供深浅色兜底。
     const QColor borderColor = themeColorFromText(
-        KswordTheme::BorderHex(),
-        KswordTheme::IsDarkModeEnabled() ? QColor(78, 86, 96) : QColor(210, 216, 224));
+        KswordTheme::BorderColorHex(),
+        KswordTheme::BorderColor());
     const QColor surfaceColor = themeColorFromText(
-        KswordTheme::SurfaceHex(),
-        KswordTheme::IsDarkModeEnabled() ? QColor(28, 32, 38) : QColor(250, 252, 255));
+        KswordTheme::SurfaceColorHex(),
+        KswordTheme::SurfaceColor());
     const QColor textColor = themeColorFromText(
-        KswordTheme::TextSecondaryHex(),
-        KswordTheme::IsDarkModeEnabled() ? QColor(172, 184, 198) : QColor(96, 105, 116));
+        KswordTheme::TextSecondaryColorHex(),
+        KswordTheme::TextSecondaryColor());
 
     // 背景与边框：
     // - 这个矩形本身代表完整时间范围；
@@ -747,55 +747,54 @@ QColor ProcessTraceTimelineWidget::colorForType(const QString& typeText) const
     const QString normalizedText = typeText.trimmed();
     if (normalizedText == QStringLiteral("进程"))
     {
-        colorValue = QColor(76, 175, 80);
+        colorValue = KswordTheme::TimelineColor(KswordTheme::TimelineRole::Process);
     }
     else if (normalizedText == QStringLiteral("线程"))
     {
-        colorValue = QColor(139, 195, 74);
+        colorValue = KswordTheme::TimelineColor(KswordTheme::TimelineRole::Thread);
     }
     else if (normalizedText == QStringLiteral("镜像"))
     {
-        colorValue = QColor(0, 188, 212);
+        colorValue = KswordTheme::TimelineColor(KswordTheme::TimelineRole::Image);
     }
     else if (normalizedText == QStringLiteral("文件"))
     {
-        colorValue = QColor(33, 150, 243);
+        colorValue = KswordTheme::TimelineColor(KswordTheme::TimelineRole::File);
     }
     else if (normalizedText == QStringLiteral("注册表"))
     {
-        colorValue = QColor(156, 39, 176);
+        colorValue = KswordTheme::TimelineColor(KswordTheme::TimelineRole::Registry);
     }
     else if (normalizedText == QStringLiteral("网络"))
     {
-        colorValue = QColor(255, 152, 0);
+        colorValue = KswordTheme::TimelineColor(KswordTheme::TimelineRole::Network);
     }
     else if (normalizedText == QStringLiteral("DNS"))
     {
-        colorValue = QColor(255, 193, 7);
+        colorValue = KswordTheme::TimelineColor(KswordTheme::TimelineRole::Dns);
     }
     else if (normalizedText == QStringLiteral("PowerShell"))
     {
-        colorValue = QColor(63, 81, 181);
+        colorValue = KswordTheme::TimelineColor(KswordTheme::TimelineRole::PowerShell);
     }
     else if (normalizedText == QStringLiteral("WMI"))
     {
-        colorValue = QColor(0, 150, 136);
+        colorValue = KswordTheme::TimelineColor(KswordTheme::TimelineRole::Wmi);
     }
     else if (normalizedText == QStringLiteral("安全审计"))
     {
-        colorValue = QColor(244, 67, 54);
+        colorValue = KswordTheme::TimelineColor(KswordTheme::TimelineRole::Security);
     }
     else if (normalizedText == QStringLiteral("Defender"))
     {
-        colorValue = QColor(121, 85, 72);
+        colorValue = KswordTheme::TimelineColor(KswordTheme::TimelineRole::Storage);
     }
     else
     {
-        colorValue = QColor(96, 125, 139);
+        colorValue = KswordTheme::TimelineColor(KswordTheme::TimelineRole::Kernel);
     }
 
-    colorValue.setAlpha(51);
-    return colorValue;
+    return KswordTheme::WithAlpha(colorValue, 51);
 }
 
 QString ProcessTraceTimelineWidget::formatDurationText(const std::uint64_t duration100ns) const

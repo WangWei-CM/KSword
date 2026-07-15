@@ -59,7 +59,7 @@ namespace
 
     QString itemSelectionStyle()
     {
-        return QStringLiteral("QTableWidget::item:selected{background:%1;color:#FFFFFF;}")
+        return QStringLiteral("QTableWidget::item:selected{background:%1;color:palette(highlighted-text);}")
             .arg(KswordTheme::PrimaryBlueHex);
     }
 
@@ -278,7 +278,7 @@ void KernelDock::refreshSsdtAsync()
             if (!success)
             {
                 guardThis->m_ssdtStatusLabel->setText(kernelText("kernel.ssdt.status.failed", QStringLiteral("状态：刷新失败")));
-                guardThis->m_ssdtStatusLabel->setStyleSheet(statusLabelStyle(QStringLiteral("#B23A3A")));
+                guardThis->m_ssdtStatusLabel->setStyleSheet(statusLabelStyle(KswordTheme::ErrorHex()));
                 guardThis->m_ssdtDetailEditor->setText(errorText);
                 return;
             }
@@ -300,7 +300,7 @@ void KernelDock::refreshSsdtAsync()
                 .arg(guardThis->m_ssdtRows.size())
                 .arg(unresolvedCount));
             guardThis->m_ssdtStatusLabel->setStyleSheet(
-                statusLabelStyle(unresolvedCount == 0U ? QStringLiteral("#3A8F3A") : QStringLiteral("#D77A00")));
+                statusLabelStyle(unresolvedCount == 0U ? KswordTheme::SuccessHex() : KswordTheme::WarningHex()));
 
             if (guardThis->m_ssdtTable->rowCount() > 0)
             {

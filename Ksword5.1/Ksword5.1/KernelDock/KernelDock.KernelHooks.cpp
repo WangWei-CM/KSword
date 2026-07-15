@@ -119,7 +119,7 @@ namespace
 
     QString kernelHookSelectionStyle()
     {
-        return QStringLiteral("QTableWidget::item:selected{background:%1;color:#FFFFFF;}")
+        return QStringLiteral("QTableWidget::item:selected{background:%1;color:palette(highlighted-text);}")
             .arg(KswordTheme::PrimaryBlueHex);
     }
 
@@ -941,17 +941,17 @@ namespace
             status == KSWORD_ARK_KERNEL_HOOK_STATUS_READ_FAILED ||
             status == KSWORD_ARK_KERNEL_HOOK_STATUS_PARSE_FAILED)
         {
-            return QColor(QStringLiteral("#B23A3A"));
+            return KswordTheme::ErrorColor();
         }
         if (status == KSWORD_ARK_KERNEL_HOOK_STATUS_INTERNAL_BRANCH ||
             status == KSWORD_ARK_KERNEL_HOOK_STATUS_FORCE_REQUIRED)
         {
-            return QColor(QStringLiteral("#D77A00"));
+            return KswordTheme::WarningColor();
         }
         if (status == KSWORD_ARK_KERNEL_HOOK_STATUS_PATCHED ||
             status == KSWORD_ARK_KERNEL_HOOK_STATUS_CLEAN)
         {
-            return QColor(QStringLiteral("#3A8F3A"));
+            return KswordTheme::SuccessColor();
         }
         return KswordTheme::TextSecondaryColor();
     }
@@ -1790,7 +1790,7 @@ void KernelDock::refreshShadowSsdtAsync()
             if (!success)
             {
                 guardThis->m_shadowSsdtStatusLabel->setText(kernelText("kernel.hooks.shadow.status.failed", QStringLiteral("状态：解析失败")));
-                guardThis->m_shadowSsdtStatusLabel->setStyleSheet(kernelHookStatusLabelStyle(QStringLiteral("#B23A3A")));
+                guardThis->m_shadowSsdtStatusLabel->setStyleSheet(kernelHookStatusLabelStyle(KswordTheme::ErrorHex()));
                 guardThis->m_shadowSsdtDetailEditor->setText(errorText);
                 return;
             }
@@ -1802,7 +1802,7 @@ void KernelDock::refreshShadowSsdtAsync()
                 .arg(returnedCount)
                 .arg(totalCount)
                 .arg(guardThis->m_shadowSsdtRows.size()));
-            guardThis->m_shadowSsdtStatusLabel->setStyleSheet(kernelHookStatusLabelStyle(QStringLiteral("#3A8F3A")));
+            guardThis->m_shadowSsdtStatusLabel->setStyleSheet(kernelHookStatusLabelStyle(KswordTheme::SuccessHex()));
 
             if (guardThis->m_shadowSsdtTable->rowCount() > 0)
             {
@@ -1892,7 +1892,7 @@ void KernelDock::refreshInlineHooksAsync()
             if (!success)
             {
                 guardThis->m_inlineHookStatusLabel->setText(kernelText("kernel.hooks.inline.status.failed", QStringLiteral("状态：扫描失败")));
-                guardThis->m_inlineHookStatusLabel->setStyleSheet(kernelHookStatusLabelStyle(QStringLiteral("#B23A3A")));
+                guardThis->m_inlineHookStatusLabel->setStyleSheet(kernelHookStatusLabelStyle(KswordTheme::ErrorHex()));
                 guardThis->m_inlineHookDetailEditor->setText(errorText);
                 return;
             }
@@ -1922,7 +1922,7 @@ void KernelDock::refreshInlineHooksAsync()
                 .arg(internalCount)
                 .arg(kernelHookFormatNtStatus(lastStatus)));
             guardThis->m_inlineHookStatusLabel->setStyleSheet(kernelHookStatusLabelStyle(
-                suspiciousCount == 0U ? QStringLiteral("#3A8F3A") : QStringLiteral("#B23A3A")));
+                suspiciousCount == 0U ? KswordTheme::SuccessHex() : KswordTheme::ErrorHex()));
 
             if (guardThis->m_inlineHookTable->rowCount() > 0)
             {
@@ -2008,7 +2008,7 @@ void KernelDock::refreshIatEatHooksAsync()
             if (!success)
             {
                 guardThis->m_iatEatHookStatusLabel->setText(kernelText("kernel.hooks.iat.status.failed", QStringLiteral("状态：扫描失败")));
-                guardThis->m_iatEatHookStatusLabel->setStyleSheet(kernelHookStatusLabelStyle(QStringLiteral("#B23A3A")));
+                guardThis->m_iatEatHookStatusLabel->setStyleSheet(kernelHookStatusLabelStyle(KswordTheme::ErrorHex()));
                 guardThis->m_iatEatHookDetailEditor->setText(errorText);
                 return;
             }
@@ -2032,7 +2032,7 @@ void KernelDock::refreshIatEatHooksAsync()
                 .arg(suspiciousCount)
                 .arg(kernelHookFormatNtStatus(lastStatus)));
             guardThis->m_iatEatHookStatusLabel->setStyleSheet(kernelHookStatusLabelStyle(
-                suspiciousCount == 0U ? QStringLiteral("#3A8F3A") : QStringLiteral("#B23A3A")));
+                suspiciousCount == 0U ? KswordTheme::SuccessHex() : KswordTheme::ErrorHex()));
 
             if (guardThis->m_iatEatHookTable->rowCount() > 0)
             {
@@ -2081,7 +2081,7 @@ void KernelDock::rebuildShadowSsdtTable(const QString& filterKeyword)
             }
             if (column == static_cast<int>(ShadowSsdtColumn::Status) && !entry.indexResolved)
             {
-                item->setForeground(QBrush(QColor(QStringLiteral("#D77A00"))));
+                item->setForeground(QBrush(KswordTheme::WarningColor()));
             }
             setTableItem(m_shadowSsdtTable, rowIndex, column, item);
         }
@@ -2131,13 +2131,13 @@ void KernelDock::rebuildInlineHookTable(const QString& filterKeyword)
             {
                 if (!entry.diskBaselineAvailable)
                 {
-                    item->setForeground(QBrush(QColor(QStringLiteral("#D77A00"))));
+                    item->setForeground(QBrush(KswordTheme::WarningColor()));
                 }
                 else
                 {
                     item->setForeground(QBrush(entry.diskBaselineDiffers
-                        ? QColor(QStringLiteral("#B23A3A"))
-                        : QColor(QStringLiteral("#3A8F3A"))));
+                        ? KswordTheme::ErrorColor()
+                        : KswordTheme::SuccessColor()));
                 }
             }
             setTableItem(m_inlineHookTable, rowIndex, column, item);
@@ -2793,7 +2793,7 @@ void KernelDock::patchSelectedInlineHookWithNop()
             .arg(kernelHookStatusText(patchResult.status))
             .arg(patchResult.bytesPatched));
         m_inlineHookStatusLabel->setStyleSheet(kernelHookStatusLabelStyle(
-            patchResult.status == KSWORD_ARK_KERNEL_HOOK_STATUS_PATCHED ? QStringLiteral("#3A8F3A") : QStringLiteral("#B23A3A")));
+            patchResult.status == KSWORD_ARK_KERNEL_HOOK_STATUS_PATCHED ? KswordTheme::SuccessHex() : KswordTheme::ErrorHex()));
     }
 
     if (patchResult.status == KSWORD_ARK_KERNEL_HOOK_STATUS_PATCHED)

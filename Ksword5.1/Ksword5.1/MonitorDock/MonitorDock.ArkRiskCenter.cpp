@@ -133,13 +133,14 @@ namespace
         return QStringLiteral(
             "QMenu{background:%1;color:%2;border:1px solid %3;}"
             "QMenu::item{padding:5px 24px 5px 24px;background:transparent;}"
-            "QMenu::item:selected{background:%4;color:#FFFFFF;}"
+            "QMenu::item:selected{background:%4;color:%6;}"
             "QMenu::item:disabled{color:%5;}")
-            .arg(KswordTheme::SurfaceHex())
-            .arg(KswordTheme::TextPrimaryHex())
-            .arg(KswordTheme::BorderHex())
-            .arg(KswordTheme::PrimaryBlueHex)
-            .arg(KswordTheme::TextSecondaryHex());
+            .arg(KswordTheme::SurfaceColorHex())
+            .arg(KswordTheme::TextPrimaryColorHex())
+            .arg(KswordTheme::BorderColorHex())
+            .arg(KswordTheme::AccentHex(KswordTheme::AccentRole::Blue))
+            .arg(KswordTheme::TextSecondaryColorHex())
+            .arg(KswordTheme::OnAccentHex());
     }
 
     void copyArkRiskTableCurrentRow(QTableWidget* table)
@@ -876,7 +877,9 @@ void MonitorDock::refreshArkRiskCenterAsync()
                         QStringLiteral("状态：%1 项；%2")
                         .arg(static_cast<qulonglong>(guardThis->m_arkRiskCenterEntries.size()))
                         .arg(statusLines.join(QStringLiteral("；"))));
-                    guardThis->m_arkRiskStatusLabel->setStyleSheet(QStringLiteral("color:#2F7D32; font-weight:700;"));
+                    guardThis->m_arkRiskStatusLabel->setStyleSheet(
+                        QStringLiteral("color:%1; font-weight:700;")
+                            .arg(KswordTheme::SuccessColor().name(QColor::HexRgb)));
                 }
             },
             Qt::QueuedConnection);

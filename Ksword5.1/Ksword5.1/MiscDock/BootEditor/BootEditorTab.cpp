@@ -214,8 +214,10 @@ void BootEditorTab::initializeToolbar()
         : QStringLiteral("权限：非管理员（多数写操作会失败）"));
     m_adminHintLabel->setStyleSheet(
         elevated
-        ? QStringLiteral("color:%1;font-weight:600;").arg(KswordTheme::PrimaryBlueHex)
-        : QStringLiteral("color:#D97706;font-weight:600;"));
+        ? QStringLiteral("color:%1;font-weight:600;")
+            .arg(KswordTheme::InfoColor().name(QColor::HexRgb))
+        : QStringLiteral("color:%1;font-weight:600;")
+            .arg(KswordTheme::WarningColor().name(QColor::HexRgb)));
     m_toolbarLayout->addWidget(m_adminHintLabel);
 }
 

@@ -523,7 +523,7 @@ namespace
             "}"
             "QMessageBox#%1 QPushButton[ksword_primary=\"true\"]{"
             "  background:%8;"
-            "  color:#FFFFFF;"
+            "  color:%15;"
             "  border:1px solid %8;"
             "  font-weight:700;"
             "}"
@@ -542,7 +542,7 @@ namespace
             "  border-radius:0px;"
             "  padding:8px;"
             "  selection-background-color:%8;"
-            "  selection-color:#FFFFFF;"
+            "  selection-color:%15;"
             "}")
             .arg(QString::fromLatin1(kThemedMessageBoxObjectName))
             .arg(windowColorText)
@@ -558,6 +558,7 @@ namespace
             .arg(QString::fromLatin1(kMessageBoxTitleLabelObjectName))
             .arg(kMessageBoxOuterBorderWidth)
             .arg(outerBorderColorText)
+            .arg(KswordTheme::OnAccentHex())
             .replace(QStringLiteral("__MESSAGE_SURFACE__"), surfaceColorText)
             .replace(QStringLiteral("__MESSAGE_PRIMARY_HOVER__"), KswordTheme::PrimaryBlueSolidHoverHex());
     }
@@ -578,7 +579,7 @@ namespace
         messageBoxPalette.setColor(QPalette::ToolTipBase, messageBoxSurfaceColor(darkModeEnabled));
         messageBoxPalette.setColor(QPalette::ToolTipText, messageBoxTextColor(darkModeEnabled));
         messageBoxPalette.setColor(QPalette::Highlight, KswordTheme::PrimaryBlueColor);
-        messageBoxPalette.setColor(QPalette::HighlightedText, QColor(255, 255, 255));
+        messageBoxPalette.setColor(QPalette::HighlightedText, KswordTheme::OnAccentColor());
         return messageBoxPalette;
     }
 

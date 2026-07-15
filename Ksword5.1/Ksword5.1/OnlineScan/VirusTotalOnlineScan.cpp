@@ -797,22 +797,22 @@ namespace
         const QString normalizedText = categoryTextValue.trimmed().toLower();
         if (normalizedText == QStringLiteral("malicious"))
         {
-            return QColor(255, 76, 76);
+            return KswordTheme::ErrorColor();
         }
         if (normalizedText == QStringLiteral("suspicious"))
         {
-            return QColor(255, 160, 64);
+            return KswordTheme::WarningColor();
         }
         if (normalizedText == QStringLiteral("failure") ||
             normalizedText == QStringLiteral("timeout") ||
             normalizedText == QStringLiteral("confirmed-timeout"))
         {
-            return QColor(210, 170, 80);
+            return KswordTheme::WarningColor();
         }
         if (normalizedText == QStringLiteral("undetected") ||
             normalizedText == QStringLiteral("harmless"))
         {
-            return QColor(140, 210, 150);
+            return KswordTheme::SuccessColor();
         }
         return QColor();
     }
@@ -880,7 +880,7 @@ namespace
             return {
                 QStringLiteral("威胁"),
                 QStringLiteral(":/Icon/vt_status_threat.svg"),
-                QColor(239, 68, 68),
+                KswordTheme::ErrorColor(),
             };
         }
         if (suspiciousCount > 0)
@@ -888,7 +888,7 @@ namespace
             return {
                 QStringLiteral("可疑"),
                 QStringLiteral(":/Icon/vt_status_suspicious.svg"),
-                QColor(245, 158, 11),
+                KswordTheme::WarningColor(),
             };
         }
         if (harmlessCount > 0)
@@ -896,13 +896,13 @@ namespace
             return {
                 QStringLiteral("安全"),
                 QStringLiteral(":/Icon/vt_status_safe.svg"),
-                QColor(34, 197, 94),
+                KswordTheme::SuccessColor(),
             };
         }
         return {
             QStringLiteral("未检出"),
             QStringLiteral(":/Icon/vt_status_undetected.svg"),
-            QColor(59, 130, 246),
+            KswordTheme::InfoColor(),
         };
     }
 
@@ -2672,7 +2672,7 @@ void VirusTotalOnlineScan::finishWithError(const QString& titleText, const QStri
             "<td width='124'><img src=':/Icon/vt_status_threat.svg' width='104' height='104'/></td>"
             "<td>"
             "<div style='font-size:22px;font-weight:700;'>%1</div>"
-            "<div style='margin-top:6px;color:#EF4444;font-size:18px;font-weight:700;'>威胁</div>"
+            "<div style='margin-top:6px;color:%4;font-size:18px;font-weight:700;'>威胁</div>"
             "<div style='margin-top:8px;'>状态：%2</div>"
             "<div style='margin-top:6px;'>错误详情：%3</div>"
             "</td>"
@@ -2682,7 +2682,8 @@ void VirusTotalOnlineScan::finishWithError(const QString& titleText, const QStri
                 ? QStringLiteral("<未知文件>")
                 : QFileInfo(m_filePath).fileName().toHtmlEscaped())
             .arg(titleText.toHtmlEscaped())
-            .arg(detailText.toHtmlEscaped()));
+            .arg(detailText.toHtmlEscaped())
+            .arg(KswordTheme::ErrorColor().name(QColor::HexRgb)));
     }
     if (!m_resultTabWidget.isNull())
     {

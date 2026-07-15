@@ -646,7 +646,7 @@ void ThreadStackWindow::applyCaptureResult(const std::uint64_t ticket, const Cap
     m_statusLabel->setText(statusText);
     m_statusLabel->setStyleSheet(
         QStringLiteral("color:%1;font-weight:600;")
-        .arg(result.ok ? QStringLiteral("#3A8F3A") : QStringLiteral("#D77A00")));
+        .arg((result.ok ? KswordTheme::SuccessColor() : KswordTheme::WarningColor()).name(QColor::HexRgb)));
     kPro.set(m_captureProgressPid, "线程调用栈捕获完成", 0, 100.0f);
 
     if (m_capturePending)

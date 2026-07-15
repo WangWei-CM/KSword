@@ -1469,8 +1469,8 @@ void NetworkFirewallPage::appendEventsToTable(
         m_eventTable->setRowCount(0);
     }
 
-    const QColor dropColor = QColor(235, 77, 92);
-    const QColor allowColor = KswordTheme::IsDarkModeEnabled() ? QColor(190, 230, 190) : QColor(25, 115, 45);
+    const QColor dropColor = KswordTheme::ErrorColor();
+    const QColor allowColor = KswordTheme::SuccessColor();
 
     m_eventTable->setUpdatesEnabled(false);
     for (const FirewallEventEntry& entry : eventList)
@@ -1699,7 +1699,7 @@ void NetworkFirewallPage::appendRulesToTable(
             }
             else if (column == RuleColumnAction && ruleEntry.actionValue == NET_FW_ACTION_BLOCK)
             {
-                item->setForeground(QColor(235, 77, 92));
+                item->setForeground(KswordTheme::ErrorColor());
             }
             m_ruleTable->setItem(row, column, item);
         }

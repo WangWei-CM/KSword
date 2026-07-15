@@ -142,10 +142,10 @@ namespace
         const bool darkModeEnabled = KswordTheme::IsDarkModeEnabled();
         const QColor accentColor = resolveCurrentAccentColor();
 
-        const QColor accentHoverColor = accentColor.lighter(darkModeEnabled ? 118 : 110);
-        const QColor accentPressedColor = accentColor.darker(darkModeEnabled ? 120 : 112);
-        const QColor neutralHoverColor = darkModeEnabled ? QColor(54, 54, 54) : QColor(236, 243, 252);
-        const QColor neutralPressedColor = darkModeEnabled ? QColor(42, 42, 42) : QColor(225, 236, 249);
+        const QColor accentHoverColor = KswordTheme::ThemeLighterColor(accentColor);
+        const QColor accentPressedColor = KswordTheme::ThemeDarkerColor(accentColor);
+        const QColor neutralHoverColor = KswordTheme::SurfaceAltColor();
+        const QColor neutralPressedColor = KswordTheme::SurfaceMutedColor();
 
         QColor denyBackgroundColor = KswordTheme::WarningAccentColor();
         denyBackgroundColor.setAlpha(darkModeEnabled ? 58 : 36);
@@ -201,7 +201,7 @@ namespace
             "}"
             "QPushButton#KswordCallbackAllowButton{"
             "  background-color:%1;"
-            "  color:#FFFFFF;"
+            "  color:palette(highlighted-text);"
             "  border:1px solid %1;"
             "}"
             "QPushButton#KswordCallbackAllowButton:hover{"

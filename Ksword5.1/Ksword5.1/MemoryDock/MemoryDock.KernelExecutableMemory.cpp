@@ -208,13 +208,14 @@ namespace
         return QStringLiteral(
             "QMenu{background:%1;color:%2;border:1px solid %3;}"
             "QMenu::item{padding:5px 24px 5px 24px;background:transparent;}"
-            "QMenu::item:selected{background:%4;color:#FFFFFF;}"
+            "QMenu::item:selected{background:%4;color:%6;}"
             "QMenu::item:disabled{color:%5;}")
-            .arg(KswordTheme::SurfaceHex())
-            .arg(KswordTheme::TextPrimaryHex())
-            .arg(KswordTheme::BorderHex())
-            .arg(KswordTheme::PrimaryBlueHex)
-            .arg(KswordTheme::TextSecondaryHex());
+            .arg(KswordTheme::SurfaceColorHex())
+            .arg(KswordTheme::TextPrimaryColorHex())
+            .arg(KswordTheme::BorderColorHex())
+            .arg(KswordTheme::AccentHex(KswordTheme::AccentRole::Blue))
+            .arg(KswordTheme::TextSecondaryColorHex())
+            .arg(KswordTheme::OnAccentHex());
     }
 
     QString kernelExecutableRowText(QTableWidget* table, const int rowIndex)
@@ -542,7 +543,9 @@ void MemoryDock::refreshKernelExecutableMemoryScanAsync()
                         guardThis->m_kernelExecutableStatusLabel->setText(
                             QStringLiteral("状态：%1").arg(unsupportedText));
                         guardThis->m_kernelExecutableStatusLabel->setStyleSheet(kernelExecutableStatusStyle(
-                            scanResult.unsupported ? QStringLiteral("#B23A3A") : KswordTheme::TextSecondaryHex()));
+                            scanResult.unsupported
+                                ? KswordTheme::ErrorColor().name(QColor::HexRgb)
+                                : KswordTheme::TextSecondaryColorHex()));
                     }
                     if (guardThis->m_kernelExecutableDetailEditor != nullptr)
                     {
@@ -567,7 +570,9 @@ void MemoryDock::refreshKernelExecutableMemoryScanAsync()
                         .arg(guardThis->m_kernelExecutableVisibleCount)
                         .arg(scanResult.moduleCount));
                     guardThis->m_kernelExecutableStatusLabel->setStyleSheet(kernelExecutableStatusStyle(
-                        scanResult.entries.empty() ? QStringLiteral("#B23A3A") : QStringLiteral("#2F7D32")));
+                        scanResult.entries.empty()
+                            ? KswordTheme::ErrorColor().name(QColor::HexRgb)
+                            : KswordTheme::SuccessColor().name(QColor::HexRgb)));
                 }
             },
             Qt::QueuedConnection);

@@ -628,7 +628,9 @@ void DriverDock::refreshDriverIntegrityAsync(const bool cpuOnly)
                             "driver.integrity.status.query_failed",
                             QStringLiteral("状态：查询失败 %1"))
                             .arg(friendlyDriverIoMessage(result.io.message)));
-                    guardThis->m_integrityStatusLabel->setStyleSheet(QStringLiteral("color:#B23A3A; font-weight:700;"));
+                    guardThis->m_integrityStatusLabel->setStyleSheet(
+                        QStringLiteral("color:%1; font-weight:700;")
+                            .arg(KswordTheme::ErrorColor().name(QColor::HexRgb)));
                 }
                 else
                 {
@@ -649,9 +651,10 @@ void DriverDock::refreshDriverIntegrityAsync(const bool cpuOnly)
                         .arg(result.moduleCount)
                         .arg(result.fieldFlags, 8, 16, QChar('0'))
                         .arg(result.statusFlags, 8, 16, QChar('0')));
-                    guardThis->m_integrityStatusLabel->setStyleSheet(degraded
-                        ? QStringLiteral("color:#9A6A00; font-weight:700;")
-                        : QStringLiteral("color:#2F7D32; font-weight:700;"));
+                    guardThis->m_integrityStatusLabel->setStyleSheet(
+                        QStringLiteral("color:%1; font-weight:700;")
+                            .arg((degraded ? KswordTheme::WarningColor() : KswordTheme::SuccessColor())
+                                .name(QColor::HexRgb)));
                 }
             }
         }, Qt::QueuedConnection);

@@ -1,4 +1,5 @@
 #include "UI_All.h"
+#include "../theme.h"
 
 #include <QLabel>
 #include <QVBoxLayout>
@@ -15,14 +16,18 @@ QWidget* createBasicPlaceholder(const QString& tipText/* = "Placeholder panel"*/
     // border makes unfinished panels visible during development and testing.
     placeholder->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     placeholder->setStyleSheet(
-        "border: 2px solid #0066CC; "
-        "background-color: transparent; "
-        "border-radius: 0px;");
+        QStringLiteral(
+            "border: 2px solid %1; "
+            "background-color: transparent; "
+            "border-radius: 0px;")
+            .arg(KswordTheme::InfoColor().name(QColor::HexRgb)));
 
     // The label carries the caller-provided hint text and stays centered so the
     // placeholder remains useful even when the containing panel is resized.
     QLabel* tipLabel = new QLabel(tipText, placeholder);
-    tipLabel->setStyleSheet("color: #0066CC; font-size: 14px;");
+    tipLabel->setStyleSheet(
+        QStringLiteral("color:%1; font-size:14px;")
+            .arg(KswordTheme::InfoColor().name(QColor::HexRgb)));
     tipLabel->setAlignment(Qt::AlignCenter);
 
     // A zero-margin vertical layout keeps the label centered in the full widget

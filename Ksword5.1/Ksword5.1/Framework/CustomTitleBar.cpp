@@ -605,8 +605,11 @@ namespace ks::ui
         const QString normalBadgeTextColorText = KswordTheme::PrimaryBlueHex;
         const QString specialBadgeBackgroundText = KswordTheme::PrimaryBlueHex;
         const QString specialBadgeTextColorText = m_darkModeEnabled
-            ? QStringLiteral("#FFFFFF")
-            : QStringLiteral("#102336");
+            ? KswordTheme::OnAccentHex()
+            : KswordTheme::ThemeColorName(KswordTheme::EnsureTextContrast(
+                KswordTheme::TextPrimaryColor(),
+                KswordTheme::AccentColor(KswordTheme::AccentRole::Blue),
+                3.0));
 
         const QString userBadgeBackgroundText = m_isSpecialUser
             ? specialBadgeBackgroundText
@@ -653,10 +656,10 @@ namespace ks::ui
             "  background:__TITLE_BUTTON_PRESSED__;"
             "}"
             "#ksCustomTitleBar QPushButton#ksTitleCloseButton:hover{"
-            "  background:#E2554E;"
+            "  background:__TITLE_CLOSE_HOVER__;"
             "}"
             "#ksCustomTitleBar QPushButton#ksTitleCloseButton:pressed{"
-            "  background:#C7433B;"
+            "  background:__TITLE_CLOSE_PRESSED__;"
             "}"
             "#ksCustomTitleBar QPushButton:disabled{"
             "  background:%7;"
@@ -674,7 +677,9 @@ namespace ks::ui
             .arg(userBadgeBackgroundText)
             .arg(userBadgeTextColorText)
             .replace(QStringLiteral("__TITLE_BUTTON_HOVER__"), KswordTheme::PrimaryBlueSolidHoverHex())
-            .replace(QStringLiteral("__TITLE_BUTTON_PRESSED__"), KswordTheme::PrimaryBluePressedHex);
+            .replace(QStringLiteral("__TITLE_BUTTON_PRESSED__"), KswordTheme::PrimaryBluePressedHex)
+            .replace(QStringLiteral("__TITLE_CLOSE_HOVER__"), KswordTheme::AccentHex(KswordTheme::AccentRole::Red, 35))
+            .replace(QStringLiteral("__TITLE_CLOSE_PRESSED__"), KswordTheme::AccentHex(KswordTheme::AccentRole::Red, 12));
         setStyleSheet(titleBarStyleSheetText);
 
         // 图标与按钮文案同步：

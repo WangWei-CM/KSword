@@ -55,18 +55,19 @@ namespace process_detail_window_internal
             "}"
             "QPushButton:hover {"
             "  background: %3;"
-            "  color: #FFFFFF;"
+            "  color: %6;"
             "  border: 1px solid %3;"
             "}"
             "QPushButton:pressed {"
             "  background: %4;"
-            "  color: #FFFFFF;"
+            "  color: %6;"
             "}")
-            .arg(KswordTheme::PrimaryBlueHex)
-            .arg(KswordTheme::PrimaryBlueBorderHex)
-            .arg(KswordTheme::PrimaryBlueSolidHoverHex())
-            .arg(KswordTheme::PrimaryBluePressedHex)
-            .arg(KswordTheme::SurfaceHex());
+            .arg(KswordTheme::AccentHex(KswordTheme::AccentRole::Blue))
+            .arg(KswordTheme::AccentHex(KswordTheme::AccentRole::Blue))
+            .arg(KswordTheme::AccentHex(KswordTheme::AccentRole::Blue, -18))
+            .arg(KswordTheme::AccentHex(KswordTheme::AccentRole::Blue, -32))
+            .arg(KswordTheme::SurfaceColorHex())
+            .arg(KswordTheme::OnAccentHex());
     }
 
     QString buildProcessDetailRootStyle()
@@ -100,7 +101,7 @@ namespace process_detail_window_internal
             "  border-radius:3px;"
             "  padding:3px 6px;"
             "  selection-background-color:%5;"
-            "  selection-color:#FFFFFF;"
+            "  selection-color:%7;"
             "}"
             "QWidget#ProcessDetailWindowRoot QLineEdit[readOnly=\"true\"]{"
             "  background:%6;"
@@ -117,7 +118,7 @@ namespace process_detail_window_internal
             "  border:1px solid %3;"
             "  gridline-color:%3;"
             "  selection-background-color:%5;"
-            "  selection-color:#FFFFFF;"
+            "  selection-color:%7;"
             "}"
             "QWidget#ProcessDetailWindowRoot QTableCornerButton::section{"
             "  background:%4;"
@@ -144,7 +145,7 @@ namespace process_detail_window_internal
             "}"
             "QWidget#ProcessDetailWindowRoot QTabBar::tab:selected{"
             "  background:%5;"
-            "  color:#FFFFFF;"
+            "  color:%7;"
             "  border-color:%5;"
             "}"
             "QWidget#ProcessDetailWindowRoot QTabBar::tab:hover:!selected{"
@@ -161,7 +162,7 @@ namespace process_detail_window_internal
             "}"
             "QWidget#ProcessDetailWindowRoot QMenu::item:selected{"
             "  background:%5;"
-            "  color:#FFFFFF;"
+            "  color:%7;"
             "}"
             "QWidget#ProcessDetailWindowRoot QMenu::item:disabled{"
             "  color:%6;"
@@ -202,12 +203,13 @@ namespace process_detail_window_internal
             "QWidget#ProcessDetailWindowRoot QScrollBar::sub-page{"
             "  background:%4;"
             "}")
-            .arg(QStringLiteral("palette(window)"))
-            .arg(KswordTheme::TextPrimaryHex())
-            .arg(KswordTheme::BorderHex())
-            .arg(KswordTheme::SurfaceHex())
-            .arg(KswordTheme::PrimaryBlueHex)
-            .arg(KswordTheme::PrimaryBlueSubtleHex());
+            .arg(KswordTheme::WindowColorHex())
+            .arg(KswordTheme::TextPrimaryColorHex())
+            .arg(KswordTheme::BorderColorHex())
+            .arg(KswordTheme::SurfaceColorHex())
+            .arg(KswordTheme::AccentHex(KswordTheme::AccentRole::Blue))
+            .arg(KswordTheme::PrimaryBlueSubtleHex())
+            .arg(KswordTheme::OnAccentHex());
     }
 
     QString buildProcessDetailMenuStyle()
@@ -226,7 +228,7 @@ namespace process_detail_window_internal
             "}"
             "QMenu::item:selected{"
             "  background:%4;"
-            "  color:#FFFFFF;"
+            "  color:%6;"
             "}"
             "QMenu::item:disabled{"
             "  color:%5;"
@@ -237,11 +239,12 @@ namespace process_detail_window_internal
             "  background:%3;"
             "  margin:3px 6px;"
             "}")
-            .arg(KswordTheme::SurfaceHex())
-            .arg(KswordTheme::TextPrimaryHex())
-            .arg(KswordTheme::BorderHex())
-            .arg(KswordTheme::PrimaryBlueHex)
-            .arg(KswordTheme::TextSecondaryHex());
+            .arg(KswordTheme::SurfaceColorHex())
+            .arg(KswordTheme::TextPrimaryColorHex())
+            .arg(KswordTheme::BorderColorHex())
+            .arg(KswordTheme::AccentHex(KswordTheme::AccentRole::Blue))
+            .arg(KswordTheme::TextSecondaryColorHex())
+            .arg(KswordTheme::OnAccentHex());
     }
 
     QIcon buildProcessDetailR0ActionIcon(const QString& iconPath)
@@ -295,32 +298,32 @@ namespace process_detail_window_internal
 
     QColor statusIdleColor()
     {
-        return KswordTheme::IsDarkModeEnabled() ? QColor(146, 214, 156) : QColor(47, 125, 50);
+        return KswordTheme::SuccessColor();
     }
 
     QColor statusWarningColor()
     {
-        return KswordTheme::IsDarkModeEnabled() ? QColor(255, 205, 130) : QColor(138, 109, 59);
+        return KswordTheme::WarningColor();
     }
 
     QColor statusErrorColor()
     {
-        return KswordTheme::IsDarkModeEnabled() ? QColor(255, 145, 145) : QColor(220, 50, 47);
+        return KswordTheme::ErrorColor();
     }
 
     QColor statusSecondaryColor()
     {
-        return KswordTheme::IsDarkModeEnabled() ? QColor(178, 178, 178) : QColor(79, 79, 79);
+        return KswordTheme::TextSecondaryColor();
     }
 
     QColor signatureTrustedColor()
     {
-        return KswordTheme::IsDarkModeEnabled() ? QColor(130, 210, 140) : QColor(34, 139, 34);
+        return KswordTheme::SuccessColor();
     }
 
     QColor signatureUntrustedColor()
     {
-        return KswordTheme::IsDarkModeEnabled() ? QColor(255, 155, 155) : QColor(220, 50, 47);
+        return KswordTheme::ErrorColor();
     }
 
     QString formatDoubleText(const double value, const int precision)
