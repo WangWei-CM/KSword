@@ -28,6 +28,18 @@ namespace
 
     // kSkt64RepositoryUrl 作用：参考项目按钮点击后打开 SKT64 仓库。
     const QString kSkt64RepositoryUrl = QStringLiteral("https://github.com/PspExitThread/SKT64");
+
+    // welcomeLogoResourcePath 作用：
+    // - 根据当前有效界面语言选择欢迎页图片；
+    // - 中文语言使用中文版本，其余语言使用英文版本。
+    QString welcomeLogoResourcePath()
+    {
+        const QString currentLanguageId =
+            ks::i18n::LanguageManager::instance().currentLanguageId();
+        return currentLanguageId.startsWith(QStringLiteral("zh"), Qt::CaseInsensitive)
+            ? QStringLiteral(":/Image/Resource/Logo/KswordHome-ZH.png")
+            : QStringLiteral(":/Image/Resource/Logo/KswordHome-En.png");
+    }
 }
 
 WelcomeDock::WelcomeDock(QWidget* parent) : QWidget(parent) {
@@ -40,15 +52,6 @@ WelcomeDock::WelcomeDock(QWidget* parent) : QWidget(parent) {
     m_leftImage->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
     m_leftImage->setAlignment(Qt::AlignCenter);
 
-    // 加载图片：优先使用资源文件中的 MainLogo.png；失败时显示占位文本。
-    QPixmap pixmap(":/Image/Resource/Logo/MainLogo.png");
-    if (!pixmap.isNull()) {
-        // 直接设置原图，不调用 scaled，保持 655x250 像素。
-        m_leftImage->setPixmap(pixmap);
-    }
-    else {
-        m_leftImage->setText("左侧图片区域");
-    }
     // 版权信息：展示团队信息、版本号和编译时间。
     m_copyright = new QLabel(this);
     // 欢迎页发布信息：
@@ -210,11 +213,21 @@ void WelcomeDock::retranslateUi()
         return ks::i18n::contextText(QString::fromLatin1(key), sourceText);
     };
 
-    if (m_leftImage != nullptr && m_leftImage->pixmap(Qt::ReturnByValue).isNull())
+    if (m_leftImage != nullptr)
     {
-        m_leftImage->setText(welcomeText(
-            "welcome.logo_fallback",
-            QStringLiteral("左侧图片区域")));
+        const QPixmap localizedLogo(welcomeLogoResourcePath());
+        if (!localizedLogo.isNull())
+        {
+            // 直接设置原图，不调用 scaled，保持图片清晰且不变形。
+            m_leftImage->setPixmap(localizedLogo);
+        }
+        else
+        {
+            m_leftImage->clear();
+            m_leftImage->setText(welcomeText(
+                "welcome.logo_fallback",
+                QStringLiteral("左侧图片区域")));
+        }
     }
 
     if (m_copyright != nullptr)
