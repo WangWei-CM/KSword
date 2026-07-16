@@ -509,6 +509,9 @@
     <None Include="..\..\tools\compress_qt_profile_json.py" />
     <None Include="..\..\tools\i18n_language_pack.py" />
     <None Include="..\..\LICENSE" />
+    <None Include="..\..\PROJECT_LICENSE.md" />
+    <None Include="..\..\COMMUNITY_COVENANT.md" />
+    <None Include="..\..\THIRD_PARTY_NOTICES.md" />
     <None Include="profiles\ark_dyndata_pack_v2.json" />
     <None Include="profiles\ark_dyndata_pack_v3.json" />
     <None Include="languages\en-US.json" />
@@ -529,12 +532,21 @@
     <Copy SourceFiles="@(KswordLanguagePack)" DestinationFolder="$(TargetDir)languages\" SkipUnchangedFiles="true" Condition="'@(KswordLanguagePack)' != ''" />
     <Warning Condition="'@(KswordLanguagePack)' == ''" Text="No KSword language packs were found under $(MSBuildProjectDirectory)\languages." />
   </Target>
-  <Target Name="CopyKswordLicense" AfterTargets="Build">
+  <Target Name="CopyKswordLegalDocuments" AfterTargets="Build">
     <PropertyGroup>
       <KswordLicenseSource>$(MSBuildProjectDirectory)\..\..\LICENSE</KswordLicenseSource>
+      <KswordProjectLicenseSource>$(MSBuildProjectDirectory)\..\..\PROJECT_LICENSE.md</KswordProjectLicenseSource>
+      <KswordCommunityCovenantSource>$(MSBuildProjectDirectory)\..\..\COMMUNITY_COVENANT.md</KswordCommunityCovenantSource>
+      <KswordThirdPartyNoticesSource>$(MSBuildProjectDirectory)\..\..\THIRD_PARTY_NOTICES.md</KswordThirdPartyNoticesSource>
     </PropertyGroup>
     <Error Condition="!Exists('$(KswordLicenseSource)')" Text="KSword license file was not found: $(KswordLicenseSource)" />
+    <Error Condition="!Exists('$(KswordProjectLicenseSource)')" Text="KSword project license notice was not found: $(KswordProjectLicenseSource)" />
+    <Error Condition="!Exists('$(KswordCommunityCovenantSource)')" Text="KSword community covenant was not found: $(KswordCommunityCovenantSource)" />
+    <Error Condition="!Exists('$(KswordThirdPartyNoticesSource)')" Text="KSword third-party notices were not found: $(KswordThirdPartyNoticesSource)" />
     <Copy SourceFiles="$(KswordLicenseSource)" DestinationFiles="$(TargetDir)LICENSE" SkipUnchangedFiles="true" />
+    <Copy SourceFiles="$(KswordProjectLicenseSource)" DestinationFiles="$(TargetDir)PROJECT_LICENSE.md" SkipUnchangedFiles="true" />
+    <Copy SourceFiles="$(KswordCommunityCovenantSource)" DestinationFiles="$(TargetDir)COMMUNITY_COVENANT.md" SkipUnchangedFiles="true" />
+    <Copy SourceFiles="$(KswordThirdPartyNoticesSource)" DestinationFiles="$(TargetDir)THIRD_PARTY_NOTICES.md" SkipUnchangedFiles="true" />
   </Target>
   <Target Name="CopyKswordArkDynDataProfilePack" AfterTargets="Build">
     <!-- v3 pack carries typed StructOffset items such as EpActiveProcessLinks; v2 is kept only as a callback-era fallback. -->

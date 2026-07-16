@@ -198,5 +198,16 @@ $msbuild = 'C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Curr
 
 ---
 
-### 关于 “Open Source” 的说明
-本项目宣传中使用的 “Open Source” 仅表示源代码公开可查看（source-available），不代表本项目属于 OSI 定义或认可的开源软件。你可以在遵守本项目许可证的前提下查看、使用和修改源代码，但不得通过出售本软件或其副本获利。所有授权范围与限制均以许可证正文为准。
+### 许可证与社区
+
+除另有明确许可证的第三方材料外，Ksword 是按 GNU General Public License
+version 3 only（`GPL-3.0-only`）发布的自由软件。任何人都可以在遵守 GPLv3 的
+前提下使用、研究、修改、托管、销售和再分发，包括商业用途。分发二进制时，必须
+按照 GPLv3 允许的方式提供完全对应的源码。
+
+根目录 `PROJECT_LICENSE.md` 记录项目适用范围和版权声明；
+`COMMUNITY_COVENANT.md` 规定官方社区参与、透明 fork、负责任安全使用和项目身份
+方面的共同标准。社区公约不是附加软件许可限制，不能缩小任何人的 GPL 权利。
+
+贡献适用根目录 `CONTRIBUTING.md`。第三方组件继续适用各自许可证；分发构建产物
+前必须检查 `docs/许可证兼容性审计.md` 中的当前结论和发行材料要求。

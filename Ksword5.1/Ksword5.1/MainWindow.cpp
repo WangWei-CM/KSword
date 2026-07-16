@@ -4952,17 +4952,53 @@ void MainWindow::showLicenseFromMenu()
             break;
         }
     }
-    QFile licenseFile(licensePath);
     QString licenseText;
-    if (licenseFile.open(QIODevice::ReadOnly | QIODevice::Text))
+    const auto appendLegalDocument = [&licenseText](const QString& filePath)
     {
-        QTextStream licenseStream(&licenseFile);
-        licenseStream.setEncoding(QStringConverter::Utf8);
-        licenseText = licenseStream.readAll();
+        QFile legalFile(filePath);
+        if (!legalFile.open(QIODevice::ReadOnly | QIODevice::Text))
+        {
+            return false;
+        }
+
+        QTextStream legalStream(&legalFile);
+        legalStream.setEncoding(QStringConverter::Utf8);
+        const QString documentText = legalStream.readAll();
+        if (!licenseText.isEmpty())
+        {
+            licenseText += QStringLiteral("\n\n===== %1 =====\n\n")
+                .arg(QFileInfo(filePath).fileName());
+        }
+        licenseText += documentText;
+        return true;
+    };
+
+    const QString projectLicensePath = applicationDirectory.absoluteFilePath(QStringLiteral("PROJECT_LICENSE.md"));
+    if (QFileInfo(projectLicensePath).isFile())
+    {
+        appendLegalDocument(projectLicensePath);
     }
-    else
+
+    if (!appendLegalDocument(licensePath))
     {
-        licenseText = QStringLiteral("未找到程序同目录的 LICENSE 文件：\n%1").arg(QDir::toNativeSeparators(licensePath));
+        if (!licenseText.isEmpty())
+        {
+            licenseText += QString::fromLatin1("\n\n===== LICENSE =====\n\n");
+        }
+        licenseText += QStringLiteral("未找到程序同目录的 LICENSE 文件：\n%1").arg(QDir::toNativeSeparators(licensePath));
+    }
+
+    const QStringList supplementaryLegalFiles{
+        QStringLiteral("COMMUNITY_COVENANT.md"),
+        QStringLiteral("THIRD_PARTY_NOTICES.md")
+    };
+    for (const QString& legalFileName : supplementaryLegalFiles)
+    {
+        const QString legalFilePath = applicationDirectory.absoluteFilePath(legalFileName);
+        if (QFileInfo(legalFilePath).isFile())
+        {
+            appendLegalDocument(legalFilePath);
+        }
     }
 
     QDialog licenseDialog(this);

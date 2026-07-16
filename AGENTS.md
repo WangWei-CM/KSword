@@ -4,6 +4,28 @@
 
 本流程用于在仓库根目录 `C:\Users\Felix\CLionProjects\KSword` 生成包含完整 `Release\` 目录的 7z 发行包。默认参考旧包布局：`C:\Users\Felix\Downloads\KswordARK评估版本-260427-未签名R0-进程内存监控增强.7z`。
 
+### 0. GPLv3 许可证发行闸门
+
+项目自有代码现按 `GPL-3.0-only` 发布；Qt Charts 和 EASY-HWID-SPOOFER 与旧自定义
+许可证的两个不兼容问题，已经通过选择 GPLv3 组合发布路径关闭。制作对外发行包前
+仍必须复核 `docs/许可证兼容性审计.md`，并完成以下发行义务：
+
+- 固定本次所有 exe、DLL、sys 和工具对应的项目源码提交，确保提供的源码能够对应
+  并构建实际发行二进制；
+- 固定 EASY-HWID-SPOOFER、Qt 6.9.3/Qt Charts、Qt Advanced Docking System、
+  FLTK 及其他预编译依赖的准确版本、来源、修改和许可证；
+- 按 GPLv3 第 6 节提供完整对应源码，包括项目源码、修改后的第三方源码以及控制
+  编译和安装所需的工程、脚本和配置；
+- 随包提供根 `LICENSE`、`PROJECT_LICENSE.md`、`COMMUNITY_COVENANT.md`、
+  `THIRD_PARTY_NOTICES.md`、组件级 LICENSE/NOTICE、Qt SBOM、模块清单和明确的
+  对应源码取得说明；
+- 对最终发行目录进行实际二进制依赖审计，确认不存在来源不明、禁止再分发或与
+  GPLv3 不兼容的材料。
+
+以上材料未完成前，本流程只能用于本地测试包，不能把产物标记为“GPL 发行合规
+已完成”“许可证审计通过”或对外发行。社区公约不是 GPL 附加条件，不能代替上述
+法律义务。
+
 ### 1. Release 构建
 
 先设置 Qt 路径和 QtMsBuild 路径，再依次构建用户态项目。主程序必须重新构建；Taskbar、KswordHUD、APIMonitor_x64 也要构建后覆盖进包。
@@ -43,6 +65,20 @@ Copy-Item 'KswordARKDriver\x64\Release\KswordARK.sys' $stage -Force
 Copy-Item 'KswordARKDriver\x64\Release\KswordARK.pdb' $stage -Force
 Copy-Item 'KswordARKDriver\x64\Release\KswordARKDriver.inf' $stage -Force
 Copy-Item 'LICENSE' (Join-Path $stage 'LICENSE') -Force
+Copy-Item 'PROJECT_LICENSE.md' (Join-Path $stage 'PROJECT_LICENSE.md') -Force
+Copy-Item 'COMMUNITY_COVENANT.md' (Join-Path $stage 'COMMUNITY_COVENANT.md') -Force
+Copy-Item 'THIRD_PARTY_NOTICES.md' (Join-Path $stage 'THIRD_PARTY_NOTICES.md') -Force
+
+$licenseDir=Join-Path $stage 'licenses\third_party'
+New-Item -ItemType Directory -Path $licenseDir -Force | Out-Null
+Copy-Item 'third_party\systeminformer_dyn\LICENSE.txt' (Join-Path $licenseDir 'systeminformer-LICENSE.txt') -Force
+Copy-Item 'third_party\systeminformer_dyn\NOTICE.md' (Join-Path $licenseDir 'systeminformer-NOTICE.md') -Force
+Copy-Item 'third_party\easy_hwid_spoofer\LICENSE.txt' (Join-Path $licenseDir 'easy-hwid-spoofer-LICENSE.txt') -Force
+Copy-Item 'third_party\easy_hwid_spoofer\NOTICE.md' (Join-Path $licenseDir 'easy-hwid-spoofer-NOTICE.md') -Force
+Copy-Item 'third_party\fltk\LICENSE.txt' (Join-Path $licenseDir 'fltk-LICENSE.txt') -Force
+Copy-Item 'third_party\fltk\NOTICE.md' (Join-Path $licenseDir 'fltk-NOTICE.md') -Force
+Copy-Item 'third_party\qt_advanced_docking_system\LICENSE.txt' (Join-Path $licenseDir 'qt-advanced-docking-system-LICENSE.txt') -Force
+Copy-Item 'third_party\qt_advanced_docking_system\NOTICE.md' (Join-Path $licenseDir 'qt-advanced-docking-system-NOTICE.md') -Force
 
 $profileDir=Join-Path $stage 'profiles'
 if (!(Test-Path $profileDir)) { New-Item -ItemType Directory -Path $profileDir | Out-Null }
@@ -85,10 +121,10 @@ if ($exit -ne 0) { exit $exit }
 ```powershell
 $seven='C:\Users\Felix\CLionProjects\Wisdom-Weasel\7z.exe'
 & $seven t $archive
-& $seven l $archive 'Release\Ksword5.1.exe' 'Release\Taskbar.exe' 'Release\KswordHUD.exe' 'Release\APIMonitor_x64.dll' 'Release\KswordARK.sys' 'Release\KswordARKDriver\KswordARK.sys' 'Release\LICENSE' 'Release\profiles\ark_dyndata_pack_v3.json' 'Release\profiles\registry_optimization_items.json' 'Release\profiles\registry_optimization_assets\Config\Data.zip' 'Release\languages\zh-CN.json' 'Release\languages\en-US.json' 'Release\platforms\qwindows.dll'
+& $seven l $archive 'Release\Ksword5.1.exe' 'Release\Taskbar.exe' 'Release\KswordHUD.exe' 'Release\APIMonitor_x64.dll' 'Release\KswordARK.sys' 'Release\KswordARKDriver\KswordARK.sys' 'Release\LICENSE' 'Release\PROJECT_LICENSE.md' 'Release\COMMUNITY_COVENANT.md' 'Release\THIRD_PARTY_NOTICES.md' 'Release\licenses\third_party\systeminformer-LICENSE.txt' 'Release\licenses\third_party\easy-hwid-spoofer-LICENSE.txt' 'Release\licenses\third_party\fltk-LICENSE.txt' 'Release\licenses\third_party\qt-advanced-docking-system-LICENSE.txt' 'Release\profiles\ark_dyndata_pack_v3.json' 'Release\profiles\registry_optimization_items.json' 'Release\profiles\registry_optimization_assets\Config\Data.zip' 'Release\languages\zh-CN.json' 'Release\languages\en-US.json' 'Release\platforms\qwindows.dll'
 ```
 
-校验通过时，`7z t` 输出应包含 `Everything is Ok`，且列表中必须包含 `Release\LICENSE`；主程序顶部“许可证”页面从 exe 同目录优先读取此文件。本流程生成的包根目录必须是 `Release\`，不要把 `dist\KswordARK-release-work\` 或其它临时目录打进包里。
+校验通过时，`7z t` 输出应包含 `Everything is Ok`，且列表中必须包含 `Release\LICENSE`、`Release\PROJECT_LICENSE.md`、`Release\COMMUNITY_COVENANT.md`、`Release\THIRD_PARTY_NOTICES.md` 和组件级 LICENSE/NOTICE；主程序顶部“许可证”页面从 exe 同目录优先读取根许可证。本流程生成的包根目录必须是 `Release\`，不要把 `dist\KswordARK-release-work\` 或其它临时目录打进包里。Qt GPL/LGPL 文本、Qt SBOM、模块清单和完整对应源码取得材料仍须按第 0 节的发行闸门另行加入并核验。
 
 
 ## Phase -1 协作规范

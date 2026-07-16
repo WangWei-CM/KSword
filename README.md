@@ -209,4 +209,10 @@ The [KSwordDEV/Website](https://github.com/KSwordDEV/Website) repository indepen
 
 This project includes system-level debugging, auditing, and management capabilities. Use it only in legally authorized and compliant environments.
 
-The term “Open Source” used in this project’s promotional materials means only that the source code is publicly available for inspection, i.e. source-available. It does not mean that this project is open source under the OSI definition or approved by the OSI. You may view, use, and modify the source code only in compliance with this project’s license, and you may not profit by selling the software or copies of it. All permissions and restrictions are governed by the full license text.
+## License and community
+
+Except for separately identified third-party material, Ksword is free software licensed under the [GNU General Public License version 3 only](LICENSE) (`GPL-3.0-only`). You may use, study, modify, host, sell, and redistribute it, including commercially, subject to the GPLv3 terms. Distribution of binaries must be accompanied by the exact Corresponding Source in one of the ways allowed by GPLv3.
+
+The [project licensing notice](PROJECT_LICENSE.md) records the scope and copyright declaration. The [Ksword Community Covenant](COMMUNITY_COVENANT.md) expresses the standards for official community participation, transparent forks, responsible security use, and project identity. It is not an additional software-license restriction and cannot reduce anyone’s GPL rights.
+
+Contributions are governed by [CONTRIBUTING.md](CONTRIBUTING.md). Third-party components remain under their own licenses; review the current [license compatibility audit](docs/%E8%AE%B8%E5%8F%AF%E8%AF%81%E5%85%BC%E5%AE%B9%E6%80%A7%E5%AE%A1%E8%AE%A1.md) before distributing a build.

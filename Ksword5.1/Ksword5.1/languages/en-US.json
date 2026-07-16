@@ -2557,6 +2557,7 @@
     "kernel.object_directory.header.type": "Type"
   },
   "source_translations": {
+    "\n\n===== LICENSE =====\n\n": "\n\n===== LICENSE =====\n\n",
     "ksTabPluginContainer": "ksTabPluginContainer",
     "ksTabPluginEmptyHint": "ksTabPluginEmptyHint",
     "ksTabPluginEmptyState": "ksTabPluginEmptyState",

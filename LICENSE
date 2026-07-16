@@ -1,707 +1,674 @@
-Ksword5.1 Community Source License
-License Version 1.1 — July 16, 2026
+                    GNU GENERAL PUBLIC LICENSE
+                       Version 3, 29 June 2007
 
-Copyright (c) 2025-2026 WangWei-CM / OB_BUFF(Felix3322).
-All rights reserved except as expressly granted by this License.
+ Copyright (C) 2007 Free Software Foundation, Inc. <https://fsf.org/>
+ Everyone is permitted to copy and distribute verbatim copies
+ of this license document, but changing it is not allowed.
 
-1. Scope
+                            Preamble
 
-This license (the "License") applies only to the Ksword5.1 core software suite
-(the "Core Software"), including its user-mode applications, kernel-mode
-components, helper tools, scripts, documentation, assets, source code, binary
-files, build outputs, and the host-side plugin framework, plugin loader,
-interfaces, APIs, and SDK materials that are not themselves Plugins, unless a
-specific file or third-party component states otherwise.
+  The GNU General Public License is a free, copyleft license for
+software and other kinds of works.
 
-This License does not apply to any Plugin. Every Plugin is a separately licensed
-component governed by its own license, as further provided in Section 8.
+  The licenses for most software and other practical works are designed
+to take away your freedom to share and change the works.  By contrast,
+the GNU General Public License is intended to guarantee your freedom to
+share and change all versions of a program--to make sure it remains free
+software for all its users.  We, the Free Software Foundation, use the
+GNU General Public License for most of our software; it applies also to
+any other work released this way by its authors.  You can apply it to
+your programs, too.
 
-This is a custom community source license. It is not represented as an
-OSI-approved license.
+  When we speak of free software, we are referring to freedom, not
+price.  Our General Public Licenses are designed to make sure that you
+have the freedom to distribute copies of free software (and charge for
+them if you wish), that you receive source code or can get it if you
+want it, that you can change the software or use pieces of it in new
+free programs, and that you know you can do these things.
 
-2. Definitions
+  To protect your rights, we need to prevent others from denying you
+these rights or asking you to surrender the rights.  Therefore, you have
+certain responsibilities if you distribute copies of the software, or if
+you modify it: responsibilities to respect the freedom of others.
 
-For purposes of this License:
+  For example, if you distribute copies of such a program, whether
+gratis or for a fee, you must pass on to the recipients the same
+freedoms that you received.  You must make sure that they, too, receive
+or can get the source code.  And you must show them these terms so they
+know their rights.
 
-"Software" means the Core Software and all materials covered by Section 1. It
-does not include Plugins.
+  Developers that use the GNU GPL protect your rights with two steps:
+(1) assert copyright on the software, and (2) offer you this License
+giving you legal permission to copy, distribute and/or modify it.
 
-"You" means an individual or legal entity exercising permissions granted by
+  For the developers' and authors' protection, the GPL clearly explains
+that there is no warranty for this free software.  For both users' and
+authors' sake, the GPL requires that modified versions be marked as
+changed, so that their problems will not be attributed erroneously to
+authors of previous versions.
+
+  Some devices are designed to deny users access to install or run
+modified versions of the software inside them, although the manufacturer
+can do so.  This is fundamentally incompatible with the aim of
+protecting users' freedom to change the software.  The systematic
+pattern of such abuse occurs in the area of products for individuals to
+use, which is precisely where it is most unacceptable.  Therefore, we
+have designed this version of the GPL to prohibit the practice for those
+products.  If such problems arise substantially in other domains, we
+stand ready to extend this provision to those domains in future versions
+of the GPL, as needed to protect the freedom of users.
+
+  Finally, every program is threatened constantly by software patents.
+States should not allow patents to restrict development and use of
+software on general-purpose computers, but in those that do, we wish to
+avoid the special danger that patents applied to a free program could
+make it effectively proprietary.  To prevent this, the GPL assures that
+patents cannot be used to render the program non-free.
+
+  The precise terms and conditions for copying, distribution and
+modification follow.
+
+                       TERMS AND CONDITIONS
+
+  0. Definitions.
+
+  "This License" refers to version 3 of the GNU General Public License.
+
+  "Copyright" also means copyright-like laws that apply to other kinds of
+works, such as semiconductor masks.
+
+  "The Program" refers to any copyrightable work licensed under this
+License.  Each licensee is addressed as "you".  "Licensees" and
+"recipients" may be individuals or organizations.
+
+  To "modify" a work means to copy from or adapt all or part of the work
+in a fashion requiring copyright permission, other than the making of an
+exact copy.  The resulting work is called a "modified version" of the
+earlier work or a work "based on" the earlier work.
+
+  A "covered work" means either the unmodified Program or a work based
+on the Program.
+
+  To "propagate" a work means to do anything with it that, without
+permission, would make you directly or secondarily liable for
+infringement under applicable copyright law, except executing it on a
+computer or modifying a private copy.  Propagation includes copying,
+distribution (with or without modification), making available to the
+public, and in some countries other activities as well.
+
+  To "convey" a work means any kind of propagation that enables other
+parties to make or receive copies.  Mere interaction with a user through
+a computer network, with no transfer of a copy, is not conveying.
+
+  An interactive user interface displays "Appropriate Legal Notices"
+to the extent that it includes a convenient and prominently visible
+feature that (1) displays an appropriate copyright notice, and (2)
+tells the user that there is no warranty for the work (except to the
+extent that warranties are provided), that licensees may convey the
+work under this License, and how to view a copy of this License.  If
+the interface presents a list of user commands or options, such as a
+menu, a prominent item in the list meets this criterion.
+
+  1. Source Code.
+
+  The "source code" for a work means the preferred form of the work
+for making modifications to it.  "Object code" means any non-source
+form of a work.
+
+  A "Standard Interface" means an interface that either is an official
+standard defined by a recognized standards body, or, in the case of
+interfaces specified for a particular programming language, one that
+is widely used among developers working in that language.
+
+  The "System Libraries" of an executable work include anything, other
+than the work as a whole, that (a) is included in the normal form of
+packaging a Major Component, but which is not part of that Major
+Component, and (b) serves only to enable use of the work with that
+Major Component, or to implement a Standard Interface for which an
+implementation is available to the public in source code form.  A
+"Major Component", in this context, means a major essential component
+(kernel, window system, and so on) of the specific operating system
+(if any) on which the executable work runs, or a compiler used to
+produce the work, or an object code interpreter used to run it.
+
+  The "Corresponding Source" for a work in object code form means all
+the source code needed to generate, install, and (for an executable
+work) run the object code and to modify the work, including scripts to
+control those activities.  However, it does not include the work's
+System Libraries, or general-purpose tools or generally available free
+programs which are used unmodified in performing those activities but
+which are not part of the work.  For example, Corresponding Source
+includes interface definition files associated with source files for
+the work, and the source code for shared libraries and dynamically
+linked subprograms that the work is specifically designed to require,
+such as by intimate data communication or control flow between those
+subprograms and other parts of the work.
+
+  The Corresponding Source need not include anything that users
+can regenerate automatically from other parts of the Corresponding
+Source.
+
+  The Corresponding Source for a work in source code form is that
+same work.
+
+  2. Basic Permissions.
+
+  All rights granted under this License are granted for the term of
+copyright on the Program, and are irrevocable provided the stated
+conditions are met.  This License explicitly affirms your unlimited
+permission to run the unmodified Program.  The output from running a
+covered work is covered by this License only if the output, given its
+content, constitutes a covered work.  This License acknowledges your
+rights of fair use or other equivalent, as provided by copyright law.
+
+  You may make, run and propagate covered works that you do not
+convey, without conditions so long as your license otherwise remains
+in force.  You may convey covered works to others for the sole purpose
+of having them make modifications exclusively for you, or provide you
+with facilities for running those works, provided that you comply with
+the terms of this License in conveying all material for which you do
+not control copyright.  Those thus making or running the covered works
+for you must do so exclusively on your behalf, under your direction
+and control, on terms that prohibit them from making any copies of
+your copyrighted material outside their relationship with you.
+
+  Conveying under any other circumstances is permitted solely under
+the conditions stated below.  Sublicensing is not allowed; section 10
+makes it unnecessary.
+
+  3. Protecting Users' Legal Rights From Anti-Circumvention Law.
+
+  No covered work shall be deemed part of an effective technological
+measure under any applicable law fulfilling obligations under article
+11 of the WIPO copyright treaty adopted on 20 December 1996, or
+similar laws prohibiting or restricting circumvention of such
+measures.
+
+  When you convey a covered work, you waive any legal power to forbid
+circumvention of technological measures to the extent such circumvention
+is effected by exercising rights under this License with respect to
+the covered work, and you disclaim any intention to limit operation or
+modification of the work as a means of enforcing, against the work's
+users, your or third parties' legal rights to forbid circumvention of
+technological measures.
+
+  4. Conveying Verbatim Copies.
+
+  You may convey verbatim copies of the Program's source code as you
+receive it, in any medium, provided that you conspicuously and
+appropriately publish on each copy an appropriate copyright notice;
+keep intact all notices stating that this License and any
+non-permissive terms added in accord with section 7 apply to the code;
+keep intact all notices of the absence of any warranty; and give all
+recipients a copy of this License along with the Program.
+
+  You may charge any price or no price for each copy that you convey,
+and you may offer support or warranty protection for a fee.
+
+  5. Conveying Modified Source Versions.
+
+  You may convey a work based on the Program, or the modifications to
+produce it from the Program, in the form of source code under the
+terms of section 4, provided that you also meet all of these conditions:
+
+    a) The work must carry prominent notices stating that you modified
+    it, and giving a relevant date.
+
+    b) The work must carry prominent notices stating that it is
+    released under this License and any conditions added under section
+    7.  This requirement modifies the requirement in section 4 to
+    "keep intact all notices".
+
+    c) You must license the entire work, as a whole, under this
+    License to anyone who comes into possession of a copy.  This
+    License will therefore apply, along with any applicable section 7
+    additional terms, to the whole of the work, and all its parts,
+    regardless of how they are packaged.  This License gives no
+    permission to license the work in any other way, but it does not
+    invalidate such permission if you have separately received it.
+
+    d) If the work has interactive user interfaces, each must display
+    Appropriate Legal Notices; however, if the Program has interactive
+    interfaces that do not display Appropriate Legal Notices, your
+    work need not make them do so.
+
+  A compilation of a covered work with other separate and independent
+works, which are not by their nature extensions of the covered work,
+and which are not combined with it such as to form a larger program,
+in or on a volume of a storage or distribution medium, is called an
+"aggregate" if the compilation and its resulting copyright are not
+used to limit the access or legal rights of the compilation's users
+beyond what the individual works permit.  Inclusion of a covered work
+in an aggregate does not cause this License to apply to the other
+parts of the aggregate.
+
+  6. Conveying Non-Source Forms.
+
+  You may convey a covered work in object code form under the terms
+of sections 4 and 5, provided that you also convey the
+machine-readable Corresponding Source under the terms of this License,
+in one of these ways:
+
+    a) Convey the object code in, or embodied in, a physical product
+    (including a physical distribution medium), accompanied by the
+    Corresponding Source fixed on a durable physical medium
+    customarily used for software interchange.
+
+    b) Convey the object code in, or embodied in, a physical product
+    (including a physical distribution medium), accompanied by a
+    written offer, valid for at least three years and valid for as
+    long as you offer spare parts or customer support for that product
+    model, to give anyone who possesses the object code either (1) a
+    copy of the Corresponding Source for all the software in the
+    product that is covered by this License, on a durable physical
+    medium customarily used for software interchange, for a price no
+    more than your reasonable cost of physically performing this
+    conveying of source, or (2) access to copy the
+    Corresponding Source from a network server at no charge.
+
+    c) Convey individual copies of the object code with a copy of the
+    written offer to provide the Corresponding Source.  This
+    alternative is allowed only occasionally and noncommercially, and
+    only if you received the object code with such an offer, in accord
+    with subsection 6b.
+
+    d) Convey the object code by offering access from a designated
+    place (gratis or for a charge), and offer equivalent access to the
+    Corresponding Source in the same way through the same place at no
+    further charge.  You need not require recipients to copy the
+    Corresponding Source along with the object code.  If the place to
+    copy the object code is a network server, the Corresponding Source
+    may be on a different server (operated by you or a third party)
+    that supports equivalent copying facilities, provided you maintain
+    clear directions next to the object code saying where to find the
+    Corresponding Source.  Regardless of what server hosts the
+    Corresponding Source, you remain obligated to ensure that it is
+    available for as long as needed to satisfy these requirements.
+
+    e) Convey the object code using peer-to-peer transmission, provided
+    you inform other peers where the object code and Corresponding
+    Source of the work are being offered to the general public at no
+    charge under subsection 6d.
+
+  A separable portion of the object code, whose source code is excluded
+from the Corresponding Source as a System Library, need not be
+included in conveying the object code work.
+
+  A "User Product" is either (1) a "consumer product", which means any
+tangible personal property which is normally used for personal, family,
+or household purposes, or (2) anything designed or sold for incorporation
+into a dwelling.  In determining whether a product is a consumer product,
+doubtful cases shall be resolved in favor of coverage.  For a particular
+product received by a particular user, "normally used" refers to a
+typical or common use of that class of product, regardless of the status
+of the particular user or of the way in which the particular user
+actually uses, or expects or is expected to use, the product.  A product
+is a consumer product regardless of whether the product has substantial
+commercial, industrial or non-consumer uses, unless such uses represent
+the only significant mode of use of the product.
+
+  "Installation Information" for a User Product means any methods,
+procedures, authorization keys, or other information required to install
+and execute modified versions of a covered work in that User Product from
+a modified version of its Corresponding Source.  The information must
+suffice to ensure that the continued functioning of the modified object
+code is in no case prevented or interfered with solely because
+modification has been made.
+
+  If you convey an object code work under this section in, or with, or
+specifically for use in, a User Product, and the conveying occurs as
+part of a transaction in which the right of possession and use of the
+User Product is transferred to the recipient in perpetuity or for a
+fixed term (regardless of how the transaction is characterized), the
+Corresponding Source conveyed under this section must be accompanied
+by the Installation Information.  But this requirement does not apply
+if neither you nor any third party retains the ability to install
+modified object code on the User Product (for example, the work has
+been installed in ROM).
+
+  The requirement to provide Installation Information does not include a
+requirement to continue to provide support service, warranty, or updates
+for a work that has been modified or installed by the recipient, or for
+the User Product in which it has been modified or installed.  Access to a
+network may be denied when the modification itself materially and
+adversely affects the operation of the network or violates the rules and
+protocols for communication across the network.
+
+  Corresponding Source conveyed, and Installation Information provided,
+in accord with this section must be in a format that is publicly
+documented (and with an implementation available to the public in
+source code form), and must require no special password or key for
+unpacking, reading or copying.
+
+  7. Additional Terms.
+
+  "Additional permissions" are terms that supplement the terms of this
+License by making exceptions from one or more of its conditions.
+Additional permissions that are applicable to the entire Program shall
+be treated as though they were included in this License, to the extent
+that they are valid under applicable law.  If additional permissions
+apply only to part of the Program, that part may be used separately
+under those permissions, but the entire Program remains governed by
+this License without regard to the additional permissions.
+
+  When you convey a copy of a covered work, you may at your option
+remove any additional permissions from that copy, or from any part of
+it.  (Additional permissions may be written to require their own
+removal in certain cases when you modify the work.)  You may place
+additional permissions on material, added by you to a covered work,
+for which you have or can give appropriate copyright permission.
+
+  Notwithstanding any other provision of this License, for material you
+add to a covered work, you may (if authorized by the copyright holders of
+that material) supplement the terms of this License with terms:
+
+    a) Disclaiming warranty or limiting liability differently from the
+    terms of sections 15 and 16 of this License; or
+
+    b) Requiring preservation of specified reasonable legal notices or
+    author attributions in that material or in the Appropriate Legal
+    Notices displayed by works containing it; or
+
+    c) Prohibiting misrepresentation of the origin of that material, or
+    requiring that modified versions of such material be marked in
+    reasonable ways as different from the original version; or
+
+    d) Limiting the use for publicity purposes of names of licensors or
+    authors of the material; or
+
+    e) Declining to grant rights under trademark law for use of some
+    trade names, trademarks, or service marks; or
+
+    f) Requiring indemnification of licensors and authors of that
+    material by anyone who conveys the material (or modified versions of
+    it) with contractual assumptions of liability to the recipient, for
+    any liability that these contractual assumptions directly impose on
+    those licensors and authors.
+
+  All other non-permissive additional terms are considered "further
+restrictions" within the meaning of section 10.  If the Program as you
+received it, or any part of it, contains a notice stating that it is
+governed by this License along with a term that is a further
+restriction, you may remove that term.  If a license document contains
+a further restriction but permits relicensing or conveying under this
+License, you may add to a covered work material governed by the terms
+of that license document, provided that the further restriction does
+not survive such relicensing or conveying.
+
+  If you add terms to a covered work in accord with this section, you
+must place, in the relevant source files, a statement of the
+additional terms that apply to those files, or a notice indicating
+where to find the applicable terms.
+
+  Additional terms, permissive or non-permissive, may be stated in the
+form of a separately written license, or stated as exceptions;
+the above requirements apply either way.
+
+  8. Termination.
+
+  You may not propagate or modify a covered work except as expressly
+provided under this License.  Any attempt otherwise to propagate or
+modify it is void, and will automatically terminate your rights under
+this License (including any patent licenses granted under the third
+paragraph of section 11).
+
+  However, if you cease all violation of this License, then your
+license from a particular copyright holder is reinstated (a)
+provisionally, unless and until the copyright holder explicitly and
+finally terminates your license, and (b) permanently, if the copyright
+holder fails to notify you of the violation by some reasonable means
+prior to 60 days after the cessation.
+
+  Moreover, your license from a particular copyright holder is
+reinstated permanently if the copyright holder notifies you of the
+violation by some reasonable means, this is the first time you have
+received notice of violation of this License (for any work) from that
+copyright holder, and you cure the violation prior to 30 days after
+your receipt of the notice.
+
+  Termination of your rights under this section does not terminate the
+licenses of parties who have received copies or rights from you under
+this License.  If your rights have been terminated and not permanently
+reinstated, you do not qualify to receive new licenses for the same
+material under section 10.
+
+  9. Acceptance Not Required for Having Copies.
+
+  You are not required to accept this License in order to receive or
+run a copy of the Program.  Ancillary propagation of a covered work
+occurring solely as a consequence of using peer-to-peer transmission
+to receive a copy likewise does not require acceptance.  However,
+nothing other than this License grants you permission to propagate or
+modify any covered work.  These actions infringe copyright if you do
+not accept this License.  Therefore, by modifying or propagating a
+covered work, you indicate your acceptance of this License to do so.
+
+  10. Automatic Licensing of Downstream Recipients.
+
+  Each time you convey a covered work, the recipient automatically
+receives a license from the original licensors, to run, modify and
+propagate that work, subject to this License.  You are not responsible
+for enforcing compliance by third parties with this License.
+
+  An "entity transaction" is a transaction transferring control of an
+organization, or substantially all assets of one, or subdividing an
+organization, or merging organizations.  If propagation of a covered
+work results from an entity transaction, each party to that
+transaction who receives a copy of the work also receives whatever
+licenses to the work the party's predecessor in interest had or could
+give under the previous paragraph, plus a right to possession of the
+Corresponding Source of the work from the predecessor in interest, if
+the predecessor has it or can get it with reasonable efforts.
+
+  You may not impose any further restrictions on the exercise of the
+rights granted or affirmed under this License.  For example, you may
+not impose a license fee, royalty, or other charge for exercise of
+rights granted under this License, and you may not initiate litigation
+(including a cross-claim or counterclaim in a lawsuit) alleging that
+any patent claim is infringed by making, using, selling, offering for
+sale, or importing the Program or any portion of it.
+
+  11. Patents.
+
+  A "contributor" is a copyright holder who authorizes use under this
+License of the Program or a work on which the Program is based.  The
+work thus licensed is called the contributor's "contributor version".
+
+  A contributor's "essential patent claims" are all patent claims
+owned or controlled by the contributor, whether already acquired or
+hereafter acquired, that would be infringed by some manner, permitted
+by this License, of making, using, or selling its contributor version,
+but do not include claims that would be infringed only as a
+consequence of further modification of the contributor version.  For
+purposes of this definition, "control" includes the right to grant
+patent sublicenses in a manner consistent with the requirements of
 this License.
 
-"Plugin" means any separately identifiable extension, add-on, module, package,
-script, provider, adapter, data pack, integration, or other component designed
-to be discovered, loaded, invoked, or used through the Ksword5.1 plugin system,
-whether bundled with the Software, distributed separately, published by the
-copyright holder, or published by a third party.
-
-"Internal Personnel" means Your employees, officers, and individual contractors
-who act solely on Your behalf, need access for the permitted purpose, and are
-bound by duties of confidentiality and non-redistribution.
-
-"Internal Use" means use of the Software by You and Your Internal Personnel for
-Your own personal activities or internal organizational operations. Internal
-Use may support revenue-generating business operations and may include lawful
-work performed for a customer, provided that the customer does not receive a
-copy of the Software and is not given direct or hosted access to the Software or
-its user interface. Internal Use does not include public hosting, service-bureau
-access, sublicensing, or making the Software available to any other person or
-entity.
-
-"Publicity Content" means truthful reviews, articles, posts, reports, tutorials,
-demonstrations, screenshots, recordings, videos, livestreams, presentations,
-benchmarks, criticism, commentary, or other content about the Software.
-
-"Monetized Publicity" means Publicity Content from which the publisher may
-receive advertising revenue or platform revenue sharing, livestream income,
-sponsorship, affiliate commission, creator-fund payments, donations, paid
-placement, subscription or paywall income, or other ordinary content-related
-compensation.
-
-"Redistribution" means making the Software, or any copy of it, available to a
-third party in source, binary, packaged, embedded, mirrored, hosted for download,
-or any other form that enables the third party to obtain a copy.
-
-"Copy Charge" means any money, fee, payment, consideration, required donation,
-subscription, purchase, bundled purchase, access fee, activation fee, membership
-fee, mandatory setup fee, or other direct or indirect economic value required as
-a condition of receiving, downloading, accessing, retaining, or being supplied
-with a copy of the Software. A charge remains a Copy Charge even if the Software
-is described as "free", "included", "complimentary", or bundled with another
-product or service.
-
-"Independent Services" means bona fide services personally or professionally
-performed in connection with the Software, including installation,
-configuration, deployment, debugging, troubleshooting, training, maintenance,
-and technical support. Independent Services do not include merely sending a
-copy or download link, unlocking access, supplying an activation mechanism, or
-renaming a Copy Charge as a service fee. Independent Services are provided only
-on the service provider's own behalf and not on behalf of the original author,
-copyright holder, or original project maintainers.
-
-"Modified Version" means any copy of the Software in which the Software or any
-part of it has been modified, patched, adapted, translated, rebranded, extended,
-removed, replaced, or otherwise changed, other than ordinary configuration
-performed through features intentionally provided by the Software.
-
-"Modified-Version Material" means any screenshot, recording, video, livestream,
-demonstration, presentation, benchmark, report, documentation, code excerpt,
-output capture, log, article, post, or other material that depicts, reproduces,
-describes, demonstrates, or reveals a Modified Version or its modifications.
-
-"External Disclosure" means making a Modified Version or Modified-Version
-Material available outside Your private household or, for a legal entity,
-outside You and Your Internal Personnel. Confidential internal circulation
-among Internal Personnel is not External Disclosure.
-
-"Corresponding Source" means the complete machine-readable source code for the
-exact version of the Software being distributed, in the preferred form for
-making modifications, together with all source files, interface definitions,
-configuration files, and scripts reasonably necessary to build, install, and
-run that version. Corresponding Source includes all modifications made by the
-distributor. It need not include third-party components that are clearly
-identified and independently available under their own licenses.
-
-"Formal Written Authorization" means an express authorization issued by the
-copyright holder, or by a project maintainer expressly authorized by the
-copyright holder, in one of the following forms:
-
-- a paper agreement bearing an authentic signature;
-- an electronic agreement or authorization document bearing an electronic or
-  cryptographic signature intended to authenticate the authorization;
-- an authorization certificate or license file issued through an official
-  licensing channel designated by the copyright holder; or
-- an email verifiably sent from an official licensing address identified in the
-  official repository or official project page, where that email expressly
-  states that it is "Formal Written Authorization" and clearly identifies the
-  authorized person or entity, the Software or version covered, the rights
-  granted, any limitations, and the effective date.
-
-A verbal statement, telephone or voice conversation, livestream statement,
-social-media post, direct message, comment, group-chat message, instant-message,
-forum post, issue-tracker comment, code-review comment, commit message, casual
-email, silence, failure to object, or other informal communication does not
-constitute Formal Written Authorization. A message sent through social or
-instant-messaging software remains informal even if it is text-based, retained,
-exported, forwarded, printed, notarized, or shown in a screenshot.
-
-3. Permissions Granted Without Formal Written Authorization
-
-Subject to full compliance with this License, the copyright holder grants You a
-non-exclusive, worldwide, royalty-free permission to exercise the rights stated
-in this Section without obtaining separate Formal Written Authorization.
-
-3.1 Personal and Organizational Internal Use
-
-You may download, copy, make reasonable backups of, install, configure, build,
-run, inspect, study, evaluate, and use the Software for lawful personal use or
-Internal Use.
-
-This permission expressly includes use inside a company, business, school,
-research institution, nonprofit organization, government body, or other legal
-entity, including use that supports ordinary commercial operations.
-
-You may use the Software internally while performing lawful work for customers
-or clients, provided that You have all required authorization for the systems
-involved and do not give the customer or client a copy of, or direct access to,
-the Software.
-
-3.2 Private and Internal Modification
-
-You may create and use a Modified Version solely for private use or Internal
-Use. A Modified Version kept entirely private or internal does not need to carry
-special "modified" labels, a different product name, an on-screen disclaimer,
-or a public changelog.
-
-This exception removes only the obligation to mark the copy as modified. It does
-not permit removal, falsification, or replacement of the original copyright,
-license, attribution, authorship, provenance, security-warning, or disclaimer
-notices contained in the Software.
-
-You may circulate a private or internal Modified Version and related materials
-among Internal Personnel as reasonably necessary for Internal Use. You may not
-make an External Disclosure of that Modified Version or any Modified-Version
-Material unless You comply with Section 5.
-
-Nothing in this License requires You to publish or disclose modifications that
-remain entirely private or internal.
-
-3.3 Publicity and Monetized Content
-
-You may create, publish, and monetize Publicity Content without separate Formal
-Written Authorization. Permitted monetization expressly includes:
-
-- video advertising revenue and platform revenue sharing;
-- livestream revenue, subscriptions, gifts, and tips;
-- sponsored content and paid placements;
-- affiliate marketing commissions;
-- creator-fund payments, donations, and paywalled commentary; and
-- other ordinary compensation associated with creating or publishing content.
-
-Every item of Publicity Content must provide clear and reasonably accessible
-attribution containing:
-
-- the project name "Ksword5.1";
-- the notice:
-  "Copyright (c) 2025-2026 WangWei-CM / OB_BUFF(Felix3322)."; and
-- the official project repository, official project page, or original
-  distribution source designated by the copyright holder.
-
-The attribution may appear in the content itself, its description, credits,
-show notes, accompanying article, or another location that an ordinary viewer
-can readily find.
-
-Sponsorships, affiliate relationships, and paid placements must be disclosed in
-an accurate manner required by applicable law and platform rules. Such
-commercial relationships must not be presented as sponsorship, approval, or
-endorsement by the original author or project.
-
-Publicity Content does not by itself authorize Redistribution of the Software,
-source code, binaries, build outputs, license keys, or any Plugin. Any
-Redistribution must comply with Section 4 or Section 5.
-
-If Publicity Content depicts, discusses, or demonstrates a Modified Version, it
-must also comply with the modification notice and disclaimer requirements in
-Section 5.
-
-4. No-Charge Redistribution and Independent Paid Services
-
-You may redistribute unmodified copies of the Software in source or binary form
-without separate Formal Written Authorization only if every copy is supplied
-free of charge and every condition in this Section is satisfied.
-
-You must:
-
-- give every recipient a complete copy of this License;
-- retain all copyright, license, attribution, provenance, authorship,
-  security-warning, and disclaimer notices included with the Software;
-- clearly identify the Software as "Ksword5.1" and identify the original
-  copyright holder;
-- provide the official project repository, official project page, or original
-  distribution source designated by the copyright holder;
-- accurately identify Yourself or Your organization as the distributor,
-  packager, or independent service provider, as applicable; and
-- clearly distinguish Your distribution from an official release issued by the
-  original project.
-
-You must not impose or collect any Copy Charge. In particular, You must not:
-
-- sell, rent, lease, license for a fee, or otherwise charge for a copy;
-- require a purchase, subscription, membership, donation, paid registration,
-  service package, or other payment merely to obtain or retain a copy;
-- hide the price of a copy inside a mandatory installation, setup, activation,
-  handling, access, packaging, or similar charge;
-- describe a copy as "free" while making payment to You or an associated party
-  a condition of receiving it; or
-- bundle the Software with a paid product or service in a manner that makes the
-  payment a condition of obtaining the Software copy.
-
-Whenever You distribute the Software in binary, executable, installer, packaged,
-or other non-source form, You must also do one of the following:
-
-- include the complete Corresponding Source with the distributed copy; or
-- provide every recipient with clear, functional, and equivalent access to
-  download the complete Corresponding Source at no charge.
-
-The Corresponding Source must match the exact distributed version. A token,
-partial, outdated, obfuscated, generated-only, or non-buildable source release
-does not satisfy this requirement. If access is provided by a link, the source
-must remain available for at least as long as You continue to offer that binary
-version.
-
-You may separately charge reasonable fees for Independent Services that You
-actually perform, including installation, configuration, deployment, debugging,
-troubleshooting, training, maintenance, and technical support. A paid service
-may include installing or configuring a free copy of the Software for the
-customer. However:
-
-- the Software copy itself must be priced at zero;
-- the fee must be for genuine time, labor, expertise, travel, or an agreed
-  service deliverable, and not for access to or possession of the copy;
-- the service and its price must be described separately and accurately;
-- the customer must be clearly informed that Ksword5.1 itself is available
-  without charge from its official source;
-- no additional fee may be required to obtain the Corresponding Source; and
-- the service provider must comply with the independent-status requirements
-  below.
-
-All such services are independent and unofficial unless the service provider
-has separate Formal Written Authorization expressly granting official status.
-Without that authorization, a service provider must not claim or imply that it
-is the official, authorized, certified, approved, endorsed, or maintainer-backed
-support provider for Ksword5.1. It must not use descriptions such as "official
-Ksword5.1 support", "authorized Ksword5.1 support", "Ksword5.1 support team",
-or substantially similar wording likely to cause confusion.
-
-A service provider may truthfully advertise "independent support for Ksword5.1",
-"third-party Ksword5.1 installation services", or similar wording, provided
-that the independent and unofficial status is clear and reasonably prominent.
-
-You must not impose terms, technical restrictions, or access controls that
-prevent a recipient from exercising the rights granted by this License with
-respect to the Software and Corresponding Source received from You.
-
-Permission to redistribute the Software does not grant any right to redistribute
-a Plugin. Each Plugin remains governed by its own license.
-
-5. Modified Versions and External Disclosure
-
-5.1 When This Section Applies
-
-This Section applies whenever You:
-
-- redistribute a Modified Version;
-- publish, display, stream, transmit, or otherwise make an External Disclosure
-  of a Modified Version; or
-- publish or otherwise externally share any Modified-Version Material,
-  including a screenshot, video, livestream, demonstration, report, benchmark,
-  documentation, or code excerpt.
-
-5.2 Required Modified-Version Notice
-
-Every External Disclosure must clearly and reasonably prominently state that the
-material or software is modified and unofficial. It must include the following
-notice, or a substantially equivalent notice that preserves its full meaning:
-
-"This is or depicts a modified and unofficial version of Ksword5.1. The
-modifications and related statements are solely those of the modifier or
-distributor and do not represent the views, positions, opinions, statements, or
-endorsements of WangWei-CM / OB_BUFF(Felix3322), the copyright holder, or the
-original Ksword5.1 project maintainers."
-
-For a screenshot, post, short clip, or similar item, the notice may appear in a
-clearly visible caption, overlay, description, or immediately accompanying text.
-For a video, livestream, article, report, presentation, or download page, the
-notice must appear in the content, description, credits, documentation, legal
-notices, or another location an ordinary viewer or recipient can readily find.
-The notice must not be hidden, intentionally obscured, rendered unreadable, or
-placed where recipients are unlikely to find it.
-
-5.3 Additional Requirements for Distribution of a Modified Version
-
-You may redistribute a Modified Version without separate Formal Written
-Authorization only free of charge, provided that You comply with the no-Copy-Charge,
-source-code, license, attribution, distributor-identification, independent-status,
-and no-false-authorship requirements of Section 4 and all requirements of this
-Section, including the following:
-
-- clearly identify Yourself or Your organization as the modifier and
-  distributor;
-- provide complete Corresponding Source for the exact Modified Version at no
-  charge under the same conditions stated in Section 4;
-- include a readily accessible MODIFICATIONS, CHANGES, or CHANGELOG file, or an
-  equivalent written notice;
-- identify the files, modules, components, features, or behavior materially
-  changed;
-- meaningfully describe what was added, removed, replaced, patched, or otherwise
-  modified;
-- state the relevant modification date or version and the identity of the
-  modifier; and
-- disclose any known material compatibility, security, or behavioral
-  differences caused by the modifications.
-
-A vague statement such as "modified version", "custom build", or "various
-changes" is not sufficient by itself. The disclosure must contain enough
-information for a reasonable recipient to distinguish the modifications from
-the original Software.
-
-Where reasonably practicable, modified source files distributed to others must
-carry a notice stating that they were changed, together with a relevant date or
-version and the identity of the modifier.
-
-You may use a different product name for a Modified Version, but You must still
-identify it as derived from Ksword5.1, preserve the required attribution, and
-avoid any implication that it is an official release.
-
-The modifier or distributor is solely responsible for its modifications,
-representations, warranties, support commitments, security claims, and any
-damage or liability arising from the Modified Version.
-
-You may charge for Independent Services performed in relation to a Modified
-Version only under Section 4. The Modified Version itself must remain free of
-any Copy Charge, and paid support or other services must not be presented as
-official, authorized, certified, approved, endorsed, or maintainer-backed unless
-that status is expressly granted by Formal Written Authorization.
-
-6. Other Commercial Activities and Hosted Access
-
-The permissions in Sections 3 through 5 allow commercial Internal Use,
-Monetized Publicity, no-charge Redistribution, and reasonable fees for genuine
-Independent Services that You perform on Your own behalf.
-
-Unless separately permitted by Formal Written Authorization, this License does
-not grant permission to:
-
-- provide third parties with direct remote or hosted access to the Software or a
-  Modified Version as a software-as-a-service, hosted service, rental service,
-  service bureau, managed platform, or similar offering;
-- embed or distribute the Software in a closed-source product while withholding
-  the applicable Corresponding Source;
-- offer a white-label version that conceals the origin of the Software;
-- sublicense the Software under terms inconsistent with this License; or
-- omit or waive the source-code, attribution, modification-disclosure, or
-  no-false-authorship requirements.
-
-Using the Software internally to produce reports, analysis, results, or other
-work product for a customer is not, by itself, hosted access, provided that the
-customer does not receive a copy of or direct access to the Software. Any
-Modified-Version Material delivered to a customer must comply with Section 5.
-
-7. No False Authorship, Official Status, or Endorsement
-
-You must not:
-
-- claim, state, imply, or create the misleading impression that You authored the
-  original Ksword5.1 Software;
-- replace the original author's identity with Your own;
-- present Yourself or Your organization as the original author, copyright
-  holder, or official project maintainer;
-- describe an unofficial or modified distribution as an original or official
-  release;
-- use packaging, filenames, metadata, websites, documentation, interfaces, or
-  promotional materials in a way likely to confuse recipients about the origin
-  or authorship of the Software;
-- imply sponsorship, affiliation, approval, certification, or endorsement by
-  the original author, copyright holder, or project maintainer without separate
-  Formal Written Authorization; or
-- claim or imply that independent installation, debugging, training,
-  maintenance, or support services are official, authorized, certified,
-  approved, endorsed, or provided by the original Ksword5.1 project without
-  separate Formal Written Authorization expressly granting that status.
-
-You may truthfully state that Your product, service, content, or distribution
-uses, includes, reviews, supports, or is based on Ksword5.1, provided that the
-statement is accurate, includes required attribution, and does not imply false
-authorship, official status, affiliation, or endorsement.
-
-Except for accurate factual attribution and references reasonably necessary to
-describe origin or compatibility, this License grants no trademark rights in
-the names, aliases, account names, logos, service marks, or visual identity of
-Ksword5.1, WangWei-CM, OB_BUFF, Felix3322, the copyright holder, or the project
-maintainers.
-
-8. Plugins and Independent Plugin Licenses
-
-Every Plugin used by, compatible with, bundled with, distributed alongside, or
-made available through the Ksword5.1 plugin system is independently licensed.
-Each Plugin must be evaluated under the license notice supplied with that
-Plugin.
-
-This License grants no permission to use, copy, install, build, run, inspect,
-modify, publish, redistribute, sublicense, sell, or otherwise exploit any
-Plugin. Rights granted for the Software do not extend to a Plugin, and rights
-granted by a Plugin's license do not extend to the Software.
-
-A Plugin's own license controls only that Plugin. This License continues to
-control the Core Software, including the host-side plugin framework, loader,
-interfaces, APIs, and SDK materials covered by Section 1.
-
-The following facts do not, by themselves, grant any license to a Plugin or show
-endorsement of it:
-
-- the Plugin is bundled with an official or unofficial distribution;
-- the Plugin is listed, indexed, signed, verified, recommended, or downloadable
-  through a project-operated service;
-- the Plugin uses an official API, interface, SDK, naming convention, or file
-  format;
-- the Plugin is technically compatible with the Software; or
-- the Plugin was created by a contributor, maintainer, or copyright holder.
-
-If a Plugin does not include a clear license, no permission is granted under
-this License, and all rights in that Plugin remain reserved to its applicable
-copyright holder, except to the extent applicable law expressly provides
-otherwise.
-
-Anyone who uses or distributes the Software together with one or more Plugins
-is solely responsible for obtaining and complying with all licenses required
-for those Plugins.
-
-9. Third-Party Components
-
-Third-party libraries, SDKs, drivers, tools, frameworks, binaries, code,
-documentation, and assets included with or used by this project remain governed
-by their respective licenses and terms.
-
-This License does not grant rights to third-party materials beyond the rights
-provided by their applicable licenses. If a third-party license conflicts with
-this License with respect to that third-party component, the third-party license
-controls only for that component.
-
-10. Security-Sensitive Functionality
-
-Ksword5.1 contains system-level debugging, inspection, driver, kernel,
-process-control, file, registry, network, and monitoring capabilities. These
-features are intended only for lawful and authorized administration, debugging,
-research, incident response, education, interoperability testing, and defensive
-security work.
-
-You are solely responsible for ensuring that Your possession and use of the
-Software are authorized, lawful, safe, and appropriate.
-
-Do not use the Software on systems, accounts, networks, devices, or resources
-that You do not own or administer, or where You do not have explicit permission
-to perform the relevant actions.
-
-11. Additional Formal Written Terms and License Priority
-
-The copyright holder, or a project maintainer expressly authorized by the
-copyright holder, may grant additional permissions, exceptions, hosted-service
-rights, closed-source distribution rights, trademark rights, or other terms
-through Formal Written Authorization.
-
-A separate formal written agreement controls over this License only to the
-extent that it expressly:
-
-- identifies this License and the Software or version covered;
-- identifies the person or entity receiving the additional rights;
-- identifies the specific provisions or restrictions being changed; and
-- states the extent to which it modifies, supplements, or supersedes those
-  provisions.
-
-All provisions not expressly modified by that Formal Written Authorization
-remain in effect.
-
-To the maximum extent permitted by applicable law, this License is the complete
-public license governing the Software and controls over any inconsistent oral,
-casual, informal, or non-formal statement, communication, representation,
-promise, permission, conduct, or course of dealing attributed to the original
-author, copyright holder, project maintainer, or contributor.
-
-No social-media communication, instant-message, group-chat message, direct
-message, forum post, issue comment, code-review comment, livestream statement,
-voice conversation, casual email, screenshot, forwarded message, or similar
-informal communication may grant, expand, amend, waive, suspend, revoke, or
-reinterpret any right or restriction under this License.
-
-An informal statement such as "you may use it", "that is fine", "I do not
-mind", "go ahead", or words of similar meaning does not create permission
-beyond this License and does not constitute Formal Written Authorization, even
-if the statement is attributed to the original author or a maintainer.
-
-Silence, delay, failure to enforce, prior tolerance of a violation, or failure
-to object to a particular use does not waive any right or authorize future or
-continuing use. A waiver of one breach is not a waiver of any other breach.
-
-12. No Warranty
-
-The Software is provided "as is" and "as available", without warranty of any
-kind, whether express, implied, statutory, or otherwise, including but not
-limited to warranties of merchantability, fitness for a particular purpose,
-title, non-infringement, accuracy, availability, compatibility, reliability, or
-security.
-
-The copyright holder, project maintainers, and contributors do not guarantee
-that the Software will be error-free, secure, uninterrupted, compatible with
-any particular system, or suitable for any particular purpose.
-
-13. Limitation of Liability
-
-To the maximum extent permitted by applicable law, the copyright holder, project
-maintainers, and contributors shall not be liable for any direct, indirect,
-incidental, special, consequential, exemplary, punitive, or other damages,
-including loss of data, corruption of data, system instability, device failure,
-service interruption, security incidents, loss of profits, loss of revenue,
-loss of goodwill, or business interruption, arising from or related to the
-Software, a Modified Version, or their use, even if advised of the possibility
-of such damages.
-
-Anyone who charges for Independent Services, including installation,
-debugging, troubleshooting, training, maintenance, or support, does so solely
-on that person's or entity's own behalf and responsibility, not on behalf of
-the original author, copyright holder, project maintainers, or contributors.
-No fee is permitted for the Software copy itself.
-
-14. Termination
-
-Every permission granted by this License or by Formal Written Authorization is
-conditional on compliance with the applicable terms and terminates
-automatically if You materially violate those terms or exceed the scope of the
-permission.
-
-Upon termination, You must immediately stop the violating activity, remove
-noncompliant public or third-party copies under Your control, correct misleading
-claims, and provide any source code, notices, or disclosures that were
-improperly withheld where correction remains possible.
-
-If a non-willful violation is fully cured, the automatic permissions granted by
-this License resume for future conduct unless the copyright holder has issued a
-Formal Written Authorization expressly terminating or limiting those
-permissions because of repeated or material violations. Cure does not erase
-liability for past infringement or breach.
-
-Termination does not limit any other rights or remedies available to the
-copyright holder. Sections concerning attribution, false authorship, Plugin
-licensing, modified-version notices, warranty disclaimers, limitation of
-liability, license priority, and responsibility for modifications survive to
-the extent necessary to give them effect.
-
-15. Severability
-
-If any provision of this License is found invalid or unenforceable under
-applicable law, that provision shall be interpreted or limited to the maximum
-extent permitted, and the remaining provisions shall remain in effect.
-
-16. Language and Informal Summaries
-
-Any translation, summary, explanation, FAQ, comment, or informal description of
-this License is provided only for convenience and does not independently grant
-rights or modify this License.
-
-If an informal translation or summary conflicts with the English text of this
-License, the English text controls, except where applicable law requires
-otherwise.
-
-
-中文说明（非正式摘要）
-
-本许可证适用于 Ksword5.1 核心软件，包括主程序、驱动、辅助工具、脚本、
-文档、资源、源码、二进制文件，以及属于核心软件一部分的插件宿主框架、
-插件加载器、接口、API 和 SDK。它不授权任何实际插件。
-
-这是一份自定义的社区源码许可证，不宣称属于经 OSI 批准的开源许可证。
-许可证默认允许个人使用、公司内部使用、内部修改、内容变现、免费二次分发，
-以及对真实安装、调试、培训和支持服务收费。
-
-个人、公司、学校、研究机构、非营利组织、政府机构等都可以在无需另行取得
-正式书面授权的情况下，下载、备份、安装、配置、编译、运行、检查、学习、
-评估和使用核心软件。公司内部使用可以服务于正常商业经营。也可以在已经取得
-目标系统合法授权的前提下，使用软件为客户完成工作，但不得把软件副本或软件
-的直接、远程、托管访问提供给客户，除非符合许可证中的相应条款。
-
-个人或公司可以为自己或内部需要修改软件。仅供个人或公司内部使用的修改版
-不需要显示“已修改”标记、不需要改名、不需要在界面显示免责声明，也不需要
-公开修改清单。内部修改可以在受保密和禁止再分发义务约束的员工、管理人员和
-承包人员之间流转。仅供内部使用的修改内容不需要公开源代码。
-
-内部修改版仍然不得删除、伪造或替换原始版权、许可证、作者、来源、安全警告
-和免责声明。只要修改版或与修改版有关的资料被传播到个人家庭或同一法律实体
-之外，就必须遵守修改版公开披露条款。
-
-允许通过宣传、评论和教学内容盈利，不需要另行书面授权。明确允许视频广告
-分成、平台创作者分成、直播收入、订阅、礼物、打赏、赞助内容、付费植入、
-联盟推广佣金、创作者基金、捐赠和付费评论等收入形式。内容必须注明
-Ksword5.1、原版权信息和官方来源；赞助和联盟关系应按法律及平台规则如实披露，
-不得暗示原作者或项目为赞助商、商品或内容背书。
-
-宣传许可本身不等于软件分发许可。展示截图、录屏、视频或直播可以盈利，但若
-内容展示的是修改版，必须清楚注明它是“修改且非官方版本”，并声明修改内容和
-相关表述不代表 WangWei-CM / OB_BUFF(Felix3322)、版权所有者或原项目维护者的
-观点、立场、意见或背书。
-
-允许免费二次分发未修改或符合要求的修改版核心软件，但禁止对软件副本本身
-收费。不得出售、出租、收费授权软件副本，也不得以订阅、会员、强制捐赠、
-付费注册、捆绑购买、激活费、下载费、强制安装费、处理费或其他名义变相收取
-软件副本费用。即使把软件称为“免费”“附送”或“包含在服务中”，只要付款是
-取得或保留副本的条件，仍然属于禁止的软件副本收费。
-
-只要向他人分发二进制文件、可执行文件、安装包或其他非源码形式，就必须同时
-附带该准确版本的完整对应源代码，或者提供无需付费即可取得完整对应源代码的
-清楚有效下载方式。不能只提供过期、残缺、混淆、无法构建或与分发版本不一致
-的源码。
-
-可以对实际提供的独立服务收费，包括安装、配置、部署、调试、故障排除、培训、
-维护和技术支持。收费必须对应真实投入的时间、劳动、专业知识、差旅或约定的
-服务成果，而不能只是发送软件、提供下载链接、解锁访问或把软件费用改名成
-“服务费”。服务中可以替客户安装免费的软件副本，但必须明确告知客户：
-Ksword5.1 软件本身可以从官方来源免费获得，所支付的费用只针对独立服务。
-软件副本价格必须为零，取得对应源代码也不得另行收费。
-
-任何安装、调试、培训、维护或支持服务，在没有正式书面授权的情况下都属于
-独立、非官方的第三方服务。服务提供者不得自称或暗示自己是“官方支持”、
-“授权支持”、“认证支持”、“Ksword5.1 支持团队”、原项目认可的服务商或由
-维护者提供支持。可以如实使用“Ksword5.1 独立支持”“第三方 Ksword5.1 安装
-服务”等表述，但必须让客户能够清楚看出其独立和非官方身份。
-
-修改版一旦向外传播，或者向外发布任何能够展示、描述或暴露修改版的资料，
-包括截图、视频、直播、演示、报告、基准测试、文档、代码片段、日志或帖子，
-就必须在明显且容易找到的位置注明这是修改且非官方版本，并声明不代表原作者
-意见。分发修改版时还必须说明修改者身份、修改日期或版本、修改了哪些文件或
-组件、增加删除替换或修复了什么，以及已知的重要兼容性、安全性或行为差异。
-修改版副本同样必须免费；可以收费的只有符合条件的独立服务。
-
-公司内部使用、内容变现、免费合规分发以及自己提供的安装、调试、培训、支持
-和维护都不需要另行书面授权。但是直接向第三方提供软件界面或功能的 SaaS、
-托管服务、出租服务、服务平台，隐瞒对应源码的闭源集成，隐藏来源的白标版本，
-或者想免除源码、署名、修改说明和禁止冒充作者或官方支持的要求，仍然需要
-正式书面授权。
-
-插件系统中的每个插件都是独立授权的组件。无论插件是否随官方软件附带、由
-官方列出、签名、推荐、下载，是否使用官方 API，或者是否由维护者本人编写，
-本许可证都不会替该插件授予任何权利。必须单独阅读并遵守每个插件自己的许可
-证；没有清楚许可证的插件，不因存在于插件目录中而自动获得使用或分发授权。
-
-第三方库、SDK、驱动、框架、二进制工具、文档和资源继续适用其各自许可证。
-核心软件的授权不会扩展到插件或第三方组件，插件和第三方组件的授权也不会自动
-扩展到核心软件。
-
-Ksword5.1 包含进程、网络、驱动、内核、文件、注册表等系统级调试、检查和
-管理能力，只能在合法、明确授权、合规且安全的场景下使用。不得用于没有所有权、
-管理权或明确操作许可的系统。
-
-“正式书面授权”仍然必须采用许可证规定的正式形式。口头承诺、电话或语音通话、
-直播表态、社交平台帖子、私信、评论、群聊、即时通讯消息、论坛帖子、Issue
-评论、代码审查评论、提交信息、普通邮件、沉默或没有及时反对，都不能修改或
-扩大本许可证。即使聊天文字被保存、导出、转发、打印、公证或截图，也仍然属于
-非正式沟通。只有符合许可证定义并明确列出被授权人、软件版本、具体权利、限制
-和生效日期的正式文件，才能覆盖相冲突的条款。
-
-本软件按“现状”和“可用状态”提供，不提供任何明示或默示担保。对独立安装、
-调试、培训、维护或支持服务收费的人，只能以自己的名义和责任提供，不得冒充
-官方支持，也不能把责任归给原作者、版权所有者或项目维护者。
-
-本中文说明仅用于帮助理解，不构成独立授权条款。如中文说明与英文正文存在不
-一致，以英文正文为准，但适用法律另有强制要求的除外。
-
-
-----------------------------------------------------------------
-Developer's Note (Non-binding)
-
-Anyone who knowingly violates this License, falsely claims authorship, or
-misappropriates the Software may find their conscience reminding them of that
-decision for the rest of their life.
-
-Unlike compressed data, guilt may not come with a reliable decompression tool.
-
-This note is humorous only, is not part of the legal terms, and has no legal
-effect.
-----------------------------------------------------------------
+  Each contributor grants you a non-exclusive, worldwide, royalty-free
+patent license under the contributor's essential patent claims, to
+make, use, sell, offer for sale, import and otherwise run, modify and
+propagate the contents of its contributor version.
+
+  In the following three paragraphs, a "patent license" is any express
+agreement or commitment, however denominated, not to enforce a patent
+(such as an express permission to practice a patent or covenant not to
+sue for patent infringement).  To "grant" such a patent license to a
+party means to make such an agreement or commitment not to enforce a
+patent against the party.
+
+  If you convey a covered work, knowingly relying on a patent license,
+and the Corresponding Source of the work is not available for anyone
+to copy, free of charge and under the terms of this License, through a
+publicly available network server or other readily accessible means,
+then you must either (1) cause the Corresponding Source to be so
+available, or (2) arrange to deprive yourself of the benefit of the
+patent license for this particular work, or (3) arrange, in a manner
+consistent with the requirements of this License, to extend the patent
+license to downstream recipients.  "Knowingly relying" means you have
+actual knowledge that, but for the patent license, your conveying the
+covered work in a country, or your recipient's use of the covered work
+in a country, would infringe one or more identifiable patents in that
+country that you have reason to believe are valid.
+
+  If, pursuant to or in connection with a single transaction or
+arrangement, you convey, or propagate by procuring conveyance of, a
+covered work, and grant a patent license to some of the parties
+receiving the covered work authorizing them to use, propagate, modify
+or convey a specific copy of the covered work, then the patent license
+you grant is automatically extended to all recipients of the covered
+work and works based on it.
+
+  A patent license is "discriminatory" if it does not include within
+the scope of its coverage, prohibits the exercise of, or is
+conditioned on the non-exercise of one or more of the rights that are
+specifically granted under this License.  You may not convey a covered
+work if you are a party to an arrangement with a third party that is
+in the business of distributing software, under which you make payment
+to the third party based on the extent of your activity of conveying
+the work, and under which the third party grants, to any of the
+parties who would receive the covered work from you, a discriminatory
+patent license (a) in connection with copies of the covered work
+conveyed by you (or copies made from those copies), or (b) primarily
+for and in connection with specific products or compilations that
+contain the covered work, unless you entered into that arrangement,
+or that patent license was granted, prior to 28 March 2007.
+
+  Nothing in this License shall be construed as excluding or limiting
+any implied license or other defenses to infringement that may
+otherwise be available to you under applicable patent law.
+
+  12. No Surrender of Others' Freedom.
+
+  If conditions are imposed on you (whether by court order, agreement or
+otherwise) that contradict the conditions of this License, they do not
+excuse you from the conditions of this License.  If you cannot convey a
+covered work so as to satisfy simultaneously your obligations under this
+License and any other pertinent obligations, then as a consequence you may
+not convey it at all.  For example, if you agree to terms that obligate you
+to collect a royalty for further conveying from those to whom you convey
+the Program, the only way you could satisfy both those terms and this
+License would be to refrain entirely from conveying the Program.
+
+  13. Use with the GNU Affero General Public License.
+
+  Notwithstanding any other provision of this License, you have
+permission to link or combine any covered work with a work licensed
+under version 3 of the GNU Affero General Public License into a single
+combined work, and to convey the resulting work.  The terms of this
+License will continue to apply to the part which is the covered work,
+but the special requirements of the GNU Affero General Public License,
+section 13, concerning interaction through a network will apply to the
+combination as such.
+
+  14. Revised Versions of this License.
+
+  The Free Software Foundation may publish revised and/or new versions of
+the GNU General Public License from time to time.  Such new versions will
+be similar in spirit to the present version, but may differ in detail to
+address new problems or concerns.
+
+  Each version is given a distinguishing version number.  If the
+Program specifies that a certain numbered version of the GNU General
+Public License "or any later version" applies to it, you have the
+option of following the terms and conditions either of that numbered
+version or of any later version published by the Free Software
+Foundation.  If the Program does not specify a version number of the
+GNU General Public License, you may choose any version ever published
+by the Free Software Foundation.
+
+  If the Program specifies that a proxy can decide which future
+versions of the GNU General Public License can be used, that proxy's
+public statement of acceptance of a version permanently authorizes you
+to choose that version for the Program.
+
+  Later license versions may give you additional or different
+permissions.  However, no additional obligations are imposed on any
+author or copyright holder as a result of your choosing to follow a
+later version.
+
+  15. Disclaimer of Warranty.
+
+  THERE IS NO WARRANTY FOR THE PROGRAM, TO THE EXTENT PERMITTED BY
+APPLICABLE LAW.  EXCEPT WHEN OTHERWISE STATED IN WRITING THE COPYRIGHT
+HOLDERS AND/OR OTHER PARTIES PROVIDE THE PROGRAM "AS IS" WITHOUT WARRANTY
+OF ANY KIND, EITHER EXPRESSED OR IMPLIED, INCLUDING, BUT NOT LIMITED TO,
+THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
+PURPOSE.  THE ENTIRE RISK AS TO THE QUALITY AND PERFORMANCE OF THE PROGRAM
+IS WITH YOU.  SHOULD THE PROGRAM PROVE DEFECTIVE, YOU ASSUME THE COST OF
+ALL NECESSARY SERVICING, REPAIR OR CORRECTION.
+
+  16. Limitation of Liability.
+
+  IN NO EVENT UNLESS REQUIRED BY APPLICABLE LAW OR AGREED TO IN WRITING
+WILL ANY COPYRIGHT HOLDER, OR ANY OTHER PARTY WHO MODIFIES AND/OR CONVEYS
+THE PROGRAM AS PERMITTED ABOVE, BE LIABLE TO YOU FOR DAMAGES, INCLUDING ANY
+GENERAL, SPECIAL, INCIDENTAL OR CONSEQUENTIAL DAMAGES ARISING OUT OF THE
+USE OR INABILITY TO USE THE PROGRAM (INCLUDING BUT NOT LIMITED TO LOSS OF
+DATA OR DATA BEING RENDERED INACCURATE OR LOSSES SUSTAINED BY YOU OR THIRD
+PARTIES OR A FAILURE OF THE PROGRAM TO OPERATE WITH ANY OTHER PROGRAMS),
+EVEN IF SUCH HOLDER OR OTHER PARTY HAS BEEN ADVISED OF THE POSSIBILITY OF
+SUCH DAMAGES.
+
+  17. Interpretation of Sections 15 and 16.
+
+  If the disclaimer of warranty and limitation of liability provided
+above cannot be given local legal effect according to their terms,
+reviewing courts shall apply local law that most closely approximates
+an absolute waiver of all civil liability in connection with the
+Program, unless a warranty or assumption of liability accompanies a
+copy of the Program in return for a fee.
+
+                     END OF TERMS AND CONDITIONS
+
+            How to Apply These Terms to Your New Programs
+
+  If you develop a new program, and you want it to be of the greatest
+possible use to the public, the best way to achieve this is to make it
+free software which everyone can redistribute and change under these terms.
+
+  To do so, attach the following notices to the program.  It is safest
+to attach them to the start of each source file to most effectively
+state the exclusion of warranty; and each file should have at least
+the "copyright" line and a pointer to where the full notice is found.
+
+    <one line to give the program's name and a brief idea of what it does.>
+    Copyright (C) <year>  <name of author>
+
+    This program is free software: you can redistribute it and/or modify
+    it under the terms of the GNU General Public License as published by
+    the Free Software Foundation, either version 3 of the License, or
+    (at your option) any later version.
+
+    This program is distributed in the hope that it will be useful,
+    but WITHOUT ANY WARRANTY; without even the implied warranty of
+    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+    GNU General Public License for more details.
+
+    You should have received a copy of the GNU General Public License
+    along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+Also add information on how to contact you by electronic and paper mail.
+
+  If the program does terminal interaction, make it output a short
+notice like this when it starts in an interactive mode:
+
+    <program>  Copyright (C) <year>  <name of author>
+    This program comes with ABSOLUTELY NO WARRANTY; for details type `show w'.
+    This is free software, and you are welcome to redistribute it
+    under certain conditions; type `show c' for details.
+
+The hypothetical commands `show w' and `show c' should show the appropriate
+parts of the General Public License.  Of course, your program's commands
+might be different; for a GUI interface, you would use an "about box".
+
+  You should also get your employer (if you work as a programmer) or school,
+if any, to sign a "copyright disclaimer" for the program, if necessary.
+For more information on this, and how to apply and follow the GNU GPL, see
+<https://www.gnu.org/licenses/>.
+
+  The GNU General Public License does not permit incorporating your program
+into proprietary programs.  If your program is a subroutine library, you
+may consider it more useful to permit linking proprietary applications with
+the library.  If this is what you want to do, use the GNU Lesser General
+Public License instead of this License.  But first, please read
+<https://www.gnu.org/licenses/why-not-lgpl.html>.

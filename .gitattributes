@@ -53,6 +53,7 @@ CMakeLists.txt text eol=lf
 # Large icon collections and vendored sources retain their upstream bytes.
 *.svg -text
 third_party/** -text
+third_party/qt_advanced_docking_system/LICENSE.txt whitespace=-trailing-space
 KswordSetup/fltk/** -text
 
 # Binary artifacts and resources.
