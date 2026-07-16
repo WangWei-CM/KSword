@@ -108,7 +108,7 @@ namespace
     // kDockLayoutConfigFileVersion 作用：
     // - 作为 ADS saveState/restoreState 的版本号；
     // - Dock 集合或默认布局发生不兼容变化时递增，可自动放弃旧布局。
-    constexpr int kDockLayoutConfigFileVersion = 1;
+    constexpr int kDockLayoutConfigFileVersion = 2;
 
     // kDockLayoutConfigFileName 作用：
     // - 定义用户拖拽后的 ADS 布局配置文件名；
@@ -7127,6 +7127,11 @@ void MainWindow::ensureDockContentInitialized(ads::CDockWidget* dockWidget)
         if (m_serviceWidget == nullptr) { m_serviceWidget = new ServiceDock(this); }
         realWidget = m_serviceWidget;
     }
+    else if (dockKey == QStringLiteral("plugin"))
+    {
+        if (m_pluginWidget == nullptr) { m_pluginWidget = ks::plugin_host::createTabPluginContainer(this); }
+        realWidget = m_pluginWidget;
+    }
     else if (dockKey == QStringLiteral("misc"))
     {
         if (m_miscWidget == nullptr) { m_miscWidget = new MiscDock(this); }
@@ -7425,7 +7430,8 @@ void MainWindow::ensureVisibleLazyDocksInitialized(const QString& reasonText)
         m_dockHandle,
         m_dockStartup,
         m_dockService,
-        m_dockMisc
+        m_dockMisc,
+        m_dockPlugin
     };
 
     ads::CDockWidget* focusedDockWidget = m_pDockManager->focusedDockWidget();
@@ -7588,6 +7594,7 @@ void MainWindow::initDockWidgets()
     if (shouldEagerLoad(QStringLiteral("startup"))) { m_startupWidget = new StartupDock(this); }
     if (shouldEagerLoad(QStringLiteral("service"))) { m_serviceWidget = new ServiceDock(this); }
     if (shouldEagerLoad(QStringLiteral("misc"))) { m_miscWidget = new MiscDock(this); }
+    if (shouldEagerLoad(QStringLiteral("plugin"))) { m_pluginWidget = ks::plugin_host::createTabPluginContainer(this); }
 
     reportStartupProgress(
         60,
@@ -7718,6 +7725,7 @@ void MainWindow::initDockWidgets()
     createLazyDockWidget(m_dockStartup, m_startupWidget, ks::i18n::text(QStringLiteral("dock.startup"), QStringLiteral("启动项")), QStringLiteral("startup"));
     createLazyDockWidget(m_dockService, m_serviceWidget, ks::i18n::text(QStringLiteral("dock.service"), QStringLiteral("服务")), QStringLiteral("service"));
     createLazyDockWidget(m_dockMisc, m_miscWidget, ks::i18n::text(QStringLiteral("dock.misc"), QStringLiteral("杂项")), QStringLiteral("misc"));
+    createLazyDockWidget(m_dockPlugin, m_pluginWidget, ks::i18n::text(QStringLiteral("dock.plugin"), QStringLiteral("插件")), QStringLiteral("plugin"));
 
     // 创建右侧和底部的基本Widgets
     m_dockCurrentOp = createDockWidget(m_progressWidget, ks::i18n::text(QStringLiteral("dock.current_op"), QStringLiteral("当前操作")), QStringLiteral("current_op"));
@@ -7764,6 +7772,7 @@ void MainWindow::initDockWidgets()
         m_dockStartup,
         m_dockService,
         m_dockMisc,
+        m_dockPlugin,
         m_dockCurrentOp,
         m_dockLog,
         m_dockImmediate,
@@ -7837,6 +7846,7 @@ void MainWindow::setupDockLayout()
     m_pDockManager->addDockWidgetTabToArea(m_dockStartup, leftDockArea);
     m_pDockManager->addDockWidgetTabToArea(m_dockService, leftDockArea);
     m_pDockManager->addDockWidgetTabToArea(m_dockMisc, leftDockArea);
+    m_pDockManager->addDockWidgetTabToArea(m_dockPlugin, leftDockArea);
 
     // 方法2: 或者使用addDockWidget并指定CenterDockWidgetArea
     // m_pDockManager->addDockWidget(ads::CenterDockWidgetArea, m_dockProcess, leftDockArea);
@@ -8176,6 +8186,11 @@ void MainWindow::initAppearanceSettings()
         {
             targetDock = m_dockMisc;
             targetName = QStringLiteral("杂项");
+        }
+        else if (normalizedKey == QStringLiteral("plugin"))
+        {
+            targetDock = m_dockPlugin;
+            targetName = QStringLiteral("插件");
         }
         else if (normalizedKey == QStringLiteral("winapi"))
         {
