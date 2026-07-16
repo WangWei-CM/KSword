@@ -6,7 +6,7 @@
 <div align="center">
 
   <img
-    src="../Ksword5.1/Ksword5.1/Resource/Logo/MainLogo.png"
+    src="../Ksword5.1/Ksword5.1/Resource/Logo/KswordHome-ZH.png"
     alt="KSword ARK Logo"
     width="520"
   />

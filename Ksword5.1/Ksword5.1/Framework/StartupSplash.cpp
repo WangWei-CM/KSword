@@ -1,5 +1,7 @@
 #include "StartupSplash.h"
 
+#include "../Internationalization/LanguageManager.h"
+
 #include <QtCore/QFile>
 #include <QtCore/QString>
 
@@ -27,10 +29,26 @@ namespace
     // - 用于注册和创建 Win32 Layered Window。
     constexpr wchar_t kFrameworkSplashClassName[] = L"KswordFrameworkStartupSplashWindow";
 
-    // kFrameworkSplashLogoResourcePath 作用：
-    // - 启动画面 Logo 的 qrc 资源路径；
+    // kFrameworkSplashLogoResourcePath* 作用：
+    // - 分别保存中英文启动图的 qrc 资源路径；
     // - 启动图直接从程序资源读取，不依赖磁盘目录。
-    constexpr auto kFrameworkSplashLogoResourcePath = ":/Image/Resource/Logo/MainLogo.png";
+    constexpr auto kFrameworkSplashLogoResourcePathEnglish =
+        ":/Image/Resource/Logo/KswordHome-En.png";
+    constexpr auto kFrameworkSplashLogoResourcePathChinese =
+        ":/Image/Resource/Logo/KswordHome-ZH.png";
+
+    // frameworkSplashLogoResourcePath 作用：
+    // - 根据 LanguageManager 已解析出的最终界面语言选择启动图；
+    // - 简体中文使用中文图，其余语言使用英文图。
+    QString frameworkSplashLogoResourcePath()
+    {
+        const QString currentLanguageId =
+            ks::i18n::LanguageManager::instance().currentLanguageId();
+        return QString::fromLatin1(
+            currentLanguageId.startsWith(QStringLiteral("zh"), Qt::CaseInsensitive)
+                ? kFrameworkSplashLogoResourcePathChinese
+                : kFrameworkSplashLogoResourcePathEnglish);
+    }
 
     // clampProgressPercent 作用：
     // - 把进度值约束在 0~100；
@@ -253,7 +271,7 @@ private:
         }
 
         // logoFile 作用：读取 qrc 内嵌 Logo 的二进制数据。
-        QFile logoFile(QString::fromLatin1(kFrameworkSplashLogoResourcePath));
+        QFile logoFile(frameworkSplashLogoResourcePath());
         if (!logoFile.open(QIODevice::ReadOnly))
         {
             shutdown();
