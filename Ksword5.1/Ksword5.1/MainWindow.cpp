@@ -4656,12 +4656,23 @@ void MainWindow::initMenus()
     m_updateMenuButton->setFixedHeight(22);
     connect(m_updateMenuButton, &QToolButton::clicked, this, &MainWindow::openReleasePageFromMenu);
 
+    m_githubMenuButton = new QToolButton(m_topActionRowWidget);
+    m_githubMenuButton->setObjectName(QStringLiteral("ksGitHubMenuButton"));
+    m_githubMenuButton->setText(QStringLiteral("GitHub"));
+    m_githubMenuButton->setToolTip(QStringLiteral("打开项目 GitHub 仓库主页"));
+    ks::i18n::LanguageManager::instance().bindText(m_githubMenuButton, QStringLiteral("menu.github"), QStringLiteral("GitHub"));
+    ks::i18n::LanguageManager::instance().bindToolTip(m_githubMenuButton, QStringLiteral("menu.github.tooltip"), QStringLiteral("打开项目 GitHub 仓库主页"));
+    m_githubMenuButton->setToolButtonStyle(Qt::ToolButtonTextOnly);
+    m_githubMenuButton->setAutoRaise(true);
+    m_githubMenuButton->setFixedHeight(22);
+    connect(m_githubMenuButton, &QToolButton::clicked, this, &MainWindow::openGitHubRepositoryFromMenu);
+
     m_licenseMenuButton = new QToolButton(m_topActionRowWidget);
     m_licenseMenuButton->setObjectName(QStringLiteral("ksLicenseMenuButton"));
     m_licenseMenuButton->setText(QStringLiteral("许可证"));
-    m_licenseMenuButton->setToolTip(QStringLiteral("查看同目录 license 文件"));
+    m_licenseMenuButton->setToolTip(QStringLiteral("查看软件许可证"));
     ks::i18n::LanguageManager::instance().bindText(m_licenseMenuButton, QStringLiteral("menu.license"), QStringLiteral("许可证"));
-    ks::i18n::LanguageManager::instance().bindToolTip(m_licenseMenuButton, QStringLiteral("menu.license.tooltip"), QStringLiteral("查看同目录 license 文件"));
+    ks::i18n::LanguageManager::instance().bindToolTip(m_licenseMenuButton, QStringLiteral("menu.license.tooltip"), QStringLiteral("查看软件许可证"));
     m_licenseMenuButton->setToolButtonStyle(Qt::ToolButtonTextOnly);
     m_licenseMenuButton->setAutoRaise(true);
     m_licenseMenuButton->setFixedHeight(22);
@@ -4708,6 +4719,7 @@ void MainWindow::initMenus()
     refreshTopActionButtonStyles();
 
     m_topActionRowLayout->addWidget(m_updateMenuButton, 0, Qt::AlignLeft | Qt::AlignVCenter);
+    m_topActionRowLayout->addWidget(m_githubMenuButton, 0, Qt::AlignLeft | Qt::AlignVCenter);
     m_topActionRowLayout->addWidget(m_licenseMenuButton, 0, Qt::AlignLeft | Qt::AlignVCenter);
     m_topActionRowLayout->addWidget(m_exitMenuButton, 0, Qt::AlignLeft | Qt::AlignVCenter);
     m_topActionRowLayout->addWidget(m_pluginMenuButton, 0, Qt::AlignLeft | Qt::AlignVCenter);
@@ -4771,10 +4783,11 @@ QString MainWindow::buildTopActionButtonStyle() const
 
 void MainWindow::refreshTopActionButtonStyles()
 {
-    // 顶部功能按钮刷新：主题切换后四个按钮都重新套用同一份 QSS。
+    // 顶部功能按钮刷新：主题切换后所有按钮都重新套用同一份 QSS。
     const QString topActionButtonStyle = buildTopActionButtonStyle();
     const QList<QToolButton*> topActionButtonList{
         m_updateMenuButton,
+        m_githubMenuButton,
         m_licenseMenuButton,
         m_exitMenuButton,
         m_pluginMenuButton,
@@ -4791,7 +4804,7 @@ void MainWindow::refreshTopActionButtonStyles()
 
 void MainWindow::openReleasePageFromMenu()
 {
-    const QUrl releaseUrl(QStringLiteral("https://github.com/WangWei-CM/KSword/releases"));
+    const QUrl releaseUrl(QStringLiteral("https://github.com/KSwordDEV/KSword/releases"));
     if (!QDesktopServices::openUrl(releaseUrl))
     {
         QMessageBox::warning(
@@ -4801,9 +4814,36 @@ void MainWindow::openReleasePageFromMenu()
     }
 }
 
+void MainWindow::openGitHubRepositoryFromMenu()
+{
+    const QUrl repositoryUrl(QStringLiteral("https://github.com/KSwordDEV/KSword"));
+    if (!QDesktopServices::openUrl(repositoryUrl))
+    {
+        QMessageBox::warning(
+            this,
+            QStringLiteral("GitHub"),
+            QStringLiteral("无法打开 GitHub 仓库：%1").arg(repositoryUrl.toString()));
+    }
+}
+
 void MainWindow::showLicenseFromMenu()
 {
-    const QString licensePath = QDir(QCoreApplication::applicationDirPath()).absoluteFilePath(QStringLiteral("license"));
+    const QDir applicationDirectory(QCoreApplication::applicationDirPath());
+    const QStringList licenseFileNames{
+        QStringLiteral("LICENSE"),
+        QStringLiteral("LICENSE.txt"),
+        QStringLiteral("license")
+    };
+    QString licensePath = applicationDirectory.absoluteFilePath(licenseFileNames.constFirst());
+    for (const QString& licenseFileName : licenseFileNames)
+    {
+        const QString candidatePath = applicationDirectory.absoluteFilePath(licenseFileName);
+        if (QFileInfo(candidatePath).isFile())
+        {
+            licensePath = candidatePath;
+            break;
+        }
+    }
     QFile licenseFile(licensePath);
     QString licenseText;
     if (licenseFile.open(QIODevice::ReadOnly | QIODevice::Text))
@@ -4814,7 +4854,7 @@ void MainWindow::showLicenseFromMenu()
     }
     else
     {
-        licenseText = QStringLiteral("未找到同目录 license 文件：\n%1").arg(QDir::toNativeSeparators(licensePath));
+        licenseText = QStringLiteral("未找到程序同目录的 LICENSE 文件：\n%1").arg(QDir::toNativeSeparators(licensePath));
     }
 
     QDialog licenseDialog(this);
@@ -4835,7 +4875,7 @@ void MainWindow::showLicenseFromMenu()
     QTextEdit licenseEditor(&licenseDialog);
     licenseEditor.setReadOnly(true);
     licenseEditor.setPlainText(licenseText.trimmed().isEmpty()
-        ? QStringLiteral("license 文件为空。")
+        ? QStringLiteral("LICENSE 文件为空。")
         : licenseText);
     dialogLayout.addWidget(&licenseEditor, 1);
 

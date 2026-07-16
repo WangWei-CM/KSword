@@ -507,6 +507,7 @@
     <None Include="qtvars.pro" />
     <None Include="..\..\tools\compress_qt_profile_json.py" />
     <None Include="..\..\tools\i18n_language_pack.py" />
+    <None Include="..\..\LICENSE" />
     <None Include="profiles\ark_dyndata_pack_v2.json" />
     <None Include="profiles\ark_dyndata_pack_v3.json" />
     <None Include="languages\en-US.json" />
@@ -526,6 +527,13 @@
     <MakeDir Directories="$(TargetDir)languages\" Condition="'@(KswordLanguagePack)' != ''" />
     <Copy SourceFiles="@(KswordLanguagePack)" DestinationFolder="$(TargetDir)languages\" SkipUnchangedFiles="true" Condition="'@(KswordLanguagePack)' != ''" />
     <Warning Condition="'@(KswordLanguagePack)' == ''" Text="No KSword language packs were found under $(MSBuildProjectDirectory)\languages." />
+  </Target>
+  <Target Name="CopyKswordLicense" AfterTargets="Build">
+    <PropertyGroup>
+      <KswordLicenseSource>$(MSBuildProjectDirectory)\..\..\LICENSE</KswordLicenseSource>
+    </PropertyGroup>
+    <Error Condition="!Exists('$(KswordLicenseSource)')" Text="KSword license file was not found: $(KswordLicenseSource)" />
+    <Copy SourceFiles="$(KswordLicenseSource)" DestinationFiles="$(TargetDir)LICENSE" SkipUnchangedFiles="true" />
   </Target>
   <Target Name="CopyKswordArkDynDataProfilePack" AfterTargets="Build">
     <!-- v3 pack carries typed StructOffset items such as EpActiveProcessLinks; v2 is kept only as a callback-era fallback. -->

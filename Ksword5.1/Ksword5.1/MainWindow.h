@@ -250,7 +250,9 @@ private:
     void showSettingsPanelFromMenu();
     // openReleasePageFromMenu 作用：从顶部菜单打开 GitHub Releases 页面检查更新。
     void openReleasePageFromMenu();
-    // showLicenseFromMenu 作用：读取程序同目录 license 文件并展示许可证内容。
+    // openGitHubRepositoryFromMenu 作用：从顶部菜单打开项目 GitHub 仓库主页。
+    void openGitHubRepositoryFromMenu();
+    // showLicenseFromMenu 作用：读取程序同目录 LICENSE 文件并展示许可证内容。
     void showLicenseFromMenu();
 
     // buildTopActionButtonStyle 作用：
@@ -260,7 +262,7 @@ private:
     QString buildTopActionButtonStyle() const;
 
     // refreshTopActionButtonStyles 作用：
-    // - 根据当前主题刷新“检查更新/许可证/退出/插件/设置”顶部功能按钮；
+    // - 根据当前主题刷新“检查更新/GitHub/许可证/退出/插件/设置”顶部功能按钮；
     // - 解决深色模式切换后旧浅色样式残留的问题。
     void refreshTopActionButtonStyles();
 
@@ -500,6 +502,7 @@ private:
     QWidget* m_topActionRowWidget = nullptr;     // m_topActionRowWidget：标题栏下方的功能条容器（常用动作 + 权限按钮）。
     QHBoxLayout* m_topActionRowLayout = nullptr; // m_topActionRowLayout：功能条水平布局。
     QToolButton* m_updateMenuButton = nullptr;   // m_updateMenuButton：功能条左侧“检查更新”按钮。
+    QToolButton* m_githubMenuButton = nullptr;   // m_githubMenuButton：功能条左侧“GitHub”仓库按钮。
     QToolButton* m_licenseMenuButton = nullptr;  // m_licenseMenuButton：功能条左侧“许可证”按钮。
     QToolButton* m_exitMenuButton = nullptr;     // m_exitMenuButton：功能条左侧“退出”按钮。
     QToolButton* m_pluginMenuButton = nullptr;   // m_pluginMenuButton：功能条左侧“插件管理”入口按钮。

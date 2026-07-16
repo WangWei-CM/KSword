@@ -42,6 +42,7 @@ Copy-Item 'APIMonitor_x64\x64\Release\APIMonitor_x64.pdb' $stage -Force
 Copy-Item 'KswordARKDriver\x64\Release\KswordARK.sys' $stage -Force
 Copy-Item 'KswordARKDriver\x64\Release\KswordARK.pdb' $stage -Force
 Copy-Item 'KswordARKDriver\x64\Release\KswordARKDriver.inf' $stage -Force
+Copy-Item 'LICENSE' (Join-Path $stage 'LICENSE') -Force
 
 $profileDir=Join-Path $stage 'profiles'
 if (!(Test-Path $profileDir)) { New-Item -ItemType Directory -Path $profileDir | Out-Null }
@@ -84,10 +85,10 @@ if ($exit -ne 0) { exit $exit }
 ```powershell
 $seven='C:\Users\Felix\CLionProjects\Wisdom-Weasel\7z.exe'
 & $seven t $archive
-& $seven l $archive 'Release\Ksword5.1.exe' 'Release\Taskbar.exe' 'Release\KswordHUD.exe' 'Release\APIMonitor_x64.dll' 'Release\KswordARK.sys' 'Release\KswordARKDriver\KswordARK.sys' 'Release\profiles\ark_dyndata_pack_v3.json' 'Release\profiles\registry_optimization_items.json' 'Release\profiles\registry_optimization_assets\Config\Data.zip' 'Release\languages\zh-CN.json' 'Release\languages\en-US.json' 'Release\platforms\qwindows.dll'
+& $seven l $archive 'Release\Ksword5.1.exe' 'Release\Taskbar.exe' 'Release\KswordHUD.exe' 'Release\APIMonitor_x64.dll' 'Release\KswordARK.sys' 'Release\KswordARKDriver\KswordARK.sys' 'Release\LICENSE' 'Release\profiles\ark_dyndata_pack_v3.json' 'Release\profiles\registry_optimization_items.json' 'Release\profiles\registry_optimization_assets\Config\Data.zip' 'Release\languages\zh-CN.json' 'Release\languages\en-US.json' 'Release\platforms\qwindows.dll'
 ```
 
-校验通过时，`7z t` 输出应包含 `Everything is Ok`。本流程生成的包根目录必须是 `Release\`，不要把 `dist\KswordARK-release-work\` 或其它临时目录打进包里。
+校验通过时，`7z t` 输出应包含 `Everything is Ok`，且列表中必须包含 `Release\LICENSE`；主程序顶部“许可证”页面从 exe 同目录优先读取此文件。本流程生成的包根目录必须是 `Release\`，不要把 `dist\KswordARK-release-work\` 或其它临时目录打进包里。
 
 
 ## Phase -1 协作规范
