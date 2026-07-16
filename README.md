@@ -208,3 +208,5 @@ The [KSwordDEV/Website](https://github.com/KSwordDEV/Website) repository indepen
 ## Notice
 
 This project includes system-level debugging, auditing, and management capabilities. Use it only in legally authorized and compliant environments.
+
+The term “Open Source” used in this project’s promotional materials means only that the source code is publicly available for inspection, i.e. source-available. It does not mean that this project is open source under the OSI definition or approved by the OSI. You may view, use, and modify the source code only in compliance with this project’s license, and you may not profit by selling the software or copies of it. All permissions and restrictions are governed by the full license text.
