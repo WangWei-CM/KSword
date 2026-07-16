@@ -13,6 +13,7 @@
 #include <QtGlobal>
 
 class QMenu;
+class QTabWidget;
 class QWidget;
 
 namespace ks::plugin_host
@@ -37,6 +38,12 @@ namespace ks::plugin_host
     // - 只展示声明支持当前目标类型的插件，菜单层级始终为“插件 → <插件名>”；
     // - 选择动作后由 Ksword 直接用 QProcess 启动独立入口。
     void populateTargetMenu(QMenu* menu, QWidget* owner, const InvocationContext& context);
+
+    // populateTabPlugins：
+    // - 发现 plugin_type=tab 的外部进程插件；
+    // - 在宿主 QTabWidget 中建立原生子窗口容器，不把插件 DLL/代码加载进 KSword；
+    // - 插件窗口句柄必须属于刚启动的插件进程，且必须直接挂到宿主提供的 HWND。
+    void populateTabPlugins(QTabWidget* tabWidget, QWidget* owner);
 
     // showPluginManager：
     // - 打开非模态插件管理窗口；

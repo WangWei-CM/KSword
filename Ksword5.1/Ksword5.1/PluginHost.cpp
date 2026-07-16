@@ -14,6 +14,7 @@
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QDir>
+#include <QEvent>
 #include <QFile>
 #include <QFileInfo>
 #include <QHash>
@@ -33,17 +34,26 @@
 #include <QProcess>
 #include <QProcessEnvironment>
 #include <QProgressBar>
+#include <QPointer>
 #include <QPushButton>
 #include <QRegularExpression>
 #include <QSaveFile>
+#include <QShowEvent>
 #include <QStandardPaths>
 #include <QTableWidget>
 #include <QTableWidgetItem>
 #include <QTabWidget>
+#include <QTextDocument>
 #include <QTimer>
 #include <QUrl>
 #include <QUuid>
 #include <QVBoxLayout>
+#include <QWidget>
+
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <Windows.h>
 
 namespace
 {
@@ -82,18 +92,28 @@ namespace
         QList<VisualizationField> summary;
     };
 
+    struct PluginTabPresentation
+    {
+        bool enabled = false;
+        QString title;
+        QString readyEvent;
+        int startupTimeoutMs = 15000;
+    };
+
     struct PluginDescriptor
     {
         QString id;
         QString name;
         QString version;
         QString description;
+        QString pluginType = QStringLiteral("command");
         QString runtime;
         QString entrypointPath;
         QString defaultCommand;
         QString pluginDirectory;
         QStringList targets;
         PluginVisualization visualization;
+        PluginTabPresentation tabPresentation;
     };
 
     struct PluginListResult
@@ -431,6 +451,61 @@ namespace
         return true;
     }
 
+    bool parseTabPresentation(
+        const QJsonObject& manifest,
+        const QString& pluginType,
+        PluginTabPresentation* presentationOut,
+        QString* errorOut)
+    {
+        if (presentationOut == nullptr || errorOut == nullptr)
+        {
+            return false;
+        }
+        *presentationOut = {};
+        const QJsonValue tabValue = manifest.value(QStringLiteral("tab"));
+        if (pluginType != QStringLiteral("tab"))
+        {
+            if (!tabValue.isUndefined())
+            {
+                *errorOut = QStringLiteral("tab 配置只允许用于 plugin_type=tab 的插件。");
+                return false;
+            }
+            return true;
+        }
+        if (!tabValue.isObject())
+        {
+            *errorOut = QStringLiteral("Tab 型插件必须提供 tab 配置对象。");
+            return false;
+        }
+
+        const QJsonObject tabObject = tabValue.toObject();
+        PluginTabPresentation presentation;
+        if (!readRequiredString(tabObject, "title", &presentation.title, errorOut) ||
+            !readRequiredString(tabObject, "ready_event", &presentation.readyEvent, errorOut))
+        {
+            return false;
+        }
+        if (presentation.title.size() > 96 || !isValidProtocolName(presentation.readyEvent))
+        {
+            *errorOut = QStringLiteral("tab.title 或 tab.ready_event 不合法。");
+            return false;
+        }
+        const QJsonValue timeoutValue = tabObject.value(QStringLiteral("startup_timeout_ms"));
+        if (!timeoutValue.isUndefined())
+        {
+            const int timeoutMs = timeoutValue.toInt(-1);
+            if (!timeoutValue.isDouble() || timeoutMs < 1000 || timeoutMs > 60000)
+            {
+                *errorOut = QStringLiteral("tab.startup_timeout_ms 必须介于 1000 与 60000 毫秒之间。");
+                return false;
+            }
+            presentation.startupTimeoutMs = timeoutMs;
+        }
+        presentation.enabled = true;
+        *presentationOut = presentation;
+        return true;
+    }
+
     bool isApprovedMarketplaceUrl(const QUrl& url)
     {
         return url.isValid() && url.scheme().compare(QStringLiteral("https"), Qt::CaseInsensitive) == 0 &&
@@ -491,7 +566,7 @@ namespace
         {
             const QString target = value.toString().trimmed().toLower();
             if ((target == QStringLiteral("file") || target == QStringLiteral("process") ||
-                target == QStringLiteral("network")) &&
+                target == QStringLiteral("network") || target == QStringLiteral("tab")) &&
                 !plugin.targets.contains(target))
             {
                 plugin.targets.push_back(target);
@@ -499,7 +574,7 @@ namespace
         }
         if (plugin.targets.isEmpty())
         {
-            *errorOut = QStringLiteral("商城条目的 targets 必须包含 file、process 和/或 network。");
+            *errorOut = QStringLiteral("商城条目的 targets 必须包含 file、process、network 和/或 tab。");
             return false;
         }
         *pluginOut = plugin;
@@ -562,6 +637,12 @@ namespace
         {
             return false;
         }
+        descriptor.pluginType = object.value(QStringLiteral("plugin_type")).toString(QStringLiteral("command")).trimmed().toLower();
+        if (descriptor.pluginType != QStringLiteral("command") && descriptor.pluginType != QStringLiteral("tab"))
+        {
+            *errorOut = QStringLiteral("plugin_type 只能是 command 或 tab。");
+            return false;
+        }
         if (descriptor.id != pluginId || !isValidPluginId(descriptor.id))
         {
             *errorOut = QStringLiteral("清单 id 必须与插件目录名完全一致。");
@@ -582,20 +663,40 @@ namespace
         for (const QJsonValue& target : targets)
         {
             const QString targetText = target.toString().trimmed().toLower();
-            if ((targetText == QStringLiteral("file") || targetText == QStringLiteral("process") ||
-                targetText == QStringLiteral("network")) &&
-                !descriptor.targets.contains(targetText))
+            const bool allowedTarget = descriptor.pluginType == QStringLiteral("tab")
+                ? targetText == QStringLiteral("tab")
+                : (targetText == QStringLiteral("file") || targetText == QStringLiteral("process") ||
+                    targetText == QStringLiteral("network"));
+            if (!allowedTarget)
+            {
+                *errorOut = descriptor.pluginType == QStringLiteral("tab")
+                    ? QStringLiteral("Tab 型插件的 targets 只能包含 tab。")
+                    : QStringLiteral("命令型插件的 targets 只能包含 file、process 和/或 network。");
+                return false;
+            }
+            if (!descriptor.targets.contains(targetText))
             {
                 descriptor.targets.push_back(targetText);
             }
         }
         if (descriptor.targets.isEmpty())
         {
-            *errorOut = QStringLiteral("targets 必须包含 file、process 和/或 network。");
+            *errorOut = descriptor.pluginType == QStringLiteral("tab")
+                ? QStringLiteral("Tab 型插件的 targets 必须包含 tab。")
+                : QStringLiteral("targets 必须包含 file、process 和/或 network。");
             return false;
         }
         if (!parseVisualization(object, &descriptor.visualization, errorOut))
         {
+            return false;
+        }
+        if (!parseTabPresentation(object, descriptor.pluginType, &descriptor.tabPresentation, errorOut))
+        {
+            return false;
+        }
+        if (descriptor.pluginType == QStringLiteral("tab") && descriptor.visualization.enabled)
+        {
+            *errorOut = QStringLiteral("Tab 型插件不能同时声明 scan-table visualization。");
             return false;
         }
 
@@ -747,6 +848,55 @@ namespace
                 arguments << QStringLiteral("--process-name") << context.processName;
             }
         }
+        *argumentsOut = arguments;
+        return true;
+    }
+
+    bool buildTabPluginCommand(
+        const PluginDescriptor& descriptor,
+        const WId parentWindowId,
+        QString* programOut,
+        QStringList* argumentsOut,
+        QString* errorOut)
+    {
+        if (programOut == nullptr || argumentsOut == nullptr || errorOut == nullptr ||
+            descriptor.pluginType != QStringLiteral("tab") || !descriptor.tabPresentation.enabled)
+        {
+            return false;
+        }
+        QStringList arguments;
+        if (descriptor.runtime == QStringLiteral("python"))
+        {
+            QString python = qEnvironmentVariable("KSWORD_PLUGIN_PYTHON").trimmed();
+            bool usePythonLauncher = false;
+            if (!python.isEmpty() && !QFileInfo(python).isFile())
+            {
+                *errorOut = QStringLiteral("KSWORD_PLUGIN_PYTHON 未指向有效文件：%1").arg(python);
+                return false;
+            }
+            if (python.isEmpty()) python = QStandardPaths::findExecutable(QStringLiteral("python.exe"));
+            if (python.isEmpty())
+            {
+                python = QStandardPaths::findExecutable(QStringLiteral("py.exe"));
+                usePythonLauncher = !python.isEmpty();
+            }
+            if (python.isEmpty())
+            {
+                *errorOut = QStringLiteral("找不到 Python 运行时；请安装 python.exe/py.exe 或设置 KSWORD_PLUGIN_PYTHON。");
+                return false;
+            }
+            *programOut = python;
+            if (usePythonLauncher) arguments << QStringLiteral("-3");
+            arguments << descriptor.entrypointPath;
+        }
+        else
+        {
+            *programOut = descriptor.entrypointPath;
+        }
+
+        arguments << QStringLiteral("--ksword-plugin") << descriptor.defaultCommand << QStringLiteral("--")
+            << QStringLiteral("--parent-hwnd") << QString::number(static_cast<qulonglong>(parentWindowId))
+            << QStringLiteral("--host-pid") << QString::number(QCoreApplication::applicationPid());
         *argumentsOut = arguments;
         return true;
     }
@@ -1277,6 +1427,333 @@ namespace
         dialog->start();
     }
 
+    class PluginTabPage final : public QWidget
+    {
+    public:
+        PluginTabPage(QWidget* parent, const PluginDescriptor& descriptor)
+            : QWidget(parent), m_descriptor(descriptor)
+        {
+            setObjectName(QStringLiteral("ksExternalPluginTab_%1").arg(descriptor.id));
+            auto* rootLayout = new QVBoxLayout(this);
+            rootLayout->setContentsMargins(4, 4, 4, 4);
+            rootLayout->setSpacing(4);
+
+            auto* statusRow = new QHBoxLayout();
+            m_statusLabel = new QLabel(QStringLiteral("正在启动外部 Tab 插件…"), this);
+            m_statusLabel->setWordWrap(true);
+            statusRow->addWidget(m_statusLabel, 1);
+            m_diagnosticsButton = new QPushButton(QStringLiteral("诊断"), this);
+            m_retryButton = new QPushButton(QStringLiteral("重试"), this);
+            m_retryButton->setVisible(false);
+            statusRow->addWidget(m_diagnosticsButton);
+            statusRow->addWidget(m_retryButton);
+            rootLayout->addLayout(statusRow);
+
+            m_surface = new QWidget(this);
+            m_surface->setObjectName(QStringLiteral("ksExternalPluginNativeSurface"));
+            m_surface->setAttribute(Qt::WA_NativeWindow, true);
+            m_surface->setFocusPolicy(Qt::StrongFocus);
+            m_surface->setStyleSheet(QStringLiteral("background:%1;border:1px solid %2;")
+                .arg(KswordTheme::SurfaceHex(), KswordTheme::BorderHex()));
+            m_surface->installEventFilter(this);
+            rootLayout->addWidget(m_surface, 1);
+
+            m_diagnostics = new QPlainTextEdit(this);
+            m_diagnostics->setReadOnly(true);
+            m_diagnostics->setMaximumHeight(180);
+            m_diagnostics->document()->setMaximumBlockCount(2000);
+            m_diagnostics->setVisible(false);
+            rootLayout->addWidget(m_diagnostics);
+
+            connect(m_diagnosticsButton, &QPushButton::clicked, this, [this]() {
+                m_diagnostics->setVisible(!m_diagnostics->isVisible());
+            });
+            connect(m_retryButton, &QPushButton::clicked, this, [this]() { start(); });
+        }
+
+        ~PluginTabPage() override
+        {
+            m_stopping = true;
+            if (::IsWindow(m_pluginWindow))
+            {
+                ::PostMessageW(m_pluginWindow, WM_CLOSE, 0, 0);
+            }
+            if (m_process != nullptr && m_process->state() != QProcess::NotRunning)
+            {
+                m_process->terminate();
+                if (!m_process->waitForFinished(1200))
+                {
+                    m_process->kill();
+                    m_process->waitForFinished(800);
+                }
+            }
+        }
+
+    protected:
+        void showEvent(QShowEvent* event) override
+        {
+            QWidget::showEvent(event);
+            if (!m_startScheduled)
+            {
+                m_startScheduled = true;
+                QTimer::singleShot(0, this, [this]() { start(); });
+            }
+        }
+
+        bool eventFilter(QObject* watched, QEvent* event) override
+        {
+            if (watched == m_surface &&
+                (event->type() == QEvent::Resize || event->type() == QEvent::Show))
+            {
+                resizePluginWindow();
+            }
+            if (watched == m_surface && event->type() == QEvent::MouseButtonPress && ::IsWindow(m_pluginWindow))
+            {
+                ::SetFocus(m_pluginWindow);
+            }
+            return QWidget::eventFilter(watched, event);
+        }
+
+    private:
+        void start()
+        {
+            if (m_process != nullptr && m_process->state() != QProcess::NotRunning)
+            {
+                return;
+            }
+            m_failed = false;
+            m_ready = false;
+            m_pluginWindow = nullptr;
+            m_stdoutBuffer.clear();
+            m_retryButton->setVisible(false);
+            m_statusLabel->setText(QStringLiteral("正在启动外部 Tab 插件…"));
+            m_statusLabel->setStyleSheet({});
+
+            QString program;
+            QStringList arguments;
+            QString errorText;
+            const WId surfaceId = m_surface->winId();
+            if (!buildTabPluginCommand(m_descriptor, surfaceId, &program, &arguments, &errorText))
+            {
+                fail(QStringLiteral("Tab 插件启动失败：%1").arg(errorText), false);
+                return;
+            }
+
+            if (m_process != nullptr)
+            {
+                m_process->deleteLater();
+            }
+            m_process = new QProcess(this);
+            m_process->setProgram(program);
+            m_process->setArguments(arguments);
+            m_process->setWorkingDirectory(m_descriptor.pluginDirectory);
+            m_process->setProcessChannelMode(QProcess::SeparateChannels);
+            QProcessEnvironment environment = QProcessEnvironment::systemEnvironment();
+            environment.insert(QStringLiteral("KSWORD_PLUGIN_ROOT"), findPluginRoot());
+            environment.insert(QStringLiteral("KSWORD_PLUGIN_ID"), m_descriptor.id);
+            m_process->setProcessEnvironment(environment);
+
+            connect(m_process, &QProcess::started, this, [this]() {
+                m_statusLabel->setText(QStringLiteral("插件进程已启动，等待窗口握手…"));
+            });
+            connect(m_process, &QProcess::readyReadStandardOutput, this, [this]() { consumeStdout(); });
+            connect(m_process, &QProcess::readyReadStandardError, this, [this]() {
+                const QString text = QString::fromUtf8(m_process->readAllStandardError());
+                if (!text.isEmpty()) m_diagnostics->appendPlainText(text.trimmed());
+            });
+            connect(m_process, &QProcess::errorOccurred, this, [this](const QProcess::ProcessError error) {
+                if (error == QProcess::FailedToStart)
+                {
+                    fail(QStringLiteral("Tab 插件启动失败：%1").arg(m_process->errorString()), false);
+                }
+            });
+            connect(m_process, qOverload<int, QProcess::ExitStatus>(&QProcess::finished), this,
+                [this](const int exitCode, const QProcess::ExitStatus exitStatus) {
+                    if (m_stopping) return;
+                    m_pluginWindow = nullptr;
+                    const QString exitText = QStringLiteral("插件进程已退出：exit=%1, status=%2")
+                        .arg(exitCode)
+                        .arg(exitStatus == QProcess::NormalExit ? QStringLiteral("normal") : QStringLiteral("crashed"));
+                    m_diagnostics->appendPlainText(exitText);
+                    if (!m_failed) fail(exitText, false);
+                });
+            m_process->start();
+
+            QPointer<PluginTabPage> guard(this);
+            QTimer::singleShot(m_descriptor.tabPresentation.startupTimeoutMs, this, [guard]() {
+                if (guard != nullptr && !guard->m_ready && !guard->m_failed)
+                {
+                    guard->fail(QStringLiteral("Tab 插件启动超时，未收到有效的窗口握手。"), true);
+                }
+            });
+        }
+
+        void consumeStdout();
+        void processProtocolLine(const QByteArray& line);
+        void resizePluginWindow();
+        void fail(const QString& message, bool stopProcess);
+
+        PluginDescriptor m_descriptor;
+        QProcess* m_process = nullptr;
+        QWidget* m_surface = nullptr;
+        QLabel* m_statusLabel = nullptr;
+        QPushButton* m_diagnosticsButton = nullptr;
+        QPushButton* m_retryButton = nullptr;
+        QPlainTextEdit* m_diagnostics = nullptr;
+        QByteArray m_stdoutBuffer;
+        HWND m_pluginWindow = nullptr;
+        bool m_ready = false;
+        bool m_failed = false;
+        bool m_stopping = false;
+        bool m_startScheduled = false;
+    };
+
+    void PluginTabPage::consumeStdout()
+    {
+        if (m_process == nullptr)
+        {
+            return;
+        }
+        m_stdoutBuffer += m_process->readAllStandardOutput();
+        if (m_stdoutBuffer.size() > kMaxBufferedStdoutBytes && !m_stdoutBuffer.contains('\n'))
+        {
+            fail(QStringLiteral("Tab 插件 stdout 单行缓冲超过 1 MiB，已终止插件。"), true);
+            return;
+        }
+        while (true)
+        {
+            const qsizetype newlineIndex = m_stdoutBuffer.indexOf('\n');
+            if (newlineIndex < 0)
+            {
+                break;
+            }
+            if (newlineIndex > kMaxBufferedStdoutBytes)
+            {
+                fail(QStringLiteral("Tab 插件 stdout 单行缓冲超过 1 MiB，已终止插件。"), true);
+                return;
+            }
+            QByteArray line = m_stdoutBuffer.left(newlineIndex);
+            m_stdoutBuffer.remove(0, newlineIndex + 1);
+            if (line.endsWith('\r')) line.chop(1);
+            if (!line.trimmed().isEmpty()) processProtocolLine(line);
+            if (m_failed) return;
+        }
+    }
+
+    void PluginTabPage::processProtocolLine(const QByteArray& line)
+    {
+        QJsonParseError parseError;
+        const QJsonDocument document = QJsonDocument::fromJson(line, &parseError);
+        if (parseError.error != QJsonParseError::NoError || !document.isObject())
+        {
+            m_diagnostics->appendPlainText(QString::fromUtf8(line));
+            fail(QStringLiteral("Tab 插件输出不是有效的 JSON Lines 协议事件。"), true);
+            return;
+        }
+        const QJsonObject object = document.object();
+        if (object.value(QStringLiteral("protocol")).toString() != QStringLiteral("ksword-plugin/1") ||
+            object.value(QStringLiteral("plugin_id")).toString() != m_descriptor.id)
+        {
+            fail(QStringLiteral("Tab 插件协议版本或 plugin_id 与清单不匹配。"), true);
+            return;
+        }
+        const QString event = object.value(QStringLiteral("event")).toString();
+        if (event == QStringLiteral("error"))
+        {
+            fail(QStringLiteral("Tab 插件报告错误：%1")
+                .arg(object.value(QStringLiteral("message")).toString(QStringLiteral("未知错误"))), true);
+            return;
+        }
+        if (event != m_descriptor.tabPresentation.readyEvent)
+        {
+            m_diagnostics->appendPlainText(QString::fromUtf8(line));
+            return;
+        }
+
+        const QJsonValue handleValue = object.value(QStringLiteral("hwnd"));
+        bool handleOk = false;
+        qulonglong numericHandle = 0;
+        if (handleValue.isString())
+        {
+            numericHandle = handleValue.toString().toULongLong(&handleOk, 0);
+        }
+        else if (handleValue.isDouble() && handleValue.toDouble() > 0.0)
+        {
+            numericHandle = static_cast<qulonglong>(handleValue.toDouble());
+            handleOk = true;
+        }
+        HWND candidateWindow = handleOk
+            ? reinterpret_cast<HWND>(static_cast<quintptr>(numericHandle))
+            : nullptr;
+        if (!handleOk || !::IsWindow(candidateWindow))
+        {
+            fail(QStringLiteral("Tab 插件返回的窗口句柄无效。"), true);
+            return;
+        }
+
+        DWORD owningProcessId = 0;
+        ::GetWindowThreadProcessId(candidateWindow, &owningProcessId);
+        if (m_process == nullptr || owningProcessId != static_cast<DWORD>(m_process->processId()))
+        {
+            fail(QStringLiteral("Tab 插件窗口不属于刚启动的插件进程，已拒绝嵌入。"), true);
+            return;
+        }
+        const HWND expectedParent = reinterpret_cast<HWND>(m_surface->winId());
+        if (::GetParent(candidateWindow) != expectedParent ||
+            (::GetWindowLongPtrW(candidateWindow, GWL_STYLE) & WS_CHILD) == 0)
+        {
+            fail(QStringLiteral("Tab 插件窗口未作为宿主容器的直接 WS_CHILD 子窗口创建。"), true);
+            return;
+        }
+
+        m_pluginWindow = candidateWindow;
+        m_ready = true;
+        m_failed = false;
+        m_retryButton->setVisible(false);
+        m_statusLabel->setStyleSheet({});
+        m_statusLabel->setText(QStringLiteral("Tab 插件已连接（外部进程 PID %1）。")
+            .arg(owningProcessId));
+        ::ShowWindow(m_pluginWindow, SW_SHOW);
+        resizePluginWindow();
+    }
+
+    void PluginTabPage::resizePluginWindow()
+    {
+        if (!::IsWindow(m_pluginWindow) || m_surface == nullptr)
+        {
+            return;
+        }
+        const QSize size = m_surface->size();
+        ::MoveWindow(m_pluginWindow, 0, 0, qMax(1, size.width()), qMax(1, size.height()), TRUE);
+    }
+
+    void PluginTabPage::fail(const QString& message, const bool stopProcess)
+    {
+        if (m_stopping)
+        {
+            return;
+        }
+        m_failed = true;
+        m_ready = false;
+        m_pluginWindow = nullptr;
+        m_statusLabel->setText(message);
+        m_statusLabel->setStyleSheet(QStringLiteral("color:%1;font-weight:600;")
+            .arg(KswordTheme::ErrorColor().name(QColor::HexRgb)));
+        m_retryButton->setVisible(true);
+        m_diagnostics->appendPlainText(message);
+        if (stopProcess && m_process != nullptr && m_process->state() != QProcess::NotRunning)
+        {
+            m_process->terminate();
+            QPointer<QProcess> processGuard(m_process);
+            QTimer::singleShot(1500, this, [processGuard]() {
+                if (processGuard != nullptr && processGuard->state() != QProcess::NotRunning)
+                {
+                    processGuard->kill();
+                }
+            });
+        }
+    }
+
     bool promoteExtractedPlugin(
         const MarketplacePlugin& plugin,
         const QString& pluginRoot,
@@ -1450,9 +1927,10 @@ namespace
                 return;
             }
             const PluginDescriptor& descriptor = m_plugins.at(row);
-            const QString detailText = QStringLiteral("id=%1\nversion=%2\nruntime=%3\nentrypoint=%4\ndefault_command=%5\ntargets=%6\nvisualization=%7\ndirectory=%8\n\n%9")
+            const QString detailText = QStringLiteral("id=%1\nversion=%2\nplugin_type=%3\nruntime=%4\nentrypoint=%5\ndefault_command=%6\ntargets=%7\nvisualization=%8\ndirectory=%9\n\n%10")
                 .arg(descriptor.id)
                 .arg(descriptor.version)
+                .arg(descriptor.pluginType)
                 .arg(descriptor.runtime)
                 .arg(descriptor.entrypointPath)
                 .arg(descriptor.defaultCommand)
@@ -1775,6 +2253,35 @@ void ks::plugin_host::populateTargetMenu(QMenu* menu, QWidget* owner, const Invo
         }
         QAction* action = menu->addAction(emptyText);
         action->setEnabled(false);
+    }
+}
+
+void ks::plugin_host::populateTabPlugins(QTabWidget* tabWidget, QWidget* owner)
+{
+    if (tabWidget == nullptr || owner == nullptr)
+    {
+        return;
+    }
+    PluginListResult result;
+    QString errorText;
+    if (!discoverPlugins(&result, &errorText))
+    {
+        return;
+    }
+    for (const PluginDescriptor& descriptor : result.plugins)
+    {
+        if (descriptor.pluginType != QStringLiteral("tab") || !descriptor.tabPresentation.enabled ||
+            !descriptor.targets.contains(QStringLiteral("tab")))
+        {
+            continue;
+        }
+        auto* page = new PluginTabPage(tabWidget, descriptor);
+        page->setProperty("kswordPluginId", descriptor.id);
+        tabWidget->addTab(
+            page,
+            QIcon(QStringLiteral(":/Icon/process_start.svg")),
+            descriptor.tabPresentation.title);
+        tabWidget->setTabToolTip(tabWidget->indexOf(page), descriptor.description);
     }
 }
 
