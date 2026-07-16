@@ -1,85 +1,707 @@
-Ksword5.1 Proprietary License
+Ksword5.1 Community Source License
+License Version 1.1 — July 16, 2026
 
 Copyright (c) 2025-2026 WangWei-CM / OB_BUFF(Felix3322).
-All rights reserved.
+All rights reserved except as expressly granted by this License.
 
 1. Scope
 
-This license applies to the Ksword5.1 software suite, including its user-mode
-applications, kernel-mode components, helper tools, scripts, documentation,
-assets, and any related source code or binary distributions in this repository
-unless a specific file or third-party component states otherwise.
+This license (the "License") applies only to the Ksword5.1 core software suite
+(the "Core Software"), including its user-mode applications, kernel-mode
+components, helper tools, scripts, documentation, assets, source code, binary
+files, build outputs, and the host-side plugin framework, plugin loader,
+interfaces, APIs, and SDK materials that are not themselves Plugins, unless a
+specific file or third-party component states otherwise.
 
-2. Permission
+This License does not apply to any Plugin. Every Plugin is a separately licensed
+component governed by its own license, as further provided in Section 8.
 
-You may use, copy, build, and run this software only if you have received
-explicit authorization from the copyright holder or project maintainer.
-Authorized use must comply with all applicable laws, regulations, organizational
-policies, and security requirements.
+This is a custom community source license. It is not represented as an
+OSI-approved license.
 
-3. Restrictions
+2. Definitions
 
-Unless explicitly permitted in writing, you may not:
+For purposes of this License:
 
-- redistribute, publish, sublicense, sell, rent, lease, or otherwise transfer
-  this software or any derivative work;
-- use this software to access, inspect, modify, disrupt, bypass, or control any
-  system, process, network, driver, kernel object, account, file, registry key,
-  or other resource without proper authorization;
-- remove, obscure, or alter copyright, license, attribution, security warning,
-  or provenance notices;
-- represent this software or derivative work as an official release without the
-  project maintainer's written approval;
-- use the software in any manner that violates law, regulation, or third-party
-  rights.
+"Software" means the Core Software and all materials covered by Section 1. It
+does not include Plugins.
 
-4. Security-Sensitive Functionality
+"You" means an individual or legal entity exercising permissions granted by
+this License.
+
+"Plugin" means any separately identifiable extension, add-on, module, package,
+script, provider, adapter, data pack, integration, or other component designed
+to be discovered, loaded, invoked, or used through the Ksword5.1 plugin system,
+whether bundled with the Software, distributed separately, published by the
+copyright holder, or published by a third party.
+
+"Internal Personnel" means Your employees, officers, and individual contractors
+who act solely on Your behalf, need access for the permitted purpose, and are
+bound by duties of confidentiality and non-redistribution.
+
+"Internal Use" means use of the Software by You and Your Internal Personnel for
+Your own personal activities or internal organizational operations. Internal
+Use may support revenue-generating business operations and may include lawful
+work performed for a customer, provided that the customer does not receive a
+copy of the Software and is not given direct or hosted access to the Software or
+its user interface. Internal Use does not include public hosting, service-bureau
+access, sublicensing, or making the Software available to any other person or
+entity.
+
+"Publicity Content" means truthful reviews, articles, posts, reports, tutorials,
+demonstrations, screenshots, recordings, videos, livestreams, presentations,
+benchmarks, criticism, commentary, or other content about the Software.
+
+"Monetized Publicity" means Publicity Content from which the publisher may
+receive advertising revenue or platform revenue sharing, livestream income,
+sponsorship, affiliate commission, creator-fund payments, donations, paid
+placement, subscription or paywall income, or other ordinary content-related
+compensation.
+
+"Redistribution" means making the Software, or any copy of it, available to a
+third party in source, binary, packaged, embedded, mirrored, hosted for download,
+or any other form that enables the third party to obtain a copy.
+
+"Copy Charge" means any money, fee, payment, consideration, required donation,
+subscription, purchase, bundled purchase, access fee, activation fee, membership
+fee, mandatory setup fee, or other direct or indirect economic value required as
+a condition of receiving, downloading, accessing, retaining, or being supplied
+with a copy of the Software. A charge remains a Copy Charge even if the Software
+is described as "free", "included", "complimentary", or bundled with another
+product or service.
+
+"Independent Services" means bona fide services personally or professionally
+performed in connection with the Software, including installation,
+configuration, deployment, debugging, troubleshooting, training, maintenance,
+and technical support. Independent Services do not include merely sending a
+copy or download link, unlocking access, supplying an activation mechanism, or
+renaming a Copy Charge as a service fee. Independent Services are provided only
+on the service provider's own behalf and not on behalf of the original author,
+copyright holder, or original project maintainers.
+
+"Modified Version" means any copy of the Software in which the Software or any
+part of it has been modified, patched, adapted, translated, rebranded, extended,
+removed, replaced, or otherwise changed, other than ordinary configuration
+performed through features intentionally provided by the Software.
+
+"Modified-Version Material" means any screenshot, recording, video, livestream,
+demonstration, presentation, benchmark, report, documentation, code excerpt,
+output capture, log, article, post, or other material that depicts, reproduces,
+describes, demonstrates, or reveals a Modified Version or its modifications.
+
+"External Disclosure" means making a Modified Version or Modified-Version
+Material available outside Your private household or, for a legal entity,
+outside You and Your Internal Personnel. Confidential internal circulation
+among Internal Personnel is not External Disclosure.
+
+"Corresponding Source" means the complete machine-readable source code for the
+exact version of the Software being distributed, in the preferred form for
+making modifications, together with all source files, interface definitions,
+configuration files, and scripts reasonably necessary to build, install, and
+run that version. Corresponding Source includes all modifications made by the
+distributor. It need not include third-party components that are clearly
+identified and independently available under their own licenses.
+
+"Formal Written Authorization" means an express authorization issued by the
+copyright holder, or by a project maintainer expressly authorized by the
+copyright holder, in one of the following forms:
+
+- a paper agreement bearing an authentic signature;
+- an electronic agreement or authorization document bearing an electronic or
+  cryptographic signature intended to authenticate the authorization;
+- an authorization certificate or license file issued through an official
+  licensing channel designated by the copyright holder; or
+- an email verifiably sent from an official licensing address identified in the
+  official repository or official project page, where that email expressly
+  states that it is "Formal Written Authorization" and clearly identifies the
+  authorized person or entity, the Software or version covered, the rights
+  granted, any limitations, and the effective date.
+
+A verbal statement, telephone or voice conversation, livestream statement,
+social-media post, direct message, comment, group-chat message, instant-message,
+forum post, issue-tracker comment, code-review comment, commit message, casual
+email, silence, failure to object, or other informal communication does not
+constitute Formal Written Authorization. A message sent through social or
+instant-messaging software remains informal even if it is text-based, retained,
+exported, forwarded, printed, notarized, or shown in a screenshot.
+
+3. Permissions Granted Without Formal Written Authorization
+
+Subject to full compliance with this License, the copyright holder grants You a
+non-exclusive, worldwide, royalty-free permission to exercise the rights stated
+in this Section without obtaining separate Formal Written Authorization.
+
+3.1 Personal and Organizational Internal Use
+
+You may download, copy, make reasonable backups of, install, configure, build,
+run, inspect, study, evaluate, and use the Software for lawful personal use or
+Internal Use.
+
+This permission expressly includes use inside a company, business, school,
+research institution, nonprofit organization, government body, or other legal
+entity, including use that supports ordinary commercial operations.
+
+You may use the Software internally while performing lawful work for customers
+or clients, provided that You have all required authorization for the systems
+involved and do not give the customer or client a copy of, or direct access to,
+the Software.
+
+3.2 Private and Internal Modification
+
+You may create and use a Modified Version solely for private use or Internal
+Use. A Modified Version kept entirely private or internal does not need to carry
+special "modified" labels, a different product name, an on-screen disclaimer,
+or a public changelog.
+
+This exception removes only the obligation to mark the copy as modified. It does
+not permit removal, falsification, or replacement of the original copyright,
+license, attribution, authorship, provenance, security-warning, or disclaimer
+notices contained in the Software.
+
+You may circulate a private or internal Modified Version and related materials
+among Internal Personnel as reasonably necessary for Internal Use. You may not
+make an External Disclosure of that Modified Version or any Modified-Version
+Material unless You comply with Section 5.
+
+Nothing in this License requires You to publish or disclose modifications that
+remain entirely private or internal.
+
+3.3 Publicity and Monetized Content
+
+You may create, publish, and monetize Publicity Content without separate Formal
+Written Authorization. Permitted monetization expressly includes:
+
+- video advertising revenue and platform revenue sharing;
+- livestream revenue, subscriptions, gifts, and tips;
+- sponsored content and paid placements;
+- affiliate marketing commissions;
+- creator-fund payments, donations, and paywalled commentary; and
+- other ordinary compensation associated with creating or publishing content.
+
+Every item of Publicity Content must provide clear and reasonably accessible
+attribution containing:
+
+- the project name "Ksword5.1";
+- the notice:
+  "Copyright (c) 2025-2026 WangWei-CM / OB_BUFF(Felix3322)."; and
+- the official project repository, official project page, or original
+  distribution source designated by the copyright holder.
+
+The attribution may appear in the content itself, its description, credits,
+show notes, accompanying article, or another location that an ordinary viewer
+can readily find.
+
+Sponsorships, affiliate relationships, and paid placements must be disclosed in
+an accurate manner required by applicable law and platform rules. Such
+commercial relationships must not be presented as sponsorship, approval, or
+endorsement by the original author or project.
+
+Publicity Content does not by itself authorize Redistribution of the Software,
+source code, binaries, build outputs, license keys, or any Plugin. Any
+Redistribution must comply with Section 4 or Section 5.
+
+If Publicity Content depicts, discusses, or demonstrates a Modified Version, it
+must also comply with the modification notice and disclaimer requirements in
+Section 5.
+
+4. No-Charge Redistribution and Independent Paid Services
+
+You may redistribute unmodified copies of the Software in source or binary form
+without separate Formal Written Authorization only if every copy is supplied
+free of charge and every condition in this Section is satisfied.
+
+You must:
+
+- give every recipient a complete copy of this License;
+- retain all copyright, license, attribution, provenance, authorship,
+  security-warning, and disclaimer notices included with the Software;
+- clearly identify the Software as "Ksword5.1" and identify the original
+  copyright holder;
+- provide the official project repository, official project page, or original
+  distribution source designated by the copyright holder;
+- accurately identify Yourself or Your organization as the distributor,
+  packager, or independent service provider, as applicable; and
+- clearly distinguish Your distribution from an official release issued by the
+  original project.
+
+You must not impose or collect any Copy Charge. In particular, You must not:
+
+- sell, rent, lease, license for a fee, or otherwise charge for a copy;
+- require a purchase, subscription, membership, donation, paid registration,
+  service package, or other payment merely to obtain or retain a copy;
+- hide the price of a copy inside a mandatory installation, setup, activation,
+  handling, access, packaging, or similar charge;
+- describe a copy as "free" while making payment to You or an associated party
+  a condition of receiving it; or
+- bundle the Software with a paid product or service in a manner that makes the
+  payment a condition of obtaining the Software copy.
+
+Whenever You distribute the Software in binary, executable, installer, packaged,
+or other non-source form, You must also do one of the following:
+
+- include the complete Corresponding Source with the distributed copy; or
+- provide every recipient with clear, functional, and equivalent access to
+  download the complete Corresponding Source at no charge.
+
+The Corresponding Source must match the exact distributed version. A token,
+partial, outdated, obfuscated, generated-only, or non-buildable source release
+does not satisfy this requirement. If access is provided by a link, the source
+must remain available for at least as long as You continue to offer that binary
+version.
+
+You may separately charge reasonable fees for Independent Services that You
+actually perform, including installation, configuration, deployment, debugging,
+troubleshooting, training, maintenance, and technical support. A paid service
+may include installing or configuring a free copy of the Software for the
+customer. However:
+
+- the Software copy itself must be priced at zero;
+- the fee must be for genuine time, labor, expertise, travel, or an agreed
+  service deliverable, and not for access to or possession of the copy;
+- the service and its price must be described separately and accurately;
+- the customer must be clearly informed that Ksword5.1 itself is available
+  without charge from its official source;
+- no additional fee may be required to obtain the Corresponding Source; and
+- the service provider must comply with the independent-status requirements
+  below.
+
+All such services are independent and unofficial unless the service provider
+has separate Formal Written Authorization expressly granting official status.
+Without that authorization, a service provider must not claim or imply that it
+is the official, authorized, certified, approved, endorsed, or maintainer-backed
+support provider for Ksword5.1. It must not use descriptions such as "official
+Ksword5.1 support", "authorized Ksword5.1 support", "Ksword5.1 support team",
+or substantially similar wording likely to cause confusion.
+
+A service provider may truthfully advertise "independent support for Ksword5.1",
+"third-party Ksword5.1 installation services", or similar wording, provided
+that the independent and unofficial status is clear and reasonably prominent.
+
+You must not impose terms, technical restrictions, or access controls that
+prevent a recipient from exercising the rights granted by this License with
+respect to the Software and Corresponding Source received from You.
+
+Permission to redistribute the Software does not grant any right to redistribute
+a Plugin. Each Plugin remains governed by its own license.
+
+5. Modified Versions and External Disclosure
+
+5.1 When This Section Applies
+
+This Section applies whenever You:
+
+- redistribute a Modified Version;
+- publish, display, stream, transmit, or otherwise make an External Disclosure
+  of a Modified Version; or
+- publish or otherwise externally share any Modified-Version Material,
+  including a screenshot, video, livestream, demonstration, report, benchmark,
+  documentation, or code excerpt.
+
+5.2 Required Modified-Version Notice
+
+Every External Disclosure must clearly and reasonably prominently state that the
+material or software is modified and unofficial. It must include the following
+notice, or a substantially equivalent notice that preserves its full meaning:
+
+"This is or depicts a modified and unofficial version of Ksword5.1. The
+modifications and related statements are solely those of the modifier or
+distributor and do not represent the views, positions, opinions, statements, or
+endorsements of WangWei-CM / OB_BUFF(Felix3322), the copyright holder, or the
+original Ksword5.1 project maintainers."
+
+For a screenshot, post, short clip, or similar item, the notice may appear in a
+clearly visible caption, overlay, description, or immediately accompanying text.
+For a video, livestream, article, report, presentation, or download page, the
+notice must appear in the content, description, credits, documentation, legal
+notices, or another location an ordinary viewer or recipient can readily find.
+The notice must not be hidden, intentionally obscured, rendered unreadable, or
+placed where recipients are unlikely to find it.
+
+5.3 Additional Requirements for Distribution of a Modified Version
+
+You may redistribute a Modified Version without separate Formal Written
+Authorization only free of charge, provided that You comply with the no-Copy-Charge,
+source-code, license, attribution, distributor-identification, independent-status,
+and no-false-authorship requirements of Section 4 and all requirements of this
+Section, including the following:
+
+- clearly identify Yourself or Your organization as the modifier and
+  distributor;
+- provide complete Corresponding Source for the exact Modified Version at no
+  charge under the same conditions stated in Section 4;
+- include a readily accessible MODIFICATIONS, CHANGES, or CHANGELOG file, or an
+  equivalent written notice;
+- identify the files, modules, components, features, or behavior materially
+  changed;
+- meaningfully describe what was added, removed, replaced, patched, or otherwise
+  modified;
+- state the relevant modification date or version and the identity of the
+  modifier; and
+- disclose any known material compatibility, security, or behavioral
+  differences caused by the modifications.
+
+A vague statement such as "modified version", "custom build", or "various
+changes" is not sufficient by itself. The disclosure must contain enough
+information for a reasonable recipient to distinguish the modifications from
+the original Software.
+
+Where reasonably practicable, modified source files distributed to others must
+carry a notice stating that they were changed, together with a relevant date or
+version and the identity of the modifier.
+
+You may use a different product name for a Modified Version, but You must still
+identify it as derived from Ksword5.1, preserve the required attribution, and
+avoid any implication that it is an official release.
+
+The modifier or distributor is solely responsible for its modifications,
+representations, warranties, support commitments, security claims, and any
+damage or liability arising from the Modified Version.
+
+You may charge for Independent Services performed in relation to a Modified
+Version only under Section 4. The Modified Version itself must remain free of
+any Copy Charge, and paid support or other services must not be presented as
+official, authorized, certified, approved, endorsed, or maintainer-backed unless
+that status is expressly granted by Formal Written Authorization.
+
+6. Other Commercial Activities and Hosted Access
+
+The permissions in Sections 3 through 5 allow commercial Internal Use,
+Monetized Publicity, no-charge Redistribution, and reasonable fees for genuine
+Independent Services that You perform on Your own behalf.
+
+Unless separately permitted by Formal Written Authorization, this License does
+not grant permission to:
+
+- provide third parties with direct remote or hosted access to the Software or a
+  Modified Version as a software-as-a-service, hosted service, rental service,
+  service bureau, managed platform, or similar offering;
+- embed or distribute the Software in a closed-source product while withholding
+  the applicable Corresponding Source;
+- offer a white-label version that conceals the origin of the Software;
+- sublicense the Software under terms inconsistent with this License; or
+- omit or waive the source-code, attribution, modification-disclosure, or
+  no-false-authorship requirements.
+
+Using the Software internally to produce reports, analysis, results, or other
+work product for a customer is not, by itself, hosted access, provided that the
+customer does not receive a copy of or direct access to the Software. Any
+Modified-Version Material delivered to a customer must comply with Section 5.
+
+7. No False Authorship, Official Status, or Endorsement
+
+You must not:
+
+- claim, state, imply, or create the misleading impression that You authored the
+  original Ksword5.1 Software;
+- replace the original author's identity with Your own;
+- present Yourself or Your organization as the original author, copyright
+  holder, or official project maintainer;
+- describe an unofficial or modified distribution as an original or official
+  release;
+- use packaging, filenames, metadata, websites, documentation, interfaces, or
+  promotional materials in a way likely to confuse recipients about the origin
+  or authorship of the Software;
+- imply sponsorship, affiliation, approval, certification, or endorsement by
+  the original author, copyright holder, or project maintainer without separate
+  Formal Written Authorization; or
+- claim or imply that independent installation, debugging, training,
+  maintenance, or support services are official, authorized, certified,
+  approved, endorsed, or provided by the original Ksword5.1 project without
+  separate Formal Written Authorization expressly granting that status.
+
+You may truthfully state that Your product, service, content, or distribution
+uses, includes, reviews, supports, or is based on Ksword5.1, provided that the
+statement is accurate, includes required attribution, and does not imply false
+authorship, official status, affiliation, or endorsement.
+
+Except for accurate factual attribution and references reasonably necessary to
+describe origin or compatibility, this License grants no trademark rights in
+the names, aliases, account names, logos, service marks, or visual identity of
+Ksword5.1, WangWei-CM, OB_BUFF, Felix3322, the copyright holder, or the project
+maintainers.
+
+8. Plugins and Independent Plugin Licenses
+
+Every Plugin used by, compatible with, bundled with, distributed alongside, or
+made available through the Ksword5.1 plugin system is independently licensed.
+Each Plugin must be evaluated under the license notice supplied with that
+Plugin.
+
+This License grants no permission to use, copy, install, build, run, inspect,
+modify, publish, redistribute, sublicense, sell, or otherwise exploit any
+Plugin. Rights granted for the Software do not extend to a Plugin, and rights
+granted by a Plugin's license do not extend to the Software.
+
+A Plugin's own license controls only that Plugin. This License continues to
+control the Core Software, including the host-side plugin framework, loader,
+interfaces, APIs, and SDK materials covered by Section 1.
+
+The following facts do not, by themselves, grant any license to a Plugin or show
+endorsement of it:
+
+- the Plugin is bundled with an official or unofficial distribution;
+- the Plugin is listed, indexed, signed, verified, recommended, or downloadable
+  through a project-operated service;
+- the Plugin uses an official API, interface, SDK, naming convention, or file
+  format;
+- the Plugin is technically compatible with the Software; or
+- the Plugin was created by a contributor, maintainer, or copyright holder.
+
+If a Plugin does not include a clear license, no permission is granted under
+this License, and all rights in that Plugin remain reserved to its applicable
+copyright holder, except to the extent applicable law expressly provides
+otherwise.
+
+Anyone who uses or distributes the Software together with one or more Plugins
+is solely responsible for obtaining and complying with all licenses required
+for those Plugins.
+
+9. Third-Party Components
+
+Third-party libraries, SDKs, drivers, tools, frameworks, binaries, code,
+documentation, and assets included with or used by this project remain governed
+by their respective licenses and terms.
+
+This License does not grant rights to third-party materials beyond the rights
+provided by their applicable licenses. If a third-party license conflicts with
+this License with respect to that third-party component, the third-party license
+controls only for that component.
+
+10. Security-Sensitive Functionality
 
 Ksword5.1 contains system-level debugging, inspection, driver, kernel,
 process-control, file, registry, network, and monitoring capabilities. These
-features are intended only for lawful, authorized administration, debugging,
-research, incident response, education, and defensive security work.
+features are intended only for lawful and authorized administration, debugging,
+research, incident response, education, interoperability testing, and defensive
+security work.
 
-You are solely responsible for ensuring that your use is authorized and safe.
-Do not use this software on systems you do not own or administer, or where you
-do not have explicit permission to perform the relevant actions.
+You are solely responsible for ensuring that Your possession and use of the
+Software are authorized, lawful, safe, and appropriate.
 
-5. Third-Party Components
+Do not use the Software on systems, accounts, networks, devices, or resources
+that You do not own or administer, or where You do not have explicit permission
+to perform the relevant actions.
 
-Third-party libraries, SDKs, drivers, tools, frameworks, binaries, and assets
-included with or used by this project remain governed by their own licenses.
-This license does not grant rights to third-party materials beyond the rights
-provided by those third-party licenses.
+11. Additional Formal Written Terms and License Priority
 
-6. No Warranty
+The copyright holder, or a project maintainer expressly authorized by the
+copyright holder, may grant additional permissions, exceptions, hosted-service
+rights, closed-source distribution rights, trademark rights, or other terms
+through Formal Written Authorization.
 
-This software is provided "as is" and "as available", without warranty of any
+A separate formal written agreement controls over this License only to the
+extent that it expressly:
+
+- identifies this License and the Software or version covered;
+- identifies the person or entity receiving the additional rights;
+- identifies the specific provisions or restrictions being changed; and
+- states the extent to which it modifies, supplements, or supersedes those
+  provisions.
+
+All provisions not expressly modified by that Formal Written Authorization
+remain in effect.
+
+To the maximum extent permitted by applicable law, this License is the complete
+public license governing the Software and controls over any inconsistent oral,
+casual, informal, or non-formal statement, communication, representation,
+promise, permission, conduct, or course of dealing attributed to the original
+author, copyright holder, project maintainer, or contributor.
+
+No social-media communication, instant-message, group-chat message, direct
+message, forum post, issue comment, code-review comment, livestream statement,
+voice conversation, casual email, screenshot, forwarded message, or similar
+informal communication may grant, expand, amend, waive, suspend, revoke, or
+reinterpret any right or restriction under this License.
+
+An informal statement such as "you may use it", "that is fine", "I do not
+mind", "go ahead", or words of similar meaning does not create permission
+beyond this License and does not constitute Formal Written Authorization, even
+if the statement is attributed to the original author or a maintainer.
+
+Silence, delay, failure to enforce, prior tolerance of a violation, or failure
+to object to a particular use does not waive any right or authorize future or
+continuing use. A waiver of one breach is not a waiver of any other breach.
+
+12. No Warranty
+
+The Software is provided "as is" and "as available", without warranty of any
 kind, whether express, implied, statutory, or otherwise, including but not
 limited to warranties of merchantability, fitness for a particular purpose,
-title, non-infringement, accuracy, availability, compatibility, or security.
+title, non-infringement, accuracy, availability, compatibility, reliability, or
+security.
 
-7. Limitation of Liability
+The copyright holder, project maintainers, and contributors do not guarantee
+that the Software will be error-free, secure, uninterrupted, compatible with
+any particular system, or suitable for any particular purpose.
 
-To the maximum extent permitted by law, the copyright holder, project
+13. Limitation of Liability
+
+To the maximum extent permitted by applicable law, the copyright holder, project
 maintainers, and contributors shall not be liable for any direct, indirect,
 incidental, special, consequential, exemplary, punitive, or other damages,
-including loss of data, system instability, service interruption, security
-incident, loss of profits, or business interruption, arising from or related to
-this software or its use, even if advised of the possibility of such damages.
+including loss of data, corruption of data, system instability, device failure,
+service interruption, security incidents, loss of profits, loss of revenue,
+loss of goodwill, or business interruption, arising from or related to the
+Software, a Modified Version, or their use, even if advised of the possibility
+of such damages.
 
-8. Termination
+Anyone who charges for Independent Services, including installation,
+debugging, troubleshooting, training, maintenance, or support, does so solely
+on that person's or entity's own behalf and responsibility, not on behalf of
+the original author, copyright holder, project maintainers, or contributors.
+No fee is permitted for the Software copy itself.
 
-Any permission granted under this license terminates automatically if you
-violate its terms. Upon termination, you must stop using the software and delete
-all unauthorized copies in your possession or control.
+14. Termination
 
-9. Additional Written Terms
+Every permission granted by this License or by Formal Written Authorization is
+conditional on compliance with the applicable terms and terminates
+automatically if You materially violate those terms or exceed the scope of the
+permission.
 
-The copyright holder or project maintainer may grant additional permissions or
-commercial terms in a separate written agreement. If such an agreement exists,
-that agreement controls only to the extent it expressly conflicts with this
-license.
+Upon termination, You must immediately stop the violating activity, remove
+noncompliant public or third-party copies under Your control, correct misleading
+claims, and provide any source code, notices, or disclosures that were
+improperly withheld where correction remains possible.
+
+If a non-willful violation is fully cured, the automatic permissions granted by
+this License resume for future conduct unless the copyright holder has issued a
+Formal Written Authorization expressly terminating or limiting those
+permissions because of repeated or material violations. Cure does not erase
+liability for past infringement or breach.
+
+Termination does not limit any other rights or remedies available to the
+copyright holder. Sections concerning attribution, false authorship, Plugin
+licensing, modified-version notices, warranty disclaimers, limitation of
+liability, license priority, and responsibility for modifications survive to
+the extent necessary to give them effect.
+
+15. Severability
+
+If any provision of this License is found invalid or unenforceable under
+applicable law, that provision shall be interpreted or limited to the maximum
+extent permitted, and the remaining provisions shall remain in effect.
+
+16. Language and Informal Summaries
+
+Any translation, summary, explanation, FAQ, comment, or informal description of
+this License is provided only for convenience and does not independently grant
+rights or modify this License.
+
+If an informal translation or summary conflicts with the English text of this
+License, the English text controls, except where applicable law requires
+otherwise.
+
 
 中文说明（非正式摘要）
 
-本项目默认不是开源授权。未经版权所有者或项目维护者明确授权，不得分发、销售、再授权或用于未授权系统。Ksword5.1 包含进程、网络、驱动、内核、文件、注册表等系统级调试和管理能力，只能在合法授权、合规和安全的场景下使用。本软件按“现状”提供，不提供任何明示或默示担保；因使用本软件造成的风险和后果由使用者自行承担。
+本许可证适用于 Ksword5.1 核心软件，包括主程序、驱动、辅助工具、脚本、
+文档、资源、源码、二进制文件，以及属于核心软件一部分的插件宿主框架、
+插件加载器、接口、API 和 SDK。它不授权任何实际插件。
+
+这是一份自定义的社区源码许可证，不宣称属于经 OSI 批准的开源许可证。
+许可证默认允许个人使用、公司内部使用、内部修改、内容变现、免费二次分发，
+以及对真实安装、调试、培训和支持服务收费。
+
+个人、公司、学校、研究机构、非营利组织、政府机构等都可以在无需另行取得
+正式书面授权的情况下，下载、备份、安装、配置、编译、运行、检查、学习、
+评估和使用核心软件。公司内部使用可以服务于正常商业经营。也可以在已经取得
+目标系统合法授权的前提下，使用软件为客户完成工作，但不得把软件副本或软件
+的直接、远程、托管访问提供给客户，除非符合许可证中的相应条款。
+
+个人或公司可以为自己或内部需要修改软件。仅供个人或公司内部使用的修改版
+不需要显示“已修改”标记、不需要改名、不需要在界面显示免责声明，也不需要
+公开修改清单。内部修改可以在受保密和禁止再分发义务约束的员工、管理人员和
+承包人员之间流转。仅供内部使用的修改内容不需要公开源代码。
+
+内部修改版仍然不得删除、伪造或替换原始版权、许可证、作者、来源、安全警告
+和免责声明。只要修改版或与修改版有关的资料被传播到个人家庭或同一法律实体
+之外，就必须遵守修改版公开披露条款。
+
+允许通过宣传、评论和教学内容盈利，不需要另行书面授权。明确允许视频广告
+分成、平台创作者分成、直播收入、订阅、礼物、打赏、赞助内容、付费植入、
+联盟推广佣金、创作者基金、捐赠和付费评论等收入形式。内容必须注明
+Ksword5.1、原版权信息和官方来源；赞助和联盟关系应按法律及平台规则如实披露，
+不得暗示原作者或项目为赞助商、商品或内容背书。
+
+宣传许可本身不等于软件分发许可。展示截图、录屏、视频或直播可以盈利，但若
+内容展示的是修改版，必须清楚注明它是“修改且非官方版本”，并声明修改内容和
+相关表述不代表 WangWei-CM / OB_BUFF(Felix3322)、版权所有者或原项目维护者的
+观点、立场、意见或背书。
+
+允许免费二次分发未修改或符合要求的修改版核心软件，但禁止对软件副本本身
+收费。不得出售、出租、收费授权软件副本，也不得以订阅、会员、强制捐赠、
+付费注册、捆绑购买、激活费、下载费、强制安装费、处理费或其他名义变相收取
+软件副本费用。即使把软件称为“免费”“附送”或“包含在服务中”，只要付款是
+取得或保留副本的条件，仍然属于禁止的软件副本收费。
+
+只要向他人分发二进制文件、可执行文件、安装包或其他非源码形式，就必须同时
+附带该准确版本的完整对应源代码，或者提供无需付费即可取得完整对应源代码的
+清楚有效下载方式。不能只提供过期、残缺、混淆、无法构建或与分发版本不一致
+的源码。
+
+可以对实际提供的独立服务收费，包括安装、配置、部署、调试、故障排除、培训、
+维护和技术支持。收费必须对应真实投入的时间、劳动、专业知识、差旅或约定的
+服务成果，而不能只是发送软件、提供下载链接、解锁访问或把软件费用改名成
+“服务费”。服务中可以替客户安装免费的软件副本，但必须明确告知客户：
+Ksword5.1 软件本身可以从官方来源免费获得，所支付的费用只针对独立服务。
+软件副本价格必须为零，取得对应源代码也不得另行收费。
+
+任何安装、调试、培训、维护或支持服务，在没有正式书面授权的情况下都属于
+独立、非官方的第三方服务。服务提供者不得自称或暗示自己是“官方支持”、
+“授权支持”、“认证支持”、“Ksword5.1 支持团队”、原项目认可的服务商或由
+维护者提供支持。可以如实使用“Ksword5.1 独立支持”“第三方 Ksword5.1 安装
+服务”等表述，但必须让客户能够清楚看出其独立和非官方身份。
+
+修改版一旦向外传播，或者向外发布任何能够展示、描述或暴露修改版的资料，
+包括截图、视频、直播、演示、报告、基准测试、文档、代码片段、日志或帖子，
+就必须在明显且容易找到的位置注明这是修改且非官方版本，并声明不代表原作者
+意见。分发修改版时还必须说明修改者身份、修改日期或版本、修改了哪些文件或
+组件、增加删除替换或修复了什么，以及已知的重要兼容性、安全性或行为差异。
+修改版副本同样必须免费；可以收费的只有符合条件的独立服务。
+
+公司内部使用、内容变现、免费合规分发以及自己提供的安装、调试、培训、支持
+和维护都不需要另行书面授权。但是直接向第三方提供软件界面或功能的 SaaS、
+托管服务、出租服务、服务平台，隐瞒对应源码的闭源集成，隐藏来源的白标版本，
+或者想免除源码、署名、修改说明和禁止冒充作者或官方支持的要求，仍然需要
+正式书面授权。
+
+插件系统中的每个插件都是独立授权的组件。无论插件是否随官方软件附带、由
+官方列出、签名、推荐、下载，是否使用官方 API，或者是否由维护者本人编写，
+本许可证都不会替该插件授予任何权利。必须单独阅读并遵守每个插件自己的许可
+证；没有清楚许可证的插件，不因存在于插件目录中而自动获得使用或分发授权。
+
+第三方库、SDK、驱动、框架、二进制工具、文档和资源继续适用其各自许可证。
+核心软件的授权不会扩展到插件或第三方组件，插件和第三方组件的授权也不会自动
+扩展到核心软件。
+
+Ksword5.1 包含进程、网络、驱动、内核、文件、注册表等系统级调试、检查和
+管理能力，只能在合法、明确授权、合规且安全的场景下使用。不得用于没有所有权、
+管理权或明确操作许可的系统。
+
+“正式书面授权”仍然必须采用许可证规定的正式形式。口头承诺、电话或语音通话、
+直播表态、社交平台帖子、私信、评论、群聊、即时通讯消息、论坛帖子、Issue
+评论、代码审查评论、提交信息、普通邮件、沉默或没有及时反对，都不能修改或
+扩大本许可证。即使聊天文字被保存、导出、转发、打印、公证或截图，也仍然属于
+非正式沟通。只有符合许可证定义并明确列出被授权人、软件版本、具体权利、限制
+和生效日期的正式文件，才能覆盖相冲突的条款。
+
+本软件按“现状”和“可用状态”提供，不提供任何明示或默示担保。对独立安装、
+调试、培训、维护或支持服务收费的人，只能以自己的名义和责任提供，不得冒充
+官方支持，也不能把责任归给原作者、版权所有者或项目维护者。
+
+本中文说明仅用于帮助理解，不构成独立授权条款。如中文说明与英文正文存在不
+一致，以英文正文为准，但适用法律另有强制要求的除外。
+
+
+----------------------------------------------------------------
+Developer's Note (Non-binding)
+
+Anyone who knowingly violates this License, falsely claims authorship, or
+misappropriates the Software may find their conscience reminding them of that
+decision for the rest of their life.
+
+Unlike compressed data, guilt may not come with a reliable decompression tool.
+
+This note is humorous only, is not part of the legal terms, and has no legal
+effect.
+----------------------------------------------------------------
