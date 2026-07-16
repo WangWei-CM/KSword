@@ -197,3 +197,6 @@ $msbuild = 'C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Curr
 本项目包含系统级调试、审计和管理能力，请仅在合法授权和合规场景下使用。
 
 ---
+
+### 关于 “Open Source” 的说明
+本项目宣传中使用的 “Open Source” 仅表示源代码公开可查看（source-available），不代表本项目属于 OSI 定义或认可的开源软件。你可以在遵守本项目许可证的前提下查看、使用和修改源代码，但不得通过出售本软件或其副本获利。所有授权范围与限制均以许可证正文为准。
