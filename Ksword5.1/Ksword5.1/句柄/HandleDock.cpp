@@ -1,5 +1,6 @@
 #include "HandleDock.h"
 
+#include "../Internationalization/LanguageManager.h"
 #include "../theme.h"
 
 #include <QAbstractItemView>
@@ -195,13 +196,16 @@ namespace
                 return;
             }
 
-            m_visible = kSplash.show();
+            m_statusText = ks::i18n::contextText(
+                QStringLiteral("handle.splash.render_list"),
+                QStringLiteral("渲染句柄列表到图形界面")).toUtf8().toStdString();
+            m_visible = kSplash.show(m_statusText);
             if (!m_visible)
             {
                 return;
             }
 
-            kSplash.progress("渲染句柄列表到图形界面", 1);
+            kSplash.progress(m_statusText, 1);
         }
 
         ~HandleRenderSplashScope()
@@ -223,19 +227,20 @@ namespace
             const int progressPercent = std::max(
                 1,
                 std::min(99, static_cast<int>((normalizedRenderedCount * 100) / m_totalRowCount)));
-            kSplash.progress("渲染句柄列表到图形界面", progressPercent);
+            kSplash.progress(m_statusText, progressPercent);
         }
 
         void finish() const
         {
             if (m_visible)
             {
-                kSplash.progress("渲染句柄列表到图形界面", 100);
+                kSplash.progress(m_statusText, 100);
             }
         }
 
     private:
         std::size_t m_totalRowCount = 0; // m_totalRowCount：当前渲染总行数。
+        std::string m_statusText;        // m_statusText：按当前语言解析后的启动画面文案（UTF-8）。
         bool m_visible = false;          // m_visible：是否成功显示启动页。
     };
 }
@@ -858,14 +863,14 @@ void HandleDock::applyHandleRefreshResult(
         m_statusLabel->setToolTip(QStringLiteral(
             "总句柄:%1\n"
             "当前显示:%2\n"
-            "计数已解析:%3\n"
+            "基础信息已读取:%3\n"
             "名称已解析:%4\n"
-            "名称回退:%5\n"
-            "类型映射命中:%6\n"
-            "R0:%7\n"
-            "仅R3:%8\n"
-            "仅R0:%9\n"
-            "双源:%10\n"
+            "补充解析名称:%5\n"
+            "类型已识别:%6\n"
+            "内核记录:%7\n"
+            "仅用户态发现:%8\n"
+            "仅内核发现:%9\n"
+            "双来源确认:%10\n"
             "诊断:%11")
             .arg(refreshResult.totalHandleCount)
             .arg(m_rows.size())
@@ -1050,10 +1055,6 @@ void HandleDock::rebuildHandleTable()
             if (row.objectName.trimmed().isEmpty())
             {
                 item->setToolTip(static_cast<int>(HandleTableColumn::ObjectName), QStringLiteral("对象已查询，但该对象没有名称。"));
-            }
-            else if (row.objectNameFromFallback)
-            {
-                item->setToolTip(static_cast<int>(HandleTableColumn::ObjectName), QStringLiteral("对象名来自类型专用回退查询。"));
             }
         }
         else if (row.objectNameFailed)

@@ -35,10 +35,12 @@ public:
 
     // show 作用：
     // - 初始化并显示启动窗口；
+    // - 首帧直接使用调用方按当前语言解析出的状态文本；
     // - 首次调用失败时返回 false。
     // 调用方式：启动流程中最早阶段调用。
+    // 入参 initialStatusText：首帧状态文案（UTF-8）；为空时显示产品名。
     // 返回：true=显示成功；false=初始化或显示失败。
-    bool show();
+    bool show(const std::string& initialStatusText = std::string());
 
     // hide 作用：
     // - 隐藏并销毁启动窗口；

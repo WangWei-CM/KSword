@@ -390,7 +390,7 @@ void MemoryDock::initializeKernelExecutableMemoryScanTab()
     toolLayout->setSpacing(8);
 
     m_kernelExecutableRefreshButton = new QPushButton(QIcon(QStringLiteral(":/Icon/process_refresh.svg")), QStringLiteral("刷新"), m_tabKernelExecutableMemory);
-    m_kernelExecutableRefreshButton->setToolTip(QStringLiteral("调用 ArkDriverClient 执行 R0 内核可执行页扫描"));
+    m_kernelExecutableRefreshButton->setToolTip(QStringLiteral("扫描内核可执行内存"));
     m_kernelExecutableRefreshButton->setStyleSheet(buildBlueButtonStyle());
 
     m_kernelExecutableRiskOnlyCheck = new QCheckBox(QStringLiteral("仅风险项"), m_tabKernelExecutableMemory);
@@ -537,7 +537,7 @@ void MemoryDock::refreshKernelExecutableMemoryScanAsync()
                     {
                         guardThis->m_kernelExecutableDetailEditor->setText(
                             scanResult.unsupported
-                            ? QStringLiteral("不支持/驱动版本过旧。\n\n当前驱动未提供 Prompt 1 的内核可执行页扫描 IOCTL，或协议版本过旧。")
+                            ? QStringLiteral("当前驱动不支持内核可执行内存扫描，请更新为匹配版本。")
                             : QStringLiteral("内核可执行页扫描失败。\n\nWin32: %1\n详情: %2")
                                 .arg(scanResult.io.win32Error)
                                 .arg(kernelExecutableIoMessageText(scanResult.io.message)));

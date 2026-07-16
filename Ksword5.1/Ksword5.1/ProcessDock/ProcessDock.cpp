@@ -4032,7 +4032,6 @@ void ProcessDock::initializeProcessActivityPanel()
     m_activityTimelineSlider->setRange(0, 0);
     m_activityTimelineSlider->setValue(0);
     m_activityTimelineSlider->setVisible(false);
-    m_activityTimelineSlider->setToolTip(QStringLiteral("隐藏时间轴：内部仅保存当前样本索引，用户通过折线图点击切换历史时刻。"));
 
     // 快照说明曾经用于展示折线图当前采样点的长文本，但会挤占进程列表空间。
     // 现在保留对象指针给旧逻辑判空使用，同时不加入布局、不显示文本。
@@ -8983,10 +8982,10 @@ void ProcessDock::showTableContextMenu(const QPoint& localPosition)
     QAction* r0DisableBreakAction = criticalProcessSubMenu->addAction(
         buildR0ActionIcon(":/Icon/process_uncritical.svg"),
         processContextText("process.menu.r0_unbreak", QStringLiteral("R0关闭 BreakOnTermination")));
-    setCriticalAction->setToolTip(QStringLiteral("R3 调用 NtSetInformationProcess(ProcessBreakOnTermination=1)。"));
-    clearCriticalAction->setToolTip(QStringLiteral("R3 调用 NtSetInformationProcess(ProcessBreakOnTermination=0)。"));
-    r0EnableBreakAction->setToolTip(QStringLiteral("R0 优先 ZwSetInformationProcess，失败后按 PDB DynData 的 _EPROCESS.Flags 偏移置位。"));
-    r0DisableBreakAction->setToolTip(QStringLiteral("R0 优先 ZwSetInformationProcess，失败后按 PDB DynData 的 _EPROCESS.Flags 偏移清位。"));
+    setCriticalAction->setToolTip(QStringLiteral("将进程标记为关键进程；意外终止可能导致系统崩溃。"));
+    clearCriticalAction->setToolTip(QStringLiteral("取消进程的关键标记。"));
+    r0EnableBreakAction->setToolTip(QStringLiteral("将进程标记为关键进程；意外终止可能导致系统崩溃。"));
+    r0DisableBreakAction->setToolTip(QStringLiteral("取消进程的关键标记。"));
     QMenu* r0DangerSubMenu = contextMenu.addMenu(
         buildR0ActionIcon(":/Icon/process_uncritical.svg"),
         processContextText("process.menu.danger", QStringLiteral("R0危险进程标志/DKOM")));
@@ -9076,9 +9075,6 @@ void ProcessDock::showTableContextMenu(const QPoint& localPosition)
                     QStringLiteral("process.integrity.") + QString::fromLatin1(preset.nameText),
                     QString::fromUtf8(preset.detailText))));
         integrityAction->setData(static_cast<unsigned int>(preset.rid));
-        integrityAction->setToolTip(QStringLiteral("R0 内核 API 优先修改 TokenIntegrityLevel 为 S-1-16-%1；驱动不可用时回退 R3%2")
-            .arg(static_cast<unsigned int>(preset.rid))
-            .arg(isCurrentLevel ? QStringLiteral("（当前）") : QString()));
     }
 
     QAction* detailsAction = contextMenu.addAction(

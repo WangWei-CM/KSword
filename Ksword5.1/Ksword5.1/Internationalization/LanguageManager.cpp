@@ -51,6 +51,9 @@ namespace
     constexpr auto kLanguagePackSchema = "ksword-language-pack";
     constexpr int kLanguagePackFormatVersion = 1;
     constexpr qint64 kMaximumLanguagePackBytes = 32 * 1024 * 1024;
+    constexpr auto kSystemLanguagePreferenceId = "system";
+    constexpr auto kEnglishFallbackLanguageId = "en-US";
+    constexpr auto kProductFallbackLanguageId = "zh-CN";
     constexpr int kComboKeyRole = Qt::UserRole + 91;
     constexpr int kComboFallbackRole = Qt::UserRole + 92;
 
@@ -318,7 +321,9 @@ namespace
     {
         // zh-CN is the checked-in source-language baseline. Other zh-* packs
         // remain extensible and must be allowed to provide their own values.
-        return languageId.compare(QStringLiteral("zh-CN"), Qt::CaseInsensitive) == 0;
+        return languageId.compare(
+            QString::fromLatin1(kProductFallbackLanguageId),
+            Qt::CaseInsensitive) == 0;
     }
 }
 
@@ -340,7 +345,7 @@ bool ks::i18n::LanguageManager::initialize(
 
     if (m_languagePacks.isEmpty())
     {
-        m_currentLanguageId = QStringLiteral("zh-CN");
+        m_currentLanguageId = QString::fromLatin1(kProductFallbackLanguageId);
         if (errorTextOut != nullptr)
         {
             *errorTextOut = QStringLiteral("No valid language packs were found. Built-in text will be used.");
@@ -349,49 +354,7 @@ bool ks::i18n::LanguageManager::initialize(
         return false;
     }
 
-    QString requestedId = preferredLanguageId.trimmed();
-    if (requestedId.compare(QStringLiteral("system"), Qt::CaseInsensitive) == 0 || requestedId.isEmpty())
-    {
-        requestedId = QLocale::system().name().replace('_', '-');
-    }
-
-    auto hasLanguage = [this](const QString& languageId) {
-        return std::any_of(
-            m_languagePacks.cbegin(),
-            m_languagePacks.cend(),
-            [&languageId](const LanguagePack& pack) {
-                return pack.info.id.compare(languageId, Qt::CaseInsensitive) == 0;
-            });
-    };
-
-    if (!hasLanguage(requestedId))
-    {
-        const QString baseLanguage = requestedId.section('-', 0, 0);
-        const auto baseMatch = std::find_if(
-            m_languagePacks.cbegin(),
-            m_languagePacks.cend(),
-            [&baseLanguage](const LanguagePack& pack) {
-                return pack.info.id.section('-', 0, 0).compare(baseLanguage, Qt::CaseInsensitive) == 0;
-            });
-        if (baseMatch != m_languagePacks.cend())
-        {
-            requestedId = baseMatch->info.id;
-        }
-        else if (hasLanguage(QStringLiteral("zh-CN")))
-        {
-            requestedId = QStringLiteral("zh-CN");
-        }
-        else if (hasLanguage(QStringLiteral("en-US")))
-        {
-            requestedId = QStringLiteral("en-US");
-        }
-        else
-        {
-            requestedId = m_languagePacks.constFirst().info.id;
-        }
-    }
-
-    const bool applied = setLanguage(requestedId, errorTextOut);
+    const bool applied = setLanguage(preferredLanguageId, errorTextOut);
     if (errorTextOut != nullptr && !warningList.isEmpty())
     {
         const QString warningText = warningList.join(QStringLiteral("\n"));
@@ -406,17 +369,19 @@ bool ks::i18n::LanguageManager::setLanguage(
     const QString& languageId,
     QString* errorTextOut)
 {
+    const QString resolvedLanguageId = resolvePreferredLanguageId(languageId);
     const auto packIterator = std::find_if(
         m_languagePacks.cbegin(),
         m_languagePacks.cend(),
-        [&languageId](const LanguagePack& pack) {
-            return pack.info.id.compare(languageId.trimmed(), Qt::CaseInsensitive) == 0;
+        [&resolvedLanguageId](const LanguagePack& pack) {
+            return pack.info.id.compare(resolvedLanguageId, Qt::CaseInsensitive) == 0;
         });
     if (packIterator == m_languagePacks.cend())
     {
         if (errorTextOut != nullptr)
         {
-            *errorTextOut = QStringLiteral("Language pack not found: %1").arg(languageId);
+            *errorTextOut = QStringLiteral("Language pack not found: %1 (resolved from %2)")
+                .arg(resolvedLanguageId, languageId);
         }
         return false;
     }
@@ -448,6 +413,74 @@ bool ks::i18n::LanguageManager::setLanguage(
         errorTextOut->clear();
     }
     return true;
+}
+
+QString ks::i18n::LanguageManager::resolvePreferredLanguageId(
+    const QString& preferredLanguageId) const
+{
+    QString requestedLanguageId = preferredLanguageId.trimmed();
+    if (requestedLanguageId.isEmpty()
+        || requestedLanguageId.compare(
+            QString::fromLatin1(kSystemLanguagePreferenceId),
+            Qt::CaseInsensitive) == 0)
+    {
+        requestedLanguageId = QLocale::system().name();
+    }
+    requestedLanguageId.replace('_', '-');
+
+    const auto findExactLanguage = [this](const QString& candidateLanguageId) {
+        return std::find_if(
+            m_languagePacks.cbegin(),
+            m_languagePacks.cend(),
+            [&candidateLanguageId](const LanguagePack& pack) {
+                return pack.info.id.compare(candidateLanguageId, Qt::CaseInsensitive) == 0;
+            });
+    };
+
+    // Locale negotiation is deterministic:
+    // exact region -> base language -> en-US -> KSword's product fallback.
+    auto languageMatch = findExactLanguage(requestedLanguageId);
+    if (languageMatch != m_languagePacks.cend())
+    {
+        return languageMatch->info.id;
+    }
+
+    const QString baseLanguageId = requestedLanguageId.section('-', 0, 0);
+    languageMatch = findExactLanguage(baseLanguageId);
+    if (languageMatch == m_languagePacks.cend() && !baseLanguageId.isEmpty())
+    {
+        languageMatch = std::find_if(
+            m_languagePacks.cbegin(),
+            m_languagePacks.cend(),
+            [&baseLanguageId](const LanguagePack& pack) {
+                return pack.info.id.section('-', 0, 0).compare(
+                    baseLanguageId,
+                    Qt::CaseInsensitive) == 0;
+            });
+    }
+    if (languageMatch != m_languagePacks.cend())
+    {
+        return languageMatch->info.id;
+    }
+
+    languageMatch = findExactLanguage(QString::fromLatin1(kEnglishFallbackLanguageId));
+    if (languageMatch != m_languagePacks.cend())
+    {
+        return languageMatch->info.id;
+    }
+
+    languageMatch = findExactLanguage(QString::fromLatin1(kProductFallbackLanguageId));
+    if (languageMatch != m_languagePacks.cend())
+    {
+        return languageMatch->info.id;
+    }
+
+    // A damaged/custom installation may omit both required fallback packs.
+    // Keep the UI usable with the first validated pack; normal builds always
+    // stop at the product fallback above.
+    return m_languagePacks.isEmpty()
+        ? QString::fromLatin1(kProductFallbackLanguageId)
+        : m_languagePacks.constFirst().info.id;
 }
 
 QString ks::i18n::LanguageManager::currentLanguageId() const

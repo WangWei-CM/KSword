@@ -312,7 +312,7 @@ void LogDockWidget::initializeUi()
     m_copyVisibleButton->setToolTip("复制当前可见列表内容（支持追踪过滤状态）");
     m_detailCheck->setToolTip("显示文件列和函数列");
     m_autoScrollCheck->setToolTip("开启后表格刷新将自动滚动到最后一行");
-    m_visibleLimitSpin->setToolTip("仅限制界面显示的最近日志条数；内部日志仍保留全量，调大后会立即显示已记录的旧日志。");
+    m_visibleLimitSpin->setToolTip("限制界面显示的最近日志条数；提高上限可显示更早记录。");
 
     ks::i18n::LanguageManager& languageManager = ks::i18n::LanguageManager::instance();
     languageManager.bindText(m_debugCheck, QStringLiteral("log.level.debug"), QStringLiteral("Debug"));
@@ -331,7 +331,7 @@ void LogDockWidget::initializeUi()
     languageManager.bindToolTip(m_copyVisibleButton, QStringLiteral("log.tooltip.copy_visible"), QStringLiteral("复制当前可见列表内容（支持追踪过滤状态）"));
     languageManager.bindToolTip(m_detailCheck, QStringLiteral("log.tooltip.detail"), QStringLiteral("显示文件列和函数列"));
     languageManager.bindToolTip(m_autoScrollCheck, QStringLiteral("log.tooltip.autoscroll"), QStringLiteral("开启后表格刷新将自动滚动到最后一行"));
-    languageManager.bindToolTip(m_visibleLimitSpin, QStringLiteral("log.tooltip.visible_limit"), QStringLiteral("仅限制界面显示的最近日志条数；内部日志仍保留全量，调大后会立即显示已记录的旧日志。"));
+    languageManager.bindToolTip(m_visibleLimitSpin, QStringLiteral("log.tooltip.visible_limit"), QStringLiteral("限制界面显示的最近日志条数；提高上限可显示更早记录。"));
 
     // 图标尺寸与按钮尺寸统一，保证工具栏视觉紧凑并保持纯图标风格。
     m_exportButton->setIconSize(DefaultButtonIconSize);

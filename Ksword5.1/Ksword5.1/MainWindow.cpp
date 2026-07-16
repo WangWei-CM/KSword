@@ -3112,7 +3112,10 @@ MainWindow::MainWindow(
     // - 外观系统。
     // 提前读取一次外观配置，便于在 initDockWidgets 阶段确定启动默认页签的预加载策略。
     m_currentAppearanceSettings = ks::settings::loadAppearanceSettings();
-    reportStartupProgress(32, QStringLiteral("正在初始化主窗口框架..."));
+    reportStartupProgress(
+        32,
+        QStringLiteral("main.startup.progress.main_window_framework"),
+        QStringLiteral("正在准备主界面..."));
 
     // 启用无边框模式：
     // - 由自绘标题栏接管最小化/最大化/关闭/置顶操作；
@@ -3189,42 +3192,63 @@ MainWindow::MainWindow(
     configureSingleInstanceMessageReception(reinterpret_cast<HWND>(winId()));
 
     // 初始化菜单
-    reportStartupProgress(38, QStringLiteral("正在初始化菜单..."));
+    reportStartupProgress(
+        38,
+        QStringLiteral("main.startup.progress.menu"),
+        QStringLiteral("正在准备主界面..."));
     initMenus();
 
     // 初始化自绘标题栏：
     // - 替代系统标题栏；
     // - 承载置顶按钮、命令输入框和窗口控制按钮。
-    reportStartupProgress(44, QStringLiteral("正在初始化自绘标题栏..."));
+    reportStartupProgress(
+        44,
+        QStringLiteral("main.startup.progress.custom_title_bar"),
+        QStringLiteral("正在准备主界面..."));
     initCustomTitleBar();
 
     // 初始化权限状态按钮：
     // - UIAccess / Admin / Debug / System / R0；
     // - 挂载到自绘标题栏右侧，不再依赖原生菜单栏。
-    reportStartupProgress(46, QStringLiteral("正在初始化权限状态按钮..."));
+    reportStartupProgress(
+        46,
+        QStringLiteral("main.startup.progress.privilege_status"),
+        QStringLiteral("正在准备主界面..."));
     initPrivilegeStatusButtons();
     startR0RuntimeConsumersAfterServiceStart();
 
     // 初始化Dock Widgets
-    reportStartupProgress(48, QStringLiteral("正在创建页面组件..."));
+    reportStartupProgress(
+        48,
+        QStringLiteral("main.startup.progress.page_components"),
+        QStringLiteral("正在加载功能模块..."));
     initDockWidgets();
 
     // 设置Dock布局
-    reportStartupProgress(74, QStringLiteral("正在整理 Dock 布局..."));
+    reportStartupProgress(
+        74,
+        QStringLiteral("main.startup.progress.dock_layout"),
+        QStringLiteral("正在恢复界面布局..."));
     setupDockLayout();
 
     // 初始化外观设置：
     // - 读取 JSON；
     // - 绑定系统深浅色变化；
     // - 应用窗口背景色/背景图/文本颜色。
-    reportStartupProgress(84, QStringLiteral("正在初始化主题与外观..."));
+    reportStartupProgress(
+        84,
+        QStringLiteral("main.startup.progress.theme_appearance"),
+        QStringLiteral("正在应用界面设置..."));
     initAppearanceSettings();
 
     // 记录初始化完成日志，方便用户在“日志输出”面板直接看到结果。
     // 注意：使用 kLogEvent，避免与 QObject::event 命名冲突。
     kLogEvent readyEvent;
     info << readyEvent << "MainWindow 初始化完成，日志面板已加载。" << eol;
-    reportStartupProgress(93, QStringLiteral("主窗口初始化完成，准备显示..."));
+    reportStartupProgress(
+        93,
+        QStringLiteral("main.startup.progress.main_window_ready"),
+        QStringLiteral("即将完成..."));
 }
 
 MainWindow::~MainWindow()
@@ -3237,17 +3261,20 @@ MainWindow::~MainWindow()
 
 void MainWindow::reportStartupProgress(
     const int progressPercent,
-    const QString& statusText) const
+    const QString& textKey,
+    const QString& fallbackText) const
 {
     // 安全回调策略：
     // - 未传入回调则静默跳过；
-    // - 有回调时把阶段百分比与文字原样转发给主函数。
+    // - 有回调时先按当前有效语言解析位置键，再把结果转发给主函数。
     if (!m_startupProgressCallback)
     {
         return;
     }
 
-    m_startupProgressCallback(progressPercent, statusText);
+    m_startupProgressCallback(
+        progressPercent,
+        ks::i18n::contextText(textKey, fallbackText));
 }
 
 void MainWindow::closeEvent(QCloseEvent* event)
@@ -4938,7 +4965,7 @@ void MainWindow::initPrivilegeStatusButtons()
         m_uiAccessStatusButton->setMinimumWidth(74);
     }
 
-    m_uiAccessStatusButton->setToolTip("UIAccess：尝试 SYSTEM TokenUIAccess fallback 启动");
+    m_uiAccessStatusButton->setToolTip("UIAccess：点击重新启动并尝试启用跨权限界面访问");
     m_r0StatusButton->setToolTip("R0：KswordARK 驱动服务快捷开关");
 
     // 把容器挂到功能条右侧。
@@ -5224,11 +5251,11 @@ void MainWindow::refreshPrivilegeStatusButtons()
     {
         if (uiAccessEnabled)
         {
-            m_uiAccessStatusButton->setToolTip("UIAccess：当前进程令牌已启用 UIAccess");
+            m_uiAccessStatusButton->setToolTip("UIAccess 已启用");
         }
         else
         {
-            m_uiAccessStatusButton->setToolTip("UIAccess：点击尝试 SYSTEM TokenUIAccess fallback 启动");
+            m_uiAccessStatusButton->setToolTip("UIAccess：点击重新启动并尝试启用跨权限界面访问");
         }
     }
     if (m_adminStatusButton != nullptr)
@@ -5631,8 +5658,8 @@ void MainWindow::handleUiAccessButtonClicked()
             this,
             QStringLiteral("UIAccess"),
             QStringLiteral(
-                "SYSTEM TokenUIAccess fallback 需要提升管理员权限，才能打开并复制 SYSTEM 进程令牌。\n\n"
-                "将先触发 Admin 提权重启；重启后请再次点击 UIAccess。"));
+                "启用 UIAccess 需要管理员权限。\n\n"
+                "程序将先以管理员身份重新启动；重启后请再次点击 UIAccess。"));
         requestAdminElevationRestart();
         return;
     }
@@ -5648,7 +5675,7 @@ void MainWindow::handleUiAccessButtonClicked()
             << eol;
         QMessageBox::warning(
             this,
-            QStringLiteral("UIAccess fallback 启动失败"),
+            QStringLiteral("UIAccess 启动失败"),
             launchDetailText);
         refreshPrivilegeStatusButtons();
         return;
@@ -6246,24 +6273,11 @@ bool MainWindow::showUnsignedDriverFailureDialog(
 
     QLabel* signatureMechanismLabel = new QLabel(
         QStringLiteral(
-            "Windows 内核驱动默认启用“强制数字签名”机制：系统在加载 .sys 时会校验证书链与镜像完整性。"
-            "当驱动未签名、签名损坏或证书不被信任时，系统会阻止加载。\n\n"
-            "注意：测试模式不是完全关闭 x64 内核代码完整性。"
-            "如果 KswordARK.sys 仍然是 NotSigned，或者测试证书没有导入本机受信任根/发布者，"
-            "即使已经看到桌面右下角“测试模式”，StartServiceW 仍可能返回 577。"),
+            "Windows 已阻止当前驱动。请改用可信签名的 KswordARK.sys；"
+            "开发或测试环境也可以选择启用测试模式。"),
         &decisionDialog);
     signatureMechanismLabel->setWordWrap(true);
     rootLayout->addWidget(signatureMechanismLabel);
-
-    QLabel* testSignCommandLabel = new QLabel(
-        QStringLiteral(
-            "开发环境修复命令：请在管理员 PowerShell 中从仓库根目录执行：\n"
-            "powershell -ExecutionPolicy Bypass -File scripts\\Sign-KswordArkDriverTest.ps1 -EnableTestSigning\n"
-            "执行后重启系统，再确认服务 ImagePath 指向刚签名的 KswordARK.sys。"),
-        &decisionDialog);
-    testSignCommandLabel->setWordWrap(true);
-    testSignCommandLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
-    rootLayout->addWidget(testSignCommandLabel);
 
     QLabel* actionTitleLabel = new QLabel(QStringLiteral("我可以做什么？"), &decisionDialog);
     actionTitleLabel->setStyleSheet(QStringLiteral("font-size:16px;font-weight:700;"));
@@ -6271,12 +6285,8 @@ bool MainWindow::showUnsignedDriverFailureDialog(
 
     QLabel* testModeDescriptionLabel = new QLabel(
         QStringLiteral(
-            "测试模式（Test Signing）会允许加载本机信任的测试签名驱动，便于开发调试。\n"
-            "风险说明：\n"
-            "1. 被本机信任测试证书签名的恶意驱动同样可能加载。\n"
-            "2. 反作弊程序会阻止所有游戏启动。\n"
-            "3. 开启和关闭测试模式都需要重启电脑。\n"
-            "4. 完全未签名的 .sys 仍应先执行测试签名脚本。"),
+            "测试模式仅用于开发或测试，会降低系统对内核驱动的保护，"
+            "并可能与反作弊软件冲突。开启或关闭后都需要重启电脑。"),
         &decisionDialog);
     testModeDescriptionLabel->setWordWrap(true);
     rootLayout->addWidget(testModeDescriptionLabel);
@@ -7234,7 +7244,10 @@ void MainWindow::initializeNextDeferredDock()
         return;
     }
 
-    reportStartupProgress(98, QStringLiteral("剩余页面补载完成。"));
+    reportStartupProgress(
+        98,
+        QStringLiteral("main.startup.progress.remaining_pages_complete"),
+        QStringLiteral("启动完成。"));
 }
 
 void MainWindow::ensureVisibleLazyDocksInitialized(const QString& reasonText)
@@ -7400,7 +7413,10 @@ void MainWindow::initDockWidgets()
         };
 
     // 首屏优先：欢迎页、启动默认页签，以及右侧/底部辅助组件；设置改由顶部菜单即时打开。
-    reportStartupProgress(50, QStringLiteral("正在创建首屏页面..."));
+    reportStartupProgress(
+        50,
+        QStringLiteral("main.startup.progress.first_page"),
+        QStringLiteral("正在加载功能模块..."));
     m_welcomeWidget = new WelcomeDock(this);
     if (shouldEagerLoad(QStringLiteral("process"))) { m_processWidget = new ProcessDock(this); }
     if (shouldEagerLoad(QStringLiteral("network"))) { m_networkWidget = new NetworkDock(this); }
@@ -7421,14 +7437,20 @@ void MainWindow::initDockWidgets()
     if (shouldEagerLoad(QStringLiteral("service"))) { m_serviceWidget = new ServiceDock(this); }
     if (shouldEagerLoad(QStringLiteral("misc"))) { m_miscWidget = new MiscDock(this); }
 
-    reportStartupProgress(60, QStringLiteral("正在创建辅助组件..."));
+    reportStartupProgress(
+        60,
+        QStringLiteral("main.startup.progress.auxiliary_components"),
+        QStringLiteral("正在加载功能模块..."));
     m_monitorPanelWidget = new MonitorPanelWidget(this);
     m_logWidget = new LogDockWidget(this);
     m_progressWidget = new ProgressDockWidget(this);
     m_immediateEditorWidget = new CodeEditorWidget(this);
 
     // 创建 Dock 容器前再推进一次启动进度，避免长时间停留在单一文案。
-    reportStartupProgress(68, QStringLiteral("正在封装 Dock 容器..."));
+    reportStartupProgress(
+        68,
+        QStringLiteral("main.startup.progress.dock_containers"),
+        QStringLiteral("正在加载功能模块..."));
 
     // 使用辅助函数创建Dock Widgets。
     auto createDockWidget = [this](
@@ -7602,7 +7624,10 @@ void MainWindow::initDockWidgets()
     }
 
     // 顶部菜单栏已精简，不再注册 Dock 视图切换菜单。
-    reportStartupProgress(72, QStringLiteral("跳过视图菜单注册"));
+    reportStartupProgress(
+        72,
+        QStringLiteral("main.startup.progress.skip_view_menu"),
+        QStringLiteral("正在加载功能模块..."));
 }
 #define ADS_TABIFY_DOCK_WIDGET_AVAILABLE
 void MainWindow::setupDockLayout()
@@ -7635,7 +7660,10 @@ void MainWindow::setupDockLayout()
     setUpdatesEnabled(false);
     m_pDockManager->setUpdatesEnabled(false);
 
-    reportStartupProgress(76, QStringLiteral("正在注册主 Dock 页签..."));
+    reportStartupProgress(
+        76,
+        QStringLiteral("main.startup.progress.register_main_docks"),
+        QStringLiteral("正在加载功能模块..."));
 
     // 2. 左侧区域：先添加第一个DockWidget，获取其所在的DockArea
     auto leftDockArea = m_pDockManager->addDockWidget(ads::LeftDockWidgetArea, m_dockWelcome);
@@ -7661,7 +7689,10 @@ void MainWindow::setupDockLayout()
     // 方法2: 或者使用addDockWidget并指定CenterDockWidgetArea
     // m_pDockManager->addDockWidget(ads::CenterDockWidgetArea, m_dockProcess, leftDockArea);
 
-    reportStartupProgress(78, QStringLiteral("正在注册辅助 Dock 区域..."));
+    reportStartupProgress(
+        78,
+        QStringLiteral("main.startup.progress.register_auxiliary_docks"),
+        QStringLiteral("正在加载功能模块..."));
 
     // 4. 右侧区域：同理
     auto rightDockArea = m_pDockManager->addDockWidget(ads::RightDockWidgetArea, m_dockCurrentOp);
@@ -7684,9 +7715,15 @@ void MainWindow::setupDockLayout()
     // 7. 默认布局搭建完成后再恢复用户布局：
     // - ADS restoreState 要求所有 DockWidget 已注册；
     // - objectName 已在 initDockWidgets 中固定为英文 key，避免中文标题变化破坏恢复。
-    reportStartupProgress(80, QStringLiteral("正在恢复上次 Dock 布局..."));
+    reportStartupProgress(
+        80,
+        QStringLiteral("main.startup.progress.restore_dock_layout"),
+        QStringLiteral("正在恢复界面布局..."));
     restoreDockLayoutFromConfig();
-    reportStartupProgress(82, QStringLiteral("正在刷新 Dock 标签状态..."));
+    reportStartupProgress(
+        82,
+        QStringLiteral("main.startup.progress.refresh_dock_tabs"),
+        QStringLiteral("正在恢复界面布局..."));
     refreshAdsDockTabVisualIdentities(m_pDockManager);
 
     m_pDockManager->setUpdatesEnabled(dockManagerUpdatesWereEnabled);
@@ -8031,7 +8068,10 @@ void MainWindow::initAppearanceSettings()
     // 启动画面细分：
     // - 设置页改为顶部菜单按需创建；
     // - 初始化时直接从 JSON 读取外观配置，再应用首轮主题样式。
-    reportStartupProgress(86, QStringLiteral("正在读取外观设置..."));
+    reportStartupProgress(
+        86,
+        QStringLiteral("main.startup.progress.read_appearance"),
+        QStringLiteral("正在应用界面设置..."));
     m_currentAppearanceSettings = ks::settings::loadAppearanceSettings();
 
     QStyleHints* styleHints = QGuiApplication::styleHints();
@@ -8045,16 +8085,25 @@ void MainWindow::initAppearanceSettings()
             });
     }
 
-    reportStartupProgress(89, QStringLiteral("正在应用主界面样式..."));
+    reportStartupProgress(
+        89,
+        QStringLiteral("main.startup.progress.apply_main_style"),
+        QStringLiteral("正在应用界面设置..."));
     applyAppearanceSettings(m_currentAppearanceSettings, QStringLiteral("初始化加载"));
     if (!m_dockLayoutRestoredFromConfig)
     {
-        reportStartupProgress(92, QStringLiteral("正在激活启动页签..."));
+        reportStartupProgress(
+            92,
+            QStringLiteral("main.startup.progress.activate_startup_tab"),
+            QStringLiteral("正在恢复界面布局..."));
         raiseStartupDockByKey(m_currentAppearanceSettings.startupDefaultTabKey, QStringLiteral("初始化加载"));
     }
     else
     {
-        reportStartupProgress(92, QStringLiteral("正在沿用上次 Dock 布局..."));
+        reportStartupProgress(
+            92,
+            QStringLiteral("main.startup.progress.reuse_dock_layout"),
+            QStringLiteral("正在恢复界面布局..."));
         info << appearanceInitEvent << "[MainWindow] 已恢复 ADS 布局，跳过启动默认页签覆盖。" << eol;
     }
     info << appearanceInitEvent << "[MainWindow] 外观设置系统初始化完成。" << eol;
@@ -8216,7 +8265,10 @@ void MainWindow::applyAppearanceSettings(
     // - 仅在初始化加载时上报，避免用户运行期切换主题时干扰启动画面状态。
     if (isInitialAppearanceApply)
     {
-        reportStartupProgress(90, QStringLiteral("正在刷新主题关联控件..."));
+        reportStartupProgress(
+            90,
+            QStringLiteral("main.startup.progress.refresh_theme_widgets"),
+            QStringLiteral("正在应用界面设置..."));
     }
 
     // 主题切换后主动刷新“按主题着色的表格行”，避免墨绿色残留到浅色模式。
@@ -8229,7 +8281,10 @@ void MainWindow::applyAppearanceSettings(
     // 不是单纯的“应用样式”，因此启动提示单独拆出，便于判断耗时是否来自这里。
     if (isInitialAppearanceApply)
     {
-        reportStartupProgress(91, QStringLiteral("正在排队确认内核 Dock 显示状态..."));
+        reportStartupProgress(
+            91,
+            QStringLiteral("main.startup.progress.queue_kernel_dock_check"),
+            QStringLiteral("即将完成..."));
         QTimer::singleShot(0, this, [this]()
             {
                 repairKernelDockAfterLayoutRestore(QStringLiteral("applyAppearanceSettings-deferred-0"));

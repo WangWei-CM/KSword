@@ -282,8 +282,12 @@ private:
     // - 安全调用启动进度回调；
     // - 让 MainWindow 内部各阶段都能主动更新 splash 文案。
     // 入参 progressPercent：阶段进度百分比。
-    // 入参 statusText：阶段说明文本。
-    void reportStartupProgress(int progressPercent, const QString& statusText) const;
+    // 入参 textKey：语言包中的稳定位置键。
+    // 入参 fallbackText：语言包不可用时的产品兜底文本。
+    void reportStartupProgress(
+        int progressPercent,
+        const QString& textKey,
+        const QString& fallbackText) const;
 
     // initAppearanceSettings 作用：
     // - 读取 SettingsDock/JSON 的外观配置；

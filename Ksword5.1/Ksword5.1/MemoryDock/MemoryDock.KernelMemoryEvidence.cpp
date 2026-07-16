@@ -463,7 +463,7 @@ void MemoryDock::initializeKernelMemoryEvidenceTab()
     toolLayout->setSpacing(8);
 
     m_kernelMemoryEvidenceRefreshButton = new QPushButton(QIcon(QStringLiteral(":/Icon/process_refresh.svg")), QStringLiteral("刷新证据"), m_tabKernelMemoryEvidence);
-    m_kernelMemoryEvidenceRefreshButton->setToolTip(QStringLiteral("通过 ArkDriverClient 查询 R0 内核内存证据"));
+    m_kernelMemoryEvidenceRefreshButton->setToolTip(QStringLiteral("刷新内核内存证据"));
     m_kernelMemoryEvidenceRefreshButton->setStyleSheet(buildBlueButtonStyle());
 
     m_kernelMemoryEvidenceRiskOnlyCheck = new QCheckBox(QStringLiteral("仅风险项"), m_tabKernelMemoryEvidence);

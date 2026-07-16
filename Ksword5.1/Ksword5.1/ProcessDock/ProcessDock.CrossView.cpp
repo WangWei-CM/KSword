@@ -472,7 +472,7 @@ void ProcessDock::initializeCrossViewPage()
     // Cross-View 详情区使用项目统一 CodeEditorWidget，保留查找/复制能力并避免普通文本框样式漂移。
     m_crossViewDetailEdit = new CodeEditorWidget(splitter);
     m_crossViewDetailEdit->setReadOnly(true);
-    m_crossViewDetailEdit->setText(QStringLiteral("选择 Cross-View 行查看 source mask、anomaly flags、DynData offsets 和 R0 detail。"));
+    m_crossViewDetailEdit->setText(QStringLiteral("选择一条记录查看进程来源、异常标记和内核详情。"));
     splitter->addWidget(m_crossViewDetailEdit);
     splitter->setStretchFactor(0, 3);
     splitter->setStretchFactor(1, 2);

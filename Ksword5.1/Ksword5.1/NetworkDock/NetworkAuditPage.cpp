@@ -185,7 +185,7 @@ namespace
             // - 输入：ArkDriverClient 返回的 unsupported/not supported 文本；
             // - 处理：折叠为网络审计页统一的人读状态；
             // - 返回：不暴露底层 IOCTL 名称，方便用户直接判断需要更新驱动。
-            return QStringLiteral("当前驱动不支持该 R0 网络审计入口，请同步更新 R0/R3 组件");
+            return QStringLiteral("当前驱动不支持网络审计，请更新为匹配版本");
         }
         if (rawText.contains(QStringLiteral("capability"), Qt::CaseInsensitive) ||
             rawText.contains(QStringLiteral("DynData"), Qt::CaseInsensitive) ||
@@ -195,12 +195,12 @@ namespace
             // - 输入：驱动返回的 capability/DynData/profile 相关说明；
             // - 处理：转换成用户能理解的偏移能力缺口；
             // - 返回：指向内核 DynData 页继续排查。
-            return QStringLiteral("动态偏移或能力组未满足，请先查看“内核 -> DynData/Capability”状态");
+            return QStringLiteral("当前驱动缺少网络审计所需能力，请更新驱动或相关数据文件");
         }
         if (rawText.contains(QStringLiteral("access denied"), Qt::CaseInsensitive) ||
             rawText.contains(QStringLiteral("privilege"), Qt::CaseInsensitive))
         {
-            return QStringLiteral("权限不足，当前进程无法完成 R0 网络审计查询");
+            return QStringLiteral("权限不足，无法完成网络审计查询");
         }
         if (rawText.contains(QStringLiteral("invalid parameter"), Qt::CaseInsensitive) ||
             rawText.contains(QStringLiteral("version mismatch"), Qt::CaseInsensitive))

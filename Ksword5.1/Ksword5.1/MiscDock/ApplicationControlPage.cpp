@@ -1788,7 +1788,7 @@ namespace ks::misc
             catch (const std::exception& exception)
             {
                 appendPlatformRow(
-                    QStringLiteral("R0 Security / ArkDriverClient"),
+                    QStringLiteral("内核安全审计"),
                     QStringLiteral("Exception"),
                     QString::fromLocal8Bit(exception.what()));
                 r0PlatformSummaryParts << QStringLiteral("R0 安全态势读取异常: %1").arg(QString::fromLocal8Bit(exception.what()));
@@ -1796,7 +1796,7 @@ namespace ks::misc
             catch (...)
             {
                 appendPlatformRow(
-                    QStringLiteral("R0 Security / ArkDriverClient"),
+                    QStringLiteral("内核安全审计"),
                     QStringLiteral("Exception"),
                     QStringLiteral("未知异常"));
                 r0PlatformSummaryParts << QStringLiteral("R0 安全态势读取异常: 未知异常");

@@ -1357,8 +1357,7 @@ namespace
             "Shadow服务表基址: %8\n"
             "服务例程地址: %9\n"
             "驱动标志: 0x%10\n\n"
-            "说明: 当前 R0 参考 System Informer 的 ksyscall 思路，从 win32k.sys 的 __win32kstub_* 和 win32u.dll 的 Nt* stub 中解析 syscall index。"
-            "若已应用包含 KeServiceDescriptorTableShadow 的 PDB/DynData profile，会继续解析 shadow service table 实际表项；服务例程地址为 0 表示 profile 缺失、身份不匹配或表项暂不可读。"))
+            "说明: 服务例程地址为 0 表示当前资料不足或该表项暂不可读。"))
             .arg(enumResult.version)
             .arg(enumResult.totalCount)
             .arg(enumResult.returnedCount)

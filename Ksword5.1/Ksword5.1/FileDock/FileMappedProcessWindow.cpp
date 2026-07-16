@@ -194,7 +194,7 @@ namespace
             lowerMessageText.contains(QStringLiteral("not supported")) ||
             lowerMessageText.contains(QStringLiteral("status=0xc00000bb")))
         {
-            return QStringLiteral("当前驱动未支持文件 Section/ControlArea 反查 IOCTL。");
+            return QStringLiteral("当前驱动不支持文件映射反查。");
         }
         if (lowerMessageText.contains(QStringLiteral("unavailable")) ||
             lowerMessageText.contains(QStringLiteral("device handle unavailable")))
@@ -208,7 +208,7 @@ namespace
         }
         if (lowerMessageText.contains(QStringLiteral("deviceiocontrol")))
         {
-            return QStringLiteral("驱动 IOCTL 调用失败，建议确认驱动版本、权限与 DynData 偏移状态。");
+            return QStringLiteral("文件映射查询失败，请确认驱动已加载且版本匹配。");
         }
         if (lowerMessageText.contains(QStringLiteral("file-section path invalid")) ||
             lowerMessageText.contains(QStringLiteral("path invalid")))

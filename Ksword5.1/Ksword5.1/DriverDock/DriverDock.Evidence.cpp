@@ -627,7 +627,7 @@ void DriverDock::refreshLoadedModuleEvidenceAsync()
     {
         m_moduleEvidenceStatusLabel->setText(driverText(
             "driver.evidence.status.aggregating",
-            QStringLiteral("证据：后台聚合中，UI 不会阻塞...")));
+            QStringLiteral("证据：正在刷新...")));
     }
 
     const std::vector<LoadedKernelModuleRecord> moduleSnapshot = m_loadedModuleCache;

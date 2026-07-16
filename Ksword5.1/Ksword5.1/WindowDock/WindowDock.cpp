@@ -2738,8 +2738,7 @@ void WindowDock::setRefreshingPlaceholderRows()
     // 目的：避免后台查询期间，GUI/Session 与热键/钩子页出现完全空表。
     // 处理：窗口/GUI线程/Session 先用本地 Win32 只读枚举生成具体行，
     //       热键/Hook 暂无纯 R3 安全枚举路径时至少生成明确诊断行。
-    const QString pendingDetailText =
-        QStringLiteral("后台正在采集 ArkDriverClient R0 快照与本地 R3 fallback；完成后会自动替换为具体行。");
+    const QString pendingDetailText = QStringLiteral("正在收集窗口信息，请稍候...");
 
     ksword::ark::Win32kWindowsResult localWindowsResult;
     localWindowsResult.io.message = "R0 refresh is pending; showing local EnumWindows fallback rows.";

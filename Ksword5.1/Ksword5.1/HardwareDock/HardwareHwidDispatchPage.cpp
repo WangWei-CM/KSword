@@ -151,7 +151,7 @@ void HardwareHwidDispatchPage::initializeUi()
     m_rootLayout->addWidget(titleLabel, 0);
 
     QLabel* scopeLabel = new QLabel(
-        QStringLiteral("来源：FiYHer/EASY-HWID-SPOOFER。仅接入 README 标明的“修改驱动程序的派遣函数(兼容性强)”方案；物理内存直接修改、SMBIOS 物理表修改、NDIS 私有块 MAC 改写、卷引导扇区直写不在本页范围内。网络路径仅处理 NSI/ARP 查询输出。"),
+        QStringLiteral("仅修改所选设备的查询结果，不直接写入物理内存、固件或磁盘。网络选项目前仅影响 NSI/ARP 查询结果。"),
         this);
     scopeLabel->setWordWrap(true);
     scopeLabel->setStyleSheet(QStringLiteral("color:%1;").arg(KswordTheme::TextSecondaryHex()));
@@ -200,15 +200,15 @@ void HardwareHwidDispatchPage::initializeUi()
     m_macModeCombo->addItem(
         QStringLiteral("自定义物理 MAC"),
         QVariant::fromValue(static_cast<qulonglong>(KSWORD_ARK_HWID_DISPATCH_MAC_MODE_CUSTOM)));
-    m_macModeCombo->setToolTip(QStringLiteral("协议预留字段：本页 dispatch-only 实现不扫描 NDIS 私有链表，不直接改写 MAC 内存块。"));
+    m_macModeCombo->setToolTip(QStringLiteral("当前版本不会修改网卡 MAC 地址。"));
     m_diskSerialEdit = new QLineEdit(profileGroup);
     m_diskProductEdit = new QLineEdit(profileGroup);
     m_diskRevisionEdit = new QLineEdit(profileGroup);
     m_gpuSerialEdit = new QLineEdit(profileGroup);
     m_permanentMacEdit = new QLineEdit(profileGroup);
     m_currentMacEdit = new QLineEdit(profileGroup);
-    m_permanentMacEdit->setToolTip(QStringLiteral("协议预留字段；当前 R0 仅支持 NSI/ARP 返回清理。"));
-    m_currentMacEdit->setToolTip(QStringLiteral("协议预留字段；当前 R0 仅支持 NSI/ARP 返回清理。"));
+    m_permanentMacEdit->setToolTip(QStringLiteral("保留设置；当前版本不会修改此地址。"));
+    m_currentMacEdit->setToolTip(QStringLiteral("保留设置；当前版本不会修改此地址。"));
     m_diskGuidCheck = new QCheckBox(QStringLiteral("随机化 GPT GUID 查询结果"), profileGroup);
     m_volumeCleanCheck = new QCheckBox(QStringLiteral("清理 MountMgr 卷唯一标识查询结果"), profileGroup);
     m_arpCleanCheck = new QCheckBox(QStringLiteral("清理 ARP Table 查询结果"), profileGroup);

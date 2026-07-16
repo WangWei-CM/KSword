@@ -149,14 +149,10 @@ namespace ksword::driver_dock_internal
         QString adviceText = driverText(
             "driver.load_advice.signature_error",
             QStringLiteral(
-                "挂载失败：StartServiceW 返回签名/镜像校验错误（%1）。\n"
+                "挂载失败：Windows 拒绝加载驱动（%1）。\n"
                 "服务：%2\n"
                 "驱动路径：%3\n"
-                "说明：测试模式并不会放行完全未签名的 x64 .sys；"
-                "KswordARK.sys 必须带测试签名，并且测试证书要被本机信任。\n"
-                "修复：管理员 PowerShell 进入仓库根目录后执行：\n"
-                "powershell -ExecutionPolicy Bypass -File scripts\\Sign-KswordArkDriverTest.ps1 -EnableTestSigning\n"
-                "执行后重启，并确认服务 ImagePath 指向刚签名的 KswordARK.sys。"))
+                "请使用可信签名的 KswordARK.sys；开发或测试环境可使用测试签名并启用测试模式，随后重启系统。"))
             .arg(formatWin32ErrorTextForAdvice(errorCode))
             .arg(serviceNameText)
             .arg(binaryPathText.trimmed().isEmpty()

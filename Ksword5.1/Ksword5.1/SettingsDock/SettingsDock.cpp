@@ -229,21 +229,17 @@ void SettingsDock::initializeAppearanceTab()
     QVBoxLayout* languageLayout = new QVBoxLayout(languageGroupBox);
     languageLayout->setSpacing(8);
 
-    QLabel* languageHintLabel = new QLabel(
-        QStringLiteral("语言由程序目录下的 languages 文件夹提供。切换后立即生效，缺失文本会按语言包声明回退。"),
-        languageGroupBox);
-    languageHintLabel->setWordWrap(true);
-    languageManager.bindText(
-        languageHintLabel,
-        QStringLiteral("settings.language.hint"),
-        QStringLiteral("语言由程序目录下的 languages 文件夹提供。切换后立即生效，缺失文本会按语言包声明回退。"));
-    languageLayout->addWidget(languageHintLabel);
-
     QHBoxLayout* languageSelectLayout = new QHBoxLayout();
     QLabel* languageLabel = new QLabel(QStringLiteral("显示语言"), languageGroupBox);
     languageManager.bindText(languageLabel, QStringLiteral("settings.language.label"), QStringLiteral("显示语言"));
     languageSelectLayout->addWidget(languageLabel, 0);
     m_languageCombo = new QComboBox(languageGroupBox);
+    m_languageCombo->addItem(QStringLiteral("跟随系统"), QStringLiteral("system"));
+    languageManager.bindComboBoxItem(
+        m_languageCombo,
+        0,
+        QStringLiteral("language.name.system"),
+        QStringLiteral("跟随系统"));
     const QList<ks::i18n::LanguageInfo> availableLanguages = languageManager.availableLanguages();
     for (const ks::i18n::LanguageInfo& languageInfo : availableLanguages)
     {
@@ -325,10 +321,10 @@ void SettingsDock::initializeAppearanceTab()
     backgroundLayout->setSpacing(8);
 
     QLabel* pathHintLabel = new QLabel(
-        QStringLiteral("默认路径：Style/ksword_background.png，可手动选择 PNG/JPG/BMP。"),
+        QStringLiteral("选择一张图片作为窗口背景（支持 PNG/JPG/BMP）。"),
         backgroundGroupBox);
     pathHintLabel->setWordWrap(true);
-    languageManager.bindText(pathHintLabel, QStringLiteral("settings.background.path_hint"), QStringLiteral("默认路径：Style/ksword_background.png，可手动选择 PNG/JPG/BMP。"));
+    languageManager.bindText(pathHintLabel, QStringLiteral("settings.background.path_hint"), QStringLiteral("选择一张图片作为窗口背景（支持 PNG/JPG/BMP）。"));
     backgroundLayout->addWidget(pathHintLabel);
 
     QHBoxLayout* pathLayout = new QHBoxLayout();
@@ -447,54 +443,54 @@ void SettingsDock::initializeAppearanceTab()
     m_startupTopMostCheckBox = new QCheckBox(QStringLiteral("启动后默认最高级置顶"), startupGroupBox);
     languageManager.bindText(m_startupTopMostCheckBox, QStringLiteral("settings.startup.topmost"), QStringLiteral("启动后默认最高级置顶"));
     m_startupTopMostCheckBox->setToolTip(
-        QStringLiteral("开启后程序启动会自动置顶；带 UIAccess 时会尝试 UIAccess+TopMost，右上角图钉可手动切换并保存偏好"));
-    languageManager.bindToolTip(m_startupTopMostCheckBox, QStringLiteral("settings.startup.topmost.tooltip"), QStringLiteral("开启后程序启动会自动置顶；带 UIAccess 时会尝试 UIAccess+TopMost，右上角图钉可手动切换并保存偏好"));
+        QStringLiteral("启动后保持窗口置顶；可用右上角图钉临时切换"));
+    languageManager.bindToolTip(m_startupTopMostCheckBox, QStringLiteral("settings.startup.topmost.tooltip"), QStringLiteral("启动后保持窗口置顶；可用右上角图钉临时切换"));
     startupLayout->addWidget(m_startupTopMostCheckBox);
 
     // m_startupAutoAdminCheckBox 作用：控制“启动图出现前是否先尝试 UAC 提权”。
     m_startupAutoAdminCheckBox = new QCheckBox(QStringLiteral("启动时自动请求管理员权限"), startupGroupBox);
     languageManager.bindText(m_startupAutoAdminCheckBox, QStringLiteral("settings.startup.admin"), QStringLiteral("启动时自动请求管理员权限"));
     m_startupAutoAdminCheckBox->setToolTip(
-        QStringLiteral("下次启动时会在启动画面出现前先尝试管理员提权，失败则继续普通权限启动"));
-    languageManager.bindToolTip(m_startupAutoAdminCheckBox, QStringLiteral("settings.startup.admin.tooltip"), QStringLiteral("下次启动时会在启动画面出现前先尝试管理员提权，失败则继续普通权限启动"));
+        QStringLiteral("下次启动时请求管理员权限；若取消或失败，将以普通权限继续"));
+    languageManager.bindToolTip(m_startupAutoAdminCheckBox, QStringLiteral("settings.startup.admin.tooltip"), QStringLiteral("下次启动时请求管理员权限；若取消或失败，将以普通权限继续"));
     startupLayout->addWidget(m_startupAutoAdminCheckBox);
 
     // m_unlockerShellContextMenuCheckBox 作用：控制是否启用系统右键“文件解锁器”菜单。
     m_unlockerShellContextMenuCheckBox = new QCheckBox(QStringLiteral("启用系统右键“文件解锁器”菜单"), startupGroupBox);
     languageManager.bindText(m_unlockerShellContextMenuCheckBox, QStringLiteral("settings.startup.unlocker"), QStringLiteral("启用系统右键“文件解锁器”菜单"));
     m_unlockerShellContextMenuCheckBox->setToolTip(
-        QStringLiteral("点击“应用”后会立即注册或移除系统右键菜单中的“Ksword 文件解锁器(R3/R0)”项"));
-    languageManager.bindToolTip(m_unlockerShellContextMenuCheckBox, QStringLiteral("settings.startup.unlocker.tooltip"), QStringLiteral("点击“应用”后会立即注册或移除系统右键菜单中的“Ksword 文件解锁器(R3/R0)”项"));
+        QStringLiteral("点击“应用”后，在系统右键菜单中添加或移除文件解锁器"));
+    languageManager.bindToolTip(m_unlockerShellContextMenuCheckBox, QStringLiteral("settings.startup.unlocker.tooltip"), QStringLiteral("点击“应用”后，在系统右键菜单中添加或移除文件解锁器"));
     startupLayout->addWidget(m_unlockerShellContextMenuCheckBox);
 
     QLabel* taskmgrHijackHintLabel = new QLabel(
-        QStringLiteral("任务管理器映像劫持：调用程序当前目录下的 TaskmgrHijack.ps1，脚本会按需弹出管理员提权。"),
+        QStringLiteral("将系统任务管理器入口切换到 Ksword。此操作需要管理员权限。"),
         startupGroupBox);
     taskmgrHijackHintLabel->setWordWrap(true);
-    languageManager.bindText(taskmgrHijackHintLabel, QStringLiteral("settings.startup.taskmgr_hint"), QStringLiteral("任务管理器映像劫持：调用程序当前目录下的 TaskmgrHijack.ps1，脚本会按需弹出管理员提权。"));
+    languageManager.bindText(taskmgrHijackHintLabel, QStringLiteral("settings.startup.taskmgr_hint"), QStringLiteral("将系统任务管理器入口切换到 Ksword。此操作需要管理员权限。"));
     startupLayout->addWidget(taskmgrHijackHintLabel);
 
     QHBoxLayout* taskmgrHijackButtonLayout = new QHBoxLayout();
     taskmgrHijackButtonLayout->setSpacing(8);
 
     // m_installTaskmgrHijackButton 作用：将 taskmgr.exe IFEO Debugger 指向当前 Ksword5.1.exe。
-    m_installTaskmgrHijackButton = new QPushButton(QStringLiteral("映像劫持任务管理器"), startupGroupBox);
-    languageManager.bindText(m_installTaskmgrHijackButton, QStringLiteral("settings.startup.taskmgr_install"), QStringLiteral("映像劫持任务管理器"));
+    m_installTaskmgrHijackButton = new QPushButton(QStringLiteral("用 Ksword 替代任务管理器"), startupGroupBox);
+    languageManager.bindText(m_installTaskmgrHijackButton, QStringLiteral("settings.startup.taskmgr_install"), QStringLiteral("用 Ksword 替代任务管理器"));
     m_installTaskmgrHijackButton->setMinimumWidth(146);
     m_installTaskmgrHijackButton->setFixedHeight(30);
     m_installTaskmgrHijackButton->setToolTip(
-        QStringLiteral("执行 TaskmgrHijack.ps1 -Install -TargetExe 当前程序，打开任务管理器时转到 Ksword"));
-    languageManager.bindToolTip(m_installTaskmgrHijackButton, QStringLiteral("settings.startup.taskmgr_install.tooltip"), QStringLiteral("执行 TaskmgrHijack.ps1 -Install -TargetExe 当前程序，打开任务管理器时转到 Ksword"));
+        QStringLiteral("打开任务管理器时改为启动 Ksword"));
+    languageManager.bindToolTip(m_installTaskmgrHijackButton, QStringLiteral("settings.startup.taskmgr_install.tooltip"), QStringLiteral("打开任务管理器时改为启动 Ksword"));
     taskmgrHijackButtonLayout->addWidget(m_installTaskmgrHijackButton, 0);
 
     // m_uninstallTaskmgrHijackButton 作用：移除 taskmgr.exe IFEO Debugger，还原系统任务管理器。
-    m_uninstallTaskmgrHijackButton = new QPushButton(QStringLiteral("还原任务管理器"), startupGroupBox);
-    languageManager.bindText(m_uninstallTaskmgrHijackButton, QStringLiteral("settings.startup.taskmgr_uninstall"), QStringLiteral("还原任务管理器"));
+    m_uninstallTaskmgrHijackButton = new QPushButton(QStringLiteral("恢复系统任务管理器"), startupGroupBox);
+    languageManager.bindText(m_uninstallTaskmgrHijackButton, QStringLiteral("settings.startup.taskmgr_uninstall"), QStringLiteral("恢复系统任务管理器"));
     m_uninstallTaskmgrHijackButton->setMinimumWidth(126);
     m_uninstallTaskmgrHijackButton->setFixedHeight(30);
     m_uninstallTaskmgrHijackButton->setToolTip(
-        QStringLiteral("执行 TaskmgrHijack.ps1 -Uninstall，移除 taskmgr.exe 映像劫持配置"));
-    languageManager.bindToolTip(m_uninstallTaskmgrHijackButton, QStringLiteral("settings.startup.taskmgr_uninstall.tooltip"), QStringLiteral("执行 TaskmgrHijack.ps1 -Uninstall，移除 taskmgr.exe 映像劫持配置"));
+        QStringLiteral("恢复任务管理器的默认启动方式"));
+    languageManager.bindToolTip(m_uninstallTaskmgrHijackButton, QStringLiteral("settings.startup.taskmgr_uninstall.tooltip"), QStringLiteral("恢复任务管理器的默认启动方式"));
     taskmgrHijackButtonLayout->addWidget(m_uninstallTaskmgrHijackButton, 0);
     taskmgrHijackButtonLayout->addStretch(1);
     startupLayout->addLayout(taskmgrHijackButtonLayout);

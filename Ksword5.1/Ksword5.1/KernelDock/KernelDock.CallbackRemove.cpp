@@ -234,7 +234,7 @@ void KernelDock::initializeCallbackRemovePanel()
     m_callbackRemoveLayout->setContentsMargins(6, 6, 6, 6);
     m_callbackRemoveLayout->setSpacing(6);
 
-    QLabel* titleLabel = new QLabel(kernelText("kernel.callback.remove.title", QStringLiteral("手动回调移除（兼容旧协议）")), m_callbackRemoveContentWidget);
+    QLabel* titleLabel = new QLabel(kernelText("kernel.callback.remove.title", QStringLiteral("手动回调移除")), m_callbackRemoveContentWidget);
     titleLabel->setStyleSheet(QStringLiteral("color:%1;font-weight:600;").arg(KswordTheme::PrimaryBlueHex));
     m_callbackRemoveLayout->addWidget(titleLabel, 0);
 
@@ -256,10 +256,10 @@ void KernelDock::initializeCallbackRemovePanel()
     m_callbackRemoveAddressEdit->setPlaceholderText(kernelText("kernel.callback.remove.address.placeholder", QStringLiteral("输入回调地址（例如 0xFFFFF80012345678）")));
     m_callbackRemoveAddressEdit->setClearButtonEnabled(true);
 
-    m_callbackRemoveButton = new QPushButton(kernelText("kernel.callback.remove.button.safe", QStringLiteral("安全移除（公开 API）")), m_callbackRemoveContentWidget);
+    m_callbackRemoveButton = new QPushButton(kernelText("kernel.callback.remove.button.safe", QStringLiteral("安全移除")), m_callbackRemoveContentWidget);
     m_callbackRemoveButton->setStyleSheet(KswordTheme::ThemedButtonStyle());
 
-    m_callbackRemoveStatusLabel = new QLabel(kernelText("kernel.callback.remove.status.waiting", QStringLiteral("状态：等待操作（旧协议安全移除；实验 unlink 不作为默认路径）")), m_callbackRemoveContentWidget);
+    m_callbackRemoveStatusLabel = new QLabel(kernelText("kernel.callback.remove.status.waiting", QStringLiteral("状态：等待操作")), m_callbackRemoveContentWidget);
     m_callbackRemoveStatusLabel->setStyleSheet(QStringLiteral("color:%1;font-weight:600;").arg(KswordTheme::TextSecondaryHex()));
 
     m_callbackRemoveToolLayout->addWidget(new QLabel(kernelText("kernel.callback.remove.label.type", QStringLiteral("类型：")), m_callbackRemoveContentWidget));
@@ -274,8 +274,7 @@ void KernelDock::initializeCallbackRemovePanel()
     m_callbackRemoveDetailEditor->setMinimumHeight(72);
     m_callbackRemoveDetailEditor->setMaximumHeight(120);
     m_callbackRemoveDetailEditor->setText(kernelText("kernel.callback.remove.detail.initial", QStringLiteral(
-        "提示：该面板继续通过 ArkDriverClient::removeExternalCallback 调用旧版安全移除路径。"
-        "实验性强制移除（unlink）已经切到 removeExternalCallbackEx 的独立路径；若驱动未支持会返回不支持，不作为默认移除方式。")));
+        "输入回调类型与地址后执行移除。此操作可能影响系统稳定性，请仅对确认异常的回调使用。")));
     m_callbackRemoveLayout->addWidget(m_callbackRemoveDetailEditor, 0);
 
     m_callbackEnumLayout->addWidget(m_callbackRemoveContentWidget, 0);
@@ -305,7 +304,7 @@ void KernelDock::initializeCallbackRemovePanel()
         {
             m_callbackRemoveStatusLabel->setText(kernelText("kernel.callback.remove.status.io_failed", QStringLiteral("状态：移除失败，error=%1"))
                 .arg(removeResult.io.win32Error));
-            m_callbackRemoveDetailEditor->setText(kernelText("kernel.callback.remove.detail.io_failed", QStringLiteral("ArkDriverClient 调用失败，Win32 错误码=%1。\n地址=0x%2\n详情=%3"))
+            m_callbackRemoveDetailEditor->setText(kernelText("kernel.callback.remove.detail.io_failed", QStringLiteral("回调移除失败，Win32 错误码=%1。\n地址=0x%2\n详情=%3"))
                 .arg(removeResult.io.win32Error)
                 .arg(QString::number(callbackAddress, 16).toUpper())
                 .arg(callbackRemoveIoMessageText(QString::fromStdString(removeResult.io.message))));
@@ -317,7 +316,7 @@ void KernelDock::initializeCallbackRemovePanel()
         const QString responseServiceName = QString::fromWCharArray(responsePacket.serviceName);
         const QString serviceName = callbackRemoveResolveServiceByModule(modulePath);
         const QString detailText = kernelText("kernel.callback.remove.detail.full", QStringLiteral(
-            "安全移除（公开 API）请求已执行。\n"
+            "安全移除请求已执行。\n"
             "- 类型：%1\n"
             "- 地址：0x%2\n"
             "- 返回字节：%3\n"
@@ -328,7 +327,7 @@ void KernelDock::initializeCallbackRemovePanel()
             "- 模块大小：0x%8\n"
             "- 驱动返回服务名：%9\n"
             "- 本地服务映射：%10\n"
-            "- 实验 unlink 协议：%11"))
+            "- 操作模式：%11"))
             .arg(m_callbackRemoveTypeCombo->currentText())
             .arg(QString::number(callbackAddress, 16).toUpper())
             .arg(bytesReturned)

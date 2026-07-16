@@ -286,7 +286,7 @@ void DriverDock::refreshLoadedKernelModuleRecords()
     if (m_moduleEvidenceStatusLabel != nullptr)
     {
         m_moduleEvidenceStatusLabel->setText(
-            driverText("driver.evidence.status.modules_refreshed", QStringLiteral("证据：模块已刷新，等待后台聚合。")));
+            driverText("driver.evidence.status.modules_refreshed", QStringLiteral("证据：模块列表已刷新。")));
     }
     if (!m_loadedModuleCache.empty())
     {

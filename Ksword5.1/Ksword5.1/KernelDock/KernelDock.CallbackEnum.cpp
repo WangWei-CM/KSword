@@ -906,7 +906,7 @@ namespace
         const QString modulePath = QString::fromWCharArray(responsePacket.modulePath);
         const QString serviceName = QString::fromWCharArray(responsePacket.serviceName);
         return kernelText("kernel.callback.enum.remove.legacy.detail", QStringLiteral(
-            "安全移除（公开 API）请求已执行。\n"
+            "安全移除请求已执行。\n"
             "- 类型：%1\n"
             "- 来源：%2\n"
             "- 可信状态：%3\n"
@@ -921,7 +921,7 @@ namespace
             "- 模块基址：%12\n"
             "- 模块大小：0x%13\n"
             "- 服务名：%14\n"
-            "- ArkDriverClient：%15"))
+            "- 驱动消息：%15"))
             .arg(entry.classText)
             .arg(entry.sourceText)
             .arg(entry.sourceTrustText)
@@ -945,15 +945,15 @@ namespace
         // Processing: shows a second confirmation before any EX public-API remove IOCTL is sent.
         // Return: true when the user explicitly confirms the safe public/API remove action.
         const QString warningText = kernelText("kernel.callback.enum.remove.safe.confirm", QStringLiteral(
-            "即将执行“安全移除（公开 API）”。\n\n"
+            "即将执行安全移除。\n\n"
             "类别：%1\n"
             "名称：%2\n"
             "来源：%3\n"
             "可信状态：%4\n"
             "移除策略：%5\n"
             "请求值：%6\n"
-            "Trusted：%7\n\n"
-            "该操作会通过 ArkDriverClient 调用 removeExternalCallbackEx 的公开 API 路径；不会使用实验性 unlink。是否继续？"))
+            "可信：%7\n\n"
+            "此操作会修改内核回调注册，可能影响系统稳定性。是否继续？"))
             .arg(entry.classText)
             .arg(callbackEnumSafeText(entry.nameText))
             .arg(entry.sourceText)
@@ -963,7 +963,7 @@ namespace
             .arg(callbackEnumYesNoText(callbackEnumIsTrustedSource(entry)));
         return QMessageBox::question(
             parentWidget,
-            kernelText("kernel.callback.enum.remove.safe.title", QStringLiteral("安全移除（公开 API）")),
+            kernelText("kernel.callback.enum.remove.safe.title", QStringLiteral("安全移除")),
             warningText,
             QMessageBox::Yes | QMessageBox::No,
             QMessageBox::No) == QMessageBox::Yes;
@@ -982,8 +982,8 @@ namespace
         {
             QMessageBox::information(
                 parentWidget,
-                kernelText("kernel.callback.enum.remove.safe.title", QStringLiteral("安全移除（公开 API）")),
-                kernelText("kernel.callback.enum.remove.safe.unavailable", QStringLiteral("当前记录不是 removable verified/candidate，公开 API 安全移除不可用。")));
+                kernelText("kernel.callback.enum.remove.safe.title", QStringLiteral("安全移除")),
+                kernelText("kernel.callback.enum.remove.safe.unavailable", QStringLiteral("当前记录不支持安全移除。")));
             return;
         }
 
@@ -997,8 +997,8 @@ namespace
         {
             QMessageBox::warning(
                 parentWidget,
-                kernelText("kernel.callback.enum.remove.safe.title", QStringLiteral("安全移除（公开 API）")),
-                kernelText("kernel.callback.enum.remove.safe.missing_value", QStringLiteral("当前记录缺少 removeExternalCallbackEx 所需的类型或地址/标识值。")));
+                kernelText("kernel.callback.enum.remove.safe.title", QStringLiteral("安全移除")),
+                kernelText("kernel.callback.enum.remove.safe.missing_value", QStringLiteral("当前记录缺少可用的类型或地址/标识值。")));
             return;
         }
 
@@ -1029,8 +1029,8 @@ namespace
             }
             QMessageBox::warning(
                 parentWidget,
-                kernelText("kernel.callback.enum.remove.safe.title", QStringLiteral("安全移除（公开 API）")),
-                kernelText("kernel.callback.enum.remove.safe.call_failed", QStringLiteral("ArkDriverClient 调用失败，Win32=%1。"))
+                kernelText("kernel.callback.enum.remove.safe.title", QStringLiteral("安全移除")),
+                kernelText("kernel.callback.enum.remove.safe.call_failed", QStringLiteral("回调移除失败，Win32=%1。"))
                     .arg(static_cast<qulonglong>(removeResult.io.win32Error)));
             return;
         }
@@ -1052,7 +1052,7 @@ namespace
             }
             QMessageBox::warning(
                 parentWidget,
-                kernelText("kernel.callback.enum.remove.safe.title", QStringLiteral("安全移除（公开 API）")),
+                kernelText("kernel.callback.enum.remove.safe.title", QStringLiteral("安全移除")),
                 kernelText("kernel.callback.enum.remove.safe.driver_failed_message", QStringLiteral("驱动返回失败，NTSTATUS=%1。"))
                     .arg(callbackEnumNtStatusText(removeResult.response.ntstatus)));
         }
@@ -1073,24 +1073,24 @@ namespace
         {
             if (statusLabel != nullptr)
             {
-                statusLabel->setText(kernelText("kernel.callback.enum.remove.experimental.not_target", QStringLiteral("状态：当前行不是可移除目标，未发送实验性 unlink 请求")));
+                statusLabel->setText(kernelText("kernel.callback.enum.remove.experimental.not_target", QStringLiteral("状态：当前条目无法移除")));
             }
             QMessageBox::information(
                 parentWidget,
-                kernelText("kernel.callback.enum.remove.experimental.title", QStringLiteral("实验性强制移除（unlink）")),
-                kernelText("kernel.callback.enum.remove.experimental.no_value", QStringLiteral("当前行没有可用的回调地址/标识值，属于诊断或不可移除条目；不会发送 IOCTL。")));
+                kernelText("kernel.callback.enum.remove.experimental.title", QStringLiteral("强制移除（实验性）")),
+                kernelText("kernel.callback.enum.remove.experimental.no_value", QStringLiteral("当前条目没有可用的回调地址或标识值，无法执行移除。")));
             return;
         }
 
         const QString confirmText = kernelText("kernel.callback.enum.remove.experimental.confirm", QStringLiteral(
-            "实验性强制移除（unlink）不是默认路径，可能破坏内核链表/数组一致性，导致系统不稳定、蓝屏或安全产品状态失真。\n\n"
+            "强制移除可能破坏内核数据，导致系统不稳定、蓝屏或安全产品状态异常。\n\n"
             "类别：%1\n"
             "名称：%2\n"
             "来源：%3\n"
             "可信状态：%4\n"
             "移除策略：%5\n"
-            "RawStorageValue：%6\n\n"
-            "确认后会发送 removeExternalCallbackEx 的 experimental flag；R0 目前应返回 STATUS_NOT_SUPPORTED。"))
+            "存储值：%6\n\n"
+            "仅在已确认目标异常并接受上述风险时继续。"))
             .arg(entry.classText)
             .arg(callbackEnumSafeText(entry.nameText))
             .arg(entry.sourceText)
@@ -1099,7 +1099,7 @@ namespace
             .arg(callbackEnumFormatAddress(entry.rawStorageValue));
         const QMessageBox::StandardButton reply = QMessageBox::warning(
             parentWidget,
-            kernelText("kernel.callback.enum.remove.experimental.title", QStringLiteral("实验性强制移除（unlink）")),
+            kernelText("kernel.callback.enum.remove.experimental.title", QStringLiteral("强制移除（实验性）")),
             confirmText,
             QMessageBox::Yes | QMessageBox::Cancel,
             QMessageBox::Cancel);
@@ -1107,7 +1107,7 @@ namespace
         {
             if (statusLabel != nullptr)
             {
-                statusLabel->setText(kernelText("kernel.callback.enum.remove.experimental.cancelled", QStringLiteral("状态：已取消实验性 unlink")));
+                statusLabel->setText(kernelText("kernel.callback.enum.remove.experimental.cancelled", QStringLiteral("状态：已取消强制移除")));
             }
             return;
         }
@@ -1130,15 +1130,15 @@ namespace
         if (statusLabel != nullptr)
         {
             statusLabel->setText(removeResult.io.ok && removeResult.response.ntstatus == callbackEnumStatusNotSupported()
-                ? kernelText("kernel.callback.enum.remove.experimental.rejected", QStringLiteral("状态：实验性 unlink 已被 R0 拒绝"))
-                : kernelText("kernel.callback.enum.remove.experimental.completed", QStringLiteral("状态：实验性 unlink 请求已完成")));
+                ? kernelText("kernel.callback.enum.remove.experimental.rejected", QStringLiteral("状态：强制移除被驱动拒绝"))
+                : kernelText("kernel.callback.enum.remove.experimental.completed", QStringLiteral("状态：强制移除请求已完成")));
         }
         QMessageBox::information(
             parentWidget,
-            kernelText("kernel.callback.enum.remove.experimental.title", QStringLiteral("实验性强制移除（unlink）")),
+            kernelText("kernel.callback.enum.remove.experimental.title", QStringLiteral("强制移除（实验性）")),
             removeResult.io.ok
-                ? kernelText("kernel.callback.enum.remove.experimental.processed", QStringLiteral("R0 已处理 experimental unlink 请求；请查看详情面板中的 NTSTATUS。"))
-                : kernelText("kernel.callback.enum.remove.experimental.io_failed", QStringLiteral("实验性 unlink 请求发送失败，Win32=%1。"))
+                ? kernelText("kernel.callback.enum.remove.experimental.processed", QStringLiteral("强制移除请求已处理，请查看详情中的状态码。"))
+                : kernelText("kernel.callback.enum.remove.experimental.io_failed", QStringLiteral("强制移除请求失败，Win32=%1。"))
                     .arg(static_cast<qulonglong>(removeResult.io.win32Error)));
     }
 
@@ -1758,7 +1758,7 @@ void KernelDock::showCallbackEnumDetailByCurrentRow()
         "可信状态: %3\n"
         "移除策略: %4\n"
         "是否需要二次确认: %5\n"
-        "当前来源是否只是 fallback/pattern: %6\n"
+        "是否仅为定位线索: %6\n"
         "状态: %7\n"
         "名称: %8\n"
         "Altitude: %9\n"
@@ -1780,8 +1780,7 @@ void KernelDock::showCallbackEnumDetailByCurrentRow()
         "IdentityHash(预留): %25\n"
         "RawStorageValue(预留): %26\n"
         "LastStatus: 0x%27\n\n"
-        "说明: 主地址显示会优先显示真实回调函数；定位/诊断行没有真实回调函数时显示全局数组、链表节点、标识符或诊断值。"
-        "旧协议尚未返回 generation/identity hash/raw storage value 时保持 0 或空值；实验 unlink 仅为 UI 预留，不作为默认路径。\n\n"
+        "说明: 主地址优先显示真实回调函数；无法获取时会显示可用于定位的节点或标识值。\n\n"
         "详情:\n%28"))
         .arg(entry->classText)
         .arg(entry->sourceText)
@@ -1923,11 +1922,11 @@ void KernelDock::showCallbackEnumContextMenu(const QPoint& localPosition)
     }
     contextMenu.addSeparator();
 
-    QAction* safeRemoveAction = contextMenu.addAction(kernelText("kernel.callback.enum.remove.safe.title", QStringLiteral("安全移除（公开 API）")));
-    safeRemoveAction->setToolTip(kernelText("kernel.callback.enum.remove.safe.tooltip", QStringLiteral("通过 ArkDriverClient::removeExternalCallbackEx 发送公开 API 路径")));
+    QAction* safeRemoveAction = contextMenu.addAction(kernelText("kernel.callback.enum.remove.safe.title", QStringLiteral("安全移除")));
+    safeRemoveAction->setToolTip(kernelText("kernel.callback.enum.remove.safe.tooltip", QStringLiteral("使用受支持的安全方式移除回调。")));
     safeRemoveAction->setEnabled(canUseLegacySafeRemove);
-    QAction* experimentalUnlinkAction = contextMenu.addAction(kernelText("kernel.callback.enum.remove.experimental.title", QStringLiteral("实验性强制移除（unlink）")));
-    experimentalUnlinkAction->setToolTip(kernelText("kernel.callback.enum.remove.experimental.tooltip", QStringLiteral("需要强确认；仅对可验证/候选/实验性行开放，诊断行不会发送 IOCTL。")));
+    QAction* experimentalUnlinkAction = contextMenu.addAction(kernelText("kernel.callback.enum.remove.experimental.title", QStringLiteral("强制移除（实验性）")));
+    experimentalUnlinkAction->setToolTip(kernelText("kernel.callback.enum.remove.experimental.tooltip", QStringLiteral("需要再次确认；只对可操作项目开放。")));
     experimentalUnlinkAction->setEnabled(canUseExperimentalUnlink);
     contextMenu.addSeparator();
 

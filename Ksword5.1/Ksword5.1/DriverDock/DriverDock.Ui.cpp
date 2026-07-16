@@ -291,7 +291,7 @@ void DriverDock::initializeOverviewTab()
     m_refreshModuleEvidenceButton->setToolTip(
         driverText(
             "driver.toolbar.refresh_module_evidence.tooltip",
-            QStringLiteral("后台聚合 DriverObject / Hook / Callback 证据")));
+            QStringLiteral("刷新内核模块证据")));
     m_refreshModuleEvidenceButton->setFixedWidth(34);
 
     m_serviceFilterEdit = new QLineEdit(m_overviewPage);
@@ -348,7 +348,7 @@ void DriverDock::initializeOverviewTab()
     moduleLayout->addWidget(new QLabel(
         driverText(
             "driver.section.loaded_modules",
-            QStringLiteral("已加载内核模块（EnumDeviceDrivers + R0 证据聚合）")),
+            QStringLiteral("已加载内核模块")),
         moduleContainer));
 
     m_moduleTable = new ks::ui::VisibleTableWidget(moduleContainer);
@@ -365,7 +365,7 @@ void DriverDock::initializeOverviewTab()
     moduleLayout->addWidget(m_moduleTable, 3);
 
     m_moduleEvidenceStatusLabel = new QLabel(
-        driverText("driver.overview.evidence.status.waiting", QStringLiteral("证据：等待后台聚合")),
+        driverText("driver.overview.evidence.status.waiting", QStringLiteral("证据：等待刷新")),
         moduleContainer);
     m_moduleEvidenceStatusLabel->setWordWrap(true);
     moduleLayout->addWidget(m_moduleEvidenceStatusLabel);
@@ -375,7 +375,7 @@ void DriverDock::initializeOverviewTab()
     m_moduleEvidenceDetailEditor->setText(
         driverText(
             "driver.overview.evidence.detail.initial",
-            QStringLiteral("请选择一条已加载模块，或点击证据刷新按钮开始后台聚合。")));
+            QStringLiteral("请选择一条已加载模块，或点击证据刷新按钮。")));
     moduleLayout->addWidget(m_moduleEvidenceDetailEditor, 2);
 
     m_overviewSplitter->addWidget(serviceContainer);
@@ -546,8 +546,7 @@ void DriverDock::initializeDebugOutputTab()
     QLabel* hintLabel = new QLabel(
         driverText(
             "driver.debug.hint",
-            QStringLiteral("说明：此页通过 KswordARK R0 回调捕获 DbgPrint/DbgPrintEx/KdPrintEx。"
-                           "仅显示通过当前内核调试筛选器的消息。")),
+            QStringLiteral("显示内核调试输出；仅展示当前筛选器允许的消息。")),
         m_debugOutputPage);
     hintLabel->setWordWrap(true);
     ks::i18n::LanguageManager::instance().bindText(
@@ -888,7 +887,7 @@ void DriverDock::initializeUnloadedPiddbTab()
     m_unloadedPiddbFilterEdit->setToolTip(
         driverText(
             "driver.unloaded.filter.tooltip",
-            QStringLiteral("仅在当前 Driver Integrity 缓存内做本地模糊过滤，不重新访问驱动。")));
+            QStringLiteral("筛选当前列表，不会重新刷新数据。")));
 
     m_unloadedPiddbRiskOnlyCheck = new QCheckBox(
         driverText("driver.unloaded.risk_only", QStringLiteral("仅风险/降级")),
@@ -896,7 +895,7 @@ void DriverDock::initializeUnloadedPiddbTab()
     m_unloadedPiddbRiskOnlyCheck->setToolTip(
         driverText(
             "driver.unloaded.risk_only.tooltip",
-            QStringLiteral("隐藏正常证据，只保留 riskFlags、partial、unsupported、truncated 或 PDB-required 行。")));
+            QStringLiteral("只显示存在风险或数据不完整的项目。")));
 
     m_unloadedPiddbStatusLabel = new QLabel(
         driverText("driver.unloaded.status.waiting", QStringLiteral("状态：等待刷新")),

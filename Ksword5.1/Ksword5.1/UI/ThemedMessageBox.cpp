@@ -1,5 +1,6 @@
 #include "ThemedMessageBox.h"
 
+#include "../Internationalization/LanguageManager.h"
 #include "../theme.h"
 
 #include <QAbstractButton>
@@ -592,14 +593,18 @@ namespace
         case QMessageBox::Yes:
         case QMessageBox::Open:
         case QMessageBox::Save:
+        case QMessageBox::SaveAll:
         case QMessageBox::Apply:
+        case QMessageBox::YesToAll:
             return QStringLiteral(":/Icon/process_start.svg");
         case QMessageBox::Retry:
         case QMessageBox::Reset:
+        case QMessageBox::RestoreDefaults:
             return QStringLiteral(":/Icon/process_refresh.svg");
         case QMessageBox::Close:
         case QMessageBox::Cancel:
         case QMessageBox::No:
+        case QMessageBox::NoToAll:
         case QMessageBox::Abort:
         case QMessageBox::Discard:
             return QStringLiteral(":/Icon/log_cancel_track.svg");
@@ -611,26 +616,57 @@ namespace
         }
     }
 
+    // standardButtonText 作用：让所有 QMessageBox 标准按钮使用 KSword 语言包。
+    QString standardButtonText(const QMessageBox::StandardButton standardButton)
+    {
+        switch (standardButton)
+        {
+        case QMessageBox::Ok: return ks::i18n::contextText(QStringLiteral("messagebox.button.ok"), QStringLiteral("确定"));
+        case QMessageBox::Save: return ks::i18n::contextText(QStringLiteral("messagebox.button.save"), QStringLiteral("保存"));
+        case QMessageBox::SaveAll: return ks::i18n::contextText(QStringLiteral("messagebox.button.save_all"), QStringLiteral("全部保存"));
+        case QMessageBox::Open: return ks::i18n::contextText(QStringLiteral("messagebox.button.open"), QStringLiteral("打开"));
+        case QMessageBox::Yes: return ks::i18n::contextText(QStringLiteral("messagebox.button.yes"), QStringLiteral("是"));
+        case QMessageBox::YesToAll: return ks::i18n::contextText(QStringLiteral("messagebox.button.yes_to_all"), QStringLiteral("全部是"));
+        case QMessageBox::No: return ks::i18n::contextText(QStringLiteral("messagebox.button.no"), QStringLiteral("否"));
+        case QMessageBox::NoToAll: return ks::i18n::contextText(QStringLiteral("messagebox.button.no_to_all"), QStringLiteral("全部否"));
+        case QMessageBox::Abort: return ks::i18n::contextText(QStringLiteral("messagebox.button.abort"), QStringLiteral("中止"));
+        case QMessageBox::Retry: return ks::i18n::contextText(QStringLiteral("messagebox.button.retry"), QStringLiteral("重试"));
+        case QMessageBox::Ignore: return ks::i18n::contextText(QStringLiteral("messagebox.button.ignore"), QStringLiteral("忽略"));
+        case QMessageBox::Close: return ks::i18n::contextText(QStringLiteral("messagebox.button.close"), QStringLiteral("关闭"));
+        case QMessageBox::Cancel: return ks::i18n::contextText(QStringLiteral("messagebox.button.cancel"), QStringLiteral("取消"));
+        case QMessageBox::Discard: return ks::i18n::contextText(QStringLiteral("messagebox.button.discard"), QStringLiteral("放弃"));
+        case QMessageBox::Help: return ks::i18n::contextText(QStringLiteral("messagebox.button.help"), QStringLiteral("帮助"));
+        case QMessageBox::Apply: return ks::i18n::contextText(QStringLiteral("messagebox.button.apply"), QStringLiteral("应用"));
+        case QMessageBox::Reset: return ks::i18n::contextText(QStringLiteral("messagebox.button.reset"), QStringLiteral("重置"));
+        case QMessageBox::RestoreDefaults: return ks::i18n::contextText(QStringLiteral("messagebox.button.restore_defaults"), QStringLiteral("恢复默认值"));
+        default: return QString();
+        }
+    }
+
     // standardButtonToolTip 作用：为标准按钮补充悬停释义。
     QString standardButtonToolTip(const QMessageBox::StandardButton standardButton)
     {
         switch (standardButton)
         {
-        case QMessageBox::Ok: return QStringLiteral("确认当前提示并继续");
-        case QMessageBox::Yes: return QStringLiteral("同意并继续执行当前操作");
-        case QMessageBox::No: return QStringLiteral("拒绝本次操作并返回");
-        case QMessageBox::Cancel: return QStringLiteral("取消并关闭当前消息框");
-        case QMessageBox::Close: return QStringLiteral("关闭当前消息框");
-        case QMessageBox::Abort: return QStringLiteral("立即中止当前流程");
-        case QMessageBox::Retry: return QStringLiteral("重新尝试当前操作");
-        case QMessageBox::Ignore: return QStringLiteral("忽略本次问题并继续");
-        case QMessageBox::Open: return QStringLiteral("打开目标资源");
-        case QMessageBox::Save: return QStringLiteral("保存当前内容");
-        case QMessageBox::Apply: return QStringLiteral("应用当前改动");
-        case QMessageBox::Reset: return QStringLiteral("恢复到初始状态");
-        case QMessageBox::Discard: return QStringLiteral("丢弃当前未保存内容");
-        case QMessageBox::Help: return QStringLiteral("查看当前提示的帮助信息");
-        default: return QStringLiteral("执行该按钮对应的消息框动作");
+        case QMessageBox::Ok: return ks::i18n::contextText(QStringLiteral("messagebox.button.ok.tooltip"), QStringLiteral("确认当前提示并继续"));
+        case QMessageBox::Yes: return ks::i18n::contextText(QStringLiteral("messagebox.button.yes.tooltip"), QStringLiteral("同意并继续执行当前操作"));
+        case QMessageBox::YesToAll: return ks::i18n::contextText(QStringLiteral("messagebox.button.yes_to_all.tooltip"), QStringLiteral("对全部项目同意并继续"));
+        case QMessageBox::No: return ks::i18n::contextText(QStringLiteral("messagebox.button.no.tooltip"), QStringLiteral("拒绝本次操作并返回"));
+        case QMessageBox::NoToAll: return ks::i18n::contextText(QStringLiteral("messagebox.button.no_to_all.tooltip"), QStringLiteral("对全部项目拒绝并返回"));
+        case QMessageBox::Cancel: return ks::i18n::contextText(QStringLiteral("messagebox.button.cancel.tooltip"), QStringLiteral("取消并关闭当前消息框"));
+        case QMessageBox::Close: return ks::i18n::contextText(QStringLiteral("messagebox.button.close.tooltip"), QStringLiteral("关闭当前消息框"));
+        case QMessageBox::Abort: return ks::i18n::contextText(QStringLiteral("messagebox.button.abort.tooltip"), QStringLiteral("立即中止当前流程"));
+        case QMessageBox::Retry: return ks::i18n::contextText(QStringLiteral("messagebox.button.retry.tooltip"), QStringLiteral("重新尝试当前操作"));
+        case QMessageBox::Ignore: return ks::i18n::contextText(QStringLiteral("messagebox.button.ignore.tooltip"), QStringLiteral("忽略本次问题并继续"));
+        case QMessageBox::Open: return ks::i18n::contextText(QStringLiteral("messagebox.button.open.tooltip"), QStringLiteral("打开目标资源"));
+        case QMessageBox::Save: return ks::i18n::contextText(QStringLiteral("messagebox.button.save.tooltip"), QStringLiteral("保存当前内容"));
+        case QMessageBox::SaveAll: return ks::i18n::contextText(QStringLiteral("messagebox.button.save_all.tooltip"), QStringLiteral("保存全部内容"));
+        case QMessageBox::Apply: return ks::i18n::contextText(QStringLiteral("messagebox.button.apply.tooltip"), QStringLiteral("应用当前改动"));
+        case QMessageBox::Reset: return ks::i18n::contextText(QStringLiteral("messagebox.button.reset.tooltip"), QStringLiteral("恢复到初始状态"));
+        case QMessageBox::RestoreDefaults: return ks::i18n::contextText(QStringLiteral("messagebox.button.restore_defaults.tooltip"), QStringLiteral("恢复产品默认设置"));
+        case QMessageBox::Discard: return ks::i18n::contextText(QStringLiteral("messagebox.button.discard.tooltip"), QStringLiteral("丢弃当前未保存内容"));
+        case QMessageBox::Help: return ks::i18n::contextText(QStringLiteral("messagebox.button.help.tooltip"), QStringLiteral("查看当前提示的帮助信息"));
+        default: return ks::i18n::contextText(QStringLiteral("messagebox.button.custom.tooltip"), QStringLiteral("执行该按钮对应的消息框动作"));
         }
     }
 
@@ -846,6 +882,7 @@ namespace
 
             if (eventType == QEvent::Polish ||
                 eventType == QEvent::Show ||
+                eventType == QEvent::LanguageChange ||
                 eventType == QEvent::PaletteChange ||
                 eventType == QEvent::ApplicationPaletteChange ||
                 eventType == QEvent::StyleChange)
@@ -970,6 +1007,11 @@ namespace
                 pushButton->setMaximumHeight(30);
                 pushButton->setMinimumWidth(primaryButton ? 86 : 76);
                 pushButton->setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Fixed);
+                const QString localizedButtonText = standardButtonText(standardButton);
+                if (!localizedButtonText.isEmpty())
+                {
+                    pushButton->setText(localizedButtonText);
+                }
                 pushButton->setToolTip(standardButtonToolTip(standardButton));
 
                 const QString iconPath = standardButtonIconPath(standardButton);

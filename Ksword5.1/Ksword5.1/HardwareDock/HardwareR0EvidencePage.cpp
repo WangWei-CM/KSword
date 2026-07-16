@@ -1005,11 +1005,11 @@ void HardwareR0EvidencePage::initializeUi()
     presetLayout->addWidget(groupCButton, 0);
 
     m_refreshButton = new QPushButton(QIcon(QStringLiteral(":/Icon/process_refresh.svg")), QStringLiteral("刷新R0证据"), this);
-    m_refreshButton->setToolTip(QStringLiteral("通过 ArkDriverClient 查询 R0 CPU/MSR/IDT/GDT 证据；不执行任何写操作。"));
+    m_refreshButton->setToolTip(QStringLiteral("刷新内核硬件证据（只读）。"));
     m_refreshButton->setStyleSheet(buildBlueButtonStyle());
 
     m_riskOnlyCheck = new QCheckBox(QStringLiteral("仅风险项"), this);
-    m_riskOnlyCheck->setToolTip(QStringLiteral("只显示 R0 返回 riskFlags 非零的 CPU/IDT/MSR/描述符证据。"));
+    m_riskOnlyCheck->setToolTip(QStringLiteral("只显示存在风险标记的硬件证据。"));
 
     m_filterEdit = new QLineEdit(this);
     m_filterEdit->setClearButtonEnabled(true);
@@ -1019,7 +1019,7 @@ void HardwareR0EvidencePage::initializeUi()
     m_maxRowsSpin = new QSpinBox(this);
     m_maxRowsSpin->setRange(64, 65536);
     m_maxRowsSpin->setValue(static_cast<int>(KSWORD_ARK_DRIVER_INTEGRITY_DEFAULT_MAX_ROWS));
-    m_maxRowsSpin->setToolTip(QStringLiteral("R0 evidence 最大返回行数。"));
+    m_maxRowsSpin->setToolTip(QStringLiteral("限制单次查询返回的最大行数。"));
 
     m_idtVectorsSpin = new QSpinBox(this);
     m_idtVectorsSpin->setRange(0, static_cast<int>(KSWORD_ARK_DRIVER_INTEGRITY_DEFAULT_IDT_VECTORS));

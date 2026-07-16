@@ -82,6 +82,7 @@ namespace ks::i18n
 
         void discoverLanguagePacks(QStringList* warningListOut);
         bool loadLanguagePack(const QString& filePath, LanguagePack* packOut, QString* errorTextOut) const;
+        QString resolvePreferredLanguageId(const QString& preferredLanguageId) const;
         QString resolveText(
             const QString& languageId,
             const QString& key,

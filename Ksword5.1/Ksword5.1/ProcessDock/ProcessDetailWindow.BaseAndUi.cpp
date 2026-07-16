@@ -1739,7 +1739,7 @@ void ProcessDetailWindow::initializeKernelObjectTab()
     m_kernelObjectLayout->setSpacing(8);
 
     QLabel* hintLabel = new QLabel(
-        QStringLiteral("本页展示 R0 读取到的 EPROCESS 字段来源、偏移和可用性；Section/ControlArea 查询只通过 PID 调用驱动，不把诊断地址作为凭据。"),
+        QStringLiteral("查看当前进程的内核对象、字段状态和内存映射信息。"),
         m_kernelObjectTab);
     hintLabel->setWordWrap(true);
     hintLabel->setStyleSheet(QStringLiteral("color:%1;").arg(KswordTheme::TextSecondaryHex()));

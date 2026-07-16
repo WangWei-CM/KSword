@@ -9108,9 +9108,6 @@ void FileDock::showPanelContextMenu(FilePanelWidgets& panel, const QPoint& local
                 .arg(QString::fromLatin1(preset.nameText))
                 .arg(QString::fromUtf8(preset.detailText)));
         integrityAction->setData(static_cast<unsigned int>(preset.rid));
-        integrityAction->setToolTip(QStringLiteral("R0 内核 API 优先写入文件 Mandatory Label：S-1-16-%1；驱动不可用时回退 R3%2")
-            .arg(static_cast<unsigned int>(preset.rid))
-            .arg(isCurrentLevel ? QStringLiteral("（当前）") : QString()));
     }
     menu.addSeparator();
     QAction* newFileAction = menu.addAction(QIcon(":/Icon/process_details.svg"), QStringLiteral("新建文件"));

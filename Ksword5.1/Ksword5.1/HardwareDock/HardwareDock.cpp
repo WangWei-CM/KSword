@@ -1044,7 +1044,7 @@ namespace
 
         QString text;
         text += QStringLiteral("\n\n[%1]\n").arg(titleText);
-        text += QStringLiteral("说明：以下内容来自 ArkDriverClient 只读 wrapper；UI 不直接 DeviceIoControl，不执行禁用/卸载/解绑/patch。\n");
+        text += QStringLiteral("以下内容为只读设备证据，不会修改设备状态。\n");
         text += QStringLiteral("调用状态: %1；兼容性: %2；Win32=%3；NTSTATUS=%4；返回字节=%5\n")
             .arg(hardwareIoOkText(auditResult.io.ok))
             .arg(auditResult.unsupported ? QStringLiteral("驱动不支持") : QStringLiteral("接口可用"))
@@ -4212,7 +4212,7 @@ void HardwareDock::initializeDeviceStackTab()
     m_deviceStackPage = createDeviceAuditPage(
         m_sideTabWidget,
         QStringLiteral("设备节点与驱动链"),
-        QStringLiteral("只读 cross-view：上方保留 DevNode/WMI 视角，下方表格展开 R0 DeviceObject/DriverObject、attached/next 关系和 PDB/DynData readiness。"),
+        QStringLiteral("对比系统设备记录与内核设备栈，帮助发现异常关联；本页为只读。"),
         &m_deviceStackEditor,
         &m_deviceStackTable);
     const int tabIndex = m_sideTabWidget->addTab(m_deviceStackPage, QStringLiteral("设备驱动链"));

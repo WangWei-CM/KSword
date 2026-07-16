@@ -872,7 +872,7 @@ void RegistryDock::initializeUi()
     m_driverRegistryModeLabel = new QLabel(m_toolBarWidget);
     m_driverRegistryModeLabel->setMinimumWidth(118);
     m_driverRegistryModeLabel->setAlignment(Qt::AlignCenter);
-    m_driverRegistryModeLabel->setToolTip(QStringLiteral("R0 在线时，本页左侧展开、右侧读取、重命名、写入和删除均优先通过驱动完成。"));
+    m_driverRegistryModeLabel->setToolTip(QStringLiteral("驱动可用时启用增强的注册表浏览与编辑。"));
 
     m_searchEdit = new QLineEdit(m_toolBarWidget);
     m_searchEdit->setStyleSheet(blueInputStyle());
@@ -1271,7 +1271,7 @@ void RegistryDock::refreshRegistryDriverModeIndicator()
             "background:%2;color:%1;padding:2px 6px;font-weight:600;}"
         ).arg(KswordTheme::SuccessColor().name(QColor::HexRgb))
          .arg(KswordTheme::RgbaColorName(KswordTheme::SuccessColor(), 41)));
-        m_driverRegistryModeLabel->setToolTip(QStringLiteral("驱动设备在线：注册表浏览和编辑将优先使用 R0。"));
+        m_driverRegistryModeLabel->setToolTip(QStringLiteral("驱动可用时启用增强的注册表浏览与编辑。"));
         return;
     }
 
@@ -1281,7 +1281,7 @@ void RegistryDock::refreshRegistryDriverModeIndicator()
         "background:%2;color:%1;padding:2px 6px;font-weight:600;}"
     ).arg(KswordTheme::BorderColorHex())
      .arg(KswordTheme::RgbaColorName(KswordTheme::SurfaceAltColor(), 36)));
-    m_driverRegistryModeLabel->setToolTip(QStringLiteral("驱动设备未在线或不可打开：注册表操作回退到 Win32 API。"));
+    m_driverRegistryModeLabel->setToolTip(QStringLiteral("驱动不可用，当前使用标准注册表模式。"));
 }
 
 bool RegistryDock::shouldUseRegistryR0() const

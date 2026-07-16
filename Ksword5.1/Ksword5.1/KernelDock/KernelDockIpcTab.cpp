@@ -184,7 +184,7 @@ namespace
             // - 输入：R0/R3 参数或版本不匹配的底层消息；
             // - 处理：转换为同步 shared/driver/client 的操作建议；
             // - 返回：详情列可直接展示的中文说明。
-            return kernelText("kernel.ipc.message.protocol_mismatch", QStringLiteral("IPC/ALPC 协议版本或参数不兼容，请同步 shared、R0 驱动与 ArkDriverClient。"));
+            return kernelText("kernel.ipc.message.protocol_mismatch", QStringLiteral("驱动与主程序版本不兼容，请更新为匹配版本。"));
         }
         if (trimmedText.contains(QStringLiteral("buffer"), Qt::CaseInsensitive) ||
             trimmedText.contains(QStringLiteral("too small"), Qt::CaseInsensitive) ||
@@ -377,7 +377,7 @@ void KernelDockIpcTab::initializeAlpcPage()
     m_ipcSummaryTable->horizontalHeader()->setStyleSheet(headerStyle());
     m_ipcSummaryTable->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
     m_ipcSummaryTable->horizontalHeader()->setSectionResizeMode(static_cast<int>(IpcSummaryColumn::Detail), QHeaderView::Stretch);
-    m_ipcSummaryTable->setToolTip(kernelText("kernel.ipc.summary.tooltip", QStringLiteral("R0 IPC summary：通过 ArkDriverClient::queryIpcSummary 只读查询，复用上方 PID/Handle；为空时查询全局摘要。")));
+    m_ipcSummaryTable->setToolTip(kernelText("kernel.ipc.summary.tooltip", QStringLiteral("只读查询进程或全局 IPC 摘要；可使用上方 PID/句柄筛选。")));
     layout->addWidget(m_ipcSummaryTable, 0);
 
     m_alpcTable = new ks::ui::VisibleTableWidget(m_alpcPage);
@@ -575,7 +575,7 @@ void KernelDockIpcTab::applyIpcSummaryResult()
             QStringLiteral("R0 IPC Summary"),
             m_lastIpcSummaryResult.unsupported ? QStringLiteral("Unsupported") : QStringLiteral("Unavailable"),
             QStringLiteral("N/A"),
-            QStringLiteral("ArkDriverClient::queryIpcSummary"),
+            QStringLiteral("驱动查询"),
             kernelText("kernel.ipc.summary.error_detail", QStringLiteral("IPC 摘要暂不可用。Win32=%1；驱动返回字节=%2；%3"))
                 .arg(m_lastIpcSummaryResult.io.win32Error)
                 .arg(m_lastIpcSummaryResult.io.bytesReturned)
@@ -590,8 +590,8 @@ void KernelDockIpcTab::applyIpcSummaryResult()
     }
 
     const auto& response = m_lastIpcSummaryResult.response;
-    const QString countUnavailableText = kernelText("kernel.ipc.summary.count_unavailable", QStringLiteral("N/A（固定摘要协议未返回 count）"));
-    const QString commonSourceText = QStringLiteral("R0 queryIpcSummary PID=%1 Handle=%2")
+    const QString countUnavailableText = kernelText("kernel.ipc.summary.count_unavailable", QStringLiteral("未提供"));
+    const QString commonSourceText = QStringLiteral("内核查询 PID=%1 Handle=%2")
         .arg(response.processId)
         .arg(formatHex64(response.handleValue));
     const QString responseDetailText = safeText(
@@ -632,13 +632,13 @@ void KernelDockIpcTab::applyIpcSummaryResult()
         QStringLiteral("SMB/IPC"),
         kernelText("kernel.ipc.summary.smb_hint_title", QStringLiteral("提示")),
         QStringLiteral("N/A"),
-        QStringLiteral("UI hint"),
-        kernelText("kernel.ipc.summary.smb_hint", QStringLiteral("当前固定 R0 IPC summary 协议未返回 SMB/IPC 专用字段；如需 SMB named pipe/IPC$ 归因，应后续扩展 ArkDriverClient 协议字段。")));
+        QStringLiteral("功能限制"),
+        kernelText("kernel.ipc.summary.smb_hint", QStringLiteral("当前版本未提供 SMB 命名管道或 IPC$ 的归因详情。")));
     appendSummaryRow(
         QStringLiteral("Transport"),
         QStringLiteral("OK"),
-        kernelText("kernel.ipc.summary.transport_count", QStringLiteral("固定摘要响应")),
-        QStringLiteral("ArkDriverClient"),
+        kernelText("kernel.ipc.summary.transport_count", QStringLiteral("已返回")),
+        QStringLiteral("内核驱动"),
         kernelText("kernel.ipc.summary.transport_detail", QStringLiteral("驱动 IPC 摘要调用成功；返回字节=%1；%2"))
             .arg(m_lastIpcSummaryResult.io.bytesReturned)
             .arg(readableIoMessage));

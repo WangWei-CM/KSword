@@ -148,8 +148,15 @@ public:
     // - 确保初始化成功后显示启动窗口；
     // - 首次显示时同步渲染首帧。
     // 返回：true=显示成功；false=初始化失败。
-    bool showWindow()
+    bool showWindow(const std::string& initialStatusTextUtf8)
     {
+        const std::wstring initialStatusText = utf8ToWideText(initialStatusTextUtf8);
+        if (!initialStatusText.empty())
+        {
+            m_statusText = initialStatusText;
+        }
+        m_progressPercent = 0;
+
         if (!initialize())
         {
             return false;
@@ -608,7 +615,7 @@ private:
     ULONG_PTR m_gdiplusToken = 0;                              // m_gdiplusToken：GDI+ 运行令牌。
     std::unique_ptr<Gdiplus::Image> m_logoImage;               // m_logoImage：Logo 图像对象。
     std::unique_ptr<IStream, StreamReleaser> m_logoStream;     // m_logoStream：Logo 内存流对象。
-    std::wstring m_statusText = L"正在启动...";                  // m_statusText：当前状态文本。
+    std::wstring m_statusText = L"KSword";                      // m_statusText：当前状态文本；启动首帧由调用方按语言策略覆盖。
     int m_progressPercent = 0;                                 // m_progressPercent：进度百分比。
     int m_windowWidth = 480;                                   // m_windowWidth：窗口宽度像素。
     int m_windowHeight = 320;                                  // m_windowHeight：窗口高度像素。
@@ -638,13 +645,13 @@ kStartupSplash::kStartupSplash()
 
 kStartupSplash::~kStartupSplash() = default;
 
-bool kStartupSplash::show()
+bool kStartupSplash::show(const std::string& initialStatusText)
 {
     if (!m_impl)
     {
         return false;
     }
-    return m_impl->showWindow();
+    return m_impl->showWindow(initialStatusText);
 }
 
 void kStartupSplash::hide()

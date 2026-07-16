@@ -353,7 +353,7 @@ namespace
     {
         ks::settings::AppearanceSettings defaultSettings;
         defaultSettings.themeMode = ks::settings::ThemeMode::FollowSystem;
-        defaultSettings.uiLanguage = QStringLiteral("zh-CN");
+        defaultSettings.uiLanguage = QStringLiteral("system");
         defaultSettings.backgroundImagePath = QStringLiteral("Style/ksword_background.png");
         defaultSettings.backgroundOpacityPercent = 35;
         defaultSettings.startupDefaultTabKey = QStringLiteral("welcome");
@@ -466,7 +466,7 @@ ks::settings::AppearanceSettings ks::settings::loadAppearanceSettings()
     const QString uiLanguageText = rootObject.value(QStringLiteral("ui_language"))
         .toString(loadedSettings.uiLanguage)
         .trimmed();
-    loadedSettings.uiLanguage = uiLanguageText.isEmpty() ? QStringLiteral("zh-CN") : uiLanguageText;
+    loadedSettings.uiLanguage = uiLanguageText.isEmpty() ? QStringLiteral("system") : uiLanguageText;
 
     // backgroundPathText 作用：读取背景图路径字段，缺失时使用默认路径。
     const QString backgroundPathText = rootObject.value(QStringLiteral("background_image_path"))
@@ -576,7 +576,7 @@ bool ks::settings::saveAppearanceSettings(const AppearanceSettings& settings, QS
     rootObject.insert(QStringLiteral("theme_mode"), themeModeToJsonText(settings.themeMode));
     rootObject.insert(
         QStringLiteral("ui_language"),
-        settings.uiLanguage.trimmed().isEmpty() ? QStringLiteral("zh-CN") : settings.uiLanguage.trimmed());
+        settings.uiLanguage.trimmed().isEmpty() ? QStringLiteral("system") : settings.uiLanguage.trimmed());
     rootObject.insert(QStringLiteral("background_image_path"), settings.backgroundImagePath);
     rootObject.insert(QStringLiteral("background_opacity_percent"), clampOpacityPercent(settings.backgroundOpacityPercent));
     rootObject.insert(

@@ -42,6 +42,30 @@ namespace
     constexpr wchar_t kPrivilegeRestartArgument[] = L"--ksword-privilege-restart";
     constexpr ULONG_PTR kUnlockerCopyDataMessageId = 0x4B535755; // "KSWU"：Ksword shell unlocker IPC。
 
+    // localizedStartupText 作用：
+    // - 让原生首启对话框、启动画面和 Qt 启动期弹窗共用 LanguageManager；
+    // - 在 QApplication 创建前也可使用已经发现的语言包。
+    QString localizedStartupText(const QString& textKey, const QString& fallbackText)
+    {
+        return ks::i18n::contextText(textKey, fallbackText);
+    }
+
+    // updateStartupSplash 作用：按当前有效语言更新原生启动画面。
+    void updateStartupSplash(
+        const bool splashReady,
+        const int progressPercent,
+        const QString& textKey,
+        const QString& fallbackText)
+    {
+        if (!splashReady)
+        {
+            return;
+        }
+        kSplash.progress(
+            localizedStartupText(textKey, fallbackText).toUtf8().toStdString(),
+            progressPercent);
+    }
+
     // kStartupScaleRecommendedLogicalWidth 作用：
     // - 定义启动分辨率审查的最低建议逻辑宽度；
     // - 低于该宽度时才弹出缩放推荐对话框。
@@ -901,21 +925,21 @@ namespace
             "当前缩放：%3\n"
             "推荐缩放：%4\n\n"
             "是否应用推荐缩放？Ksword 将保存设置并立即重启。" );
-        const QString dialogContentText = ks::i18n::contextText(
+        const QString dialogContentText = localizedStartupText(
             QStringLiteral("main.scale.dialog.content"),
             dialogContentSourceTemplate)
             .arg(logicalClientWidth)
             .arg(kStartupScaleRecommendedLogicalWidth)
             .arg(QString::fromStdWString(currentScaleText))
             .arg(QString::fromStdWString(recommendedScaleText));
-        const std::wstring applyAndRestartText = ks::i18n::contextText(
+        const std::wstring applyAndRestartText = localizedStartupText(
             QStringLiteral("main.scale.dialog.apply"), QStringLiteral("应用并重启")).toStdWString();
-        const std::wstring keepCurrentSettingsText = ks::i18n::contextText(
+        const std::wstring keepCurrentSettingsText = localizedStartupText(
             QStringLiteral("main.scale.dialog.keep"), QStringLiteral("保持当前设置")).toStdWString();
         const std::wstring dialogContentTextWide = dialogContentText.toStdWString();
-        const std::wstring dialogTitleText = ks::i18n::contextText(
+        const std::wstring dialogTitleText = localizedStartupText(
             QStringLiteral("main.scale.dialog.title"), QStringLiteral("Ksword5.1 启动缩放建议")).toStdWString();
-        const std::wstring mainInstructionText = ks::i18n::contextText(
+        const std::wstring mainInstructionText = localizedStartupText(
             QStringLiteral("main.scale.dialog.instruction"), QStringLiteral("检测到当前显示可用宽度偏小")).toStdWString();
 
         // dialogButtons 作用：TaskDialog 自定义按钮集合。
@@ -1446,7 +1470,12 @@ int main(int argc, char* argv[])
     applyQtScaleFactorEnvironment(startupSettings.startupWindowScaleFactor);
     startupTraceRaw("after applyQtScaleFactorEnvironment");
 
-    const bool splashReady = kSplash.show();
+    const bool splashReady = kSplash.show(
+        localizedStartupText(
+            QStringLiteral("main.startup.progress.starting"),
+            QStringLiteral("正在启动..."))
+            .toUtf8()
+            .toStdString());
     startupTraceRaw(std::string("kSplash.show finished, result=") + (splashReady ? "true" : "false"));
     {
         kLogEvent splashEvent;
@@ -1457,7 +1486,11 @@ int main(int argc, char* argv[])
     }
     if (splashReady)
     {
-        kSplash.progress("正在初始化 Qt 运行时...", 6);
+        updateStartupSplash(
+            splashReady,
+            6,
+            QStringLiteral("main.startup.progress.qt_runtime"),
+            QStringLiteral("正在准备运行环境..."));
     }
 
     startupTraceRaw("before QApplication construction");
@@ -1510,8 +1543,12 @@ int main(int argc, char* argv[])
             ks::settings::saveAppearanceSettings(startupSettings, &saveErrorText);
             QMessageBox::information(
                 nullptr,
-                QStringLiteral("Ksword 文件解锁器"),
-                QStringLiteral("已移除系统右键菜单中的“Ksword 文件解锁器(R3/R0)”项。"));
+                localizedStartupText(
+                    QStringLiteral("main.unlocker.dialog.title"),
+                    QStringLiteral("Ksword 文件解锁器")),
+                localizedStartupText(
+                    QStringLiteral("main.unlocker.dialog.removed"),
+                    QStringLiteral("已移除系统右键菜单中的“Ksword 文件解锁器(R3/R0)”项。")));
             return 0;
         }
 
@@ -1520,8 +1557,12 @@ int main(int argc, char* argv[])
         {
             QMessageBox::warning(
                 nullptr,
-                QStringLiteral("Ksword 文件解锁器"),
-                QStringLiteral("读取程序路径失败，无法注册系统右键菜单。"));
+                localizedStartupText(
+                    QStringLiteral("main.unlocker.dialog.title"),
+                    QStringLiteral("Ksword 文件解锁器")),
+                localizedStartupText(
+                    QStringLiteral("main.unlocker.dialog.path_failed"),
+                    QStringLiteral("读取程序路径失败，无法注册系统右键菜单。")));
             return 1;
         }
 
@@ -1533,15 +1574,23 @@ int main(int argc, char* argv[])
             ks::settings::saveAppearanceSettings(startupSettings, &saveErrorText);
             QMessageBox::information(
                 nullptr,
-                QStringLiteral("Ksword 文件解锁器"),
-                QStringLiteral("已注册系统右键菜单，可在文件/目录/磁盘和目录空白处右键触发。"));
+                localizedStartupText(
+                    QStringLiteral("main.unlocker.dialog.title"),
+                    QStringLiteral("Ksword 文件解锁器")),
+                localizedStartupText(
+                    QStringLiteral("main.unlocker.dialog.registered"),
+                    QStringLiteral("已注册系统右键菜单，可在文件/目录/磁盘和目录空白处右键触发。")));
             return 0;
         }
 
         QMessageBox::warning(
             nullptr,
-            QStringLiteral("Ksword 文件解锁器"),
-            QStringLiteral("注册系统右键菜单失败，请确认当前账户对 HKCU\\Software\\Classes 具备写入权限。"));
+            localizedStartupText(
+                QStringLiteral("main.unlocker.dialog.title"),
+                QStringLiteral("Ksword 文件解锁器")),
+            localizedStartupText(
+                QStringLiteral("main.unlocker.dialog.register_failed"),
+                QStringLiteral("注册系统右键菜单失败，请确认当前账户对 HKCU\\Software\\Classes 具备写入权限。")));
         return 1;
     }
 
@@ -1589,8 +1638,16 @@ int main(int argc, char* argv[])
 
     if (splashReady)
     {
-        kSplash.progress("正在准备应用环境...", 18);
-        kSplash.progress("正在创建主窗口...", 28);
+        updateStartupSplash(
+            splashReady,
+            18,
+            QStringLiteral("main.startup.progress.prepare_environment"),
+            QStringLiteral("正在准备运行环境..."));
+        updateStartupSplash(
+            splashReady,
+            28,
+            QStringLiteral("main.startup.progress.create_main_window"),
+            QStringLiteral("正在准备主界面..."));
     }
 
     MainWindow window(nullptr, startupProgressCallback);
@@ -1619,7 +1676,11 @@ int main(int argc, char* argv[])
 
     if (splashReady)
     {
-        kSplash.progress("正在显示主窗口...", 95);
+        updateStartupSplash(
+            splashReady,
+            95,
+            QStringLiteral("main.startup.progress.show_main_window"),
+            QStringLiteral("即将完成..."));
     }
 
     window.show();
@@ -1697,7 +1758,11 @@ int main(int argc, char* argv[])
 
     if (splashReady)
     {
-        kSplash.progress("正在等待首帧渲染...", 98);
+        updateStartupSplash(
+            splashReady,
+            98,
+            QStringLiteral("main.startup.progress.wait_first_frame"),
+            QStringLiteral("即将完成..."));
 
         // 兜底策略：
         // - 若首帧事件异常未触发；
