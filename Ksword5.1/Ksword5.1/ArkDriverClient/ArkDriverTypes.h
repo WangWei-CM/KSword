@@ -35,6 +35,7 @@
 #include "../../../shared/driver/KswordArkKernelObjectIoctl.h"
 #include "../../../shared/driver/KswordArkHwidIoctl.h"
 #include "../../../shared/driver/KswordArkDebugOutputIoctl.h"
+#include "../../../shared/driver/KswordArkBugcheckIoctl.h"
 
 namespace ksword::ark
 {

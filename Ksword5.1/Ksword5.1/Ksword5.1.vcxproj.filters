@@ -692,6 +692,9 @@
     <ClCompile Include="ArkDriverClient\ArkDriverDebugOutput.cpp">
       <Filter>Source Files\ArkDriverClient</Filter>
     </ClCompile>
+    <ClCompile Include="ArkDriverClient\ArkDriverBugcheck.cpp">
+      <Filter>Source Files\ArkDriverClient</Filter>
+    </ClCompile>
     <ClCompile Include="HardwareDock\MemoryCompositionHistoryWidget.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>

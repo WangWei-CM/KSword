@@ -18,6 +18,15 @@ namespace ksword::ark
     public:
         DriverClient() = default;
 
+        // Best-effort branding upload for the VMware-only bugcheck panel.
+        // The driver silently discards a valid packet when that feature is inactive.
+        IoResult setBugcheckBitmap(
+            std::uint32_t width,
+            std::uint32_t height,
+            std::uint32_t stride,
+            std::uint32_t brandColorRgb,
+            const std::vector<std::uint8_t>& bgraPixels) const;
+
         // Open one synchronous control handle. The returned handle owns CloseHandle.
         DriverHandle open(unsigned long desiredAccess = GENERIC_READ | GENERIC_WRITE) const;
 

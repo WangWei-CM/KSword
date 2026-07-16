@@ -28,3 +28,4 @@
 #include "driver/KswordArkDeviceAuditIoctl.h"
 #include "driver/KswordArkHwidIoctl.h"
 #include "driver/KswordArkDebugOutputIoctl.h"
+#include "driver/KswordArkBugcheckIoctl.h"

@@ -40,6 +40,8 @@
 #include <QSizePolicy>
 #include <QScrollBar>
 #include <QImageReader>
+#include <QImage>
+#include <QThreadPool>
 #include <QDialog>
 #include <QIODevice>
 #include <QMessageBox>
@@ -128,6 +130,112 @@ namespace
     constexpr const char* kKswordMainWindowHwndPropertyName = "ksword_main_window_hwnd";
     constexpr int kResizeBorderOverlayWidth = 3;
     constexpr int kResizeCornerTriangleLeg = 6;
+
+    constexpr int kBugcheckBitmapMaxWidth =
+        static_cast<int>(KSWORD_ARK_BUGCHECK_BITMAP_MAX_WIDTH);
+    constexpr int kBugcheckBitmapMaxHeight =
+        static_cast<int>(KSWORD_ARK_BUGCHECK_BITMAP_MAX_HEIGHT);
+
+    std::uint32_t detectBugcheckBrandColor(const QImage& image)
+    {
+        std::uint64_t redTotal = 0;
+        std::uint64_t greenTotal = 0;
+        std::uint64_t blueTotal = 0;
+        std::uint64_t sampleCount = 0;
+
+        for (int y = 0; y < image.height(); ++y)
+        {
+            for (int x = 0; x < image.width(); ++x)
+            {
+                const QColor color = image.pixelColor(x, y);
+                if (color.alpha() < 32 || color.blue() < 96 ||
+                    color.blue() < color.red() + 24 ||
+                    color.blue() < color.green() + 8)
+                {
+                    continue;
+                }
+                redTotal += static_cast<std::uint64_t>(color.red());
+                greenTotal += static_cast<std::uint64_t>(color.green());
+                blueTotal += static_cast<std::uint64_t>(color.blue());
+                ++sampleCount;
+            }
+        }
+
+        if (sampleCount == 0)
+        {
+            return 0x0078D4U;
+        }
+        return
+            (static_cast<std::uint32_t>(redTotal / sampleCount) << 16) |
+            (static_cast<std::uint32_t>(greenTotal / sampleCount) << 8) |
+            static_cast<std::uint32_t>(blueTotal / sampleCount);
+    }
+
+    void queueBugcheckBitmapUpload()
+    {
+        // The branding packet is optional. Keep decoding and driver I/O away
+        // from the UI thread and intentionally discard every failure result.
+        QThreadPool::globalInstance()->start([]()
+        {
+            QImage source(QStringLiteral(":/Image/Resource/Logo/KswordHome-En.png"));
+            if (source.isNull())
+            {
+                return;
+            }
+
+            if (source.width() > kBugcheckBitmapMaxWidth ||
+                source.height() > kBugcheckBitmapMaxHeight)
+            {
+                source = source.scaled(
+                    kBugcheckBitmapMaxWidth,
+                    kBugcheckBitmapMaxHeight,
+                    Qt::KeepAspectRatio,
+                    Qt::SmoothTransformation);
+                if (source.isNull())
+                {
+                    return;
+                }
+            }
+
+            const std::uint32_t brandColor = detectBugcheckBrandColor(source);
+            QImage bitmap(source.size(), QImage::Format_ARGB32);
+            if (bitmap.isNull())
+            {
+                return;
+            }
+            bitmap.fill(Qt::white);
+            {
+                QPainter painter(&bitmap);
+                painter.setCompositionMode(QPainter::CompositionMode_SourceOver);
+                painter.drawImage(0, 0, source);
+            }
+
+            const std::uint32_t width = static_cast<std::uint32_t>(bitmap.width());
+            const std::uint32_t height = static_cast<std::uint32_t>(bitmap.height());
+            const std::uint32_t stride = width * 4U;
+            if (bitmap.bytesPerLine() < static_cast<qsizetype>(stride))
+            {
+                return;
+            }
+
+            std::vector<std::uint8_t> pixels(
+                static_cast<std::size_t>(stride) * height);
+            for (std::uint32_t y = 0; y < height; ++y)
+            {
+                std::memcpy(
+                    pixels.data() + static_cast<std::size_t>(y) * stride,
+                    bitmap.constScanLine(static_cast<int>(y)),
+                    stride);
+            }
+
+            (void)ksword::ark::DriverClient().setBugcheckBitmap(
+                width,
+                height,
+                stride,
+                brandColor,
+                pixels);
+        });
+    }
 
     // makeNativeMouseLParam：
     // - 输入 globalPoint：Qt 鼠标事件提供的全局坐标；
@@ -5848,6 +5956,10 @@ void MainWindow::startR0RuntimeConsumersAfterServiceStart()
     // 输入：无。
     // 处理：复用各模块幂等 start 语义，避免重复启动线程。
     // 返回：无返回值；启动失败只写日志，不影响主流程状态查询。
+    if (m_r0DriverServiceRunning)
+    {
+        queueBugcheckBitmapUpload();
+    }
     startR0DriverLogPoller();
 
     if (CallbackPromptManager* callbackPromptManager = CallbackPromptManager::ensureGlobalManager(this))

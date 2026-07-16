@@ -125,7 +125,8 @@ Return Value:
     }
 
     status = ioctlEntry->Handler(device, Request, InputBufferLength, OutputBufferLength, &completeBytes);
-    if (!((ioctlEntry->Flags & KSWORD_ARK_IOCTL_FLAG_QUIET_SUCCESS) != 0UL &&
+    if ((ioctlEntry->Flags & KSWORD_ARK_IOCTL_FLAG_QUIET_COMPLETION) == 0UL &&
+        !((ioctlEntry->Flags & KSWORD_ARK_IOCTL_FLAG_QUIET_SUCCESS) != 0UL &&
         (NT_SUCCESS(status) || status == STATUS_PENDING))) {
         KswordARKDispatchLog(
             device,

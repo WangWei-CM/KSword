@@ -13,6 +13,7 @@
 #include "ark_process.h"
 #include "ark_log.h"
 #include "ark_debug_output.h"
+#include "ark_bugcheck.h"
 #include "ark_callback.h"
 #include "ark_kernel.h"
 #include "ark_dyndata.h"

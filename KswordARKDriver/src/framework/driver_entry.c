@@ -111,6 +111,10 @@ Return Value:
         TraceEvents(TRACE_LEVEL_WARNING, TRACE_DRIVER, "KswordARKFileMonitorInitialize recorded failure %!STATUS!", status);
     }
 
+    // VMware bugcheck diagnostics are strictly optional. The initializer
+    // returns without registering callbacks on every unsupported environment.
+    (void)KswordARKBugcheckInitialize(DriverObject, controlDevice);
+
     TraceEvents(TRACE_LEVEL_INFORMATION, TRACE_DRIVER, "%!FUNC! Exit");
     return STATUS_SUCCESS;
 }
@@ -138,6 +142,10 @@ Return Value:
     UNREFERENCED_PARAMETER(Driver);
 
     PAGED_CODE();
+
+    // Stop crash callbacks before any other teardown can invalidate state used
+    // by the nonpaged diagnostic path.
+    KswordARKBugcheckUninitialize();
 
     // 必须先注销内核调试回调，防止后续卸载阶段再次进入本驱动代码。
     KswordARKDebugOutputUninitialize();

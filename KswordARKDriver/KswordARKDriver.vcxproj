@@ -53,6 +53,9 @@
     <ClCompile Include="src\features\log\log_channel.c" />
     <ClCompile Include="src\features\debug_output\debug_output_capture.c" />
     <ClCompile Include="src\features\debug_output\debug_output_ioctl.c" />
+    <ClCompile Include="src\features\bugcheck\bugcheck_runtime.c" />
+    <ClCompile Include="src\features\bugcheck\bugcheck_svga.c" />
+    <ClCompile Include="src\features\bugcheck\bugcheck_ioctl.c" />
     <ClCompile Include="src\features\process\process_actions.c" />
     <ClCompile Include="src\features\process\process_crossview.c" />
     <ClCompile Include="src\features\process\process_detail.c" />
@@ -145,6 +148,10 @@
     <ClInclude Include="include\ark\ark_log.h" />
     <ClInclude Include="include\ark\ark_debug_output.h" />
     <ClInclude Include="..\shared\driver\KswordArkDebugOutputIoctl.h" />
+    <ClInclude Include="include\ark\ark_bugcheck.h" />
+    <ClInclude Include="..\shared\driver\KswordArkBugcheckIoctl.h" />
+    <ClInclude Include="src\features\bugcheck\bugcheck_internal.h" />
+    <ClInclude Include="src\features\bugcheck\bugcheck_font.h" />
     <ClInclude Include="include\ark\ark_process.h" />
     <ClInclude Include="include\ark\ark_queue.h" />
     <ClInclude Include="include\ark\ark_callback.h" />
@@ -321,7 +328,7 @@
     <Link>
       <AdditionalOptions>/INTEGRITYCHECK %(AdditionalOptions)</AdditionalOptions>
       <AdditionalLibraryDirectories>$(WindowsSdkDir)Lib\$(TargetPlatformVersion)\km\$(Platform);$(WindowsSdkDir)Lib\$(TargetPlatformVersion)\ucrt\$(Platform);$(WindowsSdkDir)Lib\wdf\kmdf\$(Platform);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>wdmsec.lib;wdm.lib;fwpkclnt.lib;fltMgr.lib;%(AdditionalDependencies);usbdex.lib;ntstrsafe.lib;ucrt.osmode.lib</AdditionalDependencies>
+      <AdditionalDependencies>wdmsec.lib;wdm.lib;fwpkclnt.lib;fltMgr.lib;%(AdditionalDependencies);usbdex.lib;ntstrsafe.lib;aux_klib.lib;ucrt.osmode.lib</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
@@ -340,7 +347,7 @@
     <Link>
       <AdditionalOptions>/INTEGRITYCHECK %(AdditionalOptions)</AdditionalOptions>
       <AdditionalLibraryDirectories>$(WindowsSdkDir)Lib\$(TargetPlatformVersion)\km\$(Platform);$(WindowsSdkDir)Lib\$(TargetPlatformVersion)\ucrt\$(Platform);$(WindowsSdkDir)Lib\wdf\kmdf\$(Platform);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>wdmsec.lib;wdm.lib;fwpkclnt.lib;fltMgr.lib;%(AdditionalDependencies);usbdex.lib;ntstrsafe.lib;ucrt.osmode.lib</AdditionalDependencies>
+      <AdditionalDependencies>wdmsec.lib;wdm.lib;fwpkclnt.lib;fltMgr.lib;%(AdditionalDependencies);usbdex.lib;ntstrsafe.lib;aux_klib.lib;ucrt.osmode.lib</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|ARM64'">
@@ -358,7 +365,7 @@
     <Link>
       <AdditionalOptions>/INTEGRITYCHECK %(AdditionalOptions)</AdditionalOptions>
       <AdditionalLibraryDirectories>$(WindowsSdkDir)Lib\$(TargetPlatformVersion)\km\$(Platform);$(WindowsSdkDir)Lib\$(TargetPlatformVersion)\ucrt\$(Platform);$(WindowsSdkDir)Lib\wdf\kmdf\$(Platform);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>wdmsec.lib;wdm.lib;fwpkclnt.lib;fltMgr.lib;%(AdditionalDependencies);usbdex.lib;ntstrsafe.lib;ucrt.osmode.lib</AdditionalDependencies>
+      <AdditionalDependencies>wdmsec.lib;wdm.lib;fwpkclnt.lib;fltMgr.lib;%(AdditionalDependencies);usbdex.lib;ntstrsafe.lib;aux_klib.lib;ucrt.osmode.lib</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|ARM64'">
@@ -376,7 +383,7 @@
     <Link>
       <AdditionalOptions>/INTEGRITYCHECK %(AdditionalOptions)</AdditionalOptions>
       <AdditionalLibraryDirectories>$(WindowsSdkDir)Lib\$(TargetPlatformVersion)\km\$(Platform);$(WindowsSdkDir)Lib\$(TargetPlatformVersion)\ucrt\$(Platform);$(WindowsSdkDir)Lib\wdf\kmdf\$(Platform);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>wdmsec.lib;wdm.lib;fwpkclnt.lib;fltMgr.lib;%(AdditionalDependencies);usbdex.lib;ntstrsafe.lib;ucrt.osmode.lib</AdditionalDependencies>
+      <AdditionalDependencies>wdmsec.lib;wdm.lib;fwpkclnt.lib;fltMgr.lib;%(AdditionalDependencies);usbdex.lib;ntstrsafe.lib;aux_klib.lib;ucrt.osmode.lib</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
