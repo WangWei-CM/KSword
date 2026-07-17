@@ -147,7 +147,7 @@ The current codebase focuses on R3/R0 cross-view evidence, PDB/DynData-driven of
 - Recoverable R0 process hiding uses `IOCTL_KSWORD_ARK_SET_PROCESS_VISIBILITY`. The driver changes `_EPROCESS.UniqueProcessId` and unlinks `ActiveProcessLinks` while retaining the PspCidTable record, allowing restoration by the original PID.
 - The unified driver status/capability protocol is in `shared/driver/KswordArkCapabilityIoctl.h`. KernelDock's Driver Status page shows Driver Loaded/Missing, Protocol Mismatch, DynData Missing, Limited, security policy, the most recent R0 error, and the feature-capability matrix.
 - R0 PPL changes require `KSW_CAP_PROCESS_PROTECTION_PATCH`. The user-mode confirmation dialog must show the current/target Protection, SignatureLevel impact, field source, and rollback risk.
-- New source files must be added to the corresponding `.vcxproj` and `.vcxproj.filters` files. Third-party integrations must include LICENSE and NOTICE.
+- New source files must be added to the corresponding `.vcxproj` and `.vcxproj.filters` files. Third-party integrations must keep their upstream license text.
 
 ## Repository Layout
 
@@ -209,10 +209,8 @@ The [KSwordDEV/Website](https://github.com/KSwordDEV/Website) repository indepen
 
 This project includes system-level debugging, auditing, and management capabilities. Use it only in legally authorized and compliant environments.
 
-## License and community
+## License
 
-Except for separately identified third-party material, Ksword is free software licensed under the [GNU General Public License version 3 only](LICENSE) (`GPL-3.0-only`). You may use, study, modify, host, sell, and redistribute it, including commercially, subject to the GPLv3 terms. Distribution of binaries must be accompanied by the exact Corresponding Source in one of the ways allowed by GPLv3.
+Ksword is free software under [GNU GPL version 3 only](LICENSE). Use it, study it, change it, share it, sell it, or build services around it—just follow GPLv3 and provide the matching source when you distribute binaries. Third-party components keep their own licenses.
 
-The [project licensing notice](PROJECT_LICENSE.md) records the scope and copyright declaration. The [Ksword Community Covenant](COMMUNITY_COVENANT.md) expresses the standards for official community participation, transparent forks, responsible security use, and project identity. It is not an additional software-license restriction and cannot reduce anyone’s GPL rights.
-
-Contributions are governed by [CONTRIBUTING.md](CONTRIBUTING.md). Third-party components remain under their own licenses; review the current [license compatibility audit](docs/%E8%AE%B8%E5%8F%AF%E8%AF%81%E5%85%BC%E5%AE%B9%E6%80%A7%E5%AE%A1%E8%AE%A1.md) before distributing a build.
+Except where a file says otherwise, Ksword's own code is GPLv3-only. The [Ksword Community Covenant](COMMUNITY_COVENANT.md) is about honesty, attribution, responsible use, and not pretending an unofficial fork is official. It is a community promise, not another layer of license restrictions. Contributions follow [CONTRIBUTING.md](CONTRIBUTING.md).

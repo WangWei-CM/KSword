@@ -3,11 +3,10 @@
 ## 1. Legal boundary / 法律边界
 
 Ksword is free software licensed under `GPL-3.0-only`. The binding software
-license is the complete text in `LICENSE`; the project-specific declaration is
-in `PROJECT_LICENSE.md`.
+license is the complete text in `LICENSE`.
 
 Ksword 是按 `GPL-3.0-only` 发布的自由软件。具有法律约束力的软件许可仅为
-`LICENSE` 中的完整 GPLv3 正文，项目适用声明见 `PROJECT_LICENSE.md`。
+`LICENSE` 中的完整 GPLv3 正文。
 
 This covenant is not part of the GPL, is not an additional restriction, and is
 not a condition for receiving or exercising GPL rights. Anyone may use, copy,
@@ -95,3 +94,9 @@ any right already granted by GPLv3.
 
 这些措施只影响官方社区资源的访问、官方认可或项目控制的身份标识，不撤销、
 缩小或附加条件于 GPLv3 已经授予的任何权利。
+
+本公约不靠附加许可证强制。真把社区约定当作可选依赖也行，只是名声没有
+`--no-verify` 参数。
+
+This covenant is not enforced by adding restrictions to the GPL. Treat it as
+an optional dependency if you must; reputation has no `--no-verify` flag.

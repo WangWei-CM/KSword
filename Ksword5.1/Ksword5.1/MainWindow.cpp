@@ -4973,12 +4973,6 @@ void MainWindow::showLicenseFromMenu()
         return true;
     };
 
-    const QString projectLicensePath = applicationDirectory.absoluteFilePath(QStringLiteral("PROJECT_LICENSE.md"));
-    if (QFileInfo(projectLicensePath).isFile())
-    {
-        appendLegalDocument(projectLicensePath);
-    }
-
     if (!appendLegalDocument(licensePath))
     {
         if (!licenseText.isEmpty())
@@ -4989,8 +4983,7 @@ void MainWindow::showLicenseFromMenu()
     }
 
     const QStringList supplementaryLegalFiles{
-        QStringLiteral("COMMUNITY_COVENANT.md"),
-        QStringLiteral("THIRD_PARTY_NOTICES.md")
+        QStringLiteral("COMMUNITY_COVENANT.md")
     };
     for (const QString& legalFileName : supplementaryLegalFiles)
     {
