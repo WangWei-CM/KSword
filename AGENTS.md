@@ -46,6 +46,16 @@ Copy-Item 'KswordARKDriver\x64\Release\KswordARK.sys' $stage -Force
 Copy-Item 'KswordARKDriver\x64\Release\KswordARK.pdb' $stage -Force
 Copy-Item 'KswordARKDriver\x64\Release\KswordARKDriver.inf' $stage -Force
 Copy-Item 'LICENSE' (Join-Path $stage 'LICENSE') -Force
+Copy-Item 'COMMUNITY_COVENANT.md' (Join-Path $stage 'COMMUNITY_COVENANT.md') -Force
+
+$licenseDir=Join-Path $stage 'licenses\third_party'
+New-Item -ItemType Directory -Path $licenseDir -Force | Out-Null
+Copy-Item 'third_party\systeminformer_dyn\LICENSE.txt' (Join-Path $licenseDir 'systeminformer-LICENSE.txt') -Force
+Copy-Item 'third_party\systeminformer_dyn\NOTICE.md' (Join-Path $licenseDir 'systeminformer-NOTICE.md') -Force
+Copy-Item 'third_party\easy_hwid_spoofer\LICENSE.txt' (Join-Path $licenseDir 'easy-hwid-spoofer-LICENSE.txt') -Force
+Copy-Item 'third_party\easy_hwid_spoofer\NOTICE.md' (Join-Path $licenseDir 'easy-hwid-spoofer-NOTICE.md') -Force
+Copy-Item 'third_party\fltk\LICENSE.txt' (Join-Path $licenseDir 'fltk-LICENSE.txt') -Force
+Copy-Item 'third_party\qt_advanced_docking_system\LICENSE.txt' (Join-Path $licenseDir 'qt-advanced-docking-system-LICENSE.txt') -Force
 
 $profileDir=Join-Path $stage 'profiles'
 if (!(Test-Path $profileDir)) { New-Item -ItemType Directory -Path $profileDir | Out-Null }
@@ -89,10 +99,10 @@ if ($exit -ne 0) { exit $exit }
 ```powershell
 $seven='C:\Users\Felix\CLionProjects\Wisdom-Weasel\7z.exe'
 & $seven t $archive
-& $seven l $archive 'Release\Launcher.exe' 'Release\Ksword5.1.exe' 'Release\KswordARKLight.exe' 'Release\Taskbar.exe' 'Release\KswordHUD.exe' 'Release\APIMonitor_x64.dll' 'Release\KswordARK.sys' 'Release\KswordARKDriver\KswordARK.sys' 'Release\LICENSE' 'Release\profiles\launcher_support_manifest.json' 'Release\profiles\ark_dyndata_pack_v3.json' 'Release\profiles\registry_optimization_items.json' 'Release\profiles\registry_optimization_assets\Config\Data.zip' 'Release\languages\zh-CN.json' 'Release\languages\en-US.json' 'Release\platforms\qwindows.dll'
+& $seven l $archive 'Release\Launcher.exe' 'Release\Ksword5.1.exe' 'Release\KswordARKLight.exe' 'Release\Taskbar.exe' 'Release\KswordHUD.exe' 'Release\APIMonitor_x64.dll' 'Release\KswordARK.sys' 'Release\KswordARKDriver\KswordARK.sys' 'Release\LICENSE' 'Release\COMMUNITY_COVENANT.md' 'Release\licenses\third_party\systeminformer-LICENSE.txt' 'Release\licenses\third_party\easy-hwid-spoofer-LICENSE.txt' 'Release\licenses\third_party\fltk-LICENSE.txt' 'Release\licenses\third_party\qt-advanced-docking-system-LICENSE.txt' 'Release\profiles\launcher_support_manifest.json' 'Release\profiles\ark_dyndata_pack_v3.json' 'Release\profiles\registry_optimization_items.json' 'Release\profiles\registry_optimization_assets\Config\Data.zip' 'Release\languages\zh-CN.json' 'Release\languages\en-US.json' 'Release\platforms\qwindows.dll'
 ```
 
-校验通过时，`7z t` 输出应包含 `Everything is Ok`，且列表中必须包含 `Release\LICENSE`；主程序顶部“许可证”页面从 exe 同目录优先读取此文件。本流程生成的包根目录必须是 `Release\`，不要把 `dist\KswordARK-release-work\` 或其它临时目录打进包里。
+校验通过时，`7z t` 输出应包含 `Everything is Ok`；主程序顶部“许可证”页面从 exe 同目录读取根 `LICENSE`。本流程生成的包根目录必须是 `Release\`，不要把 `dist\KswordARK-release-work\` 或其它临时目录打进包里。
 
 
 ## Phase -1 协作规范
@@ -103,5 +113,5 @@ $seven='C:\Users\Felix\CLionProjects\Wisdom-Weasel\7z.exe'
 - 用户态 KswordARK 设备访问只通过 `Ksword5.1/Ksword5.1/ArkDriverClient/`，Dock UI 不直接调用 KswordARK `DeviceIoControl`。
 - `KswordCLI` 每新增、删除或调整一个命令/别名/参数时，必须同步更新 `KswordCLI` 内置 `help` 命令元数据，并同步更新 `docs/CLI使用文档.md`。
 - 新增源码必须同步更新对应 `.vcxproj` 和 `.vcxproj.filters`。
-- 第三方代码接入必须带 LICENSE 和 NOTICE。
+- 第三方代码接入必须保留原有许可证文本。
 - 新增、删除或修改主程序用户可见文本时，必须同步 `Ksword5.1/Ksword5.1/languages/zh-CN.json` 与 `Ksword5.1/Ksword5.1/languages/en-US.json`，并通过 `python tools/i18n_language_pack.py audit --source-root Ksword5.1/Ksword5.1 --zh-pack Ksword5.1/Ksword5.1/languages/zh-CN.json --en-pack Ksword5.1/Ksword5.1/languages/en-US.json`。

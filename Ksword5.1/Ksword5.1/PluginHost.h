@@ -43,7 +43,14 @@ namespace ks::plugin_host
     // - 发现 plugin_type=tab 的外部进程插件；
     // - 在宿主 QTabWidget 中建立原生子窗口容器，不把插件 DLL/代码加载进 KSword；
     // - 插件窗口句柄必须属于刚启动的插件进程，且必须直接挂到宿主提供的 HWND。
-    void populateTabPlugins(QTabWidget* tabWidget, QWidget* owner);
+    // - 返回成功加入宿主的 Tab 数量。
+    int populateTabPlugins(QTabWidget* tabWidget, QWidget* owner);
+
+    // createTabPluginContainer：
+    // - 创建顶部“插件”Dock 的内容容器，并注入 KSword 基础主题样式；
+    // - 所有 Tab 型插件只进入该容器，不再混入“杂项/Utilities”页面；
+    // - 没有已安装 Tab 插件时显示可直接打开插件管理器的空状态页。
+    QWidget* createTabPluginContainer(QWidget* parent);
 
     // showPluginManager：
     // - 打开非模态插件管理窗口；

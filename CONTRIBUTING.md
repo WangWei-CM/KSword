@@ -1,12 +1,19 @@
 # Contributing to Ksword ARK
 
+## 贡献
+
+项目按 `GPL-3.0-only` 发布。提交代码即表示你有权提交，并同意该贡献随项目按
+GPLv3 发布。第三方代码请保留其原有许可证文本。
+
+讨论和协作遵守 `COMMUNITY_COVENANT.md`；它是社区约定，不给 GPL 再加限制。
+
 ## 模块边界
 
 - 共享 IOCTL 协议只放在 `shared/driver/`。
 - 驱动新 IOCTL 先在 `KswordARKDriver/src/dispatch/ioctl_registry.c` 注册，再在 `src/features/<module>/<module>_ioctl.c` 实现 handler。
 - 用户态 R0 调用只通过 `Ksword5.1/Ksword5.1/ArkDriverClient/`。Dock UI 不直接调用 KswordARK `DeviceIoControl`。
 - 新增源码必须加入对应 `.vcxproj` 和 `.filters`。
-- 第三方代码必须保留 LICENSE/NOTICE。
+- 第三方代码必须保留原有许可证文本。
 - DynData 共享协议只能维护在 `shared/driver/KswordArkDynDataIoctl.h`；驱动侧不要复制结构体定义。
 - 统一驱动状态/能力协议只能维护在 `shared/driver/KswordArkCapabilityIoctl.h`；KernelDock 能力页只通过 `ArkDriverClient::queryDriverCapabilities()` 获取状态。
 - System Informer DynData 只允许作为 `third_party/systeminformer_dyn/` 数据源接入，禁止顺手搬入 KPH 对象系统、通信层、session token 或 System Informer IOCTL。

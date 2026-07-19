@@ -2,6 +2,7 @@
 #include "UI/VisibleTableWidget.h"
 
 #include "theme.h"
+#include "Internationalization/LanguageManager.h"
 
 #include <QAbstractItemView>
 #include <QBrush>
@@ -1551,6 +1552,24 @@ namespace
             QProcessEnvironment environment = QProcessEnvironment::systemEnvironment();
             environment.insert(QStringLiteral("KSWORD_PLUGIN_ROOT"), findPluginRoot());
             environment.insert(QStringLiteral("KSWORD_PLUGIN_ID"), m_descriptor.id);
+            // 基础样式注入协议：
+            // - 外部进程不会继承 Qt palette/QSS，因此以环境变量提供稳定的主题角色；
+            // - 插件可以逐步选择消费这些值，不会因为未实现样式协议而无法启动；
+            // - 当前为启动时快照，主题切换后重新打开/重试插件即可获得新值。
+            environment.insert(QStringLiteral("KSWORD_PLUGIN_STYLE_API"), QStringLiteral("1"));
+            environment.insert(
+                QStringLiteral("KSWORD_PLUGIN_THEME"),
+                KswordTheme::IsDarkModeEnabled() ? QStringLiteral("dark") : QStringLiteral("light"));
+            environment.insert(QStringLiteral("KSWORD_PLUGIN_COLOR_WINDOW"), KswordTheme::WindowColorHex());
+            environment.insert(QStringLiteral("KSWORD_PLUGIN_COLOR_SURFACE"), KswordTheme::SurfaceColorHex());
+            environment.insert(QStringLiteral("KSWORD_PLUGIN_COLOR_SURFACE_ALT"), KswordTheme::SurfaceAltColorHex());
+            environment.insert(QStringLiteral("KSWORD_PLUGIN_COLOR_TEXT_PRIMARY"), KswordTheme::TextPrimaryColorHex());
+            environment.insert(QStringLiteral("KSWORD_PLUGIN_COLOR_TEXT_SECONDARY"), KswordTheme::TextSecondaryColorHex());
+            environment.insert(QStringLiteral("KSWORD_PLUGIN_COLOR_BORDER"), KswordTheme::BorderColorHex());
+            environment.insert(
+                QStringLiteral("KSWORD_PLUGIN_COLOR_ACCENT"),
+                KswordTheme::AccentHex(KswordTheme::AccentRole::Blue));
+            environment.insert(QStringLiteral("KSWORD_PLUGIN_COLOR_ON_ACCENT"), KswordTheme::OnAccentHex());
             m_process->setProcessEnvironment(environment);
 
             connect(m_process, &QProcess::started, this, [this]() {
@@ -2256,18 +2275,19 @@ void ks::plugin_host::populateTargetMenu(QMenu* menu, QWidget* owner, const Invo
     }
 }
 
-void ks::plugin_host::populateTabPlugins(QTabWidget* tabWidget, QWidget* owner)
+int ks::plugin_host::populateTabPlugins(QTabWidget* tabWidget, QWidget* owner)
 {
     if (tabWidget == nullptr || owner == nullptr)
     {
-        return;
+        return 0;
     }
     PluginListResult result;
     QString errorText;
     if (!discoverPlugins(&result, &errorText))
     {
-        return;
+        return 0;
     }
+    int addedTabs = 0;
     for (const PluginDescriptor& descriptor : result.plugins)
     {
         if (descriptor.pluginType != QStringLiteral("tab") || !descriptor.tabPresentation.enabled ||
@@ -2282,9 +2302,101 @@ void ks::plugin_host::populateTabPlugins(QTabWidget* tabWidget, QWidget* owner)
             QIcon(QStringLiteral(":/Icon/process_start.svg")),
             descriptor.tabPresentation.title);
         tabWidget->setTabToolTip(tabWidget->indexOf(page), descriptor.description);
+        ++addedTabs;
     }
+    return addedTabs;
 }
 
+QWidget* ks::plugin_host::createTabPluginContainer(QWidget* parent)
+{
+    auto* container = new QWidget(parent);
+    container->setObjectName(QStringLiteral("ksTabPluginContainer"));
+
+    auto* rootLayout = new QVBoxLayout(container);
+    rootLayout->setContentsMargins(0, 0, 0, 0);
+    rootLayout->setSpacing(0);
+
+    auto* tabWidget = new QTabWidget(container);
+    tabWidget->setObjectName(QStringLiteral("ksTabPluginHost"));
+    tabWidget->setDocumentMode(true);
+    tabWidget->setMovable(false);
+    tabWidget->setTabsClosable(false);
+    rootLayout->addWidget(tabWidget, 1);
+
+    // 宿主侧基础样式只锚定插件容器，不污染其它 Dock 或插件原生子窗口。
+    const QString pluginContainerStyle = QStringLiteral(
+        "QWidget#ksTabPluginContainer{background-color:%1;color:%2;}"
+        "QTabWidget#ksTabPluginHost::pane{background-color:%1;border:1px solid %3;border-radius:3px;}"
+        "QTabWidget#ksTabPluginHost QTabBar::tab{background-color:%4;color:%2;border:1px solid %3;"
+        "border-bottom:none;padding:6px 14px;margin-right:2px;}"
+        "QTabWidget#ksTabPluginHost QTabBar::tab:selected{background-color:%5;color:%6;border-color:%5;}"
+        "QTabWidget#ksTabPluginHost QTabBar::tab:hover:!selected{background-color:%7;}"
+        "QWidget#ksTabPluginEmptyState{background-color:%1;color:%2;}"
+        "QLabel#ksTabPluginEmptyTitle{color:%2;font-size:16px;font-weight:600;}"
+        "QLabel#ksTabPluginEmptyHint{color:%8;}"
+        "QPushButton#ksTabPluginManageButton{background-color:%5;color:%6;border:1px solid %5;"
+        "border-radius:3px;padding:6px 14px;font-weight:600;}"
+        "QPushButton#ksTabPluginManageButton:hover{background-color:%9;border-color:%9;}"
+        "QPushButton#ksTabPluginManageButton:pressed{background-color:%10;border-color:%10;}")
+        .arg(KswordTheme::SurfaceColorHex())
+        .arg(KswordTheme::TextPrimaryColorHex())
+        .arg(KswordTheme::BorderColorHex())
+        .arg(KswordTheme::SurfaceAltColorHex())
+        .arg(KswordTheme::ActiveTabBackgroundHex())
+        .arg(KswordTheme::ActiveTabTextHex())
+        .arg(KswordTheme::SurfaceMutedColorHex())
+        .arg(KswordTheme::TextSecondaryColorHex())
+        .arg(KswordTheme::PrimaryBlueSolidHoverHex())
+        .arg(KswordTheme::PrimaryBluePressedHex);
+    container->setStyleSheet(pluginContainerStyle);
+
+    if (populateTabPlugins(tabWidget, container) == 0)
+    {
+        auto* emptyPage = new QWidget(tabWidget);
+        emptyPage->setObjectName(QStringLiteral("ksTabPluginEmptyState"));
+        auto* emptyLayout = new QVBoxLayout(emptyPage);
+        emptyLayout->setContentsMargins(24, 24, 24, 24);
+        emptyLayout->setSpacing(10);
+        emptyLayout->addStretch(1);
+
+        auto* titleLabel = new QLabel(
+            ks::i18n::text(QStringLiteral("plugin.tab.empty.title"), QStringLiteral("尚未安装 Tab 型插件")),
+            emptyPage);
+        titleLabel->setObjectName(QStringLiteral("ksTabPluginEmptyTitle"));
+        titleLabel->setAlignment(Qt::AlignCenter);
+        emptyLayout->addWidget(titleLabel);
+
+        auto* hintLabel = new QLabel(
+            ks::i18n::text(
+                QStringLiteral("plugin.tab.empty.hint"),
+                QStringLiteral("请从插件管理器安装 Tab 型插件，安装完成后重启 KSword。")),
+            emptyPage);
+        hintLabel->setObjectName(QStringLiteral("ksTabPluginEmptyHint"));
+        hintLabel->setAlignment(Qt::AlignCenter);
+        hintLabel->setWordWrap(true);
+        emptyLayout->addWidget(hintLabel);
+
+        auto* buttonRow = new QHBoxLayout();
+        buttonRow->addStretch(1);
+        auto* manageButton = new QPushButton(
+            ks::i18n::text(QStringLiteral("plugin.tab.empty.manage"), QStringLiteral("打开插件管理器")),
+            emptyPage);
+        manageButton->setObjectName(QStringLiteral("ksTabPluginManageButton"));
+        buttonRow->addWidget(manageButton);
+        buttonRow->addStretch(1);
+        emptyLayout->addLayout(buttonRow);
+        emptyLayout->addStretch(1);
+
+        QObject::connect(manageButton, &QPushButton::clicked, emptyPage, [emptyPage]() {
+            ks::plugin_host::showPluginManager(emptyPage);
+        });
+        tabWidget->addTab(
+            emptyPage,
+            ks::i18n::text(QStringLiteral("plugin.tab.empty.overview"), QStringLiteral("概览")));
+    }
+
+    return container;
+}
 void ks::plugin_host::showPluginManager(QWidget* owner)
 {
     auto* dialog = new PluginManagerDialog(owner);

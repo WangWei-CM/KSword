@@ -1125,6 +1125,9 @@
     <None Include="..\..\LICENSE">
       <Filter>Profile Files</Filter>
     </None>
+    <None Include="..\..\COMMUNITY_COVENANT.md">
+      <Filter>Profile Files</Filter>
+    </None>
     <None Include="..\..\tools\i18n_language_pack.py">
       <Filter>Profile Files</Filter>
     </None>

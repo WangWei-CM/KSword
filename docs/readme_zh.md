@@ -140,7 +140,7 @@ Ksword5.1 是面向 Windows 的开源 ARK、内核调试与系统取证分析工
 - R0 可恢复进程隐藏使用 `IOCTL_KSWORD_ARK_SET_PROCESS_VISIBILITY`，驱动同时修改 `_EPROCESS.UniqueProcessId` 并摘除 `ActiveProcessLinks`，保留 PspCidTable 记录以便按原 PID 恢复。
 - 驱动统一状态/能力协议集中在 `shared/driver/KswordArkCapabilityIoctl.h`；KernelDock 的“驱动状态”页展示 Driver Loaded/Missing、Protocol Mismatch、DynData Missing、Limited、安全策略、最近 R0 错误和功能能力矩阵。
 - R0 PPL 修改必须依赖 `KSW_CAP_PROCESS_PROTECTION_PATCH`，并在用户态确认框展示当前/目标 Protection、SignatureLevel 影响、字段来源和回滚风险。
-- 新增源码必须同步更新对应 `.vcxproj` 和 `.vcxproj.filters`；第三方代码接入必须带 LICENSE 和 NOTICE。
+- 新增源码必须同步更新对应 `.vcxproj` 和 `.vcxproj.filters`；第三方代码接入必须保留上游许可证文本。
 
 
 ### 工程结构
@@ -204,3 +204,13 @@ $msbuild = 'C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Curr
 本项目包含系统级调试、审计和管理能力，请仅在合法授权和合规场景下使用。
 
 ---
+
+### 许可证
+
+Ksword 按 GNU GPL version 3 only（`GPL-3.0-only`）发布。可以使用、研究、修改、
+分享、销售，也可以围绕它提供服务；遵守 GPLv3，并在分发二进制时提供对应源码
+即可。第三方组件继续使用它们自己的许可证。
+
+除另有文件说明外，Ksword 自有代码均按 GPLv3-only 发布。
+`COMMUNITY_COVENANT.md` 是关于诚实、署名、负责任使用，以及不要把非官方 fork
+冒充官方的社区约定，不是另一层许可限制。贡献规则见 `CONTRIBUTING.md`。

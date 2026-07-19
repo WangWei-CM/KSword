@@ -148,7 +148,7 @@ The current codebase focuses on R3/R0 cross-view evidence, PDB/DynData-driven of
 - Recoverable R0 process hiding uses `IOCTL_KSWORD_ARK_SET_PROCESS_VISIBILITY`. The driver changes `_EPROCESS.UniqueProcessId` and unlinks `ActiveProcessLinks` while retaining the PspCidTable record, allowing restoration by the original PID.
 - The unified driver status/capability protocol is in `shared/driver/KswordArkCapabilityIoctl.h`. KernelDock's Driver Status page shows Driver Loaded/Missing, Protocol Mismatch, DynData Missing, Limited, security policy, the most recent R0 error, and the feature-capability matrix.
 - R0 PPL changes require `KSW_CAP_PROCESS_PROTECTION_PATCH`. The user-mode confirmation dialog must show the current/target Protection, SignatureLevel impact, field source, and rollback risk.
-- New source files must be added to the corresponding `.vcxproj` and `.vcxproj.filters` files. Third-party integrations must include LICENSE and NOTICE.
+- New source files must be added to the corresponding `.vcxproj` and `.vcxproj.filters` files. Third-party integrations must keep their upstream license text.
 
 ## Repository Layout
 
@@ -215,3 +215,9 @@ The [KSwordDEV/Website](https://github.com/KSwordDEV/Website) repository indepen
 ## Notice
 
 This project includes system-level debugging, auditing, and management capabilities. Use it only in legally authorized and compliant environments.
+
+## License
+
+Ksword is free software under [GNU GPL version 3 only](LICENSE). Use it, study it, change it, share it, sell it, or build services around it—just follow GPLv3 and provide the matching source when you distribute binaries. Third-party components keep their own licenses.
+
+Except where a file says otherwise, Ksword's own code is GPLv3-only. The [Ksword Community Covenant](COMMUNITY_COVENANT.md) is about honesty, attribution, responsible use, and not pretending an unofficial fork is official. It is a community promise, not another layer of license restrictions. Contributions follow [CONTRIBUTING.md](CONTRIBUTING.md).

@@ -459,6 +459,7 @@ private:
     ads::CDockWidget* m_dockHandle = nullptr;
     ads::CDockWidget* m_dockStartup = nullptr; // m_dockStartup：启动项页 Dock。
     ads::CDockWidget* m_dockService = nullptr;
+    ads::CDockWidget* m_dockPlugin = nullptr; // m_dockPlugin：Tab 型插件独立顶部页 Dock。
     ads::CDockWidget* m_dockMisc = nullptr;
     ads::CDockWidget* m_dockHardware = nullptr; // m_dockHardware：硬件页 Dock。
     ads::CDockWidget* m_dockCurrentOp = nullptr; // m_dockCurrentOp：当前操作 Dock。
@@ -481,6 +482,7 @@ private:
     PrivilegeDock* m_privilegeWidget = nullptr; // m_privilegeWidget：权限页内容控件。
     StartupDock* m_startupWidget = nullptr; // m_startupWidget：启动项页内容控件。
     ServiceDock* m_serviceWidget = nullptr;
+    QWidget* m_pluginWidget = nullptr; // m_pluginWidget：进程隔离 Tab 插件宿主容器。
     MiscDock* m_miscWidget = nullptr;
     WindowDock* m_windowWidget = nullptr; // m_windowWidget：窗口页内容控件。
     RegistryDock* m_registryWidget = nullptr; // m_registryWidget：注册表页内容控件。

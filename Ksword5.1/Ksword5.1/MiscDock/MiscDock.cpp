@@ -4,7 +4,6 @@
 #include "ApplicationControlPage.h"
 #include "ContextMenuCleaner/ContextMenuCleanerTab.h"
 #include "DiskEditor/DiskEditorTab.h"
-#include "../PluginHost.h"
 
 #include <QIcon>
 #include <QTabWidget>
@@ -61,6 +60,4 @@ void MiscDock::initializeUi()
         QIcon(QStringLiteral(":/Icon/process_details.svg")),
         QStringLiteral("应用控制"));
 
-    // 通用 Tab 插件宿主：只建立外部进程的原生子窗口容器，不包含任何插件专有代码。
-    ks::plugin_host::populateTabPlugins(m_mainTabWidget, this);
 }

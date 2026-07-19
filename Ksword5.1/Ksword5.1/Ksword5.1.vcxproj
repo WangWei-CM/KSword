@@ -509,6 +509,7 @@
     <None Include="..\..\tools\compress_qt_profile_json.py" />
     <None Include="..\..\tools\i18n_language_pack.py" />
     <None Include="..\..\LICENSE" />
+    <None Include="..\..\COMMUNITY_COVENANT.md" />
     <None Include="profiles\ark_dyndata_pack_v2.json" />
     <None Include="profiles\ark_dyndata_pack_v3.json" />
     <None Include="languages\en-US.json" />
@@ -529,12 +530,15 @@
     <Copy SourceFiles="@(KswordLanguagePack)" DestinationFolder="$(TargetDir)languages\" SkipUnchangedFiles="true" Condition="'@(KswordLanguagePack)' != ''" />
     <Warning Condition="'@(KswordLanguagePack)' == ''" Text="No KSword language packs were found under $(MSBuildProjectDirectory)\languages." />
   </Target>
-  <Target Name="CopyKswordLicense" AfterTargets="Build">
+  <Target Name="CopyKswordLicenseAndCovenant" AfterTargets="Build">
     <PropertyGroup>
       <KswordLicenseSource>$(MSBuildProjectDirectory)\..\..\LICENSE</KswordLicenseSource>
+      <KswordCommunityCovenantSource>$(MSBuildProjectDirectory)\..\..\COMMUNITY_COVENANT.md</KswordCommunityCovenantSource>
     </PropertyGroup>
     <Error Condition="!Exists('$(KswordLicenseSource)')" Text="KSword license file was not found: $(KswordLicenseSource)" />
+    <Error Condition="!Exists('$(KswordCommunityCovenantSource)')" Text="KSword community covenant was not found: $(KswordCommunityCovenantSource)" />
     <Copy SourceFiles="$(KswordLicenseSource)" DestinationFiles="$(TargetDir)LICENSE" SkipUnchangedFiles="true" />
+    <Copy SourceFiles="$(KswordCommunityCovenantSource)" DestinationFiles="$(TargetDir)COMMUNITY_COVENANT.md" SkipUnchangedFiles="true" />
   </Target>
   <Target Name="CopyKswordArkDynDataProfilePack" AfterTargets="Build">
     <!-- v3 pack carries typed StructOffset items such as EpActiveProcessLinks; v2 is kept only as a callback-era fallback. -->
