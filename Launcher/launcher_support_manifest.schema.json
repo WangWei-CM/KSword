@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Ksword Launcher support manifest",
+  "type": "object",
+  "required": ["schemaVersion", "generatedUtc", "product", "osPolicy", "modules", "profiles"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "generatedUtc": { "type": "string" },
+    "product": { "type": "string" },
+    "osPolicy": { "type": "object" },
+    "modules": { "type": "array", "minItems": 11 },
+    "profiles": { "type": "array" }
+  },
+  "additionalProperties": false
+}

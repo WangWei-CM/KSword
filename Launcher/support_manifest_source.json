@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "product": "KswordARK",
+  "osPolicy": {
+    "minimumWindowsMajor": 10,
+    "qtMinimumBuild": 17763,
+    "advertisedMaximumBuild": 26100,
+    "advertisedRange": "Windows 10 1809 - Windows 11 24H2",
+    "allowNewerWindows11": true
+  },
+  "modules": [
+    { "classId": 0, "className": "NTOS", "fileNames": ["ntoskrnl.exe", "ntkrnlmp.exe"], "alwaysCollect": true, "compatibilityRequired": true, "collectionOnly": false },
+    { "classId": 1, "className": "NTKRLA57", "fileNames": ["ntkrla57.exe"], "compatibilityRequired": true, "collectionOnly": false },
+    { "classId": 2, "className": "LXCORE", "fileNames": ["lxcore.sys"], "compatibilityRequired": false, "collectionOnly": false, "supportSource": "system-informer" },
+    { "classId": 16, "className": "WIN32K", "fileNames": ["win32k.sys"], "compatibilityRequired": false, "collectionOnly": true },
+    { "classId": 17, "className": "WIN32KBASE", "fileNames": ["win32kbase.sys"], "compatibilityRequired": false, "collectionOnly": true },
+    { "classId": 18, "className": "WIN32KFULL", "fileNames": ["win32kfull.sys"], "compatibilityRequired": false, "collectionOnly": true },
+    { "classId": 32, "className": "TCPIP", "fileNames": ["tcpip.sys"], "compatibilityRequired": false, "collectionOnly": true },
+    { "classId": 33, "className": "NDIS", "fileNames": ["ndis.sys"], "compatibilityRequired": false, "collectionOnly": true },
+    { "classId": 34, "className": "NETIO", "fileNames": ["netio.sys"], "compatibilityRequired": false, "collectionOnly": true },
+    { "classId": 48, "className": "FLTMGR", "fileNames": ["fltmgr.sys"], "compatibilityRequired": false, "collectionOnly": true },
+    { "classId": 64, "className": "FVEVOL", "fileNames": ["fvevol.sys"], "compatibilityRequired": false, "collectionOnly": true }
+  ]
+}

@@ -62,6 +62,7 @@ The current codebase focuses on R3/R0 cross-view evidence, PDB/DynData-driven of
 
 - `Ksword5.1`: full Qt application with ADS dock layout and the complete ARK workflow.
 - `KswordARKLight`: lightweight native Win32 ARK for older systems and low-resource environments, with simpler dependencies, faster startup, and a focused feature set.
+- `Launcher`: pure Win32 startup and compatibility assistant. It checks the readable support manifest before launching the Qt or Light target and can prepare an offline developer collection bundle when loaded kernel modules have missing offsets.
 - `KswordARKDriver`: kernel driver that implements process, thread, handle, memory, network, kernel-object, device, and security audit protocols.
 - `KswordCLI`: command-line interface for automation, validation, and troubleshooting.
 - `KswordSetup`: optional installer that extracts the release payload and creates shortcuts or integration settings. Manually extracting the full `Release\` directory is functionally equivalent.
@@ -193,12 +194,18 @@ Build only the lightweight ARK:
 & $msbuild '.\KswordARKLight\KswordARKLight.vcxproj' /t:Build /p:Configuration=Release /p:Platform=x64 /m
 ```
 
+Build the native launcher and generate the readable release support manifest:
+
+```powershell
+& $msbuild '.\Launcher\Launcher.vcxproj' /t:Build /p:Configuration=Release /p:Platform=x64 /m
+```
+
 If the current machine does not have a WDK or driver-signing environment, build the user-mode projects first. The release process can reuse an existing unsigned R0 release artifact.
 
 ## Release and Run
 
-- A release archive should contain a `Release\` root with the main program, helper programs, driver, profiles, Qt dependencies, and Qt plugin directories.
-- `KswordSetup.exe` is optional. Extracting `Release\` and running `Ksword5.1.exe` or `KswordARKLight.exe` is sufficient.
+- A release archive should contain a `Release\` root with `Launcher.exe`, `Ksword5.1.exe`, `KswordARKLight.exe`, helper programs, driver, `profiles\launcher_support_manifest.json`, the DynData packs, Qt dependencies, and Qt plugin directories. Shortcuts and the installer post-install action launch `Launcher.exe`.
+- `KswordSetup.exe` is optional. Extracting `Release\` and running `Launcher.exe` is the supported entry point; it chooses `Ksword5.1.exe` or `KswordARKLight.exe` after checking compatibility.
 - R0 features require administrator privileges, a running driver service, and compatible system security settings. Test-signing and driver-signing requirements depend on the target system.
 
 ## Project Website

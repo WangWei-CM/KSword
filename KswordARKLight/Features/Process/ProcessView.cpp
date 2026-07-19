@@ -63,9 +63,31 @@ enum class ProcessRowVisualState {
 struct DetailHostState {
     DWORD processId = 0;
     HWND child = nullptr;
+    int maximumWidth = 0;
+};
+
+struct DetailHostCreateParams {
+    DWORD processId = 0;
+    int maximumWidth = 0;
 };
 
 constexpr wchar_t kProcessDetailHostClass[] = L"KswordARKLight.ProcessDetailHost";
+
+bool EnsureDetailChild(HWND hwnd, DetailHostState& state) {
+    if (state.child) {
+        return true;
+    }
+
+    RECT client{};
+    ::GetClientRect(hwnd, &client);
+    state.child = Ksword::Features::ProcessDetail::CreateProcessDetailPage(hwnd, state.processId, client);
+    if (!state.child) {
+        return false;
+    }
+    ::ShowWindow(state.child, SW_SHOW);
+    ::MoveWindow(state.child, 0, 0, client.right - client.left, client.bottom - client.top, TRUE);
+    return true;
+}
 
 // DetailHostProc is the top-level process-detail host window procedure. Inputs
 // are ordinary Win32 messages; processing creates/resizes the child detail page;
@@ -75,24 +97,36 @@ LRESULT CALLBACK DetailHostProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     switch (msg) {
     case WM_NCCREATE: {
         const auto* create = reinterpret_cast<const CREATESTRUCTW*>(lParam);
+        const auto* parameters = create ? static_cast<const DetailHostCreateParams*>(create->lpCreateParams) : nullptr;
         auto* owned = new DetailHostState();
-        owned->processId = static_cast<DWORD>(reinterpret_cast<ULONG_PTR>(create->lpCreateParams));
+        if (parameters) {
+            owned->processId = parameters->processId;
+            owned->maximumWidth = parameters->maximumWidth;
+        }
         ::SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(owned));
         return TRUE;
     }
     case WM_CREATE:
         state = reinterpret_cast<DetailHostState*>(::GetWindowLongPtrW(hwnd, GWLP_USERDATA));
-        if (state) {
-            RECT rc{};
-            ::GetClientRect(hwnd, &rc);
-            state->child = Ksword::Features::ProcessDetail::CreateProcessDetailPage(hwnd, state->processId, rc);
-        }
+        // Delay child-page creation until the first size/show pass. At WM_CREATE
+        // the overlapped frame may not yet have its final client rectangle.
         return 0;
     case WM_SIZE:
-        if (state && state->child) {
+        if (state && EnsureDetailChild(hwnd, *state)) {
             RECT rc{};
             ::GetClientRect(hwnd, &rc);
             ::MoveWindow(state->child, 0, 0, rc.right - rc.left, rc.bottom - rc.top, TRUE);
+        }
+        return 0;
+    case WM_SHOWWINDOW:
+        if (state && wParam != FALSE) {
+            EnsureDetailChild(hwnd, *state);
+        }
+        return 0;
+    case WM_GETMINMAXINFO:
+        if (state && state->maximumWidth > 0) {
+            auto* minMax = reinterpret_cast<MINMAXINFO*>(lParam);
+            minMax->ptMaxTrackSize.x = state->maximumWidth;
         }
         return 0;
     case WM_NCDESTROY:
@@ -134,25 +168,48 @@ bool OpenProcessDetailWindow(HWND owner, DWORD processId) {
         return false;
     }
 
-    const std::wstring title = L"进程详细信息 - PID " + std::to_wstring(processId);
+    const HWND rootOwner = owner ? ::GetAncestor(owner, GA_ROOT) : nullptr;
+    RECT available{};
+    if (rootOwner) {
+        ::GetClientRect(rootOwner, &available);
+    }
+    int availableWidth = available.right - available.left;
+    if (availableWidth <= 0) {
+        ::SystemParametersInfoW(SPI_GETWORKAREA, 0, &available, 0);
+        availableWidth = available.right - available.left;
+    }
+    const int maximumWidth = std::max(720, availableWidth * 3 / 4);
+    const int initialWidth = std::min(1160, maximumWidth);
+
+    std::wstring processName = LeafName(QueryProcessImagePath(processId));
+    if (processName.empty()) {
+        processName = L"<unknown>";
+    }
+    const std::wstring title = L"进程详细信息 - " + processName + L" (PID " + std::to_wstring(processId) + L")";
+    const DetailHostCreateParams parameters{ processId, maximumWidth };
     HWND host = ::CreateWindowExW(WS_EX_APPWINDOW,
         kProcessDetailHostClass,
         title.c_str(),
         WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN | WS_CLIPSIBLINGS,
         CW_USEDEFAULT,
         CW_USEDEFAULT,
-        980,
-        680,
-        owner,
+        initialWidth,
+        760,
+        rootOwner,
         nullptr,
         ::GetModuleHandleW(nullptr),
-        reinterpret_cast<void*>(static_cast<ULONG_PTR>(processId)));
+        const_cast<DetailHostCreateParams*>(&parameters));
     if (!host) {
         return false;
     }
 
     ::ShowWindow(host, SW_SHOWNORMAL);
     ::UpdateWindow(host);
+    auto* state = reinterpret_cast<DetailHostState*>(::GetWindowLongPtrW(host, GWLP_USERDATA));
+    if (!state || !EnsureDetailChild(host, *state)) {
+        ::DestroyWindow(host);
+        return false;
+    }
     return true;
 }
 

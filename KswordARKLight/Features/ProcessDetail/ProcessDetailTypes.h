@@ -15,11 +15,26 @@ struct ProcessBasicInfo {
     DWORD processId = 0;
     DWORD parentProcessId = 0;
     DWORD sessionId = 0;
+    DWORD handleCount = 0;
+    DWORD threadCount = 0;
+    ULONGLONG workingSetBytes = 0;
+    ULONGLONG privateBytes = 0;
+    ULONGLONG ioBytes = 0;
+    std::uintptr_t pebAddress = 0;
+    std::uint64_t affinityMask = 0;
+    bool pebAddressKnown = false;
+    bool affinityKnown = false;
+    bool isAdmin = false;
+    bool adminKnown = false;
+    std::wstring processName;
+    std::wstring parentProcessName;
     std::wstring imagePath;
     std::wstring commandLine;
+    std::wstring startTimeText;
     std::wstring bitness;
     std::wstring userName;
     std::wstring integrityLevel;
+    std::wstring priorityText;
     std::wstring statusText;
 };
 

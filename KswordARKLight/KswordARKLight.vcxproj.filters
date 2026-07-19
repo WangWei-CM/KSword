@@ -341,6 +341,13 @@
     <ClCompile Include="Features\ProcessDetail\ProcessDetailPage.cpp">
       <Filter>Features\ProcessDetail</Filter>
     </ClCompile>
+    <ClCompile Include="Features\ProcessDetail\ProcessDetailPage.Action.cpp"><Filter>Features\ProcessDetail</Filter></ClCompile>
+    <ClCompile Include="Features\ProcessDetail\ProcessDetailPage.DetailPlugin.cpp"><Filter>Features\ProcessDetail</Filter></ClCompile>
+    <ClCompile Include="Features\ProcessDetail\ProcessDetailPage.EvidencePeb.cpp"><Filter>Features\ProcessDetail</Filter></ClCompile>
+    <ClCompile Include="Features\ProcessDetail\ProcessDetailPage.HotkeyKeyboard.cpp"><Filter>Features\ProcessDetail</Filter></ClCompile>
+    <ClCompile Include="Features\ProcessDetail\ProcessDetailPage.Module.cpp"><Filter>Features\ProcessDetail</Filter></ClCompile>
+    <ClCompile Include="Features\ProcessDetail\ProcessDetailPage.Thread.cpp"><Filter>Features\ProcessDetail</Filter></ClCompile>
+    <ClCompile Include="Features\ProcessDetail\ProcessDetailPage.Token.cpp"><Filter>Features\ProcessDetail</Filter></ClCompile>
     <ClCompile Include="Features\Startup\StartupActions.cpp">
       <Filter>Features\Startup</Filter>
     </ClCompile>

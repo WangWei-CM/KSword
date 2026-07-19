@@ -11,8 +11,10 @@ namespace Ksword::Features::ProcessDetail {
 class ProcessDetailCollector final {
 public:
     // Collect builds the Basic/Threads/Modules snapshot for one process ID.
-    // Input is processId; processing tolerates protected, exited or access
-    // denied targets; output always contains per-section status text.
+    // Input is processId; processing enriches Basic with independently queried
+    // Win32 identity, token, timing, memory, I/O, PEB and affinity fields while
+    // tolerating protected, exited or access-denied targets; output always
+    // contains per-section status text.
     ProcessDetailSnapshot Collect(DWORD processId) const;
 };
 

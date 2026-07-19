@@ -1,0 +1,1098 @@
+#include "ProcessDetailPage.h"
+
+#include "../../Ui/Controls.h"
+#include "../../Ui/Theme.h"
+
+#include <commctrl.h>
+#include <shellapi.h>
+#include <windowsx.h>
+
+#include <algorithm>
+#include <chrono>
+#include <cstdint>
+#include <cstring>
+#include <cwchar>
+#include <iomanip>
+#include <sstream>
+#include <string>
+#include <vector>
+
+namespace Ksword::Features::ProcessDetail {
+namespace {
+
+constexpr UINT kModuleMenuCopyCell = 64101;
+constexpr UINT kModuleMenuCopyRow = 64102;
+constexpr UINT kModuleMenuDetail = 64103;
+constexpr UINT kModuleMenuOpenFolder = 64104;
+constexpr UINT kModuleMenuUnload = 64105;
+constexpr UINT kModuleMenuSuspendThread = 64106;
+constexpr UINT kModuleMenuResumeThread = 64107;
+constexpr UINT kModuleMenuTerminateThread = 64108;
+
+constexpr UINT_PTR kModulePageVisualSubclassId = 0x4D4F4455U; // "MODU"
+constexpr UINT_PTR kModuleHeaderSubclassId = 0x4D4F4448U;     // "MODH"
+constexpr UINT_PTR kModuleStatusSubclassId = 0x4D4F4453U;     // "MODS"
+
+constexpr wchar_t kModuleDetailClass[] = L"KswordARKLight.ProcessDetail.ModuleDetail";
+constexpr int kModuleDetailSummaryId = 65101;
+constexpr int kModuleDetailEditId = 65102;
+constexpr int kModuleDetailCopyId = 65103;
+constexpr int kModuleDetailOpenFolderId = 65104;
+constexpr int kModuleDetailCloseId = 65105;
+
+struct ModuleSortState {
+    HWND list = nullptr;
+    int column = 0;
+    bool descending = false;
+};
+
+struct ModuleDetailDialogState {
+    HWND hwnd = nullptr;
+    HWND summary = nullptr;
+    HWND edit = nullptr;
+    HWND copyButton = nullptr;
+    HWND openFolderButton = nullptr;
+    HWND closeButton = nullptr;
+    std::wstring summaryText;
+    std::wstring detailText;
+    std::wstring modulePath;
+};
+
+// ReadControlText returns one native control's complete UTF-16 text. The
+// caller owns the returned value and no HWND lifetime is retained.
+std::wstring ReadControlText(HWND hwnd) {
+    if (!hwnd) {
+        return {};
+    }
+    const int length = ::GetWindowTextLengthW(hwnd);
+    std::wstring text(static_cast<std::size_t>(std::max(0, length)) + 1U, L'\0');
+    ::GetWindowTextW(hwnd, text.data(), static_cast<int>(text.size()));
+    text.resize(std::wcslen(text.c_str()));
+    return text;
+}
+
+// ReadListCell is the module-local equivalent of the root list helper. It is
+// used by native header sorting and custom draw callbacks that are not class
+// members and therefore cannot access private ProcessDetailPage helpers.
+std::wstring ReadListCell(HWND list, int row, int column) {
+    if (!list || row < 0 || column < 0) {
+        return {};
+    }
+    std::vector<wchar_t> buffer(8192U, L'\0');
+    ListView_GetItemText(list, row, column, buffer.data(), static_cast<int>(buffer.size()));
+    return buffer.data();
+}
+
+// SelectedSnapshotIndex returns the stable snapshot index stored in LVITEM's
+// lParam. Sorting changes visual row order but never changes this identity.
+std::size_t SelectedSnapshotIndex(HWND list) {
+    if (!list) {
+        return static_cast<std::size_t>(-1);
+    }
+    const int row = ListView_GetNextItem(list, -1, LVNI_SELECTED);
+    if (row < 0) {
+        return static_cast<std::size_t>(-1);
+    }
+    LVITEMW item{};
+    item.mask = LVIF_PARAM;
+    item.iItem = row;
+    if (!ListView_GetItem(list, &item) || item.lParam < 0) {
+        return static_cast<std::size_t>(-1);
+    }
+    return static_cast<std::size_t>(item.lParam);
+}
+
+std::wstring BaseNameFromPath(const std::wstring& path) {
+    const std::size_t separator = path.find_last_of(L"\\/");
+    if (separator == std::wstring::npos || separator + 1U >= path.size()) {
+        return path;
+    }
+    return path.substr(separator + 1U);
+}
+
+std::wstring FormatHex(std::uintptr_t value) {
+    std::wostringstream text;
+    text << L"0x" << std::uppercase << std::hex << value;
+    return text.str();
+}
+
+std::wstring FormatModuleSize(DWORD bytes) {
+    const double kilobytes = static_cast<double>(bytes) / 1024.0;
+    std::wostringstream text;
+    if (kilobytes < 1024.0) {
+        text << std::fixed << std::setprecision(1) << kilobytes << L" KB";
+    } else {
+        text << std::fixed << std::setprecision(2) << (kilobytes / 1024.0) << L" MB";
+    }
+    return text.str();
+}
+
+std::wstring ModuleSignatureText(HWND verifyCheck) {
+    const bool requested = verifyCheck &&
+        ::SendMessageW(verifyCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    // The frozen ProcessModuleInfo model has no signature result field. Make
+    // that boundary explicit instead of presenting the collector status as a
+    // cryptographic trust decision.
+    return requested ? L"Unavailable" : L"Pending";
+}
+
+std::wstring ModuleRunningState(const ProcessModuleInfo& module) {
+    return module.statusText == L"OK" ? L"Loaded" : L"Unknown";
+}
+
+std::wstring ModuleThreadText(const ProcessModuleInfo& module) {
+    return module.representativeThreadId == 0
+        ? L"-"
+        : std::to_wstring(module.representativeThreadId);
+}
+
+std::wstring LastErrorText(const wchar_t* operation, DWORD error) {
+    wchar_t* systemText = nullptr;
+    const DWORD flags = FORMAT_MESSAGE_ALLOCATE_BUFFER |
+        FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS;
+    ::FormatMessageW(
+        flags,
+        nullptr,
+        error,
+        0,
+        reinterpret_cast<LPWSTR>(&systemText),
+        0,
+        nullptr);
+    std::wstring result = operation ? operation : L"Win32 operation";
+    result += L" failed";
+    if (systemText) {
+        result += L": ";
+        result += systemText;
+        while (!result.empty() &&
+               (result.back() == L'\r' || result.back() == L'\n' || result.back() == L' ')) {
+            result.pop_back();
+        }
+        ::LocalFree(systemText);
+    } else {
+        result += L" (" + std::to_wstring(error) + L")";
+    }
+    return result;
+}
+
+bool WriteClipboardText(HWND owner, const std::wstring& text) {
+    if (text.empty() || !::OpenClipboard(owner)) {
+        return false;
+    }
+    const SIZE_T bytes = (text.size() + 1U) * sizeof(wchar_t);
+    HGLOBAL memory = ::GlobalAlloc(GMEM_MOVEABLE, bytes);
+    if (!memory) {
+        ::CloseClipboard();
+        return false;
+    }
+    void* destination = ::GlobalLock(memory);
+    if (!destination) {
+        ::GlobalFree(memory);
+        ::CloseClipboard();
+        return false;
+    }
+    std::memcpy(destination, text.c_str(), bytes);
+    ::GlobalUnlock(memory);
+    ::EmptyClipboard();
+    if (!::SetClipboardData(CF_UNICODETEXT, memory)) {
+        ::GlobalFree(memory);
+        ::CloseClipboard();
+        return false;
+    }
+    ::CloseClipboard();
+    return true;
+}
+
+bool OpenFolderAndSelectPath(HWND owner, const std::wstring& path) {
+    if (path.empty() || path.front() == L'<') {
+        return false;
+    }
+    const std::wstring parameters = L"/select,\"" + path + L"\"";
+    const HINSTANCE result = ::ShellExecuteW(
+        owner,
+        L"open",
+        L"explorer.exe",
+        parameters.c_str(),
+        nullptr,
+        SW_SHOWNORMAL);
+    return reinterpret_cast<INT_PTR>(result) > 32;
+}
+
+int CALLBACK CompareModuleRows(LPARAM leftIndex, LPARAM rightIndex, LPARAM contextValue) {
+    const auto* state = reinterpret_cast<const ModuleSortState*>(contextValue);
+    if (!state || !state->list) {
+        return 0;
+    }
+    const std::wstring left = ReadListCell(state->list, static_cast<int>(leftIndex), state->column);
+    const std::wstring right = ReadListCell(state->list, static_cast<int>(rightIndex), state->column);
+    int comparison = ::CompareStringOrdinal(
+        left.c_str(), static_cast<int>(left.size()),
+        right.c_str(), static_cast<int>(right.size()),
+        FALSE);
+    if (comparison == CSTR_LESS_THAN) {
+        comparison = -1;
+    } else if (comparison == CSTR_GREATER_THAN) {
+        comparison = 1;
+    } else {
+        comparison = 0;
+    }
+    return state->descending ? -comparison : comparison;
+}
+
+void UpdateSortIndicator(HWND list, int sortColumn, bool descending) {
+    HWND header = list ? ListView_GetHeader(list) : nullptr;
+    const int count = header ? Header_GetItemCount(header) : 0;
+    for (int index = 0; index < count; ++index) {
+        HDITEMW item{};
+        item.mask = HDI_FORMAT;
+        if (!Header_GetItem(header, index, &item)) {
+            continue;
+        }
+        item.fmt &= ~(HDF_SORTUP | HDF_SORTDOWN);
+        if (index == sortColumn) {
+            item.fmt |= descending ? HDF_SORTDOWN : HDF_SORTUP;
+        }
+        Header_SetItem(header, index, &item);
+    }
+}
+
+void SortModuleList(ModuleSortState& state) {
+    if (!state.list) {
+        return;
+    }
+    ListView_SortItemsEx(state.list, CompareModuleRows, reinterpret_cast<LPARAM>(&state));
+    UpdateSortIndicator(state.list, state.column, state.descending);
+}
+
+LRESULT CALLBACK ModuleHeaderSubclassProc(
+    HWND hwnd,
+    UINT message,
+    WPARAM wParam,
+    LPARAM lParam,
+    UINT_PTR subclassId,
+    DWORD_PTR referenceData) {
+    auto* state = reinterpret_cast<ModuleSortState*>(referenceData);
+    if (message == WM_LBUTTONUP && state) {
+        HDHITTESTINFO hit{};
+        hit.pt.x = GET_X_LPARAM(lParam);
+        hit.pt.y = GET_Y_LPARAM(lParam);
+        const int column = static_cast<int>(::SendMessageW(
+            hwnd, HDM_HITTEST, 0, reinterpret_cast<LPARAM>(&hit)));
+        const LRESULT result = ::DefSubclassProc(hwnd, message, wParam, lParam);
+        if (column >= 0) {
+            if (state->column == column) {
+                state->descending = !state->descending;
+            } else {
+                state->column = column;
+                state->descending = false;
+            }
+            SortModuleList(*state);
+        }
+        return result;
+    }
+    if (message == WM_NCDESTROY) {
+        ::RemoveWindowSubclass(hwnd, ModuleHeaderSubclassProc, subclassId);
+        delete state;
+        return ::DefSubclassProc(hwnd, message, wParam, lParam);
+    }
+    return ::DefSubclassProc(hwnd, message, wParam, lParam);
+}
+
+void SortModuleListByPath(HWND list) {
+    HWND header = list ? ListView_GetHeader(list) : nullptr;
+    DWORD_PTR referenceData = 0;
+    if (header && ::GetWindowSubclass(
+            header,
+            ModuleHeaderSubclassProc,
+            kModuleHeaderSubclassId,
+            &referenceData)) {
+        auto* state = reinterpret_cast<ModuleSortState*>(referenceData);
+        if (state) {
+            state->column = 0;
+            state->descending = false;
+            SortModuleList(*state);
+            return;
+        }
+    }
+    UpdateSortIndicator(list, 0, false);
+}
+
+COLORREF SignatureColor(const std::wstring& text) {
+    if (text == L"Pending" || text == L"Unknown" || text == L"Unavailable" || text.empty()) {
+        return Ksword::Ui::AppTheme().mutedTextColor;
+    }
+    if (text.find(L"Trusted") != std::wstring::npos ||
+        text.find(L"Valid") != std::wstring::npos ||
+        text.find(L"可信") != std::wstring::npos ||
+        text.find(L"有效") != std::wstring::npos) {
+        return RGB(24, 128, 56);
+    }
+    return RGB(196, 43, 28);
+}
+
+LRESULT CALLBACK ModulePageVisualSubclassProc(
+    HWND hwnd,
+    UINT message,
+    WPARAM wParam,
+    LPARAM lParam,
+    UINT_PTR subclassId,
+    DWORD_PTR referenceData) {
+    HWND moduleList = reinterpret_cast<HWND>(referenceData);
+    if (message == WM_NOTIFY) {
+        auto* header = reinterpret_cast<NMHDR*>(lParam);
+        if (header && header->hwndFrom == moduleList && header->code == NM_CUSTOMDRAW) {
+            auto* draw = reinterpret_cast<NMLVCUSTOMDRAW*>(lParam);
+            const DWORD stage = draw->nmcd.dwDrawStage;
+            if (stage == CDDS_PREPAINT) {
+                return CDRF_NOTIFYITEMDRAW;
+            }
+            if (stage == CDDS_ITEMPREPAINT) {
+                return CDRF_NOTIFYSUBITEMDRAW;
+            }
+            if (stage == (CDDS_ITEMPREPAINT | CDDS_SUBITEM)) {
+                const bool selected = (draw->nmcd.uItemState & CDIS_SELECTED) != 0;
+                if (selected) {
+                    draw->clrText = ::GetSysColor(COLOR_HIGHLIGHTTEXT);
+                    draw->clrTextBk = ::GetSysColor(COLOR_HIGHLIGHT);
+                } else {
+                    draw->clrText = Ksword::Ui::AppTheme().textColor;
+                    draw->clrTextBk = (draw->nmcd.dwItemSpec % 2U) == 0U
+                        ? Ksword::Ui::AppTheme().panelColor
+                        : Ksword::Ui::AppTheme().windowColor;
+                    if (draw->iSubItem == 2) {
+                        draw->clrText = SignatureColor(ReadListCell(
+                            moduleList,
+                            static_cast<int>(draw->nmcd.dwItemSpec),
+                            2));
+                    }
+                }
+                return CDRF_NEWFONT;
+            }
+        }
+    }
+    if (message == WM_NCDESTROY) {
+        ::RemoveWindowSubclass(hwnd, ModulePageVisualSubclassProc, subclassId);
+    }
+    return ::DefSubclassProc(hwnd, message, wParam, lParam);
+}
+
+LRESULT CALLBACK ModuleStatusSubclassProc(
+    HWND hwnd,
+    UINT message,
+    WPARAM wParam,
+    LPARAM lParam,
+    UINT_PTR subclassId,
+    DWORD_PTR referenceData) {
+    (void)referenceData;
+    if (message == WM_SETTEXT) {
+        const LRESULT result = ::DefSubclassProc(hwnd, message, wParam, lParam);
+        ::InvalidateRect(hwnd, nullptr, TRUE);
+        return result;
+    }
+    if (message == WM_ERASEBKGND) {
+        return 1;
+    }
+    if (message == WM_PAINT) {
+        PAINTSTRUCT paint{};
+        HDC dc = ::BeginPaint(hwnd, &paint);
+        RECT client{};
+        ::GetClientRect(hwnd, &client);
+        ::FillRect(dc, &client, Ksword::Ui::AppTheme().windowBrush());
+        ::SetBkMode(dc, TRANSPARENT);
+        const std::wstring text = ReadControlText(hwnd);
+        COLORREF color = RGB(24, 128, 56);
+        if (text.find(L"正在") != std::wstring::npos) {
+            color = Ksword::Ui::AppTheme().accentColor;
+        } else if (text.find(L"失败") != std::wstring::npos ||
+                   text.find(L"模块:0") != std::wstring::npos) {
+            color = RGB(196, 43, 28);
+        } else if (text.find(L"等待") != std::wstring::npos) {
+            color = Ksword::Ui::AppTheme().mutedTextColor;
+        }
+        ::SetTextColor(dc, color);
+        HFONT font = reinterpret_cast<HFONT>(::SendMessageW(hwnd, WM_GETFONT, 0, 0));
+        HGDIOBJ oldFont = font ? ::SelectObject(dc, font) : nullptr;
+        ::DrawTextW(
+            dc,
+            text.c_str(),
+            static_cast<int>(text.size()),
+            &client,
+            DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+        if (oldFont) {
+            ::SelectObject(dc, oldFont);
+        }
+        ::EndPaint(hwnd, &paint);
+        return 0;
+    }
+    if (message == WM_NCDESTROY) {
+        ::RemoveWindowSubclass(hwnd, ModuleStatusSubclassProc, subclassId);
+    }
+    return ::DefSubclassProc(hwnd, message, wParam, lParam);
+}
+
+int SystemIconIndexForPath(const std::wstring& path, HIMAGELIST* imageListOut) {
+    SHFILEINFOW info{};
+    UINT flags = SHGFI_SYSICONINDEX | SHGFI_SMALLICON;
+    DWORD attributes = 0;
+    if (path.empty() || path.front() == L'<') {
+        flags |= SHGFI_USEFILEATTRIBUTES;
+        attributes = FILE_ATTRIBUTE_NORMAL;
+    }
+    const DWORD_PTR result = ::SHGetFileInfoW(
+        path.empty() ? L"module.dll" : path.c_str(),
+        attributes,
+        &info,
+        sizeof(info),
+        flags);
+    if (imageListOut && result != 0) {
+        *imageListOut = reinterpret_cast<HIMAGELIST>(result);
+    }
+    return result != 0 ? info.iIcon : -1;
+}
+
+void ApplyDialogFont(HWND hwnd) {
+    if (hwnd) {
+        ::SendMessageW(
+            hwnd,
+            WM_SETFONT,
+            reinterpret_cast<WPARAM>(Ksword::Ui::SystemUIFont()),
+            TRUE);
+    }
+}
+
+void LayoutModuleDetailDialog(ModuleDetailDialogState& state) {
+    if (!state.hwnd) {
+        return;
+    }
+    RECT client{};
+    ::GetClientRect(state.hwnd, &client);
+    constexpr int margin = 10;
+    constexpr int spacing = 8;
+    constexpr int summaryHeight = 42;
+    constexpr int buttonHeight = 28;
+    constexpr int copyWidth = 96;
+    constexpr int openWidth = 96;
+    constexpr int closeWidth = 72;
+    const int width = std::max(0L, client.right - client.left);
+    const int height = std::max(0L, client.bottom - client.top);
+    const int buttonY = std::max(margin, height - margin - buttonHeight);
+    int buttonX = std::max(margin, width - margin - closeWidth);
+    ::MoveWindow(state.closeButton, buttonX, buttonY, closeWidth, buttonHeight, TRUE);
+    buttonX -= spacing + openWidth;
+    ::MoveWindow(state.openFolderButton, buttonX, buttonY, openWidth, buttonHeight, TRUE);
+    buttonX -= spacing + copyWidth;
+    ::MoveWindow(state.copyButton, buttonX, buttonY, copyWidth, buttonHeight, TRUE);
+    ::MoveWindow(state.summary, margin, margin, std::max(0, width - margin * 2), summaryHeight, TRUE);
+    const int editY = margin + summaryHeight + spacing;
+    const int editHeight = std::max(0, buttonY - spacing - editY);
+    ::MoveWindow(state.edit, margin, editY, std::max(0, width - margin * 2), editHeight, TRUE);
+}
+
+LRESULT CALLBACK ModuleDetailWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
+    auto* state = reinterpret_cast<ModuleDetailDialogState*>(::GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    if (message == WM_NCCREATE) {
+        const auto* create = reinterpret_cast<const CREATESTRUCTW*>(lParam);
+        state = create ? static_cast<ModuleDetailDialogState*>(create->lpCreateParams) : nullptr;
+        ::SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state));
+        if (state) {
+            state->hwnd = hwnd;
+        }
+    }
+    switch (message) {
+    case WM_CREATE:
+        if (!state) {
+            return -1;
+        }
+        state->summary = ::CreateWindowExW(
+            0, WC_STATICW, state->summaryText.c_str(),
+            WS_CHILD | WS_VISIBLE | SS_LEFT,
+            0, 0, 0, 0, hwnd,
+            reinterpret_cast<HMENU>(static_cast<INT_PTR>(kModuleDetailSummaryId)),
+            ::GetModuleHandleW(nullptr), nullptr);
+        state->edit = ::CreateWindowExW(
+            WS_EX_CLIENTEDGE, WC_EDITW, state->detailText.c_str(),
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_LEFT | ES_MULTILINE |
+                ES_READONLY | ES_AUTOVSCROLL | ES_AUTOHSCROLL | WS_VSCROLL | WS_HSCROLL,
+            0, 0, 0, 0, hwnd,
+            reinterpret_cast<HMENU>(static_cast<INT_PTR>(kModuleDetailEditId)),
+            ::GetModuleHandleW(nullptr), nullptr);
+        state->copyButton = ::CreateWindowExW(
+            0, WC_BUTTONW, L"复制全部", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+            0, 0, 0, 0, hwnd,
+            reinterpret_cast<HMENU>(static_cast<INT_PTR>(kModuleDetailCopyId)),
+            ::GetModuleHandleW(nullptr), nullptr);
+        state->openFolderButton = ::CreateWindowExW(
+            0, WC_BUTTONW, L"打开目录", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+            0, 0, 0, 0, hwnd,
+            reinterpret_cast<HMENU>(static_cast<INT_PTR>(kModuleDetailOpenFolderId)),
+            ::GetModuleHandleW(nullptr), nullptr);
+        state->closeButton = ::CreateWindowExW(
+            0, WC_BUTTONW, L"关闭", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
+            0, 0, 0, 0, hwnd,
+            reinterpret_cast<HMENU>(static_cast<INT_PTR>(kModuleDetailCloseId)),
+            ::GetModuleHandleW(nullptr), nullptr);
+        ApplyDialogFont(state->summary);
+        ApplyDialogFont(state->edit);
+        ApplyDialogFont(state->copyButton);
+        ApplyDialogFont(state->openFolderButton);
+        ApplyDialogFont(state->closeButton);
+        LayoutModuleDetailDialog(*state);
+        return 0;
+    case WM_SIZE:
+        if (state) {
+            LayoutModuleDetailDialog(*state);
+        }
+        return 0;
+    case WM_GETMINMAXINFO:
+        if (auto* sizeInfo = reinterpret_cast<MINMAXINFO*>(lParam)) {
+            sizeInfo->ptMinTrackSize.x = 600;
+            sizeInfo->ptMinTrackSize.y = 400;
+        }
+        return 0;
+    case WM_COMMAND:
+        if (!state) {
+            break;
+        }
+        switch (LOWORD(wParam)) {
+        case kModuleDetailCopyId:
+            WriteClipboardText(hwnd, state->detailText);
+            return 0;
+        case kModuleDetailOpenFolderId:
+            OpenFolderAndSelectPath(hwnd, state->modulePath);
+            return 0;
+        case kModuleDetailCloseId:
+            ::DestroyWindow(hwnd);
+            return 0;
+        default:
+            break;
+        }
+        break;
+    case WM_CLOSE:
+        ::DestroyWindow(hwnd);
+        return 0;
+    case WM_CTLCOLORSTATIC:
+    case WM_CTLCOLORBTN:
+        ::SetBkMode(reinterpret_cast<HDC>(wParam), TRANSPARENT);
+        ::SetTextColor(reinterpret_cast<HDC>(wParam), Ksword::Ui::AppTheme().textColor);
+        return reinterpret_cast<LRESULT>(Ksword::Ui::AppTheme().windowBrush());
+    case WM_CTLCOLOREDIT:
+        ::SetBkColor(reinterpret_cast<HDC>(wParam), Ksword::Ui::AppTheme().panelColor);
+        ::SetTextColor(reinterpret_cast<HDC>(wParam), Ksword::Ui::AppTheme().textColor);
+        return reinterpret_cast<LRESULT>(Ksword::Ui::AppTheme().panelBrush());
+    case WM_NCDESTROY:
+        ::SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+        if (state) {
+            state->hwnd = nullptr;
+        }
+        return 0;
+    default:
+        break;
+    }
+    return ::DefWindowProcW(hwnd, message, wParam, lParam);
+}
+
+bool RegisterModuleDetailClass() {
+    WNDCLASSW windowClass{};
+    windowClass.lpfnWndProc = ModuleDetailWindowProc;
+    windowClass.hInstance = ::GetModuleHandleW(nullptr);
+    windowClass.hCursor = ::LoadCursorW(nullptr, IDC_ARROW);
+    windowClass.hbrBackground = Ksword::Ui::AppTheme().windowBrush();
+    windowClass.lpszClassName = kModuleDetailClass;
+    if (::RegisterClassW(&windowClass)) {
+        return true;
+    }
+    return ::GetLastError() == ERROR_CLASS_ALREADY_EXISTS;
+}
+
+void RunModuleDetailDialog(HWND parent, const std::wstring& title, ModuleDetailDialogState& state) {
+    if (!RegisterModuleDetailClass()) {
+        return;
+    }
+    HWND owner = parent ? ::GetAncestor(parent, GA_ROOT) : nullptr;
+    RECT ownerRect{};
+    if (!owner || !::GetWindowRect(owner, &ownerRect)) {
+        ownerRect = { 100, 100, 860, 620 };
+    }
+    RECT windowRect{ 0, 0, 760, 520 };
+    constexpr DWORD style = WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME;
+    constexpr DWORD exStyle = WS_EX_DLGMODALFRAME;
+    ::AdjustWindowRectEx(&windowRect, style, FALSE, exStyle);
+    const int width = windowRect.right - windowRect.left;
+    const int height = windowRect.bottom - windowRect.top;
+    const int x = ownerRect.left + std::max(0L, (ownerRect.right - ownerRect.left - width) / 2);
+    const int y = ownerRect.top + std::max(0L, (ownerRect.bottom - ownerRect.top - height) / 2);
+    HWND dialog = ::CreateWindowExW(
+        exStyle,
+        kModuleDetailClass,
+        title.c_str(),
+        style,
+        x,
+        y,
+        width,
+        height,
+        owner,
+        nullptr,
+        ::GetModuleHandleW(nullptr),
+        &state);
+    if (!dialog) {
+        return;
+    }
+    const bool ownerWasEnabled = !owner || ::IsWindowEnabled(owner) != FALSE;
+    if (owner && ownerWasEnabled) {
+        ::EnableWindow(owner, FALSE);
+    }
+    ::ShowWindow(dialog, SW_SHOW);
+    ::UpdateWindow(dialog);
+
+    MSG message{};
+    bool sawQuit = false;
+    int quitCode = 0;
+    while (::IsWindow(dialog)) {
+        const BOOL result = ::GetMessageW(&message, nullptr, 0, 0);
+        if (result <= 0) {
+            if (result == 0) {
+                sawQuit = true;
+                quitCode = static_cast<int>(message.wParam);
+            }
+            break;
+        }
+        if (message.message == WM_KEYDOWN && message.wParam == VK_ESCAPE) {
+            ::DestroyWindow(dialog);
+            continue;
+        }
+        if (!::IsDialogMessageW(dialog, &message)) {
+            ::TranslateMessage(&message);
+            ::DispatchMessageW(&message);
+        }
+    }
+    if (owner && ownerWasEnabled) {
+        ::EnableWindow(owner, TRUE);
+        ::SetActiveWindow(owner);
+    }
+    if (sawQuit) {
+        ::PostQuitMessage(quitCode);
+    }
+}
+
+} // namespace
+
+bool ProcessDetailPage::CreateModuleTab() {
+    HWND refresh = AddButton(TabIndex::Modules, ModuleRefresh, L"刷新模块", 6, 6, 112, 28);
+    HWND verify = AddCheck(
+        TabIndex::Modules,
+        ModuleVerifySignature,
+        L"刷新时校验签名",
+        126,
+        6,
+        166,
+        28);
+    HWND status = AddControl(
+        TabIndex::Modules,
+        0,
+        WC_STATICW,
+        L"● 等待首次刷新",
+        SS_RIGHT | SS_CENTERIMAGE,
+        ModuleStatus,
+        304,
+        6,
+        -6,
+        28);
+    HWND list = AddList(TabIndex::Modules, ModuleList, 6, 40, -6, -6);
+    if (!refresh || !verify || !status || !list) {
+        return false;
+    }
+
+    ::SendMessageW(verify, BM_SETCHECK, BST_CHECKED, 0);
+    AddListColumn(list, 0, L"模块路径", 560);
+    AddListColumn(list, 1, L"大小", 110);
+    AddListColumn(list, 2, L"数字签名", 260);
+    AddListColumn(list, 3, L"入口偏移量", 120);
+    AddListColumn(list, 4, L"运行状态", 90);
+    AddListColumn(list, 5, L"ThreadID", 180);
+    listColumnCounts_[list] = 6;
+
+    ::SetWindowSubclass(
+        pages_[static_cast<std::size_t>(TabIndex::Modules)].hwnd,
+        ModulePageVisualSubclassProc,
+        kModulePageVisualSubclassId,
+        reinterpret_cast<DWORD_PTR>(list));
+    ::SetWindowSubclass(status, ModuleStatusSubclassProc, kModuleStatusSubclassId, 0);
+
+    if (HWND header = ListView_GetHeader(list)) {
+        auto* sortState = new ModuleSortState{};
+        sortState->list = list;
+        if (!::SetWindowSubclass(
+                header,
+                ModuleHeaderSubclassProc,
+                kModuleHeaderSubclassId,
+                reinterpret_cast<DWORD_PTR>(sortState))) {
+            delete sortState;
+        }
+    }
+    UpdateSortIndicator(list, 0, false);
+    return true;
+}
+
+void ProcessDetailPage::PopulateModuleTab() {
+    HWND list = Control(TabIndex::Modules, ModuleList);
+    HWND verify = Control(TabIndex::Modules, ModuleVerifySignature);
+    if (!list) {
+        return;
+    }
+
+    ClearList(list);
+    HIMAGELIST systemImages = nullptr;
+    for (std::size_t index = 0; index < snapshot_.modules.size(); ++index) {
+        const ProcessModuleInfo& module = snapshot_.modules[index];
+        AddListRow(
+            list,
+            static_cast<int>(index),
+            {
+                module.modulePath,
+                FormatModuleSize(module.imageSize),
+                ModuleSignatureText(verify),
+                L"Unavailable",
+                ModuleRunningState(module),
+                ModuleThreadText(module)
+            },
+            static_cast<LPARAM>(index));
+
+        HIMAGELIST rowImages = nullptr;
+        const int iconIndex = SystemIconIndexForPath(module.modulePath, &rowImages);
+        if (!systemImages && rowImages) {
+            systemImages = rowImages;
+            ListView_SetImageList(list, systemImages, LVSIL_SMALL);
+        }
+        if (iconIndex >= 0) {
+            LVITEMW item{};
+            item.mask = LVIF_IMAGE;
+            item.iItem = static_cast<int>(index);
+            item.iImage = iconIndex;
+            ListView_SetItem(list, &item);
+        }
+    }
+    SortModuleListByPath(list);
+
+    std::wstring status;
+    if (!snapshot_.modulesSucceeded) {
+        status = L"● 模块刷新失败";
+        if (!snapshot_.errorText.empty()) {
+            status += L" | " + snapshot_.errorText;
+        }
+    } else {
+        status = L"● 刷新完成 | 模块:" + std::to_wstring(snapshot_.modules.size());
+        if (snapshot_.modules.empty() && !snapshot_.errorText.empty()) {
+            status += L" | " + snapshot_.errorText;
+        }
+    }
+    if (verify && ::SendMessageW(verify, BM_GETCHECK, 0, 0) == BST_CHECKED) {
+        status += L" | 签名校验结果不可用";
+    }
+    SetPageStatus(TabIndex::Modules, ModuleStatus, status);
+}
+
+bool ProcessDetailPage::HandleModuleCommand(int controlId) {
+    if (controlId == ModuleVerifySignature) {
+        return true;
+    }
+    if (controlId != ModuleRefresh) {
+        return false;
+    }
+
+    HWND refresh = Control(TabIndex::Modules, ModuleRefresh);
+    SetPageStatus(TabIndex::Modules, ModuleStatus, L"● 正在刷新模块列表...");
+    if (refresh) {
+        ::EnableWindow(refresh, FALSE);
+    }
+    ::UpdateWindow(pages_[static_cast<std::size_t>(TabIndex::Modules)].hwnd);
+    const auto started = std::chrono::steady_clock::now();
+    RefreshAll();
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - started).count();
+    if (refresh) {
+        ::EnableWindow(refresh, TRUE);
+    }
+
+    std::wstring status = L"● 刷新完成 " + std::to_wstring(elapsed) +
+        L" ms | 模块:" + std::to_wstring(snapshot_.modules.size()) +
+        L" 线程:" + std::to_wstring(snapshot_.threads.size());
+    if (!snapshot_.modulesSucceeded) {
+        status = L"● 模块刷新失败 " + std::to_wstring(elapsed) + L" ms";
+    }
+    if (!snapshot_.errorText.empty() && (!snapshot_.modulesSucceeded || snapshot_.modules.empty())) {
+        status += L" | " + snapshot_.errorText;
+    }
+    if (::SendMessageW(Control(TabIndex::Modules, ModuleVerifySignature), BM_GETCHECK, 0, 0) == BST_CHECKED) {
+        status += L" | 签名校验结果不可用";
+    }
+    SetPageStatus(TabIndex::Modules, ModuleStatus, status);
+    return true;
+}
+
+bool ProcessDetailPage::HandleModuleContextMenu(POINT screenPoint) {
+    HWND list = Control(TabIndex::Modules, ModuleList);
+    if (!list || SelectedListRow(list) < 0) {
+        return true;
+    }
+    HMENU menu = ::CreatePopupMenu();
+    if (!menu) {
+        return true;
+    }
+    ::AppendMenuW(menu, MF_STRING, kModuleMenuCopyCell, L"复制单元格");
+    ::AppendMenuW(menu, MF_STRING, kModuleMenuCopyRow, L"复制行");
+    ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    ::AppendMenuW(menu, MF_STRING, kModuleMenuDetail, L"查看模块详情");
+    ::AppendMenuW(menu, MF_STRING, kModuleMenuOpenFolder, L"打开文件夹");
+    ::AppendMenuW(menu, MF_STRING, kModuleMenuUnload, L"卸载");
+    ::AppendMenuW(menu, MF_STRING, kModuleMenuSuspendThread, L"挂起Thread");
+    ::AppendMenuW(menu, MF_STRING, kModuleMenuResumeThread, L"取消挂起Thread");
+    ::AppendMenuW(menu, MF_STRING, kModuleMenuTerminateThread, L"结束Thread");
+    const UINT command = ::TrackPopupMenu(
+        menu,
+        TPM_RETURNCMD | TPM_RIGHTBUTTON,
+        screenPoint.x,
+        screenPoint.y,
+        0,
+        hwnd_,
+        nullptr);
+    ::DestroyMenu(menu);
+
+    switch (command) {
+    case kModuleMenuCopyCell: CopyListCell(list); break;
+    case kModuleMenuCopyRow: CopyListRow(list); break;
+    case kModuleMenuDetail: ShowModuleDetailDialog(); break;
+    case kModuleMenuOpenFolder: OpenSelectedModuleFolder(); break;
+    case kModuleMenuUnload: UnloadSelectedModule(); break;
+    case kModuleMenuSuspendThread: SuspendSelectedModuleThread(); break;
+    case kModuleMenuResumeThread: ResumeSelectedModuleThread(); break;
+    case kModuleMenuTerminateThread: TerminateSelectedModuleThread(); break;
+    default: break;
+    }
+    return true;
+}
+
+void ProcessDetailPage::ShowModuleDetailDialog() {
+    HWND list = Control(TabIndex::Modules, ModuleList);
+    const std::size_t index = SelectedSnapshotIndex(list);
+    if (index >= snapshot_.modules.size()) {
+        SetPageStatus(TabIndex::Modules, ModuleStatus, L"● 查看模块详情失败 | 当前无有效选中项");
+        return;
+    }
+    const ProcessModuleInfo& module = snapshot_.modules[index];
+    const std::wstring signature = ModuleSignatureText(Control(TabIndex::Modules, ModuleVerifySignature));
+    const std::wstring moduleName = !module.moduleName.empty()
+        ? module.moduleName
+        : BaseNameFromPath(module.modulePath);
+    std::wstring processName = snapshot_.basic.processName.empty()
+        ? BaseNameFromPath(snapshot_.basic.imagePath)
+        : snapshot_.basic.processName;
+    if (processName.empty()) {
+        processName = L"Unknown";
+    }
+
+    ModuleDetailDialogState dialogState{};
+    dialogState.modulePath = module.modulePath;
+    dialogState.summaryText = L"模块基址 " + FormatHex(module.baseAddress) +
+        L" | 大小 " + FormatModuleSize(module.imageSize) +
+        L" | 签名 " + signature;
+    std::wostringstream detail;
+    detail << L"进程 ID: " << processId_ << L"\r\n"
+           << L"进程名: " << processName << L"\r\n"
+           << L"模块路径: " << module.modulePath << L"\r\n"
+           << L"模块基址: " << FormatHex(module.baseAddress) << L"\r\n"
+           << L"模块大小: " << FormatModuleSize(module.imageSize) << L"\r\n"
+           << L"入口点 RVA: Unavailable\r\n"
+           << L"签名状态: " << signature << L"\r\n"
+           << L"签名可信: Unavailable\r\n"
+           << L"运行状态: " << ModuleRunningState(module) << L"\r\n"
+           << L"代表线程 ID: " << module.representativeThreadId << L"\r\n"
+           << L"线程 ID 文本: " << ModuleThreadText(module);
+    dialogState.detailText = detail.str();
+    RunModuleDetailDialog(hwnd_, L"模块详情 - " + (moduleName.empty() ? L"Unknown" : moduleName), dialogState);
+}
+
+void ProcessDetailPage::OpenSelectedModuleFolder() {
+    HWND list = Control(TabIndex::Modules, ModuleList);
+    const std::size_t index = SelectedSnapshotIndex(list);
+    if (index >= snapshot_.modules.size()) {
+        SetPageStatus(TabIndex::Modules, ModuleStatus, L"● 打开文件夹失败 | 当前无有效选中项");
+        return;
+    }
+    const bool opened = OpenFolderAndSelectPath(hwnd_, snapshot_.modules[index].modulePath);
+    SetPageStatus(
+        TabIndex::Modules,
+        ModuleStatus,
+        opened ? L"● 已打开模块所在目录" : L"● 打开模块所在目录失败");
+}
+
+void ProcessDetailPage::UnloadSelectedModule() {
+    HWND list = Control(TabIndex::Modules, ModuleList);
+    const std::size_t index = SelectedSnapshotIndex(list);
+    if (index >= snapshot_.modules.size()) {
+        SetPageStatus(TabIndex::Modules, ModuleStatus, L"● 卸载模块失败 | 当前无有效选中项");
+        return;
+    }
+    const std::uintptr_t moduleBase = snapshot_.modules[index].baseAddress;
+    if (moduleBase == 0) {
+        SetPageStatus(TabIndex::Modules, ModuleStatus, L"● 卸载模块失败 | 模块基址不可用");
+        return;
+    }
+
+    HMODULE localKernel32 = ::GetModuleHandleW(L"kernel32.dll");
+    FARPROC localFreeLibrary = localKernel32 ? ::GetProcAddress(localKernel32, "FreeLibrary") : nullptr;
+    HMODULE localFunctionModule = nullptr;
+    if (!localFreeLibrary || !::GetModuleHandleExW(
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            reinterpret_cast<LPCWSTR>(localFreeLibrary),
+            &localFunctionModule)) {
+        SetPageStatus(TabIndex::Modules, ModuleStatus, L"● 卸载模块失败 | 无法解析 FreeLibrary");
+        return;
+    }
+    wchar_t localFunctionPath[32768]{};
+    const DWORD localFunctionPathLength = ::GetModuleFileNameW(
+        localFunctionModule,
+        localFunctionPath,
+        static_cast<DWORD>(std::size(localFunctionPath)));
+    const std::wstring functionModuleName = localFunctionPathLength > 0
+        ? BaseNameFromPath(std::wstring(localFunctionPath, localFunctionPathLength))
+        : L"kernel32.dll";
+    std::uintptr_t remoteFunctionModule = 0;
+    for (const ProcessModuleInfo& module : snapshot_.modules) {
+        if (_wcsicmp(BaseNameFromPath(module.modulePath).c_str(), functionModuleName.c_str()) == 0) {
+            remoteFunctionModule = module.baseAddress;
+            break;
+        }
+    }
+    const std::uintptr_t localFunctionModuleAddress = reinterpret_cast<std::uintptr_t>(localFunctionModule);
+    const std::uintptr_t freeLibraryOffset =
+        reinterpret_cast<std::uintptr_t>(localFreeLibrary) - localFunctionModuleAddress;
+    const std::uintptr_t remoteFreeLibrary = remoteFunctionModule
+        ? remoteFunctionModule + freeLibraryOffset
+        : reinterpret_cast<std::uintptr_t>(localFreeLibrary);
+
+    HANDLE process = ::OpenProcess(
+        PROCESS_CREATE_THREAD | PROCESS_QUERY_INFORMATION | PROCESS_VM_OPERATION | PROCESS_VM_READ,
+        FALSE,
+        processId_);
+    if (!process) {
+        SetPageStatus(
+            TabIndex::Modules,
+            ModuleStatus,
+            L"● 卸载模块失败 | " + LastErrorText(L"OpenProcess", ::GetLastError()));
+        return;
+    }
+    HANDLE thread = ::CreateRemoteThread(
+        process,
+        nullptr,
+        0,
+        reinterpret_cast<LPTHREAD_START_ROUTINE>(remoteFreeLibrary),
+        reinterpret_cast<void*>(moduleBase),
+        0,
+        nullptr);
+    if (!thread) {
+        const DWORD error = ::GetLastError();
+        ::CloseHandle(process);
+        SetPageStatus(
+            TabIndex::Modules,
+            ModuleStatus,
+            L"● 卸载模块失败 | " + LastErrorText(L"CreateRemoteThread", error));
+        return;
+    }
+    const DWORD waitResult = ::WaitForSingleObject(thread, 10000);
+    DWORD exitCode = 0;
+    const bool completed = waitResult == WAIT_OBJECT_0 &&
+        ::GetExitCodeThread(thread, &exitCode) != FALSE && exitCode != 0;
+    ::CloseHandle(thread);
+    ::CloseHandle(process);
+    if (!completed) {
+        SetPageStatus(TabIndex::Modules, ModuleStatus, L"● 卸载模块失败 | FreeLibrary 未成功返回");
+        return;
+    }
+    RefreshAll();
+    SetPageStatus(TabIndex::Modules, ModuleStatus, L"● 卸载模块成功");
+}
+
+void ProcessDetailPage::SuspendSelectedModuleThread() {
+    HWND list = Control(TabIndex::Modules, ModuleList);
+    const std::size_t index = SelectedSnapshotIndex(list);
+    if (index >= snapshot_.modules.size() || snapshot_.modules[index].representativeThreadId == 0) {
+        SetPageStatus(TabIndex::Modules, ModuleStatus, L"● 挂起 Thread 失败 | 当前模块行没有可用 ThreadID。");
+        return;
+    }
+    const DWORD threadId = snapshot_.modules[index].representativeThreadId;
+    HANDLE thread = ::OpenThread(THREAD_SUSPEND_RESUME, FALSE, threadId);
+    if (!thread) {
+        SetPageStatus(
+            TabIndex::Modules,
+            ModuleStatus,
+            L"● 挂起 Thread 失败 | " + LastErrorText(L"OpenThread", ::GetLastError()));
+        return;
+    }
+    const DWORD previousCount = ::SuspendThread(thread);
+    const DWORD error = previousCount == static_cast<DWORD>(-1) ? ::GetLastError() : ERROR_SUCCESS;
+    ::CloseHandle(thread);
+    SetPageStatus(
+        TabIndex::Modules,
+        ModuleStatus,
+        previousCount != static_cast<DWORD>(-1)
+            ? L"● 挂起 Thread 成功"
+            : L"● 挂起 Thread 失败 | " + LastErrorText(L"SuspendThread", error));
+}
+
+void ProcessDetailPage::ResumeSelectedModuleThread() {
+    HWND list = Control(TabIndex::Modules, ModuleList);
+    const std::size_t index = SelectedSnapshotIndex(list);
+    if (index >= snapshot_.modules.size() || snapshot_.modules[index].representativeThreadId == 0) {
+        SetPageStatus(TabIndex::Modules, ModuleStatus, L"● 取消挂起 Thread 失败 | 当前模块行没有可用 ThreadID。");
+        return;
+    }
+    const DWORD threadId = snapshot_.modules[index].representativeThreadId;
+    HANDLE thread = ::OpenThread(THREAD_SUSPEND_RESUME, FALSE, threadId);
+    if (!thread) {
+        SetPageStatus(
+            TabIndex::Modules,
+            ModuleStatus,
+            L"● 取消挂起 Thread 失败 | " + LastErrorText(L"OpenThread", ::GetLastError()));
+        return;
+    }
+    const DWORD previousCount = ::ResumeThread(thread);
+    const DWORD error = previousCount == static_cast<DWORD>(-1) ? ::GetLastError() : ERROR_SUCCESS;
+    ::CloseHandle(thread);
+    SetPageStatus(
+        TabIndex::Modules,
+        ModuleStatus,
+        previousCount != static_cast<DWORD>(-1)
+            ? L"● 取消挂起 Thread 成功"
+            : L"● 取消挂起 Thread 失败 | " + LastErrorText(L"ResumeThread", error));
+}
+
+void ProcessDetailPage::TerminateSelectedModuleThread() {
+    HWND list = Control(TabIndex::Modules, ModuleList);
+    const std::size_t index = SelectedSnapshotIndex(list);
+    if (index >= snapshot_.modules.size() || snapshot_.modules[index].representativeThreadId == 0) {
+        SetPageStatus(TabIndex::Modules, ModuleStatus, L"● 结束 Thread 失败 | 当前模块行没有可用 ThreadID。");
+        return;
+    }
+    const DWORD threadId = snapshot_.modules[index].representativeThreadId;
+    HANDLE thread = ::OpenThread(THREAD_TERMINATE, FALSE, threadId);
+    if (!thread) {
+        SetPageStatus(
+            TabIndex::Modules,
+            ModuleStatus,
+            L"● 结束 Thread 失败 | " + LastErrorText(L"OpenThread", ::GetLastError()));
+        return;
+    }
+    const BOOL terminated = ::TerminateThread(thread, 0);
+    const DWORD error = terminated ? ERROR_SUCCESS : ::GetLastError();
+    ::CloseHandle(thread);
+    if (!terminated) {
+        SetPageStatus(
+            TabIndex::Modules,
+            ModuleStatus,
+            L"● 结束 Thread 失败 | " + LastErrorText(L"TerminateThread", error));
+        return;
+    }
+    RefreshAll();
+    SetPageStatus(TabIndex::Modules, ModuleStatus, L"● 结束 Thread 成功");
+}
+
+} // namespace Ksword::Features::ProcessDetail

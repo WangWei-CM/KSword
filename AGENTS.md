@@ -14,6 +14,7 @@ $env:KSWORD_QT_DIR=(Resolve-Path '.deps\Qt\6.9.3\msvc2022_64').Path
 $qtMsBuild=(Resolve-Path '.deps\QtVsTools\msbuild').Path
 
 & $msbuild 'Ksword5.1\Ksword5.1\Ksword5.1.vcxproj' /t:Build /p:Configuration=Release /p:Platform=x64 /p:QtMsBuild=$qtMsBuild /m:1 /v:minimal
+& $msbuild 'Launcher\Launcher.vcxproj' /t:Build /p:Configuration=Release /p:Platform=x64 /m:1 /v:minimal
 & $msbuild 'Taskbar\Taskbar.vcxproj' /t:Build /p:Configuration=Release /p:Platform=x64 /p:QtMsBuild=$qtMsBuild /m:1 /v:minimal
 & $msbuild 'KswordHUD\KswordHUD.vcxproj' /t:Build /p:Configuration=Release /p:Platform=x64 /p:QtMsBuild=$qtMsBuild /m:1 /v:minimal
 & $msbuild 'APIMonitor_x64\APIMonitor_x64.vcxproj' /t:Build /p:Configuration=Release /p:Platform=x64 /m:1 /v:minimal
@@ -35,6 +36,8 @@ New-Item -ItemType Directory -Path $stageRoot | Out-Null
 tar -xf $ref -C $stageRoot
 
 Copy-Item 'Ksword5.1\Ksword5.1\x64\Release\Ksword5.1.exe' $stage -Force
+Copy-Item 'Ksword5.1\Ksword5.1\x64\Release\Launcher.exe' $stage -Force
+Copy-Item 'Ksword5.1\Ksword5.1\x64\Release\KswordARKLight.exe' $stage -Force
 Copy-Item 'Taskbar\x64\Release\Taskbar.exe' $stage -Force
 Copy-Item 'KswordHUD\x64\Release\KswordHUD.exe' $stage -Force
 Copy-Item 'APIMonitor_x64\x64\Release\APIMonitor_x64.dll' $stage -Force
@@ -48,6 +51,7 @@ $profileDir=Join-Path $stage 'profiles'
 if (!(Test-Path $profileDir)) { New-Item -ItemType Directory -Path $profileDir | Out-Null }
 Copy-Item 'Ksword5.1\Ksword5.1\x64\Release\profiles\ark_dyndata_pack_v3.json' $profileDir -Force
 Copy-Item 'Ksword5.1\Ksword5.1\x64\Release\profiles\ark_dyndata_pack_v2.json' $profileDir -Force
+Copy-Item 'Ksword5.1\Ksword5.1\x64\Release\profiles\launcher_support_manifest.json' $profileDir -Force
 Copy-Item 'Ksword5.1\Ksword5.1\x64\Release\profiles\registry_optimization_items.json' $profileDir -Force
 Copy-Item 'Ksword5.1\Ksword5.1\x64\Release\profiles\registry_optimization_assets' $profileDir -Recurse -Force
 
@@ -85,7 +89,7 @@ if ($exit -ne 0) { exit $exit }
 ```powershell
 $seven='C:\Users\Felix\CLionProjects\Wisdom-Weasel\7z.exe'
 & $seven t $archive
-& $seven l $archive 'Release\Ksword5.1.exe' 'Release\Taskbar.exe' 'Release\KswordHUD.exe' 'Release\APIMonitor_x64.dll' 'Release\KswordARK.sys' 'Release\KswordARKDriver\KswordARK.sys' 'Release\LICENSE' 'Release\profiles\ark_dyndata_pack_v3.json' 'Release\profiles\registry_optimization_items.json' 'Release\profiles\registry_optimization_assets\Config\Data.zip' 'Release\languages\zh-CN.json' 'Release\languages\en-US.json' 'Release\platforms\qwindows.dll'
+& $seven l $archive 'Release\Launcher.exe' 'Release\Ksword5.1.exe' 'Release\KswordARKLight.exe' 'Release\Taskbar.exe' 'Release\KswordHUD.exe' 'Release\APIMonitor_x64.dll' 'Release\KswordARK.sys' 'Release\KswordARKDriver\KswordARK.sys' 'Release\LICENSE' 'Release\profiles\launcher_support_manifest.json' 'Release\profiles\ark_dyndata_pack_v3.json' 'Release\profiles\registry_optimization_items.json' 'Release\profiles\registry_optimization_assets\Config\Data.zip' 'Release\languages\zh-CN.json' 'Release\languages\en-US.json' 'Release\platforms\qwindows.dll'
 ```
 
 校验通过时，`7z t` 输出应包含 `Everything is Ok`，且列表中必须包含 `Release\LICENSE`；主程序顶部“许可证”页面从 exe 同目录优先读取此文件。本流程生成的包根目录必须是 `Release\`，不要把 `dist\KswordARK-release-work\` 或其它临时目录打进包里。

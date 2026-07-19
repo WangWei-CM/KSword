@@ -4,157 +4,335 @@
 
 #include "../../Core/Win32Lean.h"
 
+#include <commctrl.h>
+
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <string>
+#include <unordered_map>
+#include <vector>
+
 namespace Ksword::Features::ProcessDetail {
 
-// ProcessDetailPage owns the lightweight Win32 process-detail dock page. Inputs
-// are a parent HWND, target PID and initial bounds; processing creates one root
-// window with exactly three tabs (Basic, Threads, Modules); output is the root
-// HWND and all child lifetime is tied to that HWND.
+// ProcessDetailPage is the native Win32 conversion of the full process-detail
+// layout. It owns eleven native tab pages and does not load foreign UI sources,
+// resources, or binaries.
 class ProcessDetailPage final {
 public:
-    // Create registers the page class if needed and creates a page instance.
-    // Input is parent, target processId and parent-client bounds; processing
-    // allocates a ProcessDetailPage owned by WM_NCDESTROY; output is root HWND.
     static HWND Create(HWND parent, DWORD processId, const RECT& bounds);
-
-    // WindowProc is the Win32 class procedure used by RegisterClassW. Inputs
-    // are standard Win32 message values; processing forwards to the page
-    // instance stored in GWLP_USERDATA; output is the message LRESULT.
     static LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam);
 
 private:
+    enum class TabIndex : std::size_t {
+        Detail = 0,
+        Threads,
+        Actions,
+        Modules,
+        Token,
+        TokenSwitch,
+        Evidence,
+        Hotkeys,
+        Keyboard,
+        Plugins,
+        Peb,
+        Count
+    };
+
+    enum ControlId : int {
+        TabControl = 1000,
+
+        DetailTitle = 1100,
+        DetailPath,
+        DetailCopyPath,
+        DetailOpenFolder,
+        DetailCommandLine,
+        DetailCopyCommand,
+        DetailParentText,
+        DetailOpenHandles,
+        DetailGotoParent,
+        DetailStartTime,
+        DetailUser,
+        DetailAdmin,
+        DetailArchitecture,
+        DetailPriority,
+        DetailSession,
+        DetailThreadCount,
+        DetailHandleCount,
+        DetailCpu,
+        DetailRam,
+        DetailDisk,
+        DetailSignature,
+
+        ThreadRefresh = 1200,
+        ThreadSample,
+        ThreadStack,
+        ThreadStatus,
+        ThreadList,
+        ThreadRuntimeOutput,
+
+        ActionTerminateMode = 1300,
+        ActionTerminate,
+        ActionSuspend,
+        ActionResume,
+        ActionSetCritical,
+        ActionClearCritical,
+        ActionPriority,
+        ActionApplyPriority,
+        ActionOpenFolder,
+        ActionRefreshPpl,
+        ActionEfficiencyOn,
+        ActionEfficiencyOff,
+        ActionR0Terminate,
+        ActionR0Suspend,
+        ActionR0Ppl,
+        ActionR0Hide,
+        ActionR0Danger,
+        ActionInjectionMode,
+        ActionDllPath,
+        ActionBrowseDll,
+        ActionInjectDll,
+        ActionShellcodePath,
+        ActionBrowseShellcode,
+        ActionInjectShellcode,
+
+        ModuleRefresh = 1400,
+        ModuleVerifySignature,
+        ModuleStatus,
+        ModuleList,
+
+        TokenRefresh = 1500,
+        TokenStatus,
+        TokenEditorToolbar,
+        TokenCopy,
+        TokenFind,
+        TokenGoto,
+        TokenWrap,
+        TokenOutput,
+        TokenEditorStatus,
+
+        TokenSwitchRefresh = 1600,
+        TokenSwitchApply,
+        TokenSwitchRefreshAll,
+        TokenSwitchStatus,
+        TokenSandboxInert,
+        TokenVirtualizationAllowed,
+        TokenVirtualizationEnabled,
+        TokenUiAccess,
+        TokenMandatoryNoWriteUp,
+        TokenMandatoryNewProcessMin,
+        TokenHasRestrictions,
+        TokenIsAppContainer,
+        TokenIsRestricted,
+        TokenIsLessPrivilegedAppContainer,
+        TokenIsSandboxed,
+        TokenIsAppSilo,
+        TokenRawInfoClass,
+        TokenRawInputMode,
+        TokenRawPayload,
+        TokenRawApply,
+
+        EvidenceR0Status = 1700,
+        EvidenceCapability,
+        EvidenceImagePath,
+        EvidenceHandleTable,
+        EvidenceSectionObject,
+        EvidenceProtection,
+        EvidenceSignature,
+        EvidenceSectionSignature,
+        EvidenceSessionSource,
+        EvidenceImagePathSource,
+        EvidenceProtectionSource,
+        EvidenceSignatureSource,
+        EvidenceSectionSignatureSource,
+        EvidenceObjectTableSource,
+        EvidenceSectionObjectSource,
+        EvidenceProtectionOffset,
+        EvidenceSignatureOffset,
+        EvidenceSectionSignatureOffset,
+        EvidenceObjectTableOffset,
+        EvidenceSectionObjectOffset,
+        EvidenceRefreshSection,
+        EvidenceSectionStatus,
+        EvidenceSectionOutput,
+
+        HotkeyRefresh = 1800,
+        HotkeyStatus,
+        HotkeyList,
+
+        KeyboardRefresh = 1900,
+        KeyboardStatus,
+        KeyboardInnerTab,
+        KeyboardHotkeyList,
+        KeyboardHookList,
+
+        PluginTitle = 2000,
+        PluginDescription,
+        PluginMenu,
+        PluginManager,
+
+        PebRefresh = 2100,
+        PebApply,
+        PebStatus,
+        PebTarget,
+        PebCommandLine,
+        PebImagePath,
+        PebCurrentDirectory,
+        PebEnvironmentName,
+        PebEnvironmentValue,
+        PebImageBase,
+        PebAffinity,
+        PebPriority,
+        PebOutput,
+        PebReadonlyReason
+    };
+
+    struct Placement {
+        HWND hwnd = nullptr;
+        int x = 0;
+        int y = 0;
+        int width = 0;  // Negative values mean right margin and stretch.
+        int height = 0; // Negative values mean bottom margin and stretch.
+    };
+
+    struct PageState {
+        HWND hwnd = nullptr;
+        std::vector<Placement> placements;
+    };
+
     explicit ProcessDetailPage(DWORD processId);
-    ~ProcessDetailPage() = default;
+    ~ProcessDetailPage();
 
     ProcessDetailPage(const ProcessDetailPage&) = delete;
     ProcessDetailPage& operator=(const ProcessDetailPage&) = delete;
 
     LRESULT HandleMessage(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam);
+    static LRESULT CALLBACK PageSubclassProc(
+        HWND hwnd,
+        UINT message,
+        WPARAM wParam,
+        LPARAM lParam,
+        UINT_PTR subclassId,
+        DWORD_PTR referenceData);
+    LRESULT HandlePageMessage(TabIndex tab, HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam);
 
-    // Initialize creates child controls and performs the first snapshot refresh.
-    // Input is the newly created root HWND; processing creates toolbar, tab and
-    // list views; return value reports whether controls were created.
     bool Initialize(HWND hwnd);
-
-    // Refresh reads target process data and repopulates all three pages. There
-    // is no input beyond processId_; processing calls ProcessDetailCollector;
-    // no value is returned.
-    void Refresh();
-
-    // Layout positions toolbar, tab and active page. Input is current client
-    // size read from hwnd_; processing moves child HWNDs; no value is returned.
     void Layout();
-
-    // UpdateVisiblePage shows only the selected tab child. Input is tab index
-    // from the control; processing toggles child visibility; no return.
+    void LayoutPage(TabIndex tab);
     void UpdateVisiblePage();
+    void OnTabActivated(TabIndex tab);
+    void RefreshAll();
 
-    // PopulateBasic renders the Basic tab. Input is snapshot_.basic; processing
-    // rewrites the two-column list view; no value is returned.
-    void PopulateBasic();
+    bool CreateDetailTab();
+    bool CreateThreadTab();
+    bool CreateActionTab();
+    bool CreateModuleTab();
+    bool CreateTokenTab();
+    bool CreateTokenSwitchTab();
+    bool CreateEvidenceTab();
+    bool CreateHotkeyTab();
+    bool CreateKeyboardTab();
+    bool CreatePluginTab();
+    bool CreatePebTab();
 
-    // PopulateThreads renders the Threads tab. Input is snapshot_.threads;
-    // processing rewrites the thread list view; no value is returned.
-    void PopulateThreads();
+    HWND AddControl(
+        TabIndex tab,
+        DWORD exStyle,
+        const wchar_t* className,
+        const wchar_t* text,
+        DWORD style,
+        int controlId,
+        int x,
+        int y,
+        int width,
+        int height);
+    HWND AddLabel(TabIndex tab, int controlId, const wchar_t* text, int x, int y, int width, int height);
+    HWND AddButton(TabIndex tab, int controlId, const wchar_t* text, int x, int y, int width, int height);
+    HWND AddEdit(TabIndex tab, int controlId, const wchar_t* text, bool readOnly, bool multiline, int x, int y, int width, int height);
+    HWND AddCombo(TabIndex tab, int controlId, int x, int y, int width, int height);
+    HWND AddCheck(TabIndex tab, int controlId, const wchar_t* text, int x, int y, int width, int height);
+    HWND AddGroup(TabIndex tab, const wchar_t* text, int x, int y, int width, int height);
+    HWND AddList(TabIndex tab, int controlId, int x, int y, int width, int height);
+    HWND Control(TabIndex tab, int controlId) const;
+    void SetControlText(TabIndex tab, int controlId, const std::wstring& text);
+    std::wstring ControlText(TabIndex tab, int controlId) const;
+    void SetPageStatus(TabIndex tab, int controlId, const std::wstring& text);
 
-    // PopulateModules renders the Modules tab. Input is snapshot_.modules;
-    // processing rewrites the module list view; no value is returned.
-    void PopulateModules();
+    static void AddListColumn(HWND list, int index, const wchar_t* title, int width);
+    static void ClearList(HWND list);
+    static void AddListRow(HWND list, int row, const std::vector<std::wstring>& values, LPARAM data = 0);
+    static std::wstring ListCell(HWND list, int row, int column);
+    static bool CopyText(HWND owner, const std::wstring& text);
+    static std::wstring ReadWindowText(HWND hwnd);
+    static void ApplyFont(HWND hwnd, HFONT font = nullptr);
 
-    // PopulateR0Audit renders the read-only R0 audit tab. Input is
-    // snapshot_.r0AuditRows; processing rewrites the evidence list; no value is
-    // returned.
-    void PopulateR0Audit();
+    bool HandleGenericContextMenu(HWND source, POINT screenPoint);
+    bool HandleThreadContextMenu(POINT screenPoint);
+    bool HandleModuleContextMenu(POINT screenPoint);
+    void ShowModuleDetailDialog();
+    void CopyListCell(HWND list);
+    void CopyListRow(HWND list);
+    void CopyListAll(HWND list);
+    int SelectedListRow(HWND list) const;
 
-    // HandleListContextMenu routes thread/module right-click and keyboard menu
-    // requests. Inputs are the list HWND and screen point; processing selects
-    // the hit row and opens the proper popup menu; output reports handled state.
-    bool HandleListContextMenu(HWND list, POINT screenPoint);
+    void PopulateDetailTab();
+    void PopulateThreadTab();
+    void PopulateModuleTab();
+    void PopulateTokenTab();
+    void PopulateTokenSwitchTab();
+    void PopulateEvidenceTab();
+    void PopulateHotkeyTab();
+    void PopulateKeyboardTab();
+    void PopulatePebTab();
 
-    // ShowThreadContextMenu displays thread actions for the selected thread.
-    // Input is the menu screen point; processing executes the chosen Win32
-    // thread operation or copy action; no value is returned.
-    void ShowThreadContextMenu(POINT screenPoint);
+    bool HandleDetailCommand(int controlId);
+    bool HandleThreadCommand(int controlId);
+    bool HandleActionCommand(int controlId);
+    bool HandleModuleCommand(int controlId);
+    bool HandleTokenCommand(int controlId);
+    bool HandleTokenSwitchCommand(int controlId);
+    bool HandleEvidenceCommand(int controlId);
+    bool HandleHotkeyCommand(int controlId);
+    bool HandleKeyboardCommand(int controlId);
+    bool HandlePluginCommand(int controlId);
+    bool HandlePebCommand(int controlId);
+    bool HandlePageNotify(TabIndex tab, NMHDR* header, LRESULT& result);
 
-    // ShowModuleContextMenu displays module actions for the selected module.
-    // Input is the menu screen point; processing executes copy/open-folder or
-    // clearly reports unsupported retained actions; no value is returned.
-    void ShowModuleContextMenu(POINT screenPoint);
-
-    // SelectedListIndex returns the focused/selected row in a list-view. Input
-    // is a list HWND; output is -1 when nothing is selected.
-    int SelectedListIndex(HWND list) const;
-
-    // SelectedListColumn returns the subitem column captured from the last
-    // context-menu hit test. Input is the source list-view; processing chooses
-    // thread/module cached state and clamps negative values to zero; output is
-    // the column copied by CopySelectedListCell.
-    int SelectedListColumn(HWND list) const;
-
-    // CopySelectedListCell copies the first selected cell to the clipboard.
-    // Input is the source list-view; processing uses the focused column when
-    // available and falls back to column zero; no value is returned.
-    void CopySelectedListCell(HWND list);
-
-    // CopySelectedListRow copies the whole selected row. Inputs are source list
-    // and known column count; processing writes tab-separated Unicode text to
-    // the clipboard; no value is returned.
-    void CopySelectedListRow(HWND list, int columnCount);
-
-    // Thread action helpers apply Win32 operations to the selected thread row.
-    // Inputs are implicit through the selected list row; processing uses
-    // OpenThread/SuspendThread/ResumeThread/TerminateThread; no value is returned.
     void SuspendSelectedThread();
     void ResumeSelectedThread();
     void TerminateSelectedThread();
-
-    // ShowSelectedThreadSummary opens a compact Win32 detail dialog for the
-    // selected thread. Input is current thread-list selection; processing uses
-    // already-collected TID/start/status columns and clipboard-safe text; no
-    // value is returned.
     void ShowSelectedThreadSummary();
-
-    // OpenSelectedModuleFolder opens Explorer at the selected module path. Input
-    // is implicit through the selected module row; processing calls ShellExecuteW;
-    // no value is returned.
     void OpenSelectedModuleFolder();
-
-    // FocusSelectedModule reports and copies the selected module identity.
-    // Input is the module list selection; processing copies module path for
-    // cross-page search by other docks; no value is returned.
-    void FocusSelectedModule();
-
-    // UnloadSelectedModule requests a remote FreeLibrary for the selected
-    // module. Input is the selected module row; processing prompts for
-    // confirmation, resolves remote kernel32!FreeLibrary, creates one remote
-    // thread, waits briefly, and reports the thread exit code; no value returns.
     void UnloadSelectedModule();
-
-    // Module-thread helpers apply the original module-page Thread actions to
-    // the representative ThreadID discovered for the selected module row.
-    // Inputs are implicit through module selection; processing uses OpenThread
-    // and SuspendThread/ResumeThread/TerminateThread; no value is returned.
     void SuspendSelectedModuleThread();
     void ResumeSelectedModuleThread();
     void TerminateSelectedModuleThread();
-
-    // SetStatusLine writes concise operation feedback. Input is UI text;
-    // processing updates statusText_ when available; no value is returned.
-    void SetStatusLine(const std::wstring& text);
+    void ExecuteProcessAction(int actionId);
+    void BrowseForPayload(bool dllMode);
+    void ApplyTokenSwitches();
+    void ApplyRawTokenValue();
+    void RefreshTokenReport();
+    void RefreshTokenSwitches();
+    void RefreshSectionReport();
+    void RefreshPebReport();
+    void ApplyPebEdits();
+    void RefreshHotkeys(bool includeHooks);
 
 private:
     DWORD processId_ = 0;
     HWND hwnd_ = nullptr;
-    HWND refreshButton_ = nullptr;
-    HWND statusText_ = nullptr;
     HWND tab_ = nullptr;
-    HWND basicList_ = nullptr;
-    HWND threadsList_ = nullptr;
-    HWND modulesList_ = nullptr;
-    HWND r0AuditList_ = nullptr;
-    int lastThreadContextColumn_ = 0;
-    int lastModuleContextColumn_ = 0;
+    HFONT titleFont_ = nullptr;
+    std::array<PageState, static_cast<std::size_t>(TabIndex::Count)> pages_{};
+    std::unordered_map<HWND, int> listColumnCounts_;
+    std::unordered_map<HWND, int> listContextColumns_;
     ProcessDetailSnapshot snapshot_{};
+    bool tokenLoaded_ = false;
+    bool tokenSwitchLoaded_ = false;
+    bool sectionLoaded_ = false;
+    bool hotkeysLoaded_ = false;
+    bool keyboardLoaded_ = false;
+    bool pebLoaded_ = false;
 };
 
 } // namespace Ksword::Features::ProcessDetail

@@ -5,6 +5,8 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <cwchar>
+#include <limits>
 #include <psapi.h>
 #include <sstream>
 #include <tlhelp32.h>
@@ -283,6 +285,110 @@ std::wstring QueryProcessImagePath(HANDLE process) {
     return L"<image path unavailable: " + Ksword::Core::LastErrorMessage() + L">";
 }
 
+// LeafNameFromPath returns the final path component. Input may be a full DOS
+// path or a bare image name; output is empty only when the input is empty.
+std::wstring LeafNameFromPath(const std::wstring& path) {
+    const std::size_t separator = path.find_last_of(L"\\/");
+    if (separator == std::wstring::npos) {
+        return path;
+    }
+    return separator + 1U < path.size() ? path.substr(separator + 1U) : std::wstring{};
+}
+
+// QuerySnapshotIdentity uses the public Toolhelp process snapshot to fill the
+// target/parent names and the target's snapshot thread count. Inputs are the
+// target and parent PIDs; output fields remain unchanged when rows disappeared.
+void QuerySnapshotIdentity(
+    DWORD processId,
+    DWORD& parentProcessIdInOut,
+    std::wstring& processNameOut,
+    std::wstring& parentProcessNameOut,
+    DWORD& threadCountOut) {
+    Ksword::Core::UniqueHandle snapshot(::CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0));
+    if (!snapshot.valid()) {
+        return;
+    }
+
+    PROCESSENTRY32W entry{};
+    entry.dwSize = sizeof(entry);
+    if (!::Process32FirstW(snapshot.get(), &entry)) {
+        return;
+    }
+    do {
+        if (entry.th32ProcessID == processId) {
+            processNameOut = entry.szExeFile;
+            threadCountOut = entry.cntThreads;
+            if (parentProcessIdInOut == 0) {
+                parentProcessIdInOut = entry.th32ParentProcessID;
+            }
+        }
+        if (parentProcessIdInOut != 0 && entry.th32ProcessID == parentProcessIdInOut) {
+            parentProcessNameOut = entry.szExeFile;
+        }
+    } while (::Process32NextW(snapshot.get(), &entry));
+
+    // The parent row can sort before the target row, so restart once when the
+    // target supplied its PPID after that row had already passed.
+    if (parentProcessIdInOut != 0 && parentProcessNameOut.empty()) {
+        entry = {};
+        entry.dwSize = sizeof(entry);
+        if (::Process32FirstW(snapshot.get(), &entry)) {
+            do {
+                if (entry.th32ProcessID == parentProcessIdInOut) {
+                    parentProcessNameOut = entry.szExeFile;
+                    break;
+                }
+            } while (::Process32NextW(snapshot.get(), &entry));
+        }
+    }
+}
+
+// FormatProcessStartTime converts a creation FILETIME into local wall-clock
+// text. Input is UTC FILETIME; output is YYYY-MM-DD HH:MM:SS or unavailable.
+std::wstring FormatProcessStartTime(const FILETIME& creationTime) {
+    FILETIME localTime{};
+    SYSTEMTIME systemTime{};
+    if (!::FileTimeToLocalFileTime(&creationTime, &localTime) ||
+        !::FileTimeToSystemTime(&localTime, &systemTime)) {
+        return L"<start time unavailable>";
+    }
+
+    wchar_t text[32]{};
+    _snwprintf_s(
+        text,
+        _countof(text),
+        _TRUNCATE,
+        L"%04u-%02u-%02u %02u:%02u:%02u",
+        systemTime.wYear,
+        systemTime.wMonth,
+        systemTime.wDay,
+        systemTime.wHour,
+        systemTime.wMinute,
+        systemTime.wSecond);
+    return text;
+}
+
+// PriorityClassText maps GetPriorityClass values to stable user-facing text.
+// Input is zero on query failure; output preserves failure as unavailable.
+std::wstring PriorityClassText(DWORD priorityClass) {
+    switch (priorityClass) {
+    case IDLE_PRIORITY_CLASS: return L"Idle";
+    case BELOW_NORMAL_PRIORITY_CLASS: return L"Below Normal";
+    case NORMAL_PRIORITY_CLASS: return L"Normal";
+    case ABOVE_NORMAL_PRIORITY_CLASS: return L"Above Normal";
+    case HIGH_PRIORITY_CLASS: return L"High";
+    case REALTIME_PRIORITY_CLASS: return L"Realtime";
+    default: return L"<priority unavailable>";
+    }
+}
+
+// SaturatingAdd64 aggregates monotonically increasing I/O counters without
+// wrapping when a long-lived process approaches the unsigned 64-bit limit.
+ULONGLONG SaturatingAdd64(ULONGLONG left, ULONGLONG right) {
+    const ULONGLONG maximum = (std::numeric_limits<ULONGLONG>::max)();
+    return right > maximum - left ? maximum : left + right;
+}
+
 // QueryProcessSession reads the Terminal Services session for one PID. Input is
 // processId; processing calls ProcessIdToSessionId; output is zero on failure
 // and the caller records a status message separately.
@@ -295,7 +401,14 @@ DWORD QueryProcessSession(DWORD processId, bool& okOut) {
 // QueryTokenText opens the process token for user and integrity strings. Inputs
 // are a process handle and output references; processing uses read-only token
 // queries; output strings are diagnostic-safe even when access is denied.
-void QueryTokenText(HANDLE process, std::wstring& userOut, std::wstring& integrityOut) {
+void QueryTokenText(
+    HANDLE process,
+    std::wstring& userOut,
+    std::wstring& integrityOut,
+    bool& isAdminOut,
+    bool& adminKnownOut) {
+    isAdminOut = false;
+    adminKnownOut = false;
     Ksword::Core::UniqueHandle token;
     HANDLE rawToken = nullptr;
     if (!::OpenProcessToken(process, TOKEN_QUERY, &rawToken)) {
@@ -305,6 +418,18 @@ void QueryTokenText(HANDLE process, std::wstring& userOut, std::wstring& integri
         return;
     }
     token.reset(rawToken);
+
+    TOKEN_ELEVATION elevation{};
+    DWORD elevationBytes = 0;
+    if (::GetTokenInformation(
+            token.get(),
+            TokenElevation,
+            &elevation,
+            sizeof(elevation),
+            &elevationBytes)) {
+        isAdminOut = elevation.TokenIsElevated != 0;
+        adminKnownOut = true;
+    }
 
     DWORD userBytes = 0;
     ::GetTokenInformation(token.get(), TokenUser, nullptr, 0, &userBytes);
@@ -382,25 +507,34 @@ std::wstring QueryBitnessText(HANDLE process) {
     return L"<bitness unavailable: " + Ksword::Core::LastErrorMessage() + L">";
 }
 
-// QueryParentProcessId uses ProcessBasicInformation when available. Input is an
-// opened process handle; processing dynamically resolves NtQueryInformation-
-// Process; output is zero when unavailable.
-DWORD QueryParentProcessId(HANDLE process) {
+// QueryNativeProcessBasicInformation reads stable class-zero process metadata.
+// Input is an opened process handle; output carries PPID, PEB and affinity.
+bool QueryNativeProcessBasicInformation(HANDLE process, NativeProcessBasicInformation& basicOut) {
     HMODULE ntdll = ::GetModuleHandleW(L"ntdll.dll");
     const auto queryProcess = ntdll
         ? reinterpret_cast<NtQueryInformationProcessFn>(::GetProcAddress(ntdll, "NtQueryInformationProcess"))
         : nullptr;
     if (!queryProcess) {
-        return 0;
+        return false;
     }
 
-    NativeProcessBasicInformation basic{};
+    basicOut = {};
     ULONG returned = 0;
-    const LONG status = queryProcess(process, kProcessBasicInformationClass, &basic, sizeof(basic), &returned);
-    if (status < 0) {
-        return 0;
-    }
-    return static_cast<DWORD>(basic.inheritedFromUniqueProcessId);
+    return queryProcess(
+        process,
+        kProcessBasicInformationClass,
+        &basicOut,
+        sizeof(basicOut),
+        &returned) >= 0;
+}
+
+// QueryParentProcessId uses ProcessBasicInformation when available. Input is an
+// opened process handle; output is zero when unavailable.
+DWORD QueryParentProcessId(HANDLE process) {
+    NativeProcessBasicInformation basic{};
+    return QueryNativeProcessBasicInformation(process, basic)
+        ? static_cast<DWORD>(basic.inheritedFromUniqueProcessId)
+        : 0;
 }
 
 // ReadRemoteUnicodeString copies a UNICODE_STRING value from the target process.
@@ -428,18 +562,8 @@ std::wstring ReadRemoteUnicodeString(HANDLE process, const UNICODE_STRING& remot
 // for the PEB address and ReadProcessMemory for ProcessParameters; output is the
 // command line or a failure reason without blocking the rest of the page.
 std::wstring QueryCommandLineText(HANDLE process) {
-    HMODULE ntdll = ::GetModuleHandleW(L"ntdll.dll");
-    const auto queryProcess = ntdll
-        ? reinterpret_cast<NtQueryInformationProcessFn>(::GetProcAddress(ntdll, "NtQueryInformationProcess"))
-        : nullptr;
-    if (!queryProcess) {
-        return L"<NtQueryInformationProcess unavailable>";
-    }
-
     NativeProcessBasicInformation basic{};
-    ULONG returned = 0;
-    const LONG status = queryProcess(process, kProcessBasicInformationClass, &basic, sizeof(basic), &returned);
-    if (status < 0 || !basic.pebBaseAddress) {
+    if (!QueryNativeProcessBasicInformation(process, basic) || !basic.pebBaseAddress) {
         return L"<ProcessBasicInformation unavailable>";
     }
 
@@ -469,6 +593,13 @@ ProcessBasicInfo CollectBasicInfo(DWORD processId, bool& succeededOut) {
     info.processId = processId;
     succeededOut = false;
 
+    QuerySnapshotIdentity(
+        processId,
+        info.parentProcessId,
+        info.processName,
+        info.parentProcessName,
+        info.threadCount);
+
     HANDLE rawProcess = ::OpenProcess(kProcessBasicAccess, FALSE, processId);
     Ksword::Core::UniqueHandle process(rawProcess);
     if (!process.valid()) {
@@ -477,8 +608,33 @@ ProcessBasicInfo CollectBasicInfo(DWORD processId, bool& succeededOut) {
     }
 
     succeededOut = true;
-    info.parentProcessId = QueryParentProcessId(process.get());
+    const DWORD nativeParentProcessId = QueryParentProcessId(process.get());
+    if (nativeParentProcessId != 0) {
+        info.parentProcessId = nativeParentProcessId;
+    }
     info.imagePath = QueryProcessImagePath(process.get());
+    if (!info.imagePath.empty() && info.imagePath.front() != L'<') {
+        info.processName = LeafNameFromPath(info.imagePath);
+    }
+    QuerySnapshotIdentity(
+        processId,
+        info.parentProcessId,
+        info.processName,
+        info.parentProcessName,
+        info.threadCount);
+
+    NativeProcessBasicInformation nativeBasic{};
+    if (QueryNativeProcessBasicInformation(process.get(), nativeBasic)) {
+        if (nativeBasic.pebBaseAddress) {
+            info.pebAddress = reinterpret_cast<std::uintptr_t>(nativeBasic.pebBaseAddress);
+            info.pebAddressKnown = true;
+        }
+        if (nativeBasic.affinityMask != 0) {
+            info.affinityMask = static_cast<std::uint64_t>(nativeBasic.affinityMask);
+            info.affinityKnown = true;
+        }
+    }
+
     Ksword::Core::UniqueHandle readableProcess(::OpenProcess(kProcessReadAccess, FALSE, processId));
     info.commandLine = readableProcess.valid()
         ? QueryCommandLineText(readableProcess.get())
@@ -486,8 +642,60 @@ ProcessBasicInfo CollectBasicInfo(DWORD processId, bool& succeededOut) {
     info.bitness = QueryBitnessText(process.get());
     bool sessionOk = false;
     info.sessionId = QueryProcessSession(processId, sessionOk);
-    QueryTokenText(process.get(), info.userName, info.integrityLevel);
-    info.statusText = sessionOk ? L"OK" : L"OK; session unavailable: " + Ksword::Core::LastErrorMessage();
+    const DWORD sessionError = sessionOk ? ERROR_SUCCESS : ::GetLastError();
+    QueryTokenText(
+        process.get(),
+        info.userName,
+        info.integrityLevel,
+        info.isAdmin,
+        info.adminKnown);
+
+    FILETIME creationTime{};
+    FILETIME exitTime{};
+    FILETIME kernelTime{};
+    FILETIME userTime{};
+    info.startTimeText = ::GetProcessTimes(
+        process.get(),
+        &creationTime,
+        &exitTime,
+        &kernelTime,
+        &userTime)
+        ? FormatProcessStartTime(creationTime)
+        : L"<start time unavailable>";
+
+    info.priorityText = PriorityClassText(::GetPriorityClass(process.get()));
+    DWORD handleCount = 0;
+    if (::GetProcessHandleCount(process.get(), &handleCount)) {
+        info.handleCount = handleCount;
+    }
+
+    DWORD_PTR processAffinity = 0;
+    DWORD_PTR systemAffinity = 0;
+    if (::GetProcessAffinityMask(process.get(), &processAffinity, &systemAffinity)) {
+        info.affinityMask = static_cast<std::uint64_t>(processAffinity);
+        info.affinityKnown = true;
+    }
+
+    PROCESS_MEMORY_COUNTERS_EX memoryCounters{};
+    memoryCounters.cb = sizeof(memoryCounters);
+    HANDLE memoryProcess = readableProcess.valid() ? readableProcess.get() : process.get();
+    if (::GetProcessMemoryInfo(
+            memoryProcess,
+            reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&memoryCounters),
+            sizeof(memoryCounters))) {
+        info.workingSetBytes = static_cast<ULONGLONG>(memoryCounters.WorkingSetSize);
+        info.privateBytes = static_cast<ULONGLONG>(memoryCounters.PrivateUsage);
+    }
+
+    IO_COUNTERS ioCounters{};
+    if (::GetProcessIoCounters(process.get(), &ioCounters)) {
+        info.ioBytes = SaturatingAdd64(
+            SaturatingAdd64(ioCounters.ReadTransferCount, ioCounters.WriteTransferCount),
+            ioCounters.OtherTransferCount);
+    }
+    info.statusText = sessionOk
+        ? L"OK"
+        : L"OK; session unavailable: " + Ksword::Core::LastErrorMessage(sessionError);
     return info;
 }
 
@@ -1038,6 +1246,12 @@ ProcessDetailSnapshot ProcessDetailCollector::Collect(DWORD processId) const {
 
     std::wstring threadStatus;
     snapshot.threads = CollectThreads(processId, snapshot.threadsSucceeded, threadStatus);
+    if (snapshot.threadsSucceeded) {
+        const std::size_t boundedThreadCount = (std::min)(
+            snapshot.threads.size(),
+            static_cast<std::size_t>((std::numeric_limits<DWORD>::max)()));
+        snapshot.basic.threadCount = static_cast<DWORD>(boundedThreadCount);
+    }
     if (!snapshot.threadsSucceeded && !threadStatus.empty()) {
         snapshot.errorText += L"Threads: " + threadStatus + L"\r\n";
     }

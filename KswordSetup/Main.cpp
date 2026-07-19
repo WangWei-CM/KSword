@@ -50,6 +50,7 @@ constexpr wchar_t kDefaultInstallLeaf[] = L"KswordARK";
 constexpr wchar_t kStateArg[] = L"--install-state";
 constexpr wchar_t kSettingsRel[] = L"Style\\appearance_settings.json";
 constexpr wchar_t kMainExe[] = L"Ksword5.1.exe";
+constexpr wchar_t kLauncherExe[] = L"Launcher.exe";
 constexpr wchar_t kTaskmgrScript[] = L"TaskmgrHijack.ps1";
 
 // AppendPath joins two path fragments without depending on later helpers. Inputs
@@ -824,7 +825,7 @@ bool CreateShortcut(const std::wstring& link, const std::wstring& target, const 
 // output is true when all requested shortcuts succeed.
 bool CreateShortcuts(const InstallOptions& o, std::wstring* log) {
     bool all = true;
-    const std::wstring target = Join(o.installDir, kMainExe);
+    const std::wstring target = Join(o.installDir, kLauncherExe);
     if (o.desktopShortcut) {
         bool ok = CreateShortcut(Join(KnownFolder(FOLDERID_Desktop), L"KswordARK.lnk"), target, o.installDir);
         AppendLog(log, ok ? L"已创建桌面快捷方式。" : L"创建桌面快捷方式失败。");
@@ -838,10 +839,10 @@ bool CreateShortcuts(const InstallOptions& o, std::wstring* log) {
     return all;
 }
 
-// LaunchKsword starts the installed main program. Input is install directory;
+// LaunchKsword starts the installed Launcher. Input is install directory;
 // processing uses ShellExecuteW; output is true when launch is accepted.
 bool LaunchKsword(const std::wstring& dir) {
-    HINSTANCE rc = ::ShellExecuteW(nullptr, L"open", Join(dir, kMainExe).c_str(), nullptr, dir.c_str(), SW_SHOWNORMAL);
+    HINSTANCE rc = ::ShellExecuteW(nullptr, L"open", Join(dir, kLauncherExe).c_str(), nullptr, dir.c_str(), SW_SHOWNORMAL);
     return reinterpret_cast<INT_PTR>(rc) > 32;
 }
 
@@ -851,7 +852,7 @@ bool LaunchKsword(const std::wstring& dir) {
 InstallResult PerformInstall(const InstallOptions& o) {
     InstallResult r;
     AppendLog(&r.logText, L"开始安装到: " + o.installDir);
-    if (FileExistsInDir(o.installDir, kMainExe)) {
+    if (FileExistsInDir(o.installDir, kLauncherExe) || FileExistsInDir(o.installDir, kMainExe)) {
         AppendLog(&r.logText, L"检测到已有安装，按合并覆盖方式更新。");
     }
     r.ok = ExtractPayload(o, &r.logText) && r.ok;

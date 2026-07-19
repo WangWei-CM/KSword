@@ -61,6 +61,7 @@ Ksword5.1 是面向 Windows 的开源 ARK、内核调试与系统取证分析工
 ### 组件定位
 - `Ksword5.1`：完整 Qt 主程序，使用 ADS Dock 布局，适合完整 ARK/调试/审计工作流。
 - `KswordARKLight`：轻量 ARK 工具，面向更早系统和低资源场景；使用原生 Win32/C++ 与手写 Dock/UI，不依赖 Qt，提供精简功能、更快启动和更简洁界面。
+- `Launcher`：纯 Win32 启动器与兼容性检查助手，读取发布包中的支持清单后再启动主程序或 Light，并可在发现缺少偏移时准备离线上报文件夹。
 - `KswordARKDriver`：R0 驱动，承载进程/线程/句柄/内存/网络/内核对象/设备/安全等协议能力。
 - `KswordCLI`：面向自动化、验收和排障的命令行入口。
 - `KswordSetup`：可选安装程序，只负责释放发行包文件、创建快捷方式和可选系统集成；直接解压完整 `Release\` 目录可以达到同样运行效果。
@@ -183,11 +184,17 @@ $msbuild = 'C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Curr
 & $msbuild '.\KswordARKLight\KswordARKLight.vcxproj' /t:Build /p:Configuration=Release /p:Platform=x64 /m
 ```
 
+构建原生 Launcher 并生成可直接阅读的支持清单：
+
+```powershell
+& $msbuild '.\Launcher\Launcher.vcxproj' /t:Build /p:Configuration=Release /p:Platform=x64 /m
+```
+
 如当前机器没有 WDK 或驱动签名环境，可以先构建用户态项目；发行包制作时可沿用已有未签名 R0 Release 产物。
 
 ### 发行与运行
-- 发行包根目录应为 `Release\`，包含主程序、轻量版/辅助程序、驱动、profiles、Qt 依赖和插件目录。
-- `KswordSetup.exe` 是可选安装体验；直接解压 `Release\` 后运行 `Ksword5.1.exe` 或 `KswordARKLight.exe` 即可。
+- 发行包根目录应为 `Release\`，包含 `Launcher.exe`、主程序、轻量版/辅助程序、驱动、`profiles\launcher_support_manifest.json`、DynData packs、Qt 依赖和插件目录。
+- `KswordSetup.exe` 是可选安装体验；直接解压 `Release\` 后应运行 `Launcher.exe`，由它选择并启动主程序或 Light。
 - R0 功能需要管理员权限、驱动服务和匹配的系统安全策略；测试签名/驱动签名要求取决于当前系统配置。
 
 ### 项目网站
