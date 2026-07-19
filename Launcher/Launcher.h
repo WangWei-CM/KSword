@@ -117,6 +117,12 @@ struct RuntimePaths {
     std::wstring markerPath;
 };
 
+struct CollectionProgress {
+    HWND window = nullptr;
+    HWND label = nullptr;
+    HWND bar = nullptr;
+};
+
 bool IsChineseUi();
 std::wstring Utf8ToWide(const std::string& text);
 std::string WideToUtf8(const std::wstring& text);
@@ -151,10 +157,13 @@ int ShowUploadElevationFailureDialog(bool chinese);
 void ShowSimpleMessage(const std::wstring& title, const std::wstring& body, bool chinese);
 void ShowCheckingWindow(const std::wstring& text, HWND* window);
 void CloseCheckingWindow(HWND window);
+void ShowCollectionProgress(bool chinese, CollectionProgress* progress);
+void UpdateCollectionProgress(CollectionProgress* progress, int percent, const std::wstring& text);
+void CloseCollectionProgress(CollectionProgress* progress);
 
 bool RelaunchElevated(const LauncherOptions& options, bool forUpload);
 bool LaunchTarget(const RuntimePaths& paths, const LauncherOptions& options);
-bool PrepareUploadBundle(const RuntimePaths& paths, const SupportManifest& manifest, const ScanResult& scan, std::wstring* bundlePath);
+bool PrepareUploadBundle(const RuntimePaths& paths, const SupportManifest& manifest, const ScanResult& scan, std::wstring* bundlePath, CollectionProgress* progress, bool chinese);
 void OpenBundleFolder(const std::wstring& path);
 std::string BuildReportJson(const RuntimePaths& paths, const SupportManifest& manifest, const ScanResult& scan);
 std::string BuildReportText(const SupportManifest& manifest, const ScanResult& scan, bool chinese);

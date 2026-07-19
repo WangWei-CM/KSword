@@ -164,7 +164,14 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
 
     if (options.internalUpload) {
         std::wstring bundle;
-        PrepareUploadBundle(paths, manifest, scan, &bundle);
+        CollectionProgress progress;
+        ShowCollectionProgress(chinese, &progress);
+        const bool prepared = PrepareUploadBundle(paths, manifest, scan, &bundle, &progress, chinese);
+        CloseCollectionProgress(&progress);
+        if (!prepared) {
+            ShowSimpleMessage(Text(chinese, L"采集失败", L"Collection failed"),
+                Text(chinese, L"无法准备开发者采集文件夹。", L"The developer collection folder could not be prepared."), chinese);
+        }
         if (!bundle.empty()) OpenBundleFolder(bundle);
     }
 

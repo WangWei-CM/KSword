@@ -242,23 +242,6 @@ bool ProcessDetailPage::CreateDetailTab() {
     });
 }
 
-bool ProcessDetailPage::CreatePluginTab() {
-    const TabIndex tab = TabIndex::Plugins;
-    HWND title = AddLabel(tab, PluginTitle, L"进程插件", 14, 14, -28, 28);
-    ApplyFont(title, titleFont_);
-    HWND description = AddLabel(
-        tab,
-        PluginDescription,
-        L"选择适用于当前进程的插件进行分析。",
-        14,
-        50,
-        -28,
-        38);
-    HWND pluginMenu = AddButton(tab, PluginMenu, L"插件  ▼", 14, 98, 118, 32);
-    HWND pluginManager = AddButton(tab, PluginManager, L"插件管理", 142, 98, 118, 32);
-    return AllCreated({ title, description, pluginMenu, pluginManager });
-}
-
 void ProcessDetailPage::PopulateDetailTab() {
     const ProcessBasicInfo& basic = snapshot_.basic;
     const std::wstring processName = [&basic]() {
@@ -365,21 +348,6 @@ bool ProcessDetailPage::HandleDetailCommand(int controlId) {
     default:
         return false;
     }
-}
-
-bool ProcessDetailPage::HandlePluginCommand(int controlId) {
-    const wchar_t* status = nullptr;
-    if (controlId == PluginMenu) {
-        status = L"纯 Win32 宿主未提供插件运行时，当前无法展开进程插件。";
-    } else if (controlId == PluginManager) {
-        status = L"纯 Win32 宿主未提供插件管理器。";
-    } else {
-        return false;
-    }
-
-    SetControlText(TabIndex::Plugins, PluginDescription, status);
-    ::MessageBoxW(hwnd_, status, L"插件", MB_OK | MB_ICONINFORMATION);
-    return true;
 }
 
 } // namespace Ksword::Features::ProcessDetail

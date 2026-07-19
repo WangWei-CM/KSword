@@ -16,7 +16,7 @@
 namespace Ksword::Features::ProcessDetail {
 
 // ProcessDetailPage is the native Win32 conversion of the full process-detail
-// layout. It owns eleven native tab pages and does not load foreign UI sources,
+// layout. It owns native tab pages and does not load foreign UI sources,
 // resources, or binaries.
 class ProcessDetailPage final {
 public:
@@ -32,9 +32,6 @@ private:
         Token,
         TokenSwitch,
         Evidence,
-        Hotkeys,
-        Keyboard,
-        Plugins,
         Peb,
         Count
     };
@@ -156,21 +153,6 @@ private:
         EvidenceSectionStatus,
         EvidenceSectionOutput,
 
-        HotkeyRefresh = 1800,
-        HotkeyStatus,
-        HotkeyList,
-
-        KeyboardRefresh = 1900,
-        KeyboardStatus,
-        KeyboardInnerTab,
-        KeyboardHotkeyList,
-        KeyboardHookList,
-
-        PluginTitle = 2000,
-        PluginDescription,
-        PluginMenu,
-        PluginManager,
-
         PebRefresh = 2100,
         PebApply,
         PebStatus,
@@ -220,6 +202,13 @@ private:
     void Layout();
     void LayoutPage(TabIndex tab);
     void UpdateVisiblePage();
+    bool EnsurePage(TabIndex tab);
+    bool CreatePageHost(TabIndex tab);
+    void DestroyPageHost(TabIndex tab);
+    bool CreateTabControls(TabIndex tab);
+    void PopulateTab(TabIndex tab);
+    void ResetTabRuntimeState(TabIndex tab);
+    void RedrawTabClient();
     void OnTabActivated(TabIndex tab);
     void RefreshAll();
 
@@ -230,9 +219,6 @@ private:
     bool CreateTokenTab();
     bool CreateTokenSwitchTab();
     bool CreateEvidenceTab();
-    bool CreateHotkeyTab();
-    bool CreateKeyboardTab();
-    bool CreatePluginTab();
     bool CreatePebTab();
 
     HWND AddControl(
@@ -281,8 +267,6 @@ private:
     void PopulateTokenTab();
     void PopulateTokenSwitchTab();
     void PopulateEvidenceTab();
-    void PopulateHotkeyTab();
-    void PopulateKeyboardTab();
     void PopulatePebTab();
 
     bool HandleDetailCommand(int controlId);
@@ -292,9 +276,6 @@ private:
     bool HandleTokenCommand(int controlId);
     bool HandleTokenSwitchCommand(int controlId);
     bool HandleEvidenceCommand(int controlId);
-    bool HandleHotkeyCommand(int controlId);
-    bool HandleKeyboardCommand(int controlId);
-    bool HandlePluginCommand(int controlId);
     bool HandlePebCommand(int controlId);
     bool HandlePageNotify(TabIndex tab, NMHDR* header, LRESULT& result);
 
@@ -316,13 +297,13 @@ private:
     void RefreshSectionReport();
     void RefreshPebReport();
     void ApplyPebEdits();
-    void RefreshHotkeys(bool includeHooks);
 
 private:
     DWORD processId_ = 0;
     HWND hwnd_ = nullptr;
     HWND tab_ = nullptr;
     HFONT titleFont_ = nullptr;
+    TabIndex currentTab_ = TabIndex::Count;
     std::array<PageState, static_cast<std::size_t>(TabIndex::Count)> pages_{};
     std::unordered_map<HWND, int> listColumnCounts_;
     std::unordered_map<HWND, int> listContextColumns_;
@@ -330,8 +311,6 @@ private:
     bool tokenLoaded_ = false;
     bool tokenSwitchLoaded_ = false;
     bool sectionLoaded_ = false;
-    bool hotkeysLoaded_ = false;
-    bool keyboardLoaded_ = false;
     bool pebLoaded_ = false;
 };
 

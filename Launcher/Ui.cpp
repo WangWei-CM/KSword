@@ -163,4 +163,69 @@ void CloseCheckingWindow(HWND window) {
     while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) { TranslateMessage(&message); DispatchMessageW(&message); }
 }
 
+void ShowCollectionProgress(bool chinese, CollectionProgress* progress) {
+    if (!progress) return;
+    *progress = {};
+    INITCOMMONCONTROLSEX init = { sizeof(init), ICC_PROGRESS_CLASS };
+    InitCommonControlsEx(&init);
+    static const wchar_t kClassName[] = L"KswordLauncherCheckingWindow";
+    static bool registered = false;
+    if (!registered) {
+        WNDCLASSW klass = {};
+        klass.lpfnWndProc = CheckingWndProc;
+        klass.hInstance = GetModuleHandleW(nullptr);
+        klass.hCursor = LoadCursorW(nullptr, IDC_WAIT);
+        klass.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+        klass.lpszClassName = kClassName;
+        registered = RegisterClassW(&klass) != 0;
+    }
+    const int width = 520;
+    const int height = 180;
+    HWND window = CreateWindowExW(WS_EX_DLGMODALFRAME, kClassName,
+        chinese ? L"Ksword 启动器" : L"Ksword Launcher",
+        WS_CAPTION | WS_SYSMENU, CW_USEDEFAULT, CW_USEDEFAULT, width, height,
+        nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+    if (!window) return;
+    HWND label = CreateWindowW(L"STATIC", chinese ? L"准备采集…" : L"Preparing collection...",
+        WS_CHILD | WS_VISIBLE | SS_CENTER, 20, 35, 480, 30, window, nullptr,
+        GetModuleHandleW(nullptr), nullptr);
+    HWND bar = CreateWindowExW(0, PROGRESS_CLASSW, nullptr,
+        WS_CHILD | WS_VISIBLE, 20, 85, 480, 24, window, nullptr,
+        GetModuleHandleW(nullptr), nullptr);
+    SendMessageW(label, WM_SETFONT, reinterpret_cast<WPARAM>(GetStockObject(DEFAULT_GUI_FONT)), TRUE);
+    SendMessageW(bar, PBM_SETRANGE, 0, MAKELPARAM(0, 100));
+    SendMessageW(bar, PBM_SETPOS, 0, 0);
+    RECT work = {}; SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
+    SetWindowPos(window, HWND_TOP, work.left + (work.right - work.left - width) / 2,
+        work.top + (work.bottom - work.top - height) / 2, width, height, SWP_SHOWWINDOW);
+    UpdateWindow(window);
+    progress->window = window;
+    progress->label = label;
+    progress->bar = bar;
+}
+
+void UpdateCollectionProgress(CollectionProgress* progress, int percent, const std::wstring& text) {
+    if (!progress || !progress->window) return;
+    if (progress->label) SetWindowTextW(progress->label, text.c_str());
+    const int position = percent < 0 ? 0 : (percent > 100 ? 100 : percent);
+    if (progress->bar) SendMessageW(progress->bar, PBM_SETPOS, static_cast<WPARAM>(position), 0);
+    UpdateWindow(progress->window);
+    MSG message = {};
+    while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) {
+        TranslateMessage(&message);
+        DispatchMessageW(&message);
+    }
+}
+
+void CloseCollectionProgress(CollectionProgress* progress) {
+    if (!progress) return;
+    if (progress->window) DestroyWindow(progress->window);
+    *progress = {};
+    MSG message = {};
+    while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) {
+        TranslateMessage(&message);
+        DispatchMessageW(&message);
+    }
+}
+
 }

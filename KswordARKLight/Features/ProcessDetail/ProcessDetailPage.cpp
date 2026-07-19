@@ -24,7 +24,7 @@ constexpr UINT kCopyCellCommand = 64001;
 constexpr UINT kCopyRowCommand = 64002;
 constexpr UINT kCopyAllCommand = 64003;
 
-constexpr std::array<const wchar_t*, 11> kTabTitles{
+constexpr std::array<const wchar_t*, 8> kTabTitles{
     L"详细信息",
     L"线程",
     L"操作",
@@ -32,9 +32,6 @@ constexpr std::array<const wchar_t*, 11> kTabTitles{
     L"令牌",
     L"令牌开关",
     L"Process Detail Evidence",
-    L"进程热键",
-    L"键盘",
-    L"插件",
     L"PEB"
 };
 
@@ -180,53 +177,16 @@ bool ProcessDetailPage::Initialize(HWND hwnd) {
     if (!tab_) {
         return false;
     }
+    if (kTabTitles.size() != static_cast<std::size_t>(TabIndex::Count)) {
+        return false;
+    }
     for (int index = 0; index < static_cast<int>(kTabTitles.size()); ++index) {
         InsertTab(tab_, index, kTabTitles[static_cast<std::size_t>(index)]);
     }
 
-    for (std::size_t index = 0; index < pages_.size(); ++index) {
-        HWND pageHwnd = ::CreateWindowExW(
-            0,
-            WC_STATICW,
-            L"",
-            WS_CHILD | WS_CLIPCHILDREN | WS_CLIPSIBLINGS,
-            0,
-            0,
-            100,
-            100,
-            hwnd_,
-            nullptr,
-            ::GetModuleHandleW(nullptr),
-            nullptr);
-        pages_[index].hwnd = pageHwnd;
-        if (!pageHwnd || !::SetWindowSubclass(
-                pageHwnd,
-                PageSubclassProc,
-                static_cast<UINT_PTR>(index + 1),
-                reinterpret_cast<DWORD_PTR>(this))) {
-            return false;
-        }
-    }
-
-    const bool created =
-        CreateDetailTab() &&
-        CreateThreadTab() &&
-        CreateActionTab() &&
-        CreateModuleTab() &&
-        CreateTokenTab() &&
-        CreateTokenSwitchTab() &&
-        CreateEvidenceTab() &&
-        CreateHotkeyTab() &&
-        CreateKeyboardTab() &&
-        CreatePluginTab() &&
-        CreatePebTab();
-    if (!created) {
-        return false;
-    }
-
     ::SendMessageW(tab_, TCM_SETCURSEL, 0, 0);
-    Layout();
-    RefreshAll();
+    ProcessDetailCollector collector;
+    snapshot_ = collector.Collect(processId_);
     UpdateVisiblePage();
     return true;
 }
@@ -270,9 +230,6 @@ LRESULT ProcessDetailPage::HandlePageMessage(
         case TabIndex::Token: handled = HandleTokenCommand(id); break;
         case TabIndex::TokenSwitch: handled = HandleTokenSwitchCommand(id); break;
         case TabIndex::Evidence: handled = HandleEvidenceCommand(id); break;
-        case TabIndex::Hotkeys: handled = HandleHotkeyCommand(id); break;
-        case TabIndex::Keyboard: handled = HandleKeyboardCommand(id); break;
-        case TabIndex::Plugins: handled = HandlePluginCommand(id); break;
         case TabIndex::Peb: handled = HandlePebCommand(id); break;
         default: break;
         }
@@ -378,10 +335,155 @@ void ProcessDetailPage::UpdateVisiblePage() {
     if (selected < 0 || selected >= static_cast<int>(TabIndex::Count)) {
         selected = 0;
     }
-    for (std::size_t index = 0; index < pages_.size(); ++index) {
-        ::ShowWindow(pages_[index].hwnd, static_cast<int>(index) == selected ? SW_SHOW : SW_HIDE);
+
+    const TabIndex selectedTab = static_cast<TabIndex>(selected);
+    if (currentTab_ != selectedTab && currentTab_ != TabIndex::Count) {
+        DestroyPageHost(currentTab_);
     }
-    OnTabActivated(static_cast<TabIndex>(selected));
+    currentTab_ = selectedTab;
+
+    if (!EnsurePage(selectedTab)) {
+        return;
+    }
+
+    if (HWND page = pages_[static_cast<std::size_t>(selectedTab)].hwnd) {
+        ::ShowWindow(page, SW_SHOW);
+    }
+    Layout();
+    PopulateTab(selectedTab);
+    OnTabActivated(selectedTab);
+    RedrawTabClient();
+}
+
+bool ProcessDetailPage::EnsurePage(TabIndex tab) {
+    PageState& page = pages_[static_cast<std::size_t>(tab)];
+    if (page.hwnd) {
+        return true;
+    }
+    ResetTabRuntimeState(tab);
+    if (!CreatePageHost(tab)) {
+        return false;
+    }
+    if (!CreateTabControls(tab)) {
+        DestroyPageHost(tab);
+        return false;
+    }
+    LayoutPage(tab);
+    return true;
+}
+
+bool ProcessDetailPage::CreatePageHost(TabIndex tab) {
+    PageState& page = pages_[static_cast<std::size_t>(tab)];
+    if (page.hwnd) {
+        return true;
+    }
+
+    // TabCtrl_AdjustRect returns tab-client coordinates. The page host lives
+    // inside the TabControl so the active tab owns all visible child HWNDs.
+    HWND pageHwnd = ::CreateWindowExW(
+        0,
+        WC_STATICW,
+        L"",
+        WS_CHILD | WS_CLIPCHILDREN | WS_CLIPSIBLINGS,
+        0,
+        0,
+        100,
+        100,
+        tab_,
+        nullptr,
+        ::GetModuleHandleW(nullptr),
+        nullptr);
+    page.hwnd = pageHwnd;
+    if (!pageHwnd || !::SetWindowSubclass(
+            pageHwnd,
+            PageSubclassProc,
+            static_cast<UINT_PTR>(static_cast<std::size_t>(tab) + 1),
+            reinterpret_cast<DWORD_PTR>(this))) {
+        page.hwnd = nullptr;
+        if (pageHwnd) {
+            ::DestroyWindow(pageHwnd);
+        }
+        return false;
+    }
+    return true;
+}
+
+void ProcessDetailPage::DestroyPageHost(TabIndex tab) {
+    PageState& page = pages_[static_cast<std::size_t>(tab)];
+    for (const Placement& placement : page.placements) {
+        listColumnCounts_.erase(placement.hwnd);
+        listContextColumns_.erase(placement.hwnd);
+    }
+
+    HWND oldPage = page.hwnd;
+    page.hwnd = nullptr;
+    page.placements.clear();
+    ResetTabRuntimeState(tab);
+
+    if (oldPage) {
+        ::ShowWindow(oldPage, SW_HIDE);
+        ::DestroyWindow(oldPage);
+    }
+    RedrawTabClient();
+}
+
+bool ProcessDetailPage::CreateTabControls(TabIndex tab) {
+    switch (tab) {
+    case TabIndex::Detail: return CreateDetailTab();
+    case TabIndex::Threads: return CreateThreadTab();
+    case TabIndex::Actions: return CreateActionTab();
+    case TabIndex::Modules: return CreateModuleTab();
+    case TabIndex::Token: return CreateTokenTab();
+    case TabIndex::TokenSwitch: return CreateTokenSwitchTab();
+    case TabIndex::Evidence: return CreateEvidenceTab();
+    case TabIndex::Peb: return CreatePebTab();
+    default: return false;
+    }
+}
+
+void ProcessDetailPage::PopulateTab(TabIndex tab) {
+    switch (tab) {
+    case TabIndex::Detail: PopulateDetailTab(); break;
+    case TabIndex::Threads: PopulateThreadTab(); break;
+    case TabIndex::Modules: PopulateModuleTab(); break;
+    case TabIndex::Token: PopulateTokenTab(); break;
+    case TabIndex::TokenSwitch: PopulateTokenSwitchTab(); break;
+    case TabIndex::Evidence: PopulateEvidenceTab(); break;
+    case TabIndex::Peb: PopulatePebTab(); break;
+    case TabIndex::Actions:
+    default:
+        break;
+    }
+}
+
+void ProcessDetailPage::ResetTabRuntimeState(TabIndex tab) {
+    switch (tab) {
+    case TabIndex::Token:
+        tokenLoaded_ = false;
+        break;
+    case TabIndex::TokenSwitch:
+        tokenSwitchLoaded_ = false;
+        break;
+    case TabIndex::Evidence:
+        sectionLoaded_ = false;
+        break;
+    case TabIndex::Peb:
+        pebLoaded_ = false;
+        break;
+    default:
+        break;
+    }
+}
+
+void ProcessDetailPage::RedrawTabClient() {
+    if (!tab_) {
+        return;
+    }
+    ::RedrawWindow(
+        tab_,
+        nullptr,
+        nullptr,
+        RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW);
 }
 
 void ProcessDetailPage::OnTabActivated(TabIndex tab) {
@@ -395,12 +497,6 @@ void ProcessDetailPage::OnTabActivated(TabIndex tab) {
     case TabIndex::Evidence:
         if (!sectionLoaded_) { RefreshSectionReport(); }
         break;
-    case TabIndex::Hotkeys:
-        if (!hotkeysLoaded_) { RefreshHotkeys(false); }
-        break;
-    case TabIndex::Keyboard:
-        if (!keyboardLoaded_) { RefreshHotkeys(true); }
-        break;
     case TabIndex::Peb:
         if (!pebLoaded_) { RefreshPebReport(); }
         break;
@@ -412,10 +508,9 @@ void ProcessDetailPage::OnTabActivated(TabIndex tab) {
 void ProcessDetailPage::RefreshAll() {
     ProcessDetailCollector collector;
     snapshot_ = collector.Collect(processId_);
-    PopulateDetailTab();
-    PopulateThreadTab();
-    PopulateModuleTab();
-    PopulateEvidenceTab();
+    if (currentTab_ != TabIndex::Count && pages_[static_cast<std::size_t>(currentTab_)].hwnd) {
+        PopulateTab(currentTab_);
+    }
 }
 
 HWND ProcessDetailPage::AddControl(
@@ -742,14 +837,6 @@ bool ProcessDetailPage::HandlePageNotify(TabIndex tab, NMHDR* header, LRESULT& r
         POINT point{};
         ::GetCursorPos(&point);
         result = HandleGenericContextMenu(header->hwndFrom, point) ? 0 : 1;
-        return true;
-    }
-    if (tab == TabIndex::Keyboard && header->hwndFrom == Control(TabIndex::Keyboard, KeyboardInnerTab) &&
-        header->code == TCN_SELCHANGE) {
-        const int selected = static_cast<int>(::SendMessageW(header->hwndFrom, TCM_GETCURSEL, 0, 0));
-        ::ShowWindow(Control(TabIndex::Keyboard, KeyboardHotkeyList), selected == 0 ? SW_SHOW : SW_HIDE);
-        ::ShowWindow(Control(TabIndex::Keyboard, KeyboardHookList), selected == 1 ? SW_SHOW : SW_HIDE);
-        result = 0;
         return true;
     }
     if (tab == TabIndex::Threads && header->hwndFrom == Control(TabIndex::Threads, ThreadList) &&

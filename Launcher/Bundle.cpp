@@ -19,7 +19,11 @@ std::wstring BundleRoot() {
     if (!length || length >= ARRAYSIZE(temp)) return {};
     std::wstring root(temp, length);
     while (!root.empty() && (root.back() == L'\\' || root.back() == L'/')) root.pop_back();
-    return JoinPath(root, L"CompressAndSendToDeveloper");
+    return JoinPath(root, L"KswordCompabilityCheck");
+}
+
+std::wstring BundleLeaf(const std::wstring& root, bool chinese) {
+    return JoinPath(root, chinese ? L"压缩我并发送给开发者" : L"CompressAndSendToDeveloper");
 }
 
 bool DeleteTree(const std::wstring& path) {
@@ -115,49 +119,72 @@ std::string BuildReportText(const SupportManifest& manifest, const ScanResult& s
     return text.str();
 }
 
-bool PrepareUploadBundle(const RuntimePaths& paths, const SupportManifest& manifest, const ScanResult& scan, std::wstring* bundlePath) {
+bool PrepareUploadBundle(const RuntimePaths& paths, const SupportManifest& manifest, const ScanResult& scan, std::wstring* bundlePath, CollectionProgress* progress, bool chinese) {
     if (!bundlePath) return false;
     const std::wstring root = BundleRoot();
     if (root.empty()) return false;
-    // 只删除固定的临时目录，避免把用户其它临时文件误删。
-    const DWORD existingAttributes = GetFileAttributesW(root.c_str());
+    const std::wstring bundle = BundleLeaf(root, chinese);
+    auto update = [&](int percent, const std::wstring& text) {
+        if (progress) UpdateCollectionProgress(progress, percent, text);
+    };
+    update(5, chinese ? L"准备采集目录…" : L"Preparing the collection folder...");
+    if (!EnsureDirectory(root)) return false;
+    // 只删除固定的末级目录，保留父目录，避免把用户其它临时文件误删。
+    const DWORD existingAttributes = GetFileAttributesW(bundle.c_str());
     if (existingAttributes != INVALID_FILE_ATTRIBUTES) {
         if (existingAttributes & FILE_ATTRIBUTE_DIRECTORY) {
-            if (!DeleteTree(root)) return false;
-        } else if (!DeleteFileW(root.c_str())) {
+            if (!DeleteTree(bundle)) return false;
+        } else if (!DeleteFileW(bundle.c_str())) {
             return false;
         }
     }
-    if (!EnsureDirectory(root)) return false;
+    if (!EnsureDirectory(bundle)) return false;
     std::vector<std::wstring> copied;
     std::string log;
-    const std::wstring readme = JoinPath(root, L"README.txt");
+    update(15, chinese ? L"写入报告…" : L"Writing reports...");
+    const std::wstring readme = JoinPath(bundle, L"README.txt");
     const std::string readmeText = "Ksword Launcher compatibility collection\n\nCompress this folder and send it to the Ksword developer.\nThe .bin files are renamed copies of kernel modules; they are not executable replacements.\nPDB files are not included. report.json/report.txt contain PDB Name/GUID/Age/SymbolKey for symbol download.\n";
     WriteTextFile(readme, readmeText);
-    WriteTextFile(JoinPath(root, L"report.json"), BuildReportJson(paths, manifest, scan));
-    WriteTextFile(JoinPath(root, L"report.txt"), BuildReportText(manifest, scan, false));
+    WriteTextFile(JoinPath(bundle, L"report.json"), BuildReportJson(paths, manifest, scan));
+    // 报告正文保持英文，便于开发者在不同语言系统上直接比对。
+    WriteTextFile(JoinPath(bundle, L"report.txt"), BuildReportText(manifest, scan, false));
 
     std::vector<std::wstring> sourcePaths;
     sourcePaths.push_back(scan.kernel.path);
     for (const ModuleFinding& finding : scan.collectionCandidates) if (finding.module.classId != 0) sourcePaths.push_back(finding.module.path);
     std::sort(sourcePaths.begin(), sourcePaths.end());
     sourcePaths.erase(std::unique(sourcePaths.begin(), sourcePaths.end()), sourcePaths.end());
+    const size_t sourceCount = sourcePaths.size();
+    size_t sourceIndex = 0;
     for (const std::wstring& source : sourcePaths) {
         if (source.empty()) continue;
         const std::wstring name = FileNameOnly(source) + L".bin";
-        CopyAttachment(source, JoinPath(root, name), &copied, &log);
+        CopyAttachment(source, JoinPath(bundle, name), &copied, &log);
+        ++sourceIndex;
+        const int percent = sourceCount == 0 ? 75 : 25 + static_cast<int>((50.0 * sourceIndex) / sourceCount);
+        update(percent, chinese ? L"正在复制系统文件…" : L"Copying system files...");
     }
     std::ostringstream sums;
-    for (const std::wstring& file : copied) sums << Sha256File(file) << "  " << WideToUtf8(FileNameOnly(file)) << "\n";
-    WriteTextFile(JoinPath(root, L"SHA256SUMS.txt"), sums.str());
-    if (!log.empty()) WriteTextFile(JoinPath(root, L"launcher.log"), log);
-    else WriteTextFile(JoinPath(root, L"launcher.log"), "Collection completed without copy errors.\n");
-    *bundlePath = root;
+    update(80, chinese ? L"计算文件校验值…" : L"Calculating file checksums...");
+    for (size_t index = 0; index < copied.size(); ++index) {
+        const std::wstring& file = copied[index];
+        sums << Sha256File(file) << "  " << WideToUtf8(FileNameOnly(file)) << "\n";
+        update(80 + static_cast<int>(15.0 * (index + 1) / std::max<size_t>(1, copied.size())), chinese ? L"计算文件校验值…" : L"Calculating file checksums...");
+    }
+    WriteTextFile(JoinPath(bundle, L"SHA256SUMS.txt"), sums.str());
+    if (!log.empty()) WriteTextFile(JoinPath(bundle, L"launcher.log"), log);
+    else WriteTextFile(JoinPath(bundle, L"launcher.log"), "Collection completed without copy errors.\n");
+    update(100, chinese ? L"采集完成" : L"Collection complete");
+    *bundlePath = bundle;
     return true;
 }
 
 void OpenBundleFolder(const std::wstring& path) {
-    ShellExecuteW(nullptr, L"open", L"explorer.exe", path.c_str(), nullptr, SW_SHOWNORMAL);
+    std::wstring folder = path;
+    while (!folder.empty() && (folder.back() == L'\\' || folder.back() == L'/')) folder.pop_back();
+    const size_t separator = folder.find_last_of(L"\\/");
+    if (separator != std::wstring::npos) folder.resize(separator);
+    ShellExecuteW(nullptr, L"open", L"explorer.exe", folder.c_str(), nullptr, SW_SHOWNORMAL);
 }
 
 }
