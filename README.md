@@ -221,3 +221,13 @@ This project includes system-level debugging, auditing, and management capabilit
 Ksword is free software under [GNU GPL version 3 only](LICENSE). Use it, study it, change it, share it, sell it, or build services around it—just follow GPLv3 and provide the matching source when you distribute binaries. Third-party components keep their own licenses.
 
 Except where a file says otherwise, Ksword's own code is GPLv3-only. The [Ksword Community Covenant](COMMUNITY_COVENANT.md) is about honesty, attribution, responsible use, and not pretending an unofficial fork is official. It is a community promise, not another layer of license restrictions. Contributions follow [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## Star History
+
+<a href="https://www.star-history.com/?repos=KSwordDEV%2FKSword&type=timeline&legend=top-left">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=KSwordDEV/KSword&type=timeline&theme=dark&legend=top-left&sealed_token=z3lDzSCqYcrsHevfwWR-A7GrLv3t7XcjgLhW0yK13FvqFRvYRmGjEY5XNCqGHUE2-mvPVsKjV5EAbAtI7OTPisLY0q0652qBc5LJxbRZQpTYfSMqfcLy1r6MTWGj-JLLrObXIFhsqr5QQpxZJb8h5R5LvFURf-3JusERKoUegibW7nq8ADYLJ2FFdhvy" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=KSwordDEV/KSword&type=timeline&legend=top-left&sealed_token=z3lDzSCqYcrsHevfwWR-A7GrLv3t7XcjgLhW0yK13FvqFRvYRmGjEY5XNCqGHUE2-mvPVsKjV5EAbAtI7OTPisLY0q0652qBc5LJxbRZQpTYfSMqfcLy1r6MTWGj-JLLrObXIFhsqr5QQpxZJb8h5R5LvFURf-3JusERKoUegibW7nq8ADYLJ2FFdhvy" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=KSwordDEV/KSword&type=timeline&legend=top-left&sealed_token=z3lDzSCqYcrsHevfwWR-A7GrLv3t7XcjgLhW0yK13FvqFRvYRmGjEY5XNCqGHUE2-mvPVsKjV5EAbAtI7OTPisLY0q0652qBc5LJxbRZQpTYfSMqfcLy1r6MTWGj-JLLrObXIFhsqr5QQpxZJb8h5R5LvFURf-3JusERKoUegibW7nq8ADYLJ2FFdhvy" />
+ </picture>
+</a>
