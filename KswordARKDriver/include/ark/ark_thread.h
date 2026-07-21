@@ -15,6 +15,45 @@ KswordARKDriverEnumerateThreads(
     );
 
 /*
+ * KswordARKDriverTerminateThreadById
+ * Inputs:
+ * - ProcessId and ThreadId identify one target thread; ExitStatus supplies its
+ *   termination status.
+ * Processing:
+ * - Resolves the process with the CID-first termination resolver, references
+ *   the ETHREAD by TID, verifies ownership, then ends only that thread.
+ * Return behavior:
+ * - Returns STATUS_SUCCESS when the specified thread is terminated or already
+ *   terminating; otherwise returns validation, resolution, or termination status.
+ */
+NTSTATUS
+KswordARKDriverTerminateThreadById(
+    _In_opt_ WDFDEVICE Device,
+    _In_ ULONG ProcessId,
+    _In_ ULONG ThreadId,
+    _In_ NTSTATUS ExitStatus
+    );
+
+/*
+ * KswordARKThreadIoctlTerminate
+ * Inputs:
+ * - WDF request buffers for IOCTL_KSWORD_ARK_TERMINATE_THREAD.
+ * Processing:
+ * - Validates the fixed request, evaluates process-termination safety policy,
+ *   then forwards the requested PID/TID pair to the thread backend.
+ * Return behavior:
+ * - Returns validation, safety, or backend status and writes request size on success.
+ */
+NTSTATUS
+KswordARKThreadIoctlTerminate(
+    _In_ WDFDEVICE Device,
+    _In_ WDFREQUEST Request,
+    _In_ size_t InputBufferLength,
+    _In_ size_t OutputBufferLength,
+    _Out_ size_t* BytesReturned
+    );
+
+/*
  * KswordARKDriverQueryThreadDetail
  * Inputs:
  * - Response/OutputBufferLength describe a fixed METHOD_BUFFERED response.

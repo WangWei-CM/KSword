@@ -22,7 +22,6 @@ Environment:
 
 // Feature handler declarations live here instead of in the central dispatch file.
 NTSTATUS KswordARKProcessIoctlTerminate(_In_ WDFDEVICE Device, _In_ WDFREQUEST Request, _In_ size_t InputBufferLength, _In_ size_t OutputBufferLength, _Out_ size_t* BytesReturned);
-NTSTATUS KswordARKProcessIoctlTerminateThreads(_In_ WDFDEVICE Device, _In_ WDFREQUEST Request, _In_ size_t InputBufferLength, _In_ size_t OutputBufferLength, _Out_ size_t* BytesReturned);
 NTSTATUS KswordARKProcessIoctlSuspend(_In_ WDFDEVICE Device, _In_ WDFREQUEST Request, _In_ size_t InputBufferLength, _In_ size_t OutputBufferLength, _Out_ size_t* BytesReturned);
 NTSTATUS KswordARKProcessIoctlSetPplLevel(_In_ WDFDEVICE Device, _In_ WDFREQUEST Request, _In_ size_t InputBufferLength, _In_ size_t OutputBufferLength, _Out_ size_t* BytesReturned);
 NTSTATUS KswordARKProcessIoctlSetIntegrity(_In_ WDFDEVICE Device, _In_ WDFREQUEST Request, _In_ size_t InputBufferLength, _In_ size_t OutputBufferLength, _Out_ size_t* BytesReturned);
@@ -78,6 +77,7 @@ NTSTATUS KswordARKDynDataIoctlQueryV4MissingItems(_In_ WDFDEVICE Device, _In_ WD
 NTSTATUS KswordARKDynDataIoctlQueryV4Items(_In_ WDFDEVICE Device, _In_ WDFREQUEST Request, _In_ size_t InputBufferLength, _In_ size_t OutputBufferLength, _Out_ size_t* BytesReturned);
 NTSTATUS KswordARKCapabilityIoctlQueryDriverCapabilities(_In_ WDFDEVICE Device, _In_ WDFREQUEST Request, _In_ size_t InputBufferLength, _In_ size_t OutputBufferLength, _Out_ size_t* BytesReturned);
 NTSTATUS KswordARKThreadIoctlEnumThread(_In_ WDFDEVICE Device, _In_ WDFREQUEST Request, _In_ size_t InputBufferLength, _In_ size_t OutputBufferLength, _Out_ size_t* BytesReturned);
+NTSTATUS KswordARKThreadIoctlTerminate(_In_ WDFDEVICE Device, _In_ WDFREQUEST Request, _In_ size_t InputBufferLength, _In_ size_t OutputBufferLength, _Out_ size_t* BytesReturned);
 NTSTATUS KswordARKProcessIoctlQueryCrossView(_In_ WDFDEVICE Device, _In_ WDFREQUEST Request, _In_ size_t InputBufferLength, _In_ size_t OutputBufferLength, _Out_ size_t* BytesReturned);
 NTSTATUS KswordARKThreadIoctlQueryCrossView(_In_ WDFDEVICE Device, _In_ WDFREQUEST Request, _In_ size_t InputBufferLength, _In_ size_t OutputBufferLength, _Out_ size_t* BytesReturned);
 NTSTATUS KswordARKProcessIoctlQueryDetail(_In_ WDFDEVICE Device, _In_ WDFREQUEST Request, _In_ size_t InputBufferLength, _In_ size_t OutputBufferLength, _Out_ size_t* BytesReturned);
@@ -147,7 +147,6 @@ NTSTATUS KswordARKBugcheckIoctlSetBitmap(_In_ WDFDEVICE Device, _In_ WDFREQUEST 
 
 static const KSWORD_ARK_IOCTL_ENTRY g_KswordArkIoctlTable[] = {
     { IOCTL_KSWORD_ARK_TERMINATE_PROCESS, KswordARKProcessIoctlTerminate, "IOCTL_KSWORD_ARK_TERMINATE_PROCESS", KSWORD_ARK_IOCTL_CAPABILITY_NONE, KSWORD_ARK_IOCTL_FLAG_NONE },
-    { IOCTL_KSWORD_ARK_TERMINATE_PROCESS_THREADS, KswordARKProcessIoctlTerminateThreads, "IOCTL_KSWORD_ARK_TERMINATE_PROCESS_THREADS", KSWORD_ARK_IOCTL_CAPABILITY_NONE, KSWORD_ARK_IOCTL_FLAG_NONE },
     { IOCTL_KSWORD_ARK_SUSPEND_PROCESS, KswordARKProcessIoctlSuspend, "IOCTL_KSWORD_ARK_SUSPEND_PROCESS", KSWORD_ARK_IOCTL_CAPABILITY_NONE, KSWORD_ARK_IOCTL_FLAG_NONE },
     { IOCTL_KSWORD_ARK_SET_PPL_LEVEL, KswordARKProcessIoctlSetPplLevel, "IOCTL_KSWORD_ARK_SET_PPL_LEVEL", KSW_CAP_PROCESS_PROTECTION_PATCH, KSWORD_ARK_IOCTL_FLAG_NONE },
     { IOCTL_KSWORD_ARK_SET_PROCESS_INTEGRITY, KswordARKProcessIoctlSetIntegrity, "IOCTL_KSWORD_ARK_SET_PROCESS_INTEGRITY", KSWORD_ARK_IOCTL_CAPABILITY_NONE, KSWORD_ARK_IOCTL_FLAG_NONE },
@@ -203,6 +202,7 @@ static const KSWORD_ARK_IOCTL_ENTRY g_KswordArkIoctlTable[] = {
     { IOCTL_KSWORD_ARK_QUERY_DYN_V4_ITEMS, KswordARKDynDataIoctlQueryV4Items, "IOCTL_KSWORD_ARK_QUERY_DYN_V4_ITEMS", KSWORD_ARK_IOCTL_CAPABILITY_NONE, KSWORD_ARK_IOCTL_FLAG_NONE },
     { IOCTL_KSWORD_ARK_QUERY_DRIVER_CAPABILITIES, KswordARKCapabilityIoctlQueryDriverCapabilities, "IOCTL_KSWORD_ARK_QUERY_DRIVER_CAPABILITIES", KSWORD_ARK_IOCTL_CAPABILITY_NONE, KSWORD_ARK_IOCTL_FLAG_NONE },
     { IOCTL_KSWORD_ARK_ENUM_THREAD, KswordARKThreadIoctlEnumThread, "IOCTL_KSWORD_ARK_ENUM_THREAD", KSWORD_ARK_IOCTL_CAPABILITY_NONE, KSWORD_ARK_IOCTL_FLAG_NONE },
+    { IOCTL_KSWORD_ARK_TERMINATE_THREAD, KswordARKThreadIoctlTerminate, "IOCTL_KSWORD_ARK_TERMINATE_THREAD", KSWORD_ARK_IOCTL_CAPABILITY_NONE, KSWORD_ARK_IOCTL_FLAG_NONE },
     // Process cross-view performs its own per-source capability checks, so dispatch must allow degraded read-only results.
     { IOCTL_KSWORD_ARK_QUERY_PROCESS_CROSSVIEW, KswordARKProcessIoctlQueryCrossView, "IOCTL_KSWORD_ARK_QUERY_PROCESS_CROSSVIEW", KSWORD_ARK_IOCTL_CAPABILITY_NONE, KSWORD_ARK_IOCTL_FLAG_NONE },
     // Thread cross-view performs its own per-source capability checks, so dispatch must allow degraded read-only results.

@@ -309,22 +309,27 @@ namespace ksword::ark
         return result;
     }
 
-    IoResult DriverClient::terminateProcessThreads(const std::uint32_t processId, const long exitStatus) const
-    {
-        DriverHandle handle = open();
-        return terminateProcessThreads(handle, processId, exitStatus);
-    }
-
-    IoResult DriverClient::terminateProcessThreads(
-        DriverHandle& handle,
+    IoResult DriverClient::terminateThread(
+        const std::uint32_t threadId,
         const std::uint32_t processId,
         const long exitStatus) const
     {
-        KSWORD_ARK_TERMINATE_PROCESS_THREADS_REQUEST request{};
+        DriverHandle handle = open();
+        return terminateThread(handle, threadId, processId, exitStatus);
+    }
+
+    IoResult DriverClient::terminateThread(
+        DriverHandle& handle,
+        const std::uint32_t threadId,
+        const std::uint32_t processId,
+        const long exitStatus) const
+    {
+        KSWORD_ARK_TERMINATE_THREAD_REQUEST request{};
+        request.threadId = threadId;
         request.processId = processId;
         request.exitStatus = exitStatus;
         IoResult result = deviceIoControl(
-            IOCTL_KSWORD_ARK_TERMINATE_PROCESS_THREADS,
+            IOCTL_KSWORD_ARK_TERMINATE_THREAD,
             &request,
             static_cast<unsigned long>(sizeof(request)),
             nullptr,
@@ -332,7 +337,7 @@ namespace ksword::ark
             &handle);
 
         std::ostringstream stream;
-        stream << "pid=" << processId << ", bytesReturned=" << result.bytesReturned;
+        stream << "tid=" << threadId << ", pid=" << processId << ", bytesReturned=" << result.bytesReturned;
         if (result.ok)
         {
             stream << ", ioctl=ok";

@@ -1449,11 +1449,11 @@ void ProcessDock::showThreadTableContextMenu(const QPoint& localPosition)
     QAction* terminateAction = contextMenu.addAction(
         blueTintedIcon(":/Icon/process_terminate.svg"),
         "结束线程");
-    QAction* r0TerminateAllOwnerThreadsAction = contextMenu.addAction(
+    QAction* r0TerminateThreadAction = contextMenu.addAction(
         blueTintedIcon(":/Icon/process_terminate.svg"),
         ks::i18n::contextText(
-            QStringLiteral("process.thread.menu.r0_terminate_all"),
-            QStringLiteral("R0结束所属进程全部线程")));
+            QStringLiteral("process.thread.menu.r0_terminate"),
+            QStringLiteral("R0结束线程")));
 
     const ks::process::SystemThreadRecord* clickedThreadRecord = selectedThreadRecord();
     const bool clickedThreadIsR0Only =
@@ -1461,11 +1461,13 @@ void ProcessDock::showThreadTableContextMenu(const QPoint& localPosition)
         (clickedThreadRecord->isR0OnlyThread ||
             ((clickedThreadRecord->r0ThreadFlags & KSWORD_ARK_THREAD_FLAG_HIDDEN_FROM_ACTIVE_THREAD_LIST) != 0U));
     const bool hasR0TerminateTarget =
-        clickedThreadRecord != nullptr && clickedThreadRecord->ownerPid > 4U;
-    r0TerminateAllOwnerThreadsAction->setEnabled(hasR0TerminateTarget);
+        clickedThreadRecord != nullptr &&
+        clickedThreadRecord->ownerPid > 4U &&
+        clickedThreadRecord->threadId != 0U;
+    r0TerminateThreadAction->setEnabled(hasR0TerminateTarget);
     if (clickedThreadIsR0Only)
     {
-        // R0-only/CID-only 行不把 suspect TID 交给 R3 操作，但允许按已验证所属 PID 走 R0 全线程结束。
+        // R0-only/CID-only 行不把 suspect TID 交给 R3 操作，但允许按已验证 PID/TID 走 R0 单线程结束。
         stackAction->setEnabled(false);
         suspendAction->setEnabled(false);
         resumeAction->setEnabled(false);
@@ -1474,10 +1476,10 @@ void ProcessDock::showThreadTableContextMenu(const QPoint& localPosition)
         suspendAction->setToolTip(QStringLiteral("R0-only / hidden suspect 行只读展示，不执行线程操作。"));
         resumeAction->setToolTip(QStringLiteral("R0-only / hidden suspect 行只读展示，不执行线程操作。"));
         terminateAction->setToolTip(QStringLiteral("R0-only / hidden suspect 行只读展示，不执行线程操作。"));
-        r0TerminateAllOwnerThreadsAction->setToolTip(
+        r0TerminateThreadAction->setToolTip(
             ks::i18n::contextText(
-                QStringLiteral("process.thread.r0_terminate_all.suspect.tooltip"),
-                QStringLiteral("R0-only / hidden suspect 行可按所属 PID 结束目标进程的全部线程。")));
+                QStringLiteral("process.thread.r0_terminate.suspect.tooltip"),
+                QStringLiteral("R0-only / hidden suspect 行可按 TID/PID 结束指定线程。")));
     }
 
     m_threadContextMenuVisible = true;
@@ -1503,7 +1505,7 @@ void ProcessDock::showThreadTableContextMenu(const QPoint& localPosition)
     else if (selectedAction == suspendAction) { executeSuspendThreadAction(); }
     else if (selectedAction == resumeAction) { executeResumeThreadAction(); }
     else if (selectedAction == terminateAction) { executeTerminateThreadAction(); }
-    else if (selectedAction == r0TerminateAllOwnerThreadsAction) { executeR0TerminateAllOwnerThreadsAction(); }
+    else if (selectedAction == r0TerminateThreadAction) { executeR0TerminateThreadAction(); }
 
     clearThreadContextActionBinding();
 }
@@ -1684,10 +1686,10 @@ void ProcessDock::executeTerminateThreadAction()
     requestAsyncThreadRefresh(true);
 }
 
-void ProcessDock::executeR0TerminateAllOwnerThreadsAction()
+void ProcessDock::executeR0TerminateThreadAction()
 {
     const ks::process::SystemThreadRecord* threadRecord = selectedThreadRecord();
-    if (threadRecord == nullptr || threadRecord->ownerPid == 0U)
+    if (threadRecord == nullptr || threadRecord->ownerPid <= 4U || threadRecord->threadId == 0U)
     {
         return;
     }
@@ -1695,11 +1697,12 @@ void ProcessDock::executeR0TerminateAllOwnerThreadsAction()
     const QMessageBox::StandardButton confirmation = QMessageBox::warning(
         this,
         ks::i18n::contextText(
-            QStringLiteral("process.thread.r0_terminate_all.confirm.title"),
-            QStringLiteral("R0结束全部线程")),
+            QStringLiteral("process.thread.r0_terminate.confirm.title"),
+            QStringLiteral("R0结束线程")),
         ks::i18n::contextText(
-            QStringLiteral("process.thread.r0_terminate_all.confirm.body"),
-            QStringLiteral("将通过 R0 结束 PID %1 的全部线程。该操作不可撤销，目标进程通常会退出。是否继续？"))
+            QStringLiteral("process.thread.r0_terminate.confirm.body"),
+            QStringLiteral("将通过 R0 结束 PID %2 的线程 %1。该操作不可撤销，是否继续？"))
+            .arg(threadRecord->threadId)
             .arg(threadRecord->ownerPid),
         QMessageBox::Yes | QMessageBox::No,
         QMessageBox::No);
@@ -1710,13 +1713,16 @@ void ProcessDock::executeR0TerminateAllOwnerThreadsAction()
 
     kLogEvent actionEvent;
     const ksword::ark::DriverClient driverClient;
-    const ksword::ark::IoResult result = driverClient.terminateProcessThreads(
+    const ksword::ark::IoResult result = driverClient.terminateThread(
+        threadRecord->threadId,
         threadRecord->ownerPid,
         static_cast<long>(0xC0000005u));
     const std::string detailText = threadIoMessageStdString(result.message);
     (result.ok ? info : err) << actionEvent
-        << "[ProcessDock] executeR0TerminateAllOwnerThreadsAction: pid="
+        << "[ProcessDock] executeR0TerminateThreadAction: pid="
         << threadRecord->ownerPid
+        << ", tid="
+        << threadRecord->threadId
         << ", actionOk="
         << (result.ok ? "true" : "false")
         << ", detail="
@@ -1724,11 +1730,10 @@ void ProcessDock::executeR0TerminateAllOwnerThreadsAction()
         << eol;
     showActionResultMessage(
         ks::i18n::contextText(
-            QStringLiteral("process.thread.r0_terminate_all.result.title"),
-            QStringLiteral("R0结束所属进程全部线程")),
+            QStringLiteral("process.thread.r0_terminate.result.title"),
+            QStringLiteral("R0结束线程")),
         result.ok,
         detailText,
         actionEvent);
     requestAsyncThreadRefresh(true);
-    requestAsyncRefresh(true);
 }

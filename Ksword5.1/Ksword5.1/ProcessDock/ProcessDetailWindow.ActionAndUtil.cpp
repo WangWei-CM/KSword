@@ -49,34 +49,44 @@ void ProcessDetailWindow::executeTerminateThreadsAction()
     showActionResultMessage("TerminateThread(全部线程)", actionOk, detailText, actionEvent);
 }
 
-void ProcessDetailWindow::executeR0TerminateAllThreadsAction()
+void ProcessDetailWindow::executeR0TerminateSelectedThreadAction()
 {
-    if (m_baseRecord.pid <= 4U)
+    if (m_threadInspectTable == nullptr)
     {
-        kLogEvent invalidPidEvent;
-        warn << invalidPidEvent
-            << "[ProcessDetailWindow] executeR0TerminateAllThreadsAction: invalid pid="
-            << m_baseRecord.pid
-            << eol;
-        showActionResultMessage(
-            ks::i18n::contextText(
-                QStringLiteral("process.thread.r0_terminate_all.result.title"),
-                QStringLiteral("R0结束所属进程全部线程")),
-            false,
-            "invalid target pid",
-            invalidPidEvent);
+        return;
+    }
+
+    const int currentRow = m_threadInspectTable->currentRow();
+    const QTableWidgetItem* threadIdItem = currentRow >= 0
+        ? m_threadInspectTable->item(currentRow, toThreadColumnIndex(ThreadRowColumn::ThreadId))
+        : nullptr;
+    const std::size_t cacheIndex = threadIdItem != nullptr
+        ? static_cast<std::size_t>(threadIdItem->data(Qt::UserRole).toULongLong())
+        : static_cast<std::size_t>(m_threadInspectRows.size());
+    if (cacheIndex >= m_threadInspectRows.size())
+    {
+        return;
+    }
+
+    const ThreadInspectItem& selectedThread = m_threadInspectRows[cacheIndex];
+    const std::uint32_t processId = selectedThread.processId != 0U
+        ? selectedThread.processId
+        : m_baseRecord.pid;
+    if (processId <= 4U || selectedThread.threadId == 0U)
+    {
         return;
     }
 
     const QMessageBox::StandardButton confirmation = QMessageBox::warning(
         this,
         ks::i18n::contextText(
-            QStringLiteral("process.thread.r0_terminate_all.confirm.title"),
-            QStringLiteral("R0结束全部线程")),
+            QStringLiteral("process.thread.r0_terminate.confirm.title"),
+            QStringLiteral("R0结束线程")),
         ks::i18n::contextText(
-            QStringLiteral("process.thread.r0_terminate_all.confirm.body"),
-            QStringLiteral("将通过 R0 结束 PID %1 的全部线程。该操作不可撤销，目标进程通常会退出。是否继续？"))
-            .arg(m_baseRecord.pid),
+            QStringLiteral("process.thread.r0_terminate.confirm.body"),
+            QStringLiteral("将通过 R0 结束 PID %2 的线程 %1。该操作不可撤销，是否继续？"))
+            .arg(selectedThread.threadId)
+            .arg(processId),
         QMessageBox::Yes | QMessageBox::No,
         QMessageBox::No);
     if (confirmation != QMessageBox::Yes)
@@ -86,12 +96,15 @@ void ProcessDetailWindow::executeR0TerminateAllThreadsAction()
 
     kLogEvent actionEvent;
     const ksword::ark::DriverClient driverClient;
-    const ksword::ark::IoResult result = driverClient.terminateProcessThreads(
-        m_baseRecord.pid,
+    const ksword::ark::IoResult result = driverClient.terminateThread(
+        selectedThread.threadId,
+        processId,
         static_cast<long>(0xC0000005u));
     (result.ok ? info : err) << actionEvent
-        << "[ProcessDetailWindow] executeR0TerminateAllThreadsAction: pid="
-        << m_baseRecord.pid
+        << "[ProcessDetailWindow] executeR0TerminateSelectedThreadAction: pid="
+        << processId
+        << ", tid="
+        << selectedThread.threadId
         << ", actionOk="
         << (result.ok ? "true" : "false")
         << ", detail="
@@ -99,8 +112,8 @@ void ProcessDetailWindow::executeR0TerminateAllThreadsAction()
         << eol;
     showActionResultMessage(
         ks::i18n::contextText(
-            QStringLiteral("process.thread.r0_terminate_all.result.title"),
-            QStringLiteral("R0结束所属进程全部线程")),
+            QStringLiteral("process.thread.r0_terminate.result.title"),
+            QStringLiteral("R0结束线程")),
         result.ok,
         result.message,
         actionEvent);

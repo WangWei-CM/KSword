@@ -16,6 +16,7 @@
 #define KSWORD_ARK_IOCTL_FUNCTION_QUERY_THREAD_CROSSVIEW 0x837UL
 #define KSWORD_ARK_IOCTL_FUNCTION_QUERY_THREAD_DETAIL 0x83DUL
 #define KSWORD_ARK_IOCTL_FUNCTION_QUERY_THREAD_RUNTIME_FIELDS 0x83FUL
+#define KSWORD_ARK_IOCTL_FUNCTION_TERMINATE_THREAD 0x84FUL
 
 #define IOCTL_KSWORD_ARK_ENUM_THREAD \
     CTL_CODE( \
@@ -48,6 +49,25 @@
         KSWORD_ARK_IOCTL_FUNCTION_QUERY_THREAD_RUNTIME_FIELDS, \
         METHOD_BUFFERED, \
         FILE_ANY_ACCESS)
+
+// 指定线程终止协议：
+// - 输入：TID、所属 PID 和线程退出状态；R0 仅通过 ID 自行引用对象；
+// - 处理：验证 ETHREAD 当前仍属于请求 PID 后，结束这一条指定线程；
+// - 输出：无；完成状态通过 DeviceIoControl 成功与否以及驱动日志返回。
+#define IOCTL_KSWORD_ARK_TERMINATE_THREAD \
+    CTL_CODE( \
+        KSWORD_ARK_IOCTL_DEVICE_TYPE, \
+        KSWORD_ARK_IOCTL_FUNCTION_TERMINATE_THREAD, \
+        METHOD_BUFFERED, \
+        FILE_WRITE_ACCESS)
+
+typedef struct _KSWORD_ARK_TERMINATE_THREAD_REQUEST
+{
+    unsigned long threadId;
+    unsigned long processId;
+    long exitStatus;
+    unsigned long reserved;
+} KSWORD_ARK_TERMINATE_THREAD_REQUEST;
 
 // 线程 runtime field sample 请求：
 // - 输入：threadId 定位 ETHREAD，processId 只做可选一致性上下文展示；

@@ -418,7 +418,7 @@ private:
     // - 返回值：无，动作结果统一写日志。
     void executeTerminateProcessComboAction();
     void executeTerminateThreadsAction();
-    void executeR0TerminateAllThreadsAction();
+    void executeR0TerminateSelectedThreadAction();
     void executeSelectedTerminateAction();
     void executeSuspendProcessAction();
     void executeResumeProcessAction();

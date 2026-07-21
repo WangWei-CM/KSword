@@ -1710,45 +1710,52 @@ Exit:
 }
 
 NTSTATUS
-KswordARKDriverTerminateProcessThreadsByPid(
+KswordARKDriverTerminateThreadById(
     _In_opt_ WDFDEVICE device,
     _In_ ULONG processId,
+    _In_ ULONG threadId,
     _In_ NTSTATUS exitStatus
     )
 /*++
 
 Routine Description:
 
-    Resolve a process through the existing CID-first termination resolver and
-    terminate its current threads using the retained stage#2 backend only. This
-    entry intentionally does not issue ZwTerminateProcess or clear user memory.
+    Resolve a process through the existing CID-first termination resolver,
+    reference one ETHREAD by TID, verify ownership, and terminate that one
+    thread. This entry never invokes process-wide thread enumeration.
 
 Arguments:
 
     device - Optional driver device used for diagnostics.
     processId - PID-like identity supplied by the shared IOCTL request.
-    exitStatus - Exit status forwarded to every target thread termination call.
+    threadId - Requested thread identity supplied by the shared IOCTL request.
+    exitStatus - Exit status forwarded to the selected thread termination call.
 
 Return Value:
 
-    STATUS_SUCCESS when the thread-sweep backend terminated at least one target
-    thread. Otherwise returns target-resolution or backend failure status.
+    STATUS_SUCCESS when the selected thread is terminated or already terminating.
+    Otherwise returns target-resolution, ownership, or backend failure status.
 
 --*/
 {
     KSWORD_ARK_TERMINATE_PROCESS_TARGET target;
+    KSWORD_PSP_TERMINATE_THREAD_BY_POINTER_FN pspTerminateThreadByPointer = NULL;
+    KSWORD_ZW_OR_NT_TERMINATE_THREAD_FN zwOrNtTerminateThread = NULL;
+    PETHREAD threadObject = NULL;
+    HANDLE threadHandle = NULL;
     NTSTATUS status = STATUS_SUCCESS;
 
     // 目标对象仅由 R0 解析，先清零以便所有退出路径可安全释放。
     RtlZeroMemory(&target, sizeof(target));
 
-    // 禁止请求 Idle、System 和保留的低 PID。
-    if (processId == 0UL || processId <= 4UL) {
+    // 禁止请求 Idle、System、保留低 PID 或空 TID。
+    if (processId == 0UL || processId <= 4UL || threadId == 0UL) {
         KswordARKDriverLogTerminateMessage(
             device,
             "Warn",
-            "R0 terminate-threads rejected: pid=%lu.",
-            (unsigned long)processId);
+            "R0 terminate-thread rejected: pid=%lu, tid=%lu.",
+            (unsigned long)processId,
+            (unsigned long)threadId);
         return STATUS_INVALID_PARAMETER;
     }
 
@@ -1758,8 +1765,9 @@ Return Value:
         KswordARKDriverLogTerminateMessage(
             device,
             "Warn",
-            "R0 terminate-threads target resolve failed: requestPid=%lu, status=0x%08X.",
+            "R0 terminate-thread target resolve failed: requestPid=%lu, tid=%lu, status=0x%08X.",
             (unsigned long)processId,
+            (unsigned long)threadId,
             (unsigned int)status);
         return status;
     }
@@ -1769,8 +1777,9 @@ Return Value:
         KswordARKDriverLogTerminateMessage(
             device,
             "Warn",
-            "R0 terminate-threads rejected after resolve: requestPid=%lu, cid=%lu, unique=%lu, process=%p.",
+            "R0 terminate-thread rejected after resolve: requestPid=%lu, tid=%lu, cid=%lu, unique=%lu, process=%p.",
             (unsigned long)target.RequestedProcessId,
+            (unsigned long)threadId,
             (unsigned long)target.CidProcessId,
             (unsigned long)target.UniqueProcessId,
             target.ProcessObject);
@@ -1778,20 +1787,79 @@ Return Value:
         goto Exit;
     }
 
-    // 复用已经验证的逐线程结束实现，保持枚举与动态例程解析行为一致。
-    status = KswordARKDriverTerminateProcessThreadsByPointer(
-        device,
-        &target,
-        exitStatus);
+    // 按 TID 引用 ETHREAD，再验证它仍属于请求 PID 的已解析 EPROCESS。
+    status = PsLookupThreadByThreadId(ULongToHandle(threadId), &threadObject);
+    if (!NT_SUCCESS(status)) {
+        KswordARKDriverLogTerminateMessage(
+            device,
+            "Warn",
+            "R0 terminate-thread lookup failed: requestPid=%lu, tid=%lu, status=0x%08X.",
+            (unsigned long)target.RequestedProcessId,
+            (unsigned long)threadId,
+            (unsigned int)status);
+        goto Exit;
+    }
+    if (PsGetThreadProcess(threadObject) != target.ProcessObject) {
+        KswordARKDriverLogTerminateMessage(
+            device,
+            "Warn",
+            "R0 terminate-thread ownership mismatch: requestPid=%lu, tid=%lu.",
+            (unsigned long)target.RequestedProcessId,
+            (unsigned long)threadId);
+        status = STATUS_NOT_FOUND;
+        goto Exit;
+    }
+
+    // 优先使用已存在的私有指针终止例程，保持进程结束 fallback 的兼容策略。
+    pspTerminateThreadByPointer = KswordARKDriverResolvePspTerminateThreadByPointer();
+    if (pspTerminateThreadByPointer != NULL) {
+        status = pspTerminateThreadByPointer(threadObject, exitStatus, FALSE, NULL);
+    }
+    else {
+        // 私有例程不可用时，通过内核句柄调用导出的 Zw/NtTerminateThread。
+        zwOrNtTerminateThread = KswordARKDriverResolveZwOrNtTerminateThread();
+        if (zwOrNtTerminateThread == NULL) {
+            status = STATUS_PROCEDURE_NOT_FOUND;
+        }
+        else {
+            status = ObOpenObjectByPointer(
+                threadObject,
+                OBJ_KERNEL_HANDLE,
+                NULL,
+                THREAD_TERMINATE,
+                *PsThreadType,
+                KernelMode,
+                &threadHandle);
+            if (NT_SUCCESS(status)) {
+                status = zwOrNtTerminateThread(threadHandle, exitStatus);
+            }
+        }
+    }
+
+    // 已进入终止态等价于目标线程不再可继续执行，向 R3 返回成功。
+    if (status == STATUS_THREAD_IS_TERMINATING || status == STATUS_PROCESS_IS_TERMINATING) {
+        status = STATUS_SUCCESS;
+    }
     KswordARKDriverLogTerminateMessage(
         device,
         NT_SUCCESS(status) ? "Info" : "Warn",
-        "R0 terminate-threads result: requestPid=%lu, cid=%lu, status=0x%08X.",
+        "R0 terminate-thread result: requestPid=%lu, tid=%lu, cid=%lu, status=0x%08X.",
         (unsigned long)target.RequestedProcessId,
+        (unsigned long)threadId,
         (unsigned long)target.CidProcessId,
         (unsigned int)status);
 
 Exit:
+    // Zw/Nt fallback 成功打开的内核线程句柄必须在所有退出路径关闭。
+    if (threadHandle != NULL) {
+        ZwClose(threadHandle);
+        threadHandle = NULL;
+    }
+    // TID lookup 成功后持有的 ETHREAD 引用在这里释放。
+    if (threadObject != NULL) {
+        ObDereferenceObject(threadObject);
+        threadObject = NULL;
+    }
     // 释放 CID/ActiveProcessLinks 解析过程中获得的 EPROCESS 引用。
     KswordARKDriverReleaseTerminateTarget(&target);
     return status;

@@ -483,7 +483,7 @@ private:
     void executeSuspendThreadAction();
     void executeResumeThreadAction();
     void executeTerminateThreadAction();
-    void executeR0TerminateAllOwnerThreadsAction();
+    void executeR0TerminateThreadAction();
     void updateUsageSummaryInHeader(const std::vector<DisplayRow>& displayRows);
 
     // ======== 进程活动记录与时间轴 ========
