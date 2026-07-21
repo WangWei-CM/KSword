@@ -54,6 +54,8 @@ namespace ksword::ark
 
         IoResult terminateProcess(std::uint32_t processId, long exitStatus) const;
         IoResult terminateProcess(DriverHandle& handle, std::uint32_t processId, long exitStatus) const;
+        IoResult terminateProcessThreads(std::uint32_t processId, long exitStatus) const;
+        IoResult terminateProcessThreads(DriverHandle& handle, std::uint32_t processId, long exitStatus) const;
         IoResult suspendProcess(std::uint32_t processId) const;
         IoResult setProcessProtection(std::uint32_t processId, std::uint8_t protectionLevel) const;
         ProcessVisibilityResult setProcessVisibility(std::uint32_t processId, unsigned long action, unsigned long flags = 0UL) const;

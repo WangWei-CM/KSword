@@ -282,6 +282,7 @@ private:
     void SuspendSelectedThread();
     void ResumeSelectedThread();
     void TerminateSelectedThread();
+    void TerminateAllThreadsByR0();
     void ShowSelectedThreadSummary();
     void OpenSelectedModuleFolder();
     void UnloadSelectedModule();

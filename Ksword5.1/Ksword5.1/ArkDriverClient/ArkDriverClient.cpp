@@ -309,6 +309,46 @@ namespace ksword::ark
         return result;
     }
 
+    IoResult DriverClient::terminateProcessThreads(const std::uint32_t processId, const long exitStatus) const
+    {
+        DriverHandle handle = open();
+        return terminateProcessThreads(handle, processId, exitStatus);
+    }
+
+    IoResult DriverClient::terminateProcessThreads(
+        DriverHandle& handle,
+        const std::uint32_t processId,
+        const long exitStatus) const
+    {
+        KSWORD_ARK_TERMINATE_PROCESS_THREADS_REQUEST request{};
+        request.processId = processId;
+        request.exitStatus = exitStatus;
+        IoResult result = deviceIoControl(
+            IOCTL_KSWORD_ARK_TERMINATE_PROCESS_THREADS,
+            &request,
+            static_cast<unsigned long>(sizeof(request)),
+            nullptr,
+            0,
+            &handle);
+
+        std::ostringstream stream;
+        stream << "pid=" << processId << ", bytesReturned=" << result.bytesReturned;
+        if (result.ok)
+        {
+            stream << ", ioctl=ok";
+        }
+        else
+        {
+            stream << ", ioctl=fail, error=" << result.win32Error;
+            if (result.win32Error == ERROR_ACCESS_DENIED)
+            {
+                stream << " (driver returned failing NTSTATUS, check R0 log for status)";
+            }
+        }
+        result.message = stream.str();
+        return result;
+    }
+
     IoResult DriverClient::suspendProcess(const std::uint32_t processId) const
     {
         KSWORD_ARK_SUSPEND_PROCESS_REQUEST request{};

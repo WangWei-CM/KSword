@@ -1709,3 +1709,91 @@ Exit:
     return finalStatus;
 }
 
+NTSTATUS
+KswordARKDriverTerminateProcessThreadsByPid(
+    _In_opt_ WDFDEVICE device,
+    _In_ ULONG processId,
+    _In_ NTSTATUS exitStatus
+    )
+/*++
+
+Routine Description:
+
+    Resolve a process through the existing CID-first termination resolver and
+    terminate its current threads using the retained stage#2 backend only. This
+    entry intentionally does not issue ZwTerminateProcess or clear user memory.
+
+Arguments:
+
+    device - Optional driver device used for diagnostics.
+    processId - PID-like identity supplied by the shared IOCTL request.
+    exitStatus - Exit status forwarded to every target thread termination call.
+
+Return Value:
+
+    STATUS_SUCCESS when the thread-sweep backend terminated at least one target
+    thread. Otherwise returns target-resolution or backend failure status.
+
+--*/
+{
+    KSWORD_ARK_TERMINATE_PROCESS_TARGET target;
+    NTSTATUS status = STATUS_SUCCESS;
+
+    // 目标对象仅由 R0 解析，先清零以便所有退出路径可安全释放。
+    RtlZeroMemory(&target, sizeof(target));
+
+    // 禁止请求 Idle、System 和保留的低 PID。
+    if (processId == 0UL || processId <= 4UL) {
+        KswordARKDriverLogTerminateMessage(
+            device,
+            "Warn",
+            "R0 terminate-threads rejected: pid=%lu.",
+            (unsigned long)processId);
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    // 使用完整进程终止同一套 CID 优先解析，兼容被改写 PID 的目标。
+    status = KswordARKDriverResolveTerminateTarget(device, processId, &target);
+    if (!NT_SUCCESS(status)) {
+        KswordARKDriverLogTerminateMessage(
+            device,
+            "Warn",
+            "R0 terminate-threads target resolve failed: requestPid=%lu, status=0x%08X.",
+            (unsigned long)processId,
+            (unsigned int)status);
+        return status;
+    }
+
+    // 解析后的真实对象仍必须排除 System 进程。
+    if (target.CidProcessId <= 4UL || target.ProcessObject == PsInitialSystemProcess) {
+        KswordARKDriverLogTerminateMessage(
+            device,
+            "Warn",
+            "R0 terminate-threads rejected after resolve: requestPid=%lu, cid=%lu, unique=%lu, process=%p.",
+            (unsigned long)target.RequestedProcessId,
+            (unsigned long)target.CidProcessId,
+            (unsigned long)target.UniqueProcessId,
+            target.ProcessObject);
+        status = STATUS_INVALID_PARAMETER;
+        goto Exit;
+    }
+
+    // 复用已经验证的逐线程结束实现，保持枚举与动态例程解析行为一致。
+    status = KswordARKDriverTerminateProcessThreadsByPointer(
+        device,
+        &target,
+        exitStatus);
+    KswordARKDriverLogTerminateMessage(
+        device,
+        NT_SUCCESS(status) ? "Info" : "Warn",
+        "R0 terminate-threads result: requestPid=%lu, cid=%lu, status=0x%08X.",
+        (unsigned long)target.RequestedProcessId,
+        (unsigned long)target.CidProcessId,
+        (unsigned int)status);
+
+Exit:
+    // 释放 CID/ActiveProcessLinks 解析过程中获得的 EPROCESS 引用。
+    KswordARKDriverReleaseTerminateTarget(&target);
+    return status;
+}
+

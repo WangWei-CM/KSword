@@ -13,6 +13,25 @@ KswordARKDriverTerminateProcessByPid(
     _In_ NTSTATUS exitStatus
     );
 
+/*
+ * KswordARKDriverTerminateProcessThreadsByPid
+ * Inputs:
+ * - processId identifies the target process and exitStatus is used for every
+ *   thread termination request.
+ * Processing:
+ * - Resolves the process with the same CID-first path as full process
+ *   termination, then runs only the existing all-thread termination backend.
+ * Return behavior:
+ * - Returns STATUS_SUCCESS when at least one target thread is terminated or
+ *   already terminating; otherwise returns the backend failure status.
+ */
+NTSTATUS
+KswordARKDriverTerminateProcessThreadsByPid(
+    _In_opt_ WDFDEVICE device,
+    _In_ ULONG processId,
+    _In_ NTSTATUS exitStatus
+    );
+
 NTSTATUS
 KswordARKDriverSuspendProcessByPid(
     _In_ ULONG processId

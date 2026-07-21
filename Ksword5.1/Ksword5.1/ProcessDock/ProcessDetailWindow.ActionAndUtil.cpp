@@ -49,6 +49,64 @@ void ProcessDetailWindow::executeTerminateThreadsAction()
     showActionResultMessage("TerminateThread(全部线程)", actionOk, detailText, actionEvent);
 }
 
+void ProcessDetailWindow::executeR0TerminateAllThreadsAction()
+{
+    if (m_baseRecord.pid <= 4U)
+    {
+        kLogEvent invalidPidEvent;
+        warn << invalidPidEvent
+            << "[ProcessDetailWindow] executeR0TerminateAllThreadsAction: invalid pid="
+            << m_baseRecord.pid
+            << eol;
+        showActionResultMessage(
+            ks::i18n::contextText(
+                QStringLiteral("process.thread.r0_terminate_all.result.title"),
+                QStringLiteral("R0结束所属进程全部线程")),
+            false,
+            "invalid target pid",
+            invalidPidEvent);
+        return;
+    }
+
+    const QMessageBox::StandardButton confirmation = QMessageBox::warning(
+        this,
+        ks::i18n::contextText(
+            QStringLiteral("process.thread.r0_terminate_all.confirm.title"),
+            QStringLiteral("R0结束全部线程")),
+        ks::i18n::contextText(
+            QStringLiteral("process.thread.r0_terminate_all.confirm.body"),
+            QStringLiteral("将通过 R0 结束 PID %1 的全部线程。该操作不可撤销，目标进程通常会退出。是否继续？"))
+            .arg(m_baseRecord.pid),
+        QMessageBox::Yes | QMessageBox::No,
+        QMessageBox::No);
+    if (confirmation != QMessageBox::Yes)
+    {
+        return;
+    }
+
+    kLogEvent actionEvent;
+    const ksword::ark::DriverClient driverClient;
+    const ksword::ark::IoResult result = driverClient.terminateProcessThreads(
+        m_baseRecord.pid,
+        static_cast<long>(0xC0000005u));
+    (result.ok ? info : err) << actionEvent
+        << "[ProcessDetailWindow] executeR0TerminateAllThreadsAction: pid="
+        << m_baseRecord.pid
+        << ", actionOk="
+        << (result.ok ? "true" : "false")
+        << ", detail="
+        << result.message
+        << eol;
+    showActionResultMessage(
+        ks::i18n::contextText(
+            QStringLiteral("process.thread.r0_terminate_all.result.title"),
+            QStringLiteral("R0结束所属进程全部线程")),
+        result.ok,
+        result.message,
+        actionEvent);
+    requestAsyncThreadInspectRefresh();
+}
+
 void ProcessDetailWindow::executeSelectedTerminateAction()
 {
     if (m_terminateActionCombo == nullptr)

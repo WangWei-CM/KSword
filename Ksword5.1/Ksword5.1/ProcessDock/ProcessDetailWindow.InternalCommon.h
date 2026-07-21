@@ -12,6 +12,7 @@
 #include "ThreadStackWindow.h"
 
 #include "../ArkDriverClient/ArkDriverClient.h"
+#include "../Internationalization/LanguageManager.h"
 #include "../OnlineScan/SandboxUploadActions.h"
 #include "../theme.h"
 #include "../UI/CodeEditorWidget.h"

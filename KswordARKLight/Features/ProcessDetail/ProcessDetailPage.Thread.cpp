@@ -1,5 +1,7 @@
 #include "../../Core/Win32Lean.h"
 
+#include "../../../Ksword5.1/Ksword5.1/ArkDriverClient/ArkDriverClient.h"
+
 #include <commctrl.h>
 
 #include "ProcessDetailPage.h"
@@ -20,6 +22,7 @@ constexpr UINT kThreadShowDetailCommand = 64104;
 constexpr UINT kThreadSuspendCommand = 64105;
 constexpr UINT kThreadResumeCommand = 64106;
 constexpr UINT kThreadTerminateCommand = 64107;
+constexpr UINT kThreadR0TerminateAllCommand = 64108;
 
 constexpr UINT_PTR kThreadLayoutSubclassId = 0x54485244U; // "THRD"
 constexpr UINT_PTR kThreadLayoutTimerId = 0x54485245U;
@@ -175,6 +178,31 @@ std::wstring Win32ErrorText(const wchar_t* operation, DWORD error) {
     if (message) {
         ::LocalFree(message);
     }
+    return result;
+}
+
+std::wstring Utf8ToWide(const std::string& text) {
+    if (text.empty()) {
+        return {};
+    }
+    const int required = ::MultiByteToWideChar(
+        CP_UTF8,
+        0,
+        text.data(),
+        static_cast<int>(text.size()),
+        nullptr,
+        0);
+    if (required <= 0) {
+        return { text.begin(), text.end() };
+    }
+    std::wstring result(static_cast<std::size_t>(required), L'\0');
+    ::MultiByteToWideChar(
+        CP_UTF8,
+        0,
+        text.data(),
+        static_cast<int>(text.size()),
+        result.data(),
+        required);
     return result;
 }
 
@@ -355,6 +383,7 @@ bool ProcessDetailPage::HandleThreadContextMenu(POINT screenPoint) {
     ::AppendMenuW(menu, MF_STRING, kThreadSuspendCommand, L"挂起线程");
     ::AppendMenuW(menu, MF_STRING, kThreadResumeCommand, L"恢复线程");
     ::AppendMenuW(menu, MF_STRING, kThreadTerminateCommand, L"终止线程");
+    ::AppendMenuW(menu, MF_STRING, kThreadR0TerminateAllCommand, L"R0结束所属进程全部线程");
 
     const UINT command = ::TrackPopupMenu(
         menu,
@@ -374,6 +403,7 @@ bool ProcessDetailPage::HandleThreadContextMenu(POINT screenPoint) {
     case kThreadSuspendCommand: SuspendSelectedThread(); break;
     case kThreadResumeCommand: ResumeSelectedThread(); break;
     case kThreadTerminateCommand: TerminateSelectedThread(); break;
+    case kThreadR0TerminateAllCommand: TerminateAllThreadsByR0(); break;
     default: break;
     }
     return true;
@@ -474,6 +504,48 @@ void ProcessDetailPage::TerminateSelectedThread() {
     }
     RefreshAll();
     SetPageStatus(TabIndex::Threads, ThreadStatus, L"● 已请求终止线程 " + DecimalText(threadId));
+}
+
+void ProcessDetailPage::TerminateAllThreadsByR0() {
+    HWND list = Control(TabIndex::Threads, ThreadList);
+    std::size_t index = 0;
+    if (!SelectedItemData(list, index) || index >= snapshot_.threads.size()) {
+        SetPageStatus(TabIndex::Threads, ThreadStatus, L"● 没有选中线程。");
+        return;
+    }
+
+    const DWORD processId = snapshot_.threads[index].ownerProcessId;
+    if (processId == 0 || processId <= 4) {
+        SetPageStatus(TabIndex::Threads, ThreadStatus, L"● 拒绝结束系统或无效 PID 的线程。");
+        return;
+    }
+    const int answer = ::MessageBoxW(
+        hwnd_,
+        (L"将通过 R0 结束 PID " + DecimalText(processId) + L" 的全部线程。该操作不可撤销，目标进程通常会退出。是否继续？").c_str(),
+        L"R0结束全部线程",
+        MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2);
+    if (answer != IDYES) {
+        SetPageStatus(TabIndex::Threads, ThreadStatus, L"● 已取消 R0 结束全部线程。");
+        return;
+    }
+
+    const ksword::ark::DriverClient driverClient;
+    const ksword::ark::IoResult result = driverClient.terminateProcessThreads(
+        processId,
+        static_cast<long>(0xC0000005u));
+    if (!result.ok) {
+        SetPageStatus(
+            TabIndex::Threads,
+            ThreadStatus,
+            L"● R0结束全部线程失败 | " + Utf8ToWide(result.message));
+        return;
+    }
+
+    RefreshAll();
+    SetPageStatus(
+        TabIndex::Threads,
+        ThreadStatus,
+        L"● R0 已请求结束 PID " + DecimalText(processId) + L" 的全部线程。");
 }
 
 void ProcessDetailPage::ShowSelectedThreadSummary() {

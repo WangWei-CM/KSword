@@ -17,6 +17,7 @@
 #include <QLineEdit>
 #include <QMenu>
 #include <QMetaObject>
+#include <QMessageBox>
 #include <QPushButton>
 #include <QRunnable>
 #include <QSignalBlocker>
@@ -1448,15 +1449,23 @@ void ProcessDock::showThreadTableContextMenu(const QPoint& localPosition)
     QAction* terminateAction = contextMenu.addAction(
         blueTintedIcon(":/Icon/process_terminate.svg"),
         "结束线程");
+    QAction* r0TerminateAllOwnerThreadsAction = contextMenu.addAction(
+        blueTintedIcon(":/Icon/process_terminate.svg"),
+        ks::i18n::contextText(
+            QStringLiteral("process.thread.menu.r0_terminate_all"),
+            QStringLiteral("R0结束所属进程全部线程")));
 
     const ks::process::SystemThreadRecord* clickedThreadRecord = selectedThreadRecord();
     const bool clickedThreadIsR0Only =
         clickedThreadRecord != nullptr &&
         (clickedThreadRecord->isR0OnlyThread ||
             ((clickedThreadRecord->r0ThreadFlags & KSWORD_ARK_THREAD_FLAG_HIDDEN_FROM_ACTIVE_THREAD_LIST) != 0U));
+    const bool hasR0TerminateTarget =
+        clickedThreadRecord != nullptr && clickedThreadRecord->ownerPid > 4U;
+    r0TerminateAllOwnerThreadsAction->setEnabled(hasR0TerminateTarget);
     if (clickedThreadIsR0Only)
     {
-        // R0-only/CID-only 行只做检测展示：不把 suspect TID 交给现有 R3 操作动作。
+        // R0-only/CID-only 行不把 suspect TID 交给 R3 操作，但允许按已验证所属 PID 走 R0 全线程结束。
         stackAction->setEnabled(false);
         suspendAction->setEnabled(false);
         resumeAction->setEnabled(false);
@@ -1465,6 +1474,10 @@ void ProcessDock::showThreadTableContextMenu(const QPoint& localPosition)
         suspendAction->setToolTip(QStringLiteral("R0-only / hidden suspect 行只读展示，不执行线程操作。"));
         resumeAction->setToolTip(QStringLiteral("R0-only / hidden suspect 行只读展示，不执行线程操作。"));
         terminateAction->setToolTip(QStringLiteral("R0-only / hidden suspect 行只读展示，不执行线程操作。"));
+        r0TerminateAllOwnerThreadsAction->setToolTip(
+            ks::i18n::contextText(
+                QStringLiteral("process.thread.r0_terminate_all.suspect.tooltip"),
+                QStringLiteral("R0-only / hidden suspect 行可按所属 PID 结束目标进程的全部线程。")));
     }
 
     m_threadContextMenuVisible = true;
@@ -1490,6 +1503,7 @@ void ProcessDock::showThreadTableContextMenu(const QPoint& localPosition)
     else if (selectedAction == suspendAction) { executeSuspendThreadAction(); }
     else if (selectedAction == resumeAction) { executeResumeThreadAction(); }
     else if (selectedAction == terminateAction) { executeTerminateThreadAction(); }
+    else if (selectedAction == r0TerminateAllOwnerThreadsAction) { executeR0TerminateAllOwnerThreadsAction(); }
 
     clearThreadContextActionBinding();
 }
@@ -1668,4 +1682,53 @@ void ProcessDock::executeTerminateThreadAction()
         << eol;
     showActionResultMessage("结束线程", actionOk, detailText, actionEvent);
     requestAsyncThreadRefresh(true);
+}
+
+void ProcessDock::executeR0TerminateAllOwnerThreadsAction()
+{
+    const ks::process::SystemThreadRecord* threadRecord = selectedThreadRecord();
+    if (threadRecord == nullptr || threadRecord->ownerPid == 0U)
+    {
+        return;
+    }
+
+    const QMessageBox::StandardButton confirmation = QMessageBox::warning(
+        this,
+        ks::i18n::contextText(
+            QStringLiteral("process.thread.r0_terminate_all.confirm.title"),
+            QStringLiteral("R0结束全部线程")),
+        ks::i18n::contextText(
+            QStringLiteral("process.thread.r0_terminate_all.confirm.body"),
+            QStringLiteral("将通过 R0 结束 PID %1 的全部线程。该操作不可撤销，目标进程通常会退出。是否继续？"))
+            .arg(threadRecord->ownerPid),
+        QMessageBox::Yes | QMessageBox::No,
+        QMessageBox::No);
+    if (confirmation != QMessageBox::Yes)
+    {
+        return;
+    }
+
+    kLogEvent actionEvent;
+    const ksword::ark::DriverClient driverClient;
+    const ksword::ark::IoResult result = driverClient.terminateProcessThreads(
+        threadRecord->ownerPid,
+        static_cast<long>(0xC0000005u));
+    const std::string detailText = threadIoMessageStdString(result.message);
+    (result.ok ? info : err) << actionEvent
+        << "[ProcessDock] executeR0TerminateAllOwnerThreadsAction: pid="
+        << threadRecord->ownerPid
+        << ", actionOk="
+        << (result.ok ? "true" : "false")
+        << ", detail="
+        << detailText
+        << eol;
+    showActionResultMessage(
+        ks::i18n::contextText(
+            QStringLiteral("process.thread.r0_terminate_all.result.title"),
+            QStringLiteral("R0结束所属进程全部线程")),
+        result.ok,
+        detailText,
+        actionEvent);
+    requestAsyncThreadRefresh(true);
+    requestAsyncRefresh(true);
 }

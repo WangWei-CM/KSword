@@ -1285,6 +1285,13 @@ void ProcessDetailWindow::initializeThreadTab()
             QIcon(QStringLiteral(":/Icon/process_copy_row.svg")),
             QStringLiteral("复制当前行"));
         copyRowAction->setEnabled(m_threadInspectTable->currentRow() >= 0);
+        QAction* r0TerminateAllThreadsAction = menu.addAction(
+            QIcon(QStringLiteral(":/Icon/process_terminate.svg")),
+            ks::i18n::contextText(
+                QStringLiteral("process.thread.menu.r0_terminate_all"),
+                QStringLiteral("R0结束所属进程全部线程")));
+        r0TerminateAllThreadsAction->setEnabled(
+            m_threadInspectTable->currentRow() >= 0 && m_baseRecord.pid > 4U);
         menu.addSeparator();
         QAction* uploadVirusTotalAction = ks::online_scan::addVirusTotalSandboxMenu(
             &menu,
@@ -1309,6 +1316,11 @@ void ProcessDetailWindow::initializeThreadTab()
         QAction* selectedAction = menu.exec(m_threadInspectTable->viewport()->mapToGlobal(localPosition));
         if (selectedAction == uploadVirusTotalAction)
         {
+            return;
+        }
+        if (selectedAction == r0TerminateAllThreadsAction)
+        {
+            executeR0TerminateAllThreadsAction();
             return;
         }
         if (selectedAction != copyRowAction)
