@@ -20,6 +20,9 @@ Environment:
 #include <ntstrsafe.h>
 #include <stdarg.h>
 
+// 注册表 IOCTL 请求副本的非分页池标签，避免 METHOD_BUFFERED 输出覆写输入包。
+#define KSWORD_ARK_REGISTRY_IOCTL_TAG 'iRsK'
+
 static VOID
 KswordARKRegistryIoctlLog(
     _In_ WDFDEVICE Device,
@@ -97,6 +100,7 @@ Return Value:
 --*/
 {
     KSWORD_ARK_READ_REGISTRY_VALUE_REQUEST* readRequest = NULL;
+    KSWORD_ARK_READ_REGISTRY_VALUE_REQUEST readRequestCopy;
     PVOID inputBuffer = NULL;
     PVOID outputBuffer = NULL;
     size_t actualInputLength = 0U;
@@ -121,6 +125,13 @@ Return Value:
         return status;
     }
 
+    readRequest = (KSWORD_ARK_READ_REGISTRY_VALUE_REQUEST*)inputBuffer;
+
+    // METHOD_BUFFERED 的输入与输出可能指向同一 SystemBuffer。先复制完整请求，
+    // 后续取得并初始化响应时不会破坏 version、keyPath、valueName 与读取长度参数。
+    RtlCopyMemory(&readRequestCopy, readRequest, sizeof(readRequestCopy));
+    readRequest = &readRequestCopy;
+
     status = KswordARKRetrieveRequiredOutputBuffer(
         Request,
         sizeof(KSWORD_ARK_READ_REGISTRY_VALUE_RESPONSE),
@@ -131,7 +142,6 @@ Return Value:
         return status;
     }
 
-    readRequest = (KSWORD_ARK_READ_REGISTRY_VALUE_REQUEST*)inputBuffer;
     status = KswordARKDriverReadRegistryValue(
         outputBuffer,
         actualOutputLength,
@@ -169,6 +179,7 @@ KswordARKRegistryIoctlEnumKey(
     )
 {
     KSWORD_ARK_ENUM_REGISTRY_KEY_REQUEST* enumRequest = NULL;
+    KSWORD_ARK_ENUM_REGISTRY_KEY_REQUEST enumRequestCopy;
     PVOID inputBuffer = NULL;
     PVOID outputBuffer = NULL;
     size_t actualInputLength = 0U;
@@ -190,6 +201,12 @@ KswordARKRegistryIoctlEnumKey(
     }
 
     enumRequest = (KSWORD_ARK_ENUM_REGISTRY_KEY_REQUEST*)inputBuffer;
+
+    // 枚举请求也必须在取得输出缓冲前复制。输出响应的 lastStatus 字段恰好会
+    // 覆盖请求 keyPath 的起始位置，导致后端报告 STATUS_OBJECT_PATH_SYNTAX_BAD。
+    RtlCopyMemory(&enumRequestCopy, enumRequest, sizeof(enumRequestCopy));
+    enumRequest = &enumRequestCopy;
+
     if ((enumRequest->flags & ~(KSWORD_ARK_REGISTRY_ENUM_FLAG_INCLUDE_SUBKEYS | KSWORD_ARK_REGISTRY_ENUM_FLAG_INCLUDE_VALUES)) != 0UL) {
         KswordARKRegistryIoctlLog(Device, "Warn", "R0 registry enum ioctl: flags rejected, flags=0x%08X.", (unsigned int)enumRequest->flags);
         return STATUS_INVALID_PARAMETER;
@@ -235,12 +252,13 @@ KswordARKRegistryIoctlOperation(
     )
 {
     PVOID inputBuffer = NULL;
+    PVOID requestCopy = NULL;
     PVOID outputBuffer = NULL;
     size_t actualInputLength = 0U;
     size_t actualOutputLength = 0U;
     NTSTATUS status = STATUS_SUCCESS;
 
-    if (BytesReturned == NULL || Backend == NULL) {
+    if (BytesReturned == NULL || Backend == NULL || InputStructureBytes == 0U) {
         return STATUS_INVALID_PARAMETER;
     }
     *BytesReturned = 0U;
@@ -257,13 +275,32 @@ KswordARKRegistryIoctlOperation(
         return status;
     }
 
+    // 写操作请求大小不一，使用非分页池副本统一规避 METHOD_BUFFERED 的输入输出
+    // 共用 SystemBuffer 行为，避免后端清零 response 时毁坏 keyPath 或写入数据。
+#pragma warning(push)
+#pragma warning(disable:4996)
+    requestCopy = ExAllocatePoolWithTag(
+        NonPagedPoolNx,
+        InputStructureBytes,
+        KSWORD_ARK_REGISTRY_IOCTL_TAG);
+#pragma warning(pop)
+    if (requestCopy == NULL) {
+        KswordARKRegistryIoctlLog(Device, "Error", "R0 registry %s ioctl: request copy allocation failed.", OperationName);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+    RtlCopyMemory(requestCopy, inputBuffer, InputStructureBytes);
+
     status = KswordARKRetrieveRequiredOutputBuffer(Request, sizeof(KSWORD_ARK_REGISTRY_OPERATION_RESPONSE), &outputBuffer, &actualOutputLength);
     if (!NT_SUCCESS(status)) {
+        // 输出缓冲校验失败时也要释放已经分配的请求副本。
+        ExFreePoolWithTag(requestCopy, KSWORD_ARK_REGISTRY_IOCTL_TAG);
         KswordARKRegistryIoctlLog(Device, "Error", "R0 registry %s ioctl: output invalid, status=0x%08X.", OperationName, (unsigned int)status);
         return status;
     }
 
-    status = Backend(outputBuffer, actualOutputLength, inputBuffer, BytesReturned);
+    status = Backend(outputBuffer, actualOutputLength, requestCopy, BytesReturned);
+    // 后端已同步读取副本，请求生命周期到此结束。
+    ExFreePoolWithTag(requestCopy, KSWORD_ARK_REGISTRY_IOCTL_TAG);
     if (!NT_SUCCESS(status)) {
         KswordARKRegistryIoctlLog(Device, "Error", "R0 registry %s failed before response: status=0x%08X.", OperationName, (unsigned int)status);
         return status;
