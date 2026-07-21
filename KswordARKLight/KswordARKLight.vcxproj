@@ -217,6 +217,7 @@
     <ClCompile Include="..\Ksword5.1\Ksword5.1\ArkDriverClient\ArkDriverProcess.cpp" />
     <ClCompile Include="..\Ksword5.1\Ksword5.1\ArkDriverClient\ArkDriverRegistry.cpp" />
     <ClCompile Include="..\Ksword5.1\Ksword5.1\ArkDriverClient\ArkDriverSection.cpp" />
+    <ClCompile Include="..\Ksword5.1\Ksword5.1\ksword\process\process.cpp" />
     <ClCompile Include="..\Ksword5.1\Ksword5.1\ksword\string\string.cpp" />
   </ItemGroup>
   <ItemGroup>
@@ -332,6 +333,7 @@
     <ClInclude Include="..\Ksword5.1\Ksword5.1\ArkDriverClient\ArkDriverClient.h" />
     <ClInclude Include="..\Ksword5.1\Ksword5.1\ArkDriverClient\ArkDriverError.h" />
     <ClInclude Include="..\Ksword5.1\Ksword5.1\ArkDriverClient\ArkDriverTypes.h" />
+    <ClInclude Include="..\Ksword5.1\Ksword5.1\ksword\process\process.h" />
     <ClInclude Include="..\Ksword5.1\Ksword5.1\ksword\string\string.h" />
     <ClInclude Include="..\shared\KswordArkLogProtocol.h" />
     <ClInclude Include="..\shared\driver\KswordArkAlpcIoctl.h" />

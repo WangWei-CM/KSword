@@ -79,6 +79,9 @@
     <Filter Include="ksword\string">
       <UniqueIdentifier>{11B7D9D1-747D-5D13-A410-986B80A3FFA3}</UniqueIdentifier>
     </Filter>
+    <Filter Include="ksword\process">
+      <UniqueIdentifier>{67A05251-9E73-5C8E-9BA3-5BA59EA09048}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="KswordARKLight.rc">
@@ -456,6 +459,9 @@
     <ClCompile Include="..\Ksword5.1\Ksword5.1\ArkDriverClient\ArkDriverSection.cpp">
       <Filter>ArkDriverClient</Filter>
     </ClCompile>
+    <ClCompile Include="..\Ksword5.1\Ksword5.1\ksword\process\process.cpp">
+      <Filter>ksword\process</Filter>
+    </ClCompile>
     <ClCompile Include="..\Ksword5.1\Ksword5.1\ksword\string\string.cpp">
       <Filter>ksword\string</Filter>
     </ClCompile>
@@ -796,6 +802,9 @@
     </ClInclude>
     <ClInclude Include="..\Ksword5.1\Ksword5.1\ArkDriverClient\ArkDriverTypes.h">
       <Filter>ArkDriverClient</Filter>
+    </ClInclude>
+    <ClInclude Include="..\Ksword5.1\Ksword5.1\ksword\process\process.h">
+      <Filter>ksword\process</Filter>
     </ClInclude>
     <ClInclude Include="..\Ksword5.1\Ksword5.1\ksword\string\string.h">
       <Filter>ksword\string</Filter>

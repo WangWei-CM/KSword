@@ -11,6 +11,7 @@ enum class ProcessActionId {
     CopyCell,
     CopyRow,
     OpenDetails,
+    TerminateProcessMultiMethod,
     TerminateProcess,
     R0TerminateProcess,
     R0SuspendProcess,

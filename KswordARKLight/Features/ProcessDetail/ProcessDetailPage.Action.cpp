@@ -14,6 +14,10 @@ namespace {
 
 using Ksword::Features::Process::ProcessActionId;
 
+constexpr LPARAM kTerminateModeMultiMethod = 1;
+constexpr LPARAM kTerminateModeWin32 = 2;
+constexpr LPARAM kTerminateModeAllThreads = 3;
+
 void AddComboItem(HWND combo, const wchar_t* text, LPARAM data) {
     const LRESULT index = ::SendMessageW(combo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(text));
     if (index >= 0) {
@@ -66,9 +70,9 @@ bool ProcessDetailPage::CreateActionTab() {
     AddLabel(tab, 0, L"结束方案", 18, 32, 88, 28);
     HWND terminateMode = AddCombo(tab, ActionTerminateMode, 110, 30, -104, 220);
     AddButton(tab, ActionTerminate, L"执行", -86, 30, 74, 32);
-    AddComboItem(terminateMode, L"结束进程(组合方法链)", 2);
-    AddComboItem(terminateMode, L"TerminateProcess", 0);
-    AddComboItem(terminateMode, L"TerminateThread(全部线程)", 1);
+    AddComboItem(terminateMode, L"结束进程(组合方法链)", kTerminateModeMultiMethod);
+    AddComboItem(terminateMode, L"TerminateProcess", kTerminateModeWin32);
+    AddComboItem(terminateMode, L"TerminateThread(全部线程)", kTerminateModeAllThreads);
     ::SendMessageW(terminateMode, CB_SETCURSEL, 0, 0);
 
     AddLabel(tab, 0, L"运行控制", 18, 70, 88, 28);
@@ -124,13 +128,23 @@ bool ProcessDetailPage::HandleActionCommand(int controlId) {
     case ActionTerminate: {
         HWND combo = Control(TabIndex::Actions, ActionTerminateMode);
         const int selected = static_cast<int>(::SendMessageW(combo, CB_GETCURSEL, 0, 0));
-        if (selected == 2) {
+        const LPARAM mode = selected >= 0
+            ? ::SendMessageW(combo, CB_GETITEMDATA, static_cast<WPARAM>(selected), 0)
+            : -1;
+        if (mode == kTerminateModeAllThreads) {
             if (!ConfirmDanger(hwnd_, L"将逐个终止目标进程的全部线程。该操作不可撤销，是否继续？")) {
                 return true;
             }
             std::wstring detail;
             const bool ok = TerminateAllThreads(processId_, detail);
             ::MessageBoxW(hwnd_, detail.c_str(), L"结束进程", MB_OK | (ok ? MB_ICONINFORMATION : MB_ICONWARNING));
+            return true;
+        }
+        if (mode == kTerminateModeMultiMethod) {
+            if (!ConfirmDanger(hwnd_, L"将按多种结束方法依次处理目标进程。未保存的数据会丢失，是否继续？")) {
+                return true;
+            }
+            ExecuteProcessAction(static_cast<int>(ProcessActionId::TerminateProcessMultiMethod));
             return true;
         }
         if (!ConfirmDanger(hwnd_, L"即将结束目标进程。未保存的数据会丢失，是否继续？")) {

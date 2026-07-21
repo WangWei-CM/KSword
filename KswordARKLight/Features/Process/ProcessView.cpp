@@ -1513,7 +1513,7 @@ void ShowContextMenu(ProcessViewState& state, POINT screenPoint) {
 
     HMENU processMenu = ::CreatePopupMenu();
     appendAction(processMenu, ProcessActionId::OpenDetails, L"进程详细信息", singleProcess);
-    appendAction(processMenu, ProcessActionId::TerminateProcess, L"结束进程", hasProcessSelection);
+    appendAction(processMenu, ProcessActionId::TerminateProcessMultiMethod, L"结束进程(组合方法链)", hasProcessSelection);
     appendAction(processMenu, ProcessActionId::SuspendProcess, L"挂起进程", hasProcessSelection);
     appendAction(processMenu, ProcessActionId::ResumeProcess, L"恢复进程", hasProcessSelection);
     appendAction(processMenu, ProcessActionId::OpenFolder, L"打开所在目录", singleProcess);

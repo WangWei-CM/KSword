@@ -1,16 +1,19 @@
 #include "ProcessActions.h"
 
 #include "../../../Ksword5.1/Ksword5.1/ArkDriverClient/ArkDriverClient.h"
+#include "../../../Ksword5.1/Ksword5.1/ksword/process/process.h"
 #include "../../Core\Common.h"
 
 #include <algorithm>
 #include <cstring>
 #include <cstdint>
 #include <fstream>
+#include <functional>
 #include <iomanip>
 #include <shellapi.h>
 #include <sstream>
 #include <string>
+#include <tlhelp32.h>
 
 #ifndef SECURITY_MANDATORY_MEDIUM_PLUS_RID
 #define SECURITY_MANDATORY_MEDIUM_PLUS_RID (0x00002100L)
@@ -237,6 +240,123 @@ void AppendIoLine(std::wstring& detail, const wchar_t* operation, bool ok, const
 // original KswordARK R0 helpers.
 bool IsProtectedSystemPid(DWORD pid) {
     return pid == 0 || pid <= 4;
+}
+
+// IsProcessPresentBySnapshot checks target liveness with the same Toolhelp
+// snapshot semantics as the full ProcessDock aggregate termination action.
+// A failed snapshot is conservatively treated as "still present" so a
+// transient query failure cannot report a process as terminated.
+bool IsProcessPresentBySnapshot(DWORD pid, bool* queryOkOut) {
+    if (queryOkOut) {
+        *queryOkOut = false;
+    }
+
+    HANDLE snapshot = ::CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snapshot == INVALID_HANDLE_VALUE) {
+        return true;
+    }
+
+    PROCESSENTRY32W entry{};
+    entry.dwSize = sizeof(entry);
+    if (!::Process32FirstW(snapshot, &entry)) {
+        ::CloseHandle(snapshot);
+        return true;
+    }
+
+    bool present = false;
+    do {
+        if (entry.th32ProcessID == pid) {
+            present = true;
+            break;
+        }
+    } while (::Process32NextW(snapshot, &entry));
+
+    ::CloseHandle(snapshot);
+    if (queryOkOut) {
+        *queryOkOut = true;
+    }
+    return present;
+}
+
+// ExecuteMultiMethodTerminate mirrors the full ProcessDock right-click action:
+// each target is checked after every method and the chain stops immediately
+// once its exit has been confirmed. The two-round cap prevents an unresponsive
+// target from leaving the Light UI in an unbounded operation.
+ProcessActionResult ExecuteMultiMethodTerminate(const std::vector<DWORD>& selectedPids) {
+    ProcessActionResult result;
+    result.title = L"结束进程(组合方法链)";
+    result.success = true;
+
+    struct TerminateMethodEntry {
+        const wchar_t* methodName = nullptr;
+        std::function<bool(std::uint32_t, std::string*)> invoke;
+    };
+
+    const std::vector<TerminateMethodEntry> methods{
+        { L"TerminateProcess(Kernel32)", [](std::uint32_t pid, std::string* detail) { return ks::process::TerminateProcessByWin32(pid, detail); } },
+        { L"NtTerminateProcess/ZwTerminateProcess", [](std::uint32_t pid, std::string* detail) { return ks::process::TerminateProcessByNtNative(pid, detail); } },
+        { L"WTSTerminateProcess(WTS API)", [](std::uint32_t pid, std::string* detail) { return ks::process::TerminateProcessByWtsApi(pid, detail); } },
+        { L"WinStationTerminateProcess(winsta)", [](std::uint32_t pid, std::string* detail) { return ks::process::TerminateProcessByWinStationApi(pid, detail); } },
+        { L"TerminateJobObject(Job)", [](std::uint32_t pid, std::string* detail) { return ks::process::TerminateProcessByJobObject(pid, detail); } },
+        { L"NtTerminateJobObject/ZwTerminateJobObject", [](std::uint32_t pid, std::string* detail) { return ks::process::TerminateProcessByNtJobObject(pid, detail); } },
+        { L"RmShutdown(Restart Manager)", [](std::uint32_t pid, std::string* detail) { return ks::process::TerminateProcessByRestartManager(pid, false, detail); } },
+        { L"RmShutdown(Restart Manager, force)", [](std::uint32_t pid, std::string* detail) { return ks::process::TerminateProcessByRestartManager(pid, true, detail); } },
+        { L"DuplicateHandle(-1)+TerminateProcess", [](std::uint32_t pid, std::string* detail) { return ks::process::TerminateProcessByDuplicateHandlePseudo(pid, detail); } },
+        { L"TerminateThread(全部线程)", [](std::uint32_t pid, std::string* detail) { return ks::process::TerminateAllThreadsByPid(pid, detail); } },
+        { L"NtTerminateThread/ZwTerminateThread(全部线程)", [](std::uint32_t pid, std::string* detail) { return ks::process::TerminateAllThreadsByPidNtNative(pid, detail); } },
+        { L"DebugActiveProcess 调试附加", [](std::uint32_t pid, std::string* detail) { return ks::process::TerminateProcessByDebugAttach(pid, detail); } },
+        { L"ntsd -c q -p <pid>", [](std::uint32_t pid, std::string* detail) { return ks::process::TerminateProcessByNtsdCommand(pid, detail); } },
+        { L"NtUnmapViewOfSection 卸载 ntdll.dll", [](std::uint32_t pid, std::string* detail) { return ks::process::TerminateProcessByNtUnmapNtdll(pid, detail); } }
+    };
+
+    for (DWORD pid : selectedPids) {
+        if (IsProtectedSystemPid(pid)) {
+            AppendIoLine(result.detail, pid, L"组合结束", false, L"protected system PID");
+            result.success = false;
+            continue;
+        }
+
+        bool queryOk = false;
+        if (!IsProcessPresentBySnapshot(pid, &queryOk)) {
+            AppendIoLine(result.detail, pid, L"组合结束", true, L"目标进程已不存在，无需执行结束动作。");
+            continue;
+        }
+
+        std::wostringstream detail;
+        detail << L"PID " << pid;
+        if (!queryOk) {
+            detail << L" | 初始存在性检查失败，继续执行方法链";
+        }
+
+        bool processExited = false;
+        constexpr int kTerminateRoundLimit = 2;
+        for (int round = 1; round <= kTerminateRoundLimit && !processExited; ++round) {
+            for (const TerminateMethodEntry& method : methods) {
+                std::string methodDetail;
+                const bool invokeOk = method.invoke(pid, &methodDetail);
+                bool postQueryOk = false;
+                const bool stillPresent = IsProcessPresentBySnapshot(pid, &postQueryOk);
+                detail << L"\r\n  Round " << round << L" | " << method.methodName
+                       << L" | " << (invokeOk ? L"调用成功" : L"调用失败")
+                       << L" | " << Utf8ToWide(methodDetail.empty() ? "无附加信息" : methodDetail.c_str());
+                if (postQueryOk) {
+                    detail << (stillPresent ? L" | 进程仍在运行" : L" | 已确认退出");
+                } else {
+                    detail << L" | 存在性检查失败，按仍在运行处理";
+                }
+                if (!stillPresent) {
+                    processExited = true;
+                    break;
+                }
+            }
+        }
+
+        detail << (processExited ? L"\r\n  结果：已确认退出。" : L"\r\n  结果：两轮方法链后进程仍在运行。");
+        result.detail += detail.str();
+        result.detail += L"\r\n";
+        result.success = result.success && processExited;
+    }
+    return result;
 }
 
 // OpenProcessForAction opens a process for a concrete local Win32/NtAPI action.
@@ -743,6 +863,10 @@ ProcessActionResult ExecuteProcessAction(
         result.success = reinterpret_cast<INT_PTR>(shellResult) > 32;
         result.detail = result.success ? L"Explorer launch requested." : L"ShellExecuteW failed.";
         return result;
+    }
+
+    if (actionId == ProcessActionId::TerminateProcessMultiMethod) {
+        return ExecuteMultiMethodTerminate(selectedPids);
     }
 
     if (actionId == ProcessActionId::TerminateProcess) {
