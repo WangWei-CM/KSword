@@ -340,14 +340,13 @@ void MemoryDock::startNextScan()
         }
     }
 
-    // 再次扫描只对上一轮命中地址逐个复查，因此通常速度比首次扫描更快。
-    std::vector<SearchResultEntry> nextResultCache;
-    nextResultCache.reserve(m_searchResultCache.size());
-
-    const auto scanStartTime = std::chrono::steady_clock::now();
-    const int totalCount = static_cast<int>(m_searchResultCache.size());
-    int processedCount = 0;
-    bool cancelled = false;
+    // 再次扫描只对上一轮命中地址逐个复查。读取目标进程内存必须在后台完成，
+    // 否则命中数量较大时会长期占用 GUI 线程，且 processEvents 会引入重入。
+    const HANDLE processHandle = m_attachedProcessHandle;
+    const SearchValueType valueType = m_lastSearchValueType;
+    std::vector<SearchResultEntry> previousResultCache = m_searchResultCache;
+    const int totalCount = static_cast<int>(previousResultCache.size());
+    const QPointer<MemoryDock> selfGuard(this);
 
     // 再次扫描也统一使用“扫描中”状态，确保取消按钮和顶部按钮行为一致。
     m_scanInProgress.store(true);
@@ -360,195 +359,213 @@ void MemoryDock::startNextScan()
     m_scanProgressBar->setValue(0);
     m_scanStatusLabel->setText(QString("再次扫描中：总计 %1 条").arg(totalCount));
 
-    for (const SearchResultEntry& oldEntry : m_searchResultCache)
+    std::thread([selfGuard,
+        processHandle,
+        valueType,
+        previousResultCache = std::move(previousResultCache),
+        compareMode,
+        isNumericType,
+        compareA,
+        compareB,
+        nonNumericCompareBytes,
+        nonNumericWildcardMask,
+        bytesToDouble]() mutable
     {
-        // 用户点击取消后尽快退出循环，保留当前缓存不被部分结果覆盖。
-        if (m_scanCancelRequested.load())
+        if (selfGuard == nullptr || processHandle == nullptr)
         {
-            cancelled = true;
-            break;
+            return;
         }
 
-        // 每条结果的读取长度遵循“上一轮值字节长度”，确保比较口径一致。
-        const std::size_t readLength = std::max<std::size_t>(1, static_cast<std::size_t>(oldEntry.currentValueBytes.size()));
-        QByteArray currentBytes(static_cast<int>(readLength), '\0');
-        SIZE_T bytesRead = 0;
-        const BOOL readOk = ::ReadProcessMemory(
-            m_attachedProcessHandle,
-            reinterpret_cast<LPCVOID>(static_cast<std::uintptr_t>(oldEntry.address)),
-            currentBytes.data(),
-            static_cast<SIZE_T>(readLength),
-            &bytesRead);
-        if (readOk == FALSE || bytesRead != readLength)
+        const auto scanStartTime = std::chrono::steady_clock::now();
+        const int workerTotalCount = static_cast<int>(previousResultCache.size());
+        std::vector<SearchResultEntry> nextResultCache;
+        nextResultCache.reserve(previousResultCache.size());
+        int processedCount = 0;
+        bool cancelled = false;
+
+        for (const SearchResultEntry& oldEntry : previousResultCache)
         {
-            ++processedCount;
-            if ((processedCount % 256) == 0 || processedCount == totalCount)
+            if (selfGuard->m_scanCancelRequested.load())
             {
-                const int progressPercent = (totalCount <= 0) ? 100 : (processedCount * 100 / totalCount);
-                m_scanProgressBar->setValue(progressPercent);
-                QApplication::processEvents(QEventLoop::AllEvents, 1);
+                cancelled = true;
+                break;
             }
-            continue;
+
+            const std::size_t readLength = std::max<std::size_t>(
+                1,
+                static_cast<std::size_t>(oldEntry.currentValueBytes.size()));
+            QByteArray currentBytes(static_cast<int>(readLength), '\0');
+            SIZE_T bytesRead = 0;
+            const BOOL readOk = ::ReadProcessMemory(
+                processHandle,
+                reinterpret_cast<LPCVOID>(static_cast<std::uintptr_t>(oldEntry.address)),
+                currentBytes.data(),
+                static_cast<SIZE_T>(readLength),
+                &bytesRead);
+
+            bool keepThisEntry = false;
+            if (readOk != FALSE && bytesRead == readLength)
+            {
+                switch (compareMode)
+                {
+                case SearchCompareMode::Equal:
+                    if (isNumericType)
+                    {
+                        double currentNumber = 0.0;
+                        keepThisEntry = bytesToDouble(currentBytes, valueType, currentNumber) &&
+                            (std::fabs(currentNumber - compareA) <= 0.000001);
+                    }
+                    else if (currentBytes.size() == nonNumericCompareBytes.size())
+                    {
+                        if (nonNumericWildcardMask.size() == nonNumericCompareBytes.size())
+                        {
+                            keepThisEntry = true;
+                            for (int byteIndex = 0; byteIndex < nonNumericCompareBytes.size(); ++byteIndex)
+                            {
+                                if (nonNumericWildcardMask.at(byteIndex) != '\0' &&
+                                    currentBytes.at(byteIndex) != nonNumericCompareBytes.at(byteIndex))
+                                {
+                                    keepThisEntry = false;
+                                    break;
+                                }
+                            }
+                        }
+                        else
+                        {
+                            keepThisEntry = (currentBytes == nonNumericCompareBytes);
+                        }
+                    }
+                    break;
+                case SearchCompareMode::Greater:
+                {
+                    double currentNumber = 0.0;
+                    keepThisEntry = bytesToDouble(currentBytes, valueType, currentNumber) && currentNumber > compareA;
+                    break;
+                }
+                case SearchCompareMode::Less:
+                {
+                    double currentNumber = 0.0;
+                    keepThisEntry = bytesToDouble(currentBytes, valueType, currentNumber) && currentNumber < compareA;
+                    break;
+                }
+                case SearchCompareMode::Between:
+                {
+                    double currentNumber = 0.0;
+                    keepThisEntry = bytesToDouble(currentBytes, valueType, currentNumber) &&
+                        currentNumber >= compareA && currentNumber <= compareB;
+                    break;
+                }
+                case SearchCompareMode::Changed:
+                    keepThisEntry = (currentBytes != oldEntry.currentValueBytes);
+                    break;
+                case SearchCompareMode::Unchanged:
+                    keepThisEntry = (currentBytes == oldEntry.currentValueBytes);
+                    break;
+                case SearchCompareMode::Increased:
+                {
+                    double currentNumber = 0.0;
+                    double previousNumber = 0.0;
+                    keepThisEntry = bytesToDouble(currentBytes, valueType, currentNumber) &&
+                        bytesToDouble(oldEntry.currentValueBytes, valueType, previousNumber) &&
+                        currentNumber > previousNumber;
+                    break;
+                }
+                case SearchCompareMode::Decreased:
+                {
+                    double currentNumber = 0.0;
+                    double previousNumber = 0.0;
+                    keepThisEntry = bytesToDouble(currentBytes, valueType, currentNumber) &&
+                        bytesToDouble(oldEntry.currentValueBytes, valueType, previousNumber) &&
+                        currentNumber < previousNumber;
+                    break;
+                }
+                default:
+                    break;
+                }
+            }
+
+            if (keepThisEntry)
+            {
+                SearchResultEntry nextEntry = oldEntry;
+                nextEntry.previousValueBytes = oldEntry.currentValueBytes;
+                nextEntry.currentValueBytes = std::move(currentBytes);
+                nextResultCache.push_back(std::move(nextEntry));
+            }
+
+            ++processedCount;
+            if ((processedCount % 1024) == 0 || processedCount == workerTotalCount)
+            {
+                const int progressPercent = workerTotalCount <= 0
+                    ? 100
+                    : (processedCount * 100 / workerTotalCount);
+                QMetaObject::invokeMethod(selfGuard.data(), [selfGuard, progressPercent, processedCount, workerTotalCount]()
+                {
+                    if (selfGuard == nullptr)
+                    {
+                        return;
+                    }
+                    selfGuard->m_scanProgressBar->setValue(progressPercent);
+                    selfGuard->m_scanStatusLabel->setText(
+                        QString("再次扫描中：%1 / %2 条").arg(processedCount).arg(workerTotalCount));
+                }, Qt::QueuedConnection);
+            }
         }
 
-        bool keepThisEntry = false;
-        switch (compareMode)
+        const auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - scanStartTime).count();
+        QMetaObject::invokeMethod(selfGuard.data(), [selfGuard,
+            cancelled,
+            elapsedMs,
+            nextResultCache = std::move(nextResultCache)]() mutable
         {
-        case SearchCompareMode::Equal:
-        {
-            if (isNumericType)
+            if (selfGuard == nullptr)
             {
-                double currentNumber = 0.0;
-                if (bytesToDouble(currentBytes, m_lastSearchValueType, currentNumber))
-                {
-                    keepThisEntry = (std::fabs(currentNumber - compareA) <= 0.000001);
-                }
+                return;
+            }
+
+            selfGuard->m_scanInProgress.store(false);
+            selfGuard->m_scanCancelRequested.store(false);
+            selfGuard->m_firstScanButton->setEnabled(true);
+            selfGuard->m_resetScanButton->setEnabled(true);
+            selfGuard->m_cancelScanButton->setEnabled(false);
+
+            if (!cancelled)
+            {
+                selfGuard->m_searchResultCache = std::move(nextResultCache);
+                selfGuard->rebuildSearchResultTable();
+            }
+
+            selfGuard->m_nextScanButton->setEnabled(!selfGuard->m_searchResultCache.empty());
+            QString finishText;
+            if (cancelled)
+            {
+                finishText = QString("再次扫描已取消：保留上一轮 %1 项，耗时 %2 ms")
+                    .arg(selfGuard->m_searchResultCache.size())
+                    .arg(elapsedMs);
             }
             else
             {
-                // 字节数组/字符串等于比较按用户输入字节执行，支持 ByteArray 通配掩码。
-                if (currentBytes.size() != nonNumericCompareBytes.size())
-                {
-                    keepThisEntry = false;
-                }
-                else if (nonNumericWildcardMask.size() == nonNumericCompareBytes.size())
-                {
-                    keepThisEntry = true;
-                    for (int byteIndex = 0; byteIndex < nonNumericCompareBytes.size(); ++byteIndex)
-                    {
-                        if (nonNumericWildcardMask.at(byteIndex) == '\0')
-                        {
-                            continue;
-                        }
-                        if (currentBytes.at(byteIndex) != nonNumericCompareBytes.at(byteIndex))
-                        {
-                            keepThisEntry = false;
-                            break;
-                        }
-                    }
-                }
-                else
-                {
-                    keepThisEntry = (currentBytes == nonNumericCompareBytes);
-                }
+                finishText = QString("再次扫描完成：保留 %1 项，耗时 %2 ms")
+                    .arg(selfGuard->m_searchResultCache.size())
+                    .arg(elapsedMs);
             }
-            break;
-        }
-        case SearchCompareMode::Greater:
-        {
-            double currentNumber = 0.0;
-            keepThisEntry = bytesToDouble(currentBytes, m_lastSearchValueType, currentNumber) &&
-                (currentNumber > compareA);
-            break;
-        }
-        case SearchCompareMode::Less:
-        {
-            double currentNumber = 0.0;
-            keepThisEntry = bytesToDouble(currentBytes, m_lastSearchValueType, currentNumber) &&
-                (currentNumber < compareA);
-            break;
-        }
-        case SearchCompareMode::Between:
-        {
-            double currentNumber = 0.0;
-            keepThisEntry = bytesToDouble(currentBytes, m_lastSearchValueType, currentNumber) &&
-                (currentNumber >= compareA && currentNumber <= compareB);
-            break;
-        }
-        case SearchCompareMode::Changed:
-            keepThisEntry = (currentBytes != oldEntry.currentValueBytes);
-            break;
-        case SearchCompareMode::Unchanged:
-            keepThisEntry = (currentBytes == oldEntry.currentValueBytes);
-            break;
-        case SearchCompareMode::Increased:
-        {
-            double currentNumber = 0.0;
-            double previousNumber = 0.0;
-            keepThisEntry =
-                bytesToDouble(currentBytes, m_lastSearchValueType, currentNumber) &&
-                bytesToDouble(oldEntry.currentValueBytes, m_lastSearchValueType, previousNumber) &&
-                (currentNumber > previousNumber);
-            break;
-        }
-        case SearchCompareMode::Decreased:
-        {
-            double currentNumber = 0.0;
-            double previousNumber = 0.0;
-            keepThisEntry =
-                bytesToDouble(currentBytes, m_lastSearchValueType, currentNumber) &&
-                bytesToDouble(oldEntry.currentValueBytes, m_lastSearchValueType, previousNumber) &&
-                (currentNumber < previousNumber);
-            break;
-        }
-        default:
-            keepThisEntry = false;
-            break;
-        }
+            if (selfGuard->m_searchResultCache.size() > selfGuard->m_searchResultVisibleCount)
+            {
+                finishText += QString("（仅显示前 %1 项）").arg(selfGuard->m_searchResultVisibleCount);
+            }
+            selfGuard->m_scanStatusLabel->setText(finishText);
 
-        if (keepThisEntry)
-        {
-            SearchResultEntry nextEntry = oldEntry;
-            nextEntry.previousValueBytes = oldEntry.currentValueBytes;
-            nextEntry.currentValueBytes = currentBytes;
-            nextResultCache.push_back(std::move(nextEntry));
-        }
-
-        // 进度更新改为分批触发，降低 UI 线程重绘开销并保持界面响应。
-        ++processedCount;
-        if ((processedCount % 256) == 0 || processedCount == totalCount)
-        {
-            const int progressPercent = (totalCount <= 0) ? 100 : (processedCount * 100 / totalCount);
-            m_scanProgressBar->setValue(progressPercent);
-            QApplication::processEvents(QEventLoop::AllEvents, 1);
-        }
-    }
-
-    // 再次扫描统一收尾：恢复按钮状态并清理扫描标记。
-    m_scanInProgress.store(false);
-    m_scanCancelRequested.store(false);
-    m_firstScanButton->setEnabled(true);
-    m_resetScanButton->setEnabled(true);
-    m_cancelScanButton->setEnabled(false);
-
-    // 取消时保留上一轮结果，不覆盖缓存。
-    if (!cancelled)
-    {
-        m_searchResultCache = std::move(nextResultCache);
-    }
-    rebuildSearchResultTable();
-
-    const auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::steady_clock::now() - scanStartTime).count();
-    QString finishText;
-    if (cancelled)
-    {
-        finishText = QString("再次扫描已取消：保留上一轮 %1 项，耗时 %2 ms")
-            .arg(m_searchResultCache.size())
-            .arg(elapsedMs);
-    }
-    else
-    {
-        finishText = QString("再次扫描完成：保留 %1 项，耗时 %2 ms")
-            .arg(m_searchResultCache.size())
-            .arg(elapsedMs);
-    }
-    if (m_searchResultCache.size() > m_searchResultVisibleCount)
-    {
-        finishText += QString("（仅显示前 %1 项）").arg(m_searchResultVisibleCount);
-    }
-    m_scanStatusLabel->setText(finishText);
-
-    // 再次扫描完成日志：输出保留数量与耗时。
-    kLogEvent nextScanFinishEvent;
-    info << nextScanFinishEvent
-        << "[MemoryDock] startNextScan: 完成, remainingCount="
-        << m_searchResultCache.size()
-        << ", elapsedMs="
-        << elapsedMs
-        << ", cancelled="
-        << (cancelled ? "true" : "false")
-        << eol;
+            kLogEvent nextScanFinishEvent;
+            info << nextScanFinishEvent
+                << "[MemoryDock] startNextScan: 完成, remainingCount="
+                << selfGuard->m_searchResultCache.size()
+                << ", elapsedMs="
+                << elapsedMs
+                << ", cancelled="
+                << (cancelled ? "true" : "false")
+                << eol;
+        }, Qt::QueuedConnection);
+    }).detach();
 }
 
 void MemoryDock::resetScanState()
@@ -601,7 +618,7 @@ void MemoryDock::rebuildSearchResultTable()
         << eol;
 
     // 为避免超大结果集导致界面长时间冻结，UI 层仅展示前 N 条。
-    constexpr std::size_t kSearchResultDisplayLimit = 50000;
+    constexpr std::size_t kSearchResultDisplayLimit = 10000;
     const std::size_t totalCount = m_searchResultCache.size();
     const std::size_t visibleCount = std::min<std::size_t>(totalCount, kSearchResultDisplayLimit);
     const std::size_t hiddenCount = totalCount - visibleCount;

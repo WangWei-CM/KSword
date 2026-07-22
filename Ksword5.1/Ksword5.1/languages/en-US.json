@@ -11442,6 +11442,7 @@
     "内部错误：输出参数为空。": "Error: output parameters are empty.",
     "再次扫描": "Rescan",
     "再次扫描中：总计 %1 条": "Scanning again; total %1 items found",
+    "再次扫描中：%1 / %2 条": "Scanning again: %1 / %2 items",
     "再次扫描完成：保留 %1 项，耗时 %2 ms": "Scan complete; retained %1 item(s), took %2 ms",
     "再次扫描已取消：保留上一轮 %1 项，耗时 %2 ms": "Cancel scan; retained previous round's %1 item(s), took %2 ms",
     "再次扫描过滤": "Filter Rescan",
