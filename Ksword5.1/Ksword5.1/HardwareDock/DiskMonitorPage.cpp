@@ -23,6 +23,7 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QMenu>
+#include <QMetaObject>
 #include <QModelIndex>
 #include <QPushButton>
 #include <QSignalBlocker>
@@ -779,6 +780,12 @@ DiskMonitorPage::~DiskMonitorPage()
     {
         m_refreshTimer->stop();
     }
+    if (m_processSamplingThread != nullptr && m_processSamplingThread->joinable())
+    {
+        m_processSamplingThread->join();
+    }
+    m_processSamplingThread.reset();
+    m_processSamplingInProgress.store(false);
     stopFileActivityEtw(true);
 }
 
@@ -857,10 +864,13 @@ void DiskMonitorPage::initializeUi()
         QStringLiteral("写次数/s"),
         QStringLiteral("路径")
         });
-    m_processTable->horizontalHeader()->setSectionResizeMode(ProcessColumnChecked, QHeaderView::ResizeToContents);
-    m_processTable->horizontalHeader()->setSectionResizeMode(ProcessColumnPid, QHeaderView::ResizeToContents);
-    m_processTable->horizontalHeader()->setSectionResizeMode(ProcessColumnName, QHeaderView::ResizeToContents);
+    m_processTable->horizontalHeader()->setSectionResizeMode(ProcessColumnChecked, QHeaderView::Fixed);
+    m_processTable->horizontalHeader()->setSectionResizeMode(ProcessColumnPid, QHeaderView::Fixed);
+    m_processTable->horizontalHeader()->setSectionResizeMode(ProcessColumnName, QHeaderView::Interactive);
     m_processTable->horizontalHeader()->setSectionResizeMode(ProcessColumnPath, QHeaderView::Stretch);
+    m_processTable->setColumnWidth(ProcessColumnChecked, 54);
+    m_processTable->setColumnWidth(ProcessColumnPid, 80);
+    m_processTable->setColumnWidth(ProcessColumnName, 180);
     m_splitter->addWidget(m_processTable);
 
     m_activityTable = new ks::ui::VisibleTableWidget(this);
@@ -876,11 +886,15 @@ void DiskMonitorPage::initializeUi()
         QStringLiteral("I/O 优先级"),
         QStringLiteral("响应时间(ms)")
         });
-    m_activityTable->horizontalHeader()->setSectionResizeMode(ActivityColumnPid, QHeaderView::ResizeToContents);
-    m_activityTable->horizontalHeader()->setSectionResizeMode(ActivityColumnProcess, QHeaderView::ResizeToContents);
+    m_activityTable->horizontalHeader()->setSectionResizeMode(ActivityColumnPid, QHeaderView::Fixed);
+    m_activityTable->horizontalHeader()->setSectionResizeMode(ActivityColumnProcess, QHeaderView::Interactive);
     m_activityTable->horizontalHeader()->setSectionResizeMode(ActivityColumnFile, QHeaderView::Stretch);
-    m_activityTable->horizontalHeader()->setSectionResizeMode(ActivityColumnIoPriority, QHeaderView::ResizeToContents);
-    m_activityTable->horizontalHeader()->setSectionResizeMode(ActivityColumnResponse, QHeaderView::ResizeToContents);
+    m_activityTable->horizontalHeader()->setSectionResizeMode(ActivityColumnIoPriority, QHeaderView::Interactive);
+    m_activityTable->horizontalHeader()->setSectionResizeMode(ActivityColumnResponse, QHeaderView::Fixed);
+    m_activityTable->setColumnWidth(ActivityColumnPid, 80);
+    m_activityTable->setColumnWidth(ActivityColumnProcess, 180);
+    m_activityTable->setColumnWidth(ActivityColumnIoPriority, 100);
+    m_activityTable->setColumnWidth(ActivityColumnResponse, 110);
     m_splitter->addWidget(m_activityTable);
     m_splitter->setStretchFactor(0, 2);
     m_splitter->setStretchFactor(1, 1);
@@ -1007,7 +1021,33 @@ void DiskMonitorPage::configureTableWidget(QTableWidget* tableWidget) const
 
 void DiskMonitorPage::refreshNow()
 {
-    std::vector<ProcessDiskSample> sampleList = collectProcessDiskSamples();
+    if (m_processSamplingInProgress.exchange(true))
+    {
+        return;
+    }
+
+    // 上一轮线程只会在投递结果后立即退出，在下一轮启动前回收避免 joinable thread 析构终止进程。
+    if (m_processSamplingThread != nullptr && m_processSamplingThread->joinable())
+    {
+        m_processSamplingThread->join();
+    }
+    m_processSamplingThread.reset();
+
+    if (m_refreshButton != nullptr) m_refreshButton->setEnabled(false);
+    m_processSamplingThread = std::make_unique<std::thread>([this]()
+    {
+        std::vector<ProcessDiskSample> sampleList = collectProcessDiskSamples();
+        QMetaObject::invokeMethod(this, [this, sampleList = std::move(sampleList)]() mutable
+        {
+            m_processSamplingInProgress.store(false);
+            if (m_refreshButton != nullptr) m_refreshButton->setEnabled(true);
+            applyProcessDiskSamples(std::move(sampleList));
+        }, Qt::QueuedConnection);
+    });
+}
+
+void DiskMonitorPage::applyProcessDiskSamples(std::vector<ProcessDiskSample> sampleList)
+{
     std::sort(
         sampleList.begin(),
         sampleList.end(),
@@ -1341,19 +1381,21 @@ void DiskMonitorPage::updateProcessTable(const std::vector<ProcessDiskSample>& s
 
     QSignalBlocker tableSignalBlocker(m_processTable);
     m_updatingProcessTable = true;
+    const bool updatesEnabled = m_processTable->updatesEnabled();
+    m_processTable->setUpdatesEnabled(false);
     m_processTable->setSortingEnabled(false);
     m_processTable->clearContents();
-    m_processTable->setRowCount(0);
-
-    int rowIndex = 0;
+    std::vector<const ProcessDiskSample*> visibleSampleList;
+    visibleSampleList.reserve(sampleList.size());
     for (const ProcessDiskSample& sample : sampleList)
     {
-        if (!sampleMatchesFilter(sample))
-        {
-            continue;
-        }
+        if (sampleMatchesFilter(sample)) visibleSampleList.push_back(&sample);
+    }
+    m_processTable->setRowCount(static_cast<int>(visibleSampleList.size()));
 
-        m_processTable->insertRow(rowIndex);
+    for (int rowIndex = 0; rowIndex < static_cast<int>(visibleSampleList.size()); ++rowIndex)
+    {
+        const ProcessDiskSample& sample = *visibleSampleList[static_cast<std::size_t>(rowIndex)];
 
         QTableWidgetItem* checkItem = createReadOnlyItem(QString());
         checkItem->setFlags((checkItem->flags() | Qt::ItemIsUserCheckable) & ~Qt::ItemIsEditable);
@@ -1405,11 +1447,12 @@ void DiskMonitorPage::updateProcessTable(const std::vector<ProcessDiskSample>& s
                 ? QStringLiteral("<权限不足或系统进程>")
                 : sample.processImagePath));
 
-        ++rowIndex;
     }
 
     m_processTable->setSortingEnabled(true);
     m_updatingProcessTable = false;
+    m_processTable->setUpdatesEnabled(updatesEnabled);
+    if (updatesEnabled) m_processTable->viewport()->update();
 }
 
 void DiskMonitorPage::updateActivityTable(const std::vector<ProcessDiskSample>& sampleList)
@@ -1419,6 +1462,8 @@ void DiskMonitorPage::updateActivityTable(const std::vector<ProcessDiskSample>& 
         return;
     }
 
+    const bool updatesEnabled = m_activityTable->updatesEnabled();
+    m_activityTable->setUpdatesEnabled(false);
     std::vector<FileActivitySample> selectedFileActivityList;
     selectedFileActivityList.reserve(m_lastFileActivityList.size() + m_fileActivityHistory.size());
     for (const FileActivitySample& fileActivity : m_lastFileActivityList)
@@ -1524,6 +1569,8 @@ void DiskMonitorPage::updateActivityTable(const std::vector<ProcessDiskSample>& 
         }
 
         m_activityTable->setSortingEnabled(true);
+        m_activityTable->setUpdatesEnabled(updatesEnabled);
+        if (updatesEnabled) m_activityTable->viewport()->update();
         return;
     }
 
@@ -1535,6 +1582,8 @@ void DiskMonitorPage::updateActivityTable(const std::vector<ProcessDiskSample>& 
     {
         m_activityTable->setRowCount(0);
         m_activityTable->setSortingEnabled(true);
+        m_activityTable->setUpdatesEnabled(updatesEnabled);
+        if (updatesEnabled) m_activityTable->viewport()->update();
         return;
     }
 
@@ -1551,6 +1600,8 @@ void DiskMonitorPage::updateActivityTable(const std::vector<ProcessDiskSample>& 
     setTableItemText(m_activityTable, 0, ActivityColumnIoPriority, createReadOnlyItem(QStringLiteral("未知")));
     setTableItemText(m_activityTable, 0, ActivityColumnResponse, createNumericItem(QStringLiteral("N/A"), 0.0));
     m_activityTable->setSortingEnabled(true);
+    m_activityTable->setUpdatesEnabled(updatesEnabled);
+    if (updatesEnabled) m_activityTable->viewport()->update();
 }
 
 void DiskMonitorPage::updateSummaryLabels(const std::vector<ProcessDiskSample>& sampleList)
