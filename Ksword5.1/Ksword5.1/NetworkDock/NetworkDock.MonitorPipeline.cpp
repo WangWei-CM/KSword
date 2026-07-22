@@ -1,5 +1,10 @@
 #include "NetworkDock.InternalCommon.h"
 
+#include <QAbstractItemModel>
+#include <QElapsedTimer>
+
+#include <cstddef>
+
 using namespace network_dock_detail;
 
 namespace
@@ -83,9 +88,8 @@ void NetworkDock::flushPendingPacketsToUi()
             return;
         }
 
-        // 单次最多处理固定数量，避免 UI 一帧执行过久。
-        // kMaxConsumePerTick 用途：在“不卡 UI”与“少丢包”之间折中；这里提高上限以减少高流量积压。
-        constexpr std::size_t kMaxConsumePerTick = 960;
+        // 单次只取一小批，后续仍以时间预算兜住单帧耗时。
+        constexpr std::size_t kMaxConsumePerTick = 160;
         const std::size_t consumeCount = std::min<std::size_t>(kMaxConsumePerTick, m_pendingPacketQueue.size());
         packetBatch.reserve(consumeCount);
         for (std::size_t index = 0; index < consumeCount; ++index)
@@ -124,42 +128,87 @@ void NetworkDock::flushPendingPacketsToUi()
     }
 
     // 批量更新表格期间临时关闭重绘，减少 UI 抖动与卡顿。
-    if (!packetBatch.empty() && m_packetTable != nullptr)
+    const bool tableUpdateDisabled = !packetBatch.empty() && m_packetTable != nullptr;
+    const bool tableUpdatesEnabled = tableUpdateDisabled && m_packetTable->updatesEnabled();
+    if (tableUpdateDisabled)
     {
         m_packetTable->setUpdatesEnabled(false);
     }
-
-    // tableUpdateDisabled 用途：保证后续提前返回或异常路径也能恢复表格刷新开关。
-    const bool tableUpdateDisabled = !packetBatch.empty() && m_packetTable != nullptr;
+    QElapsedTimer budgetTimer;
+    budgetTimer.start();
+    std::size_t processedCount = 0;
     for (const ks::network::PacketRecord& packetRecord : packetBatch)
     {
         onPacketCaptured(packetRecord);
+        ++processedCount;
+        if (budgetTimer.elapsed() >= 4)
+        {
+            break;
+        }
     }
 
     if (tableUpdateDisabled)
     {
-        m_packetTable->setUpdatesEnabled(true);
-        m_packetTable->scrollToBottom();
+        m_packetTable->setUpdatesEnabled(tableUpdatesEnabled);
+        if (tableUpdatesEnabled && m_packetTable->viewport() != nullptr)
+        {
+            m_packetTable->viewport()->update();
+        }
+        if (processedCount > 0)
+        {
+            m_packetTable->scrollToBottom();
+        }
+    }
+
+    if (processedCount < packetBatch.size())
+    {
+        std::lock_guard<std::mutex> guard(m_pendingPacketMutex);
+        for (std::size_t index = packetBatch.size(); index > processedCount; --index)
+        {
+            m_pendingPacketQueue.push_front(std::move(packetBatch[index - 1]));
+        }
+        while (m_pendingPacketQueue.size() > kMaxPendingPacketQueueCount)
+        {
+            m_pendingPacketQueue.pop_front();
+            ++m_droppedPacketCount;
+        }
     }
 
     // 时间轴刷新放在批量表格刷新之后：
     // - 一次 tick 只重绘一次时间轴，避免高频逐包 update；
     // - 若用户已经框选时间窗口，新包仍会进入点缓存，但表格按外层时间过滤显示。
-    if (!packetBatch.empty())
+    if (processedCount > 0)
     {
         refreshPacketTimelineRange();
-        refreshPacketTimelinePoints();
-        refreshPacketTimelineRatePoints();
+        const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+        if ((nowMs - m_lastPacketTimelineRefreshMs) >= 250)
+        {
+            refreshPacketTimelinePoints();
+            refreshPacketTimelineRatePoints();
+            m_lastPacketTimelineRefreshMs = nowMs;
+        }
+    }
+
+    std::size_t pendingCountForInterval = 0;
+    {
+        std::lock_guard<std::mutex> guard(m_pendingPacketMutex);
+        pendingCountForInterval = m_pendingPacketQueue.size();
+    }
+    if (m_packetFlushTimer != nullptr)
+    {
+        const int targetIntervalMs = pendingCountForInterval >= 4000
+            ? 80
+            : (pendingCountForInterval > 0 ? 50 : 120);
+        if (m_packetFlushTimer->interval() != targetIntervalMs)
+        {
+            m_packetFlushTimer->setInterval(targetIntervalMs);
+        }
     }
 
     // 丢包计数只在 UI 线程展示，不在每个回调里刷屏。
     if (droppedCountSnapshot > 0 && m_monitorStatusLabel != nullptr)
     {
-        const std::size_t pendingCount = [&]()
-            {
-                std::lock_guard<std::mutex> guard(m_pendingPacketMutex);
-                return m_pendingPacketQueue.size();
-            }();
+        const std::size_t pendingCount = pendingCountForInterval;
         m_monitorStatusLabel->setText(QStringLiteral("状态：高负载（已丢弃%1条，队列%2）")
             .arg(static_cast<qulonglong>(droppedCountSnapshot))
             .arg(static_cast<qulonglong>(pendingCount)));
@@ -357,29 +406,9 @@ void NetworkDock::refreshPacketTimelineRange()
     }
 
     std::uint64_t rangeStart100ns = 0;
+    // 当前累计监控时长始终不早于已缓存报文的压缩时间戳，
+    // 因此不必在每个刷新周期扫描整个报文缓存来重算右边界。
     std::uint64_t rangeEnd100ns = currentPacketTimelineEnd100ns();
-    if (!m_packetSequenceOrder.empty())
-    {
-        // 报文序号缓存按采集顺序排列，但时间轴左边界固定为 0：
-        // - 这样旧包裁剪后，横轴仍代表“本轮监控已运行多久”；
-        // - 右边界使用累计监控时长，不把未监控的停机间隔算进去。
-        for (const std::uint64_t sequenceId : m_packetSequenceOrder)
-        {
-            const auto iterator = m_packetBySequence.find(sequenceId);
-            if (iterator == m_packetBySequence.end())
-            {
-                continue;
-            }
-
-            const std::uint64_t timestamp100ns = packetTimelineTimeForSequence(sequenceId, iterator->second);
-            if (timestamp100ns == 0)
-            {
-                continue;
-            }
-
-            rangeEnd100ns = std::max(rangeEnd100ns, timestamp100ns);
-        }
-    }
 
     if (rangeEnd100ns == 0)
     {
@@ -731,6 +760,7 @@ void NetworkDock::trimOldestPacketWhenNeeded()
     const std::size_t trimCount = std::max<std::size_t>(overflowCount, kTrimBatchCount);
 
     std::size_t visibleTrimCount = 0;
+    std::size_t timelineTrimCount = 0;
     for (std::size_t trimIndex = 0; trimIndex < trimCount; ++trimIndex)
     {
         if (m_packetSequenceOrder.empty())
@@ -740,18 +770,13 @@ void NetworkDock::trimOldestPacketWhenNeeded()
 
         const std::uint64_t oldestSequenceId = m_packetSequenceOrder.front();
         m_packetSequenceOrder.pop_front();
+        ++timelineTrimCount;
 
         const auto oldestIterator = m_packetBySequence.find(oldestSequenceId);
         if (oldestIterator == m_packetBySequence.end())
         {
             m_packetTimelineTimeBySequence.erase(oldestSequenceId);
             continue;
-        }
-
-        if (!m_packetTimelineEventPoints.empty())
-        {
-            // 时间轴点与 m_packetSequenceOrder 同步按采集顺序追加，因此裁剪最老报文时移除最老点。
-            m_packetTimelineEventPoints.erase(m_packetTimelineEventPoints.begin());
         }
 
         const std::uint64_t timelineTime100ns =
@@ -766,14 +791,25 @@ void NetworkDock::trimOldestPacketWhenNeeded()
         m_packetBySequence.erase(oldestIterator);
     }
 
+    const std::size_t timelineEraseCount = std::min(timelineTrimCount, m_packetTimelineEventPoints.size());
+    if (timelineEraseCount > 0)
+    {
+        m_packetTimelineEventPoints.erase(
+            m_packetTimelineEventPoints.begin(),
+            m_packetTimelineEventPoints.begin() + static_cast<std::ptrdiff_t>(timelineEraseCount));
+    }
+
     // 仅在当前表确有可见裁剪时才删除行，减少不必要的 UI 操作。
     if (visibleTrimCount > 0 && m_packetTable != nullptr && m_packetTable->rowCount() > 0)
     {
         const int removeRows = std::min<int>(static_cast<int>(visibleTrimCount), m_packetTable->rowCount());
-        for (int removeIndex = 0; removeIndex < removeRows; ++removeIndex)
+        const bool updatesEnabled = m_packetTable->updatesEnabled();
+        m_packetTable->setUpdatesEnabled(false);
+        if (m_packetTable->model() != nullptr)
         {
-            m_packetTable->removeRow(0);
+            m_packetTable->model()->removeRows(0, removeRows);
         }
+        m_packetTable->setUpdatesEnabled(updatesEnabled);
 
         kLogEvent trimEvent;
         dbg << trimEvent
@@ -800,6 +836,7 @@ void NetworkDock::clearAllPacketRows()
     m_packetSequenceOrder.clear();
     m_packetBySequence.clear();
     m_packetTimelineEventPoints.clear();
+    m_lastPacketTimelineRefreshMs = 0;
     clearNidsAlerts();
     resetPacketTimelineClockForCurrentState();
     resetPacketTimelineToCurrentRange();

@@ -30,7 +30,7 @@ NetworkDock::NetworkDock(QWidget* parent)
     // - 由 UI 线程周期性批量消费后台队列；
     // - 避免“每包一个 invokeMethod”把事件循环塞爆。
     m_packetFlushTimer = new QTimer(this);
-    m_packetFlushTimer->setInterval(20);
+    m_packetFlushTimer->setInterval(50);
     connect(m_packetFlushTimer, &QTimer::timeout, this, [this]()
         {
             flushPendingPacketsToUi();
