@@ -109,7 +109,7 @@ namespace
     // kDockLayoutConfigFileVersion 作用：
     // - 作为 ADS saveState/restoreState 的版本号；
     // - Dock 集合或默认布局发生不兼容变化时递增，可自动放弃旧布局。
-    constexpr int kDockLayoutConfigFileVersion = 3;
+    constexpr int kDockLayoutConfigFileVersion = 4;
 
     // kDockLayoutConfigFileName 作用：
     // - 定义用户拖拽后的 ADS 布局配置文件名；
@@ -3234,9 +3234,9 @@ MainWindow::MainWindow(
     setWindowFlag(Qt::WindowMinMaxButtonsHint, true);
 
     // Dock 全局配置：
-    // - 关闭所有可关闭按钮与标题栏三按钮（标签菜单/浮动/关闭）；
-    // - 与用户“所有 Dock Tab 不可关闭、去掉右上角按钮”的要求一致。
-    ads::CDockManager::setConfigFlag(ads::CDockManager::ActiveTabHasCloseButton, false);
+    // - 仅允许声明了 DockWidgetClosable 的辅助 Dock 显示活动标签关闭按钮；
+    // - 主功能 Dock 继续在各自 feature 中禁用关闭，区域菜单/浮动/关闭按钮仍保持隐藏。
+    ads::CDockManager::setConfigFlag(ads::CDockManager::ActiveTabHasCloseButton, true);
     ads::CDockManager::setConfigFlag(ads::CDockManager::AllTabsHaveCloseButton, false);
     ads::CDockManager::setConfigFlag(ads::CDockManager::DockAreaHasCloseButton, false);
     ads::CDockManager::setConfigFlag(ads::CDockManager::DockAreaHasUndockButton, false);
@@ -4858,6 +4858,26 @@ void MainWindow::initMenus()
     m_logMenuButton->setFixedHeight(22);
     connect(m_logMenuButton, &QToolButton::clicked, this, &MainWindow::toggleLogOutputWindow);
 
+    m_windowMenuButton = new QToolButton(m_topActionRowWidget);
+    m_windowMenuButton->setObjectName(QStringLiteral("ksWindowMenuButton"));
+    m_windowMenuButton->setText(QStringLiteral("窗口"));
+    m_windowMenuButton->setToolTip(QStringLiteral("显示或隐藏 Dock 窗口"));
+    ks::i18n::LanguageManager::instance().bindText(
+        m_windowMenuButton,
+        QStringLiteral("menu.window"),
+        QStringLiteral("窗口"));
+    ks::i18n::LanguageManager::instance().bindToolTip(
+        m_windowMenuButton,
+        QStringLiteral("menu.window.tooltip"),
+        QStringLiteral("显示或隐藏 Dock 窗口"));
+    m_windowMenuButton->setToolButtonStyle(Qt::ToolButtonTextOnly);
+    m_windowMenuButton->setAutoRaise(true);
+    m_windowMenuButton->setFixedHeight(22);
+    m_windowMenuButton->setPopupMode(QToolButton::InstantPopup);
+    m_windowMenu = new QMenu(m_windowMenuButton);
+    m_windowMenu->setObjectName(QStringLiteral("ksWindowMenu"));
+    m_windowMenuButton->setMenu(m_windowMenu);
+
     m_settingsMenuButton = new QToolButton(m_topActionRowWidget);
     m_settingsMenuButton->setObjectName(QStringLiteral("ksSettingsMenuButton"));
     m_settingsMenuButton->setText(QStringLiteral("设置"));
@@ -4878,6 +4898,7 @@ void MainWindow::initMenus()
     m_topActionRowLayout->addWidget(m_licenseMenuButton, 0, Qt::AlignLeft | Qt::AlignVCenter);
     m_topActionRowLayout->addWidget(m_exitMenuButton, 0, Qt::AlignLeft | Qt::AlignVCenter);
     m_topActionRowLayout->addWidget(m_pluginMenuButton, 0, Qt::AlignLeft | Qt::AlignVCenter);
+    m_topActionRowLayout->addWidget(m_windowMenuButton, 0, Qt::AlignLeft | Qt::AlignVCenter);
     m_topActionRowLayout->addWidget(m_logMenuButton, 0, Qt::AlignLeft | Qt::AlignVCenter);
     m_topActionRowLayout->addWidget(m_settingsMenuButton, 0, Qt::AlignLeft | Qt::AlignVCenter);
     m_topActionRowLayout->addStretch(1);
@@ -4887,6 +4908,33 @@ void MainWindow::initMenus()
         // 插入到根布局顶部；后续 initCustomTitleBar 会插到 index=0，因此标题栏仍在最上方。
         m_mainRootLayout->insertWidget(0, m_topActionRowWidget, 0);
     }
+}
+
+void MainWindow::initializeWindowDockMenuActions()
+{
+    if (m_windowMenu == nullptr || m_dockLog == nullptr || m_dockCurrentOp == nullptr)
+    {
+        return;
+    }
+
+    // 直接使用 ADS 的原生 toggle action：菜单勾选、Dock 标题栏关闭、浮动和布局恢复
+    // 都由同一份可见状态驱动，避免维护第二套布尔状态。
+    m_windowMenu->clear();
+    m_dockLog->setToggleViewActionMode(ads::CDockWidget::ActionModeToggle);
+    m_dockCurrentOp->setToggleViewActionMode(ads::CDockWidget::ActionModeToggle);
+
+    QAction* logDockAction = m_dockLog->toggleViewAction();
+    QAction* currentTasksAction = m_dockCurrentOp->toggleViewAction();
+    ks::i18n::LanguageManager::instance().bindText(
+        logDockAction,
+        QStringLiteral("dock.log_window"),
+        QStringLiteral("日志窗口"));
+    ks::i18n::LanguageManager::instance().bindText(
+        currentTasksAction,
+        QStringLiteral("dock.current_tasks"),
+        QStringLiteral("当前任务"));
+    m_windowMenu->addAction(logDockAction);
+    m_windowMenu->addAction(currentTasksAction);
 }
 
 QString MainWindow::buildTopActionButtonStyle() const
@@ -4947,6 +4995,7 @@ void MainWindow::refreshTopActionButtonStyles()
         m_licenseMenuButton,
         m_exitMenuButton,
         m_pluginMenuButton,
+        m_windowMenuButton,
         m_logMenuButton,
         m_settingsMenuButton
     };
@@ -7764,8 +7813,8 @@ void MainWindow::initDockWidgets()
         60,
         QStringLiteral("main.startup.progress.auxiliary_components"),
         QStringLiteral("正在加载功能模块..."));
-    // “监视面板 / 当前操作 / 即时窗口”保留实现代码，但不再创建或注册到 ADS。
-    // 日志面板迁移到独立的常驻非模态窗口，启动时默认隐藏。
+    // “监视面板 / 即时窗口”保留实现代码，但不再创建或注册到 ADS。
+    // 日志输出独立窗口继续常驻；辅助日志 Dock 使用第二个日志视图，二者共享全局日志数据。
     m_logOutputWindow = new QDialog(this);
     m_logOutputWindow->setObjectName(QStringLiteral("ksLogOutputWindow"));
     m_logOutputWindow->setWindowTitle(ks::i18n::text(QStringLiteral("dock.log"), QStringLiteral("日志输出")));
@@ -7915,6 +7964,29 @@ void MainWindow::initDockWidgets()
     createLazyDockWidget(m_dockMisc, m_miscWidget, ks::i18n::text(QStringLiteral("dock.misc"), QStringLiteral("杂项")), QStringLiteral("misc"));
     createLazyDockWidget(m_dockPlugin, m_pluginWidget, ks::i18n::text(QStringLiteral("dock.plugin"), QStringLiteral("插件")), QStringLiteral("plugin"));
 
+    // 两个辅助 Dock 始终创建并注册，关闭时只隐藏内容实例，确保菜单状态和 ADS 布局可恢复。
+    m_dockLogWidget = new LogDockWidget(this);
+    m_progressWidget = new ProgressDockWidget(this);
+    m_dockLog = createDockWidget(
+        m_dockLogWidget,
+        ks::i18n::text(QStringLiteral("dock.log_window"), QStringLiteral("日志窗口")),
+        QStringLiteral("log_window"),
+        ads::CDockWidget::ForceNoScrollArea);
+    m_dockCurrentOp = createDockWidget(
+        m_progressWidget,
+        ks::i18n::text(QStringLiteral("dock.current_tasks"), QStringLiteral("当前任务")),
+        QStringLiteral("current_tasks"),
+        ads::CDockWidget::ForceNoScrollArea);
+    for (ads::CDockWidget* auxiliaryDock : { m_dockLog, m_dockCurrentOp })
+    {
+        auxiliaryDock->setFeature(ads::CDockWidget::DockWidgetClosable, true);
+        auxiliaryDock->setFeature(ads::CDockWidget::DockWidgetDeleteOnClose, false);
+        auxiliaryDock->setToggleViewActionMode(ads::CDockWidget::ActionModeToggle);
+        setupDockTabText(auxiliaryDock);
+        configureAdsDockTabVisualIdentity(auxiliaryDock);
+    }
+    initializeWindowDockMenuActions();
+
     QList<ads::CDockWidget*> mainDockTabList{
         m_dockWelcome,
         m_dockProcess,
@@ -7940,7 +8012,7 @@ void MainWindow::initDockWidgets()
         configureAdsDockTabVisualIdentity(dockWidget);
     }
 
-    // 顶部菜单栏已精简，不再注册 Dock 视图切换菜单。
+    // 主功能页签不进入窗口菜单；菜单仅承载两个可关闭的辅助 Dock。
     reportStartupProgress(
         72,
         QStringLiteral("main.startup.progress.skip_view_menu"),
@@ -8012,9 +8084,20 @@ void MainWindow::setupDockLayout()
         QStringLiteral("main.startup.progress.register_auxiliary_docks"),
         QStringLiteral("正在加载功能模块..."));
 
-    // 4. 当前仅保留主功能页签区域：
-    // - 监视面板、当前操作、即时窗口不再注册为 Dock；
-    // - 日志输出由顶部按钮打开独立的非模态窗口。
+    // 4. 辅助 Dock 默认位于底部，日志与当前任务按 2:1 横向排列。
+    // 首次启动先关闭二者，但保留停靠位置；版本 4 布局恢复会覆盖此默认可见状态。
+    auto bottomLogArea = m_pDockManager->addDockWidget(
+        ads::BottomDockWidgetArea,
+        m_dockLog);
+    m_pDockManager->addDockWidget(
+        ads::RightDockWidgetArea,
+        m_dockCurrentOp,
+        bottomLogArea);
+    m_pDockManager->setSplitterSizes(leftDockArea, { 3, 1 });
+    m_pDockManager->setSplitterSizes(bottomLogArea, { 2, 1 });
+    m_dockLog->toggleView(false);
+    m_dockCurrentOp->toggleView(false);
+
     // 5. 设置默认显示的标签页
     withTemporaryNonTopMostForDockSwitch([this]()
         {

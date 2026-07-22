@@ -399,7 +399,6 @@ private:
     // - 返回值：无。
     void initializeCrossViewConnections();
     void initializeTimer();
-    void updateRefreshStateUi(bool refreshing, const QString& stateText);
     // applyAdaptiveColumnWidths 作用：
     // - 将进程表列设置为可交互宽度模式；
     // - 请求全局表格列宽自适应器按 viewport 压缩默认列宽；
@@ -439,7 +438,6 @@ private:
     // - 参数 preferThreadTable 为 true 时优先读取线程表；
     // - 返回值：无。
     void showCrossViewDetailForCurrentRow(bool preferThreadTable);
-    void applyThreadStatusUi(bool refreshing, const QString& stateText, const QString& detailText = QString());
     std::vector<DisplayRow> buildDisplayOrder() const;
     std::vector<DisplayRow> buildTreeDisplayOrder() const;
     std::vector<DisplayRow> buildListDisplayOrder() const;
@@ -605,6 +603,11 @@ private:
     QString threadStateText(std::uint32_t stateValue) const;
     QString threadWaitReasonText(std::uint32_t waitReasonValue) const;
     QIcon resolveProcessIcon(const ks::process::ProcessRecord& processRecord);
+    void queueProcessIconExtraction(const QString& imagePath);
+    void schedulePendingProcessIconExtraction(int delayMilliseconds);
+    void extractNextPendingProcessIcon();
+    void refreshProcessTableRowsForIcon(const QString& imagePath);
+    QIcon extractProcessIconFromPath(const QString& imagePath) const;
     QIcon blueTintedIcon(const char* iconPath, const QSize& iconSize = QSize(16, 16)) const;
     // tintedProcessTabIcon 作用：按指定颜色重绘进程页侧栏图标，避免选中态蓝底蓝图标。
     QIcon tintedProcessTabIcon(const char* iconPath, const QColor& tintColor, const QSize& iconSize = QSize(16, 16)) const;
@@ -690,7 +693,6 @@ private:
 
     // ======== 控制栏 ========
     QHBoxLayout* m_controlLayout = nullptr;   // 上方“操作按钮”行布局。
-    QHBoxLayout* m_statusLayout = nullptr;    // 下方“监控状态”行布局。
     QComboBox* m_strategyCombo = nullptr;     // 进程遍历方案下拉框。
     QComboBox* m_viewModeCombo = nullptr;     // 监视视图/详细视图下拉框。
     QPushButton* m_startButton = nullptr;     // 开始监视按钮。
@@ -703,7 +705,6 @@ private:
     QLineEdit* m_tableRefreshIntervalEdit = nullptr; // 进程表格重绘间隔输入框，默认 2 秒。
     QLabel* m_sampleIntervalLabel = nullptr;  // 记录打点间隔标签。
     QLineEdit* m_refreshIntervalEdit = nullptr; // 记录打点/后台监视间隔输入框，允许小数秒，默认 1 秒。
-    QLabel* m_refreshStateLabel = nullptr;    // 刷新状态标签（明显展示“刷新中/空闲+耗时”）。
 
     // ======== 进程活动记录面板 ========
     QWidget* m_activityPanelWidget = nullptr;       // m_activityPanelWidget：进程活动图表面板。
@@ -718,7 +719,6 @@ private:
     QPushButton* m_activityNetworkButton = nullptr; // 网络指标显示按钮。
     QPushButton* m_activityGpuButton = nullptr;     // GPU 指标显示按钮。
     QPushButton* m_activityProcessPickerButton = nullptr; // 准星拖拽按钮：按目标窗口 PID 过滤进程并打开进程详情。
-    QLabel* m_activityStatusLabel = nullptr;        // 活动记录状态标签。
     QLabel* m_activitySnapshotLabel = nullptr;      // 时间轴悬停快照摘要。
     bool m_activityRecordingEnabled = false;        // m_activityRecordingEnabled：由刷新状态派生，刷新即记录。
     bool m_activityTimelinePinnedToLatest = true;   // 时间轴在最右侧时自动吸附最新。
@@ -747,7 +747,6 @@ private:
     QPushButton* m_threadColumnPresetAButton = nullptr; // A：调度概览列。
     QPushButton* m_threadColumnPresetBButton = nullptr; // B：地址/诊断列。
     QLineEdit* m_threadSearchLineEdit = nullptr; // 线程页搜索框（按 TID/PID/名称过滤）。
-    QLabel* m_threadStatusLabel = nullptr;    // 线程页刷新状态标签。
     QTreeWidget* m_threadTable = nullptr;     // 线程列表表格（支持右键动作）。
     ThreadColumnLayout m_threadColumnLayout = ThreadColumnLayout::PresetA; // 当前高亮预设，默认 A。
     bool m_threadApplyingColumnLayout = false; // 程序应用预设时屏蔽 header 手动变化信号。
@@ -854,6 +853,9 @@ private:
     bool m_processNetworkTrafficCaptureStarted = false; // 抓包服务是否已经尝试启动。
     QHash<QString, QIcon> m_iconCacheByPath;  // 进程图标缓存，避免重复提取。
     QHash<QString, QIcon> m_activityIconCacheByProcessKey; // 历史活动图标缓存：进程名+路径 -> 图标。
+    QSet<QString> m_pendingProcessIconPathSet; // 待延迟提取的 EXE 图标路径集合，去重避免滚动期间重复查询。
+    bool m_processIconLoadScheduled = false; // 图标延迟提取任务是否已排队，保证单次只处理一个路径。
+    std::chrono::steady_clock::time_point m_lastProcessTableScrollTime{}; // 最近一次进程表滚动事件，用于把图标提取推迟到滚动空闲后。
     std::unordered_map<std::string, QPointer<ProcessDetailWindow>> m_detailWindowByIdentity; // 详情窗口缓存（同进程复用窗口）。
     std::unordered_map<std::string, std::chrono::steady_clock::time_point> m_detailWindowLastSyncTimeByIdentity; // 详情窗口最近一次同步时间，避免每轮刷新都触发重型解析。
     std::string m_trackedSelectedIdentityKey; // 当前选中进程 identityKey；表格刷新重建后用于恢复高亮。

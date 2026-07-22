@@ -168,6 +168,10 @@ protected:
 
 private:
     void initMenus();
+    // initializeWindowDockMenuActions：
+    // - 在辅助 Dock 创建完成后，把 ADS 原生显示/隐藏动作挂到“窗口”菜单；
+    // - 菜单复选状态由 CDockWidget::toggleViewAction 自动与 Dock 开关同步。
+    void initializeWindowDockMenuActions();
     void initPrivilegeStatusButtons();
     void refreshPrivilegeStatusButtons();
     void applyPrivilegeButtonStyle(QPushButton* button, bool activeState);
@@ -472,8 +476,8 @@ private:
     ads::CDockWidget* m_dockPlugin = nullptr; // m_dockPlugin：Tab 型插件独立顶部页 Dock。
     ads::CDockWidget* m_dockMisc = nullptr;
     ads::CDockWidget* m_dockHardware = nullptr; // m_dockHardware：硬件页 Dock。
-    ads::CDockWidget* m_dockCurrentOp = nullptr; // 已禁用，保留成员以便后续恢复 Dock 代码。
-    ads::CDockWidget* m_dockLog = nullptr; // 已迁移为非模态独立窗口，保留成员兼容旧代码。
+    ads::CDockWidget* m_dockCurrentOp = nullptr; // m_dockCurrentOp：底部“当前任务”辅助 Dock。
+    ads::CDockWidget* m_dockLog = nullptr; // m_dockLog：底部“日志窗口”辅助 Dock。
     ads::CDockWidget* m_dockImmediate = nullptr; // 已禁用，保留成员以便后续恢复 Dock 代码。
     ads::CDockWidget* m_dockMonitor = nullptr; // 已禁用，保留成员以便后续恢复 Dock 代码。
 
@@ -497,8 +501,9 @@ private:
     WindowDock* m_windowWidget = nullptr; // m_windowWidget：窗口页内容控件。
     RegistryDock* m_registryWidget = nullptr; // m_registryWidget：注册表页内容控件。
     HandleDock* m_handleWidget = nullptr;
-    LogDockWidget* m_logWidget = nullptr; // 非模态“日志输出”窗口的可视化日志面板。
-    ProgressDockWidget* m_progressWidget = nullptr; // 已禁用，保留当前操作面板实现。
+    LogDockWidget* m_logWidget = nullptr; // 非模态“日志输出”独立窗口的日志面板。
+    LogDockWidget* m_dockLogWidget = nullptr; // ADS“日志窗口”中的独立日志视图。
+    ProgressDockWidget* m_progressWidget = nullptr; // ADS“当前任务”中的任务进度面板。
     CodeEditorWidget* m_immediateEditorWidget = nullptr; // 已禁用，保留即时窗口实现。
     QDialog* m_logOutputWindow = nullptr;
     ks::ui::NotificationCardManager* m_notificationCardManager = nullptr;
@@ -520,6 +525,8 @@ private:
     QToolButton* m_licenseMenuButton = nullptr;  // m_licenseMenuButton：功能条左侧“许可证”按钮。
     QToolButton* m_exitMenuButton = nullptr;     // m_exitMenuButton：功能条左侧“退出”按钮。
     QToolButton* m_pluginMenuButton = nullptr;   // m_pluginMenuButton：功能条左侧“插件管理”入口按钮。
+    QToolButton* m_windowMenuButton = nullptr;   // m_windowMenuButton：功能条“窗口”下拉菜单入口。
+    QMenu* m_windowMenu = nullptr;               // m_windowMenu：辅助 Dock 显示/隐藏复选菜单。
     QToolButton* m_logMenuButton = nullptr;      // m_logMenuButton：功能条“日志输出”窗口切换入口。
     QToolButton* m_settingsMenuButton = nullptr; // m_settingsMenuButton：功能条左侧“设置”入口按钮。
     QPushButton* m_uiAccessStatusButton = nullptr; // m_uiAccessStatusButton：触发 UIAccess fallback 或降级回普通实例的入口。

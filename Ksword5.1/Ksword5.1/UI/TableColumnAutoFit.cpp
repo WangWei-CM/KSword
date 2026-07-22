@@ -28,6 +28,7 @@ namespace
     // 属性名统一集中，避免和业务控件属性冲突。
     constexpr const char* AutoFitInstalledProperty = "_ksword_table_column_auto_fit_installed";
     constexpr const char* AutoFitScheduledProperty = "_ksword_table_column_auto_fit_scheduled";
+    constexpr const char* AutoFitApplyingProperty = "_ksword_table_column_auto_fit_applying";
     constexpr const char* AutoFitUserAdjustedProperty = "_ksword_table_column_auto_fit_user_adjusted";
     constexpr const char* AutoFitDisabledProperty = "_ksword_table_column_auto_fit_disabled";
     constexpr const char* AutoFitHeaderHookedProperty = "_ksword_table_column_auto_fit_header_hooked";
@@ -882,9 +883,11 @@ namespace
         const int dynamicMinimumWidth = std::max(
             kAbsoluteMinimumSectionWidth,
             std::min(kPreferredMinimumSectionWidth, availableWidth / visibleSectionCount));
+        bool geometryRefreshRequired = false;
         if (header->minimumSectionSize() > dynamicMinimumWidth)
         {
             header->setMinimumSectionSize(dynamicMinimumWidth);
+            geometryRefreshRequired = true;
         }
 
         std::vector<VisibleSection> visibleSections =
@@ -895,6 +898,26 @@ namespace
         }
 
         fitWidthsToAvailableSpace(visibleSections, availableWidth);
+
+        geometryRefreshRequired = geometryRefreshRequired || header->stretchLastSection();
+        for (const VisibleSection& section : visibleSections)
+        {
+            if (header->sectionResizeMode(section.logicalIndex) != QHeaderView::Interactive ||
+                header->sectionSize(section.logicalIndex) != section.fittedWidth)
+            {
+                geometryRefreshRequired = true;
+                break;
+            }
+        }
+
+        // LayoutRequest 会由 doItemsLayout()/updateGeometry() 异步回送到全局过滤器。
+        // 当前列宽已经吻合时不能再次刷新几何，否则会形成 singleShot(0) 的空闲重排循环。
+        if (!geometryRefreshRequired)
+        {
+            return true;
+        }
+
+        view->setProperty(AutoFitApplyingProperty, true);
 
         {
             const QSignalBlocker headerSignalBlocker(header);
@@ -910,6 +933,7 @@ namespace
         }
 
         refreshViewGeometryAfterFit(view, header);
+        view->setProperty(AutoFitApplyingProperty, false);
         return true;
     }
 
@@ -922,6 +946,7 @@ namespace
     void scheduleColumnFit(QAbstractItemView* view)
     {
         if (!isAutoFitEnabled(view) ||
+            view->property(AutoFitApplyingProperty).toBool() ||
             view->property(AutoFitScheduledProperty).toBool() ||
             view->property(AutoFitUserAdjustedProperty).toBool())
         {

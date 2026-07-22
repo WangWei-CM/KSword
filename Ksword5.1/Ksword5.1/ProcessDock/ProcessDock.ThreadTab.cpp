@@ -535,22 +535,10 @@ void ProcessDock::initializeThreadPage()
     m_threadSearchLineEdit->setStyleSheet(buildThreadSearchStyle());
     m_threadSearchLineEdit->setMaximumWidth(360);
 
-    m_threadStatusLabel = new QLabel("● 等待刷新线程列表", m_threadPage);
-    m_threadStatusLabel->setToolTip("展示线程列表刷新状态与诊断路径");
-    // 状态标签只展示紧凑摘要，完整诊断保留在 tooltip，避免长文本撑宽整个 Dock。
-    m_threadStatusLabel->setMinimumWidth(0);
-    m_threadStatusLabel->setMaximumWidth(420);
-    m_threadStatusLabel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
-    m_threadStatusLabel->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
-    m_threadStatusLabel->setStyleSheet(
-        QStringLiteral("color:%1; font-weight:600;")
-        .arg(KswordTheme::TextSecondaryHex()));
-
     m_threadTopLayout->addWidget(m_threadRefreshButton);
     m_threadTopLayout->addWidget(m_threadColumnPresetWidget);
     m_threadTopLayout->addWidget(m_threadSearchLineEdit);
     m_threadTopLayout->addStretch(1);
-    m_threadTopLayout->addWidget(m_threadStatusLabel);
     m_threadPageLayout->addLayout(m_threadTopLayout);
 
     // 线程表格初始化：使用 QTreeWidget 以支持首列图标与多列排序。
@@ -794,33 +782,6 @@ void ProcessDock::initializeThreadPageConnections()
     }
 }
 
-void ProcessDock::applyThreadStatusUi(
-    const bool refreshing,
-    const QString& stateText,
-    const QString& detailText)
-{
-    if (m_threadStatusLabel == nullptr)
-    {
-        return;
-    }
-
-    if (refreshing)
-    {
-        m_threadStatusLabel->setStyleSheet(
-            QStringLiteral("color:%1; font-weight:700;").arg(KswordTheme::PrimaryBlueHex));
-    }
-    else
-    {
-        const QString idleColor = KswordTheme::IsDarkModeEnabled()
-            ? KswordTheme::SuccessColor().name(QColor::HexRgb)
-            : KswordTheme::SuccessColor().name(QColor::HexRgb);
-        m_threadStatusLabel->setStyleSheet(
-            QStringLiteral("color:%1; font-weight:600;").arg(idleColor));
-    }
-    m_threadStatusLabel->setText(stateText);
-    m_threadStatusLabel->setToolTip(detailText.isEmpty() ? stateText : detailText);
-}
-
 void ProcessDock::requestAsyncThreadRefresh(const bool forceRefresh)
 {
     if (m_threadTable == nullptr)
@@ -844,7 +805,6 @@ void ProcessDock::requestAsyncThreadRefresh(const bool forceRefresh)
     }
     m_threadRefreshInProgress = true;
     const std::uint64_t localTicket = ++m_threadRefreshTicket;
-    applyThreadStatusUi(true, QStringLiteral("● 正在刷新线程列表..."));
 
     if (m_threadRefreshButton != nullptr)
     {
@@ -886,34 +846,6 @@ void ProcessDock::requestAsyncThreadRefresh(const bool forceRefresh)
             guardThis->m_threadRecordList = std::move(threadList);
             guardThis->m_threadDiagnosticText = diagnosticText;
             guardThis->rebuildThreadTable();
-
-            const QString strategyText = usedNtQuery
-                ? QStringLiteral("NtQuerySystemInformation")
-                : QStringLiteral("Toolhelp Fallback");
-            const QString r0StateText = r0ThreadExtensionMerged
-                ? ks::i18n::contextText(
-                    QStringLiteral("process.thread.status.r0_merged"),
-                    QStringLiteral("已合并"))
-                : ks::i18n::contextText(
-                    QStringLiteral("process.thread.status.r0_unavailable"),
-                    QStringLiteral("不可用"));
-            const QString statusText = ks::i18n::contextText(
-                QStringLiteral("process.thread.status.completed"),
-                QStringLiteral("● 完成 · %1 线程 · %2 · R0:%3"))
-                .arg(guardThis->m_threadRecordList.size())
-                .arg(strategyText)
-                .arg(r0StateText);
-            QString detailText = ks::i18n::contextText(
-                QStringLiteral("process.thread.status.detail"),
-                QStringLiteral("刷新完成 | 线程:%1 | 方法:%2 | R0扩展:%3"))
-                .arg(guardThis->m_threadRecordList.size())
-                .arg(strategyText)
-                .arg(r0StateText);
-            if (!guardThis->m_threadDiagnosticText.empty())
-            {
-                detailText += QStringLiteral("\n%1").arg(QString::fromStdString(guardThis->m_threadDiagnosticText));
-            }
-            guardThis->applyThreadStatusUi(false, statusText, detailText);
 
             {
                 kLogEvent logEvent;

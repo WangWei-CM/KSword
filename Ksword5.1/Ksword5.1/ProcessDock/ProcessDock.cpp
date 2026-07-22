@@ -238,9 +238,21 @@ namespace
     constexpr int ActivityMaximumIntervalMilliseconds = 60000;
     constexpr int ProcessTableMinimumIntervalMilliseconds = 500;
     constexpr int ProcessTableMaximumIntervalMilliseconds = 60000;
+    constexpr int ProcessIconExtractionQuietPeriodMilliseconds = 180;
+    constexpr int ProcessIconExtractionRetryMilliseconds = 16;
+    constexpr int ProcessIconExtractionPointerBusyRetryMilliseconds = 250;
     constexpr std::size_t ActivityMaximumSampleCount = 1800;
     constexpr qsizetype ProcessIconCacheMaximumCount = 4096;
     constexpr qsizetype ActivityIconCacheMaximumCount = 8192;
+
+    // processPlaceholderIcon：
+    // - 进程表在真实 EXE 图标尚未进入缓存时复用同一个 SVG 图标对象；
+    // - 避免滚动绘制时为每个未命中单元格重复构造 QIcon 并重新走资源查找。
+    const QIcon& processPlaceholderIcon()
+    {
+        static const QIcon icon(QStringLiteral(":/Icon/process_main.svg"));
+        return icon;
+    }
 
     // formatProcessWin32Error 作用：
     // - 输入：stepText 表示失败步骤，errorCode 为 Win32 错误码；
@@ -3472,10 +3484,33 @@ ProcessDock::snapshotProcessNetworkTrafficCounters() const
 
 bool ProcessDock::eventFilter(QObject* watched, QEvent* event)
 {
+    if (event == nullptr)
+    {
+        return QWidget::eventFilter(watched, event);
+    }
+
+    // 进程表滚动期间不执行同步图标提取：
+    // - 记录表格及其 viewport/滚动条收到的滚轮事件；
+    // - 延迟图标任务据此等待一小段空闲窗口，保证滚动优先得到 UI 线程；
+    // - 不修改或拦截 Qt 原始滚轮处理。
+    if (event->type() == QEvent::Wheel)
+    {
+        QWidget* watchedWidget = qobject_cast<QWidget*>(watched);
+        const bool fromProcessTable =
+            watchedWidget != nullptr &&
+            m_processTable != nullptr &&
+            ((watchedWidget == m_processTable) || m_processTable->isAncestorOf(watchedWidget));
+        if (fromProcessTable)
+        {
+            m_lastProcessTableScrollTime = std::chrono::steady_clock::now();
+        }
+        return QWidget::eventFilter(watched, event);
+    }
+
     // 只处理左键按下：
     // - 鼠标释放/移动不改变选择；
     // - 右键仍保留上下文菜单的冻结选择语义。
-    if (event == nullptr || event->type() != QEvent::MouseButtonPress)
+    if (event->type() != QEvent::MouseButtonPress)
     {
         return QWidget::eventFilter(watched, event);
     }
@@ -3548,34 +3583,12 @@ void ProcessDock::showEvent(QShowEvent* event)
         return;
     }
 
+    // 进程监视必须由用户点击“开始刷新”显式启动：
+    // - ProcessDock 初次显示不再隐式拉起枚举、静态详情补齐、网络抓包或活动记录；
+    // - 这让全局暂停状态在切入进程页后仍保持暂停，避免空闲时意外占用 CPU 核心；
+    // - 首次运行标记只用于禁止重复初始化，开始按钮会保留原有完整启动流程。
     m_initialRefreshScheduled = true;
-    m_monitoringEnabled = true;
-    m_activityRecordingEnabled = true;
-    if (m_activitySamples.empty())
-    {
-        m_activityRecordingStartTick100ns = steadyNow100ns();
-        m_activityNextSequence = 0;
-    }
-    if (m_tableRefreshIntervalEdit != nullptr)
-    {
-        m_tableRefreshIntervalEdit->setEnabled(true);
-    }
-    if (m_refreshIntervalEdit != nullptr)
-    {
-        m_refreshIntervalEdit->setEnabled(true);
-    }
-    if (m_refreshTimer != nullptr)
-    {
-        m_refreshTimer->start();
-    }
-
-    // 首次显示后再触发首轮刷新：
-    // - 避免主窗口启动阶段提前拉起进程枚举；
-    // - 用户真正切到“进程”页时再加载数据。
-    QTimer::singleShot(0, this, [this]()
-        {
-            requestAsyncRefresh(true);
-        });
+    updateProcessActivityStatusLabel();
 }
 
 void ProcessDock::refreshThemeVisuals()
@@ -3646,9 +3659,6 @@ void ProcessDock::initializeTopControls()
     m_controlLayout = new QHBoxLayout();
     m_controlLayout->setContentsMargins(0, 0, 0, 0);
     m_controlLayout->setSpacing(8);
-    m_statusLayout = new QHBoxLayout();
-    m_statusLayout->setContentsMargins(0, 0, 0, 0);
-    m_statusLayout->setSpacing(8);
     ks::i18n::LanguageManager& languageManager = ks::i18n::LanguageManager::instance();
 
     // 遍历策略下拉框：
@@ -3777,18 +3787,6 @@ void ProcessDock::initializeTopControls()
     m_refreshIntervalEdit->setStyleSheet(buildBlueLineEditStyle());
     m_refreshIntervalEdit->setEnabled(false);
 
-    // 刷新状态标签：明确告诉用户当前是否在刷新，以及最后耗时。
-    m_refreshStateLabel = new QLabel("● 空闲", this);
-    languageManager.bindText(m_refreshStateLabel, QStringLiteral("process.state.idle"), QStringLiteral("● 空闲"));
-    m_refreshStateLabel->setStyleSheet(
-        QStringLiteral("color:%1; font-weight:600;")
-        .arg(KswordTheme::TextSecondaryHex()));
-    m_refreshStateLabel->setToolTip("当前刷新状态");
-    languageManager.bindToolTip(
-        m_refreshStateLabel,
-        QStringLiteral("process.tooltip.refresh_state"),
-        QStringLiteral("当前刷新状态"));
-
     // 进程搜索框：
     // - 直接基于当前缓存做本地过滤，不额外触发系统查询；
     // - 切到“进程列表”页后会自动聚焦，支持直接键入搜索词。
@@ -3856,12 +3854,7 @@ void ProcessDock::initializeTopControls()
     m_controlLayout->addWidget(m_tableRefreshIntervalEdit);
     m_controlLayout->addWidget(m_sampleIntervalLabel);
     m_controlLayout->addWidget(m_refreshIntervalEdit);
-    // 第二行只放“监控状态”，避免与操作按钮挤在同一行导致横向滚动。
-    m_statusLayout->addWidget(m_refreshStateLabel, 1);
-    m_statusLayout->addStretch(1);
-
     controlContainerLayout->addLayout(m_controlLayout);
-    controlContainerLayout->addLayout(m_statusLayout);
     m_processPageLayout->addLayout(controlContainerLayout);
 }
 
@@ -3999,13 +3992,6 @@ void ProcessDock::initializeProcessActivityPanel()
     });
     m_activityProcessPickerButton = processPickerButton;
 
-    m_activityStatusLabel = new QLabel(
-        processContextText(
-            "process.activity.status.initial",
-            QStringLiteral("进程活动：未开始刷新 | 样本 0")),
-        m_activityPanelWidget);
-    m_activityStatusLabel->setStyleSheet(QStringLiteral("color:%1; font-weight:600;").arg(KswordTheme::TextSecondaryHex()));
-
     toolbarLayout->addWidget(m_activityClearButton);
     toolbarLayout->addWidget(m_activityBackgroundRecordCheck);
     toolbarLayout->addWidget(m_activityListOnlyRefreshCheck);
@@ -4023,7 +4009,6 @@ void ProcessDock::initializeProcessActivityPanel()
     toolbarLayout->addWidget(m_activityGpuButton);
     toolbarLayout->addWidget(m_activityProcessPickerButton);
     toolbarLayout->addStretch(1);
-    toolbarLayout->addWidget(m_activityStatusLabel);
 
     m_activityChartWidget = new ProcessActivityChartWidget(this, m_activityPanelWidget);
     m_activityChartWidget->setToolTip(QString());
@@ -4233,6 +4218,9 @@ void ProcessDock::initializeProcessTable()
     // - 右键菜单会读取所有已选行并批量执行动作。
     m_processTable->setSelectionMode(QAbstractItemView::ExtendedSelection);
     m_processTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    // 按像素滚动可让滚轮和触控板事件在到达时立刻推进 viewport，
+    // 避免固定行高表格把输入聚合为较大的逐项跳动。
+    m_processTable->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
     m_processTable->setSortingEnabled(true);
     m_processTable->setContextMenuPolicy(Qt::CustomContextMenu);
     m_processTable->setAlternatingRowColors(true);
@@ -4246,6 +4234,7 @@ void ProcessDock::initializeProcessTable()
     if (QScrollBar* verticalScrollBar = m_processTable->verticalScrollBar())
     {
         verticalScrollBar->setProperty("ksword_disable_smooth_scroll", true);
+        verticalScrollBar->setSingleStep(12);
     }
     if (QScrollBar* horizontalScrollBar = m_processTable->horizontalScrollBar())
     {
@@ -4875,10 +4864,9 @@ void ProcessDock::initializeConnections()
         {
             m_refreshTimer->stop();
         }
+        // 未缓存图标只属于显示增强。暂停后取消剩余队列，避免 Shell 图标解析继续占用 GUI 线程。
+        m_pendingProcessIconPathSet.clear();
         stopProcessNetworkTrafficCapture();
-        updateRefreshStateUi(
-            false,
-            processContextText("process.refresh.state.paused", QStringLiteral("● 已暂停刷新/记录")));
         updateProcessActivityStatusLabel();
     });
 
@@ -5067,11 +5055,6 @@ void ProcessDock::initializeConnections()
             m_refreshTimer != nullptr)
         {
             m_refreshTimer->stop();
-            updateRefreshStateUi(
-                false,
-                processContextText(
-                    "process.refresh.state.hidden",
-                    QStringLiteral("● 进程页隐藏，刷新/记录自动暂停")));
         }
         if (currentPage == m_threadPage)
         {
@@ -5504,28 +5487,6 @@ bool ProcessDock::processRecordMatchesSearch(const ks::process::ProcessRecord& p
     return false;
 }
 
-void ProcessDock::updateRefreshStateUi(const bool refreshing, const QString& stateText)
-{
-    // 统一刷新状态标签更新逻辑，确保“刷新中/空闲”展示一致。
-    if (m_refreshStateLabel == nullptr)
-    {
-        return;
-    }
-
-    if (refreshing)
-    {
-        m_refreshStateLabel->setStyleSheet(
-            QStringLiteral("color:%1; font-weight:700;").arg(KswordTheme::AccentHex(KswordTheme::AccentRole::Blue)));
-    }
-    else
-    {
-        const QString idleColor = KswordTheme::SuccessColor().name(QColor::HexRgb);
-        m_refreshStateLabel->setStyleSheet(
-            QStringLiteral("color:%1; font-weight:600;").arg(idleColor));
-    }
-    m_refreshStateLabel->setText(stateText);
-}
-
 void ProcessDock::applyDefaultColumnWidths()
 {
     m_processTable->setColumnWidth(toColumnIndex(TableColumn::Name), 280);
@@ -5650,9 +5611,6 @@ void ProcessDock::requestAsyncRefresh(const bool forceRefresh)
     {
         kLogEvent logEvent;
         dbg << logEvent << "[ProcessDock] 检测到 Ctrl 按下，本轮刷新跳过。" << eol;
-            updateRefreshStateUi(
-                false,
-                processContextText("process.refresh.state.ctrl_skip", QStringLiteral("● Ctrl 按下，跳过本轮刷新")));
         return;
     }
 
@@ -5664,9 +5622,6 @@ void ProcessDock::requestAsyncRefresh(const bool forceRefresh)
         {
             kLogEvent logEvent;
             dbg << logEvent << "[ProcessDock] 右键菜单处于打开状态，本轮刷新跳过。" << eol;
-            updateRefreshStateUi(
-                false,
-                processContextText("process.refresh.state.menu_skip", QStringLiteral("● 菜单打开中，跳过本轮刷新")));
             return;
         }
 
@@ -5688,11 +5643,6 @@ void ProcessDock::requestAsyncRefresh(const bool forceRefresh)
         {
             kLogEvent logEvent;
             dbg << logEvent << "[ProcessDock] 跳过非强制刷新：进程页不可见且未启用后台保持刷新/记录。" << eol;
-            updateRefreshStateUi(
-                false,
-                processContextText(
-                    "process.refresh.state.hidden",
-                    QStringLiteral("● 进程页隐藏，刷新/记录自动暂停")));
             updateProcessActivityStatusLabel();
             return;
         }
@@ -5736,17 +5686,6 @@ void ProcessDock::requestAsyncRefresh(const bool forceRefresh)
     const std::uint64_t localTicket = ++m_refreshTicket;
     m_lastRefreshStartTime = std::chrono::steady_clock::now();
     QPointer<ProcessDock> guard(this);
-
-    // 刷新前先更新 UI 状态与日志，给出明显“刷新中”提示。
-    const QString forceReasonText = (!forceRefresh && m_monitoringEnabled && !isProcessActivityRefreshAllowedNow())
-        ? processContextText("process.refresh.state.auto_paused_suffix", QStringLiteral(" | 刷新/记录=自动暂停"))
-        : QString();
-    updateRefreshStateUi(
-        true,
-        processContextText("process.refresh.state.refreshing", QStringLiteral("● 正在刷新... 策略=%1%2"))
-        .arg(QString::fromUtf8(strategyToText(toStrategy(strategyIndex))))
-        .arg(queryKernelProcessList ? " | 内核对比=ON" : "")
-        + forceReasonText);
 
     {
         kLogEvent logEvent;
@@ -5903,32 +5842,6 @@ void ProcessDock::applyRefreshResult(RefreshResult refreshResult, const bool for
     {
         kPro.set(m_refreshProgressTaskPid, "刷新完成", 100, 1.0f);
     }
-
-    // 刷新状态标签展示详细统计，明确告诉用户“刷新已完成”。
-    QString refreshStatusText = processContextText(
-        "process.refresh.state.completed",
-        QStringLiteral("● 刷新完成 %1 ms | 方法:%2 | 枚举:%3 新增:%4 退出:%5"))
-        .arg(elapsedMs)
-        .arg(QString::fromUtf8(strategyToText(refreshResult.actualStrategy)))
-        .arg(refreshResult.enumeratedCount)
-        .arg(refreshResult.newProcessCount)
-        .arg(refreshResult.exitedProcessCount);
-    if (refreshResult.kernelCompareEnabled)
-    {
-        if (refreshResult.kernelQuerySucceeded)
-        {
-            refreshStatusText += processContextText("process.refresh.state.kernel", QStringLiteral(" | 内核:%1 隐藏:%2"))
-                .arg(refreshResult.kernelEnumeratedCount)
-                .arg(refreshResult.kernelOnlyCount);
-        }
-        else
-        {
-            refreshStatusText += processContextText(
-                "process.refresh.state.kernel_error",
-                QStringLiteral(" | 内核查询失败"));
-        }
-    }
-    updateRefreshStateUi(false, refreshStatusText);
 
     // 输出详细刷新日志，便于后续性能与正确性排查。
     {
@@ -6595,6 +6508,11 @@ void ProcessDock::rebuildTable()
     const Qt::SortOrder previousSortOrder = headerView != nullptr
         ? headerView->sortIndicatorOrder()
         : Qt::AscendingOrder;
+    // 表头尚未生成排序指示器时使用 PID，保证排序键快照和实际排序列一致。
+    const int safePreviousSortColumn =
+        (previousSortColumn >= 0 && previousSortColumn < static_cast<int>(TableColumn::Count))
+        ? previousSortColumn
+        : toColumnIndex(TableColumn::Pid);
     const std::string trackedIdentityKeyBeforeRebuild =
         !m_trackedSelectedIdentityKey.empty()
         ? m_trackedSelectedIdentityKey
@@ -6701,6 +6619,92 @@ void ProcessDock::rebuildTable()
         tableRows.push_back(std::move(tableRow));
     }
 
+    // 排序键快照作用：
+    // - 仅比较当前用户排序列的数值键和展示键；
+    // - 键未变化时保留 QSortFilterProxyModel 已有顺序，跳过一次完整排序；
+    // - 新增、退出或当前排序值变化时仍按原有规则立即重新排序。
+    struct ProcessSortCellSnapshot
+    {
+        bool hasNumericValue = false; // hasNumericValue：当前列是否提供数值排序键。
+        double numericValue = 0.0;    // numericValue：ProcessNumericSortRole 的原始数值。
+        QString displayText;          // displayText：数值相等或文本列时的稳定次级排序键。
+    };
+    const auto tableRowStableKey = [](const ProcessTableRow& tableRow) -> std::string
+    {
+        if (tableRow.rowKind == ProcessTableRowKind::Process)
+        {
+            return std::string("process:") + tableRow.identityKey;
+        }
+        return std::string("synthetic:")
+            + std::to_string(static_cast<int>(tableRow.rowKind))
+            + ":"
+            + tableRow.expansionKey.toUtf8().toStdString();
+    };
+    const auto captureSortCell = [this, safePreviousSortColumn](const ProcessTableRow& tableRow) -> ProcessSortCellSnapshot
+    {
+        ProcessSortCellSnapshot snapshot{};
+        bool numericParseOk = false;
+        const QVariant numericSortValue = processTableData(
+            tableRow,
+            safePreviousSortColumn,
+            ProcessNumericSortRole);
+        const double numericValue = numericSortValue.toDouble(&numericParseOk);
+        snapshot.hasNumericValue = numericParseOk;
+        snapshot.numericValue = numericValue;
+        snapshot.displayText = processTableData(
+            tableRow,
+            safePreviousSortColumn,
+            Qt::DisplayRole).toString();
+        return snapshot;
+    };
+    const auto requiresProcessTableResort = [&]() -> bool
+    {
+        // 树状和友好视图由源顺序定义结构，仍沿用原有代理排序触发路径。
+        if (!enableSorting)
+        {
+            return true;
+        }
+
+        const std::vector<ProcessTableRow>& previousRows = m_processTableModel->rows();
+        if (previousRows.size() != tableRows.size())
+        {
+            return true;
+        }
+
+        std::unordered_map<std::string, ProcessSortCellSnapshot> previousSortCells;
+        previousSortCells.reserve(previousRows.size());
+        for (const ProcessTableRow& previousRow : previousRows)
+        {
+            const std::string stableKey = tableRowStableKey(previousRow);
+            if (stableKey.empty() ||
+                !previousSortCells.emplace(stableKey, captureSortCell(previousRow)).second)
+            {
+                return true;
+            }
+        }
+
+        for (const ProcessTableRow& nextRow : tableRows)
+        {
+            const std::string stableKey = tableRowStableKey(nextRow);
+            const auto previousSortCellIt = previousSortCells.find(stableKey);
+            if (stableKey.empty() || previousSortCellIt == previousSortCells.end())
+            {
+                return true;
+            }
+
+            const ProcessSortCellSnapshot nextSortCell = captureSortCell(nextRow);
+            const ProcessSortCellSnapshot& previousSortCell = previousSortCellIt->second;
+            if (previousSortCell.hasNumericValue != nextSortCell.hasNumericValue ||
+                previousSortCell.numericValue != nextSortCell.numericValue ||
+                previousSortCell.displayText != nextSortCell.displayText)
+            {
+                return true;
+            }
+        }
+        return false;
+    };
+    const bool processTableResortRequired = requiresProcessTableResort();
+
     // 刷新期间临时冻结视图和选择信号，合并增量模型变更的中间态重绘。
     QSignalBlocker tableSignalBlocker(m_processTable);
     std::unique_ptr<QSignalBlocker> selectionSignalBlocker;
@@ -6717,15 +6721,19 @@ void ProcessDock::rebuildTable()
         std::chrono::steady_clock::now() - modelApplyStartTime).count();
 
     const auto sortStartTime = std::chrono::steady_clock::now();
-    m_processTable->setSortingEnabled(enableSorting);
+    // QTableView::setSortingEnabled(true) 会立即触发排序；仅在开关状态变化时调用，防止无数据变化的周期刷新重复排序。
+    const bool sortingStateChanged = (m_processTable->isSortingEnabled() != enableSorting);
+    if (sortingStateChanged)
+    {
+        m_processTable->setSortingEnabled(enableSorting);
+    }
     if (enableSorting)
     {
-        // 恢复用户上一次排序选择，而不是强制回到 PID 升序。
-        const int safeSortColumn =
-            (previousSortColumn >= 0 && previousSortColumn < static_cast<int>(TableColumn::Count))
-            ? previousSortColumn
-            : toColumnIndex(TableColumn::Pid);
-        m_processTable->sortByColumn(safeSortColumn, previousSortOrder);
+        if (sortingStateChanged || processTableResortRequired)
+        {
+            // 恢复用户上一次排序选择，而不是强制回到 PID 升序。
+            m_processTable->sortByColumn(safePreviousSortColumn, previousSortOrder);
+        }
     }
     else
     {
@@ -6746,7 +6754,41 @@ void ProcessDock::rebuildTable()
     // - 若该进程已不存在，则清空追踪状态，避免错误高亮。
     bool restoredAnySelection = false;
     QItemSelectionModel* selectionModel = m_processTable->selectionModel();
-    if (selectionModel != nullptr)
+    bool selectionRestoreRequired = modelUpdateStats.modelReset;
+    if (selectionModel != nullptr && !selectionRestoreRequired)
+    {
+        // 增量模型更新会维护 persistent index；当前实际选择仍与追踪集合一致时，不清空再重选，避免高频刷新闪烁。
+        std::unordered_set<std::string> currentSelectedIdentityKeys;
+        bool containsSyntheticSelection = false;
+        const std::vector<QModelIndex> selectedRows = selectedProcessTableRowIndexes(false);
+        currentSelectedIdentityKeys.reserve(selectedRows.size());
+        for (const QModelIndex& rowIndex : selectedRows)
+        {
+            const ProcessTableRow* selectedTableRow = processTableRowForViewIndex(rowIndex);
+            if (selectedTableRow == nullptr ||
+                selectedTableRow->rowKind != ProcessTableRowKind::Process ||
+                selectedTableRow->identityKey.empty())
+            {
+                containsSyntheticSelection = true;
+                continue;
+            }
+            currentSelectedIdentityKeys.insert(selectedTableRow->identityKey);
+        }
+
+        selectionRestoreRequired =
+            containsSyntheticSelection ||
+            currentSelectedIdentityKeys != trackedIdentityKeysBeforeRebuild;
+        if (!selectionRestoreRequired && !trackedIdentityKeyBeforeRebuild.empty())
+        {
+            const QModelIndex currentIndex = selectionModel->currentIndex();
+            const ProcessTableRow* currentTableRow = processTableRowForViewIndex(currentIndex);
+            selectionRestoreRequired =
+                currentTableRow == nullptr ||
+                currentTableRow->identityKey != trackedIdentityKeyBeforeRebuild ||
+                currentIndex.column() != trackedColumnBeforeRebuild;
+        }
+    }
+    if (selectionModel != nullptr && selectionRestoreRequired)
     {
         selectionModel->clearSelection();
         for (const std::string& identityKey : trackedIdentityKeysBeforeRebuild)
@@ -6782,7 +6824,9 @@ void ProcessDock::rebuildTable()
         syncTrackedSelectionFromTable();
         m_trackedSelectedColumn = trackedColumnBeforeRebuild;
     }
-    else if (!trackedIdentityKeysBeforeRebuild.empty() && currentProcessSearchText().isEmpty())
+    else if (selectionRestoreRequired &&
+        !trackedIdentityKeysBeforeRebuild.empty() &&
+        currentProcessSearchText().isEmpty())
     {
         m_trackedSelectedIdentityKey.clear();
         m_trackedSelectedIdentityKeys.clear();
@@ -7141,19 +7185,23 @@ void ProcessDock::appendProcessActivitySample()
         sample.totalNetKBps += processRecord.netKBps;
         sample.totalGpuPercent += processRecord.gpuPercent;
 
-        // 历史快照只保存轻量数据，但图标必须能按“进程名+路径”恢复：
-        // - 这里复用实时列表的 resolveProcessIcon；
-        // - 缓存的是 QIcon 副本，后续查看历史表格时不会再走 PID 查询。
+        // 历史快照只保存轻量数据，采样路径不得同步提取新 EXE 图标：
+        // - QFileIconProvider 在首次访问某些路径时可能阻塞 UI 线程，影响表格滚动；
+        // - 这里只复用实时列表已经就绪的图标，未命中时由历史表格真正显示该行时按需解析；
+        // - 图标仍完全基于快照中的进程名和路径，不会额外按 PID 查询。
         if (!processPoint.iconCacheKey.empty())
         {
             const QString iconKey = QString::fromStdString(processPoint.iconCacheKey);
-            if (!m_activityIconCacheByProcessKey.contains(iconKey))
+            const QString imagePath = QString::fromStdString(processPoint.imagePath).trimmed();
+            const auto liveIconIt = m_iconCacheByPath.find(imagePath);
+            if (!m_activityIconCacheByProcessKey.contains(iconKey) &&
+                liveIconIt != m_iconCacheByPath.end())
             {
                 if (m_activityIconCacheByProcessKey.size() >= ActivityIconCacheMaximumCount)
                 {
                     m_activityIconCacheByProcessKey.erase(m_activityIconCacheByProcessKey.begin());
                 }
-                m_activityIconCacheByProcessKey.insert(iconKey, resolveProcessIcon(processRecord));
+                m_activityIconCacheByProcessKey.insert(iconKey, liveIconIt.value());
             }
         }
         sample.processes.push_back(std::move(processPoint));
@@ -7261,56 +7309,8 @@ void ProcessDock::refreshProcessActivityChart()
 
 void ProcessDock::updateProcessActivityStatusLabel()
 {
-    if (m_activityStatusLabel == nullptr)
-    {
-        return;
-    }
-
-    QString stateText;
-    const bool refreshAllowed = isProcessActivityRefreshAllowedNow();
     const bool recordingAllowed = isProcessActivityRecordingAllowedNow();
     m_activityRecordingEnabled = recordingAllowed;
-    if (!m_monitoringEnabled)
-    {
-        stateText = processContextText("process.activity.state.paused", QStringLiteral("已暂停刷新/记录"));
-    }
-    else if (!refreshAllowed)
-    {
-        stateText = processContextText(
-            "process.activity.state.hidden",
-            QStringLiteral("进程页隐藏，刷新/记录自动暂停"));
-    }
-    else if (!recordingAllowed)
-    {
-        stateText = processContextText("process.activity.state.no_record", QStringLiteral("刷新中，不写记录"));
-    }
-    else if (m_activityBackgroundRecordCheck != nullptr && m_activityBackgroundRecordCheck->isChecked())
-    {
-        stateText = processContextText("process.activity.state.background", QStringLiteral("后台刷新，同步记录"));
-    }
-    else
-    {
-        stateText = processContextText("process.activity.state.recording", QStringLiteral("刷新中，同步记录"));
-    }
-
-    const int intervalMs = refreshIntervalMillisecondsFromInput();
-    const int tableIntervalMs = tableRefreshIntervalMillisecondsFromInput();
-    m_activityStatusLabel->setText(processContextText(
-        "process.activity.status.template",
-        QStringLiteral("进程活动：%1 | 样本 %2 | 打点 %3s | 列表 %4s%5%6%7"))
-        .arg(stateText)
-        .arg(static_cast<qulonglong>(m_activitySamples.size()))
-        .arg(static_cast<double>(intervalMs) / 1000.0, 0, 'f', intervalMs < 1000 ? 2 : 1)
-        .arg(static_cast<double>(tableIntervalMs) / 1000.0, 0, 'f', tableIntervalMs < 1000 ? 2 : 1)
-        .arg((m_activityBackgroundRecordCheck != nullptr && m_activityBackgroundRecordCheck->isChecked())
-            ? processContextText("process.activity.status.background_suffix", QStringLiteral(" | 后台"))
-            : QString())
-        .arg((m_activityListOnlyRefreshCheck != nullptr && m_activityListOnlyRefreshCheck->isChecked())
-            ? processContextText("process.activity.status.no_record_suffix", QStringLiteral(" | 不记录"))
-            : QString())
-        .arg(isProcessActivityTableSnapshotActive()
-            ? processContextText("process.activity.status.snapshot_suffix", QStringLiteral(" | 表格=历史快照"))
-            : processContextText("process.activity.status.live_suffix", QStringLiteral(" | 表格=实时"))));
 }
 
 void ProcessDock::previewProcessActivitySnapshotForIndex(const int sampleIndex)
@@ -9802,7 +9802,7 @@ QIcon ProcessDock::resolveProcessIcon(const ks::process::ProcessRecord& processR
 
     if (pathText.isEmpty() || pathText.startsWith('[') || pathText == QStringLiteral("历史快照"))
     {
-        return QIcon(":/Icon/process_main.svg");
+        return processPlaceholderIcon();
     }
 
     auto iconIt = m_iconCacheByPath.find(pathText);
@@ -9811,29 +9811,163 @@ QIcon ProcessDock::resolveProcessIcon(const ks::process::ProcessRecord& processR
         return iconIt.value();
     }
 
-    // 先尝试直接从 EXE 路径构造图标（期望拿到真实程序图标）。
-    QIcon processIcon(pathText);
+    // 未命中时先返回占位图，并把可能阻塞的 Shell 图标提取放到滚动空闲后的单独事件中。
+    queueProcessIconExtraction(pathText);
+    return processPlaceholderIcon();
+}
+
+void ProcessDock::queueProcessIconExtraction(const QString& imagePath)
+{
+    // 输入：后台枚举阶段已获取的 imagePath；处理：路径去重后排队；返回：无，不在当前绘制调用中访问 Shell。
+    if (!m_monitoringEnabled)
+    {
+        return;
+    }
+    const QString normalizedPath = imagePath.trimmed();
+    if (normalizedPath.isEmpty() ||
+        normalizedPath.startsWith('[') ||
+        normalizedPath == QStringLiteral("历史快照") ||
+        m_iconCacheByPath.contains(normalizedPath))
+    {
+        return;
+    }
+
+    m_pendingProcessIconPathSet.insert(normalizedPath);
+    schedulePendingProcessIconExtraction(ProcessIconExtractionRetryMilliseconds);
+}
+
+void ProcessDock::schedulePendingProcessIconExtraction(const int delayMilliseconds)
+{
+    // 输入：下一次提取前的最小等待时间；处理：只保留一个延迟任务；返回：无，避免滚动中排入大量重复定时器。
+    if (m_processIconLoadScheduled || m_pendingProcessIconPathSet.isEmpty())
+    {
+        return;
+    }
+
+    m_processIconLoadScheduled = true;
+    const int safeDelayMilliseconds = std::max(0, delayMilliseconds);
+    QPointer<ProcessDock> guard(this);
+    QTimer::singleShot(safeDelayMilliseconds, this, [guard]()
+        {
+            if (guard != nullptr)
+            {
+                guard->extractNextPendingProcessIcon();
+            }
+        });
+}
+
+void ProcessDock::extractNextPendingProcessIcon()
+{
+    // 单次只处理一个图标：
+    // - 若用户仍在进程表滚动，继续等待空闲窗口；
+    // - 避免 QFileIconProvider 解析多个 EXE 时独占 GUI 线程；
+    // - 每次完成后仅重绘 viewport，让已解析图标自然替换占位图。
+    m_processIconLoadScheduled = false;
+    if (!m_monitoringEnabled || m_pendingProcessIconPathSet.isEmpty())
+    {
+        if (!m_monitoringEnabled)
+        {
+            m_pendingProcessIconPathSet.clear();
+        }
+        return;
+    }
+
+    const auto nowTime = std::chrono::steady_clock::now();
+    if (m_lastProcessTableScrollTime.time_since_epoch().count() != 0)
+    {
+        const auto scrollIdleElapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+            nowTime - m_lastProcessTableScrollTime).count();
+        if (scrollIdleElapsed < ProcessIconExtractionQuietPeriodMilliseconds)
+        {
+            const int remainingQuietPeriod = static_cast<int>(
+                ProcessIconExtractionQuietPeriodMilliseconds - scrollIdleElapsed);
+            schedulePendingProcessIconExtraction(remainingQuietPeriod);
+            return;
+        }
+    }
+
+    // QFileIconProvider / Shell 图标解析可能读取 EXE 资源、查询图标处理程序，单次调用可明显阻塞 GUI 线程。
+    // 鼠标位于表格 viewport 内时用户随时可能继续滚动，因此不在这一交互区域内启动解析。
+    // 真实图标仍会在鼠标移出表格后的空闲期逐个补齐，业务数据和图标缓存语义不变。
+    if (m_processTable != nullptr && m_processTable->viewport() != nullptr)
+    {
+        QWidget* const tableViewport = m_processTable->viewport();
+        const QPoint viewportCursorPosition = tableViewport->mapFromGlobal(QCursor::pos());
+        if (tableViewport->rect().contains(viewportCursorPosition))
+        {
+            schedulePendingProcessIconExtraction(ProcessIconExtractionPointerBusyRetryMilliseconds);
+            return;
+        }
+    }
+
+    const auto pendingPathIt = m_pendingProcessIconPathSet.cbegin();
+    const QString imagePath = *pendingPathIt;
+    m_pendingProcessIconPathSet.erase(pendingPathIt);
+    if (!m_iconCacheByPath.contains(imagePath))
+    {
+        if (m_iconCacheByPath.size() >= ProcessIconCacheMaximumCount)
+        {
+            m_iconCacheByPath.erase(m_iconCacheByPath.begin());
+        }
+        m_iconCacheByPath.insert(imagePath, extractProcessIconFromPath(imagePath));
+    }
+
+    refreshProcessTableRowsForIcon(imagePath);
+    schedulePendingProcessIconExtraction(ProcessIconExtractionRetryMilliseconds);
+}
+
+void ProcessDock::refreshProcessTableRowsForIcon(const QString& imagePath)
+{
+    // 输入：刚写入图标缓存的规范 EXE 路径。
+    // 处理：仅重绘当前 viewport 中引用该路径的 Name 单元格，避免每补一个图标都刷新整张表。
+    // 返回：无。不可见行在之后自然进入绘制路径时读取新缓存。
+    if (m_processTable == nullptr ||
+        m_processTableModel == nullptr ||
+        m_processSortProxy == nullptr ||
+        m_processTable->viewport() == nullptr)
+    {
+        return;
+    }
+
+    const QString normalizedImagePath = imagePath.trimmed();
+    if (normalizedImagePath.isEmpty())
+    {
+        return;
+    }
+
+    QWidget* const tableViewport = m_processTable->viewport();
+    const std::vector<ProcessTableRow>& tableRows = m_processTableModel->rows();
+    const int nameColumn = toColumnIndex(TableColumn::Name);
+    for (int sourceRow = 0; sourceRow < static_cast<int>(tableRows.size()); ++sourceRow)
+    {
+        const ProcessTableRow& tableRow = tableRows[static_cast<std::size_t>(sourceRow)];
+        if (QString::fromStdString(tableRow.record.imagePath).trimmed() != normalizedImagePath)
+        {
+            continue;
+        }
+
+        const QModelIndex sourceIndex = m_processTableModel->index(sourceRow, nameColumn);
+        const QModelIndex viewIndex = m_processSortProxy->mapFromSource(sourceIndex);
+        const QRect visibleRect = m_processTable->visualRect(viewIndex);
+        if (visibleRect.isValid() && visibleRect.intersects(tableViewport->rect()))
+        {
+            tableViewport->update(visibleRect);
+        }
+    }
+}
+
+QIcon ProcessDock::extractProcessIconFromPath(const QString& imagePath) const
+{
+    // 输入：已去重且非空的 EXE 路径；处理：先尝试 Qt 图标，再回退 Shell 图标提供器；返回：真实图标或稳定占位图。
+    QIcon processIcon(imagePath);
     if (processIcon.isNull())
     {
         QFileIconProvider iconProvider;
-        processIcon = iconProvider.icon(QFileInfo(pathText));
+        processIcon = iconProvider.icon(QFileInfo(imagePath));
     }
     if (processIcon.isNull())
     {
-        processIcon = QIcon(":/Icon/process_main.svg");
-    }
-    if (m_iconCacheByPath.size() >= ProcessIconCacheMaximumCount)
-    {
-        m_iconCacheByPath.erase(m_iconCacheByPath.begin());
-    }
-    m_iconCacheByPath.insert(pathText, processIcon);
-    if (!activityIconKey.trimmed().isEmpty())
-    {
-        if (m_activityIconCacheByProcessKey.size() >= ActivityIconCacheMaximumCount)
-        {
-            m_activityIconCacheByProcessKey.erase(m_activityIconCacheByProcessKey.begin());
-        }
-        m_activityIconCacheByProcessKey.insert(activityIconKey, processIcon);
+        processIcon = processPlaceholderIcon();
     }
     return processIcon;
 }
@@ -11412,12 +11546,6 @@ void ProcessDock::executeRefreshPplProtectionLevelAction()
     }
 
     rebuildTable();
-    updateRefreshStateUi(
-        false,
-        QStringLiteral("● PPL保护级别手动刷新完成 成功:%1 失败:%2")
-            .arg(successCount)
-            .arg(failureCount));
-
     kLogEvent actionEvent;
     (failureCount == 0 ? info : warn) << actionEvent
         << "[ProcessDock] PPL 保护级别手动刷新完成, targets=" << actionTargets.size()
