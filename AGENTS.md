@@ -104,6 +104,19 @@ $seven='C:\Users\Felix\CLionProjects\Wisdom-Weasel\7z.exe'
 
 校验通过时，`7z t` 输出应包含 `Everything is Ok`；主程序顶部“许可证”页面从 exe 同目录读取根 `LICENSE`。本流程生成的包根目录必须是 `Release\`，不要把 `dist\KswordARK-release-work\` 或其它临时目录打进包里。
 
+## Launcher 用户报告接入
+
+收到解压后的 Launcher 报告目录时，先只读校验，确认 `valid=true` 后再写入语料库：
+
+```powershell
+py -3.12 tools\pdb_offset_generator\launcher_report_intake.py $reportDir
+py -3.12 tools\pdb_offset_generator\launcher_report_intake.py $reportDir --corpus-root $corpusRoot --commit
+```
+
+工具会校验 SHA256 和 PE/RSDS 身份、下载精确 PDB，并生成 NTOS/NTKRLA57 偏移配置；collection-only 模块只保存 PE/PDB。Wine、非 amd64、无 RSDS 或校验和不匹配的报告不得进入正式矩阵。
+
+导入后运行 `ksword_profile_release_sync.py` 重新生成 `ark_dyndata_pack_v3.json`，再运行 `Launcher/tools/generate_support_manifest.py` 更新支持清单。最后确认新 PDB GUID/Age 在清单中唯一且 `complete=true`，并构建 Launcher Release。重复导入应显示 `existing`。
+
 
 ## Phase -1 协作规范
 

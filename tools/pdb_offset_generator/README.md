@@ -1,5 +1,54 @@
 # Ksword PDB Offset Generator
 
+## Launcher report intake
+
+Use `launcher_report_intake.py` for an extracted Launcher collection directory.
+The default command validates `report.json`, `SHA256SUMS.txt`, every PE identity,
+and RSDS metadata without modifying the corpus:
+
+```powershell
+$reportDir='<extracted-report-directory>'
+py -3.12 tools\pdb_offset_generator\launcher_report_intake.py `
+  $reportDir
+```
+
+After reviewing the result, add `--commit` to stage all inputs, download and
+validate exact public PDBs, generate compatibility-required NTOS/NTKRLA57
+profiles, and atomically import them into `E:\KswordPDB\PDB`. Collection-only
+modules are retained as PE/PDB research corpus and do not produce fake NTOS
+profiles.
+
+```powershell
+$corpusRoot='<private-corpus-root>'
+py -3.12 tools\pdb_offset_generator\launcher_report_intake.py `
+  $reportDir `
+  --corpus-root $corpusRoot `
+  --commit
+```
+
+Each committed report writes provenance to
+`scratch\launcher-report-intake\<report-id>\intake.json` and
+`logs\launcher_report_intake\<report-id>.json`.
+
+Corpus intake and repository publishing are separate operations. After review,
+publish the validated corpus into the repository data files and regenerate the
+Launcher identity list explicitly:
+
+```powershell
+py -3.12 tools\pdb_offset_generator\ksword_profile_release_sync.py `
+  --source "$corpusRoot\profiles\ark_dyndata" `
+  --release-root "Ksword5.1\x64\Release" `
+  --pack-only --emit-pack --pack-version 3 `
+  --pack-output "Ksword5.1\Ksword5.1\profiles\ark_dyndata_pack_v3.json" `
+  --manifest "Ksword5.1\Ksword5.1\profiles\ark_dyndata_manifest.json" `
+  --report "$corpusRoot\logs\ark_dyndata_publish_report.launcher-intake.json"
+
+py -3.12 Launcher\tools\generate_support_manifest.py `
+  --source Launcher\support_manifest_source.json `
+  --pack Ksword5.1\Ksword5.1\profiles\ark_dyndata_pack_v3.json `
+  --output Launcher\launcher_support_manifest.json
+```
+
 This tool builds KswordARK dynamic-offset JSON profiles from Microsoft public symbols.
 It uses the same public symbol-server PE key format used by debugger symbol tools:
 `/<file>/<TimeDateStamp><SizeOfImage>/<file>`.

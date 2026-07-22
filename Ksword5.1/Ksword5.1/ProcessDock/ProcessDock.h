@@ -71,7 +71,7 @@ namespace ks::process
 
 namespace ks::network
 {
-    class TrafficMonitorService;
+    class ProcessNetworkEtwMonitor;
 }
 
 namespace ks::ui
@@ -300,7 +300,7 @@ private:
     };
 
     // NetworkTrafficCounters：
-    // - 输入：TrafficMonitorService 上报的单包 PID、方向、大小；
+    // - 输入：ETW 采集器上报的按 PID 网络累计字节；
     // - 处理：按 PID 累计下行/上行字节；
     // - 返回：作为刷新线程的只读快照，速率由 CounterSample 差分计算。
     struct NetworkTrafficCounters
@@ -846,11 +846,8 @@ private:
     // ======== 数据缓存 ========
     std::unordered_map<std::string, CacheEntry> m_cacheByIdentity; // 进程缓存（PID+CreateTime）。
     std::unordered_map<std::string, ks::process::CounterSample> m_counterSampleByIdentity; // 差值样本。
-    std::unique_ptr<ks::network::TrafficMonitorService> m_processNetworkTrafficService; // 进程页内部 TCP/UDP 抓包服务。
-    mutable std::mutex m_processNetworkTrafficMutex; // 保护 m_processNetworkTrafficByPid 与状态文本。
-    std::unordered_map<std::uint32_t, NetworkTrafficCounters> m_processNetworkTrafficByPid; // PID -> 网络累计字节。
-    std::string m_processNetworkTrafficStatusText; // 最近一次抓包服务状态/错误。
-    bool m_processNetworkTrafficCaptureStarted = false; // 抓包服务是否已经尝试启动。
+    std::unique_ptr<ks::network::ProcessNetworkEtwMonitor> m_processNetworkTrafficService; // 进程页内部 ETW 网络累计器。
+    bool m_processNetworkTrafficCaptureStarted = false; // ETW 采集器是否已经尝试启动。
     QHash<QString, QIcon> m_iconCacheByPath;  // 进程图标缓存，避免重复提取。
     QHash<QString, QIcon> m_activityIconCacheByProcessKey; // 历史活动图标缓存：进程名+路径 -> 图标。
     QSet<QString> m_pendingProcessIconPathSet; // 待延迟提取的 EXE 图标路径集合，去重避免滚动期间重复查询。

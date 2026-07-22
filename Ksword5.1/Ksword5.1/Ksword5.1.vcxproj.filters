@@ -587,6 +587,9 @@
     <ClCompile Include="ksword\network\network_nids.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="ksword\network\network_process_etw_monitor.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="ksword\process\process.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -994,6 +997,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="ksword\network\network_nids.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="ksword\network\network_process_etw_monitor.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="ksword\network\network_request_tools.h">

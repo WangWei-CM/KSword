@@ -24,6 +24,7 @@ REQUIRED_PROFILE_KEYS = (
 # 这些字段在当前 DynData 诊断中属于可选能力；缺失时不应把整个内核 profile
 # 判定为不可用。其它缺失字段仍会让 Launcher 报告该身份需要开发者关注。
 OPTIONAL_MISSING_FIELDS = {
+    "_EPROCESS->NumberOfLockedPages",
     "_HANDLE_TABLE->HandleCount",
     "_UNLOADED_DRIVERS->Name",
     "_UNLOADED_DRIVERS->StartAddress",

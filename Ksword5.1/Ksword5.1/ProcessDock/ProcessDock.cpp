@@ -8,7 +8,7 @@
 #include "../UI/FlatTableModel.h"
 #include "../UI/TableColumnAutoFit.h"
 #include "../Internationalization/LanguageManager.h"
-#include "../ksword/network/network.h"
+#include "../ksword/network/network_process_etw_monitor.h"
 
 #include <QAbstractItemModel>
 #include <QAbstractItemView>
@@ -3332,10 +3332,10 @@ ProcessDock::ProcessDock(QWidget* parent)
 
 ProcessDock::~ProcessDock()
 {
-    // 析构阶段先停止内部抓包线程：
+    // 析构阶段先停止内部 ETW 消费线程：
     // - 输入：无；
-    // - 处理：请求 TrafficMonitorService 退出并等待线程 join；
-    // - 返回：无，防止对象销毁后抓包回调继续访问成员。
+    // - 处理：请求 ProcessNetworkEtwMonitor 退出并等待线程 join；
+    // - 返回：无，防止对象销毁后 ETW 回调继续访问成员。
     stopProcessNetworkTrafficCapture();
 
     // 析构阶段主动解除全局事件过滤器，避免 QApplication 后续点击事件访问已销毁 Dock。
@@ -3373,8 +3373,8 @@ void ProcessDock::ensureProcessNetworkTrafficCaptureStarted()
 {
     // ensureProcessNetworkTrafficCaptureStarted：
     // - 输入：无；
-    // - 处理：懒创建内部 TCP/UDP 抓包服务，并把报文按 PID 累计为下行/上行字节；
-    // - 返回：无。失败时状态文本留在 m_processNetworkTrafficStatusText，进程表网络列自然保持 0。
+    // - 处理：懒创建内部 ETW 累计器，后台仅按 PID 记录 TCP/UDP 收发字节；
+    // - 返回：无。失败时不回退到 Raw Socket 方案，进程表沿用现有差分结果。
     if (m_processNetworkTrafficCaptureStarted)
     {
         return;
@@ -3383,49 +3383,16 @@ void ProcessDock::ensureProcessNetworkTrafficCaptureStarted()
 
     if (m_processNetworkTrafficService == nullptr)
     {
-        m_processNetworkTrafficService = std::make_unique<ks::network::TrafficMonitorService>();
+        m_processNetworkTrafficService = std::make_unique<ks::network::ProcessNetworkEtwMonitor>();
     }
 
-    m_processNetworkTrafficService->SetPacketCallback([this](const ks::network::PacketRecord& packetRecord) {
-        if (packetRecord.processId == 0U || packetRecord.totalPacketSize == 0U)
-        {
-            return;
-        }
-
-        std::lock_guard<std::mutex> guard(m_processNetworkTrafficMutex);
-        NetworkTrafficCounters& counters = m_processNetworkTrafficByPid[packetRecord.processId];
-        if (packetRecord.direction == ks::network::PacketDirection::Inbound)
-        {
-            counters.rxBytes += static_cast<std::uint64_t>(packetRecord.totalPacketSize);
-        }
-        else if (packetRecord.direction == ks::network::PacketDirection::Outbound)
-        {
-            counters.txBytes += static_cast<std::uint64_t>(packetRecord.totalPacketSize);
-        }
-    });
-
-    m_processNetworkTrafficService->SetStatusCallback([this](const std::string& statusText) {
-        std::lock_guard<std::mutex> guard(m_processNetworkTrafficMutex);
-        m_processNetworkTrafficStatusText = statusText;
-    });
-
-    const bool started = m_processNetworkTrafficService->StartCapture();
-    {
-        std::lock_guard<std::mutex> guard(m_processNetworkTrafficMutex);
-        if (started)
-        {
-            m_processNetworkTrafficStatusText = "process network traffic capture started";
-        }
-        else if (m_processNetworkTrafficStatusText.empty())
-        {
-            m_processNetworkTrafficStatusText = "process network traffic capture start failed";
-        }
-    }
+    const bool started = m_processNetworkTrafficService->Start();
 
     kLogEvent logEvent;
     (started ? info : warn) << logEvent
-        << "[ProcessDock] 进程网络吞吐抓包服务"
+        << "[ProcessDock] 进程网络吞吐 ETW 采集器"
         << (started ? "启动成功" : "启动失败")
+        << (started ? std::string() : (", detail=" + m_processNetworkTrafficService->LastErrorText()))
         << eol;
 }
 
@@ -3433,13 +3400,11 @@ void ProcessDock::stopProcessNetworkTrafficCapture()
 {
     // stopProcessNetworkTrafficCapture：
     // - 输入：无；
-    // - 处理：停止内部抓包服务，断开回调，避免暂停或析构后继续累计；
+    // - 处理：停止内部 ETW 会话，避免暂停或析构后继续累计；
     // - 返回：无。
     if (m_processNetworkTrafficService != nullptr)
     {
-        m_processNetworkTrafficService->StopCapture();
-        m_processNetworkTrafficService->SetPacketCallback({});
-        m_processNetworkTrafficService->SetStatusCallback({});
+        m_processNetworkTrafficService->Stop();
     }
     m_processNetworkTrafficCaptureStarted = false;
 }
@@ -3457,17 +3422,9 @@ void ProcessDock::pruneProcessNetworkTrafficCounters()
         }
     }
 
-    std::lock_guard<std::mutex> guard(m_processNetworkTrafficMutex);
-    for (auto counterIt = m_processNetworkTrafficByPid.begin(); counterIt != m_processNetworkTrafficByPid.end();)
+    if (m_processNetworkTrafficService != nullptr)
     {
-        if (livePidSet.find(counterIt->first) == livePidSet.end())
-        {
-            counterIt = m_processNetworkTrafficByPid.erase(counterIt);
-        }
-        else
-        {
-            ++counterIt;
-        }
+        m_processNetworkTrafficService->PruneCounters(livePidSet);
     }
 }
 
@@ -3476,10 +3433,21 @@ ProcessDock::snapshotProcessNetworkTrafficCounters() const
 {
     // snapshotProcessNetworkTrafficCounters：
     // - 输入：无；
-    // - 处理：在互斥锁内复制当前 PID 网络累计字节表；
+    // - 处理：向 ETW 累计器请求当前 PID 网络累计字节快照；
     // - 返回：刷新线程可安全读取的独立快照。
-    std::lock_guard<std::mutex> guard(m_processNetworkTrafficMutex);
-    return m_processNetworkTrafficByPid;
+    std::unordered_map<std::uint32_t, NetworkTrafficCounters> snapshot;
+    if (m_processNetworkTrafficService == nullptr)
+    {
+        return snapshot;
+    }
+
+    const auto etwSnapshot = m_processNetworkTrafficService->SnapshotCounters();
+    snapshot.reserve(etwSnapshot.size());
+    for (const auto& [processId, counters] : etwSnapshot)
+    {
+        snapshot.emplace(processId, NetworkTrafficCounters{ counters.rxBytes, counters.txBytes });
+    }
+    return snapshot;
 }
 
 bool ProcessDock::eventFilter(QObject* watched, QEvent* event)

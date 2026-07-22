@@ -84,7 +84,7 @@
     </ClCompile>
     <Link>
       <AdditionalLibraryDirectories>$(QTDIR)\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>qtadvanceddockingd.lib;Ole32.lib;Shell32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>qtadvanceddockingd.lib;Ole32.lib;Shell32.lib;Advapi32.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <AdditionalOptions>"/MANIFESTDEPENDENCY:type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' publicKeyToken='6595b64144ccf1df' language='*' processorArchitecture='*'" %(AdditionalOptions)</AdditionalOptions>
     </Link>
   </ItemDefinitionGroup>
@@ -105,7 +105,7 @@
     </ClCompile>
     <Link>
       <AdditionalLibraryDirectories>$(QTDIR)\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>qtadvanceddocking.lib;Ole32.lib;Shell32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>qtadvanceddocking.lib;Ole32.lib;Shell32.lib;Advapi32.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <AdditionalOptions>"/MANIFESTDEPENDENCY:type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' publicKeyToken='6595b64144ccf1df' language='*' processorArchitecture='*'" %(AdditionalOptions)</AdditionalOptions>
       <UACUIAccess>false</UACUIAccess>
     </Link>
@@ -341,6 +341,7 @@
     <ClCompile Include="ksword\network\network_download_tools.cpp" />
     <ClCompile Include="ksword\network\network_format_tools.cpp" />
     <ClCompile Include="ksword\network\network_nids.cpp" />
+    <ClCompile Include="ksword\network\network_process_etw_monitor.cpp" />
     <ClCompile Include="ksword\process\process.cpp" />
     <ClCompile Include="ksword\service\service.cpp" />
     <ClCompile Include="ksword\startup\startup.cpp" />
@@ -426,6 +427,7 @@
     <ClInclude Include="ksword\network\network_download_tools.h" />
     <ClInclude Include="ksword\network\network_format_tools.h" />
     <ClInclude Include="ksword\network\network_nids.h" />
+    <ClInclude Include="ksword\network\network_process_etw_monitor.h" />
     <ClInclude Include="ksword\network\network_request_tools.h" />
     <ClInclude Include="ksword\process\process.h" />
     <ClInclude Include="ksword\profile\ProfileJsonLoader.h" />

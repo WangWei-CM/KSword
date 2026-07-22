@@ -17444,6 +17444,14 @@
     "驱动注册表路径: %18\n": "Driver registry path: %18\n",
     "驱动注册表路径: %6\n": "Driver registry path: %6\n",
     "驱动键: %17\n": "Driver key: %17\n",
-    "驱动键: %5\n": "Driver key: %5\n"
+    "驱动键: %5\n": "Driver key: %5\n",
+    " failed (Win32 error ": " failed (Win32 error ",
+    "EnableTraceEx2(Microsoft-Windows-Kernel-Network)": "EnableTraceEx2(Microsoft-Windows-Kernel-Network)",
+    "Ksword.ProcessNet.": "Ksword.ProcessNet.",
+    "OpenTraceW": "OpenTraceW",
+    "ProcessTrace": "ProcessTrace",
+    "StartTraceW": "StartTraceW",
+    "[ProcessDock] 进程网络吞吐 ETW 采集器": "[ProcessDock] Process network throughput ETW collector",
+    "failed to create ETW consumer thread": "failed to create ETW consumer thread"
   }
 }
