@@ -8221,6 +8221,13 @@ void MainWindow::setupDockLayout()
             m_dockWelcome->raise();
         });
 
+    // 默认 Dock 拓扑整理完毕后立即恢复更新，再让 ADS 创建保存状态中的浮动顶层窗口：
+    // - restoreState() 会把部分 Dock 从 m_pDockManager 脱离并创建独立顶层窗口；
+    // - 若它们诞生于 updatesEnabled=false 的控件树中，恢复后会保留禁用绘制状态；
+    // - 此时鼠标命中和右键菜单仍正常，窗口客户区却始终保持黑色。
+    setUpdatesEnabled(mainWindowUpdatesWereEnabled);
+    m_pDockManager->setUpdatesEnabled(dockManagerUpdatesWereEnabled);
+
     // 6. 默认布局搭建完成后再恢复用户布局：
     // - ADS restoreState 要求所有 DockWidget 已注册；
     // - objectName 已在 initDockWidgets 中固定为英文 key，避免中文标题变化破坏恢复。
@@ -8235,8 +8242,30 @@ void MainWindow::setupDockLayout()
         QStringLiteral("正在恢复界面布局..."));
     refreshAdsDockTabVisualIdentities(m_pDockManager);
 
-    m_pDockManager->setUpdatesEnabled(dockManagerUpdatesWereEnabled);
-    setUpdatesEnabled(mainWindowUpdatesWereEnabled);
+    // 对恢复出来的独立顶层窗口再做一次显式校正：
+    // ADS 版本差异可能让 dockContainer 保留恢复阶段的更新禁用标记。
+    // 只处理本次布局恢复产生的浮动容器，不遍历或改写 Dock 内容控件。
+    if (dockManagerUpdatesWereEnabled)
+    {
+        const QList<ads::CFloatingDockContainer*> floatingWidgets = m_pDockManager->floatingWidgets();
+        for (ads::CFloatingDockContainer* floatingWidget : floatingWidgets)
+        {
+            if (floatingWidget == nullptr)
+            {
+                continue;
+            }
+            floatingWidget->installEventFilter(this);
+            floatingWidget->setUpdatesEnabled(true);
+            if (ads::CDockContainerWidget* dockContainer = floatingWidget->dockContainer(); dockContainer != nullptr)
+            {
+                dockContainer->setUpdatesEnabled(true);
+                dockContainer->updateGeometry();
+                dockContainer->update();
+            }
+            floatingWidget->updateGeometry();
+            floatingWidget->update();
+        }
+    }
     m_pDockManager->updateGeometry();
     m_pDockManager->update();
 
@@ -8831,6 +8860,20 @@ void MainWindow::applyAppearanceSettings(
 
     applyNativeWindowFrameVisualStyle();
     rebuildWindowBackgroundBrush(true);
+    if (m_pDockManager != nullptr)
+    {
+        // restoreState() 创建的浮动窗口在外观初始化前已经脱离 MainWindow，
+        // 无法继承随后设置到主窗口的 QSS，因此在当前主题与背景参数就绪后显式同步一次。
+        const QList<ads::CFloatingDockContainer*> floatingWidgets = m_pDockManager->floatingWidgets();
+        for (ads::CFloatingDockContainer* floatingWidget : floatingWidgets)
+        {
+            applyFloatingDockContainerAppearance(floatingWidget);
+            if (floatingWidget != nullptr)
+            {
+                floatingWidget->update();
+            }
+        }
+    }
     refreshPrivilegeStatusButtons();
     refreshTopActionButtonStyles();
     if (m_progressWidget != nullptr)
