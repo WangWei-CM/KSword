@@ -3583,12 +3583,32 @@ void ProcessDock::showEvent(QShowEvent* event)
         return;
     }
 
-    // 进程监视必须由用户点击“开始刷新”显式启动：
-    // - ProcessDock 初次显示不再隐式拉起枚举、静态详情补齐、网络抓包或活动记录；
-    // - 这让全局暂停状态在切入进程页后仍保持暂停，避免空闲时意外占用 CPU 核心；
-    // - 首次运行标记只用于禁止重复初始化，开始按钮会保留原有完整启动流程。
+    // 首次进入进程页时立即开始异步刷新：
+    // - 不在主窗口启动阶段枚举，只有用户真正切到页面后才启动；
+    // - 与“开始刷新”按钮采用同一套周期监视与活动记录状态；
+    // - 强制首轮刷新不等待定时器间隔，避免用户看到空表。
     m_initialRefreshScheduled = true;
+    m_monitoringEnabled = true;
+    m_activityRecordingEnabled = true;
+    if (m_activitySamples.empty())
+    {
+        m_activityRecordingStartTick100ns = steadyNow100ns();
+        m_activityNextSequence = 0;
+    }
+    m_activityTimelinePinnedToLatest = true;
+    m_activityTableSnapshotIndex = -1;
+    m_activityTableSnapshotRecords.clear();
     updateProcessActivityStatusLabel();
+    requestAsyncRefresh(true);
+
+    // showEvent 内部阶段列表页的 isVisible() 可能尚未稳定，延迟到事件循环首轮再启动周期计时器。
+    QTimer::singleShot(0, this, [this]() {
+        if (m_refreshTimer != nullptr && isProcessActivityRefreshAllowedNow())
+        {
+            m_refreshTimer->start(refreshIntervalMillisecondsFromInput());
+        }
+        updateProcessActivityStatusLabel();
+    });
 }
 
 void ProcessDock::refreshThemeVisuals()
