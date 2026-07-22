@@ -1,6 +1,9 @@
 #include "StartupDock.Internal.h"
 #include "../OnlineScan/SandboxUploadActions.h"
 
+#include <QMetaObject>
+#include <QPointer>
+
 #include <winsvc.h>
 
 #pragma comment(lib, "Advapi32.lib")
@@ -845,30 +848,69 @@ void StartupDock::deleteSelectedEntry(const StartupCategory category, QTableWidg
     }
     else if (entry.sourceTypeText == QStringLiteral("ScheduledTask"))
     {
-        QProcess processObject;
-        processObject.setProgram(QStringLiteral("schtasks.exe"));
-        processObject.setArguments({
-            QStringLiteral("/Delete"),
-            QStringLiteral("/TN"),
-            entry.locationText,
-            QStringLiteral("/F")
-            });
-        processObject.start();
-        deleteOk = processObject.waitForStarted(1500) && processObject.waitForFinished(10000)
-            && processObject.exitStatus() == QProcess::NormalExit
-            && processObject.exitCode() == 0;
-        if (!deleteOk)
+        const StartupEntry taskEntry = entry;
+        QPointer<StartupDock> safeThis(this);
+        std::thread([safeThis, taskEntry]()
         {
-            errorText = QString::fromLocal8Bit(processObject.readAllStandardError()).trimmed();
-            if (errorText.isEmpty())
+            QProcess processObject;
+            processObject.setProgram(QStringLiteral("schtasks.exe"));
+            processObject.setArguments({
+                QStringLiteral("/Delete"),
+                QStringLiteral("/TN"),
+                taskEntry.locationText,
+                QStringLiteral("/F")
+                });
+            processObject.start();
+            bool taskDeleteOk = processObject.waitForStarted(1500) && processObject.waitForFinished(10000)
+                && processObject.exitStatus() == QProcess::NormalExit
+                && processObject.exitCode() == 0;
+            QString taskErrorText;
+            if (!taskDeleteOk)
             {
-                errorText = QString::fromLocal8Bit(processObject.readAllStandardOutput()).trimmed();
+                taskErrorText = QString::fromLocal8Bit(processObject.readAllStandardError()).trimmed();
+                if (taskErrorText.isEmpty())
+                {
+                    taskErrorText = QString::fromLocal8Bit(processObject.readAllStandardOutput()).trimmed();
+                }
+                if (taskErrorText.isEmpty())
+                {
+                    taskErrorText = startupText("startup.delete.schtasks_failed", QStringLiteral("schtasks 删除失败。"));
+                }
             }
-            if (errorText.isEmpty())
-            {
-                errorText = startupText("startup.delete.schtasks_failed", QStringLiteral("schtasks 删除失败。"));
-            }
-        }
+
+            if (safeThis.isNull()) return;
+            QMetaObject::invokeMethod(
+                safeThis.data(),
+                [safeThis, taskEntry, taskDeleteOk, taskErrorText]()
+                {
+                    if (safeThis.isNull()) return;
+                    if (!taskDeleteOk)
+                    {
+                        QMessageBox::warning(
+                            safeThis.data(),
+                            startupText("startup.dialog.title", QStringLiteral("启动项")),
+                            startupText("startup.dialog.delete.failed", QStringLiteral("删除失败：%1"))
+                                .arg(taskErrorText));
+                        return;
+                    }
+
+                    kLogEvent deleteEvent;
+                    info << deleteEvent
+                        << startupText(
+                            "startup.log.delete.succeeded",
+                            QStringLiteral("[StartupDock] 删除启动项成功, type="))
+                               .toStdString()
+                        << taskEntry.sourceTypeText.toStdString()
+                        << ", name="
+                        << taskEntry.itemNameText.toStdString()
+                        << ", location="
+                        << taskEntry.locationText.toStdString()
+                        << eol;
+                    safeThis->refreshAllStartupEntries();
+                },
+                Qt::QueuedConnection);
+        }).detach();
+        return;
     }
 
     if (!deleteOk)
