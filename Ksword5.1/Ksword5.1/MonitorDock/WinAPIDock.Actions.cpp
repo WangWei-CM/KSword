@@ -1153,6 +1153,7 @@ void WinAPIDock::startMonitoring()
     {
         std::lock_guard<std::mutex> lock(m_pendingMutex);
         m_pendingRows.clear();
+        m_pendingDroppedRows = 0;
     }
 
     m_pipeStopFlag.store(false);
@@ -1294,6 +1295,29 @@ void WinAPIDock::applyEventFilter()
     }
 
     const QString keywordText = m_eventFilterEdit != nullptr ? m_eventFilterEdit->text().trimmed() : QString();
+    if (keywordText.isEmpty())
+    {
+        if (m_eventFilterActive)
+        {
+            for (int row = 0; row < m_eventTable->rowCount(); ++row)
+            {
+                m_eventTable->setRowHidden(row, false);
+            }
+        }
+        m_eventFilterActive = false;
+        if (m_eventFilterStatusLabel != nullptr)
+        {
+            m_eventFilterStatusLabel->setText(
+                QStringLiteral("筛选结果：%1 / %2")
+                    .arg(m_eventTable->rowCount())
+                    .arg(m_eventTable->rowCount()));
+            m_eventFilterStatusLabel->setStyleSheet(buildStatusStyle(
+                m_eventTable->rowCount() > 0 ? monitorSuccessColorHex() : monitorIdleColorHex()));
+        }
+        return;
+    }
+
+    m_eventFilterActive = true;
     int visibleCount = 0;
 
     for (int row = 0; row < m_eventTable->rowCount(); ++row)

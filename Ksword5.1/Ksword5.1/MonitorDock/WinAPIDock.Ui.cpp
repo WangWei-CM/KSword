@@ -494,12 +494,13 @@ void WinAPIDock::initializeUi()
             QStringLiteral("详情")
         });
     m_eventTable->horizontalHeader()->setStyleSheet(blueHeaderStyle());
-    m_eventTable->horizontalHeader()->setSectionResizeMode(EventColumnTime100ns, QHeaderView::ResizeToContents);
-    m_eventTable->horizontalHeader()->setSectionResizeMode(EventColumnCategory, QHeaderView::ResizeToContents);
-    m_eventTable->horizontalHeader()->setSectionResizeMode(EventColumnApi, QHeaderView::ResizeToContents);
-    m_eventTable->horizontalHeader()->setSectionResizeMode(EventColumnResult, QHeaderView::ResizeToContents);
-    m_eventTable->horizontalHeader()->setSectionResizeMode(EventColumnPidTid, QHeaderView::ResizeToContents);
-    m_eventTable->horizontalHeader()->setSectionResizeMode(EventColumnDetail, QHeaderView::Stretch);
+    m_eventTable->horizontalHeader()->setSectionResizeMode(QHeaderView::Interactive);
+    m_eventTable->setColumnWidth(EventColumnTime100ns, 160);
+    m_eventTable->setColumnWidth(EventColumnCategory, 72);
+    m_eventTable->setColumnWidth(EventColumnApi, 190);
+    m_eventTable->setColumnWidth(EventColumnResult, 100);
+    m_eventTable->setColumnWidth(EventColumnPidTid, 112);
+    m_eventTable->setColumnWidth(EventColumnDetail, 440);
     m_eventTable->setStyleSheet(blueInputStyle());
     m_eventTable->setAutoFillBackground(false);
     m_eventTable->setAttribute(Qt::WA_StyledBackground, true);

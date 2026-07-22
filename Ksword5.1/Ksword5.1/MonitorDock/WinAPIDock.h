@@ -15,7 +15,9 @@
 #include <QWidget>  // QWidget：WinAPIDock 的直接基类。
 
 #include <atomic>   // std::atomic_bool/std::atomic_uintptr_t：会话线程与管道句柄状态控制。
+#include <cstddef>  // std::size_t：待显示事件队列容量与刷新批次大小。
 #include <cstdint>  // std::uint32_t/std::uintptr_t：PID 与句柄数值桥接。
+#include <deque>    // std::deque：高频事件的有界 FIFO 队列。
 #include <memory>   // std::unique_ptr：后台线程对象托管。
 #include <mutex>    // std::mutex：保护待刷入事件队列。
 #include <thread>   // std::thread：进程刷新与命名管道读取线程。
@@ -124,6 +126,7 @@ private:
     void closeChildPipeHandles();
     void joinChildPipeThreads();
     void writeChildStopFlags();
+    void enqueuePendingRow(EventRow rowValue);
     void flushPendingRows();
     void appendEventRow(const EventRow& rowValue);
 
@@ -205,8 +208,13 @@ private:
     QTableWidget* m_eventTable = nullptr;              // m_eventTable：API 事件结果表。
 
     std::vector<ks::process::ProcessRecord> m_processList; // m_processList：当前系统进程快照。
-    std::vector<EventRow> m_pendingRows;                   // m_pendingRows：后台线程待刷入的事件行。
+    static constexpr std::size_t kPendingRowCapacity = 24000; // 后台队列上限，积压时丢弃最旧事件以保护内存与延迟。
+    static constexpr std::size_t kUiFlushRowLimit = 160;      // 单个 GUI tick 最多渲染的事件数。
+    static constexpr int kUiFlushBudgetMs = 4;                // 单个 GUI tick 的渲染时间预算。
+
+    std::deque<EventRow> m_pendingRows;                    // m_pendingRows：后台线程待刷入的有界 FIFO 事件队列。
     std::mutex m_pendingMutex;                             // m_pendingMutex：保护待刷入事件队列。
+    std::size_t m_pendingDroppedRows = 0;                   // m_pendingDroppedRows：因队列或渲染预算丢弃的事件数。
     std::unique_ptr<std::thread> m_pipeThread;             // m_pipeThread：命名管道读取线程。
     std::vector<std::unique_ptr<std::thread>> m_childPipeThreads; // m_childPipeThreads：自动注入子进程后的子管道读取线程。
     std::vector<std::uintptr_t> m_childPipeHandleValues;   // m_childPipeHandleValues：子管道句柄快照，用于停止时打断阻塞 ReadFile。
@@ -224,5 +232,6 @@ private:
     QString m_currentConfigPath;                           // m_currentConfigPath：当前会话配置文件路径。
     QString m_currentStopFlagPath;                         // m_currentStopFlagPath：当前停止标记文件路径。
     qint64 m_lastProcessRefreshMs = 0;                     // m_lastProcessRefreshMs：上次完成进程快照的时间戳（ms）。
+    bool m_eventFilterActive = false;                      // m_eventFilterActive：是否需要在事件到达时执行全表筛选。
     bool m_hasActivatedOnce = false;                       // m_hasActivatedOnce：是否已经至少激活过一次页面。
 };

@@ -10,9 +10,11 @@
 // ============================================================
 
 #include <QApplication>
+#include <QAbstractItemModel>
 #include <QBrush>
 #include <QCheckBox>
 #include <QColor>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QMetaObject>
 #include <QPointer>
@@ -280,12 +282,7 @@ void WinAPIDock::startPipeReadThread()
                 }, Qt::QueuedConnection);
             }
 
-            EventRow rowValue = packetToEventRow(packetValue);
-
-            {
-                std::lock_guard<std::mutex> lock(guardThis->m_pendingMutex);
-                guardThis->m_pendingRows.push_back(std::move(rowValue));
-            }
+            guardThis->enqueuePendingRow(packetToEventRow(packetValue));
         }
 
         const std::uintptr_t storedHandleValue = guardThis->m_pipeHandleValue.exchange(0);
@@ -434,11 +431,7 @@ void WinAPIDock::startChildPipeReadThread(const std::uint32_t childPidValue)
                 continue;
             }
 
-            EventRow rowValue = packetToEventRow(packetValue);
-            {
-                std::lock_guard<std::mutex> lock(guardThis->m_pendingMutex);
-                guardThis->m_pendingRows.push_back(std::move(rowValue));
-            }
+            guardThis->enqueuePendingRow(packetToEventRow(packetValue));
         }
 
         bool shouldClosePipeHandle = false;
@@ -517,12 +510,29 @@ void WinAPIDock::writeChildStopFlags()
     }
 }
 
+void WinAPIDock::enqueuePendingRow(EventRow rowValue)
+{
+    std::lock_guard<std::mutex> lock(m_pendingMutex);
+    if (m_pendingRows.size() >= kPendingRowCapacity)
+    {
+        m_pendingRows.pop_front();
+        ++m_pendingDroppedRows;
+    }
+    m_pendingRows.push_back(std::move(rowValue));
+}
+
 void WinAPIDock::flushPendingRows()
 {
     std::vector<EventRow> rowList;
     {
         std::lock_guard<std::mutex> lock(m_pendingMutex);
-        rowList.swap(m_pendingRows);
+        const std::size_t takeCount = std::min(kUiFlushRowLimit, m_pendingRows.size());
+        rowList.reserve(takeCount);
+        for (std::size_t index = 0; index < takeCount; ++index)
+        {
+            rowList.push_back(std::move(m_pendingRows.front()));
+            m_pendingRows.pop_front();
+        }
     }
 
     if (rowList.empty())
@@ -530,14 +540,51 @@ void WinAPIDock::flushPendingRows()
         return;
     }
 
-    for (const EventRow& rowValue : rowList)
+    QElapsedTimer budgetTimer;
+    budgetTimer.start();
+
+    std::size_t renderedCount = 0;
+    if (m_eventTable != nullptr)
     {
-        appendEventRow(rowValue);
+        const bool updatesEnabled = m_eventTable->updatesEnabled();
+        m_eventTable->setUpdatesEnabled(false);
+
+        for (const EventRow& rowValue : rowList)
+        {
+            appendEventRow(rowValue);
+            ++renderedCount;
+            if (budgetTimer.elapsed() >= kUiFlushBudgetMs)
+            {
+                break;
+            }
+        }
+
+        const int removeCount = std::max(0, m_eventTable->rowCount() - 12000);
+        if (removeCount > 0 && m_eventTable->model() != nullptr)
+        {
+            m_eventTable->model()->removeRows(0, removeCount);
+        }
+
+        m_eventTable->setUpdatesEnabled(updatesEnabled);
+        if (updatesEnabled && m_eventTable->viewport() != nullptr)
+        {
+            m_eventTable->viewport()->update();
+        }
     }
 
-    while (m_eventTable != nullptr && m_eventTable->rowCount() > 12000)
+    if (renderedCount < rowList.size())
     {
-        m_eventTable->removeRow(0);
+        std::lock_guard<std::mutex> lock(m_pendingMutex);
+        for (std::size_t index = rowList.size(); index > renderedCount; --index)
+        {
+            m_pendingRows.push_front(std::move(rowList[index - 1]));
+        }
+
+        while (m_pendingRows.size() > kPendingRowCapacity)
+        {
+            m_pendingRows.pop_back();
+            ++m_pendingDroppedRows;
+        }
     }
 
     applyEventFilter();
