@@ -270,6 +270,11 @@ LogDockWidget::LogDockWidget(QWidget* parent)
     refreshTableFromManager(true);
 }
 
+void LogDockWidget::refreshNow()
+{
+    refreshTableFromManager(true);
+}
+
 void LogDockWidget::initializeUi()
 {
     // 根布局：上下排列两层（单行工具栏 + 表格）。

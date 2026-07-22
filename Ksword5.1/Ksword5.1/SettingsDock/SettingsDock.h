@@ -11,6 +11,7 @@ class QLabel;
 class QLineEdit;
 class QPushButton;
 class QSlider;
+class QSpinBox;
 class QTabWidget;
 class QToolButton;
 
@@ -194,6 +195,13 @@ private:
 
     // m_backgroundOpacityValueLabel 作用：显示透明度百分比文本。
     QLabel* m_backgroundOpacityValueLabel = nullptr;
+
+    // 日志通知设置：控制右侧通知卡片的开关、等级、时长与堆叠位置。
+    QCheckBox* m_notificationCardsEnabledCheckBox = nullptr;
+    QComboBox* m_notificationMinimumLevelCombo = nullptr;
+    QSpinBox* m_notificationLogDisplaySecondsSpin = nullptr;
+    QComboBox* m_notificationDisplayPlacementCombo = nullptr;
+    QComboBox* m_notificationStackDirectionCombo = nullptr;
 
     // m_startupMaximizedCheckBox 作用：设置下次启动时是否默认最大化显示。
     QCheckBox* m_startupMaximizedCheckBox = nullptr;

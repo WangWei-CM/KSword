@@ -20,6 +20,7 @@
 #include <QProcess>
 #include <QPushButton>
 #include <QSlider>
+#include <QSpinBox>
 #include <QStringList>
 #include <QTabWidget>
 #include <QToolButton>
@@ -522,6 +523,79 @@ void SettingsDock::initializeAppearanceTab()
 
     appearanceRootLayout->addWidget(startupGroupBox);
 
+    // ===== 日志通知分组 =====
+    QGroupBox* notificationGroupBox = new QGroupBox(QStringLiteral("日志通知"), m_appearanceTab);
+    languageManager.bindText(notificationGroupBox, QStringLiteral("settings.notification.group"), QStringLiteral("日志通知"));
+    QVBoxLayout* notificationLayout = new QVBoxLayout(notificationGroupBox);
+    notificationLayout->setSpacing(8);
+
+    QLabel* notificationHintLabel = new QLabel(
+        QStringLiteral("在右侧以不抢焦点的卡片显示日志和运行中任务。"),
+        notificationGroupBox);
+    notificationHintLabel->setWordWrap(true);
+    languageManager.bindText(notificationHintLabel, QStringLiteral("settings.notification.hint"), QStringLiteral("在右侧以不抢焦点的卡片显示日志和运行中任务。"));
+    notificationLayout->addWidget(notificationHintLabel);
+
+    m_notificationCardsEnabledCheckBox = new QCheckBox(QStringLiteral("启用右侧通知卡片"), notificationGroupBox);
+    languageManager.bindText(m_notificationCardsEnabledCheckBox, QStringLiteral("settings.notification.enabled"), QStringLiteral("启用右侧通知卡片"));
+    notificationLayout->addWidget(m_notificationCardsEnabledCheckBox);
+
+    QHBoxLayout* notificationLevelLayout = new QHBoxLayout();
+    QLabel* notificationLevelLabel = new QLabel(QStringLiteral("最低日志级别"), notificationGroupBox);
+    languageManager.bindText(notificationLevelLabel, QStringLiteral("settings.notification.minimum_level"), QStringLiteral("最低日志级别"));
+    notificationLevelLayout->addWidget(notificationLevelLabel, 0);
+    m_notificationMinimumLevelCombo = new QComboBox(notificationGroupBox);
+    m_notificationMinimumLevelCombo->addItem(QStringLiteral("调试 Debug"), 0);
+    m_notificationMinimumLevelCombo->addItem(QStringLiteral("信息 Info"), 1);
+    m_notificationMinimumLevelCombo->addItem(QStringLiteral("警告 Warn"), 2);
+    m_notificationMinimumLevelCombo->addItem(QStringLiteral("错误 Error"), 3);
+    m_notificationMinimumLevelCombo->addItem(QStringLiteral("致命 Fatal"), 4);
+    languageManager.bindComboBoxItem(m_notificationMinimumLevelCombo, 0, QStringLiteral("settings.notification.level.debug"), QStringLiteral("调试 Debug"));
+    languageManager.bindComboBoxItem(m_notificationMinimumLevelCombo, 1, QStringLiteral("settings.notification.level.info"), QStringLiteral("信息 Info"));
+    languageManager.bindComboBoxItem(m_notificationMinimumLevelCombo, 2, QStringLiteral("settings.notification.level.warn"), QStringLiteral("警告 Warn"));
+    languageManager.bindComboBoxItem(m_notificationMinimumLevelCombo, 3, QStringLiteral("settings.notification.level.error"), QStringLiteral("错误 Error"));
+    languageManager.bindComboBoxItem(m_notificationMinimumLevelCombo, 4, QStringLiteral("settings.notification.level.fatal"), QStringLiteral("致命 Fatal"));
+    notificationLevelLayout->addWidget(m_notificationMinimumLevelCombo, 1);
+    notificationLayout->addLayout(notificationLevelLayout);
+
+    QHBoxLayout* notificationDurationLayout = new QHBoxLayout();
+    QLabel* notificationDurationLabel = new QLabel(QStringLiteral("日志展示秒数"), notificationGroupBox);
+    languageManager.bindText(notificationDurationLabel, QStringLiteral("settings.notification.duration"), QStringLiteral("日志展示秒数"));
+    notificationDurationLayout->addWidget(notificationDurationLabel, 0);
+    m_notificationLogDisplaySecondsSpin = new QSpinBox(notificationGroupBox);
+    m_notificationLogDisplaySecondsSpin->setRange(0, 60);
+    m_notificationLogDisplaySecondsSpin->setSuffix(QStringLiteral(" 秒"));
+    m_notificationLogDisplaySecondsSpin->setToolTip(QStringLiteral("0 表示日志卡片常驻，直到因空间不足被替换。"));
+    languageManager.bindToolTip(m_notificationLogDisplaySecondsSpin, QStringLiteral("settings.notification.duration.tooltip"), QStringLiteral("0 表示日志卡片常驻，直到因空间不足被替换。"));
+    notificationDurationLayout->addWidget(m_notificationLogDisplaySecondsSpin, 1);
+    notificationLayout->addLayout(notificationDurationLayout);
+
+    QHBoxLayout* notificationPlacementLayout = new QHBoxLayout();
+    QLabel* notificationPlacementLabel = new QLabel(QStringLiteral("显示位置"), notificationGroupBox);
+    languageManager.bindText(notificationPlacementLabel, QStringLiteral("settings.notification.placement"), QStringLiteral("显示位置"));
+    notificationPlacementLayout->addWidget(notificationPlacementLabel, 0);
+    m_notificationDisplayPlacementCombo = new QComboBox(notificationGroupBox);
+    m_notificationDisplayPlacementCombo->addItem(QStringLiteral("屏幕右侧"), static_cast<int>(ks::settings::NotificationDisplayPlacement::Screen));
+    m_notificationDisplayPlacementCombo->addItem(QStringLiteral("Ksword 主窗口内"), static_cast<int>(ks::settings::NotificationDisplayPlacement::MainWindow));
+    languageManager.bindComboBoxItem(m_notificationDisplayPlacementCombo, 0, QStringLiteral("settings.notification.placement.screen"), QStringLiteral("屏幕右侧"));
+    languageManager.bindComboBoxItem(m_notificationDisplayPlacementCombo, 1, QStringLiteral("settings.notification.placement.window"), QStringLiteral("Ksword 主窗口内"));
+    notificationPlacementLayout->addWidget(m_notificationDisplayPlacementCombo, 1);
+    notificationLayout->addLayout(notificationPlacementLayout);
+
+    QHBoxLayout* notificationStackLayout = new QHBoxLayout();
+    QLabel* notificationStackLabel = new QLabel(QStringLiteral("堆叠方向"), notificationGroupBox);
+    languageManager.bindText(notificationStackLabel, QStringLiteral("settings.notification.stack_direction"), QStringLiteral("堆叠方向"));
+    notificationStackLayout->addWidget(notificationStackLabel, 0);
+    m_notificationStackDirectionCombo = new QComboBox(notificationGroupBox);
+    m_notificationStackDirectionCombo->addItem(QStringLiteral("右下向右上"), static_cast<int>(ks::settings::NotificationStackDirection::BottomUp));
+    m_notificationStackDirectionCombo->addItem(QStringLiteral("右上向右下"), static_cast<int>(ks::settings::NotificationStackDirection::TopDown));
+    languageManager.bindComboBoxItem(m_notificationStackDirectionCombo, 0, QStringLiteral("settings.notification.stack.bottom_up"), QStringLiteral("右下向右上"));
+    languageManager.bindComboBoxItem(m_notificationStackDirectionCombo, 1, QStringLiteral("settings.notification.stack.top_down"), QStringLiteral("右上向右下"));
+    notificationStackLayout->addWidget(m_notificationStackDirectionCombo, 1);
+    notificationLayout->addLayout(notificationStackLayout);
+
+    appearanceRootLayout->addWidget(notificationGroupBox);
+
     // ===== 应用按钮区域 =====
     QHBoxLayout* actionLayout = new QHBoxLayout();
     actionLayout->addStretch(1);
@@ -616,6 +690,22 @@ void SettingsDock::bindAppearanceSignals()
         markPendingChanges(QStringLiteral("滑块滚轮调节开关切换"));
         });
 
+    connect(m_notificationCardsEnabledCheckBox, &QCheckBox::toggled, this, [this](const bool /*checkedState*/) {
+        markPendingChanges(QStringLiteral("通知卡片开关切换"));
+        });
+    connect(m_notificationMinimumLevelCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int) {
+        markPendingChanges(QStringLiteral("通知最低日志级别切换"));
+        });
+    connect(m_notificationLogDisplaySecondsSpin, QOverload<int>::of(&QSpinBox::valueChanged), this, [this](int) {
+        markPendingChanges(QStringLiteral("通知日志展示秒数切换"));
+        });
+    connect(m_notificationDisplayPlacementCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int) {
+        markPendingChanges(QStringLiteral("通知显示位置切换"));
+        });
+    connect(m_notificationStackDirectionCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int) {
+        markPendingChanges(QStringLiteral("通知堆叠方向切换"));
+        });
+
     connect(m_startupWindowScaleFactorEdit, &QLineEdit::textChanged, this, [this](const QString& /*text*/) {
         const double normalizedScaleFactor = parseWindowScaleFactorFromUi();
         updateWindowScaleFactorHintLabel(normalizedScaleFactor);
@@ -699,6 +789,32 @@ void SettingsDock::applySettingsToUi(const ks::settings::AppearanceSettings& set
         m_sliderWheelAdjustCheckBox->setChecked(settings.sliderWheelAdjustEnabled);
     }
 
+    if (m_notificationCardsEnabledCheckBox != nullptr)
+    {
+        m_notificationCardsEnabledCheckBox->setChecked(settings.notificationCardsEnabled);
+    }
+    if (m_notificationMinimumLevelCombo != nullptr)
+    {
+        const int index = m_notificationMinimumLevelCombo->findData(settings.notificationMinimumLevel);
+        m_notificationMinimumLevelCombo->setCurrentIndex(index >= 0 ? index : 2);
+    }
+    if (m_notificationLogDisplaySecondsSpin != nullptr)
+    {
+        m_notificationLogDisplaySecondsSpin->setValue(settings.notificationLogDisplaySeconds);
+    }
+    if (m_notificationDisplayPlacementCombo != nullptr)
+    {
+        const int index = m_notificationDisplayPlacementCombo->findData(
+            static_cast<int>(settings.notificationDisplayPlacement));
+        m_notificationDisplayPlacementCombo->setCurrentIndex(index >= 0 ? index : 0);
+    }
+    if (m_notificationStackDirectionCombo != nullptr)
+    {
+        const int index = m_notificationStackDirectionCombo->findData(
+            static_cast<int>(settings.notificationStackDirection));
+        m_notificationStackDirectionCombo->setCurrentIndex(index >= 0 ? index : 0);
+    }
+
     if (m_startupWindowScaleFactorEdit != nullptr)
     {
         const double normalizedScaleFactor =
@@ -730,7 +846,7 @@ void SettingsDock::applySettingsToUi(const ks::settings::AppearanceSettings& set
 
 ks::settings::AppearanceSettings SettingsDock::collectSettingsFromUi() const
 {
-    ks::settings::AppearanceSettings collectedSettings;
+    ks::settings::AppearanceSettings collectedSettings = m_currentAppearanceSettings;
 
     collectedSettings.uiLanguage = (m_languageCombo != nullptr && m_languageCombo->currentIndex() >= 0)
         ? m_languageCombo->currentData().toString()
@@ -777,6 +893,24 @@ ks::settings::AppearanceSettings SettingsDock::collectSettingsFromUi() const
         (m_scrollBarAutoHideCheckBox != nullptr) && m_scrollBarAutoHideCheckBox->isChecked();
     collectedSettings.sliderWheelAdjustEnabled =
         (m_sliderWheelAdjustCheckBox != nullptr) && m_sliderWheelAdjustCheckBox->isChecked();
+    collectedSettings.notificationCardsEnabled =
+        (m_notificationCardsEnabledCheckBox != nullptr) && m_notificationCardsEnabledCheckBox->isChecked();
+    collectedSettings.notificationMinimumLevel =
+        m_notificationMinimumLevelCombo != nullptr
+        ? m_notificationMinimumLevelCombo->currentData().toInt()
+        : m_currentAppearanceSettings.notificationMinimumLevel;
+    collectedSettings.notificationLogDisplaySeconds =
+        m_notificationLogDisplaySecondsSpin != nullptr
+        ? m_notificationLogDisplaySecondsSpin->value()
+        : m_currentAppearanceSettings.notificationLogDisplaySeconds;
+    collectedSettings.notificationDisplayPlacement =
+        m_notificationDisplayPlacementCombo != nullptr
+        ? static_cast<ks::settings::NotificationDisplayPlacement>(m_notificationDisplayPlacementCombo->currentData().toInt())
+        : m_currentAppearanceSettings.notificationDisplayPlacement;
+    collectedSettings.notificationStackDirection =
+        m_notificationStackDirectionCombo != nullptr
+        ? static_cast<ks::settings::NotificationStackDirection>(m_notificationStackDirectionCombo->currentData().toInt())
+        : m_currentAppearanceSettings.notificationStackDirection;
     // 在线扫描 API Key：
     // - 从在线扫描标签页读取；
     // - 保存时统一 trim，OnlineScan 运行时只读取配置，不硬编码密钥。
@@ -855,6 +989,11 @@ void SettingsDock::saveAndEmitFromUi(const QString& triggerReason)
         && nextSettings.useWideScrollBars == m_currentAppearanceSettings.useWideScrollBars
         && nextSettings.scrollBarAutoHideEnabled == m_currentAppearanceSettings.scrollBarAutoHideEnabled
         && nextSettings.sliderWheelAdjustEnabled == m_currentAppearanceSettings.sliderWheelAdjustEnabled
+        && nextSettings.notificationCardsEnabled == m_currentAppearanceSettings.notificationCardsEnabled
+        && nextSettings.notificationMinimumLevel == m_currentAppearanceSettings.notificationMinimumLevel
+        && nextSettings.notificationLogDisplaySeconds == m_currentAppearanceSettings.notificationLogDisplaySeconds
+        && nextSettings.notificationDisplayPlacement == m_currentAppearanceSettings.notificationDisplayPlacement
+        && nextSettings.notificationStackDirection == m_currentAppearanceSettings.notificationStackDirection
         && nextSettings.virusTotalApiKey == m_currentAppearanceSettings.virusTotalApiKey
         && nextSettings.threatBookApiKey == m_currentAppearanceSettings.threatBookApiKey)
     {

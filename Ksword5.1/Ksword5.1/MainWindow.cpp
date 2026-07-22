@@ -59,6 +59,7 @@
 #include "UI/UI.css/UI_css.h"
 #include "Framework.h"
 #include "Framework/LogDockWidget.h"
+#include "Framework/NotificationCardManager.h"
 #include "Framework/ProgressDockWidget.h"
 #include "Framework/CustomTitleBar.h"
 #include "include/ads/AutoHideTab.h"
@@ -108,7 +109,7 @@ namespace
     // kDockLayoutConfigFileVersion 作用：
     // - 作为 ADS saveState/restoreState 的版本号；
     // - Dock 集合或默认布局发生不兼容变化时递增，可自动放弃旧布局。
-    constexpr int kDockLayoutConfigFileVersion = 2;
+    constexpr int kDockLayoutConfigFileVersion = 3;
 
     // kDockLayoutConfigFileName 作用：
     // - 定义用户拖拽后的 ADS 布局配置文件名；
@@ -3393,6 +3394,11 @@ void MainWindow::closeEvent(QCloseEvent* event)
 
     // 退出时优先保存 ADS 布局，确保用户拖拽/浮动/激活 Tab 状态下次启动可恢复。
     saveDockLayoutToConfig();
+    persistLogOutputWindowGeometry();
+    if (m_notificationCardManager != nullptr)
+    {
+        m_notificationCardManager->clearCards();
+    }
 
     // 停止权限状态定时器，避免退出阶段继续触发 UI 更新。
     if (m_privilegeStatusTimer != nullptr)
@@ -3725,6 +3731,15 @@ bool MainWindow::eventFilter(QObject* watchedObject, QEvent* event)
         }
     }
 
+    if (watchedObject == m_logOutputWindow && event != nullptr)
+    {
+        if ((event->type() == QEvent::Move || event->type() == QEvent::Resize || event->type() == QEvent::Hide)
+            && m_logWindowGeometrySaveTimer != nullptr)
+        {
+            m_logWindowGeometrySaveTimer->start();
+        }
+    }
+
     return QMainWindow::eventFilter(watchedObject, event);
 }
 
@@ -3733,6 +3748,19 @@ void MainWindow::resizeEvent(QResizeEvent* event)
     QMainWindow::resizeEvent(event);
     updateResizeBorderOverlays();
     scheduleWindowBackgroundBrushRebuild();
+    if (m_notificationCardManager != nullptr)
+    {
+        m_notificationCardManager->onHostGeometryChanged();
+    }
+}
+
+void MainWindow::moveEvent(QMoveEvent* event)
+{
+    QMainWindow::moveEvent(event);
+    if (m_notificationCardManager != nullptr)
+    {
+        m_notificationCardManager->onHostGeometryChanged();
+    }
 }
 
 void MainWindow::showEvent(QShowEvent* event)
@@ -3742,6 +3770,10 @@ void MainWindow::showEvent(QShowEvent* event)
     applyNativeWindowFrameVisualStyle();
     syncCustomTitleBarMaximizedState();
     updateResizeBorderOverlays();
+    if (m_notificationCardManager != nullptr)
+    {
+        m_notificationCardManager->onHostGeometryChanged();
+    }
 
     {
         kLogEvent showEventLog;
@@ -3815,6 +3847,10 @@ void MainWindow::changeEvent(QEvent* event)
     {
         syncCustomTitleBarMaximizedState();
         updateResizeBorderOverlays();
+        if (m_notificationCardManager != nullptr)
+        {
+            m_notificationCardManager->onHostGeometryChanged();
+        }
     }
 }
 
@@ -4811,6 +4847,17 @@ void MainWindow::initMenus()
         ks::plugin_host::showPluginManager(this);
     });
 
+    m_logMenuButton = new QToolButton(m_topActionRowWidget);
+    m_logMenuButton->setObjectName(QStringLiteral("ksLogMenuButton"));
+    m_logMenuButton->setText(QStringLiteral("日志输出"));
+    m_logMenuButton->setToolTip(QStringLiteral("显示或隐藏非模态日志输出窗口"));
+    ks::i18n::LanguageManager::instance().bindText(m_logMenuButton, QStringLiteral("menu.log"), QStringLiteral("日志输出"));
+    ks::i18n::LanguageManager::instance().bindToolTip(m_logMenuButton, QStringLiteral("menu.log.tooltip"), QStringLiteral("显示或隐藏非模态日志输出窗口"));
+    m_logMenuButton->setToolButtonStyle(Qt::ToolButtonTextOnly);
+    m_logMenuButton->setAutoRaise(true);
+    m_logMenuButton->setFixedHeight(22);
+    connect(m_logMenuButton, &QToolButton::clicked, this, &MainWindow::toggleLogOutputWindow);
+
     m_settingsMenuButton = new QToolButton(m_topActionRowWidget);
     m_settingsMenuButton->setObjectName(QStringLiteral("ksSettingsMenuButton"));
     m_settingsMenuButton->setText(QStringLiteral("设置"));
@@ -4831,6 +4878,7 @@ void MainWindow::initMenus()
     m_topActionRowLayout->addWidget(m_licenseMenuButton, 0, Qt::AlignLeft | Qt::AlignVCenter);
     m_topActionRowLayout->addWidget(m_exitMenuButton, 0, Qt::AlignLeft | Qt::AlignVCenter);
     m_topActionRowLayout->addWidget(m_pluginMenuButton, 0, Qt::AlignLeft | Qt::AlignVCenter);
+    m_topActionRowLayout->addWidget(m_logMenuButton, 0, Qt::AlignLeft | Qt::AlignVCenter);
     m_topActionRowLayout->addWidget(m_settingsMenuButton, 0, Qt::AlignLeft | Qt::AlignVCenter);
     m_topActionRowLayout->addStretch(1);
 
@@ -4899,6 +4947,7 @@ void MainWindow::refreshTopActionButtonStyles()
         m_licenseMenuButton,
         m_exitMenuButton,
         m_pluginMenuButton,
+        m_logMenuButton,
         m_settingsMenuButton
     };
     for (QToolButton* button : topActionButtonList)
@@ -5092,6 +5141,92 @@ void MainWindow::showSettingsPanelFromMenu()
     dialogLayout.addWidget(&settingsPanel, 1);
 
     settingsDialog.exec();
+}
+
+void MainWindow::toggleLogOutputWindow()
+{
+    if (m_logOutputWindow == nullptr)
+    {
+        return;
+    }
+
+    if (m_logOutputWindow->isVisible())
+    {
+        persistLogOutputWindowGeometry();
+        m_logOutputWindow->hide();
+        return;
+    }
+
+    if (m_logWidget != nullptr)
+    {
+        m_logWidget->refreshNow();
+    }
+    m_logOutputWindow->show();
+    m_logOutputWindow->raise();
+    m_logOutputWindow->activateWindow();
+}
+
+void MainWindow::persistLogOutputWindowGeometry()
+{
+    if (m_logOutputWindow == nullptr || !m_logOutputWindow->geometry().isValid())
+    {
+        return;
+    }
+
+    const QString encodedGeometry = QString::fromLatin1(m_logOutputWindow->saveGeometry().toBase64());
+    if (encodedGeometry == m_currentAppearanceSettings.logWindowGeometryBase64)
+    {
+        return;
+    }
+
+    m_currentAppearanceSettings.logWindowGeometryBase64 = encodedGeometry;
+    QString saveErrorText;
+    if (!ks::settings::saveAppearanceSettings(m_currentAppearanceSettings, &saveErrorText))
+    {
+        kLogEvent geometryEvent;
+        warn << geometryEvent
+            << "[MainWindow] 保存日志窗口几何信息失败: "
+            << saveErrorText.toStdString()
+            << eol;
+    }
+}
+
+void MainWindow::restoreLogOutputWindowGeometry()
+{
+    if (m_logOutputWindow == nullptr)
+    {
+        return;
+    }
+
+    const QByteArray encodedGeometry = QByteArray::fromBase64(
+        m_currentAppearanceSettings.logWindowGeometryBase64.toLatin1());
+    bool restored = !encodedGeometry.isEmpty() && m_logOutputWindow->restoreGeometry(encodedGeometry);
+    if (restored)
+    {
+        const QRect restoredRect = m_logOutputWindow->frameGeometry();
+        bool intersectsAvailableScreen = false;
+        for (QScreen* screen : QGuiApplication::screens())
+        {
+            if (screen != nullptr && screen->availableGeometry().intersects(restoredRect))
+            {
+                intersectsAvailableScreen = true;
+                break;
+            }
+        }
+        if (intersectsAvailableScreen)
+        {
+            return;
+        }
+        restored = false;
+    }
+
+    if (!restored)
+    {
+        m_logOutputWindow->resize(900, 620);
+        const QRect hostRect = frameGeometry();
+        m_logOutputWindow->move(
+            hostRect.center() - QPoint(m_logOutputWindow->width() / 2, m_logOutputWindow->height() / 2));
+    }
 }
 
 void MainWindow::initPrivilegeStatusButtons()
@@ -7599,7 +7734,7 @@ void MainWindow::initDockWidgets()
                 dockKey == startupDockKey;
         };
 
-    // 首屏优先：欢迎页、启动默认页签，以及右侧/底部辅助组件；设置改由顶部菜单即时打开。
+    // 首屏优先：欢迎页和启动默认页签；设置改由顶部菜单即时打开。
     reportStartupProgress(
         50,
         QStringLiteral("main.startup.progress.first_page"),
@@ -7629,10 +7764,34 @@ void MainWindow::initDockWidgets()
         60,
         QStringLiteral("main.startup.progress.auxiliary_components"),
         QStringLiteral("正在加载功能模块..."));
-    m_monitorPanelWidget = new MonitorPanelWidget(this);
-    m_logWidget = new LogDockWidget(this);
-    m_progressWidget = new ProgressDockWidget(this);
-    m_immediateEditorWidget = new CodeEditorWidget(this);
+    // “监视面板 / 当前操作 / 即时窗口”保留实现代码，但不再创建或注册到 ADS。
+    // 日志面板迁移到独立的常驻非模态窗口，启动时默认隐藏。
+    m_logOutputWindow = new QDialog(this);
+    m_logOutputWindow->setObjectName(QStringLiteral("ksLogOutputWindow"));
+    m_logOutputWindow->setWindowTitle(ks::i18n::text(QStringLiteral("dock.log"), QStringLiteral("日志输出")));
+    m_logOutputWindow->setWindowModality(Qt::NonModal);
+    m_logOutputWindow->setModal(false);
+    m_logOutputWindow->setAttribute(Qt::WA_DeleteOnClose, false);
+    m_logOutputWindow->resize(900, 620);
+    ks::i18n::LanguageManager::instance().bindWindowTitle(
+        m_logOutputWindow,
+        QStringLiteral("dock.log"),
+        QStringLiteral("日志输出"));
+    QVBoxLayout* logWindowLayout = new QVBoxLayout(m_logOutputWindow);
+    logWindowLayout->setContentsMargins(8, 8, 8, 8);
+    logWindowLayout->setSpacing(0);
+    m_logWidget = new LogDockWidget(m_logOutputWindow);
+    logWindowLayout->addWidget(m_logWidget, 1);
+    m_logOutputWindow->installEventFilter(this);
+    m_logWindowGeometrySaveTimer = new QTimer(this);
+    m_logWindowGeometrySaveTimer->setSingleShot(true);
+    m_logWindowGeometrySaveTimer->setInterval(300);
+    connect(m_logWindowGeometrySaveTimer, &QTimer::timeout, this, &MainWindow::persistLogOutputWindowGeometry);
+    restoreLogOutputWindowGeometry();
+    m_logOutputWindow->hide();
+
+    m_notificationCardManager = new ks::ui::NotificationCardManager(this, m_pDockManager, this);
+    m_notificationCardManager->applySettings(m_currentAppearanceSettings);
 
     // 创建 Dock 容器前再推进一次启动进度，避免长时间停留在单一文案。
     reportStartupProgress(
@@ -7756,34 +7915,6 @@ void MainWindow::initDockWidgets()
     createLazyDockWidget(m_dockMisc, m_miscWidget, ks::i18n::text(QStringLiteral("dock.misc"), QStringLiteral("杂项")), QStringLiteral("misc"));
     createLazyDockWidget(m_dockPlugin, m_pluginWidget, ks::i18n::text(QStringLiteral("dock.plugin"), QStringLiteral("插件")), QStringLiteral("plugin"));
 
-    // 创建右侧和底部的基本Widgets
-    m_dockCurrentOp = createDockWidget(m_progressWidget, ks::i18n::text(QStringLiteral("dock.current_op"), QStringLiteral("当前操作")), QStringLiteral("current_op"));
-    m_dockLog = createDockWidget(m_logWidget, ks::i18n::text(QStringLiteral("dock.log"), QStringLiteral("日志输出")), QStringLiteral("log"));
-    m_dockImmediate = createDockWidget(m_immediateEditorWidget, ks::i18n::text(QStringLiteral("dock.immediate"), QStringLiteral("即时窗口")), QStringLiteral("immediate"));
-    // 左下角“监视面板”接入独立性能图组件（CPU每核/内存/磁盘/网络）。
-    m_dockMonitor = createDockWidget(m_monitorPanelWidget, ks::i18n::text(QStringLiteral("dock.monitor_panel"), QStringLiteral("监视面板")), QStringLiteral("monitor_panel"));
-
-    // 当前操作 Dock 专项透明策略：
-    // - Dock 自身背景透明；
-    // - 内容容器背景透明；
-    // - 避免 ADS 默认底色盖住壁纸或主题底图。
-    if (m_dockCurrentOp != nullptr)
-    {
-        m_dockCurrentOp->setObjectName(QStringLiteral("ksCurrentOperationDock"));
-        m_dockCurrentOp->setStyleSheet(
-            QStringLiteral(
-            "#ksCurrentOperationDock,"
-            "#ksCurrentOperationDock > QWidget,"
-            "#ksCurrentOperationDock QScrollArea,"
-            "#ksCurrentOperationDock QAbstractScrollArea,"
-            "#ksCurrentOperationDock QAbstractScrollArea::viewport{"
-            "  background:transparent;"
-            "  background-color:transparent;"
-            "  color:palette(text);"
-            "  border:none;"
-            "}"));
-    }
-
     QList<ads::CDockWidget*> mainDockTabList{
         m_dockWelcome,
         m_dockProcess,
@@ -7801,11 +7932,7 @@ void MainWindow::initDockWidgets()
         m_dockStartup,
         m_dockService,
         m_dockMisc,
-        m_dockPlugin,
-        m_dockCurrentOp,
-        m_dockLog,
-        m_dockImmediate,
-        m_dockMonitor
+        m_dockPlugin
     };
     for (ads::CDockWidget* dockWidget : mainDockTabList)
     {
@@ -7885,25 +8012,16 @@ void MainWindow::setupDockLayout()
         QStringLiteral("main.startup.progress.register_auxiliary_docks"),
         QStringLiteral("正在加载功能模块..."));
 
-    // 4. 右侧区域：同理
-    auto rightDockArea = m_pDockManager->addDockWidget(ads::RightDockWidgetArea, m_dockCurrentOp);
-
-    // 右侧仅保留“当前操作 + 即时窗口”。
-    m_pDockManager->addDockWidgetTabToArea(m_dockImmediate, rightDockArea);
-
-    // 5. 底部区域：按“监视面板 + 日志输出”左右分栏并占满底部。
-    auto bottomDockArea = m_pDockManager->addDockWidget(ads::BottomDockWidgetArea, m_dockMonitor);
-    m_pDockManager->addDockWidget(ads::RightDockWidgetArea, m_dockLog, bottomDockArea);
-
-    // 6. 设置默认显示的标签页
+    // 4. 当前仅保留主功能页签区域：
+    // - 监视面板、当前操作、即时窗口不再注册为 Dock；
+    // - 日志输出由顶部按钮打开独立的非模态窗口。
+    // 5. 设置默认显示的标签页
     withTemporaryNonTopMostForDockSwitch([this]()
         {
             m_dockWelcome->raise();
-            m_dockCurrentOp->raise();
-            m_dockMonitor->raise();
         });
 
-    // 7. 默认布局搭建完成后再恢复用户布局：
+    // 6. 默认布局搭建完成后再恢复用户布局：
     // - ADS restoreState 要求所有 DockWidget 已注册；
     // - objectName 已在 initDockWidgets 中固定为英文 key，避免中文标题变化破坏恢复。
     reportStartupProgress(
@@ -8518,6 +8636,11 @@ void MainWindow::applyAppearanceSettings(
     if (m_progressWidget != nullptr)
     {
         m_progressWidget->refreshThemeVisuals();
+    }
+    if (m_notificationCardManager != nullptr)
+    {
+        m_notificationCardManager->applySettings(m_currentAppearanceSettings);
+        m_notificationCardManager->refreshVisuals();
     }
 
     const QString effectiveModeText = darkModeEnabled ? QStringLiteral("dark") : QStringLiteral("light");

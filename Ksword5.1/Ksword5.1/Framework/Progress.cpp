@@ -1,4 +1,5 @@
 #include "../Framework.h"
+#include "NotificationCardManager.h"
 
 #include <algorithm>  // std::find_if
 #include <cmath>      // std::isfinite
@@ -6,14 +7,22 @@
 
 #include <QApplication> // QApplication::instance
 #include <QCoreApplication> // QCoreApplication::instance
+#include <QEventLoop> // 非模态选项窗口等待结果时保持 UI 事件处理
+#include <QGuiApplication>
 #include <QMessageBox>  // 阻塞式按钮选择对话框
 #include <QMetaObject>  // invokeMethod
 #include <QObject>      // qobject_cast
 #include <QPushButton>  // QMessageBox::addButton 返回按钮类型
 #include <QThread>      // 判断当前线程是否 UI 线程
+#include <QScreen>
+#include <QWindow>
+
+#include <atomic>
 
 namespace
 {
+    std::atomic_uint g_nonModalOptionDialogSequence{ 0 };
+
     // findTaskByPidMutable 作用：
     // - 在可写任务容器中按 PID 查找任务迭代器。
     // 参数 tasks：任务容器（可写）。
@@ -37,12 +46,86 @@ namespace
     // 返回值：
     // - 1..N 表示用户选择；
     // - 0 表示关闭窗口或没有选择。
-    int showOptionsDialogOnUiThread(const std::string& prompt, const std::vector<std::string>& options)
+    int showOptionsDialogNonModalOnUiThread(
+        const std::string& prompt,
+        const std::vector<std::string>& options)
+    {
+        QMessageBox optionDialog(ks::ui::notificationCardHostWindow());
+        optionDialog.setWindowTitle(QStringLiteral("任务操作"));
+        optionDialog.setIcon(QMessageBox::Question);
+        optionDialog.setText(QString::fromUtf8(prompt.c_str()));
+        optionDialog.setWindowModality(Qt::NonModal);
+        optionDialog.setModal(false);
+
+        std::vector<QAbstractButton*> buttonHandles;
+        buttonHandles.reserve(options.size());
+        for (const std::string& optionText : options)
+        {
+            QAbstractButton* optionButton = optionDialog.addButton(
+                QString::fromUtf8(optionText.c_str()),
+                QMessageBox::ActionRole);
+            buttonHandles.push_back(optionButton);
+        }
+
+        int selectedIndex = 0;
+        QEventLoop resultLoop;
+        QObject::connect(&optionDialog, &QMessageBox::finished, &resultLoop, [&]() {
+            QAbstractButton* clickedButton = optionDialog.clickedButton();
+            for (std::size_t index = 0; index < buttonHandles.size(); ++index)
+            {
+                if (buttonHandles[index] == clickedButton)
+                {
+                    selectedIndex = static_cast<int>(index + 1);
+                    break;
+                }
+            }
+            resultLoop.quit();
+        });
+
+        optionDialog.show();
+        QScreen* targetScreen = nullptr;
+        QWidget* hostWindow = ks::ui::notificationCardHostWindow();
+        if (hostWindow != nullptr)
+        {
+            targetScreen = QGuiApplication::screenAt(hostWindow->frameGeometry().center());
+            if (targetScreen == nullptr && hostWindow->windowHandle() != nullptr)
+            {
+                targetScreen = hostWindow->windowHandle()->screen();
+            }
+        }
+        if (targetScreen == nullptr)
+        {
+            targetScreen = QGuiApplication::primaryScreen();
+        }
+        if (targetScreen != nullptr)
+        {
+            const QRect availableRect = targetScreen->availableGeometry();
+            const unsigned int sequence = g_nonModalOptionDialogSequence.fetch_add(1);
+            const int offset = static_cast<int>(sequence % 8U) * 26;
+            optionDialog.move(
+                availableRect.center() - QPoint(optionDialog.width() / 2, optionDialog.height() / 2)
+                + QPoint(offset, offset));
+        }
+        optionDialog.raise();
+        resultLoop.exec();
+        return selectedIndex;
+    }
+
+    int showOptionsDialogOnUiThread(
+        const int pid,
+        const std::string& prompt,
+        const std::vector<std::string>& options)
     {
         // 无选项直接返回 0，避免弹出空对话框。
         if (options.empty())
         {
             return 0;
+        }
+
+        if (ks::ui::isProgressTaskNotificationOverflowed(pid))
+        {
+            // 溢出任务使用非模态窗口：调用方仍拿到原有同步返回值，主 UI 则继续处理事件。
+            return showOptionsDialogNonModalOnUiThread(prompt, options);
         }
 
         QMessageBox optionDialog;
@@ -155,15 +238,15 @@ int kProgress::UI(const int pid, const std::string& prompt, const std::vector<st
     // 若当前就是 UI 线程，直接弹框；否则阻塞调用到 UI 线程执行。
     if (QThread::currentThread() == appInstance->thread())
     {
-        selectedIndex = showOptionsDialogOnUiThread(prompt, options);
+        selectedIndex = showOptionsDialogOnUiThread(pid, prompt, options);
     }
     else
     {
         QMetaObject::invokeMethod(
             appInstance,
-            [&selectedIndex, &prompt, &options]()
+            [&selectedIndex, &prompt, &options, pid]()
             {
-                selectedIndex = showOptionsDialogOnUiThread(prompt, options);
+                selectedIndex = showOptionsDialogOnUiThread(pid, prompt, options);
             },
             Qt::BlockingQueuedConnection);
     }

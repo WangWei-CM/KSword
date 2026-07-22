@@ -167,6 +167,7 @@
     <ClCompile Include="HardwareDock\HardwareHwidDispatchPage.cpp" />
     <ClCompile Include="Framework\Log.cpp" />
     <ClCompile Include="Framework\LogDockWidget.cpp" />
+    <ClCompile Include="Framework\NotificationCardManager.cpp" />
     <ClCompile Include="Framework\Progress.cpp" />
     <ClCompile Include="Framework\ProgressDockWidget.cpp" />
     <ClCompile Include="Framework\CustomTitleBar.cpp" />
@@ -385,6 +386,7 @@
     <ClInclude Include="FileDock\FilePropertyPeAnalyzer.h" />
     <ClInclude Include="FileDock\FilePropertyPeAnalyzer.Internal.h" />
     <ClInclude Include="Framework\LogDockWidget.h" />
+    <ClInclude Include="Framework\NotificationCardManager.h" />
     <ClInclude Include="Framework\ProgressDockWidget.h" />
     <ClInclude Include="Framework\StartupSplash.h" />
     <ClInclude Include="KernelDock\KernelDockAtomWorker.h" />

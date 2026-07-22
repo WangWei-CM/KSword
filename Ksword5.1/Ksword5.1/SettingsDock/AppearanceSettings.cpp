@@ -13,6 +13,7 @@
 #endif
 #include <Windows.h>
 
+#include <algorithm>
 #include <cmath>
 
 namespace
@@ -259,6 +260,16 @@ namespace
         return opacityPercent;
     }
 
+    int clampNotificationLogLevel(const int rawLevel)
+    {
+        return std::clamp(rawLevel, 0, 4);
+    }
+
+    int clampNotificationDisplaySeconds(const int rawSeconds)
+    {
+        return std::clamp(rawSeconds, 0, 60);
+    }
+
     // clampWindowScaleFactorInternal 作用：
     // - 把窗口缩放因子约束到 0.50~2.00；
     // - 非法输入回退到 1.0。
@@ -366,6 +377,12 @@ namespace
         defaultSettings.useWideScrollBars = false;
         defaultSettings.scrollBarAutoHideEnabled = false;
         defaultSettings.sliderWheelAdjustEnabled = false;
+        defaultSettings.notificationCardsEnabled = true;
+        defaultSettings.notificationMinimumLevel = 2;
+        defaultSettings.notificationLogDisplaySeconds = 10;
+        defaultSettings.notificationDisplayPlacement = ks::settings::NotificationDisplayPlacement::Screen;
+        defaultSettings.notificationStackDirection = ks::settings::NotificationStackDirection::BottomUp;
+        defaultSettings.logWindowGeometryBase64.clear();
         defaultSettings.virusTotalApiKey.clear();
         defaultSettings.threatBookApiKey.clear();
         return defaultSettings;
@@ -539,6 +556,28 @@ ks::settings::AppearanceSettings ks::settings::loadAppearanceSettings()
     loadedSettings.sliderWheelAdjustEnabled = rootObject
         .value(QStringLiteral("slider_wheel_adjust_enabled"))
         .toBool(loadedSettings.sliderWheelAdjustEnabled);
+    loadedSettings.notificationCardsEnabled = rootObject
+        .value(QStringLiteral("notification_cards_enabled"))
+        .toBool(loadedSettings.notificationCardsEnabled);
+    loadedSettings.notificationMinimumLevel = clampNotificationLogLevel(
+        rootObject.value(QStringLiteral("notification_minimum_level"))
+        .toInt(loadedSettings.notificationMinimumLevel));
+    loadedSettings.notificationLogDisplaySeconds = clampNotificationDisplaySeconds(
+        rootObject.value(QStringLiteral("notification_log_display_seconds"))
+        .toInt(loadedSettings.notificationLogDisplaySeconds));
+    loadedSettings.notificationDisplayPlacement =
+        rootObject.value(QStringLiteral("notification_display_placement")).toString()
+        == QStringLiteral("main_window")
+        ? NotificationDisplayPlacement::MainWindow
+        : NotificationDisplayPlacement::Screen;
+    loadedSettings.notificationStackDirection =
+        rootObject.value(QStringLiteral("notification_stack_direction")).toString()
+        == QStringLiteral("top_down")
+        ? NotificationStackDirection::TopDown
+        : NotificationStackDirection::BottomUp;
+    loadedSettings.logWindowGeometryBase64 = rootObject
+        .value(QStringLiteral("log_window_geometry_base64"))
+        .toString();
     // 在线扫描 API Key 作用：
     // - 读取设置页“在线扫描”标签保存的密钥；
     // - OnlineScan 模块只读取该配置，不在代码中硬编码任何密钥。
@@ -605,6 +644,28 @@ bool ks::settings::saveAppearanceSettings(const AppearanceSettings& settings, QS
     rootObject.insert(
         QStringLiteral("slider_wheel_adjust_enabled"),
         settings.sliderWheelAdjustEnabled);
+    rootObject.insert(
+        QStringLiteral("notification_cards_enabled"),
+        settings.notificationCardsEnabled);
+    rootObject.insert(
+        QStringLiteral("notification_minimum_level"),
+        clampNotificationLogLevel(settings.notificationMinimumLevel));
+    rootObject.insert(
+        QStringLiteral("notification_log_display_seconds"),
+        clampNotificationDisplaySeconds(settings.notificationLogDisplaySeconds));
+    rootObject.insert(
+        QStringLiteral("notification_display_placement"),
+        settings.notificationDisplayPlacement == NotificationDisplayPlacement::MainWindow
+        ? QStringLiteral("main_window")
+        : QStringLiteral("screen"));
+    rootObject.insert(
+        QStringLiteral("notification_stack_direction"),
+        settings.notificationStackDirection == NotificationStackDirection::TopDown
+        ? QStringLiteral("top_down")
+        : QStringLiteral("bottom_up"));
+    rootObject.insert(
+        QStringLiteral("log_window_geometry_base64"),
+        settings.logWindowGeometryBase64.trimmed());
     // 在线扫描 API Key 保存：
     // - 与其它设置共用 appearance_settings.json；
     // - 仅保存用户输入，不在日志中输出真实 Key。

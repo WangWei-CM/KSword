@@ -42,6 +42,9 @@ public:
     // 参数 parent：Qt 父对象指针。
     explicit LogDockWidget(QWidget* parent = nullptr);
 
+    // refreshNow：独立日志窗口重新显示时强制同步最新日志快照。
+    void refreshNow();
+
 private:
     // initializeUi 作用：
     // - 创建布局、筛选区、按钮区、日志表格；

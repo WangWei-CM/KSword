@@ -21,6 +21,21 @@ namespace ks::settings
         Dark = 2
     };
 
+    // NotificationDisplayPlacement：通知卡片的承载区域。
+    // Screen：显示在主窗口所在显示器的工作区；MainWindow：显示在主窗口 Dock 客户区内。
+    enum class NotificationDisplayPlacement
+    {
+        Screen = 0,
+        MainWindow = 1
+    };
+
+    // NotificationStackDirection：右侧通知卡片的堆叠方向。
+    enum class NotificationStackDirection
+    {
+        BottomUp = 0,
+        TopDown = 1
+    };
+
     // AppearanceSettings：界面与启动设置结构体。
     // themeMode：当前主题策略；
     // backgroundImagePath：背景图路径（可相对可绝对）；
@@ -53,6 +68,12 @@ namespace ks::settings
         bool useWideScrollBars = false;
         bool scrollBarAutoHideEnabled = false;
         bool sliderWheelAdjustEnabled = false;
+        bool notificationCardsEnabled = true;
+        int notificationMinimumLevel = 2; // Warn，数值与 kLogLevel 的严重度顺序保持一致。
+        int notificationLogDisplaySeconds = 10;
+        NotificationDisplayPlacement notificationDisplayPlacement = NotificationDisplayPlacement::Screen;
+        NotificationStackDirection notificationStackDirection = NotificationStackDirection::BottomUp;
+        QString logWindowGeometryBase64;
         QString virusTotalApiKey;
         QString threatBookApiKey;
     };
