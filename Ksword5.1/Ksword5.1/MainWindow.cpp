@@ -2899,10 +2899,83 @@ namespace
         return cachedImagePixmap.isNull() ? nullptr : &cachedImagePixmap;
     }
 
+    // MainWindowBackgroundWidget 作用：
+    // - 作为主窗口根容器的唯一背景绘制者；
+    // - 每次绘制都按当前真实 rect 执行“居中、等比覆盖”，避免启动阶段预测窗口尺寸。
+    class MainWindowBackgroundWidget final : public QWidget
+    {
+    public:
+        explicit MainWindowBackgroundWidget(QWidget* parent = nullptr)
+            : QWidget(parent)
+        {
+            setAutoFillBackground(false);
+            setAttribute(Qt::WA_StyledBackground, false);
+            setAttribute(Qt::WA_OpaquePaintEvent, true);
+        }
+
+        void setBackground(
+            const QColor& baseColor,
+            const QPixmap* sourceImage,
+            const int imageOpacityPercent)
+        {
+            const int normalizedOpacityPercent = normalizeOpacityPercent(imageOpacityPercent);
+            const quint64 sourceImageCacheKey = sourceImage == nullptr ? 0 : sourceImage->cacheKey();
+            if (m_baseColor == baseColor
+                && m_imageOpacityPercent == normalizedOpacityPercent
+                && m_sourceImageCacheKey == sourceImageCacheKey)
+            {
+                return;
+            }
+
+            m_baseColor = baseColor;
+            m_imageOpacityPercent = normalizedOpacityPercent;
+            m_sourceImageCacheKey = sourceImageCacheKey;
+            m_sourceImage = sourceImage == nullptr ? QPixmap() : *sourceImage;
+            update();
+        }
+
+    protected:
+        void paintEvent(QPaintEvent* event) override
+        {
+            QPainter painter(this);
+            if (event != nullptr)
+            {
+                painter.setClipRegion(event->region());
+            }
+            painter.fillRect(rect(), m_baseColor);
+
+            if (m_sourceImage.isNull() || m_imageOpacityPercent <= 0 || rect().isEmpty())
+            {
+                return;
+            }
+
+            painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
+            painter.setOpacity(static_cast<double>(m_imageOpacityPercent) / 100.0);
+
+            QSizeF scaledImageSize = m_sourceImage.size();
+            scaledImageSize.scale(QSizeF(rect().size()), Qt::KeepAspectRatioByExpanding);
+            const QRectF targetRect(
+                (static_cast<double>(rect().width()) - scaledImageSize.width()) / 2.0,
+                (static_cast<double>(rect().height()) - scaledImageSize.height()) / 2.0,
+                scaledImageSize.width(),
+                scaledImageSize.height());
+            painter.drawPixmap(
+                targetRect,
+                m_sourceImage,
+                QRectF(QPointF(0, 0), m_sourceImage.size()));
+        }
+
+    private:
+        QColor m_baseColor = Qt::black;
+        QPixmap m_sourceImage;
+        int m_imageOpacityPercent = 0;
+        quint64 m_sourceImageCacheKey = 0;
+    };
+
     // buildBackgroundBrush 作用：
     // - 按“纯色底 + 可选背景图 + 透明度”组合一张画刷贴图；
-    // - 用于主窗口与 Dock 管理器统一背景绘制。
-    // 调用方式：MainWindow::rebuildWindowBackgroundBrush 调用。
+    // - 仅供仍使用独立调色板的浮动 Dock 容器绘制。
+    // 调用方式：MainWindow::applyFloatingDockContainerAppearance 调用。
     // 入参 windowSize：目标窗口尺寸；
     // 入参 baseColor：主题基底色（深色黑、浅色白）；
     // 入参 imagePath：背景图绝对路径；
@@ -3283,10 +3356,8 @@ MainWindow::MainWindow(
     // - 第 0 行放自绘标题栏；
     // - 第 1 行放 ADS Dock 管理器；
     // - 统一规避 setMenuWidget 在无边框场景下的可见性不稳定问题。
-    m_mainRootContainer = new QWidget(this);
+    m_mainRootContainer = new MainWindowBackgroundWidget(this);
     m_mainRootContainer->setObjectName(QStringLiteral("ksMainRootContainer"));
-    m_mainRootContainer->setAutoFillBackground(false);
-    m_mainRootContainer->setAttribute(Qt::WA_StyledBackground, false);
 
     m_mainRootLayout = new QVBoxLayout(m_mainRootContainer);
     m_mainRootLayout->setContentsMargins(0, 0, 0, 0);
@@ -3296,17 +3367,6 @@ MainWindow::MainWindow(
     m_mainRootLayout->addWidget(m_pDockManager, 1);
     setCentralWidget(m_mainRootContainer);
     initResizeBorderOverlays();
-
-    // m_backgroundRebuildTimer 用途：
-    // - 合并窗口 resize 期间的背景重建请求；
-    // - 避免最大化恢复为窗口化时立即同步重建整窗背景造成卡顿。
-    m_backgroundRebuildTimer = new QTimer(this);
-    m_backgroundRebuildTimer->setSingleShot(true);
-    m_backgroundRebuildTimer->setInterval(100);
-    connect(m_backgroundRebuildTimer, &QTimer::timeout, this, [this]()
-        {
-            rebuildWindowBackgroundBrush();
-        });
 
     // 浮动窗口创建后立即挂接事件过滤器：
     // - 让脱离主窗口的 Dock 容器也能同步背景图与纯色底；
@@ -3781,7 +3841,11 @@ void MainWindow::resizeEvent(QResizeEvent* event)
 {
     QMainWindow::resizeEvent(event);
     updateResizeBorderOverlays();
-    scheduleWindowBackgroundBrushRebuild();
+    if (m_mainRootContainer != nullptr)
+    {
+        // 背景宿主在 paintEvent 中按当前真实 rect 计算缩放与居中位置。
+        m_mainRootContainer->update();
+    }
     if (m_notificationCardManager != nullptr)
     {
         m_notificationCardManager->onHostGeometryChanged();
@@ -7464,8 +7528,11 @@ void MainWindow::ensureDockContentInitialized(ads::CDockWidget* dockWidget)
         m_processWidget->refreshThemeVisuals();
     }
 
-    // 延迟补载时只做局部刷新，不再全局重算外观，避免每个 Dock 都触发一次大范围重绘。
-    realWidget->setPalette(palette());
+    // 真实内容挂载后继续继承 Dock 控件树的调色板：
+    // - 主窗口背景改由根容器 paintEvent 绘制后，MainWindow 的 Window/Base 画刷只含主题纯色；
+    // - 若在这里把该调色板显式复制给新内容，QAbstractScrollArea 等子控件会在首次挂载时刷出黑/白实底；
+    // - Dock 再次切换时样式重新生效，因此旧行为表现为“首次初始化后黑底，切走再回来恢复透明”。
+    // 延迟补载时只做局部刷新，不全局重算外观。
     realWidget->update();
     dockWidget->update();
     kPro.set(progressPid, QStringLiteral("%1页加载完成").arg(dockTitleText).toStdString(), 0, 100.0f);
@@ -8763,19 +8830,7 @@ void MainWindow::applyAppearanceSettings(
     }
 
     applyNativeWindowFrameVisualStyle();
-    rebuildWindowBackgroundBrush(!isInitialAppearanceApply);
-    if (isInitialAppearanceApply && enableDockTransparencyForBackgroundImage)
-    {
-        QTimer::singleShot(0, this, [this]()
-            {
-                rebuildWindowBackgroundBrush(true);
-                update();
-                if (m_pDockManager != nullptr)
-                {
-                    m_pDockManager->update();
-                }
-            });
-    }
+    rebuildWindowBackgroundBrush(true);
     refreshPrivilegeStatusButtons();
     refreshTopActionButtonStyles();
     if (m_progressWidget != nullptr)
@@ -8839,16 +8894,22 @@ void MainWindow::rebuildWindowBackgroundBrush(const bool includeBackgroundImage)
     const QString resolvedImagePath = includeBackgroundImage
         ? ks::settings::resolveBackgroundImagePathForLoad(m_currentAppearanceSettings.backgroundImagePath)
         : QString();
-
-    const QBrush backgroundBrush = buildBackgroundBrush(
-        size(),
-        baseColor,
-        resolvedImagePath,
+    const int normalizedOpacityPercent = normalizeOpacityPercent(
         m_currentAppearanceSettings.backgroundOpacityPercent);
+    const QPixmap* sourceImage = includeBackgroundImage && normalizedOpacityPercent > 0
+        ? cachedBackgroundSourcePixmap(resolvedImagePath)
+        : nullptr;
+
+    if (m_mainRootContainer != nullptr)
+    {
+        static_cast<MainWindowBackgroundWidget*>(m_mainRootContainer)->setBackground(
+            baseColor,
+            sourceImage,
+            normalizedOpacityPercent);
+    }
 
     QPalette mainPalette = palette();
     mainPalette.setColor(QPalette::Window, baseColor);
-    mainPalette.setBrush(QPalette::Window, backgroundBrush);
     setPalette(mainPalette);
     setAutoFillBackground(true);
 
@@ -8856,24 +8917,10 @@ void MainWindow::rebuildWindowBackgroundBrush(const bool includeBackgroundImage)
     {
         QPalette dockPalette = m_pDockManager->palette();
         dockPalette.setColor(QPalette::Window, baseColor);
-        dockPalette.setBrush(QPalette::Window, backgroundBrush);
         m_pDockManager->setPalette(dockPalette);
-        m_pDockManager->setAutoFillBackground(true);
+        // DockManager 只负责透明内容层，背景统一由根容器绘制。
+        m_pDockManager->setAutoFillBackground(false);
     }
-}
-
-void MainWindow::scheduleWindowBackgroundBrushRebuild()
-{
-    if (m_backgroundRebuildTimer == nullptr)
-    {
-        rebuildWindowBackgroundBrush();
-        return;
-    }
-
-    // 连续 resize 时只保留最后一次重建：
-    // - 最大化拖下恢复为窗口化时，先让系统完成状态切换；
-    // - 再重建背景，减少窗口化瞬间的卡顿感。
-    m_backgroundRebuildTimer->start();
 }
 
 void MainWindow::applyFloatingDockContainerAppearance(ads::CFloatingDockContainer* floatingWidget) const

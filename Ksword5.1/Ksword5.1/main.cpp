@@ -1192,8 +1192,8 @@ namespace
     }
 
     // FirstFrameSplashHider 作用：
-    // - 监听主窗口首帧相关事件（Show/Paint/UpdateRequest）；
-    // - 一旦确认主窗口已可见，立即隐藏启动页；
+    // - 等待主窗口中央背景宿主收到首次 Paint；
+    // - 把隐藏动作排到该次 Paint 完成之后，避免启动页在背景真正绘制前消失；
     // - 提供定时兜底，规避平台消息差异导致的漏判。
     class FirstFrameSplashHider final : public QObject
     {
@@ -1247,18 +1247,30 @@ namespace
 
             // eventType 作用：统一承接本次事件类型，便于扩展首帧判定条件。
             const QEvent::Type eventType = eventObject->type();
-            // isFrameReadySignal 作用：判定是否是“窗口首帧已到”相关事件。
-            const bool isFrameReadySignal =
-                eventType == QEvent::Show ||
-                eventType == QEvent::Paint ||
-                eventType == QEvent::UpdateRequest;
+            const bool isBackgroundPaint =
+                eventType == QEvent::Paint
+                && (watchedTargetCentral || (m_targetCentralWidget == nullptr && watchedTargetWindow));
 
             if (!m_hidden
-                && isFrameReadySignal
+                && !m_hideQueued
+                && isBackgroundPaint
                 && m_targetWindow->isVisible()
                 && !m_targetWindow->isMinimized())
             {
-                hideSplashAndDetach();
+                m_hideQueued = true;
+                QTimer::singleShot(0, this, [this]()
+                    {
+                        if (m_hidden || m_targetWindow == nullptr)
+                        {
+                            return;
+                        }
+                        if (m_targetWindow->isVisible() && !m_targetWindow->isMinimized())
+                        {
+                            hideSplashAndDetach();
+                            return;
+                        }
+                        m_hideQueued = false;
+                    });
             }
             return QObject::eventFilter(watchedObject, eventObject);
         }
@@ -1289,6 +1301,7 @@ namespace
         QWidget* m_targetCentralWidget = nullptr; // m_targetCentralWidget：主窗口中央内容控件指针。
         kStartupSplash* m_splashWindow = nullptr; // m_splashWindow：启动页控制器指针。
         bool m_hidden = false;                    // m_hidden：是否已经执行过隐藏动作。
+        bool m_hideQueued = false;                // m_hideQueued：是否已把隐藏动作排到首次背景绘制之后。
     };
 }
 
@@ -1683,7 +1696,14 @@ int main(int argc, char* argv[])
             QStringLiteral("即将完成..."));
     }
 
-    window.show();
+    if (startupSettings.launchMaximizedOnStartup)
+    {
+        window.showMaximized();
+    }
+    else
+    {
+        window.show();
+    }
     startupTraceRaw("window.show invoked");
     {
         kLogEvent showEvent;
@@ -1702,39 +1722,6 @@ int main(int argc, char* argv[])
             << "x"
             << visibleGeometry.height()
             << eol;
-    }
-    if (startupSettings.launchMaximizedOnStartup)
-    {
-        QTimer::singleShot(0, &window, [&window]()
-            {
-                // windowHandle 用途：启动后执行一次原生最大化命令，避免 Qt/Win32 状态漂移。
-                const HWND windowHandle = reinterpret_cast<HWND>(window.winId());
-                if (windowHandle != nullptr && ::IsWindow(windowHandle) != FALSE)
-                {
-                    ::SendMessageW(
-                        windowHandle,
-                        WM_SYSCOMMAND,
-                        static_cast<WPARAM>(SC_MAXIMIZE),
-                        0);
-                }
-                else
-                {
-                    window.showMaximized();
-                }
-
-                kLogEvent maximizeEvent;
-                const QRect maximizedFrame = window.frameGeometry();
-                info << maximizeEvent
-                    << "[main] 启动最大化请求已执行。 frame="
-                    << maximizedFrame.x()
-                    << ","
-                    << maximizedFrame.y()
-                    << " "
-                    << maximizedFrame.width()
-                    << "x"
-                    << maximizedFrame.height()
-                    << eol;
-            });
     }
     applyNativeAppIconToWidget(&window);
 

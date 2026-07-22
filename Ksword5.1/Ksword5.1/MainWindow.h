@@ -422,14 +422,10 @@ private:
     bool isDarkModeEffective(const ks::settings::AppearanceSettings& settings) const;
 
     // rebuildWindowBackgroundBrush 作用：
-    // - 依据当前配置重建窗口背景画刷（纯色 + 可选背景图透明叠加）。
-    // 调用方式：外观变更与窗口 resize 后调用。
+    // - 把当前纯色、背景图与透明度交给主窗口背景宿主；
+    // - 实际缩放和居中在背景宿主 paintEvent 中按真实 rect 完成。
+    // 调用方式：外观设置变更时调用。
     void rebuildWindowBackgroundBrush(bool includeBackgroundImage = true);
-
-    // scheduleWindowBackgroundBrushRebuild 作用：
-    // - 对窗口 resize 触发的背景重建做短延迟合并；
-    // - 避免最大化拖下还原或连续缩放时每帧都同步重建整窗背景。
-    void scheduleWindowBackgroundBrushRebuild();
 
     // applyFloatingDockContainerAppearance 作用：
     // - 把当前主题色、背景图与样式同步到指定浮动 Dock 容器；
@@ -538,7 +534,6 @@ private:
     std::atomic_bool m_r0DriverLogPollerRunning{ false }; // m_r0DriverLogPollerRunning：R0 日志轮询线程运行标记。
     std::unique_ptr<std::thread> m_r0DriverLogPollerThread; // m_r0DriverLogPollerThread：R0 日志轮询线程对象。
     QTimer* m_privilegeStatusTimer = nullptr;
-    QTimer* m_backgroundRebuildTimer = nullptr; // m_backgroundRebuildTimer：窗口背景重建合并计时器。
     QTimer* m_logWindowGeometrySaveTimer = nullptr;
 
     // m_currentAppearanceSettings 作用：缓存当前外观配置（主题/背景图/透明度）。
