@@ -14,6 +14,7 @@
 #include "../theme.h"
 
 #include <QAbstractItemView>
+#include <QAbstractItemModel>
 #include <QAction>
 #include <QApplication>
 #include <QByteArray>
@@ -22,6 +23,7 @@
 #include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QElapsedTimer>
 #include <QGridLayout>
 #include <QHeaderView>
 #include <QHBoxLayout>
@@ -694,7 +696,7 @@ void DirectKernelCallMonitorWidget::initializeUi()
 
     controlLayout->addWidget(new QLabel(QStringLiteral("最大行数"), m_controlPanel), 1, 0);
     m_maxRowsSpin = new QSpinBox(m_controlPanel);
-    m_maxRowsSpin->setRange(1000, 100000);
+    m_maxRowsSpin->setRange(1000, 20000);
     m_maxRowsSpin->setSingleStep(1000);
     m_maxRowsSpin->setValue(12000);
     m_maxRowsSpin->setStyleSheet(blueInputStyle());
@@ -825,15 +827,16 @@ void DirectKernelCallMonitorWidget::initializeUi()
     m_eventTable->setContextMenuPolicy(Qt::CustomContextMenu);
     m_eventTable->verticalHeader()->setVisible(false);
     m_eventTable->horizontalHeader()->setStyleSheet(blueHeaderStyle());
-    m_eventTable->horizontalHeader()->setSectionResizeMode(EventColumnTime100ns, QHeaderView::ResizeToContents);
-    m_eventTable->horizontalHeader()->setSectionResizeMode(EventColumnPidTid, QHeaderView::ResizeToContents);
-    m_eventTable->horizontalHeader()->setSectionResizeMode(EventColumnProcess, QHeaderView::ResizeToContents);
-    m_eventTable->horizontalHeader()->setSectionResizeMode(EventColumnSyscallNumber, QHeaderView::ResizeToContents);
-    m_eventTable->horizontalHeader()->setSectionResizeMode(EventColumnServiceName, QHeaderView::ResizeToContents);
-    m_eventTable->horizontalHeader()->setSectionResizeMode(EventColumnVerdict, QHeaderView::ResizeToContents);
-    m_eventTable->horizontalHeader()->setSectionResizeMode(EventColumnCallAddress, QHeaderView::ResizeToContents);
-    m_eventTable->horizontalHeader()->setSectionResizeMode(EventColumnEventName, QHeaderView::ResizeToContents);
-    m_eventTable->horizontalHeader()->setSectionResizeMode(EventColumnDetail, QHeaderView::Stretch);
+    m_eventTable->horizontalHeader()->setSectionResizeMode(QHeaderView::Interactive);
+    m_eventTable->setColumnWidth(EventColumnTime100ns, 160);
+    m_eventTable->setColumnWidth(EventColumnPidTid, 100);
+    m_eventTable->setColumnWidth(EventColumnProcess, 180);
+    m_eventTable->setColumnWidth(EventColumnSyscallNumber, 84);
+    m_eventTable->setColumnWidth(EventColumnServiceName, 220);
+    m_eventTable->setColumnWidth(EventColumnVerdict, 96);
+    m_eventTable->setColumnWidth(EventColumnCallAddress, 164);
+    m_eventTable->setColumnWidth(EventColumnEventName, 150);
+    m_eventTable->setColumnWidth(EventColumnDetail, 440);
     m_rootLayout->addWidget(m_eventTable, 1);
 
     m_uiUpdateTimer = new QTimer(this);
@@ -995,6 +998,7 @@ void DirectKernelCallMonitorWidget::startCapture()
     {
         std::lock_guard<std::mutex> lock(m_pendingMutex);
         m_pendingRows.clear();
+        m_pendingDroppedRows = 0;
     }
     {
         std::lock_guard<std::mutex> lock(m_cacheMutex);
@@ -1146,7 +1150,6 @@ void DirectKernelCallMonitorWidget::startCapture()
             if (guardThis->m_uiUpdateTimer != nullptr)
             {
                 guardThis->flushPendingRows();
-                guardThis->m_uiUpdateTimer->stop();
             }
             if (processStatus == ERROR_SUCCESS)
             {
@@ -1254,7 +1257,6 @@ void DirectKernelCallMonitorWidget::stopCaptureInternal(bool waitForThread)
             if (guardThis->m_uiUpdateTimer != nullptr)
             {
                 guardThis->flushPendingRows();
-                guardThis->m_uiUpdateTimer->stop();
             }
             guardThis->updateActionState();
             guardThis->updateStatusLabel();
@@ -1400,6 +1402,11 @@ void DirectKernelCallMonitorWidget::enqueueEventFromRecord(const struct _EVENT_R
     CapturedEventRow row = buildRowFromRecord(eventRecordPtr);
     {
         std::lock_guard<std::mutex> lock(m_pendingMutex);
+        if (m_pendingRows.size() >= kPendingRowCapacity)
+        {
+            m_pendingRows.pop_front();
+            ++m_pendingDroppedRows;
+        }
         m_pendingRows.push_back(std::move(row));
     }
 }
@@ -1814,24 +1821,62 @@ void DirectKernelCallMonitorWidget::flushPendingRows()
     std::vector<CapturedEventRow> rowList;
     {
         std::lock_guard<std::mutex> lock(m_pendingMutex);
-        rowList.swap(m_pendingRows);
+        const std::size_t takeCount = std::min(kUiFlushRowLimit, m_pendingRows.size());
+        rowList.reserve(takeCount);
+        for (std::size_t index = 0; index < takeCount; ++index)
+        {
+            rowList.push_back(std::move(m_pendingRows.front()));
+            m_pendingRows.pop_front();
+        }
     }
     if (rowList.empty())
     {
+        if (!m_captureRunning.load() && m_uiUpdateTimer != nullptr)
+        {
+            m_uiUpdateTimer->stop();
+        }
         return;
     }
 
+    const bool updatesEnabled = m_eventTable->updatesEnabled();
     m_eventTable->setUpdatesEnabled(false);
+    QElapsedTimer budgetTimer;
+    budgetTimer.start();
+    std::size_t renderedCount = 0;
     for (const CapturedEventRow& rowValue : rowList)
     {
         appendEventRow(rowValue);
+        ++renderedCount;
+        if (budgetTimer.elapsed() >= kUiFlushBudgetMs)
+        {
+            break;
+        }
     }
     const int maxRows = m_maxRowsSpin != nullptr ? m_maxRowsSpin->value() : 12000;
-    while (m_eventTable->rowCount() > maxRows)
+    const int removeCount = std::max(0, m_eventTable->rowCount() - maxRows);
+    if (removeCount > 0 && m_eventTable->model() != nullptr)
     {
-        m_eventTable->removeRow(0);
+        m_eventTable->model()->removeRows(0, removeCount);
     }
-    m_eventTable->setUpdatesEnabled(true);
+    m_eventTable->setUpdatesEnabled(updatesEnabled);
+    if (updatesEnabled && m_eventTable->viewport() != nullptr)
+    {
+        m_eventTable->viewport()->update();
+    }
+
+    if (renderedCount < rowList.size())
+    {
+        std::lock_guard<std::mutex> lock(m_pendingMutex);
+        for (std::size_t index = rowList.size(); index > renderedCount; --index)
+        {
+            m_pendingRows.push_front(std::move(rowList[index - 1]));
+        }
+        while (m_pendingRows.size() > kPendingRowCapacity)
+        {
+            m_pendingRows.pop_back();
+            ++m_pendingDroppedRows;
+        }
+    }
 
     applyFilter();
     updateActionState();
@@ -1890,6 +1935,34 @@ void DirectKernelCallMonitorWidget::applyFilter()
         (m_caseCheck != nullptr && m_caseCheck->isChecked())
         ? Qt::CaseSensitive
         : Qt::CaseInsensitive;
+
+    const bool hasTextFilter = !processFilter.trimmed().isEmpty()
+        || !serviceFilter.trimmed().isEmpty()
+        || !detailFilter.trimmed().isEmpty()
+        || !globalFilter.trimmed().isEmpty();
+    const bool requiresFiltering = hasTextFilter || invertMatch;
+    if (!requiresFiltering)
+    {
+        if (m_filterActive)
+        {
+            for (int row = 0; row < m_eventTable->rowCount(); ++row)
+            {
+                m_eventTable->setRowHidden(row, false);
+            }
+        }
+        m_filterActive = false;
+        if (m_filterStatusLabel != nullptr)
+        {
+            m_filterStatusLabel->setText(QStringLiteral("筛选结果：%1 / %2")
+                .arg(m_eventTable->rowCount())
+                .arg(m_eventTable->rowCount()));
+            m_filterStatusLabel->setStyleSheet(buildStatusStyle(
+                m_eventTable->rowCount() > 0 ? monitorSuccessColorHex() : monitorIdleColorHex()));
+        }
+        return;
+    }
+
+    m_filterActive = true;
 
     int visibleCount = 0;
     for (int row = 0; row < m_eventTable->rowCount(); ++row)

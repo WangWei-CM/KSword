@@ -14,7 +14,9 @@
 #include <QWidget>
 
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <memory>
 #include <mutex>
 #include <set>
@@ -168,8 +170,13 @@ private:
     std::unordered_map<std::uint32_t, QString> m_processNameCache;
     std::unordered_map<std::uint32_t, std::vector<ModuleRange>> m_moduleRangeCache;
     std::mutex m_cacheMutex;
-    std::vector<CapturedEventRow> m_pendingRows;
+    static constexpr std::size_t kPendingRowCapacity = 24000;
+    static constexpr std::size_t kUiFlushRowLimit = 160;
+    static constexpr int kUiFlushBudgetMs = 4;
+
+    std::deque<CapturedEventRow> m_pendingRows;
     std::mutex m_pendingMutex;
+    std::size_t m_pendingDroppedRows = 0;
     std::set<std::uint32_t> m_capturePidSet;
     mutable std::mutex m_captureConfigMutex;
 
@@ -183,5 +190,6 @@ private:
     std::atomic<std::uint64_t> m_traceHandle{ 0 };
     QString m_sessionName;
     int m_captureProgressPid = 0;
+    bool m_filterActive = false;
 };
 
