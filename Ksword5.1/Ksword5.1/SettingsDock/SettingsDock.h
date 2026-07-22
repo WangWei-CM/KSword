@@ -52,7 +52,7 @@ private:
     void initializeUi();
 
     // initializeAppearanceTab 作用：
-    // - 创建“外观与启动”标签页控件（主题按钮、背景路径、透明度、启动行为）。
+    // - 创建“外观 / 语言 / 启动”三个标签页控件，并保持一套统一的保存逻辑。
     // 调用方式：initializeUi 内部调用。
     void initializeAppearanceTab();
 
@@ -160,8 +160,14 @@ private:
     // m_tabWidget 作用：设置页签容器，当前至少包含“外观”页。
     QTabWidget* m_tabWidget = nullptr;
 
-    // m_appearanceTab 作用：外观与启动设置页 QWidget 容器。
+    // m_appearanceTab 作用：外观设置页 QWidget 容器。
     QWidget* m_appearanceTab = nullptr;
+
+    // m_languageTab 作用：界面语言设置页 QWidget 容器。
+    QWidget* m_languageTab = nullptr;
+
+    // m_startupTab 作用：启动行为设置页 QWidget 容器。
+    QWidget* m_startupTab = nullptr;
 
     // m_onlineScanTab 作用：在线扫描 API Key 设置页 QWidget 容器。
     QWidget* m_onlineScanTab = nullptr;
@@ -171,6 +177,9 @@ private:
 
     // m_languageCombo 作用：列出 languages 目录中发现并通过校验的语言包。
     QComboBox* m_languageCombo = nullptr;
+
+    // m_textAntialiasingCheckBox 作用：控制应用默认字体是否启用文本抗锯齿。
+    QCheckBox* m_textAntialiasingCheckBox = nullptr;
 
     // m_followSystemButton 作用：选择“跟随系统主题”模式。
     QToolButton* m_followSystemButton = nullptr;

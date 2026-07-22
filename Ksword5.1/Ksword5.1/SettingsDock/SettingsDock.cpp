@@ -201,7 +201,7 @@ void SettingsDock::changeEvent(QEvent* event)
 
 void SettingsDock::initializeUi()
 {
-    // rootLayout 作用：SettingsDock 根布局，承载 Tab 控件。
+    // rootLayout 作用：SettingsDock 根布局，承载 Tab 控件与跨页可见的应用按钮。
     QVBoxLayout* rootLayout = new QVBoxLayout(this);
     rootLayout->setContentsMargins(10, 10, 10, 10);
     rootLayout->setSpacing(8);
@@ -211,21 +211,50 @@ void SettingsDock::initializeUi()
     m_tabWidget->setTabPosition(QTabWidget::North);
     rootLayout->addWidget(m_tabWidget);
 
+    // 应用按钮固定在页签下方，切换“外观 / 语言 / 启动”时仍可提交同一份待保存设置。
+    QHBoxLayout* actionLayout = new QHBoxLayout();
+    actionLayout->addStretch(1);
+    m_applySettingsButton = new QPushButton(QStringLiteral("应用"), this);
+    ks::i18n::LanguageManager::instance().bindText(
+        m_applySettingsButton,
+        QStringLiteral("settings.apply"),
+        QStringLiteral("应用"));
+    m_applySettingsButton->setMinimumWidth(72);
+    m_applySettingsButton->setFixedHeight(30);
+    m_applySettingsButton->setToolTip(QStringLiteral("应用当前设置改动"));
+    ks::i18n::LanguageManager::instance().bindToolTip(
+        m_applySettingsButton,
+        QStringLiteral("settings.apply.tooltip"),
+        QStringLiteral("应用当前设置改动"));
+    m_applySettingsButton->setEnabled(false);
+    actionLayout->addWidget(m_applySettingsButton, 0);
+    rootLayout->addLayout(actionLayout);
+
     setLayout(rootLayout);
 }
 
 void SettingsDock::initializeAppearanceTab()
 {
-    // m_appearanceTab 作用：承载“外观与启动”相关控件。
+    // 将原“外观、语言与启动”长页拆为三个页签，避免单一设置页超过可用高度。
     m_appearanceTab = new QWidget(m_tabWidget);
     QVBoxLayout* appearanceRootLayout = new QVBoxLayout(m_appearanceTab);
     appearanceRootLayout->setContentsMargins(8, 8, 8, 8);
     appearanceRootLayout->setSpacing(12);
 
+    m_languageTab = new QWidget(m_tabWidget);
+    QVBoxLayout* languageRootLayout = new QVBoxLayout(m_languageTab);
+    languageRootLayout->setContentsMargins(8, 8, 8, 8);
+    languageRootLayout->setSpacing(12);
+
+    m_startupTab = new QWidget(m_tabWidget);
+    QVBoxLayout* startupRootLayout = new QVBoxLayout(m_startupTab);
+    startupRootLayout->setContentsMargins(8, 8, 8, 8);
+    startupRootLayout->setSpacing(12);
+
     ks::i18n::LanguageManager& languageManager = ks::i18n::LanguageManager::instance();
 
     // ===== 界面语言分组 =====
-    QGroupBox* languageGroupBox = new QGroupBox(QStringLiteral("界面语言"), m_appearanceTab);
+    QGroupBox* languageGroupBox = new QGroupBox(QStringLiteral("界面语言"), m_languageTab);
     languageManager.bindText(languageGroupBox, QStringLiteral("settings.language.group"), QStringLiteral("界面语言"));
     QVBoxLayout* languageLayout = new QVBoxLayout(languageGroupBox);
     languageLayout->setSpacing(8);
@@ -260,7 +289,8 @@ void SettingsDock::initializeAppearanceTab()
         QStringLiteral("选择界面语言；保存后立即切换"));
     languageSelectLayout->addWidget(m_languageCombo, 1);
     languageLayout->addLayout(languageSelectLayout);
-    appearanceRootLayout->addWidget(languageGroupBox);
+    languageRootLayout->addWidget(languageGroupBox);
+    languageRootLayout->addStretch();
 
     // ===== 主题模式分组 =====
     QGroupBox* themeGroupBox = new QGroupBox(QStringLiteral("主题模式"), m_appearanceTab);
@@ -313,6 +343,19 @@ void SettingsDock::initializeAppearanceTab()
     themeButtonLayout->addWidget(m_darkModeButton);
     themeButtonLayout->addStretch();
     themeLayout->addLayout(themeButtonLayout);
+
+    m_textAntialiasingCheckBox = new QCheckBox(QStringLiteral("启用文本抗锯齿"), themeGroupBox);
+    languageManager.bindText(
+        m_textAntialiasingCheckBox,
+        QStringLiteral("settings.text_antialiasing.enabled"),
+        QStringLiteral("启用文本抗锯齿"));
+    m_textAntialiasingCheckBox->setToolTip(
+        QStringLiteral("启用后使用平滑字体渲染；关闭时使用无抗锯齿字体渲染。"));
+    languageManager.bindToolTip(
+        m_textAntialiasingCheckBox,
+        QStringLiteral("settings.text_antialiasing.enabled.tooltip"),
+        QStringLiteral("启用后使用平滑字体渲染；关闭时使用无抗锯齿字体渲染。"));
+    themeLayout->addWidget(m_textAntialiasingCheckBox);
     appearanceRootLayout->addWidget(themeGroupBox);
 
     // ===== 背景图分组 =====
@@ -421,7 +464,7 @@ void SettingsDock::initializeAppearanceTab()
     appearanceRootLayout->addWidget(interactionGroupBox);
 
     // ===== 启动行为分组 =====
-    QGroupBox* startupGroupBox = new QGroupBox(QStringLiteral("启动行为"), m_appearanceTab);
+    QGroupBox* startupGroupBox = new QGroupBox(QStringLiteral("启动行为"), m_startupTab);
     languageManager.bindText(startupGroupBox, QStringLiteral("settings.startup.group"), QStringLiteral("启动行为"));
     QVBoxLayout* startupLayout = new QVBoxLayout(startupGroupBox);
     startupLayout->setSpacing(8);
@@ -521,7 +564,8 @@ void SettingsDock::initializeAppearanceTab()
     m_startupWindowScaleHintLabel->setWordWrap(true);
     startupLayout->addWidget(m_startupWindowScaleHintLabel);
 
-    appearanceRootLayout->addWidget(startupGroupBox);
+    startupRootLayout->addWidget(startupGroupBox);
+    startupRootLayout->addStretch();
 
     // ===== 日志通知分组 =====
     QGroupBox* notificationGroupBox = new QGroupBox(QStringLiteral("日志通知"), m_appearanceTab);
@@ -596,24 +640,13 @@ void SettingsDock::initializeAppearanceTab()
 
     appearanceRootLayout->addWidget(notificationGroupBox);
 
-    // ===== 应用按钮区域 =====
-    QHBoxLayout* actionLayout = new QHBoxLayout();
-    actionLayout->addStretch(1);
-
-    // m_applySettingsButton 作用：把当前待生效改动落盘并触发界面实际应用（文字按钮）。
-    m_applySettingsButton = new QPushButton(QStringLiteral("应用"), m_appearanceTab);
-    languageManager.bindText(m_applySettingsButton, QStringLiteral("settings.apply"), QStringLiteral("应用"));
-    m_applySettingsButton->setMinimumWidth(72);
-    m_applySettingsButton->setFixedHeight(30);
-    m_applySettingsButton->setToolTip(QStringLiteral("应用当前设置改动"));
-    languageManager.bindToolTip(m_applySettingsButton, QStringLiteral("settings.apply.tooltip"), QStringLiteral("应用当前设置改动"));
-    m_applySettingsButton->setEnabled(false);
-    actionLayout->addWidget(m_applySettingsButton, 0);
-    appearanceRootLayout->addLayout(actionLayout);
-
     appearanceRootLayout->addStretch();
-    m_tabWidget->addTab(m_appearanceTab, QStringLiteral("外观与启动"));
-    languageManager.bindTab(m_tabWidget, m_appearanceTab, QStringLiteral("settings.tab.appearance"), QStringLiteral("外观、语言与启动"));
+    m_tabWidget->addTab(m_appearanceTab, QStringLiteral("外观"));
+    languageManager.bindTab(m_tabWidget, m_appearanceTab, QStringLiteral("settings.tab.appearance"), QStringLiteral("外观"));
+    m_tabWidget->addTab(m_languageTab, QStringLiteral("语言"));
+    languageManager.bindTab(m_tabWidget, m_languageTab, QStringLiteral("settings.tab.language"), QStringLiteral("语言"));
+    m_tabWidget->addTab(m_startupTab, QStringLiteral("启动"));
+    languageManager.bindTab(m_tabWidget, m_startupTab, QStringLiteral("settings.tab.startup"), QStringLiteral("启动"));
 
     bindAppearanceSignals();
     updateThemeButtonStyle();
@@ -632,6 +665,10 @@ void SettingsDock::bindAppearanceSignals()
     connect(m_themeButtonGroup, &QButtonGroup::idClicked, this, [this](int /*clickedId*/) {
         updateThemeButtonStyle();
         markPendingChanges(QStringLiteral("主题按钮切换"));
+        });
+
+    connect(m_textAntialiasingCheckBox, &QCheckBox::toggled, this, [this](const bool /*checkedState*/) {
+        markPendingChanges(QString());
         });
 
     connect(m_backgroundPathEdit, &QLineEdit::editingFinished, this, [this]() {
@@ -755,6 +792,10 @@ void SettingsDock::applySettingsToUi(const ks::settings::AppearanceSettings& set
 
     m_backgroundPathEdit->setText(settings.backgroundImagePath);
     m_backgroundOpacitySlider->setValue(settings.backgroundOpacityPercent);
+    if (m_textAntialiasingCheckBox != nullptr)
+    {
+        m_textAntialiasingCheckBox->setChecked(settings.textAntialiasingEnabled);
+    }
 
     if (m_startupMaximizedCheckBox != nullptr)
     {
@@ -893,6 +934,8 @@ ks::settings::AppearanceSettings SettingsDock::collectSettingsFromUi() const
         (m_scrollBarAutoHideCheckBox != nullptr) && m_scrollBarAutoHideCheckBox->isChecked();
     collectedSettings.sliderWheelAdjustEnabled =
         (m_sliderWheelAdjustCheckBox != nullptr) && m_sliderWheelAdjustCheckBox->isChecked();
+    collectedSettings.textAntialiasingEnabled =
+        (m_textAntialiasingCheckBox != nullptr) && m_textAntialiasingCheckBox->isChecked();
     collectedSettings.notificationCardsEnabled =
         (m_notificationCardsEnabledCheckBox != nullptr) && m_notificationCardsEnabledCheckBox->isChecked();
     collectedSettings.notificationMinimumLevel =
@@ -989,6 +1032,7 @@ void SettingsDock::saveAndEmitFromUi(const QString& triggerReason)
         && nextSettings.useWideScrollBars == m_currentAppearanceSettings.useWideScrollBars
         && nextSettings.scrollBarAutoHideEnabled == m_currentAppearanceSettings.scrollBarAutoHideEnabled
         && nextSettings.sliderWheelAdjustEnabled == m_currentAppearanceSettings.sliderWheelAdjustEnabled
+        && nextSettings.textAntialiasingEnabled == m_currentAppearanceSettings.textAntialiasingEnabled
         && nextSettings.notificationCardsEnabled == m_currentAppearanceSettings.notificationCardsEnabled
         && nextSettings.notificationMinimumLevel == m_currentAppearanceSettings.notificationMinimumLevel
         && nextSettings.notificationLogDisplaySeconds == m_currentAppearanceSettings.notificationLogDisplaySeconds

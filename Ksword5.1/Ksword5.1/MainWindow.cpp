@@ -19,6 +19,7 @@
 #include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
+#include <QFont>
 #include <QGuiApplication>
 #include <QScreen>
 #include <QSet>
@@ -8535,10 +8536,22 @@ void MainWindow::applyAppearanceSettings(
     const bool enableDockTransparencyForBackgroundImage =
         isBackgroundImageReady(settings.backgroundImagePath);
 
-    // 把深浅色状态写入全局属性，供各 Dock 在绘制/着色时读取。
+    // 统一控制应用默认字体的抗锯齿策略：关闭时显式禁用，避免配置缺失时回退到系统默认抗锯齿。
+    QFont applicationFont = QApplication::font();
+    const QFont::StyleStrategy requestedFontStyleStrategy = settings.textAntialiasingEnabled
+        ? QFont::PreferAntialias
+        : QFont::NoAntialias;
+    if (applicationFont.styleStrategy() != requestedFontStyleStrategy)
+    {
+        applicationFont.setStyleStrategy(requestedFontStyleStrategy);
+        QApplication::setFont(applicationFont);
+    }
+
+    // 把深浅色状态和文本渲染策略写入全局属性，供各 Dock 在绘制/交互时读取。
     if (QApplication* appInstance = qobject_cast<QApplication*>(QCoreApplication::instance()))
     {
         appInstance->setProperty("ksword_slider_wheel_adjust_enabled", settings.sliderWheelAdjustEnabled);
+        appInstance->setProperty("ksword_text_antialiasing_enabled", settings.textAntialiasingEnabled);
     }
 
     // Windows 11 背景控制要求：

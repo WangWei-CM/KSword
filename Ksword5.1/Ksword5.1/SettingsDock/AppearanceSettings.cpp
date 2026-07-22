@@ -377,6 +377,7 @@ namespace
         defaultSettings.useWideScrollBars = false;
         defaultSettings.scrollBarAutoHideEnabled = false;
         defaultSettings.sliderWheelAdjustEnabled = false;
+        defaultSettings.textAntialiasingEnabled = false;
         defaultSettings.notificationCardsEnabled = true;
         defaultSettings.notificationMinimumLevel = 2;
         defaultSettings.notificationLogDisplaySeconds = 10;
@@ -556,6 +557,9 @@ ks::settings::AppearanceSettings ks::settings::loadAppearanceSettings()
     loadedSettings.sliderWheelAdjustEnabled = rootObject
         .value(QStringLiteral("slider_wheel_adjust_enabled"))
         .toBool(loadedSettings.sliderWheelAdjustEnabled);
+    loadedSettings.textAntialiasingEnabled = rootObject
+        .value(QStringLiteral("text_antialiasing_enabled"))
+        .toBool(loadedSettings.textAntialiasingEnabled);
     loadedSettings.notificationCardsEnabled = rootObject
         .value(QStringLiteral("notification_cards_enabled"))
         .toBool(loadedSettings.notificationCardsEnabled);
@@ -644,6 +648,9 @@ bool ks::settings::saveAppearanceSettings(const AppearanceSettings& settings, QS
     rootObject.insert(
         QStringLiteral("slider_wheel_adjust_enabled"),
         settings.sliderWheelAdjustEnabled);
+    rootObject.insert(
+        QStringLiteral("text_antialiasing_enabled"),
+        settings.textAntialiasingEnabled);
     rootObject.insert(
         QStringLiteral("notification_cards_enabled"),
         settings.notificationCardsEnabled);
