@@ -13,6 +13,8 @@
 #include <QVector>
 #include <QWidget>
 
+#include <cstdint>
+
 class QLabel;
 class QLineEdit;
 class QPushButton;
@@ -20,6 +22,7 @@ class QSplitter;
 class QTableWidget;
 class QTextEdit;
 class QTreeWidget;
+class QTimer;
 
 // RegistryOptimizationPage:
 // - Input: parent widget plus profiles/registry_optimization_items.json at runtime;
@@ -106,6 +109,7 @@ private:
     void rebuildItemTable();
     void refreshVisibleStates();
     void refreshVisibleRowState(int tableRow);
+    void cancelStateRefresh();
     void updateDetailPanel(int tableRow);
     void updateStatusText(const QString& text);
     void applyColumnPreset(ColumnPreset preset);
@@ -133,7 +137,7 @@ private:
     bool executeExplorerNotifyAction(const QJsonObject& actionObject, QString* errorTextOut);
     bool executeFileCreateByZipAction(const QJsonObject& actionObject, QString* errorTextOut);
 
-    bool evaluateConditionText(const QString& conditionText) const;
+    static bool evaluateConditionText(const QString& conditionText);
 
 private:
     QPushButton* m_columnPresetAButton = nullptr; // A 列组按钮：默认操作视图。
@@ -141,6 +145,7 @@ private:
     QLineEdit* m_filterEdit = nullptr;           // Free-text filter for group/item/scope names.
     QPushButton* m_reloadButton = nullptr;       // Reloads JSON from profiles at runtime.
     QPushButton* m_refreshStateButton = nullptr; // Re-evaluates visible row state conditions.
+    QTimer* m_filterDebounceTimer = nullptr;     // 延迟合并连续筛选输入。
     QSplitter* m_splitter = nullptr;             // Left groups, right item list/details.
     QTreeWidget* m_groupTree = nullptr;          // Dynamic group tree from JSON group_name.
     QTableWidget* m_itemTable = nullptr;         // Dynamic option rows and per-row controls.
@@ -152,4 +157,6 @@ private:
     QVector<VisibleRow> m_visibleRows;           // Current table row to model mapping.
     ColumnPreset m_columnPreset = ColumnPreset::A; // 当前列组预设。
     bool m_rebuildingTable = false;              // Guards refresh signals during table rebuild.
+    bool m_stateRefreshInProgress = false;       // 可见状态后台刷新是否仍在执行。
+    std::uint64_t m_stateRefreshGeneration = 0;  // 忽略过期后台状态结果。
 };

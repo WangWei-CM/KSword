@@ -11,7 +11,6 @@
 #include <QColorDialog>
 #include <QComboBox>
 #include <QCoreApplication>
-#include <QEventLoop>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -25,7 +24,9 @@
 #include <QLineEdit>
 #include <QMenu>
 #include <QMessageBox>
+#include <QMetaObject>
 #include <QOperatingSystemVersion>
+#include <QPointer>
 #include <QProcess>
 #include <QPushButton>
 #include <QRegularExpression>
@@ -36,6 +37,7 @@
 #include <QTableWidget>
 #include <QTextEdit>
 #include <QTemporaryDir>
+#include <QTimer>
 #include <QTreeWidget>
 #include <QVBoxLayout>
 
@@ -43,6 +45,7 @@
 #include <array>
 #include <cstdint>
 #include <cstring>
+#include <thread>
 
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -65,6 +68,15 @@ namespace
     constexpr int kTargetColumnWidth = 132;
     constexpr int kActionColumnWidth = 82;
     constexpr int kDefaultRowHeight = 30;
+    constexpr int kFilterDebounceMs = 200;
+
+    struct VisibleStateRefreshResult
+    {
+        int tableRow = -1;
+        QString stateText;
+        QString targetLabel;
+        bool targetEnabled = false;
+    };
 
     // jsonString:
     // - Input object/name: JSON object and property name;
@@ -1141,6 +1153,9 @@ void RegistryOptimizationPage::initializeUi()
             KswordTheme::SurfaceHex(),
             KswordTheme::TextPrimaryHex(),
             KswordTheme::PrimaryBlueHex));
+    m_filterDebounceTimer = new QTimer(this);
+    m_filterDebounceTimer->setSingleShot(true);
+    m_filterDebounceTimer->setInterval(kFilterDebounceMs);
 
     m_reloadButton = new QPushButton(QStringLiteral("重新加载 JSON"), this);
     m_refreshStateButton = new QPushButton(QStringLiteral("刷新可见状态"), this);
@@ -1220,8 +1235,10 @@ void RegistryOptimizationPage::initializeConnections()
     connect(m_columnPresetBButton, &QPushButton::clicked, this, [this]() { applyColumnPreset(ColumnPreset::B); });
     connect(m_reloadButton, &QPushButton::clicked, this, [this]() { loadOptimizationProfile(); });
     connect(m_refreshStateButton, &QPushButton::clicked, this, [this]() { refreshVisibleStates(); });
-    connect(m_filterEdit, &QLineEdit::textChanged, this, [this]() { rebuildItemTable(); });
+    connect(m_filterEdit, &QLineEdit::textChanged, this, [this]() { m_filterDebounceTimer->start(); });
+    connect(m_filterDebounceTimer, &QTimer::timeout, this, [this]() { rebuildItemTable(); });
     connect(m_groupTree, &QTreeWidget::currentItemChanged, this, [this](QTreeWidgetItem*, QTreeWidgetItem*) {
+        m_filterDebounceTimer->stop();
         rebuildItemTable();
     });
     connect(m_itemTable, &QTableWidget::currentCellChanged, this, [this](int currentRow, int, int, int) {
@@ -1249,6 +1266,8 @@ QStringList RegistryOptimizationPage::profileCandidatePaths() const
 
 void RegistryOptimizationPage::loadOptimizationProfile()
 {
+    cancelStateRefresh();
+    if (m_filterDebounceTimer != nullptr) m_filterDebounceTimer->stop();
     m_itemList.clear();
     m_visibleRows.clear();
     m_loadedProfilePath.clear();
@@ -1374,8 +1393,11 @@ void RegistryOptimizationPage::rebuildGroupTree()
 
 void RegistryOptimizationPage::rebuildItemTable()
 {
+    cancelStateRefresh();
     m_rebuildingTable = true;
     QSignalBlocker blocker(m_itemTable);
+    const bool updatesEnabled = m_itemTable->updatesEnabled();
+    m_itemTable->setUpdatesEnabled(false);
     m_visibleRows.clear();
     m_itemTable->setRowCount(0);
 
@@ -1476,16 +1498,92 @@ void RegistryOptimizationPage::rebuildItemTable()
     }
     updateStatusText(QStringLiteral("系统优化：当前显示 %1 行；来源 %2。").arg(m_itemTable->rowCount()).arg(m_loadedProfilePath));
     applyColumnPreset(m_columnPreset);
+    m_itemTable->setUpdatesEnabled(updatesEnabled);
+    if (updatesEnabled) m_itemTable->viewport()->update();
 }
 
 void RegistryOptimizationPage::refreshVisibleStates()
 {
-    for (int row = 0; row < m_itemTable->rowCount(); ++row)
-    {
-        refreshVisibleRowState(row);
-        QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents, 5);
-    }
-    updateStatusText(QStringLiteral("系统优化：已刷新 %1 个可见项状态。").arg(m_itemTable->rowCount()));
+    if (m_stateRefreshInProgress) return;
+
+    const QVector<OptimizationItem> itemSnapshot = m_itemList;
+    const QVector<VisibleRow> visibleRowsSnapshot = m_visibleRows;
+    const std::uint64_t generation = ++m_stateRefreshGeneration;
+    m_stateRefreshInProgress = true;
+    m_refreshStateButton->setEnabled(false);
+
+    QPointer<RegistryOptimizationPage> guardThis(this);
+    std::thread([guardThis, generation, itemSnapshot, visibleRowsSnapshot]() {
+        QVector<VisibleStateRefreshResult> results;
+        results.reserve(visibleRowsSnapshot.size());
+        for (int tableRow = 0; tableRow < visibleRowsSnapshot.size(); ++tableRow)
+        {
+            const VisibleRow& rowRef = visibleRowsSnapshot.at(tableRow);
+            VisibleStateRefreshResult result;
+            result.tableRow = tableRow;
+            result.stateText = QStringLiteral("未匹配/未知");
+            if (rowRef.itemIndex >= 0 && rowRef.itemIndex < itemSnapshot.size())
+            {
+                const OptimizationItem& item = itemSnapshot.at(rowRef.itemIndex);
+                if (rowRef.scopeIndex >= 0 && rowRef.scopeIndex < item.scopeList.size())
+                {
+                    const OptimizationScope& scope = item.scopeList.at(rowRef.scopeIndex);
+                    for (const OptimizationState& state : scope.stateList)
+                    {
+                        if (!state.conditionText.trimmed().isEmpty() &&
+                            RegistryOptimizationPage::evaluateConditionText(state.conditionText))
+                        {
+                            result.stateText = state.labelText;
+                            result.targetLabel = state.labelText;
+                            result.targetEnabled = state.tagText.compare(QStringLiteral("State"), Qt::CaseInsensitive) == 0;
+                            break;
+                        }
+                    }
+                }
+            }
+            results.push_back(std::move(result));
+        }
+
+        QMetaObject::invokeMethod(qApp, [guardThis, generation, results = std::move(results)]() {
+            if (guardThis == nullptr || guardThis->m_stateRefreshGeneration != generation) return;
+
+            guardThis->m_stateRefreshInProgress = false;
+            guardThis->m_refreshStateButton->setEnabled(true);
+            const bool updatesEnabled = guardThis->m_itemTable->updatesEnabled();
+            guardThis->m_itemTable->setUpdatesEnabled(false);
+            for (const VisibleStateRefreshResult& result : results)
+            {
+                if (result.tableRow < 0 || result.tableRow >= guardThis->m_itemTable->rowCount()) continue;
+                if (QTableWidgetItem* statusItem = guardThis->m_itemTable->item(result.tableRow, kCurrentStateColumn))
+                {
+                    statusItem->setText(result.stateText);
+                }
+
+                QWidget* targetWidget = guardThis->m_itemTable->cellWidget(result.tableRow, kTargetControlColumn);
+                if (QComboBox* comboBox = findTargetComboBox(targetWidget))
+                {
+                    const int comboIndex = comboBox->findData(result.targetLabel);
+                    if (comboIndex >= 0) comboBox->setCurrentIndex(comboIndex);
+                }
+                else if (QCheckBox* checkBox = findTargetCheckBox(targetWidget))
+                {
+                    checkBox->setChecked(result.targetEnabled);
+                }
+            }
+            guardThis->m_itemTable->setUpdatesEnabled(updatesEnabled);
+            if (updatesEnabled) guardThis->m_itemTable->viewport()->update();
+            guardThis->updateStatusText(QStringLiteral("系统优化：已刷新 %1 个可见项状态。").arg(results.size()));
+        }, Qt::QueuedConnection);
+    }).detach();
+}
+
+void RegistryOptimizationPage::cancelStateRefresh()
+{
+    if (!m_stateRefreshInProgress) return;
+
+    ++m_stateRefreshGeneration;
+    m_stateRefreshInProgress = false;
+    if (m_refreshStateButton != nullptr) m_refreshStateButton->setEnabled(true);
 }
 
 void RegistryOptimizationPage::refreshVisibleRowState(const int tableRow)
@@ -1718,6 +1816,7 @@ const RegistryOptimizationPage::OptimizationState* RegistryOptimizationPage::det
 
 bool RegistryOptimizationPage::applyVisibleRow(const int tableRow)
 {
+    cancelStateRefresh();
     if (tableRow < 0 || tableRow >= m_visibleRows.size()) return false;
     const VisibleRow rowRef = m_visibleRows.at(tableRow);
     const OptimizationItem& item = m_itemList.at(rowRef.itemIndex);
@@ -2193,7 +2292,7 @@ bool RegistryOptimizationPage::executeFileCreateByZipAction(const QJsonObject& a
     return true;
 }
 
-bool RegistryOptimizationPage::evaluateConditionText(const QString& conditionText) const
+bool RegistryOptimizationPage::evaluateConditionText(const QString& conditionText)
 {
     const QString trimmedCondition = conditionText.trimmed();
     if (trimmedCondition.isEmpty()) return false;
