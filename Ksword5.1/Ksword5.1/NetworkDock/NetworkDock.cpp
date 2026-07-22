@@ -64,6 +64,10 @@ NetworkDock::NetworkDock(QWidget* parent)
     m_multiDownloadRefreshTimer->setInterval(180);
     connect(m_multiDownloadRefreshTimer, &QTimer::timeout, this, [this]()
         {
+            if (m_sideTabWidget == nullptr || m_sideTabWidget->currentWidget() != m_multiThreadDownloadPage)
+            {
+                return;
+            }
             refreshMultiThreadDownloadUi();
         });
     m_multiDownloadRefreshTimer->start();

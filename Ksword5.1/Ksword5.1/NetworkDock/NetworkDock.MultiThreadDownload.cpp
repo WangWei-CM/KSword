@@ -349,7 +349,10 @@ namespace
             itemPointer->setFlags(itemPointer->flags() & ~Qt::ItemIsEditable);
             tableWidget->setItem(rowIndex, columnIndex, itemPointer);
         }
-        itemPointer->setText(text);
+        if (itemPointer->text() != text)
+        {
+            itemPointer->setText(text);
+        }
     }
 }
 namespace
@@ -1277,6 +1280,8 @@ void NetworkDock::refreshMultiThreadDownloadUi()
     }
 
     const QSignalBlocker taskTableSignalBlocker(m_multiDownloadTaskTable);
+    const bool taskTableUpdatesEnabled = m_multiDownloadTaskTable->updatesEnabled();
+    m_multiDownloadTaskTable->setUpdatesEnabled(false);
     m_multiDownloadTaskTable->setRowCount(static_cast<int>(snapshotList.size()));
 
     int runningCount = 0;
@@ -1318,36 +1323,61 @@ void NetworkDock::refreshMultiThreadDownloadUi()
         setCellText(m_multiDownloadTaskTable, row, MultiDownloadTaskColumnProgress, QStringLiteral("%1%").arg(percent, 0, 'f', 2));
         setCellText(m_multiDownloadTaskTable, row, MultiDownloadTaskColumnStatus, statusText);
 
-        QWidget* actionWidget = new QWidget(m_multiDownloadTaskTable);
-        QHBoxLayout* actionLayout = new QHBoxLayout(actionWidget);
-        actionLayout->setContentsMargins(2, 2, 2, 2);
-        actionLayout->setSpacing(4);
-
         const bool taskFinished = taskState->finished.load();
         const bool taskCanceled = taskState->canceled.load();
         const bool taskPaused = taskState->pauseRequested.load();
-        QPushButton* pauseButton = new QPushButton(taskPaused ? QStringLiteral("继续") : QStringLiteral("暂停"), actionWidget);
-        pauseButton->setIcon(QIcon(taskPaused ? ":/Icon/process_start.svg" : ":/Icon/process_pause.svg"));
-        pauseButton->setToolTip(taskPaused ? QStringLiteral("继续当前下载任务") : QStringLiteral("暂停当前下载任务"));
-        pauseButton->setEnabled(!taskFinished && !taskState->cancelRequested.load());
-        connect(pauseButton, &QPushButton::clicked, this, [this, taskId = taskState->taskId, taskPaused]()
-            {
-                setMultiThreadDownloadTaskPaused(taskId, !taskPaused);
-            });
+        const bool taskActionEnabled = !taskFinished && !taskState->cancelRequested.load();
+        QWidget* actionWidget = m_multiDownloadTaskTable->cellWidget(row, MultiDownloadTaskColumnAction);
+        if (actionWidget == nullptr)
+        {
+            actionWidget = new QWidget(m_multiDownloadTaskTable);
+            QHBoxLayout* actionLayout = new QHBoxLayout(actionWidget);
+            actionLayout->setContentsMargins(2, 2, 2, 2);
+            actionLayout->setSpacing(4);
 
-        QPushButton* cancelButton = new QPushButton(QStringLiteral("取消"), actionWidget);
-        cancelButton->setIcon(QIcon(":/Icon/log_cancel_track.svg"));
-        cancelButton->setToolTip(QStringLiteral("取消当前下载任务，已写入的临时文件内容会保留"));
-        cancelButton->setEnabled(!taskFinished && !taskState->cancelRequested.load());
-        connect(cancelButton, &QPushButton::clicked, this, [this, taskId = taskState->taskId]()
-            {
-                cancelMultiThreadDownloadTask(taskId);
-            });
+            QPushButton* pauseButton = new QPushButton(actionWidget);
+            connect(pauseButton, &QPushButton::clicked, this, [this, taskId = taskState->taskId]()
+                {
+                    const std::shared_ptr<MultiThreadDownloadTaskState> currentTask = findMultiThreadDownloadTaskById(taskId);
+                    if (currentTask != nullptr)
+                    {
+                        setMultiThreadDownloadTaskPaused(taskId, !currentTask->pauseRequested.load());
+                    }
+                });
 
-        actionLayout->addWidget(pauseButton);
-        actionLayout->addWidget(cancelButton);
-        actionLayout->addStretch(1);
-        m_multiDownloadTaskTable->setCellWidget(row, MultiDownloadTaskColumnAction, actionWidget);
+            QPushButton* cancelButton = new QPushButton(actionWidget);
+            connect(cancelButton, &QPushButton::clicked, this, [this, taskId = taskState->taskId]()
+                {
+                    cancelMultiThreadDownloadTask(taskId);
+                });
+
+            actionLayout->addWidget(pauseButton);
+            actionLayout->addWidget(cancelButton);
+            actionLayout->addStretch(1);
+            m_multiDownloadTaskTable->setCellWidget(row, MultiDownloadTaskColumnAction, actionWidget);
+        }
+
+        QHBoxLayout* actionLayout = qobject_cast<QHBoxLayout*>(actionWidget->layout());
+        QPushButton* pauseButton = actionLayout != nullptr && actionLayout->count() > 0
+            ? qobject_cast<QPushButton*>(actionLayout->itemAt(0)->widget())
+            : nullptr;
+        QPushButton* cancelButton = actionLayout != nullptr && actionLayout->count() > 1
+            ? qobject_cast<QPushButton*>(actionLayout->itemAt(1)->widget())
+            : nullptr;
+        if (pauseButton != nullptr)
+        {
+            pauseButton->setText(taskPaused ? QStringLiteral("继续") : QStringLiteral("暂停"));
+            pauseButton->setIcon(QIcon(taskPaused ? ":/Icon/process_start.svg" : ":/Icon/process_pause.svg"));
+            pauseButton->setToolTip(taskPaused ? QStringLiteral("继续当前下载任务") : QStringLiteral("暂停当前下载任务"));
+            pauseButton->setEnabled(taskActionEnabled);
+        }
+        if (cancelButton != nullptr)
+        {
+            cancelButton->setText(QStringLiteral("取消"));
+            cancelButton->setIcon(QIcon(":/Icon/log_cancel_track.svg"));
+            cancelButton->setToolTip(QStringLiteral("取消当前下载任务，已写入的临时文件内容会保留"));
+            cancelButton->setEnabled(taskActionEnabled);
+        }
 
         if (taskCanceled)
         {
@@ -1375,6 +1405,12 @@ void NetworkDock::refreshMultiThreadDownloadUi()
             .arg(finishedCount)
             .arg(failedCount)
             .arg(canceledCount));
+    }
+
+    m_multiDownloadTaskTable->setUpdatesEnabled(taskTableUpdatesEnabled);
+    if (taskTableUpdatesEnabled && m_multiDownloadTaskTable->viewport() != nullptr)
+    {
+        m_multiDownloadTaskTable->viewport()->update();
     }
 
     if (m_multiDownloadSelectedTaskId <= 0 && !snapshotList.empty())
@@ -1412,6 +1448,8 @@ void NetworkDock::refreshMultiThreadDownloadUi()
     }
 
     const auto& segmentList = selectedTask->segmentStateList;
+    const bool segmentTableUpdatesEnabled = m_multiDownloadSegmentTable->updatesEnabled();
+    m_multiDownloadSegmentTable->setUpdatesEnabled(false);
     m_multiDownloadSegmentTable->setRowCount(static_cast<int>(segmentList.size()));
 
     QVector<double> segmentRatios;
@@ -1475,4 +1513,10 @@ void NetworkDock::refreshMultiThreadDownloadUi()
         .arg(selectedPercent, 0, 'f', 2)
         .arg(formatBytesText(selectedDownloaded))
         .arg(formatBytesText(selectedTotal)));
+
+    m_multiDownloadSegmentTable->setUpdatesEnabled(segmentTableUpdatesEnabled);
+    if (segmentTableUpdatesEnabled && m_multiDownloadSegmentTable->viewport() != nullptr)
+    {
+        m_multiDownloadSegmentTable->viewport()->update();
+    }
 }
