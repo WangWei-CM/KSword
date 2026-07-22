@@ -503,17 +503,18 @@ void ProcessTraceMonitorWidget::initializeUi()
         m_eventTable->viewport()->setAutoFillBackground(false);
         m_eventTable->viewport()->setAttribute(Qt::WA_StyledBackground, true);
     }
-    m_eventTable->horizontalHeader()->setSectionResizeMode(EventColumnTime100ns, QHeaderView::ResizeToContents);
-    m_eventTable->horizontalHeader()->setSectionResizeMode(EventColumnType, QHeaderView::ResizeToContents);
-    m_eventTable->horizontalHeader()->setSectionResizeMode(EventColumnProvider, QHeaderView::ResizeToContents);
-    m_eventTable->horizontalHeader()->setSectionResizeMode(EventColumnEventId, QHeaderView::ResizeToContents);
-    m_eventTable->horizontalHeader()->setSectionResizeMode(EventColumnEventName, QHeaderView::ResizeToContents);
-    m_eventTable->horizontalHeader()->setSectionResizeMode(EventColumnPidTid, QHeaderView::ResizeToContents);
-    m_eventTable->horizontalHeader()->setSectionResizeMode(EventColumnProcess, QHeaderView::ResizeToContents);
-    m_eventTable->horizontalHeader()->setSectionResizeMode(EventColumnRootPid, QHeaderView::ResizeToContents);
-    m_eventTable->horizontalHeader()->setSectionResizeMode(EventColumnRelation, QHeaderView::ResizeToContents);
-    m_eventTable->horizontalHeader()->setSectionResizeMode(EventColumnDetail, QHeaderView::Stretch);
-    m_eventTable->horizontalHeader()->setSectionResizeMode(EventColumnActivityId, QHeaderView::ResizeToContents);
+    m_eventTable->horizontalHeader()->setSectionResizeMode(QHeaderView::Interactive);
+    m_eventTable->setColumnWidth(EventColumnTime100ns, 160);
+    m_eventTable->setColumnWidth(EventColumnType, 82);
+    m_eventTable->setColumnWidth(EventColumnProvider, 190);
+    m_eventTable->setColumnWidth(EventColumnEventId, 80);
+    m_eventTable->setColumnWidth(EventColumnEventName, 180);
+    m_eventTable->setColumnWidth(EventColumnPidTid, 110);
+    m_eventTable->setColumnWidth(EventColumnProcess, 180);
+    m_eventTable->setColumnWidth(EventColumnRootPid, 86);
+    m_eventTable->setColumnWidth(EventColumnRelation, 130);
+    m_eventTable->setColumnWidth(EventColumnDetail, 440);
+    m_eventTable->setColumnWidth(EventColumnActivityId, 260);
     m_eventTable->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     m_rootLayout->addWidget(m_eventTable, 1);
 

@@ -577,6 +577,11 @@ void ProcessTraceMonitorWidget::enqueueEventFromRecord(const struct _EVENT_RECOR
 
     {
         std::lock_guard<std::mutex> lock(m_pendingMutex);
+        if (m_pendingRows.size() >= kPendingRowCapacity)
+        {
+            m_pendingRows.pop_front();
+            ++m_pendingDroppedRows;
+        }
         m_pendingRows.push_back(std::move(rowValue));
     }
 }

@@ -184,7 +184,9 @@ void ProcessTraceMonitorWidget::startMonitoring()
     {
         std::lock_guard<std::mutex> lock(m_pendingMutex);
         m_pendingRows.clear();
+        m_pendingDroppedRows = 0;
     }
+    m_lastTimelineRefreshMs = 0;
 
     // 用一轮进程快照先播种目标进程树，确保已有子进程在 ETW 会话启动前也被纳入。
     std::vector<ks::process::ProcessRecord> processList = ks::process::EnumerateProcesses(
@@ -548,14 +550,9 @@ void ProcessTraceMonitorWidget::startMonitoring()
             }
             if (guardThis->m_uiUpdateTimer != nullptr)
             {
-                guardThis->m_uiUpdateTimer->stop();
-            }
-            kPro.set(guardThis->m_captureProgressPid, "进程定向监控结束", 0, 100.0f);
-
-            if (guardThis->m_uiUpdateTimer != nullptr)
-            {
                 guardThis->flushPendingRows();
             }
+            kPro.set(guardThis->m_captureProgressPid, "进程定向监控结束", 0, 100.0f);
             guardThis->refreshTimelineRange(true);
             if (guardThis->hasAnyEventFilterActive())
             {
@@ -627,7 +624,7 @@ void ProcessTraceMonitorWidget::stopMonitoringInternal(const bool waitForThread)
     {
         m_runtimeRefreshTimer->stop();
     }
-    if (m_uiUpdateTimer != nullptr && m_uiUpdateTimer->isActive())
+    if (waitForThread && m_uiUpdateTimer != nullptr && m_uiUpdateTimer->isActive())
     {
         m_uiUpdateTimer->stop();
     }

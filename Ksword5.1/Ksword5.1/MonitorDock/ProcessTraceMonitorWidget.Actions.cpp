@@ -10,11 +10,14 @@
 // ============================================================
 
 #include <QApplication>
+#include <QAbstractItemModel>
 #include <QBrush>
 #include <QCheckBox>
 #include <QColor>
 #include <QClipboard>
 #include <QComboBox>
+#include <QDateTime>
+#include <QElapsedTimer>
 #include <QItemSelectionModel>
 #include <QLabel>
 #include <QLineEdit>
@@ -1481,33 +1484,79 @@ void ProcessTraceMonitorWidget::flushPendingRows()
     std::vector<CapturedEventRow> rowList;
     {
         std::lock_guard<std::mutex> lock(m_pendingMutex);
-        rowList.swap(m_pendingRows);
+        const std::size_t takeCount = std::min(kUiFlushRowLimit, m_pendingRows.size());
+        rowList.reserve(takeCount);
+        for (std::size_t index = 0; index < takeCount; ++index)
+        {
+            rowList.push_back(std::move(m_pendingRows.front()));
+            m_pendingRows.pop_front();
+        }
     }
 
     if (rowList.empty())
     {
         refreshTimelineRange(false);
+        if (!m_captureRunning.load() && m_uiUpdateTimer != nullptr)
+        {
+            m_uiUpdateTimer->stop();
+        }
         return;
     }
 
+    const bool updatesEnabled = m_eventTable->updatesEnabled();
     m_eventTable->setUpdatesEnabled(false);
+    QElapsedTimer budgetTimer;
+    budgetTimer.start();
+    std::size_t renderedCount = 0;
     for (const CapturedEventRow& rowValue : rowList)
     {
         appendEventRow(rowValue);
-    }
-
-    while (m_eventTable->rowCount() > 12000)
-    {
-        m_eventTable->removeRow(0);
-        if (!m_timelineEventPoints.empty())
+        ++renderedCount;
+        if (budgetTimer.elapsed() >= kUiFlushBudgetMs)
         {
-            m_timelineEventPoints.erase(m_timelineEventPoints.begin());
+            break;
         }
     }
 
-    m_eventTable->setUpdatesEnabled(true);
+    const int removeCount = std::max(0, m_eventTable->rowCount() - 12000);
+    if (removeCount > 0 && m_eventTable->model() != nullptr)
+    {
+        m_eventTable->model()->removeRows(0, removeCount);
+        const std::size_t timelineEraseCount = std::min(
+            static_cast<std::size_t>(removeCount),
+            m_timelineEventPoints.size());
+        m_timelineEventPoints.erase(
+            m_timelineEventPoints.begin(),
+            m_timelineEventPoints.begin() + static_cast<std::ptrdiff_t>(timelineEraseCount));
+    }
+
+    m_eventTable->setUpdatesEnabled(updatesEnabled);
+    if (updatesEnabled && m_eventTable->viewport() != nullptr)
+    {
+        m_eventTable->viewport()->update();
+    }
+
+    if (renderedCount < rowList.size())
+    {
+        std::lock_guard<std::mutex> lock(m_pendingMutex);
+        for (std::size_t index = rowList.size(); index > renderedCount; --index)
+        {
+            m_pendingRows.push_front(std::move(rowList[index - 1]));
+        }
+        while (m_pendingRows.size() > kPendingRowCapacity)
+        {
+            m_pendingRows.pop_back();
+            ++m_pendingDroppedRows;
+        }
+    }
+
     refreshTimelineRange(false);
-    refreshTimelinePoints();
+    const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+    if (!m_captureRunning.load() || (nowMs - m_lastTimelineRefreshMs) >= 250)
+    {
+        refreshTimelinePoints();
+        m_lastTimelineRefreshMs = nowMs;
+    }
 
     if (hasAnyEventFilterActive())
     {

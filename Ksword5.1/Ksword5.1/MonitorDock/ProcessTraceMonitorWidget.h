@@ -15,7 +15,9 @@
 #include <QWidget>
 
 #include <atomic>         // std::atomic_bool：后台监控状态控制。
+#include <cstddef>        // std::size_t：事件队列容量与单次刷新批次。
 #include <cstdint>        // std::uint32_t/std::uint64_t：PID、时间戳等固定宽度类型。
+#include <deque>          // std::deque：高频 ETW 事件的有界 FIFO 队列。
 #include <memory>         // std::unique_ptr：后台线程托管。
 #include <mutex>          // std::mutex：保护待刷入事件队列与运行期进程树。
 #include <thread>         // std::thread：ETW 会话线程与辅助刷新线程。
@@ -393,10 +395,15 @@ private:
     std::vector<TargetProcessEntry> m_targetProcessList;            // m_targetProcessList：用户选择的根进程列表。
     std::vector<ProviderEntry> m_activeProviderList;                // m_activeProviderList：本轮监控成功启用的 Provider。
     std::unordered_map<std::uint32_t, RuntimeTrackedProcess> m_trackedProcessMap; // m_trackedProcessMap：运行期目标进程树。
-    std::vector<CapturedEventRow> m_pendingRows;                    // m_pendingRows：后台待刷入 UI 的事件队列。
+    static constexpr std::size_t kPendingRowCapacity = 24000;       // 待显示事件上限，积压时丢弃最旧事件。
+    static constexpr std::size_t kUiFlushRowLimit = 160;            // 单个 GUI tick 最多写入的行数。
+    static constexpr int kUiFlushBudgetMs = 4;                       // 单个 GUI tick 的渲染时间预算。
+
+    std::deque<CapturedEventRow> m_pendingRows;                     // m_pendingRows：后台待刷入 UI 的有界 FIFO 队列。
     std::vector<ProcessTraceTimelineEventPoint> m_timelineEventPoints; // m_timelineEventPoints：时间轴绘制用轻量事件缓存。
     std::mutex m_runtimeMutex;                                      // m_runtimeMutex：保护目标进程树与 Provider 列表。
     std::mutex m_pendingMutex;                                      // m_pendingMutex：保护待刷新事件队列。
+    std::size_t m_pendingDroppedRows = 0;                            // m_pendingDroppedRows：因积压保护丢弃的事件数。
     std::atomic_bool m_captureRunning{ false };                     // m_captureRunning：ETW 监听是否在运行。
     std::atomic_bool m_capturePaused{ false };                      // m_capturePaused：ETW 监听是否处于暂停态。
     std::atomic_bool m_captureStopFlag{ false };                    // m_captureStopFlag：后台线程停止信号。
@@ -414,5 +421,6 @@ private:
     std::uint64_t m_timelineSelectionStart100ns = 0;                // m_timelineSelectionStart100ns：时间轴框选起点。
     std::uint64_t m_timelineSelectionEnd100ns = 0;                  // m_timelineSelectionEnd100ns：时间轴框选终点。
     bool m_timelineUserSelectionActive = false;                     // m_timelineUserSelectionActive：用户是否已启用时间框选。
+    qint64 m_lastTimelineRefreshMs = 0;                             // m_lastTimelineRefreshMs：上次向时间轴复制事件点的时间。
     QString m_sessionName;                                          // m_sessionName：本轮 ETW 会话名。
 };
