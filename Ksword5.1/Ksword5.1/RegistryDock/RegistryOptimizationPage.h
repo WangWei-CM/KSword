@@ -10,6 +10,7 @@
 
 #include <QJsonObject>
 #include <QString>
+#include <QStringList>
 #include <QVector>
 #include <QWidget>
 
@@ -18,9 +19,11 @@
 class QLabel;
 class QLineEdit;
 class QPushButton;
+class QProcess;
 class QSplitter;
 class QTableWidget;
 class QTextEdit;
+class QTemporaryDir;
 class QTreeWidget;
 class QTimer;
 
@@ -36,6 +39,7 @@ public:
     // - Processing: builds controls, wires signals, then loads the JSON profile;
     // - Return: no explicit return value.
     explicit RegistryOptimizationPage(QWidget* parent = nullptr);
+    ~RegistryOptimizationPage() override;
 
 private:
     // OptimizationState:
@@ -120,11 +124,14 @@ private:
     const OptimizationState* selectedTargetStateForRow(int tableRow) const;
     const OptimizationState* detectedStateForScope(const OptimizationScope& scope) const;
     bool applyVisibleRow(int tableRow);
-    bool applyStateActions(
-        const OptimizationItem& item,
-        const OptimizationScope& scope,
-        const OptimizationState& state,
-        QStringList* detailLinesOut);
+    void beginStateApply(int tableRow, const OptimizationItem& item, const OptimizationScope& scope, const OptimizationState& state);
+    void continueStateApply();
+    void finishStateApply();
+    void cancelStateApply(const QString& reasonText = QString());
+    void completePendingAction(bool actionOk, const QString& errorText);
+    void setApplyControlsEnabled(bool enabled);
+    bool startExternalAction(const QJsonObject& actionObject, QString* errorTextOut);
+    static bool actionRequiresExternalProcess(const QJsonObject& actionObject);
     bool executeAction(
         const QJsonObject& actionObject,
         QStringList* detailLinesOut,
@@ -135,7 +142,6 @@ private:
     bool executeRegistryMoveAction(const QJsonObject& actionObject, QString* errorTextOut);
     bool executeServiceStartAction(const QJsonObject& actionObject, QString* errorTextOut);
     bool executeExplorerNotifyAction(const QJsonObject& actionObject, QString* errorTextOut);
-    bool executeFileCreateByZipAction(const QJsonObject& actionObject, QString* errorTextOut);
 
     static bool evaluateConditionText(const QString& conditionText);
 
@@ -145,6 +151,7 @@ private:
     QLineEdit* m_filterEdit = nullptr;           // Free-text filter for group/item/scope names.
     QPushButton* m_reloadButton = nullptr;       // Reloads JSON from profiles at runtime.
     QPushButton* m_refreshStateButton = nullptr; // Re-evaluates visible row state conditions.
+    QPushButton* m_cancelApplyButton = nullptr;  // Cancels the current external optimization action sequence.
     QTimer* m_filterDebounceTimer = nullptr;     // 延迟合并连续筛选输入。
     QSplitter* m_splitter = nullptr;             // Left groups, right item list/details.
     QTreeWidget* m_groupTree = nullptr;          // Dynamic group tree from JSON group_name.
@@ -159,4 +166,17 @@ private:
     bool m_rebuildingTable = false;              // Guards refresh signals during table rebuild.
     bool m_stateRefreshInProgress = false;       // 可见状态后台刷新是否仍在执行。
     std::uint64_t m_stateRefreshGeneration = 0;  // 忽略过期后台状态结果。
+    bool m_stateApplyInProgress = false;         // 当前是否正在串行应用优化动作。
+    int m_stateApplyTableRow = -1;               // 应用开始时对应的表格行。
+    QString m_stateApplyItemName;                // 应用中的项目名称。
+    QString m_stateApplyTargetLabel;             // 应用中的目标状态名称。
+    QVector<QJsonObject> m_stateApplyActions;    // 保持原 JSON 顺序的待执行动作。
+    int m_stateApplyNextActionIndex = 0;         // 下一项待执行动作索引。
+    QJsonObject m_stateApplyActiveAction;        // 当前异步外部动作。
+    QStringList m_stateApplyDetailLines;         // 当前动作序列的诊断信息。
+    bool m_stateApplyAllOk = true;               // 所有已完成动作是否成功。
+    bool m_stateApplyRestartExplorer = false;    // 是否需要提示 Explorer 重启。
+    QProcess* m_stateApplyProcess = nullptr;     // 仅承载当前非阻塞 cmd/tar 子进程。
+    QTemporaryDir* m_stateApplyTemporaryDir = nullptr; // FileCreateByZIP 解压期间保留临时目录。
+    QString m_stateApplyZipDestinationPath;      // FileCreateByZIP 的最终目标路径。
 };
