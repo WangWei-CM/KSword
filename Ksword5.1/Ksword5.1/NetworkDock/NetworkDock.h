@@ -833,6 +833,13 @@ private:
     // - 作用：刷新 TCP/UDP 两张连接监控表。
     // - 返回：无。
     void refreshConnectionTables();
+    void applyConnectionSnapshot(
+        std::vector<ks::network::TcpConnectionRecord> tcpSnapshot,
+        std::vector<ks::network::UdpEndpointRecord> udpSnapshot,
+        bool tcpOk,
+        bool udpOk,
+        std::string tcpErrorText,
+        std::string udpErrorText);
 
     // refreshTcpConnectionTable：
     // - 作用：拉取 TCP 连接快照并重建 TCP 表。
@@ -1385,6 +1392,7 @@ private:
     // - 终止连接、复制行等操作直接通过当前行索引回查。
     std::vector<ks::network::TcpConnectionRecord> m_tcpConnectionCache;
     std::vector<ks::network::UdpEndpointRecord> m_udpEndpointCache;
+    std::atomic_bool m_connectionRefreshPending{ false }; // 连接快照是否正在后台枚举，避免慢枚举重叠。
 
     // PID 图标缓存：避免重复解析 EXE 图标导致 UI 卡顿。
     QHash<quint32, QIcon> m_processIconCacheByPid;
