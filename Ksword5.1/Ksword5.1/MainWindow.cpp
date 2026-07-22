@@ -6764,71 +6764,87 @@ bool MainWindow::enableWindowsTestModeAndPromptReboot()
         return false;
     }
 
-    QProcess bcdeditProcess;
-    bcdeditProcess.start(QStringLiteral("bcdedit"), { QStringLiteral("/set"), QStringLiteral("testsigning"), QStringLiteral("on") });
-    if (!bcdeditProcess.waitForStarted(5000))
+    QProcess* bcdeditProcess = new QProcess(this);
+    QTimer* timeoutTimer = new QTimer(bcdeditProcess);
+    timeoutTimer->setSingleShot(true);
+    timeoutTimer->setInterval(15000);
+    connect(timeoutTimer, &QTimer::timeout, this, [bcdeditProcess]()
     {
+        if (bcdeditProcess->state() != QProcess::NotRunning)
+        {
+            bcdeditProcess->setProperty("ksword_bcdedit_timed_out", true);
+            bcdeditProcess->kill();
+        }
+    });
+    connect(bcdeditProcess, &QProcess::errorOccurred, this, [this, bcdeditProcess](QProcess::ProcessError error)
+    {
+        if (error != QProcess::FailedToStart || bcdeditProcess->property("ksword_bcdedit_handled").toBool()) return;
+        bcdeditProcess->setProperty("ksword_bcdedit_handled", true);
         showR0FatalError(
             QStringLiteral("开启测试模式失败：无法启动 bcdedit。"),
             ERROR_GEN_FAILURE,
-            bcdeditProcess.errorString());
-        return false;
-    }
-    if (!bcdeditProcess.waitForFinished(15000))
-    {
-        bcdeditProcess.kill();
-        bcdeditProcess.waitForFinished(3000);
-        showR0FatalError(
-            QStringLiteral("开启测试模式失败：bcdedit 执行超时。"),
-            ERROR_TIMEOUT);
-        return false;
-    }
-
-    const QString standardOutput = QString::fromLocal8Bit(bcdeditProcess.readAllStandardOutput()).trimmed();
-    const QString standardError = QString::fromLocal8Bit(bcdeditProcess.readAllStandardError()).trimmed();
-    if (bcdeditProcess.exitStatus() != QProcess::NormalExit || bcdeditProcess.exitCode() != 0)
-    {
-        QString detailText = QStringLiteral("退出码：%1").arg(bcdeditProcess.exitCode());
-        if (!standardOutput.isEmpty())
+            bcdeditProcess->errorString());
+        bcdeditProcess->deleteLater();
+    });
+    connect(bcdeditProcess, qOverload<int, QProcess::ExitStatus>(&QProcess::finished), this,
+        [this, bcdeditProcess, timeoutTimer](int exitCode, QProcess::ExitStatus exitStatus)
         {
-            detailText += QStringLiteral("\nstdout：%1").arg(standardOutput);
-        }
-        if (!standardError.isEmpty())
-        {
-            detailText += QStringLiteral("\nstderr：%1").arg(standardError);
-        }
-        showR0FatalError(
-            QStringLiteral("开启测试模式失败：bcdedit 返回错误。"),
-            ERROR_GEN_FAILURE,
-            detailText);
-        return false;
-    }
+            if (bcdeditProcess->property("ksword_bcdedit_handled").toBool()) return;
+            bcdeditProcess->setProperty("ksword_bcdedit_handled", true);
+            timeoutTimer->stop();
+            if (bcdeditProcess->property("ksword_bcdedit_timed_out").toBool())
+            {
+                showR0FatalError(
+                    QStringLiteral("开启测试模式失败：bcdedit 执行超时。"),
+                    ERROR_TIMEOUT);
+                bcdeditProcess->deleteLater();
+                return;
+            }
 
-    QMessageBox rebootDialog(this);
-    rebootDialog.setIcon(QMessageBox::Question);
-    rebootDialog.setWindowTitle(QStringLiteral("测试模式已设置"));
-    rebootDialog.setText(QStringLiteral("已执行 bcdedit /set testsigning on。"));
-    rebootDialog.setInformativeText(QStringLiteral("需要重启电脑后才会生效。你可以选择稍后重启或现在重启。"));
-    QPushButton* rebootLaterButton = rebootDialog.addButton(QStringLiteral("稍后重启"), QMessageBox::RejectRole);
-    QPushButton* rebootNowButton = rebootDialog.addButton(QStringLiteral("现在重启"), QMessageBox::AcceptRole);
-    rebootDialog.exec();
+            const QString standardOutput = QString::fromLocal8Bit(bcdeditProcess->readAllStandardOutput()).trimmed();
+            const QString standardError = QString::fromLocal8Bit(bcdeditProcess->readAllStandardError()).trimmed();
+            if (exitStatus != QProcess::NormalExit || exitCode != 0)
+            {
+                QString detailText = QStringLiteral("退出码：%1").arg(exitCode);
+                if (!standardOutput.isEmpty()) detailText += QStringLiteral("\nstdout：%1").arg(standardOutput);
+                if (!standardError.isEmpty()) detailText += QStringLiteral("\nstderr：%1").arg(standardError);
+                showR0FatalError(
+                    QStringLiteral("开启测试模式失败：bcdedit 返回错误。"),
+                    ERROR_GEN_FAILURE,
+                    detailText);
+                bcdeditProcess->deleteLater();
+                return;
+            }
 
-    if (rebootDialog.clickedButton() == rebootNowButton)
-    {
-        if (!QProcess::startDetached(QStringLiteral("shutdown"), { QStringLiteral("/r"), QStringLiteral("/t"), QStringLiteral("0") }))
-        {
-            showR0FatalError(
-                QStringLiteral("立即重启失败：无法调用 shutdown 命令。"),
-                ERROR_GEN_FAILURE);
-            return false;
-        }
-    }
-    else if (rebootDialog.clickedButton() == rebootLaterButton)
-    {
-        kLogEvent logEvent;
-        info << logEvent << "[MainWindow][R0] 用户选择稍后重启，测试模式将在下次重启后生效。" << eol;
-    }
+            QMessageBox rebootDialog(this);
+            rebootDialog.setIcon(QMessageBox::Question);
+            rebootDialog.setWindowTitle(QStringLiteral("测试模式已设置"));
+            rebootDialog.setText(QStringLiteral("已执行 bcdedit /set testsigning on。"));
+            rebootDialog.setInformativeText(QStringLiteral("需要重启电脑后才会生效。你可以选择稍后重启或现在重启。"));
+            QPushButton* rebootLaterButton = rebootDialog.addButton(QStringLiteral("稍后重启"), QMessageBox::RejectRole);
+            QPushButton* rebootNowButton = rebootDialog.addButton(QStringLiteral("现在重启"), QMessageBox::AcceptRole);
+            rebootDialog.exec();
 
+            if (rebootDialog.clickedButton() == rebootNowButton)
+            {
+                if (!QProcess::startDetached(QStringLiteral("shutdown"), { QStringLiteral("/r"), QStringLiteral("/t"), QStringLiteral("0") }))
+                {
+                    showR0FatalError(
+                        QStringLiteral("立即重启失败：无法调用 shutdown 命令。"),
+                        ERROR_GEN_FAILURE);
+                }
+            }
+            else if (rebootDialog.clickedButton() == rebootLaterButton)
+            {
+                kLogEvent logEvent;
+                info << logEvent << "[MainWindow][R0] 用户选择稍后重启，测试模式将在下次重启后生效。" << eol;
+            }
+            bcdeditProcess->deleteLater();
+        });
+    bcdeditProcess->start(
+        QStringLiteral("bcdedit"),
+        { QStringLiteral("/set"), QStringLiteral("testsigning"), QStringLiteral("on") });
+    timeoutTimer->start();
     return true;
 }
 
