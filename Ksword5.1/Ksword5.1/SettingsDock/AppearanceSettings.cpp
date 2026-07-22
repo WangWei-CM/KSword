@@ -377,7 +377,7 @@ namespace
         defaultSettings.useWideScrollBars = false;
         defaultSettings.scrollBarAutoHideEnabled = false;
         defaultSettings.sliderWheelAdjustEnabled = false;
-        defaultSettings.textAntialiasingEnabled = false;
+        defaultSettings.textAntialiasingEnabled = true;
         defaultSettings.notificationCardsEnabled = true;
         defaultSettings.notificationMinimumLevel = 2;
         defaultSettings.notificationLogDisplaySeconds = 10;

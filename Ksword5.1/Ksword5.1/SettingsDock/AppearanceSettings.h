@@ -69,7 +69,7 @@ namespace ks::settings
         bool useWideScrollBars = false;
         bool scrollBarAutoHideEnabled = false;
         bool sliderWheelAdjustEnabled = false;
-        bool textAntialiasingEnabled = false;
+        bool textAntialiasingEnabled = true;
         bool notificationCardsEnabled = true;
         int notificationMinimumLevel = 2; // Warn，数值与 kLogLevel 的严重度顺序保持一致。
         int notificationLogDisplaySeconds = 10;
