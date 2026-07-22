@@ -11715,45 +11715,73 @@ void FileDock::takeOwnershipSelectedItems(FilePanelWidgets& panel)
     const int progressPid = kPro.add("文件", "取得所有权");
     kPro.set(progressPid, "准备执行", 0, 5.0f);
 
-    QStringList errorDetails;
-    for (std::size_t index = 0; index < paths.size(); ++index)
+    const bool leftPanelRequest = (&panel == &m_leftPanel);
+    const QString panelNameText = panel.panelNameText;
+    QPointer<FileDock> safeThis(this);
+    std::thread([safeThis, paths, progressPid, leftPanelRequest, panelNameText]()
     {
-        const QString& targetPath = paths[index];
-        QString detailText;
-        const bool itemOk = takeOwnershipBySystemCommand(targetPath, detailText);
-        if (!itemOk)
+        QStringList errorDetails;
+        for (std::size_t index = 0; index < paths.size(); ++index)
         {
-            errorDetails.push_back(detailText);
+            const QString& targetPath = paths[index];
+            QString detailText;
+            const bool itemOk = takeOwnershipBySystemCommand(targetPath, detailText);
+            if (!itemOk)
+            {
+                errorDetails.push_back(detailText);
+            }
+
+            const float progress = 5.0f + (static_cast<float>(index + 1) / static_cast<float>(paths.size())) * 90.0f;
+            kPro.set(progressPid, "处理中", 0, progress);
+        }
+        kPro.set(progressPid, "完成", 0, 100.0f);
+
+        if (safeThis.isNull())
+        {
+            kPro.set(progressPid, "界面已关闭", 0, 100.0f);
+            return;
         }
 
-        const float progress = 5.0f + (static_cast<float>(index + 1) / static_cast<float>(paths.size())) * 90.0f;
-        kPro.set(progressPid, "处理中", 0, progress);
-    }
-    kPro.set(progressPid, "完成", 0, 100.0f);
+        const bool invokeOk = QMetaObject::invokeMethod(
+            safeThis.data(),
+            [safeThis, progressPid, leftPanelRequest, panelNameText, paths, errorDetails]()
+            {
+                if (safeThis.isNull())
+                {
+                    kPro.set(progressPid, "界面已关闭", 0, 100.0f);
+                    return;
+                }
 
-    refreshPanel(panel);
+                FilePanelWidgets& targetPanel = leftPanelRequest ? safeThis->m_leftPanel : safeThis->m_rightPanel;
+                safeThis->refreshPanel(targetPanel);
+                if (!errorDetails.isEmpty())
+                {
+                    kLogEvent failEvent;
+                    warn << failEvent
+                        << "[FileDock] 取得所有权部分失败, panel="
+                        << panelNameText.toStdString()
+                        << ", failCount="
+                        << errorDetails.size()
+                        << ", detailPreview=\n"
+                        << buildLogPreviewText(errorDetails).toStdString()
+                        << eol;
+                    return;
+                }
 
-    if (!errorDetails.isEmpty())
-    {
-        kLogEvent failEvent;
-        warn << failEvent
-            << "[FileDock] 取得所有权部分失败, panel="
-            << panel.panelNameText.toStdString()
-            << ", failCount="
-            << errorDetails.size()
-            << ", detailPreview=\n"
-            << buildLogPreviewText(errorDetails).toStdString()
-            << eol;
-        return;
-    }
-
-    kLogEvent finishEvent;
-    info << finishEvent
-        << "[FileDock] 取得所有权完成, panel="
-        << panel.panelNameText.toStdString()
-        << ", successCount="
-        << paths.size()
-        << eol;
+                kLogEvent finishEvent;
+                info << finishEvent
+                    << "[FileDock] 取得所有权完成, panel="
+                    << panelNameText.toStdString()
+                    << ", successCount="
+                    << paths.size()
+                    << eol;
+            },
+            Qt::QueuedConnection);
+        if (!invokeOk)
+        {
+            kPro.set(progressPid, "回调失败", 0, 100.0f);
+        }
+    }).detach();
 }
 
 void FileDock::setSelectedFileIntegrityLevel(
