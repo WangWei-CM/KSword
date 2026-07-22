@@ -1258,8 +1258,12 @@ namespace
                 configureAdaptiveTabBar(tabBar);
             }
             if (eventType != QEvent::Show
-                && eventType != QEvent::Paint
-                && eventType != QEvent::Resize)
+                && eventType != QEvent::Polish
+                && eventType != QEvent::StyleChange
+                && eventType != QEvent::PaletteChange
+                && eventType != QEvent::LayoutRequest
+                && eventType != QEvent::ChildAdded
+                && eventType != QEvent::ChildRemoved)
             {
                 return QObject::eventFilter(watchedObject, eventObject);
             }
@@ -1269,7 +1273,7 @@ namespace
         }
 
     private:
-        void configureAdaptiveTabBar(QTabBar* tabBar) const
+        void configureAdaptiveTabBar(QTabBar* tabBar)
         {
             if (tabBar == nullptr || tabBar->property("ksword_adaptive_tabbar_configured").toBool())
             {
@@ -1280,6 +1284,10 @@ namespace
             tabBar->setExpanding(false);
             tabBar->setUsesScrollButtons(true);
             tabBar->setElideMode(Qt::ElideNone);
+            QObject::connect(tabBar, &QTabBar::currentChanged, tabBar, [this, tabBar](int)
+            {
+                refreshTabBarIcons(tabBar);
+            });
 
             // 仅在首次配置后执行一次“回到最左”的初始化，确保启动时空间不足也先显示最左侧 Tab。
             // 后续窗口缩放不再重复执行，避免影响用户手动滚动位置。
@@ -2907,16 +2915,35 @@ namespace
         const int imageOpacityPercent)
     {
         const QSize safeSize = windowSize.isValid() ? windowSize : QSize(1, 1);
-        QPixmap composedPixmap(safeSize);
-        composedPixmap.fill(baseColor);
-
         const int normalizedOpacityPercent = normalizeOpacityPercent(imageOpacityPercent);
-        if (normalizedOpacityPercent <= 0)
+        const QString cleanImagePath = QDir::cleanPath(imagePath.trimmed());
+        const QPixmap* sourceImage = normalizedOpacityPercent > 0
+            ? cachedBackgroundSourcePixmap(cleanImagePath)
+            : nullptr;
+        const quint64 sourceImageCacheKey = sourceImage == nullptr ? 0 : sourceImage->cacheKey();
+
+        // 主窗口 resize 期间通常会连续收到相同尺寸或相邻布局事件。
+        // 缓存最近一次合成图，避免重复分配整窗像素缓冲并再次进行平滑缩放。
+        static QSize cachedSize;
+        static QColor cachedBaseColor;
+        static QString cachedImagePath;
+        static int cachedOpacityPercent = -1;
+        static quint64 cachedSourceImageCacheKey = 0;
+        static QPixmap cachedComposedPixmap;
+        const bool cacheHit =
+            cachedSize == safeSize
+            && cachedBaseColor == baseColor
+            && cachedImagePath == cleanImagePath
+            && cachedOpacityPercent == normalizedOpacityPercent
+            && cachedSourceImageCacheKey == sourceImageCacheKey
+            && !cachedComposedPixmap.isNull();
+        if (cacheHit)
         {
-            return QBrush(composedPixmap);
+            return QBrush(cachedComposedPixmap);
         }
 
-        const QPixmap* sourceImage = cachedBackgroundSourcePixmap(imagePath);
+        QPixmap composedPixmap(safeSize);
+        composedPixmap.fill(baseColor);
         if (sourceImage != nullptr)
         {
             QPainter painter(&composedPixmap);
@@ -2936,6 +2963,12 @@ namespace
             painter.drawPixmap(targetRect, *sourceImage, QRectF(QPointF(0, 0), sourceImage->size()));
         }
 
+        cachedSize = safeSize;
+        cachedBaseColor = baseColor;
+        cachedImagePath = cleanImagePath;
+        cachedOpacityPercent = normalizedOpacityPercent;
+        cachedSourceImageCacheKey = sourceImageCacheKey;
+        cachedComposedPixmap = composedPixmap;
         return QBrush(composedPixmap);
     }
 
@@ -3269,7 +3302,7 @@ MainWindow::MainWindow(
     // - 避免最大化恢复为窗口化时立即同步重建整窗背景造成卡顿。
     m_backgroundRebuildTimer = new QTimer(this);
     m_backgroundRebuildTimer->setSingleShot(true);
-    m_backgroundRebuildTimer->setInterval(24);
+    m_backgroundRebuildTimer->setInterval(100);
     connect(m_backgroundRebuildTimer, &QTimer::timeout, this, [this]()
         {
             rebuildWindowBackgroundBrush();
