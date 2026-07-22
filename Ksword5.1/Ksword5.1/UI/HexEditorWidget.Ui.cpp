@@ -194,8 +194,8 @@ void HexEditorWidget::initializeUi()
             "  background:%4;"
             "  color:%5;"
             "}"
-            "QTableCornerButton::section{"
-            "  background:%1;"
+        "QTableCornerButton::section{"
+            "  background:transparent; /* %1 */"
             "  border:none;"
             "}")
         .arg(KswordTheme::SurfaceColorHex())

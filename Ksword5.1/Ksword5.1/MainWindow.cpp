@@ -5160,17 +5160,16 @@ void MainWindow::showSettingsPanelFromMenu()
     settingsDialog.setWindowTitle(QStringLiteral("设置"));
     settingsDialog.setModal(false);
     settingsDialog.resize(760, 640);
-    const QString settingsComboBackgroundColor = KswordTheme::SurfaceColorHex();
     const QString settingsComboTextColor = KswordTheme::TextPrimaryColorHex();
     const QString settingsComboBorderColor = KswordTheme::BorderColorHex();
-    const QString settingsComboPopupBackgroundColor = KswordTheme::SurfaceColorHex();
     const QString settingsComboSelectionBackgroundColor = KswordTheme::PrimaryBlueSubtleHex();
     settingsDialog.setStyleSheet(QStringLiteral(
         "QDialog{background:%1;color:%2;}"
         "QDialog QComboBox{"
-        "  background-color:%3 !important;"
-        "  color:%4 !important;"
-        "  border:1px solid %5 !important;"
+        "  background:transparent !important;"
+        "  background-color:transparent !important;"
+        "  color:%3 !important;"
+        "  border:1px solid %4 !important;"
         "  border-radius:3px;"
         "  padding:2px 20px 2px 6px;"
         "  min-height:22px;"
@@ -5180,31 +5179,32 @@ void MainWindow::showSettingsPanelFromMenu()
         "  width:18px;"
         "}"
         "QDialog QComboBox QAbstractItemView{"
-        "  background-color:%6 !important;"
-        "  color:%4 !important;"
-        "  border:1px solid %5 !important;"
-        "  selection-background-color:%7 !important;"
-        "  selection-color:%8 !important;"
+        "  background:transparent !important;"
+        "  background-color:transparent !important;"
+        "  alternate-background-color:transparent !important;"
+        "  color:%3 !important;"
+        "  border:1px solid %4 !important;"
+        "  selection-background-color:%5 !important;"
+        "  selection-color:%6 !important;"
         "  outline:0;"
         "}"
         "QDialog QComboBox QAbstractItemView::item{"
-        "  background-color:%6 !important;"
-        "  color:%4 !important;"
+        "  background:transparent !important;"
+        "  background-color:transparent !important;"
+        "  color:%3 !important;"
         "}"
         "QDialog QComboBox QAbstractItemView::item:hover{"
-        "  background-color:%7 !important;"
-        "  color:%8 !important;"
+        "  background-color:%5 !important;"
+        "  color:%6 !important;"
         "}"
         "QDialog QComboBox QAbstractItemView::item:selected{"
-        "  background-color:%7 !important;"
-        "  color:%8 !important;"
+        "  background-color:%5 !important;"
+        "  color:%6 !important;"
         "}")
         .arg(KswordTheme::SurfaceHex())
         .arg(KswordTheme::TextPrimaryHex())
-        .arg(settingsComboBackgroundColor)
         .arg(settingsComboTextColor)
         .arg(settingsComboBorderColor)
-        .arg(settingsComboPopupBackgroundColor)
         .arg(settingsComboSelectionBackgroundColor)
         .arg(KswordTheme::OnAccentHex()));
 
@@ -8990,10 +8990,8 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
     // - 深色模式下如果子控件继续透明或继承错误 palette，会露出近白底；
     // - 因此 hover 时父子统一使用明确背景色，避免半透明/调色板回退。
     const QString dockTabChildHoverColor = tabHoverColor;
-    const QString comboBackgroundColor = surfaceBackgroundText;
     const QString comboTextColor = primaryTextColor;
     const QString comboBorderColor = borderColorText;
-    const QString comboPopupBackgroundColor = surfaceBackgroundText;
     const QString comboPopupHoverColor = tabHoverColor;
     const QString comboArrowIconPath = darkModeEnabled
         ? QStringLiteral(":/Icon/ks_combo_arrow_dark.svg")
@@ -9184,29 +9182,33 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
 
     const QString comboBoxStyle = QStringLiteral(
         "QComboBox{"
-        "  background-color:%1 !important;"
-        "  color:%2 !important;"
-        "  border:1px solid %3 !important;"
+        "  background:transparent !important;"
+        "  background-color:transparent !important;"
+        "  color:%1 !important;"
+        "  border:1px solid %2 !important;"
         "  border-radius:3px;"
         "  padding:2px 20px 2px 6px;"
         "  min-height:22px;"
-        "  selection-background-color:%4 !important;"
-        "  selection-color:%7 !important;"
+        "  selection-background-color:%3 !important;"
+        "  selection-color:%5 !important;"
         "}"
         "QComboBox:hover{"
-        "  background-color:%6 !important;"
-        "  color:%2 !important;"
-        "  border-color:%4 !important;"
+        "  background:transparent !important;"
+        "  background-color:transparent !important;"
+        "  color:%1 !important;"
+        "  border-color:%3 !important;"
         "}"
         "QComboBox:focus,QComboBox:on{"
-        "  background-color:%1 !important;"
-        "  color:%2 !important;"
-        "  border-color:%4 !important;"
+        "  background:transparent !important;"
+        "  background-color:transparent !important;"
+        "  color:%1 !important;"
+        "  border-color:%3 !important;"
         "}"
         "QComboBox:disabled{"
-        "  background-color:%6 !important;"
-        "  color:%8 !important;"
-        "  border-color:%3 !important;"
+        "  background:transparent !important;"
+        "  background-color:transparent !important;"
+        "  color:%6 !important;"
+        "  border-color:%2 !important;"
         "}"
         "QComboBox::drop-down{"
         "  border:none !important;"
@@ -9214,7 +9216,7 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
         "  width:18px;"
         "}"
         "QComboBox::down-arrow{"
-        "  image:url(%9);"
+        "  image:url(%7);"
         "  width:12px;"
         "  height:12px;"
         "  margin-right:4px;"
@@ -9222,34 +9224,34 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
         "  subcontrol-position:center right;"
         "}"
         "QComboBox::down-arrow:disabled{"
-        "  image:url(%9);"
+        "  image:url(%7);"
         "}"
         "QComboBox QAbstractItemView{"
-        "  background-color:%5 !important;"
-        "  alternate-background-color:%5 !important;"
-        "  color:%2 !important;"
-        "  border:1px solid %3 !important;"
-        "  selection-background-color:%4 !important;"
-        "  selection-color:%7 !important;"
+        "  background:transparent !important;"
+        "  background-color:transparent !important;"
+        "  alternate-background-color:transparent !important;"
+        "  color:%1 !important;"
+        "  border:1px solid %2 !important;"
+        "  selection-background-color:%3 !important;"
+        "  selection-color:%5 !important;"
         "  outline:0;"
         "}"
         "QComboBox QAbstractItemView::item{"
-        "  background-color:%5 !important;"
-        "  color:%2 !important;"
+        "  background:transparent !important;"
+        "  background-color:transparent !important;"
+        "  color:%1 !important;"
         "}"
         "QComboBox QAbstractItemView::item:hover{"
-        "  background-color:%6 !important;"
-        "  color:%2 !important;"
+        "  background-color:%4 !important;"
+        "  color:%1 !important;"
         "}"
         "QComboBox QAbstractItemView::item:selected{"
-        "  background-color:%4 !important;"
-        "  color:%7 !important;"
+        "  background-color:%3 !important;"
+        "  color:%5 !important;"
         "}")
-        .arg(comboBackgroundColor)
         .arg(comboTextColor)
         .arg(comboBorderColor)
         .arg(activeTabColor)
-        .arg(comboPopupBackgroundColor)
         .arg(comboPopupHoverColor)
         .arg(selectedTextColor)
         .arg(disabledTextColor)
@@ -9569,7 +9571,13 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
                 "QMenuBar::item:selected{background:%2;color:%3;}"
                 "QMenuBar::item:pressed{background:__LIGHT_MENUBAR_PRESSED__;color:%3;}"
                 "QStatusBar{background-color:%1;color:%3;}"
-                "QLineEdit,QTextEdit,QPlainTextEdit,QTableWidget,QTreeWidget,QListWidget,QSpinBox,QDoubleSpinBox{"
+                "QLineEdit,QSpinBox,QDoubleSpinBox{"
+                "  background:transparent !important;"
+                "  background-color:transparent !important;"
+                "  color:%3 !important;"
+                "  border:1px solid %4;"
+                "}"
+                "QTextEdit,QPlainTextEdit,QTableWidget,QTreeWidget,QListWidget{"
                 "  background-color:%1 !important;"
                 "  color:%3 !important;"
                 "  border:1px solid %4;"
@@ -9590,12 +9598,14 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
                 "  color:%8 !important;"
                 "}"
                 "QHeaderView::section{"
-                "  background:%6 !important;"
+                "  background:transparent !important;"
+                "  background-color:transparent !important;"
                 "  color:%3 !important;"
                 "  border:1px solid %4;"
                 "}"
                 "QTableCornerButton::section{"
-                "  background:%6 !important;"
+                "  background:transparent !important;"
+                "  background-color:transparent !important;"
                 "  border:none !important;"
                 "}"
                 "QScrollBar:vertical,QScrollBar:horizontal{"
@@ -9627,7 +9637,13 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
             "QMenuBar::item:selected{background:%9;color:%3;}"
             "QMenuBar::item:pressed{background:%10;color:%8;}"
             "QStatusBar{background-color:%1;color:%3;}"
-            "QLineEdit,QTextEdit,QPlainTextEdit,QTableWidget,QTreeWidget,QListWidget,QSpinBox,QDoubleSpinBox{"
+            "QLineEdit,QSpinBox,QDoubleSpinBox{"
+            "  background:transparent !important;"
+            "  background-color:transparent !important;"
+            "  color:%3 !important;"
+            "  border:1px solid %4;"
+            "}"
+            "QTextEdit,QPlainTextEdit,QTableWidget,QTreeWidget,QListWidget{"
             "  background-color:%2 !important;"
             "  color:%3 !important;"
             "  border:1px solid %4;"
@@ -9648,12 +9664,14 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
             "  color:%8 !important;"
             "}"
             "QHeaderView::section{"
-            "  background:%6 !important;"
+            "  background:transparent !important;"
+            "  background-color:transparent !important;"
             "  color:%3 !important;"
             "  border:1px solid %4;"
             "}"
             "QTableCornerButton::section{"
-            "  background:%6 !important;"
+            "  background:transparent !important;"
+            "  background-color:transparent !important;"
             "  border:none !important;"
             "}"
             "QScrollBar:vertical,QScrollBar:horizontal{"

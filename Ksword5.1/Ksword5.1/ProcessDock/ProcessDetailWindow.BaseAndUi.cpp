@@ -481,7 +481,7 @@ void ProcessDetailWindow::applyThemeStyle()
     const QString headerStyle = QStringLiteral(
         "QHeaderView::section {"
         "  color:%1;"
-        "  background:%2;"
+        "  background:transparent; /* %2 */"
         "  border:1px solid %3;"
         "  padding:4px;"
         "  font-weight:600;"
@@ -1692,7 +1692,7 @@ void ProcessDetailWindow::initializeModuleTab()
     m_moduleTable->header()->setStyleSheet(QStringLiteral(
         "QHeaderView::section {"
         "  color:%1;"
-        "  background:%2;"
+        "  background:transparent; /* %2 */"
         "  border:1px solid %3;"
         "  padding:4px;"
         "  font-weight:600;"

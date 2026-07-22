@@ -302,7 +302,7 @@ namespace
     QString buildDeviceAuditSearchStyle()
     {
         return QStringLiteral(
-            "QLineEdit{border:1px solid %1;border-radius:4px;padding:4px 6px;color:%2;background:%3;}"
+            "QLineEdit{border:1px solid %1;border-radius:4px;padding:4px 6px;color:%2;background:transparent;/* %3 */}"
             "QLineEdit:focus{border:1px solid %4;}")
             .arg(KswordTheme::BorderColorHex())
             .arg(KswordTheme::TextPrimaryHex())

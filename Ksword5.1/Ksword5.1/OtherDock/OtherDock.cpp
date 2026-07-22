@@ -115,7 +115,7 @@ namespace
     QString blueHeaderStyle()
     {
         return QStringLiteral(
-            "QHeaderView::section{color:%1;background:%2;border:1px solid %3;font-weight:600;}")
+            "QHeaderView::section{color:%1;background:transparent;/* %2 */border:1px solid %3;font-weight:600;}")
             .arg(KswordTheme::PrimaryBlueHex)
             .arg(KswordTheme::SurfaceHex())
             .arg(KswordTheme::BorderHex());
@@ -145,7 +145,8 @@ namespace
             "  color:palette(text) !important;"
             "}"
             "QDialog#%1 QHeaderView::section{"
-            "  background-color:palette(window) !important;"
+            "  background:transparent !important;"
+            "  background-color:transparent !important;"
             "  color:palette(text) !important;"
             "}")
             .arg(dialogObjectName);

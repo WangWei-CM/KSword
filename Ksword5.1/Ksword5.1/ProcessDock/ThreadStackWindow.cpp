@@ -97,7 +97,8 @@ namespace
             "  color:palette(text) !important;"
             "}"
             "QDialog#%1 QHeaderView::section{"
-            "  background-color:palette(window) !important;"
+            "  background:transparent !important;"
+            "  background-color:transparent !important;"
             "  color:palette(text) !important;"
             "}")
             .arg(objectName);

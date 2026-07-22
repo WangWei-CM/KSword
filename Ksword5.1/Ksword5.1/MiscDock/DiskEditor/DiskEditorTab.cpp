@@ -136,7 +136,7 @@ namespace
             "QHeaderView::section{"
             "  border:none;"
             "  border-bottom:1px solid %1;"
-            "  background:%3;"
+            "  background:transparent; /* %3 */"
             "  color:%5;"
             "  padding:5px;"
             "  font-weight:700;"

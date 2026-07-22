@@ -1152,7 +1152,7 @@ void RegistryOptimizationPage::initializeUi()
     m_filterEdit = new QLineEdit(this);
     m_filterEdit->setPlaceholderText(QStringLiteral("过滤组名、项目名、作用域或条件"));
     m_filterEdit->setStyleSheet(QStringLiteral(
-        "QLineEdit{border:1px solid %1;border-radius:3px;background:%2;color:%3;padding:3px 6px;}"
+        "QLineEdit{border:1px solid %1;border-radius:3px;background:transparent;/* %2 */color:%3;padding:3px 6px;}"
         "QLineEdit:focus{border:1px solid %4;}").arg(
             KswordTheme::BorderHex(),
             KswordTheme::SurfaceHex(),

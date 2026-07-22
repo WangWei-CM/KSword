@@ -9,7 +9,7 @@
 const QString QSS_MainWindow_TabWidget = R"(
     QTabWidget::pane {
         border: none;
-        background-color: palette(base);
+        background-color: transparent;
         top: 0px;
     }
 
@@ -241,7 +241,7 @@ const QString QSS_MainWindow_dockStyle = R"(
     }
 
     QTableCornerButton::section {
-        background-color: palette(base);
+        background-color: transparent;
         border: none;
     }
 )";

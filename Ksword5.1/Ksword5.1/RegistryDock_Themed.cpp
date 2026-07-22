@@ -69,7 +69,7 @@ namespace
     QString blueInputStyle()
     {
         return QStringLiteral(
-            "QLineEdit{border:1px solid %2;border-radius:3px;background:%3;color:%4;padding:2px 6px;}"
+            "QLineEdit{border:1px solid %2;border-radius:3px;background:transparent;/* %3 */color:%4;padding:2px 6px;}"
             "QLineEdit:focus{border:1px solid %1;}")
             .arg(KswordTheme::PrimaryBlueHex)
             .arg(KswordTheme::BorderHex())
@@ -80,7 +80,7 @@ namespace
     // 表头风格：提升信息密集列表的可读性。
     QString blueHeaderStyle()
     {
-        return QStringLiteral("QHeaderView::section{color:%1;background:%2;border:1px solid %3;font-weight:600;}")
+        return QStringLiteral("QHeaderView::section{color:%1;background:transparent;/* %2 */border:1px solid %3;font-weight:600;}")
             .arg(KswordTheme::PrimaryBlueHex)
             .arg(KswordTheme::SurfaceHex())
             .arg(KswordTheme::BorderHex());

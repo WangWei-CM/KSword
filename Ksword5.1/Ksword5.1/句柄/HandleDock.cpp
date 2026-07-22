@@ -157,7 +157,7 @@ namespace
         return QStringLiteral(
             "QHeaderView::section{"
             "  color:%1;"
-            "  background:%2;"
+            "  background:transparent; /* %2 */"
             "  border:1px solid %3;"
             "  font-weight:600;"
             "}")

@@ -164,7 +164,7 @@ namespace
         // 处理：按全局主题构造输入框样式。
         // 返回：stylesheet 文本。
         return QStringLiteral(
-            "QLineEdit{border:1px solid %1;border-radius:4px;padding:4px 6px;color:%2;background:%3;}"
+            "QLineEdit{border:1px solid %1;border-radius:4px;padding:4px 6px;color:%2;background:transparent;/* %3 */}"
             "QLineEdit:focus{border:1px solid %4;}")
             .arg(KswordTheme::BorderColorHex())
             .arg(KswordTheme::TextPrimaryColorHex())

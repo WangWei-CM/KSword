@@ -70,7 +70,7 @@ namespace
     QString blueInputStyle()
     {
         return QStringLiteral(
-            "QLineEdit{border:1px solid %2;border-radius:3px;background:%3;color:%4;padding:2px 6px;}"
+            "QLineEdit{border:1px solid %2;border-radius:3px;background:transparent;/* %3 */color:%4;padding:2px 6px;}"
             "QLineEdit:focus{border:1px solid %1;}")
             .arg(KswordTheme::PrimaryBlueHex)
             .arg(KswordTheme::BorderHex())
@@ -82,7 +82,7 @@ namespace
     // - 统一账号表头样式，保证深浅色模式可读性。
     QString tableHeaderStyle()
     {
-        return QStringLiteral("QHeaderView::section{color:%1;background:%2;border:1px solid %3;font-weight:600;}")
+        return QStringLiteral("QHeaderView::section{color:%1;background:transparent;/* %2 */border:1px solid %3;font-weight:600;}")
             .arg(KswordTheme::AccentHex(KswordTheme::AccentRole::Blue))
             .arg(KswordTheme::SurfaceColorHex())
             .arg(KswordTheme::BorderColorHex());

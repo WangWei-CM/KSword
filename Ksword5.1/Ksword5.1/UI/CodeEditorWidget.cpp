@@ -187,7 +187,7 @@ namespace
     QString buildInputStyle()
     {
         return QStringLiteral(
-            "QLineEdit{border:1px solid %1;border-radius:3px;padding:2px 6px;background:%2;color:%3;}"
+            "QLineEdit{border:1px solid %1;border-radius:3px;padding:2px 6px;background:transparent;/* %2 */color:%3;}"
             "QLineEdit:focus{border:1px solid %4;}")
             .arg(KswordTheme::BorderColorHex())
             .arg(KswordTheme::SurfaceColorHex())

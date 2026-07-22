@@ -96,7 +96,7 @@ QString ProcessTraceMonitorWidget::blueButtonStyle()
 QString ProcessTraceMonitorWidget::blueInputStyle()
 {
     return QStringLiteral(
-        "QLineEdit,QComboBox{border:1px solid %2;border-radius:3px;background:%3;color:%4;padding:2px 6px;}"
+        "QLineEdit,QComboBox{border:1px solid %2;border-radius:3px;background:transparent;/* %3 */color:%4;padding:2px 6px;}"
         "QTableWidget{border:1px solid %2;border-radius:3px;background:transparent;background-color:transparent;color:%4;padding:2px 6px;gridline-color:%2;alternate-background-color:transparent;}"
         "QTableWidget::viewport{background:transparent;background-color:transparent;}"
         "QTableWidget::item:selected{background:%1;color:%5;}"
@@ -111,7 +111,7 @@ QString ProcessTraceMonitorWidget::blueInputStyle()
 QString ProcessTraceMonitorWidget::blueHeaderStyle()
 {
     return QStringLiteral(
-        "QHeaderView::section{color:%1;background:%2;border:1px solid %3;padding:4px;font-weight:600;}")
+        "QHeaderView::section{color:%1;background:transparent;/* %2 */border:1px solid %3;padding:4px;font-weight:600;}")
         .arg(KswordTheme::AccentHex(KswordTheme::AccentRole::Blue))
         .arg(KswordTheme::SurfaceColorHex())
         .arg(KswordTheme::BorderColorHex());

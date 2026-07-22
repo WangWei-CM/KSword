@@ -676,7 +676,7 @@ namespace KswordTheme
             "QDialog#%1 QPlainTextEdit,QDialog#%1 QTextEdit,QDialog#%1 QTreeWidget,"
             "QDialog#%1 QTableWidget,QDialog#%1 QAbstractScrollArea,QDialog#%1 QAbstractScrollArea::viewport{"
             "background-color:palette(base) !important;color:palette(text) !important;}"
-            "QDialog#%1 QHeaderView::section{background-color:palette(window) !important;color:palette(text) !important;}"
+            "QDialog#%1 QHeaderView::section{background:transparent !important;background-color:transparent !important;color:palette(text) !important;}"
             "QDialog#%1 QMenu{background-color:palette(base) !important;color:palette(text) !important;border:1px solid palette(mid) !important;}"
             "QDialog#%1 QMenu::item:selected{background-color:%2 !important;color:%3 !important;}"
             "QDialog#%1 QMenu::separator{height:1px;background-color:palette(mid) !important;}")

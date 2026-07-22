@@ -484,7 +484,7 @@ namespace
             "  color:palette(highlighted-text);"
             "}"
             "QHeaderView::section{"
-            "  background:%2;"
+            "  background:transparent; /* %2 */"
             "  color:%5;"
             "  border:1px solid %4;"
             "  padding:3px 6px;"

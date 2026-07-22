@@ -71,7 +71,7 @@ namespace ksword::ui::hex_editor_internal
         return QStringLiteral(
             "QHeaderView::section {"
             "  color:%1;"
-            "  background:%2;"
+            "  background:transparent; /* %2 */"
             "  border:none;"
             "  padding:4px;"
             "  font-weight:600;"

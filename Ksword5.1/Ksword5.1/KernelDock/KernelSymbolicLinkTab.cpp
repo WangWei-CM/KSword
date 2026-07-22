@@ -47,7 +47,7 @@ namespace
     QString inputStyle()
     {
         return QStringLiteral(
-            "QLineEdit{border:1px solid %1;border-radius:3px;background:%2;color:%3;padding:3px 6px;}"
+            "QLineEdit{border:1px solid %1;border-radius:3px;background:transparent;/* %2 */color:%3;padding:3px 6px;}"
             "QLineEdit:focus{border:1px solid %4;}"
             "QTableWidget{border:1px solid %1;border-radius:3px;background:%2;color:%3;gridline-color:%1;}"
             "QTableWidget::item:selected{background:%4;color:palette(highlighted-text);}")
@@ -60,7 +60,7 @@ namespace
     QString headerStyle()
     {
         return QStringLiteral(
-            "QHeaderView::section{color:%1;background:%2;border:1px solid %3;padding:4px;font-weight:600;}")
+            "QHeaderView::section{color:%1;background:transparent;/* %2 */border:1px solid %3;padding:4px;font-weight:600;}")
             .arg(KswordTheme::PrimaryBlueHex)
             .arg(KswordTheme::SurfaceHex())
             .arg(KswordTheme::BorderHex());
