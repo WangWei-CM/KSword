@@ -618,7 +618,7 @@ bool WriteSettings(const InstallOptions& o, std::wstring* log) {
          << "    \"background_opacity_percent\": 35,\n"
          << "    \"startup_default_tab_key\": \"welcome\",\n"
          << "    \"startup_maximized\": " << (o.startupMaximized ? "true" : "false") << ",\n"
-         << "    \"startup_topmost_enabled\": true,\n"
+         << "    \"startup_topmost_enabled\": false,\n"
          << "    \"startup_auto_request_admin\": " << (o.startupAdmin ? "true" : "false") << ",\n"
          << "    \"startup_window_scale_factor\": 1.0,\n"
          << "    \"startup_scale_recommend_prompt_disabled\": false,\n"
