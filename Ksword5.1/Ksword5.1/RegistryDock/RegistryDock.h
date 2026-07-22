@@ -13,6 +13,7 @@
 #include <QWidget>
 
 #include <atomic>      // std::atomic_bool：搜索线程运行状态控制。
+#include <deque>       // std::deque：搜索结果 FIFO 队列，避免头部消费搬移。
 #include <memory>      // std::unique_ptr：后台线程对象托管。
 #include <mutex>       // std::mutex：跨线程结果队列保护。
 #include <thread>      // std::thread：后台搜索线程。
@@ -177,6 +178,7 @@ private:
     void startSearchAsync();
     void stopSearch(bool waitForThread);
     void flushPendingSearchRows();
+    void enqueuePendingSearchRow(PendingSearchRow&& row);
     void searchRegistryRecursive(
         HKEY rootKey,
         const QString& subPath,
@@ -264,7 +266,7 @@ private:
     std::atomic_bool m_searchStopFlag{ false };  // 搜索线程停止标志。
     std::unique_ptr<std::thread> m_searchThread; // 搜索线程对象。
     std::mutex m_pendingMutex;                   // 待刷入搜索结果队列锁。
-    std::vector<PendingSearchRow> m_pendingRows; // 待刷入搜索结果队列。
+    std::deque<PendingSearchRow> m_pendingRows;  // 有界待刷入搜索结果 FIFO 队列。
     QTimer* m_searchFlushTimer = nullptr;        // UI 节流刷新定时器。
 
     // ===================== 进度与统计 =====================

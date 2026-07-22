@@ -91,6 +91,11 @@ namespace
     constexpr int kRoleLoaded = Qt::UserRole + 2;
     constexpr int kRolePlaceholder = Qt::UserRole + 3;
 
+    // 搜索结果节流：限制后台积压与表格对象数量，保证大量命中时 UI 仍可交互。
+    constexpr std::size_t kMaxPendingSearchRows = 4096;
+    constexpr std::size_t kSearchFlushBatchSize = 160;
+    constexpr int kMaxSearchResultRows = 20000;
+
     // 根键映射结构：支持全名与缩写两种输入。
     struct RootEntry
     {
@@ -2936,12 +2941,16 @@ void RegistryDock::startSearchAsync()
 
         QMetaObject::invokeMethod(qApp, [guardThis, scanned, hits]() {
             if (guardThis == nullptr) return;
-            guardThis->flushPendingSearchRows();
             guardThis->m_searchRunning.store(false);
             guardThis->m_searchStopFlag.store(false);
+            if (guardThis->m_searchThread != nullptr && guardThis->m_searchThread->joinable())
+            {
+                guardThis->m_searchThread->join();
+                guardThis->m_searchThread.reset();
+            }
+            guardThis->flushPendingSearchRows();
             guardThis->m_searchButton->setEnabled(true);
             guardThis->m_stopSearchButton->setEnabled(false);
-            guardThis->m_searchFlushTimer->stop();
             guardThis->updateStatusBar(QStringLiteral("状态: 搜索完成，扫描 %1 键，命中 %2 项").arg(scanned).arg(hits));
             kPro.set(guardThis->m_progressPid, "搜索完成", 0, 100.0f);
 
@@ -2993,12 +3002,11 @@ void RegistryDock::stopSearch(bool waitForThread)
         if (joinThread != nullptr && joinThread->joinable()) joinThread->join();
         QMetaObject::invokeMethod(qApp, [guardThis]() {
             if (guardThis == nullptr) return;
-            guardThis->flushPendingSearchRows();
             guardThis->m_searchRunning.store(false);
             guardThis->m_searchStopFlag.store(false);
+            guardThis->flushPendingSearchRows();
             guardThis->m_searchButton->setEnabled(true);
             guardThis->m_stopSearchButton->setEnabled(false);
-            if (guardThis->m_searchFlushTimer != nullptr) guardThis->m_searchFlushTimer->stop();
             guardThis->updateStatusBar(QStringLiteral("状态: 搜索已停止"));
             kPro.set(guardThis->m_progressPid, "搜索停止", 0, 100.0f);
 
@@ -3008,30 +3016,56 @@ void RegistryDock::stopSearch(bool waitForThread)
     }).detach();
 }
 
+void RegistryDock::enqueuePendingSearchRow(PendingSearchRow&& row)
+{
+    std::lock_guard<std::mutex> lock(m_pendingMutex);
+    if (m_pendingRows.size() < kMaxPendingSearchRows)
+    {
+        m_pendingRows.push_back(std::move(row));
+    }
+}
+
 void RegistryDock::flushPendingSearchRows()
 {
     std::vector<PendingSearchRow> rows;
+    bool hasPendingRows = false;
     {
         std::lock_guard<std::mutex> lock(m_pendingMutex);
-        if (m_pendingRows.empty()) return;
-
-        constexpr std::size_t kBatch = 200;
-        const std::size_t count = std::min<std::size_t>(kBatch, m_pendingRows.size());
+        const std::size_t count = std::min<std::size_t>(kSearchFlushBatchSize, m_pendingRows.size());
         rows.reserve(count);
-        for (std::size_t i = 0; i < count; ++i) rows.push_back(std::move(m_pendingRows[i]));
-        using DiffType = std::vector<PendingSearchRow>::difference_type;
-        m_pendingRows.erase(m_pendingRows.begin(), m_pendingRows.begin() + static_cast<DiffType>(count));
+        for (std::size_t i = 0; i < count; ++i)
+        {
+            rows.push_back(std::move(m_pendingRows.front()));
+            m_pendingRows.pop_front();
+        }
+        hasPendingRows = !m_pendingRows.empty();
     }
 
-    for (const PendingSearchRow& row : rows)
+    const int availableRows = std::max(0, kMaxSearchResultRows - m_searchResultTable->rowCount());
+    const int rowsToAppend = std::min(availableRows, static_cast<int>(rows.size()));
+    if (rowsToAppend > 0)
     {
-        const int index = m_searchResultTable->rowCount();
-        m_searchResultTable->insertRow(index);
-        m_searchResultTable->setItem(index, 0, new QTableWidgetItem(row.keyPathText));
-        m_searchResultTable->setItem(index, 1, new QTableWidgetItem(row.valueNameText));
-        m_searchResultTable->setItem(index, 2, new QTableWidgetItem(row.valueTypeText));
-        m_searchResultTable->setItem(index, 3, new QTableWidgetItem(row.valueDataPreviewText));
-        m_searchResultTable->setItem(index, 4, new QTableWidgetItem(row.hitSourceText));
+        const int firstRow = m_searchResultTable->rowCount();
+        const bool updatesEnabled = m_searchResultTable->updatesEnabled();
+        m_searchResultTable->setUpdatesEnabled(false);
+        m_searchResultTable->setRowCount(firstRow + rowsToAppend);
+        for (int index = 0; index < rowsToAppend; ++index)
+        {
+            const PendingSearchRow& row = rows[static_cast<std::size_t>(index)];
+            const int tableRow = firstRow + index;
+            m_searchResultTable->setItem(tableRow, 0, new QTableWidgetItem(row.keyPathText));
+            m_searchResultTable->setItem(tableRow, 1, new QTableWidgetItem(row.valueNameText));
+            m_searchResultTable->setItem(tableRow, 2, new QTableWidgetItem(row.valueTypeText));
+            m_searchResultTable->setItem(tableRow, 3, new QTableWidgetItem(row.valueDataPreviewText));
+            m_searchResultTable->setItem(tableRow, 4, new QTableWidgetItem(row.hitSourceText));
+        }
+        m_searchResultTable->setUpdatesEnabled(updatesEnabled);
+        if (updatesEnabled) m_searchResultTable->viewport()->update();
+    }
+
+    if (!m_searchRunning.load() && !hasPendingRows && m_searchFlushTimer != nullptr)
+    {
+        m_searchFlushTimer->stop();
     }
 }
 
@@ -3060,8 +3094,7 @@ void RegistryDock::searchRegistryRecursive(HKEY root, const QString& subPath, co
         row.valueTypeText = QStringLiteral("<Key>");
         row.valueDataPreviewText = QStringLiteral("-");
         row.hitSourceText = QStringLiteral("KeyName");
-        std::lock_guard<std::mutex> lock(m_pendingMutex);
-        m_pendingRows.push_back(std::move(row));
+        enqueuePendingSearchRow(std::move(row));
         if (hit != nullptr) *hit += 1;
     }
 
@@ -3110,8 +3143,7 @@ void RegistryDock::searchRegistryRecursive(HKEY root, const QString& subPath, co
         row.valueDataPreviewText = valueText;
         row.hitSourceText = sourceText;
 
-        std::lock_guard<std::mutex> lock(m_pendingMutex);
-        m_pendingRows.push_back(std::move(row));
+        enqueuePendingSearchRow(std::move(row));
         if (hit != nullptr) *hit += 1;
     }
 
@@ -3195,8 +3227,7 @@ void RegistryDock::searchRegistryRecursiveByR0(
         row.valueTypeText = QStringLiteral("<Key>");
         row.valueDataPreviewText = QStringLiteral("-");
         row.hitSourceText = QStringLiteral("KeyName/R0");
-        std::lock_guard<std::mutex> lock(m_pendingMutex);
-        m_pendingRows.push_back(std::move(row));
+        enqueuePendingSearchRow(std::move(row));
         if (hit != nullptr) *hit += 1;
     }
 
@@ -3239,8 +3270,7 @@ void RegistryDock::searchRegistryRecursiveByR0(
         row.valueDataPreviewText = valueText;
         row.hitSourceText = sourceText;
 
-        std::lock_guard<std::mutex> lock(m_pendingMutex);
-        m_pendingRows.push_back(std::move(row));
+        enqueuePendingSearchRow(std::move(row));
         if (hit != nullptr) *hit += 1;
     }
 
