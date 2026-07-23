@@ -2001,6 +2001,17 @@ namespace ksword::ark
         std::uint64_t capabilityMask = 0;
         std::uint64_t missingCapabilityMask = 0;
         KSWORD_ARK_WIN32K_FIELD_OFFSETS fieldOffsets{};
+        KSWORD_ARK_WIN32K_MESSAGE_HOOK_LAYOUT layout{};
+        std::uint32_t discoveredChainCount = 0;
+        std::uint32_t visitedNodeCount = 0;
+        std::uint32_t readFailureCount = 0;
+        std::uint32_t corruptLinkCount = 0;
+        std::uint32_t duplicateCount = 0;
+        std::uint32_t win32kbaseTimeDateStamp = 0;
+        std::uint32_t win32kbaseImageSize = 0;
+        std::uint32_t win32kfullTimeDateStamp = 0;
+        std::uint32_t win32kfullImageSize = 0;
+        std::wstring detail;
         std::vector<KSWORD_ARK_WIN32K_HOOK_ENTRY> entries;
     };
 

@@ -60,6 +60,7 @@ PRIVATE_GUI_TYPES = [
     "tagHOTKEY",
     "tagTIMER",
     "tagEVENTHOOK",
+    "DESKTOPINFO",
     "tagDESKTOP",
     "tagWINDOWSTATION",
 ]
@@ -95,6 +96,20 @@ TYPE_KEYWORDS = [
 SYMBOL_GROUP_KEYWORDS: list[tuple[str, list[str]]] = [
     ("window_timer", ["timer", "settimer", "killtimer", "validatetimercallback"]),
     ("event_hook", ["winevent", "eventhook", "wineventhook", "gpeventhooks"]),
+    (
+        "message_hook",
+        [
+            "setwindowshook",
+            "unhookwindowshook",
+            "freehook",
+            "gethmodtableindex",
+            "callhook",
+            "messagehook",
+            "hookproc",
+            "aatomsysloaded",
+            "catomsystableentries",
+        ],
+    ),
     ("hotkey_hook", ["hotkey", "hook", "unhook", "setwindowshook"]),
     ("window_object", ["tagwnd", "window", "hwnd", "foreground", "focus", "capture", "caret"]),
     ("gui_thread_queue", ["tagthreadinfo", "inputqueue", "thread", "queue", "qmsg"]),
@@ -129,8 +144,8 @@ RUNTIME_DETAIL_DOMAINS: dict[str, dict[str, Any]] = {
     },
     "hook_detail": {
         "displayName": "Hook chain / tagHOOK",
-        "requiredPrivateTypes": ["tagHOOK", "tagTHREADINFO", "tagDESKTOP"],
-        "usefulPublicSymbolGroups": ["hotkey_hook", "gui_thread_queue", "desktop_session"],
+        "requiredPrivateTypes": ["tagHOOK", "tagTHREADINFO", "DESKTOPINFO"],
+        "usefulPublicSymbolGroups": ["message_hook", "gui_thread_queue", "desktop_session"],
         "intendedUse": "扩充 Hook 链、过程地址、目标线程和桌面归属字段。",
     },
     "timer_detail": {
@@ -166,13 +181,23 @@ WIN32K_FIELD_ALIASES: dict[tuple[str, str], str] = {
     ("tagWND", "strName"): "tagWndTitle",
     ("tagTHREADINFO", "pq"): "tagThreadInfoQueue",
     ("tagTHREADINFO", "rpdesk"): "tagThreadInfoDesktop",
+    ("tagTHREADINFO", "aphkStart"): "tagThreadInfoHookArray",
+    ("tagTHREADINFO", "pDeskInfo"): "tagThreadInfoDesktopInfo",
+    ("tagTHREADINFO", "pdi"): "tagThreadInfoDesktopInfo",
+    ("DESKTOPINFO", "aphkStart"): "desktopInfoHookArray",
+    ("tagDESKTOPINFO", "aphkStart"): "desktopInfoHookArray",
     ("tagQ", "spwndActive"): "tagQActiveWindow",
     ("tagQ", "spwndFocus"): "tagQFocusWindow",
     ("tagQ", "spwndCapture"): "tagQCaptureWindow",
     ("tagQ", "spwndCaret"): "tagQCaretWindow",
     ("tagHOOK", "phkNext"): "tagHookNext",
+    ("tagHOOK", "head"): "tagHookHandleHeader",
+    ("tagHOOK", "pti"): "tagHookOwnerThreadInfo",
+    ("tagHOOK", "rpdesk"): "tagHookDesktop",
     ("tagHOOK", "iHook"): "tagHookType",
     ("tagHOOK", "offPfn"): "tagHookProcedure",
+    ("tagHOOK", "flags"): "tagHookFlags",
+    ("tagHOOK", "ihmod"): "tagHookModuleId",
     ("tagHOOK", "ptiHooked"): "tagHookTargetThreadInfo",
     ("tagHOTKEY", "phkNext"): "hotkeyNext",
     ("tagHOTKEY", "pti"): "hotkeyThreadInfo",
@@ -204,6 +229,93 @@ WIN32K_FIELD_ALIASES: dict[tuple[str, str], str] = {
     ("tagEVENTHOOK", "timeLast"): "eventHookTimestamp",
 }
 
+# public symbol 名称到 Ksword 运行时项目名的稳定别名。section:offset 仍须结合
+# 精确 PE 身份换算，不能把 public PDB 记录直接当作 RVA。
+WIN32K_PUBLIC_SYMBOL_ALIASES: dict[str, str] = {
+    "aatomSysLoaded": "messageHookModuleAtomTable",
+    "catomSysTableEntries": "messageHookModuleAtomCount",
+}
+
+# 当前 Win32 消息 Hook 枚举器实际使用的精确版本布局。这里保存经反汇编交叉
+# 验证的 PE/PDB 身份和 RVA，供离线审计、矩阵扩展及发布前比对使用。未知身份
+# 不继承这些偏移，驱动会返回 UNSUPPORTED。
+VALIDATED_MESSAGE_HOOK_PROFILES: list[dict[str, Any]] = [
+    {
+        "profileId": "message_hook_a8a6_2d74_v1",
+        "source": "validated_disassembly",
+        "moduleIdentities": {
+            "win32kbase.sys": {
+                "timeDateStamp": 0x8FC48444,
+                "timeDateStampHex": "0x8FC48444",
+                "imageSize": 0x002D6000,
+                "imageSizeHex": "0x002D6000",
+                "pdbName": "win32kbase.pdb",
+                "pdbGuid": "A8A69A7F-D22B-0D04-4A32-2341F88A665F",
+                "pdbAge": 1,
+                "pdbGuidAge": "A8A69A7FD22B0D044A322341F88A665F1",
+            },
+            "win32kfull.sys": {
+                "timeDateStamp": 0x83C73BE4,
+                "timeDateStampHex": "0x83C73BE4",
+                "imageSize": 0x003B4000,
+                "imageSizeHex": "0x003B4000",
+                "pdbName": "win32kfull.pdb",
+                "pdbGuid": "2D745AB4-CE61-86F2-D198-39B96062ED85",
+                "pdbAge": 1,
+                "pdbGuidAge": "2D745AB4CE6186F2D19839B96062ED851",
+            },
+        },
+        "hookTypeRange": {
+            "minimum": -1,
+            "maximum": 14,
+            "arrayIndexExpression": "hookType + 1",
+            "arrayElementCount": 16,
+        },
+        "layouts": {
+            "tagHOOK": {
+                "size": 0x60,
+                "sizeHex": "0x60",
+                "fields": {
+                    "handle": {"offset": 0x00, "offsetHex": "0x00"},
+                    "ownerThreadInfo": {"offset": 0x10, "offsetHex": "0x10"},
+                    "desktopObject": {"offset": 0x18, "offsetHex": "0x18"},
+                    "nextHook": {"offset": 0x28, "offsetHex": "0x28"},
+                    "hookType": {"offset": 0x30, "offsetHex": "0x30"},
+                    "procedureOffset": {"offset": 0x38, "offsetHex": "0x38"},
+                    "flags": {"offset": 0x40, "offsetHex": "0x40"},
+                    "moduleId": {"offset": 0x44, "offsetHex": "0x44"},
+                    "targetThreadInfo": {"offset": 0x48, "offsetHex": "0x48"},
+                },
+            },
+            "tagTHREADINFO": {
+                "fields": {
+                    "desktopInfo": {"offset": 0x1D0, "offsetHex": "0x1D0"},
+                    "aphkStart": {"offset": 0x390, "offsetHex": "0x390"},
+                },
+            },
+            "DESKTOPINFO": {
+                "fields": {
+                    "aphkStart": {"offset": 0x28, "offsetHex": "0x28"},
+                },
+            },
+        },
+        "moduleAtomTable": {
+            "moduleName": "win32kfull.sys",
+            "tableSymbol": "aatomSysLoaded",
+            "tableRva": 0x003391D0,
+            "tableRvaHex": "0x003391D0",
+            "countSymbol": "catomSysTableEntries",
+            "countRva": 0x00339310,
+            "countRvaHex": "0x00339310",
+        },
+        "disassemblyEvidence": [
+            {"symbol": "NtUserSetWindowsHookEx", "rva": 0x0001FB00, "rvaHex": "0x0001FB00", "coreRva": 0x0001FC48, "coreRvaHex": "0x0001FC48"},
+            {"symbol": "FreeHook", "rva": 0x0001FF90, "rvaHex": "0x0001FF90"},
+            {"symbol": "GetHmodTableIndex", "rva": 0x000203EC, "rvaHex": "0x000203EC"},
+        ],
+    },
+]
+
 PUBLIC_HEADER_RE = re.compile(r"^\s*(?P<record>\d+)\s+\|\s+S_PUB32\s+\[size\s*=\s*(?P<size>\d+)\]\s+`(?P<name>[^`]+)`")
 PUBLIC_DETAIL_RE = re.compile(r"flags\s*=\s*(?P<flags>[^,]+),\s*addr\s*=\s*(?P<section>[0-9A-Fa-f]+):(?P<offset>[0-9A-Fa-f]+)")
 RECORD_COUNT_RE = re.compile(r"Showing\s+([0-9,]+)\s+records")
@@ -232,6 +344,18 @@ def is_interesting_type(type_name: str) -> bool:
     return any(keyword in lowered for keyword in TYPE_KEYWORDS)
 
 
+def resolve_public_symbol_alias(symbol_name: str) -> str:
+    """解析普通或 MSVC 装饰后的 public symbol 稳定别名。"""
+    direct_alias = WIN32K_PUBLIC_SYMBOL_ALIASES.get(symbol_name)
+    if direct_alias:
+        return direct_alias
+    lowered = symbol_name.lower()
+    for source_name, alias_name in WIN32K_PUBLIC_SYMBOL_ALIASES.items():
+        if source_name.lower() in lowered:
+            return alias_name
+    return ""
+
+
 def apply_win32k_aliases(target: dict[str, Any]) -> None:
     """为未来 private PDB 字段补充 Ksword win32k offset alias。"""
     type_name = str(target.get("typeName", ""))
@@ -257,6 +381,7 @@ def parse_public_symbols(publics_text: str, module_name: str) -> list[dict[str, 
                 "record": int(header.group("record")),
                 "recordSize": int(header.group("size")),
                 "name": header.group("name"),
+                "kswordItemName": resolve_public_symbol_alias(header.group("name")),
                 "group": classify_text(header.group("name"), "other_public"),
                 "flags": "",
                 "section": "",
@@ -333,6 +458,7 @@ def extract_module_catalog(pdbutil_path: str, pdb_path: Path, cache_dir: Path) -
         row["moduleName"] = module_name
     alias_rows = [row for row in flat_rows if row.get("kswordItemName")]
     public_symbols = parse_public_symbols(publics_text, module_name)
+    public_alias_symbols = [symbol for symbol in public_symbols if symbol.get("kswordItemName")]
 
     public_groups: dict[str, int] = {}
     for symbol in public_symbols:
@@ -350,6 +476,7 @@ def extract_module_catalog(pdbutil_path: str, pdb_path: Path, cache_dir: Path) -
             "enumValueCount": sum(int(target.get("enumValueCount", 0) or 0) for target in targets),
             "kswordAliasFieldCount": len(alias_rows),
             "publicSymbolCount": len(public_symbols),
+            "kswordAliasPublicSymbolCount": len(public_alias_symbols),
             "publicSymbolGroupCounts": public_groups,
             "elapsedSeconds": round(time.time() - started, 3),
         },
@@ -362,6 +489,7 @@ def extract_module_catalog(pdbutil_path: str, pdb_path: Path, cache_dir: Path) -
         "targets": targets,
         "flatFields": flat_rows,
         "kswordAliasFields": alias_rows,
+        "kswordAliasPublicSymbols": public_alias_symbols,
         "publicSymbols": public_symbols,
         "selectedTypesWithoutFieldList": selected_but_missing_fields,
         "notes": [
@@ -593,6 +721,7 @@ def main(argv: list[str] | None = None) -> int:
         },
         "missingPrivateTypesByModule": missing_private,
         "runtimeDetailCatalog": runtime_detail_catalog,
+        "validatedMessageHookProfiles": VALIDATED_MESSAGE_HOOK_PROFILES,
         "modules": modules,
         "notes": [
             "当前 public win32kbase/win32kfull PDB 可能报告 Has Types=true，但 TPI dump 实际为 0 records；本库会如实记录。",

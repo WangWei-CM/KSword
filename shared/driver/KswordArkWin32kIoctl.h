@@ -117,6 +117,9 @@
 #define KSWORD_ARK_WIN32K_CAP_EVENT_HOOK_GLOBAL          0x0000000000008000ULL
 #define KSWORD_ARK_WIN32K_CAP_EVENT_HOOK_LAYOUT          0x0000000000010000ULL
 #define KSWORD_ARK_WIN32K_CAP_EVENT_HOOK_ENUM            0x0000000000020000ULL
+#define KSWORD_ARK_WIN32K_CAP_MESSAGE_HOOK_LAYOUT        0x0000000000040000ULL
+#define KSWORD_ARK_WIN32K_CAP_MESSAGE_HOOK_ENUM          0x0000000000080000ULL
+#define KSWORD_ARK_WIN32K_CAP_MESSAGE_HOOK_MODULE_TABLE  0x0000000000100000ULL
 
 #define KSWORD_ARK_WIN32K_QUERY_FLAG_CURRENT_SESSION_ONLY 0x00000001UL
 #define KSWORD_ARK_WIN32K_QUERY_FLAG_INCLUDE_DIAGNOSTICS  0x00000002UL
@@ -166,6 +169,36 @@
 #define KSWORD_ARK_WIN32K_EVENT_HOOK_FLAG_SKIP_OWN_THREAD  0x00000001UL
 #define KSWORD_ARK_WIN32K_EVENT_HOOK_FLAG_SKIP_OWN_PROCESS 0x00000002UL
 #define KSWORD_ARK_WIN32K_EVENT_HOOK_FLAG_IN_CONTEXT       0x00000004UL
+
+#define KSWORD_ARK_WIN32K_MESSAGE_HOOK_FIELD_HANDLE        0x00000001UL
+#define KSWORD_ARK_WIN32K_MESSAGE_HOOK_FIELD_OWNER         0x00000002UL
+#define KSWORD_ARK_WIN32K_MESSAGE_HOOK_FIELD_DESKTOP       0x00000004UL
+#define KSWORD_ARK_WIN32K_MESSAGE_HOOK_FIELD_NEXT          0x00000008UL
+#define KSWORD_ARK_WIN32K_MESSAGE_HOOK_FIELD_TYPE          0x00000010UL
+#define KSWORD_ARK_WIN32K_MESSAGE_HOOK_FIELD_PROCEDURE     0x00000020UL
+#define KSWORD_ARK_WIN32K_MESSAGE_HOOK_FIELD_FLAGS         0x00000040UL
+#define KSWORD_ARK_WIN32K_MESSAGE_HOOK_FIELD_MODULE        0x00000080UL
+#define KSWORD_ARK_WIN32K_MESSAGE_HOOK_FIELD_TARGET        0x00000100UL
+#define KSWORD_ARK_WIN32K_MESSAGE_HOOK_FIELD_CHAIN         0x00000200UL
+
+#define KSWORD_ARK_WIN32K_MESSAGE_HOOK_LAYOUT_SOURCE_UNKNOWN               0UL
+#define KSWORD_ARK_WIN32K_MESSAGE_HOOK_LAYOUT_SOURCE_VALIDATED_DISASSEMBLY 1UL
+
+#define KSWORD_ARK_WIN32K_MESSAGE_HOOK_SCOPE_UNKNOWN 0UL
+#define KSWORD_ARK_WIN32K_MESSAGE_HOOK_SCOPE_THREAD  1UL
+#define KSWORD_ARK_WIN32K_MESSAGE_HOOK_SCOPE_GLOBAL  2UL
+
+#define KSWORD_ARK_WIN32K_MESSAGE_HOOK_SOURCE_THREAD 2UL
+#define KSWORD_ARK_WIN32K_MESSAGE_HOOK_SOURCE_GLOBAL 3UL
+
+#define KSWORD_ARK_WIN32K_MESSAGE_HOOK_FLAG_GLOBAL     0x00000001UL
+#define KSWORD_ARK_WIN32K_MESSAGE_HOOK_FLAG_ANSI       0x00000002UL
+#define KSWORD_ARK_WIN32K_MESSAGE_HOOK_FLAG_NEED_SKIP  0x00000004UL
+#define KSWORD_ARK_WIN32K_MESSAGE_HOOK_FLAG_HUNG       0x00000008UL
+#define KSWORD_ARK_WIN32K_MESSAGE_HOOK_FLAG_FAULTED    0x00000010UL
+#define KSWORD_ARK_WIN32K_MESSAGE_HOOK_FLAG_NO_DELAY   0x00000020UL
+#define KSWORD_ARK_WIN32K_MESSAGE_HOOK_FLAG_WOW64_DLL  0x00000040UL
+#define KSWORD_ARK_WIN32K_MESSAGE_HOOK_FLAG_DESTROYED  0x00000080UL
 
 #define KSWORD_ARK_WIN32K_READ_STATUS_NOT_REQUESTED 0UL
 #define KSWORD_ARK_WIN32K_READ_STATUS_OK            1UL
@@ -225,6 +258,29 @@ typedef struct _KSWORD_ARK_WIN32K_EVENT_HOOK_LAYOUT
     unsigned long timeDateStamp;
     unsigned long imageSize;
 } KSWORD_ARK_WIN32K_EVENT_HOOK_LAYOUT;
+
+// tagHOOK/tagTHREADINFO/DESKTOPINFO 布局独立传输，未知 PE 身份不得使用。
+typedef struct _KSWORD_ARK_WIN32K_MESSAGE_HOOK_LAYOUT
+{
+    unsigned long objectSize;
+    unsigned long handle;
+    unsigned long ownerThreadInfo;
+    unsigned long desktopObject;
+    unsigned long nextHook;
+    unsigned long hookType;
+    unsigned long procedureOffset;
+    unsigned long flags;
+    unsigned long moduleId;
+    unsigned long targetThreadInfo;
+    unsigned long threadHookArray;
+    unsigned long threadDesktopInfo;
+    unsigned long desktopHookArray;
+    unsigned long moduleAtomTableRva;
+    unsigned long moduleAtomCountRva;
+    unsigned long source;
+    unsigned long timeDateStamp;
+    unsigned long imageSize;
+} KSWORD_ARK_WIN32K_MESSAGE_HOOK_LAYOUT;
 
 typedef struct _KSWORD_ARK_WIN32K_RECT
 {
@@ -459,7 +515,7 @@ typedef struct _KSWORD_ARK_WIN32K_HOOK_ENTRY
     unsigned long hookType;
     unsigned long hookScope;
     long lastStatus;
-    unsigned long reserved;
+    unsigned long fieldFlags;
     unsigned long long hookObject;
     unsigned long long chainHead;
     unsigned long long nextHookObject;
@@ -468,6 +524,14 @@ typedef struct _KSWORD_ARK_WIN32K_HOOK_ENTRY
     unsigned long long desktopObject;
     unsigned long long procedureAddress;
     unsigned long long moduleBase;
+    unsigned long long hookHandle;
+    unsigned long long procedureOffset;
+    unsigned long moduleId;
+    unsigned long moduleAtom;
+    unsigned long targetProcessId;
+    unsigned long targetThreadId;
+    unsigned long targetSessionId;
+    unsigned long reserved;
     wchar_t detail[KSWORD_ARK_WIN32K_DETAIL_CHARS];
 } KSWORD_ARK_WIN32K_HOOK_ENTRY;
 
@@ -484,6 +548,17 @@ typedef struct _KSWORD_ARK_WIN32K_HOOK_SNAPSHOT_RESPONSE
     unsigned long long capabilityMask;
     unsigned long long missingCapabilityMask;
     KSWORD_ARK_WIN32K_FIELD_OFFSETS fieldOffsets;
+    KSWORD_ARK_WIN32K_MESSAGE_HOOK_LAYOUT layout;
+    unsigned long discoveredChainCount;
+    unsigned long visitedNodeCount;
+    unsigned long readFailureCount;
+    unsigned long corruptLinkCount;
+    unsigned long duplicateCount;
+    unsigned long win32kbaseTimeDateStamp;
+    unsigned long win32kbaseImageSize;
+    unsigned long win32kfullTimeDateStamp;
+    unsigned long win32kfullImageSize;
+    wchar_t detail[KSWORD_ARK_WIN32K_DETAIL_CHARS];
     KSWORD_ARK_WIN32K_HOOK_ENTRY entries[1];
 } KSWORD_ARK_WIN32K_HOOK_SNAPSHOT_RESPONSE;
 

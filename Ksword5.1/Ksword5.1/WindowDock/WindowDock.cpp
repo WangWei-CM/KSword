@@ -58,6 +58,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <exception>
+#include <iterator>
 #include <string>
 #include <thread>
 #include <utility>
@@ -292,6 +293,79 @@ namespace
         default:
             return QStringLiteral("WH_TYPE(%1)").arg(hookType);
         }
+    }
+
+    QString messageHookFlagsText(const std::uint32_t flags)
+    {
+        QStringList names;
+        if ((flags & KSWORD_ARK_WIN32K_MESSAGE_HOOK_FLAG_GLOBAL) != 0U)
+        {
+            names << QStringLiteral("GLOBAL");
+        }
+        if ((flags & KSWORD_ARK_WIN32K_MESSAGE_HOOK_FLAG_ANSI) != 0U)
+        {
+            names << QStringLiteral("ANSI");
+        }
+        if ((flags & KSWORD_ARK_WIN32K_MESSAGE_HOOK_FLAG_NEED_SKIP) != 0U)
+        {
+            names << QStringLiteral("NEED_SKIP");
+        }
+        if ((flags & KSWORD_ARK_WIN32K_MESSAGE_HOOK_FLAG_HUNG) != 0U)
+        {
+            names << QStringLiteral("HUNG");
+        }
+        if ((flags & KSWORD_ARK_WIN32K_MESSAGE_HOOK_FLAG_FAULTED) != 0U)
+        {
+            names << QStringLiteral("FAULTED");
+        }
+        if ((flags & KSWORD_ARK_WIN32K_MESSAGE_HOOK_FLAG_NO_DELAY) != 0U)
+        {
+            names << QStringLiteral("NO_DELAY");
+        }
+        if ((flags & KSWORD_ARK_WIN32K_MESSAGE_HOOK_FLAG_WOW64_DLL) != 0U)
+        {
+            names << QStringLiteral("WOW64_DLL");
+        }
+        if ((flags & KSWORD_ARK_WIN32K_MESSAGE_HOOK_FLAG_DESTROYED) != 0U)
+        {
+            names << QStringLiteral("DESTROYED");
+        }
+        const std::uint32_t knownMask =
+            KSWORD_ARK_WIN32K_MESSAGE_HOOK_FLAG_GLOBAL |
+            KSWORD_ARK_WIN32K_MESSAGE_HOOK_FLAG_ANSI |
+            KSWORD_ARK_WIN32K_MESSAGE_HOOK_FLAG_NEED_SKIP |
+            KSWORD_ARK_WIN32K_MESSAGE_HOOK_FLAG_HUNG |
+            KSWORD_ARK_WIN32K_MESSAGE_HOOK_FLAG_FAULTED |
+            KSWORD_ARK_WIN32K_MESSAGE_HOOK_FLAG_NO_DELAY |
+            KSWORD_ARK_WIN32K_MESSAGE_HOOK_FLAG_WOW64_DLL |
+            KSWORD_ARK_WIN32K_MESSAGE_HOOK_FLAG_DESTROYED;
+        if ((flags & ~knownMask) != 0U)
+        {
+            names << formatUInt64Hex(flags & ~knownMask);
+        }
+        if (names.isEmpty())
+        {
+            names << QStringLiteral("0");
+        }
+        return QStringLiteral("%1 (%2)")
+            .arg(names.join(QStringLiteral(" | ")))
+            .arg(formatUInt64Hex(flags));
+    }
+
+    QString win32kAtomName(const std::uint32_t atomValue)
+    {
+        if (atomValue == 0U || atomValue > 0xFFFFU)
+        {
+            return {};
+        }
+        wchar_t buffer[512]{};
+        const UINT chars = ::GlobalGetAtomNameW(
+            static_cast<ATOM>(atomValue),
+            buffer,
+            static_cast<int>(std::size(buffer)));
+        return chars == 0U
+            ? QString()
+            : QString::fromWCharArray(buffer, static_cast<qsizetype>(chars));
     }
 
     // deviceAuditStatusText 作用：
@@ -2016,6 +2090,14 @@ namespace
             const QString driverDetailText = readableDriverDetailText(
                 wideArrayToQString(entry.detail, KSWORD_ARK_WIN32K_DETAIL_CHARS),
                 QStringLiteral("Hook快照未提供额外驱动说明"));
+            const QString moduleName = win32kAtomName(entry.moduleAtom);
+            const QString moduleAtomText = entry.moduleAtom == 0U
+                ? QString()
+                : QStringLiteral("%1 (%2)")
+                    .arg(formatUInt64Hex(entry.moduleAtom), moduleName);
+            const QString processPath = entry.processId == 0U
+                ? QString()
+                : QString::fromStdString(ks::process::QueryProcessPathByPid(entry.processId));
 
             rows.push_back(QStringList{
                 hookTypeText(entry.hookType),
@@ -2023,19 +2105,29 @@ namespace
                 QString::number(entry.processId),
                 QString::number(entry.threadId),
                 QString::number(entry.sessionId),
+                entry.targetProcessId == 0U ? QString() : QString::number(entry.targetProcessId),
+                entry.targetThreadId == 0U ? QString() : QString::number(entry.targetThreadId),
+                entry.targetSessionId == 0U ? QString() : QString::number(entry.targetSessionId),
                 formatUInt64Hex(entry.procedureAddress),
-                formatUInt64Hex(entry.moduleBase),
+                formatUInt64Hex(entry.procedureOffset),
+                QString::number(static_cast<std::int32_t>(entry.moduleId)),
+                moduleAtomText,
+                moduleName,
+                processPath,
+                formatUInt64Hex(entry.hookHandle),
                 formatUInt64Hex(entry.hookObject),
                 formatUInt64Hex(entry.chainHead),
                 formatUInt64Hex(entry.nextHookObject),
                 formatUInt64Hex(entry.threadInfo),
                 formatUInt64Hex(entry.targetThreadInfo),
                 formatUInt64Hex(entry.desktopObject),
+                messageHookFlagsText(entry.flags),
                 keyboardSourceText(entry.source),
                 win32kRuntimeStatusText(entry.status),
                 formatNtStatusText(entry.lastStatus),
-                QStringLiteral("flags=%1；%2")
-                    .arg(formatUInt64Hex(entry.flags))
+                QStringLiteral("fieldFlags=%1; moduleBase=%2; %3")
+                    .arg(formatUInt64Hex(entry.fieldFlags))
+                    .arg(formatUInt64Hex(entry.moduleBase))
                     .arg(driverDetailText) });
         }
 
@@ -2052,6 +2144,9 @@ namespace
                 const QString driverDetailText = readableDriverDetailText(
                     stdWideToQString(entry.detail),
                     QStringLiteral("键盘 Hook fallback 未提供额外驱动说明"));
+                const QString processPath = entry.processId == 0U
+                    ? QString()
+                    : QString::fromStdString(ks::process::QueryProcessPathByPid(entry.processId));
 
                 rows.push_back(QStringList{
                     hookTypeText(entry.hookType),
@@ -2059,14 +2154,23 @@ namespace
                     QString::number(entry.processId),
                     QString::number(entry.threadId),
                     QStringLiteral("N/A"),
+                    QStringLiteral("N/A"),
+                    QStringLiteral("N/A"),
+                    QStringLiteral("N/A"),
                     formatUInt64Hex(entry.procedureAddress),
-                    formatUInt64Hex(entry.moduleBase),
+                    formatUInt64Hex(entry.procedureOffset),
+                    QString::number(static_cast<std::int32_t>(entry.moduleId)),
+                    QStringLiteral("N/A"),
+                    QStringLiteral("N/A"),
+                    processPath,
+                    QStringLiteral("N/A"),
                     formatUInt64Hex(entry.hookObject),
                     formatUInt64Hex(entry.chainHead),
                     formatUInt64Hex(entry.nextHookObject),
                     formatUInt64Hex(entry.threadInfo),
                     formatUInt64Hex(entry.targetThreadInfo),
                     formatUInt64Hex(entry.desktopInfo),
+                    messageHookFlagsText(entry.flags),
                     keyboardSourceText(entry.source),
                     QStringLiteral("KeyboardFallback(%1)").arg(entry.status),
                     formatNtStatusText(entry.lastStatus),
@@ -2093,15 +2197,16 @@ namespace
                 .arg(keyboardMessageText(QStringLiteral("enumerateKeyboardHooks"), *fallbackResult))
             : QStringLiteral("PDB=%1；fallback 未执行；解释：未枚举到结构化 Hook 行不等于系统无 Hook，当前路径受 profile/字段映射限制。")
                 .arg(auditMessageText(QStringLiteral("queryWin32kHooksPdb"), result));
-        rows.push_back(QStringList{
-            QStringLiteral("<无Hook行>"), QStringLiteral("N/A"), QStringLiteral("N/A"),
-            QStringLiteral("N/A"), QStringLiteral("N/A"), QStringLiteral("N/A"),
-            QStringLiteral("N/A"), QStringLiteral("N/A"),
-            QStringLiteral("N/A"), QStringLiteral("N/A"), QStringLiteral("N/A"),
-            QStringLiteral("N/A"), QStringLiteral("N/A"), QStringLiteral("N/A"),
-            QStringLiteral("%1 / %2").arg(pdbStateText).arg(fallbackStateText),
-            formatNtStatusText(result.lastStatus),
-            emptyDetailText });
+        QStringList emptyRow;
+        for (int column = 0; column < 26; ++column)
+        {
+            emptyRow << QStringLiteral("N/A");
+        }
+        emptyRow[0] = QStringLiteral("<无消息Hook行>");
+        emptyRow[23] = QStringLiteral("%1 / %2").arg(pdbStateText).arg(fallbackStateText);
+        emptyRow[24] = formatNtStatusText(result.lastStatus);
+        emptyRow[25] = emptyDetailText + QStringLiteral(" driver=") + stdWideToQString(result.detail);
+        rows.push_back(emptyRow);
         return rows;
     }
 
@@ -2676,19 +2781,20 @@ void WindowDock::initializeUi()
             &m_hotkeysTable),
             QStringLiteral("热键表"));
         innerTabWidget->addTab(makeTableGroup(
-            QStringLiteral("Hook（只读审计，不 remove/unlink hook 链）"),
-            QStringList{ QStringLiteral("类型"), QStringLiteral("范围"), QStringLiteral("PID"),
-                         QStringLiteral("TID"), QStringLiteral("Session"), QStringLiteral("Procedure"),
-                         QStringLiteral("ModuleBase"), QStringLiteral("HookObject"),
-                         QStringLiteral("ChainHead"), QStringLiteral("NextHook"),
-                         QStringLiteral("ThreadInfo"), QStringLiteral("TargetThreadInfo"),
-                         QStringLiteral("Desktop"), QStringLiteral("Source"),
-                         QStringLiteral("状态"), QStringLiteral("LastStatus"),
-                         QStringLiteral("诊断") },
-            QVector<int>{ 0, 1, 2, 3, 4, 5, 14 },
-            QVector<int>{ 0, 6, 7, 8, 9, 13, 16 },
+            QStringLiteral("消息 Hook（只读审计，不 remove/unlink hook 链）"),
+            QStringList{ QStringLiteral("类型"), QStringLiteral("范围"), QStringLiteral("所有者 PID"),
+                         QStringLiteral("所有者 TID"), QStringLiteral("Session"), QStringLiteral("目标 PID"),
+                         QStringLiteral("目标 TID"), QStringLiteral("目标 Session"), QStringLiteral("Procedure"),
+                         QStringLiteral("ProcedureOffset"), QStringLiteral("ModuleId"), QStringLiteral("ModuleAtom"),
+                         QStringLiteral("模块名"), QStringLiteral("进程路径"), QStringLiteral("HookHandle"),
+                         QStringLiteral("HookObject"), QStringLiteral("ChainHead"), QStringLiteral("NextHook"),
+                         QStringLiteral("OwnerThreadInfo"), QStringLiteral("TargetThreadInfo"),
+                         QStringLiteral("Desktop"), QStringLiteral("Flags"), QStringLiteral("Source"),
+                         QStringLiteral("状态"), QStringLiteral("LastStatus"), QStringLiteral("诊断") },
+            QVector<int>{ 0, 1, 2, 3, 4, 5, 6, 8, 12, 14, 15, 23 },
+            QVector<int>{ 0, 8, 9, 11, 13, 15, 16, 17, 18, 19, 21, 25 },
             &m_hooksTable),
-            QStringLiteral("Hook表"));
+            QStringLiteral("消息 Hook 表"));
     }
     m_tabWidget->addTab(m_hotkeyHookPage, QStringLiteral("热键/钩子"));
 
