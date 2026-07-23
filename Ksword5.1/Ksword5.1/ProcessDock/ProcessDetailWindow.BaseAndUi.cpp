@@ -1,6 +1,7 @@
 #include "ProcessDetailWindow.InternalCommon.h"
 #include "../句柄/HandleDock.h"
 #include "../MemoryDock/MemoryDock.h"
+#include "../NetworkDock/NetworkDock.h"
 #include "../UI/VisibleTableWidget.h"
 #include "../PluginHost.h"
 
@@ -593,6 +594,7 @@ void ProcessDetailWindow::initializeUi()
     m_embeddedHandleTab = new QWidget(m_tabWidget);
     m_embeddedMemoryTab = new QWidget(m_tabWidget);
     m_embeddedMemoryScanTab = new QWidget(m_tabWidget);
+    m_embeddedNetworkTab = new QWidget(m_tabWidget);
     m_tokenTab = new QWidget(m_tabWidget);
     m_tokenSwitchTab = new QWidget(m_tabWidget);
     m_kernelObjectTab = new QWidget(m_tabWidget);
@@ -609,6 +611,7 @@ void ProcessDetailWindow::initializeUi()
     m_embeddedHandleTab->setObjectName(QStringLiteral("ProcessDetailTab_EmbeddedHandle"));
     m_embeddedMemoryTab->setObjectName(QStringLiteral("ProcessDetailTab_EmbeddedMemory"));
     m_embeddedMemoryScanTab->setObjectName(QStringLiteral("ProcessDetailTab_EmbeddedMemoryScan"));
+    m_embeddedNetworkTab->setObjectName(QStringLiteral("ProcessDetailTab_EmbeddedNetwork"));
     m_tokenTab->setObjectName(QStringLiteral("ProcessDetailTab_Token"));
     m_tokenSwitchTab->setObjectName(QStringLiteral("ProcessDetailTab_TokenSwitch"));
     m_kernelObjectTab->setObjectName(QStringLiteral("ProcessDetailTab_ProcessDetailEvidence"));
@@ -624,6 +627,7 @@ void ProcessDetailWindow::initializeUi()
     initializeModuleTab();
     initializeEmbeddedHandleTab();
     initializeEmbeddedMemoryTabs();
+    initializeEmbeddedNetworkTab();
     initializeTokenTab();
     initializeTokenSwitchTab();
     initializeKernelObjectTab();
@@ -641,6 +645,7 @@ void ProcessDetailWindow::initializeUi()
     m_tabWidget->addTab(m_embeddedHandleTab, QIcon(":/Icon/handle_refresh.svg"), "句柄");
     m_tabWidget->addTab(m_embeddedMemoryTab, QIcon(":/Icon/process_list.svg"), "内存管理");
     m_tabWidget->addTab(m_embeddedMemoryScanTab, QIcon(":/Icon/file_find.svg"), "内存扫描");
+    m_tabWidget->addTab(m_embeddedNetworkTab, QIcon(":/Icon/process_details.svg"), "网络连接");
     m_tabWidget->addTab(m_tokenTab, QIcon(":/Icon/process_critical.svg"), "令牌");
     m_tabWidget->addTab(m_tokenSwitchTab, QIcon(":/Icon/process_start.svg"), "令牌开关");
     m_tabWidget->addTab(m_kernelObjectTab, QIcon(":/Icon/process_critical.svg"), "Process Detail Evidence");
@@ -838,6 +843,12 @@ void ProcessDetailWindow::requestInitialRefreshForCurrentTab()
         return;
     }
 
+    if (currentTab == m_embeddedNetworkTab)
+    {
+        ensureEmbeddedNetworkView();
+        return;
+    }
+
     if (currentTab == m_kernelCallbackTab && !m_kernelCallbackInitialRefreshStarted)
     {
         requestAsyncKernelCallbackRefresh();
@@ -944,6 +955,41 @@ void ProcessDetailWindow::ensureEmbeddedMemoryScanView()
     m_embeddedMemoryScanLayout->addWidget(m_embeddedMemoryScanDock, 1);
     m_embeddedMemoryScanDock->focusProcessForSearch(m_baseRecord.pid, false);
     m_embeddedMemoryScanDock->show();
+}
+
+void ProcessDetailWindow::initializeEmbeddedNetworkTab()
+{
+    m_embeddedNetworkLayout = new QVBoxLayout(m_embeddedNetworkTab);
+    m_embeddedNetworkLayout->setContentsMargins(0, 0, 0, 0);
+    m_embeddedNetworkLayout->setSpacing(0);
+    m_embeddedNetworkPlaceholder = new QLabel(
+        QStringLiteral("网络连接视图将在首次进入本页时加载。"),
+        m_embeddedNetworkTab);
+    m_embeddedNetworkPlaceholder->setAlignment(Qt::AlignCenter);
+    m_embeddedNetworkPlaceholder->setStyleSheet(
+        QStringLiteral("color:%1;").arg(KswordTheme::TextSecondaryHex()));
+    m_embeddedNetworkLayout->addWidget(m_embeddedNetworkPlaceholder, 1);
+}
+
+void ProcessDetailWindow::ensureEmbeddedNetworkView()
+{
+    if (m_embeddedNetworkDock != nullptr || m_embeddedNetworkLayout == nullptr)
+    {
+        return;
+    }
+
+    m_embeddedNetworkDock = new NetworkDock(m_embeddedNetworkTab);
+    m_embeddedNetworkDock->hide();
+    if (m_embeddedNetworkPlaceholder != nullptr)
+    {
+        m_embeddedNetworkLayout->removeWidget(m_embeddedNetworkPlaceholder);
+        m_embeddedNetworkPlaceholder->deleteLater();
+        m_embeddedNetworkPlaceholder = nullptr;
+    }
+    m_embeddedNetworkLayout->addWidget(m_embeddedNetworkDock, 1);
+    m_embeddedNetworkDock->focusConnectionsByPids(
+        QVector<quint32>{ static_cast<quint32>(m_baseRecord.pid) });
+    m_embeddedNetworkDock->show();
 }
 
 void ProcessDetailWindow::requestAsyncStaticDetailRefresh(const bool includeSignatureCheck)
