@@ -36,11 +36,13 @@ constexpr int kRefreshButtonId = 69103;
 constexpr int kCopyButtonId = 69104;
 constexpr int kFilterBarId = 69105;
 constexpr int kLoadingOverlayId = 69106;
+constexpr int kBugcheckUploadButtonId = 69107;
 constexpr int kCiTabIndex = 0;
 constexpr int kVbsTabIndex = 1;
 constexpr int kHyperVTabIndex = 2;
 constexpr int kAppLockerTabIndex = 3;
 constexpr int kAuxiliaryTabIndex = 4;
+constexpr int kBugcheckTabIndex = 5;
 constexpr int kHeaderHeight = 68;
 constexpr int kGap = 6;
 constexpr UINT kMenuRefresh = 69201;
@@ -49,6 +51,7 @@ constexpr UINT kMenuCopyAll = 69203;
 constexpr UINT kMenuCopyCell = 69204;
 constexpr UINT kMsgAuditRefreshCompleted = WM_APP + 603;
 constexpr UINT kMsgAuditFilterCompleted = WM_APP + 604;
+constexpr UINT kMsgBugcheckUploadCompleted = WM_APP + 605;
 
 enum class MiscAuditPageId {
     CodeIntegrity,
@@ -56,6 +59,7 @@ enum class MiscAuditPageId {
     HyperV,
     AppLocker,
     BamAhcache,
+    Bugcheck,
 };
 
 // MiscAuditRow is the value-only evidence record rendered into each ListView.
@@ -82,6 +86,12 @@ struct MiscAuditFilterResult {
     std::vector<std::size_t> visibleIndexes;
 };
 
+// BugcheckUploadResult holds the value-only transport outcome of the explicit
+// VMware diagnostic branding upload. It deliberately carries no bitmap bytes.
+struct BugcheckUploadResult {
+    ksword::ark::IoResult io;
+};
+
 // CommandResult captures bounded stdout/stderr from an external read-only query.
 // Inputs are filled by RunCaptureCommand; processing later turns exit code and
 // captured text into UI rows. No handles are retained after the command returns.
@@ -100,6 +110,7 @@ struct MiscAuditViewState {
     HWND hwnd = nullptr;
     HWND refreshButton = nullptr;
     HWND copyButton = nullptr;
+    HWND bugcheckUploadButton = nullptr;
     HWND filterBar = nullptr;
     HWND list = nullptr;
     HWND loadingOverlay = nullptr;
@@ -116,6 +127,7 @@ struct MiscAuditViewState {
     bool hasLoaded = false;
     std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<MiscAuditRefreshResult>> refreshTask;
     std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<MiscAuditFilterResult>> filterTask;
+    std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<BugcheckUploadResult>> bugcheckUploadTask;
 };
 
 // MiscFeaturePageState owns the tab host and retained child pages. Inputs arrive
@@ -129,6 +141,7 @@ struct MiscFeaturePageState {
     HWND hypervView = nullptr;
     HWND appLockerView = nullptr;
     HWND auxiliaryView = nullptr;
+    HWND bugcheckView = nullptr;
     int currentTab = kCiTabIndex;
 };
 
@@ -740,6 +753,21 @@ std::vector<MiscAuditRow> CollectAuxiliaryRows() {
     return rows;
 }
 
+// CollectBugcheckRows reports only feature applicability. The R0 feature is
+// VMware-only and its valid upload path is intentionally quiet when inactive,
+// so this page never claims that a successful transport activated a panel.
+std::vector<MiscAuditRow> CollectBugcheckRows() {
+    std::vector<MiscAuditRow> rows;
+    AddDriverCapabilityRow(rows, L"Bugcheck / VMware branding");
+    AddCommandRow(rows, L"Bugcheck / VMware branding", L"VMware environment", L"PowerShell Win32_ComputerSystem", RunPowerShellScalar(
+        L"$c=Get-CimInstance Win32_ComputerSystem -ErrorAction Stop; 'Manufacturer=' + $c.Manufacturer + '; Model=' + $c.Model"));
+    AppendRow(rows, L"Bugcheck / VMware branding", L"R0 feature scope", L"VMware-only", L"KswordARK bugcheck runtime", L"Info",
+        L"驱动仅在检测到受支持的 VMware 显示环境时启用该诊断面板；非 VMware 环境会安全忽略合法上传包。");
+    AppendRow(rows, L"Bugcheck / VMware branding", L"内置测试位图", L"Explicit action required", L"ArkDriverClient::setBugcheckBitmap", L"Low",
+        L"点击“上传内置位图”后才会在后台发送 16×16 BGRA 测试图；不会自动上传，也不会改变 Bugcheck 策略。传输成功不代表 VMware 面板已经激活。");
+    return rows;
+}
+
 // CollectRowsForPage dispatches a tab id to its read-only collector. Input is a
 // stable page id; processing performs local R3 queries; output is the fresh row
 // snapshot used by RefreshAuditView.
@@ -755,6 +783,8 @@ std::vector<MiscAuditRow> CollectRowsForPage(const MiscAuditPageId pageId) {
         return CollectAppLockerRows();
     case MiscAuditPageId::BamAhcache:
         return CollectAuxiliaryRows();
+    case MiscAuditPageId::Bugcheck:
+        return CollectBugcheckRows();
     default:
         return {};
     }
@@ -996,6 +1026,72 @@ void RefreshAuditView(MiscAuditViewState& state) {
         });
 }
 
+// UploadBuiltinBugcheckBitmap sends a fixed, bounded 16x16 BGRA diagnostic tile
+// only after explicit UI confirmation. The work and IOCTL both run in the page's
+// background task; the active audit snapshot remains usable while it runs.
+void UploadBuiltinBugcheckBitmap(MiscAuditViewState& state) {
+    if (state.pageId != MiscAuditPageId::Bugcheck || !state.bugcheckUploadTask) {
+        return;
+    }
+    if (state.bugcheckUploadTask->running()) {
+        state.statusText = L"Bugcheck 位图上传已在后台执行。";
+        ::InvalidateRect(state.hwnd, nullptr, TRUE);
+        return;
+    }
+    const int answer = ::MessageBoxW(state.hwnd,
+        L"将上传内置的 16×16 BGRA 诊断位图到 KswordARK。\n\n"
+        L"该操作只影响受支持 VMware 环境中的驱动缓存。驱动会在非支持环境安全忽略合法数据包，"
+        L"不会修改系统 Bugcheck 策略或主动触发蓝屏。是否继续？",
+        L"确认上传 Bugcheck 诊断位图", MB_YESNO | MB_DEFBUTTON2 | MB_ICONWARNING);
+    if (answer != IDYES) {
+        state.statusText = L"已取消 Bugcheck 位图上传。";
+        ::InvalidateRect(state.hwnd, nullptr, TRUE);
+        return;
+    }
+    ::EnableWindow(state.bugcheckUploadButton, FALSE);
+    state.statusText = L"正在后台上传 Bugcheck 内置诊断位图…";
+    ::InvalidateRect(state.hwnd, nullptr, TRUE);
+    state.bugcheckUploadTask->request(
+        [] {
+            constexpr std::uint32_t width = 16;
+            constexpr std::uint32_t height = 16;
+            constexpr std::uint32_t stride = width * 4;
+            std::vector<std::uint8_t> pixels(static_cast<std::size_t>(stride) * height, 0);
+            for (std::uint32_t y = 0; y < height; ++y) {
+                for (std::uint32_t x = 0; x < width; ++x) {
+                    const std::size_t offset = (static_cast<std::size_t>(y) * stride) + (static_cast<std::size_t>(x) * 4U);
+                    const bool accent = ((x / 4U) + (y / 4U)) % 2U == 0U;
+                    pixels[offset] = accent ? 0xD7U : 0x9BU;
+                    pixels[offset + 1U] = accent ? 0x83U : 0x56U;
+                    pixels[offset + 2U] = accent ? 0x21U : 0x1BU;
+                    pixels[offset + 3U] = 0xFFU;
+                }
+            }
+            BugcheckUploadResult result{};
+            result.io = ksword::ark::DriverClient().setBugcheckBitmap(width, height, stride, 0x2183D7U, pixels);
+            return result;
+        },
+        [&state](std::uint64_t, std::optional<BugcheckUploadResult>&& result, std::exception_ptr error) {
+            ::EnableWindow(state.bugcheckUploadButton, TRUE);
+            if (error || !result.has_value()) {
+                state.statusText = L"Bugcheck 位图后台上传异常结束。";
+                ::InvalidateRect(state.hwnd, nullptr, TRUE);
+                return;
+            }
+            const ksword::ark::IoResult& io = result->io;
+            AppendRow(state.rows, L"Bugcheck / VMware branding", L"内置测试位图上传",
+                io.ok ? L"Transport OK" : L"Transport failed",
+                L"ArkDriverClient::setBugcheckBitmap", io.ok ? L"Info" : L"Unknown",
+                L"16x16 BGRA; brandColor=#2183D7; Win32=" + std::to_wstring(io.win32Error) +
+                L"; bytes=" + std::to_wstring(io.bytesReturned) + L"; " + std::wstring(io.message.begin(), io.message.end()));
+            PopulateAuditList(state);
+            state.statusText = io.ok
+                ? L"Bugcheck 位图传输完成。请注意：非 VMware 环境会被驱动安全忽略。"
+                : L"Bugcheck 位图传输失败，详细原因已加入结果列表。";
+            ::InvalidateRect(state.hwnd, nullptr, TRUE);
+        });
+}
+
 void EnsureAuditViewLoaded(HWND view) {
     MiscAuditViewState* state = StateFromAuditView(view);
     if (state && !state->hasLoaded) {
@@ -1016,6 +1112,9 @@ void LayoutAuditView(MiscAuditViewState& state) {
     const int height = Height(rc);
     ::MoveWindow(state.refreshButton, kGap, kGap, 86, 24, TRUE);
     ::MoveWindow(state.copyButton, kGap + 94, kGap, 106, 24, TRUE);
+    const bool bugcheckPage = state.pageId == MiscAuditPageId::Bugcheck;
+    ::ShowWindow(state.bugcheckUploadButton, bugcheckPage ? SW_SHOW : SW_HIDE);
+    ::MoveWindow(state.bugcheckUploadButton, kGap + 208, kGap, 126, 24, TRUE);
     ::MoveWindow(state.filterBar, kGap, 34, std::max(100, width - (kGap * 2)), 28, TRUE);
     const int top = kHeaderHeight + kGap;
     ::MoveWindow(state.list, kGap, top, std::max(0, width - (kGap * 2)), std::max(0, height - top - kGap), TRUE);
@@ -1084,9 +1183,10 @@ void ShowAuditContextMenu(MiscAuditViewState& state, POINT screenPoint) {
 bool CreateAuditChildControls(MiscAuditViewState& state, HWND hwnd) {
     state.refreshButton = Ksword::Ui::CreateButton(hwnd, kRefreshButtonId, L"Refresh", 0, 0, 80, 24);
     state.copyButton = Ksword::Ui::CreateButton(hwnd, kCopyButtonId, L"Copy TSV", 0, 0, 100, 24);
+    state.bugcheckUploadButton = Ksword::Ui::CreateButton(hwnd, kBugcheckUploadButtonId, L"上传内置位图", 0, 0, 120, 24);
     state.filterBar = Ksword::Ui::CreateFilterBar(hwnd, kFilterBarId,
         L"筛选类别、项目、状态、来源、风险和详情", 0, 0, 0, 0);
-    if (!state.refreshButton || !state.copyButton || !state.filterBar ||
+    if (!state.refreshButton || !state.copyButton || !state.bugcheckUploadButton || !state.filterBar ||
         !state.virtualList.create(hwnd, kListId, 0, 0, 0, 0, LVS_SHOWSELALWAYS | LVS_SINGLESEL)) {
         return false;
     }
@@ -1095,7 +1195,8 @@ bool CreateAuditChildControls(MiscAuditViewState& state, HWND hwnd) {
     state.loadingOverlay = Ksword::Ui::CreateLoadingOverlay(hwnd, kLoadingOverlayId, { 0, 0, 1, 1 });
     state.refreshTask = std::make_unique<Ksword::Ui::AsyncSnapshotTask<MiscAuditRefreshResult>>(hwnd, kMsgAuditRefreshCompleted);
     state.filterTask = std::make_unique<Ksword::Ui::AsyncSnapshotTask<MiscAuditFilterResult>>(hwnd, kMsgAuditFilterCompleted);
-    if (!state.loadingOverlay || !state.refreshTask || !state.filterTask) {
+    state.bugcheckUploadTask = std::make_unique<Ksword::Ui::AsyncSnapshotTask<BugcheckUploadResult>>(hwnd, kMsgBugcheckUploadCompleted);
+    if (!state.loadingOverlay || !state.refreshTask || !state.filterTask || !state.bugcheckUploadTask) {
         return false;
     }
     Ksword::Ui::SetWindowFontRecursive(hwnd);
@@ -1147,6 +1248,10 @@ bool RegisterAuditViewClass() {
                 CopyAllRows(*state);
                 return 0;
             }
+            if (state && LOWORD(wParam) == kBugcheckUploadButtonId) {
+                UploadBuiltinBugcheckBitmap(*state);
+                return 0;
+            }
             if (state && LOWORD(wParam) == kFilterBarId && HIWORD(wParam) == EN_CHANGE) {
                 RequestAuditFilter(*state, Ksword::Ui::GetFilterBarText(state->filterBar));
                 return 0;
@@ -1159,6 +1264,11 @@ bool RegisterAuditViewClass() {
             break;
         case kMsgAuditFilterCompleted:
             if (state && state->filterTask && state->filterTask->consume(hwnd, wParam, lParam)) {
+                return 0;
+            }
+            break;
+        case kMsgBugcheckUploadCompleted:
+            if (state && state->bugcheckUploadTask && state->bugcheckUploadTask->consume(hwnd, wParam, lParam)) {
                 return 0;
             }
             break;
@@ -1201,7 +1311,8 @@ bool RegisterAuditViewClass() {
             RECT rc{};
             ::GetClientRect(hwnd, &rc);
             ::FillRect(dc, &rc, Ksword::Ui::AppTheme().panelBrush());
-            RECT textRc{ kGap + 210, 7, rc.right - kGap, kHeaderHeight };
+            const int textLeft = state && state->pageId == MiscAuditPageId::Bugcheck ? kGap + 344 : kGap + 210;
+            RECT textRc{ textLeft, 7, rc.right - kGap, kHeaderHeight };
             const std::wstring text = state ? (state->title + L" - " + state->statusText) : L"Misc audit";
             Ksword::Ui::DrawTextLine(dc, text, textRc, Ksword::Ui::AppTheme().mutedTextColor, Ksword::Ui::SystemUIFont(), DT_SINGLELINE | DT_LEFT | DT_VCENTER);
             ::EndPaint(hwnd, &ps);
@@ -1213,6 +1324,9 @@ bool RegisterAuditViewClass() {
             }
             if (state && state->filterTask) {
                 state->filterTask->cancel();
+            }
+            if (state && state->bugcheckUploadTask) {
+                state->bugcheckUploadTask->cancel();
             }
             delete state;
             ::SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
@@ -1279,11 +1393,14 @@ void ShowHostPages(MiscFeaturePageState& state) {
     if (state.auxiliaryView) {
         ::ShowWindow(state.auxiliaryView, state.currentTab == kAuxiliaryTabIndex ? SW_SHOW : SW_HIDE);
     }
+    if (state.bugcheckView) {
+        ::ShowWindow(state.bugcheckView, state.currentTab == kBugcheckTabIndex ? SW_SHOW : SW_HIDE);
+    }
     const HWND currentView = state.currentTab == kCiTabIndex ? state.ciView :
         state.currentTab == kVbsTabIndex ? state.vbsView :
         state.currentTab == kHyperVTabIndex ? state.hypervView :
         state.currentTab == kAppLockerTabIndex ? state.appLockerView : state.auxiliaryView;
-    EnsureAuditViewLoaded(currentView);
+    EnsureAuditViewLoaded(state.currentTab == kBugcheckTabIndex ? state.bugcheckView : currentView);
 }
 
 // LayoutHostChildren sizes the tab control and every retained child page. Input
@@ -1298,7 +1415,7 @@ void LayoutHostChildren(MiscFeaturePageState& state) {
     RECT display = Ksword::Ui::GetTabDisplayRect(state.tab);
     const int pageWidth = Width(display);
     const int pageHeight = Height(display);
-    const std::array<HWND, 5> pages{ state.ciView, state.vbsView, state.hypervView, state.appLockerView, state.auxiliaryView };
+    const std::array<HWND, 6> pages{ state.ciView, state.vbsView, state.hypervView, state.appLockerView, state.auxiliaryView, state.bugcheckView };
     for (HWND page : pages) {
         if (page) {
             ::MoveWindow(page, display.left, display.top, pageWidth, pageHeight, TRUE);
@@ -1307,7 +1424,7 @@ void LayoutHostChildren(MiscFeaturePageState& state) {
     ShowHostPages(state);
 }
 
-// CreateHostChildControls creates the tab host and five security posture pages.
+// CreateHostChildControls creates the tab host and six security posture pages.
 // Input is host state with hwnd already assigned; output is true when every page
 // was created successfully.
 bool CreateHostChildControls(MiscFeaturePageState& state) {
@@ -1320,6 +1437,7 @@ bool CreateHostChildControls(MiscFeaturePageState& state) {
     Ksword::Ui::AddTabPage(state.tab, kHyperVTabIndex, { L"Hyper-V / VMBus" });
     Ksword::Ui::AddTabPage(state.tab, kAppLockerTabIndex, { L"AppLocker" });
     Ksword::Ui::AddTabPage(state.tab, kAuxiliaryTabIndex, { L"BAM / ahcache" });
+    Ksword::Ui::AddTabPage(state.tab, kBugcheckTabIndex, { L"Bugcheck / VMware" });
     ::SendMessageW(state.tab, TCM_SETCURSEL, static_cast<WPARAM>(kCiTabIndex), 0);
 
     RECT display = Ksword::Ui::GetTabDisplayRect(state.tab);
@@ -1329,7 +1447,8 @@ bool CreateHostChildControls(MiscFeaturePageState& state) {
     state.hypervView = CreateAuditView(state.tab, childBounds, MiscAuditPageId::HyperV, L"Hyper-V / VMBus / HvSocket");
     state.appLockerView = CreateAuditView(state.tab, childBounds, MiscAuditPageId::AppLocker, L"AppLocker / AppID");
     state.auxiliaryView = CreateAuditView(state.tab, childBounds, MiscAuditPageId::BamAhcache, L"BAM / ahcache");
-    return state.ciView && state.vbsView && state.hypervView && state.appLockerView && state.auxiliaryView;
+    state.bugcheckView = CreateAuditView(state.tab, childBounds, MiscAuditPageId::Bugcheck, L"Bugcheck / VMware branding");
+    return state.ciView && state.vbsView && state.hypervView && state.appLockerView && state.auxiliaryView && state.bugcheckView;
 }
 
 // RegisterMiscFeatureClass registers the outer Misc tab host. There is no input;
