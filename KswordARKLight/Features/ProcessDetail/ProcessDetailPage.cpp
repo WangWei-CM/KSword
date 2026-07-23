@@ -3,6 +3,7 @@
 #include "ProcessDetailCollector.h"
 
 #include "../../Ui/Controls.h"
+#include "../../Ui/LoadingOverlay.h"
 #include "../../Ui/Theme.h"
 
 #include <commctrl.h>
@@ -23,6 +24,8 @@ constexpr int kRootMargin = 8;
 constexpr UINT kCopyCellCommand = 64001;
 constexpr UINT kCopyRowCommand = 64002;
 constexpr UINT kCopyAllCommand = 64003;
+constexpr UINT kMsgSnapshotCompleted = WM_APP + 610;
+constexpr int kSnapshotLoadingOverlayId = 1110;
 
 constexpr std::array<const wchar_t*, 8> kTabTitles{
     L"详细信息",
@@ -84,6 +87,9 @@ void InsertTab(HWND tab, int index, const wchar_t* title) {
 ProcessDetailPage::ProcessDetailPage(DWORD processId) : processId_(processId) {}
 
 ProcessDetailPage::~ProcessDetailPage() {
+    if (snapshotTask_) {
+        snapshotTask_->cancel();
+    }
     if (titleFont_) {
         ::DeleteObject(titleFont_);
         titleFont_ = nullptr;
@@ -135,6 +141,11 @@ LRESULT ProcessDetailPage::HandleMessage(HWND hwnd, UINT message, WPARAM wParam,
     case WM_SIZE:
         Layout();
         return 0;
+    case kMsgSnapshotCompleted:
+        if (snapshotTask_ && snapshotTask_->consume(hwnd, wParam, lParam)) {
+            return 0;
+        }
+        break;
     case WM_NOTIFY:
         if (auto* header = reinterpret_cast<NMHDR*>(lParam);
             header && header->hwndFrom == tab_ && header->code == TCN_SELCHANGE) {
@@ -148,6 +159,9 @@ LRESULT ProcessDetailPage::HandleMessage(HWND hwnd, UINT message, WPARAM wParam,
         ::SetTextColor(reinterpret_cast<HDC>(wParam), Ksword::Ui::AppTheme().textColor);
         return reinterpret_cast<LRESULT>(Ksword::Ui::AppTheme().windowBrush());
     case WM_NCDESTROY:
+        if (snapshotTask_) {
+            snapshotTask_->cancel();
+        }
         ::SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
         delete this;
         return 0;
@@ -184,10 +198,11 @@ bool ProcessDetailPage::Initialize(HWND hwnd) {
         InsertTab(tab_, index, kTabTitles[static_cast<std::size_t>(index)]);
     }
 
+    loadingOverlay_ = Ksword::Ui::CreateLoadingOverlay(hwnd_, kSnapshotLoadingOverlayId, { 0, 0, 1, 1 });
+    snapshotTask_ = std::make_unique<Ksword::Ui::AsyncSnapshotTask<ProcessDetailSnapshot>>(hwnd_, kMsgSnapshotCompleted);
     ::SendMessageW(tab_, TCM_SETCURSEL, 0, 0);
-    ProcessDetailCollector collector;
-    snapshot_ = collector.Collect(processId_);
     UpdateVisiblePage();
+    BeginSnapshotRefresh();
     return true;
 }
 
@@ -288,6 +303,9 @@ void ProcessDetailPage::Layout() {
             ::MoveWindow(page, pageRect.left, pageRect.top, RectWidth(pageRect), RectHeight(pageRect), TRUE);
             LayoutPage(static_cast<TabIndex>(index));
         }
+    }
+    if (loadingOverlay_) {
+        ::MoveWindow(loadingOverlay_, 0, 0, RectWidth(client), RectHeight(client), TRUE);
     }
 }
 
@@ -506,10 +524,55 @@ void ProcessDetailPage::OnTabActivated(TabIndex tab) {
 }
 
 void ProcessDetailPage::RefreshAll() {
-    ProcessDetailCollector collector;
-    snapshot_ = collector.Collect(processId_);
+    BeginSnapshotRefresh();
+}
+
+// BeginSnapshotRefresh schedules the expensive process, thread, module and R0
+// evidence queries off the UI thread. AsyncSnapshotTask coalesces repeated
+// refreshes and discards out-of-date completions when the page closes.
+void ProcessDetailPage::BeginSnapshotRefresh(const std::wstring& loadingMessage) {
+    if (!snapshotTask_) {
+        return;
+    }
+    Ksword::Ui::SetLoadingOverlay(loadingOverlay_, true, loadingMessage);
+    SetSnapshotRefreshControlsEnabled(false);
+    snapshotTask_->request(
+        [processId = processId_]() {
+            ProcessDetailCollector collector;
+            return collector.Collect(processId);
+        },
+        [this](std::uint64_t, std::optional<ProcessDetailSnapshot>&& snapshot, std::exception_ptr error) {
+            Ksword::Ui::SetLoadingOverlay(loadingOverlay_, false);
+            SetSnapshotRefreshControlsEnabled(true);
+            if (error || !snapshot.has_value()) {
+                snapshot_ = {};
+                snapshot_.errorText = L"进程详情后台刷新异常结束。请检查目标进程、权限和驱动状态。";
+            } else {
+                ApplySnapshot(std::move(*snapshot));
+                return;
+            }
+            if (currentTab_ != TabIndex::Count && pages_[static_cast<std::size_t>(currentTab_)].hwnd) {
+                PopulateTab(currentTab_);
+            }
+        });
+}
+
+// ApplySnapshot atomically replaces the UI-facing detail snapshot after the
+// worker completed. Controls are populated only for the live tab, so hidden
+// tabs never cause eager control creation or message storms.
+void ProcessDetailPage::ApplySnapshot(ProcessDetailSnapshot snapshot) {
+    snapshot_ = std::move(snapshot);
     if (currentTab_ != TabIndex::Count && pages_[static_cast<std::size_t>(currentTab_)].hwnd) {
         PopulateTab(currentTab_);
+    }
+}
+
+void ProcessDetailPage::SetSnapshotRefreshControlsEnabled(const bool enabled) {
+    if (HWND threadRefresh = Control(TabIndex::Threads, ThreadRefresh)) {
+        ::EnableWindow(threadRefresh, enabled);
+    }
+    if (HWND moduleRefresh = Control(TabIndex::Modules, ModuleRefresh)) {
+        ::EnableWindow(moduleRefresh, enabled);
     }
 }
 

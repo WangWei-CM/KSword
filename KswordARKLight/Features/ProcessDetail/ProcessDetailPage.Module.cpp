@@ -798,33 +798,8 @@ bool ProcessDetailPage::HandleModuleCommand(int controlId) {
         return false;
     }
 
-    HWND refresh = Control(TabIndex::Modules, ModuleRefresh);
-    SetPageStatus(TabIndex::Modules, ModuleStatus, L"● 正在刷新模块列表...");
-    if (refresh) {
-        ::EnableWindow(refresh, FALSE);
-    }
-    ::UpdateWindow(pages_[static_cast<std::size_t>(TabIndex::Modules)].hwnd);
-    const auto started = std::chrono::steady_clock::now();
+    SetPageStatus(TabIndex::Modules, ModuleStatus, L"● 正在后台刷新模块列表...");
     RefreshAll();
-    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::steady_clock::now() - started).count();
-    if (refresh) {
-        ::EnableWindow(refresh, TRUE);
-    }
-
-    std::wstring status = L"● 刷新完成 " + std::to_wstring(elapsed) +
-        L" ms | 模块:" + std::to_wstring(snapshot_.modules.size()) +
-        L" 线程:" + std::to_wstring(snapshot_.threads.size());
-    if (!snapshot_.modulesSucceeded) {
-        status = L"● 模块刷新失败 " + std::to_wstring(elapsed) + L" ms";
-    }
-    if (!snapshot_.errorText.empty() && (!snapshot_.modulesSucceeded || snapshot_.modules.empty())) {
-        status += L" | " + snapshot_.errorText;
-    }
-    if (::SendMessageW(Control(TabIndex::Modules, ModuleVerifySignature), BM_GETCHECK, 0, 0) == BST_CHECKED) {
-        status += L" | 签名校验结果不可用";
-    }
-    SetPageStatus(TabIndex::Modules, ModuleStatus, status);
     return true;
 }
 

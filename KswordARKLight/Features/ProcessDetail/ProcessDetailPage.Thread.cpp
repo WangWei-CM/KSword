@@ -328,10 +328,8 @@ void ProcessDetailPage::PopulateThreadTab() {
 bool ProcessDetailPage::HandleThreadCommand(int controlId) {
     switch (controlId) {
     case ThreadRefresh:
-        SetPageStatus(TabIndex::Threads, ThreadStatus, L"● 正在刷新线程细节...");
-        ::EnableWindow(Control(TabIndex::Threads, ThreadRefresh), FALSE);
+        SetPageStatus(TabIndex::Threads, ThreadStatus, L"● 正在后台刷新线程细节...");
         RefreshAll();
-        ::EnableWindow(Control(TabIndex::Threads, ThreadRefresh), TRUE);
         return true;
 
     case ThreadSample: {

@@ -3,12 +3,14 @@
 #include "ProcessDetailTypes.h"
 
 #include "../../Core/Win32Lean.h"
+#include "../../Ui/AsyncTask.h"
 
 #include <commctrl.h>
 
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -211,6 +213,9 @@ private:
     void RedrawTabClient();
     void OnTabActivated(TabIndex tab);
     void RefreshAll();
+    void BeginSnapshotRefresh(const std::wstring& loadingMessage = L"正在后台加载进程详情…");
+    void ApplySnapshot(ProcessDetailSnapshot snapshot);
+    void SetSnapshotRefreshControlsEnabled(bool enabled);
 
     bool CreateDetailTab();
     bool CreateThreadTab();
@@ -303,12 +308,14 @@ private:
     DWORD processId_ = 0;
     HWND hwnd_ = nullptr;
     HWND tab_ = nullptr;
+    HWND loadingOverlay_ = nullptr;
     HFONT titleFont_ = nullptr;
     TabIndex currentTab_ = TabIndex::Count;
     std::array<PageState, static_cast<std::size_t>(TabIndex::Count)> pages_{};
     std::unordered_map<HWND, int> listColumnCounts_;
     std::unordered_map<HWND, int> listContextColumns_;
     ProcessDetailSnapshot snapshot_{};
+    std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<ProcessDetailSnapshot>> snapshotTask_;
     bool tokenLoaded_ = false;
     bool tokenSwitchLoaded_ = false;
     bool sectionLoaded_ = false;
