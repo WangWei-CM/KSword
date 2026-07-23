@@ -3,6 +3,7 @@
 #include "../../../shared/driver/KswordArkHandleIoctl.h"
 
 #include <algorithm>
+#include <cwctype>
 #include <sstream>
 
 namespace Ksword::Features::Handle {
@@ -46,6 +47,19 @@ HandleEntryView CopyEntry(const ksword::ark::HandleEntry& entry) {
     out.otNameOffset = static_cast<std::uint32_t>(entry.otNameOffset);
     out.otIndexOffset = static_cast<std::uint32_t>(entry.otIndexOffset);
     return out;
+}
+
+// IsAlpcPortType decides whether the selected object can use the dedicated
+// ALPC parser. The input is ObjectType text produced by the typed object query;
+// output is false for every non-port object, avoiding unrelated extra IOCTLs.
+bool IsAlpcPortType(const std::wstring& typeName) {
+    std::wstring normalized;
+    normalized.reserve(typeName.size());
+    for (const wchar_t character : typeName) {
+        normalized.push_back(static_cast<wchar_t>(std::towupper(character)));
+    }
+    return normalized.find(L"ALPC") != std::wstring::npos &&
+        normalized.find(L"PORT") != std::wstring::npos;
 }
 
 } // namespace
@@ -121,6 +135,10 @@ HandleObjectDetailView HandleAuditClient::QueryHandleObject(
     result.otIndexOffset = typed.otIndexOffset;
     result.typeName = typed.typeName;
     result.objectName = typed.objectName;
+    if (typed.io.ok && IsAlpcPortType(result.typeName)) {
+        result.alpcQueried = true;
+        result.alpc = client.queryAlpcPort(processId, handleValue);
+    }
 
     std::ostringstream stream;
     stream << "version=" << result.version

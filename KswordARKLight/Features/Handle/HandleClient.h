@@ -88,6 +88,8 @@ struct HandleObjectDetailView {
     std::uint64_t objectTypeAddress = 0;
     std::wstring typeName;
     std::wstring objectName;
+    bool alpcQueried = false;
+    ksword::ark::AlpcPortQueryResult alpc;
 };
 
 // HandleEnumView is the page-local response for one process HandleTable query.

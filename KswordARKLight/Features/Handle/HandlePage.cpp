@@ -814,6 +814,28 @@ void HandlePage::PopulateDetail(const int rowIndex) {
     AddDetailRow(detailList_, L"NameStatus", NtStatusText(detail.nameStatus), L"名称查询");
     AddDetailRow(detailList_, L"ProxyStatus", std::to_wstring(detail.proxyStatus), L"本页未请求 proxy handle");
     AddDetailRow(detailList_, L"ProxyHandleReturned", BoolText(detail.proxyHandle != 0), Hex64(detail.proxyHandle));
+            if (detail.alpcQueried) {
+                const auto addAlpcPort = [&](const wchar_t* relation, const ksword::ark::AlpcPortInfo& port) {
+                    AddDetailRow(detailList_,
+                        std::wstring(L"ALPC ") + relation,
+                        port.portName.empty() ? Hex64(port.objectAddress) : port.portName,
+                        L"object=" + Hex64(port.objectAddress) +
+                            L"; ownerPid=" + std::to_wstring(port.ownerProcessId) +
+                            L"; state=" + std::to_wstring(port.state) +
+                            L"; flags=" + Hex32(port.flags));
+                };
+                AddDetailRow(detailList_,
+                    L"ALPC Transport",
+                    detail.alpc.io.ok ? L"OK" : L"FAIL",
+                    Utf8ToWide(detail.alpc.io.message));
+                AddDetailRow(detailList_, L"ALPC QueryStatus", std::to_wstring(detail.alpc.queryStatus),
+                    L"fieldFlags=" + Hex32(detail.alpc.fieldFlags) +
+                        L"; capability=" + Hex64(detail.alpc.dynDataCapabilityMask));
+                addAlpcPort(L"Query", detail.alpc.queryPort);
+                addAlpcPort(L"Connection", detail.alpc.connectionPort);
+                addAlpcPort(L"Server", detail.alpc.serverPort);
+                addAlpcPort(L"Client", detail.alpc.clientPort);
+            }
             AddDetailRow(detailList_, L"异常句柄标记", AnomalyText(entry), L"只读提示，不做关闭/复制/patch");
             SetStatus(L"已读取句柄 " + Hex32(entry.handleValue) + L" 的 ObjectHeader/ObjectType 详情。");
         });
