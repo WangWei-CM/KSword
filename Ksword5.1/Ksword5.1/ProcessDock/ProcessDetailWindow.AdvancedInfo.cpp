@@ -1463,6 +1463,172 @@ namespace
         return flags.join('|');
     }
 
+    // Windows 当前公开符号中的 KERNEL_CALLBACK_TABLE 字段顺序：
+    // - PEB 只保存表指针，不保存表长；
+    // - 字段顺序用于给索引提供可读名称，旧系统会通过连续不可用尾项自动缩短结果；
+    // - 最大读取数量始终受本数组长度限制，避免沿远程内存无界扫描。
+    constexpr const char* kKernelCallbackNames[] =
+    {
+        "__fnCOPYDATA",
+        "__fnCOPYGLOBALDATA",
+        "__fnEMPTY1",
+        "__fnNCDESTROY",
+        "__fnDWORDOPTINLPMSG",
+        "__fnINOUTDRAG",
+        "__fnGETTEXTLENGTHS1",
+        "__fnINCNTOUTSTRING",
+        "__fnINCNTOUTSTRINGNULL",
+        "__fnINLPCOMPAREITEMSTRUCT",
+        "__fnINLPCREATESTRUCT",
+        "__fnINLPDELETEITEMSTRUCT",
+        "__fnINLPDRAWITEMSTRUCT",
+        "__fnPOPTINLPUINT1",
+        "__fnPOPTINLPUINT2",
+        "__fnINLPMDICREATESTRUCT",
+        "__fnINOUTLPMEASUREITEMSTRUCT",
+        "__fnINLPWINDOWPOS",
+        "__fnINOUTLPPOINT51",
+        "__fnINOUTLPSCROLLINFO",
+        "__fnINOUTLPRECT",
+        "__fnINOUTNCCALCSIZE",
+        "__fnINOUTLPPOINT52",
+        "__fnINPAINTCLIPBRD",
+        "__fnINSIZECLIPBRD",
+        "__fnINDESTROYCLIPBRD",
+        "__fnINSTRINGNULL1",
+        "__fnINSTRINGNULL2",
+        "__fnINDEVICECHANGE",
+        "__fnPOWERBROADCAST",
+        "__fnINLPUAHDRAWMENU1",
+        "__fnOPTOUTLPDWORDOPTOUTLPDWORD1",
+        "__fnOPTOUTLPDWORDOPTOUTLPDWORD2",
+        "__fnOUTDWORDINDWORD",
+        "__fnOUTLPRECT",
+        "__fnOUTSTRING",
+        "__fnPOPTINLPUINT3",
+        "__fnPOUTLPINT",
+        "__fnSENTDDEMSG",
+        "__fnINOUTSTYLECHANGE1",
+        "__fnHkINDWORD",
+        "__fnHkINLPCBTACTIVATESTRUCT",
+        "__fnHkINLPCBTCREATESTRUCT",
+        "__fnHkINLPDEBUGHOOKSTRUCT",
+        "__fnHkINLPMOUSEHOOKSTRUCTEX1",
+        "__fnHkINLPKBDLLHOOKSTRUCT",
+        "__fnHkINLPMSLLHOOKSTRUCT",
+        "__fnHkINLPMSG",
+        "__fnHkINLPRECT",
+        "__fnHkOPTINLPEVENTMSG",
+        "__xxxClientCallDelegateThread",
+        "__ClientCallDummyCallback1",
+        "__ClientCallDummyCallback2",
+        "__fnSHELLWINDOWMANAGEMENTCALLOUT",
+        "__fnSHELLWINDOWMANAGEMENTNOTIFY",
+        "__ClientCallDummyCallback3",
+        "__xxxClientCallDitThread",
+        "__xxxClientEnableMMCSS",
+        "__xxxClientUpdateDpi",
+        "__xxxClientExpandStringW",
+        "__ClientCopyDDEIn1",
+        "__ClientCopyDDEIn2",
+        "__ClientCopyDDEOut1",
+        "__ClientCopyDDEOut2",
+        "__ClientCopyImage",
+        "__ClientEventCallback",
+        "__ClientFindMnemChar",
+        "__ClientFreeDDEHandle",
+        "__ClientFreeLibrary",
+        "__ClientGetCharsetInfo",
+        "__ClientGetDDEFlags",
+        "__ClientGetDDEHookData",
+        "__ClientGetListboxString",
+        "__ClientGetMessageMPH",
+        "__ClientLoadImage",
+        "__ClientLoadLibrary",
+        "__ClientLoadMenu",
+        "__ClientLoadLocalT1Fonts",
+        "__ClientPSMTextOut",
+        "__ClientLpkDrawTextEx",
+        "__ClientExtTextOutW",
+        "__ClientGetTextExtentPointW",
+        "__ClientCharToWchar",
+        "__ClientAddFontResourceW",
+        "__ClientThreadSetup",
+        "__ClientDeliverUserApc",
+        "__ClientNoMemoryPopup",
+        "__ClientMonitorEnumProc",
+        "__ClientCallWinEventProc",
+        "__ClientWaitMessageExMPH",
+        "__ClientCallDummyCallback4",
+        "__ClientCallDummyCallback5",
+        "__ClientImmLoadLayout",
+        "__ClientImmProcessKey",
+        "__fnIMECONTROL",
+        "__fnINWPARAMDBCSCHAR",
+        "__fnGETTEXTLENGTHS2",
+        "__ClientCallDummyCallback6",
+        "__ClientLoadStringW",
+        "__ClientLoadOLE",
+        "__ClientRegisterDragDrop",
+        "__ClientRevokeDragDrop",
+        "__fnINOUTMENUGETOBJECT",
+        "__ClientPrinterThunk",
+        "__fnOUTLPCOMBOBOXINFO",
+        "__fnOUTLPSCROLLBARINFO",
+        "__fnINLPUAHDRAWMENU2",
+        "__fnINLPUAHDRAWMENUITEM",
+        "__fnINLPUAHDRAWMENU3",
+        "__fnINOUTLPUAHMEASUREMENUITEM",
+        "__fnINLPUAHDRAWMENU4",
+        "__fnOUTLPTITLEBARINFOEX",
+        "__fnTOUCH",
+        "__fnGESTURE",
+        "__fnPOPTINLPUINT4",
+        "__fnPOPTINLPUINT5",
+        "__xxxClientCallDefaultInputHandler",
+        "__fnEMPTY2",
+        "__ClientRimDevCallback",
+        "__xxxClientCallMinTouchHitTestingCallback",
+        "__ClientCallLocalMouseHooks",
+        "__xxxClientBroadcastThemeChange",
+        "__xxxClientCallDevCallbackSimple",
+        "__xxxClientAllocWindowClassExtraBytes",
+        "__xxxClientFreeWindowClassExtraBytes",
+        "__fnGETWINDOWDATA",
+        "__fnINOUTSTYLECHANGE2",
+        "__fnHkINLPMOUSEHOOKSTRUCTEX2",
+        "__xxxClientCallDefWindowProc",
+        "__fnSHELLSYNCDISPLAYCHANGED",
+        "__fnHkINLPCHARHOOKSTRUCT",
+        "__fnINTERCEPTEDWINDOWACTION",
+        "__xxxTooltipCallback",
+        "__xxxClientInitPSBInfo",
+        "__xxxClientDoScrollMenu",
+        "__xxxClientEndScroll",
+        "__xxxClientDrawSize",
+        "__xxxClientDrawScrollBar",
+        "__xxxClientHitTestScrollBar",
+        "__xxxClientTrackInit"
+    };
+
+    constexpr std::size_t kKernelCallbackMinimumProbeCount = 64;
+    constexpr std::size_t kKernelCallbackBoundaryRunLength = 8;
+
+    // isExecutableMemoryProtection：判断页面基础保护位是否允许执行。
+    bool isExecutableMemoryProtection(const DWORD protectionValue)
+    {
+        switch (protectionValue & 0xFFU)
+        {
+        case PAGE_EXECUTE:
+        case PAGE_EXECUTE_READ:
+        case PAGE_EXECUTE_READWRITE:
+        case PAGE_EXECUTE_WRITECOPY:
+            return true;
+        default:
+            return false;
+        }
+    }
+
     // protectionLevelToText：
     // - ProcessProtectionInformation 的单字节级别文本化。
     QString protectionLevelToText(const std::uint8_t protectionLevel)
@@ -4551,6 +4717,467 @@ void ProcessDetailWindow::applyRawTokenInformation()
     // - 快捷开关页会重新回读可见复选框状态。
     requestAsyncTokenRefresh();
     refreshTokenSwitchStates();
+}
+
+void ProcessDetailWindow::requestAsyncKernelCallbackRefresh()
+{
+    // 回调表页独立于 PEB 摘要页刷新：
+    // - 只读取 PEB 指针、回调表和模块快照；
+    // - 不扫描整个虚拟地址空间，避免用户仅查看回调表时承担 PEB 页的全量开销。
+    if (m_kernelCallbackRefreshing || m_baseRecord.pid == 0U)
+    {
+        return;
+    }
+
+    m_kernelCallbackInitialRefreshStarted = true;
+    m_kernelCallbackRefreshing = true;
+    const std::uint64_t ticketValue = ++m_kernelCallbackRefreshTicket;
+    const std::uint32_t pidValue = m_baseRecord.pid;
+
+    if (m_refreshKernelCallbackButton != nullptr)
+    {
+        m_refreshKernelCallbackButton->setEnabled(false);
+    }
+    if (m_kernelCallbackStatusLabel != nullptr)
+    {
+        m_kernelCallbackStatusLabel->setText(QStringLiteral("● 正在读取内核回调表..."));
+        m_kernelCallbackStatusLabel->setStyleSheet(
+            buildStateLabelStyle(KswordTheme::PrimaryBlueColor, 700));
+    }
+    if (m_kernelCallbackRefreshProgressPid == 0)
+    {
+        m_kernelCallbackRefreshProgressPid = kPro.add("进程详情", "读取内核回调表");
+    }
+    kPro.set(m_kernelCallbackRefreshProgressPid, "打开目标进程", 0, 15.0f);
+
+    QPointer<ProcessDetailWindow> guardThis(this);
+    QRunnable* refreshTask = QRunnable::create([guardThis, pidValue, ticketValue]()
+        {
+            KernelCallbackRefreshResult refreshResult{};
+            const auto beginTime = std::chrono::steady_clock::now();
+            const auto deliverResult = [&refreshResult, beginTime, guardThis, ticketValue]()
+                {
+                    refreshResult.elapsedMs = static_cast<std::uint64_t>(
+                        std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now() - beginTime).count());
+                    QMetaObject::invokeMethod(
+                        guardThis,
+                        [guardThis, ticketValue, refreshResult]()
+                        {
+                            if (guardThis == nullptr ||
+                                guardThis->m_kernelCallbackRefreshTicket != ticketValue)
+                            {
+                                return;
+                            }
+                            guardThis->applyKernelCallbackRefreshResult(refreshResult);
+                        },
+                        Qt::QueuedConnection);
+                };
+
+            HANDLE processHandle = OpenProcess(
+                PROCESS_QUERY_INFORMATION |
+                PROCESS_QUERY_LIMITED_INFORMATION |
+                PROCESS_VM_READ,
+                FALSE,
+                pidValue);
+            if (processHandle == nullptr)
+            {
+                refreshResult.diagnosticText = QStringLiteral("OpenProcess失败(%1)。")
+                    .arg(GetLastError());
+                deliverResult();
+                return;
+            }
+
+            HMODULE ntdllModule = GetModuleHandleW(L"ntdll.dll");
+            const NtQueryInformationProcessFn ntQueryProcess =
+                reinterpret_cast<NtQueryInformationProcessFn>(
+                    ntdllModule != nullptr
+                        ? GetProcAddress(ntdllModule, "NtQueryInformationProcess")
+                        : nullptr);
+            if (ntQueryProcess == nullptr)
+            {
+                refreshResult.diagnosticText = QStringLiteral("无法定位NtQueryInformationProcess。");
+                CloseHandle(processHandle);
+                deliverResult();
+                return;
+            }
+
+            PROCESS_BASIC_INFORMATION basicInformation{};
+            const NTSTATUS basicStatus = ntQueryProcess(
+                processHandle,
+                0,
+                &basicInformation,
+                static_cast<ULONG>(sizeof(basicInformation)),
+                nullptr);
+
+            ULONG_PTR wow64PebAddress = 0;
+            const NTSTATUS wow64Status = ntQueryProcess(
+                processHandle,
+                kProcessInfoClassWow64Information,
+                &wow64PebAddress,
+                static_cast<ULONG>(sizeof(wow64PebAddress)),
+                nullptr);
+            const bool useWow64Peb = NT_SUCCESS(wow64Status) && wow64PebAddress != 0U;
+
+            std::uint64_t pebAddress = 0;
+            std::uint64_t callbackTableAddress = 0;
+            std::size_t pointerSize = sizeof(std::uint64_t);
+            if (useWow64Peb)
+            {
+                refreshResult.pebKindText = QStringLiteral("Wow64PEB");
+                pebAddress = static_cast<std::uint64_t>(wow64PebAddress);
+                pointerSize = sizeof(std::uint32_t);
+
+                std::uint32_t callbackTableAddress32 = 0;
+                if (!readRemoteStructure(
+                    processHandle,
+                    pebAddress + 0x2CU,
+                    callbackTableAddress32))
+                {
+                    refreshResult.diagnosticText = QStringLiteral(
+                        "读取Wow64PEB.KernelCallbackTable失败。");
+                    CloseHandle(processHandle);
+                    deliverResult();
+                    return;
+                }
+                callbackTableAddress = static_cast<std::uint64_t>(callbackTableAddress32);
+            }
+            else
+            {
+                if (!NT_SUCCESS(basicStatus) || basicInformation.PebBaseAddress == nullptr)
+                {
+                    refreshResult.diagnosticText = QStringLiteral(
+                        "NtQueryInformationProcess(ProcessBasicInformation)失败：%1。")
+                        .arg(formatNtStatusHex(basicStatus));
+                    CloseHandle(processHandle);
+                    deliverResult();
+                    return;
+                }
+
+                refreshResult.pebKindText = QStringLiteral("NativePEB");
+                pebAddress = reinterpret_cast<std::uint64_t>(basicInformation.PebBaseAddress);
+                std::uint64_t callbackTableAddress64 = 0;
+                if (!readRemoteStructure(
+                    processHandle,
+                    pebAddress + 0x58U,
+                    callbackTableAddress64))
+                {
+                    refreshResult.diagnosticText = QStringLiteral(
+                        "读取NativePEB.KernelCallbackTable失败。");
+                    CloseHandle(processHandle);
+                    deliverResult();
+                    return;
+                }
+                callbackTableAddress = callbackTableAddress64;
+            }
+
+            refreshResult.pebAddressText = uint64ToHex(pebAddress);
+            refreshResult.tableAddressText = uint64ToHex(callbackTableAddress);
+            if (callbackTableAddress == 0U)
+            {
+                refreshResult.diagnosticText = QStringLiteral(
+                    "KernelCallbackTable为空；目标进程可能尚未加载User32。");
+                CloseHandle(processHandle);
+                deliverResult();
+                return;
+            }
+            if ((callbackTableAddress % pointerSize) != 0U)
+            {
+                appendPebDiagnostic(
+                    refreshResult.diagnosticText,
+                    QStringLiteral("KernelCallbackTable地址未按指针宽度对齐。"));
+            }
+
+            MEMORY_BASIC_INFORMATION tableMemoryInfo{};
+            const SIZE_T tableQuerySize = VirtualQueryEx(
+                processHandle,
+                reinterpret_cast<LPCVOID>(static_cast<std::uintptr_t>(callbackTableAddress)),
+                &tableMemoryInfo,
+                sizeof(tableMemoryInfo));
+            if (tableQuerySize != sizeof(tableMemoryInfo) ||
+                tableMemoryInfo.State != MEM_COMMIT ||
+                (tableMemoryInfo.Protect & (PAGE_NOACCESS | PAGE_GUARD)) != 0U)
+            {
+                appendPebDiagnostic(
+                    refreshResult.diagnosticText,
+                    QStringLiteral("KernelCallbackTable所在内存区域不可安全读取。"));
+                CloseHandle(processHandle);
+                deliverResult();
+                return;
+            }
+
+            const ks::process::ProcessModuleSnapshot moduleSnapshot =
+                ks::process::EnumerateProcessModulesAndThreads(pidValue, false);
+            if (!moduleSnapshot.diagnosticText.empty())
+            {
+                appendPebDiagnostic(
+                    refreshResult.diagnosticText,
+                    QString::fromStdString(moduleSnapshot.diagnosticText));
+            }
+
+            std::size_t trailingUnusableCount = 0;
+            bool oldTableBoundaryDetected = false;
+            for (std::size_t index = 0; index < std::size(kKernelCallbackNames); ++index)
+            {
+                KernelCallbackInspectItem row{};
+                row.index = static_cast<std::uint32_t>(index);
+                row.callbackName = QString::fromLatin1(kKernelCallbackNames[index]);
+                row.moduleText = QStringLiteral("-");
+                row.moduleOffsetText = QStringLiteral("-");
+                row.protectionText = QStringLiteral("-");
+
+                const std::uint64_t entryAddress =
+                    callbackTableAddress + static_cast<std::uint64_t>(index * pointerSize);
+                std::uint64_t callbackAddress = 0;
+                bool entryReadOk = false;
+                if (pointerSize == sizeof(std::uint32_t))
+                {
+                    std::uint32_t callbackAddress32 = 0;
+                    entryReadOk = readRemoteStructure(processHandle, entryAddress, callbackAddress32);
+                    callbackAddress = static_cast<std::uint64_t>(callbackAddress32);
+                }
+                else
+                {
+                    entryReadOk = readRemoteStructure(processHandle, entryAddress, callbackAddress);
+                }
+
+                bool plausibleCallback = false;
+                if (!entryReadOk)
+                {
+                    row.addressText = QStringLiteral("-");
+                    row.statusText = QStringLiteral("读取失败");
+                    row.suspicious = true;
+                }
+                else if (callbackAddress == 0U)
+                {
+                    row.addressText = uint64ToHex(0);
+                    row.statusText = QStringLiteral("空");
+                    row.suspicious = true;
+                }
+                else
+                {
+                    row.addressText = uint64ToHex(callbackAddress);
+                    MEMORY_BASIC_INFORMATION callbackMemoryInfo{};
+                    const SIZE_T callbackQuerySize = VirtualQueryEx(
+                        processHandle,
+                        reinterpret_cast<LPCVOID>(static_cast<std::uintptr_t>(callbackAddress)),
+                        &callbackMemoryInfo,
+                        sizeof(callbackMemoryInfo));
+                    if (callbackQuerySize != sizeof(callbackMemoryInfo))
+                    {
+                        row.statusText = QStringLiteral("地址不可查询");
+                        row.suspicious = true;
+                    }
+                    else
+                    {
+                        row.protectionText = memoryProtectToText(callbackMemoryInfo.Protect);
+                        const bool committed = callbackMemoryInfo.State == MEM_COMMIT;
+                        const bool guarded =
+                            (callbackMemoryInfo.Protect & (PAGE_NOACCESS | PAGE_GUARD)) != 0U;
+                        const bool executable =
+                            committed && !guarded &&
+                            isExecutableMemoryProtection(callbackMemoryInfo.Protect);
+
+                        bool moduleMatched = false;
+                        for (const ks::process::ProcessModuleRecord& moduleRecord : moduleSnapshot.modules)
+                        {
+                            if (moduleRecord.moduleBaseAddress == 0U ||
+                                moduleRecord.moduleSizeBytes == 0U ||
+                                callbackAddress < moduleRecord.moduleBaseAddress)
+                            {
+                                continue;
+                            }
+                            const std::uint64_t moduleOffset =
+                                callbackAddress - moduleRecord.moduleBaseAddress;
+                            if (moduleOffset >= static_cast<std::uint64_t>(moduleRecord.moduleSizeBytes))
+                            {
+                                continue;
+                            }
+
+                            row.modulePath = QString::fromStdString(moduleRecord.modulePath);
+                            row.moduleText = QString::fromStdString(moduleRecord.moduleName).trimmed();
+                            if (row.moduleText.isEmpty())
+                            {
+                                row.moduleText = QFileInfo(row.modulePath).fileName();
+                            }
+                            row.moduleOffsetText = uint64ToHex(moduleOffset);
+                            moduleMatched = true;
+                            break;
+                        }
+
+                        plausibleCallback = executable;
+                        if (!committed)
+                        {
+                            row.statusText = QStringLiteral("未提交");
+                            row.suspicious = true;
+                        }
+                        else if (!executable && moduleMatched)
+                        {
+                            row.statusText = QStringLiteral("模块内非可执行地址");
+                            row.suspicious = true;
+                        }
+                        else if (!executable)
+                        {
+                            row.statusText = QStringLiteral("非模块且不可执行");
+                            row.suspicious = true;
+                        }
+                        else if (!moduleMatched)
+                        {
+                            row.statusText = QStringLiteral("非模块可执行内存");
+                            row.suspicious = true;
+                        }
+                        else
+                        {
+                            row.statusText = QStringLiteral("正常");
+                        }
+                    }
+                }
+
+                refreshResult.rows.push_back(std::move(row));
+                if (plausibleCallback)
+                {
+                    trailingUnusableCount = 0;
+                }
+                else
+                {
+                    ++trailingUnusableCount;
+                }
+
+                if ((index + 1U) >= kKernelCallbackMinimumProbeCount &&
+                    trailingUnusableCount >= kKernelCallbackBoundaryRunLength)
+                {
+                    refreshResult.rows.resize(
+                        refreshResult.rows.size() - trailingUnusableCount);
+                    oldTableBoundaryDetected = true;
+                    break;
+                }
+            }
+
+            if (oldTableBoundaryDetected)
+            {
+                appendPebDiagnostic(
+                    refreshResult.diagnosticText,
+                    QStringLiteral("检测到连续不可用尾项，已按目标系统实际表长截断。"));
+            }
+            if (refreshResult.rows.empty())
+            {
+                appendPebDiagnostic(
+                    refreshResult.diagnosticText,
+                    QStringLiteral("未识别到可用的内核回调表条目。"));
+            }
+
+            CloseHandle(processHandle);
+            deliverResult();
+        });
+    refreshTask->setAutoDelete(true);
+    QThreadPool::globalInstance()->start(refreshTask);
+}
+
+void ProcessDetailWindow::applyKernelCallbackRefreshResult(
+    const KernelCallbackRefreshResult& refreshResult)
+{
+    m_kernelCallbackRefreshing = false;
+    if (m_refreshKernelCallbackButton != nullptr)
+    {
+        m_refreshKernelCallbackButton->setEnabled(true);
+    }
+
+    m_kernelCallbackRows = refreshResult.rows;
+    rebuildKernelCallbackTable();
+
+    const std::size_t suspiciousCount = static_cast<std::size_t>(std::count_if(
+        m_kernelCallbackRows.cbegin(),
+        m_kernelCallbackRows.cend(),
+        [](const KernelCallbackInspectItem& row)
+        {
+            return row.suspicious;
+        }));
+
+    if (m_kernelCallbackStatusLabel != nullptr)
+    {
+        QString statusText = QStringLiteral("● 刷新完成 %1 ms | %2 | PEB:%3 | 表:%4 | 条目:%5 | 异常:%6")
+            .arg(refreshResult.elapsedMs)
+            .arg(refreshResult.pebKindText.isEmpty() ? QStringLiteral("未知PEB") : refreshResult.pebKindText)
+            .arg(refreshResult.pebAddressText.isEmpty() ? QStringLiteral("-") : refreshResult.pebAddressText)
+            .arg(refreshResult.tableAddressText.isEmpty() ? QStringLiteral("-") : refreshResult.tableAddressText)
+            .arg(m_kernelCallbackRows.size())
+            .arg(suspiciousCount);
+        QColor statusColor = suspiciousCount > 0U ? statusWarningColor() : statusIdleColor();
+        if (!refreshResult.diagnosticText.trimmed().isEmpty())
+        {
+            statusText += QStringLiteral(" | %1").arg(refreshResult.diagnosticText);
+            statusColor = m_kernelCallbackRows.empty() ? statusErrorColor() : statusWarningColor();
+        }
+        m_kernelCallbackStatusLabel->setText(statusText);
+        m_kernelCallbackStatusLabel->setStyleSheet(buildStateLabelStyle(statusColor, 700));
+    }
+
+    kPro.set(m_kernelCallbackRefreshProgressPid, "内核回调表读取完成", 0, 100.0f);
+
+    kLogEvent event;
+    info << event
+        << "[ProcessDetailWindow] applyKernelCallbackRefreshResult: pid="
+        << m_baseRecord.pid
+        << ", rows="
+        << m_kernelCallbackRows.size()
+        << ", suspicious="
+        << suspiciousCount
+        << ", elapsedMs="
+        << refreshResult.elapsedMs
+        << ", diagnostic="
+        << refreshResult.diagnosticText.toStdString()
+        << eol;
+}
+
+void ProcessDetailWindow::rebuildKernelCallbackTable()
+{
+    if (m_kernelCallbackTable == nullptr)
+    {
+        return;
+    }
+
+    const bool sortingEnabled = m_kernelCallbackTable->isSortingEnabled();
+    m_kernelCallbackTable->setSortingEnabled(false);
+    m_kernelCallbackTable->clearContents();
+    m_kernelCallbackTable->setRowCount(static_cast<int>(m_kernelCallbackRows.size()));
+
+    for (int rowIndex = 0; rowIndex < static_cast<int>(m_kernelCallbackRows.size()); ++rowIndex)
+    {
+        const KernelCallbackInspectItem& row = m_kernelCallbackRows[static_cast<std::size_t>(rowIndex)];
+        auto* indexItem = new QTableWidgetItem();
+        indexItem->setData(Qt::DisplayRole, row.index);
+        auto* nameItem = new QTableWidgetItem(row.callbackName);
+        auto* addressItem = new QTableWidgetItem(row.addressText);
+        auto* moduleItem = new QTableWidgetItem(row.moduleText);
+        auto* moduleOffsetItem = new QTableWidgetItem(row.moduleOffsetText);
+        auto* protectionItem = new QTableWidgetItem(row.protectionText);
+        auto* statusItem = new QTableWidgetItem(row.statusText);
+        if (!row.modulePath.isEmpty())
+        {
+            moduleItem->setToolTip(row.modulePath);
+        }
+
+        QTableWidgetItem* items[] =
+        {
+            indexItem,
+            nameItem,
+            addressItem,
+            moduleItem,
+            moduleOffsetItem,
+            protectionItem,
+            statusItem
+        };
+        for (int columnIndex = 0; columnIndex < static_cast<int>(std::size(items)); ++columnIndex)
+        {
+            if (row.suspicious)
+            {
+                items[columnIndex]->setForeground(statusWarningColor());
+            }
+            m_kernelCallbackTable->setItem(rowIndex, columnIndex, items[columnIndex]);
+        }
+    }
+
+    m_kernelCallbackTable->setSortingEnabled(sortingEnabled);
 }
 
 void ProcessDetailWindow::requestAsyncPebRefresh()

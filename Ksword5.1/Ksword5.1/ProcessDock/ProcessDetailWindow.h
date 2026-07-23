@@ -4,7 +4,7 @@
 // ProcessDetailWindow.h
 // 作用：
 // - 提供“进程详细信息”独立窗口（非 Dock、非阻塞）；
-// - 每个进程可打开独立窗口，包含 详细信息 / 线程 / 操作 / 模块 / 令牌 / 令牌开关 / PEB 七个 Tab；
+// - 每个进程可打开独立窗口，包含详细信息、线程、操作、模块、令牌、PEB、内核回调表等 Tab；
 // - 支持模块刷新、右键操作、DLL 注入、Shellcode 注入等能力。
 // ============================================================
 
@@ -151,6 +151,31 @@ private:
         std::uint64_t elapsedMs = 0;      // 刷新耗时（毫秒）。
     };
 
+    // KernelCallbackInspectItem：PEB.KernelCallbackTable 中的单个用户态回调入口。
+    struct KernelCallbackInspectItem
+    {
+        std::uint32_t index = 0;          // 回调表索引。
+        QString callbackName;             // 公开 KERNEL_CALLBACK_TABLE 字段名。
+        QString addressText;              // 当前远程回调地址。
+        QString moduleText;               // 地址所属模块名，未命中时为空。
+        QString modulePath;               // 地址所属模块完整路径，供 tooltip 展示。
+        QString moduleOffsetText;         // callback - moduleBase。
+        QString protectionText;           // VirtualQueryEx 返回的页面保护属性。
+        QString statusText;               // 正常/空/非模块可执行内存等审计状态。
+        bool suspicious = false;          // true 时在表格中使用警告色。
+    };
+
+    // KernelCallbackRefreshResult：内核回调表页的一次异步读取结果。
+    struct KernelCallbackRefreshResult
+    {
+        std::vector<KernelCallbackInspectItem> rows; // 有效表长内的回调入口。
+        QString pebKindText;                        // NativePEB / Wow64PEB。
+        QString pebAddressText;                     // 本次读取的 PEB 地址。
+        QString tableAddressText;                   // KernelCallbackTable 地址。
+        QString diagnosticText;                     // 权限、边界或模块枚举诊断。
+        std::uint64_t elapsedMs = 0;                // 刷新耗时（毫秒）。
+    };
+
     // SectionRefreshResult：进程 SectionObject / ControlArea 异步查询结果。
     struct SectionRefreshResult
     {
@@ -272,6 +297,10 @@ private:
     // 返回：无。
     void initializeTokenSwitchTab();
     void initializePebTab();
+    // initializeKernelCallbackTab 作用：
+    // - 构建 PEB.KernelCallbackTable 独立审计页；
+    // - 表格展示回调名、地址、模块偏移、内存保护和异常状态。
+    void initializeKernelCallbackTab();
     void initializeConnections();
 
     // ======== 详情页刷新 ========
@@ -335,6 +364,12 @@ private:
     void requestAsyncPebRefresh();
     void applyTokenRefreshResult(const TextRefreshResult& refreshResult);
     void applyPebRefreshResult(const TextRefreshResult& refreshResult);
+    // requestAsyncKernelCallbackRefresh 作用：后台读取 Native/Wow64 PEB 的 KernelCallbackTable。
+    void requestAsyncKernelCallbackRefresh();
+    // applyKernelCallbackRefreshResult 作用：在 UI 线程回填内核回调表审计结果。
+    void applyKernelCallbackRefreshResult(const KernelCallbackRefreshResult& refreshResult);
+    // rebuildKernelCallbackTable 作用：根据最近一次缓存重建回调表格。
+    void rebuildKernelCallbackTable();
     // requestAsyncHotkeyRefresh 作用：
     // - 后台扫描当前进程相关热键来源；
     // - 不直接访问驱动，不阻塞详情窗口 UI 线程。
@@ -529,6 +564,7 @@ private:
     QWidget* m_keyboardTab = nullptr;          // “键盘”页。
     QWidget* m_pluginTab = nullptr;            // “插件”页。
     QWidget* m_pebTab = nullptr;               // “PEB”页。
+    QWidget* m_kernelCallbackTab = nullptr;    // “内核回调表”页。
 
     // ======== 插件页控件 ========
     QToolButton* m_pluginTargetMenuButton = nullptr; // 当前进程的“插件 → <插件名>”入口。
@@ -737,6 +773,17 @@ private:
     bool m_pebInitialRefreshStarted = false;       // PEB 页首次刷新是否已经按需启动。
     std::uint64_t m_pebRefreshTicket = 0;          // PEB 页刷新序号。
     int m_pebRefreshProgressPid = 0;               // PEB 页刷新进度 PID。
+
+    // ======== PEB.KernelCallbackTable 页控件与状态 ========
+    QVBoxLayout* m_kernelCallbackLayout = nullptr; // 内核回调表页布局。
+    QPushButton* m_refreshKernelCallbackButton = nullptr; // 刷新内核回调表按钮。
+    QLabel* m_kernelCallbackStatusLabel = nullptr; // 内核回调表刷新状态。
+    QTableWidget* m_kernelCallbackTable = nullptr; // 内核回调表结果表格。
+    bool m_kernelCallbackRefreshing = false;       // 当前是否正在读取回调表。
+    bool m_kernelCallbackInitialRefreshStarted = false; // 是否已执行懒加载首刷。
+    std::uint64_t m_kernelCallbackRefreshTicket = 0; // 防止旧任务覆盖新结果。
+    int m_kernelCallbackRefreshProgressPid = 0;    // 内核回调表进度任务 ID。
+    std::vector<KernelCallbackInspectItem> m_kernelCallbackRows; // 最近一次结果缓存。
 
     // applyPebEditableFields：
     // - 读取 PEB 页编辑区输入；

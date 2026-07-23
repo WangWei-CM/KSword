@@ -595,6 +595,7 @@ void ProcessDetailWindow::initializeUi()
     m_keyboardTab = new QWidget(m_tabWidget);
     m_pluginTab = new QWidget(m_tabWidget);
     m_pebTab = new QWidget(m_tabWidget);
+    m_kernelCallbackTab = new QWidget(m_tabWidget);
 
     m_detailTab->setObjectName(QStringLiteral("ProcessDetailTab_Detail"));
     m_threadTab->setObjectName(QStringLiteral("ProcessDetailTab_Thread"));
@@ -607,6 +608,7 @@ void ProcessDetailWindow::initializeUi()
     m_keyboardTab->setObjectName(QStringLiteral("ProcessDetailTab_Keyboard"));
     m_pluginTab->setObjectName(QStringLiteral("ProcessDetailTab_Plugin"));
     m_pebTab->setObjectName(QStringLiteral("ProcessDetailTab_Peb"));
+    m_kernelCallbackTab->setObjectName(QStringLiteral("ProcessDetailTab_KernelCallbackTable"));
 
     initializeDetailTab();
     initializeThreadTab();
@@ -619,6 +621,7 @@ void ProcessDetailWindow::initializeUi()
     initializeKeyboardTab();
     initializePluginTab();
     initializePebTab();
+    initializeKernelCallbackTab();
 
     // 为 Tab 指定图标与标题文本。
     m_tabWidget->addTab(m_detailTab, QIcon(":/Icon/process_details.svg"), "详细信息");
@@ -632,6 +635,7 @@ void ProcessDetailWindow::initializeUi()
     m_tabWidget->addTab(m_keyboardTab, QIcon(":/Icon/process_hotkey.svg"), "键盘");
     m_tabWidget->addTab(m_pluginTab, QIcon(":/Icon/process_start.svg"), "插件");
     m_tabWidget->addTab(m_pebTab, QIcon(":/Icon/process_tree.svg"), "PEB");
+    m_tabWidget->addTab(m_kernelCallbackTab, QIcon(":/Icon/process_hotkey.svg"), "内核回调表");
     m_tabWidget->setCurrentWidget(m_detailTab);
 
     // 所有控件创建完毕后统一套用主题样式。
@@ -800,6 +804,12 @@ void ProcessDetailWindow::requestInitialRefreshForCurrentTab()
     if (currentTab == m_pebTab && !m_pebInitialRefreshStarted)
     {
         requestAsyncPebRefresh();
+        return;
+    }
+
+    if (currentTab == m_kernelCallbackTab && !m_kernelCallbackInitialRefreshStarted)
+    {
+        requestAsyncKernelCallbackRefresh();
     }
 }
 
@@ -2256,6 +2266,138 @@ void ProcessDetailWindow::initializePebTab()
     m_applyPebEditButton->setStyleSheet(buttonStyle);
 }
 
+void ProcessDetailWindow::initializeKernelCallbackTab()
+{
+    // PEB.KernelCallbackTable 独立审计页：
+    // - 不与 PEB 大文本刷新绑定，切到本页时才读取远程内存；
+    // - 表格固定支持复制单元格、当前行和全部内容。
+    m_kernelCallbackLayout = new QVBoxLayout(m_kernelCallbackTab);
+    m_kernelCallbackLayout->setContentsMargins(6, 6, 6, 6);
+    m_kernelCallbackLayout->setSpacing(6);
+
+    auto* topBarLayout = new QHBoxLayout();
+    m_refreshKernelCallbackButton = new QPushButton(
+        QIcon(":/Icon/process_refresh.svg"),
+        QStringLiteral("刷新内核回调表"),
+        m_kernelCallbackTab);
+    m_refreshKernelCallbackButton->setToolTip(QStringLiteral(
+        "异步读取 PEB.KernelCallbackTable，并核对回调地址所属模块与内存保护属性。"));
+    m_refreshKernelCallbackButton->setStyleSheet(buildBlueButtonStyle());
+    topBarLayout->addWidget(m_refreshKernelCallbackButton);
+
+    m_kernelCallbackStatusLabel = new QLabel(QStringLiteral("● 尚未刷新"), m_kernelCallbackTab);
+    m_kernelCallbackStatusLabel->setStyleSheet(buildStateLabelStyle(statusSecondaryColor(), 600));
+    topBarLayout->addWidget(m_kernelCallbackStatusLabel, 1);
+    m_kernelCallbackLayout->addLayout(topBarLayout);
+
+    auto* descriptionLabel = new QLabel(
+        QStringLiteral(
+            "读取 NativePEB 或 Wow64PEB 中的用户态内核回调表。非模块可执行地址、不可执行地址和读取失败项会标为异常。"),
+        m_kernelCallbackTab);
+    descriptionLabel->setWordWrap(true);
+    descriptionLabel->setStyleSheet(QStringLiteral("color:%1;").arg(KswordTheme::TextSecondaryHex()));
+    m_kernelCallbackLayout->addWidget(descriptionLabel);
+
+    m_kernelCallbackTable = new QTableWidget(m_kernelCallbackTab);
+    m_kernelCallbackTable->setColumnCount(7);
+    m_kernelCallbackTable->setHorizontalHeaderLabels(QStringList()
+        << QStringLiteral("索引")
+        << QStringLiteral("回调名称")
+        << QStringLiteral("地址")
+        << QStringLiteral("模块")
+        << QStringLiteral("模块偏移")
+        << QStringLiteral("保护属性")
+        << QStringLiteral("状态"));
+    m_kernelCallbackTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    m_kernelCallbackTable->setSelectionBehavior(QAbstractItemView::SelectRows);
+    m_kernelCallbackTable->setSelectionMode(QAbstractItemView::SingleSelection);
+    m_kernelCallbackTable->setAlternatingRowColors(true);
+    m_kernelCallbackTable->setSortingEnabled(true);
+    m_kernelCallbackTable->setContextMenuPolicy(Qt::CustomContextMenu);
+    m_kernelCallbackTable->verticalHeader()->setVisible(false);
+    m_kernelCallbackTable->horizontalHeader()->setStretchLastSection(true);
+    m_kernelCallbackTable->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
+    m_kernelCallbackTable->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
+    m_kernelCallbackTable->horizontalHeader()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
+    m_kernelCallbackTable->horizontalHeader()->setSectionResizeMode(3, QHeaderView::ResizeToContents);
+    m_kernelCallbackTable->horizontalHeader()->setSectionResizeMode(4, QHeaderView::ResizeToContents);
+    m_kernelCallbackTable->horizontalHeader()->setSectionResizeMode(5, QHeaderView::ResizeToContents);
+    m_kernelCallbackTable->horizontalHeader()->setSectionResizeMode(6, QHeaderView::ResizeToContents);
+    m_kernelCallbackLayout->addWidget(m_kernelCallbackTable, 1);
+
+    connect(
+        m_kernelCallbackTable,
+        &QTableWidget::customContextMenuRequested,
+        this,
+        [this](const QPoint& localPosition)
+        {
+            if (m_kernelCallbackTable == nullptr)
+            {
+                return;
+            }
+
+            if (QTableWidgetItem* clickedItem = m_kernelCallbackTable->itemAt(localPosition))
+            {
+                m_kernelCallbackTable->setCurrentItem(clickedItem);
+            }
+
+            QMenu menu(m_kernelCallbackTable);
+            menu.setStyleSheet(buildProcessDetailMenuStyle());
+            QAction* copyCellAction = menu.addAction(QStringLiteral("复制当前单元格"));
+            QAction* copyRowAction = menu.addAction(QStringLiteral("复制当前行"));
+            QAction* copyAllAction = menu.addAction(QStringLiteral("复制全部"));
+            const int currentRow = m_kernelCallbackTable->currentRow();
+            const int currentColumn = m_kernelCallbackTable->currentColumn();
+            copyCellAction->setEnabled(currentRow >= 0 && currentColumn >= 0);
+            copyRowAction->setEnabled(currentRow >= 0);
+            copyAllAction->setEnabled(m_kernelCallbackTable->rowCount() > 0);
+
+            QAction* selectedAction = menu.exec(m_kernelCallbackTable->viewport()->mapToGlobal(localPosition));
+            if (selectedAction == nullptr)
+            {
+                return;
+            }
+
+            if (selectedAction == copyCellAction)
+            {
+                const QTableWidgetItem* item = m_kernelCallbackTable->item(currentRow, currentColumn);
+                QApplication::clipboard()->setText(item != nullptr ? item->text() : QString());
+                return;
+            }
+
+            const auto rowText = [this](const int rowIndex)
+            {
+                QStringList values;
+                for (int columnIndex = 0; columnIndex < m_kernelCallbackTable->columnCount(); ++columnIndex)
+                {
+                    const QTableWidgetItem* item = m_kernelCallbackTable->item(rowIndex, columnIndex);
+                    values << (item != nullptr ? item->text() : QString());
+                }
+                return values.join('\t');
+            };
+
+            if (selectedAction == copyRowAction)
+            {
+                QApplication::clipboard()->setText(rowText(currentRow));
+                return;
+            }
+
+            QStringList allLines;
+            QStringList headers;
+            for (int columnIndex = 0; columnIndex < m_kernelCallbackTable->columnCount(); ++columnIndex)
+            {
+                const QTableWidgetItem* headerItem = m_kernelCallbackTable->horizontalHeaderItem(columnIndex);
+                headers << (headerItem != nullptr ? headerItem->text() : QString());
+            }
+            allLines << headers.join('\t');
+            for (int rowIndex = 0; rowIndex < m_kernelCallbackTable->rowCount(); ++rowIndex)
+            {
+                allLines << rowText(rowIndex);
+            }
+            QApplication::clipboard()->setText(allLines.join('\n'));
+        });
+}
+
 void ProcessDetailWindow::initializeConnections()
 {
     // 连接初始化日志：用于确认所有按钮信号都已挂接。
@@ -2375,6 +2517,9 @@ void ProcessDetailWindow::initializeConnections()
     });
     connect(m_applyPebEditButton, &QPushButton::clicked, this, [this]() {
         applyPebEditableFields();
+    });
+    connect(m_refreshKernelCallbackButton, &QPushButton::clicked, this, [this]() {
+        requestAsyncKernelCallbackRefresh();
     });
     connect(m_pebTargetCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int) {
         if (m_pebDetailOutput != nullptr)
