@@ -5,8 +5,12 @@
 #include "PathNavigator.h"
 
 #include "../../Ui/Controls.h"
+#include "../../Ui/AsyncTask.h"
+#include "../../Ui/FilterBar.h"
 #include "../../Ui/ListViewUtil.h"
+#include "../../Ui/LoadingOverlay.h"
 #include "../../Ui/Theme.h"
+#include "../../Ui/VirtualListView.h"
 
 #include <commctrl.h>
 #include <shellapi.h>
@@ -31,7 +35,10 @@ constexpr int kPathEditId = 52005;
 constexpr int kButtonGoId = 52006;
 constexpr int kListId = 52007;
 constexpr int kStatusId = 52008;
+constexpr int kFilterBarId = 52009;
 constexpr UINT kColumnMenuBaseId = 52500;
+constexpr UINT kMsgDirectoryRefreshCompleted = WM_APP + 540;
+constexpr UINT kMsgFilterCompleted = WM_APP + 541;
 
 // FileColumnSpec describes one report column. Inputs are static id/title/width
 // values; processing uses the same table for initial creation and user column
@@ -40,6 +47,27 @@ struct FileColumnSpec {
     int index;
     int defaultWidth;
     const wchar_t* title;
+};
+
+// FilePresentationRow is the immutable text snapshot delivered to the virtual
+// ListView. FileEntry remains available for actions while formatting happens
+// once per completed directory snapshot instead of during every repaint.
+struct FilePresentationRow {
+    std::vector<std::wstring> cells;
+    int imageIndex = -2; // -2 means the visible-row icon has not been requested.
+};
+
+struct DirectoryRefreshSnapshot {
+    std::wstring directory;
+    DirectoryEnumerationResult result;
+};
+
+struct FileFilterResult {
+    std::uint64_t generation = 0;
+    std::wstring query;
+    std::vector<std::size_t> visibleIndexes;
+    std::wstring selectedPath;
+    std::wstring topPath;
 };
 
 constexpr FileColumnSpec kFileColumns[] = {
@@ -63,12 +91,24 @@ struct FileViewState {
     HWND refreshButton = nullptr;
     HWND pathEdit = nullptr;
     HWND goButton = nullptr;
+    HWND filterBar = nullptr;
     HWND list = nullptr;
     HWND status = nullptr;
+    HWND loadingOverlay = nullptr;
     HIMAGELIST imageList = nullptr;
     PathNavigator navigator;
     FileSystemEnumerator enumerator;
     std::vector<FileEntry> entries;
+    std::vector<FilePresentationRow> presentationRows;
+    std::shared_ptr<const std::vector<Ksword::Ui::VirtualListRow>> filterRows;
+    std::vector<std::size_t> visibleIndexes;
+    std::wstring displayTextScratch;
+    std::wstring filterQuery;
+    std::wstring enumerationStatusText;
+    std::uint64_t displayGeneration = 0;
+    bool hideOverlayAfterFilter = false;
+    std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<DirectoryRefreshSnapshot>> refreshTask;
+    std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<FileFilterResult>> filterTask;
     std::unordered_map<std::wstring, int> iconCache;
     bool columnVisible[std::size(kFileColumns)] = { true, true, true, true, true, true };
 };
@@ -208,15 +248,16 @@ bool CreateChildControls(FileViewState& state) {
     state.goButton = Ksword::Ui::CreateButton(state.hwnd, kButtonGoId, L"转到", 0, 0, 64, 24);
     state.pathEdit = ::CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
         0, 0, 200, 24, state.hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kPathEditId)), ::GetModuleHandleW(nullptr), nullptr);
+    state.filterBar = Ksword::Ui::CreateFilterBar(state.hwnd, kFilterBarId, L"筛选名称、类型、路径和属性", 0, 0, 200, 24);
     state.list = ::CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"",
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS,
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS | LVS_OWNERDATA,
         0, 0, 400, 300, state.hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kListId)), ::GetModuleHandleW(nullptr), nullptr);
     state.status = Ksword::Ui::CreateText(state.hwnd, kStatusId, L"", 0, 0, 300, 20);
 
     if (state.pathEdit) {
         ::SendMessageW(state.pathEdit, WM_SETFONT, reinterpret_cast<WPARAM>(Ksword::Ui::SystemUIFont()), TRUE);
     }
-    if (!state.pathEdit || !state.list) {
+    if (!state.pathEdit || !state.filterBar || !state.list) {
         return false;
     }
 
@@ -268,10 +309,20 @@ void LayoutFileView(FileViewState& state) {
     x += editW + gap;
     ::MoveWindow(state.goButton, x, y, goW, buttonH, TRUE);
 
-    const int listTop = y + buttonH + margin;
+    const int filterTop = y + buttonH + 5;
+    ::MoveWindow(state.filterBar, margin, filterTop, std::max(80, static_cast<int>(rc.right - margin * 2)), buttonH, TRUE);
+    const int listTop = filterTop + buttonH + 5;
     const int listH = std::max(80, static_cast<int>(rc.bottom - listTop - statusH - margin));
     ::MoveWindow(state.list, margin, listTop, std::max(80, static_cast<int>(rc.right - margin * 2)), listH, TRUE);
     ::MoveWindow(state.status, margin, listTop + listH + 2, std::max(80, static_cast<int>(rc.right - margin * 2)), statusH, TRUE);
+    if (state.loadingOverlay) {
+        ::MoveWindow(state.loadingOverlay,
+            margin,
+            listTop,
+            std::max(80, static_cast<int>(rc.right - margin * 2)),
+            listH,
+            TRUE);
+    }
 }
 
 // EntryTypeText converts a model kind into a Chinese display string. Input is a
@@ -284,12 +335,6 @@ const wchar_t* EntryTypeText(const FileEntry& entry) {
         return entry.reparsePoint ? L"目录/链接" : L"目录";
     }
     return entry.reparsePoint ? L"文件/链接" : L"文件";
-}
-
-// SetListText writes one subitem in the report list. Inputs are list HWND, row,
-// column and text; processing uses ListView_SetItemText; no value is returned.
-void SetListText(HWND list, int row, int column, const std::wstring& text) {
-    ListView_SetItemText(list, row, column, const_cast<LPWSTR>(text.c_str()));
 }
 
 // ApplyColumnVisibility adjusts report-column widths without rebuilding rows.
@@ -332,52 +377,198 @@ void ShowColumnMenu(FileViewState& state, POINT screenPoint) {
     }
 }
 
-// PopulateList replaces the visible rows with the latest enumeration result.
-// Input is mutable state and an enumeration result; processing stores the row
-// model and fills list-view subitems; no value is returned.
-void PopulateList(FileViewState& state, DirectoryEnumerationResult result) {
-    state.entries = std::move(result.entries);
-    Ksword::Ui::ScopedListViewRedrawLock redrawLock(state.list);
-    ListView_DeleteAllItems(state.list);
-
-    for (int index = 0; index < static_cast<int>(state.entries.size()); ++index) {
-        const FileEntry& entry = state.entries[index];
-        LVITEMW item{};
-        item.mask = LVIF_TEXT | LVIF_PARAM;
-        const int iconIndex = IconIndexForEntry(state, entry);
-        if (iconIndex >= 0) {
-            item.mask |= LVIF_IMAGE;
-            item.iImage = iconIndex;
-        }
-        item.iItem = index;
-        item.pszText = const_cast<LPWSTR>(entry.name.c_str());
-        item.lParam = index;
-        ListView_InsertItem(state.list, &item);
-
-        SetListText(state.list, index, 1, EntryTypeText(entry));
-        SetListText(state.list, index, 2, FileSystemEnumerator::formatSize(entry.size, entry.kind));
-        SetListText(state.list, index, 3, FileSystemEnumerator::formatLastWriteTime(entry.lastWriteTime));
-        SetListText(state.list, index, 4, FileSystemEnumerator::formatAttributes(entry.attributes));
-        SetListText(state.list, index, 5, entry.fullPath);
+// VisibleEntryIndex translates an owner-data item to its immutable source index.
+// It never asks ListView for an LVITEM because owner-data lists retain no row
+// storage for us to read back.
+std::size_t VisibleEntryIndex(const FileViewState& state, const int item) {
+    if (item < 0 || static_cast<std::size_t>(item) >= state.visibleIndexes.size()) {
+        return static_cast<std::size_t>(-1);
     }
+    return state.visibleIndexes[static_cast<std::size_t>(item)];
+}
 
-    SetStatus(state, result.statusText);
+std::wstring SelectedEntryPath(const FileViewState& state) {
+    const int selected = state.list ? ListView_GetNextItem(state.list, -1, LVNI_SELECTED) : -1;
+    const std::size_t entryIndex = VisibleEntryIndex(state, selected);
+    return entryIndex < state.entries.size() ? state.entries[entryIndex].fullPath : std::wstring{};
+}
+
+std::wstring TopEntryPath(const FileViewState& state) {
+    const int topItem = state.list ? ListView_GetTopIndex(state.list) : -1;
+    const std::size_t entryIndex = VisibleEntryIndex(state, topItem);
+    return entryIndex < state.entries.size() ? state.entries[entryIndex].fullPath : std::wstring{};
+}
+
+void RequestFileFilter(FileViewState& state,
+    const std::wstring& query,
+    std::wstring selectedPath,
+    std::wstring topPath);
+
+// BuildPresentationRows materializes every display field once, after the
+// directory worker returns. Scrolling then asks only for visible cached text.
+void BuildPresentationRows(FileViewState& state, DirectoryEnumerationResult result) {
+    state.entries = std::move(result.entries);
+    state.enumerationStatusText = result.statusText;
+    state.presentationRows.clear();
+    state.presentationRows.reserve(state.entries.size());
+    auto filterRows = std::make_shared<std::vector<Ksword::Ui::VirtualListRow>>();
+    filterRows->reserve(state.entries.size());
+
+    for (const FileEntry& entry : state.entries) {
+        FilePresentationRow row{};
+        row.cells = {
+            entry.name,
+            EntryTypeText(entry),
+            FileSystemEnumerator::formatSize(entry.size, entry.kind),
+            FileSystemEnumerator::formatLastWriteTime(entry.lastWriteTime),
+            FileSystemEnumerator::formatAttributes(entry.attributes),
+            entry.fullPath
+        };
+        Ksword::Ui::VirtualListRow filterRow{};
+        filterRow.stableKey = entry.fullPath;
+        filterRow.cells = row.cells;
+        state.presentationRows.push_back(std::move(row));
+        filterRows->push_back(std::move(filterRow));
+    }
+    state.filterRows = std::move(filterRows);
+    ++state.displayGeneration;
+}
+
+// ApplyFileFilter installs a background-produced visible-index map and restores
+// selection/scroll position by full path whenever those entries still exist.
+void ApplyFileFilter(FileViewState& state, FileFilterResult result) {
+    if (!state.list || result.generation != state.displayGeneration || result.query != state.filterQuery) {
+        return;
+    }
+    state.visibleIndexes = std::move(result.visibleIndexes);
+    int selectedItem = -1;
+    int topItem = -1;
+    {
+        Ksword::Ui::ScopedListViewRedrawLock redrawLock(state.list);
+        ListView_SetItemCountEx(state.list,
+            static_cast<int>(std::min<std::size_t>(state.visibleIndexes.size(), static_cast<std::size_t>(INT_MAX))),
+            LVSICF_NOINVALIDATEALL | LVSICF_NOSCROLL);
+        ListView_SetItemState(state.list, -1, 0, LVIS_SELECTED | LVIS_FOCUSED);
+        for (std::size_t item = 0; item < state.visibleIndexes.size(); ++item) {
+            const std::size_t entryIndex = state.visibleIndexes[item];
+            if (entryIndex >= state.entries.size()) {
+                continue;
+            }
+            const std::wstring& path = state.entries[entryIndex].fullPath;
+            if (selectedItem < 0 && !result.selectedPath.empty() && path == result.selectedPath) {
+                selectedItem = static_cast<int>(item);
+            }
+            if (topItem < 0 && !result.topPath.empty() && path == result.topPath) {
+                topItem = static_cast<int>(item);
+            }
+        }
+        if (selectedItem >= 0) {
+            ListView_SetItemState(state.list, selectedItem, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
+        }
+        if (topItem >= 0) {
+            ListView_EnsureVisible(state.list, topItem, FALSE);
+        } else if (selectedItem >= 0) {
+            ListView_EnsureVisible(state.list, selectedItem, FALSE);
+        }
+    }
+    ::InvalidateRect(state.list, nullptr, FALSE);
+    const std::wstring filterSuffix = result.query.empty()
+        ? L""
+        : L"；筛选 " + std::to_wstring(state.visibleIndexes.size()) + L" / " + std::to_wstring(state.entries.size()) + L" 项";
+    SetStatus(state, state.enumerationStatusText + filterSuffix);
+    if (state.hideOverlayAfterFilter) {
+        state.hideOverlayAfterFilter = false;
+        Ksword::Ui::SetLoadingOverlay(state.loadingOverlay, false);
+    }
+}
+
+// RequestFileFilter uses the cached value snapshot only. Input changes are
+// debounced by FilterBar and coalesced here, without another filesystem walk.
+void RequestFileFilter(FileViewState& state,
+    const std::wstring& query,
+    std::wstring selectedPath,
+    std::wstring topPath) {
+    state.filterQuery = query;
+    const std::shared_ptr<const std::vector<Ksword::Ui::VirtualListRow>> rows = state.filterRows;
+    const std::uint64_t generation = state.displayGeneration;
+    if (!state.filterTask || !rows) {
+        return;
+    }
+    state.filterTask->request(
+        [rows, generation, query, selectedPath = std::move(selectedPath), topPath = std::move(topPath)]() mutable {
+            FileFilterResult result{};
+            result.generation = generation;
+            result.query = std::move(query);
+            result.selectedPath = std::move(selectedPath);
+            result.topPath = std::move(topPath);
+            result.visibleIndexes = Ksword::Ui::VirtualListView::FilterRowIndexes(*rows, result.query);
+            return result;
+        },
+        [&state](std::uint64_t, std::optional<FileFilterResult>&& result, std::exception_ptr error) {
+            if (error || !result.has_value()) {
+                SetStatus(state, L"文件筛选任务异常结束。已保留当前结果。");
+                if (state.hideOverlayAfterFilter) {
+                    state.hideOverlayAfterFilter = false;
+                    Ksword::Ui::SetLoadingOverlay(state.loadingOverlay, false);
+                }
+                return;
+            }
+            ApplyFileFilter(state, std::move(*result));
+        });
+}
+
+// ApplyDirectoryRefresh accepts only the completed worker snapshot and starts
+// a cached background filter pass. No FindFirstFile/FindNextFile work runs in
+// UI message handlers.
+void ApplyDirectoryRefresh(FileViewState& state, DirectoryRefreshSnapshot snapshot) {
+    if (snapshot.directory != state.navigator.currentPath()) {
+        return;
+    }
+    const std::wstring selectedPath = SelectedEntryPath(state);
+    const std::wstring topPath = TopEntryPath(state);
+    BuildPresentationRows(state, std::move(snapshot.result));
+    state.visibleIndexes.clear();
+    ListView_SetItemCountEx(state.list, 0, LVSICF_NOINVALIDATEALL | LVSICF_NOSCROLL);
     ApplyColumnVisibility(state);
     ::EnableWindow(state.backButton, state.navigator.canNavigateBack());
     ::EnableWindow(state.forwardButton, state.navigator.canNavigateForward());
+    state.hideOverlayAfterFilter = true;
+    RequestFileFilter(state,
+        state.filterBar ? Ksword::Ui::GetFilterBarText(state.filterBar) : state.filterQuery,
+        selectedPath,
+        topPath);
 }
 
-// RefreshCurrentPath enumerates the navigator's active path. Input is the page
-// state; processing updates the path edit and list rows; no value is returned.
+// RefreshCurrentPath schedules directory enumeration and leaves the previous
+// immutable table available under a loading overlay until the latest result is
+// installed. Repeated navigation and refresh commands are coalesced.
 void RefreshCurrentPath(FileViewState& state) {
+    if (!state.refreshTask) {
+        return;
+    }
     const std::wstring current = state.navigator.currentPath();
     ::SetWindowTextW(state.pathEdit, current.empty() ? L"此电脑" : current.c_str());
-    PopulateList(state, state.enumerator.enumerate(current));
+    SetStatus(state, state.refreshTask->running() ? L"目录刷新已排队，等待当前枚举完成…" : L"正在后台枚举目录…");
+    ::EnableWindow(state.refreshButton, FALSE);
+    Ksword::Ui::SetLoadingOverlay(state.loadingOverlay, true, L"正在后台加载目录…");
+    state.refreshTask->request(
+        [current]() {
+            FileSystemEnumerator enumerator;
+            return DirectoryRefreshSnapshot{ current, enumerator.enumerate(current) };
+        },
+        [&state](std::uint64_t, std::optional<DirectoryRefreshSnapshot>&& snapshot, std::exception_ptr error) {
+            ::EnableWindow(state.refreshButton, TRUE);
+            if (error || !snapshot.has_value()) {
+                Ksword::Ui::SetLoadingOverlay(state.loadingOverlay, false);
+                SetStatus(state, L"目录枚举任务异常结束。请检查路径与访问权限。");
+                return;
+            }
+            ApplyDirectoryRefresh(state, std::move(*snapshot));
+        });
 }
 
-// NavigateTo requests a new directory. Inputs are state and raw path; processing
-// normalizes the path through PathNavigator and refreshes rows; no value is
-// returned.
+// NavigateTo updates only the lightweight navigator on the UI thread, then
+// schedules the potentially slow filesystem snapshot in RefreshCurrentPath.
 void NavigateTo(FileViewState& state, const std::wstring& path) {
     state.navigator.navigateTo(path);
     RefreshCurrentPath(state);
@@ -402,11 +593,12 @@ std::wstring TextFromWindow(HWND hwnd) {
 // Inputs are state and output pointer; output is true when a row is selected.
 bool SelectedEntry(const FileViewState& state, FileEntry* entry) {
     const int selected = ListView_GetNextItem(state.list, -1, LVNI_SELECTED);
-    if (selected < 0 || selected >= static_cast<int>(state.entries.size())) {
+    const std::size_t entryIndex = VisibleEntryIndex(state, selected);
+    if (entryIndex >= state.entries.size()) {
         return false;
     }
     if (entry) {
-        *entry = state.entries[selected];
+        *entry = state.entries[entryIndex];
     }
     return true;
 }
@@ -493,6 +685,33 @@ bool HandleNotify(FileViewState& state, const NMHDR* hdr) {
     if (!hdr || hdr->hwndFrom != state.list) {
         return false;
     }
+    if (hdr->code == LVN_GETDISPINFOW) {
+        auto* displayInfo = reinterpret_cast<NMLVDISPINFOW*>(const_cast<NMHDR*>(hdr));
+        const std::size_t entryIndex = VisibleEntryIndex(state, displayInfo->item.iItem);
+        if (entryIndex >= state.presentationRows.size()) {
+            return true;
+        }
+        FilePresentationRow& row = state.presentationRows[entryIndex];
+        if ((displayInfo->item.mask & LVIF_TEXT) != 0) {
+            const int column = displayInfo->item.iSubItem;
+            state.displayTextScratch = column >= 0 && static_cast<std::size_t>(column) < row.cells.size()
+                ? row.cells[static_cast<std::size_t>(column)]
+                : std::wstring{};
+            displayInfo->item.pszText = state.displayTextScratch.data();
+        }
+        if ((displayInfo->item.mask & LVIF_PARAM) != 0) {
+            displayInfo->item.lParam = static_cast<LPARAM>(entryIndex);
+        }
+        if ((displayInfo->item.mask & LVIF_IMAGE) != 0) {
+            if (row.imageIndex == -2) {
+                row.imageIndex = IconIndexForEntry(state, state.entries[entryIndex]);
+            }
+            if (row.imageIndex >= 0) {
+                displayInfo->item.iImage = row.imageIndex;
+            }
+        }
+        return true;
+    }
     if (hdr->code == NM_DBLCLK) {
         OpenSelectedEntry(state);
         return true;
@@ -500,6 +719,15 @@ bool HandleNotify(FileViewState& state, const NMHDR* hdr) {
     if (hdr->code == NM_RCLICK) {
         POINT pt{};
         ::GetCursorPos(&pt);
+        POINT client = pt;
+        ::ScreenToClient(state.list, &client);
+        LVHITTESTINFO hit{};
+        hit.pt = client;
+        const int item = ListView_HitTest(state.list, &hit);
+        if (item >= 0) {
+            ListView_SetItemState(state.list, -1, 0, LVIS_SELECTED | LVIS_FOCUSED);
+            ListView_SetItemState(state.list, item, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
+        }
         ShowContextMenu(state, pt);
         return true;
     }
@@ -537,6 +765,9 @@ LRESULT CALLBACK FileViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             return -1;
         }
         ownedState.release();
+        state->loadingOverlay = Ksword::Ui::CreateLoadingOverlay(hwnd, 52010, { 0, 0, 1, 1 });
+        state->refreshTask = std::make_unique<Ksword::Ui::AsyncSnapshotTask<DirectoryRefreshSnapshot>>(hwnd, kMsgDirectoryRefreshCompleted);
+        state->filterTask = std::make_unique<Ksword::Ui::AsyncSnapshotTask<FileFilterResult>>(hwnd, kMsgFilterCompleted);
         RefreshCurrentPath(*state);
         return 0;
     }
@@ -546,7 +777,24 @@ LRESULT CALLBACK FileViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         }
         return 0;
     case WM_COMMAND:
+        if (state && LOWORD(wParam) == kFilterBarId && HIWORD(wParam) == EN_CHANGE) {
+            RequestFileFilter(*state,
+                Ksword::Ui::GetFilterBarText(state->filterBar),
+                SelectedEntryPath(*state),
+                TopEntryPath(*state));
+            return 0;
+        }
         if (state && HandleCommand(*state, LOWORD(wParam))) {
+            return 0;
+        }
+        break;
+    case kMsgDirectoryRefreshCompleted:
+        if (state && state->refreshTask && state->refreshTask->consume(hwnd, wParam, lParam)) {
+            return 0;
+        }
+        break;
+    case kMsgFilterCompleted:
+        if (state && state->filterTask && state->filterTask->consume(hwnd, wParam, lParam)) {
             return 0;
         }
         break;
@@ -585,6 +833,12 @@ LRESULT CALLBACK FileViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         return 0;
     }
     case WM_NCDESTROY:
+        if (state && state->refreshTask) {
+            state->refreshTask->cancel();
+        }
+        if (state && state->filterTask) {
+            state->filterTask->cancel();
+        }
         if (state && state->imageList) {
             ImageList_Destroy(state->imageList);
             state->imageList = nullptr;
