@@ -1,9 +1,13 @@
 #include "DriverOverviewView.h"
 
 #include "DriverActions.h"
+#include "../../Ui/AsyncTask.h"
 #include "../../Ui/Controls.h"
+#include "../../Ui/FilterBar.h"
 #include "../../Ui/ListViewUtil.h"
+#include "../../Ui/LoadingOverlay.h"
 #include "../../Ui/Theme.h"
+#include "../../Ui/VirtualListView.h"
 
 #include <commctrl.h>
 #include <windowsx.h>
@@ -19,10 +23,15 @@ namespace {
 constexpr wchar_t kDriverOverviewClass[] = L"KswordARKLight.DriverOverviewView";
 constexpr int kOverviewListId = 64001;
 constexpr int kOverviewFilterId = 64002;
+constexpr int kOverviewLoadingOverlayId = 64003;
 constexpr UINT kOverviewMenuDetail = 64101;
+constexpr UINT kOverviewMenuCopyCell = 64102;
 constexpr UINT kOverviewMenuCopyRow = 64103;
 constexpr UINT kOverviewMenuCopyName = 64104;
 constexpr UINT kOverviewMenuCopyPath = 64105;
+constexpr UINT kOverviewMenuCopyVisible = 64106;
+constexpr UINT kMsgOverviewFilterCompleted = WM_APP + 596;
+constexpr UINT kMsgOverviewDetailCompleted = WM_APP + 597;
 constexpr wchar_t kOverviewDetailClass[] = L"KswordARKLight.DriverOverviewDetailDialog";
 constexpr int kOverviewDetailEditId = 64121;
 constexpr int kOverviewDetailCopyId = 64122;
@@ -33,10 +42,31 @@ constexpr int kOverviewDetailCloseId = 64123;
 // renders it into the child list; no ownership of the model is transferred.
 struct DriverOverviewViewState {
     HWND hwnd = nullptr;
-    HWND filterEdit = nullptr;
+    HWND filterBar = nullptr;
     HWND listView = nullptr;
+    HWND loadingOverlay = nullptr;
     DriverModel* model = nullptr;
+    std::vector<DriverOverviewRow> snapshotRows;
     std::vector<DriverOverviewRow> visibleRows;
+    Ksword::Ui::VirtualListView virtualList;
+    std::shared_ptr<const std::vector<Ksword::Ui::VirtualListRow>> filterRows;
+    std::wstring filterQuery;
+    std::uint64_t snapshotGeneration = 0;
+    std::uint64_t detailRequestId = 0;
+    int contextColumn = 0;
+    std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<struct OverviewFilterResult>> filterTask;
+    std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<struct OverviewDetailResult>> detailTask;
+};
+
+struct OverviewFilterResult {
+    std::uint64_t snapshotGeneration = 0;
+    std::wstring query;
+    std::vector<std::size_t> visibleIndexes;
+};
+
+struct OverviewDetailResult {
+    std::uint64_t requestId = 0;
+    std::wstring text;
 };
 
 // DetailDialogState owns one modeless detail window. Input is the generated
@@ -109,27 +139,12 @@ bool SelectedOverviewRow(const DriverOverviewViewState& state, DriverOverviewRow
     return true;
 }
 
-// GetEditText reads a single-line filter edit. Input is an edit HWND; output is
-// the current UTF-16 text or an empty string when the control is unavailable.
-std::wstring GetEditText(HWND edit) {
-    if (!edit) {
-        return {};
-    }
-    const int length = ::GetWindowTextLengthW(edit);
-    std::wstring text(static_cast<std::size_t>(std::max(0, length)) + 1U, L'\0');
-    if (length > 0) {
-        ::GetWindowTextW(edit, text.data(), length + 1);
-    }
-    text.resize(static_cast<std::size_t>(std::max(0, length)));
-    return text;
-}
-
 // CopyOverviewText writes selected driver text to the clipboard. Inputs are view
 // state and payload; processing delegates clipboard ownership to DriverActions;
-// no value is returned because feedback is shown through a small message box.
+// no value is returned because callers retain the non-blocking page state.
 void CopyOverviewText(const DriverOverviewViewState& state, const std::wstring& text, const wchar_t* title) {
-    const bool ok = DriverActions::CopyTextToClipboard(state.hwnd, text);
-    ::MessageBoxW(state.hwnd, ok ? L"已复制到剪贴板。" : L"复制失败。", title, MB_OK | (ok ? MB_ICONINFORMATION : MB_ICONWARNING));
+    (void)title;
+    DriverActions::CopyTextToClipboard(state.hwnd, text);
 }
 
 // BuildOverviewRowText serializes one overview row. Input is the selected model
@@ -144,6 +159,69 @@ std::wstring BuildOverviewRowText(const DriverOverviewRow& row) {
         row.statusText + L"\t" +
         row.anomalyText + L"\t" +
         row.capabilityHint;
+}
+
+// OverviewCells builds the immutable display cells for a snapshot row. It is
+// used by both owner-data rendering and clipboard export, so filtering matches
+// exactly the text visible to the user.
+std::vector<std::wstring> OverviewCells(const DriverOverviewRow& row) {
+    return {
+        row.driverName,
+        row.baseAddressText,
+        row.memoryRangeText,
+        row.sizeText,
+        row.pathText,
+        row.signatureText,
+        row.statusText,
+        row.anomalyText,
+        row.capabilityHint
+    };
+}
+
+// OverviewStableKey provides selection restoration across a background filter
+// or refresh. The path prevents duplicate module display names from colliding.
+std::wstring OverviewStableKey(const DriverOverviewRow& row) {
+    return row.driverName + L"\n" + row.pathText + L"\n" + row.baseAddressText;
+}
+
+std::vector<Ksword::Ui::VirtualListRow> BuildOverviewVirtualRows(const std::vector<DriverOverviewRow>& rows) {
+    std::vector<Ksword::Ui::VirtualListRow> displayRows;
+    displayRows.reserve(rows.size());
+    for (std::size_t index = 0; index < rows.size(); ++index) {
+        Ksword::Ui::VirtualListRow display{};
+        display.stableKey = OverviewStableKey(rows[index]);
+        display.cells = OverviewCells(rows[index]);
+        display.itemData = static_cast<LPARAM>(index);
+        displayRows.push_back(std::move(display));
+    }
+    return displayRows;
+}
+
+std::wstring StableKeyAt(const DriverOverviewViewState& state, const int visibleIndex) {
+    if (visibleIndex < 0 || visibleIndex >= static_cast<int>(state.visibleRows.size())) {
+        return {};
+    }
+    return OverviewStableKey(state.visibleRows[static_cast<std::size_t>(visibleIndex)]);
+}
+
+void RestoreListPosition(DriverOverviewViewState& state, const std::wstring& selectedKey, const std::wstring& topKey) {
+    int selectedIndex = -1;
+    int topIndex = -1;
+    for (std::size_t index = 0; index < state.visibleRows.size(); ++index) {
+        const std::wstring key = OverviewStableKey(state.visibleRows[index]);
+        if (!selectedKey.empty() && key == selectedKey) {
+            selectedIndex = static_cast<int>(index);
+        }
+        if (!topKey.empty() && key == topKey) {
+            topIndex = static_cast<int>(index);
+        }
+    }
+    if (selectedIndex >= 0) {
+        ListView_SetItemState(state.listView, selectedIndex, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
+    }
+    if (topIndex >= 0) {
+        ListView_EnsureVisible(state.listView, topIndex, FALSE);
+    }
 }
 
 // RegisterDetailDialogClass installs the modeless detail window class. There
@@ -290,15 +368,33 @@ std::wstring BuildOverviewDetailText(const DriverOverviewRow& row) {
     return detail;
 }
 
-// ShowOverviewDetail displays the generated detail body in a scrollable popup.
-// Input is the view state; processing routes R0 access through DriverActions;
-// no value is returned.
-void ShowOverviewDetail(const DriverOverviewViewState& state) {
+// ShowOverviewDetail starts the potentially slow R0 DriverObject query away
+// from the UI thread. The overlay makes the wait explicit while the list stays
+// usable after the result arrives.
+void ShowOverviewDetail(DriverOverviewViewState& state) {
     DriverOverviewRow row;
-    if (SelectedOverviewRow(state, &row)) {
-        ShowDetailWindow(state.hwnd, L"驱动详细信息", BuildOverviewDetailText(row));
+    if (!SelectedOverviewRow(state, &row) || !state.detailTask) {
+        return;
     }
+    const std::uint64_t requestId = ++state.detailRequestId;
+    Ksword::Ui::SetLoadingOverlay(state.loadingOverlay, true, L"正在后台查询 DriverObject 详情…");
+    state.detailTask->request(
+        [row, requestId] {
+            OverviewDetailResult result{};
+            result.requestId = requestId;
+            result.text = BuildOverviewDetailText(row);
+            return result;
+        },
+        [&state](std::uint64_t, std::optional<OverviewDetailResult>&& result, std::exception_ptr error) {
+            Ksword::Ui::SetLoadingOverlay(state.loadingOverlay, false);
+            if (error || !result.has_value() || result->requestId != state.detailRequestId) {
+                return;
+            }
+            ShowDetailWindow(state.hwnd, L"驱动详细信息", result->text);
+        });
 }
+
+std::wstring BuildOverviewTsv(const DriverOverviewViewState& state);
 
 // ShowOverviewContextMenu displays the overview right-click menu. Inputs are
 // the view state and screen coordinate; processing selects the clicked row,
@@ -309,6 +405,7 @@ void ShowOverviewContextMenu(DriverOverviewViewState& state, POINT screenPoint) 
     LVHITTESTINFO hit{};
     hit.pt = clientPoint;
     const int item = ListView_HitTest(state.listView, &hit);
+    state.contextColumn = std::max(0, hit.iSubItem);
     if (item >= 0) {
         ListView_SetItemState(state.listView, -1, 0, LVIS_SELECTED | LVIS_FOCUSED);
         ListView_SetItemState(state.listView, item, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
@@ -321,9 +418,11 @@ void ShowOverviewContextMenu(DriverOverviewViewState& state, POINT screenPoint) 
     }
     HMENU copyMenu = ::CreatePopupMenu();
     if (copyMenu) {
+        ::AppendMenuW(copyMenu, MF_STRING | (hasSelection ? 0U : MF_GRAYED), kOverviewMenuCopyCell, L"复制单元格");
         ::AppendMenuW(copyMenu, MF_STRING | (hasSelection ? 0U : MF_GRAYED), kOverviewMenuCopyRow, L"复制当前行");
         ::AppendMenuW(copyMenu, MF_STRING | (hasSelection ? 0U : MF_GRAYED), kOverviewMenuCopyName, L"复制驱动名称");
         ::AppendMenuW(copyMenu, MF_STRING | (hasSelection ? 0U : MF_GRAYED), kOverviewMenuCopyPath, L"复制驱动路径");
+        ::AppendMenuW(copyMenu, MF_STRING | (!state.visibleRows.empty() ? 0U : MF_GRAYED), kOverviewMenuCopyVisible, L"复制可见结果");
         ::AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(copyMenu), L"复制");
     }
     HMENU detailMenu = ::CreatePopupMenu();
@@ -336,14 +435,24 @@ void ShowOverviewContextMenu(DriverOverviewViewState& state, POINT screenPoint) 
     ::DestroyMenu(menu);
     if (command == kOverviewMenuDetail) {
         ShowOverviewDetail(state);
-    } else if (command == kOverviewMenuCopyRow ||
+    } else if (command == kOverviewMenuCopyCell ||
+        command == kOverviewMenuCopyRow ||
         command == kOverviewMenuCopyName ||
-        command == kOverviewMenuCopyPath) {
+        command == kOverviewMenuCopyPath ||
+        command == kOverviewMenuCopyVisible) {
+        if (command == kOverviewMenuCopyVisible) {
+            CopyOverviewText(state, BuildOverviewTsv(state), L"复制可见驱动结果");
+            return;
+        }
         DriverOverviewRow row;
         if (!SelectedOverviewRow(state, &row)) {
             return;
         }
-        if (command == kOverviewMenuCopyRow) {
+        if (command == kOverviewMenuCopyCell) {
+            const std::vector<std::wstring> cells = OverviewCells(row);
+            const std::size_t column = static_cast<std::size_t>(std::max(0, state.contextColumn));
+            CopyOverviewText(state, column < cells.size() ? cells[column] : std::wstring{}, L"复制单元格");
+        } else if (command == kOverviewMenuCopyRow) {
             CopyOverviewText(state, BuildOverviewRowText(row), L"复制驱动行");
         } else if (command == kOverviewMenuCopyName) {
             CopyOverviewText(state, row.driverName, L"复制驱动名称");
@@ -370,34 +479,60 @@ std::vector<Ksword::Ui::ListViewColumn> OverviewColumns() {
     };
 }
 
-// PopulateOverviewList rebuilds the list-view from the model snapshot. Input is
-// the view state; processing copies each visible row into the report control;
-// no value is returned.
-void PopulateOverviewList(DriverOverviewViewState& state) {
-    if (!state.listView) {
+std::wstring BuildOverviewTsv(const DriverOverviewViewState& state);
+
+// RequestOverviewFilter filters the immutable preformatted snapshot away from
+// the UI thread. A generation check prevents older input or refresh results
+// from replacing a newer visible result.
+void RequestOverviewFilter(DriverOverviewViewState& state, std::wstring query) {
+    if (!state.filterTask || !state.filterRows) {
         return;
     }
-
-    Ksword::Ui::ClearListViewRows(state.listView);
-    state.visibleRows.clear();
-    if (!state.model) {
-        return;
-    }
-
-    state.visibleRows = state.model->filterOverviewRows(GetEditText(state.filterEdit));
-    for (const DriverOverviewRow& row : state.visibleRows) {
-        Ksword::Ui::InsertListViewTextRow(state.listView, {
-            row.driverName,
-            row.baseAddressText,
-            row.memoryRangeText,
-            row.sizeText,
-            row.pathText,
-            row.signatureText,
-            row.statusText,
-            row.anomalyText,
-            row.capabilityHint
+    state.filterQuery = std::move(query);
+    const std::uint64_t generation = state.snapshotGeneration;
+    const auto rows = state.filterRows;
+    state.filterTask->request(
+        [rows, generation, query = state.filterQuery]() mutable {
+            OverviewFilterResult result{};
+            result.snapshotGeneration = generation;
+            result.query = std::move(query);
+            result.visibleIndexes = Ksword::Ui::VirtualListView::FilterRowIndexes(*rows, result.query);
+            return result;
+        },
+        [&state](std::uint64_t, std::optional<OverviewFilterResult>&& result, std::exception_ptr error) {
+            if (error || !result.has_value() ||
+                result->snapshotGeneration != state.snapshotGeneration ||
+                result->query != state.filterQuery) {
+                return;
+            }
+            const int selected = ListView_GetNextItem(state.listView, -1, LVNI_SELECTED);
+            const std::wstring selectedKey = StableKeyAt(state, selected);
+            const std::wstring topKey = StableKeyAt(state, ListView_GetTopIndex(state.listView));
+            state.visibleRows.clear();
+            state.visibleRows.reserve(result->visibleIndexes.size());
+            for (const std::size_t index : result->visibleIndexes) {
+                if (index < state.snapshotRows.size()) {
+                    state.visibleRows.push_back(state.snapshotRows[index]);
+                }
+            }
+            state.virtualList.setVisibleIndexes(std::move(result->visibleIndexes));
+            RestoreListPosition(state, selectedKey, topKey);
         });
+}
+
+// PopulateOverviewList installs an immutable virtual-list snapshot. It does
+// not enumerate or filter synchronously, so a driver refresh never causes a
+// per-row ListView insertion storm on the UI thread.
+void PopulateOverviewList(DriverOverviewViewState& state) {
+    if (!state.listView || !state.model) {
+        return;
     }
+    state.snapshotRows = state.model->overviewRows();
+    state.filterRows = std::make_shared<const std::vector<Ksword::Ui::VirtualListRow>>(
+        BuildOverviewVirtualRows(state.snapshotRows));
+    ++state.snapshotGeneration;
+    state.virtualList.setRows(*state.filterRows);
+    RequestOverviewFilter(state, state.filterBar ? Ksword::Ui::GetFilterBarText(state.filterBar) : state.filterQuery);
 }
 
 // BuildOverviewTsv converts the current overview rows into TSV text. Input is
@@ -445,35 +580,42 @@ bool RegisterDriverOverviewClass() {
         switch (msg) {
         case WM_CREATE:
             if (state) {
-                state->filterEdit = ::CreateWindowExW(
-                    WS_EX_CLIENTEDGE,
-                    L"EDIT",
-                    L"",
-                    WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
-                    0,
-                    0,
-                    0,
-                    0,
-                    hwnd,
-                    reinterpret_cast<HMENU>(static_cast<INT_PTR>(kOverviewFilterId)),
-                    ::GetModuleHandleW(nullptr),
-                    nullptr);
-                state->listView = Ksword::Ui::CreateReportListView(hwnd, kOverviewListId, 0, 0, 0, 0);
-                SetChildFont(state->filterEdit);
+                state->filterBar = Ksword::Ui::CreateFilterBar(hwnd, kOverviewFilterId,
+                    L"筛选驱动、路径、签名、状态和异常详情", 0, 0, 0, 0);
+                if (state->virtualList.create(hwnd, kOverviewListId, 0, 0, 0, 0, LVS_SHOWSELALWAYS | LVS_SINGLESEL)) {
+                    state->listView = state->virtualList.hwnd();
+                }
                 SetChildFont(state->listView);
-                Ksword::Ui::AddListViewColumns(state->listView, OverviewColumns());
+                state->virtualList.addColumns(OverviewColumns());
+                state->loadingOverlay = Ksword::Ui::CreateLoadingOverlay(hwnd, kOverviewLoadingOverlayId, { 0, 0, 1, 1 });
+                state->filterTask = std::make_unique<Ksword::Ui::AsyncSnapshotTask<OverviewFilterResult>>(hwnd, kMsgOverviewFilterCompleted);
+                state->detailTask = std::make_unique<Ksword::Ui::AsyncSnapshotTask<OverviewDetailResult>>(hwnd, kMsgOverviewDetailCompleted);
                 PopulateOverviewList(*state);
             }
             return 0;
         case WM_COMMAND:
             if (state && LOWORD(wParam) == kOverviewFilterId && HIWORD(wParam) == EN_CHANGE) {
-                PopulateOverviewList(*state);
+                RequestOverviewFilter(*state, Ksword::Ui::GetFilterBarText(state->filterBar));
+                return 0;
+            }
+            break;
+        case kMsgOverviewFilterCompleted:
+            if (state && state->filterTask && state->filterTask->consume(hwnd, wParam, lParam)) {
+                return 0;
+            }
+            break;
+        case kMsgOverviewDetailCompleted:
+            if (state && state->detailTask && state->detailTask->consume(hwnd, wParam, lParam)) {
                 return 0;
             }
             break;
         case WM_NOTIFY:
             if (state) {
                 const auto* header = reinterpret_cast<const NMHDR*>(lParam);
+                LRESULT virtualResult = 0;
+                if (header && state->virtualList.handleNotify(*header, virtualResult)) {
+                    return virtualResult;
+                }
                 if (header && header->hwndFrom == state->listView && header->code == NM_RCLICK) {
                     POINT pt{};
                     ::GetCursorPos(&pt);
@@ -501,12 +643,19 @@ bool RegisterDriverOverviewClass() {
                 const int width = rc.right - rc.left;
                 const int height = rc.bottom - rc.top;
                 const int margin = 6;
-                const int filterHeight = 24;
-                ::MoveWindow(state->filterEdit, margin, margin, std::max(80, width - margin * 2), filterHeight, TRUE);
+                const int filterHeight = 28;
+                ::MoveWindow(state->filterBar, margin, margin, std::max(80, width - margin * 2), filterHeight, TRUE);
                 ::MoveWindow(state->listView, 0, filterHeight + margin * 2, width, std::max(40, height - filterHeight - margin * 2), TRUE);
+                ::MoveWindow(state->loadingOverlay, 0, filterHeight + margin * 2, width, std::max(40, height - filterHeight - margin * 2), TRUE);
             }
             return 0;
         case WM_NCDESTROY:
+            if (state && state->filterTask) {
+                state->filterTask->cancel();
+            }
+            if (state && state->detailTask) {
+                state->detailTask->cancel();
+            }
             delete state;
             ::SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
             return 0;
