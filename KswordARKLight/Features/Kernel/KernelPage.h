@@ -3,7 +3,9 @@
 #include "KernelFacade.h"
 #include "KernelModel.h"
 #include "../../Core/Win32Lean.h"
+#include "../../Ui/AsyncTask.h"
 
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -57,6 +59,7 @@ private:
     void PopulateTabs();
     void OnFeatureSelectionChanged();
     void RefreshSelectedFeature();
+    void ExecuteActionInBackground(KernelActionRequest request, KernelActionId actionId, bool offerForcedRetry);
     void LocateNextResult();
     void ExecuteObjectNamespaceToolbarAction();
     void ExecuteObjectNamespaceDetailAction();
@@ -366,6 +369,10 @@ private:
     int contextColumn_ = -1;
     int sortColumn_ = -1;
     bool sortAscending_ = true;
+    std::uint64_t queryRequestId_ = 0;
+    std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<KernelOperationResult>> queryTask_;
+    std::uint64_t actionRequestId_ = 0;
+    std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<KernelOperationResult>> actionTask_;
     KernelFacade facade_;
 };
 

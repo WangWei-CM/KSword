@@ -73,6 +73,8 @@ constexpr int kIdIntegrityFillFromSelection = 51042;
 constexpr int kIdIntegrityCpuOnly = 51043;
 constexpr int kIdIntegrityIdtVectorsEdit = 51044;
 constexpr int kIdIntegrityIdtVectorsSpin = 51045;
+constexpr UINT kMsgKernelQueryCompleted = WM_APP + 605;
+constexpr UINT kMsgKernelActionCompleted = WM_APP + 606;
 constexpr int kIdCallbackGlobalEnabled = 51047;
 constexpr int kIdCallbackFileMonitorFsctlOnly = 51048;
 constexpr int kIdDeviceDriverDirectoryCombo = 51049;
@@ -1536,6 +1538,8 @@ LRESULT CALLBACK KernelPage::FilterEditSubclassProc(HWND hwnd, const UINT msg, c
 LRESULT KernelPage::HandleMessage(HWND hwnd, const UINT msg, const WPARAM wParam, const LPARAM lParam) {
     switch (msg) {
     case WM_CREATE:
+        queryTask_ = std::make_unique<Ksword::Ui::AsyncSnapshotTask<KernelOperationResult>>(hwnd, kMsgKernelQueryCompleted);
+        actionTask_ = std::make_unique<Ksword::Ui::AsyncSnapshotTask<KernelOperationResult>>(hwnd, kMsgKernelActionCompleted);
         CreateChildControls();
         PopulateTabs();
         Layout();
@@ -1543,6 +1547,16 @@ LRESULT KernelPage::HandleMessage(HWND hwnd, const UINT msg, const WPARAM wParam
     case WM_SIZE:
         Layout();
         return 0;
+    case kMsgKernelQueryCompleted:
+        if (queryTask_ && queryTask_->consume(hwnd, wParam, lParam)) {
+            return 0;
+        }
+        break;
+    case kMsgKernelActionCompleted:
+        if (actionTask_ && actionTask_->consume(hwnd, wParam, lParam)) {
+            return 0;
+        }
+        break;
     case WM_SETCURSOR:
         if (LOWORD(lParam) == HTCLIENT && CurrentFeatureUsesVerticalSplitter()) {
             POINT cursor{};
@@ -2365,6 +2379,12 @@ LRESULT KernelPage::HandleMessage(HWND hwnd, const UINT msg, const WPARAM wParam
         return 0;
     }
     case WM_NCDESTROY:
+        if (queryTask_) {
+            queryTask_->cancel();
+        }
+        if (actionTask_) {
+            actionTask_->cancel();
+        }
         ::SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
         hwnd_ = nullptr;
         delete this;
@@ -4143,9 +4163,40 @@ void KernelPage::RefreshSelectedFeature() {
     activeFeatureId_ = descriptor->id;
     hasActiveFeatureId_ = true;
     KernelRequest request = BuildCurrentRequest(descriptor->id);
-    const KernelOperationResult result = facade_.QueryFeature(request);
-    RenderResult(result);
-    InvalidateCurrentFeatureViewCache();
+    if (!queryTask_) {
+        const KernelOperationResult result = facade_.QueryFeature(request);
+        RenderResult(result);
+        InvalidateCurrentFeatureViewCache();
+        return;
+    }
+    const KernelFeatureId featureId = descriptor->id;
+    const std::uint64_t requestId = ++queryRequestId_;
+    if (statusText_) {
+        ::SetWindowTextW(statusText_, queryTask_->running()
+            ? L"正在排队后台内核查询…"
+            : L"正在后台查询内核快照…");
+    }
+    ::EnableWindow(refreshButton_, FALSE);
+    queryTask_->request(
+        [request] {
+            KernelFacade facade;
+            return facade.QueryFeature(request);
+        },
+        [this, featureId, requestId](std::uint64_t, std::optional<KernelOperationResult>&& result, std::exception_ptr error) {
+            ::EnableWindow(refreshButton_, TRUE);
+            const KernelFeatureDescriptor* current = CurrentDescriptor();
+            if (error || !result.has_value()) {
+                if (requestId == queryRequestId_ && current && current->id == featureId && statusText_) {
+                    ::SetWindowTextW(statusText_, L"内核后台查询异常结束，已保留当前结果。");
+                }
+                return;
+            }
+            if (requestId != queryRequestId_ || !current || current->id != featureId) {
+                return;
+            }
+            RenderResult(*result);
+            InvalidateCurrentFeatureViewCache();
+        });
 }
 
 void KernelPage::SaveCurrentFeatureViewCache(const bool transferDataToCache) {
@@ -4679,9 +4730,32 @@ void KernelPage::RefreshKernelCpuIntegrityFromDriverPage() {
     // processing queries KernelCpuIntegrity through KernelFacade and renders the
     // evidence rows in the same table; there is no direct driver access here.
     KernelRequest request = BuildCurrentRequest(KernelFeatureId::KernelCpuIntegrity);
-    const KernelOperationResult result = facade_.QueryFeature(request);
-    RenderResult(result);
-    ::SetWindowTextW(statusText_, (L"状态：CPU-only 完整性查询完成 | " + result.message).c_str());
+    if (!queryTask_) {
+        const KernelOperationResult result = facade_.QueryFeature(request);
+        RenderResult(result);
+        ::SetWindowTextW(statusText_, (L"状态：CPU-only 完整性查询完成 | " + result.message).c_str());
+        return;
+    }
+    const KernelFeatureId activeFeatureId = activeFeatureId_;
+    const std::uint64_t requestId = ++queryRequestId_;
+    ::SetWindowTextW(statusText_, L"状态：正在后台查询 CPU-only 完整性快照…");
+    ::EnableWindow(refreshButton_, FALSE);
+    queryTask_->request(
+        [request] {
+            KernelFacade facade;
+            return facade.QueryFeature(request);
+        },
+        [this, activeFeatureId, requestId](std::uint64_t, std::optional<KernelOperationResult>&& result, std::exception_ptr error) {
+            ::EnableWindow(refreshButton_, TRUE);
+            if (error || !result.has_value() || requestId != queryRequestId_ || activeFeatureId_ != activeFeatureId) {
+                if (requestId == queryRequestId_ && activeFeatureId_ == activeFeatureId) {
+                    ::SetWindowTextW(statusText_, L"状态：CPU-only 后台完整性查询异常结束。");
+                }
+                return;
+            }
+            RenderResult(*result);
+            ::SetWindowTextW(statusText_, (L"状态：CPU-only 完整性查询完成 | " + result->message).c_str());
+        });
 }
 
 KernelActionRequest KernelPage::BuildCurrentActionRequest(const KernelActionId actionId) const {
@@ -4724,6 +4798,10 @@ KernelActionRequest KernelPage::BuildCurrentActionRequest(const KernelActionId a
 }
 
 void KernelPage::ExecuteSelectedAction(const KernelActionId actionId) {
+    if (actionTask_ && actionTask_->running()) {
+        ::SetWindowTextW(statusText_, L"状态：内核动作正在后台执行，请等待当前结果。");
+        return;
+    }
     // ExecuteSelectedAction is the only UI entry for mutable kernel operations.
     // Inputs are the menu action id and current selection/filter text; processing
     // asks for confirmation, calls KernelFacade, optionally asks for force
@@ -4904,34 +4982,64 @@ void KernelPage::ExecuteSelectedAction(const KernelActionId actionId) {
         return;
     }
 
-    KernelOperationResult result = facade_.ExecuteAction(request);
-    if (actionId == KernelActionId::InlineHookNopPatch && !result.success) {
-        bool forceRequired = false;
-        for (const KernelResultRow& row : result.rows) {
-            for (const auto& column : row.columns) {
-                if (column.first == L"Status" && column.second == kInlineHookForceRequiredStatusText) {
-                    forceRequired = true;
-                    break;
+    ExecuteActionInBackground(std::move(request), actionId, true);
+}
+
+void KernelPage::ExecuteActionInBackground(KernelActionRequest request, const KernelActionId actionId, const bool offerForcedRetry) {
+    if (!actionTask_) {
+        RenderResult(facade_.ExecuteAction(request));
+        return;
+    }
+    const KernelFeatureId featureId = request.featureId;
+    const std::uint64_t requestId = ++actionRequestId_;
+    const KernelActionRequest retryRequest = request;
+    ::SetWindowTextW(statusText_, L"状态：正在后台执行内核动作…");
+    ::EnableWindow(refreshButton_, FALSE);
+    actionTask_->request(
+        [request] {
+            KernelFacade facade;
+            return facade.ExecuteAction(request);
+        },
+        [this, request = retryRequest, actionId, featureId, requestId, offerForcedRetry](std::uint64_t, std::optional<KernelOperationResult>&& result, std::exception_ptr error) mutable {
+            ::EnableWindow(refreshButton_, TRUE);
+            const KernelFeatureDescriptor* current = CurrentDescriptor();
+            if (error || !result.has_value()) {
+                if (requestId == actionRequestId_ && current && current->id == featureId) {
+                    ::SetWindowTextW(statusText_, L"状态：内核后台动作异常结束，未覆盖当前结果。");
+                }
+                return;
+            }
+            if (requestId != actionRequestId_ || !current || current->id != featureId) {
+                return;
+            }
+            bool forceRequired = false;
+            if (offerForcedRetry && actionId == KernelActionId::InlineHookNopPatch && !result->success) {
+                for (const KernelResultRow& row : result->rows) {
+                    for (const auto& column : row.columns) {
+                        if (column.first == L"Status" && column.second == kInlineHookForceRequiredStatusText) {
+                            forceRequired = true;
+                            break;
+                        }
+                    }
+                    if (forceRequired) {
+                        break;
+                    }
                 }
             }
             if (forceRequired) {
-                break;
+                const std::wstring forceText =
+                    L"R0 拒绝了普通 Inline Hook NOP 请求并要求强制确认。\n\n"
+                    L"地址: " + FirstSelectedRowValue({ L"Address", L"函数地址", L"目标地址" }) + L"\n"
+                    L"模块: " + FirstSelectedRowValue({ L"Module", L"ModulePath", L"模块" }) + L"\n\n"
+                    L"强制继续会修改内核代码页，只应在确认目标和当前字节无误时使用。是否强制继续？";
+                if (::MessageBoxW(hwnd_, forceText.c_str(), L"强制 Inline Hook 摘除", MB_YESNO | MB_DEFBUTTON2 | MB_ICONERROR) == IDYES) {
+                    request.force = true;
+                    ExecuteActionInBackground(std::move(request), actionId, false);
+                    return;
+                }
             }
-        }
-        if (forceRequired) {
-            const std::wstring forceText =
-                L"R0 拒绝了普通 Inline Hook NOP 请求并要求强制确认。\n\n"
-                L"地址: " + FirstSelectedRowValue({ L"Address", L"函数地址", L"目标地址" }) + L"\n"
-                L"模块: " + FirstSelectedRowValue({ L"Module", L"ModulePath", L"模块" }) + L"\n\n"
-                L"强制继续会修改内核代码页，只应在确认目标和当前字节无误时使用。是否强制继续？";
-            if (::MessageBoxW(hwnd_, forceText.c_str(), L"强制 Inline Hook 摘除", MB_YESNO | MB_DEFBUTTON2 | MB_ICONERROR) == IDYES) {
-                request.force = true;
-                result = facade_.ExecuteAction(request);
-            }
-        }
-    }
-
-    RenderResult(result);
+            RenderResult(*result);
+        });
 }
 
 void KernelPage::RenderDescriptor(const KernelFeatureDescriptor& descriptor) {
