@@ -985,6 +985,134 @@ std::vector<ProcessR0AuditInfo> CollectR0AuditRows(DWORD processId, bool& succee
     std::vector<ProcessR0AuditInfo> rows;
 
     const ksword::ark::DriverClient driverClient;
+    const ksword::ark::ThreadEnumResult threadEnumeration = driverClient.enumerateThreads(
+        KSWORD_ARK_ENUM_THREAD_FLAG_INCLUDE_ALL | KSWORD_ARK_ENUM_THREAD_FLAG_SCAN_CID_TABLE,
+        processId);
+    if (!threadEnumeration.io.ok) {
+        AddR0AuditRow(
+            rows,
+            L"ThreadEnumeration",
+            processId,
+            0,
+            0,
+            0,
+            0,
+            L"ArkDriverClient::enumerateThreads",
+            L"Unavailable",
+            0,
+            NarrowToWide(threadEnumeration.io.message));
+    } else {
+        AddR0AuditRow(
+            rows,
+            L"ThreadEnumeration",
+            processId,
+            0,
+            0,
+            0,
+            0,
+            L"ArkDriverClient::enumerateThreads",
+            L"OK",
+            100,
+            L"returned=" + std::to_wstring(threadEnumeration.returnedCount) +
+                L"/" + std::to_wstring(threadEnumeration.totalCount) +
+                L"; version=" + std::to_wstring(threadEnumeration.version));
+        constexpr std::size_t kMaxThreadEnumerationRows = 512U;
+        const std::size_t entryCount = (std::min)(threadEnumeration.entries.size(), kMaxThreadEnumerationRows);
+        for (std::size_t index = 0; index < entryCount; ++index) {
+            const ksword::ark::ThreadEntry& entry = threadEnumeration.entries[index];
+            std::wostringstream detail;
+            detail << L"flags=" << HexMaskText(entry.flags)
+                   << L"; fieldFlags=" << HexMaskText(entry.fieldFlags)
+                   << L"; r0Status=" << entry.r0Status
+                   << L"; initialStack=" << FormatHexPointer(static_cast<std::uintptr_t>(entry.initialStack))
+                   << L"; stack=" << FormatHexPointer(static_cast<std::uintptr_t>(entry.stackLimit))
+                   << L"-" << FormatHexPointer(static_cast<std::uintptr_t>(entry.stackBase))
+                   << L"; kernelStack=" << FormatHexPointer(static_cast<std::uintptr_t>(entry.kernelStack))
+                   << L"; io=R" << entry.readOperationCount
+                   << L"/W" << entry.writeOperationCount
+                   << L"/O" << entry.otherOperationCount
+                   << L"; transfer=R" << entry.readTransferCount
+                   << L"/W" << entry.writeTransferCount
+                   << L"/O" << entry.otherTransferCount
+                   << L"; capability=" << FormatHexPointer(static_cast<std::uintptr_t>(entry.dynDataCapabilityMask));
+            AddR0AuditRow(
+                rows,
+                L"ThreadEnumeration",
+                static_cast<DWORD>(entry.processId),
+                static_cast<DWORD>(entry.threadId),
+                entry.kernelStack,
+                entry.initialStack,
+                entry.stackBase,
+                L"R0 KTHREAD",
+                entry.r0Status == KSWORD_ARK_THREAD_R0_STATUS_OK ? L"OK" : L"Partial",
+                entry.r0Status == KSWORD_ARK_THREAD_R0_STATUS_OK ? 100UL : 50UL,
+                detail.str());
+        }
+        if (threadEnumeration.entries.size() > entryCount) {
+            AddR0AuditRow(
+                rows,
+                L"ThreadEnumeration",
+                processId,
+                0,
+                0,
+                0,
+                0,
+                L"R0 KTHREAD",
+                L"Truncated",
+                0,
+                L"Light limits visible R0 thread enumeration evidence to " + std::to_wstring(kMaxThreadEnumerationRows) + L" rows per refresh.");
+        }
+    }
+
+    const ksword::ark::ProcessSectionQueryResult sectionQuery = driverClient.queryProcessSection(processId);
+    if (!sectionQuery.io.ok) {
+        AddR0AuditRow(
+            rows,
+            L"ProcessSection",
+            processId,
+            0,
+            sectionQuery.sectionObjectAddress,
+            sectionQuery.controlAreaAddress,
+            0,
+            L"ArkDriverClient::queryProcessSection",
+            L"Unavailable",
+            0,
+            NarrowToWide(sectionQuery.io.message));
+    } else {
+        AddR0AuditRow(
+            rows,
+            L"ProcessSection",
+            processId,
+            0,
+            sectionQuery.sectionObjectAddress,
+            sectionQuery.controlAreaAddress,
+            0,
+            L"ArkDriverClient::queryProcessSection",
+            L"OK",
+            100,
+            L"returned=" + std::to_wstring(sectionQuery.returnedCount) +
+                L"/" + std::to_wstring(sectionQuery.totalCount) +
+                L"; queryStatus=" + std::to_wstring(sectionQuery.queryStatus) +
+                L"; fieldFlags=" + HexMaskText(sectionQuery.fieldFlags) +
+                L"; lastStatus=" + StatusHexText(sectionQuery.lastStatus));
+        for (const ksword::ark::SectionMappingEntry& mapping : sectionQuery.mappings) {
+            AddR0AuditRow(
+                rows,
+                L"ProcessSectionMapping",
+                static_cast<DWORD>(mapping.processId),
+                0,
+                sectionQuery.sectionObjectAddress,
+                sectionQuery.controlAreaAddress,
+                mapping.startVa,
+                L"ControlArea mapping",
+                L"type=" + std::to_wstring(mapping.viewMapType),
+                100,
+                L"start=" + FormatHexPointer(static_cast<std::uintptr_t>(mapping.startVa)) +
+                    L"; end=" + FormatHexPointer(static_cast<std::uintptr_t>(mapping.endVa)) +
+                    L"; mapType=" + std::to_wstring(mapping.viewMapType));
+        }
+    }
+
     const ksword::ark::ProcessCrossViewResult processAudit = driverClient.queryProcessCrossView(
         KSWORD_ARK_PROCESS_CROSSVIEW_FLAG_INCLUDE_ALL,
         processId,
