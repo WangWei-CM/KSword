@@ -112,7 +112,17 @@ std::vector<KernelFeatureDescriptor> CreateR0ExtendedDescriptors() {
             KernelFeatureId::MinifilterBypassPids,
             L"Minifilter 放行 PID",
             L"回调",
-            L"通过 ArkDriverClient 查询 R0 minifilter bypass PID 白名单。")
+            L"通过 ArkDriverClient 查询 R0 minifilter bypass PID 白名单。"),
+        Descriptor(
+            KernelFeatureId::KernelTimerDpc,
+            L"KTIMER/DPC",
+            L"内核信息",
+            L"通过 ArkDriverClient 只读枚举每 CPU TimerTable 中的 KTIMER/KDPC 快照与完整性诊断。"),
+        Descriptor(
+            KernelFeatureId::IoctlRegistry,
+            L"IOCTL 派遣表",
+            L"驱动诊断",
+            L"通过 ArkDriverClient 查询 KswordARK 统一 IOCTL 派遣注册表及 capability 门槛。")
     };
 }
 

@@ -43,6 +43,8 @@ enum class KernelFeatureId : std::uint32_t {
     KeyboardHooks,
     DynDataCapabilities,
     MinifilterBypassPids,
+    KernelTimerDpc,
+    IoctlRegistry,
     PdbProfileStatus,
     CidTableSummary,
     IpcSummary,

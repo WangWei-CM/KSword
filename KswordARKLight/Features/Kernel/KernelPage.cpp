@@ -807,6 +807,8 @@ bool IsR0TableDetailFeature(const KernelFeatureId featureId) {
     case KernelFeatureId::KeyboardHooks:
     case KernelFeatureId::DynDataCapabilities:
     case KernelFeatureId::MinifilterBypassPids:
+    case KernelFeatureId::KernelTimerDpc:
+    case KernelFeatureId::IoctlRegistry:
         return true;
     default:
         return false;
@@ -1651,6 +1653,8 @@ LRESULT KernelPage::HandleMessage(HWND hwnd, const UINT msg, const WPARAM wParam
                     descriptor->id == KernelFeatureId::KeyboardHooks ||
                     descriptor->id == KernelFeatureId::DynDataCapabilities ||
                     descriptor->id == KernelFeatureId::MinifilterBypassPids ||
+                    descriptor->id == KernelFeatureId::KernelTimerDpc ||
+                    descriptor->id == KernelFeatureId::IoctlRegistry ||
                     IsKernelHookFeature(descriptor->id)) &&
                 !currentRawColumns_.empty()) {
                 currentColumns_ = currentRawColumns_;
@@ -1681,7 +1685,9 @@ LRESULT KernelPage::HandleMessage(HWND hwnd, const UINT msg, const WPARAM wParam
                     descriptor->id == KernelFeatureId::KeyboardHotkeys ||
                     descriptor->id == KernelFeatureId::KeyboardHooks ||
                     descriptor->id == KernelFeatureId::DynDataCapabilities ||
-                    descriptor->id == KernelFeatureId::MinifilterBypassPids) {
+                    descriptor->id == KernelFeatureId::MinifilterBypassPids ||
+                    descriptor->id == KernelFeatureId::KernelTimerDpc ||
+                    descriptor->id == KernelFeatureId::IoctlRegistry) {
                     RebuildR0EvidenceListFromCache(descriptor->id);
                 } else {
                     RebuildResultListFromCache();
@@ -1743,7 +1749,9 @@ LRESULT KernelPage::HandleMessage(HWND hwnd, const UINT msg, const WPARAM wParam
                     descriptor->id == KernelFeatureId::KeyboardHotkeys ||
                     descriptor->id == KernelFeatureId::KeyboardHooks ||
                     descriptor->id == KernelFeatureId::DynDataCapabilities ||
-                    descriptor->id == KernelFeatureId::MinifilterBypassPids) {
+                    descriptor->id == KernelFeatureId::MinifilterBypassPids ||
+                    descriptor->id == KernelFeatureId::KernelTimerDpc ||
+                    descriptor->id == KernelFeatureId::IoctlRegistry) {
                     RebuildR0EvidenceListFromCache(descriptor->id);
                 }
                 ConfigureVisibleLayout();
@@ -2909,9 +2917,11 @@ void KernelPage::Layout() {
             descriptor->id == KernelFeatureId::PhysicalMemoryLayout ||
             descriptor->id == KernelFeatureId::MutationAudit ||
             descriptor->id == KernelFeatureId::KeyboardHotkeys ||
-            descriptor->id == KernelFeatureId::KeyboardHooks ||
-            descriptor->id == KernelFeatureId::DynDataCapabilities ||
-            descriptor->id == KernelFeatureId::MinifilterBypassPids);
+             descriptor->id == KernelFeatureId::KeyboardHooks ||
+             descriptor->id == KernelFeatureId::DynDataCapabilities ||
+             descriptor->id == KernelFeatureId::MinifilterBypassPids ||
+             descriptor->id == KernelFeatureId::KernelTimerDpc ||
+             descriptor->id == KernelFeatureId::IoctlRegistry);
     const int infoHeight = (showObjectNamespacePanel || showAtomPanel || showNtQueryPanel || showKernelHookPanel || showDiagnosticDualPanel ||
         showCallbackEnumerationPanel || showKernelMemoryScanPanel || showCrossViewPanel || showIntegrityPanel || showR0EvidencePanel) ? 28 : 96;
     const int buttonWidth = 92;
@@ -5186,9 +5196,11 @@ void KernelPage::RenderResult(const KernelOperationResult& result) {
             descriptor->id == KernelFeatureId::PhysicalMemoryLayout ||
             descriptor->id == KernelFeatureId::MutationAudit ||
             descriptor->id == KernelFeatureId::KeyboardHotkeys ||
-            descriptor->id == KernelFeatureId::KeyboardHooks ||
-            descriptor->id == KernelFeatureId::DynDataCapabilities ||
-            descriptor->id == KernelFeatureId::MinifilterBypassPids)) {
+             descriptor->id == KernelFeatureId::KeyboardHooks ||
+             descriptor->id == KernelFeatureId::DynDataCapabilities ||
+             descriptor->id == KernelFeatureId::MinifilterBypassPids ||
+             descriptor->id == KernelFeatureId::KernelTimerDpc ||
+             descriptor->id == KernelFeatureId::IoctlRegistry)) {
         RebuildR0EvidenceListFromCache(descriptor->id);
         statusHandledBySpecializedRenderer = true;
     } else {
@@ -8014,6 +8026,10 @@ void KernelPage::RebuildR0EvidenceListFromCache(const KernelFeatureId featureId)
             return HasNonEmptyField(row, rawColumns, { L"Capability", L"CapabilityMask", L"StatusFlags", L"字段" });
         case KernelFeatureId::MinifilterBypassPids:
             return HasNonEmptyField(row, rawColumns, { L"PID", L"Process", L"Index" });
+        case KernelFeatureId::KernelTimerDpc:
+            return HasNonEmptyField(row, rawColumns, { L"Timer", L"TimerAddress", L"DPC", L"DpcAddress" });
+        case KernelFeatureId::IoctlRegistry:
+            return HasNonEmptyField(row, rawColumns, { L"IOCTL", L"IoControlCode", L"Name", L"FunctionNumber" });
         default:
             return false;
         }
@@ -8977,6 +8993,43 @@ std::wstring KernelPage::BuildOriginalStyleSelectedRowDetail(const KernelFeature
                << L"说明: 右键可用过滤框中的 PID 列表写入 R0 minifilter bypass whitelist，或清空 whitelist。";
         return detail.str();
     }
+    case KernelFeatureId::KernelTimerDpc: {
+        std::wostringstream detail;
+        detail << L"KTIMER / KDPC 详情\r\n"
+               << L"----------------------------------------\r\n"
+               << L"CPU: " << cell({ L"CPU", L"Processor" }) << L"\r\n"
+               << L"Bucket: " << cell({ L"Bucket", L"BucketIndex" }) << L"\r\n"
+               << L"Timer: " << cell({ L"Timer", L"TimerAddress" }) << L"\r\n"
+               << L"DueTime / Period: " << cell({ L"DueTime" }) << L" / " << cell({ L"Period" }) << L"\r\n"
+               << L"TimerType: " << cell({ L"类型", L"TimerType" }) << L"\r\n"
+               << L"DPC: " << cell({ L"DPC", L"DpcAddress" }) << L"\r\n"
+               << L"DeferredRoutine: " << cell({ L"例程", L"DeferredRoutine" }) << L"\r\n"
+               << L"DeferredContext: " << cell({ L"上下文", L"DeferredContext" }) << L"\r\n"
+               << L"Flags: " << cell({ L"标志", L"Flags" }) << L"\r\n\r\n"
+               << L"查询摘要：CPU=" << rawSummary({ L"ProcessorCount" })
+               << L"，Bucket=" << rawSummary({ L"BucketsVisited" }) << L"/"
+               << rawSummary({ L"BucketCount" }) << L"，损坏=" << rawSummary({ L"CorruptBuckets" })
+               << L"，读取失败=" << rawSummary({ L"ReadFailures" })
+               << L"，重复=" << rawSummary({ L"Duplicates" });
+        return detail.str();
+    }
+    case KernelFeatureId::IoctlRegistry: {
+        std::wostringstream detail;
+        detail << L"KswordARK IOCTL 派遣注册表详情\r\n"
+               << L"----------------------------------------\r\n"
+               << L"IOCTL: " << cell({ L"IOCTL", L"IoControlCode" }) << L"\r\n"
+               << L"Function: " << cell({ L"函数", L"Function", L"FunctionNumber" }) << L"\r\n"
+               << L"Method/Access: " << cell({ L"Method/Access", L"MethodAccess" }) << L"\r\n"
+               << L"RequiredCapability: " << cell({ L"Capability", L"RequiredCapability" }) << L"\r\n"
+               << L"Handler: " << cell({ L"Handler", L"HandlerAddress" }) << L"\r\n"
+               << L"Name: " << cell({ L"名称", L"Name" }) << L"\r\n"
+               << L"Flags: " << cell({ L"Flags" }) << L"\r\n"
+               << L"Status: " << cell({ L"状态", L"Status" }) << L"\r\n\r\n"
+               << L"查询摘要：返回 " << rawSummary({ L"Returned" }) << L"/"
+               << rawSummary({ L"Total" }) << L"，重复控制码=" << rawSummary({ L"Duplicates" })
+               << L"，RegistryStatus=" << rawSummary({ L"RegistryStatus" });
+        return detail.str();
+    }
     default:
         return {};
     }
@@ -9319,6 +9372,20 @@ void KernelPage::ConfigureToolbarForDescriptor(const KernelFeatureDescriptor& de
         SetEditCueBanner(filterEdit_, L"过滤PID/进程/状态/来源");
         ::SetWindowTextW(refreshButton_, L"刷新PID");
         ::SetWindowTextW(statusText_, L"状态：等待刷新 Minifilter PID 放行表。");
+        if (riskOnlyCheck_) { Button_SetCheck(riskOnlyCheck_, BST_UNCHECKED); }
+        break;
+    case KernelFeatureId::KernelTimerDpc:
+        ::SetWindowTextW(filterLabel_, L"");
+        SetEditCueBanner(filterEdit_, L"过滤CPU/Bucket/Timer/DPC/例程/标志/详情");
+        ::SetWindowTextW(refreshButton_, L"刷新定时器");
+        ::SetWindowTextW(statusText_, L"状态：等待刷新每 CPU KTIMER/DPC 快照。");
+        if (riskOnlyCheck_) { Button_SetCheck(riskOnlyCheck_, BST_UNCHECKED); }
+        break;
+    case KernelFeatureId::IoctlRegistry:
+        ::SetWindowTextW(filterLabel_, L"");
+        SetEditCueBanner(filterEdit_, L"过滤IOCTL/函数/名称/Capability/Handler/Flags");
+        ::SetWindowTextW(refreshButton_, L"刷新派遣表");
+        ::SetWindowTextW(statusText_, L"状态：等待刷新 KswordARK IOCTL 派遣注册表。");
         if (riskOnlyCheck_) { Button_SetCheck(riskOnlyCheck_, BST_UNCHECKED); }
         break;
     default:

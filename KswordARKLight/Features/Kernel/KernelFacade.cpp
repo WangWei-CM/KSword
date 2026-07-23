@@ -2878,6 +2878,8 @@ bool IsArkDriverBacked(const KernelFeatureId id) {
     case KernelFeatureId::IpcSummary:
     case KernelFeatureId::HookAuditSummary:
     case KernelFeatureId::MinifilterBypassPids:
+    case KernelFeatureId::KernelTimerDpc:
+    case KernelFeatureId::IoctlRegistry:
         return true;
     default:
         return false;
@@ -3984,6 +3986,130 @@ KernelOperationResult QueryCpuHardwareSnapshot(const KernelRequest& request) {
         { L"Leaf80000001EDX", HexText(query.leaf80000001Edx) },
         { L"LastStatus", HexText(static_cast<std::uint32_t>(query.lastStatus)) },
     }));
+    return result;
+}
+
+// QueryKernelTimerDpc returns the immutable R0 TimerTable snapshot. The caller
+// executes this facade query on KernelPage's worker and only applies the value
+// result when its request generation is still current.
+KernelOperationResult QueryKernelTimerDpc(const KernelRequest& request) {
+    const ksword::ark::DriverClient client;
+    const unsigned long maxEntries = request.maxRows == 0
+        ? KSWORD_ARK_TIMER_DPC_DEFAULT_MAX_ENTRIES
+        : request.maxRows;
+    const ksword::ark::KernelTimerDpcEnumResult query = client.enumerateKernelTimerDpc(maxEntries);
+    KernelOperationResult result;
+    ApplyIoSummary(request, L"Kernel Timer/DPC", query.io, result);
+    result.rows.push_back(Row({
+        { L"Status", query.io.ok ? L"OK" : L"Failed" },
+        { L"Unsupported", BoolText(query.unsupported) },
+        { L"Version", std::to_wstring(query.version) },
+        { L"QueryStatus", HexText(query.queryStatus) },
+        { L"StatusFlags", HexText(query.statusFlags) },
+        { L"Total", std::to_wstring(query.totalCount) },
+        { L"Returned", std::to_wstring(query.returnedCount) },
+        { L"ProcessorCount", std::to_wstring(query.processorCount) },
+        { L"BucketCount", std::to_wstring(query.bucketCount) },
+        { L"BucketsVisited", std::to_wstring(query.bucketsVisited) },
+        { L"CorruptBuckets", std::to_wstring(query.corruptBucketCount) },
+        { L"ReadFailures", std::to_wstring(query.readFailureCount) },
+        { L"Duplicates", std::to_wstring(query.duplicateCount) },
+        { L"LastStatus", HexText(static_cast<std::uint32_t>(query.lastStatus)) },
+    }, L"KTIMER/KDPC snapshot uses the driver's bounded per-bucket traversal. Partial or corrupt diagnostics remain visible in the query summary."));
+
+    for (const ksword::ark::KernelTimerDpcEntry& entry : query.entries) {
+        const std::wstring cpu = std::to_wstring(entry.processorGroup) + L":" + std::to_wstring(entry.processorNumber);
+        std::wostringstream detail;
+        detail << L"CPU: " << cpu << L"\r\n"
+               << L"Bucket: " << entry.bucketIndex << L"\r\n"
+               << L"Timer: " << HexText(entry.timerAddress) << L"\r\n"
+               << L"DueTime: " << entry.dueTime << L"\r\n"
+               << L"Period: " << entry.period << L"\r\n"
+               << L"TimerType: " << entry.timerType << L"\r\n"
+               << L"DPC: " << HexText(entry.dpcAddress) << L"\r\n"
+               << L"DeferredRoutine: " << HexText(entry.deferredRoutine) << L"\r\n"
+               << L"DeferredContext: " << HexText(entry.deferredContext) << L"\r\n"
+               << L"Flags: " << HexText(entry.flags);
+        result.rows.push_back(Row({
+            { L"CPU", cpu },
+            { L"Processor", cpu },
+            { L"Bucket", std::to_wstring(entry.bucketIndex) },
+            { L"BucketIndex", std::to_wstring(entry.bucketIndex) },
+            { L"Timer", HexText(entry.timerAddress) },
+            { L"TimerAddress", HexText(entry.timerAddress) },
+            { L"DueTime", std::to_wstring(entry.dueTime) },
+            { L"Period", std::to_wstring(entry.period) },
+            { L"类型", std::to_wstring(entry.timerType) },
+            { L"TimerType", std::to_wstring(entry.timerType) },
+            { L"DPC", HexText(entry.dpcAddress) },
+            { L"Dpc", HexText(entry.dpcAddress) },
+            { L"DpcAddress", HexText(entry.dpcAddress) },
+            { L"例程", HexText(entry.deferredRoutine) },
+            { L"DeferredRoutine", HexText(entry.deferredRoutine) },
+            { L"上下文", HexText(entry.deferredContext) },
+            { L"DeferredContext", HexText(entry.deferredContext) },
+            { L"标志", HexText(entry.flags) },
+            { L"Flags", HexText(entry.flags) },
+            { L"状态", L"Captured" },
+            { L"Status", L"Captured" },
+        }, detail.str()));
+    }
+    return result;
+}
+
+// QueryIoctlRegistry exposes the driver's registered dispatch metadata without
+// duplicating transport primitives in the UI. It is a read-only bounded query.
+KernelOperationResult QueryIoctlRegistry(const KernelRequest& request) {
+    const ksword::ark::DriverClient client;
+    const unsigned long maxEntries = request.maxRows == 0
+        ? KSWORD_ARK_IOCTL_REGISTRY_MAX_ENTRIES
+        : request.maxRows;
+    const ksword::ark::IoctlRegistryQueryResult query = client.queryIoctlRegistry(
+        KSWORD_ARK_IOCTL_REGISTRY_FLAG_INCLUDE_HANDLER,
+        maxEntries);
+    KernelOperationResult result;
+    ApplyIoSummary(request, L"IOCTL Dispatch Registry", query.io, result);
+    result.rows.push_back(Row({
+        { L"Status", query.io.ok ? L"OK" : L"Failed" },
+        { L"Unsupported", BoolText(query.unsupported) },
+        { L"Version", std::to_wstring(query.version) },
+        { L"RegistryStatus", HexText(query.status) },
+        { L"Total", std::to_wstring(query.totalCount) },
+        { L"Returned", std::to_wstring(query.returnedCount) },
+        { L"Duplicates", std::to_wstring(query.duplicateCount) },
+        { L"LastStatus", HexText(static_cast<std::uint32_t>(query.lastStatus)) },
+    }, L"The registry is a diagnostic snapshot of handlers registered by KswordARK's centralized IOCTL dispatcher."));
+
+    for (const ksword::ark::IoctlRegistryEntry& entry : query.entries) {
+        const std::wstring methodAccess = std::to_wstring(entry.method) + L" / " + std::to_wstring(entry.access);
+        const std::wstring name = Utf8ToWide(entry.name);
+        std::wostringstream detail;
+        detail << L"IOCTL: " << HexText(entry.ioControlCode) << L"\r\n"
+               << L"Function: " << entry.functionNumber << L"\r\n"
+               << L"Method/Access: " << methodAccess << L"\r\n"
+               << L"Required capability: " << HexText(entry.requiredCapability) << L"\r\n"
+               << L"Handler: " << HexText(entry.handlerAddress) << L"\r\n"
+               << L"Name: " << name << L"\r\n"
+               << L"Flags: " << HexText(entry.flags);
+        result.rows.push_back(Row({
+            { L"IOCTL", HexText(entry.ioControlCode) },
+            { L"IoControlCode", HexText(entry.ioControlCode) },
+            { L"函数", std::to_wstring(entry.functionNumber) },
+            { L"Function", std::to_wstring(entry.functionNumber) },
+            { L"FunctionNumber", std::to_wstring(entry.functionNumber) },
+            { L"Method/Access", methodAccess },
+            { L"MethodAccess", methodAccess },
+            { L"Capability", HexText(entry.requiredCapability) },
+            { L"RequiredCapability", HexText(entry.requiredCapability) },
+            { L"Handler", HexText(entry.handlerAddress) },
+            { L"HandlerAddress", HexText(entry.handlerAddress) },
+            { L"名称", name },
+            { L"Name", name },
+            { L"Flags", HexText(entry.flags) },
+            { L"状态", L"Registered" },
+            { L"Status", L"Registered" },
+        }, detail.str()));
+    }
     return result;
 }
 
@@ -5516,6 +5642,10 @@ KernelOperationResult KernelFacade::QueryArkDriverFeature(const KernelRequest& r
         return attachCapability(QueryHookAuditSummary(request));
     case KernelFeatureId::MinifilterBypassPids:
         return attachCapability(QueryMinifilterBypassPids(request));
+    case KernelFeatureId::KernelTimerDpc:
+        return attachCapability(QueryKernelTimerDpc(request));
+    case KernelFeatureId::IoctlRegistry:
+        return attachCapability(QueryIoctlRegistry(request));
     default:
         return MakeUnsupportedResult(request, L"该内核条目没有对应的 ArkDriverClient 只读 IOCTL。 ");
     }

@@ -20,6 +20,8 @@ const std::vector<TopLevelTabSpec> kOriginalTopLevelTabs = {
     { L"回调遍历", KernelFeatureId::CallbackEnumeration },
     { L"内核可执行内存", KernelFeatureId::KernelExecutableMemory },
     { L"CrossView", KernelFeatureId::ProcessCrossView },
+    { L"定时器/DPC", KernelFeatureId::KernelTimerDpc },
+    { L"IOCTL 派遣表", KernelFeatureId::IoctlRegistry },
     { L"内核修改审计", KernelFeatureId::MutationAudit },
     { L"键盘", KernelFeatureId::KeyboardHotkeys },
 };
@@ -137,6 +139,8 @@ KernelPageLayoutKind LayoutKindForFeature(const KernelFeatureId featureId) {
     case KernelFeatureId::KeyboardHooks:
     case KernelFeatureId::DynDataCapabilities:
     case KernelFeatureId::MinifilterBypassPids:
+    case KernelFeatureId::KernelTimerDpc:
+    case KernelFeatureId::IoctlRegistry:
     case KernelFeatureId::PdbProfileStatus:
     case KernelFeatureId::CidTableSummary:
     case KernelFeatureId::IpcSummary:
@@ -238,6 +242,10 @@ std::vector<std::wstring> CanonicalColumnNames(const KernelFeatureId featureId) 
         return { L"类别", L"入口", L"状态", L"Capability", L"Rows", L"风险/降级", L"Detail" };
     case KernelFeatureId::MinifilterBypassPids:
         return { L"PID", L"进程", L"状态", L"来源" };
+    case KernelFeatureId::KernelTimerDpc:
+        return { L"CPU", L"Bucket", L"Timer", L"DueTime", L"Period", L"类型", L"DPC", L"例程", L"上下文", L"标志", L"状态" };
+    case KernelFeatureId::IoctlRegistry:
+        return { L"IOCTL", L"函数", L"Method/Access", L"Capability", L"Handler", L"名称", L"Flags", L"状态" };
     default:
         return {};
     }
@@ -549,6 +557,29 @@ std::vector<std::wstring> ColumnAliases(const KernelFeatureId featureId, const s
         if (columnName == L"进程") return { L"Process" };
         if (columnName == L"状态") return { L"状态", L"Status", L"Flags" };
         if (columnName == L"来源") return { L"来源", L"Index" };
+    }
+    if (featureId == KernelFeatureId::KernelTimerDpc) {
+        if (columnName == L"CPU") return { L"CPU", L"Processor" };
+        if (columnName == L"Bucket") return { L"Bucket", L"BucketIndex" };
+        if (columnName == L"Timer") return { L"Timer", L"TimerAddress" };
+        if (columnName == L"DueTime") return { L"DueTime" };
+        if (columnName == L"Period") return { L"Period" };
+        if (columnName == L"类型") return { L"类型", L"TypeText", L"TimerType" };
+        if (columnName == L"DPC") return { L"DPC", L"Dpc", L"DpcAddress" };
+        if (columnName == L"例程") return { L"例程", L"DeferredRoutine" };
+        if (columnName == L"上下文") return { L"上下文", L"DeferredContext" };
+        if (columnName == L"标志") return { L"标志", L"Flags" };
+        if (columnName == L"状态") return { L"状态", L"Status" };
+    }
+    if (featureId == KernelFeatureId::IoctlRegistry) {
+        if (columnName == L"IOCTL") return { L"IOCTL", L"IoControlCode" };
+        if (columnName == L"函数") return { L"函数", L"Function", L"FunctionNumber" };
+        if (columnName == L"Method/Access") return { L"Method/Access", L"MethodAccess" };
+        if (columnName == L"Capability") return { L"Capability", L"RequiredCapability" };
+        if (columnName == L"Handler") return { L"Handler", L"HandlerAddress" };
+        if (columnName == L"名称") return { L"名称", L"Name" };
+        if (columnName == L"Flags") return { L"Flags" };
+        if (columnName == L"状态") return { L"状态", L"Status" };
     }
     return { columnName };
 }
