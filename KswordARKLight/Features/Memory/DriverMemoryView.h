@@ -10,11 +10,4 @@ namespace Ksword::Features::Memory {
 // failure.
 HWND CreateDriverMemoryView(HWND parent, const RECT& bounds);
 
-// CreateProcessMemoryEvidenceView creates the read-only process VA evidence
-// surface. Inputs are parent window and initial bounds; processing uses only R3
-// VirtualQueryEx / QueryWorkingSetEx fallback evidence and never issues write,
-// patch, unlink or protection-changing actions; output is the page HWND or null
-// on failure.
-HWND CreateProcessMemoryEvidenceView(HWND parent, const RECT& bounds);
-
 } // namespace Ksword::Features::Memory
