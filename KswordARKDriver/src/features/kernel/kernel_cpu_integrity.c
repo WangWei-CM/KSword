@@ -19,6 +19,8 @@ Environment:
 #define KSW_CPU_INTEGRITY_CR4_SMAP 0x0000000000200000ULL
 #define KSW_CPU_INTEGRITY_EFER_NXE 0x0000000000000800ULL
 #define KSW_CPU_INTEGRITY_IDT_ENTRY_BYTES 16UL
+#define KSW_CPU_INTEGRITY_GDT_ENTRY_BYTES 8UL
+#define KSW_CPU_INTEGRITY_MAX_GDT_ENTRIES 256UL
 #define KSW_DRIVER_INTEGRITY_LOADED_MODULE_LIMIT 512UL
 #ifndef ALL_PROCESSOR_GROUPS
 #define ALL_PROCESSOR_GROUPS 0xFFFFU
@@ -160,7 +162,7 @@ Return Value:
         KswordARKHookBoundedAnsiEqualsInsensitive(fileName, fileNameBytes, "ntkrpamp.exe") ||
         KswordARKHookBoundedAnsiEqualsInsensitive(fileName, fileNameBytes, "hal.dll");
 }
-VOID
+KSWORD_ARK_DRIVER_INTEGRITY_EVIDENCE*
 KswordARKDriverIntegrityAddEvidence(
     _Inout_ KSW_DRIVER_INTEGRITY_BUILDER* Builder,
     _In_ ULONG EvidenceClass,
@@ -192,13 +194,13 @@ Arguments:
     OwnerModule - Optional owner module for TargetAddress.
     DetailText - Optional detail string.
 Return Value:
-    None. Response flags and counters expose truncation.
+    Pointer to the appended row, or NULL when validation/capacity rejected it.
 --*/
 {
     KSWORD_ARK_QUERY_DRIVER_INTEGRITY_RESPONSE* response = NULL;
     KSWORD_ARK_DRIVER_INTEGRITY_EVIDENCE* row = NULL;
     if (Builder == NULL || Builder->Response == NULL) {
-        return;
+        return NULL;
     }
     response = Builder->Response;
     response->totalCount += 1UL;
@@ -206,7 +208,7 @@ Return Value:
     response->flags |= RiskFlags;
     if ((Builder->RowLimit != 0UL && response->returnedCount >= Builder->RowLimit) || response->returnedCount >= Builder->Capacity) {
         response->flags |= KSWORD_ARK_DRIVER_INTEGRITY_RISK_TRUNCATED;
-        return;
+        return NULL;
     }
     row = &response->entries[response->returnedCount];
     RtlZeroMemory(row, sizeof(*row));
@@ -229,6 +231,7 @@ Return Value:
     }
     KswordARKDriverIntegrityCopyWide(row->detail, KSWORD_ARK_DRIVER_INTEGRITY_DETAIL_CHARS, DetailText);
     response->returnedCount += 1UL;
+    return row;
 }
 BOOLEAN
 KswordARKDriverIntegrityOffsetPresent(
@@ -446,6 +449,80 @@ Return Value:
     return 0ULL;
 #endif
 }
+
+static BOOLEAN
+KswordARKCpuIntegrityGdtDescriptorIsWide(
+    _In_ ULONG Type,
+    _In_ BOOLEAN UserSegment
+    )
+/*++
+Routine Description:
+    Decide whether one long-mode GDT system descriptor consumes two slots.
+Arguments:
+    Type - Four-bit architectural descriptor type.
+    UserSegment - TRUE when the S bit marks a code/data descriptor.
+Return Value:
+    TRUE for LDT/TSS/call/interrupt/trap system descriptors; FALSE otherwise.
+--*/
+{
+    if (UserSegment) {
+        return FALSE;
+    }
+    return Type == 0x2UL || Type == 0x9UL || Type == 0xBUL ||
+        Type == 0xCUL || Type == 0xEUL || Type == 0xFUL;
+}
+
+static VOID
+KswordARKCpuIntegrityPopulateDescriptorFields(
+    _Inout_opt_ KSWORD_ARK_DRIVER_INTEGRITY_EVIDENCE* Row,
+    _In_ ULONG Selector,
+    _In_ ULONG Type,
+    _In_ ULONG Dpl,
+    _In_ ULONG Flags,
+    _In_ ULONG DescriptorSize,
+    _In_ ULONGLONG TableBase,
+    _In_ ULONG TableLimit,
+    _In_ ULONGLONG Base,
+    _In_ ULONGLONG Limit,
+    _In_ ULONGLONG RawLow,
+    _In_ ULONGLONG RawHigh
+    )
+/*++
+Routine Description:
+    Fill the append-only v3 descriptor columns on one evidence row.
+Arguments:
+    Row - Row returned by the bounded evidence builder.
+    Selector - IDT code selector or GDT selector.
+    Type - Architectural gate/segment type.
+    Dpl - Descriptor privilege level.
+    Flags - KSWORD_ARK_DESCRIPTOR_FLAG_* bits.
+    DescriptorSize - Descriptor byte width.
+    TableBase - IDTR/GDTR base captured on the target CPU.
+    TableLimit - IDTR/GDTR limit captured on the target CPU.
+    Base - Handler or segment base decoded from the descriptor.
+    Limit - Effective segment limit; zero for IDT gates.
+    RawLow - First eight descriptor bytes.
+    RawHigh - Second eight descriptor bytes when present.
+Return Value:
+    None.
+--*/
+{
+    if (Row == NULL) {
+        return;
+    }
+    Row->fieldMask |= KSWORD_ARK_DRIVER_INTEGRITY_FIELD_DESCRIPTOR;
+    Row->descriptorSelector = Selector;
+    Row->descriptorType = Type;
+    Row->descriptorDpl = Dpl;
+    Row->descriptorFlags = Flags;
+    Row->descriptorSize = DescriptorSize;
+    Row->descriptorTableBase = TableBase;
+    Row->descriptorTableLimit = TableLimit;
+    Row->descriptorBase = Base;
+    Row->descriptorLimit = Limit;
+    Row->descriptorRawLow = RawLow;
+    Row->descriptorRawHigh = RawHigh;
+}
 static VOID
 KswordARKCpuIntegrityCaptureCurrent(
     _Inout_ KSW_CPU_INTEGRITY_SAMPLE* Sample
@@ -577,19 +654,41 @@ Return Value:
     }
     for (vector = 0UL; vector < vectorCount; ++vector) {
         KSW_CPU_INTEGRITY_IDT_ENTRY64 entry;
+        KSWORD_ARK_DRIVER_INTEGRITY_EVIDENCE* row = NULL;
         ULONGLONG entryAddress = (ULONGLONG)Sample->Idtr.Base + ((ULONGLONG)vector * KSW_CPU_INTEGRITY_IDT_ENTRY_BYTES);
         ULONGLONG handler = 0ULL;
+        ULONGLONG rawLow = 0ULL;
+        ULONGLONG rawHigh = 0ULL;
         ULONG riskFlags = KSWORD_ARK_DRIVER_INTEGRITY_RISK_NONE;
+        ULONG descriptorFlags = 0UL;
+        ULONG descriptorType = 0UL;
+        ULONG descriptorDpl = 0UL;
         const KSW_HOOK_SYSTEM_MODULE_ENTRY* owner = NULL;
         WCHAR detail[KSWORD_ARK_DRIVER_INTEGRITY_DETAIL_CHARS] = { 0 };
         RtlZeroMemory(&entry, sizeof(entry));
         if (!KswordARKHookReadMemorySafe((const VOID*)(ULONG_PTR)entryAddress, &entry, sizeof(entry))) {
             riskFlags = KSWORD_ARK_DRIVER_INTEGRITY_RISK_QUERY_FAILED;
-            KswordARKDriverIntegrityAddEvidence(Builder, KSWORD_ARK_DRIVER_INTEGRITY_CLASS_IDT_HANDLER, entryAddress, 0ULL, riskFlags,
+            row = KswordARKDriverIntegrityAddEvidence(Builder, KSWORD_ARK_DRIVER_INTEGRITY_CLASS_IDT_HANDLER, entryAddress, 0ULL, riskFlags,
                 KSWORD_ARK_DRIVER_INTEGRITY_SOURCE_IDT, 35UL, Sample->Group, Sample->Number, vector, NULL, L"IDT entry read failed.");
+            KswordARKCpuIntegrityPopulateDescriptorFields(
+                row, 0UL, 0UL, 0UL, KSWORD_ARK_DESCRIPTOR_FLAG_READ_FAILED,
+                KSW_CPU_INTEGRITY_IDT_ENTRY_BYTES, (ULONGLONG)Sample->Idtr.Base,
+                Sample->Idtr.Limit, 0ULL, 0ULL, 0ULL, 0ULL);
             continue;
         }
+        RtlCopyMemory(&rawLow, &entry, sizeof(rawLow));
+        RtlCopyMemory(&rawHigh, (const UCHAR*)&entry + sizeof(rawLow), sizeof(rawHigh));
         handler = KswordARKCpuIntegrityIdtHandler(&entry);
+        descriptorType = ((ULONG)entry.IstAndType >> 8) & 0xFUL;
+        descriptorDpl = ((ULONG)entry.IstAndType >> 13) & 0x3UL;
+        if ((entry.IstAndType & 0x8000U) != 0U) {
+            descriptorFlags |= KSWORD_ARK_DESCRIPTOR_FLAG_PRESENT;
+        }
+        if ((descriptorFlags & KSWORD_ARK_DESCRIPTOR_FLAG_PRESENT) == 0UL ||
+            entry.Selector == 0U || handler == 0ULL ||
+            (descriptorType != 0xEUL && descriptorType != 0xFUL) || entry.Reserved != 0UL) {
+            riskFlags |= KSWORD_ARK_DRIVER_INTEGRITY_RISK_DESCRIPTOR_INVALID;
+        }
         owner = KswordARKDriverIntegrityFindModuleForAddress(ModuleInfo, handler);
         if (owner == NULL) {
             riskFlags |= KSWORD_ARK_DRIVER_INTEGRITY_RISK_MODULE_UNRESOLVED;
@@ -598,8 +697,143 @@ Return Value:
             riskFlags |= KSWORD_ARK_DRIVER_INTEGRITY_RISK_IDT_NON_CORE_OWNER;
         }
         KswordARKCpuIntegrityFormatDetail(detail, RTL_NUMBER_OF(detail), L"IDT[%lu] gate=0x%llX handler=0x%llX selector=0x%04X attr=0x%04X.", vector, entryAddress, handler, entry.Selector, entry.IstAndType);
-        KswordARKDriverIntegrityAddEvidence(Builder, KSWORD_ARK_DRIVER_INTEGRITY_CLASS_IDT_HANDLER, entryAddress, handler, riskFlags,
+        row = KswordARKDriverIntegrityAddEvidence(Builder, KSWORD_ARK_DRIVER_INTEGRITY_CLASS_IDT_HANDLER, entryAddress, handler, riskFlags,
             KSWORD_ARK_DRIVER_INTEGRITY_SOURCE_IDT | KSWORD_ARK_DRIVER_INTEGRITY_SOURCE_SYSTEM_MODULE, 85UL, Sample->Group, Sample->Number, vector, owner, detail);
+        KswordARKCpuIntegrityPopulateDescriptorFields(
+            row, entry.Selector, descriptorType, descriptorDpl, descriptorFlags,
+            KSW_CPU_INTEGRITY_IDT_ENTRY_BYTES, (ULONGLONG)Sample->Idtr.Base,
+            Sample->Idtr.Limit, handler, 0ULL, rawLow, rawHigh);
+    }
+}
+
+static VOID
+KswordARKCpuIntegrityEmitGdtRows(
+    _Inout_ KSW_DRIVER_INTEGRITY_BUILDER* Builder,
+    _In_ const KSW_CPU_INTEGRITY_SAMPLE* Sample
+    )
+/*++
+Routine Description:
+    Decode a bounded copy of each GDT slot and emit structured v3 evidence.
+Arguments:
+    Builder - Response builder.
+    Sample - Captured GDTR state for one CPU.
+Return Value:
+    None. Every row remains read-only diagnostic evidence.
+--*/
+{
+    ULONG slot = 0UL;
+    ULONG slotCount = 0UL;
+    if (Builder == NULL || Sample == NULL || Sample->Captured == 0UL || Sample->Gdtr.Base == 0U) {
+        return;
+    }
+    slotCount = ((ULONG)Sample->Gdtr.Limit + 1UL) / KSW_CPU_INTEGRITY_GDT_ENTRY_BYTES;
+    if (slotCount > KSW_CPU_INTEGRITY_MAX_GDT_ENTRIES) {
+        Builder->Response->flags |= KSWORD_ARK_DRIVER_INTEGRITY_RISK_TRUNCATED;
+        slotCount = KSW_CPU_INTEGRITY_MAX_GDT_ENTRIES;
+    }
+    for (slot = 0UL; slot < slotCount; ++slot) {
+        KSWORD_ARK_DRIVER_INTEGRITY_EVIDENCE* row = NULL;
+        const ULONGLONG entryAddress =
+            (ULONGLONG)Sample->Gdtr.Base + ((ULONGLONG)slot * KSW_CPU_INTEGRITY_GDT_ENTRY_BYTES);
+        ULONGLONG rawLow = 0ULL;
+        ULONGLONG rawHigh = 0ULL;
+        ULONGLONG base = 0ULL;
+        ULONGLONG limit = 0ULL;
+        ULONG descriptorType = 0UL;
+        ULONG descriptorDpl = 0UL;
+        ULONG descriptorFlags = 0UL;
+        ULONG descriptorSize = KSW_CPU_INTEGRITY_GDT_ENTRY_BYTES;
+        ULONG riskFlags = KSWORD_ARK_DRIVER_INTEGRITY_RISK_NONE;
+        BOOLEAN userSegment = FALSE;
+        BOOLEAN wideDescriptor = FALSE;
+        WCHAR detail[KSWORD_ARK_DRIVER_INTEGRITY_DETAIL_CHARS] = { 0 };
+
+        if (!KswordARKHookReadMemorySafe((const VOID*)(ULONG_PTR)entryAddress, &rawLow, sizeof(rawLow))) {
+            row = KswordARKDriverIntegrityAddEvidence(
+                Builder, KSWORD_ARK_DRIVER_INTEGRITY_CLASS_GDT_DESCRIPTOR,
+                entryAddress, 0ULL, KSWORD_ARK_DRIVER_INTEGRITY_RISK_QUERY_FAILED,
+                KSWORD_ARK_DRIVER_INTEGRITY_SOURCE_GDT, 35UL, Sample->Group,
+                Sample->Number, slot, NULL, L"GDT descriptor read failed.");
+            KswordARKCpuIntegrityPopulateDescriptorFields(
+                row, slot * KSW_CPU_INTEGRITY_GDT_ENTRY_BYTES, 0UL, 0UL,
+                KSWORD_ARK_DESCRIPTOR_FLAG_READ_FAILED, descriptorSize,
+                (ULONGLONG)Sample->Gdtr.Base, Sample->Gdtr.Limit,
+                0ULL, 0ULL, 0ULL, 0ULL);
+            continue;
+        }
+
+        descriptorType = (ULONG)((rawLow >> 40) & 0xFULL);
+        userSegment = ((rawLow >> 44) & 0x1ULL) != 0ULL ? TRUE : FALSE;
+        descriptorDpl = (ULONG)((rawLow >> 45) & 0x3ULL);
+        if (((rawLow >> 47) & 0x1ULL) != 0ULL) {
+            descriptorFlags |= KSWORD_ARK_DESCRIPTOR_FLAG_PRESENT;
+        }
+        if (((rawLow >> 55) & 0x1ULL) != 0ULL) {
+            descriptorFlags |= KSWORD_ARK_DESCRIPTOR_FLAG_GRANULARITY_PAGE;
+        }
+        if (userSegment) {
+            descriptorFlags |= KSWORD_ARK_DESCRIPTOR_FLAG_USER_SEGMENT;
+        }
+        if (((rawLow >> 53) & 0x1ULL) != 0ULL) {
+            descriptorFlags |= KSWORD_ARK_DESCRIPTOR_FLAG_LONG_MODE;
+        }
+        if (((rawLow >> 54) & 0x1ULL) != 0ULL) {
+            descriptorFlags |= KSWORD_ARK_DESCRIPTOR_FLAG_DEFAULT_BIG;
+        }
+        if (!userSegment && descriptorType == 0x9UL) {
+            descriptorFlags |= KSWORD_ARK_DESCRIPTOR_FLAG_AVAILABLE;
+        }
+
+        base = ((rawLow >> 16) & 0xFFFFFFULL) | (((rawLow >> 56) & 0xFFULL) << 24);
+        limit = (rawLow & 0xFFFFULL) | (((rawLow >> 48) & 0xFULL) << 16);
+        wideDescriptor = KswordARKCpuIntegrityGdtDescriptorIsWide(descriptorType, userSegment);
+        if (wideDescriptor) {
+            descriptorSize = 2UL * KSW_CPU_INTEGRITY_GDT_ENTRY_BYTES;
+            if (slot + 1UL >= slotCount ||
+                !KswordARKHookReadMemorySafe((const VOID*)(ULONG_PTR)(entryAddress + KSW_CPU_INTEGRITY_GDT_ENTRY_BYTES), &rawHigh, sizeof(rawHigh))) {
+                riskFlags |= KSWORD_ARK_DRIVER_INTEGRITY_RISK_QUERY_FAILED |
+                    KSWORD_ARK_DRIVER_INTEGRITY_RISK_DESCRIPTOR_INVALID;
+                descriptorFlags |= KSWORD_ARK_DESCRIPTOR_FLAG_READ_FAILED;
+            }
+            else {
+                base |= (rawHigh & 0xFFFFFFFFULL) << 32;
+                if ((rawHigh >> 32) != 0ULL) {
+                    riskFlags |= KSWORD_ARK_DRIVER_INTEGRITY_RISK_DESCRIPTOR_INVALID;
+                }
+            }
+        }
+        if ((descriptorFlags & KSWORD_ARK_DESCRIPTOR_FLAG_GRANULARITY_PAGE) != 0UL) {
+            limit = (limit << 12) | 0xFFFULL;
+        }
+        if ((descriptorFlags & KSWORD_ARK_DESCRIPTOR_FLAG_PRESENT) != 0UL) {
+            if (descriptorType == 0UL ||
+                (userSegment &&
+                 (descriptorFlags & KSWORD_ARK_DESCRIPTOR_FLAG_LONG_MODE) != 0UL &&
+                 (descriptorFlags & KSWORD_ARK_DESCRIPTOR_FLAG_DEFAULT_BIG) != 0UL)) {
+                riskFlags |= KSWORD_ARK_DRIVER_INTEGRITY_RISK_DESCRIPTOR_INVALID;
+            }
+        }
+
+        KswordARKCpuIntegrityFormatDetail(
+            detail, RTL_NUMBER_OF(detail),
+            L"GDT selector=0x%04lX entry=0x%llX base=0x%llX limit=0x%llX type=0x%lX DPL=%lu flags=0x%lX size=%lu.",
+            slot * KSW_CPU_INTEGRITY_GDT_ENTRY_BYTES, entryAddress, base, limit,
+            descriptorType, descriptorDpl, descriptorFlags, descriptorSize);
+        row = KswordARKDriverIntegrityAddEvidence(
+            Builder, KSWORD_ARK_DRIVER_INTEGRITY_CLASS_GDT_DESCRIPTOR,
+            entryAddress, base, riskFlags, KSWORD_ARK_DRIVER_INTEGRITY_SOURCE_GDT,
+            riskFlags == 0UL ? 90UL : 55UL, Sample->Group, Sample->Number,
+            slot, NULL, detail);
+        KswordARKCpuIntegrityPopulateDescriptorFields(
+            row, slot * KSW_CPU_INTEGRITY_GDT_ENTRY_BYTES, descriptorType,
+            descriptorDpl, descriptorFlags, descriptorSize,
+            (ULONGLONG)Sample->Gdtr.Base, Sample->Gdtr.Limit,
+            base, limit, rawLow, rawHigh);
+        if (wideDescriptor && slot + 1UL < slotCount) {
+            // IA-32e system descriptors consume two adjacent GDT slots. The
+            // upper half is raw continuation data, not an independent entry.
+            ++slot;
+        }
     }
 }
 NTSTATUS
@@ -673,6 +907,9 @@ Return Value:
             KswordARKCpuIntegrityEmitControlRows(Builder, &sample, ModuleInfo);
             if ((Flags & KSWORD_ARK_DRIVER_INTEGRITY_FLAG_IDT_ENTRIES) != 0UL) {
                 KswordARKCpuIntegrityEmitIdtRows(Builder, &sample, ModuleInfo, MaxIdtVectorsPerCpu);
+            }
+            if ((Flags & KSWORD_ARK_DRIVER_INTEGRITY_FLAG_GDT_ENTRIES) != 0UL) {
+                KswordARKCpuIntegrityEmitGdtRows(Builder, &sample);
             }
         }
     }

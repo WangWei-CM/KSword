@@ -1023,6 +1023,17 @@ namespace ksword::ark
         std::uint64_t kldrListHeadAddress = 0;      // kldrListHeadAddress：PsLoadedModuleList 链表头。
         std::uint64_t kldrDllBase = 0;              // kldrDllBase：KLDR.DllBase。
         std::uint32_t kldrSizeOfImage = 0;          // kldrSizeOfImage：KLDR.SizeOfImage。
+        std::uint32_t descriptorSelector = 0;       // descriptorSelector：IDT 代码选择子或 GDT 选择子。
+        std::uint32_t descriptorType = 0;           // descriptorType：架构 gate/segment type。
+        std::uint32_t descriptorDpl = 0;            // descriptorDpl：描述符特权级。
+        std::uint32_t descriptorFlags = 0;          // descriptorFlags：KSWORD_ARK_DESCRIPTOR_FLAG_* 位。
+        std::uint32_t descriptorSize = 0;           // descriptorSize：8/16 字节描述符宽度。
+        std::uint32_t descriptorTableLimit = 0;     // descriptorTableLimit：IDTR/GDTR limit。
+        std::uint64_t descriptorTableBase = 0;      // descriptorTableBase：IDTR/GDTR base。
+        std::uint64_t descriptorBase = 0;           // descriptorBase：IDT handler 或 GDT segment/TSS base。
+        std::uint64_t descriptorLimit = 0;          // descriptorLimit：GDT 有效 limit。
+        std::uint64_t descriptorRawLow = 0;         // descriptorRawLow：前 8 字节原始值。
+        std::uint64_t descriptorRawHigh = 0;        // descriptorRawHigh：16 字节描述符后 8 字节。
     };
 
     // DriverIntegrityResult carries DriverObject/LDR/CPU integrity evidence.

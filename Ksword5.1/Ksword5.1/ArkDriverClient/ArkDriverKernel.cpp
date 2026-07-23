@@ -911,7 +911,9 @@ namespace ksword::ark
 
         const auto* responseHeader =
             reinterpret_cast<const KSWORD_ARK_QUERY_DRIVER_INTEGRITY_RESPONSE*>(responseBuffer.data());
-        if (responseHeader->entrySize < sizeof(KSWORD_ARK_DRIVER_INTEGRITY_EVIDENCE))
+        constexpr std::size_t minimumEvidenceSize =
+            offsetof(KSWORD_ARK_DRIVER_INTEGRITY_EVIDENCE, entryStatus);
+        if (responseHeader->entrySize < minimumEvidenceSize)
         {
             integrityResult.io.ok = false;
             integrityResult.io.message =
@@ -953,7 +955,7 @@ namespace ksword::ark
         {
             const std::size_t entryOffset =
                 headerSize + (index * static_cast<std::size_t>(responseHeader->entrySize));
-            if (entryOffset + sizeof(KSWORD_ARK_DRIVER_INTEGRITY_EVIDENCE) > responseBuffer.size())
+            if (entryOffset + static_cast<std::size_t>(responseHeader->entrySize) > responseBuffer.size())
             {
                 break;
             }
@@ -1012,6 +1014,20 @@ namespace ksword::ark
                 row.kldrListHeadAddress = static_cast<std::uint64_t>(sourceEntry->kldrListHeadAddress);
                 row.kldrDllBase = static_cast<std::uint64_t>(sourceEntry->kldrDllBase);
                 row.kldrSizeOfImage = static_cast<std::uint32_t>(sourceEntry->kldrSizeOfImage);
+            }
+            if (hasTypedField(offsetof(KSWORD_ARK_DRIVER_INTEGRITY_EVIDENCE, descriptorRawHigh), sizeof(sourceEntry->descriptorRawHigh)))
+            {
+                row.descriptorSelector = static_cast<std::uint32_t>(sourceEntry->descriptorSelector);
+                row.descriptorType = static_cast<std::uint32_t>(sourceEntry->descriptorType);
+                row.descriptorDpl = static_cast<std::uint32_t>(sourceEntry->descriptorDpl);
+                row.descriptorFlags = static_cast<std::uint32_t>(sourceEntry->descriptorFlags);
+                row.descriptorSize = static_cast<std::uint32_t>(sourceEntry->descriptorSize);
+                row.descriptorTableLimit = static_cast<std::uint32_t>(sourceEntry->descriptorTableLimit);
+                row.descriptorTableBase = static_cast<std::uint64_t>(sourceEntry->descriptorTableBase);
+                row.descriptorBase = static_cast<std::uint64_t>(sourceEntry->descriptorBase);
+                row.descriptorLimit = static_cast<std::uint64_t>(sourceEntry->descriptorLimit);
+                row.descriptorRawLow = static_cast<std::uint64_t>(sourceEntry->descriptorRawLow);
+                row.descriptorRawHigh = static_cast<std::uint64_t>(sourceEntry->descriptorRawHigh);
             }
             integrityResult.entries.push_back(std::move(row));
         }

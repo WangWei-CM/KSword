@@ -196,6 +196,7 @@
     <ClCompile Include="KernelDock\KernelDock.Runtime.cpp" />
     <ClCompile Include="KernelDock\KernelDock.Ssdt.cpp" />
     <ClCompile Include="KernelDock\KernelDockCidTab.cpp" />
+    <ClCompile Include="KernelDock\KernelDescriptorTableTab.cpp" />
     <ClCompile Include="KernelDock\KernelDockIpcTab.cpp" />
     <ClCompile Include="KernelDock\KernelBaseNamedObjectsTab.cpp" />
     <ClCompile Include="KernelDock\KernelBaseNamedObjectsWorker.cpp" />
@@ -413,6 +414,7 @@
     <ClInclude Include="KernelDock\KernelNamedPipeTab.h" />
     <ClInclude Include="KernelDock\KernelNamedPipeWorker.h" />
     <ClInclude Include="KernelDock\KernelDockCidTab.h" />
+    <ClInclude Include="KernelDock\KernelDescriptorTableTab.h" />
     <ClInclude Include="KernelDock\KernelDockIpcTab.h" />
     <ClInclude Include="KernelDock\KernelObjectDirectoryDeepTab.h" />
     <ClInclude Include="KernelDock\KernelObjectDirectoryDeepWorker.h" />

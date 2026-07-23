@@ -368,7 +368,8 @@ Routine Description:
 
     Handle IOCTL_KSWORD_ARK_QUERY_DRIVER_INTEGRITY. The existing 0x849 IOCTL
     stays read-only and uses version/size fields so v1 rows remain a stable
-    prefix while v2 callers can consume typed DriverObject evidence columns.
+    prefix while v2/v3 callers can consume typed DriverObject and descriptor
+    evidence columns.
 
 Arguments:
 

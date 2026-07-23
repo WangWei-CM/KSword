@@ -565,14 +565,17 @@ KswordARKDriverIntegrityScoreRisk(
     if ((RiskFlags & (KSWORD_ARK_DRIVER_INTEGRITY_RISK_IDT_NON_CORE_OWNER | KSWORD_ARK_DRIVER_INTEGRITY_RISK_CPU_WP_DISABLED | KSWORD_ARK_DRIVER_INTEGRITY_RISK_CPU_NXE_DISABLED | KSWORD_ARK_DRIVER_INTEGRITY_RISK_CPU_SMEP_DISABLED | KSWORD_ARK_DRIVER_INTEGRITY_RISK_CPU_SMAP_DISABLED)) != 0UL) {
         score += 50UL;
     }
+    if ((RiskFlags & KSWORD_ARK_DRIVER_INTEGRITY_RISK_DESCRIPTOR_INVALID) != 0UL) {
+        score += 50UL;
+    }
     return (score > 100UL) ? 100UL : score;
 }
 static VOID
-KswordARKDriverIntegrityFinalizeV2Rows(
+KswordARKDriverIntegrityFinalizeRows(
     _Inout_ KSWORD_ARK_QUERY_DRIVER_INTEGRITY_RESPONSE* Response
     )
 
-/* Read-only helper; fills v2 common status, field masks, and scores after all collectors finish. */
+/* Read-only helper; fills common status, field masks, and scores after all collectors finish. */
 {
     ULONG index = 0UL;
     if (Response == NULL) {
@@ -1294,7 +1297,7 @@ KswordARKDriverQueryDriverIntegrity(
         }
     }
     response->moduleCount = (moduleInfo != NULL) ? moduleInfo->NumberOfModules : 0UL;
-    KswordARKDriverIntegrityFinalizeV2Rows(response);
+    KswordARKDriverIntegrityFinalizeRows(response);
     if ((response->flags & (KSWORD_ARK_DRIVER_INTEGRITY_RISK_TRUNCATED | KSWORD_ARK_DRIVER_INTEGRITY_RISK_QUERY_FAILED | KSWORD_ARK_DRIVER_INTEGRITY_RISK_UNAVAILABLE)) != 0UL &&
         response->queryStatus == KSWORD_ARK_DRIVER_INTEGRITY_STATUS_OK) {
         response->queryStatus = KSWORD_ARK_DRIVER_INTEGRITY_STATUS_PARTIAL;

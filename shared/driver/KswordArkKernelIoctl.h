@@ -160,7 +160,8 @@ typedef struct _KSWORD_ARK_QUERY_IOCTL_REGISTRY_RESPONSE
 #define KSWORD_ARK_FORCE_UNLOAD_DRIVER_PROTOCOL_VERSION 1UL
 #define KSWORD_ARK_DRIVER_INTEGRITY_PROTOCOL_VERSION_V1 1UL
 #define KSWORD_ARK_DRIVER_INTEGRITY_PROTOCOL_VERSION_V2 2UL
-#define KSWORD_ARK_DRIVER_INTEGRITY_PROTOCOL_VERSION KSWORD_ARK_DRIVER_INTEGRITY_PROTOCOL_VERSION_V2
+#define KSWORD_ARK_DRIVER_INTEGRITY_PROTOCOL_VERSION_V3 3UL
+#define KSWORD_ARK_DRIVER_INTEGRITY_PROTOCOL_VERSION KSWORD_ARK_DRIVER_INTEGRITY_PROTOCOL_VERSION_V3
 #define KSWORD_ARK_CPU_HARDWARE_PROTOCOL_VERSION 1UL
 #define KSWORD_ARK_PHYSICAL_MEMORY_LAYOUT_PROTOCOL_VERSION 1UL
 #define KSWORD_ARK_TIMER_DPC_PROTOCOL_VERSION 1UL
@@ -248,6 +249,7 @@ typedef struct _KSWORD_ARK_QUERY_IOCTL_REGISTRY_RESPONSE
 #define KSWORD_ARK_DRIVER_INTEGRITY_FLAG_CPU               0x00000004UL
 #define KSWORD_ARK_DRIVER_INTEGRITY_FLAG_IDT_ENTRIES       0x00000008UL
 #define KSWORD_ARK_DRIVER_INTEGRITY_FLAG_OPTIONAL_GLOBALS  0x00000010UL
+#define KSWORD_ARK_DRIVER_INTEGRITY_FLAG_GDT_ENTRIES       0x00000020UL
 #define KSWORD_ARK_DRIVER_INTEGRITY_FLAG_DEFAULT \
     (KSWORD_ARK_DRIVER_INTEGRITY_FLAG_DRIVER_OBJECT | \
      KSWORD_ARK_DRIVER_INTEGRITY_FLAG_SERVICE | \
@@ -303,6 +305,17 @@ typedef struct _KSWORD_ARK_QUERY_IOCTL_REGISTRY_RESPONSE
 #define KSWORD_ARK_DRIVER_INTEGRITY_FIELD_KLDR                  0x00000040UL
 #define KSWORD_ARK_DRIVER_INTEGRITY_FIELD_OPTIONAL_GLOBAL       0x00000080UL
 #define KSWORD_ARK_DRIVER_INTEGRITY_FIELD_CPU_CONTEXT           0x00000100UL
+#define KSWORD_ARK_DRIVER_INTEGRITY_FIELD_DESCRIPTOR            0x00000200UL
+
+// IDT/GDT 描述符通用标志。它们仅表示 R0 采集到的硬件位，
+// 不用于写回或重建描述符。
+#define KSWORD_ARK_DESCRIPTOR_FLAG_PRESENT             0x00000001UL
+#define KSWORD_ARK_DESCRIPTOR_FLAG_GRANULARITY_PAGE    0x00000002UL
+#define KSWORD_ARK_DESCRIPTOR_FLAG_USER_SEGMENT        0x00000004UL
+#define KSWORD_ARK_DESCRIPTOR_FLAG_LONG_MODE           0x00000008UL
+#define KSWORD_ARK_DESCRIPTOR_FLAG_DEFAULT_BIG         0x00000010UL
+#define KSWORD_ARK_DESCRIPTOR_FLAG_AVAILABLE           0x00000020UL
+#define KSWORD_ARK_DESCRIPTOR_FLAG_READ_FAILED         0x00000040UL
 
 // Driver Integrity response status flags.
 // These bits summarize whether rows are complete, partial, unsupported, or
@@ -335,6 +348,7 @@ typedef struct _KSWORD_ARK_QUERY_IOCTL_REGISTRY_RESPONSE
 #define KSWORD_ARK_DRIVER_INTEGRITY_CLASS_MSR_ENTRY            11UL
 #define KSWORD_ARK_DRIVER_INTEGRITY_CLASS_IDT_HANDLER          12UL
 #define KSWORD_ARK_DRIVER_INTEGRITY_CLASS_OPTIONAL_GLOBAL      13UL
+#define KSWORD_ARK_DRIVER_INTEGRITY_CLASS_GDT_DESCRIPTOR       14UL
 
 // Driver Integrity query status.
 #define KSWORD_ARK_DRIVER_INTEGRITY_STATUS_UNAVAILABLE         0UL
@@ -714,8 +728,9 @@ typedef struct _KSWORD_ARK_QUERY_DRIVER_INTEGRITY_REQUEST
 /*
  * Driver Integrity evidence compatibility:
  * - The fields through detail[] are the v1 prefix and must remain stable.
- * - Protocol v2 appends typed columns so older R3 clients can keep using the
- *   prefix while newer clients use entrySize/fieldMask/statusFlags.
+ * - Protocol v2 appends typed DriverObject columns. Protocol v3 appends
+ *   descriptor columns. Older R3 clients keep using the stable prefix while
+ *   newer clients use entrySize/fieldMask/statusFlags.
  * - Missing PDB/DynData data is reported as partial/unsupported; R0 never
  *   guesses offsets from build numbers.
  */
@@ -756,6 +771,18 @@ typedef struct _KSWORD_ARK_DRIVER_INTEGRITY_EVIDENCE
     unsigned long long kldrDllBase;
     unsigned long kldrSizeOfImage;
     unsigned long reserved2;
+    // v3 尾部：IDT/GDT 描述符结构化字段，v1/v2 客户端可按 entrySize 忽略。
+    unsigned long descriptorSelector;
+    unsigned long descriptorType;
+    unsigned long descriptorDpl;
+    unsigned long descriptorFlags;
+    unsigned long descriptorSize;
+    unsigned long descriptorTableLimit;
+    unsigned long long descriptorTableBase;
+    unsigned long long descriptorBase;
+    unsigned long long descriptorLimit;
+    unsigned long long descriptorRawLow;
+    unsigned long long descriptorRawHigh;
 } KSWORD_ARK_DRIVER_INTEGRITY_EVIDENCE;
 
 typedef struct _KSWORD_ARK_QUERY_DRIVER_INTEGRITY_RESPONSE

@@ -934,6 +934,7 @@ private:
     int m_shadowSsdtTabIndex = -1;       // m_shadowSsdtTabIndex：SSSDT 解析页签索引。
     int m_inlineHookTabIndex = -1;       // m_inlineHookTabIndex：Inline Hook 页签索引。
     int m_iatEatHookTabIndex = -1;       // m_iatEatHookTabIndex：IAT/EAT Hook 页签索引。
+    int m_descriptorTableTabIndex = -1;  // m_descriptorTableTabIndex：IDT/GDT 描述符页签索引。
     int m_timerDpcTabIndex = -1;          // m_timerDpcTabIndex：KTIMER/DPC 页签索引。
     int m_crossViewTabIndex = -1;        // m_crossViewTabIndex：CID/交叉视图页签索引。
     int m_ipcTabIndex = -1;              // m_ipcTabIndex：IPC/NamedPipe/ALPC 页签索引。

@@ -167,6 +167,9 @@
     <ClCompile Include="KernelDock\KernelDockCidTab.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="KernelDock\KernelDescriptorTableTab.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="KernelDock\KernelDockIpcTab.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -931,6 +934,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="KernelDock\KernelDockCidTab.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="KernelDock\KernelDescriptorTableTab.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="KernelDock\KernelBaseNamedObjectsTab.h">
