@@ -5357,7 +5357,44 @@ KernelOperationResult ExecuteDynDataApplyMatchedProfile(const KernelActionReques
     result.supported = true;
     result.destructiveAction = true;
 
-    if (match.preferExApply) {
+    if (match.preferV4Apply) {
+        const ksword::ark::DynDataV4ApplyResult applied = client.applyDynDataProfileV4(match.profileV4);
+        const KSW_APPLY_DYN_PROFILE_V4_RESPONSE& response = applied.response;
+        result.success = applied.io.ok && !applied.unsupported && response.status >= 0 &&
+            response.rejectedItemCount == 0 && response.missingRequiredItemCount == 0;
+        result.message = std::wstring(L"DynData V4 profile 应用")
+            + (result.success ? L"完成。" : L"失败、旧驱动不支持或存在必需项缺失。")
+            + L" "
+            + response.message
+            + L" "
+            + Utf8ToWide(applied.io.message);
+        result.rows.push_back(Row({
+            { L"Action", L"DynDataApplyMatchedProfile" },
+            { L"Mode", L"V4" },
+            { L"IO", applied.io.ok ? L"OK" : L"FAIL" },
+            { L"Unsupported", BoolText(applied.unsupported) },
+            { L"Win32", std::to_wstring(applied.io.win32Error) },
+            { L"BytesReturned", std::to_wstring(applied.io.bytesReturned) },
+            { L"NTSTATUS", HexText(static_cast<std::uint32_t>(response.status)) },
+            { L"StatusFlags", HexText(response.statusFlags) },
+            { L"AppliedItems", std::to_wstring(response.appliedItemCount) },
+            { L"RejectedItems", std::to_wstring(response.rejectedItemCount) },
+            { L"RequiredItems", std::to_wstring(response.requiredItemCount) },
+            { L"PresentRequiredItems", std::to_wstring(response.presentRequiredItemCount) },
+            { L"OptionalItems", std::to_wstring(response.optionalItemCount) },
+            { L"PresentOptionalItems", std::to_wstring(response.presentOptionalItemCount) },
+            { L"ActiveCapabilityGroups", std::to_wstring(response.activeCapabilityGroupCount) },
+            { L"MissingRequiredItems", std::to_wstring(response.missingRequiredItemCount) },
+            { L"MissingOptionalItems", std::to_wstring(response.missingOptionalItemCount) },
+            { L"Profile", Utf8ToWide(match.profile.profileName) },
+            { L"PdbName", Utf8ToWide(match.profile.pdbName) },
+            { L"PdbGuid", Utf8ToWide(match.profile.pdbGuid) },
+            { L"PdbAge", std::to_wstring(match.profile.pdbAge) },
+            { L"ItemCount", std::to_wstring(match.profileV4.items.size()) },
+            { L"CapabilityGroupCount", std::to_wstring(match.profileV4.capabilityGroups.size()) },
+            { L"ProfilePath", match.path },
+        }, response.message[0] == L'\0' ? Utf8ToWide(applied.io.message) : std::wstring(response.message)));
+    } else if (match.preferExApply) {
         const ksword::ark::DynDataProfileApplyExResult applied = client.applyDynDataProfileEx(match.profileEx);
         result.success = applied.io.ok && applied.status >= 0 && applied.rejectedItemCount == 0 && applied.unknownItemCount == 0;
         result.message = std::wstring(L"DynData EX profile 应用")

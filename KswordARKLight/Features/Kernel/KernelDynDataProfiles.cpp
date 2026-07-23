@@ -6,6 +6,7 @@
 #include <Windows.h>
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <charconv>
 #include <cstdint>
@@ -17,6 +18,7 @@
 #include <iterator>
 #include <limits>
 #include <map>
+#include <set>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -555,6 +557,7 @@ std::vector<std::filesystem::path> ProfilePackSearchPaths() {
         if (base.empty()) {
             continue;
         }
+        AppendUniquePath(paths, base / L"profiles" / L"ark_dyndata_pack_v4.json");
         AppendUniquePath(paths, base / L"profiles" / L"ark_dyndata_pack_v3.json");
         AppendUniquePath(paths, base / L"profiles" / L"ark_dyndata_pack_v2.json");
         AppendUniquePath(paths, base / L"profiles" / L"ark_dyndata_pack_v1.json");
@@ -889,7 +892,10 @@ std::uint32_t ParseExplicitFlags(const JsonValue& itemObject, const bool callbac
 // protocol items. Inputs are one matched profile object; processing maps item
 // names to field ids and kind strings to protocol kinds; output is appended to
 // profileExOut and truncated at the shared protocol limit.
-void ParseProfileItems(const JsonValue& profileObject, ksword::ark::DynDataProfileApplyExInput& profileExOut) {
+void ParseProfileItems(
+    const JsonValue& profileObject,
+    ksword::ark::DynDataProfileApplyExInput& profileExOut,
+    const std::string& preferredItemKey = "items") {
     auto parseArray = [&](const JsonValue* arrayValue, const bool callbackSource) {
         if (arrayValue == nullptr || !arrayValue->isArray()) {
             return;
@@ -912,7 +918,7 @@ void ParseProfileItems(const JsonValue& profileObject, ksword::ark::DynDataProfi
         }
     };
 
-    const JsonValue* items = profileObject.member("items");
+    const JsonValue* items = profileObject.member(preferredItemKey);
     if (items == nullptr || !items->isArray() || items->arrayValue.empty()) {
         items = profileObject.member("typedItems");
     }
@@ -920,6 +926,185 @@ void ParseProfileItems(const JsonValue& profileObject, ksword::ark::DynDataProfi
     if (profileExOut.items.size() < KSW_DYN_PROFILE_EX_MAX_ITEMS) {
         parseArray(profileObject.member("callbackItems"), true);
     }
+}
+
+// CopyV4Utf8 copies profile metadata into a fixed protocol buffer. Input is a
+// UTF-8 profile string; output is always NUL terminated and never exposes a
+// partially initialized packet to the driver.
+template <std::size_t Size>
+void CopyV4Utf8(char (&destination)[Size], const std::string& source) {
+    static_assert(Size > 0U);
+    std::memset(destination, 0, Size);
+    const std::size_t bytes = std::min<std::size_t>(source.size(), Size - 1U);
+    if (bytes != 0U) {
+        std::memcpy(destination, source.data(), bytes);
+    }
+}
+
+// CopyV4Wide copies the module name into the fixed shared-protocol identity.
+// Input is local UTF-16 text; output is NUL terminated within the packet bound.
+template <std::size_t Size>
+void CopyV4Wide(wchar_t (&destination)[Size], const std::wstring& source) {
+    static_assert(Size > 0U);
+    std::fill(std::begin(destination), std::end(destination), L'\0');
+    const std::size_t chars = std::min<std::size_t>(source.size(), Size - 1U);
+    if (chars != 0U) {
+        std::copy_n(source.begin(), chars, destination);
+    }
+}
+
+// IsSupportedV4ItemId limits local packs to the stable shared DynData v4 item
+// identifiers. It prevents malformed JSON from sending arbitrary ids to R0.
+bool IsSupportedV4ItemId(const std::uint32_t itemId) {
+    if (itemId >= 1U && itemId <= KSW_DYN_FIELD_ID_MAX) {
+        return true;
+    }
+    switch (itemId) {
+    case KSW_DYN_V4_ITEM_ID_ETH_ACTIVE_EX_WORKER:
+    case KSW_DYN_V4_ITEM_ID_KPRCB_TIMER_TABLE:
+    case KSW_DYN_V4_ITEM_ID_KTIMER_TABLE_TIMER_ENTRIES:
+    case KSW_DYN_V4_ITEM_ID_KTIMER_TABLE_ENTRY_LOCK:
+    case KSW_DYN_V4_ITEM_ID_KTIMER_TABLE_ENTRY_ENTRY:
+    case KSW_DYN_V4_ITEM_ID_KTIMER_TABLE_ENTRY_TIME:
+    case KSW_DYN_V4_ITEM_ID_KTIMER_TIMER_LIST_ENTRY:
+    case KSW_DYN_V4_ITEM_ID_KTIMER_DUE_TIME:
+    case KSW_DYN_V4_ITEM_ID_KTIMER_DPC:
+    case KSW_DYN_V4_ITEM_ID_KTIMER_TIMER_TYPE:
+    case KSW_DYN_V4_ITEM_ID_KTIMER_PERIOD:
+    case KSW_DYN_V4_ITEM_ID_KDPC_DEFERRED_ROUTINE:
+    case KSW_DYN_V4_ITEM_ID_KDPC_DEFERRED_CONTEXT:
+    case KSW_DYN_V4_ITEM_ID_KTIMER_TABLE_TYPE_SIZE:
+    case KSW_DYN_V4_ITEM_ID_KTIMER_TABLE_ENTRY_TYPE_SIZE:
+    case KSW_DYN_V4_ITEM_ID_KTIMER_TYPE_SIZE:
+    case KSW_DYN_V4_ITEM_ID_KDPC_TYPE_SIZE:
+        return true;
+    default:
+        return false;
+    }
+}
+
+// ParseV4Profile converts a version-4 pack entry to the typed packet accepted
+// by applyDynDataProfileV4. Inputs are already identity-matched JSON and R0
+// identity data; output is rejected unless every capability count is exact.
+bool ParseV4Profile(
+    const JsonValue& profileObject,
+    const ksword::ark::ArkDynModuleIdentity& identity,
+    const std::string& profileName,
+    const std::string& pdbName,
+    const std::string& pdbGuid,
+    const std::uint32_t pdbAge,
+    ksword::ark::DynDataV4ApplyInput& profileOut,
+    std::wstring& errorOut) {
+    const JsonValue* itemArray = profileObject.member("items");
+    const JsonValue* groupArray = profileObject.member("capabilityGroups");
+    if (itemArray == nullptr || !itemArray->isArray() || itemArray->arrayValue.empty() ||
+        groupArray == nullptr || !groupArray->isArray() || groupArray->arrayValue.empty() ||
+        itemArray->arrayValue.size() > KSW_DYN_V4_MAX_ITEMS_PER_MODULE ||
+        groupArray->arrayValue.size() > KSW_DYN_V4_MAX_CAPABILITY_GROUPS_PER_MODULE) {
+        errorOut = L"v4 DynData pack 的 items 或 capabilityGroups 无效。";
+        return false;
+    }
+
+    profileOut = {};
+    std::array<bool, KSW_DYN_V4_MAX_CAPABILITY_GROUPS_PER_MODULE + 1U> seenGroups{};
+    std::unordered_map<std::uint32_t, std::pair<std::uint32_t, std::uint32_t>> expectedCounts;
+    for (const JsonValue& groupValue : groupArray->arrayValue) {
+        if (!groupValue.isObject()) {
+            errorOut = L"v4 DynData capability group 不是对象。";
+            return false;
+        }
+        std::uint32_t groupId = 0;
+        std::uint32_t flags = 0;
+        std::uint32_t requiredCount = 0;
+        std::uint32_t optionalCount = 0;
+        if (!ParseUInt32(groupValue.member("groupId"), groupId) ||
+            !ParseUInt32(groupValue.member("flags"), flags) ||
+            !ParseUInt32(groupValue.member("requiredItemCount"), requiredCount) ||
+            !ParseUInt32(groupValue.member("optionalItemCount"), optionalCount) ||
+            groupId == 0U || groupId > KSW_DYN_V4_MAX_CAPABILITY_GROUPS_PER_MODULE || seenGroups[groupId]) {
+            errorOut = L"v4 DynData capability group 字段无效或重复。";
+            return false;
+        }
+        seenGroups[groupId] = true;
+        KSW_DYN_V4_CAPABILITY_GROUP_PACKET group{};
+        group.groupId = groupId;
+        group.flags = flags;
+        group.requiredItemCount = requiredCount;
+        group.optionalItemCount = optionalCount;
+        CopyV4Utf8(group.groupName, ParseString(groupValue, "groupName"));
+        profileOut.capabilityGroups.push_back(group);
+        expectedCounts[groupId] = { requiredCount, optionalCount };
+    }
+
+    std::unordered_map<std::uint32_t, std::pair<std::uint32_t, std::uint32_t>> actualCounts;
+    std::set<std::uint32_t> seenItems;
+    for (const JsonValue& itemValue : itemArray->arrayValue) {
+        if (!itemValue.isObject()) {
+            errorOut = L"v4 DynData item 不是对象。";
+            return false;
+        }
+        std::uint32_t itemId = 0;
+        std::uint32_t itemKind = 0;
+        std::uint32_t flags = 0;
+        std::uint32_t groupId = 0;
+        std::uint32_t valueLow = 0;
+        std::uint32_t valueHigh = 0;
+        std::uint32_t aux[4]{};
+        if (!ParseUInt32(itemValue.member("itemId"), itemId) ||
+            !ParseUInt32(itemValue.member("itemKind"), itemKind) ||
+            !ParseUInt32(itemValue.member("flags"), flags) ||
+            !ParseUInt32(itemValue.member("capabilityGroupId"), groupId) ||
+            !ParseUInt32(itemValue.member("valueLow"), valueLow) ||
+            !ParseUInt32(itemValue.member("valueHigh"), valueHigh) ||
+            !ParseUInt32(itemValue.member("aux0"), aux[0]) ||
+            !ParseUInt32(itemValue.member("aux1"), aux[1]) ||
+            !ParseUInt32(itemValue.member("aux2"), aux[2]) ||
+            !ParseUInt32(itemValue.member("aux3"), aux[3]) ||
+            !IsSupportedV4ItemId(itemId) || !seenItems.insert(itemId).second ||
+            itemKind < KSW_DYN_V4_ITEM_KIND_STRUCT_OFFSET || itemKind > KSW_DYN_V4_ITEM_KIND_LIST_HEAD_GLOBAL ||
+            (flags != KSW_DYN_V4_ITEM_FLAG_REQUIRED && flags != KSW_DYN_V4_ITEM_FLAG_OPTIONAL) ||
+            groupId == 0U || groupId >= seenGroups.size() || !seenGroups[groupId]) {
+            errorOut = L"v4 DynData item 字段无效、未支持或重复。";
+            return false;
+        }
+        KSW_DYN_V4_ITEM_PACKET item{};
+        item.itemId = itemId;
+        item.itemKind = itemKind;
+        item.flags = flags;
+        item.capabilityGroupId = groupId;
+        item.valueLow = valueLow;
+        item.valueHigh = valueHigh;
+        item.aux0 = aux[0];
+        item.aux1 = aux[1];
+        item.aux2 = aux[2];
+        item.aux3 = aux[3];
+        profileOut.items.push_back(item);
+        auto& count = actualCounts[groupId];
+        if ((flags & KSW_DYN_V4_ITEM_FLAG_REQUIRED) != 0U) {
+            ++count.first;
+        } else {
+            ++count.second;
+        }
+    }
+    for (const auto& [groupId, expected] : expectedCounts) {
+        if (actualCounts[groupId] != expected) {
+            errorOut = L"v4 DynData capability group 的 required/optional 数量与 items 不一致。";
+            return false;
+        }
+    }
+
+    profileOut.module.image.present = identity.present ? 1UL : 0UL;
+    profileOut.module.image.classId = identity.classId;
+    profileOut.module.image.machine = identity.machine;
+    profileOut.module.image.timeDateStamp = identity.timeDateStamp;
+    profileOut.module.image.sizeOfImage = identity.sizeOfImage;
+    profileOut.module.image.imageBase = identity.imageBase;
+    CopyV4Wide(profileOut.module.image.moduleName, identity.moduleName);
+    CopyV4Utf8(profileOut.module.profileName, profileName);
+    CopyV4Utf8(profileOut.module.pdb.pdbName, pdbName);
+    CopyV4Utf8(profileOut.module.pdb.pdbGuid, pdbGuid);
+    profileOut.module.pdb.pdbAge = pdbAge;
+    return true;
 }
 
 // ProfileArrayCount returns a compact count for diagnostics. Input is a JSON
@@ -990,6 +1175,7 @@ DynDataProfileMatch BuildMatchedProfileResult(
     const JsonValue& rootObject,
     const JsonValue& profileObject,
     const std::filesystem::path& path,
+    const std::uint32_t packVersion,
     const std::uint32_t existingPackCount,
     const std::uint32_t profileCount,
     const std::uint32_t scannedProfileCount) {
@@ -1000,30 +1186,52 @@ DynDataProfileMatch BuildMatchedProfileResult(
     result.existingPackCount = existingPackCount;
     result.profileCount = profileCount;
     result.scannedProfileCount = scannedProfileCount;
+    result.packVersion = packVersion;
     result.fieldCount = ProfileArrayCount(profileObject, "fields");
-    result.typedItemCount = ProfileArrayCount(profileObject, "items");
+    result.typedItemCount = ProfileArrayCount(profileObject, packVersion == 4U ? "legacyItems" : "items");
     if (result.typedItemCount == 0U) {
         result.typedItemCount = ProfileArrayCount(profileObject, "typedItems");
     }
     result.callbackItemCount = ProfileArrayCount(profileObject, "callbackItems");
+    result.v4ItemCount = packVersion == 4U ? ProfileArrayCount(profileObject, "items") : 0U;
+    result.v4CapabilityGroupCount = packVersion == 4U ? ProfileArrayCount(profileObject, "capabilityGroups") : 0U;
     const JsonValue* coverage = profileObject.member("coveragePercent");
     result.coveragePercent = coverage != nullptr && coverage->isNumber() ? coverage->numberValue : -1.0;
 
     FillProfileMetadata(identity, profileObject, result.profile, result.profileEx);
     const std::vector<std::uint32_t> dictionary = BuildFieldDictionary(rootObject);
     ParseProfileFields(profileObject, dictionary, result.profile);
-    ParseProfileItems(profileObject, result.profileEx);
+    ParseProfileItems(profileObject, result.profileEx, packVersion == 4U ? "legacyItems" : "items");
 
-    result.preferExApply = !result.profileEx.items.empty();
-    result.valid = !result.profile.fields.empty() || !result.profileEx.items.empty();
+    if (packVersion == 4U) {
+        std::wstring v4Error;
+        if (!ParseV4Profile(
+                profileObject,
+                identity,
+                result.profile.profileName,
+                result.profile.pdbName,
+                result.profile.pdbGuid,
+                result.profile.pdbAge,
+                result.profileV4,
+                v4Error)) {
+            result.message = L"本地 DynData v4 profile 命中 identity，但数据校验失败。 " + v4Error;
+            return result;
+        }
+    }
+
+    result.preferV4Apply = !result.profileV4.items.empty();
+    result.preferExApply = !result.preferV4Apply && !result.profileEx.items.empty();
+    result.valid = !result.profile.fields.empty() || !result.profileEx.items.empty() || !result.profileV4.items.empty();
 
     std::wostringstream message;
     if (result.valid) {
         message << L"本地 DynData profile pack 命中；legacyFields=" << result.profile.fields.size()
             << L"，typedItems=" << result.profileEx.items.size()
+            << L"，v4Items=" << result.profileV4.items.size()
+            << L"，v4Groups=" << result.profileV4.capabilityGroups.size()
             << L"，packProfiles=" << result.profileCount
             << L"，scanned=" << result.scannedProfileCount
-            << L"，applyMode=" << (result.preferExApply ? L"EX" : L"Legacy") << L"。";
+            << L"，applyMode=" << (result.preferV4Apply ? L"V4" : (result.preferExApply ? L"EX" : L"Legacy")) << L"。";
     } else {
         message << L"本地 DynData profile pack 命中 identity，但可应用 fields/items 均为空或无法映射到当前协议。";
     }
@@ -1064,6 +1272,9 @@ void PushFilteredRow(KernelOperationResult& result, KernelResultRow row, const s
 std::wstring ApplyModeText(const DynDataProfileMatch& match) {
     if (!match.valid) {
         return L"Unavailable";
+    }
+    if (match.preferV4Apply) {
+        return L"V4";
     }
     return match.preferExApply ? L"EX" : L"Legacy";
 }
@@ -1128,7 +1339,7 @@ DynDataProfileMatch FindMatchingDynDataProfile(const ksword::ark::ArkDynModuleId
         }
         if (!ParseUInt32(rootObject.member("packVersion"), packVersion) ||
             schemaVersion != 1U ||
-            (packVersion != 1U && packVersion != 2U && packVersion != 3U)) {
+            (packVersion != 1U && packVersion != 2U && packVersion != 3U && packVersion != 4U)) {
             AppendDiagnostic(diagnostics, L"pack schemaVersion/packVersion 不支持: " + candidatePath.wstring());
             continue;
         }
@@ -1150,7 +1361,7 @@ DynDataProfileMatch FindMatchingDynDataProfile(const ksword::ark::ArkDynModuleId
             if (!ProfileMatchesIdentity(identity, profileObject)) {
                 continue;
             }
-            return BuildMatchedProfileResult(identity, rootObject, profileObject, candidatePath, existingPackCount, profileCount, scannedProfileCount);
+            return BuildMatchedProfileResult(identity, rootObject, profileObject, candidatePath, packVersion, existingPackCount, profileCount, scannedProfileCount);
         }
         AppendDiagnostic(diagnostics, L"pack 未命中: " + candidatePath.wstring() + L" (profiles=" + std::to_wstring(profileCount) + L")");
     }
@@ -1173,6 +1384,7 @@ void AppendDynDataProfileRows(KernelOperationResult& result, const DynDataProfil
         { L"Matched", match.matched ? L"是" : L"否" },
         { L"Valid", match.valid ? L"是" : L"否" },
         { L"ApplyMode", ApplyModeText(match) },
+        { L"PackVersion", std::to_wstring(match.packVersion) },
         { L"Profile", Utf8ToWideLocal(match.profile.profileName) },
         { L"PdbName", Utf8ToWideLocal(match.profile.pdbName) },
         { L"PdbGuid", Utf8ToWideLocal(match.profile.pdbGuid) },
@@ -1180,6 +1392,8 @@ void AppendDynDataProfileRows(KernelOperationResult& result, const DynDataProfil
         { L"Coverage", CoverageText(match.coveragePercent) },
         { L"Fields", std::to_wstring(match.profile.fields.size()) + L"/" + std::to_wstring(match.fieldCount) },
         { L"Items", std::to_wstring(match.profileEx.items.size()) + L"/" + std::to_wstring(match.typedItemCount) },
+        { L"V4Items", std::to_wstring(match.profileV4.items.size()) + L"/" + std::to_wstring(match.v4ItemCount) },
+        { L"V4Groups", std::to_wstring(match.profileV4.capabilityGroups.size()) + L"/" + std::to_wstring(match.v4CapabilityGroupCount) },
         { L"CallbackItems", std::to_wstring(match.callbackItemCount) },
         { L"PackProfiles", std::to_wstring(match.profileCount) },
         { L"ScannedProfiles", std::to_wstring(match.scannedProfileCount) },
@@ -1238,6 +1452,47 @@ void AppendDynDataProfileRows(KernelOperationResult& result, const DynDataProfil
             { L"Status", L"Truncated" },
             { L"Shown", std::to_wstring(itemLimit) },
             { L"Total", std::to_wstring(match.profileEx.items.size()) },
+        }), filterText);
+    }
+
+    const std::size_t v4GroupLimit = std::min<std::size_t>(match.profileV4.capabilityGroups.size(), 16U);
+    for (std::size_t index = 0; index < v4GroupLimit; ++index) {
+        const KSW_DYN_V4_CAPABILITY_GROUP_PACKET& group = match.profileV4.capabilityGroups[index];
+        PushFilteredRow(result, Row({
+            { L"Source", L"Profile V4 Capability Group" },
+            { L"Index", std::to_wstring(index) },
+            { L"GroupId", std::to_wstring(group.groupId) },
+            { L"Name", Utf8ToWideLocal(group.groupName) },
+            { L"RequiredItems", std::to_wstring(group.requiredItemCount) },
+            { L"OptionalItems", std::to_wstring(group.optionalItemCount) },
+            { L"Flags", HexTextLocal(group.flags) },
+        }), filterText);
+    }
+
+    const std::size_t v4ItemLimit = std::min<std::size_t>(match.profileV4.items.size(), 64U);
+    for (std::size_t index = 0; index < v4ItemLimit; ++index) {
+        const KSW_DYN_V4_ITEM_PACKET& item = match.profileV4.items[index];
+        PushFilteredRow(result, Row({
+            { L"Source", L"Profile V4 Item" },
+            { L"Index", std::to_wstring(index) },
+            { L"ItemId", std::to_wstring(item.itemId) },
+            { L"Kind", std::to_wstring(item.itemKind) },
+            { L"GroupId", std::to_wstring(item.capabilityGroupId) },
+            { L"Required", (item.flags & KSW_DYN_V4_ITEM_FLAG_REQUIRED) != 0U ? L"是" : L"否" },
+            { L"ValueLow", HexTextLocal(item.valueLow) },
+            { L"ValueHigh", HexTextLocal(item.valueHigh) },
+            { L"Aux0", HexTextLocal(item.aux0) },
+            { L"Aux1", HexTextLocal(item.aux1) },
+            { L"Aux2", HexTextLocal(item.aux2) },
+            { L"Aux3", HexTextLocal(item.aux3) },
+        }), filterText);
+    }
+    if (match.profileV4.items.size() > v4ItemLimit) {
+        PushFilteredRow(result, Row({
+            { L"Source", L"Profile V4 Item" },
+            { L"Status", L"Truncated" },
+            { L"Shown", std::to_wstring(v4ItemLimit) },
+            { L"Total", std::to_wstring(match.profileV4.items.size()) },
         }), filterText);
     }
 }

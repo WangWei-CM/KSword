@@ -17,6 +17,7 @@ struct DynDataProfileMatch {
     bool matched = false;
     bool valid = false;
     bool preferExApply = false;
+    bool preferV4Apply = false;
     std::wstring path;
     std::wstring message;
     std::uint32_t existingPackCount = 0;
@@ -25,9 +26,13 @@ struct DynDataProfileMatch {
     std::uint32_t fieldCount = 0;
     std::uint32_t typedItemCount = 0;
     std::uint32_t callbackItemCount = 0;
+    std::uint32_t v4ItemCount = 0;
+    std::uint32_t v4CapabilityGroupCount = 0;
+    std::uint32_t packVersion = 0;
     double coveragePercent = -1.0;
     ksword::ark::DynDataProfileApplyInput profile;
     ksword::ark::DynDataProfileApplyExInput profileEx;
+    ksword::ark::DynDataV4ApplyInput profileV4;
 };
 
 // FindMatchingDynDataProfile searches the runtime profile locations for a pack
