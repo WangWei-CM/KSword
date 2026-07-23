@@ -10,6 +10,7 @@
 #include <QAction>
 #include <QApplication>
 #include <QBrush>
+#include <QByteArray>
 #include <QClipboard>
 #include <QCoreApplication>
 #include <QDir>
@@ -39,6 +40,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstring>
 #include <cstdint>
 #include <limits>
 #include <thread>
@@ -98,9 +100,11 @@ namespace
         QString diagnosticsText;                         // diagnosticsText：解析/校验诊断。
         ksword::ark::DynDataProfileApplyInput applyInput; // applyInput：可直接打包给 R0 的 v1 profile。
         ksword::ark::DynDataProfileApplyExInput applyExInput; // applyExInput：可直接打包给 R0 的 v2/v3 typed-item profile。
+        ksword::ark::DynDataV4ApplyInput applyV4Input;    // applyV4Input：可直接发送给 R0 v4 存储层的稳定 item profile。
         std::uint32_t exAppliedCount = 0;               // exAppliedCount：v2/v3 typed items 数量。
         std::uint32_t callbackItemCount = 0;            // callbackItemCount：原始 callbackItems 条目数。
         std::uint32_t typedItemCount = 0;               // typedItemCount：v3 items/typedItems 条目数。
+        std::uint32_t v4ItemCount = 0;                  // v4ItemCount：v4 stable item 数量。
     };
 
     QString safeText(const QString& valueText, const QString& fallbackText);
@@ -1554,6 +1558,201 @@ namespace
         return true;
     }
 
+    template <std::size_t Size>
+    void copyV4Utf8(char (&destination)[Size], const QString& source)
+    {
+        static_assert(Size > 0U);
+        const QByteArray bytes = source.toUtf8();
+        const std::size_t copyLength = std::min<std::size_t>(Size - 1U, static_cast<std::size_t>(bytes.size()));
+        std::memset(destination, 0, Size);
+        if (copyLength != 0U)
+        {
+            std::memcpy(destination, bytes.constData(), copyLength);
+        }
+    }
+
+    template <std::size_t Size>
+    void copyV4Wide(wchar_t (&destination)[Size], const std::wstring& source)
+    {
+        static_assert(Size > 0U);
+        const std::size_t copyLength = std::min<std::size_t>(Size - 1U, source.size());
+        std::fill(std::begin(destination), std::end(destination), L'\0');
+        if (copyLength != 0U)
+        {
+            std::copy_n(source.begin(), copyLength, destination);
+        }
+    }
+
+    bool v4ItemIdSupported(const std::uint32_t itemId)
+    {
+        if (itemId >= 1U && itemId <= KSW_DYN_FIELD_ID_MAX)
+        {
+            return true;
+        }
+        switch (itemId)
+        {
+        case KSW_DYN_V4_ITEM_ID_ETH_ACTIVE_EX_WORKER:
+        case KSW_DYN_V4_ITEM_ID_KPRCB_TIMER_TABLE:
+        case KSW_DYN_V4_ITEM_ID_KTIMER_TABLE_TIMER_ENTRIES:
+        case KSW_DYN_V4_ITEM_ID_KTIMER_TABLE_ENTRY_LOCK:
+        case KSW_DYN_V4_ITEM_ID_KTIMER_TABLE_ENTRY_ENTRY:
+        case KSW_DYN_V4_ITEM_ID_KTIMER_TABLE_ENTRY_TIME:
+        case KSW_DYN_V4_ITEM_ID_KTIMER_TIMER_LIST_ENTRY:
+        case KSW_DYN_V4_ITEM_ID_KTIMER_DUE_TIME:
+        case KSW_DYN_V4_ITEM_ID_KTIMER_DPC:
+        case KSW_DYN_V4_ITEM_ID_KTIMER_TIMER_TYPE:
+        case KSW_DYN_V4_ITEM_ID_KTIMER_PERIOD:
+        case KSW_DYN_V4_ITEM_ID_KDPC_DEFERRED_ROUTINE:
+        case KSW_DYN_V4_ITEM_ID_KDPC_DEFERRED_CONTEXT:
+        case KSW_DYN_V4_ITEM_ID_KTIMER_TABLE_TYPE_SIZE:
+        case KSW_DYN_V4_ITEM_ID_KTIMER_TABLE_ENTRY_TYPE_SIZE:
+        case KSW_DYN_V4_ITEM_ID_KTIMER_TYPE_SIZE:
+        case KSW_DYN_V4_ITEM_ID_KDPC_TYPE_SIZE:
+            return true;
+        default:
+            return false;
+        }
+    }
+
+    bool loadV4ItemsFromJson(
+        const QJsonArray& itemArray,
+        const QJsonArray& groupArray,
+        const ksword::ark::ArkDynModuleIdentity& currentIdentity,
+        const QString& profileName,
+        const QString& pdbName,
+        const QString& pdbGuid,
+        const std::uint32_t pdbAge,
+        LocalPdbProfile& profile,
+        QStringList& diagnostics)
+    {
+        if (itemArray.isEmpty() || groupArray.isEmpty() ||
+            itemArray.size() > static_cast<int>(KSW_DYN_V4_MAX_ITEMS_PER_MODULE) ||
+            groupArray.size() > static_cast<int>(KSW_DYN_V4_MAX_CAPABILITY_GROUPS_PER_MODULE))
+        {
+            diagnostics << kernelText("kernel.dyndata.pack.v4.invalid", QStringLiteral("v4 pack items/capabilityGroups 无效。"));
+            return false;
+        }
+
+        std::array<bool, KSW_DYN_V4_MAX_CAPABILITY_GROUPS_PER_MODULE + 1U> seenGroups{};
+        std::unordered_map<std::uint32_t, std::pair<std::uint32_t, std::uint32_t>> expectedCounts;
+        profile.applyV4Input.capabilityGroups.clear();
+        profile.applyV4Input.items.clear();
+        for (const QJsonValue& groupValue : groupArray)
+        {
+            if (!groupValue.isObject())
+            {
+                diagnostics << kernelText("kernel.dyndata.pack.v4.invalid", QStringLiteral("v4 pack items/capabilityGroups 无效。"));
+                return false;
+            }
+            const QJsonObject groupObject = groupValue.toObject();
+            std::uint32_t groupId = 0U;
+            std::uint32_t flags = 0U;
+            std::uint32_t requiredCount = 0U;
+            std::uint32_t optionalCount = 0U;
+            if (!parseProfileUInt32(groupObject.value(QStringLiteral("groupId")), groupId) ||
+                !parseProfileUInt32(groupObject.value(QStringLiteral("flags")), flags) ||
+                !parseProfileUInt32(groupObject.value(QStringLiteral("requiredItemCount")), requiredCount) ||
+                !parseProfileUInt32(groupObject.value(QStringLiteral("optionalItemCount")), optionalCount) ||
+                groupId == 0U || groupId > KSW_DYN_V4_MAX_CAPABILITY_GROUPS_PER_MODULE || seenGroups[groupId])
+            {
+                diagnostics << kernelText("kernel.dyndata.pack.v4.invalid", QStringLiteral("v4 pack items/capabilityGroups 无效。"));
+                return false;
+            }
+            seenGroups[groupId] = true;
+            KSW_DYN_V4_CAPABILITY_GROUP_PACKET group{};
+            group.groupId = groupId;
+            group.flags = flags;
+            group.requiredItemCount = requiredCount;
+            group.optionalItemCount = optionalCount;
+            copyV4Utf8(group.groupName, groupObject.value(QStringLiteral("groupName")).toString());
+            profile.applyV4Input.capabilityGroups.push_back(group);
+            expectedCounts[groupId] = {requiredCount, optionalCount};
+        }
+
+        std::array<bool, 2048U> seenItems{};
+        std::unordered_map<std::uint32_t, std::pair<std::uint32_t, std::uint32_t>> actualCounts;
+        for (const QJsonValue& itemValue : itemArray)
+        {
+            if (!itemValue.isObject())
+            {
+                diagnostics << kernelText("kernel.dyndata.pack.v4.invalid", QStringLiteral("v4 pack items/capabilityGroups 无效。"));
+                return false;
+            }
+            const QJsonObject itemObject = itemValue.toObject();
+            std::uint32_t itemId = 0U;
+            std::uint32_t itemKind = 0U;
+            std::uint32_t flags = 0U;
+            std::uint32_t groupId = 0U;
+            std::uint32_t valueLow = 0U;
+            std::uint32_t valueHigh = 0U;
+            std::uint32_t aux[4]{};
+            if (!parseProfileUInt32(itemObject.value(QStringLiteral("itemId")), itemId) ||
+                !parseProfileUInt32(itemObject.value(QStringLiteral("itemKind")), itemKind) ||
+                !parseProfileUInt32(itemObject.value(QStringLiteral("flags")), flags) ||
+                !parseProfileUInt32(itemObject.value(QStringLiteral("capabilityGroupId")), groupId) ||
+                !parseProfileUInt32(itemObject.value(QStringLiteral("valueLow")), valueLow) ||
+                !parseProfileUInt32(itemObject.value(QStringLiteral("valueHigh")), valueHigh) ||
+                !parseProfileUInt32(itemObject.value(QStringLiteral("aux0")), aux[0]) ||
+                !parseProfileUInt32(itemObject.value(QStringLiteral("aux1")), aux[1]) ||
+                !parseProfileUInt32(itemObject.value(QStringLiteral("aux2")), aux[2]) ||
+                !parseProfileUInt32(itemObject.value(QStringLiteral("aux3")), aux[3]) ||
+                !v4ItemIdSupported(itemId) || itemId >= seenItems.size() || seenItems[itemId] ||
+                itemKind < KSW_DYN_V4_ITEM_KIND_STRUCT_OFFSET || itemKind > KSW_DYN_V4_ITEM_KIND_LIST_HEAD_GLOBAL ||
+                (flags != KSW_DYN_V4_ITEM_FLAG_REQUIRED && flags != KSW_DYN_V4_ITEM_FLAG_OPTIONAL) ||
+                groupId == 0U || !seenGroups[groupId])
+            {
+                diagnostics << kernelText("kernel.dyndata.pack.v4.invalid", QStringLiteral("v4 pack items/capabilityGroups 无效。"));
+                return false;
+            }
+            seenItems[itemId] = true;
+            KSW_DYN_V4_ITEM_PACKET item{};
+            item.itemId = itemId;
+            item.itemKind = itemKind;
+            item.flags = flags;
+            item.capabilityGroupId = groupId;
+            item.valueLow = valueLow;
+            item.valueHigh = valueHigh;
+            item.aux0 = aux[0];
+            item.aux1 = aux[1];
+            item.aux2 = aux[2];
+            item.aux3 = aux[3];
+            profile.applyV4Input.items.push_back(item);
+            auto& counts = actualCounts[groupId];
+            if ((flags & KSW_DYN_V4_ITEM_FLAG_REQUIRED) != 0U)
+            {
+                counts.first += 1U;
+            }
+            else
+            {
+                counts.second += 1U;
+            }
+        }
+        for (const auto& expected : expectedCounts)
+        {
+            const auto actual = actualCounts[expected.first];
+            if (actual != expected.second)
+            {
+                diagnostics << kernelText("kernel.dyndata.pack.v4.invalid", QStringLiteral("v4 pack items/capabilityGroups 计数不一致。"));
+                return false;
+            }
+        }
+
+        profile.applyV4Input.flags = 0U;
+        profile.applyV4Input.module.image.present = currentIdentity.present ? 1UL : 0UL;
+        profile.applyV4Input.module.image.classId = currentIdentity.classId;
+        profile.applyV4Input.module.image.machine = currentIdentity.machine;
+        profile.applyV4Input.module.image.timeDateStamp = currentIdentity.timeDateStamp;
+        profile.applyV4Input.module.image.sizeOfImage = currentIdentity.sizeOfImage;
+        profile.applyV4Input.module.image.imageBase = currentIdentity.imageBase;
+        copyV4Wide(profile.applyV4Input.module.image.moduleName, currentIdentity.moduleName);
+        copyV4Utf8(profile.applyV4Input.module.profileName, profileName);
+        copyV4Utf8(profile.applyV4Input.module.pdb.pdbName, pdbName);
+        copyV4Utf8(profile.applyV4Input.module.pdb.pdbGuid, pdbGuid);
+        profile.applyV4Input.module.pdb.pdbAge = pdbAge;
+        profile.v4ItemCount = static_cast<std::uint32_t>(profile.applyV4Input.items.size());
+        return true;
+    }
+
     // profileClassIdFromText：
     // - 输入 classText：JSON module.class；
     // - 处理：转换到 R0 profile class id；
@@ -1632,9 +1831,11 @@ namespace
     {
         QStringList paths;
         appendUniquePath(paths, qEnvironmentVariable("KSWORD_ARK_PROFILE_PACK"));
+        appendUniquePath(paths, QDir(QCoreApplication::applicationDirPath()).filePath(QStringLiteral("profiles/ark_dyndata_pack_v4.json")));
         appendUniquePath(paths, QDir(QCoreApplication::applicationDirPath()).filePath(QStringLiteral("profiles/ark_dyndata_pack_v3.json")));
         appendUniquePath(paths, QDir(QCoreApplication::applicationDirPath()).filePath(QStringLiteral("profiles/ark_dyndata_pack_v2.json")));
         appendUniquePath(paths, QDir(QCoreApplication::applicationDirPath()).filePath(QStringLiteral("profiles/ark_dyndata_pack_v1.json")));
+        appendUniquePath(paths, QDir::current().filePath(QStringLiteral("profiles/ark_dyndata_pack_v4.json")));
         appendUniquePath(paths, QDir::current().filePath(QStringLiteral("profiles/ark_dyndata_pack_v3.json")));
         appendUniquePath(paths, QDir::current().filePath(QStringLiteral("profiles/ark_dyndata_pack_v2.json")));
         appendUniquePath(paths, QDir::current().filePath(QStringLiteral("profiles/ark_dyndata_pack_v1.json")));
@@ -1841,12 +2042,17 @@ namespace
         }
 
         const QJsonArray fieldsArray = packEntry.value(QStringLiteral("fields")).toArray();
-        QJsonArray typedItemsArray = packEntry.value(QStringLiteral("items")).toArray();
+        const QJsonArray v4ItemsArray = packVersion == 4U
+            ? packEntry.value(QStringLiteral("items")).toArray()
+            : QJsonArray();
+        QJsonArray typedItemsArray = packVersion == 4U
+            ? packEntry.value(QStringLiteral("legacyItems")).toArray()
+            : packEntry.value(QStringLiteral("items")).toArray();
         if (typedItemsArray.isEmpty())
         {
             typedItemsArray = packEntry.value(QStringLiteral("typedItems")).toArray();
         }
-        if (fieldsArray.isEmpty() && typedItemsArray.isEmpty())
+        if (fieldsArray.isEmpty() && typedItemsArray.isEmpty() && v4ItemsArray.isEmpty())
         {
             profile.diagnosticsText = kernelText("kernel.dyndata.pack.fields_empty", QStringLiteral("pack profile fields/items 均为空。"));
             return profile;
@@ -1951,13 +2157,31 @@ namespace
             profile.applyExInput.ntoskrnl = currentIdentity;
             profile.applyInput.fields.clear();
         }
-        if (invalidFieldCount != 0U && !(packVersion == 3U && hasTypedItems))
+        if (packVersion == 4U)
+        {
+            QStringList v4Diagnostics;
+            if (!loadV4ItemsFromJson(
+                    v4ItemsArray,
+                    packEntry.value(QStringLiteral("capabilityGroups")).toArray(),
+                    currentIdentity,
+                    profileNameText,
+                    QString::fromStdString(profile.applyInput.pdbName),
+                    QString::fromStdString(profile.applyInput.pdbGuid),
+                    profile.applyInput.pdbAge,
+                    profile,
+                    v4Diagnostics))
+            {
+                profile.diagnosticsText = v4Diagnostics.join(QStringLiteral(" | "));
+                return profile;
+            }
+        }
+        if (invalidFieldCount != 0U && !((packVersion == 3U && hasTypedItems) || (packVersion == 4U && (!typedItemsArray.isEmpty() || !v4ItemsArray.isEmpty()))))
         {
             profile.diagnosticsText = kernelText("kernel.dyndata.pack.invalid_fields", QStringLiteral("pack profile 含 %1 个越界或无效字段，R3 已拒绝应用。"))
                 .arg(invalidFieldCount);
             return profile;
         }
-        if ((profile.applyInput.fields.empty() && profile.applyExInput.items.empty()) ||
+        if ((profile.applyInput.fields.empty() && profile.applyExInput.items.empty() && profile.applyV4Input.items.empty()) ||
             profile.applyInput.fields.size() > KSW_DYN_PROFILE_MAX_FIELDS ||
             profile.applyExInput.items.size() > KSW_DYN_PROFILE_EX_MAX_ITEMS)
         {
@@ -1968,10 +2192,11 @@ namespace
         }
 
         profile.valid = true;
-        profile.diagnosticsText = kernelText("kernel.dyndata.pack.matched_summary", QStringLiteral("pack profile 匹配，字段 %1 个，typed 项 %2 个，callback 项 %3 个，忽略未知字段 %4 个。"))
+        profile.diagnosticsText = kernelText("kernel.dyndata.pack.matched_summary", QStringLiteral("pack profile 匹配，字段 %1 个，typed 项 %2 个，callback 项 %3 个，v4 项 %4 个，忽略未知字段 %5 个。"))
             .arg(static_cast<qulonglong>(profile.applyInput.fields.size()))
             .arg(static_cast<qulonglong>(profile.typedItemCount))
             .arg(static_cast<qulonglong>(profile.callbackItemCount))
+            .arg(static_cast<qulonglong>(profile.v4ItemCount))
             .arg(profile.ignoredUnknownFields);
         return profile;
     }
@@ -2003,7 +2228,7 @@ namespace
         if (!parseProfileUInt32(rootObject.value(QStringLiteral("schemaVersion")), schemaVersion) ||
             !parseProfileUInt32(rootObject.value(QStringLiteral("packVersion")), packVersion) ||
             schemaVersion != 1U ||
-            (packVersion != 1U && packVersion != 2U && packVersion != 3U))
+            (packVersion != 1U && packVersion != 2U && packVersion != 3U && packVersion != 4U))
         {
             diagnosticsOut = kernelText("kernel.dyndata.pack.version_unsupported", QStringLiteral("PDB profile pack schemaVersion/packVersion 不支持。"));
             return bestProfile;
@@ -2011,7 +2236,7 @@ namespace
 
         const QJsonArray fieldDictionary = rootObject.value(QStringLiteral("fieldDictionary")).toArray();
         const QJsonArray profilesArray = rootObject.value(QStringLiteral("profiles")).toArray();
-        if ((fieldDictionary.isEmpty() && packVersion != 3U) || profilesArray.isEmpty())
+        if ((fieldDictionary.isEmpty() && packVersion != 3U && packVersion != 4U) || profilesArray.isEmpty())
         {
             diagnosticsOut = kernelText("kernel.dyndata.pack.dictionary_or_profiles_empty", QStringLiteral("PDB profile pack 字段字典或 profile 列表为空。"));
             return bestProfile;
@@ -2566,6 +2791,7 @@ namespace
     {
         ksword::ark::DriverClient client;
         const ksword::ark::DynDataStatusResult initialStatusResult = client.queryDynDataStatus();
+        const ksword::ark::DynDataV4ModulesResult initialV4ModulesResult = client.queryDynDataV4Modules();
 
         bool pdbProfileScanAttempted = false;
         bool pdbProfileFound = false;
@@ -2596,9 +2822,19 @@ namespace
                         KSW_CAP_KERNEL_MODULE_LIST_FIELDS |
                         KSW_CAP_DRIVER_OBJECT_FIELDS |
                         KSW_CAP_KERNEL_GLOBALS)) != 0ULL;
-            if (pdbProfileAlreadyActive && callbackProfileAlreadyActive && v3ProfileAlreadyActive)
+            const bool v4ProfileAlreadyActive = initialV4ModulesResult.io.ok && std::any_of(
+                initialV4ModulesResult.entries.begin(),
+                initialV4ModulesResult.entries.end(),
+                [&initialStatusResult](const KSW_DYN_V4_MODULE_STATUS_ENTRY& entry) {
+                    return entry.module.image.classId == initialStatusResult.ntoskrnl.classId &&
+                        entry.module.image.machine == initialStatusResult.ntoskrnl.machine &&
+                        entry.module.image.timeDateStamp == initialStatusResult.ntoskrnl.timeDateStamp &&
+                        entry.module.image.sizeOfImage == initialStatusResult.ntoskrnl.sizeOfImage &&
+                        (entry.statusFlags & KSW_DYN_V4_STATUS_FLAG_PROFILE_APPLIED) != 0U;
+                });
+            if (pdbProfileAlreadyActive && callbackProfileAlreadyActive && v3ProfileAlreadyActive && v4ProfileAlreadyActive)
             {
-                pdbProfileMessageText = kernelText("kernel.dyndata.profile.apply.already_active", QStringLiteral("R0 已经启用 PDB/callback/v3 DynData profile，本次刷新跳过重复 apply。"));
+                pdbProfileMessageText = kernelText("kernel.dyndata.profile.apply.already_active", QStringLiteral("R0 已经启用 PDB/callback/v3/v4 DynData profile，本次刷新跳过重复 apply。"));
             }
             else
             {
@@ -2620,17 +2856,17 @@ namespace
                     }
                     else if (pdbProfileAlreadyActive &&
                         callbackProfileAlreadyActive &&
-                        !v3ProfileAlreadyActive &&
-                        profile.typedItemCount == 0U)
+                        v3ProfileAlreadyActive &&
+                        profile.applyV4Input.items.empty())
                     {
-                        pdbProfileMessageText = kernelText("kernel.dyndata.profile.apply.v1_v2_skip", QStringLiteral("R0 已启用 v1/v2 PDB profile，当前匹配 profile 未提供 v3 typed items，本次刷新跳过重复 apply。"));
+                        pdbProfileMessageText = kernelText("kernel.dyndata.profile.apply.v1_v2_skip", QStringLiteral("R0 已启用旧版 DynData profile，当前匹配 profile 未提供 v4 items，本次刷新跳过重复 apply。"));
                     }
                     else
                     {
                         QStringList applyMessages;
                         bool anyApplySucceeded = false;
 
-                        if (!profile.applyInput.fields.empty())
+                        if (!profile.applyInput.fields.empty() && !pdbProfileAlreadyActive)
                         {
                             const ksword::ark::DynDataProfileApplyResult applyResult =
                                 client.applyDynDataProfile(profile.applyInput);
@@ -2646,7 +2882,8 @@ namespace
                             anyApplySucceeded = applyResult.io.ok && applyResult.status == 0;
                         }
 
-                        if (!profile.applyExInput.items.empty())
+                        if (!profile.applyExInput.items.empty() &&
+                            !(pdbProfileAlreadyActive && callbackProfileAlreadyActive && v3ProfileAlreadyActive))
                         {
                             const ksword::ark::DynDataProfileApplyExResult applyExResult =
                                 client.applyDynDataProfileEx(profile.applyExInput);
@@ -2664,6 +2901,26 @@ namespace
                                 applyMessages << wideStringToQString(applyExResult.message);
                             }
                             anyApplySucceeded = anyApplySucceeded || (applyExResult.io.ok && applyExResult.status == 0);
+                        }
+
+                        if (!profile.applyV4Input.items.empty() && !v4ProfileAlreadyActive)
+                        {
+                            const ksword::ark::DynDataV4ApplyResult applyV4Result =
+                                client.applyDynDataProfileV4(profile.applyV4Input);
+                            if (!pdbProfileIoMessageText.isEmpty())
+                            {
+                                pdbProfileIoMessageText += QStringLiteral(" | ");
+                            }
+                            pdbProfileIoMessageText += friendlyDynDataIoMessage(applyV4Result.io.message);
+                            pdbProfileStatus = applyV4Result.response.status;
+                            pdbProfileAppliedFields += applyV4Result.response.appliedItemCount;
+                            pdbProfileRejectedFields += applyV4Result.response.rejectedItemCount;
+                            if (applyV4Result.response.message[0] != L'\0')
+                            {
+                                applyMessages << wideStringToQString(applyV4Result.response.message);
+                            }
+                            anyApplySucceeded = anyApplySucceeded ||
+                                (applyV4Result.io.ok && applyV4Result.response.status == 0);
                         }
 
                         if (!applyMessages.isEmpty())

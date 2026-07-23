@@ -1158,6 +1158,9 @@
     <None Include="profiles\ark_dyndata_pack_v3.json">
       <Filter>Profile Files</Filter>
     </None>
+    <None Include="profiles\ark_dyndata_pack_v4.json">
+      <Filter>Profile Files</Filter>
+    </None>
     <None Include="languages\en-US.json">
       <Filter>Profile Files</Filter>
     </None>

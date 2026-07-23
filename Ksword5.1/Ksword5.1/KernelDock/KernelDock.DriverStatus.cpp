@@ -401,9 +401,11 @@ namespace
     {
         QStringList paths;
         appendUniquePath(paths, qEnvironmentVariable("KSWORD_ARK_PROFILE_PACK"));
+        appendUniquePath(paths, QDir(QCoreApplication::applicationDirPath()).filePath(QStringLiteral("profiles/ark_dyndata_pack_v4.json")));
         appendUniquePath(paths, QDir(QCoreApplication::applicationDirPath()).filePath(QStringLiteral("profiles/ark_dyndata_pack_v3.json")));
         appendUniquePath(paths, QDir(QCoreApplication::applicationDirPath()).filePath(QStringLiteral("profiles/ark_dyndata_pack_v2.json")));
         appendUniquePath(paths, QDir(QCoreApplication::applicationDirPath()).filePath(QStringLiteral("profiles/ark_dyndata_pack_v1.json")));
+        appendUniquePath(paths, QDir::current().filePath(QStringLiteral("profiles/ark_dyndata_pack_v4.json")));
         appendUniquePath(paths, QDir::current().filePath(QStringLiteral("profiles/ark_dyndata_pack_v3.json")));
         appendUniquePath(paths, QDir::current().filePath(QStringLiteral("profiles/ark_dyndata_pack_v2.json")));
         appendUniquePath(paths, QDir::current().filePath(QStringLiteral("profiles/ark_dyndata_pack_v1.json")));
@@ -492,7 +494,11 @@ namespace
     {
         offsetOut = 0xFFFFFFFFU;
 
-        QJsonArray typedItemsArray = profileObject.value(QStringLiteral("items")).toArray();
+        QJsonArray typedItemsArray = profileObject.value(QStringLiteral("legacyItems")).toArray();
+        if (typedItemsArray.isEmpty())
+        {
+            typedItemsArray = profileObject.value(QStringLiteral("items")).toArray();
+        }
         if (typedItemsArray.isEmpty())
         {
             typedItemsArray = profileObject.value(QStringLiteral("typedItems")).toArray();
@@ -606,7 +612,7 @@ namespace
             if (!parseProfileUInt32(rootObject.value(QStringLiteral("schemaVersion")), schemaVersion) ||
                 !parseProfileUInt32(rootObject.value(QStringLiteral("packVersion")), packVersion) ||
                 schemaVersion != 1U ||
-                (packVersion != 1U && packVersion != 2U && packVersion != 3U))
+                (packVersion != 1U && packVersion != 2U && packVersion != 3U && packVersion != 4U))
             {
                 diagnostics << kernelText("kernel.driver_status.pdb.version_unsupported", QStringLiteral("pack schemaVersion/packVersion 不支持: %1")).arg(result.pathText);
                 continue;

@@ -50,12 +50,14 @@ DEFAULT_LOCAL_KERNEL = Path(r"C:\Windows\System32\ntoskrnl.exe")
 KSW_PACK_VERSION_V1 = 1
 KSW_PACK_VERSION_V2 = 2
 KSW_PACK_VERSION_V3 = 3
+KSW_PACK_VERSION_V4 = 4
 KSW_DEFAULT_PACK_VERSION = KSW_PACK_VERSION_V1
-KSW_SUPPORTED_PACK_VERSIONS = (KSW_PACK_VERSION_V1, KSW_PACK_VERSION_V2, KSW_PACK_VERSION_V3)
+KSW_SUPPORTED_PACK_VERSIONS = (KSW_PACK_VERSION_V1, KSW_PACK_VERSION_V2, KSW_PACK_VERSION_V3, KSW_PACK_VERSION_V4)
 DEFAULT_PACK_FILE_NAMES = {
     KSW_PACK_VERSION_V1: "ark_dyndata_pack_v1.json",
     KSW_PACK_VERSION_V2: "ark_dyndata_pack_v2.json",
     KSW_PACK_VERSION_V3: "ark_dyndata_pack_v3.json",
+    KSW_PACK_VERSION_V4: "ark_dyndata_pack_v4.json",
 }
 # Kept for compatibility with callers and docs that referenced the original
 # single-pack default name before v2 publishing was added.
@@ -363,6 +365,39 @@ CALLBACK_CANONICAL_NAME_BY_NAME = {
 
 KNOWN_FIELD_NAMES = set(KNOWN_FIELD_IDS)
 
+V4_ITEM_KIND_IDS = {
+    "StructOffset": 1,
+    "GlobalRva": 2,
+    "FunctionRva": 3,
+    "EnumValue": 4,
+    "TypeSize": 5,
+    "BitField": 6,
+    "ListHeadGlobal": 7,
+}
+V4_ITEM_KIND_NAMES = set(V4_ITEM_KIND_IDS)
+V4_CORE_GROUP_ID = 1
+V4_TIMER_GROUP_ID = 2
+V4_SPECIAL_ITEM_IDS = {
+    "EthActiveExWorker": 1001,
+    "KprcbTimerTable": 1002,
+    "KtimerTableTimerEntries": 1003,
+    "KtimerTableEntryLock": 1004,
+    "KtimerTableEntryEntry": 1005,
+    "KtimerTableEntryTime": 1006,
+    "KtimerTimerListEntry": 1007,
+    "KtimerDueTime": 1008,
+    "KtimerDpc": 1009,
+    "KtimerTimerType": 1010,
+    "KtimerPeriod": 1011,
+    "KdpcDeferredRoutine": 1012,
+    "KdpcDeferredContext": 1013,
+    "KtimerTableTypeSize": 1014,
+    "KtimerTableEntryTypeSize": 1015,
+    "KtimerTypeSize": 1016,
+    "KdpcTypeSize": 1017,
+}
+V4_ITEM_IDS_BY_NAME = {**KNOWN_FIELD_IDS, **V4_SPECIAL_ITEM_IDS}
+
 
 @dataclass(frozen=True)
 class ProfileIdentity:
@@ -413,6 +448,7 @@ class ProfileRecord:
     field_count: int
     callback_items: list[dict[str, Any]] = field(default_factory=list)
     typed_items: list[dict[str, Any]] = field(default_factory=list)
+    v4_items: list[dict[str, Any]] = field(default_factory=list)
     missing_fields: list[str] = field(default_factory=list)
     missing_globals: list[str] = field(default_factory=list)
     coverage_percent: float = 0.0
@@ -469,7 +505,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=KSW_DEFAULT_PACK_VERSION,
         help=(
             "Compact pack format version to emit when --emit-pack/--pack-only is used; "
-            "1 keeps legacy fields-only output, 2 adds callbackItems, 3 adds typed items. Default: 1."
+            "1 keeps legacy fields-only output, 2 adds callbackItems, 3 adds typed items, "
+            "4 adds stable multi-module items and capability groups. Default: 1."
         ),
     )
     parser.add_argument(
@@ -860,6 +897,79 @@ def validate_typed_items(path: Path, data: dict[str, Any], state: ValidationStat
     return normalized_items
 
 
+def validate_v4_items(path: Path, data: dict[str, Any], state: ValidationState) -> list[dict[str, Any]] | None:
+    """Validate generator v4Items and normalize them to the wire-pack shape."""
+    raw_items = data.get("v4Items")
+    if raw_items is None:
+        return []
+    if not isinstance(raw_items, list):
+        reject(state, path, "v4_items_not_array")
+        return None
+
+    normalized_items: list[dict[str, Any]] = []
+    seen_item_ids: set[int] = set()
+    for index, item in enumerate(raw_items):
+        context = f"v4Items[{index}]"
+        if not isinstance(item, dict):
+            reject(state, path, f"v4_item_not_object:{context}")
+            return None
+
+        name = str(item.get("name", "")).strip()
+        expected_item_id = V4_SPECIAL_ITEM_IDS.get(name)
+        item_id = parse_uint32(item.get("itemId"))
+        if expected_item_id is None or item_id != expected_item_id or item_id == 0 or item_id in seen_item_ids:
+            reject(state, path, f"v4_item_id_invalid:{name}:{item_id}")
+            return None
+        seen_item_ids.add(item_id)
+
+        kind_name = str(item.get("kind", "")).strip()
+        item_kind = V4_ITEM_KIND_IDS.get(kind_name)
+        group_id = parse_uint32(item.get("capabilityGroupId"))
+        value = parse_uint32(item.get("value"))
+        aux_values = [parse_uint32(item.get(f"aux{aux_index}", 0)) for aux_index in range(4)]
+        if item_kind is None or group_id != V4_TIMER_GROUP_ID or value is None or any(aux is None for aux in aux_values):
+            reject(state, path, f"v4_item_shape_invalid:{name}")
+            return None
+
+        if kind_name == "StructOffset" and (value == 0xFFFFFFFF or value > KSW_DYN_PROFILE_OFFSET_MAX):
+            reject(state, path, f"v4_struct_offset_invalid:{name}")
+            return None
+        if kind_name == "TypeSize" and (value == 0 or value > KSW_DYN_PROFILE_OFFSET_MAX):
+            reject(state, path, f"v4_type_size_invalid:{name}")
+            return None
+        if kind_name == "BitField":
+            bit_offset, bit_count, storage_bytes, _reserved = [int(aux) for aux in aux_values]
+            if storage_bytes not in {1, 2, 4, 8} or bit_count == 0 or bit_count > 64 or bit_offset + bit_count > storage_bytes * 8:
+                reject(state, path, f"v4_bit_field_invalid:{name}")
+                return None
+
+        raw_flags = item.get("flags", "required")
+        if isinstance(raw_flags, str):
+            normalized_flags = 1 if raw_flags.strip().lower() == "required" else 2 if raw_flags.strip().lower() == "optional" else 0
+        else:
+            normalized_flags = parse_uint32(raw_flags) or 0
+        if normalized_flags not in {1, 2}:
+            reject(state, path, f"v4_flags_invalid:{name}")
+            return None
+
+        normalized_items.append(
+            {
+                "itemId": item_id,
+                "name": name,
+                "itemKind": item_kind,
+                "kind": kind_name,
+                "flags": normalized_flags,
+                "capabilityGroupId": group_id,
+                "value": value,
+                "aux0": int(aux_values[0]),
+                "aux1": int(aux_values[1]),
+                "aux2": int(aux_values[2]),
+                "aux3": int(aux_values[3]),
+            }
+        )
+    return normalized_items
+
+
 def reject(state: ValidationState, path: Path, reason: str) -> None:
     """Append one rejection record to the validation state.
 
@@ -940,7 +1050,10 @@ def validate_profile(path: Path, state: ValidationState) -> ProfileRecord | None
     typed_items = validate_typed_items(path, data, state)
     if typed_items is None:
         return None
-    if not fields and not typed_items:
+    v4_items = validate_v4_items(path, data, state)
+    if v4_items is None:
+        return None
+    if not fields and not typed_items and not v4_items:
         reject(state, path, "fields_and_typed_items_empty")
         return None
 
@@ -961,6 +1074,7 @@ def validate_profile(path: Path, state: ValidationState) -> ProfileRecord | None
         field_count=len(fields),
         callback_items=callback_items,
         typed_items=typed_items,
+        v4_items=v4_items,
         missing_fields=missing_fields,
         missing_globals=missing_globals,
         coverage_percent=coverage_percent,
@@ -1102,6 +1216,82 @@ def build_pack_typed_items(record: ProfileRecord, pack_version: int) -> list[dic
     return typed_items
 
 
+def build_pack_v4_items(record: ProfileRecord) -> list[dict[str, Any]]:
+    """Convert legacy typed items plus v4-only items to stable wire records."""
+    source_typed_items = record.typed_items or build_pack_typed_items(record, KSW_PACK_VERSION_V3)
+    packed_items: list[dict[str, Any]] = []
+    seen_item_ids: set[int] = set()
+    for item in source_typed_items:
+        name = str(item.get("name", "")).strip()
+        kind_name = str(item.get("kind", "")).strip()
+        normalized = normalize_typed_item_name(name, kind_name)
+        if normalized is None:
+            continue
+        canonical_name, item_id = normalized
+        if item_id in seen_item_ids:
+            continue
+        seen_item_ids.add(item_id)
+        required = bool(item.get("required", True))
+        packed_items.append(
+            {
+                "itemId": item_id,
+                "name": canonical_name,
+                "itemKind": V4_ITEM_KIND_IDS[kind_name],
+                "flags": 1 if required else 2,
+                "capabilityGroupId": V4_CORE_GROUP_ID,
+                "valueLow": require_uint32(item.get("value"), f"{record.path}:{canonical_name}"),
+                "valueHigh": 0,
+                "aux0": 0,
+                "aux1": 0,
+                "aux2": 0,
+                "aux3": 0,
+            }
+        )
+
+    for item in record.v4_items:
+        item_id = int(item["itemId"])
+        if item_id in seen_item_ids:
+            raise ValueError(f"duplicate v4 item id {item_id} in {record.path}")
+        seen_item_ids.add(item_id)
+        packed_items.append(
+            {
+                "itemId": item_id,
+                "name": str(item["name"]),
+                "itemKind": int(item["itemKind"]),
+                "flags": int(item["flags"]),
+                "capabilityGroupId": int(item["capabilityGroupId"]),
+                "valueLow": int(item["value"]),
+                "valueHigh": 0,
+                "aux0": int(item["aux0"]),
+                "aux1": int(item["aux1"]),
+                "aux2": int(item["aux2"]),
+                "aux3": int(item["aux3"]),
+            }
+        )
+    return sorted(packed_items, key=lambda item: int(item["itemId"]))
+
+
+def build_pack_v4_capability_groups(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Build exact required/optional counts expected by the R0 v4 validator."""
+    names = {
+        V4_CORE_GROUP_ID: "ntos.core",
+        V4_TIMER_GROUP_ID: "timer.dpc",
+    }
+    groups: list[dict[str, Any]] = []
+    for group_id in sorted({int(item["capabilityGroupId"]) for item in items}):
+        group_items = [item for item in items if int(item["capabilityGroupId"]) == group_id]
+        groups.append(
+            {
+                "groupId": group_id,
+                "flags": 0,
+                "requiredItemCount": sum(1 for item in group_items if int(item["flags"]) & 1),
+                "optionalItemCount": sum(1 for item in group_items if int(item["flags"]) & 2),
+                "groupName": names.get(group_id, f"group.{group_id}"),
+            }
+        )
+    return groups
+
+
 def build_pack_profile_entry(record: ProfileRecord, field_index: dict[str, int], pack_version: int) -> dict[str, Any]:
     """Convert one validated profile record into a compact pack entry.
 
@@ -1129,7 +1319,7 @@ def build_pack_profile_entry(record: ProfileRecord, field_index: dict[str, int],
         raise ValueError(f"unsupported module class for {record.path}")
 
     fields = record.data.get("fields", {})
-    if not isinstance(fields, dict) or (not fields and pack_version != KSW_PACK_VERSION_V3):
+    if not isinstance(fields, dict) or (not fields and pack_version not in {KSW_PACK_VERSION_V3, KSW_PACK_VERSION_V4}):
         raise ValueError(f"invalid field set for {record.path}")
 
     packed_fields: list[list[int]] = []
@@ -1153,6 +1343,16 @@ def build_pack_profile_entry(record: ProfileRecord, field_index: dict[str, int],
         profile_entry["callbackItems"] = record.callback_items
     elif pack_version == KSW_PACK_VERSION_V3:
         profile_entry["items"] = build_pack_typed_items(record, pack_version)
+        profile_entry["coveragePercent"] = record.coverage_percent
+        profile_entry["missingFields"] = record.missing_fields
+        profile_entry["missingGlobals"] = record.missing_globals
+    elif pack_version == KSW_PACK_VERSION_V4:
+        v4_items = build_pack_v4_items(record)
+        if not v4_items:
+            raise ValueError(f"v4 item set is empty for {record.path}")
+        profile_entry["legacyItems"] = build_pack_typed_items(record, KSW_PACK_VERSION_V3)
+        profile_entry["items"] = v4_items
+        profile_entry["capabilityGroups"] = build_pack_v4_capability_groups(v4_items)
         profile_entry["coveragePercent"] = record.coverage_percent
         profile_entry["missingFields"] = record.missing_fields
         profile_entry["missingGlobals"] = record.missing_globals

@@ -14,7 +14,7 @@ Processing:
 - Use llvm-pdbutil to resolve selected private structure member offsets,
   callback v2 PDB items, and optional v3 kernel global RVAs.
 
-Returns:
+    Returns:
 - One JSON profile per PE/PDB identity, suitable for KswordARK R3 parsing.
 - Optional callback/kernel-global diagnostics are included without making
   missing private symbols fatal, because Microsoft public PDB coverage varies by
@@ -24,6 +24,7 @@ Returns:
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import hashlib
 import json
 import os
@@ -233,6 +234,62 @@ TYPE_SIZE_MAP: dict[str, str] = {
     "RtlAvlTypeSize": "_RTL_AVL_TABLE",
 }
 
+# v4-only timer/DPC items. 这些字段不进入旧 v1/v2/v3 fields，
+# 通过独立的 v4Items 数组携带结构偏移、类型大小和位域元数据。
+V4_FIELD_MAP: dict[str, tuple[str, str]] = {
+    "KprcbTimerTable": ("_KPRCB", "TimerTable"),
+    "KtimerTableTimerEntries": ("_KTIMER_TABLE", "TimerEntries"),
+    "KtimerTableEntryLock": ("_KTIMER_TABLE_ENTRY", "Lock"),
+    "KtimerTableEntryEntry": ("_KTIMER_TABLE_ENTRY", "Entry"),
+    "KtimerTableEntryTime": ("_KTIMER_TABLE_ENTRY", "Time"),
+    "KtimerTimerListEntry": ("_KTIMER", "TimerListEntry"),
+    "KtimerDueTime": ("_KTIMER", "DueTime"),
+    "KtimerDpc": ("_KTIMER", "Dpc"),
+    "KtimerTimerType": ("_KTIMER", "TimerType"),
+    "KtimerPeriod": ("_KTIMER", "Period"),
+    "KdpcDeferredRoutine": ("_KDPC", "DeferredRoutine"),
+    "KdpcDeferredContext": ("_KDPC", "DeferredContext"),
+}
+
+# Older public PDBs describe the timer kind through the embedded dispatcher
+# header instead of exposing a direct `_KTIMER.TimerType` member.  Keep the
+# stable v4 item name while resolving that legacy layout as
+# `_KTIMER.Header + _DISPATCHER_HEADER.Type`.
+V4_MEMBER_ALIASES: dict[tuple[str, str], tuple[tuple[str, str], tuple[str, str]]] = {
+    ("_KTIMER", "TimerType"): (("_KTIMER", "Header"), ("_DISPATCHER_HEADER", "Type")),
+}
+
+V4_BIT_FIELD_MAP: dict[str, tuple[str, str]] = {
+    "EthActiveExWorker": ("_ETHREAD", "ActiveExWorker"),
+}
+
+V4_TYPE_SIZE_MAP: dict[str, str] = {
+    "KtimerTableTypeSize": "_KTIMER_TABLE",
+    "KtimerTableEntryTypeSize": "_KTIMER_TABLE_ENTRY",
+    "KtimerTypeSize": "_KTIMER",
+    "KdpcTypeSize": "_KDPC",
+}
+
+V4_ITEM_DEFINITIONS: dict[str, tuple[int, str, int]] = {
+    "EthActiveExWorker": (1001, "BitField", 2),
+    "KprcbTimerTable": (1002, "StructOffset", 2),
+    "KtimerTableTimerEntries": (1003, "StructOffset", 2),
+    "KtimerTableEntryLock": (1004, "StructOffset", 2),
+    "KtimerTableEntryEntry": (1005, "StructOffset", 2),
+    "KtimerTableEntryTime": (1006, "StructOffset", 2),
+    "KtimerTimerListEntry": (1007, "StructOffset", 2),
+    "KtimerDueTime": (1008, "StructOffset", 2),
+    "KtimerDpc": (1009, "StructOffset", 2),
+    "KtimerTimerType": (1010, "StructOffset", 2),
+    "KtimerPeriod": (1011, "StructOffset", 2),
+    "KdpcDeferredRoutine": (1012, "StructOffset", 2),
+    "KdpcDeferredContext": (1013, "StructOffset", 2),
+    "KtimerTableTypeSize": (1014, "TypeSize", 2),
+    "KtimerTableEntryTypeSize": (1015, "TypeSize", 2),
+    "KtimerTypeSize": (1016, "TypeSize", 2),
+    "KdpcTypeSize": (1017, "TypeSize", 2),
+}
+
 CALLBACK_GLOBAL_RVA_NAMES: tuple[str, ...] = (
     "PspCreateProcessNotifyRoutine",
     "PspCreateThreadNotifyRoutine",
@@ -270,11 +327,20 @@ CALLBACK_STRUCT_FIELD_MAP: dict[str, tuple[str, str]] = {
 
 TYPE_HEADER_RE = re.compile(r"^\s*([0-9A-Fa-fx]+)\s*\|\s*(LF_[A-Z0-9_]+)\b")
 FIELD_LIST_RE = re.compile(r"field list:\s*(?:<fieldlist\s+)?([0-9A-Fa-fx]+)")
-TYPE_SIZE_RE = re.compile(r"(?:size|SizeOf|sizeof)\s*=\s*(0x[0-9A-Fa-f]+|\d+)")
+TYPE_SIZE_RE = re.compile(r"\bsizeof\s*(?:=\s*)?(0x[0-9A-Fa-f]+|\d+)", re.IGNORECASE)
 OFFSET_RE = re.compile(r"offset\s*=\s*(0x[0-9A-Fa-f]+|\d+)")
 TYPE_REF_RE = re.compile(r"(?:type|Type)\s*=\s*([^,\]\s]+)")
+BIT_OFFSET_RE = re.compile(r"bit offset\s*=\s*(0x[0-9A-Fa-f]+|\d+)")
+BIT_COUNT_RE = re.compile(r"# bits\s*=\s*(0x[0-9A-Fa-f]+|\d+)")
 SYMBOL_HEADER_RE = re.compile(r"^\s*([0-9A-Fa-fx]+)\s*\|\s*(S_[A-Z0-9_]+)\b.*`([^`]+)`")
 SYMBOL_ADDR_RE = re.compile(r"\baddr\s*=\s*([0-9A-Fa-f]+):([0-9A-Fa-f]+)")
+
+CODEVIEW_PRIMITIVE_TYPE_SIZES = {
+    "0020": 1,  # unsigned char
+    "0021": 2,  # unsigned short
+    "0022": 4,  # unsigned long
+    "0023": 8,  # unsigned __int64
+}
 
 
 @dataclass(frozen=True)
@@ -406,7 +472,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--arch", default="amd64", help="kphdyn arch filter")
     parser.add_argument("--version", default=None, help="Optional version prefix filter, e.g. 10.0.26100")
     parser.add_argument("--limit", type=int, default=0, help="Stop after N generated profiles; 0 means no limit")
+    parser.add_argument("--workers", type=int, default=1, help="Parallel profile workers; use 1 for deterministic diagnostics")
     parser.add_argument("--skip-existing", action="store_true", help="Do not regenerate existing JSON profiles")
+    parser.add_argument(
+        "--refresh-v4-existing",
+        action="store_true",
+        help="Refresh only v4 timer/DPC items in existing JSON profiles; skip symbol dumps",
+    )
+    parser.add_argument("--offline", action="store_true", help="Use only cached PE/PDB files and fail fast when an artifact is absent")
     parser.add_argument("--file", default="ntoskrnl.exe,ntkrla57.exe", help="Comma-separated PE file names")
     parser.add_argument("--dry-run", action="store_true", help="Process exactly one --local-pe/--local-pdb pair without symbol downloads")
     parser.add_argument("--local-pe", default="", help="Local PE path for dry-run validation")
@@ -482,6 +555,20 @@ def sha256_file(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def write_json_atomic(path: Path, payload: dict[str, object]) -> None:
+    """Write JSON through a process-local temporary file and atomically replace it."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    try:
+        temporary_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        os.replace(temporary_path, path)
+    finally:
+        try:
+            temporary_path.unlink()
+        except FileNotFoundError:
+            pass
 
 
 def pe_machine_to_arch(machine: int) -> str:
@@ -611,7 +698,11 @@ def rva_from_section_offset(pe_path: Path, section_number: int, section_offset: 
 
 def pe_path_for_entry(root: Path, entry: KphDynEntry) -> Path:
     """Return the local corpus path for a PE entry."""
-    return root / "pe-store" / entry.arch / f"{entry.file_name}.{entry.version}" / entry.sha256 / entry.file_name
+    nested_path = root / "pe-store" / entry.arch / entry.file_name / f"{entry.file_name}.{entry.version}" / entry.sha256 / entry.file_name
+    legacy_path = root / "pe-store" / entry.arch / f"{entry.file_name}.{entry.version}" / entry.sha256 / entry.file_name
+    if nested_path.exists() or not legacy_path.exists():
+        return nested_path
+    return legacy_path
 
 
 def pdb_path_for_identity(root: Path, entry: KphDynEntry, pdb: PdbIdentity) -> Path:
@@ -700,8 +791,8 @@ def run_llvm_pdbutil_types(pdb_path: Path, pdbutil_path: str) -> str:
     return run_llvm_pdbutil_dump(pdb_path, pdbutil_path, "-types")
 
 
-def find_field_list_id(lines: list[str], struct_name: str) -> str | None:
-    """Find the LF_FIELDLIST record referenced by a concrete type.
+def find_field_list_ids(lines: list[str], struct_name: str) -> list[str]:
+    """Find LF_FIELDLIST records referenced by concrete definitions.
 
     Inputs:
     - lines: Split `llvm-pdbutil dump -types` output.
@@ -715,10 +806,12 @@ def find_field_list_id(lines: list[str], struct_name: str) -> str | None:
       definition that can be used for offset extraction.
 
     Return behavior:
-    - Returns the referenced LF_FIELDLIST id text when available; otherwise
-      returns None without guessing.
+    - Returns every referenced LF_FIELDLIST id in PDB order. Some kernels carry
+      both a shortened and a full `_KPRCB` definition, so callers must inspect
+      all concrete definitions instead of trusting the first one.
     """
     allowed = {"LF_STRUCTURE", "LF_STRUCTURE2", "LF_CLASS", "LF_CLASS2", "LF_UNION", "LF_UNION2"}
+    result: list[str] = []
     for index, line in enumerate(lines):
         header = TYPE_HEADER_RE.match(line)
         if not header:
@@ -733,8 +826,17 @@ def find_field_list_id(lines: list[str], struct_name: str) -> str | None:
                 break
             match = FIELD_LIST_RE.search(body_line)
             if match:
-                return match.group(1)
-    return None
+                normalized = normalize_record_id(match.group(1))
+                if all(normalize_record_id(item) != normalized for item in result):
+                    result.append(match.group(1))
+                break
+    return result
+
+
+def find_field_list_id(lines: list[str], struct_name: str) -> str | None:
+    """Return the first concrete field list for legacy callers."""
+    field_lists = find_field_list_ids(lines, struct_name)
+    return field_lists[0] if field_lists else None
 
 
 def resolve_type_size(types_text: str, struct_name: str) -> int | None:
@@ -806,19 +908,281 @@ def member_name_from_line(line: str) -> str | None:
 def resolve_member_offset(types_text: str, struct_name: str, member_name: str) -> int | None:
     """Resolve one direct structure member offset from llvm-pdbutil type dump text."""
     lines = types_text.splitlines()
-    field_list = find_field_list_id(lines, struct_name)
-    if field_list is None:
-        return None
-    for line in field_list_lines(lines, field_list):
-        if "LF_MEMBER" not in line or member_name_from_line(line) != member_name:
-            continue
-        match = OFFSET_RE.search(line)
-        if match:
-            return parse_int(match.group(1))
-        type_match = TYPE_REF_RE.search(line)
-        if type_match:
-            continue
+    for field_list in find_field_list_ids(lines, struct_name):
+        for line in field_list_lines(lines, field_list):
+            if "LF_MEMBER" not in line or member_name_from_line(line) != member_name:
+                continue
+            match = OFFSET_RE.search(line)
+            if match:
+                return parse_int(match.group(1))
     return None
+
+
+def resolve_bit_field(types_text: str, struct_name: str, member_name: str) -> tuple[int, int, int, int] | None:
+    """Resolve one direct LF_BITFIELD member.
+
+    Returns (byte_offset, bit_offset, bit_count, storage_bytes). Missing or
+    non-primitive storage types are rejected instead of being guessed.
+    """
+    lines = types_text.splitlines()
+    member_offset: int | None = None
+    bit_field_type_id = ""
+    for field_list in find_field_list_ids(lines, struct_name):
+        for line in field_list_lines(lines, field_list):
+            if "LF_MEMBER" not in line or member_name_from_line(line) != member_name:
+                continue
+            offset_match = OFFSET_RE.search(line)
+            type_match = TYPE_REF_RE.search(line)
+            if offset_match and type_match:
+                member_offset = parse_int(offset_match.group(1))
+                bit_field_type_id = normalize_record_id(type_match.group(1))
+            break
+        if member_offset is not None:
+            break
+    if member_offset is None or not bit_field_type_id:
+        return None
+
+    for index, line in enumerate(lines):
+        header = TYPE_HEADER_RE.match(line)
+        if not header:
+            continue
+        record_id, kind = header.groups()
+        if kind != "LF_BITFIELD" or normalize_record_id(record_id) != bit_field_type_id:
+            continue
+
+        body_lines = [line]
+        for body_line in lines[index + 1 :]:
+            if TYPE_HEADER_RE.match(body_line):
+                break
+            body_lines.append(body_line)
+        body_text = " ".join(body_lines)
+        storage_match = TYPE_REF_RE.search(body_text)
+        bit_offset_match = BIT_OFFSET_RE.search(body_text)
+        bit_count_match = BIT_COUNT_RE.search(body_text)
+        if not storage_match or not bit_offset_match or not bit_count_match:
+            return None
+        storage_bytes = CODEVIEW_PRIMITIVE_TYPE_SIZES.get(normalize_record_id(storage_match.group(1)))
+        if storage_bytes is None:
+            return None
+        return (
+            member_offset,
+            parse_int(bit_offset_match.group(1)),
+            parse_int(bit_count_match.group(1)),
+            storage_bytes,
+        )
+    return None
+
+
+def resolve_member_offsets_batch(
+    types_text: str,
+    requests: Iterable[tuple[str, str]],
+) -> dict[tuple[str, str], int]:
+    """Resolve many member offsets while indexing each structure only once."""
+    lines = types_text.splitlines()
+    members_by_struct: dict[str, set[str]] = {}
+    for struct_name, member_name in requests:
+        members_by_struct.setdefault(struct_name, set()).add(member_name)
+
+    resolved: dict[tuple[str, str], int] = {}
+    for struct_name, wanted_members in members_by_struct.items():
+        for field_list in find_field_list_ids(lines, struct_name):
+            for line in field_list_lines(lines, field_list):
+                if "LF_MEMBER" not in line:
+                    continue
+                member_name = member_name_from_line(line)
+                if member_name not in wanted_members or (struct_name, member_name) in resolved:
+                    continue
+                offset_match = OFFSET_RE.search(line)
+                if offset_match:
+                    resolved[(struct_name, member_name)] = parse_int(offset_match.group(1))
+    return resolved
+
+
+def resolve_type_sizes_batch(types_text: str, struct_names: Iterable[str]) -> dict[str, int]:
+    """Resolve concrete type sizes with one scan of the PDB type stream."""
+    wanted = set(struct_names)
+    resolved: dict[str, int] = {}
+    allowed = {"LF_STRUCTURE", "LF_STRUCTURE2", "LF_CLASS", "LF_CLASS2"}
+    lines = types_text.splitlines()
+    for index, line in enumerate(lines):
+        header = TYPE_HEADER_RE.match(line)
+        if not header or header.group(2) not in allowed or "forward ref" in line:
+            continue
+        name_match = re.search(r"`([^`]+)`", line)
+        if not name_match:
+            continue
+        struct_name = name_match.group(1)
+        if struct_name not in wanted or struct_name in resolved:
+            continue
+        body_lines = [line]
+        for body_line in lines[index + 1 :]:
+            if TYPE_HEADER_RE.match(body_line):
+                break
+            if "forward ref" in body_line:
+                body_lines = []
+                break
+            body_lines.append(body_line)
+        for candidate in body_lines:
+            size_match = TYPE_SIZE_RE.search(candidate)
+            if size_match:
+                resolved[struct_name] = parse_int(size_match.group(1))
+                break
+    return resolved
+
+
+def resolve_bit_fields_batch(
+    types_text: str,
+    requests: Iterable[tuple[str, str]],
+) -> dict[tuple[str, str], tuple[int, int, int, int]]:
+    """Resolve many LF_BITFIELD members with one bit-record index."""
+    lines = types_text.splitlines()
+    wanted = set(requests)
+    member_records: dict[tuple[str, str], tuple[int, str]] = {}
+    for struct_name in sorted({request[0] for request in wanted}):
+        for field_list in find_field_list_ids(lines, struct_name):
+            for line in field_list_lines(lines, field_list):
+                member_name = member_name_from_line(line)
+                key = (struct_name, member_name or "")
+                if "LF_MEMBER" not in line or key not in wanted or key in member_records:
+                    continue
+                offset_match = OFFSET_RE.search(line)
+                type_match = TYPE_REF_RE.search(line)
+                if offset_match and type_match:
+                    member_records[key] = (parse_int(offset_match.group(1)), normalize_record_id(type_match.group(1)))
+
+    bit_records: dict[str, tuple[int, int, int]] = {}
+    wanted_type_ids = {record[1] for record in member_records.values()}
+    for index, line in enumerate(lines):
+        header = TYPE_HEADER_RE.match(line)
+        if not header or header.group(2) != "LF_BITFIELD":
+            continue
+        type_id = normalize_record_id(header.group(1))
+        if type_id not in wanted_type_ids:
+            continue
+        body_lines = [line]
+        for body_line in lines[index + 1 :]:
+            if TYPE_HEADER_RE.match(body_line):
+                break
+            body_lines.append(body_line)
+        body_text = " ".join(body_lines)
+        storage_match = TYPE_REF_RE.search(body_text)
+        bit_offset_match = BIT_OFFSET_RE.search(body_text)
+        bit_count_match = BIT_COUNT_RE.search(body_text)
+        if not storage_match or not bit_offset_match or not bit_count_match:
+            continue
+        storage_bytes = CODEVIEW_PRIMITIVE_TYPE_SIZES.get(normalize_record_id(storage_match.group(1)))
+        if storage_bytes is not None:
+            bit_records[type_id] = (parse_int(bit_offset_match.group(1)), parse_int(bit_count_match.group(1)), storage_bytes)
+
+    resolved: dict[tuple[str, str], tuple[int, int, int, int]] = {}
+    for key, (member_offset, type_id) in member_records.items():
+        bit_record = bit_records.get(type_id)
+        if bit_record is not None:
+            resolved[key] = (member_offset, bit_record[0], bit_record[1], bit_record[2])
+    return resolved
+
+
+def resolve_type_layouts_batch(
+    types_text: str,
+    member_requests: Iterable[tuple[str, str]],
+    type_size_requests: Iterable[str],
+    bit_field_requests: Iterable[tuple[str, str]],
+) -> tuple[
+    dict[tuple[str, str], int],
+    dict[str, int],
+    dict[tuple[str, str], tuple[int, int, int, int]],
+]:
+    """Index one llvm-pdbutil type dump and resolve all requested layouts."""
+    lines = types_text.splitlines()
+    records: dict[str, tuple[str, str, list[str]]] = {}
+    index = 0
+    while index < len(lines):
+        header = TYPE_HEADER_RE.match(lines[index])
+        if not header:
+            index += 1
+            continue
+        record_id, kind = header.groups()
+        body: list[str] = []
+        next_index = index + 1
+        while next_index < len(lines) and not TYPE_HEADER_RE.match(lines[next_index]):
+            body.append(lines[next_index])
+            next_index += 1
+        records[normalize_record_id(record_id)] = (kind, lines[index], body)
+        index = next_index
+
+    field_lists: dict[str, list[str]] = {
+        record_id: body
+        for record_id, (kind, _header_line, body) in records.items()
+        if kind == "LF_FIELDLIST"
+    }
+    concrete_kinds = {"LF_STRUCTURE", "LF_STRUCTURE2", "LF_CLASS", "LF_CLASS2", "LF_UNION", "LF_UNION2"}
+    struct_field_lists: dict[str, list[str]] = {}
+    resolved_type_sizes: dict[str, int] = {}
+    wanted_type_sizes = set(type_size_requests)
+    for _record_id, (kind, header_line, body) in records.items():
+        if kind not in concrete_kinds:
+            continue
+        record_text = " ".join([header_line, *body])
+        if "forward ref" in record_text:
+            continue
+        name_match = re.search(r"`([^`]+)`", header_line)
+        if not name_match:
+            continue
+        struct_name = name_match.group(1)
+        field_list_match = FIELD_LIST_RE.search(record_text)
+        if field_list_match:
+            field_list_id = normalize_record_id(field_list_match.group(1))
+            if field_list_id in field_lists and field_list_id not in struct_field_lists.setdefault(struct_name, []):
+                struct_field_lists[struct_name].append(field_list_id)
+        if struct_name in wanted_type_sizes and struct_name not in resolved_type_sizes:
+            size_match = TYPE_SIZE_RE.search(record_text)
+            if size_match:
+                resolved_type_sizes[struct_name] = parse_int(size_match.group(1))
+
+    wanted_members: dict[str, set[str]] = {}
+    for struct_name, member_name in member_requests:
+        wanted_members.setdefault(struct_name, set()).add(member_name)
+    resolved_offsets: dict[tuple[str, str], int] = {}
+    member_type_ids: dict[tuple[str, str], str] = {}
+    wanted_bit_fields = set(bit_field_requests)
+    for struct_name, member_names in wanted_members.items():
+        for field_list_id in struct_field_lists.get(struct_name, []):
+            for line in field_lists.get(field_list_id, []):
+                if "LF_MEMBER" not in line:
+                    continue
+                member_name = member_name_from_line(line)
+                if member_name not in member_names:
+                    continue
+                key = (struct_name, member_name)
+                offset_match = OFFSET_RE.search(line)
+                if offset_match and key not in resolved_offsets:
+                    resolved_offsets[key] = parse_int(offset_match.group(1))
+                if key in wanted_bit_fields and key not in member_type_ids:
+                    type_match = TYPE_REF_RE.search(line)
+                    if type_match:
+                        member_type_ids[key] = normalize_record_id(type_match.group(1))
+
+    resolved_bit_fields: dict[tuple[str, str], tuple[int, int, int, int]] = {}
+    for key, type_id in member_type_ids.items():
+        record = records.get(type_id)
+        if record is None or record[0] != "LF_BITFIELD" or key not in resolved_offsets:
+            continue
+        record_text = " ".join([record[1], *record[2]])
+        storage_match = TYPE_REF_RE.search(record_text)
+        bit_offset_match = BIT_OFFSET_RE.search(record_text)
+        bit_count_match = BIT_COUNT_RE.search(record_text)
+        if not storage_match or not bit_offset_match or not bit_count_match:
+            continue
+        storage_bytes = CODEVIEW_PRIMITIVE_TYPE_SIZES.get(normalize_record_id(storage_match.group(1)))
+        if storage_bytes is None:
+            continue
+        resolved_bit_fields[key] = (
+            resolved_offsets[key],
+            parse_int(bit_offset_match.group(1)),
+            parse_int(bit_count_match.group(1)),
+            storage_bytes,
+        )
+    return resolved_offsets, resolved_type_sizes, resolved_bit_fields
 
 
 def parse_symbol_addresses(symbols_text: str, source: str) -> list[SymbolAddress]:
@@ -1005,6 +1369,7 @@ def build_callback_items(
     pe_path: Path,
     symbol_addresses: dict[str, list[SymbolAddress]],
     symbol_dump_failures: list[dict[str, str]],
+    resolved_member_offsets: dict[tuple[str, str], int] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Build callback v2 item payload and diagnostics.
 
@@ -1033,7 +1398,9 @@ def build_callback_items(
     )
 
     for item_name, (struct_name, member_name) in CALLBACK_STRUCT_FIELD_MAP.items():
-        offset = resolve_member_offset(types_text, struct_name, member_name)
+        offset = (resolved_member_offsets or {}).get((struct_name, member_name))
+        if offset is None and resolved_member_offsets is None:
+            offset = resolve_member_offset(types_text, struct_name, member_name)
         if offset is None:
             missing_items.append(
                 {
@@ -1063,6 +1430,152 @@ def build_callback_items(
     return callback_items, diagnostics
 
 
+def build_v4_items(
+    types_text: str,
+    resolved_member_offsets: dict[tuple[str, str], int] | None = None,
+    resolved_type_sizes: dict[str, int] | None = None,
+    resolved_bit_fields: dict[tuple[str, str], tuple[int, int, int, int]] | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+    """Build stable timer/DPC v4 items from one PDB type dump."""
+    items: list[dict[str, Any]] = []
+    missing: list[dict[str, str]] = []
+    for item_name, (item_id, item_kind, group_id) in V4_ITEM_DEFINITIONS.items():
+        if item_name in V4_FIELD_MAP:
+            struct_name, member_name = V4_FIELD_MAP[item_name]
+            offset = (resolved_member_offsets or {}).get((struct_name, member_name))
+            if offset is None and resolved_member_offsets is None:
+                offset = resolve_member_offset(types_text, struct_name, member_name)
+            if offset is None:
+                missing.append({"kind": item_kind, "name": item_name, "reason": "member_not_found", "structName": struct_name, "memberName": member_name})
+                continue
+            item: dict[str, Any] = {
+                "itemId": item_id,
+                "name": item_name,
+                "kind": item_kind,
+                "flags": "required",
+                "capabilityGroupId": group_id,
+                "value": f"0x{offset:04X}",
+                "aux0": 0,
+                "aux1": 0,
+                "aux2": 0,
+                "aux3": 0,
+            }
+        elif item_name in V4_BIT_FIELD_MAP:
+            struct_name, member_name = V4_BIT_FIELD_MAP[item_name]
+            resolved = (resolved_bit_fields or {}).get((struct_name, member_name))
+            if resolved is None and resolved_bit_fields is None:
+                resolved = resolve_bit_field(types_text, struct_name, member_name)
+            if resolved is None:
+                missing.append({"kind": item_kind, "name": item_name, "reason": "bit_field_not_found", "structName": struct_name, "memberName": member_name})
+                continue
+            offset, bit_offset, bit_count, storage_bytes = resolved
+            item = {
+                "itemId": item_id,
+                "name": item_name,
+                "kind": item_kind,
+                "flags": "required",
+                "capabilityGroupId": group_id,
+                "value": f"0x{offset:04X}",
+                "aux0": bit_offset,
+                "aux1": bit_count,
+                "aux2": storage_bytes,
+                "aux3": 0,
+            }
+        else:
+            struct_name = V4_TYPE_SIZE_MAP[item_name]
+            type_size = (resolved_type_sizes or {}).get(struct_name)
+            if type_size is None and resolved_type_sizes is None:
+                type_size = resolve_type_size(types_text, struct_name)
+            if type_size is None:
+                missing.append({"kind": item_kind, "name": item_name, "reason": "type_not_found", "structName": struct_name})
+                continue
+            item = {
+                "itemId": item_id,
+                "name": item_name,
+                "kind": item_kind,
+                "flags": "required",
+                "capabilityGroupId": group_id,
+                "value": f"0x{type_size:04X}",
+                "aux0": 0,
+                "aux1": 0,
+                "aux2": 0,
+                "aux3": 0,
+            }
+        items.append(item)
+    return items, missing
+
+
+def resolve_v4_layouts(types_text: str) -> tuple[
+    dict[tuple[str, str], int],
+    dict[str, int],
+    dict[tuple[str, str], tuple[int, int, int, int]],
+]:
+    """Resolve v4 members, type sizes, and bitfields from one PDB type dump."""
+    member_requests = list(V4_FIELD_MAP.values()) + list(V4_BIT_FIELD_MAP.values())
+    member_requests.extend(request for alias in V4_MEMBER_ALIASES.values() for request in alias)
+    resolved_member_offsets, resolved_type_sizes, resolved_bit_fields = resolve_type_layouts_batch(
+        types_text,
+        member_requests,
+        V4_TYPE_SIZE_MAP.values(),
+        V4_BIT_FIELD_MAP.values(),
+    )
+    for target, (base_member, nested_member) in V4_MEMBER_ALIASES.items():
+        if target in resolved_member_offsets:
+            continue
+        base_offset = resolved_member_offsets.get(base_member)
+        nested_offset = resolved_member_offsets.get(nested_member)
+        if base_offset is not None and nested_offset is not None:
+            resolved_member_offsets[target] = base_offset + nested_offset
+    return resolved_member_offsets, resolved_type_sizes, resolved_bit_fields
+
+
+def refresh_v4_profile(
+    profile_path: Path,
+    types_text: str,
+) -> None:
+    """Refresh v4 payload while preserving legacy/callback data in a profile."""
+    profile = json.loads(profile_path.read_text(encoding="utf-8"))
+    if not isinstance(profile, dict):
+        raise ValueError(f"profile root is not an object: {profile_path}")
+    resolved_member_offsets, resolved_type_sizes, resolved_bit_fields = resolve_v4_layouts(types_text)
+    v4_items, v4_missing_items = build_v4_items(
+        types_text,
+        resolved_member_offsets=resolved_member_offsets,
+        resolved_type_sizes=resolved_type_sizes,
+        resolved_bit_fields=resolved_bit_fields,
+    )
+    profile["v4Items"] = v4_items
+    profile["v4MissingItems"] = v4_missing_items
+    diagnostics = profile.get("diagnostics")
+    if not isinstance(diagnostics, dict):
+        diagnostics = {}
+    diagnostics["v4MissingItems"] = v4_missing_items
+    profile["diagnostics"] = diagnostics
+    profile["generatedAt"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    profile["generator"] = "tools/pdb_offset_generator/ksword_pdb_profile_generator.py"
+    write_json_atomic(profile_path, profile)
+
+
+def v4_profile_complete(profile_path: Path) -> bool:
+    """Return whether an existing generator profile already has every v4 item."""
+    try:
+        profile = json.loads(profile_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return False
+    if not isinstance(profile, dict) or profile.get("v4MissingItems"):
+        return False
+    raw_items = profile.get("v4Items")
+    if not isinstance(raw_items, list):
+        return False
+    expected_ids = {definition[0] for definition in V4_ITEM_DEFINITIONS.values()}
+    actual_ids = {
+        item.get("itemId")
+        for item in raw_items
+        if isinstance(item, dict) and isinstance(item.get("itemId"), int)
+    }
+    return actual_ids == expected_ids
+
+
 def build_profile(
     entry: KphDynEntry,
     pe_path: Path,
@@ -1088,10 +1601,26 @@ def build_profile(
     Return behavior:
     - Returns a JSON-serializable dictionary; it does not write files.
     """
+    member_requests = list(FIELD_MAP.values()) + list(CALLBACK_STRUCT_FIELD_MAP.values())
+    member_requests.extend(list(V4_FIELD_MAP.values()) + list(V4_BIT_FIELD_MAP.values()))
+    member_requests.extend(request for alias in V4_MEMBER_ALIASES.values() for request in alias)
+    resolved_member_offsets, resolved_type_size_values, resolved_bit_fields = resolve_type_layouts_batch(
+        types_text,
+        member_requests,
+        list(TYPE_SIZE_MAP.values()) + list(V4_TYPE_SIZE_MAP.values()),
+        V4_BIT_FIELD_MAP.values(),
+    )
+    for target, (base_member, nested_member) in V4_MEMBER_ALIASES.items():
+        if target in resolved_member_offsets:
+            continue
+        base_offset = resolved_member_offsets.get(base_member)
+        nested_offset = resolved_member_offsets.get(nested_member)
+        if base_offset is not None and nested_offset is not None:
+            resolved_member_offsets[target] = base_offset + nested_offset
     resolved_fields: dict[str, str] = {}
     missing_fields: list[str] = []
     for ksword_name, (struct_name, member_name) in FIELD_MAP.items():
-        offset = resolve_member_offset(types_text, struct_name, member_name)
+        offset = resolved_member_offsets.get((struct_name, member_name))
         if offset is None:
             missing_fields.append(f"{struct_name}->{member_name}")
             continue
@@ -1100,7 +1629,7 @@ def build_profile(
     resolved_type_sizes: dict[str, str] = {}
     missing_type_sizes: list[str] = []
     for ksword_name, struct_name in TYPE_SIZE_MAP.items():
-        type_size = resolve_type_size(types_text, struct_name)
+        type_size = resolved_type_size_values.get(struct_name)
         if type_size is None:
             missing_type_sizes.append(struct_name)
             continue
@@ -1111,6 +1640,7 @@ def build_profile(
         pe_path=pe_path,
         symbol_addresses=symbol_addresses or {},
         symbol_dump_failures=symbol_dump_failures or [],
+        resolved_member_offsets=resolved_member_offsets,
     )
     kernel_global_items, missing_global_details = build_global_rva_items(
         pe_path=pe_path,
@@ -1118,6 +1648,13 @@ def build_profile(
         symbol_names=KERNEL_GLOBAL_RVA_NAMES,
     )
     missing_globals = [str(item.get("name", "")) for item in missing_global_details if str(item.get("name", "")).strip()]
+    v4_items, v4_missing_items = build_v4_items(
+        types_text,
+        resolved_member_offsets=resolved_member_offsets,
+        resolved_type_sizes=resolved_type_size_values,
+        resolved_bit_fields=resolved_bit_fields,
+    )
+    diagnostics["v4MissingItems"] = v4_missing_items
     typed_items: list[dict[str, Any]] = []
     for field_name, offset_text in sorted(resolved_fields.items()):
         typed_items.append({"kind": "StructOffset", "name": field_name, "value": offset_text})
@@ -1163,6 +1700,8 @@ def build_profile(
         "missingTypeSizes": missing_type_sizes,
         "callbackItems": callback_items,
         "typedItems": typed_items,
+        "v4Items": v4_items,
+        "v4MissingItems": v4_missing_items,
         "missingGlobals": missing_globals,
         "coveragePercent": round(coverage_percent, 1),
         "diagnostics": {
@@ -1174,7 +1713,15 @@ def build_profile(
     }
 
 
-def process_entry(entry: KphDynEntry, root: Path, symbol_server: str, pdbutil_path: str, skip_existing: bool) -> Path | None:
+def process_entry(
+    entry: KphDynEntry,
+    root: Path,
+    symbol_server: str,
+    pdbutil_path: str,
+    skip_existing: bool,
+    offline: bool = False,
+    refresh_v4_existing: bool = False,
+) -> Path | None:
     """Download PE/PDB for one entry, generate JSON, and return the profile path.
 
     Inputs:
@@ -1196,31 +1743,68 @@ def process_entry(entry: KphDynEntry, root: Path, symbol_server: str, pdbutil_pa
     pe_path = pe_path_for_entry(root, entry)
     pe_url = f"{symbol_server.rstrip('/')}/{entry.file_name}/{pe_symbol_key(entry)}/{entry.file_name}"
     print(f"[PE] {entry.version} {entry.file_name} {pe_symbol_key(entry)}")
-    download_file(pe_url, pe_path)
+    if offline and not pe_path.exists():
+        raise FileNotFoundError(f"cached PE not found: {pe_path}")
+    if not offline:
+        download_file(pe_url, pe_path)
     actual_hash = sha256_file(pe_path)
     if actual_hash.lower() != entry.sha256.lower():
         raise RuntimeError(f"SHA256 mismatch for {pe_path}: expected {entry.sha256}, got {actual_hash}")
 
     pdb_identity = parse_rsds_identity(pe_path)
     profile_path = profile_path_for_entry(root, entry, pdb_identity)
-    if skip_existing and profile_path.exists():
+    if refresh_v4_existing and profile_path.exists() and v4_profile_complete(profile_path):
+        print(f"[V4-SKIP] {profile_path}")
+        return profile_path
+    if skip_existing and profile_path.exists() and not refresh_v4_existing:
         print(f"[SKIP] {profile_path}")
         return profile_path
 
     pdb_path = pdb_path_for_identity(root, entry, pdb_identity)
     pdb_url = f"{symbol_server.rstrip('/')}/{pdb_identity.pdb_name}/{pdb_identity.symbol_key}/{pdb_identity.pdb_name}"
     print(f"[PDB] {pdb_identity.pdb_name} {pdb_identity.symbol_key}")
-    download_file(pdb_url, pdb_path)
+    if offline and not pdb_path.exists():
+        raise FileNotFoundError(f"cached PDB not found: {pdb_path}")
+    if not offline:
+        download_file(pdb_url, pdb_path)
 
     print(f"[TYPES] {pdb_path}")
     types_text = run_llvm_pdbutil_types(pdb_path, pdbutil_path)
+    if refresh_v4_existing and profile_path.exists():
+        refresh_v4_profile(profile_path, types_text)
+        print(f"[V4-OK] {profile_path}")
+        return profile_path
     print(f"[SYMS] {pdb_path}")
     symbol_addresses, symbol_dump_failures = collect_symbol_addresses(pdb_path, pdbutil_path)
     profile = build_profile(entry, pe_path, pdb_identity, types_text, symbol_addresses, symbol_dump_failures)
-    profile_path.parent.mkdir(parents=True, exist_ok=True)
-    profile_path.write_text(json.dumps(profile, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    write_json_atomic(profile_path, profile)
     print(f"[OK] {profile_path}")
     return profile_path
+
+
+def process_entry_worker(
+    entry: KphDynEntry,
+    root_text: str,
+    symbol_server: str,
+    pdbutil_path: str,
+    skip_existing: bool,
+    offline: bool,
+    refresh_v4_existing: bool,
+) -> tuple[bool, str]:
+    """Process one entry in a child process and return a compact result."""
+    try:
+        result_path = process_entry(
+            entry,
+            Path(root_text),
+            symbol_server,
+            pdbutil_path,
+            skip_existing,
+            offline,
+            refresh_v4_existing,
+        )
+        return result_path is not None, str(result_path or "")
+    except Exception as exc:  # noqa: BLE001 - worker must preserve per-entry failure and continue the matrix.
+        return False, f"{entry.version} {entry.file_name}: {exc}"
 
 
 def default_dry_run_output_path(entry: KphDynEntry, pdb_identity: PdbIdentity) -> Path:
@@ -1281,8 +1865,7 @@ def run_local_dry_run(args: argparse.Namespace) -> int:
     symbol_addresses, symbol_dump_failures = collect_symbol_addresses(pdb_path, args.llvm_pdbutil)
     profile = build_profile(entry, pe_path, pdb_identity, types_text, symbol_addresses, symbol_dump_failures)
 
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(json.dumps(profile, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    write_json_atomic(output_path, profile)
     print(f"[OK] {output_path}")
     print(f"callbackItems={len(profile.get('callbackItems', []))}")
     print(f"typedItems={len(profile.get('typedItems', []))}")
@@ -1324,9 +1907,42 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     generated = 0
+    if args.workers > 1:
+        worker_count = max(1, min(int(args.workers), 32))
+        selected_entries = entries[: args.limit] if args.limit else entries
+        with concurrent.futures.ProcessPoolExecutor(max_workers=worker_count) as executor:
+            futures = [
+                executor.submit(
+                    process_entry_worker,
+                    entry,
+                    str(root),
+                    args.symbol_server,
+                    args.llvm_pdbutil,
+                    args.skip_existing,
+                    args.offline,
+                    args.refresh_v4_existing,
+                )
+                for entry in selected_entries
+            ]
+            for future in concurrent.futures.as_completed(futures):
+                succeeded, detail = future.result()
+                if succeeded:
+                    generated += 1
+                else:
+                    print(f"[ERR] {detail}", file=sys.stderr)
+        return 0 if generated > 0 else 1
+
     for entry in entries:
         try:
-            result_path = process_entry(entry, root, args.symbol_server, args.llvm_pdbutil, args.skip_existing)
+            result_path = process_entry(
+                entry,
+                root,
+                args.symbol_server,
+                args.llvm_pdbutil,
+                args.skip_existing,
+                args.offline,
+                args.refresh_v4_existing,
+            )
             if result_path is not None:
                 generated += 1
             if args.limit and generated >= args.limit:
