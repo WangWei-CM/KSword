@@ -707,6 +707,20 @@ std::vector<AuditRow> QueryFileObjectRows(const std::wstring& targetPath) {
     AddRow(rows, L"AllocationSize", L"R0 FileInfo", FieldPresentText(query.fieldFlags, KSWORD_ARK_FILE_INFO_FIELD_STANDARD_PRESENT), std::to_wstring(query.allocationSize), L"分配大小。");
     AddRow(rows, L"CreationTime", L"R0 FileInfo", FieldPresentText(query.fieldFlags, KSWORD_ARK_FILE_INFO_FIELD_BASIC_PRESENT), FileTimeToText(query.creationTime), L"FILETIME 本地化显示。");
     AddRow(rows, L"LastWriteTime", L"R0 FileInfo", FieldPresentText(query.fieldFlags, KSWORD_ARK_FILE_INFO_FIELD_BASIC_PRESENT), FileTimeToText(query.lastWriteTime), L"FILETIME 本地化显示。");
+    const ksword::ark::ImageSignatureQueryResult signature = client.queryImageSignature(ntPath);
+    const std::wstring signatureEvidence = Utf8ToWide(ksword::ark::formatImageSignatureEvidence(signature));
+    AddRow(rows,
+        L"IOCTL_KSWORD_ARK_QUERY_IMAGE_SIGNATURE",
+        L"ArkDriverClient",
+        signature.io.ok ? L"OK" : (signature.unsupported ? L"驱动不支持" : L"驱动不支持/权限不足"),
+        signature.io.ok ? L"R0 image signature evidence" : L"Image signature query failed",
+        Utf8ToWide(signature.io.message));
+    AddRow(rows,
+        L"ImageSignatureEvidence",
+        L"R0 Image Signature",
+        signature.io.ok ? L"OK" : L"不可用",
+        ntPath,
+        signatureEvidence.empty() ? Utf8ToWide(signature.io.message) : signatureEvidence);
     AddRow(rows, L"降级说明", L"UI", query.io.ok ? L"OK" : L"驱动不支持/权限不足", query.io.ok ? L"R0 FileInfo 可用" : L"R0 FileInfo 不可用", L"若旧驱动未注册 IOCTL 或服务未加载，本页保留路径和错误原因，不执行 fallback 写操作。");
     return rows;
 }
