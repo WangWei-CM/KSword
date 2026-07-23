@@ -105,13 +105,13 @@ struct HandleEnumView {
 };
 
 // HandleAuditClient is a local R3 adapter for this unregistered Light module.
-// It reuses ArkDriverClient::deviceIoControl so the page does not open or drive
-// KswordARK directly. All operations are read-only METHOD_BUFFERED queries.
+// It reuses the strong ArkDriverClient handle-query methods, so the page never
+// opens the device or sends generic IOCTL packets directly.
 class HandleAuditClient final {
 public:
     // EnumerateProcessHandles queries one process HandleTable. Input is a PID;
-    // processing sends IOCTL_KSWORD_ARK_ENUM_PROCESS_HANDLES through
-    // ArkDriverClient; output contains parsed entries or IO diagnostics.
+    // processing calls ArkDriverClient::enumerateProcessHandles; output
+    // contains typed entries or IO diagnostics.
     HandleEnumView EnumerateProcessHandles(std::uint32_t processId) const;
 
     // QueryHandleObject requests ObjectHeader/ObjectType/object-name details for

@@ -54,6 +54,16 @@ private:
     // object query and rewrites the detail table; no value is returned.
     void PopulateDetail(int rowIndex);
 
+    // RequestFilter applies a debounced local search to the immutable handle
+    // snapshot without issuing another driver query.
+    void RequestFilter(const std::wstring& query, std::wstring selectedStableKey = {}, std::wstring topStableKey = {});
+
+    // ShowHandleContextMenu exposes copy actions for the virtual handle table.
+    void ShowHandleContextMenu(POINT screenPoint);
+
+    // ShowDetailContextMenu exposes copy actions for Object detail rows.
+    void ShowDetailContextMenu(POINT screenPoint);
+
     // SetStatus writes a compact status message. Input is UI text; processing
     // updates the status static control; no value is returned.
     void SetStatus(const std::wstring& text);
@@ -64,6 +74,8 @@ private:
     HWND refreshButton_ = nullptr;
     HWND statusText_ = nullptr;
     HWND tab_ = nullptr;
+    HWND filterBar_ = nullptr;
+    HWND loadingOverlay_ = nullptr;
     HWND handleList_ = nullptr;
     HWND detailList_ = nullptr;
     int currentTab_ = 0;

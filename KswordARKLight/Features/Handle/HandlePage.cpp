@@ -2,16 +2,22 @@
 
 #include "HandleClient.h"
 
+#include "../../Ui/AsyncTask.h"
 #include "../../Ui/Controls.h"
+#include "../../Ui/FilterBar.h"
 #include "../../Ui/ListViewUtil.h"
+#include "../../Ui/LoadingOverlay.h"
 #include "../../Ui/TabUtil.h"
 #include "../../Ui/Theme.h"
+#include "../../Ui/VirtualListView.h"
 
 #include "../../../shared/driver/KswordArkHandleIoctl.h"
 
 #include <commctrl.h>
+#include <windowsx.h>
 
 #include <algorithm>
+#include <cstring>
 #include <cstdlib>
 #include <cwctype>
 #include <cstdint>
@@ -30,16 +36,51 @@ constexpr int kStatusTextId = 57003;
 constexpr int kTabId = 57004;
 constexpr int kHandleListId = 57005;
 constexpr int kDetailListId = 57006;
+constexpr int kFilterBarId = 57007;
+constexpr int kLoadingOverlayId = 57008;
 constexpr int kHandleTabIndex = 0;
 constexpr int kDetailTabIndex = 1;
+constexpr UINT kHandleMenuCopyCell = 57101;
+constexpr UINT kHandleMenuCopyRow = 57102;
+constexpr UINT kHandleMenuCopyVisible = 57103;
+constexpr UINT kMsgHandleRefreshCompleted = WM_APP + 574;
+constexpr UINT kMsgHandleFilterCompleted = WM_APP + 575;
+constexpr UINT kMsgHandleDetailCompleted = WM_APP + 576;
+
+struct HandleFilterResult {
+    std::uint64_t snapshotGeneration = 0;
+    std::wstring query;
+    std::wstring selectedStableKey;
+    std::wstring topStableKey;
+    std::vector<std::size_t> visibleIndexes;
+};
+
+struct HandleRefreshSnapshot {
+    HandleEnumView enumeration;
+    std::vector<Ksword::Ui::VirtualListRow> rows;
+};
+
+struct HandleDetailTaskResult {
+    std::uint64_t snapshotGeneration = 0;
+    std::uint32_t processId = 0;
+    std::uint64_t handleValue = 0;
+    HandleObjectDetailView detail;
+};
 
 // HandlePageState stores query snapshots separately from HWND fields so the
 // public header remains compact. Inputs are written by Refresh/PopulateDetail;
 // output behavior is value ownership for page lifetime.
 struct HandlePageState {
-    HandleAuditClient client;
     HandleEnumView snapshot;
     HandleObjectDetailView detail;
+    Ksword::Ui::VirtualListView handleList;
+    std::shared_ptr<const std::vector<Ksword::Ui::VirtualListRow>> filterRows;
+    std::uint64_t snapshotGeneration = 0;
+    std::wstring filterQuery;
+    int contextColumn = 0;
+    std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<HandleRefreshSnapshot>> refreshTask;
+    std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<HandleFilterResult>> filterTask;
+    std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<HandleDetailTaskResult>> detailTask;
 };
 
 namespace {
@@ -134,32 +175,6 @@ const wchar_t* QueryStatusText(const std::uint32_t status) {
     }
 }
 
-// TypeSourceText describes where the type index came from. Input is
-// KSWORD_ARK_OBJECT_TYPE_SOURCE_*; output is a readable source label.
-const wchar_t* TypeSourceText(const std::uint32_t source) {
-    switch (source) {
-    case KSWORD_ARK_OBJECT_TYPE_SOURCE_OBJECT_TYPE_INDEX: return L"OBJECT_TYPE.Index";
-    case KSWORD_ARK_OBJECT_TYPE_SOURCE_OBJECT_HEADER: return L"OBJECT_HEADER.TypeIndex";
-    case KSWORD_ARK_OBJECT_TYPE_SOURCE_BOTH_MATCH: return L"双源一致";
-    case KSWORD_ARK_OBJECT_TYPE_SOURCE_BOTH_MISMATCH: return L"双源不一致";
-    default: return L"None";
-    }
-}
-
-// NameInfoStatusText describes object-name query status. Input is
-// KSWORD_ARK_OBJECT_NAME_INFO_STATUS_*; output is a readable label.
-const wchar_t* NameInfoStatusText(const std::uint32_t status) {
-    switch (status) {
-    case KSWORD_ARK_OBJECT_NAME_INFO_STATUS_NOT_REQUESTED: return L"未请求";
-    case KSWORD_ARK_OBJECT_NAME_INFO_STATUS_HEADER_MASK_EMPTY: return L"InfoMask空";
-    case KSWORD_ARK_OBJECT_NAME_INFO_STATUS_HEADER_MASK_NONZERO: return L"InfoMask非零";
-    case KSWORD_ARK_OBJECT_NAME_INFO_STATUS_QUERY_OK: return L"查询成功";
-    case KSWORD_ARK_OBJECT_NAME_INFO_STATUS_QUERY_FAILED: return L"查询失败";
-    case KSWORD_ARK_OBJECT_NAME_INFO_STATUS_QUERY_TRUNCATED: return L"查询截断";
-    default: return L"未知";
-    }
-}
-
 // FieldPresent checks one protocol field flag. Inputs are a flag bitmap and one
 // KSWORD_ARK_HANDLE_FIELD_* bit; output says whether the field is present.
 bool FieldPresent(const std::uint32_t flags, const std::uint32_t bit) {
@@ -185,21 +200,8 @@ std::wstring AnomalyText(const HandleEntryView& entry) {
     if (entry.decodeStatus != KSWORD_ARK_HANDLE_DECODE_STATUS_OK) {
         labels.push_back(DecodeStatusText(entry.decodeStatus));
     }
-    if (entry.objectTypeIndexSource == KSWORD_ARK_OBJECT_TYPE_SOURCE_BOTH_MISMATCH) {
-        labels.push_back(L"ObjectType索引不一致");
-    }
     if (entry.objectAddress == 0 && FieldPresent(entry.fieldFlags, KSWORD_ARK_HANDLE_FIELD_OBJECT_PRESENT)) {
         labels.push_back(L"对象地址为空");
-    }
-    if (entry.objectHeaderAddress == 0 &&
-        FieldPresent(entry.fieldFlags, KSWORD_ARK_HANDLE_FIELD_OBJECT_HEADER_PRESENT)) {
-        labels.push_back(L"ObjectHeader为空");
-    }
-    if (entry.grantedAccessDecodeStatus == KSWORD_ARK_HANDLE_DECODE_STATUS_ACCESS_DECODE_FAILED) {
-        labels.push_back(L"GrantedAccess解码失败");
-    }
-    if (entry.pointerCount < 0) {
-        labels.push_back(L"PointerCount异常");
     }
     if (labels.empty()) {
         return L"";
@@ -212,6 +214,39 @@ std::wstring AnomalyText(const HandleEntryView& entry) {
         text += label;
     }
     return text;
+}
+
+std::vector<Ksword::Ui::VirtualListRow> BuildVirtualHandleRows(const HandleEnumView& snapshot) {
+    std::vector<Ksword::Ui::VirtualListRow> rows;
+    rows.reserve(snapshot.entries.size());
+    for (std::size_t index = 0; index < snapshot.entries.size(); ++index) {
+        const HandleEntryView& entry = snapshot.entries[index];
+        Ksword::Ui::VirtualListRow row{};
+        row.stableKey = std::to_wstring(entry.processId) + L":" + Hex32(entry.handleValue);
+        row.itemData = static_cast<LPARAM>(index);
+        row.cells = {
+            std::to_wstring(entry.processId),
+            Hex32(entry.handleValue),
+            Hex64(entry.objectAddress),
+            L"未公开",
+            L"未公开",
+            std::to_wstring(entry.objectTypeIndex),
+            Hex32(entry.grantedAccess),
+            Hex32(entry.attributes),
+            L"未公开",
+            L"未公开",
+            DecodeStatusText(entry.decodeStatus),
+            AnomalyText(entry),
+        };
+        // Detail-only diagnostic fields participate in the local snapshot
+        // search without adding hidden columns or issuing another IOCTL.
+        row.cells.push_back(Hex64(entry.dynDataCapabilityMask));
+        row.cells.push_back(Hex32(entry.epObjectTableOffset));
+        row.cells.push_back(Hex32(entry.htHandleContentionEventOffset));
+        row.cells.push_back(Hex32(entry.fieldFlags));
+        rows.push_back(std::move(row));
+    }
+    return rows;
 }
 
 // ReadPidEdit parses the PID edit box. Input is the edit HWND; processing
@@ -258,25 +293,6 @@ void AddDetailRow(HWND list, const std::wstring& name, const std::wstring& value
     Ksword::Ui::InsertListViewTextRow(list, { name, value, status });
 }
 
-// InsertHandleColumns initializes the handle table columns. Input is the
-// ListView HWND; processing inserts fixed report columns; no value is returned.
-void InsertHandleColumns(HWND list) {
-    Ksword::Ui::AddListViewColumns(list, {
-        { 0, 80, LVCFMT_RIGHT, L"PID" },
-        { 1, 90, LVCFMT_RIGHT, L"Handle" },
-        { 2, 165, LVCFMT_LEFT, L"Object" },
-        { 3, 165, LVCFMT_LEFT, L"ObjectHeader" },
-        { 4, 165, LVCFMT_LEFT, L"ObjectType" },
-        { 5, 70, LVCFMT_RIGHT, L"TypeIdx" },
-        { 6, 110, LVCFMT_RIGHT, L"GrantedAccess" },
-        { 7, 100, LVCFMT_RIGHT, L"Attributes" },
-        { 8, 100, LVCFMT_RIGHT, L"PtrCount" },
-        { 9, 100, LVCFMT_RIGHT, L"HandleCount" },
-        { 10, 150, LVCFMT_LEFT, L"Decode" },
-        { 11, 220, LVCFMT_LEFT, L"异常句柄标记" },
-    });
-}
-
 // InsertDetailColumns initializes the detail table columns. Input is the
 // ListView HWND; processing inserts name/value/status columns; no return.
 void InsertDetailColumns(HWND list) {
@@ -285,6 +301,103 @@ void InsertDetailColumns(HWND list) {
         { 1, 420, LVCFMT_LEFT, L"值" },
         { 2, 220, LVCFMT_LEFT, L"状态/来源" },
     });
+}
+
+bool CopyTextToClipboard(HWND owner, const std::wstring& text) {
+    if (text.empty() || !::OpenClipboard(owner)) {
+        return false;
+    }
+    ::EmptyClipboard();
+    const SIZE_T bytes = (text.size() + 1U) * sizeof(wchar_t);
+    HGLOBAL memory = ::GlobalAlloc(GMEM_MOVEABLE, bytes);
+    if (!memory) {
+        ::CloseClipboard();
+        return false;
+    }
+    void* target = ::GlobalLock(memory);
+    if (!target) {
+        ::GlobalFree(memory);
+        ::CloseClipboard();
+        return false;
+    }
+    std::memcpy(target, text.c_str(), bytes);
+    ::GlobalUnlock(memory);
+    if (!::SetClipboardData(CF_UNICODETEXT, memory)) {
+        ::GlobalFree(memory);
+        ::CloseClipboard();
+        return false;
+    }
+    ::CloseClipboard();
+    return true;
+}
+
+void AppendTsvRow(std::wstring& output, const std::vector<std::wstring>& cells) {
+    for (std::size_t column = 0; column < cells.size(); ++column) {
+        if (column != 0) {
+            output.push_back(L'\t');
+        }
+        for (const wchar_t ch : cells[column]) {
+            output.push_back(ch == L'\t' || ch == L'\r' || ch == L'\n' ? L' ' : ch);
+        }
+    }
+    output += L"\r\n";
+}
+
+std::wstring RowsAsTsv(const HandlePageState& state, const bool allVisible) {
+    const HWND list = state.handleList.hwnd();
+    const auto& visible = state.handleList.visibleIndexes();
+    const auto& rows = state.handleList.rows();
+    std::wstring output;
+    for (std::size_t item = 0; item < visible.size(); ++item) {
+        if (!allVisible && (!list || (ListView_GetItemState(list, static_cast<int>(item), LVIS_SELECTED) & LVIS_SELECTED) == 0)) {
+            continue;
+        }
+        const std::size_t source = visible[item];
+        if (source < rows.size()) {
+            AppendTsvRow(output, rows[source].cells);
+        }
+    }
+    return output;
+}
+
+std::wstring SelectedCellText(const HandlePageState& state) {
+    const HWND list = state.handleList.hwnd();
+    const int selected = list ? ListView_GetNextItem(list, -1, LVNI_SELECTED) : -1;
+    const auto& visible = state.handleList.visibleIndexes();
+    const auto& rows = state.handleList.rows();
+    if (selected < 0 || static_cast<std::size_t>(selected) >= visible.size()) {
+        return {};
+    }
+    const std::size_t source = visible[static_cast<std::size_t>(selected)];
+    if (source >= rows.size() || state.contextColumn < 0 || static_cast<std::size_t>(state.contextColumn) >= rows[source].cells.size()) {
+        return {};
+    }
+    return rows[source].cells[static_cast<std::size_t>(state.contextColumn)];
+}
+
+int SelectedSnapshotIndex(const HandlePageState& state) {
+    const HWND list = state.handleList.hwnd();
+    const int selected = list ? ListView_GetNextItem(list, -1, LVNI_SELECTED) : -1;
+    const auto& visible = state.handleList.visibleIndexes();
+    const auto& rows = state.handleList.rows();
+    if (selected < 0 || static_cast<std::size_t>(selected) >= visible.size()) {
+        return -1;
+    }
+    const std::size_t source = visible[static_cast<std::size_t>(selected)];
+    if (source >= rows.size() || rows[source].itemData < 0) {
+        return -1;
+    }
+    return static_cast<int>(rows[source].itemData);
+}
+
+std::wstring StableKeyAtVisibleIndex(const HandlePageState& state, const int visibleIndex) {
+    const auto& visible = state.handleList.visibleIndexes();
+    const auto& rows = state.handleList.rows();
+    if (visibleIndex < 0 || static_cast<std::size_t>(visibleIndex) >= visible.size()) {
+        return {};
+    }
+    const std::size_t source = visible[static_cast<std::size_t>(visibleIndex)];
+    return source < rows.size() ? rows[source].stableKey : std::wstring{};
 }
 
 } // namespace
@@ -358,8 +471,9 @@ bool HandlePage::Initialize(HWND hwnd) {
         nullptr);
     refreshButton_ = Ksword::Ui::CreateButton(hwnd_, kRefreshButtonId, L"枚举PID句柄", 0, 0, 0, 0);
     statusText_ = Ksword::Ui::CreateText(hwnd_, kStatusTextId, L"输入 PID 后刷新；页面只读展示句柄证据。", 0, 0, 0, 0);
+    filterBar_ = Ksword::Ui::CreateFilterBar(hwnd_, kFilterBarId, L"筛选 PID、句柄、对象、访问、状态和详情", 0, 0, 0, 0);
     tab_ = Ksword::Ui::CreateTabControl(hwnd_, kTabId, 0, 0, 0, 0);
-    if (!pidEdit_ || !refreshButton_ || !statusText_ || !tab_) {
+    if (!pidEdit_ || !refreshButton_ || !statusText_ || !filterBar_ || !tab_) {
         return false;
     }
 
@@ -369,17 +483,39 @@ bool HandlePage::Initialize(HWND hwnd) {
     ::SendMessageW(tab_, TCM_SETCURSEL, static_cast<WPARAM>(kHandleTabIndex), 0);
     currentTab_ = kHandleTabIndex;
 
-    handleList_ = Ksword::Ui::CreateReportListView(tab_, kHandleListId, 0, 0, 0, 0, 0);
+    if (!state_->handleList.create(tab_, kHandleListId, 0, 0, 0, 0, LVS_SHOWSELALWAYS | LVS_SINGLESEL)) {
+        return false;
+    }
+    handleList_ = state_->handleList.hwnd();
     detailList_ = Ksword::Ui::CreateReportListView(tab_, kDetailListId, 0, 0, 0, 0, 0);
     if (!handleList_ || !detailList_) {
         return false;
     }
-    InsertHandleColumns(handleList_);
+    state_->handleList.addColumns({
+        { 0, 80, LVCFMT_RIGHT, L"PID" },
+        { 1, 90, LVCFMT_RIGHT, L"Handle" },
+        { 2, 165, LVCFMT_LEFT, L"Object" },
+        { 3, 165, LVCFMT_LEFT, L"ObjectHeader" },
+        { 4, 165, LVCFMT_LEFT, L"ObjectType" },
+        { 5, 70, LVCFMT_RIGHT, L"TypeIdx" },
+        { 6, 110, LVCFMT_RIGHT, L"GrantedAccess" },
+        { 7, 100, LVCFMT_RIGHT, L"Attributes" },
+        { 8, 100, LVCFMT_RIGHT, L"PtrCount" },
+        { 9, 100, LVCFMT_RIGHT, L"HandleCount" },
+        { 10, 150, LVCFMT_LEFT, L"Decode" },
+        { 11, 220, LVCFMT_LEFT, L"异常句柄标记" },
+    });
     InsertDetailColumns(detailList_);
+    ListView_SetExtendedListViewStyle(handleList_, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER | LVS_EX_GRIDLINES | LVS_EX_LABELTIP);
 
     AddDetailRow(detailList_, L"页面边界", L"只读审计", L"不提供关闭句柄/复制句柄/patch 操作");
     AddDetailRow(detailList_, L"输入", L"PID + 选中句柄行", L"R0 重新引用句柄，不信任对象地址作为操作凭据");
     AddDetailRow(detailList_, L"字段范围", L"ObjectHeader/ObjectType/GrantedAccess/Attributes/异常标记", L"来自现有 Handle IOCTL");
+
+    loadingOverlay_ = Ksword::Ui::CreateLoadingOverlay(tab_, kLoadingOverlayId, { 0, 0, 1, 1 });
+    state_->refreshTask = std::make_unique<Ksword::Ui::AsyncSnapshotTask<HandleRefreshSnapshot>>(hwnd_, kMsgHandleRefreshCompleted);
+    state_->filterTask = std::make_unique<Ksword::Ui::AsyncSnapshotTask<HandleFilterResult>>(hwnd_, kMsgHandleFilterCompleted);
+    state_->detailTask = std::make_unique<Ksword::Ui::AsyncSnapshotTask<HandleDetailTaskResult>>(hwnd_, kMsgHandleDetailCompleted);
 
     Ksword::Ui::SetWindowFontRecursive(hwnd_);
     Layout();
@@ -397,24 +533,26 @@ void HandlePage::Layout() {
     const int width = std::max(100, Width(rc));
     const int height = std::max(100, Height(rc));
     const int margin = 8;
-    const int toolbarHeight = 30;
+    const int toolbarHeight = 58;
 
     ::MoveWindow(pidEdit_, margin, margin, 120, 24, TRUE);
     ::MoveWindow(refreshButton_, margin + 128, margin, 112, 24, TRUE);
     ::MoveWindow(statusText_, margin + 252, margin + 3, std::max(100, width - margin - 252), 20, TRUE);
+    ::MoveWindow(filterBar_, margin, margin + 28, std::max(100, width - margin * 2), 24, TRUE);
 
     const int tabTop = margin + toolbarHeight;
     ::MoveWindow(tab_, margin, tabTop, width - margin * 2, height - tabTop - margin, TRUE);
     RECT display = Ksword::Ui::GetTabDisplayRect(tab_);
     ::MoveWindow(handleList_, display.left, display.top, Width(display), Height(display), TRUE);
     ::MoveWindow(detailList_, display.left, display.top, Width(display), Height(display), TRUE);
+    ::MoveWindow(loadingOverlay_, display.left, display.top, Width(display), Height(display), TRUE);
     ::ShowWindow(handleList_, currentTab_ == kHandleTabIndex ? SW_SHOW : SW_HIDE);
     ::ShowWindow(detailList_, currentTab_ == kDetailTabIndex ? SW_SHOW : SW_HIDE);
 }
 
 void HandlePage::Refresh() {
-    // Input is the PID text box. Processing calls the local ArkDriverClient
-    // adapter, repopulates the retained list view, and keeps diagnostics visible.
+    // Input is the PID text box. The driver query runs on the snapshot worker;
+    // the UI keeps the previous immutable list visible while it is refreshed.
     if (!state_) {
         return;
     }
@@ -424,75 +562,246 @@ void HandlePage::Refresh() {
         return;
     }
 
-    SetStatus(L"正在只读枚举 PID " + std::to_wstring(processId) + L" 的 HandleTable...");
-    state_->snapshot = state_->client.EnumerateProcessHandles(processId);
-    PopulateList();
-    const std::wstring message = Utf8ToWide(state_->snapshot.io.message);
-    SetStatus(state_->snapshot.io.ok
-        ? L"句柄枚举完成：返回 " + std::to_wstring(state_->snapshot.entries.size()) + L" 行；" + message
-        : L"句柄枚举失败：" + message);
+    const bool firstLoad = state_->handleList.rows().empty();
+    SetStatus(state_->refreshTask->running()
+        ? L"句柄刷新已排队，等待当前快照完成…"
+        : L"正在后台只读枚举 PID " + std::to_wstring(processId) + L" 的 HandleTable…");
+    ::EnableWindow(refreshButton_, FALSE);
+    if (firstLoad) {
+        Ksword::Ui::SetLoadingOverlay(loadingOverlay_, true, L"正在加载句柄审计…");
+    }
+    state_->refreshTask->request(
+        [processId] {
+            HandleRefreshSnapshot snapshot{};
+            snapshot.enumeration = HandleAuditClient{}.EnumerateProcessHandles(processId);
+            snapshot.rows = BuildVirtualHandleRows(snapshot.enumeration);
+            return snapshot;
+        },
+        [this](std::uint64_t, std::optional<HandleRefreshSnapshot>&& snapshot, std::exception_ptr error) {
+            if (!state_) {
+                return;
+            }
+            ::EnableWindow(refreshButton_, TRUE);
+            Ksword::Ui::SetLoadingOverlay(loadingOverlay_, false);
+            if (error || !snapshot.has_value()) {
+                SetStatus(L"句柄后台枚举异常结束，请检查驱动状态与访问权限。");
+                return;
+            }
+            state_->snapshot = std::move(snapshot->enumeration);
+            state_->filterRows = std::make_shared<std::vector<Ksword::Ui::VirtualListRow>>(std::move(snapshot->rows));
+            ++state_->snapshotGeneration;
+            PopulateList();
+            const std::wstring message = Utf8ToWide(state_->snapshot.io.message);
+            SetStatus(state_->snapshot.io.ok
+                ? L"句柄枚举完成：返回 " + std::to_wstring(state_->snapshot.entries.size()) + L" 行；" + message
+                : L"句柄枚举失败：" + message);
+        });
 }
 
 void HandlePage::PopulateList() {
-    // Input is state_->snapshot. Processing clears only rows and inserts stable
-    // display values; no return value is produced.
+    // Input is the latest immutable handle snapshot. Rendering only installs
+    // owner-data rows; local filtering is calculated later on the worker.
     if (!state_ || !handleList_) {
         return;
     }
 
-    Ksword::Ui::ScopedListViewRedrawLock lock(handleList_);
-    ListView_DeleteAllItems(handleList_);
-    for (std::size_t index = 0; index < state_->snapshot.entries.size(); ++index) {
-        const HandleEntryView& entry = state_->snapshot.entries[index];
-        Ksword::Ui::InsertListViewTextRow(handleList_, {
-            std::to_wstring(entry.processId),
-            Hex32(entry.handleValue),
-            Hex64(entry.objectAddress),
-            Hex64(entry.objectHeaderAddress),
-            Hex64(entry.objectTypeAddress),
-            std::to_wstring(entry.objectTypeIndex),
-            Hex32(entry.grantedAccess),
-            Hex32(entry.attributes),
-            std::to_wstring(entry.pointerCount),
-            std::to_wstring(entry.handleCount),
-            DecodeStatusText(entry.decodeStatus),
-            AnomalyText(entry),
-        }, static_cast<LPARAM>(index));
+    const std::wstring selectedStableKey = StableKeyAtVisibleIndex(*state_, ListView_GetNextItem(handleList_, -1, LVNI_SELECTED));
+    const std::wstring topStableKey = StableKeyAtVisibleIndex(*state_, ListView_GetTopIndex(handleList_));
+    if (!state_->filterRows) {
+        return;
+    }
+    state_->handleList.setRows(*state_->filterRows);
+    RequestFilter(filterBar_ ? Ksword::Ui::GetFilterBarText(filterBar_) : state_->filterQuery, selectedStableKey, topStableKey);
+}
+
+void HandlePage::RequestFilter(const std::wstring& query, std::wstring selectedStableKey, std::wstring topStableKey) {
+    if (!state_ || !state_->filterTask || !state_->filterRows) {
+        return;
+    }
+    state_->filterQuery = query;
+    const std::uint64_t generation = state_->snapshotGeneration;
+    const auto filterRows = state_->filterRows;
+    if (selectedStableKey.empty()) {
+        selectedStableKey = StableKeyAtVisibleIndex(*state_, ListView_GetNextItem(handleList_, -1, LVNI_SELECTED));
+    }
+    if (topStableKey.empty()) {
+        topStableKey = StableKeyAtVisibleIndex(*state_, ListView_GetTopIndex(handleList_));
+    }
+    state_->filterTask->request(
+        [filterRows, generation, query = state_->filterQuery, selectedStableKey = std::move(selectedStableKey), topStableKey = std::move(topStableKey)]() mutable {
+            HandleFilterResult result{};
+            result.snapshotGeneration = generation;
+            result.query = std::move(query);
+            result.selectedStableKey = std::move(selectedStableKey);
+            result.topStableKey = std::move(topStableKey);
+            result.visibleIndexes = Ksword::Ui::VirtualListView::FilterRowIndexes(*filterRows, result.query);
+            return result;
+        },
+        [this](std::uint64_t, std::optional<HandleFilterResult>&& result, std::exception_ptr error) {
+            if (!state_ || error || !result.has_value()) {
+                if (state_) {
+                    SetStatus(L"句柄筛选异常结束，已保留当前可见结果。");
+                }
+                return;
+            }
+            if (result->snapshotGeneration == state_->snapshotGeneration && result->query == state_->filterQuery) {
+                state_->handleList.setVisibleIndexes(std::move(result->visibleIndexes));
+                const auto& rows = state_->handleList.rows();
+                const auto& visible = state_->handleList.visibleIndexes();
+                for (std::size_t item = 0; item < visible.size(); ++item) {
+                    const std::size_t source = visible[item];
+                    if (!result->selectedStableKey.empty() && source < rows.size() && rows[source].stableKey == result->selectedStableKey) {
+                        ListView_SetItemState(handleList_, static_cast<int>(item), LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
+                    }
+                    if (!result->topStableKey.empty() && source < rows.size() && rows[source].stableKey == result->topStableKey) {
+                        ListView_EnsureVisible(handleList_, static_cast<int>(item), FALSE);
+                    }
+                }
+            }
+        });
+}
+
+void HandlePage::ShowHandleContextMenu(POINT screenPoint) {
+    if (!state_ || !handleList_) {
+        return;
+    }
+    POINT clientPoint = screenPoint;
+    ::ScreenToClient(handleList_, &clientPoint);
+    LVHITTESTINFO hit{};
+    hit.pt = clientPoint;
+    const int item = ListView_SubItemHitTest(handleList_, &hit);
+    if (item >= 0) {
+        state_->contextColumn = hit.iSubItem;
+        ListView_SetItemState(handleList_, -1, 0, LVIS_SELECTED | LVIS_FOCUSED);
+        ListView_SetItemState(handleList_, item, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
+    }
+    const bool hasSelection = ListView_GetNextItem(handleList_, -1, LVNI_SELECTED) >= 0;
+    HMENU menu = ::CreatePopupMenu();
+    if (!menu) {
+        return;
+    }
+    ::AppendMenuW(menu, MF_STRING | (hasSelection ? 0U : MF_GRAYED), kHandleMenuCopyCell, L"复制单元格");
+    ::AppendMenuW(menu, MF_STRING | (hasSelection ? 0U : MF_GRAYED), kHandleMenuCopyRow, L"复制行");
+    ::AppendMenuW(menu, MF_STRING | (!state_->handleList.visibleIndexes().empty() ? 0U : MF_GRAYED), kHandleMenuCopyVisible, L"复制可见结果");
+    const UINT command = ::TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, screenPoint.x, screenPoint.y, 0, hwnd_, nullptr);
+    ::DestroyMenu(menu);
+    if (command == kHandleMenuCopyCell) {
+        SetStatus(CopyTextToClipboard(hwnd_, SelectedCellText(*state_)) ? L"已复制单元格。" : L"复制单元格失败。");
+    } else if (command == kHandleMenuCopyRow) {
+        SetStatus(CopyTextToClipboard(hwnd_, RowsAsTsv(*state_, false)) ? L"已复制行。" : L"复制行失败。");
+    } else if (command == kHandleMenuCopyVisible) {
+        SetStatus(CopyTextToClipboard(hwnd_, RowsAsTsv(*state_, true)) ? L"已复制可见结果。" : L"复制可见结果失败。");
+    }
+}
+
+void HandlePage::ShowDetailContextMenu(POINT screenPoint) {
+    if (!detailList_) {
+        return;
+    }
+    POINT clientPoint = screenPoint;
+    ::ScreenToClient(detailList_, &clientPoint);
+    LVHITTESTINFO hit{};
+    hit.pt = clientPoint;
+    const int item = ListView_SubItemHitTest(detailList_, &hit);
+    if (item >= 0) {
+        ListView_SetItemState(detailList_, -1, 0, LVIS_SELECTED | LVIS_FOCUSED);
+        ListView_SetItemState(detailList_, item, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
+    }
+    const bool hasSelection = ListView_GetNextItem(detailList_, -1, LVNI_SELECTED) >= 0;
+    HMENU menu = ::CreatePopupMenu();
+    if (!menu) {
+        return;
+    }
+    ::AppendMenuW(menu, MF_STRING | (hasSelection ? 0U : MF_GRAYED), kHandleMenuCopyCell, L"复制单元格");
+    ::AppendMenuW(menu, MF_STRING | (hasSelection ? 0U : MF_GRAYED), kHandleMenuCopyRow, L"复制行");
+    ::AppendMenuW(menu, MF_STRING, kHandleMenuCopyVisible, L"复制可见结果");
+    const UINT command = ::TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, screenPoint.x, screenPoint.y, 0, hwnd_, nullptr);
+    ::DestroyMenu(menu);
+    std::wstring text;
+    const int selected = ListView_GetNextItem(detailList_, -1, LVNI_SELECTED);
+    const int rowCount = ListView_GetItemCount(detailList_);
+    if (command == kHandleMenuCopyCell && selected >= 0) {
+        wchar_t buffer[4096]{};
+        ListView_GetItemText(detailList_, selected, std::max(0, hit.iSubItem), buffer, static_cast<int>(_countof(buffer)));
+        text = buffer;
+    } else if (command == kHandleMenuCopyRow && selected >= 0) {
+        for (int column = 0; column < 3; ++column) {
+            wchar_t buffer[4096]{};
+            ListView_GetItemText(detailList_, selected, column, buffer, static_cast<int>(_countof(buffer)));
+            if (column != 0) {
+                text.push_back(L'\t');
+            }
+            text += buffer;
+        }
+    } else if (command == kHandleMenuCopyVisible) {
+        for (int row = 0; row < rowCount; ++row) {
+            for (int column = 0; column < 3; ++column) {
+                wchar_t buffer[4096]{};
+                ListView_GetItemText(detailList_, row, column, buffer, static_cast<int>(_countof(buffer)));
+                if (column != 0) {
+                    text.push_back(L'\t');
+                }
+                text += buffer;
+            }
+            text += L"\r\n";
+        }
+    }
+    if (command != 0) {
+        SetStatus(CopyTextToClipboard(hwnd_, text) ? L"已复制结果。" : L"复制结果失败。");
     }
 }
 
 void HandlePage::PopulateDetail(const int rowIndex) {
-    // Input is a selected row index. Processing reads the cached row, performs a
-    // read-only object query by PID/handle, and renders ObjectHeader/ObjectType
-    // fields. No close/duplicate/patch action is exposed.
+    // Input is a selected snapshot row. Object inspection runs on a separate
+    // worker and is discarded when a newer handle snapshot replaces the row.
     if (!state_ || !detailList_ || rowIndex < 0 ||
         rowIndex >= static_cast<int>(state_->snapshot.entries.size())) {
         return;
     }
-
-    const HandleEntryView& entry = state_->snapshot.entries[static_cast<std::size_t>(rowIndex)];
-    state_->detail = state_->client.QueryHandleObject(entry.processId, entry.handleValue);
-
     Ksword::Ui::ScopedListViewRedrawLock lock(detailList_);
     ListView_DeleteAllItems(detailList_);
+    AddDetailRow(detailList_, L"状态", L"正在后台查询 ObjectHeader/ObjectType…", L"可切换或关闭页面");
 
-    const HandleObjectDetailView& detail = state_->detail;
-    AddDetailRow(detailList_, L"Transport", detail.io.ok ? L"OK" : L"FAIL", Utf8ToWide(detail.io.message));
+    const HandleEntryView entry = state_->snapshot.entries[static_cast<std::size_t>(rowIndex)];
+    const std::uint64_t snapshotGeneration = state_->snapshotGeneration;
+    ::SendMessageW(tab_, TCM_SETCURSEL, static_cast<WPARAM>(kDetailTabIndex), 0);
+    currentTab_ = kDetailTabIndex;
+    Layout();
+    SetStatus(L"正在后台读取句柄 " + Hex32(entry.handleValue) + L" 的对象详情…");
+    state_->detailTask->request(
+        [entry, snapshotGeneration] {
+            HandleDetailTaskResult result{};
+            result.snapshotGeneration = snapshotGeneration;
+            result.processId = entry.processId;
+            result.handleValue = entry.handleValue;
+            result.detail = HandleAuditClient{}.QueryHandleObject(entry.processId, entry.handleValue);
+            return result;
+        },
+        [this, entry](std::uint64_t, std::optional<HandleDetailTaskResult>&& result, std::exception_ptr error) {
+            if (!state_ || error || !result.has_value()) {
+                if (state_) {
+                    SetStatus(L"句柄对象详情查询异常结束。");
+                }
+                return;
+            }
+            if (result->snapshotGeneration != state_->snapshotGeneration || result->processId != entry.processId || result->handleValue != entry.handleValue) {
+                return;
+            }
+            state_->detail = std::move(result->detail);
+            Ksword::Ui::ScopedListViewRedrawLock redrawLock(detailList_);
+            ListView_DeleteAllItems(detailList_);
+            const HandleObjectDetailView& detail = state_->detail;
+            AddDetailRow(detailList_, L"Transport", detail.io.ok ? L"OK" : L"FAIL", Utf8ToWide(detail.io.message));
     AddDetailRow(detailList_, L"PID", std::to_wstring(entry.processId), L"查询输入");
     AddDetailRow(detailList_, L"Handle", Hex32(entry.handleValue), L"查询输入");
     AddDetailRow(detailList_, L"QueryStatus", QueryStatusText(detail.queryStatus), std::to_wstring(detail.queryStatus));
-    AddDetailRow(detailList_, L"ObjectName", detail.objectName, NameInfoStatusText(detail.nameInfoStatus));
+    AddDetailRow(detailList_, L"ObjectName", detail.objectName, L"ArkDriverClient 查询结果");
     AddDetailRow(detailList_, L"TypeName", detail.typeName, FieldText(DetailFieldPresent(detail.fieldFlags, KSWORD_ARK_OBJECT_INFO_FIELD_TYPE_NAME_PRESENT)));
     AddDetailRow(detailList_, L"Object", Hex64(detail.objectAddress), FieldText(DetailFieldPresent(detail.fieldFlags, KSWORD_ARK_OBJECT_INFO_FIELD_OBJECT_PRESENT)));
-    AddDetailRow(detailList_, L"ObjectHeader", Hex64(detail.objectHeaderAddress), FieldText(DetailFieldPresent(detail.fieldFlags, KSWORD_ARK_OBJECT_INFO_FIELD_OBJECT_HEADER_PRESENT)));
-    AddDetailRow(detailList_, L"ObjectType", Hex64(detail.objectTypeAddress), FieldText(DetailFieldPresent(detail.fieldFlags, KSWORD_ARK_OBJECT_INFO_FIELD_OBJECT_TYPE_PRESENT)));
-    AddDetailRow(detailList_, L"ObjectTypeIndex", std::to_wstring(detail.objectTypeIndex), TypeSourceText(detail.objectTypeIndexSource));
-    AddDetailRow(detailList_, L"HeaderTypeIndex", std::to_wstring(detail.objectHeaderTypeIndex), FieldText(DetailFieldPresent(detail.fieldFlags, KSWORD_ARK_OBJECT_INFO_FIELD_HEADER_TYPE_INDEX_PRESENT)));
-    AddDetailRow(detailList_, L"HeaderInfoMask", Hex32(detail.objectHeaderInfoMask), FieldText(DetailFieldPresent(detail.fieldFlags, KSWORD_ARK_OBJECT_INFO_FIELD_INFO_MASK_PRESENT)));
-    AddDetailRow(detailList_, L"HeaderFlags", Hex32(detail.objectHeaderFlags), L"OBJECT_HEADER.Flags");
-    AddDetailRow(detailList_, L"HeaderTraceFlags", Hex32(detail.objectHeaderTraceFlags), L"OBJECT_HEADER.TraceFlags");
-    AddDetailRow(detailList_, L"PointerCount", std::to_wstring(detail.pointerCount), FieldText(DetailFieldPresent(detail.fieldFlags, KSWORD_ARK_OBJECT_INFO_FIELD_POINTER_COUNT_PRESENT)));
-    AddDetailRow(detailList_, L"HandleCount", std::to_wstring(detail.handleCount), FieldText(DetailFieldPresent(detail.fieldFlags, KSWORD_ARK_OBJECT_INFO_FIELD_HANDLE_COUNT_PRESENT)));
+            AddDetailRow(detailList_, L"ObjectHeader", L"未公开", L"当前 ArkDriverClient 强类型结果未提供该字段");
+            AddDetailRow(detailList_, L"ObjectType", L"未公开", L"当前 ArkDriverClient 强类型结果未提供该字段");
+    AddDetailRow(detailList_, L"ObjectTypeIndex", std::to_wstring(detail.objectTypeIndex), L"ArkDriverClient 查询结果");
+            AddDetailRow(detailList_, L"ObjectHeader 字段", L"未公开", L"等待 ArkDriverClient 强类型接口补齐");
     AddDetailRow(detailList_, L"GrantedAccess(enum)", Hex32(entry.grantedAccess), FieldText(FieldPresent(entry.fieldFlags, KSWORD_ARK_HANDLE_FIELD_GRANTED_ACCESS_PRESENT)));
     AddDetailRow(detailList_, L"ActualGrantedAccess(query)", Hex32(detail.actualGrantedAccess), L"不请求 proxy handle");
     AddDetailRow(detailList_, L"HandleAttributes", Hex32(entry.attributes), FieldText(FieldPresent(entry.fieldFlags, KSWORD_ARK_HANDLE_FIELD_ATTRIBUTES_PRESENT)));
@@ -500,19 +809,14 @@ void HandlePage::PopulateDetail(const int rowIndex) {
     AddDetailRow(detailList_, L"DynDataCapabilityMask", Hex64(detail.dynDataCapabilityMask), L"capability gated");
     AddDetailRow(detailList_, L"OtNameOffset", Hex32(detail.otNameOffset), L"_OBJECT_TYPE.Name");
     AddDetailRow(detailList_, L"OtIndexOffset", Hex32(detail.otIndexOffset), L"_OBJECT_TYPE.Index");
-    AddDetailRow(detailList_, L"ObjectHeaderDecodeStatus", DecodeStatusText(detail.objectHeaderDecodeStatus), NtStatusText(detail.objectHeaderReadStatus));
-    AddDetailRow(detailList_, L"GrantedAccessDecodeStatus", DecodeStatusText(detail.grantedAccessDecodeStatus), NtStatusText(detail.grantedAccessReadStatus));
     AddDetailRow(detailList_, L"ObjectReferenceStatus", NtStatusText(detail.objectReferenceStatus), L"ObReferenceObjectByHandle 路径");
     AddDetailRow(detailList_, L"TypeStatus", NtStatusText(detail.typeStatus), L"类型查询");
     AddDetailRow(detailList_, L"NameStatus", NtStatusText(detail.nameStatus), L"名称查询");
     AddDetailRow(detailList_, L"ProxyStatus", std::to_wstring(detail.proxyStatus), L"本页未请求 proxy handle");
     AddDetailRow(detailList_, L"ProxyHandleReturned", BoolText(detail.proxyHandle != 0), Hex64(detail.proxyHandle));
-    AddDetailRow(detailList_, L"异常句柄标记", AnomalyText(entry), L"只读提示，不做关闭/复制/patch");
-
-    ::SendMessageW(tab_, TCM_SETCURSEL, static_cast<WPARAM>(kDetailTabIndex), 0);
-    currentTab_ = kDetailTabIndex;
-    Layout();
-    SetStatus(L"已读取句柄 " + Hex32(entry.handleValue) + L" 的 ObjectHeader/ObjectType 详情。");
+            AddDetailRow(detailList_, L"异常句柄标记", AnomalyText(entry), L"只读提示，不做关闭/复制/patch");
+            SetStatus(L"已读取句柄 " + Hex32(entry.handleValue) + L" 的 ObjectHeader/ObjectType 详情。");
+        });
 }
 
 void HandlePage::SetStatus(const std::wstring& text) {
@@ -534,12 +838,31 @@ LRESULT HandlePage::HandleMessage(HWND hwnd, UINT message, WPARAM wParam, LPARAM
         Layout();
         return 0;
     case WM_COMMAND:
+        if (LOWORD(wParam) == kFilterBarId && HIWORD(wParam) == EN_CHANGE) {
+            RequestFilter(Ksword::Ui::GetFilterBarText(filterBar_));
+            return 0;
+        }
         if (HIWORD(wParam) == BN_CLICKED && LOWORD(wParam) == kRefreshButtonId) {
             Refresh();
             return 0;
         }
         if (LOWORD(wParam) == kPidEditId && HIWORD(wParam) == EN_CHANGE) {
             SetStatus(L"PID 已更新，点击“枚举PID句柄”刷新。");
+            return 0;
+        }
+        break;
+    case kMsgHandleRefreshCompleted:
+        if (state_ && state_->refreshTask && state_->refreshTask->consume(hwnd, wParam, lParam)) {
+            return 0;
+        }
+        break;
+    case kMsgHandleFilterCompleted:
+        if (state_ && state_->filterTask && state_->filterTask->consume(hwnd, wParam, lParam)) {
+            return 0;
+        }
+        break;
+    case kMsgHandleDetailCompleted:
+        if (state_ && state_->detailTask && state_->detailTask->consume(hwnd, wParam, lParam)) {
             return 0;
         }
         break;
@@ -553,11 +876,16 @@ LRESULT HandlePage::HandleMessage(HWND hwnd, UINT message, WPARAM wParam, LPARAM
             Layout();
             return 0;
         }
+        if (header && header->hwndFrom == handleList_) {
+            LRESULT result = 0;
+            if (state_ && state_->handleList.handleNotify(*header, result)) {
+                return result;
+            }
+        }
         if (header && header->hwndFrom == handleList_ &&
             (header->code == NM_DBLCLK || header->code == LVN_ITEMCHANGED)) {
             if (header->code == NM_DBLCLK) {
-                const int row = ListView_GetNextItem(handleList_, -1, LVNI_SELECTED);
-                PopulateDetail(row);
+                PopulateDetail(state_ ? SelectedSnapshotIndex(*state_) : -1);
                 return 0;
             }
             const auto* changed = reinterpret_cast<const NMLISTVIEW*>(lParam);
@@ -568,6 +896,28 @@ LRESULT HandlePage::HandleMessage(HWND hwnd, UINT message, WPARAM wParam, LPARAM
         }
         break;
     }
+    case WM_CONTEXTMENU:
+        if (reinterpret_cast<HWND>(wParam) == handleList_) {
+            POINT point{ GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+            if (point.x == -1 && point.y == -1) {
+                RECT rect{};
+                ::GetWindowRect(handleList_, &rect);
+                point = { rect.left + 16, rect.top + 16 };
+            }
+            ShowHandleContextMenu(point);
+            return 0;
+        }
+        if (reinterpret_cast<HWND>(wParam) == detailList_) {
+            POINT point{ GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+            if (point.x == -1 && point.y == -1) {
+                RECT rect{};
+                ::GetWindowRect(detailList_, &rect);
+                point = { rect.left + 16, rect.top + 16 };
+            }
+            ShowDetailContextMenu(point);
+            return 0;
+        }
+        break;
     case WM_CTLCOLORSTATIC: {
         HDC dc = reinterpret_cast<HDC>(wParam);
         ::SetBkMode(dc, TRANSPARENT);
@@ -577,6 +927,17 @@ LRESULT HandlePage::HandleMessage(HWND hwnd, UINT message, WPARAM wParam, LPARAM
     case WM_ERASEBKGND:
         return 1;
     case WM_NCDESTROY:
+        if (state_) {
+            if (state_->refreshTask) {
+                state_->refreshTask->cancel();
+            }
+            if (state_->filterTask) {
+                state_->filterTask->cancel();
+            }
+            if (state_->detailTask) {
+                state_->detailTask->cancel();
+            }
+        }
         delete state_;
         state_ = nullptr;
         delete this;
