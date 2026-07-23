@@ -2026,6 +2026,29 @@ namespace ksword::ark
         std::vector<KSWORD_ARK_WIN32K_TIMER_ENTRY> entries;
     };
 
+    // Win32kEventHooksResult 承载 gpWinEventHooks/tagEVENTHOOK 只读快照。
+    // 输入：queryWin32kEventHooks 返回。
+    // 处理：保留 PE 身份、实际布局、链完整性计数和 WinEvent Hook 行。
+    // 返回行为：不调用 UnhookWinEvent，不修改全局 Hook 链。
+    struct Win32kEventHooksResult : VariableAuditResultBase
+    {
+        std::uint64_t capabilityMask = 0;
+        std::uint64_t missingCapabilityMask = 0;
+        std::uint64_t hookListPointer = 0;
+        std::uint64_t hookListHead = 0;
+        std::uint32_t visitedNodeCount = 0;
+        std::uint32_t readFailureCount = 0;
+        std::uint32_t corruptLinkCount = 0;
+        std::uint32_t duplicateCount = 0;
+        std::uint32_t win32kbaseTimeDateStamp = 0;
+        std::uint32_t win32kbaseImageSize = 0;
+        std::uint32_t win32kfullTimeDateStamp = 0;
+        std::uint32_t win32kfullImageSize = 0;
+        KSWORD_ARK_WIN32K_EVENT_HOOK_LAYOUT layout{};
+        std::wstring detail;
+        std::vector<KSWORD_ARK_WIN32K_EVENT_HOOK_ENTRY> entries;
+    };
+
     // Win32kWindowRuntimeDetailResult 承载单 HWND 的 win32k readiness/detail。
     // 输入：queryWin32kWindowDetail 返回。
     // 处理：response 保存 module/profile/capability/offset 状态；tagWND reader 未启用时也能解释原因。

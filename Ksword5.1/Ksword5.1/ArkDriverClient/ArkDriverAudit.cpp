@@ -804,6 +804,76 @@ namespace ksword::ark
         return result;
     }
 
+    Win32kEventHooksResult DriverClient::queryWin32kEventHooks(const unsigned long flags, const unsigned long sessionId, const unsigned long processId, const unsigned long threadId, const unsigned long maxEntries) const
+    {
+        constexpr const char* operationName = "IOCTL_KSWORD_ARK_QUERY_WIN32K_EVENT_HOOKS";
+        Win32kEventHooksResult result{};
+        const KSWORD_ARK_WIN32K_QUERY_REQUEST request = buildWin32kRequest(flags, sessionId, processId, threadId, maxEntries);
+        std::vector<std::uint8_t> responseBuffer(kDefaultAuditBufferBytes, 0U);
+        result.io = deviceIoControl(
+            IOCTL_KSWORD_ARK_QUERY_WIN32K_EVENT_HOOKS,
+            const_cast<KSWORD_ARK_WIN32K_QUERY_REQUEST*>(&request),
+            sizeof(request),
+            responseBuffer.data(),
+            static_cast<unsigned long>(responseBuffer.size()));
+        if (!result.io.ok)
+        {
+            markUnsupportedIfNeeded(result, operationName);
+            return result;
+        }
+
+        constexpr std::size_t headerSize = sizeof(KSWORD_ARK_WIN32K_EVENT_HOOK_SNAPSHOT_RESPONSE) - sizeof(KSWORD_ARK_WIN32K_EVENT_HOOK_ENTRY);
+        const auto* response = reinterpret_cast<const KSWORD_ARK_WIN32K_EVENT_HOOK_SNAPSHOT_RESPONSE*>(responseBuffer.data());
+        const std::size_t parsedCount = validateAuditRows(
+            result.io,
+            headerSize,
+            response->entrySize,
+            sizeof(KSWORD_ARK_WIN32K_EVENT_HOOK_ENTRY),
+            response->returnedCount,
+            operationName);
+        if (!result.io.ok)
+        {
+            return result;
+        }
+
+        result.version = response->version;
+        result.status = response->status;
+        result.totalCount = response->totalCount;
+        result.returnedCount = response->returnedCount;
+        result.entrySize = response->entrySize;
+        result.flags = response->flags;
+        result.lastStatus = response->lastStatus;
+        result.capabilityMask = response->capabilityMask;
+        result.missingCapabilityMask = response->missingCapabilityMask;
+        result.hookListPointer = response->hookListPointer;
+        result.hookListHead = response->hookListHead;
+        result.visitedNodeCount = response->visitedNodeCount;
+        result.readFailureCount = response->readFailureCount;
+        result.corruptLinkCount = response->corruptLinkCount;
+        result.duplicateCount = response->duplicateCount;
+        result.win32kbaseTimeDateStamp = response->win32kbaseTimeDateStamp;
+        result.win32kbaseImageSize = response->win32kbaseImageSize;
+        result.win32kfullTimeDateStamp = response->win32kfullTimeDateStamp;
+        result.win32kfullImageSize = response->win32kfullImageSize;
+        result.layout = response->layout;
+        result.detail = std::wstring(response->detail);
+        result.io.ntStatus = response->lastStatus;
+        result.unsupported = response->status == KSWORD_ARK_WIN32K_STATUS_UNSUPPORTED ||
+            static_cast<unsigned long>(response->lastStatus) == 0xC0000059UL;
+        result.entries = parseVariableRows<KSWORD_ARK_WIN32K_EVENT_HOOK_ENTRY>(
+            responseBuffer,
+            headerSize,
+            response->entrySize,
+            parsedCount);
+        result.io.message = appendAuditSummary(
+            operationName,
+            result.totalCount,
+            result.returnedCount,
+            result.entries.size(),
+            result.io.bytesReturned);
+        return result;
+    }
+
     Win32kWindowRuntimeDetailResult DriverClient::queryWin32kWindowDetail(
         const std::uint64_t hwnd,
         const unsigned long processId,

@@ -285,6 +285,7 @@ namespace ksword::ark
         Win32kHotkeysPdbResult queryWin32kHotkeysPdb(unsigned long flags = KSWORD_ARK_WIN32K_QUERY_FLAG_INCLUDE_ALL, unsigned long sessionId = 0UL, unsigned long processId = 0UL, unsigned long threadId = 0UL, unsigned long maxEntries = KSWORD_ARK_WIN32K_DEFAULT_MAX_ENTRIES) const;
         Win32kHooksPdbResult queryWin32kHooksPdb(unsigned long flags = KSWORD_ARK_WIN32K_QUERY_FLAG_INCLUDE_ALL, unsigned long sessionId = 0UL, unsigned long processId = 0UL, unsigned long threadId = 0UL, unsigned long maxEntries = KSWORD_ARK_WIN32K_DEFAULT_MAX_ENTRIES) const;
         Win32kTimersResult queryWin32kTimers(unsigned long flags = KSWORD_ARK_WIN32K_QUERY_FLAG_INCLUDE_ALL, unsigned long sessionId = 0UL, unsigned long processId = 0UL, unsigned long threadId = 0UL, unsigned long maxEntries = KSWORD_ARK_WIN32K_DEFAULT_MAX_ENTRIES) const;
+        Win32kEventHooksResult queryWin32kEventHooks(unsigned long flags = KSWORD_ARK_WIN32K_QUERY_FLAG_INCLUDE_ALL, unsigned long sessionId = 0UL, unsigned long processId = 0UL, unsigned long threadId = 0UL, unsigned long maxEntries = KSWORD_ARK_WIN32K_DEFAULT_MAX_ENTRIES) const;
         Win32kWindowRuntimeDetailResult queryWin32kWindowDetail(std::uint64_t hwnd, unsigned long processId = 0UL, unsigned long threadId = 0UL, unsigned long flags = KSWORD_ARK_WIN32K_QUERY_FLAG_INCLUDE_DIAGNOSTICS) const;
         // Device/kernel-object audit wrappers：
         // - 输入：只读 profile、目标名或 CID/IPC 参数；

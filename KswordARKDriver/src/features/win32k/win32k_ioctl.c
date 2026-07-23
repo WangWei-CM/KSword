@@ -39,6 +39,9 @@ Environment:
 #define KSWORD_ARK_WIN32K_TIMER_RESPONSE_HEADER_SIZE \
     (sizeof(KSWORD_ARK_WIN32K_TIMER_SNAPSHOT_RESPONSE) - sizeof(KSWORD_ARK_WIN32K_TIMER_ENTRY))
 
+#define KSWORD_ARK_WIN32K_EVENT_HOOK_RESPONSE_HEADER_SIZE \
+    (sizeof(KSWORD_ARK_WIN32K_EVENT_HOOK_SNAPSHOT_RESPONSE) - sizeof(KSWORD_ARK_WIN32K_EVENT_HOOK_ENTRY))
+
 #define KSWORD_ARK_WIN32K_WINDOW_DETAIL_RESPONSE_SIZE \
     sizeof(KSWORD_ARK_WIN32K_WINDOW_DETAIL_RESPONSE)
 
@@ -492,6 +495,33 @@ Return Value:
         KSWORD_ARK_WIN32K_TIMER_RESPONSE_HEADER_SIZE,
         "timers",
         KswordARKWin32kQueryTimerSnapshot,
+        BytesReturned);
+}
+
+NTSTATUS
+KswordARKWin32kIoctlQueryEventHooks(
+    _In_ WDFDEVICE Device,
+    _In_ WDFREQUEST Request,
+    _In_ size_t InputBufferLength,
+    _In_ size_t OutputBufferLength,
+    _Out_ size_t* BytesReturned
+    )
+/*++
+
+Routine Description:
+
+    Handle the read-only gpWinEventHooks/tagEVENTHOOK snapshot IOCTL.
+
+--*/
+{
+    UNREFERENCED_PARAMETER(OutputBufferLength);
+    return KswordARKWin32kIoctlQueryCommon(
+        Device,
+        Request,
+        InputBufferLength,
+        KSWORD_ARK_WIN32K_EVENT_HOOK_RESPONSE_HEADER_SIZE,
+        "event-hooks",
+        KswordARKWin32kQueryEventHookSnapshot,
         BytesReturned);
 }
 

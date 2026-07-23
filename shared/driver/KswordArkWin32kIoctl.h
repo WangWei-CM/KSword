@@ -19,6 +19,7 @@
 #define KSWORD_ARK_IOCTL_FUNCTION_QUERY_WIN32K_HOOKS_PDB      0x894UL
 #define KSWORD_ARK_IOCTL_FUNCTION_QUERY_WIN32K_WINDOW_DETAIL  0x895UL
 #define KSWORD_ARK_IOCTL_FUNCTION_QUERY_WIN32K_TIMERS          0x896UL
+#define KSWORD_ARK_IOCTL_FUNCTION_QUERY_WIN32K_EVENT_HOOKS     0x897UL
 
 #define IOCTL_KSWORD_ARK_QUERY_WIN32K_PROFILE_STATUS \
     CTL_CODE( \
@@ -74,6 +75,14 @@
         METHOD_BUFFERED, \
         FILE_ANY_ACCESS)
 
+// WinEvent Hook 查询只读遍历 win32kbase!gpWinEventHooks，不提供 unhook 入口。
+#define IOCTL_KSWORD_ARK_QUERY_WIN32K_EVENT_HOOKS \
+    CTL_CODE( \
+        KSWORD_ARK_IOCTL_DEVICE_TYPE, \
+        KSWORD_ARK_IOCTL_FUNCTION_QUERY_WIN32K_EVENT_HOOKS, \
+        METHOD_BUFFERED, \
+        FILE_ANY_ACCESS)
+
 #define KSWORD_ARK_WIN32K_STATUS_UNKNOWN             0UL
 #define KSWORD_ARK_WIN32K_STATUS_OK                  1UL
 #define KSWORD_ARK_WIN32K_STATUS_PARTIAL             2UL
@@ -105,6 +114,9 @@
 #define KSWORD_ARK_WIN32K_CAP_TIMER_HASH_EXPORT          0x0000000000001000ULL
 #define KSWORD_ARK_WIN32K_CAP_TIMER_LAYOUT               0x0000000000002000ULL
 #define KSWORD_ARK_WIN32K_CAP_TIMER_ENUM                 0x0000000000004000ULL
+#define KSWORD_ARK_WIN32K_CAP_EVENT_HOOK_GLOBAL          0x0000000000008000ULL
+#define KSWORD_ARK_WIN32K_CAP_EVENT_HOOK_LAYOUT          0x0000000000010000ULL
+#define KSWORD_ARK_WIN32K_CAP_EVENT_HOOK_ENUM            0x0000000000020000ULL
 
 #define KSWORD_ARK_WIN32K_QUERY_FLAG_CURRENT_SESSION_ONLY 0x00000001UL
 #define KSWORD_ARK_WIN32K_QUERY_FLAG_INCLUDE_DIAGNOSTICS  0x00000002UL
@@ -137,6 +149,23 @@
 
 #define KSWORD_ARK_WIN32K_TIMER_LAYOUT_SOURCE_UNKNOWN               0UL
 #define KSWORD_ARK_WIN32K_TIMER_LAYOUT_SOURCE_VALIDATED_DISASSEMBLY 1UL
+
+#define KSWORD_ARK_WIN32K_EVENT_HOOK_FIELD_HANDLE          0x00000001UL
+#define KSWORD_ARK_WIN32K_EVENT_HOOK_FIELD_OWNER           0x00000002UL
+#define KSWORD_ARK_WIN32K_EVENT_HOOK_FIELD_RANGE           0x00000004UL
+#define KSWORD_ARK_WIN32K_EVENT_HOOK_FIELD_FLAGS           0x00000008UL
+#define KSWORD_ARK_WIN32K_EVENT_HOOK_FIELD_TARGET          0x00000010UL
+#define KSWORD_ARK_WIN32K_EVENT_HOOK_FIELD_CALLBACK        0x00000020UL
+#define KSWORD_ARK_WIN32K_EVENT_HOOK_FIELD_MODULE_ATOM     0x00000040UL
+#define KSWORD_ARK_WIN32K_EVENT_HOOK_FIELD_NEXT            0x00000080UL
+#define KSWORD_ARK_WIN32K_EVENT_HOOK_FIELD_TIMESTAMP       0x00000100UL
+
+#define KSWORD_ARK_WIN32K_EVENT_HOOK_LAYOUT_SOURCE_UNKNOWN               0UL
+#define KSWORD_ARK_WIN32K_EVENT_HOOK_LAYOUT_SOURCE_VALIDATED_DISASSEMBLY 1UL
+
+#define KSWORD_ARK_WIN32K_EVENT_HOOK_FLAG_SKIP_OWN_THREAD  0x00000001UL
+#define KSWORD_ARK_WIN32K_EVENT_HOOK_FLAG_SKIP_OWN_PROCESS 0x00000002UL
+#define KSWORD_ARK_WIN32K_EVENT_HOOK_FLAG_IN_CONTEXT       0x00000004UL
 
 #define KSWORD_ARK_WIN32K_READ_STATUS_NOT_REQUESTED 0UL
 #define KSWORD_ARK_WIN32K_READ_STATUS_OK            1UL
@@ -175,6 +204,27 @@ typedef struct _KSWORD_ARK_WIN32K_TIMER_LAYOUT
     unsigned long timeDateStamp;
     unsigned long imageSize;
 } KSWORD_ARK_WIN32K_TIMER_LAYOUT;
+
+// tagEVENTHOOK 布局独立传输，避免改变旧 Win32k profile ABI。
+typedef struct _KSWORD_ARK_WIN32K_EVENT_HOOK_LAYOUT
+{
+    unsigned long objectSize;
+    unsigned long handle;
+    unsigned long ownerThreadInfo;
+    unsigned long nextHook;
+    unsigned long eventMin;
+    unsigned long eventMax;
+    unsigned long internalFlags;
+    unsigned long targetProcessId;
+    unsigned long targetThreadId;
+    unsigned long callbackOffset;
+    unsigned long moduleAtom;
+    unsigned long timestamp;
+    unsigned long globalRva;
+    unsigned long source;
+    unsigned long timeDateStamp;
+    unsigned long imageSize;
+} KSWORD_ARK_WIN32K_EVENT_HOOK_LAYOUT;
 
 typedef struct _KSWORD_ARK_WIN32K_RECT
 {
@@ -511,3 +561,57 @@ typedef struct _KSWORD_ARK_WIN32K_TIMER_SNAPSHOT_RESPONSE
     wchar_t detail[KSWORD_ARK_WIN32K_DETAIL_CHARS];
     KSWORD_ARK_WIN32K_TIMER_ENTRY entries[1];
 } KSWORD_ARK_WIN32K_TIMER_SNAPSHOT_RESPONSE;
+
+typedef struct _KSWORD_ARK_WIN32K_EVENT_HOOK_ENTRY
+{
+    unsigned long fieldFlags;
+    unsigned long status;
+    unsigned long processId;
+    unsigned long threadId;
+    unsigned long sessionId;
+    unsigned long flags;
+    unsigned long internalFlags;
+    unsigned long eventMin;
+    unsigned long eventMax;
+    unsigned long targetProcessId;
+    unsigned long targetThreadId;
+    unsigned long moduleAtom;
+    unsigned long installTime;
+    long lastStatus;
+    unsigned long reserved0;
+    unsigned long reserved1;
+    unsigned long long hookHandle;
+    unsigned long long hookObject;
+    unsigned long long nextHookObject;
+    unsigned long long ownerThreadInfo;
+    unsigned long long callbackAddress;
+    unsigned long long callbackOffset;
+    wchar_t detail[KSWORD_ARK_WIN32K_DETAIL_CHARS];
+} KSWORD_ARK_WIN32K_EVENT_HOOK_ENTRY;
+
+typedef struct _KSWORD_ARK_WIN32K_EVENT_HOOK_SNAPSHOT_RESPONSE
+{
+    unsigned long version;
+    unsigned long status;
+    unsigned long totalCount;
+    unsigned long returnedCount;
+    unsigned long entrySize;
+    unsigned long flags;
+    long lastStatus;
+    unsigned long reserved;
+    unsigned long long capabilityMask;
+    unsigned long long missingCapabilityMask;
+    unsigned long long hookListPointer;
+    unsigned long long hookListHead;
+    unsigned long visitedNodeCount;
+    unsigned long readFailureCount;
+    unsigned long corruptLinkCount;
+    unsigned long duplicateCount;
+    unsigned long win32kbaseTimeDateStamp;
+    unsigned long win32kbaseImageSize;
+    unsigned long win32kfullTimeDateStamp;
+    unsigned long win32kfullImageSize;
+    KSWORD_ARK_WIN32K_EVENT_HOOK_LAYOUT layout;
+    wchar_t detail[KSWORD_ARK_WIN32K_DETAIL_CHARS];
+    KSWORD_ARK_WIN32K_EVENT_HOOK_ENTRY entries[1];
+} KSWORD_ARK_WIN32K_EVENT_HOOK_SNAPSHOT_RESPONSE;

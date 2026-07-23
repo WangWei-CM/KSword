@@ -1,4 +1,5 @@
 #include "WindowDock.h"
+#include "WindowEventHookTab.h"
 #include "WindowGuiHandleTab.h"
 #include "WindowTimerTab.h"
 #include "../UI/VisibleTableWidget.h"
@@ -2563,6 +2564,15 @@ void WindowDock::initializeUi()
         ks::i18n::contextText(
             QStringLiteral("window.timer.tab.tooltip"),
             QStringLiteral("只读遍历 win32k gTimerHashTable，显示定时器对象、间隔、Flags、回调和 PID/TID 归属。")));
+
+    const int eventHookTabIndex = m_tabWidget->addTab(
+        new WindowEventHookTab(m_tabWidget),
+        ks::i18n::contextText(QStringLiteral("window.event_hook.tab"), QStringLiteral("事件 Hook")));
+    m_tabWidget->setTabToolTip(
+        eventHookTabIndex,
+        ks::i18n::contextText(
+            QStringLiteral("window.event_hook.tab.tooltip"),
+            QStringLiteral("只读遍历 win32kbase!gpWinEventHooks，显示事件范围、Flags、回调和 PID/TID 归属。")));
 
     // ===== Tab 2：win32k GUI / Session =====
     m_sessionPage = new QWidget(m_tabWidget);

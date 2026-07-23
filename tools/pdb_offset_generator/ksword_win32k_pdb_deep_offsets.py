@@ -5,7 +5,7 @@ Ksword win32k PDB 深度目录生成器。
 用途：
 - 从本机 win32k / win32kbase / win32kfull PDB 缓存读取公开类型、枚举和 public 符号；
 - 为窗口、GUI 线程、Hotkey、Hook、Desktop/Session 等 R0 只读审计准备可发布的离线事实库；
-- 明确记录 public PDB 缺少 tagWND/tagTHREADINFO/tagQ/tagHOOK/tagHOTKEY/tagTIMER 私有结构时的能力缺口。
+- 明确记录 public PDB 缺少 tagWND/tagTHREADINFO/tagQ/tagHOOK/tagHOTKEY/tagTIMER/tagEVENTHOOK 私有结构时的能力缺口。
 
 边界：
 - 只读 PDB 文件，不下载符号，不访问驱动，不运行程序；
@@ -42,13 +42,13 @@ DEFAULT_LLVM_PDBUTIL = r"D:\Software\VS\VC\Tools\Llvm\x64\bin\llvm-pdbutil.exe"
 DEFAULT_OUTPUT_DIR = r"D:\Temp\ksword_pdb_deep_offsets"
 DEFAULT_REPO_JSON = (
     r"D:\Projects\Ksword5.1\Ksword5.1\Ksword5.1\profiles\pdb_deep_offsets"
-    r"\win32k_gui_public_7bd3_000a_001c_deep_offsets.json"
+    r"\win32k_gui_public_7bd3_a8a6_2d74_deep_offsets.json"
 )
 
 DEFAULT_PDBS = [
     r"E:\KswordPDB\PDB\pdb-cache\amd64\win32k.pdb\7BD3B4D17A3C35551C4972B31B8155361\win32k.pdb",
-    r"E:\KswordPDB\PDB\pdb-cache\amd64\win32kbase.pdb\000A7125DE3FCE6C0A3913A002C1163D1\win32kbase.pdb",
-    r"E:\KswordPDB\PDB\pdb-cache\amd64\win32kfull.pdb\001C937F06114FE68C90F7D9CDEB83061\win32kfull.pdb",
+    r"E:\KswordPDB\PDB\pdb-cache\amd64\win32kbase.pdb\A8A69A7FD22B0D044A322341F88A665F1\win32kbase.pdb",
+    r"E:\KswordPDB\PDB\pdb-cache\amd64\win32kfull.pdb\2D745AB4CE6186F2D19839B96062ED851\win32kfull.pdb",
 ]
 
 # P0 GUI 私有类型清单：这些类型缺失时，不能声明 tagWND/tagQ/Hook/Hotkey 运行时读取已经可用。
@@ -59,6 +59,7 @@ PRIVATE_GUI_TYPES = [
     "tagHOOK",
     "tagHOTKEY",
     "tagTIMER",
+    "tagEVENTHOOK",
     "tagDESKTOP",
     "tagWINDOWSTATION",
 ]
@@ -93,6 +94,7 @@ TYPE_KEYWORDS = [
 # 公开符号分类关键字：用于把 NtUser/NtGdi/xxx/tagWND/Hotkey/Hook 等符号分组。
 SYMBOL_GROUP_KEYWORDS: list[tuple[str, list[str]]] = [
     ("window_timer", ["timer", "settimer", "killtimer", "validatetimercallback"]),
+    ("event_hook", ["winevent", "eventhook", "wineventhook", "gpeventhooks"]),
     ("hotkey_hook", ["hotkey", "hook", "unhook", "setwindowshook"]),
     ("window_object", ["tagwnd", "window", "hwnd", "foreground", "focus", "capture", "caret"]),
     ("gui_thread_queue", ["tagthreadinfo", "inputqueue", "thread", "queue", "qmsg"]),
@@ -136,6 +138,12 @@ RUNTIME_DETAIL_DOMAINS: dict[str, dict[str, Any]] = {
         "requiredPrivateTypes": ["tagTIMER", "tagTHREADINFO", "tagWND"],
         "usefulPublicSymbolGroups": ["window_timer", "gui_thread_queue", "window_object", "ntuser_api"],
         "intendedUse": "扩充窗口定时器对象、间隔、flags、回调、窗口和线程归属字段。",
+    },
+    "event_hook_detail": {
+        "displayName": "WinEvent hook / tagEVENTHOOK",
+        "requiredPrivateTypes": ["tagEVENTHOOK", "tagTHREADINFO"],
+        "usefulPublicSymbolGroups": ["event_hook", "hotkey_hook", "gui_thread_queue"],
+        "intendedUse": "扩充 WinEvent Hook 链、事件范围、回调、模块和目标线程归属字段。",
     },
     "desktop_session_detail": {
         "displayName": "Desktop / WindowStation / Session",
@@ -183,6 +191,17 @@ WIN32K_FIELD_ALIASES: dict[tuple[str, str], str] = {
     ("tagTIMER", "ptiCreator"): "timerAlternateThreadInfo",
     ("tagTIMER", "leHash"): "timerHashListEntry",
     ("tagTIMER", "dwTime"): "timerTimestamp",
+    ("tagEVENTHOOK", "hEventHook"): "eventHookHandle",
+    ("tagEVENTHOOK", "pti"): "eventHookOwnerThreadInfo",
+    ("tagEVENTHOOK", "phkNext"): "eventHookNext",
+    ("tagEVENTHOOK", "eventMin"): "eventHookEventMin",
+    ("tagEVENTHOOK", "eventMax"): "eventHookEventMax",
+    ("tagEVENTHOOK", "dwFlags"): "eventHookFlags",
+    ("tagEVENTHOOK", "idProcess"): "eventHookTargetProcessId",
+    ("tagEVENTHOOK", "idThread"): "eventHookTargetThreadId",
+    ("tagEVENTHOOK", "offPfn"): "eventHookCallbackOffset",
+    ("tagEVENTHOOK", "atomMod"): "eventHookModuleAtom",
+    ("tagEVENTHOOK", "timeLast"): "eventHookTimestamp",
 }
 
 PUBLIC_HEADER_RE = re.compile(r"^\s*(?P<record>\d+)\s+\|\s+S_PUB32\s+\[size\s*=\s*(?P<size>\d+)\]\s+`(?P<name>[^`]+)`")
@@ -347,7 +366,7 @@ def extract_module_catalog(pdbutil_path: str, pdb_path: Path, cache_dir: Path) -
         "selectedTypesWithoutFieldList": selected_but_missing_fields,
         "notes": [
             "publicSymbols 的 section:offset 需要结合目标 PE 节表转换，不能直接当作运行时 RVA。",
-            "privateTypeReadiness.ready 为 false 时，不能启用 tagWND/tagTHREADINFO/tagQ/tagHOOK/tagHOTKEY/tagTIMER 字段读取。",
+            "privateTypeReadiness.ready 为 false 时，不能启用 tagWND/tagTHREADINFO/tagQ/tagHOOK/tagHOTKEY/tagTIMER/tagEVENTHOOK 字段读取。",
         ],
     }
 
@@ -433,7 +452,7 @@ def build_runtime_detail_catalog(modules: list[dict[str, Any]]) -> dict[str, Any
     - modules：全部 win32k / win32kbase / win32kfull 模块目录。
     处理：
     - 汇总每个模块已出现的私有 GUI 类型、缺失类型和 public symbol 分组计数；
-    - 按 RUNTIME_DETAIL_DOMAINS 判断 window/gui-thread/hotkey/hook/desktop 域是否具备字段读取条件；
+    - 按 RUNTIME_DETAIL_DOMAINS 判断 window/gui-thread/hotkey/hook/event-hook/desktop 域是否具备字段读取条件；
     - 对 public PDB 可用的符号证据给出分组计数和代表符号，供 UI 详情页展示具体内容。
     返回：
     - JSON 可序列化目录；ready=false 时 blockedBy 会明确指出缺少 private layout。
@@ -577,7 +596,7 @@ def main(argv: list[str] | None = None) -> int:
         "modules": modules,
         "notes": [
             "当前 public win32kbase/win32kfull PDB 可能报告 Has Types=true，但 TPI dump 实际为 0 records；本库会如实记录。",
-            "tagWND/tagTHREADINFO/tagQ/tagHOOK/tagHOTKEY/tagTIMER 私有结构缺失时，R0 运行时 detail IOCTL 只能报告 readiness，不能读取对象字段。",
+            "tagWND/tagTHREADINFO/tagQ/tagHOOK/tagHOTKEY/tagTIMER/tagEVENTHOOK 私有结构缺失时，R0 运行时 detail IOCTL 只能报告 readiness，不能读取对象字段。",
             "publicSymbols 可用于函数符号提取和 UI 归因；结构字段读取仍需要 private PDB 或其它经验证 profile。",
         ],
     }

@@ -54,6 +54,14 @@ KswordARKWin32kQueryTimerSnapshot(
     );
 
 NTSTATUS
+KswordARKWin32kQueryEventHookSnapshot(
+    _Out_writes_bytes_to_(OutputBufferLength, *BytesWrittenOut) PVOID OutputBuffer,
+    _In_ size_t OutputBufferLength,
+    _In_opt_ const KSWORD_ARK_WIN32K_QUERY_REQUEST* Request,
+    _Out_ size_t* BytesWrittenOut
+    );
+
+NTSTATUS
 KswordARKWin32kQueryWindowDetail(
     _Out_writes_bytes_(OutputBufferLength) KSWORD_ARK_WIN32K_WINDOW_DETAIL_RESPONSE* Response,
     _In_ size_t OutputBufferLength,
