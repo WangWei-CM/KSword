@@ -2,6 +2,7 @@
 
 #include "DriverMemoryClient.h"
 #include "DriverMemoryModel.h"
+#include "../../Ui/AsyncTask.h"
 #include "../../Ui/Controls.h"
 #include "../../Ui/ListViewUtil.h"
 #include "../../Ui/Theme.h"
@@ -38,6 +39,13 @@ constexpr UINT kMemoryMenuClearHex = 51505;
 constexpr UINT kMemoryMenuNormalizeHex = 51506;
 constexpr UINT kMemoryMenuSelectAll = 51507;
 constexpr UINT kMemoryMenuCopyStatus = 51508;
+constexpr UINT kMsgMemoryOperationCompleted = WM_APP + 598;
+
+struct MemoryOperationSnapshot {
+    bool readOperation = false;
+    DriverMemoryReadResult readResult;
+    DriverMemoryWriteResult writeResult;
+};
 
 // DriverMemoryViewState owns child HWNDs and the driver facade for one page.
 // Inputs arrive through window messages; processing validates edit-control text
@@ -52,7 +60,8 @@ struct DriverMemoryViewState {
     HWND statusEdit = nullptr;
     HWND readButton = nullptr;
     HWND writeButton = nullptr;
-    DriverMemoryClient client;
+    bool operationInProgress = false;
+    std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<MemoryOperationSnapshot>> operationTask;
 };
 
 // GetWindowTextString copies text from a Win32 edit control. Input is the child
@@ -247,11 +256,35 @@ void HandleRead(DriverMemoryViewState& state) {
         return;
     }
 
-    const DriverMemoryReadResult result = state.client.ReadMemory(request);
-    if (result.success) {
-        ::SetWindowTextW(state.hexEdit, FormatHexBytesForDisplay(result.bytes).c_str());
+    if (state.operationInProgress || !state.operationTask) {
+        SetStatus(state, L"内存操作正在执行。");
+        return;
     }
-    SetStatus(state, result.statusText);
+    state.operationInProgress = true;
+    ::EnableWindow(state.readButton, FALSE);
+    ::EnableWindow(state.writeButton, FALSE);
+    SetStatus(state, L"正在后台执行 R0 内存读取…");
+    state.operationTask->request(
+        [request] {
+            MemoryOperationSnapshot snapshot{};
+            snapshot.readOperation = true;
+            DriverMemoryClient client;
+            snapshot.readResult = client.ReadMemory(request);
+            return snapshot;
+        },
+        [&state](std::uint64_t, std::optional<MemoryOperationSnapshot>&& snapshot, std::exception_ptr error) {
+            state.operationInProgress = false;
+            ::EnableWindow(state.readButton, TRUE);
+            ::EnableWindow(state.writeButton, TRUE);
+            if (error || !snapshot.has_value()) {
+                SetStatus(state, L"R0 内存读取异常结束。");
+                return;
+            }
+            if (snapshot->readResult.success) {
+                ::SetWindowTextW(state.hexEdit, FormatHexBytesForDisplay(snapshot->readResult.bytes).c_str());
+            }
+            SetStatus(state, snapshot->readResult.statusText);
+        });
 }
 
 // HandleWrite validates write fields and invokes the driver facade. Input is
@@ -269,8 +302,27 @@ void HandleWrite(DriverMemoryViewState& state) {
         return;
     }
 
-    const DriverMemoryWriteResult result = state.client.WriteMemory(request);
-    SetStatus(state, result.statusText);
+    if (state.operationInProgress || !state.operationTask) {
+        SetStatus(state, L"内存操作正在执行。");
+        return;
+    }
+    state.operationInProgress = true;
+    ::EnableWindow(state.readButton, FALSE);
+    ::EnableWindow(state.writeButton, FALSE);
+    SetStatus(state, L"正在后台执行 R0 内存写入…");
+    state.operationTask->request(
+        [request = std::move(request)] {
+            MemoryOperationSnapshot snapshot{};
+            DriverMemoryClient client;
+            snapshot.writeResult = client.WriteMemory(request);
+            return snapshot;
+        },
+        [&state](std::uint64_t, std::optional<MemoryOperationSnapshot>&& snapshot, std::exception_ptr error) {
+            state.operationInProgress = false;
+            ::EnableWindow(state.readButton, TRUE);
+            ::EnableWindow(state.writeButton, TRUE);
+            SetStatus(state, error || !snapshot.has_value() ? L"R0 内存写入异常结束。" : snapshot->writeResult.statusText);
+        });
 }
 
 // NormalizeHexBuffer parses and rewrites the hex edit as canonical two-digit
@@ -402,6 +454,7 @@ LRESULT CALLBACK DriverMemoryViewWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
     case WM_CREATE:
         if (state) {
             CreateChildControls(*state);
+            state->operationTask = std::make_unique<Ksword::Ui::AsyncSnapshotTask<MemoryOperationSnapshot>>(hwnd, kMsgMemoryOperationCompleted);
         }
         return 0;
     case WM_SIZE:
@@ -422,6 +475,11 @@ LRESULT CALLBACK DriverMemoryViewWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
                 HandleWrite(*state);
                 return 0;
             }
+        }
+        break;
+    case kMsgMemoryOperationCompleted:
+        if (state && state->operationTask && state->operationTask->consume(hwnd, wParam, lParam)) {
+            return 0;
         }
         break;
     case WM_CONTEXTMENU:
@@ -456,6 +514,9 @@ LRESULT CALLBACK DriverMemoryViewWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
     case WM_ERASEBKGND:
         return 1;
     case WM_NCDESTROY:
+        if (state && state->operationTask) {
+            state->operationTask->cancel();
+        }
         delete state;
         ::SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
         break;
