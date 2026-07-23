@@ -56,6 +56,10 @@ public:
     // 输入：无；处理：重建所有 NetworkAuditPage 行数据；返回：无返回值。
     void refresh();
 
+    // replacePages installs a complete immutable audit snapshot collected by a
+    // background task. It does not perform I/O on the calling UI thread.
+    void replacePages(std::vector<NetworkAuditPage> pages);
+
     // pages returns the immutable page descriptors. There is no input; output
     // remains valid for the lifetime of this model instance.
     const std::vector<NetworkAuditPage>& pages() const noexcept;

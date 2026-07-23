@@ -470,14 +470,18 @@ std::vector<NetworkAuditRow> BuildNsiRows() {
 } // namespace
 
 NetworkAuditModel::NetworkAuditModel() {
-    // 构造时立即采集一次，保证首次打开就是 wrapper/R3 投影结果或明确 unavailable。
-    refresh();
+    // Network I/O and R0 queries are scheduled by NetworkView after its
+    // controls are visible, so opening or switching a dock never blocks.
 }
 
 void NetworkAuditModel::refresh() {
     // refresh 的输入为空；处理是重建所有页面行数据；返回为空。
     // 所有 R0 调用均通过 ArkDriverClient wrapper 完成。
     pages_ = BuildNetworkAuditPages();
+}
+
+void NetworkAuditModel::replacePages(std::vector<NetworkAuditPage> pages) {
+    pages_ = std::move(pages);
 }
 
 const std::vector<NetworkAuditPage>& NetworkAuditModel::pages() const noexcept {
