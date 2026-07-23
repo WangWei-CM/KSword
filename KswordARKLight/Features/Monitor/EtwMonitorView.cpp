@@ -165,8 +165,7 @@ bool CopyTextToClipboard(HWND owner, const std::wstring& text) {
 
 } // namespace
 
-EtwMonitorView::EtwMonitorView()
-    : eventModel_(kMaxEventRows) {}
+EtwMonitorView::EtwMonitorView() = default;
 
 EtwMonitorView::~EtwMonitorView() {
     controller_.stop();
@@ -241,12 +240,17 @@ LRESULT EtwMonitorView::handleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
         }
         if (LOWORD(wParam) == kClearButtonId) {
             clearPendingEvents();
-            eventModel_.clear();
+            eventRows_.clear();
             clearEventList();
             return 0;
         }
         break;
     case WM_NOTIFY:
+        if (const auto* header = reinterpret_cast<const NMHDR*>(lParam);
+            header != nullptr && header->hwndFrom == eventList_ && header->code == LVN_GETDISPINFOW) {
+            handleVirtualEventDisplayInfo(reinterpret_cast<NMLVDISPINFOW*>(lParam));
+            return 0;
+        }
         if (const auto* header = reinterpret_cast<const NMHDR*>(lParam);
             header != nullptr && header->hwndFrom == eventList_ && header->code == NM_DBLCLK) {
             openSelectedEventDetail();
@@ -320,7 +324,7 @@ void EtwMonitorView::createControls() {
         WS_EX_CLIENTEDGE,
         WC_LISTVIEWW,
         L"",
-        WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SHOWSELALWAYS | LVS_SINGLESEL,
+        WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SHOWSELALWAYS | LVS_SINGLESEL | LVS_OWNERDATA,
         12,
         52,
         860,
@@ -441,57 +445,59 @@ void EtwMonitorView::appendEventsToView(const std::vector<EtwEvent>& events) {
         return;
     }
 
-    const std::size_t modelCountBefore = eventModel_.rowCount();
-    for (const EtwEvent& eventRow : events) {
-        eventModel_.append(eventRow);
+    const int itemCountBefore = ListView_GetItemCount(eventList_);
+    const bool followTail = itemCountBefore == 0 ||
+        ListView_GetTopIndex(eventList_) + ListView_GetCountPerPage(eventList_) >= itemCountBefore - 1;
+    eventRows_.insert(eventRows_.end(), events.begin(), events.end());
+    if (eventRows_.size() > kMaxEventRows) {
+        const std::size_t trimmed = eventRows_.size() - kMaxEventRows;
+        eventRows_.erase(eventRows_.begin(), eventRows_.begin() + static_cast<std::ptrdiff_t>(trimmed));
     }
-    const std::size_t modelCountAfter = eventModel_.rowCount();
-    const std::size_t trimmedCount =
-        (modelCountBefore + events.size() > modelCountAfter)
-        ? (modelCountBefore + events.size() - modelCountAfter)
-        : 0;
-
-    ::SendMessageW(eventList_, WM_SETREDRAW, FALSE, 0);
-    for (std::size_t index = 0; index < trimmedCount && ListView_GetItemCount(eventList_) > 0; ++index) {
-        ListView_DeleteItem(eventList_, 0);
+    ListView_SetItemCountEx(eventList_, static_cast<int>(eventRows_.size()), LVSICF_NOINVALIDATEALL | LVSICF_NOSCROLL);
+    if (followTail && !eventRows_.empty()) {
+        ListView_EnsureVisible(eventList_, static_cast<int>(eventRows_.size() - 1), FALSE);
     }
-    for (const EtwEvent& eventRow : events) {
-        insertEventRowToList(eventRow);
-    }
-    ::SendMessageW(eventList_, WM_SETREDRAW, TRUE, 0);
     ::InvalidateRect(eventList_, nullptr, FALSE);
 }
 
-void EtwMonitorView::insertEventRowToList(const EtwEvent& eventRow) {
-    const int rowIndex = ListView_GetItemCount(eventList_);
-    const std::wstring pidText = NumberText(eventRow.processId);
-    LVITEMW item{};
-    item.mask = LVIF_TEXT | LVIF_IMAGE | LVIF_PARAM;
-    item.iItem = rowIndex;
-    item.pszText = const_cast<LPWSTR>(pidText.c_str());
-    item.iImage = iconIndexForProcessId(eventRow.processId);
-    item.lParam = static_cast<LPARAM>(rowIndex);
-    ListView_InsertItem(eventList_, &item);
+// handleVirtualEventDisplayInfo answers only the ListView's visible-cell
+// requests from the bounded event ring. High-frequency ETW flushes now update
+// one item count instead of issuing one insert and six text messages per event.
+bool EtwMonitorView::handleVirtualEventDisplayInfo(NMLVDISPINFOW* displayInfo) {
+    if (displayInfo == nullptr || displayInfo->item.iItem < 0 ||
+        static_cast<std::size_t>(displayInfo->item.iItem) >= eventRows_.size()) {
+        return false;
+    }
 
-    const std::wstring tidText = NumberText(eventRow.threadId);
-    const std::wstring eventIdText = NumberText(eventRow.eventId);
-    const std::wstring levelText = NumberText(eventRow.level);
-    ListView_SetItemText(eventList_, rowIndex, 1, const_cast<LPWSTR>(eventRow.timeText.c_str()));
-    ListView_SetItemText(eventList_, rowIndex, 2, const_cast<LPWSTR>(eventRow.providerText.c_str()));
-    ListView_SetItemText(eventList_, rowIndex, 3, const_cast<LPWSTR>(tidText.c_str()));
-    ListView_SetItemText(eventList_, rowIndex, 4, const_cast<LPWSTR>(eventIdText.c_str()));
-    ListView_SetItemText(eventList_, rowIndex, 5, const_cast<LPWSTR>(levelText.c_str()));
-    ListView_SetItemText(eventList_, rowIndex, 6, const_cast<LPWSTR>(eventRow.summary.c_str()));
+    const EtwEvent& eventRow = eventRows_[static_cast<std::size_t>(displayInfo->item.iItem)];
+    if ((displayInfo->item.mask & LVIF_TEXT) != 0) {
+        switch (displayInfo->item.iSubItem) {
+        case 0: eventTextScratch_ = NumberText(eventRow.processId); break;
+        case 1: eventTextScratch_ = eventRow.timeText; break;
+        case 2: eventTextScratch_ = eventRow.providerText; break;
+        case 3: eventTextScratch_ = NumberText(eventRow.threadId); break;
+        case 4: eventTextScratch_ = NumberText(eventRow.eventId); break;
+        case 5: eventTextScratch_ = NumberText(eventRow.level); break;
+        case 6: eventTextScratch_ = eventRow.summary; break;
+        default: eventTextScratch_.clear(); break;
+        }
+        displayInfo->item.pszText = eventTextScratch_.data();
+    }
+    if ((displayInfo->item.mask & LVIF_IMAGE) != 0) {
+        displayInfo->item.iImage = iconIndexForProcessId(eventRow.processId);
+    }
+    if ((displayInfo->item.mask & LVIF_PARAM) != 0) {
+        displayInfo->item.lParam = static_cast<LPARAM>(displayInfo->item.iItem);
+    }
+    return true;
 }
 
 void EtwMonitorView::clearEventList() {
     // clearEventList is used only by explicit user clear actions:
     // - input: none;
-    // - processing: delete visible ListView rows with redraw disabled;
-    // - return: none.  It never snapshots and reinserts historical events.
-    ::SendMessageW(eventList_, WM_SETREDRAW, FALSE, 0);
-    ListView_DeleteAllItems(eventList_);
-    ::SendMessageW(eventList_, WM_SETREDRAW, TRUE, 0);
+    // - processing: reset only the owner-data count;
+    // - return: none.  No historical rows are reinserted or repainted.
+    ListView_SetItemCountEx(eventList_, 0, LVSICF_NOINVALIDATEALL | LVSICF_NOSCROLL);
     ::InvalidateRect(eventList_, nullptr, FALSE);
 }
 
@@ -607,13 +613,12 @@ bool EtwMonitorView::selectedEvent(EtwEvent* eventRow) const {
         const_cast<EtwMonitorView*>(this)->updateStatusText(L"没有选中监控项。");
         return false;
     }
-    const std::vector<EtwEvent> rows = eventModel_.snapshot();
-    if (selected >= static_cast<int>(rows.size())) {
+    if (selected >= static_cast<int>(eventRows_.size())) {
         const_cast<EtwMonitorView*>(this)->updateStatusText(L"监控项索引已过期，请刷新列表后重试。");
         return false;
     }
     if (eventRow) {
-        *eventRow = rows[static_cast<std::size_t>(selected)];
+        *eventRow = eventRows_[static_cast<std::size_t>(selected)];
     }
     return true;
 }
@@ -724,7 +729,7 @@ void EtwMonitorView::showEventContextMenu(POINT screenPoint) {
         break;
     case kEtwMenuClear:
         clearPendingEvents();
-        eventModel_.clear();
+        eventRows_.clear();
         clearEventList();
         updateStatusText(L"ETW 列表已清空。");
         break;

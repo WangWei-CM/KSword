@@ -1,7 +1,6 @@
 #pragma once
 
 #include "../../Core/Win32Lean.h"
-#include "EtwEventModel.h"
 #include "EtwFilterModel.h"
 #include "EtwSessionController.h"
 
@@ -63,7 +62,6 @@ private:
     void clearPendingEvents();
 
     void appendEventsToView(const std::vector<EtwEvent>& events);
-    void insertEventRowToList(const EtwEvent& eventRow);
     void clearEventList();
     void updateStatusText(const std::wstring& text);
     void updateButtonState();
@@ -77,6 +75,7 @@ private:
     void copySelectedEventRow();
     void copySelectedEventDetail();
     void showEventContextMenu(POINT screenPoint);
+    bool handleVirtualEventDisplayInfo(NMLVDISPINFOW* displayInfo);
 
     HWND hwnd_ = nullptr;
     HWND startButton_ = nullptr;
@@ -86,7 +85,8 @@ private:
     HWND statusText_ = nullptr;
     HWND eventList_ = nullptr;
     HIMAGELIST eventImageList_ = nullptr;
-    EtwEventModel eventModel_;
+    std::vector<EtwEvent> eventRows_;
+    std::wstring eventTextScratch_;
     EtwFilterModel filterModel_;
     EtwSessionController controller_;
     std::mutex pendingEventMutex_;
