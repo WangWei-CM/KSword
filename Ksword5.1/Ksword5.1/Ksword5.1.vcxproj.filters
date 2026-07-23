@@ -620,6 +620,9 @@
     <ClCompile Include="WindowDock\WindowDock.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="WindowDock\WindowGuiHandleTab.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="句柄\HandleDock.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -1066,6 +1069,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="WindowDock\WindowDock.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="WindowDock\WindowGuiHandleTab.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="SettingsDock\AppearanceSettings.h">

@@ -1,4 +1,5 @@
 #include "WindowDock.h"
+#include "WindowGuiHandleTab.h"
 #include "../UI/VisibleTableWidget.h"
 
 #include "../ArkDriverClient/ArkDriverClient.h"
@@ -2544,6 +2545,13 @@ void WindowDock::initializeUi()
     m_tabWidget->setTabToolTip(
         windowManagementTabIndex,
         QStringLiteral("原窗口列表与桌面管理入口在这里：包含窗口树、窗口详情、窗口站/桌面枚举和桌面切换。"));
+
+    const int guiHandleTabIndex = m_tabWidget->addTab(
+        new WindowGuiHandleTab(m_tabWidget),
+        QStringLiteral("GUI句柄"));
+    m_tabWidget->setTabToolTip(
+        guiHandleTabIndex,
+        QStringLiteral("只读枚举当前 Session 的 USER Handle 共享表，显示对象类型、地址与窗口所有者信息。"));
 
     // ===== Tab 2：win32k GUI / Session =====
     m_sessionPage = new QWidget(m_tabWidget);
