@@ -1,4 +1,5 @@
 #include "ProcessDetailPage.h"
+#include "../../Ui/FilterBar.h"
 
 #include "../../Ui/Controls.h"
 #include "../../Ui/Theme.h"
@@ -9,6 +10,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cwctype>
 #include <cstdint>
 #include <cstring>
 #include <cwchar>
@@ -108,6 +110,21 @@ std::wstring BaseNameFromPath(const std::wstring& path) {
         return path;
     }
     return path.substr(separator + 1U);
+}
+
+bool ContainsCaseInsensitive(const std::wstring& value, const std::wstring& query) {
+    if (query.empty()) {
+        return true;
+    }
+    return std::search(value.begin(), value.end(), query.begin(), query.end(), [](const wchar_t left, const wchar_t right) {
+        return std::towlower(left) == std::towlower(right);
+    }) != value.end();
+}
+
+bool MatchesModuleFilter(const std::vector<std::wstring>& values, const std::wstring& query) {
+    return std::any_of(values.begin(), values.end(), [&query](const std::wstring& value) {
+        return ContainsCaseInsensitive(value, query);
+    });
 }
 
 std::wstring FormatHex(std::uintptr_t value) {
@@ -696,8 +713,13 @@ bool ProcessDetailPage::CreateModuleTab() {
         6,
         -6,
         28);
-    HWND list = AddList(TabIndex::Modules, ModuleList, 6, 40, -6, -6);
-    if (!refresh || !verify || !status || !list) {
+    HWND page = pages_[static_cast<std::size_t>(TabIndex::Modules)].hwnd;
+    HWND filter = Ksword::Ui::CreateFilterBar(page, ModuleFilter, L"筛选模块路径、签名和线程", 6, 40, 100, 26);
+    if (filter) {
+        pages_[static_cast<std::size_t>(TabIndex::Modules)].placements.push_back(Placement{ filter, 6, 40, -6, 26 });
+    }
+    HWND list = AddList(TabIndex::Modules, ModuleList, 6, 72, -6, -6);
+    if (!refresh || !verify || !status || !filter || !list) {
         return false;
     }
 
@@ -740,20 +762,26 @@ void ProcessDetailPage::PopulateModuleTab() {
     }
 
     ClearList(list);
+    const std::wstring query = Ksword::Ui::GetFilterBarText(Control(TabIndex::Modules, ModuleFilter));
     HIMAGELIST systemImages = nullptr;
+    std::size_t visibleCount = 0;
     for (std::size_t index = 0; index < snapshot_.modules.size(); ++index) {
         const ProcessModuleInfo& module = snapshot_.modules[index];
+        const std::vector<std::wstring> values{
+            module.modulePath,
+            FormatModuleSize(module.imageSize),
+            ModuleSignatureText(verify),
+            L"Unavailable",
+            ModuleRunningState(module),
+            ModuleThreadText(module)
+        };
+        if (!MatchesModuleFilter(values, query)) {
+            continue;
+        }
         AddListRow(
             list,
-            static_cast<int>(index),
-            {
-                module.modulePath,
-                FormatModuleSize(module.imageSize),
-                ModuleSignatureText(verify),
-                L"Unavailable",
-                ModuleRunningState(module),
-                ModuleThreadText(module)
-            },
+            static_cast<int>(visibleCount),
+            values,
             static_cast<LPARAM>(index));
 
         HIMAGELIST rowImages = nullptr;
@@ -765,10 +793,11 @@ void ProcessDetailPage::PopulateModuleTab() {
         if (iconIndex >= 0) {
             LVITEMW item{};
             item.mask = LVIF_IMAGE;
-            item.iItem = static_cast<int>(index);
+            item.iItem = static_cast<int>(visibleCount);
             item.iImage = iconIndex;
             ListView_SetItem(list, &item);
         }
+        ++visibleCount;
     }
     SortModuleListByPath(list);
 
@@ -779,7 +808,7 @@ void ProcessDetailPage::PopulateModuleTab() {
             status += L" | " + snapshot_.errorText;
         }
     } else {
-        status = L"● 刷新完成 | 模块:" + std::to_wstring(snapshot_.modules.size());
+        status = L"● 刷新完成 | 模块:" + std::to_wstring(visibleCount) + L" / " + std::to_wstring(snapshot_.modules.size());
         if (snapshot_.modules.empty() && !snapshot_.errorText.empty()) {
             status += L" | " + snapshot_.errorText;
         }
@@ -792,6 +821,10 @@ void ProcessDetailPage::PopulateModuleTab() {
 
 bool ProcessDetailPage::HandleModuleCommand(int controlId) {
     if (controlId == ModuleVerifySignature) {
+        return true;
+    }
+    if (controlId == ModuleFilter) {
+        PopulateModuleTab();
         return true;
     }
     if (controlId != ModuleRefresh) {

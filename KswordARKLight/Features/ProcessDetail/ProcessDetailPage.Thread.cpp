@@ -1,4 +1,5 @@
 #include "../../Core/Win32Lean.h"
+#include "../../Ui/FilterBar.h"
 
 #include "../../../Ksword5.1/Ksword5.1/ArkDriverClient/ArkDriverClient.h"
 
@@ -8,6 +9,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cwctype>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -33,6 +35,7 @@ struct ThreadLayoutState {
     HWND sample = nullptr;
     HWND stack = nullptr;
     HWND status = nullptr;
+    HWND filter = nullptr;
     HWND list = nullptr;
     HWND output = nullptr;
 };
@@ -69,7 +72,9 @@ void LayoutThreadControls(HWND page, const ThreadLayoutState& state) {
     constexpr int spacing = 6;
     constexpr int toolbarY = 25;
     constexpr int toolbarHeight = 28;
-    constexpr int listY = 59;
+    constexpr int filterY = 59;
+    constexpr int filterHeight = 26;
+    constexpr int listY = filterY + filterHeight + spacing;
     constexpr int preferredOutputHeight = 220;
     constexpr int minimumOutputHeight = 90;
     constexpr int minimumListHeight = 80;
@@ -89,6 +94,7 @@ void LayoutThreadControls(HWND page, const ThreadLayoutState& state) {
     MoveControl(state.stack, x, toolbarY, 108, toolbarHeight);
     x += 108 + spacing;
     MoveControl(state.status, x, toolbarY, width - x - outerMargin - innerMargin, toolbarHeight);
+    MoveControl(state.filter, outerMargin + innerMargin, filterY, width - (outerMargin + innerMargin) * 2, filterHeight);
 
     const int contentBottom = height - outerMargin - innerMargin;
     const int availableBelowToolbar = std::max(0, contentBottom - listY);
@@ -206,6 +212,21 @@ std::wstring Utf8ToWide(const std::string& text) {
     return result;
 }
 
+bool ContainsCaseInsensitive(const std::wstring& value, const std::wstring& query) {
+    if (query.empty()) {
+        return true;
+    }
+    return std::search(value.begin(), value.end(), query.begin(), query.end(), [](const wchar_t left, const wchar_t right) {
+        return std::towlower(left) == std::towlower(right);
+    }) != value.end();
+}
+
+bool MatchesThreadFilter(const std::vector<std::wstring>& values, const std::wstring& query) {
+    return std::any_of(values.begin(), values.end(), [&query](const std::wstring& value) {
+        return ContainsCaseInsensitive(value, query);
+    });
+}
+
 bool SelectedItemData(HWND list, std::size_t& indexOut) {
     indexOut = 0;
     if (!list) {
@@ -234,7 +255,12 @@ bool ProcessDetailPage::CreateThreadTab() {
     HWND sample = AddButton(tab, ThreadSample, L"采样PDB字段", 112, 25, 112, 28);
     HWND stack = AddButton(tab, ThreadStack, L"查看调用栈", 230, 25, 108, 28);
     HWND status = AddLabel(tab, ThreadStatus, L"● 尚未刷新", 344, 25, -14, 28);
-    HWND list = AddList(tab, ThreadList, 14, 59, -14, -244);
+    HWND page = pages_[static_cast<std::size_t>(tab)].hwnd;
+    HWND filter = Ksword::Ui::CreateFilterBar(page, ThreadFilter, L"筛选线程字段与 R0 详情", 14, 59, 100, 26);
+    if (filter) {
+        pages_[static_cast<std::size_t>(tab)].placements.push_back(Placement{ filter, 14, 59, -14, 26 });
+    }
+    HWND list = AddList(tab, ThreadList, 14, 91, -14, -244);
     HWND output = AddEdit(
         tab,
         ThreadRuntimeOutput,
@@ -246,7 +272,7 @@ bool ProcessDetailPage::CreateThreadTab() {
         -14,
         -14);
 
-    if (!group || !refresh || !sample || !stack || !status || !list || !output) {
+    if (!group || !refresh || !sample || !stack || !status || !filter || !list || !output) {
         return false;
     }
 
@@ -268,10 +294,10 @@ bool ProcessDetailPage::CreateThreadTab() {
         sample,
         stack,
         status,
+        filter,
         list,
         output
     };
-    HWND page = pages_[static_cast<std::size_t>(tab)].hwnd;
     if (!page || !::SetWindowSubclass(
             page,
             ThreadLayoutSubclassProc,
@@ -291,31 +317,38 @@ void ProcessDetailPage::PopulateThreadTab() {
     }
 
     ClearList(list);
+    const std::wstring query = Ksword::Ui::GetFilterBarText(Control(TabIndex::Threads, ThreadFilter));
+    std::size_t visibleCount = 0;
     for (std::size_t index = 0; index < snapshot_.threads.size(); ++index) {
         const ProcessThreadInfo& thread = snapshot_.threads[index];
+        const std::vector<std::wstring> values{
+            DecimalText(thread.threadId),
+            thread.statusText.empty() ? L"-" : thread.statusText,
+            SignedDecimalText(thread.basePriority),
+            L"-",
+            HexAddressText(thread.startAddress),
+            L"Unavailable",
+            L"Unavailable",
+            L"Unavailable",
+            L"U:Unavailable | K:Unavailable | Unavailable",
+            L"Unavailable"
+        };
+        if (!MatchesThreadFilter(values, query)) {
+            continue;
+        }
         AddListRow(
             list,
-            static_cast<int>(index),
-            {
-                DecimalText(thread.threadId),
-                thread.statusText.empty() ? L"-" : thread.statusText,
-                SignedDecimalText(thread.basePriority),
-                L"-",
-                HexAddressText(thread.startAddress),
-                L"Unavailable",
-                L"Unavailable",
-                L"Unavailable",
-                L"U:Unavailable | K:Unavailable | Unavailable",
-                L"Unavailable"
-            },
+            static_cast<int>(visibleCount),
+            values,
             static_cast<LPARAM>(index + 1));
+        ++visibleCount;
     }
 
     if (snapshot_.threadsSucceeded) {
         SetPageStatus(
             TabIndex::Threads,
             ThreadStatus,
-            L"● 刷新完成 | 线程数 " + DecimalText(snapshot_.threads.size()));
+            L"● 刷新完成 | 线程 " + DecimalText(visibleCount) + L" / " + DecimalText(snapshot_.threads.size()));
     } else {
         std::wstring status = L"● 线程刷新失败";
         if (!snapshot_.errorText.empty()) {
@@ -330,6 +363,10 @@ bool ProcessDetailPage::HandleThreadCommand(int controlId) {
     case ThreadRefresh:
         SetPageStatus(TabIndex::Threads, ThreadStatus, L"● 正在后台刷新线程细节...");
         RefreshAll();
+        return true;
+
+    case ThreadFilter:
+        PopulateThreadTab();
         return true;
 
     case ThreadSample: {

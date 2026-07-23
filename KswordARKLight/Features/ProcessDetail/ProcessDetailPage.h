@@ -69,6 +69,7 @@ private:
         ThreadStatus,
         ThreadList,
         ThreadRuntimeOutput,
+        ThreadFilter,
 
         ActionTerminateMode = 1300,
         ActionTerminate,
@@ -99,6 +100,7 @@ private:
         ModuleVerifySignature,
         ModuleStatus,
         ModuleList,
+        ModuleFilter,
 
         TokenRefresh = 1500,
         TokenStatus,
