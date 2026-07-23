@@ -423,6 +423,9 @@
     <ClCompile Include="..\Ksword5.1\Ksword5.1\ArkDriverClient\ArkDriverCallback.cpp">
       <Filter>ArkDriverClient</Filter>
     </ClCompile>
+    <ClCompile Include="..\Ksword5.1\Ksword5.1\ArkDriverClient\ArkDriverBugcheck.cpp">
+      <Filter>ArkDriverClient</Filter>
+    </ClCompile>
     <ClCompile Include="..\Ksword5.1\Ksword5.1\ArkDriverClient\ArkDriverCapabilities.cpp">
       <Filter>ArkDriverClient</Filter>
     </ClCompile>
@@ -438,6 +441,9 @@
     <ClCompile Include="..\Ksword5.1\Ksword5.1\ArkDriverClient\ArkDriverDynData.cpp">
       <Filter>ArkDriverClient</Filter>
     </ClCompile>
+    <ClCompile Include="..\Ksword5.1\Ksword5.1\ArkDriverClient\ArkDriverDebugOutput.cpp">
+      <Filter>ArkDriverClient</Filter>
+    </ClCompile>
     <ClCompile Include="..\Ksword5.1\Ksword5.1\ArkDriverClient\ArkDriverError.cpp">
       <Filter>ArkDriverClient</Filter>
     </ClCompile>
@@ -445,6 +451,12 @@
       <Filter>ArkDriverClient</Filter>
     </ClCompile>
     <ClCompile Include="..\Ksword5.1\Ksword5.1\ArkDriverClient\ArkDriverHwid.cpp">
+      <Filter>ArkDriverClient</Filter>
+    </ClCompile>
+    <ClCompile Include="..\Ksword5.1\Ksword5.1\ArkDriverClient\ArkDriverHandle.cpp">
+      <Filter>ArkDriverClient</Filter>
+    </ClCompile>
+    <ClCompile Include="..\Ksword5.1\Ksword5.1\ArkDriverClient\ArkDriverIoctlRegistry.cpp">
       <Filter>ArkDriverClient</Filter>
     </ClCompile>
     <ClCompile Include="..\Ksword5.1\Ksword5.1\ArkDriverClient\ArkDriverKernel.cpp">
