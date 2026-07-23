@@ -1,9 +1,13 @@
 #include "MiscFeature.h"
 
+#include "../../Ui/AsyncTask.h"
 #include "../../Ui/Controls.h"
+#include "../../Ui/FilterBar.h"
 #include "../../Ui/ListViewUtil.h"
+#include "../../Ui/LoadingOverlay.h"
 #include "../../Ui/TabUtil.h"
 #include "../../Ui/Theme.h"
+#include "../../Ui/VirtualListView.h"
 #include "../../../Ksword5.1/Ksword5.1/ArkDriverClient/ArkDriverClient.h"
 
 #include <commctrl.h>
@@ -14,6 +18,8 @@
 #include <cstdint>
 #include <cstring>
 #include <cwctype>
+#include <memory>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <utility>
@@ -28,16 +34,21 @@ constexpr int kTabId = 69101;
 constexpr int kListId = 69102;
 constexpr int kRefreshButtonId = 69103;
 constexpr int kCopyButtonId = 69104;
+constexpr int kFilterBarId = 69105;
+constexpr int kLoadingOverlayId = 69106;
 constexpr int kCiTabIndex = 0;
 constexpr int kVbsTabIndex = 1;
 constexpr int kHyperVTabIndex = 2;
 constexpr int kAppLockerTabIndex = 3;
 constexpr int kAuxiliaryTabIndex = 4;
-constexpr int kHeaderHeight = 34;
+constexpr int kHeaderHeight = 68;
 constexpr int kGap = 6;
 constexpr UINT kMenuRefresh = 69201;
 constexpr UINT kMenuCopyRow = 69202;
 constexpr UINT kMenuCopyAll = 69203;
+constexpr UINT kMenuCopyCell = 69204;
+constexpr UINT kMsgAuditRefreshCompleted = WM_APP + 603;
+constexpr UINT kMsgAuditFilterCompleted = WM_APP + 604;
 
 enum class MiscAuditPageId {
     CodeIntegrity,
@@ -60,6 +71,17 @@ struct MiscAuditRow {
     std::wstring detail;
 };
 
+struct MiscAuditRefreshResult {
+    MiscAuditPageId pageId = MiscAuditPageId::CodeIntegrity;
+    std::vector<MiscAuditRow> rows;
+};
+
+struct MiscAuditFilterResult {
+    std::uint64_t generation = 0;
+    std::wstring query;
+    std::vector<std::size_t> visibleIndexes;
+};
+
 // CommandResult captures bounded stdout/stderr from an external read-only query.
 // Inputs are filled by RunCaptureCommand; processing later turns exit code and
 // captured text into UI rows. No handles are retained after the command returns.
@@ -78,11 +100,22 @@ struct MiscAuditViewState {
     HWND hwnd = nullptr;
     HWND refreshButton = nullptr;
     HWND copyButton = nullptr;
+    HWND filterBar = nullptr;
     HWND list = nullptr;
+    HWND loadingOverlay = nullptr;
     MiscAuditPageId pageId = MiscAuditPageId::CodeIntegrity;
     std::wstring title;
     std::wstring statusText;
     std::vector<MiscAuditRow> rows;
+    std::vector<MiscAuditRow> visibleRows;
+    Ksword::Ui::VirtualListView virtualList;
+    std::shared_ptr<const std::vector<Ksword::Ui::VirtualListRow>> filterRows;
+    std::wstring filterQuery;
+    std::uint64_t snapshotGeneration = 0;
+    int contextColumn = 0;
+    bool hasLoaded = false;
+    std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<MiscAuditRefreshResult>> refreshTask;
+    std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<MiscAuditFilterResult>> filterTask;
 };
 
 // MiscFeaturePageState owns the tab host and retained child pages. Inputs arrive
@@ -740,24 +773,99 @@ std::vector<Ksword::Ui::ListViewColumn> AuditColumns() {
     };
 }
 
-// PopulateAuditList renders a row snapshot into the report ListView. Input is a
-// page state; processing replaces visible rows only; no value is returned.
+std::vector<std::wstring> AuditCells(const MiscAuditRow& row) {
+    return { row.category, row.item, row.state, row.source, row.risk, row.detail };
+}
+
+std::wstring AuditStableKey(const MiscAuditRow& row) {
+    return row.category + L"\n" + row.item + L"\n" + row.source;
+}
+
+std::vector<Ksword::Ui::VirtualListRow> BuildAuditVirtualRows(const std::vector<MiscAuditRow>& rows) {
+    std::vector<Ksword::Ui::VirtualListRow> displayRows;
+    displayRows.reserve(rows.size());
+    for (std::size_t index = 0; index < rows.size(); ++index) {
+        Ksword::Ui::VirtualListRow display{};
+        display.stableKey = AuditStableKey(rows[index]);
+        display.cells = AuditCells(rows[index]);
+        display.itemData = static_cast<LPARAM>(index);
+        displayRows.push_back(std::move(display));
+    }
+    return displayRows;
+}
+
+std::wstring StableKeyAt(const MiscAuditViewState& state, const int visibleIndex) {
+    if (visibleIndex < 0 || visibleIndex >= static_cast<int>(state.visibleRows.size())) {
+        return {};
+    }
+    return AuditStableKey(state.visibleRows[static_cast<std::size_t>(visibleIndex)]);
+}
+
+void RestoreListPosition(MiscAuditViewState& state, const std::wstring& selectedKey, const std::wstring& topKey) {
+    int selectedIndex = -1;
+    int topIndex = -1;
+    for (std::size_t index = 0; index < state.visibleRows.size(); ++index) {
+        const std::wstring key = AuditStableKey(state.visibleRows[index]);
+        if (!selectedKey.empty() && key == selectedKey) {
+            selectedIndex = static_cast<int>(index);
+        }
+        if (!topKey.empty() && key == topKey) {
+            topIndex = static_cast<int>(index);
+        }
+    }
+    if (selectedIndex >= 0) {
+        ListView_SetItemState(state.list, selectedIndex, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
+    }
+    if (topIndex >= 0) {
+        ListView_EnsureVisible(state.list, topIndex, FALSE);
+    }
+}
+
+// RequestAuditFilter runs local matching against the immutable text snapshot.
+// Registry, service, WMI and R0 probes are never repeated while typing.
+void RequestAuditFilter(MiscAuditViewState& state, std::wstring query) {
+    if (!state.filterTask || !state.filterRows) {
+        return;
+    }
+    state.filterQuery = std::move(query);
+    const std::uint64_t generation = state.snapshotGeneration;
+    const auto rows = state.filterRows;
+    state.filterTask->request(
+        [rows, generation, query = state.filterQuery]() mutable {
+            MiscAuditFilterResult result{};
+            result.generation = generation;
+            result.query = std::move(query);
+            result.visibleIndexes = Ksword::Ui::VirtualListView::FilterRowIndexes(*rows, result.query);
+            return result;
+        },
+        [&state](std::uint64_t, std::optional<MiscAuditFilterResult>&& result, std::exception_ptr error) {
+            if (error || !result.has_value() || result->generation != state.snapshotGeneration || result->query != state.filterQuery) {
+                return;
+            }
+            const std::wstring selectedKey = StableKeyAt(state, ListView_GetNextItem(state.list, -1, LVNI_SELECTED));
+            const std::wstring topKey = StableKeyAt(state, ListView_GetTopIndex(state.list));
+            state.visibleRows.clear();
+            state.visibleRows.reserve(result->visibleIndexes.size());
+            for (const std::size_t index : result->visibleIndexes) {
+                if (index < state.rows.size()) {
+                    state.visibleRows.push_back(state.rows[index]);
+                }
+            }
+            state.virtualList.setVisibleIndexes(std::move(result->visibleIndexes));
+            RestoreListPosition(state, selectedKey, topKey);
+        });
+}
+
+// PopulateAuditList installs a new immutable owner-data snapshot after its
+// collector finishes. The old result remains interactive until this point.
 void PopulateAuditList(MiscAuditViewState& state) {
     if (!state.list) {
         return;
     }
-    Ksword::Ui::ScopedListViewRedrawLock lock(state.list);
-    Ksword::Ui::ClearListViewRows(state.list);
-    for (const MiscAuditRow& row : state.rows) {
-        Ksword::Ui::InsertListViewTextRow(state.list, {
-            row.category,
-            row.item,
-            row.state,
-            row.source,
-            row.risk,
-            row.detail,
-        });
-    }
+    state.filterRows = std::make_shared<const std::vector<Ksword::Ui::VirtualListRow>>(BuildAuditVirtualRows(state.rows));
+    ++state.snapshotGeneration;
+    state.virtualList.setRows(*state.filterRows);
+    RequestAuditFilter(state, state.filterBar ? Ksword::Ui::GetFilterBarText(state.filterBar) : state.filterQuery);
 }
 
 // BuildRowsTsv converts current rows to clipboard-friendly TSV. Input is a row
@@ -825,42 +933,75 @@ int SelectedRowIndex(const MiscAuditViewState& state) {
 // reads only the current in-memory row; no return value is produced.
 void CopySelectedRow(MiscAuditViewState& state) {
     const int index = SelectedRowIndex(state);
-    if (index < 0 || index >= static_cast<int>(state.rows.size())) {
+    if (index < 0 || index >= static_cast<int>(state.visibleRows.size())) {
         state.statusText = L"没有选中可复制的行。";
         ::InvalidateRect(state.hwnd, nullptr, TRUE);
         return;
     }
-    const bool ok = WriteClipboardText(state.hwnd, BuildRowsTsv({ state.rows[static_cast<std::size_t>(index)] }));
+    const bool ok = WriteClipboardText(state.hwnd, BuildRowsTsv({ state.visibleRows[static_cast<std::size_t>(index)] }));
     state.statusText = ok ? L"已复制当前行。" : L"复制当前行失败。";
     ::InvalidateRect(state.hwnd, nullptr, TRUE);
 }
 
-// CopyAllRows copies the full current tab as TSV. Input is a page state; process
-// serializes existing rows and does not trigger a refresh; no value is returned.
+// CopyAllRows copies the currently visible local result as TSV. It does not
+// trigger an audit refresh and therefore remains instantaneous while typing.
 void CopyAllRows(MiscAuditViewState& state) {
-    const bool ok = WriteClipboardText(state.hwnd, BuildRowsTsv(state.rows));
-    state.statusText = ok ? L"已复制全部审计行。" : L"复制全部审计行失败。";
+    const bool ok = WriteClipboardText(state.hwnd, BuildRowsTsv(state.visibleRows));
+    state.statusText = ok ? L"已复制可见审计结果。" : L"复制可见审计结果失败。";
     ::InvalidateRect(state.hwnd, nullptr, TRUE);
 }
 
-// RefreshAuditView runs the collector for the current tab and updates the UI.
-// Input is a page state; processing may launch bounded PowerShell helpers and
-// query SCM/registry/ArkDriverClient; no value is returned.
+// RefreshAuditView schedules all command, registry, service and R0 work in a
+// snapshot worker. Repeated clicks coalesce and the old table stays available.
 void RefreshAuditView(MiscAuditViewState& state) {
-    state.statusText = L"正在刷新只读审计证据...";
-    ::InvalidateRect(state.hwnd, nullptr, TRUE);
-    state.rows = CollectRowsForPage(state.pageId);
-    PopulateAuditList(state);
-    std::size_t unavailable = 0;
-    for (const MiscAuditRow& row : state.rows) {
-        if (row.state == L"Unavailable") {
-            ++unavailable;
-        }
+    if (!state.refreshTask) {
+        return;
     }
-    state.statusText = L"Rows=" + std::to_wstring(state.rows.size()) +
-        L"; Unavailable=" + std::to_wstring(unavailable) +
-        L"; 默认只读审计，失败原因保留在详情列。";
+    state.statusText = state.refreshTask->running()
+        ? L"审计刷新已排队，等待当前快照完成…"
+        : L"正在后台刷新只读审计证据…";
+    ::EnableWindow(state.refreshButton, FALSE);
+    if (state.rows.empty()) {
+        Ksword::Ui::SetLoadingOverlay(state.loadingOverlay, true, L"正在加载安全审计快照…");
+    }
     ::InvalidateRect(state.hwnd, nullptr, TRUE);
+    const MiscAuditPageId pageId = state.pageId;
+    state.refreshTask->request(
+        [pageId] {
+            MiscAuditRefreshResult result{};
+            result.pageId = pageId;
+            result.rows = CollectRowsForPage(pageId);
+            return result;
+        },
+        [&state](std::uint64_t, std::optional<MiscAuditRefreshResult>&& result, std::exception_ptr error) {
+            ::EnableWindow(state.refreshButton, TRUE);
+            Ksword::Ui::SetLoadingOverlay(state.loadingOverlay, false);
+            if (error || !result.has_value() || result->pageId != state.pageId) {
+                state.statusText = L"安全审计后台刷新异常结束，已保留旧结果。";
+                ::InvalidateRect(state.hwnd, nullptr, TRUE);
+                return;
+            }
+            state.rows = std::move(result->rows);
+            PopulateAuditList(state);
+            std::size_t unavailable = 0;
+            for (const MiscAuditRow& row : state.rows) {
+                if (row.state == L"Unavailable" || row.state == L"Unsupported") {
+                    ++unavailable;
+                }
+            }
+            state.statusText = L"Rows=" + std::to_wstring(state.rows.size()) +
+                L"; Unavailable=" + std::to_wstring(unavailable) +
+                L"; 默认只读审计，失败原因保留在详情列。";
+            ::InvalidateRect(state.hwnd, nullptr, TRUE);
+        });
+}
+
+void EnsureAuditViewLoaded(HWND view) {
+    MiscAuditViewState* state = StateFromAuditView(view);
+    if (state && !state->hasLoaded) {
+        state->hasLoaded = true;
+        RefreshAuditView(*state);
+    }
 }
 
 // LayoutAuditView places toolbar and ListView inside one Misc tab. Input is page
@@ -875,8 +1016,10 @@ void LayoutAuditView(MiscAuditViewState& state) {
     const int height = Height(rc);
     ::MoveWindow(state.refreshButton, kGap, kGap, 86, 24, TRUE);
     ::MoveWindow(state.copyButton, kGap + 94, kGap, 106, 24, TRUE);
+    ::MoveWindow(state.filterBar, kGap, 34, std::max(100, width - (kGap * 2)), 28, TRUE);
     const int top = kHeaderHeight + kGap;
     ::MoveWindow(state.list, kGap, top, std::max(0, width - (kGap * 2)), std::max(0, height - top - kGap), TRUE);
+    ::MoveWindow(state.loadingOverlay, kGap, top, std::max(0, width - (kGap * 2)), std::max(0, height - top - kGap), TRUE);
 }
 
 // ShowAuditContextMenu displays only read-only actions. Inputs are page state and
@@ -890,6 +1033,7 @@ void ShowAuditContextMenu(MiscAuditViewState& state, POINT screenPoint) {
     LVHITTESTINFO hit{};
     hit.pt = clientPoint;
     const int item = ListView_HitTest(state.list, &hit);
+    state.contextColumn = std::max(0, hit.iSubItem);
     if (item >= 0) {
         ListView_SetItemState(state.list, -1, 0, LVIS_SELECTED | LVIS_FOCUSED);
         ListView_SetItemState(state.list, item, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
@@ -903,7 +1047,8 @@ void ShowAuditContextMenu(MiscAuditViewState& state, POINT screenPoint) {
     ::AppendMenuW(menu, MF_STRING, kMenuRefresh, L"刷新只读审计");
     ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     ::AppendMenuW(menu, MF_STRING | (hasSelection ? 0U : MF_GRAYED), kMenuCopyRow, L"复制当前行");
-    ::AppendMenuW(menu, MF_STRING, kMenuCopyAll, L"复制全部行");
+    ::AppendMenuW(menu, MF_STRING | (hasSelection ? 0U : MF_GRAYED), kMenuCopyCell, L"复制单元格");
+    ::AppendMenuW(menu, MF_STRING, kMenuCopyAll, L"复制可见结果");
 
     const UINT command = ::TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, screenPoint.x, screenPoint.y, 0, state.hwnd, nullptr);
     ::DestroyMenu(menu);
@@ -914,6 +1059,17 @@ void ShowAuditContextMenu(MiscAuditViewState& state, POINT screenPoint) {
     case kMenuCopyRow:
         CopySelectedRow(state);
         break;
+    case kMenuCopyCell: {
+        const int selected = SelectedRowIndex(state);
+        if (selected >= 0 && selected < static_cast<int>(state.visibleRows.size())) {
+            const std::vector<std::wstring> cells = AuditCells(state.visibleRows[static_cast<std::size_t>(selected)]);
+            const std::size_t column = static_cast<std::size_t>(std::max(0, state.contextColumn));
+            const bool ok = WriteClipboardText(state.hwnd, column < cells.size() ? cells[column] : std::wstring{});
+            state.statusText = ok ? L"已复制单元格。" : L"复制单元格失败。";
+            ::InvalidateRect(state.hwnd, nullptr, TRUE);
+        }
+        break;
+    }
     case kMenuCopyAll:
         CopyAllRows(state);
         break;
@@ -928,11 +1084,21 @@ void ShowAuditContextMenu(MiscAuditViewState& state, POINT screenPoint) {
 bool CreateAuditChildControls(MiscAuditViewState& state, HWND hwnd) {
     state.refreshButton = Ksword::Ui::CreateButton(hwnd, kRefreshButtonId, L"Refresh", 0, 0, 80, 24);
     state.copyButton = Ksword::Ui::CreateButton(hwnd, kCopyButtonId, L"Copy TSV", 0, 0, 100, 24);
-    state.list = Ksword::Ui::CreateReportListView(hwnd, kListId, 0, 0, 0, 0);
-    if (!state.refreshButton || !state.copyButton || !state.list) {
+    state.filterBar = Ksword::Ui::CreateFilterBar(hwnd, kFilterBarId,
+        L"筛选类别、项目、状态、来源、风险和详情", 0, 0, 0, 0);
+    if (!state.refreshButton || !state.copyButton || !state.filterBar ||
+        !state.virtualList.create(hwnd, kListId, 0, 0, 0, 0, LVS_SHOWSELALWAYS | LVS_SINGLESEL)) {
         return false;
     }
-    Ksword::Ui::AddListViewColumns(state.list, AuditColumns());
+    state.list = state.virtualList.hwnd();
+    state.virtualList.addColumns(AuditColumns());
+    state.loadingOverlay = Ksword::Ui::CreateLoadingOverlay(hwnd, kLoadingOverlayId, { 0, 0, 1, 1 });
+    state.refreshTask = std::make_unique<Ksword::Ui::AsyncSnapshotTask<MiscAuditRefreshResult>>(hwnd, kMsgAuditRefreshCompleted);
+    state.filterTask = std::make_unique<Ksword::Ui::AsyncSnapshotTask<MiscAuditFilterResult>>(hwnd, kMsgAuditFilterCompleted);
+    if (!state.loadingOverlay || !state.refreshTask || !state.filterTask) {
+        return false;
+    }
+    Ksword::Ui::SetWindowFontRecursive(hwnd);
     return true;
 }
 
@@ -965,7 +1131,6 @@ bool RegisterAuditViewClass() {
                     return -1;
                 }
                 LayoutAuditView(*state);
-                RefreshAuditView(*state);
             }
             return 0;
         case WM_SIZE:
@@ -982,10 +1147,28 @@ bool RegisterAuditViewClass() {
                 CopyAllRows(*state);
                 return 0;
             }
+            if (state && LOWORD(wParam) == kFilterBarId && HIWORD(wParam) == EN_CHANGE) {
+                RequestAuditFilter(*state, Ksword::Ui::GetFilterBarText(state->filterBar));
+                return 0;
+            }
+            break;
+        case kMsgAuditRefreshCompleted:
+            if (state && state->refreshTask && state->refreshTask->consume(hwnd, wParam, lParam)) {
+                return 0;
+            }
+            break;
+        case kMsgAuditFilterCompleted:
+            if (state && state->filterTask && state->filterTask->consume(hwnd, wParam, lParam)) {
+                return 0;
+            }
             break;
         case WM_NOTIFY:
             if (state) {
                 const auto* header = reinterpret_cast<const NMHDR*>(lParam);
+                LRESULT virtualResult = 0;
+                if (header && state->virtualList.handleNotify(*header, virtualResult)) {
+                    return virtualResult;
+                }
                 if (header && header->hwndFrom == state->list && header->code == NM_RCLICK) {
                     POINT pt{};
                     ::GetCursorPos(&pt);
@@ -1025,6 +1208,12 @@ bool RegisterAuditViewClass() {
             return 0;
         }
         case WM_NCDESTROY:
+            if (state && state->refreshTask) {
+                state->refreshTask->cancel();
+            }
+            if (state && state->filterTask) {
+                state->filterTask->cancel();
+            }
             delete state;
             ::SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
             return 0;
@@ -1090,6 +1279,11 @@ void ShowHostPages(MiscFeaturePageState& state) {
     if (state.auxiliaryView) {
         ::ShowWindow(state.auxiliaryView, state.currentTab == kAuxiliaryTabIndex ? SW_SHOW : SW_HIDE);
     }
+    const HWND currentView = state.currentTab == kCiTabIndex ? state.ciView :
+        state.currentTab == kVbsTabIndex ? state.vbsView :
+        state.currentTab == kHyperVTabIndex ? state.hypervView :
+        state.currentTab == kAppLockerTabIndex ? state.appLockerView : state.auxiliaryView;
+    EnsureAuditViewLoaded(currentView);
 }
 
 // LayoutHostChildren sizes the tab control and every retained child page. Input
