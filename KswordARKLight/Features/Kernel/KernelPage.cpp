@@ -77,6 +77,8 @@ constexpr UINT kMsgKernelQueryCompleted = WM_APP + 605;
 constexpr UINT kMsgKernelActionCompleted = WM_APP + 606;
 constexpr UINT kMsgCallbackEventReceived = WM_APP + 607;
 constexpr UINT kMsgCallbackAnswerCompleted = WM_APP + 608;
+constexpr UINT kMsgR0EvidenceFilterCompleted = WM_APP + 609;
+constexpr UINT_PTR kTimerR0EvidenceFilter = 51057;
 constexpr int kIdCallbackGlobalEnabled = 51047;
 constexpr int kIdCallbackFileMonitorFsctlOnly = 51048;
 constexpr int kIdDeviceDriverDirectoryCombo = 51049;
@@ -183,6 +185,26 @@ constexpr const wchar_t* kDeviceDriverFixedDirectories[] = {
     L"\\FileSystem",
     L"\\FileSystem\\Filters",
 };
+
+// IsR0EvidenceFeature identifies the large snapshot pages that share the
+// generic R0 evidence projection. These pages use one debounced background
+// filter path to keep edit notifications off the UI thread.
+bool IsR0EvidenceFeature(const KernelFeatureId featureId) {
+    switch (featureId) {
+    case KernelFeatureId::CpuHardwareSnapshot:
+    case KernelFeatureId::PhysicalMemoryLayout:
+    case KernelFeatureId::MutationAudit:
+    case KernelFeatureId::KeyboardHotkeys:
+    case KernelFeatureId::KeyboardHooks:
+    case KernelFeatureId::DynDataCapabilities:
+    case KernelFeatureId::MinifilterBypassPids:
+    case KernelFeatureId::KernelTimerDpc:
+    case KernelFeatureId::IoctlRegistry:
+        return true;
+    default:
+        return false;
+    }
+}
 
 // MinMaxValue keeps this file independent from std::min/std::max macro
 // collisions when Windows headers are included before NOMINMAX is visible.
@@ -1570,6 +1592,7 @@ LRESULT KernelPage::HandleMessage(HWND hwnd, const UINT msg, const WPARAM wParam
         queryTask_ = std::make_unique<Ksword::Ui::AsyncSnapshotTask<KernelOperationResult>>(hwnd, kMsgKernelQueryCompleted);
         actionTask_ = std::make_unique<Ksword::Ui::AsyncSnapshotTask<KernelOperationResult>>(hwnd, kMsgKernelActionCompleted);
         callbackAnswerTask_ = std::make_unique<Ksword::Ui::AsyncSnapshotTask<KernelOperationResult>>(hwnd, kMsgCallbackAnswerCompleted);
+        r0EvidenceFilterTask_ = std::make_unique<Ksword::Ui::AsyncSnapshotTask<KernelR0EvidenceSnapshot>>(hwnd, kMsgR0EvidenceFilterCompleted);
         callbackEventReceiver_ = std::make_unique<CallbackEventReceiver>(hwnd, kMsgCallbackEventReceived);
         CreateChildControls();
         PopulateTabs();
@@ -1598,6 +1621,21 @@ LRESULT KernelPage::HandleMessage(HWND hwnd, const UINT msg, const WPARAM wParam
     }
     case kMsgCallbackAnswerCompleted:
         if (callbackAnswerTask_ && callbackAnswerTask_->consume(hwnd, wParam, lParam)) {
+            return 0;
+        }
+        break;
+    case kMsgR0EvidenceFilterCompleted:
+        if (r0EvidenceFilterTask_ && r0EvidenceFilterTask_->consume(hwnd, wParam, lParam)) {
+            return 0;
+        }
+        break;
+    case WM_TIMER:
+        if (wParam == kTimerR0EvidenceFilter) {
+            ::KillTimer(hwnd, kTimerR0EvidenceFilter);
+            if (hasPendingR0EvidenceFilter_) {
+                hasPendingR0EvidenceFilter_ = false;
+                RequestR0EvidenceRebuild(pendingR0EvidenceFeatureId_);
+            }
             return 0;
         }
         break;
@@ -1667,6 +1705,11 @@ LRESULT KernelPage::HandleMessage(HWND hwnd, const UINT msg, const WPARAM wParam
         }
         if ((LOWORD(wParam) == kIdFilterEdit || LOWORD(wParam) == kIdModuleFilterEdit) && HIWORD(wParam) == EN_CHANGE) {
             if (suppressFilterChange_) {
+                return 0;
+            }
+            if (const KernelFeatureDescriptor* descriptor = CurrentDescriptor();
+                descriptor != nullptr && IsR0EvidenceFeature(descriptor->id) && !currentRawColumns_.empty()) {
+                ScheduleR0EvidenceFilter(descriptor->id);
                 return 0;
             }
             if (const KernelFeatureDescriptor* descriptor = CurrentDescriptor();
@@ -2445,6 +2488,7 @@ LRESULT KernelPage::HandleMessage(HWND hwnd, const UINT msg, const WPARAM wParam
         return 0;
     }
     case WM_NCDESTROY:
+        ::KillTimer(hwnd, kTimerR0EvidenceFilter);
         if (callbackEventReceiver_) {
             callbackEventReceiver_->Shutdown();
         }
@@ -2456,6 +2500,9 @@ LRESULT KernelPage::HandleMessage(HWND hwnd, const UINT msg, const WPARAM wParam
         }
         if (callbackAnswerTask_) {
             callbackAnswerTask_->cancel();
+        }
+        if (r0EvidenceFilterTask_) {
+            r0EvidenceFilterTask_->cancel();
         }
         ::SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
         hwnd_ = nullptr;
@@ -8048,20 +8095,23 @@ void KernelPage::RebuildIntegrityEvidenceListFromCache(const KernelFeatureId fea
     }
 }
 
+// BuildR0EvidenceSnapshot projects an immutable raw R0 table without touching
+// Win32 controls. It runs on the filter worker, allowing large driver audits to
+// remain responsive while the user edits the local search text.
+KernelR0EvidenceSnapshot BuildR0EvidenceSnapshot(
+    const KernelFeatureId featureId,
+    std::wstring pageName,
+    std::vector<std::wstring> rawColumns,
+    std::vector<std::vector<std::wstring>> rawRows,
+    std::wstring filterText,
+    const bool riskOnly,
+    std::wstring selectedRowSignature,
+    const int topRow) {
+    KernelR0EvidenceSnapshot snapshot{};
+    snapshot.featureId = featureId;
+    snapshot.selectedRowSignature = std::move(selectedRowSignature);
+    snapshot.topRow = topRow;
 
-void KernelPage::RebuildR0EvidenceListFromCache(const KernelFeatureId featureId) {
-    // RebuildR0EvidenceListFromCache projects remaining R0-only KernelDock pages
-    // into their original fixed-column tables. Inputs are raw facade rows and
-    // the local filter edit; processing applies client-side filtering so edit-box
-    // changes do not discard rows; output is the visible Win32 ListView and the
-    // detail pane for the selected row.
-    if (!resultList_) {
-        return;
-    }
-
-    const std::vector<std::wstring>& rawColumns = !currentRawColumns_.empty() ? currentRawColumns_ : currentColumns_;
-    const std::vector<std::vector<std::wstring>>& rawRows = !currentRawRows_.empty() ? currentRawRows_ : currentRows_;
-    const std::wstring filterText = WindowText(filterEdit_);
     const auto rawValue = [&](const std::vector<std::wstring>& row, std::initializer_list<const wchar_t*> names) -> std::wstring {
         return RowFieldByName(row, rawColumns, names);
     };
@@ -8107,25 +8157,16 @@ void KernelPage::RebuildR0EvidenceListFromCache(const KernelFeatureId featureId)
             return false;
         }
     };
-    const auto hiddenColumn = [&](const std::wstring& name) {
-        if (name == L"#") {
-            return false;
-        }
-        const std::vector<std::wstring> canonical = CanonicalColumnNames(featureId);
-        return !HasColumn(canonical, name);
-    };
 
-    std::vector<std::wstring> displayColumns;
-    displayColumns.push_back(L"#");
+    snapshot.columns.push_back(L"#");
     for (const std::wstring& column : CanonicalColumnNames(featureId)) {
-        addColumnIfMissing(displayColumns, column.c_str());
+        addColumnIfMissing(snapshot.columns, column.c_str());
     }
     for (const std::wstring& column : rawColumns) {
-        addColumnIfMissing(displayColumns, column.c_str());
+        addColumnIfMissing(snapshot.columns, column.c_str());
     }
-    addColumnIfMissing(displayColumns, L"Detail");
+    addColumnIfMissing(snapshot.columns, L"Detail");
 
-    std::vector<std::vector<std::wstring>> displayRows;
     std::size_t reportedTotalRows = 0;
     std::size_t reportedReturnedRows = 0;
     std::size_t totalRows = 0;
@@ -8156,6 +8197,7 @@ void KernelPage::RebuildR0EvidenceListFromCache(const KernelFeatureId featureId)
             lastStatus = rawValue(rawRow, { L"LastStatus" });
         }
     }
+    snapshot.rows.reserve(rawRows.size());
     for (const std::vector<std::wstring>& rawRow : rawRows) {
         if (!isDataRow(rawRow)) {
             continue;
@@ -8170,66 +8212,30 @@ void KernelPage::RebuildR0EvidenceListFromCache(const KernelFeatureId featureId)
         if (risky) {
             ++riskRows;
         }
-        if (riskOnlyCheck_ && Button_GetCheck(riskOnlyCheck_) == BST_CHECKED && !risky) {
+        if (riskOnly && !risky) {
             continue;
         }
-        const std::wstring merged = MergeRowText(rawRow);
-        if (!filterText.empty() && !ContainsCaseInsensitive(merged, filterText)) {
+        if (!filterText.empty() && !ContainsCaseInsensitive(MergeRowText(rawRow), filterText)) {
             continue;
         }
-        std::vector<std::wstring> cells(displayColumns.size());
-        for (std::size_t column = 0; column < displayColumns.size(); ++column) {
-            const std::wstring& name = displayColumns[column];
+        std::vector<std::wstring> cells(snapshot.columns.size());
+        for (std::size_t column = 0; column < snapshot.columns.size(); ++column) {
+            const std::wstring& name = snapshot.columns[column];
             if (name == L"#") {
-                cells[column] = std::to_wstring(displayRows.size());
+                cells[column] = std::to_wstring(snapshot.rows.size());
             } else if (name == L"Detail") {
                 cells[column] = rawValue(rawRow, { L"Detail" });
             } else {
                 cells[column] = displayValue(rawRow, name);
             }
         }
-        displayRows.push_back(std::move(cells));
+        snapshot.rows.push_back(std::move(cells));
     }
 
-    currentColumns_ = std::move(displayColumns);
-    currentRows_ = std::move(displayRows);
-    ClearResultTable();
-    for (std::size_t index = 0; index < currentColumns_.size(); ++index) {
-        const std::wstring& name = currentColumns_[index];
-        int width = hiddenColumn(name) ? 0 : ColumnWidth(name);
-        if (name == L"对象") {
-            width = 180;
-        } else if (name == L"热键ID" || name == L"进程ID" || name == L"线程ID" || name == L"Flags") {
-            width = 80;
-        } else if (name == L"热键" || name == L"类型" || name == L"范围" || name == L"VK/Mod") {
-            width = 130;
-        } else if (name == L"函数/偏移") {
-            width = 170;
-        } else if (name == L"详情") {
-            width = 300;
-        } else if (name == L"项目" || name == L"Capability") {
-            width = 170;
-        } else if (name == L"值" || name == L"摘要" || name == L"Features" || name == L"字段" || name == L"原因") {
-            width = 260;
-        } else if (name == L"Tx" || name == L"Address" || name == L"回调") {
-            width = 165;
-        } else if (name == L"PID" || name == L"TID" || name == L"Bytes") {
-            width = 72;
-        } else if (name == L"进程" || name == L"Process") {
-            width = 180;
-        } else if (name == L"Detail") {
-            width = 320;
-        }
-        AddResultTableColumn(static_cast<int>(index), name, width);
-    }
-    SyncResultListVirtualRows();
-
-    const KernelFeatureDescriptor* descriptor = CurrentDescriptor();
-    const std::wstring pageName = descriptor != nullptr ? descriptor->title : L"R0 证据";
     const std::size_t effectiveTotal = reportedTotalRows == 0 ? totalRows : reportedTotalRows;
     const std::size_t effectiveReturned = reportedReturnedRows == 0 ? totalRows : reportedReturnedRows;
     std::wostringstream status;
-    status << L"状态：" << pageName << L"已刷新，显示 " << currentRows_.size()
+    status << L"状态：" << pageName << L"已刷新，显示 " << snapshot.rows.size()
            << L"，返回 " << effectiveReturned << L"/" << effectiveTotal;
     if (riskRows != 0) {
         status << L"，风险/异常 " << riskRows;
@@ -8246,14 +8252,127 @@ void KernelPage::RebuildR0EvidenceListFromCache(const KernelFeatureId featureId)
     if (!lastStatus.empty()) {
         status << L"，Last " << lastStatus;
     }
-    ::SetWindowTextW(statusText_, status.str().c_str());
-    if (!currentRows_.empty()) {
-        ListView_SetItemState(resultList_, 0, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
-        ListView_EnsureVisible(resultList_, 0, FALSE);
-        UpdateSelectedRowDetail();
-    } else {
-        ::SetWindowTextW(detailEdit_, L"当前过滤条件下没有 R0 证据记录。");
+    snapshot.statusText = status.str();
+    return snapshot;
+}
+
+void KernelPage::RebuildR0EvidenceListFromCache(const KernelFeatureId featureId) {
+    // RebuildR0EvidenceListFromCache projects remaining R0-only KernelDock pages
+    // into their original fixed-column tables. Inputs are raw facade rows and
+    // the local filter edit; processing applies client-side filtering so edit-box
+    // changes do not discard rows; output is the visible Win32 ListView and the
+    // detail pane for the selected row.
+    RequestR0EvidenceRebuild(featureId);
+}
+
+void KernelPage::ScheduleR0EvidenceFilter(const KernelFeatureId featureId) {
+    if (!hwnd_ || !IsR0EvidenceFeature(featureId)) {
+        return;
     }
+    pendingR0EvidenceFeatureId_ = featureId;
+    hasPendingR0EvidenceFilter_ = true;
+    ::SetTimer(hwnd_, kTimerR0EvidenceFilter, 200, nullptr);
+    if (const KernelFeatureDescriptor* descriptor = CurrentDescriptor(); descriptor != nullptr) {
+        ::SetWindowTextW(statusText_, (L"状态：正在等待筛选输入完成（200ms）… " + descriptor->title).c_str());
+    }
+}
+
+void KernelPage::RequestR0EvidenceRebuild(const KernelFeatureId featureId) {
+    if (!resultList_ || !IsR0EvidenceFeature(featureId)) {
+        return;
+    }
+    const KernelFeatureDescriptor* descriptor = CurrentDescriptor();
+    if (descriptor == nullptr || descriptor->id != featureId) {
+        return;
+    }
+    std::vector<std::wstring> rawColumns = !currentRawColumns_.empty() ? currentRawColumns_ : currentColumns_;
+    std::vector<std::vector<std::wstring>> rawRows = !currentRawRows_.empty() ? currentRawRows_ : currentRows_;
+    const std::wstring filterText = WindowText(filterEdit_);
+    const bool riskOnly = riskOnlyCheck_ && Button_GetCheck(riskOnlyCheck_) == BST_CHECKED;
+    const int selected = ListView_GetNextItem(resultList_, -1, LVNI_SELECTED);
+    std::wstring selectedSignature = selected >= 0 && selected < static_cast<int>(currentRows_.size())
+        ? MergeRowText(currentRows_[static_cast<std::size_t>(selected)])
+        : std::wstring{};
+    const int topRow = std::max(0, ListView_GetTopIndex(resultList_));
+    std::wstring pageName = descriptor->title;
+    if (!r0EvidenceFilterTask_) {
+        ApplyR0EvidenceSnapshot(BuildR0EvidenceSnapshot(featureId, pageName, rawColumns, rawRows, filterText,
+            riskOnly, selectedSignature, topRow));
+        return;
+    }
+    ::SetWindowTextW(statusText_, (L"状态：正在后台筛选 " + pageName + L"…").c_str());
+    r0EvidenceFilterTask_->request(
+        [featureId, pageName = std::move(pageName), rawColumns = std::move(rawColumns), rawRows = std::move(rawRows),
+            filterText = std::move(filterText), riskOnly, selectedSignature = std::move(selectedSignature), topRow]() mutable {
+            return BuildR0EvidenceSnapshot(featureId, std::move(pageName), std::move(rawColumns), std::move(rawRows),
+                std::move(filterText), riskOnly, std::move(selectedSignature), topRow);
+        },
+        [this](std::uint64_t, std::optional<KernelR0EvidenceSnapshot>&& snapshot, std::exception_ptr error) {
+            if (error || !snapshot.has_value()) {
+                ::SetWindowTextW(statusText_, L"状态：R0 证据后台筛选异常结束，保留当前结果。");
+                return;
+            }
+            const KernelFeatureDescriptor* descriptor = CurrentDescriptor();
+            if (descriptor == nullptr || descriptor->id != snapshot->featureId) {
+                return;
+            }
+            ApplyR0EvidenceSnapshot(std::move(*snapshot));
+        });
+}
+
+void KernelPage::ApplyR0EvidenceSnapshot(KernelR0EvidenceSnapshot snapshot) {
+    if (!resultList_ || !IsR0EvidenceFeature(snapshot.featureId)) {
+        return;
+    }
+    const KernelFeatureDescriptor* descriptor = CurrentDescriptor();
+    if (descriptor == nullptr || descriptor->id != snapshot.featureId) {
+        return;
+    }
+    const bool schemaChanged = currentColumns_ != snapshot.columns;
+    currentColumns_ = std::move(snapshot.columns);
+    currentRows_ = std::move(snapshot.rows);
+    currentRowIndents_.clear();
+    if (schemaChanged) {
+        ClearResultGridOnly();
+        const std::vector<std::wstring> canonical = CanonicalColumnNames(snapshot.featureId);
+        for (std::size_t index = 0; index < currentColumns_.size(); ++index) {
+            const std::wstring& name = currentColumns_[index];
+            int width = (name != L"#" && !HasColumn(canonical, name)) ? 0 : ColumnWidth(name);
+            if (name == L"对象") width = 180;
+            else if (name == L"热键ID" || name == L"进程ID" || name == L"线程ID" || name == L"Flags") width = 80;
+            else if (name == L"热键" || name == L"类型" || name == L"范围" || name == L"VK/Mod") width = 130;
+            else if (name == L"函数/偏移") width = 170;
+            else if (name == L"详情") width = 300;
+            else if (name == L"项目" || name == L"Capability") width = 170;
+            else if (name == L"值" || name == L"摘要" || name == L"Features" || name == L"字段" || name == L"原因") width = 260;
+            else if (name == L"Tx" || name == L"Address" || name == L"回调") width = 165;
+            else if (name == L"PID" || name == L"TID" || name == L"Bytes") width = 72;
+            else if (name == L"进程" || name == L"Process") width = 180;
+            else if (name == L"Detail") width = 320;
+            AddResultTableColumn(static_cast<int>(index), name, width);
+        }
+    }
+    SyncResultListVirtualRows();
+    ::SetWindowTextW(statusText_, snapshot.statusText.c_str());
+    if (currentRows_.empty()) {
+        ::SetWindowTextW(detailEdit_, L"当前过滤条件下没有 R0 证据记录。");
+        InvalidateCurrentFeatureViewCache();
+        return;
+    }
+    int selectedRow = 0;
+    if (!snapshot.selectedRowSignature.empty()) {
+        const auto found = std::find_if(currentRows_.begin(), currentRows_.end(), [&snapshot](const auto& row) {
+            return MergeRowText(row) == snapshot.selectedRowSignature;
+        });
+        if (found != currentRows_.end()) {
+            selectedRow = static_cast<int>(std::distance(currentRows_.begin(), found));
+        }
+    }
+    const int topRow = std::max(0, std::min(snapshot.topRow, static_cast<int>(currentRows_.size()) - 1));
+    ListView_SetItemState(resultList_, -1, 0, LVIS_SELECTED | LVIS_FOCUSED);
+    ListView_SetItemState(resultList_, selectedRow, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
+    ListView_EnsureVisible(resultList_, topRow > 0 ? topRow : selectedRow, FALSE);
+    UpdateSelectedRowDetail();
     InvalidateCurrentFeatureViewCache();
 }
 

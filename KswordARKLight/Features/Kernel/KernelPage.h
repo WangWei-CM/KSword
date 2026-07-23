@@ -16,6 +16,18 @@ namespace Ksword::Features::Kernel {
 
 struct KernelObjectNamespaceTreeNodeState;
 
+// KernelR0EvidenceSnapshot is the immutable result of a client-side R0
+// evidence projection. Worker tasks own this value completely before the UI
+// applies it to the owner-data ListView.
+struct KernelR0EvidenceSnapshot {
+    KernelFeatureId featureId = KernelFeatureId::CpuHardwareSnapshot;
+    std::vector<std::wstring> columns;
+    std::vector<std::vector<std::wstring>> rows;
+    std::wstring statusText;
+    std::wstring selectedRowSignature;
+    int topRow = 0;
+};
+
 // KernelPage is the lightweight Win32 UI for retained kernel entries. Inputs are
 // parent HWND and bounds during Create; processing owns child controls and sends
 // model requests to KernelFacade; return behavior is HWND-based like normal
@@ -85,6 +97,9 @@ private:
     void RebuildCrossViewListFromCache(KernelFeatureId featureId);
     void RebuildIntegrityEvidenceListFromCache(KernelFeatureId featureId);
     void RebuildR0EvidenceListFromCache(KernelFeatureId featureId);
+    void ScheduleR0EvidenceFilter(KernelFeatureId featureId);
+    void RequestR0EvidenceRebuild(KernelFeatureId featureId);
+    void ApplyR0EvidenceSnapshot(KernelR0EvidenceSnapshot snapshot);
     const KernelFeatureDescriptor* CurrentDescriptor() const;
     const KernelFeatureDescriptor* FeatureById(KernelFeatureId featureId) const;
     void RebuildSecondLevelTabs();
@@ -375,6 +390,7 @@ private:
     std::vector<CallbackRule> callbackRules_;
     std::unique_ptr<CallbackEventReceiver> callbackEventReceiver_;
     std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<KernelOperationResult>> callbackAnswerTask_;
+    std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<KernelR0EvidenceSnapshot>> r0EvidenceFilterTask_;
     std::vector<CallbackEventSnapshot> callbackPendingEvents_;
     std::uint32_t nextCallbackGroupId_ = 2;
     std::uint32_t nextCallbackRuleId_ = 1;
@@ -386,6 +402,8 @@ private:
     std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<KernelOperationResult>> queryTask_;
     std::uint64_t actionRequestId_ = 0;
     std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<KernelOperationResult>> actionTask_;
+    KernelFeatureId pendingR0EvidenceFeatureId_ = KernelFeatureId::CpuHardwareSnapshot;
+    bool hasPendingR0EvidenceFilter_ = false;
     KernelFacade facade_;
 };
 
