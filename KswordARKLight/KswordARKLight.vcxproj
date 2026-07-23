@@ -102,6 +102,7 @@
     <ClCompile Include="Features\AuditCommon\AuditSummaryPanel.cpp" />
     <ClCompile Include="Features\AuditCommon\AuditTable.cpp" />
     <ClCompile Include="Features\Driver\DriverActions.cpp" />
+    <ClCompile Include="Features\Driver\DriverDebugOutputView.cpp" />
     <ClCompile Include="Features\Driver\DriverEnumerator.cpp" />
     <ClCompile Include="Features\Driver\DriverFeature.cpp" />
     <ClCompile Include="Features\Driver\DriverModel.cpp" />
@@ -242,6 +243,7 @@
     <ClInclude Include="Features\AuditCommon\AuditSummaryPanel.h" />
     <ClInclude Include="Features\AuditCommon\AuditTable.h" />
     <ClInclude Include="Features\Driver\DriverActions.h" />
+    <ClInclude Include="Features\Driver\DriverDebugOutputView.h" />
     <ClInclude Include="Features\Driver\DriverEnumerator.h" />
     <ClInclude Include="Features\Driver\DriverFeature.h" />
     <ClInclude Include="Features\Driver\DriverModel.h" />

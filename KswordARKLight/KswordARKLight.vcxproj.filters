@@ -128,6 +128,9 @@
     <ClCompile Include="Features\Driver\DriverActions.cpp">
       <Filter>Features\Driver</Filter>
     </ClCompile>
+    <ClCompile Include="Features\Driver\DriverDebugOutputView.cpp">
+      <Filter>Features\Driver</Filter>
+    </ClCompile>
     <ClCompile Include="Features\Driver\DriverEnumerator.cpp">
       <Filter>Features\Driver</Filter>
     </ClCompile>
@@ -528,6 +531,9 @@
       <Filter>Features\AuditCommon</Filter>
     </ClInclude>
     <ClInclude Include="Features\Driver\DriverActions.h">
+      <Filter>Features\Driver</Filter>
+    </ClInclude>
+    <ClInclude Include="Features\Driver\DriverDebugOutputView.h">
       <Filter>Features\Driver</Filter>
     </ClInclude>
     <ClInclude Include="Features\Driver\DriverEnumerator.h">

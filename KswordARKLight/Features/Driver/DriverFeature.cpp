@@ -1,6 +1,7 @@
 #include "DriverFeature.h"
 
 #include "DriverActions.h"
+#include "DriverDebugOutputView.h"
 #include "DriverEnumerator.h"
 #include "DriverModel.h"
 #include "DriverObjectView.h"
@@ -32,6 +33,7 @@ constexpr int kIntegrityTabIndex = 2;
 constexpr int kDynDataCapabilitiesTabIndex = 3;
 constexpr int kDriverStatusTabIndex = 4;
 constexpr int kDynDataTabIndex = 5;
+constexpr int kDebugOutputTabIndex = 6;
 constexpr int kLoadingOverlayId = 65009;
 constexpr UINT kMsgRefreshCompleted = WM_APP + 590;
 
@@ -51,6 +53,7 @@ struct DriverFeaturePageState {
     HWND dynDataCapabilitiesView = nullptr;
     HWND driverStatusView = nullptr;
     HWND dynDataView = nullptr;
+    HWND debugOutputView = nullptr;
     HWND loadingOverlay = nullptr;
     DriverModel model;
     int currentTab = kOverviewTabIndex;
@@ -87,6 +90,7 @@ void ShowChildPages(DriverFeaturePageState& state) {
     const bool dynDataCapabilitiesVisible = state.currentTab == kDynDataCapabilitiesTabIndex;
     const bool driverStatusVisible = state.currentTab == kDriverStatusTabIndex;
     const bool dynDataVisible = state.currentTab == kDynDataTabIndex;
+    const bool debugOutputVisible = state.currentTab == kDebugOutputTabIndex;
     if (state.overviewView) {
         ::ShowWindow(state.overviewView, overviewVisible ? SW_SHOW : SW_HIDE);
     }
@@ -104,6 +108,9 @@ void ShowChildPages(DriverFeaturePageState& state) {
     }
     if (state.dynDataView) {
         ::ShowWindow(state.dynDataView, dynDataVisible ? SW_SHOW : SW_HIDE);
+    }
+    if (state.debugOutputView) {
+        ::ShowWindow(state.debugOutputView, debugOutputVisible ? SW_SHOW : SW_HIDE);
     }
 }
 
@@ -152,7 +159,8 @@ void LayoutChildren(DriverFeaturePageState& state) {
         state.integrityView,
         state.dynDataCapabilitiesView,
         state.driverStatusView,
-        state.dynDataView
+        state.dynDataView,
+        state.debugOutputView
     };
     for (HWND child : childViews) {
         if (child) {
@@ -208,7 +216,8 @@ void CopyCurrentTabTsv(DriverFeaturePageState& state) {
     } else if (state.currentTab == kIntegrityTabIndex ||
         state.currentTab == kDynDataCapabilitiesTabIndex ||
         state.currentTab == kDriverStatusTabIndex ||
-        state.currentTab == kDynDataTabIndex) {
+        state.currentTab == kDynDataTabIndex ||
+        state.currentTab == kDebugOutputTabIndex) {
         SetStatus(state, L"当前页由内核模块渲染，请在该页内使用其右键菜单复制/导出。");
         return;
     } else {
@@ -240,6 +249,7 @@ bool CreateChildControls(DriverFeaturePageState& state) {
     Ksword::Ui::AddTabPage(state.tab, kDynDataCapabilitiesTabIndex, { L"DynData能力" });
     Ksword::Ui::AddTabPage(state.tab, kDriverStatusTabIndex, { L"驱动状态" });
     Ksword::Ui::AddTabPage(state.tab, kDynDataTabIndex, { L"动态偏移 / DynData" });
+    Ksword::Ui::AddTabPage(state.tab, kDebugOutputTabIndex, { L"调试输出" });
     ::SendMessageW(state.tab, TCM_SETCURSEL, static_cast<WPARAM>(kOverviewTabIndex), 0);
     state.currentTab = kOverviewTabIndex;
 
@@ -272,12 +282,14 @@ bool CreateChildControls(DriverFeaturePageState& state) {
         65008,
         childBounds,
         Ksword::Features::Kernel::KernelFeatureId::DynData);
+    state.debugOutputView = CreateDriverDebugOutputView(state.tab, childBounds);
     if (!state.overviewView ||
         !state.objectView ||
         !state.integrityView ||
         !state.dynDataCapabilitiesView ||
         !state.driverStatusView ||
-        !state.dynDataView) {
+        !state.dynDataView ||
+        !state.debugOutputView) {
         return false;
     }
     state.loadingOverlay = Ksword::Ui::CreateLoadingOverlay(state.hwnd, kLoadingOverlayId, { 0, 0, 1, 1 });
