@@ -17,6 +17,7 @@ Environment:
 #include "ark/ark_thread.h"
 
 #include "ark/ark_dyndata.h"
+#include "thread_worker_state.h"
 
 #define KSWORD_ARK_THREAD_ENUM_RESPONSE_HEADER_SIZE \
     (sizeof(KSWORD_ARK_ENUM_THREAD_RESPONSE) - sizeof(KSWORD_ARK_THREAD_ENTRY))
@@ -358,35 +359,6 @@ Return Value:
 }
 
 static VOID
-KswordARKThreadMarkFailure(
-    _Inout_ KSWORD_ARK_THREAD_ENTRY* Entry,
-    _In_ NTSTATUS Status
-    )
-/*++
-
-Routine Description:
-
-    Mark an entry as read-failed when an attempted optional field read fails.
-
-Arguments:
-
-    Entry - Mutable thread response row.
-    Status - Field read status.
-
-Return Value:
-
-    None.
-
---*/
-{
-    if (Entry == NULL || NT_SUCCESS(Status)) {
-        return;
-    }
-
-    Entry->r0Status = KSWORD_ARK_THREAD_R0_STATUS_READ_FAILED;
-}
-
-static VOID
 KswordARKThreadPopulateStackFields(
     _Inout_ KSWORD_ARK_THREAD_ENTRY* Entry,
     _In_ PETHREAD ThreadObject,
@@ -565,7 +537,8 @@ KswordARKThreadAppendEntry(
     _In_ ULONG ProcessId,
     _In_ ULONG ThreadFlags,
     _In_ ULONG RequestFlags,
-    _In_ const KSW_DYN_STATE* DynState
+    _In_ const KSW_DYN_STATE* DynState,
+    _In_opt_ const KSW_DYN_V4_BIT_FIELD_LAYOUT* ActiveExWorkerField
     )
 /*++
 
@@ -582,6 +555,7 @@ Arguments:
     ThreadFlags - KSWORD_ARK_THREAD_FLAG_* cross-view flags.
     RequestFlags - Request flags controlling optional field groups.
     DynState - DynData snapshot.
+    ActiveExWorkerField - Optional v4 _ETHREAD.ActiveExWorker layout.
 
 Return Value:
 
@@ -619,6 +593,10 @@ Return Value:
     if ((RequestFlags & KSWORD_ARK_ENUM_THREAD_FLAG_INCLUDE_IO) != 0UL) {
         KswordARKThreadPopulateIoFields(entry, ThreadObject, DynState);
     }
+    if ((RequestFlags & KSWORD_ARK_ENUM_THREAD_FLAG_INCLUDE_WORKER_STATE) != 0UL &&
+        ActiveExWorkerField != NULL) {
+        KswordARKThreadPopulateWorkerField(entry, ThreadObject, ActiveExWorkerField);
+    }
 
     if (entry->r0Status != KSWORD_ARK_THREAD_R0_STATUS_READ_FAILED) {
         if (entry->fieldFlags != 0UL) {
@@ -640,6 +618,7 @@ KswordARKThreadWalkProcessThreads(
     _In_ ULONG RequestProcessId,
     _In_ ULONG RequestFlags,
     _In_ const KSW_DYN_STATE* DynState,
+    _In_opt_ const KSW_DYN_V4_BIT_FIELD_LAYOUT* ActiveExWorkerField,
     _In_ KSWORD_PS_GET_NEXT_PROCESS_THREAD_FN PsGetNextProcessThread,
     _In_opt_ UCHAR* ActiveProcessBitmap,
     _In_ size_t ActiveProcessBitmapBytes,
@@ -660,6 +639,7 @@ Arguments:
     RequestProcessId - Optional PID filter.
     RequestFlags - Optional field group flags.
     DynState - DynData snapshot.
+    ActiveExWorkerField - Optional v4 _ETHREAD.ActiveExWorker layout.
     PsGetNextProcessThread - Resolved thread iterator.
     ActiveProcessBitmap - Optional active-list PID bitmap for cross-view scans.
     ActiveProcessBitmapBytes - PID bitmap size in bytes.
@@ -704,7 +684,8 @@ Return Value:
             processId,
             KSWORD_ARK_THREAD_FLAG_KERNEL_ENUMERATED,
             RequestFlags,
-            DynState);
+            DynState,
+            ActiveExWorkerField);
         ObDereferenceObject(threadCursor);
         threadCursor = nextThread;
     }
@@ -717,6 +698,7 @@ KswordARKThreadScanCidTable(
     _In_ ULONG RequestProcessId,
     _In_ ULONG RequestFlags,
     _In_ const KSW_DYN_STATE* DynState,
+    _In_opt_ const KSW_DYN_V4_BIT_FIELD_LAYOUT* ActiveExWorkerField,
     _In_reads_bytes_(ActiveProcessBitmapBytes) const UCHAR* ActiveProcessBitmap,
     _In_ size_t ActiveProcessBitmapBytes,
     _In_reads_bytes_(ActiveThreadBitmapBytes) const UCHAR* ActiveThreadBitmap,
@@ -737,6 +719,7 @@ Arguments:
     RequestProcessId - Optional PID filter.
     RequestFlags - Optional field group flags.
     DynState - DynData snapshot.
+    ActiveExWorkerField - Optional v4 _ETHREAD.ActiveExWorker layout.
     ActiveProcessBitmap - Bitmap of active PIDs.
     ActiveProcessBitmapBytes - Bitmap size in bytes.
     ActiveThreadBitmap - Bitmap of active TIDs.
@@ -804,7 +787,8 @@ Return Value:
                     ownerProcessId,
                     threadFlags,
                     RequestFlags,
-                    DynState);
+                    DynState,
+                    ActiveExWorkerField);
             }
             ObDereferenceObject(threadObject);
         }
@@ -846,6 +830,7 @@ Return Value:
     KSWORD_PS_GET_NEXT_PROCESS_FN psGetNextProcess = NULL;
     KSWORD_PS_GET_NEXT_PROCESS_THREAD_FN psGetNextProcessThread = NULL;
     KSW_DYN_STATE dynState;
+    KSW_DYN_V4_BIT_FIELD_LAYOUT activeExWorkerField;
     size_t entryCapacity = 0U;
     size_t totalBytesWritten = 0U;
     ULONG requestFlags = KSWORD_ARK_ENUM_THREAD_FLAG_INCLUDE_ALL;
@@ -855,6 +840,7 @@ Return Value:
     UCHAR* activeProcessBitmap = NULL;
     UCHAR* activeThreadBitmap = NULL;
     size_t activeBitmapBytes = 0U;
+    BOOLEAN activeExWorkerFieldAvailable = FALSE;
 
     if (OutputBuffer == NULL || BytesWrittenOut == NULL) {
         return STATUS_INVALID_PARAMETER;
@@ -876,6 +862,11 @@ Return Value:
 
     RtlZeroMemory(&dynState, sizeof(dynState));
     KswordARKDynDataSnapshot(&dynState);
+    RtlZeroMemory(&activeExWorkerField, sizeof(activeExWorkerField));
+    activeExWorkerFieldAvailable = NT_SUCCESS(
+        KswordARKDynDataV4SnapshotActiveExWorkerField(&activeExWorkerField))
+        ? TRUE
+        : FALSE;
 
     RtlZeroMemory(OutputBuffer, OutputBufferLength);
     response = (KSWORD_ARK_ENUM_THREAD_RESPONSE*)OutputBuffer;
@@ -904,6 +895,7 @@ Return Value:
                 requestProcessId,
                 requestFlags,
                 &dynState,
+                activeExWorkerFieldAvailable ? &activeExWorkerField : NULL,
                 NULL,
                 0U,
                 NULL,
@@ -951,6 +943,7 @@ Return Value:
             requestProcessId,
             requestFlags,
             &dynState,
+            activeExWorkerFieldAvailable ? &activeExWorkerField : NULL,
             psGetNextProcessThread,
             activeProcessBitmap,
             activeBitmapBytes,
@@ -967,6 +960,7 @@ Return Value:
             requestProcessId,
             requestFlags,
             &dynState,
+            activeExWorkerFieldAvailable ? &activeExWorkerField : NULL,
             activeProcessBitmap,
             activeBitmapBytes,
             activeThreadBitmap,

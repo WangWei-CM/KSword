@@ -787,6 +787,72 @@ Return Value:
 }
 
 NTSTATUS
+KswordARKDynDataV4SnapshotActiveExWorkerField(
+    _Out_ KSW_DYN_V4_BIT_FIELD_LAYOUT* FieldOut
+    )
+/*++
+
+Routine Description:
+
+    Copy the accepted _ETHREAD.ActiveExWorker bit-field layout from the current
+    ntoskrnl v4 profile without exposing the global v4 state to thread code.
+
+Return Value:
+
+    STATUS_SUCCESS when item 1001 is present and valid; otherwise a validation
+    or capability status.
+
+--*/
+{
+    KSW_DYN_V4_MODULE_STATE* moduleState = NULL;
+    ULONG index = 0UL;
+    NTSTATUS status = STATUS_NOT_SUPPORTED;
+
+    if (FieldOut == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    RtlZeroMemory(FieldOut, sizeof(*FieldOut));
+
+    ExAcquirePushLockShared(&g_KswordDynDataV4Lock);
+    moduleState = &g_KswordDynDataV4State.Modules[0];
+    if (moduleState->Occupied &&
+        moduleState->PublicEntry.module.image.classId == KSW_DYN_PROFILE_CLASS_NTOSKRNL &&
+        moduleState->StoredItemCount <= KSW_DYN_V4_MAX_ITEMS_PER_MODULE) {
+        for (index = 0UL; index < moduleState->StoredItemCount; ++index) {
+            const KSW_DYN_V4_ITEM_PACKET* item = &moduleState->Items[index];
+            if (item->itemId != KSW_DYN_V4_ITEM_ID_ETH_ACTIVE_EX_WORKER ||
+                item->itemKind != KSW_DYN_V4_ITEM_KIND_BIT_FIELD) {
+                continue;
+            }
+
+            FieldOut->Offset = item->valueLow;
+            FieldOut->BitOffset = item->aux0;
+            FieldOut->BitCount = item->aux1;
+            FieldOut->StorageBytes = item->aux2;
+            if ((FieldOut->StorageBytes == 1UL ||
+                 FieldOut->StorageBytes == 2UL ||
+                 FieldOut->StorageBytes == 4UL ||
+                 FieldOut->StorageBytes == 8UL) &&
+                FieldOut->BitCount != 0UL &&
+                FieldOut->BitCount <= 64UL &&
+                FieldOut->BitOffset + FieldOut->BitCount <= FieldOut->StorageBytes * 8UL) {
+                status = STATUS_SUCCESS;
+            }
+            else {
+                status = STATUS_DATA_ERROR;
+            }
+            break;
+        }
+    }
+    ExReleasePushLockShared(&g_KswordDynDataV4Lock);
+
+    if (!NT_SUCCESS(status)) {
+        RtlZeroMemory(FieldOut, sizeof(*FieldOut));
+    }
+    return status;
+}
+
+NTSTATUS
 KswordARKDynDataV4ApplyProfile(
     _In_reads_bytes_(InputBufferLength) const KSW_APPLY_DYN_PROFILE_V4_REQUEST* Request,
     _In_ size_t InputBufferLength,

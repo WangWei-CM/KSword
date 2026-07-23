@@ -11,6 +11,7 @@
 #include <QBrush>
 #include <QClipboard>
 #include <QColor>
+#include <QComboBox>
 #include <QHeaderView>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -43,6 +44,7 @@ namespace
         "TID",
         "PID",
         "进程",
+        "类别",
         "启动地址",
         "Win32Start",
         "TEB",
@@ -156,6 +158,44 @@ namespace
             return QStringLiteral("Owner process hidden");
         }
         return threadR0StatusText(threadRecord.r0ThreadStatus);
+    }
+
+    // isSystemThreadRecord：System 进程（固定 PID 4）承载 PsCreateSystemThread 创建的内核线程。
+    bool isSystemThreadRecord(const ks::process::SystemThreadRecord& threadRecord)
+    {
+        return threadRecord.ownerPid == 4U;
+    }
+
+    // threadClassText：ActiveExWorker 的 present 位用于区分 false 与 DynData 不可用。
+    QString threadClassText(const ks::process::SystemThreadRecord& threadRecord)
+    {
+        const bool workerKnown =
+            (threadRecord.r0ThreadFieldFlags & KSWORD_ARK_THREAD_FIELD_ACTIVE_EX_WORKER_PRESENT) != 0U;
+        const bool activeWorker =
+            (threadRecord.r0ThreadFlags & KSWORD_ARK_THREAD_FLAG_ACTIVE_EX_WORKER) != 0U;
+        if (workerKnown && activeWorker)
+        {
+            return ks::i18n::contextText(
+                QStringLiteral("process.thread.class.worker"),
+                QStringLiteral("工作线程"));
+        }
+        if (isSystemThreadRecord(threadRecord))
+        {
+            return workerKnown
+                ? ks::i18n::contextText(
+                    QStringLiteral("process.thread.class.system"),
+                    QStringLiteral("系统线程"))
+                : ks::i18n::contextText(
+                    QStringLiteral("process.thread.class.system_unknown"),
+                    QStringLiteral("系统线程（Worker未知）"));
+        }
+        return workerKnown
+            ? ks::i18n::contextText(
+                QStringLiteral("process.thread.class.regular"),
+                QStringLiteral("普通线程"))
+            : ks::i18n::contextText(
+                QStringLiteral("process.thread.class.regular_unknown"),
+                QStringLiteral("普通线程（Worker未知）"));
     }
 
     // threadDynFieldSourceText 作用：
@@ -528,6 +568,22 @@ void ProcessDock::initializeThreadPage()
         QStringLiteral("process.thread.columns.preset_b.tooltip"),
         QStringLiteral("线程列预设 B：地址与 R0 诊断"));
 
+    m_threadScopeCombo = new QComboBox(m_threadPage);
+    m_threadScopeCombo->addItem(QStringLiteral("全部线程"), static_cast<int>(ThreadScopeFilter::All));
+    m_threadScopeCombo->addItem(QStringLiteral("系统线程"), static_cast<int>(ThreadScopeFilter::System));
+    m_threadScopeCombo->addItem(QStringLiteral("工作线程"), static_cast<int>(ThreadScopeFilter::Worker));
+    ks::i18n::LanguageManager::instance().bindComboBoxItem(
+        m_threadScopeCombo, 0, QStringLiteral("process.thread.scope.all"), QStringLiteral("全部线程"));
+    ks::i18n::LanguageManager::instance().bindComboBoxItem(
+        m_threadScopeCombo, 1, QStringLiteral("process.thread.scope.system"), QStringLiteral("系统线程"));
+    ks::i18n::LanguageManager::instance().bindComboBoxItem(
+        m_threadScopeCombo, 2, QStringLiteral("process.thread.scope.worker"), QStringLiteral("工作线程"));
+    ks::i18n::LanguageManager::instance().bindToolTip(
+        m_threadScopeCombo,
+        QStringLiteral("process.thread.scope.tooltip"),
+        QStringLiteral("按线程类别筛选；工作线程由 R0 DynData v4 的 _ETHREAD.ActiveExWorker 位识别"));
+    m_threadScopeCombo->setMinimumWidth(112);
+
     m_threadSearchLineEdit = new QLineEdit(m_threadPage);
     m_threadSearchLineEdit->setClearButtonEnabled(true);
     m_threadSearchLineEdit->setPlaceholderText("搜索 TID / PID / 进程名 / 状态 / 启动地址");
@@ -537,6 +593,7 @@ void ProcessDock::initializeThreadPage()
 
     m_threadTopLayout->addWidget(m_threadRefreshButton);
     m_threadTopLayout->addWidget(m_threadColumnPresetWidget);
+    m_threadTopLayout->addWidget(m_threadScopeCombo);
     m_threadTopLayout->addWidget(m_threadSearchLineEdit);
     m_threadTopLayout->addStretch(1);
     m_threadPageLayout->addLayout(m_threadTopLayout);
@@ -574,6 +631,7 @@ void ProcessDock::initializeThreadPage()
     m_threadTable->setColumnWidth(toThreadColumnIndex(ThreadTableColumn::ThreadId), 90);
     m_threadTable->setColumnWidth(toThreadColumnIndex(ThreadTableColumn::OwnerPid), 90);
     m_threadTable->setColumnWidth(toThreadColumnIndex(ThreadTableColumn::ProcessName), 240);
+    m_threadTable->setColumnWidth(toThreadColumnIndex(ThreadTableColumn::ThreadClass), 150);
     m_threadTable->setColumnWidth(toThreadColumnIndex(ThreadTableColumn::StartAddress), 140);
     m_threadTable->setColumnWidth(toThreadColumnIndex(ThreadTableColumn::Win32StartAddress), 140);
     m_threadTable->setColumnWidth(toThreadColumnIndex(ThreadTableColumn::TebBaseAddress), 140);
@@ -624,20 +682,22 @@ void ProcessDock::applyThreadColumnLayout(const ThreadColumnLayout layout)
         return;
     }
 
-    static constexpr std::array<ThreadTableColumn, 8> PresetAColumns{
+    static constexpr std::array<ThreadTableColumn, 9> PresetAColumns{
         ThreadTableColumn::ThreadId,
         ThreadTableColumn::OwnerPid,
         ThreadTableColumn::ProcessName,
+        ThreadTableColumn::ThreadClass,
         ThreadTableColumn::Priority,
         ThreadTableColumn::ThreadState,
         ThreadTableColumn::WaitReason,
         ThreadTableColumn::CpuTimeMs,
         ThreadTableColumn::ContextSwitches
     };
-    static constexpr std::array<ThreadTableColumn, 8> PresetBColumns{
+    static constexpr std::array<ThreadTableColumn, 9> PresetBColumns{
         ThreadTableColumn::ThreadId,
         ThreadTableColumn::OwnerPid,
         ThreadTableColumn::ProcessName,
+        ThreadTableColumn::ThreadClass,
         ThreadTableColumn::StartAddress,
         ThreadTableColumn::Win32StartAddress,
         ThreadTableColumn::TebBaseAddress,
@@ -660,6 +720,7 @@ void ProcessDock::applyThreadColumnLayout(const ThreadColumnLayout layout)
     m_threadTable->setColumnWidth(toThreadColumnIndex(ThreadTableColumn::ThreadId), 78);
     m_threadTable->setColumnWidth(toThreadColumnIndex(ThreadTableColumn::OwnerPid), 78);
     m_threadTable->setColumnWidth(toThreadColumnIndex(ThreadTableColumn::ProcessName), 180);
+    m_threadTable->setColumnWidth(toThreadColumnIndex(ThreadTableColumn::ThreadClass), 140);
     if (layout == ThreadColumnLayout::PresetA)
     {
         m_threadTable->setColumnWidth(toThreadColumnIndex(ThreadTableColumn::Priority), 88);
@@ -749,6 +810,14 @@ void ProcessDock::initializeThreadPageConnections()
         });
     }
 
+    // 类别筛选：仅过滤当前线程快照，避免因切换筛选器重复请求 R0。
+    if (m_threadScopeCombo != nullptr)
+    {
+        connect(m_threadScopeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int) {
+            rebuildThreadTable();
+        });
+    }
+
     if (m_threadColumnPresetAButton != nullptr)
     {
         connect(m_threadColumnPresetAButton, &QPushButton::clicked, this, [this]() {
@@ -803,6 +872,7 @@ void ProcessDock::requestAsyncThreadRefresh(const bool forceRefresh)
     {
         return;
     }
+
     m_threadRefreshInProgress = true;
     const std::uint64_t localTicket = ++m_threadRefreshTicket;
 
@@ -886,6 +956,7 @@ bool ProcessDock::threadRecordMatchesSearch(const ks::process::SystemThreadRecor
         QString::number(threadRecord.threadId),
         QString::number(threadRecord.ownerPid),
         QString::fromStdString(threadRecord.ownerProcessName),
+        threadClassText(threadRecord),
         QString("0x%1").arg(static_cast<qulonglong>(threadRecord.startAddress), 0, 16).toUpper(),
         QString("0x%1").arg(static_cast<qulonglong>(threadRecord.win32StartAddress), 0, 16).toUpper(),
         QString("0x%1").arg(static_cast<qulonglong>(threadRecord.tebBaseAddress), 0, 16).toUpper(),
@@ -903,6 +974,28 @@ bool ProcessDock::threadRecordMatchesSearch(const ks::process::SystemThreadRecor
     }
 
     return false;
+}
+
+bool ProcessDock::threadRecordMatchesScope(const ks::process::SystemThreadRecord& threadRecord) const
+{
+    if (m_threadScopeCombo == nullptr)
+    {
+        return true;
+    }
+
+    const ThreadScopeFilter scope = static_cast<ThreadScopeFilter>(
+        m_threadScopeCombo->currentData().toInt());
+    if (scope == ThreadScopeFilter::System)
+    {
+        return isSystemThreadRecord(threadRecord);
+    }
+    if (scope == ThreadScopeFilter::Worker)
+    {
+        return
+            (threadRecord.r0ThreadFieldFlags & KSWORD_ARK_THREAD_FIELD_ACTIVE_EX_WORKER_PRESENT) != 0U &&
+            (threadRecord.r0ThreadFlags & KSWORD_ARK_THREAD_FLAG_ACTIVE_EX_WORKER) != 0U;
+    }
+    return true;
 }
 
 void ProcessDock::rebuildThreadTable()
@@ -944,7 +1037,7 @@ void ProcessDock::rebuildThreadTable()
     // - 最后写入 TID/PID 到 UserRole，供右键动作读取。
     for (const ks::process::SystemThreadRecord& threadRecord : m_threadRecordList)
     {
-        if (!threadRecordMatchesSearch(threadRecord))
+        if (!threadRecordMatchesScope(threadRecord) || !threadRecordMatchesSearch(threadRecord))
         {
             continue;
         }
@@ -1030,6 +1123,8 @@ QString ProcessDock::formatThreadColumnText(
         return QString::number(threadRecord.ownerPid);
     case ThreadTableColumn::ProcessName:
         return QString::fromStdString(threadRecord.ownerProcessName.empty() ? "Unknown" : threadRecord.ownerProcessName);
+    case ThreadTableColumn::ThreadClass:
+        return threadClassText(threadRecord);
     case ThreadTableColumn::StartAddress:
         return hexPointerText(threadRecord.startAddress, false);
     case ThreadTableColumn::Win32StartAddress:

@@ -169,6 +169,7 @@ private:
         ThreadId = 0,      // 线程 ID。
         OwnerPid,          // 所属进程 PID。
         ProcessName,       // 所属进程名（含图标）。
+        ThreadClass,       // 系统线程 / Ex 工作线程分类。
         StartAddress,      // 线程启动地址。
         Win32StartAddress, // Win32StartAddress（R3 扩展线程信息）。
         TebBaseAddress,    // TEB 基址（R3 扩展线程信息）。
@@ -205,6 +206,14 @@ private:
         PresetA = 0, // 调度概览：身份、优先级、状态、等待与 CPU/切换统计。
         PresetB,     // 地址诊断：身份、启动/TEB/内核栈地址与 R0 状态。
         Custom       // 表头菜单、拖动或缩放后的自定义布局。
+    };
+
+    // ThreadScopeFilter：线程页按 R3 System 归属和 R0 ActiveExWorker 分类筛选。
+    enum class ThreadScopeFilter : int
+    {
+        All = 0,
+        System,
+        Worker
     };
 
     // ViewMode：两种视图模式。
@@ -601,6 +610,7 @@ private:
     void bindThreadContextActionToItem(QTreeWidgetItem* clickedItem);
     void clearThreadContextActionBinding();
     bool threadRecordMatchesSearch(const ks::process::SystemThreadRecord& threadRecord) const;
+    bool threadRecordMatchesScope(const ks::process::SystemThreadRecord& threadRecord) const;
     QString formatColumnText(const ks::process::ProcessRecord& processRecord, TableColumn column, int depth) const;
     QString formatThreadColumnText(const ks::process::SystemThreadRecord& threadRecord, ThreadTableColumn column) const;
     QString threadStateText(std::uint32_t stateValue) const;
@@ -751,6 +761,7 @@ private:
     QHBoxLayout* m_threadColumnPresetLayout = nullptr; // 预设按钮零间距布局。
     QPushButton* m_threadColumnPresetAButton = nullptr; // A：调度概览列。
     QPushButton* m_threadColumnPresetBButton = nullptr; // B：地址/诊断列。
+    QComboBox* m_threadScopeCombo = nullptr; // 全部 / System / ActiveExWorker 分类筛选。
     QLineEdit* m_threadSearchLineEdit = nullptr; // 线程页搜索框（按 TID/PID/名称过滤）。
     QTreeWidget* m_threadTable = nullptr;     // 线程列表表格（支持右键动作）。
     ThreadColumnLayout m_threadColumnLayout = ThreadColumnLayout::PresetA; // 当前高亮预设，默认 A。

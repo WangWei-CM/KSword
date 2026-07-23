@@ -84,6 +84,7 @@
     <ClCompile Include="src\features\capability\capability_query.c" />
     <ClCompile Include="src\features\capability\capability_ioctl.c" />
     <ClCompile Include="src\features\thread\thread_query.c" />
+    <ClCompile Include="src\features\thread\thread_worker_state.c" />
     <ClCompile Include="src\features\thread\thread_crossview.c" />
     <ClCompile Include="src\features\thread\thread_detail.c" />
     <ClCompile Include="src\features\thread\thread_ioctl.c" />
@@ -182,6 +183,7 @@
     <ClInclude Include="src\features\memory\memory_evidence_enrichment.h" />
     <ClInclude Include="src\features\memory\memory_kernel_exec_scan_internal.h" />
     <ClInclude Include="src\features\thread\thread_crossview.h" />
+    <ClInclude Include="src\features\thread\thread_worker_state.h" />
     <ClInclude Include="include\ark\ark_file_monitor.h" />
     <ClInclude Include="src\features\file_monitor\file_monitor_internal.h" />
     <ClInclude Include="include\ark\ark_wsl_silo.h" />

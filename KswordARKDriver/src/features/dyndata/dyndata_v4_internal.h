@@ -58,9 +58,25 @@ typedef struct _KSW_DYN_V4_TIMER_DPC_LAYOUT
     ULONG DpcTypeSize;
 } KSW_DYN_V4_TIMER_DPC_LAYOUT;
 
+// 位域消费者使用固定快照，Offset 是对象内存偏移，BitOffset/BitCount 描述
+// StorageBytes 宽度整数中的位范围。
+typedef struct _KSW_DYN_V4_BIT_FIELD_LAYOUT
+{
+    ULONG Offset;
+    ULONG BitOffset;
+    ULONG BitCount;
+    ULONG StorageBytes;
+} KSW_DYN_V4_BIT_FIELD_LAYOUT;
+
 NTSTATUS
 KswordARKDynDataV4SnapshotTimerDpcLayout(
     _Out_ KSW_DYN_V4_TIMER_DPC_LAYOUT* LayoutOut
+    );
+
+// 线程消费者获取 _ETHREAD.ActiveExWorker 的精确 PDB 位域布局。
+NTSTATUS
+KswordARKDynDataV4SnapshotActiveExWorkerField(
+    _Out_ KSW_DYN_V4_BIT_FIELD_LAYOUT* FieldOut
     );
 
 EXTERN_C_END
