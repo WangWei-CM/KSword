@@ -703,6 +703,90 @@ Return Value:
 }
 
 NTSTATUS
+KswordARKDynDataV4SnapshotTimerDpcLayout(
+    _Out_ KSW_DYN_V4_TIMER_DPC_LAYOUT* LayoutOut
+    )
+/*++
+
+Routine Description:
+
+    Copy the complete ntoskrnl Timer/DPC layout from the accepted v4 profile.
+    The global push lock is held only while fixed scalar values are copied.
+
+Return Value:
+
+    STATUS_SUCCESS when all required Timer/DPC item IDs are present with their
+    expected kinds; STATUS_NOT_SUPPORTED otherwise.
+
+--*/
+{
+    KSW_DYN_V4_MODULE_STATE* moduleState = NULL;
+    ULONG index = 0UL;
+    ULONG foundCount = 0UL;
+
+    if (LayoutOut == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    RtlZeroMemory(LayoutOut, sizeof(*LayoutOut));
+
+    ExAcquirePushLockShared(&g_KswordDynDataV4Lock);
+    moduleState = &g_KswordDynDataV4State.Modules[0];
+    if (!moduleState->Occupied ||
+        moduleState->PublicEntry.module.image.classId != KSW_DYN_PROFILE_CLASS_NTOSKRNL ||
+        moduleState->StoredItemCount > KSW_DYN_V4_MAX_ITEMS_PER_MODULE) {
+        ExReleasePushLockShared(&g_KswordDynDataV4Lock);
+        return STATUS_NOT_SUPPORTED;
+    }
+
+    for (index = 0UL; index < moduleState->StoredItemCount; ++index) {
+        const KSW_DYN_V4_ITEM_PACKET* item = &moduleState->Items[index];
+        ULONG* destination = NULL;
+        ULONG expectedKind = KSW_DYN_V4_ITEM_KIND_STRUCT_OFFSET;
+
+        switch (item->itemId) {
+        case KSW_DYN_V4_ITEM_ID_KPRCB_TIMER_TABLE: destination = &LayoutOut->KprcbTimerTable; break;
+        case KSW_DYN_V4_ITEM_ID_KTIMER_TABLE_TIMER_ENTRIES: destination = &LayoutOut->TimerTableTimerEntries; break;
+        case KSW_DYN_V4_ITEM_ID_KTIMER_TABLE_ENTRY_LOCK: destination = &LayoutOut->TimerTableEntryLock; break;
+        case KSW_DYN_V4_ITEM_ID_KTIMER_TABLE_ENTRY_ENTRY: destination = &LayoutOut->TimerTableEntryEntry; break;
+        case KSW_DYN_V4_ITEM_ID_KTIMER_TABLE_ENTRY_TIME: destination = &LayoutOut->TimerTableEntryTime; break;
+        case KSW_DYN_V4_ITEM_ID_KTIMER_TIMER_LIST_ENTRY: destination = &LayoutOut->TimerTimerListEntry; break;
+        case KSW_DYN_V4_ITEM_ID_KTIMER_DUE_TIME: destination = &LayoutOut->TimerDueTime; break;
+        case KSW_DYN_V4_ITEM_ID_KTIMER_DPC: destination = &LayoutOut->TimerDpc; break;
+        case KSW_DYN_V4_ITEM_ID_KTIMER_TIMER_TYPE: destination = &LayoutOut->TimerType; break;
+        case KSW_DYN_V4_ITEM_ID_KTIMER_PERIOD: destination = &LayoutOut->TimerPeriod; break;
+        case KSW_DYN_V4_ITEM_ID_KDPC_DEFERRED_ROUTINE: destination = &LayoutOut->DpcDeferredRoutine; break;
+        case KSW_DYN_V4_ITEM_ID_KDPC_DEFERRED_CONTEXT: destination = &LayoutOut->DpcDeferredContext; break;
+        case KSW_DYN_V4_ITEM_ID_KTIMER_TABLE_TYPE_SIZE:
+            destination = &LayoutOut->TimerTableTypeSize;
+            expectedKind = KSW_DYN_V4_ITEM_KIND_TYPE_SIZE;
+            break;
+        case KSW_DYN_V4_ITEM_ID_KTIMER_TABLE_ENTRY_TYPE_SIZE:
+            destination = &LayoutOut->TimerTableEntryTypeSize;
+            expectedKind = KSW_DYN_V4_ITEM_KIND_TYPE_SIZE;
+            break;
+        case KSW_DYN_V4_ITEM_ID_KTIMER_TYPE_SIZE:
+            destination = &LayoutOut->TimerTypeSize;
+            expectedKind = KSW_DYN_V4_ITEM_KIND_TYPE_SIZE;
+            break;
+        case KSW_DYN_V4_ITEM_ID_KDPC_TYPE_SIZE:
+            destination = &LayoutOut->DpcTypeSize;
+            expectedKind = KSW_DYN_V4_ITEM_KIND_TYPE_SIZE;
+            break;
+        default:
+            break;
+        }
+
+        if (destination != NULL && item->itemKind == expectedKind) {
+            *destination = item->valueLow;
+            foundCount += 1UL;
+        }
+    }
+    ExReleasePushLockShared(&g_KswordDynDataV4Lock);
+
+    return (foundCount == 16UL) ? STATUS_SUCCESS : STATUS_NOT_SUPPORTED;
+}
+
+NTSTATUS
 KswordARKDynDataV4ApplyProfile(
     _In_reads_bytes_(InputBufferLength) const KSW_APPLY_DYN_PROFILE_V4_REQUEST* Request,
     _In_ size_t InputBufferLength,

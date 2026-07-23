@@ -21,6 +21,7 @@
 #define KSWORD_ARK_IOCTL_FUNCTION_QUERY_CPU_HARDWARE 0x84AUL
 #define KSWORD_ARK_IOCTL_FUNCTION_QUERY_PHYSICAL_MEMORY_LAYOUT 0x84BUL
 #define KSWORD_ARK_IOCTL_FUNCTION_QUERY_IOCTL_REGISTRY 0x8A4UL
+#define KSWORD_ARK_IOCTL_FUNCTION_ENUM_TIMER_DPC 0x8A5UL
 
 #define IOCTL_KSWORD_ARK_ENUM_SSDT \
     CTL_CODE( \
@@ -41,6 +42,14 @@
     CTL_CODE( \
         KSWORD_ARK_IOCTL_DEVICE_TYPE, \
         KSWORD_ARK_IOCTL_FUNCTION_QUERY_IOCTL_REGISTRY, \
+        METHOD_BUFFERED, \
+        FILE_ANY_ACCESS)
+
+// 中文说明：按处理器只读遍历 KPRCB TimerTable，并返回 KTIMER/KDPC 快照。
+#define IOCTL_KSWORD_ARK_ENUM_TIMER_DPC \
+    CTL_CODE( \
+        KSWORD_ARK_IOCTL_DEVICE_TYPE, \
+        KSWORD_ARK_IOCTL_FUNCTION_ENUM_TIMER_DPC, \
         METHOD_BUFFERED, \
         FILE_ANY_ACCESS)
 
@@ -154,6 +163,34 @@ typedef struct _KSWORD_ARK_QUERY_IOCTL_REGISTRY_RESPONSE
 #define KSWORD_ARK_DRIVER_INTEGRITY_PROTOCOL_VERSION KSWORD_ARK_DRIVER_INTEGRITY_PROTOCOL_VERSION_V2
 #define KSWORD_ARK_CPU_HARDWARE_PROTOCOL_VERSION 1UL
 #define KSWORD_ARK_PHYSICAL_MEMORY_LAYOUT_PROTOCOL_VERSION 1UL
+#define KSWORD_ARK_TIMER_DPC_PROTOCOL_VERSION 1UL
+
+// Timer/DPC request bounds and response state. 枚举只读取活动 KTIMER 链表，
+// maxEntries 为全局行预算，maxEntriesPerBucket 限制单个损坏链表的影响范围。
+#define KSWORD_ARK_TIMER_DPC_DEFAULT_MAX_ENTRIES 4096UL
+#define KSWORD_ARK_TIMER_DPC_MAX_ENTRIES 16384UL
+#define KSWORD_ARK_TIMER_DPC_DEFAULT_BUCKET_BUDGET 4096UL
+#define KSWORD_ARK_TIMER_DPC_MAX_BUCKET_BUDGET 16384UL
+#define KSWORD_ARK_TIMER_DPC_MAX_BUCKETS 512UL
+
+#define KSWORD_ARK_TIMER_DPC_QUERY_STATUS_OK 0UL
+#define KSWORD_ARK_TIMER_DPC_QUERY_STATUS_PARTIAL 1UL
+#define KSWORD_ARK_TIMER_DPC_QUERY_STATUS_DYNDATA_MISSING 2UL
+#define KSWORD_ARK_TIMER_DPC_QUERY_STATUS_INVALID_LAYOUT 3UL
+#define KSWORD_ARK_TIMER_DPC_QUERY_STATUS_NOT_SUPPORTED 4UL
+
+#define KSWORD_ARK_TIMER_DPC_STATUS_PARTIAL 0x00000001UL
+#define KSWORD_ARK_TIMER_DPC_STATUS_TRUNCATED 0x00000002UL
+#define KSWORD_ARK_TIMER_DPC_STATUS_CORRUPT_CHAIN 0x00000004UL
+#define KSWORD_ARK_TIMER_DPC_STATUS_DYNDATA_MISSING 0x00000008UL
+#define KSWORD_ARK_TIMER_DPC_STATUS_READ_FAILED 0x00000010UL
+#define KSWORD_ARK_TIMER_DPC_STATUS_DUPLICATE_SKIPPED 0x00000020UL
+
+#define KSWORD_ARK_TIMER_DPC_ENTRY_DPC_PRESENT 0x00000001UL
+#define KSWORD_ARK_TIMER_DPC_ENTRY_DPC_FIELDS_PRESENT 0x00000002UL
+#define KSWORD_ARK_TIMER_DPC_ENTRY_PERIODIC 0x00000004UL
+#define KSWORD_ARK_TIMER_DPC_ENTRY_DUPLICATE_CPU 0x00000008UL
+#define KSWORD_ARK_TIMER_DPC_ENTRY_READ_PARTIAL 0x00000010UL
 
 // Request flags.
 #define KSWORD_ARK_ENUM_SSDT_FLAG_INCLUDE_UNRESOLVED 0x00000001UL
@@ -786,6 +823,51 @@ typedef struct _KSWORD_ARK_QUERY_PHYSICAL_MEMORY_LAYOUT_RESPONSE
     unsigned long long lastEndAddress;
     unsigned long long estimatedAddressSpaceGapBytes;
 } KSWORD_ARK_QUERY_PHYSICAL_MEMORY_LAYOUT_RESPONSE;
+
+typedef struct _KSWORD_ARK_ENUM_TIMER_DPC_REQUEST
+{
+    unsigned long version;
+    unsigned long flags;
+    unsigned long maxEntries;
+    unsigned long maxEntriesPerBucket;
+} KSWORD_ARK_ENUM_TIMER_DPC_REQUEST;
+
+typedef struct _KSWORD_ARK_TIMER_DPC_ENTRY
+{
+    unsigned short processorGroup;
+    unsigned short processorNumber;
+    unsigned long bucketIndex;
+    unsigned long flags;
+    unsigned long timerType;
+    long period;
+    long long dueTime;
+    unsigned long long timerAddress;
+    unsigned long long dpcAddress;
+    unsigned long long deferredRoutine;
+    unsigned long long deferredContext;
+} KSWORD_ARK_TIMER_DPC_ENTRY;
+
+typedef struct _KSWORD_ARK_ENUM_TIMER_DPC_RESPONSE
+{
+    unsigned long version;
+    unsigned long queryStatus;
+    unsigned long statusFlags;
+    unsigned long totalCount;
+    unsigned long returnedCount;
+    unsigned long entrySize;
+    unsigned long processorCount;
+    unsigned long bucketCount;
+    unsigned long bucketsVisited;
+    unsigned long corruptBucketCount;
+    unsigned long readFailureCount;
+    unsigned long duplicateCount;
+    long lastStatus;
+    unsigned long reserved;
+    KSWORD_ARK_TIMER_DPC_ENTRY entries[1];
+} KSWORD_ARK_ENUM_TIMER_DPC_RESPONSE;
+
+#define KSWORD_ARK_ENUM_TIMER_DPC_RESPONSE_HEADER_SIZE \
+    (sizeof(KSWORD_ARK_ENUM_TIMER_DPC_RESPONSE) - sizeof(KSWORD_ARK_TIMER_DPC_ENTRY))
 
 typedef struct _KSWORD_ARK_FORCE_UNLOAD_DRIVER_REQUEST
 {

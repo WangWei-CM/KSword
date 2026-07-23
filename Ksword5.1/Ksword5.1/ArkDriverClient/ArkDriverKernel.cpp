@@ -618,6 +618,116 @@ namespace ksword::ark
         return scanResult;
     }
 
+    KernelTimerDpcEnumResult DriverClient::enumerateKernelTimerDpc(
+        const unsigned long maxEntries,
+        const unsigned long maxEntriesPerBucket) const
+    {
+        KernelTimerDpcEnumResult enumResult{};
+        KSWORD_ARK_ENUM_TIMER_DPC_REQUEST request{};
+        request.version = KSWORD_ARK_TIMER_DPC_PROTOCOL_VERSION;
+        request.maxEntries = maxEntries;
+        request.maxEntriesPerBucket = maxEntriesPerBucket;
+
+        const std::size_t requestedRows = std::min<std::size_t>(
+            maxEntries == 0UL ? KSWORD_ARK_TIMER_DPC_DEFAULT_MAX_ENTRIES : maxEntries,
+            KSWORD_ARK_TIMER_DPC_MAX_ENTRIES);
+        const std::size_t responseBytes = KSWORD_ARK_ENUM_TIMER_DPC_RESPONSE_HEADER_SIZE +
+            (requestedRows * sizeof(KSWORD_ARK_TIMER_DPC_ENTRY));
+        std::vector<std::uint8_t> responseBuffer(responseBytes, 0U);
+        enumResult.io = deviceIoControl(
+            IOCTL_KSWORD_ARK_ENUM_TIMER_DPC,
+            &request,
+            static_cast<unsigned long>(sizeof(request)),
+            responseBuffer.data(),
+            static_cast<unsigned long>(responseBuffer.size()));
+        if (!enumResult.io.ok)
+        {
+            enumResult.unsupported = isUnsupportedIoctlError(enumResult.io.win32Error);
+            enumResult.io.message =
+                "DeviceIoControl(IOCTL_KSWORD_ARK_ENUM_TIMER_DPC) failed, error=" +
+                std::to_string(enumResult.io.win32Error);
+            return enumResult;
+        }
+        if (enumResult.io.bytesReturned < KSWORD_ARK_ENUM_TIMER_DPC_RESPONSE_HEADER_SIZE)
+        {
+            enumResult.io.ok = false;
+            enumResult.io.message =
+                "timer/DPC response too small, bytesReturned=" +
+                std::to_string(enumResult.io.bytesReturned);
+            return enumResult;
+        }
+
+        const auto* responseHeader =
+            reinterpret_cast<const KSWORD_ARK_ENUM_TIMER_DPC_RESPONSE*>(responseBuffer.data());
+        if (responseHeader->version != KSWORD_ARK_TIMER_DPC_PROTOCOL_VERSION ||
+            responseHeader->entrySize < sizeof(KSWORD_ARK_TIMER_DPC_ENTRY))
+        {
+            enumResult.io.ok = false;
+            enumResult.io.message = "timer/DPC response version or entrySize is invalid";
+            return enumResult;
+        }
+
+        enumResult.version = static_cast<std::uint32_t>(responseHeader->version);
+        enumResult.queryStatus = static_cast<std::uint32_t>(responseHeader->queryStatus);
+        enumResult.statusFlags = static_cast<std::uint32_t>(responseHeader->statusFlags);
+        enumResult.totalCount = static_cast<std::uint32_t>(responseHeader->totalCount);
+        enumResult.returnedCount = static_cast<std::uint32_t>(responseHeader->returnedCount);
+        enumResult.processorCount = static_cast<std::uint32_t>(responseHeader->processorCount);
+        enumResult.bucketCount = static_cast<std::uint32_t>(responseHeader->bucketCount);
+        enumResult.bucketsVisited = static_cast<std::uint32_t>(responseHeader->bucketsVisited);
+        enumResult.corruptBucketCount = static_cast<std::uint32_t>(responseHeader->corruptBucketCount);
+        enumResult.readFailureCount = static_cast<std::uint32_t>(responseHeader->readFailureCount);
+        enumResult.duplicateCount = static_cast<std::uint32_t>(responseHeader->duplicateCount);
+        enumResult.lastStatus = static_cast<long>(responseHeader->lastStatus);
+
+        const std::size_t availableCount =
+            (enumResult.io.bytesReturned - KSWORD_ARK_ENUM_TIMER_DPC_RESPONSE_HEADER_SIZE) /
+            static_cast<std::size_t>(responseHeader->entrySize);
+        const std::size_t parsedCount = std::min<std::size_t>(
+            static_cast<std::size_t>(responseHeader->returnedCount),
+            availableCount);
+        enumResult.entries.reserve(parsedCount);
+        for (std::size_t index = 0U; index < parsedCount; ++index)
+        {
+            const std::size_t entryOffset = KSWORD_ARK_ENUM_TIMER_DPC_RESPONSE_HEADER_SIZE +
+                (index * static_cast<std::size_t>(responseHeader->entrySize));
+            if (entryOffset + sizeof(KSWORD_ARK_TIMER_DPC_ENTRY) > responseBuffer.size())
+            {
+                break;
+            }
+            const auto* sourceEntry = reinterpret_cast<const KSWORD_ARK_TIMER_DPC_ENTRY*>(
+                responseBuffer.data() + entryOffset);
+            KernelTimerDpcEntry row{};
+            row.processorGroup = sourceEntry->processorGroup;
+            row.processorNumber = sourceEntry->processorNumber;
+            row.bucketIndex = sourceEntry->bucketIndex;
+            row.flags = sourceEntry->flags;
+            row.timerType = sourceEntry->timerType;
+            row.period = sourceEntry->period;
+            row.dueTime = sourceEntry->dueTime;
+            row.timerAddress = sourceEntry->timerAddress;
+            row.dpcAddress = sourceEntry->dpcAddress;
+            row.deferredRoutine = sourceEntry->deferredRoutine;
+            row.deferredContext = sourceEntry->deferredContext;
+            enumResult.entries.push_back(row);
+        }
+
+        std::ostringstream stream;
+        stream << "version=" << enumResult.version
+            << ", queryStatus=" << enumResult.queryStatus
+            << ", statusFlags=0x" << std::hex << enumResult.statusFlags << std::dec
+            << ", processors=" << enumResult.processorCount
+            << ", buckets=" << enumResult.bucketsVisited
+            << ", total=" << enumResult.totalCount
+            << ", returned=" << enumResult.returnedCount
+            << ", parsed=" << enumResult.entries.size()
+            << ", corrupt=" << enumResult.corruptBucketCount
+            << ", readFailures=" << enumResult.readFailureCount
+            << ", duplicates=" << enumResult.duplicateCount;
+        enumResult.io.message = stream.str();
+        return enumResult;
+    }
+
     DriverObjectQueryResult DriverClient::queryDriverObject(
         const std::wstring& driverName,
         const unsigned long flags,

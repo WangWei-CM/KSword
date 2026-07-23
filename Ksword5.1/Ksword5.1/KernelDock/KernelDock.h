@@ -210,6 +210,25 @@ struct KernelIatEatHookEntry
     QString detailText;                   // detailText：详情文本。
 };
 
+// KernelTimerDpcEntry：TimerTable 页的一条已归属模块的展示记录。
+struct KernelTimerDpcEntry
+{
+    std::uint16_t processorGroup = 0;
+    std::uint16_t processorNumber = 0;
+    std::uint32_t bucketIndex = 0;
+    std::uint32_t flags = 0;
+    std::uint32_t timerType = 0;
+    std::int32_t period = 0;
+    std::int64_t dueTime = 0;
+    std::uint64_t timerAddress = 0;
+    std::uint64_t dpcAddress = 0;
+    std::uint64_t deferredRoutine = 0;
+    std::uint64_t deferredContext = 0;
+    QString moduleNameText;
+    QString statusText;
+    QString detailText;
+};
+
 
 // ============================================================
 // KernelCallbackEnumEntry
@@ -563,6 +582,9 @@ private:
     // - 作用：创建“IAT/EAT 钩子检测”页签，展示导入/导出表可疑指针。
     void initializeIatEatHookTab();
 
+    // initializeTimerDpcTab：创建 DynData v4 驱动的 KTIMER/KDPC 只读枚举页。
+    void initializeTimerDpcTab();
+
     // initializeCrossViewTab：
     // - 作用：创建只读 CID / cross-view 页。
     void initializeCrossViewTab();
@@ -620,6 +642,9 @@ private:
     // refreshIatEatHooksAsync：
     // - 作用：后台扫描内核模块 IAT/EAT 可疑指针。
     void refreshIatEatHooksAsync();
+
+    // refreshTimerDpcAsync：后台枚举每 CPU TimerTable 并解析例程模块归属。
+    void refreshTimerDpcAsync();
 
     // ==================== 表格渲染 ====================
     // rebuildObjectNamespaceTable：
@@ -707,6 +732,8 @@ private:
     // - 参数 filterKeyword：筛选关键词（空表示不过滤）。
     void rebuildIatEatHookTable(const QString& filterKeyword);
 
+    void rebuildTimerDpcTable(const QString& filterKeyword);
+
     // ==================== 详情联动 ====================
     // showObjectNamespaceDetailByCurrentRow：
     // - 作用：根据当前选中行显示对象命名空间详情。
@@ -747,6 +774,10 @@ private:
     // showIatEatHookDetailByCurrentRow：
     // - 作用：根据当前选中行显示 IAT/EAT Hook 详情。
     void showIatEatHookDetailByCurrentRow();
+
+    void showTimerDpcDetailByCurrentRow();
+
+    void showTimerDpcContextMenu(const QPoint& localPosition);
 
     // ==================== 右键菜单 ====================
     // showObjectNamespaceContextMenu：
@@ -903,6 +934,7 @@ private:
     int m_shadowSsdtTabIndex = -1;       // m_shadowSsdtTabIndex：SSSDT 解析页签索引。
     int m_inlineHookTabIndex = -1;       // m_inlineHookTabIndex：Inline Hook 页签索引。
     int m_iatEatHookTabIndex = -1;       // m_iatEatHookTabIndex：IAT/EAT Hook 页签索引。
+    int m_timerDpcTabIndex = -1;          // m_timerDpcTabIndex：KTIMER/DPC 页签索引。
     int m_crossViewTabIndex = -1;        // m_crossViewTabIndex：CID/交叉视图页签索引。
     int m_ipcTabIndex = -1;              // m_ipcTabIndex：IPC/NamedPipe/ALPC 页签索引。
     bool m_objectNamespaceTabInitialized = false; // m_objectNamespaceTabInitialized：对象命名空间页是否已初始化。
@@ -916,6 +948,7 @@ private:
     bool m_shadowSsdtTabInitialized = false;      // m_shadowSsdtTabInitialized：SSSDT 页是否已初始化。
     bool m_inlineHookTabInitialized = false;      // m_inlineHookTabInitialized：Inline Hook 页是否已初始化。
     bool m_iatEatHookTabInitialized = false;      // m_iatEatHookTabInitialized：IAT/EAT 页是否已初始化。
+    bool m_timerDpcTabInitialized = false;        // m_timerDpcTabInitialized：KTIMER/DPC 页是否已初始化。
     bool m_crossViewTabInitialized = false;       // m_crossViewTabInitialized：CID 页是否已初始化。
     bool m_ipcTabInitialized = false;             // m_ipcTabInitialized：IPC 页是否已初始化。
 
@@ -987,6 +1020,7 @@ private:
 
     // ==================== IAT/EAT Hook 页 ====================
     QWidget* m_iatEatHookPage = nullptr;                    // m_iatEatHookPage：IAT/EAT 页容器。
+    QWidget* m_timerDpcPage = nullptr;                       // m_timerDpcPage：KTIMER/DPC 页容器。
     QWidget* m_crossViewPage = nullptr;                    // m_crossViewPage：CID / cross-view 页容器。
     QWidget* m_ipcPage = nullptr;                          // m_ipcPage：IPC / ALPC / NamedPipe 页容器。
     QVBoxLayout* m_iatEatHookLayout = nullptr;              // m_iatEatHookLayout：IAT/EAT 页布局。
@@ -998,6 +1032,15 @@ private:
     QLabel* m_iatEatHookStatusLabel = nullptr;              // m_iatEatHookStatusLabel：状态文本。
     QTableWidget* m_iatEatHookTable = nullptr;              // m_iatEatHookTable：IAT/EAT 表格。
     CodeEditorWidget* m_iatEatHookDetailEditor = nullptr;   // m_iatEatHookDetailEditor：详情文本框。
+
+    // ==================== KTIMER/DPC 页 ====================
+    QVBoxLayout* m_timerDpcLayout = nullptr;
+    QHBoxLayout* m_timerDpcToolLayout = nullptr;
+    QPushButton* m_refreshTimerDpcButton = nullptr;
+    QLineEdit* m_timerDpcFilterEdit = nullptr;
+    QLabel* m_timerDpcStatusLabel = nullptr;
+    QTableWidget* m_timerDpcTable = nullptr;
+    CodeEditorWidget* m_timerDpcDetailEditor = nullptr;
 
     // ==================== 动态偏移页 ====================
     QWidget* m_dynDataPage = nullptr;                  // m_dynDataPage：动态偏移页容器。
@@ -1066,6 +1109,7 @@ private:
     std::vector<KernelSsdtEntry> m_shadowSsdtRows;                  // m_shadowSsdtRows：SSSDT 快照行。
     std::vector<KernelInlineHookEntry> m_inlineHookRows;            // m_inlineHookRows：Inline Hook 快照行。
     std::vector<KernelIatEatHookEntry> m_iatEatHookRows;            // m_iatEatHookRows：IAT/EAT 快照行。
+    std::vector<KernelTimerDpcEntry> m_timerDpcRows;                 // m_timerDpcRows：KTIMER/DPC 快照行。
 
     // ==================== 刷新状态 ====================
     std::atomic_bool m_objectNamespaceRefreshRunning{ false }; // m_objectNamespaceRefreshRunning：对象命名空间刷新状态。
@@ -1078,4 +1122,5 @@ private:
     std::atomic_bool m_shadowSsdtRefreshRunning{ false };      // m_shadowSsdtRefreshRunning：SSSDT 刷新状态。
     std::atomic_bool m_inlineHookRefreshRunning{ false };      // m_inlineHookRefreshRunning：Inline Hook 刷新状态。
     std::atomic_bool m_iatEatHookRefreshRunning{ false };      // m_iatEatHookRefreshRunning：IAT/EAT 刷新状态。
+    std::atomic_bool m_timerDpcRefreshRunning{ false };        // m_timerDpcRefreshRunning：KTIMER/DPC 刷新状态。
 };

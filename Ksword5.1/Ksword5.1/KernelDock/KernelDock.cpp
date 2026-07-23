@@ -460,6 +460,7 @@ void KernelDock::initializeUi()
     m_shadowSsdtPage = new QWidget(m_tabWidget);
     m_inlineHookPage = new QWidget(m_tabWidget);
     m_iatEatHookPage = new QWidget(m_tabWidget);
+    m_timerDpcPage = new QWidget(m_tabWidget);
     m_crossViewPage = new QWidget(m_tabWidget);
     m_ipcPage = new QWidget(m_tabWidget);
 
@@ -504,6 +505,12 @@ void KernelDock::initializeUi()
         tabIcon(QStringLiteral(":/Icon/process_details.svg")),
         QStringLiteral("IAT/EAT"));
     m_tabWidget->setTabToolTip(m_iatEatHookTabIndex, kernelText("kernel.main.tab.iat_eat.tooltip", QStringLiteral("检测内核模块导入表和导出表可疑目标指针")));
+
+    m_timerDpcTabIndex = m_tabWidget->addTab(
+        m_timerDpcPage,
+        tabIcon(QStringLiteral(":/Icon/process_threads.svg")),
+        kernelText("kernel.main.tab.timer_dpc.title", QStringLiteral("定时器/DPC")));
+    m_tabWidget->setTabToolTip(m_timerDpcTabIndex, kernelText("kernel.main.tab.timer_dpc.tooltip", QStringLiteral("按 CPU 只读遍历 KTIMER 表并解析关联 KDPC 例程")));
 
     m_crossViewTabIndex = m_tabWidget->addTab(
         m_crossViewPage,
@@ -592,6 +599,7 @@ void KernelDock::updateTabIconContrast()
     m_tabWidget->setTabIcon(m_shadowSsdtTabIndex, tabIcon(QStringLiteral(":/Icon/process_list.svg")));
     m_tabWidget->setTabIcon(m_inlineHookTabIndex, tabIcon(QStringLiteral(":/Icon/process_critical.svg")));
     m_tabWidget->setTabIcon(m_iatEatHookTabIndex, tabIcon(QStringLiteral(":/Icon/process_details.svg")));
+    m_tabWidget->setTabIcon(m_timerDpcTabIndex, tabIcon(QStringLiteral(":/Icon/process_threads.svg")));
     m_tabWidget->setTabIcon(m_crossViewTabIndex, tabIcon(QStringLiteral(":/Icon/process_list.svg")));
     m_tabWidget->setTabIcon(m_ipcTabIndex, tabIcon(QStringLiteral(":/Icon/process_details.svg")));
     m_tabWidget->setTabIcon(m_dynDataTabIndex, tabIcon(QStringLiteral(":/Icon/process_priority.svg")));
@@ -626,6 +634,10 @@ void KernelDock::updateTabIconContrast()
     else if (currentIndex == m_iatEatHookTabIndex)
     {
         m_tabWidget->setTabIcon(currentIndex, selectedTabIcon(QStringLiteral(":/Icon/process_details.svg")));
+    }
+    else if (currentIndex == m_timerDpcTabIndex)
+    {
+        m_tabWidget->setTabIcon(currentIndex, selectedTabIcon(QStringLiteral(":/Icon/process_threads.svg")));
     }
     else if (currentIndex == m_crossViewTabIndex)
     {
@@ -1070,6 +1082,16 @@ void KernelDock::ensureTabInitialized(const int tabIndex)
         m_iatEatHookTabInitialized = true;
         hideTabInitializingProgress();
         refreshIatEatHooksAsync();
+        return;
+    }
+
+    if (tabIndex == m_timerDpcTabIndex && !m_timerDpcTabInitialized)
+    {
+        showTabInitializingProgress(tabIndex, kernelText("kernel.main.tab.timer_dpc.title", QStringLiteral("定时器/DPC")));
+        initializeTimerDpcTab();
+        m_timerDpcTabInitialized = true;
+        hideTabInitializingProgress();
+        refreshTimerDpcAsync();
         return;
     }
 

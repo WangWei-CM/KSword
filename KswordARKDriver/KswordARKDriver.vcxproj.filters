@@ -577,6 +577,9 @@
     <ClCompile Include="src\features\kernel\kernel_ioctl.c">
       <Filter>Source Files\Features\Kernel</Filter>
     </ClCompile>
+    <ClCompile Include="src\features\kernel\timer_dpc_query.c">
+      <Filter>Source Files\Features\Kernel</Filter>
+    </ClCompile>
     <ClCompile Include="src\features\callback\callback_ioctl.c">
       <Filter>Source Files\Features\Callback</Filter>
     </ClCompile>

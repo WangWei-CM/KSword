@@ -1290,6 +1290,42 @@ namespace ksword::ark
         std::vector<KernelIatEatHookEntry> entries;
     };
 
+    // KernelTimerDpcEntry 是 R0 从每个 KPRCB TimerTable 返回的一条只读快照。
+    struct KernelTimerDpcEntry
+    {
+        std::uint16_t processorGroup = 0;
+        std::uint16_t processorNumber = 0;
+        std::uint32_t bucketIndex = 0;
+        std::uint32_t flags = 0;
+        std::uint32_t timerType = 0;
+        std::int32_t period = 0;
+        std::int64_t dueTime = 0;
+        std::uint64_t timerAddress = 0;
+        std::uint64_t dpcAddress = 0;
+        std::uint64_t deferredRoutine = 0;
+        std::uint64_t deferredContext = 0;
+    };
+
+    // KernelTimerDpcEnumResult 保留枚举完整性标记，UI 不把 partial 当成完整快照。
+    struct KernelTimerDpcEnumResult
+    {
+        IoResult io;
+        bool unsupported = false;
+        std::uint32_t version = 0;
+        std::uint32_t queryStatus = KSWORD_ARK_TIMER_DPC_QUERY_STATUS_NOT_SUPPORTED;
+        std::uint32_t statusFlags = 0;
+        std::uint32_t totalCount = 0;
+        std::uint32_t returnedCount = 0;
+        std::uint32_t processorCount = 0;
+        std::uint32_t bucketCount = 0;
+        std::uint32_t bucketsVisited = 0;
+        std::uint32_t corruptBucketCount = 0;
+        std::uint32_t readFailureCount = 0;
+        std::uint32_t duplicateCount = 0;
+        long lastStatus = 0;
+        std::vector<KernelTimerDpcEntry> entries;
+    };
+
     // DriverMajorFunctionEntry 是 Phase-9 DriverObject.MajorFunction 单行模型。
     struct DriverMajorFunctionEntry
     {

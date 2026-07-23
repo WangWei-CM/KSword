@@ -448,6 +448,29 @@ namespace
         return modulePathMap;
     }
 
+    QString kernelHookResolveModuleForAddress(
+        const KernelHookModulePathMap& modulePathMap,
+        const std::uint64_t address)
+    {
+        if (address == 0U)
+        {
+            return QString();
+        }
+        for (auto iterator = modulePathMap.constBegin(); iterator != modulePathMap.constEnd(); ++iterator)
+        {
+            const KernelHookLoadedModuleInfo& module = iterator.value();
+            const std::uint64_t base = module.imageBase;
+            const std::uint64_t size = module.imageSize;
+            if (base != 0U && size != 0U && address >= base && address - base < size)
+            {
+                return module.fileNameText.trimmed().isEmpty()
+                    ? module.ntPathText
+                    : module.fileNameText;
+            }
+        }
+        return QString();
+    }
+
     template <typename PodType>
     bool kernelHookReadPodAtOffset(const QByteArray& fileBytes, const std::uint64_t fileOffset, PodType* valueOut)
     {
@@ -835,6 +858,22 @@ namespace
         Count
     };
 
+    enum class TimerDpcColumn : int
+    {
+        Cpu = 0,
+        Bucket,
+        Timer,
+        DueTime,
+        Period,
+        Type,
+        Dpc,
+        Routine,
+        Context,
+        Module,
+        Status,
+        Count
+    };
+
     QString kernelHookStatusText(const std::uint32_t status)
     {
         switch (status)
@@ -1051,6 +1090,110 @@ namespace
         default:
             return kernelText("kernel.hooks.header.unknown", QStringLiteral("未知列"));
         }
+    }
+
+    QString timerDpcColumnHeader(const TimerDpcColumn column)
+    {
+        switch (column)
+        {
+        case TimerDpcColumn::Cpu: return kernelText("kernel.timer_dpc.header.cpu", QStringLiteral("CPU"));
+        case TimerDpcColumn::Bucket: return kernelText("kernel.timer_dpc.header.bucket", QStringLiteral("Bucket"));
+        case TimerDpcColumn::Timer: return kernelText("kernel.timer_dpc.header.timer", QStringLiteral("Timer"));
+        case TimerDpcColumn::DueTime: return kernelText("kernel.timer_dpc.header.due_time", QStringLiteral("DueTime"));
+        case TimerDpcColumn::Period: return kernelText("kernel.timer_dpc.header.period", QStringLiteral("Period"));
+        case TimerDpcColumn::Type: return kernelText("kernel.timer_dpc.header.type", QStringLiteral("类型"));
+        case TimerDpcColumn::Dpc: return kernelText("kernel.timer_dpc.header.dpc", QStringLiteral("DPC"));
+        case TimerDpcColumn::Routine: return kernelText("kernel.timer_dpc.header.routine", QStringLiteral("例程"));
+        case TimerDpcColumn::Context: return kernelText("kernel.timer_dpc.header.context", QStringLiteral("上下文"));
+        case TimerDpcColumn::Module: return kernelText("kernel.timer_dpc.header.module", QStringLiteral("模块"));
+        case TimerDpcColumn::Status: return kernelText("kernel.timer_dpc.header.status", QStringLiteral("状态"));
+        default: return kernelText("kernel.hooks.header.unknown", QStringLiteral("未知列"));
+        }
+    }
+
+    QString timerDpcTypeText(const std::uint32_t timerType)
+    {
+        if (timerType == 8U)
+        {
+            return kernelText("kernel.timer_dpc.type.notification", QStringLiteral("通知定时器(8)"));
+        }
+        if (timerType == 9U)
+        {
+            return kernelText("kernel.timer_dpc.type.synchronization", QStringLiteral("同步定时器(9)"));
+        }
+        return kernelText("kernel.timer_dpc.type.unknown", QStringLiteral("未知(%1)")).arg(timerType);
+    }
+
+    QString timerDpcEntryStatusText(const std::uint32_t flags, const QString& moduleName)
+    {
+        QStringList parts;
+        if ((flags & KSWORD_ARK_TIMER_DPC_ENTRY_DPC_PRESENT) == 0U)
+        {
+            parts.push_back(kernelText("kernel.timer_dpc.status.no_dpc", QStringLiteral("无DPC")));
+        }
+        else if ((flags & KSWORD_ARK_TIMER_DPC_ENTRY_DPC_FIELDS_PRESENT) == 0U)
+        {
+            parts.push_back(kernelText("kernel.timer_dpc.status.dpc_unreadable", QStringLiteral("DPC字段不可读")));
+        }
+        else
+        {
+            parts.push_back(kernelText("kernel.timer_dpc.status.dpc", QStringLiteral("DPC已解析")));
+        }
+        if ((flags & KSWORD_ARK_TIMER_DPC_ENTRY_PERIODIC) != 0U)
+        {
+            parts.push_back(kernelText("kernel.timer_dpc.status.periodic", QStringLiteral("周期")));
+        }
+        if ((flags & KSWORD_ARK_TIMER_DPC_ENTRY_READ_PARTIAL) != 0U)
+        {
+            parts.push_back(kernelText("kernel.timer_dpc.status.partial", QStringLiteral("字段部分读取")));
+        }
+        if (moduleName.trimmed().isEmpty() && (flags & KSWORD_ARK_TIMER_DPC_ENTRY_DPC_FIELDS_PRESENT) != 0U)
+        {
+            parts.push_back(kernelText("kernel.timer_dpc.status.module_unresolved", QStringLiteral("模块未解析")));
+        }
+        return parts.join(QStringLiteral(" / "));
+    }
+
+    QString timerDpcColumnText(const KernelTimerDpcEntry& entry, const TimerDpcColumn column)
+    {
+        switch (column)
+        {
+        case TimerDpcColumn::Cpu:
+            return QStringLiteral("%1:%2").arg(entry.processorGroup).arg(entry.processorNumber);
+        case TimerDpcColumn::Bucket:
+            return QString::number(entry.bucketIndex);
+        case TimerDpcColumn::Timer:
+            return kernelHookFormatAddress(entry.timerAddress);
+        case TimerDpcColumn::DueTime:
+            return QString::number(entry.dueTime);
+        case TimerDpcColumn::Period:
+            return QString::number(entry.period);
+        case TimerDpcColumn::Type:
+            return timerDpcTypeText(entry.timerType);
+        case TimerDpcColumn::Dpc:
+            return entry.dpcAddress == 0U ? kernelText("kernel.timer_dpc.placeholder.none", QStringLiteral("<无>")) : kernelHookFormatAddress(entry.dpcAddress);
+        case TimerDpcColumn::Routine:
+            return entry.deferredRoutine == 0U ? kernelText("kernel.timer_dpc.placeholder.none", QStringLiteral("<无>")) : kernelHookFormatAddress(entry.deferredRoutine);
+        case TimerDpcColumn::Context:
+            return entry.deferredContext == 0U ? kernelText("kernel.timer_dpc.placeholder.none", QStringLiteral("<无>")) : kernelHookFormatAddress(entry.deferredContext);
+        case TimerDpcColumn::Module:
+            return kernelHookSafeText(entry.moduleNameText, kernelText("kernel.hooks.placeholder.not_resolved", QStringLiteral("<未解析>")));
+        case TimerDpcColumn::Status:
+            return kernelHookSafeText(entry.statusText);
+        default:
+            return QString();
+        }
+    }
+
+    QString timerDpcRowAsTsv(const KernelTimerDpcEntry& entry)
+    {
+        QStringList fields;
+        fields.reserve(static_cast<int>(TimerDpcColumn::Count));
+        for (int index = 0; index < static_cast<int>(TimerDpcColumn::Count); ++index)
+        {
+            fields.push_back(timerDpcColumnText(entry, static_cast<TimerDpcColumn>(index)));
+        }
+        return fields.join('\t');
     }
 
     QString shadowSsdtColumnText(const KernelSsdtEntry& entry, const ShadowSsdtColumn column)
@@ -1717,6 +1860,63 @@ void KernelDock::initializeIatEatHookTab()
     });
 }
 
+void KernelDock::initializeTimerDpcTab()
+{
+    if (m_timerDpcPage == nullptr || m_timerDpcLayout != nullptr)
+    {
+        return;
+    }
+
+    m_timerDpcLayout = new QVBoxLayout(m_timerDpcPage);
+    m_timerDpcLayout->setContentsMargins(4, 4, 4, 4);
+    m_timerDpcLayout->setSpacing(6);
+    m_timerDpcToolLayout = new QHBoxLayout();
+    m_timerDpcToolLayout->setContentsMargins(0, 0, 0, 0);
+    m_timerDpcToolLayout->setSpacing(6);
+
+    m_refreshTimerDpcButton = new QPushButton(QIcon(":/Icon/process_refresh.svg"), QString(), m_timerDpcPage);
+    m_refreshTimerDpcButton->setToolTip(kernelText("kernel.timer_dpc.refresh.tooltip", QStringLiteral("刷新每 CPU KTIMER/KDPC 快照")));
+    m_refreshTimerDpcButton->setStyleSheet(kernelHookButtonStyle());
+    m_refreshTimerDpcButton->setFixedWidth(34);
+
+    m_timerDpcFilterEdit = new QLineEdit(m_timerDpcPage);
+    m_timerDpcFilterEdit->setPlaceholderText(kernelText("kernel.timer_dpc.filter.placeholder", QStringLiteral("筛选 CPU/Bucket/Timer/DPC/例程/模块/状态")));
+    m_timerDpcFilterEdit->setClearButtonEnabled(true);
+    m_timerDpcFilterEdit->setStyleSheet(kernelHookInputStyle());
+
+    m_timerDpcStatusLabel = new QLabel(kernelText("kernel.timer_dpc.status.waiting", QStringLiteral("状态：等待刷新")), m_timerDpcPage);
+    m_timerDpcStatusLabel->setStyleSheet(kernelHookStatusLabelStyle(KswordTheme::TextSecondaryHex()));
+
+    m_timerDpcToolLayout->addWidget(m_refreshTimerDpcButton, 0);
+    m_timerDpcToolLayout->addWidget(m_timerDpcFilterEdit, 1);
+    m_timerDpcToolLayout->addWidget(m_timerDpcStatusLabel, 0);
+    m_timerDpcLayout->addLayout(m_timerDpcToolLayout);
+
+    QSplitter* splitter = new QSplitter(Qt::Vertical, m_timerDpcPage);
+    m_timerDpcLayout->addWidget(splitter, 1);
+    m_timerDpcTable = new ks::ui::VisibleTableWidget(splitter);
+    m_timerDpcTable->setColumnCount(static_cast<int>(TimerDpcColumn::Count));
+    QStringList headers;
+    for (int column = 0; column < static_cast<int>(TimerDpcColumn::Count); ++column)
+    {
+        headers.push_back(timerDpcColumnHeader(static_cast<TimerDpcColumn>(column)));
+    }
+    m_timerDpcTable->setHorizontalHeaderLabels(headers);
+    prepareTable(m_timerDpcTable);
+    m_timerDpcTable->horizontalHeader()->setSectionResizeMode(static_cast<int>(TimerDpcColumn::Module), QHeaderView::Stretch);
+
+    m_timerDpcDetailEditor = new CodeEditorWidget(splitter);
+    m_timerDpcDetailEditor->setReadOnly(true);
+    m_timerDpcDetailEditor->setText(kernelText("kernel.timer_dpc.detail.initial", QStringLiteral("请选择一条 KTIMER/DPC 记录查看详情。")));
+    splitter->setStretchFactor(0, 3);
+    splitter->setStretchFactor(1, 2);
+
+    connect(m_refreshTimerDpcButton, &QPushButton::clicked, this, [this]() { refreshTimerDpcAsync(); });
+    connect(m_timerDpcFilterEdit, &QLineEdit::textChanged, this, [this](const QString& text) { rebuildTimerDpcTable(text.trimmed()); });
+    connect(m_timerDpcTable, &QTableWidget::currentCellChanged, this, [this](int, int, int, int) { showTimerDpcDetailByCurrentRow(); });
+    connect(m_timerDpcTable, &QTableWidget::customContextMenuRequested, this, [this](const QPoint& position) { showTimerDpcContextMenu(position); });
+}
+
 void KernelDock::refreshShadowSsdtAsync()
 {
     if (m_shadowSsdtRefreshRunning.exchange(true))
@@ -2045,6 +2245,139 @@ void KernelDock::refreshIatEatHooksAsync()
     }).detach();
 }
 
+void KernelDock::refreshTimerDpcAsync()
+{
+    if (m_timerDpcRefreshRunning.exchange(true))
+    {
+        return;
+    }
+    if (m_refreshTimerDpcButton != nullptr)
+    {
+        m_refreshTimerDpcButton->setEnabled(false);
+    }
+    if (m_timerDpcStatusLabel != nullptr)
+    {
+        m_timerDpcStatusLabel->setText(kernelText("kernel.timer_dpc.status.enumerating", QStringLiteral("状态：正在遍历 KTIMER/DPC...")));
+        m_timerDpcStatusLabel->setStyleSheet(kernelHookStatusLabelStyle(KswordTheme::PrimaryBlueHex));
+    }
+
+    QPointer<KernelDock> guardThis(this);
+    std::thread([guardThis]() {
+        const ksword::ark::DriverClient driverClient;
+        const ksword::ark::KernelTimerDpcEnumResult enumResult = driverClient.enumerateKernelTimerDpc();
+        std::vector<KernelTimerDpcEntry> resultRows;
+        if (enumResult.io.ok)
+        {
+            const KernelHookModulePathMap modulePathMap = kernelHookQueryLoadedModulePathMap();
+            resultRows.reserve(enumResult.entries.size());
+            for (const ksword::ark::KernelTimerDpcEntry& source : enumResult.entries)
+            {
+                KernelTimerDpcEntry row{};
+                row.processorGroup = source.processorGroup;
+                row.processorNumber = source.processorNumber;
+                row.bucketIndex = source.bucketIndex;
+                row.flags = source.flags;
+                row.timerType = source.timerType;
+                row.period = source.period;
+                row.dueTime = source.dueTime;
+                row.timerAddress = source.timerAddress;
+                row.dpcAddress = source.dpcAddress;
+                row.deferredRoutine = source.deferredRoutine;
+                row.deferredContext = source.deferredContext;
+                row.moduleNameText = kernelHookResolveModuleForAddress(modulePathMap, row.deferredRoutine);
+                row.statusText = timerDpcEntryStatusText(row.flags, row.moduleNameText);
+                row.detailText = kernelText("kernel.timer_dpc.detail", QStringLiteral(
+                    "KTIMER / KDPC 详情\n"
+                    "CPU: %1:%2\n"
+                    "Bucket: %3\n"
+                    "Timer: %4\n"
+                    "DueTime: %5\n"
+                    "Period: %6\n"
+                    "类型: %7\n"
+                    "DPC: %8\n"
+                    "DeferredRoutine: %9\n"
+                    "DeferredContext: %10\n"
+                    "模块: %11\n"
+                    "状态: %12\n"
+                    "标志: 0x%13\n\n"
+                    "说明: 数据由 R0 使用精确 DynData v4 布局只读遍历当前活动 TimerTable 获得；"
+                    "未获取私有 bucket lock，刷新期间并发增删可能导致 partial/corrupt 诊断。"))
+                    .arg(row.processorGroup)
+                    .arg(row.processorNumber)
+                    .arg(row.bucketIndex)
+                    .arg(kernelHookFormatAddress(row.timerAddress))
+                    .arg(row.dueTime)
+                    .arg(row.period)
+                    .arg(timerDpcTypeText(row.timerType))
+                    .arg(row.dpcAddress == 0U ? kernelText("kernel.timer_dpc.placeholder.none", QStringLiteral("<无>")) : kernelHookFormatAddress(row.dpcAddress))
+                    .arg(row.deferredRoutine == 0U ? kernelText("kernel.timer_dpc.placeholder.none", QStringLiteral("<无>")) : kernelHookFormatAddress(row.deferredRoutine))
+                    .arg(row.deferredContext == 0U ? kernelText("kernel.timer_dpc.placeholder.none", QStringLiteral("<无>")) : kernelHookFormatAddress(row.deferredContext))
+                    .arg(kernelHookSafeText(row.moduleNameText, kernelText("kernel.hooks.placeholder.not_resolved", QStringLiteral("<未解析>"))))
+                    .arg(row.statusText)
+                    .arg(static_cast<qulonglong>(row.flags), 8, 16, QChar('0'));
+                resultRows.push_back(std::move(row));
+            }
+        }
+
+        QMetaObject::invokeMethod(guardThis, [guardThis, enumResult, resultRows = std::move(resultRows)]() mutable {
+            if (guardThis == nullptr)
+            {
+                return;
+            }
+            guardThis->m_timerDpcRefreshRunning.store(false);
+            if (guardThis->m_refreshTimerDpcButton != nullptr)
+            {
+                guardThis->m_refreshTimerDpcButton->setEnabled(true);
+            }
+            if (!enumResult.io.ok)
+            {
+                guardThis->m_timerDpcStatusLabel->setText(kernelText("kernel.timer_dpc.status.failed", QStringLiteral("状态：枚举失败")));
+                guardThis->m_timerDpcStatusLabel->setStyleSheet(kernelHookStatusLabelStyle(KswordTheme::ErrorHex()));
+                guardThis->m_timerDpcDetailEditor->setText(kernelText("kernel.timer_dpc.error.io", QStringLiteral("KTIMER/DPC 驱动接口调用失败。\nWin32=%1\n详情=%2"))
+                    .arg(enumResult.io.win32Error)
+                    .arg(friendlyKernelHookIoMessage(enumResult.io.message)));
+                return;
+            }
+
+            guardThis->m_timerDpcRows = std::move(resultRows);
+            guardThis->rebuildTimerDpcTable(guardThis->m_timerDpcFilterEdit->text().trimmed());
+            const bool complete = enumResult.queryStatus == KSWORD_ARK_TIMER_DPC_QUERY_STATUS_OK && enumResult.statusFlags == 0U;
+            guardThis->m_timerDpcStatusLabel->setText(kernelText("kernel.timer_dpc.status.summary", QStringLiteral(
+                "状态：CPU=%1，Bucket=%2/%3，Timer=%4/%5，损坏=%6，读取失败=%7，重复=%8，完整性=%9"))
+                .arg(enumResult.processorCount)
+                .arg(enumResult.bucketsVisited)
+                .arg(enumResult.processorCount * enumResult.bucketCount)
+                .arg(enumResult.entries.size())
+                .arg(enumResult.totalCount)
+                .arg(enumResult.corruptBucketCount)
+                .arg(enumResult.readFailureCount)
+                .arg(enumResult.duplicateCount)
+                .arg(complete
+                    ? kernelText("kernel.timer_dpc.integrity.complete", QStringLiteral("完整"))
+                    : kernelText("kernel.timer_dpc.integrity.partial", QStringLiteral("部分"))));
+            guardThis->m_timerDpcStatusLabel->setStyleSheet(kernelHookStatusLabelStyle(
+                complete ? KswordTheme::SuccessHex() : KswordTheme::WarningHex()));
+
+            if (enumResult.queryStatus == KSWORD_ARK_TIMER_DPC_QUERY_STATUS_DYNDATA_MISSING)
+            {
+                guardThis->m_timerDpcDetailEditor->setText(kernelText("kernel.timer_dpc.error.dyndata", QStringLiteral("当前 ntoskrnl 的 DynData v4 Timer/DPC 布局不可用。请确认偏移包已匹配并下发到驱动。")));
+            }
+            else if (enumResult.queryStatus == KSWORD_ARK_TIMER_DPC_QUERY_STATUS_INVALID_LAYOUT)
+            {
+                guardThis->m_timerDpcDetailEditor->setText(kernelText("kernel.timer_dpc.error.layout", QStringLiteral("驱动拒绝了当前 Timer/DPC 布局，未读取 TimerTable。")));
+            }
+            else if (guardThis->m_timerDpcTable->rowCount() > 0)
+            {
+                guardThis->m_timerDpcTable->setCurrentCell(0, 0);
+            }
+            else
+            {
+                guardThis->m_timerDpcDetailEditor->setText(kernelText("kernel.timer_dpc.empty", QStringLiteral("当前快照未返回活动 KTIMER 记录。")));
+            }
+        }, Qt::QueuedConnection);
+    }).detach();
+}
+
 void KernelDock::rebuildShadowSsdtTable(const QString& filterKeyword)
 {
     if (m_shadowSsdtTable == nullptr)
@@ -2190,6 +2523,48 @@ void KernelDock::rebuildIatEatHookTable(const QString& filterKeyword)
     m_iatEatHookTable->setSortingEnabled(true);
 }
 
+void KernelDock::rebuildTimerDpcTable(const QString& filterKeyword)
+{
+    if (m_timerDpcTable == nullptr)
+    {
+        return;
+    }
+    m_timerDpcTable->setSortingEnabled(false);
+    m_timerDpcTable->setRowCount(0);
+    for (std::size_t sourceIndex = 0U; sourceIndex < m_timerDpcRows.size(); ++sourceIndex)
+    {
+        const KernelTimerDpcEntry& entry = m_timerDpcRows[sourceIndex];
+        QStringList fields;
+        for (int column = 0; column < static_cast<int>(TimerDpcColumn::Count); ++column)
+        {
+            fields.push_back(timerDpcColumnText(entry, static_cast<TimerDpcColumn>(column)));
+        }
+        if (!filterKeyword.isEmpty() &&
+            !fields.join(' ').contains(filterKeyword, Qt::CaseInsensitive) &&
+            !entry.detailText.contains(filterKeyword, Qt::CaseInsensitive))
+        {
+            continue;
+        }
+        const int rowIndex = m_timerDpcTable->rowCount();
+        m_timerDpcTable->insertRow(rowIndex);
+        for (int column = 0; column < static_cast<int>(TimerDpcColumn::Count); ++column)
+        {
+            auto* item = new QTableWidgetItem(timerDpcColumnText(entry, static_cast<TimerDpcColumn>(column)));
+            if (column == 0)
+            {
+                item->setData(Qt::UserRole, static_cast<qulonglong>(sourceIndex));
+            }
+            if (column == static_cast<int>(TimerDpcColumn::Status))
+            {
+                const bool partial = (entry.flags & KSWORD_ARK_TIMER_DPC_ENTRY_READ_PARTIAL) != 0U;
+                item->setForeground(QBrush(partial ? KswordTheme::WarningColor() : KswordTheme::SuccessColor()));
+            }
+            setTableItem(m_timerDpcTable, rowIndex, column, item);
+        }
+    }
+    m_timerDpcTable->setSortingEnabled(true);
+}
+
 bool KernelDock::currentShadowSsdtSourceIndex(std::size_t& sourceIndexOut) const
 {
     sourceIndexOut = 0U;
@@ -2296,6 +2671,76 @@ void KernelDock::showIatEatHookDetailByCurrentRow()
     }
     const KernelIatEatHookEntry* entry = currentIatEatHookEntry();
     m_iatEatHookDetailEditor->setText(entry != nullptr ? entry->detailText : kernelText("kernel.hooks.iat.detail.initial", QStringLiteral("请选择一条 IAT/EAT 记录查看详情。")));
+}
+
+void KernelDock::showTimerDpcDetailByCurrentRow()
+{
+    if (m_timerDpcDetailEditor == nullptr || m_timerDpcTable == nullptr || m_timerDpcTable->currentRow() < 0)
+    {
+        return;
+    }
+    const QTableWidgetItem* item = m_timerDpcTable->item(m_timerDpcTable->currentRow(), 0);
+    if (item == nullptr)
+    {
+        return;
+    }
+    const std::size_t sourceIndex = static_cast<std::size_t>(item->data(Qt::UserRole).toULongLong());
+    if (sourceIndex < m_timerDpcRows.size())
+    {
+        m_timerDpcDetailEditor->setText(m_timerDpcRows[sourceIndex].detailText);
+    }
+}
+
+void KernelDock::showTimerDpcContextMenu(const QPoint& localPosition)
+{
+    if (m_timerDpcTable == nullptr)
+    {
+        return;
+    }
+    QTableWidgetItem* clickedItem = m_timerDpcTable->itemAt(localPosition);
+    const int clickedRow = clickedItem != nullptr ? clickedItem->row() : m_timerDpcTable->currentRow();
+    if (clickedItem != nullptr && !clickedItem->isSelected())
+    {
+        m_timerDpcTable->clearSelection();
+        m_timerDpcTable->setCurrentItem(clickedItem);
+        m_timerDpcTable->selectRow(clickedRow);
+    }
+    const std::vector<std::size_t> selectedIndices = selectedSourceIndices(
+        m_timerDpcTable,
+        m_timerDpcRows,
+        clickedRow);
+
+    QMenu menu(this);
+    menu.setStyleSheet(KswordTheme::ContextMenuStyle());
+    QAction* refreshAction = menu.addAction(QIcon(":/Icon/process_refresh.svg"), kernelText("kernel.timer_dpc.menu.refresh", QStringLiteral("刷新 KTIMER/DPC")));
+    QAction* copyRowsAction = menu.addAction(QIcon(":/Icon/process_copy_row.svg"), kernelText("kernel.context.menu.copy_row", QStringLiteral("复制选中行（TSV）")));
+    QAction* copyDetailAction = menu.addAction(kernelText("kernel.hooks.menu.copy_detail", QStringLiteral("复制详情（选中行）")));
+    copyRowsAction->setEnabled(!selectedIndices.empty());
+    copyDetailAction->setEnabled(!selectedIndices.empty());
+
+    const QAction* selectedAction = menu.exec(m_timerDpcTable->viewport()->mapToGlobal(localPosition));
+    if (selectedAction == refreshAction)
+    {
+        refreshTimerDpcAsync();
+    }
+    else if (selectedAction == copyRowsAction)
+    {
+        QStringList lines;
+        for (const std::size_t sourceIndex : selectedIndices)
+        {
+            lines.push_back(timerDpcRowAsTsv(m_timerDpcRows[sourceIndex]));
+        }
+        kernelHookCopyTextToClipboard(lines.join('\n'));
+    }
+    else if (selectedAction == copyDetailAction)
+    {
+        QStringList details;
+        for (const std::size_t sourceIndex : selectedIndices)
+        {
+            details.push_back(m_timerDpcRows[sourceIndex].detailText);
+        }
+        kernelHookCopyTextToClipboard(details.join(QStringLiteral("\n\n---\n\n")));
+    }
 }
 
 void KernelDock::showShadowSsdtContextMenu(const QPoint& localPosition)

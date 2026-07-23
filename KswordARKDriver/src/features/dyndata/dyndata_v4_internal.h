@@ -37,4 +37,30 @@ typedef struct _KSW_DYN_V4_STATE
 extern EX_PUSH_LOCK g_KswordDynDataV4Lock;
 extern KSW_DYN_V4_STATE g_KswordDynDataV4State;
 
+// Timer/DPC 消费者只接收完成的一次性布局快照，不直接持有 v4 全局锁。
+typedef struct _KSW_DYN_V4_TIMER_DPC_LAYOUT
+{
+    ULONG KprcbTimerTable;
+    ULONG TimerTableTimerEntries;
+    ULONG TimerTableEntryLock;
+    ULONG TimerTableEntryEntry;
+    ULONG TimerTableEntryTime;
+    ULONG TimerTimerListEntry;
+    ULONG TimerDueTime;
+    ULONG TimerDpc;
+    ULONG TimerType;
+    ULONG TimerPeriod;
+    ULONG DpcDeferredRoutine;
+    ULONG DpcDeferredContext;
+    ULONG TimerTableTypeSize;
+    ULONG TimerTableEntryTypeSize;
+    ULONG TimerTypeSize;
+    ULONG DpcTypeSize;
+} KSW_DYN_V4_TIMER_DPC_LAYOUT;
+
+NTSTATUS
+KswordARKDynDataV4SnapshotTimerDpcLayout(
+    _Out_ KSW_DYN_V4_TIMER_DPC_LAYOUT* LayoutOut
+    );
+
 EXTERN_C_END
