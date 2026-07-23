@@ -2,6 +2,7 @@
 #include "../句柄/HandleDock.h"
 #include "../MemoryDock/MemoryDock.h"
 #include "../NetworkDock/NetworkDock.h"
+#include "../WindowDock/WindowDock.h"
 #include "../UI/VisibleTableWidget.h"
 #include "../PluginHost.h"
 
@@ -595,6 +596,7 @@ void ProcessDetailWindow::initializeUi()
     m_embeddedMemoryTab = new QWidget(m_tabWidget);
     m_embeddedMemoryScanTab = new QWidget(m_tabWidget);
     m_embeddedNetworkTab = new QWidget(m_tabWidget);
+    m_embeddedWindowTab = new QWidget(m_tabWidget);
     m_tokenTab = new QWidget(m_tabWidget);
     m_tokenSwitchTab = new QWidget(m_tabWidget);
     m_kernelObjectTab = new QWidget(m_tabWidget);
@@ -612,6 +614,7 @@ void ProcessDetailWindow::initializeUi()
     m_embeddedMemoryTab->setObjectName(QStringLiteral("ProcessDetailTab_EmbeddedMemory"));
     m_embeddedMemoryScanTab->setObjectName(QStringLiteral("ProcessDetailTab_EmbeddedMemoryScan"));
     m_embeddedNetworkTab->setObjectName(QStringLiteral("ProcessDetailTab_EmbeddedNetwork"));
+    m_embeddedWindowTab->setObjectName(QStringLiteral("ProcessDetailTab_EmbeddedWindow"));
     m_tokenTab->setObjectName(QStringLiteral("ProcessDetailTab_Token"));
     m_tokenSwitchTab->setObjectName(QStringLiteral("ProcessDetailTab_TokenSwitch"));
     m_kernelObjectTab->setObjectName(QStringLiteral("ProcessDetailTab_ProcessDetailEvidence"));
@@ -628,6 +631,7 @@ void ProcessDetailWindow::initializeUi()
     initializeEmbeddedHandleTab();
     initializeEmbeddedMemoryTabs();
     initializeEmbeddedNetworkTab();
+    initializeEmbeddedWindowTab();
     initializeTokenTab();
     initializeTokenSwitchTab();
     initializeKernelObjectTab();
@@ -646,6 +650,7 @@ void ProcessDetailWindow::initializeUi()
     m_tabWidget->addTab(m_embeddedMemoryTab, QIcon(":/Icon/process_list.svg"), "内存管理");
     m_tabWidget->addTab(m_embeddedMemoryScanTab, QIcon(":/Icon/file_find.svg"), "内存扫描");
     m_tabWidget->addTab(m_embeddedNetworkTab, QIcon(":/Icon/process_details.svg"), "网络连接");
+    m_tabWidget->addTab(m_embeddedWindowTab, QIcon(":/Icon/process_tree.svg"), "窗口列表");
     m_tabWidget->addTab(m_tokenTab, QIcon(":/Icon/process_critical.svg"), "令牌");
     m_tabWidget->addTab(m_tokenSwitchTab, QIcon(":/Icon/process_start.svg"), "令牌开关");
     m_tabWidget->addTab(m_kernelObjectTab, QIcon(":/Icon/process_critical.svg"), "Process Detail Evidence");
@@ -849,6 +854,12 @@ void ProcessDetailWindow::requestInitialRefreshForCurrentTab()
         return;
     }
 
+    if (currentTab == m_embeddedWindowTab)
+    {
+        ensureEmbeddedWindowView();
+        return;
+    }
+
     if (currentTab == m_kernelCallbackTab && !m_kernelCallbackInitialRefreshStarted)
     {
         requestAsyncKernelCallbackRefresh();
@@ -990,6 +1001,41 @@ void ProcessDetailWindow::ensureEmbeddedNetworkView()
     m_embeddedNetworkDock->focusConnectionsByPids(
         QVector<quint32>{ static_cast<quint32>(m_baseRecord.pid) });
     m_embeddedNetworkDock->show();
+}
+
+void ProcessDetailWindow::initializeEmbeddedWindowTab()
+{
+    m_embeddedWindowLayout = new QVBoxLayout(m_embeddedWindowTab);
+    m_embeddedWindowLayout->setContentsMargins(0, 0, 0, 0);
+    m_embeddedWindowLayout->setSpacing(0);
+    m_embeddedWindowPlaceholder = new QLabel(
+        QStringLiteral("窗口列表视图将在首次进入本页时加载。"),
+        m_embeddedWindowTab);
+    m_embeddedWindowPlaceholder->setAlignment(Qt::AlignCenter);
+    m_embeddedWindowPlaceholder->setStyleSheet(
+        QStringLiteral("color:%1;").arg(KswordTheme::TextSecondaryHex()));
+    m_embeddedWindowLayout->addWidget(m_embeddedWindowPlaceholder, 1);
+}
+
+void ProcessDetailWindow::ensureEmbeddedWindowView()
+{
+    if (m_embeddedWindowDock != nullptr || m_embeddedWindowLayout == nullptr)
+    {
+        return;
+    }
+
+    m_embeddedWindowDock = new WindowDock(m_embeddedWindowTab);
+    m_embeddedWindowDock->hide();
+    if (m_embeddedWindowPlaceholder != nullptr)
+    {
+        m_embeddedWindowLayout->removeWidget(m_embeddedWindowPlaceholder);
+        m_embeddedWindowPlaceholder->deleteLater();
+        m_embeddedWindowPlaceholder = nullptr;
+    }
+    m_embeddedWindowLayout->addWidget(m_embeddedWindowDock, 1);
+    m_embeddedWindowDock->focusWindowsByPids(
+        QVector<quint32>{ static_cast<quint32>(m_baseRecord.pid) });
+    m_embeddedWindowDock->show();
 }
 
 void ProcessDetailWindow::requestAsyncStaticDetailRefresh(const bool includeSignatureCheck)

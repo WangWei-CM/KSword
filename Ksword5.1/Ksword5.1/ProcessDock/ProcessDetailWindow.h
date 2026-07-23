@@ -44,6 +44,7 @@ class CodeEditorWidget;
 class HandleDock;
 class MemoryDock;
 class NetworkDock;
+class WindowDock;
 
 class ProcessDetailWindow final : public QWidget
 {
@@ -276,6 +277,9 @@ private:
     // initializeEmbeddedNetworkTab 作用：创建按当前 PID 过滤的网络连接惰性容器。
     void initializeEmbeddedNetworkTab();
     void ensureEmbeddedNetworkView();
+    // initializeEmbeddedWindowTab 作用：创建按当前 PID 过滤的窗口列表惰性容器。
+    void initializeEmbeddedWindowTab();
+    void ensureEmbeddedWindowView();
     void initializeTokenTab();
     // initializeKernelObjectTab 作用：
     // - 构建 Process Detail Evidence 页面；
@@ -575,6 +579,7 @@ private:
     QWidget* m_embeddedMemoryTab = nullptr;    // 当前进程“内存管理”内嵌页。
     QWidget* m_embeddedMemoryScanTab = nullptr; // 当前进程“内存扫描”内嵌页。
     QWidget* m_embeddedNetworkTab = nullptr;   // 当前进程“网络连接”内嵌页。
+    QWidget* m_embeddedWindowTab = nullptr;    // 当前进程“窗口列表”内嵌页。
     QWidget* m_tokenTab = nullptr;             // “令牌”页。
     QWidget* m_tokenSwitchTab = nullptr;       // “令牌开关”页。
     QWidget* m_kernelObjectTab = nullptr;      // “Process Detail Evidence”页。
@@ -684,6 +689,11 @@ private:
     QVBoxLayout* m_embeddedNetworkLayout = nullptr;
     QLabel* m_embeddedNetworkPlaceholder = nullptr;
     NetworkDock* m_embeddedNetworkDock = nullptr;
+
+    // ======== 内嵌窗口列表页 ========
+    QVBoxLayout* m_embeddedWindowLayout = nullptr;
+    QLabel* m_embeddedWindowPlaceholder = nullptr;
+    WindowDock* m_embeddedWindowDock = nullptr;
 
     bool m_moduleRefreshing = false;           // 模块刷新进行中标记。
     bool m_moduleInitialRefreshStarted = false; // 模块页首次刷新是否已经按需启动。
