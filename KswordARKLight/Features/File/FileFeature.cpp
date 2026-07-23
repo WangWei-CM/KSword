@@ -3,8 +3,10 @@
 #include "FileView.h"
 
 #include "../AuditCommon/AuditTable.h"
+#include "../../Ui/AsyncTask.h"
 #include "../../Ui/Controls.h"
 #include "../../Ui/ListViewUtil.h"
+#include "../../Ui/LoadingOverlay.h"
 #include "../../Ui/TabUtil.h"
 #include "../../Ui/Theme.h"
 #include "../../../Ksword5.1/Ksword5.1/ArkDriverClient/ArkDriverClient.h"
@@ -46,6 +48,7 @@ constexpr int kAuditInnerTabId = 52612;
 constexpr int kAuditListId = 52613;
 constexpr int kAuditStatusId = 52614;
 constexpr int kAuditIntegrityButtonId = 52615;
+constexpr int kAuditLoadingOverlayId = 52616;
 constexpr int kAuditMinifilterTabIndex = 0;
 constexpr int kAuditFileObjectTabIndex = 1;
 constexpr int kAuditSectionTabIndex = 2;
@@ -58,6 +61,7 @@ constexpr UINT kIntegrityMenuMedium = 52703;
 constexpr UINT kIntegrityMenuMediumPlus = 52704;
 constexpr UINT kIntegrityMenuHigh = 52705;
 constexpr UINT kIntegrityMenuSystem = 52706;
+constexpr UINT kMsgAuditRefreshCompleted = WM_APP + 550;
 
 #ifndef SECURITY_MANDATORY_MEDIUM_PLUS_RID
 #define SECURITY_MANDATORY_MEDIUM_PLUS_RID (0x00002100L)
@@ -72,6 +76,12 @@ struct AuditRow {
     std::wstring status;
     std::wstring value;
     std::wstring detail;
+};
+
+struct AuditRefreshSnapshot {
+    int tab = kAuditMinifilterTabIndex;
+    std::wstring targetPath;
+    std::vector<AuditRow> rows;
 };
 
 // FileFeatureHostState owns the outer File feature tabs. Inputs arrive through
@@ -96,8 +106,10 @@ struct FileAuditPageState {
     HWND tab = nullptr;
     HWND list = nullptr;
     HWND status = nullptr;
+    HWND loadingOverlay = nullptr;
     int currentTab = kAuditMinifilterTabIndex;
     std::vector<AuditRow> rows;
+    std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<AuditRefreshSnapshot>> refreshTask;
 };
 
 // Width returns a non-negative rectangle width. Input is a RECT; output is a
@@ -1129,11 +1141,10 @@ bool AddAuditColumns(HWND list) {
     });
 }
 
-// QueryRowsForCurrentTab dispatches the active audit subpage query. Input is
-// audit state and target text; processing never calls mutating APIs; output is
-// the fresh table model.
-std::vector<AuditRow> QueryRowsForCurrentTab(const FileAuditPageState& state, const std::wstring& targetPath) {
-    switch (state.currentTab) {
+// QueryRowsForAuditTab dispatches a read-only audit query from its immutable
+// tab/target inputs. It is safe to run from AsyncSnapshotTask's worker thread.
+std::vector<AuditRow> QueryRowsForAuditTab(const int tab, const std::wstring& targetPath) {
+    switch (tab) {
     case kAuditMinifilterTabIndex:
         return QueryMinifilterRows();
     case kAuditFileObjectTabIndex:
@@ -1163,22 +1174,60 @@ void PopulateAuditList(FileAuditPageState& state) {
     }
 }
 
-// RefreshAuditRows re-runs the active read-only audit query. Input is page
-// state; processing updates rows/list/status; no value is returned.
-void RefreshAuditRows(FileAuditPageState& state) {
-    const std::wstring target = TextFromWindow(state.targetEdit);
-    state.rows = QueryRowsForCurrentTab(state, target);
-    PopulateAuditList(state);
-    std::wstring tabName;
-    switch (state.currentTab) {
-    case kAuditMinifilterTabIndex: tabName = L"Minifilter"; break;
-    case kAuditFileObjectTabIndex: tabName = L"FileObject"; break;
-    case kAuditSectionTabIndex: tabName = L"Section / ControlArea"; break;
-    case kAuditStorageTabIndex: tabName = L"Storage / Volume / MountMgr"; break;
-    case kAuditBitLockerTabIndex: tabName = L"BitLocker"; break;
-    default: tabName = L"Audit"; break;
+std::wstring AuditTabName(const int tab) {
+    switch (tab) {
+    case kAuditMinifilterTabIndex: return L"Minifilter";
+    case kAuditFileObjectTabIndex: return L"FileObject";
+    case kAuditSectionTabIndex: return L"Section / ControlArea";
+    case kAuditStorageTabIndex: return L"Storage / Volume / MountMgr";
+    case kAuditBitLockerTabIndex: return L"BitLocker";
+    default: return L"Audit";
     }
-    SetAuditStatus(state, L"状态：" + tabName + L" 只读审计完成，行数=" + std::to_wstring(state.rows.size()) + L"。灰/黄状态表示驱动不支持、数据不可用或权限不足。");
+}
+
+// RefreshAuditRows schedules the active read-only query away from the UI
+// thread. New target/tab requests replace the queued work and stale snapshots
+// cannot overwrite the latest audit selection.
+void RefreshAuditRows(FileAuditPageState& state) {
+    if (!state.refreshTask) {
+        return;
+    }
+    const std::wstring target = TextFromWindow(state.targetEdit);
+    const int tab = state.currentTab;
+    SetAuditStatus(state, state.refreshTask->running()
+        ? L"状态：审计刷新已排队，等待当前快照完成…"
+        : L"状态：正在后台采集 " + AuditTabName(tab) + L" 只读审计…");
+    if (state.refreshButton) {
+        ::EnableWindow(state.refreshButton, FALSE);
+    }
+    Ksword::Ui::SetLoadingOverlay(state.loadingOverlay, true, L"正在后台采集只读审计…");
+    state.refreshTask->request(
+        [tab, target]() {
+            AuditRefreshSnapshot snapshot{};
+            snapshot.tab = tab;
+            snapshot.targetPath = target;
+            snapshot.rows = QueryRowsForAuditTab(tab, target);
+            return snapshot;
+        },
+        [&state](std::uint64_t, std::optional<AuditRefreshSnapshot>&& snapshot, std::exception_ptr error) {
+            if (state.refreshButton) {
+                ::EnableWindow(state.refreshButton, TRUE);
+            }
+            Ksword::Ui::SetLoadingOverlay(state.loadingOverlay, false);
+            if (error || !snapshot.has_value()) {
+                SetAuditStatus(state, L"状态：审计后台任务异常结束。请检查驱动状态、权限和目标路径。");
+                return;
+            }
+            if (snapshot->tab != state.currentTab || snapshot->targetPath != TextFromWindow(state.targetEdit)) {
+                return;
+            }
+            state.rows = std::move(snapshot->rows);
+            PopulateAuditList(state);
+            SetAuditStatus(state,
+                L"状态：" + AuditTabName(state.currentTab) +
+                L" 只读审计完成，行数=" + std::to_wstring(state.rows.size()) +
+                L"。灰/黄状态表示驱动不支持、数据不可用或权限不足。");
+        });
 }
 
 // ApplyFileIntegrityPreset mirrors Ksword5.1's ArkDriverClient file-integrity
@@ -1296,6 +1345,9 @@ void LayoutAuditChildren(FileAuditPageState& state) {
     ::MoveWindow(state.tab, margin, tabTop, std::max(80, Width(rc) - margin * 2), tabH, TRUE);
     RECT display = Ksword::Ui::GetTabDisplayRect(state.tab);
     ::MoveWindow(state.list, display.left, display.top, Width(display), Height(display), TRUE);
+    if (state.loadingOverlay) {
+        ::MoveWindow(state.loadingOverlay, display.left, display.top, Width(display), Height(display), TRUE);
+    }
     ::MoveWindow(state.status, margin, tabTop + tabH + 2, std::max(80, Width(rc) - margin * 2), statusH, TRUE);
 }
 
@@ -1310,7 +1362,8 @@ bool CreateAuditControls(FileAuditPageState& state) {
     state.tab = Ksword::Ui::CreateTabControl(state.hwnd, kAuditInnerTabId, 0, 0, 0, 0);
     state.list = Ksword::Ui::CreateReportListView(state.tab, kAuditListId, 0, 0, 0, 0);
     state.status = Ksword::Ui::CreateText(state.hwnd, kAuditStatusId, L"状态：等待刷新。", 0, 0, 0, 0);
-    if (!state.targetEdit || !state.refreshButton || !state.integrityButton || !state.tab || !state.list || !state.status) {
+    state.loadingOverlay = Ksword::Ui::CreateLoadingOverlay(state.tab, kAuditLoadingOverlayId, { 0, 0, 1, 1 });
+    if (!state.targetEdit || !state.refreshButton || !state.integrityButton || !state.tab || !state.list || !state.status || !state.loadingOverlay) {
         return false;
     }
     ::SendMessageW(state.targetEdit, WM_SETFONT, reinterpret_cast<WPARAM>(Ksword::Ui::SystemUIFont()), TRUE);
@@ -1350,6 +1403,7 @@ bool RegisterAuditClass() {
                     return -1;
                 }
                 LayoutAuditChildren(*state);
+                state->refreshTask = std::make_unique<Ksword::Ui::AsyncSnapshotTask<AuditRefreshSnapshot>>(hwnd, kMsgAuditRefreshCompleted);
                 RefreshAuditRows(*state);
             }
             return 0;
@@ -1378,6 +1432,11 @@ bool RegisterAuditClass() {
             }
             if (state && LOWORD(wParam) == kAuditTargetEditId && HIWORD(wParam) == EN_UPDATE) {
                 SetAuditStatus(*state, L"状态：目标路径已修改，点击刷新重新采集只读审计数据。");
+                return 0;
+            }
+            break;
+        case kMsgAuditRefreshCompleted:
+            if (state && state->refreshTask && state->refreshTask->consume(hwnd, wParam, lParam)) {
                 return 0;
             }
             break;
@@ -1431,6 +1490,9 @@ bool RegisterAuditClass() {
             return 0;
         }
         case WM_NCDESTROY:
+            if (state && state->refreshTask) {
+                state->refreshTask->cancel();
+            }
             delete state;
             ::SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
             return 0;
