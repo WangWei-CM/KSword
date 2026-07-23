@@ -1,10 +1,12 @@
 #include "WindowDock.h"
 #include "WindowGuiHandleTab.h"
+#include "WindowTimerTab.h"
 #include "../UI/VisibleTableWidget.h"
 
 #include "../ArkDriverClient/ArkDriverClient.h"
 #include "../OnlineScan/SandboxUploadActions.h"
 #include "../OtherDock/OtherDock.h"
+#include "../Internationalization/LanguageManager.h"
 #include "../ksword/profile/ProfileJsonLoader.h"
 #include "../theme.h"
 
@@ -2552,6 +2554,15 @@ void WindowDock::initializeUi()
     m_tabWidget->setTabToolTip(
         guiHandleTabIndex,
         QStringLiteral("只读枚举当前 Session 的 USER Handle 共享表，显示对象类型、地址与窗口所有者信息。"));
+
+    const int timerTabIndex = m_tabWidget->addTab(
+        new WindowTimerTab(m_tabWidget),
+        ks::i18n::contextText(QStringLiteral("window.timer.tab"), QStringLiteral("窗口定时器")));
+    m_tabWidget->setTabToolTip(
+        timerTabIndex,
+        ks::i18n::contextText(
+            QStringLiteral("window.timer.tab.tooltip"),
+            QStringLiteral("只读遍历 win32k gTimerHashTable，显示定时器对象、间隔、Flags、回调和 PID/TID 归属。")));
 
     // ===== Tab 2：win32k GUI / Session =====
     m_sessionPage = new QWidget(m_tabWidget);

@@ -337,6 +337,7 @@
     <ClCompile Include="MonitorDock\WinAPIDock.Ui.cpp" />
     <ClCompile Include="WindowDock\WindowDock.cpp" />
     <ClCompile Include="WindowDock\WindowGuiHandleTab.cpp" />
+    <ClCompile Include="WindowDock\WindowTimerTab.cpp" />
     <ClCompile Include="ksword\log\log.cpp">
       <ObjectFileName>$(IntDir)ksword_log.obj</ObjectFileName>
     </ClCompile>
@@ -516,6 +517,7 @@
     <ClInclude Include="MonitorDock\WinApiMonitorProtocol.h" />
     <ClInclude Include="WindowDock\WindowDock.h" />
     <ClInclude Include="WindowDock\WindowGuiHandleTab.h" />
+    <ClInclude Include="WindowDock\WindowTimerTab.h" />
     <QtMoc Include="WelcomeDock\WelcomeDock.h" />
     <ClInclude Include="ArkDriverClient\ArkDriverClient.h" />
     <ClInclude Include="ArkDriverClient\ArkDriverTypes.h" />

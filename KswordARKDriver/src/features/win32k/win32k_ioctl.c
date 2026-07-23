@@ -36,6 +36,9 @@ Environment:
 #define KSWORD_ARK_WIN32K_HOOK_RESPONSE_HEADER_SIZE \
     (sizeof(KSWORD_ARK_WIN32K_HOOK_SNAPSHOT_RESPONSE) - sizeof(KSWORD_ARK_WIN32K_HOOK_ENTRY))
 
+#define KSWORD_ARK_WIN32K_TIMER_RESPONSE_HEADER_SIZE \
+    (sizeof(KSWORD_ARK_WIN32K_TIMER_SNAPSHOT_RESPONSE) - sizeof(KSWORD_ARK_WIN32K_TIMER_ENTRY))
+
 #define KSWORD_ARK_WIN32K_WINDOW_DETAIL_RESPONSE_SIZE \
     sizeof(KSWORD_ARK_WIN32K_WINDOW_DETAIL_RESPONSE)
 
@@ -449,6 +452,46 @@ Return Value:
         KSWORD_ARK_WIN32K_HOOK_RESPONSE_HEADER_SIZE,
         "hooks-pdb",
         KswordARKWin32kQueryHookSnapshot,
+        BytesReturned);
+}
+
+NTSTATUS
+KswordARKWin32kIoctlQueryTimers(
+    _In_ WDFDEVICE Device,
+    _In_ WDFREQUEST Request,
+    _In_ size_t InputBufferLength,
+    _In_ size_t OutputBufferLength,
+    _Out_ size_t* BytesReturned
+    )
+/*++
+
+Routine Description:
+
+    Handle the read-only gTimerHashTable/tagTIMER snapshot IOCTL.
+
+Arguments:
+
+    Device - Current framework device object.
+    Request - Current framework request.
+    InputBufferLength - Optional query request size.
+    OutputBufferLength - Dispatch-supplied output length, referenced by the
+    common WDF output buffer retrieval path.
+    BytesReturned - Receives response bytes.
+
+Return Value:
+
+    NTSTATUS from the common Win32k IOCTL adapter.
+
+--*/
+{
+    UNREFERENCED_PARAMETER(OutputBufferLength);
+    return KswordARKWin32kIoctlQueryCommon(
+        Device,
+        Request,
+        InputBufferLength,
+        KSWORD_ARK_WIN32K_TIMER_RESPONSE_HEADER_SIZE,
+        "timers",
+        KswordARKWin32kQueryTimerSnapshot,
         BytesReturned);
 }
 

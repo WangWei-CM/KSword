@@ -131,6 +131,7 @@
     <ClCompile Include="src\features\win32k\win32k_support.c" />
     <ClCompile Include="src\features\win32k\win32k_query.c" />
     <ClCompile Include="src\features\win32k\win32k_detail.c" />
+    <ClCompile Include="src\features\win32k\win32k_timer.c" />
     <ClCompile Include="src\features\win32k\win32k_ioctl.c" />
     <ClCompile Include="src\features\mutation\mutation_transaction.c" />
     <ClCompile Include="src\features\mutation\mutation_ioctl.c" />

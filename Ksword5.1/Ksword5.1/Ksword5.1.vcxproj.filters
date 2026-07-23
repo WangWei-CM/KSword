@@ -623,6 +623,9 @@
     <ClCompile Include="WindowDock\WindowGuiHandleTab.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="WindowDock\WindowTimerTab.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="句柄\HandleDock.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -1072,6 +1075,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="WindowDock\WindowGuiHandleTab.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="WindowDock\WindowTimerTab.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="SettingsDock\AppearanceSettings.h">

@@ -18,6 +18,7 @@
 #define KSWORD_ARK_IOCTL_FUNCTION_QUERY_WIN32K_HOTKEYS_PDB    0x893UL
 #define KSWORD_ARK_IOCTL_FUNCTION_QUERY_WIN32K_HOOKS_PDB      0x894UL
 #define KSWORD_ARK_IOCTL_FUNCTION_QUERY_WIN32K_WINDOW_DETAIL  0x895UL
+#define KSWORD_ARK_IOCTL_FUNCTION_QUERY_WIN32K_TIMERS          0x896UL
 
 #define IOCTL_KSWORD_ARK_QUERY_WIN32K_PROFILE_STATUS \
     CTL_CODE( \
@@ -65,6 +66,14 @@
         METHOD_BUFFERED, \
         FILE_ANY_ACCESS)
 
+// 窗口定时器查询只读遍历 win32kbase 导出的 gTimerHashTable，不提供删除或修改入口。
+#define IOCTL_KSWORD_ARK_QUERY_WIN32K_TIMERS \
+    CTL_CODE( \
+        KSWORD_ARK_IOCTL_DEVICE_TYPE, \
+        KSWORD_ARK_IOCTL_FUNCTION_QUERY_WIN32K_TIMERS, \
+        METHOD_BUFFERED, \
+        FILE_ANY_ACCESS)
+
 #define KSWORD_ARK_WIN32K_STATUS_UNKNOWN             0UL
 #define KSWORD_ARK_WIN32K_STATUS_OK                  1UL
 #define KSWORD_ARK_WIN32K_STATUS_PARTIAL             2UL
@@ -93,6 +102,9 @@
 #define KSWORD_ARK_WIN32K_CAP_TAGQ_PROFILE               0x0000000000000200ULL
 #define KSWORD_ARK_WIN32K_CAP_HOTKEY_PROFILE             0x0000000000000400ULL
 #define KSWORD_ARK_WIN32K_CAP_HOOK_PROFILE               0x0000000000000800ULL
+#define KSWORD_ARK_WIN32K_CAP_TIMER_HASH_EXPORT          0x0000000000001000ULL
+#define KSWORD_ARK_WIN32K_CAP_TIMER_LAYOUT               0x0000000000002000ULL
+#define KSWORD_ARK_WIN32K_CAP_TIMER_ENUM                 0x0000000000004000ULL
 
 #define KSWORD_ARK_WIN32K_QUERY_FLAG_CURRENT_SESSION_ONLY 0x00000001UL
 #define KSWORD_ARK_WIN32K_QUERY_FLAG_INCLUDE_DIAGNOSTICS  0x00000002UL
@@ -113,6 +125,19 @@
 #define KSWORD_ARK_WIN32K_FIELD_DETAIL_IDENTITY     0x00000400UL
 #define KSWORD_ARK_WIN32K_FIELD_DETAIL_OFFSETS      0x00000800UL
 
+#define KSWORD_ARK_WIN32K_TIMER_FIELD_OBJECT         0x00000001UL
+#define KSWORD_ARK_WIN32K_TIMER_FIELD_THREAD         0x00000002UL
+#define KSWORD_ARK_WIN32K_TIMER_FIELD_CALLBACK       0x00000004UL
+#define KSWORD_ARK_WIN32K_TIMER_FIELD_INTERVAL       0x00000008UL
+#define KSWORD_ARK_WIN32K_TIMER_FIELD_FLAGS          0x00000010UL
+#define KSWORD_ARK_WIN32K_TIMER_FIELD_WINDOW         0x00000020UL
+#define KSWORD_ARK_WIN32K_TIMER_FIELD_ID             0x00000040UL
+#define KSWORD_ARK_WIN32K_TIMER_FIELD_ALTERNATE_THREAD 0x00000080UL
+#define KSWORD_ARK_WIN32K_TIMER_FIELD_HASH_LINK      0x00000100UL
+
+#define KSWORD_ARK_WIN32K_TIMER_LAYOUT_SOURCE_UNKNOWN               0UL
+#define KSWORD_ARK_WIN32K_TIMER_LAYOUT_SOURCE_VALIDATED_DISASSEMBLY 1UL
+
 #define KSWORD_ARK_WIN32K_READ_STATUS_NOT_REQUESTED 0UL
 #define KSWORD_ARK_WIN32K_READ_STATUS_OK            1UL
 #define KSWORD_ARK_WIN32K_READ_STATUS_UNSUPPORTED   2UL
@@ -127,6 +152,29 @@
 #define KSWORD_ARK_WIN32K_DEFAULT_MAX_ENTRIES 1024UL
 #define KSWORD_ARK_WIN32K_HARD_MAX_ENTRIES 8192UL
 #define KSWORD_ARK_WIN32K_OFFSET_UNAVAILABLE 0xFFFFFFFFUL
+
+// tagTIMER 的布局单独传输，避免改变已有 KSWORD_ARK_WIN32K_FIELD_OFFSETS ABI。
+typedef struct _KSWORD_ARK_WIN32K_TIMER_LAYOUT
+{
+    unsigned long objectSize;
+    unsigned long primaryThreadInfo;
+    unsigned long callback;
+    unsigned long countdown;
+    unsigned long tolerance;
+    unsigned long flags;
+    unsigned long interval;
+    unsigned long globalListEntry;
+    unsigned long window;
+    unsigned long timerId;
+    unsigned long alternateThreadInfo;
+    unsigned long hashListEntry;
+    unsigned long timestamp;
+    unsigned long bucketCount;
+    unsigned long bucketStride;
+    unsigned long source;
+    unsigned long timeDateStamp;
+    unsigned long imageSize;
+} KSWORD_ARK_WIN32K_TIMER_LAYOUT;
 
 typedef struct _KSWORD_ARK_WIN32K_RECT
 {
@@ -414,3 +462,52 @@ typedef struct _KSWORD_ARK_WIN32K_WINDOW_DETAIL_RESPONSE
     wchar_t className[KSWORD_ARK_WIN32K_CLASS_CHARS];
     wchar_t detail[KSWORD_ARK_RUNTIME_DETAIL_TEXT_CHARS];
 } KSWORD_ARK_WIN32K_WINDOW_DETAIL_RESPONSE;
+
+typedef struct _KSWORD_ARK_WIN32K_TIMER_ENTRY
+{
+    unsigned long fieldFlags;
+    unsigned long status;
+    unsigned long processId;
+    unsigned long threadId;
+    unsigned long sessionId;
+    unsigned long flags;
+    unsigned long intervalMs;
+    unsigned long countdownMs;
+    unsigned long toleranceMs;
+    long lastStatus;
+    unsigned long reserved;
+    unsigned long long timerObject;
+    unsigned long long callbackAddress;
+    unsigned long long primaryThreadInfo;
+    unsigned long long alternateThreadInfo;
+    unsigned long long windowObject;
+    unsigned long long timerId;
+    unsigned long long hashLink;
+    wchar_t detail[KSWORD_ARK_WIN32K_DETAIL_CHARS];
+} KSWORD_ARK_WIN32K_TIMER_ENTRY;
+
+typedef struct _KSWORD_ARK_WIN32K_TIMER_SNAPSHOT_RESPONSE
+{
+    unsigned long version;
+    unsigned long status;
+    unsigned long totalCount;
+    unsigned long returnedCount;
+    unsigned long entrySize;
+    unsigned long flags;
+    long lastStatus;
+    unsigned long reserved;
+    unsigned long long capabilityMask;
+    unsigned long long missingCapabilityMask;
+    unsigned long long timerHashTable;
+    unsigned long visitedNodeCount;
+    unsigned long readFailureCount;
+    unsigned long corruptBucketCount;
+    unsigned long duplicateCount;
+    unsigned long win32kbaseTimeDateStamp;
+    unsigned long win32kbaseImageSize;
+    unsigned long win32kfullTimeDateStamp;
+    unsigned long win32kfullImageSize;
+    KSWORD_ARK_WIN32K_TIMER_LAYOUT layout;
+    wchar_t detail[KSWORD_ARK_WIN32K_DETAIL_CHARS];
+    KSWORD_ARK_WIN32K_TIMER_ENTRY entries[1];
+} KSWORD_ARK_WIN32K_TIMER_SNAPSHOT_RESPONSE;

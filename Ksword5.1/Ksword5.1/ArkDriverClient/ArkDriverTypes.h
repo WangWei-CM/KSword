@@ -2004,6 +2004,28 @@ namespace ksword::ark
         std::vector<KSWORD_ARK_WIN32K_HOOK_ENTRY> entries;
     };
 
+    // Win32kTimersResult 承载 gTimerHashTable/tagTIMER 只读快照。
+    // 输入：queryWin32kTimers 返回。
+    // 处理：保留 PE 身份、实际布局、遍历完整性计数和 Timer 行。
+    // 返回行为：不删除、不修改、不重新调度窗口定时器。
+    struct Win32kTimersResult : VariableAuditResultBase
+    {
+        std::uint64_t capabilityMask = 0;
+        std::uint64_t missingCapabilityMask = 0;
+        std::uint64_t timerHashTable = 0;
+        std::uint32_t visitedNodeCount = 0;
+        std::uint32_t readFailureCount = 0;
+        std::uint32_t corruptBucketCount = 0;
+        std::uint32_t duplicateCount = 0;
+        std::uint32_t win32kbaseTimeDateStamp = 0;
+        std::uint32_t win32kbaseImageSize = 0;
+        std::uint32_t win32kfullTimeDateStamp = 0;
+        std::uint32_t win32kfullImageSize = 0;
+        KSWORD_ARK_WIN32K_TIMER_LAYOUT layout{};
+        std::wstring detail;
+        std::vector<KSWORD_ARK_WIN32K_TIMER_ENTRY> entries;
+    };
+
     // Win32kWindowRuntimeDetailResult 承载单 HWND 的 win32k readiness/detail。
     // 输入：queryWin32kWindowDetail 返回。
     // 处理：response 保存 module/profile/capability/offset 状态；tagWND reader 未启用时也能解释原因。
