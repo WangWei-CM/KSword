@@ -30,6 +30,7 @@ constexpr int kWindowMenuDockBaseId = 42000;
 constexpr int kProcessModuleCommandId = 40001;
 constexpr UINT kMsgQueryDriverStatus = WM_APP + 101;
 constexpr UINT kMsgDockActivated = WM_APP + 102;
+constexpr UINT kMsgMaterializeDock = WM_APP + 103;
 
 // RegisterMainWindowClass registers the top-level shell class. Input is the
 // module instance; processing installs icon/cursor/background metadata; output
@@ -184,6 +185,9 @@ LRESULT MainWindow::handleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
         queryDriverStatusDeferred();
         return 0;
     case kMsgDockActivated:
+        queueDockMaterialization(static_cast<int>(wParam));
+        return 0;
+    case kMsgMaterializeDock:
         materializeDockForDockIndex(static_cast<int>(wParam));
         return 0;
     case WM_SIZE:
@@ -330,6 +334,7 @@ void MainWindow::createModuleDocks() {
         dockSlots_[moduleIndex].dockIndex = index;
         dockSlots_[moduleIndex].page = page;
         dockSlots_[moduleIndex].materialized = false;
+        dockSlots_[moduleIndex].materializing = false;
     }
     if (!dockSlots_.empty()) {
         dockManager_->activateDock(dockSlots_[0].dockIndex);
@@ -358,6 +363,30 @@ HWND MainWindow::createModulePage(const Ksword::Ui::ModuleDescriptor& module, co
     return page;
 }
 
+void MainWindow::queueDockMaterialization(const int dockIndex) {
+    if (!dockManager_ || dockIndex < 0) {
+        return;
+    }
+
+    for (int moduleIndex = 0; moduleIndex < static_cast<int>(dockSlots_.size()); ++moduleIndex) {
+        DockSlot& slot = dockSlots_[moduleIndex];
+        if (slot.dockIndex != dockIndex || slot.materialized || slot.materializing) {
+            continue;
+        }
+        slot.materializing = true;
+        const std::wstring status = L"正在加载“" + modules_[moduleIndex].title + L"”页面…";
+        Ksword::Ui::SetPlaceholderPageLoading(slot.page, true, status);
+        if (slot.page && ::IsWindowVisible(slot.page)) {
+            ::UpdateWindow(slot.page);
+        }
+        if (statusText_) {
+            ::SetWindowTextW(statusText_, status.c_str());
+        }
+        ::PostMessageW(hwnd_, kMsgMaterializeDock, static_cast<WPARAM>(dockIndex), 0);
+        return;
+    }
+}
+
 void MainWindow::materializeDockForDockIndex(const int dockIndex) {
     if (!dockManager_ || dockIndex < 0) {
         return;
@@ -365,7 +394,7 @@ void MainWindow::materializeDockForDockIndex(const int dockIndex) {
 
     for (int moduleIndex = 0; moduleIndex < static_cast<int>(dockSlots_.size()); ++moduleIndex) {
         DockSlot& slot = dockSlots_[moduleIndex];
-        if (slot.dockIndex != dockIndex || slot.materialized) {
+        if (slot.dockIndex != dockIndex || slot.materialized || !slot.materializing) {
             continue;
         }
 
@@ -382,7 +411,8 @@ void MainWindow::materializeDockForDockIndex(const int dockIndex) {
 
         HWND realPage = createModulePage(modules_[moduleIndex], pageBounds);
         if (!realPage) {
-            slot.materialized = true;
+            slot.materializing = false;
+            Ksword::Ui::SetPlaceholderPageLoading(slot.page, false, L"页面创建失败，切换到此页面可重试。" );
             return;
         }
 
@@ -390,13 +420,16 @@ void MainWindow::materializeDockForDockIndex(const int dockIndex) {
         if (dockManager_->replaceDockContent(slot.dockIndex, realPage, true)) {
             slot.page = realPage;
             slot.materialized = true;
+            slot.materializing = false;
             if (statusText_) {
-                const std::wstring message = L"Loaded module: " + modules_[moduleIndex].title;
+                const std::wstring message = L"已加载模块：" + modules_[moduleIndex].title;
                 ::SetWindowTextW(statusText_, message.c_str());
             }
         } else {
             ::DestroyWindow(realPage);
             slot.page = oldPage;
+            slot.materializing = false;
+            Ksword::Ui::SetPlaceholderPageLoading(slot.page, false, L"页面替换失败，切换到此页面可重试。" );
         }
         return;
     }

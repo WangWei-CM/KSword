@@ -14,4 +14,9 @@ HWND CreatePlaceholderPage(HWND parent, const ModuleDescriptor& descriptor, cons
 // descriptor; processing updates window text; no value is returned.
 void UpdatePlaceholderPage(HWND page, const ModuleDescriptor& descriptor);
 
+// SetPlaceholderPageLoading updates the visible state before a lazy dock page
+// is materialized. The update is deliberately paint-only and never invokes the
+// module factory, so a tab switch can provide immediate feedback.
+void SetPlaceholderPageLoading(HWND page, bool loading, const std::wstring& status = L"");
+
 } // namespace Ksword::Ui

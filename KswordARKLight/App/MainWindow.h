@@ -35,6 +35,7 @@ private:
         int dockIndex = -1;
         HWND page = nullptr;
         bool materialized = false;
+        bool materializing = false;
     };
 
     LRESULT handleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
@@ -64,6 +65,9 @@ private:
     // posted by DockManager; processing keeps the tab/split/floating location
     // intact; no value is returned.
     void materializeDockForDockIndex(int dockIndex);
+    // queueDockMaterialization paints a lightweight loading state before
+    // scheduling the real page factory on the next message turn.
+    void queueDockMaterialization(int dockIndex);
     void rebuildWindowMenuChecks();
     void toggleModuleDock(int moduleIndex);
     bool moduleDockVisible(int moduleIndex) const;
