@@ -6,9 +6,11 @@
 #include "../ProcessDetail/ProcessDetailFeature.h"
 #include "../../Ui/Controls.h"
 #include "../../Ui/AsyncTask.h"
+#include "../../Ui/FilterBar.h"
 #include "../../Ui/ListViewUtil.h"
 #include "../../Ui/LoadingOverlay.h"
 #include "../../Ui/Theme.h"
+#include "../../Ui/VirtualListView.h"
 #include "../../../Ksword5.1/Ksword5.1/ArkDriverClient/ArkDriverClient.h"
 
 #include <commctrl.h>
@@ -37,11 +39,13 @@ constexpr int kPickerButtonId = 52004;
 constexpr int kStatusTextId = 52005;
 constexpr int kProcessListId = 52006;
 constexpr int kRefreshSliderId = 52007;
+constexpr int kFilterBarId = 52010;
 constexpr UINT kContextMenuBaseId = 53000;
 constexpr UINT_PTR kRefreshTimerId = 52008;
 constexpr UINT kMsgInitialRefresh = WM_APP + 520;
 constexpr UINT kMsgRequestRefresh = WM_APP + 521;
 constexpr UINT kMsgRefreshCompleted = WM_APP + 522;
+constexpr UINT kMsgFilterCompleted = WM_APP + 523;
 constexpr int kTreeIndentPixels = 18;
 constexpr int kTreeIconGap = 4;
 constexpr int kTreeTextGap = 4;
@@ -49,6 +53,28 @@ constexpr int kTreeTextGap = 4;
 struct NotifyResult {
     bool handled = false;
     LRESULT result = 0;
+};
+
+// ProcessPresentationRow is the immutable UI snapshot for one process row.
+// Keeping display text, identity and icon input together means owner-data
+// callbacks never enumerate processes or format every row during a repaint.
+struct ProcessPresentationRow {
+    ProcessDisplayRow display;
+    std::wstring stableKey;
+    std::wstring iconPath;
+    std::vector<std::wstring> cells;
+    DWORD processId = 0;
+    bool kernelOnly = false;
+};
+
+// ProcessFilterResult is produced from a copied presentation snapshot. The UI
+// accepts it only when its display generation still matches the current list.
+struct ProcessFilterResult {
+    std::uint64_t displayGeneration = 0;
+    std::wstring query;
+    std::vector<std::size_t> visibleIndexes;
+    std::vector<DWORD> selectedPids;
+    std::wstring topStableKey;
 };
 
 enum class ProcessRowVisualState {
@@ -228,6 +254,7 @@ struct ProcessViewState {
     HWND pickerButton = nullptr;
     HWND refreshSlider = nullptr;
     HWND statusText = nullptr;
+    HWND filterBar = nullptr;
     HWND listView = nullptr;
     HWND loadingOverlay = nullptr;
     HIMAGELIST imageList = nullptr;
@@ -242,8 +269,15 @@ struct ProcessViewState {
     std::unordered_map<DWORD, ULONGLONG> previousCpuTime100ns;
     std::unordered_map<DWORD, ProcessSnapshotRow> lastActiveRowsByPid;
     std::unordered_map<DWORD, ProcessRowVisualState> visualStateByPid;
+    std::vector<ProcessPresentationRow> presentationRows;
+    std::shared_ptr<const std::vector<Ksword::Ui::VirtualListRow>> filterRows;
+    std::vector<std::size_t> visibleRowIndexes;
+    std::wstring displayTextScratch;
+    std::wstring filterQuery;
+    std::uint64_t displayGeneration = 0;
     bool hasLastActiveSnapshot = false;
     std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<struct ProcessRefreshSnapshot>> refreshTask;
+    std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<ProcessFilterResult>> filterTask;
 };
 
 // KernelProcessSnapshotEntry 用途：保存 ArkDriverClient R0 枚举返回的一行进程证据。
@@ -365,7 +399,7 @@ HWND CreateProcessListView(HWND parent, int id) {
     HWND hwnd = ::CreateWindowExW(WS_EX_CLIENTEDGE,
         WC_LISTVIEWW,
         L"",
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_CLIPSIBLINGS | LVS_REPORT | LVS_SHOWSELALWAYS,
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_CLIPSIBLINGS | LVS_REPORT | LVS_SHOWSELALWAYS | LVS_OWNERDATA,
         0,
         0,
         0,
@@ -462,10 +496,19 @@ void LayoutChildren(ProcessViewState& state, const RECT& rc) {
     ::MoveWindow(state.pickerButton, x, buttonTop, 104, buttonHeight, TRUE);
     x += 104;
     ::MoveWindow(state.refreshSlider, x, buttonTop + 2, 110, buttonHeight - 4, TRUE);
+    x += 110;
 
     const int statusTop = buttonTop + buttonHeight;
     const int width = std::max(100, static_cast<int>(rc.right - rc.left));
     const int height = std::max(100, static_cast<int>(rc.bottom - rc.top));
+    if (state.filterBar) {
+        ::MoveWindow(state.filterBar,
+            x + 8,
+            buttonTop,
+            std::max(1, width - x - 8),
+            buttonHeight,
+            TRUE);
+    }
     ::MoveWindow(state.statusText, 0, statusTop, width, 20, TRUE);
 
     const int listTop = statusTop + 20;
@@ -518,69 +561,106 @@ void RebuildColumns(ProcessViewState& state) {
     }
 }
 
-// SetListSubItemText writes one text cell to the report control. Inputs are the
-// list handle, item/subitem indexes and text; processing sends the common
-// control update message; no value is returned.
-void SetListSubItemText(HWND listView, int item, int subItem, const std::wstring& text) {
-    ListView_SetItemText(listView, item, subItem, const_cast<LPWSTR>(text.c_str()));
+// SelectedPids and the filtering scheduler are declared here because installing
+// a new immutable presentation must save selection and viewport before replacing
+// the owner-data row count.
+std::vector<DWORD> SelectedPids(ProcessViewState& state);
+std::wstring StableKeyFromListItem(const ProcessViewState& state, int item);
+void RequestProcessFilter(ProcessViewState& state,
+    const std::wstring& query,
+    std::vector<DWORD> selectedPids,
+    std::wstring topStableKey);
+
+// BuildPresentationRows converts the model into immutable owner-data rows once
+// per completed snapshot. Formatting is deliberately not performed by
+// LVN_GETDISPINFO or custom draw, keeping scrolling independent of table size.
+void BuildPresentationRows(ProcessViewState& state,
+    std::vector<ProcessPresentationRow>& presentationRows,
+    std::vector<Ksword::Ui::VirtualListRow>& filterRows) {
+    const auto& sourceRows = state.model.displayRows(state.mode);
+    const auto activeColumns = ColumnSet(state.mode);
+    const auto detailColumns = ColumnSet(ProcessViewMode::Detail);
+    presentationRows.clear();
+    filterRows.clear();
+    presentationRows.reserve(sourceRows.size());
+    filterRows.reserve(sourceRows.size());
+
+    for (const ProcessDisplayRow& sourceRow : sourceRows) {
+        ProcessPresentationRow row{};
+        row.display = sourceRow;
+        row.cells.reserve(activeColumns.size());
+        for (const auto& column : activeColumns) {
+            row.cells.push_back(state.model.textForColumn(sourceRow, column.index, state.mode));
+        }
+
+        if (const ProcessSnapshotRow* process = state.model.rowForDisplayRow(sourceRow)) {
+            row.processId = process->processId;
+            row.kernelOnly = process->r0KernelOnly;
+            row.iconPath = process->imagePath;
+            row.stableKey = L"pid:" + std::to_wstring(process->processId);
+        } else {
+            row.stableKey = L"group:" + std::to_wstring(static_cast<int>(sourceRow.group));
+        }
+
+        Ksword::Ui::VirtualListRow filterRow{};
+        filterRow.stableKey = row.stableKey;
+        filterRow.cells = row.cells;
+        // Always include detail-view text, even when the compact utilization
+        // layout is active, so filtering covers hidden details and R0 evidence.
+        for (const auto& column : detailColumns) {
+            filterRow.cells.push_back(state.model.textForColumn(sourceRow, column.index, ProcessViewMode::Detail));
+        }
+        if (!row.iconPath.empty()) {
+            filterRow.cells.push_back(row.iconPath);
+        }
+
+        presentationRows.push_back(std::move(row));
+        filterRows.push_back(std::move(filterRow));
+    }
 }
 
-// RebuildRows synchronizes visible rows without deleting the whole table. Input
-// is the page state; processing adjusts the item count, rewrites lParam/text in
-// place, and leaves the control/window alive so refreshes avoid full-table
-// flicker. No value is returned.
+// RebuildRows replaces the backing presentation snapshot, then schedules a
+// background match against it. LVS_OWNERDATA receives only an item count here;
+// no per-row ListView_InsertItem or ListView_SetItemText messages are sent.
 void RebuildRows(ProcessViewState& state) {
     if (!state.listView) {
         return;
     }
 
-    Ksword::Ui::ScopedListViewRedrawLock redrawLock(state.listView);
-    const auto& rows = state.model.displayRows(state.mode);
-    const int columnCount = static_cast<int>(ColumnSet(state.mode).size());
-    while (ListView_GetItemCount(state.listView) > static_cast<int>(rows.size())) {
-        ListView_DeleteItem(state.listView, ListView_GetItemCount(state.listView) - 1);
-    }
+    const std::vector<DWORD> selectedPids = SelectedPids(state);
+    const std::wstring topStableKey = StableKeyFromListItem(state, ListView_GetTopIndex(state.listView));
+    auto filterRows = std::make_shared<std::vector<Ksword::Ui::VirtualListRow>>();
+    BuildPresentationRows(state, state.presentationRows, *filterRows);
+    state.filterRows = std::move(filterRows);
+    ++state.displayGeneration;
 
-    for (std::size_t displayIndex = 0; displayIndex < rows.size(); ++displayIndex) {
-        const ProcessDisplayRow& displayRow = rows[displayIndex];
-        std::vector<std::wstring> cells;
-        cells.reserve(static_cast<std::size_t>(columnCount));
-        for (int column = 0; column < columnCount; ++column) {
-            cells.push_back(state.model.textForColumn(displayRow, column, state.mode));
-        }
-
-        LVITEMW item{};
-        item.mask = LVIF_TEXT | LVIF_PARAM;
-        item.iItem = static_cast<int>(displayIndex);
-        item.iSubItem = 0;
-        item.pszText = const_cast<LPWSTR>(cells.empty() ? L"" : cells[0].c_str());
-        item.lParam = static_cast<LPARAM>(displayIndex);
-
-        const int currentCount = ListView_GetItemCount(state.listView);
-        int row = item.iItem;
-        if (row >= currentCount) {
-            row = ListView_InsertItem(state.listView, &item);
-            if (row < 0) {
-                continue;
-            }
-        } else {
-            ListView_SetItem(state.listView, &item);
-        }
-        for (int column = 1; column < static_cast<int>(cells.size()); ++column) {
-            SetListSubItemText(state.listView, row, column, cells[static_cast<std::size_t>(column)]);
-        }
-        for (int column = static_cast<int>(cells.size()); column < columnCount; ++column) {
-            SetListSubItemText(state.listView, row, column, L"");
-        }
+    // The old row mapping belongs to the previous immutable snapshot. Clear it
+    // until the matching result arrives rather than letting stale indexes point
+    // at newly enumerated process data.
+    state.visibleRowIndexes.clear();
+    {
+        Ksword::Ui::ScopedListViewRedrawLock redrawLock(state.listView);
+        ListView_SetItemCountEx(state.listView, 0, LVSICF_NOINVALIDATEALL | LVSICF_NOSCROLL);
     }
-    if (!rows.empty()) {
-        ListView_RedrawItems(state.listView, 0, static_cast<int>(rows.size() - 1));
-    }
+    ::InvalidateRect(state.listView, nullptr, FALSE);
+
+    const std::wstring query = state.filterBar ? Ksword::Ui::GetFilterBarText(state.filterBar) : state.filterQuery;
+    RequestProcessFilter(state, query, selectedPids, topStableKey);
 }
 
-// SelectedDisplayIndexes reads the current multi-selection. Input is page state;
-// processing walks ListView selected rows and returns model display indexes from
-// lParam values. Output excludes rows with invalid lParam values.
+// DisplayIndexFromListItem maps a visible owner-data row to its immutable
+// presentation index. It does not call ListView_GetItem because owner-data
+// controls do not retain one LVITEM per row.
+int DisplayIndexFromListItem(const ProcessViewState& state, int item) {
+    if (item < 0 || static_cast<std::size_t>(item) >= state.visibleRowIndexes.size()) {
+        return -1;
+    }
+    const std::size_t displayIndex = state.visibleRowIndexes[static_cast<std::size_t>(item)];
+    return displayIndex <= static_cast<std::size_t>(INT_MAX) ? static_cast<int>(displayIndex) : -1;
+}
+
+// SelectedDisplayIndexes reads the current multi-selection and translates the
+// visible owner-data indexes through the immutable result mapping.
 std::vector<int> SelectedDisplayIndexes(ProcessViewState& state) {
     std::vector<int> indexes;
     if (!state.listView) {
@@ -589,79 +669,75 @@ std::vector<int> SelectedDisplayIndexes(ProcessViewState& state) {
 
     int item = -1;
     while ((item = ListView_GetNextItem(state.listView, item, LVNI_SELECTED)) != -1) {
-        LVITEMW lv{};
-        lv.mask = LVIF_PARAM;
-        lv.iItem = item;
-        if (ListView_GetItem(state.listView, &lv)) {
-            indexes.push_back(static_cast<int>(lv.lParam));
+        const int displayIndex = DisplayIndexFromListItem(state, item);
+        if (displayIndex >= 0) {
+            indexes.push_back(displayIndex);
         }
     }
     return indexes;
 }
 
-// SelectedPids converts the current ListView selection to process ids. Input is
-// page state; processing delegates group filtering to ProcessModel; output may
-// be empty when only group rows are selected.
+// SelectedPids converts selected immutable presentation rows to process ids.
+// Group headers remain selectable for copy operations but never become actions.
 std::vector<DWORD> SelectedPids(ProcessViewState& state) {
-    return state.model.selectedPids(SelectedDisplayIndexes(state), state.mode);
+    std::vector<DWORD> pids;
+    for (const int index : SelectedDisplayIndexes(state)) {
+        if (index < 0 || static_cast<std::size_t>(index) >= state.presentationRows.size()) {
+            continue;
+        }
+        const DWORD processId = state.presentationRows[static_cast<std::size_t>(index)].processId;
+        if (processId != 0) {
+            pids.push_back(processId);
+        }
+    }
+    return pids;
 }
 
-// DisplayIndexFromListItem reads the model display-row index attached to a
-// ListView row. Inputs are the page state and item index; processing reads
-// LVIF_PARAM; output is -1 for invalid list rows.
-int DisplayIndexFromListItem(ProcessViewState& state, int item) {
-    if (!state.listView || item < 0) {
-        return -1;
-    }
-
-    LVITEMW lv{};
-    lv.mask = LVIF_PARAM;
-    lv.iItem = item;
-    if (!ListView_GetItem(state.listView, &lv)) {
-        return -1;
-    }
-    return static_cast<int>(lv.lParam);
-}
-
-// GroupHeaderAtListItem returns the clicked group header row when the item is a
-// friendly group header. Inputs are page state and a list item index; output is
-// nullptr for process rows, invalid rows, or stale display indexes.
-const ProcessDisplayRow* GroupHeaderAtListItem(ProcessViewState& state, int item) {
+std::wstring StableKeyFromListItem(const ProcessViewState& state, const int item) {
     const int displayIndex = DisplayIndexFromListItem(state, item);
-    const auto& rows = state.model.displayRows(state.mode);
-    if (displayIndex < 0 || displayIndex >= static_cast<int>(rows.size())) {
+    if (displayIndex < 0 || static_cast<std::size_t>(displayIndex) >= state.presentationRows.size()) {
+        return {};
+    }
+    return state.presentationRows[static_cast<std::size_t>(displayIndex)].stableKey;
+}
+
+// GroupHeaderAtListItem returns the clicked friendly group header from the
+// current immutable presentation snapshot.
+const ProcessPresentationRow* GroupHeaderAtListItem(ProcessViewState& state, int item) {
+    const int displayIndex = DisplayIndexFromListItem(state, item);
+    if (displayIndex < 0 || static_cast<std::size_t>(displayIndex) >= state.presentationRows.size()) {
         return nullptr;
     }
-    const ProcessDisplayRow& row = rows[static_cast<std::size_t>(displayIndex)];
-    return row.groupHeader ? &row : nullptr;
+    const ProcessPresentationRow& row = state.presentationRows[static_cast<std::size_t>(displayIndex)];
+    return row.display.groupHeader ? &row : nullptr;
 }
 
-// DisplayRowFromListItem resolves a ListView row back to the visible model row.
-// Inputs are page state and item index; output is null when the row is stale or
-// invalid. Drawing and hit handling use this instead of trusting row order.
-const ProcessDisplayRow* DisplayRowFromListItem(ProcessViewState& state, int item) {
+// DisplayRowFromListItem resolves a visible owner-data row without touching the
+// model. Custom drawing therefore remains O(visible cells), even for long lists.
+const ProcessPresentationRow* DisplayRowFromListItem(ProcessViewState& state, int item) {
     const int displayIndex = DisplayIndexFromListItem(state, item);
-    const auto& rows = state.model.displayRows(state.mode);
-    if (displayIndex < 0 || displayIndex >= static_cast<int>(rows.size())) {
+    if (displayIndex < 0 || static_cast<std::size_t>(displayIndex) >= state.presentationRows.size()) {
         return nullptr;
     }
-    return &rows[static_cast<std::size_t>(displayIndex)];
+    return &state.presentationRows[static_cast<std::size_t>(displayIndex)];
 }
 
 // VisualStateForDisplayRow resolves green/gray lifecycle highlighting for a
 // visible process row. Inputs are page state and display row; processing maps
 // process PID into the latest refresh-diff table; output is Normal for groups
 // and unchanged process rows.
-ProcessRowVisualState VisualStateForDisplayRow(ProcessViewState& state, const ProcessDisplayRow& displayRow) {
-    const ProcessSnapshotRow* row = state.model.rowForDisplayRow(displayRow);
-    if (!row) {
+ProcessRowVisualState VisualStateForDisplayRow(ProcessViewState& state, const ProcessPresentationRow& displayRow) {
+    if (displayRow.processId == 0) {
         return ProcessRowVisualState::Normal;
     }
-    if (row->r0KernelOnly) {
+    if (displayRow.display.groupHeader) {
+        return ProcessRowVisualState::Normal;
+    }
+    if (displayRow.kernelOnly) {
         return ProcessRowVisualState::KernelOnly;
     }
-    const auto found = state.visualStateByPid.find(row->processId);
-    return found != state.visualStateByPid.end() ? found->second : ProcessRowVisualState::Normal;
+    const auto source = state.visualStateByPid.find(displayRow.processId);
+    return source != state.visualStateByPid.end() ? source->second : ProcessRowVisualState::Normal;
 }
 
 // RowBackgroundColor returns the fill color used by custom draw. Inputs are
@@ -769,7 +845,7 @@ LRESULT DrawProcessSubItem(ProcessViewState& state, NMLVCUSTOMDRAW* draw) {
 
     const int item = static_cast<int>(draw->nmcd.dwItemSpec);
     const int subItem = draw->iSubItem;
-    const ProcessDisplayRow* displayRow = DisplayRowFromListItem(state, item);
+    const ProcessPresentationRow* displayRow = DisplayRowFromListItem(state, item);
     if (!displayRow) {
         return CDRF_DODEFAULT;
     }
@@ -796,26 +872,30 @@ LRESULT DrawProcessSubItem(ProcessViewState& state, NMLVCUSTOMDRAW* draw) {
     HFONT font = Ksword::Ui::SystemUIFont();
     HGDIOBJ oldFont = font ? ::SelectObject(dc, font) : nullptr;
 
-    if (subItem == 0 && !displayRow->groupHeader) {
-        DrawDottedTreeGuides(dc, cell, displayRow->depth);
+    if (subItem == 0 && !displayRow->display.groupHeader) {
+        DrawDottedTreeGuides(dc, cell, displayRow->display.depth);
         const int iconSize = ::GetSystemMetrics(SM_CXSMICON);
-        const int iconLeft = cell.left + displayRow->depth * kTreeIndentPixels;
+        const int iconLeft = cell.left + displayRow->display.depth * kTreeIndentPixels;
         const int rowHeight = static_cast<int>(cell.bottom - cell.top);
         const int iconTop = static_cast<int>(cell.top) + std::max(0, (rowHeight - iconSize) / 2);
-        const int iconIndex = IconIndexForPath(state, state.model.iconPathForRow(*displayRow));
+        const int iconIndex = IconIndexForPath(state, displayRow->iconPath);
         if (state.imageList && iconIndex >= 0) {
             ImageList_Draw(state.imageList, iconIndex, dc, iconLeft, iconTop, ILD_TRANSPARENT);
         }
 
         RECT textRect = cell;
         textRect.left = iconLeft + iconSize + kTreeIconGap + kTreeTextGap;
-        const std::wstring text = state.model.textForColumn(*displayRow, 0, state.mode);
+        const std::wstring empty;
+        const std::wstring& text = displayRow->cells.empty() ? empty : displayRow->cells.front();
         ::DrawTextW(dc, text.c_str(), static_cast<int>(text.size()), &textRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
     } else {
         RECT textRect = cell;
         textRect.left += 4;
         textRect.right -= 4;
-        const std::wstring text = state.model.textForColumn(*displayRow, subItem, state.mode);
+        const std::wstring empty;
+        const std::wstring& text = subItem >= 0 && static_cast<std::size_t>(subItem) < displayRow->cells.size()
+            ? displayRow->cells[static_cast<std::size_t>(subItem)]
+            : empty;
         ::DrawTextW(dc, text.c_str(), static_cast<int>(text.size()), &textRect, TextFormatForColumn(state.mode, subItem));
     }
 
@@ -854,26 +934,166 @@ LRESULT HandleListCustomDraw(ProcessViewState& state, NMLVCUSTOMDRAW* draw) {
     }
 }
 
+// HandleVirtualListDisplayInfo supplies only the text and lParam requested for
+// visible owner-data rows. The backing ProcessPresentationRow snapshot owns the
+// text for the entire notification, so no temporary process enumeration occurs.
+LRESULT HandleVirtualListDisplayInfo(ProcessViewState& state, NMLVDISPINFOW* displayInfo) {
+    if (!displayInfo) {
+        return 0;
+    }
+
+    const int displayIndex = DisplayIndexFromListItem(state, displayInfo->item.iItem);
+    if (displayIndex < 0 || static_cast<std::size_t>(displayIndex) >= state.presentationRows.size()) {
+        return 0;
+    }
+
+    const ProcessPresentationRow& row = state.presentationRows[static_cast<std::size_t>(displayIndex)];
+    if ((displayInfo->item.mask & LVIF_TEXT) != 0) {
+        const int subItem = displayInfo->item.iSubItem;
+        state.displayTextScratch = subItem >= 0 && static_cast<std::size_t>(subItem) < row.cells.size()
+            ? row.cells[static_cast<std::size_t>(subItem)]
+            : std::wstring{};
+        displayInfo->item.pszText = state.displayTextScratch.data();
+    }
+    if ((displayInfo->item.mask & LVIF_PARAM) != 0) {
+        displayInfo->item.lParam = static_cast<LPARAM>(displayIndex);
+    }
+    return 0;
+}
+
+// ApplyProcessFilter installs a background-filtered index map while preserving
+// selection and the top visible logical row whenever they remain present.
+void ApplyProcessFilter(ProcessViewState& state, ProcessFilterResult result) {
+    if (!state.listView || result.displayGeneration != state.displayGeneration || result.query != state.filterQuery) {
+        return;
+    }
+
+    state.visibleRowIndexes = std::move(result.visibleIndexes);
+    int topItem = -1;
+    int firstSelectedItem = -1;
+    {
+        Ksword::Ui::ScopedListViewRedrawLock redrawLock(state.listView);
+        ListView_SetItemCountEx(state.listView,
+            static_cast<int>(std::min<std::size_t>(state.visibleRowIndexes.size(), static_cast<std::size_t>(INT_MAX))),
+            LVSICF_NOINVALIDATEALL | LVSICF_NOSCROLL);
+        ListView_SetItemState(state.listView, -1, 0, LVIS_SELECTED | LVIS_FOCUSED);
+
+        std::unordered_set<DWORD> selectedSet(result.selectedPids.begin(), result.selectedPids.end());
+        for (std::size_t item = 0; item < state.visibleRowIndexes.size(); ++item) {
+            const std::size_t displayIndex = state.visibleRowIndexes[item];
+            if (displayIndex >= state.presentationRows.size()) {
+                continue;
+            }
+            const ProcessPresentationRow& row = state.presentationRows[displayIndex];
+            if (topItem < 0 && !result.topStableKey.empty() && row.stableKey == result.topStableKey) {
+                topItem = static_cast<int>(item);
+            }
+            if (row.processId != 0 && selectedSet.find(row.processId) != selectedSet.end()) {
+                const int selectedItem = static_cast<int>(item);
+                ListView_SetItemState(state.listView, selectedItem, LVIS_SELECTED, LVIS_SELECTED);
+                if (firstSelectedItem < 0) {
+                    firstSelectedItem = selectedItem;
+                }
+            }
+        }
+        if (firstSelectedItem >= 0) {
+            ListView_SetItemState(state.listView, firstSelectedItem, LVIS_FOCUSED, LVIS_FOCUSED);
+        }
+        if (topItem >= 0) {
+            ListView_EnsureVisible(state.listView, topItem, FALSE);
+        } else if (firstSelectedItem >= 0) {
+            ListView_EnsureVisible(state.listView, firstSelectedItem, FALSE);
+        }
+    }
+    ::InvalidateRect(state.listView, nullptr, FALSE);
+    if (!result.query.empty()) {
+        SetStatus(state,
+            L"筛选结果 " + std::to_wstring(state.visibleRowIndexes.size()) +
+            L" / " + std::to_wstring(state.presentationRows.size()) + L" 行。");
+    }
+}
+
+// RequestProcessFilter captures a shared, immutable text snapshot. Repeated
+// keystrokes coalesce in AsyncSnapshotTask and its generation check prevents a
+// stale background match from overwriting a newer query or process refresh.
+void RequestProcessFilter(ProcessViewState& state,
+    const std::wstring& query,
+    std::vector<DWORD> selectedPids,
+    std::wstring topStableKey) {
+    state.filterQuery = query;
+    const std::shared_ptr<const std::vector<Ksword::Ui::VirtualListRow>> rows = state.filterRows;
+    const std::uint64_t displayGeneration = state.displayGeneration;
+    if (!state.filterTask || !rows) {
+        ProcessFilterResult result{};
+        result.displayGeneration = displayGeneration;
+        result.query = query;
+        result.selectedPids = std::move(selectedPids);
+        result.topStableKey = std::move(topStableKey);
+        result.visibleIndexes.resize(state.presentationRows.size());
+        for (std::size_t index = 0; index < result.visibleIndexes.size(); ++index) {
+            result.visibleIndexes[index] = index;
+        }
+        ApplyProcessFilter(state, std::move(result));
+        return;
+    }
+
+    state.filterTask->request(
+        [rows, displayGeneration, query, selectedPids = std::move(selectedPids), topStableKey = std::move(topStableKey)]() mutable {
+            ProcessFilterResult result{};
+            result.displayGeneration = displayGeneration;
+            result.query = std::move(query);
+            result.selectedPids = std::move(selectedPids);
+            result.topStableKey = std::move(topStableKey);
+            result.visibleIndexes = Ksword::Ui::VirtualListView::FilterRowIndexes(*rows, result.query);
+            return result;
+        },
+        [&state](std::uint64_t, std::optional<ProcessFilterResult>&& result, std::exception_ptr error) {
+            if (error || !result.has_value()) {
+                SetStatus(state, L"进程筛选任务异常结束。已保留当前可见结果。");
+                return;
+            }
+            ApplyProcessFilter(state, std::move(*result));
+        });
+}
+
 // SelectedRowsAsText builds tab-separated text for selected visible rows. Inputs
 // are page state and whether all columns should be copied. Processing reads the
 // current model display rows; output is suitable for the clipboard.
 std::wstring SelectedRowsAsText(ProcessViewState& state, bool allColumns) {
     const auto indexes = SelectedDisplayIndexes(state);
-    const auto& visibleRows = state.model.displayRows(state.mode);
-    const int columnCount = static_cast<int>(ColumnSet(state.mode).size());
     std::wstring text;
 
     for (int index : indexes) {
-        if (index < 0 || index >= static_cast<int>(visibleRows.size())) {
+        if (index < 0 || static_cast<std::size_t>(index) >= state.presentationRows.size()) {
             continue;
         }
-        const ProcessDisplayRow& row = visibleRows[static_cast<std::size_t>(index)];
-        const int maxColumn = allColumns ? columnCount : 1;
+        const ProcessPresentationRow& row = state.presentationRows[static_cast<std::size_t>(index)];
+        const int maxColumn = allColumns ? static_cast<int>(row.cells.size()) : std::min<int>(1, static_cast<int>(row.cells.size()));
         for (int column = 0; column < maxColumn; ++column) {
             if (column != 0) {
                 text += L'\t';
             }
-            text += state.model.textForColumn(row, column, state.mode);
+            text += row.cells[static_cast<std::size_t>(column)];
+        }
+        text += L"\r\n";
+    }
+    return text;
+}
+
+// VisibleRowsAsText exports the current owner-data result mapping, allowing the
+// context menu to copy every filtered row without selecting or repainting them.
+std::wstring VisibleRowsAsText(const ProcessViewState& state) {
+    std::wstring text;
+    for (const std::size_t displayIndex : state.visibleRowIndexes) {
+        if (displayIndex >= state.presentationRows.size()) {
+            continue;
+        }
+        const ProcessPresentationRow& row = state.presentationRows[displayIndex];
+        for (std::size_t column = 0; column < row.cells.size(); ++column) {
+            if (column != 0) {
+                text += L'\t';
+            }
+            text += row.cells[column];
         }
         text += L"\r\n";
     }
@@ -1418,21 +1638,13 @@ bool SelectPid(ProcessViewState& state, DWORD pid) {
     }
 
     ListView_SetItemState(state.listView, -1, 0, LVIS_SELECTED | LVIS_FOCUSED);
-    const auto& rows = state.model.displayRows(state.mode);
     bool found = false;
     for (int item = 0; item < ListView_GetItemCount(state.listView); ++item) {
-        LVITEMW lv{};
-        lv.mask = LVIF_PARAM;
-        lv.iItem = item;
-        if (!ListView_GetItem(state.listView, &lv)) {
+        const int displayIndex = DisplayIndexFromListItem(state, item);
+        if (displayIndex < 0 || static_cast<std::size_t>(displayIndex) >= state.presentationRows.size()) {
             continue;
         }
-        const int displayIndex = static_cast<int>(lv.lParam);
-        if (displayIndex < 0 || displayIndex >= static_cast<int>(rows.size())) {
-            continue;
-        }
-        const ProcessSnapshotRow* row = state.model.rowForDisplayRow(rows[static_cast<std::size_t>(displayIndex)]);
-        if (row && row->processId == pid) {
+        if (state.presentationRows[static_cast<std::size_t>(displayIndex)].processId == pid) {
             ListView_SetItemState(state.listView, item, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
             ListView_EnsureVisible(state.listView, item, FALSE);
             found = true;
@@ -1481,7 +1693,12 @@ void CompletePicker(ProcessViewState& state) {
 // action id. Processing keeps UI-local copy commands visible, then delegates the
 // Win32/R3 action contract to ProcessActions. No value is returned.
 void ExecuteMenuItem(ProcessViewState& state, ProcessActionId actionId) {
-    if (actionId == ProcessActionId::CopyCell || actionId == ProcessActionId::CopyRow) {
+    if (actionId == ProcessActionId::CopyCell || actionId == ProcessActionId::CopyRow || actionId == ProcessActionId::CopyVisibleResults) {
+        if (actionId == ProcessActionId::CopyVisibleResults) {
+            const bool copied = WriteClipboardText(state.hwnd, VisibleRowsAsText(state));
+            SetStatus(state, copied ? L"已复制全部可见进程结果。" : L"复制失败：当前没有可见结果或剪贴板不可用。");
+            return;
+        }
         const bool allColumns = actionId == ProcessActionId::CopyRow;
         const std::wstring text = SelectedRowsAsText(state, allColumns);
         const bool copied = WriteClipboardText(state.hwnd, text);
@@ -1566,6 +1783,7 @@ void ShowContextMenu(ProcessViewState& state, POINT screenPoint) {
     HMENU copyMenu = ::CreatePopupMenu();
     appendAction(copyMenu, ProcessActionId::CopyCell, L"复制单元格", hasVisibleSelection);
     appendAction(copyMenu, ProcessActionId::CopyRow, L"复制行", hasVisibleSelection);
+    appendAction(copyMenu, ProcessActionId::CopyVisibleResults, L"复制可见结果", !state.visibleRowIndexes.empty());
     appendPopup(menu, copyMenu, L"复制");
 
     HMENU processMenu = ::CreatePopupMenu();
@@ -1691,6 +1909,7 @@ void CreateChildControls(ProcessViewState& state) {
         ::SendMessageW(state.refreshSlider, TBM_SETPOS, TRUE, state.refreshIntervalSeconds);
     }
     state.statusText = Ksword::Ui::CreateText(state.hwnd, kStatusTextId, L"准备枚举进程。", 0, 0, 0, 0);
+    state.filterBar = Ksword::Ui::CreateFilterBar(state.hwnd, kFilterBarId, L"筛选进程、PID、路径和 R0 证据", 0, 0, 0, 0);
     state.listView = CreateProcessListView(state.hwnd, kProcessListId);
     state.imageList = CreateIconList();
     if (state.listView && state.imageList) {
@@ -1707,6 +1926,10 @@ void CreateChildControls(ProcessViewState& state) {
 NotifyResult HandleListNotify(ProcessViewState& state, NMHDR* header) {
     if (!header || header->hwndFrom != state.listView) {
         return {};
+    }
+
+    if (header->code == LVN_GETDISPINFOW) {
+        return { true, HandleVirtualListDisplayInfo(state, reinterpret_cast<NMLVDISPINFOW*>(header)) };
     }
 
     if (header->code == NM_CUSTOMDRAW) {
@@ -1738,9 +1961,9 @@ NotifyResult HandleListNotify(ProcessViewState& state, NMHDR* header) {
         if (!activate || activate->iItem < 0) {
             return {};
         }
-        const ProcessDisplayRow* group = GroupHeaderAtListItem(state, activate->iItem);
+        const ProcessPresentationRow* group = GroupHeaderAtListItem(state, activate->iItem);
         if (group) {
-            const ProcessFriendlyGroup groupId = group->group;
+            const ProcessFriendlyGroup groupId = group->display.group;
             state.model.toggleGroupCollapsed(groupId);
             RebuildRows(state);
             SetStatus(state, state.model.isGroupCollapsed(groupId) ? L"已折叠进程分组。" : L"已展开进程分组。");
@@ -1768,6 +1991,7 @@ LRESULT CALLBACK ProcessViewWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         if (state) {
             CreateChildControls(*state);
             state->refreshTask = std::make_unique<Ksword::Ui::AsyncSnapshotTask<ProcessRefreshSnapshot>>(hwnd, kMsgRefreshCompleted);
+            state->filterTask = std::make_unique<Ksword::Ui::AsyncSnapshotTask<ProcessFilterResult>>(hwnd, kMsgFilterCompleted);
             SetStatus(*state, L"进程页已创建，等待首次异步刷新。");
             ::PostMessageW(hwnd, kMsgInitialRefresh, 0, 0);
         }
@@ -1784,6 +2008,11 @@ LRESULT CALLBACK ProcessViewWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             return 0;
         }
         break;
+    case kMsgFilterCompleted:
+        if (state && state->filterTask && state->filterTask->consume(hwnd, wParam, lParam)) {
+            return 0;
+        }
+        break;
     case WM_SIZE:
         if (state) {
             RECT rc{};
@@ -1792,6 +2021,13 @@ LRESULT CALLBACK ProcessViewWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         }
         return 0;
     case WM_COMMAND:
+        if (state && LOWORD(wParam) == kFilterBarId && HIWORD(wParam) == EN_CHANGE) {
+            RequestProcessFilter(*state,
+                Ksword::Ui::GetFilterBarText(state->filterBar),
+                SelectedPids(*state),
+                StableKeyFromListItem(*state, ListView_GetTopIndex(state->listView)));
+            return 0;
+        }
         if (state && HIWORD(wParam) == BN_CLICKED) {
             switch (LOWORD(wParam)) {
             case kRefreshButtonId:
@@ -1903,6 +2139,9 @@ LRESULT CALLBACK ProcessViewWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             ::KillTimer(hwnd, kRefreshTimerId);
             if (state->refreshTask) {
                 state->refreshTask->cancel();
+            }
+            if (state->filterTask) {
+                state->filterTask->cancel();
             }
             if (state->imageList) {
                 ImageList_Destroy(state->imageList);

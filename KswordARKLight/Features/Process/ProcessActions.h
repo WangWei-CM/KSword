@@ -10,6 +10,7 @@ namespace Ksword::Features::Process {
 enum class ProcessActionId {
     CopyCell,
     CopyRow,
+    CopyVisibleResults,
     OpenDetails,
     TerminateProcessMultiMethod,
     TerminateProcess,
