@@ -1,11 +1,14 @@
 #include "DriverFeature.h"
 
 #include "DriverActions.h"
+#include "DriverEnumerator.h"
 #include "DriverModel.h"
 #include "DriverObjectView.h"
 #include "DriverOverviewView.h"
 #include "../Kernel/KernelFeature.h"
 #include "../../Ui/Controls.h"
+#include "../../Ui/AsyncTask.h"
+#include "../../Ui/LoadingOverlay.h"
 #include "../../Ui/TabUtil.h"
 #include "../../Ui/Theme.h"
 
@@ -29,6 +32,8 @@ constexpr int kIntegrityTabIndex = 2;
 constexpr int kDynDataCapabilitiesTabIndex = 3;
 constexpr int kDriverStatusTabIndex = 4;
 constexpr int kDynDataTabIndex = 5;
+constexpr int kLoadingOverlayId = 65009;
+constexpr UINT kMsgRefreshCompleted = WM_APP + 590;
 
 // DriverFeaturePageState owns the root page HWND, local driver views, and
 // retained KernelPage-backed migration tabs. Inputs arrive through Win32
@@ -46,8 +51,10 @@ struct DriverFeaturePageState {
     HWND dynDataCapabilitiesView = nullptr;
     HWND driverStatusView = nullptr;
     HWND dynDataView = nullptr;
+    HWND loadingOverlay = nullptr;
     DriverModel model;
     int currentTab = kOverviewTabIndex;
+    std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<DriverEnumerationResult>> refreshTask;
 };
 
 // StateFromWindow returns the page state stored on the HWND. Input is the page
@@ -123,6 +130,17 @@ void LayoutChildren(DriverFeaturePageState& state) {
 
     const int tabTop = margin + toolbarHeight;
     ::MoveWindow(state.tab, margin, tabTop, std::max(100, width - margin * 2), std::max(100, height - tabTop - margin), TRUE);
+    if (state.loadingOverlay) {
+        RECT tabBounds{};
+        ::GetWindowRect(state.tab, &tabBounds);
+        ::MapWindowPoints(nullptr, state.hwnd, reinterpret_cast<POINT*>(&tabBounds), 2);
+        ::MoveWindow(state.loadingOverlay,
+            tabBounds.left,
+            tabBounds.top,
+            std::max(1, Width(tabBounds)),
+            std::max(1, Height(tabBounds)),
+            TRUE);
+    }
 
     RECT tabRc{};
     ::GetClientRect(state.tab, &tabRc);
@@ -157,11 +175,27 @@ void SetStatus(DriverFeaturePageState& state, const std::wstring& text) {
 // and the local model only; KernelPage-backed migration tabs keep their own
 // refresh controls and state; no value is returned.
 void RefreshFeatureModel(DriverFeaturePageState& state) {
-    SetStatus(state, L"正在刷新驱动概览和对象信息...");
-    const DriverActionResult result = DriverActions::RefreshModel(state.model);
-    RefreshDriverOverviewView(state.overviewView);
-    RefreshDriverObjectView(state.objectView);
-    SetStatus(state, result.statusText.empty() ? L"驱动数据已刷新。" : result.statusText);
+    if (!state.refreshTask) {
+        return;
+    }
+    SetStatus(state, state.refreshTask->running() ? L"驱动刷新已排队，等待当前快照完成…" : L"正在后台刷新驱动概览和对象信息…");
+    ::EnableWindow(state.refreshButton, FALSE);
+    Ksword::Ui::SetLoadingOverlay(state.loadingOverlay, true, L"正在加载驱动快照…");
+    state.refreshTask->request(
+        [] { return EnumerateDriverSnapshot(); },
+        [&state](std::uint64_t, std::optional<DriverEnumerationResult>&& snapshot, std::exception_ptr error) {
+            ::EnableWindow(state.refreshButton, TRUE);
+            Ksword::Ui::SetLoadingOverlay(state.loadingOverlay, false);
+            if (error || !snapshot.has_value()) {
+                SetStatus(state, L"驱动后台枚举异常结束。请检查权限和驱动状态。");
+                return;
+            }
+            state.model.setOverviewRows(std::move(snapshot->overviewRows));
+            state.model.setObjectRows(std::move(snapshot->objectRows));
+            RefreshDriverOverviewView(state.overviewView);
+            RefreshDriverObjectView(state.objectView);
+            SetStatus(state, snapshot->diagnosticText.empty() ? L"驱动数据已刷新。" : snapshot->diagnosticText);
+        });
 }
 
 // CopyCurrentTabTsv exports the active table to the clipboard. Input is page
@@ -246,9 +280,12 @@ bool CreateChildControls(DriverFeaturePageState& state) {
         !state.dynDataView) {
         return false;
     }
+    state.loadingOverlay = Ksword::Ui::CreateLoadingOverlay(state.hwnd, kLoadingOverlayId, { 0, 0, 1, 1 });
+    if (!state.loadingOverlay) {
+        return false;
+    }
 
     Ksword::Ui::SetWindowFontRecursive(state.hwnd);
-    RefreshFeatureModel(state);
     return true;
 }
 
@@ -280,7 +317,9 @@ bool RegisterDriverFeatureClass() {
                     ::SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
                     return -1;
                 }
+                state->refreshTask = std::make_unique<Ksword::Ui::AsyncSnapshotTask<DriverEnumerationResult>>(hwnd, kMsgRefreshCompleted);
                 LayoutChildren(*state);
+                RefreshFeatureModel(*state);
             }
             return 0;
         case WM_SIZE:
@@ -288,6 +327,11 @@ bool RegisterDriverFeatureClass() {
                 LayoutChildren(*state);
             }
             return 0;
+        case kMsgRefreshCompleted:
+            if (state && state->refreshTask && state->refreshTask->consume(hwnd, wParam, lParam)) {
+                return 0;
+            }
+            break;
         case WM_NOTIFY:
             if (state) {
                 const auto* header = reinterpret_cast<const NMHDR*>(lParam);
@@ -322,6 +366,9 @@ bool RegisterDriverFeatureClass() {
             return reinterpret_cast<LRESULT>(Ksword::Ui::AppTheme().windowBrush());
         }
         case WM_NCDESTROY:
+            if (state && state->refreshTask) {
+                state->refreshTask->cancel();
+            }
             delete state;
             ::SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
             return 0;
