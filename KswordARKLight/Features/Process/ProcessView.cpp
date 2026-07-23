@@ -5,7 +5,9 @@
 #include "ProcessModel.h"
 #include "../ProcessDetail/ProcessDetailFeature.h"
 #include "../../Ui/Controls.h"
+#include "../../Ui/AsyncTask.h"
 #include "../../Ui/ListViewUtil.h"
+#include "../../Ui/LoadingOverlay.h"
 #include "../../Ui/Theme.h"
 #include "../../../Ksword5.1/Ksword5.1/ArkDriverClient/ArkDriverClient.h"
 
@@ -39,6 +41,7 @@ constexpr UINT kContextMenuBaseId = 53000;
 constexpr UINT_PTR kRefreshTimerId = 52008;
 constexpr UINT kMsgInitialRefresh = WM_APP + 520;
 constexpr UINT kMsgRequestRefresh = WM_APP + 521;
+constexpr UINT kMsgRefreshCompleted = WM_APP + 522;
 constexpr int kTreeIndentPixels = 18;
 constexpr int kTreeIconGap = 4;
 constexpr int kTreeTextGap = 4;
@@ -226,6 +229,7 @@ struct ProcessViewState {
     HWND refreshSlider = nullptr;
     HWND statusText = nullptr;
     HWND listView = nullptr;
+    HWND loadingOverlay = nullptr;
     HIMAGELIST imageList = nullptr;
     ProcessModel model;
     ProcessViewMode mode = ProcessViewMode::UtilizationFriendly;
@@ -239,6 +243,7 @@ struct ProcessViewState {
     std::unordered_map<DWORD, ProcessSnapshotRow> lastActiveRowsByPid;
     std::unordered_map<DWORD, ProcessRowVisualState> visualStateByPid;
     bool hasLastActiveSnapshot = false;
+    std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<struct ProcessRefreshSnapshot>> refreshTask;
 };
 
 // KernelProcessSnapshotEntry 用途：保存 ArkDriverClient R0 枚举返回的一行进程证据。
@@ -261,6 +266,14 @@ struct HiddenProcessAuditResult {
     std::size_t kernelEnumeratedCount = 0;
     std::size_t kernelOnlyCount = 0;
     std::wstring detailText;
+};
+
+// ProcessRefreshSnapshot is produced entirely on a worker thread. It keeps R3
+// enumeration and both R0 evidence queries out of timer and button handlers.
+struct ProcessRefreshSnapshot {
+    ProcessEnumerationResult enumeration;
+    HiddenProcessAuditResult hiddenAudit;
+    std::wstring crossViewStatusSuffix;
 };
 
 // ColumnSet returns the report columns for a process view mode. Input is the
@@ -462,6 +475,14 @@ void LayoutChildren(ProcessViewState& state, const RECT& rc) {
         std::max(80, width),
         std::max(80, height - listTop),
         TRUE);
+    if (state.loadingOverlay) {
+        ::MoveWindow(state.loadingOverlay,
+            0,
+            listTop,
+            std::max(80, width),
+            std::max(80, height - listTop),
+            TRUE);
+    }
 }
 
 // PaintBackground clears the page background only. Inputs are HWND and paint DC;
@@ -1246,24 +1267,33 @@ bool WriteClipboardText(HWND owner, const std::wstring& text) {
     return true;
 }
 
-// RefreshProcesses performs one process enumeration and redraws the list. Input
-// is page state. Processing calls NtQuerySystemInformation through the process
-// enumerator and updates the model. No return value is needed; status text shows
-// success or failure.
-void RefreshProcesses(ProcessViewState& state) {
-    SetStatus(state, L"正在通过 NtQuerySystemInformation 枚举进程...");
-    const ProcessEnumerationResult result = EnumerateProcessesByNtQuerySystemInformation();
-    if (!result.success) {
+// CollectProcessRefreshSnapshot performs every potentially blocking query for a
+// process refresh. It never accesses HWNDs or ProcessViewState and is safe for
+// AsyncSnapshotTask's worker thread.
+ProcessRefreshSnapshot CollectProcessRefreshSnapshot() {
+    ProcessRefreshSnapshot snapshot{};
+    snapshot.enumeration = EnumerateProcessesByNtQuerySystemInformation();
+    if (!snapshot.enumeration.success) {
+        return snapshot;
+    }
+    snapshot.hiddenAudit = ApplyDefaultHiddenProcessAudit(snapshot.enumeration.rows);
+    ApplyR0ProcessAuditRows(snapshot.enumeration.rows, snapshot.crossViewStatusSuffix);
+    return snapshot;
+}
+
+// ApplyProcessRefresh installs a completed immutable snapshot on the UI thread.
+// It performs lightweight diff bookkeeping and preserves the existing
+// incremental ListView update path until the virtual-list migration lands.
+void ApplyProcessRefresh(ProcessViewState& state, ProcessRefreshSnapshot snapshot) {
+    if (!snapshot.enumeration.success) {
         state.model.setRows({});
         RebuildRows(state);
-        SetStatus(state, L"进程枚举失败: " + result.diagnosticText);
+        SetStatus(state, L"进程枚举失败: " + snapshot.enumeration.diagnosticText);
         return;
     }
 
-    std::vector<ProcessSnapshotRow> rows = result.rows;
-    const HiddenProcessAuditResult hiddenAudit = ApplyDefaultHiddenProcessAudit(rows);
-    std::wstring crossViewStatusSuffix;
-    ApplyR0ProcessAuditRows(rows, crossViewStatusSuffix);
+    std::vector<ProcessSnapshotRow> rows = std::move(snapshot.enumeration.rows);
+    const HiddenProcessAuditResult& hiddenAudit = snapshot.hiddenAudit;
     const ULONGLONG nowMs = ::GetTickCount64();
     const ULONGLONG elapsedMs = state.previousSampleTickMs == 0 ? 0 : nowMs - state.previousSampleTickMs;
     const DWORD processorCount = std::max<DWORD>(1, ::GetActiveProcessorCount(ALL_PROCESSOR_GROUPS));
@@ -1320,8 +1350,35 @@ void RefreshProcesses(ProcessViewState& state) {
         L" 个进程；新增 " + std::to_wstring(addedCount) +
         L"，退出 " + std::to_wstring(removedCount) +
         L" 个进程；刷新 " + std::to_wstring(state.refreshIntervalSeconds) +
-        L"s；" + hiddenAudit.detailText + crossViewStatusSuffix +
+        L"s；" + hiddenAudit.detailText + snapshot.crossViewStatusSuffix +
         L"；左 Ctrl 按下时跳过自动刷新。");
+}
+
+// BeginProcessRefresh only schedules work and updates lightweight feedback. A
+// running request is coalesced by AsyncSnapshotTask so fast timers and manual
+// refreshes cannot start concurrent R0/R3 enumeration passes.
+void BeginProcessRefresh(ProcessViewState& state) {
+    if (!state.refreshTask) {
+        return;
+    }
+    SetStatus(state, state.refreshTask->running() ? L"进程刷新已排队，等待当前快照完成…" : L"正在后台枚举进程与 R0 证据…");
+    if (state.refreshButton) {
+        ::EnableWindow(state.refreshButton, FALSE);
+    }
+    Ksword::Ui::SetLoadingOverlay(state.loadingOverlay, true, L"正在刷新进程列表…");
+    state.refreshTask->request(
+        []() { return CollectProcessRefreshSnapshot(); },
+        [&state](std::uint64_t, std::optional<ProcessRefreshSnapshot>&& snapshot, std::exception_ptr error) {
+            if (state.refreshButton) {
+                ::EnableWindow(state.refreshButton, TRUE);
+            }
+            Ksword::Ui::SetLoadingOverlay(state.loadingOverlay, false);
+            if (error || !snapshot.has_value()) {
+                SetStatus(state, L"进程刷新任务异常结束。请检查驱动状态和访问权限。");
+                return;
+            }
+            ApplyProcessRefresh(state, std::move(*snapshot));
+        });
 }
 
 // SwitchMode changes the visible process layout. Inputs are page state and new
@@ -1639,6 +1696,7 @@ void CreateChildControls(ProcessViewState& state) {
     if (state.listView && state.imageList) {
         ListView_SetImageList(state.listView, state.imageList, LVSIL_SMALL);
     }
+    state.loadingOverlay = Ksword::Ui::CreateLoadingOverlay(state.hwnd, 52009, { 0, 0, 1, 1 });
     UpdateToolbarTexts(state);
     RebuildColumns(state);
 }
@@ -1709,6 +1767,7 @@ LRESULT CALLBACK ProcessViewWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
     case WM_CREATE:
         if (state) {
             CreateChildControls(*state);
+            state->refreshTask = std::make_unique<Ksword::Ui::AsyncSnapshotTask<ProcessRefreshSnapshot>>(hwnd, kMsgRefreshCompleted);
             SetStatus(*state, L"进程页已创建，等待首次异步刷新。");
             ::PostMessageW(hwnd, kMsgInitialRefresh, 0, 0);
         }
@@ -1716,10 +1775,15 @@ LRESULT CALLBACK ProcessViewWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
     case kMsgInitialRefresh:
     case kMsgRequestRefresh:
         if (state) {
-            RefreshProcesses(*state);
+            BeginProcessRefresh(*state);
             RestartRefreshTimer(*state);
         }
         return 0;
+    case kMsgRefreshCompleted:
+        if (state && state->refreshTask && state->refreshTask->consume(hwnd, wParam, lParam)) {
+            return 0;
+        }
+        break;
     case WM_SIZE:
         if (state) {
             RECT rc{};
@@ -1731,7 +1795,7 @@ LRESULT CALLBACK ProcessViewWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         if (state && HIWORD(wParam) == BN_CLICKED) {
             switch (LOWORD(wParam)) {
             case kRefreshButtonId:
-                RefreshProcesses(*state);
+                BeginProcessRefresh(*state);
                 return 0;
             case kModeButtonId:
                 ToggleMode(*state);
@@ -1756,7 +1820,7 @@ LRESULT CALLBACK ProcessViewWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                 SetStatus(*state, L"左 Ctrl 按下，跳过本次自动刷新。");
                 return 0;
             }
-            RefreshProcesses(*state);
+            BeginProcessRefresh(*state);
             return 0;
         }
         break;
@@ -1837,6 +1901,9 @@ LRESULT CALLBACK ProcessViewWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
     case WM_NCDESTROY:
         if (state) {
             ::KillTimer(hwnd, kRefreshTimerId);
+            if (state->refreshTask) {
+                state->refreshTask->cancel();
+            }
             if (state->imageList) {
                 ImageList_Destroy(state->imageList);
                 state->imageList = nullptr;
