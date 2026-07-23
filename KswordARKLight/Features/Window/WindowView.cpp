@@ -422,7 +422,10 @@ std::vector<AuditEntry> BuildWin32kGuiAuditRows(size_t windowCount) {
 
     const auto hooks = client.queryWin32kHooksPdb();
     rows.push_back({ L"Hooks", L"ArkDriverClient::queryWin32kHooksPdb", L"WH_* hook chain", IoStateText(hooks.io.ok, hooks.unsupported),
-        L"returned=" + std::to_wstring(hooks.returnedCount) + L"/" + std::to_wstring(hooks.totalCount) + L"; 不 remove/unlink hook 链。" });
+        L"returned=" + std::to_wstring(hooks.returnedCount) + L"/" + std::to_wstring(hooks.totalCount) + L"; chains=" + std::to_wstring(hooks.discoveredChainCount) + L"; " + hooks.detail });
+
+    rows.push_back({ L"Message Hook", L"ArkDriverClient::queryWin32kHooksPdb", L"线程 / 全局消息 Hook 链", IoStateText(hooks.io.ok, hooks.unsupported),
+        L"visited=" + std::to_wstring(hooks.visitedNodeCount) + L"; readFail=" + std::to_wstring(hooks.readFailureCount) + L"; corrupt=" + std::to_wstring(hooks.corruptLinkCount) + L"; capability=" + HexText(hooks.capabilityMask) + L"; 仅枚举诊断，不捕获消息 payload。" });
 
     const auto timers = client.queryWin32kTimers();
     rows.push_back({ L"Timers", L"ArkDriverClient::queryWin32kTimers", L"gTimerHashTable / tagTIMER", IoStateText(timers.io.ok, timers.unsupported),
@@ -431,9 +434,6 @@ std::vector<AuditEntry> BuildWin32kGuiAuditRows(size_t windowCount) {
     const auto eventHooks = client.queryWin32kEventHooks();
     rows.push_back({ L"Event Hooks", L"ArkDriverClient::queryWin32kEventHooks", L"gpWinEventHooks / tagEVENTHOOK", IoStateText(eventHooks.io.ok, eventHooks.unsupported),
         L"returned=" + std::to_wstring(eventHooks.returnedCount) + L"/" + std::to_wstring(eventHooks.totalCount) + L"; cap=" + HexText(eventHooks.capabilityMask) + L"; " + Utf8ToWideLossy(eventHooks.io.message) });
-
-    rows.push_back({ L"Message Hook", L"Capability", L"后续消息 Hook", L"Unsupported",
-        L"当前共享协议未暴露消息回调或 payload 捕获能力。页面保留 Hook 链只读审计，明确不安装用户态全局 Hook。" });
 
     rows.push_back({ L"WM_COPYDATA", L"R3 monitor / ETW / snapshot", L"事件摘要边界", L"ReadOnly",
         L"默认不读取 COPYDATASTRUCT payload，不安装全局消息 hook；当前仅记录只读边界说明。" });
