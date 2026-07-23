@@ -571,6 +571,9 @@ private:
     void executeOpenFolderAction();
     // executeOpenMemoryOperationAction 作用：跳转到内存页并附加当前进程，便于继续转储/查看区域。
     void executeOpenMemoryOperationAction();
+    void executeFocusHandleAction();
+    void executeFocusNetworkAction();
+    void executeFocusWindowAction();
 
     // ======== 工具函数 ========
     std::string selectedIdentityKey() const;
@@ -621,6 +624,8 @@ private:
     void showActionResultMessage(const QString& title, bool actionOk, const std::string& detailText, const kLogEvent& actionEvent);
     QObject* mainWindowActionReceiver() const;
     bool invokeMainWindowPidSlot(const char* methodName, std::uint32_t pid) const;
+    bool invokeMainWindowPidListSlot(const char* methodName, const QString& pidListText) const;
+    void connectDetailWindowNavigation(ProcessDetailWindow* detailWindow);
     ks::process::CreateProcessRequest buildCreateProcessRequestFromUi(bool* buildOk, QString* errorTextOut) const;
     // buildTokenPrivilegeEditRequestFromUi 作用：
     // - 只读取 Token 模式和特权表字段，不解析 CreateProcessW 其它输入；

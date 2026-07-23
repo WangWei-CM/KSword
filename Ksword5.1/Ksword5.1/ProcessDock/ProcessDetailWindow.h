@@ -86,6 +86,9 @@ signals:
     // - 在“跳转句柄”按钮点击时发出；
     // - 由 ProcessDock 转发给 MainWindow 打开句柄 Dock 并按 PID 过滤。
     void requestOpenHandleDockByPid(std::uint32_t pid);
+    void requestOpenMemoryDockByPid(std::uint32_t pid);
+    void requestOpenNetworkDockByPid(std::uint32_t pid);
+    void requestOpenWindowDockByPid(std::uint32_t pid);
 
 private:
     // ModuleRefreshResult：模块页后台刷新结果数据结构。
@@ -542,7 +545,11 @@ private:
     QPushButton* m_copyCommandButton = nullptr; // 复制命令行按钮。
     QLabel* m_parentIconLabel = nullptr;       // 父进程图标（20px）。
     QLabel* m_parentInfoLabel = nullptr;       // 父进程名 + PID。
-    QPushButton* m_openHandleDockButton = nullptr; // 跳转到句柄 Dock 按钮（按当前 PID 过滤）。
+    QPushButton* m_detailOpenHandleDockButton = nullptr; // 详情页跳转到句柄 Dock。
+    QPushButton* m_openHandleDockButton = nullptr; // 操作页跳转到句柄 Dock。
+    QPushButton* m_openMemoryDockButton = nullptr; // 跳转到内存 Dock。
+    QPushButton* m_openNetworkDockButton = nullptr; // 跳转到网络 Dock。
+    QPushButton* m_openWindowDockButton = nullptr; // 跳转到窗口 Dock。
     QPushButton* m_gotoParentButton = nullptr; // 转到父进程按钮。
 
     QLabel* m_detailStartTimeValue = nullptr;  // 启动时间值。

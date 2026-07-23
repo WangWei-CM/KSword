@@ -255,13 +255,28 @@ HandleDock::HandleDock(QWidget* parent)
 
 void HandleDock::focusProcessId(const std::uint32_t processId, const bool triggerRefresh)
 {
+    focusProcessIds(QVector<quint32>{ static_cast<quint32>(processId) }, triggerRefresh);
+}
+
+void HandleDock::focusProcessIds(const QVector<quint32>& processIds, const bool triggerRefresh)
+{
     if (m_tabWidget != nullptr && m_handleListPage != nullptr)
     {
         m_tabWidget->setCurrentWidget(m_handleListPage);
     }
     if (m_pidFilterEdit != nullptr)
     {
-        m_pidFilterEdit->setText(QString::number(processId));
+        QStringList pidTextList;
+        QSet<quint32> seenPidSet;
+        for (const quint32 processId : processIds)
+        {
+            if (processId != 0U && !seenPidSet.contains(processId))
+            {
+                seenPidSet.insert(processId);
+                pidTextList.push_back(QString::number(processId));
+            }
+        }
+        m_pidFilterEdit->setText(pidTextList.join(QStringLiteral(",")));
     }
     if (triggerRefresh)
     {
@@ -317,9 +332,9 @@ void HandleDock::initializeHandleListTab()
     m_refreshButton->setStyleSheet(buildBlueButtonStyle(true));
 
     m_pidFilterEdit = new QLineEdit(m_handleListPage);
-    m_pidFilterEdit->setPlaceholderText(QStringLiteral("PID 过滤（留空=全部）"));
+    m_pidFilterEdit->setPlaceholderText(QStringLiteral("PID 过滤（多个 PID 用逗号分隔，留空=全部）"));
     m_pidFilterEdit->setClearButtonEnabled(true);
-    m_pidFilterEdit->setToolTip(QStringLiteral("输入目标进程 PID，仅展示该进程句柄。"));
+    m_pidFilterEdit->setToolTip(QStringLiteral("输入一个或多个目标 PID，仅展示这些进程的句柄。"));
     m_pidFilterEdit->setStyleSheet(buildLineEditStyle());
 
     m_keywordFilterEdit = new QLineEdit(m_handleListPage);
@@ -714,7 +729,7 @@ void HandleDock::requestAsyncRefreshWithoutTypePrecondition(const bool forceRefr
         << "[HandleDock] requestAsyncRefresh: ticket="
         << currentTicket
         << ", pidFilter="
-        << (options.hasPidFilter ? std::to_string(options.pidFilter) : std::string("all"))
+        << m_pidFilterEdit->text().toStdString()
         << ", keyword="
         << options.keywordText.toStdString()
         << ", typeFilter="
@@ -1149,13 +1164,21 @@ HandleDock::HandleRefreshOptions HandleDock::collectHandleRefreshOptions() const
         options.resolveObjectName = true;
     }
 
-    const QString pidText = m_pidFilterEdit->text().trimmed();
-    bool parseOk = false;
-    const std::uint32_t parsedPid = pidText.toUInt(&parseOk, 10);
-    if (!pidText.isEmpty() && parseOk && parsedPid > 0)
+    QString normalizedPidText = m_pidFilterEdit->text().trimmed();
+    normalizedPidText.replace(',', ' ');
+    normalizedPidText.replace(';', ' ');
+    normalizedPidText.replace('\n', ' ');
+    normalizedPidText.replace('\t', ' ');
+    const QStringList pidTokenList = normalizedPidText.split(' ', Qt::SkipEmptyParts);
+    if (pidTokenList.size() == 1)
     {
-        options.hasPidFilter = true;
-        options.pidFilter = parsedPid;
+        bool parseOk = false;
+        const std::uint32_t parsedPid = pidTokenList.front().toUInt(&parseOk, 10);
+        if (parseOk && parsedPid > 0U)
+        {
+            options.hasPidFilter = true;
+            options.pidFilter = parsedPid;
+        }
     }
 
     return options;

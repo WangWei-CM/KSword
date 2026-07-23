@@ -133,6 +133,29 @@ namespace
     constexpr int kResizeBorderOverlayWidth = 3;
     constexpr int kResizeCornerTriangleLeg = 6;
 
+    QVector<quint32> parseProcessPidListText(const QString& pidListText)
+    {
+        QString normalizedText = pidListText;
+        normalizedText.replace(',', ' ');
+        normalizedText.replace(';', ' ');
+        normalizedText.replace('\n', ' ');
+        normalizedText.replace('\t', ' ');
+
+        QVector<quint32> processIds;
+        QSet<quint32> seenPidSet;
+        for (const QString& token : normalizedText.split(' ', Qt::SkipEmptyParts))
+        {
+            bool parseOk = false;
+            const quint32 processId = token.toUInt(&parseOk, 10);
+            if (parseOk && processId != 0U && !seenPidSet.contains(processId))
+            {
+                seenPidSet.insert(processId);
+                processIds.push_back(processId);
+            }
+        }
+        return processIds;
+    }
+
     constexpr int kBugcheckBitmapMaxWidth =
         static_cast<int>(KSWORD_ARK_BUGCHECK_BITMAP_MAX_WIDTH);
     constexpr int kBugcheckBitmapMaxHeight =
@@ -8303,6 +8326,28 @@ void MainWindow::focusHandleDockByPid(const quint32 pid)
     }
 }
 
+void MainWindow::focusHandleDockByPids(const QString& pidListText)
+{
+    const QVector<quint32> processIds = parseProcessPidListText(pidListText);
+    if (processIds.isEmpty())
+    {
+        return;
+    }
+    if (m_dockHandle != nullptr)
+    {
+        ensureDockContentInitialized(m_dockHandle);
+    }
+    if (m_handleWidget != nullptr)
+    {
+        m_handleWidget->focusProcessIds(processIds, true);
+    }
+    if (m_dockHandle != nullptr)
+    {
+        withTemporaryNonTopMostForDockSwitch([this]() { m_dockHandle->raise(); });
+        m_dockHandle->setVisible(true);
+    }
+}
+
 void MainWindow::focusMemoryDockByPid(const quint32 pid)
 {
     // 跳转入口日志：记录目标 PID，并确保内存 Dock 惰性加载完成。
@@ -8327,6 +8372,50 @@ void MainWindow::focusMemoryDockByPid(const quint32 pid)
                 m_dockMemory->raise();
             });
         m_dockMemory->setVisible(true);
+    }
+}
+
+void MainWindow::focusNetworkDockByPids(const QString& pidListText)
+{
+    const QVector<quint32> processIds = parseProcessPidListText(pidListText);
+    if (processIds.isEmpty())
+    {
+        return;
+    }
+    if (m_dockNetwork != nullptr)
+    {
+        ensureDockContentInitialized(m_dockNetwork);
+    }
+    if (m_networkWidget != nullptr)
+    {
+        m_networkWidget->focusConnectionsByPids(processIds);
+    }
+    if (m_dockNetwork != nullptr)
+    {
+        withTemporaryNonTopMostForDockSwitch([this]() { m_dockNetwork->raise(); });
+        m_dockNetwork->setVisible(true);
+    }
+}
+
+void MainWindow::focusWindowDockByPids(const QString& pidListText)
+{
+    const QVector<quint32> processIds = parseProcessPidListText(pidListText);
+    if (processIds.isEmpty())
+    {
+        return;
+    }
+    if (m_dockWindow != nullptr)
+    {
+        ensureDockContentInitialized(m_dockWindow);
+    }
+    if (m_windowWidget != nullptr)
+    {
+        m_windowWidget->focusWindowsByPids(processIds);
+    }
+    if (m_dockWindow != nullptr)
+    {
+        withTemporaryNonTopMostForDockSwitch([this]() { m_dockWindow->raise(); });
+        m_dockWindow->setVisible(true);
     }
 }
 

@@ -1035,15 +1035,15 @@ void ProcessDetailWindow::initializeDetailTab()
     m_parentInfoLabel->setStyleSheet(
         QStringLiteral("color:%1; font-weight:600;")
         .arg(KswordTheme::TextSecondaryHex()));
-    m_openHandleDockButton = new QPushButton(QIcon(":/Icon/process_list.svg"), "", m_detailTab);
-    m_openHandleDockButton->setToolTip(QStringLiteral("跳转到句柄 Dock，并按当前 PID 过滤"));
-    m_openHandleDockButton->setFixedSize(28, 28);
+    m_detailOpenHandleDockButton = new QPushButton(QIcon(":/Icon/process_list.svg"), "", m_detailTab);
+    m_detailOpenHandleDockButton->setToolTip(QStringLiteral("跳转到句柄 Dock，并按当前 PID 过滤"));
+    m_detailOpenHandleDockButton->setFixedSize(28, 28);
     m_gotoParentButton = new QPushButton(QIcon(":/Icon/process_details.svg"), "转到父进程", m_detailTab);
     m_gotoParentButton->setVisible(false);
     parentLayout->addWidget(new QLabel("父进程:", m_detailTab));
     parentLayout->addWidget(m_parentIconLabel);
     parentLayout->addWidget(m_parentInfoLabel, 1);
-    parentLayout->addWidget(m_openHandleDockButton);
+    parentLayout->addWidget(m_detailOpenHandleDockButton);
     parentLayout->addWidget(m_gotoParentButton);
     m_detailLayout->addLayout(parentLayout);
 
@@ -1088,7 +1088,7 @@ void ProcessDetailWindow::initializeDetailTab()
     m_copyPathButton->setStyleSheet(buttonStyle);
     m_openPathFolderButton->setStyleSheet(buttonStyle);
     m_copyCommandButton->setStyleSheet(buttonStyle);
-    m_openHandleDockButton->setStyleSheet(buildBlueButtonStyle());
+    m_detailOpenHandleDockButton->setStyleSheet(buildBlueButtonStyle());
     m_gotoParentButton->setStyleSheet(buttonStyle);
 }
 
@@ -1432,6 +1432,25 @@ void ProcessDetailWindow::initializeActionTab()
     controlLayout->addWidget(m_priorityCombo, 3, 1, 1, 3);
     controlLayout->addWidget(m_applyPriorityButton, 3, 4);
     m_actionLayout->addWidget(controlGroup);
+
+    QGroupBox* gotoGroup = new QGroupBox(QStringLiteral("转到"), m_actionTab);
+    QGridLayout* gotoLayout = new QGridLayout(gotoGroup);
+    gotoLayout->setHorizontalSpacing(8);
+    gotoLayout->setVerticalSpacing(8);
+    m_openHandleDockButton = buildTextActionButton(
+        QStringLiteral("句柄"), QStringLiteral("打开句柄页并按当前 PID 过滤"), gotoGroup);
+    m_openMemoryDockButton = buildTextActionButton(
+        QStringLiteral("内存"), QStringLiteral("打开内存页并附加当前 PID"), gotoGroup);
+    m_openNetworkDockButton = buildTextActionButton(
+        QStringLiteral("网络"), QStringLiteral("打开连接管理页并按当前 PID 过滤"), gotoGroup);
+    m_openWindowDockButton = buildTextActionButton(
+        QStringLiteral("窗口"), QStringLiteral("打开窗口页并按当前 PID 过滤"), gotoGroup);
+    gotoLayout->addWidget(m_openHandleDockButton, 0, 0);
+    gotoLayout->addWidget(m_openMemoryDockButton, 0, 1);
+    gotoLayout->addWidget(m_openNetworkDockButton, 0, 2);
+    gotoLayout->addWidget(m_openWindowDockButton, 0, 3);
+    gotoLayout->setColumnStretch(4, 1);
+    m_actionLayout->addWidget(gotoGroup);
 
     // 补充操作组：
     // - 与进程列表右键菜单对齐，把详情页原先遗漏的效率模式、PPL 刷新和 R0 能力放进来；
@@ -2295,6 +2314,30 @@ void ProcessDetailWindow::initializeConnections()
         }
         emit requestOpenHandleDockByPid(m_baseRecord.pid);
     });
+    connect(m_detailOpenHandleDockButton, &QPushButton::clicked, this, [this]() {
+        if (m_baseRecord.pid != 0U)
+        {
+            emit requestOpenHandleDockByPid(m_baseRecord.pid);
+        }
+    });
+    connect(m_openMemoryDockButton, &QPushButton::clicked, this, [this]() {
+        if (m_baseRecord.pid != 0U)
+        {
+            emit requestOpenMemoryDockByPid(m_baseRecord.pid);
+        }
+    });
+    connect(m_openNetworkDockButton, &QPushButton::clicked, this, [this]() {
+        if (m_baseRecord.pid != 0U)
+        {
+            emit requestOpenNetworkDockByPid(m_baseRecord.pid);
+        }
+    });
+    connect(m_openWindowDockButton, &QPushButton::clicked, this, [this]() {
+        if (m_baseRecord.pid != 0U)
+        {
+            emit requestOpenWindowDockByPid(m_baseRecord.pid);
+        }
+    });
 
     // 线程细节刷新按钮。
     connect(m_refreshThreadInspectButton, &QPushButton::clicked, this, [this]() {
@@ -2623,9 +2666,9 @@ void ProcessDetailWindow::refreshDetailTabTexts()
     }
     m_pathLineEdit->setText(processPathText.trimmed().isEmpty() ? "-" : processPathText);
     m_commandLineEdit->setText(QString::fromStdString(m_baseRecord.commandLine.empty() ? "-" : m_baseRecord.commandLine));
-    if (m_openHandleDockButton != nullptr)
+    if (m_detailOpenHandleDockButton != nullptr)
     {
-        m_openHandleDockButton->setVisible(m_baseRecord.pid != 0);
+        m_detailOpenHandleDockButton->setVisible(m_baseRecord.pid != 0);
     }
 
     // 详细字段赋值。

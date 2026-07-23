@@ -11,6 +11,8 @@
 #include "../Framework.h"
 
 #include <QWidget>
+#include <QSet>
+#include <QVector>
 
 #include <atomic>      // std::atomic_bool：控制后台枚举线程互斥刷新。
 #include <vector>      // std::vector：窗口快照容器。
@@ -54,6 +56,9 @@ public:
     // 析构函数：
     // - 作用：停止自动刷新定时器，确保后台流程退出安全。
     ~OtherDock() override;
+
+    void focusProcessIds(const QVector<quint32>& processIds);
+    void clearExternalProcessFilter();
 
     // WindowInfo：
     // - 作用：缓存单个窗口的关键属性，供列表与详情弹窗复用。
@@ -172,6 +177,7 @@ private:
     QWidget* m_toolBarWidget = nullptr;           // 顶部工具栏容器。
     QHBoxLayout* m_toolBarLayout = nullptr;       // 顶部工具栏布局。
     QPushButton* m_refreshButton = nullptr;       // 刷新按钮。
+    QPushButton* m_clearExternalProcessFilterButton = nullptr; // 清除跨页 PID 筛选。
     QCheckBox* m_autoRefreshCheck = nullptr;      // 自动刷新开关。
     QSpinBox* m_autoRefreshIntervalSpin = nullptr; // 自动刷新间隔（ms）。
     QLineEdit* m_filterEdit = nullptr;            // 关键字过滤输入。
@@ -227,6 +233,7 @@ private:
     std::vector<WindowInfo> m_previousSnapshot;   // 上一轮窗口快照。
     std::vector<WindowInfo> m_exitedOneRound;     // 退出窗口保留一轮。
     std::vector<quint64> m_newWindowHandles;      // 新增窗口句柄列表（用于高亮）。
+    QSet<quint32> m_externalProcessIdFilterSet;   // 进程页跨视图 PID 筛选。
     int m_refreshProgressPid = 0;                 // 刷新任务进度卡片 PID。
     std::atomic_bool m_refreshRunning{ false };   // 后台刷新进行中标志。
 };

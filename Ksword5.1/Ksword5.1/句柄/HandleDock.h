@@ -16,6 +16,7 @@
 #include <QHash>
 #include <QIcon>
 #include <QWidget>
+#include <QVector>
 
 #include <cstdint>
 #include <string>
@@ -57,6 +58,7 @@ public:
     // 传入 processId：目标进程 PID；triggerRefresh：是否立即刷新。
     // 传出：无（内部更新 UI 状态与刷新任务）。
     void focusProcessId(std::uint32_t processId, bool triggerRefresh);
+    void focusProcessIds(const QVector<quint32>& processIds, bool triggerRefresh);
 
 protected:
     // showEvent 作用：

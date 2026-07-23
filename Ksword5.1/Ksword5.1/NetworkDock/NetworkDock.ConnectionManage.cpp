@@ -1,6 +1,29 @@
 #include "NetworkDock.InternalCommon.h"
 
 using namespace network_dock_detail;
+
+void NetworkDock::focusConnectionsByPids(const QVector<quint32>& processIds)
+{
+    m_connectionPidFilterSet.clear();
+    for (const quint32 processId : processIds)
+    {
+        if (processId != 0U)
+        {
+            m_connectionPidFilterSet.insert(processId);
+        }
+    }
+
+    if (m_sideTabWidget != nullptr && m_connectionManagePage != nullptr)
+    {
+        m_sideTabWidget->setCurrentWidget(m_connectionManagePage);
+    }
+    if (m_clearConnectionPidFilterButton != nullptr)
+    {
+        m_clearConnectionPidFilterButton->setEnabled(!m_connectionPidFilterSet.isEmpty());
+    }
+    refreshConnectionTables();
+}
+
 void NetworkDock::refreshConnectionTables()
 {
     // 连接快照枚举是相对昂贵操作：
@@ -90,6 +113,28 @@ void NetworkDock::applyConnectionSnapshot(
         return;
     }
 
+    if (!m_connectionPidFilterSet.isEmpty())
+    {
+        const auto pidMatches = [this](const std::uint32_t processId)
+            {
+                return m_connectionPidFilterSet.contains(static_cast<quint32>(processId));
+            };
+        tcpSnapshot.erase(
+            std::remove_if(tcpSnapshot.begin(), tcpSnapshot.end(),
+                [&pidMatches](const ks::network::TcpConnectionRecord& record)
+                {
+                    return !pidMatches(record.processId);
+                }),
+            tcpSnapshot.end());
+        udpSnapshot.erase(
+            std::remove_if(udpSnapshot.begin(), udpSnapshot.end(),
+                [&pidMatches](const ks::network::UdpEndpointRecord& record)
+                {
+                    return !pidMatches(record.processId);
+                }),
+            udpSnapshot.end());
+    }
+
     m_tcpConnectionCache = std::move(tcpSnapshot);
     m_udpEndpointCache = std::move(udpSnapshot);
 
@@ -142,10 +187,24 @@ void NetworkDock::applyConnectionSnapshot(
     if (m_connectionStatusLabel != nullptr)
     {
         const QString nowText = QDateTime::currentDateTime().toString("HH:mm:ss");
+        QString filterText;
+        if (!m_connectionPidFilterSet.isEmpty())
+        {
+            QStringList pidTextList;
+            for (const quint32 processId : std::as_const(m_connectionPidFilterSet))
+            {
+                pidTextList.push_back(QString::number(processId));
+            }
+            std::sort(pidTextList.begin(), pidTextList.end(), [](const QString& left, const QString& right) {
+                return left.toULongLong() < right.toULongLong();
+            });
+            filterText = QStringLiteral("，PID筛选=%1").arg(pidTextList.join(','));
+        }
         m_connectionStatusLabel->setText(
-            QStringLiteral("状态：TCP=%1 条, UDP=%2 条, 刷新于 %3")
+            QStringLiteral("状态：TCP=%1 条, UDP=%2 条%3, 刷新于 %4")
             .arg(static_cast<int>(m_tcpConnectionCache.size()))
             .arg(static_cast<int>(m_udpEndpointCache.size()))
+            .arg(filterText)
             .arg(nowText));
     }
 

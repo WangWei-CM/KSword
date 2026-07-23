@@ -24,8 +24,11 @@
 #include <QColor>
 #include <QComboBox>
 #include <QDateTime>
+#include <QDialog>
+#include <QDialogButtonBox>
 #include <QFileIconProvider>
 #include <QFileInfo>
+#include <QFormLayout>
 #include <QGridLayout>
 #include <QGroupBox>
 #include <QGuiApplication>
@@ -39,6 +42,7 @@
 #include <QMetaObject>
 #include <QModelIndex>
 #include <QProgressBar>
+#include <QProcess>
 #include <QPlainTextEdit>
 #include <QPointer>
 #include <QPushButton>

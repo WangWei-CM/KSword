@@ -21,6 +21,7 @@
 #include <QTreeWidgetItem>
 
 #include <set>
+#include <unordered_set>
 
 void HandleDock::applyLocalHandleFilters()
 {
@@ -36,8 +37,22 @@ void HandleDock::applyLocalHandleFilters(const bool rebuildTable)
         (m_diffFilterCombo != nullptr) ? m_diffFilterCombo->currentText().trimmed() : QString());
     const bool onlyNamed = (m_onlyNamedCheckBox != nullptr) && m_onlyNamedCheckBox->isChecked();
 
-    bool pidParseOk = false;
-    const std::uint32_t parsedPid = pidText.toUInt(&pidParseOk, 10);
+    QString normalizedPidText = pidText;
+    normalizedPidText.replace(',', ' ');
+    normalizedPidText.replace(';', ' ');
+    normalizedPidText.replace('\n', ' ');
+    normalizedPidText.replace('\t', ' ');
+    const QStringList pidTokenList = normalizedPidText.split(' ', Qt::SkipEmptyParts);
+    std::unordered_set<std::uint32_t> pidFilterSet;
+    for (const QString& pidToken : pidTokenList)
+    {
+        bool pidParseOk = false;
+        const std::uint32_t parsedPid = pidToken.toUInt(&pidParseOk, 10);
+        if (pidParseOk && parsedPid > 0U)
+        {
+            pidFilterSet.insert(parsedPid);
+        }
+    }
 
     std::uint32_t selectedPid = 0;
     std::uint16_t selectedTypeIndex = 0;
@@ -55,7 +70,7 @@ void HandleDock::applyLocalHandleFilters(const bool rebuildTable)
     m_rows.reserve(m_allRows.size());
     for (const HandleRow& row : m_allRows)
     {
-        if (!pidText.isEmpty() && (!pidParseOk || row.processId != parsedPid))
+        if (!pidText.isEmpty() && (pidFilterSet.empty() || pidFilterSet.find(row.processId) == pidFilterSet.end()))
         {
             continue;
         }

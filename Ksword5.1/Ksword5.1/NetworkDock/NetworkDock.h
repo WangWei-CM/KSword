@@ -17,7 +17,9 @@
 #include <QHash>
 #include <QIcon>
 #include <QPointer>
+#include <QSet>
 #include <QStringList>
+#include <QVector>
 #include <QWidget>
 
 #include <atomic>        // std::atomic_bool：存活主机扫描的并发状态控制。
@@ -83,6 +85,9 @@ public:
     // 析构函数：
     // - 作用：停止后台抓包线程，避免窗口释放后仍有异步回调。
     ~NetworkDock() override;
+
+    // 切换到连接管理页并以 PID 集合过滤 TCP/UDP，独立于流量监控规则。
+    void focusConnectionsByPids(const QVector<quint32>& processIds);
 
 protected:
     // showEvent：
@@ -357,6 +362,13 @@ private:
     // - 作用：构建“网络审计”页（TCP/UDP cross-view、AFD、WFP、NDIS、NSI）。
     // - 返回：无。
     void initializeNetworkAuditTab();
+
+    // 路由表：IPv4/IPv6 枚举、编辑与持久化管理。
+    void initializeRouteTableTab();
+    void refreshRouteTable();
+    void addRouteEntry();
+    void editSelectedRouteEntry();
+    void deleteSelectedRouteEntry();
 
     // initializeArpCacheTab：
     // - 作用：构建“ARP缓存”页（展示 + 编辑）。
@@ -1217,10 +1229,12 @@ private:
     QPushButton* m_refreshConnectionButton = nullptr; // 手动刷新连接快照按钮。
     QPushButton* m_autoRefreshConnectionButton = nullptr; // 自动刷新开关按钮（checkable）。
     QPushButton* m_terminateTcpButton = nullptr;     // 终止选中 TCP 连接按钮。
+    QPushButton* m_clearConnectionPidFilterButton = nullptr; // 清除跨页 PID 连接筛选。
     QLabel* m_connectionStatusLabel = nullptr;       // 连接管理状态标签。
     QTabWidget* m_connectionSubTabWidget = nullptr;  // 连接子页签（TCP/UDP）。
     QTableWidget* m_tcpConnectionTable = nullptr;    // TCP 连接监控表。
     QTableWidget* m_udpEndpointTable = nullptr;      // UDP 端点监控表。
+    QSet<quint32> m_connectionPidFilterSet;          // 进程页“转到网络”注入的独立 PID 筛选。
 
     // ========================= Tab4：防火墙 ====================
     NetworkFirewallPage* m_firewallPage = nullptr;   // 防火墙页容器。
@@ -1276,7 +1290,42 @@ private:
     MultiThreadDownloadSegmentBarWidget* m_multiDownloadSegmentBar = nullptr; // 断节式总进度条控件。
     QLabel* m_multiDownloadTotalProgressLabel = nullptr; // 总进度百分比标签。
 
-    // ========================= Tab6：ARP 缓存 ====================
+public:
+    // 路由行的 UI/写入模型。保留纯值字段，避免把 Windows 路由结构暴露到头文件依赖链。
+    struct RouteRecord
+    {
+        int addressFamily = 0;
+        QString destinationAddress;
+        int prefixLength = 0;
+        QString nextHopAddress;
+        quint32 interfaceIndex = 0;
+        QString interfaceName;
+        quint32 metric = 0;
+        quint32 protocol = 0;
+        quint32 origin = 0;
+        bool publish = false;
+        bool immortal = false;
+        quint32 age = 0;
+        quint32 validLifetime = 0;
+        quint32 preferredLifetime = 0;
+        quint8 sitePrefixLength = 0;
+    };
+
+private:
+
+    // ========================= Tab6：路由表 ====================
+    QWidget* m_routeTablePage = nullptr;
+    QVBoxLayout* m_routeTableLayout = nullptr;
+    QHBoxLayout* m_routeTableControlLayout = nullptr;
+    QPushButton* m_refreshRouteButton = nullptr;
+    QPushButton* m_addRouteButton = nullptr;
+    QPushButton* m_editRouteButton = nullptr;
+    QPushButton* m_removeRouteButton = nullptr;
+    QLabel* m_routeStatusLabel = nullptr;
+    QTableWidget* m_routeTable = nullptr;
+    std::vector<RouteRecord> m_routeRecordCache;
+
+    // ========================= Tab7：ARP 缓存 ====================
     QWidget* m_arpCachePage = nullptr;            // ARP缓存页容器。
     QVBoxLayout* m_arpCacheLayout = nullptr;      // ARP缓存页布局。
     QHBoxLayout* m_arpCacheControlLayout = nullptr; // ARP控制栏布局。

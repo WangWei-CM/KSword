@@ -2352,6 +2352,15 @@ WindowDock::~WindowDock()
 {
 }
 
+void WindowDock::focusWindowsByPids(const QVector<quint32>& processIds)
+{
+    if (m_tabWidget != nullptr && m_windowManagementDock != nullptr)
+    {
+        m_tabWidget->setCurrentWidget(m_windowManagementDock);
+        m_windowManagementDock->focusProcessIds(processIds);
+    }
+}
+
 void WindowDock::showEvent(QShowEvent* showEventPointer)
 {
     QWidget::showEvent(showEventPointer);

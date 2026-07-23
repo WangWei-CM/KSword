@@ -46,6 +46,8 @@ public:
     // - 返回：无。
     ~WindowDock() override;
 
+    void focusWindowsByPids(const QVector<quint32>& processIds);
+
 protected:
     // showEvent 作用：
     // - 保留 Qt show 事件链；

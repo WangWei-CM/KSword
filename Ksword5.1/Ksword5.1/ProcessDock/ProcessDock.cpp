@@ -3579,6 +3579,40 @@ void ProcessDock::showEvent(QShowEvent* event)
     });
 }
 
+bool ProcessDock::invokeMainWindowPidListSlot(const char* methodName, const QString& pidListText) const
+{
+    QObject* receiver = mainWindowActionReceiver();
+    if (receiver == nullptr || pidListText.trimmed().isEmpty())
+    {
+        return false;
+    }
+    return QMetaObject::invokeMethod(
+        receiver,
+        methodName,
+        Qt::QueuedConnection,
+        Q_ARG(QString, pidListText));
+}
+
+void ProcessDock::connectDetailWindowNavigation(ProcessDetailWindow* detailWindow)
+{
+    if (detailWindow == nullptr)
+    {
+        return;
+    }
+    connect(detailWindow, &ProcessDetailWindow::requestOpenMemoryDockByPid, this,
+        [this](const std::uint32_t targetPid) {
+            (void)invokeMainWindowPidSlot("focusMemoryDockByPid", targetPid);
+        });
+    connect(detailWindow, &ProcessDetailWindow::requestOpenNetworkDockByPid, this,
+        [this](const std::uint32_t targetPid) {
+            (void)invokeMainWindowPidListSlot("focusNetworkDockByPids", QString::number(targetPid));
+        });
+    connect(detailWindow, &ProcessDetailWindow::requestOpenWindowDockByPid, this,
+        [this](const std::uint32_t targetPid) {
+            (void)invokeMainWindowPidListSlot("focusWindowDockByPids", QString::number(targetPid));
+        });
+}
+
 void ProcessDock::refreshThemeVisuals()
 {
     // 仅重建当前表格可视层，不触发新的后台枚举任务。
@@ -9007,9 +9041,22 @@ void ProcessDock::showTableContextMenu(const QPoint& localPosition)
     QAction* openFolderAction = contextMenu.addAction(
         blueTintedIcon(":/Icon/process_open_folder.svg"),
         processContextText("process.menu.open_folder", QStringLiteral("打开所在目录")));
-    QAction* openMemoryAction = contextMenu.addAction(
+    QMenu* gotoSubMenu = contextMenu.addMenu(
         blueTintedIcon(":/Icon/process_details.svg"),
-        processContextText("process.menu.open_memory", QStringLiteral("跳转到内存操作（可在此处转储）")));
+        QStringLiteral("转到"));
+    QAction* openHandleAction = gotoSubMenu->addAction(
+        blueTintedIcon(":/Icon/process_list.svg"), QStringLiteral("句柄"));
+    QAction* openMemoryAction = gotoSubMenu->addAction(
+        blueTintedIcon(":/Icon/process_details.svg"), QStringLiteral("内存"));
+    QAction* openNetworkAction = gotoSubMenu->addAction(
+        blueTintedIcon(":/Icon/process_main.svg"), QStringLiteral("网络"));
+    QAction* openWindowAction = gotoSubMenu->addAction(
+        blueTintedIcon(":/Icon/process_tree.svg"), QStringLiteral("窗口"));
+    openMemoryAction->setEnabled(!hasBatchSelection);
+    if (hasBatchSelection)
+    {
+        openMemoryAction->setToolTip(QStringLiteral("内存页一次只能附加一个进程。"));
+    }
     QAction* injectionPageAction = contextMenu.addAction(
         blueTintedIcon(":/Icon/process_priority.svg"),
         processContextText("process.menu.injection", QStringLiteral("DLL/Shellcode 注入")));
@@ -9145,7 +9192,10 @@ void ProcessDock::showTableContextMenu(const QPoint& localPosition)
         else if (selectedAction == setCriticalAction) { executeSetCriticalAction(true); }
         else if (selectedAction == clearCriticalAction) { executeSetCriticalAction(false); }
         else if (selectedAction == openFolderAction) { executeOpenFolderAction(); }
+        else if (selectedAction == openHandleAction) { executeFocusHandleAction(); }
         else if (selectedAction == openMemoryAction) { executeOpenMemoryOperationAction(); }
+        else if (selectedAction == openNetworkAction) { executeFocusNetworkAction(); }
+        else if (selectedAction == openWindowAction) { executeFocusWindowAction(); }
         else if (selectedAction == injectionPageAction) { openSelectedProcessInjectionPage(); }
         else if (selectedAction == scanHotkeyAction) { openSelectedProcessHotkeyScanner(); }
         else if (selectedAction == detailsAction) { openProcessDetailsPlaceholder(); }
@@ -11962,24 +12012,73 @@ void ProcessDock::executeOpenMemoryOperationAction()
         warn << logEvent << "[ProcessDock] executeOpenMemoryOperationAction 被忽略：当前没有选中进程。" << eol;
         return;
     }
-
-    for (const ProcessActionTarget& actionTarget : actionTargets)
+    if (actionTargets.size() != 1U)
     {
-        const bool invokeOk = invokeMainWindowPidSlot("focusMemoryDockByPid", actionTarget.record.pid);
+        QMessageBox::information(this, QStringLiteral("跳转到内存"), QStringLiteral("内存操作一次只能附加一个进程，请仅选择一个进程。"));
+        return;
+    }
+
+    const bool invokeOk = invokeMainWindowPidSlot("focusMemoryDockByPid", actionTargets.front().record.pid);
+    if (!invokeOk)
+    {
         kLogEvent actionEvent;
-        (invokeOk ? info : warn) << actionEvent
-            << "[ProcessDock] 跳转到内存操作, pid=" << actionTarget.record.pid
-            << ", invokeOk=" << (invokeOk ? "true" : "false")
-            << eol;
-        if (!invokeOk)
+        showActionResultMessage(
+            QStringLiteral("跳转到内存操作"),
+            false,
+            std::string("focusMemoryDockByPid invoke failed"),
+            actionEvent);
+    }
+}
+
+void ProcessDock::executeFocusHandleAction()
+{
+    const std::vector<ProcessActionTarget> actionTargets = selectedActionTargets();
+    QSet<quint32> seenPidSet;
+    QStringList pidTextList;
+    for (const ProcessActionTarget& target : actionTargets)
+    {
+        const quint32 processId = static_cast<quint32>(target.record.pid);
+        if (processId != 0U && !seenPidSet.contains(processId))
         {
-            showActionResultMessage(
-                QStringLiteral("跳转到内存操作"),
-                false,
-                std::string("focusMemoryDockByPid invoke failed"),
-                actionEvent);
+            seenPidSet.insert(processId);
+            pidTextList.push_back(QString::number(processId));
         }
     }
+    (void)invokeMainWindowPidListSlot("focusHandleDockByPids", pidTextList.join(','));
+}
+
+void ProcessDock::executeFocusNetworkAction()
+{
+    const std::vector<ProcessActionTarget> actionTargets = selectedActionTargets();
+    QSet<quint32> seenPidSet;
+    QStringList pidTextList;
+    for (const ProcessActionTarget& target : actionTargets)
+    {
+        const quint32 processId = static_cast<quint32>(target.record.pid);
+        if (processId != 0U && !seenPidSet.contains(processId))
+        {
+            seenPidSet.insert(processId);
+            pidTextList.push_back(QString::number(processId));
+        }
+    }
+    (void)invokeMainWindowPidListSlot("focusNetworkDockByPids", pidTextList.join(','));
+}
+
+void ProcessDock::executeFocusWindowAction()
+{
+    const std::vector<ProcessActionTarget> actionTargets = selectedActionTargets();
+    QSet<quint32> seenPidSet;
+    QStringList pidTextList;
+    for (const ProcessActionTarget& target : actionTargets)
+    {
+        const quint32 processId = static_cast<quint32>(target.record.pid);
+        if (processId != 0U && !seenPidSet.contains(processId))
+        {
+            seenPidSet.insert(processId);
+            pidTextList.push_back(QString::number(processId));
+        }
+    }
+    (void)invokeMainWindowPidListSlot("focusWindowDockByPids", pidTextList.join(','));
 }
 
 void ProcessDock::requestOpenProcessDetailByPid(const std::uint32_t pid)
@@ -12070,6 +12169,7 @@ void ProcessDock::openProcessDetailsPlaceholder()
         }
     });
 
+    connectDetailWindowNavigation(detailWindow);
     detailWindow->show();
     detailWindow->raise();
     detailWindow->activateWindow();
@@ -12154,6 +12254,7 @@ void ProcessDock::openSelectedProcessHotkeyScanner()
         return;
     }
 
+    connectDetailWindowNavigation(detailWindow);
     detailWindow->show();
     detailWindow->raise();
     detailWindow->activateWindow();
@@ -12241,6 +12342,7 @@ void ProcessDock::openSelectedProcessInjectionPage()
         return;
     }
 
+    connectDetailWindowNavigation(detailWindow);
     detailWindow->show();
     detailWindow->raise();
     detailWindow->activateWindow();
@@ -12300,9 +12402,10 @@ void ProcessDock::openProcessDetailWindowByPid(const std::uint32_t pid)
                 warn << logEvent
                     << "[ProcessDock] requestOpenHandleDockByPid 转发失败, pid="
                     << targetPid
-                    << eol;
+                << eol;
             }
         });
+        connectDetailWindowNavigation(detailWindow);
         detailWindow->show();
         detailWindow->raise();
         detailWindow->activateWindow();
@@ -12343,9 +12446,10 @@ void ProcessDock::openProcessDetailWindowByPid(const std::uint32_t pid)
             warn << logEvent
                 << "[ProcessDock] requestOpenHandleDockByPid 转发失败, pid="
                 << targetPid
-                << eol;
+            << eol;
         }
     });
+    connectDetailWindowNavigation(detailWindow);
     detailWindow->show();
     detailWindow->raise();
     detailWindow->activateWindow();

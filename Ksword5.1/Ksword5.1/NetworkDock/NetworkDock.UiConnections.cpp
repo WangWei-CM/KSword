@@ -283,6 +283,15 @@ void NetworkDock::initializeConnections()
         {
             terminateSelectedTcpConnection();
         });
+    connect(m_clearConnectionPidFilterButton, &QPushButton::clicked, this, [this]()
+        {
+            m_connectionPidFilterSet.clear();
+            if (m_clearConnectionPidFilterButton != nullptr)
+            {
+                m_clearConnectionPidFilterButton->setEnabled(false);
+            }
+            refreshConnectionTables();
+        });
 
     // HTTPS 解析控制连接。
     connect(m_httpsStartProxyButton, &QPushButton::clicked, this, [this]()

@@ -2852,6 +2852,41 @@ OtherDock::~OtherDock()
     m_createdDesktopHandles.clear();
 }
 
+void OtherDock::focusProcessIds(const QVector<quint32>& processIds)
+{
+    m_externalProcessIdFilterSet.clear();
+    for (const quint32 processId : processIds)
+    {
+        if (processId != 0U)
+        {
+            m_externalProcessIdFilterSet.insert(processId);
+        }
+    }
+    if (m_contentTabWidget != nullptr && m_windowListPage != nullptr)
+    {
+        m_contentTabWidget->setCurrentWidget(m_windowListPage);
+    }
+    if (m_clearExternalProcessFilterButton != nullptr)
+    {
+        m_clearExternalProcessFilterButton->setEnabled(!m_externalProcessIdFilterSet.isEmpty());
+    }
+    rebuildWindowTreeFromSnapshot();
+}
+
+void OtherDock::clearExternalProcessFilter()
+{
+    if (m_externalProcessIdFilterSet.isEmpty())
+    {
+        return;
+    }
+    m_externalProcessIdFilterSet.clear();
+    if (m_clearExternalProcessFilterButton != nullptr)
+    {
+        m_clearExternalProcessFilterButton->setEnabled(false);
+    }
+    rebuildWindowTreeFromSnapshot();
+}
+
 void OtherDock::initializeUi()
 {
     // 根布局负责承载“工具栏 + 主分割区 + 状态栏”。
@@ -2870,6 +2905,12 @@ void OtherDock::initializeUi()
     m_refreshButton->setToolTip(QStringLiteral("刷新窗口列表"));
     m_refreshButton->setStyleSheet(blueButtonStyle());
     m_refreshButton->setFixedWidth(32);
+
+    m_clearExternalProcessFilterButton = new QPushButton(QIcon(":/Icon/log_clear.svg"), QString(), m_toolBarWidget);
+    m_clearExternalProcessFilterButton->setToolTip(QStringLiteral("清除进程页跳转带入的 PID 筛选"));
+    m_clearExternalProcessFilterButton->setStyleSheet(blueButtonStyle());
+    m_clearExternalProcessFilterButton->setFixedWidth(32);
+    m_clearExternalProcessFilterButton->setEnabled(false);
 
     m_autoRefreshCheck = new QCheckBox(QStringLiteral("自动"), m_toolBarWidget);
     m_autoRefreshCheck->setToolTip(QStringLiteral("启用自动刷新窗口列表"));
@@ -2934,6 +2975,7 @@ void OtherDock::initializeUi()
     m_exportButton->setFixedWidth(32);
 
     m_toolBarLayout->addWidget(m_refreshButton, 0);
+    m_toolBarLayout->addWidget(m_clearExternalProcessFilterButton, 0);
     m_toolBarLayout->addWidget(m_autoRefreshCheck, 0);
     m_toolBarLayout->addWidget(m_autoRefreshIntervalSpin, 0);
     m_toolBarLayout->addWidget(m_filterEdit, 1);
@@ -3178,6 +3220,9 @@ void OtherDock::initializeConnections()
             << "[OtherDock] 用户点击刷新窗口列表。"
             << eol;
         refreshWindowListAsync();
+    });
+    connect(m_clearExternalProcessFilterButton, &QPushButton::clicked, this, [this]() {
+        clearExternalProcessFilter();
     });
 
     // 自动刷新开关：勾选后按间隔周期刷新。
@@ -3606,6 +3651,11 @@ void OtherDock::refreshWindowListAsync()
 
 bool OtherDock::passFilter(const WindowInfo& info) const
 {
+    if (!m_externalProcessIdFilterSet.isEmpty())
+    {
+        return m_externalProcessIdFilterSet.contains(static_cast<quint32>(info.processId));
+    }
+
     // 条件过滤：先按下拉条件筛掉不符合的项。
     const int mode = m_filterModeCombo->currentIndex();
     switch (mode)

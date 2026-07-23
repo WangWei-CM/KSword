@@ -7,6 +7,380 @@
 #include <QDir>
 
 using namespace network_dock_detail;
+
+namespace
+{
+    constexpr quint32 kInfiniteRouteLifetime = std::numeric_limits<quint32>::max();
+
+    QString routeAddressText(const SOCKADDR_INET& address)
+    {
+        wchar_t textBuffer[INET6_ADDRSTRLEN]{};
+        if (address.si_family == AF_INET &&
+            InetNtopW(AF_INET, &address.Ipv4.sin_addr, textBuffer, ARRAYSIZE(textBuffer)) != nullptr)
+        {
+            return QString::fromWCharArray(textBuffer);
+        }
+        if (address.si_family == AF_INET6 &&
+            InetNtopW(AF_INET6, &address.Ipv6.sin6_addr, textBuffer, ARRAYSIZE(textBuffer)) != nullptr)
+        {
+            return QString::fromWCharArray(textBuffer);
+        }
+        return QString();
+    }
+
+    bool routeAddressFromText(const int addressFamily, const QString& text, SOCKADDR_INET* addressOut)
+    {
+        if (addressOut == nullptr || (addressFamily != AF_INET && addressFamily != AF_INET6))
+        {
+            return false;
+        }
+        *addressOut = SOCKADDR_INET{};
+        addressOut->si_family = static_cast<ADDRESS_FAMILY>(addressFamily);
+        const QString normalizedText = text.trimmed();
+        if (normalizedText.isEmpty())
+        {
+            return true;
+        }
+        const std::wstring wideText = normalizedText.toStdWString();
+        if (addressFamily == AF_INET)
+        {
+            return InetPtonW(AF_INET, wideText.c_str(), &addressOut->Ipv4.sin_addr) == 1;
+        }
+        return InetPtonW(AF_INET6, wideText.c_str(), &addressOut->Ipv6.sin6_addr) == 1;
+    }
+
+    QString routeInterfaceName(const quint32 interfaceIndex)
+    {
+        MIB_IF_ROW2 interfaceRow{};
+        interfaceRow.InterfaceIndex = interfaceIndex;
+        if (GetIfEntry2(&interfaceRow) == NO_ERROR)
+        {
+            const QString alias = QString::fromWCharArray(interfaceRow.Alias).trimmed();
+            if (!alias.isEmpty())
+            {
+                return alias;
+            }
+            const QString description = QString::fromWCharArray(interfaceRow.Description).trimmed();
+            if (!description.isEmpty())
+            {
+                return description;
+            }
+        }
+        return QStringLiteral("ifIndex %1").arg(interfaceIndex);
+    }
+
+    QString routeProtocolText(const quint32 protocol)
+    {
+        switch (protocol)
+        {
+        case MIB_IPPROTO_LOCAL: return QStringLiteral("本地");
+        case MIB_IPPROTO_NETMGMT: return QStringLiteral("手动");
+        case MIB_IPPROTO_NT_STATIC: return QStringLiteral("NT 静态");
+        case MIB_IPPROTO_NT_AUTOSTATIC: return QStringLiteral("NT 自动静态");
+        default: return QStringLiteral("协议 %1").arg(protocol);
+        }
+    }
+
+    QString routeOriginText(const quint32 origin)
+    {
+        switch (static_cast<NL_ROUTE_ORIGIN>(origin))
+        {
+        case NlroManual: return QStringLiteral("手动");
+        case NlroWellKnown: return QStringLiteral("系统");
+        case NlroDHCP: return QStringLiteral("DHCP");
+        case NlroRouterAdvertisement: return QStringLiteral("路由通告");
+        case Nlro6to4: return QStringLiteral("6to4");
+        default: return QStringLiteral("来源 %1").arg(origin);
+        }
+    }
+
+    QString routeLifetimeText(const quint32 lifetime)
+    {
+        return lifetime == kInfiniteRouteLifetime ? QStringLiteral("无限") : QString::number(lifetime);
+    }
+
+    bool parseRouteLifetime(const QString& text, quint32* lifetimeOut)
+    {
+        if (lifetimeOut == nullptr)
+        {
+            return false;
+        }
+        const QString normalizedText = text.trimmed();
+        if (normalizedText.compare(QStringLiteral("infinite"), Qt::CaseInsensitive) == 0 ||
+            normalizedText == QStringLiteral("无限"))
+        {
+            *lifetimeOut = kInfiniteRouteLifetime;
+            return true;
+        }
+        bool parseOk = false;
+        const quint32 lifetime = normalizedText.toUInt(&parseOk, 10);
+        if (!parseOk)
+        {
+            return false;
+        }
+        *lifetimeOut = lifetime;
+        return true;
+    }
+
+    bool routeRecordToNativeRow(
+        const NetworkDock::RouteRecord& record,
+        MIB_IPFORWARD_ROW2* rowOut,
+        QString* errorTextOut)
+    {
+        if (rowOut == nullptr || (record.addressFamily != AF_INET && record.addressFamily != AF_INET6) ||
+            record.interfaceIndex == 0U || record.prefixLength < 0 ||
+            record.prefixLength > (record.addressFamily == AF_INET ? 32 : 128))
+        {
+            if (errorTextOut != nullptr)
+            {
+                *errorTextOut = QStringLiteral("地址族、前缀长度或接口索引无效。");
+            }
+            return false;
+        }
+
+        if (record.destinationAddress.trimmed().isEmpty())
+        {
+            if (errorTextOut != nullptr)
+            {
+                *errorTextOut = QStringLiteral("目的网络或下一跳地址格式不正确。");
+            }
+            return false;
+        }
+
+        SOCKADDR_INET destination{};
+        SOCKADDR_INET nextHop{};
+        if (!routeAddressFromText(record.addressFamily, record.destinationAddress, &destination) ||
+            !routeAddressFromText(record.addressFamily, record.nextHopAddress, &nextHop))
+        {
+            if (errorTextOut != nullptr)
+            {
+                *errorTextOut = QStringLiteral("目的网络或下一跳地址格式不正确。");
+            }
+            return false;
+        }
+
+        InitializeIpForwardEntry(rowOut);
+        rowOut->InterfaceIndex = record.interfaceIndex;
+        const DWORD luidStatus = ConvertInterfaceIndexToLuid(record.interfaceIndex, &rowOut->InterfaceLuid);
+        if (luidStatus != NO_ERROR)
+        {
+            if (errorTextOut != nullptr)
+            {
+                *errorTextOut = QStringLiteral("接口索引 %1 无法转换为 LUID，错误码=%2。")
+                    .arg(record.interfaceIndex).arg(luidStatus);
+            }
+            return false;
+        }
+        rowOut->DestinationPrefix.Prefix = destination;
+        rowOut->DestinationPrefix.PrefixLength = static_cast<UINT8>(record.prefixLength);
+        rowOut->NextHop = nextHop;
+        rowOut->SitePrefixLength = record.sitePrefixLength;
+        rowOut->Metric = record.metric;
+        rowOut->Protocol = static_cast<NL_ROUTE_PROTOCOL>(record.protocol == 0U ? MIB_IPPROTO_NETMGMT : record.protocol);
+        rowOut->Origin = static_cast<NL_ROUTE_ORIGIN>(record.origin == 0U ? NlroManual : record.origin);
+        rowOut->Publish = record.publish;
+        rowOut->Immortal = record.immortal;
+        rowOut->ValidLifetime = record.validLifetime;
+        rowOut->PreferredLifetime = record.preferredLifetime;
+        return true;
+    }
+
+    NetworkDock::RouteRecord routeRecordFromNativeRow(const MIB_IPFORWARD_ROW2& row)
+    {
+        NetworkDock::RouteRecord record;
+        record.addressFamily = row.DestinationPrefix.Prefix.si_family;
+        record.destinationAddress = routeAddressText(row.DestinationPrefix.Prefix);
+        record.prefixLength = row.DestinationPrefix.PrefixLength;
+        record.nextHopAddress = routeAddressText(row.NextHop);
+        record.interfaceIndex = row.InterfaceIndex;
+        record.interfaceName = routeInterfaceName(row.InterfaceIndex);
+        record.metric = row.Metric;
+        record.protocol = static_cast<quint32>(row.Protocol);
+        record.origin = static_cast<quint32>(row.Origin);
+        record.publish = row.Publish != FALSE;
+        record.immortal = row.Immortal != FALSE;
+        record.age = row.Age;
+        record.validLifetime = row.ValidLifetime;
+        record.preferredLifetime = row.PreferredLifetime;
+        record.sitePrefixLength = row.SitePrefixLength;
+        return record;
+    }
+
+    bool sameRouteIdentity(const NetworkDock::RouteRecord& left, const NetworkDock::RouteRecord& right)
+    {
+        return left.addressFamily == right.addressFamily &&
+            left.destinationAddress.compare(right.destinationAddress, Qt::CaseInsensitive) == 0 &&
+            left.prefixLength == right.prefixLength &&
+            left.nextHopAddress.compare(right.nextHopAddress, Qt::CaseInsensitive) == 0 &&
+            left.interfaceIndex == right.interfaceIndex;
+    }
+
+    bool isHighRiskRoute(const NetworkDock::RouteRecord& record)
+    {
+        return record.prefixLength == 0 ||
+            record.origin != static_cast<quint32>(NlroManual) ||
+            record.protocol == static_cast<quint32>(MIB_IPPROTO_LOCAL);
+    }
+
+    QString routeSummaryText(const NetworkDock::RouteRecord& record)
+    {
+        return QStringLiteral("%1/%2\n下一跳：%3\n接口：%4 (%5)\nMetric：%6\n协议：%7\n来源：%8")
+            .arg(record.destinationAddress)
+            .arg(record.prefixLength)
+            .arg(record.nextHopAddress.isEmpty() ? QStringLiteral("On-link") : record.nextHopAddress)
+            .arg(record.interfaceName)
+            .arg(record.interfaceIndex)
+            .arg(record.metric)
+            .arg(routeProtocolText(record.protocol))
+            .arg(routeOriginText(record.origin));
+    }
+
+    bool runNetshRouteCommand(
+        const QString& verb,
+        const NetworkDock::RouteRecord& record,
+        QString* errorTextOut)
+    {
+        const QString familyToken = record.addressFamily == AF_INET ? QStringLiteral("ipv4") : QStringLiteral("ipv6");
+        QProcess process;
+        process.setProgram(QStringLiteral("netsh.exe"));
+        process.setProcessChannelMode(QProcess::MergedChannels);
+        QStringList arguments{
+            QStringLiteral("interface"), familyToken, verb,
+            QStringLiteral("prefix=%1/%2").arg(record.destinationAddress).arg(record.prefixLength),
+            QStringLiteral("interface=%1").arg(record.interfaceIndex)
+        };
+        if (!record.nextHopAddress.trimmed().isEmpty())
+        {
+            arguments.push_back(QStringLiteral("nexthop=%1").arg(record.nextHopAddress));
+        }
+        if (verb != QStringLiteral("delete"))
+        {
+            arguments.push_back(QStringLiteral("metric=%1").arg(record.metric));
+            arguments.push_back(QStringLiteral("publish=%1").arg(record.publish ? QStringLiteral("yes") : QStringLiteral("no")));
+            arguments.push_back(QStringLiteral("validlifetime=%1").arg(routeLifetimeText(record.validLifetime).replace(QStringLiteral("无限"), QStringLiteral("infinite"))));
+            arguments.push_back(QStringLiteral("preferredlifetime=%1").arg(routeLifetimeText(record.preferredLifetime).replace(QStringLiteral("无限"), QStringLiteral("infinite"))));
+        }
+        arguments.push_back(QStringLiteral("store=persistent"));
+        process.setArguments(arguments);
+        process.start();
+        if (!process.waitForStarted(2000) || !process.waitForFinished(8000) ||
+            process.exitStatus() != QProcess::NormalExit || process.exitCode() != 0)
+        {
+            if (errorTextOut != nullptr)
+            {
+                const QString output = QString::fromLocal8Bit(process.readAllStandardOutput()).trimmed();
+                *errorTextOut = QStringLiteral("netsh %1 失败：%2")
+                    .arg(verb, output.isEmpty()
+                        ? (process.error() == QProcess::UnknownError
+                            ? QStringLiteral("退出码=%1").arg(process.exitCode())
+                            : process.errorString())
+                        : output);
+            }
+            return false;
+        }
+        return true;
+    }
+
+    bool editRouteRecordDialog(
+        QWidget* parent,
+        NetworkDock::RouteRecord* recordInOut,
+        bool* persistentOut,
+        const bool editing)
+    {
+        if (recordInOut == nullptr || persistentOut == nullptr)
+        {
+            return false;
+        }
+        QDialog dialog(parent);
+        dialog.setWindowTitle(editing ? QStringLiteral("编辑路由") : QStringLiteral("新增路由"));
+        QVBoxLayout* rootLayout = new QVBoxLayout(&dialog);
+        QFormLayout* formLayout = new QFormLayout();
+        QComboBox* familyCombo = new QComboBox(&dialog);
+        familyCombo->addItem(QStringLiteral("IPv4"), AF_INET);
+        familyCombo->addItem(QStringLiteral("IPv6"), AF_INET6);
+        familyCombo->setCurrentIndex(recordInOut->addressFamily == AF_INET6 ? 1 : 0);
+        QLineEdit* destinationEdit = new QLineEdit(recordInOut->destinationAddress, &dialog);
+        QSpinBox* prefixSpin = new QSpinBox(&dialog);
+        prefixSpin->setRange(0, recordInOut->addressFamily == AF_INET6 ? 128 : 32);
+        prefixSpin->setValue(recordInOut->prefixLength);
+        QLineEdit* nextHopEdit = new QLineEdit(recordInOut->nextHopAddress, &dialog);
+        QComboBox* interfaceCombo = new QComboBox(&dialog);
+        PMIB_IF_TABLE2 interfaceTable = nullptr;
+        if (GetIfTable2(&interfaceTable) == NO_ERROR && interfaceTable != nullptr)
+        {
+            for (ULONG index = 0; index < interfaceTable->NumEntries; ++index)
+            {
+                const MIB_IF_ROW2& interfaceRow = interfaceTable->Table[index];
+                const QString alias = QString::fromWCharArray(interfaceRow.Alias).trimmed();
+                interfaceCombo->addItem(
+                    QStringLiteral("%1 (%2)").arg(alias.isEmpty() ? routeInterfaceName(interfaceRow.InterfaceIndex) : alias).arg(interfaceRow.InterfaceIndex),
+                    static_cast<quint32>(interfaceRow.InterfaceIndex));
+            }
+            FreeMibTable(interfaceTable);
+        }
+        const int interfaceIndex = interfaceCombo->findData(recordInOut->interfaceIndex);
+        if (interfaceIndex >= 0)
+        {
+            interfaceCombo->setCurrentIndex(interfaceIndex);
+        }
+        QSpinBox* metricSpin = new QSpinBox(&dialog);
+        metricSpin->setRange(0, std::numeric_limits<int>::max());
+        metricSpin->setValue(static_cast<int>(std::min<quint32>(recordInOut->metric, std::numeric_limits<int>::max())));
+        QLineEdit* validLifetimeEdit = new QLineEdit(routeLifetimeText(recordInOut->validLifetime), &dialog);
+        QLineEdit* preferredLifetimeEdit = new QLineEdit(routeLifetimeText(recordInOut->preferredLifetime), &dialog);
+        QCheckBox* publishCheck = new QCheckBox(QStringLiteral("发布路由"), &dialog);
+        publishCheck->setChecked(recordInOut->publish);
+        QCheckBox* immortalCheck = new QCheckBox(QStringLiteral("Immortal"), &dialog);
+        immortalCheck->setChecked(recordInOut->immortal);
+        QCheckBox* persistentCheck = new QCheckBox(QStringLiteral("同步写入持久路由"), &dialog);
+        persistentCheck->setChecked(false);
+        persistentCheck->setToolTip(QStringLiteral("默认仅写入活动路由表；勾选后同时调用 Windows netsh 写入持久存储。"));
+        formLayout->addRow(QStringLiteral("地址族"), familyCombo);
+        formLayout->addRow(QStringLiteral("目的网络"), destinationEdit);
+        formLayout->addRow(QStringLiteral("前缀长度"), prefixSpin);
+        formLayout->addRow(QStringLiteral("下一跳（空=On-link）"), nextHopEdit);
+        formLayout->addRow(QStringLiteral("接口"), interfaceCombo);
+        formLayout->addRow(QStringLiteral("Metric"), metricSpin);
+        formLayout->addRow(QStringLiteral("有效期（秒或 infinite）"), validLifetimeEdit);
+        formLayout->addRow(QStringLiteral("首选期（秒或 infinite）"), preferredLifetimeEdit);
+        formLayout->addRow(publishCheck);
+        formLayout->addRow(immortalCheck);
+        formLayout->addRow(persistentCheck);
+        rootLayout->addLayout(formLayout);
+        QDialogButtonBox* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+        rootLayout->addWidget(buttons);
+        QObject::connect(familyCombo, qOverload<int>(&QComboBox::currentIndexChanged), &dialog, [familyCombo, prefixSpin](int) {
+            prefixSpin->setMaximum(familyCombo->currentData().toInt() == AF_INET6 ? 128 : 32);
+        });
+        QObject::connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+        QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+        if (dialog.exec() != QDialog::Accepted)
+        {
+            return false;
+        }
+        quint32 validLifetime = 0;
+        quint32 preferredLifetime = 0;
+        if (!parseRouteLifetime(validLifetimeEdit->text(), &validLifetime) ||
+            !parseRouteLifetime(preferredLifetimeEdit->text(), &preferredLifetime))
+        {
+            QMessageBox::warning(parent, QStringLiteral("路由"), QStringLiteral("有效期和首选期必须是秒数或 infinite。"));
+            return false;
+        }
+        recordInOut->addressFamily = familyCombo->currentData().toInt();
+        recordInOut->destinationAddress = destinationEdit->text().trimmed();
+        recordInOut->prefixLength = prefixSpin->value();
+        recordInOut->nextHopAddress = nextHopEdit->text().trimmed();
+        recordInOut->interfaceIndex = interfaceCombo->currentData().toUInt();
+        recordInOut->interfaceName = interfaceCombo->currentText();
+        recordInOut->metric = static_cast<quint32>(metricSpin->value());
+        recordInOut->publish = publishCheck->isChecked();
+        recordInOut->immortal = immortalCheck->isChecked();
+        recordInOut->validLifetime = validLifetime;
+        recordInOut->preferredLifetime = preferredLifetime;
+        *persistentOut = persistentCheck->isChecked();
+        return true;
+    }
+}
 // ============================================================
 // NetworkDock.NetworkDiagnostics.cpp
 // 作用：
@@ -15,6 +389,280 @@ using namespace network_dock_detail;
 // - 存活主机发现（ICMP 扫描）。
 // - hosts 文件编辑。
 // ============================================================
+
+void NetworkDock::initializeRouteTableTab()
+{
+    m_routeTablePage = new QWidget(this);
+    m_routeTableLayout = new QVBoxLayout(m_routeTablePage);
+    m_routeTableLayout->setContentsMargins(6, 6, 6, 6);
+    m_routeTableLayout->setSpacing(6);
+    m_routeTableControlLayout = new QHBoxLayout();
+    m_routeTableControlLayout->setSpacing(6);
+
+    m_refreshRouteButton = new QPushButton(m_routeTablePage);
+    m_refreshRouteButton->setIcon(QIcon(":/Icon/process_refresh.svg"));
+    m_refreshRouteButton->setToolTip(QStringLiteral("刷新 IPv4/IPv6 路由表"));
+    m_addRouteButton = new QPushButton(m_routeTablePage);
+    m_addRouteButton->setIcon(QIcon(":/Icon/process_start.svg"));
+    m_addRouteButton->setToolTip(QStringLiteral("新增路由，默认仅在本次启动有效"));
+    m_editRouteButton = new QPushButton(m_routeTablePage);
+    m_editRouteButton->setIcon(QIcon(":/Icon/process_details.svg"));
+    m_editRouteButton->setToolTip(QStringLiteral("编辑选中路由"));
+    m_removeRouteButton = new QPushButton(m_routeTablePage);
+    m_removeRouteButton->setIcon(QIcon(":/Icon/process_uncritical.svg"));
+    m_removeRouteButton->setToolTip(QStringLiteral("删除选中活动路由及其同名持久副本"));
+    m_routeStatusLabel = new QLabel(QStringLiteral("状态：等待刷新"), m_routeTablePage);
+    m_routeStatusLabel->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+    m_routeTableControlLayout->addWidget(m_refreshRouteButton);
+    m_routeTableControlLayout->addWidget(m_addRouteButton);
+    m_routeTableControlLayout->addWidget(m_editRouteButton);
+    m_routeTableControlLayout->addWidget(m_removeRouteButton);
+    m_routeTableControlLayout->addWidget(m_routeStatusLabel, 1);
+    m_routeTableLayout->addLayout(m_routeTableControlLayout);
+
+    m_routeTable = new ks::ui::VisibleTableWidget(m_routeTablePage);
+    m_routeTable->setColumnCount(13);
+    m_routeTable->setHorizontalHeaderLabels({
+        QStringLiteral("地址族"), QStringLiteral("目的网络"), QStringLiteral("下一跳"),
+        QStringLiteral("接口"), QStringLiteral("Metric"), QStringLiteral("协议"),
+        QStringLiteral("来源"), QStringLiteral("发布"), QStringLiteral("Immortal"),
+        QStringLiteral("Age"), QStringLiteral("有效期"), QStringLiteral("首选期"),
+        QStringLiteral("站点前缀")
+        });
+    m_routeTable->setSelectionBehavior(QAbstractItemView::SelectRows);
+    m_routeTable->setSelectionMode(QAbstractItemView::SingleSelection);
+    m_routeTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    m_routeTable->verticalHeader()->setVisible(false);
+    m_routeTable->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
+    m_routeTable->horizontalHeader()->setStretchLastSection(true);
+    installCopyCurrentRowMenu(m_routeTable);
+    m_routeTableLayout->addWidget(m_routeTable, 1);
+    m_sideTabWidget->addTab(m_routeTablePage, QIcon(":/Icon/process_tree.svg"), QStringLiteral("路由表"));
+
+    connect(m_refreshRouteButton, &QPushButton::clicked, this, [this]() { refreshRouteTable(); });
+    connect(m_addRouteButton, &QPushButton::clicked, this, [this]() { addRouteEntry(); });
+    connect(m_editRouteButton, &QPushButton::clicked, this, [this]() { editSelectedRouteEntry(); });
+    connect(m_removeRouteButton, &QPushButton::clicked, this, [this]() { deleteSelectedRouteEntry(); });
+    refreshRouteTable();
+}
+
+void NetworkDock::refreshRouteTable()
+{
+    if (m_routeTable == nullptr)
+    {
+        return;
+    }
+    PMIB_IPFORWARD_TABLE2 routeTable = nullptr;
+    const DWORD queryStatus = GetIpForwardTable2(AF_UNSPEC, &routeTable);
+    if (queryStatus != NO_ERROR || routeTable == nullptr)
+    {
+        if (m_routeStatusLabel != nullptr)
+        {
+            m_routeStatusLabel->setText(QStringLiteral("状态：读取路由表失败，错误码=%1").arg(queryStatus));
+        }
+        return;
+    }
+
+    m_routeRecordCache.clear();
+    m_routeRecordCache.reserve(routeTable->NumEntries);
+    m_routeTable->setUpdatesEnabled(false);
+    m_routeTable->setRowCount(0);
+    for (ULONG index = 0; index < routeTable->NumEntries; ++index)
+    {
+        const RouteRecord record = routeRecordFromNativeRow(routeTable->Table[index]);
+        if (record.addressFamily != AF_INET && record.addressFamily != AF_INET6)
+        {
+            continue;
+        }
+        const int cacheIndex = static_cast<int>(m_routeRecordCache.size());
+        m_routeRecordCache.push_back(record);
+        const int row = m_routeTable->rowCount();
+        m_routeTable->insertRow(row);
+        const QStringList fields{
+            record.addressFamily == AF_INET ? QStringLiteral("IPv4") : QStringLiteral("IPv6"),
+            QStringLiteral("%1/%2").arg(record.destinationAddress).arg(record.prefixLength),
+            record.nextHopAddress.isEmpty() ? QStringLiteral("On-link") : record.nextHopAddress,
+            QStringLiteral("%1 (%2)").arg(record.interfaceName).arg(record.interfaceIndex),
+            QString::number(record.metric), routeProtocolText(record.protocol), routeOriginText(record.origin),
+            record.publish ? QStringLiteral("是") : QStringLiteral("否"),
+            record.immortal ? QStringLiteral("是") : QStringLiteral("否"),
+            QString::number(record.age), routeLifetimeText(record.validLifetime),
+            routeLifetimeText(record.preferredLifetime), QString::number(record.sitePrefixLength)
+        };
+        for (int column = 0; column < fields.size(); ++column)
+        {
+            QTableWidgetItem* item = new QTableWidgetItem(fields.at(column));
+            item->setData(Qt::UserRole, cacheIndex);
+            m_routeTable->setItem(row, column, item);
+        }
+    }
+    m_routeTable->setUpdatesEnabled(true);
+    FreeMibTable(routeTable);
+    if (m_routeStatusLabel != nullptr)
+    {
+        m_routeStatusLabel->setText(QStringLiteral("状态：路由项 %1").arg(m_routeRecordCache.size()));
+    }
+}
+
+void NetworkDock::addRouteEntry()
+{
+    RouteRecord record;
+    record.addressFamily = AF_INET;
+    record.prefixLength = 24;
+    record.protocol = MIB_IPPROTO_NETMGMT;
+    record.origin = NlroManual;
+    record.validLifetime = kInfiniteRouteLifetime;
+    record.preferredLifetime = kInfiniteRouteLifetime;
+    bool persistent = false;
+    if (!editRouteRecordDialog(this, &record, &persistent, false))
+    {
+        return;
+    }
+    MIB_IPFORWARD_ROW2 nativeRow{};
+    QString errorText;
+    if (!routeRecordToNativeRow(record, &nativeRow, &errorText))
+    {
+        QMessageBox::warning(this, QStringLiteral("新增路由"), errorText);
+        return;
+    }
+    if (isHighRiskRoute(record) && QMessageBox::question(
+        this, QStringLiteral("新增高风险路由"),
+        QStringLiteral("将新增以下路由：\n%1\n\n该路由可能影响系统网络连接，是否继续？").arg(routeSummaryText(record)),
+        QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes)
+    {
+        return;
+    }
+    const DWORD createStatus = CreateIpForwardEntry2(&nativeRow);
+    if (createStatus != NO_ERROR)
+    {
+        QMessageBox::warning(this, QStringLiteral("新增路由"), QStringLiteral("CreateIpForwardEntry2 失败，错误码=%1").arg(createStatus));
+        return;
+    }
+    if (persistent && !runNetshRouteCommand(QStringLiteral("add"), record, &errorText))
+    {
+        (void)DeleteIpForwardEntry2(&nativeRow);
+        QMessageBox::warning(this, QStringLiteral("新增路由"), QStringLiteral("持久化写入失败，已回滚活动路由。\n%1").arg(errorText));
+        return;
+    }
+    refreshRouteTable();
+}
+
+void NetworkDock::editSelectedRouteEntry()
+{
+    if (m_routeTable == nullptr || m_routeTable->currentRow() < 0)
+    {
+        QMessageBox::information(this, QStringLiteral("编辑路由"), QStringLiteral("请先选择一条路由。"));
+        return;
+    }
+    QTableWidgetItem* sourceItem = m_routeTable->item(m_routeTable->currentRow(), 0);
+    const int cacheIndex = sourceItem != nullptr ? sourceItem->data(Qt::UserRole).toInt() : -1;
+    if (cacheIndex < 0 || cacheIndex >= static_cast<int>(m_routeRecordCache.size()))
+    {
+        return;
+    }
+    const RouteRecord original = m_routeRecordCache.at(static_cast<std::size_t>(cacheIndex));
+    RouteRecord target = original;
+    bool persistent = false;
+    if (!editRouteRecordDialog(this, &target, &persistent, true))
+    {
+        return;
+    }
+    if (isHighRiskRoute(original) || isHighRiskRoute(target))
+    {
+        const QString confirmationText = QStringLiteral("原路由：\n%1\n\n修改后：\n%2\n\n是否继续？")
+            .arg(routeSummaryText(original), routeSummaryText(target));
+        if (QMessageBox::question(this, QStringLiteral("修改高风险路由"), confirmationText,
+            QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes)
+        {
+            return;
+        }
+    }
+    MIB_IPFORWARD_ROW2 originalRow{};
+    MIB_IPFORWARD_ROW2 targetRow{};
+    QString errorText;
+    if (!routeRecordToNativeRow(original, &originalRow, &errorText) || !routeRecordToNativeRow(target, &targetRow, &errorText))
+    {
+        QMessageBox::warning(this, QStringLiteral("编辑路由"), errorText);
+        return;
+    }
+    DWORD operationStatus = NO_ERROR;
+    if (sameRouteIdentity(original, target))
+    {
+        operationStatus = SetIpForwardEntry2(&targetRow);
+    }
+    else
+    {
+        operationStatus = CreateIpForwardEntry2(&targetRow);
+        if (operationStatus == NO_ERROR)
+        {
+            operationStatus = DeleteIpForwardEntry2(&originalRow);
+        }
+    }
+    if (operationStatus != NO_ERROR)
+    {
+        QMessageBox::warning(this, QStringLiteral("编辑路由"), QStringLiteral("更新活动路由失败，错误码=%1").arg(operationStatus));
+        return;
+    }
+    if (persistent)
+    {
+        if (!sameRouteIdentity(original, target))
+        {
+            (void)runNetshRouteCommand(QStringLiteral("delete"), original, nullptr);
+            if (!runNetshRouteCommand(QStringLiteral("add"), target, &errorText))
+            {
+                QMessageBox::warning(this, QStringLiteral("编辑路由"), QStringLiteral("活动路由已更新，但持久化写入失败：%1").arg(errorText));
+            }
+        }
+        else if (!runNetshRouteCommand(QStringLiteral("set"), target, &errorText) &&
+                 !runNetshRouteCommand(QStringLiteral("add"), target, &errorText))
+        {
+            QMessageBox::warning(this, QStringLiteral("编辑路由"), QStringLiteral("活动路由已更新，但持久化写入失败：%1").arg(errorText));
+        }
+    }
+    else
+    {
+        (void)runNetshRouteCommand(QStringLiteral("delete"), original, nullptr);
+    }
+    refreshRouteTable();
+}
+
+void NetworkDock::deleteSelectedRouteEntry()
+{
+    if (m_routeTable == nullptr || m_routeTable->currentRow() < 0)
+    {
+        QMessageBox::information(this, QStringLiteral("删除路由"), QStringLiteral("请先选择一条路由。"));
+        return;
+    }
+    QTableWidgetItem* sourceItem = m_routeTable->item(m_routeTable->currentRow(), 0);
+    const int cacheIndex = sourceItem != nullptr ? sourceItem->data(Qt::UserRole).toInt() : -1;
+    if (cacheIndex < 0 || cacheIndex >= static_cast<int>(m_routeRecordCache.size()))
+    {
+        return;
+    }
+    const RouteRecord record = m_routeRecordCache.at(static_cast<std::size_t>(cacheIndex));
+    if (isHighRiskRoute(record) && QMessageBox::question(
+        this, QStringLiteral("删除高风险路由"),
+        QStringLiteral("将删除活动路由及同名持久副本：\n%1\n\n是否继续？").arg(routeSummaryText(record)),
+        QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes)
+    {
+        return;
+    }
+    MIB_IPFORWARD_ROW2 nativeRow{};
+    QString errorText;
+    if (!routeRecordToNativeRow(record, &nativeRow, &errorText))
+    {
+        QMessageBox::warning(this, QStringLiteral("删除路由"), errorText);
+        return;
+    }
+    const DWORD deleteStatus = DeleteIpForwardEntry2(&nativeRow);
+    if (deleteStatus != NO_ERROR)
+    {
+        QMessageBox::warning(this, QStringLiteral("删除路由"), QStringLiteral("DeleteIpForwardEntry2 失败，错误码=%1").arg(deleteStatus));
+        return;
+    }
+    (void)runNetshRouteCommand(QStringLiteral("delete"), record, nullptr);
+    refreshRouteTable();
+}
 
 void NetworkDock::initializeArpCacheTab()
 {

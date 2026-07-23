@@ -35,6 +35,7 @@ void NetworkDock::initializeUi()
     initializeManualRequestTab();
     initializeMultiThreadDownloadTab();
     initializeHttpsAnalyzeTab();
+    initializeRouteTableTab();
     initializeArpCacheTab();
     initializeDnsCacheTab();
     initializeAliveHostScanTab();
@@ -334,6 +335,11 @@ void NetworkDock::initializeConnectionManageTab()
     m_terminateTcpButton->setIcon(QIcon(":/Icon/process_uncritical.svg"));
     m_terminateTcpButton->setToolTip(QStringLiteral("终止当前选中的 TCP 连接（DELETE_TCB）"));
 
+    m_clearConnectionPidFilterButton = new QPushButton(m_connectionManagePage);
+    m_clearConnectionPidFilterButton->setIcon(QIcon(":/Icon/log_clear.svg"));
+    m_clearConnectionPidFilterButton->setToolTip(QStringLiteral("清除进程页跳转带入的 PID 筛选"));
+    m_clearConnectionPidFilterButton->setEnabled(false);
+
     m_connectionStatusLabel = new QLabel(QStringLiteral("状态：等待刷新"), m_connectionManagePage);
     m_connectionStatusLabel->setWordWrap(true);
     m_connectionStatusLabel->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
@@ -341,6 +347,7 @@ void NetworkDock::initializeConnectionManageTab()
     m_connectionControlLayout->addWidget(m_refreshConnectionButton);
     m_connectionControlLayout->addWidget(m_autoRefreshConnectionButton);
     m_connectionControlLayout->addWidget(m_terminateTcpButton);
+    m_connectionControlLayout->addWidget(m_clearConnectionPidFilterButton);
     m_connectionControlLayout->addWidget(m_connectionStatusLabel, 1);
     m_connectionManageLayout->addLayout(m_connectionControlLayout);
 
