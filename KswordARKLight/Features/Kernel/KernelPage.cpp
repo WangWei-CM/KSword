@@ -75,12 +75,18 @@ constexpr int kIdIntegrityIdtVectorsEdit = 51044;
 constexpr int kIdIntegrityIdtVectorsSpin = 51045;
 constexpr UINT kMsgKernelQueryCompleted = WM_APP + 605;
 constexpr UINT kMsgKernelActionCompleted = WM_APP + 606;
+constexpr UINT kMsgCallbackEventReceived = WM_APP + 607;
+constexpr UINT kMsgCallbackAnswerCompleted = WM_APP + 608;
 constexpr int kIdCallbackGlobalEnabled = 51047;
 constexpr int kIdCallbackFileMonitorFsctlOnly = 51048;
 constexpr int kIdDeviceDriverDirectoryCombo = 51049;
 constexpr int kIdDeviceDriverTypeCombo = 51050;
 constexpr int kIdBaseNamedScopeCombo = 51051;
 constexpr int kIdBaseNamedTypeCombo = 51052;
+constexpr int kIdCallbackStartReceiver = 51053;
+constexpr int kIdCallbackStopReceiver = 51054;
+constexpr int kIdCallbackAllowEvent = 51055;
+constexpr int kIdCallbackDenyEvent = 51056;
 constexpr UINT_PTR kFilterEditSubclassId = 51046;
 constexpr UINT_PTR kMenuRefreshCurrentFeature = 51100;
 constexpr UINT_PTR kMenuCopyCell = 51101;
@@ -241,6 +247,27 @@ bool HexToUInt64(const std::wstring& text, std::uint64_t& valueOut) {
     }
     valueOut = static_cast<std::uint64_t>(value);
     return true;
+}
+
+// CallbackGuidText formats the opaque callback event identifier for display and
+// for the strongly validated facade action. It does not reinterpret the bytes
+// as a Windows GUID, preserving the driver protocol's original byte order.
+std::wstring CallbackGuidText(const KSWORD_ARK_GUID128& guid) {
+    std::wostringstream stream;
+    stream << std::hex << std::uppercase << std::setfill(L'0');
+    for (const unsigned char value : guid.bytes) {
+        stream << std::setw(2) << static_cast<unsigned int>(value);
+    }
+    return stream.str();
+}
+
+// FixedWideText converts a fixed shared-protocol wchar buffer to a bounded UI
+// string. Input may have no terminator after a malformed driver response; the
+// returned display text therefore never scans beyond the packet field.
+template <std::size_t Size>
+std::wstring FixedWideText(const wchar_t (&value)[Size]) {
+    const std::size_t length = std::find(value, value + Size, L'\0') - value;
+    return std::wstring(value, length);
 }
 
 std::wstring RowFieldByName(const std::vector<std::wstring>& row,
@@ -1542,6 +1569,8 @@ LRESULT KernelPage::HandleMessage(HWND hwnd, const UINT msg, const WPARAM wParam
     case WM_CREATE:
         queryTask_ = std::make_unique<Ksword::Ui::AsyncSnapshotTask<KernelOperationResult>>(hwnd, kMsgKernelQueryCompleted);
         actionTask_ = std::make_unique<Ksword::Ui::AsyncSnapshotTask<KernelOperationResult>>(hwnd, kMsgKernelActionCompleted);
+        callbackAnswerTask_ = std::make_unique<Ksword::Ui::AsyncSnapshotTask<KernelOperationResult>>(hwnd, kMsgCallbackAnswerCompleted);
+        callbackEventReceiver_ = std::make_unique<CallbackEventReceiver>(hwnd, kMsgCallbackEventReceived);
         CreateChildControls();
         PopulateTabs();
         Layout();
@@ -1556,6 +1585,19 @@ LRESULT KernelPage::HandleMessage(HWND hwnd, const UINT msg, const WPARAM wParam
         break;
     case kMsgKernelActionCompleted:
         if (actionTask_ && actionTask_->consume(hwnd, wParam, lParam)) {
+            return 0;
+        }
+        break;
+    case kMsgCallbackEventReceived:
+    {
+        std::unique_ptr<CallbackEventSnapshot> snapshot(reinterpret_cast<CallbackEventSnapshot*>(lParam));
+        if (snapshot && callbackEventReceiver_ && callbackEventReceiver_->accepts(snapshot->generation)) {
+            AcceptCallbackEvent(std::move(*snapshot));
+        }
+        return 0;
+    }
+    case kMsgCallbackAnswerCompleted:
+        if (callbackAnswerTask_ && callbackAnswerTask_->consume(hwnd, wParam, lParam)) {
             return 0;
         }
         break;
@@ -1788,6 +1830,22 @@ LRESULT KernelPage::HandleMessage(HWND hwnd, const UINT msg, const WPARAM wParam
         }
         if (LOWORD(wParam) == kIdCallbackExport && HIWORD(wParam) == BN_CLICKED) {
             OnCallbackExportConfig();
+            return 0;
+        }
+        if (LOWORD(wParam) == kIdCallbackStartReceiver && HIWORD(wParam) == BN_CLICKED) {
+            StartCallbackEventReceiver();
+            return 0;
+        }
+        if (LOWORD(wParam) == kIdCallbackStopReceiver && HIWORD(wParam) == BN_CLICKED) {
+            StopCallbackEventReceiver();
+            return 0;
+        }
+        if (LOWORD(wParam) == kIdCallbackAllowEvent && HIWORD(wParam) == BN_CLICKED) {
+            AnswerCurrentCallbackEvent(true);
+            return 0;
+        }
+        if (LOWORD(wParam) == kIdCallbackDenyEvent && HIWORD(wParam) == BN_CLICKED) {
+            AnswerCurrentCallbackEvent(false);
             return 0;
         }
         if (LOWORD(wParam) == kIdCallbackAddGroup && HIWORD(wParam) == BN_CLICKED) {
@@ -2387,11 +2445,17 @@ LRESULT KernelPage::HandleMessage(HWND hwnd, const UINT msg, const WPARAM wParam
         return 0;
     }
     case WM_NCDESTROY:
+        if (callbackEventReceiver_) {
+            callbackEventReceiver_->Shutdown();
+        }
         if (queryTask_) {
             queryTask_->cancel();
         }
         if (actionTask_) {
             actionTask_->cancel();
+        }
+        if (callbackAnswerTask_) {
+            callbackAnswerTask_->cancel();
         }
         ::SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
         hwnd_ = nullptr;
@@ -2769,6 +2833,10 @@ void KernelPage::CreateChildControls() {
     callbackReloadButton_ = Ksword::Ui::CreateButton(hwnd_, kIdCallbackReload, L"重新加载驱动状态", 0, 0, 0, 0);
     callbackImportButton_ = Ksword::Ui::CreateButton(hwnd_, kIdCallbackImport, L"导入配置", 0, 0, 0, 0);
     callbackExportButton_ = Ksword::Ui::CreateButton(hwnd_, kIdCallbackExport, L"导出配置", 0, 0, 0, 0);
+    callbackStartReceiverButton_ = Ksword::Ui::CreateButton(hwnd_, kIdCallbackStartReceiver, L"接收待决策", 0, 0, 0, 0);
+    callbackStopReceiverButton_ = Ksword::Ui::CreateButton(hwnd_, kIdCallbackStopReceiver, L"停止接收", 0, 0, 0, 0);
+    callbackAllowEventButton_ = Ksword::Ui::CreateButton(hwnd_, kIdCallbackAllowEvent, L"允许当前", 0, 0, 0, 0);
+    callbackDenyEventButton_ = Ksword::Ui::CreateButton(hwnd_, kIdCallbackDenyEvent, L"拒绝当前", 0, 0, 0, 0);
     callbackStatusText_ = Ksword::Ui::CreateText(hwnd_, 0, L"状态：等待刷新", 0, 0, 0, 0);
     callbackGroupLabel_ = Ksword::Ui::CreateText(hwnd_, 0, L"规则组", 0, 0, 0, 0);
     callbackAddGroupButton_ = Ksword::Ui::CreateButton(hwnd_, kIdCallbackAddGroup, L"新增组", 0, 0, 0, 0);
@@ -2996,6 +3064,7 @@ void KernelPage::Layout() {
     };
     std::vector<HWND> callbackControls = {
         callbackGlobalEnabledCheck_, callbackApplyButton_, callbackReloadButton_, callbackImportButton_, callbackExportButton_,
+        callbackStartReceiverButton_, callbackStopReceiverButton_, callbackAllowEventButton_, callbackDenyEventButton_,
         callbackStatusText_, callbackGroupLabel_, callbackAddGroupButton_, callbackRemoveGroupButton_,
         callbackRenameGroupButton_, callbackMoveGroupUpButton_, callbackMoveGroupDownButton_, callbackGroupList_,
         callbackRuleLabel_, callbackAddRuleButton_, callbackRemoveRuleButton_, callbackMoveRuleUpButton_,
@@ -3883,6 +3952,10 @@ void KernelPage::Layout() {
         ::MoveWindow(callbackReloadButton_, toolbarX, panelTop, 126, toolbarHeight, TRUE); toolbarX += 130;
         ::MoveWindow(callbackImportButton_, toolbarX, panelTop, 72, toolbarHeight, TRUE); toolbarX += 76;
         ::MoveWindow(callbackExportButton_, toolbarX, panelTop, 72, toolbarHeight, TRUE); toolbarX += 76;
+        ::MoveWindow(callbackStartReceiverButton_, toolbarX, panelTop, 82, toolbarHeight, TRUE); toolbarX += 86;
+        ::MoveWindow(callbackStopReceiverButton_, toolbarX, panelTop, 68, toolbarHeight, TRUE); toolbarX += 72;
+        ::MoveWindow(callbackAllowEventButton_, toolbarX, panelTop, 68, toolbarHeight, TRUE); toolbarX += 72;
+        ::MoveWindow(callbackDenyEventButton_, toolbarX, panelTop, 68, toolbarHeight, TRUE); toolbarX += 72;
         ::MoveWindow(callbackStatusText_, toolbarX, panelTop + 3, std::max(0, width - toolbarX), 20, TRUE);
 
         const int statusTop = panelTop + toolbarHeight + compactGap;
@@ -9553,7 +9626,11 @@ void KernelPage::PopulateCallbackInterceptPanel() {
         eventLog = L"事件日志：等待决策、文件系统事件和用户决策将显示在这里。\r\n";
     }
     ::SetWindowTextW(callbackAppLogEdit_, appLog.c_str());
-    ::SetWindowTextW(callbackEventLogEdit_, eventLog.c_str());
+    if (!callbackPendingEvents_.empty() || (callbackEventReceiver_ && callbackEventReceiver_->running())) {
+        RefreshCallbackEventLog();
+    } else {
+        ::SetWindowTextW(callbackEventLogEdit_, eventLog.c_str());
+    }
 }
 
 void KernelPage::EnsureCallbackLocalModel() {
@@ -9632,6 +9709,164 @@ void KernelPage::AppendCallbackAppLog(const std::wstring& message) {
     log += L"\r\n";
     ::SetWindowTextW(callbackAppLogEdit_, log.c_str());
     ::SetWindowTextW(callbackStatusText_, message.c_str());
+}
+
+void KernelPage::StartCallbackEventReceiver() {
+    if (!callbackEventReceiver_) {
+        return;
+    }
+    if (callbackPendingEvents_.size() >= 64U) {
+        AppendCallbackAppLog(L"待决策队列已达到 64 条，为避免丢失事件，未继续接收。请先处理当前事件。");
+        RefreshCallbackEventLog();
+        return;
+    }
+    if (callbackEventReceiver_->Start()) {
+        AppendCallbackAppLog(L"已启动 Callback 待决策后台接收器。");
+    } else if (callbackEventReceiver_->running()) {
+        AppendCallbackAppLog(L"Callback 待决策后台接收器已在运行。");
+    } else if (callbackEventReceiver_->stopping()) {
+        AppendCallbackAppLog(L"Callback 待决策后台接收器正在停止，取消完成后可再次启动。");
+    } else {
+        AppendCallbackAppLog(L"无法启动 Callback 待决策后台接收器。");
+    }
+    RefreshCallbackEventLog();
+}
+
+void KernelPage::StopCallbackEventReceiver() {
+    if (callbackEventReceiver_ && callbackEventReceiver_->running()) {
+        callbackEventReceiver_->Stop();
+        AppendCallbackAppLog(L"已请求停止 Callback 待决策后台接收器，当前待决策事件仍可应答。");
+    }
+    RefreshCallbackEventLog();
+}
+
+void KernelPage::AcceptCallbackEvent(CallbackEventSnapshot snapshot) {
+    if (callbackPendingEvents_.size() >= 64U) {
+        StopCallbackEventReceiver();
+        AppendCallbackAppLog(L"待决策队列已满，已停止接收以保留现有事件。请处理当前事件后再继续接收。");
+        return;
+    }
+    const std::wstring guid = CallbackGuidText(snapshot.event.eventGuid);
+    callbackPendingEvents_.push_back(std::move(snapshot));
+    AppendCallbackAppLog(L"收到待决策 Callback 事件 " + guid + L"，等待显式允许或拒绝。");
+    if (callbackPendingEvents_.size() >= 64U) {
+        StopCallbackEventReceiver();
+    }
+    RefreshCallbackEventLog();
+}
+
+void KernelPage::AnswerCurrentCallbackEvent(const bool allow) {
+    if (callbackPendingEvents_.empty()) {
+        AppendCallbackAppLog(L"没有等待用户决策的 Callback 事件。");
+        return;
+    }
+    if (!callbackAnswerTask_ || callbackAnswerTask_->running()) {
+        AppendCallbackAppLog(L"上一条 Callback 决策仍在后台提交，请等待结果。");
+        return;
+    }
+
+    const CallbackEventSnapshot snapshot = callbackPendingEvents_.front();
+    const std::wstring guid = CallbackGuidText(snapshot.event.eventGuid);
+    const std::wstring target = FixedWideText(snapshot.event.targetPath);
+    const std::wstring prompt = std::wstring(allow ? L"允许" : L"拒绝") + L" 当前 Callback 事件？\n\n"
+        + L"事件: " + guid + L"\n"
+        + L"发起 PID: " + std::to_wstring(snapshot.event.originatingPid) + L"\n"
+        + L"目标: " + (target.empty() ? L"<不可用>" : target) + L"\n\n"
+        + L"此决定会立即发送给驱动，超时前不会自动替代为默认动作。";
+    if (::MessageBoxW(hwnd_, prompt.c_str(), allow ? L"确认允许 Callback 事件" : L"确认拒绝 Callback 事件",
+            MB_YESNO | MB_DEFBUTTON2 | MB_ICONWARNING) != IDYES) {
+        AppendCallbackAppLog(L"用户取消了 Callback 待决策应答。");
+        return;
+    }
+
+    KernelActionRequest request;
+    request.featureId = KernelFeatureId::CallbackIntercept;
+    request.actionId = KernelActionId::CallbackAnswerEvent;
+    request.rowFields = {
+        { L"EventGuid", guid },
+        { L"SourceSessionId", std::to_wstring(snapshot.event.sessionId) },
+        { L"Decision", allow ? L"Allow" : L"Deny" },
+    };
+    ::EnableWindow(callbackAllowEventButton_, FALSE);
+    ::EnableWindow(callbackDenyEventButton_, FALSE);
+    ::SetWindowTextW(callbackStatusText_, L"正在后台提交 Callback 待决策应答…");
+    callbackAnswerTask_->request(
+        [request] {
+            KernelFacade facade;
+            return facade.ExecuteAction(request);
+        },
+        [this, guid, allow](std::uint64_t, std::optional<KernelOperationResult>&& result, std::exception_ptr error) {
+            if (error || !result.has_value()) {
+                AppendCallbackAppLog(L"Callback 待决策应答后台任务异常结束，事件仍保留在队列。" );
+                RefreshCallbackEventLog();
+                return;
+            }
+            if (result->success) {
+                const auto found = std::find_if(callbackPendingEvents_.begin(), callbackPendingEvents_.end(),
+                    [&guid](const CallbackEventSnapshot& item) { return CallbackGuidText(item.event.eventGuid) == guid; });
+                if (found != callbackPendingEvents_.end()) {
+                    callbackPendingEvents_.erase(found);
+                }
+                AppendCallbackAppLog(std::wstring(L"Callback 事件 ") + guid + (allow ? L" 已允许。" : L" 已拒绝。"));
+            } else {
+                AppendCallbackAppLog(L"Callback 待决策应答失败，事件保留在队列。 " + result->message);
+            }
+            RefreshCallbackEventLog();
+        });
+}
+
+void KernelPage::RefreshCallbackEventLog() {
+    const bool receiverRunning = callbackEventReceiver_ && callbackEventReceiver_->running();
+    const bool answerRunning = callbackAnswerTask_ && callbackAnswerTask_->running();
+    if (callbackStartReceiverButton_) {
+        const bool receiverStopping = callbackEventReceiver_ && callbackEventReceiver_->stopping();
+        ::EnableWindow(callbackStartReceiverButton_, !receiverRunning && !receiverStopping && callbackPendingEvents_.size() < 64U);
+    }
+    if (callbackStopReceiverButton_) {
+        ::EnableWindow(callbackStopReceiverButton_, receiverRunning);
+    }
+    if (callbackAllowEventButton_) {
+        ::EnableWindow(callbackAllowEventButton_, !callbackPendingEvents_.empty() && !answerRunning);
+    }
+    if (callbackDenyEventButton_) {
+        ::EnableWindow(callbackDenyEventButton_, !callbackPendingEvents_.empty() && !answerRunning);
+    }
+    if (!callbackEventLogEdit_) {
+        return;
+    }
+
+    std::wostringstream log;
+    log << L"接收器: " << (receiverRunning ? L"运行中" : L"已停止")
+        << L" | 待决策: " << callbackPendingEvents_.size() << L"/64\r\n";
+    if (callbackPendingEvents_.empty()) {
+        log << L"暂无待决策事件。启动接收器后，驱动的 Ask User 规则事件会在这里显示。\r\n";
+    } else {
+        const CallbackEventSnapshot& current = callbackPendingEvents_.front();
+        log << L"当前事件（点击“允许当前”或“拒绝当前”后才会应答）\r\n"
+            << L"GUID: " << CallbackGuidText(current.event.eventGuid) << L"\r\n"
+            << L"类型/操作: " << current.event.callbackType << L" / " << current.event.operationType << L"\r\n"
+            << L"发起: PID=" << current.event.originatingPid << L", TID=" << current.event.originatingTid
+            << L", Session=" << current.event.sessionId << L"\r\n"
+            << L"规则: [" << current.event.groupId << L"] " << FixedWideText(current.event.groupName)
+            << L" / [" << current.event.ruleId << L"] " << FixedWideText(current.event.ruleName) << L"\r\n"
+            << L"发起路径: " << FixedWideText(current.event.initiatorPath) << L"\r\n"
+            << L"目标路径: " << FixedWideText(current.event.targetPath) << L"\r\n"
+            << L"默认决策: " << current.event.defaultDecision << L", 超时毫秒: " << current.event.timeoutMs << L"\r\n";
+        if (callbackPendingEvents_.size() > 1U) {
+            log << L"\r\n后续待决策事件:\r\n";
+            const std::size_t tail = std::min<std::size_t>(callbackPendingEvents_.size(), 16U);
+            for (std::size_t index = 1; index < tail; ++index) {
+                const CallbackEventSnapshot& item = callbackPendingEvents_[index];
+                log << L"[" << index << L"] " << CallbackGuidText(item.event.eventGuid)
+                    << L" PID=" << item.event.originatingPid
+                    << L" " << FixedWideText(item.event.targetPath) << L"\r\n";
+            }
+            if (callbackPendingEvents_.size() > tail) {
+                log << L"…其余 " << (callbackPendingEvents_.size() - tail) << L" 条保留在队列。\r\n";
+            }
+        }
+    }
+    ::SetWindowTextW(callbackEventLogEdit_, log.str().c_str());
 }
 
 int KernelPage::CallbackSelectedRuleTabIndex() const {

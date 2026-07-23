@@ -5103,6 +5103,77 @@ KernelOperationResult ExecuteCallbackRuntimeControl(const KernelActionRequest& r
     return result;
 }
 
+// ParseCallbackEventGuid validates the compact hexadecimal GUID sent by the
+// Win32 callback receiver. Input accepts only 32 hex digits so a UI row cannot
+// inject an arbitrary binary answer packet into the driver call.
+bool ParseCallbackEventGuid(const std::wstring& text, KSWORD_ARK_GUID128& guidOut) {
+    std::wstring compact;
+    compact.reserve(32);
+    for (const wchar_t ch : text) {
+        if (ch != L'-' && ch != L'{' && ch != L'}') {
+            if (!std::iswxdigit(ch)) {
+                return false;
+            }
+            compact.push_back(ch);
+        }
+    }
+    if (compact.size() != 32U) {
+        return false;
+    }
+    for (std::size_t index = 0; index < sizeof(guidOut.bytes); ++index) {
+        const auto digit = [](const wchar_t ch) -> int {
+            if (ch >= L'0' && ch <= L'9') return ch - L'0';
+            if (ch >= L'a' && ch <= L'f') return 10 + ch - L'a';
+            return 10 + ch - L'A';
+        };
+        guidOut.bytes[index] = static_cast<unsigned char>((digit(compact[index * 2U]) << 4U) | digit(compact[index * 2U + 1U]));
+    }
+    return true;
+}
+
+// ExecuteCallbackAnswerEvent sends one explicit allow/deny decision received by
+// the background wait loop. The caller supplies the event GUID and session only
+// after an operator confirmation; this function performs no implicit fallback.
+KernelOperationResult ExecuteCallbackAnswerEvent(const KernelActionRequest& request) {
+    KSWORD_ARK_CALLBACK_ANSWER_REQUEST answer{};
+    if (!ParseCallbackEventGuid(FieldValue(request, L"EventGuid"), answer.eventGuid)) {
+        return MakeActionError(request, L"待决策事件 GUID 无效，已拒绝向驱动发送应答。" );
+    }
+    std::uint32_t sourceSessionId = 0;
+    if (!ParseUnsigned32(FieldValue(request, L"SourceSessionId"), sourceSessionId)) {
+        return MakeActionError(request, L"待决策事件缺少有效 SourceSessionId。" );
+    }
+    const std::wstring decisionText = FieldValue(request, L"Decision");
+    const bool deny = decisionText == L"Deny";
+    if (!deny && decisionText != L"Allow") {
+        return MakeActionError(request, L"待决策事件的允许/拒绝动作无效。" );
+    }
+    answer.size = sizeof(answer);
+    answer.version = KSWORD_ARK_CALLBACK_PROTOCOL_VERSION;
+    answer.decision = deny ? KSWORD_ARK_DECISION_DENY : KSWORD_ARK_DECISION_ALLOW;
+    answer.sourceSessionId = sourceSessionId;
+    answer.answeredAtUtc100ns = CurrentUtc100ns();
+
+    const ksword::ark::DriverClient client;
+    const ksword::ark::IoResult io = client.answerCallbackEvent(answer);
+    KernelOperationResult result;
+    result.supported = true;
+    result.success = io.ok;
+    result.destructiveAction = true;
+    result.message = std::wstring(L"Callback 待决策应答 ") + (deny ? L"拒绝" : L"允许") +
+        (io.ok ? L"完成。" : L"失败。") + L" " + Utf8ToWide(io.message);
+    result.rows.push_back(Row({
+        { L"Action", L"CallbackAnswerEvent" },
+        { L"Decision", deny ? L"Deny" : L"Allow" },
+        { L"EventGuid", FieldValue(request, L"EventGuid") },
+        { L"SourceSessionId", std::to_wstring(sourceSessionId) },
+        { L"IO", io.ok ? L"OK" : L"FAIL" },
+        { L"Win32", std::to_wstring(io.win32Error) },
+        { L"BytesReturned", std::to_wstring(io.bytesReturned) },
+    }, Utf8ToWide(io.message)));
+    return result;
+}
+
 // ExecuteSetMinifilterBypassPids writes the minifilter bypass PID list through
 // ArkDriverClient. Inputs are PIDs typed into the generic filter box; output
 // includes the new R0 whitelist snapshot when the write succeeds.
@@ -5598,6 +5669,8 @@ KernelOperationResult KernelFacade::ExecuteAction(const KernelActionRequest& req
     case KernelActionId::CallbackApplyDisabledEmptyRules:
     case KernelActionId::CallbackApplyLocalRules:
         return ExecuteCallbackRuntimeControl(request);
+    case KernelActionId::CallbackAnswerEvent:
+        return ExecuteCallbackAnswerEvent(request);
     case KernelActionId::CallbackSafeRemove:
         return ExecuteCallbackSafeRemove(request);
     case KernelActionId::CallbackExperimentalUnlink:

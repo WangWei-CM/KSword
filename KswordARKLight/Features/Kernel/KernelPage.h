@@ -1,6 +1,7 @@
 #pragma once
 
 #include "KernelFacade.h"
+#include "KernelCallbackEventReceiver.h"
 #include "KernelModel.h"
 #include "../../Core/Win32Lean.h"
 #include "../../Ui/AsyncTask.h"
@@ -112,6 +113,11 @@ private:
     void ConfigureVisibleLayout();
     void ConfigureToolbarForDescriptor(const KernelFeatureDescriptor& descriptor);
     void PopulateCallbackInterceptPanel();
+    void StartCallbackEventReceiver();
+    void StopCallbackEventReceiver();
+    void AcceptCallbackEvent(CallbackEventSnapshot snapshot);
+    void AnswerCurrentCallbackEvent(bool allow);
+    void RefreshCallbackEventLog();
     void EnsureCallbackLocalModel();
     void RenderCallbackLocalModel();
     void AppendCallbackAppLog(const std::wstring& message);
@@ -259,6 +265,10 @@ private:
     HWND callbackReloadButton_ = nullptr;
     HWND callbackImportButton_ = nullptr;
     HWND callbackExportButton_ = nullptr;
+    HWND callbackStartReceiverButton_ = nullptr;
+    HWND callbackStopReceiverButton_ = nullptr;
+    HWND callbackAllowEventButton_ = nullptr;
+    HWND callbackDenyEventButton_ = nullptr;
     HWND callbackStatusText_ = nullptr;
     HWND callbackGroupLabel_ = nullptr;
     HWND callbackAddGroupButton_ = nullptr;
@@ -363,6 +373,9 @@ private:
     };
     std::vector<CallbackRuleGroup> callbackGroups_;
     std::vector<CallbackRule> callbackRules_;
+    std::unique_ptr<CallbackEventReceiver> callbackEventReceiver_;
+    std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<KernelOperationResult>> callbackAnswerTask_;
+    std::vector<CallbackEventSnapshot> callbackPendingEvents_;
     std::uint32_t nextCallbackGroupId_ = 2;
     std::uint32_t nextCallbackRuleId_ = 1;
     HWND callbackContextList_ = nullptr;

@@ -148,6 +148,7 @@ enum class KernelActionId : std::uint32_t {
     None = 0,
     InlineHookNopPatch,
     CallbackCancelPendingDecisions,
+    CallbackAnswerEvent,
     CallbackApplyDisabledEmptyRules,
     CallbackApplyLocalRules,
     CallbackSafeRemove,

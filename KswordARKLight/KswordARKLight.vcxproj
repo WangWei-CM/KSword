@@ -125,6 +125,7 @@
     <ClCompile Include="Features\Kernel\KernelAtomTableFeature.cpp" />
     <ClCompile Include="Features\Kernel\KernelBaseNamedObjectsFeature.cpp" />
     <ClCompile Include="Features\Kernel\KernelCallbackEnumerationFeature.cpp" />
+    <ClCompile Include="Features\Kernel\KernelCallbackEventReceiver.cpp" />
     <ClCompile Include="Features\Kernel\KernelCallbackInterceptFeature.cpp" />
     <ClCompile Include="Features\Kernel\KernelCatalog.cpp" />
     <ClCompile Include="Features\Kernel\KernelCommunicationEndpointFeature.cpp" />
@@ -266,6 +267,7 @@
     <ClInclude Include="Features\Kernel\KernelAtomTableFeature.h" />
     <ClInclude Include="Features\Kernel\KernelBaseNamedObjectsFeature.h" />
     <ClInclude Include="Features\Kernel\KernelCallbackEnumerationFeature.h" />
+    <ClInclude Include="Features\Kernel\KernelCallbackEventReceiver.h" />
     <ClInclude Include="Features\Kernel\KernelCallbackInterceptFeature.h" />
     <ClInclude Include="Features\Kernel\KernelCatalog.h" />
     <ClInclude Include="Features\Kernel\KernelCommunicationEndpointFeature.h" />
