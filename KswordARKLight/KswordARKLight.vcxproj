@@ -192,14 +192,17 @@
     <ClCompile Include="Features\Window\WindowModel.cpp" />
     <ClCompile Include="Features\Window\WindowView.cpp" />
     <ClCompile Include="Ui\Controls.cpp" />
+    <ClCompile Include="Ui\FilterBar.cpp" />
     <ClCompile Include="Ui\IconUtil.cpp" />
     <ClCompile Include="Ui\ListViewUtil.cpp" />
+    <ClCompile Include="Ui\LoadingOverlay.cpp" />
     <ClCompile Include="Ui\MenuUtil.cpp" />
     <ClCompile Include="Ui\PlaceholderPage.cpp" />
     <ClCompile Include="Ui\SplitterUtil.cpp" />
     <ClCompile Include="Ui\TabUtil.cpp" />
     <ClCompile Include="Ui\Theme.cpp" />
     <ClCompile Include="Ui\TreeViewUtil.cpp" />
+    <ClCompile Include="Ui\VirtualListView.cpp" />
     <ClCompile Include="..\Ksword5.1\Ksword5.1\ArkDriverClient\ArkDriverAlpc.cpp" />
     <ClCompile Include="..\Ksword5.1\Ksword5.1\ArkDriverClient\ArkDriverCallback.cpp" />
     <ClCompile Include="..\Ksword5.1\Ksword5.1\ArkDriverClient\ArkDriverCapabilities.cpp" />
@@ -320,8 +323,11 @@
     <ClInclude Include="Features\Window\WindowView.h" />
     <ClInclude Include="resource.h" />
     <ClInclude Include="Ui\Controls.h" />
+    <ClInclude Include="Ui\AsyncTask.h" />
+    <ClInclude Include="Ui\FilterBar.h" />
     <ClInclude Include="Ui\IconUtil.h" />
     <ClInclude Include="Ui\ListViewUtil.h" />
+    <ClInclude Include="Ui\LoadingOverlay.h" />
     <ClInclude Include="Ui\MenuUtil.h" />
     <ClInclude Include="Ui\ModuleDescriptor.h" />
     <ClInclude Include="Ui\PlaceholderPage.h" />
@@ -329,6 +335,7 @@
     <ClInclude Include="Ui\TabUtil.h" />
     <ClInclude Include="Ui\Theme.h" />
     <ClInclude Include="Ui\TreeViewUtil.h" />
+    <ClInclude Include="Ui\VirtualListView.h" />
     <ClInclude Include="..\Ksword5.1\Ksword5.1\ArkDriverClient\ArkDriverCapabilities.h" />
     <ClInclude Include="..\Ksword5.1\Ksword5.1\ArkDriverClient\ArkDriverClient.h" />
     <ClInclude Include="..\Ksword5.1\Ksword5.1\ArkDriverClient\ArkDriverError.h" />

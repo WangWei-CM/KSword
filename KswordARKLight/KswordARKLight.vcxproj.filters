@@ -384,10 +384,16 @@
     <ClCompile Include="Ui\Controls.cpp">
       <Filter>Ui</Filter>
     </ClCompile>
+    <ClCompile Include="Ui\FilterBar.cpp">
+      <Filter>Ui</Filter>
+    </ClCompile>
     <ClCompile Include="Ui\IconUtil.cpp">
       <Filter>Ui</Filter>
     </ClCompile>
     <ClCompile Include="Ui\ListViewUtil.cpp">
+      <Filter>Ui</Filter>
+    </ClCompile>
+    <ClCompile Include="Ui\LoadingOverlay.cpp">
       <Filter>Ui</Filter>
     </ClCompile>
     <ClCompile Include="Ui\MenuUtil.cpp">
@@ -406,6 +412,9 @@
       <Filter>Ui</Filter>
     </ClCompile>
     <ClCompile Include="Ui\TreeViewUtil.cpp">
+      <Filter>Ui</Filter>
+    </ClCompile>
+    <ClCompile Include="Ui\VirtualListView.cpp">
       <Filter>Ui</Filter>
     </ClCompile>
     <ClCompile Include="..\Ksword5.1\Ksword5.1\ArkDriverClient\ArkDriverAlpc.cpp">
@@ -764,10 +773,19 @@
     <ClInclude Include="Ui\Controls.h">
       <Filter>Ui</Filter>
     </ClInclude>
+    <ClInclude Include="Ui\AsyncTask.h">
+      <Filter>Ui</Filter>
+    </ClInclude>
+    <ClInclude Include="Ui\FilterBar.h">
+      <Filter>Ui</Filter>
+    </ClInclude>
     <ClInclude Include="Ui\IconUtil.h">
       <Filter>Ui</Filter>
     </ClInclude>
     <ClInclude Include="Ui\ListViewUtil.h">
+      <Filter>Ui</Filter>
+    </ClInclude>
+    <ClInclude Include="Ui\LoadingOverlay.h">
       <Filter>Ui</Filter>
     </ClInclude>
     <ClInclude Include="Ui\MenuUtil.h">
@@ -789,6 +807,9 @@
       <Filter>Ui</Filter>
     </ClInclude>
     <ClInclude Include="Ui\TreeViewUtil.h">
+      <Filter>Ui</Filter>
+    </ClInclude>
+    <ClInclude Include="Ui\VirtualListView.h">
       <Filter>Ui</Filter>
     </ClInclude>
     <ClInclude Include="..\Ksword5.1\Ksword5.1\ArkDriverClient\ArkDriverCapabilities.h">
