@@ -630,6 +630,16 @@ void MemoryDock::focusProcessForOperations(const std::uint32_t pid, const bool s
     }
 }
 
+void MemoryDock::focusProcessForSearch(const std::uint32_t pid, const bool showMessage)
+{
+    // 搜索页需要有效进程句柄和最新区域缓存，先复用标准附加流程，再切到搜索页。
+    focusProcessForOperations(pid, showMessage);
+    if (m_attachedPid == pid && m_tabWidget != nullptr && m_tabSearch != nullptr)
+    {
+        m_tabWidget->setCurrentWidget(m_tabSearch);
+    }
+}
+
 void MemoryDock::detachProcess()
 {
     // 分离入口日志：记录旧 PID 便于追踪。

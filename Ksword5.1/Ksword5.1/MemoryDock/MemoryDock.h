@@ -69,6 +69,11 @@ public:
     // - 调用方式：MainWindow::focusMemoryDockByPid 调用。
     void focusProcessForOperations(std::uint32_t pid, bool showMessage = false);
 
+    // focusProcessForSearch：
+    // - 作用：附加指定 PID 后切换到“内存搜索”页；
+    // - 供进程详情的独立“内存扫描”Tab 复用完整搜索能力。
+    void focusProcessForSearch(std::uint32_t pid, bool showMessage = false);
+
 private:
     // ========================================================
     // 内部数据结构定义（用于表格缓存与跨 Tab 共享状态）

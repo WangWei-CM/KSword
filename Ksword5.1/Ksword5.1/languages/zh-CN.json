@@ -18057,6 +18057,11 @@
     "非模块可执行内存": "非模块可执行内存",
     "../句柄/HandleDock.h": "../句柄/HandleDock.h",
     "ProcessDetailTab_EmbeddedHandle": "ProcessDetailTab_EmbeddedHandle",
-    "句柄审计视图将在首次进入本页时加载。": "句柄审计视图将在首次进入本页时加载。"
+    "句柄审计视图将在首次进入本页时加载。": "句柄审计视图将在首次进入本页时加载。",
+    "ProcessDetailTab_EmbeddedMemory": "ProcessDetailTab_EmbeddedMemory",
+    "ProcessDetailTab_EmbeddedMemoryScan": "ProcessDetailTab_EmbeddedMemoryScan",
+    "内存管理": "内存管理",
+    "内存管理视图将在首次进入本页时加载。": "内存管理视图将在首次进入本页时加载。",
+    "内存扫描视图将在首次进入本页时加载。": "内存扫描视图将在首次进入本页时加载。"
   }
 }

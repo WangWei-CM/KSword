@@ -1,5 +1,6 @@
 #include "ProcessDetailWindow.InternalCommon.h"
 #include "../句柄/HandleDock.h"
+#include "../MemoryDock/MemoryDock.h"
 #include "../UI/VisibleTableWidget.h"
 #include "../PluginHost.h"
 
@@ -590,6 +591,8 @@ void ProcessDetailWindow::initializeUi()
     m_actionTab = new QWidget(m_tabWidget);
     m_moduleTab = new QWidget(m_tabWidget);
     m_embeddedHandleTab = new QWidget(m_tabWidget);
+    m_embeddedMemoryTab = new QWidget(m_tabWidget);
+    m_embeddedMemoryScanTab = new QWidget(m_tabWidget);
     m_tokenTab = new QWidget(m_tabWidget);
     m_tokenSwitchTab = new QWidget(m_tabWidget);
     m_kernelObjectTab = new QWidget(m_tabWidget);
@@ -604,6 +607,8 @@ void ProcessDetailWindow::initializeUi()
     m_actionTab->setObjectName(QStringLiteral("ProcessDetailTab_Action"));
     m_moduleTab->setObjectName(QStringLiteral("ProcessDetailTab_Module"));
     m_embeddedHandleTab->setObjectName(QStringLiteral("ProcessDetailTab_EmbeddedHandle"));
+    m_embeddedMemoryTab->setObjectName(QStringLiteral("ProcessDetailTab_EmbeddedMemory"));
+    m_embeddedMemoryScanTab->setObjectName(QStringLiteral("ProcessDetailTab_EmbeddedMemoryScan"));
     m_tokenTab->setObjectName(QStringLiteral("ProcessDetailTab_Token"));
     m_tokenSwitchTab->setObjectName(QStringLiteral("ProcessDetailTab_TokenSwitch"));
     m_kernelObjectTab->setObjectName(QStringLiteral("ProcessDetailTab_ProcessDetailEvidence"));
@@ -618,6 +623,7 @@ void ProcessDetailWindow::initializeUi()
     initializeActionTab();
     initializeModuleTab();
     initializeEmbeddedHandleTab();
+    initializeEmbeddedMemoryTabs();
     initializeTokenTab();
     initializeTokenSwitchTab();
     initializeKernelObjectTab();
@@ -633,6 +639,8 @@ void ProcessDetailWindow::initializeUi()
     m_tabWidget->addTab(m_actionTab, QIcon(":/Icon/process_priority.svg"), "操作");
     m_tabWidget->addTab(m_moduleTab, QIcon(":/Icon/process_list.svg"), "模块");
     m_tabWidget->addTab(m_embeddedHandleTab, QIcon(":/Icon/handle_refresh.svg"), "句柄");
+    m_tabWidget->addTab(m_embeddedMemoryTab, QIcon(":/Icon/process_list.svg"), "内存管理");
+    m_tabWidget->addTab(m_embeddedMemoryScanTab, QIcon(":/Icon/file_find.svg"), "内存扫描");
     m_tabWidget->addTab(m_tokenTab, QIcon(":/Icon/process_critical.svg"), "令牌");
     m_tabWidget->addTab(m_tokenSwitchTab, QIcon(":/Icon/process_start.svg"), "令牌开关");
     m_tabWidget->addTab(m_kernelObjectTab, QIcon(":/Icon/process_critical.svg"), "Process Detail Evidence");
@@ -818,6 +826,18 @@ void ProcessDetailWindow::requestInitialRefreshForCurrentTab()
         return;
     }
 
+    if (currentTab == m_embeddedMemoryTab)
+    {
+        ensureEmbeddedMemoryView();
+        return;
+    }
+
+    if (currentTab == m_embeddedMemoryScanTab)
+    {
+        ensureEmbeddedMemoryScanView();
+        return;
+    }
+
     if (currentTab == m_kernelCallbackTab && !m_kernelCallbackInitialRefreshStarted)
     {
         requestAsyncKernelCallbackRefresh();
@@ -858,6 +878,72 @@ void ProcessDetailWindow::ensureEmbeddedHandleView()
     m_embeddedHandleLayout->addWidget(m_embeddedHandleDock, 1);
     m_embeddedHandleDock->focusProcessId(m_baseRecord.pid, false);
     m_embeddedHandleDock->show();
+}
+
+void ProcessDetailWindow::initializeEmbeddedMemoryTabs()
+{
+    const auto initializeContainer = [](QWidget* tab, QVBoxLayout*& layout, QLabel*& placeholder, const QString& text)
+        {
+            layout = new QVBoxLayout(tab);
+            layout->setContentsMargins(0, 0, 0, 0);
+            layout->setSpacing(0);
+            placeholder = new QLabel(text, tab);
+            placeholder->setAlignment(Qt::AlignCenter);
+            placeholder->setStyleSheet(
+                QStringLiteral("color:%1;").arg(KswordTheme::TextSecondaryHex()));
+            layout->addWidget(placeholder, 1);
+        };
+
+    initializeContainer(
+        m_embeddedMemoryTab,
+        m_embeddedMemoryLayout,
+        m_embeddedMemoryPlaceholder,
+        QStringLiteral("内存管理视图将在首次进入本页时加载。"));
+    initializeContainer(
+        m_embeddedMemoryScanTab,
+        m_embeddedMemoryScanLayout,
+        m_embeddedMemoryScanPlaceholder,
+        QStringLiteral("内存扫描视图将在首次进入本页时加载。"));
+}
+
+void ProcessDetailWindow::ensureEmbeddedMemoryView()
+{
+    if (m_embeddedMemoryDock != nullptr || m_embeddedMemoryLayout == nullptr)
+    {
+        return;
+    }
+
+    m_embeddedMemoryDock = new MemoryDock(m_embeddedMemoryTab);
+    m_embeddedMemoryDock->hide();
+    if (m_embeddedMemoryPlaceholder != nullptr)
+    {
+        m_embeddedMemoryLayout->removeWidget(m_embeddedMemoryPlaceholder);
+        m_embeddedMemoryPlaceholder->deleteLater();
+        m_embeddedMemoryPlaceholder = nullptr;
+    }
+    m_embeddedMemoryLayout->addWidget(m_embeddedMemoryDock, 1);
+    m_embeddedMemoryDock->focusProcessForOperations(m_baseRecord.pid, false);
+    m_embeddedMemoryDock->show();
+}
+
+void ProcessDetailWindow::ensureEmbeddedMemoryScanView()
+{
+    if (m_embeddedMemoryScanDock != nullptr || m_embeddedMemoryScanLayout == nullptr)
+    {
+        return;
+    }
+
+    m_embeddedMemoryScanDock = new MemoryDock(m_embeddedMemoryScanTab);
+    m_embeddedMemoryScanDock->hide();
+    if (m_embeddedMemoryScanPlaceholder != nullptr)
+    {
+        m_embeddedMemoryScanLayout->removeWidget(m_embeddedMemoryScanPlaceholder);
+        m_embeddedMemoryScanPlaceholder->deleteLater();
+        m_embeddedMemoryScanPlaceholder = nullptr;
+    }
+    m_embeddedMemoryScanLayout->addWidget(m_embeddedMemoryScanDock, 1);
+    m_embeddedMemoryScanDock->focusProcessForSearch(m_baseRecord.pid, false);
+    m_embeddedMemoryScanDock->show();
 }
 
 void ProcessDetailWindow::requestAsyncStaticDetailRefresh(const bool includeSignatureCheck)
