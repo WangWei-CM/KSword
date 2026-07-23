@@ -1,6 +1,7 @@
 #include "HardwareHwidDispatchView.h"
 
 #include "../AuditCommon/AuditTable.h"
+#include "../../Ui/AsyncTask.h"
 #include "../../Ui/Controls.h"
 #include "../../Ui/Theme.h"
 #include "../../../Ksword5.1/Ksword5.1/ArkDriverClient/ArkDriverClient.h"
@@ -13,6 +14,7 @@
 #include <cwchar>
 #include <cstring>
 #include <iomanip>
+#include <memory>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -41,6 +43,8 @@ constexpr int kFirstEditId = 61240;
 constexpr int kStatusTextId = 61260;
 constexpr int kPlanEditId = 61261;
 constexpr int kStatusTableId = 61262;
+constexpr UINT kMsgRefreshCompleted = WM_APP + 588;
+constexpr UINT kMsgControlCompleted = WM_APP + 589;
 
 enum HwidTextField : std::size_t {
     DiskSerialField = 0,
@@ -76,6 +80,9 @@ struct HwidDispatchViewState {
     std::array<HWND, HwidTextFieldCount> labels{};
     std::array<HWND, HwidTextFieldCount> edits{};
     std::wstring logText;
+    std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<ksword::ark::HwidDispatchResult>> refreshTask;
+    std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<ksword::ark::HwidDispatchResult>> controlTask;
+    bool controlInProgress = false;
 };
 
 int Width(const RECT& rc) {
@@ -378,12 +385,42 @@ void ApplyResponseToUi(HwidDispatchViewState& state, const ksword::ark::HwidDisp
     AppendLog(state, Utf8ToWide(result.io.message));
 }
 
+void SetDispatchControlsEnabled(HwidDispatchViewState& state, bool enabled) {
+    for (HWND control : { state.refreshButton, state.dryRunButton, state.enableButton, state.disableAllButton }) {
+        if (control) {
+            ::EnableWindow(control, enabled);
+        }
+    }
+}
+
 void RefreshDispatchState(HwidDispatchViewState& state) {
-    const ksword::ark::DriverClient client;
-    ApplyResponseToUi(state, client.queryHwidDispatchState());
+    if (!state.refreshTask) {
+        return;
+    }
+    if (state.statusText) {
+        ::SetWindowTextW(state.statusText, state.refreshTask->running() ? L"状态：HWID Dispatch 查询已排队。" : L"状态：正在后台查询 HWID Dispatch。 ");
+    }
+    ::EnableWindow(state.refreshButton, FALSE);
+    state.refreshTask->request(
+        [] {
+            const ksword::ark::DriverClient client;
+            return client.queryHwidDispatchState();
+        },
+        [&state](std::uint64_t, std::optional<ksword::ark::HwidDispatchResult>&& result, std::exception_ptr error) {
+            ::EnableWindow(state.refreshButton, TRUE);
+            if (error || !result.has_value()) {
+                AppendLog(state, L"HWID Dispatch 后台查询异常结束。");
+                return;
+            }
+            ApplyResponseToUi(state, *result);
+        });
 }
 
 void SendControlRequest(HwidDispatchViewState& state, const unsigned long action, const bool dryRun) {
+    if (state.refreshTask && state.refreshTask->running()) {
+        AppendLog(state, L"HWID Dispatch 状态查询尚未完成，请稍后再执行操作。");
+        return;
+    }
     if (!dryRun && !Checked(state.confirmCheck)) {
         ::MessageBoxW(
             state.hwnd,
@@ -404,9 +441,30 @@ void SendControlRequest(HwidDispatchViewState& state, const unsigned long action
         }
     }
 
-    const ksword::ark::DriverClient client;
     const KSWORD_ARK_HWID_DISPATCH_CONTROL_REQUEST request = BuildControlRequest(state, action, dryRun);
-    ApplyResponseToUi(state, client.controlHwidDispatch(request));
+    if (!state.controlTask || state.controlInProgress) {
+        AppendLog(state, L"HWID Dispatch 操作正在执行。");
+        return;
+    }
+    state.controlInProgress = true;
+    SetDispatchControlsEnabled(state, false);
+    if (state.statusText) {
+        ::SetWindowTextW(state.statusText, L"状态：正在后台执行 HWID Dispatch 操作…");
+    }
+    state.controlTask->request(
+        [request] {
+            const ksword::ark::DriverClient client;
+            return client.controlHwidDispatch(request);
+        },
+        [&state](std::uint64_t, std::optional<ksword::ark::HwidDispatchResult>&& result, std::exception_ptr error) {
+            state.controlInProgress = false;
+            SetDispatchControlsEnabled(state, true);
+            if (error || !result.has_value()) {
+                AppendLog(state, L"HWID Dispatch 操作异常结束。");
+                return;
+            }
+            ApplyResponseToUi(state, *result);
+        });
 }
 
 bool CreateChildControls(HwidDispatchViewState& state) {
@@ -586,6 +644,8 @@ bool RegisterHwidDispatchClass() {
                     ::SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
                     return -1;
                 }
+                state->refreshTask = std::make_unique<Ksword::Ui::AsyncSnapshotTask<ksword::ark::HwidDispatchResult>>(hwnd, kMsgRefreshCompleted);
+                state->controlTask = std::make_unique<Ksword::Ui::AsyncSnapshotTask<ksword::ark::HwidDispatchResult>>(hwnd, kMsgControlCompleted);
                 LayoutChildren(*state);
                 RefreshDispatchState(*state);
             }
@@ -595,6 +655,16 @@ bool RegisterHwidDispatchClass() {
                 LayoutChildren(*state);
             }
             return 0;
+        case kMsgRefreshCompleted:
+            if (state && state->refreshTask && state->refreshTask->consume(hwnd, wParam, lParam)) {
+                return 0;
+            }
+            break;
+        case kMsgControlCompleted:
+            if (state && state->controlTask && state->controlTask->consume(hwnd, wParam, lParam)) {
+                return 0;
+            }
+            break;
         case WM_COMMAND:
             if (state) {
                 switch (LOWORD(wParam)) {
@@ -664,6 +734,10 @@ bool RegisterHwidDispatchClass() {
             return 0;
         }
         case WM_NCDESTROY:
+            if (state) {
+                if (state->refreshTask) state->refreshTask->cancel();
+                if (state->controlTask) state->controlTask->cancel();
+            }
             delete state;
             ::SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
             return 0;
