@@ -1,4 +1,6 @@
 #include "NetworkDock.InternalCommon.h"
+#include "NetworkAuditPage.h"
+#include "NetworkFirewallPage.h"
 #include "../PluginHost.h"
 #include "../OnlineScan/SandboxUploadActions.h"
 #include "../theme.h"
@@ -8,6 +10,19 @@
 using namespace network_dock_detail;
 void NetworkDock::initializeConnections()
 {
+    connect(m_sideTabWidget, &QTabWidget::currentChanged, this, [this](const int /*index*/)
+        {
+            QWidget* currentPage = m_sideTabWidget != nullptr ? m_sideTabWidget->currentWidget() : nullptr;
+            if (currentPage == m_firewallPage && m_firewallPage != nullptr)
+            {
+                m_firewallPage->requestInitialRefresh();
+            }
+            else if (currentPage == m_networkAuditPage && m_networkAuditPage != nullptr)
+            {
+                m_networkAuditPage->requestInitialRefresh();
+            }
+        });
+
     // 启停抓包与清空表格按钮连接。
     connect(m_startMonitorButton, &QPushButton::clicked, this, [this]()
         {

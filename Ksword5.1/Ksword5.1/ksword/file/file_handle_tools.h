@@ -144,6 +144,7 @@ namespace ks::file
         std::wstring typeFilterText;
         bool resolveObjectName = true;
         int nameResolveBudget = 300;
+        int basicInfoQueryBudget = -1; // < 0 表示不限制；避免只读场景对全系统句柄逐个查询计数。
         HandleEnumMode enumMode = HandleEnumMode::DuplicateHandle;
         std::unordered_map<std::uint16_t, std::string> typeNameCacheByIndex;
         std::unordered_map<std::uint16_t, std::string> typeNameMapFromObjectTab;

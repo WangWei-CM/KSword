@@ -12743,6 +12743,7 @@
     "对象类型返回缓冲区长度不足。": "Object type return buffer length insufficient.",
     "对象计数: returned=%1；total=%2；已解析=%3；目标=%4；驱动=%5；设备=%6\n": "Object count: returned=%1; total=%2; parsed=%3; target=%4; driver=%5; device=%6\n",
     "对象计数查询失败:": "Object count query failed:",
+    "对象计数预算跳过:": "Object count query skipped by budget:",
     "对象路径": "Object Path",
     "对象：%1\nSID：%2\n\n%3": "Object: %1\nSID: %2\n\n%3",
     "对选中窗口启用防截图保护：优先从截图/录屏中隐藏，失败时回退黑屏": "Enable screenshot protection for selected window: Hide from screenshots/recordings first, fallback to black screen on failure.",

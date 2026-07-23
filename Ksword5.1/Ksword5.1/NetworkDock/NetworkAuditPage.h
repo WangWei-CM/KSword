@@ -32,7 +32,7 @@ class NetworkAuditPage final : public QWidget
 public:
     // 构造函数：
     // - 输入 parent：Qt 父控件，可为空；
-    // - 处理：构建只读审计页 UI，并立即触发首轮异步刷新；
+    // - 处理：构建只读审计页 UI；首轮异步刷新在页面首次显示时触发；
     // - 返回：无。
     explicit NetworkAuditPage(QWidget* parent = nullptr);
 
@@ -40,6 +40,12 @@ public:
     // - 处理：默认析构，Qt 自动释放子控件；
     // - 返回：无。
     ~NetworkAuditPage() override = default;
+
+    // requestInitialRefresh 作用：
+    // - 在页面首次成为当前页时启动首轮只读审计；
+    // - 重复调用不会启动并发任务；
+    // - 无返回值。
+    void requestInitialRefresh();
 
 private:
     // CrossViewRow：TCP/UDP 交叉视图的一行聚合结果。
@@ -346,4 +352,5 @@ private:
     QTableWidget* m_nsiSummaryTable = nullptr;
 
     std::atomic_bool m_refreshInProgress{ false };
+    std::atomic_bool m_initialRefreshRequested{ false };
 };

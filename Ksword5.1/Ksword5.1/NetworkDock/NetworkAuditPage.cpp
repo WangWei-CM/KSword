@@ -47,6 +47,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
+#include <exception>
 #include <memory>
 #include <set>
 #include <thread>
@@ -605,7 +606,15 @@ NetworkAuditPage::NetworkAuditPage(QWidget* parent)
 {
     initializeUi();
     initializeConnections();
-    refreshAllSnapshotsAsync(false);
+}
+
+void NetworkAuditPage::requestInitialRefresh()
+{
+    bool expected = false;
+    if (m_initialRefreshRequested.compare_exchange_strong(expected, true))
+    {
+        refreshAllSnapshotsAsync(false);
+    }
 }
 
 void NetworkAuditPage::initializeUi()
@@ -830,19 +839,40 @@ void NetworkAuditPage::refreshAllSnapshotsAsync(const bool forceRefresh)
     QPointer<NetworkAuditPage> safeThis(this);
     std::thread([safeThis]()
     {
-        const AuditSnapshot snapshot = buildAuditSnapshot();
+        AuditSnapshot snapshot;
+        QString failureText;
+        try
+        {
+            snapshot = buildAuditSnapshot();
+        }
+        catch (const std::exception& exception)
+        {
+            failureText = QStringLiteral("刷新失败：%1").arg(QString::fromUtf8(exception.what()));
+        }
+        catch (...)
+        {
+            failureText = QStringLiteral("刷新失败");
+        }
+
         if (safeThis.isNull())
         {
             return;
         }
 
-        const bool invokeOk = QMetaObject::invokeMethod(safeThis.data(), [safeThis, snapshot]()
+        const bool invokeOk = QMetaObject::invokeMethod(safeThis.data(), [safeThis, snapshot = std::move(snapshot), failureText]() mutable
         {
             if (safeThis.isNull())
             {
                 return;
             }
-            safeThis->applySnapshot(snapshot);
+            if (failureText.isEmpty())
+            {
+                safeThis->applySnapshot(snapshot);
+            }
+            else if (safeThis->m_statusLabel != nullptr)
+            {
+                safeThis->m_statusLabel->setText(failureText);
+            }
             if (safeThis->m_refreshButton != nullptr)
             {
                 safeThis->m_refreshButton->setEnabled(true);
@@ -852,10 +882,6 @@ void NetworkAuditPage::refreshAllSnapshotsAsync(const bool forceRefresh)
         if (!invokeOk && !safeThis.isNull())
         {
             safeThis->m_refreshInProgress.store(false);
-            if (safeThis->m_refreshButton != nullptr)
-            {
-                safeThis->m_refreshButton->setEnabled(true);
-            }
         }
     }).detach();
 }
@@ -947,6 +973,7 @@ NetworkAuditPage::AuditSnapshot NetworkAuditPage::buildAuditSnapshot()
     ks::file::HandleSnapshotOptions handleOptions;
     handleOptions.resolveObjectName = true;
     handleOptions.nameResolveBudget = 220;
+    handleOptions.basicInfoQueryBudget = 220;
     handleOptions.enumMode = ks::file::HandleEnumMode::DuplicateHandle;
     const ks::file::HandleSnapshotResult handleSnapshot = ks::file::BuildHandleSnapshot(handleOptions);
     snapshot.afdRows.reserve(handleSnapshot.rows.size());

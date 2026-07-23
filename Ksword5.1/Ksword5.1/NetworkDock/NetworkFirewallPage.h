@@ -36,7 +36,7 @@ class NetworkFirewallPage final : public QWidget
 public:
     // 构造函数：
     // - parent：Qt 父控件；
-    // - 处理：创建 UI，并尝试启动历史刷新；
+    // - 处理：创建 UI；首轮历史和规则刷新在页面首次显示时触发；
     // - 返回：无。
     explicit NetworkFirewallPage(QWidget* parent = nullptr);
 
@@ -44,6 +44,12 @@ public:
     // - 处理：停止实时订阅、关闭 BFE engine、释放 fwpuclnt.dll；
     // - 返回：无。
     ~NetworkFirewallPage() override;
+
+    // requestInitialRefresh 作用：
+    // - 在页面首次成为当前页时启动历史事件和规则快照刷新；
+    // - 重复调用不会启动并发任务；
+    // - 无返回值。
+    void requestInitialRefresh();
 
     // FirewallEventEntry：
     // - 作用：保存一次 WFP net event 的展示字段；
@@ -319,6 +325,7 @@ private:
     QCheckBox* m_ruleEnabledOnlyCheck = nullptr; // m_ruleEnabledOnlyCheck：仅显示启用规则。
     QTableWidget* m_ruleTable = nullptr;       // m_ruleTable：防火墙规则表。
     std::atomic_bool m_refreshingRules{ false }; // m_refreshingRules：规则刷新互斥。
+    std::atomic_bool m_initialRefreshRequested{ false }; // m_initialRefreshRequested：首轮刷新门控。
     std::vector<FirewallRuleEntry> m_ruleEntryList; // m_ruleEntryList：规则快照缓存。
     void* m_fwpuclntModule = nullptr;          // m_fwpuclntModule：fwpuclnt.dll 模块句柄。
     void* m_liveEngineHandle = nullptr;        // m_liveEngineHandle：实时监控 BFE engine。

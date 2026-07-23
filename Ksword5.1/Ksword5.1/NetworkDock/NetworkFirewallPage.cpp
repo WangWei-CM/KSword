@@ -44,6 +44,7 @@
 #include <algorithm>
 #include <array>
 #include <cstring>
+#include <exception>
 #include <thread>
 
 #ifndef NOMINMAX
@@ -1042,7 +1043,6 @@ NetworkFirewallPage::NetworkFirewallPage(QWidget* parent)
 {
     initializeUi();
     initializeConnections();
-    refreshHistoryAsync(false);
 }
 
 NetworkFirewallPage::~NetworkFirewallPage()
@@ -1053,6 +1053,18 @@ NetworkFirewallPage::~NetworkFirewallPage()
         FreeLibrary(static_cast<HMODULE>(m_fwpuclntModule));
         m_fwpuclntModule = nullptr;
     }
+}
+
+void NetworkFirewallPage::requestInitialRefresh()
+{
+    bool expected = false;
+    if (!m_initialRefreshRequested.compare_exchange_strong(expected, true))
+    {
+        return;
+    }
+
+    refreshHistoryAsync(false);
+    refreshRulesAsync(false);
 }
 
 void NetworkFirewallPage::initializeUi()
@@ -1308,7 +1320,6 @@ void NetworkFirewallPage::initializeConnections()
         editSelectedFirewallRule();
     });
     m_liveFlushTimer->start();
-    refreshRulesAsync(false);
 }
 
 void NetworkFirewallPage::refreshHistoryAsync(const bool forceRefresh)
@@ -1334,14 +1345,33 @@ void NetworkFirewallPage::refreshHistoryAsync(const bool forceRefresh)
     {
         std::vector<FirewallEventEntry> eventList;
         QString errorText;
-        if (!safeThis.isNull())
+        try
         {
-            void* engineHandle = nullptr;
-            if (safeThis->openWfpEngine(false, &engineHandle, &errorText))
+            if (!safeThis.isNull())
             {
-                eventList = safeThis->enumerateHistoryWithEngine(engineHandle, &errorText);
-                safeThis->closeWfpEngine(engineHandle, false);
+                void* engineHandle = nullptr;
+                if (safeThis->openWfpEngine(false, &engineHandle, &errorText))
+                {
+                    try
+                    {
+                        eventList = safeThis->enumerateHistoryWithEngine(engineHandle, &errorText);
+                    }
+                    catch (...)
+                    {
+                        safeThis->closeWfpEngine(engineHandle, false);
+                        throw;
+                    }
+                    safeThis->closeWfpEngine(engineHandle, false);
+                }
             }
+        }
+        catch (const std::exception& exception)
+        {
+            errorText = QStringLiteral("刷新失败：%1").arg(QString::fromUtf8(exception.what()));
+        }
+        catch (...)
+        {
+            errorText = QStringLiteral("刷新失败");
         }
 
         if (safeThis.isNull())
@@ -1349,7 +1379,7 @@ void NetworkFirewallPage::refreshHistoryAsync(const bool forceRefresh)
             return;
         }
 
-        QMetaObject::invokeMethod(
+        const bool invokeOk = QMetaObject::invokeMethod(
             safeThis.data(),
             [safeThis, eventList = std::move(eventList), errorText]() mutable
             {
@@ -1376,6 +1406,10 @@ void NetworkFirewallPage::refreshHistoryAsync(const bool forceRefresh)
                 safeThis->m_refreshingHistory.store(false);
             },
             Qt::QueuedConnection);
+        if (!invokeOk && !safeThis.isNull())
+        {
+            safeThis->m_refreshingHistory.store(false);
+        }
     }).detach();
 }
 
@@ -1611,16 +1645,27 @@ void NetworkFirewallPage::refreshRulesAsync(const bool forceRefresh)
     {
         std::vector<FirewallRuleEntry> ruleList;
         QString errorText;
-        if (!safeThis.isNull())
+        try
         {
-            ruleList = safeThis->enumerateFirewallRulesSnapshot(&errorText);
+            if (!safeThis.isNull())
+            {
+                ruleList = safeThis->enumerateFirewallRulesSnapshot(&errorText);
+            }
+        }
+        catch (const std::exception& exception)
+        {
+            errorText = QStringLiteral("刷新失败：%1").arg(QString::fromUtf8(exception.what()));
+        }
+        catch (...)
+        {
+            errorText = QStringLiteral("刷新失败");
         }
         if (safeThis.isNull())
         {
             return;
         }
 
-        QMetaObject::invokeMethod(
+        const bool invokeOk = QMetaObject::invokeMethod(
             safeThis.data(),
             [safeThis, ruleList = std::move(ruleList), errorText]() mutable
             {
@@ -1651,6 +1696,10 @@ void NetworkFirewallPage::refreshRulesAsync(const bool forceRefresh)
                 safeThis->m_refreshingRules.store(false);
             },
             Qt::QueuedConnection);
+        if (!invokeOk && !safeThis.isNull())
+        {
+            safeThis->m_refreshingRules.store(false);
+        }
     }).detach();
 }
 

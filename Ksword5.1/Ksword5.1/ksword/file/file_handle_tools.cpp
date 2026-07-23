@@ -1013,6 +1013,15 @@ namespace ks::file
                 textOut.clear();
                 return true;
             }
+            const std::uintptr_t bufferBegin = reinterpret_cast<std::uintptr_t>(buffer.data());
+            const std::uintptr_t bufferEnd = bufferBegin + buffer.size();
+            const std::uintptr_t textBegin = reinterpret_cast<std::uintptr_t>(unicodeValue->Buffer);
+            const std::size_t textLength = unicodeValue->Length;
+            if ((unicodeValue->Length % sizeof(wchar_t)) != 0 ||
+                textBegin < bufferBegin || textBegin > bufferEnd || textLength > bufferEnd - textBegin)
+            {
+                return false;
+            }
             textOut.assign(unicodeValue->Buffer, unicodeValue->Length / sizeof(wchar_t));
             return true;
         }
@@ -1411,8 +1420,10 @@ namespace ks::file
         }
 
         int nameBudgetRemain = std::max(options.nameResolveBudget, 0);
+        int basicInfoBudgetRemain = options.basicInfoQueryBudget;
         std::size_t duplicateFailedCount = 0;
         std::size_t basicInfoFailedCount = 0;
+        std::size_t basicInfoBudgetSkippedCount = 0;
         std::size_t nameQueryFailedCount = 0;
         std::size_t nameBudgetSkippedCount = 0;
         std::unordered_map<std::uint64_t, CachedObjectSnapshot> objectSnapshotCacheByAddress;
@@ -1473,7 +1484,19 @@ namespace ks::file
             const bool pidMatchedForBudget = !options.hasPidFilter || row.processId == options.pidFilter;
             const bool typeMatchedForBudget = !hasTypeFilter || EqualsInsensitive(row.typeName, typeFilterText);
             const bool allowDuplicateQueries = options.enumMode == HandleEnumMode::DuplicateHandle || options.enumMode == HandleEnumMode::KernelHandleTable;
-            const bool shouldQueryBasicInfo = allowDuplicateQueries && !row.basicInfoAvailable;
+            bool shouldQueryBasicInfo = allowDuplicateQueries && !row.basicInfoAvailable;
+            if (shouldQueryBasicInfo && basicInfoBudgetRemain >= 0)
+            {
+                if (basicInfoBudgetRemain > 0)
+                {
+                    --basicInfoBudgetRemain;
+                }
+                else
+                {
+                    shouldQueryBasicInfo = false;
+                    ++basicInfoBudgetSkippedCount;
+                }
+            }
             const bool typeEligibleForNameResolve = allowDuplicateQueries && options.resolveObjectName &&
                 pidMatchedForBudget && typeMatchedForBudget && ShouldAttemptNameQuery(row.typeName);
             bool shouldQueryObjectName = false;
@@ -1684,6 +1707,7 @@ namespace ks::file
         if (typeQueryFailedCount > 0) { diagnosticList.push_back(L"类型解析失败:" + std::to_wstring(typeQueryFailedCount)); }
         if (duplicateFailedCount > 0) { diagnosticList.push_back(L"句柄复制失败:" + std::to_wstring(duplicateFailedCount)); }
         if (basicInfoFailedCount > 0) { diagnosticList.push_back(L"对象计数查询失败:" + std::to_wstring(basicInfoFailedCount)); }
+        if (basicInfoBudgetSkippedCount > 0) { diagnosticList.push_back(L"对象计数预算跳过:" + std::to_wstring(basicInfoBudgetSkippedCount)); }
         if (nameQueryFailedCount > 0) { diagnosticList.push_back(L"对象名查询失败:" + std::to_wstring(nameQueryFailedCount)); }
         if (result.fallbackNameCount > 0) { diagnosticList.push_back(L"对象名回退命中:" + std::to_wstring(result.fallbackNameCount)); }
         if (nameBudgetSkippedCount > 0) { diagnosticList.push_back(L"对象名预算跳过:" + std::to_wstring(nameBudgetSkippedCount)); }
