@@ -2,8 +2,10 @@
 
 #include "RegistryActions.h"
 #include "RegistryModel.h"
+#include "../../Ui/AsyncTask.h"
 #include "../../Ui/Controls.h"
 #include "../../Ui/ListViewUtil.h"
+#include "../../Ui/LoadingOverlay.h"
 #include "../../Ui/Theme.h"
 #include "../../Ui/TreeViewUtil.h"
 
@@ -46,6 +48,14 @@ constexpr UINT kMenuWrite = 68105;
 constexpr UINT kMenuDelete = 68106;
 constexpr UINT kMenuCreateSubKey = 68107;
 constexpr UINT kMenuRename = 68108;
+constexpr UINT kMsgSnapshotCompleted = WM_APP + 560;
+constexpr int kLoadingOverlayId = 68109;
+
+struct RegistryRefreshSnapshot {
+    std::wstring path;
+    RegistryViewMode mode = RegistryViewMode::WinApi;
+    RegistrySnapshot snapshot;
+};
 
 struct RegistryViewState {
     HWND hwnd = nullptr;
@@ -65,10 +75,12 @@ struct RegistryViewState {
     HWND deleteButton = nullptr;
     HWND renameButton = nullptr;
     HWND statusText = nullptr;
+    HWND loadingOverlay = nullptr;
     RegistryViewMode mode = RegistryViewMode::WinApi;
     RegistrySnapshot snapshot;
     std::vector<std::size_t> visibleRowIndexes;
     bool syncingTreeSelection = false;
+    std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<RegistryRefreshSnapshot>> refreshTask;
 };
 
 struct RegistryTreeNodeData {
@@ -481,10 +493,42 @@ void PopulateList(RegistryViewState& state) {
 }
 
 void RefreshSnapshot(RegistryViewState& state) {
+    if (!state.refreshTask) {
+        return;
+    }
     const std::wstring current = CurrentPath(state);
-    state.snapshot = EnumerateRegistryKey(current, state.mode);
-    PopulateList(state);
-    SetStatus(state, state.snapshot.statusText);
+    const RegistryViewMode mode = state.mode;
+    SetStatus(state, state.refreshTask->running()
+        ? L"注册表刷新已排队，等待当前快照完成…"
+        : L"正在后台枚举注册表键和值…");
+    if (state.refreshButton) {
+        ::EnableWindow(state.refreshButton, FALSE);
+    }
+    Ksword::Ui::SetLoadingOverlay(state.loadingOverlay, true, L"正在后台加载注册表键和值…");
+    state.refreshTask->request(
+        [current, mode]() {
+            RegistryRefreshSnapshot snapshot{};
+            snapshot.path = current;
+            snapshot.mode = mode;
+            snapshot.snapshot = EnumerateRegistryKey(current, mode);
+            return snapshot;
+        },
+        [&state](std::uint64_t, std::optional<RegistryRefreshSnapshot>&& snapshot, std::exception_ptr error) {
+            if (state.refreshButton) {
+                ::EnableWindow(state.refreshButton, TRUE);
+            }
+            Ksword::Ui::SetLoadingOverlay(state.loadingOverlay, false);
+            if (error || !snapshot.has_value()) {
+                SetStatus(state, L"注册表后台枚举异常结束。请检查权限、路径和驱动状态。");
+                return;
+            }
+            if (snapshot->path != CurrentPath(state) || snapshot->mode != state.mode) {
+                return;
+            }
+            state.snapshot = std::move(snapshot->snapshot);
+            PopulateList(state);
+            SetStatus(state, state.snapshot.statusText);
+        });
 }
 
 void RebuildRegistryTree(RegistryViewState& state) {
@@ -555,6 +599,9 @@ void LayoutChildren(RegistryViewState& state) {
     const int listHeight = std::max(120, height - contentTop - 92);
     ::MoveWindow(state.tree, treeLeft, contentTop, treeWidth, listHeight, TRUE);
     ::MoveWindow(state.list, listLeft, contentTop, listWidth, listHeight, TRUE);
+    if (state.loadingOverlay) {
+        ::MoveWindow(state.loadingOverlay, listLeft, contentTop, listWidth, listHeight, TRUE);
+    }
 
     int editY = contentTop;
     ::MoveWindow(state.nameEdit, editorLeft, editY, editorWidth, 24, TRUE);
@@ -721,9 +768,10 @@ bool CreateChildControls(RegistryViewState& state) {
     state.deleteButton = Ksword::Ui::CreateButton(state.hwnd, kDeleteButtonId, L"删除", 0, 0, 0, 0);
     state.renameButton = Ksword::Ui::CreateButton(state.hwnd, kRenameButtonId, L"重命名", 0, 0, 0, 0);
     state.statusText = Ksword::Ui::CreateText(state.hwnd, kStatusId, L"", 0, 0, 0, 0);
+    state.loadingOverlay = Ksword::Ui::CreateLoadingOverlay(state.hwnd, kLoadingOverlayId, { 0, 0, 1, 1 });
     if (!state.refreshButton || !state.upButton || !state.pathEdit || !state.goButton || !state.modeCombo || !state.tree || !state.list ||
         !state.nameEdit || !state.typeCombo || !state.dataEdit || !state.readButton || !state.writeButton ||
-        !state.createKeyButton || !state.deleteButton || !state.renameButton || !state.statusText) {
+        !state.createKeyButton || !state.deleteButton || !state.renameButton || !state.statusText || !state.loadingOverlay) {
         return false;
     }
 
@@ -761,6 +809,7 @@ LRESULT CALLBACK RegistryViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
             }
             LayoutChildren(*state);
             RebuildRegistryTree(*state);
+            state->refreshTask = std::make_unique<Ksword::Ui::AsyncSnapshotTask<RegistryRefreshSnapshot>>(hwnd, kMsgSnapshotCompleted);
             RefreshSnapshot(*state);
         }
         return 0;
@@ -769,6 +818,11 @@ LRESULT CALLBACK RegistryViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
             LayoutChildren(*state);
         }
         return 0;
+    case kMsgSnapshotCompleted:
+        if (state && state->refreshTask && state->refreshTask->consume(hwnd, wParam, lParam)) {
+            return 0;
+        }
+        break;
     case WM_NOTIFY:
         if (state) {
             const auto* header = reinterpret_cast<const NMHDR*>(lParam);
@@ -877,6 +931,9 @@ LRESULT CALLBACK RegistryViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
     }
     case WM_NCDESTROY:
         if (state) {
+            if (state->refreshTask) {
+                state->refreshTask->cancel();
+            }
             ClearRegistryTree(state->tree);
         }
         delete state;
