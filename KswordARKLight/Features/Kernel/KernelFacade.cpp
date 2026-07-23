@@ -1170,6 +1170,20 @@ std::wstring DriverObjectNameFromActionRequest(const KernelActionRequest& reques
     }), allowName);
 }
 
+// DriverModuleBaseFromActionRequest extracts a loaded-driver image base from the
+// immutable row snapshot. It accepts the detail query's DriverStart first and
+// falls back to the module-base fields used by integrity and dispatch rows.
+std::uint64_t DriverModuleBaseFromActionRequest(const KernelActionRequest& request) {
+    const std::wstring value = FirstFieldValue(request, {
+        L"DriverStart",
+        L"ModuleBase",
+        L"OwnerModuleBase",
+        L"OwnerBase",
+    });
+    std::uint64_t moduleBase = 0;
+    return ParseFirstUnsigned64FromText(value, moduleBase) ? moduleBase : 0ULL;
+}
+
 // InlinePatchLength mirrors the original KernelDock conservative NOP length
 // selection. Inputs are hook type and available bytes; output is zero when the
 // selected row is not safe for automatic NOP patching.
@@ -5251,12 +5265,15 @@ KernelOperationResult ExecuteDriverObjectQueryDetail(const KernelActionRequest& 
 // status field so the UI does not hide partial cleanup/failure details.
 KernelOperationResult ExecuteDriverObjectForceUnload(const KernelActionRequest& request) {
     const std::wstring driverName = DriverObjectNameFromActionRequest(request);
-    if (driverName.empty()) {
-        return MakeActionError(request, L"当前行不是可卸载的 \\Driver\\Name 或 R0 DriverObject 行。");
+    const std::uint64_t moduleBase = DriverModuleBaseFromActionRequest(request);
+    if (driverName.empty() && moduleBase == 0ULL) {
+        return MakeActionError(request, L"当前行没有可卸载的 \\Driver\\Name 或模块基址。请先查询 R0 DriverObject 详情。 ");
     }
 
     const ksword::ark::DriverClient client;
-    const ksword::ark::DriverForceUnloadResult unload = client.forceUnloadDriver(driverName, 0UL, 3000UL);
+    const ksword::ark::DriverForceUnloadResult unload = moduleBase != 0ULL
+        ? client.forceUnloadDriverByModuleBase(moduleBase, driverName, 0UL, 3000UL)
+        : client.forceUnloadDriver(driverName, 0UL, 3000UL);
 
     KernelOperationResult result;
     result.supported = true;
@@ -5269,6 +5286,8 @@ KernelOperationResult ExecuteDriverObjectForceUnload(const KernelActionRequest& 
     result.rows.push_back(Row({
         { L"Action", L"DriverObjectForceUnload" },
         { L"Request", driverName },
+        { L"ModuleBase", HexText(moduleBase) },
+        { L"Resolution", moduleBase != 0ULL ? L"ModuleBase" : L"DriverName" },
         { L"IO", unload.io.ok ? L"OK" : L"FAIL" },
         { L"Win32", std::to_wstring(unload.io.win32Error) },
         { L"BytesReturned", std::to_wstring(unload.io.bytesReturned) },
