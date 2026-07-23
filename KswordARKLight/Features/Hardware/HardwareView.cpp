@@ -3,13 +3,19 @@
 #include "HardwareEnumerator.h"
 #include "HardwareModel.h"
 #include "../../../Ksword5.1/Ksword5.1/ArkDriverClient/ArkDriverClient.h"
+#include "../../Ui/AsyncTask.h"
 #include "../../Ui/Controls.h"
+#include "../../Ui/FilterBar.h"
+#include "../../Ui/LoadingOverlay.h"
 #include "../../Ui/Theme.h"
 
 #include <commctrl.h>
 #include <windowsx.h>
 
+#include <algorithm>
 #include <cstring>
+#include <cwctype>
+#include <memory>
 #include <sstream>
 #include <string>
 #include <utility>
@@ -21,11 +27,35 @@ constexpr wchar_t kHardwareViewClass[] = L"KswordARKLight.Hardware.DeviceManager
 constexpr int kRefreshButtonId = 61001;
 constexpr int kTreeId = 61002;
 constexpr int kDetailId = 61003;
-constexpr int kHeaderHeight = 32;
+constexpr int kFilterBarId = 61004;
+constexpr int kLoadingOverlayId = 61005;
+constexpr int kHeaderHeight = 64;
 constexpr int kGap = 6;
 constexpr int kTreeWidth = 420;
 constexpr UINT kMenuRefresh = 62001;
 constexpr UINT kMenuCopyInstanceId = 62002;
+constexpr UINT kMenuCopyDetailCell = 62003;
+constexpr UINT kMenuCopyDetailRow = 62004;
+constexpr UINT kMenuCopyDetailVisible = 62005;
+constexpr UINT kMsgRefreshCompleted = WM_APP + 585;
+constexpr UINT kMsgFilterCompleted = WM_APP + 586;
+constexpr UINT kMsgDetailCompleted = WM_APP + 587;
+
+struct HardwareDetailSnapshot {
+    int deviceIndex = -1;
+    std::wstring instanceId;
+    HardwareDeviceDetail detail;
+    ksword::ark::DeviceAuditResult deviceStack;
+    ksword::ark::DeviceAuditResult inputStack;
+    ksword::ark::DeviceAuditResult usbTopology;
+};
+
+struct HardwareFilterResult {
+    std::uint64_t generation = 0;
+    std::wstring query;
+    std::wstring selectedInstanceId;
+    std::vector<bool> visibleIndexes;
+};
 
 // Width returns a non-negative rectangle width. Input is a RECT; output is the
 // usable pixel width used by layout code.
@@ -45,10 +75,18 @@ int Height(const RECT& rc) {
 struct HardwareViewState {
     HWND hwnd = nullptr;
     HWND refreshButton = nullptr;
+    HWND filterBar = nullptr;
     HWND tree = nullptr;
     HWND detail = nullptr;
+    HWND loadingOverlay = nullptr;
     HardwareModel model;
+    std::vector<bool> visibleIndexes;
     std::wstring statusText;
+    std::wstring filterQuery;
+    std::uint64_t displayGeneration = 0;
+    std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<HardwareEnumerationResult>> refreshTask;
+    std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<HardwareFilterResult>> filterTask;
+    std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<HardwareDetailSnapshot>> detailTask;
 };
 
 // AddListColumn inserts one detail list column. Inputs are list HWND, index,
@@ -118,6 +156,27 @@ bool WriteClipboardText(HWND owner, const std::wstring& text) {
     return true;
 }
 
+std::wstring DetailListText(HWND list, int row, int column) {
+    std::vector<wchar_t> buffer(4096, L'\0');
+    ListView_GetItemText(list, row, column, buffer.data(), static_cast<int>(buffer.size()));
+    return std::wstring(buffer.data());
+}
+
+std::wstring DetailRowsAsText(HWND list, bool allRows) {
+    std::wstring text;
+    const int count = list ? ListView_GetItemCount(list) : 0;
+    for (int row = 0; row < count; ++row) {
+        if (!allRows && (ListView_GetItemState(list, row, LVIS_SELECTED) & LVIS_SELECTED) == 0) {
+            continue;
+        }
+        text += DetailListText(list, row, 0);
+        text += L'\t';
+        text += DetailListText(list, row, 1);
+        text += L"\r\n";
+    }
+    return text;
+}
+
 // Utf8ToWideLossy 将 ArkDriverClient 的窄字符诊断提升为宽字符。
 // 输入：通常是 ASCII/UTF-8 风格 message；处理：逐字节提升用于表格展示；
 // 返回：宽字符串。
@@ -166,12 +225,22 @@ int SelectedDeviceIndex(HardwareViewState* state) {
     return static_cast<int>(item.lParam);
 }
 
+std::wstring SelectedInstanceId(const HardwareViewState& state) {
+    const int index = SelectedDeviceIndex(const_cast<HardwareViewState*>(&state));
+    const HardwareDeviceNode* node = state.model.deviceAt(index);
+    return node ? node->instanceId : std::wstring{};
+}
+
+bool IsVisibleDevice(const HardwareViewState& state, int index) {
+    return index >= 0 && static_cast<std::size_t>(index) < state.visibleIndexes.size() && state.visibleIndexes[static_cast<std::size_t>(index)];
+}
+
 // InsertTreeNode recursively inserts a device and its children. Inputs are state,
 // device index and parent HTREEITEM; processing stores the model index in lParam;
 // output is the inserted tree item, or nullptr when the index is invalid.
 HTREEITEM InsertTreeNode(HardwareViewState* state, int index, HTREEITEM parent) {
     const HardwareDeviceNode* node = state ? state->model.deviceAt(index) : nullptr;
-    if (!node) {
+    if (!node || !IsVisibleDevice(*state, index)) {
         return nullptr;
     }
 
@@ -189,37 +258,75 @@ HTREEITEM InsertTreeNode(HardwareViewState* state, int index, HTREEITEM parent) 
     return item;
 }
 
-// ShowDetail renders the detail pane for one selected device. Inputs are state
-// and model index; processing queries live SetupAPI details, falling back to the
-// cached model; no value is returned.
-void ShowDetail(HardwareViewState* state, int index) {
+void AddDetailSnapshotToList(HardwareViewState* state, const HardwareDetailSnapshot& snapshot) {
     if (!state || !state->detail) {
         return;
     }
     ListView_DeleteAllItems(state->detail);
-    const HardwareDeviceNode* node = state->model.deviceAt(index);
+    const HardwareDeviceNode* node = state->model.deviceAt(snapshot.deviceIndex);
     if (!node) {
-        AddDetailRow(state->detail, 0, L"Selection", L"No device selected");
+        AddDetailRow(state->detail, 0, L"选择", L"未选择设备");
         return;
     }
-
-    HardwareDeviceDetail detail = QueryDeviceManagerDetails(node->instanceId);
-    if (!detail.found) {
-        detail = state->model.detailFromNode(*node);
-    }
-
     int row = 0;
-    AddDetailRow(state->detail, row++, L"Device", detail.title);
-    AddDetailRow(state->detail, row++, L"Audit mode", L"Read-only evidence view; no device state changes are exposed here.");
-    const ksword::ark::DriverClient client;
-    AddDetailRow(state->detail, row++, L"R0 device stack protocol", DeviceAuditSummaryText(client.queryDeviceStackAudit()));
-    AddDetailRow(state->detail, row++, L"R0 input stack protocol", DeviceAuditSummaryText(client.queryInputStackAudit()));
-    AddDetailRow(state->detail, row++, L"R0 USB topology protocol", DeviceAuditSummaryText(client.queryUsbTopologyAudit()));
-    AddDetailRow(state->detail, row++, L"Input privacy", L"Keyboard, mouse and HID rows are metadata only; no keystroke, movement or report stream is collected.");
-    AddDetailRow(state->detail, row++, L"Audit category", HardwareReadOnlyAuditDescription(*node));
-    for (const HardwareProperty& property : detail.properties) {
+    AddDetailRow(state->detail, row++, L"设备", snapshot.detail.title);
+    AddDetailRow(state->detail, row++, L"审计模式", L"只读证据视图，不提供设备状态修改操作。");
+    AddDetailRow(state->detail, row++, L"R0 设备栈协议", DeviceAuditSummaryText(snapshot.deviceStack));
+    AddDetailRow(state->detail, row++, L"R0 输入栈协议", DeviceAuditSummaryText(snapshot.inputStack));
+    AddDetailRow(state->detail, row++, L"R0 USB 拓扑协议", DeviceAuditSummaryText(snapshot.usbTopology));
+    AddDetailRow(state->detail, row++, L"输入隐私", L"键盘、鼠标和 HID 仅展示元数据，不采集按键、移动或报告流。");
+    AddDetailRow(state->detail, row++, L"审计分类", HardwareReadOnlyAuditDescription(*node));
+    for (const HardwareProperty& property : snapshot.detail.properties) {
         AddDetailRow(state->detail, row++, property.name, property.value);
     }
+}
+
+// ShowDetail schedules SetupAPI and R0 evidence queries away from the UI
+// thread. The completion verifies the selected instance so a late result from
+// an earlier tree selection cannot overwrite the active detail pane.
+void ShowDetail(HardwareViewState* state, int index) {
+    if (!state || !state->detail) {
+        return;
+    }
+    const HardwareDeviceNode* node = state->model.deviceAt(index);
+    if (!node) {
+        ListView_DeleteAllItems(state->detail);
+        AddDetailRow(state->detail, 0, L"选择", L"未选择设备");
+        return;
+    }
+    if (!state->detailTask) {
+        return;
+    }
+    const std::wstring instanceId = node->instanceId;
+    const HardwareDeviceDetail fallback = state->model.detailFromNode(*node);
+    ListView_DeleteAllItems(state->detail);
+    AddDetailRow(state->detail, 0, L"状态", L"正在后台加载设备详情和 R0 审计…");
+    state->detailTask->request(
+        [index, instanceId, fallback] {
+            HardwareDetailSnapshot snapshot{};
+            snapshot.deviceIndex = index;
+            snapshot.instanceId = instanceId;
+            snapshot.detail = QueryDeviceManagerDetails(instanceId);
+            if (!snapshot.detail.found) {
+                snapshot.detail = fallback;
+            }
+            const ksword::ark::DriverClient client;
+            snapshot.deviceStack = client.queryDeviceStackAudit();
+            snapshot.inputStack = client.queryInputStackAudit();
+            snapshot.usbTopology = client.queryUsbTopologyAudit();
+            return snapshot;
+        },
+        [state](std::uint64_t, std::optional<HardwareDetailSnapshot>&& snapshot, std::exception_ptr error) {
+            if (error || !snapshot.has_value()) {
+                ListView_DeleteAllItems(state->detail);
+                AddDetailRow(state->detail, 0, L"状态", L"设备详情后台加载异常结束。");
+                return;
+            }
+            if (SelectedInstanceId(*state) != snapshot->instanceId) {
+                return;
+            }
+            AddDetailSnapshotToList(state, *snapshot);
+        });
 }
 
 // SelectFirstRoot selects the first available device after refresh. Input is the
@@ -253,28 +360,154 @@ void PopulateTree(HardwareViewState* state) {
     SelectFirstRoot(state);
 }
 
-// RefreshDevices performs a full SetupAPI/CM enumeration pass. Input is module
-// state; processing replaces the model and tree contents; no value is returned.
-void RefreshDevices(HardwareViewState* state) {
-    if (!state) {
+bool ContainsInsensitive(const std::wstring& text, const std::wstring& query) {
+    if (query.empty()) {
+        return true;
+    }
+    return std::search(text.begin(), text.end(), query.begin(), query.end(), [](wchar_t left, wchar_t right) {
+        return std::towlower(left) == std::towlower(right);
+    }) != text.end();
+}
+
+bool MatchesDevice(const HardwareDeviceNode& node, const std::wstring& query) {
+    return ContainsInsensitive(node.instanceId, query) ||
+        ContainsInsensitive(node.displayName, query) ||
+        ContainsInsensitive(node.className, query) ||
+        ContainsInsensitive(node.classGuid, query) ||
+        ContainsInsensitive(node.manufacturer, query) ||
+        ContainsInsensitive(node.serviceName, query) ||
+        ContainsInsensitive(node.driverKey, query) ||
+        ContainsInsensitive(node.location, query) ||
+        ContainsInsensitive(node.locationPaths, query) ||
+        ContainsInsensitive(node.hardwareIds, query) ||
+        ContainsInsensitive(node.compatibleIds, query) ||
+        ContainsInsensitive(node.upperFilters, query) ||
+        ContainsInsensitive(node.lowerFilters, query) ||
+        ContainsInsensitive(node.classUpperFilters, query) ||
+        ContainsInsensitive(node.classLowerFilters, query);
+}
+
+HTREEITEM FindTreeItemByDeviceIndex(HWND tree, HTREEITEM item, int deviceIndex) {
+    while (item) {
+        TVITEMW tvItem{};
+        tvItem.mask = TVIF_PARAM;
+        tvItem.hItem = item;
+        if (TreeView_GetItem(tree, &tvItem) && static_cast<int>(tvItem.lParam) == deviceIndex) {
+            return item;
+        }
+        if (HTREEITEM child = TreeView_GetChild(tree, item)) {
+            if (HTREEITEM found = FindTreeItemByDeviceIndex(tree, child, deviceIndex)) {
+                return found;
+            }
+        }
+        item = TreeView_GetNextSibling(tree, item);
+    }
+    return nullptr;
+}
+
+void ApplyHardwareFilter(HardwareViewState& state, HardwareFilterResult result) {
+    if (result.generation != state.displayGeneration || result.query != state.filterQuery) {
         return;
     }
-    HardwareEnumerationResult result = EnumerateDeviceManagerTree();
-    if (result.success) {
-        state->model.setDevices(std::move(result.devices));
-        const HardwareAuditSummary summary = state->model.auditSummary();
-        state->statusText = L"Devices: " + std::to_wstring(summary.totalDevices) +
-            L" | Input/HID: " + std::to_wstring(summary.inputDevices) + L"/" + std::to_wstring(summary.hidDevices) +
-            L" | USB: " + std::to_wstring(summary.usbDevices) +
-            L" | PnP PCI/ACPI: " + std::to_wstring(summary.pciDevices) + L"/" + std::to_wstring(summary.acpiDevices) +
-            L" | Filters: " + std::to_wstring(summary.filterEvidenceDevices) +
-            L" | Attention: " + std::to_wstring(summary.problemDevices);
-    } else {
-        state->statusText = result.diagnosticText;
-        state->model.setDevices({});
+    state.visibleIndexes = std::move(result.visibleIndexes);
+    PopulateTree(&state);
+    if (!result.query.empty()) {
+        const std::size_t count = static_cast<std::size_t>(std::count(state.visibleIndexes.begin(), state.visibleIndexes.end(), true));
+        state.statusText = L"设备树筛选结果 " + std::to_wstring(count) + L" 项。";
     }
-    PopulateTree(state);
-    ::InvalidateRect(state->hwnd, nullptr, TRUE);
+    if (!result.selectedInstanceId.empty()) {
+        const auto& devices = state.model.devices();
+        for (const HardwareDeviceNode& node : devices) {
+            if (node.instanceId == result.selectedInstanceId) {
+                if (const HTREEITEM item = FindTreeItemByDeviceIndex(state.tree, TreeView_GetRoot(state.tree), node.index)) {
+                    TreeView_SelectItem(state.tree, item);
+                }
+                break;
+            }
+        }
+    }
+    ::InvalidateRect(state.hwnd, nullptr, TRUE);
+}
+
+void RequestHardwareFilter(HardwareViewState& state, std::wstring query, std::wstring selectedInstanceId) {
+    state.filterQuery = std::move(query);
+    const std::vector<HardwareDeviceNode> devices = state.model.devices();
+    const std::uint64_t generation = state.displayGeneration;
+    if (!state.filterTask) {
+        return;
+    }
+    state.filterTask->request(
+        [devices, generation, query = state.filterQuery, selectedInstanceId = std::move(selectedInstanceId)]() mutable {
+            HardwareFilterResult result{};
+            result.generation = generation;
+            result.query = std::move(query);
+            result.selectedInstanceId = std::move(selectedInstanceId);
+            result.visibleIndexes.assign(devices.size(), result.query.empty());
+            if (!result.query.empty()) {
+                for (const HardwareDeviceNode& node : devices) {
+                    if (!MatchesDevice(node, result.query)) {
+                        continue;
+                    }
+                    int current = node.index;
+                    while (current >= 0 && static_cast<std::size_t>(current) < result.visibleIndexes.size() && !result.visibleIndexes[static_cast<std::size_t>(current)]) {
+                        result.visibleIndexes[static_cast<std::size_t>(current)] = true;
+                        current = devices[static_cast<std::size_t>(current)].parentIndex;
+                    }
+                }
+            }
+            return result;
+        },
+        [&state](std::uint64_t, std::optional<HardwareFilterResult>&& result, std::exception_ptr error) {
+            if (error || !result.has_value()) {
+                state.statusText = L"设备树筛选任务异常结束，已保留当前结果。";
+                ::InvalidateRect(state.hwnd, nullptr, TRUE);
+                return;
+            }
+            ApplyHardwareFilter(state, std::move(*result));
+        });
+}
+
+void BeginDeviceRefresh(HardwareViewState& state) {
+    if (!state.refreshTask) {
+        return;
+    }
+    const bool firstLoad = state.model.devices().empty();
+    state.statusText = state.refreshTask->running() ? L"设备刷新已排队，等待当前快照完成…" : L"正在后台枚举设备、输入和 USB 审计…";
+    ::EnableWindow(state.refreshButton, FALSE);
+    if (firstLoad) {
+        Ksword::Ui::SetLoadingOverlay(state.loadingOverlay, true, L"正在加载设备审计…");
+    }
+    ::InvalidateRect(state.hwnd, nullptr, TRUE);
+    state.refreshTask->request(
+        [] { return EnumerateDeviceManagerTree(); },
+        [&state](std::uint64_t, std::optional<HardwareEnumerationResult>&& result, std::exception_ptr error) {
+            ::EnableWindow(state.refreshButton, TRUE);
+            Ksword::Ui::SetLoadingOverlay(state.loadingOverlay, false);
+            if (error || !result.has_value()) {
+                state.statusText = L"设备后台枚举异常结束。请检查访问权限。";
+                ::InvalidateRect(state.hwnd, nullptr, TRUE);
+                return;
+            }
+            if (!result->success) {
+                state.statusText = result->diagnosticText;
+                ::InvalidateRect(state.hwnd, nullptr, TRUE);
+                return;
+            }
+            const std::wstring selectedInstanceId = SelectedInstanceId(state);
+            state.model.setDevices(std::move(result->devices));
+            ++state.displayGeneration;
+            const HardwareAuditSummary summary = state.model.auditSummary();
+            state.statusText = L"设备 " + std::to_wstring(summary.totalDevices) +
+                L" | 输入/HID " + std::to_wstring(summary.inputDevices) + L"/" + std::to_wstring(summary.hidDevices) +
+                L" | USB " + std::to_wstring(summary.usbDevices) +
+                L" | PCI/ACPI " + std::to_wstring(summary.pciDevices) + L"/" + std::to_wstring(summary.acpiDevices) +
+                L" | 筛选证据 " + std::to_wstring(summary.filterEvidenceDevices) +
+                L" | 注意 " + std::to_wstring(summary.problemDevices);
+            RequestHardwareFilter(state,
+                state.filterBar ? Ksword::Ui::GetFilterBarText(state.filterBar) : state.filterQuery,
+                selectedInstanceId);
+            ::InvalidateRect(state.hwnd, nullptr, TRUE);
+        });
 }
 
 // ShowDeviceContextMenu displays read-only evidence actions for the selected
@@ -329,7 +562,7 @@ void ShowDeviceContextMenu(HardwareViewState* state, POINT screenPoint) {
 
     switch (command) {
     case kMenuRefresh:
-        RefreshDevices(state);
+        BeginDeviceRefresh(*state);
         return;
     case kMenuCopyInstanceId:
         state->statusText = WriteClipboardText(state->hwnd, node->instanceId) ? L"已复制设备实例 ID。" : L"复制设备实例 ID 失败。";
@@ -338,6 +571,37 @@ void ShowDeviceContextMenu(HardwareViewState* state, POINT screenPoint) {
     default:
         break;
     }
+}
+
+void ShowDetailContextMenu(HardwareViewState& state, POINT screenPoint) {
+    HMENU menu = ::CreatePopupMenu();
+    if (!menu) {
+        return;
+    }
+    const int selected = ListView_GetNextItem(state.detail, -1, LVNI_SELECTED);
+    const bool hasSelection = selected >= 0;
+    ::AppendMenuW(menu, MF_STRING | (hasSelection ? 0U : MF_GRAYED), kMenuCopyDetailCell, L"复制单元格");
+    ::AppendMenuW(menu, MF_STRING | (hasSelection ? 0U : MF_GRAYED), kMenuCopyDetailRow, L"复制行");
+    ::AppendMenuW(menu, MF_STRING | (ListView_GetItemCount(state.detail) > 0 ? 0U : MF_GRAYED), kMenuCopyDetailVisible, L"复制可见结果");
+    const UINT command = ::TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, screenPoint.x, screenPoint.y, 0, state.hwnd, nullptr);
+    ::DestroyMenu(menu);
+    if (command == 0) {
+        return;
+    }
+    switch (command) {
+    case kMenuCopyDetailCell:
+        state.statusText = WriteClipboardText(state.hwnd, DetailListText(state.detail, selected, 1)) ? L"已复制单元格。" : L"复制单元格失败。";
+        break;
+    case kMenuCopyDetailRow:
+        state.statusText = WriteClipboardText(state.hwnd, DetailRowsAsText(state.detail, false)) ? L"已复制详情行。" : L"复制详情行失败。";
+        break;
+    case kMenuCopyDetailVisible:
+        state.statusText = WriteClipboardText(state.hwnd, DetailRowsAsText(state.detail, true)) ? L"已复制可见详情。" : L"复制可见详情失败。";
+        break;
+    default:
+        return;
+    }
+    ::InvalidateRect(state.hwnd, nullptr, TRUE);
 }
 
 // LayoutView positions toolbar, tree, and detail controls. Input is module state;
@@ -351,31 +615,35 @@ void LayoutView(HardwareViewState* state) {
     const int width = Width(rc);
     const int height = Height(rc);
     ::MoveWindow(state->refreshButton, kGap, kGap, 86, 24, TRUE);
+    ::MoveWindow(state->filterBar, kGap, 35, std::max(80, width - kGap * 2), 24, TRUE);
     const int top = kHeaderHeight + kGap;
     const int treeWidth = width > kTreeWidth + 260 ? kTreeWidth : width / 2;
     ::MoveWindow(state->tree, kGap, top, treeWidth - kGap, height - top - kGap, TRUE);
     ::MoveWindow(state->detail, treeWidth + kGap, top, width - treeWidth - (kGap * 2), height - top - kGap, TRUE);
+    ::MoveWindow(state->loadingOverlay, kGap, top, std::max(80, width - kGap * 2), std::max(80, height - top - kGap), TRUE);
 }
 
 // CreateChildControls creates the refresh button, tree, and detail list. Inputs
 // are module state and parent HWND; processing initializes columns/fonts; output
 // is true when all required controls exist.
 bool CreateChildControls(HardwareViewState* state, HWND hwnd) {
-    state->refreshButton = Ksword::Ui::CreateButton(hwnd, kRefreshButtonId, L"Refresh", 0, 0, 80, 24);
+    state->refreshButton = Ksword::Ui::CreateButton(hwnd, kRefreshButtonId, L"刷新", 0, 0, 80, 24);
+    state->filterBar = Ksword::Ui::CreateFilterBar(hwnd, kFilterBarId, L"筛选名称、类、实例、驱动、硬件 ID 和审计证据", 0, 0, 200, 24);
     state->tree = ::CreateWindowExW(WS_EX_CLIENTEDGE, WC_TREEVIEWW, L"",
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | TVS_HASBUTTONS | TVS_HASLINES | TVS_LINESATROOT | TVS_SHOWSELALWAYS,
         0, 0, 100, 100, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kTreeId)), ::GetModuleHandleW(nullptr), nullptr);
     state->detail = ::CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"",
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | LVS_REPORT | LVS_SHOWSELALWAYS | LVS_SINGLESEL,
         0, 0, 100, 100, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kDetailId)), ::GetModuleHandleW(nullptr), nullptr);
-    if (!state->refreshButton || !state->tree || !state->detail) {
+    state->loadingOverlay = Ksword::Ui::CreateLoadingOverlay(hwnd, kLoadingOverlayId, { 0, 0, 1, 1 });
+    if (!state->refreshButton || !state->filterBar || !state->tree || !state->detail || !state->loadingOverlay) {
         return false;
     }
     ::SendMessageW(state->tree, WM_SETFONT, reinterpret_cast<WPARAM>(Ksword::Ui::SystemUIFont()), TRUE);
     ::SendMessageW(state->detail, WM_SETFONT, reinterpret_cast<WPARAM>(Ksword::Ui::SystemUIFont()), TRUE);
-    ListView_SetExtendedListViewStyle(state->detail, LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES | LVS_EX_LABELTIP);
-    AddListColumn(state->detail, 0, L"Property", 180);
-    AddListColumn(state->detail, 1, L"Value", 560);
+    ListView_SetExtendedListViewStyle(state->detail, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER | LVS_EX_GRIDLINES | LVS_EX_LABELTIP);
+    AddListColumn(state->detail, 0, L"属性", 180);
+    AddListColumn(state->detail, 1, L"值", 560);
     return true;
 }
 
@@ -398,16 +666,38 @@ bool RegisterHardwareViewClass() {
         }
         case WM_CREATE:
             if (state && CreateChildControls(state, hwnd)) {
+                state->refreshTask = std::make_unique<Ksword::Ui::AsyncSnapshotTask<HardwareEnumerationResult>>(hwnd, kMsgRefreshCompleted);
+                state->filterTask = std::make_unique<Ksword::Ui::AsyncSnapshotTask<HardwareFilterResult>>(hwnd, kMsgFilterCompleted);
+                state->detailTask = std::make_unique<Ksword::Ui::AsyncSnapshotTask<HardwareDetailSnapshot>>(hwnd, kMsgDetailCompleted);
                 LayoutView(state);
-                RefreshDevices(state);
+                BeginDeviceRefresh(*state);
             }
             return 0;
         case WM_SIZE:
             LayoutView(state);
             return 0;
         case WM_COMMAND:
-            if (LOWORD(wParam) == kRefreshButtonId) {
-                RefreshDevices(state);
+            if (state && LOWORD(wParam) == kFilterBarId && HIWORD(wParam) == EN_CHANGE) {
+                RequestHardwareFilter(*state, Ksword::Ui::GetFilterBarText(state->filterBar), SelectedInstanceId(*state));
+                return 0;
+            }
+            if (state && LOWORD(wParam) == kRefreshButtonId) {
+                BeginDeviceRefresh(*state);
+                return 0;
+            }
+            break;
+        case kMsgRefreshCompleted:
+            if (state && state->refreshTask && state->refreshTask->consume(hwnd, wParam, lParam)) {
+                return 0;
+            }
+            break;
+        case kMsgFilterCompleted:
+            if (state && state->filterTask && state->filterTask->consume(hwnd, wParam, lParam)) {
+                return 0;
+            }
+            break;
+        case kMsgDetailCompleted:
+            if (state && state->detailTask && state->detailTask->consume(hwnd, wParam, lParam)) {
                 return 0;
             }
             break;
@@ -424,6 +714,12 @@ bool RegisterHardwareViewClass() {
                 ShowDeviceContextMenu(state, pt);
                 return 0;
             }
+            if (state && notify && notify->idFrom == kDetailId && notify->code == NM_RCLICK) {
+                POINT pt{};
+                ::GetCursorPos(&pt);
+                ShowDetailContextMenu(*state, pt);
+                return 0;
+            }
             break;
         }
         case WM_CONTEXTMENU:
@@ -436,6 +732,16 @@ bool RegisterHardwareViewClass() {
                     pt.y = rc.top + 24;
                 }
                 ShowDeviceContextMenu(state, pt);
+                return 0;
+            }
+            if (state && reinterpret_cast<HWND>(wParam) == state->detail) {
+                POINT pt{ GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+                if (pt.x == -1 && pt.y == -1) {
+                    RECT rc{};
+                    ::GetWindowRect(state->detail, &rc);
+                    pt = { rc.left + 24, rc.top + 24 };
+                }
+                ShowDetailContextMenu(*state, pt);
                 return 0;
             }
             break;
@@ -458,7 +764,12 @@ bool RegisterHardwareViewClass() {
             ::EndPaint(hwnd, &ps);
             return 0;
         }
-        case WM_DESTROY:
+        case WM_NCDESTROY:
+            if (state) {
+                if (state->refreshTask) state->refreshTask->cancel();
+                if (state->filterTask) state->filterTask->cancel();
+                if (state->detailTask) state->detailTask->cancel();
+            }
             delete state;
             ::SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
             return 0;
