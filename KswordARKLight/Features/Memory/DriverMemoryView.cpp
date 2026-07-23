@@ -4,20 +4,20 @@
 #include "DriverMemoryModel.h"
 #include "../../Ui/AsyncTask.h"
 #include "../../Ui/Controls.h"
+#include "../../Ui/FilterBar.h"
 #include "../../Ui/ListViewUtil.h"
 #include "../../Ui/Theme.h"
+#include "../../Ui/VirtualListView.h"
 
 #include <algorithm>
 #include <cstring>
 #include <cwchar>
 #include <iomanip>
-#include <limits>
 #include <memory>
 #include <sstream>
 #include <string>
 #include <vector>
 #include <commctrl.h>
-#include <psapi.h>
 #include <windowsx.h>
 
 namespace Ksword::Features::Memory {
@@ -31,6 +31,8 @@ constexpr int kReadButtonId = 51004;
 constexpr int kWriteButtonId = 51005;
 constexpr int kHexEditId = 51006;
 constexpr int kStatusEditId = 51007;
+constexpr int kHistoryFilterId = 51008;
+constexpr int kHistoryListId = 51009;
 constexpr UINT kMemoryMenuRead = 51501;
 constexpr UINT kMemoryMenuWrite = 51502;
 constexpr UINT kMemoryMenuCopyHex = 51503;
@@ -39,12 +41,36 @@ constexpr UINT kMemoryMenuClearHex = 51505;
 constexpr UINT kMemoryMenuNormalizeHex = 51506;
 constexpr UINT kMemoryMenuSelectAll = 51507;
 constexpr UINT kMemoryMenuCopyStatus = 51508;
+constexpr UINT kMemoryMenuCopyHistoryCell = 51509;
+constexpr UINT kMemoryMenuCopyHistoryRow = 51510;
+constexpr UINT kMemoryMenuCopyHistoryVisible = 51511;
 constexpr UINT kMsgMemoryOperationCompleted = WM_APP + 598;
+constexpr UINT kMsgMemoryHistoryFilterCompleted = WM_APP + 599;
 
 struct MemoryOperationSnapshot {
     bool readOperation = false;
+    DWORD processId = 0;
+    std::uint64_t address = 0;
+    std::size_t requestedBytes = 0;
     DriverMemoryReadResult readResult;
     DriverMemoryWriteResult writeResult;
+};
+
+struct MemoryHistoryEntry {
+    std::uint64_t sequence = 0;
+    bool readOperation = false;
+    DWORD processId = 0;
+    std::uint64_t address = 0;
+    std::size_t requestedBytes = 0;
+    std::size_t completedBytes = 0;
+    bool success = false;
+    std::wstring status;
+};
+
+struct MemoryHistoryFilterResult {
+    std::uint64_t generation = 0;
+    std::wstring query;
+    std::vector<std::size_t> visibleIndexes;
 };
 
 // DriverMemoryViewState owns child HWNDs and the driver facade for one page.
@@ -60,8 +86,17 @@ struct DriverMemoryViewState {
     HWND statusEdit = nullptr;
     HWND readButton = nullptr;
     HWND writeButton = nullptr;
+    HWND historyFilter = nullptr;
     bool operationInProgress = false;
+    std::vector<MemoryHistoryEntry> history;
+    std::uint64_t nextHistorySequence = 1;
+    std::uint64_t historyGeneration = 0;
+    std::wstring historyFilterQuery;
+    int historyContextColumn = 0;
+    Ksword::Ui::VirtualListView historyList;
+    std::shared_ptr<const std::vector<Ksword::Ui::VirtualListRow>> historyFilterRows;
     std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<MemoryOperationSnapshot>> operationTask;
+    std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<MemoryHistoryFilterResult>> historyFilterTask;
 };
 
 // GetWindowTextString copies text from a Win32 edit control. Input is the child
@@ -87,6 +122,104 @@ void SetStatus(DriverMemoryViewState& state, const std::wstring& text) {
     if (state.statusEdit) {
         ::SetWindowTextW(state.statusEdit, text.c_str());
     }
+}
+
+std::wstring FormatHex64(const std::uint64_t value) {
+    std::wostringstream stream;
+    stream << L"0x" << std::hex << std::uppercase << value;
+    return stream.str();
+}
+
+std::vector<Ksword::Ui::ListViewColumn> MemoryHistoryColumns() {
+    return {
+        { 0, 68, LVCFMT_RIGHT, L"序号" },
+        { 1, 74, LVCFMT_LEFT, L"操作" },
+        { 2, 74, LVCFMT_RIGHT, L"PID" },
+        { 3, 150, LVCFMT_LEFT, L"地址" },
+        { 4, 88, LVCFMT_RIGHT, L"请求字节" },
+        { 5, 88, LVCFMT_RIGHT, L"完成字节" },
+        { 6, 70, LVCFMT_LEFT, L"结果" },
+        { 7, 520, LVCFMT_LEFT, L"状态" },
+    };
+}
+
+void ApplyMemoryHistoryFilter(DriverMemoryViewState& state, MemoryHistoryFilterResult result) {
+    if (result.generation != state.historyGeneration || result.query != state.historyFilterQuery) {
+        return;
+    }
+    state.historyList.setVisibleIndexes(std::move(result.visibleIndexes));
+}
+
+void RequestMemoryHistoryFilter(DriverMemoryViewState& state, std::wstring query) {
+    state.historyFilterQuery = std::move(query);
+    const auto rows = state.historyFilterRows;
+    const std::uint64_t generation = state.historyGeneration;
+    if (!state.historyFilterTask || !rows) {
+        return;
+    }
+    state.historyFilterTask->request(
+        [rows, generation, query = state.historyFilterQuery]() mutable {
+            MemoryHistoryFilterResult result{};
+            result.generation = generation;
+            result.query = std::move(query);
+            result.visibleIndexes = Ksword::Ui::VirtualListView::FilterRowIndexes(*rows, result.query);
+            return result;
+        },
+        [&state](std::uint64_t, std::optional<MemoryHistoryFilterResult>&& result, std::exception_ptr error) {
+            if (error || !result.has_value()) {
+                SetStatus(state, L"内存操作历史筛选异常结束，已保留当前可见结果。");
+                return;
+            }
+            ApplyMemoryHistoryFilter(state, std::move(*result));
+        });
+}
+
+void RebuildMemoryHistory(DriverMemoryViewState& state) {
+    auto rows = std::make_shared<std::vector<Ksword::Ui::VirtualListRow>>();
+    rows->reserve(state.history.size());
+    for (const MemoryHistoryEntry& entry : state.history) {
+        Ksword::Ui::VirtualListRow row{};
+        row.stableKey = std::to_wstring(entry.sequence);
+        row.cells = {
+            std::to_wstring(entry.sequence),
+            entry.readOperation ? L"读取" : L"写入",
+            std::to_wstring(entry.processId),
+            FormatHex64(entry.address),
+            std::to_wstring(entry.requestedBytes),
+            std::to_wstring(entry.completedBytes),
+            entry.success ? L"成功" : L"失败",
+            entry.status,
+        };
+        // The state text is both visible and part of the immutable filtering
+        // snapshot, so local filtering never performs another driver query.
+        row.stableKey += L"|" + entry.status;
+        rows->push_back(std::move(row));
+    }
+    state.historyList.setRows(*rows);
+    state.historyFilterRows = std::move(rows);
+    ++state.historyGeneration;
+    RequestMemoryHistoryFilter(state, state.historyFilter ? Ksword::Ui::GetFilterBarText(state.historyFilter) : state.historyFilterQuery);
+}
+
+void AppendMemoryHistory(DriverMemoryViewState& state, const MemoryOperationSnapshot& snapshot) {
+    MemoryHistoryEntry entry{};
+    entry.sequence = state.nextHistorySequence++;
+    entry.readOperation = snapshot.readOperation;
+    entry.processId = snapshot.processId;
+    entry.address = snapshot.address;
+    entry.requestedBytes = snapshot.requestedBytes;
+    entry.success = snapshot.readOperation ? snapshot.readResult.success : snapshot.writeResult.success;
+    entry.completedBytes = snapshot.readOperation ? snapshot.readResult.bytes.size() : snapshot.writeResult.bytesWritten;
+    entry.status = snapshot.readOperation ? snapshot.readResult.statusText : snapshot.writeResult.statusText;
+    if (entry.status.empty()) {
+        entry.status = entry.success ? L"操作完成。" : L"操作失败。";
+    }
+    constexpr std::size_t kMaxHistoryEntries = 512;
+    state.history.push_back(std::move(entry));
+    if (state.history.size() > kMaxHistoryEntries) {
+        state.history.erase(state.history.begin(), state.history.begin() + static_cast<std::ptrdiff_t>(state.history.size() - kMaxHistoryEntries));
+    }
+    RebuildMemoryHistory(state);
 }
 
 // CopyTextToClipboard writes Unicode text from the memory page to the clipboard.
@@ -203,12 +336,17 @@ void LayoutChildren(DriverMemoryViewState& state, const RECT& rc) {
     ::MoveWindow(state.readButton, margin, buttonTop, buttonWidth, editHeight + 2, TRUE);
     ::MoveWindow(state.writeButton, margin + buttonWidth + gap, buttonTop, buttonWidth, editHeight + 2, TRUE);
 
-    const int hexTop = buttonTop + editHeight + 34;
-    const int statusHeight = 58;
-    const int hexHeight = std::max(80, height - hexTop - statusHeight - (margin * 2));
+    const int filterTop = buttonTop + editHeight + gap;
+    const int hexTop = filterTop + editHeight + gap;
+    const int statusHeight = 42;
+    const int historyHeight = 112;
+    const int hexHeight = std::max(64, height - hexTop - statusHeight - historyHeight - (margin * 2) - (gap * 3));
     const int contentWidth = std::max(100, width - margin * 2);
+    ::MoveWindow(state.historyFilter, margin, filterTop, contentWidth, editHeight, TRUE);
     ::MoveWindow(state.hexEdit, margin, hexTop, contentWidth, hexHeight, TRUE);
     ::MoveWindow(state.statusEdit, margin, hexTop + hexHeight + gap, contentWidth, statusHeight, TRUE);
+    const int historyTop = hexTop + hexHeight + gap + statusHeight + gap;
+    ::MoveWindow(state.historyList.hwnd(), margin, historyTop, contentWidth, historyHeight, TRUE);
 }
 
 // PaintLabels draws static labels directly on the page to keep the child window
@@ -227,11 +365,11 @@ void PaintLabels(HWND hwnd, HDC dc) {
     RECT pid{ 12, 38, 70, 62 };
     RECT address{ 200, 38, 272, 62 };
     RECT length{ 472, 38, 544, 62 };
-    RECT hex{ 12, 96, rc.right - 12, 118 };
+    RECT filter{ 12, 96, rc.right - 12, 118 };
     Ksword::Ui::DrawTextLine(dc, L"PID", pid, muted, Ksword::Ui::SystemUIFont(), DT_LEFT | DT_VCENTER | DT_SINGLELINE);
     Ksword::Ui::DrawTextLine(dc, L"Address", address, muted, Ksword::Ui::SystemUIFont(), DT_LEFT | DT_VCENTER | DT_SINGLELINE);
     Ksword::Ui::DrawTextLine(dc, L"Length", length, muted, Ksword::Ui::SystemUIFont(), DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-    Ksword::Ui::DrawTextLine(dc, L"Hex input / output", hex, muted, Ksword::Ui::SystemUIFont(), DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    Ksword::Ui::DrawTextLine(dc, L"操作历史筛选（匹配全部列和状态）", filter, muted, Ksword::Ui::SystemUIFont(), DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 }
 
 // StateFromWindow returns the state pointer stored on the page HWND. Input is a
@@ -268,6 +406,9 @@ void HandleRead(DriverMemoryViewState& state) {
         [request] {
             MemoryOperationSnapshot snapshot{};
             snapshot.readOperation = true;
+            snapshot.processId = request.processId;
+            snapshot.address = request.address;
+            snapshot.requestedBytes = request.length;
             DriverMemoryClient client;
             snapshot.readResult = client.ReadMemory(request);
             return snapshot;
@@ -284,6 +425,7 @@ void HandleRead(DriverMemoryViewState& state) {
                 ::SetWindowTextW(state.hexEdit, FormatHexBytesForDisplay(snapshot->readResult.bytes).c_str());
             }
             SetStatus(state, snapshot->readResult.statusText);
+            AppendMemoryHistory(state, *snapshot);
         });
 }
 
@@ -313,6 +455,9 @@ void HandleWrite(DriverMemoryViewState& state) {
     state.operationTask->request(
         [request = std::move(request)] {
             MemoryOperationSnapshot snapshot{};
+            snapshot.processId = request.processId;
+            snapshot.address = request.address;
+            snapshot.requestedBytes = request.bytes.size();
             DriverMemoryClient client;
             snapshot.writeResult = client.WriteMemory(request);
             return snapshot;
@@ -321,7 +466,12 @@ void HandleWrite(DriverMemoryViewState& state) {
             state.operationInProgress = false;
             ::EnableWindow(state.readButton, TRUE);
             ::EnableWindow(state.writeButton, TRUE);
-            SetStatus(state, error || !snapshot.has_value() ? L"R0 内存写入异常结束。" : snapshot->writeResult.statusText);
+            if (error || !snapshot.has_value()) {
+                SetStatus(state, L"R0 内存写入异常结束。");
+                return;
+            }
+            SetStatus(state, snapshot->writeResult.statusText);
+            AppendMemoryHistory(state, *snapshot);
         });
 }
 
@@ -412,6 +562,80 @@ void ShowMemoryContextMenu(DriverMemoryViewState& state, HWND target, POINT scre
     }
 }
 
+std::wstring SelectedHistoryCellText(const DriverMemoryViewState& state) {
+    const HWND list = state.historyList.hwnd();
+    const int selected = list ? ListView_GetNextItem(list, -1, LVNI_SELECTED) : -1;
+    const auto& visible = state.historyList.visibleIndexes();
+    const auto& rows = state.historyList.rows();
+    if (selected < 0 || static_cast<std::size_t>(selected) >= visible.size()) {
+        return {};
+    }
+    const std::size_t source = visible[static_cast<std::size_t>(selected)];
+    if (source >= rows.size() || state.historyContextColumn < 0 || static_cast<std::size_t>(state.historyContextColumn) >= rows[source].cells.size()) {
+        return {};
+    }
+    return rows[source].cells[static_cast<std::size_t>(state.historyContextColumn)];
+}
+
+std::wstring SelectedHistoryRowsText(const DriverMemoryViewState& state, const bool allVisible) {
+    const HWND list = state.historyList.hwnd();
+    const auto& visible = state.historyList.visibleIndexes();
+    const auto& rows = state.historyList.rows();
+    std::wstring text;
+    for (std::size_t item = 0; item < visible.size(); ++item) {
+        if (!allVisible && (!list || (ListView_GetItemState(list, static_cast<int>(item), LVIS_SELECTED) & LVIS_SELECTED) == 0)) {
+            continue;
+        }
+        const std::size_t source = visible[item];
+        if (source >= rows.size()) {
+            continue;
+        }
+        const auto& cells = rows[source].cells;
+        for (std::size_t column = 0; column < cells.size(); ++column) {
+            if (column != 0) {
+                text.push_back(L'\t');
+            }
+            text += cells[column];
+        }
+        text += L"\r\n";
+    }
+    return text;
+}
+
+void ShowMemoryHistoryContextMenu(DriverMemoryViewState& state, POINT screenPoint) {
+    const HWND list = state.historyList.hwnd();
+    if (!list) {
+        return;
+    }
+    POINT clientPoint = screenPoint;
+    ::ScreenToClient(list, &clientPoint);
+    LVHITTESTINFO hit{};
+    hit.pt = clientPoint;
+    const int item = ListView_SubItemHitTest(list, &hit);
+    if (item >= 0) {
+        state.historyContextColumn = hit.iSubItem;
+        ListView_SetItemState(list, -1, 0, LVIS_SELECTED | LVIS_FOCUSED);
+        ListView_SetItemState(list, item, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
+    }
+    const bool hasSelection = ListView_GetNextItem(list, -1, LVNI_SELECTED) >= 0;
+    HMENU menu = ::CreatePopupMenu();
+    if (!menu) {
+        return;
+    }
+    ::AppendMenuW(menu, MF_STRING | (hasSelection ? 0U : MF_GRAYED), kMemoryMenuCopyHistoryCell, L"复制单元格");
+    ::AppendMenuW(menu, MF_STRING | (hasSelection ? 0U : MF_GRAYED), kMemoryMenuCopyHistoryRow, L"复制行");
+    ::AppendMenuW(menu, MF_STRING | (!state.historyList.visibleIndexes().empty() ? 0U : MF_GRAYED), kMemoryMenuCopyHistoryVisible, L"复制可见结果");
+    const UINT command = ::TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, screenPoint.x, screenPoint.y, 0, state.hwnd, nullptr);
+    ::DestroyMenu(menu);
+    if (command == kMemoryMenuCopyHistoryCell) {
+        SetStatus(state, CopyTextToClipboard(state.hwnd, SelectedHistoryCellText(state)) ? L"已复制单元格。" : L"复制单元格失败。");
+    } else if (command == kMemoryMenuCopyHistoryRow) {
+        SetStatus(state, CopyTextToClipboard(state.hwnd, SelectedHistoryRowsText(state, false)) ? L"已复制行。" : L"复制行失败。");
+    } else if (command == kMemoryMenuCopyHistoryVisible) {
+        SetStatus(state, CopyTextToClipboard(state.hwnd, SelectedHistoryRowsText(state, true)) ? L"已复制可见结果。" : L"复制可见结果失败。");
+    }
+}
+
 // CreateChildControls creates every input/output control for the page. Input is
 // page state with hwnd set; processing creates edit controls and buttons; no
 // value is returned because missing children are handled by normal HWND checks.
@@ -429,6 +653,13 @@ void CreateChildControls(DriverMemoryViewState& state) {
         0,
         0,
         ES_MULTILINE | ES_AUTOVSCROLL | WS_VSCROLL | ES_WANTRETURN);
+    state.historyFilter = Ksword::Ui::CreateFilterBar(state.hwnd, kHistoryFilterId, L"筛选操作、PID、地址、状态", 0, 0, 0, 0);
+    state.historyList.create(state.hwnd, kHistoryListId, 0, 0, 0, 0, LVS_SHOWSELALWAYS | LVS_SINGLESEL);
+    state.historyList.addColumns(MemoryHistoryColumns());
+    if (state.historyList.hwnd()) {
+        ListView_SetExtendedListViewStyle(state.historyList.hwnd(), LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER | LVS_EX_GRIDLINES | LVS_EX_LABELTIP);
+        ::SendMessageW(state.historyList.hwnd(), WM_SETFONT, reinterpret_cast<WPARAM>(Ksword::Ui::SystemUIFont()), TRUE);
+    }
     state.statusEdit = CreateEdit(state.hwnd,
         kStatusEditId,
         L"Driver-only memory read/write surface. Requests are sent through ArkDriverClient and the shared memory IOCTL protocol.",
@@ -455,6 +686,8 @@ LRESULT CALLBACK DriverMemoryViewWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
         if (state) {
             CreateChildControls(*state);
             state->operationTask = std::make_unique<Ksword::Ui::AsyncSnapshotTask<MemoryOperationSnapshot>>(hwnd, kMsgMemoryOperationCompleted);
+            state->historyFilterTask = std::make_unique<Ksword::Ui::AsyncSnapshotTask<MemoryHistoryFilterResult>>(hwnd, kMsgMemoryHistoryFilterCompleted);
+            RebuildMemoryHistory(*state);
         }
         return 0;
     case WM_SIZE:
@@ -465,6 +698,10 @@ LRESULT CALLBACK DriverMemoryViewWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
         }
         return 0;
     case WM_COMMAND:
+        if (state && LOWORD(wParam) == kHistoryFilterId && HIWORD(wParam) == EN_CHANGE) {
+            RequestMemoryHistoryFilter(*state, Ksword::Ui::GetFilterBarText(state->historyFilter));
+            return 0;
+        }
         if (state && HIWORD(wParam) == BN_CLICKED) {
             const int id = LOWORD(wParam);
             if (id == kReadButtonId) {
@@ -482,6 +719,21 @@ LRESULT CALLBACK DriverMemoryViewWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
             return 0;
         }
         break;
+    case kMsgMemoryHistoryFilterCompleted:
+        if (state && state->historyFilterTask && state->historyFilterTask->consume(hwnd, wParam, lParam)) {
+            return 0;
+        }
+        break;
+    case WM_NOTIFY: {
+        const auto* notify = reinterpret_cast<const NMHDR*>(lParam);
+        if (state && notify && notify->idFrom == kHistoryListId) {
+            LRESULT result = 0;
+            if (state->historyList.handleNotify(*notify, result)) {
+                return result;
+            }
+        }
+        break;
+    }
     case WM_CONTEXTMENU:
         if (state) {
             POINT pt{ GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
@@ -491,6 +743,10 @@ LRESULT CALLBACK DriverMemoryViewWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
                 pt = { rc.left + 16, rc.top + 16 };
             }
             HWND target = reinterpret_cast<HWND>(wParam);
+            if (target == state->historyList.hwnd()) {
+                ShowMemoryHistoryContextMenu(*state, pt);
+                return 0;
+            }
             if (target != state->hexEdit && target != state->statusEdit) {
                 target = state->hwnd;
             }
@@ -516,6 +772,9 @@ LRESULT CALLBACK DriverMemoryViewWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
     case WM_NCDESTROY:
         if (state && state->operationTask) {
             state->operationTask->cancel();
+        }
+        if (state && state->historyFilterTask) {
+            state->historyFilterTask->cancel();
         }
         delete state;
         ::SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
@@ -548,470 +807,6 @@ bool RegisterDriverMemoryViewClass() {
     return registered;
 }
 
-constexpr wchar_t kProcessMemoryEvidenceViewClass[] = L"KswordARKLight.ProcessMemoryEvidenceView";
-constexpr int kEvidencePidEditId = 51601;
-constexpr int kEvidenceStartEditId = 51602;
-constexpr int kEvidenceLimitEditId = 51603;
-constexpr int kEvidenceRefreshButtonId = 51604;
-constexpr int kEvidenceListId = 51605;
-constexpr int kEvidenceStatusEditId = 51606;
-
-// ProcessMemoryEvidenceRow is the R3-only audit model for one VA region. Inputs
-// come from VirtualQueryEx and, when available, QueryWorkingSetEx; processing
-// derives risk columns without reading bytes or changing mappings; return
-// behavior is value storage for ListView rendering.
-struct ProcessMemoryEvidenceRow {
-    std::uint64_t baseAddress = 0;
-    std::uint64_t allocationBase = 0;
-    std::uint64_t regionSize = 0;
-    DWORD state = 0;
-    DWORD protect = 0;
-    DWORD type = 0;
-    bool workingSetKnown = false;
-    bool workingSetValid = false;
-    bool workingSetShared = false;
-    bool writableExecutable = false;
-    bool privateExecutable = false;
-    bool largePageUnknown = true;
-    bool badPage = false;
-    bool mappedFile = false;
-};
-
-// ProcessMemoryEvidenceViewState owns the R3 fallback evidence controls. Inputs
-// arrive through Win32 messages; processing performs read-only process queries;
-// no destructor-owned handles are kept after each refresh.
-struct ProcessMemoryEvidenceViewState {
-    HWND hwnd = nullptr;
-    HWND pidEdit = nullptr;
-    HWND startEdit = nullptr;
-    HWND limitEdit = nullptr;
-    HWND refreshButton = nullptr;
-    HWND list = nullptr;
-    HWND statusEdit = nullptr;
-};
-
-using QueryWorkingSetExFn = BOOL(WINAPI*)(HANDLE, PVOID, DWORD);
-
-// Hex64 formats an integer as uppercase 0x-prefixed text. Input is the numeric
-// value; processing uses iostream formatting; output is stable ListView text.
-std::wstring Hex64(const std::uint64_t value) {
-    std::wostringstream stream;
-    stream << L"0x" << std::hex << std::uppercase << value;
-    return stream.str();
-}
-
-// YesNo returns a localized boolean marker. Input is a boolean observation;
-// output is short text for risk/evidence columns.
-const wchar_t* YesNo(const bool value) {
-    return value ? L"是" : L"否";
-}
-
-// ProtectionIsExecutable checks whether a Win32 page protection allows execute.
-// Input is MEMORY_BASIC_INFORMATION.Protect or AllocationProtect; processing
-// strips guard/nocache modifiers and tests execute variants; output is true for
-// executable user-mode protections.
-bool ProtectionIsExecutable(const DWORD protect) {
-    const DWORD base = protect & 0xFFU;
-    return base == PAGE_EXECUTE ||
-        base == PAGE_EXECUTE_READ ||
-        base == PAGE_EXECUTE_READWRITE ||
-        base == PAGE_EXECUTE_WRITECOPY;
-}
-
-// ProtectionIsWritable checks whether a Win32 page protection allows writes or
-// copy-on-write writes. Input is a protection mask; output is true for writable
-// mappings used by the WX risk heuristic.
-bool ProtectionIsWritable(const DWORD protect) {
-    const DWORD base = protect & 0xFFU;
-    return base == PAGE_READWRITE ||
-        base == PAGE_WRITECOPY ||
-        base == PAGE_EXECUTE_READWRITE ||
-        base == PAGE_EXECUTE_WRITECOPY;
-}
-
-// ProtectionText converts Win32 protection bits into a compact display string.
-// Input is a protection mask; processing preserves guard/nocache/writecombine
-// suffixes; output is human-readable and never used as an authority decision.
-std::wstring ProtectionText(const DWORD protect) {
-    const DWORD base = protect & 0xFFU;
-    std::wstring text;
-    switch (base) {
-    case PAGE_NOACCESS: text = L"NOACCESS"; break;
-    case PAGE_READONLY: text = L"R"; break;
-    case PAGE_READWRITE: text = L"RW"; break;
-    case PAGE_WRITECOPY: text = L"WC"; break;
-    case PAGE_EXECUTE: text = L"X"; break;
-    case PAGE_EXECUTE_READ: text = L"RX"; break;
-    case PAGE_EXECUTE_READWRITE: text = L"RWX"; break;
-    case PAGE_EXECUTE_WRITECOPY: text = L"XWC"; break;
-    default: text = L"0x" + Hex64(base).substr(2); break;
-    }
-    if ((protect & PAGE_GUARD) != 0) {
-        text += L"|GUARD";
-    }
-    if ((protect & PAGE_NOCACHE) != 0) {
-        text += L"|NOCACHE";
-    }
-    if ((protect & PAGE_WRITECOMBINE) != 0) {
-        text += L"|WRITECOMBINE";
-    }
-    return text;
-}
-
-// StateText converts MEM_* state to display text. Input is mbi.State; output is
-// a short table value.
-std::wstring StateText(const DWORD state) {
-    switch (state) {
-    case MEM_COMMIT: return L"COMMIT";
-    case MEM_RESERVE: return L"RESERVE";
-    case MEM_FREE: return L"FREE";
-    default: return Hex64(state);
-    }
-}
-
-// TypeText converts MEM_PRIVATE/MAPPED/IMAGE values to display text. Input is
-// mbi.Type; output is a short table value.
-std::wstring TypeText(const DWORD type) {
-    switch (type) {
-    case MEM_PRIVATE: return L"PRIVATE";
-    case MEM_MAPPED: return L"MAPPED";
-    case MEM_IMAGE: return L"IMAGE";
-    case 0: return L"-";
-    default: return Hex64(type);
-    }
-}
-
-// EvidenceColumns returns the fixed report columns for the process VA evidence
-// page. There is no input; output is consumed by the shared ListView helper.
-std::vector<Ksword::Ui::ListViewColumn> EvidenceColumns() {
-    return {
-        { 0, 130, LVCFMT_LEFT, L"Base" },
-        { 1, 130, LVCFMT_LEFT, L"AllocBase" },
-        { 2, 92, LVCFMT_RIGHT, L"Size" },
-        { 3, 74, LVCFMT_LEFT, L"State" },
-        { 4, 92, LVCFMT_LEFT, L"Protect" },
-        { 5, 80, LVCFMT_LEFT, L"Type" },
-        { 6, 70, LVCFMT_LEFT, L"WX" },
-        { 7, 92, LVCFMT_LEFT, L"PrivateExec" },
-        { 8, 86, LVCFMT_LEFT, L"LargePage" },
-        { 9, 74, LVCFMT_LEFT, L"BadPage" },
-        { 10, 82, LVCFMT_LEFT, L"MappedFile" },
-        { 11, 98, LVCFMT_LEFT, L"WorkingSet" },
-    };
-}
-
-// QueryWorkingSetExDynamic calls K32QueryWorkingSetEx when the API is present.
-// Inputs are a process handle and one address; processing dynamically resolves
-// kernel32 export to avoid adding project dependencies; output reports whether
-// working-set evidence was available and fills validity/shared flags.
-bool QueryWorkingSetExDynamic(HANDLE process, void* address, bool& valid, bool& shared) {
-    valid = false;
-    shared = false;
-    HMODULE kernel32 = ::GetModuleHandleW(L"kernel32.dll");
-    if (!kernel32) {
-        return false;
-    }
-    const auto query = reinterpret_cast<QueryWorkingSetExFn>(::GetProcAddress(kernel32, "K32QueryWorkingSetEx"));
-    if (!query) {
-        return false;
-    }
-    PSAPI_WORKING_SET_EX_INFORMATION info{};
-    info.VirtualAddress = address;
-    if (!query(process, &info, static_cast<DWORD>(sizeof(info)))) {
-        return false;
-    }
-    valid = info.VirtualAttributes.Valid != 0;
-    shared = info.VirtualAttributes.Shared != 0;
-    return true;
-}
-
-// BuildEvidenceRow derives display/risk facts from one MEMORY_BASIC_INFORMATION
-// record. Inputs are mbi plus optional working-set facts; processing never reads
-// target bytes; output is a row object for the report table.
-ProcessMemoryEvidenceRow BuildEvidenceRow(
-    const MEMORY_BASIC_INFORMATION& mbi,
-    const bool workingSetKnown,
-    const bool workingSetValid,
-    const bool workingSetShared) {
-    ProcessMemoryEvidenceRow row;
-    row.baseAddress = reinterpret_cast<std::uint64_t>(mbi.BaseAddress);
-    row.allocationBase = reinterpret_cast<std::uint64_t>(mbi.AllocationBase);
-    row.regionSize = static_cast<std::uint64_t>(mbi.RegionSize);
-    row.state = mbi.State;
-    row.protect = mbi.Protect;
-    row.type = mbi.Type;
-    row.workingSetKnown = workingSetKnown;
-    row.workingSetValid = workingSetValid;
-    row.workingSetShared = workingSetShared;
-    row.writableExecutable = mbi.State == MEM_COMMIT && ProtectionIsExecutable(mbi.Protect) && ProtectionIsWritable(mbi.Protect);
-    row.privateExecutable = mbi.State == MEM_COMMIT && mbi.Type == MEM_PRIVATE && ProtectionIsExecutable(mbi.Protect);
-    row.badPage = mbi.State == MEM_COMMIT && ((mbi.Protect & PAGE_GUARD) != 0 || ((mbi.Protect & 0xFFU) == PAGE_NOACCESS));
-    row.mappedFile = mbi.Type == MEM_IMAGE || mbi.Type == MEM_MAPPED;
-    return row;
-}
-
-// InsertEvidenceRow appends one evidence row to the ListView. Inputs are a list
-// HWND and model row; processing converts each field to text; output is the
-// inserted row index from the shared helper.
-int InsertEvidenceRow(HWND list, const ProcessMemoryEvidenceRow& row) {
-    std::wstring workingSetText = L"未知";
-    if (row.workingSetKnown) {
-        workingSetText = row.workingSetValid ? (row.workingSetShared ? L"Valid/Shared" : L"Valid/Private") : L"Not resident";
-    }
-    return Ksword::Ui::InsertListViewTextRow(list, {
-        Hex64(row.baseAddress),
-        Hex64(row.allocationBase),
-        std::to_wstring(row.regionSize),
-        StateText(row.state),
-        ProtectionText(row.protect),
-        TypeText(row.type),
-        YesNo(row.writableExecutable),
-        YesNo(row.privateExecutable),
-        row.largePageUnknown ? L"R3未知" : L"否",
-        YesNo(row.badPage),
-        YesNo(row.mappedFile),
-        workingSetText,
-    });
-}
-
-// SetEvidenceStatus writes a status summary to the read-only status box. Inputs
-// are page state and text; processing updates the edit control; no value is
-// returned.
-void SetEvidenceStatus(ProcessMemoryEvidenceViewState& state, const std::wstring& text) {
-    if (state.statusEdit) {
-        ::SetWindowTextW(state.statusEdit, text.c_str());
-    }
-}
-
-// EnumerateProcessMemoryEvidence walks a target process VA map with R3 APIs.
-// Inputs are PID/start/limit from UI; processing uses VirtualQueryEx and an
-// optional QueryWorkingSetEx sample for each region; output is a vector of
-// read-only evidence rows plus status text.
-std::vector<ProcessMemoryEvidenceRow> EnumerateProcessMemoryEvidence(
-    const DWORD processId,
-    const std::uint64_t startAddress,
-    const std::uint64_t maxRegions,
-    std::wstring& statusText) {
-    std::vector<ProcessMemoryEvidenceRow> rows;
-    if (processId == 0 || maxRegions == 0) {
-        statusText = L"PID 和 MaxRegions 必须非零。";
-        return rows;
-    }
-
-    HANDLE process = ::OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, processId);
-    if (!process) {
-        statusText = L"OpenProcess 查询失败，win32=" + std::to_wstring(::GetLastError()) + L"。";
-        return rows;
-    }
-
-    std::uint64_t address = startAddress;
-    std::uint64_t queried = 0;
-    std::uint64_t workingSetKnown = 0;
-    while (queried < maxRegions) {
-        MEMORY_BASIC_INFORMATION mbi{};
-        const SIZE_T returned = ::VirtualQueryEx(
-            process,
-            reinterpret_cast<LPCVOID>(address),
-            &mbi,
-            sizeof(mbi));
-        if (returned == 0) {
-            break;
-        }
-
-        bool wsValid = false;
-        bool wsShared = false;
-        const bool wsKnown = QueryWorkingSetExDynamic(process, mbi.BaseAddress, wsValid, wsShared);
-        if (wsKnown) {
-            ++workingSetKnown;
-        }
-        rows.push_back(BuildEvidenceRow(mbi, wsKnown, wsValid, wsShared));
-        ++queried;
-
-        const std::uint64_t base = reinterpret_cast<std::uint64_t>(mbi.BaseAddress);
-        const std::uint64_t size = static_cast<std::uint64_t>(mbi.RegionSize);
-        if (size == 0 || base + size <= address) {
-            break;
-        }
-        address = base + size;
-        if (address < base) {
-            break;
-        }
-    }
-
-    ::CloseHandle(process);
-    statusText = L"R3 fallback evidence: VirtualQueryEx regions=" + std::to_wstring(rows.size()) +
-        L"，WorkingSetEx rows=" + std::to_wstring(workingSetKnown) +
-        L"。LargePage/PTE/物理地址字段需要 R0 PTE/VA translation 支持，当前页只读降级显示未知。";
-    return rows;
-}
-
-// RefreshProcessEvidence validates UI input and rebuilds the ListView. Input is
-// the page state; processing does only read-only R3 queries; output is visible
-// table/status state.
-void RefreshProcessEvidence(ProcessMemoryEvidenceViewState& state) {
-    std::uint64_t pidValue = 0;
-    std::uint64_t startValue = 0;
-    std::uint64_t limitValue = 0;
-    std::wstring error;
-    if (!ParseUnsignedInteger(GetWindowTextString(state.pidEdit), std::numeric_limits<DWORD>::max(), L"PID", pidValue, error) ||
-        !ParseUnsignedInteger(GetWindowTextString(state.startEdit), std::numeric_limits<std::uint64_t>::max(), L"Start", startValue, error) ||
-        !ParseUnsignedInteger(GetWindowTextString(state.limitEdit), 100000ULL, L"MaxRegions", limitValue, error)) {
-        SetEvidenceStatus(state, error);
-        return;
-    }
-
-    std::wstring status;
-    const std::vector<ProcessMemoryEvidenceRow> rows = EnumerateProcessMemoryEvidence(
-        static_cast<DWORD>(pidValue),
-        startValue,
-        limitValue,
-        status);
-
-    Ksword::Ui::ScopedListViewRedrawLock redrawLock(state.list);
-    Ksword::Ui::ClearListViewRows(state.list);
-    for (const ProcessMemoryEvidenceRow& row : rows) {
-        InsertEvidenceRow(state.list, row);
-    }
-    SetEvidenceStatus(state, status);
-}
-
-// LayoutEvidenceChildren positions every control in the process VA page. Inputs
-// are page state and current client rect; processing computes a simple report
-// layout; no value is returned.
-void LayoutEvidenceChildren(ProcessMemoryEvidenceViewState& state, const RECT& rc) {
-    const int margin = 12;
-    const int editHeight = 24;
-    const int width = std::max(0, static_cast<int>(rc.right - rc.left));
-    const int height = std::max(0, static_cast<int>(rc.bottom - rc.top));
-    ::MoveWindow(state.pidEdit, 64, 36, 110, editHeight, TRUE);
-    ::MoveWindow(state.startEdit, 238, 36, 160, editHeight, TRUE);
-    ::MoveWindow(state.limitEdit, 488, 36, 100, editHeight, TRUE);
-    ::MoveWindow(state.refreshButton, 606, 35, 86, editHeight + 2, TRUE);
-    const int statusHeight = 56;
-    const int listTop = 74;
-    const int listHeight = std::max(80, height - listTop - statusHeight - margin);
-    ::MoveWindow(state.list, margin, listTop, std::max(100, width - margin * 2), listHeight, TRUE);
-    ::MoveWindow(state.statusEdit, margin, listTop + listHeight + 8, std::max(100, width - margin * 2), statusHeight, TRUE);
-}
-
-// PaintEvidenceLabels draws static labels for the R3 evidence page. Inputs are
-// page HWND and paint DC; processing draws title and field labels; no value is
-// returned.
-void PaintEvidenceLabels(HWND hwnd, HDC dc) {
-    RECT rc{};
-    ::GetClientRect(hwnd, &rc);
-    ::FillRect(dc, &rc, Ksword::Ui::AppTheme().windowBrush());
-    const COLORREF text = Ksword::Ui::AppTheme().textColor;
-    const COLORREF muted = Ksword::Ui::AppTheme().mutedTextColor;
-    Ksword::Ui::DrawTextLine(dc, L"Process VA / PTE Evidence (R3 read-only fallback)", { 12, 8, rc.right - 12, 30 }, text, Ksword::Ui::SystemUIFont(), DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-    Ksword::Ui::DrawTextLine(dc, L"PID", { 12, 36, 58, 60 }, muted, Ksword::Ui::SystemUIFont(), DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-    Ksword::Ui::DrawTextLine(dc, L"Start", { 190, 36, 232, 60 }, muted, Ksword::Ui::SystemUIFont(), DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-    Ksword::Ui::DrawTextLine(dc, L"MaxRegions", { 410, 36, 486, 60 }, muted, Ksword::Ui::SystemUIFont(), DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-}
-
-// StateFromEvidenceWindow returns state stored on the evidence page HWND. Input
-// is a page HWND; processing reads GWLP_USERDATA; output is null before create
-// or after destroy.
-ProcessMemoryEvidenceViewState* StateFromEvidenceWindow(HWND hwnd) {
-    return reinterpret_cast<ProcessMemoryEvidenceViewState*>(::GetWindowLongPtrW(hwnd, GWLP_USERDATA));
-}
-
-// CreateEvidenceChildControls creates all R3 evidence controls. Input is page
-// state with hwnd set; processing creates edit/button/list/status controls and
-// columns; no direct value is returned.
-void CreateEvidenceChildControls(ProcessMemoryEvidenceViewState& state) {
-    state.pidEdit = CreateEdit(state.hwnd, kEvidencePidEditId, std::to_wstring(::GetCurrentProcessId()).c_str(), 0, 0, 0, 0, 0);
-    state.startEdit = CreateEdit(state.hwnd, kEvidenceStartEditId, L"0x0", 0, 0, 0, 0, 0);
-    state.limitEdit = CreateEdit(state.hwnd, kEvidenceLimitEditId, L"512", 0, 0, 0, 0, 0);
-    state.refreshButton = Ksword::Ui::CreateButton(state.hwnd, kEvidenceRefreshButtonId, L"Refresh", 0, 0, 0, 0);
-    state.list = Ksword::Ui::CreateReportListView(state.hwnd, kEvidenceListId, 0, 0, 0, 0, LVS_SHOWSELALWAYS);
-    Ksword::Ui::AddListViewColumns(state.list, EvidenceColumns());
-    state.statusEdit = CreateEdit(state.hwnd,
-        kEvidenceStatusEditId,
-        L"只读 R3 fallback：VirtualQueryEx / QueryWorkingSetEx。R0 PTE/VA translation 不可用时 LargePage、物理地址、PTE 位显示为未知。",
-        0,
-        0,
-        0,
-        0,
-        ES_MULTILINE | ES_AUTOVSCROLL | WS_VSCROLL | ES_READONLY);
-}
-
-// ProcessMemoryEvidenceWndProc dispatches page messages. Inputs are standard
-// Win32 message parameters; processing owns state lifetime, layout and refresh
-// button behavior; output is a DefWindowProc-compatible LRESULT.
-LRESULT CALLBACK ProcessMemoryEvidenceWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
-    if (msg == WM_NCCREATE) {
-        auto state = std::make_unique<ProcessMemoryEvidenceViewState>();
-        state->hwnd = hwnd;
-        ::SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state.release()));
-    }
-
-    ProcessMemoryEvidenceViewState* state = StateFromEvidenceWindow(hwnd);
-    switch (msg) {
-    case WM_CREATE:
-        if (state) {
-            CreateEvidenceChildControls(*state);
-        }
-        return 0;
-    case WM_SIZE:
-        if (state) {
-            RECT rc{};
-            ::GetClientRect(hwnd, &rc);
-            LayoutEvidenceChildren(*state, rc);
-        }
-        return 0;
-    case WM_COMMAND:
-        if (state && HIWORD(wParam) == BN_CLICKED && LOWORD(wParam) == kEvidenceRefreshButtonId) {
-            RefreshProcessEvidence(*state);
-            return 0;
-        }
-        break;
-    case WM_CTLCOLORSTATIC: {
-        HDC dc = reinterpret_cast<HDC>(wParam);
-        ::SetBkMode(dc, TRANSPARENT);
-        ::SetTextColor(dc, Ksword::Ui::AppTheme().textColor);
-        return reinterpret_cast<LRESULT>(Ksword::Ui::AppTheme().windowBrush());
-    }
-    case WM_PAINT: {
-        PAINTSTRUCT ps{};
-        HDC dc = ::BeginPaint(hwnd, &ps);
-        PaintEvidenceLabels(hwnd, dc);
-        ::EndPaint(hwnd, &ps);
-        return 0;
-    }
-    case WM_ERASEBKGND:
-        return 1;
-    case WM_NCDESTROY:
-        delete state;
-        ::SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
-        break;
-    default:
-        break;
-    }
-    return ::DefWindowProcW(hwnd, msg, wParam, lParam);
-}
-
-// RegisterProcessMemoryEvidenceViewClass installs the R3 evidence page class.
-// There is no input; processing is idempotent; output is true when the class can
-// be used by CreateWindowExW.
-bool RegisterProcessMemoryEvidenceViewClass() {
-    static bool registered = false;
-    if (registered) {
-        return true;
-    }
-
-    WNDCLASSW wc{};
-    wc.lpfnWndProc = ProcessMemoryEvidenceWndProc;
-    wc.hInstance = ::GetModuleHandleW(nullptr);
-    wc.hCursor = ::LoadCursorW(nullptr, IDC_ARROW);
-    wc.hbrBackground = Ksword::Ui::AppTheme().windowBrush();
-    wc.lpszClassName = kProcessMemoryEvidenceViewClass;
-    if (::RegisterClassW(&wc) || ::GetLastError() == ERROR_CLASS_ALREADY_EXISTS) {
-        registered = true;
-    }
-    return registered;
-}
-
 } // namespace
 
 HWND CreateDriverMemoryView(HWND parent, const RECT& bounds) {
@@ -1022,25 +817,6 @@ HWND CreateDriverMemoryView(HWND parent, const RECT& bounds) {
     return ::CreateWindowExW(0,
         kDriverMemoryViewClass,
         L"Driver Memory",
-        WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN | WS_CLIPSIBLINGS,
-        bounds.left,
-        bounds.top,
-        bounds.right - bounds.left,
-        bounds.bottom - bounds.top,
-        parent,
-        nullptr,
-        ::GetModuleHandleW(nullptr),
-        nullptr);
-}
-
-HWND CreateProcessMemoryEvidenceView(HWND parent, const RECT& bounds) {
-    if (!RegisterProcessMemoryEvidenceViewClass()) {
-        return nullptr;
-    }
-
-    return ::CreateWindowExW(0,
-        kProcessMemoryEvidenceViewClass,
-        L"Process Memory Evidence",
         WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN | WS_CLIPSIBLINGS,
         bounds.left,
         bounds.top,
