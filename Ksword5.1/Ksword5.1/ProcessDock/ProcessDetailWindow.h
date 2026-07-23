@@ -41,6 +41,7 @@ class QTreeWidgetItem;
 class QVBoxLayout;
 class QPoint;
 class CodeEditorWidget;
+class HandleDock;
 
 class ProcessDetailWindow final : public QWidget
 {
@@ -262,6 +263,10 @@ private:
     void initializeThreadTab();
     void initializeActionTab();
     void initializeModuleTab();
+    // initializeEmbeddedHandleTab 作用：创建按需加载的当前进程句柄审计容器。
+    void initializeEmbeddedHandleTab();
+    // ensureEmbeddedHandleView 作用：首次进入句柄页时创建 HandleDock 并锁定当前 PID。
+    void ensureEmbeddedHandleView();
     void initializeTokenTab();
     // initializeKernelObjectTab 作用：
     // - 构建 Process Detail Evidence 页面；
@@ -557,6 +562,7 @@ private:
     QWidget* m_threadTab = nullptr;            // “线程”页。
     QWidget* m_actionTab = nullptr;            // “操作”页。
     QWidget* m_moduleTab = nullptr;            // “模块”页。
+    QWidget* m_embeddedHandleTab = nullptr;    // 当前进程“句柄”内嵌审计页。
     QWidget* m_tokenTab = nullptr;             // “令牌”页。
     QWidget* m_tokenSwitchTab = nullptr;       // “令牌开关”页。
     QWidget* m_kernelObjectTab = nullptr;      // “Process Detail Evidence”页。
@@ -648,6 +654,11 @@ private:
     QTreeWidget* m_moduleTable = nullptr;      // 模块表格。
 
     std::vector<ks::process::ProcessModuleRecord> m_moduleRecords; // 当前模块数据缓存。
+
+    // ======== 内嵌句柄审计页 ========
+    QVBoxLayout* m_embeddedHandleLayout = nullptr; // 句柄审计页容器布局。
+    QLabel* m_embeddedHandlePlaceholder = nullptr; // 首次进入前的轻量提示。
+    HandleDock* m_embeddedHandleDock = nullptr;    // 复用完整 HandleDock，按当前 PID 过滤。
 
     bool m_moduleRefreshing = false;           // 模块刷新进行中标记。
     bool m_moduleInitialRefreshStarted = false; // 模块页首次刷新是否已经按需启动。

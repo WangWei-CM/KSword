@@ -1,4 +1,5 @@
 #include "ProcessDetailWindow.InternalCommon.h"
+#include "../句柄/HandleDock.h"
 #include "../UI/VisibleTableWidget.h"
 #include "../PluginHost.h"
 
@@ -588,6 +589,7 @@ void ProcessDetailWindow::initializeUi()
     m_threadTab = new QWidget(m_tabWidget);
     m_actionTab = new QWidget(m_tabWidget);
     m_moduleTab = new QWidget(m_tabWidget);
+    m_embeddedHandleTab = new QWidget(m_tabWidget);
     m_tokenTab = new QWidget(m_tabWidget);
     m_tokenSwitchTab = new QWidget(m_tabWidget);
     m_kernelObjectTab = new QWidget(m_tabWidget);
@@ -601,6 +603,7 @@ void ProcessDetailWindow::initializeUi()
     m_threadTab->setObjectName(QStringLiteral("ProcessDetailTab_Thread"));
     m_actionTab->setObjectName(QStringLiteral("ProcessDetailTab_Action"));
     m_moduleTab->setObjectName(QStringLiteral("ProcessDetailTab_Module"));
+    m_embeddedHandleTab->setObjectName(QStringLiteral("ProcessDetailTab_EmbeddedHandle"));
     m_tokenTab->setObjectName(QStringLiteral("ProcessDetailTab_Token"));
     m_tokenSwitchTab->setObjectName(QStringLiteral("ProcessDetailTab_TokenSwitch"));
     m_kernelObjectTab->setObjectName(QStringLiteral("ProcessDetailTab_ProcessDetailEvidence"));
@@ -614,6 +617,7 @@ void ProcessDetailWindow::initializeUi()
     initializeThreadTab();
     initializeActionTab();
     initializeModuleTab();
+    initializeEmbeddedHandleTab();
     initializeTokenTab();
     initializeTokenSwitchTab();
     initializeKernelObjectTab();
@@ -628,6 +632,7 @@ void ProcessDetailWindow::initializeUi()
     m_tabWidget->addTab(m_threadTab, QIcon(":/Icon/process_tree.svg"), "线程");
     m_tabWidget->addTab(m_actionTab, QIcon(":/Icon/process_priority.svg"), "操作");
     m_tabWidget->addTab(m_moduleTab, QIcon(":/Icon/process_list.svg"), "模块");
+    m_tabWidget->addTab(m_embeddedHandleTab, QIcon(":/Icon/handle_refresh.svg"), "句柄");
     m_tabWidget->addTab(m_tokenTab, QIcon(":/Icon/process_critical.svg"), "令牌");
     m_tabWidget->addTab(m_tokenSwitchTab, QIcon(":/Icon/process_start.svg"), "令牌开关");
     m_tabWidget->addTab(m_kernelObjectTab, QIcon(":/Icon/process_critical.svg"), "Process Detail Evidence");
@@ -807,10 +812,52 @@ void ProcessDetailWindow::requestInitialRefreshForCurrentTab()
         return;
     }
 
+    if (currentTab == m_embeddedHandleTab)
+    {
+        ensureEmbeddedHandleView();
+        return;
+    }
+
     if (currentTab == m_kernelCallbackTab && !m_kernelCallbackInitialRefreshStarted)
     {
         requestAsyncKernelCallbackRefresh();
     }
+}
+
+void ProcessDetailWindow::initializeEmbeddedHandleTab()
+{
+    // 只创建轻量容器；HandleDock 自身包含多张表和异步枚举，首次切页时再构造。
+    m_embeddedHandleLayout = new QVBoxLayout(m_embeddedHandleTab);
+    m_embeddedHandleLayout->setContentsMargins(0, 0, 0, 0);
+    m_embeddedHandleLayout->setSpacing(0);
+
+    m_embeddedHandlePlaceholder = new QLabel(
+        QStringLiteral("句柄审计视图将在首次进入本页时加载。"),
+        m_embeddedHandleTab);
+    m_embeddedHandlePlaceholder->setAlignment(Qt::AlignCenter);
+    m_embeddedHandlePlaceholder->setStyleSheet(
+        QStringLiteral("color:%1;").arg(KswordTheme::TextSecondaryHex()));
+    m_embeddedHandleLayout->addWidget(m_embeddedHandlePlaceholder, 1);
+}
+
+void ProcessDetailWindow::ensureEmbeddedHandleView()
+{
+    if (m_embeddedHandleDock != nullptr || m_embeddedHandleLayout == nullptr)
+    {
+        return;
+    }
+
+    m_embeddedHandleDock = new HandleDock(m_embeddedHandleTab);
+    m_embeddedHandleDock->hide();
+    if (m_embeddedHandlePlaceholder != nullptr)
+    {
+        m_embeddedHandleLayout->removeWidget(m_embeddedHandlePlaceholder);
+        m_embeddedHandlePlaceholder->deleteLater();
+        m_embeddedHandlePlaceholder = nullptr;
+    }
+    m_embeddedHandleLayout->addWidget(m_embeddedHandleDock, 1);
+    m_embeddedHandleDock->focusProcessId(m_baseRecord.pid, false);
+    m_embeddedHandleDock->show();
 }
 
 void ProcessDetailWindow::requestAsyncStaticDetailRefresh(const bool includeSignatureCheck)
