@@ -1,18 +1,28 @@
 #pragma once
 
 #include "../../Core/Win32Lean.h"
+#include "../../Ui/AsyncTask.h"
 #include "EtwFilterModel.h"
 #include "EtwSessionController.h"
 
 #include <commctrl.h>
 
 #include <deque>
+#include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <mutex>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
 namespace Ksword::Features::Monitor {
+
+struct EtwEventFilterResult {
+    std::uint64_t generation = 0;
+    std::wstring query;
+    std::vector<std::size_t> visibleIndexes;
+};
 
 // EtwMonitorView is the ETW-only monitoring page. Inputs are parent HWND and
 // bounds; processing creates a Win32 child page with Start/Stop/Filter buttons
@@ -62,6 +72,8 @@ private:
     void clearPendingEvents();
 
     void appendEventsToView(const std::vector<EtwEvent>& events);
+    void requestLocalFilter(std::wstring query);
+    void applyLocalFilter(EtwEventFilterResult result);
     void clearEventList();
     void updateStatusText(const std::wstring& text);
     void updateButtonState();
@@ -73,6 +85,8 @@ private:
     bool selectedEvent(EtwEvent* eventRow) const;
     std::wstring formatEventDetailText(const EtwEvent& eventRow) const;
     void copySelectedEventRow();
+    void copySelectedEventCell();
+    void copyVisibleEventRows();
     void copySelectedEventDetail();
     void showEventContextMenu(POINT screenPoint);
     bool handleVirtualEventDisplayInfo(NMLVDISPINFOW* displayInfo);
@@ -83,15 +97,21 @@ private:
     HWND filterButton_ = nullptr;
     HWND clearButton_ = nullptr;
     HWND statusText_ = nullptr;
+    HWND localFilterBar_ = nullptr;
     HWND eventList_ = nullptr;
     HIMAGELIST eventImageList_ = nullptr;
     std::vector<EtwEvent> eventRows_;
+    std::vector<std::size_t> visibleEventIndexes_;
+    std::wstring localFilterQuery_;
+    std::uint64_t eventGeneration_ = 0;
+    int eventContextColumn_ = 0;
     std::wstring eventTextScratch_;
     EtwFilterModel filterModel_;
     EtwSessionController controller_;
     std::mutex pendingEventMutex_;
     std::deque<EtwEvent> pendingEvents_;
     std::unordered_map<std::uint32_t, int> processIconCache_;
+    std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<EtwEventFilterResult>> localFilterTask_;
     bool deleteOnDestroy_ = false;
 };
 

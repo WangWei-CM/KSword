@@ -1,6 +1,7 @@
 #include "EtwMonitorView.h"
 
 #include "../../Ui/Controls.h"
+#include "../../Ui/FilterBar.h"
 #include "../../Ui/Theme.h"
 #include "EtwFilterDialog.h"
 
@@ -9,6 +10,7 @@
 #include <windowsx.h>
 #include <algorithm>
 #include <cstdio>
+#include <cwctype>
 #include <iomanip>
 #include <iterator>
 #include <sstream>
@@ -23,7 +25,9 @@ constexpr int kStopButtonId = 52002;
 constexpr int kFilterButtonId = 52003;
 constexpr int kClearButtonId = 52004;
 constexpr int kListId = 52005;
+constexpr int kLocalFilterBarId = 52006;
 constexpr UINT kStatusMessage = WM_APP + 62;
+constexpr UINT kLocalFilterMessage = WM_APP + 63;
 constexpr UINT_PTR kEventFlushTimerId = 52061;
 constexpr UINT kEventFlushIntervalMs = 150;
 constexpr std::size_t kMaxEventRows = 5000;
@@ -36,6 +40,8 @@ constexpr UINT kEtwMenuClear = 52604;
 constexpr UINT kEtwMenuStart = 52605;
 constexpr UINT kEtwMenuStop = 52606;
 constexpr UINT kEtwMenuFilter = 52607;
+constexpr UINT kEtwMenuCopyCell = 52608;
+constexpr UINT kEtwMenuCopyVisible = 52609;
 
 void EnsureViewClass() {
     static bool registered = false;
@@ -132,6 +138,26 @@ std::wstring NumberText(const unsigned long long value) {
     return buffer;
 }
 
+bool ContainsCaseInsensitive(const std::wstring& value, const std::wstring& query) {
+    if (query.empty()) {
+        return true;
+    }
+    const auto found = std::search(value.begin(), value.end(), query.begin(), query.end(), [](const wchar_t left, const wchar_t right) {
+        return std::towlower(left) == std::towlower(right);
+    });
+    return found != value.end();
+}
+
+bool MatchesEvent(const EtwEvent& eventRow, const std::wstring& query) {
+    return ContainsCaseInsensitive(NumberText(eventRow.processId), query) ||
+        ContainsCaseInsensitive(eventRow.timeText, query) ||
+        ContainsCaseInsensitive(eventRow.providerText, query) ||
+        ContainsCaseInsensitive(NumberText(eventRow.threadId), query) ||
+        ContainsCaseInsensitive(NumberText(eventRow.eventId), query) ||
+        ContainsCaseInsensitive(NumberText(eventRow.level), query) ||
+        ContainsCaseInsensitive(eventRow.summary, query);
+}
+
 // CopyTextToClipboard writes Unicode text for ETW menu actions. Inputs are owner
 // HWND and text; processing transfers CF_UNICODETEXT to the system clipboard;
 // output reports success.
@@ -226,6 +252,10 @@ LRESULT EtwMonitorView::handleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
         layout();
         return 0;
     case WM_COMMAND:
+        if (LOWORD(wParam) == kLocalFilterBarId && HIWORD(wParam) == EN_CHANGE) {
+            requestLocalFilter(Ksword::Ui::GetFilterBarText(localFilterBar_));
+            return 0;
+        }
         if (LOWORD(wParam) == kStartButtonId) {
             startSession();
             return 0;
@@ -290,6 +320,11 @@ LRESULT EtwMonitorView::handleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
         }
         return 0;
     }
+    case kLocalFilterMessage:
+        if (localFilterTask_ && localFilterTask_->consume(hwnd, wParam, lParam)) {
+            return 0;
+        }
+        break;
     case WM_CTLCOLORSTATIC: {
         HDC dc = reinterpret_cast<HDC>(wParam);
         ::SetBkMode(dc, TRANSPARENT);
@@ -298,6 +333,9 @@ LRESULT EtwMonitorView::handleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
     }
     case WM_DESTROY:
         ::KillTimer(hwnd_, kEventFlushTimerId);
+        if (localFilterTask_) {
+            localFilterTask_->cancel();
+        }
         controller_.stop();
         return 0;
     case WM_NCDESTROY:
@@ -319,6 +357,7 @@ void EtwMonitorView::createControls() {
     filterButton_ = Ksword::Ui::CreateButton(hwnd_, kFilterButtonId, L"筛选器...", 180, 12, 96, 28);
     clearButton_ = Ksword::Ui::CreateButton(hwnd_, kClearButtonId, L"清空", 282, 12, 78, 28);
     statusText_ = Ksword::Ui::CreateText(hwnd_, 0, L"ETW 已停止。筛选器在弹窗中配置。", 376, 18, 520, 22);
+    localFilterBar_ = Ksword::Ui::CreateFilterBar(hwnd_, kLocalFilterBarId, L"本地筛选所有事件字段和摘要", 12, 46, 320, 24);
 
     eventList_ = ::CreateWindowExW(
         WS_EX_CLIENTEDGE,
@@ -326,7 +365,7 @@ void EtwMonitorView::createControls() {
         L"",
         WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SHOWSELALWAYS | LVS_SINGLESEL | LVS_OWNERDATA,
         12,
-        52,
+        76,
         860,
         400,
         hwnd_,
@@ -350,6 +389,7 @@ void EtwMonitorView::createControls() {
     InsertColumn(eventList_, 5, L"Level", 60);
     InsertColumn(eventList_, 6, L"摘要", 420);
     ::SendMessageW(eventList_, WM_SETFONT, reinterpret_cast<WPARAM>(Ksword::Ui::SystemUIFont()), TRUE);
+    localFilterTask_ = std::make_unique<Ksword::Ui::AsyncSnapshotTask<EtwEventFilterResult>>(hwnd_, kLocalFilterMessage);
 
     controller_.setEventCallback([this](const EtwEvent& eventRow) {
         enqueueEventFromWorker(eventRow);
@@ -367,7 +407,8 @@ void EtwMonitorView::layout() {
     const int width = rc.right - rc.left;
     const int height = rc.bottom - rc.top;
     ::MoveWindow(statusText_, 376, 17, width - 388, 24, TRUE);
-    ::MoveWindow(eventList_, 12, 52, width - 24, height - 64, TRUE);
+    ::MoveWindow(localFilterBar_, 12, 46, width - 24, 24, TRUE);
+    ::MoveWindow(eventList_, 12, 76, width - 24, height - 88, TRUE);
 }
 
 void EtwMonitorView::startSession() {
@@ -440,12 +481,63 @@ void EtwMonitorView::clearPendingEvents() {
     pendingEvents_.clear();
 }
 
+void EtwMonitorView::requestLocalFilter(std::wstring query) {
+    localFilterQuery_ = std::move(query);
+    if (eventList_ == nullptr) {
+        return;
+    }
+    if (localFilterQuery_.empty()) {
+        visibleEventIndexes_.resize(eventRows_.size());
+        for (std::size_t index = 0; index < visibleEventIndexes_.size(); ++index) {
+            visibleEventIndexes_[index] = index;
+        }
+        ListView_SetItemCountEx(eventList_, static_cast<int>(visibleEventIndexes_.size()), LVSICF_NOINVALIDATEALL | LVSICF_NOSCROLL);
+        ::InvalidateRect(eventList_, nullptr, FALSE);
+        return;
+    }
+    if (!localFilterTask_) {
+        return;
+    }
+    const auto snapshot = std::make_shared<const std::vector<EtwEvent>>(eventRows_);
+    const std::uint64_t generation = eventGeneration_;
+    localFilterTask_->request(
+        [snapshot, generation, query = localFilterQuery_]() mutable {
+            EtwEventFilterResult result{};
+            result.generation = generation;
+            result.query = std::move(query);
+            result.visibleIndexes.reserve(snapshot->size());
+            for (std::size_t index = 0; index < snapshot->size(); ++index) {
+                if (MatchesEvent((*snapshot)[index], result.query)) {
+                    result.visibleIndexes.push_back(index);
+                }
+            }
+            return result;
+        },
+        [this](std::uint64_t, std::optional<EtwEventFilterResult>&& result, std::exception_ptr error) {
+            if (error || !result.has_value()) {
+                updateStatusText(L"ETW 本地筛选异常结束，已保留当前可见结果。");
+                return;
+            }
+            applyLocalFilter(std::move(*result));
+        });
+}
+
+void EtwMonitorView::applyLocalFilter(EtwEventFilterResult result) {
+    if (result.generation != eventGeneration_ || result.query != localFilterQuery_) {
+        return;
+    }
+    visibleEventIndexes_ = std::move(result.visibleIndexes);
+    ListView_SetItemCountEx(eventList_, static_cast<int>(visibleEventIndexes_.size()), LVSICF_NOINVALIDATEALL | LVSICF_NOSCROLL);
+    updateStatusText(L"ETW 本地筛选结果：" + std::to_wstring(visibleEventIndexes_.size()) + L" 项。");
+    ::InvalidateRect(eventList_, nullptr, FALSE);
+}
+
 void EtwMonitorView::appendEventsToView(const std::vector<EtwEvent>& events) {
     if (events.empty() || eventList_ == nullptr) {
         return;
     }
 
-    const int itemCountBefore = ListView_GetItemCount(eventList_);
+    const int itemCountBefore = static_cast<int>(visibleEventIndexes_.size());
     const bool followTail = itemCountBefore == 0 ||
         ListView_GetTopIndex(eventList_) + ListView_GetCountPerPage(eventList_) >= itemCountBefore - 1;
     eventRows_.insert(eventRows_.end(), events.begin(), events.end());
@@ -453,9 +545,18 @@ void EtwMonitorView::appendEventsToView(const std::vector<EtwEvent>& events) {
         const std::size_t trimmed = eventRows_.size() - kMaxEventRows;
         eventRows_.erase(eventRows_.begin(), eventRows_.begin() + static_cast<std::ptrdiff_t>(trimmed));
     }
-    ListView_SetItemCountEx(eventList_, static_cast<int>(eventRows_.size()), LVSICF_NOINVALIDATEALL | LVSICF_NOSCROLL);
-    if (followTail && !eventRows_.empty()) {
-        ListView_EnsureVisible(eventList_, static_cast<int>(eventRows_.size() - 1), FALSE);
+    ++eventGeneration_;
+    if (localFilterQuery_.empty()) {
+        visibleEventIndexes_.resize(eventRows_.size());
+        for (std::size_t index = 0; index < visibleEventIndexes_.size(); ++index) {
+            visibleEventIndexes_[index] = index;
+        }
+    } else {
+        requestLocalFilter(localFilterQuery_);
+    }
+    ListView_SetItemCountEx(eventList_, static_cast<int>(visibleEventIndexes_.size()), LVSICF_NOINVALIDATEALL | LVSICF_NOSCROLL);
+    if (followTail && !visibleEventIndexes_.empty()) {
+        ListView_EnsureVisible(eventList_, static_cast<int>(visibleEventIndexes_.size() - 1), FALSE);
     }
     ::InvalidateRect(eventList_, nullptr, FALSE);
 }
@@ -465,11 +566,15 @@ void EtwMonitorView::appendEventsToView(const std::vector<EtwEvent>& events) {
 // one item count instead of issuing one insert and six text messages per event.
 bool EtwMonitorView::handleVirtualEventDisplayInfo(NMLVDISPINFOW* displayInfo) {
     if (displayInfo == nullptr || displayInfo->item.iItem < 0 ||
-        static_cast<std::size_t>(displayInfo->item.iItem) >= eventRows_.size()) {
+        static_cast<std::size_t>(displayInfo->item.iItem) >= visibleEventIndexes_.size()) {
         return false;
     }
 
-    const EtwEvent& eventRow = eventRows_[static_cast<std::size_t>(displayInfo->item.iItem)];
+    const std::size_t sourceIndex = visibleEventIndexes_[static_cast<std::size_t>(displayInfo->item.iItem)];
+    if (sourceIndex >= eventRows_.size()) {
+        return false;
+    }
+    const EtwEvent& eventRow = eventRows_[sourceIndex];
     if ((displayInfo->item.mask & LVIF_TEXT) != 0) {
         switch (displayInfo->item.iSubItem) {
         case 0: eventTextScratch_ = NumberText(eventRow.processId); break;
@@ -487,7 +592,7 @@ bool EtwMonitorView::handleVirtualEventDisplayInfo(NMLVDISPINFOW* displayInfo) {
         displayInfo->item.iImage = iconIndexForProcessId(eventRow.processId);
     }
     if ((displayInfo->item.mask & LVIF_PARAM) != 0) {
-        displayInfo->item.lParam = static_cast<LPARAM>(displayInfo->item.iItem);
+        displayInfo->item.lParam = static_cast<LPARAM>(sourceIndex);
     }
     return true;
 }
@@ -497,6 +602,8 @@ void EtwMonitorView::clearEventList() {
     // - input: none;
     // - processing: reset only the owner-data count;
     // - return: none.  No historical rows are reinserted or repainted.
+    visibleEventIndexes_.clear();
+    ++eventGeneration_;
     ListView_SetItemCountEx(eventList_, 0, LVSICF_NOINVALIDATEALL | LVSICF_NOSCROLL);
     ::InvalidateRect(eventList_, nullptr, FALSE);
 }
@@ -613,12 +720,17 @@ bool EtwMonitorView::selectedEvent(EtwEvent* eventRow) const {
         const_cast<EtwMonitorView*>(this)->updateStatusText(L"没有选中监控项。");
         return false;
     }
-    if (selected >= static_cast<int>(eventRows_.size())) {
+    if (selected >= static_cast<int>(visibleEventIndexes_.size())) {
+        const_cast<EtwMonitorView*>(this)->updateStatusText(L"监控项索引已过期，请刷新列表后重试。");
+        return false;
+    }
+    const std::size_t sourceIndex = visibleEventIndexes_[static_cast<std::size_t>(selected)];
+    if (sourceIndex >= eventRows_.size()) {
         const_cast<EtwMonitorView*>(this)->updateStatusText(L"监控项索引已过期，请刷新列表后重试。");
         return false;
     }
     if (eventRow) {
-        *eventRow = eventRows_[static_cast<std::size_t>(selected)];
+        *eventRow = eventRows_[sourceIndex];
     }
     return true;
 }
@@ -655,6 +767,43 @@ void EtwMonitorView::copySelectedEventRow() {
     updateStatusText(CopyTextToClipboard(hwnd_, row.str()) ? L"已复制 ETW 行。" : L"复制 ETW 行失败。");
 }
 
+void EtwMonitorView::copySelectedEventCell() {
+    EtwEvent eventRow;
+    if (!selectedEvent(&eventRow)) {
+        return;
+    }
+    std::wstring text;
+    switch (eventContextColumn_) {
+    case 0: text = NumberText(eventRow.processId); break;
+    case 1: text = eventRow.timeText; break;
+    case 2: text = eventRow.providerText; break;
+    case 3: text = NumberText(eventRow.threadId); break;
+    case 4: text = NumberText(eventRow.eventId); break;
+    case 5: text = NumberText(eventRow.level); break;
+    case 6: text = eventRow.summary; break;
+    default: break;
+    }
+    updateStatusText(CopyTextToClipboard(hwnd_, text) ? L"已复制 ETW 单元格。" : L"复制 ETW 单元格失败。");
+}
+
+void EtwMonitorView::copyVisibleEventRows() {
+    std::wostringstream output;
+    for (const std::size_t sourceIndex : visibleEventIndexes_) {
+        if (sourceIndex >= eventRows_.size()) {
+            continue;
+        }
+        const EtwEvent& eventRow = eventRows_[sourceIndex];
+        output << eventRow.timeText << L'\t'
+               << eventRow.providerText << L'\t'
+               << eventRow.processId << L'\t'
+               << eventRow.threadId << L'\t'
+               << eventRow.eventId << L'\t'
+               << static_cast<unsigned int>(eventRow.level) << L'\t'
+               << eventRow.summary << L"\r\n";
+    }
+    updateStatusText(CopyTextToClipboard(hwnd_, output.str()) ? L"已复制 ETW 可见结果。" : L"复制 ETW 可见结果失败。");
+}
+
 void EtwMonitorView::copySelectedEventDetail() {
     EtwEvent eventRow;
     if (!selectedEvent(&eventRow)) {
@@ -676,8 +825,9 @@ void EtwMonitorView::showEventContextMenu(POINT screenPoint) {
     ::ScreenToClient(eventList_, &clientPoint);
     LVHITTESTINFO hit{};
     hit.pt = clientPoint;
-    const int hitRow = ListView_HitTest(eventList_, &hit);
+    const int hitRow = ListView_SubItemHitTest(eventList_, &hit);
     if (hitRow >= 0) {
+        eventContextColumn_ = hit.iSubItem;
         ListView_SetItemState(eventList_, -1, 0, LVIS_SELECTED | LVIS_FOCUSED);
         ListView_SetItemState(eventList_, hitRow, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
     }
@@ -694,8 +844,10 @@ void EtwMonitorView::showEventContextMenu(POINT screenPoint) {
     }
     HMENU copyMenu = ::CreatePopupMenu();
     if (copyMenu) {
+        ::AppendMenuW(copyMenu, MF_STRING | (hasSelection ? 0U : MF_GRAYED), kEtwMenuCopyCell, L"复制单元格");
         ::AppendMenuW(copyMenu, MF_STRING | (hasSelection ? 0U : MF_GRAYED), kEtwMenuCopyRow, L"复制当前行");
         ::AppendMenuW(copyMenu, MF_STRING | (hasSelection ? 0U : MF_GRAYED), kEtwMenuCopyDetail, L"复制详情");
+        ::AppendMenuW(copyMenu, MF_STRING | (!visibleEventIndexes_.empty() ? 0U : MF_GRAYED), kEtwMenuCopyVisible, L"复制可见结果");
         ::AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(copyMenu), L"复制");
     }
     HMENU sessionMenu = ::CreatePopupMenu();
@@ -724,8 +876,14 @@ void EtwMonitorView::showEventContextMenu(POINT screenPoint) {
     case kEtwMenuCopyRow:
         copySelectedEventRow();
         break;
+    case kEtwMenuCopyCell:
+        copySelectedEventCell();
+        break;
     case kEtwMenuCopyDetail:
         copySelectedEventDetail();
+        break;
+    case kEtwMenuCopyVisible:
+        copyVisibleEventRows();
         break;
     case kEtwMenuClear:
         clearPendingEvents();
