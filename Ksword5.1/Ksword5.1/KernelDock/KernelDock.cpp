@@ -16,6 +16,7 @@
 #include "KernelDockCidTab.h"
 #include "KernelDockIpcTab.h"
 #include "KernelDeviceDriverObjectsTab.h"
+#include "KernelIoctlAuditTab.h"
 #include "KernelNamedPipeTab.h"
 #include "KernelObjectDirectoryDeepTab.h"
 #include "KernelObjectTypeMatrixTab.h"
@@ -696,6 +697,10 @@ void KernelDock::initializeObjectNamespaceTab()
         new KernelDeviceDriverObjectsTab(m_objectNamespaceInnerTabWidget),
         tabIcon(QStringLiteral(":/Icon/process_details.svg")),
         kernelText("kernel.main.inner_tab.device_driver", QStringLiteral("设备与驱动")));
+    m_objectNamespaceInnerTabWidget->addTab(
+        new KernelIoctlAuditTab(m_objectNamespaceInnerTabWidget),
+        tabIcon(QStringLiteral(":/Icon/process_list.svg")),
+        kernelText("kernel.main.inner_tab.ioctl_audit", QStringLiteral("IOCTL 派遣表")));
     m_objectNamespaceInnerTabWidget->addTab(
         new KernelObjectTypeMatrixTab(m_objectNamespaceInnerTabWidget),
         tabIcon(QStringLiteral(":/Icon/process_list.svg")),

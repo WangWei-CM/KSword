@@ -355,6 +355,9 @@
     <ClCompile Include="src\features\kernel\driver_object_query.c">
       <Filter>Source Files\Features\Kernel</Filter>
     </ClCompile>
+    <ClCompile Include="src\features\kernel\ioctl_registry_query.c">
+      <Filter>Source Files\Features\Kernel</Filter>
+    </ClCompile>
     <ClCompile Include="src\features\kernel\driver_integrity.c">
       <Filter>Source Files\Features\Kernel</Filter>
     </ClCompile>

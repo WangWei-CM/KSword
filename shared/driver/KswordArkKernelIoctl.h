@@ -20,6 +20,7 @@
 #define KSWORD_ARK_IOCTL_FUNCTION_QUERY_DRIVER_INTEGRITY 0x849UL
 #define KSWORD_ARK_IOCTL_FUNCTION_QUERY_CPU_HARDWARE 0x84AUL
 #define KSWORD_ARK_IOCTL_FUNCTION_QUERY_PHYSICAL_MEMORY_LAYOUT 0x84BUL
+#define KSWORD_ARK_IOCTL_FUNCTION_QUERY_IOCTL_REGISTRY 0x8A4UL
 
 #define IOCTL_KSWORD_ARK_ENUM_SSDT \
     CTL_CODE( \
@@ -34,6 +35,59 @@
         KSWORD_ARK_IOCTL_FUNCTION_QUERY_DRIVER_OBJECT, \
         METHOD_BUFFERED, \
         FILE_ANY_ACCESS)
+
+// 中文说明：查询 KswordARK 自身静态 IOCTL 注册表，只返回只读诊断元数据。
+#define IOCTL_KSWORD_ARK_QUERY_IOCTL_REGISTRY \
+    CTL_CODE( \
+        KSWORD_ARK_IOCTL_DEVICE_TYPE, \
+        KSWORD_ARK_IOCTL_FUNCTION_QUERY_IOCTL_REGISTRY, \
+        METHOD_BUFFERED, \
+        FILE_ANY_ACCESS)
+
+#define KSWORD_ARK_IOCTL_REGISTRY_PROTOCOL_VERSION 1UL
+#define KSWORD_ARK_IOCTL_REGISTRY_NAME_CHARS 96U
+#define KSWORD_ARK_IOCTL_REGISTRY_MAX_ENTRIES 512UL
+#define KSWORD_ARK_IOCTL_REGISTRY_FLAG_INCLUDE_HANDLER 0x00000001UL
+#define KSWORD_ARK_IOCTL_REGISTRY_STATUS_OK 0UL
+#define KSWORD_ARK_IOCTL_REGISTRY_STATUS_TRUNCATED 1UL
+#define KSWORD_ARK_IOCTL_REGISTRY_STATUS_INVALID_REQUEST 2UL
+
+typedef struct _KSWORD_ARK_QUERY_IOCTL_REGISTRY_REQUEST
+{
+    unsigned long version;
+    unsigned long flags;
+    unsigned long maxEntries;
+    unsigned long reserved;
+} KSWORD_ARK_QUERY_IOCTL_REGISTRY_REQUEST;
+
+typedef struct _KSWORD_ARK_IOCTL_REGISTRY_ENTRY
+{
+    unsigned long ioControlCode;
+    unsigned long functionNumber;
+    unsigned long method;
+    unsigned long access;
+    unsigned long flags;
+    unsigned long reserved;
+    unsigned long long requiredCapability;
+    unsigned long long handlerAddress;
+    char name[KSWORD_ARK_IOCTL_REGISTRY_NAME_CHARS];
+} KSWORD_ARK_IOCTL_REGISTRY_ENTRY;
+
+typedef struct _KSWORD_ARK_QUERY_IOCTL_REGISTRY_RESPONSE
+{
+    unsigned long version;
+    unsigned long status;
+    unsigned long totalCount;
+    unsigned long returnedCount;
+    unsigned long entrySize;
+    unsigned long duplicateCount;
+    long lastStatus;
+    unsigned long reserved;
+    KSWORD_ARK_IOCTL_REGISTRY_ENTRY entries[1];
+} KSWORD_ARK_QUERY_IOCTL_REGISTRY_RESPONSE;
+
+#define KSWORD_ARK_IOCTL_REGISTRY_RESPONSE_HEADER_SIZE \
+    (sizeof(KSWORD_ARK_QUERY_IOCTL_REGISTRY_RESPONSE) - sizeof(KSWORD_ARK_IOCTL_REGISTRY_ENTRY))
 
 #define IOCTL_KSWORD_ARK_ENUM_SHADOW_SSDT \
     CTL_CODE( \

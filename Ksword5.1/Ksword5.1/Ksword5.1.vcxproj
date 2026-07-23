@@ -202,6 +202,7 @@
     <ClCompile Include="KernelDock\KernelCommunicationEndpointTab.cpp" />
     <ClCompile Include="KernelDock\KernelDeviceDriverObjectsTab.cpp" />
     <ClCompile Include="KernelDock\KernelDeviceDriverObjectsWorker.cpp" />
+    <ClCompile Include="KernelDock\KernelIoctlAuditTab.cpp" />
     <ClCompile Include="KernelDock\KernelDockAtomWorker.cpp" />
     <ClCompile Include="KernelDock\KernelDockObjectNamespaceWorker.cpp" />
     <ClCompile Include="KernelDock\KernelDockQueryWorker.cpp" />
@@ -371,6 +372,7 @@
     <ClCompile Include="ArkDriverClient\ArkDriverFile.cpp" />
     <ClCompile Include="ArkDriverClient\ArkDriverRegistry.cpp" />
     <ClCompile Include="ArkDriverClient\ArkDriverKernel.cpp" />
+    <ClCompile Include="ArkDriverClient\ArkDriverIoctlRegistry.cpp" />
     <ClCompile Include="ArkDriverClient\ArkDriverKeyboard.cpp" />
     <ClCompile Include="ArkDriverClient\ArkDriverCallback.cpp" />
     <ClCompile Include="ArkDriverClient\ArkDriverMutation.cpp" />
@@ -404,6 +406,7 @@
     <ClInclude Include="KernelDock\KernelCommunicationEndpointTab.h" />
     <ClInclude Include="KernelDock\KernelDeviceDriverObjectsTab.h" />
     <ClInclude Include="KernelDock\KernelDeviceDriverObjectsWorker.h" />
+    <ClInclude Include="KernelDock\KernelIoctlAuditTab.h" />
     <ClInclude Include="KernelDock\KernelDockObjectNamespaceWorker.h" />
     <ClInclude Include="KernelDock\KernelDockQueryWorker.h" />
     <ClInclude Include="KernelDock\KernelDockSsdtWorker.h" />

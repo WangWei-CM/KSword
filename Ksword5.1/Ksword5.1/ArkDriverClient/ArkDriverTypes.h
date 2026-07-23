@@ -1342,6 +1342,33 @@ namespace ksword::ark
         std::vector<DriverDeviceEntry> devices;
     };
 
+    // IoctlRegistryEntry 承载 KswordARK dispatch registry 的一条只读诊断行。
+    struct IoctlRegistryEntry
+    {
+        std::uint32_t ioControlCode = 0;       // ioControlCode：完整 CTL_CODE。
+        std::uint32_t functionNumber = 0;      // functionNumber：CTL_CODE 的 function 部分。
+        std::uint32_t method = 0;              // method：METHOD_BUFFERED 等传输方式。
+        std::uint32_t access = 0;              // access：FILE_ANY_ACCESS/READ/WRITE。
+        std::uint32_t flags = 0;                // flags：dispatch registry flags。
+        std::uint64_t requiredCapability = 0;  // requiredCapability：DynData capability 门槛。
+        std::uint64_t handlerAddress = 0;       // handlerAddress：可选 handler 诊断地址。
+        std::string name;                       // name：注册表中的固定名称。
+    };
+
+    // IoctlRegistryQueryResult 承载 KswordARK 自身 IOCTL registry 查询响应。
+    struct IoctlRegistryQueryResult
+    {
+        IoResult io;                            // io：DeviceIoControl 传输状态。
+        bool unsupported = false;               // unsupported：旧驱动未注册查询 IOCTL。
+        std::uint32_t version = 0;              // version：协议版本。
+        std::uint32_t status = 0;               // status：完整/截断状态。
+        std::uint32_t totalCount = 0;           // totalCount：R0 registry 总行数。
+        std::uint32_t returnedCount = 0;        // returnedCount：本次返回行数。
+        std::uint32_t duplicateCount = 0;       // duplicateCount：重复控制码数量。
+        long lastStatus = 0;                    // lastStatus：R0 查询状态。
+        std::vector<IoctlRegistryEntry> entries; // entries：按 dispatch 顺序排列的行。
+    };
+
     // DriverForceUnloadResult 承载 R0 DriverObject 强制卸载响应。
     struct DriverForceUnloadResult
     {

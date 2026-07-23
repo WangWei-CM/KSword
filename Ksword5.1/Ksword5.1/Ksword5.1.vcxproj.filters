@@ -194,6 +194,9 @@
     <ClCompile Include="KernelDock\KernelDeviceDriverObjectsWorker.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="KernelDock\KernelIoctlAuditTab.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="KernelDock\KernelDockAtomWorker.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -683,6 +686,9 @@
     <ClCompile Include="ArkDriverClient\ArkDriverKernel.cpp">
       <Filter>Source Files\ArkDriverClient</Filter>
     </ClCompile>
+    <ClCompile Include="ArkDriverClient\ArkDriverIoctlRegistry.cpp">
+      <Filter>Source Files\ArkDriverClient</Filter>
+    </ClCompile>
     <ClCompile Include="ArkDriverClient\ArkDriverKeyboard.cpp">
       <Filter>Source Files\ArkDriverClient</Filter>
     </ClCompile>
@@ -940,6 +946,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="KernelDock\KernelDeviceDriverObjectsWorker.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="KernelDock\KernelIoctlAuditTab.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="KernelDock\KernelDockObjectNamespaceWorker.h">

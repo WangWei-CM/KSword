@@ -55,6 +55,7 @@ NTSTATUS KswordARKKernelIoctlForceUnloadDriver(_In_ WDFDEVICE Device, _In_ WDFRE
 NTSTATUS KswordARKKernelIoctlQueryDriverIntegrity(_In_ WDFDEVICE Device, _In_ WDFREQUEST Request, _In_ size_t InputBufferLength, _In_ size_t OutputBufferLength, _Out_ size_t* BytesReturned);
 NTSTATUS KswordARKKernelIoctlQueryCpuHardware(_In_ WDFDEVICE Device, _In_ WDFREQUEST Request, _In_ size_t InputBufferLength, _In_ size_t OutputBufferLength, _Out_ size_t* BytesReturned);
 NTSTATUS KswordARKKernelIoctlQueryPhysicalMemoryLayout(_In_ WDFDEVICE Device, _In_ WDFREQUEST Request, _In_ size_t InputBufferLength, _In_ size_t OutputBufferLength, _Out_ size_t* BytesReturned);
+NTSTATUS KswordARKKernelIoctlQueryIoctlRegistry(_In_ WDFDEVICE Device, _In_ WDFREQUEST Request, _In_ size_t InputBufferLength, _In_ size_t OutputBufferLength, _Out_ size_t* BytesReturned);
 NTSTATUS KswordARKCallbackIoctlSetRulesHandler(_In_ WDFDEVICE Device, _In_ WDFREQUEST Request, _In_ size_t InputBufferLength, _In_ size_t OutputBufferLength, _Out_ size_t* BytesReturned);
 NTSTATUS KswordARKCallbackIoctlGetRuntimeStateHandler(_In_ WDFDEVICE Device, _In_ WDFREQUEST Request, _In_ size_t InputBufferLength, _In_ size_t OutputBufferLength, _Out_ size_t* BytesReturned);
 NTSTATUS KswordARKCallbackIoctlWaitEventHandler(_In_ WDFDEVICE Device, _In_ WDFREQUEST Request, _In_ size_t InputBufferLength, _In_ size_t OutputBufferLength, _Out_ size_t* BytesReturned);
@@ -180,6 +181,7 @@ static const KSWORD_ARK_IOCTL_ENTRY g_KswordArkIoctlTable[] = {
     { IOCTL_KSWORD_ARK_QUERY_DRIVER_INTEGRITY, KswordARKKernelIoctlQueryDriverIntegrity, "IOCTL_KSWORD_ARK_QUERY_DRIVER_INTEGRITY", KSWORD_ARK_IOCTL_CAPABILITY_NONE, KSWORD_ARK_IOCTL_FLAG_NONE },
     { IOCTL_KSWORD_ARK_QUERY_CPU_HARDWARE, KswordARKKernelIoctlQueryCpuHardware, "IOCTL_KSWORD_ARK_QUERY_CPU_HARDWARE", KSWORD_ARK_IOCTL_CAPABILITY_NONE, KSWORD_ARK_IOCTL_FLAG_QUIET_SUCCESS },
     { IOCTL_KSWORD_ARK_QUERY_PHYSICAL_MEMORY_LAYOUT, KswordARKKernelIoctlQueryPhysicalMemoryLayout, "IOCTL_KSWORD_ARK_QUERY_PHYSICAL_MEMORY_LAYOUT", KSWORD_ARK_IOCTL_CAPABILITY_NONE, KSWORD_ARK_IOCTL_FLAG_QUIET_SUCCESS },
+    { IOCTL_KSWORD_ARK_QUERY_IOCTL_REGISTRY, KswordARKKernelIoctlQueryIoctlRegistry, "IOCTL_KSWORD_ARK_QUERY_IOCTL_REGISTRY", KSWORD_ARK_IOCTL_CAPABILITY_NONE, KSWORD_ARK_IOCTL_FLAG_QUIET_SUCCESS },
     { IOCTL_KSWORD_ARK_SET_CALLBACK_RULES, KswordARKCallbackIoctlSetRulesHandler, "IOCTL_KSWORD_ARK_SET_CALLBACK_RULES", KSWORD_ARK_IOCTL_CAPABILITY_NONE, KSWORD_ARK_IOCTL_FLAG_NONE },
     { IOCTL_KSWORD_ARK_GET_CALLBACK_RUNTIME_STATE, KswordARKCallbackIoctlGetRuntimeStateHandler, "IOCTL_KSWORD_ARK_GET_CALLBACK_RUNTIME_STATE", KSWORD_ARK_IOCTL_CAPABILITY_NONE, KSWORD_ARK_IOCTL_FLAG_NONE },
     { IOCTL_KSWORD_ARK_WAIT_CALLBACK_EVENT, KswordARKCallbackIoctlWaitEventHandler, "IOCTL_KSWORD_ARK_WAIT_CALLBACK_EVENT", KSWORD_ARK_IOCTL_CAPABILITY_NONE, KSWORD_ARK_IOCTL_FLAG_NONE },
@@ -371,4 +373,38 @@ Return Value:
     }
 
     return duplicateCount;
+}
+
+// 中文说明：按索引导出静态注册表项，越界时返回 NULL。
+_Must_inspect_result_
+const KSWORD_ARK_IOCTL_ENTRY*
+KswordARKGetIoctlEntryByIndex(
+    _In_ ULONG Index
+    )
+/*++
+
+Routine Description:
+
+    中文说明：只读返回注册表项，不复制或修改静态表。
+
+Arguments:
+
+    Index - 注册表数组索引。
+
+Return Value:
+
+    有效索引返回项地址，越界返回 NULL。
+
+--*/
+{
+    // 中文说明：先取得固定数组长度，避免调用方越界访问。
+    const ULONG totalCount = KswordARKGetRegisteredIoctlCount();
+
+    // 中文说明：拒绝越界索引，保持注册表查询为只读安全操作。
+    if (Index >= totalCount) {
+        return NULL;
+    }
+
+    // 中文说明：返回静态数组中的只读项地址。
+    return &g_KswordArkIoctlTable[Index];
 }

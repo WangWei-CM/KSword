@@ -51,4 +51,11 @@ KswordARKGetDuplicateIoctlCount(
     VOID
     );
 
+// 中文说明：按稳定索引返回注册表项，供只读诊断 IOCTL 使用。
+_Must_inspect_result_
+const KSWORD_ARK_IOCTL_ENTRY*
+KswordARKGetIoctlEntryByIndex(
+    _In_ ULONG Index
+    );
+
 EXTERN_C_END
