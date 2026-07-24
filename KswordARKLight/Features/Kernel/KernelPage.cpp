@@ -10475,14 +10475,19 @@ void KernelPage::StartCallbackFileIo(
         return;
     }
 
+    const bool callbackOperation = operation != CallbackFileIoOperation::ExportResultTsv;
     const wchar_t* operationText = operation == CallbackFileIoOperation::ImportConfig
         ? L"正在后台导入回调配置…"
         : operation == CallbackFileIoOperation::ExportConfig
             ? L"正在后台导出回调配置…"
-            : L"正在后台导出文件监控事件…";
+            : operation == CallbackFileIoOperation::ExportFileMonitor
+                ? L"正在后台导出文件监控事件…"
+                : L"正在后台导出内核结果 TSV…";
     ::SetWindowTextW(statusText_, (std::wstring(L"状态：") + operationText).c_str());
-    AppendCallbackAppLog(operationText);
-    SetCallbackFileIoControlsEnabled(false);
+    if (callbackOperation) {
+        AppendCallbackAppLog(operationText);
+        SetCallbackFileIoControlsEnabled(false);
+    }
     callbackFileIoTask_->request(
         [operation, path = std::move(path), text = std::move(text)]() mutable {
             CallbackFileIoResult result{};
@@ -10495,11 +10500,19 @@ void KernelPage::StartCallbackFileIo(
             }
             return result;
         },
-        [this](std::uint64_t, std::optional<CallbackFileIoResult>&& result, std::exception_ptr error) {
-            SetCallbackFileIoControlsEnabled(true);
+        [this, operation](std::uint64_t, std::optional<CallbackFileIoResult>&& result, std::exception_ptr error) {
+            const bool callbackOperation = operation != CallbackFileIoOperation::ExportResultTsv;
+            if (callbackOperation) {
+                SetCallbackFileIoControlsEnabled(true);
+            }
             if (error || !result.has_value()) {
-                AppendCallbackAppLog(L"回调配置文件后台任务异常结束。");
-                ::MessageBoxW(hwnd_, L"回调配置文件后台任务异常结束。", L"回调文件操作", MB_OK | MB_ICONWARNING);
+                const wchar_t* title = callbackOperation ? L"回调文件操作" : L"导出 TSV";
+                const wchar_t* detail = callbackOperation ? L"回调配置文件后台任务异常结束。" : L"内核结果 TSV 后台导出异常结束。";
+                if (callbackOperation) {
+                    AppendCallbackAppLog(detail);
+                }
+                ::SetWindowTextW(statusText_, (std::wstring(L"状态：") + detail).c_str());
+                ::MessageBoxW(hwnd_, detail, title, MB_OK | MB_ICONWARNING);
                 return;
             }
             ApplyCallbackFileIoResult(std::move(*result));
@@ -10510,13 +10523,19 @@ void KernelPage::StartCallbackFileIo(
 // file body has already been read or written, so this code only updates local
 // callback models and UI diagnostics.
 void KernelPage::ApplyCallbackFileIoResult(CallbackFileIoResult result) {
+    const bool callbackOperation = result.operation != CallbackFileIoOperation::ExportResultTsv;
     const wchar_t* title = result.operation == CallbackFileIoOperation::ImportConfig
         ? L"导入配置"
         : result.operation == CallbackFileIoOperation::ExportConfig
             ? L"导出配置"
-            : L"导出文件事件";
+            : result.operation == CallbackFileIoOperation::ExportFileMonitor
+                ? L"导出文件事件"
+                : L"导出 TSV";
     if (!result.errorText.empty()) {
-        AppendCallbackAppLog(std::wstring(title) + L"失败: " + result.errorText);
+        if (callbackOperation) {
+            AppendCallbackAppLog(std::wstring(title) + L"失败: " + result.errorText);
+        }
+        ::SetWindowTextW(statusText_, (std::wstring(L"状态：") + title + L"失败: " + result.errorText).c_str());
         ::MessageBoxW(hwnd_, result.errorText.c_str(), title, MB_OK | MB_ICONWARNING);
         return;
     }
@@ -10536,8 +10555,12 @@ void KernelPage::ApplyCallbackFileIoResult(CallbackFileIoResult result) {
 
     const std::wstring successText = result.operation == CallbackFileIoOperation::ExportConfig
         ? L"导出配置成功: " + result.path
-        : L"文件系统事件导出成功: " + result.path;
-    AppendCallbackAppLog(successText);
+        : result.operation == CallbackFileIoOperation::ExportFileMonitor
+            ? L"文件系统事件导出成功: " + result.path
+            : L"已导出 TSV: " + result.path;
+    if (callbackOperation) {
+        AppendCallbackAppLog(successText);
+    }
     ::SetWindowTextW(statusText_, (std::wstring(L"状态：") + successText).c_str());
 }
 
@@ -13493,9 +13516,12 @@ std::wstring KernelPage::BuildDiagnosticReportForCurrentFeature() const {
 }
 
 void KernelPage::ExportAllRowsTsv() {
-    // ExportAllRowsTsv mirrors original table export workflows. There is no
-    // input beyond visible resultList_ content; processing prompts for a path
-    // and writes UTF-16LE TSV with headers; output is a status message.
+    // ExportAllRowsTsv captures the visible table text and sends the disk write
+    // through the shared file-I/O task so slow folders cannot freeze the dock.
+    if (callbackFileIoTask_ && callbackFileIoTask_->running()) {
+        ::SetWindowTextW(statusText_, L"状态：文件任务正在后台执行，请等待完成。");
+        return;
+    }
     wchar_t path[MAX_PATH] = L"kernel_rows.tsv";
     if (const KernelFeatureDescriptor* descriptor = CurrentDescriptor();
         descriptor != nullptr && descriptor->id == KernelFeatureId::DeviceDriverObjects) {
@@ -13538,12 +13564,7 @@ void KernelPage::ExportAllRowsTsv() {
             text += VisibleCellText(row, column);
         }
     }
-    std::wstring error;
-    if (!WriteWholeFileText(path, text, &error)) {
-        ::MessageBoxW(hwnd_, error.c_str(), L"导出 TSV", MB_OK | MB_ICONWARNING);
-        return;
-    }
-    ::SetWindowTextW(statusText_, (L"状态：已导出 TSV: " + std::wstring(path)).c_str());
+    StartCallbackFileIo(CallbackFileIoOperation::ExportResultTsv, path, std::move(text));
 }
 
 const KernelFeatureDescriptor* KernelPage::CurrentDescriptor() const {

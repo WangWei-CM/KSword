@@ -31,7 +31,8 @@ struct KernelR0EvidenceSnapshot {
 enum class CallbackFileIoOperation {
     ImportConfig,
     ExportConfig,
-    ExportFileMonitor
+    ExportFileMonitor,
+    ExportResultTsv
 };
 
 // CallbackFileIoResult is the immutable boundary for callback-rule files and
