@@ -21,6 +21,7 @@ Environment:
 #include "../../platform/pool_compat.h"
 
 #include <ntimage.h>
+#include <ntstrsafe.h>
 
 #define KSWORD_ARK_WIN32K_TIMER_POOL_TAG 'mTkW'
 #define KSWORD_ARK_WIN32K_TIMER_OBJECT_SIZE 0x88UL
@@ -73,6 +74,7 @@ typedef struct _KSWORD_ARK_WIN32K_TIMER_WALK_CONTEXT
     ULONG64* SeenTimers;
     ULONG SeenCount;
     ULONG TraversalCount;
+    ULONG UnresolvedOwnerCount;
     BOOLEAN Stop;
 } KSWORD_ARK_WIN32K_TIMER_WALK_CONTEXT;
 
@@ -409,6 +411,7 @@ KswordARKWin32kTimerLookupThread(
     _In_reads_(ThreadMapCount) const KSWORD_ARK_WIN32K_TIMER_THREAD_MAP_ENTRY* ThreadMap,
     _In_ ULONG ThreadMapCount,
     _In_ ULONG64 ThreadInfo,
+    _In_ ULONG PreferredSessionId,
     _Out_ ULONG* ProcessIdOut,
     _Out_ ULONG* ThreadIdOut,
     _Out_ ULONG* SessionIdOut
@@ -447,7 +450,9 @@ Return Value:
     }
 
     for (index = 0UL; index < ThreadMapCount; ++index) {
-        if (ThreadMap[index].ThreadInfo == ThreadInfo) {
+        if (ThreadMap[index].ThreadInfo == ThreadInfo &&
+            (PreferredSessionId == 0UL ||
+                ThreadMap[index].SessionId == PreferredSessionId)) {
             *ProcessIdOut = ThreadMap[index].ProcessId;
             *ThreadIdOut = ThreadMap[index].ThreadId;
             *SessionIdOut = ThreadMap[index].SessionId;
@@ -499,7 +504,7 @@ KswordARKWin32kTimerMatchesRequest(
     _In_ const KSWORD_ARK_WIN32K_TIMER_WALK_CONTEXT* Context,
     _In_ ULONG ProcessId,
     _In_ ULONG ThreadId,
-    _In_ ULONG SessionId
+    _In_ BOOLEAN OwnerResolved
     )
 /*++
 
@@ -523,16 +528,12 @@ Return Value:
     if (Context == NULL) {
         return FALSE;
     }
-    if (Context->RequestedSessionId != 0UL &&
-        Context->RequestedSessionId != SessionId) {
-        return FALSE;
-    }
     if (Context->Request != NULL && Context->Request->processId != 0UL &&
-        Context->Request->processId != ProcessId) {
+        (!OwnerResolved || Context->Request->processId != ProcessId)) {
         return FALSE;
     }
     if (Context->Request != NULL && Context->Request->threadId != 0UL &&
-        Context->Request->threadId != ThreadId) {
+        (!OwnerResolved || Context->Request->threadId != ThreadId)) {
         return FALSE;
     }
     return TRUE;
@@ -605,6 +606,7 @@ Return Value:
         Context->ThreadMap,
         Context->ThreadMapCount,
         primaryThreadInfo,
+        Context->RequestedSessionId,
         &processId,
         &threadId,
         &sessionId);
@@ -613,11 +615,13 @@ Return Value:
             Context->ThreadMap,
             Context->ThreadMapCount,
             alternateThreadInfo,
+            Context->RequestedSessionId,
             &processId,
             &threadId,
             &sessionId);
     }
     if (!ownerResolved) {
+        Context->UnresolvedOwnerCount += 1UL;
         processId = 0UL;
         threadId = 0UL;
         // gTimerHashTable was read while attached to RequestedSessionId. Keep
@@ -630,7 +634,7 @@ Return Value:
             Context,
             processId,
             threadId,
-            sessionId)) {
+            ownerResolved)) {
         return;
     }
     Context->Response->totalCount += 1UL;
@@ -1079,6 +1083,17 @@ Return Value:
                 ((ULONG64)bucketIndex * (ULONG64)response->layout.bucketStride);
             KswordARKWin32kTimerWalkBucket(&context, listHeadAddress);
         }
+        (VOID)RtlStringCchPrintfW(
+            response->detail,
+            KSWORD_ARK_WIN32K_DETAIL_CHARS,
+            L"collector=session-filter-v2; session=%lu, requestPid=%lu, requestTid=%lu, threadMap=%lu, visited=%lu, accepted=%lu, unresolved=%lu.",
+            requestedSessionId,
+            Request != NULL ? Request->processId : 0UL,
+            Request != NULL ? Request->threadId : 0UL,
+            threadMapCount,
+            response->visitedNodeCount,
+            response->totalCount,
+            context.UnresolvedOwnerCount);
     }
 
 Cleanup:

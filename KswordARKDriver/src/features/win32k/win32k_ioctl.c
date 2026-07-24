@@ -219,6 +219,7 @@ Return Value:
 {
     KSWORD_ARK_WIN32K_QUERY_REQUEST* queryRequest = NULL;
     KSWORD_ARK_WIN32K_QUERY_REQUEST defaultRequest;
+    KSWORD_ARK_WIN32K_QUERY_REQUEST requestCopy;
     PVOID outputBuffer = NULL;
     size_t actualOutputLength = 0U;
     NTSTATUS status = STATUS_SUCCESS;
@@ -237,6 +238,12 @@ Return Value:
         KswordARKWin32kIoctlLog(Device, "Error", "R0 win32k-%s ioctl: input invalid, status=0x%08X.", OperationName, (unsigned int)status);
         return status;
     }
+
+    // METHOD_BUFFERED uses one system buffer for both input and output. Keep a
+    // private copy before the collector initializes its response header, or
+    // response fields at the same offsets are observed as PID/TID filters.
+    requestCopy = *queryRequest;
+    queryRequest = &requestCopy;
 
     status = KswordARKRetrieveRequiredOutputBuffer(
         Request,

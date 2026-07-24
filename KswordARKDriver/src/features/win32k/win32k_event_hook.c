@@ -21,6 +21,7 @@ Environment:
 #include "../../platform/pool_compat.h"
 
 #include <ntimage.h>
+#include <ntstrsafe.h>
 
 #define KSWORD_ARK_WIN32K_EVENT_POOL_TAG 'eWkW'
 #define KSWORD_ARK_WIN32K_EVENT_OBJECT_SIZE 0x60UL
@@ -271,6 +272,7 @@ KswordARKWin32kEventLookupThread(
     _In_reads_(ThreadMapCount) const KSWORD_ARK_WIN32K_EVENT_THREAD_MAP_ENTRY* ThreadMap,
     _In_ ULONG ThreadMapCount,
     _In_ ULONG64 ThreadInfo,
+    _In_ ULONG PreferredSessionId,
     _Out_ ULONG* ProcessIdOut,
     _Out_ ULONG* ThreadIdOut,
     _Out_ ULONG* SessionIdOut
@@ -288,7 +290,9 @@ KswordARKWin32kEventLookupThread(
         return FALSE;
     }
     for (index = 0UL; index < ThreadMapCount; ++index) {
-        if (ThreadMap[index].ThreadInfo == ThreadInfo) {
+        if (ThreadMap[index].ThreadInfo == ThreadInfo &&
+            (PreferredSessionId == 0UL ||
+                ThreadMap[index].SessionId == PreferredSessionId)) {
             *ProcessIdOut = ThreadMap[index].ProcessId;
             *ThreadIdOut = ThreadMap[index].ThreadId;
             *SessionIdOut = ThreadMap[index].SessionId;
@@ -321,21 +325,17 @@ KswordARKWin32kEventAlreadySeen(
 static BOOLEAN
 KswordARKWin32kEventMatchesRequest(
     _In_opt_ const KSWORD_ARK_WIN32K_QUERY_REQUEST* Request,
-    _In_ ULONG RequestedSessionId,
     _In_ ULONG ProcessId,
     _In_ ULONG ThreadId,
-    _In_ ULONG SessionId
+    _In_ BOOLEAN OwnerResolved
     )
 {
-    if (RequestedSessionId != 0UL && RequestedSessionId != SessionId) {
-        return FALSE;
-    }
     if (Request != NULL && Request->processId != 0UL &&
-        Request->processId != ProcessId) {
+        (!OwnerResolved || Request->processId != ProcessId)) {
         return FALSE;
     }
     if (Request != NULL && Request->threadId != 0UL &&
-        Request->threadId != ThreadId) {
+        (!OwnerResolved || Request->threadId != ThreadId)) {
         return FALSE;
     }
     return TRUE;
@@ -368,6 +368,7 @@ KswordARKWin32kQueryEventHookSnapshot(
     ULONG seenCount = 0UL;
     ULONG maxEntries = KSWORD_ARK_WIN32K_DEFAULT_MAX_ENTRIES;
     ULONG requestedSessionId = 0UL;
+    ULONG unresolvedOwnerCount = 0UL;
     size_t headerSize = 0U;
     size_t entryCapacity = 0U;
     BOOLEAN threadMapTruncated = FALSE;
@@ -637,10 +638,12 @@ KswordARKWin32kQueryEventHookSnapshot(
             threadMap,
             threadMapCount,
             ownerThreadInfo,
+            requestedSessionId,
             &processId,
             &threadId,
             &sessionId);
         if (!ownerResolved) {
+            unresolvedOwnerCount += 1UL;
             // gpWinEventHooks is session-local. Preserve the attached session
             // so an unresolved private pti field does not discard the node.
             processId = 0UL;
@@ -650,10 +653,9 @@ KswordARKWin32kQueryEventHookSnapshot(
 
         if (KswordARKWin32kEventMatchesRequest(
                 Request,
-                requestedSessionId,
                 processId,
                 threadId,
-                sessionId)) {
+                ownerResolved)) {
             KSWORD_ARK_WIN32K_EVENT_HOOK_ENTRY* entry = NULL;
             ULONG internalFlags = KswordARKWin32kEventReadU32(
                 objectBytes,
@@ -732,6 +734,18 @@ KswordARKWin32kQueryEventHookSnapshot(
         }
         currentHook = nextHook;
     }
+
+    (VOID)RtlStringCchPrintfW(
+        response->detail,
+        KSWORD_ARK_WIN32K_DETAIL_CHARS,
+        L"collector=session-filter-v2; session=%lu, requestPid=%lu, requestTid=%lu, threadMap=%lu, visited=%lu, accepted=%lu, unresolved=%lu.",
+        requestedSessionId,
+        Request != NULL ? Request->processId : 0UL,
+        Request != NULL ? Request->threadId : 0UL,
+        threadMapCount,
+        response->visitedNodeCount,
+        response->totalCount,
+        unresolvedOwnerCount);
 
 Cleanup:
     if (attached) {
