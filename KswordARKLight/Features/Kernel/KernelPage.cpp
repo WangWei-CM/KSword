@@ -10448,6 +10448,94 @@ void KernelPage::OnCallbackBypassRemove() {
     AppendCallbackAppLog(L"已移除选中 PID，当前列表: " + joined);
 }
 
+// BuildCallbackModuleFileDetail performs all file metadata, version-resource
+// and PE-header reads from an immutable path/row-summary pair. It is called by
+// the file-I/O worker and never accesses HWNDs or page state.
+std::wstring BuildCallbackModuleFileDetail(
+    const std::wstring& modulePath,
+    const std::wstring& callbackSummary,
+    std::wstring* errorText) {
+    WIN32_FILE_ATTRIBUTE_DATA fileData{};
+    if (!::GetFileAttributesExW(modulePath.c_str(), GetFileExInfoStandard, &fileData)) {
+        if (errorText) {
+            *errorText = L"当前回调行没有可访问的模块文件，错误 " + std::to_wstring(::GetLastError());
+        }
+        return {};
+    }
+
+    const ULARGE_INTEGER fileSize{ { fileData.nFileSizeLow, fileData.nFileSizeHigh } };
+    const auto fileTimeText = [](const FILETIME& ft) -> std::wstring {
+        FILETIME localFt{};
+        SYSTEMTIME st{};
+        if (!::FileTimeToLocalFileTime(&ft, &localFt) || !::FileTimeToSystemTime(&localFt, &st)) {
+            return L"<unknown>";
+        }
+        std::wostringstream out;
+        out << std::setfill(L'0')
+            << std::setw(4) << st.wYear << L'-'
+            << std::setw(2) << st.wMonth << L'-'
+            << std::setw(2) << st.wDay << L' '
+            << std::setw(2) << st.wHour << L':'
+            << std::setw(2) << st.wMinute << L':'
+            << std::setw(2) << st.wSecond;
+        return out.str();
+    };
+
+    std::wstring versionText;
+    const DWORD versionSize = ::GetFileVersionInfoSizeW(modulePath.c_str(), nullptr);
+    if (versionSize != 0) {
+        std::vector<std::uint8_t> versionBytes(versionSize);
+        if (::GetFileVersionInfoW(modulePath.c_str(), 0, versionSize, versionBytes.data())) {
+            VS_FIXEDFILEINFO* info = nullptr;
+            UINT infoSize = 0;
+            if (::VerQueryValueW(versionBytes.data(), L"\\", reinterpret_cast<void**>(&info), &infoSize) && info != nullptr) {
+                std::wostringstream version;
+                version << HIWORD(info->dwFileVersionMS) << L'.' << LOWORD(info->dwFileVersionMS)
+                    << L'.' << HIWORD(info->dwFileVersionLS) << L'.' << LOWORD(info->dwFileVersionLS);
+                versionText = version.str();
+            }
+        }
+    }
+
+    std::wstring peText = L"PE: <unavailable>";
+    HANDLE file = ::CreateFileW(modulePath.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file != INVALID_HANDLE_VALUE) {
+        std::uint8_t header[4096]{};
+        DWORD bytesRead = 0;
+        if (::ReadFile(file, header, sizeof(header), &bytesRead, nullptr) && bytesRead >= sizeof(IMAGE_DOS_HEADER)) {
+            const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(header);
+            if (dos->e_magic == IMAGE_DOS_SIGNATURE && dos->e_lfanew > 0 &&
+                static_cast<DWORD>(dos->e_lfanew) + sizeof(IMAGE_NT_HEADERS64) <= bytesRead) {
+                const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(header + dos->e_lfanew);
+                if (nt->Signature == IMAGE_NT_SIGNATURE) {
+                    std::wostringstream pe;
+                    pe << L"PE Machine=0x" << std::hex << std::uppercase << nt->FileHeader.Machine
+                       << L", Sections=" << std::dec << nt->FileHeader.NumberOfSections
+                       << L", TimeDateStamp=0x" << std::hex << std::uppercase << nt->FileHeader.TimeDateStamp
+                       << L", ImageBase=0x" << nt->OptionalHeader.ImageBase
+                       << L", SizeOfImage=0x" << nt->OptionalHeader.SizeOfImage;
+                    peText = pe.str();
+                }
+            }
+        }
+        ::CloseHandle(file);
+    }
+
+    std::wostringstream detail;
+    detail << L"模块文件详细信息\r\n"
+           << L"----------------------------------------\r\n"
+           << L"文件路径: " << modulePath << L"\r\n"
+           << L"文件大小: " << fileSize.QuadPart << L" bytes\r\n"
+           << L"创建时间: " << fileTimeText(fileData.ftCreationTime) << L"\r\n"
+           << L"修改时间: " << fileTimeText(fileData.ftLastWriteTime) << L"\r\n"
+           << L"访问时间: " << fileTimeText(fileData.ftLastAccessTime) << L"\r\n"
+           << L"版本: " << (versionText.empty() ? L"<unavailable>" : versionText) << L"\r\n"
+           << peText << L"\r\n\r\n"
+           << callbackSummary;
+    return detail.str();
+}
+
 // SetCallbackFileIoControlsEnabled serializes the import/export surface while a
 // filesystem task runs. Other callback views remain inspectable and the worker
 // result is discarded automatically if this page closes.
@@ -10482,7 +10570,9 @@ void KernelPage::StartCallbackFileIo(
             ? L"正在后台导出回调配置…"
             : operation == CallbackFileIoOperation::ExportFileMonitor
                 ? L"正在后台导出文件监控事件…"
-                : L"正在后台导出内核结果 TSV…";
+                : operation == CallbackFileIoOperation::ExportResultTsv
+                    ? L"正在后台导出内核结果 TSV…"
+                    : L"正在后台读取模块文件详细信息…";
     ::SetWindowTextW(statusText_, (std::wstring(L"状态：") + operationText).c_str());
     if (callbackOperation) {
         AppendCallbackAppLog(operationText);
@@ -10495,6 +10585,8 @@ void KernelPage::StartCallbackFileIo(
             result.path = std::move(path);
             if (operation == CallbackFileIoOperation::ImportConfig) {
                 result.text = ReadWholeFileText(result.path, &result.errorText);
+            } else if (operation == CallbackFileIoOperation::CallbackModuleDetail) {
+                result.text = BuildCallbackModuleFileDetail(result.path, text, &result.errorText);
             } else if (!WriteWholeFileText(result.path, text, &result.errorText)) {
                 result.text.clear();
             }
@@ -10530,7 +10622,9 @@ void KernelPage::ApplyCallbackFileIoResult(CallbackFileIoResult result) {
             ? L"导出配置"
             : result.operation == CallbackFileIoOperation::ExportFileMonitor
                 ? L"导出文件事件"
-                : L"导出 TSV";
+                : result.operation == CallbackFileIoOperation::ExportResultTsv
+                    ? L"导出 TSV"
+                    : L"模块文件详细信息";
     if (!result.errorText.empty()) {
         if (callbackOperation) {
             AppendCallbackAppLog(std::wstring(title) + L"失败: " + result.errorText);
@@ -10550,6 +10644,12 @@ void KernelPage::ApplyCallbackFileIoResult(CallbackFileIoResult result) {
         RenderCallbackLocalModel();
         AppendCallbackAppLog(L"导入配置成功: " + result.path);
         ::SetWindowTextW(statusText_, (std::wstring(L"状态：已导入回调配置: ") + result.path).c_str());
+        return;
+    }
+
+    if (result.operation == CallbackFileIoOperation::CallbackModuleDetail) {
+        ::SetWindowTextW(detailEdit_, result.text.c_str());
+        ::SetWindowTextW(statusText_, L"状态：已显示模块文件详细信息。");
         return;
     }
 
@@ -12811,97 +12911,24 @@ void KernelPage::OpenSelectedCallbackModuleFolder() {
 }
 
 void KernelPage::ShowSelectedCallbackModuleFileDetail() {
-    // ShowSelectedCallbackModuleFileDetail mirrors the original module-file
-    // detail dialog at a Win32 level. Input is the selected callback module;
-    // processing reports file size, timestamps, version resource and PE header;
-    // output is shown in detailEdit_ and copied nowhere.
+    // ShowSelectedCallbackModuleFileDetail captures the selected row's immutable
+    // text and delegates file metadata, version-resource and PE-header reads to
+    // the callback file-I/O task.
     const std::wstring modulePath = SelectedCallbackModulePath();
-    if (modulePath.empty() || ::GetFileAttributesW(modulePath.c_str()) == INVALID_FILE_ATTRIBUTES) {
+    if (modulePath.empty()) {
         ::MessageBoxW(hwnd_, L"当前回调行没有可访问的模块文件。", L"模块文件详细信息", MB_OK | MB_ICONINFORMATION);
         return;
     }
-
-    WIN32_FILE_ATTRIBUTE_DATA fileData{};
-    ::GetFileAttributesExW(modulePath.c_str(), GetFileExInfoStandard, &fileData);
-    const ULARGE_INTEGER fileSize{ { fileData.nFileSizeLow, fileData.nFileSizeHigh } };
-    const auto fileTimeText = [](const FILETIME& ft) -> std::wstring {
-        FILETIME localFt{};
-        SYSTEMTIME st{};
-        if (!::FileTimeToLocalFileTime(&ft, &localFt) || !::FileTimeToSystemTime(&localFt, &st)) {
-            return L"<unknown>";
-        }
-        std::wostringstream out;
-        out << std::setfill(L'0')
-            << std::setw(4) << st.wYear << L'-'
-            << std::setw(2) << st.wMonth << L'-'
-            << std::setw(2) << st.wDay << L' '
-            << std::setw(2) << st.wHour << L':'
-            << std::setw(2) << st.wMinute << L':'
-            << std::setw(2) << st.wSecond;
-        return out.str();
-    };
-
-    std::wstring versionText;
-    const DWORD versionSize = ::GetFileVersionInfoSizeW(modulePath.c_str(), nullptr);
-    if (versionSize != 0) {
-        std::vector<std::uint8_t> versionBytes(versionSize);
-        if (::GetFileVersionInfoW(modulePath.c_str(), 0, versionSize, versionBytes.data())) {
-            VS_FIXEDFILEINFO* info = nullptr;
-            UINT infoSize = 0;
-            if (::VerQueryValueW(versionBytes.data(), L"\\", reinterpret_cast<void**>(&info), &infoSize) && info != nullptr) {
-                std::wostringstream version;
-                version << HIWORD(info->dwFileVersionMS) << L'.' << LOWORD(info->dwFileVersionMS)
-                    << L'.' << HIWORD(info->dwFileVersionLS) << L'.' << LOWORD(info->dwFileVersionLS);
-                versionText = version.str();
-            }
-        }
-    }
-
-    std::wstring peText = L"PE: <unavailable>";
-    HANDLE file = ::CreateFileW(modulePath.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-        nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (file != INVALID_HANDLE_VALUE) {
-        std::uint8_t header[4096]{};
-        DWORD bytesRead = 0;
-        if (::ReadFile(file, header, sizeof(header), &bytesRead, nullptr) && bytesRead >= sizeof(IMAGE_DOS_HEADER)) {
-            const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(header);
-            if (dos->e_magic == IMAGE_DOS_SIGNATURE && dos->e_lfanew > 0 &&
-                static_cast<DWORD>(dos->e_lfanew) + sizeof(IMAGE_NT_HEADERS64) <= bytesRead) {
-                const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(header + dos->e_lfanew);
-                if (nt->Signature == IMAGE_NT_SIGNATURE) {
-                    std::wostringstream pe;
-                    pe << L"PE Machine=0x" << std::hex << std::uppercase << nt->FileHeader.Machine
-                       << L", Sections=" << std::dec << nt->FileHeader.NumberOfSections
-                       << L", TimeDateStamp=0x" << std::hex << std::uppercase << nt->FileHeader.TimeDateStamp
-                       << L", ImageBase=0x" << nt->OptionalHeader.ImageBase
-                       << L", SizeOfImage=0x" << nt->OptionalHeader.SizeOfImage;
-                    peText = pe.str();
-                }
-            }
-        }
-        ::CloseHandle(file);
-    }
-
-    std::wostringstream detail;
-    detail << L"模块文件详细信息\r\n"
-           << L"----------------------------------------\r\n"
-           << L"文件路径: " << modulePath << L"\r\n"
-           << L"原始模块路径: " << FirstSelectedRowField({ L"ModulePath", L"Module", L"模块" }) << L"\r\n"
-           << L"文件大小: " << fileSize.QuadPart << L" bytes\r\n"
-           << L"创建时间: " << fileTimeText(fileData.ftCreationTime) << L"\r\n"
-           << L"修改时间: " << fileTimeText(fileData.ftLastWriteTime) << L"\r\n"
-           << L"访问时间: " << fileTimeText(fileData.ftLastAccessTime) << L"\r\n"
-           << L"版本: " << (versionText.empty() ? L"<unavailable>" : versionText) << L"\r\n"
-           << peText << L"\r\n\r\n"
-           << L"回调行摘要\r\n"
-           << L"类别: " << FirstSelectedRowField({ L"ClassText", L"Class", L"类别" }) << L"\r\n"
-           << L"来源: " << FirstSelectedRowField({ L"SourceText", L"Source", L"来源" }) << L"\r\n"
-           << L"名称: " << FirstSelectedRowField({ L"Name", L"名称" }) << L"\r\n"
-           << L"Callback: " << SelectedRowField(L"Callback") << L"\r\n"
-           << L"ModuleBase: " << SelectedRowField(L"ModuleBase") << L"\r\n"
-           << L"ModuleSize: " << SelectedRowField(L"ModuleSize") << L"\r\n";
-    ::SetWindowTextW(detailEdit_, detail.str().c_str());
-    ::SetWindowTextW(statusText_, L"状态：已显示模块文件详细信息。");
+    std::wostringstream summary;
+    summary << L"回调行摘要\r\n"
+            << L"原始模块路径: " << FirstSelectedRowField({ L"ModulePath", L"Module", L"模块" }) << L"\r\n"
+            << L"类别: " << FirstSelectedRowField({ L"ClassText", L"Class", L"类别" }) << L"\r\n"
+            << L"来源: " << FirstSelectedRowField({ L"SourceText", L"Source", L"来源" }) << L"\r\n"
+            << L"名称: " << FirstSelectedRowField({ L"Name", L"名称" }) << L"\r\n"
+            << L"Callback: " << SelectedRowField(L"Callback") << L"\r\n"
+            << L"ModuleBase: " << SelectedRowField(L"ModuleBase") << L"\r\n"
+            << L"ModuleSize: " << SelectedRowField(L"ModuleSize") << L"\r\n";
+    StartCallbackFileIo(CallbackFileIoOperation::CallbackModuleDetail, modulePath, summary.str());
 }
 
 
