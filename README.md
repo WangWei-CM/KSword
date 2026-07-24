@@ -11,20 +11,20 @@
     width="520"
   />
 
-  <a href="https://github.com/user-attachments/assets/25a3b2e2-4ee0-49aa-bd90-ee6e3ba01fe4">
+  <a href="https://github.com/user-attachments/assets/02085a90-af21-4880-b956-d059a655a4da">
     <img
-      src="https://github.com/user-attachments/assets/25a3b2e2-4ee0-49aa-bd90-ee6e3ba01fe4"
+      src="https://github.com/user-attachments/assets/02085a90-af21-4880-b956-d059a655a4da"
       alt="KSword ARK dark interface"
       width="49%"
     />
   </a>
-  <a href="https://github.com/user-attachments/assets/217769a2-0521-41f9-9933-ca7c2fbb1d13">
+  <a href="https://github.com/user-attachments/assets/98556440-9583-4daa-818b-a04546610a2e">
     <img
-      src="https://github.com/user-attachments/assets/217769a2-0521-41f9-9933-ca7c2fbb1d13"
+      src="https://github.com/user-attachments/assets/98556440-9583-4daa-818b-a04546610a2e"
       alt="KSword ARK light interface"
       width="49%"
     />
-  </a>
+
 
   <br>
 
