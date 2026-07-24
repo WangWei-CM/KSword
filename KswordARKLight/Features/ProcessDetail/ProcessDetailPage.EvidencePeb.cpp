@@ -743,20 +743,33 @@ bool ProcessDetailPage::HandlePebCommand(const int controlId) {
 }
 
 void ProcessDetailPage::RefreshSectionReport() {
-    HWND refresh = Control(TabIndex::Evidence, EvidenceRefreshSection);
-    if (refresh) { ::EnableWindow(refresh, FALSE); }
-    SetPageStatus(TabIndex::Evidence, EvidenceSectionStatus, L"● 正在查询 Section/ControlArea...");
-    const auto begin = std::chrono::steady_clock::now();
-
-    ProcessDetailCollector collector;
-    ProcessDetailSnapshot fresh = collector.Collect(processId_);
-    snapshot_.r0AuditRows = std::move(fresh.r0AuditRows);
-    snapshot_.r0AuditSucceeded = fresh.r0AuditSucceeded;
-    if (!fresh.basic.imagePath.empty()) {
-        snapshot_.basic.imagePath = std::move(fresh.basic.imagePath);
+    if (!evidenceTask_) {
+        SetPageStatus(TabIndex::Evidence, EvidenceSectionStatus, L"● R0 证据后台任务不可用。");
+        return;
     }
-    PopulateEvidenceTab();
+    SetPageStatus(TabIndex::Evidence, EvidenceSectionStatus, L"● 正在查询 Section/ControlArea...");
+    const DWORD processId = processId_;
+    evidenceTask_->request(
+        [processId] {
+            ProcessDetailCollector collector;
+            return collector.Collect(processId);
+        },
+        [this](std::uint64_t, std::optional<ProcessDetailSnapshot>&& result, std::exception_ptr error) {
+            if (error || !result.has_value()) {
+                SetPageStatus(TabIndex::Evidence, EvidenceSectionStatus, L"● R0 证据后台查询异常结束。");
+                return;
+            }
+            snapshot_.r0AuditRows = std::move(result->r0AuditRows);
+            snapshot_.r0AuditSucceeded = result->r0AuditSucceeded;
+            if (!result->basic.imagePath.empty()) {
+                snapshot_.basic.imagePath = std::move(result->basic.imagePath);
+            }
+            PopulateEvidenceTab();
+            RenderSectionReport();
+        });
+}
 
+void ProcessDetailPage::RenderSectionReport() {
     std::wostringstream report;
     report << L"[R0 Process Runtime Detail]\r\n";
     report << L"PID: " << processId_ << L"\r\n";
@@ -793,15 +806,12 @@ void ProcessDetailPage::RefreshSectionReport() {
     report << L"  当前 Light 快照未携带独立映射数组；上方审计行保留驱动返回的完整只读证据。\r\n";
 
     SetControlText(TabIndex::Evidence, EvidenceSectionOutput, report.str());
-    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::steady_clock::now() - begin).count();
     SetPageStatus(
         TabIndex::Evidence,
         EvidenceSectionStatus,
-        L"● 刷新完成 " + std::to_wstring(elapsed) + L" ms" +
+        std::wstring(L"● 后台刷新完成") +
             (snapshot_.r0AuditSucceeded ? L"" : L" | R0证据部分不可用"));
     sectionLoaded_ = true;
-    if (refresh) { ::EnableWindow(refresh, TRUE); }
 }
 
 void ProcessDetailPage::RefreshPebReport() {

@@ -30,6 +30,7 @@ constexpr UINT kMsgModuleFilterCompleted = WM_APP + 612;
 constexpr UINT kMsgActionCompleted = WM_APP + 613;
 constexpr UINT kMsgTokenReportCompleted = WM_APP + 614;
 constexpr UINT kMsgTokenSwitchCompleted = WM_APP + 615;
+constexpr UINT kMsgEvidenceCompleted = WM_APP + 616;
 constexpr int kSnapshotLoadingOverlayId = 1110;
 
 constexpr std::array<const wchar_t*, 8> kTabTitles{
@@ -103,6 +104,9 @@ ProcessDetailPage::~ProcessDetailPage() {
     }
     if (tokenSwitchTask_) {
         tokenSwitchTask_->cancel();
+    }
+    if (evidenceTask_) {
+        evidenceTask_->cancel();
     }
     if (threadFilterTask_) {
         threadFilterTask_->cancel();
@@ -181,6 +185,11 @@ LRESULT ProcessDetailPage::HandleMessage(HWND hwnd, UINT message, WPARAM wParam,
             return 0;
         }
         break;
+    case kMsgEvidenceCompleted:
+        if (evidenceTask_ && evidenceTask_->consume(hwnd, wParam, lParam)) {
+            return 0;
+        }
+        break;
     case kMsgThreadFilterCompleted:
         if (threadFilterTask_ && threadFilterTask_->consume(hwnd, wParam, lParam)) {
             return 0;
@@ -215,6 +224,9 @@ LRESULT ProcessDetailPage::HandleMessage(HWND hwnd, UINT message, WPARAM wParam,
         }
         if (tokenSwitchTask_) {
             tokenSwitchTask_->cancel();
+        }
+        if (evidenceTask_) {
+            evidenceTask_->cancel();
         }
         if (threadFilterTask_) {
             threadFilterTask_->cancel();
@@ -263,9 +275,10 @@ bool ProcessDetailPage::Initialize(HWND hwnd) {
     actionTask_ = std::make_unique<Ksword::Ui::AsyncSnapshotTask<ProcessDetailActionResult>>(hwnd_, kMsgActionCompleted);
     tokenReportTask_ = std::make_unique<Ksword::Ui::AsyncSnapshotTask<ProcessTokenReportSnapshot>>(hwnd_, kMsgTokenReportCompleted);
     tokenSwitchTask_ = std::make_unique<Ksword::Ui::AsyncSnapshotTask<ProcessTokenSwitchSnapshot>>(hwnd_, kMsgTokenSwitchCompleted);
+    evidenceTask_ = std::make_unique<Ksword::Ui::AsyncSnapshotTask<ProcessDetailSnapshot>>(hwnd_, kMsgEvidenceCompleted);
     threadFilterTask_ = std::make_unique<Ksword::Ui::AsyncSnapshotTask<DetailTableFilterResult>>(hwnd_, kMsgThreadFilterCompleted);
     moduleFilterTask_ = std::make_unique<Ksword::Ui::AsyncSnapshotTask<DetailTableFilterResult>>(hwnd_, kMsgModuleFilterCompleted);
-    if (!loadingOverlay_ || !snapshotTask_ || !actionTask_ || !tokenReportTask_ || !tokenSwitchTask_ || !threadFilterTask_ || !moduleFilterTask_) {
+    if (!loadingOverlay_ || !snapshotTask_ || !actionTask_ || !tokenReportTask_ || !tokenSwitchTask_ || !evidenceTask_ || !threadFilterTask_ || !moduleFilterTask_) {
         return false;
     }
     ::SendMessageW(tab_, TCM_SETCURSEL, 0, 0);

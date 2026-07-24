@@ -354,6 +354,7 @@ private:
     void RefreshTokenReport();
     void RefreshTokenSwitches();
     void RefreshSectionReport();
+    void RenderSectionReport();
     void RefreshPebReport();
     void ApplyPebEdits();
 
@@ -372,6 +373,7 @@ private:
     std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<ProcessDetailActionResult>> actionTask_;
     std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<ProcessTokenReportSnapshot>> tokenReportTask_;
     std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<ProcessTokenSwitchSnapshot>> tokenSwitchTask_;
+    std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<ProcessDetailSnapshot>> evidenceTask_;
     std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<DetailTableFilterResult>> threadFilterTask_;
     std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<DetailTableFilterResult>> moduleFilterTask_;
     Ksword::Ui::VirtualListView threadVirtualList_;
