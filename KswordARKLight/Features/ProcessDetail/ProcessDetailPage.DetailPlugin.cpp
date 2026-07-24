@@ -1,15 +1,12 @@
 #include "../../Core/Win32Lean.h"
 
 #include <commctrl.h>
-#include <psapi.h>
 #include <shellapi.h>
-#include <tlhelp32.h>
 
 #include "ProcessDetailPage.h"
 
 #include <algorithm>
 #include <array>
-#include <cwchar>
 #include <iomanip>
 #include <sstream>
 #include <string>
@@ -25,129 +22,13 @@ std::wstring DisplayText(const std::wstring& text, const wchar_t* fallback = L"-
     return text.empty() ? std::wstring(fallback) : text;
 }
 
-std::wstring FileNameFromPath(const std::wstring& path) {
-    const std::size_t slash = path.find_last_of(L"\\/");
-    if (slash == std::wstring::npos) {
-        return path;
-    }
-    return path.substr(slash + 1);
-}
-
-std::wstring ProcessNameById(DWORD processId) {
-    if (processId == 0) {
-        return {};
-    }
-
-    HANDLE snapshot = ::CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-    if (snapshot == INVALID_HANDLE_VALUE) {
-        return {};
-    }
-
-    PROCESSENTRY32W entry{};
-    entry.dwSize = sizeof(entry);
-    std::wstring name;
-    if (::Process32FirstW(snapshot, &entry)) {
-        do {
-            if (entry.th32ProcessID == processId) {
-                name = entry.szExeFile;
-                break;
-            }
-        } while (::Process32NextW(snapshot, &entry));
-    }
-    ::CloseHandle(snapshot);
-    return name;
-}
-
-std::wstring ProcessStartTime(HANDLE process) {
-    FILETIME creation{};
-    FILETIME exit{};
-    FILETIME kernel{};
-    FILETIME user{};
-    if (!process || !::GetProcessTimes(process, &creation, &exit, &kernel, &user)) {
+std::wstring WorkingSetText(const ULONGLONG bytes, const bool known) {
+    if (!known) {
         return L"-";
     }
-
-    SYSTEMTIME utc{};
-    SYSTEMTIME local{};
-    if (!::FileTimeToSystemTime(&creation, &utc) ||
-        !::SystemTimeToTzSpecificLocalTime(nullptr, &utc, &local)) {
-        return L"-";
-    }
-
-    wchar_t text[64]{};
-    swprintf_s(
-        text,
-        L"%04u-%02u-%02u %02u:%02u:%02u",
-        local.wYear,
-        local.wMonth,
-        local.wDay,
-        local.wHour,
-        local.wMinute,
-        local.wSecond);
-    return text;
-}
-
-std::wstring PriorityClassText(HANDLE process) {
-    if (!process) {
-        return L"Unknown";
-    }
-    switch (::GetPriorityClass(process)) {
-    case IDLE_PRIORITY_CLASS: return L"Idle";
-    case BELOW_NORMAL_PRIORITY_CLASS: return L"Below normal";
-    case NORMAL_PRIORITY_CLASS: return L"Normal";
-    case ABOVE_NORMAL_PRIORITY_CLASS: return L"Above normal";
-    case HIGH_PRIORITY_CLASS: return L"High";
-    case REALTIME_PRIORITY_CLASS: return L"Realtime";
-    default: return L"Unknown";
-    }
-}
-
-std::wstring ElevatedText(HANDLE process) {
-    if (!process) {
-        return L"■ 未知";
-    }
-
-    HANDLE token = nullptr;
-    if (!::OpenProcessToken(process, TOKEN_QUERY, &token)) {
-        return L"■ 未知";
-    }
-
-    TOKEN_ELEVATION elevation{};
-    DWORD returned = 0;
-    const BOOL queried = ::GetTokenInformation(
-        token,
-        TokenElevation,
-        &elevation,
-        sizeof(elevation),
-        &returned);
-    ::CloseHandle(token);
-    if (!queried) {
-        return L"■ 未知";
-    }
-    return elevation.TokenIsElevated ? L"■ 是" : L"■ 否";
-}
-
-std::wstring HandleCountText(HANDLE process) {
-    DWORD count = 0;
-    if (!process || !::GetProcessHandleCount(process, &count)) {
-        return L"-";
-    }
-    return std::to_wstring(count);
-}
-
-std::wstring WorkingSetText(HANDLE process) {
-    PROCESS_MEMORY_COUNTERS_EX counters{};
-    counters.cb = sizeof(counters);
-    if (!process || !::GetProcessMemoryInfo(
-            process,
-            reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&counters),
-            sizeof(counters))) {
-        return L"-";
-    }
-
     std::wostringstream text;
     text << std::fixed << std::setprecision(1)
-         << (static_cast<double>(counters.WorkingSetSize) / (1024.0 * 1024.0))
+         << (static_cast<double>(bytes) / (1024.0 * 1024.0))
          << L" MB";
     return text.str();
 }
@@ -244,13 +125,7 @@ bool ProcessDetailPage::CreateDetailTab() {
 
 void ProcessDetailPage::PopulateDetailTab() {
     const ProcessBasicInfo& basic = snapshot_.basic;
-    const std::wstring processName = [&basic]() {
-        std::wstring name = FileNameFromPath(basic.imagePath);
-        if (name.empty()) {
-            name = ProcessNameById(basic.processId);
-        }
-        return name.empty() ? std::wstring(L"Unknown") : name;
-    }();
+    const std::wstring processName = DisplayText(basic.processName, L"Unknown");
 
     SetControlText(
         TabIndex::Detail,
@@ -263,8 +138,7 @@ void ProcessDetailPage::PopulateDetailTab() {
         SetControlText(TabIndex::Detail, DetailParentText, L"无父进程信息");
         ::ShowWindow(Control(TabIndex::Detail, DetailGotoParent), SW_HIDE);
     } else {
-        const std::wstring parentName = ProcessNameById(basic.parentProcessId);
-        if (parentName.empty()) {
+        if (basic.parentProcessName.empty()) {
             SetControlText(
                 TabIndex::Detail,
                 DetailParentText,
@@ -274,30 +148,29 @@ void ProcessDetailPage::PopulateDetailTab() {
             SetControlText(
                 TabIndex::Detail,
                 DetailParentText,
-                parentName + L" (PID: " + std::to_wstring(basic.parentProcessId) + L")");
+                basic.parentProcessName + L" (PID: " + std::to_wstring(basic.parentProcessId) + L")");
             ::ShowWindow(Control(TabIndex::Detail, DetailGotoParent), SW_SHOW);
         }
     }
 
-    HANDLE process = ::OpenProcess(
-        PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ,
-        FALSE,
-        processId_);
-    SetControlText(TabIndex::Detail, DetailStartTime, ProcessStartTime(process));
+    SetControlText(TabIndex::Detail, DetailStartTime, DisplayText(basic.startTimeText));
     SetControlText(TabIndex::Detail, DetailUser, DisplayText(basic.userName));
-    SetControlText(TabIndex::Detail, DetailAdmin, ElevatedText(process));
+    SetControlText(
+        TabIndex::Detail,
+        DetailAdmin,
+        basic.adminKnown ? (basic.isAdmin ? L"■ 是" : L"■ 否") : L"■ 未知");
     SetControlText(TabIndex::Detail, DetailArchitecture, DisplayText(basic.bitness, L"Unknown"));
-    SetControlText(TabIndex::Detail, DetailPriority, PriorityClassText(process));
+    SetControlText(TabIndex::Detail, DetailPriority, DisplayText(basic.priorityText, L"Unknown"));
     SetControlText(TabIndex::Detail, DetailSession, std::to_wstring(basic.sessionId));
     SetControlText(TabIndex::Detail, DetailThreadCount, std::to_wstring(LatestThreadCount()));
-    SetControlText(TabIndex::Detail, DetailHandleCount, HandleCountText(process));
+    SetControlText(
+        TabIndex::Detail,
+        DetailHandleCount,
+        snapshot_.basicSucceeded ? std::to_wstring(basic.handleCount) : L"-");
     SetControlText(TabIndex::Detail, DetailCpu, L"-");
-    SetControlText(TabIndex::Detail, DetailRam, WorkingSetText(process));
+    SetControlText(TabIndex::Detail, DetailRam, WorkingSetText(basic.workingSetBytes, snapshot_.basicSucceeded));
     SetControlText(TabIndex::Detail, DetailDisk, L"-");
     SetControlText(TabIndex::Detail, DetailSignature, L"-");
-    if (process) {
-        ::CloseHandle(process);
-    }
 
     ::EnableWindow(Control(TabIndex::Detail, DetailOpenHandles), processId_ != 0);
     ::EnableWindow(
