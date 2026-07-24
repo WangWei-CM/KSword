@@ -47,6 +47,10 @@ struct FileActionContext {
     std::wstring currentDirectory;
     FileEntry selectedEntry;
     bool hasSelection = false;
+    bool backgroundExecution = false;
+    bool confirmed = false;
+    std::wstring targetDirectory;
+    std::wstring renameTarget;
 };
 
 // FileActionResult carries the effect summary for a menu command. Inputs are an
@@ -57,6 +61,18 @@ struct FileActionResult {
     bool refreshRequested = false;
     bool navigateRequested = false;
     std::wstring navigatePath;
+    std::wstring statusText;
+    std::wstring clipboardText;
+    std::wstring dialogTitle;
+    std::wstring dialogText;
+    UINT dialogFlags = 0;
+};
+
+// FileActionPreparation holds the UI-thread-only outcome required before a
+// background file action starts. Dialog cancellation is reported through the
+// ready flag and status text without scheduling filesystem or R0 work.
+struct FileActionPreparation {
+    bool ready = true;
     std::wstring statusText;
 };
 
@@ -75,6 +91,11 @@ public:
     // performs the permitted local operation or reports that the entry is only
     // not retained in the light build; output tells the caller what changed.
     static FileActionResult execute(FileActionId action, const FileActionContext& context);
+
+    // prepareBackground performs confirmations and picker dialogs while the
+    // window still owns the UI thread. The resulting context can then be passed
+    // to execute() with backgroundExecution=true.
+    static FileActionPreparation prepareBackground(FileActionId action, FileActionContext& context);
 
     // copyTextToClipboard writes Unicode text to the process clipboard. Inputs
     // are owner and text; processing allocates a CF_UNICODETEXT block; output is

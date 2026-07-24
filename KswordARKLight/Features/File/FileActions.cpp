@@ -827,6 +827,63 @@ FileActionId FileActions::showContextMenu(HWND owner, const FileActionContext& c
     return static_cast<FileActionId>(chosen);
 }
 
+// prepareBackground keeps modal confirmations and shell dialogs on the window
+// thread. All filesystem, security, Restart Manager and driver work remains in
+// execute(), which FileView dispatches to its background action task.
+FileActionPreparation FileActions::prepareBackground(FileActionId action, FileActionContext& context) {
+    FileActionPreparation preparation{};
+    const std::wstring selected = SelectedPath(context);
+    switch (action) {
+    case FileActionId::DeleteItem:
+        if (!selected.empty() &&
+            ::MessageBoxW(context.owner, selected.c_str(), L"确认删除选中项？", MB_ICONWARNING | MB_YESNO | MB_DEFBUTTON2) != IDYES) {
+            preparation.ready = false;
+            preparation.statusText = L"已取消删除。";
+        } else {
+            context.confirmed = !selected.empty();
+        }
+        break;
+    case FileActionId::CopyToOppositePanel:
+    case FileActionId::MoveToOppositePanel: {
+        if (selected.empty()) {
+            break;
+        }
+        const bool move = action == FileActionId::MoveToOppositePanel;
+        context.targetDirectory = PickTargetFolder(
+            context.owner,
+            move ? L"选择移动目标文件夹" : L"选择复制目标文件夹");
+        if (context.targetDirectory.empty()) {
+            preparation.ready = false;
+            preparation.statusText = move ? L"已取消移动。" : L"已取消复制。";
+        }
+        break;
+    }
+    case FileActionId::Rename:
+        if (!selected.empty()) {
+            context.renameTarget = PromptRenameTarget(context.owner, selected);
+            if (context.renameTarget.empty()) {
+                preparation.ready = false;
+                preparation.statusText = L"已取消重命名。";
+            }
+        }
+        break;
+    case FileActionId::DriverDelete: {
+        const std::wstring ntPath = BuildDriverNtPath(selected);
+        if (!ntPath.empty() &&
+            ::MessageBoxW(context.owner, ntPath.c_str(), L"确认通过R0驱动删除选中项？", MB_ICONWARNING | MB_YESNO | MB_DEFBUTTON2) != IDYES) {
+            preparation.ready = false;
+            preparation.statusText = L"已取消R0驱动删除。";
+        } else {
+            context.confirmed = !ntPath.empty();
+        }
+        break;
+    }
+    default:
+        break;
+    }
+    return preparation;
+}
+
 FileActionResult FileActions::execute(FileActionId action, const FileActionContext& context) {
     FileActionResult result;
     const std::wstring selected = SelectedPath(context);
@@ -841,11 +898,21 @@ FileActionResult FileActions::execute(FileActionId action, const FileActionConte
         return result;
     case FileActionId::CopyPath:
         result.handled = true;
+        if (context.backgroundExecution) {
+            result.clipboardText = selected;
+            result.statusText = selected.empty() ? L"没有可复制的路径。" : L"已获取路径。";
+            return result;
+        }
         result.statusText = copyTextToClipboard(context.owner, selected) ? L"已复制路径。" : L"复制路径失败。";
         return result;
     case FileActionId::CopyShortFileName: {
         result.handled = true;
         const std::wstring shortPath = ShortPathForFile(selected);
+        if (context.backgroundExecution) {
+            result.clipboardText = shortPath;
+            result.statusText = shortPath.empty() ? L"短文件名不可用。" : L"已获取短文件名。";
+            return result;
+        }
         if (!shortPath.empty() && copyTextToClipboard(context.owner, shortPath)) {
             result.statusText = L"已复制短文件名。";
         } else {
@@ -859,8 +926,13 @@ FileActionResult FileActions::execute(FileActionId action, const FileActionConte
             result.statusText = L"没有选中文件。";
             return result;
         }
-        if (::MessageBoxW(context.owner, selected.c_str(), L"确认删除选中项？", MB_ICONWARNING | MB_YESNO | MB_DEFBUTTON2) != IDYES) {
+        if (!context.backgroundExecution &&
+            ::MessageBoxW(context.owner, selected.c_str(), L"确认删除选中项？", MB_ICONWARNING | MB_YESNO | MB_DEFBUTTON2) != IDYES) {
             result.statusText = L"已取消删除。";
+            return result;
+        }
+        if (context.backgroundExecution && !context.confirmed) {
+            result.statusText = L"删除未获得用户确认。";
             return result;
         }
         if (context.selectedEntry.kind == FileEntryKind::Directory) {
@@ -897,11 +969,21 @@ FileActionResult FileActions::execute(FileActionId action, const FileActionConte
         return result;
     case FileActionId::CopyKernelModeAddress:
         result.handled = true;
+        if (context.backgroundExecution) {
+            result.clipboardText = BuildDriverNtPath(selected);
+            result.statusText = result.clipboardText.empty() ? L"内核模式路径不可用。" : L"已获取内核模式路径。";
+            return result;
+        }
         result.statusText = copyTextToClipboard(context.owner, BuildDriverNtPath(selected)) ? L"已复制内核模式路径。" : L"复制内核模式路径失败。";
         return result;
     case FileActionId::CopyLinkTarget: {
         result.handled = true;
         const std::wstring target = ResolveLinkTarget(selected);
+        if (context.backgroundExecution) {
+            result.clipboardText = target;
+            result.statusText = target.empty() ? L"链接目标不可用。" : L"已获取链接目标。";
+            return result;
+        }
         result.statusText = !target.empty() && copyTextToClipboard(context.owner, target) ? L"已复制链接目标。" : L"链接目标不可用或复制失败。";
         return result;
     }
@@ -931,7 +1013,9 @@ FileActionResult FileActions::execute(FileActionId action, const FileActionConte
             return result;
         }
         const bool move = action == FileActionId::MoveToOppositePanel;
-        const std::wstring targetFolder = PickTargetFolder(context.owner, move ? L"选择移动目标文件夹" : L"选择复制目标文件夹");
+        const std::wstring targetFolder = context.backgroundExecution
+            ? context.targetDirectory
+            : PickTargetFolder(context.owner, move ? L"选择移动目标文件夹" : L"选择复制目标文件夹");
         if (targetFolder.empty()) {
             result.statusText = move ? L"已取消移动。" : L"已取消复制。";
             return result;
@@ -944,7 +1028,9 @@ FileActionResult FileActions::execute(FileActionId action, const FileActionConte
     }
     case FileActionId::Rename: {
         result.handled = true;
-        const std::wstring target = PromptRenameTarget(context.owner, selected);
+        const std::wstring target = context.backgroundExecution
+            ? context.renameTarget
+            : PromptRenameTarget(context.owner, selected);
         if (target.empty()) {
             result.statusText = L"已取消重命名。";
             return result;
@@ -968,8 +1054,13 @@ FileActionResult FileActions::execute(FileActionId action, const FileActionConte
             result.statusText = L"驱动删除失败：NT路径转换为空。";
             return result;
         }
-        if (::MessageBoxW(context.owner, ntPath.c_str(), L"确认通过R0驱动删除选中项？", MB_ICONWARNING | MB_YESNO | MB_DEFBUTTON2) != IDYES) {
+        if (!context.backgroundExecution &&
+            ::MessageBoxW(context.owner, ntPath.c_str(), L"确认通过R0驱动删除选中项？", MB_ICONWARNING | MB_YESNO | MB_DEFBUTTON2) != IDYES) {
             result.statusText = L"已取消R0驱动删除。";
+            return result;
+        }
+        if (context.backgroundExecution && !context.confirmed) {
+            result.statusText = L"R0 驱动删除未获得用户确认。";
             return result;
         }
         const bool isDirectory = context.selectedEntry.kind == FileEntryKind::Directory;
@@ -981,8 +1072,13 @@ FileActionResult FileActions::execute(FileActionId action, const FileActionConte
     }
     case FileActionId::FileUnlocker:
         result.handled = true;
+        result.dialogText = QueryFileLockers(selected);
+        result.dialogTitle = L"文件解锁器(R3/R0)";
+        result.dialogFlags = MB_ICONINFORMATION;
         result.statusText = L"已完成文件占用扫描。";
-        ::MessageBoxW(context.owner, QueryFileLockers(selected).c_str(), L"文件解锁器(R3/R0)", MB_OK | MB_ICONINFORMATION);
+        if (!context.backgroundExecution) {
+            ::MessageBoxW(context.owner, result.dialogText.c_str(), result.dialogTitle.c_str(), MB_OK | result.dialogFlags);
+        }
         return result;
     case FileActionId::TakeOwnership:
         result.handled = true;
@@ -1002,8 +1098,14 @@ FileActionResult FileActions::execute(FileActionId action, const FileActionConte
         const std::wstring hash = ComputeSha256(selected, &error);
         result.statusText = hash.empty() ? L"SHA-256 计算失败：" + error : L"SHA-256: " + hash;
         if (!hash.empty()) {
-            copyTextToClipboard(context.owner, hash);
-            ::MessageBoxW(context.owner, result.statusText.c_str(), L"文件哈希", MB_OK | MB_ICONINFORMATION);
+            result.clipboardText = hash;
+            result.dialogTitle = L"文件哈希";
+            result.dialogText = result.statusText;
+            result.dialogFlags = MB_ICONINFORMATION;
+            if (!context.backgroundExecution) {
+                copyTextToClipboard(context.owner, hash);
+                ::MessageBoxW(context.owner, result.dialogText.c_str(), result.dialogTitle.c_str(), MB_OK | result.dialogFlags);
+            }
         }
         return result;
     }
@@ -1014,7 +1116,12 @@ FileActionResult FileActions::execute(FileActionId action, const FileActionConte
             return result;
         }
         result.statusText = VerifyEmbeddedSignature(selected);
-        ::MessageBoxW(context.owner, result.statusText.c_str(), L"数字签名", MB_OK | MB_ICONINFORMATION);
+        result.dialogTitle = L"数字签名";
+        result.dialogText = result.statusText;
+        result.dialogFlags = MB_ICONINFORMATION;
+        if (!context.backgroundExecution) {
+            ::MessageBoxW(context.owner, result.dialogText.c_str(), result.dialogTitle.c_str(), MB_OK | result.dialogFlags);
+        }
         return result;
     case FileActionId::Entropy: {
         result.handled = true;
@@ -1030,7 +1137,12 @@ FileActionResult FileActions::execute(FileActionId action, const FileActionConte
             wchar_t buffer[160]{};
             ::swprintf_s(buffer, L"Entropy: %.4f bits/byte, sampled=%llu bytes", entropy, static_cast<unsigned long long>(sampled));
             result.statusText = buffer;
-            ::MessageBoxW(context.owner, result.statusText.c_str(), L"文件熵值", MB_OK | MB_ICONINFORMATION);
+            result.dialogTitle = L"文件熵值";
+            result.dialogText = result.statusText;
+            result.dialogFlags = MB_ICONINFORMATION;
+            if (!context.backgroundExecution) {
+                ::MessageBoxW(context.owner, result.dialogText.c_str(), result.dialogTitle.c_str(), MB_OK | result.dialogFlags);
+            }
         }
         return result;
     }
@@ -1045,7 +1157,12 @@ FileActionResult FileActions::execute(FileActionId action, const FileActionConte
             result.statusText = L"读取十六进制预览失败，错误 " + std::to_wstring(::GetLastError());
             return result;
         }
-        ::MessageBoxW(context.owner, preview.c_str(), L"十六进制预览（前 512 字节）", MB_OK | MB_ICONINFORMATION);
+        result.dialogTitle = L"十六进制预览（前 512 字节）";
+        result.dialogText = preview;
+        result.dialogFlags = MB_ICONINFORMATION;
+        if (!context.backgroundExecution) {
+            ::MessageBoxW(context.owner, result.dialogText.c_str(), result.dialogTitle.c_str(), MB_OK | result.dialogFlags);
+        }
         result.statusText = L"已显示十六进制预览。";
         return result;
     }
@@ -1056,7 +1173,12 @@ FileActionResult FileActions::execute(FileActionId action, const FileActionConte
             return result;
         }
         result.statusText = L"已显示 PE 头部摘要。";
-        ::MessageBoxW(context.owner, BuildPeSummary(selected).c_str(), L"PE 查看器", MB_OK | MB_ICONINFORMATION);
+        result.dialogTitle = L"PE 查看器";
+        result.dialogText = BuildPeSummary(selected);
+        result.dialogFlags = MB_ICONINFORMATION;
+        if (!context.backgroundExecution) {
+            ::MessageBoxW(context.owner, result.dialogText.c_str(), result.dialogTitle.c_str(), MB_OK | result.dialogFlags);
+        }
         return result;
     case FileActionId::MappedProcessScan: {
         result.handled = true;
@@ -1104,8 +1226,11 @@ FileActionResult FileActions::execute(FileActionId action, const FileActionConte
             }
         }
         result.statusText = summary.str();
-        if (context.owner) {
-            ::MessageBoxW(context.owner, result.statusText.c_str(), L"文件映射进程(R0)", MB_OK | (query.io.ok ? MB_ICONINFORMATION : MB_ICONWARNING));
+        result.dialogTitle = L"文件映射进程(R0)";
+        result.dialogText = result.statusText;
+        result.dialogFlags = query.io.ok ? MB_ICONINFORMATION : MB_ICONWARNING;
+        if (!context.backgroundExecution && context.owner) {
+            ::MessageBoxW(context.owner, result.dialogText.c_str(), result.dialogTitle.c_str(), MB_OK | result.dialogFlags);
         }
         return result;
     }

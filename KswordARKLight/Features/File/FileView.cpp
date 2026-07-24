@@ -39,6 +39,7 @@ constexpr int kFilterBarId = 52009;
 constexpr UINT kColumnMenuBaseId = 52500;
 constexpr UINT kMsgDirectoryRefreshCompleted = WM_APP + 540;
 constexpr UINT kMsgFilterCompleted = WM_APP + 541;
+constexpr UINT kMsgFileActionCompleted = WM_APP + 542;
 
 // FileColumnSpec describes one report column. Inputs are static id/title/width
 // values; processing uses the same table for initial creation and user column
@@ -68,6 +69,13 @@ struct FileFilterResult {
     std::vector<std::size_t> visibleIndexes;
     std::wstring selectedPath;
     std::wstring topPath;
+};
+
+// FileActionTaskResult carries a fully materialized backend operation result.
+// UI-only effects such as clipboard writes and dialogs are applied only after
+// this immutable result returns to the window thread.
+struct FileActionTaskResult {
+    FileActionResult result;
 };
 
 constexpr FileColumnSpec kFileColumns[] = {
@@ -109,6 +117,7 @@ struct FileViewState {
     bool hideOverlayAfterFilter = false;
     std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<DirectoryRefreshSnapshot>> refreshTask;
     std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<FileFilterResult>> filterTask;
+    std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<FileActionTaskResult>> actionTask;
     std::unordered_map<std::wstring, int> iconCache;
     bool columnVisible[std::size(kFileColumns)] = { true, true, true, true, true, true };
 };
@@ -603,9 +612,77 @@ bool SelectedEntry(const FileViewState& state, FileEntry* entry) {
     return true;
 }
 
-// OpenSelectedEntry either navigates into directories/drives or shell-opens
-// files. Input is state; processing uses local Win32 ShellExecuteW only for file
-// open behavior; no value is returned.
+// ApplyFileActionResult runs only on the window thread. It keeps clipboard and
+// modal UI ownership out of the worker while following any refresh/navigation
+// request produced by the completed immutable file-action result.
+void ApplyFileActionResult(FileViewState& state, FileActionResult result) {
+    if (!result.clipboardText.empty() && !FileActions::copyTextToClipboard(state.hwnd, result.clipboardText)) {
+        if (!result.statusText.empty()) {
+            result.statusText += L"；复制到剪贴板失败。";
+        } else {
+            result.statusText = L"复制到剪贴板失败。";
+        }
+    }
+    if (!result.statusText.empty()) {
+        SetStatus(state, result.statusText);
+    }
+    if (result.navigateRequested) {
+        NavigateTo(state, result.navigatePath);
+    } else if (result.refreshRequested) {
+        RefreshCurrentPath(state);
+    }
+    if (!result.dialogText.empty()) {
+        ::MessageBoxW(
+            state.hwnd,
+            result.dialogText.c_str(),
+            result.dialogTitle.empty() ? L"文件操作" : result.dialogTitle.c_str(),
+            MB_OK | (result.dialogFlags == 0 ? MB_ICONINFORMATION : result.dialogFlags));
+    }
+}
+
+// BeginFileAction performs UI-only preflight synchronously, then runs every
+// shell, filesystem, Restart Manager, security and R0 operation through the
+// dedicated action task. A running action rejects duplicate requests while the
+// prior directory snapshot remains interactive.
+void BeginFileAction(FileViewState& state, const FileActionId action, FileActionContext context) {
+    if (action == FileActionId::None) {
+        return;
+    }
+    if (!state.actionTask) {
+        SetStatus(state, L"文件操作任务不可用。");
+        return;
+    }
+    if (state.actionTask->running()) {
+        SetStatus(state, L"另一个文件操作正在后台执行，请等待完成。");
+        return;
+    }
+
+    const FileActionPreparation preparation = FileActions::prepareBackground(action, context);
+    if (!preparation.ready) {
+        SetStatus(state, preparation.statusText.empty() ? L"已取消文件操作。" : preparation.statusText);
+        return;
+    }
+
+    context.backgroundExecution = true;
+    context.owner = nullptr;
+    SetStatus(state, L"正在后台执行文件操作…");
+    state.actionTask->request(
+        [action, context = std::move(context)]() mutable {
+            FileActionTaskResult completed{};
+            completed.result = FileActions::execute(action, context);
+            return completed;
+        },
+        [&state](std::uint64_t, std::optional<FileActionTaskResult>&& completed, std::exception_ptr error) {
+            if (error || !completed.has_value()) {
+                SetStatus(state, L"文件后台操作异常结束。请检查访问权限和驱动状态。");
+                return;
+            }
+            ApplyFileActionResult(state, std::move(completed->result));
+        });
+}
+
+// OpenSelectedEntry either navigates into directories/drives or schedules a
+// ShellExecute request for files. It never blocks the file page message loop.
 void OpenSelectedEntry(FileViewState& state) {
     FileEntry entry;
     if (!SelectedEntry(state, &entry)) {
@@ -620,14 +697,17 @@ void OpenSelectedEntry(FileViewState& state) {
     context.currentDirectory = state.navigator.currentPath();
     context.selectedEntry = entry;
     context.hasSelection = true;
-    const FileActionResult result = FileActions::execute(FileActionId::OpenRun, context);
-    SetStatus(state, result.statusText);
+    BeginFileAction(state, FileActionId::OpenRun, std::move(context));
 }
 
 // ShowContextMenu builds a context object, displays the FileActions menu, then
 // executes the selected command. Inputs are state and screen coordinate; no
 // value is returned.
 void ShowContextMenu(FileViewState& state, POINT screenPoint) {
+    if (state.actionTask && state.actionTask->running()) {
+        SetStatus(state, L"另一个文件操作正在后台执行，请等待完成。");
+        return;
+    }
     FileActionContext context;
     context.owner = state.hwnd;
     context.currentDirectory = state.navigator.currentPath();
@@ -637,17 +717,7 @@ void ShowContextMenu(FileViewState& state, POINT screenPoint) {
         ShowColumnMenu(state, screenPoint);
         return;
     }
-    const FileActionResult result = FileActions::execute(action, context);
-    if (result.navigateRequested) {
-        NavigateTo(state, result.navigatePath);
-        return;
-    }
-    if (result.refreshRequested) {
-        RefreshCurrentPath(state);
-    }
-    if (!result.statusText.empty()) {
-        SetStatus(state, result.statusText);
-    }
+    BeginFileAction(state, action, std::move(context));
 }
 
 // HandleCommand processes toolbar button commands. Inputs are state and command
@@ -768,6 +838,7 @@ LRESULT CALLBACK FileViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         state->loadingOverlay = Ksword::Ui::CreateLoadingOverlay(hwnd, 52010, { 0, 0, 1, 1 });
         state->refreshTask = std::make_unique<Ksword::Ui::AsyncSnapshotTask<DirectoryRefreshSnapshot>>(hwnd, kMsgDirectoryRefreshCompleted);
         state->filterTask = std::make_unique<Ksword::Ui::AsyncSnapshotTask<FileFilterResult>>(hwnd, kMsgFilterCompleted);
+        state->actionTask = std::make_unique<Ksword::Ui::AsyncSnapshotTask<FileActionTaskResult>>(hwnd, kMsgFileActionCompleted);
         RefreshCurrentPath(*state);
         return 0;
     }
@@ -795,6 +866,11 @@ LRESULT CALLBACK FileViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         break;
     case kMsgFilterCompleted:
         if (state && state->filterTask && state->filterTask->consume(hwnd, wParam, lParam)) {
+            return 0;
+        }
+        break;
+    case kMsgFileActionCompleted:
+        if (state && state->actionTask && state->actionTask->consume(hwnd, wParam, lParam)) {
             return 0;
         }
         break;
@@ -838,6 +914,9 @@ LRESULT CALLBACK FileViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         }
         if (state && state->filterTask) {
             state->filterTask->cancel();
+        }
+        if (state && state->actionTask) {
+            state->actionTask->cancel();
         }
         if (state && state->imageList) {
             ImageList_Destroy(state->imageList);
