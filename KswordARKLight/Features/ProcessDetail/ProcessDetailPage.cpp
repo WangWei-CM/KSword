@@ -27,6 +27,7 @@ constexpr UINT kCopyAllCommand = 64003;
 constexpr UINT kMsgSnapshotCompleted = WM_APP + 610;
 constexpr UINT kMsgThreadFilterCompleted = WM_APP + 611;
 constexpr UINT kMsgModuleFilterCompleted = WM_APP + 612;
+constexpr UINT kMsgActionCompleted = WM_APP + 613;
 constexpr int kSnapshotLoadingOverlayId = 1110;
 
 constexpr std::array<const wchar_t*, 8> kTabTitles{
@@ -92,6 +93,9 @@ ProcessDetailPage::~ProcessDetailPage() {
     if (snapshotTask_) {
         snapshotTask_->cancel();
     }
+    if (actionTask_) {
+        actionTask_->cancel();
+    }
     if (threadFilterTask_) {
         threadFilterTask_->cancel();
     }
@@ -154,6 +158,11 @@ LRESULT ProcessDetailPage::HandleMessage(HWND hwnd, UINT message, WPARAM wParam,
             return 0;
         }
         break;
+    case kMsgActionCompleted:
+        if (actionTask_ && actionTask_->consume(hwnd, wParam, lParam)) {
+            return 0;
+        }
+        break;
     case kMsgThreadFilterCompleted:
         if (threadFilterTask_ && threadFilterTask_->consume(hwnd, wParam, lParam)) {
             return 0;
@@ -179,6 +188,9 @@ LRESULT ProcessDetailPage::HandleMessage(HWND hwnd, UINT message, WPARAM wParam,
     case WM_NCDESTROY:
         if (snapshotTask_) {
             snapshotTask_->cancel();
+        }
+        if (actionTask_) {
+            actionTask_->cancel();
         }
         if (threadFilterTask_) {
             threadFilterTask_->cancel();
@@ -224,9 +236,10 @@ bool ProcessDetailPage::Initialize(HWND hwnd) {
 
     loadingOverlay_ = Ksword::Ui::CreateLoadingOverlay(hwnd_, kSnapshotLoadingOverlayId, { 0, 0, 1, 1 });
     snapshotTask_ = std::make_unique<Ksword::Ui::AsyncSnapshotTask<ProcessDetailSnapshot>>(hwnd_, kMsgSnapshotCompleted);
+    actionTask_ = std::make_unique<Ksword::Ui::AsyncSnapshotTask<ProcessDetailActionResult>>(hwnd_, kMsgActionCompleted);
     threadFilterTask_ = std::make_unique<Ksword::Ui::AsyncSnapshotTask<DetailTableFilterResult>>(hwnd_, kMsgThreadFilterCompleted);
     moduleFilterTask_ = std::make_unique<Ksword::Ui::AsyncSnapshotTask<DetailTableFilterResult>>(hwnd_, kMsgModuleFilterCompleted);
-    if (!loadingOverlay_ || !snapshotTask_ || !threadFilterTask_ || !moduleFilterTask_) {
+    if (!loadingOverlay_ || !snapshotTask_ || !actionTask_ || !threadFilterTask_ || !moduleFilterTask_) {
         return false;
     }
     ::SendMessageW(tab_, TCM_SETCURSEL, 0, 0);
@@ -614,6 +627,38 @@ void ProcessDetailPage::SetSnapshotRefreshControlsEnabled(const bool enabled) {
     if (HWND moduleRefresh = Control(TabIndex::Modules, ModuleRefresh)) {
         ::EnableWindow(moduleRefresh, enabled);
     }
+}
+
+// ExecuteBackgroundAction serializes process-detail mutations away from the UI
+// thread. Confirmations and selection capture occur before this call; the
+// worker receives only immutable IDs/snapshots and completion is discarded when
+// the page is destroyed by AsyncSnapshotTask.
+void ProcessDetailPage::ExecuteBackgroundAction(
+    const TabIndex tab,
+    const int statusControlId,
+    const std::wstring& workingText,
+    std::function<ProcessDetailActionResult()> work) {
+    if (!actionTask_ || !work) {
+        SetPageStatus(tab, statusControlId, L"● 操作任务不可用。");
+        return;
+    }
+    if (actionTask_->running()) {
+        SetPageStatus(tab, statusControlId, L"● 另一个进程操作正在后台执行。");
+        return;
+    }
+    SetPageStatus(tab, statusControlId, workingText);
+    actionTask_->request(
+        std::move(work),
+        [this, tab, statusControlId](std::uint64_t, std::optional<ProcessDetailActionResult>&& result, std::exception_ptr error) {
+            if (error || !result.has_value()) {
+                SetPageStatus(tab, statusControlId, L"● 后台操作异常结束。");
+                return;
+            }
+            SetPageStatus(tab, statusControlId, result->statusText);
+            if (result->refreshRequired) {
+                RefreshAll();
+            }
+        });
 }
 
 HWND ProcessDetailPage::AddControl(

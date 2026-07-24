@@ -1003,79 +1003,84 @@ void ProcessDetailPage::UnloadSelectedModule() {
         SetPageStatus(TabIndex::Modules, ModuleStatus, L"● 卸载模块失败 | 模块基址不可用");
         return;
     }
+    const auto moduleSnapshot = moduleEntries_;
+    const DWORD targetProcessId = processId_;
+    ExecuteBackgroundAction(
+        TabIndex::Modules,
+        ModuleStatus,
+        L"● 正在后台卸载模块…",
+        [moduleBase, targetProcessId, moduleSnapshot] {
+            ProcessDetailActionResult action{};
+            HMODULE localKernel32 = ::GetModuleHandleW(L"kernel32.dll");
+            FARPROC localFreeLibrary = localKernel32 ? ::GetProcAddress(localKernel32, "FreeLibrary") : nullptr;
+            HMODULE localFunctionModule = nullptr;
+            if (!localFreeLibrary || !::GetModuleHandleExW(
+                    GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                    reinterpret_cast<LPCWSTR>(localFreeLibrary),
+                    &localFunctionModule)) {
+                action.statusText = L"● 卸载模块失败 | 无法解析 FreeLibrary";
+                return action;
+            }
+            wchar_t localFunctionPath[32768]{};
+            const DWORD localFunctionPathLength = ::GetModuleFileNameW(
+                localFunctionModule,
+                localFunctionPath,
+                static_cast<DWORD>(std::size(localFunctionPath)));
+            const std::wstring functionModuleName = localFunctionPathLength > 0
+                ? BaseNameFromPath(std::wstring(localFunctionPath, localFunctionPathLength))
+                : L"kernel32.dll";
+            std::uintptr_t remoteFunctionModule = 0;
+            if (moduleSnapshot) {
+                for (const ProcessModuleInfo& module : *moduleSnapshot) {
+                    if (_wcsicmp(BaseNameFromPath(module.modulePath).c_str(), functionModuleName.c_str()) == 0) {
+                        remoteFunctionModule = module.baseAddress;
+                        break;
+                    }
+                }
+            }
+            const std::uintptr_t localFunctionModuleAddress = reinterpret_cast<std::uintptr_t>(localFunctionModule);
+            const std::uintptr_t freeLibraryOffset =
+                reinterpret_cast<std::uintptr_t>(localFreeLibrary) - localFunctionModuleAddress;
+            const std::uintptr_t remoteFreeLibrary = remoteFunctionModule
+                ? remoteFunctionModule + freeLibraryOffset
+                : reinterpret_cast<std::uintptr_t>(localFreeLibrary);
 
-    HMODULE localKernel32 = ::GetModuleHandleW(L"kernel32.dll");
-    FARPROC localFreeLibrary = localKernel32 ? ::GetProcAddress(localKernel32, "FreeLibrary") : nullptr;
-    HMODULE localFunctionModule = nullptr;
-    if (!localFreeLibrary || !::GetModuleHandleExW(
-            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-            reinterpret_cast<LPCWSTR>(localFreeLibrary),
-            &localFunctionModule)) {
-        SetPageStatus(TabIndex::Modules, ModuleStatus, L"● 卸载模块失败 | 无法解析 FreeLibrary");
-        return;
-    }
-    wchar_t localFunctionPath[32768]{};
-    const DWORD localFunctionPathLength = ::GetModuleFileNameW(
-        localFunctionModule,
-        localFunctionPath,
-        static_cast<DWORD>(std::size(localFunctionPath)));
-    const std::wstring functionModuleName = localFunctionPathLength > 0
-        ? BaseNameFromPath(std::wstring(localFunctionPath, localFunctionPathLength))
-        : L"kernel32.dll";
-    std::uintptr_t remoteFunctionModule = 0;
-    for (const ProcessModuleInfo& module : modules) {
-        if (_wcsicmp(BaseNameFromPath(module.modulePath).c_str(), functionModuleName.c_str()) == 0) {
-            remoteFunctionModule = module.baseAddress;
-            break;
-        }
-    }
-    const std::uintptr_t localFunctionModuleAddress = reinterpret_cast<std::uintptr_t>(localFunctionModule);
-    const std::uintptr_t freeLibraryOffset =
-        reinterpret_cast<std::uintptr_t>(localFreeLibrary) - localFunctionModuleAddress;
-    const std::uintptr_t remoteFreeLibrary = remoteFunctionModule
-        ? remoteFunctionModule + freeLibraryOffset
-        : reinterpret_cast<std::uintptr_t>(localFreeLibrary);
-
-    HANDLE process = ::OpenProcess(
-        PROCESS_CREATE_THREAD | PROCESS_QUERY_INFORMATION | PROCESS_VM_OPERATION | PROCESS_VM_READ,
-        FALSE,
-        processId_);
-    if (!process) {
-        SetPageStatus(
-            TabIndex::Modules,
-            ModuleStatus,
-            L"● 卸载模块失败 | " + LastErrorText(L"OpenProcess", ::GetLastError()));
-        return;
-    }
-    HANDLE thread = ::CreateRemoteThread(
-        process,
-        nullptr,
-        0,
-        reinterpret_cast<LPTHREAD_START_ROUTINE>(remoteFreeLibrary),
-        reinterpret_cast<void*>(moduleBase),
-        0,
-        nullptr);
-    if (!thread) {
-        const DWORD error = ::GetLastError();
-        ::CloseHandle(process);
-        SetPageStatus(
-            TabIndex::Modules,
-            ModuleStatus,
-            L"● 卸载模块失败 | " + LastErrorText(L"CreateRemoteThread", error));
-        return;
-    }
-    const DWORD waitResult = ::WaitForSingleObject(thread, 10000);
-    DWORD exitCode = 0;
-    const bool completed = waitResult == WAIT_OBJECT_0 &&
-        ::GetExitCodeThread(thread, &exitCode) != FALSE && exitCode != 0;
-    ::CloseHandle(thread);
-    ::CloseHandle(process);
-    if (!completed) {
-        SetPageStatus(TabIndex::Modules, ModuleStatus, L"● 卸载模块失败 | FreeLibrary 未成功返回");
-        return;
-    }
-    RefreshAll();
-    SetPageStatus(TabIndex::Modules, ModuleStatus, L"● 卸载模块成功");
+            HANDLE process = ::OpenProcess(
+                PROCESS_CREATE_THREAD | PROCESS_QUERY_INFORMATION | PROCESS_VM_OPERATION | PROCESS_VM_READ,
+                FALSE,
+                targetProcessId);
+            if (!process) {
+                action.statusText = L"● 卸载模块失败 | " + LastErrorText(L"OpenProcess", ::GetLastError());
+                return action;
+            }
+            HANDLE thread = ::CreateRemoteThread(
+                process,
+                nullptr,
+                0,
+                reinterpret_cast<LPTHREAD_START_ROUTINE>(remoteFreeLibrary),
+                reinterpret_cast<void*>(moduleBase),
+                0,
+                nullptr);
+            if (!thread) {
+                const DWORD error = ::GetLastError();
+                ::CloseHandle(process);
+                action.statusText = L"● 卸载模块失败 | " + LastErrorText(L"CreateRemoteThread", error);
+                return action;
+            }
+            const DWORD waitResult = ::WaitForSingleObject(thread, 10000);
+            DWORD exitCode = 0;
+            const bool completed = waitResult == WAIT_OBJECT_0 &&
+                ::GetExitCodeThread(thread, &exitCode) != FALSE && exitCode != 0;
+            ::CloseHandle(thread);
+            ::CloseHandle(process);
+            if (!completed) {
+                action.statusText = L"● 卸载模块失败 | FreeLibrary 未成功返回";
+                return action;
+            }
+            action.refreshRequired = true;
+            action.statusText = L"● 卸载模块成功";
+            return action;
+        });
 }
 
 void ProcessDetailPage::SuspendSelectedModuleThread() {
@@ -1087,23 +1092,26 @@ void ProcessDetailPage::SuspendSelectedModuleThread() {
         return;
     }
     const DWORD threadId = modules[index].representativeThreadId;
-    HANDLE thread = ::OpenThread(THREAD_SUSPEND_RESUME, FALSE, threadId);
-    if (!thread) {
-        SetPageStatus(
-            TabIndex::Modules,
-            ModuleStatus,
-            L"● 挂起 Thread 失败 | " + LastErrorText(L"OpenThread", ::GetLastError()));
-        return;
-    }
-    const DWORD previousCount = ::SuspendThread(thread);
-    const DWORD error = previousCount == static_cast<DWORD>(-1) ? ::GetLastError() : ERROR_SUCCESS;
-    ::CloseHandle(thread);
-    SetPageStatus(
+    ExecuteBackgroundAction(
         TabIndex::Modules,
         ModuleStatus,
-        previousCount != static_cast<DWORD>(-1)
-            ? L"● 挂起 Thread 成功"
-            : L"● 挂起 Thread 失败 | " + LastErrorText(L"SuspendThread", error));
+        L"● 正在后台挂起模块线程…",
+        [threadId] {
+            ProcessDetailActionResult action{};
+            HANDLE thread = ::OpenThread(THREAD_SUSPEND_RESUME, FALSE, threadId);
+            if (!thread) {
+                action.statusText = L"● 挂起 Thread 失败 | " + LastErrorText(L"OpenThread", ::GetLastError());
+                return action;
+            }
+            const DWORD previousCount = ::SuspendThread(thread);
+            const DWORD error = previousCount == static_cast<DWORD>(-1) ? ::GetLastError() : ERROR_SUCCESS;
+            ::CloseHandle(thread);
+            action.refreshRequired = error == ERROR_SUCCESS;
+            action.statusText = error == ERROR_SUCCESS
+                ? L"● 挂起 Thread 成功"
+                : L"● 挂起 Thread 失败 | " + LastErrorText(L"SuspendThread", error);
+            return action;
+        });
 }
 
 void ProcessDetailPage::ResumeSelectedModuleThread() {
@@ -1115,23 +1123,26 @@ void ProcessDetailPage::ResumeSelectedModuleThread() {
         return;
     }
     const DWORD threadId = modules[index].representativeThreadId;
-    HANDLE thread = ::OpenThread(THREAD_SUSPEND_RESUME, FALSE, threadId);
-    if (!thread) {
-        SetPageStatus(
-            TabIndex::Modules,
-            ModuleStatus,
-            L"● 取消挂起 Thread 失败 | " + LastErrorText(L"OpenThread", ::GetLastError()));
-        return;
-    }
-    const DWORD previousCount = ::ResumeThread(thread);
-    const DWORD error = previousCount == static_cast<DWORD>(-1) ? ::GetLastError() : ERROR_SUCCESS;
-    ::CloseHandle(thread);
-    SetPageStatus(
+    ExecuteBackgroundAction(
         TabIndex::Modules,
         ModuleStatus,
-        previousCount != static_cast<DWORD>(-1)
-            ? L"● 取消挂起 Thread 成功"
-            : L"● 取消挂起 Thread 失败 | " + LastErrorText(L"ResumeThread", error));
+        L"● 正在后台恢复模块线程…",
+        [threadId] {
+            ProcessDetailActionResult action{};
+            HANDLE thread = ::OpenThread(THREAD_SUSPEND_RESUME, FALSE, threadId);
+            if (!thread) {
+                action.statusText = L"● 取消挂起 Thread 失败 | " + LastErrorText(L"OpenThread", ::GetLastError());
+                return action;
+            }
+            const DWORD previousCount = ::ResumeThread(thread);
+            const DWORD error = previousCount == static_cast<DWORD>(-1) ? ::GetLastError() : ERROR_SUCCESS;
+            ::CloseHandle(thread);
+            action.refreshRequired = error == ERROR_SUCCESS;
+            action.statusText = error == ERROR_SUCCESS
+                ? L"● 取消挂起 Thread 成功"
+                : L"● 取消挂起 Thread 失败 | " + LastErrorText(L"ResumeThread", error);
+            return action;
+        });
 }
 
 void ProcessDetailPage::TerminateSelectedModuleThread() {
@@ -1143,26 +1154,28 @@ void ProcessDetailPage::TerminateSelectedModuleThread() {
         return;
     }
     const DWORD threadId = modules[index].representativeThreadId;
-    HANDLE thread = ::OpenThread(THREAD_TERMINATE, FALSE, threadId);
-    if (!thread) {
-        SetPageStatus(
-            TabIndex::Modules,
-            ModuleStatus,
-            L"● 结束 Thread 失败 | " + LastErrorText(L"OpenThread", ::GetLastError()));
-        return;
-    }
-    const BOOL terminated = ::TerminateThread(thread, 0);
-    const DWORD error = terminated ? ERROR_SUCCESS : ::GetLastError();
-    ::CloseHandle(thread);
-    if (!terminated) {
-        SetPageStatus(
-            TabIndex::Modules,
-            ModuleStatus,
-            L"● 结束 Thread 失败 | " + LastErrorText(L"TerminateThread", error));
-        return;
-    }
-    RefreshAll();
-    SetPageStatus(TabIndex::Modules, ModuleStatus, L"● 结束 Thread 成功");
+    ExecuteBackgroundAction(
+        TabIndex::Modules,
+        ModuleStatus,
+        L"● 正在后台结束模块线程…",
+        [threadId] {
+            ProcessDetailActionResult action{};
+            HANDLE thread = ::OpenThread(THREAD_TERMINATE, FALSE, threadId);
+            if (!thread) {
+                action.statusText = L"● 结束 Thread 失败 | " + LastErrorText(L"OpenThread", ::GetLastError());
+                return action;
+            }
+            const BOOL terminated = ::TerminateThread(thread, 0);
+            const DWORD error = terminated ? ERROR_SUCCESS : ::GetLastError();
+            ::CloseHandle(thread);
+            if (!terminated) {
+                action.statusText = L"● 结束 Thread 失败 | " + LastErrorText(L"TerminateThread", error);
+                return action;
+            }
+            action.refreshRequired = true;
+            action.statusText = L"● 结束 Thread 成功";
+            return action;
+        });
 }
 
 } // namespace Ksword::Features::ProcessDetail

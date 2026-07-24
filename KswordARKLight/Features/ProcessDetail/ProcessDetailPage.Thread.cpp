@@ -548,23 +548,29 @@ void ProcessDetailPage::SuspendSelectedThread() {
         return;
     }
 
-    HANDLE thread = ::OpenThread(THREAD_SUSPEND_RESUME, FALSE, threadId);
-    if (!thread) {
-        SetPageStatus(TabIndex::Threads, ThreadStatus, L"● " + Win32ErrorText(L"OpenThread", ::GetLastError()));
-        return;
-    }
-    const DWORD previousCount = ::SuspendThread(thread);
-    const DWORD error = previousCount == static_cast<DWORD>(-1) ? ::GetLastError() : ERROR_SUCCESS;
-    ::CloseHandle(thread);
-    if (error != ERROR_SUCCESS) {
-        SetPageStatus(TabIndex::Threads, ThreadStatus, L"● " + Win32ErrorText(L"SuspendThread", error));
-        return;
-    }
-    RefreshAll();
-    SetPageStatus(
+    ExecuteBackgroundAction(
         TabIndex::Threads,
         ThreadStatus,
-        L"● 已挂起线程 " + DecimalText(threadId) + L"（原挂起计数 " + DecimalText(previousCount) + L"）");
+        L"● 正在后台挂起线程 " + DecimalText(threadId) + L"…",
+        [threadId] {
+            ProcessDetailActionResult result{};
+            HANDLE thread = ::OpenThread(THREAD_SUSPEND_RESUME, FALSE, threadId);
+            if (!thread) {
+                result.statusText = L"● " + Win32ErrorText(L"OpenThread", ::GetLastError());
+                return result;
+            }
+            const DWORD previousCount = ::SuspendThread(thread);
+            const DWORD error = previousCount == static_cast<DWORD>(-1) ? ::GetLastError() : ERROR_SUCCESS;
+            ::CloseHandle(thread);
+            if (error != ERROR_SUCCESS) {
+                result.statusText = L"● " + Win32ErrorText(L"SuspendThread", error);
+                return result;
+            }
+            result.refreshRequired = true;
+            result.statusText = L"● 已挂起线程 " + DecimalText(threadId) +
+                L"（原挂起计数 " + DecimalText(previousCount) + L"）";
+            return result;
+        });
 }
 
 void ProcessDetailPage::ResumeSelectedThread() {
@@ -576,23 +582,29 @@ void ProcessDetailPage::ResumeSelectedThread() {
         return;
     }
     const DWORD threadId = threads[index].threadId;
-    HANDLE thread = ::OpenThread(THREAD_SUSPEND_RESUME, FALSE, threadId);
-    if (!thread) {
-        SetPageStatus(TabIndex::Threads, ThreadStatus, L"● " + Win32ErrorText(L"OpenThread", ::GetLastError()));
-        return;
-    }
-    const DWORD previousCount = ::ResumeThread(thread);
-    const DWORD error = previousCount == static_cast<DWORD>(-1) ? ::GetLastError() : ERROR_SUCCESS;
-    ::CloseHandle(thread);
-    if (error != ERROR_SUCCESS) {
-        SetPageStatus(TabIndex::Threads, ThreadStatus, L"● " + Win32ErrorText(L"ResumeThread", error));
-        return;
-    }
-    RefreshAll();
-    SetPageStatus(
+    ExecuteBackgroundAction(
         TabIndex::Threads,
         ThreadStatus,
-        L"● 已恢复线程 " + DecimalText(threadId) + L"（原挂起计数 " + DecimalText(previousCount) + L"）");
+        L"● 正在后台恢复线程 " + DecimalText(threadId) + L"…",
+        [threadId] {
+            ProcessDetailActionResult result{};
+            HANDLE thread = ::OpenThread(THREAD_SUSPEND_RESUME, FALSE, threadId);
+            if (!thread) {
+                result.statusText = L"● " + Win32ErrorText(L"OpenThread", ::GetLastError());
+                return result;
+            }
+            const DWORD previousCount = ::ResumeThread(thread);
+            const DWORD error = previousCount == static_cast<DWORD>(-1) ? ::GetLastError() : ERROR_SUCCESS;
+            ::CloseHandle(thread);
+            if (error != ERROR_SUCCESS) {
+                result.statusText = L"● " + Win32ErrorText(L"ResumeThread", error);
+                return result;
+            }
+            result.refreshRequired = true;
+            result.statusText = L"● 已恢复线程 " + DecimalText(threadId) +
+                L"（原挂起计数 " + DecimalText(previousCount) + L"）";
+            return result;
+        });
 }
 
 void ProcessDetailPage::TerminateSelectedThread() {
@@ -618,20 +630,28 @@ void ProcessDetailPage::TerminateSelectedThread() {
         return;
     }
 
-    HANDLE thread = ::OpenThread(THREAD_TERMINATE, FALSE, threadId);
-    if (!thread) {
-        SetPageStatus(TabIndex::Threads, ThreadStatus, L"● " + Win32ErrorText(L"OpenThread", ::GetLastError()));
-        return;
-    }
-    const BOOL terminated = ::TerminateThread(thread, 1);
-    const DWORD error = terminated ? ERROR_SUCCESS : ::GetLastError();
-    ::CloseHandle(thread);
-    if (!terminated) {
-        SetPageStatus(TabIndex::Threads, ThreadStatus, L"● " + Win32ErrorText(L"TerminateThread", error));
-        return;
-    }
-    RefreshAll();
-    SetPageStatus(TabIndex::Threads, ThreadStatus, L"● 已请求终止线程 " + DecimalText(threadId));
+    ExecuteBackgroundAction(
+        TabIndex::Threads,
+        ThreadStatus,
+        L"● 正在后台终止线程 " + DecimalText(threadId) + L"…",
+        [threadId] {
+            ProcessDetailActionResult result{};
+            HANDLE thread = ::OpenThread(THREAD_TERMINATE, FALSE, threadId);
+            if (!thread) {
+                result.statusText = L"● " + Win32ErrorText(L"OpenThread", ::GetLastError());
+                return result;
+            }
+            const BOOL terminated = ::TerminateThread(thread, 1);
+            const DWORD error = terminated ? ERROR_SUCCESS : ::GetLastError();
+            ::CloseHandle(thread);
+            if (!terminated) {
+                result.statusText = L"● " + Win32ErrorText(L"TerminateThread", error);
+                return result;
+            }
+            result.refreshRequired = true;
+            result.statusText = L"● 已请求终止线程 " + DecimalText(threadId);
+            return result;
+        });
 }
 
 void ProcessDetailPage::TerminateSelectedThreadByR0() {
@@ -666,24 +686,24 @@ void ProcessDetailPage::TerminateSelectedThreadByR0() {
         return;
     }
 
-    const ksword::ark::DriverClient driverClient;
-    const ksword::ark::IoResult result = driverClient.terminateThread(
-        threadId,
-        processId,
-        static_cast<long>(0xC0000005u));
-    if (!result.ok) {
-        SetPageStatus(
-            TabIndex::Threads,
-            ThreadStatus,
-            L"● R0结束线程失败 | " + Utf8ToWide(result.message));
-        return;
-    }
-
-    RefreshAll();
-    SetPageStatus(
+    ExecuteBackgroundAction(
         TabIndex::Threads,
         ThreadStatus,
-        L"● R0 已请求结束线程 " + DecimalText(threadId) + L"。");
+        L"● 正在后台通过 R0 结束线程 " + DecimalText(threadId) + L"…",
+        [threadId, processId] {
+            ProcessDetailActionResult action{};
+            const ksword::ark::IoResult result = ksword::ark::DriverClient().terminateThread(
+                threadId,
+                processId,
+                static_cast<long>(0xC0000005u));
+            if (!result.ok) {
+                action.statusText = L"● R0结束线程失败 | " + Utf8ToWide(result.message);
+                return action;
+            }
+            action.refreshRequired = true;
+            action.statusText = L"● R0 已请求结束线程 " + DecimalText(threadId) + L"。";
+            return action;
+        });
 }
 
 void ProcessDetailPage::ShowSelectedThreadSummary() {

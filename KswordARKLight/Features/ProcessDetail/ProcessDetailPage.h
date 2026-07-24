@@ -11,6 +11,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -197,6 +198,11 @@ private:
         HIMAGELIST imageList = nullptr;
     };
 
+    struct ProcessDetailActionResult {
+        bool refreshRequired = false;
+        std::wstring statusText;
+    };
+
     explicit ProcessDetailPage(DWORD processId);
     ~ProcessDetailPage();
 
@@ -296,6 +302,11 @@ private:
     void PopulatePebTab();
     void RequestThreadFilter(bool rebuildRows);
     void RequestModuleFilter(bool rebuildRows);
+    void ExecuteBackgroundAction(
+        TabIndex tab,
+        int statusControlId,
+        const std::wstring& workingText,
+        std::function<ProcessDetailActionResult()> work);
     void OnModuleSortRequested(int column);
     static LRESULT CALLBACK ModuleHeaderSubclassProc(
         HWND hwnd,
@@ -351,6 +362,7 @@ private:
     std::unordered_map<HWND, int> listContextColumns_;
     ProcessDetailSnapshot snapshot_{};
     std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<ProcessDetailSnapshot>> snapshotTask_;
+    std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<ProcessDetailActionResult>> actionTask_;
     std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<DetailTableFilterResult>> threadFilterTask_;
     std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<DetailTableFilterResult>> moduleFilterTask_;
     Ksword::Ui::VirtualListView threadVirtualList_;
