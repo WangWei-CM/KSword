@@ -46,6 +46,7 @@ constexpr UINT kMsgInitialRefresh = WM_APP + 520;
 constexpr UINT kMsgRequestRefresh = WM_APP + 521;
 constexpr UINT kMsgRefreshCompleted = WM_APP + 522;
 constexpr UINT kMsgFilterCompleted = WM_APP + 523;
+constexpr UINT kMsgActionCompleted = WM_APP + 524;
 constexpr int kTreeIndentPixels = 18;
 constexpr int kTreeIconGap = 4;
 constexpr int kTreeTextGap = 4;
@@ -75,6 +76,14 @@ struct ProcessFilterResult {
     std::vector<std::size_t> visibleIndexes;
     std::vector<DWORD> selectedPids;
     std::wstring topStableKey;
+};
+
+// ProcessViewActionResult crosses the worker/UI boundary for a context-menu
+// operation. The worker owns only immutable process identity and row snapshots;
+// the UI owns status, diagnostics and any follow-up refresh.
+struct ProcessViewActionResult {
+    ProcessActionResult result;
+    bool refreshRequired = false;
 };
 
 enum class ProcessRowVisualState {
@@ -278,6 +287,7 @@ struct ProcessViewState {
     bool hasLastActiveSnapshot = false;
     std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<struct ProcessRefreshSnapshot>> refreshTask;
     std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<ProcessFilterResult>> filterTask;
+    std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<ProcessViewActionResult>> actionTask;
 };
 
 // KernelProcessSnapshotEntry 用途：保存 ArkDriverClient R0 枚举返回的一行进程证据。
@@ -1689,9 +1699,115 @@ void CompletePicker(ProcessViewState& state) {
     }
 }
 
+// IsReadOnlyProcessAction identifies operations that do not alter the process
+// snapshot. It lets action completion refresh after a mutation (including a
+// partially successful multi-PID action) without needlessly rebuilding the list
+// after Explorer, clipboard or diagnostic-only operations.
+bool IsReadOnlyProcessAction(const ProcessActionId actionId) {
+    switch (actionId) {
+    case ProcessActionId::OpenFolder:
+    case ProcessActionId::OpenMemoryOperation:
+    case ProcessActionId::ScanHotkeys:
+        return true;
+    default:
+        return false;
+    }
+}
+
+// BeginProcessAction captures the current selection and model snapshot on the
+// UI thread, then executes Win32/R0 work away from it. AsyncSnapshotTask drops
+// stale completions and cancels delivery when the page closes, so a slow driver
+// request cannot freeze or resurrect a closed dock.
+void BeginProcessAction(
+    ProcessViewState& state,
+    const ProcessActionId actionId,
+    std::vector<DWORD> selectedPids,
+    std::vector<ProcessSnapshotRow> snapshotRows,
+    std::wstring workingText) {
+    if (!state.actionTask) {
+        SetStatus(state, L"进程操作任务不可用。");
+        return;
+    }
+    if (state.actionTask->running()) {
+        SetStatus(state, L"另一个进程操作正在后台执行，请等待完成。");
+        return;
+    }
+
+    SetStatus(state, std::move(workingText));
+    state.actionTask->request(
+        [actionId, selectedPids = std::move(selectedPids), snapshotRows = std::move(snapshotRows)]() mutable {
+            ProcessViewActionResult completed{};
+            completed.result = ExecuteProcessAction(actionId, selectedPids, snapshotRows);
+            completed.refreshRequired = !IsReadOnlyProcessAction(actionId);
+            return completed;
+        },
+        [&state](std::uint64_t, std::optional<ProcessViewActionResult>&& completed, std::exception_ptr error) {
+            if (error || !completed.has_value()) {
+                SetStatus(state, L"后台进程操作异常结束。");
+                return;
+            }
+
+            SetStatus(state, completed->result.title + L": " + completed->result.detail);
+            if (!completed->result.success) {
+                ::MessageBoxW(
+                    state.hwnd,
+                    completed->result.detail.c_str(),
+                    completed->result.title.c_str(),
+                    MB_OK | MB_ICONINFORMATION);
+            }
+            if (completed->refreshRequired) {
+                BeginProcessRefresh(state);
+            }
+        });
+}
+
+// BeginR0Injection captures the approved payload path and target PID before
+// moving file I/O and the driver request to the action worker.
+void BeginR0Injection(
+    ProcessViewState& state,
+    const bool dllMode,
+    std::vector<DWORD> selectedPids,
+    std::wstring payloadPath) {
+    if (!state.actionTask) {
+        SetStatus(state, L"R0 注入任务不可用。");
+        return;
+    }
+    if (state.actionTask->running()) {
+        SetStatus(state, L"另一个进程操作正在后台执行，请等待完成。");
+        return;
+    }
+
+    SetStatus(state, dllMode ? L"正在后台执行 R0 DLL 注入…" : L"正在后台读取并执行 R0 Shellcode 注入…");
+    state.actionTask->request(
+        [dllMode, selectedPids = std::move(selectedPids), payloadPath = std::move(payloadPath)]() mutable {
+            ProcessViewActionResult completed{};
+            completed.result = dllMode
+                ? ExecuteR0ProcessDllInjection(selectedPids, payloadPath)
+                : ExecuteR0ProcessShellcodeInjection(selectedPids, payloadPath);
+            completed.refreshRequired = true;
+            return completed;
+        },
+        [&state](std::uint64_t, std::optional<ProcessViewActionResult>&& completed, std::exception_ptr error) {
+            if (error || !completed.has_value()) {
+                SetStatus(state, L"后台 R0 注入异常结束。");
+                return;
+            }
+
+            SetStatus(state, completed->result.title + L": " + completed->result.detail);
+            if (!completed->result.success) {
+                ::MessageBoxW(
+                    state.hwnd,
+                    completed->result.detail.c_str(),
+                    completed->result.title.c_str(),
+                    MB_OK | MB_ICONINFORMATION);
+            }
+            BeginProcessRefresh(state);
+        });
+}
+
 // ExecuteMenuItem handles one context-menu command. Inputs are page state and an
-// action id. Processing keeps UI-local copy commands visible, then delegates the
-// Win32/R3 action contract to ProcessActions. No value is returned.
+// action id. UI-local copy and page creation remain immediate; blocking Win32,
+// R0 and file operations are queued through BeginProcessAction.
 void ExecuteMenuItem(ProcessViewState& state, ProcessActionId actionId) {
     if (actionId == ProcessActionId::CopyCell || actionId == ProcessActionId::CopyRow || actionId == ProcessActionId::CopyVisibleResults) {
         if (actionId == ProcessActionId::CopyVisibleResults) {
@@ -1738,21 +1854,16 @@ void ExecuteMenuItem(ProcessViewState& state, ProcessActionId actionId) {
             return;
         }
 
-        const ProcessActionResult result = dllMode
-            ? ExecuteR0ProcessDllInjection(pids, payloadPath)
-            : ExecuteR0ProcessShellcodeInjection(pids, payloadPath);
-        SetStatus(state, result.title + L": " + result.detail);
-        if (!result.success) {
-            ::MessageBoxW(state.hwnd, result.detail.c_str(), result.title.c_str(), MB_OK | MB_ICONINFORMATION);
-        }
+        BeginR0Injection(state, dllMode, pids, payloadPath);
         return;
     }
 
-    const ProcessActionResult result = ExecuteProcessAction(actionId, SelectedPids(state), state.model.rows());
-    SetStatus(state, result.title + L": " + result.detail);
-    if (!result.success) {
-        ::MessageBoxW(state.hwnd, result.detail.c_str(), result.title.c_str(), MB_OK | MB_ICONINFORMATION);
-    }
+    BeginProcessAction(
+        state,
+        actionId,
+        SelectedPids(state),
+        state.model.rows(),
+        L"正在后台执行进程操作…");
 }
 
 // ShowContextMenu builds and displays the grouped process context menu. Inputs are
@@ -1764,6 +1875,7 @@ void ShowContextMenu(ProcessViewState& state, POINT screenPoint) {
     const bool hasVisibleSelection = !SelectedDisplayIndexes(state).empty();
     const bool hasProcessSelection = !pids.empty();
     const bool singleProcess = pids.size() == 1;
+    const bool actionRunning = state.actionTask && state.actionTask->running();
     state.activeMenuItems.clear();
 
     HMENU menu = ::CreatePopupMenu();
@@ -1774,7 +1886,11 @@ void ShowContextMenu(ProcessViewState& state, POINT screenPoint) {
     auto appendAction = [&](HMENU parent, ProcessActionId id, const wchar_t* text, bool enabled) {
         state.activeMenuItems.push_back(ProcessActionMenuItem{ id, text });
         const UINT command = kContextMenuBaseId + static_cast<UINT>(state.activeMenuItems.size() - 1);
-        ::AppendMenuW(parent, MF_STRING | (enabled ? 0U : MF_GRAYED), command, text);
+        const bool immediateAction = id == ProcessActionId::CopyCell ||
+            id == ProcessActionId::CopyRow ||
+            id == ProcessActionId::CopyVisibleResults ||
+            id == ProcessActionId::OpenDetails;
+        ::AppendMenuW(parent, MF_STRING | (enabled && (!actionRunning || immediateAction) ? 0U : MF_GRAYED), command, text);
     };
     auto appendPopup = [](HMENU parent, HMENU child, const wchar_t* text) {
         ::AppendMenuW(parent, MF_POPUP, reinterpret_cast<UINT_PTR>(child), text);
@@ -1992,6 +2108,7 @@ LRESULT CALLBACK ProcessViewWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             CreateChildControls(*state);
             state->refreshTask = std::make_unique<Ksword::Ui::AsyncSnapshotTask<ProcessRefreshSnapshot>>(hwnd, kMsgRefreshCompleted);
             state->filterTask = std::make_unique<Ksword::Ui::AsyncSnapshotTask<ProcessFilterResult>>(hwnd, kMsgFilterCompleted);
+            state->actionTask = std::make_unique<Ksword::Ui::AsyncSnapshotTask<ProcessViewActionResult>>(hwnd, kMsgActionCompleted);
             SetStatus(*state, L"进程页已创建，等待首次异步刷新。");
             ::PostMessageW(hwnd, kMsgInitialRefresh, 0, 0);
         }
@@ -2010,6 +2127,11 @@ LRESULT CALLBACK ProcessViewWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         break;
     case kMsgFilterCompleted:
         if (state && state->filterTask && state->filterTask->consume(hwnd, wParam, lParam)) {
+            return 0;
+        }
+        break;
+    case kMsgActionCompleted:
+        if (state && state->actionTask && state->actionTask->consume(hwnd, wParam, lParam)) {
             return 0;
         }
         break;
@@ -2142,6 +2264,9 @@ LRESULT CALLBACK ProcessViewWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             }
             if (state->filterTask) {
                 state->filterTask->cancel();
+            }
+            if (state->actionTask) {
+                state->actionTask->cancel();
             }
             if (state->imageList) {
                 ImageList_Destroy(state->imageList);
