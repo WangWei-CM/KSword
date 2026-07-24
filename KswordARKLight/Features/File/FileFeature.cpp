@@ -62,6 +62,7 @@ constexpr UINT kIntegrityMenuMediumPlus = 52704;
 constexpr UINT kIntegrityMenuHigh = 52705;
 constexpr UINT kIntegrityMenuSystem = 52706;
 constexpr UINT kMsgAuditRefreshCompleted = WM_APP + 550;
+constexpr UINT kMsgFileIntegrityCompleted = WM_APP + 551;
 
 #ifndef SECURITY_MANDATORY_MEDIUM_PLUS_RID
 #define SECURITY_MANDATORY_MEDIUM_PLUS_RID (0x00002100L)
@@ -82,6 +83,13 @@ struct AuditRefreshSnapshot {
     int tab = kAuditMinifilterTabIndex;
     std::wstring targetPath;
     std::vector<AuditRow> rows;
+};
+
+struct FileIntegrityActionResult {
+    AuditRow row;
+    bool success = false;
+    std::wstring statusText;
+    std::wstring failureDetail;
 };
 
 // FileFeatureHostState owns the outer File feature tabs. Inputs arrive through
@@ -110,6 +118,7 @@ struct FileAuditPageState {
     int currentTab = kAuditMinifilterTabIndex;
     std::vector<AuditRow> rows;
     std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<AuditRefreshSnapshot>> refreshTask;
+    std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<FileIntegrityActionResult>> integrityTask;
 };
 
 // Width returns a non-negative rectangle width. Input is a RECT; output is a
@@ -1256,55 +1265,80 @@ void ApplyFileIntegrityPreset(FileAuditPageState& state, const unsigned long rid
     }
 
     const std::wstring ntPath = BuildDriverNtPath(target);
-    const std::wstring probePath = ProbeWin32PathForAttributes(target);
-    const DWORD attributes = ::GetFileAttributesW(probePath.c_str());
-    const bool attributesKnown = attributes != INVALID_FILE_ATTRIBUTES;
-    const bool isDirectory = attributesKnown && (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
-
     std::wstring prompt = L"将通过 KswordARK R0 文件完整性协议设置 Mandatory Label。\r\n\r\n目标: ";
     prompt += target;
     prompt += L"\r\n驱动路径: " + ntPath;
     prompt += L"\r\n级别: " + label + L" (RID=" + HexText(rid) + L")";
-    prompt += L"\r\n类型: ";
-    prompt += attributesKnown ? (isDirectory ? L"目录" : L"文件") : L"无法通过 Win32 预判，按文件提交";
+    prompt += L"\r\n类型: 将在后台探测文件属性";
     prompt += L"\r\n\r\n该操作会修改文件/目录安全标签，是否继续？";
     if (::MessageBoxW(state.hwnd, prompt.c_str(), L"确认 R0 文件完整性设置", MB_YESNO | MB_DEFBUTTON2 | MB_ICONWARNING) != IDYES) {
         SetAuditStatus(state, L"状态：用户取消文件完整性设置。");
         return;
     }
-
-    const ksword::ark::DriverClient client;
-    const ksword::ark::FileIntegrityResult result = client.setFileIntegrity(ntPath, isDirectory, rid);
-    const bool ok = result.io.ok &&
-        !result.unsupported &&
-        result.lastStatus >= 0 &&
-        result.status == KSWORD_ARK_FILE_INTEGRITY_STATUS_APPLIED;
-
-    std::wostringstream value;
-    value << label << L", RID=0x" << std::hex << std::uppercase << rid
-          << L", directory=" << (isDirectory ? 1 : 0);
-    std::wostringstream detail;
-    detail << Utf8ToWide(result.io.message)
-           << L"; status=" << result.status
-           << L"; lastStatus=" << NtStatusText(result.lastStatus)
-           << L"; bytes=" << result.io.bytesReturned;
-    if (result.unsupported) {
-        detail << L"; unsupported";
+    if (!state.integrityTask) {
+        SetAuditStatus(state, L"状态：文件完整性后台任务不可用。");
+        return;
     }
-    AddRow(
-        state.rows,
-        L"IOCTL_KSWORD_ARK_SET_FILE_INTEGRITY",
-        L"ArkDriverClient::setFileIntegrity",
-        ok ? L"OK" : L"失败",
-        value.str(),
-        detail.str());
-    PopulateAuditList(state);
-    SetAuditStatus(state, ok
-        ? L"状态：R0 文件完整性设置成功，结果已追加到表格。"
-        : L"状态：R0 文件完整性设置失败，结果已追加到表格。");
-    if (!ok) {
-        ::MessageBoxW(state.hwnd, detail.str().c_str(), L"R0 文件完整性设置失败", MB_OK | MB_ICONINFORMATION);
+    if (state.integrityTask->running()) {
+        SetAuditStatus(state, L"状态：已有文件完整性设置正在后台执行。");
+        return;
     }
+    ::EnableWindow(state.integrityButton, FALSE);
+    SetAuditStatus(state, L"状态：正在后台探测目标并设置 R0 文件完整性…");
+    state.integrityTask->request(
+        [target, ntPath, rid, label] {
+            FileIntegrityActionResult action{};
+            const std::wstring probePath = ProbeWin32PathForAttributes(target);
+            const DWORD attributes = ::GetFileAttributesW(probePath.c_str());
+            const bool attributesKnown = attributes != INVALID_FILE_ATTRIBUTES;
+            const bool isDirectory = attributesKnown && (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+            const ksword::ark::DriverClient client;
+            const ksword::ark::FileIntegrityResult result = client.setFileIntegrity(ntPath, isDirectory, rid);
+            action.success = result.io.ok &&
+                !result.unsupported &&
+                result.lastStatus >= 0 &&
+                result.status == KSWORD_ARK_FILE_INTEGRITY_STATUS_APPLIED;
+
+            std::wostringstream value;
+            value << label << L", RID=0x" << std::hex << std::uppercase << rid
+                  << L", directory=" << (isDirectory ? 1 : 0);
+            std::wostringstream detail;
+            detail << Utf8ToWide(result.io.message)
+                   << L"; status=" << result.status
+                   << L"; lastStatus=" << NtStatusText(result.lastStatus)
+                   << L"; bytes=" << result.io.bytesReturned;
+            if (!attributesKnown) {
+                detail << L"; GetFileAttributesW unavailable, submitted as file";
+            }
+            if (result.unsupported) {
+                detail << L"; unsupported";
+            }
+            action.row = {
+                L"IOCTL_KSWORD_ARK_SET_FILE_INTEGRITY",
+                L"ArkDriverClient::setFileIntegrity",
+                action.success ? L"OK" : L"失败",
+                value.str(),
+                detail.str()
+            };
+            action.statusText = action.success
+                ? L"状态：R0 文件完整性设置成功，结果已追加到表格。"
+                : L"状态：R0 文件完整性设置失败，结果已追加到表格。";
+            action.failureDetail = action.success ? std::wstring{} : detail.str();
+            return action;
+        },
+        [&state](std::uint64_t, std::optional<FileIntegrityActionResult>&& result, std::exception_ptr error) {
+            ::EnableWindow(state.integrityButton, TRUE);
+            if (error || !result.has_value()) {
+                SetAuditStatus(state, L"状态：文件完整性后台任务异常结束。");
+                return;
+            }
+            state.rows.push_back(std::move(result->row));
+            PopulateAuditList(state);
+            SetAuditStatus(state, result->statusText);
+            if (!result->success) {
+                ::MessageBoxW(state.hwnd, result->failureDetail.c_str(), L"R0 文件完整性设置失败", MB_OK | MB_ICONINFORMATION);
+            }
+        });
 }
 
 // ShowFileIntegrityMenu displays mandatory-label presets for the current target.
@@ -1418,6 +1452,7 @@ bool RegisterAuditClass() {
                 }
                 LayoutAuditChildren(*state);
                 state->refreshTask = std::make_unique<Ksword::Ui::AsyncSnapshotTask<AuditRefreshSnapshot>>(hwnd, kMsgAuditRefreshCompleted);
+                state->integrityTask = std::make_unique<Ksword::Ui::AsyncSnapshotTask<FileIntegrityActionResult>>(hwnd, kMsgFileIntegrityCompleted);
                 RefreshAuditRows(*state);
             }
             return 0;
@@ -1451,6 +1486,11 @@ bool RegisterAuditClass() {
             break;
         case kMsgAuditRefreshCompleted:
             if (state && state->refreshTask && state->refreshTask->consume(hwnd, wParam, lParam)) {
+                return 0;
+            }
+            break;
+        case kMsgFileIntegrityCompleted:
+            if (state && state->integrityTask && state->integrityTask->consume(hwnd, wParam, lParam)) {
                 return 0;
             }
             break;
@@ -1506,6 +1546,9 @@ bool RegisterAuditClass() {
         case WM_NCDESTROY:
             if (state && state->refreshTask) {
                 state->refreshTask->cancel();
+            }
+            if (state && state->integrityTask) {
+                state->integrityTask->cancel();
             }
             delete state;
             ::SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
