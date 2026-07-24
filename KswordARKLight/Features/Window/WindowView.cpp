@@ -66,6 +66,7 @@ constexpr UINT kMsgWindowDetailCompleted = WM_APP + 612;
 enum class WindowViewMode {
     WindowList,
     Win32kGuiAudit,
+    Win32kMessageHookAudit,
     GpuDisplayAudit
 };
 
@@ -388,6 +389,68 @@ int SelectedModelIndex(WindowViewState* state) {
     return static_cast<int>(rows[source].itemData);
 }
 
+// Win32kHookScopeText renders the protocol-level thread/global scope while
+// keeping unexpected values explicit for copied audit evidence.
+std::wstring Win32kHookScopeText(const std::uint32_t scope) {
+    switch (scope) {
+    case KSWORD_ARK_WIN32K_MESSAGE_HOOK_SCOPE_THREAD: return L"Thread";
+    case KSWORD_ARK_WIN32K_MESSAGE_HOOK_SCOPE_GLOBAL: return L"Global";
+    case KSWORD_ARK_WIN32K_MESSAGE_HOOK_SCOPE_UNKNOWN: return L"Unknown";
+    default: return L"Scope(" + std::to_wstring(scope) + L")";
+    }
+}
+
+// Win32kHookTypeText maps the documented WH_* values to their stable names.
+std::wstring Win32kHookTypeText(const std::uint32_t hookType) {
+    switch (hookType) {
+    case 0xFFFFFFFFUL: return L"WH_MSGFILTER(-1)";
+    case 0UL: return L"WH_JOURNALRECORD";
+    case 1UL: return L"WH_JOURNALPLAYBACK";
+    case 2UL: return L"WH_KEYBOARD";
+    case 3UL: return L"WH_GETMESSAGE";
+    case 4UL: return L"WH_CALLWNDPROC";
+    case 5UL: return L"WH_CBT";
+    case 6UL: return L"WH_SYSMSGFILTER";
+    case 7UL: return L"WH_MOUSE";
+    case 8UL: return L"WH_HARDWARE";
+    case 9UL: return L"WH_DEBUG";
+    case 10UL: return L"WH_SHELL";
+    case 11UL: return L"WH_FOREGROUNDIDLE";
+    case 12UL: return L"WH_CALLWNDPROCRET";
+    case 13UL: return L"WH_KEYBOARD_LL";
+    case 14UL: return L"WH_MOUSE_LL";
+    default: return L"WH_TYPE(" + std::to_wstring(hookType) + L")";
+    }
+}
+
+std::wstring Win32kHookSourceText(const std::uint32_t source) {
+    switch (source) {
+    case KSWORD_ARK_WIN32K_MESSAGE_HOOK_SOURCE_THREAD: return L"ThreadHookChain";
+    case KSWORD_ARK_WIN32K_MESSAGE_HOOK_SOURCE_GLOBAL: return L"GlobalHookChain";
+    default: return L"Source(" + std::to_wstring(source) + L")";
+    }
+}
+
+std::wstring Win32kHookFlagsText(const std::uint32_t flags) {
+    std::vector<const wchar_t*> labels;
+    if ((flags & KSWORD_ARK_WIN32K_MESSAGE_HOOK_FLAG_GLOBAL) != 0U) { labels.push_back(L"Global"); }
+    if ((flags & KSWORD_ARK_WIN32K_MESSAGE_HOOK_FLAG_ANSI) != 0U) { labels.push_back(L"Ansi"); }
+    if ((flags & KSWORD_ARK_WIN32K_MESSAGE_HOOK_FLAG_NEED_SKIP) != 0U) { labels.push_back(L"NeedSkip"); }
+    if ((flags & KSWORD_ARK_WIN32K_MESSAGE_HOOK_FLAG_HUNG) != 0U) { labels.push_back(L"Hung"); }
+    if ((flags & KSWORD_ARK_WIN32K_MESSAGE_HOOK_FLAG_FAULTED) != 0U) { labels.push_back(L"Faulted"); }
+    if ((flags & KSWORD_ARK_WIN32K_MESSAGE_HOOK_FLAG_NO_DELAY) != 0U) { labels.push_back(L"NoDelay"); }
+    if ((flags & KSWORD_ARK_WIN32K_MESSAGE_HOOK_FLAG_WOW64_DLL) != 0U) { labels.push_back(L"Wow64Dll"); }
+    if ((flags & KSWORD_ARK_WIN32K_MESSAGE_HOOK_FLAG_DESTROYED) != 0U) { labels.push_back(L"Destroyed"); }
+    std::wstring text;
+    for (const wchar_t* label : labels) {
+        if (!text.empty()) {
+            text += L"|";
+        }
+        text += label;
+    }
+    return text.empty() ? L"-" : text;
+}
+
 // SelectedWindow returns the selected HWND after model lookup. Input is module
 // state; output is nullptr when no row is selected or the model index is stale.
 HWND SelectedWindow(WindowViewState* state) {
@@ -437,6 +500,70 @@ std::vector<AuditEntry> BuildWin32kGuiAuditRows(size_t windowCount) {
 
     rows.push_back({ L"WM_COPYDATA", L"R3 monitor / ETW / snapshot", L"事件摘要边界", L"ReadOnly",
         L"默认不读取 COPYDATASTRUCT payload，不安装全局消息 hook；当前仅记录只读边界说明。" });
+    return rows;
+}
+
+// BuildWin32kMessageHookAuditRows exposes the structured thread/global hook
+// rows added by the current Win32k protocol. It performs one typed, read-only
+// client query on the refresh worker and never captures message payloads or
+// changes a hook chain.
+std::vector<AuditEntry> BuildWin32kMessageHookAuditRows() {
+    const ksword::ark::Win32kHooksPdbResult result = ksword::ark::DriverClient().queryWin32kHooksPdb();
+    std::vector<AuditEntry> rows;
+    rows.reserve(result.entries.size() + 1U);
+
+    const std::wstring summary =
+        L"returned=" + std::to_wstring(result.returnedCount) + L"/" + std::to_wstring(result.totalCount) +
+        L"; chains=" + std::to_wstring(result.discoveredChainCount) +
+        L"; visited=" + std::to_wstring(result.visitedNodeCount) +
+        L"; readFail=" + std::to_wstring(result.readFailureCount) +
+        L"; corrupt=" + std::to_wstring(result.corruptLinkCount) +
+        L"; duplicate=" + std::to_wstring(result.duplicateCount) +
+        L"; cap=" + HexText(result.capabilityMask) +
+        L"; missing=" + HexText(result.missingCapabilityMask) +
+        L"; " + Utf8ToWideLossy(result.io.message) +
+        (result.detail.empty() ? L"" : L"; " + result.detail);
+
+    rows.push_back({
+        L"Message Hook snapshot",
+        L"ArkDriverClient::queryWin32kHooksPdb",
+        L"Thread / global message hook chain",
+        IoStateText(result.io.ok, result.unsupported),
+        summary
+    });
+
+    for (const KSWORD_ARK_WIN32K_HOOK_ENTRY& entry : result.entries) {
+        const std::wstring item = Win32kHookTypeText(entry.hookType) + L" / " + Win32kHookScopeText(entry.hookScope) +
+            L" | PID=" + std::to_wstring(entry.processId) + L" TID=" + std::to_wstring(entry.threadId) +
+            L" Session=" + std::to_wstring(entry.sessionId);
+        std::wostringstream detail;
+        detail << L"source=" << Win32kHookSourceText(entry.source)
+               << L"; target=" << entry.targetProcessId << L"/" << entry.targetThreadId << L"/" << entry.targetSessionId
+               << L"; hookHandle=" << HexText(entry.hookHandle)
+               << L"; hookObject=" << HexText(entry.hookObject)
+               << L"; chain=" << HexText(entry.chainHead) << L" -> " << HexText(entry.nextHookObject)
+               << L"; procedure=" << HexText(entry.procedureAddress) << L" + " << HexText(entry.procedureOffset)
+               << L"; moduleBase=" << HexText(entry.moduleBase)
+               << L"; moduleId=" << static_cast<std::int32_t>(entry.moduleId)
+               << L"; atom=" << HexText(entry.moduleAtom)
+               << L"; threadInfo=" << HexText(entry.threadInfo)
+               << L"; targetThreadInfo=" << HexText(entry.targetThreadInfo)
+               << L"; desktop=" << HexText(entry.desktopObject)
+               << L"; flags=" << Win32kHookFlagsText(entry.flags) << L" (" << HexText(entry.flags) << L")"
+               << L"; fieldFlags=" << HexText(entry.fieldFlags)
+               << L"; lastStatus=" << HexText(static_cast<std::uint32_t>(entry.lastStatus));
+        const std::wstring driverDetail = FixedWideText(entry.detail, KSWORD_ARK_WIN32K_DETAIL_CHARS);
+        if (!driverDetail.empty()) {
+            detail << L"; " << driverDetail;
+        }
+        rows.push_back({
+            L"Message Hook",
+            Win32kHookSourceText(entry.source),
+            item,
+            Win32kRuntimeStatusText(entry.status),
+            detail.str()
+        });
+    }
     return rows;
 }
 
@@ -723,7 +850,7 @@ void PopulateList(WindowViewState* state) {
     } else {
         ConfigureWindowColumns(state);
     }
-    state->virtualList.setRows(*state->filterRows);
+    state->virtualList.setSharedRows(state->filterRows);
     RequestWindowFilter(state, state->filterBar ? Ksword::Ui::GetFilterBarText(state->filterBar) : state->filterQuery);
 }
 
@@ -749,14 +876,18 @@ void RefreshWindows(WindowViewState* state) {
             WindowRefreshSnapshot snapshot{};
             snapshot.mode = mode;
             snapshot.sortMode = sortMode;
-            snapshot.enumeration = EnumerateTopLevelWindows();
             if (mode == WindowViewMode::Win32kGuiAudit) {
+                snapshot.enumeration = EnumerateTopLevelWindows();
                 snapshot.auditRows = BuildWin32kGuiAuditRows(snapshot.enumeration.rows.size());
+                snapshot.displayRows = BuildAuditDisplayRows(snapshot.auditRows);
+            } else if (mode == WindowViewMode::Win32kMessageHookAudit) {
+                snapshot.auditRows = BuildWin32kMessageHookAuditRows();
                 snapshot.displayRows = BuildAuditDisplayRows(snapshot.auditRows);
             } else if (mode == WindowViewMode::GpuDisplayAudit) {
                 snapshot.auditRows = BuildGpuDisplayAuditRows();
                 snapshot.displayRows = BuildAuditDisplayRows(snapshot.auditRows);
             } else {
+                snapshot.enumeration = EnumerateTopLevelWindows();
                 snapshot.displayRows = BuildWindowDisplayRows(snapshot.enumeration, sortMode);
             }
             return snapshot;
@@ -781,6 +912,8 @@ void RefreshWindows(WindowViewState* state) {
                 state->statusText = state->model.rows().empty() ? L"Windows: 0" : L"Windows: " + std::to_wstring(state->model.rows().size());
             } else if (snapshot->mode == WindowViewMode::Win32kGuiAudit) {
                 state->statusText = L"Win32K GUI 审计快照已刷新。";
+            } else if (snapshot->mode == WindowViewMode::Win32kMessageHookAudit) {
+                state->statusText = L"Win32K 消息 Hook 审计快照已刷新：" + std::to_wstring(state->auditRows.size()) + L" 行。";
             } else {
                 state->statusText = L"GPU / Display / Watchdog 审计快照已刷新。";
             }
@@ -807,6 +940,14 @@ void UpdateViewModeFromCombo(WindowViewState* state) {
         ::EnableWindow(state->maximizeButton, FALSE);
         ::EnableWindow(state->closeButton, FALSE);
     } else if (selected == 2) {
+        state->viewMode = WindowViewMode::Win32kMessageHookAudit;
+        ::EnableWindow(state->sortCombo, FALSE);
+        ::EnableWindow(state->frontButton, FALSE);
+        ::EnableWindow(state->restoreButton, FALSE);
+        ::EnableWindow(state->minimizeButton, FALSE);
+        ::EnableWindow(state->maximizeButton, FALSE);
+        ::EnableWindow(state->closeButton, FALSE);
+    } else if (selected == 3) {
         state->viewMode = WindowViewMode::GpuDisplayAudit;
         ::EnableWindow(state->sortCombo, FALSE);
         ::EnableWindow(state->frontButton, FALSE);
@@ -1167,6 +1308,7 @@ bool CreateChildControls(WindowViewState* state, HWND hwnd) {
     ::SendMessageW(state->auditModeCombo, WM_SETFONT, reinterpret_cast<WPARAM>(Ksword::Ui::SystemUIFont()), TRUE);
     ::SendMessageW(state->auditModeCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"窗口列表"));
     ::SendMessageW(state->auditModeCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Win32K GUI 审计"));
+    ::SendMessageW(state->auditModeCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Win32K 消息 Hook 审计"));
     ::SendMessageW(state->auditModeCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"GPU/Display 审计"));
     ::SendMessageW(state->auditModeCombo, CB_SETCURSEL, 0, 0);
     ::SendMessageW(state->sortCombo, WM_SETFONT, reinterpret_cast<WPARAM>(Ksword::Ui::SystemUIFont()), TRUE);
