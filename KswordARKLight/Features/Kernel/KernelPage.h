@@ -34,7 +34,8 @@ enum class CallbackFileIoOperation {
     ExportFileMonitor,
     ExportResultTsv,
     CallbackModuleDetail,
-    MapNtPath
+    MapNtPath,
+    OpenModuleFolder
 };
 
 // CallbackFileIoResult is the immutable boundary for callback-rule files and

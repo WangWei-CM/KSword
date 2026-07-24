@@ -10608,9 +10608,11 @@ void KernelPage::StartCallbackFileIo(
                 ? L"正在后台导出文件监控事件…"
                 : operation == CallbackFileIoOperation::ExportResultTsv
                     ? L"正在后台导出内核结果 TSV…"
-                    : operation == CallbackFileIoOperation::CallbackModuleDetail
-                        ? L"正在后台读取模块文件详细信息…"
-                        : L"正在后台映射 DOS 路径…";
+                : operation == CallbackFileIoOperation::CallbackModuleDetail
+                    ? L"正在后台读取模块文件详细信息…"
+                    : operation == CallbackFileIoOperation::MapNtPath
+                        ? L"正在后台映射 DOS 路径…"
+                        : L"正在后台打开模块所在目录…";
     ::SetWindowTextW(statusText_, (std::wstring(L"状态：") + operationText).c_str());
     if (callbackOperation) {
         AppendCallbackAppLog(operationText);
@@ -10627,6 +10629,18 @@ void KernelPage::StartCallbackFileIo(
                 result.text = BuildCallbackModuleFileDetail(result.path, text, &result.errorText);
             } else if (operation == CallbackFileIoOperation::MapNtPath) {
                 result.text = BuildDosPathMapping(result.path, &result.clipboardText);
+            } else if (operation == CallbackFileIoOperation::OpenModuleFolder) {
+                if (::GetFileAttributesW(result.path.c_str()) == INVALID_FILE_ATTRIBUTES) {
+                    result.errorText = L"当前回调行没有可访问的模块文件，错误 " + std::to_wstring(::GetLastError());
+                } else {
+                    const std::wstring parameters = L"/select,\"" + result.path + L"\"";
+                    const HINSTANCE launched = ::ShellExecuteW(nullptr, L"open", L"explorer.exe", parameters.c_str(), nullptr, SW_SHOWNORMAL);
+                    if (reinterpret_cast<INT_PTR>(launched) <= 32) {
+                        result.errorText = L"打开模块所在目录失败。";
+                    } else {
+                        result.text = L"状态：已打开模块所在目录。";
+                    }
+                }
             } else if (!WriteWholeFileText(result.path, text, &result.errorText)) {
                 result.text.clear();
             }
@@ -10664,9 +10678,11 @@ void KernelPage::ApplyCallbackFileIoResult(CallbackFileIoResult result) {
                 ? L"导出文件事件"
                 : result.operation == CallbackFileIoOperation::ExportResultTsv
                     ? L"导出 TSV"
-                    : result.operation == CallbackFileIoOperation::CallbackModuleDetail
-                        ? L"模块文件详细信息"
-                        : L"DOS 路径映射";
+                : result.operation == CallbackFileIoOperation::CallbackModuleDetail
+                    ? L"模块文件详细信息"
+                    : result.operation == CallbackFileIoOperation::MapNtPath
+                        ? L"DOS 路径映射"
+                        : L"打开模块所在目录";
     if (!result.errorText.empty()) {
         if (callbackOperation) {
             AppendCallbackAppLog(std::wstring(title) + L"失败: " + result.errorText);
@@ -10701,6 +10717,11 @@ void KernelPage::ApplyCallbackFileIoResult(CallbackFileIoResult result) {
         }
         ::SetWindowTextW(detailEdit_, result.text.c_str());
         ::SetWindowTextW(statusText_, L"状态：DOS 路径映射完成。");
+        return;
+    }
+
+    if (result.operation == CallbackFileIoOperation::OpenModuleFolder) {
+        ::SetWindowTextW(statusText_, result.text.c_str());
         return;
     }
 
@@ -12915,17 +12936,11 @@ void KernelPage::OpenSelectedCallbackModuleFolder() {
     // action. Input is the selected module path; processing asks explorer.exe to
     // select the module file; no value is returned beyond status text.
     const std::wstring modulePath = SelectedCallbackModulePath();
-    if (modulePath.empty() || ::GetFileAttributesW(modulePath.c_str()) == INVALID_FILE_ATTRIBUTES) {
+    if (modulePath.empty()) {
         ::MessageBoxW(hwnd_, L"当前回调行没有可访问的模块文件。", L"打开模块所在目录", MB_OK | MB_ICONINFORMATION);
         return;
     }
-    const std::wstring parameters = L"/select,\"" + modulePath + L"\"";
-    HINSTANCE launched = ::ShellExecuteW(hwnd_, L"open", L"explorer.exe", parameters.c_str(), nullptr, SW_SHOWNORMAL);
-    if (reinterpret_cast<INT_PTR>(launched) <= 32) {
-        ::MessageBoxW(hwnd_, modulePath.c_str(), L"打开模块所在目录失败", MB_OK | MB_ICONWARNING);
-        return;
-    }
-    ::SetWindowTextW(statusText_, L"状态：已打开模块所在目录。");
+    StartCallbackFileIo(CallbackFileIoOperation::OpenModuleFolder, modulePath);
 }
 
 void KernelPage::ShowSelectedCallbackModuleFileDetail() {
