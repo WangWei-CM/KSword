@@ -129,7 +129,6 @@ void KernelObjectTypeMatrixTab::initializeUi()
     m_table->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_table->setAlternatingRowColors(true);
     m_table->setContextMenuPolicy(Qt::CustomContextMenu);
-    m_table->setStyleSheet(QStringLiteral("QTableWidget::item:selected{background:%1;color:palette(highlighted-text);}").arg(KswordTheme::PrimaryBlueHex));
     m_table->verticalHeader()->setVisible(false);
     m_table->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
     m_table->horizontalHeader()->setSectionResizeMode(static_cast<int>(ObjectTypeMatrixColumn::Strategy), QHeaderView::Stretch);

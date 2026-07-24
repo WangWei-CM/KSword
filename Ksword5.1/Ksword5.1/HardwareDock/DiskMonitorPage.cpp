@@ -421,15 +421,10 @@ namespace
             "  background:transparent;"
             "  background-color:transparent;"
             "}"
-            "QTableWidget::item:selected{"
-            "  background:%5;"
-            "  color:%6;"
             "}")
             .arg(KswordTheme::TextPrimaryColorHex())
             .arg(KswordTheme::SurfaceAltColorHex())
-            .arg(KswordTheme::BorderColorHex())
-            .arg(KswordTheme::AccentHex(KswordTheme::AccentRole::Blue))
-            .arg(KswordTheme::OnAccentHex());
+            .arg(KswordTheme::BorderColorHex());
     }
 
     // trimWideString：

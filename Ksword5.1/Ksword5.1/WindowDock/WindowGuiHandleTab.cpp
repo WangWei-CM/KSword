@@ -223,7 +223,14 @@ namespace
             {
                 continue;
             }
-            selected = (std::max)(selected, candidate);
+            // SERVERINFO has used both the first and second DWORD for the
+            // handle count across Windows generations. If both look numeric,
+            // prefer the smaller safe bound instead of mistaking flags for a
+            // larger table length and crossing the shared mapping boundary.
+            if (selected == 0U || candidate < selected)
+            {
+                selected = candidate;
+            }
         }
         return selected;
     }
@@ -390,7 +397,23 @@ namespace
         }
         const std::size_t totalBytes = static_cast<std::size_t>(handleCount) * sharedInfo.handleEntrySize;
         std::vector<std::uint8_t> handleTable(totalBytes, 0U);
-        if (!readCurrentProcessMemory(sharedInfo.handleEntries, handleTable.data(), handleTable.size()))
+        std::uint32_t readableEntryCount = 0U;
+        for (std::uint32_t index = 0U; index < handleCount; ++index)
+        {
+            const std::size_t entryOffset = static_cast<std::size_t>(index) * sharedInfo.handleEntrySize;
+            if (entryOffset > (std::numeric_limits<std::uintptr_t>::max)() - sharedInfo.handleEntries)
+            {
+                break;
+            }
+            if (readCurrentProcessMemory(
+                    sharedInfo.handleEntries + entryOffset,
+                    handleTable.data() + entryOffset,
+                    sharedInfo.handleEntrySize))
+            {
+                ++readableEntryCount;
+            }
+        }
+        if (readableEntryCount == 0U)
         {
             snapshot.statusText = guiHandleText(
                 "window.gui_handle.status.table_read_failed",

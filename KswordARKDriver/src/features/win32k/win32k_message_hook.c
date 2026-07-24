@@ -7,9 +7,9 @@ Module Name:
 Abstract:
 
     Read-only enumeration of classic Win32 message hook chains. The collector
-    walks tagTHREADINFO/DESKTOPINFO aphkStart arrays and tagHOOK nodes only
-    after the loaded win32kbase/win32kfull PE identity matches a verified
-    layout. It never removes, unlinks, or changes a hook.
+    walks tagTHREADINFO/DESKTOPINFO aphkStart arrays and tagHOOK nodes using an
+    exact PE layout when possible, otherwise the nearest previous Windows
+    profile. It never removes, unlinks, or changes a hook.
 
 Environment:
 
@@ -32,15 +32,32 @@ Environment:
 #define KSWORD_ARK_WIN32K_MESSAGE_MAX_PROCESS_WALK 4096UL
 #define KSWORD_ARK_WIN32K_MESSAGE_MAX_THREAD_WALK 65536UL
 
-// 当前 PDB/PE 矩阵中由 NtUserSetWindowsHookEx、FreeHook、GetHmodTableIndex
-// 反汇编交叉验证的精确布局。未知 PE 身份返回 UNSUPPORTED。
-#define KSWORD_ARK_WIN32K_MESSAGE_BASE_TIMESTAMP 0x8FC48444UL
-#define KSWORD_ARK_WIN32K_MESSAGE_BASE_IMAGE_SIZE 0x002D6000UL
-#define KSWORD_ARK_WIN32K_MESSAGE_FULL_TIMESTAMP 0x83C73BE4UL
-#define KSWORD_ARK_WIN32K_MESSAGE_FULL_IMAGE_SIZE 0x003B4000UL
-
 #define KSWORD_ARK_WIN32K_MESSAGE_MODULE_ATOM_TABLE_RVA 0x003391D0UL
 #define KSWORD_ARK_WIN32K_MESSAGE_MODULE_ATOM_COUNT_RVA 0x00339310UL
+
+typedef struct _KSWORD_ARK_WIN32K_MESSAGE_PROFILE
+{
+    KSWORD_ARK_WIN32K_LAYOUT_PROFILE_IDENTITY identity;
+    KSWORD_ARK_WIN32K_MESSAGE_HOOK_LAYOUT layout;
+} KSWORD_ARK_WIN32K_MESSAGE_PROFILE;
+
+// 按 Windows 版本从旧到新维护；精确身份缺失时选择最近的上一个版本。
+static const KSWORD_ARK_WIN32K_MESSAGE_PROFILE g_KswordArkWin32kMessageProfiles[] =
+{
+    {
+        // Windows 10 22H2 reports 19045 through the enablement package while
+        // win32k stays on the 19041 servicing branch.
+        { 10UL, 0UL, 19041UL, 6456UL,
+          0x8FC48444UL, 0x002D6000UL, 0x83C73BE4UL, 0x003B4000UL },
+        { KSWORD_ARK_WIN32K_MESSAGE_OBJECT_SIZE,
+          0x00UL, 0x10UL, 0x18UL, 0x28UL, 0x30UL, 0x38UL, 0x40UL,
+          0x44UL, 0x48UL, 0x390UL, 0x1D0UL, 0x28UL,
+          KSWORD_ARK_WIN32K_MESSAGE_MODULE_ATOM_TABLE_RVA,
+          KSWORD_ARK_WIN32K_MESSAGE_MODULE_ATOM_COUNT_RVA,
+          KSWORD_ARK_WIN32K_MESSAGE_HOOK_LAYOUT_SOURCE_UNKNOWN,
+          0x83C73BE4UL, 0x003B4000UL }
+    }
+};
 
 typedef struct _KSWORD_ARK_WIN32K_MESSAGE_THREAD_MAP_ENTRY
 {
@@ -154,29 +171,17 @@ KswordARKWin32kMessageSetDetail(
 static VOID
 KswordARKWin32kMessageInitializeLayout(
     _Out_ KSWORD_ARK_WIN32K_MESSAGE_HOOK_LAYOUT* Layout,
-    _In_ ULONG FullTimeDateStamp,
-    _In_ ULONG FullImageSize
+    _In_ const KSWORD_ARK_WIN32K_MESSAGE_PROFILE* Profile,
+    _In_ ULONG Source
     )
 {
-    RtlZeroMemory(Layout, sizeof(*Layout));
-    Layout->objectSize = KSWORD_ARK_WIN32K_MESSAGE_OBJECT_SIZE;
-    Layout->handle = 0x00UL;
-    Layout->ownerThreadInfo = 0x10UL;
-    Layout->desktopObject = 0x18UL;
-    Layout->nextHook = 0x28UL;
-    Layout->hookType = 0x30UL;
-    Layout->procedureOffset = 0x38UL;
-    Layout->flags = 0x40UL;
-    Layout->moduleId = 0x44UL;
-    Layout->targetThreadInfo = 0x48UL;
-    Layout->threadHookArray = 0x390UL;
-    Layout->threadDesktopInfo = 0x1D0UL;
-    Layout->desktopHookArray = 0x28UL;
-    Layout->moduleAtomTableRva = KSWORD_ARK_WIN32K_MESSAGE_MODULE_ATOM_TABLE_RVA;
-    Layout->moduleAtomCountRva = KSWORD_ARK_WIN32K_MESSAGE_MODULE_ATOM_COUNT_RVA;
-    Layout->source = KSWORD_ARK_WIN32K_MESSAGE_HOOK_LAYOUT_SOURCE_VALIDATED_DISASSEMBLY;
-    Layout->timeDateStamp = FullTimeDateStamp;
-    Layout->imageSize = FullImageSize;
+    if (Layout == NULL || Profile == NULL) {
+        return;
+    }
+    *Layout = Profile->layout;
+    Layout->source = Source == KSWORD_ARK_WIN32K_LAYOUT_SELECTION_EXACT_IDENTITY
+        ? KSWORD_ARK_WIN32K_MESSAGE_HOOK_LAYOUT_SOURCE_VALIDATED_DISASSEMBLY
+        : KSWORD_ARK_WIN32K_MESSAGE_HOOK_LAYOUT_SOURCE_NEAREST_PREVIOUS;
 }
 
 static NTSTATUS
@@ -639,6 +644,8 @@ KswordARKWin32kQueryHookSnapshot(
     KSW_HOOK_SYSTEM_MODULE_ENTRY fullEntry;
     IMAGE_NT_HEADERS baseHeaders;
     IMAGE_NT_HEADERS fullHeaders;
+    KSWORD_ARK_WIN32K_LAYOUT_SELECTION layoutSelection;
+    const KSWORD_ARK_WIN32K_MESSAGE_PROFILE* layoutProfile = NULL;
     KSWORD_ARK_WIN32K_HOOK_SNAPSHOT_RESPONSE* response = NULL;
     KSWORD_ARK_WIN32K_MESSAGE_THREAD_MAP_ENTRY* threadMap = NULL;
     KSWORD_ARK_WIN32K_MESSAGE_SEEN_ENTRY* seenHooks = NULL;
@@ -723,24 +730,44 @@ KswordARKWin32kQueryHookSnapshot(
     response->win32kbaseImageSize = baseHeaders.OptionalHeader.SizeOfImage;
     response->win32kfullTimeDateStamp = fullHeaders.FileHeader.TimeDateStamp;
     response->win32kfullImageSize = fullHeaders.OptionalHeader.SizeOfImage;
-    if (response->win32kbaseTimeDateStamp != KSWORD_ARK_WIN32K_MESSAGE_BASE_TIMESTAMP ||
-        response->win32kbaseImageSize != KSWORD_ARK_WIN32K_MESSAGE_BASE_IMAGE_SIZE ||
-        response->win32kfullTimeDateStamp != KSWORD_ARK_WIN32K_MESSAGE_FULL_TIMESTAMP ||
-        response->win32kfullImageSize != KSWORD_ARK_WIN32K_MESSAGE_FULL_IMAGE_SIZE) {
+    if (!KswordARKWin32kSelectLayoutProfile(
+            g_KswordArkWin32kMessageProfiles,
+            RTL_NUMBER_OF(g_KswordArkWin32kMessageProfiles),
+            sizeof(g_KswordArkWin32kMessageProfiles[0]),
+            response->win32kbaseTimeDateStamp,
+            response->win32kbaseImageSize,
+            response->win32kfullTimeDateStamp,
+            response->win32kfullImageSize,
+            &layoutSelection)) {
         response->status = KSWORD_ARK_WIN32K_STATUS_UNSUPPORTED;
         response->missingCapabilityMask = KSWORD_ARK_WIN32K_CAP_MESSAGE_HOOK_LAYOUT |
             KSWORD_ARK_WIN32K_CAP_MESSAGE_HOOK_ENUM;
         response->lastStatus = STATUS_REVISION_MISMATCH;
         KswordARKWin32kMessageSetDetail(
             response->detail,
-            L"Current win32k PE identity has no verified tagHOOK layout in the offset table.");
+            L"No exact or nearest-previous Windows tagHOOK profile is available.");
         goto Cleanup;
     }
+    layoutProfile = &g_KswordArkWin32kMessageProfiles[layoutSelection.profileIndex];
 
     KswordARKWin32kMessageInitializeLayout(
         &response->layout,
-        response->win32kfullTimeDateStamp,
-        response->win32kfullImageSize);
+        layoutProfile,
+        layoutSelection.source);
+    if (response->layout.objectSize == 0UL ||
+        response->layout.objectSize > KSWORD_ARK_WIN32K_MESSAGE_OBJECT_SIZE ||
+        response->layout.threadHookArray > 0x1000UL ||
+        response->layout.threadDesktopInfo > 0x1000UL ||
+        response->layout.desktopHookArray > 0x1000UL) {
+        response->status = KSWORD_ARK_WIN32K_STATUS_UNSUPPORTED;
+        response->missingCapabilityMask = KSWORD_ARK_WIN32K_CAP_MESSAGE_HOOK_LAYOUT |
+            KSWORD_ARK_WIN32K_CAP_MESSAGE_HOOK_ENUM;
+        response->lastStatus = STATUS_INVALID_PARAMETER;
+        KswordARKWin32kMessageSetDetail(
+            response->detail,
+            L"Selected tagHOOK profile failed local object and owner-layout validation.");
+        goto Cleanup;
+    }
     response->fieldOffsets.tagHookNext = response->layout.nextHook;
     response->fieldOffsets.tagHookType = response->layout.hookType;
     response->fieldOffsets.tagHookProcedure = response->layout.procedureOffset;
@@ -821,7 +848,9 @@ KswordARKWin32kQueryHookSnapshot(
         : STATUS_SUCCESS;
     KswordARKWin32kMessageSetDetail(
         response->detail,
-        L"tagHOOK layout validated by PE identity; thread and desktop chains are read only and bounded.");
+        layoutSelection.source == KSWORD_ARK_WIN32K_LAYOUT_SELECTION_EXACT_IDENTITY
+            ? L"tagHOOK layout matched the exact PE identity; thread and desktop chains are read only and bounded."
+            : L"Exact tagHOOK identity was missing; the nearest previous Windows layout is active. Results are read only, bounded, and may be partial.");
 
     if (KeGetCurrentIrql() != PASSIVE_LEVEL) {
         response->status = KSWORD_ARK_WIN32K_STATUS_READ_FAILED;

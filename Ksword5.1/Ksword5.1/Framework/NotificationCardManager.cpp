@@ -6,6 +6,7 @@
 
 #include <QApplication>
 #include <QClipboard>
+#include <QCursor>
 #include <QDateTime>
 #include <QGuiApplication>
 #include <QHBoxLayout>
@@ -23,7 +24,6 @@
 #define NOMINMAX
 #endif
 #include <Windows.h>
-#include <Windowsx.h>
 
 #include <algorithm>
 #include <cmath>
@@ -277,9 +277,14 @@ namespace ks::ui
             MSG* nativeMessage = static_cast<MSG*>(message);
             if (nativeMessage != nullptr && nativeMessage->message == WM_NCHITTEST && result != nullptr)
             {
-                const QPoint localPosition = mapFromGlobal(
-                    QPoint(GET_X_LPARAM(nativeMessage->lParam), GET_Y_LPARAM(nativeMessage->lParam)));
-                if (m_copyButton == nullptr || !m_copyButton->geometry().contains(localPosition))
+                // 使用 Qt 的全局光标逻辑坐标，并转换到按钮自身坐标系：
+                // - 避免直接使用 Win32 物理坐标导致高 DPI 下命中区域偏移；
+                // - 避免把嵌套在 m_frame 中的按钮矩形误当作卡片坐标。
+                const QPoint cardPosition = mapFromGlobal(QCursor::pos());
+                const bool copyButtonHit = m_copyButton != nullptr
+                    && m_copyButton->isVisible()
+                    && m_copyButton->rect().contains(m_copyButton->mapFrom(this, cardPosition));
+                if (!copyButtonHit)
                 {
                     *result = HTTRANSPARENT;
                     return true;

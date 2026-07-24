@@ -202,6 +202,13 @@ namespace ks::ui
         // - 传出：用户名文本。
         QString resolveCurrentUserNameText() const;
 
+        // resolveWindowsVersionText：
+        // - 作用：读取当前 Windows 发布版本和完整内核版本号；
+        // - 调用：初始化右侧系统版本标签时调用；
+        // - 传入：无；
+        // - 传出：例如 Win10 1909[10.0.18363.592]。
+        QString resolveWindowsVersionText() const;
+
     private:
         QWidget* m_leftWidget = nullptr;          // m_leftWidget：左侧信息区容器（图标+标题+用户名）。
         QHBoxLayout* m_leftLayout = nullptr;      // m_leftLayout：左侧信息区布局。
@@ -214,6 +221,7 @@ namespace ks::ui
         QWidget* m_rightWidget = nullptr;         // m_rightWidget：右侧按钮区容器。
         QHBoxLayout* m_rightLayout = nullptr;     // m_rightLayout：右侧按钮区布局。
         QWidget* m_customRightWidget = nullptr;   // m_customRightWidget：右侧控制按钮前的自定义扩展控件。
+        QLabel* m_systemVersionLabel = nullptr;   // m_systemVersionLabel：眼睛与图钉按钮左侧的系统版本文本。
         QPushButton* m_captureProtectionButton = nullptr; // m_captureProtectionButton：截屏屏蔽切换按钮。
         QPushButton* m_pinButton = nullptr;       // m_pinButton：置顶切换图钉按钮。
         QPushButton* m_minButton = nullptr;       // m_minButton：最小化按钮。

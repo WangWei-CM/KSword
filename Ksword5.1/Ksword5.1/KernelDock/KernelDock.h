@@ -646,6 +646,9 @@ private:
     // refreshTimerDpcAsync：后台枚举每 CPU TimerTable 并解析例程模块归属。
     void refreshTimerDpcAsync();
 
+    // refreshTimerDpcAfterDynDataAsync：先完成 DynData profile 应用，再枚举 Timer/DPC。
+    void refreshTimerDpcAfterDynDataAsync();
+
     // ==================== 表格渲染 ====================
     // rebuildObjectNamespaceTable：
     // - 作用：根据筛选关键词重建对象命名空间树。
@@ -1124,4 +1127,5 @@ private:
     std::atomic_bool m_inlineHookRefreshRunning{ false };      // m_inlineHookRefreshRunning：Inline Hook 刷新状态。
     std::atomic_bool m_iatEatHookRefreshRunning{ false };      // m_iatEatHookRefreshRunning：IAT/EAT 刷新状态。
     std::atomic_bool m_timerDpcRefreshRunning{ false };        // m_timerDpcRefreshRunning：KTIMER/DPC 刷新状态。
+    std::atomic_bool m_timerDpcRefreshAfterDynData{ false };   // m_timerDpcRefreshAfterDynData：DynData 完成后自动重试 Timer/DPC。
 };

@@ -119,8 +119,7 @@ namespace
 
     QString kernelHookSelectionStyle()
     {
-        return QStringLiteral("QTableWidget::item:selected{background:%1;color:palette(highlighted-text);}")
-            .arg(KswordTheme::PrimaryBlueHex);
+        return QString();
     }
 
     QString kernelHookStatusLabelStyle(const QString& colorHex)
@@ -1911,7 +1910,7 @@ void KernelDock::initializeTimerDpcTab()
     splitter->setStretchFactor(0, 3);
     splitter->setStretchFactor(1, 2);
 
-    connect(m_refreshTimerDpcButton, &QPushButton::clicked, this, [this]() { refreshTimerDpcAsync(); });
+    connect(m_refreshTimerDpcButton, &QPushButton::clicked, this, [this]() { refreshTimerDpcAfterDynDataAsync(); });
     connect(m_timerDpcFilterEdit, &QLineEdit::textChanged, this, [this](const QString& text) { rebuildTimerDpcTable(text.trimmed()); });
     connect(m_timerDpcTable, &QTableWidget::currentCellChanged, this, [this](int, int, int, int) { showTimerDpcDetailByCurrentRow(); });
     connect(m_timerDpcTable, &QTableWidget::customContextMenuRequested, this, [this](const QPoint& position) { showTimerDpcContextMenu(position); });
@@ -2378,6 +2377,21 @@ void KernelDock::refreshTimerDpcAsync()
     }).detach();
 }
 
+void KernelDock::refreshTimerDpcAfterDynDataAsync()
+{
+    // TimerTable 的所有私有字段都来自 DynData v4。动态偏移页是惰性 UI，
+    // Timer/DPC 不能依赖用户先手动打开该页，因此在业务查询前显式完成
+    // profile 匹配和下发。已有 DynData 任务运行时只登记一次后续刷新。
+    if (!m_dynDataTabInitialized)
+    {
+        initializeDynDataTab();
+        m_dynDataTabInitialized = true;
+    }
+
+    m_timerDpcRefreshAfterDynData.store(true);
+    refreshDynDataAsync();
+}
+
 void KernelDock::rebuildShadowSsdtTable(const QString& filterKeyword)
 {
     if (m_shadowSsdtTable == nullptr)
@@ -2721,7 +2735,7 @@ void KernelDock::showTimerDpcContextMenu(const QPoint& localPosition)
     const QAction* selectedAction = menu.exec(m_timerDpcTable->viewport()->mapToGlobal(localPosition));
     if (selectedAction == refreshAction)
     {
-        refreshTimerDpcAsync();
+        refreshTimerDpcAfterDynDataAsync();
     }
     else if (selectedAction == copyRowsAction)
     {

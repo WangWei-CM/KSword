@@ -92,8 +92,7 @@ namespace
 
     QString itemSelectionStyle()
     {
-        return QStringLiteral("QTableWidget::item:selected{background:%1;color:palette(highlighted-text);}")
-            .arg(KswordTheme::PrimaryBlueHex);
+        return QString();
     }
 
     QString menuStyle()

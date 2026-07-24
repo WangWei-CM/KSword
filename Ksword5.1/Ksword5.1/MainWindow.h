@@ -478,7 +478,7 @@ private:
     ads::CDockWidget* m_dockCurrentOp = nullptr; // m_dockCurrentOp：底部“当前任务”辅助 Dock。
     ads::CDockWidget* m_dockLog = nullptr; // m_dockLog：底部“日志窗口”辅助 Dock。
     ads::CDockWidget* m_dockImmediate = nullptr; // 已禁用，保留成员以便后续恢复 Dock 代码。
-    ads::CDockWidget* m_dockMonitor = nullptr; // 已禁用，保留成员以便后续恢复 Dock 代码。
+    ads::CDockWidget* m_dockMonitor = nullptr; // m_dockMonitor：底部“监视面板”辅助 Dock。
 
     // 自定义Widgets
     WelcomeDock* m_welcomeWidget = nullptr; // m_welcomeWidget：欢迎页内容控件。
@@ -490,7 +490,7 @@ private:
     DriverDock* m_driverWidget = nullptr; // m_driverWidget：驱动页内容控件。
     KernelDock* m_kernelWidget = nullptr; // m_kernelWidget：内核页内容控件。
     MonitorDock* m_monitorWidget = nullptr; // m_monitorWidget：监控页内容控件。
-    MonitorPanelWidget* m_monitorPanelWidget = nullptr; // 已禁用，保留监视面板实现。
+    MonitorPanelWidget* m_monitorPanelWidget = nullptr; // m_monitorPanelWidget：监视面板性能图内容控件。
     HardwareDock* m_hardwareWidget = nullptr; // m_hardwareWidget：硬件页内容控件。
     PrivilegeDock* m_privilegeWidget = nullptr; // m_privilegeWidget：权限页内容控件。
     StartupDock* m_startupWidget = nullptr; // m_startupWidget：启动项页内容控件。

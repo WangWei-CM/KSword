@@ -94,7 +94,6 @@ namespace
     QString itemSelectionStyle()
     {
         return QStringLiteral(
-            "QTableWidget::item:selected{background:%1;color:palette(highlighted-text);}"
             "QTreeWidget::item:selected{background:%1;color:palette(highlighted-text);}")
             .arg(KswordTheme::PrimaryBlueHex);
     }
@@ -1103,7 +1102,7 @@ void KernelDock::ensureTabInitialized(const int tabIndex)
         initializeTimerDpcTab();
         m_timerDpcTabInitialized = true;
         hideTabInitializingProgress();
-        refreshTimerDpcAsync();
+        refreshTimerDpcAfterDynDataAsync();
         return;
     }
 

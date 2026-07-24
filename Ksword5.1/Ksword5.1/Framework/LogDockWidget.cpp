@@ -6,10 +6,12 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <limits>
 #include <utility>
 
 #include <QAction>
 #include <QAbstractItemView>
+#include <QAbstractItemModel>
 #include <QApplication>
 #include <QBrush>
 #include <QCheckBox>
@@ -19,13 +21,16 @@
 #include <QHBoxLayout>
 #include <QInputDialog>
 #include <QStyledItemDelegate>
+#include <QStyle>
 #include <QItemSelectionModel>
 #include <QLabel>
 #include <QLineEdit>
 #include <QMenu>
 #include <QMessageBox>
 #include <QPainter>
+#include <QPen>
 #include <QPixmap>
+#include <QPointer>
 #include <QPushButton>
 #include <QScrollBar>
 #include <QSize>
@@ -73,18 +78,26 @@ namespace
     class LogContentWrapDelegate final : public QStyledItemDelegate
     {
     public:
-        explicit LogContentWrapDelegate(QObject* parentObject = nullptr)
-            : QStyledItemDelegate(parentObject)
+        explicit LogContentWrapDelegate(QTableView* tableView)
+            : QStyledItemDelegate(tableView)
+            , m_tableView(tableView)
         {
         }
 
         void paint(QPainter* painter, const QStyleOptionViewItem& option, const QModelIndex& index) const override
         {
             QStyleOptionViewItem adjustedOption(option);
+            const bool rowSelected = (adjustedOption.state & QStyle::State_Selected) != 0;
             initStyleOption(&adjustedOption, index);
             adjustedOption.textElideMode = isWrappingColumn(index.column()) ? Qt::ElideNone : Qt::ElideRight;
             adjustedOption.features.setFlag(QStyleOptionViewItem::WrapText, isWrappingColumn(index.column()));
+            adjustedOption.state &= ~QStyle::State_Selected;
+            adjustedOption.state &= ~QStyle::State_HasFocus;
             QStyledItemDelegate::paint(painter, adjustedOption, index);
+            if (rowSelected)
+            {
+                drawRowSelectionOutline(painter, option, index);
+            }
         }
 
         QSize sizeHint(const QStyleOptionViewItem& option, const QModelIndex& index) const override
@@ -106,10 +119,79 @@ namespace
         }
 
     private:
+        void drawRowSelectionOutline(
+            QPainter* painter,
+            const QStyleOptionViewItem& option,
+            const QModelIndex& index) const
+        {
+            if (painter == nullptr || m_tableView == nullptr || !index.isValid())
+            {
+                return;
+            }
+
+            QHeaderView* headerView = m_tableView->horizontalHeader();
+            const QAbstractItemModel* model = index.model();
+            if (headerView == nullptr || model == nullptr)
+            {
+                return;
+            }
+
+            int firstVisibleVisualIndex = std::numeric_limits<int>::max();
+            int lastVisibleVisualIndex = std::numeric_limits<int>::min();
+            const int columnCount = model->columnCount(index.parent());
+            for (int columnIndex = 0; columnIndex < columnCount; ++columnIndex)
+            {
+                if (m_tableView->isColumnHidden(columnIndex))
+                {
+                    continue;
+                }
+
+                const int visualIndex = headerView->visualIndex(columnIndex);
+                if (visualIndex < 0)
+                {
+                    continue;
+                }
+                firstVisibleVisualIndex = std::min(firstVisibleVisualIndex, visualIndex);
+                lastVisibleVisualIndex = std::max(lastVisibleVisualIndex, visualIndex);
+            }
+
+            const int currentVisualIndex = headerView->visualIndex(index.column());
+            if (currentVisualIndex < 0 ||
+                firstVisibleVisualIndex == std::numeric_limits<int>::max() ||
+                lastVisibleVisualIndex == std::numeric_limits<int>::min())
+            {
+                return;
+            }
+
+            const QRect borderRect = option.rect.adjusted(0, 1, -1, -2);
+            if (!borderRect.isValid())
+            {
+                return;
+            }
+
+            painter->save();
+            painter->setRenderHint(QPainter::Antialiasing, false);
+            painter->setBrush(Qt::NoBrush);
+            painter->setPen(QPen(KswordTheme::PrimaryBlueColor, 3.0));
+            painter->drawLine(borderRect.topLeft(), borderRect.topRight());
+            painter->drawLine(borderRect.bottomLeft(), borderRect.bottomRight());
+            if (currentVisualIndex == firstVisibleVisualIndex)
+            {
+                painter->drawLine(borderRect.topLeft(), borderRect.bottomLeft());
+            }
+            if (currentVisualIndex == lastVisibleVisualIndex)
+            {
+                painter->drawLine(borderRect.topRight(), borderRect.bottomRight());
+            }
+            painter->restore();
+        }
+
         static bool isWrappingColumn(const int column)
         {
             return column == ContentColumn || column == FileColumn || column == FunctionColumn;
         }
+
+        QPointer<QTableView> m_tableView;
     };
 
     // DefaultButtonIconSize：日志面板按钮与菜单图标默认尺寸。
@@ -421,6 +503,7 @@ void LogDockWidget::initializeUi()
     m_logTable = new QTableView(this);
     m_logTable->setModel(m_logModel);
     m_logTable->setItemDelegate(new LogContentWrapDelegate(m_logTable));
+    m_logTable->setProperty("ksword_preserve_custom_table_delegate", true);
     m_logTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_logTable->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_logTable->setSelectionMode(QAbstractItemView::ExtendedSelection);

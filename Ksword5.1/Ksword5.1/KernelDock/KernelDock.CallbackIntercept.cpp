@@ -9,6 +9,7 @@
 
 #include <QApplication>
 #include <QAbstractItemView>
+#include <QAbstractItemModel>
 #include <QCheckBox>
 #include <QComboBox>
 #include <QCoreApplication>
@@ -30,13 +31,18 @@
 #include <QClipboard>
 #include <QIODevice>
 #include <QPlainTextEdit>
+#include <QPainter>
+#include <QPen>
 #include <QPixmap>
+#include <QPointer>
 #include <QPushButton>
 #include <QScrollArea>
 #include <QSize>
 #include <QSplitter>
 #include <QStyledItemDelegate>
+#include <QStyle>
 #include <QTabWidget>
+#include <QTableView>
 #include <QTableWidget>
 #include <QTableWidgetItem>
 #include <QTimer>
@@ -135,9 +141,23 @@ namespace
     class OpaqueTableEditorDelegate final : public QStyledItemDelegate
     {
     public:
-        explicit OpaqueTableEditorDelegate(QObject* parent = nullptr)
-            : QStyledItemDelegate(parent)
+        explicit OpaqueTableEditorDelegate(QTableView* tableView)
+            : QStyledItemDelegate(tableView)
+            , m_tableView(tableView)
         {
+        }
+
+        void paint(QPainter* painter, const QStyleOptionViewItem& option, const QModelIndex& index) const override
+        {
+            QStyleOptionViewItem itemOption(option);
+            const bool rowSelected = (itemOption.state & QStyle::State_Selected) != 0;
+            itemOption.state &= ~QStyle::State_Selected;
+            itemOption.state &= ~QStyle::State_HasFocus;
+            QStyledItemDelegate::paint(painter, itemOption, index);
+            if (rowSelected)
+            {
+                drawRowSelectionOutline(painter, option, index);
+            }
         }
 
         QWidget* createEditor(
@@ -166,6 +186,76 @@ namespace
             }
             return editor;
         }
+
+    private:
+        void drawRowSelectionOutline(
+            QPainter* painter,
+            const QStyleOptionViewItem& option,
+            const QModelIndex& index) const
+        {
+            if (painter == nullptr || m_tableView == nullptr || !index.isValid())
+            {
+                return;
+            }
+
+            QHeaderView* headerView = m_tableView->horizontalHeader();
+            const QAbstractItemModel* model = index.model();
+            if (headerView == nullptr || model == nullptr)
+            {
+                return;
+            }
+
+            int firstVisibleVisualIndex = std::numeric_limits<int>::max();
+            int lastVisibleVisualIndex = std::numeric_limits<int>::min();
+            const int columnCount = model->columnCount(index.parent());
+            for (int columnIndex = 0; columnIndex < columnCount; ++columnIndex)
+            {
+                if (m_tableView->isColumnHidden(columnIndex))
+                {
+                    continue;
+                }
+
+                const int visualIndex = headerView->visualIndex(columnIndex);
+                if (visualIndex < 0)
+                {
+                    continue;
+                }
+                firstVisibleVisualIndex = std::min(firstVisibleVisualIndex, visualIndex);
+                lastVisibleVisualIndex = std::max(lastVisibleVisualIndex, visualIndex);
+            }
+
+            const int currentVisualIndex = headerView->visualIndex(index.column());
+            if (currentVisualIndex < 0 ||
+                firstVisibleVisualIndex == std::numeric_limits<int>::max() ||
+                lastVisibleVisualIndex == std::numeric_limits<int>::min())
+            {
+                return;
+            }
+
+            const QRect borderRect = option.rect.adjusted(0, 1, -1, -2);
+            if (!borderRect.isValid())
+            {
+                return;
+            }
+
+            painter->save();
+            painter->setRenderHint(QPainter::Antialiasing, false);
+            painter->setBrush(Qt::NoBrush);
+            painter->setPen(QPen(KswordTheme::PrimaryBlueColor, 3.0));
+            painter->drawLine(borderRect.topLeft(), borderRect.topRight());
+            painter->drawLine(borderRect.bottomLeft(), borderRect.bottomRight());
+            if (currentVisualIndex == firstVisibleVisualIndex)
+            {
+                painter->drawLine(borderRect.topLeft(), borderRect.bottomLeft());
+            }
+            if (currentVisualIndex == lastVisibleVisualIndex)
+            {
+                painter->drawLine(borderRect.topRight(), borderRect.bottomRight());
+            }
+            painter->restore();
+        }
+
+        QPointer<QTableView> m_tableView;
     };
 
     quint32 defaultOperationMaskByType(const quint32 callbackType)
@@ -478,10 +568,6 @@ namespace
             "QTableWidget::viewport{"
             "  background:%1;"
             "  background-color:%1;"
-            "}"
-            "QTableWidget::item:selected{"
-            "  background:%5;"
-            "  color:palette(highlighted-text);"
             "}"
             "QHeaderView::section{"
             "  background:transparent; /* %2 */"
@@ -1534,6 +1620,7 @@ private:
             QAbstractItemView::SelectedClicked |
             QAbstractItemView::EditKeyPressed);
         m_groupTable->setItemDelegate(new OpaqueTableEditorDelegate(m_groupTable));
+        m_groupTable->setProperty("ksword_preserve_custom_table_delegate", true);
         m_groupTable->verticalHeader()->setVisible(false);
         m_groupTable->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
         m_groupTable->horizontalHeader()->setSectionResizeMode(static_cast<int>(GroupColumn::Comment), QHeaderView::Stretch);
@@ -2374,6 +2461,7 @@ private:
             QAbstractItemView::SelectedClicked |
             QAbstractItemView::EditKeyPressed);
         ruleTable->setItemDelegate(new OpaqueTableEditorDelegate(ruleTable));
+        ruleTable->setProperty("ksword_preserve_custom_table_delegate", true);
         ruleTable->setSortingEnabled(false);
         ruleTable->setWordWrap(false);
         ruleTable->setContextMenuPolicy(Qt::CustomContextMenu);

@@ -2,7 +2,9 @@
 
 #include "../theme.h"
 
+#include <QAction>
 #include <QApplication>
+#include <QClipboard>
 #include <QCoreApplication>
 #include <QDate>
 #include <QFileIconProvider>
@@ -14,6 +16,7 @@
 #include <QIcon>
 #include <QLabel>
 #include <QLineEdit>
+#include <QMenu>
 #include <QMouseEvent>
 #include <QPushButton>
 #include <QResizeEvent>
@@ -47,6 +50,91 @@ namespace
     constexpr int kCommandLineMinWidth = 210;
     constexpr int kCommandLineMaxWidth = 760;
     constexpr int kAppIconSize = 18;
+
+#ifdef Q_OS_WIN
+    // readWindowsCurrentVersionStringValue：
+    // - 作用：从 CurrentVersion 注册表项读取字符串值；
+    // - 调用：resolveWindowsVersionText 读取 DisplayVersion/ReleaseId 时调用；
+    // - 传入 valueName：要读取的注册表值名；
+    // - 传出：读取成功时返回去除空白的文本，失败时返回空字符串。
+    QString readWindowsCurrentVersionStringValue(const wchar_t* valueName)
+    {
+        constexpr wchar_t kCurrentVersionRegistryPath[] =
+            L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion";
+        HKEY currentVersionKeyHandle = nullptr;
+        const LSTATUS openStatus = ::RegOpenKeyExW(
+            HKEY_LOCAL_MACHINE,
+            kCurrentVersionRegistryPath,
+            0,
+            KEY_QUERY_VALUE | KEY_WOW64_64KEY,
+            &currentVersionKeyHandle);
+        if (openStatus != ERROR_SUCCESS)
+        {
+            return {};
+        }
+
+        wchar_t valueBuffer[128] = {};
+        DWORD valueType = 0;
+        DWORD valueSize = sizeof(valueBuffer);
+        const LSTATUS queryStatus = ::RegQueryValueExW(
+            currentVersionKeyHandle,
+            valueName,
+            nullptr,
+            &valueType,
+            reinterpret_cast<LPBYTE>(valueBuffer),
+            &valueSize);
+        ::RegCloseKey(currentVersionKeyHandle);
+        if (queryStatus != ERROR_SUCCESS
+            || (valueType != REG_SZ && valueType != REG_EXPAND_SZ))
+        {
+            return {};
+        }
+
+        return QString::fromWCharArray(valueBuffer).trimmed();
+    }
+
+    // readWindowsCurrentVersionDwordValue：
+    // - 作用：从 CurrentVersion 注册表项读取 DWORD 值；
+    // - 调用：resolveWindowsVersionText 读取 UBR 时调用；
+    // - 传入 valueName：要读取的注册表值名。
+    // - 传出：读取成功时返回数值，失败时返回 0。
+    DWORD readWindowsCurrentVersionDwordValue(const wchar_t* valueName)
+    {
+        constexpr wchar_t kCurrentVersionRegistryPath[] =
+            L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion";
+        HKEY currentVersionKeyHandle = nullptr;
+        const LSTATUS openStatus = ::RegOpenKeyExW(
+            HKEY_LOCAL_MACHINE,
+            kCurrentVersionRegistryPath,
+            0,
+            KEY_QUERY_VALUE | KEY_WOW64_64KEY,
+            &currentVersionKeyHandle);
+        if (openStatus != ERROR_SUCCESS)
+        {
+            return 0;
+        }
+
+        DWORD valueData = 0;
+        DWORD valueType = 0;
+        DWORD valueSize = sizeof(valueData);
+        const LSTATUS queryStatus = ::RegQueryValueExW(
+            currentVersionKeyHandle,
+            valueName,
+            nullptr,
+            &valueType,
+            reinterpret_cast<LPBYTE>(&valueData),
+            &valueSize);
+        ::RegCloseKey(currentVersionKeyHandle);
+        if (queryStatus != ERROR_SUCCESS
+            || valueType != REG_DWORD
+            || valueSize != sizeof(valueData))
+        {
+            return 0;
+        }
+
+        return valueData;
+    }
+#endif
 
     // widgetBelongsTo：
     // - 作用：判断某个命中控件是否属于指定祖先控件分支；
@@ -512,11 +600,20 @@ namespace ks::ui
         m_commandLineEdit->setClearButtonEnabled(true);
         m_commandLineEdit->setFixedHeight(22);
 
-        // 右侧控制区：截屏屏蔽 + 图钉 + 最小化 + 最大化/还原 + 关闭。
+        // 右侧控制区：系统版本 + 截屏屏蔽 + 图钉 + 最小化 + 最大化/还原 + 关闭。
         m_rightWidget = new QWidget(this);
         m_rightLayout = new QHBoxLayout(m_rightWidget);
         m_rightLayout->setContentsMargins(0, 0, 2, 0);
         m_rightLayout->setSpacing(1);
+
+        m_systemVersionLabel = new QLabel(m_rightWidget);
+        m_systemVersionLabel->setObjectName(QStringLiteral("ksTitleSystemVersionLabel"));
+        m_systemVersionLabel->setText(resolveWindowsVersionText());
+        m_systemVersionLabel->setAlignment(Qt::AlignVCenter | Qt::AlignRight);
+        m_systemVersionLabel->setFixedHeight(kControlButtonHeight);
+        m_systemVersionLabel->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+        m_systemVersionLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
+        m_systemVersionLabel->setContextMenuPolicy(Qt::CustomContextMenu);
 
         m_captureProtectionButton = new QPushButton(m_rightWidget);
         m_pinButton = new QPushButton(m_rightWidget);
@@ -529,6 +626,8 @@ namespace ks::ui
         m_minButton->setObjectName(QStringLiteral("ksTitleMinButton"));
         m_maxButton->setObjectName(QStringLiteral("ksTitleMaxButton"));
         m_closeButton->setObjectName(QStringLiteral("ksTitleCloseButton"));
+
+        m_rightLayout->addWidget(m_systemVersionLabel, 0, Qt::AlignVCenter);
 
         const std::array<QPushButton*, 5> controlButtons = {
             m_captureProtectionButton,
@@ -565,6 +664,19 @@ namespace ks::ui
 
     void CustomTitleBar::initializeConnections()
     {
+        connect(m_systemVersionLabel, &QLabel::customContextMenuRequested, this, [this](const QPoint& localPos) {
+            if (m_systemVersionLabel == nullptr || m_systemVersionLabel->text().isEmpty())
+            {
+                return;
+            }
+
+            QMenu contextMenu(m_systemVersionLabel);
+            QAction* copyAction = contextMenu.addAction(QStringLiteral("复制"));
+            connect(copyAction, &QAction::triggered, this, [this]() {
+                QApplication::clipboard()->setText(m_systemVersionLabel->text());
+            });
+            contextMenu.exec(m_systemVersionLabel->mapToGlobal(localPos));
+        });
         connect(m_captureProtectionButton, &QPushButton::clicked, this, [this]() {
             emit requestToggleCaptureProtection();
         });
@@ -627,6 +739,12 @@ namespace ks::ui
             "  color:%3;"
             "  font-size:12px;"
             "  font-weight:600;"
+            "}"
+            "#ksCustomTitleBar QLabel#ksTitleSystemVersionLabel{"
+            "  color:%3;"
+            "  font-size:11px;"
+            "  font-weight:500;"
+            "  padding:0 4px;"
             "}"
             "#ksCustomTitleBar QLineEdit{"
             "  background:%4;"
@@ -934,5 +1052,60 @@ namespace ks::ui
         }
 
         return QStringLiteral("UnknownUser");
+    }
+
+    QString CustomTitleBar::resolveWindowsVersionText() const
+    {
+#ifdef Q_OS_WIN
+        using RtlGetVersionFunction = LONG(WINAPI*)(OSVERSIONINFOW*);
+        const HMODULE ntdllModuleHandle = ::GetModuleHandleW(L"ntdll.dll");
+        const auto rtlGetVersion = ntdllModuleHandle != nullptr
+            ? reinterpret_cast<RtlGetVersionFunction>(
+                ::GetProcAddress(ntdllModuleHandle, "RtlGetVersion"))
+            : nullptr;
+        if (rtlGetVersion == nullptr)
+        {
+            return {};
+        }
+
+        OSVERSIONINFOW versionInfo = {};
+        versionInfo.dwOSVersionInfoSize = sizeof(versionInfo);
+        if (rtlGetVersion(&versionInfo) != 0)
+        {
+            return {};
+        }
+
+        QString releaseVersionText = readWindowsCurrentVersionStringValue(L"DisplayVersion");
+        if (releaseVersionText.isEmpty())
+        {
+            releaseVersionText = readWindowsCurrentVersionStringValue(L"ReleaseId");
+        }
+        if (releaseVersionText.isEmpty())
+        {
+            releaseVersionText = QString::number(versionInfo.dwBuildNumber);
+        }
+
+        const DWORD displayMajorVersion =
+            versionInfo.dwMajorVersion == 10 && versionInfo.dwBuildNumber >= 22000
+            ? 11
+            : versionInfo.dwMajorVersion;
+        const DWORD updateBuildRevision = readWindowsCurrentVersionDwordValue(L"UBR");
+
+        return QStringLiteral("Win")
+            + QString::number(displayMajorVersion)
+            + QStringLiteral(" ")
+            + releaseVersionText
+            + QStringLiteral("[")
+            + QString::number(versionInfo.dwMajorVersion)
+            + QStringLiteral(".")
+            + QString::number(versionInfo.dwMinorVersion)
+            + QStringLiteral(".")
+            + QString::number(versionInfo.dwBuildNumber)
+            + QStringLiteral(".")
+            + QString::number(updateBuildRevision)
+            + QStringLiteral("]");
+#else
+        return {};
+#endif
     }
 }

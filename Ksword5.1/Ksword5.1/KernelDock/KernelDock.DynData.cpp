@@ -449,8 +449,7 @@ namespace
     // - 返回：表格 selection 样式文本。
     QString itemSelectionStyle()
     {
-        return QStringLiteral("QTableWidget::item:selected{background:%1;color:palette(highlighted-text);}")
-            .arg(KswordTheme::PrimaryBlueHex);
+        return QString();
     }
 
     // copyMenuStyle：
@@ -3427,6 +3426,11 @@ void KernelDock::refreshDynDataAsync()
                 << ", caps="
                 << formatHex64(guardThis->m_dynDataSummary.capabilityMask)
                 << eol;
+
+            if (guardThis->m_timerDpcRefreshAfterDynData.exchange(false))
+            {
+                guardThis->refreshTimerDpcAsync();
+            }
         }, Qt::QueuedConnection);
     }).detach();
 }

@@ -117,8 +117,6 @@ namespace process_detail_window_internal
             "  color:%2;"
             "  border:1px solid %3;"
             "  gridline-color:%3;"
-            "  selection-background-color:%5;"
-            "  selection-color:%7;"
             "}"
             "QWidget#ProcessDetailWindowRoot QTableCornerButton::section{"
             "  background:transparent; /* %4 */"

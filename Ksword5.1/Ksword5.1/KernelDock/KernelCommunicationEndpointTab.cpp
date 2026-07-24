@@ -116,10 +116,6 @@ void KernelCommunicationEndpointTab::initializeUi()
     m_table->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_table->setAlternatingRowColors(true);
     m_table->setContextMenuPolicy(Qt::CustomContextMenu);
-    m_table->setStyleSheet(
-        QStringLiteral("QTableWidget::item:selected{background:%1;color:%2;}")
-            .arg(KswordTheme::AccentHex(KswordTheme::AccentRole::Blue))
-            .arg(KswordTheme::OnAccentHex()));
     m_table->verticalHeader()->setVisible(false);
     m_table->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
     m_table->horizontalHeader()->setSectionResizeMode(static_cast<int>(CommunicationEndpointColumn::FullPath), QHeaderView::Stretch);

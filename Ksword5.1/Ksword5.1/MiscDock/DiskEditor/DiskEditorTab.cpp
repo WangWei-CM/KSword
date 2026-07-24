@@ -129,10 +129,6 @@ namespace
             "  color:%4;"
             "  gridline-color:%1;"
             "}"
-            "QTableWidget::item:selected{"
-            "  background:%5;"
-            "  color:%6;"
-            "}"
             "QHeaderView::section{"
             "  border:none;"
             "  border-bottom:1px solid %1;"
@@ -146,7 +142,7 @@ namespace
             .arg(KswordTheme::SurfaceAltColorHex())
             .arg(KswordTheme::TextPrimaryColorHex())
             .arg(KswordTheme::AccentHex(KswordTheme::AccentRole::Blue))
-            .arg(KswordTheme::OnAccentHex());
+            .arg(KswordTheme::AccentHex(KswordTheme::AccentRole::Blue));
     }
 
     // buildInfoCardStyle：

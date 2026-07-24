@@ -1905,6 +1905,7 @@ void ShowContextMenu(ProcessViewState& state, POINT screenPoint) {
     HMENU processMenu = ::CreatePopupMenu();
     appendAction(processMenu, ProcessActionId::OpenDetails, L"进程详细信息", singleProcess);
     appendAction(processMenu, ProcessActionId::TerminateProcessMultiMethod, L"结束进程(组合方法链)", hasProcessSelection);
+    appendAction(processMenu, ProcessActionId::TerminateProcessTree, L"结束进程树", hasProcessSelection);
     appendAction(processMenu, ProcessActionId::SuspendProcess, L"挂起进程", hasProcessSelection);
     appendAction(processMenu, ProcessActionId::ResumeProcess, L"恢复进程", hasProcessSelection);
     appendAction(processMenu, ProcessActionId::OpenFolder, L"打开所在目录", singleProcess);
@@ -1933,6 +1934,7 @@ void ShowContextMenu(ProcessViewState& state, POINT screenPoint) {
 
     HMENU r0Menu = ::CreatePopupMenu();
     appendAction(r0Menu, ProcessActionId::R0TerminateProcess, L"R0结束进程", hasProcessSelection);
+    appendAction(r0Menu, ProcessActionId::R0TerminateProcessTree, L"R0结束进程树", hasProcessSelection);
     appendAction(r0Menu, ProcessActionId::R0SuspendProcess, L"R0挂起进程", hasProcessSelection);
     appendAction(r0Menu, ProcessActionId::RefreshPplProtectionLevel, L"刷新PPL保护级别", hasProcessSelection);
 

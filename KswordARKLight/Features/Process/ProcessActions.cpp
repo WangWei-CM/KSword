@@ -14,6 +14,8 @@
 #include <sstream>
 #include <string>
 #include <tlhelp32.h>
+#include <unordered_map>
+#include <unordered_set>
 
 #ifndef SECURITY_MANDATORY_MEDIUM_PLUS_RID
 #define SECURITY_MANDATORY_MEDIUM_PLUS_RID (0x00002100L)
@@ -111,6 +113,57 @@ const ProcessSnapshotRow* FindRowByPid(const std::vector<ProcessSnapshotRow>& ro
         return row.processId == pid;
     });
     return it == rows.end() ? nullptr : &*it;
+}
+
+// CollectR3ProcessTreePids expands the selected R3 processes into descendant-
+// first termination targets. R0-only audit rows are deliberately excluded from
+// both roots and descendants, so driver evidence never changes tree discovery.
+std::vector<DWORD> CollectR3ProcessTreePids(
+    const std::vector<DWORD>& selectedPids,
+    const std::vector<ProcessSnapshotRow>& snapshotRows) {
+    std::unordered_map<DWORD, std::vector<DWORD>> childrenByParentPid;
+    std::unordered_set<DWORD> r3PidSet;
+    childrenByParentPid.reserve(snapshotRows.size());
+    r3PidSet.reserve(snapshotRows.size());
+
+    for (const ProcessSnapshotRow& row : snapshotRows) {
+        if (row.r0KernelOnly || row.processId == 0U || !r3PidSet.insert(row.processId).second) {
+            continue;
+        }
+        childrenByParentPid[row.parentProcessId].push_back(row.processId);
+    }
+
+    for (auto& childPair : childrenByParentPid) {
+        std::vector<DWORD>& childPids = childPair.second;
+        std::sort(childPids.begin(), childPids.end());
+    }
+
+    std::vector<DWORD> treePids;
+    treePids.reserve(r3PidSet.size());
+    std::unordered_set<DWORD> visitedPids;
+    visitedPids.reserve(r3PidSet.size());
+    std::function<void(DWORD)> appendSubtree;
+    appendSubtree =
+        [&childrenByParentPid, &treePids, &visitedPids, &appendSubtree](const DWORD processId) {
+        if (!visitedPids.insert(processId).second) {
+            return;
+        }
+
+        const auto childIt = childrenByParentPid.find(processId);
+        if (childIt != childrenByParentPid.end()) {
+            for (const DWORD childPid : childIt->second) {
+                appendSubtree(childPid);
+            }
+        }
+        treePids.push_back(processId);
+    };
+
+    for (const DWORD selectedPid : selectedPids) {
+        if (r3PidSet.find(selectedPid) != r3PidSet.end()) {
+            appendSubtree(selectedPid);
+        }
+    }
+    return treePids;
 }
 
 ProcessActionResult FailureResult(const wchar_t* title, const std::vector<DWORD>& pids, const wchar_t* reason) {
@@ -869,6 +922,16 @@ ProcessActionResult ExecuteProcessAction(
         return ExecuteMultiMethodTerminate(selectedPids);
     }
 
+    if (actionId == ProcessActionId::TerminateProcessTree) {
+        const std::vector<DWORD> treePids = CollectR3ProcessTreePids(selectedPids, snapshotRows);
+        if (treePids.empty()) {
+            return FailureResult(L"结束进程树", selectedPids, L"选中进程未包含在当前 R3 进程快照中，无法识别进程树。");
+        }
+        ProcessActionResult result = ExecuteMultiMethodTerminate(treePids);
+        result.title = L"结束进程树";
+        return result;
+    }
+
     if (actionId == ProcessActionId::TerminateProcess) {
         ProcessActionResult result;
         result.title = L"结束进程";
@@ -894,17 +957,25 @@ ProcessActionResult ExecuteProcessAction(
         return result;
     }
 
-    if (actionId == ProcessActionId::R0TerminateProcess) {
+    if (actionId == ProcessActionId::R0TerminateProcess || actionId == ProcessActionId::R0TerminateProcessTree) {
+        const bool terminateTree = actionId == ProcessActionId::R0TerminateProcessTree;
+        const std::vector<DWORD> targetPids = terminateTree
+            ? CollectR3ProcessTreePids(selectedPids, snapshotRows)
+            : selectedPids;
+        if (targetPids.empty()) {
+            return FailureResult(L"R0结束进程树", selectedPids, L"选中进程未包含在当前 R3 进程快照中，无法识别进程树。");
+        }
         ProcessActionResult result;
-        result.title = L"R0结束进程";
+        result.title = terminateTree ? L"R0结束进程树" : L"R0结束进程";
         result.success = true;
         const ksword::ark::DriverClient driverClient;
-        for (DWORD pid : selectedPids) {
+        for (DWORD pid : targetPids) {
             if (IsProtectedSystemPid(pid)) {
                 AppendIoLine(result.detail, pid, L"R0 terminate", false, L"protected system PID");
                 result.success = false;
                 continue;
             }
+            // 每个 PID 独立调用 ArkDriverClient，因此会单独提交现有结束进程 IOCTL。
             const ksword::ark::IoResult io = driverClient.terminateProcess(static_cast<std::uint32_t>(pid), static_cast<long>(0xC0000005u));
             AppendIoLine(result.detail, pid, L"R0 terminate", io.ok, Utf8ToWide(io.message));
             result.success = result.success && io.ok;

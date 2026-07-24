@@ -4,6 +4,7 @@
 #include <QEasingCurve>
 #include <QAbstractScrollArea>
 #include <QAbstractItemView>
+#include <QAbstractItemModel>
 #include <QAbstractSlider>
 #include <QTextEdit>
 #include <QTextStream>
@@ -21,6 +22,7 @@
 #include <QFileInfo>
 #include <QFont>
 #include <QGuiApplication>
+#include <QHeaderView>
 #include <QScreen>
 #include <QSet>
 #include <QWindow>
@@ -32,6 +34,7 @@
 #include <QPainter>
 #include <QPaintEvent>
 #include <QPalette>
+#include <QPen>
 #include <QPointF>
 #include <QPixmap>
 #include <QPointer>
@@ -51,6 +54,11 @@
 #include <QStringList>
 #include <QToolTip>
 #include <QStyleHints>
+#include <QStyle>
+#include <QStyledItemDelegate>
+#include <QStyleOptionViewItem>
+#include <QProxyStyle>
+#include <QTableView>
 #include <QUrl>
 #include <QEvent>
 #include <QEventLoop>
@@ -93,6 +101,7 @@
 #include <chrono>
 #include <cmath>
 #include <functional>
+#include <limits>
 #include <utility>
 #include <unordered_map>
 #include <cstring>
@@ -110,7 +119,7 @@ namespace
     // kDockLayoutConfigFileVersion 作用：
     // - 作为 ADS saveState/restoreState 的版本号；
     // - Dock 集合或默认布局发生不兼容变化时递增，可自动放弃旧布局。
-    constexpr int kDockLayoutConfigFileVersion = 4;
+    constexpr int kDockLayoutConfigFileVersion = 5;
 
     // kDockLayoutConfigFileName 作用：
     // - 定义用户拖拽后的 ADS 布局配置文件名；
@@ -130,6 +139,9 @@ namespace
     constexpr const char* kKswordProcessUiAccessPropertyName = "ksword_process_uiaccess_enabled";
     constexpr const char* kKswordMainWindowTopMostPropertyName = "ksword_main_window_topmost";
     constexpr const char* kKswordMainWindowHwndPropertyName = "ksword_main_window_hwnd";
+    constexpr const char* kKswordCustomTableDelegatePropertyName = "ksword_preserve_custom_table_delegate";
+    constexpr const char* kKswordTableSelectionOutlineDelegatePropertyName = "ksword_table_selection_outline_delegate";
+    constexpr const char* kKswordTableSelectionOutlineStylePropertyName = "ksword_table_selection_outline_style";
     constexpr int kResizeBorderOverlayWidth = 3;
     constexpr int kResizeCornerTriangleLeg = 6;
 
@@ -1612,6 +1624,219 @@ namespace
         std::unordered_map<QScrollBar*, QPointer<QPropertyAnimation>> m_scrollAnimationByBar;
     };
 
+    // TableSelectionOutlineDelegate 作用：
+    // - 接管未定制 delegate 的 QTableView/QTableWidget 选中绘制；
+    // - 清除 Qt 默认的 Highlight 填充，保留模型自身的背景色；
+    // - 选中时绘制 3px 主题色整行边框。
+    class TableSelectionOutlineDelegate final : public QStyledItemDelegate
+    {
+    public:
+        explicit TableSelectionOutlineDelegate(QTableView* tableView)
+            : QStyledItemDelegate(tableView)
+            , m_tableView(tableView)
+        {
+        }
+
+        void paint(QPainter* painter, const QStyleOptionViewItem& option, const QModelIndex& index) const override
+        {
+            QStyleOptionViewItem itemOption(option);
+            const bool rowSelected = (itemOption.state & QStyle::State_Selected) != 0;
+
+            // QSS 的 transparent 背景不会阻止原生 style 使用 Highlight 填充。
+            // 在调用基类前清除选中状态，才可保留交替行色及模型 BackgroundRole。
+            itemOption.state &= ~QStyle::State_Selected;
+            itemOption.state &= ~QStyle::State_HasFocus;
+            QStyledItemDelegate::paint(painter, itemOption, index);
+
+            if (rowSelected)
+            {
+                drawRowSelectionOutline(painter, option, index);
+            }
+        }
+
+    private:
+        void drawRowSelectionOutline(
+            QPainter* painter,
+            const QStyleOptionViewItem& option,
+            const QModelIndex& index) const
+        {
+            if (painter == nullptr || m_tableView == nullptr || !index.isValid())
+            {
+                return;
+            }
+
+            QHeaderView* headerView = m_tableView->horizontalHeader();
+            const QAbstractItemModel* model = index.model();
+            if (headerView == nullptr || model == nullptr)
+            {
+                return;
+            }
+
+            int firstVisibleVisualIndex = std::numeric_limits<int>::max();
+            int lastVisibleVisualIndex = std::numeric_limits<int>::min();
+            const int columnCount = model->columnCount(index.parent());
+            for (int columnIndex = 0; columnIndex < columnCount; ++columnIndex)
+            {
+                if (m_tableView->isColumnHidden(columnIndex))
+                {
+                    continue;
+                }
+
+                const int visualIndex = headerView->visualIndex(columnIndex);
+                if (visualIndex < 0)
+                {
+                    continue;
+                }
+                firstVisibleVisualIndex = std::min(firstVisibleVisualIndex, visualIndex);
+                lastVisibleVisualIndex = std::max(lastVisibleVisualIndex, visualIndex);
+            }
+
+            const int currentVisualIndex = headerView->visualIndex(index.column());
+            if (currentVisualIndex < 0 ||
+                firstVisibleVisualIndex == std::numeric_limits<int>::max() ||
+                lastVisibleVisualIndex == std::numeric_limits<int>::min())
+            {
+                return;
+            }
+
+            const QRect borderRect = option.rect.adjusted(0, 1, -1, -2);
+            if (!borderRect.isValid())
+            {
+                return;
+            }
+
+            painter->save();
+            painter->setRenderHint(QPainter::Antialiasing, false);
+            painter->setBrush(Qt::NoBrush);
+            painter->setPen(QPen(KswordTheme::PrimaryBlueColor, 3.0));
+            painter->drawLine(borderRect.topLeft(), borderRect.topRight());
+            painter->drawLine(borderRect.bottomLeft(), borderRect.bottomRight());
+            if (currentVisualIndex == firstVisibleVisualIndex)
+            {
+                painter->drawLine(borderRect.topLeft(), borderRect.bottomLeft());
+            }
+            if (currentVisualIndex == lastVisibleVisualIndex)
+            {
+                painter->drawLine(borderRect.topRight(), borderRect.bottomRight());
+            }
+            painter->restore();
+        }
+
+        QPointer<QTableView> m_tableView;
+    };
+
+    // TableSelectionOutlineProxyStyle 作用：
+    // - 在原生 style 层统一移除 QTableView/QTableWidget 的默认选中填充；
+    // - 作为 delegate 的兜底，覆盖第三方或运行期替换 delegate 后重新出现的 Highlight；
+    // - 处理 CE_ItemViewItem 与 PE_PanelItemViewRow，不干预 QHeaderView 的 CE_Header* 绘制和调色板。
+    class TableSelectionOutlineProxyStyle final : public QProxyStyle
+    {
+    public:
+        TableSelectionOutlineProxyStyle()
+            : QProxyStyle(QStringLiteral("windowsvista"))
+        {
+        }
+
+        void drawControl(
+            const ControlElement element,
+            const QStyleOption* option,
+            QPainter* painter,
+            const QWidget* widget = nullptr) const override
+        {
+            if (element == CE_ItemViewItem &&
+                option != nullptr &&
+                qobject_cast<const QTableView*>(widget) != nullptr)
+            {
+                if (const auto* itemOption = qstyleoption_cast<const QStyleOptionViewItem*>(option))
+                {
+                    QStyleOptionViewItem unselectedOption(*itemOption);
+                    unselectedOption.state &= ~QStyle::State_Selected;
+                    unselectedOption.state &= ~QStyle::State_HasFocus;
+                    QProxyStyle::drawControl(element, &unselectedOption, painter, widget);
+                    return;
+                }
+            }
+
+            QProxyStyle::drawControl(element, option, painter, widget);
+        }
+
+        void drawPrimitive(
+            const PrimitiveElement element,
+            const QStyleOption* option,
+            QPainter* painter,
+            const QWidget* widget = nullptr) const override
+        {
+            // QTableView 会在 delegate 绘制前先绘制 PE_PanelItemViewRow。
+            // QStyleSheetStyle 遇到透明 item 背景时会回退到该基础 style，
+            // 因而仅在 CE_ItemViewItem 清除 State_Selected 仍会留下 Highlight 整行填充。
+            if (element == PE_PanelItemViewRow &&
+                option != nullptr &&
+                qobject_cast<const QTableView*>(widget) != nullptr)
+            {
+                if (const auto* itemOption = qstyleoption_cast<const QStyleOptionViewItem*>(option))
+                {
+                    QStyleOptionViewItem unselectedOption(*itemOption);
+                    unselectedOption.state &= ~QStyle::State_Selected;
+                    unselectedOption.state &= ~QStyle::State_HasFocus;
+                    QProxyStyle::drawPrimitive(element, &unselectedOption, painter, widget);
+                    return;
+                }
+            }
+
+            QProxyStyle::drawPrimitive(element, option, painter, widget);
+        }
+    };
+
+    // GlobalTableSelectionOutlineFilter 作用：
+    // - 在 QTableView/QTableWidget 首次显示前安装统一 delegate；
+    // - 后续懒加载 Dock 和弹窗创建的表格自动获得同一选中态；
+    // - 带专用 delegate 的表格通过动态属性明确跳过，避免破坏编辑或自定义绘制。
+    class GlobalTableSelectionOutlineFilter final : public QObject
+    {
+    public:
+        explicit GlobalTableSelectionOutlineFilter(QObject* parent = nullptr)
+            : QObject(parent)
+        {
+        }
+
+        static void installDelegateForTable(QTableView* tableView)
+        {
+            if (tableView == nullptr)
+            {
+                return;
+            }
+
+            if (!tableView->property(kKswordTableSelectionOutlineStylePropertyName).toBool())
+            {
+                auto* selectionOutlineStyle = new TableSelectionOutlineProxyStyle();
+                selectionOutlineStyle->setParent(tableView);
+                tableView->setStyle(selectionOutlineStyle);
+                tableView->setProperty(kKswordTableSelectionOutlineStylePropertyName, true);
+            }
+
+            if (tableView->property(kKswordCustomTableDelegatePropertyName).toBool() ||
+                tableView->property(kKswordTableSelectionOutlineDelegatePropertyName).toBool())
+            {
+                return;
+            }
+
+            tableView->setItemDelegate(new TableSelectionOutlineDelegate(tableView));
+            tableView->setProperty(kKswordTableSelectionOutlineDelegatePropertyName, true);
+        }
+
+    protected:
+        bool eventFilter(QObject* watchedObject, QEvent* eventObject) override
+        {
+            if (eventObject == nullptr || eventObject->type() != QEvent::Show)
+            {
+                return QObject::eventFilter(watchedObject, eventObject);
+            }
+
+            installDelegateForTable(qobject_cast<QTableView*>(watchedObject));
+            return QObject::eventFilter(watchedObject, eventObject);
+        }
+    };
+
     // ensureGlobalContextMenuThemeFilterInstalled 作用：
     // - 安装一次应用级 QMenu 主题过滤器；
     // - 让所有后续创建的右键菜单自动获得深浅色背景兜底。
@@ -1658,6 +1883,28 @@ namespace
         {
             sliderWheelFilter = new GlobalSliderWheelFilter(appInstance);
             appInstance->installEventFilter(sliderWheelFilter);
+        }
+    }
+
+    void ensureGlobalTableSelectionOutlineFilterInstalled()
+    {
+        QApplication* appInstance = qobject_cast<QApplication*>(QCoreApplication::instance());
+        if (appInstance == nullptr)
+        {
+            return;
+        }
+
+        static GlobalTableSelectionOutlineFilter* tableSelectionOutlineFilter = nullptr;
+        if (tableSelectionOutlineFilter == nullptr)
+        {
+            tableSelectionOutlineFilter = new GlobalTableSelectionOutlineFilter(appInstance);
+            appInstance->installEventFilter(tableSelectionOutlineFilter);
+        }
+
+        for (QWidget* widget : appInstance->allWidgets())
+        {
+            GlobalTableSelectionOutlineFilter::installDelegateForTable(
+                qobject_cast<QTableView*>(widget));
         }
     }
 
@@ -3337,6 +3584,7 @@ MainWindow::MainWindow(
     // - 避免后续新增菜单遗漏 setStyleSheet 导致浅色模式黑底。
     ensureGlobalContextMenuThemeFilterInstalled();
     ensureGlobalSliderWheelFilterInstalled();
+    ensureGlobalTableSelectionOutlineFilterInstalled();
 
     // 记录主窗口启动日志，便于验证日志系统与 UI 联动是否生效。
     // 注意：使用 kLogEvent，避免与 QObject::event 命名冲突。
@@ -5033,7 +5281,7 @@ void MainWindow::initMenus()
 
 void MainWindow::initializeWindowDockMenuActions()
 {
-    if (m_windowMenu == nullptr || m_dockLog == nullptr || m_dockCurrentOp == nullptr)
+    if (m_windowMenu == nullptr || m_dockLog == nullptr || m_dockMonitor == nullptr || m_dockCurrentOp == nullptr)
     {
         return;
     }
@@ -5042,19 +5290,26 @@ void MainWindow::initializeWindowDockMenuActions()
     // 都由同一份可见状态驱动，避免维护第二套布尔状态。
     m_windowMenu->clear();
     m_dockLog->setToggleViewActionMode(ads::CDockWidget::ActionModeToggle);
+    m_dockMonitor->setToggleViewActionMode(ads::CDockWidget::ActionModeToggle);
     m_dockCurrentOp->setToggleViewActionMode(ads::CDockWidget::ActionModeToggle);
 
     QAction* logDockAction = m_dockLog->toggleViewAction();
+    QAction* monitorPanelAction = m_dockMonitor->toggleViewAction();
     QAction* currentTasksAction = m_dockCurrentOp->toggleViewAction();
     ks::i18n::LanguageManager::instance().bindText(
         logDockAction,
         QStringLiteral("dock.log_window"),
         QStringLiteral("日志窗口"));
     ks::i18n::LanguageManager::instance().bindText(
+        monitorPanelAction,
+        QStringLiteral("dock.monitor_panel"),
+        QStringLiteral("监视面板"));
+    ks::i18n::LanguageManager::instance().bindText(
         currentTasksAction,
         QStringLiteral("dock.current_tasks"),
         QStringLiteral("当前任务"));
     m_windowMenu->addAction(logDockAction);
+    m_windowMenu->addAction(monitorPanelAction);
     m_windowMenu->addAction(currentTasksAction);
 }
 
@@ -7953,8 +8208,8 @@ void MainWindow::initDockWidgets()
         60,
         QStringLiteral("main.startup.progress.auxiliary_components"),
         QStringLiteral("正在加载功能模块..."));
-    // “监视面板 / 即时窗口”保留实现代码，但不再创建或注册到 ADS。
-    // 日志输出独立窗口继续常驻；辅助日志 Dock 使用第二个日志视图，二者共享全局日志数据。
+    // “即时窗口”继续保留实现代码但不注册到 ADS。
+    // 日志输出独立窗口继续常驻；三个辅助 Dock 各自持有独立内容控件。
     m_logOutputWindow = new QDialog(this);
     m_logOutputWindow->setObjectName(QStringLiteral("ksLogOutputWindow"));
     m_logOutputWindow->setWindowTitle(ks::i18n::text(QStringLiteral("dock.log"), QStringLiteral("日志输出")));
@@ -8104,20 +8359,26 @@ void MainWindow::initDockWidgets()
     createLazyDockWidget(m_dockMisc, m_miscWidget, ks::i18n::text(QStringLiteral("dock.misc"), QStringLiteral("杂项")), QStringLiteral("misc"));
     createLazyDockWidget(m_dockPlugin, m_pluginWidget, ks::i18n::text(QStringLiteral("dock.plugin"), QStringLiteral("插件")), QStringLiteral("plugin"));
 
-    // 两个辅助 Dock 始终创建并注册，关闭时只隐藏内容实例，确保菜单状态和 ADS 布局可恢复。
+    // 三个辅助 Dock 始终创建并注册，关闭时只隐藏内容实例，确保菜单状态和 ADS 布局可恢复。
     m_dockLogWidget = new LogDockWidget(this);
+    m_monitorPanelWidget = new MonitorPanelWidget(this);
     m_progressWidget = new ProgressDockWidget(this);
     m_dockLog = createDockWidget(
         m_dockLogWidget,
         ks::i18n::text(QStringLiteral("dock.log_window"), QStringLiteral("日志窗口")),
         QStringLiteral("log_window"),
         ads::CDockWidget::ForceNoScrollArea);
+    m_dockMonitor = createDockWidget(
+        m_monitorPanelWidget,
+        ks::i18n::text(QStringLiteral("dock.monitor_panel"), QStringLiteral("监视面板")),
+        QStringLiteral("monitor_panel"),
+        ads::CDockWidget::ForceNoScrollArea);
     m_dockCurrentOp = createDockWidget(
         m_progressWidget,
         ks::i18n::text(QStringLiteral("dock.current_tasks"), QStringLiteral("当前任务")),
         QStringLiteral("current_tasks"),
         ads::CDockWidget::ForceNoScrollArea);
-    for (ads::CDockWidget* auxiliaryDock : { m_dockLog, m_dockCurrentOp })
+    for (ads::CDockWidget* auxiliaryDock : { m_dockLog, m_dockMonitor, m_dockCurrentOp })
     {
         auxiliaryDock->setFeature(ads::CDockWidget::DockWidgetClosable, true);
         auxiliaryDock->setFeature(ads::CDockWidget::DockWidgetDeleteOnClose, false);
@@ -8152,7 +8413,7 @@ void MainWindow::initDockWidgets()
         configureAdsDockTabVisualIdentity(dockWidget);
     }
 
-    // 主功能页签不进入窗口菜单；菜单仅承载两个可关闭的辅助 Dock。
+    // 主功能页签不进入窗口菜单；菜单仅承载三个可关闭的辅助 Dock。
     reportStartupProgress(
         72,
         QStringLiteral("main.startup.progress.skip_view_menu"),
@@ -8224,18 +8485,23 @@ void MainWindow::setupDockLayout()
         QStringLiteral("main.startup.progress.register_auxiliary_docks"),
         QStringLiteral("正在加载功能模块..."));
 
-    // 4. 辅助 Dock 默认位于底部，日志与当前任务按 2:1 横向排列。
-    // 首次启动先关闭二者，但保留停靠位置；版本 4 布局恢复会覆盖此默认可见状态。
+    // 4. 辅助 Dock 默认位于底部，按“日志窗口｜监视面板｜当前任务”以 2:2:1 横向排列。
+    // 首次启动先关闭三者，但保留停靠位置；版本 5 布局恢复会覆盖此默认可见状态。
     auto bottomLogArea = m_pDockManager->addDockWidget(
         ads::BottomDockWidgetArea,
         m_dockLog);
+    auto bottomMonitorArea = m_pDockManager->addDockWidget(
+        ads::RightDockWidgetArea,
+        m_dockMonitor,
+        bottomLogArea);
     m_pDockManager->addDockWidget(
         ads::RightDockWidgetArea,
         m_dockCurrentOp,
-        bottomLogArea);
+        bottomMonitorArea);
     m_pDockManager->setSplitterSizes(leftDockArea, { 3, 1 });
-    m_pDockManager->setSplitterSizes(bottomLogArea, { 2, 1 });
+    m_pDockManager->setSplitterSizes(bottomLogArea, { 2, 2, 1 });
     m_dockLog->toggleView(false);
+    m_dockMonitor->toggleView(false);
     m_dockCurrentOp->toggleView(false);
 
     // 5. 设置默认显示的标签页
@@ -8889,6 +9155,10 @@ void MainWindow::applyAppearanceSettings(
     {
         setStyleSheet(appearanceStyleSheet);
     }
+
+    // 表格多在 Dock 初始化阶段创建，而全局过滤器首次安装发生在此之前。
+    // 在父级 QSS 就绪后扫描现有表格，确保统一代理覆盖已创建的 QTableView/QTableWidget。
+    ensureGlobalTableSelectionOutlineFilterInstalled();
     applyResizeBorderOverlayStyle();
     updateResizeBorderOverlays();
     if (m_pDockManager != nullptr)
@@ -9772,7 +10042,7 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
                 "  color:%3 !important;"
                 "  gridline-color:%4;"
                 "}"
-                "QTableView::item:selected,QTableWidget::item:selected,QTreeView::item:selected,QTreeWidget::item:selected{"
+                "QTreeView::item:selected,QTreeWidget::item:selected{"
                 "  background:%7 !important;"
                 "  color:%8 !important;"
                 "}"
@@ -9838,7 +10108,7 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
             "  color:%3 !important;"
             "  gridline-color:%4;"
             "}"
-            "QTableView::item:selected,QTableWidget::item:selected,QTreeView::item:selected,QTreeWidget::item:selected{"
+            "QTreeView::item:selected,QTreeWidget::item:selected{"
             "  background:%7 !important;"
             "  color:%8 !important;"
             "}"

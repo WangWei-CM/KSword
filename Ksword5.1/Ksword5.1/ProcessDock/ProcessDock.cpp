@@ -1945,7 +1945,7 @@ namespace
             painter->save();
             painter->setRenderHint(QPainter::Antialiasing, false);
             painter->setBrush(Qt::NoBrush);
-            painter->setPen(QPen(borderColor, rowSelected ? 2.0 : 1.4));
+            painter->setPen(QPen(borderColor, rowSelected ? 3.0 : 1.4));
             painter->drawLine(borderRect.topLeft(), borderRect.topRight());
             painter->drawLine(borderRect.bottomLeft(), borderRect.bottomRight());
             if (currentVisualIndex == firstVisibleVisualIndex)
@@ -3789,7 +3789,6 @@ void ProcessDock::initializeTopControls()
         QStringLiteral("process.tooltip.table_interval"),
         QStringLiteral("只控制下方进程表格刷新频率，默认 2 秒。"));
     m_tableRefreshIntervalEdit->setStyleSheet(buildBlueLineEditStyle());
-    m_tableRefreshIntervalEdit->setEnabled(false);
 
     // 记录/打点间隔输入框：
     // - 允许小数秒，默认 1s；
@@ -3807,7 +3806,6 @@ void ProcessDock::initializeTopControls()
         QStringLiteral("process.tooltip.sample_interval"),
         QStringLiteral("记录打点间隔，允许输入小数秒，默认 1；过小间隔会提高系统枚举开销。"));
     m_refreshIntervalEdit->setStyleSheet(buildBlueLineEditStyle());
-    m_refreshIntervalEdit->setEnabled(false);
 
     // 进程搜索框：
     // - 直接基于当前缓存做本地过滤，不额外触发系统查询；
@@ -4247,6 +4245,7 @@ void ProcessDock::initializeProcessTable()
     m_processTable->setContextMenuPolicy(Qt::CustomContextMenu);
     m_processTable->setAlternatingRowColors(true);
     m_processTable->setItemDelegate(new ProcessRowHighlightDelegate(m_processTable));
+    m_processTable->setProperty("ksword_preserve_custom_table_delegate", true);
     m_processTable->setShowGrid(false);
     m_processTable->setWordWrap(false);
     m_processTable->setCornerButtonEnabled(false);
@@ -4848,14 +4847,6 @@ void ProcessDock::initializeConnections()
         m_activityTimelinePinnedToLatest = true;
         m_activityTableSnapshotIndex = -1;
         m_activityTableSnapshotRecords.clear();
-        if (m_tableRefreshIntervalEdit != nullptr)
-        {
-            m_tableRefreshIntervalEdit->setEnabled(true);
-        }
-        if (m_refreshIntervalEdit != nullptr)
-        {
-            m_refreshIntervalEdit->setEnabled(true);
-        }
         if (m_refreshTimer != nullptr)
         {
             if (isProcessActivityRefreshAllowedNow())
@@ -4874,14 +4865,6 @@ void ProcessDock::initializeConnections()
         warn << logEvent << "[ProcessDock] 用户点击暂停刷新，周期刷新与进程活动记录一起暂停。" << eol;
         m_monitoringEnabled = false;
         m_activityRecordingEnabled = false;
-        if (m_tableRefreshIntervalEdit != nullptr)
-        {
-            m_tableRefreshIntervalEdit->setEnabled(false);
-        }
-        if (m_refreshIntervalEdit != nullptr)
-        {
-            m_refreshIntervalEdit->setEnabled(false);
-        }
         if (m_refreshTimer != nullptr)
         {
             m_refreshTimer->stop();
@@ -8902,13 +8885,20 @@ void ProcessDock::showTableContextMenu(const QPoint& localPosition)
 
     // 结束动作区：
     // - 取消“结束进程”二级菜单，改为一级动作；
-    // - “结束进程”会按顺序执行 TerminateProcess + TerminateThread(全部线程)。
+    // - 进程树目标只从当前 R3 快照的父 PID 关系推导，R0 不参与识别；
+    // - R0 进程树逐 PID 复用现有结束进程 IOCTL，不新增树专用协议。
     QAction* terminateProcessAction = contextMenu.addAction(
         blueTintedIcon(":/Icon/process_terminate.svg"),
         processContextText("process.menu.terminate", QStringLiteral("结束进程")));
+    QAction* terminateProcessTreeAction = contextMenu.addAction(
+        blueTintedIcon(":/Icon/process_terminate.svg"),
+        processContextText("process.menu.terminate_tree", QStringLiteral("结束进程树")));
     QAction* r0TerminateAction = contextMenu.addAction(
         buildR0ActionIcon(":/Icon/process_terminate.svg"),
         processContextText("process.menu.r0_terminate", QStringLiteral("R0结束进程")));
+    QAction* r0TerminateTreeAction = contextMenu.addAction(
+        buildR0ActionIcon(":/Icon/process_terminate.svg"),
+        processContextText("process.menu.r0_terminate_tree", QStringLiteral("R0结束进程树")));
     QAction* r0SuspendAction = contextMenu.addAction(
         buildR0ActionIcon(":/Icon/process_suspend.svg"),
         processContextText("process.menu.r0_suspend", QStringLiteral("R0挂起进程")));
@@ -9167,7 +9157,9 @@ void ProcessDock::showTableContextMenu(const QPoint& localPosition)
         if (selectedAction == copyCellAction) { copyCurrentCell(); }
         else if (selectedAction == copyRowAction) { copyCurrentRow(); }
         else if (selectedAction == terminateProcessAction) { executeTerminateProcessAction(); }
+        else if (selectedAction == terminateProcessTreeAction) { executeTerminateProcessTreeAction(); }
         else if (selectedAction == r0TerminateAction) { executeR0TerminateProcessAction(); }
+        else if (selectedAction == r0TerminateTreeAction) { executeR0TerminateProcessTreeAction(); }
         else if (selectedAction == r0SuspendAction) { executeR0SuspendProcessAction(); }
         else if (selectedAction == r0HideUnlinkOnlyAction) {
             executeR0SetProcessHiddenAction(true, KSWORD_ARK_PROCESS_VISIBILITY_FLAG_UNLINK_ACTIVE_LIST);
@@ -9507,6 +9499,95 @@ std::vector<ProcessDock::ProcessActionTarget> ProcessDock::selectedActionTargets
     }
 
     return actionTargets;
+}
+
+std::vector<ProcessDock::ProcessActionTarget> ProcessDock::processTreeActionTargets() const
+{
+    // 进程树识别只读取 R3 刷新写入的主进程缓存：
+    // - 不读取 R0 cross-view 或 R0-only 行，避免内核枚举结果改变父子关系；
+    // - 仅保留最新轮仍存活的记录，避免退出进程或 PID 复用污染树目标。
+    std::unordered_map<std::uint32_t, std::vector<ProcessActionTarget>> childrenByParentPid;
+    childrenByParentPid.reserve(m_cacheByIdentity.size());
+    for (const auto& cachePair : m_cacheByIdentity)
+    {
+        const CacheEntry& cacheEntry = cachePair.second;
+        if (cacheEntry.isExitedInLatestRound || cacheEntry.record.pid == 0U)
+        {
+            continue;
+        }
+
+        ProcessActionTarget snapshotTarget{};
+        snapshotTarget.identityKey = cachePair.first;
+        snapshotTarget.record = cacheEntry.record;
+        childrenByParentPid[snapshotTarget.record.parentPid].push_back(std::move(snapshotTarget));
+    }
+
+    // 固定同一父节点的遍历顺序，保证同一份 R3 快照每次生成的动作列表一致。
+    for (auto& childPair : childrenByParentPid)
+    {
+        std::vector<ProcessActionTarget>& childTargets = childPair.second;
+        std::sort(childTargets.begin(), childTargets.end(), [](const ProcessActionTarget& left, const ProcessActionTarget& right)
+        {
+            if (left.record.pid != right.record.pid)
+            {
+                return left.record.pid < right.record.pid;
+            }
+            return left.identityKey < right.identityKey;
+        });
+    }
+
+    const std::vector<ProcessActionTarget> selectedTargets = selectedActionTargets();
+    std::vector<ProcessActionTarget> pendingTargets;
+    pendingTargets.reserve(m_cacheByIdentity.size());
+    std::unordered_set<std::uint32_t> scheduledPidSet;
+    scheduledPidSet.reserve(m_cacheByIdentity.size());
+
+    // 选中根也必须存在于 R3 主缓存，R0-only 行不会被当作进程树根。
+    for (const ProcessActionTarget& selectedTarget : selectedTargets)
+    {
+        const auto cacheIt = m_cacheByIdentity.find(selectedTarget.identityKey);
+        if (cacheIt == m_cacheByIdentity.end() ||
+            cacheIt->second.isExitedInLatestRound ||
+            cacheIt->second.record.pid == 0U)
+        {
+            continue;
+        }
+
+        const std::uint32_t processId = cacheIt->second.record.pid;
+        if (!scheduledPidSet.insert(processId).second)
+        {
+            continue;
+        }
+
+        ProcessActionTarget rootTarget{};
+        rootTarget.identityKey = cacheIt->first;
+        rootTarget.record = cacheIt->second.record;
+        pendingTargets.push_back(std::move(rootTarget));
+    }
+
+    std::vector<ProcessActionTarget> treeTargets;
+    treeTargets.reserve(pendingTargets.size());
+    for (std::size_t pendingIndex = 0U; pendingIndex < pendingTargets.size(); ++pendingIndex)
+    {
+        ProcessActionTarget currentTarget = pendingTargets[pendingIndex];
+        treeTargets.push_back(currentTarget);
+
+        const auto childIt = childrenByParentPid.find(currentTarget.record.pid);
+        if (childIt == childrenByParentPid.end())
+        {
+            continue;
+        }
+
+        for (const ProcessActionTarget& childTarget : childIt->second)
+        {
+            if (scheduledPidSet.insert(childTarget.record.pid).second)
+            {
+                pendingTargets.push_back(childTarget);
+            }
+        }
+    }
+
+    return treeTargets;
 }
 
 void ProcessDock::clearProcessTableSelection()
@@ -11114,11 +11195,42 @@ void ProcessDock::executeR0TerminateProcessAction()
         return;
     }
 
+    executeR0TerminateProcessActions(QStringLiteral("R0结束进程"), actionTargets);
+}
+
+void ProcessDock::executeR0TerminateProcessTreeAction()
+{
+    const std::vector<ProcessActionTarget> actionTargets = processTreeActionTargets();
+    if (actionTargets.empty())
+    {
+        kLogEvent logEvent;
+        warn << logEvent
+            << "[ProcessDock] executeR0TerminateProcessTreeAction 被忽略：选中进程未包含在当前 R3 快照中。"
+            << eol;
+        QMessageBox::information(
+            this,
+            processContextText("process.menu.r0_terminate_tree", QStringLiteral("R0结束进程树")),
+            processContextText(
+                "process.action.r0_terminate_tree.r3_snapshot_unavailable",
+                QStringLiteral("当前选中进程未包含在 R3 进程快照中，无法识别进程树。")));
+        return;
+    }
+
+    executeR0TerminateProcessActions(
+        processContextText("process.menu.r0_terminate_tree", QStringLiteral("R0结束进程树")),
+        actionTargets);
+}
+
+void ProcessDock::executeR0TerminateProcessActions(
+    const QString& actionTitle,
+    const std::vector<ProcessActionTarget>& actionTargets)
+{
     dispatchProcessActionTargetsInParallel(
-        QStringLiteral("R0结束进程"),
+        actionTitle,
         actionTargets,
         [](const ProcessActionTarget& actionTarget, std::string* detailTextOut)
         {
+            // 每个动作目标都会单独调用 ArkDriverClient，形成独立的结束进程 IOCTL。
             return terminateProcessByR0Driver(actionTarget.record.pid, detailTextOut);
         },
         true);
@@ -11603,8 +11715,38 @@ void ProcessDock::executeTerminateProcessAction()
         return;
     }
 
+    executeTerminateProcessActions(QStringLiteral("结束进程"), actionTargets);
+}
+
+void ProcessDock::executeTerminateProcessTreeAction()
+{
+    const std::vector<ProcessActionTarget> actionTargets = processTreeActionTargets();
+    if (actionTargets.empty())
+    {
+        kLogEvent logEvent;
+        warn << logEvent
+            << "[ProcessDock] executeTerminateProcessTreeAction 被忽略：选中进程未包含在当前 R3 快照中。"
+            << eol;
+        QMessageBox::information(
+            this,
+            processContextText("process.menu.terminate_tree", QStringLiteral("结束进程树")),
+            processContextText(
+                "process.action.terminate_tree.r3_snapshot_unavailable",
+                QStringLiteral("当前选中进程未包含在 R3 进程快照中，无法识别进程树。")));
+        return;
+    }
+
+    executeTerminateProcessActions(
+        processContextText("process.menu.terminate_tree", QStringLiteral("结束进程树")),
+        actionTargets);
+}
+
+void ProcessDock::executeTerminateProcessActions(
+    const QString& actionTitle,
+    const std::vector<ProcessActionTarget>& actionTargets)
+{
     dispatchProcessActionTargetsInParallel(
-        QStringLiteral("结束进程"),
+        actionTitle,
         actionTargets,
         [](const ProcessActionTarget& actionTarget, std::string* detailTextOut)
         {

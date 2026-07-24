@@ -93,6 +93,19 @@ namespace
         return QStringLiteral("0x%1").arg(value, 8, 16, QLatin1Char('0')).toUpper();
     }
 
+    QString layoutSourceText(const std::uint32_t source)
+    {
+        switch (source)
+        {
+        case KSWORD_ARK_WIN32K_TIMER_LAYOUT_SOURCE_VALIDATED_DISASSEMBLY:
+            return timerText("window.timer.layout.exact", QStringLiteral("精确 PE 身份"));
+        case KSWORD_ARK_WIN32K_TIMER_LAYOUT_SOURCE_NEAREST_PREVIOUS:
+            return timerText("window.timer.layout.previous", QStringLiteral("最近旧版回退"));
+        default:
+            return timerText("window.timer.layout.unknown", QStringLiteral("未知"));
+        }
+    }
+
     QString intervalText(const std::uint32_t value)
     {
         if (value == 0x7FFFFFFFU)
@@ -205,7 +218,7 @@ namespace
         {
             snapshot.statusText = timerText(
                 "window.timer.status.unsupported",
-                QStringLiteral("状态：当前 win32k 版本没有已验证的 tagTIMER 布局；base=%1/%2，full=%3/%4。%5"))
+                QStringLiteral("状态：当前 win32k 版本没有精确或可用的最近旧版 tagTIMER 布局；base=%1/%2，full=%3/%4。%5"))
                 .arg(hex32(result.win32kbaseTimeDateStamp))
                 .arg(hex32(result.win32kbaseImageSize))
                 .arg(hex32(result.win32kfullTimeDateStamp))
@@ -271,7 +284,7 @@ namespace
             .arg(result.duplicateCount)
             .arg(hex64(result.timerHashTable))
             .arg(result.layout.objectSize, 0, 16)
-            .arg(result.layout.source)
+            .arg(layoutSourceText(result.layout.source))
             .arg(detailText);
         return snapshot;
     }

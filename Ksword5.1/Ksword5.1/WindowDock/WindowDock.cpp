@@ -352,6 +352,25 @@ namespace
             .arg(formatUInt64Hex(flags));
     }
 
+    QString messageHookLayoutSourceText(const std::uint32_t source)
+    {
+        switch (source)
+        {
+        case KSWORD_ARK_WIN32K_MESSAGE_HOOK_LAYOUT_SOURCE_VALIDATED_DISASSEMBLY:
+            return ks::i18n::contextText(
+                QStringLiteral("window.message_hook.layout.exact"),
+                QStringLiteral("精确 PE 身份"));
+        case KSWORD_ARK_WIN32K_MESSAGE_HOOK_LAYOUT_SOURCE_NEAREST_PREVIOUS:
+            return ks::i18n::contextText(
+                QStringLiteral("window.message_hook.layout.previous"),
+                QStringLiteral("最近旧版回退"));
+        default:
+            return ks::i18n::contextText(
+                QStringLiteral("window.message_hook.layout.unknown"),
+                QStringLiteral("未知"));
+        }
+    }
+
     QString win32kAtomName(const std::uint32_t atomValue)
     {
         if (atomValue == 0U || atomValue > 0xFFFFU)
@@ -1293,16 +1312,10 @@ namespace
             "  alternate-background-color:%2;"
             "  color:%3;"
             "  gridline-color:%4;"
-            "  selection-background-color:%5;"
-            "  selection-color:%6;"
             "}"
             "QTableWidget::item{"
             "  color:%3;"
             "  padding:3px 5px;"
-            "}"
-            "QTableWidget::item:selected{"
-            "  background-color:%5;"
-            "  color:%6;"
             "}"
             "QHeaderView::section{"
             "  background:transparent; /* %2 */"
@@ -1315,8 +1328,7 @@ namespace
             .arg(surfaceAltColor)
             .arg(textColor)
             .arg(borderColor)
-            .arg(KswordTheme::AccentHex(KswordTheme::AccentRole::Blue))
-            .arg(KswordTheme::OnAccentHex());
+            .arg(KswordTheme::AccentHex(KswordTheme::AccentRole::Blue));
     }
 
     // applyAuditTablePalette 作用：
@@ -2125,9 +2137,14 @@ namespace
                 keyboardSourceText(entry.source),
                 win32kRuntimeStatusText(entry.status),
                 formatNtStatusText(entry.lastStatus),
-                QStringLiteral("fieldFlags=%1; moduleBase=%2; %3")
+                QStringLiteral("fieldFlags=%1; moduleBase=%2; layout=%3; profileFull=%4/%5; currentFull=%6/%7; %8")
                     .arg(formatUInt64Hex(entry.fieldFlags))
                     .arg(formatUInt64Hex(entry.moduleBase))
+                    .arg(messageHookLayoutSourceText(result.layout.source))
+                    .arg(formatUInt64Hex(result.layout.timeDateStamp))
+                    .arg(formatUInt64Hex(result.layout.imageSize))
+                    .arg(formatUInt64Hex(result.win32kfullTimeDateStamp))
+                    .arg(formatUInt64Hex(result.win32kfullImageSize))
                     .arg(driverDetailText) });
         }
 

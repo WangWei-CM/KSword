@@ -73,14 +73,11 @@ namespace
 
     QString tableStyle()
     {
-        return QStringLiteral("QTableWidget{background:%1;color:%2;alternate-background-color:%3;gridline-color:%4;}"
-                              "QTableWidget::item:selected{background:%5;color:palette(highlighted-text);}")
+        return QStringLiteral("QTableWidget{background:%1;color:%2;alternate-background-color:%3;gridline-color:%4;}")
             .arg(KswordTheme::SurfaceColorHex())
             .arg(KswordTheme::TextPrimaryColorHex())
             .arg(KswordTheme::SurfaceAltColorHex())
-            .arg(KswordTheme::BorderColorHex())
-            .arg(KswordTheme::AccentHex(KswordTheme::AccentRole::Blue))
-            .arg(KswordTheme::OnAccentHex());
+            .arg(KswordTheme::BorderColorHex());
     }
 
     QTableWidgetItem* readOnlyItem(const QString& textValue)

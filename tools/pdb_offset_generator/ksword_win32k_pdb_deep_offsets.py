@@ -236,13 +236,20 @@ WIN32K_PUBLIC_SYMBOL_ALIASES: dict[str, str] = {
     "catomSysTableEntries": "messageHookModuleAtomCount",
 }
 
-# 当前 Win32 消息 Hook 枚举器实际使用的精确版本布局。这里保存经反汇编交叉
-# 验证的 PE/PDB 身份和 RVA，供离线审计、矩阵扩展及发布前比对使用。未知身份
-# 不继承这些偏移，驱动会返回 UNSUPPORTED。
+# 当前 Win32 消息 Hook 枚举器实际使用的版本布局。这里保存 Windows 版本、
+# PE/PDB 身份和 RVA，供离线审计、矩阵扩展及发布前比对使用。运行时先做精确
+# PE 身份匹配；缺失时按 windowsVersion 选择不高于当前系统的最近表项。
 VALIDATED_MESSAGE_HOOK_PROFILES: list[dict[str, Any]] = [
     {
         "profileId": "message_hook_a8a6_2d74_v1",
         "source": "validated_disassembly",
+        "windowsVersion": {
+            "major": 10,
+            "minor": 0,
+            "build": 19041,
+            "revision": 6456,
+            "text": "10.0.19041.6456",
+        },
         "moduleIdentities": {
             "win32kbase.sys": {
                 "timeDateStamp": 0x8FC48444,
@@ -721,6 +728,13 @@ def main(argv: list[str] | None = None) -> int:
         },
         "missingPrivateTypesByModule": missing_private,
         "runtimeDetailCatalog": runtime_detail_catalog,
+        "runtimeProfileSelectionPolicy": {
+            "exactMatch": "win32kbase/win32kfull TimeDateStamp+SizeOfImage pair",
+            "missingExactMatch": "nearest previous windowsVersion from the same layout domain",
+            "futureProfilesRejected": True,
+            "peTimestampOrdering": False,
+            "reason": "Modern Windows PE timestamps may be reproducible-build hashes and are not chronological.",
+        },
         "validatedMessageHookProfiles": VALIDATED_MESSAGE_HOOK_PROFILES,
         "modules": modules,
         "notes": [
