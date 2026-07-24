@@ -24,6 +24,7 @@
       alt="KSword ARK light interface"
       width="49%"
     />
+  </a>
 
 
   <br>
