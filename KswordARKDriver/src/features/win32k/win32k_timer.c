@@ -7,8 +7,8 @@ Module Name:
 Abstract:
 
     Read-only enumeration of win32k tagTIMER objects through the exported
-    gTimerHashTable.  The collector is intentionally version-gated by the
-    win32kbase/win32kfull PE identity and never unlinks or modifies a timer.
+    gTimerHashTable. The collector prefers exact PE identity and can fall back
+    to the nearest previous Windows layout. It never unlinks or modifies a timer.
 
 Environment:
 
@@ -31,20 +31,35 @@ Environment:
 #define KSWORD_ARK_WIN32K_TIMER_MAX_NODES 32768UL
 #define KSWORD_ARK_WIN32K_TIMER_MAX_NODES_PER_BUCKET 8192UL
 
-// 当前缓存中已由 win32kfull NtUserSetTimer 反汇编复核的 tagTIMER 布局。
-// 该表只覆盖同一对 PE 身份，未知构建会返回 UNSUPPORTED，避免猜读私有对象。
-#define KSWORD_ARK_WIN32K_TIMER_BASE_TIMESTAMP 0x8FC48444UL
-#define KSWORD_ARK_WIN32K_TIMER_BASE_IMAGE_SIZE 0x002D6000UL
-#define KSWORD_ARK_WIN32K_TIMER_FULL_TIMESTAMP 0x83C73BE4UL
-#define KSWORD_ARK_WIN32K_TIMER_FULL_IMAGE_SIZE 0x003B4000UL
-
-typedef struct _KSWORD_ARK_WIN32K_TIMER_THREAD_MAP_ENTRY
+typedef struct _KSWORD_ARK_WIN32K_TIMER_PROFILE
 {
-    ULONG64 ThreadInfo;
-    ULONG ProcessId;
-    ULONG ThreadId;
-    ULONG SessionId;
-} KSWORD_ARK_WIN32K_TIMER_THREAD_MAP_ENTRY;
+    KSWORD_ARK_WIN32K_LAYOUT_PROFILE_IDENTITY identity;
+    KSWORD_ARK_WIN32K_TIMER_LAYOUT layout;
+} KSWORD_ARK_WIN32K_TIMER_PROFILE;
+
+// 按 Windows 版本从旧到新维护。精确 PE 身份优先；未命中时由公共选择器
+// 使用不高于当前 Windows 版本的最近表项。
+static const KSWORD_ARK_WIN32K_TIMER_PROFILE g_KswordArkWin32kTimerProfiles[] =
+{
+    {
+        // 22H2 19045 is an enablement-package version. Private win32k
+        // binaries remain on the 19041 servicing branch; use that branch for
+        // nearest-previous ordering so PsGetVersion/NtBuildNumber cannot make
+        // the verified profile look newer than the running kernel.
+        { 10UL, 0UL, 19041UL, 6456UL,
+          0x8FC48444UL, 0x002D6000UL, 0x83C73BE4UL, 0x003B4000UL },
+        { KSWORD_ARK_WIN32K_TIMER_OBJECT_SIZE,
+          0x18UL, 0x20UL, 0x28UL, 0x2CUL, 0x30UL, 0x34UL, 0x48UL,
+          0x58UL, 0x60UL, 0x68UL, 0x70UL, 0x80UL,
+          KSWORD_ARK_WIN32K_TIMER_BUCKET_COUNT,
+          KSWORD_ARK_WIN32K_TIMER_BUCKET_STRIDE,
+          KSWORD_ARK_WIN32K_TIMER_LAYOUT_SOURCE_UNKNOWN,
+          0x83C73BE4UL, 0x003B4000UL }
+    }
+};
+
+typedef KSWORD_ARK_WIN32K_GUI_THREAD_MAP_ENTRY
+    KSWORD_ARK_WIN32K_TIMER_THREAD_MAP_ENTRY;
 
 typedef struct _KSWORD_ARK_WIN32K_TIMER_WALK_CONTEXT
 {
@@ -67,6 +82,26 @@ NTAPI
 RtlFindExportedRoutineByName(
     _In_ PVOID ImageBase,
     _In_z_ PCSTR RoutineName
+    );
+
+NTKERNELAPI
+VOID
+KeStackAttachProcess(
+    _Inout_ PVOID Process,
+    _Out_ PVOID ApcState
+    );
+
+NTKERNELAPI
+VOID
+KeUnstackDetachProcess(
+    _In_ PVOID ApcState
+    );
+
+NTKERNELAPI
+NTSTATUS
+PsLookupProcessByProcessId(
+    _In_ HANDLE ProcessId,
+    _Outptr_ PEPROCESS* Process
     );
 
 static BOOLEAN
@@ -237,8 +272,8 @@ Return Value:
 static VOID
 KswordARKWin32kTimerInitializeLayout(
     _Out_ KSWORD_ARK_WIN32K_TIMER_LAYOUT* Layout,
-    _In_ ULONG FullTimeDateStamp,
-    _In_ ULONG FullImageSize
+    _In_ const KSWORD_ARK_WIN32K_TIMER_PROFILE* Profile,
+    _In_ ULONG Source
     )
 /*++
 
@@ -249,8 +284,8 @@ Routine Description:
 Arguments:
 
     Layout - Receives the timer layout packet.
-    FullTimeDateStamp - win32kfull PE timestamp.
-    FullImageSize - win32kfull image size.
+    Profile - Selected exact or nearest-previous layout profile.
+    Source - Layout selection source.
 
 Return Value:
 
@@ -258,25 +293,13 @@ Return Value:
 
 --*/
 {
-    RtlZeroMemory(Layout, sizeof(*Layout));
-    Layout->objectSize = KSWORD_ARK_WIN32K_TIMER_OBJECT_SIZE;
-    Layout->primaryThreadInfo = 0x18UL;
-    Layout->callback = 0x20UL;
-    Layout->countdown = 0x28UL;
-    Layout->tolerance = 0x2CUL;
-    Layout->flags = 0x30UL;
-    Layout->interval = 0x34UL;
-    Layout->globalListEntry = 0x48UL;
-    Layout->window = 0x58UL;
-    Layout->timerId = 0x60UL;
-    Layout->alternateThreadInfo = 0x68UL;
-    Layout->hashListEntry = 0x70UL;
-    Layout->timestamp = 0x80UL;
-    Layout->bucketCount = KSWORD_ARK_WIN32K_TIMER_BUCKET_COUNT;
-    Layout->bucketStride = KSWORD_ARK_WIN32K_TIMER_BUCKET_STRIDE;
-    Layout->source = KSWORD_ARK_WIN32K_TIMER_LAYOUT_SOURCE_VALIDATED_DISASSEMBLY;
-    Layout->timeDateStamp = FullTimeDateStamp;
-    Layout->imageSize = FullImageSize;
+    if (Layout == NULL || Profile == NULL) {
+        return;
+    }
+    *Layout = Profile->layout;
+    Layout->source = Source == KSWORD_ARK_WIN32K_LAYOUT_SELECTION_EXACT_IDENTITY
+        ? KSWORD_ARK_WIN32K_TIMER_LAYOUT_SOURCE_VALIDATED_DISASSEMBLY
+        : KSWORD_ARK_WIN32K_TIMER_LAYOUT_SOURCE_NEAREST_PREVIOUS;
 }
 
 static NTSTATUS
@@ -304,79 +327,81 @@ Return Value:
 
 --*/
 {
-    KSWORD_WIN32K_PS_GET_NEXT_PROCESS_FN psGetNextProcess = NULL;
-    KSWORD_WIN32K_PS_GET_NEXT_PROCESS_THREAD_FN psGetNextProcessThread = NULL;
-    KSWORD_WIN32K_PS_GET_THREAD_WIN32_THREAD_FN psGetThreadWin32Thread = NULL;
-    KSWORD_WIN32K_PS_GET_PROCESS_SESSION_ID_FN psGetProcessSessionId = NULL;
-    KSWORD_ARK_WIN32K_TIMER_THREAD_MAP_ENTRY* map = NULL;
-    PEPROCESS processCursor = NULL;
-    ULONG count = 0UL;
-    BOOLEAN truncated = FALSE;
+    return KswordARKWin32kBuildGuiThreadMap(
+        KSWORD_ARK_WIN32K_TIMER_MAX_THREAD_MAP,
+        KSWORD_ARK_WIN32K_TIMER_POOL_TAG,
+        MapOut,
+        CountOut,
+        TruncatedOut);
+}
 
-    if (MapOut == NULL || CountOut == NULL || TruncatedOut == NULL) {
-        return STATUS_INVALID_PARAMETER;
+static NTSTATUS
+KswordARKWin32kTimerReferenceSessionProcess(
+    _In_reads_(ThreadMapCount) const KSWORD_ARK_WIN32K_TIMER_THREAD_MAP_ENTRY* ThreadMap,
+    _In_ ULONG ThreadMapCount,
+    _In_opt_ const KSWORD_ARK_WIN32K_QUERY_REQUEST* Request,
+    _Inout_ ULONG* RequestedSessionId,
+    _Outptr_ PEPROCESS* ProcessOut
+    )
+{
+    ULONG preferredProcessId = Request != NULL ? Request->processId : 0UL;
+    ULONG pass = 0UL;
+
+    if (ThreadMap == NULL || ThreadMapCount == 0UL ||
+        RequestedSessionId == NULL || ProcessOut == NULL) {
+        return STATUS_NOT_FOUND;
     }
-    *MapOut = NULL;
-    *CountOut = 0UL;
-    *TruncatedOut = FALSE;
+    *ProcessOut = NULL;
 
-    map = (KSWORD_ARK_WIN32K_TIMER_THREAD_MAP_ENTRY*)KswordARKAllocateNonPagedPool(
-        sizeof(*map) * KSWORD_ARK_WIN32K_TIMER_MAX_THREAD_MAP,
-        KSWORD_ARK_WIN32K_TIMER_POOL_TAG);
-    if (map == NULL) {
-        return STATUS_INSUFFICIENT_RESOURCES;
-    }
-    RtlZeroMemory(map, sizeof(*map) * KSWORD_ARK_WIN32K_TIMER_MAX_THREAD_MAP);
+    for (pass = 0UL; pass < 4UL; ++pass) {
+        ULONG index = 0UL;
 
-    psGetNextProcess = KswordARKWin32kResolvePsGetNextProcess();
-    psGetNextProcessThread = KswordARKWin32kResolvePsGetNextProcessThread();
-    psGetThreadWin32Thread = KswordARKWin32kResolvePsGetThreadWin32Thread();
-    psGetProcessSessionId = KswordARKWin32kResolvePsGetProcessSessionId();
-    if (psGetNextProcess == NULL || psGetNextProcessThread == NULL ||
-        psGetThreadWin32Thread == NULL) {
-        ExFreePoolWithTag(map, KSWORD_ARK_WIN32K_TIMER_POOL_TAG);
-        return STATUS_PROCEDURE_NOT_FOUND;
-    }
+        for (index = 0UL; index < ThreadMapCount; ++index) {
+            const KSWORD_ARK_WIN32K_TIMER_THREAD_MAP_ENTRY* entry = &ThreadMap[index];
+            BOOLEAN candidate = FALSE;
+            PEPROCESS process = NULL;
+            NTSTATUS status = STATUS_SUCCESS;
 
-    processCursor = psGetNextProcess(NULL);
-    while (processCursor != NULL) {
-        PEPROCESS nextProcess = psGetNextProcess(processCursor);
-        PETHREAD threadCursor = NULL;
-        ULONG processId = HandleToULong(PsGetProcessId(processCursor));
-        ULONG sessionId = psGetProcessSessionId != NULL
-            ? psGetProcessSessionId(processCursor)
-            : 0UL;
-
-        threadCursor = psGetNextProcessThread(processCursor, NULL);
-        while (threadCursor != NULL) {
-            PETHREAD nextThread = psGetNextProcessThread(processCursor, threadCursor);
-            PVOID threadInfo = psGetThreadWin32Thread(threadCursor);
-
-            if (threadInfo != NULL) {
-                if (count >= KSWORD_ARK_WIN32K_TIMER_MAX_THREAD_MAP) {
-                    truncated = TRUE;
-                }
-                else {
-                    map[count].ThreadInfo = (ULONG64)(ULONG_PTR)threadInfo;
-                    map[count].ProcessId = processId;
-                    map[count].ThreadId = HandleToULong(PsGetThreadId(threadCursor));
-                    map[count].SessionId = sessionId;
-                    count += 1UL;
-                }
+            switch (pass) {
+            case 0UL:
+                candidate = preferredProcessId != 0UL &&
+                    entry->ProcessId == preferredProcessId &&
+                    (*RequestedSessionId == 0UL || entry->SessionId == *RequestedSessionId);
+                break;
+            case 1UL:
+                candidate = *RequestedSessionId != 0UL &&
+                    entry->SessionId == *RequestedSessionId;
+                break;
+            case 2UL:
+                candidate = *RequestedSessionId == 0UL && entry->SessionId != 0UL;
+                break;
+            default:
+                candidate = *RequestedSessionId == 0UL;
+                break;
+            }
+            if (!candidate) {
+                continue;
             }
 
-            ObDereferenceObject(threadCursor);
-            threadCursor = nextThread;
-        }
+            status = PsLookupProcessByProcessId(
+                ULongToHandle(entry->ProcessId),
+                &process);
+            if (NT_SUCCESS(status) && process != NULL) {
+                KSWORD_WIN32K_PS_GET_PROCESS_SESSION_ID_FN psGetProcessSessionId =
+                    KswordARKWin32kResolvePsGetProcessSessionId();
 
-        ObDereferenceObject(processCursor);
-        processCursor = nextProcess;
+                if (psGetProcessSessionId == NULL ||
+                    psGetProcessSessionId(process) == entry->SessionId) {
+                    *RequestedSessionId = entry->SessionId;
+                    *ProcessOut = process;
+                    return STATUS_SUCCESS;
+                }
+                ObDereferenceObject(process);
+            }
+        }
     }
 
-    *MapOut = map;
-    *CountOut = count;
-    *TruncatedOut = truncated;
-    return STATUS_SUCCESS;
+    return STATUS_NOT_FOUND;
 }
 
 static BOOLEAN
@@ -821,9 +846,12 @@ Return Value:
     KSW_HOOK_SYSTEM_MODULE_ENTRY fullEntry;
     IMAGE_NT_HEADERS baseHeaders;
     IMAGE_NT_HEADERS fullHeaders;
+    KSWORD_ARK_WIN32K_LAYOUT_SELECTION layoutSelection;
+    const KSWORD_ARK_WIN32K_TIMER_PROFILE* layoutProfile = NULL;
     KSWORD_ARK_WIN32K_TIMER_SNAPSHOT_RESPONSE* response = NULL;
     KSWORD_ARK_WIN32K_TIMER_THREAD_MAP_ENTRY* threadMap = NULL;
     ULONG64* seenTimers = NULL;
+    PEPROCESS sessionProcess = NULL;
     PVOID timerHashTable = NULL;
     ULONG moduleInfoBytes = 0UL;
     ULONG threadMapCount = 0UL;
@@ -833,6 +861,8 @@ Return Value:
     size_t headerSize = 0U;
     size_t entryCapacity = 0U;
     BOOLEAN threadMapTruncated = FALSE;
+    BOOLEAN attached = FALSE;
+    DECLSPEC_ALIGN(16) UCHAR attachState[128];
     NTSTATUS status = STATUS_SUCCESS;
 
     if (BytesWrittenOut == NULL || OutputBuffer == NULL) {
@@ -893,24 +923,96 @@ Return Value:
     response->win32kbaseImageSize = baseHeaders.OptionalHeader.SizeOfImage;
     response->win32kfullTimeDateStamp = fullHeaders.FileHeader.TimeDateStamp;
     response->win32kfullImageSize = fullHeaders.OptionalHeader.SizeOfImage;
-    if (response->win32kbaseTimeDateStamp != KSWORD_ARK_WIN32K_TIMER_BASE_TIMESTAMP ||
-        response->win32kbaseImageSize != KSWORD_ARK_WIN32K_TIMER_BASE_IMAGE_SIZE ||
-        response->win32kfullTimeDateStamp != KSWORD_ARK_WIN32K_TIMER_FULL_TIMESTAMP ||
-        response->win32kfullImageSize != KSWORD_ARK_WIN32K_TIMER_FULL_IMAGE_SIZE) {
+    if (!KswordARKWin32kSelectLayoutProfile(
+            g_KswordArkWin32kTimerProfiles,
+            RTL_NUMBER_OF(g_KswordArkWin32kTimerProfiles),
+            sizeof(g_KswordArkWin32kTimerProfiles[0]),
+            response->win32kbaseTimeDateStamp,
+            response->win32kbaseImageSize,
+            response->win32kfullTimeDateStamp,
+            response->win32kfullImageSize,
+            &layoutSelection)) {
         response->status = KSWORD_ARK_WIN32K_STATUS_UNSUPPORTED;
         response->missingCapabilityMask = KSWORD_ARK_WIN32K_CAP_TIMER_LAYOUT |
             KSWORD_ARK_WIN32K_CAP_TIMER_ENUM;
         response->lastStatus = STATUS_REVISION_MISMATCH;
         KswordARKWin32kTimerSetDetail(
             response->detail,
-            L"Current win32k PE identity has no verified tagTIMER layout in the offset table.");
+            L"No exact or nearest-previous Windows tagTIMER profile is available.");
         goto Cleanup;
     }
+    layoutProfile = &g_KswordArkWin32kTimerProfiles[layoutSelection.profileIndex];
 
     KswordARKWin32kTimerInitializeLayout(
         &response->layout,
-        response->win32kfullTimeDateStamp,
-        response->win32kfullImageSize);
+        layoutProfile,
+        layoutSelection.source);
+    if (response->layout.objectSize == 0UL ||
+        response->layout.objectSize > KSWORD_ARK_WIN32K_TIMER_OBJECT_SIZE ||
+        response->layout.bucketCount == 0UL ||
+        response->layout.bucketCount > 256UL ||
+        response->layout.bucketStride < sizeof(LIST_ENTRY)) {
+        response->status = KSWORD_ARK_WIN32K_STATUS_UNSUPPORTED;
+        response->missingCapabilityMask = KSWORD_ARK_WIN32K_CAP_TIMER_LAYOUT |
+            KSWORD_ARK_WIN32K_CAP_TIMER_ENUM;
+        response->lastStatus = STATUS_INVALID_PARAMETER;
+        KswordARKWin32kTimerSetDetail(
+            response->detail,
+            L"Selected tagTIMER profile failed local size and bucket validation.");
+        goto Cleanup;
+    }
+    status = KswordARKWin32kTimerBuildThreadMap(
+        &threadMap,
+        &threadMapCount,
+        &threadMapTruncated);
+    if (!NT_SUCCESS(status)) {
+        response->status = KSWORD_ARK_WIN32K_STATUS_READ_FAILED;
+        response->lastStatus = status;
+        response->missingCapabilityMask |= KSWORD_ARK_WIN32K_CAP_THREADINFO_PUBLIC;
+        KswordARKWin32kTimerSetDetail(
+            response->detail,
+            L"GUI thread mapping failed before the target win32k session could be attached.");
+        goto Cleanup;
+    }
+
+    if (Request != NULL && Request->sessionId != 0UL) {
+        requestedSessionId = Request->sessionId;
+    }
+    else if (Request != NULL &&
+        (Request->flags & KSWORD_ARK_WIN32K_QUERY_FLAG_CURRENT_SESSION_ONLY) != 0UL) {
+        KSWORD_WIN32K_PS_GET_PROCESS_SESSION_ID_FN psGetProcessSessionId =
+            KswordARKWin32kResolvePsGetProcessSessionId();
+        if (psGetProcessSessionId != NULL) {
+            requestedSessionId = psGetProcessSessionId(PsGetCurrentProcess());
+        }
+    }
+
+    status = KswordARKWin32kTimerReferenceSessionProcess(
+        threadMap,
+        threadMapCount,
+        Request,
+        &requestedSessionId,
+        &sessionProcess);
+    if (!NT_SUCCESS(status) || sessionProcess == NULL) {
+        response->status = KSWORD_ARK_WIN32K_STATUS_READ_FAILED;
+        response->lastStatus = NT_SUCCESS(status) ? STATUS_NOT_FOUND : status;
+        response->missingCapabilityMask |= KSWORD_ARK_WIN32K_CAP_TIMER_HASH_EXPORT |
+            KSWORD_ARK_WIN32K_CAP_TIMER_ENUM;
+        KswordARKWin32kTimerSetDetail(
+            response->detail,
+            L"No live GUI process was available for the requested win32k session.");
+        goto Cleanup;
+    }
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL) {
+        response->status = KSWORD_ARK_WIN32K_STATUS_READ_FAILED;
+        response->lastStatus = STATUS_INVALID_DEVICE_STATE;
+        goto Cleanup;
+    }
+
+    RtlZeroMemory(attachState, sizeof(attachState));
+    KeStackAttachProcess((PVOID)sessionProcess, attachState);
+    attached = TRUE;
+
     timerHashTable = RtlFindExportedRoutineByName(
         baseEntry.ImageBase,
         "gTimerHashTable");
@@ -929,32 +1031,21 @@ Return Value:
     response->timerHashTable = (ULONG64)(ULONG_PTR)timerHashTable;
     response->capabilityMask = KSWORD_ARK_WIN32K_CAP_WIN32KBASE_LOADED |
         KSWORD_ARK_WIN32K_CAP_WIN32KFULL_LOADED |
+        KSWORD_ARK_WIN32K_CAP_THREADINFO_PUBLIC |
         KSWORD_ARK_WIN32K_CAP_TIMER_HASH_EXPORT |
         KSWORD_ARK_WIN32K_CAP_TIMER_LAYOUT |
         KSWORD_ARK_WIN32K_CAP_TIMER_ENUM;
-    response->status = KSWORD_ARK_WIN32K_STATUS_OK;
+    response->status = threadMapTruncated
+        ? KSWORD_ARK_WIN32K_STATUS_PARTIAL
+        : KSWORD_ARK_WIN32K_STATUS_OK;
+    response->lastStatus = threadMapTruncated
+        ? STATUS_BUFFER_OVERFLOW
+        : STATUS_SUCCESS;
     KswordARKWin32kTimerSetDetail(
         response->detail,
-        L"tagTIMER layout validated by PE identity and read-only hash traversal.");
-
-    status = KswordARKWin32kTimerBuildThreadMap(
-        &threadMap,
-        &threadMapCount,
-        &threadMapTruncated);
-    if (!NT_SUCCESS(status)) {
-        response->status = KSWORD_ARK_WIN32K_STATUS_PARTIAL;
-        response->lastStatus = status;
-        response->missingCapabilityMask |= KSWORD_ARK_WIN32K_CAP_THREADINFO_PUBLIC;
-        KswordARKWin32kTimerSetDetail(
-            response->detail,
-            L"gTimerHashTable is available, but public GUI thread mapping failed.");
-        goto Cleanup;
-    }
-    if (threadMapTruncated) {
-        response->status = KSWORD_ARK_WIN32K_STATUS_PARTIAL;
-        response->lastStatus = STATUS_BUFFER_OVERFLOW;
-    }
-    response->capabilityMask |= KSWORD_ARK_WIN32K_CAP_THREADINFO_PUBLIC;
+        layoutSelection.source == KSWORD_ARK_WIN32K_LAYOUT_SELECTION_EXACT_IDENTITY
+            ? L"tagTIMER layout matched the exact PE identity; gTimerHashTable is being read in the requested GUI session."
+            : L"The nearest previous tagTIMER layout and the current gTimerHashTable export are active in the requested GUI session; results may be partial.");
 
     seenTimers = (ULONG64*)KswordARKAllocateNonPagedPool(
         sizeof(*seenTimers) * KSWORD_ARK_WIN32K_TIMER_MAX_SEEN,
@@ -965,18 +1056,6 @@ Return Value:
         goto Cleanup;
     }
     RtlZeroMemory(seenTimers, sizeof(*seenTimers) * KSWORD_ARK_WIN32K_TIMER_MAX_SEEN);
-
-    if (Request != NULL && Request->sessionId != 0UL) {
-        requestedSessionId = Request->sessionId;
-    }
-    else if (Request != NULL &&
-        (Request->flags & KSWORD_ARK_WIN32K_QUERY_FLAG_CURRENT_SESSION_ONLY) != 0UL) {
-        KSWORD_WIN32K_PS_GET_PROCESS_SESSION_ID_FN psGetProcessSessionId =
-            KswordARKWin32kResolvePsGetProcessSessionId();
-        if (psGetProcessSessionId != NULL) {
-            requestedSessionId = psGetProcessSessionId(PsGetCurrentProcess());
-        }
-    }
 
     {
         KSWORD_ARK_WIN32K_TIMER_WALK_CONTEXT context;
@@ -991,15 +1070,23 @@ Return Value:
         context.SeenTimers = seenTimers;
 
         for (bucketIndex = 0UL;
-            bucketIndex < KSWORD_ARK_WIN32K_TIMER_BUCKET_COUNT && !context.Stop;
+            bucketIndex < response->layout.bucketCount && !context.Stop;
             ++bucketIndex) {
             ULONG64 listHeadAddress = (ULONG64)(ULONG_PTR)timerHashTable +
-                ((ULONG64)bucketIndex * (ULONG64)KSWORD_ARK_WIN32K_TIMER_BUCKET_STRIDE);
+                ((ULONG64)bucketIndex * (ULONG64)response->layout.bucketStride);
             KswordARKWin32kTimerWalkBucket(&context, listHeadAddress);
         }
     }
 
 Cleanup:
+    if (attached) {
+        KeUnstackDetachProcess(attachState);
+        attached = FALSE;
+    }
+    if (sessionProcess != NULL) {
+        ObDereferenceObject(sessionProcess);
+        sessionProcess = NULL;
+    }
     if (seenTimers != NULL) {
         ExFreePoolWithTag(seenTimers, KSWORD_ARK_WIN32K_TIMER_POOL_TAG);
     }
