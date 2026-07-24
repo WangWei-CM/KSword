@@ -10536,6 +10536,42 @@ std::wstring BuildCallbackModuleFileDetail(
     return detail.str();
 }
 
+// BuildDosPathMapping performs the bounded drive-to-device lookup away from
+// the UI thread. It returns display text and an optional plain mapping string
+// for the UI thread to place on the clipboard.
+std::wstring BuildDosPathMapping(const std::wstring& ntPath, std::wstring* clipboardText) {
+    std::vector<wchar_t> drives(32768, L'\0');
+    const DWORD chars = ::GetLogicalDriveStringsW(static_cast<DWORD>(drives.size()), drives.data());
+    std::wstring mappings;
+    for (wchar_t* cursor = drives.data(); chars != 0 && *cursor != L'\0'; cursor += std::wcslen(cursor) + 1) {
+        const std::wstring driveRoot(cursor);
+        if (driveRoot.size() < 2 || driveRoot[1] != L':') {
+            continue;
+        }
+        const std::wstring driveName = driveRoot.substr(0, 2);
+        std::vector<wchar_t> device(4096, L'\0');
+        if (::QueryDosDeviceW(driveName.c_str(), device.data(), static_cast<DWORD>(device.size())) == 0) {
+            continue;
+        }
+        const std::wstring devicePath(device.data());
+        if (devicePath.empty() || _wcsnicmp(ntPath.c_str(), devicePath.c_str(), devicePath.size()) != 0) {
+            continue;
+        }
+        if (!mappings.empty()) {
+            mappings += L"\r\n";
+        }
+        mappings += driveName + ntPath.substr(devicePath.size());
+    }
+
+    if (mappings.empty()) {
+        return L"路径: " + ntPath + L"\r\n未找到可用 DOS 路径映射。";
+    }
+    if (clipboardText) {
+        *clipboardText = mappings;
+    }
+    return L"路径: " + ntPath + L"\r\n已找到 DOS 路径映射（并已复制）:\r\n" + mappings;
+}
+
 // SetCallbackFileIoControlsEnabled serializes the import/export surface while a
 // filesystem task runs. Other callback views remain inspectable and the worker
 // result is discarded automatically if this page closes.
@@ -10572,7 +10608,9 @@ void KernelPage::StartCallbackFileIo(
                 ? L"正在后台导出文件监控事件…"
                 : operation == CallbackFileIoOperation::ExportResultTsv
                     ? L"正在后台导出内核结果 TSV…"
-                    : L"正在后台读取模块文件详细信息…";
+                    : operation == CallbackFileIoOperation::CallbackModuleDetail
+                        ? L"正在后台读取模块文件详细信息…"
+                        : L"正在后台映射 DOS 路径…";
     ::SetWindowTextW(statusText_, (std::wstring(L"状态：") + operationText).c_str());
     if (callbackOperation) {
         AppendCallbackAppLog(operationText);
@@ -10587,6 +10625,8 @@ void KernelPage::StartCallbackFileIo(
                 result.text = ReadWholeFileText(result.path, &result.errorText);
             } else if (operation == CallbackFileIoOperation::CallbackModuleDetail) {
                 result.text = BuildCallbackModuleFileDetail(result.path, text, &result.errorText);
+            } else if (operation == CallbackFileIoOperation::MapNtPath) {
+                result.text = BuildDosPathMapping(result.path, &result.clipboardText);
             } else if (!WriteWholeFileText(result.path, text, &result.errorText)) {
                 result.text.clear();
             }
@@ -10624,7 +10664,9 @@ void KernelPage::ApplyCallbackFileIoResult(CallbackFileIoResult result) {
                 ? L"导出文件事件"
                 : result.operation == CallbackFileIoOperation::ExportResultTsv
                     ? L"导出 TSV"
-                    : L"模块文件详细信息";
+                    : result.operation == CallbackFileIoOperation::CallbackModuleDetail
+                        ? L"模块文件详细信息"
+                        : L"DOS 路径映射";
     if (!result.errorText.empty()) {
         if (callbackOperation) {
             AppendCallbackAppLog(std::wstring(title) + L"失败: " + result.errorText);
@@ -10650,6 +10692,15 @@ void KernelPage::ApplyCallbackFileIoResult(CallbackFileIoResult result) {
     if (result.operation == CallbackFileIoOperation::CallbackModuleDetail) {
         ::SetWindowTextW(detailEdit_, result.text.c_str());
         ::SetWindowTextW(statusText_, L"状态：已显示模块文件详细信息。");
+        return;
+    }
+
+    if (result.operation == CallbackFileIoOperation::MapNtPath) {
+        if (!result.clipboardText.empty()) {
+            SetClipboardText(hwnd_, result.clipboardText);
+        }
+        ::SetWindowTextW(detailEdit_, result.text.c_str());
+        ::SetWindowTextW(statusText_, L"状态：DOS 路径映射完成。");
         return;
     }
 
@@ -12791,10 +12842,8 @@ void KernelPage::CopyRowsWithSameDirectory() {
 }
 
 void KernelPage::MapSelectedNtPathAsDosPaths() {
-    // MapSelectedNtPathAsDosPaths mirrors the original object namespace DOS path
-    // mapping helper. Input is a selected NT device path or symbolic-link
-    // target; processing enumerates QueryDosDeviceW names; output copies and
-    // displays matching DOS paths.
+    // MapSelectedNtPathAsDosPaths captures the selected NT path and delegates
+    // all drive/device queries to the background file-I/O task.
     const std::wstring ntPath = FirstSelectedRowField({
         L"Target",
         L"targetPath",
@@ -12808,38 +12857,7 @@ void KernelPage::MapSelectedNtPathAsDosPaths() {
         ::MessageBoxW(hwnd_, L"当前行不是 \\Device\\... NT 路径，无法映射 DOS 路径。", L"DOS 路径映射", MB_OK | MB_ICONINFORMATION);
         return;
     }
-
-    std::vector<wchar_t> drives(32768, L'\0');
-    const DWORD chars = ::GetLogicalDriveStringsW(static_cast<DWORD>(drives.size()), drives.data());
-    std::wstring result;
-    for (wchar_t* cursor = drives.data(); chars != 0 && *cursor != L'\0'; cursor += std::wcslen(cursor) + 1) {
-        std::wstring driveRoot(cursor);
-        if (driveRoot.size() < 2 || driveRoot[1] != L':') {
-            continue;
-        }
-        const std::wstring driveName = driveRoot.substr(0, 2);
-        std::vector<wchar_t> device(4096, L'\0');
-        if (::QueryDosDeviceW(driveName.c_str(), device.data(), static_cast<DWORD>(device.size())) == 0) {
-            continue;
-        }
-        const std::wstring devicePath(device.data());
-        if (devicePath.empty() || _wcsnicmp(ntPath.c_str(), devicePath.c_str(), devicePath.size()) != 0) {
-            continue;
-        }
-        std::wstring mapped = driveName + ntPath.substr(devicePath.size());
-        if (!result.empty()) {
-            result += L"\r\n";
-        }
-        result += mapped;
-    }
-    if (result.empty()) {
-        result = L"路径: " + ntPath + L"\r\n未找到可用 DOS 路径映射。";
-    } else {
-        SetClipboardText(hwnd_, result);
-        result = L"路径: " + ntPath + L"\r\n已找到 DOS 路径映射（并已复制）:\r\n" + result;
-    }
-    ::SetWindowTextW(detailEdit_, result.c_str());
-    ::SetWindowTextW(statusText_, L"状态：DOS 路径映射完成。");
+    StartCallbackFileIo(CallbackFileIoOperation::MapNtPath, ntPath);
 }
 
 std::wstring KernelPage::NormalizeCallbackModulePath(const std::wstring& modulePath) const {

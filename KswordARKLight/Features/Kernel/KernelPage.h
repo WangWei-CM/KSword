@@ -33,7 +33,8 @@ enum class CallbackFileIoOperation {
     ExportConfig,
     ExportFileMonitor,
     ExportResultTsv,
-    CallbackModuleDetail
+    CallbackModuleDetail,
+    MapNtPath
 };
 
 // CallbackFileIoResult is the immutable boundary for callback-rule files and
@@ -43,6 +44,7 @@ struct CallbackFileIoResult {
     CallbackFileIoOperation operation = CallbackFileIoOperation::ImportConfig;
     std::wstring path;
     std::wstring text;
+    std::wstring clipboardText;
     std::wstring errorText;
 };
 
