@@ -235,10 +235,18 @@ bool IsVisibleDevice(const HardwareViewState& state, int index) {
     return index >= 0 && static_cast<std::size_t>(index) < state.visibleIndexes.size() && state.visibleIndexes[static_cast<std::size_t>(index)];
 }
 
-// InsertTreeNode recursively inserts a device and its children. Inputs are state,
-// device index and parent HTREEITEM; processing stores the model index in lParam;
-// output is the inserted tree item, or nullptr when the index is invalid.
-HTREEITEM InsertTreeNode(HardwareViewState* state, int index, HTREEITEM parent) {
+// HasVisibleChildren reports whether a node has at least one child represented
+// by the current filter snapshot. It keeps empty-filter tree construction lazy.
+bool HasVisibleChildren(const HardwareViewState& state, const HardwareDeviceNode& node) {
+    return std::any_of(node.childIndices.begin(), node.childIndices.end(), [&state](const int childIndex) {
+        return IsVisibleDevice(state, childIndex);
+    });
+}
+
+// InsertTreeNode inserts one device node. When includeDescendants is false the
+// item exposes its child affordance but defers child materialization until the
+// user expands it; filtered trees request a complete visible branch instead.
+HTREEITEM InsertTreeNode(HardwareViewState* state, int index, HTREEITEM parent, const bool includeDescendants) {
     const HardwareDeviceNode* node = state ? state->model.deviceAt(index) : nullptr;
     if (!node || !IsVisibleDevice(*state, index)) {
         return nullptr;
@@ -247,15 +255,34 @@ HTREEITEM InsertTreeNode(HardwareViewState* state, int index, HTREEITEM parent) 
     TVINSERTSTRUCTW insert{};
     insert.hParent = parent;
     insert.hInsertAfter = TVI_LAST;
-    insert.item.mask = TVIF_TEXT | TVIF_PARAM;
+    insert.item.mask = TVIF_TEXT | TVIF_PARAM | TVIF_CHILDREN;
     const std::wstring title = CompactDeviceName(*node);
     insert.item.pszText = const_cast<LPWSTR>(title.c_str());
     insert.item.lParam = static_cast<LPARAM>(index);
+    insert.item.cChildren = HasVisibleChildren(*state, *node) ? 1 : 0;
     HTREEITEM item = TreeView_InsertItem(state->tree, &insert);
-    for (int childIndex : node->childIndices) {
-        InsertTreeNode(state, childIndex, item);
+    if (includeDescendants) {
+        for (const int childIndex : node->childIndices) {
+            InsertTreeNode(state, childIndex, item, true);
+        }
     }
     return item;
+}
+
+// PopulateTreeItemChildren materializes one expanded branch at most once.
+// Inputs are a tree item and its stable model index; processing only inserts
+// direct children so a large device inventory does not block initial rendering.
+void PopulateTreeItemChildren(HardwareViewState* state, HTREEITEM parent, const int index) {
+    if (!state || !parent || TreeView_GetChild(state->tree, parent) != nullptr) {
+        return;
+    }
+    const HardwareDeviceNode* node = state->model.deviceAt(index);
+    if (!node) {
+        return;
+    }
+    for (const int childIndex : node->childIndices) {
+        InsertTreeNode(state, childIndex, parent, false);
+    }
 }
 
 void AddDetailSnapshotToList(HardwareViewState* state, const HardwareDetailSnapshot& snapshot) {
@@ -343,20 +370,24 @@ void SelectFirstRoot(HardwareViewState* state) {
     }
 }
 
-// PopulateTree rebuilds the tree control from the model. Input is module state;
-// processing inserts only device-manager nodes and expands top-level roots; no
-// value is returned.
+// PopulateTree rebuilds the tree control from the immutable filtered snapshot.
+// Empty searches create roots only, while a non-empty local search exposes the
+// compact matching branch so both cases stay responsive with large inventories.
 void PopulateTree(HardwareViewState* state) {
     if (!state || !state->tree) {
         return;
     }
+    const bool filtered = !state->filterQuery.empty();
+    ::SendMessageW(state->tree, WM_SETREDRAW, FALSE, 0);
     TreeView_DeleteAllItems(state->tree);
-    for (int rootIndex : state->model.rootIndices()) {
-        HTREEITEM root = InsertTreeNode(state, rootIndex, TVI_ROOT);
-        if (root) {
+    for (const int rootIndex : state->model.rootIndices()) {
+        HTREEITEM root = InsertTreeNode(state, rootIndex, TVI_ROOT, filtered);
+        if (root && filtered) {
             TreeView_Expand(state->tree, root, TVE_EXPAND);
         }
     }
+    ::SendMessageW(state->tree, WM_SETREDRAW, TRUE, 0);
+    ::InvalidateRect(state->tree, nullptr, FALSE);
     SelectFirstRoot(state);
 }
 
@@ -405,6 +436,43 @@ HTREEITEM FindTreeItemByDeviceIndex(HWND tree, HTREEITEM item, int deviceIndex) 
     return nullptr;
 }
 
+// EnsureTreeItemVisible restores a stable selection after a tree rebuild. It
+// materializes only the selected node's ancestor chain for an unfiltered tree,
+// preserving the lazy-loading benefit while avoiding selection jumps.
+HTREEITEM EnsureTreeItemVisible(HardwareViewState& state, const int deviceIndex) {
+    if (!state.tree || !IsVisibleDevice(state, deviceIndex)) {
+        return nullptr;
+    }
+    std::vector<int> lineage;
+    int currentIndex = deviceIndex;
+    const std::size_t limit = state.model.devices().size();
+    while (currentIndex >= 0 && lineage.size() <= limit) {
+        const HardwareDeviceNode* node = state.model.deviceAt(currentIndex);
+        if (!node) {
+            return nullptr;
+        }
+        lineage.push_back(currentIndex);
+        currentIndex = node->parentIndex;
+    }
+    if (lineage.empty() || lineage.size() > limit) {
+        return nullptr;
+    }
+    std::reverse(lineage.begin(), lineage.end());
+    HTREEITEM item = FindTreeItemByDeviceIndex(state.tree, TreeView_GetRoot(state.tree), lineage.front());
+    if (!item) {
+        return nullptr;
+    }
+    for (std::size_t index = 1; index < lineage.size(); ++index) {
+        PopulateTreeItemChildren(&state, item, lineage[index - 1]);
+        TreeView_Expand(state.tree, item, TVE_EXPAND);
+        item = FindTreeItemByDeviceIndex(state.tree, TreeView_GetChild(state.tree, item), lineage[index]);
+        if (!item) {
+            return nullptr;
+        }
+    }
+    return item;
+}
+
 void ApplyHardwareFilter(HardwareViewState& state, HardwareFilterResult result) {
     if (result.generation != state.displayGeneration || result.query != state.filterQuery) {
         return;
@@ -419,7 +487,7 @@ void ApplyHardwareFilter(HardwareViewState& state, HardwareFilterResult result) 
         const auto& devices = state.model.devices();
         for (const HardwareDeviceNode& node : devices) {
             if (node.instanceId == result.selectedInstanceId) {
-                if (const HTREEITEM item = FindTreeItemByDeviceIndex(state.tree, TreeView_GetRoot(state.tree), node.index)) {
+                if (const HTREEITEM item = EnsureTreeItemVisible(state, node.index)) {
                     TreeView_SelectItem(state.tree, item);
                 }
                 break;
@@ -703,6 +771,13 @@ bool RegisterHardwareViewClass() {
             break;
         case WM_NOTIFY: {
             auto* notify = reinterpret_cast<NMHDR*>(lParam);
+            if (state && notify && notify->idFrom == kTreeId && notify->code == TVN_ITEMEXPANDINGW) {
+                const auto* expanding = reinterpret_cast<const NMTREEVIEWW*>(lParam);
+                if (expanding && expanding->action == TVE_EXPAND) {
+                    PopulateTreeItemChildren(state, expanding->itemNew.hItem, static_cast<int>(expanding->itemNew.lParam));
+                }
+                return 0;
+            }
             if (state && notify && notify->idFrom == kTreeId && notify->code == TVN_SELCHANGEDW) {
                 auto* change = reinterpret_cast<NMTREEVIEWW*>(lParam);
                 ShowDetail(state, static_cast<int>(change->itemNew.lParam));
