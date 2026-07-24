@@ -7,8 +7,8 @@ Module Name:
 Abstract:
 
     Read-only enumeration of tagEVENTHOOK objects through
-    win32kbase!gpWinEventHooks. The collector is version-gated by exact
-    win32kbase/win32kfull PE identities and never unhooks or changes a node.
+    win32kbase!gpWinEventHooks. The collector prefers exact PE identity and can
+    fall back to the nearest previous Windows layout. It never changes a node.
 
 Environment:
 
@@ -30,20 +30,59 @@ Environment:
 #define KSWORD_ARK_WIN32K_EVENT_INTERNAL_PUBLIC_MASK 0x0000001EUL
 #define KSWORD_ARK_WIN32K_EVENT_INTERNAL_IN_CONTEXT 0x00000008UL
 
-// 当前缓存中已由 _SetWinEventHook/DestroyEventHook 反汇编复核的布局。
-// 未命中同一 PE 身份时返回 UNSUPPORTED，避免猜读 tagEVENTHOOK。
-#define KSWORD_ARK_WIN32K_EVENT_BASE_TIMESTAMP 0x8FC48444UL
-#define KSWORD_ARK_WIN32K_EVENT_BASE_IMAGE_SIZE 0x002D6000UL
-#define KSWORD_ARK_WIN32K_EVENT_FULL_TIMESTAMP 0x83C73BE4UL
-#define KSWORD_ARK_WIN32K_EVENT_FULL_IMAGE_SIZE 0x003B4000UL
-
-typedef struct _KSWORD_ARK_WIN32K_EVENT_THREAD_MAP_ENTRY
+typedef struct _KSWORD_ARK_WIN32K_EVENT_PROFILE
 {
-    ULONG64 ThreadInfo;
-    ULONG ProcessId;
-    ULONG ThreadId;
-    ULONG SessionId;
-} KSWORD_ARK_WIN32K_EVENT_THREAD_MAP_ENTRY;
+    KSWORD_ARK_WIN32K_LAYOUT_PROFILE_IDENTITY identity;
+    KSWORD_ARK_WIN32K_EVENT_HOOK_LAYOUT layout;
+} KSWORD_ARK_WIN32K_EVENT_PROFILE;
+
+// 按 Windows 版本从旧到新维护；精确身份缺失时选择最近的上一个版本。
+static const KSWORD_ARK_WIN32K_EVENT_PROFILE g_KswordArkWin32kEventProfiles[] =
+{
+    {
+        // Windows 10 22H2 reports 19045 through the enablement package while
+        // win32k stays on the 19041 servicing branch.
+        { 10UL, 0UL, 19041UL, 6456UL,
+          0x8FC48444UL, 0x002D6000UL, 0x83C73BE4UL, 0x003B4000UL },
+        { KSWORD_ARK_WIN32K_EVENT_OBJECT_SIZE,
+          0x00UL, 0x10UL, 0x18UL, 0x20UL, 0x24UL, 0x28UL,
+          0x30UL, 0x38UL, 0x40UL, 0x48UL, 0x58UL,
+          KSWORD_ARK_WIN32K_EVENT_GLOBAL_RVA,
+          KSWORD_ARK_WIN32K_EVENT_HOOK_LAYOUT_SOURCE_UNKNOWN,
+          0x83C73BE4UL, 0x003B4000UL }
+    }
+};
+
+typedef KSWORD_ARK_WIN32K_GUI_THREAD_MAP_ENTRY
+    KSWORD_ARK_WIN32K_EVENT_THREAD_MAP_ENTRY;
+
+NTKERNELAPI
+VOID
+KeStackAttachProcess(
+    _Inout_ PVOID Process,
+    _Out_ PVOID ApcState
+    );
+
+NTKERNELAPI
+VOID
+KeUnstackDetachProcess(
+    _In_ PVOID ApcState
+    );
+
+NTKERNELAPI
+NTSTATUS
+PsLookupProcessByProcessId(
+    _In_ HANDLE ProcessId,
+    _Outptr_ PEPROCESS* Process
+    );
+
+NTSYSAPI
+PVOID
+NTAPI
+RtlFindExportedRoutineByName(
+    _In_ PVOID ImageBase,
+    _In_z_ PCSTR RoutineName
+    );
 
 static BOOLEAN
 KswordARKWin32kEventIsKernelAddress(
@@ -130,27 +169,17 @@ KswordARKWin32kEventSetDetail(
 static VOID
 KswordARKWin32kEventInitializeLayout(
     _Out_ KSWORD_ARK_WIN32K_EVENT_HOOK_LAYOUT* Layout,
-    _In_ ULONG FullTimeDateStamp,
-    _In_ ULONG FullImageSize
+    _In_ const KSWORD_ARK_WIN32K_EVENT_PROFILE* Profile,
+    _In_ ULONG Source
     )
 {
-    RtlZeroMemory(Layout, sizeof(*Layout));
-    Layout->objectSize = KSWORD_ARK_WIN32K_EVENT_OBJECT_SIZE;
-    Layout->handle = 0x00UL;
-    Layout->ownerThreadInfo = 0x10UL;
-    Layout->nextHook = 0x18UL;
-    Layout->eventMin = 0x20UL;
-    Layout->eventMax = 0x24UL;
-    Layout->internalFlags = 0x28UL;
-    Layout->targetProcessId = 0x30UL;
-    Layout->targetThreadId = 0x38UL;
-    Layout->callbackOffset = 0x40UL;
-    Layout->moduleAtom = 0x48UL;
-    Layout->timestamp = 0x58UL;
-    Layout->globalRva = KSWORD_ARK_WIN32K_EVENT_GLOBAL_RVA;
-    Layout->source = KSWORD_ARK_WIN32K_EVENT_HOOK_LAYOUT_SOURCE_VALIDATED_DISASSEMBLY;
-    Layout->timeDateStamp = FullTimeDateStamp;
-    Layout->imageSize = FullImageSize;
+    if (Layout == NULL || Profile == NULL) {
+        return;
+    }
+    *Layout = Profile->layout;
+    Layout->source = Source == KSWORD_ARK_WIN32K_LAYOUT_SELECTION_EXACT_IDENTITY
+        ? KSWORD_ARK_WIN32K_EVENT_HOOK_LAYOUT_SOURCE_VALIDATED_DISASSEMBLY
+        : KSWORD_ARK_WIN32K_EVENT_HOOK_LAYOUT_SOURCE_NEAREST_PREVIOUS;
 }
 
 static NTSTATUS
@@ -160,77 +189,81 @@ KswordARKWin32kEventBuildThreadMap(
     _Out_ BOOLEAN* TruncatedOut
     )
 {
-    KSWORD_WIN32K_PS_GET_NEXT_PROCESS_FN psGetNextProcess = NULL;
-    KSWORD_WIN32K_PS_GET_NEXT_PROCESS_THREAD_FN psGetNextProcessThread = NULL;
-    KSWORD_WIN32K_PS_GET_THREAD_WIN32_THREAD_FN psGetThreadWin32Thread = NULL;
-    KSWORD_WIN32K_PS_GET_PROCESS_SESSION_ID_FN psGetProcessSessionId = NULL;
-    KSWORD_ARK_WIN32K_EVENT_THREAD_MAP_ENTRY* map = NULL;
-    PEPROCESS processCursor = NULL;
-    ULONG count = 0UL;
-    BOOLEAN truncated = FALSE;
+    return KswordARKWin32kBuildGuiThreadMap(
+        KSWORD_ARK_WIN32K_EVENT_MAX_THREAD_MAP,
+        KSWORD_ARK_WIN32K_EVENT_POOL_TAG,
+        MapOut,
+        CountOut,
+        TruncatedOut);
+}
 
-    if (MapOut == NULL || CountOut == NULL || TruncatedOut == NULL) {
-        return STATUS_INVALID_PARAMETER;
+static NTSTATUS
+KswordARKWin32kEventReferenceSessionProcess(
+    _In_reads_(ThreadMapCount) const KSWORD_ARK_WIN32K_EVENT_THREAD_MAP_ENTRY* ThreadMap,
+    _In_ ULONG ThreadMapCount,
+    _In_opt_ const KSWORD_ARK_WIN32K_QUERY_REQUEST* Request,
+    _Inout_ ULONG* RequestedSessionId,
+    _Outptr_ PEPROCESS* ProcessOut
+    )
+{
+    ULONG preferredProcessId = Request != NULL ? Request->processId : 0UL;
+    ULONG pass = 0UL;
+
+    if (ThreadMap == NULL || ThreadMapCount == 0UL ||
+        RequestedSessionId == NULL || ProcessOut == NULL) {
+        return STATUS_NOT_FOUND;
     }
-    *MapOut = NULL;
-    *CountOut = 0UL;
-    *TruncatedOut = FALSE;
+    *ProcessOut = NULL;
 
-    map = (KSWORD_ARK_WIN32K_EVENT_THREAD_MAP_ENTRY*)KswordARKAllocateNonPagedPool(
-        sizeof(*map) * KSWORD_ARK_WIN32K_EVENT_MAX_THREAD_MAP,
-        KSWORD_ARK_WIN32K_EVENT_POOL_TAG);
-    if (map == NULL) {
-        return STATUS_INSUFFICIENT_RESOURCES;
-    }
-    RtlZeroMemory(map, sizeof(*map) * KSWORD_ARK_WIN32K_EVENT_MAX_THREAD_MAP);
+    for (pass = 0UL; pass < 4UL; ++pass) {
+        ULONG index = 0UL;
 
-    psGetNextProcess = KswordARKWin32kResolvePsGetNextProcess();
-    psGetNextProcessThread = KswordARKWin32kResolvePsGetNextProcessThread();
-    psGetThreadWin32Thread = KswordARKWin32kResolvePsGetThreadWin32Thread();
-    psGetProcessSessionId = KswordARKWin32kResolvePsGetProcessSessionId();
-    if (psGetNextProcess == NULL || psGetNextProcessThread == NULL ||
-        psGetThreadWin32Thread == NULL) {
-        ExFreePoolWithTag(map, KSWORD_ARK_WIN32K_EVENT_POOL_TAG);
-        return STATUS_PROCEDURE_NOT_FOUND;
-    }
+        for (index = 0UL; index < ThreadMapCount; ++index) {
+            const KSWORD_ARK_WIN32K_EVENT_THREAD_MAP_ENTRY* entry = &ThreadMap[index];
+            BOOLEAN candidate = FALSE;
+            PEPROCESS process = NULL;
+            NTSTATUS status = STATUS_SUCCESS;
 
-    processCursor = psGetNextProcess(NULL);
-    while (processCursor != NULL) {
-        PEPROCESS nextProcess = psGetNextProcess(processCursor);
-        PETHREAD threadCursor = NULL;
-        ULONG processId = HandleToULong(PsGetProcessId(processCursor));
-        ULONG sessionId = psGetProcessSessionId != NULL
-            ? psGetProcessSessionId(processCursor)
-            : 0UL;
-
-        threadCursor = psGetNextProcessThread(processCursor, NULL);
-        while (threadCursor != NULL) {
-            PETHREAD nextThread = psGetNextProcessThread(processCursor, threadCursor);
-            PVOID threadInfo = psGetThreadWin32Thread(threadCursor);
-
-            if (threadInfo != NULL) {
-                if (count >= KSWORD_ARK_WIN32K_EVENT_MAX_THREAD_MAP) {
-                    truncated = TRUE;
-                }
-                else {
-                    map[count].ThreadInfo = (ULONG64)(ULONG_PTR)threadInfo;
-                    map[count].ProcessId = processId;
-                    map[count].ThreadId = HandleToULong(PsGetThreadId(threadCursor));
-                    map[count].SessionId = sessionId;
-                    count += 1UL;
-                }
+            switch (pass) {
+            case 0UL:
+                candidate = preferredProcessId != 0UL &&
+                    entry->ProcessId == preferredProcessId &&
+                    (*RequestedSessionId == 0UL || entry->SessionId == *RequestedSessionId);
+                break;
+            case 1UL:
+                candidate = *RequestedSessionId != 0UL &&
+                    entry->SessionId == *RequestedSessionId;
+                break;
+            case 2UL:
+                candidate = *RequestedSessionId == 0UL && entry->SessionId != 0UL;
+                break;
+            default:
+                candidate = *RequestedSessionId == 0UL;
+                break;
             }
-            ObDereferenceObject(threadCursor);
-            threadCursor = nextThread;
+            if (!candidate) {
+                continue;
+            }
+
+            status = PsLookupProcessByProcessId(
+                ULongToHandle(entry->ProcessId),
+                &process);
+            if (NT_SUCCESS(status) && process != NULL) {
+                KSWORD_WIN32K_PS_GET_PROCESS_SESSION_ID_FN psGetProcessSessionId =
+                    KswordARKWin32kResolvePsGetProcessSessionId();
+
+                if (psGetProcessSessionId == NULL ||
+                    psGetProcessSessionId(process) == entry->SessionId) {
+                    *RequestedSessionId = entry->SessionId;
+                    *ProcessOut = process;
+                    return STATUS_SUCCESS;
+                }
+                ObDereferenceObject(process);
+            }
         }
-        ObDereferenceObject(processCursor);
-        processCursor = nextProcess;
     }
 
-    *MapOut = map;
-    *CountOut = count;
-    *TruncatedOut = truncated;
-    return STATUS_SUCCESS;
+    return STATUS_NOT_FOUND;
 }
 
 static BOOLEAN
@@ -321,9 +354,13 @@ KswordARKWin32kQueryEventHookSnapshot(
     KSW_HOOK_SYSTEM_MODULE_ENTRY fullEntry;
     IMAGE_NT_HEADERS baseHeaders;
     IMAGE_NT_HEADERS fullHeaders;
+    KSWORD_ARK_WIN32K_LAYOUT_SELECTION layoutSelection;
+    const KSWORD_ARK_WIN32K_EVENT_PROFILE* layoutProfile = NULL;
     KSWORD_ARK_WIN32K_EVENT_HOOK_SNAPSHOT_RESPONSE* response = NULL;
     KSWORD_ARK_WIN32K_EVENT_THREAD_MAP_ENTRY* threadMap = NULL;
     ULONG64* seenHooks = NULL;
+    PEPROCESS sessionProcess = NULL;
+    PVOID hookListExport = NULL;
     ULONG64 hookListPointer = 0ULL;
     ULONG64 currentHook = 0ULL;
     ULONG moduleInfoBytes = 0UL;
@@ -334,6 +371,8 @@ KswordARKWin32kQueryEventHookSnapshot(
     size_t headerSize = 0U;
     size_t entryCapacity = 0U;
     BOOLEAN threadMapTruncated = FALSE;
+    BOOLEAN attached = FALSE;
+    DECLSPEC_ALIGN(16) UCHAR attachState[128];
     NTSTATUS status = STATUS_SUCCESS;
 
     if (BytesWrittenOut == NULL || OutputBuffer == NULL) {
@@ -396,92 +435,55 @@ KswordARKWin32kQueryEventHookSnapshot(
     response->win32kbaseImageSize = baseHeaders.OptionalHeader.SizeOfImage;
     response->win32kfullTimeDateStamp = fullHeaders.FileHeader.TimeDateStamp;
     response->win32kfullImageSize = fullHeaders.OptionalHeader.SizeOfImage;
-    if (response->win32kbaseTimeDateStamp != KSWORD_ARK_WIN32K_EVENT_BASE_TIMESTAMP ||
-        response->win32kbaseImageSize != KSWORD_ARK_WIN32K_EVENT_BASE_IMAGE_SIZE ||
-        response->win32kfullTimeDateStamp != KSWORD_ARK_WIN32K_EVENT_FULL_TIMESTAMP ||
-        response->win32kfullImageSize != KSWORD_ARK_WIN32K_EVENT_FULL_IMAGE_SIZE) {
+    if (!KswordARKWin32kSelectLayoutProfile(
+            g_KswordArkWin32kEventProfiles,
+            RTL_NUMBER_OF(g_KswordArkWin32kEventProfiles),
+            sizeof(g_KswordArkWin32kEventProfiles[0]),
+            response->win32kbaseTimeDateStamp,
+            response->win32kbaseImageSize,
+            response->win32kfullTimeDateStamp,
+            response->win32kfullImageSize,
+            &layoutSelection)) {
         response->status = KSWORD_ARK_WIN32K_STATUS_UNSUPPORTED;
         response->missingCapabilityMask = KSWORD_ARK_WIN32K_CAP_EVENT_HOOK_LAYOUT |
             KSWORD_ARK_WIN32K_CAP_EVENT_HOOK_ENUM;
         response->lastStatus = STATUS_REVISION_MISMATCH;
         KswordARKWin32kEventSetDetail(
             response->detail,
-            L"Current win32k PE identity has no verified tagEVENTHOOK layout in the offset table.");
+            L"No exact or nearest-previous Windows tagEVENTHOOK profile is available.");
         goto Cleanup;
     }
+    layoutProfile = &g_KswordArkWin32kEventProfiles[layoutSelection.profileIndex];
 
     KswordARKWin32kEventInitializeLayout(
         &response->layout,
-        response->win32kfullTimeDateStamp,
-        response->win32kfullImageSize);
-    if ((ULONG64)KSWORD_ARK_WIN32K_EVENT_GLOBAL_RVA + sizeof(ULONG64) >
-        (ULONG64)response->win32kbaseImageSize) {
+        layoutProfile,
+        layoutSelection.source);
+    if (response->layout.objectSize == 0UL ||
+        response->layout.objectSize > KSWORD_ARK_WIN32K_EVENT_OBJECT_SIZE) {
         response->status = KSWORD_ARK_WIN32K_STATUS_UNSUPPORTED;
         response->missingCapabilityMask = KSWORD_ARK_WIN32K_CAP_EVENT_HOOK_GLOBAL |
             KSWORD_ARK_WIN32K_CAP_EVENT_HOOK_ENUM;
-        response->lastStatus = STATUS_INVALID_ADDRESS;
+        response->lastStatus = STATUS_INVALID_PARAMETER;
         KswordARKWin32kEventSetDetail(
             response->detail,
-            L"gpWinEventHooks RVA is outside the verified win32kbase image.");
+            L"Selected tagEVENTHOOK profile failed local object-size validation.");
         goto Cleanup;
     }
-
-    hookListPointer = (ULONG64)(ULONG_PTR)baseEntry.ImageBase +
-        (ULONG64)KSWORD_ARK_WIN32K_EVENT_GLOBAL_RVA;
-    response->hookListPointer = hookListPointer;
-    if (!KswordARKWin32kEventReadMemory(
-            hookListPointer,
-            &currentHook,
-            sizeof(currentHook))) {
-        response->status = KSWORD_ARK_WIN32K_STATUS_READ_FAILED;
-        response->missingCapabilityMask = KSWORD_ARK_WIN32K_CAP_EVENT_HOOK_GLOBAL |
-            KSWORD_ARK_WIN32K_CAP_EVENT_HOOK_ENUM;
-        response->lastStatus = STATUS_PARTIAL_COPY;
-        KswordARKWin32kEventSetDetail(
-            response->detail,
-            L"gpWinEventHooks pointer could not be read in the current session.");
-        goto Cleanup;
-    }
-    response->hookListHead = currentHook;
-    response->capabilityMask = KSWORD_ARK_WIN32K_CAP_WIN32KBASE_LOADED |
-        KSWORD_ARK_WIN32K_CAP_WIN32KFULL_LOADED |
-        KSWORD_ARK_WIN32K_CAP_EVENT_HOOK_GLOBAL |
-        KSWORD_ARK_WIN32K_CAP_EVENT_HOOK_LAYOUT |
-        KSWORD_ARK_WIN32K_CAP_EVENT_HOOK_ENUM;
-    response->status = KSWORD_ARK_WIN32K_STATUS_OK;
-    KswordARKWin32kEventSetDetail(
-        response->detail,
-        L"tagEVENTHOOK layout validated by PE identity; global chain is read-only and bounded.");
 
     status = KswordARKWin32kEventBuildThreadMap(
         &threadMap,
         &threadMapCount,
         &threadMapTruncated);
     if (!NT_SUCCESS(status)) {
-        response->status = KSWORD_ARK_WIN32K_STATUS_PARTIAL;
+        response->status = KSWORD_ARK_WIN32K_STATUS_READ_FAILED;
         response->lastStatus = status;
         response->missingCapabilityMask |= KSWORD_ARK_WIN32K_CAP_THREADINFO_PUBLIC;
         KswordARKWin32kEventSetDetail(
             response->detail,
-            L"Event hook chain is available, but owner ThreadInfo mapping failed.");
-    }
-    else {
-        response->capabilityMask |= KSWORD_ARK_WIN32K_CAP_THREADINFO_PUBLIC;
-        if (threadMapTruncated) {
-            response->status = KSWORD_ARK_WIN32K_STATUS_PARTIAL;
-            response->lastStatus = STATUS_BUFFER_OVERFLOW;
-        }
-    }
-
-    seenHooks = (ULONG64*)KswordARKAllocateNonPagedPool(
-        sizeof(*seenHooks) * KSWORD_ARK_WIN32K_EVENT_MAX_SEEN,
-        KSWORD_ARK_WIN32K_EVENT_POOL_TAG);
-    if (seenHooks == NULL) {
-        response->status = KSWORD_ARK_WIN32K_STATUS_PARTIAL;
-        response->lastStatus = STATUS_INSUFFICIENT_RESOURCES;
+            L"GUI thread mapping failed before the target win32k session could be attached.");
         goto Cleanup;
     }
-    RtlZeroMemory(seenHooks, sizeof(*seenHooks) * KSWORD_ARK_WIN32K_EVENT_MAX_SEEN);
 
     if (Request != NULL && Request->sessionId != 0UL) {
         requestedSessionId = Request->sessionId;
@@ -494,6 +496,97 @@ KswordARKWin32kQueryEventHookSnapshot(
             requestedSessionId = psGetProcessSessionId(PsGetCurrentProcess());
         }
     }
+
+    status = KswordARKWin32kEventReferenceSessionProcess(
+        threadMap,
+        threadMapCount,
+        Request,
+        &requestedSessionId,
+        &sessionProcess);
+    if (!NT_SUCCESS(status) || sessionProcess == NULL) {
+        response->status = KSWORD_ARK_WIN32K_STATUS_READ_FAILED;
+        response->lastStatus = NT_SUCCESS(status) ? STATUS_NOT_FOUND : status;
+        response->missingCapabilityMask |= KSWORD_ARK_WIN32K_CAP_EVENT_HOOK_GLOBAL |
+            KSWORD_ARK_WIN32K_CAP_EVENT_HOOK_ENUM;
+        KswordARKWin32kEventSetDetail(
+            response->detail,
+            L"No live GUI process was available for the requested win32k session.");
+        goto Cleanup;
+    }
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL) {
+        response->status = KSWORD_ARK_WIN32K_STATUS_READ_FAILED;
+        response->lastStatus = STATUS_INVALID_DEVICE_STATE;
+        goto Cleanup;
+    }
+
+    RtlZeroMemory(attachState, sizeof(attachState));
+    KeStackAttachProcess((PVOID)sessionProcess, attachState);
+    attached = TRUE;
+
+    hookListExport = RtlFindExportedRoutineByName(
+        baseEntry.ImageBase,
+        "gpWinEventHooks");
+    hookListPointer = (ULONG64)(ULONG_PTR)hookListExport;
+    if (hookListExport == NULL ||
+        !KswordARKWin32kEventIsKernelAddress(hookListPointer) ||
+        hookListPointer < (ULONG64)(ULONG_PTR)baseEntry.ImageBase ||
+        hookListPointer - (ULONG64)(ULONG_PTR)baseEntry.ImageBase > MAXULONG ||
+        hookListPointer - (ULONG64)(ULONG_PTR)baseEntry.ImageBase + sizeof(ULONG64) >
+            (ULONG64)response->win32kbaseImageSize) {
+        response->status = KSWORD_ARK_WIN32K_STATUS_UNSUPPORTED;
+        response->missingCapabilityMask = KSWORD_ARK_WIN32K_CAP_EVENT_HOOK_GLOBAL |
+            KSWORD_ARK_WIN32K_CAP_EVENT_HOOK_ENUM;
+        response->lastStatus = STATUS_PROCEDURE_NOT_FOUND;
+        KswordARKWin32kEventSetDetail(
+            response->detail,
+            L"win32kbase does not expose a valid gpWinEventHooks data export.");
+        goto Cleanup;
+    }
+    response->layout.globalRva = (ULONG)(hookListPointer -
+        (ULONG64)(ULONG_PTR)baseEntry.ImageBase);
+    response->hookListPointer = hookListPointer;
+    if (!KswordARKWin32kEventReadMemory(
+            hookListPointer,
+            &currentHook,
+            sizeof(currentHook))) {
+        response->status = KSWORD_ARK_WIN32K_STATUS_READ_FAILED;
+        response->missingCapabilityMask = KSWORD_ARK_WIN32K_CAP_EVENT_HOOK_GLOBAL |
+            KSWORD_ARK_WIN32K_CAP_EVENT_HOOK_ENUM;
+        response->lastStatus = STATUS_PARTIAL_COPY;
+        KswordARKWin32kEventSetDetail(
+            response->detail,
+            L"gpWinEventHooks could not be read after attaching the requested GUI session.");
+        goto Cleanup;
+    }
+
+    response->hookListHead = currentHook;
+    response->capabilityMask = KSWORD_ARK_WIN32K_CAP_WIN32KBASE_LOADED |
+        KSWORD_ARK_WIN32K_CAP_WIN32KFULL_LOADED |
+        KSWORD_ARK_WIN32K_CAP_THREADINFO_PUBLIC |
+        KSWORD_ARK_WIN32K_CAP_EVENT_HOOK_GLOBAL |
+        KSWORD_ARK_WIN32K_CAP_EVENT_HOOK_LAYOUT |
+        KSWORD_ARK_WIN32K_CAP_EVENT_HOOK_ENUM;
+    response->status = threadMapTruncated
+        ? KSWORD_ARK_WIN32K_STATUS_PARTIAL
+        : KSWORD_ARK_WIN32K_STATUS_OK;
+    response->lastStatus = threadMapTruncated
+        ? STATUS_BUFFER_OVERFLOW
+        : STATUS_SUCCESS;
+    KswordARKWin32kEventSetDetail(
+        response->detail,
+        layoutSelection.source == KSWORD_ARK_WIN32K_LAYOUT_SELECTION_EXACT_IDENTITY
+            ? L"tagEVENTHOOK layout matched the exact PE identity; gpWinEventHooks is being read in the requested GUI session."
+            : L"The nearest previous tagEVENTHOOK layout and the current gpWinEventHooks export are active in the requested GUI session; results may be partial.");
+
+    seenHooks = (ULONG64*)KswordARKAllocateNonPagedPool(
+        sizeof(*seenHooks) * KSWORD_ARK_WIN32K_EVENT_MAX_SEEN,
+        KSWORD_ARK_WIN32K_EVENT_POOL_TAG);
+    if (seenHooks == NULL) {
+        response->status = KSWORD_ARK_WIN32K_STATUS_PARTIAL;
+        response->lastStatus = STATUS_INSUFFICIENT_RESOURCES;
+        goto Cleanup;
+    }
+    RtlZeroMemory(seenHooks, sizeof(*seenHooks) * KSWORD_ARK_WIN32K_EVENT_MAX_SEEN);
 
     while (currentHook != 0ULL) {
         UCHAR objectBytes[KSWORD_ARK_WIN32K_EVENT_OBJECT_SIZE];
@@ -634,6 +727,14 @@ KswordARKWin32kQueryEventHookSnapshot(
     }
 
 Cleanup:
+    if (attached) {
+        KeUnstackDetachProcess(attachState);
+        attached = FALSE;
+    }
+    if (sessionProcess != NULL) {
+        ObDereferenceObject(sessionProcess);
+        sessionProcess = NULL;
+    }
     if (seenHooks != NULL) {
         ExFreePoolWithTag(seenHooks, KSWORD_ARK_WIN32K_EVENT_POOL_TAG);
     }

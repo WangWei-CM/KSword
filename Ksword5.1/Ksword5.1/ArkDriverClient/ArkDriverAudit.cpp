@@ -283,9 +283,19 @@ namespace ksword::ark
             const unsigned long maxEntries)
         {
             KSWORD_ARK_WIN32K_QUERY_REQUEST request{};
+            unsigned long effectiveSessionId = sessionId;
+            if (effectiveSessionId == 0UL &&
+                (flags & KSWORD_ARK_WIN32K_QUERY_FLAG_CURRENT_SESSION_ONLY) != 0UL)
+            {
+                DWORD currentSessionId = 0U;
+                if (::ProcessIdToSessionId(::GetCurrentProcessId(), &currentSessionId) != FALSE)
+                {
+                    effectiveSessionId = currentSessionId;
+                }
+            }
             request.version = KSWORD_ARK_WIN32K_PROTOCOL_VERSION;
             request.flags = flags;
-            request.sessionId = sessionId;
+            request.sessionId = effectiveSessionId;
             request.processId = processId;
             request.threadId = threadId;
             request.maxEntries = maxEntries;

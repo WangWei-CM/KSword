@@ -15,8 +15,73 @@ Environment:
 --*/
 
 #include "win32k_support.h"
+#include "../../platform/pool_compat.h"
 
 #include <ntstrsafe.h>
+
+#define KSWORD_ARK_WIN32K_SYSTEM_PROCESS_INFORMATION_CLASS 5UL
+#define KSWORD_ARK_WIN32K_PROCESS_SNAPSHOT_SLACK (64UL * 1024UL)
+#define KSWORD_ARK_WIN32K_PROCESS_SNAPSHOT_LIMIT (64UL * 1024UL * 1024UL)
+
+typedef struct _KSWORD_ARK_WIN32K_SYSTEM_THREAD_INFORMATION
+{
+    LARGE_INTEGER KernelTime;
+    LARGE_INTEGER UserTime;
+    LARGE_INTEGER CreateTime;
+    ULONG WaitTime;
+    PVOID StartAddress;
+    CLIENT_ID ClientId;
+    KPRIORITY Priority;
+    LONG BasePriority;
+    ULONG ContextSwitches;
+    ULONG ThreadState;
+    ULONG WaitReason;
+} KSWORD_ARK_WIN32K_SYSTEM_THREAD_INFORMATION;
+
+typedef struct _KSWORD_ARK_WIN32K_SYSTEM_PROCESS_INFORMATION
+{
+    ULONG NextEntryOffset;
+    ULONG NumberOfThreads;
+    UCHAR Reserved1[48];
+    UNICODE_STRING ImageName;
+    KPRIORITY BasePriority;
+    HANDLE UniqueProcessId;
+    PVOID Reserved2;
+    ULONG HandleCount;
+    ULONG SessionId;
+    PVOID Reserved3;
+    SIZE_T PeakVirtualSize;
+    SIZE_T VirtualSize;
+    ULONG Reserved4;
+    SIZE_T PeakWorkingSetSize;
+    SIZE_T WorkingSetSize;
+    PVOID Reserved5;
+    SIZE_T QuotaPagedPoolUsage;
+    PVOID Reserved6;
+    SIZE_T QuotaNonPagedPoolUsage;
+    SIZE_T PagefileUsage;
+    SIZE_T PeakPagefileUsage;
+    SIZE_T PrivatePageCount;
+    LARGE_INTEGER Reserved7[6];
+    KSWORD_ARK_WIN32K_SYSTEM_THREAD_INFORMATION Threads[1];
+} KSWORD_ARK_WIN32K_SYSTEM_PROCESS_INFORMATION;
+
+NTSYSAPI
+NTSTATUS
+NTAPI
+ZwQuerySystemInformation(
+    _In_ ULONG SystemInformationClass,
+    _Out_writes_bytes_opt_(SystemInformationLength) PVOID SystemInformation,
+    _In_ ULONG SystemInformationLength,
+    _Out_opt_ PULONG ReturnLength
+    );
+
+NTKERNELAPI
+NTSTATUS
+PsLookupThreadByThreadId(
+    _In_ HANDLE ThreadId,
+    _Outptr_ PETHREAD* Thread
+    );
 
 NTSYSAPI
 PVOID
@@ -25,6 +90,177 @@ RtlFindExportedRoutineByName(
     _In_ PVOID ImageBase,
     _In_z_ PCSTR RoutineName
     );
+
+static BOOLEAN
+KswordARKWin32kQueryWindowsRevision(
+    _Out_ ULONG* RevisionOut
+    )
+{
+    UNICODE_STRING keyName;
+    UNICODE_STRING valueName;
+    OBJECT_ATTRIBUTES attributes;
+    HANDLE keyHandle = NULL;
+    UCHAR valueBuffer[sizeof(KEY_VALUE_PARTIAL_INFORMATION) + sizeof(ULONG)] = { 0 };
+    PKEY_VALUE_PARTIAL_INFORMATION valueInfo =
+        (PKEY_VALUE_PARTIAL_INFORMATION)valueBuffer;
+    ULONG resultLength = 0UL;
+    ULONG revision = 0UL;
+    NTSTATUS status = STATUS_SUCCESS;
+
+    if (RevisionOut == NULL || KeGetCurrentIrql() != PASSIVE_LEVEL) {
+        return FALSE;
+    }
+    *RevisionOut = 0UL;
+
+    RtlInitUnicodeString(
+        &keyName,
+        L"\\Registry\\Machine\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion");
+    RtlInitUnicodeString(&valueName, L"UBR");
+    InitializeObjectAttributes(
+        &attributes,
+        &keyName,
+        OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE,
+        NULL,
+        NULL);
+    status = ZwOpenKey(&keyHandle, KEY_QUERY_VALUE, &attributes);
+    if (!NT_SUCCESS(status)) {
+        return FALSE;
+    }
+
+    status = ZwQueryValueKey(
+        keyHandle,
+        &valueName,
+        KeyValuePartialInformation,
+        valueBuffer,
+        sizeof(valueBuffer),
+        &resultLength);
+    ZwClose(keyHandle);
+    if (!NT_SUCCESS(status) ||
+        resultLength < FIELD_OFFSET(KEY_VALUE_PARTIAL_INFORMATION, Data) + sizeof(ULONG) ||
+        valueInfo->Type != REG_DWORD ||
+        valueInfo->DataLength < sizeof(ULONG)) {
+        return FALSE;
+    }
+
+    RtlCopyMemory(&revision, valueInfo->Data, sizeof(revision));
+    *RevisionOut = revision;
+    return TRUE;
+}
+
+static LONG
+KswordARKWin32kCompareProfileVersions(
+    _In_ const KSWORD_ARK_WIN32K_LAYOUT_PROFILE_IDENTITY* Left,
+    _In_ const KSWORD_ARK_WIN32K_LAYOUT_PROFILE_IDENTITY* Right
+    )
+{
+#define KSW_COMPARE_PROFILE_FIELD(FieldName) \
+    if (Left->FieldName < Right->FieldName) { return -1; } \
+    if (Left->FieldName > Right->FieldName) { return 1; }
+    KSW_COMPARE_PROFILE_FIELD(windowsMajorVersion);
+    KSW_COMPARE_PROFILE_FIELD(windowsMinorVersion);
+    KSW_COMPARE_PROFILE_FIELD(windowsBuildNumber);
+    KSW_COMPARE_PROFILE_FIELD(windowsRevision);
+#undef KSW_COMPARE_PROFILE_FIELD
+    return 0;
+}
+
+BOOLEAN
+KswordARKWin32kSelectLayoutProfile(
+    _In_reads_bytes_(ProfileCount * ProfileStride) const VOID* ProfileTable,
+    _In_ ULONG ProfileCount,
+    _In_ SIZE_T ProfileStride,
+    _In_ ULONG CurrentWin32kbaseTimeDateStamp,
+    _In_ ULONG CurrentWin32kbaseImageSize,
+    _In_ ULONG CurrentWin32kfullTimeDateStamp,
+    _In_ ULONG CurrentWin32kfullImageSize,
+    _Out_ KSWORD_ARK_WIN32K_LAYOUT_SELECTION* Selection
+    )
+/*++
+
+Routine Description:
+
+    Select an exact Win32k PE layout first. If no exact identity exists, use
+    the newest profile whose Windows version is not newer than the running
+    system. PE timestamps are deliberately not ordered because modern Windows
+    images use reproducible-build hashes rather than chronological timestamps.
+
+--*/
+{
+    const UCHAR* profileBytes = (const UCHAR*)ProfileTable;
+    KSWORD_ARK_WIN32K_LAYOUT_PROFILE_IDENTITY currentVersion;
+    const KSWORD_ARK_WIN32K_LAYOUT_PROFILE_IDENTITY* bestProfile = NULL;
+    ULONG bestIndex = 0UL;
+    ULONG index = 0UL;
+
+    if (ProfileTable == NULL || ProfileCount == 0UL ||
+        ProfileStride < sizeof(KSWORD_ARK_WIN32K_LAYOUT_PROFILE_IDENTITY) ||
+        Selection == NULL) {
+        return FALSE;
+    }
+    RtlZeroMemory(Selection, sizeof(*Selection));
+
+    for (index = 0UL; index < ProfileCount; ++index) {
+        const KSWORD_ARK_WIN32K_LAYOUT_PROFILE_IDENTITY* profile =
+            (const KSWORD_ARK_WIN32K_LAYOUT_PROFILE_IDENTITY*)(profileBytes +
+                ((SIZE_T)index * ProfileStride));
+        if (profile->win32kbaseTimeDateStamp == CurrentWin32kbaseTimeDateStamp &&
+            profile->win32kbaseImageSize == CurrentWin32kbaseImageSize &&
+            profile->win32kfullTimeDateStamp == CurrentWin32kfullTimeDateStamp &&
+            profile->win32kfullImageSize == CurrentWin32kfullImageSize) {
+            Selection->profileIndex = index;
+            Selection->source = KSWORD_ARK_WIN32K_LAYOUT_SELECTION_EXACT_IDENTITY;
+            Selection->selectedIdentity = *profile;
+            (VOID)PsGetVersion(
+                &Selection->currentWindowsMajorVersion,
+                &Selection->currentWindowsMinorVersion,
+                &Selection->currentWindowsBuildNumber,
+                NULL);
+            (VOID)KswordARKWin32kQueryWindowsRevision(
+                &Selection->currentWindowsRevision);
+            return TRUE;
+        }
+    }
+
+    RtlZeroMemory(&currentVersion, sizeof(currentVersion));
+    (VOID)PsGetVersion(
+        &currentVersion.windowsMajorVersion,
+        &currentVersion.windowsMinorVersion,
+        &currentVersion.windowsBuildNumber,
+        NULL);
+    if (!KswordARKWin32kQueryWindowsRevision(&currentVersion.windowsRevision)) {
+        currentVersion.windowsRevision = MAXULONG;
+    }
+    if (currentVersion.windowsMajorVersion == 0UL ||
+        currentVersion.windowsBuildNumber == 0UL) {
+        return FALSE;
+    }
+
+    for (index = 0UL; index < ProfileCount; ++index) {
+        const KSWORD_ARK_WIN32K_LAYOUT_PROFILE_IDENTITY* profile =
+            (const KSWORD_ARK_WIN32K_LAYOUT_PROFILE_IDENTITY*)(profileBytes +
+                ((SIZE_T)index * ProfileStride));
+        if (KswordARKWin32kCompareProfileVersions(profile, &currentVersion) > 0) {
+            continue;
+        }
+        if (bestProfile == NULL ||
+            KswordARKWin32kCompareProfileVersions(profile, bestProfile) >= 0) {
+            bestProfile = profile;
+            bestIndex = index;
+        }
+    }
+    if (bestProfile == NULL) {
+        return FALSE;
+    }
+
+    Selection->profileIndex = bestIndex;
+    Selection->source = KSWORD_ARK_WIN32K_LAYOUT_SELECTION_NEAREST_PREVIOUS;
+    Selection->currentWindowsMajorVersion = currentVersion.windowsMajorVersion;
+    Selection->currentWindowsMinorVersion = currentVersion.windowsMinorVersion;
+    Selection->currentWindowsBuildNumber = currentVersion.windowsBuildNumber;
+    Selection->currentWindowsRevision = currentVersion.windowsRevision;
+    Selection->selectedIdentity = *bestProfile;
+    return TRUE;
+}
 
 VOID
 KswordARKWin32kInitializeOffsets(
@@ -221,6 +457,252 @@ Return Value:
 
     RtlInitUnicodeString(&routineName, L"PsGetProcessSessionId");
     return (KSWORD_WIN32K_PS_GET_PROCESS_SESSION_ID_FN)MmGetSystemRoutineAddress(&routineName);
+}
+
+static NTSTATUS
+KswordARKWin32kCaptureProcessSnapshot(
+    _Outptr_result_bytebuffer_(*SnapshotBytesOut) PVOID* SnapshotOut,
+    _Out_ ULONG* SnapshotBytesOut
+    )
+{
+    PVOID snapshot = NULL;
+    ULONG requiredBytes = 0UL;
+    ULONG allocationBytes = 0UL;
+    ULONG returnedBytes = 0UL;
+    ULONG attempt = 0UL;
+    NTSTATUS status = STATUS_SUCCESS;
+
+    if (SnapshotOut == NULL || SnapshotBytesOut == NULL ||
+        KeGetCurrentIrql() != PASSIVE_LEVEL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    *SnapshotOut = NULL;
+    *SnapshotBytesOut = 0UL;
+
+    status = ZwQuerySystemInformation(
+        KSWORD_ARK_WIN32K_SYSTEM_PROCESS_INFORMATION_CLASS,
+        NULL,
+        0UL,
+        &requiredBytes);
+    if (status != STATUS_INFO_LENGTH_MISMATCH &&
+        status != STATUS_BUFFER_TOO_SMALL &&
+        !NT_SUCCESS(status)) {
+        return status;
+    }
+
+    for (attempt = 0UL; attempt < 3UL; ++attempt) {
+        if (requiredBytes < sizeof(KSWORD_ARK_WIN32K_SYSTEM_PROCESS_INFORMATION)) {
+            requiredBytes = 256UL * 1024UL;
+        }
+        if (requiredBytes > KSWORD_ARK_WIN32K_PROCESS_SNAPSHOT_LIMIT ||
+            requiredBytes > MAXULONG - KSWORD_ARK_WIN32K_PROCESS_SNAPSHOT_SLACK) {
+            return STATUS_INSUFFICIENT_RESOURCES;
+        }
+        allocationBytes = requiredBytes + KSWORD_ARK_WIN32K_PROCESS_SNAPSHOT_SLACK;
+        snapshot = KswordARKAllocateNonPagedPool(
+            allocationBytes,
+            'sWkW');
+        if (snapshot == NULL) {
+            return STATUS_INSUFFICIENT_RESOURCES;
+        }
+        RtlZeroMemory(snapshot, allocationBytes);
+
+        returnedBytes = 0UL;
+        status = ZwQuerySystemInformation(
+            KSWORD_ARK_WIN32K_SYSTEM_PROCESS_INFORMATION_CLASS,
+            snapshot,
+            allocationBytes,
+            &returnedBytes);
+        if (NT_SUCCESS(status)) {
+            if (returnedBytes == 0UL || returnedBytes > allocationBytes) {
+                returnedBytes = allocationBytes;
+            }
+            *SnapshotOut = snapshot;
+            *SnapshotBytesOut = returnedBytes;
+            return STATUS_SUCCESS;
+        }
+
+        ExFreePoolWithTag(snapshot, 'sWkW');
+        snapshot = NULL;
+        if (status != STATUS_INFO_LENGTH_MISMATCH &&
+            status != STATUS_BUFFER_TOO_SMALL) {
+            return status;
+        }
+        requiredBytes = returnedBytes > allocationBytes
+            ? returnedBytes
+            : allocationBytes;
+    }
+
+    return status;
+}
+
+NTSTATUS
+KswordARKWin32kBuildGuiThreadMap(
+    _In_ ULONG MaximumEntries,
+    _In_ ULONG PoolTag,
+    _Outptr_result_buffer_(*CountOut) KSWORD_ARK_WIN32K_GUI_THREAD_MAP_ENTRY** MapOut,
+    _Out_ ULONG* CountOut,
+    _Out_ BOOLEAN* TruncatedOut
+    )
+/*++
+
+Routine Description:
+
+    Build a bounded map from PsGetThreadWin32Thread values to PID, TID and
+    Session ID. Older kernels with public process walkers use those walkers.
+    Current kernels that do not export PsGetNextProcess fall back to the stable
+    SystemProcessInformation PID/TID snapshot and PsLookupThreadByThreadId.
+
+--*/
+{
+    KSWORD_WIN32K_PS_GET_NEXT_PROCESS_FN psGetNextProcess = NULL;
+    KSWORD_WIN32K_PS_GET_NEXT_PROCESS_THREAD_FN psGetNextProcessThread = NULL;
+    KSWORD_WIN32K_PS_GET_THREAD_WIN32_THREAD_FN psGetThreadWin32Thread = NULL;
+    KSWORD_WIN32K_PS_GET_PROCESS_SESSION_ID_FN psGetProcessSessionId = NULL;
+    KSWORD_ARK_WIN32K_GUI_THREAD_MAP_ENTRY* map = NULL;
+    ULONG count = 0UL;
+    BOOLEAN truncated = FALSE;
+
+    if (MapOut == NULL || CountOut == NULL || TruncatedOut == NULL ||
+        MaximumEntries == 0UL ||
+        MaximumEntries > MAXULONG / sizeof(*map) ||
+        KeGetCurrentIrql() != PASSIVE_LEVEL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    *MapOut = NULL;
+    *CountOut = 0UL;
+    *TruncatedOut = FALSE;
+
+    map = (KSWORD_ARK_WIN32K_GUI_THREAD_MAP_ENTRY*)KswordARKAllocateNonPagedPool(
+        sizeof(*map) * MaximumEntries,
+        PoolTag);
+    if (map == NULL) {
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+    RtlZeroMemory(map, sizeof(*map) * MaximumEntries);
+
+    psGetNextProcess = KswordARKWin32kResolvePsGetNextProcess();
+    psGetNextProcessThread = KswordARKWin32kResolvePsGetNextProcessThread();
+    psGetThreadWin32Thread = KswordARKWin32kResolvePsGetThreadWin32Thread();
+    psGetProcessSessionId = KswordARKWin32kResolvePsGetProcessSessionId();
+    if (psGetThreadWin32Thread == NULL) {
+        ExFreePoolWithTag(map, PoolTag);
+        return STATUS_PROCEDURE_NOT_FOUND;
+    }
+
+    if (psGetNextProcess != NULL && psGetNextProcessThread != NULL) {
+        PEPROCESS processCursor = psGetNextProcess(NULL);
+
+        while (processCursor != NULL) {
+            PEPROCESS nextProcess = psGetNextProcess(processCursor);
+            PETHREAD threadCursor = psGetNextProcessThread(processCursor, NULL);
+            ULONG processId = HandleToULong(PsGetProcessId(processCursor));
+            ULONG sessionId = psGetProcessSessionId != NULL
+                ? psGetProcessSessionId(processCursor)
+                : 0UL;
+
+            while (threadCursor != NULL) {
+                PETHREAD nextThread = psGetNextProcessThread(processCursor, threadCursor);
+                PVOID threadInfo = psGetThreadWin32Thread(threadCursor);
+
+                if (threadInfo != NULL) {
+                    if (count >= MaximumEntries) {
+                        truncated = TRUE;
+                    }
+                    else {
+                        map[count].ThreadInfo = (ULONG64)(ULONG_PTR)threadInfo;
+                        map[count].ProcessId = processId;
+                        map[count].ThreadId = HandleToULong(PsGetThreadId(threadCursor));
+                        map[count].SessionId = sessionId;
+                        count += 1UL;
+                    }
+                }
+                ObDereferenceObject(threadCursor);
+                threadCursor = nextThread;
+            }
+            ObDereferenceObject(processCursor);
+            processCursor = nextProcess;
+        }
+    }
+    else {
+        PVOID snapshot = NULL;
+        ULONG snapshotBytes = 0UL;
+        ULONG processOffset = 0UL;
+        NTSTATUS status = KswordARKWin32kCaptureProcessSnapshot(
+            &snapshot,
+            &snapshotBytes);
+
+        if (!NT_SUCCESS(status)) {
+            ExFreePoolWithTag(map, PoolTag);
+            return status;
+        }
+
+#if defined(_WIN64)
+        C_ASSERT(FIELD_OFFSET(KSWORD_ARK_WIN32K_SYSTEM_PROCESS_INFORMATION, Threads) == 0x100);
+        C_ASSERT(sizeof(KSWORD_ARK_WIN32K_SYSTEM_THREAD_INFORMATION) == 0x50);
+#endif
+        while (processOffset < snapshotBytes) {
+            KSWORD_ARK_WIN32K_SYSTEM_PROCESS_INFORMATION* processInfo =
+                (KSWORD_ARK_WIN32K_SYSTEM_PROCESS_INFORMATION*)((PUCHAR)snapshot + processOffset);
+            ULONG remainingBytes = snapshotBytes - processOffset;
+            ULONG entryBytes = processInfo->NextEntryOffset != 0UL
+                ? processInfo->NextEntryOffset
+                : remainingBytes;
+            ULONG threadCapacity = 0UL;
+            ULONG threadCount = 0UL;
+            ULONG threadIndex = 0UL;
+
+            if (remainingBytes < (ULONG)FIELD_OFFSET(KSWORD_ARK_WIN32K_SYSTEM_PROCESS_INFORMATION, Threads) ||
+                entryBytes < (ULONG)FIELD_OFFSET(KSWORD_ARK_WIN32K_SYSTEM_PROCESS_INFORMATION, Threads) ||
+                entryBytes > remainingBytes) {
+                truncated = TRUE;
+                break;
+            }
+            threadCapacity = (entryBytes -
+                FIELD_OFFSET(KSWORD_ARK_WIN32K_SYSTEM_PROCESS_INFORMATION, Threads)) /
+                sizeof(KSWORD_ARK_WIN32K_SYSTEM_THREAD_INFORMATION);
+            threadCount = processInfo->NumberOfThreads;
+            if (threadCount > threadCapacity) {
+                threadCount = threadCapacity;
+                truncated = TRUE;
+            }
+
+            for (threadIndex = 0UL; threadIndex < threadCount; ++threadIndex) {
+                PETHREAD threadObject = NULL;
+                HANDLE threadId = processInfo->Threads[threadIndex].ClientId.UniqueThread;
+
+                status = PsLookupThreadByThreadId(threadId, &threadObject);
+                if (NT_SUCCESS(status) && threadObject != NULL) {
+                    PVOID threadInfo = psGetThreadWin32Thread(threadObject);
+
+                    if (threadInfo != NULL) {
+                        if (count >= MaximumEntries) {
+                            truncated = TRUE;
+                        }
+                        else {
+                            map[count].ThreadInfo = (ULONG64)(ULONG_PTR)threadInfo;
+                            map[count].ProcessId = HandleToULong(processInfo->UniqueProcessId);
+                            map[count].ThreadId = HandleToULong(threadId);
+                            map[count].SessionId = processInfo->SessionId;
+                            count += 1UL;
+                        }
+                    }
+                    ObDereferenceObject(threadObject);
+                }
+            }
+
+            if (processInfo->NextEntryOffset == 0UL) {
+                break;
+            }
+            processOffset += processInfo->NextEntryOffset;
+        }
+        ExFreePoolWithTag(snapshot, 'sWkW');
+    }
+
+    *MapOut = map;
+    *CountOut = count;
+    *TruncatedOut = truncated;
+    return STATUS_SUCCESS;
 }
 
 BOOLEAN

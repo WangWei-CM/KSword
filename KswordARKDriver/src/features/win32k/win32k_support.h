@@ -21,6 +21,55 @@ typedef ULONG(NTAPI* KSWORD_WIN32K_PS_GET_PROCESS_SESSION_ID_FN)(
     _In_ PEPROCESS Process
     );
 
+typedef struct _KSWORD_ARK_WIN32K_GUI_THREAD_MAP_ENTRY
+{
+    ULONG64 ThreadInfo;
+    ULONG ProcessId;
+    ULONG ThreadId;
+    ULONG SessionId;
+} KSWORD_ARK_WIN32K_GUI_THREAD_MAP_ENTRY;
+
+// 每个私有 Win32k 布局表项必须把该身份结构放在首字段。
+// Windows 版本用于“最近的上一个版本”排序，PE 身份仍用于精确匹配。
+typedef struct _KSWORD_ARK_WIN32K_LAYOUT_PROFILE_IDENTITY
+{
+    ULONG windowsMajorVersion;
+    ULONG windowsMinorVersion;
+    ULONG windowsBuildNumber;
+    ULONG windowsRevision;
+    ULONG win32kbaseTimeDateStamp;
+    ULONG win32kbaseImageSize;
+    ULONG win32kfullTimeDateStamp;
+    ULONG win32kfullImageSize;
+} KSWORD_ARK_WIN32K_LAYOUT_PROFILE_IDENTITY;
+
+typedef struct _KSWORD_ARK_WIN32K_LAYOUT_SELECTION
+{
+    ULONG profileIndex;
+    ULONG source;
+    ULONG currentWindowsMajorVersion;
+    ULONG currentWindowsMinorVersion;
+    ULONG currentWindowsBuildNumber;
+    ULONG currentWindowsRevision;
+    KSWORD_ARK_WIN32K_LAYOUT_PROFILE_IDENTITY selectedIdentity;
+} KSWORD_ARK_WIN32K_LAYOUT_SELECTION;
+
+#define KSWORD_ARK_WIN32K_LAYOUT_SELECTION_NONE             0UL
+#define KSWORD_ARK_WIN32K_LAYOUT_SELECTION_EXACT_IDENTITY   1UL
+#define KSWORD_ARK_WIN32K_LAYOUT_SELECTION_NEAREST_PREVIOUS 2UL
+
+BOOLEAN
+KswordARKWin32kSelectLayoutProfile(
+    _In_reads_bytes_(ProfileCount * ProfileStride) const VOID* ProfileTable,
+    _In_ ULONG ProfileCount,
+    _In_ SIZE_T ProfileStride,
+    _In_ ULONG CurrentWin32kbaseTimeDateStamp,
+    _In_ ULONG CurrentWin32kbaseImageSize,
+    _In_ ULONG CurrentWin32kfullTimeDateStamp,
+    _In_ ULONG CurrentWin32kfullImageSize,
+    _Out_ KSWORD_ARK_WIN32K_LAYOUT_SELECTION* Selection
+    );
+
 VOID
 KswordARKWin32kInitializeOffsets(
     _Out_ KSWORD_ARK_WIN32K_FIELD_OFFSETS* Offsets
@@ -56,6 +105,15 @@ KswordARKWin32kResolvePsGetThreadWin32Thread(
 KSWORD_WIN32K_PS_GET_PROCESS_SESSION_ID_FN
 KswordARKWin32kResolvePsGetProcessSessionId(
     VOID
+    );
+
+NTSTATUS
+KswordARKWin32kBuildGuiThreadMap(
+    _In_ ULONG MaximumEntries,
+    _In_ ULONG PoolTag,
+    _Outptr_result_buffer_(*CountOut) KSWORD_ARK_WIN32K_GUI_THREAD_MAP_ENTRY** MapOut,
+    _Out_ ULONG* CountOut,
+    _Out_ BOOLEAN* TruncatedOut
     );
 
 BOOLEAN
