@@ -5,6 +5,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -37,9 +38,15 @@ public:
 
     bool create(HWND parent, int id, int x, int y, int width, int height, DWORD extraStyle = 0);
     HWND hwnd() const noexcept;
+    // detach releases only the transient HWND association. The immutable row
+    // snapshot is kept so a lazily recreated dock page can install it again.
+    void detach() noexcept;
     bool addColumns(const std::vector<ListViewColumn>& columns);
 
     void setRows(std::vector<VirtualListRow> rows);
+    // setSharedRows accepts a frozen shared snapshot without copying its strings on
+    // the UI thread. The caller must never mutate the vector after hand-off.
+    void setSharedRows(std::shared_ptr<const std::vector<VirtualListRow>> rows);
     const std::vector<VirtualListRow>& rows() const noexcept;
     const std::vector<std::size_t>& visibleIndexes() const noexcept;
     void setVisibleIndexes(std::vector<std::size_t> indexes);
@@ -59,7 +66,7 @@ private:
 
 private:
     HWND hwnd_ = nullptr;
-    std::vector<VirtualListRow> rows_;
+    std::shared_ptr<const std::vector<VirtualListRow>> rows_;
     std::vector<std::size_t> visibleIndexes_;
 };
 

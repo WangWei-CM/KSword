@@ -25,6 +25,8 @@ constexpr UINT kCopyCellCommand = 64001;
 constexpr UINT kCopyRowCommand = 64002;
 constexpr UINT kCopyAllCommand = 64003;
 constexpr UINT kMsgSnapshotCompleted = WM_APP + 610;
+constexpr UINT kMsgThreadFilterCompleted = WM_APP + 611;
+constexpr UINT kMsgModuleFilterCompleted = WM_APP + 612;
 constexpr int kSnapshotLoadingOverlayId = 1110;
 
 constexpr std::array<const wchar_t*, 8> kTabTitles{
@@ -90,6 +92,12 @@ ProcessDetailPage::~ProcessDetailPage() {
     if (snapshotTask_) {
         snapshotTask_->cancel();
     }
+    if (threadFilterTask_) {
+        threadFilterTask_->cancel();
+    }
+    if (moduleFilterTask_) {
+        moduleFilterTask_->cancel();
+    }
     if (titleFont_) {
         ::DeleteObject(titleFont_);
         titleFont_ = nullptr;
@@ -146,6 +154,16 @@ LRESULT ProcessDetailPage::HandleMessage(HWND hwnd, UINT message, WPARAM wParam,
             return 0;
         }
         break;
+    case kMsgThreadFilterCompleted:
+        if (threadFilterTask_ && threadFilterTask_->consume(hwnd, wParam, lParam)) {
+            return 0;
+        }
+        break;
+    case kMsgModuleFilterCompleted:
+        if (moduleFilterTask_ && moduleFilterTask_->consume(hwnd, wParam, lParam)) {
+            return 0;
+        }
+        break;
     case WM_NOTIFY:
         if (auto* header = reinterpret_cast<NMHDR*>(lParam);
             header && header->hwndFrom == tab_ && header->code == TCN_SELCHANGE) {
@@ -161,6 +179,12 @@ LRESULT ProcessDetailPage::HandleMessage(HWND hwnd, UINT message, WPARAM wParam,
     case WM_NCDESTROY:
         if (snapshotTask_) {
             snapshotTask_->cancel();
+        }
+        if (threadFilterTask_) {
+            threadFilterTask_->cancel();
+        }
+        if (moduleFilterTask_) {
+            moduleFilterTask_->cancel();
         }
         ::SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
         delete this;
@@ -200,6 +224,11 @@ bool ProcessDetailPage::Initialize(HWND hwnd) {
 
     loadingOverlay_ = Ksword::Ui::CreateLoadingOverlay(hwnd_, kSnapshotLoadingOverlayId, { 0, 0, 1, 1 });
     snapshotTask_ = std::make_unique<Ksword::Ui::AsyncSnapshotTask<ProcessDetailSnapshot>>(hwnd_, kMsgSnapshotCompleted);
+    threadFilterTask_ = std::make_unique<Ksword::Ui::AsyncSnapshotTask<DetailTableFilterResult>>(hwnd_, kMsgThreadFilterCompleted);
+    moduleFilterTask_ = std::make_unique<Ksword::Ui::AsyncSnapshotTask<DetailTableFilterResult>>(hwnd_, kMsgModuleFilterCompleted);
+    if (!loadingOverlay_ || !snapshotTask_ || !threadFilterTask_ || !moduleFilterTask_) {
+        return false;
+    }
     ::SendMessageW(tab_, TCM_SETCURSEL, 0, 0);
     UpdateVisiblePage();
     BeginSnapshotRefresh();
@@ -434,6 +463,11 @@ void ProcessDetailPage::DestroyPageHost(TabIndex tab) {
     }
 
     HWND oldPage = page.hwnd;
+    if (tab == TabIndex::Threads) {
+        threadVirtualList_.detach();
+    } else if (tab == TabIndex::Modules) {
+        moduleVirtualList_.detach();
+    }
     page.hwnd = nullptr;
     page.placements.clear();
     ResetTabRuntimeState(tab);
@@ -562,6 +596,12 @@ void ProcessDetailPage::BeginSnapshotRefresh(const std::wstring& loadingMessage)
 // tabs never cause eager control creation or message storms.
 void ProcessDetailPage::ApplySnapshot(ProcessDetailSnapshot snapshot) {
     snapshot_ = std::move(snapshot);
+    pendingThreadEntries_ = std::make_shared<const std::vector<ProcessThreadInfo>>(std::move(snapshot_.threads));
+    pendingModuleEntries_ = std::make_shared<const std::vector<ProcessModuleInfo>>(std::move(snapshot_.modules));
+    ++threadSourceGeneration_;
+    ++moduleSourceGeneration_;
+    RequestThreadFilter(true);
+    RequestModuleFilter(true);
     if (currentTab_ != TabIndex::Count && pages_[static_cast<std::size_t>(currentTab_)].hwnd) {
         PopulateTab(currentTab_);
     }
@@ -676,6 +716,28 @@ HWND ProcessDetailPage::AddList(TabIndex tab, int controlId, int x, int y, int w
             list,
             LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES | LVS_EX_DOUBLEBUFFER | LVS_EX_LABELTIP | LVS_EX_INFOTIP);
     }
+    return list;
+}
+
+HWND ProcessDetailPage::AddVirtualList(
+    TabIndex tab,
+    int controlId,
+    int x,
+    int y,
+    int width,
+    int height,
+    Ksword::Ui::VirtualListView& virtualList) {
+    PageState& page = pages_[static_cast<std::size_t>(tab)];
+    const int initialWidth = width < 0 ? 100 : width;
+    const int initialHeight = height < 0 ? 100 : height;
+    if (!virtualList.create(page.hwnd, controlId, x, y, initialWidth, initialHeight)) {
+        return nullptr;
+    }
+    HWND list = virtualList.hwnd();
+    page.placements.push_back(Placement{ list, x, y, width, height });
+    ListView_SetExtendedListViewStyle(
+        list,
+        LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES | LVS_EX_DOUBLEBUFFER | LVS_EX_LABELTIP | LVS_EX_INFOTIP);
     return list;
 }
 
@@ -896,6 +958,9 @@ bool ProcessDetailPage::HandlePageNotify(TabIndex tab, NMHDR* header, LRESULT& r
     if (!header) {
         return false;
     }
+    if (threadVirtualList_.handleNotify(*header, result) || moduleVirtualList_.handleNotify(*header, result)) {
+        return true;
+    }
     if (header->code == NM_RCLICK && listColumnCounts_.contains(header->hwndFrom)) {
         POINT point{};
         ::GetCursorPos(&point);
@@ -909,6 +974,23 @@ bool ProcessDetailPage::HandlePageNotify(TabIndex tab, NMHDR* header, LRESULT& r
         return true;
     }
     return false;
+}
+
+const std::vector<ProcessThreadInfo>& ProcessDetailPage::ThreadEntries() const noexcept {
+    static const std::vector<ProcessThreadInfo> empty;
+    return threadEntries_ ? *threadEntries_ : empty;
+}
+
+const std::vector<ProcessModuleInfo>& ProcessDetailPage::ModuleEntries() const noexcept {
+    static const std::vector<ProcessModuleInfo> empty;
+    return moduleEntries_ ? *moduleEntries_ : empty;
+}
+
+std::size_t ProcessDetailPage::LatestThreadCount() const noexcept {
+    if (pendingThreadEntries_) {
+        return pendingThreadEntries_->size();
+    }
+    return ThreadEntries().size();
 }
 
 } // namespace Ksword::Features::ProcessDetail

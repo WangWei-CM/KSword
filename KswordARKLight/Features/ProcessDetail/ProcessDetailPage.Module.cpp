@@ -15,6 +15,7 @@
 #include <cstring>
 #include <cwchar>
 #include <iomanip>
+#include <memory>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -41,12 +42,6 @@ constexpr int kModuleDetailEditId = 65102;
 constexpr int kModuleDetailCopyId = 65103;
 constexpr int kModuleDetailOpenFolderId = 65104;
 constexpr int kModuleDetailCloseId = 65105;
-
-struct ModuleSortState {
-    HWND list = nullptr;
-    int column = 0;
-    bool descending = false;
-};
 
 struct ModuleDetailDialogState {
     HWND hwnd = nullptr;
@@ -112,21 +107,6 @@ std::wstring BaseNameFromPath(const std::wstring& path) {
     return path.substr(separator + 1U);
 }
 
-bool ContainsCaseInsensitive(const std::wstring& value, const std::wstring& query) {
-    if (query.empty()) {
-        return true;
-    }
-    return std::search(value.begin(), value.end(), query.begin(), query.end(), [](const wchar_t left, const wchar_t right) {
-        return std::towlower(left) == std::towlower(right);
-    }) != value.end();
-}
-
-bool MatchesModuleFilter(const std::vector<std::wstring>& values, const std::wstring& query) {
-    return std::any_of(values.begin(), values.end(), [&query](const std::wstring& value) {
-        return ContainsCaseInsensitive(value, query);
-    });
-}
-
 std::wstring FormatHex(std::uintptr_t value) {
     std::wostringstream text;
     text << L"0x" << std::uppercase << std::hex << value;
@@ -144,9 +124,7 @@ std::wstring FormatModuleSize(DWORD bytes) {
     return text.str();
 }
 
-std::wstring ModuleSignatureText(HWND verifyCheck) {
-    const bool requested = verifyCheck &&
-        ::SendMessageW(verifyCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
+std::wstring ModuleSignatureText(bool requested) {
     // The frozen ProcessModuleInfo model has no signature result field. Make
     // that boundary explicit instead of presenting the collector status as a
     // cryptographic trust decision.
@@ -234,27 +212,6 @@ bool OpenFolderAndSelectPath(HWND owner, const std::wstring& path) {
     return reinterpret_cast<INT_PTR>(result) > 32;
 }
 
-int CALLBACK CompareModuleRows(LPARAM leftIndex, LPARAM rightIndex, LPARAM contextValue) {
-    const auto* state = reinterpret_cast<const ModuleSortState*>(contextValue);
-    if (!state || !state->list) {
-        return 0;
-    }
-    const std::wstring left = ReadListCell(state->list, static_cast<int>(leftIndex), state->column);
-    const std::wstring right = ReadListCell(state->list, static_cast<int>(rightIndex), state->column);
-    int comparison = ::CompareStringOrdinal(
-        left.c_str(), static_cast<int>(left.size()),
-        right.c_str(), static_cast<int>(right.size()),
-        FALSE);
-    if (comparison == CSTR_LESS_THAN) {
-        comparison = -1;
-    } else if (comparison == CSTR_GREATER_THAN) {
-        comparison = 1;
-    } else {
-        comparison = 0;
-    }
-    return state->descending ? -comparison : comparison;
-}
-
 void UpdateSortIndicator(HWND list, int sortColumn, bool descending) {
     HWND header = list ? ListView_GetHeader(list) : nullptr;
     const int count = header ? Header_GetItemCount(header) : 0;
@@ -270,67 +227,6 @@ void UpdateSortIndicator(HWND list, int sortColumn, bool descending) {
         }
         Header_SetItem(header, index, &item);
     }
-}
-
-void SortModuleList(ModuleSortState& state) {
-    if (!state.list) {
-        return;
-    }
-    ListView_SortItemsEx(state.list, CompareModuleRows, reinterpret_cast<LPARAM>(&state));
-    UpdateSortIndicator(state.list, state.column, state.descending);
-}
-
-LRESULT CALLBACK ModuleHeaderSubclassProc(
-    HWND hwnd,
-    UINT message,
-    WPARAM wParam,
-    LPARAM lParam,
-    UINT_PTR subclassId,
-    DWORD_PTR referenceData) {
-    auto* state = reinterpret_cast<ModuleSortState*>(referenceData);
-    if (message == WM_LBUTTONUP && state) {
-        HDHITTESTINFO hit{};
-        hit.pt.x = GET_X_LPARAM(lParam);
-        hit.pt.y = GET_Y_LPARAM(lParam);
-        const int column = static_cast<int>(::SendMessageW(
-            hwnd, HDM_HITTEST, 0, reinterpret_cast<LPARAM>(&hit)));
-        const LRESULT result = ::DefSubclassProc(hwnd, message, wParam, lParam);
-        if (column >= 0) {
-            if (state->column == column) {
-                state->descending = !state->descending;
-            } else {
-                state->column = column;
-                state->descending = false;
-            }
-            SortModuleList(*state);
-        }
-        return result;
-    }
-    if (message == WM_NCDESTROY) {
-        ::RemoveWindowSubclass(hwnd, ModuleHeaderSubclassProc, subclassId);
-        delete state;
-        return ::DefSubclassProc(hwnd, message, wParam, lParam);
-    }
-    return ::DefSubclassProc(hwnd, message, wParam, lParam);
-}
-
-void SortModuleListByPath(HWND list) {
-    HWND header = list ? ListView_GetHeader(list) : nullptr;
-    DWORD_PTR referenceData = 0;
-    if (header && ::GetWindowSubclass(
-            header,
-            ModuleHeaderSubclassProc,
-            kModuleHeaderSubclassId,
-            &referenceData)) {
-        auto* state = reinterpret_cast<ModuleSortState*>(referenceData);
-        if (state) {
-            state->column = 0;
-            state->descending = false;
-            SortModuleList(*state);
-            return;
-        }
-    }
-    UpdateSortIndicator(list, 0, false);
 }
 
 COLORREF SignatureColor(const std::wstring& text) {
@@ -464,6 +360,85 @@ int SystemIconIndexForPath(const std::wstring& path, HIMAGELIST* imageListOut) {
         *imageListOut = reinterpret_cast<HIMAGELIST>(result);
     }
     return result != 0 ? info.iIcon : -1;
+}
+
+std::vector<Ksword::Ui::VirtualListRow> BuildModuleVirtualRows(
+    const std::vector<ProcessModuleInfo>& modules,
+    const bool verifySignatures,
+    const int sortColumn,
+    const bool sortDescending,
+    HIMAGELIST& imageListOut) {
+    std::vector<Ksword::Ui::VirtualListRow> rows;
+    rows.reserve(modules.size());
+    for (std::size_t index = 0; index < modules.size(); ++index) {
+        const ProcessModuleInfo& module = modules[index];
+        Ksword::Ui::VirtualListRow row{};
+        row.stableKey = module.modulePath + L"\n" + FormatHex(module.baseAddress);
+        row.itemData = static_cast<LPARAM>(index);
+        row.cells = {
+            module.modulePath,
+            FormatModuleSize(module.imageSize),
+            ModuleSignatureText(verifySignatures),
+            L"Unavailable",
+            ModuleRunningState(module),
+            ModuleThreadText(module)
+        };
+        HIMAGELIST rowImages = nullptr;
+        row.imageIndex = SystemIconIndexForPath(module.modulePath, &rowImages);
+        if (!imageListOut && rowImages) {
+            imageListOut = rowImages;
+        }
+        rows.push_back(std::move(row));
+    }
+    const int column = std::clamp(sortColumn, 0, 5);
+    std::stable_sort(rows.begin(), rows.end(), [column, sortDescending](const auto& left, const auto& right) {
+        const std::wstring& leftCell = left.cells[static_cast<std::size_t>(column)];
+        const std::wstring& rightCell = right.cells[static_cast<std::size_t>(column)];
+        const int comparison = ::CompareStringOrdinal(
+            leftCell.c_str(), static_cast<int>(leftCell.size()),
+            rightCell.c_str(), static_cast<int>(rightCell.size()), FALSE);
+        if (comparison == CSTR_EQUAL) {
+            return left.stableKey < right.stableKey;
+        }
+        return sortDescending ? comparison == CSTR_GREATER_THAN : comparison == CSTR_LESS_THAN;
+    });
+    return rows;
+}
+
+std::wstring StableKeyAt(const Ksword::Ui::VirtualListView& list, int visibleIndex) {
+    if (visibleIndex < 0 || static_cast<std::size_t>(visibleIndex) >= list.visibleIndexes().size()) {
+        return {};
+    }
+    const std::size_t rowIndex = list.visibleIndexes()[static_cast<std::size_t>(visibleIndex)];
+    return rowIndex < list.rows().size() ? list.rows()[rowIndex].stableKey : std::wstring{};
+}
+
+void RestoreListPosition(
+    HWND list,
+    const Ksword::Ui::VirtualListView& virtualList,
+    const std::wstring& selectedKey,
+    const std::wstring& topKey) {
+    int selectedIndex = -1;
+    int topIndex = -1;
+    for (std::size_t index = 0; index < virtualList.visibleIndexes().size(); ++index) {
+        const std::size_t rowIndex = virtualList.visibleIndexes()[index];
+        if (rowIndex >= virtualList.rows().size()) {
+            continue;
+        }
+        const std::wstring& stableKey = virtualList.rows()[rowIndex].stableKey;
+        if (!selectedKey.empty() && stableKey == selectedKey) {
+            selectedIndex = static_cast<int>(index);
+        }
+        if (!topKey.empty() && stableKey == topKey) {
+            topIndex = static_cast<int>(index);
+        }
+    }
+    if (selectedIndex >= 0) {
+        ListView_SetItemState(list, selectedIndex, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
+    }
+    if (topIndex >= 0) {
+        ListView_EnsureVisible(list, topIndex, FALSE);
+    }
 }
 
 void ApplyDialogFont(HWND hwnd) {
@@ -718,7 +693,7 @@ bool ProcessDetailPage::CreateModuleTab() {
     if (filter) {
         pages_[static_cast<std::size_t>(TabIndex::Modules)].placements.push_back(Placement{ filter, 6, 40, -6, 26 });
     }
-    HWND list = AddList(TabIndex::Modules, ModuleList, 6, 72, -6, -6);
+    HWND list = AddVirtualList(TabIndex::Modules, ModuleList, 6, 72, -6, -6, moduleVirtualList_);
     if (!refresh || !verify || !status || !filter || !list) {
         return false;
     }
@@ -731,6 +706,10 @@ bool ProcessDetailPage::CreateModuleTab() {
     AddListColumn(list, 4, L"运行状态", 90);
     AddListColumn(list, 5, L"ThreadID", 180);
     listColumnCounts_[list] = 6;
+    if (moduleFilterRows_) {
+        moduleVirtualList_.setSharedRows(moduleFilterRows_);
+        moduleVirtualList_.setVisibleIndexes(moduleVisibleIndexes_);
+    }
 
     ::SetWindowSubclass(
         pages_[static_cast<std::size_t>(TabIndex::Modules)].hwnd,
@@ -740,91 +719,40 @@ bool ProcessDetailPage::CreateModuleTab() {
     ::SetWindowSubclass(status, ModuleStatusSubclassProc, kModuleStatusSubclassId, 0);
 
     if (HWND header = ListView_GetHeader(list)) {
-        auto* sortState = new ModuleSortState{};
-        sortState->list = list;
-        if (!::SetWindowSubclass(
-                header,
-                ModuleHeaderSubclassProc,
-                kModuleHeaderSubclassId,
-                reinterpret_cast<DWORD_PTR>(sortState))) {
-            delete sortState;
-        }
+        ::SetWindowSubclass(
+            header,
+            ProcessDetailPage::ModuleHeaderSubclassProc,
+            kModuleHeaderSubclassId,
+            reinterpret_cast<DWORD_PTR>(this));
     }
-    UpdateSortIndicator(list, 0, false);
+    UpdateSortIndicator(list, moduleSortColumn_, moduleSortDescending_);
     return true;
 }
 
 void ProcessDetailPage::PopulateModuleTab() {
     HWND list = Control(TabIndex::Modules, ModuleList);
-    HWND verify = Control(TabIndex::Modules, ModuleVerifySignature);
     if (!list) {
         return;
     }
-
-    ClearList(list);
-    const std::wstring query = Ksword::Ui::GetFilterBarText(Control(TabIndex::Modules, ModuleFilter));
-    HIMAGELIST systemImages = nullptr;
-    std::size_t visibleCount = 0;
-    for (std::size_t index = 0; index < snapshot_.modules.size(); ++index) {
-        const ProcessModuleInfo& module = snapshot_.modules[index];
-        const std::vector<std::wstring> values{
-            module.modulePath,
-            FormatModuleSize(module.imageSize),
-            ModuleSignatureText(verify),
-            L"Unavailable",
-            ModuleRunningState(module),
-            ModuleThreadText(module)
-        };
-        if (!MatchesModuleFilter(values, query)) {
-            continue;
-        }
-        AddListRow(
-            list,
-            static_cast<int>(visibleCount),
-            values,
-            static_cast<LPARAM>(index));
-
-        HIMAGELIST rowImages = nullptr;
-        const int iconIndex = SystemIconIndexForPath(module.modulePath, &rowImages);
-        if (!systemImages && rowImages) {
-            systemImages = rowImages;
-            ListView_SetImageList(list, systemImages, LVSIL_SMALL);
-        }
-        if (iconIndex >= 0) {
-            LVITEMW item{};
-            item.mask = LVIF_IMAGE;
-            item.iItem = static_cast<int>(visibleCount);
-            item.iImage = iconIndex;
-            ListView_SetItem(list, &item);
-        }
-        ++visibleCount;
+    if (moduleFilterRows_) {
+        moduleVirtualList_.setSharedRows(moduleFilterRows_);
+        moduleVirtualList_.setVisibleIndexes(moduleVisibleIndexes_);
     }
-    SortModuleListByPath(list);
-
-    std::wstring status;
-    if (!snapshot_.modulesSucceeded) {
-        status = L"● 模块刷新失败";
-        if (!snapshot_.errorText.empty()) {
-            status += L" | " + snapshot_.errorText;
-        }
-    } else {
-        status = L"● 刷新完成 | 模块:" + std::to_wstring(visibleCount) + L" / " + std::to_wstring(snapshot_.modules.size());
-        if (snapshot_.modules.empty() && !snapshot_.errorText.empty()) {
-            status += L" | " + snapshot_.errorText;
-        }
+    if (pendingModuleEntries_ || !moduleFilterRows_) {
+        SetPageStatus(TabIndex::Modules, ModuleStatus, L"● 正在后台准备模块表...");
     }
-    if (verify && ::SendMessageW(verify, BM_GETCHECK, 0, 0) == BST_CHECKED) {
-        status += L" | 签名校验结果不可用";
-    }
-    SetPageStatus(TabIndex::Modules, ModuleStatus, status);
 }
 
 bool ProcessDetailPage::HandleModuleCommand(int controlId) {
     if (controlId == ModuleVerifySignature) {
+        if (HWND verify = Control(TabIndex::Modules, ModuleVerifySignature)) {
+            moduleVerifySignatures_ = ::SendMessageW(verify, BM_GETCHECK, 0, 0) == BST_CHECKED;
+        }
+        RequestModuleFilter(true);
         return true;
     }
     if (controlId == ModuleFilter) {
-        PopulateModuleTab();
+        RequestModuleFilter(false);
         return true;
     }
     if (controlId != ModuleRefresh) {
@@ -834,6 +762,134 @@ bool ProcessDetailPage::HandleModuleCommand(int controlId) {
     SetPageStatus(TabIndex::Modules, ModuleStatus, L"● 正在后台刷新模块列表...");
     RefreshAll();
     return true;
+}
+
+void ProcessDetailPage::RequestModuleFilter(bool rebuildRows) {
+    if (!moduleFilterTask_) {
+        return;
+    }
+    const HWND filter = Control(TabIndex::Modules, ModuleFilter);
+    moduleFilterQuery_ = filter ? Ksword::Ui::GetFilterBarText(filter) : moduleFilterQuery_;
+    const auto existingRows = moduleFilterRows_;
+    const auto source = pendingModuleEntries_ ? pendingModuleEntries_ : moduleEntries_;
+    // Preserve request ordering when a refresh and typing overlap: the newest
+    // query always rebuilds from the pending snapshot, never the old table.
+    const bool buildRows = rebuildRows || !existingRows || pendingModuleEntries_;
+    if (!source && buildRows) {
+        return;
+    }
+    const std::uint64_t generation = moduleSourceGeneration_;
+    const int sortColumn = moduleSortColumn_;
+    const bool sortDescending = moduleSortDescending_;
+    const bool verifySignatures = moduleVerifySignatures_;
+    SetPageStatus(TabIndex::Modules, ModuleStatus, L"● 正在后台筛选模块表...");
+    moduleFilterTask_->request(
+        [source, existingRows, buildRows, generation, sortColumn, sortDescending, verifySignatures, query = moduleFilterQuery_]() mutable {
+            DetailTableFilterResult result{};
+            result.sourceGeneration = generation;
+            result.query = std::move(query);
+            result.sortColumn = sortColumn;
+            result.sortDescending = sortDescending;
+            if (buildRows) {
+                HIMAGELIST imageList = nullptr;
+                result.rows = std::make_shared<const std::vector<Ksword::Ui::VirtualListRow>>(
+                    BuildModuleVirtualRows(*source, verifySignatures, sortColumn, sortDescending, imageList));
+                result.imageList = imageList;
+            } else {
+                result.rows = existingRows;
+            }
+            if (result.rows) {
+                result.visibleIndexes = Ksword::Ui::VirtualListView::FilterRowIndexes(*result.rows, result.query);
+            }
+            return result;
+        },
+        [this](std::uint64_t, std::optional<DetailTableFilterResult>&& result, std::exception_ptr error) {
+            if (error || !result.has_value() || result->sourceGeneration != moduleSourceGeneration_ ||
+                result->query != moduleFilterQuery_ || result->sortColumn != moduleSortColumn_ ||
+                result->sortDescending != moduleSortDescending_ || !result->rows) {
+                return;
+            }
+            const HWND list = moduleVirtualList_.hwnd();
+            const std::wstring selectedKey = ::IsWindow(list)
+                ? StableKeyAt(moduleVirtualList_, ListView_GetNextItem(list, -1, LVNI_SELECTED))
+                : std::wstring{};
+            const std::wstring topKey = ::IsWindow(list)
+                ? StableKeyAt(moduleVirtualList_, ListView_GetTopIndex(list))
+                : std::wstring{};
+            const bool replaceRows = result->rows != moduleFilterRows_;
+            const std::size_t visibleCount = result->visibleIndexes.size();
+            moduleFilterRows_ = result->rows;
+            moduleVisibleIndexes_ = result->visibleIndexes;
+            if (replaceRows) {
+                moduleEntries_ = pendingModuleEntries_ ? pendingModuleEntries_ : moduleEntries_;
+                pendingModuleEntries_.reset();
+            }
+            if (::IsWindow(list)) {
+                if (result->imageList) {
+                    ListView_SetImageList(list, result->imageList, LVSIL_SMALL);
+                }
+                if (replaceRows) {
+                    moduleVirtualList_.setSharedRows(moduleFilterRows_);
+                }
+                moduleVirtualList_.setVisibleIndexes(std::move(result->visibleIndexes));
+                RestoreListPosition(list, moduleVirtualList_, selectedKey, topKey);
+                UpdateSortIndicator(list, moduleSortColumn_, moduleSortDescending_);
+            }
+            std::wstring status;
+            if (!snapshot_.modulesSucceeded) {
+                status = L"● 模块刷新失败";
+                if (!snapshot_.errorText.empty()) {
+                    status += L" | " + snapshot_.errorText;
+                }
+            } else {
+                status = L"● 刷新完成 | 模块:" + std::to_wstring(visibleCount) +
+                    L" / " + std::to_wstring(ModuleEntries().size());
+                if (ModuleEntries().empty() && !snapshot_.errorText.empty()) {
+                    status += L" | " + snapshot_.errorText;
+                }
+            }
+            if (moduleVerifySignatures_) {
+                status += L" | 签名校验结果不可用";
+            }
+            SetPageStatus(TabIndex::Modules, ModuleStatus, status);
+        });
+}
+
+void ProcessDetailPage::OnModuleSortRequested(const int column) {
+    if (column < 0 || column >= 6) {
+        return;
+    }
+    if (moduleSortColumn_ == column) {
+        moduleSortDescending_ = !moduleSortDescending_;
+    } else {
+        moduleSortColumn_ = column;
+        moduleSortDescending_ = false;
+    }
+    UpdateSortIndicator(moduleVirtualList_.hwnd(), moduleSortColumn_, moduleSortDescending_);
+    RequestModuleFilter(true);
+}
+
+LRESULT CALLBACK ProcessDetailPage::ModuleHeaderSubclassProc(
+    HWND hwnd,
+    UINT message,
+    WPARAM wParam,
+    LPARAM lParam,
+    UINT_PTR subclassId,
+    DWORD_PTR referenceData) {
+    auto* page = reinterpret_cast<ProcessDetailPage*>(referenceData);
+    if (message == WM_LBUTTONUP && page) {
+        HDHITTESTINFO hit{};
+        hit.pt.x = GET_X_LPARAM(lParam);
+        hit.pt.y = GET_Y_LPARAM(lParam);
+        const int column = static_cast<int>(::SendMessageW(hwnd, HDM_HITTEST, 0, reinterpret_cast<LPARAM>(&hit)));
+        const LRESULT result = ::DefSubclassProc(hwnd, message, wParam, lParam);
+        page->OnModuleSortRequested(column);
+        return result;
+    }
+    if (message == WM_NCDESTROY) {
+        ::RemoveWindowSubclass(hwnd, ModuleHeaderSubclassProc, subclassId);
+    }
+    return ::DefSubclassProc(hwnd, message, wParam, lParam);
 }
 
 bool ProcessDetailPage::HandleModuleContextMenu(POINT screenPoint) {
@@ -881,12 +937,13 @@ bool ProcessDetailPage::HandleModuleContextMenu(POINT screenPoint) {
 void ProcessDetailPage::ShowModuleDetailDialog() {
     HWND list = Control(TabIndex::Modules, ModuleList);
     const std::size_t index = SelectedSnapshotIndex(list);
-    if (index >= snapshot_.modules.size()) {
+    const auto& modules = ModuleEntries();
+    if (index >= modules.size()) {
         SetPageStatus(TabIndex::Modules, ModuleStatus, L"● 查看模块详情失败 | 当前无有效选中项");
         return;
     }
-    const ProcessModuleInfo& module = snapshot_.modules[index];
-    const std::wstring signature = ModuleSignatureText(Control(TabIndex::Modules, ModuleVerifySignature));
+    const ProcessModuleInfo& module = modules[index];
+    const std::wstring signature = ModuleSignatureText(moduleVerifySignatures_);
     const std::wstring moduleName = !module.moduleName.empty()
         ? module.moduleName
         : BaseNameFromPath(module.modulePath);
@@ -921,11 +978,12 @@ void ProcessDetailPage::ShowModuleDetailDialog() {
 void ProcessDetailPage::OpenSelectedModuleFolder() {
     HWND list = Control(TabIndex::Modules, ModuleList);
     const std::size_t index = SelectedSnapshotIndex(list);
-    if (index >= snapshot_.modules.size()) {
+    const auto& modules = ModuleEntries();
+    if (index >= modules.size()) {
         SetPageStatus(TabIndex::Modules, ModuleStatus, L"● 打开文件夹失败 | 当前无有效选中项");
         return;
     }
-    const bool opened = OpenFolderAndSelectPath(hwnd_, snapshot_.modules[index].modulePath);
+    const bool opened = OpenFolderAndSelectPath(hwnd_, modules[index].modulePath);
     SetPageStatus(
         TabIndex::Modules,
         ModuleStatus,
@@ -935,11 +993,12 @@ void ProcessDetailPage::OpenSelectedModuleFolder() {
 void ProcessDetailPage::UnloadSelectedModule() {
     HWND list = Control(TabIndex::Modules, ModuleList);
     const std::size_t index = SelectedSnapshotIndex(list);
-    if (index >= snapshot_.modules.size()) {
+    const auto& modules = ModuleEntries();
+    if (index >= modules.size()) {
         SetPageStatus(TabIndex::Modules, ModuleStatus, L"● 卸载模块失败 | 当前无有效选中项");
         return;
     }
-    const std::uintptr_t moduleBase = snapshot_.modules[index].baseAddress;
+    const std::uintptr_t moduleBase = modules[index].baseAddress;
     if (moduleBase == 0) {
         SetPageStatus(TabIndex::Modules, ModuleStatus, L"● 卸载模块失败 | 模块基址不可用");
         return;
@@ -964,7 +1023,7 @@ void ProcessDetailPage::UnloadSelectedModule() {
         ? BaseNameFromPath(std::wstring(localFunctionPath, localFunctionPathLength))
         : L"kernel32.dll";
     std::uintptr_t remoteFunctionModule = 0;
-    for (const ProcessModuleInfo& module : snapshot_.modules) {
+    for (const ProcessModuleInfo& module : modules) {
         if (_wcsicmp(BaseNameFromPath(module.modulePath).c_str(), functionModuleName.c_str()) == 0) {
             remoteFunctionModule = module.baseAddress;
             break;
@@ -1022,11 +1081,12 @@ void ProcessDetailPage::UnloadSelectedModule() {
 void ProcessDetailPage::SuspendSelectedModuleThread() {
     HWND list = Control(TabIndex::Modules, ModuleList);
     const std::size_t index = SelectedSnapshotIndex(list);
-    if (index >= snapshot_.modules.size() || snapshot_.modules[index].representativeThreadId == 0) {
+    const auto& modules = ModuleEntries();
+    if (index >= modules.size() || modules[index].representativeThreadId == 0) {
         SetPageStatus(TabIndex::Modules, ModuleStatus, L"● 挂起 Thread 失败 | 当前模块行没有可用 ThreadID。");
         return;
     }
-    const DWORD threadId = snapshot_.modules[index].representativeThreadId;
+    const DWORD threadId = modules[index].representativeThreadId;
     HANDLE thread = ::OpenThread(THREAD_SUSPEND_RESUME, FALSE, threadId);
     if (!thread) {
         SetPageStatus(
@@ -1049,11 +1109,12 @@ void ProcessDetailPage::SuspendSelectedModuleThread() {
 void ProcessDetailPage::ResumeSelectedModuleThread() {
     HWND list = Control(TabIndex::Modules, ModuleList);
     const std::size_t index = SelectedSnapshotIndex(list);
-    if (index >= snapshot_.modules.size() || snapshot_.modules[index].representativeThreadId == 0) {
+    const auto& modules = ModuleEntries();
+    if (index >= modules.size() || modules[index].representativeThreadId == 0) {
         SetPageStatus(TabIndex::Modules, ModuleStatus, L"● 取消挂起 Thread 失败 | 当前模块行没有可用 ThreadID。");
         return;
     }
-    const DWORD threadId = snapshot_.modules[index].representativeThreadId;
+    const DWORD threadId = modules[index].representativeThreadId;
     HANDLE thread = ::OpenThread(THREAD_SUSPEND_RESUME, FALSE, threadId);
     if (!thread) {
         SetPageStatus(
@@ -1076,11 +1137,12 @@ void ProcessDetailPage::ResumeSelectedModuleThread() {
 void ProcessDetailPage::TerminateSelectedModuleThread() {
     HWND list = Control(TabIndex::Modules, ModuleList);
     const std::size_t index = SelectedSnapshotIndex(list);
-    if (index >= snapshot_.modules.size() || snapshot_.modules[index].representativeThreadId == 0) {
+    const auto& modules = ModuleEntries();
+    if (index >= modules.size() || modules[index].representativeThreadId == 0) {
         SetPageStatus(TabIndex::Modules, ModuleStatus, L"● 结束 Thread 失败 | 当前模块行没有可用 ThreadID。");
         return;
     }
-    const DWORD threadId = snapshot_.modules[index].representativeThreadId;
+    const DWORD threadId = modules[index].representativeThreadId;
     HANDLE thread = ::OpenThread(THREAD_TERMINATE, FALSE, threadId);
     if (!thread) {
         SetPageStatus(

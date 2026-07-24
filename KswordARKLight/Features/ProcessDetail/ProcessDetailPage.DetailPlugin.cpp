@@ -289,7 +289,7 @@ void ProcessDetailPage::PopulateDetailTab() {
     SetControlText(TabIndex::Detail, DetailArchitecture, DisplayText(basic.bitness, L"Unknown"));
     SetControlText(TabIndex::Detail, DetailPriority, PriorityClassText(process));
     SetControlText(TabIndex::Detail, DetailSession, std::to_wstring(basic.sessionId));
-    SetControlText(TabIndex::Detail, DetailThreadCount, std::to_wstring(snapshot_.threads.size()));
+    SetControlText(TabIndex::Detail, DetailThreadCount, std::to_wstring(LatestThreadCount()));
     SetControlText(TabIndex::Detail, DetailHandleCount, HandleCountText(process));
     SetControlText(TabIndex::Detail, DetailCpu, L"-");
     SetControlText(TabIndex::Detail, DetailRam, WorkingSetText(process));

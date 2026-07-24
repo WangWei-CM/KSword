@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cwctype>
+#include <memory>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -212,19 +213,65 @@ std::wstring Utf8ToWide(const std::string& text) {
     return result;
 }
 
-bool ContainsCaseInsensitive(const std::wstring& value, const std::wstring& query) {
-    if (query.empty()) {
-        return true;
+std::vector<Ksword::Ui::VirtualListRow> BuildThreadVirtualRows(const std::vector<ProcessThreadInfo>& threads) {
+    std::vector<Ksword::Ui::VirtualListRow> rows;
+    rows.reserve(threads.size());
+    for (std::size_t index = 0; index < threads.size(); ++index) {
+        const ProcessThreadInfo& thread = threads[index];
+        Ksword::Ui::VirtualListRow row{};
+        row.stableKey = DecimalText(thread.threadId) + L"\n" + HexAddressText(thread.startAddress);
+        row.itemData = static_cast<LPARAM>(index + 1);
+        row.cells = {
+            DecimalText(thread.threadId),
+            thread.statusText.empty() ? L"-" : thread.statusText,
+            SignedDecimalText(thread.basePriority),
+            L"-",
+            HexAddressText(thread.startAddress),
+            L"Unavailable",
+            L"Unavailable",
+            L"Unavailable",
+            L"U:Unavailable | K:Unavailable | Unavailable",
+            L"Unavailable"
+        };
+        rows.push_back(std::move(row));
     }
-    return std::search(value.begin(), value.end(), query.begin(), query.end(), [](const wchar_t left, const wchar_t right) {
-        return std::towlower(left) == std::towlower(right);
-    }) != value.end();
+    return rows;
 }
 
-bool MatchesThreadFilter(const std::vector<std::wstring>& values, const std::wstring& query) {
-    return std::any_of(values.begin(), values.end(), [&query](const std::wstring& value) {
-        return ContainsCaseInsensitive(value, query);
-    });
+std::wstring StableKeyAt(const Ksword::Ui::VirtualListView& list, int visibleIndex) {
+    if (visibleIndex < 0 || static_cast<std::size_t>(visibleIndex) >= list.visibleIndexes().size()) {
+        return {};
+    }
+    const std::size_t rowIndex = list.visibleIndexes()[static_cast<std::size_t>(visibleIndex)];
+    return rowIndex < list.rows().size() ? list.rows()[rowIndex].stableKey : std::wstring{};
+}
+
+void RestoreListPosition(
+    HWND list,
+    const Ksword::Ui::VirtualListView& virtualList,
+    const std::wstring& selectedKey,
+    const std::wstring& topKey) {
+    int selectedIndex = -1;
+    int topIndex = -1;
+    for (std::size_t index = 0; index < virtualList.visibleIndexes().size(); ++index) {
+        const std::size_t rowIndex = virtualList.visibleIndexes()[index];
+        if (rowIndex >= virtualList.rows().size()) {
+            continue;
+        }
+        const std::wstring& stableKey = virtualList.rows()[rowIndex].stableKey;
+        if (!selectedKey.empty() && stableKey == selectedKey) {
+            selectedIndex = static_cast<int>(index);
+        }
+        if (!topKey.empty() && stableKey == topKey) {
+            topIndex = static_cast<int>(index);
+        }
+    }
+    if (selectedIndex >= 0) {
+        ListView_SetItemState(list, selectedIndex, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
+    }
+    if (topIndex >= 0) {
+        ListView_EnsureVisible(list, topIndex, FALSE);
+    }
 }
 
 bool SelectedItemData(HWND list, std::size_t& indexOut) {
@@ -260,7 +307,7 @@ bool ProcessDetailPage::CreateThreadTab() {
     if (filter) {
         pages_[static_cast<std::size_t>(tab)].placements.push_back(Placement{ filter, 14, 59, -14, 26 });
     }
-    HWND list = AddList(tab, ThreadList, 14, 91, -14, -244);
+    HWND list = AddVirtualList(tab, ThreadList, 14, 91, -14, -244, threadVirtualList_);
     HWND output = AddEdit(
         tab,
         ThreadRuntimeOutput,
@@ -287,6 +334,10 @@ bool ProcessDetailPage::CreateThreadTab() {
     AddListColumn(list, 8, L"R0栈边界", 260);
     AddListColumn(list, 9, L"R0详情", 360);
     listColumnCounts_[list] = 10;
+    if (threadFilterRows_) {
+        threadVirtualList_.setSharedRows(threadFilterRows_);
+        threadVirtualList_.setVisibleIndexes(threadVisibleIndexes_);
+    }
 
     auto* layoutState = new ThreadLayoutState{
         group,
@@ -315,47 +366,85 @@ void ProcessDetailPage::PopulateThreadTab() {
     if (!list) {
         return;
     }
-
-    ClearList(list);
-    const std::wstring query = Ksword::Ui::GetFilterBarText(Control(TabIndex::Threads, ThreadFilter));
-    std::size_t visibleCount = 0;
-    for (std::size_t index = 0; index < snapshot_.threads.size(); ++index) {
-        const ProcessThreadInfo& thread = snapshot_.threads[index];
-        const std::vector<std::wstring> values{
-            DecimalText(thread.threadId),
-            thread.statusText.empty() ? L"-" : thread.statusText,
-            SignedDecimalText(thread.basePriority),
-            L"-",
-            HexAddressText(thread.startAddress),
-            L"Unavailable",
-            L"Unavailable",
-            L"Unavailable",
-            L"U:Unavailable | K:Unavailable | Unavailable",
-            L"Unavailable"
-        };
-        if (!MatchesThreadFilter(values, query)) {
-            continue;
-        }
-        AddListRow(
-            list,
-            static_cast<int>(visibleCount),
-            values,
-            static_cast<LPARAM>(index + 1));
-        ++visibleCount;
+    if (threadFilterRows_) {
+        threadVirtualList_.setSharedRows(threadFilterRows_);
+        threadVirtualList_.setVisibleIndexes(threadVisibleIndexes_);
     }
-
-    if (snapshot_.threadsSucceeded) {
-        SetPageStatus(
-            TabIndex::Threads,
-            ThreadStatus,
-            L"● 刷新完成 | 线程 " + DecimalText(visibleCount) + L" / " + DecimalText(snapshot_.threads.size()));
-    } else {
-        std::wstring status = L"● 线程刷新失败";
-        if (!snapshot_.errorText.empty()) {
-            status += L" | " + snapshot_.errorText;
-        }
-        SetPageStatus(TabIndex::Threads, ThreadStatus, status);
+    if (pendingThreadEntries_ || !threadFilterRows_) {
+        SetPageStatus(TabIndex::Threads, ThreadStatus, L"● 正在后台准备线程表...");
     }
+}
+
+void ProcessDetailPage::RequestThreadFilter(bool rebuildRows) {
+    if (!threadFilterTask_) {
+        return;
+    }
+    const HWND filter = Control(TabIndex::Threads, ThreadFilter);
+    threadFilterQuery_ = filter ? Ksword::Ui::GetFilterBarText(filter) : threadFilterQuery_;
+    const auto existingRows = threadFilterRows_;
+    const auto source = pendingThreadEntries_ ? pendingThreadEntries_ : threadEntries_;
+    // A newer collector snapshot remains pending until its display rows are
+    // installed. Any coalesced filter request must therefore rebuild from the
+    // pending immutable source instead of applying the new query to old rows.
+    const bool buildRows = rebuildRows || !existingRows || pendingThreadEntries_;
+    if (!source && buildRows) {
+        return;
+    }
+    const std::uint64_t generation = threadSourceGeneration_;
+    SetPageStatus(TabIndex::Threads, ThreadStatus, L"● 正在后台筛选线程表...");
+    threadFilterTask_->request(
+        [source, existingRows, buildRows, generation, query = threadFilterQuery_]() mutable {
+            DetailTableFilterResult result{};
+            result.sourceGeneration = generation;
+            result.query = std::move(query);
+            result.rows = buildRows
+                ? std::make_shared<const std::vector<Ksword::Ui::VirtualListRow>>(BuildThreadVirtualRows(*source))
+                : existingRows;
+            if (result.rows) {
+                result.visibleIndexes = Ksword::Ui::VirtualListView::FilterRowIndexes(*result.rows, result.query);
+            }
+            return result;
+        },
+        [this](std::uint64_t, std::optional<DetailTableFilterResult>&& result, std::exception_ptr error) {
+            if (error || !result.has_value() || result->sourceGeneration != threadSourceGeneration_ ||
+                result->query != threadFilterQuery_ || !result->rows) {
+                return;
+            }
+            const HWND list = threadVirtualList_.hwnd();
+            const std::wstring selectedKey = ::IsWindow(list)
+                ? StableKeyAt(threadVirtualList_, ListView_GetNextItem(list, -1, LVNI_SELECTED))
+                : std::wstring{};
+            const std::wstring topKey = ::IsWindow(list)
+                ? StableKeyAt(threadVirtualList_, ListView_GetTopIndex(list))
+                : std::wstring{};
+            const bool replaceRows = result->rows != threadFilterRows_;
+            threadFilterRows_ = result->rows;
+            threadVisibleIndexes_ = result->visibleIndexes;
+            if (replaceRows) {
+                threadEntries_ = pendingThreadEntries_ ? pendingThreadEntries_ : threadEntries_;
+                pendingThreadEntries_.reset();
+            }
+            if (::IsWindow(list)) {
+                if (replaceRows) {
+                    threadVirtualList_.setSharedRows(threadFilterRows_);
+                }
+                threadVirtualList_.setVisibleIndexes(std::move(result->visibleIndexes));
+                RestoreListPosition(list, threadVirtualList_, selectedKey, topKey);
+            }
+            if (snapshot_.threadsSucceeded) {
+                SetPageStatus(
+                    TabIndex::Threads,
+                    ThreadStatus,
+                    L"● 刷新完成 | 线程 " + DecimalText(threadVirtualList_.rowCount()) +
+                        L" / " + DecimalText(ThreadEntries().size()));
+            } else {
+                std::wstring status = L"● 线程刷新失败";
+                if (!snapshot_.errorText.empty()) {
+                    status += L" | " + snapshot_.errorText;
+                }
+                SetPageStatus(TabIndex::Threads, ThreadStatus, status);
+            }
+        });
 }
 
 bool ProcessDetailPage::HandleThreadCommand(int controlId) {
@@ -366,18 +455,19 @@ bool ProcessDetailPage::HandleThreadCommand(int controlId) {
         return true;
 
     case ThreadFilter:
-        PopulateThreadTab();
+        RequestThreadFilter(false);
         return true;
 
     case ThreadSample: {
         HWND list = Control(TabIndex::Threads, ThreadList);
         std::size_t index = 0;
-        if (!SelectedItemData(list, index) || index >= snapshot_.threads.size()) {
+        const auto& threads = ThreadEntries();
+        if (!SelectedItemData(list, index) || index >= threads.size()) {
             SetControlText(TabIndex::Threads, ThreadRuntimeOutput, L"请先在线程表中选择一条线程记录。");
             SetPageStatus(TabIndex::Threads, ThreadStatus, L"● 请先选择一个线程。");
             return true;
         }
-        const ProcessThreadInfo& thread = snapshot_.threads[index];
+        const ProcessThreadInfo& thread = threads[index];
         std::wostringstream text;
         text << L"[Selected Thread Runtime Context]\r\n"
              << L"TID/PID: " << thread.threadId << L"/" << thread.ownerProcessId << L"\r\n"
@@ -447,11 +537,12 @@ bool ProcessDetailPage::HandleThreadContextMenu(POINT screenPoint) {
 void ProcessDetailPage::SuspendSelectedThread() {
     HWND list = Control(TabIndex::Threads, ThreadList);
     std::size_t index = 0;
-    if (!SelectedItemData(list, index) || index >= snapshot_.threads.size()) {
+    const auto& threads = ThreadEntries();
+    if (!SelectedItemData(list, index) || index >= threads.size()) {
         SetPageStatus(TabIndex::Threads, ThreadStatus, L"● 没有选中线程。");
         return;
     }
-    const DWORD threadId = snapshot_.threads[index].threadId;
+    const DWORD threadId = threads[index].threadId;
     if (threadId == ::GetCurrentThreadId()) {
         SetPageStatus(TabIndex::Threads, ThreadStatus, L"● 拒绝挂起当前 Light UI 线程。");
         return;
@@ -479,11 +570,12 @@ void ProcessDetailPage::SuspendSelectedThread() {
 void ProcessDetailPage::ResumeSelectedThread() {
     HWND list = Control(TabIndex::Threads, ThreadList);
     std::size_t index = 0;
-    if (!SelectedItemData(list, index) || index >= snapshot_.threads.size()) {
+    const auto& threads = ThreadEntries();
+    if (!SelectedItemData(list, index) || index >= threads.size()) {
         SetPageStatus(TabIndex::Threads, ThreadStatus, L"● 没有选中线程。");
         return;
     }
-    const DWORD threadId = snapshot_.threads[index].threadId;
+    const DWORD threadId = threads[index].threadId;
     HANDLE thread = ::OpenThread(THREAD_SUSPEND_RESUME, FALSE, threadId);
     if (!thread) {
         SetPageStatus(TabIndex::Threads, ThreadStatus, L"● " + Win32ErrorText(L"OpenThread", ::GetLastError()));
@@ -506,11 +598,12 @@ void ProcessDetailPage::ResumeSelectedThread() {
 void ProcessDetailPage::TerminateSelectedThread() {
     HWND list = Control(TabIndex::Threads, ThreadList);
     std::size_t index = 0;
-    if (!SelectedItemData(list, index) || index >= snapshot_.threads.size()) {
+    const auto& threads = ThreadEntries();
+    if (!SelectedItemData(list, index) || index >= threads.size()) {
         SetPageStatus(TabIndex::Threads, ThreadStatus, L"● 没有选中线程。");
         return;
     }
-    const DWORD threadId = snapshot_.threads[index].threadId;
+    const DWORD threadId = threads[index].threadId;
     if (threadId == ::GetCurrentThreadId()) {
         SetPageStatus(TabIndex::Threads, ThreadStatus, L"● 拒绝终止当前 Light UI 线程。");
         return;
@@ -544,13 +637,14 @@ void ProcessDetailPage::TerminateSelectedThread() {
 void ProcessDetailPage::TerminateSelectedThreadByR0() {
     HWND list = Control(TabIndex::Threads, ThreadList);
     std::size_t index = 0;
-    if (!SelectedItemData(list, index) || index >= snapshot_.threads.size()) {
+    const auto& threads = ThreadEntries();
+    if (!SelectedItemData(list, index) || index >= threads.size()) {
         SetPageStatus(TabIndex::Threads, ThreadStatus, L"● 没有选中线程。");
         return;
     }
 
-    const DWORD threadId = snapshot_.threads[index].threadId;
-    const DWORD processId = snapshot_.threads[index].ownerProcessId;
+    const DWORD threadId = threads[index].threadId;
+    const DWORD processId = threads[index].ownerProcessId;
     if (threadId == 0 || processId == 0 || processId <= 4) {
         SetPageStatus(TabIndex::Threads, ThreadStatus, L"● 拒绝结束系统或无效 PID 的线程。");
         return;
@@ -595,13 +689,14 @@ void ProcessDetailPage::TerminateSelectedThreadByR0() {
 void ProcessDetailPage::ShowSelectedThreadSummary() {
     HWND list = Control(TabIndex::Threads, ThreadList);
     std::size_t index = 0;
-    if (!SelectedItemData(list, index) || index >= snapshot_.threads.size()) {
+    const auto& threads = ThreadEntries();
+    if (!SelectedItemData(list, index) || index >= threads.size()) {
         SetPageStatus(TabIndex::Threads, ThreadStatus, L"● 没有选中线程。");
         SetControlText(TabIndex::Threads, ThreadRuntimeOutput, L"请选择一条线程记录查看 runtime detail。");
         return;
     }
 
-    const ProcessThreadInfo& thread = snapshot_.threads[index];
+    const ProcessThreadInfo& thread = threads[index];
     std::wostringstream detail;
     detail << L"[Thread Runtime Detail]\r\n"
            << L"TID/PID: " << thread.threadId << L"/" << thread.ownerProcessId << L"\r\n"

@@ -4,6 +4,7 @@
 
 #include "../../Core/Win32Lean.h"
 #include "../../Ui/AsyncTask.h"
+#include "../../Ui/VirtualListView.h"
 
 #include <commctrl.h>
 
@@ -186,6 +187,16 @@ private:
         std::vector<Placement> placements;
     };
 
+    struct DetailTableFilterResult {
+        std::uint64_t sourceGeneration = 0;
+        std::wstring query;
+        int sortColumn = 0;
+        bool sortDescending = false;
+        std::shared_ptr<const std::vector<Ksword::Ui::VirtualListRow>> rows;
+        std::vector<std::size_t> visibleIndexes;
+        HIMAGELIST imageList = nullptr;
+    };
+
     explicit ProcessDetailPage(DWORD processId);
     ~ProcessDetailPage();
 
@@ -246,6 +257,14 @@ private:
     HWND AddCheck(TabIndex tab, int controlId, const wchar_t* text, int x, int y, int width, int height);
     HWND AddGroup(TabIndex tab, const wchar_t* text, int x, int y, int width, int height);
     HWND AddList(TabIndex tab, int controlId, int x, int y, int width, int height);
+    HWND AddVirtualList(
+        TabIndex tab,
+        int controlId,
+        int x,
+        int y,
+        int width,
+        int height,
+        Ksword::Ui::VirtualListView& virtualList);
     HWND Control(TabIndex tab, int controlId) const;
     void SetControlText(TabIndex tab, int controlId, const std::wstring& text);
     std::wstring ControlText(TabIndex tab, int controlId) const;
@@ -275,6 +294,20 @@ private:
     void PopulateTokenSwitchTab();
     void PopulateEvidenceTab();
     void PopulatePebTab();
+    void RequestThreadFilter(bool rebuildRows);
+    void RequestModuleFilter(bool rebuildRows);
+    void OnModuleSortRequested(int column);
+    static LRESULT CALLBACK ModuleHeaderSubclassProc(
+        HWND hwnd,
+        UINT message,
+        WPARAM wParam,
+        LPARAM lParam,
+        UINT_PTR subclassId,
+        DWORD_PTR referenceData);
+
+    const std::vector<ProcessThreadInfo>& ThreadEntries() const noexcept;
+    const std::vector<ProcessModuleInfo>& ModuleEntries() const noexcept;
+    std::size_t LatestThreadCount() const noexcept;
 
     bool HandleDetailCommand(int controlId);
     bool HandleThreadCommand(int controlId);
@@ -318,6 +351,25 @@ private:
     std::unordered_map<HWND, int> listContextColumns_;
     ProcessDetailSnapshot snapshot_{};
     std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<ProcessDetailSnapshot>> snapshotTask_;
+    std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<DetailTableFilterResult>> threadFilterTask_;
+    std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<DetailTableFilterResult>> moduleFilterTask_;
+    Ksword::Ui::VirtualListView threadVirtualList_;
+    Ksword::Ui::VirtualListView moduleVirtualList_;
+    std::shared_ptr<const std::vector<ProcessThreadInfo>> threadEntries_;
+    std::shared_ptr<const std::vector<ProcessThreadInfo>> pendingThreadEntries_;
+    std::shared_ptr<const std::vector<ProcessModuleInfo>> moduleEntries_;
+    std::shared_ptr<const std::vector<ProcessModuleInfo>> pendingModuleEntries_;
+    std::shared_ptr<const std::vector<Ksword::Ui::VirtualListRow>> threadFilterRows_;
+    std::shared_ptr<const std::vector<Ksword::Ui::VirtualListRow>> moduleFilterRows_;
+    std::vector<std::size_t> threadVisibleIndexes_;
+    std::vector<std::size_t> moduleVisibleIndexes_;
+    std::uint64_t threadSourceGeneration_ = 0;
+    std::uint64_t moduleSourceGeneration_ = 0;
+    std::wstring threadFilterQuery_;
+    std::wstring moduleFilterQuery_;
+    int moduleSortColumn_ = 0;
+    bool moduleSortDescending_ = false;
+    bool moduleVerifySignatures_ = true;
     bool tokenLoaded_ = false;
     bool tokenSwitchLoaded_ = false;
     bool sectionLoaded_ = false;

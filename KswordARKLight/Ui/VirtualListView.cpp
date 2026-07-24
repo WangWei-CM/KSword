@@ -27,17 +27,27 @@ HWND VirtualListView::hwnd() const noexcept {
     return hwnd_;
 }
 
+void VirtualListView::detach() noexcept {
+    hwnd_ = nullptr;
+}
+
 bool VirtualListView::addColumns(const std::vector<ListViewColumn>& columns) {
     return AddListViewColumns(hwnd_, columns);
 }
 
 void VirtualListView::setRows(std::vector<VirtualListRow> rows) {
+    rows_ = std::make_shared<const std::vector<VirtualListRow>>(std::move(rows));
+    resetVisibleIndexes();
+}
+
+void VirtualListView::setSharedRows(std::shared_ptr<const std::vector<VirtualListRow>> rows) {
     rows_ = std::move(rows);
     resetVisibleIndexes();
 }
 
 const std::vector<VirtualListRow>& VirtualListView::rows() const noexcept {
-    return rows_;
+    static const std::vector<VirtualListRow> empty;
+    return rows_ ? *rows_ : empty;
 }
 
 const std::vector<std::size_t>& VirtualListView::visibleIndexes() const noexcept {
@@ -45,13 +55,14 @@ const std::vector<std::size_t>& VirtualListView::visibleIndexes() const noexcept
 }
 
 void VirtualListView::setVisibleIndexes(std::vector<std::size_t> indexes) {
-    indexes.erase(std::remove_if(indexes.begin(), indexes.end(), [this](const std::size_t index) { return index >= rows_.size(); }), indexes.end());
+    const std::size_t rowCount = rows_ ? rows_->size() : 0;
+    indexes.erase(std::remove_if(indexes.begin(), indexes.end(), [rowCount](const std::size_t index) { return index >= rowCount; }), indexes.end());
     visibleIndexes_ = std::move(indexes);
     updateItemCount();
 }
 
 void VirtualListView::resetVisibleIndexes() {
-    visibleIndexes_.resize(rows_.size());
+    visibleIndexes_.resize(rows_ ? rows_->size() : 0);
     for (std::size_t index = 0; index < visibleIndexes_.size(); ++index) {
         visibleIndexes_[index] = index;
     }
@@ -131,7 +142,7 @@ const VirtualListRow* VirtualListView::rowAtVisibleIndex(const int visibleIndex)
         return nullptr;
     }
     const std::size_t rowIndex = visibleIndexes_[static_cast<std::size_t>(visibleIndex)];
-    return rowIndex < rows_.size() ? &rows_[rowIndex] : nullptr;
+    return rows_ && rowIndex < rows_->size() ? &(*rows_)[rowIndex] : nullptr;
 }
 
 void VirtualListView::updateItemCount() {
