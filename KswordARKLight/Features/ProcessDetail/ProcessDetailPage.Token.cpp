@@ -9,6 +9,7 @@
 #include <iomanip>
 #include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace Ksword::Features::ProcessDetail {
@@ -138,6 +139,123 @@ void SetChecked(HWND checkbox, bool checked) {
     }
 }
 
+constexpr std::array<int, 10> kTokenBooleanInformationClasses{
+    15, 23, 24, 26, 21, 29, 40, 46, 47, 51
+};
+
+ProcessTokenReportSnapshot CollectTokenReportSnapshot(const DWORD processId) {
+    ProcessTokenReportSnapshot snapshot{};
+    ScopedHandle process(::OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, processId));
+    HANDLE rawToken = nullptr;
+    if (!process || !::OpenProcessToken(process.get(), TOKEN_QUERY, &rawToken)) {
+        const DWORD error = ::GetLastError();
+        snapshot.statusText = L"● 刷新失败：无法打开目标令牌";
+        snapshot.reportText = L"OpenProcess/OpenProcessToken failed: " + std::to_wstring(error);
+        snapshot.editorStatusText = L"行:1 列:1 字符:0 文件:<未命名> 模式:只读 编码:UTF-16";
+        return snapshot;
+    }
+
+    ScopedHandle token(rawToken);
+    std::wostringstream report;
+    report << L"[Token / Security Information]\r\nPID: " << processId << L"\r\n";
+
+    std::vector<std::byte> bytes;
+    DWORD error = 0;
+    if (QueryTokenBytes(token.get(), TokenUser, bytes, error)) {
+        const auto* user = reinterpret_cast<const TOKEN_USER*>(bytes.data());
+        report << L"User: " << SidText(user->User.Sid) << L"\r\n";
+    }
+    if (QueryTokenBytes(token.get(), TokenElevationType, bytes, error)) {
+        const auto value = *reinterpret_cast<const TOKEN_ELEVATION_TYPE*>(bytes.data());
+        report << L"ElevationType: " << (value == TokenElevationTypeFull ? L"Full" : value == TokenElevationTypeLimited ? L"Limited" : L"Default") << L"\r\n";
+    }
+    if (QueryTokenBytes(token.get(), TokenElevation, bytes, error)) {
+        report << L"IsElevated: " << (reinterpret_cast<const TOKEN_ELEVATION*>(bytes.data())->TokenIsElevated ? L"true" : L"false") << L"\r\n";
+    }
+    if (QueryTokenBytes(token.get(), TokenGroups, bytes, error)) {
+        const auto* groups = reinterpret_cast<const TOKEN_GROUPS*>(bytes.data());
+        report << L"GroupCount: " << groups->GroupCount << L"\r\n";
+        for (DWORD index = 0; index < std::min<DWORD>(groups->GroupCount, 16); ++index) {
+            report << L"  - " << SidText(groups->Groups[index].Sid) << L"\r\n";
+        }
+    }
+    if (QueryTokenBytes(token.get(), TokenPrivileges, bytes, error)) {
+        const auto* privileges = reinterpret_cast<const TOKEN_PRIVILEGES*>(bytes.data());
+        report << L"PrivilegeCount: " << privileges->PrivilegeCount << L"\r\n";
+        for (DWORD index = 0; index < std::min<DWORD>(privileges->PrivilegeCount, 24); ++index) {
+            wchar_t name[256]{};
+            DWORD length = static_cast<DWORD>(std::size(name));
+            ::LookupPrivilegeNameW(nullptr, const_cast<LUID*>(&privileges->Privileges[index].Luid), name, &length);
+            report << L"  - " << (*name ? name : L"<unknown>") << L" ["
+                   << ((privileges->Privileges[index].Attributes & SE_PRIVILEGE_ENABLED) ? L"Enabled" : L"Disabled")
+                   << L"]\r\n";
+        }
+    }
+
+    report << L"\r\n[All TokenInformationClass Snapshot]\r\n";
+    for (int informationClass = 1; informationClass <= 80; ++informationClass) {
+        if (QueryTokenBytes(token.get(), informationClass, bytes, error)) {
+            report << L"  [" << informationClass << L"] " << TokenClassName(informationClass)
+                   << L": size=" << bytes.size() << L", raw=" << RawPreview(bytes) << L"\r\n";
+        } else {
+            report << L"  [" << informationClass << L"] " << TokenClassName(informationClass)
+                   << L": queryFailed(" << error << L")\r\n";
+        }
+    }
+    DWORD sessionId = 0;
+    DWORD returnLength = 0;
+    if (::GetTokenInformation(token.get(), TokenSessionId, &sessionId, sizeof(sessionId), &returnLength)) {
+        report << L"SessionId: " << sessionId << L"\r\n";
+    }
+
+    snapshot.succeeded = true;
+    snapshot.reportText = report.str();
+    snapshot.statusText = L"● 刷新完成";
+    snapshot.editorStatusText =
+        L"行:1 列:1 字符:" + std::to_wstring(snapshot.reportText.size()) + L" 文件:<未命名> 模式:只读 编码:UTF-16";
+    return snapshot;
+}
+
+ProcessTokenSwitchSnapshot CollectTokenSwitchSnapshot(const DWORD processId) {
+    ProcessTokenSwitchSnapshot snapshot{};
+    ScopedHandle process(::OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, processId));
+    HANDLE rawToken = nullptr;
+    if (!process || !::OpenProcessToken(process.get(), TOKEN_QUERY, &rawToken)) {
+        snapshot.statusText = L"● 刷新失败：无法打开目标令牌";
+        return snapshot;
+    }
+
+    ScopedHandle token(rawToken);
+    int success = 0;
+    for (std::size_t index = 0; index < kTokenBooleanInformationClasses.size(); ++index) {
+        ULONG value = 0;
+        DWORD returned = 0;
+        if (::GetTokenInformation(
+                token.get(),
+                static_cast<TOKEN_INFORMATION_CLASS>(kTokenBooleanInformationClasses[index]),
+                &value,
+                sizeof(value),
+                &returned)) {
+            snapshot.values[index] = value != 0;
+            snapshot.updated[index] = true;
+            ++success;
+        }
+    }
+
+    TOKEN_MANDATORY_POLICY policy{};
+    DWORD returned = 0;
+    if (::GetTokenInformation(token.get(), TokenMandatoryPolicy, &policy, sizeof(policy), &returned)) {
+        snapshot.values[10] = (policy.Policy & 0x1U) != 0;
+        snapshot.values[11] = (policy.Policy & 0x2U) != 0;
+        snapshot.updated[10] = true;
+        snapshot.updated[11] = true;
+        ++success;
+    }
+    snapshot.succeeded = true;
+    snapshot.statusText = L"● 刷新完成：" + std::to_wstring(success) + L" 项开关已同步";
+    return snapshot;
+}
+
 } // namespace
 
 bool ProcessDetailPage::CreateTokenTab() {
@@ -197,6 +315,9 @@ bool ProcessDetailPage::CreateTokenSwitchTab() {
     AddLabel(tab, 0,
         L"提示：可先点“刷新全部令牌信息”查看所有 TokenInformationClass 的当前状态，再按快捷或原始模式应用。",
         10, 444, -10, 44);
+    if (actionTask_ && actionTask_->running()) {
+        SetBackgroundActionControlsEnabled(false);
+    }
     return infoClass && mode && payload;
 }
 
@@ -254,107 +375,62 @@ bool ProcessDetailPage::HandleTokenSwitchCommand(int controlId) {
 }
 
 void ProcessDetailPage::RefreshTokenReport() {
-    SetPageStatus(TabIndex::Token, TokenStatus, L"● 正在刷新令牌...");
-    ScopedHandle process(::OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, processId_));
-    HANDLE rawToken = nullptr;
-    if (!process || !::OpenProcessToken(process.get(), TOKEN_QUERY, &rawToken)) {
-        SetPageStatus(TabIndex::Token, TokenStatus, L"● 刷新失败：无法打开目标令牌");
-        SetControlText(TabIndex::Token, TokenOutput, L"OpenProcess/OpenProcessToken failed: " + std::to_wstring(::GetLastError()));
+    if (!tokenReportTask_) {
+        SetPageStatus(TabIndex::Token, TokenStatus, L"● 令牌后台任务不可用。");
         return;
     }
-    ScopedHandle token(rawToken);
-    std::wostringstream report;
-    report << L"[Token / Security Information]\r\nPID: " << processId_ << L"\r\n";
-
-    std::vector<std::byte> bytes;
-    DWORD error = 0;
-    if (QueryTokenBytes(token.get(), TokenUser, bytes, error)) {
-        const auto* user = reinterpret_cast<const TOKEN_USER*>(bytes.data());
-        report << L"User: " << SidText(user->User.Sid) << L"\r\n";
-    }
-    if (QueryTokenBytes(token.get(), TokenElevationType, bytes, error)) {
-        const auto value = *reinterpret_cast<const TOKEN_ELEVATION_TYPE*>(bytes.data());
-        report << L"ElevationType: " << (value == TokenElevationTypeFull ? L"Full" : value == TokenElevationTypeLimited ? L"Limited" : L"Default") << L"\r\n";
-    }
-    if (QueryTokenBytes(token.get(), TokenElevation, bytes, error)) {
-        report << L"IsElevated: " << (reinterpret_cast<const TOKEN_ELEVATION*>(bytes.data())->TokenIsElevated ? L"true" : L"false") << L"\r\n";
-    }
-    if (QueryTokenBytes(token.get(), TokenGroups, bytes, error)) {
-        const auto* groups = reinterpret_cast<const TOKEN_GROUPS*>(bytes.data());
-        report << L"GroupCount: " << groups->GroupCount << L"\r\n";
-        for (DWORD index = 0; index < std::min<DWORD>(groups->GroupCount, 16); ++index) {
-            report << L"  - " << SidText(groups->Groups[index].Sid) << L"\r\n";
-        }
-    }
-    if (QueryTokenBytes(token.get(), TokenPrivileges, bytes, error)) {
-        const auto* privileges = reinterpret_cast<const TOKEN_PRIVILEGES*>(bytes.data());
-        report << L"PrivilegeCount: " << privileges->PrivilegeCount << L"\r\n";
-        for (DWORD index = 0; index < std::min<DWORD>(privileges->PrivilegeCount, 24); ++index) {
-            wchar_t name[256]{};
-            DWORD length = static_cast<DWORD>(std::size(name));
-            ::LookupPrivilegeNameW(nullptr, const_cast<LUID*>(&privileges->Privileges[index].Luid), name, &length);
-            report << L"  - " << (*name ? name : L"<unknown>") << L" ["
-                   << ((privileges->Privileges[index].Attributes & SE_PRIVILEGE_ENABLED) ? L"Enabled" : L"Disabled")
-                   << L"]\r\n";
-        }
-    }
-
-    report << L"\r\n[All TokenInformationClass Snapshot]\r\n";
-    for (int informationClass = 1; informationClass <= 80; ++informationClass) {
-        if (QueryTokenBytes(token.get(), informationClass, bytes, error)) {
-            report << L"  [" << informationClass << L"] " << TokenClassName(informationClass)
-                   << L": size=" << bytes.size() << L", raw=" << RawPreview(bytes) << L"\r\n";
-        } else {
-            report << L"  [" << informationClass << L"] " << TokenClassName(informationClass)
-                   << L": queryFailed(" << error << L")\r\n";
-        }
-    }
-    DWORD sessionId = 0;
-    DWORD returnLength = 0;
-    if (::GetTokenInformation(token.get(), TokenSessionId, &sessionId, sizeof(sessionId), &returnLength)) {
-        report << L"SessionId: " << sessionId << L"\r\n";
-    }
-    SetControlText(TabIndex::Token, TokenOutput, report.str());
-    SetPageStatus(TabIndex::Token, TokenStatus, L"● 刷新完成");
-    SetControlText(TabIndex::Token, TokenEditorStatus,
-        L"行:1 列:1 字符:" + std::to_wstring(report.str().size()) + L" 文件:<未命名> 模式:只读 编码:UTF-16");
-    tokenLoaded_ = true;
+    SetPageStatus(TabIndex::Token, TokenStatus, L"● 正在刷新令牌...");
+    const DWORD processId = processId_;
+    tokenReportTask_->request(
+        [processId] { return CollectTokenReportSnapshot(processId); },
+        [this](std::uint64_t, std::optional<ProcessTokenReportSnapshot>&& result, std::exception_ptr error) {
+            if (error || !result.has_value()) {
+                SetPageStatus(TabIndex::Token, TokenStatus, L"● 令牌后台查询异常结束。");
+                return;
+            }
+            SetControlText(TabIndex::Token, TokenOutput, result->reportText);
+            SetControlText(TabIndex::Token, TokenEditorStatus, result->editorStatusText);
+            SetPageStatus(TabIndex::Token, TokenStatus, result->statusText);
+            tokenLoaded_ = result->succeeded;
+        });
 }
 
 void ProcessDetailPage::RefreshTokenSwitches() {
-    SetPageStatus(TabIndex::TokenSwitch, TokenSwitchStatus, L"● 正在读取令牌开关...");
-    ScopedHandle process(::OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, processId_));
-    HANDLE rawToken = nullptr;
-    if (!process || !::OpenProcessToken(process.get(), TOKEN_QUERY, &rawToken)) {
-        SetPageStatus(TabIndex::TokenSwitch, TokenSwitchStatus, L"● 刷新失败：无法打开目标令牌");
+    if (!tokenSwitchTask_) {
+        SetPageStatus(TabIndex::TokenSwitch, TokenSwitchStatus, L"● 令牌开关后台任务不可用。");
         return;
     }
-    ScopedHandle token(rawToken);
-    const std::array<std::pair<int, int>, 10> mappings{{
-        { 15, TokenSandboxInert }, { 23, TokenVirtualizationAllowed }, { 24, TokenVirtualizationEnabled },
-        { 26, TokenUiAccess }, { 21, TokenHasRestrictions }, { 29, TokenIsAppContainer },
-        { 40, TokenIsRestricted }, { 46, TokenIsLessPrivilegedAppContainer },
-        { 47, TokenIsSandboxed }, { 51, TokenIsAppSilo }
-    }};
-    int success = 0;
-    for (const auto& [informationClass, controlId] : mappings) {
-        ULONG value = 0;
-        DWORD returned = 0;
-        if (::GetTokenInformation(token.get(), static_cast<TOKEN_INFORMATION_CLASS>(informationClass), &value, sizeof(value), &returned)) {
-            SetChecked(Control(TabIndex::TokenSwitch, controlId), value != 0);
-            ++success;
-        }
-    }
-    TOKEN_MANDATORY_POLICY policy{};
-    DWORD returned = 0;
-    if (::GetTokenInformation(token.get(), TokenMandatoryPolicy, &policy, sizeof(policy), &returned)) {
-        SetChecked(Control(TabIndex::TokenSwitch, TokenMandatoryNoWriteUp), (policy.Policy & 0x1U) != 0);
-        SetChecked(Control(TabIndex::TokenSwitch, TokenMandatoryNewProcessMin), (policy.Policy & 0x2U) != 0);
-        ++success;
-    }
-    SetPageStatus(TabIndex::TokenSwitch, TokenSwitchStatus,
-        L"● 刷新完成：" + std::to_wstring(success) + L" 项开关已同步");
-    tokenSwitchLoaded_ = true;
+    SetPageStatus(TabIndex::TokenSwitch, TokenSwitchStatus, L"● 正在读取令牌开关...");
+    const DWORD processId = processId_;
+    tokenSwitchTask_->request(
+        [processId] { return CollectTokenSwitchSnapshot(processId); },
+        [this](std::uint64_t, std::optional<ProcessTokenSwitchSnapshot>&& result, std::exception_ptr error) {
+            if (error || !result.has_value()) {
+                SetPageStatus(TabIndex::TokenSwitch, TokenSwitchStatus, L"● 令牌开关后台查询异常结束。");
+                return;
+            }
+            constexpr std::array<int, 12> controls{
+                TokenSandboxInert,
+                TokenVirtualizationAllowed,
+                TokenVirtualizationEnabled,
+                TokenUiAccess,
+                TokenHasRestrictions,
+                TokenIsAppContainer,
+                TokenIsRestricted,
+                TokenIsLessPrivilegedAppContainer,
+                TokenIsSandboxed,
+                TokenIsAppSilo,
+                TokenMandatoryNoWriteUp,
+                TokenMandatoryNewProcessMin
+            };
+            for (std::size_t index = 0; index < controls.size(); ++index) {
+                if (result->updated[index]) {
+                    SetChecked(Control(TabIndex::TokenSwitch, controls[index]), result->values[index]);
+                }
+            }
+            SetPageStatus(TabIndex::TokenSwitch, TokenSwitchStatus, result->statusText);
+            tokenSwitchLoaded_ = result->succeeded;
+        });
 }
 
 void ProcessDetailPage::ApplyTokenSwitches() {
@@ -362,37 +438,60 @@ void ProcessDetailPage::ApplyTokenSwitches() {
         L"令牌开关", MB_YESNO | MB_DEFBUTTON2 | MB_ICONWARNING) != IDYES) {
         return;
     }
-    const auto setInformation = reinterpret_cast<NtSetInformationTokenFn>(
-        ::GetProcAddress(::GetModuleHandleW(L"ntdll.dll"), "NtSetInformationToken"));
-    ScopedHandle process(::OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, processId_));
-    HANDLE rawToken = nullptr;
-    if (!setInformation || !process || !::OpenProcessToken(process.get(), TOKEN_QUERY | TOKEN_ADJUST_DEFAULT, &rawToken)) {
-        SetPageStatus(TabIndex::TokenSwitch, TokenSwitchStatus, L"● 应用失败：无法获取 NtSetInformationToken/令牌写权限");
-        return;
-    }
-    ScopedHandle token(rawToken);
-    const std::array<std::pair<int, int>, 10> mappings{{
-        { 15, TokenSandboxInert }, { 23, TokenVirtualizationAllowed }, { 24, TokenVirtualizationEnabled },
-        { 26, TokenUiAccess }, { 21, TokenHasRestrictions }, { 29, TokenIsAppContainer },
-        { 40, TokenIsRestricted }, { 46, TokenIsLessPrivilegedAppContainer },
-        { 47, TokenIsSandboxed }, { 51, TokenIsAppSilo }
-    }};
-    int success = 0;
-    int failed = 0;
-    for (const auto& [informationClass, controlId] : mappings) {
-        ULONG value = IsChecked(Control(TabIndex::TokenSwitch, controlId)) ? 1UL : 0UL;
-        const NTSTATUS status = setInformation(token.get(), static_cast<TOKEN_INFORMATION_CLASS>(informationClass), &value, sizeof(value));
-        status >= 0 ? ++success : ++failed;
-    }
-    TOKEN_MANDATORY_POLICY policy{};
-    if (IsChecked(Control(TabIndex::TokenSwitch, TokenMandatoryNoWriteUp))) { policy.Policy |= 0x1U; }
-    if (IsChecked(Control(TabIndex::TokenSwitch, TokenMandatoryNewProcessMin))) { policy.Policy |= 0x2U; }
-    const NTSTATUS policyStatus = setInformation(token.get(), TokenMandatoryPolicy, &policy, sizeof(policy));
-    policyStatus >= 0 ? ++success : ++failed;
-    SetPageStatus(TabIndex::TokenSwitch, TokenSwitchStatus,
-        L"● 应用完成：成功" + std::to_wstring(success) + L"，失败" + std::to_wstring(failed));
-    RefreshTokenSwitches();
-    RefreshTokenReport();
+    const std::array<bool, 12> values{
+        IsChecked(Control(TabIndex::TokenSwitch, TokenSandboxInert)),
+        IsChecked(Control(TabIndex::TokenSwitch, TokenVirtualizationAllowed)),
+        IsChecked(Control(TabIndex::TokenSwitch, TokenVirtualizationEnabled)),
+        IsChecked(Control(TabIndex::TokenSwitch, TokenUiAccess)),
+        IsChecked(Control(TabIndex::TokenSwitch, TokenHasRestrictions)),
+        IsChecked(Control(TabIndex::TokenSwitch, TokenIsAppContainer)),
+        IsChecked(Control(TabIndex::TokenSwitch, TokenIsRestricted)),
+        IsChecked(Control(TabIndex::TokenSwitch, TokenIsLessPrivilegedAppContainer)),
+        IsChecked(Control(TabIndex::TokenSwitch, TokenIsSandboxed)),
+        IsChecked(Control(TabIndex::TokenSwitch, TokenIsAppSilo)),
+        IsChecked(Control(TabIndex::TokenSwitch, TokenMandatoryNoWriteUp)),
+        IsChecked(Control(TabIndex::TokenSwitch, TokenMandatoryNewProcessMin))
+    };
+    const DWORD processId = processId_;
+    ExecuteBackgroundAction(
+        TabIndex::TokenSwitch,
+        TokenSwitchStatus,
+        L"● 正在后台写回令牌开关…",
+        [processId, values] {
+            ProcessDetailActionResult action{};
+            const auto setInformation = reinterpret_cast<NtSetInformationTokenFn>(
+                ::GetProcAddress(::GetModuleHandleW(L"ntdll.dll"), "NtSetInformationToken"));
+            ScopedHandle process(::OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, processId));
+            HANDLE rawToken = nullptr;
+            if (!setInformation || !process || !::OpenProcessToken(
+                    process.get(), TOKEN_QUERY | TOKEN_ADJUST_DEFAULT, &rawToken)) {
+                action.statusText = L"● 应用失败：无法获取 NtSetInformationToken/令牌写权限";
+                return action;
+            }
+
+            ScopedHandle token(rawToken);
+            int success = 0;
+            int failed = 0;
+            for (std::size_t index = 0; index < kTokenBooleanInformationClasses.size(); ++index) {
+                ULONG value = values[index] ? 1UL : 0UL;
+                const NTSTATUS status = setInformation(
+                    token.get(),
+                    static_cast<TOKEN_INFORMATION_CLASS>(kTokenBooleanInformationClasses[index]),
+                    &value,
+                    sizeof(value));
+                status >= 0 ? ++success : ++failed;
+            }
+            TOKEN_MANDATORY_POLICY policy{};
+            if (values[10]) { policy.Policy |= 0x1U; }
+            if (values[11]) { policy.Policy |= 0x2U; }
+            const NTSTATUS policyStatus = setInformation(token.get(), TokenMandatoryPolicy, &policy, sizeof(policy));
+            policyStatus >= 0 ? ++success : ++failed;
+            action.statusText =
+                L"● 应用完成：成功" + std::to_wstring(success) + L"，失败" + std::to_wstring(failed);
+            action.refreshTokenSwitches = true;
+            action.refreshTokenReport = true;
+            return action;
+        });
 }
 
 void ProcessDetailPage::ApplyRawTokenValue() {
@@ -436,26 +535,42 @@ void ProcessDetailPage::ApplyRawTokenValue() {
         }
     }
 
-    const auto setInformation = reinterpret_cast<NtSetInformationTokenFn>(
-        ::GetProcAddress(::GetModuleHandleW(L"ntdll.dll"), "NtSetInformationToken"));
-    ScopedHandle process(::OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, processId_));
-    HANDLE rawToken = nullptr;
-    if (!setInformation || !process || !::OpenProcessToken(
-            process.get(), TOKEN_QUERY | TOKEN_ADJUST_DEFAULT | TOKEN_ADJUST_SESSIONID, &rawToken)) {
-        SetPageStatus(TabIndex::TokenSwitch, TokenSwitchStatus, L"● 原始设置失败：无法打开目标令牌");
+    if (payload.size() > 16U * 1024U * 1024U) {
+        SetPageStatus(TabIndex::TokenSwitch, TokenSwitchStatus, L"● 原始设置失败：负载超过16 MiB上限");
         return;
     }
-    ScopedHandle token(rawToken);
-    const NTSTATUS status = setInformation(
-        token.get(), static_cast<TOKEN_INFORMATION_CLASS>(informationClass), payload.data(), static_cast<ULONG>(payload.size()));
-    std::wostringstream message;
-    message << (status >= 0 ? L"● 原始设置成功：" : L"● 原始设置失败：")
-            << L"[" << informationClass << L"] " << TokenClassName(informationClass)
-            << L", size=" << payload.size() << L", status=0x"
-            << std::uppercase << std::hex << static_cast<std::uint32_t>(status);
-    SetPageStatus(TabIndex::TokenSwitch, TokenSwitchStatus, message.str());
-    RefreshTokenSwitches();
-    RefreshTokenReport();
+    const DWORD processId = processId_;
+    ExecuteBackgroundAction(
+        TabIndex::TokenSwitch,
+        TokenSwitchStatus,
+        L"● 正在后台写入原始令牌信息…",
+        [informationClass, processId, payload = std::move(payload)]() mutable {
+            ProcessDetailActionResult action{};
+            const auto setInformation = reinterpret_cast<NtSetInformationTokenFn>(
+                ::GetProcAddress(::GetModuleHandleW(L"ntdll.dll"), "NtSetInformationToken"));
+            ScopedHandle process(::OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, processId));
+            HANDLE rawToken = nullptr;
+            if (!setInformation || !process || !::OpenProcessToken(
+                    process.get(), TOKEN_QUERY | TOKEN_ADJUST_DEFAULT | TOKEN_ADJUST_SESSIONID, &rawToken)) {
+                action.statusText = L"● 原始设置失败：无法打开目标令牌";
+                return action;
+            }
+            ScopedHandle token(rawToken);
+            const NTSTATUS status = setInformation(
+                token.get(),
+                static_cast<TOKEN_INFORMATION_CLASS>(informationClass),
+                payload.data(),
+                static_cast<ULONG>(payload.size()));
+            std::wostringstream message;
+            message << (status >= 0 ? L"● 原始设置成功：" : L"● 原始设置失败：")
+                    << L"[" << informationClass << L"] " << TokenClassName(informationClass)
+                    << L", size=" << payload.size() << L", status=0x"
+                    << std::uppercase << std::hex << static_cast<std::uint32_t>(status);
+            action.statusText = message.str();
+            action.refreshTokenSwitches = true;
+            action.refreshTokenReport = true;
+            return action;
+        });
 }
 
 } // namespace Ksword::Features::ProcessDetail

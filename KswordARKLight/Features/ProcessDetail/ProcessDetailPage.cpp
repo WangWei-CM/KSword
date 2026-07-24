@@ -28,6 +28,8 @@ constexpr UINT kMsgSnapshotCompleted = WM_APP + 610;
 constexpr UINT kMsgThreadFilterCompleted = WM_APP + 611;
 constexpr UINT kMsgModuleFilterCompleted = WM_APP + 612;
 constexpr UINT kMsgActionCompleted = WM_APP + 613;
+constexpr UINT kMsgTokenReportCompleted = WM_APP + 614;
+constexpr UINT kMsgTokenSwitchCompleted = WM_APP + 615;
 constexpr int kSnapshotLoadingOverlayId = 1110;
 
 constexpr std::array<const wchar_t*, 8> kTabTitles{
@@ -96,6 +98,12 @@ ProcessDetailPage::~ProcessDetailPage() {
     if (actionTask_) {
         actionTask_->cancel();
     }
+    if (tokenReportTask_) {
+        tokenReportTask_->cancel();
+    }
+    if (tokenSwitchTask_) {
+        tokenSwitchTask_->cancel();
+    }
     if (threadFilterTask_) {
         threadFilterTask_->cancel();
     }
@@ -163,6 +171,16 @@ LRESULT ProcessDetailPage::HandleMessage(HWND hwnd, UINT message, WPARAM wParam,
             return 0;
         }
         break;
+    case kMsgTokenReportCompleted:
+        if (tokenReportTask_ && tokenReportTask_->consume(hwnd, wParam, lParam)) {
+            return 0;
+        }
+        break;
+    case kMsgTokenSwitchCompleted:
+        if (tokenSwitchTask_ && tokenSwitchTask_->consume(hwnd, wParam, lParam)) {
+            return 0;
+        }
+        break;
     case kMsgThreadFilterCompleted:
         if (threadFilterTask_ && threadFilterTask_->consume(hwnd, wParam, lParam)) {
             return 0;
@@ -191,6 +209,12 @@ LRESULT ProcessDetailPage::HandleMessage(HWND hwnd, UINT message, WPARAM wParam,
         }
         if (actionTask_) {
             actionTask_->cancel();
+        }
+        if (tokenReportTask_) {
+            tokenReportTask_->cancel();
+        }
+        if (tokenSwitchTask_) {
+            tokenSwitchTask_->cancel();
         }
         if (threadFilterTask_) {
             threadFilterTask_->cancel();
@@ -237,9 +261,11 @@ bool ProcessDetailPage::Initialize(HWND hwnd) {
     loadingOverlay_ = Ksword::Ui::CreateLoadingOverlay(hwnd_, kSnapshotLoadingOverlayId, { 0, 0, 1, 1 });
     snapshotTask_ = std::make_unique<Ksword::Ui::AsyncSnapshotTask<ProcessDetailSnapshot>>(hwnd_, kMsgSnapshotCompleted);
     actionTask_ = std::make_unique<Ksword::Ui::AsyncSnapshotTask<ProcessDetailActionResult>>(hwnd_, kMsgActionCompleted);
+    tokenReportTask_ = std::make_unique<Ksword::Ui::AsyncSnapshotTask<ProcessTokenReportSnapshot>>(hwnd_, kMsgTokenReportCompleted);
+    tokenSwitchTask_ = std::make_unique<Ksword::Ui::AsyncSnapshotTask<ProcessTokenSwitchSnapshot>>(hwnd_, kMsgTokenSwitchCompleted);
     threadFilterTask_ = std::make_unique<Ksword::Ui::AsyncSnapshotTask<DetailTableFilterResult>>(hwnd_, kMsgThreadFilterCompleted);
     moduleFilterTask_ = std::make_unique<Ksword::Ui::AsyncSnapshotTask<DetailTableFilterResult>>(hwnd_, kMsgModuleFilterCompleted);
-    if (!loadingOverlay_ || !snapshotTask_ || !actionTask_ || !threadFilterTask_ || !moduleFilterTask_) {
+    if (!loadingOverlay_ || !snapshotTask_ || !actionTask_ || !tokenReportTask_ || !tokenSwitchTask_ || !threadFilterTask_ || !moduleFilterTask_) {
         return false;
     }
     ::SendMessageW(tab_, TCM_SETCURSEL, 0, 0);
@@ -664,6 +690,12 @@ void ProcessDetailPage::ExecuteBackgroundAction(
                     result->dialogTitle.empty() ? L"进程操作" : result->dialogTitle.c_str(),
                     MB_OK | (result->dialogIcon == 0 ? MB_ICONINFORMATION : result->dialogIcon));
             }
+            if (result->refreshTokenSwitches) {
+                RefreshTokenSwitches();
+            }
+            if (result->refreshTokenReport) {
+                RefreshTokenReport();
+            }
             if (result->refreshRequired) {
                 RefreshAll();
             }
@@ -675,7 +707,7 @@ void ProcessDetailPage::ExecuteBackgroundAction(
 // remain available, so the user can inspect prior data without starting a
 // competing process/R0 request.
 void ProcessDetailPage::SetBackgroundActionControlsEnabled(const bool enabled) {
-    constexpr std::array<int, 24> controls{
+    constexpr std::array<int, 41> controls{
         ActionTerminateMode,
         ActionTerminate,
         ActionSuspend,
@@ -699,12 +731,28 @@ void ProcessDetailPage::SetBackgroundActionControlsEnabled(const bool enabled) {
         ActionInjectDll,
         ActionShellcodePath,
         ActionBrowseShellcode,
-        ActionInjectShellcode
+        ActionInjectShellcode,
+        TokenSwitchApply,
+        TokenRawInfoClass,
+        TokenRawInputMode,
+        TokenRawPayload,
+        TokenRawApply,
+        TokenSandboxInert,
+        TokenVirtualizationAllowed,
+        TokenVirtualizationEnabled,
+        TokenUiAccess,
+        TokenMandatoryNoWriteUp,
+        TokenMandatoryNewProcessMin,
+        TokenHasRestrictions,
+        TokenIsAppContainer,
+        TokenIsRestricted,
+        TokenIsLessPrivilegedAppContainer,
+        TokenIsSandboxed,
+        TokenIsAppSilo
     };
     for (const int controlId : controls) {
-        if (HWND control = Control(TabIndex::Actions, controlId)) {
-            ::EnableWindow(control, enabled);
-        }
+        const TabIndex tab = controlId >= TokenSwitchRefresh ? TabIndex::TokenSwitch : TabIndex::Actions;
+        if (HWND control = Control(tab, controlId)) { ::EnableWindow(control, enabled); }
     }
 }
 

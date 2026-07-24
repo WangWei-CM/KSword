@@ -2,6 +2,7 @@
 
 #include "../../Core/Win32Lean.h"
 
+#include <array>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -95,6 +96,26 @@ struct ProcessDetailSnapshot {
     bool threadsSucceeded = false;
     bool modulesSucceeded = false;
     bool r0AuditSucceeded = false;
+};
+
+// ProcessTokenReportSnapshot contains the fully rendered, immutable token
+// report collected away from the UI thread. The page only assigns these strings
+// to controls when the newest request completes.
+struct ProcessTokenReportSnapshot {
+    bool succeeded = false;
+    std::wstring statusText;
+    std::wstring reportText;
+    std::wstring editorStatusText;
+};
+
+// ProcessTokenSwitchSnapshot keeps the queried boolean token fields in their
+// UI order: ten direct information classes followed by two mandatory-policy
+// bits. It never owns a token handle or an HWND.
+struct ProcessTokenSwitchSnapshot {
+    bool succeeded = false;
+    std::array<bool, 12> values{};
+    std::array<bool, 12> updated{};
+    std::wstring statusText;
 };
 
 } // namespace Ksword::Features::ProcessDetail

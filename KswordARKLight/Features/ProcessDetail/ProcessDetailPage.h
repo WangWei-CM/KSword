@@ -201,6 +201,8 @@ private:
 
     struct ProcessDetailActionResult {
         bool refreshRequired = false;
+        bool refreshTokenReport = false;
+        bool refreshTokenSwitches = false;
         std::wstring statusText;
         std::wstring dialogTitle;
         std::wstring dialogText;
@@ -368,6 +370,8 @@ private:
     ProcessDetailSnapshot snapshot_{};
     std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<ProcessDetailSnapshot>> snapshotTask_;
     std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<ProcessDetailActionResult>> actionTask_;
+    std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<ProcessTokenReportSnapshot>> tokenReportTask_;
+    std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<ProcessTokenSwitchSnapshot>> tokenSwitchTask_;
     std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<DetailTableFilterResult>> threadFilterTask_;
     std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<DetailTableFilterResult>> moduleFilterTask_;
     Ksword::Ui::VirtualListView threadVirtualList_;
