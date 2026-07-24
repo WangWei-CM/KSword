@@ -620,7 +620,10 @@ Return Value:
     if (!ownerResolved) {
         processId = 0UL;
         threadId = 0UL;
-        sessionId = 0UL;
+        // gTimerHashTable was read while attached to RequestedSessionId. Keep
+        // the object visible even when a nearest-previous private pti offset
+        // cannot be joined to the public PsGetThreadWin32Thread map.
+        sessionId = Context->RequestedSessionId;
     }
 
     if (!KswordARKWin32kTimerMatchesRequest(

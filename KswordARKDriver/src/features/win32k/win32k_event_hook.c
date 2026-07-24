@@ -640,6 +640,13 @@ KswordARKWin32kQueryEventHookSnapshot(
             &processId,
             &threadId,
             &sessionId);
+        if (!ownerResolved) {
+            // gpWinEventHooks is session-local. Preserve the attached session
+            // so an unresolved private pti field does not discard the node.
+            processId = 0UL;
+            threadId = 0UL;
+            sessionId = requestedSessionId;
+        }
 
         if (KswordARKWin32kEventMatchesRequest(
                 Request,
