@@ -78,6 +78,7 @@ constexpr UINT kMsgKernelActionCompleted = WM_APP + 606;
 constexpr UINT kMsgCallbackEventReceived = WM_APP + 607;
 constexpr UINT kMsgCallbackAnswerCompleted = WM_APP + 608;
 constexpr UINT kMsgR0EvidenceFilterCompleted = WM_APP + 609;
+constexpr UINT kMsgCallbackFileIoCompleted = WM_APP + 610;
 constexpr UINT_PTR kTimerR0EvidenceFilter = 51057;
 constexpr int kIdCallbackGlobalEnabled = 51047;
 constexpr int kIdCallbackFileMonitorFsctlOnly = 51048;
@@ -1592,6 +1593,7 @@ LRESULT KernelPage::HandleMessage(HWND hwnd, const UINT msg, const WPARAM wParam
         queryTask_ = std::make_unique<Ksword::Ui::AsyncSnapshotTask<KernelOperationResult>>(hwnd, kMsgKernelQueryCompleted);
         actionTask_ = std::make_unique<Ksword::Ui::AsyncSnapshotTask<KernelOperationResult>>(hwnd, kMsgKernelActionCompleted);
         callbackAnswerTask_ = std::make_unique<Ksword::Ui::AsyncSnapshotTask<KernelOperationResult>>(hwnd, kMsgCallbackAnswerCompleted);
+        callbackFileIoTask_ = std::make_unique<Ksword::Ui::AsyncSnapshotTask<CallbackFileIoResult>>(hwnd, kMsgCallbackFileIoCompleted);
         r0EvidenceFilterTask_ = std::make_unique<Ksword::Ui::AsyncSnapshotTask<KernelR0EvidenceSnapshot>>(hwnd, kMsgR0EvidenceFilterCompleted);
         callbackEventReceiver_ = std::make_unique<CallbackEventReceiver>(hwnd, kMsgCallbackEventReceived);
         CreateChildControls();
@@ -1621,6 +1623,11 @@ LRESULT KernelPage::HandleMessage(HWND hwnd, const UINT msg, const WPARAM wParam
     }
     case kMsgCallbackAnswerCompleted:
         if (callbackAnswerTask_ && callbackAnswerTask_->consume(hwnd, wParam, lParam)) {
+            return 0;
+        }
+        break;
+    case kMsgCallbackFileIoCompleted:
+        if (callbackFileIoTask_ && callbackFileIoTask_->consume(hwnd, wParam, lParam)) {
             return 0;
         }
         break;
@@ -2500,6 +2507,9 @@ LRESULT KernelPage::HandleMessage(HWND hwnd, const UINT msg, const WPARAM wParam
         }
         if (callbackAnswerTask_) {
             callbackAnswerTask_->cancel();
+        }
+        if (callbackFileIoTask_) {
+            callbackFileIoTask_->cancel();
         }
         if (r0EvidenceFilterTask_) {
             r0EvidenceFilterTask_->cancel();
@@ -10438,9 +10448,106 @@ void KernelPage::OnCallbackBypassRemove() {
     AppendCallbackAppLog(L"已移除选中 PID，当前列表: " + joined);
 }
 
+// SetCallbackFileIoControlsEnabled serializes the import/export surface while a
+// filesystem task runs. Other callback views remain inspectable and the worker
+// result is discarded automatically if this page closes.
+void KernelPage::SetCallbackFileIoControlsEnabled(const bool enabled) {
+    for (const HWND control : { callbackImportButton_, callbackExportButton_, callbackExportFileMonitorButton_ }) {
+        if (control) {
+            ::EnableWindow(control, enabled);
+        }
+    }
+}
+
+// StartCallbackFileIo is the sole callback-rule file I/O entry. Dialog paths
+// and immutable text snapshots are captured on the UI thread, while decoding
+// and writing execute on AsyncSnapshotTask's worker.
+void KernelPage::StartCallbackFileIo(
+    const CallbackFileIoOperation operation,
+    std::wstring path,
+    std::wstring text) {
+    if (!callbackFileIoTask_) {
+        ::MessageBoxW(hwnd_, L"回调配置文件任务不可用。", L"回调文件操作", MB_OK | MB_ICONWARNING);
+        return;
+    }
+    if (callbackFileIoTask_->running()) {
+        AppendCallbackAppLog(L"回调配置文件任务正在后台执行，请等待完成。");
+        return;
+    }
+
+    const wchar_t* operationText = operation == CallbackFileIoOperation::ImportConfig
+        ? L"正在后台导入回调配置…"
+        : operation == CallbackFileIoOperation::ExportConfig
+            ? L"正在后台导出回调配置…"
+            : L"正在后台导出文件监控事件…";
+    ::SetWindowTextW(statusText_, (std::wstring(L"状态：") + operationText).c_str());
+    AppendCallbackAppLog(operationText);
+    SetCallbackFileIoControlsEnabled(false);
+    callbackFileIoTask_->request(
+        [operation, path = std::move(path), text = std::move(text)]() mutable {
+            CallbackFileIoResult result{};
+            result.operation = operation;
+            result.path = std::move(path);
+            if (operation == CallbackFileIoOperation::ImportConfig) {
+                result.text = ReadWholeFileText(result.path, &result.errorText);
+            } else if (!WriteWholeFileText(result.path, text, &result.errorText)) {
+                result.text.clear();
+            }
+            return result;
+        },
+        [this](std::uint64_t, std::optional<CallbackFileIoResult>&& result, std::exception_ptr error) {
+            SetCallbackFileIoControlsEnabled(true);
+            if (error || !result.has_value()) {
+                AppendCallbackAppLog(L"回调配置文件后台任务异常结束。");
+                ::MessageBoxW(hwnd_, L"回调配置文件后台任务异常结束。", L"回调文件操作", MB_OK | MB_ICONWARNING);
+                return;
+            }
+            ApplyCallbackFileIoResult(std::move(*result));
+        });
+}
+
+// ApplyCallbackFileIoResult applies the completed immutable worker value. The
+// file body has already been read or written, so this code only updates local
+// callback models and UI diagnostics.
+void KernelPage::ApplyCallbackFileIoResult(CallbackFileIoResult result) {
+    const wchar_t* title = result.operation == CallbackFileIoOperation::ImportConfig
+        ? L"导入配置"
+        : result.operation == CallbackFileIoOperation::ExportConfig
+            ? L"导出配置"
+            : L"导出文件事件";
+    if (!result.errorText.empty()) {
+        AppendCallbackAppLog(std::wstring(title) + L"失败: " + result.errorText);
+        ::MessageBoxW(hwnd_, result.errorText.c_str(), title, MB_OK | MB_ICONWARNING);
+        return;
+    }
+
+    if (result.operation == CallbackFileIoOperation::ImportConfig) {
+        std::wstring parseError;
+        if (!LoadCallbackLocalConfig(result.text, &parseError)) {
+            AppendCallbackAppLog(L"导入配置解析失败: " + parseError);
+            ::MessageBoxW(hwnd_, parseError.c_str(), title, MB_OK | MB_ICONWARNING);
+            return;
+        }
+        RenderCallbackLocalModel();
+        AppendCallbackAppLog(L"导入配置成功: " + result.path);
+        ::SetWindowTextW(statusText_, (std::wstring(L"状态：已导入回调配置: ") + result.path).c_str());
+        return;
+    }
+
+    const std::wstring successText = result.operation == CallbackFileIoOperation::ExportConfig
+        ? L"导出配置成功: " + result.path
+        : L"文件系统事件导出成功: " + result.path;
+    AppendCallbackAppLog(successText);
+    ::SetWindowTextW(statusText_, (std::wstring(L"状态：") + successText).c_str());
+}
+
 void KernelPage::OnCallbackImportConfig() {
-    // OnCallbackImportConfig imports the lightweight local callback-rule format.
-    // Input is selected file path; output replaces local editor state.
+    // OnCallbackImportConfig obtains the file path on the UI thread, then
+    // delegates decoding and disk I/O to StartCallbackFileIo.
+    if (callbackFileIoTask_ && callbackFileIoTask_->running()) {
+        AppendCallbackAppLog(L"回调配置文件任务正在后台执行，请等待完成。");
+        return;
+    }
     wchar_t path[MAX_PATH]{};
     OPENFILENAMEW ofn{};
     ofn.lStructSize = sizeof(ofn);
@@ -10452,23 +10559,16 @@ void KernelPage::OnCallbackImportConfig() {
     if (!::GetOpenFileNameW(&ofn)) {
         return;
     }
-    std::wstring error;
-    const std::wstring text = ReadWholeFileText(path, &error);
-    if (!error.empty()) {
-        ::MessageBoxW(hwnd_, error.c_str(), L"导入配置", MB_OK | MB_ICONWARNING);
-        return;
-    }
-    if (!LoadCallbackLocalConfig(text, &error)) {
-        ::MessageBoxW(hwnd_, error.c_str(), L"导入配置", MB_OK | MB_ICONWARNING);
-        return;
-    }
-    RenderCallbackLocalModel();
-    AppendCallbackAppLog(L"导入配置成功: " + std::wstring(path));
+    StartCallbackFileIo(CallbackFileIoOperation::ImportConfig, path);
 }
 
 void KernelPage::OnCallbackExportConfig() {
-    // OnCallbackExportConfig exports the local callback-rule editor state.
-    // Input is selected save path; output is a UTF-16LE .kswrules file.
+    // OnCallbackExportConfig captures the current model snapshot before the
+    // worker writes it, leaving the page responsive during disk activity.
+    if (callbackFileIoTask_ && callbackFileIoTask_->running()) {
+        AppendCallbackAppLog(L"回调配置文件任务正在后台执行，请等待完成。");
+        return;
+    }
     wchar_t path[MAX_PATH] = L"callback_rules.kswrules";
     OPENFILENAMEW ofn{};
     ofn.lStructSize = sizeof(ofn);
@@ -10481,17 +10581,17 @@ void KernelPage::OnCallbackExportConfig() {
     if (!::GetSaveFileNameW(&ofn)) {
         return;
     }
-    std::wstring error;
-    if (!WriteWholeFileText(path, SerializeCallbackLocalConfig(), &error)) {
-        ::MessageBoxW(hwnd_, error.c_str(), L"导出配置", MB_OK | MB_ICONWARNING);
-        return;
-    }
-    AppendCallbackAppLog(L"导出配置成功: " + std::wstring(path));
+    StartCallbackFileIo(CallbackFileIoOperation::ExportConfig, path, SerializeCallbackLocalConfig());
 }
 
 void KernelPage::OnCallbackExportFileMonitor() {
-    // OnCallbackExportFileMonitor writes the visible file-monitor table as TSV.
-    // Input is selected save path; output is a UTF-16LE text file.
+    // OnCallbackExportFileMonitor snapshots the visible table before the worker
+    // writes it. The UI read is bounded to the current list contents and disk
+    // I/O does not run in this command handler.
+    if (callbackFileIoTask_ && callbackFileIoTask_->running()) {
+        AppendCallbackAppLog(L"回调配置文件任务正在后台执行，请等待完成。");
+        return;
+    }
     wchar_t path[MAX_PATH] = L"callback_file_monitor.tsv";
     OPENFILENAMEW ofn{};
     ofn.lStructSize = sizeof(ofn);
@@ -10518,12 +10618,7 @@ void KernelPage::OnCallbackExportFileMonitor() {
             text += ListViewText(callbackFileMonitorList_, row, column);
         }
     }
-    std::wstring error;
-    if (!WriteWholeFileText(path, text, &error)) {
-        ::MessageBoxW(hwnd_, error.c_str(), L"导出文件事件", MB_OK | MB_ICONWARNING);
-        return;
-    }
-    AppendCallbackAppLog(L"文件系统事件导出成功: " + std::wstring(path));
+    StartCallbackFileIo(CallbackFileIoOperation::ExportFileMonitor, path, std::move(text));
 }
 
 void KernelPage::CopyCallbackPanelSelection(HWND source) {

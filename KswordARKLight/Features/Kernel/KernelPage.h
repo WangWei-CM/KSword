@@ -28,6 +28,22 @@ struct KernelR0EvidenceSnapshot {
     int topRow = 0;
 };
 
+enum class CallbackFileIoOperation {
+    ImportConfig,
+    ExportConfig,
+    ExportFileMonitor
+};
+
+// CallbackFileIoResult is the immutable boundary for callback-rule files and
+// file-monitor exports. Picker dialogs and model application remain on the UI
+// thread; file reads and writes are performed by a dedicated worker task.
+struct CallbackFileIoResult {
+    CallbackFileIoOperation operation = CallbackFileIoOperation::ImportConfig;
+    std::wstring path;
+    std::wstring text;
+    std::wstring errorText;
+};
+
 // KernelPage is the lightweight Win32 UI for retained kernel entries. Inputs are
 // parent HWND and bounds during Create; processing owns child controls and sends
 // model requests to KernelFacade; return behavior is HWND-based like normal
@@ -156,6 +172,9 @@ private:
     void OnCallbackImportConfig();
     void OnCallbackExportConfig();
     void OnCallbackExportFileMonitor();
+    void StartCallbackFileIo(CallbackFileIoOperation operation, std::wstring path, std::wstring text = {});
+    void ApplyCallbackFileIoResult(CallbackFileIoResult result);
+    void SetCallbackFileIoControlsEnabled(bool enabled);
     void ShowCallbackInterceptContextMenu(HWND source, POINT screenPoint);
     void CopyCallbackPanelSelection(HWND source);
     std::wstring SerializeCallbackLocalConfig() const;
@@ -390,6 +409,7 @@ private:
     std::vector<CallbackRule> callbackRules_;
     std::unique_ptr<CallbackEventReceiver> callbackEventReceiver_;
     std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<KernelOperationResult>> callbackAnswerTask_;
+    std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<CallbackFileIoResult>> callbackFileIoTask_;
     std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<KernelR0EvidenceSnapshot>> r0EvidenceFilterTask_;
     std::vector<CallbackEventSnapshot> callbackPendingEvents_;
     std::uint32_t nextCallbackGroupId_ = 2;
