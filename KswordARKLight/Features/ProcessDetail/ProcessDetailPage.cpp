@@ -31,6 +31,7 @@ constexpr UINT kMsgActionCompleted = WM_APP + 613;
 constexpr UINT kMsgTokenReportCompleted = WM_APP + 614;
 constexpr UINT kMsgTokenSwitchCompleted = WM_APP + 615;
 constexpr UINT kMsgEvidenceCompleted = WM_APP + 616;
+constexpr UINT kMsgPebCompleted = WM_APP + 617;
 constexpr int kSnapshotLoadingOverlayId = 1110;
 
 constexpr std::array<const wchar_t*, 8> kTabTitles{
@@ -107,6 +108,9 @@ ProcessDetailPage::~ProcessDetailPage() {
     }
     if (evidenceTask_) {
         evidenceTask_->cancel();
+    }
+    if (pebTask_) {
+        pebTask_->cancel();
     }
     if (threadFilterTask_) {
         threadFilterTask_->cancel();
@@ -190,6 +194,11 @@ LRESULT ProcessDetailPage::HandleMessage(HWND hwnd, UINT message, WPARAM wParam,
             return 0;
         }
         break;
+    case kMsgPebCompleted:
+        if (pebTask_ && pebTask_->consume(hwnd, wParam, lParam)) {
+            return 0;
+        }
+        break;
     case kMsgThreadFilterCompleted:
         if (threadFilterTask_ && threadFilterTask_->consume(hwnd, wParam, lParam)) {
             return 0;
@@ -227,6 +236,9 @@ LRESULT ProcessDetailPage::HandleMessage(HWND hwnd, UINT message, WPARAM wParam,
         }
         if (evidenceTask_) {
             evidenceTask_->cancel();
+        }
+        if (pebTask_) {
+            pebTask_->cancel();
         }
         if (threadFilterTask_) {
             threadFilterTask_->cancel();
@@ -276,9 +288,10 @@ bool ProcessDetailPage::Initialize(HWND hwnd) {
     tokenReportTask_ = std::make_unique<Ksword::Ui::AsyncSnapshotTask<ProcessTokenReportSnapshot>>(hwnd_, kMsgTokenReportCompleted);
     tokenSwitchTask_ = std::make_unique<Ksword::Ui::AsyncSnapshotTask<ProcessTokenSwitchSnapshot>>(hwnd_, kMsgTokenSwitchCompleted);
     evidenceTask_ = std::make_unique<Ksword::Ui::AsyncSnapshotTask<ProcessDetailSnapshot>>(hwnd_, kMsgEvidenceCompleted);
+    pebTask_ = std::make_unique<Ksword::Ui::AsyncSnapshotTask<ProcessPebSnapshot>>(hwnd_, kMsgPebCompleted);
     threadFilterTask_ = std::make_unique<Ksword::Ui::AsyncSnapshotTask<DetailTableFilterResult>>(hwnd_, kMsgThreadFilterCompleted);
     moduleFilterTask_ = std::make_unique<Ksword::Ui::AsyncSnapshotTask<DetailTableFilterResult>>(hwnd_, kMsgModuleFilterCompleted);
-    if (!loadingOverlay_ || !snapshotTask_ || !actionTask_ || !tokenReportTask_ || !tokenSwitchTask_ || !evidenceTask_ || !threadFilterTask_ || !moduleFilterTask_) {
+    if (!loadingOverlay_ || !snapshotTask_ || !actionTask_ || !tokenReportTask_ || !tokenSwitchTask_ || !evidenceTask_ || !pebTask_ || !threadFilterTask_ || !moduleFilterTask_) {
         return false;
     }
     ::SendMessageW(tab_, TCM_SETCURSEL, 0, 0);
@@ -709,6 +722,9 @@ void ProcessDetailPage::ExecuteBackgroundAction(
             if (result->refreshTokenReport) {
                 RefreshTokenReport();
             }
+            if (result->refreshPebReport) {
+                RefreshPebReport();
+            }
             if (result->refreshRequired) {
                 RefreshAll();
             }
@@ -720,7 +736,7 @@ void ProcessDetailPage::ExecuteBackgroundAction(
 // remain available, so the user can inspect prior data without starting a
 // competing process/R0 request.
 void ProcessDetailPage::SetBackgroundActionControlsEnabled(const bool enabled) {
-    constexpr std::array<int, 41> controls{
+    constexpr std::array<int, 50> controls{
         ActionTerminateMode,
         ActionTerminate,
         ActionSuspend,
@@ -761,10 +777,21 @@ void ProcessDetailPage::SetBackgroundActionControlsEnabled(const bool enabled) {
         TokenIsRestricted,
         TokenIsLessPrivilegedAppContainer,
         TokenIsSandboxed,
-        TokenIsAppSilo
+        TokenIsAppSilo,
+        PebApply,
+        PebCommandLine,
+        PebImagePath,
+        PebCurrentDirectory,
+        PebEnvironmentName,
+        PebEnvironmentValue,
+        PebImageBase,
+        PebAffinity,
+        PebPriority
     };
     for (const int controlId : controls) {
-        const TabIndex tab = controlId >= TokenSwitchRefresh ? TabIndex::TokenSwitch : TabIndex::Actions;
+        const TabIndex tab = controlId >= PebRefresh
+            ? TabIndex::Peb
+            : controlId >= TokenSwitchRefresh ? TabIndex::TokenSwitch : TabIndex::Actions;
         if (HWND control = Control(tab, controlId)) { ::EnableWindow(control, enabled); }
     }
 }

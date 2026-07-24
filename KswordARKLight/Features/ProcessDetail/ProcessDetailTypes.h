@@ -118,4 +118,22 @@ struct ProcessTokenSwitchSnapshot {
     std::wstring statusText;
 };
 
+// ProcessPebSnapshot is a read-only PEB and virtual-address-space result. The
+// worker fills it without retaining remote-process handles; the UI applies it
+// only after the latest request completes.
+struct ProcessPebSnapshot {
+    bool completed = false;
+    bool affinityKnown = false;
+    bool priorityKnown = false;
+    bool selectedPebKnown = false;
+    int priorityComboIndex = 0;
+    std::wstring statusText;
+    std::wstring reportText;
+    std::wstring affinityText;
+    std::wstring commandLine;
+    std::wstring imagePath;
+    std::wstring currentDirectory;
+    std::wstring imageBase;
+};
+
 } // namespace Ksword::Features::ProcessDetail

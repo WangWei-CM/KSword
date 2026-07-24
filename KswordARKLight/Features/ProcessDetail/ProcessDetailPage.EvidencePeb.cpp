@@ -522,6 +522,247 @@ std::wstring MemoryProtectText(const DWORD protect) {
     return text;
 }
 
+// CollectPebSnapshot owns all remote-memory reads and address-space enumeration
+// performed by the PEB page. It receives only immutable request inputs and
+// returns strings/values that can safely be applied after the worker finishes.
+ProcessPebSnapshot CollectPebSnapshot(const DWORD processId, const int selectedTarget) {
+    ProcessPebSnapshot snapshot{};
+    const auto begin = std::chrono::steady_clock::now();
+    std::wostringstream report;
+    report << L"[PEB / Process Summary]\r\n";
+    report << L"PID: " << processId << L"\r\n";
+    std::vector<std::wstring> diagnostics;
+    std::vector<PebReadResult> pebResults;
+
+    HANDLE process = ::OpenProcess(
+        PROCESS_QUERY_INFORMATION | PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ,
+        FALSE,
+        processId);
+    if (!process) {
+        process = ::OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, processId);
+    }
+    if (!process) {
+        diagnostics.push_back(L"OpenProcess失败(" + std::to_wstring(::GetLastError()) + L")");
+        report << L"OpenProcess: <failed>\r\n";
+    } else {
+        HMODULE ntdll = ::GetModuleHandleW(L"ntdll.dll");
+        const auto ntQuery = reinterpret_cast<NtQueryInformationProcessFn>(
+            ntdll ? ::GetProcAddress(ntdll, "NtQueryInformationProcess") : nullptr);
+        ProcessBasicInformationLite basic{};
+        if (ntQuery) {
+            const LONG status = ntQuery(process, kProcessBasicInformationClass, &basic, sizeof(basic), nullptr);
+            if (status >= 0 && basic.pebBaseAddress) {
+                report << L"PEB Address: " << FormatHex(reinterpret_cast<std::uint64_t>(basic.pebBaseAddress)) << L"\r\n";
+                pebResults.push_back(ReadPeb64(process, reinterpret_cast<std::uint64_t>(basic.pebBaseAddress)));
+            } else {
+                diagnostics.push_back(L"ProcessBasicInformation未返回可用PEB地址。");
+            }
+            ULONG_PTR wow64Peb = 0;
+            const LONG wowStatus = ntQuery(process, kProcessWow64InformationClass, &wow64Peb, sizeof(wow64Peb), nullptr);
+            if (wowStatus >= 0 && wow64Peb != 0 && wow64Peb != reinterpret_cast<ULONG_PTR>(basic.pebBaseAddress)) {
+                pebResults.push_back(ReadPeb32(process, static_cast<std::uint64_t>(wow64Peb)));
+            }
+        } else {
+            diagnostics.push_back(L"NtQueryInformationProcess不可用。");
+        }
+
+        ULONG_PTR processAffinity = 0;
+        ULONG_PTR systemAffinity = 0;
+        if (::GetProcessAffinityMask(process, &processAffinity, &systemAffinity)) {
+            report << L"ProcessAffinity: " << FormatHex(processAffinity) << L"\r\n";
+            report << L"CpuCoreAffinity: ";
+            bool first = true;
+            for (unsigned int bit = 0; bit < sizeof(ULONG_PTR) * 8U; ++bit) {
+                if ((processAffinity & (static_cast<ULONG_PTR>(1) << bit)) == 0) { continue; }
+                if (!first) { report << L","; }
+                report << bit;
+                first = false;
+            }
+            report << L"\r\n";
+            snapshot.affinityKnown = true;
+            snapshot.affinityText = FormatHex(processAffinity);
+        }
+
+        const DWORD priorityClass = ::GetPriorityClass(process);
+        report << L"PriorityClass: " << PriorityClassText(priorityClass) << L"\r\n";
+        snapshot.priorityKnown = priorityClass != 0;
+        snapshot.priorityComboIndex = ComboIndexByPriorityClass(priorityClass);
+
+        USHORT processMachine = IMAGE_FILE_MACHINE_UNKNOWN;
+        USHORT nativeMachine = IMAGE_FILE_MACHINE_UNKNOWN;
+        if (::IsWow64Process2(process, &processMachine, &nativeMachine)) {
+            report << L"Wow64ProcessMachine: " << FormatHex(processMachine) << L"\r\n";
+            report << L"Wow64NativeMachine: " << FormatHex(nativeMachine) << L"\r\n";
+        }
+
+        FILETIME creationTime{}, exitTime{}, kernelTime{}, userTime{};
+        if (::GetProcessTimes(process, &creationTime, &exitTime, &kernelTime, &userTime)) {
+            ULARGE_INTEGER kernel{};
+            kernel.LowPart = kernelTime.dwLowDateTime;
+            kernel.HighPart = kernelTime.dwHighDateTime;
+            ULARGE_INTEGER user{};
+            user.LowPart = userTime.dwLowDateTime;
+            user.HighPart = userTime.dwHighDateTime;
+            report << L"KernelCpuMs: " << static_cast<double>(kernel.QuadPart) / 10000.0 << L"\r\n";
+            report << L"UserCpuMs: " << static_cast<double>(user.QuadPart) / 10000.0 << L"\r\n";
+        }
+
+        PROCESS_MEMORY_COUNTERS_EX memoryCounters{};
+        if (::GetProcessMemoryInfo(
+                process,
+                reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&memoryCounters),
+                sizeof(memoryCounters))) {
+            report << L"WorkingSet: " << memoryCounters.WorkingSetSize << L" bytes\r\n";
+            report << L"PrivateUsage: " << memoryCounters.PrivateUsage << L" bytes\r\n";
+            report << L"PeakWorkingSet: " << memoryCounters.PeakWorkingSetSize << L" bytes\r\n";
+            report << L"QuotaPagedPool: " << memoryCounters.QuotaPagedPoolUsage << L" bytes\r\n";
+            report << L"QuotaNonPagedPool: " << memoryCounters.QuotaNonPagedPoolUsage << L" bytes\r\n";
+            report << L"PageFaultCount: " << memoryCounters.PageFaultCount << L"\r\n";
+        }
+
+        IO_COUNTERS io{};
+        if (::GetProcessIoCounters(process, &io)) {
+            report << L"ReadOps: " << io.ReadOperationCount << L"\r\n";
+            report << L"WriteOps: " << io.WriteOperationCount << L"\r\n";
+            report << L"ReadBytes: " << io.ReadTransferCount << L"\r\n";
+            report << L"WriteBytes: " << io.WriteTransferCount << L"\r\n";
+        }
+
+        for (PebReadResult& peb : pebResults) {
+            if (!peb.ok) {
+                diagnostics.push_back(peb.name + L": " + peb.diagnostic);
+                continue;
+            }
+            report << L"[" << peb.name << L"]\r\n";
+            report << L"  PebAddress: " << FormatHex(peb.pebAddress) << L"\r\n";
+            report << L"  ProcessParameters: " << FormatHex(peb.processParametersAddress) << L"\r\n";
+            report << L"  ImageBaseAddress: " << FormatHex(peb.imageBaseAddress) << L"\r\n";
+            report << L"  Environment: " << FormatHex(peb.environmentAddress) << L"\r\n";
+            report << L"  BeingDebugged: " << (peb.beingDebugged ? L"true" : L"false") << L"\r\n";
+            if (!peb.commandLine.empty()) { report << L"CommandLine(" << peb.name << L"): " << peb.commandLine << L"\r\n"; }
+            if (!peb.imagePath.empty()) { report << L"ImagePath(" << peb.name << L"): " << peb.imagePath << L"\r\n"; }
+            if (!peb.currentDirectory.empty()) { report << L"CurrentDirectory(" << peb.name << L"): " << peb.currentDirectory << L"\r\n"; }
+        }
+
+        const wchar_t* targetName = selectedTarget == 1 ? L"Wow64PEB" : L"NativePEB";
+        const auto selectedPeb = std::find_if(pebResults.begin(), pebResults.end(), [targetName](const PebReadResult& peb) {
+            return peb.ok && peb.name == targetName;
+        });
+        if (selectedPeb != pebResults.end()) {
+            snapshot.selectedPebKnown = true;
+            snapshot.commandLine = selectedPeb->commandLine;
+            snapshot.imagePath = selectedPeb->imagePath;
+            snapshot.currentDirectory = selectedPeb->currentDirectory;
+            snapshot.imageBase = FormatHex(selectedPeb->imageBaseAddress);
+
+            if (selectedPeb->imageBaseAddress != 0) {
+                IMAGE_DOS_HEADER dos{};
+                if (ReadRemoteStructure(process, selectedPeb->imageBaseAddress, dos) &&
+                    dos.e_magic == IMAGE_DOS_SIGNATURE && dos.e_lfanew > 0 && dos.e_lfanew < 0x100000) {
+                    IMAGE_NT_HEADERS64 nt{};
+                    if (ReadRemoteStructure(process, selectedPeb->imageBaseAddress + dos.e_lfanew, nt) &&
+                        nt.Signature == IMAGE_NT_SIGNATURE) {
+                        report << L"ImageBaseAddress: " << FormatHex(selectedPeb->imageBaseAddress) << L"\r\n";
+                        report << L"EntryPointRva: " << FormatHex(nt.OptionalHeader.AddressOfEntryPoint) << L"\r\n";
+                        report << L"EntryPointAddress: "
+                               << FormatHex(selectedPeb->imageBaseAddress + nt.OptionalHeader.AddressOfEntryPoint)
+                               << L"\r\n";
+                    }
+                }
+            }
+        }
+
+        const auto environmentPeb = std::find_if(pebResults.begin(), pebResults.end(), [](const PebReadResult& peb) {
+            return peb.ok && peb.environmentAddress != 0;
+        });
+        report << L"[EnvironmentPreview";
+        if (environmentPeb != pebResults.end()) { report << L":" << environmentPeb->name; }
+        report << L"]\r\n";
+        if (environmentPeb != pebResults.end()) {
+            std::wstring environmentDiagnostic;
+            const std::vector<std::wstring> environment = ReadEnvironmentPreview(
+                process,
+                environmentPeb->environmentAddress,
+                environmentDiagnostic);
+            for (const std::wstring& line : environment) {
+                report << L"  " << line << L"\r\n";
+            }
+            if (environment.empty()) { report << L"  <unavailable>\r\n"; }
+            if (!environmentDiagnostic.empty()) { diagnostics.push_back(environmentDiagnostic); }
+        } else {
+            report << L"  <unavailable>\r\n";
+        }
+
+        SYSTEM_INFO systemInfo{};
+        ::GetSystemInfo(&systemInfo);
+        std::uintptr_t cursor = reinterpret_cast<std::uintptr_t>(systemInfo.lpMinimumApplicationAddress);
+        const std::uintptr_t maximum = reinterpret_cast<std::uintptr_t>(systemInfo.lpMaximumApplicationAddress);
+        std::uint64_t regionCount = 0;
+        std::uint64_t previewCount = 0;
+        std::uint64_t commitBytes = 0;
+        std::uint64_t mappedBytes = 0;
+        std::uint64_t imageBytes = 0;
+        std::uint64_t privateBytes = 0;
+        const auto deadline = begin + std::chrono::seconds(8);
+        report << L"[VirtualAddressRegionPreview]\r\n";
+        while (cursor < maximum && regionCount < kMaxRegionCount && std::chrono::steady_clock::now() <= deadline) {
+            MEMORY_BASIC_INFORMATION info{};
+            if (::VirtualQueryEx(process, reinterpret_cast<LPCVOID>(cursor), &info, sizeof(info)) == 0 || info.RegionSize == 0) {
+                break;
+            }
+            ++regionCount;
+            if (info.State == MEM_COMMIT) { commitBytes += info.RegionSize; }
+            if (info.Type == MEM_MAPPED) { mappedBytes += info.RegionSize; }
+            if (info.Type == MEM_IMAGE) { imageBytes += info.RegionSize; }
+            if (info.Type == MEM_PRIVATE) { privateBytes += info.RegionSize; }
+            if (info.State == MEM_COMMIT && previewCount < kMaxPreviewRegions) {
+                const std::uint64_t start = reinterpret_cast<std::uint64_t>(info.BaseAddress);
+                report << L"  " << FormatHex(start) << L"-" << FormatHex(start + info.RegionSize)
+                       << L" | " << MemoryStateText(info.State)
+                       << L" | " << MemoryProtectText(info.Protect)
+                       << L" | " << MemoryTypeText(info.Type);
+                if (info.Type == MEM_MAPPED || info.Type == MEM_IMAGE) {
+                    wchar_t mappedPath[1024]{};
+                    if (::GetMappedFileNameW(process, info.BaseAddress, mappedPath, static_cast<DWORD>(std::size(mappedPath))) > 0) {
+                        report << L" | " << mappedPath;
+                    }
+                }
+                report << L"\r\n";
+                ++previewCount;
+            }
+            const std::uintptr_t next = cursor + info.RegionSize;
+            if (next <= cursor) { break; }
+            cursor = next;
+        }
+        if (regionCount >= kMaxRegionCount) { diagnostics.push_back(L"虚拟内存枚举达到60000行上限。"); }
+        if (std::chrono::steady_clock::now() > deadline) { diagnostics.push_back(L"虚拟内存枚举超过8秒，已返回部分结果。"); }
+        report << L"RegionCount: " << regionCount << L"\r\n";
+        report << L"CommitBytes: " << commitBytes << L"\r\n";
+        report << L"MappedBytes: " << mappedBytes << L"\r\n";
+        report << L"ImageBytes: " << imageBytes << L"\r\n";
+        report << L"PrivateBytes: " << privateBytes << L"\r\n";
+        report << L"HeapCount: <skipped>\r\n";
+        report << L"HeapBlockCount: <skipped>\r\n";
+        report << L"HeapBlockEnumeration: <skipped to keep PEB refresh bounded>\r\n";
+        ::CloseHandle(process);
+    }
+
+    if (!diagnostics.empty()) {
+        report << L"[Diagnostic]\r\n";
+        for (const std::wstring& diagnostic : diagnostics) {
+            report << L"  " << diagnostic << L"\r\n";
+        }
+    }
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - begin).count();
+    snapshot.completed = true;
+    snapshot.reportText = report.str();
+    snapshot.statusText =
+        L"● 后台刷新完成 " + std::to_wstring(elapsed) + L" ms" +
+        (diagnostics.empty() ? L"" : L" | 存在降级/诊断信息");
+    return snapshot;
+}
+
 } // namespace
 
 bool ProcessDetailPage::CreateEvidenceTab() {
@@ -649,6 +890,9 @@ bool ProcessDetailPage::CreatePebTab() {
         542,
         -8,
         118);
+    if (actionTask_ && actionTask_->running()) {
+        SetBackgroundActionControlsEnabled(false);
+    }
     return true;
 }
 
@@ -815,248 +1059,42 @@ void ProcessDetailPage::RenderSectionReport() {
 }
 
 void ProcessDetailPage::RefreshPebReport() {
-    HWND refresh = Control(TabIndex::Peb, PebRefresh);
-    if (refresh) { ::EnableWindow(refresh, FALSE); }
+    if (!pebTask_) {
+        SetPageStatus(TabIndex::Peb, PebStatus, L"● PEB 后台任务不可用。");
+        return;
+    }
     SetPageStatus(TabIndex::Peb, PebStatus, L"● 正在刷新PEB...");
-    const auto begin = std::chrono::steady_clock::now();
-    ::SetCursor(::LoadCursorW(nullptr, IDC_WAIT));
-
-    std::wostringstream report;
-    report << L"[PEB / Process Summary]\r\n";
-    report << L"PID: " << processId_ << L"\r\n";
-    std::vector<std::wstring> diagnostics;
-    std::vector<PebReadResult> pebResults;
-
-    HANDLE process = ::OpenProcess(
-        PROCESS_QUERY_INFORMATION | PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ,
-        FALSE,
-        processId_);
-    if (!process) {
-        process = ::OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, processId_);
-    }
-    if (!process) {
-        diagnostics.push_back(L"OpenProcess失败(" + std::to_wstring(::GetLastError()) + L")");
-        report << L"OpenProcess: <failed>\r\n";
-    } else {
-        HMODULE ntdll = ::GetModuleHandleW(L"ntdll.dll");
-        const auto ntQuery = reinterpret_cast<NtQueryInformationProcessFn>(
-            ntdll ? ::GetProcAddress(ntdll, "NtQueryInformationProcess") : nullptr);
-        ProcessBasicInformationLite basic{};
-        if (ntQuery) {
-            const LONG status = ntQuery(process, kProcessBasicInformationClass, &basic, sizeof(basic), nullptr);
-            if (status >= 0 && basic.pebBaseAddress) {
-                report << L"PEB Address: " << FormatHex(reinterpret_cast<std::uint64_t>(basic.pebBaseAddress)) << L"\r\n";
-                pebResults.push_back(ReadPeb64(process, reinterpret_cast<std::uint64_t>(basic.pebBaseAddress)));
-            } else {
-                diagnostics.push_back(L"ProcessBasicInformation未返回可用PEB地址。");
+    const int selectedTarget = static_cast<int>(
+        ::SendMessageW(Control(TabIndex::Peb, PebTarget), CB_GETCURSEL, 0, 0));
+    const DWORD processId = processId_;
+    pebTask_->request(
+        [processId, selectedTarget] { return CollectPebSnapshot(processId, selectedTarget); },
+        [this](std::uint64_t, std::optional<ProcessPebSnapshot>&& result, std::exception_ptr error) {
+            if (error || !result.has_value()) {
+                SetPageStatus(TabIndex::Peb, PebStatus, L"● PEB 后台查询异常结束。");
+                return;
             }
-            ULONG_PTR wow64Peb = 0;
-            const LONG wowStatus = ntQuery(process, kProcessWow64InformationClass, &wow64Peb, sizeof(wow64Peb), nullptr);
-            if (wowStatus >= 0 && wow64Peb != 0 && wow64Peb != reinterpret_cast<ULONG_PTR>(basic.pebBaseAddress)) {
-                pebResults.push_back(ReadPeb32(process, static_cast<std::uint64_t>(wow64Peb)));
+            SetControlText(TabIndex::Peb, PebOutput, result->reportText);
+            if (result->affinityKnown) {
+                SetControlText(TabIndex::Peb, PebAffinity, result->affinityText);
             }
-        } else {
-            diagnostics.push_back(L"NtQueryInformationProcess不可用。");
-        }
-
-        ULONG_PTR processAffinity = 0;
-        ULONG_PTR systemAffinity = 0;
-        if (::GetProcessAffinityMask(process, &processAffinity, &systemAffinity)) {
-            report << L"ProcessAffinity: " << FormatHex(processAffinity) << L"\r\n";
-            report << L"CpuCoreAffinity: ";
-            bool first = true;
-            for (unsigned int bit = 0; bit < sizeof(ULONG_PTR) * 8U; ++bit) {
-                if ((processAffinity & (static_cast<ULONG_PTR>(1) << bit)) == 0) { continue; }
-                if (!first) { report << L","; }
-                report << bit;
-                first = false;
+            if (result->priorityKnown) {
+                ::SendMessageW(
+                    Control(TabIndex::Peb, PebPriority),
+                    CB_SETCURSEL,
+                    static_cast<WPARAM>(result->priorityComboIndex),
+                    0);
             }
-            report << L"\r\n";
-            SetControlText(TabIndex::Peb, PebAffinity, FormatHex(processAffinity));
-        }
-
-        const DWORD priorityClass = ::GetPriorityClass(process);
-        report << L"PriorityClass: " << PriorityClassText(priorityClass) << L"\r\n";
-        if (HWND priority = Control(TabIndex::Peb, PebPriority)) {
-            ::SendMessageW(priority, CB_SETCURSEL, ComboIndexByPriorityClass(priorityClass), 0);
-        }
-
-        USHORT processMachine = IMAGE_FILE_MACHINE_UNKNOWN;
-        USHORT nativeMachine = IMAGE_FILE_MACHINE_UNKNOWN;
-        if (::IsWow64Process2(process, &processMachine, &nativeMachine)) {
-            report << L"Wow64ProcessMachine: " << FormatHex(processMachine) << L"\r\n";
-            report << L"Wow64NativeMachine: " << FormatHex(nativeMachine) << L"\r\n";
-        }
-
-        FILETIME creationTime{}, exitTime{}, kernelTime{}, userTime{};
-        if (::GetProcessTimes(process, &creationTime, &exitTime, &kernelTime, &userTime)) {
-            ULARGE_INTEGER kernel{};
-            kernel.LowPart = kernelTime.dwLowDateTime;
-            kernel.HighPart = kernelTime.dwHighDateTime;
-            ULARGE_INTEGER user{};
-            user.LowPart = userTime.dwLowDateTime;
-            user.HighPart = userTime.dwHighDateTime;
-            report << L"KernelCpuMs: " << static_cast<double>(kernel.QuadPart) / 10000.0 << L"\r\n";
-            report << L"UserCpuMs: " << static_cast<double>(user.QuadPart) / 10000.0 << L"\r\n";
-        }
-
-        PROCESS_MEMORY_COUNTERS_EX memoryCounters{};
-        if (::GetProcessMemoryInfo(
-                process,
-                reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&memoryCounters),
-                sizeof(memoryCounters))) {
-            report << L"WorkingSet: " << memoryCounters.WorkingSetSize << L" bytes\r\n";
-            report << L"PrivateUsage: " << memoryCounters.PrivateUsage << L" bytes\r\n";
-            report << L"PeakWorkingSet: " << memoryCounters.PeakWorkingSetSize << L" bytes\r\n";
-            report << L"QuotaPagedPool: " << memoryCounters.QuotaPagedPoolUsage << L" bytes\r\n";
-            report << L"QuotaNonPagedPool: " << memoryCounters.QuotaNonPagedPoolUsage << L" bytes\r\n";
-            report << L"PageFaultCount: " << memoryCounters.PageFaultCount << L"\r\n";
-        }
-
-        IO_COUNTERS io{};
-        if (::GetProcessIoCounters(process, &io)) {
-            report << L"ReadOps: " << io.ReadOperationCount << L"\r\n";
-            report << L"WriteOps: " << io.WriteOperationCount << L"\r\n";
-            report << L"ReadBytes: " << io.ReadTransferCount << L"\r\n";
-            report << L"WriteBytes: " << io.WriteTransferCount << L"\r\n";
-        }
-
-        for (PebReadResult& peb : pebResults) {
-            if (!peb.ok) {
-                diagnostics.push_back(peb.name + L": " + peb.diagnostic);
-                continue;
+            if (result->selectedPebKnown) {
+                SetControlText(TabIndex::Peb, PebCommandLine, result->commandLine);
+                SetControlText(TabIndex::Peb, PebImagePath, result->imagePath);
+                SetControlText(TabIndex::Peb, PebCurrentDirectory, result->currentDirectory);
+                SetControlText(TabIndex::Peb, PebImageBase, result->imageBase);
             }
-            report << L"[" << peb.name << L"]\r\n";
-            report << L"  PebAddress: " << FormatHex(peb.pebAddress) << L"\r\n";
-            report << L"  ProcessParameters: " << FormatHex(peb.processParametersAddress) << L"\r\n";
-            report << L"  ImageBaseAddress: " << FormatHex(peb.imageBaseAddress) << L"\r\n";
-            report << L"  Environment: " << FormatHex(peb.environmentAddress) << L"\r\n";
-            report << L"  BeingDebugged: " << (peb.beingDebugged ? L"true" : L"false") << L"\r\n";
-            if (!peb.commandLine.empty()) { report << L"CommandLine(" << peb.name << L"): " << peb.commandLine << L"\r\n"; }
-            if (!peb.imagePath.empty()) { report << L"ImagePath(" << peb.name << L"): " << peb.imagePath << L"\r\n"; }
-            if (!peb.currentDirectory.empty()) { report << L"CurrentDirectory(" << peb.name << L"): " << peb.currentDirectory << L"\r\n"; }
-        }
-
-        const int selectedTarget = static_cast<int>(::SendMessageW(Control(TabIndex::Peb, PebTarget), CB_GETCURSEL, 0, 0));
-        const wchar_t* targetName = selectedTarget == 1 ? L"Wow64PEB" : L"NativePEB";
-        const auto selectedPeb = std::find_if(pebResults.begin(), pebResults.end(), [targetName](const PebReadResult& peb) {
-            return peb.ok && peb.name == targetName;
+            SetPageStatus(TabIndex::Peb, PebStatus, result->statusText);
+            pebLoaded_ = result->completed;
         });
-        if (selectedPeb != pebResults.end()) {
-            SetControlText(TabIndex::Peb, PebCommandLine, selectedPeb->commandLine);
-            SetControlText(TabIndex::Peb, PebImagePath, selectedPeb->imagePath);
-            SetControlText(TabIndex::Peb, PebCurrentDirectory, selectedPeb->currentDirectory);
-            SetControlText(TabIndex::Peb, PebImageBase, FormatHex(selectedPeb->imageBaseAddress));
 
-            if (selectedPeb->imageBaseAddress != 0) {
-                IMAGE_DOS_HEADER dos{};
-                if (ReadRemoteStructure(process, selectedPeb->imageBaseAddress, dos) &&
-                    dos.e_magic == IMAGE_DOS_SIGNATURE && dos.e_lfanew > 0 && dos.e_lfanew < 0x100000) {
-                    IMAGE_NT_HEADERS64 nt{};
-                    if (ReadRemoteStructure(process, selectedPeb->imageBaseAddress + dos.e_lfanew, nt) &&
-                        nt.Signature == IMAGE_NT_SIGNATURE) {
-                        report << L"ImageBaseAddress: " << FormatHex(selectedPeb->imageBaseAddress) << L"\r\n";
-                        report << L"EntryPointRva: " << FormatHex(nt.OptionalHeader.AddressOfEntryPoint) << L"\r\n";
-                        report << L"EntryPointAddress: "
-                               << FormatHex(selectedPeb->imageBaseAddress + nt.OptionalHeader.AddressOfEntryPoint)
-                               << L"\r\n";
-                    }
-                }
-            }
-        }
-
-        const auto environmentPeb = std::find_if(pebResults.begin(), pebResults.end(), [](const PebReadResult& peb) {
-            return peb.ok && peb.environmentAddress != 0;
-        });
-        report << L"[EnvironmentPreview";
-        if (environmentPeb != pebResults.end()) { report << L":" << environmentPeb->name; }
-        report << L"]\r\n";
-        if (environmentPeb != pebResults.end()) {
-            std::wstring environmentDiagnostic;
-            const std::vector<std::wstring> environment = ReadEnvironmentPreview(
-                process,
-                environmentPeb->environmentAddress,
-                environmentDiagnostic);
-            for (const std::wstring& line : environment) {
-                report << L"  " << line << L"\r\n";
-            }
-            if (environment.empty()) { report << L"  <unavailable>\r\n"; }
-            if (!environmentDiagnostic.empty()) { diagnostics.push_back(environmentDiagnostic); }
-        } else {
-            report << L"  <unavailable>\r\n";
-        }
-
-        SYSTEM_INFO systemInfo{};
-        ::GetSystemInfo(&systemInfo);
-        std::uintptr_t cursor = reinterpret_cast<std::uintptr_t>(systemInfo.lpMinimumApplicationAddress);
-        const std::uintptr_t maximum = reinterpret_cast<std::uintptr_t>(systemInfo.lpMaximumApplicationAddress);
-        std::uint64_t regionCount = 0;
-        std::uint64_t previewCount = 0;
-        std::uint64_t commitBytes = 0;
-        std::uint64_t mappedBytes = 0;
-        std::uint64_t imageBytes = 0;
-        std::uint64_t privateBytes = 0;
-        const auto deadline = begin + std::chrono::seconds(8);
-        report << L"[VirtualAddressRegionPreview]\r\n";
-        while (cursor < maximum && regionCount < kMaxRegionCount && std::chrono::steady_clock::now() <= deadline) {
-            MEMORY_BASIC_INFORMATION info{};
-            if (::VirtualQueryEx(process, reinterpret_cast<LPCVOID>(cursor), &info, sizeof(info)) == 0 || info.RegionSize == 0) {
-                break;
-            }
-            ++regionCount;
-            if (info.State == MEM_COMMIT) { commitBytes += info.RegionSize; }
-            if (info.Type == MEM_MAPPED) { mappedBytes += info.RegionSize; }
-            if (info.Type == MEM_IMAGE) { imageBytes += info.RegionSize; }
-            if (info.Type == MEM_PRIVATE) { privateBytes += info.RegionSize; }
-            if (info.State == MEM_COMMIT && previewCount < kMaxPreviewRegions) {
-                const std::uint64_t start = reinterpret_cast<std::uint64_t>(info.BaseAddress);
-                report << L"  " << FormatHex(start) << L"-" << FormatHex(start + info.RegionSize)
-                       << L" | " << MemoryStateText(info.State)
-                       << L" | " << MemoryProtectText(info.Protect)
-                       << L" | " << MemoryTypeText(info.Type);
-                if (info.Type == MEM_MAPPED || info.Type == MEM_IMAGE) {
-                    wchar_t mappedPath[1024]{};
-                    if (::GetMappedFileNameW(process, info.BaseAddress, mappedPath, static_cast<DWORD>(std::size(mappedPath))) > 0) {
-                        report << L" | " << mappedPath;
-                    }
-                }
-                report << L"\r\n";
-                ++previewCount;
-            }
-            const std::uintptr_t next = cursor + info.RegionSize;
-            if (next <= cursor) { break; }
-            cursor = next;
-        }
-        if (regionCount >= kMaxRegionCount) { diagnostics.push_back(L"虚拟内存枚举达到60000行上限。"); }
-        if (std::chrono::steady_clock::now() > deadline) { diagnostics.push_back(L"虚拟内存枚举超过8秒，已返回部分结果。"); }
-        report << L"RegionCount: " << regionCount << L"\r\n";
-        report << L"CommitBytes: " << commitBytes << L"\r\n";
-        report << L"MappedBytes: " << mappedBytes << L"\r\n";
-        report << L"ImageBytes: " << imageBytes << L"\r\n";
-        report << L"PrivateBytes: " << privateBytes << L"\r\n";
-        report << L"HeapCount: <skipped>\r\n";
-        report << L"HeapBlockCount: <skipped>\r\n";
-        report << L"HeapBlockEnumeration: <skipped to keep PEB refresh bounded>\r\n";
-        ::CloseHandle(process);
-    }
-
-    if (!diagnostics.empty()) {
-        report << L"[Diagnostic]\r\n";
-        for (const std::wstring& diagnostic : diagnostics) {
-            report << L"  " << diagnostic << L"\r\n";
-        }
-    }
-    SetControlText(TabIndex::Peb, PebOutput, report.str());
-    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::steady_clock::now() - begin).count();
-    SetPageStatus(
-        TabIndex::Peb,
-        PebStatus,
-        L"● 刷新完成 " + std::to_wstring(elapsed) + L" ms" +
-            (diagnostics.empty() ? L"" : L" | 存在降级/诊断信息"));
-    pebLoaded_ = true;
-    if (refresh) { ::EnableWindow(refresh, TRUE); }
-    ::SetCursor(::LoadCursorW(nullptr, IDC_ARROW));
 }
 
 void ProcessDetailPage::ApplyPebEdits() {
@@ -1071,97 +1109,111 @@ void ProcessDetailPage::ApplyPebEdits() {
         return;
     }
 
-    HANDLE process = ::OpenProcess(
-        PROCESS_QUERY_INFORMATION | PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SET_INFORMATION,
-        FALSE,
-        processId_);
-    if (!process) {
-        ::MessageBoxW(
-            hwnd_,
-            (L"OpenProcess失败：" + std::to_wstring(::GetLastError())).c_str(),
-            L"PEB 修改失败",
-            MB_ICONERROR | MB_OK);
-        return;
-    }
-
-    std::vector<std::wstring> results;
-    int successCount = 0;
-    int failCount = 0;
-    int skippedCount = 0;
-    const auto skippedRemote = [&](const wchar_t* field, const std::wstring& value) {
-        if (value.empty()) { return; }
-        ++skippedCount;
-        results.push_back(std::wstring(L"[跳过] ") + field + L"：Light 远程PEB写入未启用，未执行任何写操作。");
-    };
-    skippedRemote(L"CommandLine", ControlText(TabIndex::Peb, PebCommandLine));
-    skippedRemote(L"ImagePathName", ControlText(TabIndex::Peb, PebImagePath));
-    skippedRemote(L"CurrentDirectory", ControlText(TabIndex::Peb, PebCurrentDirectory));
-    if (!TrimCopy(ControlText(TabIndex::Peb, PebEnvironmentName)).empty()) {
-        skippedRemote(L"Environment", ControlText(TabIndex::Peb, PebEnvironmentName));
-    }
-    skippedRemote(L"ImageBaseAddress", ControlText(TabIndex::Peb, PebImageBase));
-
+    const std::wstring commandLine = ControlText(TabIndex::Peb, PebCommandLine);
+    const std::wstring imagePath = ControlText(TabIndex::Peb, PebImagePath);
+    const std::wstring currentDirectory = ControlText(TabIndex::Peb, PebCurrentDirectory);
+    const std::wstring environmentName = ControlText(TabIndex::Peb, PebEnvironmentName);
+    const std::wstring imageBase = ControlText(TabIndex::Peb, PebImageBase);
     const std::wstring affinityText = TrimCopy(ControlText(TabIndex::Peb, PebAffinity));
-    if (affinityText.empty()) {
-        ++skippedCount;
-        results.push_back(L"[跳过] AffinityMask：输入为空。");
-    } else {
-        std::uint64_t requestedAffinity = 0;
-        ULONG_PTR currentAffinity = 0;
-        ULONG_PTR systemAffinity = 0;
-        if (!ParseUnsigned(affinityText, requestedAffinity) || requestedAffinity == 0 ||
-            requestedAffinity > std::numeric_limits<ULONG_PTR>::max()) {
-            ++failCount;
-            results.push_back(L"[失败] AffinityMask：格式无效、为0或超过当前位宽。");
-        } else if (::GetProcessAffinityMask(process, &currentAffinity, &systemAffinity) &&
-                   requestedAffinity == static_cast<std::uint64_t>(currentAffinity)) {
-            ++skippedCount;
-            results.push_back(L"[跳过] AffinityMask：未变化。");
-        } else if (::SetProcessAffinityMask(process, static_cast<ULONG_PTR>(requestedAffinity))) {
-            ++successCount;
-            results.push_back(L"[成功] AffinityMask：已设置为 " + FormatHex(requestedAffinity) + L"。");
-        } else {
-            ++failCount;
-            results.push_back(L"[失败] AffinityMask：SetProcessAffinityMask失败(" +
-                std::to_wstring(::GetLastError()) + L")。");
-        }
-    }
-
     const int priorityIndex = static_cast<int>(
         ::SendMessageW(Control(TabIndex::Peb, PebPriority), CB_GETCURSEL, 0, 0));
-    const DWORD requestedPriority = PriorityClassByComboIndex(priorityIndex);
-    if (requestedPriority == 0) {
-        ++skippedCount;
-        results.push_back(L"[跳过] PriorityClass：选择为不修改。");
-    } else {
-        const DWORD currentPriority = ::GetPriorityClass(process);
-        if (currentPriority == requestedPriority) {
-            ++skippedCount;
-            results.push_back(L"[跳过] PriorityClass：未变化。");
-        } else if (::SetPriorityClass(process, requestedPriority)) {
-            ++successCount;
-            results.push_back(L"[成功] PriorityClass：已设置为 " + PriorityClassText(requestedPriority) + L"。");
-        } else {
-            ++failCount;
-            results.push_back(L"[失败] PriorityClass：SetPriorityClass失败(" +
-                std::to_wstring(::GetLastError()) + L")。");
-        }
-    }
-    ::CloseHandle(process);
-
-    std::wostringstream resultText;
-    resultText << L"成功 " << successCount << L"，失败 " << failCount << L"，跳过 " << skippedCount << L"\r\n\r\n";
-    for (const std::wstring& line : results) {
-        resultText << line << L"\r\n";
-    }
-    SetPageStatus(
+    const DWORD processId = processId_;
+    ExecuteBackgroundAction(
         TabIndex::Peb,
         PebStatus,
-        L"● PEB修改完成：成功 " + std::to_wstring(successCount) +
-            L"，失败 " + std::to_wstring(failCount) +
-            L"，跳过 " + std::to_wstring(skippedCount));
-    ::MessageBoxW(hwnd_, resultText.str().c_str(), L"PEB 修改结果", MB_ICONINFORMATION | MB_OK);
-    RefreshPebReport();
+        L"● 正在后台修改进程属性…",
+        [processId, commandLine, imagePath, currentDirectory, environmentName, imageBase, affinityText, priorityIndex] {
+            ProcessDetailActionResult action{};
+            HANDLE process = ::OpenProcess(
+                PROCESS_QUERY_INFORMATION | PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SET_INFORMATION,
+                FALSE,
+                processId);
+            if (!process) {
+                action.statusText = L"● PEB 修改失败：无法打开目标进程";
+                action.dialogTitle = L"PEB 修改失败";
+                action.dialogText = L"OpenProcess失败：" + std::to_wstring(::GetLastError());
+                action.dialogIcon = MB_ICONERROR;
+                return action;
+            }
+
+            std::vector<std::wstring> results;
+            int successCount = 0;
+            int failCount = 0;
+            int skippedCount = 0;
+            const auto skippedRemote = [&](const wchar_t* field, const std::wstring& value) {
+                if (value.empty()) { return; }
+                ++skippedCount;
+                results.push_back(std::wstring(L"[跳过] ") + field + L"：Light 远程PEB写入未启用，未执行任何写操作。");
+            };
+            skippedRemote(L"CommandLine", commandLine);
+            skippedRemote(L"ImagePathName", imagePath);
+            skippedRemote(L"CurrentDirectory", currentDirectory);
+            if (!TrimCopy(environmentName).empty()) {
+                skippedRemote(L"Environment", environmentName);
+            }
+            skippedRemote(L"ImageBaseAddress", imageBase);
+
+            if (affinityText.empty()) {
+                ++skippedCount;
+                results.push_back(L"[跳过] AffinityMask：输入为空。");
+            } else {
+                std::uint64_t requestedAffinity = 0;
+                ULONG_PTR currentAffinity = 0;
+                ULONG_PTR systemAffinity = 0;
+                if (!ParseUnsigned(affinityText, requestedAffinity) || requestedAffinity == 0 ||
+                    requestedAffinity > std::numeric_limits<ULONG_PTR>::max()) {
+                    ++failCount;
+                    results.push_back(L"[失败] AffinityMask：格式无效、为0或超过当前位宽。");
+                } else if (::GetProcessAffinityMask(process, &currentAffinity, &systemAffinity) &&
+                           requestedAffinity == static_cast<std::uint64_t>(currentAffinity)) {
+                    ++skippedCount;
+                    results.push_back(L"[跳过] AffinityMask：未变化。");
+                } else if (::SetProcessAffinityMask(process, static_cast<ULONG_PTR>(requestedAffinity))) {
+                    ++successCount;
+                    results.push_back(L"[成功] AffinityMask：已设置为 " + FormatHex(requestedAffinity) + L"。");
+                } else {
+                    ++failCount;
+                    results.push_back(L"[失败] AffinityMask：SetProcessAffinityMask失败(" +
+                        std::to_wstring(::GetLastError()) + L")。");
+                }
+            }
+
+            const DWORD requestedPriority = PriorityClassByComboIndex(priorityIndex);
+            if (requestedPriority == 0) {
+                ++skippedCount;
+                results.push_back(L"[跳过] PriorityClass：选择为不修改。");
+            } else {
+                const DWORD currentPriority = ::GetPriorityClass(process);
+                if (currentPriority == requestedPriority) {
+                    ++skippedCount;
+                    results.push_back(L"[跳过] PriorityClass：未变化。");
+                } else if (::SetPriorityClass(process, requestedPriority)) {
+                    ++successCount;
+                    results.push_back(L"[成功] PriorityClass：已设置为 " + PriorityClassText(requestedPriority) + L"。");
+                } else {
+                    ++failCount;
+                    results.push_back(L"[失败] PriorityClass：SetPriorityClass失败(" +
+                        std::to_wstring(::GetLastError()) + L")。");
+                }
+            }
+            ::CloseHandle(process);
+
+            std::wostringstream resultText;
+            resultText << L"成功 " << successCount << L"，失败 " << failCount << L"，跳过 " << skippedCount << L"\r\n\r\n";
+            for (const std::wstring& line : results) {
+                resultText << line << L"\r\n";
+            }
+            action.statusText =
+                L"● PEB修改完成：成功 " + std::to_wstring(successCount) +
+                L"，失败 " + std::to_wstring(failCount) +
+                L"，跳过 " + std::to_wstring(skippedCount);
+            action.dialogTitle = L"PEB 修改结果";
+            action.dialogText = resultText.str();
+            action.dialogIcon = MB_ICONINFORMATION;
+            action.refreshPebReport = true;
+            return action;
+        });
+
 }
 
 } // namespace Ksword::Features::ProcessDetail

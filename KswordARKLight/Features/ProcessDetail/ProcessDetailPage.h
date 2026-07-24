@@ -203,6 +203,7 @@ private:
         bool refreshRequired = false;
         bool refreshTokenReport = false;
         bool refreshTokenSwitches = false;
+        bool refreshPebReport = false;
         std::wstring statusText;
         std::wstring dialogTitle;
         std::wstring dialogText;
@@ -374,6 +375,7 @@ private:
     std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<ProcessTokenReportSnapshot>> tokenReportTask_;
     std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<ProcessTokenSwitchSnapshot>> tokenSwitchTask_;
     std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<ProcessDetailSnapshot>> evidenceTask_;
+    std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<ProcessPebSnapshot>> pebTask_;
     std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<DetailTableFilterResult>> threadFilterTask_;
     std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<DetailTableFilterResult>> moduleFilterTask_;
     Ksword::Ui::VirtualListView threadVirtualList_;
