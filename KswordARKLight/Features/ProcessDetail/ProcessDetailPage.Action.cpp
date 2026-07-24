@@ -7,6 +7,7 @@
 
 #include <array>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace Ksword::Features::ProcessDetail {
@@ -27,6 +28,15 @@ void AddComboItem(HWND combo, const wchar_t* text, LPARAM data) {
 
 bool ConfirmDanger(HWND owner, const wchar_t* text) {
     return ::MessageBoxW(owner, text, L"高风险操作确认", MB_YESNO | MB_DEFBUTTON2 | MB_ICONWARNING) == IDYES;
+}
+
+bool ConfirmR0Injection(HWND owner, const wchar_t* action, DWORD processId, const std::wstring& path) {
+    std::wstring message = L"将通过 KswordARK R0 进程注入协议执行操作：";
+    message += action ? action : L"注入";
+    message += L"\r\n\r\n目标 PID: " + std::to_wstring(processId);
+    message += L"\r\nPayload: " + path;
+    message += L"\r\n\r\n该操作会在目标进程创建远程线程，可能导致目标崩溃或系统不稳定。是否继续？";
+    return ::MessageBoxW(owner, message.c_str(), L"确认 R0 注入", MB_YESNO | MB_DEFBUTTON2 | MB_ICONWARNING) == IDYES;
 }
 
 bool TerminateAllThreads(DWORD processId, std::wstring& detail) {
@@ -103,7 +113,7 @@ bool ProcessDetailPage::CreateActionTab() {
     AddButton(tab, ActionR0Hide, L"R0隐藏", 410, 312, 92, 32);
     AddButton(tab, ActionR0Danger, L"R0危险", 510, 312, 92, 32);
 
-    AddGroup(tab, L"注入与载入", 6, 374, -6, 144);
+    AddGroup(tab, L"注入与载入", 6, 374, -6, 180);
     AddLabel(tab, 0, L"模式", 18, 400, 88, 28);
     HWND injectionMode = AddCombo(tab, ActionInjectionMode, 110, 398, -12, 220);
     AddComboItem(injectionMode, L"R3", 0);
@@ -119,8 +129,13 @@ bool ProcessDetailPage::CreateActionTab() {
     ::SendMessageW(shellcodePath, EM_SETCUEBANNER, FALSE, reinterpret_cast<LPARAM>(L"请选择原始 shellcode 二进制文件"));
     AddButton(tab, ActionBrowseShellcode, L"浏览", -166, 472, 72, 32);
     AddButton(tab, ActionInjectShellcode, L"执行", -86, 472, 72, 32);
+    AddLabel(tab, ActionStatus, L"● 操作就绪。", 18, 518, -18, 26);
 
-    return terminateMode && priority && injectionMode && dllPath && shellcodePath;
+    if (actionTask_ && actionTask_->running()) {
+        SetBackgroundActionControlsEnabled(false);
+    }
+
+    return terminateMode && priority && injectionMode && dllPath && shellcodePath && Control(tab, ActionStatus);
 }
 
 bool ProcessDetailPage::HandleActionCommand(int controlId) {
@@ -135,9 +150,22 @@ bool ProcessDetailPage::HandleActionCommand(int controlId) {
             if (!ConfirmDanger(hwnd_, L"将逐个终止目标进程的全部线程。该操作不可撤销，是否继续？")) {
                 return true;
             }
-            std::wstring detail;
-            const bool ok = TerminateAllThreads(processId_, detail);
-            ::MessageBoxW(hwnd_, detail.c_str(), L"结束进程", MB_OK | (ok ? MB_ICONINFORMATION : MB_ICONWARNING));
+            const DWORD processId = processId_;
+            ExecuteBackgroundAction(
+                TabIndex::Actions,
+                ActionStatus,
+                L"● 正在后台终止目标进程的全部线程…",
+                [processId] {
+                    ProcessDetailActionResult action{};
+                    const bool success = TerminateAllThreads(processId, action.dialogText);
+                    action.dialogTitle = L"结束进程";
+                    action.dialogIcon = success ? MB_ICONINFORMATION : MB_ICONWARNING;
+                    action.statusText = success
+                        ? L"● 已在后台完成全部线程终止。"
+                        : L"● 全部线程终止未完全成功。";
+                    action.refreshRequired = success;
+                    return action;
+                });
             return true;
         }
         if (mode == kTerminateModeMultiMethod) {
@@ -258,10 +286,27 @@ bool ProcessDetailPage::HandleActionCommand(int controlId) {
             ::MessageBoxW(hwnd_, L"Light 纯 Win32 版本尚未提供 R3 注入后端。", L"注入与载入", MB_OK | MB_ICONINFORMATION);
             return true;
         }
-        const auto result = dllMode
-            ? Ksword::Features::Process::ExecuteR0ProcessDllInjection({ processId_ }, path)
-            : Ksword::Features::Process::ExecuteR0ProcessShellcodeInjection({ processId_ }, path);
-        ::MessageBoxW(hwnd_, result.detail.c_str(), result.title.c_str(), MB_OK | (result.success ? MB_ICONINFORMATION : MB_ICONWARNING));
+        if (!ConfirmR0Injection(hwnd_, dllMode ? L"DLL 注入" : L"Shellcode 注入", processId_, path)) {
+            SetPageStatus(TabIndex::Actions, ActionStatus, L"● 用户取消 R0 注入。");
+            return true;
+        }
+        const DWORD processId = processId_;
+        ExecuteBackgroundAction(
+            TabIndex::Actions,
+            ActionStatus,
+            dllMode ? L"● 正在后台执行 R0 DLL 注入…" : L"● 正在后台执行 R0 Shellcode 注入…",
+            [dllMode, processId, path] {
+                const auto result = dllMode
+                    ? Ksword::Features::Process::ExecuteR0ProcessDllInjection({ processId }, path)
+                    : Ksword::Features::Process::ExecuteR0ProcessShellcodeInjection({ processId }, path);
+                ProcessDetailActionResult action{};
+                action.refreshRequired = result.success;
+                action.statusText = result.title + L"：" + result.detail;
+                action.dialogTitle = result.title;
+                action.dialogText = result.detail;
+                action.dialogIcon = result.success ? MB_ICONINFORMATION : MB_ICONWARNING;
+                return action;
+            });
         return true;
     }
     default:
@@ -276,14 +321,22 @@ void ProcessDetailPage::ExecuteProcessAction(int actionId) {
     row.parentProcessId = snapshot_.basic.parentProcessId;
     row.imageName = snapshot_.basic.processName;
     row.imagePath = snapshot_.basic.imagePath;
-    const ProcessActionResult result = Ksword::Features::Process::ExecuteProcessAction(
-        static_cast<ProcessActionId>(actionId), { processId_ }, { row });
-    if (!result.detail.empty()) {
-        ::MessageBoxW(hwnd_, result.detail.c_str(), result.title.c_str(), MB_OK | (result.success ? MB_ICONINFORMATION : MB_ICONWARNING));
-    }
-    if (result.success) {
-        RefreshAll();
-    }
+    const DWORD processId = processId_;
+    ExecuteBackgroundAction(
+        TabIndex::Actions,
+        ActionStatus,
+        L"● 正在后台执行进程操作…",
+        [actionId, processId, row = std::move(row)] {
+            const ProcessActionResult result = Ksword::Features::Process::ExecuteProcessAction(
+                static_cast<ProcessActionId>(actionId), { processId }, { row });
+            ProcessDetailActionResult action{};
+            action.refreshRequired = result.success;
+            action.statusText = result.title + L"：" + result.detail;
+            action.dialogTitle = result.title;
+            action.dialogText = result.detail;
+            action.dialogIcon = result.success ? MB_ICONINFORMATION : MB_ICONWARNING;
+            return action;
+        });
 }
 
 void ProcessDetailPage::BrowseForPayload(bool dllMode) {

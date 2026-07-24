@@ -97,6 +97,7 @@ private:
         ActionShellcodePath,
         ActionBrowseShellcode,
         ActionInjectShellcode,
+        ActionStatus = 1330,
 
         ModuleRefresh = 1400,
         ModuleVerifySignature,
@@ -201,6 +202,9 @@ private:
     struct ProcessDetailActionResult {
         bool refreshRequired = false;
         std::wstring statusText;
+        std::wstring dialogTitle;
+        std::wstring dialogText;
+        UINT dialogIcon = 0;
     };
 
     explicit ProcessDetailPage(DWORD processId);
@@ -307,6 +311,7 @@ private:
         int statusControlId,
         const std::wstring& workingText,
         std::function<ProcessDetailActionResult()> work);
+    void SetBackgroundActionControlsEnabled(bool enabled);
     void OnModuleSortRequested(int column);
     static LRESULT CALLBACK ModuleHeaderSubclassProc(
         HWND hwnd,

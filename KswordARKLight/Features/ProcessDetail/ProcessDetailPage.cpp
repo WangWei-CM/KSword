@@ -647,18 +647,65 @@ void ProcessDetailPage::ExecuteBackgroundAction(
         return;
     }
     SetPageStatus(tab, statusControlId, workingText);
+    SetBackgroundActionControlsEnabled(false);
     actionTask_->request(
         std::move(work),
         [this, tab, statusControlId](std::uint64_t, std::optional<ProcessDetailActionResult>&& result, std::exception_ptr error) {
+            SetBackgroundActionControlsEnabled(true);
             if (error || !result.has_value()) {
                 SetPageStatus(tab, statusControlId, L"● 后台操作异常结束。");
                 return;
             }
             SetPageStatus(tab, statusControlId, result->statusText);
+            if (!result->dialogText.empty()) {
+                ::MessageBoxW(
+                    hwnd_,
+                    result->dialogText.c_str(),
+                    result->dialogTitle.empty() ? L"进程操作" : result->dialogTitle.c_str(),
+                    MB_OK | (result->dialogIcon == 0 ? MB_ICONINFORMATION : result->dialogIcon));
+            }
             if (result->refreshRequired) {
                 RefreshAll();
             }
         });
+}
+
+// SetBackgroundActionControlsEnabled keeps the mutation surface idle while the
+// shared action worker owns an operation. The status labels and tab navigation
+// remain available, so the user can inspect prior data without starting a
+// competing process/R0 request.
+void ProcessDetailPage::SetBackgroundActionControlsEnabled(const bool enabled) {
+    constexpr std::array<int, 24> controls{
+        ActionTerminateMode,
+        ActionTerminate,
+        ActionSuspend,
+        ActionResume,
+        ActionSetCritical,
+        ActionClearCritical,
+        ActionPriority,
+        ActionApplyPriority,
+        ActionOpenFolder,
+        ActionRefreshPpl,
+        ActionEfficiencyOn,
+        ActionEfficiencyOff,
+        ActionR0Terminate,
+        ActionR0Suspend,
+        ActionR0Ppl,
+        ActionR0Hide,
+        ActionR0Danger,
+        ActionInjectionMode,
+        ActionDllPath,
+        ActionBrowseDll,
+        ActionInjectDll,
+        ActionShellcodePath,
+        ActionBrowseShellcode,
+        ActionInjectShellcode
+    };
+    for (const int controlId : controls) {
+        if (HWND control = Control(TabIndex::Actions, controlId)) {
+            ::EnableWindow(control, enabled);
+        }
+    }
 }
 
 HWND ProcessDetailPage::AddControl(
