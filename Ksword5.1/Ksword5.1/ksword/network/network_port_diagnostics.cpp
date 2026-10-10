@@ -221,7 +221,8 @@ ks::network::PortReleaseResult ks::network::ReleaseLocalPort(const PortOccupant&
         {
             result.error = "操作已取消。";
         }
-        else if (!stillOwns || !current.errors.empty())
+        // 另一地址族失败只影响空闲结论；此处已取得的同实例占用行仍是有效操作证据。
+        else if (!stillOwns)
         {
             result.error = "原占用记录已变化或无法完整复核，未执行解除。";
         }
@@ -239,6 +240,10 @@ ks::network::PortReleaseResult ks::network::ReleaseLocalPort(const PortOccupant&
             if (query == nullptr || !query(process.get(), &critical) || critical)
             {
                 result.error = "目标是关键进程或关键状态不可确认，未结束进程。";
+            }
+            else if (canceled && canceled())
+            {
+                result.error = "操作已取消。";
             }
             else
             {

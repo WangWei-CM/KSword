@@ -244,7 +244,7 @@ void PortDiagnosticsPage::showSnapshot(const ks::network::PortDiagnosticSnapshot
     QStringList errors;
     for (const auto& error : snapshot.errors)
     {
-        errors.push_back(QString::fromUtf8(error.c_str()));
+        errors.push_back(portText(error.c_str()));
     }
     m_report->setText(errors.join(QLatin1Char('\n')));
     m_report->setVisible(!errors.isEmpty());
@@ -339,7 +339,7 @@ void PortDiagnosticsPage::release(ks::network::PortReleaseAction action)
             m_status->setText(outcome + QLatin1Char(' ') + snapshotSummary(result.after));
             if (!result.error.empty())
             {
-                m_report->setText(QString::fromUtf8(result.error.c_str()) + QLatin1Char('\n') + m_report->text());
+                m_report->setText(portText(result.error.c_str()) + QLatin1Char('\n') + m_report->text());
                 m_report->show();
             }
             setBusy(false);
