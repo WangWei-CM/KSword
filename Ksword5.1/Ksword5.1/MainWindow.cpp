@@ -1901,6 +1901,34 @@ namespace
                 return;
             }
 
+            // 明确登记的新页签使用中性选中底和动态图标，旧实心底过滤器必须让出颜色所有权。
+            // 若注册发生在首次 Polish 之后，只还原本过滤器写入的图标，保留页面后续新资源。
+            if (tabBar->property("ksword_page_tabs_style").toBool()
+                || tabBar->property("ksword_secondary_tabs").toBool())
+            {
+                const auto originalEntry = m_originalIconsByTabBar.find(tabBar);
+                const auto displayEntry = m_displayIconsByTabBar.find(tabBar);
+                const QList<QIcon> originalIcons = originalEntry == m_originalIconsByTabBar.end()
+                    ? QList<QIcon>() : originalEntry->second;
+                const QList<QIcon> displayIcons = displayEntry == m_displayIconsByTabBar.end()
+                    ? QList<QIcon>() : displayEntry->second;
+                // 先清除旧记录再写回，避免 setTabIcon 引发的事件再次使用旧颜色缓存。
+                m_originalIconsByTabBar.erase(tabBar);
+                m_displayIconsByTabBar.erase(tabBar);
+                m_contrastIconsByTabBar.erase(tabBar);
+                const qsizetype count = std::min({static_cast<qsizetype>(tabBar->count()),
+                    originalIcons.size(), displayIcons.size()}); // 旧缓存只覆盖仍存在的原槽位。
+                for (qsizetype index = 0; index < count; ++index)
+                {
+                    if (!originalIcons[index].isNull() && !displayIcons[index].isNull()
+                        && tabBar->tabIcon(static_cast<int>(index)).cacheKey() == displayIcons[index].cacheKey())
+                    {
+                        tabBar->setTabIcon(static_cast<int>(index), originalIcons[index]);
+                    }
+                }
+                return;
+            }
+
             QList<QIcon>& originalIconList = m_originalIconsByTabBar[tabBar];
             QList<QIcon>& displayIconList = m_displayIconsByTabBar[tabBar];
             QList<QIcon>& contrastIconList = m_contrastIconsByTabBar[tabBar];

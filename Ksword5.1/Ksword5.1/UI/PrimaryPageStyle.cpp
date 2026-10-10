@@ -23,7 +23,9 @@ namespace
         {
             style.remove(first, last + end.size() - first);
         }
-        style = style.trimmed() + QLatin1Char('\n') + begin + rules + end;
+        const QString ownedBlock = begin + rules + end; // 仅本模块的容器/输入规则，不拥有按钮颜色。
+        widget->setProperty("ksword_primary_style_block", ownedBlock);
+        style = style.trimmed() + QLatin1Char('\n') + ownedBlock;
         if (style != widget->styleSheet())
         {
             widget->setStyleSheet(style);

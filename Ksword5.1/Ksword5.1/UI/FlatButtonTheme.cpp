@@ -1,5 +1,6 @@
 #include "./FlatButtonTheme.h"
 #include "ThemeBinding.h"
+#include "./ToolbarMetrics.h"
 #include "../theme.h"
 
 #include <QAbstractButton>
@@ -16,6 +17,28 @@ namespace
     // 标记只描述本模块拥有的颜色规则，页面原有几何和其它控件样式原样保留。
     constexpr char beginMarker[] = "/*KSWORD_FLAT_BUTTON_BEGIN*/";
     constexpr char endMarker[] = "/*KSWORD_FLAT_BUTTON_END*/";
+
+    // 返回影响按钮颜色所有权的剩余 QSS，不修改真实样式或接管未知业务颜色。
+    // 只精确排除已登记的工具栏几何与主页面容器块；额外规则仍阻止跨层猜配色。
+    QString buttonColorOwnershipStyle(const QWidget* owner)
+    {
+        QString style = owner->styleSheet(); // 当前控件真正拥有的完整局部样式。
+        if (owner->property("ksword_toolbar_control").toBool())
+        {
+            style.remove(ks::ui::ToolbarControlGeometryStyle().trimmed());
+        }
+        if (owner->property("ksword_toolbar_icon_only").toBool())
+        {
+            style.remove(ks::ui::ToolbarIconGeometryStyle().trimmed());
+        }
+        // 容器块由 PrimaryPageStyle 记录完整内容，不能只凭属性忽略整份祖先样式。
+        const QString primaryBlock = owner->property("ksword_primary_style_block").toString();
+        if (!primaryBlock.isEmpty())
+        {
+            style.remove(primaryBlock);
+        }
+        return style.trimmed();
+    }
 
     QString replaceOwnedBlock(QString style, const QString& replacement)
     {
@@ -147,7 +170,7 @@ namespace
             }
             for (QWidget* owner = button; owner != nullptr; owner = owner->parentWidget())
             {
-                const QString style = owner->styleSheet();
+                const QString style = buttonColorOwnershipStyle(owner);
                 int latestTone = -1; // 后声明的页面状态优先，不把首次 Neutral 锁成永久色调。
                 qsizetype latestPosition = -1;
                 for (int tone = 0; tone <= 3; ++tone)
@@ -346,7 +369,7 @@ bool ks::ui::TryGetFlatButtonBackground(const QAbstractButton* button,
     int tone = -1; // 只从仍实际存在的拥有标记读取，避免旧 managed 属性覆盖页面数据色。
     for (const QWidget* owner = button; owner != nullptr; owner = owner->parentWidget())
     {
-        const QString style = owner->styleSheet();
+        const QString style = buttonColorOwnershipStyle(owner);
         qsizetype latestPosition = -1;
         for (int candidate = 0; candidate <= 3; ++candidate)
         {
@@ -371,7 +394,7 @@ bool ks::ui::TryGetFlatButtonBackground(const QAbstractButton* button,
     if (tone < 0)
     {
         // 没有本地覆盖的应用默认按钮使用全局同一 Neutral 块。
-        if (!button->styleSheet().isEmpty() || QApplication::instance() == nullptr
+        if (!buttonColorOwnershipStyle(button).isEmpty() || QApplication::instance() == nullptr
             || !qApp->styleSheet().contains(QLatin1String(beginMarker)))
         {
             return false;
@@ -381,9 +404,9 @@ bool ks::ui::TryGetFlatButtonBackground(const QAbstractButton* button,
     FlatButtonAppearance appearance = FlatButtonAppearance::Auto;
     for (const QWidget* owner = button; owner != nullptr; owner = owner->parentWidget())
     {
-        const QString style = owner->styleSheet();
+        const QString style = buttonColorOwnershipStyle(owner);
         qsizetype latest = -1;
-        for (int candidate = 0; candidate <= 2; ++candidate)
+        for (int candidate = 0; candidate <= static_cast<int>(FlatButtonAppearance::Navigation); ++candidate)
         {
             const qsizetype position = style.lastIndexOf(
                 QStringLiteral("/*KSWORD_FLAT_BUTTON_APPEARANCE_%1*/").arg(candidate));

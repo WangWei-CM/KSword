@@ -16,6 +16,22 @@
 
 namespace ks::ui
 {
+    // 返回本模块只拥有的几何规则；颜色组件可精确排除它，不误判为业务配色覆盖。
+    inline QString ToolbarControlGeometryStyle()
+    {
+        return QStringLiteral(
+            "\nQPushButton[ksword_toolbar_control=\"true\"],"
+            "QToolButton[ksword_toolbar_control=\"true\"]{padding:0px 10px;border-radius:5px;}");
+    }
+
+    // 图标按钮的几何仅移除内边距，不能切断实际底色与 SVG 前景的状态绑定。
+    inline QString ToolbarIconGeometryStyle()
+    {
+        return QStringLiteral(
+            "\nQPushButton[ksword_toolbar_icon_only=\"true\"],"
+            "QToolButton[ksword_toolbar_icon_only=\"true\"]{padding:0px;}");
+    }
+
     // 已审核的单个按钮/单行输入控件也可接入统一几何，供 FlowLayout 等换行工具行使用。
     // height 为整行共同高度；0 表示按该控件字体计算，不修改文字、状态或业务配色。
     inline void NormalizeToolbarControl(QWidget* widget, int height = 0)
@@ -29,9 +45,7 @@ namespace ks::ui
         widget->setFixedHeight(controlHeight);
         if (auto* button = qobject_cast<QAbstractButton*>(widget))
         {
-            const QString geometryRule = QStringLiteral(
-                "\nQPushButton[ksword_toolbar_control=\"true\"],"
-                "QToolButton[ksword_toolbar_control=\"true\"]{padding:0px 10px;border-radius:5px;}");
+            const QString geometryRule = ToolbarControlGeometryStyle();
             if (!button->property("ksword_toolbar_control").toBool())
             {
                 button->setProperty("ksword_toolbar_control", true);
@@ -52,9 +66,7 @@ namespace ks::ui
                 button->setFixedWidth(controlHeight);
                 // 图标按钮保持方形，不能被文字按钮的横向留白压缩可见图标。
                 button->setProperty("ksword_toolbar_icon_only", true);
-                const QString iconRule = QStringLiteral(
-                    "\nQPushButton[ksword_toolbar_icon_only=\"true\"],"
-                    "QToolButton[ksword_toolbar_icon_only=\"true\"]{padding:0px;}" );
+                const QString iconRule = ToolbarIconGeometryStyle();
                 if (!button->styleSheet().endsWith(iconRule))
                 {
                     button->setStyleSheet(button->styleSheet() + iconRule);
