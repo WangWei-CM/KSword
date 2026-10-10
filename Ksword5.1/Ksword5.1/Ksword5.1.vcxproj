@@ -418,6 +418,8 @@
     <ClCompile Include="NetworkDock\NetworkDock.InternalHelpers.cpp" />
     <ClCompile Include="NetworkDock\NetworkFirewallPage.cpp" />
     <ClCompile Include="NetworkDock\NetworkAuditPage.cpp" />
+    <ClCompile Include="NetworkDock\PortDiagnosticsPage.cpp" />
+    <ClCompile Include="ksword\network\network_port_diagnostics.cpp" />
     <ClCompile Include="NetworkDock\HttpsProxyService.cpp" />
     <ClCompile Include="OnlineScan\SandboxUploadActions.cpp" />
     <ClCompile Include="OnlineScan\OnlineScanSupport.cpp" />
@@ -1041,6 +1043,8 @@
     <ClInclude Include="NetworkDock\NetworkDock.InternalHelpers.h" />
     <QtMoc Include="NetworkDock\NetworkFirewallPage.h" />
     <ClInclude Include="NetworkDock\NetworkAuditPage.h" />
+    <ClInclude Include="NetworkDock\PortDiagnosticsPage.h" />
+    <ClInclude Include="ksword\network\network_port_diagnostics.h" />
     <ClInclude Include="NetworkDock\HttpsProxyService.h" />
     <ClInclude Include="OnlineScan\SandboxUploadActions.h" />
     <ClInclude Include="OnlineScan\OnlineScanSupport.h" />

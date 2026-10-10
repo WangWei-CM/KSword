@@ -743,6 +743,12 @@
     <ClCompile Include="NetworkDock\NetworkAuditPage.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="NetworkDock\PortDiagnosticsPage.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="ksword\network\network_port_diagnostics.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="NetworkDock\HttpsProxyService.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -3151,6 +3157,12 @@
       <Filter>Header Files</Filter>
     </QtMoc>
     <ClInclude Include="NetworkDock\NetworkAuditPage.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="NetworkDock\PortDiagnosticsPage.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="ksword\network\network_port_diagnostics.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="NetworkDock\HttpsProxyService.h">

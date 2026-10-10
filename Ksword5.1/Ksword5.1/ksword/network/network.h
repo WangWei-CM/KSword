@@ -35,6 +35,7 @@
 // - TCP/UDP 连接快照枚举；
 // - TCP 连接终止（DELETE_TCB）。
 #include "network_connection_tools.h"
+#include "./network_port_diagnostics.h"
 
 // 手动请求工具：
 // - 提供可配置的 Winsock 请求执行封装。

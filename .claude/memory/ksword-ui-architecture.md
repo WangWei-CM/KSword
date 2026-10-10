@@ -217,3 +217,8 @@ KSword 主程序位于 `Ksword5.1/Ksword5.1`（Qt 6.9.3 Widgets + Qt Advanced Do
 
 - 悬停图标底色查询必须排除 `ToolbarMetrics` 的两段明确几何规则与 `PrimaryPageStyle` 记录的完整非按钮样式块，不能将这些规则当作未知业务配色而拒绝按钮上下文。只移除查询副本中的精确拥有片段，真正的额外局部/祖先规则继续保留保护；Navigation 外观也参与状态查询。
 - `GlobalTabIconContrastFilter` 对 `ksword_page_tabs_style` / `ksword_secondary_tabs` 登记的中性页签让出图标所有权；若登记较晚，只恢复过滤器本人写入的旧图标，先清缓存再还原。实心选中底用的 `OnAccentColor` 位图不能覆盖普通父子 Tab 的动态图标。
+
+### 网络端口诊断
+
+- `NetworkDock/PortDiagnosticsPage` 是独立网络工具 Tab，使用 PrimaryPageStyle、统一按钮几何和 AsyncOperation；占用表与绑定表隐藏无用途的冻结/快照条。只查询本地同号端口，覆盖 TCP/UDP 与 IPv4/IPv6；短暂 SO_EXCLUSIVEADDRUSE 绑定不监听、不收发，IPv6 使用 V6ONLY，探测后关闭 socket。
+- 解除明确区分结束整个占用进程与断开单条 IPv4 活动 TCP；后者不承诺关闭监听。进程快照在端口枚举前建立创建时间基线，动作前复核身份与占用，终止使用现有 IfCreationTimeMatches 工具并排除系统/自身/关键或未验证目标。API 成功只表示提交动作，重新枚举和绑定结果单独呈现；部分失败不能报为空闲。用户要求只编译，自行运行验收。

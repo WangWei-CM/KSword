@@ -7,6 +7,7 @@
 #include "../UI/PrimaryPageStyle.h"
 #include "NetworkFirewallPage.h"
 #include "NetworkAuditPage.h"
+#include "./PortDiagnosticsPage.h"
 #include "../Internationalization/LanguageManager.h"
 
 #include <QFrame>
@@ -37,6 +38,12 @@ void NetworkDock::initializeUi()
     // be restored later if a cleaner enforcement model replaces it.
     initializeFirewallTab();
     initializeNetworkAuditTab();
+    // 端口诊断是独立工具页，避免把解除操作与抓包、审计刷新混在一起。
+    auto* portDiagnostics = new PortDiagnosticsPage(m_sideTabWidget);
+    m_sideTabWidget->addTab(portDiagnostics,
+        QIcon(QStringLiteral(":/Icon/process_details.svg")), QStringLiteral("端口诊断"));
+    ks::i18n::LanguageManager::instance().bindTab(m_sideTabWidget, portDiagnostics,
+        QStringLiteral("network.tab.port_diagnostics"), QStringLiteral("端口诊断"));
     initializeManualRequestTab();
     initializeMultiThreadDownloadTab();
     initializeHttpsAnalyzeTab();
