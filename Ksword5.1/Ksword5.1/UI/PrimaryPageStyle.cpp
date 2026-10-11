@@ -5,8 +5,10 @@
 #include "../theme.h"
 
 #include <QComboBox>
+#include <QAbstractSpinBox>
 #include <QGroupBox>
 #include <QLabel>
+#include <QLineEdit>
 #include <QPointer>
 
 namespace
@@ -35,6 +37,33 @@ namespace
 
 namespace ks::ui
 {
+    void StyleStandaloneInput(QWidget* input)
+    {
+        if (!input || (!qobject_cast<QComboBox*>(input)
+            && !qobject_cast<QAbstractSpinBox*>(input) && !qobject_cast<QLineEdit*>(input)))
+        {
+            return;
+        }
+        // 内部编辑器属于外层输入面，单独加圆角会产生重复底块和接缝。
+        if (qobject_cast<QLineEdit*>(input)
+            && (qobject_cast<QComboBox*>(input->parentWidget())
+                || qobject_cast<QAbstractSpinBox*>(input->parentWidget())))
+        {
+            return;
+        }
+        input->setProperty("ksword_standalone_input", true);
+        const QString geometry = QStringLiteral(
+            "\nQComboBox[ksword_standalone_input=\"true\"],"
+            "QAbstractSpinBox[ksword_standalone_input=\"true\"],"
+            "QLineEdit[ksword_standalone_input=\"true\"]{border-radius:5px;}"
+            "QAbstractSpinBox[ksword_standalone_input=\"true\"]::up-button{border-top-right-radius:4px;}"
+            "QAbstractSpinBox[ksword_standalone_input=\"true\"]::down-button{border-bottom-right-radius:4px;}");
+        if (!input->styleSheet().contains(geometry))
+        {
+            input->setStyleSheet(input->styleSheet() + geometry);
+        }
+    }
+
     void StylePrimaryCombo(QComboBox* combo)
     {
         if (combo == nullptr || combo->property("ksword_primary_combo").toBool())
@@ -50,6 +79,10 @@ namespace ks::ui
             {
                 // 控件自身的完整状态规则优先于 Dock 透明祖先，热切换不留下旧色快照。
                 ReplacePrimaryStyle(target, KswordTheme::ThemedComboBoxStyle());
+                if (target->property("ksword_standalone_input").toBool())
+                {
+                    StyleStandaloneInput(target);
+                }
             }
         });
     }

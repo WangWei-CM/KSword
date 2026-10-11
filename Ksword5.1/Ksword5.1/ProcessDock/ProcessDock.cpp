@@ -4148,6 +4148,10 @@ namespace
         const QColor popupBackgroundColor = KswordTheme::SurfaceAltColor();
 
         comboBoxPointer->setStyleSheet(buildBlueComboBoxStyle());
+        if (comboBoxPointer->property("ksword_standalone_input").toBool())
+        {
+            ks::ui::StyleStandaloneInput(comboBoxPointer);
+        }
 
         QPalette comboPalette = comboBoxPointer->palette();
         comboPalette.setColor(QPalette::Base, comboBackgroundColor);
@@ -5313,6 +5317,7 @@ void ProcessDock::initializeTopControls()
     controlContainerLayout->addLayout(m_controlLayout);
     m_processPageLayout->addWidget(controlContainer);
     ks::ui::StylePrimaryCombo(m_viewModeCombo);
+    ks::ui::StyleStandaloneInput(m_viewModeCombo);
 }
 
 void ProcessDock::initializeProcessActivityPanel()
@@ -5359,6 +5364,7 @@ void ProcessDock::initializeProcessActivityPanel()
         QStringLiteral("process.activity.history.recent"), QStringLiteral("留存最近"));
     m_activityHistoryModeCombo->setCurrentIndex(2);
     ks::ui::StylePrimaryCombo(m_activityHistoryModeCombo);
+    ks::ui::StyleStandaloneInput(m_activityHistoryModeCombo);
     languageManager.bindToolTip(m_activityHistoryModeCombo,
         QStringLiteral("process.activity.history.tooltip.mode"),
         QStringLiteral("选择历史留存方式；不记录历史仅停止新增记录，全量留存不限制采样数量。"));
@@ -5370,6 +5376,7 @@ void ProcessDock::initializeProcessActivityPanel()
     m_activityHistoryLimitSpin->setMaximumWidth(120);
     // 数字与单位使用明确的主题文字/表面角色，不能依赖父级输入框颜色继承。
     ks::ui::BindSpinBoxTheme(m_activityHistoryLimitSpin);
+    ks::ui::StyleStandaloneInput(m_activityHistoryLimitSpin);
     m_activityHistoryLimitSpin->setSuffix(QStringLiteral(" 次"));
     languageManager.bindSuffix(m_activityHistoryLimitSpin,
         QStringLiteral("process.activity.history.count_suffix"), QStringLiteral(" 次"));

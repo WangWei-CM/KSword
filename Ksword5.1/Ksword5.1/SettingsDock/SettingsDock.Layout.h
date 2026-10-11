@@ -118,7 +118,8 @@ namespace ks::settings::ui
     inline QWidget* ControlRow(QHBoxLayout* row, QWidget* parent)
     {
         auto* field = new QWidget(parent); // 容纳同一设置的控件、数值和次要动作。
-        field->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
+        // 可换行说明必须能按实际宽度收缩，Fixed 会把未分配宽度时的建议高度锁住。
+        field->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
         row->setContentsMargins(0, 0, 0, 0);
         row->setSpacing(6);
         field->setLayout(row);
@@ -136,7 +137,8 @@ namespace ks::settings::ui
         value->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
         auto* hint = Label(parent, key, fallback);
         hint->setProperty("ksword_settings_hint", true);
-        hint->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+        // 保留文字的宽高关联，避免被忽略的建议宽度把短说明估算成很多行。
+        hint->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
         row->addWidget(hint, 1);
         new SliderLegendState(slider, value, hint);
     }

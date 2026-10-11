@@ -568,6 +568,7 @@ void ProcessDock::initializeThreadPage()
     m_threadScopeCombo->setMinimumWidth(112);
     // 范围选择明确登记完整底面，保留原筛选项与索引。
     ks::ui::StylePrimaryCombo(m_threadScopeCombo);
+    ks::ui::StyleStandaloneInput(m_threadScopeCombo);
 
     m_threadSearchLineEdit = new QLineEdit(m_threadPage);
     // 线程结果树不经过通用表格搜索注册，保留原提示并明确接入搜索底面。

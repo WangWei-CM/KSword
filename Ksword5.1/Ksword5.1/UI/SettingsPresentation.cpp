@@ -83,10 +83,11 @@ namespace
                 {
                     field->setMinimumHeight(rowHeight);
                 }
-                const int labelHeight = std::max(rowHeight, field->sizeHint().height());
-                if (label->minimumHeight() != labelHeight)
+                // 不能将复合行的无宽度 sizeHint 固化为最小高度：可换行说明的建议
+                // 高度可能很大。实际换行与整行高度交给 QFormLayout 的 heightForWidth。
+                if (label->minimumHeight() != rowHeight)
                 {
-                    label->setMinimumHeight(labelHeight);
+                    label->setMinimumHeight(rowHeight);
                 }
             }
         }

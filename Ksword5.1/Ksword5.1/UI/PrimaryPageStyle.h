@@ -10,6 +10,10 @@ namespace ks::ui
     // 页面显式登记组合框，完整维护中性底、文字、箭头与交互态；不改变选项或业务信号。
     void StylePrimaryCombo(QComboBox* combo);
 
+    // 仅登记页面确认独立成块的输入框；组合控件内部编辑器和连体选择组不得调用。
+    // 只对齐外轮廓圆角，保持颜色、命中区域和原业务逻辑。
+    void StyleStandaloneInput(QWidget* input);
+
     // 已有功能分组保留完整细边界，只统一底面和标题，不创建卡片或改变内部布局。
     void StylePrimaryGroup(QGroupBox* group);
 
