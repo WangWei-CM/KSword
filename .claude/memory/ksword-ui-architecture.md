@@ -234,3 +234,9 @@ KSword 主程序位于 `Ksword5.1/Ksword5.1`（Qt 6.9.3 Widgets + Qt Advanced Do
 - 分段整组底色使用 `ControlInputSurfaceColor`，与页面维持可见对比；不能再用 Window/SurfaceAlt 的中间混色，它会在内存工作台等页面与底板重合。按钮组、搜索范围 QTabBar、自绘 HexViewSegmented 三种适配器共用，文字/图标继续按实际选中和未选底面校准。
 - 动画中在选中面内外裁剪绘制两种对比度前景，避免过渡时字/图标与底色相同；原按钮 setParent 后需恢复隐式可见，显式业务隐藏继续保留。节拍按所在屏幕频率，遵循系统动画开关；隐藏与布局变化停止旧几何。编辑器查找/跳转/类别分段通过只读快照适配，原命中矩形和提示不变。
 - `UI/ThemedSlider` 保留 QSlider 的输入与信号，用原 QStyleOption 的真实 handle 位置绘制连续填充、浅轨道和圆把手，包含 RTL、反向及禁用态；设置、窗口透明度和 DWM 两处透明度均明确接入。
+
+
+## 参数表单页框架（2026-10-11）
+
+- `UI/ParameterWorkspace` 将参数独立滚动、固定执行区与结果区分开；窄窗口改上下分栏。使用 `StyleParameterSection` 明确选择标题分隔线，用 `FoldParameterSection` 折叠非 checkable 的低频参数分组。只有显式登记的参数区补齐输入底色、下拉和数值框主题，不全局重排或扫描业务页面。
+- 用户要求先完成框架，后续逐页由用户接入；本轮保留网络请求构造与创建进程两个试用接入，直接编译交用户看效果，不继续扩展其他页面或启动审计。接入方法和限制见 `docs/参数表单框架接入.md`。

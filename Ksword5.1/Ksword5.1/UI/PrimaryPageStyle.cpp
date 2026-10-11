@@ -108,6 +108,19 @@ namespace ks::ui
                 KswordTheme::TextSecondaryColor(), surface, 4.5);
             const QColor disabled = KswordTheme::EnsureTextContrast(
                 KswordTheme::TextDisabledColor(), surface, 3.0);
+            // 参数工作区用标题与细分隔线表达分区，不在两栏面板内重复堆大边框。
+            if (target->property("ksword_parameter_section").toBool())
+            {
+                ReplacePrimaryStyle(target, QStringLiteral(
+                    "QGroupBox[ksword_parameter_section=\"true\"]{background:transparent;"
+                    "border:0;border-top:1px solid %1;border-radius:0;margin-top:18px;padding-top:0;}"
+                    "QGroupBox[ksword_parameter_section=\"true\"]::title{"
+                    "subcontrol-origin:margin;subcontrol-position:top left;left:0;"
+                    "padding:0 0 5px 0;background:transparent;color:%2;font-weight:600;}"
+                    "QGroupBox[ksword_parameter_section=\"true\"]::title:disabled{color:%3;}")
+                    .arg(KswordTheme::BorderColor().name(), title.name(), disabled.name()));
+                return;
+            }
             // 仅命中此分组自身，嵌套业务控件、表格语义底色及选中态保持原所有权。
             ReplacePrimaryStyle(target, QStringLiteral(
                 "QGroupBox[ksword_primary_group=\"true\"]{background:%1;"

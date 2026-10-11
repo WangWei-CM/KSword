@@ -672,6 +672,7 @@
     <ClCompile Include="UI\ThemeBinding.cpp" />
     <ClCompile Include="UI\SecondaryPageLayout.cpp" />
     <ClCompile Include="UI\PrimaryPageStyle.cpp" />
+    <ClCompile Include="UI\ParameterWorkspace.cpp" />
     <ClCompile Include="UI\MainSurfaceStyle.cpp" />
     <ClCompile Include="UI\PageNavigationBridge.cpp" />
     <ClCompile Include="UI\McpLocalBridge.cpp" />
@@ -919,6 +920,7 @@
     <ClInclude Include="UI\PageControlStyle.h" />
     <ClInclude Include="UI\SecondaryPageLayout.h" />
     <ClInclude Include="UI\PrimaryPageStyle.h" />
+    <ClInclude Include="UI\ParameterWorkspace.h" />
     <ClInclude Include="UI\MainSurfaceStyle.h" />
     <ClInclude Include="UI\PageNavigationBridge.h" />
     <ClInclude Include="UI\McpLocalBridge.h" />

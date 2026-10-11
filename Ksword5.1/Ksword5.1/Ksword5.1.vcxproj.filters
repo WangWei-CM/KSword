@@ -1556,6 +1556,9 @@
     <ClCompile Include="UI\PrimaryPageStyle.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="UI\ParameterWorkspace.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="UI\MainSurfaceStyle.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -2779,6 +2782,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="UI\PrimaryPageStyle.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="UI\ParameterWorkspace.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="UI\MainSurfaceStyle.h">

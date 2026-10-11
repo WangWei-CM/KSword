@@ -6660,6 +6660,7 @@
     "notification.copy.log_template": "%1\n%2\n%3\nFile: %4\nFunction: %5\nGUID: %6"
   },
   "source_translations": {
+    "高级": "Advanced",
     "0% 仅纯色 · 100% 仅背景图": "0% solid · 100% image",
     "0% 不模糊": "0% no blur",
     "0% 几乎完全看到桌面": "0% almost fully transparent",

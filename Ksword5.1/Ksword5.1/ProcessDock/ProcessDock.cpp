@@ -7,6 +7,7 @@
 #include "../UI/ToolbarMetrics.h"
 #include "../UI/PageControlStyle.h"
 #include "../UI/PrimaryPageStyle.h"
+#include "../UI/ParameterWorkspace.h"
 #include "../UI/SecondaryPageLayout.h"
 #include <QDynamicPropertyChangeEvent>
 #include "../UI/TableInteractionSupport.h"
@@ -5768,19 +5769,10 @@ void ProcessDock::initializeCreateProcessPage()
     m_createProcessPageLayout->setContentsMargins(6, 6, 6, 6);
     m_createProcessPageLayout->setSpacing(6);
 
-    QScrollArea* scrollArea = new QScrollArea(m_createProcessPage);
-    scrollArea->setWidgetResizable(true);
-    scrollArea->setFrameShape(QFrame::NoFrame);
-    applyTransparentContainerStyle(scrollArea);
-    m_createProcessPageLayout->addWidget(scrollArea, 1);
-
-    QWidget* contentWidget = new QWidget(scrollArea);
-    applyTransparentContainerStyle(contentWidget);
-    QVBoxLayout* contentLayout = new QVBoxLayout(contentWidget);
-    contentLayout->setContentsMargins(2, 2, 2, 2);
-    // 参数组间留白高于组内行距，所有参数和结果仍在同一滚动页面。
-    contentLayout->setSpacing(16);
-    scrollArea->setWidget(contentWidget);
+    auto* workspace = new ks::ui::ParameterWorkspace(m_createProcessPage, 600);
+    m_createProcessPageLayout->addWidget(workspace);
+    QVBoxLayout* contentLayout = workspace->parameters();
+    QWidget* contentWidget = contentLayout->parentWidget();
 
     const QString inputStyle = buildBlueLineEditStyle();
     const QString buttonStyle = buildBlueButtonStyle(false);
@@ -5802,13 +5794,13 @@ void ProcessDock::initializeCreateProcessPage()
             std::vector<QCheckBox*>* outputCheckBoxList) -> QGroupBox*
     {
         QGroupBox* groupBox = new QGroupBox(groupTitle, parentWidget);
-        ks::ui::StylePrimaryGroup(groupBox);
+        ks::ui::StyleParameterSection(groupBox);
         QGridLayout* groupLayout = new QGridLayout(groupBox);
         groupLayout->setContentsMargins(6, 6, 6, 6);
         groupLayout->setHorizontalSpacing(10);
         groupLayout->setVerticalSpacing(4);
 
-        const int columnCount = 3;
+        const int columnCount = 2;
         for (std::size_t index = 0; index < definitionList.size(); ++index)
         {
             const BitmaskFlagDefinition& definition = definitionList[index];
@@ -5835,7 +5827,7 @@ void ProcessDock::initializeCreateProcessPage()
 
     // 1) 创建方式 + 令牌来源配置。
     QGroupBox* methodGroup = new QGroupBox("创建方式 / 令牌来源", contentWidget);
-    ks::ui::StylePrimaryGroup(methodGroup);
+    ks::ui::StyleParameterSection(methodGroup);
     QGridLayout* methodLayout = new QGridLayout(methodGroup);
     methodLayout->setHorizontalSpacing(8);
     methodLayout->setVerticalSpacing(6);
@@ -5870,12 +5862,12 @@ void ProcessDock::initializeCreateProcessPage()
         "Token DesiredAccess 位标志组合",
         TokenDesiredAccessDefinitions,
         &m_tokenDesiredAccessChecks);
-    methodLayout->addWidget(tokenAccessGroup, 3, 0, 1, 4);
+    methodLayout->addWidget(ks::ui::FoldParameterSection(tokenAccessGroup), 3, 0, 1, 4);
     contentLayout->addWidget(methodGroup);
 
     // 2) CreateProcessW 基础参数。
     QGroupBox* basicGroup = new QGroupBox("CreateProcessW 参数（全部可选 Null）", contentWidget);
-    ks::ui::StylePrimaryGroup(basicGroup);
+    ks::ui::StyleParameterSection(basicGroup);
     QGridLayout* basicLayout = new QGridLayout(basicGroup);
     basicLayout->setHorizontalSpacing(8);
     basicLayout->setVerticalSpacing(6);
@@ -5915,20 +5907,21 @@ void ProcessDock::initializeCreateProcessPage()
     m_useEnvironmentCheck->setChecked(false);
     m_environmentUnicodeCheck->setChecked(true);
 
-    basicLayout->addWidget(m_useApplicationNameCheck, 0, 0);
-    basicLayout->addWidget(m_applicationNameEdit, 0, 1, 1, 2);
-    basicLayout->addWidget(m_applicationBrowseButton, 0, 3);
-    basicLayout->addWidget(m_useCommandLineCheck, 1, 0);
-    basicLayout->addWidget(m_commandLineEdit, 1, 1, 1, 3);
-    basicLayout->addWidget(m_useCurrentDirectoryCheck, 2, 0);
-    basicLayout->addWidget(m_currentDirectoryEdit, 2, 1, 1, 2);
-    basicLayout->addWidget(m_currentDirectoryBrowseButton, 2, 3);
-    basicLayout->addWidget(m_useEnvironmentCheck, 3, 0);
-    basicLayout->addWidget(m_environmentEditor, 3, 1, 2, 3);
-    basicLayout->addWidget(m_environmentUnicodeCheck, 5, 1, 1, 3);
-    basicLayout->addWidget(new QLabel("dwCreationFlags（创建标志）:", basicGroup), 6, 0);
-    basicLayout->addWidget(m_creationFlagsEdit, 6, 1);
-    basicLayout->addWidget(m_inheritHandleCheck, 6, 2, 1, 2);
+    basicLayout->setColumnStretch(0, 1);
+    basicLayout->addWidget(m_useApplicationNameCheck, 0, 0, 1, 2);
+    basicLayout->addWidget(m_applicationNameEdit, 1, 0);
+    basicLayout->addWidget(m_applicationBrowseButton, 1, 1);
+    basicLayout->addWidget(m_useCommandLineCheck, 2, 0, 1, 2);
+    basicLayout->addWidget(m_commandLineEdit, 3, 0, 1, 2);
+    basicLayout->addWidget(m_useCurrentDirectoryCheck, 4, 0, 1, 2);
+    basicLayout->addWidget(m_currentDirectoryEdit, 5, 0);
+    basicLayout->addWidget(m_currentDirectoryBrowseButton, 5, 1);
+    basicLayout->addWidget(m_useEnvironmentCheck, 6, 0, 1, 2);
+    basicLayout->addWidget(m_environmentEditor, 7, 0, 1, 2);
+    basicLayout->addWidget(m_environmentUnicodeCheck, 8, 0, 1, 2);
+    basicLayout->addWidget(new QLabel("dwCreationFlags（创建标志）:", basicGroup), 9, 0);
+    basicLayout->addWidget(m_creationFlagsEdit, 10, 0, 1, 2);
+    basicLayout->addWidget(m_inheritHandleCheck, 11, 0, 1, 2);
 
     // dwCreationFlags 位标志勾选区：
     // - 列出 CreateProcess 常见全部标志；
@@ -5938,12 +5931,12 @@ void ProcessDock::initializeCreateProcessPage()
         "dwCreationFlags 位标志组合",
         CreateProcessFlagDefinitions,
         &m_creationFlagChecks);
-    basicLayout->addWidget(creationFlagsGroup, 7, 0, 1, 4);
+    basicLayout->addWidget(ks::ui::FoldParameterSection(creationFlagsGroup), 12, 0, 1, 2);
     contentLayout->addWidget(basicGroup);
 
     // 3) PROCESS / THREAD SECURITY_ATTRIBUTES。
     QGroupBox* securityGroup = new QGroupBox("SECURITY_ATTRIBUTES（Process / Thread）", contentWidget);
-    ks::ui::StylePrimaryGroup(securityGroup);
+    ks::ui::StyleParameterSection(securityGroup);
     QGridLayout* securityLayout = new QGridLayout(securityGroup);
     securityLayout->setHorizontalSpacing(8);
     securityLayout->setVerticalSpacing(6);
@@ -5975,11 +5968,11 @@ void ProcessDock::initializeCreateProcessPage()
     securityLayout->addWidget(new QLabel("lpSecurityDescriptor（安全描述符指针）", securityGroup), 1, 3);
     securityLayout->addWidget(m_threadSecurityDescriptorEdit, 1, 4);
     securityLayout->addWidget(m_threadSecurityInheritCheck, 1, 5);
-    contentLayout->addWidget(securityGroup);
+    contentLayout->addWidget(ks::ui::FoldParameterSection(securityGroup));
 
     // 4) STARTUPINFOW 全字段。
     QGroupBox* startupGroup = new QGroupBox("STARTUPINFOW（全部字段）", contentWidget);
-    ks::ui::StylePrimaryGroup(startupGroup);
+    ks::ui::StyleParameterSection(startupGroup);
     QGridLayout* startupLayout = new QGridLayout(startupGroup);
     startupLayout->setHorizontalSpacing(8);
     startupLayout->setVerticalSpacing(6);
@@ -6019,37 +6012,32 @@ void ProcessDock::initializeCreateProcessPage()
     }
 
     int startupRow = 0;
-    startupLayout->addWidget(m_useStartupInfoCheck, startupRow++, 0, 1, 6);
+    startupLayout->addWidget(m_useStartupInfoCheck, startupRow++, 0, 1, 2);
     const auto addStartupField = [&startupLayout, &startupRow](const QString& labelText, QWidget* editorWidget, const int colOffset)
         {
-            startupLayout->addWidget(new QLabel(labelText), startupRow, colOffset);
-            startupLayout->addWidget(editorWidget, startupRow, colOffset + 1);
+            Q_UNUSED(colOffset);
+            startupLayout->addWidget(new QLabel(labelText), startupRow, 0);
+            startupLayout->addWidget(editorWidget, startupRow++, 1);
         };
 
     addStartupField("cb（结构体大小）", m_siCbEdit, 0);
     addStartupField("lpReserved（保留字符串）", m_siReservedEdit, 2);
     addStartupField("lpDesktop（目标桌面）", m_siDesktopEdit, 4);
-    ++startupRow;
     addStartupField("lpTitle（窗口标题）", m_siTitleEdit, 0);
     addStartupField("dwX（窗口X坐标）", m_siXEdit, 2);
     addStartupField("dwY（窗口Y坐标）", m_siYEdit, 4);
-    ++startupRow;
     addStartupField("dwXSize（窗口宽）", m_siXSizeEdit, 0);
     addStartupField("dwYSize（窗口高）", m_siYSizeEdit, 2);
     addStartupField("dwXCountChars（控制台宽）", m_siXCountCharsEdit, 4);
-    ++startupRow;
     addStartupField("dwYCountChars（控制台高）", m_siYCountCharsEdit, 0);
     addStartupField("dwFillAttribute（控制台属性）", m_siFillAttributeEdit, 2);
     addStartupField("dwFlags（启动标志）", m_siFlagsEdit, 4);
-    ++startupRow;
     addStartupField("wShowWindow（显示方式）", m_siShowWindowEdit, 0);
     addStartupField("cbReserved2（保留2长度）", m_siCbReserved2Edit, 2);
     addStartupField("lpReserved2（保留2指针）", m_siReserved2PtrEdit, 4);
-    ++startupRow;
     addStartupField("hStdInput（标准输入句柄）", m_siStdInputEdit, 0);
     addStartupField("hStdOutput（标准输出句柄）", m_siStdOutputEdit, 2);
     addStartupField("hStdError（标准错误句柄）", m_siStdErrorEdit, 4);
-    ++startupRow;
 
     // STARTUPINFO.dwFillAttribute 位标志勾选区：
     // - 提供前景/背景颜色与样式位的可视化组合。
@@ -6058,7 +6046,7 @@ void ProcessDock::initializeCreateProcessPage()
         "STARTUPINFO.dwFillAttribute 位标志组合",
         ConsoleFillAttributeDefinitions,
         &m_startupFillAttributeChecks);
-    startupLayout->addWidget(startupFillAttrGroup, startupRow++, 0, 1, 6);
+    startupLayout->addWidget(ks::ui::FoldParameterSection(startupFillAttrGroup), startupRow++, 0, 1, 2);
 
     // STARTUPINFO.dwFlags 位标志勾选区：
     // - 列出 STARTF_* 标志；
@@ -6068,13 +6056,13 @@ void ProcessDock::initializeCreateProcessPage()
         "STARTUPINFO.dwFlags 位标志组合",
         StartupInfoFlagDefinitions,
         &m_startupFlagChecks);
-    startupLayout->addWidget(startupFlagsGroup, startupRow++, 0, 1, 6);
+    startupLayout->addWidget(ks::ui::FoldParameterSection(startupFlagsGroup), startupRow++, 0, 1, 2);
 
-    contentLayout->addWidget(startupGroup);
+    contentLayout->addWidget(ks::ui::FoldParameterSection(startupGroup));
 
     // 5) PROCESS_INFORMATION 全字段。
     QGroupBox* processInfoGroup = new QGroupBox("PROCESS_INFORMATION（输出结构体，支持自定义初值）", contentWidget);
-    ks::ui::StylePrimaryGroup(processInfoGroup);
+    ks::ui::StyleParameterSection(processInfoGroup);
     QGridLayout* processInfoLayout = new QGridLayout(processInfoGroup);
     processInfoLayout->setHorizontalSpacing(8);
     processInfoLayout->setVerticalSpacing(6);
@@ -6100,11 +6088,11 @@ void ProcessDock::initializeCreateProcessPage()
     processInfoLayout->addWidget(m_piPidEdit, 2, 1);
     processInfoLayout->addWidget(new QLabel("dwThreadId（输出TID）", processInfoGroup), 2, 2);
     processInfoLayout->addWidget(m_piTidEdit, 2, 3);
-    contentLayout->addWidget(processInfoGroup);
+    contentLayout->addWidget(ks::ui::FoldParameterSection(processInfoGroup));
 
     // 6) Token 特权编辑器。
     QGroupBox* tokenPrivilegeGroup = new QGroupBox("Token 特权调整（AdjustTokenPrivileges）", contentWidget);
-    ks::ui::StylePrimaryGroup(tokenPrivilegeGroup);
+    ks::ui::StyleParameterSection(tokenPrivilegeGroup);
     QVBoxLayout* tokenPrivilegeLayout = new QVBoxLayout(tokenPrivilegeGroup);
     const QStringList privilegeNames = tokenPrivilegeNames();
     m_tokenPrivilegeTable = new ks::ui::VisibleTableWidget(privilegeNames.size(), 2, tokenPrivilegeGroup);
@@ -6183,13 +6171,13 @@ void ProcessDock::initializeCreateProcessPage()
 
     tokenPrivilegeLayout->addWidget(m_tokenPrivilegeTable, 1);
     tokenPrivilegeLayout->addLayout(tokenActionLayout);
-    contentLayout->addWidget(tokenPrivilegeGroup);
+    contentLayout->addWidget(ks::ui::FoldParameterSection(tokenPrivilegeGroup));
 
     // 7) 操作按钮 + 输出日志。
     QGroupBox* actionGroup = new QGroupBox("执行与结果", contentWidget);
-    ks::ui::StylePrimaryGroup(actionGroup);
+    ks::ui::StyleParameterSection(actionGroup);
     QVBoxLayout* actionLayout = new QVBoxLayout(actionGroup);
-    QHBoxLayout* actionButtonLayout = new QHBoxLayout();
+    QHBoxLayout* actionButtonLayout = workspace->actions();
     m_launchProcessButton = new QPushButton("执行创建进程", actionGroup);
     m_resetCreateFormButton = new QPushButton("恢复默认配置", actionGroup);
     m_launchProcessButton->setStyleSheet(buttonStyle);
@@ -6206,9 +6194,9 @@ void ProcessDock::initializeCreateProcessPage()
     m_createResultOutput->setStyleSheet(inputStyle);
     m_createResultOutput->setPlaceholderText("这里显示请求参数摘要、API 返回结果和失败错误码。");
 
-    actionLayout->addLayout(actionButtonLayout);
     actionLayout->addWidget(m_createResultOutput, 1);
-    contentLayout->addWidget(actionGroup, 1);
+    workspace->results()->addWidget(actionGroup, 1);
+    workspace->finish();
 
     // 默认值补充：命令行默认跟随 applicationName。
     m_commandLineEdit->setPlaceholderText("例如: \"C:\\Windows\\System32\\notepad.exe\" C:\\test.txt");
