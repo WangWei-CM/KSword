@@ -204,7 +204,7 @@ void ScannerDock::buildUi()
     // m_mainTabs：将只读检查与高风险编辑明确分离，避免误触。
     m_mainTabs = new QTabWidget(this);
     m_mainTabs->setDocumentMode(true);
-    ks::ui::StylePageTabs(m_mainTabs);
+    ks::ui::StylePageTabsContentFrame(m_mainTabs);
     rootLayout->addWidget(m_mainTabs, 1);
     buildAnalysisUi();
 
@@ -214,7 +214,7 @@ void ScannerDock::buildUi()
     inspectionLayout->setContentsMargins(0, 0, 0, 0);
     m_resultTabs = new QTabWidget(m_inspectionPage);
     m_resultTabs->setDocumentMode(true);
-    ks::ui::StylePageTabs(m_resultTabs);
+    ks::ui::StylePageTabsContentFrame(m_resultTabs);
     inspectionLayout->addWidget(m_resultTabs);
     m_mainTabs->addTab(m_inspectionPage, QString());
 

@@ -1,5 +1,7 @@
 #include "MemoryConsumerEvidencePage.h"
 #include "../UI/ToolbarMetrics.h"
+#include "../UI/PrimaryPageStyle.h"
+#include "../UI/FlatButtonTheme.h"
 #include "../UI/PageControlStyle.h"
 #include "../UI/CodeEditorWidget.h"
 #include "PoolAllocationAnalysisWidget.h"
@@ -74,6 +76,12 @@ MemoryConsumerEvidencePage::MemoryConsumerEvidencePage(QWidget* parent) : QWidge
     m_traceStart = new QPushButton(this);
     m_traceStop = new QPushButton(this);
     m_duration = new QSpinBox(this);
+    ks::ui::StyleStandaloneInput(m_duration); // 采样时长使用数值输入角色。
+    for (QPushButton* action : {m_gpuButton, m_traceStart, m_traceStop})
+    {
+        ks::ui::ApplyFlatButtonTheme(action, ks::ui::FlatButtonTone::Neutral,
+            ks::ui::FlatButtonAppearance::Solid);
+    }
     m_duration->setRange(5, 600); m_duration->setValue(30);
     controls->addWidget(m_gpuButton); controls->addWidget(m_traceStart);
     controls->addWidget(m_duration); controls->addWidget(m_traceStop);
@@ -81,7 +89,7 @@ MemoryConsumerEvidencePage::MemoryConsumerEvidencePage(QWidget* parent) : QWidge
     ks::ui::NormalizeToolbarRow(controls);
     m_note = new QLabel(this); m_note->setWordWrap(true); layout->addWidget(m_note);
     m_detailTabs = new QTabWidget(this);
-    ks::ui::StylePageTabs(m_detailTabs);
+    ks::ui::StylePageTabsContentFrame(m_detailTabs);
     m_detailTabs->setMinimumSize(0, 0);
     m_detailTabs->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Ignored);
     auto* gpuPage = new QWidget(m_detailTabs);

@@ -13006,14 +13006,14 @@ bool FileDock::eventFilter(QObject* watched, QEvent* event)
 void FileDock::initializeUi()
 {
     m_rootLayout = new QVBoxLayout(this);
-    m_rootLayout->setContentsMargins(4, 4, 4, 4);
+    m_rootLayout->setContentsMargins(0, 0, 0, 0); // 文件双栏内容由Tab框架提供等边外沿。
     m_rootLayout->setSpacing(6);
 
     // 顶层改为竖排 Tab：文件管理 + 文件恢复。
     m_rootTabWidget = new QTabWidget(this);
     m_rootTabWidget->setTabPosition(QTabWidget::West);
     m_rootTabWidget->setDocumentMode(true);
-    ks::ui::StylePageTabs(m_rootTabWidget);
+    ks::ui::StylePageTabsContentFrame(m_rootTabWidget);
     m_rootLayout->addWidget(m_rootTabWidget, 1);
 
     m_fileManagerPage = new QWidget(m_rootTabWidget);

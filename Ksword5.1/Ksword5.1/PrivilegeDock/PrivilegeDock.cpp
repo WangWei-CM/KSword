@@ -267,12 +267,12 @@ void PrivilegeDock::changeEvent(QEvent* event)
 void PrivilegeDock::initializeUi()
 {
     m_rootLayout = new QVBoxLayout(this);
-    m_rootLayout->setContentsMargins(4, 4, 4, 4);
+    m_rootLayout->setContentsMargins(0, 0, 0, 0); // 分类导航与内容框架分别负责自身几何。
     m_rootLayout->setSpacing(6);
 
     m_tabWidget = new QTabWidget(this);
     m_tabWidget->setTabPosition(QTabWidget::West);
-    ks::ui::StylePageTabs(m_tabWidget);
+    ks::ui::StylePageTabsContentFrame(m_tabWidget);
     m_rootLayout->addWidget(m_tabWidget, 1);
 
     initializeAccountTab();
@@ -282,7 +282,7 @@ void PrivilegeDock::initializeUi()
     auto* accountLayout = new QVBoxLayout(accounts);
     accountLayout->setContentsMargins(0, 0, 0, 0);
     auto* accountTabs = new QTabWidget(accounts);
-    ks::ui::StylePageTabs(accountTabs);
+    ks::ui::StylePageTabsContentFrame(accountTabs);
     accountLayout->addWidget(accountTabs);
     auto* manager = ks::privilege::createAccountManagementPage(accountTabs,
         [this](const QString& target, const QString& account) {

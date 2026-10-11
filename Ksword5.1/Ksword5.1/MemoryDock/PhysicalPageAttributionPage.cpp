@@ -231,7 +231,7 @@ PhysicalPageAttributionPage::PhysicalPageAttributionPage(QWidget* parent) : QWid
     m_chart = new MemoryAttributionChart(this);
     root->addWidget(m_chart);
     m_tabs = new QTabWidget(this);
-    ks::ui::StylePageTabs(m_tabs);
+    ks::ui::StylePageTabsContentFrame(m_tabs);
     m_categories = table(m_tabs);
     m_categories->horizontalHeader()->setSortIndicator(2, Qt::DescendingOrder);
     m_groups = table(m_tabs);
@@ -246,6 +246,7 @@ PhysicalPageAttributionPage::PhysicalPageAttributionPage(QWidget* parent) : QWid
     auto* lookup = new QHBoxLayout(lookupToolbar);
     lookup->setContentsMargins(8, 4, 8, 4);
     m_pfn = new QLineEdit(pages);
+    ks::ui::StyleStandaloneInput(m_pfn); // PFN地址输入使用独立实底，保留原查询语义。
     m_inspectButton = new QPushButton(pages);
     lookup->addWidget(m_pfn, 1);
     lookup->addWidget(m_inspectButton);

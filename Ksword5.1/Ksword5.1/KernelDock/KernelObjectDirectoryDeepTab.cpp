@@ -1,6 +1,8 @@
 
 #include "KernelObjectDirectoryDeepTab.h"
 #include "../UI/ToolbarMetrics.h"
+#include "../UI/PrimaryPageStyle.h"
+#include "../UI/FlatButtonTheme.h"
 #include "KernelDock.h"
 #include "../UI/TableInteractionSupport.h"
 
@@ -252,17 +254,21 @@ void KernelObjectDirectoryDeepTab::initializeUi()
 
     auto* rootPathLabel = new QLabel(kernelText("kernel.object_directory.toolbar.root_path.label", QStringLiteral("根路径:")), this);
     m_rootPathEdit = new QLineEdit(this);
+    ks::ui::StyleStandaloneInput(m_rootPathEdit); // 对象根路径与同排查询动作使用统一控件轮廓。
     m_rootPathEdit->setText(QStringLiteral("\\"));
     m_rootPathEdit->setPlaceholderText(kernelText("kernel.object_directory.toolbar.root_path.placeholder", QStringLiteral("\\、\\Device、\\BaseNamedObjects、\\Sessions")));
     m_rootPathEdit->setToolTip(kernelText("kernel.object_directory.toolbar.root_path.tooltip", QStringLiteral("Object Manager Directory 根路径，必须是 Directory 对象。")));
 
     auto* depthLabel = new QLabel(kernelText("kernel.object_directory.toolbar.max_depth.label", QStringLiteral("最大深度:")), this);
     m_maxDepthSpinBox = new QSpinBox(this);
+    ks::ui::StyleStandaloneInput(m_maxDepthSpinBox);
     m_maxDepthSpinBox->setRange(0, 32);
     m_maxDepthSpinBox->setValue(4);
     m_maxDepthSpinBox->setToolTip(kernelText("kernel.object_directory.toolbar.max_depth.tooltip", QStringLiteral("只对 TypeName == Directory 的对象继续下钻，达到深度后停止。")));
 
     m_refreshButton = new QPushButton(kernelText("kernel.object_directory.toolbar.refresh", QStringLiteral("刷新")), this);
+    ks::ui::ApplyFlatButtonTheme(m_refreshButton, ks::ui::FlatButtonTone::Neutral,
+        ks::ui::FlatButtonAppearance::Solid);
     m_refreshButton->setToolTip(kernelText("kernel.object_directory.toolbar.refresh.tooltip", QStringLiteral("后台递归枚举指定 Object Manager Directory。")));
 
     m_statusLabel = new QLabel(kernelText("kernel.object_directory.status.waiting", QStringLiteral("状态：等待刷新")), this);

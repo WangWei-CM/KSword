@@ -4437,7 +4437,7 @@ void HardwareDock::startInitialSamplingAfterFirstPaint()
 void HardwareDock::initializeUi()
 {
     m_rootLayout = new QVBoxLayout(this);
-    m_rootLayout->setContentsMargins(4, 4, 4, 4);
+    m_rootLayout->setContentsMargins(0, 0, 0, 0); // Tab自身统一6px内容留白。
     m_rootLayout->setSpacing(6);
 
     // 顶部横向页签：
@@ -4445,7 +4445,7 @@ void HardwareDock::initializeUi()
     // - 页签按内容宽度排列，空间不足时使用滚动按钮，避免强行压缩文字；
     // - 用户可见名称统一使用清晰中文，内部协议缩写放到页面说明中。
     m_sideTabWidget = new QTabWidget(this);
-    ks::ui::StylePageTabs(m_sideTabWidget);
+    ks::ui::StylePageTabsContentFrame(m_sideTabWidget);
     configureCompressibleWidget(m_sideTabWidget, QSizePolicy::Expanding, QSizePolicy::Expanding);
     m_sideTabWidget->setTabPosition(QTabWidget::North);
     m_sideTabWidget->setDocumentMode(true);
@@ -7321,6 +7321,7 @@ void HardwareDock::ensureDiskMonitorTabInitialized()
 
     m_diskMonitorPage = new DiskMonitorPage(m_diskMonitorHostPage);
     hostLayout->addWidget(m_diskMonitorPage, 1);
+    m_diskMonitorHostPage->setProperty("ksword_page_frame_host", true); // 消除占位壳与真实页重复外围间距。
 }
 
 void HardwareDock::ensureOtherDevicesTabInitialized()
@@ -7351,6 +7352,7 @@ void HardwareDock::ensureOtherDevicesTabInitialized()
 
     m_otherDevicesPage = new HardwareOtherDevicesPage(m_otherDevicesHostPage);
     hostLayout->addWidget(m_otherDevicesPage, 1);
+    m_otherDevicesHostPage->setProperty("ksword_page_frame_host", true);
 }
 
 void HardwareDock::initializeCoreCharts()

@@ -221,7 +221,7 @@ void HvmDock::initializeUi()
     // 拆成子页之后每一页只剩一件事，两个方向的挤压同时消失。
     auto* const tabs = new QTabWidget(this);
     m_tabs = tabs;
-    ks::ui::StylePageTabs(tabs);
+    ks::ui::StylePageTabsContentFrame(tabs);
 
     auto* const controlPanel = new QWidget(tabs);
     auto* const controlLayout = new QVBoxLayout(controlPanel);

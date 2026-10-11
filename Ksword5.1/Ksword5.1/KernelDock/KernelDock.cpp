@@ -381,7 +381,7 @@ void KernelDock::initializeUi()
     // 表现就是内核页在大多数情况下都不透明（issue #161）。判据只保留一处，才不会再次跑偏。
 
     m_rootLayout = new QVBoxLayout(this);
-    m_rootLayout->setContentsMargins(6, 6, 6, 6);
+    m_rootLayout->setContentsMargins(0, 0, 0, 0); // 嵌套分类只由实际内容层提供外围留白。
     m_rootLayout->setSpacing(4);
 
     // 初始化进度条默认隐藏，仅在惰性 Tab 开始构建时短暂显示。
@@ -403,7 +403,7 @@ void KernelDock::initializeUi()
     m_rootLayout->addWidget(m_tabInitializingProgressBar, 0);
 
     m_tabWidget = new QTabWidget(this);
-    ks::ui::StylePageTabs(m_tabWidget);
+    ks::ui::StylePageTabsContentFrame(m_tabWidget);
     ks::ui::InstallParentTabTransition(m_tabWidget);
     m_tabWidget->setIconSize(QSize(16, 16));
     m_rootLayout->addWidget(m_tabWidget, 1);
@@ -417,6 +417,7 @@ void KernelDock::initializeUi()
     m_miscLayout->setSpacing(0);
     m_miscInnerTabWidget = new QTabWidget(m_miscPage);
     ks::ui::StyleChildPageTabs(m_miscInnerTabWidget);
+    ks::ui::StylePageTabsContentFrame(m_miscInnerTabWidget);
     m_miscInnerTabWidget->setIconSize(QSize(16, 16));
     m_miscLayout->addWidget(m_miscInnerTabWidget, 1);
 
@@ -433,6 +434,7 @@ void KernelDock::initializeUi()
     m_kernelAuditLayout->setContentsMargins(4, 4, 4, 4);
     m_kernelAuditInnerTabWidget = new QTabWidget(m_kernelAuditPage);
     ks::ui::StyleChildPageTabs(m_kernelAuditInnerTabWidget);
+    ks::ui::StylePageTabsContentFrame(m_kernelAuditInnerTabWidget);
     m_kernelAuditInnerTabWidget->setIconSize(QSize(16, 16));
     m_kernelAuditLayout->addWidget(m_kernelAuditInnerTabWidget, 1);
     m_inlineHookPage = new QWidget(m_kernelAuditInnerTabWidget);
@@ -452,6 +454,7 @@ void KernelDock::initializeUi()
     m_selfDriverLayout->setContentsMargins(4, 4, 4, 4);
     m_selfDriverInnerTabWidget = new QTabWidget(m_selfDriverPage);
     ks::ui::StyleChildPageTabs(m_selfDriverInnerTabWidget);
+    ks::ui::StylePageTabsContentFrame(m_selfDriverInnerTabWidget);
     m_selfDriverInnerTabWidget->setIconSize(QSize(16, 16));
     m_selfDriverLayout->addWidget(m_selfDriverInnerTabWidget, 1);
     m_driverStatusPage = new QWidget(m_selfDriverInnerTabWidget);
@@ -809,6 +812,7 @@ void KernelDock::initializeIoManagementTab()
 
     m_ioManagementInnerTabWidget = new QTabWidget(m_ioManagementPage);
     ks::ui::StyleChildPageTabs(m_ioManagementInnerTabWidget);
+    ks::ui::StylePageTabsContentFrame(m_ioManagementInnerTabWidget);
     m_ioManagementInnerTabWidget->setTabPosition(QTabWidget::North);
     m_ioManagementInnerTabWidget->setDocumentMode(true);
     m_ioManagementLayout->addWidget(m_ioManagementInnerTabWidget, 1);
@@ -889,6 +893,7 @@ void KernelDock::initializeObjectNamespaceTab()
 
     m_objectNamespaceInnerTabWidget = new QTabWidget(m_objectNamespacePage);
     ks::ui::StyleChildPageTabs(m_objectNamespaceInnerTabWidget);
+    ks::ui::StylePageTabsContentFrame(m_objectNamespaceInnerTabWidget);
     m_objectNamespaceInnerTabWidget->setIconSize(QSize(16, 16));
     m_objectNamespaceLayout->addWidget(m_objectNamespaceInnerTabWidget, 1);
 

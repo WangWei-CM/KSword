@@ -534,7 +534,7 @@ namespace ks::misc
         m_rootLayout->addWidget(m_toolbarWidget, 0);
 
         m_tabWidget = new QTabWidget(this);
-        ks::ui::StylePageTabs(m_tabWidget);
+        ks::ui::StylePageTabsContentFrame(m_tabWidget);
         m_rootLayout->addWidget(m_tabWidget, 1);
 
         m_appLockerPage = buildAppLockerPage();

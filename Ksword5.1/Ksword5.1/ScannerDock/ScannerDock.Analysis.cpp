@@ -84,6 +84,7 @@ void ScannerDock::buildAnalysisUi()
     m_analysisAddressKind->setObjectName(QStringLiteral("scanner_analysis_address_kind"));
     m_analysisAddressKind->addItems({QString(), QStringLiteral("RVA"), QStringLiteral("VA")});
     m_analysisAddressEdit = new QLineEdit(m_analysisPage);
+    ks::ui::StyleStandaloneInput(m_analysisAddressEdit); // 地址跳转字段补齐独立实底。
     m_analysisAddressEdit->setObjectName(QStringLiteral("scanner_analysis_address"));
     m_analysisAddressEdit->setMinimumWidth(0);
     m_analysisAddressEdit->setPlaceholderText(QStringLiteral("0x00000000"));

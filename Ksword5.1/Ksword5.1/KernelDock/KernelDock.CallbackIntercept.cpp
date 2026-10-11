@@ -1878,7 +1878,7 @@ private:
         rightLayout->addLayout(ruleToolbarLayout, 0);
 
         m_ruleTabWidget = new QTabWidget(rightPane);
-        ks::ui::StylePageTabs(m_ruleTabWidget);
+        ks::ui::StylePageTabsContentFrame(m_ruleTabWidget);
         rightLayout->addWidget(m_ruleTabWidget, 1);
 
         createRuleTableTab(KSWORD_ARK_CALLBACK_TYPE_REGISTRY, kernelText("kernel.callback.intercept.tab.registry", QStringLiteral("注册表")));
@@ -1891,7 +1891,7 @@ private:
         createProcessProtectTab(m_ruleTabWidget);
 
         auto* logTabWidget = new QTabWidget(scrollContent);
-        ks::ui::StylePageTabs(logTabWidget);
+        ks::ui::StylePageTabsContentFrame(logTabWidget);
         m_appLogEditor = new CodeTextEdit(logTabWidget);
         static_cast<CodeTextEdit*>(m_appLogEditor)->setSyntaxLanguage(CodeTextEdit::SyntaxLanguage::PlainText);
         m_eventLogEditor = new CodeTextEdit(logTabWidget);

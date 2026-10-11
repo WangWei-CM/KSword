@@ -2,6 +2,7 @@
 #include "./PageControlStyle.h"
 #include "./MainSurfaceStyle.h"
 #include "./PageTabMotion.h"
+#include "./AdaptivePageScroll.h"
 
 #include <QBoxLayout>
 #include <QEvent>
@@ -12,7 +13,7 @@
 
 namespace
 {
-    constexpr int kPageCornerRadius = 8; // 下沿局部凹角与已有圆角工具面共用半径，不新增侧框。
+    constexpr int kPageCornerRadius = 8; // 内容组件已有圆角；外框再加等边间隔得到同心外弧。
 
     struct PageTabColors
     {
@@ -90,43 +91,47 @@ namespace
         return rules;
     }
 
-    // 只沿首个可见布局项读取连接对象，不遍历全部业务控件或猜测控件名称。
-    // 首项是嵌套 Tab 时由其自身连接；首项透明包装只继续沿已有布局下行。
-    QWidget* leadingRoundedSurface(QLayout* layout, bool& delegated, int depth = 0)
+    // 只识别项目自己的滚动壳，不递归查找任意子控件或改动专业编辑器内部布局。
+    QWidget* pageLayoutOwner(QWidget* page)
     {
-        if (!layout || depth > 8)
+        // 只穿过调用页明确标记的惰性占位壳，避免对任意专业控件的单子项布局作猜测。
+        for (int depth = 0; page && depth < 4 && page->property("ksword_page_frame_host").toBool(); ++depth)
+        {
+            QLayout* layout = page->layout();
+            QWidget* child = layout && layout->count() == 1 ? layout->itemAt(0)->widget() : nullptr;
+            if (!child)
+            {
+                break;
+            }
+            page = child;
+        }
+        if (!page || qobject_cast<QAbstractScrollArea*>(page))
         {
             return nullptr;
         }
-        for (int index = 0; index < layout->count(); ++index)
+        if (auto* scroll = page->findChild<QScrollArea*>(
+            QString::fromLatin1(ks::ui::kAdaptivePageScrollObjectName), Qt::FindDirectChildrenOnly))
         {
-            QLayoutItem* item = layout->itemAt(index); // 原页面的顺序，不重排或调整业务间距。
-            QWidget* widget = item ? item->widget() : nullptr;
-            if (widget && widget->isHidden())
+            return scroll->widget();
+        }
+        return page;
+    }
+
+    // 页面只承载另一组已登记Tab时，由最内层提供一次留白，避免逐级累加。
+    int pageFrameInset(QTabWidget* tabs)
+    {
+        const int inset = tabs->property("ksword_page_tabs_content_inset").toInt();
+        QWidget* owner = pageLayoutOwner(tabs->currentWidget());
+        QLayout* layout = owner ? owner->layout() : nullptr;
+        if (inset > 0 && layout && layout->count() == 1)
+        {
+            auto* nested = qobject_cast<QTabWidget*>(layout->itemAt(0)->widget());
+            if (nested && nested->property("ksword_page_tabs_content_inset").toInt() > 0)
             {
-                continue;
-            }
-            if (widget)
-            {
-                if (qobject_cast<QTabWidget*>(widget))
-                {
-                    delegated = true;
-                    return nullptr;
-                }
-                if (widget->property("ksword_primary_toolbar").toBool()
-                    || widget->property("ksword_primary_content_panel").toBool()
-                    || widget->property("ksword_parameter_surface").toBool())
-                {
-                    return widget;
-                }
-                return leadingRoundedSurface(widget->layout(), delegated, depth + 1);
-            }
-            if (item && item->layout())
-            {
-                return leadingRoundedSurface(item->layout(), delegated, depth + 1);
+                return 0;
             }
         }
-        return nullptr;
+        return inset;
     }
 
     // 普通pane保留原页面留白；只有明确登记的框架才由pane提供等边间距。
@@ -138,14 +143,19 @@ namespace
         }
         const bool child = tabs->tabBar()->property("ksword_page_tabs_child").toBool();
         const PageTabColors colors = tabColors(ks::ui::UsesMainSurfaceHierarchy(tabs), child);
-        const int inset = tabs->property("ksword_page_tabs_content_inset").toInt(); // 明确登记的等边留白。
+        const int inset = pageFrameInset(tabs); // 只计最内层明确登记的留白。
         const QVariant mainSurface = tabs->window()->property("ksword_main_surface_hierarchy");
         const QString background = mainSurface.isValid() && !mainSurface.toBool()
             ? QStringLiteral("transparent") : colors.page.name();
-        const QString rules = QStringLiteral(
+        QString rules = QStringLiteral(
             "QTabWidget[ksword_page_tabs_widget=\"true\"]::pane{"
             "border:0;border-radius:%3px;top:0px;background:%1;padding:%2px;}")
             .arg(background).arg(inset).arg(inset > 0 ? 0 : kPageCornerRadius);
+        if (child && tabs->tabPosition() == QTabWidget::North)
+        {
+            // 子栏的层级缩进只作用于标签，不能把整页内容向右挤8px。
+            rules += QStringLiteral("QTabWidget[ksword_page_tabs_widget=\"true\"]::tab-bar{left:8px;}");
+        }
         const QString previous = tabs->property("ksword_page_tabs_owned_pane_style").toString();
         if (previous == rules)
         {
@@ -161,7 +171,7 @@ namespace
     class PageContentCorner final : public QWidget
     {
     public:
-        explicit PageContentCorner(QTabWidget* tabs) : QWidget(tabs), m_tabs(tabs)
+        explicit PageContentCorner(QWidget* host) : QWidget(host), m_tabs(host)
         {
             setAttribute(Qt::WA_TransparentForMouseEvents);
             setAttribute(Qt::WA_NoSystemBackground);
@@ -185,8 +195,8 @@ namespace
             {
                 return;
             }
-            const bool child = m_tabs->tabBar()->property("ksword_page_tabs_child").toBool();
-            const PageTabColors colors = tabColors(ks::ui::UsesMainSurfaceHierarchy(m_tabs), child);
+            // 外框层级与父子栏强调程度分开，子栏也保留清楚的同心外弧。
+            const PageTabColors colors = tabColors(ks::ui::UsesMainSurfaceHierarchy(m_tabs), false);
             QPainterPath square; // 只填外框圆弧之外的角落，保留内部原有圆角和留白。
             square.addRect(QRectF(rect()));
             QPainterPath content;
@@ -199,12 +209,80 @@ namespace
         }
 
     private:
-        QPointer<QTabWidget> m_tabs; // 颜色从原宿主读取，保留主题与父子栏层级。
+        QPointer<QWidget> m_tabs; // 颜色从原宿主读取，可用于Tab或无内层Tab的页面。
         QRect m_opening; // 最外层框架边界转换到当前角片的局部坐标。
         int m_radius = kPageCornerRadius; // 与内部圆角同心的外框半径。
     };
 
-    // 导航仅延伸两个小凹角；不再沿内容高度画侧翼，不会产生第二圈包围边框。
+    // 服务/欢迎等没有内容Tab的整页使用同一个外框几何，仅登记页根，不处理内部卡片。
+    class WorkspaceFrame final : public QObject
+    {
+    public:
+        WorkspaceFrame(QWidget* page, int inset) : QObject(page), m_page(page), m_inset(inset)
+        {
+            for (QPointer<PageContentCorner>& corner : m_corners)
+            {
+                corner = new PageContentCorner(page);
+            }
+            page->installEventFilter(this);
+            schedule();
+        }
+
+    protected:
+        bool eventFilter(QObject* watched, QEvent* event) override
+        {
+            // 合并尺寸/主题事件，不在paint中改变布局或持续运行计时器。
+            switch (event->type())
+            {
+            case QEvent::Resize:
+            case QEvent::Show:
+            case QEvent::Hide:
+            case QEvent::StyleChange:
+            case QEvent::PaletteChange:
+            case QEvent::DynamicPropertyChange:
+                schedule();
+                break;
+            default:
+                break;
+            }
+            return QObject::eventFilter(watched, event);
+        }
+
+    private:
+        void schedule()
+        {
+            if (m_pending) return;
+            m_pending = true;
+            QTimer::singleShot(0, this, [this]()
+            {
+                m_pending = false;
+                if (!m_page) return;
+                const QRect outer = m_page->rect(); // 页根就是最外层边界，不以内侧内容定位。
+                const int radius = kPageCornerRadius + m_inset;
+                const QVariant surface = m_page->window()->property("ksword_main_surface_hierarchy");
+                const bool visible = m_page->isVisible() && (!surface.isValid() || surface.toBool())
+                    && outer.width() >= radius * 2 && outer.height() >= radius * 2;
+                for (int index = 0; index < 4; ++index)
+                {
+                    PageContentCorner* corner = m_corners[index];
+                    corner->setVisible(visible);
+                    if (!visible) continue;
+                    const int left = (index & 1) ? outer.width() - radius : 0;
+                    const int top = (index & 2) ? outer.height() - radius : 0;
+                    corner->setGeometry(left, top, radius, radius);
+                    corner->setOpeningRectangle(outer, radius);
+                    corner->raise();
+                }
+            });
+        }
+
+        QPointer<QWidget> m_page; // 原页面拥有控制器与四个微型角片。
+        int m_inset = 6; // 与此页面根布局一致的外围间距。
+        QPointer<PageContentCorner> m_corners[4]; // 不创建整页透明覆盖窗口。
+        bool m_pending = false; // 单次合并更新标记。
+    };
+
+    // 导航底面只占标签栏，内容四角完全由外框角片负责，避免旧的首工具条补色残留。
     class PageNavigationSurface final : public QWidget
     {
     public:
@@ -219,12 +297,6 @@ namespace
             setFocusPolicy(Qt::NoFocus);
         }
 
-        // target 是实际内容组件在 tabs 内的边界，绘制时映射到这个窄连接层。
-        void setConnectionRectangle(const QRect& target)
-        {
-            m_connectionRectangle = target;
-        }
-
     protected:
         void paintEvent(QPaintEvent*) override
         {
@@ -234,33 +306,15 @@ namespace
             }
             const bool child = m_tabs->tabBar()->property("ksword_page_tabs_child").toBool();
             const PageTabColors colors = tabColors(ks::ui::UsesMainSurfaceHierarchy(m_tabs), child);
-            QPainter painter(this); // 本行仍贯穿导航宽度；下方只画原组件顶角外侧的差集。
-            painter.setRenderHint(QPainter::Antialiasing);
-            painter.setPen(Qt::NoPen);
-            painter.setBrush(colors.rail);
-            const int railHeight = m_tabs->tabBar()->geometry().bottom() - y() + 1;
-            painter.drawRect(QRect(0, 0, width(), railHeight));
-            if (m_connectionRectangle.isEmpty())
-            {
-                return;
-            }
-            const QRectF opening(m_connectionRectangle.translated(-pos())); // 与真实工具带 x/y 对齐。
-            const qreal joinHeight = opening.top() + kPageCornerRadius - railHeight;
-            // 只连接实际工具带宽度内的窄带；有原生小间隔时，中部也必须连续。
-            QPainterPath joinBand;
-            joinBand.addRect(QRectF(opening.left(), railHeight, opening.width(), joinHeight));
-            QPainterPath aperture;
-            aperture.addRoundedRect(opening, kPageCornerRadius, kPageCornerRadius);
-            // 只补真实圆角外侧的两块负空间；内侧控件和其已有圆角不会被覆盖。
-            painter.drawPath(joinBand.subtracted(aperture));
+            QPainter painter(this); // 水平/竖向导航均使用控制器给出的真实栏范围。
+            painter.fillRect(rect(), colors.rail);
         }
 
     private:
         QPointer<QTabWidget> m_tabs; // 仅保存原有业务标签容器的受控寿命。
-        QRect m_connectionRectangle; // 原页面首个面板或有效内容区域的真实几何。
     };
 
-    // 控制器只同步导航本行与局部顶角，原 QStackedWidget 和页面布局保持原对象。
+    // 明确登记的页面由此统一外围留白，原Stack、控件和业务分区保持原对象。
     class PageTabEnvelope final : public QObject
     {
     public:
@@ -317,27 +371,25 @@ namespace
         }
 
     private:
-        // 只有父布局全部内容就是这个 Tab 时才收紧外层顶部，绝不动页内16px留白。
-        void connectOuterLayout()
+        // 登记框架只接管当前页最外层layout；卡片/表单内部16px等业务留白不动。
+        void normalizePageMargin(QWidget* owner)
         {
-            QWidget* parent = m_tabs->parentWidget();
-            if (!parent || parent->isWindow())
+            if (!owner || m_tabs->property("ksword_page_tabs_content_inset").toInt() <= 0)
             {
                 return;
             }
-            QLayout* layout = parent->layout();
-            if (!layout || layout->count() != 1 || layout->itemAt(0)->widget() != m_tabs)
+            QLayout* layout = owner->layout();
+            if (!layout)
             {
                 return;
             }
-            const QMargins margins = layout->contentsMargins();
-            if (margins.top() != 0)
+            if (layout->contentsMargins() != QMargins())
             {
-                layout->setContentsMargins(margins.left(), 0, margins.right(), margins.bottom());
+                layout->setContentsMargins(0, 0, 0, 0);
             }
         }
 
-        // 观察当前页面和实际首面板，惰性创建与布局变化后再读取真正连接边界。
+        // 观察当前页及其明确滚动内容；惰性页面建好布局后再消除重复的外围间距。
         void observeContent(QWidget* page, QWidget* surface)
         {
             for (QWidget* previous : {m_observedPage.data(), m_observedSurface.data()})
@@ -359,7 +411,7 @@ namespace
             }
         }
 
-        // 导航本行维持原宽度；只有毗邻内容时补凹角，绝不靠新 padding 做人工对齐。
+        // 同步四种方向的导航与最外框角片；未登记的详情Tab只统一导航样式。
         void synchronize()
         {
             if (!m_tabs || !m_surface)
@@ -367,8 +419,7 @@ namespace
                 return;
             }
             QTabBar* bar = m_tabs->tabBar(); // 原 QTabBar 继续负责图标、文字和所有输入。
-            if (m_tabs->tabPosition() != QTabWidget::North || bar->isHidden()
-                || bar->property("ksword_secondary_tabs").toBool())
+            if (bar->isHidden() || bar->property("ksword_secondary_tabs").toBool())
             {
                 m_surface->hide();
                 for (const QPointer<PageContentCorner>& corner : m_contentCorners)
@@ -377,47 +428,32 @@ namespace
                 }
                 return;
             }
-            connectOuterLayout();
+            QWidget* page = m_tabs->currentWidget(); // 保留业务页面身份，惰性页稍后会再次同步。
+            QWidget* owner = pageLayoutOwner(page);
+            observeContent(page, owner);
+            normalizePageMargin(owner);
             applyPaneStyle(m_tabs);
             const QRect bounds = m_tabs->contentsRect();
-            QWidget* page = m_tabs->currentWidget(); // 当前页可能刚惰性构造，只读其真实布局。
-            const bool contentFrame = m_tabs->property("ksword_page_tabs_content_inset").toInt() > 0;
-            bool delegated = false; // 首项嵌套 Tab 已负责自身衔接，外层不叠加另一层凹角。
-            QWidget* surface = page && !contentFrame ? leadingRoundedSurface(page->layout(), delegated) : nullptr;
-            observeContent(page, surface);
-            QRect connection;
-            if (page && !delegated && !contentFrame)
-            {
-                const QRect effective = page->layout() ? page->layout()->contentsRect() : page->contentsRect();
-                connection = surface
-                    ? QRect(surface->mapTo(m_tabs, QPoint()), surface->size())
-                    : effective.translated(page->mapTo(m_tabs, QPoint()));
-            }
-            const int railBottom = bar->geometry().bottom() + 1; // 下沿来自原栏，不是页签命中矩形。
-            const bool adjoining = !connection.isEmpty()
-                && connection.width() >= kPageCornerRadius * 2
-                && connection.top() >= railBottom - 1
-                && connection.top() <= railBottom + kPageCornerRadius;
-            if (!adjoining)
-            {
-                connection = QRect(); // 原业务分区留白较大时保留它，不用细长侧线跨过内容。
-            }
-            const int bottom = adjoining ? connection.top() + kPageCornerRadius : railBottom;
-            const QRect band(bounds.left(), bar->y(), bounds.width(), bottom - bar->y());
+            const bool vertical = m_tabs->tabPosition() == QTabWidget::West
+                || m_tabs->tabPosition() == QTabWidget::East;
+            const QRect band = vertical
+                ? QRect(bar->x(), bounds.top(), bar->width(), bounds.height())
+                : QRect(bounds.left(), bar->y(), bounds.width(), bar->height());
             m_surface->setGeometry(band);
-            m_surface->setConnectionRectangle(connection);
             m_surface->setVisible(m_tabs->isVisible());
             m_surface->raise();
             bar->raise();
             // 页面已被pane内缩；向外还原这层间隔，角片必须放在外框而不是页面控件上。
-            const int inset = m_tabs->property("ksword_page_tabs_content_inset").toInt();
+            const int inset = pageFrameInset(m_tabs);
+            const QVariant mainSurface = m_tabs->window()->property("ksword_main_surface_hierarchy");
+            const bool opaqueFrame = !mainSurface.isValid() || mainSurface.toBool(); // 穿透模式不补实色角片。
             const int outerRadius = kPageCornerRadius + inset; // 8+6=14，圆角处也保持6px径向间隔。
             const QRect opening = page ? QRect(page->mapTo(m_tabs, QPoint()), page->size())
                 .adjusted(-inset, -inset, inset, inset) : QRect();
             for (int index = 0; index < 4; ++index)
             {
                 PageContentCorner* corner = m_contentCorners[index];
-                const bool visible = contentFrame && page && m_tabs->isVisible()
+                const bool visible = inset > 0 && opaqueFrame && page && m_tabs->isVisible()
                     && opening.width() >= outerRadius * 2 && opening.height() >= outerRadius * 2;
                 corner->setVisible(visible);
                 if (!visible)
@@ -456,9 +492,9 @@ namespace
         }
 
         QPointer<QTabWidget> m_tabs; // 页面销毁后排队几何同步自动失效。
-        QPointer<PageNavigationSurface> m_surface; // 仅导航行和两个小角的局部衔接层。
-        QPointer<QWidget> m_observedPage; // 当前业务页，保持原有布局和边距。
-        QPointer<QWidget> m_observedSurface; // 真正连接面，随其位置和尺寸变化更新小角。
+        QPointer<PageNavigationSurface> m_surface; // 仅覆盖横/竖导航栏。
+        QPointer<QWidget> m_observedPage; // 当前业务页，保留控件和布局身份。
+        QPointer<QWidget> m_observedSurface; // 原页面或明确的自适应滚动内容。
         QPointer<PageContentCorner> m_contentCorners[4]; // 等边模式的最外层四角，不覆盖内部组件圆角。
         bool m_pending = false; // 同一轮字体/布局/样式事件仅安排一次同步。
     };
@@ -569,7 +605,7 @@ namespace ks::ui
             return;
         }
         tabs->tabBar()->setProperty("ksword_page_tabs_child", true);
-        tabs->setContentsMargins(8, 0, 0, 0);
+        tabs->setContentsMargins(0, 0, 0, 0); // 子栏缩进由tab-bar子控件承担，内容四边保持等宽。
         StylePageTabs(tabs);
         InstallChildTabTransition(tabs);
     }
@@ -580,9 +616,18 @@ namespace ks::ui
         {
             return;
         }
-        // 留白只在pane登记一次；调用页的外围layout必须为0，避免两层间距累加。
+        // 明确登记后由pane接管一次外围留白；当前页及惰性页的最外层layout由控制器归零。
         tabs->setProperty("ksword_page_tabs_content_inset", qMax(0, inset));
         StylePageTabs(tabs);
         applyPaneStyle(tabs);
+    }
+
+    void StyleWorkspaceContentFrame(QWidget* page, int inset)
+    {
+        if (!page || page->property("ksword_workspace_content_frame").toBool()) return;
+        page->setProperty("ksword_workspace_content_frame", true);
+        const int spacing = qMax(0, inset); // 页面明确选定的等边间隔，只登记一次。
+        if (page->layout()) page->layout()->setContentsMargins(spacing, spacing, spacing, spacing);
+        new WorkspaceFrame(page, spacing);
     }
 }

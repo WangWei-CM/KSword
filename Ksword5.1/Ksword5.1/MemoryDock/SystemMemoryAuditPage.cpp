@@ -859,7 +859,7 @@ void SystemMemoryAuditPage::initializeUi()
     rootLayout->addLayout(summaryLayout);
 
     m_detailTabs = new QTabWidget(this);
-    ks::ui::StylePageTabs(m_detailTabs);
+    ks::ui::StylePageTabsContentFrame(m_detailTabs);
 
     QWidget* const overviewPage = new QWidget(m_detailTabs);
     QVBoxLayout* const overviewLayout = new QVBoxLayout(overviewPage);
@@ -1003,6 +1003,7 @@ void SystemMemoryAuditPage::initializeUi()
         ddmaLayout->setSpacing(6);
 
         m_ddmaCrossCheckAddressEdit = new QLineEdit(ddmaRow);
+        ks::ui::StyleStandaloneInput(m_ddmaCrossCheckAddressEdit); // 明确的物理地址字段补齐输入层。
         m_ddmaCrossCheckAddressEdit->setPlaceholderText(
             localized("Physical page address, e.g. 0x1000"));
         m_ddmaCrossCheckAddressEdit->setClearButtonEnabled(true);

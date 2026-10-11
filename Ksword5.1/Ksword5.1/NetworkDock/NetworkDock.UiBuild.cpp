@@ -26,7 +26,7 @@ void NetworkDock::initializeUi()
     // - 网络功能页签数量已较多，改成顶部横排后避免左侧竖排标签挤出纵向滚动条；
     // - 保留统一 QTabWidget 结构，不改变各功能页内部实现。
     m_sideTabWidget = new QTabWidget(this);
-    ks::ui::StylePageTabs(m_sideTabWidget);
+    ks::ui::StylePageTabsContentFrame(m_sideTabWidget);
     m_sideTabWidget->setTabPosition(QTabWidget::North);
     m_sideTabWidget->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     m_rootLayout->addWidget(m_sideTabWidget, 1);
@@ -430,7 +430,7 @@ void NetworkDock::initializeConnectionManageTab()
 
     // 子页签：分别展示 TCP 与 UDP。
     m_connectionSubTabWidget = new QTabWidget(m_connectionManagePage);
-    ks::ui::StylePageTabs(m_connectionSubTabWidget);
+    ks::ui::StylePageTabsContentFrame(m_connectionSubTabWidget);
     m_connectionSubTabWidget->setTabPosition(QTabWidget::North);
     m_connectionSubTabWidget->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     m_connectionManageLayout->addWidget(m_connectionSubTabWidget, 1);

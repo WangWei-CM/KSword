@@ -467,7 +467,7 @@ void ProcessDock::initializeCrossViewPage()
     m_crossViewPageLayout->addWidget(splitter, 1);
 
     QTabWidget* innerTabs = new QTabWidget(splitter);
-    ks::ui::StylePageTabs(innerTabs);
+    ks::ui::StylePageTabsContentFrame(innerTabs);
     m_processCrossViewTable = new ks::ui::VisibleTableWidget(innerTabs);
     m_threadCrossViewTable = new ks::ui::VisibleTableWidget(innerTabs);
     // 两张来源矩阵均为独立 R0 证据，保留完整快照对比。

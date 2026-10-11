@@ -178,7 +178,7 @@ HyperVMemoryPage::HyperVMemoryPage(QWidget* parent) : QWidget(parent)
     m_progress = new QProgressBar(this); m_progress->setTextVisible(false); m_progress->setMaximumHeight(5); root->addWidget(m_progress);
     m_chart = new MemoryAttributionChart(this); root->addWidget(m_chart);
     m_tabs = new QTabWidget(this);
-    ks::ui::StylePageTabs(m_tabs);
+    ks::ui::StylePageTabsContentFrame(m_tabs);
     auto* split = new QSplitter(Qt::Vertical, m_tabs);
     m_partitions = table(split); m_detail = new ks::ui::StructuredFieldView(split);
 

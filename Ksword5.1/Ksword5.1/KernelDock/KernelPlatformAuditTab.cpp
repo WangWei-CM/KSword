@@ -393,7 +393,7 @@ void KernelPlatformAuditTab::initializeUi()
     rootLayout->addLayout(toolbar);
 
     m_innerTabs = new QTabWidget(this);
-    ks::ui::StylePageTabs(m_innerTabs);
+    ks::ui::StylePageTabsContentFrame(m_innerTabs);
     if (m_mode == Mode::Hal)
     {
         addPage(

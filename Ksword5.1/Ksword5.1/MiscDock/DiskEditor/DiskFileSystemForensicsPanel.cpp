@@ -1,6 +1,9 @@
 #include "DiskFileSystemForensicsPanel.h"
 #include <QList>
 #include "../../UI/ToolbarMetrics.h"
+#include "../../UI/PrimaryPageStyle.h"
+#include "../../UI/FlatButtonTheme.h"
+#include "../../UI/ThemeBinding.h"
 #include "../../UI/DetailDialogChrome.h"
 
 #include "../../ArkDriverClient/ArkDriverTypes.h"
@@ -237,6 +240,15 @@ namespace ks::misc
         auto* rawMoreMenu = new QMenu(m_rawMoreButton);
         auto* rawAdvancedMenu = rawMoreMenu->addMenu(
             QStringLiteral("高级分析"));
+        // 主菜单与子菜单各自绑定不透明主题，避免从专业面板继承透明底色。
+        for (QMenu* menu : {rawMoreMenu, rawAdvancedMenu})
+        {
+            const QPointer<QMenu> safeMenu(menu);
+            ks::ui::BindWidgetTheme(menu, [safeMenu]()
+            {
+                if (safeMenu) safeMenu->setStyleSheet(KswordTheme::ContextMenuStyle());
+            });
+        }
         m_rawPeAction = rawAdvancedMenu->addAction(
             QStringLiteral("分析并反汇编原始 PE…"));
         m_rawMoreButton->setMenu(rawMoreMenu);
@@ -410,6 +422,21 @@ namespace ks::misc
         {
             ks::ui::NormalizeToolbarControl(control);
         }
+        // 明确的路径/簇号字段补实底；普通取证动作与危险擦除保留不同语义色。
+        for (QLineEdit* field : {m_rawPathEdit, m_filePathEdit, m_volumePathEdit, m_clusterEdit})
+        {
+            ks::ui::StyleStandaloneInput(field);
+        }
+        const QList<QAbstractButton*> actions {m_probeButton, m_rawUpButton,
+            m_rawListButton, m_rawPreviewButton, m_rawExportButton, m_rawMoreButton,
+            m_deletedScanButton, m_fileBrowseButton, m_extentButton, m_reverseButton};
+        for (QAbstractButton* action : actions)
+        {
+            ks::ui::ApplyFlatButtonTheme(action, ks::ui::FlatButtonTone::Neutral,
+                ks::ui::FlatButtonAppearance::Solid);
+        }
+        ks::ui::ApplyFlatButtonTheme(m_deletedEraseButton, ks::ui::FlatButtonTone::Danger,
+            ks::ui::FlatButtonAppearance::Solid);
     }
 
     void DiskFileSystemForensicsPanel::initializeConnections()

@@ -495,7 +495,7 @@ namespace ks::misc
         leftLayout->addWidget(m_hexEditor, 1);
 
         m_advancedTabs = new QTabWidget(leftPanel);
-        ks::ui::StylePageTabs(m_advancedTabs);
+        ks::ui::StylePageTabsContentFrame(m_advancedTabs);
         initializeAdvancedPanels(m_advancedTabs);
         leftLayout->addWidget(m_advancedTabs, 1);
 

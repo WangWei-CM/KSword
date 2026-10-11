@@ -4700,6 +4700,7 @@ void MonitorDock::ensureDirectKernelCallTabInitialized()
     }
 
     m_directKernelCallWidget = new DirectKernelCallMonitorWidget(m_directKernelCallHostPage);
+    m_directKernelCallHostPage->setProperty("ksword_page_frame_host", true); // 只标记此明确惰性壳。
     hostLayout->addWidget(m_directKernelCallWidget, 1);
 }
 
@@ -4727,6 +4728,7 @@ void MonitorDock::ensureKernelCallbackTabInitialized()
     }
 
     m_kernelCallbackWidget = new KernelCallbackMonitorWidget(m_kernelCallbackHostPage);
+    m_kernelCallbackHostPage->setProperty("ksword_page_frame_host", true);
     hostLayout->addWidget(m_kernelCallbackWidget, 1);
 }
 
@@ -4748,6 +4750,7 @@ void MonitorDock::ensureWinApiTabInitialized()
         }
 
         m_winApiWidget = new WinAPIDock(m_winApiPage);
+        m_winApiPage->setProperty("ksword_page_frame_host", true);
         hostLayout->addWidget(m_winApiWidget, 1);
     }
 
@@ -4902,11 +4905,11 @@ void MonitorDock::initializeUi()
     // - 监控页本体包含“进程定向 / WinAPI / WMI / ETW”四个标签；
     // - 性能四宫格图已经独立到左下角“监视面板”Dock。
     m_rootLayout = new QVBoxLayout(this);
-    m_rootLayout->setContentsMargins(6, 6, 6, 6);
+    m_rootLayout->setContentsMargins(0, 0, 0, 0); // 惰性监控页共用一次内容框架留白。
     m_rootLayout->setSpacing(6);
 
     m_sideTabWidget = new QTabWidget(this);
-    ks::ui::StylePageTabs(m_sideTabWidget);
+    ks::ui::StylePageTabsContentFrame(m_sideTabWidget);
     m_rootLayout->addWidget(m_sideTabWidget, 1);
 
     m_processTraceWidget = new ProcessTraceMonitorWidget(m_sideTabWidget);

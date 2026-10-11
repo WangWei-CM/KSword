@@ -521,11 +521,11 @@ void HandleDock::initializeUi()
 {
     setObjectName(QStringLiteral("HandleDockRoot"));
     m_rootLayout = new QVBoxLayout(this);
-    m_rootLayout->setContentsMargins(8, 8, 8, 8);
+    m_rootLayout->setContentsMargins(0, 0, 0, 0); // 框架统一内容四周留白，根层不再重复包边。
     m_rootLayout->setSpacing(6);
 
     m_tabWidget = new QTabWidget(this);
-    ks::ui::StylePageTabs(m_tabWidget);
+    ks::ui::StylePageTabsContentFrame(m_tabWidget);
     m_rootLayout->addWidget(m_tabWidget, 1);
 
     initializeHandleListTab();

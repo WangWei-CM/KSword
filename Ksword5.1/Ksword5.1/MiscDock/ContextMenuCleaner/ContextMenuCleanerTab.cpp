@@ -121,7 +121,7 @@ void ContextMenuCleanerTab::initializeUi()
     });
 
     m_areaTabWidget = new QTabWidget(this);
-    ks::ui::StylePageTabs(m_areaTabWidget);
+    ks::ui::StylePageTabsContentFrame(m_areaTabWidget);
     m_areaTabWidget->setObjectName(QStringLiteral("ksContextMenuCleanerAreaTabs"));
     m_rootLayout->addWidget(m_areaTabWidget, 1);
 

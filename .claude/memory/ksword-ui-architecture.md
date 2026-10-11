@@ -246,7 +246,7 @@ KSword 主程序位于 `Ksword5.1/Ksword5.1`（Qt 6.9.3 Widgets + Qt Advanced Do
 
 ## 导航连接与固定表面层级（2026-10-11）
 
-- 普通页签由 `UI/PageControlStyle.cpp` 共用完整状态样式；用户纠正后禁止新增 pane padding 或贯穿全高的包围外框。导航下沿仅绘圆角组件顶角之外的局部凹角，按当前页面首个明确工具面板/内容面板的真实坐标对齐，保留原业务留白；嵌套 Tab 交给内层连接，不能按 tabRect 再硬加 8px。保留原 TabBar/StackedWidget、页序与鼠标命中，子栏取消旧顶部 6px 间隔；ADS 外壳自身间隔为 0。
+- 普通页签由 `UI/PageControlStyle.cpp` 共用完整状态样式；最新外框通过 `StylePageTabsContentFrame` 明确接入，只在最外层绘圆角。旧“首工具条补角”和自动清零父布局顶部的路径已删除。保留原 TabBar/StackedWidget、页序与命中，子栏缩进仅作用于 tab-bar，不再右移内容；ADS 外壳自身间隔为0。
 - 主窗口底板、内容、工具带、表头、输入直接从 `MainWindowSurfaceColors` 固定求值，不能从每层父 palette 再抬高明度。大面板/工具底统一 8px，独立按钮/输入 5px；同一组件内部拼接处允许 0px（参数执行区、冻结辅助窗格和数值框内部编辑器）。背景图/穿透模式仍走既有保护。
 - `StyleStandaloneInput` 为未绑定的明确独立输入补完整颜色绑定，已有业务绑定只对齐圆角；单行字段用 `BindLineEditTheme`，搜索沿用同一配色但保留原过滤行为。主页面按钮、搜索、数值框和下拉框共用固定输入层，正常/悬停/焦点文字单独校准对比，输入背景校准保留中性色相。线程 A/B 不得在状态更新时重写旧 FlatButton QSS；纯工具动作需明确实底，内部清除/导航等例外按用途选择。
 - `PageTabMotion` 与 `DockTabSelectionAnimation` 仅移动导航选中底面和下划线，180ms、经过时间插值、按实际屏幕刷新率使用 PreciseTimer，遵循系统客户端动画开关。原业务页不截图或位移，原文字/图标/输入与子栏滑动保持；ADS 工厂基类绘制后调用动画绘制入口，覆盖旧静态标记，避免双重高亮。
@@ -254,5 +254,6 @@ KSword 主程序位于 `Ksword5.1/Ksword5.1`（Qt 6.9.3 Widgets + Qt Advanced Do
 - 主窗口 3px 外沿 overlay 是缩放命中层，非置顶时不绘制蓝色外框/角标，置顶保留提示。不能直接删除 overlay 或取消原 WM_NCHITTEST 缩放；置顶成功和外观刷新都需同步其视觉状态。
 - 表格内部 `ComparisonTableView` 复用源表操作条并声明 `InheritedTableActionBarProperty`，全局登记不再安装第二条；比对期间无用途的冻结/新增快照隐藏，返回实时、快照清理仍由源条负责。差异过滤改变行数后须更新复制/导出可用性；零行禁用属于有效状态，不能靠开启无效按钮掩盖重复宿主。
 - 顶部进程图提交快照前冻结原可见窗口的右端与跨度，禁止按所选时间加半个跨度居中。图上任一点（含最新点）均进入快照状态，后台刷新不得仅因索引在最右侧而重新吸附。查看时只暂停顶部历史队列追加/自动裁剪，系统枚举和独立详情性能记录继续；播放、清空等明确动作恢复实时，保留数量的用户调整仍执行原裁剪。
-- 凹角反馈中的全高 1px 竖线曾被误当作导航覆盖层残留：实际截图 `#3d5670` 对应 ADS `depthOverlayStyle` 外框，后置 MainSurfaceStyle 只换底色不会取消边框。必须在原规则与最终宿主规则明确 border:0。凹角的 rail 不能与工具带都使用 toolbar 色，否则圆外差集会填平凸圆角；父 rail 使用 content（独立窗口 SurfaceAlt），连接限于真实工具带宽度内的窄 joinBand，既有 ≤8px 小间隔中部也需连贯。
+- 凹角反馈中的全高1px竖线曾被误当作导航覆盖层残留：实际截图 `#3d5670` 对应 ADS `depthOverlayStyle` 外框，后置 MainSurfaceStyle 只换底色不会取消边框。原规则与最终宿主规则均需 border:0。历史上向首工具条内角填 rail 色的方案已被用户否定并删除，不得恢复。
 - 用户明确圆角必须落在最外层框架，不能覆盖内部控件已有圆角。`StylePageTabsContentFrame` 登记6px pane留白，进程/线程页外围layout归0；页坐标先向外扩展这6px还原外框，再以外半径14px（内部8px+留白6px）绘四角，使内外圆心重合、弧线间隔也为6px。pane留白沿用page底色，角片只填最外弧线之外的rail色；无描边，不新增全高覆盖层。未登记页不批量改变。
+- 用户随后明确要求全软件UI复查和推广。本轮扩展到51个导航/结果/页根入口，见 `docs/UI标准覆盖复查-20261011.md`。框架只接管明确页根/自适应滚动内容的外围边距，内部卡片16px保留；纯嵌套Tab只计最内层，惰性代理用 `ksword_page_frame_host` 明确标记。竖向Tab同样支持；服务/欢迎通过 `StyleWorkspaceContentFrame` 登记页根。背景穿透模式不绘实色角片，专业编辑器内部及原生插件窗口不强行接入。

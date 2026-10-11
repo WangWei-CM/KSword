@@ -39,11 +39,15 @@ namespace ks::ui
     // 普通内容页签共用状态颜色和几何；选中底面/细线平滑移动，原栏保留所有输入。
     void StylePageTabBar(QTabBar* bar);
 
-    // 已确认的 QTabWidget 仅在下沿连接内容的凹圆角，不增加包围边框或页面留白。
+    // 普通QTabWidget仅统一导航底面与动画；详情/属性窗口保留自身布局。
     void StylePageTabs(QTabWidget* tabs);
 
-    // 明确页面选择等边留白和最外框四角；外半径=8+inset，页外围layout用0，无描边。
+    // 明确页面选择等边留白和最外框四角；外半径=8+inset，无描边。
+    // 接管直接页面或项目滚动壳内容的外围layout边距；内部卡片不动，纯嵌套Tab只计最内层。
     void StylePageTabsContentFrame(QTabWidget* tabs, int inset = 6);
+
+    // 无内层Tab的主页面明确登记页根外框，根布局四边统一，内层卡片布局保持原样。
+    void StyleWorkspaceContentFrame(QWidget* page, int inset = 6);
 
     // 子级保持轻底面与左缩进，顶部直接接父栏；原子栏方向动画继续使用原入口。
     void StyleChildPageTabs(QTabWidget* tabs);

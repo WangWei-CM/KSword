@@ -3068,7 +3068,7 @@ void WindowDock::initializeUi()
     m_tabWidget = new QTabWidget(this);
     // 窗口 Dock 的根子页统一放到顶部横排，保留所有现有页面和 currentIndex 状态源。
     m_tabWidget->setTabPosition(QTabWidget::North);
-    ks::ui::StylePageTabs(m_tabWidget);
+    ks::ui::StylePageTabsContentFrame(m_tabWidget);
     m_rootLayout->addWidget(m_tabWidget, 1);
 
     // 配置只读结构化表格：可排序、行选择、内容自适应列宽、末列拉伸。
@@ -3172,7 +3172,7 @@ void WindowDock::initializeUi()
         innerTabWidget->setTabPosition(QTabWidget::North);
         innerTabWidget->setDocumentMode(true);
         innerTabWidget->setUsesScrollButtons(true);
-        ks::ui::StylePageTabs(innerTabWidget);
+        ks::ui::StylePageTabsContentFrame(innerTabWidget);
         return innerTabWidget;
     };
 

@@ -332,7 +332,7 @@ void MemoryDock::initializeTabs()
 
     // 全部子页面统一由 QTabWidget 承载。
     m_tabWidget = new QTabWidget(this);
-    ks::ui::StylePageTabs(m_tabWidget);
+    ks::ui::StylePageTabsContentFrame(m_tabWidget);
     m_tabWidget->setDocumentMode(true);
     // 加固：QTabWidget 的页面栈会对所有页（含未显示、被隐藏的旧页）的最小高度取最大值。
     // 每个页面本身都已经带内部滚动壳（见 ks::ui::EnablePageInnerScroll），这里再把页签控件

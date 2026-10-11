@@ -3276,7 +3276,7 @@ void OtherDock::initializeUi()
 
     // 中部主内容：Tab1=窗口列表，Tab2=桌面管理（SwitchDesktop）。
     m_contentTabWidget = new QTabWidget(this);
-    ks::ui::StylePageTabs(m_contentTabWidget);
+    ks::ui::StylePageTabsContentFrame(m_contentTabWidget);
     m_rootLayout->addWidget(m_contentTabWidget, 1);
 
     m_windowListPage = new QWidget(m_contentTabWidget);

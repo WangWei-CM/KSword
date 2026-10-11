@@ -2071,7 +2071,7 @@ void KernelDock::initializeCallbackEnumTab()
     m_callbackEnumLayout->addWidget(splitter, 1);
 
     QTabWidget* callbackViewTabs = new QTabWidget(splitter);
-    ks::ui::StylePageTabs(callbackViewTabs);
+    ks::ui::StylePageTabsContentFrame(callbackViewTabs);
     m_callbackEnumTable = new ks::ui::VisibleTableWidget(callbackViewTabs);
     // 内核回调新增、消失与归属变化需要完整快照比较。
     ks::ui::SetTableActionBarMode(m_callbackEnumTable, ks::ui::TableActionBarMode::Full);

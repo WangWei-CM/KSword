@@ -291,6 +291,7 @@ void KernelDock::initializeCallbackRemovePanel()
     }
 
     m_callbackRemoveAddressEdit = new QLineEdit(m_callbackRemoveContentWidget);
+    ks::ui::StyleStandaloneInput(m_callbackRemoveAddressEdit); // 地址字段保持可辨底色，确认流程不变。
     m_callbackRemoveAddressEdit->setPlaceholderText(kernelText("kernel.callback.remove.address.placeholder", QStringLiteral("输入回调地址（例如 0xFFFFF80012345678）")));
     m_callbackRemoveAddressEdit->setClearButtonEnabled(true);
 

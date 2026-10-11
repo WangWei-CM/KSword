@@ -1,6 +1,9 @@
 #include "../UI/StructuredFieldView.h"
 #include "TamperDetectionPage.h"
 #include "../UI/ToolbarMetrics.h"
+#include "../UI/PrimaryPageStyle.h"
+#include "../UI/FlatButtonTheme.h"
+#include "../UI/FlowLayout.h"
 #include "../UI/CodeEditorWidget.h"
 
 #include "../ArkDriverClient/ArkDriverClient.h"
@@ -393,16 +396,22 @@ namespace ksword::memory_dock
 
         formLayout->addWidget(new QLabel(QStringLiteral("扫描目标"), this), 0, 0);
         m_targetCombo = new QComboBox(this);
+        ks::ui::StylePrimaryCombo(m_targetCombo);
+        // 长模块名称交给下拉列表展示，不能由sizeHint撑宽整页。
+        m_targetCombo->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+        m_targetCombo->setMinimumContentsLength(12);
         m_targetCombo->setToolTip(QStringLiteral("选择要检查的模块，或选“自定义范围”后在右侧填写起始地址。"));
         formLayout->addWidget(m_targetCombo, 0, 1);
 
         m_rangeStartEdit = new QLineEdit(this);
+        ks::ui::StyleStandaloneInput(m_rangeStartEdit); // 地址不是搜索框，保留其解析和校验行为。
         m_rangeStartEdit->setPlaceholderText(QStringLiteral("起始地址，默认十六进制"));
         m_rangeStartEdit->setClearButtonEnabled(true);
         formLayout->addWidget(m_rangeStartEdit, 0, 2);
 
         formLayout->addWidget(new QLabel(QStringLiteral("最多扫描页数"), this), 0, 3);
         m_maxPageSpin = new QSpinBox(this);
+        ks::ui::StyleStandaloneInput(m_maxPageSpin);
         m_maxPageSpin->setRange(1, kHardMaxPages);
         m_maxPageSpin->setValue(kDefaultMaxPages);
         m_maxPageSpin->setToolTip(QStringLiteral("DDMA 每页要做四次磁盘往返（备份扇区→写→读→还原），页数乘轮数直接决定耗时。先用小范围定位，再扩大。"));
@@ -410,14 +419,14 @@ namespace ksword::memory_dock
 
         formLayout->addWidget(new QLabel(QStringLiteral("采样轮数"), this), 1, 0);
         m_roundSpin = new QSpinBox(this);
+        ks::ui::StyleStandaloneInput(m_roundSpin);
         m_roundSpin->setRange(2, 10);
         m_roundSpin->setValue(3);
         m_roundSpin->setToolTip(QStringLiteral("一轮无法把篡改和采样窗口内的正常写入分开，所以最少两轮。只有每一轮都不一致才会升为结论。"));
         formLayout->addWidget(m_roundSpin, 1, 1);
 
-        QHBoxLayout* pathLayout = new QHBoxLayout();
-        pathLayout->setContentsMargins(0, 0, 0, 0);
-        pathLayout->setSpacing(10);
+        // 七种检查通道在窄窗自动换行，原复选框身份和默认值保持不变。
+        auto* pathLayout = new ks::ui::FlowLayout(nullptr, 0, 10, 6);
         m_useUserModeCheck = new QCheckBox(QStringLiteral("R3 用户态读"), this);
         m_useKernelVirtualCheck = new QCheckBox(QStringLiteral("R0 虚拟地址读"), this);
         m_useKernelPhysicalCheck = new QCheckBox(QStringLiteral("R0 物理地址读"), this);
@@ -440,7 +449,6 @@ namespace ksword::memory_dock
         pathLayout->addWidget(m_useDmaCheck);
         pathLayout->addWidget(m_useImageSectionCheck);
         pathLayout->addWidget(m_useOnDiskImageCheck);
-        pathLayout->addStretch(1);
         formLayout->addLayout(pathLayout, 1, 2, 1, 3);
 
         rootLayout->addLayout(formLayout);
@@ -449,6 +457,8 @@ namespace ksword::memory_dock
         actionLayout->setContentsMargins(0, 0, 0, 0);
         actionLayout->setSpacing(8);
         m_runButton = new QPushButton(QStringLiteral("开始交叉检查"), this);
+        ks::ui::ApplyFlatButtonTheme(m_runButton, ks::ui::FlatButtonTone::Accent,
+            ks::ui::FlatButtonAppearance::Solid);
         actionLayout->addWidget(m_runButton);
         m_channelHintLabel = new QLabel(this);
         m_channelHintLabel->setWordWrap(true);

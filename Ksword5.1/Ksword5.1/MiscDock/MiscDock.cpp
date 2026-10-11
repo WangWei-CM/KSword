@@ -38,6 +38,7 @@ namespace
     // - 返回：已挂到占位控件上的垂直布局。
     QVBoxLayout* buildHostLayout(QWidget* hostWidget)
     {
+        hostWidget->setProperty("ksword_page_frame_host", true); // 明确的单页惰性壳允许框架读取真实页外围。
         QVBoxLayout* hostLayout = new QVBoxLayout(hostWidget);
         hostLayout->setContentsMargins(0, 0, 0, 0);
         hostLayout->setSpacing(0);
@@ -63,7 +64,7 @@ void MiscDock::initializeUi()
 
     // 主 Tab 承载所有杂项工具，保持 Dock 外层只暴露一个统一入口。
     m_mainTabWidget = new QTabWidget(this);
-    ks::ui::StylePageTabs(m_mainTabWidget);
+    ks::ui::StylePageTabsContentFrame(m_mainTabWidget);
     m_mainTabWidget->setObjectName(QStringLiteral("ksMiscDockMainTab"));
     m_rootLayout->addWidget(m_mainTabWidget, 1);
 

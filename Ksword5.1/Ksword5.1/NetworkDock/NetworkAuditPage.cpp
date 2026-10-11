@@ -886,7 +886,7 @@ void NetworkAuditPage::initializeUi()
     m_rootLayout->addLayout(m_headerLayout);
 
     m_sectionTabWidget = new QTabWidget(this);
-    ks::ui::StylePageTabs(m_sectionTabWidget);
+    ks::ui::StylePageTabsContentFrame(m_sectionTabWidget);
     m_sectionTabWidget->setTabPosition(QTabWidget::North);
     m_rootLayout->addWidget(m_sectionTabWidget, 1);
 
@@ -1068,7 +1068,7 @@ void NetworkAuditPage::initializeUi()
     wfpLayout->setContentsMargins(4, 4, 4, 4);
     wfpLayout->setSpacing(6);
     m_wfpTabWidget = new QTabWidget(m_wfpPage);
-    ks::ui::StylePageTabs(m_wfpTabWidget);
+    ks::ui::StylePageTabsContentFrame(m_wfpTabWidget);
     m_wfpTabWidget->setTabPosition(QTabWidget::North);
     wfpLayout->addWidget(m_wfpTabWidget, 1);
 
@@ -1107,7 +1107,7 @@ void NetworkAuditPage::initializeUi()
     ndisLayout->setContentsMargins(4, 4, 4, 4);
     ndisLayout->setSpacing(6);
     m_ndisTabWidget = new QTabWidget(m_ndisPage);
-    ks::ui::StylePageTabs(m_ndisTabWidget);
+    ks::ui::StylePageTabsContentFrame(m_ndisTabWidget);
     m_ndisTabWidget->setTabPosition(QTabWidget::North);
     ndisLayout->addWidget(m_ndisTabWidget, 1);
     m_ndisAdapterTable = buildWfpTable(m_ndisPage, { QStringLiteral("名称"), QStringLiteral("描述"), QStringLiteral("IfIndex"), QStringLiteral("状态"), QStringLiteral("MAC"), QStringLiteral("速率"), QStringLiteral("连接") });

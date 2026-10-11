@@ -2588,7 +2588,7 @@ void NetworkFirewallPage::initializeUi()
     m_rootLayout->addLayout(headerLayout, 0);
 
     m_innerTabWidget = new QTabWidget(this);
-    ks::ui::StylePageTabs(m_innerTabWidget);
+    ks::ui::StylePageTabsContentFrame(m_innerTabWidget);
     m_rootLayout->addWidget(m_innerTabWidget, 1);
 
     initializeEventMonitorUi();

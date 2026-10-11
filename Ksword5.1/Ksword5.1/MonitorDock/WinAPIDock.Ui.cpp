@@ -528,7 +528,7 @@ void WinAPIDock::initializeUi()
         m_eventTable->viewport()->setAttribute(Qt::WA_StyledBackground, true);
     }
     m_resultTabs = new QTabWidget(this);
-    ks::ui::StylePageTabs(m_resultTabs);
+    ks::ui::StylePageTabsContentFrame(m_resultTabs);
     m_resultTabs->addTab(m_eventTable, QStringLiteral("API 事件"));
     QWidget* coveragePanel = new QWidget(m_resultTabs);
     auto* coverageLayout = new QVBoxLayout(coveragePanel);

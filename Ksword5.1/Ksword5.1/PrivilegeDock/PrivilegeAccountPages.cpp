@@ -749,6 +749,7 @@ namespace
             split->addWidget(m_groups); split->addWidget(m_members); layout->addWidget(split, 3);
             auto* actions = new QHBoxLayout;
             m_member = new QLineEdit(this);
+            ks::ui::StyleStandaloneInput(m_member); // 成员操作参数与搜索框分开登记。
             m_member->setPlaceholderText(privilegeText("privilege.workbench.groups.member_input", QStringLiteral("待加入的账户名或 SID")));
             auto* add = button(this, "privilege.workbench.groups.add", QStringLiteral("加入所选组"));
             auto* remove = button(this, "privilege.workbench.groups.remove", QStringLiteral("移除所选成员"));
@@ -757,6 +758,7 @@ namespace
             auto* lookup = new QHBoxLayout;
             m_account = new QLineEdit(this);
             m_account->setPlaceholderText(privilegeText("privilege.workbench.groups.lookup_input", QStringLiteral("查询账户所属的本地组（含间接成员）")));
+            ks::ui::StyleStandaloneInput(m_account);
             auto* query = button(this, "privilege.workbench.groups.lookup", QStringLiteral("查询所属组"));
             lookup->addWidget(m_account, 1); lookup->addWidget(query); layout->addLayout(lookup);
             ks::ui::NormalizeToolbarRow(lookup);
@@ -916,6 +918,7 @@ namespace
             auto* accountBar = new QHBoxLayout;
             m_account = new QLineEdit(this);
             m_account->setPlaceholderText(privilegeText("privilege.workbench.rights.account_input", QStringLiteral("账户名或 SID（用户、组、服务身份）")));
+            ks::ui::StyleStandaloneInput(m_account);
             auto* queryAccount = button(this, "privilege.workbench.rights.query_account", QStringLiteral("账户 → 直接权限"));
             accountBar->addWidget(m_account, 1); accountBar->addWidget(queryAccount); layout->addLayout(accountBar);
             ks::ui::NormalizeToolbarRow(accountBar);
