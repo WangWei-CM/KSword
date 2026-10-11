@@ -269,3 +269,13 @@ KSword 主程序位于 `Ksword5.1/Ksword5.1`（Qt 6.9.3 Widgets + Qt Advanced Do
 - 用户在本轮明确要求停止自动测试，由用户实测。停止后只完成 Release 编译及源码收尾；既有离屏结果不等同于真实窗口、DWM 外沿或业务验收。
 
 - **UI 验证方式（用户明确要求）**：创建伪窗口/独立 UI 夹具只适用于开发机无法正常编译主程序的情况。能够编译时必须直接使用主程序查看和验证，不再构建离屏替代窗口。若用户要求自行测试，则停止自动测试，仅继续已授权的编译。
+
+
+## 共享详情框架统一安装（2026-10-11）
+
+- 用户纠正实现方式：详情必须使用共享框架，不逐窗复制/维护摘要、导航或卡片布局。统一入口 `InstallDetailWindowFramework` 管理窗口摘要与正文外壳、原Tab导航、原文档卡片投影、自适应字段及滚动区；Polish/Show和惰性子控件创建后合并安装。各模块只提供实际身份、字段和动作配置，业务模型不由框架复制。
+- `GlobalDialogTheme` 为普通业务QDialog安装结构，已登记二级工具同样装结构但保留Secondary颜色所有权。Qt文件/颜色/字体/单项输入选择器和带 `ksword_detail_keep_layout` 的共享设置页保留已有结构。ProcessDetailWindow为QWidget，明确从ConfigureDetailDialogRoot接入。
+- `DetailFieldProjection` 直接复用原StructuredFieldView搜索/格式/复制/导出控件，原source仍持规范文档。程序式格式切换走presentationChanged，不能只看被QSignalBlocker阻断的Combo信号。字段分组匹配时保留整组搜索语义；数值刷新原位更新，只有结构变化重建卡片。
+- 卡片实底由DetailCard绘制，正文间隔和滚动Canvas走Window层，避免QSS对子面板再次铺矩形实底导致错误色块/黑色角缝。共享框架根QSS必须让GlobalDialogTheme保持唯一所有权，否则双方增删末尾块会产生StyleChange循环。
+- 只有投影自身有滚动区或处于原树模式时才关闭多余外滚动壳；自然高卡片scrollBody=false必须保留唯一外层纵向滚动。QSplitter替换使用占位并保留非零用户比例，隐藏页首次布局前全零sizes不应恢复为显式折叠。
+- 文件自建侧栏Tab必须标记ksword_detail_tabs避免重复导航；启动项卡片须来自同一完整文档，不能按section拆source而改变复制全部/导出范围。覆盖清单见 `docs/详情共享框架接入-20261011.md`。不运行自动测试/伪窗口，原Release编译交用户实测。

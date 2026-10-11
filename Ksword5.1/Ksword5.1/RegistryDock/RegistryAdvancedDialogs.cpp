@@ -2,6 +2,7 @@
 #include "../UI/VisibleTableWidget.h"
 #include "../UI/ToolbarMetrics.h"
 #include "../UI/DetailDialogChrome.h"
+#include "../UI/PrimaryPageStyle.h"
 #include "RegistryValueCodec.h"
 #include "RegistryValueEditorWidget.h"
 #include "../UI/CodeEditorWidget.h"
@@ -144,41 +145,49 @@ namespace
             setObjectName(QStringLiteral("registry_key_permissions"));
             setWindowTitle(trText(QStringLiteral("注册表键权限")));
             auto* rootLayout = new QVBoxLayout(this);
+            // 注册表对象标识与业务页分开，两个 DACL 编辑器仅滚动各自正文。
+            rootLayout->addWidget(ks::ui::CreateDetailSummaryHeader(this, windowTitle(), path));
             auto* content = new QWidget(this);
             auto* layout = new QVBoxLayout(content);
-            layout->setContentsMargins(8, 8, 8, 8);
-            layout->setSpacing(6);
+            layout->setContentsMargins(16, 16, 16, 16);
+            layout->setSpacing(12);
             rootLayout->addWidget(content, 1);
-            auto* address = new QLabel(path, this);
-            address->setProperty("ks_i18n_preserve_data_text", true);
-            address->setTextFormat(Qt::PlainText);
-            address->setWordWrap(true);
-            address->setTextInteractionFlags(Qt::TextSelectableByMouse);
-            layout->addWidget(address);
             auto* scope = new QLabel(trText(QStringLiteral("Win32 权限 · %1 位视图 · Owner / Group 只读；仅编辑 DACL，不请求 SACL。"))
                 .arg(viewBits == 32 ? 32 : viewBits == 64 ? 64 : static_cast<int>(sizeof(void*) * 8)), this);
             scope->setWordWrap(true);
             layout->addWidget(scope);
             auto* form = new QFormLayout;
-            form->setRowWrapPolicy(QFormLayout::WrapLongRows);
+            ks::ui::ConfigureDetailForm(form);
             m_owner = new QLineEdit(this);
             m_group = new QLineEdit(this);
             m_owner->setReadOnly(true);
             m_group->setReadOnly(true);
+            ks::ui::StyleStandaloneInput(m_owner);
+            ks::ui::StyleStandaloneInput(m_group);
             form->addRow(QStringLiteral("Owner SDDL"), m_owner);
             form->addRow(QStringLiteral("Group SDDL"), m_group);
-            layout->addLayout(form);
-            layout->addWidget(new QLabel(trText(QStringLiteral("原始 DACL SDDL")), this));
+            auto* identityCard = ks::ui::CreateDetailCard(QString(), content);
+            qobject_cast<QVBoxLayout*>(identityCard->layout())->addLayout(form);
+            layout->addWidget(identityCard);
+            auto* originalCard = ks::ui::CreateDetailCard(trText(QStringLiteral("原始 DACL SDDL")), content);
+            originalCard->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
             // 原始 DACL 是系统返回的原始数据，禁止翻译或自动切换结构视图。
             m_original = new CodeEditorWidget(this);
             m_original->setObjectName(QStringLiteral("registry_original_dacl"));
             m_original->setReadOnly(true);
-            layout->addWidget(m_original, 1);
-            layout->addWidget(new QLabel(trText(QStringLiteral("新 DACL SDDL（只允许 D: 部分）")), this));
+            m_original->setMinimumSize(0, 0);
+            m_original->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Ignored);
+            qobject_cast<QVBoxLayout*>(originalCard->layout())->addWidget(m_original, 1);
+            layout->addWidget(originalCard, 1);
+            auto* requestedCard = ks::ui::CreateDetailCard(trText(QStringLiteral("新 DACL SDDL（只允许 D: 部分）")), content);
+            requestedCard->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
             // 新 DACL 使用相同内置编辑器；是否允许修改仍由 WRITE_DAC 校验决定。
             m_edit = new CodeEditorWidget(this);
             m_edit->setObjectName(QStringLiteral("registry_requested_dacl"));
-            layout->addWidget(m_edit, 1);
+            m_edit->setMinimumSize(0, 0);
+            m_edit->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Ignored);
+            qobject_cast<QVBoxLayout*>(requestedCard->layout())->addWidget(m_edit, 1);
+            layout->addWidget(requestedCard, 1);
             m_status = new QLabel(this);
             m_status->setTextFormat(Qt::PlainText);
             m_status->setWordWrap(true);
@@ -445,6 +454,7 @@ namespace
             ks::ui::StyleSecondaryWindow(this);
             auto* layout = new QVBoxLayout(this);
             ks::ui::StyleSecondaryContentLayout(layout);
+            layout->addWidget(ks::ui::CreateDetailSummaryHeader(this, windowTitle()));
             auto* notice = new QLabel(trText(QStringLiteral("选择现有 Hive 文件后复制到临时工作副本。编辑仅改变工作副本；使用“另存副本”导出，原文件不直接加载或修改。")), this);
             notice->setWordWrap(true);
             layout->addWidget(notice);
@@ -465,13 +475,18 @@ namespace
             m_source->setTextInteractionFlags(Qt::TextSelectableByMouse);
             layout->addWidget(m_source);
             auto* split = new QSplitter(this);
+            split->setChildrenCollapsible(false);
             m_tree = new QTreeWidget(split);
+            m_tree->setMinimumWidth(0);
+            m_tree->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Expanding);
             m_tree->setProperty("ks_i18n_preserve_model_data", true);
             m_tree->setHeaderLabel(trText(QStringLiteral("离线键")));
             auto* right = new QWidget(split);
             auto* rightLayout = new QVBoxLayout(right);
             rightLayout->setContentsMargins(0, 0, 0, 0);
             m_values = new QTableWidget(right);
+            m_values->setMinimumWidth(0);
+            m_values->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Expanding);
             // 离线 Hive 值表为工作副本编辑，不提供无意义的现场比较栏。
             ks::ui::SetTableActionBarMode(m_values, ks::ui::TableActionBarMode::Compact);
             m_values->setProperty("ks_i18n_preserve_model_data", true);

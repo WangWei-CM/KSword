@@ -1,5 +1,6 @@
 #include "HvmWatchEventDialog.h"
 #include "./DetailDialogChrome.h"
+#include "UI_All.h"
 
 #include "StructuredFieldView.h"
 #include "HvmControl.h"
@@ -257,7 +258,7 @@ namespace ks::ui
         dialog.setObjectName(QStringLiteral("hvmWatchHitEventDialog"));
         dialog.setWindowTitle(
             text(QStringLiteral("内存监视 #%1 的命中现场")).arg(entry.watchId));
-        dialog.resize(900, 640);
+        applyResponsiveWindowGeometry(&dialog, parent, QSize(900, 640), QSize(480, 360));
         // 详情弹窗必须显式设置不透明背景，否则浅色主题下可能出现黑底黑字。
         dialog.setStyleSheet(
             KswordTheme::OpaqueDialogStyle(dialog.objectName()));
@@ -265,11 +266,12 @@ namespace ks::ui
         auto* const layout = new QVBoxLayout(&dialog);
         layout->setContentsMargins(10, 10, 10, 10);
         layout->setSpacing(8);
+        layout->addWidget(CreateDetailSummaryHeader(&dialog, dialog.windowTitle(), label));
 
         // 文本详情统一用项目内置编辑器，而不是裸 QTextEdit。
         auto* const editor = new StructuredFieldView(&dialog);
         editor->setDocument(buildWatchHitDocument(entry, hit, label));
-        layout->addWidget(editor, 1);
+        layout->addWidget(CreateDetailFieldProjection(editor, &dialog), 1);
 
         auto* const buttonBox =
             new QDialogButtonBox(QDialogButtonBox::Close, &dialog);

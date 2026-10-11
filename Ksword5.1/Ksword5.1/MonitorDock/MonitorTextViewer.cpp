@@ -3,6 +3,7 @@
 #include "../theme.h"
 #include "../UI/CodeEditorWidget.h"
 #include "../UI/DetailDialogChrome.h"
+#include "../UI/UI_All.h"
 
 // ============================================================
 // MonitorTextViewer.cpp
@@ -34,18 +35,22 @@ namespace monitor_text_viewer
         dialog->setAttribute(Qt::WA_DeleteOnClose, true);
         dialog->setObjectName(QStringLiteral("monitor_native_document"));
         dialog->setWindowTitle(titleText.trimmed().isEmpty() ? ks::i18n::sourceText(QStringLiteral("详情查看")) : titleText);
-        dialog->resize(980, 720);
+        ks::ui::applyResponsiveWindowGeometry(dialog, parentWidget, QSize(980, 720), QSize(480, 360));
         dialog->setModal(false);
         dialog->setStyleSheet(KswordTheme::OpaqueDialogStyle(dialog->objectName()));
         auto* layout = new QVBoxLayout(dialog);
+        // 对象摘要保持在导航上方；属性卡片和原始数据分别负责自己的滚动。
+        layout->addWidget(ks::ui::CreateDetailSummaryHeader(dialog,
+            dialog->windowTitle(), virtualPathText, QIcon(QStringLiteral(":/Icon/process_details.svg"))));
         auto* fields = new ks::ui::StructuredFieldView(dialog);
         fields->setDocument(document.fields);
         fields->setToolTip(virtualPathText);
-        if (document.rawPayload.isEmpty()) layout->addWidget(fields, 1);
+        auto* fieldPage = ks::ui::CreateDetailFieldProjection(fields, dialog);
+        if (document.rawPayload.isEmpty()) layout->addWidget(fieldPage, 1);
         else {
             auto* tabs = new QTabWidget(dialog);
             ks::ui::StylePageTabs(tabs);
-            tabs->addTab(fields, ks::i18n::sourceText(QStringLiteral("属性")));
+            tabs->addTab(fieldPage, ks::i18n::sourceText(QStringLiteral("属性")));
             auto* raw = new CodeEditorWidget(tabs);
             raw->setReadOnly(true);
             raw->setRawText(document.rawPayload);

@@ -4,6 +4,8 @@
 #include "../UI/PageControlStyle.h"
 #include "../UI/PrimaryPageStyle.h"
 #include "../UI/ToolbarMetrics.h"
+#include "../UI/DetailPresentation.h"
+#include "../UI/StructuredFieldView.h"
 
 #include "../Internationalization/LanguageManager.h"
 #include "../UI/TableInteractionSupport.h"
@@ -668,7 +670,11 @@ void HandleDock::initializeObjectHeaderTab()
     }
 
     m_objectHeaderLayout->addWidget(m_handleDetailStatusLabel);
-    m_objectHeaderLayout->addWidget(m_handleDetailTable, 1);
+    // 原树保留作为业务证据缓存，卡片只投影同一字段，不改变异步代次与查询逻辑。
+    auto* fields = new ks::ui::StructuredFieldView(m_objectHeaderPage);
+    m_handleDetailTable->setProperty("ksword_handle_detail_source", QVariant::fromValue(static_cast<QObject*>(fields)));
+    m_handleDetailTable->hide();
+    m_objectHeaderLayout->addWidget(ks::ui::CreateDetailFieldProjection(fields, m_objectHeaderPage), 1);
 
     m_tabWidget->addTab(m_objectHeaderPage, QIcon(":/Icon/process_critical.svg"), QStringLiteral("Object Header"));
     // Object Header 页只做只读证据展示，不承载关闭/修改类动作；页面职责挂到页签提示上，不再占用版面。

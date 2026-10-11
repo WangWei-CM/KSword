@@ -2,6 +2,8 @@
 #include "../UI/PageControlStyle.h"
 #include "../UI/ToolbarMetrics.h"
 #include "../UI/DetailDialogChrome.h"
+#include "../UI/FlowLayout.h"
+#include "../UI/UI_All.h"
 #include "../UI/VisibleTableWidget.h"
 #include "../UI/ThemeBinding.h"
 
@@ -975,7 +977,7 @@ namespace
     }
 
     // fitTableHeightToRows 作用：
-    // - 按当前行高计算 QTableWidget 的最小/最大高度；
+    // - 按当前行高估算紧凑高度，但不设置不能缩小的整表高度；
     // - 用于基础信息这种紧凑文本块，避免空白区域让行距显得松散。
     // 入参 table：需要压缩高度的表格。
     // 返回：无。
@@ -994,8 +996,12 @@ namespace
         {
             totalHeight += table->rowHeight(rowIndex);
         }
-        table->setMinimumHeight(totalHeight);
-        table->setMaximumHeight(totalHeight);
+        // 数据增加时允许在信息表内滚动，不能把整张报告撑到窗口之外。
+        const int compactHeight = qMax(96, table->fontMetrics().height() * 8);
+        table->setMinimumSize(0, 0);
+        table->setMaximumHeight(qMin(totalHeight, compactHeight));
+        table->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+        table->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
     }
 
     // setTableRow 作用：
@@ -2843,36 +2849,9 @@ void VirusTotalOnlineScan::ensureResultDialog()
     resultDialog->setAttribute(Qt::WA_DeleteOnClose, true);
     resultDialog->setObjectName(QStringLiteral("virusTotalLiveResultDialog"));
     resultDialog->setWindowTitle(QStringLiteral("VirusTotal 云沙箱上传结果"));
-    resultDialog->resize(1180, 780);
-    resultDialog->setStyleSheet(
-        KswordTheme::OpaqueDialogStyle(resultDialog->objectName()) +
-        QStringLiteral(
-            "QDialog#virusTotalLiveResultDialog QLabel#vtOverviewCard{"
-            "  border:0;"
-            "  padding:4px 0 12px 0;"
-            "}"
-            "QDialog#virusTotalLiveResultDialog QGroupBox{"
-            "  border:0;"
-            "  margin-top:12px;"
-            "  padding-top:12px;"
-            "}"
-            "QDialog#virusTotalLiveResultDialog QGroupBox::title{"
-            "  subcontrol-origin:margin;"
-            "  left:0px;"
-            "  padding:0 4px;"
-            "  font-weight:600;"
-            "}"
-            "QDialog#virusTotalLiveResultDialog QTabWidget::pane{"
-            "  border:1px solid palette(mid);"
-            "}"
-            "QDialog#virusTotalLiveResultDialog QTableWidget#vtFileInfoTable{"
-            "  border:0;"
-            "  background:transparent;"
-            "}"
-            "QDialog#virusTotalLiveResultDialog QTableWidget#vtFileInfoTable::item{"
-            "  border:0;"
-            "  padding:1px 8px 1px 0;"
-            "}"));
+    ks::ui::applyResponsiveWindowGeometry(resultDialog, m_dialogParent.data(),
+        QSize(1180, 780), QSize(560, 420));
+    resultDialog->setStyleSheet(KswordTheme::OpaqueDialogStyle(resultDialog->objectName()));
 
     // dialogLayout 作用：
     // - 顶部放全局 API 操作按钮；
@@ -2881,6 +2860,9 @@ void VirusTotalOnlineScan::ensureResultDialog()
     QVBoxLayout* dialogLayout = new QVBoxLayout(resultDialog);
     dialogLayout->setContentsMargins(0, 0, 0, 10);
     dialogLayout->setSpacing(0);
+    // 对象摘要占据全宽；右侧的 API 页面保留各自的数据视图和原有索引。
+    dialogLayout->addWidget(ks::ui::CreateDetailSummaryHeader(resultDialog,
+        resultDialog->windowTitle(), m_filePath));
 
     QHBoxLayout* topButtonLayout = new QHBoxLayout();
     topButtonLayout->setContentsMargins(10, 8, 10, 8);
@@ -2912,15 +2894,14 @@ void VirusTotalOnlineScan::ensureResultDialog()
             QWidget* reportPage = new QWidget(detailTabWidget);
             QVBoxLayout* reportPageLayout = new QVBoxLayout(reportPage);
             reportPageLayout->setContentsMargins(0, 0, 0, 0);
-            QScrollArea* reportScrollArea = new QScrollArea(reportPage);
-            reportScrollArea->setWidgetResizable(true);
-            reportScrollArea->setFrameShape(QFrame::NoFrame);
-            reportPageLayout->addWidget(reportScrollArea, 1);
-
-            QWidget* reportContent = new QWidget(reportScrollArea);
+            // 业务树、引擎表和 HTML 各自滚动；取消包住它们的第二层整页滚动区。
+            QWidget* reportContent = new QWidget(reportPage);
+            reportContent->setMinimumWidth(0);
+            reportContent->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Expanding);
+            reportPageLayout->addWidget(reportContent, 1);
             QVBoxLayout* reportLayout = new QVBoxLayout(reportContent);
-            reportLayout->setContentsMargins(12, 12, 12, 12);
-            reportLayout->setSpacing(10);
+            reportLayout->setContentsMargins(16, 16, 16, 16);
+            reportLayout->setSpacing(12);
 
             QLabel* overviewLabel = new QLabel(reportContent);
             overviewLabel->setObjectName(QStringLiteral("vtOverviewCard"));
@@ -2940,9 +2921,9 @@ void VirusTotalOnlineScan::ensureResultDialog()
 
             if (apiKind == VtApiKind::ShallowAnalysis)
             {
-                QGroupBox* fileInfoGroup = new QGroupBox(QStringLiteral("基础信息 / HASH"), reportContent);
-                QVBoxLayout* fileInfoLayout = new QVBoxLayout(fileInfoGroup);
-                fileInfoLayout->setContentsMargins(0, 2, 0, 2);
+                QWidget* fileInfoGroup = ks::ui::CreateDetailCard(QStringLiteral("基础信息 / HASH"), reportContent);
+                QVBoxLayout* fileInfoLayout = qobject_cast<QVBoxLayout*>(fileInfoGroup->layout());
+                fileInfoLayout->setContentsMargins(16, 14, 16, 14);
                 fileInfoLayout->setSpacing(0);
                 QTableWidget* fileInfoTable = new ks::ui::VisibleTableWidget(fileInfoGroup);
                 fileInfoTable->setObjectName(QStringLiteral("vtFileInfoTable"));
@@ -2958,8 +2939,9 @@ void VirusTotalOnlineScan::ensureResultDialog()
                 reportLayout->addWidget(fileInfoGroup, 0);
                 pane.fileInfoTable = fileInfoTable;
 
-                QGroupBox* engineGroup = new QGroupBox(QStringLiteral("多引擎检测"), reportContent);
-                QVBoxLayout* engineLayout = new QVBoxLayout(engineGroup);
+                QWidget* engineGroup = ks::ui::CreateDetailCard(QStringLiteral("多引擎检测"), reportContent);
+                engineGroup->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+                QVBoxLayout* engineLayout = qobject_cast<QVBoxLayout*>(engineGroup->layout());
                 QTableWidget* engineTable = new ks::ui::VisibleTableWidget(engineGroup);
                 // 单份云端响应已有报告导出，检测引擎摘要不再重复展示表格快照条。
                 ks::ui::SetTableActionBarMode(engineTable, ks::ui::TableActionBarMode::None);
@@ -2983,9 +2965,11 @@ void VirusTotalOnlineScan::ensureResultDialog()
             }
             else if (apiKind == VtApiKind::Ioc)
             {
-                QGroupBox* iocButtonGroup = new QGroupBox(QStringLiteral("IOC 分项分析"), reportContent);
-                QHBoxLayout* iocButtonLayout = new QHBoxLayout(iocButtonGroup);
-                iocButtonLayout->setContentsMargins(0, 4, 0, 4);
+                QWidget* iocButtonGroup = ks::ui::CreateDetailCard(QStringLiteral("IOC 分项分析"), reportContent);
+                // 分项动作按实际可用宽度换行，不能用一条长工具栏撑宽报告页。
+                auto* iocActions = new QWidget(iocButtonGroup);
+                auto* iocButtonLayout = new ks::ui::FlowLayout(iocActions, 0, 8, 8);
+                qobject_cast<QVBoxLayout*>(iocButtonGroup->layout())->addWidget(iocActions);
                 for (const QString& relationshipText : iocRelationships())
                 {
                     QPushButton* relationshipButton = new QPushButton(
@@ -2998,19 +2982,19 @@ void VirusTotalOnlineScan::ensureResultDialog()
                             // 返回：无。
                             startSingleIocRelationship(relationshipText);
                         });
-                    iocButtonLayout->addWidget(relationshipButton, 0);
+                    ks::ui::NormalizeToolbarControl(relationshipButton);
+                    iocButtonLayout->addWidget(relationshipButton);
                 }
-                iocButtonLayout->addStretch(1);
-                ks::ui::NormalizeToolbarRow(iocButtonLayout);
                 reportLayout->addWidget(iocButtonGroup, 0);
             }
 
-            QGroupBox* reportTreeGroup = new QGroupBox(
+            QWidget* reportTreeGroup = ks::ui::CreateDetailCard(
                 apiKind == VtApiKind::ShallowAnalysis
                     ? QStringLiteral("静态分析 / 可展开详情")
                     : QStringLiteral("报告详情"),
                 reportContent);
-            QVBoxLayout* reportTreeLayout = new QVBoxLayout(reportTreeGroup);
+            reportTreeGroup->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+            QVBoxLayout* reportTreeLayout = qobject_cast<QVBoxLayout*>(reportTreeGroup->layout());
             if (apiKind == VtApiKind::FileProfile)
             {
                 QLineEdit* fileProfileFilterEdit = new QLineEdit(reportTreeGroup);
@@ -3080,7 +3064,8 @@ void VirusTotalOnlineScan::ensureResultDialog()
                 htmlPreviewBrowser->setReadOnly(true);
                 htmlPreviewBrowser->setOpenExternalLinks(false);
                 htmlPreviewBrowser->setOpenLinks(false);
-                htmlPreviewBrowser->setMinimumHeight(260);
+                htmlPreviewBrowser->setMinimumSize(0, 0);
+                htmlPreviewBrowser->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Expanding);
                 htmlPreviewBrowser->setPlaceholderText(QStringLiteral("双击带 HTML 报告的沙箱行后在此处显示渲染结果。"));
                 htmlPreviewLayout->addWidget(htmlPreviewBrowser, 1);
                 htmlPreviewGroup->setVisible(false);
@@ -3114,12 +3099,9 @@ void VirusTotalOnlineScan::ensureResultDialog()
                 pane.sandboxHtmlButton = htmlButton;
             }
 
-            reportLayout->addStretch(0);
-            reportScrollArea->setWidget(reportContent);
-
             QWidget* responsePage = new QWidget(detailTabWidget);
             QVBoxLayout* responseLayout = new QVBoxLayout(responsePage);
-            responseLayout->setContentsMargins(8, 8, 8, 8);
+            responseLayout->setContentsMargins(16, 16, 16, 16);
             QTreeWidget* responseTree = new QTreeWidget(responsePage);
             responseTree->setColumnCount(3);
             responseTree->setHeaderLabels(QStringList()
@@ -3137,7 +3119,7 @@ void VirusTotalOnlineScan::ensureResultDialog()
 
             QWidget* rawPage = new QWidget(detailTabWidget);
             QVBoxLayout* rawLayout = new QVBoxLayout(rawPage);
-            rawLayout->setContentsMargins(8, 8, 8, 8);
+            rawLayout->setContentsMargins(16, 16, 16, 16);
             CodeEditorWidget* rawEditor = new CodeEditorWidget(resultDialog);
             rawEditor->setReadOnly(true);
             rawLayout->addWidget(rawEditor, 1);

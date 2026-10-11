@@ -11,6 +11,7 @@
 #include "FilePropertyPeAnalyzer.h"
 #include "../UI/StructuredFieldView.h"
 #include "../UI/DetailDialogChrome.h"
+#include "../UI/DetailPresentation.h"
 #include "DriverFileSystemParser.h"
 #include "IrpFileSystemParser.h"
 #include "FileHandleUsageScanner.h"
@@ -4683,11 +4684,11 @@ namespace
             "QDialog#FileDetailDialogRoot QLineEdit,"
             "QDialog#FileDetailDialogRoot QPlainTextEdit,"
             "QDialog#FileDetailDialogRoot QTextEdit{"
-            "  background:%4;"
+            "  background:%8;"
             "  color:%2;"
-            "  border:1px solid %3;"
-            "  border-radius:3px;"
-            "  padding:3px 6px;"
+            "  border:0;"
+            "  border-radius:5px;"
+            "  padding:0 6px;"
             "  selection-background-color:%5;"
             "  selection-color:%7;"
             "}"
@@ -4699,10 +4700,6 @@ namespace
             "  border:none;"
             "  gridline-color:transparent;"
             "}"
-            "QDialog#FileDetailDialogRoot QAbstractScrollArea::viewport{"
-            "  background:%4;"
-            "  color:%2;"
-            "}"
             "QDialog#FileDetailDialogRoot QTableCornerButton::section,"
             "QDialog#FileDetailDialogRoot QHeaderView::section{"
             "  background:%4;"
@@ -4713,18 +4710,17 @@ namespace
             "}"
             "QDialog#FileDetailDialogRoot QTabWidget::pane{"
             "  border:none;"
-            "  background:%4;"
+            "  background:%1;"
             "}"
             "QWidget#FileDetailTabNavigation{"
-            "  background:%6;"
+            "  background:%1;"
             "  border:none;"
             "}"
             "QWidget#FileDetailTabNavigation QToolButton{border-radius:7px;padding:8px;text-align:left;}"
-            "QFrame#FileDetailIdentity{background:%4;border-bottom:1px solid %3;}"
-            "QFrame#FileMetadataSaveBar{background:%4;border-top:1px solid %3;}"
-            "QScrollArea#FileDetailNavigationScroll{background:%6;border:none;}"
-            "QScrollArea#FileDetailNavigationScroll QWidget#qt_scrollarea_viewport{background:%6;}"
-            "QDialog#FileDetailDialogRoot QPushButton{border-radius:3px;padding:4px 10px;}"
+            "QFrame#FileMetadataSaveBar{background:%1;border-top:1px solid %3;}"
+            "QScrollArea#FileDetailNavigationScroll{background:%1;border:none;}"
+            "QScrollArea#FileDetailNavigationScroll QWidget#qt_scrollarea_viewport{background:%1;}"
+            "QDialog#FileDetailDialogRoot QPushButton{border-radius:5px;padding:0 10px;}"
             "QDialog#FileDetailDialogRoot QProgressBar{"
             "  background:%6;"
             "  color:%2;"
@@ -4736,13 +4732,14 @@ namespace
             "  background:%5;"
             "  border-radius:2px;"
             "}")
-            .arg(KswordTheme::MainBackgroundHex())
+            .arg(KswordTheme::WindowColorHex())
             .arg(KswordTheme::TextPrimaryHex())
             .arg(KswordTheme::BorderHex())
             .arg(KswordTheme::SurfaceHex())
             .arg(KswordTheme::ControlAccentHex())
             .arg(KswordTheme::SurfaceAltHex())
             .arg(KswordTheme::OnAccentDynamicHex())
+            .arg(KswordTheme::ControlInputSurfaceColor().name())
             + ks::ui::BuildDetailDialogChromeStyle(QStringLiteral("FileDetailDialogRoot"))
             // 文件详情只接管按钮，其他控件与导航几何继续保留原页面规则。
             + ks::ui::BuildFlatButtonStyle().replace(QStringLiteral("QPushButton"),
@@ -5539,6 +5536,8 @@ namespace
             QVBoxLayout* dialogLayout = new QVBoxLayout(this);
             dialogLayout->setContentsMargins(0, 0, 0, 0);
             dialogLayout->setSpacing(0);
+            // 对象摘要属于整个详情窗口，不再只塞在常规信息页中。
+            dialogLayout->addWidget(buildIdentityHeader());
             QHBoxLayout* rootLayout = new QHBoxLayout();
             rootLayout->setContentsMargins(0, 0, 0, 0);
             rootLayout->setSpacing(0);
@@ -5555,11 +5554,12 @@ namespace
             navigationScroll->setWidgetResizable(true);
             navigationScroll->setFrameShape(QFrame::NoFrame);
             navigationScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-            navigationScroll->setFixedWidth(240);
             navigationScroll->setWidget(m_tabNavigation);
             ks::ui::ConfigureDetailNavigation(navigationScroll, m_tabNavigation);
 
             m_tabWidget = new QTabWidget(this);
+            // 已由文件详情的分组侧栏管理，共享框架不得再给同一个Tab套第二个导航壳。
+            m_tabWidget->setProperty("ksword_detail_tabs", true);
             m_tabWidget->setMinimumSize(0, 0);
             m_tabWidget->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Ignored);
             if (auto* pageStack = m_tabWidget->findChild<QStackedWidget*>())
@@ -5750,6 +5750,8 @@ namespace
                 m_tabNavigationButtons.front()->setChecked(true);
             }
             ks::ui::ConfigureDetailDialogRoot(this);
+            // 统一框架接管真实页面与后续懒加载子控件，业务仍保留原 Tab 和异步数据源。
+            ks::ui::InstallDetailWindowFramework(this);
             applyThemeStyle();
         }
 
@@ -5837,13 +5839,14 @@ namespace
 
             const QPalette dialogPalette = buildFileDetailDialogPalette(this);
             QPalette surfacePalette = dialogPalette;
-            surfacePalette.setColor(QPalette::Window, KswordTheme::SurfaceColor());
+            // 页根保持窗口底色，只有明确卡片使用 Surface，防止滚动区再抬亮整块背景。
+            surfacePalette.setColor(QPalette::Window, KswordTheme::WindowColor());
             surfacePalette.setColor(QPalette::WindowText, KswordTheme::TextPrimaryColor());
             applyFileDetailSurfacePalette(this, dialogPalette);
             setStyleSheet(buildFileDetailDialogStyle());
 
             QPalette navigationPalette = surfacePalette;
-            navigationPalette.setColor(QPalette::Window, KswordTheme::SurfaceAltColor());
+            navigationPalette.setColor(QPalette::Window, KswordTheme::WindowColor());
             applyFileDetailSurfacePalette(m_tabNavigation, navigationPalette);
             applyFileDetailSurfacePalette(m_tabWidget, surfacePalette);
             if (m_tabWidget != nullptr)
@@ -9232,28 +9235,55 @@ namespace
                     }
 
                     const QString titleText = tabGuard->tabText(tabIndex);
-                    if (lazyKey == QStringLiteral("metadata") || lazyKey == QStringLiteral("security"))
-                    {
-                        // Form controls retain their natural minimum width inside a
-                        // scroll area, so every editing action remains reachable on
-                        // small screens without enlarging the independent window.
-                        auto* formScroll = new QScrollArea(tabGuard.data());
-                        formScroll->setFrameShape(QFrame::NoFrame);
-                        formScroll->setWidgetResizable(true);
-                        realPage->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
-                        formScroll->setWidget(realPage);
-                        realPage = formScroll;
-                    }
+                    // 编辑表单由共享详情框架按页面内部用途适配；禁止在整个 Tab 外再套滚动区。
                     tabGuard->removeTab(tabIndex);
                     tabGuard->insertTab(tabIndex, realPage, titleText);
                     // 新建的懒加载页也必须立即拿到 Surface 调色板，不能回退到系统 Base。
                     realPage->setMinimumSize(0, 0);
                     realPage->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Ignored);
                     tabGuard->tabBar()->hide();
+                    ks::ui::InstallDetailWindowFramework(this);
                     applyThemeStyle();
                     tabGuard->setCurrentIndex(tabIndex);
                     placeholderGuard->deleteLater();
                 });
+        }
+
+        // 创建全宽对象摘要；文件位置与复制动作在切换任何详情页时仍可达。
+        QWidget* buildIdentityHeader()
+        {
+            QFileIconProvider iconProvider;
+            const QString title = m_batchMode
+                ? ks::i18n::sourceText(QStringLiteral("批量文件属性 - %1 项")).arg(m_filePaths.size())
+                : QFileInfo(m_filePath).fileName();
+            QWidget* header = ks::ui::CreateDetailSummaryHeader(this, title,
+                QDir::toNativeSeparators(m_filePath), iconProvider.icon(QFileInfo(m_filePath)));
+            auto* actions = qobject_cast<QHBoxLayout*>(header->layout());
+            auto* location = new QPushButton(ks::i18n::sourceText(QStringLiteral("打开所在位置")), header);
+            auto* copyPath = new QPushButton(ks::i18n::sourceText(QStringLiteral("复制路径")), header);
+            location->setIcon(QIcon(QStringLiteral(":/Icon/process_open_folder.svg")));
+            copyPath->setIcon(QIcon(QStringLiteral(":/Icon/process_copy_cell.svg")));
+            for (QPushButton* button : {location, copyPath})
+            {
+                button->setToolTip(button->text());
+                ks::ui::ApplyFlatButtonTheme(button, ks::ui::FlatButtonTone::Neutral,
+                    ks::ui::FlatButtonAppearance::Solid);
+                ks::ui::NormalizeToolbarControl(button);
+                actions->addWidget(button);
+            }
+            connect(location, &QPushButton::clicked, this, [this]()
+            {
+                QDesktopServices::openUrl(QUrl::fromLocalFile(QFileInfo(m_filePath).absolutePath()));
+            });
+            connect(copyPath, &QPushButton::clicked, this, [this]()
+            {
+                if (auto* clipboard = QApplication::clipboard())
+                {
+                    clipboard->setText(m_batchMode ? m_filePaths.join(QLatin1Char('\n'))
+                        : QDir::toNativeSeparators(m_filePath));
+                }
+            });
+            return header;
         }
 
         QWidget* buildGeneralTab()
@@ -9337,48 +9367,6 @@ namespace
 
             QWidget* page = new QWidget(this);
             QVBoxLayout* layout = new QVBoxLayout(page);
-
-            QFrame* header = new QFrame(page);
-            header->setObjectName(QStringLiteral("FileDetailIdentity"));
-            QHBoxLayout* headerLayout = new QHBoxLayout(header);
-            headerLayout->setContentsMargins(16, 16, 16, 16);
-            QLabel* icon = new QLabel(header);
-            QFileIconProvider iconProvider;
-            icon->setPixmap(iconProvider.icon(QFileInfo(m_filePath)).pixmap(56, 56));
-            headerLayout->addWidget(icon);
-            QVBoxLayout* identityLayout = new QVBoxLayout();
-            QLabel* name = new QLabel(QFileInfo(m_filePath).fileName(), header);
-            name->setProperty("ks_i18n_preserve_data_text", true);
-            name->setTextFormat(Qt::PlainText);
-            name->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
-            name->setWordWrap(true);
-            name->setMinimumWidth(0);
-            name->setTextInteractionFlags(Qt::TextSelectableByMouse);
-            QFont nameFont = name->font();
-            nameFont.setBold(true);
-            nameFont.setPointSizeF(nameFont.pointSizeF() > 0 ? nameFont.pointSizeF() + 2 : 12);
-            name->setFont(nameFont);
-            QLabel* path = new QLabel(QDir::toNativeSeparators(m_filePath), header);
-            path->setProperty("ks_i18n_preserve_data_text", true);
-            path->setTextFormat(Qt::PlainText);
-            path->setWordWrap(true);
-            path->setMinimumWidth(0);
-            path->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
-            path->setTextInteractionFlags(Qt::TextSelectableByMouse);
-            identityLayout->addWidget(name);
-            identityLayout->addWidget(path);
-            headerLayout->addLayout(identityLayout, 1);
-            QVBoxLayout* actions = new QVBoxLayout();
-            QPushButton* location = new QPushButton(ks::i18n::sourceText(QStringLiteral("打开所在位置")), header);
-            QPushButton* copyPath = new QPushButton(ks::i18n::sourceText(QStringLiteral("复制路径")), header);
-            actions->addWidget(location);
-            actions->addWidget(copyPath);
-            headerLayout->addLayout(actions);
-            connect(location, &QPushButton::clicked, this, [this]()
-                { QDesktopServices::openUrl(QUrl::fromLocalFile(QFileInfo(m_filePath).absolutePath())); });
-            connect(copyPath, &QPushButton::clicked, this, [this]()
-                { if (auto* clipboard = QApplication::clipboard()) clipboard->setText(QDir::toNativeSeparators(m_filePath)); });
-            layout->addWidget(header);
 
             m_generalPropertyView = new ks::ui::StructuredFieldView(page);
             const QFileInfo info(m_filePath);

@@ -2,6 +2,7 @@
 #include "../UI/TableInteractionSupport.h"
 #include "../ksword/log/log.h"
 #include "../theme.h"
+#include "../UI/StructuredFieldView.h"
 
 // ============================================================
 // HandleDock.Detail.cpp
@@ -153,6 +154,20 @@ void HandleDock::applyHandleDetailRefreshResult(
         m_handleDetailTable->addTopLevelItem(item);
     }
 
+    // 展示层从查询结果建立文档，隐藏原树依然保留所有字段与业务上下文。
+    auto* fields = qobject_cast<ks::ui::StructuredFieldView*>(
+        m_handleDetailTable->property("ksword_handle_detail_source").value<QObject*>());
+    if (fields != nullptr)
+    {
+        ks::ui::FieldDocument document;
+        document.section(QStringLiteral("Object Header"));
+        for (const HandleDetailField& field : refreshResult.fields)
+        {
+            document.field(field.keyText, field.valueText);
+        }
+        fields->setDocument(document);
+    }
+
     QString statusText = QStringLiteral("● 详情刷新完成 %1 ms").arg(refreshResult.elapsedMs);
     if (!refreshResult.diagnosticText.trimmed().isEmpty())
     {
@@ -208,4 +223,11 @@ void HandleDock::showHandleDetailPlaceholder(const QString& messageText)
         return;
     }
     m_handleDetailTable->clear();
+    // 提示已经显示在状态栏；清空选择必须同时清空原树和真实文档，不能再生成占位数据。
+    auto* fields = qobject_cast<ks::ui::StructuredFieldView*>(
+        m_handleDetailTable->property("ksword_handle_detail_source").value<QObject*>());
+    if (fields != nullptr)
+    {
+        fields->setDocument(ks::ui::FieldDocument{});
+    }
 }

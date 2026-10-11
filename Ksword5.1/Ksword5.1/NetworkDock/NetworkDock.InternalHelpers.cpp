@@ -1,6 +1,8 @@
 #include "NetworkDock.InternalHelpers.h"
 #include "../UI/PageControlStyle.h"
 #include "../UI/DetailDialogChrome.h"
+#include "../UI/DetailPresentation.h"
+#include "../UI/StructuredFieldView.h"
 
 #include "../UI/MemoryWorkbench/HexView.h"
 #include "../UI/TableInteractionSupport.h"
@@ -136,78 +138,6 @@ namespace network_dock_detail
 
     namespace
     {
-        // buildPacketDetailWindowStyle 作用：
-        // - 为“流量监控 -> 报文详情”窗口生成独立主题样式；
-        // - 重点覆盖 QPlainTextEdit/QTabWidget/Page，修复深色模式下白底残留。
-        QString buildPacketDetailWindowStyle()
-        {
-            const QString windowBackground = KswordTheme::SurfaceHex();
-            const QString panelBackground = KswordTheme::SurfaceAltHex();
-            const QString inputBackground = KswordTheme::SurfaceMutedColorHex();
-            const QString borderColor = KswordTheme::BorderHex();
-            const QString textColor = KswordTheme::TextPrimaryHex();
-            const QString secondaryTextColor = KswordTheme::TextSecondaryHex();
-            const QString accentColor = KswordTheme::AccentHex(KswordTheme::AccentRole::Blue);
-
-            return QStringLiteral(
-                "QWidget{"
-                "  background:%1;"
-                "  color:%2;"
-                "}"
-                "QLabel{"
-                "  background:transparent;"
-                "  color:%2;"
-                "}"
-                "QTabWidget::pane{"
-                "  background:%3;"
-                "  border:1px solid %4;"
-                "  border-radius:4px;"
-                "}"
-                "QTabBar::tab{"
-                "  background:%1;"
-                "  color:%5;"
-                "  border:1px solid %4;"
-                "  padding:6px 12px;"
-                "  margin-right:2px;"
-                "  border-top-left-radius:4px;"
-                "  border-top-right-radius:4px;"
-                "}"
-                "QTabBar::tab:selected{"
-                "  background:%3;"
-                "  color:%2;"
-                "  border-bottom-color:%3;"
-                "}"
-                "QPlainTextEdit{"
-                "  background:%6;"
-                "  color:%2;"
-                "  border:1px solid %4;"
-                "  selection-background-color:%7;"
-                "  selection-color:%8;"
-                "}"
-                "QMenu{"
-                "  background:%6;"
-                "  color:%2;"
-                "  border:1px solid %4;"
-                "}"
-                "QMenu::item:selected{"
-                "  background:%7;"
-                "  color:%8;"
-                "}"
-                "QMenu::separator{"
-                "  height:1px;"
-                "  background:%4;"
-                "  margin:2px 6px;"
-                "}")
-                .arg(windowBackground)
-                .arg(textColor)
-                .arg(panelBackground)
-                .arg(borderColor)
-                .arg(secondaryTextColor)
-                .arg(inputBackground)
-                .arg(accentColor)
-                .arg(KswordTheme::OnAccentDynamicHex());
-        }
-
         // PacketDetailWindow：
         // - 报文详情独立窗口（show 非阻塞，不阻塞主 UI）；
         // - 十六进制区使用纯文本编辑器，支持像文本一样跨行连续选择复制。
@@ -226,74 +156,43 @@ namespace network_dock_detail
                         ? QStringLiteral("R0 WFP ALE 流事件详情 - #%1").arg(packetRecord.sequenceId)
                         : QStringLiteral("报文详情 - #%1").arg(packetRecord.sequenceId));
                 resize(1120, 760);
-                setStyleSheet(buildPacketDetailWindowStyle());
-
                 QVBoxLayout* rootLayout = new QVBoxLayout(this);
-                rootLayout->setContentsMargins(8, 8, 8, 8);
-                rootLayout->setSpacing(6);
+                ks::ui::ConfigureDetailDialogRoot(this);
+                rootLayout->addWidget(ks::ui::CreateDetailSummaryHeader(this, windowTitle(),
+                    toQString(packetRecord.processName), QIcon(QStringLiteral(":/Icon/process_details.svg"))));
+                QTabWidget* detailTabWidget = new QTabWidget(this);
 
-                // 元信息区域：时间、协议、方向、PID、端点、长度。
-                QLabel* metaLabel = new QLabel(this);
-                const QString timeText = toQString(
-                    ks::network::FormatUnixTimestampMs(packetRecord.captureTimestampMs, true));
+                // 原始来源、端点与字节证据直接进入文档，共享卡片负责窄窗换行和单层滚动。
+                ks::ui::FieldDocument metadata;
+                metadata.section(QStringLiteral("常规信息"));
+                const QString timeText = toQString(ks::network::FormatUnixTimestampMs(packetRecord.captureTimestampMs, true));
                 if (packetRecord.wfpAleEventNoPayload)
                 {
-                    metaLabel->setText(QStringLiteral(
-                        "来源: %1\n驱动事件序号: %2  标志: 0x%3\n时间: %4\n协议: %5  方向: %6\nPID: %7  进程: %8\n本地: %9\n远端: %10\n总长度: -（ALE 元数据）, 负载: -（ALE 无 payload）")
-                        .arg(packetSourceDisplayText(packetRecord))
-                        .arg(packetRecord.sourceSequenceId)
-                        .arg(packetRecord.sourceFlags, 8, 16, QChar('0'))
-                        .arg(timeText)
-                        .arg(toQString(ks::network::PacketProtocolToString(packetRecord.protocol)))
-                        .arg(toQString(ks::network::PacketDirectionToString(packetRecord.direction)))
-                        .arg(packetRecord.processId)
-                        .arg(toQString(packetRecord.processName))
-                        .arg(formatEndpointText(packetRecord.localAddress, packetRecord.localPort))
-                        .arg(formatEndpointText(packetRecord.remoteAddress, packetRecord.remotePort)));
+                    metadata.field(QStringLiteral("来源"), packetSourceDisplayText(packetRecord));
+                    metadata.field(QStringLiteral("驱动事件序号"), QString::number(packetRecord.sourceSequenceId));
+                    metadata.field(QStringLiteral("标志"), QStringLiteral("0x%1").arg(packetRecord.sourceFlags, 8, 16, QChar('0')));
                 }
-                else
-                {
-                    metaLabel->setText(QStringLiteral(
-                        "时间: %1\n协议: %2  方向: %3\nPID: %4  进程: %5\n本地: %6\n远端: %7\n总长度: %8 bytes, 负载: %9 bytes")
-                        .arg(timeText)
-                        .arg(toQString(ks::network::PacketProtocolToString(packetRecord.protocol)))
-                        .arg(toQString(ks::network::PacketDirectionToString(packetRecord.direction)))
-                        .arg(packetRecord.processId)
-                        .arg(toQString(packetRecord.processName))
-                        .arg(formatEndpointText(packetRecord.localAddress, packetRecord.localPort))
-                        .arg(formatEndpointText(packetRecord.remoteAddress, packetRecord.remotePort))
-                        .arg(packetRecord.totalPacketSize)
-                        .arg(packetRecord.payloadSize));
-                }
-                metaLabel->setWordWrap(true);
-                metaLabel->setStyleSheet(QStringLiteral("padding:8px 10px;border:0;"));
-                rootLayout->addWidget(metaLabel);
-
-                // 可读摘要：先展示“内容预览列同款”的语义化 ASCII 摘要，便于快速判断协议文本。
-                QLabel* readablePreviewLabel = new QLabel(this);
-                const QString readablePreviewText =
-                    packetRecord.wfpAleEventNoPayload
-                        ? QStringLiteral("R0 WFP ALE 流事件不包含 packet payload")
-                        : buildPayloadAsciiPreviewText(packetRecord);
-                readablePreviewLabel->setText(
-                    QStringLiteral("可读ASCII摘要: %1").arg(readablePreviewText));
-                readablePreviewLabel->setWordWrap(true);
-                readablePreviewLabel->setToolTip(
-                    packetRecord.wfpAleEventNoPayload
-                        ? QStringLiteral("该记录来自内核 WFP ALE 流授权层，不包含逐包长度、报文字节或 payload。")
-                        : QStringLiteral("该摘要优先提取 payload 中可读 ASCII 片段。"));
-                readablePreviewLabel->setStyleSheet(QStringLiteral("color:%1;").arg(KswordTheme::TextSecondaryHex()));
-                rootLayout->addWidget(readablePreviewLabel);
-
-                // 详情页签：当前仅保留十六进制视图页。
-                QTabWidget* detailTabWidget = new QTabWidget(this);
-                ks::ui::StylePageTabs(detailTabWidget);
-                rootLayout->addWidget(detailTabWidget, 1);
+                metadata.field(QStringLiteral("时间"), timeText);
+                metadata.field(QStringLiteral("协议"), toQString(ks::network::PacketProtocolToString(packetRecord.protocol)));
+                metadata.field(QStringLiteral("方向"), toQString(ks::network::PacketDirectionToString(packetRecord.direction)));
+                metadata.field(QStringLiteral("PID"), QString::number(packetRecord.processId));
+                metadata.field(QStringLiteral("进程"), toQString(packetRecord.processName));
+                metadata.field(QStringLiteral("本地"), formatEndpointText(packetRecord.localAddress, packetRecord.localPort));
+                metadata.field(QStringLiteral("远端"), formatEndpointText(packetRecord.remoteAddress, packetRecord.remotePort));
+                metadata.field(QStringLiteral("总长度"), packetRecord.wfpAleEventNoPayload
+                    ? QStringLiteral("-（ALE 元数据）") : QStringLiteral("%1 bytes").arg(packetRecord.totalPacketSize));
+                metadata.field(QStringLiteral("负载"), packetRecord.wfpAleEventNoPayload
+                    ? QStringLiteral("-（ALE 无 payload）") : QStringLiteral("%1 bytes").arg(packetRecord.payloadSize));
+                metadata.field(QStringLiteral("可读ASCII摘要"), packetRecord.wfpAleEventNoPayload
+                    ? QStringLiteral("R0 WFP ALE 流事件不包含 packet payload") : buildPayloadAsciiPreviewText(packetRecord));
+                auto* metadataSource = new ks::ui::StructuredFieldView(detailTabWidget);
+                metadataSource->setDocument(metadata);
+                detailTabWidget->addTab(ks::ui::CreateDetailFieldProjection(metadataSource, detailTabWidget), QStringLiteral("常规信息"));
 
                 // 十六进制页：统一复用 ks::ui::HexView，功能与内存/文件模块保持一致。
                 QWidget* hexPage = new QWidget(detailTabWidget);
                 QVBoxLayout* hexPageLayout = new QVBoxLayout(hexPage);
-                hexPageLayout->setContentsMargins(0, 0, 0, 0);
+                hexPageLayout->setContentsMargins(16, 16, 16, 16);
                 hexPageLayout->setSpacing(4);
 
                 QLabel* hexHintLabel = new QLabel(
@@ -322,6 +221,10 @@ namespace network_dock_detail
                 hexPageLayout->addWidget(hexEditorWidget, 1);
 
                 detailTabWidget->addTab(hexPage, QStringLiteral("十六进制"));
+                ks::ui::SetDetailTabGroups(detailTabWidget, {{ks::ui::DetailNavigationKind::General, {0}},
+                    {ks::ui::DetailNavigationKind::Content, {1}}});
+                rootLayout->addWidget(ks::ui::CreateDetailTabShell(detailTabWidget, this), 1);
+                ks::ui::InstallDetailWindowFramework(this);
                 ks::ui::ApplyDetailDialogChrome(this);
             }
         };

@@ -1,5 +1,6 @@
 #include "KernelDriverDispatchEditorDialog.h"
 #include "../UI/SecondaryPageLayout.h"
+#include "../UI/DetailPresentation.h"
 #include "../UI/ToolbarMetrics.h"
 #include "../UI/VisibleTableWidget.h"
 
@@ -239,6 +240,8 @@ void KernelDriverDispatchEditorDialog::initializeUi()
         }
     });
     setActionsEnabled(false);
+    // 事务表和动作保留原模型，由共享详情框架整理摘要、字段与滚动边界。
+    ks::ui::InstallDetailWindowFramework(this);
 }
 
 void KernelDriverDispatchEditorDialog::refreshDriverSnapshot()
