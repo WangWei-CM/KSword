@@ -332,16 +332,16 @@ void DriverDock::initializeIntegrityTab()
 
     m_integrityFillFromSelectionButton = new QPushButton(QIcon(QStringLiteral(":/Icon/process_details.svg")), QString(), m_integrityPage);
     KswordTheme::ApplyCompactIconButtonMetrics(m_integrityFillFromSelectionButton);
-    // 完整性页的图标工具显式绑定状态色，不依赖 Dock 透明父级的样式发现。
+    // 三个独立查询动作保留实底，与同排输入区形成连续的工具栏轮廓。
     ks::ui::ApplyFlatButtonTheme(m_integrityFillFromSelectionButton,
-        ks::ui::FlatButtonTone::Neutral, ks::ui::FlatButtonAppearance::Flat);
+        ks::ui::FlatButtonTone::Neutral, ks::ui::FlatButtonAppearance::Solid);
     m_integrityFillFromSelectionButton->setToolTip(
         driverText("driver.integrity.form.fill.tooltip", QStringLiteral("从当前服务选择填充 DriverObject 名称")));
 
     m_integrityRefreshButton = new QPushButton(QIcon(QStringLiteral(":/Icon/process_refresh.svg")), QString(), m_integrityPage);
     KswordTheme::ApplyCompactIconButtonMetrics(m_integrityRefreshButton);
     ks::ui::ApplyFlatButtonTheme(m_integrityRefreshButton,
-        ks::ui::FlatButtonTone::Neutral, ks::ui::FlatButtonAppearance::Flat);
+        ks::ui::FlatButtonTone::Neutral, ks::ui::FlatButtonAppearance::Solid);
     m_integrityRefreshButton->setToolTip(
         driverText(
             "driver.integrity.form.refresh.tooltip",
@@ -350,7 +350,7 @@ void DriverDock::initializeIntegrityTab()
     m_integrityCpuOnlyButton = new QPushButton(QIcon(QStringLiteral(":/Icon/process_threads.svg")), QString(), m_integrityPage);
     KswordTheme::ApplyCompactIconButtonMetrics(m_integrityCpuOnlyButton);
     ks::ui::ApplyFlatButtonTheme(m_integrityCpuOnlyButton,
-        ks::ui::FlatButtonTone::Neutral, ks::ui::FlatButtonAppearance::Flat);
+        ks::ui::FlatButtonTone::Neutral, ks::ui::FlatButtonAppearance::Solid);
     m_integrityCpuOnlyButton->setToolTip(
         driverText("driver.integrity.form.cpu_only.tooltip", QStringLiteral("仅查询 CPU entry / IDT / MSR 证据")));
 

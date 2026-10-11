@@ -216,6 +216,7 @@ KSword 主程序位于 `Ksword5.1/Ksword5.1`（Qt 6.9.3 Widgets + Qt Advanced Do
 - `UI/TabHierarchyTransition` 在父级激活时仅滑动子栏快照，方向取父级Tab实际矩形的左右关系（含RTL），不搬动内容页或模型。父级在惰性构建前登记，子栏显示/跨Dock迁移时接入当前宿主；180ms动画遵循系统动画开关，连续切换、隐藏、字号/主题/尺寸变化取消旧帧。
 
 - 悬停图标底色查询必须排除 `ToolbarMetrics` 的两段明确几何规则与 `PrimaryPageStyle` 记录的完整非按钮样式块，不能将这些规则当作未知业务配色而拒绝按钮上下文。只移除查询副本中的精确拥有片段，真正的额外局部/祖先规则继续保留保护；Navigation 外观也参与状态查询。
+- `ApplyFlatButtonTheme` 的首次异步应用与 pending 过滤都必须比较剔除已拥有几何片段后的配色 QSS。登记后再 `NormalizeToolbarRow` 会追加尺寸规则，若比较整份样式，会误以为业务换色而退出，造成多页按钮无底色、前景退回旧颜色。首次之外的数据色接管保护保持不变；独立纯图标动作需由页面明确传 Solid，Auto 仍允许标题栏和内嵌工具使用透明语义。
 - `GlobalTabIconContrastFilter` 对 `ksword_page_tabs_style` / `ksword_secondary_tabs` 登记的中性页签让出图标所有权；若登记较晚，只恢复过滤器本人写入的旧图标，先清缓存再还原。实心选中底用的 `OnAccentColor` 位图不能覆盖普通父子 Tab 的动态图标。
 
 ### 网络端口诊断

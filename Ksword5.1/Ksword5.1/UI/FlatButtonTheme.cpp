@@ -163,9 +163,10 @@ namespace
                 return false;
             }
             // 显式 API 尚未刷新时，旧的本地/父级 marker 不得把 Danger 降回 Neutral。
-            // 页面真的重写自身样式则继续重新发现，保留 A/B 切换的最新声明。
+            // 尺寸归一可能在排队期间追加几何片段，不应因此放弃显式页面声明。
             if (button->property("ksword_flat_button_pending").toBool()
-                && button->styleSheet() == button->property("ksword_flat_button_initial_style").toString())
+                && buttonColorOwnershipStyle(button)
+                    == button->property("ksword_flat_button_initial_color_style").toString())
             {
                 return false;
             }
@@ -312,12 +313,13 @@ void ks::ui::ApplyFlatButtonTheme(QAbstractButton* button, FlatButtonTone tone, 
     button->setProperty("ksword_flat_button_tone", static_cast<int>(tone));
     button->setProperty("ksword_flat_button_appearance", static_cast<int>(appearance));
     const QPointer<QAbstractButton> guardedButton(button);
-    const QString initialStyle = button->styleSheet(); // 显式调用允许接管调用时的样式。
+    // 比较的是配色所有权，不是整份 QSS；后续 ToolbarMetrics 追加的尺寸规则不撤销授权。
+    const QString initialColorStyle = buttonColorOwnershipStyle(button);
     button->setProperty("ksword_flat_button_pending", true);
-    button->setProperty("ksword_flat_button_initial_style", initialStyle);
+    button->setProperty("ksword_flat_button_initial_color_style", initialColorStyle);
     // ThemeBinding 探活时复制回调；首次许可必须跨闭包副本共享，不能只用 mutable bool。
     const auto applied = std::make_shared<bool>(false);
-    BindWidgetTheme(button, [guardedButton, tone, appearance, initialStyle, applied]()
+    BindWidgetTheme(button, [guardedButton, tone, appearance, initialColorStyle, applied]()
     {
         if (guardedButton.isNull())
         {
@@ -327,7 +329,7 @@ void ks::ui::ApplyFlatButtonTheme(QAbstractButton* button, FlatButtonTone tone, 
         // 页面后来改成未标记的数据色时，旧绑定不得重新追加共享规则夺回所有权。
         // 首次显式接管也要核对等待队列期间页面是否已经换过样式。
         if (!currentStyle.isEmpty() && !currentStyle.contains(QLatin1String(beginMarker))
-            && (*applied || currentStyle != initialStyle))
+            && (*applied || buttonColorOwnershipStyle(guardedButton.data()) != initialColorStyle))
         {
             guardedButton->setProperty("ksword_flat_button_pending", false);
             return;
@@ -344,7 +346,7 @@ void ks::ui::ApplyFlatButtonTheme(QAbstractButton* button, FlatButtonTone tone, 
         if (!guardedButton.isNull())
         {
             guardedButton->setProperty("ksword_flat_button_pending", false);
-            guardedButton->setProperty("ksword_flat_button_initial_style", QVariant());
+            guardedButton->setProperty("ksword_flat_button_initial_color_style", QVariant());
         }
     }, ThemePalettePolicy::PreserveLocal);
 }

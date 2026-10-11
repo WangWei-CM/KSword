@@ -61,12 +61,12 @@ void ScannerDock::buildAnalysisUi()
     m_analysisPreviousButton->setIcon(style()->standardIcon(QStyle::SP_ArrowLeft));
     m_analysisNextButton->setIcon(style()->standardIcon(QStyle::SP_ArrowRight));
     KswordTheme::ApplyCompactIconButtonMetrics(m_analysisPreviousButton);
-    // 分页是图标工具，明确保留透明常态和主题交互态，不改变当前页或尺寸。
+    // 前后范围是两个独立按钮，使用同排动作的中性实底，不改动页序和命中区域。
     ks::ui::ApplyFlatButtonTheme(m_analysisPreviousButton,
-        ks::ui::FlatButtonTone::Neutral, ks::ui::FlatButtonAppearance::Flat);
+        ks::ui::FlatButtonTone::Neutral, ks::ui::FlatButtonAppearance::Solid);
     KswordTheme::ApplyCompactIconButtonMetrics(m_analysisNextButton);
     ks::ui::ApplyFlatButtonTheme(m_analysisNextButton,
-        ks::ui::FlatButtonTone::Neutral, ks::ui::FlatButtonAppearance::Flat);
+        ks::ui::FlatButtonTone::Neutral, ks::ui::FlatButtonAppearance::Solid);
     m_analysisFindButton = new QPushButton(m_analysisPage);
     sectionRow->addWidget(m_analysisSectionLabel);
     sectionRow->addWidget(m_analysisSectionCombo, 1);
