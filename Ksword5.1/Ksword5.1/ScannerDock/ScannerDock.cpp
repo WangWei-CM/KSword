@@ -178,6 +178,8 @@ void ScannerDock::buildUi()
     pathLayout->setSpacing(6);
     m_pathLabel = new QLabel(this);
     m_pathEdit = new QLineEdit(this);
+    // 文件目标在参数滚动区之外，必须独立登记输入底色，不能只统一行高。
+    ks::ui::StyleStandaloneInput(m_pathEdit);
     m_pathEdit->setObjectName(QStringLiteral("scanner_target_path"));
     m_pathEdit->setClearButtonEnabled(true);
     m_browseButton = new QPushButton(this);

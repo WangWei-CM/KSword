@@ -3,6 +3,7 @@
 #include "KernelDock.h"
 #include "../theme.h"
 #include "../UI/ParameterWorkspace.h"
+#include "../UI/PrimaryPageStyle.h"
 
 #include <QFormLayout>
 #include <QGroupBox>
@@ -246,12 +247,15 @@ void KernelIoctlDecoderTab::initializeUi()
     const auto createOutputEdit = [decoderGroup]() -> QLineEdit*
     {
         auto* outputEdit = new QLineEdit(decoderGroup);
+        ks::ui::StyleStandaloneInput(outputEdit);
         outputEdit->setReadOnly(true);
         outputEdit->setText(QStringLiteral("—"));
         return outputEdit;
     };
 
     m_codeEdit = new QLineEdit(decoderGroup);
+    // 解码输入与四个只读结果均为普通字段，位图的专业绘制与独立横向滚动保留。
+    ks::ui::StyleStandaloneInput(m_codeEdit);
     m_codeEdit->setClearButtonEnabled(true);
     m_codeEdit->setPlaceholderText(
         kernelText("kernel.ioctl_decoder.input.placeholder", QStringLiteral("例如：0x222004")));

@@ -848,7 +848,9 @@ void DriverDock::initializeObjectInfoTab()
     m_objectInfoLayout->addWidget(m_objectInfoSummaryEdit);
 
     m_objectDetailTabWidget = new QTabWidget(m_objectInfoPage);
-    ks::ui::StylePageTabs(m_objectDetailTabWidget);
+    // DriverObject 等五个结果页是对象查询的子层级，沿用共享子页导航和等边内容框。
+    ks::ui::StyleChildPageTabs(m_objectDetailTabWidget);
+    ks::ui::StylePageTabsContentFrame(m_objectDetailTabWidget);
     m_objectInfoLayout->addWidget(m_objectDetailTabWidget, 1);
 
     auto configureReadOnlyTable = [](QTableWidget* table)

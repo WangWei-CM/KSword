@@ -652,29 +652,11 @@ void HandleDock::initializeObjectHeaderTab()
         QSizePolicy::Preferred);
     m_handleDetailStatusLabel->setStyleSheet(
         QStringLiteral("color:%1;font-weight:600;").arg(KswordTheme::TextSecondaryHex()));
-    m_handleDetailTable = new QTreeWidget(m_objectHeaderPage);
-    // 单个对象头沿用树形属性证据展示，不新增表格快照/对比栏。
-    m_handleDetailTable->setColumnCount(2);
-    m_handleDetailTable->setHeaderLabels(QStringList{ QStringLiteral("字段"), QStringLiteral("值") });
-    m_handleDetailTable->setRootIsDecorated(false);
-    m_handleDetailTable->setItemsExpandable(false);
-    m_handleDetailTable->setAlternatingRowColors(true);
-    m_handleDetailTable->setSelectionMode(QAbstractItemView::NoSelection);
-    m_handleDetailTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
-    installReadOnlyTreeCopyMenu(m_handleDetailTable);
-    if (m_handleDetailTable->header() != nullptr)
-    {
-        m_handleDetailTable->header()->setStyleSheet(buildHeaderStyle());
-        m_handleDetailTable->header()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
-        m_handleDetailTable->header()->setSectionResizeMode(1, QHeaderView::Stretch);
-    }
-
+    // 直接保存查询结果的规范文档，卡片共享搜索/复制/导出，不再构造隐藏键值树。
     m_objectHeaderLayout->addWidget(m_handleDetailStatusLabel);
-    // 原树保留作为业务证据缓存，卡片只投影同一字段，不改变异步代次与查询逻辑。
-    auto* fields = new ks::ui::StructuredFieldView(m_objectHeaderPage);
-    m_handleDetailTable->setProperty("ksword_handle_detail_source", QVariant::fromValue(static_cast<QObject*>(fields)));
-    m_handleDetailTable->hide();
-    m_objectHeaderLayout->addWidget(ks::ui::CreateDetailFieldProjection(fields, m_objectHeaderPage), 1);
+    m_handleDetailFields = new ks::ui::StructuredFieldView(m_objectHeaderPage);
+    m_objectHeaderLayout->addWidget(
+        ks::ui::CreateDetailFieldProjection(m_handleDetailFields, m_objectHeaderPage), 1);
 
     m_tabWidget->addTab(m_objectHeaderPage, QIcon(":/Icon/process_critical.svg"), QStringLiteral("Object Header"));
     // Object Header 页只做只读证据展示，不承载关闭/修改类动作；页面职责挂到页签提示上，不再占用版面。
@@ -719,15 +701,15 @@ void HandleDock::initializeObjectTypeTab()
     ks::ui::NormalizeToolbarRow(m_objectTypeToolLayout);
 
     m_objectTypeTable = new QTreeWidget(m_objectTypePage);
-    m_objectTypeDetailTable = new QTreeWidget(m_objectTypePage);
+    m_objectTypeDetailFields = new ks::ui::StructuredFieldView(m_objectTypePage);
     // 类型清单和字段详情沿用原有树与右键复制，不新增表格操作栏。
     initializeObjectTypeTable();
     installReadOnlyTreeCopyMenu(m_objectTypeTable);
-    installReadOnlyTreeCopyMenu(m_objectTypeDetailTable);
 
     m_objectTypeLayout->addLayout(m_objectTypeToolLayout);
     m_objectTypeLayout->addWidget(m_objectTypeTable, 3);
-    m_objectTypeLayout->addWidget(m_objectTypeDetailTable, 2);
+    m_objectTypeLayout->addWidget(
+        ks::ui::CreateDetailFieldProjection(m_objectTypeDetailFields, m_objectTypePage), 2);
 
     m_tabWidget->addTab(m_objectTypePage, QIcon(":/Icon/process_tree.svg"), QStringLiteral("Object Type"));
 }
@@ -816,21 +798,7 @@ void HandleDock::initializeObjectTypeTable()
         typeHeader->setSectionResizeMode(static_cast<int>(ObjectTypeTableColumn::TypeName), QHeaderView::Stretch);
     }
 
-    // 对象类型详情区使用键值树，方便快速浏览全部字段。
-    m_objectTypeDetailTable->setColumnCount(2);
-    m_objectTypeDetailTable->setHeaderLabels(QStringList{ QStringLiteral("字段"), QStringLiteral("值") });
-    m_objectTypeDetailTable->setRootIsDecorated(false);
-    m_objectTypeDetailTable->setItemsExpandable(false);
-    m_objectTypeDetailTable->setAlternatingRowColors(true);
-    m_objectTypeDetailTable->setSelectionMode(QAbstractItemView::NoSelection);
-    m_objectTypeDetailTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
-    QHeaderView* detailHeader = m_objectTypeDetailTable->header();
-    if (detailHeader != nullptr)
-    {
-        detailHeader->setStyleSheet(buildHeaderStyle());
-        detailHeader->setSectionResizeMode(0, QHeaderView::ResizeToContents);
-        detailHeader->setSectionResizeMode(1, QHeaderView::Stretch);
-    }
+
 }
 
 void HandleDock::initializeConnections()
@@ -1295,7 +1263,6 @@ void HandleDock::applyObjectTypeRefreshResult(
 
     const QList<QAbstractItemView*> affectedViews{
         m_objectTypeTable,
-        m_objectTypeDetailTable,
         m_tableWidget
     };
     if (ks::ui::IsItemViewUiCommitBlockedByContextMenu(affectedViews))
@@ -1962,7 +1929,7 @@ void HandleDock::rebuildObjectTypeTable(const QString& filterKeyword)
     }
     else
     {
-        m_objectTypeDetailTable->clear();
+        m_objectTypeDetailFields->setDocument(ks::ui::FieldDocument{});
     }
 
     kLogEvent rebuildTypeEvent;

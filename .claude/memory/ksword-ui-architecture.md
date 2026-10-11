@@ -295,3 +295,11 @@ KSword 主程序位于 `Ksword5.1/Ksword5.1`（Qt 6.9.3 Widgets + Qt Advanced Do
 - 参数编辑器只在真实样式/palette变化时全文重高亮，重复finish不累加padding。浮动详情隐藏后不替换全文，显示入口先从规范源回填；相同文本不重建镜像文档。
 - 进程历史、CPU核心历史和磁盘ETW/速率采样不因隐藏停止；隐藏的图表向量转换、动画、线程排序和活动表UI提交延后Show。CPU主题/语言重绘不能重复追加历史；身份清理必须真正清空图形。逐核表复用item，只更新真实变化的文本。
 - BCD、磁盘编辑外部参数、权限访问评估/身份启动、HWID和电源字段已补共享输入接入；专业HEX内部保留。实际范围与源码触发链见 `docs/UI适配与性能补漏-20261011.md`，不得把编译通过当逐页视觉/性能验收。
+
+## 全导航逐页补漏（2026-10-11）
+
+- 从 MainWindow 17 个主入口和 3 个辅助 Dock 展开实际 Tab、惰性子页及动态工厂；逐页矩阵见 `docs/UI逐页复查-20261011.md` 及其三份分区清单。不得只统计调用样式 helper 的父入口，或把不可达旧页面、动态实例数当成已运行页数。
+- ParameterWorkspace 容器 QSS 也会阻断 FlatButtonFilter 的祖先样式判定。记录 `ksword_parameter_surface_style_block` 完整精确块，仅从颜色所有权判断中排除该块和已登记几何；额外业务规则仍保留。固定底栏的未绑定普通直接动作明确 Solid，已有 Danger/Accent/专用状态 binding 不接管。
+- 安装 Segmented 后禁止业务刷新再写旧 FlatButtonStyle；只更新共享选择态。Scanner/Minidump 的动态宽表应在创建工厂一次安装，覆盖全部生成页并保留右键自定义空选态。
+- 页内详情同样必须淘汰隐藏旧树：Handle Object Header/Type 直接提交唯一 FieldDocument，不再先 clear/new QTreeWidgetItem 再生成同字段文档。持续事件表模型兼任归档/保留职责，不能用隐藏提前 return 改变采集语义。
+- WMI/ETW/进程定向折叠主题在工厂分别绑定段、内容、标题，禁止 StyleChange 再 findChildren 扫全页。ProgressDock 同一进度更新不重写相同卡片 QSS。LogDock 隐藏周期刷新不更新 revision，Show 经过原菜单屏障同步最新管理器历史；全量导出不受显示条数限制。

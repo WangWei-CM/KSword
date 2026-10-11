@@ -1865,17 +1865,6 @@ namespace
         return std::find(columnGroup.begin(), columnGroup.end(), columnIndex) != columnGroup.end();
     }
 
-    // buildColumnPresetButtonStyle 作用：
-    // - 输入 selected：按钮是否对应当前列组；
-    // - 处理：选中时使用主题主色背景，未选中时使用中性纯色背景和主题文字；
-    // - 返回：QPushButton stylesheet 文本。
-    QString buildColumnPresetButtonStyle(const bool selected)
-    {
-        // A/B 仍按业务预设决定强调状态，手工布局回到中性色，保留24px宽度。
-        return ks::ui::BuildFlatButtonStyle(selected ? ks::ui::FlatButtonTone::Accent : ks::ui::FlatButtonTone::Neutral)
-            + QStringLiteral("QPushButton{min-width:24px;max-width:24px;padding:3px 0;border-radius:0;font-weight:700;}");
-    }
-
     // updateColumnPresetButtons 作用：
     // - 输入 table：目标表格，buttonA/buttonB：列组按钮；
     // - 处理：按表格属性刷新按钮着色，自定义列布局时两者均不着色；
@@ -1898,8 +1887,6 @@ namespace
         ks::ui::SetSegmentedButtonSelected(buttonB, buttonBSelected);
         buttonA->setProperty(kColumnPresetSelectedProperty, buttonASelected);
         buttonB->setProperty(kColumnPresetSelectedProperty, buttonBSelected);
-        buttonA->setStyleSheet(buildColumnPresetButtonStyle(buttonASelected));
-        buttonB->setStyleSheet(buildColumnPresetButtonStyle(buttonBSelected));
     }
 
     // applyColumnPresetToTable 作用：
@@ -1962,7 +1949,8 @@ namespace
         button->setCursor(Qt::PointingHandCursor);
         // 该动态属性标识由 WindowDock 主题刷新统一管理的 A/B 列预设按钮。
         button->setProperty(kColumnPresetSelectedProperty, false);
-        button->setStyleSheet(buildColumnPresetButtonStyle(false));
+        // 这里只保留列组按钮的紧凑宽度；选中底面和过渡由随后安装的分段控件绘制。
+        button->setFixedWidth(24);
         return button;
     }
 
@@ -3011,14 +2999,16 @@ void WindowDock::refreshThemeVisuals()
         {
             continue;
         }
-        button->setStyleSheet(
-            buildColumnPresetButtonStyle(
-                button->property(kColumnPresetSelectedProperty).toBool()));
+        ks::ui::SetSegmentedButtonSelected(button,
+            button->property(kColumnPresetSelectedProperty).toBool());
     }
 
     if (m_queryWindowDetailButton != nullptr)
     {
-        m_queryWindowDetailButton->setStyleSheet(ks::ui::BuildFlatButtonStyle() + QStringLiteral("QPushButton,QToolButton{border-radius:3px;padding:4px 10px;font-weight:600;}"));
+        // 独立查询动作保留统一底面和几何，不在换肤时恢复旧圆角及留白。
+        ks::ui::ApplyFlatButtonTheme(m_queryWindowDetailButton, ks::ui::FlatButtonTone::Neutral,
+            ks::ui::FlatButtonAppearance::Solid);
+        ks::ui::NormalizeToolbarControl(m_queryWindowDetailButton);
     }
 }
 

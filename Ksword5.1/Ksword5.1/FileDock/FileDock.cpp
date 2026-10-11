@@ -6,6 +6,7 @@
 #include "../UI/VisibleTableWidget.h"
 #include "../UI/PageControlStyle.h"
 #include "../UI/PrimaryPageStyle.h"
+#include "../UI/ParameterWorkspace.h"
 #include "../UI/ToolbarMetrics.h"
 #include "../UI/UI_All.h"
 #include "FilePropertyPeAnalyzer.h"
@@ -9663,6 +9664,9 @@ namespace
                     }
                     updatePendingSaveUi();
                 });
+            // 此页是明确的编辑参数区，共享输入负责网格字段和长选项，保留原暂存事务。
+            ks::ui::StyleParameterFields(page);
+            ks::ui::StyleWorkspaceTextViews(page);
             return page;
         }
 
@@ -9781,6 +9785,9 @@ namespace
                     status->setText(QStringLiteral("● Shell 属性已暂存。"));
                     updatePendingSaveUi();
                 });
+            // 此页是明确的编辑参数区，共享输入负责网格字段和长选项，保留原暂存事务。
+            ks::ui::StyleParameterFields(page);
+            ks::ui::StyleWorkspaceTextViews(page);
             return page;
         }
 
@@ -9921,6 +9928,9 @@ namespace
                 });
             QMetaObject::invokeMethod(page, [this, table]() { refreshMetadataStreamTable(table); },
                 Qt::QueuedConnection);
+            // 此页是明确的编辑参数区，共享输入负责网格字段和长选项，保留原暂存事务。
+            ks::ui::StyleParameterFields(page);
+            ks::ui::StyleWorkspaceTextViews(page);
             return page;
         }
 
@@ -10036,6 +10046,9 @@ namespace
                 });
             QMetaObject::invokeMethod(page, [this, table]() { refreshMetadataEaTable(table); },
                 Qt::QueuedConnection);
+            // 此页是明确的编辑参数区，共享输入负责网格字段和长选项，保留原暂存事务。
+            ks::ui::StyleParameterFields(page);
+            ks::ui::StyleWorkspaceTextViews(page);
             return page;
         }
 
@@ -10178,6 +10191,9 @@ namespace
                     status->setText(QStringLiteral("● 安全描述符已暂存。"));
                     updatePendingSaveUi();
                 });
+            // 此页是明确的编辑参数区，共享输入负责网格字段和长选项，保留原暂存事务。
+            ks::ui::StyleParameterFields(page);
+            ks::ui::StyleWorkspaceTextViews(page);
             return page;
         }
 
@@ -10361,6 +10377,9 @@ namespace
                     }
                     updatePendingSaveUi();
                 });
+            // 此页是明确的编辑参数区，共享输入负责网格字段和长选项，保留原暂存事务。
+            ks::ui::StyleParameterFields(page);
+            ks::ui::StyleWorkspaceTextViews(page);
             return page;
         }
 
@@ -10469,6 +10488,9 @@ namespace
             }
             layout->addWidget(attributeGroup);
             layout->addStretch(1);
+            // 此页是明确的编辑参数区，共享输入负责网格字段和长选项，保留原暂存事务。
+            ks::ui::StyleParameterFields(page);
+            ks::ui::StyleWorkspaceTextViews(page);
             return page;
         }
 
@@ -10849,6 +10871,9 @@ namespace
                 });
 
             QMetaObject::invokeMethod(page, refreshSecurityUi, Qt::QueuedConnection);
+            // 此页是明确的编辑参数区，共享输入负责网格字段和长选项，保留原暂存事务。
+            ks::ui::StyleParameterFields(page);
+            ks::ui::StyleWorkspaceTextViews(page);
             return page;
         }
 
@@ -12067,8 +12092,10 @@ namespace
             layout->addLayout(searchBar);
             QHBoxLayout* options = new QHBoxLayout();
             QComboBox* encoding = new QComboBox(page);
+            ks::ui::StylePrimaryCombo(encoding);
             encoding->addItems({QStringLiteral("ASCII"), QStringLiteral("UTF-16LE"), QStringLiteral("ASCII + UTF-16LE")});
             QSpinBox* minimumLength = new QSpinBox(page);
+            ks::ui::StyleStandaloneInput(minimumLength);
             minimumLength->setRange(4, 1024);
             minimumLength->setValue(4);
             options->addWidget(encoding);
@@ -12297,10 +12324,12 @@ namespace
             QVBoxLayout* layout = new QVBoxLayout(page);
             QHBoxLayout* jumpBar = new QHBoxLayout();
             QLineEdit* offsetEdit = new QLineEdit(page);
+            ks::ui::StyleStandaloneInput(offsetEdit);
             offsetEdit->setPlaceholderText(ks::i18n::sourceText(QStringLiteral("文件偏移：0x 十六进制或十进制")));
             offsetEdit->setClearButtonEnabled(true);
             QPushButton* jump = new QPushButton(ks::i18n::sourceText(QStringLiteral("跳转到文件偏移")), page);
             QComboBox* windowSize = new QComboBox(page);
+            ks::ui::StylePrimaryCombo(windowSize);
             windowSize->addItem(QStringLiteral("64 KiB"), 64 * 1024);
             windowSize->addItem(QStringLiteral("256 KiB"), 256 * 1024);
             windowSize->addItem(QStringLiteral("1 MiB"), 1024 * 1024);

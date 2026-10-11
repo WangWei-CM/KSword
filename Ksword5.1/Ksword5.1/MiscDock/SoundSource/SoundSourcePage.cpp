@@ -777,16 +777,11 @@ namespace ks::misc
             QStringLiteral("color:%1;")
             .arg(KswordTheme::TextSecondaryColorHex()));
 
-        // 纯色按钮保留列组 checked 态；刷新按钮仍受原采样 enabled 状态控制。
-        const QString presetButtonStyle = ks::ui::BuildFlatButtonStyle(ks::ui::FlatButtonTone::Neutral)
-            + QStringLiteral("QToolButton{border-radius:4px;}");
+        // 列组底面和动画由 SegmentedControl 唯一绘制；主题刷新只处理独立刷新动作。
         m_refreshButton->setStyleSheet(
             ks::ui::BuildFlatButtonStyle(ks::ui::FlatButtonTone::Neutral,
                 ks::ui::FlatButtonAppearance::Solid)
             + QStringLiteral("QToolButton{border-radius:5px;}"));
-        m_overviewPresetButton->setStyleSheet(presetButtonStyle);
-        m_audioPresetButton->setStyleSheet(presetButtonStyle);
-        m_kernelPresetButton->setStyleSheet(presetButtonStyle);
     }
 
     QString SoundSourcePage::recordKey(

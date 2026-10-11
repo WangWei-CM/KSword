@@ -188,6 +188,8 @@ namespace
         std::function<QWidget*(QWidget*)> factory)
     {
         auto* holder = new QWidget(tabs);
+        // 惰性壳不再叠加真实页边距，由外层导航框架管理同一份等边留白。
+        holder->setProperty("ksword_page_frame_host", true);
         holder->setObjectName(QString::fromLatin1(key));
         auto* layout = new QVBoxLayout(holder);
         layout->setContentsMargins(0, 0, 0, 0);

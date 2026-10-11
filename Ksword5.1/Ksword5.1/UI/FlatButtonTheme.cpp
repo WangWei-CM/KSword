@@ -38,6 +38,12 @@ namespace
         {
             style.remove(primaryBlock);
         }
+        // 参数框架只绘容器底面/底栏分界，不拥有按钮配色；不能把该精确块当业务覆盖。
+        const QString parameterBlock = owner->property("ksword_parameter_surface_style_block").toString();
+        if (!parameterBlock.isEmpty())
+        {
+            style.remove(parameterBlock);
+        }
         return style.trimmed();
     }
 
@@ -338,8 +344,9 @@ void ks::ui::ApplyFlatButtonTheme(QAbstractButton* button, FlatButtonTone tone, 
         const QString currentStyle = guardedButton->styleSheet();
         // 页面后来改成未标记的数据色时，旧绑定不得重新追加共享规则夺回所有权。
         // 首次显式接管也要核对等待队列期间页面是否已经换过样式。
-        if (!currentStyle.isEmpty() && !currentStyle.contains(QLatin1String(beginMarker))
-            && (*applied || buttonColorOwnershipStyle(guardedButton.data()) != initialColorStyle))
+        const QString currentColorStyle = buttonColorOwnershipStyle(guardedButton.data());
+        if (!currentColorStyle.isEmpty() && !currentStyle.contains(QLatin1String(beginMarker))
+            && (*applied || currentColorStyle != initialColorStyle))
         {
             guardedButton->setProperty("ksword_flat_button_pending", false);
             return;

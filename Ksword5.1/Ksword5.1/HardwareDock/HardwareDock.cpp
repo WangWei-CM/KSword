@@ -5030,6 +5030,8 @@ void HardwareDock::beginUtilizationWindowPick()
     }
     QDialog* const prompt = new QDialog(m_utilizationFloatingWindow.data(),
         Qt::Tool | Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint);
+    // 鼠标拾取提示不是属性窗，保持原提示/取消结构及其相对浮窗位置。
+    prompt->setProperty("ksword_detail_keep_layout", true);
     prompt->setAttribute(Qt::WA_DeleteOnClose);
     QVBoxLayout* const layout = new QVBoxLayout(prompt);
     layout->addWidget(new QLabel(ks::i18n::contextText(
@@ -5038,6 +5040,7 @@ void HardwareDock::beginUtilizationWindowPick()
     QPushButton* const cancel = new QPushButton(ks::i18n::contextText(
         QStringLiteral("hardware.utilization.floating.pick_cancel"),
         QStringLiteral("取消")), prompt);
+    ks::ui::NormalizeToolbarControl(cancel);
     layout->addWidget(cancel);
     connect(cancel, &QPushButton::clicked, prompt, &QDialog::reject);
     connect(prompt, &QDialog::finished, this, [this]()

@@ -609,17 +609,18 @@ namespace
             "  background-color:%1;"
             "}"
             "QHeaderView::section{"
-            "  background:transparent; /* %2 */"
-            "  color:%5;"
-            "  border:1px solid %4;"
-            "  padding:3px 6px;"
-            "  font-weight:600;"
+            "  background:%5;"
+            "  color:%3;"
+            "  border:0;border-bottom:1px solid %4;"
+            "  padding:4px 8px;"
+            "  font-weight:500;"
             "}")
             .arg(tableBackground)
             .arg(alternateBackground)
             .arg(KswordTheme::TextPrimaryHex())
             .arg(KswordTheme::BorderHex())
-            .arg(KswordTheme::PrimaryBlueHex);
+            // 规则编辑器的表头始终是稳定输入层；行底仍保留既有背景穿透选择。
+            .arg(KswordTheme::SurfaceAltHex());
     }
 
     QString callbackRuleContextMenuStyle()

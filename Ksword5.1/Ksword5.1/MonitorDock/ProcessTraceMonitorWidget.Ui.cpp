@@ -96,7 +96,15 @@ QWidget* ProcessTraceMonitorWidget::createConfigurationCollapseSection(
     // - Maximum 垂直策略确保配置段按内容高度参与布局，不挤占事件表弹性区域。
     QWidget* sectionWidget = new QWidget(parentWidget);
     sectionWidget->setProperty("kswordCollapsePanel", QStringLiteral("true"));
-    sectionWidget->setStyleSheet(collapsePanelStyle(sectionWidget));
+    // 仅此明确折叠控件持有主题绑定，样式未变化时不重复 polish 子树。
+    ks::ui::BindWidgetTheme(sectionWidget, [sectionWidget]()
+    {
+        const QString style = collapsePanelStyle(sectionWidget);
+        if (sectionWidget->styleSheet() != style)
+        {
+            sectionWidget->setStyleSheet(style);
+        }
+    });
     sectionWidget->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Maximum);
 
     QVBoxLayout* sectionLayout = new QVBoxLayout(sectionWidget);
@@ -112,7 +120,15 @@ QWidget* ProcessTraceMonitorWidget::createConfigurationCollapseSection(
     headerButton->setCheckable(true);
     headerButton->setChecked(expanded);
     headerButton->setArrowType(expanded ? Qt::DownArrow : Qt::RightArrow);
-    headerButton->setStyleSheet(collapseHeaderButtonStyle());
+    // 仅此明确折叠控件持有主题绑定，样式未变化时不重复 polish 子树。
+    ks::ui::BindWidgetTheme(headerButton, [headerButton]()
+    {
+        const QString style = collapseHeaderButtonStyle();
+        if (headerButton->styleSheet() != style)
+        {
+            headerButton->setStyleSheet(style);
+        }
+    });
     headerButton->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
 
     // 内容宿主：
@@ -120,7 +136,15 @@ QWidget* ProcessTraceMonitorWidget::createConfigurationCollapseSection(
     // - 内容页本身由 initializeUi 构建并交给宿主布局托管。
     QWidget* contentHostWidget = new QWidget(sectionWidget);
     contentHostWidget->setProperty("kswordCollapseContent", QStringLiteral("true"));
-    contentHostWidget->setStyleSheet(collapsePanelStyle(contentHostWidget));
+    // 仅此明确折叠控件持有主题绑定，样式未变化时不重复 polish 子树。
+    ks::ui::BindWidgetTheme(contentHostWidget, [contentHostWidget]()
+    {
+        const QString style = collapsePanelStyle(contentHostWidget);
+        if (contentHostWidget->styleSheet() != style)
+        {
+            contentHostWidget->setStyleSheet(style);
+        }
+    });
     contentHostWidget->setVisible(expanded);
     contentHostWidget->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Maximum);
 

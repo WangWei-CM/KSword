@@ -300,20 +300,13 @@ namespace ks::misc
         }
         const QSignalBlocker blockerA(m_columnPresetAButton);
         const QSignalBlocker blockerB(m_columnPresetBButton);
-        m_columnPresetAButton->setStyleSheet(buildPresetButtonStyle(true));
-        m_columnPresetBButton->setStyleSheet(buildPresetButtonStyle(false));
         m_columnPresetAButton->setChecked(m_columnLayout == ClipboardGuardColumnLayout::PresetA);
         m_columnPresetBButton->setChecked(m_columnLayout == ClipboardGuardColumnLayout::PresetB);
-    }
-
-    QString ClipboardGuardPage::buildPresetButtonStyle(const bool leftButton)
-    {
-        const QString outerRadius = leftButton
-            ? QStringLiteral("border-top-left-radius:3px;border-bottom-left-radius:3px;")
-            : QStringLiteral("border-top-right-radius:3px;border-bottom-right-radius:3px;border-left:0px;");
-        // A/B 保留紧贴外侧圆角；尺寸由工具条统一，checked 强调由公共规则绘制。
-        return ks::ui::BuildFlatButtonStyle(ks::ui::FlatButtonTone::Neutral)
-            + QStringLiteral("QPushButton{font-weight:700;border-radius:0px;%1}").arg(outerRadius);
+        // 信号屏蔽期间显式同步选中状态，绘制仍只由共享分段控件拥有。
+        ks::ui::SetSegmentedButtonSelected(m_columnPresetAButton,
+            m_columnLayout == ClipboardGuardColumnLayout::PresetA);
+        ks::ui::SetSegmentedButtonSelected(m_columnPresetBButton,
+            m_columnLayout == ClipboardGuardColumnLayout::PresetB);
     }
 
     QTableWidgetItem* ClipboardGuardPage::createReadOnlyItem(const QString& textValue)

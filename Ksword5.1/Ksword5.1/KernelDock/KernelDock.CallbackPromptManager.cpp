@@ -328,6 +328,8 @@ void CallbackPromptManager::stop()
 void CallbackPromptManager::initializePopupUi()
 {
     auto* popupDialog = new DecisionPopupDialog(this);
+    // 带超时且不抢焦点的决策通知保留原紧凑位置，不能被通用详情框架增添摘要和导航。
+    popupDialog->setProperty("ksword_detail_keep_layout", true);
     popupDialog->setObjectName(QStringLiteral("KswordCallbackDecisionPopup"));
     popupDialog->setWindowFlags(
         Qt::Tool |

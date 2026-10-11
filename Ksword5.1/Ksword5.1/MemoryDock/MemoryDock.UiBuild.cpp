@@ -352,7 +352,7 @@ void MemoryDock::initializeTabs()
     initializeTamperDetectionTab();
     initializeDdmaTab();
 
-    // 12 个页签的图标集中在这里设置：分散到各构建函数里会漏，也不好统一调整语义。
+    // 原有 10 个页签的图标集中在这里设置：分散到各构建函数里会漏，也不好统一调整语义。
     // 下标顺序与上面的构建顺序严格一一对应。
     const char* const tabIconAliases[] = {
         ":/Icon/process_list.svg",        // 进程与模块
@@ -363,6 +363,7 @@ void MemoryDock::initializeTabs()
         ":/Icon/process_tree.svg",        // PTE / VA 翻译
         ":/Icon/process_performance.svg", // 进程内存证据
         ":/Icon/disk_analyze.svg",        // 系统内存审计
+        ":/Icon/process_critical.svg",    // 篡改检测
         ":/Icon/disk_storage.svg"         // DDMA
     };
     const int iconCount = static_cast<int>(sizeof(tabIconAliases) / sizeof(tabIconAliases[0]));

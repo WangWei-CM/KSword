@@ -12,6 +12,21 @@
 #include <QVBoxLayout>   // 纵向布局
 #include <QSet>          // 当前快照保留的卡片 PID。
 
+namespace
+{
+    // 进度更新只更改数据；主题字符串相同时不触发整个卡片的样式重计算。
+    void setStyleIfChanged(QWidget* widget, const QString& style)
+    {
+        if (widget->styleSheet() != style) widget->setStyleSheet(style);
+    }
+
+    QString taskCardStyle(const QString& background)
+    {
+        return QStringLiteral("QFrame#task_card{border:none;border-radius:8px;background:%1;}")
+            .arg(background);
+    }
+}
+
 ProgressDockWidget::ProgressDockWidget(QWidget* parent)
     : QWidget(parent)
 {
@@ -83,7 +98,7 @@ void ProgressDockWidget::applyTransparentBackgroundPolicy()
     // - QScrollArea；
     // - viewport；
     // - 承载卡片的滚动内容层。
-    setStyleSheet(
+    setStyleIfChanged(this,
         QStringLiteral(
         "#ksProgressDockRoot,"
         "#ksProgressDockScrollArea,"
@@ -120,7 +135,7 @@ void ProgressDockWidget::refreshThemeVisuals()
     applyTransparentBackgroundPolicy();
     if (m_emptyTipLabel != nullptr)
     {
-        m_emptyTipLabel->setStyleSheet(
+        setStyleIfChanged(m_emptyTipLabel,
             QStringLiteral("color:%1; font-size:13px; background:transparent;")
             .arg(buildHighContrastTextHex()));
     }
@@ -227,14 +242,7 @@ QWidget* ProgressDockWidget::createTaskCardWidget(const kProgressTask& taskItem)
     cardFrame->setObjectName(QStringLiteral("task_card"));
     cardFrame->setProperty("task_pid", taskItem.pid);
     cardFrame->setFrameShape(QFrame::NoFrame);
-    cardFrame->setStyleSheet(
-        QStringLiteral(
-        "QFrame {"
-        "  border:none;"
-        "  border-radius:4px;"
-        "  background:%1;"
-        "}")
-        .arg(buildCardBackgroundHex()));
+    cardFrame->setStyleSheet(taskCardStyle(buildCardBackgroundHex()));
 
     // 卡片内部布局：任务标题、步骤、进度条依次排列。
     QVBoxLayout* cardLayout = new QVBoxLayout(cardFrame);
@@ -298,17 +306,16 @@ void ProgressDockWidget::updateTaskCardWidget(QWidget* const card, const kProgre
     title->setText(ks::i18n::contextText(QStringLiteral("progress.task.title"), QStringLiteral("%1  (PID:%2)"))
         .arg(ks::i18n::sourceText(QString::fromUtf8(taskItem.taskName.c_str())))
         .arg(taskItem.pid) + QStringLiteral("  ·  ") + stateText);
-    title->setStyleSheet(QStringLiteral("font-weight:600; color:%1; background:transparent;")
+    setStyleIfChanged(title, QStringLiteral("font-weight:600; color:%1; background:transparent;")
         .arg(KswordTheme::ThemeColorName(KswordTheme::EnsureTextContrast(
             ks::ui::TaskStateColor(taskItem.state), KswordTheme::SurfaceColor()))));
     step->setText(ks::i18n::contextText(QStringLiteral("progress.task.step"), QStringLiteral("步骤：%1"))
         .arg(ks::i18n::sourceText(QString::fromUtf8(taskItem.stepName.c_str()))));
-    step->setStyleSheet(QStringLiteral("color:%1; background:transparent;").arg(buildHighContrastTextHex()));
+    setStyleIfChanged(step, QStringLiteral("color:%1; background:transparent;").arg(buildHighContrastTextHex()));
     progress->setValue(static_cast<int>(taskItem.progress * 100.0f + 0.5f));
     progress->setVisible(!taskItem.hideProgressBarTemporarily && !IsProgressTerminal(taskItem.state));
-    progress->setStyleSheet(buildProgressBarStyleSheet());
-    card->setStyleSheet(QStringLiteral("QFrame {border:none;border-radius:4px;background:%1;}")
-        .arg(buildCardBackgroundHex()));
+    setStyleIfChanged(progress, buildProgressBarStyleSheet());
+    setStyleIfChanged(card, taskCardStyle(buildCardBackgroundHex()));
 }
 
 QString ProgressDockWidget::buildHighContrastTextHex() const

@@ -19,6 +19,7 @@
 #include "../UI/DetailDialogChrome.h"
 #include "../UI/DetailPresentation.h"
 #include "../UI/PrimaryPageStyle.h"
+#include "../UI/ParameterWorkspace.h"
 #include "../PluginHost.h"
 
 #include <QTimer>
@@ -5165,6 +5166,8 @@ void ProcessDetailWindow::initializeActionTab()
             ks::ui::NormalizeToolbarControl(buttonItem);
         }
     }
+    // 明确操作页的网格参数复用共享字段主题，不让组合框或路径输入继承透明底。
+    ks::ui::StyleParameterFields(actionContent);
 }
 
 void ProcessDetailWindow::initializeModuleTab()
@@ -5757,6 +5760,8 @@ void ProcessDetailWindow::initializeTokenSwitchTab()
     const QString comboStyle = KswordTheme::ThemedComboBoxStyle();
     m_tokenRawInfoClassCombo->setStyleSheet(comboStyle);
     m_tokenRawInputModeCombo->setStyleSheet(comboStyle);
+    // 原始令牌参数沿用现有解析与权限校验，只统一输入和长选项的呈现。
+    ks::ui::StyleParameterFields(tokenSwitchContent);
 }
 
 void ProcessDetailWindow::initializePebTab()

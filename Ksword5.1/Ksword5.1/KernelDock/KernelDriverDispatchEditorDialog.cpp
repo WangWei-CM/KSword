@@ -123,10 +123,12 @@ void KernelDriverDispatchEditorDialog::initializeUi()
     m_table->horizontalHeader()->setStretchLastSection(true);
     m_table->setStyleSheet(
         QStringLiteral(
-            "QTableWidget{background:transparent;color:%1;}"
-            "QHeaderView::section{color:%2;background:transparent;border:1px solid %3;font-weight:600;}")
+            "QTableWidget{color:%1;}"
+            "QHeaderView::section{color:%1;background:%2;border:0;"
+            "border-bottom:1px solid %3;font-weight:500;padding:4px 8px;}")
             .arg(KswordTheme::TextPrimaryHex())
-            .arg(KswordTheme::PrimaryBlueHex)
+            // 编辑器保留事务表语义，表头遵循统一中性层次而不再强制透明蓝字。
+            .arg(KswordTheme::SurfaceAltHex())
             .arg(KswordTheme::BorderHex()));
     m_table->setColumnWidth(ColumnMajor, 82);
     m_table->setColumnWidth(ColumnSymbol, 230);

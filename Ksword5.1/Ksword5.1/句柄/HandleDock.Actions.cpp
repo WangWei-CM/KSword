@@ -1,4 +1,5 @@
 #include "HandleDock.h"
+#include "../UI/StructuredFieldView.h"
 
 // ============================================================
 // HandleDock.Actions.cpp
@@ -31,9 +32,9 @@ namespace
 
 void HandleDock::showObjectTypeDetailByCurrentRow()
 {
-    m_objectTypeDetailTable->clear();
     if (m_objectTypeTable == nullptr || m_objectTypeTable->currentItem() == nullptr)
     {
+        m_objectTypeDetailFields->setDocument(ks::ui::FieldDocument{});
         return;
     }
 
@@ -41,21 +42,23 @@ void HandleDock::showObjectTypeDetailByCurrentRow()
         m_objectTypeTable->currentItem()->data(static_cast<int>(ObjectTypeTableColumn::TypeIndex), Qt::UserRole);
     if (!rowIndexValue.isValid())
     {
+        m_objectTypeDetailFields->setDocument(ks::ui::FieldDocument{});
         return;
     }
     const std::size_t rowIndex = static_cast<std::size_t>(rowIndexValue.toULongLong());
     if (rowIndex >= m_objectTypeRows.size())
     {
+        m_objectTypeDetailFields->setDocument(ks::ui::FieldDocument{});
         return;
     }
 
     const HandleObjectTypeEntry& row = m_objectTypeRows[rowIndex];
-    auto addDetailRow = [this](const QString& keyText, const QString& valueText)
+    // 类型列表保持原模型，选中对象的字段直接投影为统一卡片。
+    ks::ui::FieldDocument document;
+    document.section(QStringLiteral("Object Type"));
+    auto addDetailRow = [&document](const QString& keyText, const QString& valueText)
         {
-            auto* detailItem = new QTreeWidgetItem();
-            detailItem->setText(0, keyText);
-            detailItem->setText(1, valueText);
-            m_objectTypeDetailTable->addTopLevelItem(detailItem);
+            document.field(keyText, valueText);
         };
 
     addDetailRow(QStringLiteral("类型编号"), QString::number(row.typeIndex));
@@ -68,6 +71,7 @@ void HandleDock::showObjectTypeDetailByCurrentRow()
     addDetailRow(QStringLiteral("池类型"), QString::number(row.poolType));
     addDetailRow(QStringLiteral("默认分页池配额"), QString::number(row.defaultPagedPoolCharge));
     addDetailRow(QStringLiteral("默认非分页池配额"), QString::number(row.defaultNonPagedPoolCharge));
+    m_objectTypeDetailFields->setDocument(document);
 }
 
 HandleDock::HandleRow* HandleDock::selectedHandleRow()

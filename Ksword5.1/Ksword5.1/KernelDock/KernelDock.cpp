@@ -425,6 +425,9 @@ void KernelDock::initializeUi()
     m_timerDpcPage = new QWidget(m_tabWidget);
     m_crossViewPage = new QWidget(m_tabWidget);
     m_ipcPage = new QWidget(m_tabWidget);
+    // 两页仅为惰性业务组件的转交壳；让共享外框归一化真实内容，避免多算一层留白。
+    m_crossViewPage->setProperty("ksword_page_frame_host", true);
+    m_ipcPage->setProperty("ksword_page_frame_host", true);
 
     // 内核审计与回调聚合页：
     // - 仅改变四个现有业务页面的 UI 层级；

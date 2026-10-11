@@ -52,29 +52,6 @@
 
 namespace
 {
-    // buildOpaqueDialogStyle 作用：覆盖父级透明样式，保证弹窗在浅色主题下可读。
-    // 参数 dialogObjectName：QDialog objectName。
-    // 返回：QSS 文本。
-    QString buildOpaqueDialogStyle(const QString& dialogObjectName)
-    {
-        return QStringLiteral(
-            "QDialog#%1{"
-            "  background-color:palette(window) !important;"
-            "  color:palette(text) !important;"
-            "}"
-            "QDialog#%1 QTreeWidget,"
-            "QDialog#%1 QAbstractScrollArea,"
-            "QDialog#%1 QAbstractScrollArea::viewport{"
-            "  background-color:palette(base) !important;"
-            "  color:palette(text) !important;"
-            "}"
-            "QDialog#%1 QHeaderView::section{"
-            "  background:transparent !important;"
-            "  background-color:transparent !important;"
-            "  color:palette(text) !important;"
-            "}")
-            .arg(dialogObjectName);
-    }
 
     // formatHex 作用：把整数格式化为 0x 前缀十六进制文本。
     // 参数 value：数值。
@@ -293,7 +270,7 @@ void FileMappedProcessWindow::initializeUi()
     setObjectName(QStringLiteral("FileMappedProcessWindowRoot"));
     setAttribute(Qt::WA_StyledBackground, true);
     setAutoFillBackground(true);
-    setStyleSheet(buildOpaqueDialogStyle(objectName()));
+    // 根表面与表头仅由下方共享详情主题拥有，避免旧透明规则覆盖统一分层。
     setWindowTitle(QStringLiteral("文件映射进程(R0 Section/ControlArea)"));
     ks::ui::applyResponsiveWindowGeometry(
         this,
@@ -313,13 +290,15 @@ void FileMappedProcessWindow::initializeUi()
     m_refreshButton->setIcon(QIcon(":/Icon/handle_refresh.svg"));
     KswordTheme::ApplyCompactIconButtonMetrics(m_refreshButton);
     m_refreshButton->setToolTip(QStringLiteral("刷新 R0 映射进程扫描"));
-    m_refreshButton->setStyleSheet(ks::ui::BuildFlatButtonStyle() + QStringLiteral("QPushButton,QToolButton{border-radius:3px;padding:4px 10px;font-weight:600;}"));
+    ks::ui::ApplyFlatButtonTheme(m_refreshButton, ks::ui::FlatButtonTone::Neutral,
+        ks::ui::FlatButtonAppearance::Solid);
 
     m_openProcessButton = new QPushButton(this);
     m_openProcessButton->setIcon(QIcon(":/Icon/process_details.svg"));
     KswordTheme::ApplyCompactIconButtonMetrics(m_openProcessButton);
     m_openProcessButton->setToolTip(QStringLiteral("转到当前行进程详情"));
-    m_openProcessButton->setStyleSheet(ks::ui::BuildFlatButtonStyle() + QStringLiteral("QPushButton,QToolButton{border-radius:3px;padding:4px 10px;font-weight:600;}"));
+    ks::ui::ApplyFlatButtonTheme(m_openProcessButton, ks::ui::FlatButtonTone::Neutral,
+        ks::ui::FlatButtonAppearance::Solid);
 
     QStringList targetTextList;
     for (const QString& pathText : m_targetPaths)

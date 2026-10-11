@@ -7,6 +7,7 @@
 #include "../UI/ToolbarMetrics.h"
 #include "../UI/PageControlStyle.h"
 #include "../UI/PrimaryPageStyle.h"
+#include "../UI/ThemeBinding.h"
 #include "../UI/MainSurfaceStyle.h"
 #include "DirectKernelCallMonitorWidget.h"
 #include "KernelCallbackMonitorWidget.h"
@@ -890,7 +891,15 @@ namespace
     {
         QWidget* sectionWidget = new QWidget(parent);
         sectionWidget->setProperty("kswordCollapsePanel", QStringLiteral("true"));
-        sectionWidget->setStyleSheet(collapsePanelStyle(sectionWidget));
+        // 仅此明确折叠控件持有主题绑定，样式未变化时不重复 polish 子树。
+        ks::ui::BindWidgetTheme(sectionWidget, [sectionWidget]()
+        {
+            const QString style = collapsePanelStyle(sectionWidget);
+            if (sectionWidget->styleSheet() != style)
+            {
+                sectionWidget->setStyleSheet(style);
+            }
+        });
         sectionWidget->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Maximum);
 
         QVBoxLayout* sectionLayout = new QVBoxLayout(sectionWidget);
@@ -903,12 +912,28 @@ namespace
         headerButton->setCheckable(true);
         headerButton->setChecked(expanded);
         headerButton->setArrowType(expanded ? Qt::DownArrow : Qt::RightArrow);
-        headerButton->setStyleSheet(collapseHeaderButtonStyle());
+        // 仅此明确折叠控件持有主题绑定，样式未变化时不重复 polish 子树。
+        ks::ui::BindWidgetTheme(headerButton, [headerButton]()
+        {
+            const QString style = collapseHeaderButtonStyle();
+            if (headerButton->styleSheet() != style)
+            {
+                headerButton->setStyleSheet(style);
+            }
+        });
         headerButton->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
 
         QWidget* contentHostWidget = new QWidget(sectionWidget);
         contentHostWidget->setProperty("kswordCollapseContent", QStringLiteral("true"));
-        contentHostWidget->setStyleSheet(collapsePanelStyle(contentHostWidget));
+        // 仅此明确折叠控件持有主题绑定，样式未变化时不重复 polish 子树。
+        ks::ui::BindWidgetTheme(contentHostWidget, [contentHostWidget]()
+        {
+            const QString style = collapsePanelStyle(contentHostWidget);
+            if (contentHostWidget->styleSheet() != style)
+            {
+                contentHostWidget->setStyleSheet(style);
+            }
+        });
         contentHostWidget->setVisible(expanded);
         contentHostWidget->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Maximum);
 
@@ -936,43 +961,6 @@ namespace
             });
 
         return sectionWidget;
-    }
-
-    // refreshIndependentCollapseTheme 作用：
-    // - 递归刷新独立折叠段样式，响应深浅主题切换；
-    // - 入参 rootWidget：需要扫描的根控件；
-    // - 返回：无返回值。
-    void refreshIndependentCollapseTheme(QWidget* rootWidget)
-    {
-        if (rootWidget == nullptr)
-        {
-            return;
-        }
-
-        const QList<QWidget*> widgetList = rootWidget->findChildren<QWidget*>();
-        for (QWidget* widgetPointer : widgetList)
-        {
-            if (widgetPointer == nullptr)
-            {
-                continue;
-            }
-            if (widgetPointer->property("kswordCollapsePanel").toString() == QStringLiteral("true")
-                || widgetPointer->property("kswordCollapseContent").toString() == QStringLiteral("true"))
-            {
-                widgetPointer->setStyleSheet(collapsePanelStyle(widgetPointer));
-            }
-        }
-
-        const QList<QToolButton*> headerButtonList = rootWidget->findChildren<QToolButton*>();
-        for (QToolButton* buttonPointer : headerButtonList)
-        {
-            if (buttonPointer != nullptr
-                && buttonPointer->parentWidget() != nullptr
-                && buttonPointer->parentWidget()->property("kswordCollapsePanel").toString() == QStringLiteral("true"))
-            {
-                buttonPointer->setStyleSheet(collapseHeaderButtonStyle());
-            }
-        }
     }
 
     void stopActiveKswordTraceSessionsByPrefix(const QStringList& sessionPrefixList)
@@ -4666,8 +4654,7 @@ bool MonitorDock::event(QEvent* eventPointer)
             || eventPointer->type() == QEvent::ApplicationPaletteChange
             || eventPointer->type() == QEvent::StyleChange))
     {
-        refreshIndependentCollapseTheme(m_wmiPage);
-        refreshIndependentCollapseTheme(m_etwPage);
+        // 折叠面板自身绑定主题；这里只维护 ETW 配置区域的高度约束。
         updateEtwCollapseHeight();
     }
     return handled;

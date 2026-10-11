@@ -1,5 +1,7 @@
 #include "ScannerDock.h"
 #include "../UI/FlatButtonTheme.h"
+#include "../UI/SegmentedControl.h"
+#include "../UI/ToolbarMetrics.h"
 
 #include "Internationalization/LanguageManager.h"
 #include "ksword/scanner/binary_scanner.h"
@@ -432,13 +434,7 @@ QWidget* ScannerDock::createStructuredTablePage(
     auto groups = std::make_shared<std::vector<std::vector<int>>>(); // groups：每个预设显示的列索引。
     auto buttons = std::make_shared<std::vector<QPointer<QPushButton>>>(); // buttons：可安全失效的列组按钮。
 
-    // activeStyle/inactiveStyle：当前预设使用主题强调色；自定义显隐时全部取消着色。
-    // A/B/C 的强调状态仍由列预设决定；自定义布局保持中性实心底色。
-    const QString activeStyle = ks::ui::BuildFlatButtonStyle(ks::ui::FlatButtonTone::Accent)
-        + QStringLiteral("QPushButton{padding:3px 10px;}");
-    const QString inactiveStyle = ks::ui::BuildFlatButtonStyle(ks::ui::FlatButtonTone::Neutral)
-        + QStringLiteral("QPushButton{padding:3px 10px;}");
-
+    // 动态宽表列组共用分段底面，业务仅登记选择状态，不保存旧主题样式快照。
     for (int groupIndex = 0; groupIndex < groupCount; ++groupIndex)
     {
         // columns：每组保留第 0 列，并加入属于本组的互补字段。
@@ -462,17 +458,25 @@ QWidget* ScannerDock::createStructuredTablePage(
                 "scanner.column_view.tooltip",
                 "列组 %1：显示一组互补字段；可在表头右键自定义列。")
                 .arg(groupButton->text()));
-        groupButton->setStyleSheet(groupIndex == 0 ? activeStyle : inactiveStyle);
+        ks::ui::SetSegmentedButtonSelected(groupButton, groupIndex == 0);
         buttons->push_back(groupButton);
         buttonLayout->addWidget(groupButton);
     }
+    // 此工厂覆盖所有动态宽表；原按钮、提示、列显隐与右键自定义语义保持一致。
+    QList<QAbstractButton*> segments;
+    for (const QPointer<QPushButton>& button : *buttons)
+    {
+        segments.push_back(button.data());
+    }
+    ks::ui::NormalizeToolbarRow(buttonLayout, 0);
+    ks::ui::InstallSegmentedButtons(buttonLayout, segments);
     buttonLayout->addStretch(1);
     pageLayout->addLayout(buttonLayout);
     pageLayout->addWidget(table, 1);
 
     // applyGroup：切换预设时先隐藏所有列，再仅显示目标组并更新按钮主题。
     const auto applyGroup =
-        [table, groups, buttons, activeStyle, inactiveStyle](const int groupIndex)
+        [table, groups, buttons](const int groupIndex)
         {
             for (int column = 0; column < table->columnCount(); ++column)
             {
@@ -486,8 +490,8 @@ QWidget* ScannerDock::createStructuredTablePage(
             {
                 if (buttons->at(static_cast<std::size_t>(buttonIndex)))
                 {
-                    buttons->at(static_cast<std::size_t>(buttonIndex))->setStyleSheet(
-                        buttonIndex == groupIndex ? activeStyle : inactiveStyle);
+                    ks::ui::SetSegmentedButtonSelected(
+                        buttons->at(static_cast<std::size_t>(buttonIndex)), buttonIndex == groupIndex);
                 }
             }
         };
@@ -511,7 +515,7 @@ QWidget* ScannerDock::createStructuredTablePage(
         tableHeader,
         &QHeaderView::customContextMenuRequested,
         page,
-        [this, table, tableHeader, buttons, inactiveStyle](const QPoint& position)
+        [this, table, tableHeader, buttons](const QPoint& position)
         {
             QMenu menu(tableHeader); // menu：仅在当前右键操作期间存在的列显隐菜单。
             menu.setStyleSheet(QStringLiteral(
@@ -540,14 +544,14 @@ QWidget* ScannerDock::createStructuredTablePage(
                     columnAction,
                     &QAction::toggled,
                     &menu,
-                    [table, column, buttons, inactiveStyle](const bool visible)
+                    [table, column, buttons](const bool visible)
                     {
                         table->setColumnHidden(column, !visible);
                         for (const QPointer<QPushButton>& button : *buttons)
                         {
                             if (button)
                             {
-                                button->setStyleSheet(inactiveStyle);
+                                ks::ui::SetSegmentedButtonSelected(button, false);
                             }
                         }
                     });

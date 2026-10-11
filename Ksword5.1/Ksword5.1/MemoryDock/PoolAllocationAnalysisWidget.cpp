@@ -5,6 +5,8 @@
 #include "../UI/VisibleTableWidget.h"
 #include "../UI/ToolbarMetrics.h"
 #include "../UI/PageControlStyle.h"
+#include "../UI/PrimaryPageStyle.h"
+#include "../UI/FlatButtonTheme.h"
 #include <QAbstractTableModel>
 #include <QComboBox>
 #include <QEvent>
@@ -212,6 +214,7 @@ PoolAllocationAnalysisWidget::PoolAllocationAnalysisWidget(QWidget* parent) : QW
     m_grouping->setMinimumContentsLength(8); m_grouping->setMinimumWidth(0);
     m_grouping->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
     m_grouping->addItems({QString(), QString(), QString()});
+    ks::ui::StylePrimaryCombo(m_grouping);
     m_filter = new QLineEdit(this); m_filter->setObjectName(QStringLiteral("pool_analysis_filter")); m_filter->setMinimumWidth(0);
     ks::ui::StyleSearchField(m_filter);
     filters->addWidget(m_grouping, 2); filters->addWidget(m_filter, 3); layout->addLayout(filters);
@@ -240,12 +243,19 @@ PoolAllocationAnalysisWidget::PoolAllocationAnalysisWidget(QWidget* parent) : QW
     m_stacks->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
     m_stacks->setMinimumContentsLength(10); m_stacks->setMinimumWidth(0); detailLayout->addWidget(m_stacks);
     m_stacks->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
+    ks::ui::StylePrimaryCombo(m_stacks);
     auto* detailActions = new ks::ui::FlowLayout(nullptr, 0, 8, 8);
     m_resolve = new QPushButton(detail); m_resolve->setObjectName(QStringLiteral("pool_analysis_resolve"));
     m_module = new QPushButton(detail); m_module->setObjectName(QStringLiteral("pool_analysis_module"));
     detailActions->addWidget(m_resolve); detailActions->addWidget(m_module); detailLayout->addLayout(detailActions);
     ks::ui::NormalizeToolbarControl(m_resolve);
     ks::ui::NormalizeToolbarControl(m_module);
+    // ETL 导入和帧定位是实际动作，显式保留中性实底及热主题绑定。
+    for (QPushButton* button : {m_open, m_cancel, m_resolve, m_module})
+    {
+        ks::ui::ApplyFlatButtonTheme(button, ks::ui::FlatButtonTone::Neutral,
+            ks::ui::FlatButtonAppearance::Solid);
+    }
     m_frames = new ks::ui::StructuredFieldView(detail);
     m_frames->setObjectName(QStringLiteral("pool_analysis_frames"));
      detailLayout->addWidget(m_frames, 1); split->addWidget(m_table); split->addWidget(detail);

@@ -1,4 +1,6 @@
 #include "HvmHookWizard.h"
+#include "./SecondaryPageLayout.h"
+#include "./PrimaryPageStyle.h"
 #include "../../../shared/evidence/MemoryAddressInput.h"
 
 #include "MemoryWorkbench/HexView.h"
@@ -388,6 +390,12 @@ namespace ks::ui
             ks::i18n::sourceText(QStringLiteral("把编码结果写进编辑器")),
             jumpGroup);
         jumpLayout->addRow(m_applyJumpButton);
+        // 跳转模板是专业编辑器旁的普通参数表单，接入共享布局而不碰 HEX 输入子树。
+        StyleSecondaryForm(jumpLayout, 180);
+        StyleSecondarySection(jumpGroup);
+        StyleStandaloneInput(m_jumpTemplateBox);
+        StyleStandaloneInput(m_jumpTargetEdit);
+        StyleStandaloneInput(jumpOffsetEdit);
         sideLayout->addWidget(jumpGroup);
 
         splitter->addWidget(sideWidget);

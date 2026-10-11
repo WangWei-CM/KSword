@@ -1,4 +1,7 @@
 #include "HvmEventDialog.h"
+#include "./SecondaryPageLayout.h"
+#include "./ToolbarMetrics.h"
+#include "./VisibleTableWidget.h"
 
 #include "HvmControl.h"
 #include "../Internationalization/LanguageManager.h"
@@ -75,7 +78,10 @@ HvmEventDialog::HvmEventDialog(QWidget* const parent)
 
 void HvmEventDialog::buildUi()
 {
+    // 事件流属于持续采集工具窗，套用共享二级窗口底面与内容排版。
+    ks::ui::StyleSecondaryWindow(this);
     QVBoxLayout* const rootLayout = new QVBoxLayout(this);
+    ks::ui::StyleSecondaryContentLayout(rootLayout);
 
     QLabel* const hintLabel = new QLabel(
         ks::i18n::sourceText(QStringLiteral("事件环是有界的：丢弃计数非零说明消费跟不上产生速度，中间有缺口。")),
@@ -84,6 +90,8 @@ void HvmEventDialog::buildUi()
     rootLayout->addWidget(hintLabel);
 
     m_eventTable = new QTableWidget(0, 8, this);
+    // 事件本身已经是时间序列，保留复制/导出即可，不额外占用快照对比工具条。
+    ks::ui::SetTableActionBarMode(m_eventTable, ks::ui::TableActionBarMode::Compact);
     m_eventTable->setHorizontalHeaderLabels(QStringList()
         << ks::i18n::sourceText(QStringLiteral("序号"))
         << ks::i18n::sourceText(QStringLiteral("类型"))
@@ -109,6 +117,9 @@ void HvmEventDialog::buildUi()
     buttonLayout->addWidget(m_followCheck, 0, 0);
     buttonLayout->addWidget(m_pauseButton, 0, 1);
     buttonLayout->addWidget(m_clearButton, 0, 2);
+    buttonLayout->setHorizontalSpacing(8);
+    ks::ui::NormalizeToolbarControl(m_pauseButton);
+    ks::ui::NormalizeToolbarControl(m_clearButton);
     rootLayout->addLayout(buttonLayout);
 
     m_statusLabel = new QLabel(QString(), this);

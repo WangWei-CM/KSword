@@ -41,6 +41,8 @@ class QTreeWidget;
 class QTreeWidgetItem;
 class QVBoxLayout;
 
+namespace ks::ui { class StructuredFieldView; }
+
 namespace ks::handle
 {
     enum class HandleTreeItemKind : int
@@ -694,7 +696,7 @@ private:
     QWidget* m_objectHeaderPage = nullptr;       // m_objectHeaderPage：Object Header 页容器。
     QVBoxLayout* m_objectHeaderLayout = nullptr; // m_objectHeaderLayout：Object Header 页布局。
     QLabel* m_handleDetailStatusLabel = nullptr; // m_handleDetailStatusLabel：Object Header 状态文本。
-    QTreeWidget* m_handleDetailTable = nullptr;  // m_handleDetailTable：Object Header 键值表。
+    ks::ui::StructuredFieldView* m_handleDetailFields = nullptr; // 对象头的唯一字段文档，不再维护隐藏树。
 
     QWidget* m_objectTypePage = nullptr;         // m_objectTypePage：Object Type 页容器。
     QVBoxLayout* m_objectTypeLayout = nullptr;   // m_objectTypeLayout：Object Type 页布局。
@@ -703,7 +705,7 @@ private:
     QLineEdit* m_objectTypeFilterEdit = nullptr; // m_objectTypeFilterEdit：对象类型过滤输入框。
     QLabel* m_objectTypeStatusLabel = nullptr;   // m_objectTypeStatusLabel：对象类型状态文本。
     QTreeWidget* m_objectTypeTable = nullptr;    // m_objectTypeTable：对象类型列表表格。
-    QTreeWidget* m_objectTypeDetailTable = nullptr; // m_objectTypeDetailTable：对象类型详情（键值对表）。
+    ks::ui::StructuredFieldView* m_objectTypeDetailFields = nullptr; // 对象类型详情复用同一字段投影框架。
 
     bool m_refreshInProgress = false;            // m_refreshInProgress：句柄刷新互斥标记。
     bool m_refreshPending = false;               // m_refreshPending：刷新进行中期间记录的待执行刷新请求。

@@ -1,6 +1,7 @@
 #include "../Framework.h"
 #include "./ParameterWorkspace.h"
 #include "./PrimaryPageStyle.h"
+#include "./FlatButtonTheme.h"
 #include "./ThemeBinding.h"
 #include "./MainSurfaceStyle.h"
 #include "./ToolbarMetrics.h"
@@ -231,6 +232,7 @@ namespace
                 .arg(surface.name(), footer
                     ? QStringLiteral("border-top:1px solid %1;border-top-left-radius:0;border-top-right-radius:0;").arg(divider.name())
                     : QString());
+            target->setProperty("ksword_parameter_surface_style_block", style); // 完整中性容器块供按钮所有权识别。
             if (target->styleSheet() != style)
             {
                 target->setStyleSheet(style); // 语言/重复palette通知不重写同一面板底色。
@@ -468,6 +470,29 @@ namespace ks::ui
             }
         }
         NormalizeToolbarRow(m_actions);
+        // 底栏是明确的普通操作区；未声明配色的独立动作显式接实底，避免被祖先容器QSS阻断。
+        for (int index = 0; index < m_actions->count(); ++index)
+        {
+            auto* button = qobject_cast<QAbstractButton*>(m_actions->itemAt(index)->widget());
+            if (!button || button->property("ksword_flat_button_managed").toBool()
+                || HasWidgetThemeBinding(button))
+            {
+                continue; // 原危险色/强调色或专用动作状态继续由原拥有者维护。
+            }
+            QString colors = button->styleSheet(); // 仅剔除共享几何，真实业务局部配色不能硬替换。
+            if (button->property("ksword_toolbar_control").toBool())
+            {
+                colors.remove(ToolbarControlGeometryStyle().trimmed());
+            }
+            if (button->property("ksword_toolbar_icon_only").toBool())
+            {
+                colors.remove(ToolbarIconGeometryStyle().trimmed());
+            }
+            if (colors.trimmed().isEmpty())
+            {
+                ApplyFlatButtonTheme(button, FlatButtonTone::Neutral, FlatButtonAppearance::Solid);
+            }
+        }
         m_actions->parentWidget()->setVisible(m_actions->count() > 0);
     }
 
