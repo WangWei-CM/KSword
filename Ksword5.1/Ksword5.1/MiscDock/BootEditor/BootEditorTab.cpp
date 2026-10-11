@@ -178,7 +178,8 @@ void BootEditorTab::initializeUi()
     // - 中部上方条目表与下方三栏编辑区；
     // - 底部状态摘要。
     m_rootLayout = new QVBoxLayout(this);
-    m_rootLayout->setContentsMargins(6, 6, 6, 6);
+    // ParameterWorkspace 已自带 16px 留白，外层只提供阅读基线。
+    ks::ui::StyleWorkspacePage(this, 0);
     m_rootLayout->setSpacing(6);
 
     initializeToolbar();
@@ -186,6 +187,7 @@ void BootEditorTab::initializeUi()
 
     m_statusLabel = new QLabel(QStringLiteral("状态：尚未加载 BCD 数据"), this);
     m_statusLabel->setWordWrap(true);
+    m_statusLabel->setContentsMargins(16, 0, 16, 0);
     m_rootLayout->addWidget(m_statusLabel);
 }
 
@@ -194,8 +196,9 @@ void BootEditorTab::initializeToolbar()
     // 顶部工具栏主要承载“高频全局操作”。
     m_toolbarWidget = new QWidget(this);
     m_toolbarLayout = new QHBoxLayout(m_toolbarWidget);
-    m_toolbarLayout->setContentsMargins(0, 0, 0, 0);
+    m_toolbarLayout->setContentsMargins(16, 12, 16, 12);
     m_toolbarLayout->setSpacing(6);
+    ks::ui::StylePrimaryToolbar(m_toolbarWidget);
     m_rootLayout->addWidget(m_toolbarWidget);
 
     // btnFactory：
@@ -262,6 +265,7 @@ void BootEditorTab::initializeCenterPane()
 {
     // 参数表单占左侧，条目选择器与命令回执在右侧共享高度。
     auto* workspace = new ks::ui::ParameterWorkspace(this, 500);
+    workspace->useWideParameterLayout(60);
     m_rootLayout->addWidget(workspace, 1);
     m_mainSplitter = new QSplitter(Qt::Vertical, workspace);
     m_mainSplitter->setChildrenCollapsible(false);
@@ -404,7 +408,8 @@ void BootEditorTab::initializeCenterPane()
     for (QPushButton* button : { m_setLegacyForSelectedButton, m_setLegacyForDefaultButton, m_setStandardForSelectedButton })
         ks::ui::NormalizeToolbarControl(button);
     legacyLayout->addWidget(legacyActionWidget);
-    leftEditorLayout->addWidget(ks::ui::FoldParameterSection(legacyGroup));
+    QWidget* legacySection = ks::ui::FoldParameterSection(legacyGroup); // 低频 Legacy 操作仍可折叠。
+    leftEditorLayout->addWidget(legacySection);
 
     // 高级开关组。
     QGroupBox* flagGroup = new QGroupBox(QStringLiteral("高级开关"), middleEditorColumn);
@@ -437,7 +442,8 @@ void BootEditorTab::initializeCenterPane()
     flagLayout->addWidget(m_recoveryEnabledCheck);
     flagLayout->addWidget(new QLabel(QStringLiteral("safeboot 模式"), flagGroup));
     flagLayout->addWidget(m_safeBootCombo);
-    middleEditorLayout->addWidget(ks::ui::FoldParameterSection(flagGroup));
+    QWidget* flagSection = ks::ui::FoldParameterSection(flagGroup, true); // 常用引导开关默认可见。
+    middleEditorLayout->addWidget(flagSection);
 
     // 应用动作区：分离“当前条目修改”和“bootmgr 全局参数”。
     QWidget* actionWidget = workspace;
@@ -477,7 +483,8 @@ void BootEditorTab::initializeCenterPane()
     customLayout->addWidget(m_customCommandEdit, 1);
     customLayout->addWidget(m_runCustomCommandButton, 0);
     ks::ui::NormalizeToolbarRow(customLayout);
-    middleEditorLayout->addWidget(ks::ui::FoldParameterSection(customGroup));
+    QWidget* customSection = ks::ui::FoldParameterSection(customGroup); // 任意命令保持低频入口。
+    middleEditorLayout->addWidget(customSection);
 
     // 原始输出位于右侧条目表下方，不再占用参数栏或产生第三个窄列。
     QGroupBox* outputGroup = new QGroupBox(QStringLiteral("原始输出"), outputEditorColumn);
@@ -500,6 +507,9 @@ void BootEditorTab::initializeCenterPane()
     m_mainSplitter->setStretchFactor(1, 5);
     m_mainSplitter->setSizes(QList<int>{ 380, 320 });
 
+    // 基础字段与开关宽屏互补两列，保持原控件、选择条目与写回流程。
+    ks::ui::ArrangeParameterColumns(workspace->parameters(),
+        { basicGroup, legacySection }, { flagSection, customSection }, 300);
     workspace->finish();
 }
 

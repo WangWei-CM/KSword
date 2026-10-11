@@ -565,6 +565,7 @@ void NetworkDock::initializeManualRequestTab()
 
     // 参数独立滚动，结果单独展示，操作固定在参数栏底部。
     auto* workspace = new ks::ui::ParameterWorkspace(m_manualRequestPage, 480);
+    workspace->useWideParameterLayout(60);
     m_manualRequestLayout->addWidget(workspace);
     QVBoxLayout* contentLayout = workspace->parameters();
     QWidget* contentWidget = contentLayout->parentWidget();
@@ -572,10 +573,9 @@ void NetworkDock::initializeManualRequestTab()
     // 1) API 与 socket 参数分组：支持模式切换和手动覆盖底层参数。
     QGroupBox* apiGroup = new QGroupBox(QStringLiteral("API 与 Socket 参数"), contentWidget);
     ks::ui::StyleParameterSection(apiGroup);
-    QGridLayout* apiLayout = new QGridLayout(apiGroup);
+    QFormLayout* apiLayout = new QFormLayout(apiGroup);
     apiLayout->setHorizontalSpacing(8);
     apiLayout->setVerticalSpacing(6);
-    apiLayout->setColumnStretch(1, 1);
 
     m_manualApiCombo = new QComboBox(apiGroup);
     ks::ui::StylePrimaryCombo(m_manualApiCombo);
@@ -596,31 +596,24 @@ void NetworkDock::initializeManualRequestTab()
     m_manualProtocolEdit->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     m_manualSocketFlagsEdit->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
 
-    apiLayout->addWidget(new QLabel(QStringLiteral("请求模式:"), apiGroup), 0, 0);
-    apiLayout->addWidget(m_manualApiCombo, 0, 1);
-    // 常用模式保留在外，底层覆盖参数单独折叠。
+    apiLayout->addRow(new QLabel(QStringLiteral("请求模式:"), apiGroup), m_manualApiCombo);
+    // 宽屏为参数留出足够空间，底层参数默认可见，仍可由用户折叠。
     auto* socketGroup = new QGroupBox(QStringLiteral("手动覆盖 socket 参数"), apiGroup);
-    auto* socketLayout = new QGridLayout(socketGroup);
-    socketLayout->setColumnStretch(1, 1);
-    socketLayout->addWidget(m_manualOverrideSocketParameterCheck, 0, 0, 1, 2);
-    socketLayout->addWidget(new QLabel(QStringLiteral("addressFamily:"), socketGroup), 1, 0);
-    socketLayout->addWidget(m_manualAddressFamilyEdit, 1, 1);
-    socketLayout->addWidget(new QLabel(QStringLiteral("socketType:"), socketGroup), 2, 0);
-    socketLayout->addWidget(m_manualSocketTypeEdit, 2, 1);
-    socketLayout->addWidget(new QLabel(QStringLiteral("protocol:"), socketGroup), 3, 0);
-    socketLayout->addWidget(m_manualProtocolEdit, 3, 1);
-    socketLayout->addWidget(new QLabel(QStringLiteral("socketFlags:"), socketGroup), 4, 0);
-    socketLayout->addWidget(m_manualSocketFlagsEdit, 4, 1);
-    apiLayout->addWidget(ks::ui::FoldParameterSection(socketGroup), 1, 0, 1, 2);
+    auto* socketLayout = new QFormLayout(socketGroup);
+    socketLayout->addRow(m_manualOverrideSocketParameterCheck);
+    socketLayout->addRow(new QLabel(QStringLiteral("addressFamily:"), socketGroup), m_manualAddressFamilyEdit);
+    socketLayout->addRow(new QLabel(QStringLiteral("socketType:"), socketGroup), m_manualSocketTypeEdit);
+    socketLayout->addRow(new QLabel(QStringLiteral("protocol:"), socketGroup), m_manualProtocolEdit);
+    socketLayout->addRow(new QLabel(QStringLiteral("socketFlags:"), socketGroup), m_manualSocketFlagsEdit);
+    apiLayout->addRow(ks::ui::FoldParameterSection(socketGroup, true));
     contentLayout->addWidget(apiGroup);
 
     // 2) 端点与行为参数分组：覆盖 bind/connect/超时/选项等细节。
     QGroupBox* endpointGroup = new QGroupBox(QStringLiteral("端点与行为参数"), contentWidget);
     ks::ui::StyleParameterSection(endpointGroup);
-    QGridLayout* endpointLayout = new QGridLayout(endpointGroup);
+    QFormLayout* endpointLayout = new QFormLayout(endpointGroup);
     endpointLayout->setHorizontalSpacing(8);
     endpointLayout->setVerticalSpacing(6);
-    endpointLayout->setColumnStretch(1, 1);
 
     m_manualEnableBindCheck = new QCheckBox(QStringLiteral("启用本地 bind"), endpointGroup);
     m_manualEnableBindCheck->setToolTip(QStringLiteral("勾选后先 bind(localAddress:localPort) 再执行连接/发送。"));
@@ -655,39 +648,29 @@ void NetworkDock::initializeManualRequestTab()
     m_manualSendFlagsEdit->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     m_manualReceiveFlagsEdit->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
 
-    endpointLayout->addWidget(new QLabel(QStringLiteral("远端地址:"), endpointGroup), 0, 0);
-    endpointLayout->addWidget(m_manualRemoteAddressEdit, 0, 1);
-    endpointLayout->addWidget(new QLabel(QStringLiteral("远端端口:"), endpointGroup), 1, 0);
-    endpointLayout->addWidget(m_manualRemotePortSpin, 1, 1);
-    endpointLayout->addWidget(m_manualConnectBeforeSendCheck, 2, 1);
+    endpointLayout->addRow(new QLabel(QStringLiteral("远端地址:"), endpointGroup), m_manualRemoteAddressEdit);
+    endpointLayout->addRow(new QLabel(QStringLiteral("远端端口:"), endpointGroup), m_manualRemotePortSpin);
+    endpointLayout->addRow(m_manualConnectBeforeSendCheck);
     auto* transportGroup = new QGroupBox(QStringLiteral("高级"), endpointGroup);
-    auto* transportLayout = new QGridLayout(transportGroup);
-    transportLayout->setColumnStretch(1, 1);
-    transportLayout->addWidget(m_manualEnableBindCheck, 0, 0, 1, 2);
-    transportLayout->addWidget(new QLabel(QStringLiteral("本地地址:"), transportGroup), 1, 0);
-    transportLayout->addWidget(m_manualLocalAddressEdit, 1, 1);
-    transportLayout->addWidget(new QLabel(QStringLiteral("本地端口:"), transportGroup), 2, 0);
-    transportLayout->addWidget(m_manualLocalPortSpin, 2, 1);
-    transportLayout->addWidget(new QLabel(QStringLiteral("发送超时(ms):"), transportGroup), 3, 0);
-    transportLayout->addWidget(m_manualSendTimeoutSpin, 3, 1);
-    transportLayout->addWidget(new QLabel(QStringLiteral("接收超时(ms):"), transportGroup), 4, 0);
-    transportLayout->addWidget(m_manualRecvTimeoutSpin, 4, 1);
-    transportLayout->addWidget(new QLabel(QStringLiteral("sendFlags:"), transportGroup), 5, 0);
-    transportLayout->addWidget(m_manualSendFlagsEdit, 5, 1);
-    transportLayout->addWidget(new QLabel(QStringLiteral("recvFlags:"), transportGroup), 6, 0);
-    transportLayout->addWidget(m_manualReceiveFlagsEdit, 6, 1);
-    transportLayout->addWidget(m_manualReuseAddressCheck, 7, 0);
-    transportLayout->addWidget(m_manualNoDelayCheck, 7, 1);
-    endpointLayout->addWidget(ks::ui::FoldParameterSection(transportGroup), 3, 0, 1, 2);
+    auto* transportLayout = new QFormLayout(transportGroup);
+    transportLayout->addRow(m_manualEnableBindCheck);
+    transportLayout->addRow(new QLabel(QStringLiteral("本地地址:"), transportGroup), m_manualLocalAddressEdit);
+    transportLayout->addRow(new QLabel(QStringLiteral("本地端口:"), transportGroup), m_manualLocalPortSpin);
+    transportLayout->addRow(new QLabel(QStringLiteral("发送超时(ms):"), transportGroup), m_manualSendTimeoutSpin);
+    transportLayout->addRow(new QLabel(QStringLiteral("接收超时(ms):"), transportGroup), m_manualRecvTimeoutSpin);
+    transportLayout->addRow(new QLabel(QStringLiteral("sendFlags:"), transportGroup), m_manualSendFlagsEdit);
+    transportLayout->addRow(new QLabel(QStringLiteral("recvFlags:"), transportGroup), m_manualReceiveFlagsEdit);
+    transportLayout->addRow(m_manualReuseAddressCheck);
+    transportLayout->addRow(m_manualNoDelayCheck);
+    endpointLayout->addRow(ks::ui::FoldParameterSection(transportGroup, true));
     contentLayout->addWidget(endpointGroup);
 
     // 3) 载荷与接收参数分组：支持文本/HEX 输入与响应读取开关。
     QGroupBox* payloadGroup = new QGroupBox(QStringLiteral("载荷与响应读取"), contentWidget);
     ks::ui::StyleParameterSection(payloadGroup);
-    QGridLayout* payloadLayout = new QGridLayout(payloadGroup);
+    QFormLayout* payloadLayout = new QFormLayout(payloadGroup);
     payloadLayout->setHorizontalSpacing(8);
     payloadLayout->setVerticalSpacing(6);
-    payloadLayout->setColumnStretch(1, 1);
 
     m_manualPayloadFormatCombo = new QComboBox(payloadGroup);
     m_manualPayloadFormatCombo->addItem(QStringLiteral("ASCII 文本"), static_cast<int>(ks::network::ManualPayloadFormat::AsciiText));
@@ -713,14 +696,15 @@ void NetworkDock::initializeManualRequestTab()
     m_manualShutdownSendCheck = new QCheckBox(QStringLiteral("发送后 shutdown(SD_SEND)"), payloadGroup);
     m_manualShutdownSendCheck->setChecked(false);
 
-    payloadLayout->addWidget(new QLabel(QStringLiteral("载荷格式:"), payloadGroup), 0, 0);
-    payloadLayout->addWidget(m_manualPayloadFormatCombo, 0, 1);
-    payloadLayout->addWidget(m_manualPayloadEditor, 1, 0, 1, 2);
-    payloadLayout->addWidget(m_manualReceiveAfterSendCheck, 2, 0, 1, 2);
-    payloadLayout->addWidget(new QLabel(QStringLiteral("最大读取字节:"), payloadGroup), 3, 0);
-    payloadLayout->addWidget(m_manualReceiveMaxBytesSpin, 3, 1);
-    payloadLayout->addWidget(m_manualShutdownSendCheck, 4, 0, 1, 2);
+    payloadLayout->addRow(new QLabel(QStringLiteral("载荷格式:"), payloadGroup), m_manualPayloadFormatCombo);
+    payloadLayout->addRow(m_manualPayloadEditor);
+    payloadLayout->addRow(m_manualReceiveAfterSendCheck);
+    payloadLayout->addRow(new QLabel(QStringLiteral("最大读取字节:"), payloadGroup), m_manualReceiveMaxBytesSpin);
+    payloadLayout->addRow(m_manualShutdownSendCheck);
     contentLayout->addWidget(payloadGroup);
+
+    // API/载荷和端点/行为各自自然排列；参数栏不足两列时恢复 API→端点→载荷顺序。
+    ks::ui::ArrangeParameterColumns(contentLayout, {apiGroup, payloadGroup}, {endpointGroup}, 300);
 
     // 4) 执行与结果分组：执行请求、重置参数、输出结果日志。
     QGroupBox* actionGroup = new QGroupBox(QStringLiteral("执行与结果"), contentWidget);

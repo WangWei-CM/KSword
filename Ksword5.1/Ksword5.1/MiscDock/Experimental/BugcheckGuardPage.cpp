@@ -202,8 +202,15 @@ namespace ks::misc
     void BugcheckGuardPage::initializeUi()
     {
         auto* rootLayout = new QVBoxLayout(this);
-        rootLayout->setContentsMargins(12, 12, 12, 12);
+        ks::ui::StyleWorkspacePage(this, 0);
         rootLayout->setSpacing(10);
+
+        // 两段风险说明保持固定且完整可见，不与工作区叠加外层留白。
+        auto* introduction = new QWidget(this); // 提示仍位于控制区之前。
+        auto* introductionLayout = new QVBoxLayout(introduction);
+        introductionLayout->setContentsMargins(16, 16, 16, 0);
+        introductionLayout->setSpacing(8);
+        rootLayout->addWidget(introduction);
 
         auto& language = ks::i18n::LanguageManager::instance();
         m_warningLabel = new QLabel(this);
@@ -217,7 +224,7 @@ namespace ks::misc
                 "开启“内存完整性（HVCI）”时只能暂停，不能忽略。"
                 "要尝试继续运行，必须先关闭“内存完整性”并重启；"
                 "即使如此，电脑仍可能马上蓝屏、死机或丢失数据。只在测试机上使用。"));
-        rootLayout->addWidget(m_warningLabel);
+        introductionLayout->addWidget(m_warningLabel);
 
         m_persistenceLabel = new QLabel(this);
         m_persistenceLabel->setWordWrap(true);
@@ -229,10 +236,12 @@ namespace ks::misc
             QStringLiteral("misc.experimental.bugcheck.persistence"),
             QStringLiteral(
                 "开启后持续拦截：尝试继续运行时保留 Hook，后续触发仍会拦截，直到手动关闭。仅暂停模式仍会在暂停后进入蓝屏。"));
-        rootLayout->addWidget(m_persistenceLabel);
+        introductionLayout->addWidget(m_persistenceLabel);
 
         // 风险说明保持页顶，参数和实时回执各有独立区域。
         auto* workspace = new ks::ui::ParameterWorkspace(this, 500);
+        // 延时与三个选项构成一个任务，略加宽长风险选项，不制造空的第二列。
+        workspace->useWideParameterLayout(55);
         rootLayout->addWidget(workspace, 1);
 
         auto* controlGroup = new QGroupBox(this);

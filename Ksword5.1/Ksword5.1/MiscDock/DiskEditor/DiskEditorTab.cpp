@@ -3,6 +3,7 @@
 #include "../../UI/PageControlStyle.h"
 #include "../../UI/PrimaryPageStyle.h"
 #include "../../UI/ParameterWorkspace.h"
+#include "../../UI/FlatButtonTheme.h"
 #include "../../UI/ToolbarMetrics.h"
 #include "DiskEditorFormat.h"
 #include "../../UI/CodeEditorWidget.h"
@@ -103,7 +104,8 @@ namespace
     // - 与项目蓝色主题保持一致。
     QString buildToolButtonStyle()
     {
-        return KswordTheme::ThemedButtonStyle();
+        return ks::ui::BuildFlatButtonStyle(ks::ui::FlatButtonTone::Neutral,
+            ks::ui::FlatButtonAppearance::Solid);
     }
 
     // buildInputStyle：
@@ -346,8 +348,7 @@ namespace ks::misc
     {
         // 根布局：顶部工具栏 + 主分割区 + 底部状态。
         m_rootLayout = new QVBoxLayout(this);
-        m_rootLayout->setContentsMargins(6, 6, 6, 6);
-        m_rootLayout->setSpacing(6);
+        ks::ui::StyleWorkspacePage(this);
 
         initializeToolbar();
         initializeLayoutPanels();
@@ -356,15 +357,26 @@ namespace ks::misc
         m_statusLabel->setWordWrap(true);
         m_statusLabel->setStyleSheet(QStringLiteral("color:%1;").arg(KswordTheme::TextSecondaryHex()));
         m_rootLayout->addWidget(m_statusLabel, 0);
+        // 专业 HEX 自绘保持自己的数据面，只有实际文本日志登记共享阅读主题。
+        ks::ui::StyleWorkspaceTextViews(this);
     }
 
     void DiskEditorTab::initializeToolbar()
     {
         // 顶部工具栏聚合磁盘选择、读取范围和写入保护。
         m_toolbarWidget = new QWidget(this);
-        m_toolbarLayout = new QHBoxLayout(m_toolbarWidget);
+        auto* toolbarStack = new QVBoxLayout(m_toolbarWidget); // 设备、范围和保护按用途分行。
+        toolbarStack->setContentsMargins(16, 12, 16, 12);
+        toolbarStack->setSpacing(8);
+        ks::ui::StylePrimaryToolbar(m_toolbarWidget);
+        m_toolbarLayout = new QHBoxLayout();
         m_toolbarLayout->setContentsMargins(0, 0, 0, 0);
-        m_toolbarLayout->setSpacing(6);
+        m_toolbarLayout->setSpacing(8);
+        auto* rangeLayout = new QHBoxLayout(); // 读取范围和对应动作保持同一行。
+        auto* protectionLayout = new QHBoxLayout(); // 两个保护条件独立保持可读。
+        toolbarStack->addLayout(m_toolbarLayout);
+        toolbarStack->addLayout(rangeLayout);
+        toolbarStack->addLayout(protectionLayout);
         m_rootLayout->addWidget(m_toolbarWidget, 0);
 
         m_diskCombo = new QComboBox(m_toolbarWidget);
@@ -392,6 +404,9 @@ namespace ks::misc
         m_readButton->setStyleSheet(buildToolButtonStyle());
         m_writeButton->setStyleSheet(buildToolButtonStyle());
         m_partitionStartButton->setStyleSheet(buildToolButtonStyle());
+        // 写回保留独立危险语义，保护开关和写入前确认仍由原逻辑控制。
+        ks::ui::ApplyFlatButtonTheme(m_writeButton, ks::ui::FlatButtonTone::Danger,
+            ks::ui::FlatButtonAppearance::Solid);
 
         m_offsetEdit = new QLineEdit(m_toolbarWidget);
         m_offsetEdit->setPlaceholderText(QStringLiteral("偏移，例如 0x0000000000000000"));
@@ -420,16 +435,20 @@ namespace ks::misc
         m_toolbarLayout->addWidget(new QLabel(QStringLiteral("访问层"), m_toolbarWidget), 0);
         m_toolbarLayout->addWidget(m_backendCombo, 0);
         m_toolbarLayout->addWidget(m_refreshButton, 0);
-        m_toolbarLayout->addWidget(new QLabel(QStringLiteral("偏移"), m_toolbarWidget), 0);
-        m_toolbarLayout->addWidget(m_offsetEdit, 1);
-        m_toolbarLayout->addWidget(new QLabel(QStringLiteral("长度"), m_toolbarWidget), 0);
-        m_toolbarLayout->addWidget(m_lengthSpin, 0);
-        m_toolbarLayout->addWidget(m_partitionStartButton, 0);
-        m_toolbarLayout->addWidget(m_readButton, 0);
-        m_toolbarLayout->addWidget(m_readOnlyCheck, 0);
-        m_toolbarLayout->addWidget(m_requireAlignedCheck, 0);
-        m_toolbarLayout->addWidget(m_writeButton, 0);
+        rangeLayout->addWidget(new QLabel(QStringLiteral("偏移"), m_toolbarWidget), 0);
+        rangeLayout->addWidget(m_offsetEdit, 1);
+        rangeLayout->addWidget(new QLabel(QStringLiteral("长度"), m_toolbarWidget), 0);
+        rangeLayout->addWidget(m_lengthSpin, 0);
+        rangeLayout->addWidget(m_partitionStartButton, 0);
+        rangeLayout->addWidget(m_readButton, 0);
+        rangeLayout->addWidget(m_writeButton, 0);
+        protectionLayout->addWidget(m_readOnlyCheck, 0);
+        protectionLayout->addWidget(m_requireAlignedCheck, 0);
+        protectionLayout->addStretch(1);
         ks::ui::NormalizeToolbarRow(m_toolbarLayout);
+        ks::ui::NormalizeToolbarRow(rangeLayout);
+        ks::ui::NormalizeToolbarRow(protectionLayout);
+        ks::ui::StyleParameterFields(m_toolbarWidget);
     }
 
     void DiskEditorTab::initializeLayoutPanels()
@@ -439,8 +458,9 @@ namespace ks::misc
 
         QWidget* leftPanel = new QWidget(m_mainSplitter);
         QVBoxLayout* leftLayout = new QVBoxLayout(leftPanel);
-        leftLayout->setContentsMargins(0, 0, 0, 0);
-        leftLayout->setSpacing(6);
+        leftLayout->setContentsMargins(16, 16, 16, 16);
+        leftLayout->setSpacing(12);
+        ks::ui::StylePrimaryContentPanel(leftPanel, false);
 
         m_diskMapWidget = new DiskMapWidget(leftPanel);
         leftLayout->addWidget(m_diskMapWidget, 0);
@@ -481,8 +501,9 @@ namespace ks::misc
 
         QWidget* rightPanel = new QWidget(m_mainSplitter);
         QVBoxLayout* rightLayout = new QVBoxLayout(rightPanel);
-        rightLayout->setContentsMargins(0, 0, 0, 0);
+        rightLayout->setContentsMargins(16, 16, 16, 16);
         rightLayout->setSpacing(12);
+        ks::ui::StylePrimaryContentPanel(rightPanel, false);
 
         QGroupBox* diskSummaryGroup = new QGroupBox(QStringLiteral("磁盘摘要"), rightPanel);
         ks::ui::StylePrimaryGroup(diskSummaryGroup);
@@ -491,6 +512,7 @@ namespace ks::misc
         m_diskSummaryLabel->setWordWrap(true);
         m_diskSummaryLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
         diskSummaryLayout->addWidget(m_diskSummaryLabel);
+        ks::ui::StyleParameterSection(diskSummaryGroup);
         rightLayout->addWidget(diskSummaryGroup, 0);
 
         QGroupBox* partitionDetailGroup = new QGroupBox(QStringLiteral("分区详情"), rightPanel);
@@ -500,6 +522,7 @@ namespace ks::misc
         m_partitionDetailLabel->setWordWrap(true);
         m_partitionDetailLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
         partitionDetailLayout->addWidget(m_partitionDetailLabel);
+        ks::ui::StyleParameterSection(partitionDetailGroup);
         rightLayout->addWidget(partitionDetailGroup, 0);
 
         QGroupBox* logGroup = new QGroupBox(QStringLiteral("操作日志"), rightPanel);
@@ -509,6 +532,7 @@ namespace ks::misc
         m_logEdit->setReadOnly(true);
         // 日志主题、工具和原文追加由共享外壳处理。
         logLayout->addWidget(m_logEdit, 1);
+        ks::ui::StyleParameterSection(logGroup);
         rightLayout->addWidget(logGroup, 1);
 
         m_mainSplitter->addWidget(leftPanel);
@@ -619,12 +643,14 @@ namespace ks::misc
 
         QWidget* toolPage = new QWidget(parent);
         QVBoxLayout* toolLayout = new QVBoxLayout(toolPage);
-        toolLayout->setContentsMargins(4, 4, 4, 4);
+        // 内层参数工作区已有 16px 留白，不再额外叠加工具页边距。
+        toolLayout->setContentsMargins(0, 0, 0, 0);
         // 工具页先选范围、再执行，分区间距大于区内行距。
         toolLayout->setSpacing(16);
 
         // 范围操作是参数工具，磁盘目录/十六进制主工作区仍保留原来的浏览布局。
         auto* workspace = new ks::ui::ParameterWorkspace(toolPage, 460);
+        workspace->useWideParameterLayout(60);
         toolLayout->addWidget(workspace, 1);
 
         QGroupBox* rangeGroup = new QGroupBox(QStringLiteral("范围与文件"), toolPage);
@@ -713,6 +739,8 @@ namespace ks::misc
             button->setStyleSheet(buildToolButtonStyle());
         }
         m_importButton->setIcon(QIcon(QStringLiteral(":/Icon/disk_warning.svg")));
+        ks::ui::ApplyFlatButtonTheme(m_importButton, ks::ui::FlatButtonTone::Danger,
+            ks::ui::FlatButtonAppearance::Solid);
         actionLayout->addWidget(new QLabel(QStringLiteral("搜索"), actionGroup), 0, 0);
         actionLayout->addWidget(m_searchPatternEdit, 0, 1);
         actionLayout->addWidget(m_searchModeCombo, 1, 0);
@@ -748,6 +776,8 @@ namespace ks::misc
         // 字节搜索命中结果保留复制导出，收拢无关现场快照。
         ks::ui::SetTableActionBarMode(m_searchResultTable, ks::ui::TableActionBarMode::Compact);
         workspace->results()->addWidget(m_searchResultTable, 1);
+        ks::ui::ArrangeParameterColumns(workspace->parameters(),
+            { rangeGroup }, { actionGroup }, 300);
         workspace->finish();
         m_advancedTabs->addTab(toolPage, QIcon(QStringLiteral(":/Icon/disk_tools.svg")), QStringLiteral("搜索/镜像/扫描"));
 

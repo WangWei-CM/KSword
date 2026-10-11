@@ -21,7 +21,11 @@ namespace ks::ui
     void StylePrimaryToolbar(QWidget* toolbar);
 
     // 图表等独立数据面由页面明确登记，与表格使用同层底色和轻边界。
-    void StylePrimaryContentPanel(QWidget* panel);
+    void StylePrimaryContentPanel(QWidget* panel, bool outline = true);
+
+    // 普通状态/列表/专业工作页的显式阅读基线；不扫描或重排业务控件。
+    // page 保留原布局，仅统一正文下限、四周留白和主题画布。
+    void StyleWorkspacePage(QWidget* page, int margin = 16);
 
     // 只为页面标题绑定可读次级颜色与字重，不接管状态提示或模型项的数据语义色。
     void StylePrimarySectionTitle(QLabel* title);

@@ -1,5 +1,8 @@
 #include "DwmZOrderControl.h"
 #include "../UI/ToolbarMetrics.h"
+#include "../UI/FlatButtonTheme.h"
+#include "../UI/FlowLayout.h"
+#include "../UI/ParameterWorkspace.h"
 #include "DwmZOrderClient.h"
 #include "WindowInputClient.h"
 #include "../Internationalization/LanguageManager.h"
@@ -7,7 +10,7 @@
 #include <QComboBox>
 #include <QCoreApplication>
 #include <QDir>
-#include <QGridLayout>
+#include <QFormLayout>
 #include <QGroupBox>
 #include <QLabel>
 #include <QLineEdit>
@@ -67,6 +70,17 @@ namespace ks::dwm_order
             Control(const WindowIdentity& expected, QWidget* parent) : QGroupBox(parent)
             {
                 Bind(this, "window.dwm_order.title", "画面遮挡顺序");
+                // 属性页和杂项页共用原控件，仅提高阅读基线，保持操作/回执语义。
+                QFont body = font();
+                if (body.pixelSize() > 0)
+                {
+                    body.setPixelSize(qMax(14, body.pixelSize()));
+                }
+                else
+                {
+                    body.setPointSizeF(qMax(10.0, body.pointSizeF()));
+                }
+                setFont(body);
                 auto* layout = new QVBoxLayout(this);
                 auto* hint = new QLabel(this);
                 hint->setWordWrap(true);
@@ -76,7 +90,12 @@ namespace ks::dwm_order
                 support->setWordWrap(true);
                 Bind(support, "window.dwm_order.support", "适配范围：Windows 11 24H2 x64；Windows 10 的 19041 系列 DWM x64（实验性，待实机验证）。具体组件版本须通过完整特征校验。");
                 layout->addWidget(support);
-                auto* form = new QGridLayout;
+                // 标签与输入保留配对；窄页按表单实际宽度换行，不挤掉句柄字段。
+                auto* form = new QFormLayout;
+                form->setRowWrapPolicy(QFormLayout::WrapLongRows);
+                form->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
+                form->setHorizontalSpacing(12);
+                form->setVerticalSpacing(8);
                 auto* orderLabel = new QLabel(this);
                 Bind(orderLabel, "window.dwm_order.position", "合成位置");
                 order_ = new QComboBox(this);
@@ -88,37 +107,38 @@ namespace ks::dwm_order
                     ks::i18n::LanguageManager::instance().bindComboBoxItem(order_, i,
                         QString::fromLatin1(keys[i]), QString::fromUtf8(names[i]));
                 }
-                form->addWidget(orderLabel, 0, 0);
-                form->addWidget(order_, 0, 1);
+                form->addRow(orderLabel, order_);
                 auto* referenceLabel = new QLabel(this);
                 Bind(referenceLabel, "window.dwm_order.reference", "参照窗口 HWND");
                 reference_ = new QLineEdit(this);
                 ks::i18n::LanguageManager::instance().bindPlaceholder(reference_,
                     QStringLiteral("window.dwm_order.reference_hint"), QStringLiteral("十六进制 0x1234 或十进制句柄"));
                 reference_->setEnabled(false);
-                form->addWidget(referenceLabel, 1, 0);
-                form->addWidget(reference_, 1, 1);
+                form->addRow(referenceLabel, reference_);
                 layout->addLayout(form);
                 maintain_ = new QCheckBox(this);
                 Bind(maintain_, "window.dwm_order.maintain", "持续保持，直到恢复或目标窗口关闭");
                 maintain_->setChecked(true);
                 layout->addWidget(maintain_);
-                auto* actions = new QGridLayout;
-                actions->setHorizontalSpacing(8);
-                actions->setVerticalSpacing(8);
+                auto* actions = new ks::ui::FlowLayout(nullptr, 0, 8, 8);
                 apply_ = MakeButton("window.dwm_order.apply", "应用 DWM 顺序");
                 query_ = MakeButton("window.dwm_order.query", "读取画面顺序");
                 restore_ = MakeButton("window.dwm_order.restore", "恢复系统顺序");
-                actions->addWidget(apply_, 0, 0);
-                actions->addWidget(query_, 0, 1);
-                actions->addWidget(restore_, 1, 0);
+                actions->addWidget(apply_);
+                actions->addWidget(query_);
+                actions->addWidget(restore_);
+                ks::ui::ApplyFlatButtonTheme(apply_, ks::ui::FlatButtonTone::Accent,
+                    ks::ui::FlatButtonAppearance::Solid);
                 layout->addLayout(actions);
                 status_ = new QLabel(this);
                 status_->setWordWrap(true);
                 status_->setTextFormat(Qt::PlainText);
                 status_->setTextInteractionFlags(Qt::TextSelectableByMouse);
+                status_->setContentsMargins(0, 8, 0, 0);
                 status_->setText(Text("window.dwm_order.disconnected", "请使用本页的“加载 DWM 代理”按钮连接 DWM。"));
                 layout->addWidget(status_);
+                ks::ui::StyleParameterSection(this);
+                ks::ui::StyleParameterFields(this);
                 identityOk_ = CaptureWindow(expected.hwnd, identity_, identityError_)
                     && identity_.processId == expected.processId && identity_.threadId == expected.threadId
                     && identity_.processCreated == expected.processCreated;
@@ -133,6 +153,11 @@ namespace ks::dwm_order
             {
                 auto* button = new QPushButton(this);
                 Bind(button, key, source);
+                // 明确采用实心中性按钮，透明祖先不能吞掉操作底面。
+                ks::i18n::LanguageManager::instance().bindToolTip(button,
+                    QString::fromLatin1(key), QString::fromUtf8(source));
+                ks::ui::ApplyFlatButtonTheme(button, ks::ui::FlatButtonTone::Neutral,
+                    ks::ui::FlatButtonAppearance::Solid);
                 ks::ui::NormalizeToolbarControl(button);
                 return button;
             }

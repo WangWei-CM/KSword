@@ -1,6 +1,7 @@
 #include "HvmDock.h"
 #include "../UI/PageControlStyle.h"
 #include "../UI/PrimaryPageStyle.h"
+#include "../UI/ParameterWorkspace.h"
 #include "../UI/ToolbarMetrics.h"
 #include "../UI/FlatButtonTheme.h"
 
@@ -181,9 +182,9 @@ void HvmDock::initializeUi()
     // 知道自己处在哪一步，否则子 Tab 就把生命周期这条主线切断了。
     auto* const headerPanel = new QWidget(this);
     // 生命周期状态使用轻底面，和下方操作页形成稳定的阅读起点。
-    ks::ui::StylePrimaryToolbar(headerPanel);
+    ks::ui::StylePrimaryContentPanel(headerPanel, false);
     auto* const headerLayout = new QVBoxLayout(headerPanel);
-    headerLayout->setContentsMargins(8, 6, 8, 6);
+    headerLayout->setContentsMargins(16, 12, 16, 12);
     headerLayout->setSpacing(4);
 
     // 面包屑用换行布局：1024 宽下三段加两个箭头刚好占满，再窄一点
@@ -224,7 +225,8 @@ void HvmDock::initializeUi()
 
     auto* const controlPanel = new QWidget(tabs);
     auto* const controlLayout = new QVBoxLayout(controlPanel);
-    controlLayout->setContentsMargins(6, 6, 6, 6);
+    controlLayout->setContentsMargins(16, 16, 16, 16);
+    ks::ui::StylePrimaryContentPanel(controlPanel, false);
     // 三个步骤之间留出分区间距，组内按钮仍保持紧凑流式排列。
     controlLayout->setSpacing(16);
 
@@ -233,7 +235,7 @@ void HvmDock::initializeUi()
         ks::i18n::sourceText(QStringLiteral("第 1 步 · 资源（不进入常驻）")),
         controlPanel);
     auto* const prepareRow = new ks::ui::FlowLayout(prepareGroup, 6, 8, 8);
-    ks::ui::StylePrimaryGroup(prepareGroup);
+    ks::ui::StyleParameterSection(prepareGroup);
     m_prepareButton = new QPushButton(
         ks::i18n::sourceText(QStringLiteral("准备资源（不进入常驻）")),
         prepareGroup);
@@ -262,7 +264,7 @@ void HvmDock::initializeUi()
         ks::i18n::sourceText(QStringLiteral("第 2 步 · 安装（要求资源已准备且未常驻）")),
         controlPanel);
     auto* const installRow = new ks::ui::FlowLayout(installGroup, 6, 8, 8);
-    ks::ui::StylePrimaryGroup(installGroup);
+    ks::ui::StyleParameterSection(installGroup);
     // 引导式入口放在第一个：它是这一组里唯一一个不要求用户先自己算出物理页地址的。
     // 下面那七个面板保留原样给专家用——它们能做的事更多，代价是每一个值都要自己备好。
     m_selfTestButton = new QPushButton(ks::i18n::sourceText(QStringLiteral("全核 SVM 自检")), installGroup);
@@ -307,7 +309,7 @@ void HvmDock::initializeUi()
         ks::i18n::sourceText(QStringLiteral("第 3 步 · 常驻与故障")),
         controlPanel);
     auto* const residentRow = new ks::ui::FlowLayout(residentGroup, 6, 8, 8);
-    ks::ui::StylePrimaryGroup(residentGroup);
+    ks::ui::StyleParameterSection(residentGroup);
     m_residentButton = new QPushButton(residentGroup);
     m_soakButton = new QPushButton(
         ks::i18n::sourceText(QStringLiteral("常驻保持自检（5 秒）")),
@@ -411,7 +413,8 @@ void HvmDock::initializeUi()
     detailPage->setFrameShape(QFrame::NoFrame);
     auto* const detailHost = new QWidget(detailPage);
     auto* const detailLayout = new QVBoxLayout(detailHost);
-    detailLayout->setContentsMargins(6, 6, 6, 6);
+    detailLayout->setContentsMargins(16, 16, 16, 16);
+    ks::ui::StylePrimaryContentPanel(detailHost, false);
     detailLayout->setSpacing(6);
     m_detailLabel = new QLabel(detailHost);
     m_detailLabel->setWordWrap(true);
@@ -472,6 +475,9 @@ void HvmDock::initializeUi()
     // 出口，不是这一页的主线。主线是三步生命周期，它在「控制」上。
     tabs->setCurrentWidget(controlPanel);
     rootLayout->addWidget(tabs, 1);
+    // 三步生命周期保持完整，只有阅读层级与明确色块更新。
+    ks::ui::StyleWorkspacePage(this, 8);
+    ks::ui::StyleParameterFields(controlPanel);
 
     m_pollTimer = new QTimer(this);
     m_pollTimer->setInterval(kStatePollIntervalMilliseconds);

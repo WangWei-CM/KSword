@@ -11,6 +11,8 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QPointer>
+#include <QBoxLayout>
+#include <QFont>
 
 namespace
 {
@@ -161,10 +163,18 @@ namespace ks::ui
         });
     }
 
-    void StylePrimaryContentPanel(QWidget* panel)
+    void StylePrimaryContentPanel(QWidget* panel, bool outline)
     {
-        if (!panel || panel->property("ksword_primary_content_panel").toBool())
+        if (!panel)
         {
+            return;
+        }
+        const bool changed = panel->property("ksword_primary_content_panel_outlined").isValid()
+            && panel->property("ksword_primary_content_panel_outlined").toBool() != outline;
+        panel->setProperty("ksword_primary_content_panel_outlined", outline);
+        if (panel->property("ksword_primary_content_panel").toBool())
+        {
+            if (changed) RefreshWidgetThemeBindings();
             return;
         }
         panel->setProperty("ksword_primary_content_panel", true);
@@ -178,11 +188,40 @@ namespace ks::ui
             }
             const bool mainSurface = UsesMainSurfaceHierarchy(target);
             const MainSurfaceColors surfaces = MainWindowSurfaceColors();
+            const bool outlined = target->property("ksword_primary_content_panel_outlined").toBool();
+            const QString background = mainSurface ? surfaces.content.name()
+                : outlined ? QStringLiteral("transparent") : KswordTheme::SurfaceColor().name();
+            const QString rules = outlined ? QStringLiteral(
+                "QWidget[ksword_primary_content_panel=\"true\"]{background:%1;border:1px solid %2;border-radius:6px;}")
+                    .arg(background, mainSurface ? surfaces.border.name() : KswordTheme::BorderColor().name())
+                : QStringLiteral(
+                    "QWidget[ksword_primary_content_panel=\"true\"]{background:%1;border:0;border-radius:6px;}").arg(background);
+            ReplacePrimaryStyle(target, rules);
+        });
+    }
+
+    void StyleWorkspacePage(QWidget* page, int margin)
+    {
+        if (!page) return;
+        page->setProperty("ksword_workspace_page", true);
+        page->setAttribute(Qt::WA_StyledBackground);
+        QFont body = page->font();
+        if (body.pixelSize() > 0) body.setPixelSize(qMax(14, body.pixelSize()));
+        else body.setPointSizeF(qMax(10.0, body.pointSizeF()));
+        page->setFont(body);
+        if (page->layout())
+        {
+            page->layout()->setContentsMargins(margin, margin, margin, margin);
+            if (auto* box = qobject_cast<QBoxLayout*>(page->layout())) box->setSpacing(12);
+        }
+        const QPointer<QWidget> target(page);
+        BindWidgetTheme(page, [target]()
+        {
+            if (!target) return;
+            const QColor canvas = UsesMainSurfaceHierarchy(target)
+                ? MainWindowSurfaceColors().canvas : KswordTheme::WindowColor();
             ReplacePrimaryStyle(target, QStringLiteral(
-                "QWidget[ksword_primary_content_panel=\"true\"]{"
-                "background:%1;border:1px solid %2;border-radius:6px;}")
-                .arg(mainSurface ? surfaces.content.name() : QStringLiteral("transparent"),
-                    mainSurface ? surfaces.border.name() : KswordTheme::BorderColor().name()));
+                "QWidget[ksword_workspace_page=\"true\"]{background:%1;border:0;}").arg(canvas.name()));
         });
     }
 

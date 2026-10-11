@@ -32,6 +32,86 @@
 
 namespace
 {
+    // 明确登记的参数分区使用独立两列；Resize 后排队切换，避免布局计算中同步搬动子控件。
+    class ParameterColumns final : public QWidget
+    {
+    public:
+        ParameterColumns(QWidget* parent, const QList<QWidget*>& primary,
+            const QList<QWidget*>& secondary, const QList<QWidget*>& originalOrder, int minimumColumnWidth)
+            : QWidget(parent), m_primary(primary), m_secondary(secondary), m_originalOrder(originalOrder),
+            m_minimumColumnWidth(qMax(200, minimumColumnWidth))
+        {
+            setMinimumWidth(0);
+            setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Maximum);
+            m_columns = new QHBoxLayout(this);
+            m_columns->setContentsMargins(0, 0, 0, 0);
+            m_columns->setSpacing(18);
+
+            // 两列各自使用自然高度，长分区不会把另一列的短分区撑成大块空白。
+            m_primaryPanel = new QWidget(this);
+            m_secondaryPanel = new QWidget(this);
+            m_primaryPanel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Maximum);
+            m_secondaryPanel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Maximum);
+            m_primaryPanel->setMinimumWidth(0);
+            m_secondaryPanel->setMinimumWidth(0);
+            m_primaryLayout = createColumn(m_primaryPanel);
+            m_secondaryLayout = createColumn(m_secondaryPanel);
+            m_columns->addWidget(m_primaryPanel, 1, Qt::AlignTop);
+            m_columns->addWidget(m_secondaryPanel, 1, Qt::AlignTop);
+            applyColumns(false);
+        }
+    protected:
+        void resizeEvent(QResizeEvent* event) override
+        {
+            QWidget::resizeEvent(event);
+            if (m_pending) return;
+            m_pending = true;
+            QTimer::singleShot(0, this, [this]()
+            {
+                m_pending = false;
+                const bool twoColumns = width() >= m_minimumColumnWidth * 2 + m_columns->spacing();
+                if (twoColumns != m_twoColumns) applyColumns(twoColumns);
+            });
+        }
+    private:
+        // 输入列容器，返回只在顶部排列且不传播硬最小宽度的纵向布局。
+        static QVBoxLayout* createColumn(QWidget* panel)
+        {
+            auto* column = new QVBoxLayout(panel);
+            column->setContentsMargins(0, 0, 0, 0);
+            column->setSpacing(18);
+            column->setAlignment(Qt::AlignTop);
+            column->setSizeConstraint(QLayout::SetNoConstraint);
+            return column;
+        }
+        void applyColumns(bool twoColumns)
+        {
+            // 删除的只是布局项；业务分区、字段对象、折叠状态与已有信号连接继续保留。
+            while (QLayoutItem* item = m_primaryLayout->takeAt(0)) delete item;
+            while (QLayoutItem* item = m_secondaryLayout->takeAt(0)) delete item;
+            const QList<QWidget*>& first = twoColumns ? m_primary : m_originalOrder;
+            for (QWidget* section : first) m_primaryLayout->addWidget(section);
+            if (twoColumns)
+            {
+                for (QWidget* section : m_secondary) m_secondaryLayout->addWidget(section);
+            }
+            m_secondaryPanel->setVisible(twoColumns);
+            m_twoColumns = twoColumns;
+            updateGeometry();
+        }
+        QList<QWidget*> m_primary; // 宽屏第一列中由页面明确选择的分区。
+        QList<QWidget*> m_secondary; // 宽屏第二列中由页面明确选择的分区。
+        QList<QWidget*> m_originalOrder; // 单列恢复原阅读顺序。
+        QHBoxLayout* m_columns = nullptr; // 两列之间仅使用间隔，不增加边框。
+        QWidget* m_primaryPanel = nullptr; // 第一列独立自然高度容器。
+        QWidget* m_secondaryPanel = nullptr; // 第二列仅在空间足够时可见。
+        QVBoxLayout* m_primaryLayout = nullptr;
+        QVBoxLayout* m_secondaryLayout = nullptr;
+        int m_minimumColumnWidth = 300; // 每列最少正文宽度。
+        bool m_twoColumns = false;
+        bool m_pending = false; // 合并连续 Resize，避免重复搬动字段。
+    };
+
     // 只作用于明确登记的参数复选框/单选框。保留原文与对象，仅重绘标签并按宽度测量高度。
     class ParameterChoiceWrap final : public QObject
     {
@@ -218,7 +298,10 @@ namespace
     // 编辑输入是独立实底，结果日志与结果面板同底；同时同步 palette，避免行号栏仍沿用黑底。
     void styleWorkspaceEditors(QWidget* container)
     {
-        for (auto* editor : container->findChildren<QPlainTextEdit*>())
+        if (!container) return;
+        QList<QPlainTextEdit*> editors = container->findChildren<QPlainTextEdit*>();
+        if (auto* self = qobject_cast<QPlainTextEdit*>(container)) editors.prepend(self);
+        for (auto* editor : editors)
         {
             QFont textFont = editor->font();
             if (textFont.pixelSize() > 0) textFont.setPixelSize(qMax(14, textFont.pixelSize()));
@@ -279,6 +362,8 @@ namespace ks::ui
         // 参数面板与结果面板处于同一视觉层级，中间留白代替重复的大组框。
         m_parameterPanel = new QWidget(m_splitter);
         m_resultPanel = new QWidget(m_splitter);
+        m_parameterPanel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+        m_resultPanel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
         bindWorkspaceSurface(m_parameterPanel);
         bindWorkspaceSurface(m_resultPanel);
         auto* left = new QVBoxLayout(m_parameterPanel);
@@ -312,18 +397,41 @@ namespace ks::ui
         setMinimumSize(0, 0);
     }
 
-    // 仅首次显示和宽窄布局转换重分配，不在每次 resize 中覆盖用户分栏选择。
+    // 页面显式选择参数密集布局；百分比只控制初次分配，后续尺寸由 QSplitter 保留。
+    void ParameterWorkspace::useWideParameterLayout(int parameterPercent)
+    {
+        m_parameterPercent = qBound(40, parameterPercent, 70);
+        m_splitter->setStretchFactor(0, 1);
+        m_splitter->setStretchFactor(1, 1);
+        m_positioned = false;
+    }
+
+    // 仅首次显示和宽窄布局转换重分配；两种方向独立记住拖动后的位置。
     void ParameterWorkspace::resizeEvent(QResizeEvent* event)
     {
         QWidget::resizeEvent(event);
         const auto orientation = width() < 860 ? Qt::Vertical : Qt::Horizontal;
         if (!m_positioned || m_splitter->orientation() != orientation)
         {
+            if (m_positioned)
+            {
+                if (m_splitter->orientation() == Qt::Horizontal) m_horizontalSizes = m_splitter->sizes();
+                else m_verticalSizes = m_splitter->sizes();
+            }
             m_splitter->setOrientation(orientation);
             if (orientation == Qt::Horizontal)
-                m_splitter->setSizes({m_parameterWidth, qMax(320, width() - m_parameterWidth)});
+            {
+                const int available = qMax(1, width() - m_splitter->handleWidth());
+                const int parameterSize = m_parameterPercent > 0
+                    ? available * m_parameterPercent / 100 : m_parameterWidth;
+                m_splitter->setSizes(m_horizontalSizes.isEmpty()
+                    ? QList<int>{parameterSize, qMax(1, available - parameterSize)} : m_horizontalSizes);
+            }
             else
-                m_splitter->setSizes({qMax(220, height() / 2), qMax(180, height() / 2)});
+            {
+                m_splitter->setSizes(m_verticalSizes.isEmpty()
+                    ? QList<int>{qMax(220, height() / 2), qMax(180, height() / 2)} : m_verticalSizes);
+            }
             m_positioned = true;
         }
     }
@@ -331,8 +439,8 @@ namespace ks::ui
     void ParameterWorkspace::finish()
     {
         StyleParameterFields(m_scroll->widget());
-        styleWorkspaceEditors(m_scroll->widget());
-        styleWorkspaceEditors(m_resultPanel);
+        StyleWorkspaceTextViews(m_scroll->widget());
+        StyleWorkspaceTextViews(m_resultPanel);
         // 参数区按内容自然高度排列，禁止多行表单把剩余高度摊成巨大行间空白。
         for (auto* section : m_scroll->widget()->findChildren<QGroupBox*>())
         {
@@ -345,6 +453,30 @@ namespace ks::ui
         }
         NormalizeToolbarRow(m_actions);
         m_actions->parentWidget()->setVisible(m_actions->count() > 0);
+    }
+
+    void StyleWorkspaceTextViews(QWidget* container)
+    {
+        styleWorkspaceEditors(container);
+    }
+
+    void ArrangeParameterColumns(QVBoxLayout* layout, const QList<QWidget*>& primary,
+        const QList<QWidget*>& secondary, int minimumColumnWidth)
+    {
+        if (!layout || primary.isEmpty() || secondary.isEmpty()) return;
+        QList<QWidget*> originalOrder; // 先记录原阅读顺序，窄屏恢复时不按宽屏列顺序拼接。
+        for (int index = 0; index < layout->count(); ++index)
+        {
+            QWidget* section = layout->itemAt(index)->widget();
+            if (section && (primary.contains(section) || secondary.contains(section))) originalOrder.append(section);
+        }
+        // 要求调用方先将全部分区加入原布局，避免遗漏分区或无意接管其它页面内容。
+        if (originalOrder.size() != primary.size() + secondary.size()) return;
+        const int insertion = layout->indexOf(originalOrder.first());
+        for (QWidget* section : originalOrder) layout->removeWidget(section);
+        auto* columns = new ParameterColumns(layout->parentWidget(), primary, secondary,
+            originalOrder, minimumColumnWidth);
+        layout->insertWidget(insertion, columns);
     }
 
     void StyleParameterSection(QGroupBox* group)

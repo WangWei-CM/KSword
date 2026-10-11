@@ -897,9 +897,9 @@ void NetworkAuditPage::initializeUi()
 
     // 连接管理动作已合并到 Cross-View，不再单独占用顶层 Tab。
     QWidget* const crossToolbar = new QWidget(m_crossViewPage);
-    ks::ui::StylePrimaryToolbar(crossToolbar);
+    ks::ui::StylePrimaryContentPanel(crossToolbar, false);
     QVBoxLayout* const crossToolbarLayout = new QVBoxLayout(crossToolbar);
-    crossToolbarLayout->setContentsMargins(8, 4, 8, 4);
+    crossToolbarLayout->setContentsMargins(12, 10, 12, 10);
     crossToolbarLayout->setSpacing(8);
     QHBoxLayout* crossSearchLayout = new QHBoxLayout();
     crossSearchLayout->setContentsMargins(0, 0, 0, 0);
@@ -1147,6 +1147,10 @@ void NetworkAuditPage::initializeUi()
     installCopyMenu(m_nsiSummaryTable);
     nsiLayout->addWidget(m_nsiSummaryTable, 1);
     m_sectionTabWidget->addTab(m_nsiPage, QStringLiteral("NSI"));
+    // 证据模型和专业分割器保留，只统一各列表页的阅读基线。
+    for (QWidget* page : {m_crossViewPage, m_afdPage, m_wfpPage, m_ndisPage, m_nsiPage})
+        ks::ui::StyleWorkspacePage(page);
+
 }
 
 void NetworkAuditPage::initializeConnections()

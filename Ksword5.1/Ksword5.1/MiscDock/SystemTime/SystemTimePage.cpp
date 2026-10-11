@@ -193,8 +193,15 @@ namespace ks::misc
     void SystemTimePage::initializeUi()
     {
         auto* rootLayout = new QVBoxLayout(this);
-        rootLayout->setContentsMargins(12, 12, 12, 12);
+        ks::ui::StyleWorkspacePage(this, 0);
         rootLayout->setSpacing(10);
+
+        // 风险说明保留独立 16px 留白，工作区不再叠加外层边距。
+        auto* introduction = new QWidget(this); // 固定说明区不随参数滚走。
+        auto* introductionLayout = new QVBoxLayout(introduction);
+        introductionLayout->setContentsMargins(16, 16, 16, 0);
+        introductionLayout->setSpacing(8);
+        rootLayout->addWidget(introduction);
 
         // 永久警告不随确认消失，确保活动状态下始终能看到风险边界。
         m_warningLabel = new QLabel(
@@ -206,7 +213,7 @@ namespace ks::misc
             this);
         m_warningLabel->setWordWrap(true);
         applyWarningBannerStyle();
-        rootLayout->addWidget(m_warningLabel);
+        introductionLayout->addWidget(m_warningLabel);
 
         m_persistenceLabel = new QLabel(
             QStringLiteral(
@@ -217,10 +224,11 @@ namespace ks::misc
         m_persistenceLabel->setStyleSheet(
             QStringLiteral("color:%1;")
                 .arg(KswordTheme::TextSecondaryHex()));
-        rootLayout->addWidget(m_persistenceLabel);
+        introductionLayout->addWidget(m_persistenceLabel);
 
         // 后端与倍率独立滚动；状态和固定恢复按钮不随参数滚走。
         auto* workspace = new ks::ui::ParameterWorkspace(this, 500);
+        workspace->useWideParameterLayout(62);
         rootLayout->addWidget(workspace, 1);
 
         // 后端组要求用户明确选择 Hyper-V 共享页或原 HAL 兼容路径。
@@ -425,6 +433,9 @@ namespace ks::misc
         ks::ui::StyleParameterSection(statusGroup);
         workspace->results()->addWidget(statusGroup);
         workspace->results()->addStretch(1);
+        // 说明较多的后端选择与实际倍率互补并排；风险确认始终展开。
+        ks::ui::ArrangeParameterColumns(workspace->parameters(),
+            { backendGroup, schemeGroup }, { controlGroup }, 300);
         workspace->finish();
 
         m_refreshTimer = new QTimer(this);

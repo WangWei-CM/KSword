@@ -1,6 +1,7 @@
 #include "RenderBenchmarkPage.h"
 #include "../../UI/ToolbarMetrics.h"
 #include "../../UI/ParameterWorkspace.h"
+#include "../../UI/PrimaryPageStyle.h"
 
 // ============================================================
 // RenderBenchmarkPage.cpp
@@ -508,11 +509,13 @@ namespace ks::misc
     void RenderBenchmarkPage::initializeUi()
     {
         QVBoxLayout* const rootLayout = new QVBoxLayout(this);
-        rootLayout->setContentsMargins(10, 10, 10, 10);
         rootLayout->setSpacing(8);
+        // 工作区本身已有 16px 内边距，外层不再叠加第二圈留白。
+        ks::ui::StyleWorkspacePage(this, 0);
 
         // 测量参数独立滚动，报告获得完整高度，执行全部测试的动作固定在底栏。
         auto* workspace = new ks::ui::ParameterWorkspace(this, 500);
+        workspace->useWideParameterLayout(60);
         rootLayout->addWidget(workspace, 1);
 
         ks::i18n::LanguageManager& languageManager = ks::i18n::LanguageManager::instance();
@@ -796,6 +799,9 @@ namespace ks::misc
         m_reportEdit->setReadOnly(true);
         m_reportEdit->setMinimumHeight(180);
         workspace->results()->addWidget(m_reportEdit, 1);
+        // 参数多、报告稀少：宽屏并排四类测量，窄屏按原次序恢复单列。
+        ks::ui::ArrangeParameterColumns(workspace->parameters(),
+            { repaintGroupBox, dragGroupBox }, { compositionGroupBox, responseGroupBox }, 300);
         workspace->finish();
     }
 

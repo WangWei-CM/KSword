@@ -2607,9 +2607,9 @@ void NetworkFirewallPage::initializeEventMonitorUi()
 
     // 业务动作与搜索同属一条工具带，表格证据区保持原有伸缩。
     QWidget* const eventToolbar = new QWidget(m_eventMonitorPage);
-    ks::ui::StylePrimaryToolbar(eventToolbar);
+    ks::ui::StylePrimaryContentPanel(eventToolbar, false);
     QHBoxLayout* toolbarLayout = new QHBoxLayout(eventToolbar);
-    toolbarLayout->setContentsMargins(8, 4, 8, 4);
+    toolbarLayout->setContentsMargins(12, 8, 12, 8);
     toolbarLayout->setSpacing(8);
 
     m_refreshHistoryButton = new QPushButton(QStringLiteral("刷新历史"), m_eventMonitorPage);
@@ -2648,6 +2648,8 @@ void NetworkFirewallPage::initializeEventMonitorUi()
     ks::ui::NormalizeToolbarRow(toolbarLayout);
     pageLayout->addWidget(eventToolbar, 0);
 
+    // 证据列表保留完整高度；工具色块与画布明确分层。
+    ks::ui::StyleWorkspacePage(m_eventMonitorPage);
     m_eventTable = new ks::ui::VisibleTableWidget(m_eventMonitorPage);
     // 防火墙事件保留完整取证操作栏。
     ks::ui::SetTableActionBarMode(m_eventTable, ks::ui::TableActionBarMode::Full);
@@ -2732,9 +2734,9 @@ void NetworkFirewallPage::initializeRuleManagerUi()
 
     // 业务动作与搜索同属一条工具带，表格证据区保持原有伸缩。
     QWidget* const ruleToolbar = new QWidget(m_ruleManagerPage);
-    ks::ui::StylePrimaryToolbar(ruleToolbar);
+    ks::ui::StylePrimaryContentPanel(ruleToolbar, false);
     QHBoxLayout* toolbarLayout = new QHBoxLayout(ruleToolbar);
-    toolbarLayout->setContentsMargins(8, 4, 8, 4);
+    toolbarLayout->setContentsMargins(12, 8, 12, 8);
     toolbarLayout->setSpacing(8);
 
     m_refreshRulesButton = new QPushButton(QStringLiteral("刷新规则"), m_ruleManagerPage);
@@ -2787,6 +2789,8 @@ void NetworkFirewallPage::initializeRuleManagerUi()
     pageLayout->addWidget(ruleToolbar, 0);
 
     m_ruleSplitter = new QSplitter(Qt::Vertical, m_ruleManagerPage);
+    // 证据列表保留完整高度；工具色块与画布明确分层。
+    ks::ui::StyleWorkspacePage(m_ruleManagerPage);
     m_ruleTable = new ks::ui::VisibleTableWidget(m_ruleSplitter);
     // 规则变更具有对比意义，不能按小结果表直接隐藏。
     ks::ui::SetTableActionBarMode(m_ruleTable, ks::ui::TableActionBarMode::Full);

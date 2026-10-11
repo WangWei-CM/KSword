@@ -1,6 +1,7 @@
 #include "ClipboardGuardPage.h"
 #include "../../UI/ToolbarMetrics.h"
 #include "../../UI/PrimaryPageStyle.h"
+#include "../../UI/ParameterWorkspace.h"
 #include "../../UI/VisibleTableWidget.h"
 #include "../../UI/FlatButtonTheme.h"
 #include "../../theme.h"
@@ -41,7 +42,8 @@ namespace ks::misc
         QString buildToolButtonStyle()
         {
             // 纯色主题只接管颜色；保留本页按钮尺寸和业务选中状态。
-            return ks::ui::BuildFlatButtonStyle(ks::ui::FlatButtonTone::Neutral)
+            return ks::ui::BuildFlatButtonStyle(ks::ui::FlatButtonTone::Neutral,
+                ks::ui::FlatButtonAppearance::Solid)
                 + QStringLiteral("QPushButton{border-radius:4px;padding:4px 10px;}");
 
         }
@@ -100,8 +102,16 @@ namespace ks::misc
     void ClipboardGuardPage::initializeUi()
     {
         m_rootLayout = new QVBoxLayout(this);
-        m_rootLayout->setContentsMargins(6, 6, 6, 6);
-        m_rootLayout->setSpacing(6);
+        ks::ui::StyleWorkspacePage(this);
+        m_rootLayout->setSpacing(16);
+
+        // 策略与持续事件分别占据独立色面，保留原表格及 A/B 列预设对象。
+        auto* rulePanel = new QWidget(this); // 上方策略面板保持自然高度。
+        auto* ruleLayout = new QVBoxLayout(rulePanel);
+        ruleLayout->setContentsMargins(16, 16, 16, 16);
+        ruleLayout->setSpacing(8);
+        ks::ui::StylePrimaryContentPanel(rulePanel, false);
+        m_rootLayout->addWidget(rulePanel);
 
         // ---- 工具栏 ----
         m_toolbarLayout = new QHBoxLayout();
@@ -136,11 +146,14 @@ namespace ks::misc
         m_toolbarLayout->addWidget(m_addRuleButton);
         m_toolbarLayout->addWidget(m_removeRuleButton);
         m_toolbarLayout->addWidget(m_refreshButton);
-        m_toolbarLayout->addWidget(m_globalMonitorCheck);
         m_toolbarLayout->addStretch(1);
-        m_toolbarLayout->addWidget(m_statusLabel);
         ks::ui::NormalizeToolbarRow(m_toolbarLayout);
-        m_rootLayout->addLayout(m_toolbarLayout);
+        ruleLayout->addLayout(m_toolbarLayout);
+
+        // 长监控选项与动作分行，状态在自身一行换行，窄窗口不挤压全部按钮。
+        m_statusLabel->setWordWrap(true);
+        ruleLayout->addWidget(m_globalMonitorCheck);
+        ruleLayout->addWidget(m_statusLabel);
 
         // ---- 规则表：PID/映像/规则名/读/写/枚举/启用 ----
         m_ruleTable = new QTableWidget(0, 7, this);
@@ -155,9 +168,15 @@ namespace ks::misc
         m_ruleTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
         m_ruleTable->setAlternatingRowColors(true);
         m_ruleTable->setMaximumHeight(160);
-        m_rootLayout->addWidget(m_ruleTable, 0);
-        // 静态策略和持续事件之间用留白区分，区内仍保持紧凑的操作/结果关系。
-        m_rootLayout->addSpacing(8);
+        ruleLayout->addWidget(m_ruleTable, 0);
+        ks::ui::StyleParameterFields(rulePanel);
+
+        auto* eventPanel = new QWidget(this); // 下方事件占满可用高度。
+        auto* eventLayout = new QVBoxLayout(eventPanel);
+        eventLayout->setContentsMargins(16, 16, 16, 16);
+        eventLayout->setSpacing(8);
+        ks::ui::StylePrimaryContentPanel(eventPanel, false);
+        m_rootLayout->addWidget(eventPanel, 1);
 
         // ---- 事件表工具栏：A/B 列组预设 ----
         QHBoxLayout* const eventTopLayout = new QHBoxLayout();
@@ -184,7 +203,7 @@ namespace ks::misc
         eventTopLayout->addWidget(m_columnPresetWidget);
         eventTopLayout->addStretch(1);
         ks::ui::NormalizeToolbarRow(eventTopLayout);
-        m_rootLayout->addLayout(eventTopLayout);
+        eventLayout->addLayout(eventTopLayout);
 
         // ---- 事件表 ----
         m_eventTable = new QTableWidget(0, ColumnCount, this);
@@ -203,7 +222,7 @@ namespace ks::misc
         m_eventTable->setAlternatingRowColors(true);
         m_eventTable->setContextMenuPolicy(Qt::CustomContextMenu);
         applyColumnLayout(ClipboardGuardColumnLayout::PresetA);
-        m_rootLayout->addWidget(m_eventTable, 1);
+        eventLayout->addWidget(m_eventTable, 1);
 
         m_uiFlushTimer = new QTimer(this);
         m_uiFlushTimer->setInterval(200);

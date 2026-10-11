@@ -5,6 +5,7 @@
 #include "../../UI/PrimaryPageStyle.h"
 #include "../../UI/ParameterWorkspace.h"
 #include "../../UI/ToolbarMetrics.h"
+#include "../../UI/FlatButtonTheme.h"
 
 #include "../../Internationalization/LanguageManager.h"
 #include "../../UI/CodeEditorWidget.h"
@@ -209,7 +210,7 @@ namespace ks::misc
         {
             m_warningLabel->setStyleSheet(
                 QStringLiteral(
-                    "QLabel{padding:10px;border:1px solid %1;border-radius:5px;"
+                    "QLabel{padding:16px;border:0;border-left:3px solid %1;border-radius:5px;"
                     "background:%2;color:%3;}")
                     .arg(KswordTheme::ErrorHex())
                     .arg(KswordTheme::ThemeColorName(KswordTheme::ErrorBackgroundColor()))
@@ -219,7 +220,7 @@ namespace ks::misc
         {
             m_pendingLabel->setStyleSheet(
                 QStringLiteral(
-                    "QLabel{padding:8px;border:1px solid %1;border-radius:5px;"
+                    "QLabel{padding:12px;border:0;border-left:3px solid %1;border-radius:5px;"
                     "background:%2;color:%3;}")
                     .arg(KswordTheme::WarningHex())
                     .arg(KswordTheme::ThemeColorName(KswordTheme::WarningBackgroundColor()))
@@ -232,8 +233,20 @@ namespace ks::misc
         auto& language = ks::i18n::LanguageManager::instance();
 
         auto* rootLayout = new QVBoxLayout(this);
-        rootLayout->setContentsMargins(12, 12, 12, 12);
-        rootLayout->setSpacing(10);
+        ks::ui::StyleWorkspacePage(this);
+        rootLayout->setSpacing(16);
+
+        // 独立中性色面承载状态、定位和动作；原分组继续负责标题与业务控件。
+        auto wrapSection = [this](QGroupBox* group)
+        {
+            auto* panel = new QWidget(this); // 面板只提供底色与等边留白。
+            auto* panelLayout = new QVBoxLayout(panel);
+            panelLayout->setContentsMargins(16, 16, 16, 16);
+            panelLayout->setSpacing(0);
+            panelLayout->addWidget(group);
+            ks::ui::StylePrimaryContentPanel(panel, false);
+            return panel;
+        };
 
         // ===================== 风险横幅 =====================
         m_warningLabel = new QLabel(this);
@@ -247,8 +260,6 @@ namespace ks::misc
 
         // ===================== 当前状态 =====================
         auto* postureGroup = new QGroupBox(this);
-        // 状态、目标与操作分区保持明确边界，保留原有风险说明及确认流程。
-        ks::ui::StylePrimaryGroup(postureGroup);
         language.bindText(
             postureGroup,
             QStringLiteral("misc.disable_dse.posture.title"),
@@ -272,12 +283,10 @@ namespace ks::misc
         postureLayout->addWidget(m_blockLabel);
 
         ks::ui::StyleParameterSection(postureGroup);
-        rootLayout->addWidget(postureGroup);
-        rootLayout->addSpacing(6);
+        rootLayout->addWidget(wrapSection(postureGroup));
 
         // ===================== 目标定位 =====================
         auto* locationGroup = new QGroupBox(this);
-        ks::ui::StylePrimaryGroup(locationGroup);
         language.bindText(
             locationGroup,
             QStringLiteral("misc.disable_dse.location.title"),
@@ -293,20 +302,19 @@ namespace ks::misc
         // 定位与事务保留实际时序消息；追加时翻译，语言切换由页面按消息重绘。
         m_traceEdit = new CodeEditorWidget(locationGroup);
         m_traceEdit->setReadOnly(true);
-        m_traceEdit->setMaximumHeight(150);
+        m_traceEdit->setMinimumHeight(96);
         language.bindToolTip(
             m_traceEdit,
             QStringLiteral("misc.disable_dse.trace.tooltip"),
             QStringLiteral("定位轨迹与事务日志。定位不使用任何硬编码偏移：从导出的 CiInitialize 反汇编找到 CipInitialize，再在其中找写 g_CiOptions 的指令。"));
-        locationLayout->addWidget(m_traceEdit);
+        // 定位轨迹承担页面剩余高度，不再将日志压成窄条后留下大块空白。
+        locationLayout->addWidget(m_traceEdit, 1);
 
         ks::ui::StyleParameterSection(locationGroup);
-        rootLayout->addWidget(locationGroup);
-        rootLayout->addSpacing(6);
+        rootLayout->addWidget(wrapSection(locationGroup), 1);
 
         // ===================== 操作 =====================
         auto* actionGroup = new QGroupBox(this);
-        ks::ui::StylePrimaryGroup(actionGroup);
         language.bindText(
             actionGroup,
             QStringLiteral("misc.disable_dse.action.title"),
@@ -324,7 +332,8 @@ namespace ks::misc
         buttonLayout->setSpacing(8);
 
         m_refreshButton = new QPushButton(actionGroup);
-        m_refreshButton->setStyleSheet(KswordTheme::ThemedButtonStyle());
+        ks::ui::ApplyFlatButtonTheme(m_refreshButton, ks::ui::FlatButtonTone::Neutral,
+            ks::ui::FlatButtonAppearance::Solid);
         language.bindText(
             m_refreshButton,
             QStringLiteral("misc.disable_dse.action.refresh"),
@@ -332,7 +341,8 @@ namespace ks::misc
         buttonLayout->addWidget(m_refreshButton);
 
         m_locateButton = new QPushButton(actionGroup);
-        m_locateButton->setStyleSheet(KswordTheme::ThemedButtonStyle());
+        ks::ui::ApplyFlatButtonTheme(m_locateButton, ks::ui::FlatButtonTone::Neutral,
+            ks::ui::FlatButtonAppearance::Solid);
         language.bindText(
             m_locateButton,
             QStringLiteral("misc.disable_dse.action.locate"),
@@ -340,7 +350,8 @@ namespace ks::misc
         buttonLayout->addWidget(m_locateButton);
 
         m_disableButton = new QPushButton(actionGroup);
-        m_disableButton->setStyleSheet(KswordTheme::ThemedButtonStyle());
+        ks::ui::ApplyFlatButtonTheme(m_disableButton, ks::ui::FlatButtonTone::Danger,
+            ks::ui::FlatButtonAppearance::Solid);
         language.bindText(
             m_disableButton,
             QStringLiteral("misc.disable_dse.action.disable"),
@@ -348,7 +359,8 @@ namespace ks::misc
         buttonLayout->addWidget(m_disableButton);
 
         m_restoreButton = new QPushButton(actionGroup);
-        m_restoreButton->setStyleSheet(KswordTheme::ThemedButtonStyle());
+        ks::ui::ApplyFlatButtonTheme(m_restoreButton, ks::ui::FlatButtonTone::Accent,
+            ks::ui::FlatButtonAppearance::Solid);
         language.bindText(
             m_restoreButton,
             QStringLiteral("misc.disable_dse.action.restore"),
@@ -365,8 +377,10 @@ namespace ks::misc
         actionLayout->addWidget(m_resultLabel);
 
         ks::ui::StyleParameterSection(actionGroup);
-        rootLayout->addWidget(actionGroup);
-        rootLayout->addStretch(1);
+        rootLayout->addWidget(wrapSection(actionGroup));
+
+        // 只登记本页的日志，QSS 与 palette 同步避免编辑器继续采样透明黑底。
+        ks::ui::StyleWorkspaceTextViews(this);
 
         applyBannerStyle();
     }

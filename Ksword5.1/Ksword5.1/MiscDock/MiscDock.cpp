@@ -1,5 +1,6 @@
 #include "MiscDock.h"
 #include "../UI/PageControlStyle.h"
+#include "../UI/PrimaryPageStyle.h"
 
 #include "BootEditor/BootEditorTab.h"
 #include "ApplicationControlPage.h"
@@ -596,6 +597,13 @@ void MiscDock::initializePluginPage()
     }
 
     QVBoxLayout* const hostLayout = buildHostLayout(m_pluginHostWidget);
-    m_pluginPage = ks::plugin_host::createTabPluginContainer(m_pluginHostWidget);
-    hostLayout->addWidget(m_pluginPage, 1);
+    // 插件原生子窗口仍由原宿主持有，只为其外围增加明确的无描边工作面。
+    auto* pluginPanel = new QWidget(m_pluginHostWidget); // 外壳不接管插件内部 palette/QSS。
+    auto* pluginLayout = new QVBoxLayout(pluginPanel);
+    pluginLayout->setSpacing(12);
+    ks::ui::StyleWorkspacePage(pluginPanel);
+    ks::ui::StylePrimaryContentPanel(pluginPanel, false);
+    m_pluginPage = ks::plugin_host::createTabPluginContainer(pluginPanel);
+    pluginLayout->addWidget(m_pluginPage, 1);
+    hostLayout->addWidget(pluginPanel, 1);
 }

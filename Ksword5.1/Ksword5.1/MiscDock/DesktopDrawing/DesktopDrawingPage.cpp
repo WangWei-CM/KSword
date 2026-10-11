@@ -61,15 +61,16 @@ namespace ks::misc
     {
         auto& language = ks::i18n::LanguageManager::instance();
         auto* root = new QVBoxLayout(this);
-        root->setContentsMargins(12, 12, 12, 12);
         root->setSpacing(10);
+        ks::ui::StyleWorkspacePage(this);
 
         auto* scroll = new QScrollArea(this);
         scroll->setWidgetResizable(true);
         scroll->setFrameShape(QFrame::NoFrame);
         m_settings = new QWidget(scroll);
         auto* form = new QFormLayout(m_settings);
-        form->setContentsMargins(0, 0, 0, 0);
+        form->setContentsMargins(16, 16, 16, 16);
+        ks::ui::StylePrimaryContentPanel(m_settings, false);
         // 简短表单保持一屏可读，标签与字段使用固定间距。
         form->setHorizontalSpacing(16);
         form->setVerticalSpacing(8);

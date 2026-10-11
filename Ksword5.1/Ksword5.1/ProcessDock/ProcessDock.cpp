@@ -5770,6 +5770,7 @@ void ProcessDock::initializeCreateProcessPage()
     m_createProcessPageLayout->setSpacing(6);
 
     auto* workspace = new ks::ui::ParameterWorkspace(m_createProcessPage, 600);
+    workspace->useWideParameterLayout(60);
     m_createProcessPageLayout->addWidget(workspace);
     QVBoxLayout* contentLayout = workspace->parameters();
     QWidget* contentWidget = contentLayout->parentWidget();
@@ -5828,7 +5829,7 @@ void ProcessDock::initializeCreateProcessPage()
     // 1) 创建方式 + 令牌来源配置。
     QGroupBox* methodGroup = new QGroupBox("创建方式 / 令牌来源", contentWidget);
     ks::ui::StyleParameterSection(methodGroup);
-    QGridLayout* methodLayout = new QGridLayout(methodGroup);
+    QFormLayout* methodLayout = new QFormLayout(methodGroup);
     methodLayout->setHorizontalSpacing(8);
     methodLayout->setVerticalSpacing(6);
     m_createMethodCombo = new QComboBox(methodGroup);
@@ -5846,14 +5847,11 @@ void ProcessDock::initializeCreateProcessPage()
     m_tokenDesiredAccessEdit->setStyleSheet(inputStyle);
 
     // 方法选择区域补充中文语义，避免只看英文 API 名不易理解。
-    methodLayout->addWidget(new QLabel("API（创建方式）:", methodGroup), 0, 0);
-    methodLayout->addWidget(m_createMethodCombo, 0, 1);
-    methodLayout->setColumnStretch(1, 1);
-    methodLayout->addWidget(new QLabel("源 PID（令牌来源进程）:", methodGroup), 1, 0);
-    methodLayout->addWidget(m_tokenSourcePidEdit, 1, 1);
-    methodLayout->addWidget(new QLabel("令牌访问掩码（DesiredAccess）:", methodGroup), 2, 0);
-    methodLayout->addWidget(m_tokenDesiredAccessEdit, 2, 1);
-    methodLayout->addWidget(m_tokenDuplicatePrimaryCheck, 3, 0, 1, 2);
+    // 长标签在列宽不足时由表单换行，字段保留原对象及已有业务连接。
+    methodLayout->addRow(new QLabel("API（创建方式）:", methodGroup), m_createMethodCombo);
+    methodLayout->addRow(new QLabel("源 PID（令牌来源进程）:", methodGroup), m_tokenSourcePidEdit);
+    methodLayout->addRow(new QLabel("令牌访问掩码（DesiredAccess）:", methodGroup), m_tokenDesiredAccessEdit);
+    methodLayout->addRow(m_tokenDuplicatePrimaryCheck);
 
     // Token DesiredAccess 位标志勾选区：
     // - 覆盖最常见 TOKEN_* / 标准权限 / GENERIC_*；
@@ -5863,7 +5861,7 @@ void ProcessDock::initializeCreateProcessPage()
         "Token DesiredAccess 位标志组合",
         TokenDesiredAccessDefinitions,
         &m_tokenDesiredAccessChecks);
-    methodLayout->addWidget(ks::ui::FoldParameterSection(tokenAccessGroup), 4, 0, 1, 2);
+    methodLayout->addRow(ks::ui::FoldParameterSection(tokenAccessGroup));
     contentLayout->addWidget(methodGroup);
 
     // 2) CreateProcessW 基础参数。
@@ -5932,13 +5930,13 @@ void ProcessDock::initializeCreateProcessPage()
         "dwCreationFlags 位标志组合",
         CreateProcessFlagDefinitions,
         &m_creationFlagChecks);
-    basicLayout->addWidget(ks::ui::FoldParameterSection(creationFlagsGroup), 12, 0, 1, 2);
+    basicLayout->addWidget(ks::ui::FoldParameterSection(creationFlagsGroup, true), 12, 0, 1, 2);
     contentLayout->addWidget(basicGroup);
 
     // 3) PROCESS / THREAD SECURITY_ATTRIBUTES。
     QGroupBox* securityGroup = new QGroupBox("SECURITY_ATTRIBUTES（Process / Thread）", contentWidget);
     ks::ui::StyleParameterSection(securityGroup);
-    QGridLayout* securityLayout = new QGridLayout(securityGroup);
+    QFormLayout* securityLayout = new QFormLayout(securityGroup);
     securityLayout->setHorizontalSpacing(8);
     securityLayout->setVerticalSpacing(6);
 
@@ -5958,25 +5956,21 @@ void ProcessDock::initializeCreateProcessPage()
     m_threadSecurityDescriptorEdit->setStyleSheet(inputStyle);
 
     // 两个安全结构各自纵向成组，不再横跨六列挤出参数栏。
-    securityLayout->setColumnStretch(1, 1);
-    securityLayout->addWidget(m_useProcessSecurityCheck, 0, 0, 1, 2);
-    securityLayout->addWidget(new QLabel("nLength（结构体长度）", securityGroup), 1, 0);
-    securityLayout->addWidget(m_processSecurityLengthEdit, 1, 1);
-    securityLayout->addWidget(new QLabel("lpSecurityDescriptor（安全描述符指针）", securityGroup), 2, 0);
-    securityLayout->addWidget(m_processSecurityDescriptorEdit, 2, 1);
-    securityLayout->addWidget(m_processSecurityInheritCheck, 3, 0, 1, 2);
-    securityLayout->addWidget(m_useThreadSecurityCheck, 4, 0, 1, 2);
-    securityLayout->addWidget(new QLabel("nLength（结构体长度）", securityGroup), 5, 0);
-    securityLayout->addWidget(m_threadSecurityLengthEdit, 5, 1);
-    securityLayout->addWidget(new QLabel("lpSecurityDescriptor（安全描述符指针）", securityGroup), 6, 0);
-    securityLayout->addWidget(m_threadSecurityDescriptorEdit, 6, 1);
-    securityLayout->addWidget(m_threadSecurityInheritCheck, 7, 0, 1, 2);
-    contentLayout->addWidget(ks::ui::FoldParameterSection(securityGroup));
+    securityLayout->addRow(m_useProcessSecurityCheck);
+    securityLayout->addRow(new QLabel("nLength（结构体长度）", securityGroup), m_processSecurityLengthEdit);
+    securityLayout->addRow(new QLabel("lpSecurityDescriptor（安全描述符指针）", securityGroup), m_processSecurityDescriptorEdit);
+    securityLayout->addRow(m_processSecurityInheritCheck);
+    securityLayout->addRow(m_useThreadSecurityCheck);
+    securityLayout->addRow(new QLabel("nLength（结构体长度）", securityGroup), m_threadSecurityLengthEdit);
+    securityLayout->addRow(new QLabel("lpSecurityDescriptor（安全描述符指针）", securityGroup), m_threadSecurityDescriptorEdit);
+    securityLayout->addRow(m_threadSecurityInheritCheck);
+    QWidget* securitySection = ks::ui::FoldParameterSection(securityGroup); // 低频安全结构保留折叠入口。
+    contentLayout->addWidget(securitySection);
 
     // 4) STARTUPINFOW 全字段。
     QGroupBox* startupGroup = new QGroupBox("STARTUPINFOW（全部字段）", contentWidget);
     ks::ui::StyleParameterSection(startupGroup);
-    QGridLayout* startupLayout = new QGridLayout(startupGroup);
+    QFormLayout* startupLayout = new QFormLayout(startupGroup);
     startupLayout->setHorizontalSpacing(8);
     startupLayout->setVerticalSpacing(6);
     m_useStartupInfoCheck = new QCheckBox("启用 lpStartupInfo（启动信息结构体，取消则传 NULL）", startupGroup);
@@ -6014,13 +6008,11 @@ void ProcessDock::initializeCreateProcessPage()
         startupEdit->setStyleSheet(inputStyle);
     }
 
-    int startupRow = 0;
-    startupLayout->addWidget(m_useStartupInfoCheck, startupRow++, 0, 1, 2);
-    const auto addStartupField = [&startupLayout, &startupRow](const QString& labelText, QWidget* editorWidget, const int colOffset)
+    startupLayout->addRow(m_useStartupInfoCheck);
+    const auto addStartupField = [&startupLayout](const QString& labelText, QWidget* editorWidget, const int colOffset)
         {
             Q_UNUSED(colOffset);
-            startupLayout->addWidget(new QLabel(labelText), startupRow, 0);
-            startupLayout->addWidget(editorWidget, startupRow++, 1);
+            startupLayout->addRow(new QLabel(labelText), editorWidget);
         };
 
     addStartupField("cb（结构体大小）", m_siCbEdit, 0);
@@ -6049,7 +6041,7 @@ void ProcessDock::initializeCreateProcessPage()
         "STARTUPINFO.dwFillAttribute 位标志组合",
         ConsoleFillAttributeDefinitions,
         &m_startupFillAttributeChecks);
-    startupLayout->addWidget(ks::ui::FoldParameterSection(startupFillAttrGroup), startupRow++, 0, 1, 2);
+    startupLayout->addRow(ks::ui::FoldParameterSection(startupFillAttrGroup));
 
     // STARTUPINFO.dwFlags 位标志勾选区：
     // - 列出 STARTF_* 标志；
@@ -6059,14 +6051,15 @@ void ProcessDock::initializeCreateProcessPage()
         "STARTUPINFO.dwFlags 位标志组合",
         StartupInfoFlagDefinitions,
         &m_startupFlagChecks);
-    startupLayout->addWidget(ks::ui::FoldParameterSection(startupFlagsGroup), startupRow++, 0, 1, 2);
+    startupLayout->addRow(ks::ui::FoldParameterSection(startupFlagsGroup));
 
-    contentLayout->addWidget(ks::ui::FoldParameterSection(startupGroup));
+    QWidget* startupSection = ks::ui::FoldParameterSection(startupGroup, true); // 常用启动字段默认展开。
+    contentLayout->addWidget(startupSection);
 
     // 5) PROCESS_INFORMATION 全字段。
     QGroupBox* processInfoGroup = new QGroupBox("PROCESS_INFORMATION（输出结构体，支持自定义初值）", contentWidget);
     ks::ui::StyleParameterSection(processInfoGroup);
-    QGridLayout* processInfoLayout = new QGridLayout(processInfoGroup);
+    QFormLayout* processInfoLayout = new QFormLayout(processInfoGroup);
     processInfoLayout->setHorizontalSpacing(8);
     processInfoLayout->setVerticalSpacing(6);
 
@@ -6082,17 +6075,13 @@ void ProcessDock::initializeCreateProcessPage()
     m_piPidEdit->setStyleSheet(inputStyle);
     m_piTidEdit->setStyleSheet(inputStyle);
 
-    processInfoLayout->setColumnStretch(1, 1);
-    processInfoLayout->addWidget(m_useProcessInfoCheck, 0, 0, 1, 2);
-    processInfoLayout->addWidget(new QLabel("hProcess（输出进程句柄）", processInfoGroup), 1, 0);
-    processInfoLayout->addWidget(m_piProcessHandleEdit, 1, 1);
-    processInfoLayout->addWidget(new QLabel("hThread（输出线程句柄）", processInfoGroup), 2, 0);
-    processInfoLayout->addWidget(m_piThreadHandleEdit, 2, 1);
-    processInfoLayout->addWidget(new QLabel("dwProcessId（输出PID）", processInfoGroup), 3, 0);
-    processInfoLayout->addWidget(m_piPidEdit, 3, 1);
-    processInfoLayout->addWidget(new QLabel("dwThreadId（输出TID）", processInfoGroup), 4, 0);
-    processInfoLayout->addWidget(m_piTidEdit, 4, 1);
-    contentLayout->addWidget(ks::ui::FoldParameterSection(processInfoGroup));
+    processInfoLayout->addRow(m_useProcessInfoCheck);
+    processInfoLayout->addRow(new QLabel("hProcess（输出进程句柄）", processInfoGroup), m_piProcessHandleEdit);
+    processInfoLayout->addRow(new QLabel("hThread（输出线程句柄）", processInfoGroup), m_piThreadHandleEdit);
+    processInfoLayout->addRow(new QLabel("dwProcessId（输出PID）", processInfoGroup), m_piPidEdit);
+    processInfoLayout->addRow(new QLabel("dwThreadId（输出TID）", processInfoGroup), m_piTidEdit);
+    QWidget* processInfoSection = ks::ui::FoldParameterSection(processInfoGroup); // 输出结构自定义初值仍低频折叠。
+    contentLayout->addWidget(processInfoSection);
 
     // 6) Token 特权编辑器。
     QGroupBox* tokenPrivilegeGroup = new QGroupBox("Token 特权调整（AdjustTokenPrivileges）", contentWidget);
@@ -6163,19 +6152,25 @@ void ProcessDock::initializeCreateProcessPage()
         m_tokenPrivilegeTable->setCellWidget(row, 1, actionCombo);
     }
 
-    QHBoxLayout* tokenActionLayout = new QHBoxLayout();
+    QVBoxLayout* tokenActionLayout = new QVBoxLayout();
     m_applyTokenPrivilegeButton = new QPushButton("仅应用令牌调整（不创建）", tokenPrivilegeGroup);
     m_resetTokenPrivilegeButton = new QPushButton("重置全部特权动作为保持", tokenPrivilegeGroup);
     m_applyTokenPrivilegeButton->setStyleSheet(buttonStyle);
     m_resetTokenPrivilegeButton->setStyleSheet(buttonStyle);
     tokenActionLayout->addWidget(m_applyTokenPrivilegeButton);
     tokenActionLayout->addWidget(m_resetTokenPrivilegeButton);
-    tokenActionLayout->addStretch(1);
-    ks::ui::NormalizeToolbarRow(tokenActionLayout);
+    // 令牌动作文字较长，纵向排列避免窄列中两个按钮横向裁切。
+    ks::ui::NormalizeToolbarControl(m_applyTokenPrivilegeButton);
+    ks::ui::NormalizeToolbarControl(m_resetTokenPrivilegeButton);
 
     tokenPrivilegeLayout->addWidget(m_tokenPrivilegeTable, 1);
     tokenPrivilegeLayout->addLayout(tokenActionLayout);
-    contentLayout->addWidget(ks::ui::FoldParameterSection(tokenPrivilegeGroup));
+    QWidget* tokenPrivilegeSection = ks::ui::FoldParameterSection(tokenPrivilegeGroup); // 令牌特权保留独立折叠。
+    contentLayout->addWidget(tokenPrivilegeSection);
+
+    // 创建方式/基础参数在第一列，启动信息/低频结构在第二列；窄屏按原序恢复单列。
+    ks::ui::ArrangeParameterColumns(contentLayout, {methodGroup, basicGroup},
+        {securitySection, startupSection, processInfoSection, tokenPrivilegeSection}, 320);
 
     // 7) 操作按钮 + 输出日志。
     QGroupBox* actionGroup = new QGroupBox("执行与结果", contentWidget);

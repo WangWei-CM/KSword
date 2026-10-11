@@ -2,6 +2,7 @@
 #include "../UI/ToolbarMetrics.h"
 #include "../UI/FlatButtonTheme.h"
 #include "../UI/ParameterWorkspace.h"
+#include "../UI/PrimaryPageStyle.h"
 
 #include "../theme.h"
 #include "../UI/AdaptivePageScroll.h"
@@ -121,14 +122,26 @@ void DdmaPage::initializeUi()
 {
     // 页面自带内部滚动壳：四个分组框纵向堆叠约有一千多像素，是内存 Dock 过长的最大单一来源。
     // 根布局建在壳的内容容器上；放不下时在页内滚动，不再撑高整个 Dock。
-    QVBoxLayout* rootLayout = new QVBoxLayout(ks::ui::EnablePageInnerScroll(this));
-    rootLayout->setContentsMargins(6, 6, 6, 6);
-    rootLayout->setSpacing(6);
-
-    rootLayout->addWidget(buildIntroGroup());
-    rootLayout->addWidget(buildChannelGroup());
-    rootLayout->addWidget(buildAccessGroup(), 1);
-    rootLayout->addWidget(buildCompareGroup());
+    QWidget* content = ks::ui::EnablePageInnerScroll(this);
+    QVBoxLayout* rootLayout = new QVBoxLayout(content);
+    rootLayout->setSpacing(16);
+    // 专业通道、编辑器和复核各自保留，只用明确的无描边色块建立层次。
+    const auto addSection = [rootLayout, content](QGroupBox* group, int stretch = 0)
+    {
+        auto* panel = new QWidget(content);
+        ks::ui::StylePrimaryContentPanel(panel, false);
+        auto* panelLayout = new QVBoxLayout(panel);
+        panelLayout->setContentsMargins(16, 16, 16, 16);
+        panelLayout->addWidget(group);
+        rootLayout->addWidget(panel, stretch);
+    };
+    addSection(buildIntroGroup());
+    addSection(buildChannelGroup());
+    addSection(buildAccessGroup(), 1);
+    addSection(buildCompareGroup());
+    ks::ui::StyleWorkspacePage(this, 0);
+    ks::ui::StyleWorkspacePage(content);
+    ks::ui::StyleWorkspaceTextViews(content);
 
     applySemanticStyles();
 }

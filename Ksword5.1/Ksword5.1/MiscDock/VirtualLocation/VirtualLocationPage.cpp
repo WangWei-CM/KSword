@@ -186,8 +186,14 @@ namespace ks::misc
         auto& language = ks::i18n::LanguageManager::instance();
 
         auto* rootLayout = new QVBoxLayout(this);
-        rootLayout->setContentsMargins(12, 12, 12, 12);
+        ks::ui::StyleWorkspacePage(this, 0);
         rootLayout->setSpacing(10);
+
+        // 生效范围说明和内部工作区分别管理留白，避免参数框外再套一圈。
+        auto* introduction = new QWidget(this); // 范围说明仍固定在页顶。
+        auto* introductionLayout = new QVBoxLayout(introduction);
+        introductionLayout->setContentsMargins(16, 16, 16, 0);
+        rootLayout->addWidget(introduction);
 
         // ===================== 生效范围说明 =====================
         m_scopeLabel = new QLabel(this);
@@ -200,10 +206,11 @@ namespace ks::misc
                 "本页把坐标写成 Windows 的“系统默认位置”，只对通过 Windows 位置服务取位置的程序生效，"
                 "而且要在系统拿不到更精确的定位源时才会被采用。浏览器网页定位、自带 IP 库或自建定位 SDK 的应用不受影响。"
                 "修改只落在注册表上，随时可以用“清除虚拟定位”还原。"));
-        rootLayout->addWidget(m_scopeLabel);
+        introductionLayout->addWidget(m_scopeLabel);
 
         // 单列坐标编辑与只读定位证据并排，避免经纬度横排挤出参数边界。
         auto* workspace = new ks::ui::ParameterWorkspace(this, 480);
+        workspace->useWideParameterLayout(55);
         rootLayout->addWidget(workspace, 1);
 
         // ===================== 当前状态 =====================
@@ -501,6 +508,9 @@ namespace ks::misc
         workspace->results()->addWidget(m_resultLabel);
         ks::ui::StyleParameterSection(actionGroup);
         workspace->parameters()->addWidget(actionGroup);
+        // 定位字段数量适中，宽屏仅将坐标与全系统选项并排，不扩成整页表单。
+        ks::ui::ArrangeParameterColumns(workspace->parameters(),
+            { inputGroup }, { actionGroup }, 300);
         workspace->finish();
     }
 
