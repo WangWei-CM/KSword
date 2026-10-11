@@ -33,7 +33,7 @@ void SettingsDock::initializeOnlineScanTab()
     QGroupBox* keyGroupBox = new QGroupBox(QStringLiteral("在线扫描 API Key"), m_onlineScanTab);
     languageManager.bindText(keyGroupBox, QStringLiteral("settings.online.group"), QStringLiteral("在线扫描 API Key"));
     QFormLayout* formLayout = new QFormLayout(keyGroupBox);
-    ks::ui::StyleSecondaryForm(formLayout);
+    ks::ui::StyleSettingsForm(formLayout);
 
     m_virusTotalApiKeyEdit = new QLineEdit(keyGroupBox);
     m_virusTotalApiKeyEdit->setPlaceholderText(QStringLiteral("VirusTotal API Key"));
@@ -57,7 +57,7 @@ void SettingsDock::initializeOnlineScanTab()
     formLayout->addRow(threatBookLabel, m_threatBookApiKeyEdit);
     ks::ui::NormalizeToolbarControl(m_threatBookApiKeyEdit);
 
-    ks::ui::StyleSecondaryForm(formLayout);
+    ks::ui::StyleSettingsForm(formLayout);
     ks::settings::ui::Section(keyGroupBox);
     rootLayout->addWidget(keyGroupBox, 0);
 

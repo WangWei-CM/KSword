@@ -2,6 +2,7 @@
 
 #include "../Internationalization/LanguageManager.h"
 #include "../UI/SecondaryPageLayout.h"
+#include "../UI/SettingsPresentation.h"
 #include "../UI/ToolbarMetrics.h"
 
 #include <QAbstractButton>
@@ -74,7 +75,12 @@ namespace ks::settings::ui
         if (section->layout() != nullptr)
         {
             section->layout()->setContentsMargins(0, 0, 0, 0);
-            section->layout()->setSpacing(8);
+            section->layout()->setSpacing(6);
+            // 在线扫描页直接以表单为分区根布局，同样参与设置行的对齐。
+            if (auto* form = qobject_cast<QFormLayout*>(section->layout()))
+            {
+                ks::ui::StyleSettingsForm(form);
+            }
             // 表单在控件齐备后再统一左列宽度，不能只在空表单上调用几何策略。
             for (int index = 0; index < section->layout()->count(); ++index)
             {
@@ -82,8 +88,7 @@ namespace ks::settings::ui
                 if (form != nullptr)
                 {
                     const int storedWidth = form->property("ksword_settings_label_width").toInt();
-                    ks::ui::StyleSecondaryForm(form, storedWidth > 0 ? storedWidth : 160);
-                    form->setVerticalSpacing(10);
+                    ks::ui::StyleSettingsForm(form, storedWidth > 0 ? storedWidth : 204);
                 }
             }
         }
@@ -93,6 +98,7 @@ namespace ks::settings::ui
     inline QLabel* Label(QWidget* parent, const QString& labelKey, const QString& fallback)
     {
         auto* label = new QLabel(parent); // 对齐到控件行的标签。
+        label->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
         label->setWordWrap(true);
         ks::i18n::LanguageManager::instance().bindText(label, labelKey, fallback);
         return label;
@@ -103,9 +109,8 @@ namespace ks::settings::ui
     {
         auto* form = new QFormLayout(); // 每个分区独立维护行，标签宽度共用。
         form->setProperty("ksword_settings_label_width", labelWidth);
-        ks::ui::StyleSecondaryForm(form, labelWidth);
-        form->setVerticalSpacing(10);
         parent->addLayout(form);
+        ks::ui::StyleSettingsForm(form, labelWidth);
         return form;
     }
 
@@ -113,10 +118,11 @@ namespace ks::settings::ui
     inline QWidget* ControlRow(QHBoxLayout* row, QWidget* parent)
     {
         auto* field = new QWidget(parent); // 容纳同一设置的控件、数值和次要动作。
+        field->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
         row->setContentsMargins(0, 0, 0, 0);
-        row->setSpacing(8);
+        row->setSpacing(6);
         field->setLayout(row);
-        ks::ui::NormalizeToolbarRow(row);
+        ks::ui::NormalizeToolbarRow(row, 6);
         return field;
     }
 

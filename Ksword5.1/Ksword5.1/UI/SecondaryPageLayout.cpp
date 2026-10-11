@@ -244,7 +244,7 @@ namespace ks::ui
                 "subcontrol-origin:margin;subcontrol-position:top left;left:0;top:0;"
                 "padding:0;background:transparent;color:%2;font-weight:600;}")
                 .arg(KswordTheme::BorderColor().name(), KswordTheme::TextSecondaryColor().name())
-                .arg(settings ? 28 : 22).arg(settings ? 10 : 8));
+                .arg(settings ? 24 : 22).arg(8));
         });
     }
 

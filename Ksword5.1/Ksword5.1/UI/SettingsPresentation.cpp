@@ -5,12 +5,119 @@
 #include <QAbstractButton>
 #include <QApplication>
 #include <QFontDatabase>
+#include <QFormLayout>
+#include <QLabel>
 #include <QPointer>
 #include <QTabBar>
+#include <QTimer>
 #include <algorithm>
+
+namespace
+{
+    // 只追踪已登记的设置表单。字体或复合控件尺寸变化后，同步左右两列的视觉中心。
+    class SettingsFormMetrics final : public QObject
+    {
+    public:
+        explicit SettingsFormMetrics(QFormLayout* form) : QObject(form), m_form(form)
+        {
+            if (form->parentWidget())
+            {
+                form->parentWidget()->installEventFilter(this);
+            }
+            schedule();
+        }
+
+    protected:
+        bool eventFilter(QObject*, QEvent* event) override
+        {
+            if (event->type() == QEvent::FontChange || event->type() == QEvent::StyleChange
+                || event->type() == QEvent::LayoutRequest)
+            {
+                schedule();
+            }
+            return false;
+        }
+
+    private:
+        // 合并 Qt 样式/布局事件，避免在布局计算中再次改变几何。
+        void schedule()
+        {
+            if (m_pending)
+            {
+                return;
+            }
+            m_pending = true;
+            QTimer::singleShot(0, this, [this]()
+            {
+                m_pending = false;
+                apply();
+            });
+        }
+
+        void apply()
+        {
+            const int labelWidth = m_form->property("ksword_settings_label_width").toInt();
+            for (int row = 0; row < m_form->rowCount(); ++row)
+            {
+                QLayoutItem* labelItem = m_form->itemAt(row, QFormLayout::LabelRole);
+                QLayoutItem* fieldItem = m_form->itemAt(row, QFormLayout::FieldRole);
+                auto* label = labelItem ? qobject_cast<QLabel*>(labelItem->widget()) : nullptr;
+                QWidget* field = fieldItem ? fieldItem->widget() : nullptr;
+                // 跨行说明不强加控件行高；长标签仍可按实际宽度换行。
+                if (!label || label->text().isEmpty() || !field)
+                {
+                    continue;
+                }
+                label->installEventFilter(this);
+                field->installEventFilter(this);
+                label->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+                label->setWordWrap(true);
+                if (label->minimumWidth() != labelWidth)
+                {
+                    label->setMinimumWidth(labelWidth);
+                }
+                // 行内文字按同一字号测量，右侧的原生复选框也占据完整的单行高度。
+                const int rowHeight = std::max({28, label->fontMetrics().height() + 12,
+                    field->fontMetrics().height() + 12});
+                if (field->minimumHeight() != rowHeight)
+                {
+                    field->setMinimumHeight(rowHeight);
+                }
+                const int labelHeight = std::max(rowHeight, field->sizeHint().height());
+                if (label->minimumHeight() != labelHeight)
+                {
+                    label->setMinimumHeight(labelHeight);
+                }
+            }
+        }
+
+        QFormLayout* m_form; // 布局拥有此对象，不跨设置页保存状态。
+        bool m_pending = false; // 每轮只执行一次尺寸同步。
+    };
+}
 
 namespace ks::ui
 {
+    void StyleSettingsForm(QFormLayout* form, int labelWidth)
+    {
+        if (!form)
+        {
+            return;
+        }
+        form->setProperty("ksword_settings_label_width", labelWidth);
+        form->setHorizontalSpacing(16);
+        form->setVerticalSpacing(4);
+        form->setLabelAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+        form->setFormAlignment(Qt::AlignLeft | Qt::AlignTop);
+        form->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
+        form->setRowWrapPolicy(QFormLayout::WrapLongRows);
+        if (!form->property("ksword_settings_form_metrics").toBool())
+        {
+            form->setProperty("ksword_settings_form_metrics", true);
+            new SettingsFormMetrics(form);
+        }
+    }
+
     void ApplySettingsPresentation(QWidget* settings)
     {
         if (settings == nullptr)
@@ -44,6 +151,12 @@ namespace ks::ui
             const QColor input = KswordTheme::BlendColors(KswordTheme::WindowColor(), KswordTheme::SurfaceAltColor(), 70);
             QString rules = QStringLiteral(
                 "QWidget[ksword_settings_content=\"true\"]{background:transparent;color:__TEXT__; }"
+                // 表单正文与控件文案同级，避免全局按钮半粗体让右列显得更重。
+                "QWidget[ksword_settings_content=\"true\"] QLabel,"
+                "QWidget[ksword_settings_content=\"true\"] QAbstractButton,"
+                "QWidget[ksword_settings_content=\"true\"] QLineEdit,"
+                "QWidget[ksword_settings_content=\"true\"] QComboBox,"
+                "QWidget[ksword_settings_content=\"true\"] QAbstractSpinBox{font-weight:400;}"
                 "QWidget[ksword_settings_content=\"true\"] QLineEdit,"
                 "QWidget[ksword_settings_content=\"true\"] QComboBox,"
                 "QWidget[ksword_settings_content=\"true\"] QAbstractSpinBox{"
@@ -70,8 +183,9 @@ namespace ks::ui
             return;
         }
         button->setProperty("ksword_theme_icon_managed", true); // 色块是未应用配置的数据原色。
-        QFont code = QFontDatabase::systemFont(QFontDatabase::FixedFont);
-        code.setPointSizeF(std::max(10.5, button->font().pointSizeF()));
+        QFont code = button->font(); // 色值保留等宽家族，但不另行放大字号或加重。
+        code.setFamily(QFontDatabase::systemFont(QFontDatabase::FixedFont).family());
+        code.setWeight(QFont::Normal);
         button->setFont(code);
         const QPointer<QAbstractButton> target(button);
         BindWidgetTheme(button, [target]()
@@ -80,7 +194,7 @@ namespace ks::ui
             {
                 const QColor input = KswordTheme::BlendColors(KswordTheme::WindowColor(), KswordTheme::SurfaceAltColor(), 70);
                 target->setStyleSheet(QStringLiteral(
-                    "QPushButton{background:%1;color:%2;border:1px solid %3;border-radius:5px;padding:3px 8px;}"
+                    "QPushButton{background:%1;color:%2;border:1px solid %3;border-radius:5px;padding:3px 8px;font-weight:400;}"
                     "QPushButton:hover{border-color:%4;}"
                     "QPushButton:disabled{color:%5;}")
                     .arg(input.name(), KswordTheme::TextPrimaryColor().name(), KswordTheme::BorderColor().name(),

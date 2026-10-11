@@ -30,15 +30,15 @@ void SettingsDock::initializeAppearanceTab()
     QVBoxLayout* appearanceRootLayout = new QVBoxLayout(m_appearanceTab);
     ks::ui::StyleSecondaryContentLayout(appearanceRootLayout);
     // 分区间留白大于区内行距，让标题自然形成阅读停顿，控件行仍保持紧凑。
-    appearanceRootLayout->setSpacing(24);
+    appearanceRootLayout->setSpacing(20);
     auto* primaryColumn = new QWidget(m_appearanceTab); // 常用配色设置列。
     auto* primaryLayout = new QVBoxLayout(primaryColumn);
     primaryLayout->setContentsMargins(0, 0, 0, 0);
-    primaryLayout->setSpacing(24);
+    primaryLayout->setSpacing(20);
     auto* secondaryColumn = new QWidget(m_appearanceTab); // 样例预览和交互设置列。
     auto* secondaryLayout = new QVBoxLayout(secondaryColumn);
     secondaryLayout->setContentsMargins(0, 0, 0, 0);
-    secondaryLayout->setSpacing(24);
+    secondaryLayout->setSpacing(20);
 
     ks::i18n::LanguageManager& languageManager = ks::i18n::LanguageManager::instance();
 
@@ -224,8 +224,9 @@ void SettingsDock::initializeAppearanceTab()
 
     // m_backgroundPathEdit 作用：用户输入背景图路径文本。
     m_backgroundPathEdit = new QLineEdit(backgroundGroupBox);
-    QFont pathFont = QFontDatabase::systemFont(QFontDatabase::FixedFont);
-    pathFont.setPointSizeF(std::max(10.5, font().pointSizeF()));
+    QFont pathFont = font(); // 数据字体只切换家族，字号单位、字重与左右表单文字一致。
+    pathFont.setFamily(QFontDatabase::systemFont(QFontDatabase::FixedFont).family());
+    pathFont.setWeight(QFont::Normal);
     m_backgroundPathEdit->setFont(pathFont);
     m_backgroundPathEdit->setPlaceholderText(QStringLiteral("Style/ksword_background.png"));
     languageManager.bindToolTip(m_backgroundPathEdit,
@@ -497,7 +498,7 @@ void SettingsDock::initializeAppearanceTab()
     interactionForm->addRow(ks::settings::ui::Label(interactionGroupBox,
         QStringLiteral("settings.detail_layout.group"), QStringLiteral("详情页显示方案")), m_detailSchemeCombo);
     ks::ui::NormalizeToolbarControl(m_detailSchemeCombo);
-    ks::ui::StyleSecondaryForm(interactionForm, 176);
+    ks::ui::StyleSettingsForm(interactionForm, 176);
 
     // 两列使用统一自适应容器。附属开关继续在同页可见，不折叠或增加标签页。
     primaryLayout->addStretch();

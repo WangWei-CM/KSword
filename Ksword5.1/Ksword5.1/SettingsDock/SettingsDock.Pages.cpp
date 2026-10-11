@@ -458,7 +458,7 @@ void SettingsDock::initializeFeaturesTab()
     QVBoxLayout* featuresRootLayout = new QVBoxLayout(m_featuresTab);
     ks::ui::StyleSecondaryContentLayout(featuresRootLayout);
     // 功能页按完整分区留白，避免相邻标题与上一组开关挤在一起。
-    featuresRootLayout->setSpacing(24);
+    featuresRootLayout->setSpacing(20);
 
     ks::i18n::LanguageManager& languageManager = ks::i18n::LanguageManager::instance();
     QGroupBox* r0PromptGroupBox = new QGroupBox(QStringLiteral("R0 功能提示"), m_featuresTab);
