@@ -512,6 +512,7 @@ namespace ks::ui
         QSignalBlocker blocker(m_style);
         m_style->setCurrentIndex(presentation == Presentation::Tree ? 1 : 0);
         applyPresentation();
+        emit presentationChanged();
     }
 
     void StructuredFieldView::applyPresentation()

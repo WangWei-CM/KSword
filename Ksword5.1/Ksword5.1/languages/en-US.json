@@ -40485,6 +40485,19 @@
     "受信任的发布者": "Trusted publisher",
     "ProcessGeneralProjectedCaption": "ProcessGeneralProjectedCaption",
     "本地 MCP 桥已启用：%1": "Local MCP bridge enabled: %1",
-    "本地 MCP 桥启动失败：%1": "Local MCP bridge failed to start: %1"
+    "本地 MCP 桥启动失败：%1": "Local MCP bridge failed to start: %1",
+    "%1 / %2 字节": "%1 / %2 bytes",
+    "-（ALE 元数据）": "- (ALE metadata)",
+    "-（ALE 无 payload）": "- (ALE has no payload)",
+    "上行/下行": "Upload/download",
+    "内容长度": "Content length",
+    "可读ASCII摘要": "Readable ASCII summary",
+    "密码套件": "Cipher suite",
+    "证书 SHA-256": "Certificate SHA-256",
+    "证书主体": "Certificate subject",
+    "证书到期": "Certificate expiry",
+    "证书签发者": "Certificate issuer",
+    "远端": "Remote endpoint",
+    "驱动事件序号": "Driver event sequence"
   }
 }

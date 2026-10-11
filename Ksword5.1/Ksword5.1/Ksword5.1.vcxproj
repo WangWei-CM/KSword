@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003" DefaultTargets="Build" ToolsVersion="17.0">
   <ItemGroup Label="ProjectConfigurations">
     <ProjectConfiguration Include="Debug|x64">
@@ -673,6 +673,8 @@
     <ClCompile Include="UI\SecondaryPageLayout.cpp" />
     <ClCompile Include="UI\PrimaryPageStyle.cpp" />
     <ClCompile Include="UI\DetailPresentation.cpp" />
+    <ClCompile Include="UI\DetailFieldProjection.cpp" />
+    <ClCompile Include="UI\DetailWindowFramework.cpp" />
     <ClCompile Include="UI\ParameterWorkspace.cpp" />
     <ClCompile Include="UI\MainSurfaceStyle.cpp" />
     <ClCompile Include="UI\PageNavigationBridge.cpp" />

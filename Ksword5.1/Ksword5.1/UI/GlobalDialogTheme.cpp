@@ -13,9 +13,22 @@
 #include <QStyle>
 #include <QWidget>
 #include <QTimer>
+#include <QFileDialog>
+#include <QColorDialog>
+#include <QFontDialog>
+#include <QInputDialog>
 
 namespace
 {
+    // 系统专用选择器和共享设置页保留自己的结构，业务弹窗统一由详情框架安装布局。
+    bool shouldInstallDetailFramework(QDialog* dialog)
+    {
+        return dialog && !qobject_cast<QMessageBox*>(dialog)
+            && !qobject_cast<QFileDialog*>(dialog) && !qobject_cast<QColorDialog*>(dialog)
+            && !qobject_cast<QFontDialog*>(dialog) && !qobject_cast<QInputDialog*>(dialog)
+            && !dialog->property("ksword_detail_keep_layout").toBool();
+    }
+
     // kGlobalDialogThemePropertyName 作用：
     // - 标记某个 QDialog 已纳入全局普通弹窗主题；
     // - QSS 使用该动态属性作为选择器，避免污染非弹窗控件。
@@ -285,6 +298,12 @@ namespace
         bool eventFilter(QObject* watchedObject, QEvent* eventObject) override
         {
             QDialog* dialog = qobject_cast<QDialog*>(watchedObject);
+            if (dialog && eventObject && (eventObject->type() == QEvent::Polish || eventObject->type() == QEvent::Show)
+                && shouldInstallDetailFramework(dialog))
+            {
+                // 二级窗口也共享结构；它的颜色所有权仍交原SecondaryPageLayout持有。
+                ks::ui::InstallDetailWindowFramework(dialog);
+            }
             if (!shouldThemeDialog(dialog) || eventObject == nullptr)
             {
                 return QObject::eventFilter(watchedObject, eventObject);
@@ -428,6 +447,10 @@ namespace ks::ui
         for (QWidget* topLevelWidget : topLevelWidgetList)
         {
             QDialog* dialog = qobject_cast<QDialog*>(topLevelWidget);
+            if (shouldInstallDetailFramework(dialog))
+            {
+                ks::ui::InstallDetailWindowFramework(dialog);
+            }
             if (!shouldThemeDialog(dialog))
             {
                 continue;

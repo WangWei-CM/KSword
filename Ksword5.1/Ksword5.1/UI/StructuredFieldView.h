@@ -75,6 +75,7 @@ namespace ks::ui
 
     signals:
         void documentChanged(); // Emitted once per event turn after a complete value snapshot.
+        void presentationChanged(); // 共享卡片宿主同步程序式切换，不依赖被QSignalBlocker阻断的下拉信号。
 
     protected:
         bool eventFilter(QObject* watched, QEvent* event) override;

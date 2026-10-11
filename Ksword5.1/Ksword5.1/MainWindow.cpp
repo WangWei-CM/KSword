@@ -7892,6 +7892,8 @@ void MainWindow::showSettingsPanelFromMenu(bool showLanguageTab)
 {
     QDialog settingsDialog(this);
     settingsDialog.setWindowTitle(QStringLiteral("设置"));
+    // 设置页已由SettingsPresentation管理自适应布局，保留该共享设置框架。
+    settingsDialog.setProperty("ksword_detail_keep_layout", true);
     settingsDialog.setModal(false);
     ks::ui::StyleSecondaryWindow(&settingsDialog);
     ks::ui::applyResponsiveWindowGeometry(&settingsDialog, this, QSize(1240, 780), QSize(720, 520));

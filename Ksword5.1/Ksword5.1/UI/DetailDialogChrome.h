@@ -28,10 +28,11 @@ namespace ks::ui
             "QWidget[ksword_detail_shell=\"true\"] QStackedWidget{background:%1;border:0;}"
             "QWidget[ksword_detail_shell=\"true\"] QScrollArea{background:%1;border:0;padding:0;margin:0;}"
             "QWidget[ksword_detail_shell=\"true\"] QScrollArea > QWidget{background:%1;}"
+            "QWidget[ksword_detail_shell=\"true\"] QWidget[ksword_detail_framework_body=\"true\"]{background:%1;border:0;}"
             "QWidget[ksword_detail_shell=\"true\"] QAbstractItemView{border:0;}"
             // 标题放进无描边卡片内部，旧GroupBox也不再沿标题切开一圈线框。
             "QWidget[ksword_detail_shell=\"true\"] QGroupBox{background:%3;border:0;border-radius:8px;margin-top:0;padding-top:28px;}"
-            "QWidget[ksword_detail_shell=\"true\"] QGroupBox::title{subcontrol-origin:margin;left:16px;top:10px;padding:0;color:%2;background:transparent;font-weight:600;}"
+            "QWidget[ksword_detail_shell=\"true\"] QGroupBox::title{subcontrol-origin:padding;subcontrol-position:top left;left:16px;top:10px;padding:0;color:%2;background:transparent;font-weight:600;}"
             "QWidget[ksword_detail_shell=\"true\"] QWidget[ksword_detail_header=\"true\"]{background:%1;border:0;border-bottom:1px solid %4;}"
             "QWidget[ksword_detail_shell=\"true\"] QWidget[ksword_detail_sidebar=\"true\"],QWidget[ksword_detail_shell=\"true\"] QScrollArea[ksword_detail_sidebar=\"true\"],QWidget[ksword_detail_shell=\"true\"] QScrollArea[ksword_detail_sidebar=\"true\"] > QWidget,QWidget[ksword_detail_shell=\"true\"] QScrollArea[ksword_detail_sidebar=\"true\"] > QWidget > QWidget{background:%1;border:0;padding:0;margin:0;}"
             // 分界仅画在滚动区的外缘，导航项与 viewport 不重复描边。
@@ -56,6 +57,7 @@ namespace ks::ui
         if (body.pixelSize() > 0) body.setPixelSize(qMax(14, body.pixelSize()));
         else body.setPointSizeF(qMax(10.0, body.pointSizeF()));
         window->setFont(body);
+        InstallDetailWindowFramework(window);
         if (window->layout() != nullptr)
         {
             window->layout()->setContentsMargins(0, 0, 0, 0);
