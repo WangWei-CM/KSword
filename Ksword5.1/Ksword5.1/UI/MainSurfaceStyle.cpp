@@ -7,6 +7,15 @@ namespace ks::ui
 {
     MainSurfaceColors MainWindowSurfaceColors()
     {
+        // 固定层级只依赖主题种子；同主题的所有按钮/表格复用同一求值结果。
+        // 未应用的设置预览必须旁路缓存，不能污染生产主题的代次。
+        static thread_local MainSurfaceColors cachedColors;
+        static thread_local quint64 cachedGeneration = 0;
+        const bool preview = KswordTheme::ActiveThemePreviewSeeds != nullptr;
+        if (!preview && cachedGeneration == KswordTheme::ThemeSeedGeneration)
+        {
+            return cachedColors;
+        }
         MainSurfaceColors colors; // 不使用固定 RGB，保留深浅模式与用户背景种子。
         colors.canvas = KswordTheme::BlendColors(
             KswordTheme::MainBackgroundColor(), KswordTheme::SurfaceColor(), 16);
@@ -22,6 +31,11 @@ namespace ks::ui
         colors.input = KswordTheme::ControlInputSurfaceColor(colors.content, colors.header);
         colors.border = KswordTheme::BlendColors(
             colors.content, KswordTheme::BorderColor(), 90);
+        if (!preview)
+        {
+            cachedColors = colors;
+            cachedGeneration = KswordTheme::ThemeSeedGeneration;
+        }
         return colors;
     }
 

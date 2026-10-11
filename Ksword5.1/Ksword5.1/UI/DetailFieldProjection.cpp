@@ -15,6 +15,7 @@
 #include <QScrollArea>
 #include <QScrollBar>
 #include <QShowEvent>
+#include <QStyle>
 #include <QToolButton>
 #include <QVBoxLayout>
 #include <QTimer>
@@ -197,8 +198,6 @@ namespace
             QPointer<QFormLayout> form; // 显示隐藏由原表单拥有的行处理。
             QString searchContext;
             QString semantic; // 主题单独变化时无需再次展开规范文档即可校准值颜色。
-            QString valueStyle; // 真实语义色或主题改变时才重新polish值标签。
-            QString labelStyle; // 字段名颜色仅在首次和主题改变时写入。
             bool visible = true; // 过滤可见性缓存，数值刷新不重新安排整张卡片的布局。
         };
         struct Card
@@ -250,13 +249,7 @@ namespace
             m_refreshing = true;
             if (themeChanged)
             {
-                const QString style = QStringLiteral(
-                    "QWidget[ksword_detail_projection=\"true\"],QWidget[ksword_detail_document_body=\"true\"]{background:%1;border:0;}"
-                    "QScrollArea{background:%1;border:0;}").arg(KswordTheme::WindowColorHex());
-                if (styleSheet() != style)
-                {
-                    setStyleSheet(style);
-                }
+                applyProjectionStyle(); // 同一投影只更新一个主题块，避免逐字段重写QSS造成大量repolish。
             }
             // 同一个文档与语言只展开一次；纯主题和搜索请求直接使用现有行绑定。
             const auto sections = dataChanged ? displaySections(m_source->document()) : QVector<DisplaySection>();
@@ -271,7 +264,6 @@ namespace
                 }
             }
             const bool structureChanged = dataChanged && structure != m_structure;
-            bool colorsDirty = themeChanged || structureChanged;
             if (structureChanged)
             {
                 m_structure = structure;
@@ -328,6 +320,8 @@ namespace
                         value->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
                         value->setTextInteractionFlags(Qt::TextSelectableByMouse | Qt::TextSelectableByKeyboard);
                         value->setProperty("ks_i18n_preserve_data_text", true);
+                        value->setProperty("ksword_detail_field_value", true);
+                        value->setProperty("ksword_detail_field_semantic", field.semantic);
                         value->setContextMenuPolicy(Qt::CustomContextMenu);
                         connect(value, &QWidget::customContextMenuRequested, value, [value](const QPoint& point)
                         {
@@ -348,12 +342,13 @@ namespace
                         else
                         {
                             label = new QLabel(field.name, card);
+                            label->setProperty("ksword_detail_field_label", true);
                             label->setWordWrap(true);
                             label->setMinimumWidth(0);
                             form->addRow(label, value);
                         }
                         binding.rows.append({label, value, form, field.searchContext, field.semantic,
-                            QString(), QString(), true});
+                            true});
                     }
                     m_cards->addWidget(card);
                     m_bindings.append(binding);
@@ -371,7 +366,14 @@ namespace
                     if (row.semantic != field.semantic)
                     {
                         row.semantic = field.semantic;
-                        colorsDirty = true;
+                        // 只有真实字段语义发生改变才让这一项重匹配；普通换肤由投影根统一处理。
+                        if (row.value)
+                        {
+                            row.value->setProperty("ksword_detail_field_semantic", field.semantic);
+                            row.value->style()->unpolish(row.value);
+                            row.value->style()->polish(row.value);
+                            row.value->update();
+                        }
                     }
                     if (row.value && row.value->text() != field.value)
                     {
@@ -379,10 +381,6 @@ namespace
                         row.value->setToolTip(field.value);
                     }
                 }
-            }
-            if (colorsDirty)
-            {
-                applyRowColors();
             }
             if (structureChanged || searchChanged || (dataChanged && !query.isEmpty()))
             {
@@ -405,36 +403,41 @@ namespace
             }
         }
 
-        // 颜色变化不依赖再次flatten文档；相同颜色也不对每个标签重复套QSS。
-        void applyRowColors()
+        // 集中生成投影自己的精确主题块；状态色仍按卡片实底校准，不覆盖外部额外业务规则。
+        void applyProjectionStyle()
         {
-            const auto valueStyle = [](const QColor& color)
+            const auto readableColor = [](const QColor& color)
             {
-                return QStringLiteral("background:transparent;color:%1;")
-                    .arg(KswordTheme::EnsureTextContrast(color, KswordTheme::SurfaceColor(), 4.5).name());
+                return KswordTheme::EnsureTextContrast(color, KswordTheme::SurfaceColor(), 4.5).name();
             };
-            const QString normalStyle = valueStyle(KswordTheme::TextPrimaryColor());
-            const QString successStyle = valueStyle(KswordTheme::SuccessColor());
-            const QString errorStyle = valueStyle(KswordTheme::ErrorColor());
-            const QString labelStyle = QStringLiteral("background:transparent;color:%1;")
-                .arg(KswordTheme::TextSecondaryHex());
-            for (auto& card : m_bindings)
+            const QString begin = QStringLiteral("/* KSWORD_DETAIL_PROJECTION_BEGIN */");
+            const QString end = QStringLiteral("/* KSWORD_DETAIL_PROJECTION_END */");
+            const QString block = begin + QStringLiteral(
+                "QWidget[ksword_detail_projection=\"true\"],QWidget[ksword_detail_document_body=\"true\"]{background:%1;border:0;}"
+                "QScrollArea{background:%1;border:0;}"
+                "QLabel[ksword_detail_field_label=\"true\"]{background:transparent;color:%2;}"
+                "QLabel[ksword_detail_field_value=\"true\"]{background:transparent;color:%3;}"
+                "QLabel[ksword_detail_field_value=\"true\"][ksword_detail_field_semantic=\"success\"]{color:%4;}"
+                "QLabel[ksword_detail_field_value=\"true\"][ksword_detail_field_semantic=\"error\"]{color:%5;}")
+                .arg(KswordTheme::WindowColorHex(), KswordTheme::TextSecondaryHex(),
+                    readableColor(KswordTheme::TextPrimaryColor()), readableColor(KswordTheme::SuccessColor()),
+                    readableColor(KswordTheme::ErrorColor())) + end;
+            QString style = styleSheet(); // 保留其它拥有者定点添加的样式，只替换框架拥有的块。
+            const qsizetype first = style.indexOf(begin);
+            const qsizetype last = first < 0 ? -1 : style.indexOf(end, first);
+            if (first >= 0 && last >= first)
             {
-                for (auto& row : card.rows)
-                {
-                    const QString& style = row.semantic == QLatin1String("success") ? successStyle
-                        : row.semantic == QLatin1String("error") ? errorStyle : normalStyle;
-                    if (row.value && row.valueStyle != style)
-                    {
-                        row.valueStyle = style;
-                        row.value->setStyleSheet(style);
-                    }
-                    if (row.label && row.labelStyle != labelStyle)
-                    {
-                        row.labelStyle = labelStyle;
-                        row.label->setStyleSheet(labelStyle);
-                    }
-                }
+                style.remove(first, last + end.size() - first);
+            }
+            style = style.trimmed();
+            if (!style.isEmpty())
+            {
+                style += QLatin1Char('\n');
+            }
+            style += block;
+            if (styleSheet() != style)
+            {
+                setStyleSheet(style);
             }
         }
         void filter()

@@ -9,6 +9,7 @@
 class QComboBox;
 class QLabel;
 class QLineEdit;
+class QShowEvent;
 class QToolButton;
 class QTreeWidget;
 class QTreeWidgetItem;
@@ -86,9 +87,16 @@ namespace ks::ui
     protected:
         bool eventFilter(QObject* watched, QEvent* event) override;
         void changeEvent(QEvent* event) override;
+        void showEvent(QShowEvent* event) override;
         void resizeEvent(QResizeEvent* event) override;
 
     private:
+        // 只识别已实际登记共享框架且无专业布局保护的详情源，不依据普通隐藏状态猜测用途。
+        bool belongsToSharedDetail() const;
+        // 延迟已登记详情中的隐藏/切页过渡旧树；专业工作台与普通视图保留同步模型语义。
+        bool shouldDeferHiddenTree() const;
+        // 回填仍存在的旧树；调用前已确认页面可见，投影接管后此入口直接退出。
+        void flushDeferredTree();
         void rebuild();
         void updateTranslations();
         void applyPresentation();
@@ -111,6 +119,9 @@ namespace ks::ui
         bool m_layoutPending = false;
         bool m_documentNotificationPending = false;
         bool m_documentOnly = false; // 卡片宿主只使用文档数据，禁止旧树构建、排序和列重测。
+        bool m_hiddenTreeDirty = false; // 未访问详情Tab只保存唯一最新文档，不维护即将淘汰的旧树。
+        bool m_hiddenTreeLayoutDirty = false; // 隐藏旧树的主题/字体/几何工作合并到下一次显示。
+        bool m_treeShowPending = false; // 详情切页的Show先于currentChanged，排队旧树fallback可被投影接管取消。
         quint64 m_documentRevision = 0; // 搜索与主题变化不属于规范文档更新。
     };
 }

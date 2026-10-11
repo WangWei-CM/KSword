@@ -303,3 +303,13 @@ KSword 主程序位于 `Ksword5.1/Ksword5.1`（Qt 6.9.3 Widgets + Qt Advanced Do
 - 安装 Segmented 后禁止业务刷新再写旧 FlatButtonStyle；只更新共享选择态。Scanner/Minidump 的动态宽表应在创建工厂一次安装，覆盖全部生成页并保留右键自定义空选态。
 - 页内详情同样必须淘汰隐藏旧树：Handle Object Header/Type 直接提交唯一 FieldDocument，不再先 clear/new QTreeWidgetItem 再生成同字段文档。持续事件表模型兼任归档/保留职责，不能用隐藏提前 return 改变采集语义。
 - WMI/ETW/进程定向折叠主题在工厂分别绑定段、内容、标题，禁止 StyleChange 再 findChildren 扫全页。ProgressDock 同一进度更新不重写相同卡片 QSS。LogDock 隐藏周期刷新不更新 revision，Show 经过原菜单屏障同步最新管理器历史；全量导出不受显示条数限制。
+
+## 主题与首开延迟（2026-10-11）
+
+- DetailWindowFramework 只收当前 Stack 页；真正换宿主后才重收结构。Qt Stack 先 Show 后 currentChanged，详情旧字段树的 Show 回填必须合并排队，让同步投影先消费；未投影源继续回填。专业 keep_layout 仍保留同步 tree() 模型行为。
+- ThemeBinding 的 pending membership 保留到真实取出，不能先清整批再应用父样式，否则尚待处理子项被 PaletteChange 再次排队。FIFO 分片约6ms让出事件循环，销毁清地址、同址新对象和真正语言/应用主题广播继续保留；单个 setStyleSheet 仍不能被中断。
+- 组合框主题不能为所有 QWidget Show 递归 findChild，也不能换肤时调用所有 Combo.view() 提前创建隐藏 Popup。只按真正 Popup 的 Qt 所有权父链定位，已打开列表换肤，下次展开接当前主题。
+- TablePresentation 自身QSS有 applying 门禁，已初始化隐藏表延后Show；主题委托已按可见项实时取语义色时，不在 Palette 广播扫全部模型回写画刷。冻结辅助窗格复用源委托。
+- RelativeLuminance 8位通道线性化预算256值，保持原公式/阈值；MainSurfaceColors按主题代次缓存但preview旁路；两个按钮selector同外观复用五态配方。不是预加载全部业务窗口，也不把源码优化当作实机耗时测量。说明见 `docs/UI主题与弹窗延迟修复-20261011.md`。
+- R0“需要启用”是QMessageBox，不进入详情卡片框架。提示前SCM只读检查须后台化并在查询前合并通知；回UI不仅探析构lifetime，还要核验实际退出/服务启停代次，不能让旧STOPPED结果覆盖新启停或退出时再弹启用框。消息框图标复用现成QIcon或已映射原生资源缓存，禁止每次polish走EXE Shell图标查询。
+- SecondaryPageLayout也记录完整中性拥有块；FlatButtonTheme只精确排除该块，不忽略业务附加QSS。明确二级底栏的无配色普通动作补Solid，残留managed标记不能抢回已被业务重写的颜色；显式Flat/风险色和专用binding保留。控件检查工具动作使用真实SVG/16px/实底，不能用Unicode箭头和暂停符号代替可辨图标。用户要求全部修改收齐后统一编译，不每个截图/按钮单独编译。

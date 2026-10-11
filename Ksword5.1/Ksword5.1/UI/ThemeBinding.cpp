@@ -6,6 +6,7 @@
 
 #include <QApplication>
 #include <QEvent>
+#include <QElapsedTimer>
 #include <QList>
 #include <QObject>
 #include <QPalette>
@@ -17,6 +18,7 @@
 #include <QWidget>
 
 #include <algorithm>
+#include <deque>
 #include <list>
 #include <utility>
 
@@ -78,10 +80,10 @@ namespace
         }
 
     private:
-        // drain 对弱引用快照逐一刷新；回调可创建或删除其他绑定，不破坏正在遍历的队列。
+        // drain 限时处理弱引用队列；回调可创建/删除绑定，不影响未消费项的去重身份。
         void drain();
         std::list<QPointer<WidgetThemeBinding>> m_bindings; // 稳定迭代器，登记/销毁无需扫描全部绑定。
-        QList<QPointer<WidgetThemeBinding>> m_pending;  // 本轮待刷新项，保持登记顺序。
+        std::deque<QPointer<WidgetThemeBinding>> m_pending; // 常数时间取队首，保持登记顺序。
         QSet<WidgetThemeBinding*> m_pendingMembership; // 仅作常数时间去重；实际队列仍持弱引用。
         bool m_scheduled = false; // 合并同一轮重复主题事件的调度门禁。
     };
@@ -162,13 +164,13 @@ namespace
         }
 
     protected:
-        // 局部 palette 或语言变化可能改变角色文本；自身 setStyleSheet 的重入事件不再排队。
+        // 自身setStyleSheet的局部Palette重入不排队；真实语言/应用主题广播仍保留后续刷新。
         bool eventFilter(QObject* watched, QEvent* event) override
         {
-            if (!m_applying && m_registry != nullptr && event != nullptr &&
-                (event->type() == QEvent::PaletteChange ||
-                    event->type() == QEvent::ApplicationPaletteChange ||
-                    event->type() == QEvent::LanguageChange))
+            if (m_registry != nullptr && event != nullptr &&
+                (event->type() == QEvent::ApplicationPaletteChange ||
+                    event->type() == QEvent::LanguageChange ||
+                    (!m_applying && event->type() == QEvent::PaletteChange)))
             {
                 m_registry->schedule(this);
             }
@@ -208,7 +210,7 @@ namespace
         if (!m_pendingMembership.contains(binding))
         {
             m_pendingMembership.insert(binding);
-            m_pending.append(weakBinding);
+            m_pending.push_back(weakBinding);
         }
         if (m_scheduled)
         {
@@ -229,17 +231,33 @@ namespace
 
     void ThemeBindingRegistry::drain()
     {
-        // 先分离本轮队列；回调新增的登记项进入下一轮，避免遍历容器因重入失效。
-        auto pending = std::move(m_pending); // 只包含本轮待刷新的弱引用。
-        m_pending.clear();
-        m_pendingMembership.clear(); // 回调的新请求属于下一轮，不阻断嵌套刷新/替换策略。
-        m_scheduled = false;
-        for (const auto& binding : pending)
+        // 尚未消费的子控件继续保持membership，父样式的PaletteChange不再将它们重复入队。
+        // 只在实际取出时解除去重，保留回调重登记及真正嵌套更新的后续刷新。
+        QElapsedTimer slice;
+        slice.start();
+        const std::size_t initialCount = m_pending.size();
+        for (std::size_t index = 0; index < initialCount && !m_pending.empty(); ++index)
         {
+            const QPointer<WidgetThemeBinding> binding = m_pending.front();
+            m_pending.pop_front();
             if (binding != nullptr)
             {
+                m_pendingMembership.remove(binding.data());
                 binding->apply();
             }
+            // 不在同一次GUI回调里刷新全部页面，给输入、布局和绘制留出事件循环机会。
+            // 单个业务回调仍必须自己有界；这里不能中断正在执行的setStyleSheet。
+            if (slice.elapsed() >= 6)
+            {
+                break;
+            }
+        }
+        // 处理期间始终保留scheduled，嵌套事件循环不会启动第二个drain消费同一队列。
+        m_scheduled = false;
+        if (!m_pending.empty())
+        {
+            m_scheduled = true;
+            QTimer::singleShot(0, this, [this]() { drain(); });
         }
     }
 

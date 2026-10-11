@@ -27,6 +27,29 @@ namespace
     constexpr char kOriginalGrid[] = "ksword_table_presentation_original_grid";
     constexpr char kPending[] = "ksword_table_presentation_pending";
     constexpr char kInstalled[] = "ksword_table_presentation_installed";
+    constexpr char kApplying[] = "ksword_table_presentation_applying";
+    constexpr char kInitialized[] = "ksword_table_presentation_initialized";
+
+    // 本组件写入QSS产生的事件不回投自己；真实外部主题/字体通知仍由过滤器维护。
+    class PresentationChange final
+    {
+    public:
+        explicit PresentationChange(QAbstractItemView* view)
+            : m_view(view), m_previous(view->property(kApplying).toBool())
+        {
+            view->setProperty(kApplying, true);
+            view->setProperty(kInitialized, true);
+        }
+
+        ~PresentationChange()
+        {
+            if (m_view) m_view->setProperty(kApplying, m_previous);
+        }
+
+    private:
+        QPointer<QAbstractItemView> m_view;
+        bool m_previous;
+    };
 
     QString withoutPresentationBlock(QString style)
     {
@@ -66,9 +89,12 @@ namespace
         return qobject_cast<const QTableView*>(view) != nullptr || qobject_cast<const QTreeView*>(view) != nullptr;
     }
 
-    void schedulePresentation(QAbstractItemView* view)
+    void schedulePresentation(QAbstractItemView* view, bool deferHidden = false)
     {
-        if (!supportedView(view) || view->property(kPending).toBool()) return;
+        if (!supportedView(view)) return;
+        // 已初始化隐藏表只留原几何，Show时必然重算最新主题；首次Polish仍建立呈现基线。
+        if (deferHidden && !view->isVisible() && view->property(kInitialized).toBool()) return;
+        if (view->property(kPending).toBool()) return;
         view->setProperty(kPending, true);
         const QPointer<QAbstractItemView> guardedView(view);
         QTimer::singleShot(0, view, [guardedView]()
@@ -92,12 +118,18 @@ namespace
             {
             case QEvent::Polish:
             case QEvent::Show:
+                schedulePresentation(qobject_cast<QAbstractItemView*>(source));
+                break;
             case QEvent::StyleChange:
             case QEvent::FontChange:
             case QEvent::PaletteChange:
+                // 仅忽略此表格自己的样式回声，不吞真正的应用主题广播。
+                if (source->property(kApplying).toBool()) break;
+                schedulePresentation(qobject_cast<QAbstractItemView*>(source), true);
+                break;
             case QEvent::ApplicationPaletteChange:
                 // Only the view itself, never header/viewport/popup Show/Resize internals.
-                schedulePresentation(qobject_cast<QAbstractItemView*>(source));
+                schedulePresentation(qobject_cast<QAbstractItemView*>(source), true);
                 break;
             default:
                 break;
@@ -186,6 +218,7 @@ namespace ks::ui
     void ApplyTablePresentation(QAbstractItemView* view, const bool normalizeHeader)
     {
         if (!supportedView(view)) return;
+        const PresentationChange applying(view);
         view->setProperty(kNormalizeHeader, normalizeHeader);
         auto* table = qobject_cast<QTableView*>(view);
         if (PreservesCustomTablePresentation(view))

@@ -405,7 +405,8 @@ namespace
         // 真实主题或业务QSS变化合并到一次更新；弹窗销毁和首显同步应用会取消旧任务。
         void scheduleTheme(QDialog* dialog)
         {
-            if (dialog->property(kDialogThemePendingPropertyName).toBool())
+            // 隐藏窗口的整树根QSS不参与每次换肤，真实Show入口会同步应用最新主题。
+            if (!dialog->isVisible() || dialog->property(kDialogThemePendingPropertyName).toBool())
             {
                 return;
             }
@@ -419,7 +420,10 @@ namespace
                     return;
                 }
                 safeDialog->setProperty(kDialogThemePendingPropertyName, false);
-                safeStyler->polishDialog(safeDialog);
+                if (safeDialog->isVisible())
+                {
+                    safeStyler->polishDialog(safeDialog);
+                }
             });
         }
 
@@ -535,6 +539,10 @@ namespace ks::ui
         for (QWidget* topLevelWidget : topLevelWidgetList)
         {
             QDialog* dialog = qobject_cast<QDialog*>(topLevelWidget);
+            if (dialog == nullptr || !dialog->isVisible())
+            {
+                continue; // 首次/再次Show同步安装并换肤，不预加载隐藏业务窗口。
+            }
             // 手动刷新与首显遵循同一根QSS所有权顺序，不能先让框架写一份重复主题。
             if (shouldThemeDialog(dialog))
             {

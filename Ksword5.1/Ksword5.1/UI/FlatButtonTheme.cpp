@@ -12,6 +12,7 @@
 #include <QPushButton>
 #include <QToolButton>
 #include <memory>
+#include <array>
 
 namespace
 {
@@ -43,6 +44,12 @@ namespace
         if (!parameterBlock.isEmpty())
         {
             style.remove(parameterBlock);
+        }
+        // 二级窗口/底栏仅拥有容器、分区和输入规则，不以中性容器块阻断共享按钮配色。
+        const QString secondaryBlock = owner->property("ksword_secondary_style_block").toString();
+        if (!secondaryBlock.isEmpty())
+        {
+            style.remove(secondaryBlock);
         }
         return style.trimmed();
     }
@@ -130,16 +137,31 @@ namespace
         using namespace ks::ui;
         QString style = QStringLiteral("/*KSWORD_FLAT_BUTTON_TONE_%1*/"
             "/*KSWORD_FLAT_BUTTON_APPEARANCE_%2*/").arg(static_cast<int>(tone)).arg(static_cast<int>(appearance));
+        std::array<FlatButtonStateColors, 5> recipe;
+        const FlatButtonState states[] = {FlatButtonState::Normal, FlatButtonState::Hover,
+            FlatButtonState::Pressed, FlatButtonState::Checked, FlatButtonState::Disabled};
+        FlatButtonAppearance recipeAppearance = FlatButtonAppearance::Auto;
+        bool hasRecipe = false;
         for (int kind = 0; kind < 2; ++kind)
         {
             const QString selector = kind == 0 ? QStringLiteral("QPushButton") : QStringLiteral("QToolButton");
             const FlatButtonAppearance actual = resolvedAppearance(tone, appearance,
                 button != nullptr ? toolPresentation(button) : kind == 1);
-            const FlatButtonStateColors normal = FlatButtonColorsForState(palette, tone, actual, FlatButtonState::Normal);
-            const FlatButtonStateColors hover = FlatButtonColorsForState(palette, tone, actual, FlatButtonState::Hover);
-            const FlatButtonStateColors pressed = FlatButtonColorsForState(palette, tone, actual, FlatButtonState::Pressed);
-            const FlatButtonStateColors checked = FlatButtonColorsForState(palette, tone, actual, FlatButtonState::Checked);
-            const FlatButtonStateColors disabled = FlatButtonColorsForState(palette, tone, actual, FlatButtonState::Disabled);
+            // 两个selector的实际外观相同时复用五态颜色；Auto工具/操作外观不同仍独立计算。
+            if (!hasRecipe || recipeAppearance != actual)
+            {
+                for (std::size_t index = 0; index < recipe.size(); ++index)
+                {
+                    recipe[index] = FlatButtonColorsForState(palette, tone, actual, states[index]);
+                }
+                recipeAppearance = actual;
+                hasRecipe = true;
+            }
+            const auto& normal = recipe[0];
+            const auto& hover = recipe[1];
+            const auto& pressed = recipe[2];
+            const auto& checked = recipe[3];
+            const auto& disabled = recipe[4];
             style += QStringLiteral(
                 "%1{background-color:%2;color:%3;border:none;}"
                 "%1:hover,%1:focus{background-color:%4;color:%5;border:none;}"

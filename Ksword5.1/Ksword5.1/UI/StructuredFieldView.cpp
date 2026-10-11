@@ -23,6 +23,7 @@
 #include <QScrollBar>
 #include <QSet>
 #include <QShortcut>
+#include <QShowEvent>
 #include <QSignalBlocker>
 #include <QStyle>
 #include <QStyledItemDelegate>
@@ -373,6 +374,8 @@ namespace ks::ui
             return;
         }
         m_documentOnly = true;
+        m_hiddenTreeDirty = false;
+        m_hiddenTreeLayoutDirty = false;
         m_presentation = Presentation::Sections;
         m_searchActive = false;
         m_expansionBeforeSearch.clear();
@@ -419,6 +422,13 @@ namespace ks::ui
         {
             return;
         }
+        if (shouldDeferHiddenTree())
+        {
+            m_hiddenTreeDirty = true;
+            return; // 文档/导出代次仍即时更新，隐藏Tab不构造旧模型和逐字段测量。
+        }
+        m_hiddenTreeDirty = false;
+        m_hiddenTreeLayoutDirty = false;
         QHash<QString, bool> expanded;
         QSet<QString> selected;
         QString current;
@@ -542,6 +552,11 @@ namespace ks::ui
         {
             return; // 搜索信号仍由同一输入发出，筛选由唯一卡片宿主处理。
         }
+        if (shouldDeferHiddenTree())
+        {
+            m_hiddenTreeDirty = true;
+            return; // 保留搜索框的最新查询，显示时从最新文档一次重建并筛选。
+        }
         const QString query = m_search->text().trimmed();
         const bool active = !query.isEmpty();
         if (active && !m_searchActive)
@@ -592,11 +607,20 @@ namespace ks::ui
         {
             return;
         }
+        if (shouldDeferHiddenTree())
+        {
+            m_hiddenTreeLayoutDirty = true;
+            return;
+        }
         const bool sections = m_presentation == Presentation::Sections;
         m_tree->setRootIsDecorated(!sections);
         m_tree->setIndentation(sections ? 14 : 20);
         m_tree->setAlternatingRowColors(!sections);
         static_cast<PropertyDelegate*>(m_tree->itemDelegate())->sections = sections;
+        if (m_hiddenTreeDirty)
+        {
+            return; // Show随后重建最新文档，不先为已过期的旧行安排一次布局。
+        }
         updateColumns();
         m_tree->doItemsLayout();
         m_tree->viewport()->update();
@@ -606,6 +630,11 @@ namespace ks::ui
     {
         if (m_documentOnly || !m_tree)
         {
+            return;
+        }
+        if (shouldDeferHiddenTree())
+        {
+            m_hiddenTreeLayoutDirty = true;
             return;
         }
         const int width = m_tree->viewport()->width();
@@ -691,10 +720,78 @@ namespace ks::ui
             (event->type() == QEvent::FontChange || event->type() == QEvent::ApplicationFontChange ||
                 event->type() == QEvent::PaletteChange || event->type() == QEvent::ApplicationPaletteChange))
         {
+            if (shouldDeferHiddenTree())
+            {
+                m_hiddenTreeLayoutDirty = true;
+                return; // QApplication换肤仍广播到隐藏旧树，但不触发其全文测量和doItemsLayout。
+            }
             updateColumns();
             m_tree->doItemsLayout();
             m_tree->viewport()->update();
         }
+    }
+
+    bool StructuredFieldView::belongsToSharedDetail() const
+    {
+        const QWidget* owner = window(); // 仅共享详情根实际登记后启用，不推断普通隐藏编辑器用途。
+        for (const QWidget* parent = this; parent; parent = parent->parentWidget())
+        {
+            if (parent->property("ksword_detail_keep_layout").toBool())
+            {
+                return false; // 专业工作台仍依赖tree()及其原生模型的即时状态。
+            }
+            if (parent == owner)
+            {
+                break;
+            }
+        }
+        return owner && owner->property("ksword_detail_framework_controller").value<QObject*>() != nullptr;
+    }
+
+    bool StructuredFieldView::shouldDeferHiddenTree() const
+    {
+        // 切页Show后的业务currentChanged槽也可能提交新文档；排队fallback前仍不重建待淘汰树。
+        return !m_documentOnly && m_tree && (!isVisible() || m_treeShowPending) && belongsToSharedDetail();
+    }
+
+    void StructuredFieldView::flushDeferredTree()
+    {
+        if (m_documentOnly || !m_tree || !isVisible()
+            || (!m_hiddenTreeDirty && !m_hiddenTreeLayoutDirty))
+        {
+            return;
+        }
+        m_hiddenTreeLayoutDirty = false;
+        applyPresentation();
+        if (m_hiddenTreeDirty)
+        {
+            rebuild();
+        }
+    }
+
+    // Qt先Show新Stack页再发currentChanged；让同步共享投影先消费文档，避免刚建旧树就删除。
+    void StructuredFieldView::showEvent(QShowEvent* event)
+    {
+        QWidget::showEvent(event);
+        if (m_documentOnly || !m_tree || (!m_hiddenTreeDirty && !m_hiddenTreeLayoutDirty))
+        {
+            return;
+        }
+        if (!belongsToSharedDetail())
+        {
+            flushDeferredTree(); // 普通视图和专业工作台保留原有同步显示语义。
+            return;
+        }
+        if (m_treeShowPending)
+        {
+            return;
+        }
+        m_treeShowPending = true;
+        QTimer::singleShot(0, this, [this]()
+        {
+            m_treeShowPending = false;
+            flushDeferredTree(); // source被销毁则Qt取消回调；已投影、隐藏或清脏时不恢复旧树。
+        });
     }
 
     void StructuredFieldView::resizeEvent(QResizeEvent* event)
@@ -702,6 +799,11 @@ namespace ks::ui
         QWidget::resizeEvent(event);
         if (m_documentOnly || !m_tree)
         {
+            return;
+        }
+        if (shouldDeferHiddenTree())
+        {
+            m_hiddenTreeLayoutDirty = true;
             return;
         }
         updateColumns();
@@ -715,6 +817,11 @@ namespace ks::ui
         // event turn, once Qt has finished its own resize/layout work.
         if (m_tree && watched == m_tree->viewport() && event->type() == QEvent::Resize && !m_layoutPending)
         {
+            if (shouldDeferHiddenTree())
+            {
+                m_hiddenTreeLayoutDirty = true;
+                return QWidget::eventFilter(watched, event);
+            }
             m_layoutPending = true;
             QTimer::singleShot(0, this, [this]
             {
@@ -722,6 +829,11 @@ namespace ks::ui
                 if (m_documentOnly || !m_tree)
                 {
                     return; // 排队回调可能发生在接入卡片并销毁旧树之后。
+                }
+                if (shouldDeferHiddenTree())
+                {
+                    m_hiddenTreeLayoutDirty = true;
+                    return; // 排队期间已切走该Tab时，不能继续为隐藏旧树安排布局。
                 }
                 updateColumns();
                 m_tree->doItemsLayout();

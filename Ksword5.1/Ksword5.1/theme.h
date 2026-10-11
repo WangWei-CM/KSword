@@ -16,6 +16,7 @@
 #include "UI/ThemeControlGlyphs.h"
 
 #include <cmath>
+#include <array>
 
 namespace KswordTheme
 {
@@ -224,16 +225,24 @@ namespace KswordTheme
 
     inline double RelativeLuminance(const QColor& colorValue)
     {
-        const auto linearize = [](const int channelValue) {
-            const double channel = static_cast<double>(channelValue) / 255.0;
-            return channel <= 0.03928
-                ? channel / 12.92
-                : std::pow((channel + 0.055) / 1.055, 2.4);
-        };
+        // QColor在原算法中也按8位通道求值；保留同一公式，通道线性化只预算一次。
+        // 对比度亮度搜索会反复访问同一256个输入，不再每个候选色执行三次pow。
+        static const std::array<double, 256> linearChannels = []()
+        {
+            std::array<double, 256> channels{};
+            for (int value = 0; value < 256; ++value)
+            {
+                const double channel = static_cast<double>(value) / 255.0;
+                channels[value] = channel <= 0.03928
+                    ? channel / 12.92
+                    : std::pow((channel + 0.055) / 1.055, 2.4);
+            }
+            return channels;
+        }();
 
-        return 0.2126 * linearize(colorValue.red())
-            + 0.7152 * linearize(colorValue.green())
-            + 0.0722 * linearize(colorValue.blue());
+        return 0.2126 * linearChannels[ClampChannel(colorValue.red())]
+            + 0.7152 * linearChannels[ClampChannel(colorValue.green())]
+            + 0.0722 * linearChannels[ClampChannel(colorValue.blue())];
     }
 
     inline double ContrastRatio(const QColor& firstColor, const QColor& secondColor)

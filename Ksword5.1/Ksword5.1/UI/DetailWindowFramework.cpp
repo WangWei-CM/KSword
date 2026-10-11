@@ -111,7 +111,7 @@ namespace
         void schedule()
         {
             // Polish或构造尾部登记时尚未出现安全的Show，不能在半构造布局上安装框架。
-            if (!m_prepared || m_pending || m_applying)
+            if (!m_prepared || m_pending || m_applying || !m_window || !m_window->isVisible())
             {
                 return;
             }
@@ -119,7 +119,10 @@ namespace
             QTimer::singleShot(0, this, [this]()
             {
                 m_pending = false;
-                apply();
+                if (m_window && m_window->isVisible())
+                {
+                    apply(); // 排队期间已隐藏时保留dirty，Show再整理，不重抛隐藏根QSS。
+                }
             });
         }
     protected:
@@ -170,6 +173,21 @@ namespace
             }
             return false;
         }
+        // 判断结构宿主是否属于当前可见页；未打开的Tab不在弹窗首帧提前迁移/建投影。
+        bool isCurrentPageScope(QWidget* scope) const
+        {
+            QWidget* page = scope;
+            for (QWidget* parent = scope ? scope->parentWidget() : nullptr;
+                parent && page != m_window; page = parent, parent = parent->parentWidget())
+            {
+                auto* stack = qobject_cast<QStackedWidget*>(parent);
+                if (stack && stack->currentWidget() != page)
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
         // 专业编辑器、文档投影和叶控件内部不属于详情布局框架的结构观察范围。
         void collectWidgets(QWidget* scope, WidgetList& widgets) const
         {
@@ -195,6 +213,11 @@ namespace
                 }
                 return; // 不扫描表/树/代码编辑器的viewport及内部滚动条。
             }
+            if (auto* stack = qobject_cast<QStackedWidget*>(scope))
+            {
+                collectWidgets(stack->currentWidget(), widgets);
+                return; // 其余页面在currentChanged安全点准备，不把全部Tab的代价压到首Show。
+            }
             const auto children = scope->findChildren<QWidget*>(QString(), Qt::FindDirectChildrenOnly);
             for (auto* child : children)
             {
@@ -210,6 +233,23 @@ namespace
             m_observed.insert(widget);
             widget->installEventFilter(this);
             connect(widget, &QObject::destroyed, this, [this, widget]() { m_observed.remove(widget); });
+            if (auto* stack = qobject_cast<QStackedWidget*>(widget))
+            {
+                // currentChanged发生在页身份与Qt父子关系稳定后；同步处理保证新页首帧已是新布局。
+                const QPointer<QStackedWidget> safeStack(stack);
+                connect(stack, &QStackedWidget::currentChanged, this, [this, safeStack](int)
+                {
+                    if (!safeStack || !m_prepared || m_applying)
+                    {
+                        return;
+                    }
+                    markStructureDirty(safeStack->currentWidget());
+                    if (m_window && m_window->isVisible())
+                    {
+                        apply(); // 窗口隐藏时只留dirty，重开Show再处理，避免后台程序化切页消耗UI时间。
+                    }
+                });
+            }
         }
         void observeContainers(const WidgetList& widgets)
         {
@@ -307,8 +347,9 @@ namespace
                 root->addWidget(footer);
             }
         }
-        void prepareTabs(const WidgetList& widgets)
+        bool prepareTabs(const WidgetList& widgets)
         {
+            bool replaced = false; // 只有真实换宿主才重新收集一次已改变的页面结构。
             for (const auto& pointer : widgets)
             {
                 auto* tabs = qobject_cast<QTabWidget*>(pointer.data());
@@ -328,7 +369,7 @@ namespace
                 }
                 if (!nested)
                 {
-                    replaceDetailWidget(tabs, [tabs](QWidget* parent)
+                    replaced |= replaceDetailWidget(tabs, [tabs](QWidget* parent)
                     {
                         return ks::ui::CreateDetailTabShell(tabs, parent);
                     });
@@ -341,9 +382,11 @@ namespace
                     ks::ui::StylePageTabs(tabs); // 保留内部Tab身份并复用同一导航动画和主题。
                 }
             }
+            return replaced;
         }
-        void prepareFields(const WidgetList& widgets)
+        bool prepareFields(const WidgetList& widgets)
         {
+            bool replaced = false; // 文档源尚未投影时才重新收集新宿主与布局。
             for (const auto& pointer : widgets)
             {
                 auto* source = qobject_cast<ks::ui::StructuredFieldView*>(pointer.data());
@@ -364,13 +407,15 @@ namespace
                     body->setContentsMargins(0, 0, 0, 0);
                     body->setSpacing(0);
                     body->addWidget(ks::ui::CreateDetailFieldProjection(source, source, scrollBody));
+                    replaced = true;
                     continue;
                 }
-                replaceDetailWidget(source, [source, scrollBody](QWidget* parent)
+                replaced |= replaceDetailWidget(source, [source, scrollBody](QWidget* parent)
                 {
                     return ks::ui::CreateDetailFieldProjection(source, parent, scrollBody);
                 });
             }
+            return replaced;
         }
         void prepareForm(QFormLayout* form)
         {
@@ -527,14 +572,23 @@ namespace
                 {
                     continue;
                 }
+                if (!m_window->isVisible() || !isCurrentPageScope(scope))
+                {
+                    m_dirtyScopes.append(scope); // 隐藏页保留最新结构请求，切到该页后再一次性处理。
+                    continue;
+                }
                 WidgetList widgets;
                 collectWidgets(scope, widgets);
-                prepareTabs(widgets);
-                widgets.clear(); // 首次导航接入可能同步创建当前惰性页，字段取其构造后的快照。
-                collectWidgets(scope, widgets);
-                prepareFields(widgets);
-                widgets.clear(); // 源视图的旧控件已销毁，观察新宿主而不是保存失效控件。
-                collectWidgets(scope, widgets);
+                if (prepareTabs(widgets))
+                {
+                    widgets.clear(); // 首次导航接入可能同步创建当前惰性页，字段取其构造后的快照。
+                    collectWidgets(scope, widgets);
+                }
+                if (prepareFields(widgets))
+                {
+                    widgets.clear(); // 源视图的旧控件已销毁，观察新宿主而不是保存失效控件。
+                    collectWidgets(scope, widgets);
+                }
                 prepareForms(widgets);
                 prepareScrollAreas(widgets);
                 observeContainers(widgets);

@@ -124,6 +124,18 @@ namespace ks::ui
             return;
         }
 
+        // 已安装本组件委托时，语义role在真正绘制的行上按当前主题求值。
+        // 不再为每次Palette广播扫描整个事件表/命名空间树并回写展示画刷。
+        // 冻结窗格复用源委托和模型；非本组件的委托继续走下面的兼容刷新。
+        if (dynamic_cast<SemanticForegroundDelegate*>(view->itemDelegate()) != nullptr)
+        {
+            if (view->viewport() != nullptr)
+            {
+                view->viewport()->update();
+            }
+            return;
+        }
+
         // model 为原模型；阻断颜色写入信号，防止 itemChanged/排序/搜索监听误判为业务数据变化。
         QAbstractItemModel* const model = view->model();
         {
