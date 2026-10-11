@@ -1,4 +1,5 @@
 #include "DockTabInteraction.h"
+#include "./DockTabSelectionAnimation.h"
 #include "SmoothScrollSupport.h"
 
 #include "../include/ads/DockAreaTabBar.h"
@@ -319,6 +320,8 @@ namespace ks::ui
                 areaLayout->setSpacing(0);
             }
             tabBar->setProperty(kInstalledProperty, true);
+            // 与既有滚动控制共用原标签栏；动画仅改变导航底面，不改页面或鼠标行为。
+            InstallDockTabSelectionAnimation(tabBar);
             new DockTabScroller(dockArea->titleBar());
         }
     }

@@ -3,6 +3,7 @@
 #include "UI/SecondaryPageLayout.h"
 #include "UI/MainSurfaceStyle.h"
 #include "UI/PageControlStyle.h"
+#include "UI/DockTabSelectionAnimation.h"
 #include "UI/PageNavigationBridge.h"
 #include "UI/McpLocalBridge.h"
 #include "UI/McpHexCanvasAdapter.h"
@@ -972,6 +973,12 @@ namespace
         void paintEvent(QPaintEvent* paintEventObject) override
         {
             ads::CDockWidgetTab::paintEvent(paintEventObject);
+            // 原标签继续绘制文字与处理输入，动画组件只负责连续移动的底面和选中线。
+            QPainter painter(this);
+            if (ks::ui::PaintAnimatedDockTabSelection(this, painter))
+            {
+                return;
+            }
             if (!isEnabled() || !underMouse())
             {
                 return;
@@ -981,7 +988,6 @@ namespace
             // 选中标签保持背景色派生底面，并补回被背景补绘覆盖的主题色选中标记。
             // 子 QLabel 会在父控件 paintEvent 返回后再绘制，因此文字不会被遮住。
             const bool activeTab = property("activeTab").toBool();
-            QPainter painter(this);
             painter.setPen(Qt::NoPen);
             painter.setBrush(dockTabHoverFillColor(activeTab));
             painter.drawRect(paintEventObject != nullptr ? paintEventObject->rect() : rect());

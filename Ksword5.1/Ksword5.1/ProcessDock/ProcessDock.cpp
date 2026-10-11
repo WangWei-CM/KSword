@@ -7,6 +7,7 @@
 #include "../UI/ToolbarMetrics.h"
 #include "../UI/PageControlStyle.h"
 #include "../UI/PrimaryPageStyle.h"
+#include "../UI/TablePresentation.h"
 #include "../UI/ParameterWorkspace.h"
 #include "../UI/SecondaryPageLayout.h"
 #include <QDynamicPropertyChangeEvent>
@@ -5719,17 +5720,8 @@ void ProcessDock::initializeProcessTable()
         toColumnIndex(TableColumn::Ram) + 1);
     headerView->setStretchLastSection(false);
     headerView->setContextMenuPolicy(Qt::CustomContextMenu);
-    headerView->setStyleSheet(QStringLiteral(
-        "QHeaderView::section {"
-        "  color: %1;"
-        "  background: transparent; /* %2 */"
-        "  border: 1px solid %3;"
-        "  padding: 4px;"
-        "  font-weight: 600;"
-        "}")
-        .arg(KswordTheme::PrimaryBlueHex)
-        .arg(KswordTheme::SurfaceHex())
-        .arg(KswordTheme::BorderHex()));
+    // 表头底色和圆角由共享外壳负责，保留原列尺寸、菜单和排序行为。
+    ks::ui::ApplyTablePresentation(m_processTable);
 
     // 列布局配置必须在首次套用视图预设之前读入：
     // applyViewMode 会在铺完预设后叠加用户覆盖，顺序反了会让自定义列在启动时被冲掉。

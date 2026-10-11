@@ -36,10 +36,10 @@ namespace ks::ui
         BindSearchFieldTheme(field);
     }
 
-    // 普通内容页签共用状态颜色和几何；只登记明确传入的栏，保留页序和导航行为。
+    // 普通内容页签共用状态颜色和几何；选中底面/细线平滑移动，原栏保留所有输入。
     void StylePageTabBar(QTabBar* bar);
 
-    // 已确认的 QTabWidget 连接全宽导航底板与页面圆角；保留内容页自己的内边距。
+    // 已确认的 QTabWidget 让导航侧翼包住圆角内容面；仅直接工作区增加等宽 8px 留白。
     void StylePageTabs(QTabWidget* tabs);
 
     // 子级保持轻底面与左缩进，顶部直接接父栏；原子栏方向动画继续使用原入口。

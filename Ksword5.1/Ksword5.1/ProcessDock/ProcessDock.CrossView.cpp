@@ -4,6 +4,7 @@
 #include "../UI/ToolbarMetrics.h"
 #include "../UI/PageControlStyle.h"
 #include "../UI/PrimaryPageStyle.h"
+#include "../UI/TablePresentation.h"
 #include "../UI/FlatButtonTheme.h"
 #include "../UI/ThemeBinding.h"
 
@@ -493,6 +494,8 @@ void ProcessDock::initializeCrossViewPage()
         table->verticalHeader()->setVisible(false);
         table->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
         table->horizontalHeader()->setSectionResizeMode(columnIndex(CrossViewColumn::Detail), QHeaderView::Stretch);
+        // 两张来源表保留独立圆角外壳，内部冻结窗格仍由共享层保持连体方角。
+        ks::ui::ApplyTablePresentation(table);
     }
     installCrossViewContextMenu(
         m_processCrossViewTable,

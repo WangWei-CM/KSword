@@ -1,6 +1,7 @@
 #include "../Framework.h"
 #include "./PageControlStyle.h"
 #include "./MainSurfaceStyle.h"
+#include "./PageTabMotion.h"
 
 #include <QBoxLayout>
 #include <QEvent>
@@ -11,7 +12,8 @@
 
 namespace
 {
-    constexpr int kPageCornerRadius = 8; // 导航下缘与内容组件共用的圆角半径。
+    constexpr int kPageCornerRadius = 8; // 导航包围面的内部转角与内容组件共用的半径。
+    constexpr int kPageEnvelopeInset = 8; // 仅直接工作区留一圈等宽小边缘，嵌套子栏不重复累计。
 
     struct PageTabColors
     {
@@ -40,14 +42,16 @@ namespace
     }
 
     // selector 可为全局回退或明确属性选择器；各状态采用同一几何，避免悬停时跳动。
-    QString tabBarRules(const QString& selector, const PageTabColors& colors, bool child)
+    QString tabBarRules(const QString& selector, const PageTabColors& colors, bool child, bool animated = false)
     {
-        const QColor text = KswordTheme::EnsureTextContrast(
-            KswordTheme::TextSecondaryColor(), colors.rail, 4.5);
-        const QColor hoverText = KswordTheme::EnsureTextContrast(
-            KswordTheme::TextPrimaryColor(), colors.hovered, 4.5);
-        const QColor selectedText = KswordTheme::EnsureTextContrast(
-            KswordTheme::TextPrimaryColor(), colors.selected, 4.5);
+        const QColor selectedBackgrounds[]{colors.rail, colors.hovered, colors.selected};
+        // 移动底面会暂时经过未选标签，三种前景都必须在所有实际中性底面上可读。
+        const QColor text = KswordTheme::EnsureTextContrastForBackgrounds(
+            KswordTheme::TextSecondaryColor(), selectedBackgrounds, 3, 4.5);
+        const QColor hoverText = KswordTheme::EnsureTextContrastForBackgrounds(
+            KswordTheme::TextPrimaryColor(), selectedBackgrounds, 3, 4.5);
+        const QColor selectedText = KswordTheme::EnsureTextContrastForBackgrounds(
+            KswordTheme::TextPrimaryColor(), selectedBackgrounds, 3, 4.5);
         const QColor marker = KswordTheme::EnsureTextContrast(
             KswordTheme::ControlAccentColor(), colors.selected, 3.0);
         // 颜色均以完整 QSS 规则一次替换，不能向样式参数中再注入未替换的占位符。
@@ -75,17 +79,76 @@ namespace
                 "%1::tab{padding:3px 10px;min-height:18px;"
                 "border-top-left-radius:4px;border-top-right-radius:4px;}").arg(selector);
         }
+        if (animated)
+        {
+            // 只让出选中形状，仍由 Qt 绘制图标、文字、关闭控件、焦点与原生拖动反馈。
+            rules += QStringLiteral(
+                "%1::tab:selected,%1::tab:selected:hover,%1::tab:selected:pressed{"
+                "background:transparent;border-bottom-color:transparent;}"
+                "%1::tab:left:selected,%1::tab:right:selected{border-left-color:transparent;}").arg(selector);
+        }
         return rules;
     }
 
-    // 全宽导航底面仅覆盖栏位及下方两处圆角，不读取页面数据，也不抢占命中区域。
+    // 只包围直接工作区：嵌套页签沿用父侧翼，避免三级导航层层增加边距。
+    bool enclosesWorkspace(const QTabWidget* tabs)
+    {
+        if (!tabs || tabs->tabPosition() != QTabWidget::North
+            || tabs->property("ksword_secondary_tabs").toBool()
+            || tabs->tabBar()->property("ksword_page_tabs_child").toBool())
+        {
+            return false;
+        }
+        for (QWidget* parent = tabs->parentWidget(); parent && !parent->isWindow(); parent = parent->parentWidget())
+        {
+            auto* ancestor = qobject_cast<QTabWidget*>(parent);
+            if (ancestor && ancestor->property("ksword_page_tabs_widget").toBool())
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // 用 pane 的盒模型向原生布局表达留白，不直接改 QStackedWidget 的几何。
+    void applyPaneStyle(QTabWidget* tabs)
+    {
+        if (!tabs || tabs->property("ksword_secondary_tabs").toBool())
+        {
+            return;
+        }
+        const bool child = tabs->tabBar()->property("ksword_page_tabs_child").toBool();
+        const PageTabColors colors = tabColors(ks::ui::UsesMainSurfaceHierarchy(tabs), child);
+        const QVariant mainSurface = tabs->window()->property("ksword_main_surface_hierarchy");
+        const QString background = mainSurface.isValid() && !mainSurface.toBool()
+            ? QStringLiteral("transparent") : colors.page.name();
+        const QString rules = QStringLiteral(
+            "QTabWidget[ksword_page_tabs_widget=\"true\"]::pane{"
+            "border:0;border-radius:8px;top:0px;background:%1;padding:%2px;}")
+            .arg(background).arg(enclosesWorkspace(tabs) ? kPageEnvelopeInset : 0);
+        const QString previous = tabs->property("ksword_page_tabs_owned_pane_style").toString();
+        if (previous == rules)
+        {
+            return;
+        }
+        QString current = tabs->styleSheet();
+        current.remove(previous); // 保留业务页面明确声明的专业编辑器与控件样式。
+        tabs->setProperty("ksword_page_tabs_owned_pane_style", rules);
+        tabs->setStyleSheet(current + rules);
+    }
+
+    // 全宽底板从导航两侧延伸到内容底部；中间挖出圆角口，保持所有业务内容和命中。
     class PageNavigationSurface final : public QWidget
     {
     public:
         explicit PageNavigationSurface(QTabWidget* tabs) : QWidget(tabs), m_tabs(tabs)
         {
+            setProperty("ksword_page_navigation_surface", true);
+            setStyleSheet(QStringLiteral(
+                "QWidget[ksword_page_navigation_surface=\"true\"]{background:transparent;border:0;}"));
             setAttribute(Qt::WA_TransparentForMouseEvents);
             setAttribute(Qt::WA_NoSystemBackground);
+            setAutoFillBackground(false); // 全局 QWidget 底色不能填入挖空中心覆盖业务页面。
             setFocusPolicy(Qt::NoFocus);
         }
 
@@ -102,21 +165,27 @@ namespace
             painter.setRenderHint(QPainter::Antialiasing);
             painter.setPen(Qt::NoPen);
             painter.setBrush(colors.rail);
-            const qreal bandHeight = height() - kPageCornerRadius;
-            painter.drawRect(QRectF(0, 0, width(), bandHeight));
-
-            // 内容顶角由小凹角包住；中间区域始终透明，不遮挡日志、曲线或编辑器。
-            const qreal radius = std::min(qreal(kPageCornerRadius), width() / 2.0);
-            QPainterPath corners;
-            corners.moveTo(0, bandHeight);
-            corners.lineTo(radius, bandHeight);
-            corners.quadTo(0, bandHeight, 0, bandHeight + radius);
-            corners.closeSubpath();
-            corners.moveTo(width(), bandHeight);
-            corners.lineTo(width() - radius, bandHeight);
-            corners.quadTo(width(), bandHeight, width(), bandHeight + radius);
-            corners.closeSubpath();
-            painter.drawPath(corners);
+            if (!enclosesWorkspace(m_tabs))
+            {
+                painter.drawRect(rect()); // 子级只保留导航本行，父级已经拥有完整侧翼。
+                return;
+            }
+            auto* stack = m_tabs->findChild<QStackedWidget*>(
+                QStringLiteral("qt_tabwidget_stackedwidget"), Qt::FindDirectChildrenOnly);
+            if (!stack)
+            {
+                return;
+            }
+            // 内部几何完全读原 QTabWidget 布局；QSS 的 pane padding 负责等宽留白。
+            const QRectF opening(stack->geometry().translated(-pos()));
+            QPainterPath shell;
+            shell.setFillRule(Qt::WindingFill);
+            shell.addRoundedRect(QRectF(rect()), kPageCornerRadius, kPageCornerRadius);
+            shell.addRect(QRectF(0, 0, width(), m_tabs->tabBar()->height()));
+            QPainterPath aperture;
+            aperture.addRoundedRect(opening, kPageCornerRadius, kPageCornerRadius);
+            // 使用路径相减，顶角是真正凹入圆角，侧翼一直包到内容底部而不是两片小角。
+            painter.drawPath(shell.subtracted(aperture));
         }
 
     private:
@@ -133,6 +202,11 @@ namespace
             setObjectName(QStringLiteral("ks_page_tab_envelope"));
             tabs->installEventFilter(this);
             tabs->tabBar()->installEventFilter(this);
+            if (auto* stack = tabs->findChild<QStackedWidget*>(
+                QStringLiteral("qt_tabwidget_stackedwidget"), Qt::FindDirectChildrenOnly))
+            {
+                stack->installEventFilter(this); // 原生 pane 布局更新后同步外壳，不与其争抢几何。
+            }
             connect(tabs, &QTabWidget::currentChanged, this, [this]() { schedule(); });
             schedule();
         }
@@ -187,7 +261,7 @@ namespace
             }
         }
 
-        // 按原栏位真实边界铺底，绘制顺序只把底面置于栏下、页面顶角之上。
+        // 按原栏位真实边界铺底，绘制顺序把侧翼置于页面角之上，内部挖口保持透明。
         void synchronize()
         {
             if (!m_tabs || !m_surface)
@@ -202,8 +276,10 @@ namespace
                 return;
             }
             connectOuterLayout();
+            applyPaneStyle(m_tabs); // 跨 Dock 移动或子栏登记改变时重新判断是否需要包围。
             const QRect bounds = m_tabs->contentsRect();
-            const QRect band(bounds.left(), bar->y(), bounds.width(), bar->height() + kPageCornerRadius);
+            const QRect band(bounds.left(), bar->y(), bounds.width(), enclosesWorkspace(m_tabs)
+                ? bounds.bottom() - bar->y() + 1 : bar->height());
             m_surface->setGeometry(band);
             m_surface->setVisible(m_tabs->isVisible());
             m_surface->raise();
@@ -270,21 +346,33 @@ namespace ks::ui
 
     void StylePageTabBar(QTabBar* bar)
     {
-        if (!bar || bar->property("ksword_secondary_tabs").toBool())
+        if (!bar || bar->property("ksword_secondary_tabs").toBool()
+            || bar->property("ksword_segmented_tabs").toBool())
         {
             return;
         }
+        const QPointer<QTabBar> safeBar(bar); // 动画和主题刷新不得访问销毁后的标签栏。
+        InstallPageTabMotion(bar, [safeBar]()
+        {
+            if (!safeBar)
+            {
+                return PageTabMotionColors{};
+            }
+            const bool child = safeBar->property("ksword_page_tabs_child").toBool();
+            const PageTabColors colors = tabColors(UsesMainSurfaceHierarchy(safeBar), child);
+            return PageTabMotionColors{colors.selected, KswordTheme::EnsureTextContrast(
+                KswordTheme::ControlAccentColor(), colors.selected, 3.0)};
+        });
         if (bar->property("ksword_page_tabs_style").toBool())
         {
             const bool child = bar->property("ksword_page_tabs_child").toBool();
             bar->setStyleSheet(tabBarRules(QStringLiteral("QTabBar[ksword_page_tabs_style=\"true\"]"),
-                tabColors(UsesMainSurfaceHierarchy(bar), child), child));
+                tabColors(UsesMainSurfaceHierarchy(bar), child), child, true));
             return;
         }
         bar->setProperty("ksword_page_tabs_style", true);
         bar->setExpanding(false);
         bar->setUsesScrollButtons(true);
-        const QPointer<QTabBar> safeBar(bar); // 主题刷新不得访问销毁后的标签栏。
         BindWidgetTheme(bar, [safeBar]()
         {
             if (!safeBar || safeBar->property("ksword_secondary_tabs").toBool())
@@ -293,7 +381,7 @@ namespace ks::ui
             }
             const bool child = safeBar->property("ksword_page_tabs_child").toBool();
             const QString rules = tabBarRules(QStringLiteral("QTabBar[ksword_page_tabs_style=\"true\"]"),
-                tabColors(UsesMainSurfaceHierarchy(safeBar), child), child);
+                tabColors(UsesMainSurfaceHierarchy(safeBar), child), child, true);
             if (safeBar->styleSheet() != rules)
             {
                 safeBar->setStyleSheet(rules);
@@ -321,18 +409,7 @@ namespace ks::ui
             {
                 return;
             }
-            const PageTabColors colors = tabColors(UsesMainSurfaceHierarchy(safeTabs), false);
-            const QVariant mainSurface = safeTabs->window()->property("ksword_main_surface_hierarchy");
-            const QString background = mainSurface.isValid() && !mainSurface.toBool()
-                ? QStringLiteral("transparent") : colors.page.name();
-            const QString rules = QStringLiteral(
-                "QTabWidget[ksword_page_tabs_widget=\"true\"]::pane{"
-                "border:0;border-radius:8px;top:0px;background:%1;}").arg(background);
-            // 仅替换本组件拥有的pane规则，保留页面原有专业编辑器和布局样式。
-            QString current = safeTabs->styleSheet();
-            current.remove(safeTabs->property("ksword_page_tabs_owned_pane_style").toString());
-            safeTabs->setProperty("ksword_page_tabs_owned_pane_style", rules);
-            safeTabs->setStyleSheet(current + rules);
+            applyPaneStyle(safeTabs);
         });
     }
 

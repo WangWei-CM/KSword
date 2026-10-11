@@ -4,6 +4,7 @@
 #include "../UI/ToolbarMetrics.h"
 #include "../UI/PageControlStyle.h"
 #include "../UI/PrimaryPageStyle.h"
+#include "../UI/TablePresentation.h"
 #include "ThreadAffinityMenu.h"
 #include "ThreadStackWindow.h"
 
@@ -565,17 +566,8 @@ void ProcessDock::initializeThreadPage()
     threadHeaderView->setSectionsMovable(true);
     threadHeaderView->setStretchLastSection(false);
     threadHeaderView->setContextMenuPolicy(Qt::CustomContextMenu);
-    threadHeaderView->setStyleSheet(QStringLiteral(
-        "QHeaderView::section {"
-        "  color: %1;"
-        "  background: transparent; /* %2 */"
-        "  border: 1px solid %3;"
-        "  padding: 4px;"
-        "  font-weight: 600;"
-        "}")
-        .arg(KswordTheme::PrimaryBlueHex)
-        .arg(KswordTheme::SurfaceHex())
-        .arg(KswordTheme::BorderHex()));
+    // 表头底色和圆角由共享外壳负责，保留原列尺寸、菜单和排序行为。
+    ks::ui::ApplyTablePresentation(m_threadTable);
 
     m_threadTable->setColumnWidth(toThreadColumnIndex(ThreadTableColumn::ThreadId), 90);
     m_threadTable->setColumnWidth(toThreadColumnIndex(ThreadTableColumn::OwnerPid), 90);

@@ -1,6 +1,7 @@
 #include "TablePresentation.h"
 #include "VisibleTableWidget.h"
 #include "./MainSurfaceStyle.h"
+#include "./RoundedViewSurface.h"
 #include "../theme.h"
 
 #include <QApplication>
@@ -189,6 +190,8 @@ namespace ks::ui
         auto* table = qobject_cast<QTableView*>(view);
         if (PreservesCustomTablePresentation(view))
         {
+            // 专业自绘保留原外壳，同时撤掉此前可能已安装的极角装饰。
+            SetRoundedViewSurfaceEnabled(view, false);
             replacePresentationBlock(view, {});
             replacePresentationBlock(columnHeader(view), {});
             if (table != nullptr) replacePresentationBlock(table->verticalHeader(), {});
@@ -237,6 +240,10 @@ namespace ks::ui
             "QTableView::item,QTableWidget::item,QTreeView::item,QTreeWidget::item{padding:%1;}"
             "QTableCornerButton::section{background:%2;border:0;border-bottom:1px solid %3;}")
             .arg(cellPadding, headerSurface, headerBorder, outerFrame, dataSurface));
+
+        // QSS 圆角只约束外框，不能裁剪子表头/viewport；四个极角显式补父背景。
+        // 冻结辅助窗格属于连体内部拼接，保持方角并让主表负责整个外壳。
+        SetRoundedViewSurfaceEnabled(view, !auxiliaryPane);
 
         // normalizeHeader=false and the existing header-specific opt-out retain custom geometry.
         if (!normalizeHeader || (table != nullptr && PreservesCustomTableHeaderStyle(table)))

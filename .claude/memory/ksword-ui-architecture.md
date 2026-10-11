@@ -246,6 +246,8 @@ KSword 主程序位于 `Ksword5.1/Ksword5.1`（Qt 6.9.3 Widgets + Qt Advanced Do
 
 ## 导航连接与固定表面层级（2026-10-11）
 
-- 普通页签由 `UI/PageControlStyle.cpp` 共用完整状态样式；明确登记的 `QTabWidget` 增加贯穿宽度的导航底面和下沿 8px 凹角，保留原 TabBar/StackedWidget、页序与鼠标命中。子栏取消旧顶部 6px 间隔，仅保留左缩进；外层只有一个 Tab 的布局只收紧顶部，不压缩页内留白。ADS 外壳自身间隔为 0，普通页签与 ADS 主导航仍各自保留角色。
+- 普通页签由 `UI/PageControlStyle.cpp` 共用完整状态样式；明确登记的直接工作区 `QTabWidget` 用 pane padding 8px 向 Qt 表达内边距，导航底面沿两侧一直延伸到内容底部，路径相减挖出圆角内口。凹角不是仅在 Tab 下沿补两片角；嵌套/child 不重复增加包围边距。保留原 TabBar/StackedWidget、页序与鼠标命中，子栏取消旧顶部 6px 间隔；ADS 外壳自身间隔为 0。
 - 主窗口底板、内容、工具带、表头、输入直接从 `MainWindowSurfaceColors` 固定求值，不能从每层父 palette 再抬高明度。大面板/工具底统一 8px，独立按钮/输入 5px；同一组件内部拼接处允许 0px（参数执行区、冻结辅助窗格和数值框内部编辑器）。背景图/穿透模式仍走既有保护。
 - `StyleStandaloneInput` 为未绑定的明确独立输入补完整颜色绑定，已有业务绑定只对齐圆角；单行字段用 `BindLineEditTheme`，搜索沿用同一配色但保留原过滤行为。主页面按钮、搜索、数值框和下拉框共用固定输入层，正常/悬停/焦点文字单独校准对比，输入背景校准保留中性色相。线程 A/B 不得在状态更新时重写旧 FlatButton QSS；纯工具动作需明确实底，内部清除/导航等例外按用途选择。
+- `PageTabMotion` 与 `DockTabSelectionAnimation` 仅移动导航选中底面和下划线，180ms、经过时间插值、按实际屏幕刷新率使用 PreciseTimer，遵循系统客户端动画开关。原业务页不截图或位移，原文字/图标/输入与子栏滑动保持；ADS 工厂基类绘制后调用动画绘制入口，覆盖旧静态标记，避免双重高亮。
+- QSS border-radius 不裁剪表头或视口子控件，不能只声明圆角就认为实际可见。`RoundedViewSurface` 对普通表/树的四个 8px 圆外极角补真实祖先背景，鼠标穿透、无 setMask/整父截图；专业自绘 opt-out 与冻结辅助窗格保持原外壳。角片背景只走微型 palette/PE_Widget，防止大视图重绘或父面板圆外再次被填实。

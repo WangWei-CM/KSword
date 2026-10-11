@@ -1595,6 +1595,15 @@
     <ClCompile Include="UI\PageControlStyle.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="UI\PageTabMotion.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="UI\DockTabSelectionAnimation.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="UI\RoundedViewSurface.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="UI\TabHierarchyTransition.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -2779,6 +2788,15 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="UI\PageControlStyle.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="UI\PageTabMotion.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="UI\DockTabSelectionAnimation.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="UI\RoundedViewSurface.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="UI\SecondaryPageLayout.h">
