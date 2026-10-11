@@ -30,10 +30,11 @@
 
 namespace
 {
-    // 中性底和强调选中面都从当前主题派生；文字分别按实际绘制面校准。
+    // 整组底面使用有页面对比度的输入角色；Window/SurfaceAlt 混色容易与工作台
+    // 背景重合，使未选项看似散落文字。三个适配器共用此底色与前景校准。
     QColor segmentSurface()
     {
-        return KswordTheme::BlendColors(KswordTheme::WindowColor(), KswordTheme::SurfaceAltColor(), 120);
+        return KswordTheme::ControlInputSurfaceColor();
     }
 
     bool clientAnimationsEnabled()

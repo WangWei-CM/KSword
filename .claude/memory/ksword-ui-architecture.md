@@ -229,5 +229,6 @@ KSword 主程序位于 `Ksword5.1/Ksword5.1`（Qt 6.9.3 Widgets + Qt Advanced Do
 - 禁止把复合行未经宽度约束的 `sizeHint().height()` 写成标签最小高度；可换行说明的估算会把滑块行撑大。复合行纵向使用 Preferred，说明保留真实宽度建议，由布局按实际宽度算换行。`StyleStandaloneInput` 只接入页面明确确认的独立输入面（当前进程/线程工具行），圆角与同排按钮统一为 5px；不批量替换连体组、内层编辑器、Popup 或 Tab。
 - `UI/SettingsPresentation` 仅提高设置正文的阅读字号下限，保留用户字体家族；导航、分区标题、色值数据与说明有独立层级。设置输入使用较暗中性底与细边界，字体选择限制为适当宽度；滑块读数与说明同排并跟随真实 Enabled 状态，减少孤立长轨道。配置保存与预览/应用语义不变。
 - `UI/SegmentedControl` 对明确登记的原 QAbstractButton/QTabBar/自绘编辑器提供共享圆角底面与 160ms 选中面动画；保留原对象及点击、键盘、提示、禁用和列自定义空选态，不扫描或替换全部按钮。QSignalBlocker 改状态也由 Paint 身份兜底同步；旧只靠 QSS 的预设明确调用 SetSegmentedButtonSelected，不能从颜色猜语义。
+- 分段整组底色使用 `ControlInputSurfaceColor`，与页面维持可见对比；不能再用 Window/SurfaceAlt 的中间混色，它会在内存工作台等页面与底板重合。按钮组、搜索范围 QTabBar、自绘 HexViewSegmented 三种适配器共用，文字/图标继续按实际选中和未选底面校准。
 - 动画中在选中面内外裁剪绘制两种对比度前景，避免过渡时字/图标与底色相同；原按钮 setParent 后需恢复隐式可见，显式业务隐藏继续保留。节拍按所在屏幕频率，遵循系统动画开关；隐藏与布局变化停止旧几何。编辑器查找/跳转/类别分段通过只读快照适配，原命中矩形和提示不变。
 - `UI/ThemedSlider` 保留 QSlider 的输入与信号，用原 QStyleOption 的真实 handle 位置绘制连续填充、浅轨道和圆把手，包含 RTL、反向及禁用态；设置、窗口透明度和 DWM 两处透明度均明确接入。
