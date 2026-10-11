@@ -257,3 +257,15 @@ KSword 主程序位于 `Ksword5.1/Ksword5.1`（Qt 6.9.3 Widgets + Qt Advanced Do
 - 凹角反馈中的全高1px竖线曾被误当作导航覆盖层残留：实际截图 `#3d5670` 对应 ADS `depthOverlayStyle` 外框，后置 MainSurfaceStyle 只换底色不会取消边框。原规则与最终宿主规则均需 border:0。历史上向首工具条内角填 rail 色的方案已被用户否定并删除，不得恢复。
 - 用户明确圆角必须落在最外层框架，不能覆盖内部控件已有圆角。`StylePageTabsContentFrame` 登记6px pane留白，进程/线程页外围layout归0；页坐标先向外扩展这6px还原外框，再以外半径14px（内部8px+留白6px）绘四角，使内外圆心重合、弧线间隔也为6px。pane留白沿用page底色，角片只填最外弧线之外的rail色；无描边，不新增全高覆盖层。未登记页不批量改变。
 - 用户随后明确要求全软件UI复查和推广。本轮扩展到51个导航/结果/页根入口，见 `docs/UI标准覆盖复查-20261011.md`。框架只接管明确页根/自适应滚动内容的外围边距，内部卡片16px保留；纯嵌套Tab只计最内层，惰性代理用 `ksword_page_frame_host` 明确标记。竖向Tab同样支持；服务/欢迎通过 `StyleWorkspaceContentFrame` 登记页根。背景穿透模式不绘实色角片，专业编辑器内部及原生插件窗口不强行接入。
+
+
+## 详情窗口与弹窗更新（2026-10-11）
+
+- 用户要求详情窗口采用全宽对象摘要、左侧分组导航、右侧无描边卡片；允许系统决定窗口外沿方圆角。`DetailDialogChrome` 使用 Window/Surface 两层，导航选中为中性底加主题色文字，侧栏由 `DetailPresentation` 按窗口宽度调整。
+- `DetailPresentation` 提供内部标题卡片和字段双列，复用 `ArrangeParameterColumns`，窄窗回到单列、QFormLayout 允许长行换行。进程概览去掉 660px 最小宽度和页外重复滚动区，卡片视图与结构化视图分别负责自身滚动；字段数据仍来自同一 StructuredFieldView 文档。
+- `StyleStandaloneInput` 使用共享 ToolbarMetrics 高度公式，独立输入字号变化时更新高度；必须排除 QComboBox/QAbstractSpinBox 内部的 QLineEdit，不能重复撑高组合控件。
+- `ThemedMessageBox` 淘汰悬浮自绘标题栏与强制无边框，不改变按钮角色和关闭返回值。主题操作合并到事件队列；Qt 在样式应用时会重建 QMessageBox 网格，因此最低宽度 spacer 必须在套样式、处理按钮之后加到当前网格，而不是只设窗口 minimumWidth 或提前加到旧网格。
+- 原生窗口 `WindowChrome` 使用 DWMWCP_DEFAULT；方圆角、最大化和贴靠由系统决定。主窗口及其它原本无边框的专用窗口不由本模块强改窗口类型。
+- 用户在本轮明确要求停止自动测试，由用户实测。停止后只完成 Release 编译及源码收尾；既有离屏结果不等同于真实窗口、DWM 外沿或业务验收。
+
+- **UI 验证方式（用户明确要求）**：创建伪窗口/独立 UI 夹具只适用于开发机无法正常编译主程序的情况。能够编译时必须直接使用主程序查看和验证，不再构建离屏替代窗口。若用户要求自行测试，则停止自动测试，仅继续已授权的编译。

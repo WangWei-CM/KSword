@@ -672,6 +672,7 @@
     <ClCompile Include="UI\ThemeBinding.cpp" />
     <ClCompile Include="UI\SecondaryPageLayout.cpp" />
     <ClCompile Include="UI\PrimaryPageStyle.cpp" />
+    <ClCompile Include="UI\DetailPresentation.cpp" />
     <ClCompile Include="UI\ParameterWorkspace.cpp" />
     <ClCompile Include="UI\MainSurfaceStyle.cpp" />
     <ClCompile Include="UI\PageNavigationBridge.cpp" />
@@ -942,6 +943,7 @@
     <ClInclude Include="SettingsDock\SettingsDock.Layout.h" />
     <ClInclude Include="UI\DetailNavigationGroups.h" />
     <ClInclude Include="UI\DetailDialogChrome.h" />
+    <ClInclude Include="UI\DetailPresentation.h" />
     <ClInclude Include="UI\SmoothScrollSupport.h" />
     <ClInclude Include="UI\TableColumnAutoFit.h" />
     <ClInclude Include="UI\TableFreezeSupport.h" />

@@ -1556,6 +1556,9 @@
     <ClCompile Include="UI\PrimaryPageStyle.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="UI\DetailPresentation.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="UI\ParameterWorkspace.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -2851,6 +2854,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="UI\DetailDialogChrome.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="UI\DetailPresentation.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="HardwareDock\HardwareFieldDocuments.h">

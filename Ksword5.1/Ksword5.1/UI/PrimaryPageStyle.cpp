@@ -16,6 +16,27 @@
 
 namespace
 {
+    // 独立表单没有工具行观察器；字号变化时按同一规则更新高度，不重复登记。
+    class StandaloneInputMetrics final : public QObject
+    {
+    public:
+        explicit StandaloneInputMetrics(QWidget* input) : QObject(input), m_input(input)
+        {
+            input->installEventFilter(this);
+        }
+    protected:
+        bool eventFilter(QObject* source, QEvent* event) override
+        {
+            if (event->type() == QEvent::FontChange || event->type() == QEvent::ApplicationFontChange)
+            {
+                ks::ui::NormalizeToolbarControl(m_input);
+            }
+            return QObject::eventFilter(source, event);
+        }
+    private:
+        QWidget* m_input = nullptr; // 父控件拥有观察器，二者同时销毁。
+    };
+
     // 各控件只替换自己拥有的样式片段，避免丢掉页面既有几何规则。
     void ReplacePrimaryStyle(QWidget* widget, const QString& rules)
     {
@@ -53,6 +74,13 @@ namespace ks::ui
                 || qobject_cast<QAbstractSpinBox*>(input->parentWidget())))
         {
             return;
+        }
+        // 独立单行输入与按钮共用字体测量高度；组合控件内部编辑器已在上方排除。
+        NormalizeToolbarControl(input);
+        if (!input->property("ksword_standalone_metrics").toBool())
+        {
+            input->setProperty("ksword_standalone_metrics", true);
+            new StandaloneInputMetrics(input);
         }
         input->setProperty("ksword_standalone_input", true);
         const QString geometry = QStringLiteral(

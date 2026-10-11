@@ -1,4 +1,4 @@
-#include "GlobalDialogTheme.h"
+﻿#include "GlobalDialogTheme.h"
 #include "./DetailDialogChrome.h"
 
 #include "../theme.h"
@@ -12,6 +12,7 @@
 #include <QPushButton>
 #include <QStyle>
 #include <QWidget>
+#include <QTimer>
 
 namespace
 {
@@ -135,10 +136,10 @@ namespace
             "QDialog[%2=\"true\"] QPlainTextEdit,"
             "QDialog[%2=\"true\"] QSpinBox,"
             "QDialog[%2=\"true\"] QDoubleSpinBox{"
-            "  background-color:__SURFACE_BACKGROUND__ !important;"
+            "  background-color:__INPUT_BACKGROUND__ !important;"
             "  color:__SURFACE_TEXT__ !important;"
-            "  border:1px solid __BORDER__;"
-            "  border-radius:3px;"
+            "  border:0;"
+            "  border-radius:5px;"
             "  padding:3px 6px;"
             "  selection-background-color:__ACCENT__;"
             "  selection-color:__ON_ACCENT__;"
@@ -147,16 +148,21 @@ namespace
             "QDialog[%2=\"true\"] QAbstractScrollArea::viewport{"
             "  background-color:__SURFACE_BACKGROUND__ !important;"
             "  color:__SURFACE_TEXT__ !important;"
-            "  border:1px solid __BORDER__;"
+            "  border:0;"
             "  selection-background-color:__ACCENT__;"
             "  selection-color:__ON_ACCENT__;"
             "}"
             "QDialog[%2=\"true\"] QGroupBox{"
             "  background-color:__SURFACE_BACKGROUND__ !important;"
             "  color:__SURFACE_TEXT__ !important;"
-            "  border:1px solid __BORDER__;"
-            "  border-radius:4px;"
-            "  margin-top:8px;"
+            "  border:0;"
+            "  border-radius:8px;"
+            "  margin-top:0px;"
+            "  padding-top:28px;"
+            "}"
+            "QDialog[%2=\"true\"] QGroupBox::title{"
+            "  subcontrol-origin:padding;subcontrol-position:top left;"
+            "  left:16px;top:10px;padding:0;font-weight:600;"
             "}"
             "QDialog[%2=\"true\"] QGroupBox QLabel{"
             "  background-color:transparent !important;"
@@ -169,18 +175,21 @@ namespace
             "}"
             "QDialog[%2=\"true\"] QTabWidget::pane{"
             "  background-color:__SURFACE_BACKGROUND__ !important;"
-            "  border:1px solid __BORDER__;"
+            "  border:0;"
             "}"
             "QDialog[%2=\"true\"] QTabBar::tab{"
             "  background-color:__SURFACE_ALT__ !important;"
             "  color:__SURFACE_TEXT__ !important;"
-            "  border:1px solid __BORDER__;"
+            "  border:0;"
             "  padding:4px 10px;"
             "}"
             "QDialog[%2=\"true\"] QTabBar::tab:selected{"
-            "  background-color:__ACCENT__ !important;"
-            "  color:__ON_ACCENT__ !important;"
+            "  background-color:__SURFACE_BACKGROUND__ !important;"
+            "  color:__SURFACE_TEXT__ !important;"
+            "  border-bottom:2px solid __ACCENT__;"
             "}"
+            // 滚动容器只是视口，不再叠加一整块更亮的底色和边框。
+            "QDialog[%2=\"true\"] QScrollArea{background:transparent;border:0;}"
             "QDialog[%2=\"true\"] QMenu{"
             "  background-color:__SURFACE_BACKGROUND__ !important;"
             "  color:__SURFACE_TEXT__ !important;"
@@ -196,6 +205,8 @@ namespace
         styleSheetText.replace(QStringLiteral("__MARKER__"), QString::fromLatin1(kGlobalDialogStyleMarker));
         styleSheetText.replace(QStringLiteral("__WINDOW_BACKGROUND__"), windowBackgroundText);
         styleSheetText.replace(QStringLiteral("__SURFACE_BACKGROUND__"), surfaceBackgroundText);
+        styleSheetText.replace(QStringLiteral("__INPUT_BACKGROUND__"),
+            KswordTheme::ThemeColorName(KswordTheme::ControlInputSurfaceColor()));
         styleSheetText.replace(QStringLiteral("__SURFACE_ALT__"), alternateSurfaceText);
         styleSheetText.replace(QStringLiteral("__WINDOW_TEXT__"), windowTextColorText);
         styleSheetText.replace(QStringLiteral("__SURFACE_TEXT__"), textColorText);
@@ -288,7 +299,16 @@ namespace
             {
                 if (!dialog->property(kGlobalDialogPolishingPropertyName).toBool())
                 {
-                    polishDialog(dialog);
+                    if (!dialog->property("ksword_dialog_theme_pending").toBool())
+                    {
+                        dialog->setProperty("ksword_dialog_theme_pending", true);
+                        // 合并样式事件，离开 Qt 的显示/布局调用栈再应用主题。
+                        QTimer::singleShot(0, dialog, [this, dialog]()
+                        {
+                            dialog->setProperty("ksword_dialog_theme_pending", false);
+                            polishDialog(dialog);
+                        });
+                    }
                 }
             }
 
@@ -335,7 +355,11 @@ namespace
             dialog->setProperty(kGlobalDialogDarkModePropertyName, darkModeEnabled);
             dialog->setAttribute(Qt::WA_StyledBackground, true);
             dialog->setAutoFillBackground(true);
-            dialog->setPalette(buildDialogPalette(sourcePalette, darkModeEnabled));
+            const QPalette targetPalette = buildDialogPalette(sourcePalette, darkModeEnabled);
+            if (dialog->palette() != targetPalette)
+            {
+                dialog->setPalette(targetPalette);
+            }
 
             if (dialog->styleSheet() != targetStyleSheet)
             {

@@ -17,6 +17,8 @@
 #include "../UI/TableInteractionSupport.h"
 #include "../UI/DetailLayoutRegistry.h"
 #include "../UI/DetailDialogChrome.h"
+#include "../UI/DetailPresentation.h"
+#include "../UI/PrimaryPageStyle.h"
 #include "../PluginHost.h"
 
 #include <QTimer>
@@ -62,28 +64,39 @@ namespace
             style->addItem(ks::i18n::sourceText(QStringLiteral("紧凑双列")));
             style->addItem(ks::i18n::sourceText(QStringLiteral("分区")));
             style->addItem(ks::i18n::sourceText(QStringLiteral("树状")));
-            style->setMinimumHeight(30);
+            ks::ui::StylePrimaryCombo(style);
             controls->addWidget(style);
-            auto* copy = new QPushButton(QIcon(QStringLiteral(":/Icon/process_copy_row.svg")),
-                ks::i18n::sourceText(QStringLiteral("复制全部信息")), this);
+            auto* copy = new QPushButton(QIcon(QStringLiteral(":/Icon/process_copy_row.svg")), QString(), this);
+            copy->setToolTip(ks::i18n::sourceText(QStringLiteral("复制全部信息")));
+            copy->setFixedWidth(30);
             auto* exportButton = new QPushButton(ks::i18n::sourceText(QStringLiteral("导出")), this);
             exportButton->setObjectName(QStringLiteral("ProcessGeneralExport"));
             for (auto* button : { copy, exportButton })
             {
-                button->setStyleSheet(ks::ui::BuildFlatButtonStyle() + QStringLiteral("QPushButton,QToolButton{border-radius:3px;padding:4px 10px;font-weight:600;}"));
-                button->setMinimumHeight(30);
-                button->setIconSize(QSize(16, 16));
+                ks::ui::ApplyFlatButtonTheme(button, ks::ui::FlatButtonTone::Neutral,
+                    ks::ui::FlatButtonAppearance::Solid);
+                ks::ui::NormalizeToolbarControl(button);
             }
+            controls->addStretch(1);
             controls->addWidget(copy);
             controls->addWidget(exportButton);
-            m_dense = new QWidget(this);
+            m_cardScroll = new QScrollArea(this);
+            m_cardScroll->setWidgetResizable(true);
+            m_cardScroll->setFrameShape(QFrame::NoFrame);
+            m_cardScroll->setMinimumSize(0, 0);
+            m_cardScroll->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Ignored);
+            m_dense = new QWidget(m_cardScroll);
+            m_dense->setMinimumWidth(0);
+            m_dense->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
             m_dense->setObjectName(QStringLiteral("ProcessGeneralDenseProjection"));
-            layout->addWidget(m_dense);
+            m_cardScroll->setWidget(m_dense);
+            layout->addWidget(m_cardScroll, 1);
             fields = new ks::ui::StructuredFieldView(this);
             m_fields = fields;
-            m_fields->setMinimumHeight(480);
+            m_fields->setMinimumSize(0, 0);
+            m_fields->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Ignored);
             m_fields->hide();
-            layout->addWidget(m_fields);
+            layout->addWidget(m_fields, 1);
             QObject::connect(m_fields, &ks::ui::StructuredFieldView::documentChanged,
                 this, [this]() { rebuild(); });
             QObject::connect(copy, &QPushButton::clicked, this, [this]() {
@@ -101,7 +114,7 @@ namespace
                     QMessageBox::warning(safe.data(), ks::i18n::sourceText(QStringLiteral("导出失败")), file.errorString());
             });
             QObject::connect(style, &QComboBox::currentIndexChanged, this, [this](int index) {
-                m_dense->setVisible(index == 0);
+                m_cardScroll->setVisible(index == 0);
                 m_fields->setVisible(index != 0);
                 if (index != 0) m_fields->setPresentation(index == 1
                     ? ks::ui::StructuredFieldView::Presentation::Sections
@@ -149,15 +162,17 @@ namespace
             caption->setObjectName(QStringLiteral("ProcessGeneralProjectedCaption"));
             caption->setProperty("ks_general_field_name", node.name);
             caption->setTextFormat(Qt::PlainText);
+            caption->setWordWrap(true);
+            caption->setMinimumWidth(0);
             applySupportingTextTheme(caption);
             auto* value = new QLabel(node.translateValue ? ks::i18n::sourceText(node.value) : node.value, parent);
             value->setTextFormat(Qt::PlainText);
             value->setProperty("ks_i18n_preserve_data_text", true);
             value->setProperty("ks_general_field_name", node.name);
             value->setObjectName(QStringLiteral("ProcessGeneralProjectedValue"));
-            value->setWordWrap(false);
+            value->setWordWrap(true);
             value->setMinimumWidth(0);
-            value->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+            value->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
             updateValueLabel(value, node);
             value->setTextInteractionFlags(Qt::TextSelectableByMouse | Qt::TextSelectableByKeyboard);
             value->setContextMenuPolicy(Qt::CustomContextMenu);
@@ -168,6 +183,7 @@ namespace
                 const QString copied = node ? (node->translateValue ? ks::i18n::sourceText(node->value) : node->value) : QString();
                 const QPoint position = value->mapToGlobal(point);
                 QMenu menu;
+                menu.setStyleSheet(KswordTheme::ContextMenuStyle());
                 QAction* action = menu.addAction(ks::i18n::sourceText(QStringLiteral("复制")));
                 if (menu.exec(position) == action && QApplication::clipboard()) QApplication::clipboard()->setText(copied);
             });
@@ -217,18 +233,6 @@ namespace
             label->setStyleSheet(buildStateLabelStyle(color, weight));
         }
 
-        QFormLayout* form(QGridLayout* grid, int column)
-        {
-            auto* rows = new QFormLayout;
-            rows->setLabelAlignment(Qt::AlignRight | Qt::AlignVCenter);
-            rows->setHorizontalSpacing(18);
-            rows->setVerticalSpacing(6);
-            rows->setFieldGrowthPolicy(QFormLayout::ExpandingFieldsGrow);
-            grid->addLayout(rows, 0, column, Qt::AlignTop);
-            grid->setColumnStretch(column, 1);
-            return rows;
-        }
-
         void rebuild()
         {
             if (!m_fields) return;
@@ -269,17 +273,12 @@ namespace
             m_dense->setProperty("ks_has_diagnostic", hasDiagnostic);
             auto* layout = new QVBoxLayout(m_dense);
             layout->setContentsMargins(0, 0, 0, 0);
-            layout->setSpacing(8);
-            auto* overview = new QGroupBox(ks::i18n::sourceText(QStringLiteral("概览与资源")), m_dense);
-            QFont overviewTitleFont = overview->font();
-            overviewTitleFont.setBold(true);
-            overview->setFont(overviewTitleFont);
-            overview->setStyleSheet(QStringLiteral("QGroupBox::title{font-weight:700;}"));
-            auto* overviewGrid = new QGridLayout(overview);
-            overviewGrid->setContentsMargins(8, 12, 8, 8);
-            overviewGrid->setHorizontalSpacing(28);
-            auto* left = form(overviewGrid, 0);
-            auto* right = form(overviewGrid, 1);
+            layout->setSpacing(12);
+            layout->setAlignment(Qt::AlignTop); // 卡片按自然高度排列，多余空间留在正文底部。
+            auto* overview = ks::ui::CreateDetailCard(ks::i18n::sourceText(QStringLiteral("概览与资源")), m_dense);
+            QFormLayout* left = nullptr;
+            QFormLayout* right = nullptr;
+            ks::ui::AddDetailFieldColumns(overview, left, right);
             const QStringList leftNames{QStringLiteral("PID"),QStringLiteral("父 PID"),QStringLiteral("启动时间"),QStringLiteral("运行时长"),QStringLiteral("用户"),QStringLiteral("管理员"),QStringLiteral("完整性级别"),QStringLiteral("提升类型"),QStringLiteral("架构"),QStringLiteral("Session ID")};
             const QStringList rightNames{QStringLiteral("优先级"),QStringLiteral("CPU 占用"),QStringLiteral("CPU 单核等效"),QStringLiteral("GPU 占用"),QStringLiteral("DISK 吞吐"),QStringLiteral("网络下行"),QStringLiteral("网络上行"),QStringLiteral("线程数量"),QStringLiteral("句柄数量"),QStringLiteral("工作集"),QStringLiteral("私有提交"),QStringLiteral("峰值工作集"),QStringLiteral("页错误"),QStringLiteral("数字签名")};
             QSet<QString> displayed;
@@ -296,17 +295,11 @@ namespace
                     if (node.kind == ks::ui::FieldNode::Kind::Note) notes.push_back(&node);
                 }
                 if (remaining.isEmpty() && notes.isEmpty()) continue;
-                auto* group = new QGroupBox(ks::i18n::sourceText(section.name), m_dense);
-                QFont groupTitleFont = group->font();
-                groupTitleFont.setBold(true);
-                group->setFont(groupTitleFont);
-                group->setStyleSheet(QStringLiteral("QGroupBox::title{font-weight:700;}"));
-                if (!section.initiallyExpanded) { group->setCheckable(true); group->setChecked(false); }
-                auto* grid = new QGridLayout(group);
-                grid->setContentsMargins(8, 12, 8, 8);
-                grid->setHorizontalSpacing(28);
-                auto* a = form(grid, 0);
-                auto* b = form(grid, 1);
+                // 只读字段不使用“勾选以启用”式GroupBox；卡片在窄窗自动降为单列。
+                auto* group = ks::ui::CreateDetailCard(ks::i18n::sourceText(section.name), m_dense);
+                QFormLayout* a = nullptr;
+                QFormLayout* b = nullptr;
+                ks::ui::AddDetailFieldColumns(group, a, b);
                 const int midpoint = (remaining.size() + 1) / 2;
                 for (int i = 0; i < remaining.size(); ++i) addRow(i < midpoint ? a : b, group, *remaining.at(i));
                 int row = 1;
@@ -321,7 +314,9 @@ namespace
                     label->setWordWrap(true);
                     label->setProperty("ks_i18n_preserve_data_text", true);
                     label->setTextInteractionFlags(Qt::TextSelectableByMouse);
-                    grid->addWidget(label, row++, 0, 1, 2);
+                    label->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+                    group->layout()->addWidget(label);
+                    ++row;
                 }
                 layout->addWidget(group);
             }
@@ -329,6 +324,7 @@ namespace
 
         ks::ui::StructuredFieldView* m_fields = nullptr;
         QWidget* m_dense = nullptr;
+        QScrollArea* m_cardScroll = nullptr; // 卡片独占一个滚动区，树形视图使用自身滚动。
     };
 
     constexpr int kInitialDetailDataRefreshDelayMs = 350;
@@ -2534,8 +2530,21 @@ void ProcessDetailWindow::initializeUi()
 
     // 页面区保留 QTabWidget，避免影响现有页面跳转、currentChanged 与惰性刷新逻辑。
     // 原生 QTabBar 隐藏后，以左侧单列导航提供全部页面入口。
-    m_rootLayout = new QHBoxLayout(this);
+    auto* windowLayout = new QVBoxLayout(this);
     ks::ui::ConfigureDetailDialogRoot(this);
+    auto* summaryHeader = new QWidget(this);
+    summaryHeader->setObjectName(QLatin1String("ksword_process_detail_header"));
+    summaryHeader->setProperty("ksword_detail_header", true);
+    summaryHeader->setAttribute(Qt::WA_StyledBackground);
+    auto* summaryLayout = new QVBoxLayout(summaryHeader);
+    summaryLayout->setContentsMargins(16, 14, 16, 14);
+    summaryLayout->setSpacing(8);
+    windowLayout->addWidget(summaryHeader);
+    auto* body = new QWidget(this);
+    m_rootLayout = new QHBoxLayout(body);
+    m_rootLayout->setContentsMargins(0, 0, 0, 0);
+    m_rootLayout->setSpacing(0);
+    windowLayout->addWidget(body, 1);
 
     m_tabNavigation = new QWidget(this);
     m_tabNavigation->setObjectName(QStringLiteral("ProcessDetailTabNavigation"));
@@ -3752,19 +3761,13 @@ void ProcessDetailWindow::initializeDetailTab()
         label->setWordWrap(true);
         label->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
     };
-    auto* outerLayout = new QVBoxLayout(m_detailTab);
-    outerLayout->setContentsMargins(0, 0, 0, 0);
-    auto* detailScroll = new QScrollArea(m_detailTab);
-    detailScroll->setObjectName(QStringLiteral("ProcessGeneralPageScroll"));
-    detailScroll->setWidgetResizable(true);
-    detailScroll->setFrameShape(QFrame::NoFrame);
-    auto* detailContent = new QWidget(detailScroll);
-    detailContent->setMinimumWidth(660);
-    detailScroll->setWidget(detailContent);
-    outerLayout->addWidget(detailScroll);
+    // 页级容器不再包裹第二层滚动；只有卡片正文或树视图自身滚动。
+    QWidget* detailContent = m_detailTab;
     m_detailLayout = new QVBoxLayout(detailContent);
-    m_detailLayout->setContentsMargins(8, 8, 8, 8);
-    m_detailLayout->setSpacing(8);
+    m_detailLayout->setContentsMargins(16, 12, 16, 12);
+    m_detailLayout->setSpacing(10);
+    QWidget* summaryHeader = findChild<QWidget*>(QLatin1String("ksword_process_detail_header"));
+    auto* summaryLayout = qobject_cast<QVBoxLayout*>(summaryHeader->layout());
     // 顶部：40px 图标 + 进程名与 PID。
     QHBoxLayout* titleLayout = new QHBoxLayout();
     m_processIconLabel = new QLabel(m_detailTab);
@@ -3777,7 +3780,7 @@ void ProcessDetailWindow::initializeDetailTab()
     titleLayout->addWidget(m_processIconLabel, 0, Qt::AlignTop);
     titleLayout->addWidget(m_processTitleLabel, 1);
     titleLayout->addStretch(1);
-    m_detailLayout->addLayout(titleLayout);
+    summaryLayout->addLayout(titleLayout);
 
     // 路径行：只读输入框 + 复制 + 打开文件夹 + 现有文件详情窗口入口。
     QHBoxLayout* pathLayout = new QHBoxLayout();
@@ -3788,6 +3791,7 @@ void ProcessDetailWindow::initializeDetailTab()
     pathLayout->addWidget(pathLabel);
     m_pathLineEdit = new QLineEdit(m_detailTab);
     m_pathLineEdit->setReadOnly(true);
+    ks::ui::StyleStandaloneInput(m_pathLineEdit);
     m_copyPathButton = new QPushButton(QIcon(":/Icon/process_copy_cell.svg"), QString(), m_detailTab);
     m_openPathFolderButton = new QPushButton(QIcon(":/Icon/process_open_folder.svg"), QString(), m_detailTab);
     m_openFileDetailButton = new QPushButton(QIcon(":/Icon/process_details.svg"), QString(), m_detailTab);
@@ -3801,7 +3805,8 @@ void ProcessDetailWindow::initializeDetailTab()
     pathLayout->addWidget(m_copyPathButton);
     pathLayout->addWidget(m_openPathFolderButton);
     pathLayout->addWidget(m_openFileDetailButton);
-    m_detailLayout->addLayout(pathLayout);
+    // 进程身份与文件动作位于全宽摘要栏，切换资源/安全页时仍然可见。
+    summaryLayout->addLayout(pathLayout);
 
     // 命令行行：只读输入框 + 复制。
     QHBoxLayout* commandLayout = new QHBoxLayout();
@@ -3814,6 +3819,7 @@ void ProcessDetailWindow::initializeDetailTab()
     m_commandLineEdit->setReadOnly(true);
     m_commandLineEdit->setMinimumWidth(0);
     m_commandLineEdit->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
+    ks::ui::StyleStandaloneInput(m_commandLineEdit);
     m_copyCommandButton = new QPushButton(QIcon(":/Icon/process_copy_cell.svg"), QString(), m_detailTab);
     languageManager.bindText(m_copyCommandButton, QStringLiteral("process.detail.action.copy"), QStringLiteral("复制"));
     commandLayout->addWidget(m_commandLineEdit, 1);
@@ -3847,27 +3853,34 @@ void ProcessDetailWindow::initializeDetailTab()
 
     QHBoxLayout* detailActionLayout = new QHBoxLayout();
     m_refreshDetailOverviewButton = new QPushButton(QIcon(":/Icon/process_refresh.svg"), QString(), m_detailTab);
-    languageManager.bindText(m_refreshDetailOverviewButton, QStringLiteral("process.detail.action.refresh"), QStringLiteral("刷新运行时详细数据"));
+    m_refreshDetailOverviewButton->setToolTip(ks::i18n::text(
+        QStringLiteral("process.detail.action.refresh"), QStringLiteral("刷新运行时详细数据")));
+    m_refreshDetailOverviewButton->setFixedWidth(30);
     m_detailOverviewStatusLabel = new QLabel(m_detailTab);
     languageManager.bindText(m_detailOverviewStatusLabel, QStringLiteral("process.detail.status.waiting"), QStringLiteral("● 等待读取运行时详细数据"));
     configureCopyableLabel(m_detailOverviewStatusLabel);
-    detailActionLayout->addWidget(m_refreshDetailOverviewButton);
-    detailActionLayout->addWidget(m_detailOverviewStatusLabel, 1);
+    auto* pageTitle = new QLabel(ks::i18n::sourceText(QStringLiteral("详细信息")), m_detailTab);
+    QFont pageTitleFont = pageTitle->font();
+    pageTitleFont.setBold(true);
+    pageTitle->setFont(pageTitleFont);
+    detailActionLayout->addWidget(pageTitle);
     m_detailLayout->addLayout(detailActionLayout);
+    m_detailLayout->addWidget(m_detailOverviewStatusLabel);
 
     for (auto* button : {m_copyPathButton, m_openPathFolderButton, m_openFileDetailButton,
         m_copyCommandButton, m_detailOpenHandleDockButton, m_gotoParentButton, m_refreshDetailOverviewButton})
     {
-        button->setStyleSheet(ks::ui::BuildFlatButtonStyle() + QStringLiteral("QPushButton,QToolButton{border-radius:3px;padding:4px 10px;font-weight:600;}"));
+        ks::ui::ApplyFlatButtonTheme(button, ks::ui::FlatButtonTone::Neutral,
+            ks::ui::FlatButtonAppearance::Solid);
         ks::ui::NormalizeToolbarControl(button);
     }
-    m_detailLayout->addWidget(new ProcessGeneralOverview(m_generalFields, detailContent, detailActionLayout));
+    m_detailLayout->addWidget(new ProcessGeneralOverview(m_generalFields, detailContent, detailActionLayout), 1);
+    detailActionLayout->addWidget(m_refreshDetailOverviewButton);
     // 路径与运行时操作行使用共同几何；父进程图标保留 20px，仅调整按钮。
     ks::ui::NormalizeToolbarRow(pathLayout);
     ks::ui::NormalizeToolbarRow(commandLayout);
     parentLayout->setSpacing(8);
     ks::ui::NormalizeToolbarRow(detailActionLayout);
-    m_detailLayout->addStretch(1);
 }
 
 

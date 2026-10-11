@@ -275,7 +275,7 @@ ks::ui::FlatButtonStateColors ks::ui::FlatButtonColorsForState(const QPalette& p
     }
     else if (state == FlatButtonState::Hover)
     {
-        result.background = navigation ? KswordTheme::BlendColors(surface, checked, 32) : interaction;
+        result.background = navigation ? KswordTheme::BlendColors(surface, alternate, 96) : interaction;
         if (tone != FlatButtonTone::Neutral && !flat)
         {
             // 已有实色的主操作也保留悬停反馈，不让 Hover 与普通态完全相同。
@@ -286,13 +286,14 @@ ks::ui::FlatButtonStateColors ks::ui::FlatButtonColorsForState(const QPalette& p
     }
     else if (state == FlatButtonState::Pressed)
     {
-        result.background = navigation ? KswordTheme::BlendColors(surface, checked, 80)
+        result.background = navigation ? KswordTheme::BlendColors(surface, alternate, 210)
             : KswordTheme::EnsureTextContrast(interaction.darker(118), surface, 3.0);
     }
     else if (state == FlatButtonState::Checked)
     {
-        result.background = navigation ? KswordTheme::BlendColors(surface, checked, 210) : checked;
-        preferred = palette.color(QPalette::Active, QPalette::HighlightedText);
+        // 导航选中保留中性底面，仅文字/图标强调，避免侧栏大面积亮蓝抢占信息层级。
+        result.background = navigation ? KswordTheme::BlendColors(surface, alternate, 170) : checked;
+        preferred = navigation ? accent : palette.color(QPalette::Active, QPalette::HighlightedText);
     }
     else if (state == FlatButtonState::Disabled)
     {
