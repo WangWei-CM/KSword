@@ -1,5 +1,6 @@
 #include "BugcheckGuardPage.h"
 #include "../../UI/PrimaryPageStyle.h"
+#include "../../UI/ParameterWorkspace.h"
 #include "../../UI/ToolbarMetrics.h"
 
 #include "../../ArkDriverClient/ArkDriverClient.h"
@@ -230,6 +231,10 @@ namespace ks::misc
                 "开启后持续拦截：尝试继续运行时保留 Hook，后续触发仍会拦截，直到手动关闭。仅暂停模式仍会在暂停后进入蓝屏。"));
         rootLayout->addWidget(m_persistenceLabel);
 
+        // 风险说明保持页顶，参数和实时回执各有独立区域。
+        auto* workspace = new ks::ui::ParameterWorkspace(this, 500);
+        rootLayout->addWidget(workspace, 1);
+
         auto* controlGroup = new QGroupBox(this);
         // 控制与回执采用同一轻边界，风险提示仍保留自己的语义颜色。
         ks::ui::StylePrimaryGroup(controlGroup);
@@ -304,7 +309,7 @@ namespace ks::misc
         m_screenshotPollTimer->setInterval(10);
         m_screenshotPollTimer->setTimerType(Qt::PreciseTimer);
 
-        auto* actionLayout = new QHBoxLayout();
+        auto* actionLayout = workspace->actions();
         m_refreshButton = new QPushButton(
             QIcon(QStringLiteral(":/Icon/process_refresh.svg")),
             QString(),
@@ -330,8 +335,8 @@ namespace ks::misc
         actionLayout->addWidget(m_enableButton);
         actionLayout->addStretch(1);
         ks::ui::NormalizeToolbarRow(actionLayout);
-        controlLayout->addLayout(actionLayout);
-        rootLayout->addWidget(controlGroup);
+        ks::ui::StyleParameterSection(controlGroup);
+        workspace->parameters()->addWidget(controlGroup);
 
         auto* statusGroup = new QGroupBox(this);
         ks::ui::StylePrimaryGroup(statusGroup);
@@ -354,8 +359,10 @@ namespace ks::misc
         m_detailLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
         statusLayout->addWidget(m_statusLabel);
         statusLayout->addWidget(m_detailLabel);
-        rootLayout->addWidget(statusGroup);
-        rootLayout->addStretch(1);
+        ks::ui::StyleParameterSection(statusGroup);
+        workspace->results()->addWidget(statusGroup);
+        workspace->results()->addStretch(1);
+        workspace->finish();
 
         connect(
             m_refreshButton,

@@ -3,6 +3,7 @@
 
 #include "DisableDsePage.h"
 #include "../../UI/PrimaryPageStyle.h"
+#include "../../UI/ParameterWorkspace.h"
 #include "../../UI/ToolbarMetrics.h"
 
 #include "../../Internationalization/LanguageManager.h"
@@ -270,6 +271,7 @@ namespace ks::misc
         m_blockLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
         postureLayout->addWidget(m_blockLabel);
 
+        ks::ui::StyleParameterSection(postureGroup);
         rootLayout->addWidget(postureGroup);
         rootLayout->addSpacing(6);
 
@@ -298,6 +300,7 @@ namespace ks::misc
             QStringLiteral("定位轨迹与事务日志。定位不使用任何硬编码偏移：从导出的 CiInitialize 反汇编找到 CipInitialize，再在其中找写 g_CiOptions 的指令。"));
         locationLayout->addWidget(m_traceEdit);
 
+        ks::ui::StyleParameterSection(locationGroup);
         rootLayout->addWidget(locationGroup);
         rootLayout->addSpacing(6);
 
@@ -361,6 +364,7 @@ namespace ks::misc
         m_resultLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
         actionLayout->addWidget(m_resultLabel);
 
+        ks::ui::StyleParameterSection(actionGroup);
         rootLayout->addWidget(actionGroup);
         rootLayout->addStretch(1);
 

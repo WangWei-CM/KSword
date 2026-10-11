@@ -1,4 +1,5 @@
 #include "MemoryDock.Internal.h"
+#include "../UI/ParameterWorkspace.h"
 #include "../UI/ToolbarMetrics.h"
 #include "../UI/StructuredFieldView.h"
 #include "../UI/AdaptivePageScroll.h" // ks::ui::EnablePageInnerScroll：页内滚动壳。
@@ -239,26 +240,17 @@ void MemoryDock::initializeProcessPteTranslateTab()
         << eol;
 
     m_tabProcessPteTranslate = new QWidget(m_tabWidget);
-    // 页面自带内部滚动壳：内容放不下时在页内滚动，不把 Dock 撑高。页面指针身份不变。
-    QWidget* const tabContent = ks::ui::EnablePageInnerScroll(m_tabProcessPteTranslate);
-    QVBoxLayout* tabLayout = new QVBoxLayout(tabContent);
+    // 参数独立滚动，刷新固定在参数栏底部，表格和详情持续保留结果区高度。
+    QVBoxLayout* tabLayout = new QVBoxLayout(m_tabProcessPteTranslate);
     tabLayout->setContentsMargins(6, 6, 6, 6);
     tabLayout->setSpacing(6);
+    auto* workspace = new ks::ui::ParameterWorkspace(m_tabProcessPteTranslate, 420);
+    tabLayout->addWidget(workspace);
 
-    // 第一层（动作行）：只放“点一下立刻有反馈”的动作与状态回显，
-    // 采样口径全部下沉到第二层的“翻译参数”分组里。
-    QHBoxLayout* actionLayout = new QHBoxLayout();
-    actionLayout->setContentsMargins(0, 0, 0, 0);
-    actionLayout->setSpacing(8);
-
+    // 执行动作由工作区固定承载，本地筛选仍只改变当前结果视图。
     m_processPteTranslateRefreshButton = new QPushButton(QIcon(QStringLiteral(":/Icon/process_refresh.svg")), QStringLiteral("刷新"), m_tabProcessPteTranslate);
     m_processPteTranslateRefreshButton->setToolTip(QStringLiteral("基于当前附加进程采集 PTE / VA 翻译证据"));
     m_processPteTranslateRefreshButton->setStyleSheet(buildBlueButtonStyle());
-
-    // 竖线分隔符：把“执行动作”和“视图过滤”在视觉上切开，不再一排糊成一条。
-    QFrame* actionSeparator = new QFrame(m_tabProcessPteTranslate);
-    actionSeparator->setFrameShape(QFrame::VLine);
-    actionSeparator->setFrameShadow(QFrame::Sunken);
 
     m_processPteTranslateRiskOnlyCheck = new QCheckBox(QStringLiteral("仅风险项"), m_tabProcessPteTranslate);
     m_processPteTranslateRiskOnlyCheck->setChecked(true);
@@ -271,17 +263,15 @@ void MemoryDock::initializeProcessPteTranslateTab()
     m_processPteTranslateStatusLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
     m_processPteTranslateStatusLabel->setStyleSheet(QStringLiteral("color:%1; font-weight:600;").arg(KswordTheme::TextSecondaryHex()));
 
-    // 状态标签吃掉剩余宽度（stretch=1），长状态文本不会把左侧动作挤走。
-    actionLayout->addWidget(m_processPteTranslateRefreshButton);
-    actionLayout->addWidget(actionSeparator);
-    actionLayout->addWidget(m_processPteTranslateRiskOnlyCheck);
-    actionLayout->addWidget(m_processPteTranslateStatusLabel, 1);
-    ks::ui::NormalizeToolbarRow(actionLayout);
-    tabLayout->addLayout(actionLayout);
+    workspace->actions()->addWidget(m_processPteTranslateRefreshButton);
+    workspace->actions()->addStretch();
+    m_processPteTranslateStatusLabel->setWordWrap(true);
+    workspace->results()->addWidget(m_processPteTranslateStatusLabel);
 
     // 第二层：采样参数分组，起点 VA 与采样页数各配一个文字标签，
     // 避免用户对着一个孤零零的“VA”缩写猜它到底要填什么。
     QGroupBox* translateParameterGroup = new QGroupBox(QStringLiteral("翻译参数"), m_tabProcessPteTranslate);
+    ks::ui::StyleParameterSection(translateParameterGroup);
     QGridLayout* translateParameterLayout = new QGridLayout(translateParameterGroup);
     translateParameterLayout->setContentsMargins(10, 8, 10, 8);
     translateParameterLayout->setHorizontalSpacing(8);
@@ -308,16 +298,17 @@ void MemoryDock::initializeProcessPteTranslateTab()
     m_processPteTranslatePageCountSpin->setValue(16);
     m_processPteTranslatePageCountSpin->setToolTip(QStringLiteral("每次采样的页数上限"));
 
-    // 网格布局：第 1 列留给可拉伸的 VA 输入框，页数控件保持自然宽度贴在右侧。
+    // 地址和值分行，让完整地址在参数栏中获得全部可用宽度。
     translateParameterLayout->addWidget(addressCaption, 0, 0);
-    translateParameterLayout->addWidget(m_processPteTranslateAddressEdit, 0, 1);
-    translateParameterLayout->addWidget(pageCountCaption, 0, 2);
-    translateParameterLayout->addWidget(m_processPteTranslatePageCountSpin, 0, 3);
-    translateParameterLayout->setColumnStretch(1, 1);
-    tabLayout->addWidget(translateParameterGroup);
+    translateParameterLayout->addWidget(m_processPteTranslateAddressEdit, 1, 0);
+    translateParameterLayout->addWidget(pageCountCaption, 2, 0);
+    translateParameterLayout->addWidget(m_processPteTranslatePageCountSpin, 3, 0);
+    translateParameterLayout->addWidget(m_processPteTranslateRiskOnlyCheck, 4, 0);
+    translateParameterLayout->setColumnStretch(0, 1);
+    workspace->parameters()->addWidget(translateParameterGroup);
 
     QSplitter* splitter = new QSplitter(Qt::Vertical, m_tabProcessPteTranslate);
-    tabLayout->addWidget(splitter, 1);
+    workspace->results()->addWidget(splitter, 1);
 
     m_processPteTranslateTable = new ks::ui::VisibleTableWidget(splitter);
     // 小范围地址翻译是参数查询的结果，紧凑复制/导出即可。
@@ -359,6 +350,7 @@ void MemoryDock::initializeProcessPteTranslateTab()
     splitter->setStretchFactor(0, 3);
     splitter->setStretchFactor(1, 2);
 
+    workspace->finish();
     m_tabWidget->addTab(m_tabProcessPteTranslate, QStringLiteral("PTE / VA 翻译"));
 }
 

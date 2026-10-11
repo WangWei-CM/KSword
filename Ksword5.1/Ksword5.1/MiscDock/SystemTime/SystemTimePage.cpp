@@ -1,5 +1,7 @@
 #include "SystemTimePage.h"
 #include "../../UI/PrimaryPageStyle.h"
+#include "../../UI/ParameterWorkspace.h"
+#include <QFormLayout>
 #include "../../UI/ToolbarMetrics.h"
 
 #include "../../ArkDriverClient/ArkDriverClient.h"
@@ -217,6 +219,10 @@ namespace ks::misc
                 .arg(KswordTheme::TextSecondaryHex()));
         rootLayout->addWidget(m_persistenceLabel);
 
+        // 后端与倍率独立滚动；状态和固定恢复按钮不随参数滚走。
+        auto* workspace = new ks::ui::ParameterWorkspace(this, 500);
+        rootLayout->addWidget(workspace, 1);
+
         // 后端组要求用户明确选择 Hyper-V 共享页或原 HAL 兼容路径。
         auto* backendGroup = new QGroupBox(
             QStringLiteral("计时后端"),
@@ -260,7 +266,8 @@ namespace ks::misc
         backendLayout->addWidget(hypervDescription);
         backendLayout->addWidget(m_halBackendRadio);
         backendLayout->addWidget(halDescription);
-        rootLayout->addWidget(backendGroup);
+        ks::ui::StyleParameterSection(backendGroup);
+        workspace->parameters()->addWidget(backendGroup);
         // 模式组明确区分兼容定位和写入前增强校验定位。
         auto* schemeGroup = new QGroupBox(
             QStringLiteral("实现模式"),
@@ -303,7 +310,8 @@ namespace ks::misc
         schemeLayout->addWidget(compatDescription);
         schemeLayout->addWidget(m_guardedResolutionRadio);
         schemeLayout->addWidget(guardedDescription);
-        rootLayout->addWidget(schemeGroup);
+        ks::ui::StyleParameterSection(schemeGroup);
+        workspace->parameters()->addWidget(schemeGroup);
 
         // 倍率组只提供同一原理下的 N 倍加速和 1/N 减速。
         auto* controlGroup = new QGroupBox(
@@ -311,7 +319,8 @@ namespace ks::misc
             this);
         auto* controlLayout = new QVBoxLayout(controlGroup);
         ks::ui::StylePrimaryGroup(controlGroup);
-        auto* modeLayout = new QHBoxLayout();
+        auto* modeLayout = new QFormLayout();
+        modeLayout->setRowWrapPolicy(QFormLayout::WrapLongRows);
         m_speedUpRadio = new QRadioButton(
             QStringLiteral("加速 N 倍"),
             controlGroup);
@@ -327,15 +336,9 @@ namespace ks::misc
         m_factorSpin->setSuffix(QStringLiteral(" ×"));
         m_factorSpin->setToolTip(
             QStringLiteral("设置 2 到 64 的整数倍率"));
-        modeLayout->addWidget(m_speedUpRadio);
-        modeLayout->addWidget(m_slowDownRadio);
-        // 单行参数的组间距由共享工具条统一提供。
-        modeLayout->addWidget(new QLabel(
-            QStringLiteral("倍率："),
-            controlGroup));
-        modeLayout->addWidget(m_factorSpin);
-        modeLayout->addStretch(1);
-        ks::ui::NormalizeToolbarRow(modeLayout);
+        modeLayout->addRow(m_speedUpRadio);
+        modeLayout->addRow(m_slowDownRadio);
+        modeLayout->addRow(QStringLiteral("倍率："), m_factorSpin);
         controlLayout->addLayout(modeLayout);
 
         m_acknowledgeCheck = new QCheckBox(
@@ -377,12 +380,14 @@ namespace ks::misc
         }
         buttonLayout->addWidget(m_refreshButton);
         buttonLayout->addWidget(m_timeSyncButton);
-        buttonLayout->addWidget(m_applyButton);
-        buttonLayout->addWidget(m_resetButton);
+        workspace->actions()->addWidget(m_applyButton);
+        workspace->actions()->addWidget(m_resetButton);
+        workspace->actions()->addStretch(1);
         buttonLayout->addStretch(1);
         ks::ui::NormalizeToolbarRow(buttonLayout);
-        controlLayout->addLayout(buttonLayout);
-        rootLayout->addWidget(controlGroup);
+        workspace->results()->addLayout(buttonLayout);
+        ks::ui::StyleParameterSection(controlGroup);
+        workspace->parameters()->addWidget(controlGroup);
 
         // 状态组同时显示用户结论与可核对的解析证据。
         auto* statusGroup = new QGroupBox(
@@ -417,8 +422,10 @@ namespace ks::misc
         statusLayout->addWidget(m_backendLabel);
         statusLayout->addWidget(m_diagnosticLabel);
         statusLayout->addWidget(m_operationLabel);
-        rootLayout->addWidget(statusGroup);
-        rootLayout->addStretch(1);
+        ks::ui::StyleParameterSection(statusGroup);
+        workspace->results()->addWidget(statusGroup);
+        workspace->results()->addStretch(1);
+        workspace->finish();
 
         m_refreshTimer = new QTimer(this);
         m_refreshTimer->setInterval(

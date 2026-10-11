@@ -5847,12 +5847,13 @@ void ProcessDock::initializeCreateProcessPage()
 
     // 方法选择区域补充中文语义，避免只看英文 API 名不易理解。
     methodLayout->addWidget(new QLabel("API（创建方式）:", methodGroup), 0, 0);
-    methodLayout->addWidget(m_createMethodCombo, 0, 1, 1, 3);
+    methodLayout->addWidget(m_createMethodCombo, 0, 1);
+    methodLayout->setColumnStretch(1, 1);
     methodLayout->addWidget(new QLabel("源 PID（令牌来源进程）:", methodGroup), 1, 0);
     methodLayout->addWidget(m_tokenSourcePidEdit, 1, 1);
-    methodLayout->addWidget(new QLabel("令牌访问掩码（DesiredAccess）:", methodGroup), 1, 2);
-    methodLayout->addWidget(m_tokenDesiredAccessEdit, 1, 3);
-    methodLayout->addWidget(m_tokenDuplicatePrimaryCheck, 2, 0, 1, 4);
+    methodLayout->addWidget(new QLabel("令牌访问掩码（DesiredAccess）:", methodGroup), 2, 0);
+    methodLayout->addWidget(m_tokenDesiredAccessEdit, 2, 1);
+    methodLayout->addWidget(m_tokenDuplicatePrimaryCheck, 3, 0, 1, 2);
 
     // Token DesiredAccess 位标志勾选区：
     // - 覆盖最常见 TOKEN_* / 标准权限 / GENERIC_*；
@@ -5862,7 +5863,7 @@ void ProcessDock::initializeCreateProcessPage()
         "Token DesiredAccess 位标志组合",
         TokenDesiredAccessDefinitions,
         &m_tokenDesiredAccessChecks);
-    methodLayout->addWidget(ks::ui::FoldParameterSection(tokenAccessGroup), 3, 0, 1, 4);
+    methodLayout->addWidget(ks::ui::FoldParameterSection(tokenAccessGroup), 4, 0, 1, 2);
     contentLayout->addWidget(methodGroup);
 
     // 2) CreateProcessW 基础参数。
@@ -5956,18 +5957,20 @@ void ProcessDock::initializeCreateProcessPage()
     m_threadSecurityLengthEdit->setStyleSheet(inputStyle);
     m_threadSecurityDescriptorEdit->setStyleSheet(inputStyle);
 
-    securityLayout->addWidget(m_useProcessSecurityCheck, 0, 0);
-    securityLayout->addWidget(new QLabel("nLength（结构体长度）", securityGroup), 0, 1);
-    securityLayout->addWidget(m_processSecurityLengthEdit, 0, 2);
-    securityLayout->addWidget(new QLabel("lpSecurityDescriptor（安全描述符指针）", securityGroup), 0, 3);
-    securityLayout->addWidget(m_processSecurityDescriptorEdit, 0, 4);
-    securityLayout->addWidget(m_processSecurityInheritCheck, 0, 5);
-    securityLayout->addWidget(m_useThreadSecurityCheck, 1, 0);
-    securityLayout->addWidget(new QLabel("nLength（结构体长度）", securityGroup), 1, 1);
-    securityLayout->addWidget(m_threadSecurityLengthEdit, 1, 2);
-    securityLayout->addWidget(new QLabel("lpSecurityDescriptor（安全描述符指针）", securityGroup), 1, 3);
-    securityLayout->addWidget(m_threadSecurityDescriptorEdit, 1, 4);
-    securityLayout->addWidget(m_threadSecurityInheritCheck, 1, 5);
+    // 两个安全结构各自纵向成组，不再横跨六列挤出参数栏。
+    securityLayout->setColumnStretch(1, 1);
+    securityLayout->addWidget(m_useProcessSecurityCheck, 0, 0, 1, 2);
+    securityLayout->addWidget(new QLabel("nLength（结构体长度）", securityGroup), 1, 0);
+    securityLayout->addWidget(m_processSecurityLengthEdit, 1, 1);
+    securityLayout->addWidget(new QLabel("lpSecurityDescriptor（安全描述符指针）", securityGroup), 2, 0);
+    securityLayout->addWidget(m_processSecurityDescriptorEdit, 2, 1);
+    securityLayout->addWidget(m_processSecurityInheritCheck, 3, 0, 1, 2);
+    securityLayout->addWidget(m_useThreadSecurityCheck, 4, 0, 1, 2);
+    securityLayout->addWidget(new QLabel("nLength（结构体长度）", securityGroup), 5, 0);
+    securityLayout->addWidget(m_threadSecurityLengthEdit, 5, 1);
+    securityLayout->addWidget(new QLabel("lpSecurityDescriptor（安全描述符指针）", securityGroup), 6, 0);
+    securityLayout->addWidget(m_threadSecurityDescriptorEdit, 6, 1);
+    securityLayout->addWidget(m_threadSecurityInheritCheck, 7, 0, 1, 2);
     contentLayout->addWidget(ks::ui::FoldParameterSection(securityGroup));
 
     // 4) STARTUPINFOW 全字段。
@@ -6079,15 +6082,16 @@ void ProcessDock::initializeCreateProcessPage()
     m_piPidEdit->setStyleSheet(inputStyle);
     m_piTidEdit->setStyleSheet(inputStyle);
 
-    processInfoLayout->addWidget(m_useProcessInfoCheck, 0, 0, 1, 4);
+    processInfoLayout->setColumnStretch(1, 1);
+    processInfoLayout->addWidget(m_useProcessInfoCheck, 0, 0, 1, 2);
     processInfoLayout->addWidget(new QLabel("hProcess（输出进程句柄）", processInfoGroup), 1, 0);
     processInfoLayout->addWidget(m_piProcessHandleEdit, 1, 1);
-    processInfoLayout->addWidget(new QLabel("hThread（输出线程句柄）", processInfoGroup), 1, 2);
-    processInfoLayout->addWidget(m_piThreadHandleEdit, 1, 3);
-    processInfoLayout->addWidget(new QLabel("dwProcessId（输出PID）", processInfoGroup), 2, 0);
-    processInfoLayout->addWidget(m_piPidEdit, 2, 1);
-    processInfoLayout->addWidget(new QLabel("dwThreadId（输出TID）", processInfoGroup), 2, 2);
-    processInfoLayout->addWidget(m_piTidEdit, 2, 3);
+    processInfoLayout->addWidget(new QLabel("hThread（输出线程句柄）", processInfoGroup), 2, 0);
+    processInfoLayout->addWidget(m_piThreadHandleEdit, 2, 1);
+    processInfoLayout->addWidget(new QLabel("dwProcessId（输出PID）", processInfoGroup), 3, 0);
+    processInfoLayout->addWidget(m_piPidEdit, 3, 1);
+    processInfoLayout->addWidget(new QLabel("dwThreadId（输出TID）", processInfoGroup), 4, 0);
+    processInfoLayout->addWidget(m_piTidEdit, 4, 1);
     contentLayout->addWidget(ks::ui::FoldParameterSection(processInfoGroup));
 
     // 6) Token 特权编辑器。

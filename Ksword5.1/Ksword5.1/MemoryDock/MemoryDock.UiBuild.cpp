@@ -1,4 +1,4 @@
-﻿#include "MemoryDock.Internal.h"
+#include "MemoryDock.Internal.h"
 #include "SystemMemoryAuditPage.h"
 #include "DdmaPage.h"
 #include "../UI/AdaptivePageScroll.h" // ks::ui::EnablePageInnerScroll / IsolateMinimumSize：页内滚动壳与最小尺寸隔离。
@@ -8,6 +8,8 @@
 #include "../UI/PageControlStyle.h"
 #include "../UI/PrimaryPageStyle.h"
 #include "../UI/FlatButtonTheme.h"
+#include "../UI/ParameterWorkspace.h"
+#include <QFormLayout>
 #include "../Internationalization/LanguageManager.h"
 
 #include <QCompleter> // 进程下拉的包含式补全需要完整类型。
@@ -850,18 +852,19 @@ void MemoryDock::initializeMemorySearchTab()
 
     // Tab3：内存搜索。
     m_tabSearch = new QWidget(m_tabWidget);
-    // 页面自带内部滚动壳：内容放不下时在页内滚动，不把 Dock 撑高。页面指针身份不变。
-    QWidget* const tabContent = ks::ui::EnablePageInnerScroll(m_tabSearch);
-    QVBoxLayout* tabLayout = new QVBoxLayout(tabContent);
+    // 扫描条件独立滚动，扫描/取消固定，结果表保持完整工作高度。
+    QVBoxLayout* tabLayout = new QVBoxLayout(m_tabSearch);
     tabLayout->setContentsMargins(6, 6, 6, 6);
     tabLayout->setSpacing(6);
+    auto* workspace = new ks::ui::ParameterWorkspace(m_tabSearch, 420);
+    tabLayout->addWidget(workspace);
 
     const QString inputStyle = buildBlueInputStyle();
     const QString buttonStyle = buildBlueButtonStyle();
 
     // 搜索条件面板。
     QGroupBox* conditionGroup = new QGroupBox("搜索条件", m_tabSearch);
-    ks::ui::StylePrimaryGroup(conditionGroup);
+    ks::ui::StyleParameterSection(conditionGroup);
     QGridLayout* conditionLayout = new QGridLayout(conditionGroup);
     conditionLayout->setHorizontalSpacing(8);
     conditionLayout->setVerticalSpacing(6);
@@ -900,7 +903,7 @@ void MemoryDock::initializeMemorySearchTab()
     m_searchHeapOnlyCheck = new QCheckBox("仅堆(近似)", conditionGroup);
     m_searchStackOnlyCheck = new QCheckBox("仅栈(近似)", conditionGroup);
     m_searchTypeCombo->setToolTip("选择要搜索的数据类型；类型必须和内存中实际存放的格式一致才能搜到");
-    m_searchRangeCombo->setToolTip("限定搜索的地址范围；选“自定义范围”后可填写右侧的起止地址");
+    m_searchRangeCombo->setToolTip("限定搜索的地址范围；选“自定义范围”后可填写起止地址");
     m_searchImageOnlyCheck->setToolTip("只在 exe/dll 映射的内存中搜索");
     m_searchHeapOnlyCheck->setToolTip("只在推测为堆（程序动态分配）的内存中搜索，判定为近似值");
     m_searchStackOnlyCheck->setToolTip("只在推测为栈（函数局部变量）的内存中搜索，判定为近似值");
@@ -925,29 +928,34 @@ void MemoryDock::initializeMemorySearchTab()
     m_nextScanButton->setEnabled(false);
     m_cancelScanButton->setEnabled(false);
 
+    // 原七列表单拆为单列；起止地址和区域开关保持可见，不依赖横向滚动。
     conditionLayout->addWidget(new QLabel("数据类型", conditionGroup), 0, 0);
-    conditionLayout->addWidget(m_searchTypeCombo, 0, 1);
-    conditionLayout->addWidget(new QLabel("值", conditionGroup), 0, 2);
-    conditionLayout->addWidget(m_searchValueEdit, 0, 3, 1, 3);
-    conditionLayout->addWidget(new QLabel("范围", conditionGroup), 1, 0);
-    conditionLayout->addWidget(m_searchRangeCombo, 1, 1);
-    conditionLayout->addWidget(m_searchRangeStartEdit, 1, 2);
-    conditionLayout->addWidget(m_searchRangeEndEdit, 1, 3);
-    conditionLayout->addWidget(m_searchImageOnlyCheck, 1, 4);
-    conditionLayout->addWidget(m_searchHeapOnlyCheck, 1, 5);
-    conditionLayout->addWidget(m_searchStackOnlyCheck, 1, 6);
-    conditionLayout->addWidget(m_firstScanButton, 2, 1);
-    conditionLayout->addWidget(m_nextScanButton, 2, 2);
-    conditionLayout->addWidget(m_resetScanButton, 2, 3);
-    conditionLayout->addWidget(m_cancelScanButton, 2, 4);
+    conditionLayout->addWidget(m_searchTypeCombo, 1, 0);
+    conditionLayout->addWidget(new QLabel("值", conditionGroup), 2, 0);
+    conditionLayout->addWidget(m_searchValueEdit, 3, 0);
+    conditionLayout->addWidget(new QLabel("范围", conditionGroup), 4, 0);
+    conditionLayout->addWidget(m_searchRangeCombo, 5, 0);
+    conditionLayout->addWidget(m_searchRangeStartEdit, 6, 0);
+    conditionLayout->addWidget(m_searchRangeEndEdit, 7, 0);
+    conditionLayout->addWidget(m_searchImageOnlyCheck, 8, 0);
+    conditionLayout->addWidget(m_searchHeapOnlyCheck, 9, 0);
+    conditionLayout->addWidget(m_searchStackOnlyCheck, 10, 0);
+    conditionLayout->setColumnStretch(0, 1);
+    workspace->parameters()->addWidget(conditionGroup);
 
-    tabLayout->addWidget(conditionGroup);
+    // 四个扫描动作以两行固定，避免窄栏按钮互相挤压。
+    auto* scanActions = new QGridLayout();
+    scanActions->addWidget(m_firstScanButton, 0, 0);
+    scanActions->addWidget(m_nextScanButton, 0, 1);
+    scanActions->addWidget(m_resetScanButton, 1, 0);
+    scanActions->addWidget(m_cancelScanButton, 1, 1);
+    workspace->actions()->addLayout(scanActions, 1);
 
-    // 初始条件与再次扫描是不同阶段，以轻边界和留白分组，保留结果可见高度。
-    tabLayout->addSpacing(6);
     QGroupBox* compareGroup = new QGroupBox("再次扫描过滤", m_tabSearch);
-    ks::ui::StylePrimaryGroup(compareGroup);
-    QHBoxLayout* compareLayout = new QHBoxLayout(compareGroup);
+    ks::ui::StyleParameterSection(compareGroup);
+    QFormLayout* compareLayout = new QFormLayout(compareGroup);
+    compareLayout->setRowWrapPolicy(QFormLayout::WrapAllRows);
+    compareLayout->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
     compareLayout->setContentsMargins(8, 6, 8, 6);
     compareLayout->setSpacing(8);
 
@@ -971,17 +979,16 @@ void MemoryDock::initializeMemorySearchTab()
     m_nextScanValueBEdit->setStyleSheet(inputStyle);
     m_nextScanValueBEdit->setVisible(false);
 
-    compareLayout->addWidget(new QLabel("条件", compareGroup));
-    compareLayout->addWidget(m_nextScanCompareCombo);
-    compareLayout->addWidget(new QLabel("值", compareGroup));
-    compareLayout->addWidget(m_nextScanValueEdit, 1);
-    compareLayout->addWidget(m_nextScanValueBEdit, 1);
-    ks::ui::NormalizeToolbarRow(compareLayout);
-    tabLayout->addWidget(compareGroup);
+    compareLayout->addRow(QStringLiteral("条件"), m_nextScanCompareCombo);
+    compareLayout->addRow(QStringLiteral("值"), m_nextScanValueEdit);
+    compareLayout->addRow(m_nextScanValueBEdit);
+    workspace->parameters()->addWidget(compareGroup);
 
-    // 访问后端选择条：扫描页的每一次区域读取都会走这里选中的通道。
-    tabLayout->addWidget(
-        createBackendSelector(m_tabSearch, m_searchBackendCombo, m_searchBackendHintLabel));
+    // 只在本页将访问后端横条转为纵向，其他专业编辑器工具条保持原布局。
+    QWidget* backendSelector = createBackendSelector(
+        m_tabSearch, m_searchBackendCombo, m_searchBackendHintLabel);
+    static_cast<QHBoxLayout*>(backendSelector->layout())->setDirection(QBoxLayout::TopToBottom);
+    workspace->parameters()->addWidget(backendSelector);
 
     m_searchResultTable = new ks::ui::VisibleTableWidget(m_tabSearch);
     // 搜索已经提供前次值/再次扫描比较，通用快照会重复同一信息。
@@ -997,7 +1004,7 @@ void MemoryDock::initializeMemorySearchTab()
     m_searchResultTable->setSortingEnabled(true);
     m_searchResultTable->verticalHeader()->setVisible(false);
     m_searchResultTable->horizontalHeader()->setStretchLastSection(true);
-    tabLayout->addWidget(m_searchResultTable, 1);
+    workspace->results()->addWidget(m_searchResultTable, 1);
 
     QHBoxLayout* progressLayout = new QHBoxLayout();
     progressLayout->setContentsMargins(0, 0, 0, 0);
@@ -1007,7 +1014,8 @@ void MemoryDock::initializeMemorySearchTab()
     m_scanStatusLabel = new QLabel("就绪", m_tabSearch);
     progressLayout->addWidget(m_scanProgressBar, 1);
     progressLayout->addWidget(m_scanStatusLabel);
-    tabLayout->addLayout(progressLayout);
+    workspace->results()->addLayout(progressLayout);
+    workspace->finish();
 
     m_tabWidget->addTab(m_tabSearch, "内存搜索");
     ks::i18n::LanguageManager::instance().bindTab(

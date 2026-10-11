@@ -1,6 +1,7 @@
 #include "PrivilegeDock.h"
 #include "../UI/PageControlStyle.h"
 #include "../UI/ToolbarMetrics.h"
+#include "../UI/ParameterWorkspace.h"
 #include "PrivilegeAccountPages.h"
 #include "PrivilegeTokenPages.h"
 #include "PrivilegeAccessPage.h"
@@ -27,6 +28,7 @@
 #include <QDateTime>
 #include <QEvent>
 #include <QFormLayout>
+#include <QGroupBox>
 #include <QHeaderView>
 #include <QHBoxLayout>
 #include <QIcon>
@@ -325,6 +327,9 @@ void PrivilegeDock::initializeAccountTab()
     m_accountLayout = new QVBoxLayout(m_accountPage);
     m_accountLayout->setContentsMargins(4, 4, 4, 4);
     m_accountLayout->setSpacing(6);
+    // 两个账号操作独立成组并各带原动作；右侧账号表只辅助选取目标。
+    auto* workspace = new ks::ui::ParameterWorkspace(m_accountPage, 420);
+    m_accountLayout->addWidget(workspace);
 
     m_accountToolbarLayout = new QHBoxLayout();
     m_accountToolbarLayout->setContentsMargins(0, 0, 0, 0);
@@ -343,7 +348,7 @@ void PrivilegeDock::initializeAccountTab()
     m_accountToolbarLayout->addWidget(m_accountRefreshButton, 0);
     m_accountToolbarLayout->addWidget(m_accountStatusLabel, 1);
     ks::ui::NormalizeToolbarRow(m_accountToolbarLayout);
-    m_accountLayout->addLayout(m_accountToolbarLayout, 0);
+    workspace->results()->addLayout(m_accountToolbarLayout, 0);
 
     m_accountTable = new ks::ui::VisibleTableWidget(m_accountPage);
     // 创建/重置页的账户表是表单选取辅助，避免占用两组表单高度。
@@ -359,10 +364,16 @@ void PrivilegeDock::initializeAccountTab()
     m_accountTable->horizontalHeader()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
     m_accountTable->horizontalHeader()->setSectionResizeMode(3, QHeaderView::ResizeToContents);
     installPrivilegeTableCopyMenu(m_accountTable);
-    m_accountLayout->addWidget(m_accountTable, 1);
+    workspace->results()->addWidget(m_accountTable, 1);
 
     // 新建用户输入区：包含用户名、密码、确认密码。
+    auto* createGroup = new QGroupBox(m_accountPage);
+    languageManager.bindText(createGroup, QStringLiteral("privilege.dialog.create.title"), QStringLiteral("创建用户"));
+    auto* createSection = new QVBoxLayout(createGroup);
+    ks::ui::StyleParameterSection(createGroup);
     QFormLayout* createLayout = new QFormLayout();
+    createLayout->setRowWrapPolicy(QFormLayout::WrapAllRows);
+    createLayout->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
     // 组内保持紧凑，两个不同账号动作之间额外留白，避免误读为连续步骤。
     createLayout->setVerticalSpacing(8);
     createLayout->setHorizontalSpacing(12);
@@ -395,7 +406,7 @@ void PrivilegeDock::initializeAccountTab()
     createLayout->addRow(createUserLabel, m_createUserNameEdit);
     createLayout->addRow(createPasswordLabel, m_createPasswordEdit);
     createLayout->addRow(createConfirmPasswordLabel, m_createPasswordConfirmEdit);
-    m_accountLayout->addLayout(createLayout, 0);
+    createSection->addLayout(createLayout);
 
     m_createUserButton = new QPushButton(QIcon(":/Icon/process_start.svg"), QString(), m_accountPage);
     languageManager.bindToolTip(
@@ -405,11 +416,17 @@ void PrivilegeDock::initializeAccountTab()
     m_createUserButton->setStyleSheet(blueButtonStyle());
     m_createUserButton->setFixedWidth(34);
     ks::ui::NormalizeToolbarControl(m_createUserButton);
-    m_accountLayout->addWidget(m_createUserButton, 0, Qt::AlignLeft);
-    m_accountLayout->addSpacing(12);
+    createSection->addWidget(m_createUserButton, 0, Qt::AlignLeft);
+    workspace->parameters()->addWidget(createGroup);
 
     // 重置密码输入区：支持指定账号并确认密码。
+    auto* resetGroup = new QGroupBox(m_accountPage);
+    languageManager.bindText(resetGroup, QStringLiteral("privilege.dialog.reset.title"), QStringLiteral("重置密码"));
+    auto* resetSection = new QVBoxLayout(resetGroup);
+    ks::ui::StyleParameterSection(resetGroup);
     QFormLayout* resetLayout = new QFormLayout();
+    resetLayout->setRowWrapPolicy(QFormLayout::WrapAllRows);
+    resetLayout->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
     resetLayout->setVerticalSpacing(8);
     resetLayout->setHorizontalSpacing(12);
     m_resetUserNameEdit = new QLineEdit(m_accountPage);
@@ -441,7 +458,7 @@ void PrivilegeDock::initializeAccountTab()
     resetLayout->addRow(resetUserLabel, m_resetUserNameEdit);
     resetLayout->addRow(resetPasswordLabel, m_resetPasswordEdit);
     resetLayout->addRow(resetConfirmPasswordLabel, m_resetPasswordConfirmEdit);
-    m_accountLayout->addLayout(resetLayout, 0);
+    resetSection->addLayout(resetLayout);
 
     m_resetPasswordButton = new QPushButton(QIcon(":/Icon/process_priority.svg"), QString(), m_accountPage);
     languageManager.bindToolTip(
@@ -451,7 +468,8 @@ void PrivilegeDock::initializeAccountTab()
     m_resetPasswordButton->setStyleSheet(blueButtonStyle());
     m_resetPasswordButton->setFixedWidth(34);
     ks::ui::NormalizeToolbarControl(m_resetPasswordButton);
-    m_accountLayout->addWidget(m_resetPasswordButton, 0, Qt::AlignLeft);
+    resetSection->addWidget(m_resetPasswordButton, 0, Qt::AlignLeft);
+    workspace->parameters()->addWidget(resetGroup);
     // 账号和密码输入均为单行表单，采用与查询工具一致的触达高度。
     for (QLineEdit* edit : {m_createUserNameEdit, m_createPasswordEdit,
         m_createPasswordConfirmEdit, m_resetUserNameEdit, m_resetPasswordEdit,
@@ -460,6 +478,8 @@ void PrivilegeDock::initializeAccountTab()
         ks::ui::NormalizeToolbarControl(edit);
     }
 
+    // 账号创建与密码重置不共用固定动作栏，防止误把相邻账号表单当成同一操作。
+    workspace->finish();
     m_tabWidget->addTab(m_accountPage, QStringLiteral("账号"));
     languageManager.bindTab(
         m_tabWidget,

@@ -1,5 +1,6 @@
 #include "../UI/StructuredFieldView.h"
 #include "OtherDock.h"
+#include "../UI/ParameterWorkspace.h"
 #include "../UI/CodeEditorWidget.h"
 #include "../theme.h"
 
@@ -394,7 +395,10 @@ void OtherDock::showCreateDesktopDialog()
     basicLayout->addRow(QStringLiteral("桌面堆大小"), heapSizeSpin);
     basicLayout->addRow(QStringLiteral("创建标志"), allowOtherAccountHookCheck);
     ks::ui::StyleSecondaryForm(basicLayout, 128);
-    ks::ui::StyleSecondarySection(basicGroup);
+    // 保留弹窗两列布局，只统一明确的参数区；长名称和创建标志改为整行。
+    basicLayout->setRowWrapPolicy(QFormLayout::WrapAllRows);
+    ks::ui::StyleParameterSection(basicGroup);
+    ks::ui::StyleParameterFields(basicGroup);
     primaryLayout->addWidget(basicGroup);
 
     QGroupBox* accessGroup = new QGroupBox(QStringLiteral("访问掩码（dwDesiredAccess）"), &dialog);
@@ -422,7 +426,8 @@ void OtherDock::showCreateDesktopDialog()
         accessLayout->addWidget(checkBox, i, 0);
         accessControls.push_back(AccessFlagControl{ checkBox, accessDefinitions[i].second, checkBox->text() });
     }
-    ks::ui::StyleSecondarySection(accessGroup);
+    ks::ui::StyleParameterSection(accessGroup);
+    ks::ui::StyleParameterFields(accessGroup);
     accessLayout->setVerticalSpacing(8);
     secondaryLayout->addWidget(accessGroup);
 
@@ -455,7 +460,8 @@ void OtherDock::showCreateDesktopDialog()
     securityLayout->addWidget(switchAfterCreateCheck);
     securityLayout->addWidget(customSddlCheck);
     securityLayout->addWidget(sddlEdit);
-    ks::ui::StyleSecondarySection(securityGroup);
+    ks::ui::StyleParameterSection(securityGroup);
+    ks::ui::StyleParameterFields(securityGroup);
     securityLayout->setSpacing(8);
     primaryLayout->addWidget(securityGroup);
     primaryLayout->addStretch(1);

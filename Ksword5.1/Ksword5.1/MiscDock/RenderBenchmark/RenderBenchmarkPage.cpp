@@ -1,5 +1,6 @@
 #include "RenderBenchmarkPage.h"
 #include "../../UI/ToolbarMetrics.h"
+#include "../../UI/ParameterWorkspace.h"
 
 // ============================================================
 // RenderBenchmarkPage.cpp
@@ -510,6 +511,10 @@ namespace ks::misc
         rootLayout->setContentsMargins(10, 10, 10, 10);
         rootLayout->setSpacing(8);
 
+        // 测量参数独立滚动，报告获得完整高度，执行全部测试的动作固定在底栏。
+        auto* workspace = new ks::ui::ParameterWorkspace(this, 500);
+        rootLayout->addWidget(workspace, 1);
+
         ks::i18n::LanguageManager& languageManager = ks::i18n::LanguageManager::instance();
 
         // ===== 顶部操作条 =====
@@ -524,13 +529,15 @@ namespace ks::misc
             m_runAllButton,
             QStringLiteral("misc.render_benchmark.run_all"),
             QStringLiteral("运行全部测试"));
-        topActionLayout->addWidget(m_runAllButton);
+        workspace->actions()->addWidget(m_runAllButton);
+        workspace->actions()->addStretch(1);
 
         m_statusLabel = new QLabel(QStringLiteral("就绪。"), this);
         languageManager.bindText(
             m_statusLabel,
             QStringLiteral("misc.render_benchmark.status.idle"),
             QStringLiteral("就绪。"));
+        m_statusLabel->setWordWrap(true);
         topActionLayout->addWidget(m_statusLabel, 1);
 
         m_progressBar = new QProgressBar(this);
@@ -541,7 +548,7 @@ namespace ks::misc
         topActionLayout->addWidget(m_progressBar);
 
         ks::ui::NormalizeToolbarRow(topActionLayout);
-        rootLayout->addLayout(topActionLayout);
+        workspace->results()->addLayout(topActionLayout);
 
         // ===== 测试一：主窗口重绘基准 =====
         QGroupBox* const repaintGroupBox = new QGroupBox(QStringLiteral("主窗口整树重绘"), this);
@@ -587,7 +594,8 @@ namespace ks::misc
         repaintActionLayout->addStretch();
         ks::ui::NormalizeToolbarRow(repaintActionLayout);
         repaintLayout->addLayout(repaintActionLayout);
-        rootLayout->addWidget(repaintGroupBox);
+        ks::ui::StyleParameterSection(repaintGroupBox);
+        workspace->parameters()->addWidget(repaintGroupBox);
 
         // ===== 测试二：拖动 A/B =====
         QGroupBox* const dragGroupBox = new QGroupBox(QStringLiteral("拖动流畅度 A/B"), this);
@@ -610,40 +618,40 @@ namespace ks::misc
                 "对比“每次材质刷新都重绘整树”与“只下发材质不重绘”两种策略的掉帧率。运行时屏幕上会出现一个测试窗口并自行移动，测完自动关闭。"));
         dragLayout->addWidget(dragHintLabel);
 
-        QHBoxLayout* const dragActionLayout = new QHBoxLayout();
+        QFormLayout* const dragActionLayout = new QFormLayout();
+        dragActionLayout->setRowWrapPolicy(QFormLayout::WrapLongRows);
         dragActionLayout->setSpacing(6);
         QLabel* const dragFrameLabel = new QLabel(QStringLiteral("模拟帧数"), dragGroupBox);
         languageManager.bindText(
             dragFrameLabel,
             QStringLiteral("misc.render_benchmark.drag.frames"),
             QStringLiteral("模拟帧数"));
-        dragActionLayout->addWidget(dragFrameLabel);
+
         m_dragFrameSpin = new QSpinBox(dragGroupBox);
         m_dragFrameSpin->setRange(30, 600);
         m_dragFrameSpin->setValue(120);
-        dragActionLayout->addWidget(m_dragFrameSpin);
+        dragActionLayout->addRow(dragFrameLabel, m_dragFrameSpin);
 
         QLabel* const dragRowLabel = new QLabel(QStringLiteral("表格行数"), dragGroupBox);
         languageManager.bindText(
             dragRowLabel,
             QStringLiteral("misc.render_benchmark.drag.rows"),
             QStringLiteral("表格行数"));
-        dragActionLayout->addWidget(dragRowLabel);
+
         m_dragRowSpin = new QSpinBox(dragGroupBox);
         m_dragRowSpin->setRange(0, 3000);
         m_dragRowSpin->setValue(600);
-        dragActionLayout->addWidget(m_dragRowSpin);
+        dragActionLayout->addRow(dragRowLabel, m_dragRowSpin);
 
         m_runDragButton = new QPushButton(QStringLiteral("运行拖动对比"), dragGroupBox);
         languageManager.bindText(
             m_runDragButton,
             QStringLiteral("misc.render_benchmark.drag.run"),
             QStringLiteral("运行拖动对比"));
-        dragActionLayout->addWidget(m_runDragButton);
-        dragActionLayout->addStretch();
-        ks::ui::NormalizeToolbarRow(dragActionLayout);
+        dragActionLayout->addRow(m_runDragButton);
         dragLayout->addLayout(dragActionLayout);
-        rootLayout->addWidget(dragGroupBox);
+        ks::ui::StyleParameterSection(dragGroupBox);
+        workspace->parameters()->addWidget(dragGroupBox);
 
         // ===== 测试三：DWM 合成能力探测 =====
         QGroupBox* const compositionGroupBox = new QGroupBox(QStringLiteral("DWM 合成能力探测"), this);
@@ -679,7 +687,8 @@ namespace ks::misc
         compositionActionLayout->addStretch();
         ks::ui::NormalizeToolbarRow(compositionActionLayout);
         compositionLayout->addLayout(compositionActionLayout);
-        rootLayout->addWidget(compositionGroupBox);
+        ks::ui::StyleParameterSection(compositionGroupBox);
+        workspace->parameters()->addWidget(compositionGroupBox);
 
         // ===== 测试四：目标窗口响应探针 =====
         QGroupBox* const responseGroupBox = new QGroupBox(QStringLiteral("窗口响应探针"), this);
@@ -704,7 +713,7 @@ namespace ks::misc
                 "测试只移动窗口位置，结束后放回原处；最大化的窗口无法移动，请先还原。"));
         responseLayout->addWidget(responseHintLabel);
 
-        QHBoxLayout* const responseTargetLayout = new QHBoxLayout();
+        QVBoxLayout* const responseTargetLayout = new QVBoxLayout();
         responseTargetLayout->setSpacing(6);
         QLabel* const responseTargetLabel = new QLabel(QStringLiteral("目标窗口"), responseGroupBox);
         languageManager.bindText(
@@ -713,7 +722,9 @@ namespace ks::misc
             QStringLiteral("目标窗口"));
         responseTargetLayout->addWidget(responseTargetLabel);
         m_targetWindowCombo = new QComboBox(responseGroupBox);
-        m_targetWindowCombo->setMinimumWidth(360);
+        m_targetWindowCombo->setMinimumWidth(0);
+        m_targetWindowCombo->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+        m_targetWindowCombo->setMinimumContentsLength(20);
         responseTargetLayout->addWidget(m_targetWindowCombo, 1);
         m_refreshTargetsButton = new QPushButton(QStringLiteral("刷新窗口列表"), responseGroupBox);
         languageManager.bindText(
@@ -721,7 +732,8 @@ namespace ks::misc
             QStringLiteral("misc.render_benchmark.response.refresh"),
             QStringLiteral("刷新窗口列表"));
         responseTargetLayout->addWidget(m_refreshTargetsButton);
-        ks::ui::NormalizeToolbarRow(responseTargetLayout);
+        ks::ui::NormalizeToolbarControl(m_targetWindowCombo);
+        ks::ui::NormalizeToolbarControl(m_refreshTargetsButton);
         responseLayout->addLayout(responseTargetLayout);
 
         QHBoxLayout* const responseActionLayout = new QHBoxLayout();
@@ -745,7 +757,8 @@ namespace ks::misc
         responseActionLayout->addStretch();
         ks::ui::NormalizeToolbarRow(responseActionLayout);
         responseLayout->addLayout(responseActionLayout);
-        rootLayout->addWidget(responseGroupBox);
+        ks::ui::StyleParameterSection(responseGroupBox);
+        workspace->parameters()->addWidget(responseGroupBox);
 
         // ===== 报告区 =====
         QHBoxLayout* const reportActionLayout = new QHBoxLayout();
@@ -755,7 +768,8 @@ namespace ks::misc
             reportLabel,
             QStringLiteral("misc.render_benchmark.report"),
             QStringLiteral("测试报告"));
-        reportActionLayout->addWidget(reportLabel);
+        // 报告标题独立一行，三项报告动作在窄结果栏中仍保持可见。
+        workspace->results()->addWidget(reportLabel);
         reportActionLayout->addStretch();
         m_copyReportButton = new QPushButton(QStringLiteral("复制报告"), this);
         languageManager.bindText(
@@ -776,12 +790,13 @@ namespace ks::misc
             QStringLiteral("清空报告"));
         reportActionLayout->addWidget(m_clearReportButton);
         ks::ui::NormalizeToolbarRow(reportActionLayout);
-        rootLayout->addLayout(reportActionLayout);
+        workspace->results()->addLayout(reportActionLayout);
 
         m_reportEdit = new CodeEditorWidget(this);
         m_reportEdit->setReadOnly(true);
         m_reportEdit->setMinimumHeight(180);
-        rootLayout->addWidget(m_reportEdit, 1);
+        workspace->results()->addWidget(m_reportEdit, 1);
+        workspace->finish();
     }
 
     void RenderBenchmarkPage::initializeConnections()

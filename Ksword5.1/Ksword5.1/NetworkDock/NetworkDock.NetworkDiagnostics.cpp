@@ -1,5 +1,6 @@
 #include "NetworkDock.InternalCommon.h"
 #include "../UI/ToolbarMetrics.h"
+#include "../UI/ParameterWorkspace.h"
 #include "../UI/SecondaryPageLayout.h"
 #include "../Framework/PrivilegeElevationPrompt.h"
 #include "../UI/VisibleTableWidget.h"
@@ -862,11 +863,13 @@ void NetworkDock::initializeAliveHostScanTab()
 {
     m_aliveScanPage = new QWidget(this);
     m_aliveScanLayout = new QVBoxLayout(m_aliveScanPage);
-    m_aliveScanLayout->setContentsMargins(6, 6, 6, 6);
-    m_aliveScanLayout->setSpacing(6);
+    m_aliveScanLayout->setContentsMargins(0, 0, 0, 0);
+    auto* workspace = new ks::ui::ParameterWorkspace(m_aliveScanPage, 360); // 扫描参数独立滚动。
+    m_aliveScanLayout->addWidget(workspace);
 
-    m_aliveScanControlLayout = new QHBoxLayout();
-    m_aliveScanControlLayout->setSpacing(6);
+    m_aliveScanControlLayout = workspace->actions();
+    auto* scanForm = new QFormLayout; // 原横向输入拆为单列，确保 IP 字段完整可用。
+    scanForm->setRowWrapPolicy(QFormLayout::WrapAllRows);
 
     QLabel* startIpLabel = new QLabel(QStringLiteral("起始IP:"), m_aliveScanPage);
     m_aliveScanStartIpEdit = new QLineEdit(m_aliveScanPage);
@@ -892,25 +895,23 @@ void NetworkDock::initializeAliveHostScanTab()
     m_stopAliveScanButton->setToolTip(QStringLiteral("停止当前主机扫描任务"));
     m_stopAliveScanButton->setEnabled(false);
 
-    m_aliveScanControlLayout->addWidget(startIpLabel);
-    m_aliveScanControlLayout->addWidget(m_aliveScanStartIpEdit);
-    m_aliveScanControlLayout->addWidget(endIpLabel);
-    m_aliveScanControlLayout->addWidget(m_aliveScanEndIpEdit);
-    m_aliveScanControlLayout->addWidget(timeoutLabel);
-    m_aliveScanControlLayout->addWidget(m_aliveScanTimeoutSpin);
+    scanForm->addRow(startIpLabel, m_aliveScanStartIpEdit);
+    scanForm->addRow(endIpLabel, m_aliveScanEndIpEdit);
+    scanForm->addRow(timeoutLabel, m_aliveScanTimeoutSpin);
+    workspace->parameters()->addLayout(scanForm);
     m_aliveScanControlLayout->addWidget(m_startAliveScanButton);
     m_aliveScanControlLayout->addWidget(m_stopAliveScanButton);
-    m_aliveScanLayout->addLayout(m_aliveScanControlLayout);
-    ks::ui::NormalizeToolbarRow(m_aliveScanControlLayout);
+    m_aliveScanControlLayout->addStretch();
 
     m_aliveScanProgressBar = new QProgressBar(m_aliveScanPage);
     m_aliveScanProgressBar->setRange(0, 100);
     m_aliveScanProgressBar->setValue(0);
     m_aliveScanProgressBar->setFormat(QStringLiteral("0%"));
-    m_aliveScanLayout->addWidget(m_aliveScanProgressBar);
+    workspace->results()->addWidget(m_aliveScanProgressBar);
 
     m_aliveScanStatusLabel = new QLabel(QStringLiteral("状态：待机"), m_aliveScanPage);
-    m_aliveScanLayout->addWidget(m_aliveScanStatusLabel);
+    m_aliveScanStatusLabel->setWordWrap(true);
+    workspace->results()->addWidget(m_aliveScanStatusLabel);
 
     m_aliveScanTable = new ks::ui::VisibleTableWidget(m_aliveScanPage);
     // 单次发现结果需要导出，不需要每个结果表的冻结/对比操作。
@@ -929,7 +930,8 @@ void NetworkDock::initializeAliveHostScanTab()
     m_aliveScanTable->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
     // 横向滚动条不强制关闭：默认由全局列宽自适应压入 viewport，用户拖宽列后按需出现。
     installCopyCurrentRowMenu(m_aliveScanTable);
-    m_aliveScanLayout->addWidget(m_aliveScanTable, 1);
+    workspace->results()->addWidget(m_aliveScanTable, 1);
+    workspace->finish();
 
     m_sideTabWidget->addTab(m_aliveScanPage, QIcon(":/Icon/process_main.svg"), QStringLiteral("存活主机"));
 }

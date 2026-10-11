@@ -9,6 +9,12 @@
 #include <QAbstractItemView>
 #include <QAbstractSpinBox>
 #include <QComboBox>
+#include <QApplication>
+#include <QCheckBox>
+#include <QRadioButton>
+#include <QFormLayout>
+#include <QLabel>
+#include <QMouseEvent>
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QLineEdit>
@@ -19,11 +25,116 @@
 #include <QResizeEvent>
 #include <QScrollArea>
 #include <QSplitter>
+#include <QStyleOptionButton>
+#include <QTimer>
 #include <QToolButton>
 #include <QVBoxLayout>
 
 namespace
 {
+    // 只作用于明确登记的参数复选框/单选框。保留原文与对象，仅重绘标签并按宽度测量高度。
+    class ParameterChoiceWrap final : public QObject
+    {
+    public:
+        explicit ParameterChoiceWrap(QAbstractButton* button) : QObject(button), m_button(button)
+        {
+            button->setMinimumWidth(0);
+            button->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
+            button->installEventFilter(this);
+            schedule();
+        }
+    protected:
+        bool eventFilter(QObject*, QEvent* event) override
+        {
+            if (!m_button) return false;
+            if (event->type() == QEvent::Paint)
+            {
+                QStyleOptionButton option = styleOption();
+                QPainter painter(m_button);
+                // 指示器继续由主题 QStyle 绘制，三态、禁用、按下、键盘状态不会变成假图标。
+                m_button->style()->drawControl(isRadio() ? QStyle::CE_RadioButton : QStyle::CE_CheckBox,
+                    &option, &painter, m_button);
+                const QRect label = labelRect();
+                const int flags = Qt::AlignVCenter | Qt::AlignLeading | Qt::TextWordWrap
+                    | Qt::TextWrapAnywhere | (m_button->style()->styleHint(QStyle::SH_UnderlineShortcut, &option, m_button)
+                        ? Qt::TextShowMnemonic : Qt::TextHideMnemonic);
+                m_button->style()->drawItemText(&painter, label, flags, option.palette,
+                    m_button->isEnabled(), m_button->text(), QPalette::WindowText);
+                return true;
+            }
+            if (!m_forwarding && (event->type() == QEvent::MouseButtonPress
+                || event->type() == QEvent::MouseButtonRelease || event->type() == QEvent::MouseMove
+                || event->type() == QEvent::MouseButtonDblClick))
+            {
+                auto* mouse = static_cast<QMouseEvent*>(event);
+                if (m_button->rect().contains(mouse->position().toPoint()))
+                {
+                    // 多行正文同样可点击。将行内命中交回原按钮指示器，原生按下/释放/拖出取消仍保留。
+                    const QStyleOptionButton option = styleOption();
+                    const QRect indicator = m_button->style()->subElementRect(isRadio()
+                        ? QStyle::SE_RadioButtonIndicator : QStyle::SE_CheckBoxIndicator, &option, m_button);
+                    const QPointF local = indicator.center();
+                    QMouseEvent forwarded(mouse->type(), local, mouse->scenePosition(), mouse->globalPosition(),
+                        mouse->button(), mouse->buttons(), mouse->modifiers(), mouse->pointingDevice());
+                    forwarded.setTimestamp(mouse->timestamp());
+                    m_forwarding = true;
+                    QPointer<ParameterChoiceWrap> alive(this);
+                    QApplication::sendEvent(m_button, &forwarded);
+                    if (alive) m_forwarding = false;
+                    event->setAccepted(forwarded.isAccepted());
+                    return true;
+                }
+            }
+            if (event->type() == QEvent::Resize || event->type() == QEvent::FontChange
+                || event->type() == QEvent::StyleChange || event->type() == QEvent::LayoutRequest
+                || event->type() == QEvent::Show)
+                schedule();
+            return false;
+        }
+    private:
+        bool isRadio() const { return qobject_cast<QRadioButton*>(m_button.data()) != nullptr; }
+        QStyleOptionButton styleOption() const
+        {
+            QStyleOptionButton option;
+            option.initFrom(m_button);
+            option.icon = m_button->icon();
+            option.iconSize = m_button->iconSize();
+            if (m_button->isDown()) option.state |= QStyle::State_Sunken;
+            else option.state |= QStyle::State_Raised;
+            const auto* check = qobject_cast<QCheckBox*>(m_button.data());
+            if (check && check->checkState() == Qt::PartiallyChecked) option.state |= QStyle::State_NoChange;
+            else option.state |= m_button->isChecked() ? QStyle::State_On : QStyle::State_Off;
+            return option;
+        }
+        QRect labelRect() const
+        {
+            const QStyleOptionButton option = styleOption();
+            const int indicator = m_button->style()->pixelMetric(isRadio()
+                ? QStyle::PM_ExclusiveIndicatorWidth : QStyle::PM_IndicatorWidth, &option, m_button);
+            return m_button->layoutDirection() == Qt::RightToLeft
+                ? m_button->rect().adjusted(0, 3, -indicator - 7, -3)
+                : m_button->rect().adjusted(indicator + 7, 3, 0, -3);
+        }
+        void schedule()
+        {
+            if (m_pending) return;
+            m_pending = true;
+            QTimer::singleShot(0, this, [this]()
+            {
+                m_pending = false;
+                if (!m_button || m_button->width() <= 0) return;
+                const int width = qMax(1, labelRect().width());
+                const int height = m_button->fontMetrics().boundingRect(QRect(0, 0, width, 10000),
+                    Qt::TextWordWrap | Qt::TextWrapAnywhere | Qt::TextHideMnemonic, m_button->text()).height() + 6;
+                const int needed = qMax(28, height);
+                if (m_button->minimumHeight() != needed) m_button->setMinimumHeight(needed);
+            });
+        }
+        QPointer<QAbstractButton> m_button; // 原始业务控件，不复制 checked 或 text 状态。
+        bool m_pending = false;
+        bool m_forwarding = false;
+    };
+
     // 参数框架的色块自身无描边，只在操作区与正文之间留一条低对比度分隔线。
     void bindWorkspaceSurface(QWidget* widget, bool footer = false)
     {
@@ -56,6 +167,15 @@ namespace
             setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
             setMinimumHeight(30);
             connect(this, &QToolButton::toggled, this, [this]() { update(); });
+        }
+        QSize sizeHint() const override
+        {
+            return QSize(200, qMax(30, fontMetrics().height() + 10));
+        }
+        QSize minimumSizeHint() const override
+        {
+            // 标题已有省略与完整 tooltip，不让原生按钮的长文本宽度撑出横向滚动。
+            return QSize(0, qMax(30, fontMetrics().height() + 10));
         }
     protected:
         void paintEvent(QPaintEvent*) override
@@ -100,6 +220,10 @@ namespace
     {
         for (auto* editor : container->findChildren<QPlainTextEdit*>())
         {
+            QFont textFont = editor->font();
+            if (textFont.pixelSize() > 0) textFont.setPixelSize(qMax(14, textFont.pixelSize()));
+            else textFont.setPointSizeF(qMax(10.0, textFont.pointSizeF()));
+            editor->setFont(textFont);
             editor->setFrameShape(QFrame::NoFrame);
             const QPointer<QPlainTextEdit> target(editor);
             ks::ui::BindWidgetTheme(editor, [target]()
@@ -140,6 +264,11 @@ namespace ks::ui
     ParameterWorkspace::ParameterWorkspace(QWidget* parent, int parameterWidth)
         : QWidget(parent), m_parameterWidth(parameterWidth)
     {
+        // 放大正文而保留用户字体家族；Qt 负责 DPI，不改变应用级字号与其他专业视图。
+        QFont body = font();
+        if (body.pixelSize() > 0) body.setPixelSize(qMax(14, body.pixelSize()));
+        else body.setPointSizeF(qMax(10.0, body.pointSizeF()));
+        setFont(body);
         auto* root = new QVBoxLayout(this);
         root->setContentsMargins(0, 0, 0, 0);
         m_splitter = new QSplitter(Qt::Horizontal, this);
@@ -153,14 +282,17 @@ namespace ks::ui
         bindWorkspaceSurface(m_parameterPanel);
         bindWorkspaceSurface(m_resultPanel);
         auto* left = new QVBoxLayout(m_parameterPanel);
-        left->setContentsMargins(1, 1, 1, 1);
+        left->setContentsMargins(16, 16, 16, 16);
         left->setSpacing(0);
         m_scroll = new QScrollArea(m_parameterPanel);
         m_scroll->setWidgetResizable(true);
         m_scroll->setFrameShape(QFrame::NoFrame);
+        m_scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
         auto* form = new QWidget(m_scroll);
+        form->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+        form->setMinimumWidth(0);
         m_parameters = new QVBoxLayout(form);
-        m_parameters->setContentsMargins(14, 10, 14, 14);
+        m_parameters->setContentsMargins(0, 0, 0, 0);
         m_parameters->setSpacing(18);
         m_parameters->setAlignment(Qt::AlignTop);
         m_scroll->setWidget(form);
@@ -169,11 +301,11 @@ namespace ks::ui
         auto* footer = new QWidget(m_parameterPanel);
         bindWorkspaceSurface(footer, true);
         m_actions = new QHBoxLayout(footer);
-        m_actions->setContentsMargins(12, 9, 12, 9);
+        m_actions->setContentsMargins(0, 12, 0, 0);
         m_actions->setSpacing(8);
         left->addWidget(footer);
         m_results = new QVBoxLayout(m_resultPanel);
-        m_results->setContentsMargins(10, 10, 10, 10);
+        m_results->setContentsMargins(16, 16, 16, 16);
         m_results->setSpacing(8);
         m_splitter->setStretchFactor(0, 0);
         m_splitter->setStretchFactor(1, 1);
@@ -205,7 +337,11 @@ namespace ks::ui
         for (auto* section : m_scroll->widget()->findChildren<QGroupBox*>())
         {
             if (section->property("ksword_parameter_section").toBool())
-                section->setSizePolicy(section->sizePolicy().horizontalPolicy(), QSizePolicy::Maximum);
+            {
+                section->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Maximum);
+                if (section->layout())
+                    section->layout()->setContentsMargins(0, section->title().isEmpty() ? 4 : 8, 0, 4);
+            }
         }
         NormalizeToolbarRow(m_actions);
         m_actions->parentWidget()->setVisible(m_actions->count() > 0);
@@ -235,8 +371,26 @@ namespace ks::ui
                 ancestor = ancestor->parentWidget())
                 tableEditor = tableEditor || qobject_cast<QAbstractItemView*>(ancestor);
             if (tableEditor) continue;
+            if (auto* label = qobject_cast<QLabel*>(field))
+            {
+                label->setWordWrap(true);
+                label->setMinimumWidth(0);
+                label->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
+            }
+            else if (qobject_cast<QCheckBox*>(field) || qobject_cast<QRadioButton*>(field))
+            {
+                if (!field->property("ksword_parameter_wrap_choice").toBool())
+                {
+                    field->setProperty("ksword_parameter_wrap_choice", true);
+                    new ParameterChoiceWrap(static_cast<QAbstractButton*>(field));
+                }
+            }
             if (auto* combo = qobject_cast<QComboBox*>(field))
             {
+                combo->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+                combo->setMinimumContentsLength(8);
+                combo->setMinimumWidth(0);
+                combo->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
                 StylePrimaryCombo(combo);
                 StyleStandaloneInput(combo);
             }
@@ -272,6 +426,13 @@ namespace ks::ui
                             KswordTheme::SurfaceMutedColor().name(), KswordTheme::TextDisabledColor().name()));
                 });
             }
+        }
+        for (auto* form : container->findChildren<QFormLayout*>())
+        {
+            if (form->rowWrapPolicy() == QFormLayout::DontWrapRows)
+                form->setRowWrapPolicy(QFormLayout::WrapLongRows);
+            form->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
+            form->setLabelAlignment(Qt::AlignLeft | Qt::AlignVCenter);
         }
     }
 

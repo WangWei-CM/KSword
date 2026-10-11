@@ -1,5 +1,6 @@
 #include "NetworkDock.InternalCommon.h"
 #include "../UI/ToolbarMetrics.h"
+#include "../UI/ParameterWorkspace.h"
 #include "../UI/FlatButtonTheme.h"
 #include "../UI/VisibleTableWidget.h"
 #include "../theme.h"
@@ -13,6 +14,7 @@
 // ============================================================
 
 #include <QDir>
+#include <QFormLayout>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QPainter>
@@ -750,11 +752,13 @@ void NetworkDock::initializeMultiThreadDownloadTab()
 {
     m_multiThreadDownloadPage = new QWidget(this);
     m_multiThreadDownloadLayout = new QVBoxLayout(m_multiThreadDownloadPage);
-    m_multiThreadDownloadLayout->setContentsMargins(6, 6, 6, 6);
-    m_multiThreadDownloadLayout->setSpacing(6);
+    m_multiThreadDownloadLayout->setContentsMargins(0, 0, 0, 0);
+    auto* workspace = new ks::ui::ParameterWorkspace(m_multiThreadDownloadPage, 420); // 下载输入与任务进度分栏。
+    m_multiThreadDownloadLayout->addWidget(workspace);
 
-    m_multiThreadDownloadControlLayout = new QHBoxLayout();
-    m_multiThreadDownloadControlLayout->setSpacing(6);
+    m_multiThreadDownloadControlLayout = workspace->actions();
+    auto* downloadForm = new QFormLayout; // URL/目录占满一行，避免旧工具条挤压路径。
+    downloadForm->setRowWrapPolicy(QFormLayout::WrapAllRows);
 
     QLabel* urlLabel = new QLabel(QStringLiteral("URL:"), m_multiThreadDownloadPage);
     m_multiDownloadUrlEdit = new QLineEdit(m_multiThreadDownloadPage);
@@ -764,8 +768,6 @@ void NetworkDock::initializeMultiThreadDownloadTab()
     QLabel* dirLabel = new QLabel(QStringLiteral("下载目录:"), m_multiThreadDownloadPage);
     m_multiDownloadSaveDirEdit = new QLineEdit(m_multiThreadDownloadPage);
     m_multiDownloadSaveDirEdit->setToolTip(QStringLiteral("默认目录为用户 Downloads。"));
-    m_multiDownloadSaveDirEdit->setMinimumWidth(180);
-    m_multiDownloadSaveDirEdit->setMaximumWidth(360);
 
     const QString defaultDownloadPath = QStandardPaths::writableLocation(QStandardPaths::DownloadLocation);
     m_multiDownloadSaveDirEdit->setText(defaultDownloadPath.isEmpty() ? QDir::homePath() : defaultDownloadPath);
@@ -792,17 +794,16 @@ void NetworkDock::initializeMultiThreadDownloadTab()
     m_multiDownloadStatusLabel->setWordWrap(true);
     m_multiDownloadStatusLabel->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
 
-    m_multiThreadDownloadControlLayout->addWidget(urlLabel);
-    m_multiThreadDownloadControlLayout->addWidget(m_multiDownloadUrlEdit, 1);
-    m_multiThreadDownloadControlLayout->addWidget(dirLabel);
-    m_multiThreadDownloadControlLayout->addWidget(m_multiDownloadSaveDirEdit);
-    m_multiThreadDownloadControlLayout->addWidget(threadLabel);
-    m_multiThreadDownloadControlLayout->addWidget(m_multiDownloadThreadCountSpin);
-    m_multiThreadDownloadControlLayout->addWidget(m_multiDownloadBrowseDirButton);
+    auto* directoryRow = new QHBoxLayout; // 目录选择按钮继续紧邻路径。
+    directoryRow->addWidget(m_multiDownloadSaveDirEdit, 1);
+    directoryRow->addWidget(m_multiDownloadBrowseDirButton);
+    downloadForm->addRow(urlLabel, m_multiDownloadUrlEdit);
+    downloadForm->addRow(dirLabel, directoryRow);
+    downloadForm->addRow(threadLabel, m_multiDownloadThreadCountSpin);
+    workspace->parameters()->addLayout(downloadForm);
     m_multiThreadDownloadControlLayout->addWidget(m_multiDownloadStartButton);
-    m_multiThreadDownloadControlLayout->addWidget(m_multiDownloadStatusLabel, 1);
-    m_multiThreadDownloadLayout->addLayout(m_multiThreadDownloadControlLayout);
-    ks::ui::NormalizeToolbarRow(m_multiThreadDownloadControlLayout);
+    m_multiThreadDownloadControlLayout->addStretch();
+    workspace->results()->addWidget(m_multiDownloadStatusLabel);
 
     // 下载捕获设置栏：
     // - 提供“剪贴板自动捕获下载链接”开关；
@@ -838,11 +839,11 @@ void NetworkDock::initializeMultiThreadDownloadTab()
         QStringLiteral("color:%1;").arg(KswordTheme::TextSecondaryHex()));
 
     captureSettingsLayout->addWidget(m_multiDownloadAutoCaptureClipboardCheck, 0, 0, 1, 3);
-    captureSettingsLayout->addWidget(suffixLabel, 1, 0);
-    captureSettingsLayout->addWidget(m_multiDownloadCaptureSuffixEdit, 1, 1);
-    captureSettingsLayout->addWidget(m_multiDownloadSaveCaptureSettingsButton, 1, 2);
-    captureSettingsLayout->addWidget(captureHintLabel, 2, 0, 1, 3);
-    m_multiThreadDownloadLayout->addWidget(captureSettingsGroup);
+    captureSettingsLayout->addWidget(suffixLabel, 1, 0, 1, 3);
+    captureSettingsLayout->addWidget(m_multiDownloadCaptureSuffixEdit, 2, 0, 1, 2);
+    captureSettingsLayout->addWidget(m_multiDownloadSaveCaptureSettingsButton, 2, 2);
+    captureSettingsLayout->addWidget(captureHintLabel, 3, 0, 1, 3);
+    workspace->parameters()->addWidget(ks::ui::FoldParameterSection(captureSettingsGroup));
 
     m_multiDownloadTaskTable = new ks::ui::VisibleTableWidget(m_multiThreadDownloadPage);
     // 下载任务由单元格动作管理，只保留紧凑复制和导出。
@@ -866,19 +867,19 @@ void NetworkDock::initializeMultiThreadDownloadTab()
     m_multiDownloadTaskTable->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
     // 横向滚动条不强制关闭：默认由全局列宽自适应压入 viewport，用户拖宽列后按需出现。
     installCopyCurrentRowMenu(m_multiDownloadTaskTable);
-    m_multiThreadDownloadLayout->addWidget(m_multiDownloadTaskTable, 1);
+    workspace->results()->addWidget(m_multiDownloadTaskTable, 1);
 
     QLabel* progressTitleLabel = new QLabel(
         QStringLiteral("当前选中任务总进度（未完成时会断成多节）："),
         m_multiThreadDownloadPage);
     progressTitleLabel->setWordWrap(true);
-    m_multiThreadDownloadLayout->addWidget(progressTitleLabel);
+    workspace->results()->addWidget(progressTitleLabel);
 
     m_multiDownloadSegmentBar = new MultiThreadDownloadSegmentBarWidget(m_multiThreadDownloadPage);
-    m_multiThreadDownloadLayout->addWidget(m_multiDownloadSegmentBar);
+    workspace->results()->addWidget(m_multiDownloadSegmentBar);
 
     m_multiDownloadTotalProgressLabel = new QLabel(QStringLiteral("总进度：0.00%"), m_multiThreadDownloadPage);
-    m_multiThreadDownloadLayout->addWidget(m_multiDownloadTotalProgressLabel);
+    workspace->results()->addWidget(m_multiDownloadTotalProgressLabel);
 
     m_multiDownloadSegmentTable = new ks::ui::VisibleTableWidget(m_multiThreadDownloadPage);
     // 分段是所选任务的附属进度，快照/对比不适用且挤占进度空间。
@@ -897,7 +898,8 @@ void NetworkDock::initializeMultiThreadDownloadTab()
     m_multiDownloadSegmentTable->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
     // 横向滚动条不强制关闭：默认由全局列宽自适应压入 viewport，用户拖宽列后按需出现。
     installCopyCurrentRowMenu(m_multiDownloadSegmentTable);
-    m_multiThreadDownloadLayout->addWidget(m_multiDownloadSegmentTable, 1);
+    workspace->results()->addWidget(m_multiDownloadSegmentTable, 1);
+    workspace->finish();
 
     m_sideTabWidget->addTab(
         m_multiThreadDownloadPage,

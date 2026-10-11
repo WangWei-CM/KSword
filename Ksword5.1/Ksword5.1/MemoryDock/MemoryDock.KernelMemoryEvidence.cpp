@@ -1,4 +1,5 @@
 #include "MemoryDock.Internal.h"
+#include "../UI/ParameterWorkspace.h"
 #include "../UI/ToolbarMetrics.h"
 #include "../UI/PageControlStyle.h"
 #include "../UI/PrimaryPageStyle.h"
@@ -430,26 +431,17 @@ void MemoryDock::initializeKernelMemoryEvidenceTab()
     // 处理：创建内核内存证据只读页面。非模块执行范围扫描默认关闭，必须填写范围后显式启用。
     // 返回：无。
     m_tabKernelMemoryEvidence = new QWidget(m_tabWidget);
-    // 页面自带内部滚动壳：内容放不下时在页内滚动，不把 Dock 撑高。页面指针身份不变。
-    QWidget* const tabContent = ks::ui::EnablePageInnerScroll(m_tabKernelMemoryEvidence);
-    QVBoxLayout* tabLayout = new QVBoxLayout(tabContent);
+    // 参数独立滚动，刷新固定在参数栏底部，表格和详情持续保留结果区高度。
+    QVBoxLayout* tabLayout = new QVBoxLayout(m_tabKernelMemoryEvidence);
     tabLayout->setContentsMargins(6, 6, 6, 6);
     tabLayout->setSpacing(6);
+    auto* workspace = new ks::ui::ParameterWorkspace(m_tabKernelMemoryEvidence, 420);
+    tabLayout->addWidget(workspace);
 
-    // 第一层动作行：只保留“刷新 + 过滤 + 状态”，扫描参数整体下沉到第二层分组框，
-    // 否则 8 个控件挤在一条工具条里，窄窗口下输入框会被压到只剩几个像素。
-    QHBoxLayout* toolLayout = new QHBoxLayout();
-    toolLayout->setContentsMargins(0, 0, 0, 0);
-    toolLayout->setSpacing(8);
-
+    // 执行动作由工作区固定承载，本地筛选仍只改变当前结果视图。
     m_kernelMemoryEvidenceRefreshButton = new QPushButton(QIcon(QStringLiteral(":/Icon/process_refresh.svg")), QStringLiteral("刷新证据"), m_tabKernelMemoryEvidence);
     m_kernelMemoryEvidenceRefreshButton->setToolTip(QStringLiteral("刷新内核内存证据"));
     m_kernelMemoryEvidenceRefreshButton->setStyleSheet(buildBlueButtonStyle());
-
-    // 竖线分隔符把“刷新”这个写查询动作与右侧的本地过滤在视觉上分开。
-    QFrame* evidenceActionSeparator = new QFrame(m_tabKernelMemoryEvidence);
-    evidenceActionSeparator->setFrameShape(QFrame::VLine);
-    evidenceActionSeparator->setFrameShadow(QFrame::Sunken);
 
     m_kernelMemoryEvidenceFilterEdit = new QLineEdit(m_tabKernelMemoryEvidence);
     m_kernelMemoryEvidenceFilterEdit->setClearButtonEnabled(true);
@@ -462,17 +454,15 @@ void MemoryDock::initializeKernelMemoryEvidenceTab()
     m_kernelMemoryEvidenceStatusLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
     m_kernelMemoryEvidenceStatusLabel->setStyleSheet(statusStyle(KswordTheme::TextSecondaryHex()));
 
-    toolLayout->addWidget(m_kernelMemoryEvidenceRefreshButton);
-    toolLayout->addWidget(evidenceActionSeparator);
-    toolLayout->addWidget(m_kernelMemoryEvidenceFilterEdit, 1);
-    toolLayout->addWidget(m_kernelMemoryEvidenceStatusLabel);
-    ks::ui::NormalizeToolbarRow(toolLayout);
-    tabLayout->addLayout(toolLayout);
+    workspace->actions()->addWidget(m_kernelMemoryEvidenceRefreshButton);
+    workspace->actions()->addStretch();
+    m_kernelMemoryEvidenceStatusLabel->setWordWrap(true);
+    workspace->results()->addWidget(m_kernelMemoryEvidenceStatusLabel);
 
-    // 第二层扫描参数分组：两个开关一行，三组“标签 + 输入”一行，网格保证标签与输入始终成对。
+    // 扫描参数按单列分组，开关和非模块扫描范围保留完整的显式配置。
     QGroupBox* evidenceScanParamGroup = new QGroupBox(QStringLiteral("扫描参数"), m_tabKernelMemoryEvidence);
-    // 采样参数以完整轻边界单独成组，查询结果保留原伸缩空间。
-    ks::ui::StylePrimaryGroup(evidenceScanParamGroup);
+    // 参数标题和分隔线由共享框架管理，查询结果保留原伸缩空间。
+    ks::ui::StyleParameterSection(evidenceScanParamGroup);
     QGridLayout* evidenceScanParamLayout = new QGridLayout(evidenceScanParamGroup);
     evidenceScanParamLayout->setContentsMargins(8, 6, 8, 6);
     evidenceScanParamLayout->setHorizontalSpacing(8);
@@ -503,20 +493,21 @@ void MemoryDock::initializeKernelMemoryEvidenceTab()
     m_kernelMemoryEvidenceMaxRowsSpin->setValue(static_cast<int>(KSWORD_ARK_MEMORY_EVIDENCE_DEFAULT_MAX_ROWS));
     m_kernelMemoryEvidenceMaxRowsSpin->setToolTip(QStringLiteral("最大返回行数"));
 
-    // 第 0 行两个开关各占两列，第 1 行三组标签/输入，末列留伸缩位吸收窗口多余宽度。
-    evidenceScanParamLayout->addWidget(m_kernelMemoryEvidenceRiskOnlyCheck, 0, 0, 1, 2);
-    evidenceScanParamLayout->addWidget(m_kernelMemoryEvidenceIncludeNonModuleCheck, 0, 2, 1, 4);
-    evidenceScanParamLayout->addWidget(new QLabel(QStringLiteral("起始 VA"), evidenceScanParamGroup), 1, 0);
-    evidenceScanParamLayout->addWidget(m_kernelMemoryEvidenceStartEdit, 1, 1);
-    evidenceScanParamLayout->addWidget(new QLabel(QStringLiteral("结束 VA"), evidenceScanParamGroup), 1, 2);
-    evidenceScanParamLayout->addWidget(m_kernelMemoryEvidenceEndEdit, 1, 3);
-    evidenceScanParamLayout->addWidget(new QLabel(QStringLiteral("最大行数"), evidenceScanParamGroup), 1, 4);
-    evidenceScanParamLayout->addWidget(m_kernelMemoryEvidenceMaxRowsSpin, 1, 5);
-    evidenceScanParamLayout->setColumnStretch(6, 1);
-    tabLayout->addWidget(evidenceScanParamGroup);
+    // 每组地址独占一行，开关始终展开；过滤输入保留原占位说明和业务连接。
+    evidenceScanParamLayout->addWidget(m_kernelMemoryEvidenceRiskOnlyCheck, 0, 0);
+    evidenceScanParamLayout->addWidget(m_kernelMemoryEvidenceIncludeNonModuleCheck, 1, 0);
+    evidenceScanParamLayout->addWidget(new QLabel(QStringLiteral("起始 VA"), evidenceScanParamGroup), 2, 0);
+    evidenceScanParamLayout->addWidget(m_kernelMemoryEvidenceStartEdit, 3, 0);
+    evidenceScanParamLayout->addWidget(new QLabel(QStringLiteral("结束 VA"), evidenceScanParamGroup), 4, 0);
+    evidenceScanParamLayout->addWidget(m_kernelMemoryEvidenceEndEdit, 5, 0);
+    evidenceScanParamLayout->addWidget(new QLabel(QStringLiteral("最大行数"), evidenceScanParamGroup), 6, 0);
+    evidenceScanParamLayout->addWidget(m_kernelMemoryEvidenceMaxRowsSpin, 7, 0);
+    evidenceScanParamLayout->addWidget(m_kernelMemoryEvidenceFilterEdit, 8, 0);
+    evidenceScanParamLayout->setColumnStretch(0, 1);
+    workspace->parameters()->addWidget(evidenceScanParamGroup);
 
     QSplitter* splitter = new QSplitter(Qt::Vertical, m_tabKernelMemoryEvidence);
-    tabLayout->addWidget(splitter, 1);
+    workspace->results()->addWidget(splitter, 1);
 
     m_kernelMemoryEvidenceTable = new ks::ui::VisibleTableWidget(splitter);
     // Hash/权限与风险变更有前后对比价值，保留完整操作栏。
@@ -554,6 +545,7 @@ void MemoryDock::initializeKernelMemoryEvidenceTab()
     splitter->setStretchFactor(0, 3);
     splitter->setStretchFactor(1, 2);
 
+    workspace->finish();
     m_tabWidget->addTab(m_tabKernelMemoryEvidence, QStringLiteral("内核内存证据"));
 }
 

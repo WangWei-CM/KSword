@@ -4,6 +4,9 @@
 #include "../UI/VisibleTableWidget.h"
 #include "../UI/ToolbarMetrics.h"
 #include "../UI/PageControlStyle.h"
+#include "../UI/ParameterWorkspace.h"
+#include <QGridLayout>
+#include <QGroupBox>
 #include "../UI/ThemeStatusRole.h"
 #include "../theme.h"
 
@@ -62,30 +65,18 @@ namespace
     }
 
     // createPanelFrame：
-    // - 作用：创建统一的浅边框面板，减少顶层布局中裸控件带来的视觉割裂；
+    // - 作用：创建无描边配置容器，由参数工作区统一提供底面；
     // - 调用：顶部进程选择、左侧 Agent、右侧 Fake Success 三块配置区域复用；
-    // - 返回：已设置 StyledPanel 的 QFrame，父对象由调用方传入。
+    // - 返回：不绘制额外外框的 QFrame，父对象由调用方传入。
     QFrame* createPanelFrame(QWidget* parentWidget)
     {
         QFrame* const framePointer = new QFrame(parentWidget);
-        framePointer->setFrameShape(QFrame::StyledPanel);
+        framePointer->setFrameShape(QFrame::NoFrame);
         framePointer->setFrameShadow(QFrame::Plain);
         return framePointer;
     }
 
-    // createSectionTitle：
-    // - 作用：生成配置区标题标签；
-    // - 调用：Agent 会话和 Fake Success 面板顶部；
-    // - 返回：带统一强调色样式的 QLabel。
-    QLabel* createSectionTitle(
-        const QString& titleText,
-        QWidget* parentWidget,
-        const QString& styleSheetText)
-    {
-        QLabel* const titleLabel = new QLabel(titleText, parentWidget);
-        titleLabel->setStyleSheet(styleSheetText);
-        return titleLabel;
-    }
+
 }
 
 void WinAPIDock::initializeUi()
@@ -94,31 +85,13 @@ void WinAPIDock::initializeUi()
     m_rootLayout->setContentsMargins(8, 8, 8, 8);
     m_rootLayout->setSpacing(8);
 
-    QFrame* const sessionCollapseFrame = createPanelFrame(this);
-    QVBoxLayout* const sessionCollapseLayout = new QVBoxLayout(sessionCollapseFrame);
-    sessionCollapseLayout->setContentsMargins(6, 6, 6, 6);
-    sessionCollapseLayout->setSpacing(8);
-
-    m_sessionCollapseButton = new QToolButton(sessionCollapseFrame);
-    m_sessionCollapseButton->setCheckable(true);
-    m_sessionCollapseButton->setChecked(true);
-    m_sessionCollapseButton->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
-    m_sessionCollapseButton->setArrowType(Qt::DownArrow);
-    m_sessionCollapseButton->setText(QStringLiteral("WinAPI Monitor 配置（目标进程 / Agent / Fake Success）"));
-    m_sessionCollapseButton->setToolTip(QStringLiteral("展开或折叠上方所有配置；结果表始终保留在最下方。"));
-    sessionCollapseLayout->addWidget(m_sessionCollapseButton, 0);
-    ks::ui::NormalizeToolbarControl(m_sessionCollapseButton);
-
-    m_sessionCollapseContent = new QWidget(sessionCollapseFrame);
-    QVBoxLayout* const sessionCollapseContentLayout = new QVBoxLayout(m_sessionCollapseContent);
-    sessionCollapseContentLayout->setContentsMargins(0, 0, 0, 0);
-    sessionCollapseContentLayout->setSpacing(8);
-    sessionCollapseLayout->addWidget(m_sessionCollapseContent, 0);
-    m_rootLayout->addWidget(sessionCollapseFrame, 0);
+    // 配置独立滚动，生命周期动作固定，事件结果不再被多列配置区挤压。
+    auto* workspace = new ks::ui::ParameterWorkspace(this, 500);
+    m_rootLayout->addWidget(workspace, 1);
 
     // 顶部进程选择：用户先输入进程名/PID，再从带图标的下拉候选中选中目标。
-    m_processPanel = createPanelFrame(m_sessionCollapseContent);
-    QHBoxLayout* const processPanelLayout = new QHBoxLayout(m_processPanel);
+    m_processPanel = createPanelFrame(workspace);
+    QGridLayout* const processPanelLayout = new QGridLayout(m_processPanel);
     processPanelLayout->setContentsMargins(8, 8, 8, 8);
     processPanelLayout->setSpacing(8);
 
@@ -136,9 +109,9 @@ void WinAPIDock::initializeUi()
     m_processCombo->setEditable(true);
     m_processCombo->setInsertPolicy(QComboBox::NoInsert);
     m_processCombo->setMaxVisibleItems(24);
-    m_processCombo->setMinimumWidth(360);
+    m_processCombo->setMinimumWidth(0);
     m_processCombo->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
-    m_processCombo->setMinimumContentsLength(36);
+    m_processCombo->setMinimumContentsLength(18);
     m_processCombo->setStyleSheet(blueInputStyle());
     m_processCombo->setToolTip(QStringLiteral("输入进程名、PID 或路径片段后选择目标。未选择候选时，也可直接输入数字 PID。"));
     if (m_processCombo->lineEdit() != nullptr)
@@ -163,34 +136,25 @@ void WinAPIDock::initializeUi()
     m_processStatusLabel = new QLabel(QStringLiteral("● 输入进程名或刷新候选列表"), m_processPanel);
     ks::ui::ApplyStatusRole(m_processStatusLabel, ks::ui::StatusRole::Idle);
 
-    processPanelLayout->addWidget(processTitleLabel, 0);
-    processPanelLayout->addWidget(m_processIconLabel, 0);
-    processPanelLayout->addWidget(m_processCombo, 1);
-    processPanelLayout->addWidget(m_processRefreshButton, 0);
-    processPanelLayout->addWidget(m_processStatusLabel, 0);
+    processPanelLayout->addWidget(processTitleLabel, 0, 0, 1, 3);
+    processPanelLayout->addWidget(m_processIconLabel, 1, 0);
+    processPanelLayout->addWidget(m_processCombo, 1, 1);
+    processPanelLayout->addWidget(m_processRefreshButton, 1, 2);
+    m_processStatusLabel->setWordWrap(true);
+    processPanelLayout->addWidget(m_processStatusLabel, 2, 0, 1, 3);
+    processPanelLayout->setColumnStretch(1, 1);
     // 图标标签保留 24px，不作为按钮统一高度的目标。
     ks::ui::NormalizeToolbarControl(m_processCombo);
     ks::ui::NormalizeToolbarControl(m_processRefreshButton);
-    sessionCollapseContentLayout->addWidget(m_processPanel, 0);
+    workspace->parameters()->addWidget(m_processPanel);
 
-    // 下方左右布局：左侧是普通 WinAPI Agent 会话，右侧是 Fake Success 规则。
-    m_topSplitter = new QSplitter(Qt::Horizontal, m_sessionCollapseContent);
-    m_topSplitter->setChildrenCollapsible(false);
-    sessionCollapseContentLayout->addWidget(m_topSplitter, 0);
-
-    m_sessionPanel = createPanelFrame(nullptr);
-    QVBoxLayout* const sessionPanelLayout = new QVBoxLayout(m_sessionPanel);
-    sessionPanelLayout->setContentsMargins(8, 8, 8, 8);
+    auto* sessionGroup = new QGroupBox(QStringLiteral("WinAPI Agent 会话"), workspace);
+    m_sessionPanel = sessionGroup;
+    auto* sessionPanelLayout = new QVBoxLayout(sessionGroup);
+    sessionPanelLayout->setContentsMargins(0, 0, 0, 0);
     sessionPanelLayout->setSpacing(8);
 
-    sessionPanelLayout->addWidget(
-        createSectionTitle(
-            QStringLiteral("WinAPI Agent 会话"),
-            m_sessionPanel,
-            QStringLiteral("color:%1;font-weight:600;").arg(KswordTheme::PrimaryBlueHex)),
-        0);
-
-    QHBoxLayout* const sessionConfigurationColumnsLayout = new QHBoxLayout();
+    QVBoxLayout* const sessionConfigurationColumnsLayout = new QVBoxLayout();
     sessionConfigurationColumnsLayout->setContentsMargins(0, 0, 0, 0);
     sessionConfigurationColumnsLayout->setSpacing(8);
 
@@ -203,6 +167,7 @@ void WinAPIDock::initializeUi()
     sessionFormLayout->setContentsMargins(0, 0, 0, 0);
     sessionFormLayout->setHorizontalSpacing(8);
     sessionFormLayout->setVerticalSpacing(8);
+    sessionFormLayout->setRowWrapPolicy(QFormLayout::WrapLongRows);
 
     QWidget* const dllPathRowWidget = new QWidget(sessionConfigurationLeftColumn);
     QHBoxLayout* const dllPathLayout = new QHBoxLayout(dllPathRowWidget);
@@ -248,13 +213,12 @@ void WinAPIDock::initializeUi()
     m_autoInjectChildCheck = new QCheckBox(QStringLiteral("自动注入子进程"), categoryFrame);
     m_rawFallbackCheck = new QCheckBox(QStringLiteral("Raw 兜底 Hook（强类型优先）"), categoryFrame);
     m_rawDefaultDenyListCheck = new QCheckBox(QStringLiteral("启用默认高频/高风险黑名单"), categoryFrame);
-    QFrame* const rawConfigurationFrame = createPanelFrame(m_sessionPanel);
+    auto* rawConfigurationFrame = new QGroupBox(QStringLiteral("Raw 兜底配置"), m_sessionPanel);
     QVBoxLayout* const rawConfigurationLayout = new QVBoxLayout(rawConfigurationFrame);
     rawConfigurationLayout->setContentsMargins(8, 8, 8, 8);
     rawConfigurationLayout->setSpacing(6);
 
-    QLabel* const rawConfigurationTitleLabel = new QLabel(QStringLiteral("Raw 兜底配置"), rawConfigurationFrame);
-    rawConfigurationLayout->addWidget(rawConfigurationTitleLabel, 0);
+
 
     auto* moduleListEditor = new CodeTextEdit(rawConfigurationFrame);
     auto* denyListEditor = new CodeTextEdit(rawConfigurationFrame);
@@ -312,13 +276,13 @@ void WinAPIDock::initializeUi()
     rawConfigurationLayout->addWidget(m_rawModuleListEdit, 0);
     rawConfigurationLayout->addWidget(new QLabel(QStringLiteral("Raw 额外黑名单（exact / prefix*）"), rawConfigurationFrame), 0);
     rawConfigurationLayout->addWidget(m_rawDenyListEdit, 0);
-    rawConfigurationLayout->addStretch(1);
 
-    sessionConfigurationColumnsLayout->addWidget(sessionConfigurationLeftColumn, 1);
-    sessionConfigurationColumnsLayout->addWidget(rawConfigurationFrame, 1);
+
+    sessionConfigurationColumnsLayout->addWidget(sessionConfigurationLeftColumn);
+    sessionConfigurationColumnsLayout->addWidget(ks::ui::FoldParameterSection(rawConfigurationFrame));
     sessionPanelLayout->addLayout(sessionConfigurationColumnsLayout);
 
-    QHBoxLayout* const sessionButtonLayout = new QHBoxLayout();
+    QHBoxLayout* const sessionButtonLayout = workspace->actions();
     sessionButtonLayout->setSpacing(6);
 
     m_startButton = new QPushButton(m_sessionPanel);
@@ -359,33 +323,28 @@ void WinAPIDock::initializeUi()
     sessionButtonLayout->addWidget(m_startButton, 0);
     sessionButtonLayout->addWidget(m_stopButton, 0);
     sessionButtonLayout->addWidget(m_terminateHookButton, 0);
-    sessionButtonLayout->addWidget(m_exportButton, 0);
-    sessionButtonLayout->addWidget(m_clearEventButton, 0);
+
     sessionButtonLayout->addStretch(1);
     ks::ui::NormalizeToolbarRow(sessionButtonLayout);
-    sessionPanelLayout->addLayout(sessionButtonLayout);
+
 
     m_sessionStatusLabel = new QLabel(QStringLiteral("● 空闲"), m_sessionPanel);
     ks::ui::ApplyStatusRole(m_sessionStatusLabel, ks::ui::StatusRole::Idle);
-    sessionPanelLayout->addWidget(m_sessionStatusLabel, 0);
-    sessionPanelLayout->addStretch(1);
+    m_sessionStatusLabel->setWordWrap(true);
+    workspace->results()->addWidget(m_sessionStatusLabel);
+    ks::ui::StyleParameterSection(sessionGroup);
+    workspace->parameters()->addWidget(sessionGroup);
 
-    QWidget* const fakeSuccessPanel = createPanelFrame(nullptr);
+    auto* fakeSuccessPanel = new QGroupBox(QStringLiteral("Fake Success（命中 API 直接伪返回）"), workspace);
     QVBoxLayout* const fakeSuccessLayout = new QVBoxLayout(fakeSuccessPanel);
     fakeSuccessLayout->setContentsMargins(8, 8, 8, 8);
     fakeSuccessLayout->setSpacing(6);
-
-    fakeSuccessLayout->addWidget(
-        createSectionTitle(
-            QStringLiteral("Fake Success（命中 API 直接伪返回）"),
-            fakeSuccessPanel,
-            QStringLiteral("color:%1;font-weight:600;").arg(KswordTheme::PrimaryBlueHex)),
-        0);
 
     QFormLayout* const fakeFormLayout = new QFormLayout();
     fakeFormLayout->setContentsMargins(0, 0, 0, 0);
     fakeFormLayout->setHorizontalSpacing(8);
     fakeFormLayout->setVerticalSpacing(6);
+    fakeFormLayout->setRowWrapPolicy(QFormLayout::WrapLongRows);
 
     m_fakeModuleEdit = new QLineEdit(fakeSuccessPanel);
     m_fakeApiEdit = new QLineEdit(fakeSuccessPanel);
@@ -442,7 +401,7 @@ void WinAPIDock::initializeUi()
     fakeSuccessLayout->addLayout(fakeFormLayout);
     fakeSuccessLayout->addWidget(m_fakeRawFallbackCheck, 0);
 
-    QHBoxLayout* const fakeButtonLayout = new QHBoxLayout();
+    auto* fakeButtonLayout = new QGridLayout();
     fakeButtonLayout->setContentsMargins(0, 0, 0, 0);
     fakeButtonLayout->setSpacing(6);
     m_fakeAddRuleButton = new QPushButton(QStringLiteral("添加规则"), fakeSuccessPanel);
@@ -457,12 +416,13 @@ void WinAPIDock::initializeUi()
     m_fakeRemoveRuleButton->setStyleSheet(blueButtonStyle());
     m_fakeApplyRuleButton->setStyleSheet(blueButtonStyle());
     m_fakeStopRuleButton->setStyleSheet(blueButtonStyle());
-    fakeButtonLayout->addWidget(m_fakeAddRuleButton, 0);
-    fakeButtonLayout->addWidget(m_fakeRemoveRuleButton, 0);
-    fakeButtonLayout->addWidget(m_fakeApplyRuleButton, 0);
-    fakeButtonLayout->addWidget(m_fakeStopRuleButton, 0);
-    fakeButtonLayout->addStretch(1);
-    ks::ui::NormalizeToolbarRow(fakeButtonLayout);
+    // 规则动作按两列排列，保留真实确认/停止入口，不压缩成四个挤在一起的按钮。
+    fakeButtonLayout->addWidget(m_fakeAddRuleButton, 0, 0);
+    fakeButtonLayout->addWidget(m_fakeRemoveRuleButton, 0, 1);
+    fakeButtonLayout->addWidget(m_fakeApplyRuleButton, 1, 0);
+    fakeButtonLayout->addWidget(m_fakeStopRuleButton, 1, 1);
+    for (QPushButton* button : { m_fakeAddRuleButton, m_fakeRemoveRuleButton, m_fakeApplyRuleButton, m_fakeStopRuleButton })
+        ks::ui::NormalizeToolbarControl(button);
     fakeSuccessLayout->addLayout(fakeButtonLayout);
 
     m_fakeRuleTable = new ks::ui::VisibleTableWidget(fakeSuccessPanel);
@@ -500,10 +460,7 @@ void WinAPIDock::initializeUi()
     fakeSuccessLayout->addWidget(m_fakeRuleStatusLabel, 0);
     fakeSuccessLayout->addStretch(1);
 
-    m_topSplitter->addWidget(m_sessionPanel);
-    m_topSplitter->addWidget(fakeSuccessPanel);
-    m_topSplitter->setStretchFactor(0, 1);
-    m_topSplitter->setStretchFactor(1, 1);
+    workspace->parameters()->addWidget(ks::ui::FoldParameterSection(fakeSuccessPanel));
 
     m_filterPanel = new QWidget(this);
     QHBoxLayout* const filterLayout = new QHBoxLayout(m_filterPanel);
@@ -534,7 +491,9 @@ void WinAPIDock::initializeUi()
     filterLayout->addWidget(m_eventKeepBottomCheck, 0);
     filterLayout->addWidget(m_eventFilterStatusLabel, 0);
     ks::ui::NormalizeToolbarRow(filterLayout);
-    m_rootLayout->addWidget(m_filterPanel, 0);
+    filterLayout->addWidget(m_exportButton);
+    filterLayout->addWidget(m_clearEventButton);
+    workspace->results()->addWidget(m_filterPanel);
 
     m_eventTable = new ks::ui::VisibleTableWidget(this);
     ks::ui::SetTableActionBarMode(m_eventTable, ks::ui::TableActionBarMode::Full);
@@ -608,7 +567,8 @@ void WinAPIDock::initializeUi()
     m_coverageTable->setColumnWidth(5, 140);
     coverageLayout->addWidget(m_coverageTable, 1);
     m_resultTabs->addTab(coveragePanel, QStringLiteral("API 覆盖"));
-    m_rootLayout->addWidget(m_resultTabs, 1);
+    workspace->results()->addWidget(m_resultTabs, 1);
+    workspace->finish();
     connect(m_resultTabs, &QTabWidget::currentChanged, this, [this](int index) { if (index == 1 && m_coverageDirty) updateCoverageView(); });
     connect(m_coveragePidCombo, &QComboBox::currentIndexChanged, this, [this]() { updateCoverageView(); });
     connect(m_coverageFilterEdit, &QLineEdit::textChanged, this, [this]() { updateCoverageView(); });
@@ -616,14 +576,5 @@ void WinAPIDock::initializeUi()
     m_uiFlushTimer = new QTimer(this);
     m_uiFlushTimer->setInterval(120);
 
-    connect(m_sessionCollapseButton, &QToolButton::toggled, this, [this](const bool checked) {
-        if (m_sessionCollapseContent != nullptr)
-        {
-            m_sessionCollapseContent->setVisible(checked);
-        }
-        if (m_sessionCollapseButton != nullptr)
-        {
-            m_sessionCollapseButton->setArrowType(checked ? Qt::DownArrow : Qt::RightArrow);
-        }
-    });
+
 }

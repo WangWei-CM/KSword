@@ -2,6 +2,7 @@
 #include "../UI/ToolbarMetrics.h"
 #include "../UI/PrimaryPageStyle.h"
 #include "../UI/FlatButtonTheme.h"
+#include "../UI/ParameterWorkspace.h"
 
 // ============================================================
 // FileDock.IrpBuilder.cpp
@@ -401,6 +402,9 @@ void FileDock::initializeIrpBuilderPage()
     QVBoxLayout* pageLayout = new QVBoxLayout(m_irpBuilderPage);
     pageLayout->setContentsMargins(6, 6, 6, 6);
     pageLayout->setSpacing(6);
+    // 请求参数独立滚动；发送动作固定，右侧回执不再被长表单推走。
+    auto* workspace = new ks::ui::ParameterWorkspace(m_irpBuilderPage, 480);
+    pageLayout->addWidget(workspace);
 
     const QString inputStyle = irpBuilderInputStyle();
     const QString buttonStyle = irpBuilderButtonStyle();
@@ -409,8 +413,7 @@ void FileDock::initializeIrpBuilderPage()
     QGroupBox* targetGroup = new QGroupBox(
         QStringLiteral("目标与请求"),
         m_irpBuilderPage);
-    // 请求目标、参数和标志是三个独立输入区，保留轻边界而不增加额外包层。
-    ks::ui::StylePrimaryGroup(targetGroup);
+    ks::ui::StyleParameterSection(targetGroup);
     QGridLayout* targetLayout = new QGridLayout(targetGroup);
     targetLayout->setContentsMargins(8, 8, 8, 8);
     targetLayout->setHorizontalSpacing(8);
@@ -497,33 +500,31 @@ void FileDock::initializeIrpBuilderPage()
     m_irpTimeoutEdit->setToolTip(QStringLiteral(
         "等待完成的毫秒数，上限 60000；超时后 R0 会取消 IRP 并等待其排空。"));
 
-    int targetRow = 0;
-    targetLayout->addWidget(new QLabel(QStringLiteral("常用操作:"), targetGroup), targetRow, 0);
-    targetLayout->addWidget(m_irpOperationPresetCombo, targetRow, 1, 1, 5);
-    ++targetRow;
-    targetLayout->addWidget(new QLabel(QStringLiteral("目标路径:"), targetGroup), targetRow, 0);
-    targetLayout->addWidget(m_irpPathEdit, targetRow, 1, 1, 4);
-    targetLayout->addWidget(browseButton, targetRow, 5);
-    ++targetRow;
-    targetLayout->addWidget(new QLabel(QStringLiteral("MajorFunction:"), targetGroup), targetRow, 0);
-    targetLayout->addWidget(m_irpMajorCombo, targetRow, 1, 1, 2);
-    targetLayout->addWidget(new QLabel(QStringLiteral("MinorFunction:"), targetGroup), targetRow, 3);
-    targetLayout->addWidget(m_irpMinorEdit, targetRow, 4, 1, 2);
-    ++targetRow;
-    targetLayout->addWidget(new QLabel(QStringLiteral("目标栈层:"), targetGroup), targetRow, 0);
-    targetLayout->addWidget(m_irpLayerCombo, targetRow, 1, 1, 2);
-    targetLayout->addWidget(new QLabel(QStringLiteral("超时(ms):"), targetGroup), targetRow, 3);
-    targetLayout->addWidget(m_irpTimeoutEdit, targetRow, 4, 1, 2);
-    targetLayout->setColumnStretch(1, 1);
-    targetLayout->setColumnStretch(4, 1);
-    pageLayout->addWidget(targetGroup, 0);
+    // 长路径和下拉独占整行，原四/六列请求头实际重排为一列字段。
+    targetLayout->addWidget(new QLabel(QStringLiteral("常用操作:"), targetGroup), 0, 0, 1, 2);
+    targetLayout->addWidget(m_irpOperationPresetCombo, 1, 0, 1, 2);
+    targetLayout->addWidget(new QLabel(QStringLiteral("目标路径:"), targetGroup), 2, 0, 1, 2);
+    targetLayout->addWidget(m_irpPathEdit, 3, 0);
+    targetLayout->addWidget(browseButton, 3, 1);
+    targetLayout->addWidget(new QLabel(QStringLiteral("MajorFunction:"), targetGroup), 4, 0, 1, 2);
+    targetLayout->addWidget(m_irpMajorCombo, 5, 0, 1, 2);
+    targetLayout->addWidget(new QLabel(QStringLiteral("MinorFunction:"), targetGroup), 6, 0, 1, 2);
+    targetLayout->addWidget(m_irpMinorEdit, 7, 0, 1, 2);
+    targetLayout->addWidget(new QLabel(QStringLiteral("目标栈层:"), targetGroup), 8, 0, 1, 2);
+    targetLayout->addWidget(m_irpLayerCombo, 9, 0, 1, 2);
+    targetLayout->addWidget(new QLabel(QStringLiteral("超时(ms):"), targetGroup), 10, 0, 1, 2);
+    targetLayout->addWidget(m_irpTimeoutEdit, 11, 0, 1, 2);
+    targetLayout->setColumnStretch(0, 1);
+    workspace->parameters()->addWidget(targetGroup);
 
     // ---------- 参数区 ----------
     QGroupBox* parameterGroup = new QGroupBox(
         QStringLiteral("IO_STACK_LOCATION 参数"),
         m_irpBuilderPage);
-    ks::ui::StylePrimaryGroup(parameterGroup);
-    QGridLayout* parameterLayout = new QGridLayout(parameterGroup);
+    ks::ui::StyleParameterSection(parameterGroup);
+    QFormLayout* parameterLayout = new QFormLayout(parameterGroup);
+    parameterLayout->setRowWrapPolicy(QFormLayout::WrapAllRows);
+    parameterLayout->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
     parameterLayout->setContentsMargins(8, 8, 8, 8);
     parameterLayout->setHorizontalSpacing(8);
     parameterLayout->setVerticalSpacing(6);
@@ -582,44 +583,39 @@ void FileDock::initializeIrpBuilderPage()
         QStringLiteral("DIRECTORY_CONTROL 的文件名通配符，留空表示不限定。"));
 
     const auto addParameterRow =
-        [&](int row, int column, const QString& labelText, QWidget* editWidget)
+        [&](const QString& labelText, QWidget* editWidget)
         {
-            parameterLayout->addWidget(
-                new QLabel(labelText, parameterGroup), row, column * 2);
-            parameterLayout->addWidget(editWidget, row, column * 2 + 1);
+            parameterLayout->addRow(labelText, editWidget);
         };
 
-    addParameterRow(0, 0, QStringLiteral("DesiredAccess:"), m_irpDesiredAccessEdit);
-    addParameterRow(0, 1, QStringLiteral("ShareAccess:"), m_irpShareAccessEdit);
-    addParameterRow(0, 2, QStringLiteral("CreateDisposition:"), m_irpCreateDispositionEdit);
-    addParameterRow(1, 0, QStringLiteral("CreateOptions:"), m_irpCreateOptionsEdit);
-    addParameterRow(1, 1, QStringLiteral("FileAttributes:"), m_irpFileAttributesEdit);
-    addParameterRow(1, 2, QStringLiteral("InformationClass:"), m_irpInformationClassEdit);
-    addParameterRow(2, 0, QStringLiteral("ControlCode:"), m_irpControlCodeEdit);
-    addParameterRow(2, 1, QStringLiteral("SecurityInformation:"), m_irpSecurityInformationEdit);
-    addParameterRow(2, 2, QStringLiteral("ByteOffset:"), m_irpByteOffsetEdit);
-    addParameterRow(3, 0, QStringLiteral("Key:"), m_irpLockKeyEdit);
-    addParameterRow(3, 1, QStringLiteral("LockLength:"), m_irpLockLengthEdit);
-    addParameterRow(3, 2, QStringLiteral("OutputBytes:"), m_irpOutputBytesEdit);
-    addParameterRow(4, 0, QStringLiteral("FileName 通配符:"), m_irpPatternEdit);
-    for (int column = 0; column < 3; ++column)
-    {
-        parameterLayout->setColumnStretch(column * 2 + 1, 1);
-    }
-    pageLayout->addWidget(parameterGroup, 0);
+    addParameterRow(QStringLiteral("DesiredAccess:"), m_irpDesiredAccessEdit);
+    addParameterRow(QStringLiteral("ShareAccess:"), m_irpShareAccessEdit);
+    addParameterRow(QStringLiteral("CreateDisposition:"), m_irpCreateDispositionEdit);
+    addParameterRow(QStringLiteral("CreateOptions:"), m_irpCreateOptionsEdit);
+    addParameterRow(QStringLiteral("FileAttributes:"), m_irpFileAttributesEdit);
+    addParameterRow(QStringLiteral("InformationClass:"), m_irpInformationClassEdit);
+    addParameterRow(QStringLiteral("ControlCode:"), m_irpControlCodeEdit);
+    addParameterRow(QStringLiteral("SecurityInformation:"), m_irpSecurityInformationEdit);
+    addParameterRow(QStringLiteral("ByteOffset:"), m_irpByteOffsetEdit);
+    addParameterRow(QStringLiteral("Key:"), m_irpLockKeyEdit);
+    addParameterRow(QStringLiteral("LockLength:"), m_irpLockLengthEdit);
+    addParameterRow(QStringLiteral("OutputBytes:"), m_irpOutputBytesEdit);
+    addParameterRow(QStringLiteral("FileName 通配符:"), m_irpPatternEdit);
+    workspace->parameters()->addWidget(ks::ui::FoldParameterSection(parameterGroup, true));
 
     // ---------- 标志与输入数据 ----------
     QGroupBox* optionGroup = new QGroupBox(
         QStringLiteral("标志与输入数据"),
         m_irpBuilderPage);
-    ks::ui::StylePrimaryGroup(optionGroup);
+    ks::ui::StyleParameterSection(optionGroup);
     QVBoxLayout* optionLayout = new QVBoxLayout(optionGroup);
     optionLayout->setContentsMargins(8, 8, 8, 8);
     optionLayout->setSpacing(6);
 
-    QHBoxLayout* flagLayout = new QHBoxLayout();
+    // 确认项始终展开，各标志单独一行，不再依赖横向滚动查看。
+    QVBoxLayout* flagLayout = new QVBoxLayout();
     flagLayout->setContentsMargins(0, 0, 0, 0);
-    flagLayout->setSpacing(12);
+    flagLayout->setSpacing(6);
 
     m_irpConfirmCheck = new QCheckBox(
         QStringLiteral("确认写入语义"),
@@ -676,10 +672,10 @@ void FileDock::initializeIrpBuilderPage()
         "作为 IRP 数据段的输入内容，上限 64 KiB。\n"
         "空白、逗号和短横线会被忽略，方便直接粘贴各种转储格式。"));
     optionLayout->addWidget(m_irpInputHexEdit, 0);
-    pageLayout->addWidget(optionGroup, 0);
+    workspace->parameters()->addWidget(optionGroup);
 
     // ---------- 发送与结果 ----------
-    QHBoxLayout* actionLayout = new QHBoxLayout();
+    QHBoxLayout* actionLayout = workspace->actions();
     actionLayout->setContentsMargins(0, 0, 0, 0);
     actionLayout->setSpacing(8);
 
@@ -697,11 +693,11 @@ void FileDock::initializeIrpBuilderPage()
     m_irpStatusLabel->setWordWrap(true);
 
     actionLayout->addWidget(m_irpSendButton, 0);
-    actionLayout->addWidget(m_irpStatusLabel, 1);
+    actionLayout->addStretch(1);
     ks::ui::NormalizeToolbarRow(actionLayout);
-    pageLayout->addLayout(actionLayout, 0);
+    workspace->results()->addWidget(m_irpStatusLabel);
 
-    QSplitter* resultSplitter = new QSplitter(Qt::Horizontal, m_irpBuilderPage);
+    QSplitter* resultSplitter = new QSplitter(Qt::Vertical, m_irpBuilderPage);
     resultSplitter->setChildrenCollapsible(false);
 
     m_irpResultTable = new ks::ui::VisibleTableWidget(resultSplitter);
@@ -728,7 +724,8 @@ void FileDock::initializeIrpBuilderPage()
     resultSplitter->addWidget(m_irpOutputHexEdit);
     resultSplitter->setStretchFactor(0, 1);
     resultSplitter->setStretchFactor(1, 1);
-    pageLayout->addWidget(resultSplitter, 1);
+    workspace->results()->addWidget(resultSplitter, 1);
+    workspace->finish();
 
     connect(browseButton, &QPushButton::clicked, this, [this]() {
         const QString selectedPath = QFileDialog::getOpenFileName(

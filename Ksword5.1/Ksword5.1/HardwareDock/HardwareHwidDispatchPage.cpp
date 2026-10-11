@@ -2,6 +2,7 @@
 #include "../UI/ToolbarMetrics.h"
 #include "HardwareHwidDispatchPage.h"
 #include "../UI/PrimaryPageStyle.h"
+#include "../UI/ParameterWorkspace.h"
 #include "../UI/VisibleTableWidget.h"
 
 #include "../ArkDriverClient/ArkDriverClient.h"
@@ -14,6 +15,7 @@
 #include <QComboBox>
 #include <QDateTime>
 #include <QGridLayout>
+#include <QFormLayout>
 #include <QGroupBox>
 #include <QGuiApplication>
 #include <QHBoxLayout>
@@ -144,18 +146,20 @@ void HardwareHwidDispatchPage::showEvent(QShowEvent* event)
 void HardwareHwidDispatchPage::initializeUi()
 {
     m_rootLayout = new QVBoxLayout(this);
-    m_rootLayout->setContentsMargins(6, 6, 6, 6);
-    m_rootLayout->setSpacing(8);
+    m_rootLayout->setContentsMargins(0, 0, 0, 0);
+    auto* workspace = new ks::ui::ParameterWorkspace(this, 480); // 方案参数与状态/计划保持同屏。
+    m_rootLayout->addWidget(workspace);
 
     QLabel* titleLabel = new QLabel(QStringLiteral("HWID Dispatch 派遣函数"), this);
     titleLabel->setStyleSheet(
         QStringLiteral("font-size:18px;font-weight:700;color:%1;")
         .arg(KswordTheme::TextPrimaryHex()));
-    m_rootLayout->addWidget(titleLabel, 0);
+    workspace->parameters()->addWidget(titleLabel);
 
     m_statusLabel = new QLabel(QStringLiteral("状态：尚未查询驱动。"), this);
     m_statusLabel->setStyleSheet(QStringLiteral("font-weight:600;color:%1;").arg(KswordTheme::PrimaryBlueHex));
-    m_rootLayout->addWidget(m_statusLabel, 0);
+    m_statusLabel->setWordWrap(true);
+    workspace->results()->addWidget(m_statusLabel);
 
     // 风险说明改为常驻文字：真实下发前仍会弹出确认框，
     // 不再要求先勾选确认框（重复门槛，且忘记勾选只会得到一句报错）。
@@ -164,12 +168,12 @@ void HardwareHwidDispatchPage::initializeUi()
         this);
     riskNoticeLabel->setWordWrap(true);
     riskNoticeLabel->setStyleSheet(QStringLiteral("color:%1;").arg(KswordTheme::WarningHex()));
-    m_rootLayout->addWidget(riskNoticeLabel, 0);
+    workspace->parameters()->addWidget(riskNoticeLabel);
 
     QGroupBox* targetGroup = new QGroupBox(QStringLiteral("Dispatch 目标驱动"), this);
-    // 目标选择和方案参数为两个独立分区，保留可见但低对比的完整边界。
-    ks::ui::StylePrimaryGroup(targetGroup);
-    QGridLayout* targetLayout = new QGridLayout(targetGroup);
+    // 目标逐行排列，避免两列驱动名称挤出左侧参数栏。
+    QVBoxLayout* targetLayout = new QVBoxLayout(targetGroup);
+    ks::ui::StyleParameterSection(targetGroup);
     m_diskCheck = new QCheckBox(QStringLiteral("\\Driver\\Disk - 磁盘查询派遣"), targetGroup);
     m_partMgrCheck = new QCheckBox(QStringLiteral("\\Driver\\partmgr - 分区信息派遣"), targetGroup);
     m_mountMgrCheck = new QCheckBox(QStringLiteral("\\Driver\\mountmgr - 卷唯一标识派遣"), targetGroup);
@@ -178,17 +182,17 @@ void HardwareHwidDispatchPage::initializeUi()
     m_diskCheck->setChecked(true);
     m_partMgrCheck->setChecked(true);
     m_mountMgrCheck->setChecked(true);
-    targetLayout->addWidget(m_diskCheck, 0, 0);
-    targetLayout->addWidget(m_partMgrCheck, 0, 1);
-    targetLayout->addWidget(m_mountMgrCheck, 1, 0);
-    targetLayout->addWidget(m_nvidiaCheck, 1, 1);
-    targetLayout->addWidget(m_nsiProxyCheck, 2, 0);
-    m_rootLayout->addWidget(targetGroup, 0);
-    m_rootLayout->addSpacing(8);
+    targetLayout->addWidget(m_diskCheck);
+    targetLayout->addWidget(m_partMgrCheck);
+    targetLayout->addWidget(m_mountMgrCheck);
+    targetLayout->addWidget(m_nvidiaCheck);
+    targetLayout->addWidget(m_nsiProxyCheck);
+    workspace->parameters()->addWidget(targetGroup);
 
     QGroupBox* profileGroup = new QGroupBox(QStringLiteral("派遣函数方案参数"), this);
-    ks::ui::StylePrimaryGroup(profileGroup);
-    QGridLayout* profileLayout = new QGridLayout(profileGroup);
+    QFormLayout* profileLayout = new QFormLayout(profileGroup); // 每项标签和值纵向相邻。
+    ks::ui::StyleParameterSection(profileGroup);
+    profileLayout->setRowWrapPolicy(QFormLayout::WrapAllRows);
     m_diskModeCombo = new QComboBox(profileGroup);
     ks::ui::StylePrimaryCombo(m_diskModeCombo);
     m_diskModeCombo->addItem(
@@ -220,26 +224,18 @@ void HardwareHwidDispatchPage::initializeUi()
     m_diskGuidCheck = new QCheckBox(QStringLiteral("随机化 GPT GUID 查询结果"), profileGroup);
     m_volumeCleanCheck = new QCheckBox(QStringLiteral("清理 MountMgr 卷唯一标识查询结果"), profileGroup);
     m_arpCleanCheck = new QCheckBox(QStringLiteral("清理 ARP Table 查询结果"), profileGroup);
-    profileLayout->addWidget(new QLabel(QStringLiteral("磁盘模式"), profileGroup), 0, 0);
-    profileLayout->addWidget(m_diskModeCombo, 0, 1);
-    profileLayout->addWidget(new QLabel(QStringLiteral("磁盘序列号"), profileGroup), 1, 0);
-    profileLayout->addWidget(m_diskSerialEdit, 1, 1);
-    profileLayout->addWidget(new QLabel(QStringLiteral("磁盘产品名"), profileGroup), 2, 0);
-    profileLayout->addWidget(m_diskProductEdit, 2, 1);
-    profileLayout->addWidget(new QLabel(QStringLiteral("磁盘固件值"), profileGroup), 3, 0);
-    profileLayout->addWidget(m_diskRevisionEdit, 3, 1);
-    profileLayout->addWidget(new QLabel(QStringLiteral("GPU 序列号"), profileGroup), 0, 2);
-    profileLayout->addWidget(m_gpuSerialEdit, 0, 3);
-    profileLayout->addWidget(new QLabel(QStringLiteral("MAC 模式(预留)"), profileGroup), 1, 2);
-    profileLayout->addWidget(m_macModeCombo, 1, 3);
-    profileLayout->addWidget(new QLabel(QStringLiteral("永久 MAC"), profileGroup), 2, 2);
-    profileLayout->addWidget(m_permanentMacEdit, 2, 3);
-    profileLayout->addWidget(new QLabel(QStringLiteral("当前 MAC"), profileGroup), 3, 2);
-    profileLayout->addWidget(m_currentMacEdit, 3, 3);
-    profileLayout->addWidget(m_diskGuidCheck, 4, 0, 1, 2);
-    profileLayout->addWidget(m_volumeCleanCheck, 4, 2, 1, 2);
-    profileLayout->addWidget(m_arpCleanCheck, 5, 0, 1, 2);
-    m_rootLayout->addWidget(profileGroup, 0);
+    profileLayout->addRow(QStringLiteral("磁盘模式"), m_diskModeCombo);
+    profileLayout->addRow(QStringLiteral("磁盘序列号"), m_diskSerialEdit);
+    profileLayout->addRow(QStringLiteral("磁盘产品名"), m_diskProductEdit);
+    profileLayout->addRow(QStringLiteral("磁盘固件值"), m_diskRevisionEdit);
+    profileLayout->addRow(QStringLiteral("GPU 序列号"), m_gpuSerialEdit);
+    profileLayout->addRow(QStringLiteral("MAC 模式(预留)"), m_macModeCombo);
+    profileLayout->addRow(QStringLiteral("永久 MAC"), m_permanentMacEdit);
+    profileLayout->addRow(QStringLiteral("当前 MAC"), m_currentMacEdit);
+    profileLayout->addRow(m_diskGuidCheck);
+    profileLayout->addRow(m_volumeCleanCheck);
+    profileLayout->addRow(m_arpCleanCheck);
+    workspace->parameters()->addWidget(profileGroup);
 
     QHBoxLayout* buttonLayout = new QHBoxLayout();
     m_refreshButton = new QPushButton(QIcon(QStringLiteral(":/Icon/process_refresh.svg")), QStringLiteral("查询状态"), this);
@@ -254,13 +250,23 @@ void HardwareHwidDispatchPage::initializeUi()
     m_copyPlanButton = new QPushButton(QIcon(QStringLiteral(":/Icon/process_copy_row.svg")), QStringLiteral("复制计划"), this);
     m_copyPlanButton->setToolTip(QStringLiteral("复制当前目标、参数和风险说明，便于留档或复核。"));
     buttonLayout->addWidget(m_refreshButton);
-    buttonLayout->addWidget(m_dryRunButton);
-    buttonLayout->addWidget(m_enableButton);
-    buttonLayout->addWidget(m_disableButton);
     buttonLayout->addWidget(m_copyPlanButton);
     buttonLayout->addStretch(1);
     ks::ui::NormalizeToolbarRow(buttonLayout);
-    m_rootLayout->addLayout(buttonLayout, 0);
+    workspace->results()->addLayout(buttonLayout);
+    // 三个执行动作纵向固定，保留完整文字和风险提示，不依靠隐藏滚动条裁切。
+    auto* executionPanel = new QWidget(this);
+    auto* executionLayout = new QVBoxLayout(executionPanel);
+    executionLayout->setContentsMargins(0, 0, 0, 0);
+    executionLayout->setSpacing(8);
+    executionLayout->addWidget(m_dryRunButton);
+    executionLayout->addWidget(m_enableButton);
+    executionLayout->addWidget(m_disableButton);
+    workspace->actions()->addWidget(executionPanel, 1);
+    for (QPushButton* action : {m_dryRunButton, m_enableButton, m_disableButton})
+    {
+        ks::ui::NormalizeToolbarControl(action); // 纵排动作保留统一行高。
+    }
 
     m_statusTable = new ks::ui::VisibleTableWidget(this);
     // 调节表单的操作回执小表不需要独立快照、冻结或对比工具条。
@@ -280,7 +286,7 @@ void HardwareHwidDispatchPage::initializeUi()
     m_statusTable->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_statusTable->setAlternatingRowColors(true);
     m_statusTable->horizontalHeader()->setStretchLastSection(true);
-    m_rootLayout->addWidget(m_statusTable, 1);
+    workspace->results()->addWidget(m_statusTable, 1);
 
     QWidget* editorPanel = new QWidget(this);
     QHBoxLayout* editorLayout = new QHBoxLayout(editorPanel);
@@ -289,7 +295,8 @@ void HardwareHwidDispatchPage::initializeUi()
     m_planEditor = new ks::ui::StructuredFieldView(editorPanel);
 
     editorLayout->addWidget(m_planEditor, 1);
-    m_rootLayout->addWidget(editorPanel, 1);
+    workspace->results()->addWidget(editorPanel, 1);
+    workspace->finish();
 }
 
 void HardwareHwidDispatchPage::initializeConnections()

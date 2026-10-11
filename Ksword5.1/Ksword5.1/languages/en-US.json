@@ -6660,6 +6660,8 @@
     "notification.copy.log_template": "%1\n%2\n%3\nFile: %4\nFunction: %5\nGUID: %6"
   },
   "source_translations": {
+    "限定搜索的地址范围；选“自定义范围”后可填写起止地址": "Limit the address range to search; choose 'Custom range' to enter the start and end addresses.",
+    "读取选中磁盘的分区表，找出未分配间隙并把建议的 LBA 填进 LBA 输入框。只读不写。磁盘头部的间隙正是引导器寄居处，永远不会被选为建议值。填好之后仍然需要你自己勾选确认。": "Read the selected disk's partition table, find unallocated gaps, and fill the suggested LBA into the LBA field. Read-only. The head-of-disk gap is where bootloaders live and is never suggested. You still need to tick the acknowledgement yourself.",
     "高级": "Advanced",
     "0% 仅纯色 · 100% 仅背景图": "0% solid · 100% image",
     "0% 不模糊": "0% no blur",

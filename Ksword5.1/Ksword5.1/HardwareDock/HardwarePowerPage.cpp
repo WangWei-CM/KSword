@@ -2,6 +2,7 @@
 #include <QList>
 #include "../UI/ToolbarMetrics.h"
 #include "../UI/PrimaryPageStyle.h"
+#include "../UI/ParameterWorkspace.h"
 
 #include "../ArkDriverClient/ArkDriverClient.h"
 #include "../Internationalization/LanguageManager.h"
@@ -15,6 +16,7 @@
 #include <QDoubleSpinBox>
 #include <QGridLayout>
 #include <QGroupBox>
+#include <QHBoxLayout>
 #include <QHeaderView>
 #include <QLabel>
 #include <QMessageBox>
@@ -345,8 +347,9 @@ void HardwarePowerPage::initializeUi()
 {
     auto& language = ks::i18n::LanguageManager::instance();
     auto* rootLayout = new QVBoxLayout(this);
-    rootLayout->setContentsMargins(6, 6, 6, 6);
-    rootLayout->setSpacing(8);
+    rootLayout->setContentsMargins(0, 0, 0, 0);
+    auto* workspace = new ks::ui::ParameterWorkspace(this, 480); // 调节参数滚动，能力表保持可见。
+    rootLayout->addWidget(workspace);
 
     auto* titleLabel = new QLabel(QStringLiteral("CPU 电源与性能调节"), this);
     titleLabel->setStyleSheet(
@@ -361,7 +364,7 @@ void HardwarePowerPage::initializeUi()
         titleLabel,
         QStringLiteral("hardware.power.title.tooltip"),
         QStringLiteral("R0 调节仅写入已探测的 Intel RAPL/HWP/Turbo/请求倍频白名单字段，不绕过 BIOS/微码锁，也不提供任意 MSR 写入。"));
-    rootLayout->addWidget(titleLabel, 0);
+    workspace->parameters()->addWidget(titleLabel);
 
     m_statusLabel = new QLabel(
         powerText(
@@ -371,23 +374,18 @@ void HardwarePowerPage::initializeUi()
     m_statusLabel->setWordWrap(true);
     m_statusLabel->setStyleSheet(
         QStringLiteral("font-weight:600;color:%1;").arg(KswordTheme::PrimaryBlueHex));
-    rootLayout->addWidget(m_statusLabel, 0);
+    workspace->results()->addWidget(m_statusLabel);
 
-    auto* scrollArea = new QScrollArea(this);
-    scrollArea->setWidgetResizable(true);
-    auto* contentWidget = new QWidget(scrollArea);
-    auto* contentLayout = new QVBoxLayout(contentWidget);
-    contentLayout->setContentsMargins(0, 0, 0, 0);
-    // 方案、能力和各组调节参数之间需要留白，参数行本身不增高。
-    contentLayout->setSpacing(16);
+    QWidget* contentWidget = workspace; // 原控件继续由页面持有，由框架接管布局。
+    auto* contentLayout = workspace->parameters();
 
     auto* schemeGroup = new QGroupBox(QStringLiteral("Windows 电源方案"), contentWidget);
-    ks::ui::StylePrimaryGroup(schemeGroup);
     language.bindText(
         schemeGroup,
         QStringLiteral("hardware.power.scheme.group"),
         QStringLiteral("Windows 电源方案"));
     auto* schemeLayout = new QGridLayout(schemeGroup);
+    ks::ui::StyleParameterSection(schemeGroup);
     auto* schemeLabel = new QLabel(QStringLiteral("当前/目标方案"), schemeGroup);
     language.bindText(
         schemeLabel,
@@ -415,20 +413,18 @@ void HardwarePowerPage::initializeUi()
     m_restoreInitialStateButton->setToolTip(
         QStringLiteral("把功耗墙、倍频、Turbo 等所有设置一键恢复到本页刚打开时的原始状态"));
     schemeLayout->addWidget(schemeLabel, 0, 0);
-    schemeLayout->addWidget(m_powerSchemeCombo, 0, 1);
-    schemeLayout->addWidget(m_applyPowerSchemeButton, 0, 2);
-    schemeLayout->addWidget(m_refreshAllButton, 0, 3);
-    schemeLayout->addWidget(m_restoreInitialStateButton, 1, 0, 1, 4);
-    schemeLayout->setColumnStretch(1, 1);
+    schemeLayout->addWidget(m_powerSchemeCombo, 1, 0);
+    schemeLayout->addWidget(m_applyPowerSchemeButton, 2, 0);
+    schemeLayout->setColumnStretch(0, 1);
     contentLayout->addWidget(schemeGroup, 0);
 
     auto* snapshotGroup = new QGroupBox(QStringLiteral("CPU 能力与当前状态"), contentWidget);
-    ks::ui::StylePrimaryGroup(snapshotGroup);
     language.bindText(
         snapshotGroup,
         QStringLiteral("hardware.power.snapshot.group"),
         QStringLiteral("CPU 能力与当前状态"));
     auto* snapshotLayout = new QVBoxLayout(snapshotGroup);
+    ks::ui::StyleParameterSection(snapshotGroup);
     m_snapshotTable = new ks::ui::VisibleTableWidget(snapshotGroup);
     // 当前能力键值摘要位于调节表单内，保留右键复制，不挤占调节空间。
     ks::ui::SetTableActionBarMode(m_snapshotTable, ks::ui::TableActionBarMode::None);
@@ -442,17 +438,17 @@ void HardwarePowerPage::initializeUi()
     m_snapshotTable->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
     m_snapshotTable->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
     m_snapshotTable->verticalHeader()->setVisible(false);
-    m_snapshotTable->setMinimumHeight(260);
+    m_snapshotTable->setMinimumHeight(160);
     snapshotLayout->addWidget(m_snapshotTable, 1);
-    contentLayout->addWidget(snapshotGroup, 1);
+    workspace->results()->addWidget(snapshotGroup, 1);
 
     auto* raplGroup = new QGroupBox(QStringLiteral("RAPL 功耗墙（PL1 / PL2）"), contentWidget);
-    ks::ui::StylePrimaryGroup(raplGroup);
     language.bindText(
         raplGroup,
         QStringLiteral("hardware.power.rapl.group"),
         QStringLiteral("RAPL 功耗墙（PL1 / PL2）"));
     auto* raplLayout = new QGridLayout(raplGroup);
+    ks::ui::StyleParameterSection(raplGroup);
     auto* pl1Label = new QLabel(QStringLiteral("PL1 长时功耗"), raplGroup);
     auto* pl2Label = new QLabel(QStringLiteral("PL2 短时功耗"), raplGroup);
     language.bindText(pl1Label, QStringLiteral("hardware.power.rapl.pl1"), QStringLiteral("PL1 长时功耗"));
@@ -484,21 +480,22 @@ void HardwarePowerPage::initializeUi()
     m_raisePowerLimitsButton->setToolTip(
         QStringLiteral("把功耗上限拉到平台允许的最高值，相当于解除软件功耗限制；可能升温降频，请谨慎使用"));
     raplLayout->addWidget(pl1Label, 0, 0);
-    raplLayout->addWidget(m_pl1Spin, 0, 1);
-    raplLayout->addWidget(m_pl1EnableCheck, 0, 2);
-    raplLayout->addWidget(m_pl1ClampCheck, 0, 3);
-    raplLayout->addWidget(pl2Label, 1, 0);
-    raplLayout->addWidget(m_pl2Spin, 1, 1);
-    raplLayout->addWidget(m_pl2EnableCheck, 1, 2);
-    raplLayout->addWidget(m_pl2ClampCheck, 1, 3);
-    raplLayout->addWidget(m_applyPowerLimitsButton, 2, 0, 1, 2);
-    raplLayout->addWidget(m_raisePowerLimitsButton, 2, 2, 1, 2);
+    // PL1/PL2 各自连续排列，开关跟随本项功耗值，避免四列表单横向溢出。
+    raplLayout->addWidget(m_pl1Spin, 1, 0);
+    raplLayout->addWidget(m_pl1EnableCheck, 2, 0);
+    raplLayout->addWidget(m_pl1ClampCheck, 3, 0);
+    raplLayout->addWidget(pl2Label, 4, 0);
+    raplLayout->addWidget(m_pl2Spin, 5, 0);
+    raplLayout->addWidget(m_pl2EnableCheck, 6, 0);
+    raplLayout->addWidget(m_pl2ClampCheck, 7, 0);
+    raplLayout->addWidget(m_applyPowerLimitsButton, 8, 0);
+    raplLayout->addWidget(m_raisePowerLimitsButton, 9, 0);
     contentLayout->addWidget(raplGroup, 0);
 
     auto* turboGroup = new QGroupBox(QStringLiteral("Turbo 与超频倍率"), contentWidget);
-    ks::ui::StylePrimaryGroup(turboGroup);
     language.bindText(turboGroup, QStringLiteral("hardware.power.turbo.group"), QStringLiteral("Turbo 与超频倍率"));
     auto* turboLayout = new QGridLayout(turboGroup);
+    ks::ui::StyleParameterSection(turboGroup);
     m_turboEnableCheck = new QCheckBox(QStringLiteral("启用 Intel Turbo Boost"), turboGroup);
     language.bindText(m_turboEnableCheck, QStringLiteral("hardware.power.turbo.enable"), QStringLiteral("启用 Intel Turbo Boost"));
     m_applyTurboButton = new QPushButton(QStringLiteral("应用 Turbo 开关"), turboGroup);
@@ -514,10 +511,10 @@ void HardwarePowerPage::initializeUi()
     m_applyTurboRatioButton->setToolTip(
         QStringLiteral("把设定的全核睿频倍率写入 CPU（超频操作，风险较高，可能导致不稳定或死机）"));
     turboLayout->addWidget(m_turboEnableCheck, 0, 0);
-    turboLayout->addWidget(m_applyTurboButton, 0, 1);
-    turboLayout->addWidget(ratioLabel, 1, 0);
-    turboLayout->addWidget(m_turboRatioSpin, 1, 1);
-    turboLayout->addWidget(m_applyTurboRatioButton, 1, 2);
+    turboLayout->addWidget(m_applyTurboButton, 1, 0);
+    turboLayout->addWidget(ratioLabel, 2, 0);
+    turboLayout->addWidget(m_turboRatioSpin, 3, 0);
+    turboLayout->addWidget(m_applyTurboRatioButton, 4, 0);
     auto* requestedMultiplierLabel = new QLabel(
         QStringLiteral("请求倍频（IA32_PERF_CTL）"),
         turboGroup);
@@ -537,16 +534,16 @@ void HardwarePowerPage::initializeUi()
         QStringLiteral("应用请求倍频"));
     m_applyRequestedMultiplierButton->setToolTip(
         QStringLiteral("向 CPU 写入请求的运行倍频（IA32_PERF_CTL 寄存器）"));
-    turboLayout->addWidget(requestedMultiplierLabel, 2, 0);
-    turboLayout->addWidget(m_requestedMultiplierSpin, 2, 1);
-    turboLayout->addWidget(m_applyRequestedMultiplierButton, 2, 2);
-    turboLayout->setColumnStretch(3, 1);
+    requestedMultiplierLabel->setWordWrap(true);
+    turboLayout->addWidget(requestedMultiplierLabel, 5, 0);
+    turboLayout->addWidget(m_requestedMultiplierSpin, 6, 0);
+    turboLayout->addWidget(m_applyRequestedMultiplierButton, 7, 0);
     contentLayout->addWidget(turboGroup, 0);
 
     auto* hwpGroup = new QGroupBox(QStringLiteral("Intel Speed Shift / HWP"), contentWidget);
-    ks::ui::StylePrimaryGroup(hwpGroup);
     language.bindText(hwpGroup, QStringLiteral("hardware.power.hwp.group"), QStringLiteral("Intel Speed Shift / HWP"));
     auto* hwpLayout = new QGridLayout(hwpGroup);
+    ks::ui::StyleParameterSection(hwpGroup);
     auto* hwpMinimumLabel = new QLabel(QStringLiteral("最小性能"), hwpGroup);
     auto* hwpMaximumLabel = new QLabel(QStringLiteral("最大性能"), hwpGroup);
     auto* hwpDesiredLabel = new QLabel(QStringLiteral("期望性能（0=自动）"), hwpGroup);
@@ -568,14 +565,17 @@ void HardwarePowerPage::initializeUi()
     m_applyHwpButton->setToolTip(
         QStringLiteral("把上方 Speed Shift/HWP 的最小、最大、期望性能与能效偏好应用到所有 CPU 逻辑核心"));
     hwpLayout->addWidget(hwpMinimumLabel, 0, 0);
-    hwpLayout->addWidget(m_hwpMinimumSpin, 0, 1);
-    hwpLayout->addWidget(hwpMaximumLabel, 0, 2);
-    hwpLayout->addWidget(m_hwpMaximumSpin, 0, 3);
-    hwpLayout->addWidget(hwpDesiredLabel, 1, 0);
-    hwpLayout->addWidget(m_hwpDesiredSpin, 1, 1);
-    hwpLayout->addWidget(hwpEppLabel, 1, 2);
-    hwpLayout->addWidget(m_hwpEppSpin, 1, 3);
-    hwpLayout->addWidget(m_applyHwpButton, 2, 0, 1, 4);
+    // HWP 从两组横排字段收为单列，各字段的取值范围和业务含义不变。
+    hwpLayout->addWidget(m_hwpMinimumSpin, 1, 0);
+    hwpLayout->addWidget(hwpMaximumLabel, 2, 0);
+    hwpLayout->addWidget(m_hwpMaximumSpin, 3, 0);
+    hwpDesiredLabel->setWordWrap(true);
+    hwpLayout->addWidget(hwpDesiredLabel, 4, 0);
+    hwpLayout->addWidget(m_hwpDesiredSpin, 5, 0);
+    hwpEppLabel->setWordWrap(true);
+    hwpLayout->addWidget(hwpEppLabel, 6, 0);
+    hwpLayout->addWidget(m_hwpEppSpin, 7, 0);
+    hwpLayout->addWidget(m_applyHwpButton, 8, 0);
     contentLayout->addWidget(hwpGroup, 0);
 
     // 风险说明改为常驻文字：每次点击“应用”时仍会弹出确认框，
@@ -590,9 +590,9 @@ void HardwarePowerPage::initializeUi()
         riskNoticeLabel,
         QStringLiteral("hardware.power.risk_notice"),
         QStringLiteral("注意：提高功耗/倍率可能导致过热、降频、数据错误、死机或硬件寿命下降；请先保存工作并准备好恢复方案。"));
-    contentLayout->addWidget(riskNoticeLabel, 0);
+    contentLayout->insertWidget(1, riskNoticeLabel); // 风险始终位于参数前部，不收入折叠区。
 
-    // 四个调节组保持原栅格与参数语义，统一明确登记的按钮、组合与数值控件。
+    // 四个调节组保持原控件与参数语义，各组按自然高度纵向排列。
     for (QGridLayout* groupLayout : { schemeLayout, raplLayout, turboLayout, hwpLayout })
     {
         groupLayout->setHorizontalSpacing(8);
@@ -607,10 +607,15 @@ void HardwarePowerPage::initializeUi()
     {
         ks::ui::NormalizeToolbarControl(control);
     }
-    contentLayout->addStretch(1);
-
-    scrollArea->setWidget(contentWidget);
-    rootLayout->addWidget(scrollArea, 1);
+    // 刷新/还原是全页动作，固定在参数栏底部；分组应用仍邻近其参数。
+    auto* pageActions = new QWidget(workspace);
+    auto* pageActionLayout = new QVBoxLayout(pageActions);
+    pageActionLayout->setContentsMargins(0, 0, 0, 0);
+    pageActionLayout->setSpacing(8);
+    pageActionLayout->addWidget(m_refreshAllButton);
+    pageActionLayout->addWidget(m_restoreInitialStateButton);
+    workspace->actions()->addWidget(pageActions, 1);
+    workspace->finish();
     updateControlAvailability();
 }
 

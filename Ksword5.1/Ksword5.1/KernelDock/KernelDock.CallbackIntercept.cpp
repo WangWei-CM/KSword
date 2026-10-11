@@ -1,6 +1,7 @@
 #include "KernelDock.h"
 #include "../UI/PageControlStyle.h"
 #include "../UI/ToolbarMetrics.h"
+#include "../UI/ParameterWorkspace.h"
 #include "../UI/CodeTextEdit.h"
 #include "../UI/VisibleTableWidget.h"
 
@@ -24,6 +25,7 @@
 #include <QFileInfo>
 #include <QFrame>
 #include <QGridLayout>
+#include <QGroupBox>
 #include <QHeaderView>
 #include <QHash>
 #include <QIcon>
@@ -2776,8 +2778,9 @@ private:
 
         auto* tabPage = new QWidget(parentWidget);
         auto* tabLayout = new QVBoxLayout(tabPage);
-        tabLayout->setContentsMargins(8, 8, 8, 8);
-        tabLayout->setSpacing(8);
+        tabLayout->setContentsMargins(0, 0, 0, 0);
+        auto* workspace = new ks::ui::ParameterWorkspace(tabPage, 460); // 保护参数滚动，规则与信任结果同时保留。
+        tabLayout->addWidget(workspace);
 
         auto* hintLabel = new QLabel(
             kernelText("kernel.callback.intercept.process_protect.hint",
@@ -2785,9 +2788,11 @@ private:
             tabPage);
         hintLabel->setWordWrap(true);
         hintLabel->setStyleSheet(QStringLiteral("color:%1;").arg(KswordTheme::TextSecondaryHex()));
-        tabLayout->addWidget(hintLabel, 0);
+        workspace->parameters()->addWidget(hintLabel);
 
-        auto* switchLayout = new QHBoxLayout();
+        auto* switchGroup = new QGroupBox(
+            kernelText("kernel.callback.intercept.process_protect.tab", QStringLiteral("进程保护")), tabPage);
+        auto* switchLayout = new QVBoxLayout(switchGroup); // 总开关逐行排列，原来的十控件横排不再撑宽页面。
         switchLayout->setContentsMargins(0, 0, 0, 0);
         switchLayout->setSpacing(12);
         m_processProtectEnabledCheck = new QCheckBox(
@@ -2830,20 +2835,27 @@ private:
         switchLayout->addWidget(m_processProtectKernelCheck, 0);
         switchLayout->addWidget(m_processProtectSelfHealCheck, 0);
         switchLayout->addWidget(m_processProtectScanIntervalSpin, 0);
-        switchLayout->addStretch(1);
+
         m_processProtectApplyButton = new QPushButton(
             kernelText("kernel.callback.intercept.process_protect.apply", QStringLiteral("应用到驱动")), tabPage);
         m_processProtectRefreshButton = new QPushButton(
             kernelText("kernel.callback.intercept.process_protect.refresh", QStringLiteral("从驱动刷新")), tabPage);
         m_processProtectClearButton = new QPushButton(
             kernelText("kernel.callback.intercept.process_protect.clear_apply", QStringLiteral("清空并应用")), tabPage);
-        switchLayout->addWidget(m_processProtectApplyButton, 0);
-        switchLayout->addWidget(m_processProtectRefreshButton, 0);
-        switchLayout->addWidget(m_processProtectClearButton, 0);
-        ks::ui::NormalizeToolbarRow(switchLayout);
-        tabLayout->addLayout(switchLayout, 0);
+        ks::ui::StyleParameterSection(switchGroup);
+        workspace->parameters()->addWidget(switchGroup);
+        auto* pageActions = new QWidget(tabPage);
+        auto* pageActionLayout = new QVBoxLayout(pageActions);
+        pageActionLayout->setContentsMargins(0, 0, 0, 0);
+        pageActionLayout->setSpacing(8);
+        pageActionLayout->addWidget(m_processProtectApplyButton);
+        pageActionLayout->addWidget(m_processProtectRefreshButton);
+        pageActionLayout->addWidget(m_processProtectClearButton);
+        workspace->actions()->addWidget(pageActions, 1);
 
-        auto* ruleInputLayout = new QHBoxLayout();
+        auto* ruleGroup = new QGroupBox(
+            kernelText("kernel.callback.intercept.process_protect.header.target", QStringLiteral("受保护目标")), tabPage);
+        auto* ruleInputLayout = new QVBoxLayout(ruleGroup); // 类型、路径、权限预设与名称各占一行。
         ruleInputLayout->setContentsMargins(0, 0, 0, 0);
         ruleInputLayout->setSpacing(6);
         m_processProtectKindCombo = new QComboBox(tabPage);
@@ -2885,19 +2897,23 @@ private:
         m_processProtectRemoveRuleButton = new QPushButton(
             kernelText("kernel.callback.intercept.process_protect.remove_rule", QStringLiteral("移除选中")), tabPage);
         ruleInputLayout->addWidget(m_processProtectKindCombo, 0);
-        ruleInputLayout->addWidget(m_processProtectTargetEdit, 2);
+        ruleInputLayout->addWidget(m_processProtectTargetEdit);
         ruleInputLayout->addWidget(m_processProtectPresetCombo, 0);
         ruleInputLayout->addWidget(m_processProtectThreadsCheck, 0);
-        ruleInputLayout->addWidget(m_processProtectRuleNameEdit, 1);
+        ruleInputLayout->addWidget(m_processProtectRuleNameEdit);
         ruleInputLayout->addWidget(m_processProtectAddRuleButton, 0);
-        ruleInputLayout->addWidget(m_processProtectApplyPresetButton, 0);
-        ruleInputLayout->addWidget(m_processProtectRemoveRuleButton, 0);
-        ks::ui::NormalizeToolbarRow(ruleInputLayout);
-        tabLayout->addLayout(ruleInputLayout, 0);
+        ks::ui::StyleParameterSection(ruleGroup);
+        workspace->parameters()->addWidget(ruleGroup);
+        auto* ruleActions = new QHBoxLayout; // 只对选中规则生效的动作紧邻结果表。
+        ruleActions->addWidget(m_processProtectApplyPresetButton);
+        ruleActions->addWidget(m_processProtectRemoveRuleButton);
+        ruleActions->addStretch();
+        ks::ui::NormalizeToolbarRow(ruleActions);
+        workspace->results()->addLayout(ruleActions);
 
-        // 内核 PP 层的参数单独一行：它决定的是"让 Windows 自己执行保护"，
-        // 与上面那行的句柄削权是两回事，混在一行容易被当成同一组开关。
-        auto* kernelInputLayout = new QHBoxLayout();
+        // 内核 PP 层的参数单独成组：它决定的是"让 Windows 自己执行保护"，
+        // 与句柄削权是两回事，不能混为同一组开关。
+        auto* kernelInputLayout = new QVBoxLayout();
         kernelInputLayout->setContentsMargins(0, 0, 0, 0);
         kernelInputLayout->setSpacing(6);
         auto* kernelLabel = new QLabel(
@@ -2949,9 +2965,7 @@ private:
         kernelInputLayout->addWidget(m_processProtectSelfHealRuleCheck, 0);
         kernelInputLayout->addWidget(m_processProtectClearDebugPortCheck, 0);
         kernelInputLayout->addWidget(m_processProtectApplyKernelButton, 0);
-        kernelInputLayout->addStretch(1);
-        ks::ui::NormalizeToolbarRow(kernelInputLayout);
-        tabLayout->addLayout(kernelInputLayout, 0);
+        workspace->parameters()->addLayout(kernelInputLayout);
 
         m_processProtectRuleTable = new ks::ui::VisibleTableWidget(tabPage);
         // 保护规则属于编辑配置，保留页面应用/刷新动作。
@@ -2994,16 +3008,18 @@ private:
         m_processProtectRuleTable->setStyleSheet(callbackRuleTableStyle());
         applyCallbackTableTransparency(m_processProtectRuleTable);
         installCallbackTableCopyMenu(m_processProtectRuleTable, -1);
-        tabLayout->addWidget(m_processProtectRuleTable, 3);
+        workspace->results()->addWidget(m_processProtectRuleTable, 3);
 
         auto* trustedLabel = new QLabel(
             kernelText("kernel.callback.intercept.process_protect.trusted_title",
                 QStringLiteral("信任白名单（这些发起方打开受保护进程时不削权）")),
             tabPage);
         trustedLabel->setStyleSheet(QStringLiteral("color:%1;font-weight:600;").arg(KswordTheme::TextPrimaryHex()));
-        tabLayout->addWidget(trustedLabel, 0);
+        trustedLabel->setWordWrap(true);
+        workspace->results()->addWidget(trustedLabel);
 
-        auto* trustedInputLayout = new QHBoxLayout();
+        auto* trustedGroup = new QGroupBox(trustedLabel->text(), tabPage);
+        auto* trustedInputLayout = new QVBoxLayout(trustedGroup); // 信任目标独立输入，不与保护目标混排。
         trustedInputLayout->setContentsMargins(0, 0, 0, 0);
         trustedInputLayout->setSpacing(6);
         m_processProtectTrustedKindCombo = new QComboBox(tabPage);
@@ -3026,11 +3042,15 @@ private:
         m_processProtectTrustedRemoveButton = new QPushButton(
             kernelText("kernel.callback.intercept.process_protect.trusted_remove", QStringLiteral("移除选中")), tabPage);
         trustedInputLayout->addWidget(m_processProtectTrustedKindCombo, 0);
-        trustedInputLayout->addWidget(m_processProtectTrustedTargetEdit, 1);
+        trustedInputLayout->addWidget(m_processProtectTrustedTargetEdit);
         trustedInputLayout->addWidget(m_processProtectTrustedAddButton, 0);
-        trustedInputLayout->addWidget(m_processProtectTrustedRemoveButton, 0);
-        ks::ui::NormalizeToolbarRow(trustedInputLayout);
-        tabLayout->addLayout(trustedInputLayout, 0);
+        ks::ui::StyleParameterSection(trustedGroup);
+        workspace->parameters()->addWidget(trustedGroup);
+        auto* trustedActions = new QHBoxLayout;
+        trustedActions->addWidget(m_processProtectTrustedRemoveButton);
+        trustedActions->addStretch();
+        ks::ui::NormalizeToolbarRow(trustedActions);
+        workspace->results()->addLayout(trustedActions);
 
         m_processProtectTrustedTable = new ks::ui::VisibleTableWidget(tabPage);
         // 受信发起方的小配置列表不需要快照工具条。
@@ -3053,7 +3073,7 @@ private:
         m_processProtectTrustedTable->setStyleSheet(callbackRuleTableStyle());
         applyCallbackTableTransparency(m_processProtectTrustedTable);
         installCallbackTableCopyMenu(m_processProtectTrustedTable, -1);
-        tabLayout->addWidget(m_processProtectTrustedTable, 1);
+        workspace->results()->addWidget(m_processProtectTrustedTable, 1);
 
         m_processProtectStatusLabel = new QLabel(
             kernelText("kernel.callback.intercept.process_protect.status.not_refreshed",
@@ -3061,7 +3081,15 @@ private:
             tabPage);
         m_processProtectStatusLabel->setWordWrap(true);
         m_processProtectStatusLabel->setStyleSheet(QStringLiteral("color:%1;").arg(KswordTheme::TextSecondaryHex()));
-        tabLayout->addWidget(m_processProtectStatusLabel, 0);
+        workspace->results()->addWidget(m_processProtectStatusLabel);
+        // 纵排后的参数动作仍按当前字号计算单行高度，不能沿用旧横排的几何假设。
+        for (QPushButton* action : {m_processProtectApplyButton, m_processProtectRefreshButton,
+                m_processProtectClearButton, m_processProtectAddRuleButton,
+                m_processProtectApplyKernelButton, m_processProtectTrustedAddButton})
+        {
+            ks::ui::NormalizeToolbarControl(action);
+        }
+        workspace->finish();
 
         m_ruleTabWidget->addTab(
             tabPage,

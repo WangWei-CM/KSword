@@ -1,6 +1,7 @@
 #include "ScannerDock.h"
 #include "../UI/PageControlStyle.h"
 #include "../UI/ToolbarMetrics.h"
+#include "../UI/ParameterWorkspace.h"
 #include "../UI/VisibleTableWidget.h"
 
 #include "Internationalization/LanguageManager.h"
@@ -29,6 +30,7 @@
 #include <QMetaObject>
 #include <QPushButton>
 #include <QRegularExpression>
+#include <QScrollArea>
 #include <QStyle>
 #include <QStringList>
 #include <QTabWidget>
@@ -216,11 +218,32 @@ void ScannerDock::buildUi()
     inspectionLayout->addWidget(m_resultTabs);
     m_mainTabs->addTab(m_inspectionPage, QString());
 
-    // editorLayout：直接从输入控件开始，风险口径改挂在各控件的 tooltip 上。
+    // 编辑页没有独立结果面板，保留单栏；参数正文滚动，确认动作固定在底部。
     m_editorPage = new QWidget(m_mainTabs);
+    QFont editorFont = m_editorPage->font(); // 与参数工作区一致提高阅读下限，保留用户字体单位。
+    if (editorFont.pixelSize() > 0)
+    {
+        editorFont.setPixelSize(qMax(14, editorFont.pixelSize()));
+    }
+    else
+    {
+        editorFont.setPointSizeF(qMax(10.0, editorFont.pointSizeF()));
+    }
+    m_editorPage->setFont(editorFont);
     auto* editorLayout = new QVBoxLayout(m_editorPage);
-    editorLayout->setContentsMargins(12, 12, 12, 12);
-    editorLayout->setSpacing(10);
+    editorLayout->setContentsMargins(16, 16, 16, 16);
+    editorLayout->setSpacing(16);
+    auto* parameterScroll = new QScrollArea(m_editorPage);
+    parameterScroll->setWidgetResizable(true);
+    parameterScroll->setFrameShape(QFrame::NoFrame);
+    parameterScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    auto* parameterBody = new QWidget(parameterScroll);
+    parameterBody->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+    auto* parameterLayout = new QVBoxLayout(parameterBody);
+    parameterLayout->setContentsMargins(0, 0, 0, 0);
+    parameterLayout->setSpacing(16);
+    parameterScroll->setWidget(parameterBody);
+    editorLayout->addWidget(parameterScroll, 1);
 
     // editForm：只收集等长替换所需的偏移与新字节，不提供插入/删除入口。
     auto* editGroup = new QGroupBox(m_editorPage); // 参数与确认动作分区，但继续在同页完整显示。
@@ -231,6 +254,7 @@ void ScannerDock::buildUi()
     editForm->setVerticalSpacing(8);
     editForm->setLabelAlignment(Qt::AlignLeft | Qt::AlignVCenter);
     editForm->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
+    editForm->setRowWrapPolicy(QFormLayout::WrapAllRows);
     m_offsetLabel = new QLabel(m_editorPage);
     m_offsetEdit = new QLineEdit(m_editorPage);
     m_offsetEdit->setPlaceholderText(QStringLiteral("0x00000000"));
@@ -241,16 +265,19 @@ void ScannerDock::buildUi()
     editForm->addRow(m_replacementLabel, m_replacementEdit);
     ks::ui::NormalizeToolbarControl(m_offsetEdit);
     ks::ui::NormalizeToolbarControl(m_replacementEdit);
-    ks::ui::StylePrimaryGroup(editGroup);
-    editorLayout->addWidget(editGroup);
+    ks::ui::StyleParameterSection(editGroup);
+    editGroup->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Maximum);
+    parameterLayout->addWidget(editGroup);
 
     m_backupCheckBox = new QCheckBox(m_editorPage);
     m_backupCheckBox->setChecked(true);
-    editorLayout->addWidget(m_backupCheckBox);
+    parameterLayout->addWidget(m_backupCheckBox);
 
     m_riskCheckBox = new QCheckBox(m_editorPage);
     m_riskCheckBox->setChecked(false);
-    editorLayout->addWidget(m_riskCheckBox);
+    parameterLayout->addWidget(m_riskCheckBox);
+    parameterLayout->addStretch();
+    ks::ui::StyleParameterFields(parameterBody); // 风险原勾选对象保持可见，并按实际宽度换行。
 
     auto* applyLayout = new QHBoxLayout();
     applyLayout->addStretch(1);
@@ -260,7 +287,6 @@ void ScannerDock::buildUi()
     ks::ui::NormalizeToolbarRow(applyLayout);
     ks::ui::ApplyFlatButtonTheme(m_applyPatchButton, ks::ui::FlatButtonTone::Danger);
     editorLayout->addLayout(applyLayout);
-    editorLayout->addStretch(1);
     m_mainTabs->addTab(m_editorPage, QString());
 
     // 所有按钮和回车动作都通过 ScannerDock 方法进入同一套校验流程。

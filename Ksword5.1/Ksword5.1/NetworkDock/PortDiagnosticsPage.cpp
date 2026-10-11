@@ -4,12 +4,14 @@
 #include "../UI/CodeEditorWidget.h"
 #include "../UI/FlatButtonTheme.h"
 #include "../UI/PrimaryPageStyle.h"
+#include "../UI/ParameterWorkspace.h"
 #include "../UI/ToolbarMetrics.h"
 #include "../UI/VisibleTableWidget.h"
 #include "../Internationalization/LanguageManager.h"
 
 #include <QComboBox>
 #include <QGroupBox>
+#include <QFormLayout>
 #include <QHeaderView>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -75,41 +77,46 @@ PortDiagnosticsPage::PortDiagnosticsPage(QWidget* parent) : QWidget(parent)
 {
     m_operation = new ks::ui::AsyncOperation(this);
     auto* root = new QVBoxLayout(this); // 查询、占用与绑定各自分区，保持主要结果可伸展。
-    root->setContentsMargins(8, 8, 8, 8);
-    root->setSpacing(12);
-    auto* controls = new QHBoxLayout;
-    controls->addWidget(new QLabel(portText("本地端口"), this));
+    root->setContentsMargins(0, 0, 0, 0);
+    auto* workspace = new ks::ui::ParameterWorkspace(this, 380); // 参数与诊断结果独立使用空间。
+    root->addWidget(workspace);
+    auto* controls = new QFormLayout;
+    controls->setRowWrapPolicy(QFormLayout::WrapAllRows);
     m_port = new QSpinBox(this);
     m_port->setRange(1, 65535);
     m_port->setValue(8080);
     m_port->setMinimumWidth(110);
-    controls->addWidget(m_port);
+    controls->addRow(portText("本地端口"), m_port);
     m_protocol = new QComboBox(this);
     m_protocol->addItems({portText("TCP 与 UDP"), QStringLiteral("TCP"), QStringLiteral("UDP")});
     ks::ui::StylePrimaryCombo(m_protocol);
-    controls->addWidget(m_protocol);
+    controls->addRow(m_protocol);
     m_diagnose = new QPushButton(QIcon(QStringLiteral(":/Icon/process_refresh.svg")), portText("诊断"), this);
     m_diagnose->setToolTip(portText("查询占用进程并检测 IPv4/IPv6 的独占绑定能力"));
     m_release = new QPushButton(portText("解除占用"), this);
     m_release->setToolTip(portText("结束所选占用进程，影响该进程的全部任务与连接"));
     m_disconnect = new QPushButton(portText("断开 TCP"), this);
     m_disconnect->setToolTip(portText("仅断开所选 IPv4 活动 TCP 连接，不会关闭监听端口"));
-    controls->addWidget(m_diagnose);
-    controls->addWidget(m_release);
-    controls->addWidget(m_disconnect);
-    controls->addStretch();
+    workspace->parameters()->addLayout(controls);
+    workspace->actions()->addWidget(m_diagnose);
+    workspace->actions()->addStretch();
     ks::ui::ApplyFlatButtonTheme(m_diagnose);
     ks::ui::ApplyFlatButtonTheme(m_release, ks::ui::FlatButtonTone::Danger);
     ks::ui::ApplyFlatButtonTheme(m_disconnect);
-    ks::ui::NormalizeToolbarRow(controls);
-    root->addLayout(controls);
     m_status = new QLabel(portText("输入本地端口后点击诊断。"), this);
     m_status->setWordWrap(true);
-    root->addWidget(m_status);
+    workspace->parameters()->addWidget(m_status);
 
     auto* ownersGroup = new QGroupBox(portText("占用进程与端点"), this);
-    ks::ui::StylePrimaryGroup(ownersGroup);
     auto* ownersLayout = new QVBoxLayout(ownersGroup);
+    ks::ui::StyleParameterSection(ownersGroup);
+    // 解除/断开依赖当前结果行，放在占用表旁，避免挤宽参数执行栏。
+    auto* ownerActions = new QHBoxLayout;
+    ownerActions->addWidget(m_release);
+    ownerActions->addWidget(m_disconnect);
+    ownerActions->addStretch();
+    ks::ui::NormalizeToolbarRow(ownerActions);
+    ownersLayout->addLayout(ownerActions);
     m_owners = createEvidenceTable(ownersGroup,
         {portText("协议 / 地址族"), portText("本地端点"), portText("状态"), QStringLiteral("PID"), portText("进程")});
     ownersLayout->addWidget(m_owners, 1);
@@ -119,11 +126,11 @@ PortDiagnosticsPage::PortDiagnosticsPage(QWidget* parent) : QWidget(parent)
     m_details->setTextInteractionFlags(Qt::TextSelectableByMouse);
     m_details->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
     ownersLayout->addWidget(m_details);
-    root->addWidget(ownersGroup, 1);
+    workspace->results()->addWidget(ownersGroup, 1);
 
     auto* probeGroup = new QGroupBox(portText("绑定检测"), this);
-    ks::ui::StylePrimaryGroup(probeGroup);
     auto* probeLayout = new QVBoxLayout(probeGroup);
+    ks::ui::StyleParameterSection(probeGroup);
     m_probes = createEvidenceTable(probeGroup,
         {portText("协议 / 地址族"), portText("检查结果"), portText("错误码")});
     m_probes->setMaximumHeight(145);
@@ -131,12 +138,13 @@ PortDiagnosticsPage::PortDiagnosticsPage(QWidget* parent) : QWidget(parent)
     auto* explanation = new QLabel(portText("检测只做短暂独占绑定，不监听、不收发数据。无进程但绑定失败时，可能涉及 TIME_WAIT、系统保留或独占限制。"), probeGroup);
     explanation->setWordWrap(true);
     probeLayout->addWidget(explanation);
-    root->addWidget(probeGroup);
+    workspace->results()->addWidget(probeGroup);
     m_report = new CodeEditorWidget(this);
     m_report->setReadOnly(true);
     m_report->setMaximumHeight(100);
     m_report->hide();
-    root->addWidget(m_report);
+    workspace->results()->addWidget(m_report);
+    workspace->finish();
 
     // 输入变更清空旧目标，所有写操作只使用诊断时保存的完整值快照。
     connect(m_port, &QSpinBox::valueChanged, this, [this]() { invalidateSnapshot(); });

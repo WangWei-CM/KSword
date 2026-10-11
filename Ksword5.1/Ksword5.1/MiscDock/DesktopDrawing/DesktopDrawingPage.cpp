@@ -1,5 +1,6 @@
 #include "DesktopDrawingPage.h"
 #include "../../UI/PrimaryPageStyle.h"
+#include "../../UI/ParameterWorkspace.h"
 #include "../../UI/ToolbarMetrics.h"
 
 #include "../../Internationalization/LanguageManager.h"
@@ -122,6 +123,8 @@ namespace ks::misc
         m_colorButton = new QPushButton(m_settings);
         updateColorButton();
         addRow(QStringLiteral("misc.desktop_drawing.color"), QStringLiteral("图案颜色"), m_colorButton);
+        // 绘制结果在桌面上，此页保留单列表单，不创建空的结果面板。
+        ks::ui::StyleParameterFields(m_settings);
         scroll->setWidget(m_settings);
         root->addWidget(scroll, 1);
 

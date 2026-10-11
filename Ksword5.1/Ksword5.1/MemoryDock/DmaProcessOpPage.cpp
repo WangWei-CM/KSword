@@ -2,6 +2,7 @@
 #include "../UI/ToolbarMetrics.h"
 #include "../UI/SecondaryPageLayout.h"
 #include "../UI/CodeTextEdit.h"
+#include "../UI/ParameterWorkspace.h"
 
 #include "../ArkDriverClient/ArkDriverClient.h"
 #include "../theme.h"
@@ -113,23 +114,29 @@ namespace ksword::memory_dock
     {
         QVBoxLayout* root = new QVBoxLayout(this);
         ks::ui::StyleSecondaryContentLayout(root);
+        // 参数和风险确认独立滚动，执行/还原固定，完整校验日志留在结果区。
+        auto* workspace = new ks::ui::ParameterWorkspace(this, 480);
+        root->addWidget(workspace);
 
         QLabel* intro = new QLabel(this);
         intro->setWordWrap(true);
         intro->setTextInteractionFlags(Qt::TextSelectableByMouse);
         intro->setText(QStringLiteral("通过 DDMA 直接往目标进程的物理页里写字节。与“R-1 注入”不是同一件事：R-1 把载荷放在影子页里、真页从头到尾没被改过，还有一个武装好的触发点；DMA 一样都没有。这里改的是**真页**，任何读取路径都看得见（包括本工具自己的 R3/R0/HVM）；而且**没有触发**，载荷写完就躺在那里等目标自己执行到，写进一个永远不会被执行的位置等于什么都没做。每一次写入都强制先备份、写完立刻读回校验——DDMA 写入没有任何自证，驱动报成功只说明命令被接受，不说明物理页真的变了。"));
-        root->addWidget(intro);
+        workspace->parameters()->addWidget(intro);
 
         m_targetLabel = new QLabel(QStringLiteral("未附加进程。"), this);
         m_targetLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
-        root->addWidget(m_targetLabel);
+        m_targetLabel->setWordWrap(true);
+        workspace->parameters()->addWidget(m_targetLabel);
 
         // 参数和确认条件共用平面分区，日志保留独立伸缩空间。
         auto* inputSection = new QGroupBox(QStringLiteral("操作参数"), this);
-        ks::ui::StyleSecondarySection(inputSection);
+        ks::ui::StyleParameterSection(inputSection);
         auto* inputLayout = new QVBoxLayout(inputSection);
         inputLayout->setSpacing(8);
         auto* form = new QFormLayout();
+        form->setRowWrapPolicy(QFormLayout::WrapAllRows);
+        form->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
         m_addressEdit = new QLineEdit(this);
         m_addressEdit->setPlaceholderText(QStringLiteral("目标进程里的地址，默认十六进制"));
         m_addressEdit->setClearButtonEnabled(true);
@@ -141,7 +148,6 @@ namespace ksword::memory_dock
         m_payloadEdit->setClearButtonEnabled(true);
         m_payloadEdit->setToolTip(QStringLiteral("位置无关的机器码。只接受成对的十六进制数位，分隔符随意；位数为奇数会被拒绝而不是补零——补零会静默改变最后一个字节，也就是改变最后一条指令。"));
         form->addRow(QStringLiteral("载荷（十六进制）"), m_payloadEdit);
-        ks::ui::StyleSecondaryForm(form, 150);
         inputLayout->addLayout(form);
 
         m_forceCheck = new QCheckBox(QStringLiteral("附加 FORCE 标志（DDMA 写入要求）"), this);
@@ -154,10 +160,10 @@ namespace ksword::memory_dock
         m_unknownSharingCheck->setToolTip(QStringLiteral("只在“无法确认”时起作用。已经确认被其它进程共享的页没有任何开关能解锁——往一张共享的映像页写字节会打到每一个映射它的进程。"));
         inputLayout->addWidget(m_acknowledgeCheck);
         inputLayout->addWidget(m_unknownSharingCheck);
-        root->addWidget(inputSection);
+        workspace->parameters()->addWidget(inputSection);
 
-        auto* footer = new QWidget(this);
-        QHBoxLayout* actions = new QHBoxLayout(footer);
+        // 三个长动作纵向排列，避免在窄参数栏中挤掉“还原”入口。
+        auto* actions = new QVBoxLayout();
         actions->setContentsMargins(0, 0, 0, 0);
         actions->setSpacing(8);
         m_injectButton = new QPushButton(QStringLiteral("注入载荷到页内空隙"), this);
@@ -168,26 +174,26 @@ namespace ksword::memory_dock
         actions->addWidget(m_injectButton);
         actions->addWidget(m_ud2Button);
         actions->addWidget(m_restoreButton);
-        actions->addStretch(1);
-        ks::ui::NormalizeToolbarRow(actions);
+        workspace->actions()->addLayout(actions, 1);
+        ks::ui::NormalizeToolbarControl(m_injectButton);
+        ks::ui::NormalizeToolbarControl(m_ud2Button);
+        ks::ui::NormalizeToolbarControl(m_restoreButton);
 
         m_channelHintLabel = new QLabel(this);
         m_channelHintLabel->setWordWrap(true);
-        root->addWidget(m_channelHintLabel);
+        workspace->parameters()->addWidget(m_channelHintLabel);
 
         m_statusLabel = new QLabel(QStringLiteral("尚未执行。"), this);
         m_statusLabel->setWordWrap(true);
         m_statusLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
-        root->addWidget(m_statusLabel);
+        workspace->results()->addWidget(m_statusLabel);
 
         m_logText = new CodeTextEdit(this);
         static_cast<CodeTextEdit*>(m_logText)->setSyntaxLanguage(CodeTextEdit::SyntaxLanguage::PlainText);
         m_logText->setReadOnly(true);
         m_logText->setPlaceholderText(QStringLiteral("每一次写入的计划、备份与读回校验结果都会记在这里。备份是还原的唯一依据，别清空它。"));
-        root->addWidget(m_logText, 1);
-        // 动作固定在日志下方，长结果和日志滚动不再推走执行与还原入口。
-        ks::ui::StyleSecondaryFooter(footer);
-        root->addWidget(footer);
+        workspace->results()->addWidget(m_logText, 1);
+        workspace->finish();
     }
 
     void DmaProcessOpPage::wireSignals()

@@ -2,6 +2,7 @@
 
 #include "KernelDock.h"
 #include "../theme.h"
+#include "../UI/ParameterWorkspace.h"
 
 #include <QFormLayout>
 #include <QGroupBox>
@@ -11,6 +12,7 @@
 #include <QPaintEvent>
 #include <QPainter>
 #include <QRegularExpression>
+#include <QScrollArea>
 #include <QSignalBlocker>
 #include <QVBoxLayout>
 
@@ -219,8 +221,9 @@ void KernelIoctlDecoderTab::initializeUi()
 {
     // rootLayout 管理说明、左右两栏和状态提示，页面本身不执行任何内核调用。
     auto* rootLayout = new QVBoxLayout(this);
-    rootLayout->setContentsMargins(12, 12, 12, 12);
-    rootLayout->setSpacing(10);
+    rootLayout->setContentsMargins(0, 0, 0, 0);
+    auto* workspace = new ks::ui::ParameterWorkspace(this, 380); // 输入/字段与位图分开，窄窗自动纵排。
+    rootLayout->addWidget(workspace);
 
     auto* descriptionLabel = new QLabel(
         kernelText(
@@ -229,20 +232,15 @@ void KernelIoctlDecoderTab::initializeUi()
         this);
     descriptionLabel->setWordWrap(true);
     descriptionLabel->setStyleSheet(
-        QStringLiteral("color:%1;font-size:13px;").arg(KswordTheme::TextSecondaryHex()));
-    rootLayout->addWidget(descriptionLabel);
+        QStringLiteral("color:%1;").arg(KswordTheme::TextSecondaryHex()));
+    workspace->parameters()->addWidget(descriptionLabel);
 
-    // contentLayout 将字段表单和位布局并排，布局比例与 issue 参考图保持一致。
-    auto* contentLayout = new QHBoxLayout();
-    contentLayout->setSpacing(12);
+    // 字段保留实时解析关系；每个值独占一行，长访问权限名称不会撑宽参数栏。
     auto* decoderGroup = new QGroupBox(
         kernelText("kernel.ioctl_decoder.group.fields", QStringLiteral("控制码字段")),
         this);
     auto* fieldLayout = new QFormLayout(decoderGroup);
-    fieldLayout->setContentsMargins(14, 16, 14, 14);
-    fieldLayout->setHorizontalSpacing(10);
-    fieldLayout->setVerticalSpacing(10);
-    fieldLayout->setLabelAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    fieldLayout->setRowWrapPolicy(QFormLayout::WrapAllRows);
 
     // createOutputEdit 统一生成不可编辑结果框，避免四个字段出现不一致的主题状态。
     const auto createOutputEdit = [decoderGroup]() -> QLineEdit*
@@ -250,11 +248,6 @@ void KernelIoctlDecoderTab::initializeUi()
         auto* outputEdit = new QLineEdit(decoderGroup);
         outputEdit->setReadOnly(true);
         outputEdit->setText(QStringLiteral("—"));
-        outputEdit->setStyleSheet(QStringLiteral(
-            "QLineEdit{background:%1;color:%2;border:1px solid %3;border-radius:3px;padding:5px 8px;}")
-            .arg(KswordTheme::SurfaceHex())
-            .arg(KswordTheme::TextPrimaryHex())
-            .arg(KswordTheme::BorderHex()));
         return outputEdit;
     };
 
@@ -290,19 +283,27 @@ void KernelIoctlDecoderTab::initializeUi()
         this);
     auto* bitLayout = new QVBoxLayout(layoutGroup);
     bitLayout->setContentsMargins(8, 8, 8, 8);
-    m_bitLayoutWidget = new KernelIoctlBitLayoutWidget(layoutGroup);
-    bitLayout->addWidget(m_bitLayoutWidget, 1);
+    // 位图保留逐位读数的最低宽度，只在结果内滚动，不反向撑宽左侧参数栏。
+    auto* bitViewport = new QScrollArea(layoutGroup);
+    bitViewport->setWidgetResizable(true);
+    bitViewport->setFrameShape(QFrame::NoFrame);
+    m_bitLayoutWidget = new KernelIoctlBitLayoutWidget(bitViewport);
+    bitViewport->setWidget(m_bitLayoutWidget);
+    bitLayout->addWidget(bitViewport, 1);
 
-    contentLayout->addWidget(decoderGroup, 5);
-    contentLayout->addWidget(layoutGroup, 7);
-    rootLayout->addLayout(contentLayout, 1);
+    ks::ui::StyleParameterSection(decoderGroup);
+    ks::ui::StyleParameterSection(layoutGroup);
+    workspace->parameters()->addWidget(decoderGroup);
+    workspace->results()->addWidget(layoutGroup, 1);
 
     m_statusLabel = new QLabel(
         kernelText("kernel.ioctl_decoder.status.empty", QStringLiteral("请输入 32 位 IOCTL 控制码。")),
         this);
     m_statusLabel->setStyleSheet(
         QStringLiteral("color:%1;font-weight:600;").arg(KswordTheme::TextSecondaryHex()));
-    rootLayout->addWidget(m_statusLabel);
+    m_statusLabel->setWordWrap(true);
+    workspace->parameters()->addWidget(m_statusLabel);
+    workspace->finish();
 
     // textChanged 提供实时解析，editingFinished 只负责规范化显示，不改变字段语义。
     connect(m_codeEdit, &QLineEdit::textChanged, this, [this](const QString& inputText)
