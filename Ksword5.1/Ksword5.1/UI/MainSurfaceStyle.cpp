@@ -41,6 +41,8 @@ namespace ks::ui
             KswordTheme::TextPrimaryColor(), colors.content, 4.5);
         // 仅为主工作区的结构容器分层，不给每个 QWidget 画底，也不接管单元格语义色。
         return QStringLiteral(
+            // 最终主/浮动宿主规则也取消 ADS 外壳描边，不能只换底色留下贯穿页面的竖线。
+            "ads--CDockAreaWidget{border:0 !important;}"
             "ads--CDockAreaWidget,ads--CDockWidget > QWidget{background:%1 !important;}"
             "ads--CDockWidget QTabWidget > QStackedWidget{background:%1;}"
             "ads--CDockWidget QTabWidget > QStackedWidget > QWidget{background:%1;}"

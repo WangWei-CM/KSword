@@ -13102,11 +13102,11 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
             windowTextColor);
 
     // depthOverlayStyle 作用：
-    // - 为 Dock 面板、分组、表格和 Tab 增加边界/圆角/轻阴影感；
+    // - 工作区外壳不描边；只为内容分组和卡片保留各自的边界与圆角；
     // - 让当前 Tab 使用与图标错开的深浅对比色，避免蓝色图标在蓝底上不可见。
     const QString depthOverlayStyle = QStringLiteral(
         "ads--CDockAreaWidget{"
-        "  border:1px solid %1 !important;"
+        "  border:0 !important;"
         "  border-radius:8px;"
         "  background:%2 !important;"
         "}"

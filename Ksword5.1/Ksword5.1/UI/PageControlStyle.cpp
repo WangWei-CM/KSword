@@ -28,7 +28,8 @@ namespace
         const ks::ui::MainSurfaceColors mainColors = ks::ui::MainWindowSurfaceColors();
         PageTabColors colors;
         colors.page = mainSurface ? mainColors.canvas : KswordTheme::WindowColor();
-        colors.rail = mainSurface ? mainColors.toolbar : KswordTheme::SurfaceColor();
+        // 导航与工具面必须不同色：同色补在圆外会把原工具带圆角填成方角。
+        colors.rail = mainSurface ? mainColors.content : KswordTheme::SurfaceAltColor();
         colors.selected = mainSurface ? mainColors.header : KswordTheme::SurfaceAltColor();
         if (child)
         {
@@ -197,14 +198,13 @@ namespace
             }
             const QRectF opening(m_connectionRectangle.translated(-pos())); // 与真实工具带 x/y 对齐。
             const qreal joinHeight = opening.top() + kPageCornerRadius - railHeight;
-            QPainterPath corners;
-            corners.addRect(QRectF(opening.left(), railHeight, kPageCornerRadius, joinHeight));
-            corners.addRect(QRectF(opening.right() - kPageCornerRadius,
-                railHeight, kPageCornerRadius, joinHeight));
+            // 只连接实际工具带宽度内的窄带；有原生小间隔时，中部也必须连续。
+            QPainterPath joinBand;
+            joinBand.addRect(QRectF(opening.left(), railHeight, opening.width(), joinHeight));
             QPainterPath aperture;
             aperture.addRoundedRect(opening, kPageCornerRadius, kPageCornerRadius);
             // 只补真实圆角外侧的两块负空间；内侧控件和其已有圆角不会被覆盖。
-            painter.drawPath(corners.subtracted(aperture));
+            painter.drawPath(joinBand.subtracted(aperture));
         }
 
     private:
