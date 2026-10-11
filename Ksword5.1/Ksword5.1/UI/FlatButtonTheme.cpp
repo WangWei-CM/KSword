@@ -155,7 +155,8 @@ namespace
                 return false;
             }
             auto* button = qobject_cast<QAbstractButton*>(object);
-            if (button == nullptr || button->inherits("QLineEditIconButton") || (!qobject_cast<QPushButton*>(button)
+            if (button == nullptr || button->inherits("QLineEditIconButton")
+                || button->property("ksword_segmented_button").toBool() || (!qobject_cast<QPushButton*>(button)
                 && !qobject_cast<QToolButton*>(button)) || (ks::ui::HasWidgetThemeBinding(button)
                 && !button->property("ksword_flat_button_managed").toBool()))
             {

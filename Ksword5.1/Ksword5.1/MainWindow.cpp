@@ -1904,7 +1904,8 @@ namespace
             // 明确登记的新页签使用中性选中底和动态图标，旧实心底过滤器必须让出颜色所有权。
             // 若注册发生在首次 Polish 之后，只还原本过滤器写入的图标，保留页面后续新资源。
             if (tabBar->property("ksword_page_tabs_style").toBool()
-                || tabBar->property("ksword_secondary_tabs").toBool())
+                || tabBar->property("ksword_secondary_tabs").toBool()
+                || tabBar->property("ksword_segmented_tabs").toBool())
             {
                 const auto originalEntry = m_originalIconsByTabBar.find(tabBar);
                 const auto displayEntry = m_displayIconsByTabBar.find(tabBar);
