@@ -673,6 +673,7 @@
     <ClCompile Include="UI\SecondaryPageLayout.cpp" />
     <ClCompile Include="UI\PrimaryPageStyle.cpp" />
     <ClCompile Include="UI\MainSurfaceStyle.cpp" />
+    <ClCompile Include="UI\PageNavigationBridge.cpp" />
     <ClCompile Include="UI\SegmentedControl.cpp" />
     <ClCompile Include="UI\ThemedSlider.cpp" />
     <ClCompile Include="UI\SettingsPresentation.cpp" />
@@ -913,6 +914,8 @@
     <ClInclude Include="UI\SecondaryPageLayout.h" />
     <ClInclude Include="UI\PrimaryPageStyle.h" />
     <ClInclude Include="UI\MainSurfaceStyle.h" />
+    <ClInclude Include="UI\PageNavigationBridge.h" />
+    <ClInclude Include="..\..\shared\usermode\KswordPageNavigation.h" />
     <ClInclude Include="UI\SegmentedControl.h" />
     <ClInclude Include="UI\ThemedSlider.h" />
     <ClInclude Include="UI\SettingsPresentation.h" />

@@ -140,6 +140,7 @@
     </ClCompile>
     <ClCompile Include="TaskbarSharedState.cpp" />
     <ClCompile Include="Taskbar.cpp" />
+    <ClCompile Include="PageOverviewWindow.cpp" />
     <ClCompile Include="main.cpp" />
   </ItemGroup>
   <ItemGroup>
@@ -156,6 +157,8 @@
     <ClInclude Include="TaskbarEarthquakeAudioPlayer.h" />
     <ClInclude Include="TaskbarRestartCoordinator.h" />
     <ClInclude Include="Function.h" />
+    <ClInclude Include="PageOverviewWindow.h" />
+    <ClInclude Include="..\shared\usermode\KswordPageNavigation.h" />
     <ClInclude Include="SosHotkeyLauncher.h" />
     <ClInclude Include="RescueDesktopHost.h" />
     <ClInclude Include="..\shared\rescue\RescueDesktopWin32.h" />

@@ -66,7 +66,7 @@ void Taskbar::applyTaskbarTheme(bool earthquakeAlert, const QColor& backgroundCo
         logoLabel->setPixmap(displayPixmap.scaled(QSize(QWIDGETSIZE_MAX, logoLabel->height()),
             Qt::KeepAspectRatio, Qt::SmoothTransformation));
     }
-    for (GlowIconButton* button : { lockBtn, toolBtn, settingsBtn, userBtn })
+    for (GlowIconButton* button : { lockBtn, toolBtn, settingsBtn, overviewBtn, userBtn })
     {
         if (button != nullptr)
         {

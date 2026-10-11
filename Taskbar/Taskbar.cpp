@@ -2,6 +2,8 @@
 #include "Function.h"
 #include "Override.h"
 #include "TaskbarSettingsDialog.h"
+#include "PageOverviewWindow.h"
+#include <QPointer>
 
 #include <windows.h>
 #include <shellapi.h>
@@ -37,7 +39,7 @@ constexpr int kTaskbarContentHeight = kTaskbarLogicalHeight - (kTaskbarOuterMarg
 constexpr int kMinimumSpectrumWidth = 80;
 constexpr int kLargeScreenSpectrumMinimumWidth = 220;
 constexpr int kMaximumSpectrumWidth = 320;
-constexpr int kCompactScreenNonSpectrumBudget = 620;
+constexpr int kCompactScreenNonSpectrumBudget = 648;
 
 struct MonitorSearchContext {
     QString targetName;
@@ -454,6 +456,8 @@ Taskbar::Taskbar(QScreen* targetScreen, TaskbarSharedState* sharedState,
     toolBtn->setToolTip(QStringLiteral("打开命令提示符"));
     settingsBtn = new GlowIconButton(":/Icon/Resource/svg/system/settings_6_line.svg", iconSize, rightBtnContainer);
     settingsBtn->setToolTip(QStringLiteral("通知设置"));
+    overviewBtn = new GlowIconButton(":/Icon/Resource/svg/system/grid_2_line.svg", iconSize, rightBtnContainer);
+    overviewBtn->setToolTip(QStringLiteral("KSword 页面平铺：透明分列、搜索并直达各级页面"));
     userBtn = new GlowIconButton(":/Icon/Resource/Icon/user_2_line.svg", iconSize, rightBtnContainer);
     userBtn->setToolTip(QStringLiteral("用户自定义功能"));
     exitBtn = new GlowIconButton(":/Icon/Resource/Icon/exit_fill.svg", iconSize, rightBtnContainer);
@@ -461,12 +465,30 @@ Taskbar::Taskbar(QScreen* targetScreen, TaskbarSharedState* sharedState,
     rightBtnLayout->addWidget(lockBtn);
     rightBtnLayout->addWidget(toolBtn);
     rightBtnLayout->addWidget(settingsBtn);
+    rightBtnLayout->addWidget(overviewBtn);
     rightBtnLayout->addWidget(userBtn);
     rightBtnLayout->addWidget(exitBtn);
     rightBtnLayout->setAlignment(Qt::AlignRight);
     connect(lockBtn, &QPushButton::clicked, lockWorkstation);
     connect(toolBtn, &QPushButton::clicked, openCmd);
     connect(settingsBtn, &QPushButton::clicked, this, &Taskbar::showSettingsDialog);
+    connect(overviewBtn, &QPushButton::clicked, this, [this]()
+    {
+        // 多显示器 Taskbar 共用一个导航窗，避免同时读取目录时互相覆盖路由代次。
+        static QPointer<PageOverviewWindow> overview;
+        if (!overview)
+        {
+            overview = new PageOverviewWindow(this);
+        }
+        if (overview->isVisible())
+        {
+            overview->hide();
+        }
+        else
+        {
+            overview->openOnScreen(screen());
+        }
+    });
     connect(userBtn, &QPushButton::clicked, userCustomFunction);
     connect(exitBtn, &QPushButton::clicked, this, &Taskbar::onExitClicked);
     hLayout->addWidget(rightBtnContainer);

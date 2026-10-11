@@ -92,6 +92,7 @@ private:
     GlowIconButton* lockBtn;              // 锁定工作站图标按钮。
     GlowIconButton* toolBtn;              // 打开命令提示符图标按钮。
     GlowIconButton* settingsBtn;          // 打开通知设置图标按钮。
+    GlowIconButton* overviewBtn = nullptr; // 打开透明置顶的 KSword 页面平铺窗口。
     GlowIconButton* userBtn;              // 预留用户扩展图标按钮。
     TaskbarSettingsDialog* settingsDialog; // 当前显示器可打开的非模态设置窗口。
 

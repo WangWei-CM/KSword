@@ -2,6 +2,7 @@
 #include "UI/ToolbarMetrics.h"
 #include "UI/SecondaryPageLayout.h"
 #include "UI/MainSurfaceStyle.h"
+#include "UI/PageNavigationBridge.h"
 #include "UI/UI_All.h"
 #include "../../shared/usermode/KswordArkServiceMode.h"
 #include "Framework/PrivilegeElevationPrompt.h"
@@ -5333,6 +5334,10 @@ MainWindow::MainWindow(
         QStringLiteral("main.startup.progress.page_components"),
         QStringLiteral("正在加载功能模块..."));
     initDockWidgets();
+    if (m_pageNavigationBridge)
+    {
+        m_pageNavigationBridge->setReady();
+    }
 
     // Dock 构造期间会 processEvents；此时才安排 R0 刷新，避免 0ms 回调提前返回后遗失。
     // 已运行的服务和本轮新启动的服务复用同一入口，偏移仍按精确内核身份下发。
@@ -6563,6 +6568,12 @@ bool MainWindow::nativeEvent(const QByteArray& eventType, void* message, qintptr
     {
         const COPYDATASTRUCT* const copyData =
             reinterpret_cast<const COPYDATASTRUCT*>(nativeMessage->lParam);
+        if (m_pageNavigationBridge && m_pageNavigationBridge->handleMessage(
+            copyData, reinterpret_cast<HWND>(nativeMessage->wParam)))
+        {
+            *result = TRUE;
+            return true;
+        }
         if (copyData != nullptr
             && copyData->dwData == kUnlockerCopyDataMessageId
             && copyData->lpData != nullptr
@@ -6956,6 +6967,17 @@ void MainWindow::initGlobalUiSearchController()
         m_globalUiSearchController->searchScopeDisplayText());
     m_globalUiSearchController->setSearchInputActive(
         m_customTitleBar->isSearchInputModeActive());
+
+    // Taskbar 独立呈现目录；主程序复用已有 Dock 初始化/激活路径，只发布一级功能页。
+    m_pageNavigationBridge = new ks::ui::PageNavigationBridge(this, [this]()
+    {
+        auto docks = collectSearchableDockWidgets();
+        docks.removeAll(m_dockLog);
+        docks.removeAll(m_dockMonitor);
+        docks.removeAll(m_dockCurrentOp);
+        return docks;
+    }, [this](ads::CDockWidget* dock) { ensureDockContentInitialized(dock); },
+        [this](ads::CDockWidget* dock) { activateDockForSearchNavigation(dock); });
 
     connect(
         m_customTitleBar,

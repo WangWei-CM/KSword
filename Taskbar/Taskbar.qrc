@@ -10,5 +10,6 @@
         <file>Resource/Icon/user_2_line.svg</file>
         <file>Resource/svg/system/refresh_1_line.svg</file>
         <file>Resource/svg/system/settings_6_line.svg</file>
+        <file>Resource/svg/system/grid_2_line.svg</file>
     </qresource>
 </RCC>

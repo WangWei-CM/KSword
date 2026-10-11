@@ -1559,6 +1559,9 @@
     <ClCompile Include="UI\MainSurfaceStyle.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="UI\PageNavigationBridge.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="UI\SegmentedControl.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -2761,6 +2764,12 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="UI\MainSurfaceStyle.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="UI\PageNavigationBridge.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\shared\usermode\KswordPageNavigation.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="UI\SegmentedControl.h">

@@ -224,6 +224,13 @@ namespace ks::ui
         subTabStack_->addWidget(textView_);
         subTabStack_->addWidget(compareView_);
         subTabStack_->addWidget(pseudocodeView_);
+        // 五种内容页由自绘分段导航，给跨进程页面目录登记同一组实际标题。
+        QStringList navigationTitles;
+        for (int index = 0; index < subTabSegmented_->count(); ++index)
+        {
+            navigationTitles.append(subTabSegmented_->labelAt(index));
+        }
+        subTabStack_->setProperty("ksword_navigation_page_titles", navigationTitles);
 
         // ---- 侧栏：地址簿面板 + int3 补丁面板（绑定 WorkbenchShared 的共享对象） ----
         auto& shared = WorkbenchShared::Instance();

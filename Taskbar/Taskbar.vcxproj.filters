@@ -35,6 +35,15 @@
     <ClCompile Include="Taskbar.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="PageOverviewWindow.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClInclude Include="PageOverviewWindow.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="..\shared\usermode\KswordPageNavigation.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="main.cpp">
