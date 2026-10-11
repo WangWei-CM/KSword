@@ -2,6 +2,7 @@
 #include "./PrimaryPageStyle.h"
 #include "./ThemeBinding.h"
 #include "./ToolbarMetrics.h"
+#include "./MainSurfaceStyle.h"
 #include "../theme.h"
 
 #include <QComboBox>
@@ -101,7 +102,8 @@ namespace ks::ui
             {
                 return;
             }
-            const QColor surface = KswordTheme::SurfaceColor(); // 功能区相对页面保留一层中性底。
+            const QColor surface = UsesMainSurfaceHierarchy(target)
+                ? MainWindowSurfaceColors().content : KswordTheme::SurfaceColor();
             const QColor title = KswordTheme::EnsureTextContrast(
                 KswordTheme::TextSecondaryColor(), surface, 4.5);
             const QColor disabled = KswordTheme::EnsureTextContrast(
@@ -131,12 +133,40 @@ namespace ks::ui
         {
             if (target)
             {
+                const bool mainSurface = UsesMainSurfaceHierarchy(target);
+                const MainSurfaceColors surfaces = MainWindowSurfaceColors();
                 // 工具带只画底面和一条下边界，不把所有按钮包成重复卡片。
                 ReplacePrimaryStyle(target, QStringLiteral(
                     "QWidget[ksword_primary_toolbar=\"true\"]{"
                     "background:%1;border:0;border-bottom:1px solid %2;}")
-                    .arg(KswordTheme::SurfaceColor().name(), KswordTheme::BorderColor().name()));
+                    .arg(mainSurface ? surfaces.toolbar.name() : KswordTheme::SurfaceColor().name(),
+                        mainSurface ? surfaces.border.name() : KswordTheme::BorderColor().name()));
             }
+        });
+    }
+
+    void StylePrimaryContentPanel(QWidget* panel)
+    {
+        if (!panel || panel->property("ksword_primary_content_panel").toBool())
+        {
+            return;
+        }
+        panel->setProperty("ksword_primary_content_panel", true);
+        panel->setAttribute(Qt::WA_StyledBackground, true);
+        const QPointer<QWidget> target(panel); // 沿用原面板对象，图表采样和绘图逻辑不变。
+        BindWidgetTheme(panel, [target]()
+        {
+            if (!target)
+            {
+                return;
+            }
+            const bool mainSurface = UsesMainSurfaceHierarchy(target);
+            const MainSurfaceColors surfaces = MainWindowSurfaceColors();
+            ReplacePrimaryStyle(target, QStringLiteral(
+                "QWidget[ksword_primary_content_panel=\"true\"]{"
+                "background:%1;border:1px solid %2;border-radius:6px;}")
+                .arg(mainSurface ? surfaces.content.name() : QStringLiteral("transparent"),
+                    mainSurface ? surfaces.border.name() : KswordTheme::BorderColor().name()));
         });
     }
 
@@ -153,7 +183,11 @@ namespace ks::ui
             if (target)
             {
                 // 标题既可能位于工具带，也可能直接位于页面，两个背景都保持可读。
-                const QColor backgrounds[] = {KswordTheme::WindowColor(), KswordTheme::SurfaceColor()};
+                const bool mainSurface = UsesMainSurfaceHierarchy(target);
+                const MainSurfaceColors surfaces = MainWindowSurfaceColors();
+                const QColor backgrounds[] = {
+                    mainSurface ? surfaces.canvas : KswordTheme::WindowColor(),
+                    mainSurface ? surfaces.toolbar : KswordTheme::SurfaceColor()};
                 const QColor text = KswordTheme::EnsureTextContrastForBackgrounds(
                     KswordTheme::TextSecondaryColor(), backgrounds, 2, 4.5);
                 ReplacePrimaryStyle(target, QStringLiteral(

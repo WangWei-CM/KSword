@@ -15,6 +15,7 @@ KSword 主程序位于 `Ksword5.1/Ksword5.1`（Qt 6.9.3 Widgets + Qt Advanced Do
 
 ## UI 主题架构
 
+- 主工作区的底板/数据面/交替行/工具带/表头由 `UI/MainSurfaceStyle` 从现有种子派生，不改变 QApplication 的全局角色。主窗口与 ADS 浮动窗口明确登记顶层身份，独立属性/设置窗口不沿父链继承；有背景图或穿透模式时继续沿用原透明策略。`TablePresentation` 只改视图容器底面、交替底和结构边界，不声明 item 背景/边框，保留模型热度/风险刷子与自定义表格 opt-out；进程 GPU 视口继续读取真实 Base，图表外壳由 PrimaryContentPanel 显式接入。
 - 顶部ADS导航使用独立的`DockTabState`角色（`theme.h::DockTabBackgroundColor/TextColor/GlyphColor`）：三态背景分别沿用背景种子的`SurfaceColor/SurfaceMutedColor/SurfaceAltColor`偏移，只有强调文字、图形与`DockTabHighlightColor`选中底边从主题色派生；底边两像素同时扣减底部padding，保持既有高度。`DockNavigationStyleSheet`最后追加，覆盖旧基础属性hover和背景图透明兜底；普通业务QTabBar不受影响。自绘hover必须补回选中底边，局部文字共用`UI/DockThemeIcons::ApplyDockTabTextColor`，自有工厂在选中/hover/主题事件后调用。Qt在选中标签上仍可能请求Normal图标，导航图形需要对三态都保持对比，背景变化后允许前景做对比度校准。2026-10-04本次背景/强调分离回归5921条断言通过，覆盖主体色变化时三态背景不变、背景种子驱动真实三态底面、选中/选中悬停标记及图标对比；日志`.codex-build-logs/titlebar-background-offset-ui.log`。MainWindow自绘工厂仅静态核对，未启动生产GUI。本次两次主程序Build尝试均在i18n门禁被并行MemoryWorkbench持续新增的文本缺项阻断（已定点补齐11条双语提示）；最新失败日志`.codex-build-logs/ksword-build-check-20261004-213558.raw.log`，不报告整库编译通过。
 - 2026-10-04全项目配色审计见`docs/全项目配色审计.md`，后续修复及验证见`docs/配色问题修复记录.md`：全局旧色补偿只改QWidget显式palette/QSS，不覆盖item brush、QTextCharFormat/ExtraSelection、模型HTML或成员缓存；已有颜色角色也不能证明存量内容会随主题刷新。独立产品的固定设计/状态语义/数据原色不自动算缺陷。
 - 表格交替底/搜索normal-hover-selected的多底组合可能没有共同达到4.5:1的单一文字色，要按实际绘制选项求前景，不能降低门槛或猜model row奇偶。`ThemeItemForeground`专属语义角色仅用于明确标记项，换色不重新枚举、不reset模型或隐藏/选择快照。自有插件日志页的热主题通过`DebuggerBackend/KswordPluginTheme.h`颜色快照传递，Qt宿主排队限时发送、Win32接收页更换成对画刷；第三方调试器主窗口保持独立。

@@ -20,6 +20,9 @@ namespace ks::ui
     // toolbar 是页面明确建立的操作区；轻底面和下分界区分操作与结果，不遍历子控件。
     void StylePrimaryToolbar(QWidget* toolbar);
 
+    // 图表等独立数据面由页面明确登记，与表格使用同层底色和轻边界。
+    void StylePrimaryContentPanel(QWidget* panel);
+
     // 只为页面标题绑定可读次级颜色与字重，不接管状态提示或模型项的数据语义色。
     void StylePrimarySectionTitle(QLabel* title);
 }

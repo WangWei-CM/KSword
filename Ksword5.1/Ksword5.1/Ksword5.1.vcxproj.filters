@@ -1556,6 +1556,9 @@
     <ClCompile Include="UI\PrimaryPageStyle.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="UI\MainSurfaceStyle.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="UI\SegmentedControl.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -2755,6 +2758,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="UI\PrimaryPageStyle.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="UI\MainSurfaceStyle.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="UI\SegmentedControl.h">

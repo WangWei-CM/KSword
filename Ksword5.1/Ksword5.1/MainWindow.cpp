@@ -1,6 +1,7 @@
 #include "MainWindow.h"
 #include "UI/ToolbarMetrics.h"
 #include "UI/SecondaryPageLayout.h"
+#include "UI/MainSurfaceStyle.h"
 #include "UI/UI_All.h"
 #include "../../shared/usermode/KswordArkServiceMode.h"
 #include "Framework/PrivilegeElevationPrompt.h"
@@ -5165,6 +5166,8 @@ MainWindow::MainWindow(
     , m_startupSystemFont(startupSystemFont)
     , m_startupProgressCallback(startupProgressCallback)
 {
+    // 只给主工作区登记结构分层，独立属性/设置窗口不会继承这个顶层身份。
+    setProperty("ksword_main_surface_hierarchy", true);
     // 安装全局 QMenu 主题过滤器：
     // - 统一兜底所有右键菜单背景；
     // - 避免后续新增菜单遗漏 setStyleSheet 导致浅色模式黑底。
@@ -12297,6 +12300,7 @@ void MainWindow::applyAppearanceSettings(
 
     if (mainStyleRefreshRequired)
     {
+        setProperty("ksword_main_surface_hierarchy", !enableDockContentTransparency);
         runtimeProgress.update(
             66,
             QStringLiteral("main.runtime_appearance.progress.refresh"),
@@ -12855,6 +12859,7 @@ void MainWindow::applyFloatingDockContainerAppearance(ads::CFloatingDockContaine
         cachedBackgroundImage(m_currentAppearanceSettings.backgroundImagePath);
 
     // floatingSize 用途：浮动容器当前尺寸；无效时至少给 1x1，避免画刷构造失败。
+    floatingWidget->setProperty("ksword_main_surface_hierarchy", !enableDockContentTransparency);
     const QSize floatingSize = floatingWidget->size().isValid() ? floatingWidget->size() : QSize(1, 1);
     const QBrush backgroundBrush = buildBackgroundBrush(
         floatingSize,
@@ -13162,7 +13167,7 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
             "  background-color:%1 !important;"
             "  color:%2 !important;"
             "}")
-            .arg(surfaceBackgroundText)
+            .arg(ks::ui::MainWindowSurfaceColors().canvas.name())
             .arg(primaryTextColor);
 
     // kernelDockContentStyle 作用：
@@ -13334,6 +13339,7 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
             + dockContentTransparentStyle
             + finalDockAreaTransparentStyle
             + kernelDockStyle
+            + ks::ui::BuildMainSurfaceStyle(enableDockContentTransparency)
             + tabPluginOpaqueStyle
             + finalOrdinaryTabHoverStyle
             + KswordTheme::DockNavigationStyleSheet();
@@ -13389,6 +13395,7 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
         + dockContentTransparentStyle
         + finalDockAreaTransparentStyle
         + kernelDockStyle
+        + ks::ui::BuildMainSurfaceStyle(enableDockContentTransparency)
         + tabPluginOpaqueStyle
         + finalOrdinaryTabHoverStyle
         + KswordTheme::DockNavigationStyleSheet();

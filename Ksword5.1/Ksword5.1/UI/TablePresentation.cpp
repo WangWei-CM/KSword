@@ -1,5 +1,6 @@
 #include "TablePresentation.h"
 #include "VisibleTableWidget.h"
+#include "MainSurfaceStyle.h"
 #include "../theme.h"
 
 #include <QApplication>
@@ -207,26 +208,35 @@ namespace ks::ui
         const bool compact = view->property(kDensity).toInt() == static_cast<int>(TablePresentationDensity::Compact);
         const QString cellPadding = compact ? QStringLiteral("2px 6px") : QStringLiteral("4px 8px");
         const QString headerPadding = compact ? QStringLiteral("3px 6px") : QStringLiteral("5px 8px");
-        // 表头使用稳定的第二层表面，不能跟随内容 Base 变回同一底色。
-        const QString headerSurface = KswordTheme::SurfaceMutedColor().name();
+        // 主工作区把数据面、表头和页面底板分开；独立详情窗口继续使用原有角色。
+        const bool mainSurface = UsesMainSurfaceHierarchy(view);
+        const MainSurfaceColors surfaces = MainWindowSurfaceColors();
+        const QColor headerColor = mainSurface ? surfaces.header : KswordTheme::SurfaceMutedColor();
+        const QString headerSurface = headerColor.name();
         const QString headerText = KswordTheme::EnsureTextContrast(
-            KswordTheme::TextPrimaryColor(), KswordTheme::SurfaceMutedColor(), 4.5).name();
-        const QString headerBorder = KswordTheme::BorderColor().name();
+            KswordTheme::TextPrimaryColor(), headerColor, 4.5).name();
+        const QString headerBorder = mainSurface ? surfaces.border.name() : KswordTheme::BorderColor().name();
         // 外围轻描边区分并排表格；冻结辅助窗格是同一表格内容，不重复加圆角边界。
         const bool auxiliaryPane = view->property("KSWORD_TABLE_INTERACTION_FROZEN_PANE_AUXILIARY").toBool();
         const QString outerFrame = auxiliaryPane ? QStringLiteral("border:0;border-radius:0;")
             : QStringLiteral("border:1px solid %1;border-radius:6px;").arg(
-                KswordTheme::BlendColors(KswordTheme::SurfaceColor(), KswordTheme::BorderColor(), 150).name());
+                mainSurface ? surfaces.border.name()
+                    : KswordTheme::BlendColors(KswordTheme::SurfaceColor(), KswordTheme::BorderColor(), 150).name());
+        const QColor rowBackgrounds[] = {surfaces.content, surfaces.alternate};
+        const QString dataSurface = mainSurface
+            ? QStringLiteral("background-color:%1;color:%2;alternate-background-color:%3;")
+                .arg(surfaces.content.name(), KswordTheme::EnsureTextContrastForBackgrounds(
+                    KswordTheme::TextPrimaryColor(), rowBackgrounds, 2, 4.5).name(), surfaces.alternate.name())
+            : QStringLiteral("color:palette(text);alternate-background-color:palette(alternate-base);");
         // item 显式 border:0 会让 Qt 样式表接管单元格底面并忽略模型 BackgroundRole。
         // 仅配置 padding，网格仍由 setShowGrid(false) 管理，保留热度/风险/差异语义刷子。
         replacePresentationBlock(view, QStringLiteral(
             "QTableView,QTableWidget,QTreeView,QTreeWidget{"
-            "%4color:palette(text);"
-            "alternate-background-color:palette(alternate-base);"
+            "%4%5"
             "selection-background-color:palette(highlight);selection-color:palette(highlighted-text);}"
             "QTableView::item,QTableWidget::item,QTreeView::item,QTreeWidget::item{padding:%1;}"
             "QTableCornerButton::section{background:%2;border:0;border-bottom:1px solid %3;}")
-            .arg(cellPadding, headerSurface, headerBorder, outerFrame));
+            .arg(cellPadding, headerSurface, headerBorder, outerFrame, dataSurface));
 
         // normalizeHeader=false and the existing header-specific opt-out retain custom geometry.
         if (!normalizeHeader || (table != nullptr && PreservesCustomTableHeaderStyle(table)))
@@ -241,7 +251,7 @@ namespace ks::ui
             "border:0;border-bottom:1px solid %4;padding:%1;font-weight:600;}"
             "QHeaderView::section:hover{background-color:%5;}")
             .arg(headerPadding, headerSurface, headerText, headerBorder,
-                KswordTheme::ControlInputHoverColor(KswordTheme::SurfaceMutedColor()).name());
+                KswordTheme::ControlInputHoverColor(headerColor).name());
         replacePresentationBlock(columnHeader(view), headerBlock);
         if (table != nullptr)
         {

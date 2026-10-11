@@ -5329,14 +5329,8 @@ void ProcessDock::initializeProcessActivityPanel()
     m_activityPanelWidget->setObjectName(QStringLiteral("processActivityPanelWidget"));
     m_activityPanelWidget->setAutoFillBackground(false);
     m_activityPanelWidget->setAttribute(Qt::WA_StyledBackground, true);
-    m_activityPanelWidget->setStyleSheet(QStringLiteral(
-        "QWidget#processActivityPanelWidget {"
-        "  background:transparent;"
-        "  background-color:transparent;"
-        "  border:1px solid %1;"
-        "  border-radius:4px;"
-        "}")
-        .arg(KswordTheme::BorderHex()));
+    // 图表作为独立数据面，与下方表格共享层级；不修改图表内部的指标颜色。
+    ks::ui::StylePrimaryContentPanel(m_activityPanelWidget);
     ks::i18n::LanguageManager& languageManager = ks::i18n::LanguageManager::instance();
 
     QVBoxLayout* panelLayout = new QVBoxLayout(m_activityPanelWidget);
