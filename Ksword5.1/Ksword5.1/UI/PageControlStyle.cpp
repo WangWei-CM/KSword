@@ -141,7 +141,7 @@ namespace
         const int inset = tabs->property("ksword_page_tabs_content_inset").toInt(); // 明确登记的等边留白。
         const QVariant mainSurface = tabs->window()->property("ksword_main_surface_hierarchy");
         const QString background = mainSurface.isValid() && !mainSurface.toBool()
-            ? QStringLiteral("transparent") : (inset > 0 ? colors.rail : colors.page).name();
+            ? QStringLiteral("transparent") : colors.page.name();
         const QString rules = QStringLiteral(
             "QTabWidget[ksword_page_tabs_widget=\"true\"]::pane{"
             "border:0;border-radius:%3px;top:0px;background:%1;padding:%2px;}")
@@ -157,7 +157,7 @@ namespace
         tabs->setStyleSheet(current + rules);
     }
 
-    // 每个角只占8px方块；在原方形框架色中挖出内容的圆角，不描边也不铺侧翼。
+    // 角片只修整最外层框架；外半径=内部圆角半径+间隔，内外圆心重合以保持等宽。
     class PageContentCorner final : public QWidget
     {
     public:
@@ -170,10 +170,11 @@ namespace
             hide();
         }
 
-        // opening传入整个页面在Tab中的真实边界；当前角的位置由控制器设置。
-        void setOpeningRectangle(const QRect& opening)
+        // opening为包含四边留白的外框，radius为外半径；内部控件的圆角不在此重画。
+        void setOpeningRectangle(const QRect& opening, int radius)
         {
             m_opening = opening.translated(-pos());
+            m_radius = radius;
             update();
         }
 
@@ -186,10 +187,10 @@ namespace
             }
             const bool child = m_tabs->tabBar()->property("ksword_page_tabs_child").toBool();
             const PageTabColors colors = tabColors(ks::ui::UsesMainSurfaceHierarchy(m_tabs), child);
-            QPainterPath square; // 只画当前小角所在区域，内容视口不会被覆盖。
+            QPainterPath square; // 只填外框圆弧之外的角落，保留内部原有圆角和留白。
             square.addRect(QRectF(rect()));
             QPainterPath content;
-            content.addRoundedRect(QRectF(m_opening), kPageCornerRadius, kPageCornerRadius);
+            content.addRoundedRect(QRectF(m_opening), m_radius, m_radius);
             QPainter painter(this);
             painter.setRenderHint(QPainter::Antialiasing);
             painter.setPen(Qt::NoPen);
@@ -199,7 +200,8 @@ namespace
 
     private:
         QPointer<QTabWidget> m_tabs; // 颜色从原宿主读取，保留主题与父子栏层级。
-        QRect m_opening; // 页面边界转换到当前微型角片的局部坐标。
+        QRect m_opening; // 最外层框架边界转换到当前角片的局部坐标。
+        int m_radius = kPageCornerRadius; // 与内部圆角同心的外框半径。
     };
 
     // 导航仅延伸两个小凹角；不再沿内容高度画侧翼，不会产生第二圈包围边框。
@@ -407,22 +409,25 @@ namespace
             m_surface->setVisible(m_tabs->isVisible());
             m_surface->raise();
             bar->raise();
-            // 等边模式以整个页面四角为准，保留Tab下方的间隔，不再只连接首工具条。
-            const QRect opening = page ? QRect(page->mapTo(m_tabs, QPoint()), page->size()) : QRect();
+            // 页面已被pane内缩；向外还原这层间隔，角片必须放在外框而不是页面控件上。
+            const int inset = m_tabs->property("ksword_page_tabs_content_inset").toInt();
+            const int outerRadius = kPageCornerRadius + inset; // 8+6=14，圆角处也保持6px径向间隔。
+            const QRect opening = page ? QRect(page->mapTo(m_tabs, QPoint()), page->size())
+                .adjusted(-inset, -inset, inset, inset) : QRect();
             for (int index = 0; index < 4; ++index)
             {
                 PageContentCorner* corner = m_contentCorners[index];
                 const bool visible = contentFrame && page && m_tabs->isVisible()
-                    && opening.width() >= kPageCornerRadius * 2 && opening.height() >= kPageCornerRadius * 2;
+                    && opening.width() >= outerRadius * 2 && opening.height() >= outerRadius * 2;
                 corner->setVisible(visible);
                 if (!visible)
                 {
                     continue;
                 }
-                const int left = (index & 1) ? opening.right() + 1 - kPageCornerRadius : opening.left();
-                const int top = (index & 2) ? opening.bottom() + 1 - kPageCornerRadius : opening.top();
-                corner->setGeometry(left, top, kPageCornerRadius, kPageCornerRadius);
-                corner->setOpeningRectangle(opening);
+                const int left = (index & 1) ? opening.right() + 1 - outerRadius : opening.left();
+                const int top = (index & 2) ? opening.bottom() + 1 - outerRadius : opening.top();
+                corner->setGeometry(left, top, outerRadius, outerRadius);
+                corner->setOpeningRectangle(opening, outerRadius);
                 corner->raise();
             }
             // 角落的明确工具控件保留原按钮和命中；底面不应覆盖它们。
@@ -454,7 +459,7 @@ namespace
         QPointer<PageNavigationSurface> m_surface; // 仅导航行和两个小角的局部衔接层。
         QPointer<QWidget> m_observedPage; // 当前业务页，保持原有布局和边距。
         QPointer<QWidget> m_observedSurface; // 真正连接面，随其位置和尺寸变化更新小角。
-        QPointer<PageContentCorner> m_contentCorners[4]; // 只在明确等边模式下显示四个凹圆角。
+        QPointer<PageContentCorner> m_contentCorners[4]; // 等边模式的最外层四角，不覆盖内部组件圆角。
         bool m_pending = false; // 同一轮字体/布局/样式事件仅安排一次同步。
     };
 }
