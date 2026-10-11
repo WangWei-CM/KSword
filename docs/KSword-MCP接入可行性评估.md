@@ -1,6 +1,6 @@
 # KSword MCP 接入可行性评估
 
-日期：2026-10-10。范围：当前工作树静态检查，以及 Qt 6.9.3、Microsoft UI Automation、MCP 官方资料研究。未启动 KSword、CLI 或驱动，未构建，也未做 UIA/MCP 端到端验收。
+研究日期：2026-10-10。下文保留当时的源码及官方资料评估。2026-10-11 已开始实现路线 2；使用方式见 [Qt 对象桥 MCP](../tools/ksword_mcp/README.md)，实现与验证记录见文末。
 
 ## 结论
 
@@ -118,7 +118,7 @@ Qt 元对象可枚举已登记的属性和方法，但普通 C++ 方法未用 sl
 | `ksword_job_status` | 对接现有任务完成/取消信号，区分 accepted、running、partial、completed、failed、cancelled。 |
 | 少量业务工具 | 先包装已支持 R3 JSON 的 CLI 命令，后续复用共享后端。 |
 
-这是建议的工具面，当前仓库尚未实现这些 MCP 工具。通用 UI 工具可减少工具数量；具体能力发现通过页面/动作目录实现。正式业务工具需要 typed inputSchema、outputSchema 和动作说明，不能仅从 CLI 的 syntax 文本自动推导完整合约。
+这是研究阶段提出的工具面；首版已实现的工具以 [sidecar 文档](../tools/ksword_mcp/README.md)为准。通用 UI 工具可减少工具数量；具体能力发现通过页面/动作目录实现。正式业务工具需要 typed inputSchema、outputSchema 和动作说明，不能仅从 CLI 的 syntax 文本自动推导完整合约。
 
 Qt widget 和连接到 view 的模型必须在 GUI 线程使用。IPC/协议层排队到 GUI 线程，按子树/行范围分片读取并返回值快照；不要在 GUI 线程同步等待客户端，也不要让网络线程直接遍历控件或模型。`invokeMethod(..., QueuedConnection)` 可用于投递，`BlockingQueuedConnection` 在同线程使用会死锁。[Qt 6.9 线程与 QObject](https://doc.qt.io/archives/qt-6.9/threads-qobject.html)、[QAbstractItemModel 线程边界](https://doc.qt.io/archives/qt-6.9/qabstractitemmodel.html#thread-safety)、[QMetaObject 6.9.3](https://doc.qt.io/archives/qt-6.9/qmetaobject.html)
 
@@ -142,4 +142,27 @@ UI 数据结果应明确说明后端、快照时间/代次和已加载范围。�
 
 最有信息量的首批原型是：一个尚未创建的 Dock、普通按钮加输入框、一个动态表格、一个临时右键菜单、HexCanvas 读/选区薄适配、一个异步扫描的完成与取消。它们可以验证通用桥是否承担了主要工作，以及哪些例外确实需要逐控件/逐功能适配。
 
-后续运行验收应分别记录 Qt 对象桥/UIA/CLI 三种路径的结果，并覆盖中文/英文、详情窗口关闭重建、表格刷新与排序、模态确认、目标退出、提权和能力不支持等实际状态。驱动或硬件功能仍需对应真实环境验收。当前完成的是可行性研究和接口方案，尚无任何 MCP 或全功能覆盖的运行通过结论。
+后续运行验收应分别记录 Qt 对象桥/UIA/CLI 三种路径的结果，并覆盖中文/英文、详情窗口关闭重建、表格刷新与排序、模态确认、目标退出、提权和能力不支持等实际状态。驱动或硬件功能仍需对应真实环境验收。本节保留研究阶段的验收建议；首版的构建与夹具证据见下节，真实产品页面、驱动和硬件功能仍需逐项验收。
+
+## 首版实现与验证（2026-10-11）
+
+路线 2 已落地为主程序内建 Qt 对象桥和独立 stdio sidecar。使用新版主程序的 `--mcp` 启动参数显式开启；连接固定为本机 PID 命名管道，双方核验实际进程身份，主程序另复核同用户、同会话及同完整性级别。启动命令、客户端配置和 11 个工具的调用顺序见 [使用说明](../tools/ksword_mcp/README.md)。
+
+- 通用引擎：[McpUiController](../Ksword5.1/Ksword5.1/UI/McpUiController.h)，支持目录/导航、控件快照、按钮/原生菜单、字段编辑、文本/模型切片与修订校验选行。图标按钮优先保留可访问名称，缺失时用原悬停释义辅助发现。
+- 本地服务：[McpLocalBridge](../Ksword5.1/Ksword5.1/UI/McpLocalBridge.cpp)，有请求/响应/连接预算，关闭时作废排队动作。变更动作明确确认且不自动重试，原有业务确认弹窗继续由 GUI 处理。
+- 特殊控件：内建代码通过 `registerReadAdapter` 注册真实 Qt 类型的只读扩展；首个 [HexCanvas 适配器](../Ksword5.1/Ksword5.1/UI/McpHexCanvasAdapter.cpp)只读取已经加载的画布缓存、暂存层和选区，不请求 provider 或直接读取/写入目标内存。地址保持 uint64 十六进制字符串。
+- 操作回执：`operation_status` 仅表明控件调用已排队/派发或失败，业务完成状态明确为未知；仍需读取页面、文本或表格验证实际业务结果。
+
+最终冻结源码的独立验证记录：
+
+| 检查 | 结果及范围 |
+| --- | --- |
+| sidecar 原生管道/协议/官方 SDK 回归 | 21 项通过；含分片读写、有限超时与取消、服务端 PID、句柄回收、严格原始 schema 和不重试动作。 |
+| 生产 Qt/IPC 源码的 HostX64 `/W4 /WX` 夹具 | 120 项断言通过，0 失败，退出码 0；含真实 `QMenu::exec()` 返回选择、输入信号、自毁回调、菜单归属、旧模型修订、敏感字段和图标释义。 |
+| 官方 SDK → stdio sidecar → 本地管道 → 生产 Qt 桥 | 94 项断言通过，退出码 0；11 个工具被实际发现和调用。另有真实 IPC 回调销毁 heap 宿主的独立正常退出用例，客户端收到预期传输错误。 |
+| 中英语言包 | 审计通过，新增的两条启动诊断已同步。 |
+| 主程序 Release/x64 | 最终 MSBuild 返回 `BUILD_RESULT=SUCCESS`、`EXIT_CODE=0`，标准 `Ksword5.1/x64/Release/Ksword5.1.exe` 为 24,568,320 字节；SHA256 为 `C3B9E2578FC2423D15B827E4911A12C731AC651BC14DC321462B37B27B53A63F`。构建日志：`.codex-build-logs/ksword-build-check-20261011-004011.raw.log`。 |
+
+回归入口为 [Qt 构建/夹具脚本](../tools/Invoke-McpUiBridgeTests.ps1)和 [MCP 端到端脚本](../tools/mcp_ui_bridge_e2e.py)。本机证据在 `output/mcp-ui-bridge-build.log`、`output/mcp-ui-bridge-tests.log`、`output/mcp-ui-e2e-tests.log` 与 `output/mcp-ui-destroy-fixture.log`；这些运行产物不纳入源码提交。
+
+以上验证使用合成 Qt 窗口，不加载生产驱动。实际产品的逐页 GUI、实际 HexCanvas 数据源、提权部署和驱动/硬件功能仍需对应环境验收；不能从通用工具数量推导全功能覆盖率。

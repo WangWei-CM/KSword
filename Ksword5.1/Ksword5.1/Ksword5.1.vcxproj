@@ -674,6 +674,12 @@
     <ClCompile Include="UI\PrimaryPageStyle.cpp" />
     <ClCompile Include="UI\MainSurfaceStyle.cpp" />
     <ClCompile Include="UI\PageNavigationBridge.cpp" />
+    <ClCompile Include="UI\McpLocalBridge.cpp" />
+    <ClCompile Include="UI\McpHexCanvasAdapter.cpp" />
+    <ClCompile Include="UI\McpUiController.Adapters.cpp" />
+    <ClCompile Include="UI\McpUiController.cpp" />
+    <ClCompile Include="UI\McpUiController.Fields.cpp" />
+    <ClCompile Include="UI\McpUiController.Tables.cpp" />
     <ClCompile Include="UI\SegmentedControl.cpp" />
     <ClCompile Include="UI\ThemedSlider.cpp" />
     <ClCompile Include="UI\SettingsPresentation.cpp" />
@@ -915,7 +921,11 @@
     <ClInclude Include="UI\PrimaryPageStyle.h" />
     <ClInclude Include="UI\MainSurfaceStyle.h" />
     <ClInclude Include="UI\PageNavigationBridge.h" />
+    <ClInclude Include="UI\McpLocalBridge.h" />
+    <ClInclude Include="UI\McpHexCanvasAdapter.h" />
+    <ClInclude Include="UI\McpUiController.h" />
     <ClInclude Include="..\..\shared\usermode\KswordPageNavigation.h" />
+    <ClInclude Include="..\..\shared\usermode\KswordMcpProtocol.h" />
     <ClInclude Include="UI\SegmentedControl.h" />
     <ClInclude Include="UI\ThemedSlider.h" />
     <ClInclude Include="UI\SettingsPresentation.h" />

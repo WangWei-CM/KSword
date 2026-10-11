@@ -1562,6 +1562,24 @@
     <ClCompile Include="UI\PageNavigationBridge.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="UI\McpLocalBridge.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="UI\McpHexCanvasAdapter.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="UI\McpUiController.Adapters.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="UI\McpUiController.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="UI\McpUiController.Fields.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="UI\McpUiController.Tables.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="UI\SegmentedControl.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -2769,7 +2787,19 @@
     <ClInclude Include="UI\PageNavigationBridge.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="UI\McpLocalBridge.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="UI\McpHexCanvasAdapter.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="UI\McpUiController.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="..\..\shared\usermode\KswordPageNavigation.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\shared\usermode\KswordMcpProtocol.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="UI\SegmentedControl.h">

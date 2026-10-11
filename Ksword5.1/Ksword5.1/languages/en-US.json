@@ -40480,6 +40480,8 @@
     "应用冻结": "Apply freeze",
     "数量按照当前可见顺序；冻结区域最多占用视口的一半。": "Counts follow the current visible order. The frozen area can occupy at most half of the viewport.",
     "受信任的发布者": "Trusted publisher",
-    "ProcessGeneralProjectedCaption": "ProcessGeneralProjectedCaption"
+    "ProcessGeneralProjectedCaption": "ProcessGeneralProjectedCaption",
+    "本地 MCP 桥已启用：%1": "Local MCP bridge enabled: %1",
+    "本地 MCP 桥启动失败：%1": "Local MCP bridge failed to start: %1"
   }
 }

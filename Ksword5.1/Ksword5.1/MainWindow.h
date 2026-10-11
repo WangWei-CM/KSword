@@ -69,6 +69,7 @@ namespace ks::ui
     class CustomTitleBar; // 前置声明：主窗口自绘标题栏组件。
     class GlobalUiSearchController; // 前置声明：标题栏全局页面搜索控制器。
     class PageNavigationBridge; // Taskbar 页面目录与跨进程导航服务。
+    class McpLocalBridge; // 显式启动的本地 MCP Qt 对象桥。
     class CommandExecutionPopup; // 前置声明：标题栏 CMD 命令选项弹层。
     struct CommandExecutionOptions; // 前置声明：CMD 命令启动选项快照。
     class NotificationCardManager;
@@ -735,6 +736,7 @@ private:
     ks::ui::CustomTitleBar* m_customTitleBar = nullptr; // m_customTitleBar：主窗口自绘标题栏组件。
     ks::ui::GlobalUiSearchController* m_globalUiSearchController = nullptr; // m_globalUiSearchController：标题栏全局页面搜索控制器。
     ks::ui::PageNavigationBridge* m_pageNavigationBridge = nullptr; // 不在主程序增加导航按钮。
+    ks::ui::McpLocalBridge* m_mcpLocalBridge = nullptr; // 在页面及驱动后端拆除前关闭。
     ks::ui::CommandExecutionPopup* m_commandExecutionPopup = nullptr; // m_commandExecutionPopup：标题栏 CMD 选项弹层。
     bool m_windowPinned = false;                        // m_windowPinned：主窗口当前是否置顶。
     bool m_captureProtectionEnabled = false;            // m_captureProtectionEnabled：主窗口当前是否启用截屏屏蔽。

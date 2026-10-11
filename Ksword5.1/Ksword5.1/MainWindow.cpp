@@ -3,6 +3,8 @@
 #include "UI/SecondaryPageLayout.h"
 #include "UI/MainSurfaceStyle.h"
 #include "UI/PageNavigationBridge.h"
+#include "UI/McpLocalBridge.h"
+#include "UI/McpHexCanvasAdapter.h"
 #include "UI/UI_All.h"
 #include "../../shared/usermode/KswordArkServiceMode.h"
 #include "Framework/PrivilegeElevationPrompt.h"
@@ -5376,10 +5378,74 @@ MainWindow::MainWindow(
         93,
         QStringLiteral("main.startup.progress.main_window_ready"),
         QStringLiteral("即将完成..."));
+
+    // 只在当前启动参数显式包含 --mcp 时开放本地桥，目录读取不初始化全部页面。
+    if (QCoreApplication::arguments().contains(QStringLiteral("--mcp")))
+    {
+        m_mcpLocalBridge = new ks::ui::McpLocalBridge(this, [this]()
+        {
+            QJsonArray pages; // 当前主程序已登记的一级 Dock 目录。
+            for (ads::CDockWidget* dock : collectSearchableDockWidgets())
+            {
+                if (!dock)
+                {
+                    continue;
+                }
+                const QString id = dock->objectName(); // 原布局恢复使用的稳定英文键。
+                const bool initialized = !dock->property("ks_lazy_key").isValid()
+                    || dock->property("ks_lazy_initialized").toBool();
+                pages.append(QJsonObject{{QStringLiteral("id"), id},
+                    {QStringLiteral("title"), dock->windowTitle()},
+                    {QStringLiteral("initialized"), initialized}});
+            }
+            return pages;
+        }, [this](const QString& pageId) -> QWidget*
+        {
+            // 仅允许目录中的 Dock，导航继续复用已有的懒加载/置前链。
+            for (ads::CDockWidget* dock : collectSearchableDockWidgets())
+            {
+                if (dock && dock->objectName() == pageId)
+                {
+                    if (dock->property("ks_lazy_initializing").toBool())
+                    {
+                        return nullptr; // 重入时不把尚未完成的占位页登记为可操作内容。
+                    }
+                    QPointer<ads::CDockWidget> guardedDock(dock); // 初始化期间允许事件循环重入。
+                    activateDockForSearchNavigation(dock);
+                    if (!guardedDock || (guardedDock->property("ks_lazy_key").isValid()
+                        && !guardedDock->property("ks_lazy_initialized").toBool()))
+                    {
+                        return nullptr; // 初始化失败或尚未完成时必须返回 page_unavailable。
+                    }
+                    return guardedDock->widget();
+                }
+            }
+            return nullptr;
+        });
+        ks::ui::registerMcpHexCanvasAdapter(m_mcpLocalBridge); // 自绘画布只读查询共用扩展注册表。
+        kLogEvent mcpEvent; // 本次启动桥的统一诊断事件，不包含用户字段值。
+        const bool started = m_mcpLocalBridge->start();
+        const QString diagnostic = started
+            ? ks::i18n::sourceText(QStringLiteral("本地 MCP 桥已启用：%1")).arg(m_mcpLocalBridge->endpoint())
+            : ks::i18n::sourceText(QStringLiteral("本地 MCP 桥启动失败：%1")).arg(m_mcpLocalBridge->lastError());
+        if (started)
+        {
+            info << mcpEvent << diagnostic.toUtf8().toStdString() << eol;
+        }
+        else
+        {
+            warn << mcpEvent << diagnostic.toUtf8().toStdString() << eol;
+        }
+    }
 }
 
 MainWindow::~MainWindow()
 {
+    // 排队的 MCP 动作必须先失效，再拆除页面、驱动租约与后台消费者。
+    if (m_mcpLocalBridge)
+    {
+        m_mcpLocalBridge->close();
+    }
     // 先使已进入 Qt 队列的通知失效，再等待工作线程已经复制的 handler 归还租约。
     // 返回后不会再有线程使用 this 投递新事件，随后才能安全拆除窗口成员。
     m_r0NotificationLifetime->store(false, std::memory_order_release);
