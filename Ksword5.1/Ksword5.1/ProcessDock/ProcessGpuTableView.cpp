@@ -5,7 +5,7 @@
 #include <QGuiApplication>
 #include <QOpenGLContext>
 #include <QOpenGLFunctions>
-#include <QOpenGLWidget>
+#include <QtOpenGLWidgets/QOpenGLWidget>
 #include <QSurfaceFormat>
 #include <QTimer>
 

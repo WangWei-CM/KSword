@@ -1,10 +1,5 @@
 #include "StartupSplash.h"
 
-#include "../Internationalization/LanguageManager.h"
-
-#include <QtCore/QFile>
-#include <QtCore/QString>
-
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
@@ -14,690 +9,632 @@
 #include <gdiplus.h>
 
 #include <algorithm>
+#include <atomic>
+#include <condition_variable>
 #include <cmath>
-#include <cstring>
 #include <memory>
+#include <mutex>
 #include <string>
+#include <thread>
+#include <vector>
 
 #pragma comment(lib, "Gdiplus.lib")
-#pragma comment(lib, "Ole32.lib")
 
 namespace
 {
-    // kFrameworkSplashClassName 作用：
-    // - Framework 启动画面的原生窗口类名；
-    // - 用于注册和创建 Win32 Layered Window。
-    constexpr wchar_t kFrameworkSplashClassName[] = L"KswordFrameworkStartupSplashWindow";
+    constexpr wchar_t kWindowClass[] = L"KswordFrameworkSplashWindow";
+    constexpr int kBaseWidth = 640;
+    constexpr UINT kShowMessage = WM_APP + 1;
+    constexpr UINT kHideMessage = WM_APP + 2;
+    constexpr UINT kRedrawMessage = WM_APP + 3;
+    constexpr UINT kResetAnimationMessage = WM_APP + 4;
 
-    // kFrameworkSplashLogoResourcePath* 作用：
-    // - 分别保存中英文启动图的 qrc 资源路径；
-    // - 启动图直接从程序资源读取，不依赖磁盘目录。
-    constexpr auto kFrameworkSplashLogoResourcePathEnglish =
-        ":/Image/Resource/Logo/KswordHome-En.png";
-    constexpr auto kFrameworkSplashLogoResourcePathChinese =
-        ":/Image/Resource/Logo/KswordHome-ZH.png";
-
-    // frameworkSplashLogoResourcePath 作用：
-    // - 根据 LanguageManager 已解析出的最终界面语言选择启动图；
-    // - 简体中文使用中文图，其余语言使用英文图。
-    QString frameworkSplashLogoResourcePath()
+    std::wstring utf8ToWide(const std::string& text)
     {
-        const QString currentLanguageId =
-            ks::i18n::LanguageManager::instance().currentLanguageId();
-        return QString::fromLatin1(
-            currentLanguageId.startsWith(QStringLiteral("zh"), Qt::CaseInsensitive)
-                ? kFrameworkSplashLogoResourcePathChinese
-                : kFrameworkSplashLogoResourcePathEnglish);
+        if (text.empty()) return {};
+        const int count = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+            text.c_str(), -1, nullptr, 0);
+        if (count <= 0) return {};
+        std::wstring result(static_cast<size_t>(count), L'\0');
+        if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, text.c_str(), -1,
+            result.data(), count) == 0) return {};
+        result.pop_back();
+        return result;
     }
 
-    // clampProgressPercent 作用：
-    // - 把进度值约束在 0~100；
-    // - 避免进度条宽度出现负值或溢出。
-    int clampProgressPercent(const int rawPercentValue)
+    std::wstring defaultImagePath()
     {
-        return std::clamp(rawPercentValue, 0, 100);
-    }
-
-    // utf8ToWideText 作用：
-    // - 把 UTF-8 文本转换为 UTF-16 宽字符串；
-    // - 供 GDI+ DrawString 绘制中文状态文本。
-    // 调用方式：progress 调用时转换业务文案。
-    // 入参 utf8Text：UTF-8 编码文本。
-    // 返回：UTF-16 宽字符串；失败时返回空字符串。
-    std::wstring utf8ToWideText(const std::string& utf8Text)
-    {
-        if (utf8Text.empty())
+        std::vector<wchar_t> buffer(MAX_PATH);
+        for (;;)
         {
-            return std::wstring();
-        }
-
-        const int requiredLength = ::MultiByteToWideChar(
-            CP_UTF8,
-            0,
-            utf8Text.c_str(),
-            -1,
-            nullptr,
-            0);
-        if (requiredLength <= 1)
-        {
-            return std::wstring();
-        }
-
-        std::wstring wideTextBuffer(static_cast<std::size_t>(requiredLength - 1), L'\0');
-        const int convertResult = ::MultiByteToWideChar(
-            CP_UTF8,
-            0,
-            utf8Text.c_str(),
-            -1,
-            wideTextBuffer.data(),
-            requiredLength);
-        if (convertResult <= 1)
-        {
-            return std::wstring();
-        }
-        return wideTextBuffer;
-    }
-
-    // querySystemDpiValue 作用：
-    // - 获取当前系统 DPI 值；
-    // - 新系统优先调用 GetDpiForSystem，旧系统回退 96 DPI。
-    // 返回：系统 DPI（>=96）。
-    UINT querySystemDpiValue()
-    {
-        HMODULE user32ModuleHandle = ::GetModuleHandleW(L"user32.dll");
-        if (user32ModuleHandle != nullptr)
-        {
-            using GetDpiForSystemFunction = UINT(WINAPI*)();
-            const GetDpiForSystemFunction getDpiForSystemFunction =
-                reinterpret_cast<GetDpiForSystemFunction>(
-                    ::GetProcAddress(user32ModuleHandle, "GetDpiForSystem"));
-            if (getDpiForSystemFunction != nullptr)
+            const DWORD copied = GetModuleFileNameW(nullptr, buffer.data(),
+                static_cast<DWORD>(buffer.size()));
+            if (copied == 0) return {};
+            if (copied < buffer.size() - 1)
             {
-                const UINT queriedDpi = getDpiForSystemFunction();
-                if (queriedDpi >= 96U)
-                {
-                    return queriedDpi;
-                }
+                std::wstring path(buffer.data(), copied);
+                const size_t slash = path.find_last_of(L"\\/");
+                if (slash == std::wstring::npos) return {};
+                return path.substr(0, slash + 1) + L"Style\\KswordHome_2.png";
             }
+            if (buffer.size() >= 32768) return {};
+            buffer.resize(buffer.size() * 2);
         }
-        return 96U;
     }
 
-    // pumpNativeSplashMessages 作用：
-    // - 手动泵一次启动窗自己的 Win32 消息循环；
-    // - 避免把 Qt 主窗口消息提前派发，打乱首帧与事件时序。
-    // 入参 splashWindowHandle：启动窗句柄。
-    void pumpNativeSplashMessages(const HWND splashWindowHandle)
+    void enableSplashThreadDpiAwareness()
     {
-        if (splashWindowHandle == nullptr)
+        // The splash precedes QApplication: set physical coordinates only on
+        // its UI thread, leaving Qt's process/thread DPI setup to Qt.
+        const HMODULE user32 = GetModuleHandleW(L"user32.dll");
+        using SetThreadDpiAwarenessContextFn = HANDLE(WINAPI*)(HANDLE);
+        const auto setDpiContext = reinterpret_cast<SetThreadDpiAwarenessContextFn>(
+            GetProcAddress(user32, "SetThreadDpiAwarenessContext"));
+        if (setDpiContext != nullptr)
         {
-            return;
+            if (setDpiContext(reinterpret_cast<HANDLE>(static_cast<LONG_PTR>(-4))) == nullptr)
+                setDpiContext(reinterpret_cast<HANDLE>(static_cast<LONG_PTR>(-3)));
         }
+    }
 
-        MSG pendingMessage = {};
-        while (::PeekMessageW(&pendingMessage, splashWindowHandle, 0, 0, PM_REMOVE) != FALSE)
+    UINT windowDpi(HWND window)
+    {
+        const HMODULE user32 = GetModuleHandleW(L"user32.dll");
+        using GetDpiForWindowFn = UINT(WINAPI*)(HWND);
+        const auto getDpi = reinterpret_cast<GetDpiForWindowFn>(
+            GetProcAddress(user32, "GetDpiForWindow"));
+        if (window != nullptr && getDpi != nullptr)
         {
-            ::TranslateMessage(&pendingMessage);
-            ::DispatchMessageW(&pendingMessage);
+            const UINT dpi = getDpi(window);
+            if (dpi != 0) return dpi;
         }
+        HDC screen = GetDC(nullptr);
+        const UINT dpi = screen != nullptr ? static_cast<UINT>(GetDeviceCaps(screen, LOGPIXELSX)) : 96;
+        if (screen != nullptr) ReleaseDC(nullptr, screen);
+        return std::max(96U, dpi);
+    }
+
+    void fillRoundedRectangle(Gdiplus::Graphics& graphics, const Gdiplus::Brush& brush,
+        float x, float y, float width, float height)
+    {
+        if (width <= 0.0f || height <= 0.0f) return;
+        const float diameter = std::min(width, height);
+        Gdiplus::GraphicsPath outline;
+        outline.AddArc(x, y, diameter, diameter, 180.0f, 90.0f);
+        outline.AddArc(x + width - diameter, y, diameter, diameter, 270.0f, 90.0f);
+        outline.AddArc(x + width - diameter, y + height - diameter,
+            diameter, diameter, 0.0f, 90.0f);
+        outline.AddArc(x, y + height - diameter, diameter, diameter, 90.0f, 90.0f);
+        outline.CloseFigure();
+        graphics.FillPath(&brush, &outline);
+    }
+
+    double cubic(double t, double p1, double p2)
+    {
+        const double inverse = 1.0 - t;
+        return 3.0 * inverse * inverse * t * p1 +
+            3.0 * inverse * t * t * p2 + t * t * t;
+    }
+
+    double winUiTravel(double elapsedFraction)
+    {
+        // WinUI's progress-bar spline is cubic-bezier(0.4, 0, 0.6, 1).
+        double low = 0.0;
+        double high = 1.0;
+        for (int index = 0; index < 16; ++index)
+        {
+            const double middle = (low + high) * 0.5;
+            if (cubic(middle, 0.4, 0.6) < elapsedFraction) low = middle;
+            else high = middle;
+        }
+        return cubic((low + high) * 0.5, 0.0, 1.0);
     }
 }
 
-// kStartupSplash::Impl 作用：
-// - 承载启动窗口全部 Win32/GDI+ 资源与绘制逻辑；
-// - 由外层 kStartupSplash 通过 PImpl 统一调度。
 class kStartupSplash::Impl final
 {
 public:
-    // 构造函数作用：
-    // - 初始化默认状态文本和绘制参数；
-    // - 不做重量级资源创建。
-    Impl() = default;
-
-    // 析构函数作用：
-    // - 统一回收窗口句柄与 GDI+ 资源；
-    // - 避免进程退出时残留对象。
     ~Impl()
     {
-        shutdown();
+        const HWND window = m_window.load();
+        if (window != nullptr) PostMessageW(window, WM_CLOSE, 0, 0);
+        if (m_thread.joinable()) m_thread.join();
     }
 
-    // showWindow 作用：
-    // - 确保初始化成功后显示启动窗口；
-    // - 首次显示时同步渲染首帧。
-    // 返回：true=显示成功；false=初始化失败。
-    bool showWindow(const std::string& initialStatusTextUtf8)
+    void setBackgroundImagePath(const std::wstring& path)
     {
-        const std::wstring initialStatusText = utf8ToWideText(initialStatusTextUtf8);
-        if (!initialStatusText.empty())
-        {
-            m_statusText = initialStatusText;
-        }
-        m_progressPercent = 0;
-
-        if (!initialize())
-        {
-            return false;
-        }
-        if (m_windowHandle == nullptr)
-        {
-            return false;
-        }
-
-        recalculateLayoutMetrics();
-        renderFrame();
-        ::ShowWindow(m_windowHandle, SW_SHOWNOACTIVATE);
-        ::UpdateWindow(m_windowHandle);
-        pumpNativeSplashMessages(m_windowHandle);
-        return true;
+        std::lock_guard<std::mutex> lock(m_stateMutex);
+        if (!m_thread.joinable()) m_imagePath = path;
     }
 
-    // hideWindow 作用：
-    // - 隐藏启动窗口但保留句柄，支持后续再次显示；
-    // - 不销毁 GDI+ 与图像资源。
-    void hideWindow()
+    void setFooterText(const std::wstring& email, const std::wstring& buildDate,
+        const std::wstring& repository)
     {
-        if (m_windowHandle != nullptr)
         {
-            ::ShowWindow(m_windowHandle, SW_HIDE);
-            pumpNativeSplashMessages(m_windowHandle);
+            std::lock_guard<std::mutex> lock(m_stateMutex);
+            m_email = email;
+            m_buildDate = buildDate;
+            m_repository = repository;
         }
+        requestRedraw();
     }
 
-    // setProgressState 作用：
-    // - 更新状态文案与进度百分比；
-    // - 立即重绘并泵消息，保证视觉实时反馈。
-    // 入参 operationNameUtf8：当前操作名称（UTF-8）。
-    // 入参 progressPercent：进度百分比（0~100）。
-    void setProgressState(const std::string& operationNameUtf8, const int progressPercent)
+    void setProgressMode(SplashProgressMode mode)
     {
-        if (m_windowHandle == nullptr || !m_initialized)
         {
-            return;
+            std::lock_guard<std::mutex> lock(m_stateMutex);
+            if (m_mode == mode) return;
+            m_mode = mode;
         }
-
-        const std::wstring nextStatusText = utf8ToWideText(operationNameUtf8);
-        if (!nextStatusText.empty())
-        {
-            m_statusText = nextStatusText;
-        }
-        m_progressPercent = clampProgressPercent(progressPercent);
-        renderFrame();
-        pumpNativeSplashMessages(m_windowHandle);
+        const HWND window = m_window.load();
+        if (window != nullptr) PostMessageW(window, kResetAnimationMessage, 0, 0);
     }
 
-    // isReady 作用：
-    // - 查询当前实现对象是否已准备好显示。
-    // 返回：true=初始化完成且窗口句柄有效。
-    bool isReady() const
+    void setAccentColorRgb(unsigned int rgb)
     {
-        return m_initialized && m_windowHandle != nullptr;
+        {
+            std::lock_guard<std::mutex> lock(m_stateMutex);
+            m_accentRgb = rgb & 0x00FFFFFFU;
+        }
+        requestRedraw();
     }
 
-private:
-    // StreamReleaser 作用：
-    // - IStream 智能指针删除器；
-    // - 用于安全释放 COM 内存流对象。
-    struct StreamReleaser
+    bool show(const std::string& initialStatusText)
     {
-        void operator()(IStream* streamPointer) const
+        const std::wstring status = utf8ToWide(initialStatusText);
         {
-            if (streamPointer != nullptr)
+            std::lock_guard<std::mutex> lock(m_stateMutex);
+            m_status = status.empty() ? L"Ksword" : status;
+            m_percent = 0;
+        }
+        if (!m_thread.joinable())
+        {
             {
-                streamPointer->Release();
+                std::lock_guard<std::mutex> lock(m_stateMutex);
+                m_threadReady = false;
+                m_threadSucceeded = false;
+            }
+            // Rescue launches select the caller's desktop before splash startup.
+            m_desktop = GetThreadDesktop(GetCurrentThreadId());
+            m_thread = std::thread(&Impl::run, this);
+            std::unique_lock<std::mutex> lock(m_stateMutex);
+            m_created.wait(lock, [this] { return m_threadReady; });
+            if (!m_threadSucceeded)
+            {
+                lock.unlock();
+                m_thread.join();
+                return false;
             }
         }
-    };
-
-    // initialize 作用：
-    // - 初始化 GDI+、加载 Logo、注册窗口类并创建窗口；
-    // - 初始化成功后可执行 show/progress。
-    bool initialize()
-    {
-        if (m_initialized)
-        {
-            return true;
-        }
-
-        // startupInput 作用：GDI+ 启动配置输入结构。
-        Gdiplus::GdiplusStartupInput startupInput;
-        const Gdiplus::Status startupResult = Gdiplus::GdiplusStartup(
-            &m_gdiplusToken,
-            &startupInput,
-            nullptr);
-        if (startupResult != Gdiplus::Ok)
-        {
-            return false;
-        }
-
-        // logoFile 作用：读取 qrc 内嵌 Logo 的二进制数据。
-        QFile logoFile(frameworkSplashLogoResourcePath());
-        if (!logoFile.open(QIODevice::ReadOnly))
-        {
-            shutdown();
-            return false;
-        }
-
-        // logoBytes 作用：承载 Logo PNG 的原始字节流。
-        const QByteArray logoBytes = logoFile.readAll();
-        if (logoBytes.isEmpty())
-        {
-            shutdown();
-            return false;
-        }
-
-        // memoryHandle 作用：为 COM IStream 分配可移动全局内存块。
-        HGLOBAL memoryHandle = ::GlobalAlloc(GMEM_MOVEABLE, static_cast<SIZE_T>(logoBytes.size()));
-        if (memoryHandle == nullptr)
-        {
-            shutdown();
-            return false;
-        }
-
-        void* memoryPointer = ::GlobalLock(memoryHandle);
-        if (memoryPointer == nullptr)
-        {
-            ::GlobalFree(memoryHandle);
-            shutdown();
-            return false;
-        }
-        std::memcpy(memoryPointer, logoBytes.constData(), static_cast<std::size_t>(logoBytes.size()));
-        ::GlobalUnlock(memoryHandle);
-
-        IStream* streamRawPointer = nullptr;
-        const HRESULT createStreamResult = ::CreateStreamOnHGlobal(memoryHandle, TRUE, &streamRawPointer);
-        if (FAILED(createStreamResult) || streamRawPointer == nullptr)
-        {
-            ::GlobalFree(memoryHandle);
-            shutdown();
-            return false;
-        }
-        m_logoStream.reset(streamRawPointer);
-
-        // imageRawPointer 作用：GDI+ 图像对象原始指针，后续转为 unique_ptr 托管。
-        Gdiplus::Image* imageRawPointer = Gdiplus::Image::FromStream(m_logoStream.get(), FALSE);
-        m_logoImage.reset(imageRawPointer);
-        if (!m_logoImage || m_logoImage->GetLastStatus() != Gdiplus::Ok)
-        {
-            shutdown();
-            return false;
-        }
-
-        if (!registerWindowClassIfNeeded())
-        {
-            shutdown();
-            return false;
-        }
-
-        recalculateLayoutMetrics();
-
-        // windowStyleEx 作用：组合透明层、置顶、无激活启动窗样式。
-        const DWORD windowStyleEx = WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE;
-        m_windowHandle = ::CreateWindowExW(
-            windowStyleEx,
-            kFrameworkSplashClassName,
-            L"",
-            WS_POPUP,
-            m_windowPosX,
-            m_windowPosY,
-            m_windowWidth,
-            m_windowHeight,
-            nullptr,
-            nullptr,
-            ::GetModuleHandleW(nullptr),
-            this);
-        if (m_windowHandle == nullptr)
-        {
-            shutdown();
-            return false;
-        }
-
-        m_initialized = true;
-        return true;
+        const HWND window = m_window.load();
+        if (window == nullptr) return false;
+        SendMessageW(window, kShowMessage, 0, 0);
+        return IsWindowVisible(window) != FALSE;
     }
 
-    // shutdown 作用：
-    // - 回收原生窗口、图像流与 GDI+；
-    // - 在析构和初始化失败回滚场景复用。
-    void shutdown()
+    void hide()
     {
-        if (m_windowHandle != nullptr)
+        const HWND window = m_window.load();
+        if (window != nullptr) SendMessageW(window, kHideMessage, 0, 0);
+    }
+
+    void progress(const std::string& operationName, int percent)
+    {
+        if (m_window.load() == nullptr) return;
+        const std::wstring status = utf8ToWide(operationName);
         {
-            ::DestroyWindow(m_windowHandle);
-            m_windowHandle = nullptr;
+            std::lock_guard<std::mutex> lock(m_stateMutex);
+            if (!status.empty()) m_status = status;
+            m_percent = std::clamp(percent, 0, 100);
         }
-        m_logoImage.reset();
-        m_logoStream.reset();
-        if (m_gdiplusToken != 0)
+        requestRedraw();
+    }
+
+    bool ready() const { return m_window.load() != nullptr; }
+
+private:
+    void signalCreated(bool succeeded)
+    {
         {
+            std::lock_guard<std::mutex> lock(m_stateMutex);
+            m_threadSucceeded = succeeded;
+            m_threadReady = true;
+        }
+        m_created.notify_one();
+    }
+
+    void run()
+    {
+        if (m_desktop == nullptr || !SetThreadDesktop(m_desktop))
+        {
+            signalCreated(false);
+            return;
+        }
+        enableSplashThreadDpiAwareness();
+        Gdiplus::GdiplusStartupInput input;
+        if (Gdiplus::GdiplusStartup(&m_gdiplusToken, &input, nullptr) != Gdiplus::Ok)
+        {
+            signalCreated(false);
+            return;
+        }
+        std::wstring path;
+        {
+            std::lock_guard<std::mutex> lock(m_stateMutex);
+            path = m_imagePath.empty() ? defaultImagePath() : m_imagePath;
+        }
+        m_image.reset(Gdiplus::Image::FromFile(path.c_str(), FALSE));
+        if (!m_image || m_image->GetLastStatus() != Gdiplus::Ok ||
+            m_image->GetWidth() == 0 || m_image->GetHeight() == 0)
+        {
+            m_image.reset();
             Gdiplus::GdiplusShutdown(m_gdiplusToken);
             m_gdiplusToken = 0;
+            signalCreated(false);
+            return;
         }
-        m_initialized = false;
-    }
-
-    // registerWindowClassIfNeeded 作用：
-    // - 仅首次注册启动窗类；
-    // - 重复调用安全。
-    bool registerWindowClassIfNeeded()
-    {
-        static bool classRegistered = false;
-        if (classRegistered)
-        {
-            return true;
-        }
+        m_imageWidth = static_cast<int>(m_image->GetWidth());
+        m_imageHeight = static_cast<int>(m_image->GetHeight());
 
         WNDCLASSEXW windowClass = {};
         windowClass.cbSize = sizeof(windowClass);
         windowClass.lpfnWndProc = &Impl::windowProc;
-        windowClass.hInstance = ::GetModuleHandleW(nullptr);
-        windowClass.lpszClassName = kFrameworkSplashClassName;
-        windowClass.hCursor = ::LoadCursorW(nullptr, IDC_ARROW);
-        windowClass.hbrBackground = nullptr;
-
-        const ATOM registerResult = ::RegisterClassExW(&windowClass);
-        if (registerResult == 0)
+        windowClass.hInstance = GetModuleHandleW(nullptr);
+        windowClass.lpszClassName = kWindowClass;
+        windowClass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+        const bool registered = RegisterClassExW(&windowClass) != 0 ||
+            GetLastError() == ERROR_CLASS_ALREADY_EXISTS;
+        if (registered)
         {
-            const DWORD errorCode = ::GetLastError();
-            if (errorCode != ERROR_CLASS_ALREADY_EXISTS)
+            layout();
+            const HWND window = CreateWindowExW(
+                WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE,
+                kWindowClass, L"Ksword", WS_POPUP, m_x, m_y, m_width, m_height,
+                nullptr, nullptr, GetModuleHandleW(nullptr), this);
+            m_window.store(window);
+        }
+        const HWND window = m_window.load();
+        signalCreated(window != nullptr);
+        if (window != nullptr)
+        {
+            MSG message = {};
+            while (GetMessageW(&message, nullptr, 0, 0) > 0)
             {
-                return false;
+                TranslateMessage(&message);
+                DispatchMessageW(&message);
+            }
+            m_window.store(nullptr);
+        }
+        m_image.reset();
+        Gdiplus::GdiplusShutdown(m_gdiplusToken);
+        m_gdiplusToken = 0;
+    }
+
+    void layout()
+    {
+        const HWND window = m_window.load();
+        const HMONITOR monitor = window != nullptr
+            ? MonitorFromWindow(window, MONITOR_DEFAULTTOPRIMARY)
+            : MonitorFromPoint(POINT{0, 0}, MONITOR_DEFAULTTOPRIMARY);
+        MONITORINFO info = {sizeof(info)};
+        if (!GetMonitorInfoW(monitor, &info)) return;
+        m_dpi = windowDpi(window);
+        m_scale = static_cast<float>(m_dpi) / 96.0f;
+        m_width = MulDiv(kBaseWidth, static_cast<int>(m_dpi), 96);
+        m_height = std::max(1, static_cast<int>(std::lround(
+            static_cast<double>(m_width) * m_imageHeight / m_imageWidth)));
+        m_canvasHeight = m_height / m_scale;
+        m_x = info.rcMonitor.left + ((info.rcMonitor.right - info.rcMonitor.left) - m_width) / 2;
+        m_y = info.rcMonitor.top + ((info.rcMonitor.bottom - info.rcMonitor.top) - m_height) / 2;
+        if (window != nullptr)
+            SetWindowPos(window, HWND_TOPMOST, m_x, m_y, m_width, m_height,
+                SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+    }
+
+    void requestRedraw()
+    {
+        const HWND window = m_window.load();
+        if (window != nullptr) PostMessageW(window, kRedrawMessage, 0, 0);
+    }
+
+    bool redraw()
+    {
+        const HWND window = m_window.load();
+        return window != nullptr && paint(nullptr);
+    }
+
+    Gdiplus::Color backgroundTextColor(const void* pixels, const Gdiplus::RectF& area) const
+    {
+        // Sample only the resized background, before text or progress is drawn.
+        // Any transparent sample uses white: the desktop behind it is unknown.
+        const auto* bytes = static_cast<const BYTE*>(pixels);
+        unsigned int brightness = 0;
+        constexpr int columns = 5;
+        constexpr int rows = 3;
+        for (int row = 0; row < rows; ++row)
+        {
+            for (int column = 0; column < columns; ++column)
+            {
+                const int x = std::clamp(static_cast<int>(
+                    (area.X + area.Width * (column + 0.5f) / columns) * m_scale), 0, m_width - 1);
+                const int y = std::clamp(static_cast<int>(
+                    (area.Y + area.Height * (row + 0.5f) / rows) * m_scale), 0, m_height - 1);
+                const BYTE* pixel = bytes + (static_cast<size_t>(y) * m_width + x) * 4;
+                if (pixel[3] < 255) return Gdiplus::Color(255, 255, 255, 255);
+                brightness += 299U * pixel[2] + 587U * pixel[1] + 114U * pixel[0];
             }
         }
-
-        classRegistered = true;
-        return true;
+        return brightness >= 150U * 1000U * columns * rows
+            ? Gdiplus::Color(255, 0, 0, 0) : Gdiplus::Color(255, 255, 255, 255);
     }
 
-    // recalculateLayoutMetrics 作用：
-    // - 依据系统 DPI 和屏幕尺寸重算 Logo 绘制尺寸与窗口尺寸；
-    // - 保证启动图在不同缩放下保持一致视觉比例。
-    void recalculateLayoutMetrics()
+    bool paint(HDC target)
     {
-        if (!m_logoImage)
+        std::wstring status;
+        std::wstring email;
+        std::wstring buildDate;
+        std::wstring repository;
+        SplashProgressMode mode;
+        unsigned int accentRgb;
+        int percent;
         {
-            return;
+            std::lock_guard<std::mutex> lock(m_stateMutex);
+            status = m_status;
+            email = m_email;
+            buildDate = m_buildDate;
+            repository = m_repository;
+            mode = m_mode;
+            accentRgb = m_accentRgb;
+            percent = m_percent;
         }
 
-        m_currentDpi = std::max(96U, querySystemDpiValue());
-        m_dpiScaleFactor = static_cast<double>(m_currentDpi) / 96.0;
-
-        // 根据 DPI 缩放固定像素参数，修复高缩放下控件偏小问题。
-        m_padding = std::max(8, static_cast<int>(std::lround(m_basePadding * m_dpiScaleFactor)));
-        m_bottomAreaHeight = std::max(28, static_cast<int>(std::lround(m_baseBottomAreaHeight * m_dpiScaleFactor)));
-        m_logoInfoSpacing = std::max(6, static_cast<int>(std::lround(m_baseLogoInfoSpacing * m_dpiScaleFactor)));
-        m_statusFontPixelSize = std::max(9.0f, static_cast<float>(m_baseStatusFontPixelSize * m_dpiScaleFactor));
-        m_trackHeight = std::max(4, static_cast<int>(std::lround(m_baseTrackHeight * m_dpiScaleFactor)));
-
-        // sourceLogoWidth/sourceLogoHeight 作用：Logo 原始像素尺寸。
-        const int sourceLogoWidth = std::max(1, static_cast<int>(m_logoImage->GetWidth()));
-        const int sourceLogoHeight = std::max(1, static_cast<int>(m_logoImage->GetHeight()));
-
-        // screenWidth/screenHeight 作用：当前主屏幕像素宽高。
-        const int screenWidth = std::max(1, ::GetSystemMetrics(SM_CXSCREEN));
-        const int screenHeight = std::max(1, ::GetSystemMetrics(SM_CYSCREEN));
-
-        // 按 DPI 缩放最小显示尺寸，确保高缩放下 Logo 仍清晰且占比合理。
-        const int minLogoWidth = std::max(1, static_cast<int>(std::lround(320.0 * m_dpiScaleFactor)));
-        const int minLogoHeight = std::max(1, static_cast<int>(std::lround(220.0 * m_dpiScaleFactor)));
-        const int maxLogoWidth = std::max(minLogoWidth, (screenWidth * 40) / 100);
-        const int maxLogoHeight = std::max(minLogoHeight, (screenHeight * 38) / 100);
-
-        const double scaleByWidth = static_cast<double>(maxLogoWidth) / static_cast<double>(sourceLogoWidth);
-        const double scaleByHeight = static_cast<double>(maxLogoHeight) / static_cast<double>(sourceLogoHeight);
-        const double finalScale = std::min(1.0, std::min(scaleByWidth, scaleByHeight));
-
-        m_logoDrawWidth = std::max(1, static_cast<int>(std::lround(sourceLogoWidth * finalScale)));
-        m_logoDrawHeight = std::max(1, static_cast<int>(std::lround(sourceLogoHeight * finalScale)));
-
-        m_windowWidth = m_logoDrawWidth + (m_padding * 2);
-        m_windowHeight = m_logoDrawHeight + (m_padding * 2) + m_logoInfoSpacing + m_bottomAreaHeight;
-        m_windowPosX = (screenWidth - m_windowWidth) / 2;
-        m_windowPosY = (screenHeight - m_windowHeight) / 2;
-
-        if (m_windowHandle != nullptr)
+        HDC memory = CreateCompatibleDC(target);
+        if (memory == nullptr) return false;
+        BITMAPINFO info = {};
+        info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        info.bmiHeader.biWidth = m_width;
+        info.bmiHeader.biHeight = -m_height;
+        info.bmiHeader.biPlanes = 1;
+        info.bmiHeader.biBitCount = 32;
+        info.bmiHeader.biCompression = BI_RGB;
+        void* pixels = nullptr;
+        HBITMAP bitmap = CreateDIBSection(memory, &info, DIB_RGB_COLORS, &pixels, nullptr, 0);
+        if (bitmap == nullptr)
         {
-            ::SetWindowPos(
-                m_windowHandle,
-                HWND_TOPMOST,
-                m_windowPosX,
-                m_windowPosY,
-                m_windowWidth,
-                m_windowHeight,
-                SWP_NOACTIVATE | SWP_SHOWWINDOW);
+            DeleteDC(memory);
+            return false;
         }
-    }
-
-    // renderFrame 作用：
-    // - 使用 32 位 ARGB DIB 绘制透明启动窗；
-    // - 通过 UpdateLayeredWindow 提交到系统桌面。
-    void renderFrame()
-    {
-        if (m_windowHandle == nullptr || !m_logoImage)
+        HGDIOBJ oldBitmap = SelectObject(memory, bitmap);
         {
-            return;
-        }
-
-        HDC screenDeviceContext = ::GetDC(nullptr);
-        if (screenDeviceContext == nullptr)
-        {
-            return;
-        }
-
-        HDC memoryDeviceContext = ::CreateCompatibleDC(screenDeviceContext);
-        if (memoryDeviceContext == nullptr)
-        {
-            ::ReleaseDC(nullptr, screenDeviceContext);
-            return;
-        }
-
-        BITMAPINFO bitmapInfo = {};
-        bitmapInfo.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-        bitmapInfo.bmiHeader.biWidth = m_windowWidth;
-        bitmapInfo.bmiHeader.biHeight = -m_windowHeight;
-        bitmapInfo.bmiHeader.biPlanes = 1;
-        bitmapInfo.bmiHeader.biBitCount = 32;
-        bitmapInfo.bmiHeader.biCompression = BI_RGB;
-
-        void* dibBitsPointer = nullptr;
-        HBITMAP dibBitmapHandle = ::CreateDIBSection(
-            memoryDeviceContext,
-            &bitmapInfo,
-            DIB_RGB_COLORS,
-            &dibBitsPointer,
-            nullptr,
-            0);
-        if (dibBitmapHandle == nullptr)
-        {
-            ::DeleteDC(memoryDeviceContext);
-            ::ReleaseDC(nullptr, screenDeviceContext);
-            return;
-        }
-
-        HGDIOBJ oldBitmapHandle = ::SelectObject(memoryDeviceContext, dibBitmapHandle);
-
-        {
-            Gdiplus::Graphics graphics(memoryDeviceContext);
-            graphics.SetCompositingMode(Gdiplus::CompositingModeSourceOver);
-            graphics.SetCompositingQuality(Gdiplus::CompositingQualityHighQuality);
-            graphics.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBicubic);
+            // UpdateLayeredWindow requires premultiplied RGB and per-pixel alpha.
+            // Drawing into this bitmap preserves alpha for both PNG and overlays.
+            Gdiplus::Bitmap surface(m_width, m_height, m_width * 4,
+                PixelFormat32bppPARGB, static_cast<BYTE*>(pixels));
+            Gdiplus::Graphics graphics(&surface);
             graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+            graphics.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBicubic);
             graphics.Clear(Gdiplus::Color(0, 0, 0, 0));
+            graphics.ScaleTransform(m_scale, m_scale);
 
-            // 居中绘制 Logo 主图层。
-            const int logoPosX = (m_windowWidth - m_logoDrawWidth) / 2;
-            const int logoPosY = m_padding;
-            graphics.DrawImage(
-                m_logoImage.get(),
-                Gdiplus::Rect(logoPosX, logoPosY, m_logoDrawWidth, m_logoDrawHeight));
+            // Scale directly from source pixels at the monitor's resolution.
+            // No 640px intermediate bitmap is enlarged at high DPI.
+            graphics.DrawImage(m_image.get(), Gdiplus::RectF(0.0f, 0.0f,
+                static_cast<float>(kBaseWidth), m_canvasHeight),
+                0.0f, 0.0f, static_cast<float>(m_imageWidth),
+                static_cast<float>(m_imageHeight), Gdiplus::UnitPixel);
 
-            // 底部叠加信息层：状态文案 + 进度条（整体位于 Logo 下方，不遮挡主图）。
-            const int overlayTop = logoPosY + m_logoDrawHeight + m_logoInfoSpacing;
-            const Gdiplus::RectF overlayRect(
-                0.0f,
-                static_cast<Gdiplus::REAL>(overlayTop),
-                static_cast<Gdiplus::REAL>(m_windowWidth),
-                static_cast<Gdiplus::REAL>(m_bottomAreaHeight));
-            Gdiplus::SolidBrush overlayBrush(Gdiplus::Color(138, 0, 0, 0));
-            graphics.FillRectangle(&overlayBrush, overlayRect);
+            graphics.Flush(Gdiplus::FlushIntentionSync);
+            const Gdiplus::Color footerColor = backgroundTextColor(pixels,
+                Gdiplus::RectF(28.0f, m_canvasHeight - 63.0f, 188.0f, 60.0f));
+            const Gdiplus::Color statusColor = backgroundTextColor(pixels,
+                Gdiplus::RectF(260.0f, m_canvasHeight - 60.0f, 354.0f, 24.0f));
+            Gdiplus::SolidBrush footerForeground(footerColor);
+            Gdiplus::SolidBrush statusForeground(statusColor);
+            const int accentRed = static_cast<int>((accentRgb >> 16) & 0xFFU);
+            const int accentGreen = static_cast<int>((accentRgb >> 8) & 0xFFU);
+            const int accentBlue = static_cast<int>(accentRgb & 0xFFU);
+            Gdiplus::Font footerFont(L"Microsoft YaHei UI", 14.0f,
+                Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
+            Gdiplus::StringFormat singleLine;
+            singleLine.SetFormatFlags(Gdiplus::StringFormatFlagsNoWrap);
+            singleLine.SetTrimming(Gdiplus::StringTrimmingEllipsisCharacter);
+            const float footerX = 28.0f;
+            constexpr float footerLineHeight = 20.0f;
+            float footerY = m_canvasHeight - 63.0f;
+            const std::wstring* footerLines[] = { &email, &buildDate, &repository };
+            for (const std::wstring* line : footerLines)
+            {
+                graphics.DrawString(line->c_str(), -1, &footerFont,
+                    Gdiplus::RectF(footerX, footerY, 188.0f, footerLineHeight),
+                    &singleLine, &footerForeground);
+                footerY += footerLineHeight;
+            }
 
-            const int textPosY = overlayTop + std::max(6, static_cast<int>(std::lround(8.0 * m_dpiScaleFactor)));
-            const Gdiplus::RectF textRect(
-                static_cast<Gdiplus::REAL>(m_padding),
-                static_cast<Gdiplus::REAL>(textPosY),
-                static_cast<Gdiplus::REAL>(m_windowWidth - m_padding * 2),
-                static_cast<Gdiplus::REAL>(std::max(16, static_cast<int>(std::lround(22.0 * m_dpiScaleFactor)))));
-            Gdiplus::Font textFont(
-                L"Microsoft YaHei UI",
-                m_statusFontPixelSize,
-                Gdiplus::FontStyleRegular,
-                Gdiplus::UnitPixel);
-            Gdiplus::SolidBrush textBrush(Gdiplus::Color(235, 248, 248, 248));
-            graphics.DrawString(m_statusText.c_str(), -1, &textFont, textRect, nullptr, &textBrush);
+            // Inset the status/progress area from the divider, keeping the right margin.
+            constexpr float trackX = 260.0f;
+            constexpr float trackWidth = 354.0f;
+            float statusSize = 12.0f;
+            Gdiplus::RectF bounds;
+            for (; statusSize > 9.0f; statusSize -= 1.0f)
+            {
+                Gdiplus::Font candidate(L"Microsoft YaHei UI", statusSize,
+                    Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
+                graphics.MeasureString(status.c_str(), -1, &candidate,
+                    Gdiplus::PointF(0.0f, 0.0f), &bounds);
+                if (bounds.Width <= trackWidth) break;
+            }
+            Gdiplus::Font statusFont(L"Microsoft YaHei UI", statusSize,
+                Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
+            graphics.DrawString(status.c_str(), -1, &statusFont,
+                Gdiplus::RectF(trackX, m_canvasHeight - 60.0f, trackWidth, 24.0f),
+                &singleLine, &statusForeground);
 
-            const int trackMarginBottom = std::max(4, static_cast<int>(std::lround(6.0 * m_dpiScaleFactor)));
-            const int trackTop = overlayTop + m_bottomAreaHeight - m_trackHeight - trackMarginBottom;
-            const int trackWidth = std::max(1, m_windowWidth - m_padding * 2);
-            const Gdiplus::RectF trackRect(
-                static_cast<Gdiplus::REAL>(m_padding),
-                static_cast<Gdiplus::REAL>(trackTop),
-                static_cast<Gdiplus::REAL>(trackWidth),
-                static_cast<Gdiplus::REAL>(m_trackHeight));
-            Gdiplus::SolidBrush trackBrush(Gdiplus::Color(130, 25, 25, 25));
-            graphics.FillRectangle(&trackBrush, trackRect);
-
-            const int filledWidth = static_cast<int>(
-                std::lround(static_cast<double>(trackWidth) * (static_cast<double>(m_progressPercent) / 100.0)));
-            const Gdiplus::RectF valueRect(
-                static_cast<Gdiplus::REAL>(m_padding),
-                static_cast<Gdiplus::REAL>(trackTop),
-                static_cast<Gdiplus::REAL>(std::max(0, filledWidth)),
-                static_cast<Gdiplus::REAL>(m_trackHeight));
-            Gdiplus::SolidBrush valueBrush(Gdiplus::Color(240, 67, 160, 255));
-            graphics.FillRectangle(&valueBrush, valueRect);
+            const float trackY = m_canvasHeight - 32.0f;
+            constexpr float trackHeight = 8.0f;
+            Gdiplus::SolidBrush track(Gdiplus::Color(130,
+                statusColor.GetR(), statusColor.GetG(), statusColor.GetB()));
+            Gdiplus::SolidBrush indicator(Gdiplus::Color(240,
+                static_cast<BYTE>(accentRed), static_cast<BYTE>(accentGreen),
+                static_cast<BYTE>(accentBlue)));
+            fillRoundedRectangle(graphics, track, trackX, trackY, trackWidth, trackHeight);
+            graphics.SetClip(Gdiplus::RectF(trackX, trackY, trackWidth, trackHeight));
+            if (mode == SplashProgressMode::Indeterminate)
+            {
+                constexpr ULONGLONG kCycleMs = 1150;
+                constexpr ULONGLONG kTravelMs = 1000;
+                const ULONGLONG phase = (GetTickCount64() - m_animationStart) % kCycleMs;
+                if (phase < kTravelMs)
+                {
+                    const float progress = static_cast<float>(winUiTravel(
+                        static_cast<double>(phase) / kTravelMs));
+                    const float segmentWidth = 30.0f +
+                        70.0f * 4.0f * progress * (1.0f - progress);
+                    const float segmentX = trackX +
+                        (trackWidth - segmentWidth) * progress;
+                    const float fadeIn = std::min(1.0f, phase / 90.0f);
+                    const float fadeOut = std::min(1.0f, (kTravelMs - phase) / 90.0f);
+                    Gdiplus::SolidBrush movingIndicator(Gdiplus::Color(
+                        static_cast<BYTE>(240.0f * std::min(fadeIn, fadeOut)),
+                        static_cast<BYTE>(accentRed), static_cast<BYTE>(accentGreen),
+                        static_cast<BYTE>(accentBlue)));
+                    fillRoundedRectangle(graphics, movingIndicator, segmentX, trackY,
+                        segmentWidth, trackHeight);
+                }
+            }
+            else if (percent > 0)
+            {
+                fillRoundedRectangle(graphics, indicator, trackX, trackY,
+                    trackWidth * percent / 100.0f, trackHeight);
+            }
+            graphics.ResetClip();
+            graphics.Flush(Gdiplus::FlushIntentionSync);
         }
-
-        POINT sourcePoint = { 0, 0 };
-        SIZE layerSize = { m_windowWidth, m_windowHeight };
-        POINT targetPoint = { m_windowPosX, m_windowPosY };
-        BLENDFUNCTION blendFunction = {};
-        blendFunction.BlendOp = AC_SRC_OVER;
-        blendFunction.SourceConstantAlpha = 255;
-        blendFunction.AlphaFormat = AC_SRC_ALPHA;
-
-        ::UpdateLayeredWindow(
-            m_windowHandle,
-            screenDeviceContext,
-            &targetPoint,
-            &layerSize,
-            memoryDeviceContext,
-            &sourcePoint,
-            0,
-            &blendFunction,
-            ULW_ALPHA);
-
-        ::SelectObject(memoryDeviceContext, oldBitmapHandle);
-        ::DeleteObject(dibBitmapHandle);
-        ::DeleteDC(memoryDeviceContext);
-        ::ReleaseDC(nullptr, screenDeviceContext);
+        // Optional DC output is used by the offscreen rendering fixture.
+        if (target != nullptr)
+            BitBlt(target, 0, 0, m_width, m_height, memory, 0, 0, SRCCOPY);
+        const HWND window = m_window.load();
+        POINT position = {m_x, m_y};
+        POINT source = {};
+        SIZE size = {m_width, m_height};
+        BLENDFUNCTION blend = {AC_SRC_OVER, 0, 255, AC_SRC_ALPHA};
+        const bool submitted = window != nullptr && UpdateLayeredWindow(window, nullptr,
+            &position, &size, memory, &source, 0, &blend, ULW_ALPHA) != FALSE;
+        SelectObject(memory, oldBitmap);
+        DeleteObject(bitmap);
+        DeleteDC(memory);
+        return submitted;
     }
 
-    // windowProc 作用：
-    // - 处理启动窗口基础消息；
-    // - 关闭背景擦除，避免透明层闪白。
-    // 入参 hwnd/message/wParam/lParam：Win32 标准消息参数。
-    // 返回：消息处理结果。
-    static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
+    static LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam)
     {
         if (message == WM_NCCREATE)
         {
-            const CREATESTRUCTW* createStructPointer = reinterpret_cast<const CREATESTRUCTW*>(lParam);
-            if (createStructPointer != nullptr)
-            {
-                Impl* selfPointer = reinterpret_cast<Impl*>(createStructPointer->lpCreateParams);
-                ::SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(selfPointer));
-            }
+            const auto* creation = reinterpret_cast<const CREATESTRUCTW*>(lParam);
+            SetWindowLongPtrW(window, GWLP_USERDATA,
+                reinterpret_cast<LONG_PTR>(creation->lpCreateParams));
         }
-
+        auto* self = reinterpret_cast<Impl*>(GetWindowLongPtrW(window, GWLP_USERDATA));
         switch (message)
         {
+        case kShowMessage:
+            if (self != nullptr)
+            {
+                self->m_animationStart = GetTickCount64();
+                self->layout();
+                if (self->redraw())
+                {
+                    SetTimer(window, 1, 16, nullptr);
+                    ShowWindow(window, SW_SHOWNOACTIVATE);
+                }
+            }
+            return 0;
+        case kHideMessage:
+            KillTimer(window, 1);
+            ShowWindow(window, SW_HIDE);
+            return 0;
+        case kResetAnimationMessage:
+            if (self != nullptr)
+            {
+                self->m_animationStart = GetTickCount64();
+                self->redraw();
+            }
+            return 0;
+        case kRedrawMessage:
+            if (self != nullptr) self->redraw();
+            return 0;
+        case WM_TIMER:
+            if (self != nullptr && IsWindowVisible(window)) self->redraw();
+            return 0;
         case WM_ERASEBKGND:
             return 1;
-        default:
-            return ::DefWindowProcW(hwnd, message, wParam, lParam);
+        case WM_PAINT:
+            if (self != nullptr)
+            {
+                PAINTSTRUCT paint = {};
+                BeginPaint(window, &paint);
+                self->paint(nullptr);
+                EndPaint(window, &paint);
+                return 0;
+            }
+            break;
+        case WM_DPICHANGED:
+        case WM_DISPLAYCHANGE:
+            if (self != nullptr)
+            {
+                self->layout();
+                self->redraw();
+            }
+            return 0;
+        case WM_CLOSE:
+            DestroyWindow(window);
+            return 0;
+        case WM_DESTROY:
+            PostQuitMessage(0);
+            return 0;
         }
+        return DefWindowProcW(window, message, wParam, lParam);
     }
 
-private:
-    HWND m_windowHandle = nullptr;                              // m_windowHandle：启动窗口句柄。
-    ULONG_PTR m_gdiplusToken = 0;                              // m_gdiplusToken：GDI+ 运行令牌。
-    std::unique_ptr<Gdiplus::Image> m_logoImage;               // m_logoImage：Logo 图像对象。
-    std::unique_ptr<IStream, StreamReleaser> m_logoStream;     // m_logoStream：Logo 内存流对象。
-    std::wstring m_statusText = L"KSword";                      // m_statusText：当前状态文本；启动首帧由调用方按语言策略覆盖。
-    int m_progressPercent = 0;                                 // m_progressPercent：进度百分比。
-    int m_windowWidth = 480;                                   // m_windowWidth：窗口宽度像素。
-    int m_windowHeight = 320;                                  // m_windowHeight：窗口高度像素。
-    int m_logoDrawWidth = 360;                                 // m_logoDrawWidth：Logo 绘制宽度像素。
-    int m_logoDrawHeight = 220;                                // m_logoDrawHeight：Logo 绘制高度像素。
-    int m_windowPosX = 0;                                      // m_windowPosX：窗口左上角 X 坐标。
-    int m_windowPosY = 0;                                      // m_windowPosY：窗口左上角 Y 坐标。
-    int m_padding = 24;                                        // m_padding：窗口内边距（DPI 缩放后值）。
-    int m_bottomAreaHeight = 56;                               // m_bottomAreaHeight：底部信息区高度（DPI 缩放后值）。
-    int m_logoInfoSpacing = 12;                                // m_logoInfoSpacing：Logo 与信息区垂直间距。
-    float m_statusFontPixelSize = 12.0f;                       // m_statusFontPixelSize：状态文字像素字号。
-    int m_trackHeight = 8;                                     // m_trackHeight：进度条轨道高度。
-    bool m_initialized = false;                                // m_initialized：是否初始化完成。
-    UINT m_currentDpi = 96U;                                   // m_currentDpi：当前系统 DPI。
-    double m_dpiScaleFactor = 1.0;                             // m_dpiScaleFactor：DPI 缩放倍率。
-    int m_basePadding = 24;                                    // m_basePadding：96DPI 基准内边距。
-    int m_baseBottomAreaHeight = 56;                           // m_baseBottomAreaHeight：96DPI 基准底部区高度。
-    int m_baseLogoInfoSpacing = 12;                            // m_baseLogoInfoSpacing：96DPI 基准 Logo 与信息区间距。
-    float m_baseStatusFontPixelSize = 12.0f;                   // m_baseStatusFontPixelSize：96DPI 基准文字字号。
-    int m_baseTrackHeight = 8;                                 // m_baseTrackHeight：96DPI 基准进度条高度。
+    std::thread m_thread;
+    HDESK m_desktop = nullptr; // Borrowed from caller for UI thread startup.
+    std::atomic<HWND> m_window{nullptr};
+    mutable std::mutex m_stateMutex;
+    std::condition_variable m_created;
+    bool m_threadReady = false;
+    bool m_threadSucceeded = false;
+    std::wstring m_imagePath;
+    std::wstring m_status = L"Ksword";
+    std::wstring m_email;
+    std::wstring m_buildDate;
+    std::wstring m_repository;
+    SplashProgressMode m_mode = SplashProgressMode::Determinate;
+    unsigned int m_accentRgb = 0x43A0FFU;
+    int m_percent = 0;
+
+    ULONG_PTR m_gdiplusToken = 0;
+    std::unique_ptr<Gdiplus::Image> m_image;
+    int m_imageWidth = 0;
+    int m_imageHeight = 0;
+    float m_canvasHeight = 360.0f;
+    int m_width = kBaseWidth;
+    int m_height = 360;
+    int m_x = 0;
+    int m_y = 0;
+    UINT m_dpi = 96;
+    float m_scale = 1.0f;
+    ULONGLONG m_animationStart = 0;
 };
 
-kStartupSplash::kStartupSplash()
-    : m_impl(std::make_unique<Impl>())
-{
-}
-
+kStartupSplash::kStartupSplash() : m_impl(std::make_unique<Impl>()) {}
 kStartupSplash::~kStartupSplash() = default;
+void kStartupSplash::setBackgroundImagePath(const std::wstring& path) { m_impl->setBackgroundImagePath(path); }
+void kStartupSplash::setFooterText(const std::wstring& email, const std::wstring& buildDate,
+    const std::wstring& repository) { m_impl->setFooterText(email, buildDate, repository); }
+void kStartupSplash::setProgressMode(SplashProgressMode mode) { m_impl->setProgressMode(mode); }
+void kStartupSplash::setAccentColorRgb(unsigned int rgb) { m_impl->setAccentColorRgb(rgb); }
+bool kStartupSplash::show(const std::string& initialStatusText) { return m_impl->show(initialStatusText); }
+void kStartupSplash::hide() { m_impl->hide(); }
+void kStartupSplash::progress(const std::string& operationName, int percent)
+{ m_impl->progress(operationName, percent); }
+bool kStartupSplash::ready() const { return m_impl->ready(); }
 
-bool kStartupSplash::show(const std::string& initialStatusText)
-{
-    if (!m_impl)
-    {
-        return false;
-    }
-    return m_impl->showWindow(initialStatusText);
-}
-
-void kStartupSplash::hide()
-{
-    if (m_impl)
-    {
-        m_impl->hideWindow();
-    }
-}
-
-void kStartupSplash::progress(const std::string& operationName, const int progressPercent)
-{
-    if (m_impl)
-    {
-        m_impl->setProgressState(operationName, progressPercent);
-    }
-}
-
-bool kStartupSplash::ready() const
-{
-    if (!m_impl)
-    {
-        return false;
-    }
-    return m_impl->isReady();
-}
-
-// kSplash 作用：
-// - Framework 全局启动画面控制对象定义；
-// - 与 Framework.h 中 extern 声明对应。
 kStartupSplash kSplash;

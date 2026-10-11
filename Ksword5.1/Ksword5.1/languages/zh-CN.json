@@ -2776,6 +2776,9 @@
     "main.crash.restart_question": "选择“是”重新启动 KswordARK，选择“否”退出。",
     "main.crash.repeated": "程序刚刚重启后再次崩溃，建议先退出并检查转储文件。",
     "main.crash.restart_failed": "重新启动 KswordARK 失败，程序即将退出。",
+    "main.startup.footer.email": "support@ksword.dev",
+    "main.startup.footer.build_date": "编译于 %1",
+    "main.startup.footer.repository": "Github.com/KswordDEV",
     "main.startup.progress.starting": "正在启动...",
     "main.startup.progress.qt_runtime": "正在准备运行环境...",
     "main.startup.progress.prepare_environment": "正在准备运行环境...",
@@ -40501,6 +40504,9 @@
     "证书到期": "证书到期",
     "证书签发者": "证书签发者",
     "远端": "远端",
-    "驱动事件序号": "驱动事件序号"
+    "驱动事件序号": "驱动事件序号",
+    "KswordFrameworkSplashWindow": "KswordFrameworkSplashWindow",
+    "support@ksword.dev": "support@ksword.dev",
+    "编译于 %1": "编译于 %1"
   }
 }

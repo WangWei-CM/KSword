@@ -2776,6 +2776,9 @@
     "main.crash.restart_question": "Choose Yes to restart KswordARK, or No to exit.",
     "main.crash.repeated": "The program crashed again immediately after a restart. Exit and inspect the dump file.",
     "main.crash.restart_failed": "KswordARK could not be restarted and will now exit.",
+    "main.startup.footer.email": "support@ksword.dev",
+    "main.startup.footer.build_date": "Compile at %1",
+    "main.startup.footer.repository": "Github.com/KswordDEV",
     "main.startup.progress.starting": "Starting...",
     "main.startup.progress.qt_runtime": "Preparing the runtime...",
     "main.startup.progress.prepare_environment": "Preparing the runtime...",
@@ -40501,6 +40504,9 @@
     "证书到期": "Certificate expiry",
     "证书签发者": "Certificate issuer",
     "远端": "Remote endpoint",
-    "驱动事件序号": "Driver event sequence"
+    "驱动事件序号": "Driver event sequence",
+    "KswordFrameworkSplashWindow": "KswordFrameworkSplashWindow",
+    "support@ksword.dev": "support@ksword.dev",
+    "编译于 %1": "Compile at %1"
   }
 }

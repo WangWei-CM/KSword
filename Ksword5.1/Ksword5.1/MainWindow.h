@@ -85,8 +85,8 @@ class MainWindow : public QMainWindow
 public:
     // StartupProgressCallback 作用：
     // - 主窗口构造期间把细分阶段进度回传给启动画面；
-    // - 主函数可传入 lambda，把文字与百分比同步到 splash。
-    using StartupProgressCallback = std::function<void(int, const QString&)>;
+    // - 主函数可传入 lambda，同步百分比、翻译后的文字和稳定阶段键。
+    using StartupProgressCallback = std::function<void(int, const QString&, const QString&)>;
 
     // 构造函数作用：
     // - 初始化主窗口菜单、Dock、布局与外观；

@@ -75,6 +75,22 @@ KSword 主程序位于 `Ksword5.1/Ksword5.1`（Qt 6.9.3 Widgets + Qt Advanced Do
 
 ## 启动单实例与权限切换
 
+- 2026-10-11 原生启动页以独立 Win32 UI 线程播放伸缩不定进度条，仍使用 `Framework/StartupSplash` 的 `kSplash` 接口。背景仅从 exe 同目录的 `Style/KswordHome_2.png` 读取，缺失时 `show=false`，暂不回退嵌入资源。图片按 640 逻辑像素宽度等比绘制，200% 为 1280 物理像素（用户已确认采用标准倍率），不能先生成 640px 中间位图再放大；底部文本和进度条按图片实际高度定位；用户确认右移24逻辑像素后，又要求状态字更小且整体远离分割线；最终状态字号上限12逻辑像素（先23→18→16，用户要求恢复旧字体后回到原12）；与替换前相同的Microsoft YaHei UI常规体，移除新增的AntiAliasGridFit文字渲染设置，使用GDI+默认渲染，状态布局顶点为画布高度减60、文本框高24，较原高度减83下移23，更靠近进度条，右侧状态/进度区域起点260、宽354，较首次右移结果再右移16，保留26逻辑像素右边距；底轨、不定滑块和百分比填充均按半条高绘制圆角（8高/4半径，短填充按宽度收小半径）。线程在创建窗口前绑定调用方 `GetThreadDesktop` 并设置自身 Per-Monitor DPI awareness，以保留 SOS 私有桌面和 QApplication 创建前的真实 DPI；窗口创建后通过 `GetDpiForWindow` 取缩放，不能依赖 DPI-unaware 进程的 `GetDpiForMonitor`。`hide` 停止动画定时器；启动状态及编译日期在主线程先完成双语解析；左下角三行统一14逻辑像素常规体，无邮箱下划线，统一20逻辑像素行高绘制；颜色随后改为区域背景自适应。`.codex-build-logs/startup-splash/splash_fixture.cpp` 在不切换输入桌面的私有桌面调用生产实现，42 项检查通过，覆盖 exe 相对路径、非 16:9/正方形图、96/144/192 DPI、阻塞调用方时动画刷新、重复显隐及图片缺失；192 DPI 为夹具注入，不等于实机修改缩放验收。
+
+- 同次完整 Release/x64 构建最终通过（`BUILD_RESULT=SUCCESS`、`EXIT_CODE=0`、主程序产物更新），日志 `.codex-build-logs/ksword-build-check-20261011-171913.raw.log`，双语审计28665条通过。初次构建在既有 GPU 表格/平滑滚动的裸 `QOpenGLWidget` 包含上报 C1083；两处改用 `QtOpenGLWidgets/QOpenGLWidget` 明确模块路径后通过，未修改 Qt SDK 或滚动行为。未启动生产主程序加载驱动，完整 GUI 由用户运行验收。
+
+- 后续状态字号18、起点260及圆角进度条的完整 Release 构建通过（`EXIT_CODE=0`，产物更新），日志 `.codex-build-logs/ksword-build-check-20261011-172707.raw.log`；同一私有桌面夹具42项及100%/200%生产绘制预览通过。
+
+- 同日用户要求前期保持百分比填充，仅在“即将完成...”切换滑动样式。`MainWindow::StartupProgressCallback` 透传稳定阶段键，`main::updateStartupSplash` 识别 `queue_kernel_dock_check`、`main_window_ready`、`show_main_window`、`wait_first_frame` 四个收尾阶段；不比较中文/英文显示文本。`setProgressMode` 同模式更新不重启动画。当前夹具44项通过，额外输出50%填充预览 `Style/preview-percent.png`；完整 Release 日志 `.codex-build-logs/ksword-build-check-20261011-183837.raw.log`。
+
+- 状态字号16、文字下移23后的完整 Release 构建通过（`EXIT_CODE=0`，产物更新），日志 `.codex-build-logs/ksword-build-check-20261011-202246.raw.log`；夹具44项和百分比/滑动预览通过。
+
+- 旧版状态字体核对为Microsoft YaHei UI常规体、12逻辑像素、默认GDI+文字渲染；按用户要求恢复这些设置，并将左下角三行统一14逻辑像素常规白字、去邮箱下划线、20逻辑像素行高。44项夹具与预览通过，包含这两项的完整 Release 构建通过（`EXIT_CODE=0`，产物更新），日志 `.codex-build-logs/ksword-build-check-20261011-203007.raw.log`。
+
+- PNG透明与自适应文字：普通Win32窗口配不透明深色`Clear`会把透明PNG像素铺成深色，不等于桌面透出。现改为`WS_EX_LAYERED`、清空为透明、在DIB像素上包装`PixelFormat32bppPARGB`并以`Gdiplus::Graphics(Bitmap*)`绘制，最后`UpdateLayeredWindow(ULW_ALPHA/AC_SRC_ALPHA)`提交；不能仅改Clear alpha而继续用HDC/BitBlt当窗口透明合成。首次显示前先提交像素，动画消息直接提交新帧。状态区和左下角三行分别在缩放后的背景像素上取5×3网格样本，且在绘制文字前取样；只要采到alpha<255就用白字，否则RGB加权平均亮度>=150用黑字，深色用白字。进度底轨随状态字黑/白选择，蓝色填充不变。197项私有桌面夹具通过，含100%/200%浅/深/左右不同底色、透明/半透明、背景alpha=0/128/255保留、RGB预乘约束及每次真实UpdateLayeredWindow成功；不代表启动生产主程序或切换真实桌面验收。
+
+- 透明与文字取色改动的完整Release/x64构建通过（`EXIT_CODE=0`、产物更新、双语与主题审计通过），日志 `.codex-build-logs/ksword-build-check-20261011-204031.raw.log`。
+
 - `AppearanceSettings::preventMultipleInstances` 默认为 `true`，对应 JSON 字段 `prevent_multiple_instances`；只限制普通启动，关闭后新进程不再查找或激活旧主窗口。
 - Admin、SYSTEM、UIAccess 等权限切换重启必须携带 `--ksword-privilege-restart`，保证默认开启防多开时仍能启动接管实例。使用 `CreateProcessWithTokenW` / `CreateProcessAsUserW` 时不能把 `lpCommandLine` 留空，应通过 `argumentsWithPrivilegeRestartMarker` 组装命令行并保留当前参数。
 - 权限接管不能只绕过单实例检查：旧实例启动新实例成功后必须进入正常关闭流程，新实例应复用 `--ksword-crash-restart-wait-pid <PID>` 的同路径/直接父进程校验并等待旧实例退出，再继续主程序初始化，避免两个实例同时读写设置或争用 R0 服务。透传当前参数时先替换可能遗留的旧 wait PID。

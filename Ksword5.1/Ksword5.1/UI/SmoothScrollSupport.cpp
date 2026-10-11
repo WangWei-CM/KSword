@@ -10,7 +10,7 @@
 #include <QLabel>
 #include <QGroupBox>
 #include <QLineEdit>
-#include <QOpenGLWidget>
+#include <QtOpenGLWidgets/QOpenGLWidget>
 #include <QPlainTextEdit>
 #include <QPointer>
 #include <QPointingDevice>
