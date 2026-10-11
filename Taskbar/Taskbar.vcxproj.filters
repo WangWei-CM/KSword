@@ -38,7 +38,13 @@
     <ClCompile Include="PageOverviewWindow.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="PageOverviewBackdrop.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClInclude Include="PageOverviewWindow.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="PageOverviewBackdrop.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="..\shared\usermode\KswordPageNavigation.h">

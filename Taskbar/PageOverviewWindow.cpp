@@ -1,4 +1,5 @@
 #include "PageOverviewWindow.h"
+#include "PageOverviewBackdrop.h"
 #include "../shared/usermode/KswordPageNavigation.h"
 #include <QApplication>
 #include <QCoreApplication>
@@ -20,9 +21,11 @@
 #include <QPointer>
 #include <QPushButton>
 #include <QScreen>
+#include <QSettings>
 #include <QScrollArea>
 #include <QShowEvent>
 #include <QSizeGrip>
+#include <QSlider>
 #include <QTimer>
 #include <QUuid>
 #include <QVBoxLayout>
@@ -70,8 +73,8 @@ namespace
                 painter.fillRect(QRect(3, 4, 2, height() - 8), rainbow(hue));
             }
             QFont textFont = font(); // 只有一级列标题和二级分组加重，三级项保持紧凑。
+            textFont.setPointSizeF(m_depth < 0 ? 12.0 : 11.0);
             textFont.setWeight(m_depth <= 1 ? QFont::DemiBold : QFont::Normal);
-            if (m_depth < 0) textFont.setPointSizeF(font().pointSizeF() + 1.0);
             painter.setFont(textFont);
             painter.setPen(!isEnabled() ? QColor(137, 149, 168) : m_depth < 0 ? rainbow(hue) : QColor(235, 241, 250));
             const int indent = 12 + std::min(3, std::max(0, m_depth - 1)) * 12;
@@ -154,6 +157,28 @@ struct PageOverviewWindow::State
     bool loading = false;
     int startupTicks = 0;
     QString summary; // 搜索清空后恢复目录概况，不丢掉加载状态。
+    std::unique_ptr<PageOverviewBackdrop> backdrop; // 独立原生合成层，不模糊前景控件。
+    QSlider* blurAmount = nullptr; // 0 关闭，1–40 实时改变高斯效果强度。
+    QLabel* blurValue = nullptr; // 定宽数值不会在拖动过程中挤动搜索与页面列。
+
+    // 设置单独保存在 Taskbar 目录，避免修改主程序主题或通知设置。
+    void saveAppearance() const
+    {
+        QSettings settings(QCoreApplication::applicationDirPath() + QStringLiteral("/TaskbarPageOverview.ini"),
+            QSettings::IniFormat);
+        settings.setValue(QStringLiteral("Appearance/BlurAmount"), blurAmount->value());
+    }
+
+    void applyBlur()
+    {
+        blurValue->setText(QString::number(blurAmount->value()));
+        if (!backdrop->setAmount(blurAmount->value()))
+        {
+            blurAmount->setEnabled(false);
+            blurValue->setText(QStringLiteral("—"));
+            blurAmount->setToolTip(QStringLiteral("当前系统无法提供桌面背景模糊，已保留透明背景。"));
+        }
+    }
 
     // WM_COPYDATA 只提交短请求，主程序在事件循环里分片生成目录，避免互相阻塞。
     bool send(const QString& operation, const QString& id = QString())
@@ -320,6 +345,7 @@ PageOverviewWindow::PageOverviewWindow(QWidget* owner)
     : QWidget(owner, Qt::Tool | Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint), m_state(std::make_unique<State>())
 {
     m_state->owner = this;
+    m_state->backdrop = std::make_unique<PageOverviewBackdrop>(this);
     setWindowTitle(QStringLiteral("KSword 页面平铺"));
     setObjectName(QStringLiteral("ks_taskbar_page_overview"));
     setAttribute(Qt::WA_TranslucentBackground);
@@ -366,6 +392,18 @@ PageOverviewWindow::PageOverviewWindow(QWidget* owner)
     top->addWidget(m_state->launch);
     top->addWidget(refresh);
     top->addWidget(close);
+    // 记录原 9pt 工具行的高度，再放大字；文字变大不会把整个框架撑高。
+    header->ensurePolished();
+    m_state->search->ensurePolished();
+    const int controlHeight = m_state->search->sizeHint().height();
+    header->setFixedHeight(header->sizeHint().height());
+    m_state->search->setFixedHeight(controlHeight);
+    for (QPushButton* button : {m_state->launch, refresh, close})
+        button->setFixedHeight(controlHeight);
+    QFont headerFont = font();
+    headerFont.setPointSizeF(10.5);
+    header->setFont(headerFont);
+    header->setStyleSheet(QStringLiteral("QLineEdit{padding:2px 9px;}QPushButton{padding:2px 9px;}"));
     root->addWidget(header);
     m_state->scroll = new QScrollArea(this);
     m_state->scroll->setFrameShape(QFrame::NoFrame);
@@ -381,11 +419,44 @@ PageOverviewWindow::PageOverviewWindow(QWidget* owner)
     auto* footer = new QHBoxLayout();
     m_state->status = new QLabel(this);
     m_state->status->setStyleSheet(QStringLiteral(
-        "QLabel{background:rgba(13,18,28,225);color:#d6e2f4;padding:4px 8px;border-radius:4px;}"));
+        "QLabel{background:rgba(13,18,28,225);color:#d6e2f4;padding:3px 8px;border-radius:4px;}"));
+    QFont footerFont = font();
+    footerFont.setPointSizeF(10.0);
+    m_state->status->setFont(footerFont);
     m_state->status->setWordWrap(true);
     footer->addWidget(m_state->status, 1);
+    // 调节器占用现有底栏，不增加工具行、不改变列宽与页面行高。
+    auto* blurControls = new QFrame(this);
+    blurControls->setFixedHeight(26);
+    blurControls->setStyleSheet(QStringLiteral(
+        "QFrame{background:rgba(13,18,28,225);border-radius:4px;}"
+        "QLabel{background:transparent;color:#d6e2f4;}"
+        "QSlider::groove:horizontal{height:4px;background:#4b596d;border-radius:2px;}"
+        "QSlider::sub-page:horizontal{background:#8d9cff;border-radius:2px;}"
+        "QSlider::handle:horizontal{width:12px;margin:-4px 0;background:#edf3ff;border-radius:6px;}"));
+    blurControls->setFont(footerFont);
+    auto* blurLayout = new QHBoxLayout(blurControls);
+    blurLayout->setContentsMargins(8, 0, 8, 0);
+    blurLayout->setSpacing(7);
+    blurLayout->addWidget(new QLabel(QStringLiteral("模糊"), blurControls));
+    m_state->blurAmount = new QSlider(Qt::Horizontal, blurControls);
+    m_state->blurAmount->setRange(0, 40);
+    m_state->blurAmount->setFixedWidth(84);
+    m_state->blurAmount->setPageStep(5);
+    m_state->blurAmount->setAccessibleName(QStringLiteral("背景高斯模糊强度"));
+    m_state->blurAmount->setToolTip(QStringLiteral("实时调节背景高斯模糊强度，0 关闭；不改变面板透明度。"));
+    QSettings appearance(QCoreApplication::applicationDirPath() + QStringLiteral("/TaskbarPageOverview.ini"),
+        QSettings::IniFormat);
+    m_state->blurAmount->setValue(std::clamp(appearance.value(QStringLiteral("Appearance/BlurAmount"), 20).toInt(), 0, 40));
+    blurLayout->addWidget(m_state->blurAmount);
+    m_state->blurValue = new QLabel(QString::number(m_state->blurAmount->value()), blurControls);
+    m_state->blurValue->setFixedWidth(23);
+    m_state->blurValue->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    blurLayout->addWidget(m_state->blurValue);
+    footer->addWidget(blurControls);
     footer->addWidget(new QSizeGrip(this), 0, Qt::AlignRight);
     root->addLayout(footer);
+    connect(m_state->blurAmount, &QSlider::valueChanged, this, [this]() { m_state->applyBlur(); });
 
     m_state->timeout = new QTimer(this);
     m_state->timeout->setSingleShot(true);
@@ -474,6 +545,8 @@ PageOverviewWindow::PageOverviewWindow(QWidget* owner)
 
 PageOverviewWindow::~PageOverviewWindow()
 {
+    m_state->saveAppearance();
+    m_state->backdrop->hide();
     ::RemovePropW(reinterpret_cast<HWND>(winId()), ks::page_navigation::ClientProperty);
 }
 
@@ -494,6 +567,11 @@ void PageOverviewWindow::openOnScreen(QScreen* screen)
 bool PageOverviewWindow::nativeEvent(const QByteArray& type, void* message, qintptr* result)
 {
     const MSG* native = static_cast<const MSG*>(message);
+    if (native && native->message == WM_WINDOWPOSCHANGED)
+    {
+        // 原生移动/缩放/置顶变化时立即同步背景，避免拖动中留下一块旧底板。
+        m_state->backdrop->synchronize();
+    }
     if (native && native->message == WM_COPYDATA)
     {
         const auto* data = reinterpret_cast<const COPYDATASTRUCT*>(native->lParam);
@@ -515,6 +593,10 @@ bool PageOverviewWindow::nativeEvent(const QByteArray& type, void* message, qint
 void PageOverviewWindow::showEvent(QShowEvent* event)
 {
     QWidget::showEvent(event);
+    QTimer::singleShot(0, this, [this]()
+    {
+        if (isVisible()) m_state->applyBlur();
+    });
     BOOL animations = TRUE;
     ::SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, &animations, 0);
     if (animations) m_state->animation->start();
@@ -523,6 +605,8 @@ void PageOverviewWindow::showEvent(QShowEvent* event)
 
 void PageOverviewWindow::hideEvent(QHideEvent* event)
 {
+    m_state->backdrop->hide();
+    m_state->saveAppearance();
     if (m_state->loading) m_state->send(QStringLiteral("cancel"));
     m_state->loading = false;
     m_state->animation->stop();

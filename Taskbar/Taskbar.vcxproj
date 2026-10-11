@@ -141,6 +141,7 @@
     <ClCompile Include="TaskbarSharedState.cpp" />
     <ClCompile Include="Taskbar.cpp" />
     <ClCompile Include="PageOverviewWindow.cpp" />
+    <ClCompile Include="PageOverviewBackdrop.cpp" />
     <ClCompile Include="main.cpp" />
   </ItemGroup>
   <ItemGroup>
@@ -158,6 +159,7 @@
     <ClInclude Include="TaskbarRestartCoordinator.h" />
     <ClInclude Include="Function.h" />
     <ClInclude Include="PageOverviewWindow.h" />
+    <ClInclude Include="PageOverviewBackdrop.h" />
     <ClInclude Include="..\shared\usermode\KswordPageNavigation.h" />
     <ClInclude Include="SosHotkeyLauncher.h" />
     <ClInclude Include="RescueDesktopHost.h" />
