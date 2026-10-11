@@ -2776,6 +2776,9 @@
     "main.crash.restart_question": "选择“是”重新启动 KswordARK，选择“否”退出。",
     "main.crash.repeated": "程序刚刚重启后再次崩溃，建议先退出并检查转储文件。",
     "main.crash.restart_failed": "重新启动 KswordARK 失败，程序即将退出。",
+    "main.startup.footer.email": "support@ksword.dev",
+    "main.startup.footer.build_date": "编译于 %1",
+    "main.startup.footer.repository": "Github.com/KswordDEV",
     "main.startup.progress.starting": "正在启动...",
     "main.startup.progress.qt_runtime": "正在准备运行环境...",
     "main.startup.progress.prepare_environment": "正在准备运行环境...",
@@ -40482,6 +40485,9 @@
     "受信任的发布者": "受信任的发布者",
     "ProcessGeneralProjectedCaption": "ProcessGeneralProjectedCaption",
     "本地 MCP 桥已启用：%1": "本地 MCP 桥已启用：%1",
-    "本地 MCP 桥启动失败：%1": "本地 MCP 桥启动失败：%1"
+    "本地 MCP 桥启动失败：%1": "本地 MCP 桥启动失败：%1",
+    "KswordFrameworkSplashWindow": "KswordFrameworkSplashWindow",
+    "support@ksword.dev": "support@ksword.dev",
+    "编译于 %1": "编译于 %1"
   }
 }

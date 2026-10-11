@@ -71,6 +71,7 @@ namespace
         return ks::i18n::contextText(textKey, fallbackText);
     }
 
+    // 按稳定阶段键选择样式，避免语言切换影响“即将完成”阶段的识别。
     // updateStartupSplash 作用：按当前有效语言更新原生启动画面。
     void updateStartupSplash(
         const bool splashReady,
@@ -82,6 +83,13 @@ namespace
         {
             return;
         }
+        const bool finishing =
+            textKey == QStringLiteral("main.startup.progress.queue_kernel_dock_check")
+            || textKey == QStringLiteral("main.startup.progress.main_window_ready")
+            || textKey == QStringLiteral("main.startup.progress.show_main_window")
+            || textKey == QStringLiteral("main.startup.progress.wait_first_frame");
+        kSplash.setProgressMode(finishing
+            ? SplashProgressMode::Indeterminate : SplashProgressMode::Determinate);
         kSplash.progress(
             localizedStartupText(textKey, fallbackText).toUtf8().toStdString(),
             progressPercent);
@@ -1528,6 +1536,14 @@ int main(int argc, char* argv[])
     applyQtScaleFactorEnvironment(startupSettings.startupWindowScaleFactor);
     startupTraceRaw("after applyQtScaleFactorEnvironment");
 
+    kSplash.setProgressMode(SplashProgressMode::Determinate);
+    kSplash.setFooterText(
+        localizedStartupText(QStringLiteral("main.startup.footer.email"),
+            QStringLiteral("support@ksword.dev")).toStdWString(),
+        localizedStartupText(QStringLiteral("main.startup.footer.build_date"),
+            QStringLiteral("编译于 %1")).arg(QString::fromLatin1(__DATE__)).toStdWString(),
+        localizedStartupText(QStringLiteral("main.startup.footer.repository"),
+            QStringLiteral("Github.com/KswordDEV")).toStdWString());
     const bool splashReady = kSplash.show(
         localizedStartupText(
             QStringLiteral("main.startup.progress.starting"),
@@ -1756,7 +1772,7 @@ int main(int argc, char* argv[])
     // - 接收 MainWindow 构造阶段回调；
     // - 持续回写启动页文案和进度百分比。
     const MainWindow::StartupProgressCallback startupProgressCallback =
-        [splashReady](const int progressPercent, const QString& statusText)
+        [splashReady](const int progressPercent, const QString& statusText, const QString& textKey)
         {
             // 进度点同时打进启动追踪文件：
             // - 追踪行带毫秒时间戳，主窗口构造内部的分段耗时才有得看；
@@ -1768,7 +1784,7 @@ int main(int argc, char* argv[])
             {
                 return;
             }
-            kSplash.progress(statusText.toUtf8().toStdString(), progressPercent);
+            updateStartupSplash(splashReady, progressPercent, textKey, statusText);
             kLogEvent splashProgressEvent;
             info << splashProgressEvent
                 << "[main] StartupProgressCallback progress="

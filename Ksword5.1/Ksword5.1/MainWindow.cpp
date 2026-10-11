@@ -5471,7 +5471,8 @@ void MainWindow::reportStartupProgress(
 
     m_startupProgressCallback(
         progressPercent,
-        ks::i18n::contextText(textKey, fallbackText));
+        ks::i18n::contextText(textKey, fallbackText),
+        textKey);
 }
 
 void MainWindow::closeEvent(QCloseEvent* event)
