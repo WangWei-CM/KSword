@@ -66,6 +66,7 @@
 #include <QScrollArea>
 #include <QScreen>
 #include <QSlider>
+#include "../UI/ThemedSlider.h"
 #include <QSpinBox>
 #include <QStackedWidget>
 #include <QSplitter>
@@ -1658,7 +1659,7 @@ private:
         positionLayout->addWidget(centerScreenButton, 2, 1, 1, 3, Qt::AlignLeft);
 
         m_topMostCheck = new QCheckBox(QStringLiteral("置顶窗口"), statePanel);
-        m_alphaSlider = new QSlider(Qt::Horizontal, statePanel);
+        m_alphaSlider = new ks::ui::ThemedSlider(Qt::Horizontal, statePanel);
         m_alphaSlider->setRange(0, 255);
         m_alphaSpin = new QSpinBox(statePanel);
         m_alphaSpin->setRange(0, 255);

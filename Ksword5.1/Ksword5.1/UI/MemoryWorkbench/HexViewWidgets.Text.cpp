@@ -5,6 +5,7 @@
 // 约定：自绘颜色每次绘制读取；分段页签与普通内容 Tab 共用低对比填充、主题下划线及可读文字。
 
 #include "HexViewWidgets.h"
+#include "../SegmentedControl.h"
 
 #include "HexViewFormat.h"
 
@@ -51,6 +52,16 @@ namespace ks::ui
         setFocusPolicy(Qt::TabFocus);
         setCursor(Qt::PointingHandCursor);
         setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+        ks::ui::InstallSegmentedSurface(this, [this]()
+        {
+            ks::ui::SegmentedSurfaceSnapshot state;
+            state.selected = currentIndex();
+            for (int index = 0; index < count(); ++index)
+            {
+                state.items.push_back({QRectF(segmentRect(index)), labelAt(index), QIcon(), isSegmentEnabled(index)});
+            }
+            return state;
+        });
     }
 
     // 设置某段常规提示（禁用期间不显示，重新启用后恢复）。

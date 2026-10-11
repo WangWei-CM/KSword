@@ -4,6 +4,9 @@
 #include "../Internationalization/LanguageManager.h"
 #include "../UI/ThemePreviewWidget.h"
 #include "../UI/FlowLayout.h"
+#include "../UI/SegmentedControl.h"
+#include "../UI/ThemedSlider.h"
+#include "../UI/SettingsPresentation.h"
 #include "../theme.h"
 
 #include <QButtonGroup>
@@ -40,8 +43,8 @@ void SettingsDock::initializeAppearanceTab()
     ks::i18n::LanguageManager& languageManager = ks::i18n::LanguageManager::instance();
 
     // ===== 主题模式分组 =====
-    QGroupBox* themeGroupBox = new QGroupBox(QStringLiteral("主题模式"), m_appearanceTab);
-    languageManager.bindText(themeGroupBox, QStringLiteral("settings.theme.group"), QStringLiteral("主题模式"));
+    QGroupBox* themeGroupBox = new QGroupBox(QStringLiteral("主题"), m_appearanceTab);
+    languageManager.bindText(themeGroupBox, QStringLiteral("settings.appearance.section.theme"), QStringLiteral("主题"));
     QVBoxLayout* themeLayout = new QVBoxLayout(themeGroupBox);
     themeLayout->setSpacing(8);
 
@@ -93,6 +96,7 @@ void SettingsDock::initializeAppearanceTab()
         QStringLiteral("settings.theme.group"), QStringLiteral("主题模式")),
         ks::settings::ui::ControlRow(themeButtonLayout, themeGroupBox));
     ks::ui::NormalizeToolbarRow(themeButtonLayout, 0);
+    ks::ui::InstallSegmentedButtons(themeButtonLayout, {m_followSystemButton, m_lightModeButton, m_darkModeButton});
 
     // ===== 自定义主题色分组 =====
     QWidget* themeColorGroupBox = new QWidget(themeGroupBox); // 主题色是一行，不嵌套第二层分区。
@@ -113,6 +117,8 @@ void SettingsDock::initializeAppearanceTab()
     languageManager.bindText(m_resetThemeColorButton, QStringLiteral("settings.theme.color.reset"), QStringLiteral("一键复原"));
     themeColorActionLayout->addWidget(m_resetThemeColorButton, 0);
     themeColorActionLayout->addStretch();
+    ks::ui::StyleSettingsColorButton(m_chooseThemeColorButton);
+    ks::ui::StyleSettingsLinkButton(m_resetThemeColorButton);
     themeColorLayout->addLayout(themeColorActionLayout);
     ks::ui::NormalizeToolbarRow(themeColorActionLayout);
     themeForm->addRow(ks::settings::ui::Label(themeGroupBox,
@@ -139,6 +145,7 @@ void SettingsDock::initializeAppearanceTab()
     languageManager.bindText(fontLabel, QStringLiteral("settings.font.label"), QStringLiteral("设置字体"));
     fontLayout->addWidget(fontLabel, 0);
     m_fontCombo = new QComboBox(themeGroupBox);
+    m_fontCombo->setMaximumWidth(300); // 字体选择不拉成整列长条，保留明确的控件边界。
     // 第 0 项 itemData 固定为空字符串；显示文字通过独立刷新函数本地化。
     m_fontCombo->addItem(QString(), QString());
     updateSystemDefaultFontItemText();
@@ -148,7 +155,9 @@ void SettingsDock::initializeAppearanceTab()
     {
         const int fontIndex = m_fontCombo->count();
         m_fontCombo->addItem(fontFamily, fontFamily);
-        m_fontCombo->setItemData(fontIndex, QFont(fontFamily), Qt::FontRole);
+        QFont familyPreview = m_fontCombo->font(); // 字体预览沿用正文大小与抗锯齿，只改变家族。
+        familyPreview.setFamily(fontFamily);
+        m_fontCombo->setItemData(fontIndex, familyPreview, Qt::FontRole);
     }
     m_fontCombo->setToolTip(QStringLiteral("选择系统中已安装的字体；点击“应用”后立即生效"));
     languageManager.bindToolTip(
@@ -156,6 +165,7 @@ void SettingsDock::initializeAppearanceTab()
         QStringLiteral("settings.font.tooltip"),
         QStringLiteral("选择系统中已安装的字体；点击“应用”后立即生效"));
     fontLayout->addWidget(m_fontCombo, 1);
+    fontLayout->addStretch();
     fontLayout->removeWidget(fontLabel);
     themeForm->addRow(fontLabel, ks::settings::ui::ControlRow(fontLayout, themeGroupBox));
 
@@ -176,8 +186,8 @@ void SettingsDock::initializeAppearanceTab()
     ks::settings::ui::Section(themeGroupBox);
 
     // ===== 窗口背景分组 =====
-    QGroupBox* backgroundGroupBox = new QGroupBox(QStringLiteral("窗口背景"), m_appearanceTab);
-    languageManager.bindText(backgroundGroupBox, QStringLiteral("settings.background.group"), QStringLiteral("窗口背景"));
+    QGroupBox* backgroundGroupBox = new QGroupBox(QStringLiteral("背景"), m_appearanceTab);
+    languageManager.bindText(backgroundGroupBox, QStringLiteral("settings.appearance.section.background"), QStringLiteral("背景"));
     QVBoxLayout* backgroundLayout = new QVBoxLayout(backgroundGroupBox);
     backgroundLayout->setSpacing(8);
     auto* backgroundForm = ks::settings::ui::Form(backgroundLayout);
@@ -202,6 +212,8 @@ void SettingsDock::initializeAppearanceTab()
         QStringLiteral("恢复默认背景色"));
     mainBackgroundColorActionLayout->addWidget(m_resetMainBackgroundColorButton, 0);
     mainBackgroundColorActionLayout->addStretch();
+    ks::ui::StyleSettingsColorButton(m_chooseMainBackgroundColorButton);
+    ks::ui::StyleSettingsLinkButton(m_resetMainBackgroundColorButton);
     backgroundForm->addRow(ks::settings::ui::Label(backgroundGroupBox,
         QStringLiteral("settings.background.color.short"), QStringLiteral("主背景色")),
         ks::settings::ui::ControlRow(mainBackgroundColorActionLayout, backgroundGroupBox));
@@ -212,6 +224,9 @@ void SettingsDock::initializeAppearanceTab()
 
     // m_backgroundPathEdit 作用：用户输入背景图路径文本。
     m_backgroundPathEdit = new QLineEdit(backgroundGroupBox);
+    QFont pathFont = QFontDatabase::systemFont(QFontDatabase::FixedFont);
+    pathFont.setPointSizeF(std::max(10.5, font().pointSizeF()));
+    m_backgroundPathEdit->setFont(pathFont);
     m_backgroundPathEdit->setPlaceholderText(QStringLiteral("Style/ksword_background.png"));
     languageManager.bindToolTip(m_backgroundPathEdit,
         QStringLiteral("settings.background.path_hint"),
@@ -222,6 +237,10 @@ void SettingsDock::initializeAppearanceTab()
     m_browseBackgroundButton = new QToolButton(backgroundGroupBox);
     m_browseBackgroundButton->setIcon(QIcon(QString::fromUtf8(":/Icon/settings_background_browse.svg")));
     KswordTheme::ApplyStandardIconButtonMetrics(m_browseBackgroundButton);
+    m_browseBackgroundButton->setMinimumWidth(0);
+    m_browseBackgroundButton->setMaximumWidth(QWIDGETSIZE_MAX);
+    m_browseBackgroundButton->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+    languageManager.bindText(m_browseBackgroundButton, QStringLiteral("settings.background.browse.short"), QStringLiteral("浏览…"));
     m_browseBackgroundButton->setToolTip(QStringLiteral("浏览背景图文件"));
     languageManager.bindToolTip(m_browseBackgroundButton, QStringLiteral("settings.background.browse.tooltip"), QStringLiteral("浏览背景图文件"));
     pathLayout->addWidget(m_browseBackgroundButton);
@@ -230,6 +249,11 @@ void SettingsDock::initializeAppearanceTab()
     m_resetBackgroundButton = new QToolButton(backgroundGroupBox);
     m_resetBackgroundButton->setIcon(QIcon(QString::fromUtf8(":/Icon/settings_background_reset.svg")));
     KswordTheme::ApplyStandardIconButtonMetrics(m_resetBackgroundButton);
+    m_resetBackgroundButton->setMinimumWidth(0);
+    m_resetBackgroundButton->setMaximumWidth(QWIDGETSIZE_MAX);
+    m_resetBackgroundButton->setToolButtonStyle(Qt::ToolButtonTextOnly);
+    languageManager.bindText(m_resetBackgroundButton, QStringLiteral("settings.background.restore.short"), QStringLiteral("恢复"));
+    ks::ui::StyleSettingsLinkButton(m_resetBackgroundButton);
     m_resetBackgroundButton->setToolTip(QStringLiteral("恢复默认背景路径"));
     languageManager.bindToolTip(m_resetBackgroundButton, QStringLiteral("settings.background.reset.tooltip"), QStringLiteral("恢复默认背景路径"));
     pathLayout->addWidget(m_resetBackgroundButton);
@@ -243,7 +267,7 @@ void SettingsDock::initializeAppearanceTab()
     opacityLayout->setSpacing(6);
 
     // m_backgroundOpacitySlider 作用：控制背景图透明度数值。
-    m_backgroundOpacitySlider = new QSlider(Qt::Horizontal, backgroundGroupBox);
+    m_backgroundOpacitySlider = new ks::ui::ThemedSlider(Qt::Horizontal, backgroundGroupBox);
     m_backgroundOpacitySlider->setRange(0, 100);
     m_backgroundOpacitySlider->setSingleStep(1);
     m_backgroundOpacitySlider->setPageStep(5);
@@ -256,6 +280,9 @@ void SettingsDock::initializeAppearanceTab()
     m_backgroundOpacityValueLabel = new QLabel(QStringLiteral("35%"), backgroundGroupBox);
     m_backgroundOpacityValueLabel->setMinimumWidth(48);
     opacityLayout->addWidget(m_backgroundOpacityValueLabel);
+    ks::settings::ui::SliderLegend(opacityLayout, m_backgroundOpacitySlider,
+        m_backgroundOpacityValueLabel, backgroundGroupBox, QStringLiteral("settings.background.opacity.legend"),
+        QStringLiteral("0% 仅纯色 · 100% 仅背景图"));
 
     backgroundForm->addRow(ks::settings::ui::Label(backgroundGroupBox,
         QStringLiteral("settings.background.opacity.short"), QStringLiteral("背景图透明度")),
@@ -307,7 +334,7 @@ void SettingsDock::initializeAppearanceTab()
     blurRadiusLayout->setSpacing(6);
 
     // m_backgroundBlurRadiusSlider 作用：控制背景图自绘玻璃模糊的半径强度。
-    m_backgroundBlurRadiusSlider = new QSlider(Qt::Horizontal, backgroundGroupBox);
+    m_backgroundBlurRadiusSlider = new ks::ui::ThemedSlider(Qt::Horizontal, backgroundGroupBox);
     m_backgroundBlurRadiusSlider->setRange(0, 100);
     m_backgroundBlurRadiusSlider->setSingleStep(1);
     m_backgroundBlurRadiusSlider->setPageStep(5);
@@ -322,6 +349,9 @@ void SettingsDock::initializeAppearanceTab()
     m_backgroundBlurRadiusValueLabel = new QLabel(QStringLiteral("0%"), backgroundGroupBox);
     m_backgroundBlurRadiusValueLabel->setMinimumWidth(48);
     blurRadiusLayout->addWidget(m_backgroundBlurRadiusValueLabel);
+    ks::settings::ui::SliderLegend(blurRadiusLayout, m_backgroundBlurRadiusSlider,
+        m_backgroundBlurRadiusValueLabel, backgroundGroupBox, QStringLiteral("settings.background.blur_radius.legend"),
+        QStringLiteral("0% 不模糊"));
 
     backgroundForm->addRow(ks::settings::ui::Label(backgroundGroupBox,
         QStringLiteral("settings.background.blur_radius.short"), QStringLiteral("背景图模糊半径")),
@@ -331,7 +361,7 @@ void SettingsDock::initializeAppearanceTab()
     acrylicTintLayout->setSpacing(6);
 
     // m_acrylicTintOpacitySlider 作用：控制磨砂玻璃着色层的不透明度。
-    m_acrylicTintOpacitySlider = new QSlider(Qt::Horizontal, backgroundGroupBox);
+    m_acrylicTintOpacitySlider = new ks::ui::ThemedSlider(Qt::Horizontal, backgroundGroupBox);
     m_acrylicTintOpacitySlider->setRange(0, 100);
     m_acrylicTintOpacitySlider->setSingleStep(1);
     m_acrylicTintOpacitySlider->setPageStep(5);
@@ -346,6 +376,9 @@ void SettingsDock::initializeAppearanceTab()
     m_acrylicTintOpacityValueLabel = new QLabel(QStringLiteral("75%"), backgroundGroupBox);
     m_acrylicTintOpacityValueLabel->setMinimumWidth(48);
     acrylicTintLayout->addWidget(m_acrylicTintOpacityValueLabel);
+    ks::settings::ui::SliderLegend(acrylicTintLayout, m_acrylicTintOpacitySlider,
+        m_acrylicTintOpacityValueLabel, backgroundGroupBox, QStringLiteral("settings.background.acrylic_tint.legend"),
+        QStringLiteral("越低越通透，越高文字越清晰"));
 
     transparencyForm->addRow(ks::settings::ui::Label(transparencyGroupBox,
         QStringLiteral("settings.background.acrylic_tint.short"), QStringLiteral("磨砂着色不透明度")),
@@ -355,7 +388,7 @@ void SettingsDock::initializeAppearanceTab()
     desktopTintLayout->setSpacing(6);
 
     // m_desktopTintOpacitySlider 作用：控制直透桌面模式下自绘着色层的不透明度。
-    m_desktopTintOpacitySlider = new QSlider(Qt::Horizontal, backgroundGroupBox);
+    m_desktopTintOpacitySlider = new ks::ui::ThemedSlider(Qt::Horizontal, backgroundGroupBox);
     m_desktopTintOpacitySlider->setRange(0, 100);
     m_desktopTintOpacitySlider->setSingleStep(1);
     m_desktopTintOpacitySlider->setPageStep(5);
@@ -370,6 +403,9 @@ void SettingsDock::initializeAppearanceTab()
     m_desktopTintOpacityValueLabel = new QLabel(QStringLiteral("65%"), backgroundGroupBox);
     m_desktopTintOpacityValueLabel->setMinimumWidth(48);
     desktopTintLayout->addWidget(m_desktopTintOpacityValueLabel);
+    ks::settings::ui::SliderLegend(desktopTintLayout, m_desktopTintOpacitySlider,
+        m_desktopTintOpacityValueLabel, backgroundGroupBox, QStringLiteral("settings.background.desktop_tint.legend"),
+        QStringLiteral("0% 几乎完全看到桌面"));
 
     transparencyForm->addRow(ks::settings::ui::Label(transparencyGroupBox,
         QStringLiteral("settings.background.desktop_tint.short"), QStringLiteral("直透着色不透明度")),

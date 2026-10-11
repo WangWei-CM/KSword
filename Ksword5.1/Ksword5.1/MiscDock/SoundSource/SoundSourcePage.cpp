@@ -23,6 +23,7 @@
 #include <QThreadPool>
 #include <QTimer>
 #include <QToolButton>
+#include "../../UI/SegmentedControl.h"
 #include <QVBoxLayout>
 
 #include <algorithm>
@@ -254,6 +255,7 @@ namespace ks::misc
             presetLayout->addWidget(presetButton);
         }
         ks::ui::NormalizeToolbarRow(presetLayout, 0);
+        ks::ui::InstallSegmentedButtons(presetLayout, {m_overviewPresetButton, m_audioPresetButton, m_kernelPresetButton});
         toolbarLayout->addLayout(presetLayout);
         toolbarLayout->addStretch(1);
         ks::ui::NormalizeToolbarRow(toolbarLayout);

@@ -72,7 +72,7 @@ namespace
 
         void select(const QRectF& rectangle, bool animate)
         {
-            if (rectangle == m_target && animate)
+            if (rectangle == m_target)
             {
                 return;
             }
@@ -110,7 +110,7 @@ namespace
 
     // 文字在滑动面内外分别裁剪绘制，避免动画中途出现黑字落在黑底或白字落在浅底。
     void paintSegment(QPainter& painter, const QRectF& bounds, const QRectF& indicator,
-        const QString& text, const QIcon& icon, QFont font, bool enabled, bool hovered, bool focus)
+        const QString& text, const QIcon& icon, QFont font, bool checked, bool enabled, bool hovered, bool focus)
     {
         const QColor base = segmentSurface();
         const QColor accent = KswordTheme::ControlAccentColor();
@@ -129,9 +129,12 @@ namespace
         painter.drawPath(selectedPath);
 
         // 内容位置与字体只计算一次，两种前景使用完全相同的字形和图标轮廓。
-        font.setWeight(QFont::Normal);
+        font.setWeight(checked ? QFont::DemiBold : QFont::Normal);
         const QSize iconSize(16, 16);
-        const qreal contentWidth = QFontMetrics(font).horizontalAdvance(text)
+        const int iconWidth = icon.isNull() ? 0 : iconSize.width() + (text.isEmpty() ? 0 : 6);
+        const QString displayText = QFontMetrics(font).elidedText(text, Qt::ElideRight,
+            std::max(0, static_cast<int>(bounds.width()) - 20 - iconWidth));
+        const qreal contentWidth = QFontMetrics(font).horizontalAdvance(displayText)
             + (icon.isNull() ? 0 : iconSize.width() + (text.isEmpty() ? 0 : 6));
         QRectF content(bounds.center().x() - contentWidth / 2.0,
             bounds.top(), contentWidth, bounds.height());
@@ -147,7 +150,7 @@ namespace
             const QColor foreground = KswordTheme::EnsureTextContrast(preferred, background, enabled ? 4.5 : 3.0);
             painter.setFont(font);
             painter.setPen(foreground);
-            painter.drawText(textRect, Qt::AlignCenter | Qt::TextShowMnemonic, text);
+            painter.drawText(textRect, Qt::AlignCenter | Qt::TextShowMnemonic, displayText);
             if (!icon.isNull())
             {
                 // 互斥工具选项的单色图形由本组件拥有；保留源 alpha 和当前设备 DPR。
@@ -189,12 +192,18 @@ namespace
             m_row->setSpacing(0);
             for (QAbstractButton* button : buttons)
             {
+                const bool explicitlyHidden = button->isHidden()
+                    && button->testAttribute(Qt::WA_WState_ExplicitShowHide);
                 m_buttons.push_back(button);
                 m_originalWidths.push_back(button->minimumWidth());
                 button->setProperty("ksword_segmented_button", true);
                 button->setProperty("ksword_theme_icon_managed", true);
                 button->setParent(this);
                 m_row->addWidget(button);
+                if (!explicitlyHidden)
+                {
+                    button->show(); // setParent 会隐藏原按钮，显式业务隐藏则继续保留。
+                }
                 button->installEventFilter(this);
                 QObject::connect(button, &QAbstractButton::toggled, this, [this]() { queueSync(); });
                 QObject::connect(button, &QAbstractButton::clicked, this, [this]() { queueSync(); });
@@ -250,13 +259,19 @@ namespace
             }
             if (event->type() == QEvent::Paint)
             {
+                if (selectedIndex() != m_selectedIndex)
+                {
+                    queueSync(); // QSignalBlocker 也可能改 checked；以真实状态兜底，不依赖业务信号。
+                }
                 // 保留原按钮输入和可访问性，仅覆盖绘制；旧 QSS 不再铺出一排独立实色块。
                 QPainter painter(button);
                 painter.setRenderHint(QPainter::Antialiasing);
                 const auto* tool = qobject_cast<QToolButton*>(button);
                 const bool textOnly = tool != nullptr && tool->toolButtonStyle() == Qt::ToolButtonTextOnly;
+                const QVariant selection = button->property("ksword_segmented_selected");
                 paintSegment(painter, QRectF(button->rect()), m_motion.rectangle().translated(-button->pos()),
-                    button->text(), textOnly ? QIcon() : button->icon(), button->font(), button->isEnabled(),
+                    button->text(), textOnly ? QIcon() : button->icon(), button->font(),
+                    selection.isValid() ? selection.toBool() : button->isChecked(), button->isEnabled(),
                     button->underMouse(), button->hasFocus() && button->testAttribute(Qt::WA_KeyboardFocusChange));
                 return true;
             }
@@ -282,7 +297,8 @@ namespace
             }
             if (event->type() == QEvent::DynamicPropertyChange || event->type() == QEvent::LayoutRequest
                 || event->type() == QEvent::FontChange || event->type() == QEvent::StyleChange
-                || event->type() == QEvent::EnabledChange)
+                || event->type() == QEvent::EnabledChange || event->type() == QEvent::Show
+                || event->type() == QEvent::Hide)
             {
                 queueSync();
             }
@@ -295,6 +311,24 @@ namespace
         }
 
     private:
+        int selectedIndex() const
+        {
+            int selected = -1;
+            for (int index = 0; index < m_buttons.size(); ++index)
+            {
+                const auto* button = m_buttons[index].data();
+                if (button != nullptr && !button->isHidden())
+                {
+                    const QVariant state = button->property("ksword_segmented_selected");
+                    if (state.isValid() ? state.toBool() : button->isChecked())
+                    {
+                        selected = index;
+                    }
+                }
+            }
+            return selected;
+        }
+
         // 合并互斥按钮组的先取消/再选中事件，让同一轮变更从旧选中面平滑移动到新位置。
         void queueSync()
         {
@@ -318,17 +352,20 @@ namespace
             for (int index = 0; index < m_buttons.size(); ++index)
             {
                 auto* button = m_buttons[index].data();
-                if (button == nullptr)
+                if (button == nullptr || button->isHidden())
                 {
                     continue;
                 }
                 QFont font = button->font();
                 font.setWeight(QFont::Normal);
+                QFont selectedFont = font;
+                selectedFont.setWeight(QFont::DemiBold);
                 const auto* tool = qobject_cast<QToolButton*>(button);
                 const bool textOnly = tool != nullptr && tool->toolButtonStyle() == Qt::ToolButtonTextOnly;
                 const int iconWidth = button->icon().isNull() || textOnly ? 0 : 22;
                 const int measured = std::max({30, m_originalWidths[index],
-                    QFontMetrics(font).horizontalAdvance(button->text()) + iconWidth + 24});
+                    std::max(QFontMetrics(font).horizontalAdvance(button->text()),
+                        QFontMetrics(selectedFont).horizontalAdvance(button->text())) + iconWidth + 24});
                 if (button->width() != measured || button->minimumWidth() != measured)
                 {
                     button->setFixedWidth(measured);
@@ -353,6 +390,7 @@ namespace
                 queueSync();
             }
             m_motion.select(selected, animate);
+            m_selectedIndex = selectedIndex();
             repaintParts();
         }
 
@@ -374,6 +412,55 @@ namespace
         SegmentMotion m_motion;
         QSize m_hint;
         bool m_pending = false;
+        int m_selectedIndex = -1; // 绘制兜底只在选择确实变化时排队，避免持续重绘循环。
+    };
+
+    // 旧自绘编辑器提供值化绘制快照；共享层仅替换 Paint，不吞掉其提示与选择事件。
+    class SurfaceSegments final : public QObject
+    {
+    public:
+        SurfaceSegments(QWidget* owner, std::function<ks::ui::SegmentedSurfaceSnapshot()> readState)
+            : QObject(owner), m_owner(owner), m_readState(std::move(readState)),
+              m_motion(owner, [owner]() { owner->update(); })
+        {
+            owner->installEventFilter(this);
+        }
+    protected:
+        bool eventFilter(QObject*, QEvent* event) override
+        {
+            if (event->type() == QEvent::Paint)
+            {
+                const auto state = m_readState(); // 调用方仍是原控件，几何与输入共用同一来源。
+                const QRectF selected = state.selected >= 0 && state.selected < state.items.size()
+                    ? state.items[state.selected].bounds.adjusted(2, 2, -2, -2) : QRectF();
+                m_motion.select(selected, true);
+                QPainter painter(m_owner);
+                painter.setRenderHint(QPainter::Antialiasing);
+                painter.setPen(Qt::NoPen);
+                painter.setBrush(segmentSurface());
+                painter.drawRoundedRect(QRectF(m_owner->rect()), 7, 7);
+                const QPoint hover = m_owner->mapFromGlobal(QCursor::pos());
+                for (int index = 0; index < state.items.size(); ++index)
+                {
+                    const auto& item = state.items[index];
+                    paintSegment(painter, item.bounds.adjusted(2, 2, -2, -2), m_motion.rectangle(),
+                        item.text, item.icon, m_owner->font(), index == state.selected,
+                        item.enabled && m_owner->isEnabled(), m_owner->underMouse() && item.bounds.contains(hover),
+                        m_owner->hasFocus() && index == state.selected && m_owner->testAttribute(Qt::WA_KeyboardFocusChange));
+                }
+                return true;
+            }
+            if (event->type() == QEvent::Hide || event->type() == QEvent::Resize
+                || event->type() == QEvent::FontChange || event->type() == QEvent::PaletteChange)
+            {
+                m_motion.stop();
+            }
+            return false;
+        }
+    private:
+        QWidget* m_owner = nullptr; // 控件与过滤器同寿命，不交给后台任务。
+        std::function<ks::ui::SegmentedSurfaceSnapshot()> m_readState;
+        SegmentMotion m_motion;
     };
 
     // 原生范围标签复用同一选中面和裁剪文字；索引、选择信号与键盘行为继续由 QTabBar 负责。
@@ -393,6 +480,10 @@ namespace
         {
             if (event->type() == QEvent::Paint)
             {
+                if (m_bar->currentIndex() != m_selectedIndex)
+                {
+                    sync(true); // 搜索范围的程序切换会阻塞 currentChanged，也应移动选中面。
+                }
                 QPainter painter(m_bar);
                 painter.setRenderHint(QPainter::Antialiasing);
                 painter.setPen(Qt::NoPen);
@@ -403,7 +494,7 @@ namespace
                 {
                     paintSegment(painter, QRectF(m_bar->tabRect(index)).adjusted(2, 2, -2, -2),
                         m_motion.rectangle(), m_bar->tabText(index), m_bar->tabIcon(index), m_bar->font(),
-                        m_bar->isTabEnabled(index) && m_bar->isEnabled(), index == hovered,
+                        index == m_bar->currentIndex(), m_bar->isTabEnabled(index) && m_bar->isEnabled(), index == hovered,
                         m_bar->hasFocus() && index == m_bar->currentIndex()
                             && m_bar->testAttribute(Qt::WA_KeyboardFocusChange));
                 }
@@ -413,11 +504,20 @@ namespace
                 || event->type() == QEvent::FontChange || event->type() == QEvent::LayoutRequest
                 || event->type() == QEvent::PaletteChange)
             {
+                if (event->type() == QEvent::FontChange || event->type() == QEvent::PaletteChange)
+                {
+                    m_motion.stop();
+                }
                 sync(false);
             }
             if (event->type() == QEvent::Hide)
             {
                 m_motion.stop();
+            }
+            if (event->type() == QEvent::MouseMove || event->type() == QEvent::Enter
+                || event->type() == QEvent::Leave || event->type() == QEvent::HoverMove)
+            {
+                m_bar->update();
             }
             return false;
         }
@@ -426,11 +526,13 @@ namespace
         void sync(bool animate)
         {
             const int selected = m_bar->currentIndex();
+            m_selectedIndex = selected;
             m_motion.select(selected < 0 ? QRectF()
                 : QRectF(m_bar->tabRect(selected)).adjusted(2, 2, -2, -2), animate);
         }
         QTabBar* m_bar = nullptr;
         SegmentMotion m_motion;
+        int m_selectedIndex = -1;
     };
 }
 
@@ -457,6 +559,7 @@ QWidget* ks::ui::InstallSegmentedButtons(QBoxLayout* layout, const QList<QAbstra
     }
     auto* control = new ButtonSegments(buttons, owner);
     layout->insertWidget(first, control);
+    control->show();
     return control;
 }
 
@@ -469,6 +572,8 @@ void ks::ui::InstallSegmentedTabBar(QTabBar* bar)
     bar->setProperty("ksword_segmented_tabs", true);
     bar->setProperty("ksword_adaptive_tabbar_configured", true);
     bar->setDrawBase(false);
+    bar->setMouseTracking(true);
+    bar->setAttribute(Qt::WA_Hover, true);
     bar->setExpanding(true);
     bar->setStyleSheet(QStringLiteral(
         "QTabBar[ksword_segmented_tabs=\"true\"]{background:transparent;border:0;}"
@@ -487,4 +592,14 @@ void ks::ui::SetSegmentedButtonSelected(QAbstractButton* button, bool selected)
     const QSignalBlocker blocker(button); // 显式同步外观不重放业务 toggled 回调。
     button->setCheckable(true);
     button->setChecked(selected);
+}
+
+void ks::ui::InstallSegmentedSurface(QWidget* owner, std::function<SegmentedSurfaceSnapshot()> readState)
+{
+    if (owner == nullptr || !readState || owner->property("ksword_segmented_surface").toBool())
+    {
+        return;
+    }
+    owner->setProperty("ksword_segmented_surface", true);
+    new SurfaceSegments(owner, std::move(readState));
 }

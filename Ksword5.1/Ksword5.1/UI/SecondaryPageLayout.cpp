@@ -216,7 +216,8 @@ namespace ks::ui
                     KswordTheme::TextPrimaryColor().name(), KswordTheme::ControlAccentColor().name(),
                     KswordTheme::BlendColors(base, KswordTheme::ControlAccentColor(), 16).name(),
                     KswordTheme::TextDisabledColor().name());
-            SetOwnedStyle(target, rules);
+            SetOwnedStyle(target, rules + (target->property("ksword_settings_tabs").toBool()
+                ? QStringLiteral("QTabBar[ksword_settings_tabs=\"true\"]::tab:selected{font-weight:600;}") : QString()));
         });
     }
 
@@ -235,13 +236,15 @@ namespace ks::ui
                 return;
             }
             // 细线位于标题下方，正文没有卡片底色和额外侧边，信息密度由页面布局决定。
+            const bool settings = target->property("ksword_settings_section").toBool();
             SetOwnedStyle(target, QStringLiteral(
                 "QGroupBox[ksword_secondary_section=\"true\"]{background:transparent;"
-                "border:0;border-top:1px solid %1;border-radius:0;margin-top:22px;padding-top:8px;}"
+                "border:0;border-top:1px solid %1;border-radius:0;margin-top:%3px;padding-top:%4px;}"
                 "QGroupBox[ksword_secondary_section=\"true\"]::title{"
                 "subcontrol-origin:margin;subcontrol-position:top left;left:0;top:0;"
                 "padding:0;background:transparent;color:%2;font-weight:600;}")
-                .arg(KswordTheme::BorderColor().name(), KswordTheme::TextSecondaryColor().name()));
+                .arg(KswordTheme::BorderColor().name(), KswordTheme::TextSecondaryColor().name())
+                .arg(settings ? 28 : 22).arg(settings ? 10 : 8));
         });
     }
 

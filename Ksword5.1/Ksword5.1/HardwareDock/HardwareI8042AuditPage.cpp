@@ -21,6 +21,7 @@
 #include <QLineEdit>
 #include <QMetaObject>
 #include <QPushButton>
+#include "../UI/SegmentedControl.h"
 #include <QPointer>
 #include <QShowEvent>
 #include <QStringList>
@@ -160,6 +161,7 @@ void HardwareI8042AuditPage::initializeUi()
     presetLayout->addWidget(m_columnGroupAButton);
     presetLayout->addWidget(m_columnGroupBButton);
     presetLayout->addWidget(m_columnGroupCButton);
+    ks::ui::InstallSegmentedButtons(presetLayout, {m_columnGroupAButton, m_columnGroupBButton, m_columnGroupCButton});
     ks::ui::NormalizeToolbarRow(presetLayout, 0);
     toolbar->addLayout(presetLayout);
     toolbar->addWidget(m_filterEdit, 1);
@@ -506,6 +508,7 @@ void HardwareI8042AuditPage::updateColumnGroupButtons()
     {
         if (buttons[index] != nullptr)
         {
+            ks::ui::SetSegmentedButtonSelected(buttons[index], static_cast<int>(index) == m_columnGroupIndex);
             buttons[index]->setStyleSheet(
                 i8042ColumnButtonStyle(
                     static_cast<int>(index) == m_columnGroupIndex));

@@ -25,6 +25,7 @@
 #include <QMetaObject>
 #include <QPointer>
 #include <QPushButton>
+#include "../UI/SegmentedControl.h"
 #include <QSplitter>
 #include <QTableWidget>
 #include <QTableWidgetItem>
@@ -184,6 +185,7 @@ void KernelThreadAuditTab::initializeUi()
     presetLayout->setSpacing(0);
     presetLayout->addWidget(m_overviewButton);
     presetLayout->addWidget(m_evidenceButton);
+    ks::ui::InstallSegmentedButtons(presetLayout, {m_overviewButton, m_evidenceButton});
     ks::ui::NormalizeToolbarRow(presetLayout, 0);
     toolLayout->addLayout(presetLayout);
     toolLayout->addWidget(m_filterEdit, 1);
@@ -583,6 +585,8 @@ void KernelThreadAuditTab::updatePresetButtons()
 
     m_overviewButton->setStyleSheet(m_viewPreset == ViewPreset::Overview ? activeStyle : inactiveStyle);
     m_evidenceButton->setStyleSheet(m_viewPreset == ViewPreset::Evidence ? activeStyle : inactiveStyle);
+    ks::ui::SetSegmentedButtonSelected(m_overviewButton, m_viewPreset == ViewPreset::Overview);
+    ks::ui::SetSegmentedButtonSelected(m_evidenceButton, m_viewPreset == ViewPreset::Evidence);
 }
 
 void KernelThreadAuditTab::showHeaderMenu(const QPoint& localPosition)

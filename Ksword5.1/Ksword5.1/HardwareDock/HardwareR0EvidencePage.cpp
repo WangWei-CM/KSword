@@ -29,6 +29,7 @@
 #include <QPixmap>
 #include <QPointer>
 #include <QPushButton>
+#include "../UI/SegmentedControl.h"
 #include <QRunnable>
 #include <QRegularExpression>
 #include <QSignalBlocker>
@@ -270,6 +271,9 @@ namespace
         }
 
         const QString presetText = table->property("kswordColumnPreset").toString();
+        ks::ui::SetSegmentedButtonSelected(buttonA, presetText == QStringLiteral("A"));
+        ks::ui::SetSegmentedButtonSelected(buttonB, presetText == QStringLiteral("B"));
+        ks::ui::SetSegmentedButtonSelected(buttonC, presetText == QStringLiteral("C"));
         buttonA->setStyleSheet(buildColumnPresetButtonStyle(presetText == QStringLiteral("A")));
         buttonB->setStyleSheet(buildColumnPresetButtonStyle(presetText == QStringLiteral("B")));
         buttonC->setStyleSheet(buildColumnPresetButtonStyle(presetText == QStringLiteral("C")));
@@ -922,6 +926,7 @@ void HardwareR0EvidencePage::initializeUi()
     presetLayout->addWidget(groupAButton, 0);
     presetLayout->addWidget(groupBButton, 0);
     presetLayout->addWidget(groupCButton, 0);
+    ks::ui::InstallSegmentedButtons(presetLayout, {groupAButton, groupBButton, groupCButton});
 
     m_refreshButton = new QPushButton(QIcon(QStringLiteral(":/Icon/process_refresh.svg")), QStringLiteral("刷新R0证据"), this);
     m_refreshButton->setToolTip(QStringLiteral("刷新内核硬件证据（只读）。"));

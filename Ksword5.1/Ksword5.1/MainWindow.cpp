@@ -7844,6 +7844,7 @@ void MainWindow::showSettingsPanelFromMenu(bool showLanguageTab)
 
     // 固定操作栏不放入滚动区域，保证“应用/取消”始终可见。
     auto* footer = new QWidget(&settingsDialog); // 操作区用一条中性边界与内容分开。
+    footer->setFont(settingsPanel->font()); // 底部动作与设置正文共用阅读字号。
     auto* actionLayout = new QHBoxLayout(footer);
     actionLayout->addStretch(1);
     auto* cancelButton = new QPushButton(QStringLiteral("取消"), &settingsDialog);

@@ -2,6 +2,8 @@
 #include "../UI/SecondaryPageLayout.h"
 #include "../UI/ToolbarMetrics.h"
 #include "../UI/FlatButtonTheme.h"
+#include "../UI/SettingsPresentation.h"
+#include "../UI/SegmentedControl.h"
 
 #include "../Framework.h"
 #include "../Internationalization/LanguageManager.h"
@@ -33,6 +35,7 @@
 #include <QStringList>
 #include <QStyleHints>
 #include <QTabWidget>
+#include <QTabBar>
 #include <QToolButton>
 #include <QVBoxLayout>
 
@@ -208,6 +211,7 @@ SettingsDock::SettingsDock(QWidget* parent)
     kLogEvent settingsInitEvent;
     info << settingsInitEvent << "[SettingsDock] 开始初始化设置页 UI。" << eol;
 
+    ks::ui::ApplySettingsPresentation(this);
     initializeUi();
     initializeAppearanceTab();
     initializeLanguageTab();
@@ -238,6 +242,14 @@ void SettingsDock::changeEvent(QEvent* event)
         refreshBugcheckDiagnosticsStatusText();
         updateApplyButtonState();
     }
+    if (event->type() == QEvent::ApplicationFontChange)
+    {
+        ks::ui::ApplySettingsPresentation(this);
+        if (m_tabWidget != nullptr)
+        {
+            ks::ui::StyleSettingsNavigation(m_tabWidget->tabBar(), font());
+        }
+    }
     // 跟随系统模式下深浅色由系统翻转，不经过“应用”按钮，
     // 这里补一次重下发，避免主题按钮自身停在旧主题的快照配色上。
     if (event->type() == QEvent::ApplicationPaletteChange && m_themeButtonGroup != nullptr)
@@ -256,6 +268,7 @@ void SettingsDock::initializeUi()
 
     // m_tabWidget 作用：设置页签容器，后续可扩展更多标签页。
     m_tabWidget = new QTabWidget(this);
+    ks::ui::StyleSettingsNavigation(m_tabWidget->tabBar(), font());
     ks::ui::StyleSecondaryTabs(m_tabWidget);
     m_tabWidget->setTabPosition(QTabWidget::North);
     rootLayout->addWidget(m_tabWidget);
@@ -1360,12 +1373,7 @@ void SettingsDock::saveAndEmitFromUi(const QString& triggerReason)
 
 void SettingsDock::updateThemeButtonStyle()
 {
-    // 主题选择以纯色强调当前模式，保留按钮组 checked 状态及原尺寸。
-    const QString normalStyle = ks::ui::BuildFlatButtonStyle(ks::ui::FlatButtonTone::Neutral)
-        + QStringLiteral("QToolButton{border-radius:2px;}");
-    const QString checkedStyle = ks::ui::BuildFlatButtonStyle(ks::ui::FlatButtonTone::Accent)
-        + QStringLiteral("QToolButton{border-radius:2px;}");
-
+    // 选中状态仍来自原 QButtonGroup；共享组件负责连续底面、动画与文字对比。
     const QList<QAbstractButton*> themeButtons = m_themeButtonGroup->buttons();
     for (QAbstractButton* themeButton : themeButtons)
     {
@@ -1374,7 +1382,7 @@ void SettingsDock::updateThemeButtonStyle()
         {
             continue;
         }
-        themedToolButton->setStyleSheet(themedToolButton->isChecked() ? checkedStyle : normalStyle);
+        themedToolButton->update();
     }
 }
 

@@ -32,6 +32,7 @@
 #include <QStyleOption>
 #include <QStyledItemDelegate>
 #include <QTabBar>
+#include "./SegmentedControl.h"
 #include <QTabWidget>
 #include <QTableView>
 #include <QTextDocument>
@@ -1251,6 +1252,7 @@ namespace ks::ui
         m_searchScopeTabs->addTab(QString());
         m_searchScopeTabs->addTab(QString());
         m_searchScopeTabs->addTab(QString());
+        InstallSegmentedTabBar(m_searchScopeTabs);
         m_searchResultsOnlyCheck = new QCheckBox(m_searchOptionsRow);
 
         optionsLayout->addWidget(m_searchScopeLabel, 0);
@@ -1709,27 +1711,7 @@ namespace ks::ui
             m_searchResultsOnlyCheck->setStyleSheet(
                 QStringLiteral("color:%1;").arg(KswordTheme::TextSecondaryHex()));
         }
-        if (m_searchScopeTabs != nullptr)
-        {
-            // 搜索范围属于紧凑分段页签，保留均分宽度；选中面使用与普通内容 Tab 一致的弱强调。
-            const QColor selectedSurface = KswordTheme::BlendColors(
-                KswordTheme::SurfaceColor(), KswordTheme::PrimaryAccentColor(), 38);
-            m_searchScopeTabs->setStyleSheet(QStringLiteral(
-                "QTabBar::tab{background:%1;color:%2;border:0;border-bottom:2px solid %3;"
-                "padding:3px 12px;min-width:92px;}"
-                "QTabBar::tab:first{border-top-left-radius:5px;}"
-                "QTabBar::tab:last{border-top-right-radius:5px;}"
-                "QTabBar::tab:selected{background:%4;color:%5;border-bottom-color:%7;}"
-                "QTabBar::tab:hover:!selected{background:%6;color:%2;}")
-                .arg(
-                    KswordTheme::SurfaceHex(),
-                    KswordTheme::TextSecondaryHex(),
-                    KswordTheme::BorderStrongHex(),
-                    selectedSurface.name(),
-                    KswordTheme::EnsureTextContrast(KswordTheme::TextPrimaryColor(), selectedSurface, 4.5).name(),
-                    KswordTheme::SurfaceMutedColorHex(),
-                    KswordTheme::ThemeColorName(KswordTheme::PrimaryAccentColor())));
-        }
+        // 范围栏颜色由共享分段组件在绘制时求值，显示弹层不再覆写它的选中样式。
 
         const int anchorWidth = m_popupAnchorWidget != nullptr ? m_popupAnchorWidget->width() : 460;
         const int panelWidth = std::clamp(

@@ -1562,6 +1562,9 @@
     <ClCompile Include="UI\ThemedSlider.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="UI\SettingsPresentation.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="UI\TabHierarchyTransition.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -2758,6 +2761,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="UI\ThemedSlider.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="UI\SettingsPresentation.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="UI\TabHierarchyTransition.h">

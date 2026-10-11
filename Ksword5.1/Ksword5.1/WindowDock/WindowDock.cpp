@@ -53,6 +53,7 @@
 #include <QPoint>
 #include <QPointer>
 #include <QPushButton>
+#include "../UI/SegmentedControl.h"
 #include <QSizePolicy>
 #include <QRect>
 #include <QScreen>
@@ -1893,6 +1894,8 @@ namespace
         // 按钮属性用途：保存当前选中态，主题刷新时无需重新捕获局部 lambda 指针。
         const bool buttonASelected = presetText == QStringLiteral("A");
         const bool buttonBSelected = presetText == QStringLiteral("B");
+        ks::ui::SetSegmentedButtonSelected(buttonA, buttonASelected);
+        ks::ui::SetSegmentedButtonSelected(buttonB, buttonBSelected);
         buttonA->setProperty(kColumnPresetSelectedProperty, buttonASelected);
         buttonB->setProperty(kColumnPresetSelectedProperty, buttonBSelected);
         buttonA->setStyleSheet(buildColumnPresetButtonStyle(buttonASelected));
@@ -3122,6 +3125,7 @@ void WindowDock::initializeUi()
             QStringLiteral("显示 B 组精简列：偏向地址、来源、flags、路径或诊断字段。"));
         presetLayout->addWidget(groupAButton, 0);
         presetLayout->addWidget(groupBButton, 0);
+        ks::ui::InstallSegmentedButtons(presetLayout, {groupAButton, groupBButton});
         presetLayout->addStretch(1);
         // A/B 为同一个分段选择器，保留紧贴关系。
         ks::ui::NormalizeToolbarRow(presetLayout, 0);

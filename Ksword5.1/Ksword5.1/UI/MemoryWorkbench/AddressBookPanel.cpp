@@ -20,6 +20,7 @@
 #include <QKeySequence>
 #include <QLineEdit>
 #include <QPushButton>
+#include "../SegmentedControl.h"
 #include <QSignalBlocker>
 #include <QSortFilterProxyModel>
 #include <QVBoxLayout>
@@ -251,6 +252,7 @@ namespace ks::ui
         columnButtonsLayout->setSpacing(0);
         columnButtonsLayout->addWidget(m_columnAButton);
         columnButtonsLayout->addWidget(m_columnBButton);
+        ks::ui::InstallSegmentedButtons(columnButtonsLayout, {m_columnAButton, m_columnBButton});
         m_toolbarFlow->addWidget(m_columnButtonsHost);
 
         m_pointerChainAddButton = new QPushButton(

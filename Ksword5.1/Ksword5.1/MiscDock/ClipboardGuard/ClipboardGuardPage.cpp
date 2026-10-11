@@ -14,6 +14,7 @@
 #include <QLabel>
 #include <QMenu>
 #include <QPushButton>
+#include "../../UI/SegmentedControl.h"
 #include <QSignalBlocker>
 #include <QTableWidget>
 #include <QTableWidgetItem>
@@ -178,6 +179,7 @@ namespace ks::misc
         m_columnPresetBButton->setToolTip(QStringLiteral("列预设 B：来源与诊断（时间/PID/TID/会话/完整性/发起进程/序号）。"));
         presetLayout->addWidget(m_columnPresetAButton);
         presetLayout->addWidget(m_columnPresetBButton);
+        ks::ui::InstallSegmentedButtons(presetLayout, {m_columnPresetAButton, m_columnPresetBButton});
         ks::ui::NormalizeToolbarRow(presetLayout, 0);
         eventTopLayout->addWidget(m_columnPresetWidget);
         eventTopLayout->addStretch(1);

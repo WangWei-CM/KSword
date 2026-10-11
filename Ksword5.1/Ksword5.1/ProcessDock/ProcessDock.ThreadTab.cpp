@@ -28,6 +28,7 @@
 #include <QMetaObject>
 #include <QMessageBox>
 #include <QPushButton>
+#include "../UI/SegmentedControl.h"
 #include <QRunnable>
 #include <QSignalBlocker>
 #include <QSizePolicy>
@@ -539,6 +540,7 @@ void ProcessDock::initializeThreadPage()
     m_threadColumnPresetBButton->setCheckable(true);
     m_threadColumnPresetLayout->addWidget(m_threadColumnPresetAButton);
     m_threadColumnPresetLayout->addWidget(m_threadColumnPresetBButton);
+    ks::ui::InstallSegmentedButtons(m_threadColumnPresetLayout, {m_threadColumnPresetAButton, m_threadColumnPresetBButton});
     ks::ui::NormalizeToolbarRow(m_threadColumnPresetLayout, 0);
     ks::i18n::LanguageManager::instance().bindToolTip(
         m_threadColumnPresetAButton,

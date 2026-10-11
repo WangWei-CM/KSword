@@ -9,11 +9,50 @@
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QSlider>
 #include <QScrollArea>
 #include <QVBoxLayout>
 
 namespace ks::settings::ui
 {
+    // 说明和读数跟随滑块的真实启用状态，程序加载配置或禁用父级时也保持一致。
+    class SliderLegendState final : public QObject
+    {
+    public:
+        SliderLegendState(QSlider* slider, QWidget* value, QWidget* hint)
+            : QObject(slider), m_slider(slider), m_value(value), m_hint(hint)
+        {
+            slider->installEventFilter(this);
+            apply();
+        }
+    protected:
+        bool eventFilter(QObject*, QEvent* event) override
+        {
+            if (event->type() == QEvent::EnabledChange)
+            {
+                apply();
+            }
+            return false;
+        }
+    private:
+        void apply()
+        {
+            if (m_slider)
+            {
+                if (m_value)
+                {
+                    m_value->setEnabled(m_slider->isEnabled());
+                }
+                if (m_hint)
+                {
+                    m_hint->setEnabled(m_slider->isEnabled());
+                }
+            }
+        }
+        QPointer<QSlider> m_slider;
+        QPointer<QWidget> m_value;
+        QPointer<QWidget> m_hint;
+    };
     // ScrollPage 只包装当前页内容，让顶部标签和窗口底部操作始终留在可见范围。
     // content 所有权交给返回的滚动区；原有控件实例和信号连接保持有效。
     inline QWidget* ScrollPage(QWidget* content)
@@ -30,6 +69,7 @@ namespace ks::settings::ui
     // Section 为明确的设置分区保留标题和细分隔线，布局不再绘制逐项卡片。
     inline void Section(QGroupBox* section)
     {
+        section->setProperty("ksword_settings_section", true);
         ks::ui::StyleSecondarySection(section);
         if (section->layout() != nullptr)
         {
@@ -43,6 +83,7 @@ namespace ks::settings::ui
                 {
                     const int storedWidth = form->property("ksword_settings_label_width").toInt();
                     ks::ui::StyleSecondaryForm(form, storedWidth > 0 ? storedWidth : 160);
+                    form->setVerticalSpacing(10);
                 }
             }
         }
@@ -58,11 +99,12 @@ namespace ks::settings::ui
     }
 
     // Form 把一组相关选项排在同一标签列；窄页允许长行换行，不裁剪输入内容。
-    inline QFormLayout* Form(QVBoxLayout* parent, int labelWidth = 160)
+    inline QFormLayout* Form(QVBoxLayout* parent, int labelWidth = 204)
     {
         auto* form = new QFormLayout(); // 每个分区独立维护行，标签宽度共用。
         form->setProperty("ksword_settings_label_width", labelWidth);
         ks::ui::StyleSecondaryForm(form, labelWidth);
+        form->setVerticalSpacing(10);
         parent->addLayout(form);
         return form;
     }
@@ -76,6 +118,21 @@ namespace ks::settings::ui
         field->setLayout(row);
         ks::ui::NormalizeToolbarRow(row);
         return field;
+    }
+
+    // 数值紧跟轨道，解释位于同一行；窄页只让解释换行，不把滑块拉成整页长线。
+    inline void SliderLegend(QHBoxLayout* row, QSlider* slider, QLabel* value,
+        QWidget* parent, const QString& key, const QString& fallback)
+    {
+        slider->setMinimumWidth(120);
+        slider->setMaximumWidth(250);
+        value->setMinimumWidth(42);
+        value->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+        auto* hint = Label(parent, key, fallback);
+        hint->setProperty("ksword_settings_hint", true);
+        hint->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+        row->addWidget(hint, 1);
+        new SliderLegendState(slider, value, hint);
     }
 
     // ToggleRow 把已有复选框的文字放入左列，使勾选位置与其他输入控件对齐。

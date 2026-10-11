@@ -40,6 +40,7 @@
 #include <QPointer>
 #include <QProcess>
 #include <QPushButton>
+#include "../UI/SegmentedControl.h"
 #include <QRegularExpression>
 #include <QSignalBlocker>
 #include <QSize>
@@ -960,6 +961,7 @@ void RegistryOptimizationPage::initializeUi()
     m_columnPresetBButton->setToolTip(QStringLiteral("B 组：诊断视图，只显示项目、作用域、类型和条件/警告。"));
     presetButtonLayout->addWidget(m_columnPresetAButton);
     presetButtonLayout->addWidget(m_columnPresetBButton);
+    ks::ui::InstallSegmentedButtons(presetButtonLayout, {m_columnPresetAButton, m_columnPresetBButton});
 
     m_filterEdit = new QLineEdit(this);
     // 优化项/分组结果过滤共用此字段，不改变原有去抖和列预设。
@@ -1541,10 +1543,12 @@ void RegistryOptimizationPage::refreshColumnPresetButtonStyles()
     if (m_columnPresetAButton != nullptr)
     {
         m_columnPresetAButton->setStyleSheet(m_columnPreset == ColumnPreset::A ? activeStyle : inactiveStyle);
+        ks::ui::SetSegmentedButtonSelected(m_columnPresetAButton, m_columnPreset == ColumnPreset::A);
     }
     if (m_columnPresetBButton != nullptr)
     {
         m_columnPresetBButton->setStyleSheet(m_columnPreset == ColumnPreset::B ? activeStyle : inactiveStyle);
+        ks::ui::SetSegmentedButtonSelected(m_columnPresetBButton, m_columnPreset == ColumnPreset::B);
     }
 }
 

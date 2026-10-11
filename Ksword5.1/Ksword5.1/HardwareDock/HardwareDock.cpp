@@ -69,6 +69,7 @@
 #include <QPointer>
 #include <QProcess>
 #include <QPushButton>
+#include "../UI/SegmentedControl.h"
 #include <QRegularExpression>
 #include <QResizeEvent>
 #include <QRunnable>
@@ -442,6 +443,9 @@ namespace
         }
 
         const QString presetText = table->property("kswordColumnPreset").toString();
+        ks::ui::SetSegmentedButtonSelected(buttonA, presetText == QStringLiteral("A"));
+        ks::ui::SetSegmentedButtonSelected(buttonB, presetText == QStringLiteral("B"));
+        ks::ui::SetSegmentedButtonSelected(buttonC, presetText == QStringLiteral("C"));
         buttonA->setStyleSheet(buildColumnPresetButtonStyle(presetText == QStringLiteral("A")));
         buttonB->setStyleSheet(buildColumnPresetButtonStyle(presetText == QStringLiteral("B")));
         buttonC->setStyleSheet(buildColumnPresetButtonStyle(presetText == QStringLiteral("C")));
@@ -666,6 +670,7 @@ namespace
             presetLayout->addWidget(groupAButton, 0);
             presetLayout->addWidget(groupBButton, 0);
             presetLayout->addWidget(groupCButton, 0);
+            ks::ui::InstallSegmentedButtons(presetLayout, {groupAButton, groupBButton, groupCButton});
 
             tableToolLayout->addLayout(presetLayout, 0);
             tableToolLayout->addWidget(searchEdit, 1);

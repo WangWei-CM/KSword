@@ -22,6 +22,7 @@
 #include <QMetaObject>
 #include <QPointer>
 #include <QPushButton>
+#include "../UI/SegmentedControl.h"
 #include <QRunnable>
 #include <QTableWidget>
 #include <QTableWidgetItem>
@@ -367,6 +368,7 @@ void ProcessMessageHookWindow::initializeUi()
     toolbarLayout->addWidget(m_scopeCombo, 0);
     toolbarLayout->addWidget(m_columnAButton, 0);
     toolbarLayout->addWidget(m_columnBButton, 0);
+    ks::ui::InstallSegmentedButtons(toolbarLayout, {m_columnAButton, m_columnBButton});
     toolbarLayout->addWidget(m_targetLabel, 1);
     ks::ui::NormalizeToolbarRow(toolbarLayout);
     rootLayout->addLayout(toolbarLayout);
@@ -818,6 +820,8 @@ void ProcessMessageHookWindow::updateColumnPresetButtons()
     const QString preset = m_table->property("kswordColumnPreset").toString();
     m_columnAButton->setStyleSheet(presetButtonStyle(preset == QStringLiteral("A")));
     m_columnBButton->setStyleSheet(presetButtonStyle(preset == QStringLiteral("B")));
+    ks::ui::SetSegmentedButtonSelected(m_columnAButton, preset == QStringLiteral("A"));
+    ks::ui::SetSegmentedButtonSelected(m_columnBButton, preset == QStringLiteral("B"));
 }
 
 void ProcessMessageHookWindow::showHeaderContextMenu(const QPoint& localPosition)

@@ -44,6 +44,7 @@
 #include <QScrollArea>
 #include <QScrollBar>
 #include <QSlider>
+#include "../UI/ThemedSlider.h"
 #include <QSpinBox>
 #include <QSplitter>
 #include <QString>
@@ -1017,7 +1018,7 @@ namespace ks::window::dwmctl
             m_accentColorButton->setFixedWidth(52);
             grid->addWidget(m_accentColorButton, 2, 1);
             grid->addWidget(makeLabel(group, "window.dwm.accent.alpha", "透明度"), 2, 2);
-            m_accentAlphaSlider = new QSlider(Qt::Horizontal, group);
+            m_accentAlphaSlider = new ks::ui::ThemedSlider(Qt::Horizontal, group);
             m_accentAlphaSlider->setRange(0, 255);
             m_accentAlphaSlider->setValue(160);
             grid->addWidget(m_accentAlphaSlider, 2, 3);
@@ -1082,7 +1083,7 @@ namespace ks::window::dwmctl
             m_thumbnailClientOnlyCheck = new QCheckBox(
                 uiText("window.dwm.thumbnail.client_only", "仅客户区"), thumbnailGroup);
             bindUiText(m_thumbnailClientOnlyCheck, "window.dwm.thumbnail.client_only", "仅客户区");
-            m_thumbnailOpacitySlider = new QSlider(Qt::Horizontal, thumbnailGroup);
+            m_thumbnailOpacitySlider = new ks::ui::ThemedSlider(Qt::Horizontal, thumbnailGroup);
             m_thumbnailOpacitySlider->setRange(0, 255);
             m_thumbnailOpacitySlider->setValue(255);
             thumbnailControlLayout->addWidget(m_thumbnailEnableCheck, 0);
