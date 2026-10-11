@@ -513,7 +513,13 @@ namespace
         : public ks::ui::visible_table_detail::TableChromeHostView<QTableView>
     {
     public:
-        using TableChromeHostView<QTableView>::TableChromeHostView;
+        // 内部视图只提供结果和冻结空间，复制/导出/返回统一交给源表操作条。
+        explicit ComparisonTableView(QWidget* parent)
+            : TableChromeHostView<QTableView>(parent)
+        {
+            setProperty(ks::ui::InheritedTableActionBarProperty, true);
+            ks::ui::SetTableActionBarMode(this, TableActionBarMode::None);
+        }
 
     protected:
         void wheelEvent(QWheelEvent* eventObject) override
@@ -828,6 +834,8 @@ namespace
                     if (!m_comparisonModel.isNull())
                     {
                         m_comparisonModel->setShowDifferencesOnly(checked);
+                        // 差异为空时不能复制，切回全部结果后须恢复源条动作的真实可用性。
+                        updateControls();
                     }
                 });
             connect(m_ignoreColumnsButton, &QToolButton::clicked, this, [this]()
@@ -2216,10 +2224,11 @@ namespace
             const bool fullMode = m_mode == TableActionBarMode::Full;
             m_copyAllButton->setVisible(actionBarVisible);
             m_exportButton->setVisible(actionBarVisible);
-            m_freezePaneButton->setVisible(fullMode);
-            m_pauseRefreshButton->setVisible(fullMode);
+            // 比对结果不支持冻结实时采集或重新快照，避免展示一排永久禁用的无效动作。
+            m_freezePaneButton->setVisible(fullMode && !m_inComparison);
+            m_pauseRefreshButton->setVisible(fullMode && !m_inComparison);
             m_snapshotScrollArea->setVisible(fullMode);
-            m_addSnapshotButton->setVisible(fullMode);
+            m_addSnapshotButton->setVisible(fullMode && !m_inComparison);
             m_cleanupButton->setVisible(fullMode && !m_cleanupMode);
             m_doneCleanupButton->setVisible(fullMode && m_cleanupMode);
             m_deleteSelectedButton->setVisible(fullMode && m_cleanupMode);
@@ -2281,15 +2290,23 @@ namespace
                 m_differenceOnlyCheckBox, m_ignoreColumnsButton, m_currentViewButton, m_compareViewButton};
             for (QAbstractButton* button : secondaryActions)
             {
+                // 比对模式保留明确的退出入口；其他次要动作在窄栏进入菜单。
+                if (m_inComparison && button == m_currentViewButton)
+                {
+                    continue;
+                }
                 moveToMenu(button);
             }
             const int primaryWidth = m_copyAllButton->sizeHint().width() + m_exportButton->sizeHint().width()
-                + m_freezePaneButton->sizeHint().width() + m_moreButton->sizeHint().width() + 24;
+                + (m_freezePaneButton->isHidden() ? 0 : m_freezePaneButton->sizeHint().width())
+                + (m_inComparison ? m_currentViewButton->sizeHint().width() : 0)
+                + m_moreButton->sizeHint().width() + 24;
             if (primaryWidth > width())
             {
                 moveToMenu(m_freezePaneButton);
             }
             if (width() < m_copyAllButton->sizeHint().width() + m_exportButton->sizeHint().width()
+                + (m_inComparison ? m_currentViewButton->sizeHint().width() : 0)
                 + m_moreButton->sizeHint().width() + 20)
             {
                 moveToMenu(m_exportButton);
@@ -2382,7 +2399,8 @@ namespace
                 m_table != nullptr &&
                 m_table->model() != nullptr);
             m_cleanupButton->setVisible(!m_cleanupMode);
-            m_cleanupButton->setEnabled(controlsAvailable && hasSnapshots && !m_inComparison);
+            // 清理入口本身会先退出比对，仍由源条持有原快照，允许直接管理这些快照。
+            m_cleanupButton->setEnabled(controlsAvailable && hasSnapshots);
             m_doneCleanupButton->setVisible(m_cleanupMode);
             m_doneCleanupButton->setEnabled(controlsAvailable);
             m_deleteSelectedButton->setVisible(m_cleanupMode);

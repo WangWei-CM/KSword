@@ -1570,6 +1570,18 @@ public:
         update();
     }
 
+    // freezeVisibleTimelineWindow：提交历史快照前保留当前可见 X 窗口；再次选择只换焦点。
+    // 不停止后台采样或实时钟，退出快照后仍可沿用原吸附最新行为。
+    void freezeVisibleTimelineWindow()
+    {
+        if (hasFrozenTimelineWindow())
+        {
+            return;
+        }
+        m_frozenWindowEndMs = windowEndMs(); // 原窗口右端决定每个可见点的 X，不以选中点居中。
+        m_frozenWindowDurationMs = windowDurationMs(); // 一并保存跨度，参数变更不挤动快照 X 位置。
+    }
+
 protected:
     // 隐藏页面不运行绘制节拍；重新显示时恢复真实时间轴，历史快照仍固定在所选时刻。
     void showEvent(QShowEvent* eventPointer) override
@@ -1698,7 +1710,7 @@ protected:
 
     // mousePressEvent：
     // - 单击图表时将时间轴固定到对应历史样本；
-    // - 若点击最右侧样本，则恢复“吸附最新”模式。
+    // - 最右侧样本也属于明确快照选择；实时跟随由原播放/清空等入口恢复。
     void mousePressEvent(QMouseEvent* eventPointer) override
     {
         if (eventPointer == nullptr ||
@@ -1827,9 +1839,20 @@ private:
         std::vector<SeriesPoint> points;             // 只在样本或选择改变时重算。
     };
 
-    // 固定实时窗口的时间跨度，保证像素/秒速度稳定；全量保留仍保留全部原始快照。
+    // 仅有效历史快照读取冻结窗口；取消、清空或原历史淘汰路径立即恢复实时轴。
+    bool hasFrozenTimelineWindow() const
+    {
+        return m_ownerDock != nullptr && !m_ownerDock->m_activityTimelinePinnedToLatest
+            && m_ownerDock->isProcessActivityTableSnapshotActive() && m_frozenWindowDurationMs > 0.0;
+    }
+
+    // 固定实时窗口跨度保证匀速；快照保留提交时跨度，全量留存仍保留全部原始样本。
     double windowDurationMs() const
     {
+        if (hasFrozenTimelineWindow())
+        {
+            return m_frozenWindowDurationMs;
+        }
         const int count = m_ownerDock->m_activityHistoryLimitSpin != nullptr
             ? m_ownerDock->m_activityHistoryLimitSpin->value() : 50;
         return static_cast<double>(m_ownerDock->refreshIntervalMillisecondsFromInput())
@@ -1864,15 +1887,12 @@ private:
         m_liveEndMs = std::max(0.0, elapsedMs - delayMs);
     }
 
-    // 点击历史时冻结图表窗口；悬停预览不改变 pinned 状态，也不驱动进程表重绘。
+    // 点击历史只冻结原窗口，不把所选点移到中央；悬停继续复用同一 X 映射。
     double windowEndMs() const
     {
-        if (!m_ownerDock->m_activityTimelinePinnedToLatest && m_ownerDock->m_activityTableSnapshotIndex >= 0)
+        if (hasFrozenTimelineWindow())
         {
-            const int index = std::clamp(m_ownerDock->m_activityTableSnapshotIndex, 0,
-                static_cast<int>(m_ownerDock->m_activitySamples.size()) - 1);
-            return static_cast<double>(m_ownerDock->m_activitySamples[index].elapsedMs)
-                + windowDurationMs() * 0.5;
+            return m_frozenWindowEndMs;
         }
         return m_liveEndMs;
     }
@@ -2380,6 +2400,8 @@ private:
     int m_focusedSampleIndex = -1;      // m_focusedSampleIndex：当前时间轴定位样本。
     QTimer* m_frameTimer = nullptr; // 独立绘制节拍，隐藏时停止。
     double m_liveEndMs = 0.0; // 连续实时窗口右端，暂停时保持。
+    double m_frozenWindowEndMs = 0.0; // 提交快照时可见窗口右端，后台时钟推进不改变它。
+    double m_frozenWindowDurationMs = 0.0; // 同一快照窗口的跨度，保持点选前后的 X 比例。
     std::uint64_t m_recordingStartTick = 0; // 当前记录会话的单调时钟原点。
     QPoint m_hoverPosition; // 鼠标最后停留的本地坐标，绘制时重新匹配可见采样。
     bool m_hoverActive = false; // 只在鼠标位于实际曲线画布内显示圆点。
@@ -2442,7 +2464,8 @@ protected:
             setValue(sampleIndex);
             if (m_ownerDock != nullptr)
             {
-                m_ownerDock->commitProcessActivityTimelineIndex(sampleIndex);
+                // 旧隐藏滑块保留最右端回到实时的原语义；图表点选不使用该兼容开关。
+                m_ownerDock->commitProcessActivityTimelineIndex(sampleIndex, true);
             }
             eventPointer->accept();
             return;
@@ -9492,6 +9515,16 @@ void ProcessDock::appendProcessActivitySample()
         sample.processes.push_back(std::move(processPoint));
     }
 
+    // 查看快照时只暂停顶部图表历史追加及其自动裁剪，防止最近 N 次淘汰选中点。
+    // 系统枚举/计数器继续更新；独立详情仍接收本轮真实采样，历史队列不额外扩容。
+    // 原播放/清空等入口退出快照后继续追加；用户改保留数量仍走明确的 trim 路径。
+    if (isProcessActivityTableSnapshotActive())
+    {
+        appendProcessActivitySampleToDetailWindows(sample);
+        updateProcessActivityStatusLabel();
+        return;
+    }
+
     m_activitySamples.push_back(std::move(sample));
     const std::size_t removedSampleCount = trimProcessActivitySamples();
     if (m_activityChartWidget != nullptr)
@@ -9627,7 +9660,9 @@ void ProcessDock::refreshProcessActivityTimeline(const std::size_t removedSample
         ? std::max(0, m_activityTimelineSlider->value() - static_cast<int>(removedSampleCount))
         : m_activityTimelineSlider->value();
     const int previousMaximum = m_activityTimelineSlider->maximum();
-    const bool shouldPinToLatest = m_activityTimelinePinnedToLatest || previousValue >= previousMaximum;
+    const bool snapshotActive = isProcessActivityTableSnapshotActive(); // 最新索引仍可能是已选快照。
+    const bool shouldPinToLatest = m_activityTimelinePinnedToLatest
+        || (!snapshotActive && previousValue >= previousMaximum);
 
     m_activityTimelineSliderUpdating = true;
     m_activityTimelineSlider->setRange(0, std::max(0, sampleCount - 1));
@@ -9644,7 +9679,8 @@ void ProcessDock::refreshProcessActivityTimeline(const std::size_t removedSample
     {
         const int restoredValue = std::clamp(previousValue, 0, sampleCount - 1);
         m_activityTimelineSlider->setValue(restoredValue);
-        m_activityTimelinePinnedToLatest = (restoredValue >= sampleCount - 1);
+        // 有效快照不因索引碰巧在最右端而恢复实时，后台新增一条样本也不能重 pin。
+        m_activityTimelinePinnedToLatest = !snapshotActive && (restoredValue >= sampleCount - 1);
     }
     m_activityTimelineSliderUpdating = oldUpdating;
 
@@ -9718,7 +9754,7 @@ void ProcessDock::showProcessActivitySnapshotForIndex(const int sampleIndex)
     previewProcessActivitySnapshotForIndex(sampleIndex);
 }
 
-void ProcessDock::commitProcessActivityTimelineIndex(const int sampleIndex)
+void ProcessDock::commitProcessActivityTimelineIndex(const int sampleIndex, const bool followLatestWhenSelected)
 {
     if (m_activitySamples.empty())
     {
@@ -9731,12 +9767,17 @@ void ProcessDock::commitProcessActivityTimelineIndex(const int sampleIndex)
     }
 
     const int safeIndex = std::clamp(sampleIndex, 0, static_cast<int>(m_activitySamples.size()) - 1);
-    const bool latestSelected =
-        (m_activityTimelineSlider != nullptr && safeIndex >= m_activityTimelineSlider->maximum()) ||
-        (safeIndex >= static_cast<int>(m_activitySamples.size()) - 1);
+    const bool followLatest = followLatestWhenSelected
+        && ((m_activityTimelineSlider != nullptr && safeIndex >= m_activityTimelineSlider->maximum())
+            || (safeIndex >= static_cast<int>(m_activitySamples.size()) - 1));
 
-    m_activityTimelinePinnedToLatest = latestSelected;
-    m_activityTableSnapshotIndex = latestSelected ? -1 : safeIndex;
+    // 必须先冻结旧的可见轴，再修改快照身份；历史点之间切换不重新排列折线。
+    if (!followLatest && m_activityChartWidget != nullptr)
+    {
+        m_activityChartWidget->freezeVisibleTimelineWindow();
+    }
+    m_activityTimelinePinnedToLatest = followLatest;
+    m_activityTableSnapshotIndex = followLatest ? -1 : safeIndex;
     if (m_activityTimelineSlider != nullptr && m_activityTimelineSlider->value() != safeIndex)
     {
         const bool oldUpdating = m_activityTimelineSliderUpdating;

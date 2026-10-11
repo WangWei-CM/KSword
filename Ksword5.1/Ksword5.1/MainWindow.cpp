@@ -607,10 +607,18 @@ namespace
             setMouseTracking(true);
         }
 
+        // 置顶才显示角标；关闭提示只影响绘制，原角落缩放命中区继续保留。
+        void setHintVisible(bool visible)
+        {
+            m_hintVisible = visible;
+            update(); // 主题换色时，即使可见状态相同也重画当前颜色。
+        }
+
     protected:
         void paintEvent(QPaintEvent* event) override
         {
             Q_UNUSED(event);
+            if (!m_hintVisible) return;
 
             QPainter painter(this);
             painter.setRenderHint(QPainter::Antialiasing, false);
@@ -638,6 +646,7 @@ namespace
 
     private:
         Corner m_corner; // m_corner：标记当前控件绘制左下角还是右下角三角形。
+        bool m_hintVisible = false; // 非置顶默认不绘制外沿提示。
     };
 
     // dockTabHoverFillColor 作用：
@@ -5811,9 +5820,10 @@ void MainWindow::updateResizeBorderOverlays()
 
 void MainWindow::applyResizeBorderOverlayStyle()
 {
-    const QString borderStyleText = QStringLiteral(
-        "background:%1;"
-        "border:none;").arg(KswordTheme::PrimaryBlueBorderHex);
+    // 边缘命中层保持存在；只有置顶时才绘制原蓝色提示，普通窗口不显示大外框。
+    const QString borderStyleText = m_windowPinned ? QStringLiteral(
+        "QWidget{background:%1;border:none;}").arg(KswordTheme::PrimaryBlueBorderHex)
+        : QStringLiteral("QWidget{background:transparent;border:none;}");
 
     const std::array<QWidget*, 4> borderWidgets = {
         m_resizeBorderTop,
@@ -5830,11 +5840,11 @@ void MainWindow::applyResizeBorderOverlayStyle()
     }
     if (m_resizeCornerBottomLeft != nullptr)
     {
-        m_resizeCornerBottomLeft->update();
+        static_cast<ResizeCornerTriangleWidget*>(m_resizeCornerBottomLeft)->setHintVisible(m_windowPinned);
     }
     if (m_resizeCornerBottomRight != nullptr)
     {
-        m_resizeCornerBottomRight->update();
+        static_cast<ResizeCornerTriangleWidget*>(m_resizeCornerBottomRight)->setHintVisible(m_windowPinned);
     }
 }
 
@@ -7124,6 +7134,7 @@ void MainWindow::setPinnedWindowState(const bool pinnedState, const bool emitLog
 
     if (m_windowPinned == pinnedState)
     {
+        applyResizeBorderOverlayStyle(); // 启动回填同状态时也同步边缘绘制提示。
         if (QApplication* appInstance = qobject_cast<QApplication*>(QCoreApplication::instance()))
         {
             appInstance->setProperty(kKswordMainWindowTopMostPropertyName, m_windowPinned);
@@ -7168,6 +7179,7 @@ void MainWindow::setPinnedWindowState(const bool pinnedState, const bool emitLog
     }
 
     m_windowPinned = pinnedState;
+    applyResizeBorderOverlayStyle(); // 只在实际置顶切换成功后改变提示，不影响缩放命中。
     if (QApplication* appInstance = qobject_cast<QApplication*>(QCoreApplication::instance()))
     {
         appInstance->setProperty(kKswordMainWindowTopMostPropertyName, m_windowPinned);

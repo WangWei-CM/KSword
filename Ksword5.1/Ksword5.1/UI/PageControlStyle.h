@@ -39,7 +39,7 @@ namespace ks::ui
     // 普通内容页签共用状态颜色和几何；选中底面/细线平滑移动，原栏保留所有输入。
     void StylePageTabBar(QTabBar* bar);
 
-    // 已确认的 QTabWidget 让导航侧翼包住圆角内容面；仅直接工作区增加等宽 8px 留白。
+    // 已确认的 QTabWidget 仅在下沿连接内容的凹圆角，不增加包围边框或页面留白。
     void StylePageTabs(QTabWidget* tabs);
 
     // 子级保持轻底面与左缩进，顶部直接接父栏；原子栏方向动画继续使用原入口。
