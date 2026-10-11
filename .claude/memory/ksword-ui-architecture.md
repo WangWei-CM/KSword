@@ -240,3 +240,4 @@ KSword 主程序位于 `Ksword5.1/Ksword5.1`（Qt 6.9.3 Widgets + Qt Advanced Do
 
 - `UI/ParameterWorkspace` 将参数独立滚动、固定执行区与结果区分开；窄窗口改上下分栏。使用 `StyleParameterSection` 明确选择标题分隔线，用 `FoldParameterSection` 折叠非 checkable 的低频参数分组。只有显式登记的参数区补齐输入底色、下拉和数值框主题，不全局重排或扫描业务页面。
 - 用户要求先完成框架，后续逐页由用户接入；本轮保留网络请求构造与创建进程两个试用接入，直接编译交用户看效果，不继续扩展其他页面或启动审计。接入方法和限制见 `docs/参数表单框架接入.md`。
+- 参数框架参考图使用无描边的色块，禁止复用带 1px 外框的 `StylePrimaryContentPanel`。只保留低对比度分隔线；原生 QToolButton 的 arrowType 会产生亮色大三角，折叠标题改为自绘小号空心折角。参数分组使用自然高度，避免 QGridLayout 将额外高度均分为巨大行距。编辑区应同时绑定 QSS 和 palette，保证 CodeTextEdit 行号、当前行与语法色采样到真实底色；只读结果与面板同底，编辑输入单独铺底。
