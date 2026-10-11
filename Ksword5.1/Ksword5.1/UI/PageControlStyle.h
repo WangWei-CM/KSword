@@ -42,6 +42,9 @@ namespace ks::ui
     // 已确认的 QTabWidget 仅在下沿连接内容的凹圆角，不增加包围边框或页面留白。
     void StylePageTabs(QTabWidget* tabs);
 
+    // 明确页面选择等边框架留白和四角负空间；页外围layout用0，inset默认6px，无描边。
+    void StylePageTabsContentFrame(QTabWidget* tabs, int inset = 6);
+
     // 子级保持轻底面与左缩进，顶部直接接父栏；原子栏方向动画继续使用原入口。
     void StyleChildPageTabs(QTabWidget* tabs);
 

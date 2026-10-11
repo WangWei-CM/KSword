@@ -471,7 +471,8 @@ void ProcessDock::initializeThreadPage()
     m_threadPage = new QWidget(this);
     m_threadPageLayout = new QVBoxLayout(m_threadPage);
     // 页签与工具带连续，内部结果间距由页面布局保持。
-    m_threadPageLayout->setContentsMargins(6, 0, 6, 6);
+    // 与进程页共用Tab框架的四边6px留白，工具条和表格保持原有区内间距。
+    m_threadPageLayout->setContentsMargins(0, 0, 0, 0);
     m_threadPageLayout->setSpacing(6);
 
     // 顶部操作栏控件：全部采用图标按钮 + Tooltip。

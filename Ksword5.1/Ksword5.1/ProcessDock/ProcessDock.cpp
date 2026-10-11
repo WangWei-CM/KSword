@@ -4996,13 +4996,13 @@ void ProcessDock::initializeUi()
         m_sideTabWidget->tabBar()->setUsesScrollButtons(true);
     }
     // 内容 Tab 使用低对比底面与强调下划线，主 ADS 导航仍由独立样式管理。
-    ks::ui::StylePageTabs(m_sideTabWidget);
+    ks::ui::StylePageTabsContentFrame(m_sideTabWidget);
 
     // “进程列表”页是本模块核心页面。
     m_processListPage = new QWidget(this);
     m_processPageLayout = new QVBoxLayout(m_processListPage);
-    // 页签下方直接接工具面；左右和底部仍保留原有密度留白。
-    m_processPageLayout->setContentsMargins(6, 0, 6, 6);
+    // 四边6px留白由Tab框架统一提供；页内不再叠加第二层外围间距。
+    m_processPageLayout->setContentsMargins(0, 0, 0, 0);
     m_processPageLayout->setSpacing(6);
 
     // 初始化上方控制栏和下方表格。
