@@ -39,10 +39,8 @@ namespace ks::ui
             KswordTheme::TextPrimaryColor(), colors.content, 4.5);
         // 仅为主工作区的结构容器分层，不给每个 QWidget 画底，也不接管单元格语义色。
         return QStringLiteral(
-            "ads--CDockAreaWidget,ads--CDockWidget > QWidget,"
-            "ads--CDockWidget QTabWidget::pane{background:%1 !important;}"
-            "ads--CDockWidget QListView,ads--CDockWidget QListWidget,"
-            "ads--CDockWidget QTextEdit,ads--CDockWidget QPlainTextEdit{"
+            "ads--CDockAreaWidget,ads--CDockWidget > QWidget,ads--CDockWidget QTabWidget::pane{background:%1 !important;}"
+            "ads--CDockWidget QListView,ads--CDockWidget QListWidget,ads--CDockWidget QTextEdit,ads--CDockWidget QPlainTextEdit{"
             "background:%2 !important;color:%3;alternate-background-color:%4;}"
             "ads--CDockWidget QFrame#card,ads--CDockWidget QWidget#card{"
             "background:%2;border-color:%5;}")

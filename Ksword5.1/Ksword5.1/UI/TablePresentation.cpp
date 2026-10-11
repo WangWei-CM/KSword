@@ -1,6 +1,6 @@
 #include "TablePresentation.h"
 #include "VisibleTableWidget.h"
-#include "MainSurfaceStyle.h"
+#include "./MainSurfaceStyle.h"
 #include "../theme.h"
 
 #include <QApplication>
