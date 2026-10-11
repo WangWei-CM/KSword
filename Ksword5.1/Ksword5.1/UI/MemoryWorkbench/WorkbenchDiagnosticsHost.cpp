@@ -18,6 +18,8 @@ namespace ks::ui
     WorkbenchDiagnosticsHost::WorkbenchDiagnosticsHost(QWidget* parent)
         : QWidget(parent)
     {
+        // 专业诊断抽屉保留自己的Stack/Tree导航身份，不被详情分组投影重挂。
+        setProperty("ksword_detail_keep_layout", true);
         auto* layout = new QVBoxLayout(this);
         layout->setContentsMargins(0, 0, 0, 0);
         panes_ = new QStackedWidget(this);

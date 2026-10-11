@@ -28,6 +28,7 @@
 #include <QMouseEvent>
 #include <QResizeEvent>
 #include <QVariantAnimation>
+#include <QScopedValueRollback>
 
 using namespace process_detail_window_internal;
 
@@ -40,6 +41,34 @@ using namespace process_detail_window_internal;
 
 namespace
 {
+    constexpr char kProcessDetailThemePalette[] = "ksword_process_detail_theme_palette"; // 最近业务主题的目标调色板。
+    constexpr char kProcessDetailThemeStyle[] = "ksword_process_detail_theme_style"; // 最近业务主题的目标根样式。
+
+    // 业务窗口独占根主题，Window用于页底，Surface只用于字段/卡片，不从自身旧palette派生。
+    QPalette processDetailThemePalette(const QWidget* window)
+    {
+        QPalette colors = qApp ? qApp->palette() : window->palette();
+        colors.setColor(QPalette::Window, KswordTheme::WindowColor());
+        colors.setColor(QPalette::WindowText, KswordTheme::TextPrimaryColor());
+        colors.setColor(QPalette::Base, KswordTheme::SurfaceColor());
+        colors.setColor(QPalette::AlternateBase, KswordTheme::SurfaceAltColor());
+        colors.setColor(QPalette::Text, KswordTheme::TextPrimaryColor());
+        colors.setColor(QPalette::PlaceholderText, KswordTheme::TextSecondaryColor());
+        colors.setColor(QPalette::Mid, KswordTheme::BorderColor());
+        colors.setColor(QPalette::Highlight, KswordTheme::AccentColor(KswordTheme::AccentRole::Blue));
+        colors.setColor(QPalette::HighlightedText, KswordTheme::OnAccentColor());
+        return colors;
+    }
+
+    // 只对真实改变的局部主题写QSS，避免标题/状态反复触发子控件polish。
+    void applyProcessDetailLocalStyle(QWidget* widget, const QString& style)
+    {
+        if (widget && widget->styleSheet() != style)
+        {
+            widget->setStyleSheet(style);
+        }
+    }
+
     bool generalSignatureStateUndecided(const QString& state)
     {
         return state.isEmpty() || state == QStringLiteral("Unknown") || state == QStringLiteral("Unavailable")
@@ -1770,6 +1799,8 @@ ProcessDetailWindow::ProcessDetailWindow(const ks::process::ProcessRecord& baseR
     : QWidget(parent)
     , m_baseRecord(baseRecord)
 {
+    // 声明根QSS业务所有权要早于所有主题与框架入口，避免两方轮流覆盖根样式。
+    setProperty("ksword_detail_theme_owner", true);
     // 构造入口日志：记录目标 PID 与 identity 关键字段。
     kLogEvent ctorStartEvent;
     info << ctorStartEvent
@@ -2019,9 +2050,17 @@ void ProcessDetailWindow::changeEvent(QEvent* event)
 {
     QWidget::changeEvent(event);
 
-    // 主题切换时立即重建内部样式，避免旧主题颜色残留。
-    if (event == nullptr)
+    // 自己写palette/QSS产生的同步事件不能落到数据刷新路径。
+    if (event == nullptr || m_themeStyleApplying)
     {
+        return;
+    }
+
+    if (event->type() == QEvent::LanguageChange)
+    {
+        // 只有语言变化重建译文；普通样式事件不能重新读取图标、文件和对象详情。
+        refreshDetailTabTexts();
+        refreshCpuCoreView();
         return;
     }
 
@@ -2034,8 +2073,19 @@ void ProcessDetailWindow::changeEvent(QEvent* event)
         return;
     }
 
-    applyThemeStyle();
-    refreshDetailTabTexts();
+    const QPalette desiredPalette = processDetailThemePalette(this);
+    const QString desiredStyle = buildProcessDetailRootStyle();
+    const bool themeChanged = !property(kProcessDetailThemePalette).isValid()
+        || property(kProcessDetailThemePalette).value<QPalette>() != desiredPalette
+        || property(kProcessDetailThemeStyle).toString() != desiredStyle;
+    if (themeChanged || styleSheet() != desiredStyle || palette() != desiredPalette)
+    {
+        applyThemeStyle();
+    }
+    if (!themeChanged)
+    {
+        return; // 同一主题下的StyleChange没有状态数据或文字需要重建。
+    }
 
     if (m_threadInspectStatusLabel != nullptr)
     {
@@ -2126,8 +2176,6 @@ void ProcessDetailWindow::changeEvent(QEvent* event)
             m_keyboardStatusLabel->setStyleSheet(buildStateLabelStyle(statusIdleColor(), 600));
         }
     }
-
-    refreshKernelObjectTabTexts();
 }
 
 void ProcessDetailWindow::applyThemeStyle()
@@ -2136,28 +2184,26 @@ void ProcessDetailWindow::applyThemeStyle()
     {
         return;
     }
-    m_themeStyleApplying = true;
+    QScopedValueRollback<bool> applying(m_themeStyleApplying, true); // 所有退出路径自动释放主题重入门禁。
 
     // 显式设置窗口调色板：
     // - Win11 下必须手动强制窗口背景，避免被系统自动接管为亮色。
-    const bool darkModeEnabled = KswordTheme::IsDarkModeEnabled();
-    QPalette themedPalette = (qApp != nullptr) ? qApp->palette() : palette();
-    themedPalette.setColor(QPalette::Window, KswordTheme::SurfaceColor());
-    themedPalette.setColor(QPalette::WindowText, KswordTheme::TextPrimaryColor());
-    themedPalette.setColor(QPalette::Base, KswordTheme::SurfaceColor());
-    themedPalette.setColor(QPalette::AlternateBase, KswordTheme::SurfaceAltColor());
-    themedPalette.setColor(QPalette::Text, KswordTheme::TextPrimaryColor());
-    themedPalette.setColor(QPalette::PlaceholderText, KswordTheme::TextSecondaryColor());
-    themedPalette.setColor(QPalette::Mid, KswordTheme::BorderColor());
-    themedPalette.setColor(QPalette::Highlight, KswordTheme::AccentColor(KswordTheme::AccentRole::Blue));
-    themedPalette.setColor(QPalette::HighlightedText, KswordTheme::OnAccentColor());
-
-    setPalette(themedPalette);
+    const QPalette themedPalette = processDetailThemePalette(this);
+    const QString rootStyle = buildProcessDetailRootStyle();
+    const bool colorsChanged = !property(kProcessDetailThemePalette).isValid()
+        || property(kProcessDetailThemePalette).value<QPalette>() != themedPalette;
+    if (palette() != themedPalette)
+    {
+        setPalette(themedPalette);
+    }
     setAutoFillBackground(true);
     setAttribute(Qt::WA_StyledBackground, true);
-    setStyleSheet(buildProcessDetailRootStyle());
+    if (styleSheet() != rootStyle)
+    {
+        setStyleSheet(rootStyle);
+    }
 
-    // 内容页与滚动 viewport 共用主 Surface；导航用 AlternateBase 分层。
+    // 内容页与共享外框共用Window底板；内部卡片/字段保持独立Surface层。
     const std::vector<QWidget*> tabPageList{
         m_detailTab,
         m_performanceTab,
@@ -2179,45 +2225,51 @@ void ProcessDetailWindow::applyThemeStyle()
         {
             continue;
         }
-        tabPage->setPalette(themedPalette);
+        if (tabPage->palette() != themedPalette)
+        {
+            tabPage->setPalette(themedPalette);
+        }
         tabPage->setAutoFillBackground(true);
         tabPage->setAttribute(Qt::WA_StyledBackground, true);
     }
 
-    if (m_processCpuCoreGrid != nullptr)
+    if (colorsChanged && m_processCpuCoreGrid != nullptr)
     {
         m_processCpuCoreGrid->update();
     }
-    if (m_threadCpuCoreGrid != nullptr)
+    if (colorsChanged && m_threadCpuCoreGrid != nullptr)
     {
         m_threadCpuCoreGrid->update();
     }
 
     if (m_cpuCoreTitleLabel != nullptr)
     {
-        m_cpuCoreTitleLabel->setStyleSheet(QStringLiteral("font-size:16px;font-weight:700;color:%1;")
+        applyProcessDetailLocalStyle(m_cpuCoreTitleLabel, QStringLiteral("font-size:16px;font-weight:700;color:%1;")
             .arg(KswordTheme::TextPrimaryHex()));
     }
     if (m_cpuCoreDescriptionLabel != nullptr)
     {
-        m_cpuCoreDescriptionLabel->setStyleSheet(QStringLiteral("color:%1;")
+        applyProcessDetailLocalStyle(m_cpuCoreDescriptionLabel, QStringLiteral("color:%1;")
             .arg(KswordTheme::TextSecondaryHex()));
     }
     const QString cpuCoreSummaryStyle = QStringLiteral("font-size:20px;font-weight:700;color:%1;")
         .arg(KswordTheme::AccentColor(KswordTheme::AccentRole::Blue).name());
     if (m_cpuCoreSystemValueLabel != nullptr)
     {
-        m_cpuCoreSystemValueLabel->setStyleSheet(cpuCoreSummaryStyle);
+        applyProcessDetailLocalStyle(m_cpuCoreSystemValueLabel, cpuCoreSummaryStyle);
     }
     if (m_cpuCoreEquivalentValueLabel != nullptr)
     {
-        m_cpuCoreEquivalentValueLabel->setStyleSheet(cpuCoreSummaryStyle);
+        applyProcessDetailLocalStyle(m_cpuCoreEquivalentValueLabel, cpuCoreSummaryStyle);
     }
-    refreshCpuCoreView();
+    if (colorsChanged)
+    {
+        refreshCpuCoreView(); // 真正换色才刷新颜色相关读数，普通StyleChange不重新构建核心卡片。
+    }
 
     if (m_signatureCheckBox != nullptr)
     {
-        m_signatureCheckBox->setStyleSheet(QStringLiteral(
+        applyProcessDetailLocalStyle(m_signatureCheckBox, QStringLiteral(
             "QCheckBox { color:%1; font-weight:600; }")
             .arg(KswordTheme::TextPrimaryHex()));
     }
@@ -2227,15 +2279,16 @@ void ProcessDetailWindow::applyThemeStyle()
         const QString comboStyle = KswordTheme::ThemedComboBoxStyle();
         if (m_tokenRawInfoClassCombo != nullptr)
         {
-            m_tokenRawInfoClassCombo->setStyleSheet(comboStyle);
+            applyProcessDetailLocalStyle(m_tokenRawInfoClassCombo, comboStyle);
         }
         if (m_tokenRawInputModeCombo != nullptr)
         {
-            m_tokenRawInputModeCombo->setStyleSheet(comboStyle);
+            applyProcessDetailLocalStyle(m_tokenRawInputModeCombo, comboStyle);
         }
     }
 
-    m_themeStyleApplying = false;
+    setProperty(kProcessDetailThemePalette, QVariant::fromValue(themedPalette));
+    setProperty(kProcessDetailThemeStyle, rootStyle);
 }
 
 void ProcessDetailWindow::initializeUi()

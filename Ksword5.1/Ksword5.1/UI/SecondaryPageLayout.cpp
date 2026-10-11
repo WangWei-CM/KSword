@@ -2,6 +2,7 @@
 #include "./SecondaryPageLayout.h"
 #include "./ThemeBinding.h"
 #include "./ToolbarMetrics.h"
+#include "./PageTabMotion.h"
 #include "../theme.h"
 
 #include <QDialogButtonBox>
@@ -197,6 +198,12 @@ namespace ks::ui
         bar->setProperty("ksword_secondary_tabs", true);
         bar->setExpanding(false);
         bar->setUsesScrollButtons(true);
+        InstallPageTabMotion(bar, []()
+        {
+            const QColor selected = KswordTheme::WindowColor();
+            return PageTabMotionColors{selected, KswordTheme::EnsureTextContrast(
+                KswordTheme::ControlAccentColor(), selected, 3.0)};
+        });
         const QPointer<QTabBar> target(bar);
         BindWidgetTheme(bar, [target]()
         {
@@ -209,11 +216,11 @@ namespace ks::ui
                 "QTabBar[ksword_secondary_tabs=\"true\"]{background:transparent;border-bottom:1px solid %1;}"
                 "QTabBar[ksword_secondary_tabs=\"true\"]::tab{background:transparent;color:%2;"
                 "border:0;border-bottom:2px solid transparent;padding:8px 14px;margin:0;min-height:16px;}"
-                "QTabBar[ksword_secondary_tabs=\"true\"]::tab:selected{color:%3;border-bottom-color:%4;}"
-                "QTabBar[ksword_secondary_tabs=\"true\"]::tab:hover{background:%5;color:%3;}"
-                "QTabBar[ksword_secondary_tabs=\"true\"]::tab:disabled{color:%6;}")
+                "QTabBar[ksword_secondary_tabs=\"true\"]::tab:selected{color:%3;border-bottom-color:transparent;}"
+                "QTabBar[ksword_secondary_tabs=\"true\"]::tab:hover{background:%4;color:%3;}"
+                "QTabBar[ksword_secondary_tabs=\"true\"]::tab:disabled{color:%5;}")
                 .arg(KswordTheme::BorderColor().name(), KswordTheme::TextSecondaryColor().name(),
-                    KswordTheme::TextPrimaryColor().name(), KswordTheme::ControlAccentColor().name(),
+                    KswordTheme::TextPrimaryColor().name(),
                     KswordTheme::BlendColors(base, KswordTheme::ControlAccentColor(), 16).name(),
                     KswordTheme::TextDisabledColor().name());
             SetOwnedStyle(target, rules + (target->property("ksword_settings_tabs").toBool()

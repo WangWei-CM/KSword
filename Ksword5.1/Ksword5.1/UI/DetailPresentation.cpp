@@ -144,15 +144,23 @@ namespace ks::ui
             {
                 return;
             }
-            safe->setStyleSheet(QStringLiteral(
+            const QString style = QStringLiteral(
                 "QWidget[ksword_detail_header=\"true\"]{background:%1;color:%2;border:0;border-bottom:1px solid %3;}"
                 "QLabel{background:transparent;color:%2;border:0;}")
                 .arg(KswordTheme::WindowColorHex(), KswordTheme::TextPrimaryHex(),
-                    KswordTheme::BlendColors(KswordTheme::WindowColor(), KswordTheme::BorderColor(), 70).name()));
+                    KswordTheme::BlendColors(KswordTheme::WindowColor(), KswordTheme::BorderColor(), 70).name());
+            if (safe->styleSheet() != style)
+            {
+                safe->setStyleSheet(style);
+            }
             if (safeDescription)
             {
-                safeDescription->setStyleSheet(QStringLiteral("color:%1;background:transparent;")
-                    .arg(KswordTheme::TextSecondaryHex()));
+                const QString descriptionStyle = QStringLiteral("color:%1;background:transparent;")
+                    .arg(KswordTheme::TextSecondaryHex());
+                if (safeDescription->styleSheet() != descriptionStyle)
+                {
+                    safeDescription->setStyleSheet(descriptionStyle);
+                }
             }
         });
         return header;
@@ -167,6 +175,9 @@ namespace ks::ui
         layout->setContentsMargins(16, 14, 16, 14);
         layout->setSpacing(10);
         auto* heading = new QLabel(title, card);
+        QFont headingFont = heading->font(); // 初始字体已与最终主题一致，不在首显后改变标题几何。
+        headingFont.setWeight(QFont::DemiBold);
+        heading->setFont(headingFont);
         heading->setProperty("ksword_detail_card_heading", true);
         heading->setWordWrap(true);
         heading->setTextFormat(Qt::PlainText);
@@ -179,11 +190,15 @@ namespace ks::ui
             {
                 return;
             }
-            safeCard->setStyleSheet(QStringLiteral(
+            const QString style = QStringLiteral(
                 "QWidget[ksword_detail_card=\"true\"]{background:transparent;border:0;}"
                 "QLabel{background:transparent;border:0;}"
                 "QLabel[ksword_detail_card_heading=\"true\"]{background:transparent;color:%1;font-weight:600;}")
-                .arg(KswordTheme::TextPrimaryHex()));
+                .arg(KswordTheme::TextPrimaryHex());
+            if (safeCard->styleSheet() != style)
+            {
+                safeCard->setStyleSheet(style);
+            }
             safeCard->update();
         });
         return card;

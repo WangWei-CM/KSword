@@ -2,11 +2,15 @@
 #include "./DetailDialogChrome.h"
 #include "./StructuredFieldView.h"
 #include "./PrimaryPageStyle.h"
+#include "./PageControlStyle.h"
 #include "./ToolbarMetrics.h"
 #include "./ThemeBinding.h"
 #include "../theme.h"
 #include <QAbstractScrollArea>
+#include <QAbstractButton>
+#include <QAbstractSpinBox>
 #include <QBoxLayout>
+#include <QComboBox>
 #include <QDialogButtonBox>
 #include <QFormLayout>
 #include <QGroupBox>
@@ -15,8 +19,11 @@
 #include <QPointer>
 #include <QSet>
 #include <QSplitter>
+#include <QStackedWidget>
+#include <QTabBar>
 #include <QTimer>
 #include <algorithm>
+#include <utility>
 
 namespace
 {
@@ -25,6 +32,7 @@ namespace
     bool replaceDetailWidget(QWidget* original, Factory create)
     {
         QWidget* parent = original ? original->parentWidget() : nullptr;
+        const bool explicitlyHidden = original && original->isHidden();
         if (auto* splitter = qobject_cast<QSplitter*>(parent))
         {
             const int index = splitter->indexOf(original);
@@ -39,6 +47,7 @@ namespace
             // 暂不挂到Splitter，避免构造过程被其ChildAdded自动插到末尾。
             QWidget* replacement = create(nullptr);
             splitter->replaceWidget(index, replacement);
+            replacement->setVisible(!explicitlyHidden);
             delete placeholder;
             if (std::any_of(sizes.cbegin(), sizes.cend(), [](int size) { return size > 0; }))
             {
@@ -61,6 +70,7 @@ namespace
         delete replaced;
         QWidget* replacement = create(parent);
         delete layout->replaceWidget(placeholder, replacement);
+        replacement->setVisible(!explicitlyHidden);
         delete placeholder;
         return true;
     }
@@ -83,11 +93,25 @@ namespace
         explicit DetailWindowFramework(QWidget* window) : QObject(window), m_window(window)
         {
             window->installEventFilter(this);
-            schedule();
+        }
+        // 构造结束后的Show是唯一全窗安装点，首帧前完成重挂，避免先显示旧布局再闪到新布局。
+        void prepareForShow()
+        {
+            if (!m_window || !m_window->layout() || m_applying)
+            {
+                return;
+            }
+            if (!m_prepared)
+            {
+                m_dirtyScopes = {m_window};
+                m_styleDirty = true;
+            }
+            apply();
         }
         void schedule()
         {
-            if (m_pending || m_applying)
+            // Polish或构造尾部登记时尚未出现安全的Show，不能在半构造布局上安装框架。
+            if (!m_prepared || m_pending || m_applying)
             {
                 return;
             }
@@ -101,21 +125,141 @@ namespace
     protected:
         bool eventFilter(QObject* object, QEvent* event) override
         {
-            // 惰性页和动态字段在完成当前构造后加入共享布局，不在ChildAdded半构造状态访问。
-            if (!m_applying && (event->type() == QEvent::ChildAdded || event->type() == QEvent::Show
-                || event->type() == QEvent::FontChange || event->type() == QEvent::ApplicationFontChange
-                || (object == m_window && (event->type() == QEvent::StyleChange || event->type() == QEvent::PaletteChange))))
+            if (m_applying)
             {
-                schedule();
+                return QObject::eventFilter(object, event);
             }
-            if (!m_applying && event->type() == QEvent::DynamicPropertyChange
-                && static_cast<QDynamicPropertyChangeEvent*>(event)->propertyName() == "ksword_detail_projection_scroll")
+            if (object == m_window && event->type() == QEvent::Show)
             {
+                prepareForShow();
+            }
+            else if (event->type() == QEvent::ChildAdded)
+            {
+                // 只监听页面/布局宿主。惰性页构造结束后整理这个子树，不因字段刷新遍历整窗。
+                auto* scope = qobject_cast<QWidget*>(object);
+                if (scope && qobject_cast<QScrollArea*>(scope->parentWidget()))
+                {
+                    scope = scope->parentWidget(); // QScrollArea通过viewport接入新的正文。
+                }
+                markStructureDirty(scope);
+            }
+            else if (object == m_window && (event->type() == QEvent::StyleChange
+                || event->type() == QEvent::PaletteChange || event->type() == QEvent::FontChange
+                || event->type() == QEvent::ApplicationFontChange))
+            {
+                m_styleDirty = true;
                 schedule();
             }
             return QObject::eventFilter(object, event);
         }
     private:
+        using WidgetList = QVector<QPointer<QWidget>>;
+
+        bool keepsOwnLayout(QWidget* widget) const
+        {
+            for (auto* parent = widget; parent; parent = parent->parentWidget())
+            {
+                if (parent->property("ksword_detail_keep_layout").toBool())
+                {
+                    return true;
+                }
+                if (parent == m_window)
+                {
+                    break;
+                }
+            }
+            return false;
+        }
+        // 专业编辑器、文档投影和叶控件内部不属于详情布局框架的结构观察范围。
+        void collectWidgets(QWidget* scope, WidgetList& widgets) const
+        {
+            if (!scope || (scope != m_window && scope->window() != m_window) || keepsOwnLayout(scope)
+                || scope->property("ksword_detail_projection_source").toBool()
+                || scope->property("ksword_detail_projection").toBool())
+            {
+                return;
+            }
+            widgets.append(scope);
+            if (qobject_cast<ks::ui::StructuredFieldView*>(scope)
+                || qobject_cast<QAbstractButton*>(scope) || qobject_cast<QAbstractSpinBox*>(scope)
+                || qobject_cast<QComboBox*>(scope) || qobject_cast<QLineEdit*>(scope)
+                || qobject_cast<QLabel*>(scope) || qobject_cast<QTabBar*>(scope))
+            {
+                return;
+            }
+            if (auto* scroll = qobject_cast<QAbstractScrollArea*>(scope))
+            {
+                if (auto* area = qobject_cast<QScrollArea*>(scroll))
+                {
+                    collectWidgets(area->widget(), widgets);
+                }
+                return; // 不扫描表/树/代码编辑器的viewport及内部滚动条。
+            }
+            const auto children = scope->findChildren<QWidget*>(QString(), Qt::FindDirectChildrenOnly);
+            for (auto* child : children)
+            {
+                collectWidgets(child, widgets);
+            }
+        }
+        void observe(QWidget* widget)
+        {
+            if (!widget || m_observed.contains(widget))
+            {
+                return;
+            }
+            m_observed.insert(widget);
+            widget->installEventFilter(this);
+            connect(widget, &QObject::destroyed, this, [this, widget]() { m_observed.remove(widget); });
+        }
+        void observeContainers(const WidgetList& widgets)
+        {
+            for (const auto& pointer : widgets)
+            {
+                QWidget* widget = pointer.data();
+                if (!widget || qobject_cast<ks::ui::StructuredFieldView*>(widget)
+                    || qobject_cast<QAbstractButton*>(widget) || qobject_cast<QAbstractSpinBox*>(widget)
+                    || qobject_cast<QComboBox*>(widget) || qobject_cast<QLineEdit*>(widget)
+                    || qobject_cast<QLabel*>(widget) || qobject_cast<QTabBar*>(widget))
+                {
+                    continue;
+                }
+                if (auto* scroll = qobject_cast<QAbstractScrollArea*>(widget))
+                {
+                    if (auto* area = qobject_cast<QScrollArea*>(scroll))
+                    {
+                        observe(area);
+                        observe(area->viewport());
+                    }
+                    continue;
+                }
+                // 包含尚无layout的惰性QWidget页面，不监听普通叶控件的Show/FontChange。
+                if (widget->layout() || qobject_cast<QSplitter*>(widget)
+                    || qobject_cast<QStackedWidget*>(widget)
+                    || qstrcmp(widget->metaObject()->className(), "QWidget") == 0)
+                {
+                    observe(widget);
+                }
+            }
+        }
+        void markStructureDirty(QWidget* scope)
+        {
+            if (!scope || (scope != m_window && scope->window() != m_window) || keepsOwnLayout(scope))
+            {
+                return;
+            }
+            for (const auto& pointer : m_dirtyScopes)
+            {
+                if (pointer && (pointer == scope || pointer->isAncestorOf(scope)))
+                {
+                    return;
+                }
+            }
+            m_dirtyScopes.erase(std::remove_if(m_dirtyScopes.begin(), m_dirtyScopes.end(),
+                [scope](const QPointer<QWidget>& item) { return !item || scope->isAncestorOf(item); }),
+                m_dirtyScopes.end());
+            m_dirtyScopes.append(scope);
+            schedule();
+        }
         void adoptRoot()
         {
             QLayout* original = m_window->layout();
@@ -163,12 +307,13 @@ namespace
                 root->addWidget(footer);
             }
         }
-        void prepareTabs()
+        void prepareTabs(const WidgetList& widgets)
         {
-            const auto tabsList = m_window->findChildren<QTabWidget*>();
-            for (auto* tabs : tabsList)
+            for (const auto& pointer : widgets)
             {
-                if (tabs->property("ksword_detail_tabs").toBool())
+                auto* tabs = qobject_cast<QTabWidget*>(pointer.data());
+                if (!tabs || tabs->property("ksword_detail_tabs").toBool()
+                    || tabs->property("ksword_detail_nested_tabs").toBool())
                 {
                     continue;
                 }
@@ -190,63 +335,107 @@ namespace
                 }
                 else
                 {
+                    tabs->setProperty("ksword_detail_nested_tabs", true);
                     tabs->setMinimumSize(0, 0);
                     tabs->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Ignored);
+                    ks::ui::StylePageTabs(tabs); // 保留内部Tab身份并复用同一导航动画和主题。
                 }
             }
         }
-        void prepareFields()
+        void prepareFields(const WidgetList& widgets)
         {
-            for (auto* source : m_window->findChildren<ks::ui::StructuredFieldView*>())
+            for (const auto& pointer : widgets)
             {
-                if (source->property("ksword_detail_projection_source").toBool())
+                auto* source = qobject_cast<ks::ui::StructuredFieldView*>(pointer.data());
+                if (!source || source->property("ksword_detail_projection_source").toBool())
                 {
                     continue;
                 }
                 const bool scrollBody = !insideDetailScroll(source, m_window);
+                if (qobject_cast<QStackedWidget*>(source->parentWidget()))
+                {
+                    // 原字段对象就是Tab/Stack页：保留页身份、索引和业务引用，只替换内部布局。
+                    source->setDocumentOnly();
+                    delete source->layout(); // Qt只删除布局项；原搜索和报告动作仍由source拥有。
+                    source->setMinimumSize(0, 0);
+                    source->setSizePolicy(QSizePolicy::Ignored,
+                        scrollBody ? QSizePolicy::Ignored : QSizePolicy::Preferred);
+                    auto* body = new QVBoxLayout(source);
+                    body->setContentsMargins(0, 0, 0, 0);
+                    body->setSpacing(0);
+                    body->addWidget(ks::ui::CreateDetailFieldProjection(source, source, scrollBody));
+                    continue;
+                }
                 replaceDetailWidget(source, [source, scrollBody](QWidget* parent)
                 {
                     return ks::ui::CreateDetailFieldProjection(source, parent, scrollBody);
                 });
             }
-            for (auto* form : m_window->findChildren<QFormLayout*>())
+        }
+        void prepareForm(QFormLayout* form)
+        {
+            if (form->property("ksword_detail_framework_form").toBool())
             {
-                if (form->property("ksword_detail_framework_form").toBool())
+                return;
+            }
+            form->setProperty("ksword_detail_framework_form", true);
+            ks::ui::ConfigureDetailForm(form);
+            for (int index = 0; index < form->rowCount(); ++index)
+            {
+                auto* labelItem = form->itemAt(index, QFormLayout::LabelRole);
+                if (auto* label = labelItem ? qobject_cast<QLabel*>(labelItem->widget()) : nullptr)
                 {
-                    continue;
+                    label->setMinimumWidth(0);
+                    label->setWordWrap(true);
                 }
-                form->setProperty("ksword_detail_framework_form", true);
-                ks::ui::ConfigureDetailForm(form);
-                for (int index = 0; index < form->rowCount(); ++index)
+                auto* fieldItem = form->itemAt(index, QFormLayout::FieldRole);
+                if (auto* widget = fieldItem ? fieldItem->widget() : nullptr)
                 {
-                    auto* labelItem = form->itemAt(index, QFormLayout::LabelRole);
-                    if (auto* label = labelItem ? qobject_cast<QLabel*>(labelItem->widget()) : nullptr)
-                    {
-                        label->setMinimumWidth(0);
-                        label->setWordWrap(true);
-                    }
-                    auto* fieldItem = form->itemAt(index, QFormLayout::FieldRole);
-                    if (auto* widget = fieldItem ? fieldItem->widget() : nullptr)
-                    {
-                        ks::ui::StyleStandaloneInput(widget);
-                    }
+                    ks::ui::StyleStandaloneInput(widget);
                 }
             }
         }
-        void prepareScrollAreas()
+        void prepareForms(const WidgetList& widgets)
         {
-            for (auto* scroll : m_window->findChildren<QScrollArea*>())
+            for (const auto& pointer : widgets)
             {
-                if (scroll->property("ksword_detail_sidebar").toBool() || !scroll->widget())
+                QLayout* layout = pointer ? pointer->layout() : nullptr;
+                if (!layout)
                 {
                     continue;
                 }
-                scroll->setFrameShape(QFrame::NoFrame);
-                scroll->setWidgetResizable(true);
-                scroll->setMinimumSize(0, 0);
-                scroll->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Ignored);
-                scroll->widget()->setMinimumWidth(0);
-                scroll->widget()->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+                if (auto* form = qobject_cast<QFormLayout*>(layout))
+                {
+                    prepareForm(form);
+                }
+                // 布局对象只包含子布局，专业Widget子树已在collectWidgets中排除。
+                for (auto* form : layout->findChildren<QFormLayout*>())
+                {
+                    prepareForm(form);
+                }
+            }
+        }
+        void prepareScrollAreas(const WidgetList& widgets)
+        {
+            for (const auto& pointer : widgets)
+            {
+                auto* scroll = qobject_cast<QScrollArea*>(pointer.data());
+                if (!scroll || scroll->property("ksword_detail_sidebar").toBool() || !scroll->widget())
+                {
+                    continue;
+                }
+                if (!scroll->property("ksword_detail_scroll_prepared").toBool())
+                {
+                    scroll->setProperty("ksword_detail_scroll_prepared", true);
+                    scroll->setFrameShape(QFrame::NoFrame);
+                    scroll->setWidgetResizable(true);
+                    scroll->setMinimumSize(0, 0);
+                    scroll->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Ignored);
+                }
+                auto* body = scroll->widget();
+                body->setMinimumWidth(0);
+                QSizePolicy policy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+                Qt::ScrollBarPolicy vertical = Qt::ScrollBarAsNeeded;
                 // 只处理单正文视图的重复滚动壳，参数+多个独立数据视图保留业务滚动边界。
                 QLayout* layout = scroll->widget()->layout();
                 if (layout && layout->count() == 1)
@@ -257,31 +446,35 @@ namespace
                         || (projection && content->property("ksword_detail_projection_scroll").toBool()))
                     {
                         scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-                        scroll->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-                        scroll->widget()->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Ignored);
+                        vertical = Qt::ScrollBarAlwaysOff;
+                        policy = QSizePolicy(QSizePolicy::Ignored, QSizePolicy::Ignored);
                         content->setMinimumSize(0, 0);
                         content->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Ignored);
                     }
                     else if (projection)
                     {
-                        scroll->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
                         content->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
                     }
                 }
+                if (body->sizePolicy() != policy)
+                {
+                    body->setSizePolicy(policy);
+                }
+                if (scroll->verticalScrollBarPolicy() != vertical)
+                {
+                    scroll->setVerticalScrollBarPolicy(vertical);
+                }
             }
         }
-        void apply()
+        void applyStyle()
         {
-            if (!m_window || !m_window->layout())
+            // 根窗口仍可刷新业务主题；共享外框只维护自己的末尾块，避免旧QSS覆盖卡片间底色。
+            // 自有主题根（进程详情）已生成同一套Chrome，不能追加后再被业务StyleChange删除。
+            if (m_window->property("ksword_global_dialog_theme").toBool()
+                || m_window->property("ksword_detail_theme_owner").toBool())
             {
                 return;
             }
-            m_applying = true;
-            adoptRoot();
-            prepareTabs();
-            prepareFields();
-            prepareScrollAreas();
-            // 根窗口仍可刷新业务主题；共享外框只维护自己的末尾块，避免旧QSS覆盖卡片间底色。
             const QString begin = QStringLiteral("/* KSWORD_DETAIL_FRAMEWORK_BEGIN */");
             const QString end = QStringLiteral("/* KSWORD_DETAIL_FRAMEWORK_END */");
             QString style = m_window->styleSheet();
@@ -294,27 +487,70 @@ namespace
             style = style.trimmed() + QLatin1Char('\n') + begin
                 + ks::ui::BuildDetailDialogChromeStyle(m_window->objectName()) + end;
             // 普通QDialog根QSS由GlobalDialogTheme唯一持有，不能与它轮流移除/追加样式块。
-            if (!m_window->property("ksword_global_dialog_theme").toBool() && m_window->styleSheet() != style)
+            if (m_window->styleSheet() != style)
             {
                 m_window->setStyleSheet(style);
             }
-            // 禁止旧固定窗口尺寸限制目标布局；字段本身的值宽/编辑器行为由其原控件继续负责。
-            m_window->setMaximumSize(QWIDGETSIZE_MAX, QWIDGETSIZE_MAX);
-            m_window->setMinimumSize(qMin(m_window->minimumWidth(), 640), qMin(m_window->minimumHeight(), 440));
-            const auto widgets = m_window->findChildren<QWidget*>();
-            for (auto* widget : widgets)
+        }
+        void apply()
+        {
+            if (!m_window || !m_window->layout() || m_applying || keepsOwnLayout(m_window))
             {
-                if (!m_observed.contains(widget))
+                return;
+            }
+            m_applying = true;
+            if (!m_prepared)
+            {
+                // 全部接入窗口沿用用户字体和更大的字号，统一补齐未登记弹窗的字号下限。
+                QFont font = m_window->font();
+                if (font.pixelSize() > 0 && font.pixelSize() < 14)
                 {
-                    m_observed.insert(widget);
-                    widget->installEventFilter(this);
-                    connect(widget, &QObject::destroyed, this, [this, widget]() { m_observed.remove(widget); });
+                    font.setPixelSize(14);
                 }
+                else if (font.pixelSize() <= 0 && font.pointSizeF() < 10.0)
+                {
+                    font.setPointSizeF(10.0);
+                }
+                if (font != m_window->font())
+                {
+                    m_window->setFont(font);
+                }
+                adoptRoot();
+                m_window->setMaximumSize(QWIDGETSIZE_MAX, QWIDGETSIZE_MAX);
+                m_window->setMinimumSize(qMin(m_window->minimumWidth(), 640), qMin(m_window->minimumHeight(), 440));
+                m_prepared = true;
+            }
+            const WidgetList scopes = std::exchange(m_dirtyScopes, {});
+            for (const auto& scope : scopes)
+            {
+                if (!scope || (scope != m_window && !m_window->isAncestorOf(scope)))
+                {
+                    continue;
+                }
+                WidgetList widgets;
+                collectWidgets(scope, widgets);
+                prepareTabs(widgets);
+                widgets.clear(); // 首次导航接入可能同步创建当前惰性页，字段取其构造后的快照。
+                collectWidgets(scope, widgets);
+                prepareFields(widgets);
+                widgets.clear(); // 源视图的旧控件已销毁，观察新宿主而不是保存失效控件。
+                collectWidgets(scope, widgets);
+                prepareForms(widgets);
+                prepareScrollAreas(widgets);
+                observeContainers(widgets);
+            }
+            if (m_styleDirty)
+            {
+                m_styleDirty = false;
+                applyStyle(); // 字号和主题变化不再重新遍历、重挂页面结构。
             }
             m_applying = false;
         }
         QPointer<QWidget> m_window; // 原窗口保留身份、模态关系和业务关闭语义。
-        QSet<QWidget*> m_observed; // 只观察已登记窗口内控件，惰性页增量加入。
+        QSet<QWidget*> m_observed; // 只观察布局宿主，字段/表格的普通事件不触发结构遍历。
+        WidgetList m_dirtyScopes; // 惰性构造按最小宿主子树合并，销毁后自动失效。
+        bool m_prepared = false; // 首帧前安装一次，重开不重挂原业务布局。
+        bool m_styleDirty = false; // 主题刷新与结构更新分开。
         bool m_pending = false;
         bool m_applying = false; // 防止重挂父对象期间重复整理同一布局。
     };
@@ -322,7 +558,7 @@ namespace
 
 void ks::ui::InstallDetailWindowFramework(QWidget* window)
 {
-    if (!window || !window->isWindow())
+    if (!window || !window->isWindow() || window->property("ksword_detail_keep_layout").toBool())
     {
         return;
     }
@@ -335,4 +571,17 @@ void ks::ui::InstallDetailWindowFramework(QWidget* window)
     window->setProperty("ksword_detail_shell", true);
     auto* framework = new DetailWindowFramework(window);
     window->setProperty("ksword_detail_framework_controller", QVariant::fromValue<QObject*>(framework));
+}
+
+void ks::ui::PrepareDetailWindowForShow(QWidget* window)
+{
+    if (!window || window->property("ksword_detail_keep_layout").toBool())
+    {
+        return;
+    }
+    InstallDetailWindowFramework(window);
+    if (const auto controller = window->property("ksword_detail_framework_controller").value<QObject*>())
+    {
+        static_cast<DetailWindowFramework*>(controller)->prepareForShow();
+    }
 }

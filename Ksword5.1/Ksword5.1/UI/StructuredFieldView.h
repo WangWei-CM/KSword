@@ -61,8 +61,14 @@ namespace ks::ui
         enum class Presentation { Sections, Tree };
 
         explicit StructuredFieldView(QWidget* parent = nullptr);
+        // 详情卡片接入后仅保存规范文档与搜索/复制/导出入口，销毁旧树和格式选择器。
+        // 单向切换，不影响未接入卡片的列表详情和专业工作台；此模式tree()返回nullptr。
+        void setDocumentOnly();
+        bool isDocumentOnly() const { return m_documentOnly; }
         void setDocument(const FieldDocument& document);
         const FieldDocument& document() const { return m_document; }
+        // 规范文档代次供卡片合并通知；未变化的document-only快照不增加代次。
+        quint64 documentRevision() const { return m_documentRevision; }
         QString plainText() const;
         QString selectedText() const;
         bool exportText(const QString& filePath, QString* error = nullptr) const;
@@ -104,5 +110,7 @@ namespace ks::ui
         bool m_searchActive = false;
         bool m_layoutPending = false;
         bool m_documentNotificationPending = false;
+        bool m_documentOnly = false; // 卡片宿主只使用文档数据，禁止旧树构建、排序和列重测。
+        quint64 m_documentRevision = 0; // 搜索与主题变化不属于规范文档更新。
     };
 }

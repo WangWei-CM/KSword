@@ -7,7 +7,6 @@
 #include "../theme.h"
 #include <QApplication>
 #include <QClipboard>
-#include <QComboBox>
 #include <QFormLayout>
 #include <QLabel>
 #include <QLineEdit>
@@ -15,6 +14,7 @@
 #include <QPointer>
 #include <QScrollArea>
 #include <QScrollBar>
+#include <QShowEvent>
 #include <QToolButton>
 #include <QVBoxLayout>
 #include <QTimer>
@@ -101,7 +101,11 @@ namespace
         DetailFieldProjection(ks::ui::StructuredFieldView* source, QWidget* parent, bool scrollBody)
             : QWidget(parent), m_source(source)
         {
+            const bool embeddedSource = parent == source; // 原source本身是Tab/Stack页时保留其业务身份。
+            // 唯一详情视图是分组卡片；先销毁旧格式控件与树，停止隐藏树的构建和列测量。
+            source->setDocumentOnly();
             setProperty("ksword_detail_projection", true);
+            setProperty("ksword_detail_projection_embedded_source", embeddedSource);
             setProperty("ksword_detail_projection_scroll", scrollBody);
             setMinimumSize(0, 0);
             setSizePolicy(QSizePolicy::Ignored, scrollBody ? QSizePolicy::Ignored : QSizePolicy::Preferred);
@@ -116,14 +120,7 @@ namespace
             {
                 tools->addWidget(m_search, 1);
                 ks::ui::StyleStandaloneInput(m_search);
-                connect(m_search, &QLineEdit::textChanged, this, [this]() { filter(); });
-            }
-            auto* presentation = source->findChild<QComboBox*>(QString(), Qt::FindDirectChildrenOnly);
-            if (presentation)
-            {
-                tools->addWidget(presentation);
-                ks::ui::StylePrimaryCombo(presentation);
-                presentation->show();
+                connect(m_search, &QLineEdit::textChanged, this, [this]() { scheduleRefresh(); });
             }
             for (auto* button : source->findChildren<QToolButton*>(QString(), Qt::FindDirectChildrenOnly))
             {
@@ -152,53 +149,27 @@ namespace
                 m_scroll->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Ignored);
                 m_scroll->setWidget(m_body);
                 root->addWidget(m_scroll, 1);
-                m_cardHost = m_scroll;
             }
             else
             {
                 root->addWidget(m_body);
-                m_cardHost = m_body;
             }
             source->setProperty("ksword_detail_projection_source", true);
-            source->setParent(this);
-            source->hide();
-            if (presentation)
+            if (!embeddedSource)
             {
-                source->setMinimumSize(0, 0);
-                source->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Ignored);
-                root->addWidget(source, 1);
-                connect(source, &ks::ui::StructuredFieldView::presentationChanged, this, [this, scrollBody]()
-                {
-                    const bool tree = m_source && m_source->presentation() == ks::ui::StructuredFieldView::Presentation::Tree;
-                    m_cardHost->setVisible(!tree);
-                    if (m_source)
-                    {
-                        m_source->setVisible(tree);
-                    }
-                    // 原树自己滚动；自然高度卡片则继续使用原外层正文滚动区。
-                    setProperty("ksword_detail_projection_scroll", scrollBody || tree);
-                    setSizePolicy(QSizePolicy::Ignored, scrollBody || tree ? QSizePolicy::Ignored : QSizePolicy::Preferred);
-                });
-                m_cardHost->setVisible(presentation->currentIndex() != 1);
-                source->setVisible(presentation->currentIndex() == 1);
-                const bool tree = presentation->currentIndex() == 1;
-                setProperty("ksword_detail_projection_scroll", scrollBody || tree);
-                setSizePolicy(QSizePolicy::Ignored, scrollBody || tree ? QSizePolicy::Ignored : QSizePolicy::Preferred);
+                source->setParent(this);
+                source->hide();
             }
-            connect(source, &ks::ui::StructuredFieldView::documentChanged, this, [this]() { refresh(); });
+            connect(source, &ks::ui::StructuredFieldView::documentChanged, this, [this]() { scheduleRefresh(); });
             const QPointer<DetailFieldProjection> safe(this);
             ks::ui::BindWidgetTheme(this, [safe]()
             {
                 if (safe)
                 {
-                    safe->setStyleSheet(QStringLiteral(
-                        "QWidget[ksword_detail_projection=\"true\"],QWidget[ksword_detail_document_body=\"true\"]{background:%1;border:0;}"
-                        "QScrollArea{background:%1;border:0;}")
-                        .arg(KswordTheme::WindowColorHex()));
-                    safe->refresh();
+                    safe->scheduleRefresh();
                 }
             });
-            refresh();
+            scheduleRefresh();
         }
     protected:
         void changeEvent(QEvent* event) override
@@ -207,8 +178,16 @@ namespace
             if (event->type() == QEvent::LanguageChange)
             {
                 // 等语言广播结束再更新卡片，避免广播遍历中同步销毁旧标题/字段控件。
-                QTimer::singleShot(0, this, [this]() { refresh(); });
+                ++m_translationRevision;
+                scheduleRefresh();
             }
+        }
+        // 首次显示和切回隐藏页时，首帧直接使用最新文档，不先画旧内容再排队重建。
+        void showEvent(QShowEvent* event) override
+        {
+            QWidget::showEvent(event);
+            m_dirty = true;
+            refresh();
         }
     private:
         struct Row
@@ -217,20 +196,70 @@ namespace
             QPointer<QLabel> value; // 可选择/复制的值，数据刷新时原位更新。
             QPointer<QFormLayout> form; // 显示隐藏由原表单拥有的行处理。
             QString searchContext;
+            QString semantic; // 主题单独变化时无需再次展开规范文档即可校准值颜色。
+            QString valueStyle; // 真实语义色或主题改变时才重新polish值标签。
+            QString labelStyle; // 字段名颜色仅在首次和主题改变时写入。
+            bool visible = true; // 过滤可见性缓存，数值刷新不重新安排整张卡片的布局。
         };
         struct Card
         {
             QPointer<QWidget> widget; // 一个分区仅有一层圆角实底。
             QVector<Row> rows; // 与当前文档分区的字段顺序一一对应。
             QString title; // 搜索标题时保留原结构化视图的整组匹配语义。
+            bool visible = true; // 只在匹配状态变化时显隐整组。
         };
-        void refresh()
+        // 文档、主题、语言与搜索共同排队；隐藏Tab只保留dirty，不构造或遍历卡片。
+        void scheduleRefresh()
         {
-            if (!m_source)
+            m_dirty = true;
+            if (m_refreshPending || m_refreshing || !isVisible())
             {
                 return;
             }
-            const auto sections = displaySections(m_source->document());
+            m_refreshPending = true;
+            QTimer::singleShot(0, this, [this]()
+            {
+                m_refreshPending = false;
+                refresh();
+            });
+        }
+
+        void refresh()
+        {
+            if (!m_source || !m_dirty || !isVisible() || m_refreshing)
+            {
+                return;
+            }
+            const quint64 revision = m_source->documentRevision(); // 当前完整规范快照身份。
+            const QString language = ks::i18n::LanguageManager::instance().currentLanguageId();
+            const QString theme = KswordTheme::WindowColorHex() + KswordTheme::SurfaceHex()
+                + KswordTheme::TextPrimaryHex() + KswordTheme::TextSecondaryHex()
+                + KswordTheme::SuccessColor().name(QColor::HexArgb)
+                + KswordTheme::ErrorColor().name(QColor::HexArgb);
+            const QString query = m_search ? m_search->text().trimmed() : QString();
+            const quint64 translationRevision = m_translationRevision; // 同语言包重新翻译也只处理一次。
+            const bool dataChanged = !m_snapshotReady || revision != m_documentRevision || language != m_language
+                || translationRevision != m_renderedTranslationRevision;
+            const bool themeChanged = !m_snapshotReady || theme != m_theme;
+            const bool searchChanged = !m_snapshotReady || query != m_query;
+            m_dirty = false;
+            if (!dataChanged && !themeChanged && !searchChanged)
+            {
+                return; // 首次theme回调或旧documentChanged到达时，当前快照已经展示完毕。
+            }
+            m_refreshing = true;
+            if (themeChanged)
+            {
+                const QString style = QStringLiteral(
+                    "QWidget[ksword_detail_projection=\"true\"],QWidget[ksword_detail_document_body=\"true\"]{background:%1;border:0;}"
+                    "QScrollArea{background:%1;border:0;}").arg(KswordTheme::WindowColorHex());
+                if (styleSheet() != style)
+                {
+                    setStyleSheet(style);
+                }
+            }
+            // 同一个文档与语言只展开一次；纯主题和搜索请求直接使用现有行绑定。
+            const auto sections = dataChanged ? displaySections(m_source->document()) : QVector<DisplaySection>();
             QStringList structure;
             for (const auto& section : sections)
             {
@@ -241,7 +270,9 @@ namespace
                     structure.append(field.note ? QStringLiteral("note") : field.name);
                 }
             }
-            if (structure != m_structure)
+            const bool structureChanged = dataChanged && structure != m_structure;
+            bool colorsDirty = themeChanged || structureChanged;
+            if (structureChanged)
             {
                 m_structure = structure;
                 m_bindings.clear();
@@ -319,11 +350,10 @@ namespace
                             label = new QLabel(field.name, card);
                             label->setWordWrap(true);
                             label->setMinimumWidth(0);
-                            label->setStyleSheet(QStringLiteral("background:transparent;color:%1;")
-                                .arg(KswordTheme::TextSecondaryHex()));
                             form->addRow(label, value);
                         }
-                        binding.rows.append({label, value, form, field.searchContext});
+                        binding.rows.append({label, value, form, field.searchContext, field.semantic,
+                            QString(), QString(), true});
                     }
                     m_cards->addWidget(card);
                     m_bindings.append(binding);
@@ -338,26 +368,74 @@ namespace
                     const auto& field = section.fields.at(rowIndex);
                     auto& row = card.rows[rowIndex];
                     row.searchContext = field.searchContext;
+                    if (row.semantic != field.semantic)
+                    {
+                        row.semantic = field.semantic;
+                        colorsDirty = true;
+                    }
                     if (row.value && row.value->text() != field.value)
                     {
                         row.value->setText(field.value);
                         row.value->setToolTip(field.value);
                     }
-                    if (row.value)
+                }
+            }
+            if (colorsDirty)
+            {
+                applyRowColors();
+            }
+            if (structureChanged || searchChanged || (dataChanged && !query.isEmpty()))
+            {
+                filter();
+            }
+            m_documentRevision = revision;
+            m_language = language;
+            m_theme = theme;
+            m_query = query;
+            m_renderedTranslationRevision = translationRevision;
+            m_snapshotReady = true;
+            m_refreshing = false;
+            if (m_source && m_source->documentRevision() != revision)
+            {
+                m_dirty = true; // 布局回调中若提交新快照，下一轮继续处理，不能漏掉真实变更。
+            }
+            if (m_dirty)
+            {
+                scheduleRefresh();
+            }
+        }
+
+        // 颜色变化不依赖再次flatten文档；相同颜色也不对每个标签重复套QSS。
+        void applyRowColors()
+        {
+            const auto valueStyle = [](const QColor& color)
+            {
+                return QStringLiteral("background:transparent;color:%1;")
+                    .arg(KswordTheme::EnsureTextContrast(color, KswordTheme::SurfaceColor(), 4.5).name());
+            };
+            const QString normalStyle = valueStyle(KswordTheme::TextPrimaryColor());
+            const QString successStyle = valueStyle(KswordTheme::SuccessColor());
+            const QString errorStyle = valueStyle(KswordTheme::ErrorColor());
+            const QString labelStyle = QStringLiteral("background:transparent;color:%1;")
+                .arg(KswordTheme::TextSecondaryHex());
+            for (auto& card : m_bindings)
+            {
+                for (auto& row : card.rows)
+                {
+                    const QString& style = row.semantic == QLatin1String("success") ? successStyle
+                        : row.semantic == QLatin1String("error") ? errorStyle : normalStyle;
+                    if (row.value && row.valueStyle != style)
                     {
-                        const QColor color = field.semantic == QLatin1String("success") ? KswordTheme::SuccessColor()
-                            : field.semantic == QLatin1String("error") ? KswordTheme::ErrorColor() : KswordTheme::TextPrimaryColor();
-                        row.value->setStyleSheet(QStringLiteral("background:transparent;color:%1;")
-                            .arg(KswordTheme::EnsureTextContrast(color, KswordTheme::SurfaceColor(), 4.5).name()));
+                        row.valueStyle = style;
+                        row.value->setStyleSheet(style);
                     }
-                    if (row.label)
+                    if (row.label && row.labelStyle != labelStyle)
                     {
-                        row.label->setStyleSheet(QStringLiteral("background:transparent;color:%1;")
-                            .arg(KswordTheme::TextSecondaryHex()));
+                        row.labelStyle = labelStyle;
+                        row.label->setStyleSheet(labelStyle);
                     }
                 }
             }
-            filter();
         }
         void filter()
         {
@@ -371,14 +449,16 @@ namespace
                     const bool visible = query.isEmpty() || sectionMatches || (row.label && row.label->text().contains(query, Qt::CaseInsensitive))
                         || row.searchContext.contains(query, Qt::CaseInsensitive)
                         || (row.value && row.value->text().contains(query, Qt::CaseInsensitive));
-                    if (row.form && row.value)
+                    if (row.visible != visible && row.form && row.value)
                     {
+                        row.visible = visible;
                         row.form->setRowVisible(row.value, visible);
                     }
                     any |= visible;
                 }
-                if (card.widget)
+                if (card.visible != any && card.widget)
                 {
+                    card.visible = any;
                     card.widget->setVisible(any);
                 }
             }
@@ -388,9 +468,18 @@ namespace
         QWidget* m_body = nullptr;
         QVBoxLayout* m_cards = nullptr;
         QScrollArea* m_scroll = nullptr; // 嵌入已有正文滚动时为空。
-        QWidget* m_cardHost = nullptr; // 卡片与原树视图互斥显示，不生成嵌套滚动。
         QStringList m_structure; // 仅记录结构身份，值更新不会重建卡片和滚动区。
         QVector<Card> m_bindings;
+        quint64 m_documentRevision = 0; // 最后一帧使用的规范文档代次。
+        quint64 m_translationRevision = 0; // LanguageChange只在统一调度器中递增。
+        quint64 m_renderedTranslationRevision = 0; // 已展示的翻译代次，兜底主题回调不重复翻译。
+        QString m_language; // 相同语言的重复广播不重建字段文本。
+        QString m_theme; // 精确记录卡片使用的主题颜色，纯主题更新不展开文档。
+        QString m_query; // 相同搜索和数据无需再次遍历可见性。
+        bool m_snapshotReady = false; // 初次空文档也需要建立画布与过滤状态。
+        bool m_dirty = true; // 隐藏页面保留待更新状态，Show首帧同步处理。
+        bool m_refreshPending = false; // 合并同一事件轮内的文档/语言/主题通知。
+        bool m_refreshing = false; // 创建字段与套样式期间禁止重入。
     };
 }
 
@@ -403,7 +492,16 @@ QWidget* ks::ui::CreateDetailFieldProjection(StructuredFieldView* source, QWidge
     if (source->property("ksword_detail_projection_source").toBool() && source->parentWidget()
         && source->parentWidget()->property("ksword_detail_projection").toBool())
     {
-        return source->parentWidget(); // 重复接入复用同一宿主，保留原搜索、模式和导出控件。
+        return source->parentWidget(); // 重复接入复用同一宿主，保留原搜索和完整文档导出控件。
+    }
+    // canonical source仍作为业务Tab页时，投影是其直接子项，不通过换父对象查找宿主。
+    for (QWidget* child : source->findChildren<QWidget*>(QString(), Qt::FindDirectChildrenOnly))
+    {
+        if (child->property("ksword_detail_projection").toBool()
+            && child->property("ksword_detail_projection_embedded_source").toBool())
+        {
+            return child;
+        }
     }
     return new DetailFieldProjection(source, parent ? parent : source->parentWidget(), scrollBody);
 }

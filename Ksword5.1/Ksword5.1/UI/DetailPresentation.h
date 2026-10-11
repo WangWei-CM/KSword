@@ -26,4 +26,6 @@ namespace ks::ui
         bool scrollBody = true);
     // 统一安装窗口布局框架；保留原页签/字段/动作，首次与惰性页面创建后合并整理。
     void InstallDetailWindowFramework(QWidget* window);
+    // 构造完成的首次Show安全点调用，首帧绘制前一次性准备结构；普通刷新不重挂布局。
+    void PrepareDetailWindowForShow(QWidget* window);
 }

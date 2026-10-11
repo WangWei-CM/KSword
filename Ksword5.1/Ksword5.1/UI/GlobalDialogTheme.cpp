@@ -10,8 +10,8 @@
 #include <QPalette>
 #include <QPointer>
 #include <QPushButton>
-#include <QStyle>
 #include <QWidget>
+#include <QVariant>
 #include <QTimer>
 #include <QFileDialog>
 #include <QColorDialog>
@@ -53,6 +53,10 @@ namespace
     // - 写入合成样式表中的分隔标记；
     // - 后续刷新时据此区分“业务原样式”和“全局主题追加块”。
     constexpr const char* kGlobalDialogStyleMarker = "/* KSWORD_GLOBAL_DIALOG_THEME_BEGIN */";
+    constexpr const char* kGlobalDialogStyleEndMarker = "/* KSWORD_GLOBAL_DIALOG_THEME_END */"; // 完整主题块结束标记。
+    constexpr const char* kAppliedDialogStyleSheetPropertyName = "ksword_global_dialog_applied_style_sheet"; // 最近实际写入的根QSS。
+    constexpr const char* kAppliedDialogPalettePropertyName = "ksword_global_dialog_applied_palette"; // 最近实际生效的根调色板。
+    constexpr const char* kDialogThemePendingPropertyName = "ksword_dialog_theme_pending"; // 尚未消费的合并主题请求。
 
     // dialogWindowColor 作用：让普通弹窗使用全局窗口背景角色。
     QColor dialogWindowColor(const bool darkModeEnabled)
@@ -236,9 +240,23 @@ namespace
         return styleSheetText;
     }
 
-    // originalStyleSheetForDialog 作用：
-    // - 获取并缓存业务弹窗原始样式；
-    // - 如果当前样式已经含有全局标记，则沿用已缓存的原始样式。
+    // 移除明确拥有的完整块，保留业务在主题块前后新增的规则和顺序。
+    void removeOwnedStyleBlocks(QString& style, const QString& begin, const QString& end)
+    {
+        qsizetype first = style.indexOf(begin);
+        while (first >= 0)
+        {
+            const qsizetype last = style.indexOf(end, first + begin.size());
+            if (last < 0)
+            {
+                break;
+            }
+            style.remove(first, last + end.size() - first);
+            first = style.indexOf(begin);
+        }
+    }
+
+    // 每次从现有QSS提取业务规则，不能因为含主题标记就回退到旧缓存并丢掉新规则。
     QString originalStyleSheetForDialog(QDialog* dialog)
     {
         if (dialog == nullptr)
@@ -246,15 +264,23 @@ namespace
             return QString();
         }
 
-        const QString currentStyleSheet = dialog->styleSheet();
-        const bool currentStyleHasThemeBlock = currentStyleSheet.contains(QString::fromLatin1(kGlobalDialogStyleMarker));
-        if (!currentStyleHasThemeBlock)
+        QString businessStyle = dialog->styleSheet();
+        const QString begin = QString::fromLatin1(kGlobalDialogStyleMarker);
+        const QString end = QString::fromLatin1(kGlobalDialogStyleEndMarker);
+        // 旧运行状态只有BEGIN时沿用既有原始缓存；新块均有END，更新不会再吞掉业务后缀。
+        if (businessStyle.contains(begin) && !businessStyle.contains(end))
         {
-            dialog->setProperty(kOriginalDialogStyleSheetPropertyName, currentStyleSheet);
-            return currentStyleSheet;
+            businessStyle = dialog->property(kOriginalDialogStyleSheetPropertyName).isValid()
+                ? dialog->property(kOriginalDialogStyleSheetPropertyName).toString()
+                : businessStyle.left(businessStyle.indexOf(begin));
         }
-
-        return dialog->property(kOriginalDialogStyleSheetPropertyName).toString();
+        removeOwnedStyleBlocks(businessStyle, begin, end);
+        // 普通弹窗由本主题器独占根QSS；接管前可能已有共享框架的同一外观块。
+        removeOwnedStyleBlocks(businessStyle, QStringLiteral("/* KSWORD_DETAIL_FRAMEWORK_BEGIN */"),
+            QStringLiteral("/* KSWORD_DETAIL_FRAMEWORK_END */"));
+        businessStyle = businessStyle.trimmed();
+        dialog->setProperty(kOriginalDialogStyleSheetPropertyName, businessStyle);
+        return businessStyle;
     }
 
     // shouldThemeDialog 作用：
@@ -297,41 +323,103 @@ namespace
         // - 触发时调用 polishDialog 统一补齐主题。
         bool eventFilter(QObject* watchedObject, QEvent* eventObject) override
         {
-            QDialog* dialog = qobject_cast<QDialog*>(watchedObject);
-            if (dialog && eventObject && (eventObject->type() == QEvent::Polish || eventObject->type() == QEvent::Show)
-                && shouldInstallDetailFramework(dialog))
+            // 普通按钮只在自身首次Polish设置光标，保持原交互提示而不扫描整个详情子树。
+            if (eventObject && eventObject->type() == QEvent::Polish)
             {
-                // 二级窗口也共享结构；它的颜色所有权仍交原SecondaryPageLayout持有。
-                ks::ui::InstallDetailWindowFramework(dialog);
+                auto* button = qobject_cast<QPushButton*>(watchedObject);
+                auto* owner = button ? qobject_cast<QDialog*>(button->window()) : nullptr;
+                if (button && shouldThemeDialog(owner))
+                {
+                    button->setCursor(Qt::PointingHandCursor);
+                }
             }
-            if (!shouldThemeDialog(dialog) || eventObject == nullptr)
+            QDialog* dialog = qobject_cast<QDialog*>(watchedObject);
+            if (dialog == nullptr || eventObject == nullptr
+                || dialog->property(kGlobalDialogPolishingPropertyName).toBool())
             {
                 return QObject::eventFilter(watchedObject, eventObject);
             }
 
             const QEvent::Type eventType = eventObject->type();
-            if (eventType == QEvent::Polish ||
-                eventType == QEvent::Show ||
-                eventType == QEvent::PaletteChange ||
-                eventType == QEvent::ApplicationPaletteChange ||
-                eventType == QEvent::StyleChange)
+            const bool ownsTheme = shouldThemeDialog(dialog);
+            const QPointer<QDialog> eventDialog(dialog); // 首显结构迁移和主题事件可使业务窗口关闭。
+            if (eventType == QEvent::Polish || eventType == QEvent::Show)
             {
-                if (!dialog->property(kGlobalDialogPolishingPropertyName).toBool())
+                // 首帧前声明根主题所有权；Polish只登记，Show时才迁移已构建完成的布局。
+                if (ownsTheme)
                 {
-                    if (!dialog->property("ksword_dialog_theme_pending").toBool())
+                    dialog->setProperty(kGlobalDialogThemePropertyName, QStringLiteral("true"));
+                }
+                if (shouldInstallDetailFramework(dialog))
+                {
+                    ks::ui::InstallDetailWindowFramework(dialog);
+                    if (eventType == QEvent::Show)
                     {
-                        dialog->setProperty("ksword_dialog_theme_pending", true);
-                        // 合并样式事件，离开 Qt 的显示/布局调用栈再应用主题。
-                        QTimer::singleShot(0, dialog, [this, dialog]()
-                        {
-                            dialog->setProperty("ksword_dialog_theme_pending", false);
-                            polishDialog(dialog);
-                        });
+                        ks::ui::PrepareDetailWindowForShow(dialog);
                     }
                 }
+                if (!eventDialog)
+                {
+                    return true;
+                }
+                if (ownsTheme)
+                {
+                    // Polish/Show在Qt真正绘制前完成；取消旧排队项，不再先画旧颜色再闪到新主题。
+                    dialog->setProperty(kDialogThemePendingPropertyName, false);
+                    polishDialog(dialog);
+                }
+                if (!eventDialog)
+                {
+                    return true;
+                }
+                return QObject::eventFilter(watchedObject, eventObject);
+            }
+            if (!ownsTheme)
+            {
+                return QObject::eventFilter(watchedObject, eventObject);
+            }
+
+            // 自身已应用的根样式/调色板重新发事件时直接退出，不遍历子按钮或重建主题块。
+            if (eventType == QEvent::StyleChange
+                && dialog->property(kAppliedDialogStyleSheetPropertyName).isValid()
+                && dialog->styleSheet() == dialog->property(kAppliedDialogStyleSheetPropertyName).toString())
+            {
+                return QObject::eventFilter(watchedObject, eventObject);
+            }
+            if (eventType == QEvent::PaletteChange
+                && dialog->property(kAppliedDialogPalettePropertyName).isValid()
+                && dialog->palette() == dialog->property(kAppliedDialogPalettePropertyName).value<QPalette>())
+            {
+                return QObject::eventFilter(watchedObject, eventObject);
+            }
+            if (eventType == QEvent::PaletteChange || eventType == QEvent::ApplicationPaletteChange
+                || eventType == QEvent::StyleChange)
+            {
+                scheduleTheme(dialog);
             }
 
             return QObject::eventFilter(watchedObject, eventObject);
+        }
+
+        // 真实主题或业务QSS变化合并到一次更新；弹窗销毁和首显同步应用会取消旧任务。
+        void scheduleTheme(QDialog* dialog)
+        {
+            if (dialog->property(kDialogThemePendingPropertyName).toBool())
+            {
+                return;
+            }
+            dialog->setProperty(kDialogThemePendingPropertyName, true);
+            const QPointer<GlobalDialogStyler> safeStyler(this);
+            const QPointer<QDialog> safeDialog(dialog);
+            QTimer::singleShot(0, dialog, [safeStyler, safeDialog]()
+            {
+                if (!safeStyler || !safeDialog || !safeDialog->property(kDialogThemePendingPropertyName).toBool())
+                {
+                    return;
+                }
+                safeDialog->setProperty(kDialogThemePendingPropertyName, false);
+                safeStyler->polishDialog(safeDialog);
+            });
         }
 
         // polishDialog 作用：
@@ -350,7 +438,7 @@ namespace
 
             struct PolishingResetter
             {
-                QDialog* targetDialog = nullptr; // targetDialog：需要恢复重入标记的弹窗。
+                QPointer<QDialog> targetDialog; // 根样式处理可引发业务关闭，恢复标记前必须探活。
                 ~PolishingResetter()
                 {
                     if (targetDialog != nullptr)
@@ -362,13 +450,15 @@ namespace
 
             dialog->setProperty(kGlobalDialogPolishingPropertyName, true);
             PolishingResetter resetter{ dialog };
+            const QPointer<QDialog> safeDialog(dialog); // 事件接收者可能在业务主题回调中关闭。
 
             const bool darkModeEnabled = KswordTheme::IsDarkModeEnabled();
             const QPalette sourcePalette = (qApp != nullptr) ? qApp->palette() : dialog->palette();
             const QString originalStyleSheet = originalStyleSheetForDialog(dialog);
             const QString targetStyleSheet = originalStyleSheet + buildGlobalDialogStyleSheetBlock(darkModeEnabled)
                 + (dialog->property("ksword_detail_shell").toBool()
-                    ? ks::ui::BuildDetailDialogChromeStyle(dialog->objectName()) : QString());
+                    ? ks::ui::BuildDetailDialogChromeStyle(dialog->objectName()) : QString())
+                + QLatin1Char('\n') + QString::fromLatin1(kGlobalDialogStyleEndMarker);
 
             dialog->setProperty(kGlobalDialogThemePropertyName, QStringLiteral("true"));
             dialog->setProperty(kGlobalDialogDarkModePropertyName, darkModeEnabled);
@@ -379,26 +469,23 @@ namespace
             {
                 dialog->setPalette(targetPalette);
             }
+            if (!safeDialog)
+            {
+                return;
+            }
 
             if (dialog->styleSheet() != targetStyleSheet)
             {
                 dialog->setStyleSheet(targetStyleSheet);
             }
-
-            const QList<QPushButton*> buttonList = dialog->findChildren<QPushButton*>();
-            for (QPushButton* button : buttonList)
+            if (!safeDialog)
             {
-                if (button == nullptr)
-                {
-                    continue;
-                }
-                button->setCursor(Qt::PointingHandCursor);
-                if (QStyle* buttonStyle = button->style())
-                {
-                    buttonStyle->unpolish(button);
-                    buttonStyle->polish(button);
-                }
+                return;
             }
+
+            // Qt在根QSS实际变化时自行刷新子控件；手工逐按钮重polish会重复触发整个主题链。
+            dialog->setProperty(kAppliedDialogStyleSheetPropertyName, targetStyleSheet);
+            dialog->setProperty(kAppliedDialogPalettePropertyName, QVariant::fromValue(dialog->palette()));
         }
     };
 
@@ -447,6 +534,11 @@ namespace ks::ui
         for (QWidget* topLevelWidget : topLevelWidgetList)
         {
             QDialog* dialog = qobject_cast<QDialog*>(topLevelWidget);
+            // 手动刷新与首显遵循同一根QSS所有权顺序，不能先让框架写一份重复主题。
+            if (shouldThemeDialog(dialog))
+            {
+                dialog->setProperty(kGlobalDialogThemePropertyName, QStringLiteral("true"));
+            }
             if (shouldInstallDetailFramework(dialog))
             {
                 ks::ui::InstallDetailWindowFramework(dialog);

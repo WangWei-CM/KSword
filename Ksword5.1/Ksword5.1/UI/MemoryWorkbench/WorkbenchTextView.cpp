@@ -104,6 +104,8 @@ namespace ks::ui
 
     WorkbenchTextView::WorkbenchTextView(QWidget* parent) : QWidget(parent)
     {
+        // 文本解码器的Canvas/结构视图由业务切换，详情框架仅管理专业工作台外壳。
+        setProperty("ksword_detail_keep_layout", true);
         auto* layout = new QVBoxLayout(this);
         layout->setContentsMargins(0, 0, 0, 0);
         layout->setSpacing(4);

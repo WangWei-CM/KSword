@@ -262,7 +262,7 @@ KSword 主程序位于 `Ksword5.1/Ksword5.1`（Qt 6.9.3 Widgets + Qt Advanced Do
 ## 详情窗口与弹窗更新（2026-10-11）
 
 - 用户要求详情窗口采用全宽对象摘要、左侧分组导航、右侧无描边卡片；允许系统决定窗口外沿方圆角。`DetailDialogChrome` 使用 Window/Surface 两层，导航选中为中性底加主题色文字，侧栏由 `DetailPresentation` 按窗口宽度调整。
-- `DetailPresentation` 提供内部标题卡片和字段双列，复用 `ArrangeParameterColumns`，窄窗回到单列、QFormLayout 允许长行换行。进程概览去掉 660px 最小宽度和页外重复滚动区，卡片视图与结构化视图分别负责自身滚动；字段数据仍来自同一 StructuredFieldView 文档。
+- `DetailPresentation` 提供内部标题卡片和字段双列，复用 `ArrangeParameterColumns`，窄窗回到单列、QFormLayout 允许长行换行。进程概览去掉 660px 最小宽度和页外重复滚动区；详情只保留分组卡片，字段数据仍来自同一 StructuredFieldView 文档。
 - `StyleStandaloneInput` 使用共享 ToolbarMetrics 高度公式，独立输入字号变化时更新高度；必须排除 QComboBox/QAbstractSpinBox 内部的 QLineEdit，不能重复撑高组合控件。
 - `ThemedMessageBox` 淘汰悬浮自绘标题栏与强制无边框，不改变按钮角色和关闭返回值。主题操作合并到事件队列；Qt 在样式应用时会重建 QMessageBox 网格，因此最低宽度 spacer 必须在套样式、处理按钮之后加到当前网格，而不是只设窗口 minimumWidth 或提前加到旧网格。
 - 原生窗口 `WindowChrome` 使用 DWMWCP_DEFAULT；方圆角、最大化和贴靠由系统决定。主窗口及其它原本无边框的专用窗口不由本模块强改窗口类型。
@@ -273,9 +273,16 @@ KSword 主程序位于 `Ksword5.1/Ksword5.1`（Qt 6.9.3 Widgets + Qt Advanced Do
 
 ## 共享详情框架统一安装（2026-10-11）
 
-- 用户纠正实现方式：详情必须使用共享框架，不逐窗复制/维护摘要、导航或卡片布局。统一入口 `InstallDetailWindowFramework` 管理窗口摘要与正文外壳、原Tab导航、原文档卡片投影、自适应字段及滚动区；Polish/Show和惰性子控件创建后合并安装。各模块只提供实际身份、字段和动作配置，业务模型不由框架复制。
+- 用户纠正实现方式：详情必须使用共享框架，不逐窗复制/维护摘要、导航或卡片布局。统一入口 `InstallDetailWindowFramework` 只登记控制器；`PrepareDetailWindowForShow` 在构造结束后的首个Show、首帧绘制前完成窗口摘要/原Tab导航/文档卡片/自适应字段及滚动区安装。各模块只提供实际身份、字段和动作配置，业务模型不由框架复制。
 - `GlobalDialogTheme` 为普通业务QDialog安装结构，已登记二级工具同样装结构但保留Secondary颜色所有权。Qt文件/颜色/字体/单项输入选择器和带 `ksword_detail_keep_layout` 的共享设置页保留已有结构。ProcessDetailWindow为QWidget，明确从ConfigureDetailDialogRoot接入。
-- `DetailFieldProjection` 直接复用原StructuredFieldView搜索/格式/复制/导出控件，原source仍持规范文档。程序式格式切换走presentationChanged，不能只看被QSignalBlocker阻断的Combo信号。字段分组匹配时保留整组搜索语义；数值刷新原位更新，只有结构变化重建卡片。
+- `DetailFieldProjection` 直接复用原StructuredFieldView搜索/复制/导出控件，原source仍持规范文档。详情固定分组卡片，`setDocumentOnly()` 删除旧树与格式下拉，停止隐藏树重建、列测量和其排队回调。字段分组匹配时保留整组搜索语义；数值刷新原位更新，只有结构变化重建卡片。
 - 卡片实底由DetailCard绘制，正文间隔和滚动Canvas走Window层，避免QSS对子面板再次铺矩形实底导致错误色块/黑色角缝。共享框架根QSS必须让GlobalDialogTheme保持唯一所有权，否则双方增删末尾块会产生StyleChange循环。
-- 只有投影自身有滚动区或处于原树模式时才关闭多余外滚动壳；自然高卡片scrollBody=false必须保留唯一外层纵向滚动。QSplitter替换使用占位并保留非零用户比例，隐藏页首次布局前全零sizes不应恢复为显式折叠。
+- 只有投影自身有滚动区才关闭多余外滚动壳；自然高卡片scrollBody=false必须保留唯一外层纵向滚动。QSplitter替换使用占位并保留非零用户比例，隐藏页首次布局前全零sizes不应恢复为显式折叠。
 - 文件自建侧栏Tab必须标记ksword_detail_tabs避免重复导航；启动项卡片须来自同一完整文档，不能按section拆source而改变复制全部/导出范围。覆盖清单见 `docs/详情共享框架接入-20261011.md`。不运行自动测试/伪窗口，原Release编译交用户实测。
+
+- 结构观察只接入布局/惰性页面宿主的ChildAdded，合并最小子树；主题或字体变化只刷新根样式，不监听全部叶控件的Show/FontChange并扫描整窗。卡片投影与专业编辑器内部不参与通用结构遍历。
+- `MemoryWorkbenchView`、`WorkbenchDiagnosticsHost`、`WorkbenchTextView` 使用 `ksword_detail_keep_layout` 保留整个专业子树：业务代码仍依赖Stack内原fields身份及tree指针，不能把它们替换成详情卡片。详情窗口外壳仍照常接入；父控制器也不能进入有独立控制器的子窗口。
+- 根QSS必须单一拥有：GlobalDialogTheme拥有普通QDialog；进程详情以 `ksword_detail_theme_owner` 声明业务拥有Chrome。框架不得追加又被业务changeEvent删除的相同块，StyleChange也不能触发文档重建。根样式/调色板及卡片标签只有实际变化才写入，禁止逐按钮手工重复polish。
+- 字号下限统一安装处补齐14px/10pt，保留更大字号及字体家族。`StyleSecondaryTabs` 与普通Tab同用PageTabMotion，静态下划线透明让动画唯一绘制，不另设持续全页刷新计时器。
+- 文档投影以documentRevision/语言/主题/搜索键合并通知；隐藏Tab只留dirty，Show首帧同步使用最新快照。规范字段相同的document-only快照不增代次、不发通知，纯搜索/主题不重新flatten；真实数值变化原位更新，值样式与行可见状态只在变化时写入。
+- `StructuredFieldView` 本身直接作为Tab/Stack页时不能替换页对象：清掉旧布局后在source内部安装 `CreateDetailFieldProjection(source, source)`，保持原页索引/标题/currentWidget及业务指针。该模式不重挂或隐藏source，重复接入查其直接投影子节点，避免父子循环和重复宿主。

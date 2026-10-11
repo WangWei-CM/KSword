@@ -53,13 +53,13 @@ namespace process_detail_window_internal
 
     QString buildProcessDetailRootStyle()
     {
-        // The shared detail shell owns surfaces, navigation and section framing.
-        // Keep this window's read-only form field treatment independent of it.
+        // 业务窗口独占根QSS，共享框架只提供外观配方和布局，不能再追加第二份根样式。
+        // 只读单行字段继续保留既有语义，详情外观限定本窗口，避免影响内嵌专业窗口。
         return QStringLiteral(
             "QWidget#ProcessDetailWindowRoot QLineEdit[readOnly=\"true\"]{"
             "background:transparent;border:0;border-bottom:1px solid %1;border-radius:0;padding:5px 3px;}")
             .arg(KswordTheme::BorderHex())
-            + ks::ui::BuildDetailDialogChromeStyle();
+            + ks::ui::BuildDetailDialogChromeStyle(QStringLiteral("ProcessDetailWindowRoot"));
     }
 
     QString buildProcessDetailMenuStyle()
