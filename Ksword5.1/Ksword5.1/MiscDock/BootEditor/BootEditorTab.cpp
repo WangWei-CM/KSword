@@ -73,27 +73,6 @@ namespace
         return KswordTheme::ThemedButtonStyle();
     }
 
-    // buildBlueInputStyle：
-    // - 统一输入类控件（编辑框/下拉框/数值框）边框与焦点反馈；
-    // - 提升整页视觉一致性。
-    QString buildBlueInputStyle()
-    {
-        return QStringLiteral(
-            "QLineEdit,QSpinBox{"
-            "  border:1px solid %2;"
-            "  border-radius:3px;"
-            "  background:%3;"
-            "  color:%4;"
-            "  padding:2px 6px;"
-            "}"
-            "QLineEdit:focus,QSpinBox:focus{border:1px solid %1;}")
-            .arg(KswordTheme::PrimaryBlueHex)
-            .arg(KswordTheme::BorderHex())
-            .arg(KswordTheme::SurfaceHex())
-            .arg(KswordTheme::TextPrimaryHex())
-            + KswordTheme::ThemedComboBoxStyle();
-    }
-
     // isCurrentProcessElevated：
     // - 检查当前进程是否为管理员权限；
     // - 用于顶部提示“是否可能执行成功”。
@@ -344,14 +323,13 @@ void BootEditorTab::initializeCenterPane()
     m_timeoutSpin->setRange(0, 999);
     m_timeoutSpin->setSuffix(QStringLiteral(" 秒"));
 
-    m_descriptionEdit->setStyleSheet(buildBlueInputStyle());
-    m_deviceEdit->setStyleSheet(buildBlueInputStyle());
-    m_osDeviceEdit->setStyleSheet(buildBlueInputStyle());
-    m_pathEdit->setStyleSheet(buildBlueInputStyle());
-    m_systemRootEdit->setStyleSheet(buildBlueInputStyle());
-    m_localeEdit->setStyleSheet(buildBlueInputStyle());
-    m_bootMenuPolicyCombo->setStyleSheet(buildBlueInputStyle());
-    m_timeoutSpin->setStyleSheet(buildBlueInputStyle());
+    // BCD 编辑字段沿用共享输入层；不能在组合框已登记主题后再覆盖整份旧 QSS。
+    for (QLineEdit* field : {m_descriptionEdit, m_deviceEdit, m_osDeviceEdit,
+        m_pathEdit, m_systemRootEdit, m_localeEdit})
+    {
+        ks::ui::StyleStandaloneInput(field);
+    }
+    ks::ui::StyleStandaloneInput(m_timeoutSpin);
 
     basicLayout->addRow(QStringLiteral("标识符"), m_identifierValueLabel);
     basicLayout->addRow(QStringLiteral("对象类型"), m_typeValueLabel);
@@ -432,7 +410,6 @@ void BootEditorTab::initializeCenterPane()
     m_safeBootCombo->addItem(QStringLiteral("最小安全模式"), QStringLiteral("minimal"));
     m_safeBootCombo->addItem(QStringLiteral("网络安全模式"), QStringLiteral("network"));
     m_safeBootCombo->addItem(QStringLiteral("命令行安全模式"), QStringLiteral("alternateshell"));
-    m_safeBootCombo->setStyleSheet(buildBlueInputStyle());
 
     flagLayout->addWidget(m_testSigningCheck);
     flagLayout->addWidget(m_noIntegrityCheck);
@@ -475,7 +452,7 @@ void BootEditorTab::initializeCenterPane()
     m_customCommandEdit = new QLineEdit(customGroup);
     m_customCommandEdit->setPlaceholderText(QStringLiteral("示例：/set {current} bootmenupolicy Legacy"));
     m_customCommandEdit->setToolTip(QStringLiteral("只填写 bcdedit 后面的参数；也支持完整输入 bcdedit ..."));
-    m_customCommandEdit->setStyleSheet(buildBlueInputStyle());
+    ks::ui::StyleStandaloneInput(m_customCommandEdit);
     m_runCustomCommandButton = new QPushButton(QStringLiteral("执行"), customGroup);
     m_runCustomCommandButton->setToolTip(QStringLiteral("执行自定义 bcdedit 命令并输出原始结果"));
     m_runCustomCommandButton->setIcon(QIcon(QStringLiteral(":/Icon/process_start.svg")));

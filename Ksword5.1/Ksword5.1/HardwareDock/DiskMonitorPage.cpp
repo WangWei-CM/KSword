@@ -35,6 +35,7 @@
 #include <QPointer>
 #include <QPushButton>
 #include <QSignalBlocker>
+#include <QShowEvent>
 #include <QSizePolicy>
 #include <QSplitter>
 #include <QStringList>
@@ -994,6 +995,13 @@ DiskMonitorPage::~DiskMonitorPage()
     stopFileActivityEtw();
 }
 
+void DiskMonitorPage::showEvent(QShowEvent* event)
+{
+    QWidget::showEvent(event);
+    // 初次显示无缓存时直接跳过；之后恢复最新模型，避免先绘一帧过期数据。
+    refreshProcessPresentation();
+}
+
 void DiskMonitorPage::initializeUi()
 {
     m_rootLayout = new QVBoxLayout(this);
@@ -1433,8 +1441,9 @@ void DiskMonitorPage::applyProcessDiskSamples(
     m_lastSampleList = sampleList;
     m_lastFileActivityList = consumeFileActivitySamples(m_lastSampleList);
 
-    updateProcessTable(m_lastSampleList);
-    updateActivityTable();
+    // 保持 ETW 消费和速率基线连续，只把不可见表格的 item/排序工作延后。
+    m_processPresentationDirty = true;
+    refreshProcessPresentation();
     if (m_storagePanel != nullptr)
     {
         m_storagePanel->applySamples(std::move(storageSampleBatch));
@@ -1457,6 +1466,34 @@ void DiskMonitorPage::applyProcessDiskSamples(
             .arg(etwStateText)
             .arg(statusSuffix));
     }
+}
+
+void DiskMonitorPage::refreshProcessPresentation()
+{
+    if (!m_processPresentationDirty || !isVisible())
+    {
+        return;
+    }
+
+    // 隐藏再显示同样尊重右键菜单/Ctrl 选择屏障，延后任务只读取届时的最新缓存。
+    const QPointer<DiskMonitorPage> safeThis(this);
+    const QList<QTableView*> tables { m_processTable, m_activityTable };
+    if (ks::ui::DeferTableUiCommitIfContextMenuOpen(
+        this, QStringLiteral("disk-monitor-process-presentation"), tables,
+        [safeThis]()
+        {
+            if (safeThis)
+            {
+                safeThis->refreshProcessPresentation();
+            }
+        }))
+    {
+        return;
+    }
+
+    updateProcessTable(m_lastSampleList);
+    updateActivityTable();
+    m_processPresentationDirty = false;
 }
 
 std::vector<DiskMonitorPage::ProcessDiskSample> DiskMonitorPage::collectProcessDiskSamples()

@@ -26,6 +26,7 @@
 #include <QEasingCurve>
 #include <QHash>
 #include <QMouseEvent>
+#include <QPaintEvent>
 #include <QResizeEvent>
 #include <QVariantAnimation>
 #include <QScopedValueRollback>
@@ -67,6 +68,25 @@ namespace
         {
             widget->setStyleSheet(style);
         }
+    }
+
+    // 进程图标只在路径、主题或像素倍率变化时重新生成；缺失路径由既有后台静态查询补齐。
+    // label 保存自己的显示键，不改变进程身份与共享的路径图标缓存。
+    bool processDetailIconNeedsRefresh(QLabel* label, const QString& path)
+    {
+        const QVariant previousPath = label->property("ksword_detail_icon_path");
+        const quint64 generation = KswordTheme::ThemeSeedGeneration;
+        const qreal pixelRatio = label->devicePixelRatioF();
+        if (previousPath.isValid() && previousPath.toString() == path
+            && label->property("ksword_detail_icon_theme").toULongLong() == generation
+            && label->property("ksword_detail_icon_dpr").toReal() == pixelRatio)
+        {
+            return false;
+        }
+        label->setProperty("ksword_detail_icon_path", path);
+        label->setProperty("ksword_detail_icon_theme", QVariant::fromValue(generation));
+        label->setProperty("ksword_detail_icon_dpr", pixelRatio);
+        return true;
     }
 
     bool generalSignatureStateUndecided(const QString& state)
@@ -644,12 +664,32 @@ namespace
             m_timeHeader = timeHeader;
             m_copyLatestText = copyLatestText;
             m_copyHistoryText = copyHistoryText;
-            m_animationProgress = 0.0;
             m_seriesAnimation->stop();
-            m_seriesAnimation->start();
+            // 隐藏和空图只保存完整历史，避免无可见帧时仍启动260ms动画计时器。
+            if (isVisible() && !m_timestamps.empty())
+            {
+                m_animationProgress = 0.0;
+                m_seriesAnimation->start();
+            }
+            else
+            {
+                m_animationProgress = 1.0;
+                update();
+            }
         }
 
     protected:
+        // 切页后立即收尾旧动画；原始曲线数据仍留存，重新显示由窗口提交最新快照。
+        bool event(QEvent* eventPointer) override
+        {
+            if (eventPointer != nullptr && eventPointer->type() == QEvent::Hide && m_seriesAnimation != nullptr)
+            {
+                m_seriesAnimation->stop();
+                m_animationProgress = 1.0;
+            }
+            return QWidget::event(eventPointer);
+        }
+
         void paintEvent(QPaintEvent* eventPointer) override
         {
             (void)eventPointer;
@@ -971,9 +1011,12 @@ namespace
                     ++historyIt;
                 }
             }
-            synchronizeHeight();
-            updateGeometry();
-            update();
+            // 隐藏时仍记录每个核心的历史；可见布局留到Show，固定高度不重复通知父布局。
+            if (isVisible())
+            {
+                synchronizeHeight();
+                update();
+            }
         }
 
         QSize sizeHint() const override
@@ -996,7 +1039,8 @@ namespace
         bool event(QEvent* eventPointer) override
         {
             const bool handled = QWidget::event(eventPointer);
-            if (eventPointer != nullptr && eventPointer->type() == QEvent::Resize)
+            if (eventPointer != nullptr &&
+                (eventPointer->type() == QEvent::Resize || eventPointer->type() == QEvent::Show))
             {
                 synchronizeHeight();
             }
@@ -1234,21 +1278,14 @@ namespace
                     ++threadIt;
                 }
             }
-            std::stable_sort(
-                m_threadValues.begin(),
-                m_threadValues.end(),
-                [](const ProcessDetailWindow::ThreadCpuCoreValue& left,
-                   const ProcessDetailWindow::ThreadCpuCoreValue& right) {
-                    if (left.cpuPercent != right.cpuPercent)
-                    {
-                        return left.cpuPercent > right.cpuPercent;
-                    }
-                    return left.threadId < right.threadId;
-                });
             m_multipleProcessorGroups = multipleProcessorGroups;
-            synchronizeHeight();
-            updateGeometry();
-            update();
+            m_sortPending = true;
+            // 线程历史与展开状态持续维护，只有显示顺序与尺寸计算按可见性合并。
+            if (isVisible())
+            {
+                synchronizeVisibleValues();
+                update();
+            }
         }
 
         QSize sizeHint() const override
@@ -1271,7 +1308,11 @@ namespace
         bool event(QEvent* eventPointer) override
         {
             const bool handled = QWidget::event(eventPointer);
-            if (eventPointer != nullptr && eventPointer->type() == QEvent::Resize)
+            if (eventPointer != nullptr && eventPointer->type() == QEvent::Show)
+            {
+                synchronizeVisibleValues();
+            }
+            else if (eventPointer != nullptr && eventPointer->type() == QEvent::Resize)
             {
                 synchronizeHeight();
             }
@@ -1290,6 +1331,7 @@ namespace
             const QColor primaryTextColor = KswordTheme::TextPrimaryColor();
             const QColor secondaryTextColor = KswordTheme::TextSecondaryColor();
             qreal cardTop = 0.0;
+            const QRect exposedRect = eventPointer != nullptr ? eventPointer->rect() : rect();
 
             for (int index = 0; index < static_cast<int>(m_threadValues.size()); ++index)
             {
@@ -1303,6 +1345,15 @@ namespace
                     static_cast<qreal>(width()),
                     currentCardHeight);
                 cardTop += currentCardHeight + kGridSpacing;
+                // 滚动内容可能包含大量线程；视口外卡片保留数据，只跳过文字和折线路径生成。
+                if (cardRect.bottom() < exposedRect.top() - 1)
+                {
+                    continue;
+                }
+                if (cardRect.top() > exposedRect.bottom() + 1)
+                {
+                    break;
+                }
 
                 painter.setPen(QPen(borderColor, 1.0));
                 painter.setBrush(cardColor);
@@ -1445,6 +1496,25 @@ namespace
 
     private:
         using CoreHistoryMap = std::unordered_map<std::uint32_t, std::deque<double>>;
+
+        // 首次可见或收到可见样本时排序一次；高度真正变化时setFixedHeight自行通知布局。
+        void synchronizeVisibleValues()
+        {
+            if (m_sortPending)
+            {
+                std::stable_sort(m_threadValues.begin(), m_threadValues.end(),
+                    [](const ProcessDetailWindow::ThreadCpuCoreValue& left,
+                       const ProcessDetailWindow::ThreadCpuCoreValue& right) {
+                        if (left.cpuPercent != right.cpuPercent)
+                        {
+                            return left.cpuPercent > right.cpuPercent;
+                        }
+                        return left.threadId < right.threadId;
+                    });
+                m_sortPending = false;
+            }
+            synchronizeHeight();
+        }
 
         static constexpr int kCollapsedCardHeight = 44;
         static constexpr int kGridSpacing = 8;
@@ -1609,6 +1679,7 @@ namespace
         std::vector<ProcessDetailWindow::ThreadCpuCoreValue> m_threadValues;
         std::unordered_map<std::uint32_t, CoreHistoryMap> m_historyByThreadId;
         QSet<std::uint32_t> m_expandedThreadIds;
+        bool m_sortPending = false; // 隐藏期间多个样本只需在Show时提交最终排序。
         bool m_multipleProcessorGroups = false;
     };
 }
@@ -1970,6 +2041,9 @@ void ProcessDetailWindow::updateBaseRecord(const ks::process::ProcessRecord& bas
         ++m_keyboardRefreshTicket;
         m_performanceHistory.clear();
         m_cpuCoreViewSample = CpuCoreViewSample{};
+        // 身份切换清掉旧图形的数据；隐藏页保留dirty，不能在新对象上显示旧进程曲线。
+        refreshPerformanceHistoryCharts();
+        refreshCpuCoreView(true);
     }
     refreshDetailTabTexts();
     if (shouldTryStaticBackgroundRefresh || identityChanged)
@@ -2043,7 +2117,24 @@ void ProcessDetailWindow::setCpuCoreViewSample(CpuCoreViewSample sample)
 {
     // 页面采用懒加载；尚未构造控件时只保存最新区间，首次进入即可直接展示。
     m_cpuCoreViewSample = std::move(sample);
-    refreshCpuCoreView();
+    refreshCpuCoreView(true);
+}
+
+bool ProcessDetailWindow::eventFilter(QObject* watched, QEvent* event)
+{
+    // Show 已设置可见标志；这里只提交已有数据，不枚举、不重建页面或修改根主题。
+    if (event != nullptr && event->type() == QEvent::Show)
+    {
+        if (watched == m_performanceTab && m_performanceChartsDirty)
+        {
+            refreshPerformanceHistoryCharts();
+        }
+        else if (watched == m_cpuCoreTab && m_cpuCorePresentationDirty)
+        {
+            refreshCpuCoreView();
+        }
+    }
+    return QWidget::eventFilter(watched, event);
 }
 
 void ProcessDetailWindow::changeEvent(QEvent* event)
@@ -2060,6 +2151,7 @@ void ProcessDetailWindow::changeEvent(QEvent* event)
     {
         // 只有语言变化重建译文；普通样式事件不能重新读取图标、文件和对象详情。
         refreshDetailTabTexts();
+        refreshPerformanceHistoryCharts();
         refreshCpuCoreView();
         return;
     }
@@ -2264,6 +2356,7 @@ void ProcessDetailWindow::applyThemeStyle()
     }
     if (colorsChanged)
     {
+        refreshPerformanceHistoryCharts(); // 已构造的曲线配色跟随主题，隐藏时仅保留dirty。
         refreshCpuCoreView(); // 真正换色才刷新颜色相关读数，普通StyleChange不重新构建核心卡片。
     }
 
@@ -3663,6 +3756,7 @@ void ProcessDetailWindow::initializeDetailTab()
 
 void ProcessDetailWindow::initializePerformanceTab()
 {
+    m_performanceTab->installEventFilter(this);
     auto& languageManager = ks::i18n::LanguageManager::instance();
     const auto configureCopyableLabel = [&languageManager](QLabel* label) {
         if (label == nullptr)
@@ -3761,20 +3855,17 @@ void ProcessDetailWindow::initializePerformanceTab()
 
 void ProcessDetailWindow::refreshPerformanceHistoryCharts()
 {
-    if (m_performanceHistoryStatusLabel == nullptr)
+    m_performanceChartsDirty = true;
+    // 数据入队和1800点裁剪仍在每次样本更新执行；只有不可见的图形转换延后。
+    if (m_performanceHistoryStatusLabel == nullptr || !m_performanceTab->isVisible())
     {
         return;
     }
+    m_performanceChartsDirty = false;
 
     const auto text = [](const QString& key) {
         return ks::i18n::text(key, QString());
     };
-    if (m_performanceHistory.empty())
-    {
-        m_performanceHistoryStatusLabel->setText(text(QStringLiteral("process.detail.performance.status.empty")));
-        return;
-    }
-
     std::vector<qint64> timestamps;
     std::vector<double> cpuValues;
     std::vector<double> cpuCoreValues;
@@ -3888,6 +3979,12 @@ void ProcessDetailWindow::refreshPerformanceHistoryCharts()
         QStringLiteral("%"),
         100.0);
 
+    // 空历史同样已经提交到六个图表，避免身份切换/清空后残留上一对象的曲线。
+    if (timestamps.empty())
+    {
+        m_performanceHistoryStatusLabel->setText(text(QStringLiteral("process.detail.performance.status.empty")));
+        return;
+    }
     const QString beginTime = QDateTime::fromMSecsSinceEpoch(timestamps.front()).toString(QStringLiteral("HH:mm:ss"));
     const QString endTime = QDateTime::fromMSecsSinceEpoch(timestamps.back()).toString(QStringLiteral("HH:mm:ss"));
     m_performanceHistoryStatusLabel->setText(
@@ -3899,6 +3996,7 @@ void ProcessDetailWindow::refreshPerformanceHistoryCharts()
 
 void ProcessDetailWindow::initializeCpuCoreTab()
 {
+    m_cpuCoreTab->installEventFilter(this);
     auto& languageManager = ks::i18n::LanguageManager::instance();
     QVBoxLayout* layout = nullptr;
     QWidget* const contentWidget = createScrollableTabContent(m_cpuCoreTab, layout, 12, 10);
@@ -3994,11 +4092,12 @@ void ProcessDetailWindow::initializeCpuCoreTab()
     layout->addWidget(threadGroup);
     layout->addStretch(1);
 
-    refreshCpuCoreView();
+    refreshCpuCoreView(true);
 }
 
-void ProcessDetailWindow::refreshCpuCoreView()
+void ProcessDetailWindow::refreshCpuCoreView(const bool appendHistory)
 {
+    m_cpuCorePresentationDirty = true;
     if (m_cpuCoreStatusLabel == nullptr ||
         m_processCpuCoreGrid == nullptr ||
         m_threadCpuCoreGrid == nullptr)
@@ -4007,6 +4106,24 @@ void ProcessDetailWindow::refreshCpuCoreView()
     }
 
     const CpuCoreViewSample& sample = m_cpuCoreViewSample;
+    // 新采样必须记录，包括隐藏期间；换主题、换语言和重新显示只刷新外观。
+    if (appendHistory)
+    {
+        const bool multipleProcessorGroups = !sample.processCores.empty() && std::any_of(
+            sample.processCores.cbegin(), sample.processCores.cend(),
+            [&sample](const CpuCoreValue& core) {
+                return core.group != sample.processCores.front().group;
+            });
+        static_cast<CpuCoreUsageGridWidget*>(m_processCpuCoreGrid)->setCoreValues(
+            sample.processCores, multipleProcessorGroups);
+        static_cast<CpuThreadUsageCardGridWidget*>(m_threadCpuCoreGrid)->setThreadValues(
+            sample.threads, multipleProcessorGroups);
+    }
+    if (!m_cpuCoreTab->isVisible())
+    {
+        return;
+    }
+    m_cpuCorePresentationDirty = false;
     if (m_cpuCoreSystemValueLabel != nullptr)
     {
         m_cpuCoreSystemValueLabel->setText(
@@ -4046,20 +4163,7 @@ void ProcessDetailWindow::refreshCpuCoreView()
         statusColor = signatureTrustedColor();
     }
     m_cpuCoreStatusLabel->setText(statusText);
-    m_cpuCoreStatusLabel->setStyleSheet(buildStateLabelStyle(statusColor, 600));
-
-    const bool multipleProcessorGroups = !sample.processCores.empty() && std::any_of(
-        sample.processCores.cbegin(),
-        sample.processCores.cend(),
-        [&sample](const CpuCoreValue& core) {
-            return core.group != sample.processCores.front().group;
-        });
-    static_cast<CpuCoreUsageGridWidget*>(m_processCpuCoreGrid)->setCoreValues(
-        sample.processCores,
-        multipleProcessorGroups);
-    static_cast<CpuThreadUsageCardGridWidget*>(m_threadCpuCoreGrid)->setThreadValues(
-        sample.threads,
-        multipleProcessorGroups);
+    applyProcessDetailLocalStyle(m_cpuCoreStatusLabel, buildStateLabelStyle(statusColor, 600));
 }
 
 void ProcessDetailWindow::initializeThreadTab()
@@ -6400,12 +6504,25 @@ void ProcessDetailWindow::initializeConnections()
 void ProcessDetailWindow::refreshDetailTabTexts()
 {
     if (m_generalFields == nullptr) return;
-    m_processIconLabel->setPixmap(resolveProcessIcon(m_baseRecord.imagePath, 40).pixmap(40, 40));
+    const QString path = QString::fromStdString(m_baseRecord.imagePath);
+    // 数值快照通常不改变图标；只在真实显示键变化时查图标并栅格化。
+    const QString iconKey = QString::fromStdString(m_identityKey) + QLatin1Char('\n') + path;
+    if (processDetailIconNeedsRefresh(m_processIconLabel, iconKey))
+    {
+        m_processIconLabel->setPixmap(resolveProcessIcon(m_baseRecord.imagePath, 40).pixmap(40, 40));
+    }
     m_processTitleLabel->setText(QStringLiteral("%1  ·  PID %2")
         .arg(QString::fromStdString(m_baseRecord.processName)).arg(m_baseRecord.pid));
-    const QString path = QString::fromStdString(m_baseRecord.imagePath);
-    m_pathLineEdit->setText(path);
-    m_commandLineEdit->setText(QString::fromStdString(m_baseRecord.commandLine));
+    // QLineEdit::setText还会重置选择/撤销状态；相同路径与命令行不反复回填。
+    if (m_pathLineEdit->text() != path)
+    {
+        m_pathLineEdit->setText(path);
+    }
+    const QString commandLine = QString::fromStdString(m_baseRecord.commandLine);
+    if (m_commandLineEdit->text() != commandLine)
+    {
+        m_commandLineEdit->setText(commandLine);
+    }
     m_detailOpenHandleDockButton->setVisible(m_baseRecord.pid != 0);
     const QFileInfo imageInfo(path);
     m_openFileDetailButton->setEnabled(imageInfo.exists() && imageInfo.isFile());
@@ -6537,7 +6654,7 @@ void ProcessDetailWindow::refreshKernelObjectTabTexts()
     if (m_kernelObjectR0StatusValue != nullptr)
     {
         m_kernelObjectR0StatusValue->setText(detailProcessR0StatusText(m_baseRecord.r0Status));
-        m_kernelObjectR0StatusValue->setStyleSheet(
+        applyProcessDetailLocalStyle(m_kernelObjectR0StatusValue,
             buildStateLabelStyle(
                 m_baseRecord.r0Status == KSWORD_ARK_PROCESS_R0_STATUS_OK
                 ? statusIdleColor()
@@ -6562,7 +6679,7 @@ void ProcessDetailWindow::refreshKernelObjectTabTexts()
             objectTableAvailable,
             m_baseRecord.r0ObjectTableAddress,
             m_baseRecord.r0ObjectTableSource));
-        m_kernelObjectHandleTableValue->setStyleSheet(
+        applyProcessDetailLocalStyle(m_kernelObjectHandleTableValue,
             buildStateLabelStyle(objectTableAvailable ? statusIdleColor() : statusSecondaryColor(), 700));
     }
     if (m_kernelObjectSectionObjectValue != nullptr)
@@ -6572,7 +6689,7 @@ void ProcessDetailWindow::refreshKernelObjectTabTexts()
             sectionObjectAvailable,
             m_baseRecord.r0SectionObjectAddress,
             m_baseRecord.r0SectionObjectSource));
-        m_kernelObjectSectionObjectValue->setStyleSheet(
+        applyProcessDetailLocalStyle(m_kernelObjectSectionObjectValue,
             buildStateLabelStyle(sectionObjectAvailable ? statusIdleColor() : statusSecondaryColor(), 700));
     }
 
@@ -6619,20 +6736,31 @@ void ProcessDetailWindow::refreshParentProcessSection()
         << m_baseRecord.parentPid
         << eol;
 
-    // 默认先隐藏“转到父进程”，只有父进程仍存在才显示。
-    m_gotoParentButton->setVisible(false);
-    m_gotoParentButton->setProperty("parent_pid", QVariant());
-
     if (m_baseRecord.parentPid == 0)
     {
+        m_gotoParentButton->setVisible(false);
+        if (m_gotoParentButton->property("parent_pid").isValid())
+        {
+            m_gotoParentButton->setProperty("parent_pid", QVariant());
+        }
         m_parentInfoLabel->setText("无父进程信息");
-        m_parentIconLabel->setPixmap(QIcon(":/Icon/process_main.svg").pixmap(20, 20));
+        if (processDetailIconNeedsRefresh(m_parentIconLabel, QString()))
+        {
+            m_parentIconLabel->setPixmap(QIcon(":/Icon/process_main.svg").pixmap(20, 20));
+        }
         return;
     }
 
     const std::uint32_t parentPid = m_baseRecord.parentPid;
     const std::string parentName = ks::process::GetProcessNameByPID(parentPid);
     const bool parentAlive = !parentName.empty();
+    // 保留每轮父进程活性检查，但不再先隐藏又显示同一个按钮触发两次整行布局。
+    m_gotoParentButton->setVisible(parentAlive);
+    const QVariant parentPidValue = parentAlive ? QVariant::fromValue(parentPid) : QVariant();
+    if (m_gotoParentButton->property("parent_pid") != parentPidValue)
+    {
+        m_gotoParentButton->setProperty("parent_pid", parentPidValue);
+    }
 
     if (parentAlive)
     {
@@ -6641,9 +6769,12 @@ void ProcessDetailWindow::refreshParentProcessSection()
             .arg(QString::fromStdString(parentName))
             .arg(parentPid));
         const std::string parentPath = ks::process::QueryProcessPathByPid(parentPid);
-        m_parentIconLabel->setPixmap(resolveProcessIcon(parentPath, 20).pixmap(20, 20));
-        m_gotoParentButton->setVisible(true);
-        m_gotoParentButton->setProperty("parent_pid", QVariant::fromValue(parentPid));
+        const QString parentIconKey = QString::number(parentPid) + QLatin1Char('\n')
+            + QString::fromStdString(parentPath);
+        if (processDetailIconNeedsRefresh(m_parentIconLabel, parentIconKey))
+        {
+            m_parentIconLabel->setPixmap(resolveProcessIcon(parentPath, 20).pixmap(20, 20));
+        }
         kLogEvent refreshParentAliveEvent;
         dbg << refreshParentAliveEvent
             << "[ProcessDetailWindow] refreshParentProcessSection: 父进程可访问, parentPid="
@@ -6653,7 +6784,10 @@ void ProcessDetailWindow::refreshParentProcessSection()
     else
     {
         m_parentInfoLabel->setText(QString("父进程已退出或不可访问 (PID: %1)").arg(parentPid));
-        m_parentIconLabel->setPixmap(QIcon(":/Icon/process_main.svg").pixmap(20, 20));
+        if (processDetailIconNeedsRefresh(m_parentIconLabel, QString()))
+        {
+            m_parentIconLabel->setPixmap(QIcon(":/Icon/process_main.svg").pixmap(20, 20));
+        }
         kLogEvent refreshParentDeadEvent;
         info << refreshParentDeadEvent
             << "[ProcessDetailWindow] refreshParentProcessSection: 父进程不可访问, parentPid="
@@ -6664,6 +6798,13 @@ void ProcessDetailWindow::refreshParentProcessSection()
 
 void ProcessDetailWindow::updateWindowTitle()
 {
+    const QString desiredTitle = QString("进程详细信息 - %1 (PID %2)")
+        .arg(QString::fromStdString(m_baseRecord.processName.empty() ? "Unknown" : m_baseRecord.processName))
+        .arg(m_baseRecord.pid);
+    if (windowTitle() == desiredTitle)
+    {
+        return;
+    }
     // 标题更新日志：便于多窗口场景排查标题错乱。
     kLogEvent updateTitleEvent;
     dbg << updateTitleEvent
@@ -6671,9 +6812,6 @@ void ProcessDetailWindow::updateWindowTitle()
         << m_baseRecord.pid
         << eol;
 
-    setWindowTitle(
-        QString("进程详细信息 - %1 (PID %2)")
-        .arg(QString::fromStdString(m_baseRecord.processName.empty() ? "Unknown" : m_baseRecord.processName))
-        .arg(m_baseRecord.pid));
+    setWindowTitle(desiredTitle);
 }
 

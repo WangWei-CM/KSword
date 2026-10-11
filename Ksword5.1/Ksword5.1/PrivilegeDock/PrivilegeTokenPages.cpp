@@ -1180,14 +1180,19 @@ namespace
             form->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
             auto* pathRow = new QHBoxLayout;
             m_image = new QLineEdit(this);
+            // 身份启动字段属于普通参数输入，复用共享尺寸和热主题，不接管启动逻辑。
+            ks::ui::StyleStandaloneInput(m_image);
             m_image->setPlaceholderText(text("privilege.workbench.launch.image_hint", QStringLiteral("可执行文件的完整路径（.exe）")));
             auto* browse = new QPushButton(text("privilege.workbench.launch.browse", QStringLiteral("浏览")), this);
             pathRow->addWidget(m_image, 1); pathRow->addWidget(browse);
             ks::ui::NormalizeToolbarRow(pathRow);
             form->addRow(text("privilege.workbench.launch.image", QStringLiteral("程序")), pathRow);
             m_arguments = new QLineEdit(this);
+            ks::ui::StyleStandaloneInput(m_arguments);
             form->addRow(text("privilege.workbench.launch.arguments", QStringLiteral("参数")), m_arguments);
-            m_directory = new QLineEdit(this); m_directory->setReadOnly(true);
+            m_directory = new QLineEdit(this);
+            m_directory->setReadOnly(true);
+            ks::ui::StyleStandaloneInput(m_directory);
             form->addRow(text("privilege.workbench.launch.directory", QStringLiteral("工作目录（程序所在目录）")), m_directory);
             m_mode = new QComboBox(this);
             ks::ui::StylePrimaryCombo(m_mode);

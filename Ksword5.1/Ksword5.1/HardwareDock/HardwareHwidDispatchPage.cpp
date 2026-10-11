@@ -219,6 +219,12 @@ void HardwareHwidDispatchPage::initializeUi()
     m_gpuSerialEdit = new QLineEdit(profileGroup);
     m_permanentMacEdit = new QLineEdit(profileGroup);
     m_currentMacEdit = new QLineEdit(profileGroup);
+    // 参数页的普通文本输入共用已登记选择器的视觉层次，禁用字段仍由业务状态控制。
+    for (QLineEdit* field : {m_diskSerialEdit, m_diskProductEdit, m_diskRevisionEdit,
+        m_gpuSerialEdit, m_permanentMacEdit, m_currentMacEdit})
+    {
+        ks::ui::StyleStandaloneInput(field);
+    }
     m_permanentMacEdit->setToolTip(QStringLiteral("保留设置；当前版本不会修改此地址。"));
     m_currentMacEdit->setToolTip(QStringLiteral("保留设置；当前版本不会修改此地址。"));
     m_diskGuidCheck = new QCheckBox(QStringLiteral("随机化 GPT GUID 查询结果"), profileGroup);

@@ -108,29 +108,6 @@ namespace
             ks::ui::FlatButtonAppearance::Solid);
     }
 
-    // buildInputStyle：
-    // - 返回输入框和下拉框样式；
-    // - 保证深浅色模式均可读。
-    QString buildInputStyle()
-    {
-        return QStringLiteral(
-            "QLineEdit,QSpinBox{"
-            "  border:1px solid %1;"
-            "  border-radius:4px;"
-            "  padding:3px 6px;"
-            "  background:%2;"
-            "  color:%3;"
-            "}"
-            "QLineEdit:focus,QSpinBox:focus{"
-            "  border:1px solid %4;"
-            "}")
-            .arg(KswordTheme::BorderHex())
-            .arg(KswordTheme::SurfaceHex())
-            .arg(KswordTheme::TextPrimaryHex())
-            .arg(KswordTheme::PrimaryBlueHex)
-            + KswordTheme::ThemedComboBoxStyle();
-    }
-
     // buildTableStyle：
     // - 返回分区表样式；
     // - 使用主题色绘制选中和表头。
@@ -412,14 +389,15 @@ namespace ks::misc
         m_offsetEdit->setPlaceholderText(QStringLiteral("偏移，例如 0x0000000000000000"));
         m_offsetEdit->setText(QStringLiteral("0x0000000000000000"));
         m_offsetEdit->setMinimumWidth(190);
-        m_offsetEdit->setStyleSheet(buildInputStyle());
+        // 磁盘读取参数属于工作台外部表单，专业 HEX 视图继续维护自身输入行为。
+        ks::ui::StyleStandaloneInput(m_offsetEdit);
 
         m_lengthSpin = new QSpinBox(m_toolbarWidget);
         m_lengthSpin->setRange(512, 1024 * 1024);
         m_lengthSpin->setSingleStep(512);
         m_lengthSpin->setValue(4096);
         m_lengthSpin->setSuffix(QStringLiteral(" B"));
-        m_lengthSpin->setStyleSheet(buildInputStyle());
+        ks::ui::StyleStandaloneInput(m_lengthSpin);
 
         m_readOnlyCheck = new QCheckBox(QStringLiteral("只读保护"), m_toolbarWidget);
         m_readOnlyCheck->setChecked(true);
@@ -658,13 +636,13 @@ namespace ks::misc
         QGridLayout* rangeLayout = new QGridLayout(rangeGroup);
         m_toolOffsetEdit = new QLineEdit(rangeGroup);
         m_toolOffsetEdit->setText(QStringLiteral("0x0000000000000000"));
-        m_toolOffsetEdit->setStyleSheet(buildInputStyle());
+        ks::ui::StyleStandaloneInput(m_toolOffsetEdit);
         m_toolLengthEdit = new QLineEdit(rangeGroup);
         m_toolLengthEdit->setText(QStringLiteral("0x100000"));
-        m_toolLengthEdit->setStyleSheet(buildInputStyle());
+        ks::ui::StyleStandaloneInput(m_toolLengthEdit);
         m_toolFileEdit = new QLineEdit(rangeGroup);
         m_toolFileEdit->setPlaceholderText(QStringLiteral("镜像导出/导入/对比文件路径"));
-        m_toolFileEdit->setStyleSheet(buildInputStyle());
+        ks::ui::StyleStandaloneInput(m_toolFileEdit);
         m_toolUseSelectionButton = new QPushButton(QStringLiteral("填入当前范围"), rangeGroup);
         m_toolUsePartitionButton = new QPushButton(QStringLiteral("填入所选分区"), rangeGroup);
         m_toolUseSelectionButton->setToolTip(QStringLiteral("用当前读取/选中的范围填入下方工具的偏移和长度"));
@@ -702,7 +680,7 @@ namespace ks::misc
         QGridLayout* actionLayout = new QGridLayout(actionGroup);
         m_searchPatternEdit = new QLineEdit(actionGroup);
         m_searchPatternEdit->setPlaceholderText(QStringLiteral("搜索：AA BB ?? 或 ASCII/UTF-16 文本"));
-        m_searchPatternEdit->setStyleSheet(buildInputStyle());
+        ks::ui::StyleStandaloneInput(m_searchPatternEdit);
         m_searchModeCombo = new QComboBox(actionGroup);
         m_searchModeCombo->addItem(QStringLiteral("HEX 字节/??通配"), static_cast<int>(DiskSearchPatternMode::HexBytes));
         m_searchModeCombo->addItem(QStringLiteral("ASCII 文本"), static_cast<int>(DiskSearchPatternMode::AsciiText));
@@ -716,13 +694,13 @@ namespace ks::misc
         m_maxResultSpin = new QSpinBox(actionGroup);
         m_maxResultSpin->setRange(1, 10000);
         m_maxResultSpin->setValue(512);
-        m_maxResultSpin->setStyleSheet(buildInputStyle());
+        ks::ui::StyleStandaloneInput(m_maxResultSpin);
         m_scanBlockSpin = new QSpinBox(actionGroup);
         m_scanBlockSpin->setRange(512, 8 * 1024 * 1024);
         m_scanBlockSpin->setSingleStep(4096);
         m_scanBlockSpin->setValue(1024 * 1024);
         m_scanBlockSpin->setSuffix(QStringLiteral(" B"));
-        m_scanBlockSpin->setStyleSheet(buildInputStyle());
+        ks::ui::StyleStandaloneInput(m_scanBlockSpin);
         m_searchButton = new QPushButton(QStringLiteral("搜索"), actionGroup);
         m_hashButton = new QPushButton(QStringLiteral("计算哈希"), actionGroup);
         m_exportButton = new QPushButton(QStringLiteral("导出镜像"), actionGroup);

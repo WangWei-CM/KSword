@@ -157,7 +157,7 @@ namespace
             rules += QStringLiteral("QTabWidget[ksword_page_tabs_widget=\"true\"]::tab-bar{left:8px;}");
         }
         const QString previous = tabs->property("ksword_page_tabs_owned_pane_style").toString();
-        if (previous == rules)
+        if (previous == rules && tabs->styleSheet().contains(rules))
         {
             return;
         }
@@ -183,7 +183,12 @@ namespace
         // opening为包含四边留白的外框，radius为外半径；内部控件的圆角不在此重画。
         void setOpeningRectangle(const QRect& opening, int radius)
         {
-            m_opening = opening.translated(-pos());
+            const QRect localOpening = opening.translated(-pos()); // 只在角片局部形状实际变化时重画。
+            if (m_opening == localOpening && m_radius == radius)
+            {
+                return;
+            }
+            m_opening = localOpening;
             m_radius = radius;
             update();
         }
@@ -235,11 +240,14 @@ namespace
             switch (event->type())
             {
             case QEvent::Resize:
-            case QEvent::Show:
             case QEvent::Hide:
+                schedule();
+                break;
+            case QEvent::Show:
             case QEvent::StyleChange:
             case QEvent::PaletteChange:
             case QEvent::DynamicPropertyChange:
+                m_surfaceDirty = true; // 主题变化即使没有几何变化，也须刷新四角底色。
                 schedule();
                 break;
             default:
@@ -257,6 +265,8 @@ namespace
             {
                 m_pending = false;
                 if (!m_page) return;
+                const bool repaintSurface = m_surfaceDirty; // 普通重复布局通知不强制重绘相同角片。
+                m_surfaceDirty = false;
                 const QRect outer = m_page->rect(); // 页根就是最外层边界，不以内侧内容定位。
                 const int radius = kPageCornerRadius + m_inset;
                 const QVariant surface = m_page->window()->property("ksword_main_surface_hierarchy");
@@ -272,6 +282,7 @@ namespace
                     corner->setGeometry(left, top, radius, radius);
                     corner->setOpeningRectangle(outer, radius);
                     corner->raise();
+                    if (repaintSurface) corner->update();
                 }
             });
         }
@@ -280,6 +291,7 @@ namespace
         int m_inset = 6; // 与此页面根布局一致的外围间距。
         QPointer<PageContentCorner> m_corners[4]; // 不创建整页透明覆盖窗口。
         bool m_pending = false; // 单次合并更新标记。
+        bool m_surfaceDirty = true; // 首次显示或主题变化才额外请求角片重画。
     };
 
     // 导航底面只占标签栏，内容四角完全由外框角片负责，避免旧的首工具条补色残留。
@@ -343,15 +355,18 @@ namespace
             // 惰性创建、改字号、移动宿主与标签溢出都会改变栏几何，合并到下一轮布局。
             switch (event->type())
             {
-            case QEvent::Show:
             case QEvent::Resize:
             case QEvent::Move:
             case QEvent::LayoutRequest:
             case QEvent::FontChange:
+                schedule();
+                break;
+            case QEvent::Show:
             case QEvent::StyleChange:
             case QEvent::PaletteChange:
             case QEvent::ParentChange:
             case QEvent::DynamicPropertyChange:
+                m_surfaceDirty = true; // 几何同步与主题底色失效分开，避免每个Move都重画。
                 schedule();
                 break;
             case QEvent::Hide:
@@ -392,6 +407,10 @@ namespace
         // 观察当前页及其明确滚动内容；惰性页面建好布局后再消除重复的外围间距。
         void observeContent(QWidget* page, QWidget* surface)
         {
+            if (m_observedPage == page && m_observedSurface == surface)
+            {
+                return; // Resize/LayoutRequest不会改变归属，不重复移动同一个事件过滤器。
+            }
             for (QWidget* previous : {m_observedPage.data(), m_observedSurface.data()})
             {
                 if (previous && previous != page && previous != surface)
@@ -418,6 +437,8 @@ namespace
             {
                 return;
             }
+            const bool repaintSurface = m_surfaceDirty; // 本轮只在主题或宿主变化时强制重画底面。
+            m_surfaceDirty = false;
             QTabBar* bar = m_tabs->tabBar(); // 原 QTabBar 继续负责图标、文字和所有输入。
             if (bar->isHidden() || bar->property("ksword_secondary_tabs").toBool())
             {
@@ -439,7 +460,8 @@ namespace
             const QRect band = vertical
                 ? QRect(bar->x(), bounds.top(), bar->width(), bounds.height())
                 : QRect(bounds.left(), bar->y(), bounds.width(), bar->height());
-            m_surface->setGeometry(band);
+            const bool bandChanged = m_surface->geometry() != band;
+            if (bandChanged) m_surface->setGeometry(band);
             m_surface->setVisible(m_tabs->isVisible());
             m_surface->raise();
             bar->raise();
@@ -465,6 +487,7 @@ namespace
                 corner->setGeometry(left, top, outerRadius, outerRadius);
                 corner->setOpeningRectangle(opening, outerRadius);
                 corner->raise();
+                if (repaintSurface) corner->update();
             }
             // 角落的明确工具控件保留原按钮和命中；底面不应覆盖它们。
             for (Qt::Corner corner : {Qt::TopLeftCorner, Qt::TopRightCorner})
@@ -474,7 +497,7 @@ namespace
                     tool->raise();
                 }
             }
-            m_surface->update();
+            if (repaintSurface || bandChanged) m_surface->update();
         }
 
         void schedule()
@@ -497,6 +520,7 @@ namespace
         QPointer<QWidget> m_observedSurface; // 原页面或明确的自适应滚动内容。
         QPointer<PageContentCorner> m_contentCorners[4]; // 等边模式的最外层四角，不覆盖内部组件圆角。
         bool m_pending = false; // 同一轮字体/布局/样式事件仅安排一次同步。
+        bool m_surfaceDirty = true; // 保留主题刷新，普通同几何同步不重复重画底面。
     };
 }
 
@@ -551,8 +575,12 @@ namespace ks::ui
         if (bar->property("ksword_page_tabs_style").toBool())
         {
             const bool child = bar->property("ksword_page_tabs_child").toBool();
-            bar->setStyleSheet(tabBarRules(QStringLiteral("QTabBar[ksword_page_tabs_style=\"true\"]"),
-                tabColors(UsesMainSurfaceHierarchy(bar), child), child, true));
+            const QString rules = tabBarRules(QStringLiteral("QTabBar[ksword_page_tabs_style=\"true\"]"),
+                tabColors(UsesMainSurfaceHierarchy(bar), child), child, true);
+            if (bar->styleSheet() != rules)
+            {
+                bar->setStyleSheet(rules); // 重复明确接入不再触发整栏polish和外壳StyleChange。
+            }
             return;
         }
         bar->setProperty("ksword_page_tabs_style", true);

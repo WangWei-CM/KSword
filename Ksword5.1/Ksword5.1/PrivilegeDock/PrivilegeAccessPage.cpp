@@ -71,6 +71,8 @@ namespace
             form->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
             auto* subjectRow = new QHBoxLayout;
             m_pid = new QLineEdit(QString::number(GetCurrentProcessId()), this);
+            // PID、对象路径和权限掩码是独立参数字段，保留原解析与校验，仅接入输入主题。
+            ks::ui::StyleStandaloneInput(m_pid);
             m_pid->setObjectName(QStringLiteral("privilege_access_pid"));
             subjectRow->addWidget(m_pid, 1);
             auto* current = new QPushButton(text("privilege.workbench.access.current", "当前进程"), this);
@@ -95,6 +97,7 @@ namespace
 
             auto* pathRow = new QHBoxLayout;
             m_path = new QLineEdit(QCoreApplication::applicationFilePath(), this);
+            ks::ui::StyleStandaloneInput(m_path);
             m_path->setObjectName(QStringLiteral("privilege_access_path"));
             pathRow->addWidget(m_path, 1);
             m_browse = new QPushButton(text("privilege.workbench.access.browse", "选择文件"), this);
@@ -123,6 +126,7 @@ namespace
             m_preset->addItem(text("privilege.workbench.access.preset.custom", "自定义掩码"));
             form->addRow(text("privilege.workbench.access.operation", "请求权限"), m_preset);
             m_mask = new QLineEdit(hex(GENERIC_READ), this);
+            ks::ui::StyleStandaloneInput(m_mask);
             m_mask->setObjectName(QStringLiteral("privilege_access_mask"));
             form->addRow(m_mask);
             workspace->parameters()->addLayout(form);

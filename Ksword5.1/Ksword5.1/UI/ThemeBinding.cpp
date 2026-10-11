@@ -10,12 +10,14 @@
 #include <QObject>
 #include <QPalette>
 #include <QPointer>
+#include <QSet>
 #include <QThread>
 #include <QTimer>
 #include <QVariant>
 #include <QWidget>
 
 #include <algorithm>
+#include <list>
 #include <utility>
 
 namespace
@@ -78,8 +80,9 @@ namespace
     private:
         // drain 对弱引用快照逐一刷新；回调可创建或删除其他绑定，不破坏正在遍历的队列。
         void drain();
-        QList<QPointer<WidgetThemeBinding>> m_bindings; // 存活登记项，不拥有控件。
+        std::list<QPointer<WidgetThemeBinding>> m_bindings; // 稳定迭代器，登记/销毁无需扫描全部绑定。
         QList<QPointer<WidgetThemeBinding>> m_pending;  // 本轮待刷新项，保持登记顺序。
+        QSet<WidgetThemeBinding*> m_pendingMembership; // 仅作常数时间去重；实际队列仍持弱引用。
         bool m_scheduled = false; // 合并同一轮重复主题事件的调度门禁。
     };
 
@@ -142,7 +145,10 @@ namespace
             if (lifetime != nullptr && widget != nullptr && preserveLocal)
             {
                 // Qt setStyleSheet 会把后设的局部 palette 还原为旧 QSS 基线，因此需要显式恢复。
-                widget->setPalette(localPalette);
+                if (widget->palette() != localPalette)
+                {
+                    widget->setPalette(localPalette); // 无变化时不再次广播整棵子树的PaletteChange。
+                }
             }
             if (lifetime != nullptr)
             {
@@ -181,11 +187,13 @@ namespace
     // add 将对象放入唯一登记表，并安排首次刷新；不在控件构造期间同步执行样式函数。
     void ThemeBindingRegistry::add(WidgetThemeBinding* binding)
     {
-        // 动态页面反复开关时及时清理死亡登记项，不等用户下次切换主题。
-        m_bindings.erase(std::remove_if(m_bindings.begin(), m_bindings.end(),
-            [](const QPointer<WidgetThemeBinding>& current) { return current.isNull(); }),
-            m_bindings.end());
-        m_bindings.append(binding);
+        // 每个绑定只增加一个节点；销毁时原位移除，创建大页不再形成逐项全表扫描。
+        const auto registration = m_bindings.emplace(m_bindings.end(), binding);
+        connect(binding, &QObject::destroyed, this, [this, registration, binding]()
+        {
+            m_bindings.erase(registration);
+            m_pendingMembership.remove(binding); // 防止释放后同址新对象被旧待刷新地址误判为已排队。
+        });
         schedule(binding);
     }
 
@@ -197,8 +205,9 @@ namespace
         }
         // weakBinding 为当前对象的弱引用；重复事件只保留一次待刷新记录。
         const QPointer<WidgetThemeBinding> weakBinding(binding);
-        if (!m_pending.contains(weakBinding))
+        if (!m_pendingMembership.contains(binding))
         {
+            m_pendingMembership.insert(binding);
             m_pending.append(weakBinding);
         }
         if (m_scheduled)
@@ -211,10 +220,7 @@ namespace
 
     void ThemeBindingRegistry::scheduleAll()
     {
-        // 清理死亡登记项；只遍历明确接入的对象，避免主题切换扫描整个 UI。
-        m_bindings.erase(std::remove_if(m_bindings.begin(), m_bindings.end(),
-            [](const QPointer<WidgetThemeBinding>& binding) { return binding.isNull(); }),
-            m_bindings.end());
+        // 只遍历存活登记项一次，排队去重由哈希表负责；换肤由二次方查找变为线性处理。
         for (const auto& binding : m_bindings)
         {
             schedule(binding.data());
@@ -226,6 +232,7 @@ namespace
         // 先分离本轮队列；回调新增的登记项进入下一轮，避免遍历容器因重入失效。
         auto pending = std::move(m_pending); // 只包含本轮待刷新的弱引用。
         m_pending.clear();
+        m_pendingMembership.clear(); // 回调的新请求属于下一轮，不阻断嵌套刷新/替换策略。
         m_scheduled = false;
         for (const auto& binding : pending)
         {

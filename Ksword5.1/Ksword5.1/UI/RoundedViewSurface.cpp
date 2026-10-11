@@ -140,7 +140,12 @@ namespace
         // false 仅隐藏外角装饰，不改变视图/视口层次；custom opt-out 随时可恢复原外观。
         void setEnabled(bool enabled)
         {
+            if (m_enabled == enabled)
+            {
+                return; // 表格重复应用相同外观时，不再排队重画四个角片。
+            }
             m_enabled = enabled;
+            m_surfaceDirty = true;
             if (!enabled)
             {
                 for (const QPointer<RoundedCornerSurface>& corner : m_corners)
@@ -163,15 +168,19 @@ namespace
                 switch (event->type())
                 {
                 case QEvent::Resize:
-                case QEvent::Show:
-                case QEvent::ParentChange:
-                case QEvent::ChildAdded:
                 case QEvent::LayoutRequest:
                 case QEvent::ContentsRectChange:
+                    scheduleRefresh();
+                    break;
+                case QEvent::Show:
+                case QEvent::Move:
+                case QEvent::ParentChange:
+                case QEvent::ChildAdded:
                 case QEvent::StyleChange:
                 case QEvent::PaletteChange:
                 case QEvent::ApplicationPaletteChange:
                 case QEvent::DevicePixelRatioChange:
+                    m_surfaceDirty = true; // 祖先背景坐标/主题改变，即使角片大小相同也要重绘。
                     scheduleRefresh();
                     break;
                 default:
@@ -205,6 +214,8 @@ namespace
                 return;
             }
             const int radius = qMin(kRadius, qMin(m_view->width(), m_view->height()) / 2);
+            const bool repaintSurface = m_surfaceDirty; // 普通同几何LayoutRequest不重采祖先背景。
+            m_surfaceDirty = false;
             const std::array<QPoint, 4> positions = {QPoint(0, 0),
                 QPoint(m_view->width() - radius, 0), QPoint(0, m_view->height() - radius),
                 QPoint(m_view->width() - radius, m_view->height() - radius)};
@@ -214,9 +225,11 @@ namespace
                 {
                     continue;
                 }
-                m_corners[index]->setGeometry(QRect(positions[index], QSize(radius, radius)));
+                const QRect geometry(positions[index], QSize(radius, radius));
+                const bool geometryChanged = m_corners[index]->geometry() != geometry;
+                if (geometryChanged) m_corners[index]->setGeometry(geometry);
                 m_corners[index]->setVisible(m_enabled && radius > 0 && m_view->isVisible());
-                if (m_enabled)
+                if (m_enabled && (repaintSurface || geometryChanged))
                 {
                     m_corners[index]->raise();
                     m_corners[index]->update();
@@ -228,6 +241,7 @@ namespace
         std::array<QPointer<RoundedCornerSurface>, 4> m_corners; // 原视图拥有的四个极小装饰。
         bool m_enabled = false; // 显式开关，由 TablePresentation 的普通/自绘判断设置。
         bool m_pending = false; // 合并 Show、Resize 和主题变更产生的重复请求。
+        bool m_surfaceDirty = true; // 首次展示、重挂或主题变化才强制重采微型背景。
     };
 }
 

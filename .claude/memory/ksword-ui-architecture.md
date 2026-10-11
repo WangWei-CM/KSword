@@ -286,3 +286,12 @@ KSword 主程序位于 `Ksword5.1/Ksword5.1`（Qt 6.9.3 Widgets + Qt Advanced Do
 - 字号下限统一安装处补齐14px/10pt，保留更大字号及字体家族。`StyleSecondaryTabs` 与普通Tab同用PageTabMotion，静态下划线透明让动画唯一绘制，不另设持续全页刷新计时器。
 - 文档投影以documentRevision/语言/主题/搜索键合并通知；隐藏Tab只留dirty，Show首帧同步使用最新快照。规范字段相同的document-only快照不增代次、不发通知，纯搜索/主题不重新flatten；真实数值变化原位更新，值样式与行可见状态只在变化时写入。
 - `StructuredFieldView` 本身直接作为Tab/Stack页时不能替换页对象：清掉旧布局后在source内部安装 `CreateDetailFieldProjection(source, source)`，保持原页索引/标题/currentWidget及业务指针。该模式不重挂或隐藏source，重复接入查其直接投影子节点，避免父子循环和重复宿主。
+
+## UI 适配与性能补漏（2026-10-11）
+
+- 文件详情同样以 `ksword_detail_theme_owner` 保留完整业务根主题；GlobalDialogTheme为其安装共享结构但让出颜色。`ApplyDetailDialogChrome` 与框架维护同一个完整拥有块，不重复追加或覆盖根主题。侧导航比较源图标身份，不能拿主题加工后的显示图标key误判源变化。
+- ThemeBinding登记使用稳定节点并在destroyed时原位删除，pending哈希只作去重，真正队列仍是QPointer且保持登记顺序。drain先分离队列/清membership，保留嵌套新请求；销毁时清pending地址，避免同址新对象误判。禁止恢复每次新增绑定的全表清理或增长队列逐项contains。
+- 主页面外框/圆角控制器区分几何与底色dirty；宿主、几何、样式不变时不重装事件过滤器/重画，真实主题、重挂、DPR仍更新。单面板outline变化只刷新自己的绑定，不能广播全软件换肤。
+- 参数编辑器只在真实样式/palette变化时全文重高亮，重复finish不累加padding。浮动详情隐藏后不替换全文，显示入口先从规范源回填；相同文本不重建镜像文档。
+- 进程历史、CPU核心历史和磁盘ETW/速率采样不因隐藏停止；隐藏的图表向量转换、动画、线程排序和活动表UI提交延后Show。CPU主题/语言重绘不能重复追加历史；身份清理必须真正清空图形。逐核表复用item，只更新真实变化的文本。
+- BCD、磁盘编辑外部参数、权限访问评估/身份启动、HWID和电源字段已补共享输入接入；专业HEX内部保留。实际范围与源码触发链见 `docs/UI适配与性能补漏-20261011.md`，不得把编译通过当逐页视觉/性能验收。

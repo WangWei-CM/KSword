@@ -226,11 +226,15 @@ namespace
             if (!target) return;
             const QColor surface = ks::ui::MainWindowSurfaceColors().content;
             const QColor divider = KswordTheme::BlendColors(surface, KswordTheme::BorderColor(), 70);
-            target->setStyleSheet(QStringLiteral(
+            const QString style = QStringLiteral(
                 "QWidget[ksword_parameter_surface=\"true\"]{background:%1;border:0;border-radius:8px;%2}")
                 .arg(surface.name(), footer
                     ? QStringLiteral("border-top:1px solid %1;border-top-left-radius:0;border-top-right-radius:0;").arg(divider.name())
-                    : QString()));
+                    : QString());
+            if (target->styleSheet() != style)
+            {
+                target->setStyleSheet(style); // 语言/重复palette通知不重写同一面板底色。
+            }
         });
     }
 
@@ -306,7 +310,7 @@ namespace
             QFont textFont = editor->font();
             if (textFont.pixelSize() > 0) textFont.setPixelSize(qMax(14, textFont.pixelSize()));
             else textFont.setPointSizeF(qMax(10.0, textFont.pointSizeF()));
-            editor->setFont(textFont);
+            if (editor->font() != textFont) editor->setFont(textFont);
             editor->setFrameShape(QFrame::NoFrame);
             const QPointer<QPlainTextEdit> target(editor);
             ks::ui::BindWidgetTheme(editor, [target]()
@@ -321,12 +325,16 @@ namespace
                 const QColor accent = KswordTheme::ControlAccentColor();
                 const QColor disabledBase = KswordTheme::BlendColors(panel, base, 90);
                 const QColor disabledText = KswordTheme::EnsureTextContrast(KswordTheme::TextDisabledColor(), disabledBase, 3.0);
-                target->setStyleSheet(QStringLiteral(
+                const QPalette previousColors = target->palette(); // 保存本轮前的角色，用于判断是否需要全文重高亮。
+                const QString style = QStringLiteral(
                     "QPlainTextEdit{background:%1;color:%2;border:0;border-radius:5px;"
                     "selection-background-color:%3;selection-color:%4;placeholder-text-color:%5;}"
                     "QPlainTextEdit:disabled{background:%6;color:%7;}")
                     .arg(base.name(), text.name(), accent.name(), KswordTheme::OnAccentColor(accent).name(),
-                        placeholder.name(), disabledBase.name(), disabledText.name()));
+                        placeholder.name(), disabledBase.name(), disabledText.name());
+                const bool styleChanged = target->styleSheet() != style;
+                if (styleChanged) target->setStyleSheet(style);
+                if (!target) return; // 样式事件可能关闭原宿主，继续写入前必须探活。
                 QPalette colors = target->palette();
                 colors.setColor(QPalette::Base, base);
                 colors.setColor(QPalette::Window, base);
@@ -336,9 +344,15 @@ namespace
                 colors.setColor(QPalette::Disabled, QPalette::Window, disabledBase);
                 colors.setColor(QPalette::Disabled, QPalette::Text, disabledText);
                 colors.setColor(QPalette::Disabled, QPalette::PlaceholderText, disabledText);
-                target->setPalette(colors);
-                target->viewport()->setPalette(colors);
-                if (auto* code = dynamic_cast<CodeTextEdit*>(target.data())) code->refreshThemeColors();
+                if (target->palette() != colors) target->setPalette(colors);
+                if (!target) return;
+                if (target->viewport()->palette() != colors) target->viewport()->setPalette(colors);
+                if (!target) return;
+                // CodeTextEdit的refreshThemeColors会全文rehighlight；颜色未变时不再重复执行。
+                if (styleChanged || previousColors != colors)
+                {
+                    if (auto* code = dynamic_cast<CodeTextEdit*>(target.data())) code->refreshThemeColors();
+                }
             });
         }
     }
@@ -540,8 +554,12 @@ namespace ks::ui
                     || qobject_cast<QAbstractSpinBox*>(edit->parentWidget())) continue;
                 NormalizeToolbarControl(edit);
                 // 搜索、参数输入和数值框使用同一编辑层；这里只拥有紧凑表单的横向留白。
-                edit->setStyleSheet(edit->styleSheet() + QStringLiteral(
-                    "QLineEdit[ksword_standalone_input=\"true\"]{padding:0 8px;}"));
+                const QString geometry = QStringLiteral(
+                    "QLineEdit[ksword_standalone_input=\"true\"]{padding:0 8px;}");
+                if (!edit->styleSheet().contains(geometry))
+                {
+                    edit->setStyleSheet(edit->styleSheet() + geometry); // 重复finish不累加同一几何规则。
+                }
                 BindLineEditTheme(edit);
                 StyleStandaloneInput(edit);
             }

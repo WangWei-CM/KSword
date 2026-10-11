@@ -98,6 +98,7 @@
 #include <QTextEdit>
 #include <QPointer>
 #include <QPalette>
+#include <QScopedValueRollback>
 #include <QProgressBar>
 #include <QProcess>
 #include <QPushButton>
@@ -4652,7 +4653,10 @@ namespace
         {
             return;
         }
-        widget->setPalette(palette);
+        if (widget->palette() != palette)
+        {
+            widget->setPalette(palette); // 惰性页接入不再给所有已完成页面重复广播换肤事件。
+        }
         widget->setAutoFillBackground(true);
         widget->setAttribute(Qt::WA_StyledBackground, true);
     }
@@ -5503,6 +5507,8 @@ namespace
             , m_batchMode(filePaths.size() > 1)
             , m_initialTabKey(initialTabKey.trimmed().toLower())
         {
+            // 文件属性拥有完整根主题，普通弹窗兜底只安装共享结构，不参与根配色竞争。
+            setProperty("ksword_detail_theme_owner", true);
             QStringList normalizedPaths;
             QSet<QString> seenPaths;
             for (const QString& candidatePath : m_filePaths)
@@ -5807,7 +5813,7 @@ namespace
         void changeEvent(QEvent* event) override
         {
             QDialog::changeEvent(event);
-            if (event == nullptr)
+            if (event == nullptr || m_themeStyleApplying)
             {
                 return;
             }
@@ -5835,7 +5841,7 @@ namespace
             {
                 return;
             }
-            m_themeStyleApplying = true;
+            QScopedValueRollback<bool> applying(m_themeStyleApplying, true); // 根主题事件重入只执行一轮。
 
             const QPalette dialogPalette = buildFileDetailDialogPalette(this);
             QPalette surfacePalette = dialogPalette;
@@ -5843,7 +5849,11 @@ namespace
             surfacePalette.setColor(QPalette::Window, KswordTheme::WindowColor());
             surfacePalette.setColor(QPalette::WindowText, KswordTheme::TextPrimaryColor());
             applyFileDetailSurfacePalette(this, dialogPalette);
-            setStyleSheet(buildFileDetailDialogStyle());
+            const QString style = buildFileDetailDialogStyle();
+            if (styleSheet() != style)
+            {
+                setStyleSheet(style);
+            }
 
             QPalette navigationPalette = surfacePalette;
             navigationPalette.setColor(QPalette::Window, KswordTheme::WindowColor());
@@ -5857,7 +5867,6 @@ namespace
                 }
             }
 
-            m_themeStyleApplying = false;
         }
 
         struct HashCalculationResult

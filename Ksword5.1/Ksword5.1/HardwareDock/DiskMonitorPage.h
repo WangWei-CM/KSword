@@ -34,6 +34,7 @@ class QLabel;
 class QLineEdit;
 class QPushButton;
 class QSplitter;
+class QShowEvent;
 class QTableWidget;
 class QTableWidgetItem;
 class QTimer;
@@ -59,6 +60,10 @@ public:
     // - 停止刷新定时器；
     // - Qt 子对象由父子树释放。
     ~DiskMonitorPage() override;
+
+protected:
+    // 重新显示时提交隐藏期间的最新缓存；不重启采集，不重置速率基线。
+    void showEvent(QShowEvent* event) override;
 
 private:
     // ProcessDiskSample：
@@ -184,6 +189,8 @@ private:
     void updateProcessTable(const std::vector<ProcessDiskSample>& sampleList);
     void updateActivityTable();
     void updateSummaryLabels(const std::vector<ProcessDiskSample>& sampleList);
+    // 仅在可见且允许提交时更新两张活动表，合并隐藏期间多轮 UI 重建。
+    void refreshProcessPresentation();
     void syncSelectionFromTable();
 
     // installProcessColumnMenu：
@@ -237,6 +244,7 @@ private:
     DiskMonitorStoragePanel* m_storagePanel = nullptr; // m_storagePanel：固定卷容量与性能区。
     QTimer* m_refreshTimer = nullptr;              // m_refreshTimer：周期刷新定时器。
     bool m_initialSamplingStarted = false;         // m_initialSamplingStarted：是否已经启动 ETW 与首轮采样。
+    bool m_processPresentationDirty = false;       // 最新采样已入缓存，但活动表尚未显示该轮内容。
     std::unique_ptr<std::thread> m_processSamplingThread; // m_processSamplingThread：后台进程 IO 采样线程。
     std::atomic_bool m_processSamplingInProgress{ false }; // m_processSamplingInProgress：避免采样重叠。
     std::atomic_bool m_processSamplingStopRequested{ false }; // m_processSamplingStopRequested：析构时协作取消同步采样。

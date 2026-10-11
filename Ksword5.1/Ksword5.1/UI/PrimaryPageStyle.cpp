@@ -208,11 +208,11 @@ namespace ks::ui
         const bool changed = panel->property("ksword_primary_content_panel_outlined").isValid()
             && panel->property("ksword_primary_content_panel_outlined").toBool() != outline;
         panel->setProperty("ksword_primary_content_panel_outlined", outline);
-        if (panel->property("ksword_primary_content_panel").toBool())
+        if (panel->property("ksword_primary_content_panel").toBool() && !changed)
         {
-            if (changed) RefreshWidgetThemeBindings();
             return;
         }
+        // 单面板边界模式改变只替换并排队自己的绑定，不广播全应用主题刷新。
         panel->setProperty("ksword_primary_content_panel", true);
         panel->setAttribute(Qt::WA_StyledBackground, true);
         const QPointer<QWidget> target(panel); // 沿用原面板对象，图表采样和绘图逻辑不变。

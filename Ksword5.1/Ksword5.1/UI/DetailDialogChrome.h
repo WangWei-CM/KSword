@@ -81,7 +81,27 @@ namespace ks::ui
         ConfigureDetailDialogRoot(window);
         // 单页详情的根layout也排列摘要、工具和状态，它们的业务间距不能被当作外框清掉。
         if (window->layout() != nullptr) window->layout()->setSpacing(spacing);
-        window->setStyleSheet(window->styleSheet() + BuildDetailDialogChromeStyle(window->objectName()));
+        if (window->property("ksword_global_dialog_theme").toBool()
+            || window->property("ksword_detail_theme_owner").toBool())
+        {
+            return; // 已有根主题拥有者生成同一套Chrome，不能再追加第二份。
+        }
+        // 与安装器维护同一个完整块；多次接入或换色都替换原块，不累加全窗QSS。
+        const QString begin = QStringLiteral("/* KSWORD_DETAIL_FRAMEWORK_BEGIN */");
+        const QString end = QStringLiteral("/* KSWORD_DETAIL_FRAMEWORK_END */");
+        QString style = window->styleSheet();
+        const qsizetype first = style.indexOf(begin);
+        const qsizetype last = first < 0 ? -1 : style.indexOf(end, first);
+        if (first >= 0 && last >= first)
+        {
+            style.remove(first, last + end.size() - first);
+        }
+        style = style.trimmed() + QLatin1Char('\n') + begin
+            + BuildDetailDialogChromeStyle(window->objectName()) + end;
+        if (window->styleSheet() != style)
+        {
+            window->setStyleSheet(style);
+        }
     }
 
     inline void ConfigureDetailNavigation(QScrollArea* scroll, QWidget* navigation, const int width = 240)
@@ -168,13 +188,41 @@ namespace ks::ui
             for (int index = 0; index < m_tabButtons.size(); ++index)
             {
                 QToolButton* button = m_tabButtons.at(index);
-                button->setText(m_tabs->tabText(index));
-                button->setToolTip(m_tabs->tabToolTip(index).isEmpty() ? m_tabs->tabText(index) : m_tabs->tabToolTip(index));
+                const QString title = m_tabs->tabText(index); // 原Tab元数据仍是唯一来源。
+                const QString tip = m_tabs->tabToolTip(index).isEmpty() ? title : m_tabs->tabToolTip(index);
+                if (button->text() != title)
+                {
+                    button->setText(title);
+                }
+                if (button->toolTip() != tip)
+                {
+                    button->setToolTip(tip);
+                }
                 const QIcon icon = m_tabs->tabIcon(index);
-                button->setIcon(icon.isNull() ? QIcon(QStringLiteral(":/Icon/process_details.svg")) : icon);
-                button->setEnabled(m_tabs->isTabEnabled(index));
-                button->setVisible(m_tabs->isTabVisible(index));
-                button->setChecked(m_tabs->currentIndex() == index);
+                const QIcon desiredIcon = icon.isNull() ? m_fallbackIcon : icon;
+                const QVariant previousIcon = button->property("ksword_detail_navigation_icon_key");
+                // 比较源图标身份；按钮主题可能替换显示图标，不能反复拿加工后的key当源变化。
+                if (!previousIcon.isValid() || previousIcon.toLongLong() != desiredIcon.cacheKey()
+                    || button->icon().isNull())
+                {
+                    button->setProperty("ksword_detail_navigation_icon_key", desiredIcon.cacheKey());
+                    button->setIcon(desiredIcon);
+                }
+                const bool enabled = m_tabs->isTabEnabled(index);
+                const bool visible = m_tabs->isTabVisible(index);
+                const bool checked = m_tabs->currentIndex() == index;
+                if (button->isEnabled() != enabled)
+                {
+                    button->setEnabled(enabled);
+                }
+                if (button->isHidden() == visible)
+                {
+                    button->setVisible(visible);
+                }
+                if (button->isChecked() != checked)
+                {
+                    button->setChecked(checked);
+                }
             }
             ArrangeDetailNavigationGroups(m_navigation, m_tabs, m_buttons);
         }
@@ -182,6 +230,7 @@ namespace ks::ui
         QPointer<QWidget> m_navigation;
         QButtonGroup* m_buttons;
         QList<QPointer<QToolButton>> m_tabButtons;
+        QIcon m_fallbackIcon{QStringLiteral(":/Icon/process_details.svg")}; // 同一控制器复用默认图标缓存。
         bool m_refreshPending = false;
     };
 

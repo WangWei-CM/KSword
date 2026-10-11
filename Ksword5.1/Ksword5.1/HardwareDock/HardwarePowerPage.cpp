@@ -607,6 +607,14 @@ void HardwarePowerPage::initializeUi()
     {
         ks::ui::NormalizeToolbarControl(control);
     }
+    // 数值参数此前只登记高度；显式接入输入底面与热主题，和方案下拉保持一致。
+    const QList<QWidget*> parameterInputs { m_pl1Spin, m_pl2Spin, m_turboRatioSpin,
+        m_requestedMultiplierSpin, m_hwpMinimumSpin, m_hwpMaximumSpin,
+        m_hwpDesiredSpin, m_hwpEppSpin };
+    for (QWidget* input : parameterInputs)
+    {
+        ks::ui::StyleStandaloneInput(input);
+    }
     // 刷新/还原是全页动作，固定在参数栏底部；分组应用仍邻近其参数。
     auto* pageActions = new QWidget(workspace);
     auto* pageActionLayout = new QVBoxLayout(pageActions);

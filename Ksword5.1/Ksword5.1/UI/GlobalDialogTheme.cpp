@@ -297,7 +297,8 @@ namespace
             return false;
         }
         // 配置与操作窗口由其明确登记的主题拥有，避免兜底重新铺上卡片和高亮 Tab。
-        if (dialog->property("ksword_secondary_window").toBool())
+        if (dialog->property("ksword_secondary_window").toBool()
+            || dialog->property("ksword_detail_theme_owner").toBool())
         {
             return false;
         }

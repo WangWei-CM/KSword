@@ -362,6 +362,8 @@ private:
     // 参数 event：变更事件对象。
     // 返回：无。
     void changeEvent(QEvent* event) override;
+    // 仅观察性能/核心页的显示事件，在首次可见时提交隐藏期间保留的最新图形投影。
+    bool eventFilter(QObject* watched, QEvent* event) override;
 
     void initializeUi();
     // applyThemeStyle 作用：
@@ -470,7 +472,8 @@ private:
     // ======== 详情页刷新 ========
     void refreshDetailTabTexts();
     void refreshPerformanceHistoryCharts();
-    void refreshCpuCoreView();
+    // appendHistory 仅由新的核心区间或首次创建调用；主题/语言刷新不得重复追加样本。
+    void refreshCpuCoreView(bool appendHistory = false);
     // requestAsyncStaticDetailRefresh 作用：
     // - 在后台补齐路径、命令行、用户、签名等慢字段；
     // - 避免在窗口构造或周期同步时阻塞 UI 线程。
@@ -827,6 +830,7 @@ private:
     QWidget* m_performanceNetworkChart = nullptr;      // 网络收发图表。
     QWidget* m_performanceGpuChart = nullptr;          // GPU 图表。
     std::deque<PerformanceHistorySample> m_performanceHistory; // 当前详情窗口的定长历史序列。
+    bool m_performanceChartsDirty = true; // 历史始终保留，隐藏时只延后拆分图表向量。
 
     // ======== CPU 核心页控件与区间快照 ========
     QLabel* m_cpuCoreTitleLabel = nullptr;             // 页面标题，主题切换时刷新前景色。
@@ -837,6 +841,7 @@ private:
     QWidget* m_processCpuCoreGrid = nullptr;            // 当前进程逐逻辑处理器折线矩阵。
     QWidget* m_threadCpuCoreGrid = nullptr;             // 按总占用排序、可点击展开的线程折线矩阵。
     CpuCoreViewSample m_cpuCoreViewSample;              // 页面未构造时也保留最新快照。
+    bool m_cpuCorePresentationDirty = true; // 隐藏时延后标签排版，核心历史仍逐区间记入。
 
     // ======== 线程页控件 ========
     QVBoxLayout* m_threadLayout = nullptr;     // 线程页总布局。
