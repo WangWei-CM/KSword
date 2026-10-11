@@ -1,6 +1,7 @@
 #include "ProcessTraceMonitorWidget.h"
 #include "../UI/FlatButtonTheme.h"
 #include "../UI/ThemeStatusRole.h"
+#include "../UI/MainSurfaceStyle.h"
 
 // ============================================================
 // ProcessTraceMonitorWidget.cpp
@@ -120,17 +121,17 @@ QString ProcessTraceMonitorWidget::blueHeaderStyle()
         .arg(KswordTheme::BorderHex());
 }
 
-QString ProcessTraceMonitorWidget::collapsePanelStyle()
+QString ProcessTraceMonitorWidget::collapsePanelStyle(const QWidget* panel)
 {
     // 样式复用 MonitorDock 已有独立 Collapse 约定：
-    // - 外层使用 kswordCollapsePanel 标记，显示统一边框和圆角；
+    // - 外层明确使用数据面和圆角，内层宿主不继续叠加更亮的卡片底；
     // - 内容宿主使用 kswordCollapseContent 标记，避免嵌套区域重复描边。
     return QStringLiteral(
         "QWidget[kswordCollapsePanel=\"true\"]{"
         "  background:%1;"
         "  color:%2;"
-        "  border:1px solid %3;"
-        "  border-radius:5px;"
+        "  border:0;"
+        "  border-radius:8px;"
         "}"
         "QWidget[kswordCollapseContent=\"true\"]{"
         "  background:transparent;"
@@ -138,9 +139,9 @@ QString ProcessTraceMonitorWidget::collapsePanelStyle()
         "  color:%2;"
         "  border:none;"
         "}")
-        .arg(KswordTheme::SurfaceHex())
-        .arg(KswordTheme::TextPrimaryHex())
-        .arg(KswordTheme::BorderHex());
+        .arg(ks::ui::UsesMainSurfaceHierarchy(panel)
+            ? ks::ui::MainWindowSurfaceColors().content.name() : KswordTheme::SurfaceHex())
+        .arg(KswordTheme::TextPrimaryHex());
 }
 
 QString ProcessTraceMonitorWidget::collapseHeaderButtonStyle()
@@ -173,7 +174,7 @@ void ProcessTraceMonitorWidget::refreshCollapseTheme(QWidget* rootWidget)
         if (widgetPointer->property("kswordCollapsePanel").toString() == QStringLiteral("true")
             || widgetPointer->property("kswordCollapseContent").toString() == QStringLiteral("true"))
         {
-            widgetPointer->setStyleSheet(collapsePanelStyle());
+            widgetPointer->setStyleSheet(collapsePanelStyle(widgetPointer));
         }
     }
 

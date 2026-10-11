@@ -65,6 +65,13 @@ namespace ks::ui
         {
             input->setStyleSheet(input->styleSheet() + geometry);
         }
+        // 明确独立输入才接管完整底色；已有业务主题绑定保留所有权，不覆盖状态语义。
+        if (!HasWidgetThemeBinding(input))
+        {
+            if (auto* combo = qobject_cast<QComboBox*>(input)) StylePrimaryCombo(combo);
+            else if (auto* spin = qobject_cast<QAbstractSpinBox*>(input)) BindSpinBoxTheme(spin);
+            else if (auto* edit = qobject_cast<QLineEdit*>(input)) BindLineEditTheme(edit);
+        }
     }
 
     void StylePrimaryCombo(QComboBox* combo)
@@ -81,7 +88,9 @@ namespace ks::ui
             if (target)
             {
                 // 控件自身的完整状态规则优先于 Dock 透明祖先，热切换不留下旧色快照。
-                ReplacePrimaryStyle(target, KswordTheme::ThemedComboBoxStyle());
+                const QColor surface = UsesMainSurfaceHierarchy(target)
+                    ? MainWindowSurfaceColors().input : KswordTheme::ControlInputSurfaceColor();
+                ReplacePrimaryStyle(target, KswordTheme::ThemedComboBoxStyle(surface));
                 if (target->property("ksword_standalone_input").toBool())
                 {
                     StyleStandaloneInput(target);
@@ -129,7 +138,7 @@ namespace ks::ui
             // 仅命中此分组自身，嵌套业务控件、表格语义底色及选中态保持原所有权。
             ReplacePrimaryStyle(target, QStringLiteral(
                 "QGroupBox[ksword_primary_group=\"true\"]{background:%1;"
-                "border:1px solid %2;border-radius:6px;margin-top:10px;padding-top:6px;}"
+                "border:1px solid %2;border-radius:8px;margin-top:10px;padding-top:6px;}"
                 "QGroupBox[ksword_primary_group=\"true\"]::title{"
                 "subcontrol-origin:margin;subcontrol-position:top left;left:10px;"
                 "padding:0 5px;background:%1;color:%3;font-weight:600;}"
@@ -153,12 +162,11 @@ namespace ks::ui
             {
                 const bool mainSurface = UsesMainSurfaceHierarchy(target);
                 const MainSurfaceColors surfaces = MainWindowSurfaceColors();
-                // 工具带只画底面和一条下边界，不把所有按钮包成重复卡片。
+                // 独立工具带与内容板统一圆角，以底色差表达层级，不再拼接一块方形底面。
                 ReplacePrimaryStyle(target, QStringLiteral(
                     "QWidget[ksword_primary_toolbar=\"true\"]{"
-                    "background:%1;border:0;border-bottom:1px solid %2;}")
-                    .arg(mainSurface ? surfaces.toolbar.name() : KswordTheme::SurfaceColor().name(),
-                        mainSurface ? surfaces.border.name() : KswordTheme::BorderColor().name()));
+                    "background:%1;border:0;border-radius:8px;}")
+                    .arg(mainSurface ? surfaces.toolbar.name() : KswordTheme::SurfaceColor().name()));
             }
         });
     }
@@ -192,10 +200,10 @@ namespace ks::ui
             const QString background = mainSurface ? surfaces.content.name()
                 : outlined ? QStringLiteral("transparent") : KswordTheme::SurfaceColor().name();
             const QString rules = outlined ? QStringLiteral(
-                "QWidget[ksword_primary_content_panel=\"true\"]{background:%1;border:1px solid %2;border-radius:6px;}")
+                "QWidget[ksword_primary_content_panel=\"true\"]{background:%1;border:1px solid %2;border-radius:8px;}")
                     .arg(background, mainSurface ? surfaces.border.name() : KswordTheme::BorderColor().name())
                 : QStringLiteral(
-                    "QWidget[ksword_primary_content_panel=\"true\"]{background:%1;border:0;border-radius:6px;}").arg(background);
+                    "QWidget[ksword_primary_content_panel=\"true\"]{background:%1;border:0;border-radius:8px;}").arg(background);
             ReplacePrimaryStyle(target, rules);
         });
     }
@@ -221,7 +229,7 @@ namespace ks::ui
             const QColor canvas = UsesMainSurfaceHierarchy(target)
                 ? MainWindowSurfaceColors().canvas : KswordTheme::WindowColor();
             ReplacePrimaryStyle(target, QStringLiteral(
-                "QWidget[ksword_workspace_page=\"true\"]{background:%1;border:0;}").arg(canvas.name()));
+                "QWidget[ksword_workspace_page=\"true\"]{background:%1;border:0;border-radius:8px;}").arg(canvas.name()));
         });
     }
 

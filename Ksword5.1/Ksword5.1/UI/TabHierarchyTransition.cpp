@@ -1,5 +1,6 @@
 #include "../Framework.h"
 #include "./TabHierarchyTransition.h"
+#include "./PageControlStyle.h"
 #include "../theme.h"
 
 #include <QEvent>
@@ -133,7 +134,7 @@ namespace
                 const int availableWidth = std::min(child->width(), m_tabs->width() - origin.x());
                 TabStripSnapshot result;
                 result.band = QRect(origin, QSize(std::max(0, availableWidth), bar->height()));
-                result.background = KswordTheme::SurfaceColor();
+                result.background = ks::ui::PageTabRailColor(bar); // 快照留白与当前子栏底面完全一致。
                 result.image = bar->grab(); // 仅取导航快照，避免渲染数据页及惰性业务内容。
                 return result;
             }

@@ -227,7 +227,7 @@ namespace
             const QColor surface = ks::ui::MainWindowSurfaceColors().content;
             const QColor divider = KswordTheme::BlendColors(surface, KswordTheme::BorderColor(), 70);
             target->setStyleSheet(QStringLiteral(
-                "QWidget[ksword_parameter_surface=\"true\"]{background:%1;border:0;border-radius:7px;%2}")
+                "QWidget[ksword_parameter_surface=\"true\"]{background:%1;border:0;border-radius:8px;%2}")
                 .arg(surface.name(), footer
                     ? QStringLiteral("border-top:1px solid %1;border-top-left-radius:0;border-top-right-radius:0;").arg(divider.name())
                     : QString()));
@@ -313,7 +313,9 @@ namespace
             {
                 if (!target) return;
                 const QColor panel = ks::ui::MainWindowSurfaceColors().content;
-                const QColor base = target->isReadOnly() ? panel : KswordTheme::ControlInputSurfaceColor();
+                const QColor input = ks::ui::UsesMainSurfaceHierarchy(target)
+                    ? ks::ui::MainWindowSurfaceColors().input : KswordTheme::ControlInputSurfaceColor();
+                const QColor base = target->isReadOnly() ? panel : input;
                 const QColor text = KswordTheme::EnsureTextContrast(KswordTheme::TextPrimaryColor(), base, 4.5);
                 const QColor placeholder = KswordTheme::EnsureTextContrast(KswordTheme::TextSecondaryColor(), base, 4.5);
                 const QColor accent = KswordTheme::ControlAccentColor();
@@ -537,26 +539,11 @@ namespace ks::ui
                 if (qobject_cast<QComboBox*>(edit->parentWidget())
                     || qobject_cast<QAbstractSpinBox*>(edit->parentWidget())) continue;
                 NormalizeToolbarControl(edit);
-                const QPointer<QLineEdit> target(edit);
-                BindWidgetTheme(edit, [target]()
-                {
-                    if (!target) return;
-                    const QColor base = KswordTheme::ControlInputSurfaceColor();
-                    const QColor backgrounds[] = {base, KswordTheme::ControlInputHoverColor(base), KswordTheme::ControlInputFocusColor(base)};
-                    const QColor text = KswordTheme::EnsureTextContrastForBackgrounds(KswordTheme::TextPrimaryColor(), backgrounds, 3, 4.5);
-                    // 输入面在控件自身声明，优先于祖先 QWidget 的透明规则。
-                    target->setStyleSheet(QStringLiteral(
-                        "QLineEdit{background:%1;color:%2;border:0;border-radius:5px;padding:0 8px;"
-                        "selection-background-color:%3;selection-color:%4;placeholder-text-color:%5;}"
-                        "QLineEdit:hover{background:%6;}QLineEdit:focus{background:%7;}"
-                        "QLineEdit:disabled{background:%8;color:%9;}")
-                        .arg(base.name(), text.name(),
-                            KswordTheme::ControlAccentColor().name(),
-                            KswordTheme::OnAccentColor(KswordTheme::ControlAccentColor()).name(),
-                            KswordTheme::TextSecondaryColor().name(),
-                            KswordTheme::ControlInputHoverColor(base).name(), KswordTheme::ControlInputFocusColor(base).name(),
-                            KswordTheme::SurfaceMutedColor().name(), KswordTheme::TextDisabledColor().name()));
-                });
+                // 搜索、参数输入和数值框使用同一编辑层；这里只拥有紧凑表单的横向留白。
+                edit->setStyleSheet(edit->styleSheet() + QStringLiteral(
+                    "QLineEdit[ksword_standalone_input=\"true\"]{padding:0 8px;}"));
+                BindLineEditTheme(edit);
+                StyleStandaloneInput(edit);
             }
         }
         for (auto* form : container->findChildren<QFormLayout*>())

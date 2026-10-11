@@ -1,4 +1,5 @@
 #include "ThemeBinding.h"
+#include "./MainSurfaceStyle.h"
 #include "../theme.h"
 #include <QAbstractSpinBox>
 #include <QLineEdit>
@@ -22,6 +23,7 @@ namespace
     // kBindingProperty 保存控件自身的绑定对象；该对象由控件的 QObject 子树持有。
     constexpr char kBindingProperty[] = "KSWORD_EXPLICIT_THEME_BINDING";
     constexpr char kSearchFieldProperty[] = "KSWORD_SEARCH_FIELD_THEME"; // 已明确登记的搜索框。
+    constexpr char kLineFieldProperty[] = "KSWORD_LINE_FIELD_THEME"; // 独立单行字段共用输入角色。
     constexpr char kSearchStyleBegin[] = "/* KSWORD_SEARCH_FIELD_BEGIN */"; // 本组件样式起点。
     constexpr char kSearchStyleEnd[] = "/* KSWORD_SEARCH_FIELD_END */"; // 本组件样式终点。
     constexpr char kSpinStyleBegin[] = "/* KSWORD_SPIN_FIELD_BEGIN */"; // 数值框独有颜色片段起点。
@@ -295,7 +297,8 @@ bool ks::ui::BindSpinBoxTheme(QAbstractSpinBox* spinBox)
         {
             return;
         }
-        const QColor background = KswordTheme::ControlInputSurfaceColor(); // 与同排搜索/组合框共用输入面。
+        const QColor background = UsesMainSurfaceHierarchy(guardedSpin)
+            ? MainWindowSurfaceColors().input : KswordTheme::ControlInputSurfaceColor();
         const QColor hoverBackground = KswordTheme::ControlInputHoverColor(background);
         const QColor focusBackground = KswordTheme::ControlInputFocusColor(background);
         const QColor backgrounds[] = {background, hoverBackground, focusBackground};
@@ -333,7 +336,8 @@ bool ks::ui::BindSpinBoxTheme(QAbstractSpinBox* spinBox)
         {
             return;
         }
-        const QColor background = KswordTheme::ControlInputSurfaceColor();
+        const QColor background = UsesMainSurfaceHierarchy(guardedEditor)
+            ? MainWindowSurfaceColors().input : KswordTheme::ControlInputSurfaceColor();
         const QColor backgrounds[] = {background, KswordTheme::ControlInputHoverColor(background),
             KswordTheme::ControlInputFocusColor(background)}; // 内部文字随外层三态底面校准。
         const QColor foreground = KswordTheme::EnsureTextContrastForBackgrounds(
@@ -357,14 +361,14 @@ bool ks::ui::BindSpinBoxTheme(QAbstractSpinBox* spinBox)
     return outerBound && editorBound;
 }
 
-bool ks::ui::BindSearchFieldTheme(QLineEdit* searchField)
+bool ks::ui::BindLineEditTheme(QLineEdit* searchField)
 {
     if (searchField == nullptr)
     {
         return false;
     }
-    // 表格布局反复核验专用搜索框时不重复登记，已安装的绑定仍负责热主题刷新。
-    if (searchField->property(kSearchFieldProperty).toBool() && HasWidgetThemeBinding(searchField))
+    // 同一字段重复接入不增加绑定，原有独立业务配色由明确接入方负责清理。
+    if (searchField->property(kLineFieldProperty).toBool() && HasWidgetThemeBinding(searchField))
     {
         return true;
     }
@@ -388,7 +392,10 @@ bool ks::ui::BindSearchFieldTheme(QLineEdit* searchField)
         {
             background = KswordTheme::SurfaceAltColor();
         }
-        background = KswordTheme::ControlInputSurfaceColor(pageSurface, background);
+        // 主页面固定采用编辑层，不从已变亮的父容器继续计算更亮的底面。
+        const bool mainSurface = UsesMainSurfaceHierarchy(guardedField);
+        background = mainSurface ? MainWindowSurfaceColors().input
+            : KswordTheme::ControlInputSurfaceColor(pageSurface, background);
         const QColor hoverBackground = KswordTheme::ControlInputHoverColor(background);
         const QColor focusBackground = KswordTheme::ControlInputFocusColor(background);
         const QColor backgrounds[] = {background, hoverBackground, focusBackground};
@@ -403,9 +410,11 @@ bool ks::ui::BindSearchFieldTheme(QLineEdit* searchField)
             return preferred;
         };
         const QColor foreground = KswordTheme::EnsureTextContrastForBackgrounds(opaqueForeground(
-            parentColors.color(QPalette::Active, QPalette::Text), KswordTheme::TextPrimaryColor()), backgrounds, 3);
+            mainSurface ? KswordTheme::TextPrimaryColor() : parentColors.color(QPalette::Active, QPalette::Text),
+            KswordTheme::TextPrimaryColor()), backgrounds, 3);
         const QColor placeholder = KswordTheme::EnsureTextContrastForBackgrounds(opaqueForeground(
-            parentColors.color(QPalette::Active, QPalette::PlaceholderText), KswordTheme::TextSecondaryColor()), backgrounds, 3);
+            mainSurface ? KswordTheme::TextSecondaryColor() : parentColors.color(QPalette::Active, QPalette::PlaceholderText),
+            KswordTheme::TextSecondaryColor()), backgrounds, 3);
         const QColor disabledForeground = KswordTheme::EnsureTextContrast(opaqueForeground(
             parentColors.color(QPalette::Disabled, QPalette::Text), KswordTheme::TextDisabledColor()), background, 3.0);
         const QColor disabledPlaceholder = KswordTheme::EnsureTextContrast(opaqueForeground(
@@ -450,8 +459,17 @@ bool ks::ui::BindSearchFieldTheme(QLineEdit* searchField)
     });
     if (bound && !guardedField.isNull())
     {
-        guardedField->setProperty(kSearchFieldProperty, true);
+        guardedField->setProperty(kLineFieldProperty, true);
     }
+    return bound;
+}
+
+// 搜索沿用单行字段完整配色，不改变具体过滤词、输入行为或页面已登记的搜索几何。
+bool ks::ui::BindSearchFieldTheme(QLineEdit* searchField)
+{
+    if (searchField == nullptr) return false;
+    const bool bound = BindLineEditTheme(searchField);
+    if (bound) searchField->setProperty(kSearchFieldProperty, true);
     return bound;
 }
 

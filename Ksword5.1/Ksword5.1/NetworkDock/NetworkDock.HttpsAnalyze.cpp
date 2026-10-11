@@ -524,40 +524,48 @@ void NetworkDock::initializeHttpsAnalyzeTab()
     m_httpsListenAddressEdit = new QLineEdit(QStringLiteral("127.0.0.1"), m_httpsAnalyzePage);
     m_httpsListenAddressEdit->setToolTip(QStringLiteral("HTTPS代理监听地址。"));
     m_httpsListenAddressEdit->setMaximumWidth(140);
+    // 监听地址是独立参数输入，不能借用搜索字段或透明祖先的底色。
+    ks::ui::StyleStandaloneInput(m_httpsListenAddressEdit);
 
     m_httpsListenPortSpin = new QSpinBox(m_httpsAnalyzePage);
     m_httpsListenPortSpin->setRange(1, 65535);
     m_httpsListenPortSpin->setValue(8889);
+    ks::ui::StyleStandaloneInput(m_httpsListenPortSpin);
     m_httpsListenPortSpin->setToolTip(QStringLiteral("HTTPS代理监听端口。"));
 
     m_httpsStartProxyButton = new QPushButton(QStringLiteral("启动代理"), m_httpsAnalyzePage);
     // 页面明确选择动作语义；颜色变化不改变确认或执行路径。
-    ks::ui::ApplyFlatButtonTheme(m_httpsStartProxyButton, ks::ui::FlatButtonTone::Accent);
+    ks::ui::ApplyFlatButtonTheme(m_httpsStartProxyButton, ks::ui::FlatButtonTone::Accent,
+        ks::ui::FlatButtonAppearance::Solid);
     m_httpsStartProxyButton->setIcon(QIcon(":/Icon/process_start.svg"));
     // 抓取范围并入启动按钮：用户在这里决定要不要开，也正是在这里需要知道抓不到什么。
     m_httpsStartProxyButton->setToolTip(QStringLiteral("启动本地 HTTPS 解析代理。只记录经过本地系统代理的 HTTP/1.1 流量；QUIC/HTTP/3、直连流量和启用证书锁定的应用不会进入本表。"));
 
     m_httpsStopProxyButton = new QPushButton(QStringLiteral("停止代理"), m_httpsAnalyzePage);
     // 页面明确选择动作语义；颜色变化不改变确认或执行路径。
-    ks::ui::ApplyFlatButtonTheme(m_httpsStopProxyButton, ks::ui::FlatButtonTone::Neutral);
+    ks::ui::ApplyFlatButtonTheme(m_httpsStopProxyButton, ks::ui::FlatButtonTone::Neutral,
+        ks::ui::FlatButtonAppearance::Solid);
     m_httpsStopProxyButton->setIcon(QIcon(":/Icon/process_pause.svg"));
     m_httpsStopProxyButton->setToolTip(QStringLiteral("停止本地 HTTPS 解析代理。"));
 
     m_httpsTrustCertButton = new QPushButton(QStringLiteral("信任证书"), m_httpsAnalyzePage);
     // 页面明确选择动作语义；颜色变化不改变确认或执行路径。
-    ks::ui::ApplyFlatButtonTheme(m_httpsTrustCertButton, ks::ui::FlatButtonTone::Accent);
+    ks::ui::ApplyFlatButtonTheme(m_httpsTrustCertButton, ks::ui::FlatButtonTone::Accent,
+        ks::ui::FlatButtonAppearance::Solid);
     m_httpsTrustCertButton->setIcon(QIcon(":/Icon/process_details.svg"));
     m_httpsTrustCertButton->setToolTip(QStringLiteral("一键生成并信任 HTTPS 代理根证书。"));
 
     m_httpsApplyProxyButton = new QPushButton(QStringLiteral("应用系统代理"), m_httpsAnalyzePage);
     // 页面明确选择动作语义；颜色变化不改变确认或执行路径。
-    ks::ui::ApplyFlatButtonTheme(m_httpsApplyProxyButton, ks::ui::FlatButtonTone::Accent);
+    ks::ui::ApplyFlatButtonTheme(m_httpsApplyProxyButton, ks::ui::FlatButtonTone::Accent,
+        ks::ui::FlatButtonAppearance::Solid);
     m_httpsApplyProxyButton->setIcon(QIcon(":/Icon/process_main.svg"));
     m_httpsApplyProxyButton->setToolTip(QStringLiteral("把系统代理切换到本地 HTTPS 代理。"));
 
     m_httpsClearProxyButton = new QPushButton(QStringLiteral("还原系统代理"), m_httpsAnalyzePage);
     // 页面明确选择动作语义；颜色变化不改变确认或执行路径。
-    ks::ui::ApplyFlatButtonTheme(m_httpsClearProxyButton, ks::ui::FlatButtonTone::Neutral);
+    ks::ui::ApplyFlatButtonTheme(m_httpsClearProxyButton, ks::ui::FlatButtonTone::Neutral,
+        ks::ui::FlatButtonAppearance::Solid);
     m_httpsClearProxyButton->setIcon(QIcon(":/Icon/log_clear.svg"));
     m_httpsClearProxyButton->setToolTip(QStringLiteral("恢复本页应用 HTTPS 代理前保存的系统代理配置。"));
 
@@ -587,6 +595,7 @@ void NetworkDock::initializeHttpsAnalyzeTab()
     m_httpsParsedFilterEdit->setToolTip(QStringLiteral("实时筛选当前 HTTPS 解析记录，不影响代理转发或完整缓存。"));
     m_httpsParsedEventFilterCombo = new QComboBox(m_httpsAnalyzePage);
     ks::ui::StylePrimaryCombo(m_httpsParsedEventFilterCombo);
+    ks::ui::StyleStandaloneInput(m_httpsParsedEventFilterCombo);
     m_httpsParsedEventFilterCombo->addItem(QStringLiteral("全部事件"));
     m_httpsParsedEventFilterCombo->addItem(QStringLiteral("CONNECT"));
     m_httpsParsedEventFilterCombo->addItem(QStringLiteral("TLS"));
@@ -597,12 +606,14 @@ void NetworkDock::initializeHttpsAnalyzeTab()
     m_httpsParsedEventFilterCombo->setToolTip(QStringLiteral("按 HTTPS 代理事件类型筛选。"));
     m_httpsClearParsedButton = new QPushButton(QStringLiteral("清空解析结果"), m_httpsAnalyzePage);
     // 页面明确选择动作语义；颜色变化不改变确认或执行路径。
-    ks::ui::ApplyFlatButtonTheme(m_httpsClearParsedButton, ks::ui::FlatButtonTone::Neutral);
+    ks::ui::ApplyFlatButtonTheme(m_httpsClearParsedButton, ks::ui::FlatButtonTone::Neutral,
+        ks::ui::FlatButtonAppearance::Solid);
     m_httpsClearParsedButton->setIcon(QIcon(":/Icon/log_clear.svg"));
     m_httpsClearParsedButton->setToolTip(QStringLiteral("清空解析表和详情缓存，不停止 HTTPS 代理。"));
     m_httpsExportParsedButton = new QPushButton(QStringLiteral("导出可见 CSV"), m_httpsAnalyzePage);
     // 页面明确选择动作语义；颜色变化不改变确认或执行路径。
-    ks::ui::ApplyFlatButtonTheme(m_httpsExportParsedButton, ks::ui::FlatButtonTone::Neutral);
+    ks::ui::ApplyFlatButtonTheme(m_httpsExportParsedButton, ks::ui::FlatButtonTone::Neutral,
+        ks::ui::FlatButtonAppearance::Solid);
     m_httpsExportParsedButton->setIcon(QIcon(":/Icon/log_copy.svg"));
     m_httpsExportParsedButton->setToolTip(QStringLiteral("将当前筛选后可见的 HTTPS 解析记录导出为 UTF-8 CSV。"));
     m_httpsAutoScrollCheck = new QCheckBox(QStringLiteral("自动滚动"), m_httpsAnalyzePage);

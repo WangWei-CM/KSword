@@ -684,6 +684,7 @@
     <ClCompile Include="UI\SegmentedControl.cpp" />
     <ClCompile Include="UI\ThemedSlider.cpp" />
     <ClCompile Include="UI\SettingsPresentation.cpp" />
+    <ClCompile Include="UI\PageControlStyle.cpp" />
     <ClCompile Include="UI\TabHierarchyTransition.cpp" />
     <ClCompile Include="UI\FlatButtonTheme.cpp" />
     <ClCompile Include="UI\FloatingScrollbars.cpp" />

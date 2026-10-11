@@ -1592,6 +1592,9 @@
     <ClCompile Include="UI\SettingsPresentation.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="UI\PageControlStyle.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="UI\TabHierarchyTransition.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>

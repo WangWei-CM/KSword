@@ -424,7 +424,8 @@ void ProcessDock::initializeCrossViewPage()
     // 返回：无。
     m_crossViewPage = new QWidget(this);
     m_crossViewPageLayout = new QVBoxLayout(m_crossViewPage);
-    m_crossViewPageLayout->setContentsMargins(6, 6, 6, 6);
+    // 与进程/线程工具带保持相同的页签接缝，结果区仍保留原始左右留白。
+    m_crossViewPageLayout->setContentsMargins(6, 0, 6, 6);
     m_crossViewPageLayout->setSpacing(6);
 
     // 来源矩阵工具区保持一行，用轻底面分开查询条件与结果。

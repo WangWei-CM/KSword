@@ -1,6 +1,7 @@
 #include "./FlatButtonTheme.h"
 #include "ThemeBinding.h"
 #include "./ToolbarMetrics.h"
+#include "./MainSurfaceStyle.h"
 #include "../theme.h"
 
 #include <QAbstractButton>
@@ -83,6 +84,14 @@ namespace
     {
         QPalette colors = button != nullptr && button->parentWidget() != nullptr
             ? button->parentWidget()->palette() : QApplication::palette();
+        // 主窗口操作底色读取固定内容/表头层，避免嵌套卡片继承后再次加亮。
+        if (ks::ui::UsesMainSurfaceHierarchy(button))
+        {
+            const ks::ui::MainSurfaceColors surfaces = ks::ui::MainWindowSurfaceColors();
+            colors.setColor(QPalette::Base, surfaces.content);
+            colors.setColor(QPalette::AlternateBase, surfaces.header);
+            return colors;
+        }
         const QWidget* parent = button == nullptr ? nullptr : button->parentWidget();
         const QColor parentBackground = parent == nullptr ? QColor()
             : colors.color(QPalette::Active, parent->backgroundRole());

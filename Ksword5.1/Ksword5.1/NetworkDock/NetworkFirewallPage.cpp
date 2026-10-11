@@ -2607,33 +2607,37 @@ void NetworkFirewallPage::initializeEventMonitorUi()
 
     // 业务动作与搜索同属一条工具带，表格证据区保持原有伸缩。
     QWidget* const eventToolbar = new QWidget(m_eventMonitorPage);
-    ks::ui::StylePrimaryContentPanel(eventToolbar, false);
+    ks::ui::StylePrimaryToolbar(eventToolbar);
     QHBoxLayout* toolbarLayout = new QHBoxLayout(eventToolbar);
     toolbarLayout->setContentsMargins(12, 8, 12, 8);
     toolbarLayout->setSpacing(8);
 
     m_refreshHistoryButton = new QPushButton(QStringLiteral("刷新历史"), m_eventMonitorPage);
     // 此动作使用纯色主题，保留页面原有图标、状态和业务连接。
-    ks::ui::ApplyFlatButtonTheme(m_refreshHistoryButton, ks::ui::FlatButtonTone::Neutral);
+    ks::ui::ApplyFlatButtonTheme(m_refreshHistoryButton, ks::ui::FlatButtonTone::Neutral,
+        ks::ui::FlatButtonAppearance::Solid);
     m_refreshHistoryButton->setToolTip(QStringLiteral("枚举当前 BFE 会话可见的 WFP net event 历史记录"));
     toolbarLayout->addWidget(m_refreshHistoryButton, 0);
 
     m_startLiveButton = new QPushButton(QStringLiteral("启动实时"), m_eventMonitorPage);
     // 此动作使用纯色主题，保留页面原有图标、状态和业务连接。
-    ks::ui::ApplyFlatButtonTheme(m_startLiveButton, ks::ui::FlatButtonTone::Accent);
+    ks::ui::ApplyFlatButtonTheme(m_startLiveButton, ks::ui::FlatButtonTone::Accent,
+        ks::ui::FlatButtonAppearance::Solid);
     m_startLiveButton->setToolTip(QStringLiteral("开启 WFP net event collection 并订阅实时事件，需要管理员权限。"));
     toolbarLayout->addWidget(m_startLiveButton, 0);
 
     m_stopLiveButton = new QPushButton(QStringLiteral("停止实时"), m_eventMonitorPage);
     // 此动作使用纯色主题，保留页面原有图标、状态和业务连接。
-    ks::ui::ApplyFlatButtonTheme(m_stopLiveButton, ks::ui::FlatButtonTone::Neutral);
+    ks::ui::ApplyFlatButtonTheme(m_stopLiveButton, ks::ui::FlatButtonTone::Neutral,
+        ks::ui::FlatButtonAppearance::Solid);
     m_stopLiveButton->setEnabled(false);
     m_stopLiveButton->setToolTip(QStringLiteral("停止实时监控防火墙（WFP）事件"));
     toolbarLayout->addWidget(m_stopLiveButton, 0);
 
     m_clearButton = new QPushButton(QStringLiteral("清空"), m_eventMonitorPage);
     // 此动作使用纯色主题，保留页面原有图标、状态和业务连接。
-    ks::ui::ApplyFlatButtonTheme(m_clearButton, ks::ui::FlatButtonTone::Neutral);
+    ks::ui::ApplyFlatButtonTheme(m_clearButton, ks::ui::FlatButtonTone::Neutral,
+        ks::ui::FlatButtonAppearance::Solid);
     m_clearButton->setToolTip(QStringLiteral("清空下方的防火墙事件列表"));
     toolbarLayout->addWidget(m_clearButton, 0);
 
@@ -2734,28 +2738,31 @@ void NetworkFirewallPage::initializeRuleManagerUi()
 
     // 业务动作与搜索同属一条工具带，表格证据区保持原有伸缩。
     QWidget* const ruleToolbar = new QWidget(m_ruleManagerPage);
-    ks::ui::StylePrimaryContentPanel(ruleToolbar, false);
+    ks::ui::StylePrimaryToolbar(ruleToolbar);
     QHBoxLayout* toolbarLayout = new QHBoxLayout(ruleToolbar);
     toolbarLayout->setContentsMargins(12, 8, 12, 8);
     toolbarLayout->setSpacing(8);
 
     m_refreshRulesButton = new QPushButton(QStringLiteral("刷新规则"), m_ruleManagerPage);
     // 此动作使用纯色主题，保留页面原有图标、状态和业务连接。
-    ks::ui::ApplyFlatButtonTheme(m_refreshRulesButton, ks::ui::FlatButtonTone::Neutral);
+    ks::ui::ApplyFlatButtonTheme(m_refreshRulesButton, ks::ui::FlatButtonTone::Neutral,
+        ks::ui::FlatButtonAppearance::Solid);
     m_refreshRulesButton->setIcon(QIcon(QStringLiteral(":/Icon/process_refresh.svg")));
     m_refreshRulesButton->setToolTip(QStringLiteral("重新枚举 Windows Firewall 规则"));
     toolbarLayout->addWidget(m_refreshRulesButton, 0);
 
     m_addRuleButton = new QPushButton(QStringLiteral("新增"), m_ruleManagerPage);
     // 此动作使用纯色主题，保留页面原有图标、状态和业务连接。
-    ks::ui::ApplyFlatButtonTheme(m_addRuleButton, ks::ui::FlatButtonTone::Accent);
+    ks::ui::ApplyFlatButtonTheme(m_addRuleButton, ks::ui::FlatButtonTone::Accent,
+        ks::ui::FlatButtonAppearance::Solid);
     m_addRuleButton->setIcon(QIcon(QStringLiteral(":/Icon/plus.svg")));
     m_addRuleButton->setToolTip(QStringLiteral("新增 Windows Firewall 规则"));
     toolbarLayout->addWidget(m_addRuleButton, 0);
 
     m_editRuleButton = new QPushButton(QStringLiteral("编辑"), m_ruleManagerPage);
     // 此动作使用纯色主题，保留页面原有图标、状态和业务连接。
-    ks::ui::ApplyFlatButtonTheme(m_editRuleButton, ks::ui::FlatButtonTone::Neutral);
+    ks::ui::ApplyFlatButtonTheme(m_editRuleButton, ks::ui::FlatButtonTone::Neutral,
+        ks::ui::FlatButtonAppearance::Solid);
     m_editRuleButton->setIcon(QIcon(QStringLiteral(":/Icon/process_details.svg")));
     m_editRuleButton->setToolTip(QStringLiteral("编辑选中的规则"));
     m_editRuleButton->setEnabled(false);
@@ -2763,7 +2770,8 @@ void NetworkFirewallPage::initializeRuleManagerUi()
 
     m_toggleRuleButton = new QPushButton(QStringLiteral("启用/禁用"), m_ruleManagerPage);
     // 此动作使用纯色主题，保留页面原有图标、状态和业务连接。
-    ks::ui::ApplyFlatButtonTheme(m_toggleRuleButton, ks::ui::FlatButtonTone::Neutral);
+    ks::ui::ApplyFlatButtonTheme(m_toggleRuleButton, ks::ui::FlatButtonTone::Neutral,
+        ks::ui::FlatButtonAppearance::Solid);
     m_toggleRuleButton->setIcon(QIcon(QStringLiteral(":/Icon/process_suspend.svg")));
     m_toggleRuleButton->setToolTip(QStringLiteral("切换选中规则的启用状态"));
     m_toggleRuleButton->setEnabled(false);
@@ -2771,7 +2779,8 @@ void NetworkFirewallPage::initializeRuleManagerUi()
 
     m_deleteRuleButton = new QPushButton(QStringLiteral("删除"), m_ruleManagerPage);
     // 此动作使用纯色主题，保留页面原有图标、状态和业务连接。
-    ks::ui::ApplyFlatButtonTheme(m_deleteRuleButton, ks::ui::FlatButtonTone::Danger);
+    ks::ui::ApplyFlatButtonTheme(m_deleteRuleButton, ks::ui::FlatButtonTone::Danger,
+        ks::ui::FlatButtonAppearance::Solid);
     m_deleteRuleButton->setIcon(QIcon(QStringLiteral(":/Icon/log_clear.svg")));
     m_deleteRuleButton->setToolTip(QStringLiteral("删除选中的规则"));
     m_deleteRuleButton->setEnabled(false);

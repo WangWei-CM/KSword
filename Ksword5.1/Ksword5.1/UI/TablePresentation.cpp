@@ -219,7 +219,7 @@ namespace ks::ui
         // 外围轻描边区分并排表格；冻结辅助窗格是同一表格内容，不重复加圆角边界。
         const bool auxiliaryPane = view->property("KSWORD_TABLE_INTERACTION_FROZEN_PANE_AUXILIARY").toBool();
         const QString outerFrame = auxiliaryPane ? QStringLiteral("border:0;border-radius:0;")
-            : QStringLiteral("border:1px solid %1;border-radius:6px;").arg(
+            : QStringLiteral("border:1px solid %1;border-radius:8px;").arg(
                 mainSurface ? surfaces.border.name()
                     : KswordTheme::BlendColors(KswordTheme::SurfaceColor(), KswordTheme::BorderColor(), 150).name());
         const QColor rowBackgrounds[] = {surfaces.content, surfaces.alternate};

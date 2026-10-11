@@ -5,6 +5,8 @@
 #include "../UI/ToolbarMetrics.h"
 #include "../UI/PageControlStyle.h"
 #include "../UI/ParameterWorkspace.h"
+#include "../UI/PrimaryPageStyle.h"
+#include "../UI/FlatButtonTheme.h"
 #include <QGridLayout>
 #include <QGroupBox>
 #include "../UI/ThemeStatusRole.h"
@@ -96,8 +98,7 @@ void WinAPIDock::initializeUi()
     processPanelLayout->setSpacing(8);
 
     QLabel* const processTitleLabel = new QLabel(QStringLiteral("目标进程"), m_processPanel);
-    processTitleLabel->setStyleSheet(
-        QStringLiteral("color:%1;font-weight:600;").arg(KswordTheme::PrimaryBlueHex));
+    ks::ui::StylePrimarySectionTitle(processTitleLabel);
 
     m_processIconLabel = new QLabel(m_processPanel);
     m_processIconLabel->setFixedSize(24, 24);
@@ -443,7 +444,6 @@ void WinAPIDock::initializeUi()
             QStringLiteral("错误值"),
             QStringLiteral("32 位栈清理字节")
         });
-    m_fakeRuleTable->horizontalHeader()->setStyleSheet(blueHeaderStyle());
     m_fakeRuleTable->horizontalHeader()->setSectionResizeMode(FakeRuleColumnModule, QHeaderView::ResizeToContents);
     m_fakeRuleTable->horizontalHeader()->setSectionResizeMode(FakeRuleColumnApi, QHeaderView::ResizeToContents);
     m_fakeRuleTable->horizontalHeader()->setSectionResizeMode(FakeRuleColumnReturnType, QHeaderView::ResizeToContents);
@@ -451,7 +451,6 @@ void WinAPIDock::initializeUi()
     m_fakeRuleTable->horizontalHeader()->setSectionResizeMode(FakeRuleColumnLastErrorKind, QHeaderView::ResizeToContents);
     m_fakeRuleTable->horizontalHeader()->setSectionResizeMode(FakeRuleColumnLastErrorValue, QHeaderView::ResizeToContents);
     m_fakeRuleTable->horizontalHeader()->setSectionResizeMode(FakeRuleColumnX86StackBytes, QHeaderView::Stretch);
-    m_fakeRuleTable->setStyleSheet(blueInputStyle());
     m_fakeRuleTable->setMaximumHeight(170);
     fakeSuccessLayout->addWidget(m_fakeRuleTable, 0);
 
@@ -463,8 +462,9 @@ void WinAPIDock::initializeUi()
     workspace->parameters()->addWidget(ks::ui::FoldParameterSection(fakeSuccessPanel));
 
     m_filterPanel = new QWidget(this);
+    ks::ui::StylePrimaryToolbar(m_filterPanel);
     QHBoxLayout* const filterLayout = new QHBoxLayout(m_filterPanel);
-    filterLayout->setContentsMargins(0, 0, 0, 0);
+    filterLayout->setContentsMargins(8, 6, 8, 6);
     filterLayout->setSpacing(6);
 
     m_eventFilterEdit = new QLineEdit(m_filterPanel);
@@ -490,9 +490,9 @@ void WinAPIDock::initializeUi()
     filterLayout->addWidget(m_eventFilterClearButton, 0);
     filterLayout->addWidget(m_eventKeepBottomCheck, 0);
     filterLayout->addWidget(m_eventFilterStatusLabel, 0);
-    ks::ui::NormalizeToolbarRow(filterLayout);
     filterLayout->addWidget(m_exportButton);
     filterLayout->addWidget(m_clearEventButton);
+    ks::ui::NormalizeToolbarRow(filterLayout);
     workspace->results()->addWidget(m_filterPanel);
 
     m_eventTable = new ks::ui::VisibleTableWidget(this);
@@ -513,7 +513,6 @@ void WinAPIDock::initializeUi()
             QStringLiteral("PID/TID"),
             QStringLiteral("详情")
         });
-    m_eventTable->horizontalHeader()->setStyleSheet(blueHeaderStyle());
     m_eventTable->horizontalHeader()->setSectionResizeMode(QHeaderView::Interactive);
     m_eventTable->setColumnWidth(EventColumnTime100ns, 160);
     m_eventTable->setColumnWidth(EventColumnCategory, 72);
@@ -521,7 +520,6 @@ void WinAPIDock::initializeUi()
     m_eventTable->setColumnWidth(EventColumnResult, 100);
     m_eventTable->setColumnWidth(EventColumnPidTid, 112);
     m_eventTable->setColumnWidth(EventColumnDetail, 440);
-    m_eventTable->setStyleSheet(blueInputStyle());
     m_eventTable->setAutoFillBackground(false);
     m_eventTable->setAttribute(Qt::WA_StyledBackground, true);
     if (m_eventTable->viewport() != nullptr)
@@ -536,6 +534,7 @@ void WinAPIDock::initializeUi()
     auto* coverageLayout = new QVBoxLayout(coveragePanel);
     auto* coverageFilterLayout = new QHBoxLayout();
     m_coveragePidCombo = new QComboBox(coveragePanel);
+    ks::ui::StylePrimaryCombo(m_coveragePidCombo);
     m_coveragePidCombo->setToolTip(QStringLiteral("选择覆盖快照的进程 PID"));
     m_coverageFilterEdit = new QLineEdit(coveragePanel);
     m_coverageFilterEdit->setPlaceholderText(QStringLiteral("筛选 API / Hook 类型 / 覆盖状态 / 原因"));
@@ -559,7 +558,6 @@ void WinAPIDock::initializeUi()
     m_coverageTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_coverageTable->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_coverageTable->setAlternatingRowColors(true);
-    m_coverageTable->setStyleSheet(blueInputStyle());
     m_coverageTable->horizontalHeader()->setSectionResizeMode(QHeaderView::Interactive);
     m_coverageTable->horizontalHeader()->setStretchLastSection(true);
     m_coverageTable->setColumnWidth(3, 240);
@@ -569,6 +567,22 @@ void WinAPIDock::initializeUi()
     m_resultTabs->addTab(coveragePanel, QStringLiteral("API 覆盖"));
     workspace->results()->addWidget(m_resultTabs, 1);
     workspace->finish();
+
+    // 参数已有统一输入面，结果工具行只登记明确动作，避免套第二层高亮配置底板。
+    for (QPushButton* button : {m_processRefreshButton, m_browseAgentDllButton,
+        m_stopButton, m_exportButton, m_clearEventButton, m_eventFilterClearButton,
+        m_fakeAddRuleButton, m_fakeRemoveRuleButton, m_fakeStopRuleButton})
+    {
+        ks::ui::ApplyFlatButtonTheme(button, ks::ui::FlatButtonTone::Neutral,
+            ks::ui::FlatButtonAppearance::Solid);
+    }
+    for (QPushButton* button : {m_startButton, m_fakeApplyRuleButton})
+    {
+        ks::ui::ApplyFlatButtonTheme(button, ks::ui::FlatButtonTone::Accent,
+            ks::ui::FlatButtonAppearance::Solid);
+    }
+    ks::ui::ApplyFlatButtonTheme(m_terminateHookButton, ks::ui::FlatButtonTone::Danger,
+        ks::ui::FlatButtonAppearance::Solid);
     connect(m_resultTabs, &QTabWidget::currentChanged, this, [this](int index) { if (index == 1 && m_coverageDirty) updateCoverageView(); });
     connect(m_coveragePidCombo, &QComboBox::currentIndexChanged, this, [this]() { updateCoverageView(); });
     connect(m_coverageFilterEdit, &QLineEdit::textChanged, this, [this]() { updateCoverageView(); });

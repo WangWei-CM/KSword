@@ -455,50 +455,6 @@ namespace
         }
         return true;
     }
-
-    // buildThreadButtonStyle 作用：
-    // - 提供线程页按钮统一蓝色样式；
-    // - 图标按钮和文字按钮共用同一套边框/悬停色逻辑。
-    QString buildThreadButtonStyle(const bool iconOnlyButton)
-    {
-        // 纯色按钮共用主题状态；保留页面原有紧凑尺寸。
-        return ks::ui::BuildFlatButtonStyle(ks::ui::FlatButtonTone::Neutral,
-            ks::ui::FlatButtonAppearance::Solid)
-            + QStringLiteral("QPushButton{border-radius:3px;padding:%1;}")
-                .arg(iconOnlyButton ? QStringLiteral("4px") : QStringLiteral("4px 10px"));
-    }
-
-    // buildThreadSearchStyle 作用：统一线程页搜索框边框与焦点色。
-    QString buildThreadSearchStyle()
-    {
-        return QStringLiteral(
-            "QLineEdit {"
-            "  border: 1px solid %2;"
-            "  border-radius: 3px;"
-            "  background: %3;"
-            "  color: %4;"
-            "  padding: 3px 5px;"
-            "}"
-            "QLineEdit:focus {"
-            "  border: 1px solid %1;"
-            "}")
-            .arg(KswordTheme::AccentHex(KswordTheme::AccentRole::Blue))
-            .arg(KswordTheme::BorderHex())
-            .arg(KswordTheme::SurfaceHex())
-            .arg(KswordTheme::TextPrimaryHex());
-    }
-
-    // buildThreadPresetButtonStyle：A/B 相邻按钮共用 checked 高亮，仅圆化外侧边角。
-    QString buildThreadPresetButtonStyle(const bool leftButton)
-    {
-        // A/B 选中态保持共享强调底色；只圆化组合外侧角，保留零间距。
-        const QString outerRadius = leftButton
-            ? QStringLiteral("border-top-left-radius:3px;border-bottom-left-radius:3px;")
-            : QStringLiteral("border-top-right-radius:3px;border-bottom-right-radius:3px;");
-        return ks::ui::BuildFlatButtonStyle()
-            + QStringLiteral("QPushButton{min-width:27px;max-width:27px;min-height:26px;max-height:26px;"
-                "padding:0px;font-weight:700;border-radius:0px;%1}").arg(outerRadius);
-    }
 }
 
 int ProcessDock::toThreadColumnIndex(const ThreadTableColumn column)
@@ -513,7 +469,8 @@ void ProcessDock::initializeThreadPage()
     // 2) 下方线程表格（支持排序、右键动作）。
     m_threadPage = new QWidget(this);
     m_threadPageLayout = new QVBoxLayout(m_threadPage);
-    m_threadPageLayout->setContentsMargins(6, 6, 6, 6);
+    // 页签与工具带连续，内部结果间距由页面布局保持。
+    m_threadPageLayout->setContentsMargins(6, 0, 6, 6);
     m_threadPageLayout->setSpacing(6);
 
     // 顶部操作栏控件：全部采用图标按钮 + Tooltip。
@@ -527,7 +484,8 @@ void ProcessDock::initializeThreadPage()
     m_threadRefreshButton = new QPushButton(QIcon(IconThreadRefresh), "", m_threadPage);
     KswordTheme::ApplyCompactIconButtonMetrics(m_threadRefreshButton);
     m_threadRefreshButton->setToolTip("刷新系统线程列表（优先 NtQuerySystemInformation）");
-    m_threadRefreshButton->setStyleSheet(buildThreadButtonStyle(true));
+    ks::ui::ApplyFlatButtonTheme(m_threadRefreshButton,
+        ks::ui::FlatButtonTone::Neutral, ks::ui::FlatButtonAppearance::Solid);
 
     // A/B 按钮必须相邻：A 默认高亮，B 提供地址与 R0 诊断列。
     m_threadColumnPresetWidget = new QWidget(m_threadPage);
@@ -575,7 +533,6 @@ void ProcessDock::initializeThreadPage()
     m_threadSearchLineEdit->setClearButtonEnabled(true);
     m_threadSearchLineEdit->setPlaceholderText("搜索 TID / PID / 进程名 / 状态 / 启动地址");
     m_threadSearchLineEdit->setToolTip("过滤当前线程列表，不触发新的系统查询");
-    m_threadSearchLineEdit->setStyleSheet(buildThreadSearchStyle());
     ks::ui::StyleSearchField(m_threadSearchLineEdit);
     m_threadSearchLineEdit->setMaximumWidth(360);
 
@@ -762,8 +719,7 @@ void ProcessDock::updateThreadColumnPresetButtons()
 
     const QSignalBlocker presetABlocker(m_threadColumnPresetAButton);
     const QSignalBlocker presetBBlocker(m_threadColumnPresetBButton);
-    m_threadColumnPresetAButton->setStyleSheet(buildThreadPresetButtonStyle(true));
-    m_threadColumnPresetBButton->setStyleSheet(buildThreadPresetButtonStyle(false));
+    // 分段宿主拥有圆角底面、选中滑块与前景；这里只同步原按钮状态，不能覆写其样式。
     m_threadColumnPresetAButton->setChecked(m_threadColumnLayout == ThreadColumnLayout::PresetA);
     m_threadColumnPresetBButton->setChecked(m_threadColumnLayout == ThreadColumnLayout::PresetB);
 }

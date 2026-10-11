@@ -3,6 +3,8 @@
 #include "../UI/ToolbarMetrics.h"
 #include "../UI/PageControlStyle.h"
 #include "../UI/ThemeBinding.h"
+#include "../UI/PrimaryPageStyle.h"
+#include "../UI/FlatButtonTheme.h"
 
 // ============================================================
 // DirectKernelCallMonitorWidget.cpp
@@ -117,21 +119,15 @@ namespace
             + KswordTheme::ThemedComboBoxStyle();
     }
 
-    QString blueHeaderStyle()
-    {
-        return QStringLiteral(
-            "QHeaderView::section{color:%1;background:transparent;/* %2 */border:1px solid %3;padding:4px;font-weight:600;}")
-            .arg(KswordTheme::PrimaryBlueHex)
-            .arg(KswordTheme::SurfaceHex())
-            .arg(KswordTheme::BorderHex());
-    }
-
     QPushButton* createIconButton(QWidget* parentWidget, const QString& iconPath, const QString& tooltipText)
     {
         QPushButton* buttonPointer = new QPushButton(QIcon(iconPath), QString(), parentWidget);
         buttonPointer->setToolTip(tooltipText);
         buttonPointer->setFixedSize(QSize(30, 28));
         buttonPointer->setStyleSheet(blueButtonStyle());
+        // 采集页的明确操作按钮使用实底；标题栏和其它透明工具不走本工厂。
+        ks::ui::ApplyFlatButtonTheme(buttonPointer, ks::ui::FlatButtonTone::Neutral,
+            ks::ui::FlatButtonAppearance::Solid);
         return buttonPointer;
     }
 
@@ -371,6 +367,7 @@ void DirectKernelCallMonitorWidget::initializeUi()
     m_rootLayout->setSpacing(6);
 
     m_controlPanel = new QWidget(this);
+    ks::ui::StylePrimaryToolbar(m_controlPanel);
     QGridLayout* controlLayout = new QGridLayout(m_controlPanel);
     controlLayout->setContentsMargins(6, 6, 6, 6);
     controlLayout->setHorizontalSpacing(6);
@@ -379,7 +376,8 @@ void DirectKernelCallMonitorWidget::initializeUi()
     controlLayout->addWidget(new QLabel(QStringLiteral("目标 PID"), m_controlPanel), 0, 0);
     m_targetPidEdit = new QLineEdit(m_controlPanel);
     m_targetPidEdit->setPlaceholderText(QStringLiteral("多个 PID 用逗号/空格分隔；留空需勾选全局采集"));
-    m_targetPidEdit->setStyleSheet(blueInputStyle());
+    ks::ui::StyleStandaloneInput(m_targetPidEdit);
+    ks::ui::NormalizeToolbarControl(m_targetPidEdit);
     controlLayout->addWidget(m_targetPidEdit, 0, 1, 1, 3);
 
     m_globalCaptureCheck = new QCheckBox(QStringLiteral("全局采集"), m_controlPanel);
@@ -396,7 +394,8 @@ void DirectKernelCallMonitorWidget::initializeUi()
     m_maxRowsSpin->setRange(1000, 20000);
     m_maxRowsSpin->setSingleStep(1000);
     m_maxRowsSpin->setValue(12000);
-    m_maxRowsSpin->setStyleSheet(blueInputStyle());
+    ks::ui::StyleStandaloneInput(m_maxRowsSpin);
+    ks::ui::NormalizeToolbarControl(m_maxRowsSpin);
     controlLayout->addWidget(m_maxRowsSpin, 1, 1);
 
     controlLayout->addWidget(new QLabel(QStringLiteral("缓冲区(KB)"), m_controlPanel), 1, 2);
@@ -404,7 +403,8 @@ void DirectKernelCallMonitorWidget::initializeUi()
     m_bufferSizeSpin->setRange(64, 4096);
     m_bufferSizeSpin->setSingleStep(64);
     m_bufferSizeSpin->setValue(512);
-    m_bufferSizeSpin->setStyleSheet(blueInputStyle());
+    ks::ui::StyleStandaloneInput(m_bufferSizeSpin);
+    ks::ui::NormalizeToolbarControl(m_bufferSizeSpin);
     controlLayout->addWidget(m_bufferSizeSpin, 1, 3);
 
     m_reloadMapButton = createIconButton(
@@ -415,6 +415,8 @@ void DirectKernelCallMonitorWidget::initializeUi()
         m_controlPanel,
         QStringLiteral(":/Icon/process_start.svg"),
         QStringLiteral("开始直接内核调用监控"));
+    ks::ui::ApplyFlatButtonTheme(m_startButton, ks::ui::FlatButtonTone::Accent,
+        ks::ui::FlatButtonAppearance::Solid);
     m_stopButton = createIconButton(
         m_controlPanel,
         QStringLiteral(":/Icon/process_terminate.svg"),
@@ -456,6 +458,7 @@ void DirectKernelCallMonitorWidget::initializeUi()
     m_rootLayout->addWidget(m_controlPanel, 0);
 
     m_filterPanel = new QWidget(this);
+    ks::ui::StylePrimaryToolbar(m_filterPanel);
     QGridLayout* filterLayout = new QGridLayout(m_filterPanel);
     filterLayout->setContentsMargins(6, 6, 6, 6);
     filterLayout->setHorizontalSpacing(6);
@@ -532,7 +535,6 @@ void DirectKernelCallMonitorWidget::initializeUi()
     m_eventTable->setSelectionMode(QAbstractItemView::ExtendedSelection);
     m_eventTable->setContextMenuPolicy(Qt::CustomContextMenu);
     m_eventTable->verticalHeader()->setVisible(false);
-    m_eventTable->horizontalHeader()->setStyleSheet(blueHeaderStyle());
     m_eventTable->horizontalHeader()->setSectionResizeMode(QHeaderView::Interactive);
     m_eventTable->setColumnWidth(EventColumnTime100ns, 160);
     m_eventTable->setColumnWidth(EventColumnPidTid, 100);

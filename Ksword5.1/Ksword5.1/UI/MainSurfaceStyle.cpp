@@ -9,17 +9,19 @@ namespace ks::ui
     {
         MainSurfaceColors colors; // 不使用固定 RGB，保留深浅模式与用户背景种子。
         colors.canvas = KswordTheme::BlendColors(
-            KswordTheme::MainBackgroundColor(), KswordTheme::SurfaceColor(), 48);
+            KswordTheme::MainBackgroundColor(), KswordTheme::SurfaceColor(), 16);
         colors.content = KswordTheme::BlendColors(
-            KswordTheme::SurfaceColor(), KswordTheme::SurfaceAltColor(), 48);
+            KswordTheme::MainBackgroundColor(), KswordTheme::SurfaceColor(), 175);
+        // 内容、工具带和表头直接从同一组种子求值，嵌套再深也不逐层抬高明度。
         colors.alternate = KswordTheme::BlendColors(
-            colors.content, KswordTheme::SurfaceAltColor(), 80);
+            colors.content, KswordTheme::SurfaceAltColor(), 48);
         colors.toolbar = KswordTheme::BlendColors(
-            colors.content, KswordTheme::SurfaceAltColor(), 140);
+            colors.content, KswordTheme::SurfaceAltColor(), 72);
         colors.header = KswordTheme::BlendColors(
-            KswordTheme::SurfaceAltColor(), KswordTheme::SurfaceMutedColor(), 160);
+            colors.content, KswordTheme::SurfaceAltColor(), 112);
+        colors.input = KswordTheme::ControlInputSurfaceColor(colors.content, colors.header);
         colors.border = KswordTheme::BlendColors(
-            colors.content, KswordTheme::BorderColor(), 140);
+            colors.content, KswordTheme::BorderColor(), 90);
         return colors;
     }
 
@@ -39,11 +41,14 @@ namespace ks::ui
             KswordTheme::TextPrimaryColor(), colors.content, 4.5);
         // 仅为主工作区的结构容器分层，不给每个 QWidget 画底，也不接管单元格语义色。
         return QStringLiteral(
-            "ads--CDockAreaWidget,ads--CDockWidget > QWidget,ads--CDockWidget QTabWidget::pane{background:%1 !important;}"
+            "ads--CDockAreaWidget,ads--CDockWidget > QWidget{background:%1 !important;}"
+            "ads--CDockWidget QTabWidget > QStackedWidget{background:%1;}"
+            "ads--CDockWidget QTabWidget > QStackedWidget > QWidget{background:%1;}"
             "ads--CDockWidget QListView,ads--CDockWidget QListWidget,ads--CDockWidget QTextEdit,ads--CDockWidget QPlainTextEdit{"
-            "background:%2 !important;color:%3;alternate-background-color:%4;}"
+            "background:%2 !important;color:%3;alternate-background-color:%4;border-radius:8px;}"
+            "ads--CDockWidget QGroupBox{background:%2;border-radius:8px;}"
             "ads--CDockWidget QFrame#card,ads--CDockWidget QWidget#card{"
-            "background:%2;border-color:%5;}")
+            "background:%2;border-color:%5;border-radius:8px;}")
             .arg(colors.canvas.name(), colors.content.name(), text.name(),
                 colors.alternate.name(), colors.border.name());
     }

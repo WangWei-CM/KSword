@@ -2,6 +2,7 @@
 #include "UI/ToolbarMetrics.h"
 #include "UI/SecondaryPageLayout.h"
 #include "UI/MainSurfaceStyle.h"
+#include "UI/PageControlStyle.h"
 #include "UI/PageNavigationBridge.h"
 #include "UI/McpLocalBridge.h"
 #include "UI/McpHexCanvasAdapter.h"
@@ -13022,16 +13023,7 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
         KswordTheme::SurfaceColor(),
         darkModeEnabled ? 240 : 242);
     const QString panelBorderColor = borderColorText;
-    const QString inactiveTabColor = surfaceAltBackgroundText;
-    const QString inactiveTabTextColor = primaryTextColor;
-    const QString activeTabColor = KswordTheme::ActiveTabBackgroundHex();
-    const QString activeTabTextColor = KswordTheme::ActiveTabTextHex();
-    // normalTabHoverColor 作用：
-    // - 只控制普通 QTabBar 的未选中悬停态；
-    // - 浅色模式使用明确的浅灰色，避免继承/回退到黑色背景；
-    // - ADS Dock tab 继续使用下面的 dockTabChildHoverColor，不在这里改动。
-    const QString normalTabHoverColor = KswordTheme::ThemeColorName(
-        darkModeEnabled ? KswordTheme::PrimaryBlueSubtleColor() : KswordTheme::SurfaceMutedColor());
+
     const QString tooltipStyle = QStringLiteral(
         "QToolTip{"
         "  background-color:%1 !important;"
@@ -13128,7 +13120,7 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
         "}"
         "QTabWidget::pane{"
         "  border:none !important;"
-        "  border-radius:0px;"
+        "  border-radius:8px;"
         "  background:%2 !important;"
         "  top:0px;"
         "}")
@@ -13142,29 +13134,8 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
     const QString buttonInteractionStyle = ks::ui::BuildFlatButtonStyle(
         ks::ui::FlatButtonTone::Neutral);
 
-    // tabStyle 作用：统一普通 Tab 与 ADS Dock Tab 的颜色、边距和选中态。
-    // 字号不在这里设置，保证所有 Tab 栏继承 Qt 默认应用字号。
-    const QString tabStyle = QStringLiteral(
-        "QTabBar{border:none !important;}"
-        "QTabBar::tab{"
-        " background-color:%1 !important;color:%2 !important;"
-        " border:none !important;border-radius:0px !important;"
-        " padding:3px 12px;min-height:22px;margin:0px;}"
-        "QTabBar::tab:left,QTabBar::tab:right{padding:5px 6px;}"
-        "QTabBar::tab:selected{"
-        " background-color:%3 !important;color:%4 !important;font-weight:700;}"
-        "QTabBar::tab:hover:!selected,"
-        "QMainWindow QTabBar::tab:hover:!selected,"
-        "QMainWindow QTabBar::tab:pressed:!selected{"
-        " background-color:%5 !important;background:%5 !important;color:%2 !important;}"
-        "QMainWindow QTabBar::tab:selected:hover,"
-        "QMainWindow QTabBar::tab:selected:pressed{"
-        " background-color:%3 !important;background:%3 !important;color:%4 !important;}")
-        .arg(inactiveTabColor)
-        .arg(inactiveTabTextColor)
-        .arg(activeTabColor)
-        .arg(activeTabTextColor)
-        .arg(normalTabHoverColor);
+    // 普通业务标签共用完整状态和圆角；ADS 主导航继续使用独立 Dock 角色。
+    const QString tabStyle = ks::ui::BuildPageTabsStyleSheet(!enableDockContentTransparency);
 
     const QString sharedOverlayStyle = depthOverlayStyle
         + buttonInteractionStyle
@@ -13347,34 +13318,8 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
         "}")
         .arg(surfaceBackgroundText)
         .arg(primaryTextColor);
-    // finalOrdinaryTabHoverStyle 作用：
-    // - 作为普通 QTabWidget/QTabBar 的最终 hover/pressed 兜底；
-    // - 深色模式使用深灰、浅色模式使用浅灰，避免基础 QSS 或平台 palette 反向回退；
-    // - 选择器刻意避开 ads--CDockWidgetTab/ads--CAutoHideTab，所以不影响 ADS Dock 标签。
-    const QString ordinaryTabHoverColor = darkModeEnabled
-        ? KswordTheme::SurfaceMutedColorHex()
-        : KswordTheme::SurfaceAltColorHex();
-    const QString finalOrdinaryTabHoverStyle = QStringLiteral(
-        "QMainWindow QTabWidget QTabBar::tab:hover:!selected,"
-        "QMainWindow QTabWidget QTabBar::tab:pressed:!selected,"
-        "QTabWidget QTabBar::tab:hover:!selected,"
-        "QTabWidget QTabBar::tab:pressed:!selected{"
-        "  background-color:%1 !important;"
-        "  background:%1 !important;"
-        "  color:%2 !important;"
-        "}"
-        "QMainWindow QTabWidget QTabBar::tab:selected:hover,"
-        "QMainWindow QTabWidget QTabBar::tab:selected:pressed,"
-        "QTabWidget QTabBar::tab:selected:hover,"
-        "QTabWidget QTabBar::tab:selected:pressed{"
-        "  background-color:%3 !important;"
-        "  background:%3 !important;"
-        "  color:%4 !important;"
-        "}")
-        .arg(ordinaryTabHoverColor)
-        .arg(primaryTextColor)
-        .arg(activeTabColor)
-        .arg(activeTabTextColor);
+    // 普通页签最后追加相同状态规则，避免旧hover兜底重写已统一的底面和文字。
+    const QString finalOrdinaryTabHoverStyle = ks::ui::BuildPageTabsStyleSheet(!enableDockContentTransparency);
 
     if (!darkModeEnabled)
     {

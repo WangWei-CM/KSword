@@ -1,6 +1,7 @@
 #include "../Framework.h"
 #include "ThemeAccentIcon.h"
 #include "./FlatButtonTheme.h"
+#include "./PageControlStyle.h"
 #include "../theme.h"
 
 #include <QIconEngine>
@@ -104,18 +105,14 @@ namespace ks::ui
                 // 弱底色 Tab 的 Active/Selected 仍在中性表面上，不能校准到强调色底。
                 if (m_neutralTab)
                 {
-                    const QColor base = KswordTheme::SurfaceColor();
-                    const QColor parentBase = KswordTheme::SurfaceAltColor();
-                    const QColor backgrounds[] = {KswordTheme::WindowColor(), base, parentBase,
-                        KswordTheme::BlendColors(base, KswordTheme::ControlAccentColor(), 38),
-                        KswordTheme::BlendColors(parentBase, KswordTheme::ControlAccentColor(), 38)};
                     const QColor preferred = mode == QIcon::Disabled
                         ? KswordTheme::TextDisabledColor() : accent;
                     if (flatButtonBackgroundKnown != nullptr)
                     {
                         *flatButtonBackgroundKnown = true;
                     }
-                    return KswordTheme::EnsureTextContrastForBackgrounds(preferred, backgrounds, 5, 3.0);
+                    // 普通标签可能请求任意模式，按共享父/子导航真实底面统一校准。
+                    return PageTabIconContrastColor(preferred);
                 }
 
                 // buttonBackground 用途：仅由共享按钮组件确认拥有的实际状态底色。

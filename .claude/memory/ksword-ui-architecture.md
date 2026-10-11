@@ -243,3 +243,9 @@ KSword 主程序位于 `Ksword5.1/Ksword5.1`（Qt 6.9.3 Widgets + Qt Advanced Do
 - 参数框架参考图使用无描边的色块，禁止复用带 1px 外框的 `StylePrimaryContentPanel`。只保留低对比度分隔线；原生 QToolButton 的 arrowType 会产生亮色大三角，折叠标题改为自绘小号空心折角。参数分组使用自然高度，避免 QGridLayout 将额外高度均分为巨大行距。编辑区应同时绑定 QSS 和 palette，保证 CodeTextEdit 行号、当前行与语法色采样到真实底色；只读结果与面板同底，编辑输入单独铺底。
 - 参数面板和结果面板采用 16px 等边内边距、至少 10pt/14px 字号。横向适配同时依赖页面拆多列、组合框最小内容宽度、QFormLayout 换行和长选项文字换行，不能仅隐藏水平条。原 QCheckBox/QRadioButton 保留对象/文本/可访问性/信号，只在明确参数区自绘换行标签与测量高度；标签点击仍交给原生按钮处理。折叠标题自绘省略文本后必须同步缩小 minimumSizeHint，否则原生长标题仍会撑宽参数栏。
 - 参数/日志并非固定窄左宽右。页面可用 `useWideParameterLayout(percent)` 明确分配宽屏比例，`ArrangeParameterColumns` 显式指定两列分区，窄屏恢复原阅读顺序；保留用户拖动比例。请求构造与创建进程等日志较少页面默认展开常用参数。普通状态/专业页使用 `StyleWorkspacePage`、无描边 `StylePrimaryContentPanel(false)`、`StyleWorkspaceTextViews` 单独更新，不因不适合参数框架就保留旧透明控件。无描边面板在独立窗口也必须有实底；边框 QSS 的替换参数保持连续，不能把带未替换 %N 的字符串再作为参数注入。
+
+## 导航连接与固定表面层级（2026-10-11）
+
+- 普通页签由 `UI/PageControlStyle.cpp` 共用完整状态样式；明确登记的 `QTabWidget` 增加贯穿宽度的导航底面和下沿 8px 凹角，保留原 TabBar/StackedWidget、页序与鼠标命中。子栏取消旧顶部 6px 间隔，仅保留左缩进；外层只有一个 Tab 的布局只收紧顶部，不压缩页内留白。ADS 外壳自身间隔为 0，普通页签与 ADS 主导航仍各自保留角色。
+- 主窗口底板、内容、工具带、表头、输入直接从 `MainWindowSurfaceColors` 固定求值，不能从每层父 palette 再抬高明度。大面板/工具底统一 8px，独立按钮/输入 5px；同一组件内部拼接处允许 0px（参数执行区、冻结辅助窗格和数值框内部编辑器）。背景图/穿透模式仍走既有保护。
+- `StyleStandaloneInput` 为未绑定的明确独立输入补完整颜色绑定，已有业务绑定只对齐圆角；单行字段用 `BindLineEditTheme`，搜索沿用同一配色但保留原过滤行为。主页面按钮、搜索、数值框和下拉框共用固定输入层，正常/悬停/焦点文字单独校准对比，输入背景校准保留中性色相。线程 A/B 不得在状态更新时重写旧 FlatButton QSS；纯工具动作需明确实底，内部清除/导航等例外按用途选择。

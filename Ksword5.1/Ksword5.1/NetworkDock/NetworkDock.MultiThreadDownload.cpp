@@ -780,14 +780,18 @@ void NetworkDock::initializeMultiThreadDownloadTab()
 
     m_multiDownloadBrowseDirButton = new QPushButton(m_multiThreadDownloadPage);
     // 此动作使用纯色主题，保留页面原有图标、状态和业务连接。
-    ks::ui::ApplyFlatButtonTheme(m_multiDownloadBrowseDirButton, ks::ui::FlatButtonTone::Neutral);
+    ks::ui::ApplyFlatButtonTheme(m_multiDownloadBrowseDirButton, ks::ui::FlatButtonTone::Neutral,
+        ks::ui::FlatButtonAppearance::Solid);
     m_multiDownloadBrowseDirButton->setIcon(QIcon(":/Icon/file_find.svg"));
+    KswordTheme::ApplyCompactIconButtonMetrics(m_multiDownloadBrowseDirButton);
     m_multiDownloadBrowseDirButton->setToolTip(QStringLiteral("选择下载目录"));
 
     m_multiDownloadStartButton = new QPushButton(m_multiThreadDownloadPage);
     // 此动作使用纯色主题，保留页面原有图标、状态和业务连接。
-    ks::ui::ApplyFlatButtonTheme(m_multiDownloadStartButton, ks::ui::FlatButtonTone::Accent);
+    ks::ui::ApplyFlatButtonTheme(m_multiDownloadStartButton, ks::ui::FlatButtonTone::Accent,
+        ks::ui::FlatButtonAppearance::Solid);
     m_multiDownloadStartButton->setIcon(QIcon(":/Icon/process_start.svg"));
+    KswordTheme::ApplyCompactIconButtonMetrics(m_multiDownloadStartButton);
     m_multiDownloadStartButton->setToolTip(QStringLiteral("启动新的多线程下载任务"));
 
     m_multiDownloadStatusLabel = new QLabel(QStringLiteral("状态：等待下载任务"), m_multiThreadDownloadPage);
@@ -797,6 +801,8 @@ void NetworkDock::initializeMultiThreadDownloadTab()
     auto* directoryRow = new QHBoxLayout; // 目录选择按钮继续紧邻路径。
     directoryRow->addWidget(m_multiDownloadSaveDirEdit, 1);
     directoryRow->addWidget(m_multiDownloadBrowseDirButton);
+    // 路径与浏览动作作为同一工具行对齐，保持输入伸缩和统一的 8px 间距。
+    ks::ui::NormalizeToolbarRow(directoryRow);
     downloadForm->addRow(urlLabel, m_multiDownloadUrlEdit);
     downloadForm->addRow(dirLabel, directoryRow);
     downloadForm->addRow(threadLabel, m_multiDownloadThreadCountSpin);
@@ -827,9 +833,12 @@ void NetworkDock::initializeMultiThreadDownloadTab()
 
     m_multiDownloadSaveCaptureSettingsButton = new QPushButton(captureSettingsGroup);
     // 此动作使用纯色主题，保留页面原有图标、状态和业务连接。
-    ks::ui::ApplyFlatButtonTheme(m_multiDownloadSaveCaptureSettingsButton, ks::ui::FlatButtonTone::Accent);
+    ks::ui::ApplyFlatButtonTheme(m_multiDownloadSaveCaptureSettingsButton, ks::ui::FlatButtonTone::Accent,
+        ks::ui::FlatButtonAppearance::Solid);
     m_multiDownloadSaveCaptureSettingsButton->setIcon(QIcon(":/Icon/codeeditor_save.svg"));
+    KswordTheme::ApplyCompactIconButtonMetrics(m_multiDownloadSaveCaptureSettingsButton);
     m_multiDownloadSaveCaptureSettingsButton->setToolTip(QStringLiteral("保存下载捕获设置到 JSON"));
+    ks::ui::NormalizeToolbarControl(m_multiDownloadSaveCaptureSettingsButton);
 
     QLabel* captureHintLabel = new QLabel(
         QStringLiteral("提示：剪贴板询问框为非阻塞窗口，不会阻塞主界面操作。"),

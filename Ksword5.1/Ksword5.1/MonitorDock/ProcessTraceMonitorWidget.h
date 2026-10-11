@@ -324,7 +324,7 @@ private:
     static QString blueButtonStyle();
     static QString blueInputStyle();
     static QString blueHeaderStyle();
-    static QString collapsePanelStyle();
+    static QString collapsePanelStyle(const QWidget* panel);
     static QString collapseHeaderButtonStyle();
     static void refreshCollapseTheme(QWidget* rootWidget);
     static QString providerTypeFromName(const QString& providerNameText);

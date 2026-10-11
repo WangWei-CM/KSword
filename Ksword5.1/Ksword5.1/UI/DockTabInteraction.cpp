@@ -311,6 +311,13 @@ namespace ks::ui
             {
                 return;
             }
+            // ADS 标题栏与所属内容使用同一外壳，中间不另留布局缝隙。
+            // 不触碰任何业务页面自己的内容留白、滚动或专业分栏。
+            if (QLayout* areaLayout = dockArea->layout())
+            {
+                areaLayout->setContentsMargins(0, 0, 0, 0);
+                areaLayout->setSpacing(0);
+            }
             tabBar->setProperty(kInstalledProperty, true);
             new DockTabScroller(dockArea->titleBar());
         }

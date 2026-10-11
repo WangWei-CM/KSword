@@ -4102,30 +4102,19 @@ namespace
         return false;
     }
 
-    // 统一按钮蓝色样式，和现有主题风格保持一致。
+    // 进程页独立操作统一使用有底面的按钮；显式工具入口也与正文按钮共用圆角。
     QString buildBlueButtonStyle(const bool iconOnlyButton,
-        ks::ui::FlatButtonAppearance appearance = ks::ui::FlatButtonAppearance::Auto)
+        ks::ui::FlatButtonAppearance appearance = ks::ui::FlatButtonAppearance::Solid)
     {
-        // 图标工具保持透明常态，普通表单操作保留可辨识实底；几何仍由原参数决定。
-        if (iconOnlyButton && appearance == ks::ui::FlatButtonAppearance::Auto)
-        {
-            appearance = ks::ui::FlatButtonAppearance::Flat;
-        }
         return ks::ui::BuildFlatButtonStyle(ks::ui::FlatButtonTone::Neutral, appearance)
-            + QStringLiteral("QPushButton{border-radius:3px;padding:%1;}")
+            + QStringLiteral("QPushButton{border-radius:5px;padding:%1;}")
                 .arg(iconOnlyButton ? QStringLiteral("4px") : QStringLiteral("4px 10px"));
-    }
-
-    // 下拉框复用共享输入面，保持与数值框和搜索框的中性层次一致。
-    QString buildBlueComboBoxStyle()
-    {
-        return KswordTheme::ThemedComboBoxStyle();
     }
 
     // buildBlueComboBoxPopupViewStyle 作用：
     // - 给 QComboBox::view() 直接设置弹出列表样式；
     // - QComboBox 的 popup 是独立 item view，父级选择器在某些 Qt/Windows 主题下压不住白底；
-    // - 返回：仅作用于 popup view 的 QSS，主框样式仍由 buildBlueComboBoxStyle 负责。
+    // - 返回：仅作用于 popup view 的 QSS，主框样式由共享 StylePrimaryCombo 负责。
     QString buildBlueComboBoxPopupViewStyle()
     {
         return KswordTheme::ThemedComboBoxPopupViewStyle();
@@ -4148,11 +4137,9 @@ namespace
             KswordTheme::TextPrimaryColor(), comboBackgroundColor);
         const QColor popupBackgroundColor = KswordTheme::SurfaceAltColor();
 
-        comboBoxPointer->setStyleSheet(buildBlueComboBoxStyle());
-        if (comboBoxPointer->property("ksword_standalone_input").toBool())
-        {
-            ks::ui::StyleStandaloneInput(comboBoxPointer);
-        }
+        // 主框只由共享组合框样式拥有，避免刷新进程数据时重置圆角或覆盖主题绑定。
+        ks::ui::StylePrimaryCombo(comboBoxPointer);
+        ks::ui::StyleStandaloneInput(comboBoxPointer);
 
         QPalette comboPalette = comboBoxPointer->palette();
         comboPalette.setColor(QPalette::Base, comboBackgroundColor);
@@ -4990,7 +4977,8 @@ void ProcessDock::initializeUi()
     // “进程列表”页是本模块核心页面。
     m_processListPage = new QWidget(this);
     m_processPageLayout = new QVBoxLayout(m_processListPage);
-    m_processPageLayout->setContentsMargins(6, 6, 6, 6);
+    // 页签下方直接接工具面；左右和底部仍保留原有密度留白。
+    m_processPageLayout->setContentsMargins(6, 0, 6, 6);
     m_processPageLayout->setSpacing(6);
 
     // 初始化上方控制栏和下方表格。
@@ -5172,7 +5160,6 @@ void ProcessDock::initializeTopControls()
         m_processSearchLineEdit,
         QStringLiteral("process.tooltip.search"),
         QStringLiteral("切到进程列表页后可直接输入搜索词"));
-    m_processSearchLineEdit->setStyleSheet(buildBlueLineEditStyle());
     ks::ui::StyleSearchField(m_processSearchLineEdit);
     m_processSearchLineEdit->setMaximumWidth(320);
 
@@ -5284,7 +5271,8 @@ void ProcessDock::initializeTopControls()
         m_columnChooserButton,
         QStringLiteral("process.tooltip.column_chooser"),
         QStringLiteral("添加或移除进程列表中显示的列。"));
-    m_columnChooserButton->setStyleSheet(buildBlueButtonStyle(false, ks::ui::FlatButtonAppearance::Solid));
+    ks::ui::ApplyFlatButtonTheme(m_columnChooserButton,
+        ks::ui::FlatButtonTone::Neutral, ks::ui::FlatButtonAppearance::Solid);
 
     // 进程列表设置入口：仅显示齿轮图标，具体选项在独立窗口中即时生效。
     m_processSettingsButton = new QPushButton(QIcon(QStringLiteral(":/Icon/process_settings.svg")), QString(), this);
@@ -5295,11 +5283,12 @@ void ProcessDock::initializeTopControls()
         QStringLiteral("process.tooltip.settings"),
         QStringLiteral("打开进程列表设置"));
 
-    // 按钮统一蓝色风格（图标按钮版本）。
-    const QString buttonStyle = buildBlueButtonStyle(true, ks::ui::FlatButtonAppearance::Solid);
-    m_startButton->setStyleSheet(buttonStyle);
-    m_pauseButton->setStyleSheet(buttonStyle);
-    m_processSettingsButton->setStyleSheet(buttonStyle);
+    // 显式独立图标动作共用实底和状态前景，避免悬停与主题切换后退回局部旧色。
+    for (QPushButton* action : { m_startButton, m_pauseButton, m_processSettingsButton })
+    {
+        ks::ui::ApplyFlatButtonTheme(action,
+            ks::ui::FlatButtonTone::Neutral, ks::ui::FlatButtonAppearance::Solid);
+    }
 
     // 第一行按功能顺序排列，所有相邻控件统一使用布局的 8px 间距：
     // ① 枚举与视图：决定“列出哪些进程、怎么组织”；
@@ -5345,7 +5334,8 @@ void ProcessDock::initializeProcessActivityPanel()
         m_activityClearButton,
         QStringLiteral("process.activity.tooltip.clear"),
         QStringLiteral("清空当前刷新同步记录的进程活动样本。"));
-    m_activityClearButton->setStyleSheet(buildBlueButtonStyle(false, ks::ui::FlatButtonAppearance::Solid));
+    ks::ui::ApplyFlatButtonTheme(m_activityClearButton,
+        ks::ui::FlatButtonTone::Neutral, ks::ui::FlatButtonAppearance::Solid);
 
     m_activityHistoryModeCombo = new QComboBox(m_activityPanelWidget);
     m_activityHistoryModeCombo->addItem(QStringLiteral("不记录历史"), static_cast<int>(ActivityHistoryMode::None));
@@ -5380,19 +5370,18 @@ void ProcessDock::initializeProcessActivityPanel()
         QStringLiteral("process.activity.history.tooltip.limit"),
         QStringLiteral("保留最近的采样次数，默认 50 次；减少次数会立即移除更早的历史样本。"));
 
-    const QString metricButtonStyle = ks::ui::BuildFlatButtonStyle()
-        + QStringLiteral("QPushButton{border-radius:3px;padding:3px 8px;}");
-
     // 指标按钮必须可独立开关：
     // - 默认全部点亮，用户打开页面即可看到 CPU/内存/磁盘/网络/GPU 全部曲线；
     // - 后续可以按需关闭单项指标，避免曲线过密。
     auto createMetricButton =
-        [this, &metricButtonStyle](const QString& text, const bool checkedByDefault)
+        [this](const QString& text, const bool checkedByDefault)
         {
             QPushButton* button = new QPushButton(text, m_activityPanelWidget);
             button->setCheckable(true);
             button->setChecked(checkedByDefault);
-            button->setStyleSheet(metricButtonStyle);
+            // 指标是独立开关而非互斥分段；保留 checked 语义，共用工具按钮状态。
+            ks::ui::ApplyFlatButtonTheme(button,
+                ks::ui::FlatButtonTone::Neutral, ks::ui::FlatButtonAppearance::Solid);
             button->setToolTip(QStringLiteral("切换该指标是否绘制在上方百分比折线图中。"));
             return button;
         };
@@ -5425,7 +5414,9 @@ void ProcessDock::initializeProcessActivityPanel()
     ProcessWindowPickerDragButton* processPickerButton = new ProcessWindowPickerDragButton(m_activityPanelWidget);
     processPickerButton->setIcon(QIcon(IconWindowPickerTarget));
     KswordTheme::ApplyCompactIconButtonMetrics(processPickerButton);
-    processPickerButton->setStyleSheet(buildBlueButtonStyle(true));
+    // 拾取属于工具栏独立动作，不能使用透明常态把图标直接压在工具面上。
+    ks::ui::ApplyFlatButtonTheme(processPickerButton,
+        ks::ui::FlatButtonTone::Neutral, ks::ui::FlatButtonAppearance::Solid);
     processPickerButton->setToolTip(QStringLiteral("按住并拖拽准星到目标窗口，松开后按该窗口 PID 筛选进程并打开进程详细信息"));
     languageManager.bindToolTip(
         processPickerButton,

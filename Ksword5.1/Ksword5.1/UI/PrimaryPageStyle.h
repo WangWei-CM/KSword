@@ -11,13 +11,13 @@ namespace ks::ui
     void StylePrimaryCombo(QComboBox* combo);
 
     // 仅登记页面确认独立成块的输入框；组合控件内部编辑器和连体选择组不得调用。
-    // 只对齐外轮廓圆角，保持颜色、命中区域和原业务逻辑。
+    // 对齐外轮廓圆角；没有独立主题绑定时补齐输入角色，保留命中区域和业务逻辑。
     void StyleStandaloneInput(QWidget* input);
 
     // 已有功能分组保留完整细边界，只统一底面和标题，不创建卡片或改变内部布局。
     void StylePrimaryGroup(QGroupBox* group);
 
-    // toolbar 是页面明确建立的操作区；轻底面和下分界区分操作与结果，不遍历子控件。
+    // toolbar 是页面明确建立的操作区；圆角轻底面区分操作与结果，不遍历子控件。
     void StylePrimaryToolbar(QWidget* toolbar);
 
     // 图表等独立数据面由页面明确登记，与表格使用同层底色和轻边界。

@@ -18,8 +18,9 @@ using namespace network_dock_detail;
 void NetworkDock::initializeUi()
 {
     m_rootLayout = new QVBoxLayout(this);
-    m_rootLayout->setContentsMargins(4, 4, 4, 4);
-    m_rootLayout->setSpacing(4);
+    // 根层只有一个导航控件，去除额外外边距，使网络与进程页签保持同一接缝。
+    m_rootLayout->setContentsMargins(0, 0, 0, 0);
+    m_rootLayout->setSpacing(0);
 
     // 顶部横排 Tab：
     // - 网络功能页签数量已较多，改成顶部横排后避免左侧竖排标签挤出纵向滚动条；
@@ -75,18 +76,21 @@ void NetworkDock::initializeTrafficMonitorTab()
     // 此动作使用纯色主题，保留页面原有图标、状态和业务连接。
     ks::ui::ApplyFlatButtonTheme(m_startMonitorButton, ks::ui::FlatButtonTone::Accent, ks::ui::FlatButtonAppearance::Solid);
     m_startMonitorButton->setIcon(QIcon(":/Icon/process_start.svg"));
+    KswordTheme::ApplyCompactIconButtonMetrics(m_startMonitorButton);
     m_startMonitorButton->setToolTip(QStringLiteral("启动网络流量监控"));
 
     m_stopMonitorButton = new QPushButton(m_trafficMonitorPage);
     // 此动作使用纯色主题，保留页面原有图标、状态和业务连接。
     ks::ui::ApplyFlatButtonTheme(m_stopMonitorButton, ks::ui::FlatButtonTone::Neutral, ks::ui::FlatButtonAppearance::Solid);
     m_stopMonitorButton->setIcon(QIcon(":/Icon/process_pause.svg"));
+    KswordTheme::ApplyCompactIconButtonMetrics(m_stopMonitorButton);
     m_stopMonitorButton->setToolTip(QStringLiteral("停止网络流量监控"));
 
     m_clearPacketButton = new QPushButton(m_trafficMonitorPage);
     // 此动作使用纯色主题，保留页面原有图标、状态和业务连接。
     ks::ui::ApplyFlatButtonTheme(m_clearPacketButton, ks::ui::FlatButtonTone::Neutral, ks::ui::FlatButtonAppearance::Solid);
     m_clearPacketButton->setIcon(QIcon(":/Icon/log_clear.svg"));
+    KswordTheme::ApplyCompactIconButtonMetrics(m_clearPacketButton);
     m_clearPacketButton->setToolTip(QStringLiteral("清空当前流量列表"));
 
     m_networkPluginButton = new QPushButton(QStringLiteral("插件"), m_trafficMonitorPage);
@@ -121,6 +125,7 @@ void NetworkDock::initializeTrafficMonitorTab()
     m_monitorFilterToggleButton->setCheckable(true);
     m_monitorFilterToggleButton->setChecked(false);
     m_monitorFilterToggleButton->setIcon(QIcon(":/Icon/filter_funnel.svg"));
+    KswordTheme::ApplyCompactIconButtonMetrics(m_monitorFilterToggleButton);
     m_monitorFilterToggleButton->setToolTip(QStringLiteral("展开/收起网络筛选器配置"));
 
     QLabel* filterTitleLabel = new QLabel(QStringLiteral("网络筛选器"), m_trafficMonitorPage);
@@ -714,13 +719,15 @@ void NetworkDock::initializeManualRequestTab()
 
     m_manualExecuteButton = new QPushButton(QStringLiteral("执行请求"), actionGroup);
     // 此动作使用纯色主题，保留页面原有图标、状态和业务连接。
-    ks::ui::ApplyFlatButtonTheme(m_manualExecuteButton, ks::ui::FlatButtonTone::Accent);
+    ks::ui::ApplyFlatButtonTheme(m_manualExecuteButton, ks::ui::FlatButtonTone::Accent,
+        ks::ui::FlatButtonAppearance::Solid);
     m_manualExecuteButton->setIcon(QIcon(":/Icon/process_start.svg"));
     m_manualExecuteButton->setToolTip(QStringLiteral("按上方参数立即执行一次网络请求。"));
 
     m_manualResetButton = new QPushButton(QStringLiteral("恢复默认参数"), actionGroup);
     // 此动作使用纯色主题，保留页面原有图标、状态和业务连接。
-    ks::ui::ApplyFlatButtonTheme(m_manualResetButton, ks::ui::FlatButtonTone::Neutral);
+    ks::ui::ApplyFlatButtonTheme(m_manualResetButton, ks::ui::FlatButtonTone::Neutral,
+        ks::ui::FlatButtonAppearance::Solid);
     m_manualResetButton->setIcon(QIcon(":/Icon/log_clear.svg"));
     m_manualResetButton->setToolTip(QStringLiteral("重置请求构造页全部参数。"));
 

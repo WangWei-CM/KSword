@@ -1,5 +1,7 @@
 #include "NetworkDock.InternalCommon.h"
 #include "../UI/ToolbarMetrics.h"
+#include "../UI/PrimaryPageStyle.h"
+#include "../UI/FlatButtonTheme.h"
 #include "../UI/SecondaryPageLayout.h"
 #include <QFormLayout>
 
@@ -549,12 +551,17 @@ void NetworkDock::showMultiThreadDownloadClipboardPrompt(const QString& urlText)
     QLabel* urlLabel = new QLabel(QStringLiteral("下载 URL:"), promptDialog); // urlLabel：URL 输入框标题标签。
     QLineEdit* urlEdit = new QLineEdit(urlText, promptDialog); // urlEdit：可编辑确认的下载 URL 输入框。
     urlEdit->setToolTip(QStringLiteral("确认本次要下载的 HTTP/HTTPS 链接。"));
+    ks::ui::StyleStandaloneInput(urlEdit);
 
     QLabel* saveDirLabel = new QLabel(QStringLiteral("保存目录:"), promptDialog); // saveDirLabel：保存目录输入框标题标签。
     QLineEdit* saveDirEdit = new QLineEdit(defaultSaveDirectoryText, promptDialog); // saveDirEdit：可编辑确认的保存目录输入框。
     saveDirEdit->setToolTip(QStringLiteral("确认下载文件保存目录。"));
+    ks::ui::StyleStandaloneInput(saveDirEdit);
     QPushButton* browseButton = new QPushButton(promptDialog); // browseButton：保存目录浏览按钮。
     browseButton->setIcon(QIcon(":/Icon/file_find.svg"));
+    KswordTheme::ApplyCompactIconButtonMetrics(browseButton);
+    ks::ui::ApplyFlatButtonTheme(browseButton,
+        ks::ui::FlatButtonTone::Neutral, ks::ui::FlatButtonAppearance::Solid);
     browseButton->setToolTip(QStringLiteral("浏览并选择保存目录"));
 
     QHBoxLayout* saveDirLayout = new QHBoxLayout(); // saveDirLayout：保存目录行布局（输入框+浏览按钮）。
@@ -568,6 +575,11 @@ void NetworkDock::showMultiThreadDownloadClipboardPrompt(const QString& urlText)
     QPushButton* cancelButton = new QPushButton(QStringLiteral("取消下载"), promptDialog); // cancelButton：取消本次询问按钮。
     cancelButton->setIcon(QIcon(":/Icon/titlebar_close.svg"));
     cancelButton->setToolTip(QStringLiteral("关闭本次下载询问框，不创建任务"));
+    // 询问窗沿用下载页动作层级；确认与取消只改变外观，不改非模态业务行为。
+    ks::ui::ApplyFlatButtonTheme(startButton,
+        ks::ui::FlatButtonTone::Accent, ks::ui::FlatButtonAppearance::Solid);
+    ks::ui::ApplyFlatButtonTheme(cancelButton,
+        ks::ui::FlatButtonTone::Neutral, ks::ui::FlatButtonAppearance::Solid);
 
     // 下载参数用两行表单对齐；动作区独立绘制边界，不再混在字段之间。
     auto* footer = new QWidget(promptDialog);

@@ -100,9 +100,13 @@ PortDiagnosticsPage::PortDiagnosticsPage(QWidget* parent) : QWidget(parent)
     workspace->parameters()->addLayout(controls);
     workspace->actions()->addWidget(m_diagnose);
     workspace->actions()->addStretch();
-    ks::ui::ApplyFlatButtonTheme(m_diagnose);
-    ks::ui::ApplyFlatButtonTheme(m_release, ks::ui::FlatButtonTone::Danger);
-    ks::ui::ApplyFlatButtonTheme(m_disconnect);
+    // 诊断和结果行操作都是独立动作，底面与其他网络工具按钮统一。
+    ks::ui::ApplyFlatButtonTheme(m_diagnose,
+        ks::ui::FlatButtonTone::Neutral, ks::ui::FlatButtonAppearance::Solid);
+    ks::ui::ApplyFlatButtonTheme(m_release, ks::ui::FlatButtonTone::Danger,
+        ks::ui::FlatButtonAppearance::Solid);
+    ks::ui::ApplyFlatButtonTheme(m_disconnect,
+        ks::ui::FlatButtonTone::Neutral, ks::ui::FlatButtonAppearance::Solid);
     m_status = new QLabel(portText("输入本地端口后点击诊断。"), this);
     m_status->setWordWrap(true);
     workspace->parameters()->addWidget(m_status);
