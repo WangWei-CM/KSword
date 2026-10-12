@@ -831,7 +831,15 @@ namespace
         }
         else if (auto* container = qobject_cast<ads::CDockContainerWidget*>(rootWidget))
         {
-            dockWidgets = container->dockWidgets();
+            // 通用容器的汇总方法受保护，使用公开分区列表，仍不递归进入业务控件树。
+            for (int areaIndex = 0; areaIndex < container->dockAreaCount(); ++areaIndex)
+            {
+                ads::CDockAreaWidget* area = container->dockArea(areaIndex); // 当前真实 Dock 分区。
+                if (area != nullptr)
+                {
+                    dockWidgets.append(area->dockWidgets());
+                }
+            }
         }
         for (ads::CDockWidget* dockWidget : dockWidgets)
         {
