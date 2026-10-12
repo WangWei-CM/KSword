@@ -107,6 +107,7 @@
 #include "UI/DockTabInteraction.h"
 #include "UI/GlobalDialogTheme.h"
 #include "UI/GlobalUiBaseStyle.h"
+#include "UI/ThemedSlider.h"
 #include "UI/GlobalUiSearch.h"
 #include "UI/CommandExecutionPopup.h"
 #include "UI/WindowChrome.h"
@@ -5019,28 +5020,23 @@ namespace
             "  border-color:__DISABLED_OUTLINE__;background:__DISABLED_FILL__;image:url(__DASH_DISABLED_ICON__);"
             "}"
             "QRadioButton::indicator{"
-            "  width:15px;height:15px;"
-            "  border:2px solid __OUTLINE__;"
+            "  width:14px;height:14px;"
+            "  border:1px solid __OUTLINE__;"
             "  border-radius:8px;"
             "  background:__SURFACE__;"
             "  image:none;"
             "}"
             "QRadioButton::indicator:unchecked:hover{border-color:__ACCENT__;background:__SURFACE_ALT__; }"
-            "QRadioButton::indicator:checked{border-color:__ACCENT__;background:__ACCENT__;image:url(__RADIO_ICON__); }"
-            "QRadioButton::indicator:checked:hover{border-color:__ACCENT_HOVER__;background:__ACCENT_HOVER__;image:url(__RADIO_HOVER_ICON__); }"
-            "QRadioButton::indicator:checked:pressed{border-color:__ACCENT_PRESSED__;background:__ACCENT_PRESSED__;image:url(__RADIO_PRESSED_ICON__); }"
+            "QRadioButton::indicator:checked{border-color:__ACCENT__;background:__SURFACE__;image:url(__RADIO_ICON__); }"
+            "QRadioButton::indicator:checked:hover{border-color:__ACCENT_HOVER__;background:__SURFACE__;image:url(__RADIO_HOVER_ICON__); }"
+            "QRadioButton::indicator:checked:pressed{border-color:__ACCENT_PRESSED__;background:__SURFACE__;image:url(__RADIO_PRESSED_ICON__); }"
             "QRadioButton::indicator:disabled{border-color:__DISABLED_OUTLINE__;background:__SURFACE_MUTED__;image:none; }"
-            "QRadioButton::indicator:checked:disabled{border-color:__DISABLED_OUTLINE__;background:__DISABLED_FILL__;image:url(__RADIO_DISABLED_ICON__); }"
-            "QSlider::groove:horizontal{height:4px;border:1px solid __OUTLINE__;border-radius:2px;background:__SURFACE_MUTED__; }"
-            "QSlider::groove:vertical{width:4px;border:1px solid __OUTLINE__;border-radius:2px;background:__SURFACE_MUTED__; }"
-            "QSlider::handle:horizontal{width:14px;margin:-6px 0;border:2px solid __OUTLINE__;border-radius:8px;background:__ACCENT__; }"
-            "QSlider::handle:vertical{height:14px;margin:0 -6px;border:2px solid __OUTLINE__;border-radius:8px;background:__ACCENT__; }"
-            "QSlider::handle:horizontal:hover,QSlider::handle:vertical:hover{border-color:__ACCENT_HOVER__;background:__ACCENT_HOVER__; }"
-            "QSlider::handle:horizontal:pressed,QSlider::handle:vertical:pressed{border-color:__ACCENT_PRESSED__;background:__ACCENT_PRESSED__; }"
-            "QSlider::handle:horizontal:disabled,QSlider::handle:vertical:disabled{border-color:__DISABLED_OUTLINE__;background:__DISABLED_FILL__; }"
+            "QRadioButton::indicator:checked:disabled{border-color:__DISABLED_OUTLINE__;background:__SURFACE_MUTED__;image:url(__RADIO_DISABLED_ICON__); }"
+            "__STANDARD_SLIDER_RULES__"
             "__END_MARKER__\n");
 
         controlStyle.replace(QStringLiteral("__BEGIN_MARKER__"), QString::fromLatin1(kControlContrastStyleBeginMarker));
+        controlStyle.replace(QStringLiteral("__STANDARD_SLIDER_RULES__"), ks::ui::BuildStandardSliderStyle());
         controlStyle.replace(QStringLiteral("__END_MARKER__"), QString::fromLatin1(kControlContrastStyleEndMarker));
         controlStyle.replace(QStringLiteral("__SURFACE__"), KswordTheme::SurfaceColorHex());
         controlStyle.replace(QStringLiteral("__SURFACE_ALT__"), KswordTheme::SurfaceAltColorHex());
@@ -5060,10 +5056,10 @@ namespace
         controlStyle.replace(QStringLiteral("__DASH_HOVER_ICON__"), glyphPath(accentHoverColor, whiteDashPath));
         controlStyle.replace(QStringLiteral("__DASH_PRESSED_ICON__"), glyphPath(accentPressedColor, whiteDashPath));
         controlStyle.replace(QStringLiteral("__DASH_DISABLED_ICON__"), glyphPath(disabledFillColor, whiteDashPath, true));
-        controlStyle.replace(QStringLiteral("__RADIO_ICON__"), glyphPath(accentColor, whiteRadioPath));
-        controlStyle.replace(QStringLiteral("__RADIO_HOVER_ICON__"), glyphPath(accentHoverColor, whiteRadioPath));
-        controlStyle.replace(QStringLiteral("__RADIO_PRESSED_ICON__"), glyphPath(accentPressedColor, whiteRadioPath));
-        controlStyle.replace(QStringLiteral("__RADIO_DISABLED_ICON__"), glyphPath(disabledFillColor, whiteRadioPath, true));
+        controlStyle.replace(QStringLiteral("__RADIO_ICON__"), QLatin1Char('"') + ks::ui::ThemedControlGlyphPath(whiteRadioPath, accentColor) + QLatin1Char('"'));
+        controlStyle.replace(QStringLiteral("__RADIO_HOVER_ICON__"), QLatin1Char('"') + ks::ui::ThemedControlGlyphPath(whiteRadioPath, accentHoverColor) + QLatin1Char('"'));
+        controlStyle.replace(QStringLiteral("__RADIO_PRESSED_ICON__"), QLatin1Char('"') + ks::ui::ThemedControlGlyphPath(whiteRadioPath, accentPressedColor) + QLatin1Char('"'));
+        controlStyle.replace(QStringLiteral("__RADIO_DISABLED_ICON__"), QLatin1Char('"') + ks::ui::ThemedControlGlyphPath(whiteRadioPath, KswordTheme::TextDisabledColor()) + QLatin1Char('"'));
         return controlStyle;
     }
 
@@ -13348,41 +13344,39 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
         "ads--CDockAreaWidget{"
         "  border:0 !important;"
         "  border-radius:8px;"
-        "  background:%2 !important;"
+        "  background:%1 !important;"
         "}"
         "ads--CDockAreaTitleBar{"
         "  border-bottom:none !important;"
         "  padding:0px;"
         "}"
         "QFrame#card,QWidget#card{"
-        "  border:1px solid %1;"
+        "  border:0;"
         "  border-radius:8px;"
-        "  background:%2;"
+        "  background:%1;"
         "  margin-top:12px;"
         "}"
-        // 组框和卡片都需要完整边界；内容分组用细线和更小圆角，按钮仍采用纯色。
+        // 默认组框与卡片共用无描边标准面，明确的专业分组仍可用自己的共享角色。
         "QGroupBox{"
-        "  border:1px solid %1;"
-        "  border-radius:6px;"
-        "  background:%2;"
-        "  margin-top:12px;"
-        "  padding-top:6px;"
+        "  border:0;"
+        "  border-radius:8px;"
+        "  background:%1;"
+        "  margin:0;padding:32px 10px 10px 10px;"
         "}"
         "QGroupBox::title{"
-        "  subcontrol-origin:margin;"
+        "  subcontrol-origin:padding;"
         "  subcontrol-position:top left;"
-        "  left:10px;"
-        "  padding:0px 4px;"
-        "  background:%2;"
-        "  color:%3;"
+        "  left:16px;top:10px;"
+        "  padding:0;"
+        "  background:transparent;"
+        "  color:%2;"
         "}"
         "QTabWidget::pane{"
         "  border:none !important;"
         "  border-radius:8px;"
-        "  background:%2 !important;"
+        "  background:%1 !important;"
         "  top:0px;"
         "}")
-        .arg(panelBorderColor)
         .arg(panelBackgroundColor)
         .arg(primaryTextColor);
 

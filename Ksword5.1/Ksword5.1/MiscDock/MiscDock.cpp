@@ -9,6 +9,7 @@
 #include "ContextMenuCleaner/ContextMenuCleanerTab.h"
 #include "DisableDse/DisableDsePage.h"
 #include "CKS/CksPage.h"
+#include "./ThemeCheckPage.h"
 #include "Experimental/BugcheckGuardPage.h"
 #include "DiskEditor/DiskEditorTab.h"
 #include "RenderBenchmark/RenderBenchmarkPage.h"
@@ -268,6 +269,12 @@ void MiscDock::initializeUi()
         QStringLiteral("misc.plugin.tab"),
         QStringLiteral("插件"));
 
+    // 主题检查使用真实主程序中的惰性页面，样例控件不逐个手工适配。
+    m_themeCheckHostWidget = new QWidget(m_mainTabWidget);
+    m_themeCheckTabIndex = m_mainTabWidget->addTab(m_themeCheckHostWidget, QStringLiteral("主题检查"));
+    ks::i18n::LanguageManager::instance().bindTab(m_mainTabWidget, m_themeCheckHostWidget,
+        QStringLiteral("misc.theme_check.tab"), QStringLiteral("主题检查"));
+
     // 页签切换：按需初始化对应子页。
     connect(
         m_mainTabWidget,
@@ -295,6 +302,17 @@ void MiscDock::ensureTabInitialized(const int tabIndex)
     const ks::ui::ScopedWidgetThemePreparation themePreparation(m_mainTabWidget); // 不逐页复制首显准备。
     if (tabIndex < 0)
     {
+        return;
+    }
+
+    if (tabIndex == m_themeCheckTabIndex)
+    {
+        if (!m_themeCheckPage)
+        {
+            auto* layout = buildHostLayout(m_themeCheckHostWidget);
+            m_themeCheckPage = new ks::misc::ThemeCheckPage(m_themeCheckHostWidget);
+            layout->addWidget(m_themeCheckPage);
+        }
         return;
     }
 

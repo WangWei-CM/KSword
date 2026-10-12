@@ -230,9 +230,9 @@ namespace
             "QTabWidget[ksword_page_tabs_widget=\"true\"]::pane{"
             "border:0;border-radius:%3px;top:0px;background:%1;padding:%2px;}")
             .arg(background).arg(inset).arg(inset > 0 || joined ? 0 : kPageCornerRadius);
-        if (joined)
+        if (joined || (tabs->property("ksword_standard_tabs_gap").toBool() && !child))
         {
-            // 工具栏与Tab是一组，结果操作条和表格是下一组；只在两组之间保留6px。
+            // 连体结果与默认普通Tab均保留6px接缝，普通Tab不改变上方组件的关系和颜色。
             // 不恢复左右/底部的pane内缩，结果外边界仍与整条Tab栏对齐。
             QString separationEdge = QStringLiteral("top"); // 间隔跟随标签所在边，不改标签栏本身。
             switch (tabs->tabPosition())

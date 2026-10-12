@@ -1409,6 +1409,12 @@
     <ClCompile Include="UI\GlobalUiBaseStyle.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="UI\StandardWidgetTheme.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="MiscDock\ThemeCheckPage.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="UI\GlobalRefreshShortcut.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -3337,6 +3343,12 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="UI\GlobalUiBaseStyle.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="UI\StandardWidgetTheme.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="MiscDock\ThemeCheckPage.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="UI\GlobalRefreshShortcut.h">

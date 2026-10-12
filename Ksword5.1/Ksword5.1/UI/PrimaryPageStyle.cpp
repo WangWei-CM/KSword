@@ -154,7 +154,7 @@ namespace ks::ui
                 const QColor separator = KswordTheme::BlendColors(surface, KswordTheme::BorderColor(), 70);
                 ReplacePrimaryStyle(target, QStringLiteral(
                     "QGroupBox[ksword_parameter_section=\"true\"]{background:transparent;"
-                    "border:0;border-top:%4px solid %1;border-radius:0;margin-top:%5px;padding-top:0;}"
+                    "border:0;border-top:%4px solid %1;border-radius:0;margin:%5px 0 0 0;padding:0;}"
                     "QGroupBox[ksword_parameter_section=\"true\"]::title{"
                     "subcontrol-origin:margin;subcontrol-position:top left;left:0;"
                     "padding:0 0 5px 0;background:transparent;color:%2;font-weight:600;}"
@@ -163,15 +163,16 @@ namespace ks::ui
                     .arg(hasTitle ? 1 : 0).arg(hasTitle ? 18 : 0));
                 return;
             }
-            // 仅命中此分组自身，嵌套业务控件、表格语义底色及选中态保持原所有权。
+            // 普通分组使用新版卡片：标题在卡片内部，正文留白自然，不再显示框线上的图例。
             ReplacePrimaryStyle(target, QStringLiteral(
                 "QGroupBox[ksword_primary_group=\"true\"]{background:%1;"
-                "border:1px solid %2;border-radius:8px;margin-top:10px;padding-top:6px;}"
+                "border:0;border-radius:8px;margin:0;padding:%4px 10px 10px 10px;}"
                 "QGroupBox[ksword_primary_group=\"true\"]::title{"
-                "subcontrol-origin:margin;subcontrol-position:top left;left:10px;"
-                "padding:0 5px;background:%1;color:%3;font-weight:600;}"
-                "QGroupBox[ksword_primary_group=\"true\"]::title:disabled{color:%4;}")
-                .arg(surface.name(), KswordTheme::BorderColor().name(), title.name(), disabled.name()));
+                "subcontrol-origin:padding;subcontrol-position:top left;left:16px;top:10px;"
+                "padding:0;background:transparent;color:%2;font-weight:600;}"
+                "QGroupBox[ksword_primary_group=\"true\"]::title:disabled{color:%3;}")
+                .arg(surface.name(), title.name(), disabled.name())
+                .arg(target->title().isEmpty() ? 10 : 32));
         });
     }
 

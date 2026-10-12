@@ -1,5 +1,7 @@
 #include "GlobalUiBaseStyle.h"
 #include "./FlatButtonTheme.h"
+#include "./PageControlStyle.h"
+#include "./ThemedSlider.h"
 
 #include "ThemeStatusRole.h"
 
@@ -49,6 +51,12 @@ namespace ks::ui
             "  background-color:transparent;"
             "  border:none;"
             "}"
+
+            // 只有默认接管的独立控件获得基础内边距；显式紧凑组件与内部编辑器不受影响。
+            "QPushButton[ksword_standard_control=\"true\"]{padding:0px 10px;}"
+            "QToolButton[ksword_standard_control=\"true\"]{padding:0px 6px;}"
+            "QLineEdit[ksword_standard_control=\"true\"]{padding:0px 8px;}"
+            "QAbstractSpinBox[ksword_standard_control=\"true\"]{padding-left:8px;padding-right:22px;}"
 
             // ---------- 输入控件基线 ----------
             // 单行字段用一致的中性实底标明编辑面，焦点只轻染主题色，不画亮色线框。
@@ -163,18 +171,18 @@ namespace ks::ui
             "}"
 
             // ---------- 分组框基线 ----------
-            // margin-top 是标题行所需的最小空间，与 Qt 原生标题高度一致。
-            // 内容范围需要完整的中性细边界，避免相邻分组融为一体；按钮不用跟随加框。
+            // 新分组默认是无描边内容面；标题和留白建立层级，不再退回原生凹凸线框。
             "QGroupBox{"
-            "  border:1px solid __BORDER__;"
-            "  border-radius:6px;"
-            "  margin-top:12px;"
+            "  border:0;"
+            "  border-radius:8px;"
+            "  background-color:__SURFACE__;"
+            "  margin:0;padding:32px 10px 10px 10px;"
             "}"
             "QGroupBox::title{"
-            "  subcontrol-origin:margin;"
+            "  subcontrol-origin:padding;"
             "  subcontrol-position:top left;"
-            "  left:8px;"
-            "  padding:0px 4px;"
+            "  left:16px;top:10px;"
+            "  padding:0;background:transparent;"
             "  color:__TEXT_SECONDARY__;"
             "  font-weight:600;"
             "}"
@@ -207,7 +215,7 @@ namespace ks::ui
             "QProgressBar{"
             "  background-color:__SURFACE_MUTED__;"
             "  color:__TEXT__;"
-            "  border:1px solid __BORDER__;"
+            "  border:0;"
             "  border-radius:3px;"
             "  text-align:center;"
             "}"
@@ -298,7 +306,11 @@ namespace ks::ui
         baseControlStyle.replace(
             QStringLiteral("__ON_ACCENT_PRESSED__"),
             KswordTheme::OnAccentHex(KswordTheme::ControlAccentPressedColor()));
-        // 默认控件仅获得按钮状态基线；业务本地几何与语义色仍由逐页接入负责。
-        return baseControlStyle + BuildFlatButtonStyle(FlatButtonTone::Neutral);
+        // 所有默认规则都在同一个拥有块内，反复换肤只替换一次，不能向末尾不断堆副本。
+        const QString standardControls = BuildFlatButtonStyle(FlatButtonTone::Neutral)
+            + BuildPageTabsStyleSheet(false) + BuildStandardSliderStyle();
+        baseControlStyle.replace(QString::fromLatin1(kBaseControlStyleEndMarker),
+            standardControls + QString::fromLatin1(kBaseControlStyleEndMarker));
+        return baseControlStyle;
     }
 }

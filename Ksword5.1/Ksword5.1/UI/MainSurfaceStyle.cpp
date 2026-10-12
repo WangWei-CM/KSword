@@ -44,13 +44,42 @@ namespace ks::ui
         return widget && widget->window()->property("ksword_main_surface_hierarchy").toBool();
     }
 
+    bool UsesTransparentMainSurface(const QWidget* widget)
+    {
+        if (!widget) return false;
+        const QVariant mode = widget->window()->property("ksword_main_surface_hierarchy");
+        return mode.isValid() && !mode.toBool();
+    }
+
+    QString MainDataSurfaceStyleColor(const QColor& color, bool transparent)
+    {
+        // 主底板继续透出背景；数据区保留轻透衬底，避免文字直接压在任意壁纸/桌面上。
+        QColor surface = color;
+        if (transparent) surface.setAlpha(224);
+        return surface.name(transparent ? QColor::HexArgb : QColor::HexRgb);
+    }
+
     QString BuildMainSurfaceStyle(bool transparentContent)
     {
+        const MainSurfaceColors colors = MainWindowSurfaceColors();
         if (transparentContent)
         {
-            return {}; // 不用不透明数据面覆盖用户启用的背景图/穿透策略。
+            // 只为数据面补可读性，不给普通QWidget/Stack/页根铺底，不改变窗口透明度。
+            const QColor backgrounds[] = {KswordTheme::BlendColors(colors.content, QColor(Qt::black), 31),
+                KswordTheme::BlendColors(colors.content, QColor(Qt::white), 31)};
+            const QColor text = KswordTheme::EnsureTextContrastForBackgrounds(
+                KswordTheme::TextPrimaryColor(), backgrounds, 2, 4.5);
+            return QStringLiteral(R"qss(
+                ads--CDockWidget QTableView,ads--CDockWidget QTreeView,
+                ads--CDockWidget QListView,ads--CDockWidget QTextEdit,ads--CDockWidget QPlainTextEdit,
+                ads--CDockWidget QStackedWidget > QTableView,ads--CDockWidget QStackedWidget > QTreeView,
+                ads--CDockWidget QStackedWidget > QListView,ads--CDockWidget QStackedWidget > QTextEdit,
+                ads--CDockWidget QStackedWidget > QPlainTextEdit,ads--CDockWidget QGroupBox{
+                    background:%1 !important;color:%2;alternate-background-color:%3 !important;border-radius:8px;
+                })qss")
+                .arg(MainDataSurfaceStyleColor(colors.content, true), text.name(),
+                    MainDataSurfaceStyleColor(colors.alternate, true));
         }
-        const MainSurfaceColors colors = MainWindowSurfaceColors();
         const QColor text = KswordTheme::EnsureTextContrast(
             KswordTheme::TextPrimaryColor(), colors.content, 4.5);
         // 仅为主工作区的结构容器分层，不给每个 QWidget 画底，也不接管单元格语义色。

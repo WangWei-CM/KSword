@@ -4,6 +4,27 @@
 #include <QPainter>
 #include <QStyleOptionSlider>
 
+QString ks::ui::BuildStandardSliderStyle()
+{
+    // 与ThemedSlider的绘制配方保持同一色层和18px命中把手，普通QSlider直接获得标准外观。
+    const QColor tail = KswordTheme::BlendColors(KswordTheme::TextPrimaryColor(), KswordTheme::SurfaceColor(), 70);
+    const QColor disabledTail = KswordTheme::BlendColors(KswordTheme::SurfaceColor(), KswordTheme::TextDisabledColor(), 75);
+    const QColor disabledThumb = KswordTheme::BlendColors(disabledTail, KswordTheme::TextDisabledColor(), 160);
+    return QStringLiteral(
+        "QSlider{background:transparent;border:0;}"
+        "QSlider::groove:horizontal{height:6px;border:0;border-radius:3px;background:%1;}"
+        "QSlider::groove:vertical{width:6px;border:0;border-radius:3px;background:%1;}"
+        "QSlider::sub-page:horizontal,QSlider::add-page:vertical{background:%2;border:0;border-radius:3px;}"
+        "QSlider::handle:horizontal{width:18px;height:18px;margin:-6px 0;border:0;border-radius:9px;background:white;}"
+        "QSlider::handle:vertical{height:18px;width:18px;margin:0 -6px;border:0;border-radius:9px;background:white;}"
+        "QSlider::handle:horizontal:focus,QSlider::handle:vertical:focus{border:1px solid %2;}"
+        "QSlider::handle:horizontal:disabled,QSlider::handle:vertical:disabled{background:%3;border:0;}"
+        "QSlider::groove:horizontal:disabled,QSlider::groove:vertical:disabled{background:%4;}"
+        "QSlider::sub-page:horizontal:disabled,QSlider::add-page:vertical:disabled{background:%5;}")
+        .arg(tail.name(), KswordTheme::ControlAccentHex(), disabledThumb.name(), disabledTail.name(),
+            KswordTheme::BlendColors(disabledTail, KswordTheme::ControlAccentColor(), 55).name());
+}
+
 ks::ui::ThemedSlider::ThemedSlider(Qt::Orientation orientation, QWidget* parent)
     : QSlider(orientation, parent)
 {

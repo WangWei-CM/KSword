@@ -317,7 +317,7 @@ namespace ks::ui
             const bool settings = target->property("ksword_settings_section").toBool();
             SetOwnedStyle(target, QStringLiteral(
                 "QGroupBox[ksword_secondary_section=\"true\"]{background:transparent;"
-                "border:0;border-top:1px solid %1;border-radius:0;margin-top:%3px;padding-top:%4px;}"
+                "border:0;border-top:1px solid %1;border-radius:0;margin:%3px 0 0 0;padding:%4px 0 0 0;}"
                 "QGroupBox[ksword_secondary_section=\"true\"]::title{"
                 "subcontrol-origin:margin;subcontrol-position:top left;left:0;top:0;"
                 "padding:0;background:transparent;color:%2;font-weight:600;}")

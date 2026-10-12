@@ -1,0 +1,218 @@
+#include "../Framework.h"
+#include "./ThemeCheckPage.h"
+#include "../Internationalization/LanguageManager.h"
+#include "../UI/MainSurfaceStyle.h"
+#include "../UI/ThemeBinding.h"
+#include "../UI/VisibleTableWidget.h"
+#include "../UI/ParameterWorkspace.h"
+#include "../UI/PrimaryPageStyle.h"
+#include <QApplication>
+#include <QCheckBox>
+#include <QComboBox>
+#include <QDoubleSpinBox>
+#include <QDateTime>
+#include <QDir>
+#include <QFormLayout>
+#include <QGroupBox>
+#include <QHeaderView>
+#include <QHBoxLayout>
+#include <QLabel>
+#include <QLineEdit>
+#include <QPlainTextEdit>
+#include <QProgressBar>
+#include <QPushButton>
+#include <QRadioButton>
+#include <QScrollArea>
+#include <QShowEvent>
+#include <QSlider>
+#include <QSpinBox>
+#include <QTabWidget>
+#include <QTableWidget>
+#include <QTimer>
+#include <QVBoxLayout>
+
+namespace ks::misc
+{
+    ThemeCheckPage::ThemeCheckPage(QWidget* parent) : QWidget(parent)
+    {
+        setObjectName(QStringLiteral("ks_theme_check_page"));
+        ks::ui::StyleWorkspacePage(this);
+        auto* root = new QVBoxLayout(this);
+        root->setContentsMargins(6, 6, 6, 6);
+        root->setSpacing(8);
+        auto* description = new QLabel(QStringLiteral("本页使用普通 Qt 控件，未逐个设置样式。请检查深浅主题、透明背景、悬停和下拉弹窗。"), this);
+        description->setWordWrap(true);
+        root->addWidget(description);
+
+        // 页面选用真实参数/结果框架；样本控件仍不调用逐控件适配，验证默认主题本身。
+        auto* workspace = new ks::ui::ParameterWorkspace(this, 480);
+        workspace->useWideParameterLayout(60); // 宽屏优先双列参数，不让少量检查结果吞掉页面。
+        root->addWidget(workspace, 1);
+        auto* inputs = new QGroupBox(QStringLiteral("默认输入与选择"), workspace);
+        auto* form = new QFormLayout(inputs);
+        form->setRowWrapPolicy(QFormLayout::WrapLongRows);
+        auto* field = new QLineEdit(inputs);
+        field->setObjectName(QStringLiteral("ks_theme_check_input"));
+        field->setPlaceholderText(QStringLiteral("输入示例文字"));
+        auto* integer = new QSpinBox(inputs);
+        integer->setRange(0, 10000);
+        integer->setValue(42);
+        auto* decimal = new QDoubleSpinBox(inputs);
+        decimal->setRange(0, 100);
+        decimal->setValue(1.25);
+        auto* combo = new QComboBox(inputs);
+        combo->setObjectName(QStringLiteral("ks_theme_check_combo"));
+        combo->addItems({QStringLiteral("选项一"), QStringLiteral("选项二"), QStringLiteral("选项三")});
+        form->addRow(QStringLiteral("单行输入"), field);
+        form->addRow(QStringLiteral("整数"), integer);
+        form->addRow(QStringLiteral("小数"), decimal);
+        form->addRow(QStringLiteral("下拉选择"), combo);
+        m_samples << field << integer << decimal << combo;
+        auto* checked = new QCheckBox(QStringLiteral("复选状态"), inputs);
+        checked->setChecked(true);
+        form->addRow(checked);
+        auto* radio = new QRadioButton(QStringLiteral("单选状态"), inputs);
+        radio->setChecked(true);
+        form->addRow(radio);
+        auto* disabled = new QLineEdit(QStringLiteral("禁用状态仍应清晰可辨"), inputs);
+        disabled->setEnabled(false);
+        form->addRow(QStringLiteral("禁用输入"), disabled);
+        workspace->parameters()->addWidget(inputs);
+
+        // 原生滑块和进度条不使用专用子类，直接验证全局默认皮肤。
+        auto* values = new QGroupBox(QStringLiteral("默认滑块与进度"), workspace);
+        auto* valueLayout = new QVBoxLayout(values);
+        auto* slider = new QSlider(Qt::Horizontal, values);
+        slider->setObjectName(QStringLiteral("ks_theme_check_slider"));
+        slider->setRange(0, 100);
+        slider->setValue(60);
+        auto* progress = new QProgressBar(values);
+        progress->setRange(0, 100);
+        progress->setValue(slider->value());
+        connect(slider, &QSlider::valueChanged, progress, &QProgressBar::setValue);
+        valueLayout->addWidget(slider);
+        valueLayout->addWidget(progress);
+        workspace->parameters()->addWidget(values);
+
+        // 这里的普通文本控件是刻意保留的皮肤样本，不承担业务日志/代码编辑器职责。
+        // 原生Tab和表格只声明数据行为，不手动安装Tab动画、圆角或配色。
+        auto* tabs = new QTabWidget(workspace);
+        tabs->setObjectName(QStringLiteral("ks_theme_check_tabs"));
+        auto* table = new QTableWidget(0, 2, tabs);
+        m_table = table;
+        table->setObjectName(QStringLiteral("ks_theme_check_table"));
+        table->setHorizontalHeaderLabels({QStringLiteral("名称"), QStringLiteral("状态")});
+        table->setEditTriggers(QAbstractItemView::NoEditTriggers); // 接入数据由真实控件状态产生。
+        table->setAlternatingRowColors(true);
+        table->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
+        ks::ui::SetTableActionBarMode(table, ks::ui::TableActionBarMode::None);
+        auto* text = new QPlainTextEdit(tabs);
+        text->setPlainText(QStringLiteral("普通多行输入：背景、文字和选区应随主题一致变化。"));
+        tabs->addTab(table, QStringLiteral("表格"));
+        tabs->addTab(text, QStringLiteral("文本"));
+        tabs->setMinimumHeight(180);
+        // 结果侧独立分组验证标题在卡片内部；参数侧同类QGroupBox自动成为分区标题。
+        auto* card = new QGroupBox(QStringLiteral("默认分组卡片"), workspace);
+        auto* cardLayout = new QVBoxLayout(card);
+        auto* cardNote = new QLabel(QStringLiteral("分组标题位于卡片内部，参数分区使用标题与分隔线。"), card);
+        cardNote->setWordWrap(true);
+        cardLayout->addWidget(cardNote);
+        workspace->results()->addWidget(card);
+        workspace->results()->addWidget(tabs, 1);
+
+        auto* dynamic = new QGroupBox(QStringLiteral("动态新建控件"), workspace);
+        m_dynamicLayout = new QVBoxLayout(dynamic);
+        auto* add = new QPushButton(QStringLiteral("新增控件"), dynamic);
+        add->setObjectName(QStringLiteral("ks_theme_check_add"));
+        connect(add, &QPushButton::clicked, this, &ThemeCheckPage::addDynamicControls);
+        m_dynamicLayout->addWidget(add);
+        m_samples << add;
+        workspace->parameters()->addWidget(dynamic);
+        ks::ui::ArrangeParameterColumns(workspace->parameters(), {inputs}, {values, dynamic});
+        auto* check = new QPushButton(QStringLiteral("重新检查"), workspace);
+        check->setObjectName(QStringLiteral("ks_theme_check_refresh"));
+        connect(check, &QPushButton::clicked, this, &ThemeCheckPage::refreshChecks);
+        auto* actions = workspace->actions();
+        actions->addWidget(check);
+        m_samples << check;
+        auto* capture = new QPushButton(QStringLiteral("保存检查截图"), workspace);
+        capture->setObjectName(QStringLiteral("ks_theme_check_capture"));
+        auto* captureStatus = new QLabel(this);
+        captureStatus->setObjectName(QStringLiteral("ks_theme_check_capture_status"));
+        captureStatus->setWordWrap(true);
+        captureStatus->setTextInteractionFlags(Qt::TextSelectableByMouse);
+        connect(capture, &QPushButton::clicked, this, [this, captureStatus]()
+        {
+            // 只抓取当前真实页面，不读取其它窗口或桌面；透明像素保留在PNG中。
+            const QString file = QDir::tempPath() + QStringLiteral("/ksword-theme-check-")
+                + QString::number(QCoreApplication::applicationPid()) + QLatin1Char('-')
+                + QString::number(QDateTime::currentMSecsSinceEpoch()) + QStringLiteral(".png");
+            captureStatus->setText(grab().save(file) ? file
+                : ks::i18n::sourceText(QStringLiteral("检查截图保存失败")));
+        });
+        actions->addWidget(capture);
+        actions->addStretch(1);
+        workspace->results()->addWidget(captureStatus);
+        m_samples << capture;
+        m_status = new QLabel(this);
+        m_status->setObjectName(QStringLiteral("ks_theme_check_status"));
+        m_status->setWordWrap(true);
+        m_status->setTextInteractionFlags(Qt::TextSelectableByMouse);
+        workspace->results()->insertWidget(0, m_status);
+    }
+
+    void ThemeCheckPage::showEvent(QShowEvent* event)
+    {
+        QWidget::showEvent(event);
+        QTimer::singleShot(0, this, &ThemeCheckPage::refreshChecks);
+    }
+
+    void ThemeCheckPage::addDynamicControls()
+    {
+        if (m_dynamicCount >= 3) return; // 有界示例，不触发系统或驱动操作。
+        ++m_dynamicCount;
+        auto* field = new QLineEdit(m_dynamicLayout->parentWidget());
+        field->setObjectName(QStringLiteral("ks_theme_check_dynamic_") + QString::number(m_dynamicCount));
+        field->setPlaceholderText(ks::i18n::sourceText(QStringLiteral("动态输入 %1")).arg(m_dynamicCount));
+        m_dynamicLayout->addWidget(field);
+        m_samples << field;
+        QTimer::singleShot(0, this, &ThemeCheckPage::refreshChecks);
+    }
+
+    void ThemeCheckPage::refreshChecks()
+    {
+        int bound = 0; // 只统计确实被默认机制接入的真实控件。
+        int sized = 0;
+        int live = 0;
+        m_table->setRowCount(m_samples.size()); // 动态新建样本自然追加到同一份检查结果。
+        for (const QPointer<QWidget>& sample : m_samples)
+        {
+            if (!sample) continue;
+            ++live;
+            const bool connected = ks::ui::HasWidgetThemeBinding(sample)
+                && sample->property("ksword_standard_control").toBool();
+            if (connected) ++bound;
+            if (sample->height() >= 28) ++sized;
+            const QString type = QString::fromLatin1(sample->metaObject()->className());
+            const QString state = ks::i18n::sourceText(QStringLiteral("%1 · 高度 %2px"))
+                .arg(ks::i18n::sourceText(connected ? QStringLiteral("已接入") : QStringLiteral("未接入")))
+                .arg(sample->height());
+            for (int column = 0; column < 2; ++column)
+            {
+                auto* item = m_table->item(live - 1, column);
+                if (!item)
+                {
+                    item = new QTableWidgetItem();
+                    m_table->setItem(live - 1, column, item);
+                }
+                item->setText(column == 0 ? type : state);
+            }
+        }
+        const bool installed = qApp->property("ksword_standard_widget_theme_installed").toBool();
+        const QString mode = ks::i18n::sourceText(ks::ui::UsesTransparentMainSurface(this)
+            ? QStringLiteral("透明背景") : QStringLiteral("不透明背景"));
+        m_status->setText(ks::i18n::sourceText(QStringLiteral("标准主题：%1；自动接入：%2/%3；尺寸：%4/%3；背景：%5。视觉效果请检查悬停、弹窗和选区。"))
+            .arg(ks::i18n::sourceText(installed ? QStringLiteral("已安装") : QStringLiteral("未安装")))
+            .arg(bound).arg(live).arg(sized).arg(mode));
+    }
+}

@@ -121,6 +121,9 @@ private:
     QWidget* m_scannerHostWidget = nullptr;             // m_scannerHostWidget：扫描器页占位控件。
     QWidget* m_minidumpHostWidget = nullptr;            // m_minidumpHostWidget：转储分析页占位控件。
     QWidget* m_pluginHostWidget = nullptr;              // m_pluginHostWidget：插件页占位控件。
+    QWidget* m_themeCheckHostWidget = nullptr;          // 标准主题真实检查页的惰性宿主。
+    int m_themeCheckTabIndex = -1;                      // 检查页追加于现有导航末尾。
+    QWidget* m_themeCheckPage = nullptr;                // 不改变原有业务页生命周期。
 
     // ===================== 页签索引 =====================
     int m_bootEditorTabIndex = -1;          // m_bootEditorTabIndex：引导页页签索引。

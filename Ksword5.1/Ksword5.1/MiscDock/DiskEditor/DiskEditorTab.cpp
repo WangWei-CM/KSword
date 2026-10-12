@@ -137,28 +137,7 @@ namespace
             .arg(KswordTheme::PrimaryBlueHex);
     }
 
-    // buildInfoCardStyle：
-    // - 返回摘要卡片和日志框样式；
-    // - 只负责视觉展示。
-    QString buildInfoCardStyle()
-    {
-        return QStringLiteral(
-            "QGroupBox{"
-            "  border:1px solid %1;"
-            "  border-radius:8px;"
-            "  margin-top:10px;"
-            "  padding:8px;"
-            "  color:%2;"
-            "  font-weight:700;"
-            "}"
-            "QGroupBox::title{"
-            "  subcontrol-origin:margin;"
-            "  left:10px;"
-            "  padding:0 4px;"
-            "}")
-            .arg(KswordTheme::BorderHex())
-            .arg(KswordTheme::TextPrimaryHex());
-    }
+
 
     // setReadOnlyItem：
     // - 创建不可编辑表格单元格；

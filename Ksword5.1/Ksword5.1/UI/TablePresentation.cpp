@@ -256,7 +256,8 @@ namespace ks::ui
         const QString cellPadding = compact ? QStringLiteral("2px 6px") : QStringLiteral("4px 8px");
         const QString headerPadding = compact ? QStringLiteral("3px 6px") : QStringLiteral("5px 8px");
         // 主工作区把数据面、表头和页面底板分开；独立详情窗口继续使用原有角色。
-        const bool mainSurface = UsesMainSurfaceHierarchy(view);
+        const bool transparentSurface = UsesTransparentMainSurface(view);
+        const bool mainSurface = UsesMainSurfaceHierarchy(view) || transparentSurface;
         const MainSurfaceColors surfaces = MainWindowSurfaceColors();
         const QColor headerColor = mainSurface ? surfaces.header : KswordTheme::SurfaceMutedColor();
         const QString headerSurface = headerColor.name();
@@ -269,11 +270,18 @@ namespace ks::ui
             : QStringLiteral("border:1px solid %1;border-radius:8px;").arg(
                 mainSurface ? surfaces.border.name()
                     : KswordTheme::BlendColors(KswordTheme::SurfaceColor(), KswordTheme::BorderColor(), 150).name());
-        const QColor rowBackgrounds[] = {surfaces.content, surfaces.alternate};
+        // 透明数据面同时按最暗/最亮背板估算前景，不能把带alpha底色直接当作纯色校准。
+        const int backdropWeight = transparentSurface ? 31 : 0;
+        const QColor rowBackgrounds[] = {
+            KswordTheme::BlendColors(surfaces.content, QColor(Qt::black), backdropWeight),
+            KswordTheme::BlendColors(surfaces.content, QColor(Qt::white), backdropWeight),
+            KswordTheme::BlendColors(surfaces.alternate, QColor(Qt::black), backdropWeight),
+            KswordTheme::BlendColors(surfaces.alternate, QColor(Qt::white), backdropWeight)};
         const QString dataSurface = mainSurface
             ? QStringLiteral("background-color:%1;color:%2;alternate-background-color:%3;")
-                .arg(surfaces.content.name(), KswordTheme::EnsureTextContrastForBackgrounds(
-                    KswordTheme::TextPrimaryColor(), rowBackgrounds, 2, 4.5).name(), surfaces.alternate.name())
+                .arg(MainDataSurfaceStyleColor(surfaces.content, transparentSurface), KswordTheme::EnsureTextContrastForBackgrounds(
+                    KswordTheme::TextPrimaryColor(), rowBackgrounds, 4, 4.5).name(),
+                    MainDataSurfaceStyleColor(surfaces.alternate, transparentSurface))
             : QStringLiteral("color:palette(text);alternate-background-color:palette(alternate-base);");
         // item 显式 border:0 会让 Qt 样式表接管单元格底面并忽略模型 BackgroundRole。
         // 仅配置 padding，网格仍由 setShowGrid(false) 管理，保留热度/风险/差异语义刷子。

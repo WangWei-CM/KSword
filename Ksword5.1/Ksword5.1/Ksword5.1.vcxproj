@@ -520,6 +520,8 @@
     <ClCompile Include="UI\MemoryEditHistory.Core.cpp" />
     <ClCompile Include="UI\GlobalDialogTheme.cpp" />
     <ClCompile Include="UI\GlobalUiBaseStyle.cpp" />
+    <ClCompile Include="UI\StandardWidgetTheme.cpp" />
+    <ClCompile Include="MiscDock\ThemeCheckPage.cpp" />
     <ClCompile Include="UI\GlobalRefreshShortcut.cpp" />
     <ClCompile Include="UI\GlobalUiSearch.cpp" />
     <ClCompile Include="UI\DockTabInteraction.cpp" />
@@ -1144,6 +1146,8 @@
     <ClInclude Include="UI\MemoryEditHistory.Core.h" />
     <ClInclude Include="UI\GlobalDialogTheme.h" />
     <ClInclude Include="UI\GlobalUiBaseStyle.h" />
+    <ClInclude Include="UI\StandardWidgetTheme.h" />
+    <ClInclude Include="MiscDock\ThemeCheckPage.h" />
     <ClInclude Include="UI\GlobalRefreshShortcut.h" />
     <QtMoc Include="UI\GlobalUiSearch.h" />
     <QtMoc Include="UI\HvmMemoryDialog.h" />

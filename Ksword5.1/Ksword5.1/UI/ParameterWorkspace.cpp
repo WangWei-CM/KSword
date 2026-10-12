@@ -397,6 +397,7 @@ namespace ks::ui
         m_scroll->setFrameShape(QFrame::NoFrame);
         m_scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
         auto* form = new QWidget(m_scroll);
+        form->setProperty("ksword_parameter_body", true); // 默认组框据此选择分区结构，而非把结果卡片也当参数。
         form->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
         form->setMinimumWidth(0);
         m_parameters = new QVBoxLayout(form);
