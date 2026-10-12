@@ -1,5 +1,7 @@
 # Memory Index
 
+- [CKS 新版免重置研究](../../docs/CKS新版免重置启用研究.md) — 官方首次启用重置要求、旧 SSDE 与 2026 年锁定状态实验、精确 build/CI 文件身份和未验收边界
+
 - [DynData v4 配置读取与分模块回执](ksword-dyndata-profile-loading.md) — 协议统一 ID 目录、1401 整包拒绝、PDB 提取缺口、匿名 union/位域语义与离线 Qt 消费回归
 
 - [Taskbar 页面平铺导航](ksword-taskbar-page-overview.md) — 独立透明 RGB 分列窗口、实际页面目录、WM_COPYDATA 身份校验与逐层跳转

@@ -7,7 +7,7 @@
 - **CKS 产品策略**：`SLGetWindowsInformationDWORD` 读取 `CodeIntegrity-AllowConfigurablePolicy-CustomKernelSigners`。值为 1 只说明许可查询值开启。
 - **CI Licensed**：读取 `HKLM\SYSTEM\CurrentControlSet\Control\CI\Protected\Licensed`。查询失败显示未知，不当作 0。
 - **安全启动与 HVCI 配置**：读取 Windows 对应状态键。HVCI 配置值不等同于运行中的 HVCI 状态。
-- **SSDE 服务**：SCM 回报服务是否存在、是否 RUNNING、是否 BOOT_START；镜像路径必须以 `ssde.sys` 结尾才允许管理。
+- **SSDE 服务**：SCM 回报服务是否存在、是否 RUNNING、是否 BOOT_START；镜像必须指向系统驱动目录中的 `ssde.sys` 才允许管理。
 - **策略列表**：由系统 `CiTool --list-policies -json` 读取。列表的 `IsSignedPolicy` / `IsEnforced` 不证明 CKS 生效，也不识别某条策略是否包含目标内核签名者；`IsEnforced` 是当前生效字段，不等同于策略处于“强制而非审核”模式。最终应以目标驱动的真实加载结果及 Code Integrity 事件为准。
 
 ## 微软现行流程
@@ -29,6 +29,8 @@
 [SSDE issue #10](https://github.com/valinet/ssde/issues/10) 还记录了一种人工替代路径：在 UEFI 暂停 Secure Boot、安装驱动、开启测试签名并重启两次、检查 Licensed 与服务，再重新启用 Secure Boot。该操作依赖 UEFI 和恢复环境，页面仅展示步骤与状态，不自动执行。
 
 ## 资料与版本边界
+
+2026 年新版的免重置路径及证据缺口见 [新版 Windows 的 CKS 免重置启用研究](CKS新版免重置启用研究.md)。新的受保护启用状态不由旧 SSDE 上游源码处理，因此不能把本页的许可值与服务状态当作当前补丁版本的兼容性验收。
 
 - [微软 Custom Kernel Signers 文档](https://learn.microsoft.com/windows/security/application-security/application-control/app-control-for-business/design/custom-kernel-signers)：当前支持范围、签名策略、首次重置和验证要求。
 - [微软 CiTool 命令](https://learn.microsoft.com/windows/security/application-security/application-control/app-control-for-business/operations/citool-commands)：部署和列出策略。
