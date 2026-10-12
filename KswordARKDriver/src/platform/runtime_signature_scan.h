@@ -100,4 +100,17 @@ KswordARKRuntimeCollectExecutableDataReferences(
     _In_ ULONG ReferenceCapacity
     );
 
+// Resume a bounded executable-section scan after a full reference batch.
+// CursorRva and ScannedBytesOut prevent the first section from exhausting the
+// caller's reference capacity and hiding later executable sections.
+ULONG
+KswordARKRuntimeCollectExecutableDataReferenceBatch(
+    _In_ const KSW_RUNTIME_IMAGE_VIEW* View,
+    _In_ ULONG ScanByteBudget,
+    _Inout_ ULONG* CursorRva,
+    _Out_writes_(ReferenceCapacity) KSW_RUNTIME_DATA_REFERENCE* References,
+    _In_ ULONG ReferenceCapacity,
+    _Out_ ULONG* ScannedBytesOut
+    );
+
 EXTERN_C_END

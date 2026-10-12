@@ -44,6 +44,8 @@ try:
     from ksword_profile_release_sync import (
         KNOWN_FIELD_IDS as V4_CORE_ITEM_IDS,
         V4_ITEM_KIND_IDS as V4_WIRE_ITEM_KIND_IDS,
+        V4_SPECIAL_ITEM_IDS,
+        SUPPORTED_V4_ITEM_IDS,
         CALLBACK_ITEM_KIND_GLOBAL_RVA,
         CALLBACK_ITEM_KIND_STRUCT_OFFSET,
         CALLBACK_ITEM_KIND_TYPE_SIZE,
@@ -91,6 +93,27 @@ CALLBACK_ITEM_SCHEMA_VERSION = 2
 TYPED_ITEM_SCHEMA_VERSION = 3
 
 FIELD_MAP: dict[str, tuple[str, str]] = {
+    "HtHandleContentionEvent": ("_HANDLE_TABLE", "HandleContentionEvent"),
+    "OtName": ("_OBJECT_TYPE", "Name"),
+    "OtIndex": ("_OBJECT_TYPE", "Index"),
+    "EgeGuid": ("_ETW_GUID_ENTRY", "Guid"),
+    "EreGuidEntry": ("_ETW_REG_ENTRY", "GuidEntry"),
+    "MmSectionControlArea": ("_SECTION", "u1.ControlArea"),
+    "MmControlAreaListHead": ("_CONTROL_AREA", "ListHead"),
+    "MmControlAreaLock": ("_CONTROL_AREA", "ControlAreaLock"),
+    "AlpcCommunicationInfo": ("_ALPC_PORT", "CommunicationInfo"),
+    "AlpcOwnerProcess": ("_ALPC_PORT", "OwnerProcess"),
+    "AlpcConnectionPort": ("_ALPC_COMMUNICATION_INFO", "ConnectionPort"),
+    "AlpcServerCommunicationPort": ("_ALPC_COMMUNICATION_INFO", "ServerCommunicationPort"),
+    "AlpcClientCommunicationPort": ("_ALPC_COMMUNICATION_INFO", "ClientCommunicationPort"),
+    "AlpcHandleTable": ("_ALPC_COMMUNICATION_INFO", "HandleTable"),
+    "AlpcHandleTableLock": ("_ALPC_HANDLE_TABLE", "Lock"),
+    "AlpcAttributes": ("_ALPC_PORT", "PortAttributes"),
+    "AlpcAttributesFlags": ("_ALPC_PORT_ATTRIBUTES", "Flags"),
+    "AlpcPortContext": ("_ALPC_PORT", "PortContext"),
+    "AlpcPortObjectLock": ("_ALPC_PORT", "PortObjectLock"),
+    "AlpcSequenceNo": ("_ALPC_PORT", "SequenceNo"),
+    "AlpcState": ("_ALPC_PORT", "u1.State"),
     "EpObjectTable": ("_EPROCESS", "ObjectTable"),
     "EpSectionObject": ("_EPROCESS", "SectionObject"),
     "EpUniqueProcessId": ("_EPROCESS", "UniqueProcessId"),
@@ -279,6 +302,37 @@ TYPE_SIZE_MAP: dict[str, str] = {
     "PiDdbTypeSize": "_PIDDB_CACHE_ENTRY",
 }
 
+# These EX/core values are bit shifts, not byte offsets. Resolve the actual
+# bitfield metadata; never use a Windows-version table or a fixed constant.
+CORE_SHIFT_FIELD_MAP = {
+    "ObDecodeShift": ("_HANDLE_TABLE_ENTRY", "ObjectPointerBits"),
+    "ObAttributesShift": ("_HANDLE_TABLE_ENTRY", "Attributes"),
+}
+
+
+def resolve_core_fields(resolved_offsets, resolved_bits):
+    """Return PDB-derived core values and diagnostics for unresolved fields."""
+    fields = {}
+    missing = []
+    for name, member in FIELD_MAP.items():
+        value = resolved_offsets.get(member)
+        if value is None:
+            missing.append("->".join(member))
+        else:
+            fields[name] = f"0x{value:04X}"
+    for name, member in CORE_SHIFT_FIELD_MAP.items():
+        descriptor = resolved_bits.get(member)
+        if descriptor is not None:
+            byte_offset, bit_offset, bit_count, storage = descriptor
+            valid = byte_offset == 0 and storage == 8 and 0 < bit_count <= 64 and bit_offset + bit_count <= 64
+            if name == "ObDecodeShift":
+                valid = valid and bit_offset + bit_count == 64
+            if valid:
+                fields[name] = f"0x{bit_offset:04X}"
+                continue
+        missing.append("->".join(member))
+    return fields, missing
+
 # v4-only module items. v4Items 统一携带结构偏移、类型大小和位域元数据。
 V4_FIELD_MAP: dict[str, tuple[str, str]] = {
     "KprcbTimerTable": ("_KPRCB", "TimerTable"),
@@ -402,55 +456,55 @@ V4_ENUM_VALUE_MAP: dict[str, tuple[str, str]] = {
 }
 
 V4_ITEM_DEFINITIONS: dict[str, tuple[int, str, int]] = {
-    "PspTerminateProcess": (1401, "GlobalRva", 1),
-    "EthActiveExWorker": (1001, "BitField", 2),
-    "KprcbTimerTable": (1002, "StructOffset", 2),
-    "KtimerTableTimerEntries": (1003, "StructOffset", 2),
-    "KtimerTableEntryEntry": (1005, "StructOffset", 2),
-    "KtimerTimerListEntry": (1007, "StructOffset", 2),
-    "KtimerDueTime": (1008, "StructOffset", 2),
-    "KtimerDpc": (1009, "StructOffset", 2),
-    "KtimerTimerType": (1010, "StructOffset", 2),
-    "KtimerPeriod": (1011, "StructOffset", 2),
-    "KdpcDeferredRoutine": (1012, "StructOffset", 2),
-    "KdpcDeferredContext": (1013, "StructOffset", 2),
-    "KtimerTableTypeSize": (1014, "TypeSize", 2),
-    "KtimerTableEntryTypeSize": (1015, "TypeSize", 2),
-    "KtimerTypeSize": (1016, "TypeSize", 2),
-    "KdpcTypeSize": (1017, "TypeSize", 2),
-    "FltFilterOperations": (1101, "StructOffset", 3),
-    "CiKernelHashBucketList": (1201, "GlobalRva", 4),
-    "CiHashCacheLock": (1202, "GlobalRva", 4),
-    "CiHashEntryNext": (1203, "StructOffset", 4),
-    "CiHashEntryDriverName": (1204, "StructOffset", 4),
-    "CiHashEntryTimeDateStamp": (1205, "StructOffset", 4),
-    "CiHashEntryLoadStatus": (1206, "StructOffset", 4),
-    "CiHashEntryImageBase": (1207, "StructOffset", 4),
-    "CiHashEntryImageSize": (1208, "StructOffset", 4),
-    "CiHashEntryTypeSize": (1209, "TypeSize", 4),
-    "WqPspSystemPartition": (1301, "GlobalRva", 5),
-    "WqExpBuiltinPriorities": (1302, "GlobalRva", 5),
-    "WqEpartitionExPartition": (1303, "StructOffset", 5),
-    "WqExPartitionWorkQueues": (1304, "StructOffset", 5),
-    "WqExWorkQueueWorkPriQueue": (1305, "StructOffset", 5),
-    "WqExWorkQueueQueueIndex": (1306, "StructOffset", 5),
-    "WqKpriQueueEntryListHead": (1307, "StructOffset", 5),
-    "WqKpriQueueThreadListHead": (1308, "StructOffset", 5),
-    "WqKthreadQueue": (1309, "StructOffset", 5),
-    "WqKthreadQueueListEntry": (1310, "StructOffset", 5),
-    "WqWorkItemList": (1311, "StructOffset", 5),
-    "WqWorkItemRoutine": (1312, "StructOffset", 5),
-    "WqWorkItemParameter": (1313, "StructOffset", 5),
-    "WqExPoolUntrusted": (1314, "EnumValue", 5),
-    "WqEpartitionTypeSize": (1315, "TypeSize", 5),
-    "WqExPartitionTypeSize": (1316, "TypeSize", 5),
-    "WqExWorkQueueTypeSize": (1317, "TypeSize", 5),
-    "WqKpriQueueTypeSize": (1318, "TypeSize", 5),
-    "WqKthreadTypeSize": (1319, "TypeSize", 5),
-    "WqWorkItemTypeSize": (1320, "TypeSize", 5),
-    "WqEthreadStartAddress": (1321, "StructOffset", 5),
-    "WqEthreadTypeSize": (1322, "TypeSize", 5),
-    "WqEthreadTcb": (1323, "StructOffset", 5),
+    "PspTerminateProcess": (V4_SPECIAL_ITEM_IDS["PspTerminateProcess"], "GlobalRva", 1),
+    "EthActiveExWorker": (V4_SPECIAL_ITEM_IDS["EthActiveExWorker"], "BitField", 2),
+    "KprcbTimerTable": (V4_SPECIAL_ITEM_IDS["KprcbTimerTable"], "StructOffset", 2),
+    "KtimerTableTimerEntries": (V4_SPECIAL_ITEM_IDS["KtimerTableTimerEntries"], "StructOffset", 2),
+    "KtimerTableEntryEntry": (V4_SPECIAL_ITEM_IDS["KtimerTableEntryEntry"], "StructOffset", 2),
+    "KtimerTimerListEntry": (V4_SPECIAL_ITEM_IDS["KtimerTimerListEntry"], "StructOffset", 2),
+    "KtimerDueTime": (V4_SPECIAL_ITEM_IDS["KtimerDueTime"], "StructOffset", 2),
+    "KtimerDpc": (V4_SPECIAL_ITEM_IDS["KtimerDpc"], "StructOffset", 2),
+    "KtimerTimerType": (V4_SPECIAL_ITEM_IDS["KtimerTimerType"], "StructOffset", 2),
+    "KtimerPeriod": (V4_SPECIAL_ITEM_IDS["KtimerPeriod"], "StructOffset", 2),
+    "KdpcDeferredRoutine": (V4_SPECIAL_ITEM_IDS["KdpcDeferredRoutine"], "StructOffset", 2),
+    "KdpcDeferredContext": (V4_SPECIAL_ITEM_IDS["KdpcDeferredContext"], "StructOffset", 2),
+    "KtimerTableTypeSize": (V4_SPECIAL_ITEM_IDS["KtimerTableTypeSize"], "TypeSize", 2),
+    "KtimerTableEntryTypeSize": (V4_SPECIAL_ITEM_IDS["KtimerTableEntryTypeSize"], "TypeSize", 2),
+    "KtimerTypeSize": (V4_SPECIAL_ITEM_IDS["KtimerTypeSize"], "TypeSize", 2),
+    "KdpcTypeSize": (V4_SPECIAL_ITEM_IDS["KdpcTypeSize"], "TypeSize", 2),
+    "FltFilterOperations": (V4_SPECIAL_ITEM_IDS["FltFilterOperations"], "StructOffset", 3),
+    "CiKernelHashBucketList": (V4_SPECIAL_ITEM_IDS["CiKernelHashBucketList"], "GlobalRva", 4),
+    "CiHashCacheLock": (V4_SPECIAL_ITEM_IDS["CiHashCacheLock"], "GlobalRva", 4),
+    "CiHashEntryNext": (V4_SPECIAL_ITEM_IDS["CiHashEntryNext"], "StructOffset", 4),
+    "CiHashEntryDriverName": (V4_SPECIAL_ITEM_IDS["CiHashEntryDriverName"], "StructOffset", 4),
+    "CiHashEntryTimeDateStamp": (V4_SPECIAL_ITEM_IDS["CiHashEntryTimeDateStamp"], "StructOffset", 4),
+    "CiHashEntryLoadStatus": (V4_SPECIAL_ITEM_IDS["CiHashEntryLoadStatus"], "StructOffset", 4),
+    "CiHashEntryImageBase": (V4_SPECIAL_ITEM_IDS["CiHashEntryImageBase"], "StructOffset", 4),
+    "CiHashEntryImageSize": (V4_SPECIAL_ITEM_IDS["CiHashEntryImageSize"], "StructOffset", 4),
+    "CiHashEntryTypeSize": (V4_SPECIAL_ITEM_IDS["CiHashEntryTypeSize"], "TypeSize", 4),
+    "WqPspSystemPartition": (V4_SPECIAL_ITEM_IDS["WqPspSystemPartition"], "GlobalRva", 5),
+    "WqExpBuiltinPriorities": (V4_SPECIAL_ITEM_IDS["WqExpBuiltinPriorities"], "GlobalRva", 5),
+    "WqEpartitionExPartition": (V4_SPECIAL_ITEM_IDS["WqEpartitionExPartition"], "StructOffset", 5),
+    "WqExPartitionWorkQueues": (V4_SPECIAL_ITEM_IDS["WqExPartitionWorkQueues"], "StructOffset", 5),
+    "WqExWorkQueueWorkPriQueue": (V4_SPECIAL_ITEM_IDS["WqExWorkQueueWorkPriQueue"], "StructOffset", 5),
+    "WqExWorkQueueQueueIndex": (V4_SPECIAL_ITEM_IDS["WqExWorkQueueQueueIndex"], "StructOffset", 5),
+    "WqKpriQueueEntryListHead": (V4_SPECIAL_ITEM_IDS["WqKpriQueueEntryListHead"], "StructOffset", 5),
+    "WqKpriQueueThreadListHead": (V4_SPECIAL_ITEM_IDS["WqKpriQueueThreadListHead"], "StructOffset", 5),
+    "WqKthreadQueue": (V4_SPECIAL_ITEM_IDS["WqKthreadQueue"], "StructOffset", 5),
+    "WqKthreadQueueListEntry": (V4_SPECIAL_ITEM_IDS["WqKthreadQueueListEntry"], "StructOffset", 5),
+    "WqWorkItemList": (V4_SPECIAL_ITEM_IDS["WqWorkItemList"], "StructOffset", 5),
+    "WqWorkItemRoutine": (V4_SPECIAL_ITEM_IDS["WqWorkItemRoutine"], "StructOffset", 5),
+    "WqWorkItemParameter": (V4_SPECIAL_ITEM_IDS["WqWorkItemParameter"], "StructOffset", 5),
+    "WqExPoolUntrusted": (V4_SPECIAL_ITEM_IDS["WqExPoolUntrusted"], "EnumValue", 5),
+    "WqEpartitionTypeSize": (V4_SPECIAL_ITEM_IDS["WqEpartitionTypeSize"], "TypeSize", 5),
+    "WqExPartitionTypeSize": (V4_SPECIAL_ITEM_IDS["WqExPartitionTypeSize"], "TypeSize", 5),
+    "WqExWorkQueueTypeSize": (V4_SPECIAL_ITEM_IDS["WqExWorkQueueTypeSize"], "TypeSize", 5),
+    "WqKpriQueueTypeSize": (V4_SPECIAL_ITEM_IDS["WqKpriQueueTypeSize"], "TypeSize", 5),
+    "WqKthreadTypeSize": (V4_SPECIAL_ITEM_IDS["WqKthreadTypeSize"], "TypeSize", 5),
+    "WqWorkItemTypeSize": (V4_SPECIAL_ITEM_IDS["WqWorkItemTypeSize"], "TypeSize", 5),
+    "WqEthreadStartAddress": (V4_SPECIAL_ITEM_IDS["WqEthreadStartAddress"], "StructOffset", 5),
+    "WqEthreadTypeSize": (V4_SPECIAL_ITEM_IDS["WqEthreadTypeSize"], "TypeSize", 5),
+    "WqEthreadTcb": (V4_SPECIAL_ITEM_IDS["WqEthreadTcb"], "StructOffset", 5),
 }
 
 # CI 缓存的最小安全遍历只依赖两个全局、Next、DriverName 和类型大小。
@@ -1425,9 +1479,10 @@ def resolve_type_layouts_batch(
             if size_match:
                 resolved_type_sizes[struct_name] = parse_int(size_match.group(1))
 
+    member_requests = list(member_requests)
     wanted_members: dict[str, set[str]] = {}
     for struct_name, member_name in member_requests:
-        wanted_members.setdefault(struct_name, set()).add(member_name)
+        wanted_members.setdefault(struct_name, set()).add(member_name.split(".")[0])
     resolved_offsets: dict[tuple[str, str], int] = {}
     member_type_ids: dict[tuple[str, str], str] = {}
     wanted_bit_fields = set(bit_field_requests)
@@ -1443,15 +1498,52 @@ def resolve_type_layouts_batch(
                 offset_match = OFFSET_RE.search(line)
                 if offset_match and key not in resolved_offsets:
                     resolved_offsets[key] = parse_int(offset_match.group(1))
-                if key in wanted_bit_fields and key not in member_type_ids:
+                if key not in member_type_ids:
                     type_match = TYPE_REF_RE.search(line)
                     if type_match:
                         member_type_ids[key] = normalize_record_id(type_match.group(1))
 
+    # Follow named embedded members by their exact CodeView type IDs. This is
+    # required for anonymous unions such as _SECTION.u1.ControlArea; matching
+    # anonymous type names would mix unrelated structures.
+    def nested_offsets(type_id: str, components: list[str]) -> set[int]:
+        record = records.get(type_id)
+        if record is None or record[0] not in concrete_kinds:
+            return set()
+        field_match = FIELD_LIST_RE.search(" ".join([record[1], *record[2]]))
+        if field_match is None:
+            return set()
+        offsets = set()
+        for line in field_lists.get(normalize_record_id(field_match.group(1)), []):
+            if "LF_MEMBER" not in line or member_name_from_line(line) != components[0]:
+                continue
+            offset_match = OFFSET_RE.search(line)
+            type_match = TYPE_REF_RE.search(line)
+            if offset_match is None:
+                continue
+            offset = parse_int(offset_match.group(1))
+            if len(components) == 1:
+                offsets.add(offset)
+            elif type_match is not None:
+                offsets.update(offset + value for value in nested_offsets(
+                    normalize_record_id(type_match.group(1)), components[1:]))
+        return offsets
+
+    for struct_name, path in member_requests:
+        components = path.split(".")
+        if len(components) == 1:
+            continue
+        key = (struct_name, components[0])
+        if key not in resolved_offsets or key not in member_type_ids:
+            continue
+        values = nested_offsets(member_type_ids[key], components[1:])
+        if len(values) == 1:
+            resolved_offsets[(struct_name, path)] = resolved_offsets[key] + values.pop()
+
     resolved_bit_fields: dict[tuple[str, str], tuple[int, int, int, int]] = {}
     for key, type_id in member_type_ids.items():
         record = records.get(type_id)
-        if record is None or record[0] != "LF_BITFIELD" or key not in resolved_offsets:
+        if key not in wanted_bit_fields or record is None or record[0] != "LF_BITFIELD" or key not in resolved_offsets:
             continue
         record_text = " ".join([record[1], *record[2]])
         storage_match = TYPE_REF_RE.search(record_text)
@@ -2053,6 +2145,8 @@ def resolve_v4_layouts(types_text: str) -> tuple[
 ]:
     """Resolve v4 members, type sizes, and bitfields from one PDB type dump."""
     member_requests = list(V4_FIELD_MAP.values()) + list(V4_BIT_FIELD_MAP.values())
+    member_requests.extend(FIELD_MAP.values())
+    member_requests.extend(CORE_SHIFT_FIELD_MAP.values())
     member_requests.extend(
         member
         for aliases in V4_CI_FIELD_ALIASES.values()
@@ -2060,11 +2154,12 @@ def resolve_v4_layouts(types_text: str) -> tuple[
     )
     member_requests.extend(request for alias in V4_MEMBER_ALIASES.values() for request in alias)
     type_size_requests = list(V4_TYPE_SIZE_MAP.values()) + list(V4_CI_TYPE_SIZE_ALIASES)
+    type_size_requests.extend(TYPE_SIZE_MAP.values())
     resolved_member_offsets, resolved_type_sizes, resolved_bit_fields = resolve_type_layouts_batch(
         types_text,
         member_requests,
         type_size_requests,
-        V4_BIT_FIELD_MAP.values(),
+        [*V4_BIT_FIELD_MAP.values(), *CORE_SHIFT_FIELD_MAP.values()],
     )
     for target, (base_member, nested_member) in V4_MEMBER_ALIASES.items():
         if target in resolved_member_offsets:
@@ -2094,6 +2189,14 @@ def refresh_v4_profile(
         resolved_bit_fields=resolved_bit_fields,
         module_class=module_class,
     )
+    if module_class.strip().lower() in {"ntoskrnl", "ntkrla57"}:
+        fields, missing_fields = resolve_core_fields(resolved_member_offsets, resolved_bit_fields)
+        core_inputs = [{"name": name, "kind": "StructOffset", "value": value}
+                       for name, value in fields.items()]
+        core_inputs.extend({"name": name, "kind": "TypeSize", "value": resolved_type_sizes[type_name]}
+                           for name, type_name in TYPE_SIZE_MAP.items() if type_name in resolved_type_sizes)
+        v4_items.extend(build_v4_core_items(core_inputs))
+        profile["missingFields"] = missing_fields
     normalized_module_class = module_class.strip().lower()
     if normalized_module_class in {"ci", "ntoskrnl"}:
         # 仅刷新类型时没有 symbol dump；保留旧生成流程已按同一身份写入的 GlobalRva。
@@ -2169,7 +2272,7 @@ def v4_profile_complete(profile_path: Path) -> bool:
         for definition in V4_ITEM_DEFINITIONS.values()
         if definition[2] in active_groups
     }
-    allowed_ids.update(V4_CORE_ITEM_IDS.values())
+    allowed_ids = SUPPORTED_V4_ITEM_IDS
     actual_ids = {
         item.get("itemId")
         for item in raw_items
@@ -2205,6 +2308,7 @@ def build_profile(
     """
     member_requests = list(FIELD_MAP.values()) + list(CALLBACK_STRUCT_FIELD_MAP.values())
     member_requests.extend(list(V4_FIELD_MAP.values()) + list(V4_BIT_FIELD_MAP.values()))
+    member_requests.extend(CORE_SHIFT_FIELD_MAP.values())
     member_requests.extend(
         member
         for aliases in V4_CI_FIELD_ALIASES.values()
@@ -2220,7 +2324,7 @@ def build_profile(
         types_text,
         member_requests,
         type_size_requests,
-        V4_BIT_FIELD_MAP.values(),
+        [*V4_BIT_FIELD_MAP.values(), *CORE_SHIFT_FIELD_MAP.values()],
     )
     for target, (base_member, nested_member) in V4_MEMBER_ALIASES.items():
         if target in resolved_member_offsets:
@@ -2229,14 +2333,7 @@ def build_profile(
         nested_offset = resolved_member_offsets.get(nested_member)
         if base_offset is not None and nested_offset is not None:
             resolved_member_offsets[target] = base_offset + nested_offset
-    resolved_fields: dict[str, str] = {}
-    missing_fields: list[str] = []
-    for ksword_name, (struct_name, member_name) in FIELD_MAP.items():
-        offset = resolved_member_offsets.get((struct_name, member_name))
-        if offset is None:
-            missing_fields.append(f"{struct_name}->{member_name}")
-            continue
-        resolved_fields[ksword_name] = f"0x{offset:04X}"
+    resolved_fields, missing_fields = resolve_core_fields(resolved_member_offsets, resolved_bit_fields)
 
     resolved_type_sizes: dict[str, str] = {}
     missing_type_sizes: list[str] = []
@@ -2294,7 +2391,7 @@ def build_profile(
     ]
 
     total_candidates = (
-        len(FIELD_MAP) +
+        len(FIELD_MAP) + len(CORE_SHIFT_FIELD_MAP) +
         len(TYPE_SIZE_MAP) +
         len(CALLBACK_GLOBAL_RVA_NAMES) +
         len(CALLBACK_STRUCT_FIELD_MAP) +

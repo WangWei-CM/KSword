@@ -195,6 +195,29 @@ Return Value:
         state.Ntoskrnl.imageBase == 0ULL || state.Ntoskrnl.sizeOfImage == 0UL) {
         return STATUS_DEVICE_NOT_READY; // 保留真正未初始化/无身份的诊断。
     }
+    // Global RVAs accepted for this exact kernel can complete only this query's
+    // missing private fields. Keep shared DynData and all provenance unchanged.
+    if (KswordARKUnloadedDynDataSourceIsTrusted(state.KernelGlobalSources.PiDDBCacheTable) &&
+        KswordARKUnloadedDynDataSourceIsTrusted(state.KernelGlobalSources.PiDDBLock) &&
+        (state.Kernel.PiDdbDriverName == KSW_DYN_OFFSET_UNAVAILABLE ||
+         state.Kernel.PiDdbTimeDateStamp == KSW_DYN_OFFSET_UNAVAILABLE ||
+         state.Kernel.PiDdbLoadStatus == KSW_DYN_OFFSET_UNAVAILABLE ||
+         state.Kernel.PiDdbTypeSize == KSW_DYN_OFFSET_UNAVAILABLE)) {
+        KSW_RUNTIME_KERNEL_LAYOUT runtimeLayout;
+        NTSTATUS resolveStatus;
+        RtlFillMemory(&runtimeLayout, sizeof(runtimeLayout), 0xFF);
+        resolveStatus = KswordARKDriverResolvePiDdbLayout(&state.Ntoskrnl,
+            state.KernelGlobals.PiDDBCacheTable, state.KernelGlobals.PiDDBLock, &runtimeLayout);
+        if (!NT_SUCCESS(resolveStatus)) { return resolveStatus; }
+        state.Kernel.PiDdbDriverName = (ULONG)runtimeLayout.PiDdbDriverName;
+        state.Kernel.PiDdbTimeDateStamp = (ULONG)runtimeLayout.PiDdbTimeDateStamp;
+        state.Kernel.PiDdbLoadStatus = (ULONG)runtimeLayout.PiDdbLoadStatus;
+        state.Kernel.PiDdbTypeSize = (ULONG)runtimeLayout.PiDdbTypeSize;
+        state.KernelSources.PiDdbDriverName = KSW_DYN_FIELD_SOURCE_RUNTIME_PATTERN;
+        state.KernelSources.PiDdbTimeDateStamp = KSW_DYN_FIELD_SOURCE_RUNTIME_PATTERN;
+        state.KernelSources.PiDdbLoadStatus = KSW_DYN_FIELD_SOURCE_RUNTIME_PATTERN;
+        state.KernelSources.PiDdbTypeSize = KSW_DYN_FIELD_SOURCE_RUNTIME_PATTERN;
+    }
     if (!KswordARKUnloadedDynDataSourceIsTrusted(
             state.KernelSources.PiDdbDriverName) ||
         !KswordARKUnloadedDynDataSourceIsTrusted(

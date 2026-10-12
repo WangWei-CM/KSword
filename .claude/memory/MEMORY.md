@@ -1,5 +1,7 @@
 # Memory Index
 
+- [DynData v4 配置读取与分模块回执](ksword-dyndata-profile-loading.md) — 协议统一 ID 目录、1401 整包拒绝、PDB 提取缺口、匿名 union/位域语义与离线 Qt 消费回归
+
 - [Taskbar 页面平铺导航](ksword-taskbar-page-overview.md) — 独立透明 RGB 分列窗口、实际页面目录、WM_COPYDATA 身份校验与逐层跳转
 
 - [CLI 崩溃报告与 VMware 验收](ksword-cli-crash-report.md) — Unicode CRT 日志 fastfail、旧 OS build 门禁归因、参数/状态诊断、VIX 自动通道与只读回归

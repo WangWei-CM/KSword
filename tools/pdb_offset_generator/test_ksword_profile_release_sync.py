@@ -115,5 +115,49 @@ class V4OnlyPackTests(unittest.TestCase):
             self.assertNotIn(1, generator.v4_group_ids_for_module(module))
 
 
+class ProtocolAndCoreExtractionTests(unittest.TestCase):
+    def test_protocol_catalog_accepts_psp_and_rejects_retired_or_unknown_ids(self):
+        self.assertIn(1401, release_sync.SUPPORTED_V4_ITEM_IDS)
+        self.assertNotIn(1402, release_sync.SUPPORTED_V4_ITEM_IDS)
+        self.assertNotIn(1004, release_sync.SUPPORTED_V4_ITEM_IDS)
+        for name, definition in generator.V4_ITEM_DEFINITIONS.items():
+            self.assertEqual(definition[0], release_sync.V4_SPECIAL_ITEM_IDS[name])
+            self.assertIn(definition[0], release_sync.SUPPORTED_V4_ITEM_IDS)
+
+    def test_nested_union_resolves_by_type_id_and_missing_member_stays_missing(self):
+        types = """
+   0x1000 | LF_STRUCTURE [size = 32] `_SECTION`
+            field list: 0x1001
+            options: sizeof 48
+   0x1001 | LF_FIELDLIST [size = 24]
+            - LF_MEMBER [name = `u1`, Type = 0x1002, offset = 40, attrs = public]
+   0x1002 | LF_UNION [size = 24] `<anonymous-tag>`
+            field list: 0x1003
+            options: sizeof 8
+   0x1003 | LF_FIELDLIST [size = 24]
+            - LF_MEMBER [name = `ControlArea`, Type = 0x0012, offset = 0, attrs = public]
+   0x1004 | LF_UNION [size = 24] `<anonymous-tag>`
+            field list: 0x1005
+            options: sizeof 8
+   0x1005 | LF_FIELDLIST [size = 24]
+            - LF_MEMBER [name = `ControlArea`, Type = 0x0012, offset = 16, attrs = public]
+"""
+        offsets, _, _ = generator.resolve_type_layouts_batch(types,
+            [("_SECTION", "u1.ControlArea"), ("_SECTION", "u1.Missing")], [], [])
+        self.assertEqual(offsets[("_SECTION", "u1.ControlArea")], 40)
+        self.assertNotIn(("_SECTION", "u1.Missing"), offsets)
+
+    def test_handle_shifts_use_bit_positions_and_reject_incompatible_metadata(self):
+        bits = {("_HANDLE_TABLE_ENTRY", "ObjectPointerBits"): (0, 20, 44, 8),
+                ("_HANDLE_TABLE_ENTRY", "Attributes"): (0, 17, 3, 8)}
+        fields, _ = generator.resolve_core_fields({}, bits)
+        self.assertEqual(fields["ObDecodeShift"], "0x0014")
+        self.assertEqual(fields["ObAttributesShift"], "0x0011")
+        bits[("_HANDLE_TABLE_ENTRY", "ObjectPointerBits")] = (0, 20, 40, 8)
+        fields, missing = generator.resolve_core_fields({}, bits)
+        self.assertNotIn("ObDecodeShift", fields)
+        self.assertIn("_HANDLE_TABLE_ENTRY->ObjectPointerBits", missing)
+
+
 if __name__ == "__main__":
     unittest.main()

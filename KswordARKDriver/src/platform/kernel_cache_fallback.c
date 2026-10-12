@@ -844,8 +844,10 @@ KswordARKKernelCacheResolvePiDdb(
                 ambiguous = TRUE;
                 continue;
             }
+            if (score > bestScore) {
+                ambiguous = FALSE; // Duplicate references cannot clear a tied conflict.
+            }
             bestScore = score;
-            ambiguous = FALSE;
             bestTableReference = &References[tableIndex];
             bestLockReference = &References[lockIndex];
         }
@@ -903,6 +905,69 @@ KswordARKKernelCacheResolvePiDdb(
         ExReleaseResourceLite(candidate.Lock);
     }
     KeLeaveCriticalRegion();
+}
+
+NTSTATUS
+KswordARKDriverResolvePiDdbLayout(
+    _In_ const KSW_DYN_MODULE_IDENTITY_PACKET* NtoskrnlIdentity,
+    _In_ ULONG TableRva,
+    _In_ ULONG LockRva,
+    _Out_ PKSW_RUNTIME_KERNEL_LAYOUT Layout
+    )
+{
+    KSW_RUNTIME_IMAGE_VIEW view;
+    KSW_PIDDB_LAYOUT_CANDIDATE candidate;
+    RTL_AVL_TABLE snapshot;
+    PVOID entries[KSW_KERNEL_CACHE_MAX_SAMPLE_ENTRIES];
+    ULONG entryCount = 0UL;
+    BOOLEAN acquired;
+    NTSTATUS status = STATUS_NOT_SUPPORTED;
+
+    if (Layout == NULL || NtoskrnlIdentity == NULL ||
+        NtoskrnlIdentity->present == 0UL || NtoskrnlIdentity->imageBase == 0ULL ||
+        NtoskrnlIdentity->sizeOfImage == 0UL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL) { return STATUS_INVALID_DEVICE_STATE; }
+    RtlZeroMemory(&view, sizeof(view));
+    RtlZeroMemory(&candidate, sizeof(candidate));
+    RtlZeroMemory(&snapshot, sizeof(snapshot));
+    RtlZeroMemory(entries, sizeof(entries));
+    if (!KswordARKRuntimeInitializeImageView((PVOID)(ULONG_PTR)NtoskrnlIdentity->imageBase,
+            NtoskrnlIdentity->sizeOfImage, &view) || TableRva >= view.Size || LockRva >= view.Size) {
+        return STATUS_NOT_SUPPORTED;
+    }
+    candidate.Table = (PRTL_AVL_TABLE)(view.Base + TableRva);
+    candidate.Lock = (PERESOURCE)(view.Base + LockRva);
+    if (!KswordARKKernelCacheAvlTableIsPlausible(&view, (ULONG_PTR)candidate.Table, NULL) ||
+        !KswordARKKernelCacheResourceIsPlausible(&view, (ULONG_PTR)candidate.Lock)) {
+        return STATUS_NOT_SUPPORTED;
+    }
+    if (!KswordARKKernelProbeResourceIsSystemResource((ULONG_PTR)candidate.Lock)) {
+        return STATUS_OBJECT_TYPE_MISMATCH;
+    }
+    KeEnterCriticalRegion();
+    acquired = ExAcquireResourceSharedLite(candidate.Lock, FALSE);
+    if (acquired) {
+        if (!KswordARKKernelCacheAvlTableIsPlausible(&view, (ULONG_PTR)candidate.Table, &snapshot) ||
+            !KswordARKKernelCacheCollectAvlEntries(&snapshot, (ULONG_PTR)candidate.Table,
+                entries, RTL_NUMBER_OF(entries), &entryCount)) {
+            status = STATUS_DATA_ERROR;
+        }
+        else if (KswordARKKernelCacheInferPiDdbEntryLayout(entries, entryCount, &candidate)) {
+            Layout->PiDDBCacheTableRva = (LONG)TableRva;
+            Layout->PiDDBLockRva = (LONG)LockRva;
+            Layout->PiDdbDriverName = (LONG)candidate.DriverNameOffset;
+            Layout->PiDdbTimeDateStamp = (LONG)candidate.TimeDateStampOffset;
+            Layout->PiDdbLoadStatus = (LONG)candidate.LoadStatusOffset;
+            Layout->PiDdbTypeSize = (LONG)candidate.EntrySize;
+            status = STATUS_SUCCESS;
+        }
+        ExReleaseResourceLite(candidate.Lock);
+    }
+    else { status = STATUS_LOCK_NOT_GRANTED; }
+    KeLeaveCriticalRegion();
+    return status;
 }
 
 VOID

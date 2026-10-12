@@ -837,3 +837,58 @@ Return Value:
     }
     return referenceCount;
 }
+
+ULONG
+KswordARKRuntimeCollectExecutableDataReferenceBatch(
+    _In_ const KSW_RUNTIME_IMAGE_VIEW* View,
+    _In_ ULONG ScanByteBudget,
+    _Inout_ ULONG* CursorRva,
+    _Out_writes_(ReferenceCapacity) KSW_RUNTIME_DATA_REFERENCE* References,
+    _In_ ULONG ReferenceCapacity,
+    _Out_ ULONG* ScannedBytesOut
+    )
+{
+    ULONG referenceCount = 0UL;
+    ULONG sectionIndex = 0UL;
+
+    if (ScannedBytesOut != NULL) {
+        *ScannedBytesOut = 0UL;
+    }
+    if (View == NULL || CursorRva == NULL || ScannedBytesOut == NULL ||
+        References == NULL || ReferenceCapacity == 0UL || ScanByteBudget == 0UL ||
+        *CursorRva >= View->Size) {
+        return 0UL;
+    }
+    RtlZeroMemory(References, (SIZE_T)ReferenceCapacity * sizeof(*References));
+    for (sectionIndex = 0UL; sectionIndex < View->SectionCount; ++sectionIndex) {
+        const KSW_RUNTIME_IMAGE_SECTION* section = &View->Sections[sectionIndex];
+        ULONG_PTR cursor;
+
+        if ((section->Characteristics & IMAGE_SCN_MEM_EXECUTE) == 0UL ||
+            section->End <= section->Start || section->End <= View->Base + *CursorRva) {
+            continue;
+        }
+        cursor = max(section->Start, View->Base + *CursorRva);
+        while (cursor < section->End && *ScannedBytesOut < ScanByteBudget &&
+            referenceCount < ReferenceCapacity) {
+            ULONG_PTR target = 0U;
+            ULONG instructionBytes = 0UL;
+
+            if (KswordARKRuntimeDecodeRipReference(cursor, &target, &instructionBytes) &&
+                instructionBytes <= section->End - cursor &&
+                KswordARKRuntimeAddressInImage(View, target, 1U) &&
+                !KswordARKRuntimeAddressIsExecutable(View, target, 1U)) {
+                (VOID)KswordARKRuntimeAppendReference(References, ReferenceCapacity,
+                    &referenceCount, target, section->Start, cursor);
+            }
+            ++cursor;
+            ++*ScannedBytesOut;
+        }
+        *CursorRva = (ULONG)(cursor - View->Base);
+        if (*ScannedBytesOut >= ScanByteBudget || referenceCount >= ReferenceCapacity) {
+            return referenceCount;
+        }
+    }
+    *CursorRva = View->Size;
+    return referenceCount;
+}

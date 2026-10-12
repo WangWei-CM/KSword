@@ -28,3 +28,18 @@
 - `RuntimeUnloadedScanRegression.ps1` 的扫描与布局函数均取自生产源码；传入期望 RVA 只用作测试断言，
   不作为扫描输入且不读取 PDB/配置。当前内核在两个合成装载基址下发现地址并通过合成多记录布局验证，
   以及缺失/越界函数表拒绝，共 8 项断言通过。不能据此宣称其它 Windows 版本或实机查询已通过。
+
+- 2026-10-12 离线 PiDDB/CI 研究：当前 `10.0.19041.7725` 的 ntoskrnl PDB 只有
+  `PiDDBCacheTable=0xD2F000`、`PiDDBLock=0xC44C40`，没有 PiDDB 私有条目类型；CI PDB
+  只有 `g_KernelHashBucketList=0xC3090`、`g_HashCacheLock=0x39DC0`，没有条目结构类型。
+  这确认缺口是 PDB 本身不含私有类型，不是提取器漏读。
+- PiDDB 查询现在在精确可信全局通过后，以只读共享锁、AVL 完整性检查、系统资源身份探针和多条目一致性
+  补全本次查询所需的私有字段；不会写回全局 DynData，也不会把推断字段冒充 PDB 来源。CI 查询现在会在
+  非空锚点仍不足以覆盖缓存时，按可执行节分批继续扫描，并删除了把不透明哈希负载猜成时间戳/状态/映像
+  的逻辑；可选字段继续保持不可用。
+- `CacheLayoutFallbackRegression.ps1` 使用生产 C 代码和合成内存覆盖 PiDDB/CI 的有效、忙锁、资源身份、
+  AVL/链表环、歧义和 IRQL 拒绝路径，22 项断言通过；另有 SafeRead、Mm 扫描和既有布局回归通过。候选
+  x64 驱动通过 MSVC/WDK、ApiValidator Universal、INF/CAT，产物在 `.codex-build-logs/piddb-ci-layout-investigation/driver/`，
+  未签名且未加载。硬盘移除期间只能继续做离线验证，无法代替实机驱动查询。
+- 同轮审查发现 CI 消费端仍有旧的裸指针读取；现已改为 `KswordARKRuntimeReadMemory`，包括链表头、Next、名称和所有可选字段。
+  当前可访问系统的 `ci.dll` 是 `10.0.19041.5737`，而离线研究的匹配 CI PDB 是 `10.0.19041.7725`，因此不能把本机 CI 文件当作同一身份的实机证据。

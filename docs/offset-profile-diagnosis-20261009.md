@@ -130,3 +130,32 @@ for path in paths:
 随后用户要求修复 CI 再推送。`c7c1886c` 的 [CI run 37901296101](https://github.com/KSwordDEV/KSword/actions/runs/37901296101) 在 user-mode job 的插件安装回归夹具编译时失败：抽取的 `MarketplacePlugin` 新增了 `ks::plugin_host::UpstreamPlan` 成员，而 `tools/test_plugin_install_layout.py` 生成的入口没有包含类型声明。夹具已增加真实 `PluginHost.Distribution.h`，保留原有安装、校验与回滚回归步骤。
 
 CI 使用空 profiles 占位供 Launcher 生成编译期清单，且此前已禁止将它发布到正式产物。两个主程序 CI 构建入口现显式传入 `KswordSkipDynDataProfilePack=true`，只跳过私有运行时档案的发布 Target；正常构建仍执行严格规范化。CI 占位 v4 JSON 补齐 `schemaVersion=1`，不添加虚假身份或偏移，也不下载 PDB。编译与回归的最终结果需要推送后对应 SHA 的 GitHub Actions 回执确认。
+
+## 2026-10-11：消费端 ID 目录与提取补全
+
+诊断报告中当前内核精确命中，但 NTOS 的加载返回“v4 pack items/capabilityGroups 无效”。原因是协议已经定义可选 item 1401（PspTerminateProcess），GUI 的独立白名单漏项，整份 NTOS profile 被拒绝且未发送 EX/V4；FLTMGR 的独立成功却污染了原有汇总状态。
+
+支持 ID 现由 `shared/driver/KswordArkDynDataIoctl.h` 的共享目录维护，GUI 和 Python 发布器共同使用。诊断报告和界面按模块列出本次 EX/V4 下发、接受和驱动当前缓存状态，兼容汇总只统计 NTOS，缓存接受不掩盖本轮格式失败。
+
+提取器新增对象类型、ETW、ALPC、Section/ControlArea 的 21 个成员映射，以及 2 个句柄位域 shift 映射。嵌套匿名 union 按确切 type ID 解析，位移来自 PDB 位域位置。当前精确内核 profile 从 225 增到 248 项；原有偏移和身份不变，其他 profile 保留。完整 Release 包含 2856 profiles、580004 items，没有虚构缺失私有类型。
+
+离线证据：Python 回归 8 项通过；`tools/test_dyndata_profile_loader.py` 执行生产 Qt 解析和 EX 投影，全部 2856 profiles 通过，未知/重复 ID、非法数值和组计数错误仍拒绝；旧消费者对同一合法包复现拒绝。Release 主程序使用 HostX64 构建。没有自动加载或下发驱动；用户负责换版后的实际运行验证。
+
+## 2026-10-12：PiDDB 与 CI 私有布局缺口
+
+对当前 `10.0.19041.7725` 的匹配符号做了独立类型枚举和反汇编交叉检查。ntoskrnl PDB 提供
+`PiDDBCacheTable` 和 `PiDDBLock` 两个精确全局 RVA，但没有 PiDDB 私有条目类型；CI PDB 提供
+`g_KernelHashBucketList` 和 `g_HashCacheLock`，同样没有哈希条目结构类型。因而这些字段是 PDB
+本身不包含，不能通过重新提取补出。反汇编只用于确认成员访问语义和扫描锚点，不把某一版机器码
+常数直接发布为跨版本静态偏移。
+
+PiDDB 查询现在在匹配身份且全局 RVA 可信时，执行可写数据边界检查、AVL 形状校验、系统
+`ERESOURCE` 身份探针、非阻塞共享锁和锁内多条目一致性推断；成功结果只存在于本次查询快照，
+不会改变全局 DynData 或来源标记。CI 运行时解析在锚点结果不完整时按可执行节分批继续扫描，
+并保留 `Next`、驱动名和最小记录边界；哈希负载不再被猜测为时间戳、状态或映像字段。
+
+`KswordARKDriver/tests/CacheLayoutFallbackRegression.ps1` 使用生产 C 实现和合成内存覆盖两类布局
+的成功、锁忙、资源身份失败、环、歧义和 IRQL 拒绝，共 22 项通过；SafeRead、Mm 扫描和布局
+回归也通过。候选驱动完成 x64 MSVC/WDK 构建、ApiValidator Universal、INF/CAT 校验，未签名、
+未加载，位于 `.codex-build-logs/piddb-ci-layout-investigation/driver/`。硬盘移除期间可以继续做
+这类源码、反汇编和离线回归研究，但不能代替目标系统的实机驱动回执和蓝屏风险验证。

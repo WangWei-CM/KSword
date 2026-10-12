@@ -439,113 +439,6 @@ KswordARKCiHashFindModule(
     return FALSE;
 }
 
-static VOID
-KswordARKCiHashInferOptionalFields(
-    _In_ const KSW_CI_HASH_CANDIDATE* Candidate,
-    _Inout_ KSW_DYN_V4_CI_KERNEL_HASH_LAYOUT* Layout
-    )
-{
-    ULONG pairOffset = 0UL;
-    ULONG bestPairMatches = 0UL;
-    LONG bestPairOffset = -1;
-    BOOLEAN pairTied = FALSE;
-    ULONG imageOffset = 0UL;
-    ULONG bestImageMatches = 0UL;
-    LONG bestImageOffset = -1;
-    BOOLEAN imageTied = FALSE;
-
-    for (pairOffset = 0UL;
-         pairOffset + (2UL * sizeof(ULONG)) <= KSW_CI_HASH_MAX_ENTRY_BYTES;
-         pairOffset += sizeof(ULONG)) {
-        ULONG sampleIndex = 0UL;
-        ULONG matches = 0UL;
-
-        if (pairOffset == Candidate->NextOffset ||
-            pairOffset == Candidate->NameOffset) {
-            continue;
-        }
-        for (sampleIndex = 0UL;
-             sampleIndex < Candidate->SampleCount;
-             ++sampleIndex) {
-            ULONG timestamp = 0UL;
-            NTSTATUS loadStatus = STATUS_SUCCESS;
-
-            if (KswordARKRuntimeReadMemory(
-                    (const UCHAR*)Candidate->Samples[sampleIndex] + pairOffset,
-                    &timestamp,
-                    sizeof(timestamp)) &&
-                KswordARKRuntimeReadMemory(
-                    (const UCHAR*)Candidate->Samples[sampleIndex] + pairOffset +
-                        sizeof(ULONG),
-                    &loadStatus,
-                    sizeof(loadStatus)) &&
-                timestamp >= 0x20000000UL &&
-                (loadStatus == STATUS_SUCCESS ||
-                 (((ULONG)loadStatus & 0xC0000000UL) == 0xC0000000UL) ||
-                 (((ULONG)loadStatus & 0xC0000000UL) == 0x80000000UL))) {
-                matches += 1UL;
-            }
-        }
-        if (matches < 2UL || matches < bestPairMatches) {
-            continue;
-        }
-        if (matches == bestPairMatches && bestPairMatches != 0UL) {
-            pairTied = TRUE;
-            continue;
-        }
-        bestPairMatches = matches;
-        bestPairOffset = (LONG)pairOffset;
-        pairTied = FALSE;
-    }
-    if (bestPairOffset >= 0 && !pairTied) {
-        Layout->EntryTimeDateStamp = (ULONG)bestPairOffset;
-        Layout->EntryLoadStatus = (ULONG)bestPairOffset + sizeof(ULONG);
-    }
-
-    for (imageOffset = 0UL;
-         imageOffset + sizeof(PVOID) + sizeof(ULONG) <=
-             KSW_CI_HASH_MAX_ENTRY_BYTES;
-         imageOffset += sizeof(PVOID)) {
-        ULONG sampleIndex = 0UL;
-        ULONG matches = 0UL;
-
-        for (sampleIndex = 0UL;
-             sampleIndex < Candidate->SampleCount;
-             ++sampleIndex) {
-            ULONG_PTR imageBase = 0U;
-            ULONG imageSize = 0UL;
-
-            if (KswordARKRuntimeReadMemory(
-                    (const UCHAR*)Candidate->Samples[sampleIndex] + imageOffset,
-                    &imageBase,
-                    sizeof(imageBase)) &&
-                KswordARKRuntimeReadMemory(
-                    (const UCHAR*)Candidate->Samples[sampleIndex] + imageOffset +
-                        sizeof(PVOID),
-                    &imageSize,
-                    sizeof(imageSize)) &&
-                KswordARKCiHashIsKernelAddress(imageBase) &&
-                imageSize >= PAGE_SIZE && imageSize <= 0x40000000UL) {
-                matches += 1UL;
-            }
-        }
-        if (matches < 2UL || matches < bestImageMatches) {
-            continue;
-        }
-        if (matches == bestImageMatches && bestImageMatches != 0UL) {
-            imageTied = TRUE;
-            continue;
-        }
-        bestImageMatches = matches;
-        bestImageOffset = (LONG)imageOffset;
-        imageTied = FALSE;
-    }
-    if (bestImageOffset >= 0 && !imageTied) {
-        Layout->EntryImageBase = (ULONG)bestImageOffset;
-        Layout->EntryImageSize = (ULONG)bestImageOffset + sizeof(PVOID);
-    }
-}
-
 NTSTATUS
 KswordARKCiHashResolveRuntimeLayout(
     _Out_ KSW_DYN_V4_CI_KERNEL_HASH_LAYOUT* LayoutOut
@@ -565,6 +458,8 @@ KswordARKCiHashResolveRuntimeLayout(
     ULONG referenceCount = 0UL;
     KSW_CI_HASH_CANDIDATE bestList;
     const KSW_RUNTIME_DATA_REFERENCE* bestLock = NULL;
+    KSW_RUNTIME_DATA_REFERENCE bestLockStorage;
+    BOOLEAN fullScanNeeded = FALSE;
     ULONG bestChainLength = 0UL;
     ULONG bestPairScore = 0UL;
     BOOLEAN listAmbiguous = FALSE;
@@ -583,6 +478,7 @@ KswordARKCiHashResolveRuntimeLayout(
     LayoutOut->EntryImageSize = KSW_DYN_OFFSET_UNAVAILABLE;
     RtlZeroMemory(&view, sizeof(view));
     RtlZeroMemory(&bestList, sizeof(bestList));
+    RtlZeroMemory(&bestLockStorage, sizeof(bestLockStorage));
     if (KeGetCurrentIrql() != PASSIVE_LEVEL) {
         return STATUS_INVALID_DEVICE_STATE;
     }
@@ -611,46 +507,78 @@ KswordARKCiHashResolveRuntimeLayout(
         KSW_CI_HASH_ROUTINE_SCAN_BYTES,
         references,
         KSW_CI_HASH_MAX_REFERENCES);
-    if (referenceCount == 0UL) {
-        referenceCount = KswordARKRuntimeCollectExecutableDataReferences(
-            &view,
-            min(view.Size, KSW_CI_HASH_FULL_SCAN_BUDGET),
-            references,
-            KSW_CI_HASH_MAX_REFERENCES);
-    }
-
     for (referenceIndex = 0UL; referenceIndex < referenceCount; ++referenceIndex) {
         KSW_CI_HASH_CANDIDATE candidate;
-
         RtlZeroMemory(&candidate, sizeof(candidate));
-        if (!KswordARKCiHashInferListCandidate(
-                &view,
-                &references[referenceIndex],
-                &candidate)) {
-            continue;
+        if (KswordARKCiHashInferListCandidate(&view, &references[referenceIndex], &candidate)) {
+            KswordARKCiHashSelectListCandidate(&candidate, &bestList, &bestChainLength, &listAmbiguous);
         }
-        KswordARKCiHashSelectListCandidate(&candidate, &bestList,
-            &bestChainLength, &listAmbiguous); // 统一保留等分矛盾链的粘性歧义。
+    }
+    // Nonempty anchor results can still omit the cache. Resume through later
+    // executable sections rather than truncating everything at the first 768 refs.
+    fullScanNeeded = bestChainLength < 2UL || listAmbiguous;
+    if (fullScanNeeded) {
+        ULONG cursorRva = 0UL;
+        ULONG scannedTotal = 0UL;
+        while (cursorRva < view.Size && scannedTotal < KSW_CI_HASH_FULL_SCAN_BUDGET) {
+            ULONG scanned = 0UL;
+            referenceCount = KswordARKRuntimeCollectExecutableDataReferenceBatch(&view,
+                min(0x10000UL, KSW_CI_HASH_FULL_SCAN_BUDGET - scannedTotal),
+                &cursorRva, references, KSW_CI_HASH_MAX_REFERENCES, &scanned);
+            scannedTotal += scanned;
+            for (referenceIndex = 0UL; referenceIndex < referenceCount; ++referenceIndex) {
+                KSW_CI_HASH_CANDIDATE candidate;
+                RtlZeroMemory(&candidate, sizeof(candidate));
+                if (KswordARKCiHashInferListCandidate(&view, &references[referenceIndex], &candidate)) {
+                    KswordARKCiHashSelectListCandidate(&candidate, &bestList, &bestChainLength, &listAmbiguous);
+                }
+            }
+            if (scanned == 0UL) { break; }
+        }
     }
     if (bestChainLength < 2UL || listAmbiguous) {
         status = STATUS_NOT_FOUND;
         goto Exit;
     }
 
-    for (referenceIndex = 0UL; referenceIndex < referenceCount; ++referenceIndex) {
-        ULONG pairScore = 0UL;
-
-        if (references[referenceIndex].Address == bestList.ListGlobal ||
-            !KswordARKCiHashResourceIsPlausible(
-                &view,
-                references[referenceIndex].Address)) {
-            continue;
+    referenceCount = KswordARKRuntimeCollectFunctionDataReferences(&view, anchors,
+        RTL_NUMBER_OF(anchors), 4UL, KSW_CI_HASH_ROUTINE_SCAN_BYTES,
+        references, KSW_CI_HASH_MAX_REFERENCES);
+    // Revisit references after list selection, retaining the selected lock by
+    // value because the reference buffer is reused for each scan batch.
+    {
+        ULONG cursorRva = 0UL;
+        ULONG scannedTotal = 0UL;
+        BOOLEAN anchorsPending = TRUE;
+        for (;;) {
+            for (referenceIndex = 0UL; referenceIndex < referenceCount; ++referenceIndex) {
+                ULONG pairScore;
+                if (references[referenceIndex].Address == bestList.ListGlobal ||
+                    !KswordARKCiHashResourceIsPlausible(&view, references[referenceIndex].Address)) {
+                    continue;
+                }
+                pairScore = KswordARKCiHashPairScore(&bestList, &references[referenceIndex]);
+                KswordARKCiHashSelectLockReference(&references[referenceIndex], pairScore,
+                    &bestLock, &bestPairScore, &pairAmbiguous);
+                if (bestLock != NULL && bestLock != &bestLockStorage) {
+                    bestLockStorage = *bestLock;
+                    bestLock = &bestLockStorage;
+                }
+            }
+            if (anchorsPending) {
+                anchorsPending = FALSE;
+                if (!fullScanNeeded && bestLock != NULL && !pairAmbiguous && bestPairScore >= 2UL) { break; }
+            }
+            if (cursorRva >= view.Size || scannedTotal >= KSW_CI_HASH_FULL_SCAN_BUDGET) { break; }
+            {
+                ULONG scanned = 0UL;
+                referenceCount = KswordARKRuntimeCollectExecutableDataReferenceBatch(&view,
+                    min(0x10000UL, KSW_CI_HASH_FULL_SCAN_BUDGET - scannedTotal),
+                    &cursorRva, references, KSW_CI_HASH_MAX_REFERENCES, &scanned);
+                scannedTotal += scanned;
+                if (scanned == 0UL) { break; }
+            }
         }
-        pairScore = KswordARKCiHashPairScore(
-            &bestList,
-            &references[referenceIndex]);
-        KswordARKCiHashSelectLockReference(&references[referenceIndex], pairScore,
-            &bestLock, &bestPairScore, &pairAmbiguous); // 重复引用不得清除另一锁的等分冲突。
     }
     if (bestLock == NULL || bestPairScore < 2UL || pairAmbiguous) {
         status = STATUS_NOT_FOUND;
@@ -668,11 +596,13 @@ KswordARKCiHashResolveRuntimeLayout(
     }
 
     KeEnterCriticalRegion();
+    status = STATUS_LOCK_NOT_GRANTED;
     lockAcquired = ExAcquireResourceSharedLite(
         (PERESOURCE)bestLock->Address,
         FALSE);
     if (lockAcquired) {
         KSW_CI_HASH_CANDIDATE lockedCandidate;
+        status = STATUS_DATA_ERROR;
 
         RtlZeroMemory(&lockedCandidate, sizeof(lockedCandidate));
         if (KswordARKCiHashWalkCandidate(
@@ -693,20 +623,9 @@ KswordARKCiHashResolveRuntimeLayout(
                 (ULONG)(bestLock->Address - view.Base);
             LayoutOut->EntryNext = bestList.NextOffset;
             LayoutOut->EntryDriverName = bestList.NameOffset;
-            KswordARKCiHashInferOptionalFields(&lockedCandidate, LayoutOut);
             LayoutOut->EntryTypeSize = max(
                 LayoutOut->EntryNext + (ULONG)sizeof(PVOID),
                 LayoutOut->EntryDriverName + (ULONG)sizeof(UNICODE_STRING));
-            if (LayoutOut->EntryTimeDateStamp != KSW_DYN_OFFSET_UNAVAILABLE) {
-                LayoutOut->EntryTypeSize = max(
-                    LayoutOut->EntryTypeSize,
-                    LayoutOut->EntryLoadStatus + (ULONG)sizeof(NTSTATUS));
-            }
-            if (LayoutOut->EntryImageBase != KSW_DYN_OFFSET_UNAVAILABLE) {
-                LayoutOut->EntryTypeSize = max(
-                    LayoutOut->EntryTypeSize,
-                    LayoutOut->EntryImageSize + (ULONG)sizeof(ULONG));
-            }
             LayoutOut->EntryTypeSize =
                 (LayoutOut->EntryTypeSize + (sizeof(PVOID) - 1UL)) &
                 ~(sizeof(PVOID) - 1UL);

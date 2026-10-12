@@ -406,45 +406,48 @@ Return Value:
     *NextEntryOut = NULL;
     entryBytes = (const UCHAR*)Entry;
 
-    __try {
-        RtlCopyMemory(
-            &nextEntry,
+    // Every address comes from a profile or runtime candidate.  Do not use a
+    // guarded raw memcpy here: MmCopyMemory must establish a complete read.
+    if (!KswordARKRuntimeReadMemory(
             entryBytes + Layout->EntryNext,
-            sizeof(nextEntry));
-        RtlCopyMemory(
-            &name,
+            &nextEntry,
+            sizeof(nextEntry)) ||
+        !KswordARKRuntimeReadMemory(
             entryBytes + Layout->EntryDriverName,
-            sizeof(name));
-        if (Layout->EntryTimeDateStamp != KSW_DYN_OFFSET_UNAVAILABLE) {
-            RtlCopyMemory(
-                &Row->timeDateStamp,
-                entryBytes + Layout->EntryTimeDateStamp,
-                sizeof(Row->timeDateStamp));
-            Row->flags |=
-                KSWORD_ARK_UNLOADED_DRIVER_ROW_FLAG_HAS_TIMESTAMP;
-        }
-        if (Layout->EntryLoadStatus != KSW_DYN_OFFSET_UNAVAILABLE) {
-            RtlCopyMemory(
-                &Row->loadStatus,
-                entryBytes + Layout->EntryLoadStatus,
-                sizeof(Row->loadStatus));
-            Row->flags |=
-                KSWORD_ARK_UNLOADED_DRIVER_ROW_FLAG_HAS_LOAD_STATUS;
-        }
-        if (Layout->EntryImageBase != KSW_DYN_OFFSET_UNAVAILABLE) {
-            RtlCopyMemory(
-                &imageBase,
-                entryBytes + Layout->EntryImageBase,
-                sizeof(imageBase));
-        }
-        if (Layout->EntryImageSize != KSW_DYN_OFFSET_UNAVAILABLE) {
-            RtlCopyMemory(
-                &imageSize,
-                entryBytes + Layout->EntryImageSize,
-                sizeof(imageSize));
-        }
+            &name,
+            sizeof(name))) {
+        return FALSE;
     }
-    __except (EXCEPTION_EXECUTE_HANDLER) {
+    if (Layout->EntryTimeDateStamp != KSW_DYN_OFFSET_UNAVAILABLE) {
+        if (!KswordARKRuntimeReadMemory(
+                entryBytes + Layout->EntryTimeDateStamp,
+                &Row->timeDateStamp,
+                sizeof(Row->timeDateStamp))) {
+            return FALSE;
+        }
+        Row->flags |= KSWORD_ARK_UNLOADED_DRIVER_ROW_FLAG_HAS_TIMESTAMP;
+    }
+    if (Layout->EntryLoadStatus != KSW_DYN_OFFSET_UNAVAILABLE) {
+        if (!KswordARKRuntimeReadMemory(
+                entryBytes + Layout->EntryLoadStatus,
+                &Row->loadStatus,
+                sizeof(Row->loadStatus))) {
+            return FALSE;
+        }
+        Row->flags |= KSWORD_ARK_UNLOADED_DRIVER_ROW_FLAG_HAS_LOAD_STATUS;
+    }
+    if (Layout->EntryImageBase != KSW_DYN_OFFSET_UNAVAILABLE &&
+        !KswordARKRuntimeReadMemory(
+            entryBytes + Layout->EntryImageBase,
+            &imageBase,
+            sizeof(imageBase))) {
+        return FALSE;
+    }
+    if (Layout->EntryImageSize != KSW_DYN_OFFSET_UNAVAILABLE &&
+        !KswordARKRuntimeReadMemory(
+            entryBytes + Layout->EntryImageSize,
+            &imageSize,
+            sizeof(imageSize))) {
         return FALSE;
     }
     if (!KswordARKUnloadedCopyName(&name, Row)) {
@@ -502,7 +505,11 @@ Return Value:
     if (!NT_SUCCESS(status)) {
         status = KswordARKCiHashResolveRuntimeLayout(&layout);
         if (!NT_SUCCESS(status)) {
-            return STATUS_REVISION_MISMATCH;
+            // No matching PDB is not the whole explanation: fallback also ran.
+            // Preserve busy/read/resource failures; an unresolved layout has its
+            // own semantic status rather than pretending no scan was attempted.
+            return (status == STATUS_NOT_FOUND || status == STATUS_NOT_SUPPORTED)
+                ? STATUS_NOT_SUPPORTED : status;
         }
     }
     listGlobal = (PVOID)(ULONG_PTR)(
@@ -518,41 +525,43 @@ Return Value:
         KeLeaveCriticalRegion();
         return STATUS_LOCK_NOT_GRANTED;
     }
-    __try {
-        current = *(PVOID*)listGlobal;
-        while (current != NULL) {
-            PVOID nextEntry = NULL;
-            KSWORD_ARK_UNLOADED_DRIVER_ROW row;
-
-            if (walkedRows >= KSW_UNLOADED_DRIVER_HARD_WALK_LIMIT) {
-                Context->Response->responseFlags |=
-                    KSWORD_ARK_UNLOADED_DRIVER_RESPONSE_FLAG_TRUNCATED;
-                status = STATUS_BUFFER_OVERFLOW;
-                break;
-            }
-            RtlZeroMemory(&row, sizeof(row));
-            if (KswordARKUnloadedReadCiHashRow(
-                    &layout,
-                    current,
-                    &nextEntry,
-                    &row)) {
-                KswordARKUnloadedAppendRow(Context, &row);
-            }
-            else {
-                KswordARKUnloadedSkipInvalidRow(Context, STATUS_DATA_ERROR);
-                status = STATUS_DATA_ERROR;
-                break;
-            }
-            if (nextEntry == current) {
-                status = STATUS_DATA_ERROR;
-                break;
-            }
-            current = nextEntry;
-            walkedRows += 1UL;
-        }
+    if (!KswordARKRuntimeReadMemory(
+            listGlobal,
+            &current,
+            sizeof(current))) {
+        ExReleaseResourceLite(hashLock);
+        KeLeaveCriticalRegion();
+        return STATUS_PARTIAL_COPY;
     }
-    __except (EXCEPTION_EXECUTE_HANDLER) {
-        status = GetExceptionCode();
+    while (current != NULL) {
+        PVOID nextEntry = NULL;
+        KSWORD_ARK_UNLOADED_DRIVER_ROW row;
+
+        if (walkedRows >= KSW_UNLOADED_DRIVER_HARD_WALK_LIMIT) {
+            Context->Response->responseFlags |=
+                KSWORD_ARK_UNLOADED_DRIVER_RESPONSE_FLAG_TRUNCATED;
+            status = STATUS_BUFFER_OVERFLOW;
+            break;
+        }
+        RtlZeroMemory(&row, sizeof(row));
+        if (KswordARKUnloadedReadCiHashRow(
+                &layout,
+                current,
+                &nextEntry,
+                &row)) {
+            KswordARKUnloadedAppendRow(Context, &row);
+        }
+        else {
+            KswordARKUnloadedSkipInvalidRow(Context, STATUS_DATA_ERROR);
+            status = STATUS_DATA_ERROR;
+            break;
+        }
+        if (nextEntry == current) {
+            status = STATUS_DATA_ERROR;
+            break;
+        }
+        current = nextEntry;
+        walkedRows += 1UL;
     }
     ExReleaseResourceLite(hashLock);
     KeLeaveCriticalRegion();

@@ -55,6 +55,8 @@ static BOOLEAN readableGlobal;
 static BOOLEAN writableGlobal;
 static ULONG readCalls;
 static ULONG failures;
+static ULONG piResolveCalls;
+static NTSTATUS piResolveStatus;
 static PVOID testSystemRangeStart = (PVOID)(ULONG_PTR)0xFFFF800000000000ULL;
 
 static KIRQL TestIrql(VOID) { return testIrql; }
@@ -111,6 +113,24 @@ static BOOLEAN TestWritable(const KSW_RUNTIME_IMAGE_VIEW* View, ULONG_PTR Addres
     return writableGlobal && (Address == IMAGE_BASE + POINTER_RVA || Address == IMAGE_BASE + 0x200UL) && Size <= sizeof(PVOID);
 }
 
+/* Only mock the completion boundary here; CacheLayoutFallbackRegression runs
+   its actual production inference against bounded memory. */
+static NTSTATUS TestPiDdbLayout(const KSW_DYN_MODULE_IDENTITY_PACKET* Identity,
+    ULONG TableRva, ULONG LockRva, PKSW_RUNTIME_KERNEL_LAYOUT Layout)
+{
+    ++piResolveCalls;
+    if (Identity->imageBase != IMAGE_BASE || TableRva != 0x200UL || LockRva != 0x300UL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    if (NT_SUCCESS(piResolveStatus)) {
+        Layout->PiDdbDriverName = 16;
+        Layout->PiDdbTimeDateStamp = 32;
+        Layout->PiDdbLoadStatus = 36;
+        Layout->PiDdbTypeSize = 40;
+    }
+    return piResolveStatus;
+}
+
 #undef KeGetCurrentIrql
 #undef KeQuerySystemTime
 #define KeGetCurrentIrql TestIrql
@@ -122,6 +142,7 @@ static BOOLEAN TestWritable(const KSW_RUNTIME_IMAGE_VIEW* View, ULONG_PTR Addres
 #define KswordARKRuntimeReadMemory TestRead
 #define KswordARKRuntimeInitializeImageView TestImage
 #define KswordARKRuntimeAddressIsWritableData TestWritable
+#define KswordARKDriverResolvePiDdbLayout TestPiDdbLayout
 #include "@UNLOADED_RESOLVER@"
 #include "@ROOT@/KswordARKDriver/src/features/kernel/kernel_unloaded_layout.c"
 
@@ -168,6 +189,8 @@ static VOID Reset(VOID)
     readableGlobal = TRUE;
     writableGlobal = TRUE;
     readCalls = 0UL;
+    piResolveCalls = 0UL;
+    piResolveStatus = STATUS_NOT_SUPPORTED;
 }
 
 static VOID SetTrustedFields(ULONG Source)
@@ -241,6 +264,20 @@ int main(void)
     Expect("PiDDB runtime layout without NtosActive", KswordARKUnloadedResolvePiDdbLayout(&piLayout), STATUS_SUCCESS);
     dynState.Kernel.PiDdbDriverName = 0xFFFFFFFFUL;
     Expect("PiDDB missing member rejected", KswordARKUnloadedResolvePiDdbLayout(&piLayout), STATUS_NOT_SUPPORTED);
+    Expect("PiDDB trusted globals trigger completion", piResolveCalls == 1UL ? STATUS_SUCCESS : STATUS_DATA_ERROR, STATUS_SUCCESS);
+    piResolveStatus = STATUS_SUCCESS;
+    Expect("PiDDB missing member completed locally", KswordARKUnloadedResolvePiDdbLayout(&piLayout), STATUS_SUCCESS);
+    Expect("PiDDB completed layout matches resolver", piLayout.DriverNameOffset == 16UL &&
+        piLayout.TimeDateStampOffset == 32UL && piLayout.LoadStatusOffset == 36UL &&
+        piLayout.EntrySize == 40UL ? STATUS_SUCCESS : STATUS_DATA_ERROR, STATUS_SUCCESS);
+    Expect("PiDDB global snapshot unchanged", !dynState.NtosActive &&
+        dynState.Kernel.PiDdbDriverName == KSW_DYN_OFFSET_UNAVAILABLE ? STATUS_SUCCESS : STATUS_DATA_ERROR, STATUS_SUCCESS);
+    piResolveStatus = STATUS_LOCK_NOT_GRANTED;
+    Expect("PiDDB busy status preserved", KswordARKUnloadedResolvePiDdbLayout(&piLayout), STATUS_LOCK_NOT_GRANTED);
+    dynState.KernelGlobalSources.PiDDBLock = KSW_DYN_FIELD_SOURCE_UNAVAILABLE;
+    piResolveCalls = 0UL;
+    Expect("PiDDB untrusted global rejected", KswordARKUnloadedResolvePiDdbLayout(&piLayout), STATUS_NOT_SUPPORTED);
+    Expect("PiDDB untrusted global cannot trigger completion", piResolveCalls == 0UL ? STATUS_SUCCESS : STATUS_DATA_ERROR, STATUS_SUCCESS);
     Reset();
     TestImage((PVOID)(ULONG_PTR)IMAGE_BASE, sizeof(imageBytes), &view);
     RtlZeroMemory(references, sizeof(references));

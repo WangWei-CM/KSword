@@ -75,7 +75,6 @@ def normalize_profile(profile: Any, index: int, core_max: int) -> dict[str, Any]
     actual: Counter[tuple[int, int]] = Counter()
     seen: set[int] = set()
     retained: list[dict[str, Any]] = []
-    special_ids = set(schema.V4_SPECIAL_ITEM_IDS.values())
     for source_item in items:
         if not isinstance(source_item, dict):
             raise ValueError(f"invalid v4 item: {context}")
@@ -83,7 +82,7 @@ def normalize_profile(profile: Any, index: int, core_max: int) -> dict[str, Any]
         item_id, group_id = item["itemId"], item["capabilityGroupId"]
         if item_id in seen or item_id == 0 or item_id >= 2048:
             raise ValueError(f"duplicate/invalid item {item_id}: {context}")
-        if item_id > core_max and item_id not in special_ids and item_id not in RETIRED_TIMER_IDS:
+        if item_id not in schema.SUPPORTED_V4_ITEM_IDS and item_id not in RETIRED_TIMER_IDS:
             raise ValueError(f"unknown item {item_id}: {context}")
         if item["itemKind"] not in schema.V4_ITEM_KIND_IDS.values() or item["flags"] not in (1, 2):
             raise ValueError(f"invalid kind/flags for item {item_id}: {context}")

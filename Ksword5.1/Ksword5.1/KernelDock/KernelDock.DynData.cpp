@@ -1500,64 +1500,7 @@ namespace
 
     bool v4ItemIdSupported(const std::uint32_t itemId)
     {
-        if (itemId >= 1U && itemId <= KSW_DYN_FIELD_ID_MAX)
-        {
-            return true;
-        }
-        switch (itemId)
-        {
-        case KSW_DYN_V4_ITEM_ID_ETH_ACTIVE_EX_WORKER:
-        case KSW_DYN_V4_ITEM_ID_KPRCB_TIMER_TABLE:
-        case KSW_DYN_V4_ITEM_ID_KTIMER_TABLE_TIMER_ENTRIES:
-        case KSW_DYN_V4_ITEM_ID_KTIMER_TABLE_ENTRY_ENTRY:
-        case KSW_DYN_V4_ITEM_ID_KTIMER_TIMER_LIST_ENTRY:
-        case KSW_DYN_V4_ITEM_ID_KTIMER_DUE_TIME:
-        case KSW_DYN_V4_ITEM_ID_KTIMER_DPC:
-        case KSW_DYN_V4_ITEM_ID_KTIMER_TIMER_TYPE:
-        case KSW_DYN_V4_ITEM_ID_KTIMER_PERIOD:
-        case KSW_DYN_V4_ITEM_ID_KDPC_DEFERRED_ROUTINE:
-        case KSW_DYN_V4_ITEM_ID_KDPC_DEFERRED_CONTEXT:
-        case KSW_DYN_V4_ITEM_ID_KTIMER_TABLE_TYPE_SIZE:
-        case KSW_DYN_V4_ITEM_ID_KTIMER_TABLE_ENTRY_TYPE_SIZE:
-        case KSW_DYN_V4_ITEM_ID_KTIMER_TYPE_SIZE:
-        case KSW_DYN_V4_ITEM_ID_KDPC_TYPE_SIZE:
-        case KSW_DYN_V4_ITEM_ID_FLT_FILTER_OPERATIONS:
-        case KSW_DYN_V4_ITEM_ID_CI_KERNEL_HASH_BUCKET_LIST:
-        case KSW_DYN_V4_ITEM_ID_CI_HASH_CACHE_LOCK:
-        case KSW_DYN_V4_ITEM_ID_CI_HASH_ENTRY_NEXT:
-        case KSW_DYN_V4_ITEM_ID_CI_HASH_ENTRY_DRIVER_NAME:
-        case KSW_DYN_V4_ITEM_ID_CI_HASH_ENTRY_TIME_DATE_STAMP:
-        case KSW_DYN_V4_ITEM_ID_CI_HASH_ENTRY_LOAD_STATUS:
-        case KSW_DYN_V4_ITEM_ID_CI_HASH_ENTRY_IMAGE_BASE:
-        case KSW_DYN_V4_ITEM_ID_CI_HASH_ENTRY_IMAGE_SIZE:
-        case KSW_DYN_V4_ITEM_ID_CI_HASH_ENTRY_TYPE_SIZE:
-        case KSW_DYN_V4_ITEM_ID_WQ_PSP_SYSTEM_PARTITION:
-        case KSW_DYN_V4_ITEM_ID_WQ_EXP_BUILTIN_PRIORITIES:
-        case KSW_DYN_V4_ITEM_ID_WQ_EPARTITION_EX_PARTITION:
-        case KSW_DYN_V4_ITEM_ID_WQ_EX_PARTITION_WORK_QUEUES:
-        case KSW_DYN_V4_ITEM_ID_WQ_EX_WORK_QUEUE_WORK_PRI_QUEUE:
-        case KSW_DYN_V4_ITEM_ID_WQ_EX_WORK_QUEUE_QUEUE_INDEX:
-        case KSW_DYN_V4_ITEM_ID_WQ_KPRI_QUEUE_ENTRY_LIST_HEAD:
-        case KSW_DYN_V4_ITEM_ID_WQ_KPRI_QUEUE_THREAD_LIST_HEAD:
-        case KSW_DYN_V4_ITEM_ID_WQ_KTHREAD_QUEUE:
-        case KSW_DYN_V4_ITEM_ID_WQ_KTHREAD_QUEUE_LIST_ENTRY:
-        case KSW_DYN_V4_ITEM_ID_WQ_WORK_ITEM_LIST:
-        case KSW_DYN_V4_ITEM_ID_WQ_WORK_ITEM_ROUTINE:
-        case KSW_DYN_V4_ITEM_ID_WQ_WORK_ITEM_PARAMETER:
-        case KSW_DYN_V4_ITEM_ID_WQ_EX_POOL_UNTRUSTED:
-        case KSW_DYN_V4_ITEM_ID_WQ_EPARTITION_TYPE_SIZE:
-        case KSW_DYN_V4_ITEM_ID_WQ_EX_PARTITION_TYPE_SIZE:
-        case KSW_DYN_V4_ITEM_ID_WQ_EX_WORK_QUEUE_TYPE_SIZE:
-        case KSW_DYN_V4_ITEM_ID_WQ_KPRI_QUEUE_TYPE_SIZE:
-        case KSW_DYN_V4_ITEM_ID_WQ_KTHREAD_TYPE_SIZE:
-        case KSW_DYN_V4_ITEM_ID_WQ_WORK_ITEM_TYPE_SIZE:
-        case KSW_DYN_V4_ITEM_ID_WQ_ETHREAD_START_ADDRESS:
-        case KSW_DYN_V4_ITEM_ID_WQ_ETHREAD_TYPE_SIZE:
-        case KSW_DYN_V4_ITEM_ID_WQ_ETHREAD_TCB:
-            return true;
-        default:
-            return false;
-        }
+        return KswordArkDynDataV4ItemIdSupported(itemId) != 0;
     }
 
     bool loadV4ItemsFromJson(
@@ -2546,6 +2489,16 @@ namespace
     // - 输入 summary/rows：摘要和字段行；
     // - 处理：拼出可复制的完整诊断报告；
     // - 返回：多行报告文本。
+    QString moduleProfileStateText(const KernelDynDataProfileModuleResult& result)
+    {
+        const QString notAttempted = kernelText("kernel.dyndata.module.not_attempted", QStringLiteral("未下发"));
+        return kernelText("kernel.dyndata.module.state", QStringLiteral("命中=%1；格式有效=%2；本次接受=%3；驱动当前已接受=%4；EX=%5；V4=%6；应用=%7；拒绝=%8；%9"))
+            .arg(boolText(result.found), boolText(result.valid), boolText(result.acceptedThisRefresh), boolText(result.active),
+                 result.exAttempted ? formatNtStatus(result.exStatus) : notAttempted,
+                 result.v4Attempted ? formatNtStatus(result.v4Status) : notAttempted)
+            .arg(result.appliedItems).arg(result.rejectedItems).arg(result.message);
+    }
+
     ks::ui::FieldDocument buildDynDataReport(const KernelDynDataSummary& summary, const std::vector<KernelDynDataFieldEntry>& rows)
     {
         ks::ui::FieldDocument lines;
@@ -2575,6 +2528,12 @@ namespace
         lines.field(QStringLiteral("PdbProfileIgnoredJsonFields"), QStringLiteral("%1").arg(summary.pdbProfileIgnoredJsonFields));
         lines.field(QStringLiteral("PdbProfileMessage"), QStringLiteral("%1").arg(safeText(summary.pdbProfileMessageText)));
         lines.field(QStringLiteral("PdbProfileIo"), QStringLiteral("%1").arg(safeText(summary.pdbProfileIoMessageText)));
+        for (const auto& module : summary.profileModules)
+        {
+            lines.section(module.moduleName);
+            lines.field(kernelText("kernel.dyndata.module.application", QStringLiteral("模块偏移应用")), moduleProfileStateText(module));
+            lines.field(QStringLiteral("ProfileIo"), safeText(module.ioMessage));
+        }
         lines.nodes += moduleDetailText(QStringLiteral("ntoskrnl"), summary.ntoskrnl).nodes;
         lines.nodes += moduleDetailText(QStringLiteral("lxcore"), summary.lxcore).nodes;
 
@@ -2613,14 +2572,18 @@ namespace
         appendSummaryRow(table, QStringLiteral("lxcore profile"), boolText(statusFlagEnabled(summary.statusFlags, KSW_DYN_STATUS_FLAG_LXCORE_ACTIVE)));
         appendSummaryRow(table, QStringLiteral("Ksword runtime offset"), boolText(statusFlagEnabled(summary.statusFlags, KSW_DYN_STATUS_FLAG_EXTRA_ACTIVE)));
         appendSummaryRow(table, QStringLiteral("PDB profile active"), boolText(statusFlagEnabled(summary.statusFlags, KSW_DYN_STATUS_FLAG_PDB_PROFILE_ACTIVE)));
-        appendSummaryRow(table, kernelText("kernel.dyndata.summary.pdb_scan", QStringLiteral("PDB profile 扫描")), boolText(summary.pdbProfileScanAttempted));
-        appendSummaryRow(table, kernelText("kernel.dyndata.summary.pdb_found", QStringLiteral("PDB profile 命中")), boolText(summary.pdbProfileFound));
-        appendSummaryRow(table, kernelText("kernel.dyndata.summary.pdb_applied", QStringLiteral("PDB profile 本次应用")), boolText(summary.pdbProfileApplied));
-        appendSummaryRow(table, kernelText("kernel.dyndata.summary.pdb_source", QStringLiteral("PDB profile 来源")), safeText(summary.pdbProfileSourceText));
-        appendSummaryRow(table, kernelText("kernel.dyndata.summary.pdb_name", QStringLiteral("PDB profile 名称")), safeText(summary.pdbProfileNameText));
-        appendSummaryRow(table, kernelText("kernel.dyndata.summary.pdb_path", QStringLiteral("PDB profile 路径")), safeText(summary.pdbProfilePathText));
-        appendSummaryRow(table, kernelText("kernel.dyndata.summary.pdb_status", QStringLiteral("PDB profile 状态")), formatNtStatus(summary.pdbProfileStatus));
-        appendSummaryRow(table, kernelText("kernel.dyndata.summary.pdb_fields", QStringLiteral("PDB profile 字段")), QStringLiteral("applied=%1 rejected=%2 unknown=%3 ignoredJson=%4")
+        for (const auto& module : summary.profileModules)
+        {
+            appendSummaryRow(table, module.moduleName, moduleProfileStateText(module));
+        }
+        appendSummaryRow(table, kernelText("kernel.dyndata.summary.pdb_scan", QStringLiteral("NTOS PDB profile 扫描")), boolText(summary.pdbProfileScanAttempted));
+        appendSummaryRow(table, kernelText("kernel.dyndata.summary.pdb_found", QStringLiteral("NTOS PDB profile 命中")), boolText(summary.pdbProfileFound));
+        appendSummaryRow(table, kernelText("kernel.dyndata.summary.pdb_applied", QStringLiteral("NTOS PDB profile 本次应用")), boolText(summary.pdbProfileApplied));
+        appendSummaryRow(table, kernelText("kernel.dyndata.summary.pdb_source", QStringLiteral("NTOS PDB profile 来源")), safeText(summary.pdbProfileSourceText));
+        appendSummaryRow(table, kernelText("kernel.dyndata.summary.pdb_name", QStringLiteral("NTOS PDB profile 名称")), safeText(summary.pdbProfileNameText));
+        appendSummaryRow(table, kernelText("kernel.dyndata.summary.pdb_path", QStringLiteral("NTOS PDB profile 路径")), safeText(summary.pdbProfilePathText));
+        appendSummaryRow(table, kernelText("kernel.dyndata.summary.pdb_status", QStringLiteral("NTOS PDB profile 状态")), formatNtStatus(summary.pdbProfileStatus));
+        appendSummaryRow(table, kernelText("kernel.dyndata.summary.pdb_fields", QStringLiteral("NTOS PDB profile 字段")), QStringLiteral("applied=%1 rejected=%2 unknown=%3 ignoredJson=%4")
             .arg(summary.pdbProfileAppliedFields)
             .arg(summary.pdbProfileRejectedFields)
             .arg(summary.pdbProfileUnknownFields)
@@ -2738,7 +2701,6 @@ namespace
 
         bool pdbProfileScanAttempted = false;
         bool pdbProfileFound = false;
-        bool pdbProfileApplied = false;
         bool requeryAfterProfileApply = false;
         long pdbProfileStatus = 0;
         std::uint32_t pdbProfileAppliedFields = 0U;
@@ -2750,6 +2712,14 @@ namespace
         QString pdbProfileSourceText;
         QString pdbProfileMessageText;
         QString pdbProfileIoMessageText;
+        std::vector<KernelDynDataProfileModuleResult> moduleResults;
+        KernelDynDataProfileModuleResult ntosResult;
+        ntosResult.moduleClassId = initialStatusResult.ntoskrnl.classId;
+        ntosResult.moduleName = QString::fromStdWString(initialStatusResult.ntoskrnl.moduleName);
+        if (ntosResult.moduleName.isEmpty())
+        {
+            ntosResult.moduleName = QStringLiteral("NTOS");
+        }
 
         if (initialStatusResult.io.ok)
         {
@@ -2781,7 +2751,6 @@ namespace
                 // 此处是驱动已接受档案，而非本轮 apply 失败；状态页不能显示“已应用：否”。
                 // 不伪造本轮应用计数，后续 V4 accepted items 查询继续提供真实缓存内容。
                 pdbProfileFound = true;
-                pdbProfileApplied = true;
                 pdbProfileMessageText = kernelText("kernel.dyndata.profile.apply.already_active", QStringLiteral("R0 已经启用 v4 DynData profile，本次刷新跳过重复 apply。"));
             }
             else
@@ -2793,6 +2762,8 @@ namespace
                         initialStatusResult.ntoskrnl,
                         scanDiagnostics);
                 pdbProfileMessageText = scanDiagnostics;
+                ntosResult.found = profile.matched;
+                ntosResult.valid = profile.valid;
                 if (profile.matched)
                 {
                     pdbProfileFound = true;
@@ -2803,6 +2774,7 @@ namespace
 
                     if (!profile.valid)
                     {
+                        pdbProfileStatus = static_cast<long>(0xC000000DUL);
                         pdbProfileMessageText = profile.diagnosticsText;
                     }
                     else if (pdbProfileAlreadyActive &&
@@ -2826,7 +2798,12 @@ namespace
                             {
                                 pdbProfileIoMessageText += QStringLiteral(" | ");
                             }
-                            pdbProfileIoMessageText += friendlyDynDataIoMessage(applyExResult.io.message);
+                            pdbProfileIoMessageText += applyExResult.io.ok ? stringToQString(applyExResult.io.message) : friendlyDynDataIoMessage(applyExResult.io.message);
+                            ntosResult.exAttempted = true;
+                            ntosResult.exStatus = applyExResult.status;
+                            ntosResult.exAccepted = applyExResult.io.ok && applyExResult.status == 0 && applyExResult.rejectedItemCount == 0U;
+                            ntosResult.appliedItems += applyExResult.appliedItemCount;
+                            ntosResult.rejectedItems += applyExResult.rejectedItemCount;
                             pdbProfileStatus = applyExResult.status;
                             pdbProfileAppliedFields += applyExResult.appliedItemCount;
                             pdbProfileRejectedFields += applyExResult.rejectedItemCount;
@@ -2846,8 +2823,18 @@ namespace
                             {
                                 pdbProfileIoMessageText += QStringLiteral(" | ");
                             }
-                            pdbProfileIoMessageText += friendlyDynDataIoMessage(applyV4Result.io.message);
-                            pdbProfileStatus = applyV4Result.response.status;
+                            pdbProfileIoMessageText += applyV4Result.io.ok ? stringToQString(applyV4Result.io.message) : friendlyDynDataIoMessage(applyV4Result.io.message);
+                            ntosResult.v4Attempted = true;
+                            ntosResult.v4Status = applyV4Result.response.status;
+                            ntosResult.v4Accepted = applyV4Result.io.ok && applyV4Result.response.status == 0 &&
+                                applyV4Result.response.rejectedItemCount == 0U && applyV4Result.response.missingRequiredItemCount == 0U;
+                            ntosResult.appliedItems += applyV4Result.response.appliedItemCount;
+                            ntosResult.rejectedItems += applyV4Result.response.rejectedItemCount;
+                            // A successful V4 cache must not hide a failed EX projection.
+                            if (!ntosResult.exAttempted || ntosResult.exStatus == 0)
+                            {
+                                pdbProfileStatus = applyV4Result.response.status;
+                            }
                             pdbProfileAppliedFields += applyV4Result.response.appliedItemCount;
                             pdbProfileRejectedFields += applyV4Result.response.rejectedItemCount;
                             if (applyV4Result.response.message[0] != L'\0')
@@ -2865,7 +2852,9 @@ namespace
                         {
                             pdbProfileMessageText = applyMessages.join(QStringLiteral(" | "));
                         }
-                        pdbProfileApplied = anyApplySucceeded;
+                        ntosResult.acceptedThisRefresh = anyApplySucceeded &&
+                            (!ntosResult.exAttempted || ntosResult.exAccepted) &&
+                            (!ntosResult.v4Attempted || ntosResult.v4Accepted);
                         requeryAfterProfileApply = anyApplySucceeded;
                     }
                 }
@@ -2890,85 +2879,62 @@ namespace
                     moduleEntry.module.image.classId ==
                         KSW_DYN_PROFILE_CLASS_CI;
                 if (!supportedCompanion ||
-                    moduleEntry.module.image.present == 0UL ||
-                    (moduleEntry.statusFlags &
-                        KSW_DYN_V4_STATUS_FLAG_PROFILE_APPLIED) != 0U)
+                    moduleEntry.module.image.present == 0UL)
                 {
                     continue;
                 }
 
-                pdbProfileScanAttempted = true;
+                KernelDynDataProfileModuleResult moduleResult;
+                moduleResult.moduleClassId = moduleEntry.module.image.classId;
+                moduleResult.moduleName = QString::fromStdWString(convertV4PacketIdentity(moduleEntry.module.image).moduleName);
+                moduleResult.active = (moduleEntry.statusFlags & KSW_DYN_V4_STATUS_FLAG_PROFILE_APPLIED) != 0U;
+                if (moduleResult.active)
+                {
+                    moduleResult.found = true;
+                    moduleResult.valid = true;
+                    moduleResults.push_back(moduleResult);
+                    continue;
+                }
                 const ksword::ark::ArkDynModuleIdentity moduleIdentity =
                     convertV4PacketIdentity(moduleEntry.module.image);
-                const QString moduleLabel =
-                    QString::fromStdWString(moduleIdentity.moduleName);
                 QString moduleScanDiagnostics;
                 LocalPdbProfile moduleProfile =
                     findMatchingPdbProfile(
                         moduleIdentity,
                         moduleScanDiagnostics);
-                const QString moduleDiagnosticBlock =
-                    QStringLiteral("%1: %2")
-                        .arg(moduleLabel, moduleScanDiagnostics);
-                if (!pdbProfileMessageText.isEmpty())
-                {
-                    pdbProfileMessageText += QStringLiteral(" | ");
-                }
-                pdbProfileMessageText += moduleDiagnosticBlock;
-
+                moduleResult.found = moduleProfile.matched;
+                moduleResult.valid = moduleProfile.valid;
+                moduleResult.message = moduleScanDiagnostics;
                 if (!moduleProfile.matched)
                 {
+                    moduleResults.push_back(moduleResult);
                     continue;
                 }
-                pdbProfileFound = true;
-                if (pdbProfileSourceText.isEmpty())
-                {
-                    pdbProfileSourceText =
-                        profileSourceDisplayText(moduleProfile.sourceText);
-                    pdbProfileNameText =
-                        stringToQString(
-                            moduleProfile.applyInput.profileName);
-                    pdbProfilePathText = moduleProfile.pathText;
-                }
-                pdbProfileIgnoredJsonFields +=
-                    moduleProfile.ignoredUnknownFields;
                 if (!moduleProfile.valid ||
                     moduleProfile.applyV4Input.items.empty())
                 {
+                    moduleResult.message = moduleProfile.diagnosticsText;
+                    moduleResults.push_back(moduleResult);
                     continue;
                 }
 
                 const ksword::ark::DynDataV4ApplyResult moduleApplyResult =
                     client.applyDynDataProfileV4(
                         moduleProfile.applyV4Input);
-                if (!pdbProfileIoMessageText.isEmpty())
-                {
-                    pdbProfileIoMessageText += QStringLiteral(" | ");
-                }
-                pdbProfileIoMessageText +=
-                    friendlyDynDataIoMessage(
-                        moduleApplyResult.io.message);
-                pdbProfileStatus =
-                    moduleApplyResult.response.status;
-                pdbProfileAppliedFields +=
-                    moduleApplyResult.response.appliedItemCount;
-                pdbProfileRejectedFields +=
-                    moduleApplyResult.response.rejectedItemCount;
-                if (moduleApplyResult.response.message[0] != L'\0')
-                {
-                    pdbProfileMessageText +=
-                        QStringLiteral(" | %1: ").arg(moduleLabel);
-                    pdbProfileMessageText +=
-                        wideStringToQString(
-                            moduleApplyResult.response.message);
-                }
+                moduleResult.v4Attempted = true;
+                moduleResult.v4Status = moduleApplyResult.response.status;
+                moduleResult.ioMessage = moduleApplyResult.io.ok ? stringToQString(moduleApplyResult.io.message) : friendlyDynDataIoMessage(moduleApplyResult.io.message);
+                moduleResult.appliedItems = moduleApplyResult.response.appliedItemCount;
+                moduleResult.rejectedItems = moduleApplyResult.response.rejectedItemCount;
+                moduleResult.message = wideStringToQString(moduleApplyResult.response.message);
                 const bool moduleApplySucceeded =
                     moduleApplyResult.io.ok &&
                     moduleApplyResult.response.status == 0 &&
                     moduleApplyResult.response.rejectedItemCount == 0U &&
                     moduleApplyResult.response.missingRequiredItemCount == 0U;
-                pdbProfileApplied =
-                    pdbProfileApplied || moduleApplySucceeded;
+                moduleResult.v4Accepted = moduleApplySucceeded;
+                moduleResult.acceptedThisRefresh = moduleApplySucceeded;
+                moduleResults.push_back(moduleResult);
                 requeryAfterProfileApply =
                     requeryAfterProfileApply ||
                     moduleApplySucceeded;
@@ -3016,7 +2982,6 @@ namespace
             acceptedNtosModule != v4ModulesResult.entries.end();
         const bool cachedPdbProfileAccepted = statusResult.io.ok &&
             statusFlagEnabled(statusResult.statusFlags, KSW_DYN_STATUS_FLAG_PDB_PROFILE_ACTIVE);
-        pdbProfileApplied = pdbProfileApplied || cachedNtosProfileAccepted || cachedPdbProfileAccepted;
         pdbProfileFound = pdbProfileFound || cachedNtosProfileAccepted || cachedPdbProfileAccepted;
         if (cachedNtosProfileAccepted && pdbProfileNameText.isEmpty())
         {
@@ -3026,6 +2991,28 @@ namespace
             pdbProfileNameText = QString::fromUtf8(
                 profileName,
                 static_cast<qsizetype>(std::distance(std::begin(profileName), nameEnd)));
+        }
+
+        ntosResult.found = pdbProfileFound;
+        // A cached accepted profile must not hide a format failure in this scan.
+        if (!pdbProfileScanAttempted && (cachedNtosProfileAccepted || cachedPdbProfileAccepted))
+        {
+            ntosResult.valid = true;
+        }
+        ntosResult.active = cachedNtosProfileAccepted || cachedPdbProfileAccepted;
+        ntosResult.message = pdbProfileMessageText;
+        ntosResult.ioMessage = pdbProfileIoMessageText;
+        moduleResults.insert(moduleResults.begin(), ntosResult);
+        for (auto& module : moduleResults)
+        {
+            for (const auto& entry : v4ModulesResult.entries)
+            {
+                if (module.moduleClassId != ntosResult.moduleClassId && v4ModulesResult.io.ok &&
+                    entry.module.image.present != 0UL && entry.module.image.classId == module.moduleClassId)
+                {
+                    module.active = (entry.statusFlags & KSW_DYN_V4_STATUS_FLAG_PROFILE_APPLIED) != 0U;
+                }
+            }
         }
 
         summaryOut = KernelDynDataSummary{};
@@ -3038,7 +3025,8 @@ namespace
         summaryOut.fieldsIoMessageText = friendlyDynDataIoMessage(fieldsResult.io.message);
         summaryOut.pdbProfileScanAttempted = pdbProfileScanAttempted;
         summaryOut.pdbProfileFound = pdbProfileFound;
-        summaryOut.pdbProfileApplied = pdbProfileApplied;
+        summaryOut.pdbProfileApplied = ntosResult.acceptedThisRefresh;
+        summaryOut.profileModules = std::move(moduleResults);
         summaryOut.pdbProfileStatus = pdbProfileStatus;
         summaryOut.pdbProfileAppliedFields = pdbProfileAppliedFields;
         summaryOut.pdbProfileRejectedFields = pdbProfileRejectedFields;

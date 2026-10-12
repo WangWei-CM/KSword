@@ -320,6 +320,26 @@ struct KernelDynDataModuleIdentity
 // - 表示动态偏移页顶部摘要；
 // - 同时缓存 status/fields 两类 IOCTL 的成功状态和 R0 诊断字段。
 // ============================================================
+struct KernelDynDataProfileModuleResult
+{
+    std::uint32_t moduleClassId = 0;
+    QString moduleName;
+    bool found = false;
+    bool valid = false;
+    bool exAttempted = false;
+    bool v4Attempted = false;
+    bool exAccepted = false;
+    bool v4Accepted = false;
+    bool acceptedThisRefresh = false;
+    bool active = false;
+    long exStatus = 0;
+    long v4Status = 0;
+    std::uint32_t appliedItems = 0;
+    std::uint32_t rejectedItems = 0;
+    QString message;
+    QString ioMessage;
+};
+
 struct KernelDynDataSummary
 {
     bool statusQueryOk = false;          // statusQueryOk：QUERY_DYN_STATUS 是否成功。
@@ -351,6 +371,7 @@ struct KernelDynDataSummary
     QString pdbProfilePathText;           // pdbProfilePathText：匹配 profile 文件路径。
     QString pdbProfileMessageText;        // pdbProfileMessageText：R0/R3 profile 诊断消息。
     QString pdbProfileIoMessageText;      // pdbProfileIoMessageText：apply IOCTL 传输诊断。
+    std::vector<KernelDynDataProfileModuleResult> profileModules; // 各模块独立的本轮下发和最终回读。
     bool dynDataV4ModulesQueryOk = false; // dynDataV4ModulesQueryOk：v4 modules 状态查询是否成功。
     bool dynDataV4ModulesUnsupported = false; // dynDataV4ModulesUnsupported：旧驱动是否缺少 v4 modules 查询入口。
     std::uint32_t dynDataV4ModulesTotalCount = 0; // dynDataV4ModulesTotalCount：R0 观察到的 v4 module 总数。

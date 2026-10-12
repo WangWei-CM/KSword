@@ -307,8 +307,10 @@ namespace
             label->setText(
                 driverText(
                     "driver.unloaded.status.layout_missing",
-                    QStringLiteral("状态：%1 的当前 PDB profile 缺少安全读取布局。"))
-                    .arg(sourceText));
+                    QStringLiteral("状态：%1 的 profile 与运行时解析均未提供安全读取布局（NTSTATUS=%2）。"))
+                    .arg(sourceText)
+                    .arg(fixedHex32(
+                        static_cast<std::uint32_t>(result.lastStatus))));
             label->setStyleSheet(
                 QStringLiteral("color:%1; font-weight:700;")
                     .arg(KswordTheme::WarningColor().name(QColor::HexRgb)));
