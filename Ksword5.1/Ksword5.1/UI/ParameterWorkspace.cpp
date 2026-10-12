@@ -362,6 +362,11 @@ namespace
 
 namespace ks::ui
 {
+    void StyleParameterCanvas(QWidget* canvas)
+    {
+        if (canvas) bindWorkspaceSurface(canvas, false, true);
+    }
+
     ParameterWorkspace::ParameterWorkspace(QWidget* parent, int parameterWidth)
         : QWidget(parent), m_parameterWidth(parameterWidth)
     {

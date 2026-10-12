@@ -6734,6 +6734,7 @@
     "notification.copy.log_template": "%1\n%2\n%3\n文件：%4\n函数：%5\nGUID：%6"
   },
   "source_translations": {
+    "PageTabFocusStyle.h": "PageTabFocusStyle.h",
     "当前生效": "当前生效",
     "未报告": "未报告",
     "CiTool 未报告策略": "CiTool 未报告策略",

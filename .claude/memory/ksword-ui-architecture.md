@@ -352,3 +352,4 @@ KSword 主程序位于 `Ksword5.1/Ksword5.1`（Qt 6.9.3 Widgets + Qt Advanced Do
 - 不禁绘全树或预加载全部业务页。共享回调及overlay的Show/Hide/raise可关闭宿主或换页，QPointer探活之外还须复核当前页身份。说明见 `docs/UI首帧闪动修复-20261011.md`，用户自行测试，不把源码或编译结果当实机闪动验收。
 
 - ParameterWorkspace参数滚动区不能只给外部面板绑定实底：QScrollArea视口和setWidget后的表单会填充继承的Window色，透明分区于是露出页根深色黑块。scroll/viewport/form三层须通过原共享surface绑定保持同一卡片色，内部canvas半径0，外部卡片8；沿用完整中性拥有块，避免新增规则被按钮所有权误判为业务覆盖。系统变速页截图反馈触发此修复，不改分区或滚动结构。
+- 2026-10-12 CKS截图再次暴露嵌套Tab正文误用StyleWorkspacePage而铺成页根黑底；参数内普通页壳改用StyleParameterCanvas，pane按参数祖先沿用content色。普通共享Tab的PageTabFocusStyle只在键盘输入后绘原生焦点primitive，鼠标点击隐藏焦点矩形，保留原栏焦点策略与输入语义。

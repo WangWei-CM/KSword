@@ -2,6 +2,7 @@
 #include "./PageControlStyle.h"
 #include "./MainSurfaceStyle.h"
 #include "./PageTabMotion.h"
+#include "./PageTabFocusStyle.h"
 #include "./AdaptivePageScroll.h"
 #include "./PrimaryPageStyle.h"
 
@@ -213,8 +214,18 @@ namespace
         const PageTabColors colors = tabColors(ks::ui::UsesMainSurfaceHierarchy(tabs), child, joined);
         const int inset = pageFrameInset(tabs); // 只计最内层明确登记的留白。
         const QVariant mainSurface = tabs->window()->property("ksword_main_surface_hierarchy");
+        bool parameterCanvas = false; // 参数卡片内的Tab不再新增更暗的页根底板。
+        for (QWidget* owner = tabs->parentWidget(); owner && !owner->isWindow(); owner = owner->parentWidget())
+        {
+            if (owner->property("ksword_parameter_surface").toBool())
+            {
+                parameterCanvas = true;
+                break;
+            }
+        }
+        const QColor pageColor = parameterCanvas ? ks::ui::MainWindowSurfaceColors().content : colors.page;
         const QString background = mainSurface.isValid() && !mainSurface.toBool()
-            ? QStringLiteral("transparent") : colors.page.name();
+            ? QStringLiteral("transparent") : pageColor.name();
         QString rules = QStringLiteral(
             "QTabWidget[ksword_page_tabs_widget=\"true\"]::pane{"
             "border:0;border-radius:%3px;top:0px;background:%1;padding:%2px;}")
@@ -849,6 +860,7 @@ namespace ks::ui
         {
             return;
         }
+        InstallMouseAwareTabFocus(bar); // 鼠标激活页签不显示键盘焦点矩形。
         const QPointer<QTabBar> safeBar(bar); // 动画和主题刷新不得访问销毁后的标签栏。
         InstallPageTabMotion(bar, [safeBar]()
         {

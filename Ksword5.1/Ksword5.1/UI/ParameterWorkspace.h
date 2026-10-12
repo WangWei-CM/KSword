@@ -44,6 +44,8 @@ namespace ks::ui
     // 同步明确登记编辑区的 QSS 与真实 palette；只读日志跟随面板底色，输入单独铺底。
     void StyleWorkspaceTextViews(QWidget* container);
     void StyleParameterSection(QGroupBox* group);
+    // 嵌入参数面板的普通页壳与滚动画布复用同一内容底色，不新增页根层。
+    void StyleParameterCanvas(QWidget* canvas);
     // 页面完成分区后显式调用：两列分别自然排列；不够两列时按原 layout 顺序回到单列。
     // 不替换任何字段或连接；minimumColumnWidth 是每列正文可用宽度下限，单位为逻辑像素。
     void ArrangeParameterColumns(QVBoxLayout* layout, const QList<QWidget*>& primary,

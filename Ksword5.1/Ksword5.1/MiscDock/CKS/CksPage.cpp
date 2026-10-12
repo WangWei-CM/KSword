@@ -2,7 +2,12 @@
 
 #include "../../Internationalization/LanguageManager.h"
 #include "../../UI/PrimaryPageStyle.h"
+#include "../../UI/ParameterWorkspace.h"
+#include "../../UI/PageControlStyle.h"
 #include "../../UI/ToolbarMetrics.h"
+#include "../../UI/FlowLayout.h"
+#include "../../UI/ResultTableHost.h"
+#include "../../UI/TablePresentation.h"
 #include "../../theme.h"
 
 #include <QApplication>
@@ -21,10 +26,9 @@
 #include <QMetaObject>
 #include <QPointer>
 #include <QPushButton>
-#include <QScrollArea>
 #include <QShowEvent>
 #include <QTabWidget>
-#include <QTreeWidget>
+#include <QTableWidget>
 #include <QUrl>
 #include <QVBoxLayout>
 
@@ -110,18 +114,15 @@ namespace
         return label;
     }
 
-    // AddRoutePage：为长流程提供独立滚动区，避免小窗截断确认按钮。
+    // AddRoutePage：只建普通子页；参数滚动与执行区由共享工作区统一拥有。
     QVBoxLayout* AddRoutePage(QTabWidget* tabs, const QString& title)
     {
-        auto* scroll = new QScrollArea(tabs); // scroll：每条启用路径的滚动外壳。
-        scroll->setWidgetResizable(true);
-        scroll->setFrameShape(QFrame::NoFrame);
-        auto* content = new QWidget(scroll); // content：承载该路径的完整说明与控件。
-        ks::ui::StyleWorkspacePage(content);
-        auto* layout = new QVBoxLayout(content); // layout：该路径的纵向内容。
+        auto* content = new QWidget(tabs); // content：当前路径的参数正文。
+        auto* layout = new QVBoxLayout(content); // layout：保持业务说明与文件选择顺序。
+        layout->setContentsMargins(0, 0, 0, 0);
+        ks::ui::StyleParameterCanvas(content); // 子页沿用参数卡片色，不再铺页根黑色底板。
         layout->setSpacing(12);
-        scroll->setWidget(content);
-        tabs->addTab(scroll, title);
+        tabs->addTab(content, title);
         return layout;
     }
 }
@@ -158,10 +159,19 @@ namespace ks::misc
     {
         auto& language = ks::i18n::LanguageManager::instance();
         auto* root = new QVBoxLayout(this); // root：页面固定状态与流程页签。
-        ks::ui::StyleWorkspacePage(this);
-        root->setSpacing(12);
+        ks::ui::StyleWorkspacePage(this, 0);
+        root->setSpacing(10);
 
-        AddBoundLabel(this, root, QStringLiteral("misc.cks.warning"),
+        // 与系统变速、虚拟定位共用两栏：左侧参数滚动，右侧证据与结果常驻。
+        auto* introduction = new QWidget(this); // introduction：固定的操作边界提示。
+        auto* introductionLayout = new QVBoxLayout(introduction);
+        introductionLayout->setContentsMargins(16, 16, 16, 0);
+        root->addWidget(introduction);
+        auto* workspace = new ks::ui::ParameterWorkspace(this, 500);
+        workspace->useWideParameterLayout(55);
+        root->addWidget(workspace, 1);
+
+        AddBoundLabel(introduction, introductionLayout, QStringLiteral("misc.cks.warning"),
             QStringLiteral("CKS 改变内核驱动信任边界。微软路径要求 PK/KEK 所有权、已签名的专用策略及首次启用后的系统重置；SSDE 是旧版实验流程，可能造成无法启动。策略文件存在、许可值为 1 或 CiTool 部署成功，都不等于目标驱动已获准加载。"));
 
         auto* statusGroup = new QGroupBox(this); // statusGroup：只读状态证据。
@@ -186,11 +196,14 @@ namespace ks::misc
         m_service->setWordWrap(true);
         m_service->setTextInteractionFlags(Qt::TextSelectableByMouse);
         statusLayout->addWidget(m_service);
-        root->addWidget(statusGroup);
+        ks::ui::StyleParameterSection(statusGroup);
+        ks::ui::NormalizeToolbarRow(refreshRow);
+        workspace->results()->addWidget(statusGroup);
 
         auto* routes = new QTabWidget(this); // routes：官方与实验路径不混用操作。
         routes->setObjectName(QStringLiteral("ksCksRoutes"));
-        root->addWidget(routes, 1);
+        ks::ui::StylePageTabsContentFrame(routes);
+        workspace->parameters()->addWidget(routes);
         auto* official = AddRoutePage(routes,
             T(QStringLiteral("misc.cks.official.tab"), QStringLiteral("微软现行流程")));
         auto* experimental = AddRoutePage(routes,
@@ -230,17 +243,26 @@ namespace ks::misc
         official->addLayout(policyRow);
         AddBoundLabel(routes, official, QStringLiteral("misc.cks.official.recovery"),
             QStringLiteral("首次部署后请先验证审核模式、驱动加载和 Code Integrity 事件，再考虑强制模式。已签名策略的删除或错误更新可能使 Windows 无法启动；更新必须由原策略认可的签名者重新签名。此页不提供直接删除 EFI 策略。"));
-        m_policyList = new QTreeWidget(routes); // m_policyList：CiTool 原始策略列表。
+        m_policyList = new ks::ui::VisibleTableWidget(routes); // 共享宿主维护紧凑复制/导出工具条。
         m_policyList->setColumnCount(4);
-        m_policyList->setRootIsDecorated(false);
+        m_policyList->setEditTriggers(QAbstractItemView::NoEditTriggers);
+        m_policyList->setSelectionBehavior(QAbstractItemView::SelectRows);
+        m_policyList->setSelectionMode(QAbstractItemView::ExtendedSelection);
+        ks::ui::ApplyTablePresentation(m_policyList);
+        ks::ui::ResultTableCapabilities policyCapabilities; // 只读清单采用紧凑复制/导出操作条。
+        policyCapabilities.actionBar = ks::ui::TableActionBarMode::Compact;
+        ks::ui::ResultTableHost::ensure(m_policyList)->bindModel(m_policyList->model(),
+            {{0, QStringLiteral("cks.name")}, {1, QStringLiteral("cks.id")},
+             {2, QStringLiteral("cks.signed")}, {3, QStringLiteral("cks.active")}},
+            policyCapabilities);
         m_policyList->setAlternatingRowColors(true);
         m_policyList->setMinimumHeight(150);
-        m_policyList->header()->setStretchLastSection(false);
-        m_policyList->header()->setSectionResizeMode(0, QHeaderView::Stretch);
-        m_policyList->header()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
-        m_policyList->header()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
-        m_policyList->header()->setSectionResizeMode(3, QHeaderView::ResizeToContents);
-        official->addWidget(m_policyList);
+        m_policyList->horizontalHeader()->setStretchLastSection(false);
+        m_policyList->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
+        m_policyList->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
+        m_policyList->horizontalHeader()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
+        m_policyList->horizontalHeader()->setSectionResizeMode(3, QHeaderView::ResizeToContents);
+        workspace->results()->addWidget(m_policyList, 1);
         official->addStretch();
 
         AddBoundLabel(routes, experimental, QStringLiteral("misc.cks.ssde.intro"),
@@ -308,7 +330,7 @@ namespace ks::misc
             QStringLiteral("只改为按需启动，不删除驱动、服务或签名策略"));
         bootRow->addWidget(m_disableBoot);
         bootRow->addStretch();
-        experimental->addLayout(bootRow);
+        // bootRow 的动作在构造末尾移入共享固定执行区。
         AddBoundLabel(routes, experimental, QStringLiteral("misc.cks.ssde.alternative"),
             QStringLiteral("issue #10 的人工替代步骤：准备自有 PK 与签名策略后，在 UEFI 暂时关闭 Secure Boot；安装 SSDE 驱动；开启测试签名并重启两次；确认 Licensed=1 且服务 RUNNING；再回 UEFI 开启 Secure Boot。此方法同样需要逐次回读，并保留关闭 Secure Boot 的恢复通道。"));
         auto* ssdeDocs = new QPushButton(routes); // ssdeDocs：上游问题说明入口。
@@ -322,7 +344,41 @@ namespace ks::misc
         m_result = new QLabel(this); // m_result：最近一次操作的明确回执。
         m_result->setWordWrap(true);
         m_result->setTextInteractionFlags(Qt::TextSelectableByMouse);
-        root->addWidget(m_result);
+        workspace->results()->addWidget(m_result);
+
+        // 主操作移到共享固定执行区，切换路径只切换对应动作组。
+        auto* officialActions = new QWidget(workspace);
+        auto* officialActionRow = new QHBoxLayout(officialActions);
+        officialActionRow->setContentsMargins(0, 0, 0, 0);
+        officialActionRow->addWidget(m_deploy);
+        officialActionRow->addStretch();
+        auto* ssdeActions = new QWidget(workspace);
+        auto* ssdeFlow = new ks::ui::FlowLayout(ssdeActions, 0, 8, 8); // 动作按实际宽度换行。
+        bootRow->removeWidget(m_enableBoot);
+        bootRow->removeWidget(m_disableBoot);
+        for (QPushButton* button : {m_launch, m_install, m_start, m_enableBoot, m_disableBoot})
+        {
+            ks::ui::NormalizeToolbarControl(button);
+            ssdeFlow->addWidget(button);
+        }
+        delete bootRow;
+        workspace->actions()->addWidget(officialActions);
+        workspace->actions()->addWidget(ssdeActions);
+        ssdeActions->hide();
+        connect(routes, &QTabWidget::currentChanged, this,
+            [officialActions, ssdeActions](const int index)
+            {
+                officialActions->setVisible(index == 0);
+                ssdeActions->setVisible(index == 1);
+            });
+
+        // 工具行统一行高、间距与按钮主题；参数和结果保留共享画布所有权。
+        ks::ui::NormalizeToolbarRow(policyRow);
+        ks::ui::NormalizeToolbarRow(helperRow);
+        ks::ui::NormalizeToolbarRow(driverRow);
+        ks::ui::NormalizeToolbarRow(officialActionRow);
+        ks::ui::NormalizeToolbarControl(ssdeDocs);
+        workspace->finish();
         connect(m_refresh, &QPushButton::clicked, this, [this]() { refresh(); });
         connect(choosePolicy, &QPushButton::clicked, this, [this]() { chooseFile(QStringLiteral("policy")); });
         connect(chooseHelper, &QPushButton::clicked, this, [this]() { chooseFile(QStringLiteral("helper")); });
@@ -398,12 +454,13 @@ namespace ks::misc
         {
             return;
         }
-        m_policyList->setHeaderLabels({
+        m_policyList->setHorizontalHeaderLabels({
             T(QStringLiteral("misc.cks.policy.name"), QStringLiteral("策略名称")),
             T(QStringLiteral("misc.cks.policy.id"), QStringLiteral("策略 ID")),
             T(QStringLiteral("misc.cks.policy.signed"), QStringLiteral("签名")),
             T(QStringLiteral("misc.cks.policy.enforced"), QStringLiteral("当前生效"))});
-        m_policyList->clear();
+        m_policyList->clearContents();
+        m_policyList->setRowCount(0);
         if (!m_hasSnapshot)
         {
             m_status->setText(T(QStringLiteral("misc.cks.status.loading"),
@@ -448,15 +505,20 @@ namespace ks::misc
         }
         for (const cks::Policy& policy : m_snapshot.policies)
         {
-            auto* item = new QTreeWidgetItem(m_policyList); // item：CiTool 的一条策略回执。
-            item->setText(0, policy.name);
-            item->setText(1, policy.id);
-            item->setText(2, !policy.signedKnown
+            const int row = m_policyList->rowCount(); // row：本条只读回执的行号。
+            m_policyList->insertRow(row);
+            auto setCell = [this, row](int column, const QString& text)
+            {
+                m_policyList->setItem(row, column, new QTableWidgetItem(text));
+            };
+            setCell(0, policy.name);
+            setCell(1, policy.id);
+            setCell(2, !policy.signedKnown
                 ? T(QStringLiteral("misc.cks.state.not_reported"), QStringLiteral("未报告"))
                 : policy.signedPolicy
                     ? T(QStringLiteral("misc.cks.state.yes"), QStringLiteral("是"))
                     : T(QStringLiteral("misc.cks.state.no"), QStringLiteral("否")));
-            item->setText(3, !policy.enforcedKnown
+            setCell(3, !policy.enforcedKnown
                 ? T(QStringLiteral("misc.cks.state.not_reported"), QStringLiteral("未报告"))
                 : policy.enforced
                     ? T(QStringLiteral("misc.cks.state.yes"), QStringLiteral("是"))
@@ -464,16 +526,24 @@ namespace ks::misc
         }
         if (m_snapshot.policies.isEmpty() && m_snapshot.policyError.isEmpty())
         {
-            auto* item = new QTreeWidgetItem(m_policyList); // 空列表与查询错误分开显示。
-            item->setText(0, T(QStringLiteral("misc.cks.policy.empty"),
+            m_policyList->insertRow(0);
+            auto setCell = [this](int column, const QString& text)
+            {
+                m_policyList->setItem(0, column, new QTableWidgetItem(text));
+            };
+            setCell(0, T(QStringLiteral("misc.cks.policy.empty"),
                 QStringLiteral("CiTool 未报告策略")));
         }
         if (!m_snapshot.policyError.isEmpty())
         {
-            auto* item = new QTreeWidgetItem(m_policyList); // item：策略查询失败不是空列表。
-            item->setText(0, T(QStringLiteral("misc.cks.policy.error"),
+            m_policyList->insertRow(0);
+            auto setCell = [this](int column, const QString& text)
+            {
+                m_policyList->setItem(0, column, new QTableWidgetItem(text));
+            };
+            setCell(0, T(QStringLiteral("misc.cks.policy.error"),
                 QStringLiteral("CiTool 策略查询失败")));
-            item->setText(1, DetailText(m_snapshot.policyError));
+            setCell(1, DetailText(m_snapshot.policyError));
         }
     }
 
@@ -576,7 +646,7 @@ namespace ks::misc
     {
         QMessageBox dialog(this); // dialog：有不透明背景且默认取消的风险确认。
         dialog.setObjectName(QStringLiteral("ksCksConfirm"));
-        dialog.setStyleSheet(KswordTheme::OpaqueDialogStyle(dialog.objectName()));
+        // 普通确认框由主程序已安装的 ThemedMessageBox 统一维护主题和按钮。
         dialog.setIcon(QMessageBox::Warning);
         dialog.setWindowTitle(T(QStringLiteral("misc.cks.confirm.title"),
             QStringLiteral("确认 CKS 操作")));

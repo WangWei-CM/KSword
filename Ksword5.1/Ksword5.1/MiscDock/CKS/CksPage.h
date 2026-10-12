@@ -13,7 +13,7 @@ class QEvent;
 class QLabel;
 class QPushButton;
 class QShowEvent;
-class QTreeWidget;
+class QTableWidget;
 
 namespace ks::misc
 {
@@ -63,7 +63,7 @@ namespace ks::misc
         QLabel* m_helperFile = nullptr; // m_helperFile：辅助程序路径和 SHA-256。
         QLabel* m_driverFile = nullptr; // m_driverFile：驱动路径和 SHA-256。
         QLabel* m_result = nullptr; // m_result：本次操作回执。
-        QTreeWidget* m_policyList = nullptr; // m_policyList：CiTool 报告的策略列表。
+        QTableWidget* m_policyList = nullptr; // m_policyList：CiTool 报告的策略列表。
         QPushButton* m_refresh = nullptr; // m_refresh：图标化刷新动作。
         QPushButton* m_deploy = nullptr; // m_deploy：部署或更新签名策略。
         QPushButton* m_launch = nullptr; // m_launch：启动 SSDE 启用程序。
