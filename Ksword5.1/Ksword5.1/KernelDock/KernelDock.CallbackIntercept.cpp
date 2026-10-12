@@ -1857,10 +1857,12 @@ private:
         auto* rightPane = new QWidget(mainSplitter);
         auto* rightLayout = new QVBoxLayout(rightPane);
         rightLayout->setContentsMargins(0, 0, 0, 0);
-        rightLayout->setSpacing(6);
+        // 右侧只包含规则动作与规则页签，两者直接相连，左侧分组布局仍独立。
+        rightLayout->setSpacing(0);
 
-        auto* ruleToolbarLayout = new QHBoxLayout();
-        ruleToolbarLayout->setContentsMargins(0, 0, 0, 0);
+        auto* ruleHeader = new QWidget(rightPane);
+        auto* ruleToolbarLayout = new QHBoxLayout(ruleHeader);
+        ruleToolbarLayout->setContentsMargins(8, 4, 8, 4);
         ruleToolbarLayout->setSpacing(6);
         m_addRuleButton = new QPushButton(kernelText("kernel.callback.intercept.rule.add", QStringLiteral("新增规则")), rightPane);
         m_removeRuleButton = new QPushButton(kernelText("kernel.callback.intercept.rule.remove", QStringLiteral("删除规则")), rightPane);
@@ -1876,10 +1878,10 @@ private:
         ruleToolbarLayout->addWidget(m_moveRuleDownButton, 0);
         ruleToolbarLayout->addStretch(1);
         ks::ui::NormalizeToolbarRow(ruleToolbarLayout);
-        rightLayout->addLayout(ruleToolbarLayout, 0);
+        rightLayout->addWidget(ruleHeader, 0);
 
         m_ruleTabWidget = new QTabWidget(rightPane);
-        ks::ui::StylePageTabsContentFrame(m_ruleTabWidget);
+        ks::ui::StyleJoinedResultTabs(m_ruleTabWidget, ruleHeader);
         rightLayout->addWidget(m_ruleTabWidget, 1);
 
         createRuleTableTab(KSWORD_ARK_CALLBACK_TYPE_REGISTRY, kernelText("kernel.callback.intercept.tab.registry", QStringLiteral("注册表")));

@@ -171,13 +171,17 @@ void ScannerDock::buildUi()
     // rootLayout：承载路径工具条、状态提示与两大功能页。
     auto* rootLayout = new QVBoxLayout(this);
     rootLayout->setContentsMargins(8, 8, 8, 8);
-    rootLayout->setSpacing(8);
+    rootLayout->setSpacing(0); // 扫描来源、状态与结果导航组成连续的工作区头部。
 
     // pathLayout：把路径输入、文件选择和扫描动作排在同一行。
     auto* pathToolbar = new QWidget(this); // 文件目标和扫描动作作为一个紧凑操作区。
-    auto* pathLayout = new QHBoxLayout(pathToolbar);
-    pathLayout->setContentsMargins(6, 4, 6, 6);
+    auto* pathStack = new QVBoxLayout(pathToolbar); // 来源行与扫描状态共用页头底面。
+    pathStack->setContentsMargins(6, 4, 6, 6);
+    pathStack->setSpacing(6);
+    auto* pathLayout = new QHBoxLayout();
+    pathLayout->setContentsMargins(0, 0, 0, 0);
     pathLayout->setSpacing(6);
+    pathStack->addLayout(pathLayout);
     m_pathLabel = new QLabel(this);
     m_pathEdit = new QLineEdit(this);
     // 文件目标在参数滚动区之外，必须独立登记输入底色，不能只统一行高。
@@ -203,12 +207,12 @@ void ScannerDock::buildUi()
     m_statusLabel = new QLabel(this);
     m_statusLabel->setWordWrap(true);
     m_statusLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
-    rootLayout->addWidget(m_statusLabel);
+    pathStack->addWidget(m_statusLabel);
 
     // m_mainTabs：将只读检查与高风险编辑明确分离，避免误触。
     m_mainTabs = new QTabWidget(this);
     m_mainTabs->setDocumentMode(true);
-    ks::ui::StylePageTabsContentFrame(m_mainTabs);
+    ks::ui::StyleJoinedResultTabs(m_mainTabs, pathToolbar);
     rootLayout->addWidget(m_mainTabs, 1);
     buildAnalysisUi();
 

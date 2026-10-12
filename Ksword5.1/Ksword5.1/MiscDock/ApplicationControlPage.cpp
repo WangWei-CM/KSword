@@ -509,6 +509,7 @@ namespace ks::misc
     {
         m_rootLayout = new QVBoxLayout(this);
         ks::ui::StyleWorkspacePage(this);
+        m_rootLayout->setSpacing(0); // 公共操作带直接连接策略结果Tab，内部章节间距仍由子页负责。
 
         m_toolbarWidget = new QWidget(this);
         // 页面公共动作采用单条工具带，子页的策略与结果区域不再重复铺背景。
@@ -534,7 +535,7 @@ namespace ks::misc
         m_rootLayout->addWidget(m_toolbarWidget, 0);
 
         m_tabWidget = new QTabWidget(this);
-        ks::ui::StylePageTabsContentFrame(m_tabWidget);
+        ks::ui::StyleJoinedResultTabs(m_tabWidget, m_toolbarWidget);
         m_rootLayout->addWidget(m_tabWidget, 1);
 
         m_appLockerPage = buildAppLockerPage();

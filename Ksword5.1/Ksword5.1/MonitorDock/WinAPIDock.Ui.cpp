@@ -501,7 +501,13 @@ void WinAPIDock::initializeUi()
     filterLayout->addWidget(m_exportButton);
     filterLayout->addWidget(m_clearEventButton);
     ks::ui::NormalizeToolbarRow(filterLayout);
-    workspace->results()->addWidget(m_filterPanel);
+    // 只连接事件过滤条与结果Tab，不更改参数工作区标题等其它组件之间的间距。
+    QWidget* const eventResults = new QWidget(this);
+    auto* const eventResultsLayout = new QVBoxLayout(eventResults);
+    eventResultsLayout->setContentsMargins(0, 0, 0, 0);
+    eventResultsLayout->setSpacing(0);
+    eventResultsLayout->addWidget(m_filterPanel);
+    workspace->results()->addWidget(eventResults, 1);
 
     m_eventTable = new ks::ui::VisibleTableWidget(this);
     ks::ui::SetTableActionBarMode(m_eventTable, ks::ui::TableActionBarMode::Full);
@@ -536,7 +542,7 @@ void WinAPIDock::initializeUi()
         m_eventTable->viewport()->setAttribute(Qt::WA_StyledBackground, true);
     }
     m_resultTabs = new QTabWidget(this);
-    ks::ui::StylePageTabsContentFrame(m_resultTabs);
+    ks::ui::StyleJoinedResultTabs(m_resultTabs, m_filterPanel);
     m_resultTabs->addTab(m_eventTable, QStringLiteral("API 事件"));
     QWidget* coveragePanel = new QWidget(m_resultTabs);
     auto* coverageLayout = new QVBoxLayout(coveragePanel);
@@ -573,7 +579,7 @@ void WinAPIDock::initializeUi()
     m_coverageTable->setColumnWidth(5, 140);
     coverageLayout->addWidget(m_coverageTable, 1);
     m_resultTabs->addTab(coveragePanel, QStringLiteral("API 覆盖"));
-    workspace->results()->addWidget(m_resultTabs, 1);
+    eventResultsLayout->addWidget(m_resultTabs, 1);
     workspace->finish();
 
     // 参数已有统一输入面，结果工具行只登记明确动作，避免套第二层高亮配置底板。

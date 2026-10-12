@@ -176,13 +176,19 @@ void HvmDock::initializeUi()
     rootLayout->setContentsMargins(6, 6, 6, 6);
     rootLayout->setSpacing(6);
 
+    // 生命周期摘要与操作页签共用一个无接缝区域，不改变各专业面板的内部留白。
+    auto* const resultGroup = new QWidget(this);
+    auto* const resultLayout = new QVBoxLayout(resultGroup);
+    resultLayout->setContentsMargins(0, 0, 0, 0);
+    resultLayout->setSpacing(0);
+    rootLayout->addWidget(resultGroup, 1);
+
     // 常驻表头：只放「我现在在哪一步」。
     //
     // 这两行是唯一在任何子页下都必须看得见的东西——切到证据页之后仍然要
     // 知道自己处在哪一步，否则子 Tab 就把生命周期这条主线切断了。
     auto* const headerPanel = new QWidget(this);
-    // 生命周期状态使用轻底面，和下方操作页形成稳定的阅读起点。
-    ks::ui::StylePrimaryContentPanel(headerPanel, false);
+    // 生命周期状态的底面由后面的连续结果页签样式统一提供。
     auto* const headerLayout = new QVBoxLayout(headerPanel);
     headerLayout->setContentsMargins(16, 12, 16, 12);
     headerLayout->setSpacing(4);
@@ -212,7 +218,7 @@ void HvmDock::initializeUi()
         QStringLiteral("color:%1;font-weight:600;")
             .arg(KswordTheme::TextPrimaryHex()));
     headerLayout->addWidget(m_stateLabel);
-    rootLayout->addWidget(headerPanel);
+    resultLayout->addWidget(headerPanel);
 
     // 子 Tab：把原先竖着堆五段的控制面板拆开。
     //
@@ -221,7 +227,7 @@ void HvmDock::initializeUi()
     // 拆成子页之后每一页只剩一件事，两个方向的挤压同时消失。
     auto* const tabs = new QTabWidget(this);
     m_tabs = tabs;
-    ks::ui::StylePageTabsContentFrame(tabs);
+    ks::ui::StyleJoinedResultTabs(tabs, headerPanel);
 
     auto* const controlPanel = new QWidget(tabs);
     auto* const controlLayout = new QVBoxLayout(controlPanel);
@@ -474,7 +480,7 @@ void HvmDock::initializeUi()
     // 默认落在「控制」而不是第一页：「跑第三方虚拟机」是给撞上问题的人准备的
     // 出口，不是这一页的主线。主线是三步生命周期，它在「控制」上。
     tabs->setCurrentWidget(controlPanel);
-    rootLayout->addWidget(tabs, 1);
+    resultLayout->addWidget(tabs, 1);
     // 三步生命周期保持完整，只有阅读层级与明确色块更新。
     ks::ui::StyleWorkspacePage(this, 8);
     ks::ui::StyleParameterFields(controlPanel);

@@ -46,6 +46,10 @@ namespace ks::ui
     // 接管直接页面或项目滚动壳内容的外围layout边距；内部卡片不动，纯嵌套Tab只计最内层。
     void StylePageTabsContentFrame(QTabWidget* tabs, int inset = 6);
 
+    // 非直接父子导航的结果Tab与上方普通工具区连体；pane和结果页根不再重复内缩。
+    // 调用页负责header到Tab的局部零间隔；专业header可传空以保留其独立主题绑定。
+    void StyleJoinedResultTabs(QTabWidget* tabs, QWidget* header = nullptr);
+
     // 主导航明确承接方形工作区时，连接内部圆角与最外框；纯单子Tab可继承此资格。
     // 外半径=8+inset，无描边；有工具条或分隔区的复合页改在真正页根登记。
     void StyleSquarePageTabsFrame(QTabWidget* tabs, int inset = 6);

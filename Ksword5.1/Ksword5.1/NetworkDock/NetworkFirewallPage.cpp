@@ -2570,8 +2570,15 @@ void NetworkFirewallPage::initializeUi()
     m_rootLayout->setContentsMargins(6, 6, 6, 6);
     m_rootLayout->setSpacing(6);
 
-    QHBoxLayout* headerLayout = new QHBoxLayout();
-    headerLayout->setContentsMargins(0, 0, 0, 0);
+    // 状态摘要与结果分类共用连续工具面，外围保留页面原有等边留白。
+    QWidget* const firewallResults = new QWidget(this);
+    auto* const firewallResultsLayout = new QVBoxLayout(firewallResults);
+    firewallResultsLayout->setContentsMargins(0, 0, 0, 0);
+    firewallResultsLayout->setSpacing(0);
+    m_rootLayout->addWidget(firewallResults, 1);
+    QWidget* const firewallHeader = new QWidget(firewallResults);
+    QHBoxLayout* headerLayout = new QHBoxLayout(firewallHeader);
+    headerLayout->setContentsMargins(8, 6, 8, 6);
     headerLayout->setSpacing(8);
 
     QLabel* titleLabel = new QLabel(QStringLiteral("防火墙"), this);
@@ -2585,11 +2592,11 @@ void NetworkFirewallPage::initializeUi()
         QStringLiteral("font-size:13px;color:%1;").arg(KswordTheme::TextSecondaryHex()));
     m_statusLabel->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
     headerLayout->addWidget(m_statusLabel, 1);
-    m_rootLayout->addLayout(headerLayout, 0);
+    firewallResultsLayout->addWidget(firewallHeader, 0);
 
     m_innerTabWidget = new QTabWidget(this);
-    ks::ui::StylePageTabsContentFrame(m_innerTabWidget);
-    m_rootLayout->addWidget(m_innerTabWidget, 1);
+    ks::ui::StyleJoinedResultTabs(m_innerTabWidget, firewallHeader);
+    firewallResultsLayout->addWidget(m_innerTabWidget, 1);
 
     initializeEventMonitorUi();
     initializeRuleManagerUi();

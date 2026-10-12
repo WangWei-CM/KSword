@@ -53,7 +53,7 @@ void ContextMenuCleanerTab::initializeUi()
     // 根布局：上方风险说明，下方七类 Shell 关联子页。
     m_rootLayout = new QVBoxLayout(this);
     ks::ui::StyleWorkspacePage(this);
-    m_rootLayout->setSpacing(16);
+    m_rootLayout->setSpacing(0); // 跨分类动作与分类结果连体，避免Tab下的表格重复内缩。
 
     // 页面级工具栏：整份菜单备份 / 恢复备份 / 当前分类耗时测量。
     // 放在子页签上方，因为这三件事都是跨分类的操作（备份与恢复覆盖全部七类）。
@@ -121,7 +121,7 @@ void ContextMenuCleanerTab::initializeUi()
     });
 
     m_areaTabWidget = new QTabWidget(this);
-    ks::ui::StylePageTabsContentFrame(m_areaTabWidget);
+    ks::ui::StyleJoinedResultTabs(m_areaTabWidget, m_pageToolbar);
     m_areaTabWidget->setObjectName(QStringLiteral("ksContextMenuCleanerAreaTabs"));
     m_rootLayout->addWidget(m_areaTabWidget, 1);
 

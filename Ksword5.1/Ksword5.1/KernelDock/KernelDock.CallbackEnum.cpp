@@ -2046,8 +2046,15 @@ void KernelDock::initializeCallbackEnumTab()
     m_callbackEnumLayout->setContentsMargins(4, 4, 4, 4);
     m_callbackEnumLayout->setSpacing(6);
 
-    m_callbackEnumToolLayout = new QHBoxLayout();
-    m_callbackEnumToolLayout->setContentsMargins(0, 0, 0, 0);
+    // 查询头与结果分割器局部连组，保留结果/详情之间原有的可拖动分配。
+    auto* resultGroup = new QWidget(m_callbackEnumPage);
+    auto* resultLayout = new QVBoxLayout(resultGroup);
+    resultLayout->setContentsMargins(0, 0, 0, 0);
+    resultLayout->setSpacing(0);
+    m_callbackEnumLayout->addWidget(resultGroup, 1);
+    auto* queryHeader = new QWidget(resultGroup);
+    m_callbackEnumToolLayout = new QHBoxLayout(queryHeader);
+    m_callbackEnumToolLayout->setContentsMargins(8, 4, 8, 4);
     m_callbackEnumToolLayout->setSpacing(6);
 
     m_refreshCallbackEnumButton = new QPushButton(QIcon(":/Icon/process_refresh.svg"), QString(), m_callbackEnumPage);
@@ -2070,13 +2077,13 @@ void KernelDock::initializeCallbackEnumTab()
     m_callbackEnumToolLayout->addWidget(m_callbackEnumFilterEdit, 1);
     m_callbackEnumToolLayout->addWidget(m_callbackEnumStatusLabel, 0);
     ks::ui::NormalizeToolbarRow(m_callbackEnumToolLayout);
-    m_callbackEnumLayout->addLayout(m_callbackEnumToolLayout);
+    resultLayout->addWidget(queryHeader);
 
     QSplitter* splitter = new QSplitter(Qt::Vertical, m_callbackEnumPage);
-    m_callbackEnumLayout->addWidget(splitter, 1);
+    resultLayout->addWidget(splitter, 1);
 
     QTabWidget* callbackViewTabs = new QTabWidget(splitter);
-    ks::ui::StylePageTabsContentFrame(callbackViewTabs);
+    ks::ui::StyleJoinedResultTabs(callbackViewTabs, queryHeader);
     m_callbackEnumTable = new ks::ui::VisibleTableWidget(callbackViewTabs);
     // 内核回调新增、消失与归属变化需要完整快照比较。
     ks::ui::SetTableActionBarMode(m_callbackEnumTable, ks::ui::TableActionBarMode::Full);

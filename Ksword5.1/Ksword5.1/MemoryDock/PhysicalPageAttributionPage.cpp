@@ -181,6 +181,16 @@ PhysicalPageAttributionPage::PhysicalPageAttributionPage(QWidget* parent) : QWid
     // 放不下时在本页内滚动，不再把外层的审计页撑高。根布局建在壳的内容容器上。
     auto* root = new QVBoxLayout(ks::ui::EnablePageInnerScroll(this));
     root->setContentsMargins(0, 0, 0, 0);
+    // 扫描摘要和归因图组成统一结果头，表格页签与结果保持同宽而不再套第二层边距。
+    auto* resultGroup = new QWidget(this);
+    auto* resultLayout = new QVBoxLayout(resultGroup);
+    resultLayout->setContentsMargins(0, 0, 0, 0);
+    resultLayout->setSpacing(0);
+    root->addWidget(resultGroup, 1);
+    auto* resultHeader = new QWidget(resultGroup);
+    auto* headerLayout = new QVBoxLayout(resultHeader);
+    headerLayout->setContentsMargins(0, 0, 0, 0);
+    headerLayout->setSpacing(6);
     // 扫描设置与结果过滤同属 PFN 工作流，以一个两行工具区连接并与归因图分开。
     auto* scanToolbar = new QWidget(this); // 扫描工具区的 QWidget 所有权跟随页面。
     ks::ui::StylePrimaryToolbar(scanToolbar);
@@ -218,20 +228,21 @@ PhysicalPageAttributionPage::PhysicalPageAttributionPage(QWidget* parent) : QWid
     ks::ui::ApplyFlatButtonTheme(m_cancelButton, ks::ui::FlatButtonTone::Neutral);
     ks::ui::ApplyFlatButtonTheme(m_mappingButton, ks::ui::FlatButtonTone::Neutral);
     ks::ui::ApplyFlatButtonTheme(m_exportButton, ks::ui::FlatButtonTone::Neutral);
-    root->addWidget(scanToolbar);
+    headerLayout->addWidget(scanToolbar);
     m_summary = new QLabel(this);
     m_summary->setWordWrap(true);
     m_summary->setTextInteractionFlags(Qt::TextSelectableByMouse);
-    root->addWidget(m_summary);
+    headerLayout->addWidget(m_summary);
     m_progress = new QProgressBar(this);
     m_progress->setRange(0, 1000);
     m_progress->setTextVisible(false);
     m_progress->setMaximumHeight(5);
-    root->addWidget(m_progress);
+    headerLayout->addWidget(m_progress);
     m_chart = new MemoryAttributionChart(this);
-    root->addWidget(m_chart);
+    headerLayout->addWidget(m_chart);
+    resultLayout->addWidget(resultHeader);
     m_tabs = new QTabWidget(this);
-    ks::ui::StylePageTabsContentFrame(m_tabs);
+    ks::ui::StyleJoinedResultTabs(m_tabs, resultHeader);
     m_categories = table(m_tabs);
     m_categories->horizontalHeader()->setSortIndicator(2, Qt::DescendingOrder);
     m_groups = table(m_tabs);
@@ -286,7 +297,7 @@ PhysicalPageAttributionPage::PhysicalPageAttributionPage(QWidget* parent) : QWid
         const auto handler = openModuleDetails;
         if (handler) { handler(path); }
     };
-    root->addWidget(m_tabs, 1);
+    resultLayout->addWidget(m_tabs, 1);
     connect(m_scanButton, &QPushButton::clicked, this, [this] { startScan(); });
     connect(m_cancelButton, &QPushButton::clicked, this, [this] {
         if (m_job) { m_job->cancel.store(true); }

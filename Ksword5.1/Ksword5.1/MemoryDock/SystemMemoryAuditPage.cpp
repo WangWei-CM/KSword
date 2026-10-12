@@ -764,6 +764,17 @@ void SystemMemoryAuditPage::initializeUi()
     rootLayout->setContentsMargins(6, 6, 6, 6);
     rootLayout->setSpacing(6);
 
+    // 摘要卡片与结果页签局部连组，下面独立的 DDMA 复核与状态行保留原间距。
+    auto* const resultGroup = new QWidget(this);
+    auto* const resultLayout = new QVBoxLayout(resultGroup);
+    resultLayout->setContentsMargins(0, 0, 0, 0);
+    resultLayout->setSpacing(0);
+    rootLayout->addWidget(resultGroup, 1);
+    auto* const resultHeader = new QWidget(resultGroup);
+    auto* const headerLayout = new QVBoxLayout(resultHeader);
+    headerLayout->setContentsMargins(0, 0, 0, 0);
+    headerLayout->setSpacing(6);
+
     // 快照与深度扫描属于全页操作，以轻底面区分下面的摘要与分项数据。
     QWidget* const snapshotToolbar = new QWidget(this);
     ks::ui::StylePrimaryToolbar(snapshotToolbar);
@@ -800,7 +811,7 @@ void SystemMemoryAuditPage::initializeUi()
     ks::ui::ApplyFlatButtonTheme(m_refreshButton, ks::ui::FlatButtonTone::Accent);
     ks::ui::ApplyFlatButtonTheme(m_userResidencyScanButton, ks::ui::FlatButtonTone::Neutral);
     ks::ui::ApplyFlatButtonTheme(m_pfnScanButton, ks::ui::FlatButtonTone::Neutral);
-    rootLayout->addWidget(snapshotToolbar);
+    headerLayout->addWidget(snapshotToolbar);
 
     QGridLayout* const summaryLayout = new QGridLayout();
     // 数值卡片保持紧凑，只提高横向组间留白，便于比较同一行的指标。
@@ -856,10 +867,11 @@ void SystemMemoryAuditPage::initializeUi()
     summaryLayout->setColumnStretch(0, 1);
     summaryLayout->setColumnStretch(1, 1);
     summaryLayout->setColumnStretch(2, 1);
-    rootLayout->addLayout(summaryLayout);
+    headerLayout->addLayout(summaryLayout);
+    resultLayout->addWidget(resultHeader);
 
     m_detailTabs = new QTabWidget(this);
-    ks::ui::StylePageTabsContentFrame(m_detailTabs);
+    ks::ui::StyleJoinedResultTabs(m_detailTabs, resultHeader);
 
     QWidget* const overviewPage = new QWidget(m_detailTabs);
     QVBoxLayout* const overviewLayout = new QVBoxLayout(overviewPage);
@@ -991,7 +1003,7 @@ void SystemMemoryAuditPage::initializeUi()
     // 只给 stretchFactor 而不给初值时，首帧两块都会按 sizeHint 之外的 0 高度参与分配，
     // 说明区会塌成一条线；这里必须同时给一组初始尺寸。
     detailSplitter->setSizes(QList<int>{ 420, 160 });
-    rootLayout->addWidget(detailSplitter, 1);
+    resultLayout->addWidget(detailSplitter, 1);
 
     // DDMA 复核条：本页统计的是"标准通道看到的物理内存"，被 SLAT 重定向的页在
     // 这里只会表现为一段说不清归属的余量。用 DDMA 对同一页再读一次，是唯一能在

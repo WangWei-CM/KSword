@@ -79,7 +79,15 @@ void KernelIoctlAuditTab::initializeUi()
     rootLayout->setContentsMargins(6, 6, 6, 6);
     rootLayout->setSpacing(5);
 
-    auto* toolbar = new QHBoxLayout();
+    // 查询头与结果页签组成一个连续区域，外围留白仍只由根布局提供。
+    auto* resultGroup = new QWidget(this);
+    auto* resultLayout = new QVBoxLayout(resultGroup);
+    resultLayout->setContentsMargins(0, 0, 0, 0);
+    resultLayout->setSpacing(0);
+    rootLayout->addWidget(resultGroup, 1);
+    auto* queryHeader = new QWidget(resultGroup);
+    auto* toolbar = new QHBoxLayout(queryHeader);
+    toolbar->setContentsMargins(8, 4, 8, 4);
     m_refreshButton = new QPushButton(kernelText("kernel.ioctl_audit.refresh", QStringLiteral("刷新派遣表")), this);
     m_refreshButton->setStyleSheet(buttonStyle());
     m_filterEdit = new QLineEdit(this);
@@ -100,10 +108,10 @@ void KernelIoctlAuditTab::initializeUi()
     toolbar->addWidget(m_clearFilterButton);
     toolbar->addWidget(m_statusLabel, 1);
     ks::ui::NormalizeToolbarRow(toolbar);
-    rootLayout->addLayout(toolbar);
+    resultLayout->addWidget(queryHeader);
 
     m_innerTabs = new QTabWidget(this);
-    ks::ui::StylePageTabsContentFrame(m_innerTabs);
+    ks::ui::StyleJoinedResultTabs(m_innerTabs, queryHeader);
     m_driverPage = new QWidget(m_innerTabs);
     m_devicePage = new QWidget(m_innerTabs);
     m_dispatchPage = new QWidget(m_innerTabs);
@@ -195,7 +203,7 @@ void KernelIoctlAuditTab::initializeUi()
     m_innerTabs->addTab(m_devicePage, kernelText("kernel.ioctl_audit.tab.devices", QStringLiteral("设备对象")));
     m_innerTabs->addTab(m_dispatchPage, kernelText("kernel.ioctl_audit.tab.dispatch", QStringLiteral("MajorFunction")));
     m_innerTabs->addTab(m_registryPage, kernelText("kernel.ioctl_audit.tab.registry", QStringLiteral("KswordARK IOCTL 注册表")));
-    rootLayout->addWidget(m_innerTabs, 1);
+    resultLayout->addWidget(m_innerTabs, 1);
 
     connect(m_refreshButton, &QPushButton::clicked, this, [this]() { refreshAsync(); });
     connect(m_filterEdit, &QLineEdit::textChanged, this, [this]() { applyFilter(); });

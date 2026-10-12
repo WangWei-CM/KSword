@@ -87,9 +87,8 @@ RegistryAccessContext RegistryDock::accessContextForPath(const QString& path) co
 
 void RegistryDock::initializeWorkbenchControls()
 {
-    // 主Tab承接方形工作区；右侧结果Tab只保留留白，不在已有内容区里另画外圆。
+    // 主Tab承接方形工作区；右侧结果Tab稍后与搜索区衔接，不再重复内缩。
     ks::ui::StyleSquarePageTabsFrame(m_registryTabWidget);
-    ks::ui::StylePageTabsContentFrame(m_rightTabWidget);
     const auto fallbackIcon = [](QPushButton* button, QStyle::StandardPixmap icon) {
         if (button->icon().pixmap(button->iconSize()).isNull()) button->setIcon(button->style()->standardIcon(icon));
     };
@@ -239,9 +238,16 @@ void RegistryDock::initializeWorkbenchControls()
     ks::ui::NormalizeToolbarControl(m_searchTypeCombo);
     ks::ui::NormalizeToolbarControl(m_searchButton);
     ks::ui::NormalizeToolbarControl(m_stopSearchButton);
-    m_registryEditorLayout->insertWidget(3, searchPanel);
-    // 搜索选项可折行，底面与上方命令行区分而不额外包一层卡片。
-    ks::ui::StylePrimaryToolbar(searchPanel);
+    // 搜索选项和树/结果分割器直接相连，保留位置导航、命令行和底部状态栏间距。
+    QWidget* const registryResults = new QWidget(m_registryEditorPage);
+    auto* const registryResultsLayout = new QVBoxLayout(registryResults);
+    registryResultsLayout->setContentsMargins(0, 0, 0, 0);
+    registryResultsLayout->setSpacing(0);
+    m_registryEditorLayout->removeWidget(m_mainSplitter);
+    registryResultsLayout->addWidget(searchPanel);
+    registryResultsLayout->addWidget(m_mainSplitter, 1);
+    m_registryEditorLayout->insertWidget(3, registryResults, 1);
+    ks::ui::StyleJoinedResultTabs(m_rightTabWidget, searchPanel);
     searchLayout->setContentsMargins(6, 3, 6, 3);
     // 等命令/搜索按钮迁出并补齐文字后，再固定导航行几何，避免文字动作被误判为图标按钮。
     ks::ui::NormalizeToolbarRow(m_toolBarLayout);

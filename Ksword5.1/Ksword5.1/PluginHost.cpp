@@ -1157,12 +1157,24 @@ namespace
             rootLayout->setContentsMargins(16, 16, 16, 16);
             rootLayout->setSpacing(10);
 
+            // 插件扫描摘要与输出分类连成一组，页脚的任务状态与取消动作仍独立保留。
+            auto* resultsGroup = new QWidget(this);
+            auto* resultsLayout = new QVBoxLayout(resultsGroup);
+            resultsLayout->setContentsMargins(0, 0, 0, 0);
+            resultsLayout->setSpacing(0);
+            rootLayout->addWidget(resultsGroup, 1);
+            auto* resultsHeader = new QWidget(resultsGroup);
+            auto* headerLayout = new QVBoxLayout(resultsHeader);
+            headerLayout->setContentsMargins(12, 10, 12, 10);
+            headerLayout->setSpacing(8);
+            resultsLayout->addWidget(resultsHeader);
+
             auto* titleLabel = new QLabel(
                 descriptor.visualization.enabled ? descriptor.visualization.title : descriptor.name,
                 this);
             titleLabel->setStyleSheet(QStringLiteral("font-size:18px;font-weight:700;color:%1;")
                 .arg(KswordTheme::TextPrimaryHex()));
-            rootLayout->addWidget(titleLabel);
+            headerLayout->addWidget(titleLabel);
 
             QString targetText;
             if (context.targetKind == ks::plugin_host::TargetKind::File)
@@ -1187,12 +1199,12 @@ namespace
             targetLabel->setWordWrap(true);
             targetLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
             targetLabel->setStyleSheet(QStringLiteral("color:%1;").arg(KswordTheme::TextSecondaryHex()));
-            rootLayout->addWidget(targetLabel);
+            headerLayout->addWidget(targetLabel);
 
             m_progress = new QProgressBar(this);
             m_progress->setRange(0, 0);
             m_progress->setTextVisible(true);
-            rootLayout->addWidget(m_progress);
+            headerLayout->addWidget(m_progress);
 
             if (!descriptor.visualization.summary.isEmpty())
             {
@@ -1207,11 +1219,11 @@ namespace
                     m_summaryLabels.insert(field.field, label);
                 }
                 summaryLayout->addStretch(1);
-                rootLayout->addLayout(summaryLayout);
+                headerLayout->addLayout(summaryLayout);
             }
 
             m_tabs = new QTabWidget(this);
-            ks::ui::StylePageTabsContentFrame(m_tabs); // 宿主自己的扫描结果使用统一框架。
+            ks::ui::StyleJoinedResultTabs(m_tabs, resultsHeader); // 结果和页签使用相同宽度。
             if (descriptor.visualization.enabled)
             {
                 m_resultTable = new ks::ui::VisibleTableWidget(m_tabs);
@@ -1264,7 +1276,7 @@ namespace
             m_diagnostics->setMaximumBlockCount(2000);
             m_diagnostics->setPlaceholderText(QStringLiteral("插件错误和协议诊断会显示在这里。"));
             m_tabs->addTab(m_diagnostics, QStringLiteral("诊断"));
-            rootLayout->addWidget(m_tabs, 1);
+            resultsLayout->addWidget(m_tabs, 1);
 
             auto* footer = new QHBoxLayout();
             m_status = new QLabel(QStringLiteral("正在启动…"), this);

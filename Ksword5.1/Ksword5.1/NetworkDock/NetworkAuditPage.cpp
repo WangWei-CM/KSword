@@ -861,8 +861,15 @@ void NetworkAuditPage::initializeUi()
     m_rootLayout->setContentsMargins(10, 10, 10, 10);
     m_rootLayout->setSpacing(10);
 
-    m_headerLayout = new QHBoxLayout();
-    m_headerLayout->setContentsMargins(0, 0, 0, 0);
+    // 审计状态行与其结果分类组成连续区域；其它页内工具行保留自己的间隔。
+    QWidget* const auditResults = new QWidget(this);
+    auto* const auditResultsLayout = new QVBoxLayout(auditResults);
+    auditResultsLayout->setContentsMargins(0, 0, 0, 0);
+    auditResultsLayout->setSpacing(0);
+    m_rootLayout->addWidget(auditResults, 1);
+    QWidget* const auditHeader = new QWidget(auditResults);
+    m_headerLayout = new QHBoxLayout(auditHeader);
+    m_headerLayout->setContentsMargins(8, 6, 8, 6);
     m_headerLayout->setSpacing(6);
 
     QLabel* titleLabel = new QLabel(QStringLiteral("网络只读审计"), this);
@@ -883,12 +890,12 @@ void NetworkAuditPage::initializeUi()
     m_headerLayout->addWidget(m_refreshButton);
     ks::ui::NormalizeToolbarRow(m_headerLayout);
 
-    m_rootLayout->addLayout(m_headerLayout);
+    auditResultsLayout->addWidget(auditHeader);
 
     m_sectionTabWidget = new QTabWidget(this);
-    ks::ui::StylePageTabsContentFrame(m_sectionTabWidget);
+    ks::ui::StyleJoinedResultTabs(m_sectionTabWidget, auditHeader);
     m_sectionTabWidget->setTabPosition(QTabWidget::North);
-    m_rootLayout->addWidget(m_sectionTabWidget, 1);
+    auditResultsLayout->addWidget(m_sectionTabWidget, 1);
 
     // TCP/UDP cross-view。
     m_crossViewPage = new QWidget(this);

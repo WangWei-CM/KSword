@@ -145,7 +145,7 @@ void MinidumpDock::buildUi()
     // rootLayout：承载路径工具条、状态提示与结果页签。
     auto* rootLayout = new QVBoxLayout(this);
     rootLayout->setContentsMargins(8, 8, 8, 8);
-    rootLayout->setSpacing(8);
+    rootLayout->setSpacing(0); // 来源、诊断状态与结果Tab连成同宽头部。
 
     // pathLayout：路径输入与全部动作按钮排在同一行。
     auto* sourceToolbar = new QWidget(this); // 转储与符号来源集中在结果上方，不挤占各结果页工具栏。
@@ -218,12 +218,12 @@ void MinidumpDock::buildUi()
     m_statusLabel = new QLabel(this);
     m_statusLabel->setWordWrap(true);
     m_statusLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
-    rootLayout->addWidget(m_statusLabel);
+    sourceLayout->addWidget(m_statusLabel);
 
     // m_resultTabs：解析结果页签；具体页在 renderResult 里按数据动态挂载。
     m_resultTabs = new QTabWidget(this);
     m_resultTabs->setDocumentMode(true);
-    ks::ui::StylePageTabsContentFrame(m_resultTabs);
+    ks::ui::StyleJoinedResultTabs(m_resultTabs, sourceToolbar);
     rootLayout->addWidget(m_resultTabs, 1);
 
     // 预创建全部表格与报告编辑器：语言切换/重复解析时复用，不反复销毁。

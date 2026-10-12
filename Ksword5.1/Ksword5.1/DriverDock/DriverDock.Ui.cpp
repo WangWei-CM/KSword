@@ -786,8 +786,18 @@ void DriverDock::initializeObjectInfoTab()
     m_objectInfoLayout->setContentsMargins(4, 4, 4, 4);
     m_objectInfoLayout->setSpacing(6);
 
+    // 对象查询与摘要作为结果头，专业字段视图仍只负责自身字段的绘制。
+    auto* resultGroup = new QWidget(m_objectInfoPage);
+    auto* resultLayout = new QVBoxLayout(resultGroup);
+    resultLayout->setContentsMargins(0, 0, 0, 0);
+    resultLayout->setSpacing(0);
+    m_objectInfoLayout->addWidget(resultGroup, 1);
+    auto* resultHeader = new QWidget(resultGroup);
+    auto* headerLayout = new QVBoxLayout(resultHeader);
+    headerLayout->setContentsMargins(0, 0, 0, 0);
+    headerLayout->setSpacing(4);
     QHBoxLayout* queryLayout = new QHBoxLayout();
-    queryLayout->setContentsMargins(0, 0, 0, 0);
+    queryLayout->setContentsMargins(8, 4, 8, 4);
     queryLayout->setSpacing(6);
 
     m_objectDriverNameEdit = new QLineEdit(m_objectInfoPage);
@@ -839,20 +849,21 @@ void DriverDock::initializeObjectInfoTab()
     queryLayout->addWidget(m_objectEvidenceRefreshButton);
     queryLayout->addWidget(m_objectInfoStatusLabel, 1);
     ks::ui::NormalizeToolbarRow(queryLayout);
-    m_objectInfoLayout->addLayout(queryLayout);
+    headerLayout->addLayout(queryLayout);
 
     // 摘要直接投影 DriverObject 快照字段，详细证据仍由下方表格承载。
     m_objectInfoSummaryEdit = new ks::ui::StructuredFieldView(m_objectInfoPage);
     m_objectInfoSummaryEdit->setMaximumHeight(145);
     m_objectInfoSummaryEdit->setDocument(ks::ui::FieldDocument{}.note(
         QStringLiteral("DriverObject 摘要显示在这里。")));
-    m_objectInfoLayout->addWidget(m_objectInfoSummaryEdit);
+    headerLayout->addWidget(m_objectInfoSummaryEdit);
+    resultLayout->addWidget(resultHeader);
 
     m_objectDetailTabWidget = new QTabWidget(m_objectInfoPage);
-    // DriverObject 等五个结果页是对象查询的子层级，沿用共享子页导航和等边内容框。
+    // DriverObject 等五个结果页紧接查询摘要，表格与页签使用相同宽度。
     ks::ui::StyleChildPageTabs(m_objectDetailTabWidget);
-    ks::ui::StylePageTabsContentFrame(m_objectDetailTabWidget);
-    m_objectInfoLayout->addWidget(m_objectDetailTabWidget, 1);
+    ks::ui::StyleJoinedResultTabs(m_objectDetailTabWidget, resultHeader);
+    resultLayout->addWidget(m_objectDetailTabWidget, 1);
 
     auto configureReadOnlyTable = [](QTableWidget* table)
     {

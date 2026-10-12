@@ -104,6 +104,16 @@ void KernelSlatIommuAuditTab::initializeUi()
     rootLayout->setContentsMargins(6, 6, 6, 6);
     rootLayout->setSpacing(6);
 
+    // 采集动作和取证摘要连到结果页签，表格/详情分割器仍保持原有子控件关系。
+    auto* resultGroup = new QWidget(this);
+    auto* resultLayout = new QVBoxLayout(resultGroup);
+    resultLayout->setContentsMargins(0, 0, 0, 0);
+    resultLayout->setSpacing(0);
+    rootLayout->addWidget(resultGroup, 1);
+    auto* resultHeader = new QWidget(resultGroup);
+    auto* headerLayout = new QVBoxLayout(resultHeader);
+    headerLayout->setContentsMargins(8, 4, 8, 4);
+    headerLayout->setSpacing(4);
     auto* toolbar = new QHBoxLayout();
     m_refreshButton = new QPushButton(
         kernelText("kernel.slat_iommu.refresh", QStringLiteral("刷新取证")),
@@ -136,7 +146,7 @@ void KernelSlatIommuAuditTab::initializeUi()
     toolbar->addStretch(1);
     toolbar->addWidget(m_statusLabel);
     ks::ui::NormalizeToolbarRow(toolbar);
-    rootLayout->addLayout(toolbar);
+    headerLayout->addLayout(toolbar);
 
     m_summaryLabel = new QLabel(this);
     m_summaryLabel->setWordWrap(true);
@@ -144,11 +154,12 @@ void KernelSlatIommuAuditTab::initializeUi()
     m_summaryLabel->setStyleSheet(
         QStringLiteral("QLabel{padding:6px;color:%1;}")
             .arg(KswordTheme::TextPrimaryHex()));
-    rootLayout->addWidget(m_summaryLabel);
+    headerLayout->addWidget(m_summaryLabel);
+    resultLayout->addWidget(resultHeader);
 
     auto* splitter = new QSplitter(Qt::Vertical, this);
     auto* evidenceTabs = new QTabWidget(splitter);
-    ks::ui::StylePageTabsContentFrame(evidenceTabs);
+    ks::ui::StyleJoinedResultTabs(evidenceTabs, resultHeader);
 
     m_probeTable = new ks::ui::VisibleTableWidget(evidenceTabs);
     // 虚拟/物理别名探针差异需要保留现场快照比较。
@@ -221,7 +232,7 @@ void KernelSlatIommuAuditTab::initializeUi()
     splitter->addWidget(m_detailEdit);
     splitter->setStretchFactor(0, 3);
     splitter->setStretchFactor(1, 2);
-    rootLayout->addWidget(splitter, 1);
+    resultLayout->addWidget(splitter, 1);
 
     connect(m_refreshButton, &QPushButton::clicked, this, [this]() {
         refreshAsync();

@@ -275,6 +275,7 @@ KSword 主程序位于 `Ksword5.1/Ksword5.1`（Qt 6.9.3 Widgets + Qt Advanced Do
 - 用户明确圆角必须落在最外层框架，不能覆盖内部控件已有圆角。`StylePageTabsContentFrame` 登记6px pane留白，进程/线程页外围layout归0；页坐标先向外扩展这6px还原外框，再以外半径14px（内部8px+留白6px）绘四角，使内外圆心重合、弧线间隔也为6px。pane留白沿用page底色，角片只填最外弧线之外的rail色；无描边，不新增全高覆盖层。未登记页不批量改变。
 - 用户随后明确要求全软件UI复查和推广。本轮扩展到51个导航/结果/页根入口，见 `docs/UI标准覆盖复查-20261011.md`。框架只接管明确页根/自适应滚动内容的外围边距，内部卡片16px保留；纯嵌套Tab只计最内层，惰性代理用 `ksword_page_frame_host` 明确标记。竖向Tab同样支持；服务/欢迎通过 `StyleWorkspaceContentFrame` 登记页根。背景穿透模式不绘实色角片，专业编辑器内部及原生插件窗口不强行接入。
 - 最新适用条件是“方角外框包着圆角内容”，有留白不等于有外框。`StylePageTabsContentFrame` 默认只整理留白；直接承接方形工作区的11个主导航用 `StyleSquarePageTabsFrame` 明确方框身份，资格仅沿完整单子Tab/已标记惰性壳传递，遇工具条、splitter、并列内容或已有圆角面板停止。Cross-View、注册表右侧、WinAPI等结果Tab不画外角。内存/启动项/窗口/Other/HVM/Scanner/Minidump有页头或页尾，改在整页根登记Workspace；Workspace被嵌入已有页面框架或根margin被接管后也不再画内层外圆。保留14/8/6同心几何和首帧生命周期保护。
+- 上方工具/状态区后接结果Tab，使用 `StyleJoinedResultTabs` 与直接父子导航区分：工具带与Tab共用toolbar色、接缝侧底圆角为0，局部分组零spacing，pane零padding使表格与整条Tab栏同宽。仅普通QWidget页壳的外围layout归0；专业自定义控件（含无Q_OBJECT类型）与明确卡片内部留白保留，使用C++动态类型区分而不能只看Qt元对象。重绑工具带只在拼接角色改变时触发，首显主题与Tab动画沿用原入口。逐页覆盖见 `docs/UI结果Tab连体布局-20261012.md`。
 
 
 ## 详情窗口与弹窗更新（2026-10-11）

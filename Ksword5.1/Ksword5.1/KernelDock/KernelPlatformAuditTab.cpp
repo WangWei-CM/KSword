@@ -356,8 +356,15 @@ void KernelPlatformAuditTab::initializeUi()
 
     // 中文说明：只读审计页不再用常驻横幅占顶部版面；编辑判定口径改挂「当前地址」
     // 列表头，真正下手时编辑对话框的风险文案与写入前的二次确认仍会完整复述。
-    auto* toolbar = new QHBoxLayout();
-    toolbar->setContentsMargins(0, 0, 0, 0);
+    // HAL/WDF 的筛选头只连接自己的结果页签，避免重复内边距缩窄表格。
+    auto* resultGroup = new QWidget(this);
+    auto* resultLayout = new QVBoxLayout(resultGroup);
+    resultLayout->setContentsMargins(0, 0, 0, 0);
+    resultLayout->setSpacing(0);
+    rootLayout->addWidget(resultGroup, 1);
+    auto* queryHeader = new QWidget(resultGroup);
+    auto* toolbar = new QHBoxLayout(queryHeader);
+    toolbar->setContentsMargins(8, 4, 8, 4);
     toolbar->setSpacing(0);
     m_refreshButton = new QPushButton(QIcon(QStringLiteral(":/Icon/process_refresh.svg")), QString(), this);
     m_refreshButton->setToolTip(kernelText(
@@ -390,10 +397,10 @@ void KernelPlatformAuditTab::initializeUi()
     toolbar->addWidget(m_filterEdit, 1);
     toolbar->addWidget(m_statusLabel);
     ks::ui::NormalizeToolbarRow(toolbar);
-    rootLayout->addLayout(toolbar);
+    resultLayout->addWidget(queryHeader);
 
     m_innerTabs = new QTabWidget(this);
-    ks::ui::StylePageTabsContentFrame(m_innerTabs);
+    ks::ui::StyleJoinedResultTabs(m_innerTabs, queryHeader);
     if (m_mode == Mode::Hal)
     {
         addPage(
@@ -418,7 +425,7 @@ void KernelPlatformAuditTab::initializeUi()
             KSWORD_ARK_PLATFORM_AUDIT_SCOPE_WDF_CALLBACKS,
             kernelText("kernel.platform.wdf.callbacks", QStringLiteral("WDF 回调")));
     }
-    rootLayout->addWidget(m_innerTabs, 1);
+    resultLayout->addWidget(m_innerTabs, 1);
 
     connect(m_refreshButton, &QPushButton::clicked, this, [this]() { refreshAsync(); });
     connect(m_columnGroupAButton, &QPushButton::clicked, this, [this]() { setColumnGroup(0); });

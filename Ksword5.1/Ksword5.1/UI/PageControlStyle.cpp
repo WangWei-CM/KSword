@@ -3,6 +3,7 @@
 #include "./MainSurfaceStyle.h"
 #include "./PageTabMotion.h"
 #include "./AdaptivePageScroll.h"
+#include "./PrimaryPageStyle.h"
 
 #include <QBoxLayout>
 #include <QEvent>
@@ -10,6 +11,7 @@
 #include <QPainterPath>
 #include <QStackedWidget>
 #include <QTimer>
+#include <typeinfo>
 
 namespace
 {
@@ -24,7 +26,7 @@ namespace
     };
 
     // 主窗口使用工作区层级，独立窗口使用现有表面角色；子栏与父栏用不同强度。
-    PageTabColors tabColors(bool mainSurface, bool child)
+    PageTabColors tabColors(bool mainSurface, bool child, bool joined = false)
     {
         const ks::ui::MainSurfaceColors mainColors = ks::ui::MainWindowSurfaceColors();
         PageTabColors colors;
@@ -37,6 +39,12 @@ namespace
             // 子栏只在选中项上铺轻底面，完整底板贴近页面，避免两排导航看似同级。
             colors.rail = colors.page;
             colors.selected = mainSurface ? mainColors.toolbar : KswordTheme::SurfaceColor();
+        }
+        if (joined)
+        {
+            // 结果页签属于上方工具区的末行，连续底面不再模拟另一层页面导航。
+            colors.rail = mainSurface ? mainColors.toolbar : KswordTheme::SurfaceColor();
+            colors.selected = mainSurface ? mainColors.header : KswordTheme::SurfaceAltColor();
         }
         colors.hovered = KswordTheme::BlendColors(colors.rail, colors.selected, 128);
         return colors;
@@ -201,7 +209,8 @@ namespace
             return;
         }
         const bool child = tabs->tabBar()->property("ksword_page_tabs_child").toBool();
-        const PageTabColors colors = tabColors(ks::ui::UsesMainSurfaceHierarchy(tabs), child);
+        const bool joined = tabs->property("ksword_joined_result_tabs").toBool(); // 连体结果区不重复内缩。
+        const PageTabColors colors = tabColors(ks::ui::UsesMainSurfaceHierarchy(tabs), child, joined);
         const int inset = pageFrameInset(tabs); // 只计最内层明确登记的留白。
         const QVariant mainSurface = tabs->window()->property("ksword_main_surface_hierarchy");
         const QString background = mainSurface.isValid() && !mainSurface.toBool()
@@ -209,7 +218,7 @@ namespace
         QString rules = QStringLiteral(
             "QTabWidget[ksword_page_tabs_widget=\"true\"]::pane{"
             "border:0;border-radius:%3px;top:0px;background:%1;padding:%2px;}")
-            .arg(background).arg(inset).arg(inset > 0 ? 0 : kPageCornerRadius);
+            .arg(background).arg(inset).arg(inset > 0 || joined ? 0 : kPageCornerRadius);
         if (child && tabs->tabPosition() == QTabWidget::North)
         {
             // 子栏的层级缩进只作用于标签，不能把整页内容向右挤8px。
@@ -414,7 +423,8 @@ namespace
                 return;
             }
             const bool child = m_tabs->tabBar()->property("ksword_page_tabs_child").toBool();
-            const PageTabColors colors = tabColors(ks::ui::UsesMainSurfaceHierarchy(m_tabs), child);
+            const PageTabColors colors = tabColors(ks::ui::UsesMainSurfaceHierarchy(m_tabs), child,
+                m_tabs->property("ksword_joined_result_tabs").toBool());
             QPainter painter(this); // 水平/竖向导航均使用控制器给出的真实栏范围。
             painter.fillRect(rect(), colors.rail);
         }
@@ -552,8 +562,24 @@ namespace
             QLayout* layout = owner ? owner->layout() : nullptr;
             return m_layoutDirty || m_preparedPage != page || m_preparedOwner != owner
                 || m_preparedInset != pageFrameInset(m_tabs)
-                || (layout && m_tabs->property("ksword_page_tabs_content_inset").toInt() > 0
+                || (layout && ownsPageMargin(owner)
                     && layout->contentsMargins() != QMargins());
+        }
+
+        // 连体模式只整理普通页壳；专业控件即使没有Q_OBJECT，也不能把其内部布局当成外围。
+        bool ownsPageMargin(QWidget* owner) const
+        {
+            if (!owner)
+            {
+                return false;
+            }
+            if (m_tabs->property("ksword_joined_result_tabs").toBool())
+            {
+                return typeid(*owner) == typeid(QWidget)
+                    && !owner->property("ksword_primary_content_panel").toBool()
+                    && !owner->property("ksword_parameter_surface").toBool();
+            }
+            return m_tabs->property("ksword_page_tabs_content_inset").toInt() > 0;
         }
 
         void prepareNow()
@@ -568,7 +594,7 @@ namespace
         // 登记框架只接管当前页最外层layout；卡片/表单内部16px等业务留白不动。
         void normalizePageMargin(QWidget* owner)
         {
-            if (!owner || m_tabs->property("ksword_page_tabs_content_inset").toInt() <= 0)
+            if (!ownsPageMargin(owner))
             {
                 return;
             }
@@ -768,7 +794,8 @@ namespace ks::ui
     QColor PageTabRailColor(const QTabBar* bar)
     {
         const bool child = bar && bar->property("ksword_page_tabs_child").toBool();
-        return tabColors(UsesMainSurfaceHierarchy(bar), child).rail;
+        return tabColors(UsesMainSurfaceHierarchy(bar), child,
+            bar && bar->property("ksword_joined_result_tabs").toBool()).rail;
     }
 
     QColor PageTabIconContrastColor(const QColor& preferred)
@@ -807,7 +834,8 @@ namespace ks::ui
                 return PageTabMotionColors{};
             }
             const bool child = safeBar->property("ksword_page_tabs_child").toBool();
-            const PageTabColors colors = tabColors(UsesMainSurfaceHierarchy(safeBar), child);
+            const PageTabColors colors = tabColors(UsesMainSurfaceHierarchy(safeBar), child,
+                safeBar->property("ksword_joined_result_tabs").toBool());
             return PageTabMotionColors{colors.selected, KswordTheme::EnsureTextContrast(
                 KswordTheme::ControlAccentColor(), colors.selected, 3.0)};
         });
@@ -815,7 +843,8 @@ namespace ks::ui
         {
             const bool child = bar->property("ksword_page_tabs_child").toBool();
             const QString rules = tabBarRules(QStringLiteral("QTabBar[ksword_page_tabs_style=\"true\"]"),
-                tabColors(UsesMainSurfaceHierarchy(bar), child), child, true);
+                tabColors(UsesMainSurfaceHierarchy(bar), child,
+                    bar->property("ksword_joined_result_tabs").toBool()), child, true);
             if (bar->styleSheet() != rules)
             {
                 bar->setStyleSheet(rules); // 重复明确接入不再触发整栏polish和外壳StyleChange。
@@ -833,7 +862,8 @@ namespace ks::ui
             }
             const bool child = safeBar->property("ksword_page_tabs_child").toBool();
             const QString rules = tabBarRules(QStringLiteral("QTabBar[ksword_page_tabs_style=\"true\"]"),
-                tabColors(UsesMainSurfaceHierarchy(safeBar), child), child, true);
+                tabColors(UsesMainSurfaceHierarchy(safeBar), child,
+                    safeBar->property("ksword_joined_result_tabs").toBool()), child, true);
             if (safeBar->styleSheet() != rules)
             {
                 safeBar->setStyleSheet(rules);
@@ -898,6 +928,24 @@ namespace ks::ui
         // 仅真正直接承接方形工作区的主导航调用；普通结果Tab不声明这项资格。
         tabs->setProperty("ksword_square_page_frame", true);
         StylePageTabsContentFrame(tabs, inset);
+    }
+
+    void StyleJoinedResultTabs(QTabWidget* tabs, QWidget* header)
+    {
+        if (!tabs)
+        {
+            return;
+        }
+        // 调用页明确决定上方组件与结果区的布局接缝，此处只统一形状、颜色和结果宽度。
+        tabs->setProperty("ksword_joined_result_tabs", true);
+        tabs->tabBar()->setProperty("ksword_joined_result_tabs", true);
+        tabs->setProperty("ksword_square_page_frame", false);
+        if (header)
+        {
+            header->setProperty("ksword_primary_toolbar_joined_tabs", true);
+            StylePrimaryToolbar(header); // 工具带只保留顶部外圆角，底部与页签连续。
+        }
+        StylePageTabsContentFrame(tabs, 0);
     }
 
     void StyleWorkspaceContentFrame(QWidget* page, int inset)

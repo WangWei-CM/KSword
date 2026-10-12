@@ -334,14 +334,23 @@ void MemoryDock::initializeTabs()
 
     // 全部子页面统一由 QTabWidget 承载。
     m_tabWidget = new QTabWidget(this);
-    ks::ui::StylePageTabsContentFrame(m_tabWidget);
+    // 进程选择头和功能页签连成一组，根布局中的其它状态区继续保留原间隔。
+    auto* resultGroup = new QWidget(this);
+    auto* resultLayout = new QVBoxLayout(resultGroup);
+    resultLayout->setContentsMargins(0, 0, 0, 0);
+    resultLayout->setSpacing(0);
+    QWidget* const processHeader = m_toolbarLayout->parentWidget();
+    m_rootLayout->removeWidget(processHeader);
+    resultLayout->addWidget(processHeader);
+    ks::ui::StyleJoinedResultTabs(m_tabWidget, processHeader);
     m_tabWidget->setDocumentMode(true);
     // 加固：QTabWidget 的页面栈会对所有页（含未显示、被隐藏的旧页）的最小高度取最大值。
     // 每个页面本身都已经带内部滚动壳（见 ks::ui::EnablePageInnerScroll），这里再把页签控件
     // 的最小尺寸隔离掉，这样以后有人新增页签却忘了包壳，表现为页内被裁剪，
     // 而不是把 Dock 的头部、工具栏和状态栏挤坏。
     ks::ui::IsolateMinimumSize(m_tabWidget);
-    m_rootLayout->addWidget(m_tabWidget, 1);
+    resultLayout->addWidget(m_tabWidget, 1);
+    m_rootLayout->addWidget(resultGroup, 1);
 
     initializeProcessModuleTab();
     initializeMemoryRegionTab();

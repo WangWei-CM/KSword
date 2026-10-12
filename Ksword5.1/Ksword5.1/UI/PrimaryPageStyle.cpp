@@ -177,10 +177,17 @@ namespace ks::ui
 
     void StylePrimaryToolbar(QWidget* toolbar)
     {
-        if (toolbar == nullptr || toolbar->property("ksword_primary_toolbar").toBool())
+        if (toolbar == nullptr)
         {
             return;
         }
+        const bool joined = toolbar->property("ksword_primary_toolbar_joined_tabs").toBool();
+        if (toolbar->property("ksword_primary_toolbar").toBool()
+            && toolbar->property("ksword_primary_toolbar_joined_applied").toBool() == joined)
+        {
+            return; // 只在明确改变拼接形状时重新登记本工具带，普通重复调用保持幂等。
+        }
+        toolbar->setProperty("ksword_primary_toolbar_joined_applied", joined);
         toolbar->setProperty("ksword_primary_toolbar", true);
         toolbar->setAttribute(Qt::WA_StyledBackground, true);
         const QPointer<QWidget> target(toolbar);
@@ -191,10 +198,12 @@ namespace ks::ui
                 const bool mainSurface = UsesMainSurfaceHierarchy(target);
                 const MainSurfaceColors surfaces = MainWindowSurfaceColors();
                 // 独立工具带与内容板统一圆角，以底色差表达层级，不再拼接一块方形底面。
+                const int bottomRadius = target->property("ksword_primary_toolbar_joined_tabs").toBool() ? 0 : 8;
                 ReplacePrimaryStyle(target, QStringLiteral(
                     "QWidget[ksword_primary_toolbar=\"true\"]{"
-                    "background:%1;border:0;border-radius:8px;}")
-                    .arg(mainSurface ? surfaces.toolbar.name() : KswordTheme::SurfaceColor().name()));
+                    "background:%1;border:0;border-radius:8px;"
+                    "border-bottom-left-radius:%2px;border-bottom-right-radius:%2px;}")
+                    .arg(mainSurface ? surfaces.toolbar.name() : KswordTheme::SurfaceColor().name()).arg(bottomRadius));
             }
         });
     }

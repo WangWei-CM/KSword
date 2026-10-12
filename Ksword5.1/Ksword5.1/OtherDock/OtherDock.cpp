@@ -3165,7 +3165,12 @@ void OtherDock::initializeUi()
     m_toolBarLayout = new QHBoxLayout(m_toolBarWidget);
     m_toolBarLayout->setContentsMargins(0, 0, 0, 0);
     m_toolBarLayout->setSpacing(4);
-    m_rootLayout->addWidget(m_toolBarWidget, 0);
+    // 仅将枚举工具带与结果Tab合并；底部状态栏继续沿用根布局的分区间隔。
+    auto* resultLayout = new QVBoxLayout();
+    resultLayout->setContentsMargins(0, 0, 0, 0);
+    resultLayout->setSpacing(0);
+    m_rootLayout->addLayout(resultLayout, 1);
+    resultLayout->addWidget(m_toolBarWidget, 0);
 
     m_refreshButton = new QPushButton(QIcon(":/Icon/process_refresh.svg"), QString(), m_toolBarWidget);
     m_refreshButton->setToolTip(QStringLiteral("刷新窗口列表"));
@@ -3269,8 +3274,8 @@ void OtherDock::initializeUi()
 
     // 中部主内容：Tab1=窗口列表，Tab2=桌面管理（SwitchDesktop）。
     m_contentTabWidget = new QTabWidget(this);
-    ks::ui::StylePageTabsContentFrame(m_contentTabWidget);
-    m_rootLayout->addWidget(m_contentTabWidget, 1);
+    ks::ui::StyleJoinedResultTabs(m_contentTabWidget, m_toolBarWidget);
+    resultLayout->addWidget(m_contentTabWidget, 1);
 
     m_windowListPage = new QWidget(m_contentTabWidget);
     m_windowListPageLayout = new QVBoxLayout(m_windowListPage);

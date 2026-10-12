@@ -3029,7 +3029,7 @@ void WindowDock::initializeUi()
 {
     m_rootLayout = new QVBoxLayout(this);
     m_rootLayout->setContentsMargins(4, 4, 4, 4);
-    m_rootLayout->setSpacing(6);
+    m_rootLayout->setSpacing(0); // 审计状态头与分类结果Tab共用连续边缘。
 
     m_toolBarWidget = new QWidget(this);
     m_toolBarLayout = new QVBoxLayout(m_toolBarWidget);
@@ -3066,7 +3066,7 @@ void WindowDock::initializeUi()
     m_tabWidget = new QTabWidget(this);
     // 窗口 Dock 的根子页统一放到顶部横排，保留所有现有页面和 currentIndex 状态源。
     m_tabWidget->setTabPosition(QTabWidget::North);
-    ks::ui::StylePageTabsContentFrame(m_tabWidget);
+    ks::ui::StyleJoinedResultTabs(m_tabWidget, m_toolBarWidget);
     m_rootLayout->addWidget(m_tabWidget, 1);
 
     // 配置只读结构化表格：可排序、行选择、内容自适应列宽、末列拉伸。
@@ -3161,24 +3161,32 @@ void WindowDock::initializeUi()
     };
 
     // 页面公共头：标题 + “只读审计页”提示。
-    const auto makePageHeader = [this](QWidget* pageWidget, QVBoxLayout* pageLayout, const QString& titleText)
+    const auto makePageHeader = [this](QWidget* pageWidget, QVBoxLayout* pageLayout,
+        const QString& titleText) -> QWidget*
     {
-        QLabel* pageTitleLabel = new QLabel(titleText, pageWidget);
+        // 局部标题成为结果导航头部，外层页间距不影响内层结果与Tab的等宽边缘。
+        QWidget* pageHeader = new QWidget(pageWidget);
+        auto* headerLayout = new QHBoxLayout(pageHeader);
+        headerLayout->setContentsMargins(6, 4, 6, 4);
+        QLabel* pageTitleLabel = new QLabel(titleText, pageHeader);
         ks::ui::StylePrimarySectionTitle(pageTitleLabel);
-        pageLayout->addWidget(pageTitleLabel, 0);
+        headerLayout->addWidget(pageTitleLabel);
+        pageLayout->setSpacing(0);
+        pageLayout->addWidget(pageHeader, 0);
+        return pageHeader;
     };
 
     // makeInnerTabWidget 作用：
     // - 输入 parentWidget：当前外层审计页；
     // - 处理：创建一个紧凑的内部页签容器，把每个表格/文本框拆到独立页签；
     // - 返回：可直接 addTab 的 QTabWidget，避免多个大控件纵向堆叠后被压缩到不可见。
-    const auto makeInnerTabWidget = [](QWidget* parentWidget) -> QTabWidget*
+    const auto makeInnerTabWidget = [](QWidget* parentWidget, QWidget* pageHeader) -> QTabWidget*
     {
         QTabWidget* innerTabWidget = new QTabWidget(parentWidget);
         innerTabWidget->setTabPosition(QTabWidget::North);
         innerTabWidget->setDocumentMode(true);
         innerTabWidget->setUsesScrollButtons(true);
-        ks::ui::StylePageTabsContentFrame(innerTabWidget);
+        ks::ui::StyleJoinedResultTabs(innerTabWidget, pageHeader);
         return innerTabWidget;
     };
 
@@ -3251,9 +3259,9 @@ void WindowDock::initializeUi()
         QVBoxLayout* pageLayout = new QVBoxLayout(m_sessionPage);
         pageLayout->setContentsMargins(4, 4, 4, 4);
         pageLayout->setSpacing(6);
-        makePageHeader(m_sessionPage, pageLayout, QStringLiteral("win32k GUI / Session"));
+        QWidget* pageHeader = makePageHeader(m_sessionPage, pageLayout, QStringLiteral("win32k GUI / Session"));
 
-        QTabWidget* innerTabWidget = makeInnerTabWidget(m_sessionPage);
+        QTabWidget* innerTabWidget = makeInnerTabWidget(m_sessionPage, pageHeader);
         pageLayout->addWidget(innerTabWidget, 1);
 
         innerTabWidget->addTab(
@@ -3332,9 +3340,9 @@ void WindowDock::initializeUi()
         QVBoxLayout* pageLayout = new QVBoxLayout(m_hotkeyHookPage);
         pageLayout->setContentsMargins(4, 4, 4, 4);
         pageLayout->setSpacing(6);
-        makePageHeader(m_hotkeyHookPage, pageLayout, QStringLiteral("Hotkey / Hook"));
+        QWidget* pageHeader = makePageHeader(m_hotkeyHookPage, pageLayout, QStringLiteral("Hotkey / Hook"));
 
-        QTabWidget* innerTabWidget = makeInnerTabWidget(m_hotkeyHookPage);
+        QTabWidget* innerTabWidget = makeInnerTabWidget(m_hotkeyHookPage, pageHeader);
         pageLayout->addWidget(innerTabWidget, 1);
 
         innerTabWidget->addTab(
@@ -3400,9 +3408,9 @@ void WindowDock::initializeUi()
         QVBoxLayout* pageLayout = new QVBoxLayout(m_clipboardPage);
         pageLayout->setContentsMargins(4, 4, 4, 4);
         pageLayout->setSpacing(6);
-        makePageHeader(m_clipboardPage, pageLayout, QStringLiteral("Clipboard / Message-Only"));
+        QWidget* pageHeader = makePageHeader(m_clipboardPage, pageLayout, QStringLiteral("Clipboard / Message-Only"));
 
-        QTabWidget* innerTabWidget = makeInnerTabWidget(m_clipboardPage);
+        QTabWidget* innerTabWidget = makeInnerTabWidget(m_clipboardPage, pageHeader);
         pageLayout->addWidget(innerTabWidget, 1);
 
         QWidget* group = makeTableGroup(
@@ -3424,9 +3432,9 @@ void WindowDock::initializeUi()
         QVBoxLayout* pageLayout = new QVBoxLayout(m_displayPage);
         pageLayout->setContentsMargins(4, 4, 4, 4);
         pageLayout->setSpacing(6);
-        makePageHeader(m_displayPage, pageLayout, QStringLiteral("GPU / Display / Watchdog"));
+        QWidget* pageHeader = makePageHeader(m_displayPage, pageLayout, QStringLiteral("GPU / Display / Watchdog"));
 
-        QTabWidget* innerTabWidget = makeInnerTabWidget(m_displayPage);
+        QTabWidget* innerTabWidget = makeInnerTabWidget(m_displayPage, pageHeader);
         pageLayout->addWidget(innerTabWidget, 1);
 
         innerTabWidget->addTab(

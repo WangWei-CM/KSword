@@ -159,6 +159,16 @@ HyperVMemoryPage::HyperVMemoryPage(QWidget* parent) : QWidget(parent)
     // 放不下时在本页内滚动。根布局建在壳的内容容器上。
     auto* root = new QVBoxLayout(ks::ui::EnablePageInnerScroll(this));
     root->setContentsMargins(0, 0, 0, 0);
+    // 归因图与采集摘要组成结果头，内部图表保持原绘制和高度，结果页签紧随其后。
+    auto* resultGroup = new QWidget(this);
+    auto* resultLayout = new QVBoxLayout(resultGroup);
+    resultLayout->setContentsMargins(0, 0, 0, 0);
+    resultLayout->setSpacing(0);
+    root->addWidget(resultGroup, 1);
+    auto* resultHeader = new QWidget(resultGroup);
+    auto* headerLayout = new QVBoxLayout(resultHeader);
+    headerLayout->setContentsMargins(0, 0, 0, 0);
+    headerLayout->setSpacing(6);
     // 采集与筛选共用一条轻工具带，归因图和证据页保持原有高度分配。
     auto* collectionToolbar = new QWidget(this); // 采集控制容器由内层布局重新接管。
     ks::ui::StylePrimaryToolbar(collectionToolbar);
@@ -172,13 +182,14 @@ HyperVMemoryPage::HyperVMemoryPage(QWidget* parent) : QWidget(parent)
     ks::ui::ApplyFlatButtonTheme(m_collect, ks::ui::FlatButtonTone::Accent);
     ks::ui::ApplyFlatButtonTheme(m_cancel, ks::ui::FlatButtonTone::Neutral);
     ks::ui::ApplyFlatButtonTheme(m_export, ks::ui::FlatButtonTone::Neutral);
-    root->addWidget(collectionToolbar);
+    headerLayout->addWidget(collectionToolbar);
     m_summary = new QLabel(this); m_summary->setWordWrap(true); m_summary->setTextFormat(Qt::PlainText);
-    m_summary->setTextInteractionFlags(Qt::TextSelectableByMouse); root->addWidget(m_summary);
-    m_progress = new QProgressBar(this); m_progress->setTextVisible(false); m_progress->setMaximumHeight(5); root->addWidget(m_progress);
-    m_chart = new MemoryAttributionChart(this); root->addWidget(m_chart);
+    m_summary->setTextInteractionFlags(Qt::TextSelectableByMouse); headerLayout->addWidget(m_summary);
+    m_progress = new QProgressBar(this); m_progress->setTextVisible(false); m_progress->setMaximumHeight(5); headerLayout->addWidget(m_progress);
+    m_chart = new MemoryAttributionChart(this); headerLayout->addWidget(m_chart);
+    resultLayout->addWidget(resultHeader);
     m_tabs = new QTabWidget(this);
-    ks::ui::StylePageTabsContentFrame(m_tabs);
+    ks::ui::StyleJoinedResultTabs(m_tabs, resultHeader);
     auto* split = new QSplitter(Qt::Vertical, m_tabs);
     m_partitions = table(split); m_detail = new ks::ui::StructuredFieldView(split);
 
@@ -194,7 +205,7 @@ HyperVMemoryPage::HyperVMemoryPage(QWidget* parent) : QWidget(parent)
     ks::ui::SetTableActionBarMode(m_sources, ks::ui::TableActionBarMode::None);
     m_evidence = new ks::ui::StructuredFieldView(m_tabs);
      m_tabs->addTab(m_evidence, {});
-    root->addWidget(m_tabs, 1);
+    resultLayout->addWidget(m_tabs, 1);
     connect(m_collect, &QPushButton::clicked, this, [this] { startCollection(); });
     connect(m_cancel, &QPushButton::clicked, this, [this] { if (m_job) { m_job->cancel.store(true); } });
     connect(m_export, &QPushButton::clicked, this, [this] { exportEvidence(); });

@@ -425,9 +425,16 @@ void ProcessDock::initializeCrossViewPage()
     // 返回：无。
     m_crossViewPage = new QWidget(this);
     m_crossViewPageLayout = new QVBoxLayout(m_crossViewPage);
-    // 与进程/线程工具带保持相同的页签接缝，结果区仍保留原始左右留白。
+    // 外围留白由进程主Tab统一处理，工具行和结果页签在局部分组内直接相连。
     m_crossViewPageLayout->setContentsMargins(6, 0, 6, 6);
     m_crossViewPageLayout->setSpacing(6);
+
+    // 来源矩阵保持原详情分割器，只取消查询工具行与结果Tab之间的重复间隔。
+    QWidget* const crossViewResults = new QWidget(m_crossViewPage);
+    auto* const crossViewResultsLayout = new QVBoxLayout(crossViewResults);
+    crossViewResultsLayout->setContentsMargins(0, 0, 0, 0);
+    crossViewResultsLayout->setSpacing(0);
+    m_crossViewPageLayout->addWidget(crossViewResults, 1);
 
     // 来源矩阵工具区保持一行，用轻底面分开查询条件与结果。
     QWidget* const crossViewToolbar = new QWidget(m_crossViewPage);
@@ -461,14 +468,14 @@ void ProcessDock::initializeCrossViewPage()
     m_crossViewTopLayout->addWidget(m_crossViewSearchEdit, 1);
     m_crossViewTopLayout->addWidget(m_crossViewStatusLabel);
     ks::ui::NormalizeToolbarRow(m_crossViewTopLayout);
-    m_crossViewPageLayout->addWidget(crossViewToolbar);
+    crossViewResultsLayout->addWidget(crossViewToolbar);
 
     QSplitter* splitter = new QSplitter(Qt::Vertical, m_crossViewPage);
-    m_crossViewPageLayout->addWidget(splitter, 1);
+    crossViewResultsLayout->addWidget(splitter, 1);
 
     QTabWidget* innerTabs = new QTabWidget(splitter);
-    // 分割器内的结果Tab只有留白；外围方角已经由进程主Tab承接，不再嵌套外圆。
-    ks::ui::StylePageTabsContentFrame(innerTabs);
+    // 结果表与整条页签等宽，工具行底部接上页签；下方详情仍由原分割器管理。
+    ks::ui::StyleJoinedResultTabs(innerTabs, crossViewToolbar);
     m_processCrossViewTable = new ks::ui::VisibleTableWidget(innerTabs);
     m_threadCrossViewTable = new ks::ui::VisibleTableWidget(innerTabs);
     // 两张来源矩阵均为独立 R0 证据，保留完整快照对比。

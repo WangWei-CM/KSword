@@ -71,6 +71,16 @@ struct MemoryConsumerEvidencePage::GpuJob {
 MemoryConsumerEvidencePage::MemoryConsumerEvidencePage(QWidget* parent) : QWidget(parent)
 {
     auto* layout = new QVBoxLayout(this);
+    // 采集动作和提示共同作为结果头；专业池分析页与日志编辑器保留自己的内部布局。
+    auto* resultGroup = new QWidget(this);
+    auto* resultLayout = new QVBoxLayout(resultGroup);
+    resultLayout->setContentsMargins(0, 0, 0, 0);
+    resultLayout->setSpacing(0);
+    layout->addWidget(resultGroup, 1);
+    auto* resultHeader = new QWidget(resultGroup);
+    auto* headerLayout = new QVBoxLayout(resultHeader);
+    headerLayout->setContentsMargins(8, 4, 8, 4);
+    headerLayout->setSpacing(4);
     auto* controls = new QHBoxLayout;
     m_gpuButton = new QPushButton(this);
     m_traceStart = new QPushButton(this);
@@ -85,11 +95,12 @@ MemoryConsumerEvidencePage::MemoryConsumerEvidencePage(QWidget* parent) : QWidge
     m_duration->setRange(5, 600); m_duration->setValue(30);
     controls->addWidget(m_gpuButton); controls->addWidget(m_traceStart);
     controls->addWidget(m_duration); controls->addWidget(m_traceStop);
-    controls->addStretch(); layout->addLayout(controls);
+    controls->addStretch(); headerLayout->addLayout(controls);
     ks::ui::NormalizeToolbarRow(controls);
-    m_note = new QLabel(this); m_note->setWordWrap(true); layout->addWidget(m_note);
+    m_note = new QLabel(this); m_note->setWordWrap(true); headerLayout->addWidget(m_note);
+    resultLayout->addWidget(resultHeader);
     m_detailTabs = new QTabWidget(this);
-    ks::ui::StylePageTabsContentFrame(m_detailTabs);
+    ks::ui::StyleJoinedResultTabs(m_detailTabs, resultHeader);
     m_detailTabs->setMinimumSize(0, 0);
     m_detailTabs->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Ignored);
     auto* gpuPage = new QWidget(m_detailTabs);
@@ -113,7 +124,7 @@ MemoryConsumerEvidencePage::MemoryConsumerEvidencePage(QWidget* parent) : QWidge
     // 命令输出按原文追加，容量控制由统一外壳负责。
     m_traceLog->setReadOnly(true);
     m_traceLog->setMaximumBlockCount(300); m_detailTabs->addTab(m_traceLog, {});
-    layout->addWidget(m_detailTabs, 1);
+    resultLayout->addWidget(m_detailTabs, 1);
     m_captureTimer = new QTimer(this); m_captureTimer->setSingleShot(true);
     connect(m_captureTimer, &QTimer::timeout, this, [this] { stopTrace(); });
     m_commandTimer = new QTimer(this); m_commandTimer->setSingleShot(true);
