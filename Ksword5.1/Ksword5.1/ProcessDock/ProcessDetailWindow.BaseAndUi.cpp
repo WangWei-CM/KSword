@@ -2556,6 +2556,8 @@ void ProcessDetailWindow::initializeUi()
 
 void ProcessDetailWindow::ensureTabContentInitialized(QWidget* const tab)
 {
+    // 所有惰性详情页共用完成入口；早退也准备已存在的可见页，构造/隐藏阶段只持弱引用。
+    const ks::ui::ScopedWidgetThemePreparation prepareMountedTab(tab);
     if (tab == nullptr || m_initializedTabs.contains(tab))
     {
         return;
@@ -2738,7 +2740,15 @@ void ProcessDetailWindow::requestInitialRefreshForCurrentTab()
     {
         return;
     }
+    const QPointer<ProcessDetailWindow> lifetime(this); // 首帧主题回调可以关闭详情根。
+    const QPointer<QTabWidget> requestedTabs(m_tabWidget); // 防止回调替换或销毁原导航宿主。
+    const QPointer<QWidget> requestedTab(currentTab); // 当前页身份在准备后仍须一致。
     ensureTabContentInitialized(currentTab);
+    if (lifetime == nullptr || requestedTabs == nullptr || requestedTab == nullptr
+        || requestedTabs.data() != m_tabWidget || requestedTabs->currentWidget() != requestedTab.data())
+    {
+        return;
+    }
 
     if (currentTab == m_threadTab)
     {
@@ -2880,6 +2890,8 @@ void ProcessDetailWindow::ensureEmbeddedHandleView()
     }
 
     QTimer::singleShot(kEmbeddedViewBuildFirstStageDelayMs, this, [this]() {
+        // 挂载、范围裁剪与显式 Show 全部结束后才准备最终分支，不给默认页提前换肤。
+        const ks::ui::ScopedWidgetThemePreparation prepareMountedTab(m_embeddedHandleTab);
         if (m_embeddedHandleDock != nullptr || m_embeddedHandleLayout == nullptr)
         {
             clearEmbeddedViewBuildPending(m_embeddedHandleTab);
@@ -2945,6 +2957,8 @@ void ProcessDetailWindow::ensureEmbeddedMemoryView()
     // QTimer::singleShot 传入 this 作为上下文对象：窗口先于定时器销毁时回调不会执行，
     // 与构造函数里首刷延迟的既有写法保持一致，无需额外的存活判断。
     QTimer::singleShot(kEmbeddedViewBuildFirstStageDelayMs, this, [this]() {
+        // 统一在本阶段退出时准备真实首屏；隐藏或已销毁宿主由共享弱引用守卫跳过。
+        const ks::ui::ScopedWidgetThemePreparation prepareMountedTab(m_embeddedMemoryTab);
         if (m_embeddedMemoryDock != nullptr || m_embeddedMemoryLayout == nullptr)
         {
             clearEmbeddedViewBuildPending(m_embeddedMemoryTab);
@@ -3003,6 +3017,8 @@ void ProcessDetailWindow::ensureEmbeddedNetworkView()
     }
 
     QTimer::singleShot(kEmbeddedViewBuildFirstStageDelayMs, this, [this]() {
+        // 连接范围会切换内层 Tab，完成 Scope 与 Show 后再准备当前分支的首次颜色。
+        const ks::ui::ScopedWidgetThemePreparation prepareMountedTab(m_embeddedNetworkTab);
         if (m_embeddedNetworkDock != nullptr || m_embeddedNetworkLayout == nullptr)
         {
             clearEmbeddedViewBuildPending(m_embeddedNetworkTab);
@@ -3076,6 +3092,8 @@ void ProcessDetailWindow::ensureEmbeddedWindowView()
     }
 
     QTimer::singleShot(kEmbeddedViewBuildFirstStageDelayMs, this, [this]() {
+        // 范围裁剪和挂载保持原流程，阶段结束仅对真实可见宿主消费待应用主题。
+        const ks::ui::ScopedWidgetThemePreparation prepareMountedTab(m_embeddedWindowTab);
         if (m_embeddedWindowDock != nullptr || m_embeddedWindowLayout == nullptr)
         {
             clearEmbeddedViewBuildPending(m_embeddedWindowTab);
@@ -6229,9 +6247,17 @@ void ProcessDetailWindow::initializeConnections()
     // - 进程详情窗口打开路径只构建 UI 和轻量文本；
     // - 这样用户能立即看到窗口，后台扫描不会同时挤占线程池与 UI 回填。
     connect(m_tabWidget, &QTabWidget::currentChanged, this, [this](const int tabIndex) {
-        if (m_tabWidget != nullptr)
+        const QPointer<ProcessDetailWindow> lifetime(this); // 统一准备允许主题回调关闭详情窗。
+        const QPointer<QTabWidget> requestedTabs(m_tabWidget); // 保留本次切页的真实导航宿主。
+        const QPointer<QWidget> requestedTab(requestedTabs != nullptr ? requestedTabs->widget(tabIndex) : nullptr);
+        if (requestedTabs != nullptr)
         {
-            ensureTabContentInitialized(m_tabWidget->widget(tabIndex));
+            ensureTabContentInitialized(requestedTab.data());
+        }
+        if (lifetime == nullptr || requestedTabs == nullptr || requestedTab == nullptr
+            || requestedTabs.data() != m_tabWidget || requestedTabs->currentWidget() != requestedTab.data())
+        {
+            return; // 析构或回调换页后不能再操作旧导航，也不能启动旧页首刷。
         }
         if (m_tabNavigationButtonGroup != nullptr)
         {

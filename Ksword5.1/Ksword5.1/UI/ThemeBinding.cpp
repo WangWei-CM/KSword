@@ -16,6 +16,8 @@
 #include <QTimer>
 #include <QVariant>
 #include <QWidget>
+#include <QStackedWidget>
+#include <QVector>
 
 #include <algorithm>
 #include <deque>
@@ -66,6 +68,7 @@ namespace
         void add(WidgetThemeBinding* binding);
         void schedule(WidgetThemeBinding* binding);
         void scheduleAll();
+        void applyPending(WidgetThemeBinding* binding); // 首帧入口消费同一登记项，不另建主题绑定。
 
     protected:
         // 应用调色板更新只排队刷新；各控件的局部 palette 事件由自己的绑定观察。
@@ -124,6 +127,16 @@ namespace
             m_palettePolicy = palettePolicy;
         }
 
+        // 首显与普通分片共用待刷新标记；同步首显后，旧队列节点只负责释放 membership。
+        void requestRefresh()
+        {
+            m_refreshPending = true;
+        }
+        bool takePendingRefresh()
+        {
+            return std::exchange(m_refreshPending, false);
+        }
+
         // apply 只在 GUI 线程调用；先复制函数，再执行可能销毁自身的样式更新。
         void apply()
         {
@@ -154,6 +167,7 @@ namespace
             }
             if (lifetime != nullptr)
             {
+                lifetime->m_hasApplied = true; // 首绘前只补尚未应用的绑定，不把后续换肤改成同步全树。
                 lifetime->m_applying = false;
                 if (lifetime->m_refreshRequested && lifetime->m_registry != nullptr)
                 {
@@ -167,6 +181,28 @@ namespace
         // 自身setStyleSheet的局部Palette重入不排队；真实语言/应用主题广播仍保留后续刷新。
         bool eventFilter(QObject* watched, QEvent* event) override
         {
+            // 完整挂载入口负责提前准备；动态创建的叶控件在首次 Paint 派发前补本地颜色。
+            // 初次 Show 不执行未知回调；已应用过的隐藏页重显时先消费待刷新颜色。
+            // Popup/Tooltip 保持既有延迟约束，常驻页面的换肤继续走分片队列。
+            const bool initialPaint = event != nullptr && event->type() == QEvent::Paint && !m_hasApplied;
+            const bool reshow = event != nullptr && event->type() == QEvent::Show && m_hasApplied;
+            if ((initialPaint || reshow)
+                && m_refreshPending && !m_applying && m_widget != nullptr && m_registry != nullptr
+                && m_widget->window()->windowType() != Qt::Popup
+                && m_widget->window()->windowType() != Qt::ToolTip)
+            {
+                const QPointer<QWidget> owner(m_widget); // 本地样式回调可能关闭所属控件。
+                const QPointer<WidgetThemeBinding> lifetime(this); // 也允许单独删除绑定而保留控件。
+                m_registry->applyPending(this);
+                if (lifetime.isNull())
+                {
+                    return owner.isNull();
+                }
+                if (owner.isNull())
+                {
+                    return true;
+                }
+            }
             if (m_registry != nullptr && event != nullptr &&
                 (event->type() == QEvent::ApplicationPaletteChange ||
                     event->type() == QEvent::LanguageChange ||
@@ -184,6 +220,8 @@ namespace
         ks::ui::ThemePalettePolicy m_palettePolicy; // 是否保留独立窗口的局部调色板。
         bool m_applying = false; // 禁止刷新过程中因自身样式事件递归调度。
         bool m_refreshRequested = false; // 嵌套循环消费的刷新在外层结束后重新排队。
+        bool m_refreshPending = false; // 首显或分片尚未消费的同一刷新请求。
+        bool m_hasApplied = false; // 首次完成后恢复正常分片，不在每次 Paint 执行主题函数。
     };
 
     // add 将对象放入唯一登记表，并安排首次刷新；不在控件构造期间同步执行样式函数。
@@ -205,6 +243,7 @@ namespace
         {
             return;
         }
+        binding->requestRefresh();
         // weakBinding 为当前对象的弱引用；重复事件只保留一次待刷新记录。
         const QPointer<WidgetThemeBinding> weakBinding(binding);
         if (!m_pendingMembership.contains(binding))
@@ -229,6 +268,15 @@ namespace
         }
     }
 
+    // 节点仍留在 FIFO 中去重；若之后到达新主题请求，该节点可消费新请求而不丢更新。
+    void ThemeBindingRegistry::applyPending(WidgetThemeBinding* binding)
+    {
+        if (binding != nullptr && binding->takePendingRefresh())
+        {
+            binding->apply();
+        }
+    }
+
     void ThemeBindingRegistry::drain()
     {
         // 尚未消费的子控件继续保持membership，父样式的PaletteChange不再将它们重复入队。
@@ -243,7 +291,7 @@ namespace
             if (binding != nullptr)
             {
                 m_pendingMembership.remove(binding.data());
-                binding->apply();
+                applyPending(binding.data());
             }
             // 不在同一次GUI回调里刷新全部页面，给输入、布局和绘制留出事件循环机会。
             // 单个业务回调仍必须自己有界；这里不能中断正在执行的setStyleSheet。
@@ -281,6 +329,61 @@ namespace
             }
         }
         return nullptr;
+    }
+
+    // 只收当前可显示分支和现成控件，不提前创建其它 Tab、独立窗口或 Popup。
+    void collectShownBranch(QWidget* widget, QVector<QPointer<QWidget>>& branch)
+    {
+        if (widget == nullptr)
+        {
+            return;
+        }
+        branch.append(widget);
+        const auto* stack = qobject_cast<QStackedWidget*>(widget); // 隐藏 Tab 不能进入首帧工作量。
+        for (QObject* object : widget->children())
+        {
+            auto* child = qobject_cast<QWidget*>(object); // 布局/模型 QObject 无需参与颜色准备。
+            if (child == nullptr || child->isWindow() || !child->isVisibleTo(widget)
+                || (stack != nullptr && child != stack->currentWidget()))
+            {
+                continue;
+            }
+            collectShownBranch(child, branch);
+        }
+    }
+}
+
+// 构造完成并建立最终父级后，由页面挂载/详情 Show 入口调用；仅消费已登记的局部主题。
+void ks::ui::PrepareWidgetThemeBindingsForShow(QWidget* scope)
+{
+    const QPointer<ThemeBindingRegistry> ownerRegistry(registry()); // 同时确认应用寿命与 GUI 线程。
+    if (ownerRegistry == nullptr || scope == nullptr || scope->thread() != QThread::currentThread()
+        || scope->window()->windowType() == Qt::Popup || scope->window()->windowType() == Qt::ToolTip)
+    {
+        return;
+    }
+    QVector<QPointer<QWidget>> branch; // 回调可析构或重挂控件，收集后全部通过弱引用探活。
+    collectShownBranch(scope, branch);
+    for (const QPointer<QWidget>& widget : branch)
+    {
+        if (widget != nullptr && ownerRegistry != nullptr)
+        {
+            ownerRegistry->applyPending(bindingForWidget(widget.data()));
+        }
+    }
+}
+
+ks::ui::ScopedWidgetThemePreparation::ScopedWidgetThemePreparation(QWidget* scope)
+    : m_scope(scope)
+{
+}
+
+ks::ui::ScopedWidgetThemePreparation::~ScopedWidgetThemePreparation()
+{
+    // 页面工厂已返回业务构造/挂载的所有步骤；构造期不可见与后台预建都保持原分片。
+    if (m_scope != nullptr && m_scope->thread() == QThread::currentThread() && m_scope->isVisible())
+    {
+        PrepareWidgetThemeBindingsForShow(m_scope.data());
     }
 }
 

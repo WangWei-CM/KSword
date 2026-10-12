@@ -99,7 +99,7 @@ namespace
         const QPointer<QAbstractItemView> guardedView(view);
         QTimer::singleShot(0, view, [guardedView]()
         {
-            if (guardedView.isNull()) return;
+            if (guardedView.isNull() || !guardedView->property(kPending).toBool()) return;
             guardedView->setProperty(kPending, false);
             const QVariant normalize = guardedView->property(kNormalizeHeader);
             ks::ui::ApplyTablePresentation(guardedView.data(), !normalize.isValid() || normalize.toBool());
@@ -117,9 +117,20 @@ namespace
             switch (event->type())
             {
             case QEvent::Polish:
-            case QEvent::Show:
                 schedulePresentation(qobject_cast<QAbstractItemView*>(source));
                 break;
+            case QEvent::Show:
+            {
+                // Show 到达时视图构造已完成；先统一 frame/grid/表头，避免先绘旧尺寸再跳变。
+                const QPointer<QAbstractItemView> view(qobject_cast<QAbstractItemView*>(source));
+                if (!supportedView(view.data()) || view->property(kApplying).toBool()) break;
+                view->setProperty(kPending, false); // 消费旧首次请求，旧计时回调不再重复改样式。
+                if (view.isNull()) return true;
+                const QVariant normalize = view->property(kNormalizeHeader);
+                ks::ui::ApplyTablePresentation(view.data(), !normalize.isValid() || normalize.toBool());
+                if (view.isNull()) return true;
+                break;
+            }
             case QEvent::StyleChange:
             case QEvent::FontChange:
             case QEvent::PaletteChange:

@@ -3,6 +3,7 @@
 #include "../UI/PrimaryPageStyle.h"
 #include "../UI/ToolbarMetrics.h"
 #include "../UI/FlatButtonTheme.h"
+#include "../UI/ThemeBinding.h"
 #include "../UI/FloatingScrollbars.h"
 #include "../../../shared/ui/KsPainterChart.h"
 #include "../UI/TableInteractionSupport.h"
@@ -7298,6 +7299,8 @@ void HardwareDock::initializePnpAcpiPciTab()
 
 void HardwareDock::ensureDiskMonitorTabInitialized()
 {
+    // 完成真实页面挂载后同步准备可见绑定；已初始化页重显也走同一个出口。
+    const ks::ui::ScopedWidgetThemePreparation themePreparation(m_diskMonitorHostPage);
     if (m_diskMonitorPage != nullptr || m_diskMonitorHostPage == nullptr)
     {
         return;
@@ -7329,6 +7332,8 @@ void HardwareDock::ensureDiskMonitorTabInitialized()
 
 void HardwareDock::ensureOtherDevicesTabInitialized()
 {
+    // 完成真实页面挂载后同步准备可见绑定；不提前构造隐藏设备页。
+    const ks::ui::ScopedWidgetThemePreparation themePreparation(m_otherDevicesHostPage);
     if (m_otherDevicesPage != nullptr || m_otherDevicesHostPage == nullptr)
     {
         return;

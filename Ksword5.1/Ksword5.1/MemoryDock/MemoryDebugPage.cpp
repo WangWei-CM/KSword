@@ -5,6 +5,7 @@
 #include "../UI/ToolbarMetrics.h"
 #include "../UI/PrimaryPageStyle.h"
 #include "../UI/FlatButtonTheme.h"
+#include "../UI/ThemeBinding.h"
 #include "../Internationalization/LanguageManager.h"
 
 #include <QComboBox>
@@ -134,6 +135,7 @@ namespace ks::ui
 
     void MemoryDebugPage::ensureView()
     {
+        const ScopedWidgetThemePreparation themePreparation(this); // 完成生产服务与视图挂载后准备首帧。
         if (view_ != nullptr)
         {
             return;

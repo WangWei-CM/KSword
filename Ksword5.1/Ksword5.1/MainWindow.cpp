@@ -5438,7 +5438,7 @@ MainWindow::MainWindow(
         m_pageNavigationBridge->setReady();
     }
 
-    // Dock 构造期间会 processEvents；此时才安排 R0 刷新，避免 0ms 回调提前返回后遗失。
+    // 完整 Dock/外观初始化后再安排 R0 刷新，避免早期回调看到尚未挂载的页面直接返回。
     // 已运行的服务和本轮新启动的服务复用同一入口，偏移仍按精确内核身份下发。
     startR0RuntimeConsumersAfterServiceStart();
 
@@ -10719,6 +10719,25 @@ void MainWindow::ensureDockContentInitialized(ads::CDockWidget* dockWidget)
         m_processWidget->refreshThemeVisuals();
     }
 
+    // 内容已经构造完成并挂到最终 ADS 父链，当前分支的待应用主题必须先于第一帧完成。
+    // 不泵事件、不禁绘整树；隐藏 Tab 和独立窗口仍由各自的 Show 入口准备。
+    const QPointer<MainWindow> windowLifetime(this); // 局部主题或布局回调可能关闭所属窗口。
+    const QPointer<QWidget> contentLifetime(realWidget);
+    const QPointer<ads::CDockWidget> dockLifetime(dockWidget);
+    ks::ui::PrepareWidgetThemeBindingsForShow(realWidget);
+    if (!windowLifetime || !contentLifetime || !dockLifetime)
+    {
+        return;
+    }
+    if (QLayout* contentLayout = realWidget->layout())
+    {
+        contentLayout->activate();
+    }
+    if (!windowLifetime || !contentLifetime || !dockLifetime)
+    {
+        return;
+    }
+
     // 真实内容挂载后继续继承 Dock 控件树的调色板：
     // - 主窗口背景改由根容器 paintEvent 绘制后，MainWindow 的 Window/Base 画刷只含主题纯色；
     // - 若在这里把该调色板显式复制给新内容，QAbstractScrollArea 等子控件会在首次挂载时刷出黑/白实底；
@@ -11299,12 +11318,17 @@ void MainWindow::initDockWidgets()
                 dockOut->setMinimumHeight(300);
                 dockOut->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
             }
-            connect(dockOut, &ads::CDockWidget::visibilityChanged, this, [this, dockOut](const bool visible)
+            const QPointer<ads::CDockWidget> guardedDock(dockOut); // 延迟可见通知不延长 Dock 寿命。
+            connect(dockOut, &ads::CDockWidget::visibilityChanged, this, [this, guardedDock](const bool visible)
                 {
                     if (visible)
                     {
-                        QTimer::singleShot(0, this, [this, dockOut]() {
-                            ensureDockContentInitialized(dockOut);
+                        QTimer::singleShot(0, this, [this, guardedDock]() {
+                            // 快速切走后不再构造旧的隐藏页；明确 focus/jump 仍走原同步入口。
+                            if (guardedDock != nullptr && guardedDock->isVisible())
+                            {
+                                ensureDockContentInitialized(guardedDock.data());
+                            }
                             });
                     }
                 });
