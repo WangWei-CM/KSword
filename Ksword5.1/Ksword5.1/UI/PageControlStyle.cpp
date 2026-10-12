@@ -219,6 +219,29 @@ namespace
             "QTabWidget[ksword_page_tabs_widget=\"true\"]::pane{"
             "border:0;border-radius:%3px;top:0px;background:%1;padding:%2px;}")
             .arg(background).arg(inset).arg(inset > 0 || joined ? 0 : kPageCornerRadius);
+        if (joined)
+        {
+            // 工具栏与Tab是一组，结果操作条和表格是下一组；只在两组之间保留6px。
+            // 不恢复左右/底部的pane内缩，结果外边界仍与整条Tab栏对齐。
+            QString separationEdge = QStringLiteral("top"); // 间隔跟随标签所在边，不改标签栏本身。
+            switch (tabs->tabPosition())
+            {
+            case QTabWidget::South:
+                separationEdge = QStringLiteral("bottom");
+                break;
+            case QTabWidget::West:
+                separationEdge = QStringLiteral("left");
+                break;
+            case QTabWidget::East:
+                separationEdge = QStringLiteral("right");
+                break;
+            default:
+                break;
+            }
+            rules += QStringLiteral(
+                "QTabWidget[ksword_page_tabs_widget=\"true\"]::pane{padding-%1:6px;}")
+                .arg(separationEdge);
+        }
         if (child && tabs->tabPosition() == QTabWidget::North)
         {
             // 子栏的层级缩进只作用于标签，不能把整页内容向右挤8px。
