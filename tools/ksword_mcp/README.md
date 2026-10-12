@@ -10,7 +10,7 @@
 python -m pip install -r tools\ksword_mcp\requirements.txt
 ```
 
-仅本次启动明确加 `--mcp` 的 GUI 会开启对象桥。如果主程序已有运行实例，先正常关闭该实例，再启动新实例，以免单实例跳转到未启用桥的旧实例：
+可从主程序顶部“设置 → MCP”即时启用或停止对象桥；默认关闭。“随程序启动”点击设置窗口底部“应用”后保存，下次启动生效。“取消”放弃待保存偏好和路径，本次启停是即时操作。也可用 `--mcp` 仅对本次启动启用桥。如果主程序已有运行实例，该参数不会改变旧实例的状态，应直接在旧实例的 MCP 设置页启用，或先正常关闭旧实例再启动：
 
 ```powershell
 $kswordProcess = Start-Process -FilePath '.\Ksword5.1\x64\Release\Ksword5.1.exe' -ArgumentList '--mcp' -PassThru
@@ -24,6 +24,8 @@ python tools\ksword_mcp\server.py --pid 12345
 ```
 
 GUI PID 每次重启可能变化，需要更新客户端参数。sidecar 不自动发现、启动或提权 GUI，也不调用驱动接口。首次 GUI 启动、切页和按钮所触发的业务行为仍与用户手动操作一致。
+
+MCP 设置页显示实际监听状态、当前 PID 和命名管道，可填写 Python 命令与 sidecar 脚本路径，并预览/复制下面两种客户端配置。预览使用当前输入，路径在点击“应用”后保存。主程序按标准 Release 位置自动寻找仓库中的 `tools/ksword_mcp/server.py`；安装位置不同或发行目录缺少 sidecar 时可手动选择。复制前会检查命令非空和脚本存在，但不会验证或安装 Python 依赖，也不会修改客户端全局配置。
 
 ## 客户端配置示例
 
@@ -84,7 +86,8 @@ args = ["C:/path/to/KSword/tools/ksword_mcp/server.py", "--pid", "12345"]
 
 ## 本地边界与超时
 
-- 唯一本地端点为 `\\.\pipe\ksword-mcp-{pid}`；GUI 只在显式 `--mcp` 启动时监听，退出时关闭。不会创建网络端口或永久服务。
+- 唯一本地端点为 `\\.\pipe\ksword-mcp-{pid}`；GUI 按 MCP 设置页的本次启停、已保存自动启动偏好或显式 `--mcp` 参数监听，退出时关闭。不会创建网络端口或永久服务。
+- 停止立即断开当前连接，并使旧对象 ID、模型 revision 与操作回执失效；再次启用会创建新的桥实例。客户端需重新获取 snapshot，不能重用停止前的 ID。通过 MCP 触发停止时，当前连接也可能在停止回执送达前断开，不应自动重试动作。
 - sidecar 用 `GetNamedPipeServerProcessId` 核验服务器进程与 `--pid` 一致，GUI 校验连接方身份及会话/权限边界。
 - 每个工具调用独立连接，一次发送、一帧回执。动作从不自动重试；超时可能发生在 GUI 已接受动作之后，调用方应先检查状态再决定下一步。
 - 请求上限 64 KiB，回执上限 2 MiB，包括末尾换行。UTF-8、JSON、schemaVersion、状态与 UUID 均严格验证。单次表格最多读取 2048 个单元格；GUI 另外限制每格 1024 个 UTF-16 单位、整片文本 131072 个单位，截断状态由原回执标示。

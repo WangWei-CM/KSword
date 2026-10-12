@@ -1,0 +1,312 @@
+#include "../Framework.h"
+#include "SettingsDock.h"
+#include "SettingsDock.Layout.h"
+#include "../UI/CodeEditorWidget.h"
+#include "../UI/FlatButtonTheme.h"
+#include "../UI/ThemeAccentIcon.h"
+#include "../UI/ThemeStatusRole.h"
+#include "../theme.h"
+
+#include <QApplication>
+#include <QCheckBox>
+#include <QClipboard>
+#include <QComboBox>
+#include <QCoreApplication>
+#include <QDir>
+#include <QFileDialog>
+#include <QFileInfo>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QLineEdit>
+#include <QPushButton>
+#include <QTabWidget>
+
+namespace
+{
+    // 返回当前安装位置对应的 sidecar；只检查约定落点，不递归扫描或运行脚本。
+    QString DefaultMcpSidecarPath()
+    {
+        const QDir executableDir(QCoreApplication::applicationDirPath()); // 当前 exe 所在目录。
+        const QStringList candidates{ // 发布目录与仓库标准 Release 目录的相对位置。
+            executableDir.filePath(QStringLiteral("tools/ksword_mcp/server.py")),
+            executableDir.filePath(QStringLiteral("../../../tools/ksword_mcp/server.py"))};
+        for (const QString& candidate : candidates)
+        {
+            const QFileInfo script(candidate); // 单个约定路径的存在性与文件身份。
+            if (script.isFile())
+            {
+                return QDir::cleanPath(script.absoluteFilePath());
+            }
+        }
+        return QString();
+    }
+
+    // 创建可换行说明；输入稳定语言键与中文回退，返回由父控件管理的标签。
+    QLabel* McpHint(QWidget* parent, const QString& key, const QString& text)
+    {
+        auto* label = ks::settings::ui::Label(parent, key, text); // 自适应说明正文。
+        label->setProperty("ksword_settings_hint", true);
+        label->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+        return label;
+    }
+
+    // 创建标准 SVG 图标动作；明确实底与语义角色，提示绑定同时用于可访问名称。
+    QPushButton* McpIconButton(QWidget* parent, const QString& name, const QString& icon,
+        const QString& key, const QString& hint, ks::ui::FlatButtonTone tone)
+    {
+        auto* button = new QPushButton(parent); // 保留 Qt 原生按钮动作与焦点语义。
+        button->setObjectName(name);
+        KswordTheme::ApplyStandardIconButtonMetrics(button);
+        ks::ui::ApplyFlatButtonTheme(button, tone, ks::ui::FlatButtonAppearance::Solid);
+        button->setIcon(ks::ui::MakeThemeButtonAccentIcon(QIcon(icon), QColor(), button));
+        ks::i18n::LanguageManager::instance().bindToolTip(button, key, hint);
+        button->setAccessibleName(ks::i18n::sourceText(hint));
+        return button;
+    }
+}
+
+// 从顶部“设置 → MCP”进入；设置正文独立滚动，配置预览保留自己的文本滚动。
+void SettingsDock::initializeMcpTab()
+{
+    m_mcpTab = new QWidget(m_tabWidget);
+    m_mcpTab->setObjectName(QStringLiteral("settings_mcp_page"));
+    auto* root = new QVBoxLayout(m_mcpTab); // 设置、预览和说明各自拥有明确高度。
+    ks::ui::StyleSecondaryContentLayout(root);
+    root->setContentsMargins(6, 6, 6, 6); // 页根等边留白只由这一层负责。
+    auto& language = ks::i18n::LanguageManager::instance(); // 共享热切换语言绑定。
+
+    auto* service = new QGroupBox(m_mcpTab); // 当前服务与下次启动偏好。
+    language.bindText(service, QStringLiteral("settings.mcp.service"), QStringLiteral("本地 MCP 服务"));
+    auto* serviceLayout = new QVBoxLayout(service);
+    serviceLayout->addWidget(McpHint(service, QStringLiteral("settings.mcp.service_hint"),
+        QStringLiteral("允许 MCP 客户端读取界面并触发操作。启停立即影响本次会话；自动启动选项点击“应用”后保存。")));
+    auto* serviceForm = ks::settings::ui::Form(serviceLayout, 128); // 自然高度状态行。
+    m_mcpStatusLabel = new QLabel(service);
+    m_mcpStatusLabel->setObjectName(QStringLiteral("mcp_service_status"));
+    serviceForm->addRow(ks::settings::ui::Label(service, QStringLiteral("settings.mcp.status"),
+        QStringLiteral("当前状态")), m_mcpStatusLabel);
+    auto* pid = new QLabel(QString::number(QCoreApplication::applicationPid()), service); // 本次进程 PID。
+    pid->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    serviceForm->addRow(ks::settings::ui::Label(service, QStringLiteral("settings.mcp.pid"),
+        QStringLiteral("进程 PID")), pid);
+    m_mcpEndpointLabel = new QLabel(service);
+    m_mcpEndpointLabel->setWordWrap(true);
+    m_mcpEndpointLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    m_mcpEndpointLabel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+    serviceForm->addRow(ks::settings::ui::Label(service, QStringLiteral("settings.mcp.endpoint"),
+        QStringLiteral("本地管道")), m_mcpEndpointLabel);
+
+    // 本次动作不会改写待保存偏好；停止会断开连接并取消尚未派发的界面动作。
+    auto* sessionRow = new QHBoxLayout(); // 同排等高的启停动作。
+    m_mcpStartButton = McpIconButton(service, QStringLiteral("mcp_service_start"),
+        QStringLiteral(":/Icon/process_start.svg"), QStringLiteral("settings.mcp.start"),
+        QStringLiteral("本次启用 MCP 服务"), ks::ui::FlatButtonTone::Accent);
+    m_mcpStopButton = McpIconButton(service, QStringLiteral("mcp_service_stop"),
+        QStringLiteral(":/Icon/process_stop.svg"), QStringLiteral("settings.mcp.stop"),
+        QStringLiteral("停止 MCP 服务并断开当前连接"), ks::ui::FlatButtonTone::Neutral);
+    sessionRow->addWidget(m_mcpStartButton);
+    sessionRow->addWidget(m_mcpStopButton);
+    sessionRow->addStretch(1);
+    serviceForm->addRow(ks::settings::ui::Label(service, QStringLiteral("settings.mcp.session"),
+        QStringLiteral("本次会话")), ks::settings::ui::ControlRow(sessionRow, service));
+    m_mcpAutoStartCheckBox = new QCheckBox(service);
+    m_mcpAutoStartCheckBox->setObjectName(QStringLiteral("mcp_auto_start"));
+    ks::settings::ui::ToggleRow(serviceForm, m_mcpAutoStartCheckBox,
+        QStringLiteral("settings.mcp.auto_start"), QStringLiteral("随程序启动"));
+    language.bindToolTip(m_mcpAutoStartCheckBox, QStringLiteral("settings.mcp.auto_start_hint"),
+        QStringLiteral("点击“应用”后，下次启动自动启用本地 MCP 服务；默认关闭。"));
+    m_mcpErrorLabel = McpHint(service, QStringLiteral("settings.mcp.error"), QString());
+    m_mcpErrorLabel->setTextFormat(Qt::PlainText);
+    m_mcpErrorLabel->setProperty("ksword_settings_hint", false); // 错误色由状态角色唯一拥有。
+    ks::ui::ApplyStatusRole(m_mcpErrorLabel, ks::ui::StatusRole::Error);
+    serviceLayout->addWidget(m_mcpErrorLabel);
+    ks::settings::ui::Section(service);
+
+    auto* client = new QGroupBox(m_mcpTab); // 路径只用于客户端配置预览。
+    language.bindText(client, QStringLiteral("settings.mcp.client"), QStringLiteral("客户端配置"));
+    auto* clientLayout = new QVBoxLayout(client);
+    clientLayout->addWidget(McpHint(client, QStringLiteral("settings.mcp.client_hint"),
+        QStringLiteral("使用已安装 MCP 依赖的 Python。配置包含当前 PID，程序重启后需重新复制。")));
+    auto* clientForm = ks::settings::ui::Form(clientLayout, 112); // 路径输入统一标签与行高。
+    m_mcpPythonCommandEdit = new QLineEdit(client);
+    m_mcpPythonCommandEdit->setObjectName(QStringLiteral("mcp_python_command"));
+    clientForm->addRow(ks::settings::ui::Label(client, QStringLiteral("settings.mcp.python"),
+        QStringLiteral("Python 命令")), m_mcpPythonCommandEdit);
+    language.bindToolTip(m_mcpPythonCommandEdit, QStringLiteral("settings.mcp.python_hint"),
+        QStringLiteral("填写 python 或 Python 可执行文件完整路径，不包含额外参数。"));
+    m_mcpSidecarPathEdit = new QLineEdit(client);
+    m_mcpSidecarPathEdit->setObjectName(QStringLiteral("mcp_sidecar_script_path"));
+    language.bindPlaceholder(m_mcpSidecarPathEdit, QStringLiteral("settings.mcp.script_placeholder"),
+        QStringLiteral("选择 tools/ksword_mcp/server.py"));
+    auto* pathRow = new QHBoxLayout(); // 路径伸缩，浏览动作固定为标准图标按钮。
+    auto* browse = McpIconButton(client, QStringLiteral("mcp_script_browse"),
+        QStringLiteral(":/Icon/settings_background_browse.svg"), QStringLiteral("settings.mcp.browse"),
+        QStringLiteral("选择 MCP sidecar 脚本"), ks::ui::FlatButtonTone::Neutral);
+    pathRow->addWidget(m_mcpSidecarPathEdit, 1);
+    pathRow->addWidget(browse);
+    clientForm->addRow(ks::settings::ui::Label(client, QStringLiteral("settings.mcp.script"),
+        QStringLiteral("Sidecar 脚本")), ks::settings::ui::ControlRow(pathRow, client));
+    m_mcpConfigFormatCombo = new QComboBox(client);
+    m_mcpConfigFormatCombo->setObjectName(QStringLiteral("mcp_config_format"));
+    m_mcpConfigFormatCombo->addItem(QStringLiteral("JSON"));
+    m_mcpConfigFormatCombo->addItem(QStringLiteral("TOML (Codex)"));
+    clientForm->addRow(ks::settings::ui::Label(client, QStringLiteral("settings.mcp.format"),
+        QStringLiteral("配置格式")), m_mcpConfigFormatCombo);
+    ks::settings::ui::Section(client);
+
+    // 共用自适应双栏；窄窗按服务、客户端顺序纵排，参数不会靠水平滚动隐藏。
+    auto* columns = ks::ui::CreateSecondaryColumns(service, client, m_mcpTab, 900, 1, 1);
+    auto* settingsScroll = ks::ui::CreateSecondaryFormScroll(columns, m_mcpTab); // 自然高参数滚动区。
+    root->addWidget(settingsScroll, 0);
+    auto* previewRow = new QHBoxLayout(); // 配置标题与复制动作固定在预览上方。
+    previewRow->addWidget(ks::settings::ui::Label(m_mcpTab, QStringLiteral("settings.mcp.preview"),
+        QStringLiteral("配置预览")), 1);
+    m_mcpCopyButton = McpIconButton(m_mcpTab, QStringLiteral("mcp_config_copy"),
+        QStringLiteral(":/Icon/codeeditor_copy.svg"), QStringLiteral("settings.mcp.copy"),
+        QStringLiteral("复制完整 MCP 客户端配置"), ks::ui::FlatButtonTone::Neutral);
+    previewRow->addWidget(m_mcpCopyButton);
+    ks::ui::NormalizeToolbarRow(previewRow);
+    root->addLayout(previewRow);
+    m_mcpConfigPreview = new CodeEditorWidget(m_mcpTab);
+    m_mcpConfigPreview->setObjectName(QStringLiteral("mcp_config_preview"));
+    m_mcpConfigPreview->setReadOnly(true);
+    m_mcpConfigPreview->setWordWrapEnabled(true);
+    m_mcpConfigPreview->setMinimumHeight(180);
+    root->addWidget(m_mcpConfigPreview, 1);
+    m_mcpConfigHintLabel = McpHint(m_mcpTab, QStringLiteral("settings.mcp.connection_hint"), QString());
+    root->addWidget(m_mcpConfigHintLabel);
+    m_tabWidget->addTab(m_mcpTab, QStringLiteral("MCP"));
+    language.bindTab(m_tabWidget, m_mcpTab, QStringLiteral("settings.tab.mcp"), QStringLiteral("MCP"));
+
+    // 所有持久化编辑复用“应用/取消”；预览格式与本次启停不产生待保存改动。
+    connect(m_mcpAutoStartCheckBox, &QCheckBox::toggled, this, [this]()
+    {
+        markPendingChanges(QStringLiteral("MCP 启动偏好变化"));
+    });
+    const auto pathChanged = [this]() // 两个路径字段共用预览与待保存更新。
+    {
+        refreshMcpClientConfiguration();
+        markPendingChanges(QStringLiteral("MCP 客户端路径变化"));
+    };
+    connect(m_mcpPythonCommandEdit, &QLineEdit::textChanged, this, pathChanged);
+    connect(m_mcpSidecarPathEdit, &QLineEdit::textChanged, this, pathChanged);
+    connect(m_mcpConfigFormatCombo, &QComboBox::currentIndexChanged,
+        this, &SettingsDock::refreshMcpClientConfiguration);
+    connect(m_mcpStartButton, &QPushButton::clicked, this, [this]()
+    {
+        emit mcpServiceEnabledRequested(true);
+    });
+    connect(m_mcpStopButton, &QPushButton::clicked, this, [this]()
+    {
+        emit mcpServiceEnabledRequested(false);
+    });
+    connect(browse, &QPushButton::clicked, this, [this]()
+    {
+        const QString path = QFileDialog::getOpenFileName(this, // 原生选择器，不套详情框架。
+            ks::i18n::sourceText(QStringLiteral("选择 MCP sidecar 脚本")),
+            m_mcpSidecarPathEdit->text(), QStringLiteral("Python (*.py)"));
+        if (!path.isEmpty())
+        {
+            m_mcpSidecarPathEdit->setText(QDir::cleanPath(path));
+        }
+    });
+    connect(m_mcpCopyButton, &QPushButton::clicked, this, [this]()
+    {
+        QApplication::clipboard()->setText(m_mcpConfigPreview->text()); // 复制唯一完整文档。
+    });
+    refreshMcpServiceState();
+}
+
+// 输入主窗口回填的真实状态；错误和值始终按普通文本显示，不解释为富文本。
+void SettingsDock::setMcpServiceState(bool running, const QString& endpoint, const QString& error)
+{
+    m_mcpServiceRunning = running;
+    m_mcpServiceEndpoint = endpoint;
+    m_mcpServiceError = error;
+    refreshMcpServiceState();
+}
+
+// 当前状态由监听器决定，自动启动复选框只描述下次启动偏好。
+void SettingsDock::refreshMcpServiceState()
+{
+    if (!m_mcpStatusLabel)
+    {
+        return;
+    }
+    m_mcpStatusLabel->setText(ks::i18n::sourceText(m_mcpServiceRunning
+        ? QStringLiteral("运行中") : (m_mcpServiceError.isEmpty()
+            ? QStringLiteral("已停止") : QStringLiteral("启动失败"))));
+    ks::ui::ApplyStatusRole(m_mcpStatusLabel, m_mcpServiceRunning
+        ? ks::ui::StatusRole::Success : (m_mcpServiceError.isEmpty()
+            ? ks::ui::StatusRole::Idle : ks::ui::StatusRole::Error));
+    const QString endpoint = m_mcpServiceEndpoint.isEmpty() // 尚未启用时也显示本次固定端点。
+        ? QStringLiteral("ksword-mcp-") + QString::number(QCoreApplication::applicationPid())
+        : m_mcpServiceEndpoint;
+    m_mcpEndpointLabel->setText(QStringLiteral("\\\\.\\pipe\\") + endpoint);
+    m_mcpErrorLabel->setText(m_mcpServiceError);
+    m_mcpErrorLabel->setVisible(!m_mcpServiceError.isEmpty());
+    m_mcpStartButton->setEnabled(!m_mcpServiceRunning);
+    m_mcpStopButton->setEnabled(m_mcpServiceRunning);
+}
+
+// 回填配置时自动发现脚本位置，不执行 Python；已有显式路径优先。
+void SettingsDock::applyMcpSettingsToUi(const ks::settings::AppearanceSettings& settings)
+{
+    m_mcpAutoStartCheckBox->setChecked(settings.mcpAutoStart);
+    m_mcpPythonCommandEdit->setText(settings.mcpPythonCommand);
+    m_mcpSidecarPathEdit->setText(settings.mcpSidecarScriptPath.isEmpty()
+        ? DefaultMcpSidecarPath() : settings.mcpSidecarScriptPath);
+    refreshMcpClientConfiguration();
+}
+
+// 只收集待应用字段；自动发现路径仍保存为空，以保留安装目录迁移能力。
+void SettingsDock::collectMcpSettingsFromUi(ks::settings::AppearanceSettings& settings) const
+{
+    settings.mcpAutoStart = m_mcpAutoStartCheckBox->isChecked();
+    settings.mcpPythonCommand = m_mcpPythonCommandEdit->text().trimmed();
+    const QString path = QDir::fromNativeSeparators(m_mcpSidecarPathEdit->text().trimmed()); // 规范路径。
+    settings.mcpSidecarScriptPath = path == DefaultMcpSidecarPath() ? QString() : path;
+}
+
+// 配置唯一文档来自当前输入和当前 PID；JSON 转义同时用于 TOML 基础字符串。
+void SettingsDock::refreshMcpClientConfiguration()
+{
+    if (!m_mcpConfigPreview)
+    {
+        return;
+    }
+    const QString command = m_mcpPythonCommandEdit->text().trimmed(); // 一个命令，无 shell 拼接。
+    const QString path = m_mcpSidecarPathEdit->text().trimmed(); // 用户明确输入的脚本位置。
+    const QString script = path.isEmpty() ? QString() // 相对路径也按当前位置生成绝对路径。
+        : QDir::fromNativeSeparators(QFileInfo(path).absoluteFilePath());
+    const QJsonArray args{script, QStringLiteral("--pid"),
+        QString::number(QCoreApplication::applicationPid())}; // 本次 GUI 的真实进程身份。
+    QString configuration; // 预览、复制与编辑器导出的同一规范正文。
+    if (m_mcpConfigFormatCombo->currentIndex() == 0)
+    {
+        const QJsonObject server{{QStringLiteral("command"), command}, {QStringLiteral("args"), args}};
+        const QJsonObject document{{QStringLiteral("mcpServers"),
+            QJsonObject{{QStringLiteral("ksword"), server}}}};
+        configuration = QString::fromUtf8(QJsonDocument(document).toJson(QJsonDocument::Indented));
+    }
+    else
+    {
+        const QByteArray quotedCommand = QJsonDocument(QJsonArray{command}) // 保留引号与反斜线转义。
+            .toJson(QJsonDocument::Compact).mid(1).chopped(1);
+        configuration = QStringLiteral("[mcp_servers.ksword]\ncommand = %1\nargs = %2\n")
+            .arg(QString::fromUtf8(quotedCommand),
+                QString::fromUtf8(QJsonDocument(args).toJson(QJsonDocument::Compact)));
+    }
+    if (m_mcpConfigPreview->text() != configuration)
+    {
+        m_mcpConfigPreview->setRawText(configuration);
+    }
+    const bool usable = !command.isEmpty() && QFileInfo(script).isFile(); // 不声称已安装 Python 依赖。
+    m_mcpCopyButton->setEnabled(usable);
+    m_mcpConfigHintLabel->setText(ks::i18n::sourceText(usable
+        ? QStringLiteral("仅限本机、同用户、同会话与匹配权限的客户端。路径点击“应用”后保存；主程序不会自动安装依赖。")
+        : QStringLiteral("请填写 Python 命令并选择存在的 sidecar 脚本，再复制配置。")));
+    ks::ui::ApplyStatusRole(m_mcpConfigHintLabel,
+        usable ? ks::ui::StatusRole::Idle : ks::ui::StatusRole::Warning);
+}

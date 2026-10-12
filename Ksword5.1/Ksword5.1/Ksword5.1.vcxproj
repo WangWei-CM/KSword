@@ -276,6 +276,7 @@
     <ClCompile Include="KernelDock\KernelThreadAuditTab.cpp" />
     <ClCompile Include="KernelDock\KernelThreadAuditTab.Snapshot.cpp" />
     <ClCompile Include="MainWindow.cpp" />
+    <ClCompile Include="MainWindow.Mcp.cpp" />
     <ClCompile Include="MainWindow.Hvm.cpp" />
     <ClCompile Include="MiscDock\BootEditor\BootEditorTab.Actions.cpp" />
     <ClCompile Include="MiscDock\ApplicationControlPage.cpp" />
@@ -479,6 +480,7 @@
     <ClCompile Include="Internationalization\LanguageManager.cpp" />
     <ClCompile Include="SettingsDock\AppearanceSettings.cpp" />
     <ClCompile Include="SettingsDock\SettingsDock.OnlineScan.cpp" />
+    <ClCompile Include="SettingsDock\SettingsDock.Mcp.cpp" />
     <ClCompile Include="SettingsDock\SettingsDock.Bugcheck.cpp" />
     <ClCompile Include="SettingsDock\SettingsDock.cpp" />
     <ClCompile Include="SettingsDock\SettingsDock.Appearance.cpp" />

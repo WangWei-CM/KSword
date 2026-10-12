@@ -16,6 +16,7 @@ class QSpinBox;
 class QTabWidget;
 class QToolButton;
 class QVBoxLayout;
+class CodeEditorWidget;
 
 namespace ks::ui
 {
@@ -47,6 +48,9 @@ public:
     // showLanguageSettingsTab 作用：切换到“语言”页签，供欢迎页快捷入口调用。
     void showLanguageSettingsTab();
 
+    // 输入真实监听状态、端点与错误；主窗口在打开设置或启停后调用，不保存偏好。
+    void setMcpServiceState(bool running, const QString& endpoint, const QString& error);
+
 protected:
     void changeEvent(QEvent* event) override;
 
@@ -60,6 +64,9 @@ signals:
 
     // pendingChangesChanged 作用：同步对话框固定“应用”按钮的可用状态。
     void pendingChangesChanged(bool hasPendingChanges);
+
+    // 用户请求本次会话启停；主窗口处理后回填真实状态，取消设置不回滚此即时动作。
+    void mcpServiceEnabledRequested(bool enabled);
 
     // bugcheckDiagnosticsAutoInstallChanged 作用：通知主窗口更新本次已加载配置与页面入口显示状态。
     void bugcheckDiagnosticsAutoInstallChanged(bool enabled);
@@ -100,6 +107,13 @@ private:
     // 调用方式：initializeUi 后、读取配置前调用。
     // 返回：无。
     void initializeOnlineScanTab();
+
+    // MCP 设置页复用二级设置布局；配置回填、收集与预览分别接入现有保存流程。
+    void initializeMcpTab();
+    void applyMcpSettingsToUi(const ks::settings::AppearanceSettings& settings);
+    void collectMcpSettingsFromUi(ks::settings::AppearanceSettings& settings) const;
+    void refreshMcpServiceState(); // 根据最近的真实状态刷新文案和启停按钮。
+    void refreshMcpClientConfiguration(); // 仅更新当前 PID 的配置预览，不运行脚本。
 
     // initializeBugcheckDiagnosticsControls 作用：在“功能”标签追加配置化蓝屏诊断的三种操作。
     // 调用方式：initializeFeaturesTab 创建完已有分组后调用。
@@ -271,6 +285,24 @@ private:
 
     // m_onlineScanTab 作用：在线扫描 API Key 设置页 QWidget 容器。
     QWidget* m_onlineScanTab = nullptr;
+
+    // MCP 页保持原控件身份；运行状态与待应用偏好分开保存。
+    QWidget* m_mcpTab = nullptr; // 设置窗口中的 MCP 分类页。
+    QCheckBox* m_mcpAutoStartCheckBox = nullptr; // 待保存的自动启动偏好。
+    QLineEdit* m_mcpPythonCommandEdit = nullptr; // 客户端 Python 命令或可执行文件路径。
+    QLineEdit* m_mcpSidecarPathEdit = nullptr; // 客户端 sidecar 脚本路径。
+    QComboBox* m_mcpConfigFormatCombo = nullptr; // JSON/TOML 预览格式，不参与保存。
+    QLabel* m_mcpStatusLabel = nullptr; // 实际监听状态，不根据自动启动偏好推断。
+    QLabel* m_mcpEndpointLabel = nullptr; // 当前进程的本地管道名。
+    QLabel* m_mcpErrorLabel = nullptr; // 最近一次启动失败原因。
+    QLabel* m_mcpConfigHintLabel = nullptr; // 路径与权限的连接说明。
+    QPushButton* m_mcpStartButton = nullptr; // 本次启用动作。
+    QPushButton* m_mcpStopButton = nullptr; // 本次停止动作。
+    QPushButton* m_mcpCopyButton = nullptr; // 复制完整客户端配置。
+    CodeEditorWidget* m_mcpConfigPreview = nullptr; // 配置规范文本的唯一文档。
+    bool m_mcpServiceRunning = false; // 主窗口回填的真实监听状态。
+    QString m_mcpServiceEndpoint; // 当前 PID 端点的值快照。
+    QString m_mcpServiceError; // 最近一次监听失败的值快照。
 
     // m_themeButtonGroup 作用：三种主题按钮的互斥分组。
     QButtonGroup* m_themeButtonGroup = nullptr;

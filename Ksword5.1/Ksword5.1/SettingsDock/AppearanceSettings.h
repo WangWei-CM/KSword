@@ -126,6 +126,10 @@ namespace ks::settings
         bool autoRequestAdminOnStartup = true;
         bool startupAutoInstallR0Driver = false;
         bool preventMultipleInstances = true;
+        // MCP 只监听本地管道；启动偏好与客户端路径不改变本次会话的启停状态。
+        bool mcpAutoStart = false; // 下次启动时是否自动开放本地对象桥。
+        QString mcpPythonCommand = QStringLiteral("python"); // MCP 客户端使用的 Python 命令。
+        QString mcpSidecarScriptPath; // 留空时根据当前程序位置寻找随源码提供的 sidecar。
         double startupWindowScaleFactor = 1.0;
         bool startupScaleRecommendPromptDisabled = false;
         bool unlockerShellContextMenuEnabled = false;

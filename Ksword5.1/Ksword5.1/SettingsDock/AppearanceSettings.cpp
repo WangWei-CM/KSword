@@ -406,6 +406,10 @@ namespace
         defaultSettings.autoRequestAdminOnStartup = true;
         defaultSettings.startupAutoInstallR0Driver = false;
         defaultSettings.preventMultipleInstances = true;
+        // MCP 默认关闭；路径留空以便安装位置变化后重新发现 sidecar。
+        defaultSettings.mcpAutoStart = false;
+        defaultSettings.mcpPythonCommand = QStringLiteral("python");
+        defaultSettings.mcpSidecarScriptPath.clear();
         defaultSettings.startupWindowScaleFactor = 1.0;
         defaultSettings.startupScaleRecommendPromptDisabled = false;
         defaultSettings.unlockerShellContextMenuEnabled = false;
@@ -746,6 +750,14 @@ ks::settings::AppearanceSettings ks::settings::loadAppearanceSettings()
     loadedSettings.preventMultipleInstances = rootObject.value(QStringLiteral("prevent_multiple_instances"))
         .toBool(loadedSettings.preventMultipleInstances);
 
+    // 读取 MCP 启动偏好和客户端路径；旧配置保持关闭，路径不作为可执行操作。
+    loadedSettings.mcpAutoStart = rootObject.value(QStringLiteral("mcp_auto_start"))
+        .toBool(loadedSettings.mcpAutoStart);
+    loadedSettings.mcpPythonCommand = rootObject.value(QStringLiteral("mcp_python_command"))
+        .toString(loadedSettings.mcpPythonCommand).trimmed();
+    loadedSettings.mcpSidecarScriptPath = rootObject.value(QStringLiteral("mcp_sidecar_script_path"))
+        .toString().trimmed();
+
     // startupWindowScaleFactor 作用：读取“启动窗口缩放因子”，兼容旧字段 window_scale_factor。
     double rawWindowScaleFactor = loadedSettings.startupWindowScaleFactor;
     if (rootObject.contains(QStringLiteral("startup_window_scale_factor")))
@@ -966,6 +978,10 @@ bool ks::settings::saveAppearanceSettings(const AppearanceSettings& settings, QS
     rootObject.insert(QStringLiteral("startup_auto_request_admin"), settings.autoRequestAdminOnStartup);
     rootObject.insert(QStringLiteral("startup_auto_install_r0_driver"), settings.startupAutoInstallR0Driver);
     rootObject.insert(QStringLiteral("prevent_multiple_instances"), settings.preventMultipleInstances);
+    // 客户端路径只生成可复制配置，不由主程序启动 Python 或修改客户端设置。
+    rootObject.insert(QStringLiteral("mcp_auto_start"), settings.mcpAutoStart);
+    rootObject.insert(QStringLiteral("mcp_python_command"), settings.mcpPythonCommand.trimmed());
+    rootObject.insert(QStringLiteral("mcp_sidecar_script_path"), settings.mcpSidecarScriptPath.trimmed());
     rootObject.insert(
         QStringLiteral("startup_window_scale_factor"),
         clampWindowScaleFactorInternal(settings.startupWindowScaleFactor));

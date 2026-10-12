@@ -165,6 +165,9 @@ signals:
     // r0DriverServiceStarted：R0 服务确认启动后通知等待中的功能重试其只读查询。
     void r0DriverServiceStarted();
 
+    // 本地 MCP 监听状态变化；所有打开的设置页共用真实状态与错误快照。
+    void mcpServiceStateChanged(bool running, const QString& endpoint, const QString& error);
+
 protected:
     // eventFilter 作用：
     // - 监听 ADS 浮动 Dock 窗口的显示与尺寸变化；
@@ -395,6 +398,7 @@ private:
     // - 作用：从顶部菜单栏打开设置内容，替代主 Dock Tab 中的“设置”页签。
     // - showLanguageTab=true 时直接定位到语言设置页。
     void showSettingsPanelFromMenu(bool showLanguageTab = false);
+    void setMcpServiceEnabled(bool enabled); // 本次启停，不改自动启动偏好或网络配置。
     void toggleLogOutputWindow();
     void persistLogOutputWindowGeometry();
     void restoreLogOutputWindowGeometry();
@@ -737,6 +741,7 @@ private:
     ks::ui::GlobalUiSearchController* m_globalUiSearchController = nullptr; // m_globalUiSearchController：标题栏全局页面搜索控制器。
     ks::ui::PageNavigationBridge* m_pageNavigationBridge = nullptr; // 不在主程序增加导航按钮。
     ks::ui::McpLocalBridge* m_mcpLocalBridge = nullptr; // 在页面及驱动后端拆除前关闭。
+    QString m_mcpServiceError; // 最近一次启动失败，设置页可重试并清除此值。
     ks::ui::CommandExecutionPopup* m_commandExecutionPopup = nullptr; // m_commandExecutionPopup：标题栏 CMD 选项弹层。
     bool m_windowPinned = false;                        // m_windowPinned：主窗口当前是否置顶。
     bool m_captureProtectionEnabled = false;            // m_captureProtectionEnabled：主窗口当前是否启用截屏屏蔽。

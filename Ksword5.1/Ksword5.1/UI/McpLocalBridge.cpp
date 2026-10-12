@@ -184,7 +184,14 @@ namespace ks::ui
             return false;
         }
         m_host->setProperty("ksword_mcp_endpoint", m_endpoint);
+        m_lastError.clear(); // 重试成功后不保留旧错误。
         return true;
+    }
+
+    // 不根据启动参数或配置推断运行状态，只查询当前管道监听器。
+    bool McpLocalBridge::isListening() const
+    {
+        return !m_closed && m_server->isListening();
     }
 
     void McpLocalBridge::close()

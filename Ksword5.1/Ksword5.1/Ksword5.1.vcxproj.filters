@@ -137,6 +137,9 @@
     <ClCompile Include="MainWindow.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="MainWindow.Mcp.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="MainWindow.Hvm.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -960,6 +963,9 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="SettingsDock\SettingsDock.OnlineScan.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="SettingsDock\SettingsDock.Mcp.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="SettingsDock\SettingsDock.Bugcheck.cpp">

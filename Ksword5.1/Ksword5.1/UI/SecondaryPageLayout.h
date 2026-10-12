@@ -34,4 +34,8 @@ namespace ks::ui
     QWidget* CreateSecondaryColumns(QWidget* primary, QWidget* secondary,
         QWidget* parent = nullptr, int breakpoint = 900,
         int primaryStretch = 3, int secondaryStretch = 2);
+
+    // 自然高度表单滚动区；宽窗不占用空白，窄窗允许压缩并独立滚动，结果保留自身高度。
+    // content 的所有权交给返回控件；只观察明确的表单宿主，不进入专业编辑器子树。
+    QWidget* CreateSecondaryFormScroll(QWidget* content, QWidget* parent = nullptr);
 }

@@ -13,6 +13,7 @@
 #include <QLabel>
 #include <QPointer>
 #include <QPushButton>
+#include <QScrollArea>
 #include <QToolButton>
 #include <QStackedWidget>
 #include <QTabBar>
@@ -110,6 +111,68 @@ namespace
         }
     }
 
+    // 表单滚动区的建议高度来自真实内容；伸缩空白交给同页结果或预览。
+    class SecondaryFormScroll final : public QScrollArea
+    {
+    public:
+        SecondaryFormScroll(QWidget* content, QWidget* parent)
+            : QScrollArea(parent)
+        {
+            setWidgetResizable(true);
+            setFrameShape(QFrame::NoFrame);
+            setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+            setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Maximum);
+            content->setMinimumWidth(0);
+            setWidget(content);
+            content->installEventFilter(this);
+            viewport()->installEventFilter(this);
+        }
+
+        // 布局按当前宽度测量换行高度；不把表单区拉满窗口，也不固定字段行高。
+        QSize sizeHint() const override
+        {
+            QSize hint = QScrollArea::sizeHint(); // 保留原视口的横向建议。
+            if (widget())
+            {
+                QLayout* body = widget()->layout(); // 明确表单根布局，不扫描全部后代。
+                const int measured = body && body->hasHeightForWidth()
+                    ? body->totalHeightForWidth(std::max(1, viewport()->width()))
+                    : widget()->sizeHint().height();
+                hint.setHeight(std::max(0, measured) + frameWidth() * 2);
+            }
+            return hint;
+        }
+
+    protected:
+        // 尺寸、字体与分栏变化合并更新建议高度；值未变化时不反复触发布局。
+        bool eventFilter(QObject* watched, QEvent* event) override
+        {
+            if (event->type() == QEvent::Resize || event->type() == QEvent::LayoutRequest
+                || event->type() == QEvent::FontChange || event->type() == QEvent::Show)
+            {
+                if (!m_pending)
+                {
+                    m_pending = true;
+                    QTimer::singleShot(0, this, [this]()
+                    {
+                        m_pending = false;
+                        const QSize hint = sizeHint(); // 最新宽度对应的自然内容高度。
+                        if (hint != m_lastHint)
+                        {
+                            m_lastHint = hint;
+                            updateGeometry();
+                        }
+                    });
+                }
+            }
+            return QScrollArea::eventFilter(watched, event);
+        }
+
+    private:
+        bool m_pending = false; // 合并同一轮事件中的布局变化。
+        QSize m_lastHint; // 避免没有真实高度变化时循环安排布局。
+    };
+
     // 双栏只在容器宽度跨阈值时重新排列，避免每次内容刷新都重建表单。
     class SecondaryColumns final : public QWidget
     {
@@ -198,6 +261,12 @@ namespace
 
 namespace ks::ui
 {
+    // 仅供明确的表单/预览混合页调用，普通整页设置滚动区仍保留原行为。
+    QWidget* CreateSecondaryFormScroll(QWidget* content, QWidget* parent)
+    {
+        return content ? new SecondaryFormScroll(content, parent) : nullptr;
+    }
+
     void StyleSecondaryWindow(QWidget* window)
     {
         if (window == nullptr || window->property("ksword_secondary_window").toBool())

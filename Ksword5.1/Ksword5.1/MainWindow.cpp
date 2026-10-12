@@ -5472,63 +5472,11 @@ MainWindow::MainWindow(
         QStringLiteral("main.startup.progress.main_window_ready"),
         QStringLiteral("即将完成..."));
 
-    // 只在当前启动参数显式包含 --mcp 时开放本地桥，目录读取不初始化全部页面。
-    if (QCoreApplication::arguments().contains(QStringLiteral("--mcp")))
+    // 显式参数或已保存偏好启用本地桥；同一启停入口也供设置页使用。
+    if (QCoreApplication::arguments().contains(QStringLiteral("--mcp"))
+        || m_currentAppearanceSettings.mcpAutoStart)
     {
-        m_mcpLocalBridge = new ks::ui::McpLocalBridge(this, [this]()
-        {
-            QJsonArray pages; // 当前主程序已登记的一级 Dock 目录。
-            for (ads::CDockWidget* dock : collectSearchableDockWidgets())
-            {
-                if (!dock)
-                {
-                    continue;
-                }
-                const QString id = dock->objectName(); // 原布局恢复使用的稳定英文键。
-                const bool initialized = !dock->property("ks_lazy_key").isValid()
-                    || dock->property("ks_lazy_initialized").toBool();
-                pages.append(QJsonObject{{QStringLiteral("id"), id},
-                    {QStringLiteral("title"), dock->windowTitle()},
-                    {QStringLiteral("initialized"), initialized}});
-            }
-            return pages;
-        }, [this](const QString& pageId) -> QWidget*
-        {
-            // 仅允许目录中的 Dock，导航继续复用已有的懒加载/置前链。
-            for (ads::CDockWidget* dock : collectSearchableDockWidgets())
-            {
-                if (dock && dock->objectName() == pageId)
-                {
-                    if (dock->property("ks_lazy_initializing").toBool())
-                    {
-                        return nullptr; // 重入时不把尚未完成的占位页登记为可操作内容。
-                    }
-                    QPointer<ads::CDockWidget> guardedDock(dock); // 初始化期间允许事件循环重入。
-                    activateDockForSearchNavigation(dock);
-                    if (!guardedDock || (guardedDock->property("ks_lazy_key").isValid()
-                        && !guardedDock->property("ks_lazy_initialized").toBool()))
-                    {
-                        return nullptr; // 初始化失败或尚未完成时必须返回 page_unavailable。
-                    }
-                    return guardedDock->widget();
-                }
-            }
-            return nullptr;
-        });
-        ks::ui::registerMcpHexCanvasAdapter(m_mcpLocalBridge); // 自绘画布只读查询共用扩展注册表。
-        kLogEvent mcpEvent; // 本次启动桥的统一诊断事件，不包含用户字段值。
-        const bool started = m_mcpLocalBridge->start();
-        const QString diagnostic = started
-            ? ks::i18n::sourceText(QStringLiteral("本地 MCP 桥已启用：%1")).arg(m_mcpLocalBridge->endpoint())
-            : ks::i18n::sourceText(QStringLiteral("本地 MCP 桥启动失败：%1")).arg(m_mcpLocalBridge->lastError());
-        if (started)
-        {
-            info << mcpEvent << diagnostic.toUtf8().toStdString() << eol;
-        }
-        else
-        {
-            warn << mcpEvent << diagnostic.toUtf8().toStdString() << eol;
-        }
+        setMcpServiceEnabled(true);
     }
 }
 
@@ -7988,6 +7936,13 @@ void MainWindow::showSettingsPanelFromMenu(bool showLanguageTab)
 
     // 每页内容自己滚动，导航和底部操作留在原位；每次打开仍读取当前配置。
     auto* settingsPanel = new SettingsDock(&settingsDialog);
+    // 本次会话状态独立于设置的应用/取消；多个设置窗口也接收同一状态源。
+    connect(settingsPanel, &SettingsDock::mcpServiceEnabledRequested,
+        this, &MainWindow::setMcpServiceEnabled);
+    connect(this, &MainWindow::mcpServiceStateChanged,
+        settingsPanel, &SettingsDock::setMcpServiceState);
+    settingsPanel->setMcpServiceState(m_mcpLocalBridge && m_mcpLocalBridge->isListening(),
+        m_mcpLocalBridge ? m_mcpLocalBridge->endpoint() : QString(), m_mcpServiceError);
     if (showLanguageTab)
     {
         settingsPanel->showLanguageSettingsTab();

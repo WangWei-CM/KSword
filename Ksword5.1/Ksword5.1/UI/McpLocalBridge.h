@@ -22,6 +22,7 @@ namespace ks::ui
 
         // 监听同用户的当前 PID 管道；失败保留 lastError，不修改网络或全局配置。
         bool start();
+        bool isListening() const; // 返回实际监听状态，供设置页显示与幂等启停判断。
         void close(); // 停止连接并使排队的 GUI 动作失效，支持重复调用。
         QString endpoint() const; // 返回当前实例的本地管道名。
         QString lastError() const; // 返回启动失败的诊断文本，仅供日志/诊断使用。

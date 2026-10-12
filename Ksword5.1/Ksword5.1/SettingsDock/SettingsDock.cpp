@@ -218,6 +218,7 @@ SettingsDock::SettingsDock(QWidget* parent)
     initializeStartupTab();
     initializeFeaturesTab();
     initializeOnlineScanTab();
+    initializeMcpTab();
     bindAppearanceSignals();
     loadSettingsFromJson();
 
@@ -240,6 +241,8 @@ void SettingsDock::changeEvent(QEvent* event)
     {
         updateSystemDefaultFontItemText();
         refreshBugcheckDiagnosticsStatusText();
+        refreshMcpServiceState();
+        refreshMcpClientConfiguration();
         updateApplyButtonState();
     }
     if (event->type() == QEvent::ApplicationFontChange)
@@ -506,6 +509,9 @@ void SettingsDock::loadSettingsFromJson()
 void SettingsDock::applySettingsToUi(const ks::settings::AppearanceSettings& settings)
 {
     m_isApplyingUiState = true;
+
+    // MCP 回填沿用加载保护，不能把自动发现的路径误标成用户修改。
+    applyMcpSettingsToUi(settings);
 
     if (m_languageCombo != nullptr)
     {
@@ -824,6 +830,7 @@ ks::settings::AppearanceSettings SettingsDock::collectSettingsFromUi() const
         && m_startupAutoInstallR0DriverCheckBox->isChecked();
     collectedSettings.preventMultipleInstances =
         (m_preventMultipleInstancesCheckBox == nullptr) || m_preventMultipleInstancesCheckBox->isChecked();
+    collectMcpSettingsFromUi(collectedSettings);
     collectedSettings.startupWindowScaleFactor = parseWindowScaleFactorFromUi();
     // 该开关来自启动前弹窗，不在设置页编辑；这里保留内存值，避免保存时被覆盖。
     collectedSettings.startupScaleRecommendPromptDisabled =
@@ -1196,6 +1203,9 @@ void SettingsDock::saveAndEmitFromUi(const QString& triggerReason)
         && nextSettings.autoRequestAdminOnStartup == m_currentAppearanceSettings.autoRequestAdminOnStartup
         && nextSettings.startupAutoInstallR0Driver == m_currentAppearanceSettings.startupAutoInstallR0Driver
         && nextSettings.preventMultipleInstances == m_currentAppearanceSettings.preventMultipleInstances
+        && nextSettings.mcpAutoStart == m_currentAppearanceSettings.mcpAutoStart
+        && nextSettings.mcpPythonCommand == m_currentAppearanceSettings.mcpPythonCommand
+        && nextSettings.mcpSidecarScriptPath == m_currentAppearanceSettings.mcpSidecarScriptPath
         && sameScaleFactor
         && nextSettings.startupScaleRecommendPromptDisabled == m_currentAppearanceSettings.startupScaleRecommendPromptDisabled
         && nextSettings.unlockerShellContextMenuEnabled == m_currentAppearanceSettings.unlockerShellContextMenuEnabled
