@@ -85,7 +85,10 @@ namespace
             setFocusPolicy(Qt::NoFocus);
             setMouseTracking(true);
             setAutoFillBackground(false);
-            setAttribute(Qt::WA_NoSystemBackground, true);
+            // 透明条仍需Qt恢复下面的视口像素，否则滚动拷贝/淡出会留下旧滑块残影。
+            setAttribute(Qt::WA_NoSystemBackground, false);
+            setAttribute(Qt::WA_OpaquePaintEvent, false);
+            setStyleSheet(QStringLiteral("QScrollBar{background:transparent;border:0;}"));
             setAttribute(Qt::WA_TransparentForMouseEvents, true);
             m_idleTimer.setSingleShot(true);
             m_idleTimer.setInterval(kIdleDelayMs);
@@ -102,6 +105,7 @@ namespace
             connect(&m_fade, &QVariantAnimation::valueChanged, this, [this](const QVariant& value)
             {
                 m_opacity = value.toReal();
+                refreshBackdrop(); // 透明度变小前恢复同一窄带，不能在旧亮线之上累积混色。
                 update();
             });
             connect(&m_fade, &QVariantAnimation::finished, this, [this]()
@@ -110,6 +114,7 @@ namespace
                 {
                     // 完全隐藏后整个命中带一并退出，不拦截下面单元格或复制按钮。
                     setAttribute(Qt::WA_TransparentForMouseEvents, true);
+                    refreshBackdrop();
                     hide();
                 }
             });
@@ -128,6 +133,7 @@ namespace
             if (!qFuzzyCompare(m_scale, scale))
             {
                 m_scale = scale;
+                refreshBackdrop(); // 线宽随缩放变化时清理旧覆盖像素。
                 update();
             }
         }
@@ -156,6 +162,7 @@ namespace
             m_hovered = false;
             m_nearEdge = false;
             setAttribute(Qt::WA_TransparentForMouseEvents, true);
+            refreshBackdrop();
             hide();
         }
 
@@ -171,6 +178,7 @@ namespace
             setAttribute(Qt::WA_TransparentForMouseEvents, false);
             show();
             raise();
+            refreshBackdrop();
             update();
             armIdleTimer();
         }
@@ -190,6 +198,24 @@ namespace
             else
             {
                 armIdleTimer();
+            }
+        }
+
+        // 表格的scroll位图拷贝可能包含悬浮条；只失效覆盖窄带，保留其余内容的滚动快路。
+        // 无同步repaint/processEvents，多个变化仍由Qt在下一帧合并；Paint本身不再排刷新。
+        void refreshBackdrop()
+        {
+            auto* area = qobject_cast<QAbstractScrollArea*>(parentWidget()); // 覆盖层的原始滚动宿主。
+            QWidget* viewport = area != nullptr ? area->viewport() : nullptr; // 允许业务替换实际视口。
+            if (viewport == nullptr || !viewport->isVisible())
+            {
+                return;
+            }
+            const QPoint origin = viewport->mapTo(area, QPoint()); // 将兄弟覆盖层坐标转换到视口。
+            const QRect dirty = geometry().translated(-origin).intersected(viewport->rect());
+            if (!dirty.isEmpty())
+            {
+                viewport->update(dirty); // 同时擦掉被滚动复制的旧位置及当前滑块下方的像素。
             }
         }
 
@@ -237,6 +263,7 @@ namespace
             m_hovered = false;
             m_nearEdge = false;
             armIdleTimer();
+            refreshBackdrop(); // 悬停结束后线宽缩小，旧宽度覆盖的像素也需要恢复。
             update();
             QScrollBar::leaveEvent(event);
         }
@@ -642,6 +669,11 @@ namespace
             const auto scrolled = [this, axis]()
             {
                 m_overlays[axis]->reveal();
+                // 横向滚动也会复制纵向条，纵向滚动也会复制横向条；两轴窄带一起失效。
+                for (const QPointer<FloatingScrollbar>& overlay : m_overlays)
+                {
+                    if (overlay != nullptr && overlay->isVisible()) overlay->refreshBackdrop();
+                }
                 scheduleRefresh();
             };
             m_connections[axis].append(connect(source, &QScrollBar::rangeChanged, this, changed));
@@ -659,6 +691,12 @@ namespace
             {
                 return;
             }
+            // 行数/步长更新未必触发valueChanged，也可能改变滑块长度或位置。
+            const bool thumbChanged = overlay->minimum() != source->minimum()
+                || overlay->maximum() != source->maximum()
+                || overlay->pageStep() != source->pageStep()
+                || overlay->value() != source->value()
+                || overlay->invertedAppearance() != source->invertedAppearance();
             const QSignalBlocker blocker(overlay);
             overlay->setRange(source->minimum(), source->maximum());
             overlay->setPageStep(source->pageStep());
@@ -675,6 +713,7 @@ namespace
                 overlay->setPalette(m_area->palette());
             }
             overlay->setScale(m_scale);
+            if (thumbChanged) overlay->refreshBackdrop();
         }
 
         void updateGeometry(bool enabled)

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <functional>
+#include <QPointer>
 
 class QWidget;
 class QAbstractSpinBox;
@@ -17,11 +18,28 @@ namespace ks::ui
 
     // BindWidgetTheme：登记控件完整的主题角色刷新函数；同一控件再次登记会替换旧函数。
     // widget 管理绑定生命周期，refresh 必须使用明确的主题角色，并完整刷新自身局部样式。
-    // 首次及主题变化均延迟到下一轮 GUI 事件循环，避免在 Popup Show/Resize 中重入 polish。
+    // 构造期登记及主题变化分片排队；完整页面挂载可局部消费首帧请求，Popup 保留延迟约束。
     // 返回 false 表示空参数、没有 QApplication 或调用线程不属于 GUI 线程。
     // PreserveLocal 会在重建 QSS 后恢复调用前的局部 palette，防止 Qt repolish 丢失独立底色。
     bool BindWidgetTheme(QWidget* widget, std::function<void()> refresh,
         ThemePalettePolicy palettePolicy = ThemePalettePolicy::FollowApplication);
+
+    // 仅在构造完成、最终父级建立后准备当前显示分支；不扫描模型或预加载隐藏 Tab/Popup。
+    // 与原分片消费同一待刷新标记，已准备项不会在旧队列中重复执行。
+    void PrepareWidgetThemeBindingsForShow(QWidget* scope);
+
+    // 惰性工厂退出时统一准备已完成的可见分支；覆盖早退，不在构造开始或隐藏页调用。
+    class ScopedWidgetThemePreparation final
+    {
+    public:
+        explicit ScopedWidgetThemePreparation(QWidget* scope);
+        ~ScopedWidgetThemePreparation();
+        ScopedWidgetThemePreparation(const ScopedWidgetThemePreparation&) = delete;
+        ScopedWidgetThemePreparation& operator=(const ScopedWidgetThemePreparation&) = delete;
+
+    private:
+        QPointer<QWidget> m_scope; // 工厂或回调关闭宿主时自动失效。
+    };
 
     // 为数值控件及其内部编辑器显式绑定可读主题色，避免父级 QSS 把数字染成底色。
     // 只替换拥有的无线框颜色片段，保留 value/suffix、页面样式尺寸、步进按钮与编辑状态。

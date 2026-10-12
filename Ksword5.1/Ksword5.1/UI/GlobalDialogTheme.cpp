@@ -1,5 +1,6 @@
 ﻿#include "GlobalDialogTheme.h"
 #include "./DetailDialogChrome.h"
+#include "./ThemeBinding.h"
 
 #include "../theme.h"
 
@@ -17,6 +18,7 @@
 #include <QColorDialog>
 #include <QFontDialog>
 #include <QInputDialog>
+#include <QLayout>
 
 namespace
 {
@@ -372,6 +374,23 @@ namespace
                 if (!eventDialog)
                 {
                     return true;
+                }
+                if (eventType == QEvent::Show)
+                {
+                    // 详情结构与根色完成后，只消费当前分支初次颜色，不让子卡片下一帧换底。
+                    ks::ui::PrepareWidgetThemeBindingsForShow(eventDialog.data());
+                    if (!eventDialog)
+                    {
+                        return true;
+                    }
+                    if (eventDialog->layout() != nullptr)
+                    {
+                        eventDialog->layout()->activate();
+                    }
+                    if (!eventDialog)
+                    {
+                        return true;
+                    }
                 }
                 return QObject::eventFilter(watchedObject, eventObject);
             }

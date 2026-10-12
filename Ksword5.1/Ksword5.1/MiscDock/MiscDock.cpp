@@ -1,6 +1,7 @@
 #include "MiscDock.h"
 #include "../UI/PageControlStyle.h"
 #include "../UI/PrimaryPageStyle.h"
+#include "../UI/ThemeBinding.h"
 
 #include "BootEditor/BootEditorTab.h"
 #include "ApplicationControlPage.h"
@@ -277,6 +278,7 @@ void MiscDock::initializeUi()
 
 void MiscDock::ensureTabInitialized(const int tabIndex)
 {
+    const ks::ui::ScopedWidgetThemePreparation themePreparation(m_mainTabWidget); // 不逐页复制首显准备。
     if (tabIndex < 0)
     {
         return;

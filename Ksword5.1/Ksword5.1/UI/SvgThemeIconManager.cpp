@@ -1,6 +1,7 @@
 #include "SvgThemeIconManager.h"
 #include "ThemeAccentIcon.h"
 #include "./FlatButtonTheme.h"
+#include "./ThemeBinding.h"
 
 // ============================================================
 // SvgThemeIconManager.cpp
@@ -510,14 +511,46 @@ bool ks::ui::SvgThemeIconManager::eventFilter(
             {
                 return QObject::eventFilter(watchedObject, eventObject);
             }
+            // 只在首次实际绘制前补本按钮已登记颜色及图标，不在 Polish/构造期重入布局。
+            const bool themePrepared = buttonPointer->property("ksword_svg_first_theme_prepared").toBool();
+            const bool iconPrepared = buttonPointer->property("ksword_svg_first_paint_prepared").toBool();
+            if ((!themePrepared || (!iconPrepared && !buttonPointer->icon().isNull())) &&
+                !buttonPointer->property("ksword_theme_icon_managed").toBool())
+            {
+                const QPointer<QAbstractButton> guardedButton(buttonPointer); // 首次主题回调可关闭控件。
+                buttonPointer->setProperty("ksword_svg_first_theme_prepared", true);
+                if (guardedButton.isNull()) return true;
+                PrepareWidgetThemeBindingsForShow(buttonPointer);
+                if (guardedButton.isNull()) return true;
+            }
             const QIcon currentIcon = buttonPointer->icon(); // 按钮当前图标。
+            const bool firstPaint = !currentIcon.isNull() && !iconPrepared;
+            if (firstPaint)
+            {
+                // 无图标首绘不消耗此标记，稍后赋予的第一个图标也必须在绘制前准备。
+                const QPointer<QAbstractButton> guardedButton(buttonPointer);
+                buttonPointer->setProperty("ksword_svg_first_paint_prepared", true);
+                if (guardedButton.isNull()) return true;
+            }
             if (!buttonPointer->property("ksword_theme_icon_managed").toBool() &&
                 !currentIcon.isNull() &&
                 buttonPointer->property(LastButtonIconKeyProperty).toULongLong() !=
                     static_cast<qulonglong>(currentIcon.cacheKey()) &&
                 (m_customTintActive || hasSharedFlatButtonTheme(buttonPointer)))
             {
-                scheduleWidgetRefresh(buttonPointer);
+                if (firstPaint)
+                {
+                    // 状态缓存就绪后直接包装，第一帧使用正确前景，后续变化继续分片。
+                    const QPointer<QAbstractButton> guardedButton(buttonPointer);
+                    buttonPointer->setProperty(PendingIconRefreshProperty, false);
+                    if (guardedButton.isNull()) return true;
+                    (void)applyToWidget(buttonPointer, nullptr);
+                    if (guardedButton.isNull()) return true;
+                }
+                else
+                {
+                    scheduleWidgetRefresh(buttonPointer);
+                }
             }
         }
         else if (m_customTintActive)
@@ -583,7 +616,7 @@ void ks::ui::SvgThemeIconManager::drainWidgetRefreshes()
     {
         const QPointer<QWidget> safeWidget = m_pendingWidgetRefreshes.front();
         m_pendingWidgetRefreshes.pop_front();
-        if (safeWidget == nullptr)
+        if (safeWidget == nullptr || !safeWidget->property(PendingIconRefreshProperty).toBool())
         {
             continue;
         }

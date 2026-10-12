@@ -217,19 +217,19 @@ namespace
     };
 
     // 参数框架的色块自身无描边，只在操作区与正文之间留一条低对比度分隔线。
-    void bindWorkspaceSurface(QWidget* widget, bool footer = false)
+    void bindWorkspaceSurface(QWidget* widget, bool footer = false, bool canvas = false)
     {
         widget->setAttribute(Qt::WA_StyledBackground);
         widget->setProperty("ksword_parameter_surface", true);
         const QPointer<QWidget> target(widget);
-        ks::ui::BindWidgetTheme(widget, [target, footer]()
+        ks::ui::BindWidgetTheme(widget, [target, footer, canvas]()
         {
             if (!target) return;
             const QColor surface = ks::ui::MainWindowSurfaceColors().content;
             const QColor divider = KswordTheme::BlendColors(surface, KswordTheme::BorderColor(), 70);
             const QString style = QStringLiteral(
-                "QWidget[ksword_parameter_surface=\"true\"]{background:%1;border:0;border-radius:8px;%2}")
-                .arg(surface.name(), footer
+                "QWidget[ksword_parameter_surface=\"true\"]{background:%1;border:0;border-radius:%2px;%3}")
+                .arg(surface.name()).arg(canvas ? 0 : 8).arg(footer
                     ? QStringLiteral("border-top:1px solid %1;border-top-left-radius:0;border-top-right-radius:0;").arg(divider.name())
                     : QString());
             target->setProperty("ksword_parameter_surface_style_block", style); // 完整中性容器块供按钮所有权识别。
@@ -399,6 +399,11 @@ namespace ks::ui
         m_parameters->setSpacing(18);
         m_parameters->setAlignment(Qt::AlignTop);
         m_scroll->setWidget(form);
+        // QScrollArea的viewport与setWidget后的表单会自动填Window底色，不能继承页根的深色。
+        // 三个承载层共用外部卡片色，内部不再叠圆角；仍由原视口承担滚动与裁剪。
+        bindWorkspaceSurface(m_scroll, false, true);
+        bindWorkspaceSurface(m_scroll->viewport(), false, true);
+        bindWorkspaceSurface(form, false, true);
         left->addWidget(m_scroll, 1);
 
         auto* footer = new QWidget(m_parameterPanel);

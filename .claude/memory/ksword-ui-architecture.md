@@ -178,6 +178,7 @@ KSword 主程序位于 `Ksword5.1/Ksword5.1`（Qt 6.9.3 Widgets + Qt Advanced Do
 - 单行输入、搜索、数值框、组合框及普通实心按钮使用 `ControlInputSurfaceColor` 的中性表面，hover/focus 保持同一层次。内部 Spin/Combo 编辑器透明无框；主窗口末尾不能重新强制透明输入面和描边。表格操作栏与进程控制明确使用 Solid，标题/导航工具仍保留自身语义。
 - 表头采用 SurfaceMuted 与单条底部分隔，详情分组采用 SurfaceAlt 与标题线；普通属性名使用可读次级文字而非 PlaceholderText。禁止为单元格添加 `border:0`，否则 Qt QSS 会吞掉模型 BackgroundRole。
 - 悬浮滚动条闲置 1100ms 后用 180ms 淡出，滚动或靠近内容边缘唤醒，悬停/拖动期间保持；完全隐藏后鼠标穿透。刷新内容与范围更新不重启闲置计时，原生滚动对象、单位与信号不变。
+- 悬浮细线不能声明WA_NoSystemBackground或不透明Paint：透明/淡出绘制必须恢复下面的视口像素。滚动、缩放、范围/步长改变、悬停宽度变化和隐藏前，只对覆盖条对应的视口窄带update；不能在Paint中反向update视口形成循环，也不无条件刷新整表。外观用透明局部QScrollBar规则隔离全局轨道底色，原生条、坐标、数据与动画逻辑保留。进程详情内嵌内存区域表的滚动条残影截图触发此修复，用户自行实测。
 
 ### 进程控制与多表分区
 
@@ -338,3 +339,14 @@ KSword 主程序位于 `Ksword5.1/Ksword5.1`（Qt 6.9.3 Widgets + Qt Advanced Do
 - 定时权限刷新只在实际样式变化时写 QSS。CustomTitleBar 状态更新不得反复 Shell 查询 EXE、重建原图和重登记相同按钮绑定；真实主题代次和资源变化仍更新。普通浮动纯色使用 solid QBrush，不分配整窗纹理。
 - 主题事件不重建进程/线程业务表；动态数据角色和风险委托在绘制时读取当前色。普通审计表中性色交给 palette/alternating，保留业务风险原色。
 - 全应用旧色补偿主入口使用分片队列；新主题取消旧调度时必须保留未完成的 A→B→C 基线链，分别检查局部 QSS 和显式 palette 的业务接管。只读快照及单个 Qt 样式调用不承诺时间硬上限。详情见 `docs/UI按钮消失与换肤卡顿修复-20261011.md`，未经用户实测不报告耗时提升。
+
+### 页面首帧与后续分片必须分开
+
+- 首次 ThemeBinding 若只排队，页面会先绘旧外观再换色。完整挂载/详情根 Show 后用 `PrepareWidgetThemeBindingsForShow` 消费当前显示分支的既有请求，QStackedWidget只取当前页，隐藏页/独立子窗口/Popup不提前准备。首次动态叶控件Paint前补颜色，已应用过的隐藏控件重显消费dirty；构造期Polish/初次Show不调用未知绑定。
+- 同步首显和分片共用dirty标记；旧FIFO保留membership去重但已消费项不重复执行。新主题/重登记/嵌套请求继续生效，不把正常全应用换肤恢复为同步整树操作。
+- 惰性子页不能仅依赖父Dock首次准备，currentChanged时还可能只是占位壳。统一工厂用 `ScopedWidgetThemePreparation` 在构造/服务接线/挂载全部完成后准备当前可见分支，覆盖内核、杂项、硬件/监控惰性页、内存工作台/调试和进程详情；进程内嵌Dock在延迟构造阶段退出时也共用守卫，必须等业务范围/内部页选择/show全部结束再准备最终分支。不可见构造不提前执行未知绑定，也不逐分支复制主题实现。
+- 表格Show前统一frame/grid/header；页框Show/currentChanged前准备留白与pane，Paint只改已有overlay几何。侧栏首显同步定宽，角片先确定几何再显示；已消费几何回调按代次失效。14/8/6无描边等宽标准不变。
+- SVG首次颜色与首次实际图标标记分离，不能因首次Paint无图标而丢掉迟到图标的准备机会。内核初始化禁止全应用processEvents，只repaint明确等待反馈；延迟Dock可见回调复核实际可见性。
+- 不禁绘全树或预加载全部业务页。共享回调及overlay的Show/Hide/raise可关闭宿主或换页，QPointer探活之外还须复核当前页身份。说明见 `docs/UI首帧闪动修复-20261011.md`，用户自行测试，不把源码或编译结果当实机闪动验收。
+
+- ParameterWorkspace参数滚动区不能只给外部面板绑定实底：QScrollArea视口和setWidget后的表单会填充继承的Window色，透明分区于是露出页根深色黑块。scroll/viewport/form三层须通过原共享surface绑定保持同一卡片色，内部canvas半径0，外部卡片8；沿用完整中性拥有块，避免新增规则被按钮所有权误判为业务覆盖。系统变速页截图反馈触发此修复，不改分区或滚动结构。

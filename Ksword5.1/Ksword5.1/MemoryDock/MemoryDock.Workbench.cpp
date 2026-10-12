@@ -3,6 +3,7 @@
 #include "MemoryDebugPage.h"
 
 #include "../Internationalization/LanguageManager.h"
+#include "../UI/ThemeBinding.h"
 #include "../UI/MemoryWorkbench/MemoryWorkbenchView.h"
 #include "../UI/MemoryWorkbench/WorkbenchNavigation.h"
 #include "../UI/MemoryWorkbench/WorkbenchShared.h"
@@ -79,6 +80,7 @@ void MemoryDock::initializeWorkbenchTab()
 // 再创建视图、注入服务、加载设置，最后连接信号并回放"创建之前已经发生的附加"。
 void MemoryDock::ensureWorkbenchView()
 {
+    const ks::ui::ScopedWidgetThemePreparation themePreparation(m_tabWorkbench); // 服务与接线完成后补可见主题。
     // 已创建或容器页不存在时直接返回。
     if (m_workbenchView != nullptr || m_tabWorkbench == nullptr)
     {

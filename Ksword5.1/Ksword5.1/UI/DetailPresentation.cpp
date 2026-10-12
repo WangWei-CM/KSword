@@ -35,7 +35,7 @@ namespace
         }
     };
 
-    // 只观察明确登记的侧栏及其顶层窗口，字体/窗口变化后合并更新几何。
+    // 只观察明确登记的侧栏及其顶层窗口；首显同步定宽，连续缩放合并更新。
     class DetailSidebarSizing final : public QObject
     {
     public:
@@ -49,14 +49,37 @@ namespace
     protected:
         bool eventFilter(QObject* source, QEvent* event) override
         {
-            if (event->type() == QEvent::Resize || event->type() == QEvent::Show
-                || event->type() == QEvent::FontChange || event->type() == QEvent::ApplicationFontChange)
+            if (m_applying)
+            {
+                return QObject::eventFilter(source, event);
+            }
+            const QEvent::Type type = event->type(); // 当前事件只来自已登记侧栏或详情根。
+            if (type == QEvent::Show || (type == QEvent::Resize && m_window && !m_window->isVisible()))
+            {
+                // 恢复窗口几何后、首帧绘制前使用最终宽度；旧排队请求不得再改一次布局。
+                ++m_scheduleRevision;
+                m_pending = false;
+                const QPointer<DetailSidebarSizing> lifetime(this); // 定宽可触发业务布局事件。
+                const QPointer<QObject> receiver(source); // 接收者销毁时不得继续转发当前事件。
+                apply();
+                if (!lifetime || !receiver)
+                {
+                    return receiver.isNull(); // 只销毁控制器时，仍让存活窗口处理自己的 Show。
+                }
+            }
+            else if (type == QEvent::Resize || type == QEvent::FontChange
+                || type == QEvent::ApplicationFontChange)
             {
                 if (!m_pending)
                 {
                     m_pending = true;
-                    QTimer::singleShot(0, this, [this]()
+                    const quint64 revision = ++m_scheduleRevision; // 区分同步首显消费前后的请求。
+                    QTimer::singleShot(0, this, [this, revision]()
                     {
+                        if (!m_pending || revision != m_scheduleRevision)
+                        {
+                            return;
+                        }
                         m_pending = false;
                         apply();
                     });
@@ -75,13 +98,21 @@ namespace
             const int width = qBound(minimum, m_window->width() / 5, m_maximum);
             if (m_sidebar->minimumWidth() != width || m_sidebar->maximumWidth() != width)
             {
+                m_applying = true; // 自己定宽产生的Resize不另排第二次同步/异步更新。
+                const QPointer<DetailSidebarSizing> lifetime(this); // 业务布局回调可能关闭详情窗口。
                 m_sidebar->setFixedWidth(width);
+                if (lifetime)
+                {
+                    lifetime->m_applying = false;
+                }
             }
         }
         QPointer<QScrollArea> m_sidebar; // 保留原导航滚动区。
         QPointer<QWidget> m_window; // 详情顶层窗口提供可用宽度。
         int m_maximum = 240; // 宽屏时的侧栏宽度上限。
         bool m_pending = false; // 避免Resize反馈重复安排布局。
+        bool m_applying = false; // 隔离自身定宽产生的布局事件。
+        quint64 m_scheduleRevision = 0; // 首显同步更新使此前排队请求失效。
     };
 }
 

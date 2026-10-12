@@ -236,7 +236,8 @@ namespace
     protected:
         bool eventFilter(QObject* watched, QEvent* event) override
         {
-            // 合并尺寸/主题事件，不在paint中改变布局或持续运行计时器。
+            const QPointer<QObject> source(watched); // 同步overlay通知若销毁宿主，不能继续向旧对象派发。
+            // Show先放好现有四角；Paint兜底仅更新overlay，不改变页面布局。
             switch (event->type())
             {
             case QEvent::Resize:
@@ -244,8 +245,15 @@ namespace
                 schedule();
                 break;
             case QEvent::Show:
+                m_surfaceDirty = true;
+                refreshNow();
+                break;
+            case QEvent::Paint:
+                if (m_geometryDirty) refreshNow();
+                break;
             case QEvent::StyleChange:
             case QEvent::PaletteChange:
+            case QEvent::ApplicationPaletteChange:
             case QEvent::DynamicPropertyChange:
                 m_surfaceDirty = true; // 主题变化即使没有几何变化，也须刷新四角底色。
                 schedule();
@@ -253,38 +261,62 @@ namespace
             default:
                 break;
             }
-            return QObject::eventFilter(watched, event);
+            return source.isNull();
         }
 
     private:
+        void refreshNow()
+        {
+            ++m_scheduleGeneration; // 同步消费后撤销旧pending，保留后来通知的新代次。
+            m_pending = false;
+            refreshCorners();
+        }
+
         void schedule()
         {
+            m_geometryDirty = true;
             if (m_pending) return;
             m_pending = true;
-            QTimer::singleShot(0, this, [this]()
+            const quint64 generation = ++m_scheduleGeneration;
+            QTimer::singleShot(0, this, [this, generation]()
             {
+                if (generation != m_scheduleGeneration) return;
                 m_pending = false;
-                if (!m_page) return;
-                const bool repaintSurface = m_surfaceDirty; // 普通重复布局通知不强制重绘相同角片。
-                m_surfaceDirty = false;
-                const QRect outer = m_page->rect(); // 页根就是最外层边界，不以内侧内容定位。
-                const int radius = kPageCornerRadius + m_inset;
-                const QVariant surface = m_page->window()->property("ksword_main_surface_hierarchy");
-                const bool visible = m_page->isVisible() && (!surface.isValid() || surface.toBool())
-                    && outer.width() >= radius * 2 && outer.height() >= radius * 2;
-                for (int index = 0; index < 4; ++index)
-                {
-                    PageContentCorner* corner = m_corners[index];
-                    corner->setVisible(visible);
-                    if (!visible) continue;
-                    const int left = (index & 1) ? outer.width() - radius : 0;
-                    const int top = (index & 2) ? outer.height() - radius : 0;
-                    corner->setGeometry(left, top, radius, radius);
-                    corner->setOpeningRectangle(outer, radius);
-                    corner->raise();
-                    if (repaintSurface) corner->update();
-                }
+                refreshCorners();
             });
+        }
+
+        void refreshCorners()
+        {
+            if (!m_page) return;
+            const QPointer<WorkspaceFrame> lifetime(this);
+            m_geometryDirty = false;
+            const bool repaintSurface = m_surfaceDirty; // 普通重复布局通知不强制重绘相同角片。
+            m_surfaceDirty = false;
+            const QRect outer = m_page->rect(); // 页根就是最外层边界，不以内侧内容定位。
+            const int radius = kPageCornerRadius + m_inset;
+            const QVariant surface = m_page->window()->property("ksword_main_surface_hierarchy");
+            const bool visible = m_page->isVisible() && (!surface.isValid() || surface.toBool())
+                && outer.width() >= radius * 2 && outer.height() >= radius * 2;
+            for (int index = 0; index < 4; ++index)
+            {
+                const QPointer<PageContentCorner> corner = m_corners[index];
+                if (!corner) continue;
+                const int left = (index & 1) ? outer.width() - radius : 0;
+                const int top = (index & 2) ? outer.height() - radius : 0;
+                if (visible)
+                {
+                    corner->setGeometry(left, top, radius, radius);
+                    if (!lifetime || !corner) return;
+                    corner->setOpeningRectangle(outer, radius);
+                }
+                corner->setVisible(visible);
+                if (!lifetime || !corner) return;
+                if (!visible) continue;
+                corner->raise();
+                if (!lifetime || !corner || !m_page) return;
+                if (repaintSurface) corner->update();
+            }
         }
 
         QPointer<QWidget> m_page; // 原页面拥有控制器与四个微型角片。
@@ -292,6 +324,8 @@ namespace
         QPointer<PageContentCorner> m_corners[4]; // 不创建整页透明覆盖窗口。
         bool m_pending = false; // 单次合并更新标记。
         bool m_surfaceDirty = true; // 首次显示或主题变化才额外请求角片重画。
+        bool m_geometryDirty = true; // Paint仅补已存在角片的位置和可见性。
+        quint64 m_scheduleGeneration = 0; // 同步消费后，排队的旧工作不会重复刷新。
     };
 
     // 导航底面只占标签栏，内容四角完全由外框角片负责，避免旧的首工具条补色残留。
@@ -345,47 +379,129 @@ namespace
             {
                 stack->installEventFilter(this); // 原生 pane 布局更新后同步局部连接，不争抢几何。
             }
-            connect(tabs, &QTabWidget::currentChanged, this, [this]() { schedule(); });
+            connect(tabs, &QTabWidget::currentChanged, this, [this]()
+            {
+                m_layoutDirty = true;
+                if (canPreparePage()) prepareNow(); // Qt已显示目标页，再处理当前页的明确外层布局。
+                else schedule();
+            });
             schedule();
         }
 
     protected:
         bool eventFilter(QObject* watched, QEvent* event) override
         {
+            const QPointer<QObject> source(watched); // 同步样式/布局可能销毁当前宿主。
             // 惰性创建、改字号、移动宿主与标签溢出都会改变栏几何，合并到下一轮布局。
             switch (event->type())
             {
             case QEvent::Resize:
             case QEvent::Move:
-            case QEvent::LayoutRequest:
             case QEvent::FontChange:
                 schedule();
                 break;
+            case QEvent::LayoutRequest:
+                if (!m_preparing && canPreparePage() && needsLayoutPreparation()) prepareNow();
+                else schedule();
+                break;
             case QEvent::Show:
+                m_surfaceDirty = true;
+                if (!m_preparing && canPreparePage()
+                    && (watched == m_tabs || watched == m_tabs->currentWidget()
+                        || watched == m_observedSurface))
+                {
+                    prepareNow(); // 当前页已完成Show/原生布局，首绘前建立留白和现有角片。
+                }
+                else schedule();
+                break;
+            case QEvent::Paint:
+                if (m_geometryDirty)
+                {
+                    if (!m_layoutDirty)
+                    {
+                        ++m_scheduleGeneration; // 仅几何工作已消费，不让旧队列重复刷新。
+                        m_pending = false;
+                    }
+                    synchronizeSurfaces(); // Paint绝不写业务layout或QSS。
+                }
+                break;
             case QEvent::StyleChange:
             case QEvent::PaletteChange:
+            case QEvent::ApplicationPaletteChange:
             case QEvent::ParentChange:
             case QEvent::DynamicPropertyChange:
+            case QEvent::ChildAdded:
                 m_surfaceDirty = true; // 几何同步与主题底色失效分开，避免每个Move都重画。
+                m_layoutDirty = true;
                 schedule();
                 break;
             case QEvent::Hide:
                 if (watched == m_tabs && m_surface)
                 {
+                    const QPointer<PageTabEnvelope> lifetime(this); // Hide可同步关闭宿主或切换当前页。
+                    const QPointer<QWidget> page(m_tabs->currentWidget());
                     m_surface->hide();
-                    for (const QPointer<PageContentCorner>& corner : m_contentCorners)
+                    if (!lifetime || !retainCurrentPage(page)) return source.isNull();
+                    for (int index = 0; index < 4; ++index)
                     {
+                        const QPointer<PageContentCorner> corner = m_contentCorners[index];
+                        if (!corner) continue;
                         corner->hide();
+                        if (!lifetime || !retainCurrentPage(page)) return source.isNull();
                     }
                 }
                 break;
             default:
                 break;
             }
-            return QObject::eventFilter(watched, event);
+            return source.isNull();
         }
 
     private:
+        // 几何/Show/Hide/ZOrderChange可同步换页；旧页快照不能继续覆盖新页的外角。
+        bool retainCurrentPage(const QPointer<QWidget>& page)
+        {
+            if (!m_tabs || !m_surface) return false;
+            if (m_tabs->currentWidget() == page.data()) return true;
+            m_layoutDirty = true;
+            m_surfaceDirty = true;
+            schedule(); // 新页按最新归属整理，不继续消费已失效的角片坐标。
+            return false;
+        }
+
+        bool hasVisibleFramePage() const
+        {
+            return m_tabs && m_tabs->isVisible() && m_tabs->currentWidget()
+                && !m_tabs->currentWidget()->isHidden() && !m_tabs->tabBar()->isHidden()
+                && !m_tabs->tabBar()->property("ksword_secondary_tabs").toBool();
+        }
+
+        bool canPreparePage() const
+        {
+            // 原生Popup继续排队，不在Qt遍历其内部child的Show栈重入样式或布局。
+            return hasVisibleFramePage() && m_tabs->window()->windowType() != Qt::Popup;
+        }
+
+        bool needsLayoutPreparation() const
+        {
+            QWidget* page = m_tabs->currentWidget();
+            QWidget* owner = pageLayoutOwner(page);
+            QLayout* layout = owner ? owner->layout() : nullptr;
+            return m_layoutDirty || m_preparedPage != page || m_preparedOwner != owner
+                || m_preparedInset != pageFrameInset(m_tabs)
+                || (layout && m_tabs->property("ksword_page_tabs_content_inset").toInt() > 0
+                    && layout->contentsMargins() != QMargins());
+        }
+
+        void prepareNow()
+        {
+            if (m_preparing) return;
+            ++m_scheduleGeneration; // 同步消费后，旧回调不能清理后来的新pending。
+            m_pending = false;
+            m_layoutDirty = true; // Show必须按挂载后的真实父归属补齐pane，普通Resize不重做此阶段。
+            synchronize();
+        }
+
         // 登记框架只接管当前页最外层layout；卡片/表单内部16px等业务留白不动。
         void normalizePageMargin(QWidget* owner)
         {
@@ -430,30 +546,68 @@ namespace
             }
         }
 
-        // 同步四种方向的导航与最外框角片；未登记的详情Tab只统一导航样式。
-        void synchronize()
+        // 仅有效当前页Show/布局之后处理留白和pane；隐藏或半构造页不在此改布局。
+        void synchronize(bool fromQueue = false)
         {
-            if (!m_tabs || !m_surface)
+            if (!m_tabs || !m_surface || m_preparing)
             {
                 return;
             }
+            const bool visiblePage = hasVisibleFramePage();
+            if ((canPreparePage() || (fromQueue && visiblePage)) && needsLayoutPreparation())
+            {
+                const QPointer<PageTabEnvelope> lifetime(this);
+                const QPointer<QWidget> page(m_tabs->currentWidget());
+                const QPointer<QWidget> owner(pageLayoutOwner(page));
+                m_preparing = true;
+                observeContent(page, owner);
+                normalizePageMargin(owner);
+                if (!lifetime || !m_tabs) return;
+                applyPaneStyle(m_tabs);
+                if (!lifetime || !m_tabs) return;
+                if (m_tabs->layout()) m_tabs->layout()->activate();
+                if (!lifetime || !m_tabs) return;
+                if (owner && owner->layout()) owner->layout()->activate();
+                if (!lifetime || !m_tabs) return;
+                if (m_tabs->currentWidget() != page || pageLayoutOwner(page) != owner)
+                {
+                    m_preparing = false;
+                    m_layoutDirty = true;
+                    schedule(); // 真正换页/换惰性内容后，不能把旧归属标成新页面已准备。
+                    return;
+                }
+                m_preparedPage = page;
+                m_preparedOwner = owner;
+                m_preparedInset = pageFrameInset(m_tabs);
+                m_layoutDirty = false;
+                m_preparing = false;
+            }
+            synchronizeSurfaces();
+        }
+
+        // 只摆放既有导航底面及四角，可在firstPaint兜底；绝不写layout、pane或创建覆盖层。
+        void synchronizeSurfaces()
+        {
+            if (!m_tabs || !m_surface) return;
+            const QPointer<PageTabEnvelope> lifetime(this);
+            m_geometryDirty = false;
             const bool repaintSurface = m_surfaceDirty; // 本轮只在主题或宿主变化时强制重画底面。
             m_surfaceDirty = false;
-            QTabBar* bar = m_tabs->tabBar(); // 原 QTabBar 继续负责图标、文字和所有输入。
+            const QPointer<QTabBar> bar(m_tabs->tabBar()); // 原 QTabBar 继续负责图标、文字和所有输入。
+            const QPointer<QWidget> page(m_tabs->currentWidget()); // 页面在外部几何回调中可能被删除。
             if (bar->isHidden() || bar->property("ksword_secondary_tabs").toBool())
             {
                 m_surface->hide();
-                for (const QPointer<PageContentCorner>& corner : m_contentCorners)
+                if (!lifetime || !retainCurrentPage(page)) return;
+                for (int index = 0; index < 4; ++index)
                 {
+                    const QPointer<PageContentCorner> corner = m_contentCorners[index];
+                    if (!corner) continue;
                     corner->hide();
+                    if (!lifetime || !retainCurrentPage(page)) return;
                 }
                 return;
             }
-            QWidget* page = m_tabs->currentWidget(); // 保留业务页面身份，惰性页稍后会再次同步。
-            QWidget* owner = pageLayoutOwner(page);
-            observeContent(page, owner);
-            normalizePageMargin(owner);
-            applyPaneStyle(m_tabs);
             const QRect bounds = m_tabs->contentsRect();
             const bool vertical = m_tabs->tabPosition() == QTabWidget::West
                 || m_tabs->tabPosition() == QTabWidget::East;
@@ -462,9 +616,13 @@ namespace
                 : QRect(bounds.left(), bar->y(), bounds.width(), bar->height());
             const bool bandChanged = m_surface->geometry() != band;
             if (bandChanged) m_surface->setGeometry(band);
+            if (!lifetime || !m_surface || !bar || !retainCurrentPage(page)) return;
             m_surface->setVisible(m_tabs->isVisible());
+            if (!lifetime || !m_surface || !bar || !retainCurrentPage(page)) return;
             m_surface->raise();
+            if (!lifetime || !m_surface || !bar || !retainCurrentPage(page)) return;
             bar->raise();
+            if (!lifetime || !m_surface || !bar || !retainCurrentPage(page)) return;
             // 页面已被pane内缩；向外还原这层间隔，角片必须放在外框而不是页面控件上。
             const int inset = pageFrameInset(m_tabs);
             const QVariant mainSurface = m_tabs->window()->property("ksword_main_surface_hierarchy");
@@ -474,19 +632,25 @@ namespace
                 .adjusted(-inset, -inset, inset, inset) : QRect();
             for (int index = 0; index < 4; ++index)
             {
-                PageContentCorner* corner = m_contentCorners[index];
+                const QPointer<PageContentCorner> corner = m_contentCorners[index];
                 const bool visible = inset > 0 && opaqueFrame && page && m_tabs->isVisible()
                     && opening.width() >= outerRadius * 2 && opening.height() >= outerRadius * 2;
-                corner->setVisible(visible);
+                if (!corner) continue;
                 if (!visible)
                 {
+                    corner->hide();
+                    if (!lifetime || !retainCurrentPage(page)) return;
                     continue;
                 }
                 const int left = (index & 1) ? opening.right() + 1 - outerRadius : opening.left();
                 const int top = (index & 2) ? opening.bottom() + 1 - outerRadius : opening.top();
                 corner->setGeometry(left, top, outerRadius, outerRadius);
+                if (!lifetime || !corner || !retainCurrentPage(page)) return;
                 corner->setOpeningRectangle(opening, outerRadius);
+                corner->show(); // 几何先就绪，再允许现有角片首次绘制。
+                if (!lifetime || !corner || !retainCurrentPage(page)) return;
                 corner->raise();
+                if (!lifetime || !corner || !retainCurrentPage(page)) return;
                 if (repaintSurface) corner->update();
             }
             // 角落的明确工具控件保留原按钮和命中；底面不应覆盖它们。
@@ -495,6 +659,7 @@ namespace
                 if (QWidget* tool = m_tabs->cornerWidget(corner))
                 {
                     tool->raise();
+                    if (!lifetime || !m_surface || !retainCurrentPage(page)) return;
                 }
             }
             if (repaintSurface || bandChanged) m_surface->update();
@@ -502,15 +667,18 @@ namespace
 
         void schedule()
         {
-            if (m_pending)
+            m_geometryDirty = true;
+            if (m_pending || m_preparing)
             {
                 return;
             }
             m_pending = true;
-            QTimer::singleShot(0, this, [this]()
+            const quint64 generation = ++m_scheduleGeneration;
+            QTimer::singleShot(0, this, [this, generation]()
             {
+                if (generation != m_scheduleGeneration) return;
                 m_pending = false;
-                synchronize();
+                synchronize(true); // Popup在排队安全点仍处理既有布局，不在Show栈同步处理。
             });
         }
 
@@ -521,6 +689,13 @@ namespace
         QPointer<PageContentCorner> m_contentCorners[4]; // 等边模式的最外层四角，不覆盖内部组件圆角。
         bool m_pending = false; // 同一轮字体/布局/样式事件仅安排一次同步。
         bool m_surfaceDirty = true; // 保留主题刷新，普通同几何同步不重复重画底面。
+        bool m_geometryDirty = true; // Paint仅处理现有overlay的几何。
+        bool m_layoutDirty = true; // 真正布局/主题工作不被Paint兜底错误消费。
+        bool m_preparing = false; // 自身pane/layout事件不回投新的同步或排队任务。
+        QPointer<QWidget> m_preparedPage; // 当前页身份变化才需要首显布局准备。
+        QPointer<QWidget> m_preparedOwner; // 惰性宿主更换真实内容后再准备其最外层布局。
+        int m_preparedInset = -1; // 嵌套Tab外留白变化也在安全布局点处理。
+        quint64 m_scheduleGeneration = 0; // 同步已消费的旧回调自动失效。
     };
 }
 

@@ -121,7 +121,7 @@ namespace
         Corner m_corner; // 决定圆心在当前角片的内侧方向。
     };
 
-    // 同一视图只安装一次，结构/主题变化合并至下一轮事件循环，避免 Show 中重入 polish。
+    // 同一视图只安装一次；Show 仅同步现有角片几何，其余结构/主题通知仍合并处理。
     class RoundedViewController final : public QObject
     {
     public:
@@ -146,23 +146,34 @@ namespace
             }
             m_enabled = enabled;
             m_surfaceDirty = true;
+            const QPointer<RoundedViewController> lifetime(this); // 外角Hide可同步销毁原视图。
             if (!enabled)
             {
-                for (const QPointer<RoundedCornerSurface>& corner : m_corners)
+                for (std::size_t index = 0; index < m_corners.size(); ++index)
                 {
+                    const QPointer<RoundedCornerSurface> corner = m_corners[index];
                     if (corner != nullptr)
                     {
                         corner->hide();
+                        if (!lifetime || !m_view || m_enabled != enabled) return;
                     }
                 }
             }
-            scheduleRefresh();
+            if (m_view && m_view->isVisible())
+            {
+                refreshNow(); // 首次有效展示只摆放现有角片，不重入视图 polish 或业务布局。
+            }
+            else
+            {
+                scheduleRefresh();
+            }
         }
 
     protected:
         // viewport/GPU 后端替换也会产生 ChildAdded；只重排角片，不接管该后端的绘制或计时。
         bool eventFilter(QObject* watched, QEvent* event) override
         {
+            const QPointer<QObject> source(watched); // 现有角片Show通知可能使业务关闭宿主。
             if (watched == m_view && event != nullptr)
             {
                 switch (event->type())
@@ -173,6 +184,12 @@ namespace
                     scheduleRefresh();
                     break;
                 case QEvent::Show:
+                    m_surfaceDirty = true;
+                    refreshNow();
+                    break;
+                case QEvent::Paint:
+                    if (m_geometryDirty) refreshNow(); // 仅补纯角片几何，不改视图/viewport 布局。
+                    break;
                 case QEvent::Move:
                 case QEvent::ParentChange:
                 case QEvent::ChildAdded:
@@ -187,20 +204,30 @@ namespace
                     break;
                 }
             }
-            return false;
+            return source.isNull();
         }
 
     private:
+        void refreshNow()
+        {
+            ++m_scheduleGeneration; // 同步已经消费旧工作，旧singleShot不能清掉新的pending。
+            m_pending = false;
+            refreshCorners();
+        }
+
         // 只保存一次排队刷新；控件生命周期由父视图和 QTimer 上下文共同守护。
         void scheduleRefresh()
         {
+            m_geometryDirty = true;
             if (m_pending)
             {
                 return;
             }
             m_pending = true;
-            QTimer::singleShot(0, this, [this]()
+            const quint64 generation = ++m_scheduleGeneration;
+            QTimer::singleShot(0, this, [this, generation]()
             {
+                if (generation != m_scheduleGeneration) return;
                 m_pending = false;
                 refreshCorners();
             });
@@ -213,6 +240,8 @@ namespace
             {
                 return;
             }
+            const QPointer<RoundedViewController> lifetime(this);
+            m_geometryDirty = false;
             const int radius = qMin(kRadius, qMin(m_view->width(), m_view->height()) / 2);
             const bool repaintSurface = m_surfaceDirty; // 普通同几何LayoutRequest不重采祖先背景。
             m_surfaceDirty = false;
@@ -221,18 +250,22 @@ namespace
                 QPoint(m_view->width() - radius, m_view->height() - radius)};
             for (std::size_t index = 0; index < m_corners.size(); ++index)
             {
-                if (m_corners[index] == nullptr)
+                const QPointer<RoundedCornerSurface> corner = m_corners[index];
+                if (!corner)
                 {
                     continue;
                 }
                 const QRect geometry(positions[index], QSize(radius, radius));
-                const bool geometryChanged = m_corners[index]->geometry() != geometry;
-                if (geometryChanged) m_corners[index]->setGeometry(geometry);
-                m_corners[index]->setVisible(m_enabled && radius > 0 && m_view->isVisible());
+                const bool geometryChanged = corner->geometry() != geometry;
+                if (geometryChanged) corner->setGeometry(geometry);
+                if (!lifetime || !corner || !m_view) return;
+                corner->setVisible(m_enabled && radius > 0 && m_view->isVisible());
+                if (!lifetime || !corner || !m_view) return;
                 if (m_enabled && (repaintSurface || geometryChanged))
                 {
-                    m_corners[index]->raise();
-                    m_corners[index]->update();
+                    corner->raise();
+                    if (!lifetime || !corner || !m_view) return;
+                    corner->update();
                 }
             }
         }
@@ -242,6 +275,8 @@ namespace
         bool m_enabled = false; // 显式开关，由 TablePresentation 的普通/自绘判断设置。
         bool m_pending = false; // 合并 Show、Resize 和主题变更产生的重复请求。
         bool m_surfaceDirty = true; // 首次展示、重挂或主题变化才强制重采微型背景。
+        bool m_geometryDirty = true; // Paint兜底只摆放已存在的四角，不写业务样式或布局。
+        quint64 m_scheduleGeneration = 0; // 已同步消费的旧定时任务自动失效。
     };
 }
 

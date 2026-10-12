@@ -696,7 +696,15 @@ void KernelDock::showTabInitializingProgress(const int tabIndex, const QString& 
     m_tabInitializingStatusLabel->setText(kernelText("kernel.main.status.initializing", QStringLiteral("正在初始化 %1 页面...")).arg(titleText));
     m_tabInitializingStatusLabel->setVisible(true);
     m_tabInitializingProgressBar->setVisible(true);
-    QApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
+    // 仅把等待反馈同步画出来，不能派发全应用事件让尚在构造的页、主题回调先绘制半成品。
+    if (m_tabInitializingStatusLabel->isVisible())
+    {
+        m_tabInitializingStatusLabel->repaint();
+    }
+    if (m_tabInitializingProgressBar->isVisible())
+    {
+        m_tabInitializingProgressBar->repaint();
+    }
 }
 
 void KernelDock::hideTabInitializingProgress()
@@ -1452,6 +1460,7 @@ void KernelDock::openKnowledgeRoute(const QString& routeId)
 
 void KernelDock::ensureTabInitialized(const int tabIndex)
 {
+    const ks::ui::ScopedWidgetThemePreparation themePreparation(m_tabWidget); // 全部分支挂载完再准备首帧。
     if (tabIndex == m_objectNamespaceTabIndex && !m_objectNamespaceTabInitialized)
     {
         showTabInitializingProgress(tabIndex, kernelText("kernel.main.tab.object_namespace.title", QStringLiteral("对象命名空间")));
@@ -1574,6 +1583,7 @@ void KernelDock::ensureTabInitialized(const int tabIndex)
 
 void KernelDock::ensureIoManagementTabInitialized(const int innerTabIndex)
 {
+    const ks::ui::ScopedWidgetThemePreparation themePreparation(m_ioManagementInnerTabWidget);
     if (innerTabIndex == m_ioSsdtTabIndex && !m_ssdtTabInitialized)
     {
         showTabInitializingProgress(m_ioManagementTabIndex, QStringLiteral("SSDT"));
