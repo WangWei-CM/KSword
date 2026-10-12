@@ -403,7 +403,8 @@ void KernelDock::initializeUi()
     m_rootLayout->addWidget(m_tabInitializingProgressBar, 0);
 
     m_tabWidget = new QTabWidget(this);
-    ks::ui::StylePageTabsContentFrame(m_tabWidget);
+    // 主Tab承接方形工作区；纯分类子Tab按单一承载关系继承这层外围过渡。
+    ks::ui::StyleSquarePageTabsFrame(m_tabWidget);
     ks::ui::InstallParentTabTransition(m_tabWidget);
     m_tabWidget->setIconSize(QSize(16, 16));
     m_rootLayout->addWidget(m_tabWidget, 1);

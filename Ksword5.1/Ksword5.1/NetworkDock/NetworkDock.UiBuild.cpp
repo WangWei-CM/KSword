@@ -26,7 +26,8 @@ void NetworkDock::initializeUi()
     // - 网络功能页签数量已较多，改成顶部横排后避免左侧竖排标签挤出纵向滚动条；
     // - 保留统一 QTabWidget 结构，不改变各功能页内部实现。
     m_sideTabWidget = new QTabWidget(this);
-    ks::ui::StylePageTabsContentFrame(m_sideTabWidget);
+    // 网络主Tab直接占满方形工作区，页内连接/审计结果Tab不重复补外角。
+    ks::ui::StyleSquarePageTabsFrame(m_sideTabWidget);
     m_sideTabWidget->setTabPosition(QTabWidget::North);
     m_sideTabWidget->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     m_rootLayout->addWidget(m_sideTabWidget, 1);

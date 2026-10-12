@@ -3493,6 +3493,8 @@ void OtherDock::initializeUi()
 
     // 初始化一次桌面列表，确保打开页签后立即可见。
     refreshDesktopList();
+    // 页头、内容Tab及状态栏共享同一外壳，四角只放在整页根并保留原4px留白。
+    ks::ui::StyleWorkspaceContentFrame(this, 4);
 }
 
 void OtherDock::initializeConnections()

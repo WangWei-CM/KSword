@@ -444,7 +444,7 @@ RegistryDock::~RegistryDock()
 void RegistryDock::initializeUi()
 {
     m_rootLayout = new QVBoxLayout(this);
-    m_rootLayout->setContentsMargins(4, 4, 4, 4);
+    m_rootLayout->setContentsMargins(0, 0, 0, 0); // 主Tab统一外围6px，根层不再重复内缩外框。
     m_rootLayout->setSpacing(6);
 
     m_registryTabWidget = new QTabWidget(this);

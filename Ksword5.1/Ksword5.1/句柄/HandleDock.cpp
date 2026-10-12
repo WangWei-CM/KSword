@@ -527,7 +527,8 @@ void HandleDock::initializeUi()
     m_rootLayout->setSpacing(6);
 
     m_tabWidget = new QTabWidget(this);
-    ks::ui::StylePageTabsContentFrame(m_tabWidget);
+    // 分类主Tab直接承接ADS方框，表格自己的圆角不额外补角。
+    ks::ui::StyleSquarePageTabsFrame(m_tabWidget);
     m_rootLayout->addWidget(m_tabWidget, 1);
 
     initializeHandleListTab();

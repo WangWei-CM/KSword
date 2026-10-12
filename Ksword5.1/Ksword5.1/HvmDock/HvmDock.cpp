@@ -478,6 +478,8 @@ void HvmDock::initializeUi()
     // 三步生命周期保持完整，只有阅读层级与明确色块更新。
     ks::ui::StyleWorkspacePage(this, 8);
     ks::ui::StyleParameterFields(controlPanel);
+    // 生命周期页头属于同一个方形工作区，只在整页根绘过渡，沿用已设置的8px留白。
+    ks::ui::StyleWorkspaceContentFrame(this, 8);
 
     m_pollTimer = new QTimer(this);
     m_pollTimer->setInterval(kStatePollIntervalMilliseconds);

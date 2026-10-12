@@ -120,6 +120,8 @@ MinidumpDock::MinidumpDock(QWidget* parent)
     setStatus(
         "minidump.status.idle",
         "选择一个转储文件开始解析：支持应用崩溃 MDMP 与系统蓝屏 DMP。");
+    // 转储页头与结果共用整页外框，结果Tab本身不制造外圆，原8px留白保持一致。
+    ks::ui::StyleWorkspaceContentFrame(this, 8);
 }
 
 MinidumpDock::~MinidumpDock()

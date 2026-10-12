@@ -151,6 +151,8 @@ ScannerDock::ScannerDock(QWidget* parent)
     buildUi();
     retranslateUi();
     setStatus("scanner.status.ready", "请选择 PE、ELF、Mach-O 或 ISO9660 镜像开始扫描。");
+    // 独立方形宿主下由整页承担过渡；嵌入杂项主框时共享层保留外层唯一过渡。
+    ks::ui::StyleWorkspaceContentFrame(this, 8);
 }
 
 ScannerDock::~ScannerDock()

@@ -87,8 +87,8 @@ RegistryAccessContext RegistryDock::accessContextForPath(const QString& path) co
 
 void RegistryDock::initializeWorkbenchControls()
 {
-    // 工作台主内容、结果页签及路径标签共享低对比普通 Tab 外观。
-    ks::ui::StylePageTabsContentFrame(m_registryTabWidget);
+    // 主Tab承接方形工作区；右侧结果Tab只保留留白，不在已有内容区里另画外圆。
+    ks::ui::StyleSquarePageTabsFrame(m_registryTabWidget);
     ks::ui::StylePageTabsContentFrame(m_rightTabWidget);
     const auto fallbackIcon = [](QPushButton* button, QStyle::StandardPixmap icon) {
         if (button->icon().pixmap(button->iconSize()).isNull()) button->setIcon(button->style()->standardIcon(icon));

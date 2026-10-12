@@ -176,6 +176,8 @@ void StartupDock::initializeUi()
 
     m_rootLayout->addWidget(m_toolbarWidget, 0);
     m_rootLayout->addWidget(m_sideTabWidget, 1);
+    // 工具条和分类Tab共同组成整页，外角放在页根并沿用原四边4px。
+    ks::ui::StyleWorkspaceContentFrame(this, 4);
 }
 
 void StartupDock::initializeToolbar()

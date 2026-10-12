@@ -366,7 +366,8 @@ void DriverDock::initializeUi()
     m_rootLayout->setSpacing(6);
 
     m_tabWidget = new QTabWidget(this);
-    ks::ui::StylePageTabsContentFrame(m_tabWidget);
+    // 根布局只有主Tab，由它承接ADS方角；对象详情Tab不重复登记外角。
+    ks::ui::StyleSquarePageTabsFrame(m_tabWidget);
     m_rootLayout->addWidget(m_tabWidget, 1);
 
     initializeServiceTab();

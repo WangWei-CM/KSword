@@ -3451,6 +3451,8 @@ void WindowDock::initializeUi()
         innerTabWidget->addTab(group, QStringLiteral("设备表"));
     }
     m_tabWidget->addTab(m_displayPage, QStringLiteral("显示"));
+    // 审计工具带位于Tab之外，只在整个窗口工作区根衔接方框，保留四边4px。
+    ks::ui::StyleWorkspaceContentFrame(this, 4);
 }
 
 void WindowDock::initializeConnections()

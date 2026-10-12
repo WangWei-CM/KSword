@@ -65,7 +65,8 @@ void MiscDock::initializeUi()
 
     // 主 Tab 承载所有杂项工具，保持 Dock 外层只暴露一个统一入口。
     m_mainTabWidget = new QTabWidget(this);
-    ks::ui::StylePageTabsContentFrame(m_mainTabWidget);
+    // 只有杂项主Tab承接ADS方框，惰性子页的结果区域不另造外圆。
+    ks::ui::StyleSquarePageTabsFrame(m_mainTabWidget);
     m_mainTabWidget->setObjectName(QStringLiteral("ksMiscDockMainTab"));
     m_rootLayout->addWidget(m_mainTabWidget, 1);
 

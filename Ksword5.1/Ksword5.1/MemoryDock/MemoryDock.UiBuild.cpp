@@ -172,6 +172,8 @@ void MemoryDock::initializeUi()
 
     // 状态栏建立之后再统一下发一次语义色，保证底部标签也走同一条路径。
     applyMemoryDockSemanticStyles();
+    // 方形宿主包住的是完整内存页，过渡覆盖页头/工具条/状态栏外围，不落在中部Tab。
+    ks::ui::StyleWorkspaceContentFrame(this, 6);
 }
 
 void MemoryDock::applyMemoryDockSemanticStyles()

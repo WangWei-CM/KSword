@@ -467,6 +467,7 @@ void ProcessDock::initializeCrossViewPage()
     m_crossViewPageLayout->addWidget(splitter, 1);
 
     QTabWidget* innerTabs = new QTabWidget(splitter);
+    // 分割器内的结果Tab只有留白；外围方角已经由进程主Tab承接，不再嵌套外圆。
     ks::ui::StylePageTabsContentFrame(innerTabs);
     m_processCrossViewTable = new ks::ui::VisibleTableWidget(innerTabs);
     m_threadCrossViewTable = new ks::ui::VisibleTableWidget(innerTabs);

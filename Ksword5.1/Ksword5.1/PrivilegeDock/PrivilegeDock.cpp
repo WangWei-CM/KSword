@@ -274,7 +274,8 @@ void PrivilegeDock::initializeUi()
 
     m_tabWidget = new QTabWidget(this);
     m_tabWidget->setTabPosition(QTabWidget::West);
-    ks::ui::StylePageTabsContentFrame(m_tabWidget);
+    // 侧向主Tab负责方形工作区；纯账户子Tab由共享层沿单一承载关系继承。
+    ks::ui::StyleSquarePageTabsFrame(m_tabWidget);
     m_rootLayout->addWidget(m_tabWidget, 1);
 
     initializeAccountTab();

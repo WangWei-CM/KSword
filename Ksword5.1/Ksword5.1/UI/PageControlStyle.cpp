@@ -117,21 +117,80 @@ namespace
         return page;
     }
 
-    // 页面只承载另一组已登记Tab时，由最内层提供一次留白，避免逐级累加。
+    // 只识别整个当前页交给下一组Tab的结构；工具条、splitter或并列面板不是转交。
+    QTabWidget* delegatedPageTabs(QTabWidget* tabs)
+    {
+        QWidget* owner = pageLayoutOwner(tabs->currentWidget());
+        QLayout* layout = owner ? owner->layout() : nullptr;
+        auto* nested = qobject_cast<QTabWidget*>(owner); // 也支持直接把下一组Tab作为当前页。
+        if (!nested && layout && layout->count() == 1)
+        {
+            nested = qobject_cast<QTabWidget*>(layout->itemAt(0)->widget());
+        }
+        return nested && nested->property("ksword_page_tabs_content_inset").toInt() > 0 ? nested : nullptr;
+    }
+
+    // 留白是独立职责，内嵌结果Tab也可保留；不能据此推断外面存在方角框架。
     int pageFrameInset(QTabWidget* tabs)
     {
         const int inset = tabs->property("ksword_page_tabs_content_inset").toInt();
-        QWidget* owner = pageLayoutOwner(tabs->currentWidget());
-        QLayout* layout = owner ? owner->layout() : nullptr;
-        if (inset > 0 && layout && layout->count() == 1)
+        return inset > 0 && delegatedPageTabs(tabs) ? 0 : inset;
+    }
+
+    // 方框资格只由明确主导航提供，沿纯单子Tab链传递；内嵌结果区不能借祖先方框画角。
+    bool hasSquareTabBoundary(QTabWidget* tabs)
+    {
+        for (int depth = 0; tabs && depth < 16; ++depth)
         {
-            auto* nested = qobject_cast<QTabWidget*>(layout->itemAt(0)->widget());
-            if (nested && nested->property("ksword_page_tabs_content_inset").toInt() > 0)
+            QTabWidget* outerTabs = nullptr; // 只检查最近的Tab宿主，不跨过一层失败的边界。
+            for (QWidget* ancestor = tabs->parentWidget(); ancestor && !ancestor->isWindow();
+                ancestor = ancestor->parentWidget())
             {
-                return 0;
+                if (ancestor->property("ksword_workspace_content_frame").toBool()
+                    || ancestor->property("ksword_primary_content_panel").toBool()
+                    || ancestor->property("ksword_parameter_surface").toBool())
+                {
+                    return false; // 已有整页或圆角卡片包住它，不能凭自己的登记再造一圈外框。
+                }
+                outerTabs = qobject_cast<QTabWidget*>(ancestor);
+                if (outerTabs)
+                {
+                    break;
+                }
+            }
+            if (!outerTabs)
+            {
+                return tabs->property("ksword_square_page_frame").toBool();
+            }
+            if (delegatedPageTabs(outerTabs) != tabs)
+            {
+                return false;
+            }
+            tabs = outerTabs;
+        }
+        return false;
+    }
+
+    // 独立页根挂进已有页面或圆角面板后已不是最外方框，不能再在内部叠一组外圆。
+    bool hasSquareWorkspaceBoundary(QWidget* page, int inset)
+    {
+        if (inset <= 0 || !page->layout()
+            || page->layout()->contentsMargins() != QMargins(inset, inset, inset, inset))
+        {
+            return false; // 被外围框架接管为零边距后，原页根不再拥有外角。
+        }
+        for (QWidget* ancestor = page->parentWidget(); ancestor && !ancestor->isWindow();
+            ancestor = ancestor->parentWidget())
+        {
+            if (ancestor->property("ksword_page_tabs_content_inset").toInt() > 0
+                || ancestor->property("ksword_workspace_content_frame").toBool()
+                || ancestor->property("ksword_primary_content_panel").toBool()
+                || ancestor->property("ksword_parameter_surface").toBool())
+            {
+                return false;
             }
         }
-        return inset;
+        return true;
     }
 
     // 普通pane保留原页面留白；只有明确登记的框架才由pane提供等边间距。
@@ -241,6 +300,8 @@ namespace
             switch (event->type())
             {
             case QEvent::Resize:
+            case QEvent::Move:
+            case QEvent::LayoutRequest:
             case QEvent::Hide:
                 schedule();
                 break;
@@ -252,6 +313,7 @@ namespace
                 if (m_geometryDirty) refreshNow();
                 break;
             case QEvent::StyleChange:
+            case QEvent::ParentChange:
             case QEvent::PaletteChange:
             case QEvent::ApplicationPaletteChange:
             case QEvent::DynamicPropertyChange:
@@ -296,7 +358,8 @@ namespace
             const QRect outer = m_page->rect(); // 页根就是最外层边界，不以内侧内容定位。
             const int radius = kPageCornerRadius + m_inset;
             const QVariant surface = m_page->window()->property("ksword_main_surface_hierarchy");
-            const bool visible = m_page->isVisible() && (!surface.isValid() || surface.toBool())
+            const bool visible = hasSquareWorkspaceBoundary(m_page, m_inset)
+                && m_page->isVisible() && (!surface.isValid() || surface.toBool())
                 && outer.width() >= radius * 2 && outer.height() >= radius * 2;
             for (int index = 0; index < 4; ++index)
             {
@@ -627,13 +690,14 @@ namespace
             const int inset = pageFrameInset(m_tabs);
             const QVariant mainSurface = m_tabs->window()->property("ksword_main_surface_hierarchy");
             const bool opaqueFrame = !mainSurface.isValid() || mainSurface.toBool(); // 穿透模式不补实色角片。
+            const bool squareBoundary = hasSquareTabBoundary(m_tabs); // 有留白不等于外面有方框。
             const int outerRadius = kPageCornerRadius + inset; // 8+6=14，圆角处也保持6px径向间隔。
             const QRect opening = page ? QRect(page->mapTo(m_tabs, QPoint()), page->size())
                 .adjusted(-inset, -inset, inset, inset) : QRect();
             for (int index = 0; index < 4; ++index)
             {
                 const QPointer<PageContentCorner> corner = m_contentCorners[index];
-                const bool visible = inset > 0 && opaqueFrame && page && m_tabs->isVisible()
+                const bool visible = squareBoundary && inset > 0 && opaqueFrame && page && m_tabs->isVisible()
                     && opening.width() >= outerRadius * 2 && opening.height() >= outerRadius * 2;
                 if (!corner) continue;
                 if (!visible)
@@ -823,6 +887,17 @@ namespace ks::ui
         tabs->setProperty("ksword_page_tabs_content_inset", qMax(0, inset));
         StylePageTabs(tabs);
         applyPaneStyle(tabs);
+    }
+
+    void StyleSquarePageTabsFrame(QTabWidget* tabs, int inset)
+    {
+        if (!tabs)
+        {
+            return;
+        }
+        // 仅真正直接承接方形工作区的主导航调用；普通结果Tab不声明这项资格。
+        tabs->setProperty("ksword_square_page_frame", true);
+        StylePageTabsContentFrame(tabs, inset);
     }
 
     void StyleWorkspaceContentFrame(QWidget* page, int inset)

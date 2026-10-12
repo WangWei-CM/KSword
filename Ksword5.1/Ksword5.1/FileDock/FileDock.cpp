@@ -13039,7 +13039,8 @@ void FileDock::initializeUi()
     m_rootTabWidget = new QTabWidget(this);
     m_rootTabWidget->setTabPosition(QTabWidget::West);
     m_rootTabWidget->setDocumentMode(true);
-    ks::ui::StylePageTabsContentFrame(m_rootTabWidget);
+    // 竖向主Tab直接承接ADS方形外壳，内部双栏仍各自保持原有圆角。
+    ks::ui::StyleSquarePageTabsFrame(m_rootTabWidget);
     m_rootLayout->addWidget(m_rootTabWidget, 1);
 
     m_fileManagerPage = new QWidget(m_rootTabWidget);

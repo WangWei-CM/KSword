@@ -42,11 +42,15 @@ namespace ks::ui
     // 普通QTabWidget仅统一导航底面与动画；详情/属性窗口保留自身布局。
     void StylePageTabs(QTabWidget* tabs);
 
-    // 明确页面选择等边留白和最外框四角；外半径=8+inset，无描边。
+    // 明确页面选择等边留白；普通嵌入内容区不因此获得外角。
     // 接管直接页面或项目滚动壳内容的外围layout边距；内部卡片不动，纯嵌套Tab只计最内层。
     void StylePageTabsContentFrame(QTabWidget* tabs, int inset = 6);
 
-    // 无内层Tab的主页面明确登记页根外框，根布局四边统一，内层卡片布局保持原样。
+    // 主导航明确承接方形工作区时，连接内部圆角与最外框；纯单子Tab可继承此资格。
+    // 外半径=8+inset，无描边；有工具条或分隔区的复合页改在真正页根登记。
+    void StyleSquarePageTabsFrame(QTabWidget* tabs, int inset = 6);
+
+    // 复合主页面明确登记方形页根；挂到已有页面框架内时不再绘内部外角。
     void StyleWorkspaceContentFrame(QWidget* page, int inset = 6);
 
     // 子级保持轻底面与左缩进，顶部直接接父栏；原子栏方向动画继续使用原入口。

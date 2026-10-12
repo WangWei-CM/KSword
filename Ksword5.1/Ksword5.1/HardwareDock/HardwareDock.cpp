@@ -4446,7 +4446,8 @@ void HardwareDock::initializeUi()
     // - 页签按内容宽度排列，空间不足时使用滚动按钮，避免强行压缩文字；
     // - 用户可见名称统一使用清晰中文，内部协议缩写放到页面说明中。
     m_sideTabWidget = new QTabWidget(this);
-    ks::ui::StylePageTabsContentFrame(m_sideTabWidget);
+    // 硬件分类主Tab占满方形工作区，仅此层负责内容外围过渡。
+    ks::ui::StyleSquarePageTabsFrame(m_sideTabWidget);
     configureCompressibleWidget(m_sideTabWidget, QSizePolicy::Expanding, QSizePolicy::Expanding);
     m_sideTabWidget->setTabPosition(QTabWidget::North);
     m_sideTabWidget->setDocumentMode(true);

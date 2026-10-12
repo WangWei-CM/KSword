@@ -4902,7 +4902,8 @@ void MonitorDock::initializeUi()
     m_rootLayout->setSpacing(6);
 
     m_sideTabWidget = new QTabWidget(this);
-    ks::ui::StylePageTabsContentFrame(m_sideTabWidget);
+    // 主Tab直接承接监控工作区方框，页内事件/结果Tab只保留自身留白。
+    ks::ui::StyleSquarePageTabsFrame(m_sideTabWidget);
     m_rootLayout->addWidget(m_sideTabWidget, 1);
 
     m_processTraceWidget = new ProcessTraceMonitorWidget(m_sideTabWidget);
