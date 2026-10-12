@@ -195,6 +195,9 @@ void MinidumpDock::buildUi()
     m_symbolPathEdit = new QLineEdit(this);
     m_symbolPathEdit->setClearButtonEnabled(true);
     m_symbolPathEdit->setStyleSheet(inputStyle);
+    // 文件路径和符号路径采用普通参数输入，不套搜索语义或改变加载时机。
+    ks::ui::StyleStandaloneInput(m_pathEdit);
+    ks::ui::StyleStandaloneInput(m_symbolPathEdit);
     symbolLayout->addWidget(m_symbolPathLabel);
     symbolLayout->addWidget(m_symbolPathEdit, 1);
     ks::ui::NormalizeToolbarRow(symbolLayout);
@@ -218,7 +221,7 @@ void MinidumpDock::buildUi()
     // m_resultTabs：解析结果页签；具体页在 renderResult 里按数据动态挂载。
     m_resultTabs = new QTabWidget(this);
     m_resultTabs->setDocumentMode(true);
-    ks::ui::StylePageTabs(m_resultTabs);
+    ks::ui::StylePageTabsContentFrame(m_resultTabs);
     rootLayout->addWidget(m_resultTabs, 1);
 
     // 预创建全部表格与报告编辑器：语言切换/重复解析时复用，不反复销毁。

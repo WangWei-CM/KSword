@@ -4,6 +4,7 @@
 #include "../UI/ToolbarMetrics.h"
 #include "../UI/PageControlStyle.h"
 #include "../UI/PrimaryPageStyle.h"
+#include "../UI/TablePresentation.h"
 #include "../UI/FlatButtonTheme.h"
 #include "../UI/ThemeBinding.h"
 
@@ -424,7 +425,8 @@ void ProcessDock::initializeCrossViewPage()
     // 返回：无。
     m_crossViewPage = new QWidget(this);
     m_crossViewPageLayout = new QVBoxLayout(m_crossViewPage);
-    m_crossViewPageLayout->setContentsMargins(6, 6, 6, 6);
+    // 与进程/线程工具带保持相同的页签接缝，结果区仍保留原始左右留白。
+    m_crossViewPageLayout->setContentsMargins(6, 0, 6, 6);
     m_crossViewPageLayout->setSpacing(6);
 
     // 来源矩阵工具区保持一行，用轻底面分开查询条件与结果。
@@ -465,7 +467,7 @@ void ProcessDock::initializeCrossViewPage()
     m_crossViewPageLayout->addWidget(splitter, 1);
 
     QTabWidget* innerTabs = new QTabWidget(splitter);
-    ks::ui::StylePageTabs(innerTabs);
+    ks::ui::StylePageTabsContentFrame(innerTabs);
     m_processCrossViewTable = new ks::ui::VisibleTableWidget(innerTabs);
     m_threadCrossViewTable = new ks::ui::VisibleTableWidget(innerTabs);
     // 两张来源矩阵均为独立 R0 证据，保留完整快照对比。
@@ -492,6 +494,8 @@ void ProcessDock::initializeCrossViewPage()
         table->verticalHeader()->setVisible(false);
         table->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
         table->horizontalHeader()->setSectionResizeMode(columnIndex(CrossViewColumn::Detail), QHeaderView::Stretch);
+        // 两张来源表保留独立圆角外壳，内部冻结窗格仍由共享层保持连体方角。
+        ks::ui::ApplyTablePresentation(table);
     }
     installCrossViewContextMenu(
         m_processCrossViewTable,

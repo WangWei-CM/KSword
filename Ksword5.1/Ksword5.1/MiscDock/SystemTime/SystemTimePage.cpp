@@ -1,5 +1,7 @@
 #include "SystemTimePage.h"
 #include "../../UI/PrimaryPageStyle.h"
+#include "../../UI/ParameterWorkspace.h"
+#include <QFormLayout>
 #include "../../UI/ToolbarMetrics.h"
 
 #include "../../ArkDriverClient/ArkDriverClient.h"
@@ -191,8 +193,15 @@ namespace ks::misc
     void SystemTimePage::initializeUi()
     {
         auto* rootLayout = new QVBoxLayout(this);
-        rootLayout->setContentsMargins(12, 12, 12, 12);
+        ks::ui::StyleWorkspacePage(this, 0);
         rootLayout->setSpacing(10);
+
+        // 风险说明保留独立 16px 留白，工作区不再叠加外层边距。
+        auto* introduction = new QWidget(this); // 固定说明区不随参数滚走。
+        auto* introductionLayout = new QVBoxLayout(introduction);
+        introductionLayout->setContentsMargins(16, 16, 16, 0);
+        introductionLayout->setSpacing(8);
+        rootLayout->addWidget(introduction);
 
         // 永久警告不随确认消失，确保活动状态下始终能看到风险边界。
         m_warningLabel = new QLabel(
@@ -204,7 +213,7 @@ namespace ks::misc
             this);
         m_warningLabel->setWordWrap(true);
         applyWarningBannerStyle();
-        rootLayout->addWidget(m_warningLabel);
+        introductionLayout->addWidget(m_warningLabel);
 
         m_persistenceLabel = new QLabel(
             QStringLiteral(
@@ -215,7 +224,12 @@ namespace ks::misc
         m_persistenceLabel->setStyleSheet(
             QStringLiteral("color:%1;")
                 .arg(KswordTheme::TextSecondaryHex()));
-        rootLayout->addWidget(m_persistenceLabel);
+        introductionLayout->addWidget(m_persistenceLabel);
+
+        // 后端与倍率独立滚动；状态和固定恢复按钮不随参数滚走。
+        auto* workspace = new ks::ui::ParameterWorkspace(this, 500);
+        workspace->useWideParameterLayout(62);
+        rootLayout->addWidget(workspace, 1);
 
         // 后端组要求用户明确选择 Hyper-V 共享页或原 HAL 兼容路径。
         auto* backendGroup = new QGroupBox(
@@ -260,7 +274,8 @@ namespace ks::misc
         backendLayout->addWidget(hypervDescription);
         backendLayout->addWidget(m_halBackendRadio);
         backendLayout->addWidget(halDescription);
-        rootLayout->addWidget(backendGroup);
+        ks::ui::StyleParameterSection(backendGroup);
+        workspace->parameters()->addWidget(backendGroup);
         // 模式组明确区分兼容定位和写入前增强校验定位。
         auto* schemeGroup = new QGroupBox(
             QStringLiteral("实现模式"),
@@ -303,7 +318,8 @@ namespace ks::misc
         schemeLayout->addWidget(compatDescription);
         schemeLayout->addWidget(m_guardedResolutionRadio);
         schemeLayout->addWidget(guardedDescription);
-        rootLayout->addWidget(schemeGroup);
+        ks::ui::StyleParameterSection(schemeGroup);
+        workspace->parameters()->addWidget(schemeGroup);
 
         // 倍率组只提供同一原理下的 N 倍加速和 1/N 减速。
         auto* controlGroup = new QGroupBox(
@@ -311,7 +327,8 @@ namespace ks::misc
             this);
         auto* controlLayout = new QVBoxLayout(controlGroup);
         ks::ui::StylePrimaryGroup(controlGroup);
-        auto* modeLayout = new QHBoxLayout();
+        auto* modeLayout = new QFormLayout();
+        modeLayout->setRowWrapPolicy(QFormLayout::WrapLongRows);
         m_speedUpRadio = new QRadioButton(
             QStringLiteral("加速 N 倍"),
             controlGroup);
@@ -327,15 +344,9 @@ namespace ks::misc
         m_factorSpin->setSuffix(QStringLiteral(" ×"));
         m_factorSpin->setToolTip(
             QStringLiteral("设置 2 到 64 的整数倍率"));
-        modeLayout->addWidget(m_speedUpRadio);
-        modeLayout->addWidget(m_slowDownRadio);
-        // 单行参数的组间距由共享工具条统一提供。
-        modeLayout->addWidget(new QLabel(
-            QStringLiteral("倍率："),
-            controlGroup));
-        modeLayout->addWidget(m_factorSpin);
-        modeLayout->addStretch(1);
-        ks::ui::NormalizeToolbarRow(modeLayout);
+        modeLayout->addRow(m_speedUpRadio);
+        modeLayout->addRow(m_slowDownRadio);
+        modeLayout->addRow(QStringLiteral("倍率："), m_factorSpin);
         controlLayout->addLayout(modeLayout);
 
         m_acknowledgeCheck = new QCheckBox(
@@ -377,12 +388,14 @@ namespace ks::misc
         }
         buttonLayout->addWidget(m_refreshButton);
         buttonLayout->addWidget(m_timeSyncButton);
-        buttonLayout->addWidget(m_applyButton);
-        buttonLayout->addWidget(m_resetButton);
+        workspace->actions()->addWidget(m_applyButton);
+        workspace->actions()->addWidget(m_resetButton);
+        workspace->actions()->addStretch(1);
         buttonLayout->addStretch(1);
         ks::ui::NormalizeToolbarRow(buttonLayout);
-        controlLayout->addLayout(buttonLayout);
-        rootLayout->addWidget(controlGroup);
+        workspace->results()->addLayout(buttonLayout);
+        ks::ui::StyleParameterSection(controlGroup);
+        workspace->parameters()->addWidget(controlGroup);
 
         // 状态组同时显示用户结论与可核对的解析证据。
         auto* statusGroup = new QGroupBox(
@@ -417,8 +430,13 @@ namespace ks::misc
         statusLayout->addWidget(m_backendLabel);
         statusLayout->addWidget(m_diagnosticLabel);
         statusLayout->addWidget(m_operationLabel);
-        rootLayout->addWidget(statusGroup);
-        rootLayout->addStretch(1);
+        ks::ui::StyleParameterSection(statusGroup);
+        workspace->results()->addWidget(statusGroup);
+        workspace->results()->addStretch(1);
+        // 说明较多的后端选择与实际倍率互补并排；风险确认始终展开。
+        ks::ui::ArrangeParameterColumns(workspace->parameters(),
+            { backendGroup, schemeGroup }, { controlGroup }, 300);
+        workspace->finish();
 
         m_refreshTimer = new QTimer(this);
         m_refreshTimer->setInterval(

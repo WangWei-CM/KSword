@@ -378,17 +378,21 @@ namespace
         detailDialog.setStyleSheet(KswordTheme::OpaqueDialogStyle(detailDialog.objectName()));
 
         QVBoxLayout* rootLayout = new QVBoxLayout(&detailDialog);
+        ks::ui::ConfigureDetailDialogRoot(&detailDialog);
+        rootLayout->addWidget(ks::ui::CreateDetailSummaryHeader(&detailDialog,
+            QFileInfo(filePath).fileName(), QDir::toNativeSeparators(filePath),
+            QIcon(QStringLiteral(":/Icon/process_details.svg"))));
         QTabWidget* tabWidget = new QTabWidget(&detailDialog);
 
         ks::ui::StructuredFieldView* generalEditor = new ks::ui::StructuredFieldView(&detailDialog);
 
         generalEditor->setDocument(callbackEnumBuildModuleFileGeneralText(filePath));
-        tabWidget->addTab(generalEditor, kernelText("kernel.callback.enum.file.tab.general", QStringLiteral("常规信息")));
+        tabWidget->addTab(ks::ui::CreateDetailFieldProjection(generalEditor, tabWidget), kernelText("kernel.callback.enum.file.tab.general", QStringLiteral("常规信息")));
 
         ks::ui::StructuredFieldView* peEditor = new ks::ui::StructuredFieldView(&detailDialog);
 
         peEditor->setDocument(file_dock_detail::buildPeAnalysisDocument(filePath));
-        tabWidget->addTab(peEditor, kernelText("kernel.callback.enum.file.tab.pe", QStringLiteral("PE信息")));
+        tabWidget->addTab(ks::ui::CreateDetailFieldProjection(peEditor, tabWidget), kernelText("kernel.callback.enum.file.tab.pe", QStringLiteral("PE信息")));
 
         ks::ui::SetDetailTabGroups(tabWidget, {{ks::ui::DetailNavigationKind::General, {0}},
             {ks::ui::DetailNavigationKind::Content, {1}}});
@@ -397,6 +401,7 @@ namespace
         QObject::connect(buttonBox, &QDialogButtonBox::rejected, &detailDialog, &QDialog::reject);
         QObject::connect(buttonBox, &QDialogButtonBox::accepted, &detailDialog, &QDialog::accept);
         rootLayout->addWidget(buttonBox, 0);
+        ks::ui::InstallDetailWindowFramework(&detailDialog);
         ks::ui::ApplyDetailDialogChrome(&detailDialog);
         detailDialog.exec();
     }
@@ -2071,7 +2076,7 @@ void KernelDock::initializeCallbackEnumTab()
     m_callbackEnumLayout->addWidget(splitter, 1);
 
     QTabWidget* callbackViewTabs = new QTabWidget(splitter);
-    ks::ui::StylePageTabs(callbackViewTabs);
+    ks::ui::StylePageTabsContentFrame(callbackViewTabs);
     m_callbackEnumTable = new ks::ui::VisibleTableWidget(callbackViewTabs);
     // 内核回调新增、消失与归属变化需要完整快照比较。
     ks::ui::SetTableActionBarMode(m_callbackEnumTable, ks::ui::TableActionBarMode::Full);

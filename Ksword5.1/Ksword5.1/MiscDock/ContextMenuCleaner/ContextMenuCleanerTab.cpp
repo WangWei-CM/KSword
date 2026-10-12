@@ -1,5 +1,7 @@
 #include "ContextMenuCleanerTab.h"
 #include "../../UI/PageControlStyle.h"
+#include "../../UI/PrimaryPageStyle.h"
+#include "../../UI/FlatButtonTheme.h"
 #include "../../UI/ToolbarMetrics.h"
 #include "../../Framework/PrivilegeElevationPrompt.h"
 #include "../../UI/VisibleTableWidget.h"
@@ -50,15 +52,16 @@ void ContextMenuCleanerTab::initializeUi()
 {
     // 根布局：上方风险说明，下方七类 Shell 关联子页。
     m_rootLayout = new QVBoxLayout(this);
-    m_rootLayout->setContentsMargins(6, 6, 6, 6);
-    m_rootLayout->setSpacing(6);
+    ks::ui::StyleWorkspacePage(this);
+    m_rootLayout->setSpacing(16);
 
     // 页面级工具栏：整份菜单备份 / 恢复备份 / 当前分类耗时测量。
     // 放在子页签上方，因为这三件事都是跨分类的操作（备份与恢复覆盖全部七类）。
     m_pageToolbar = new QWidget(this);
     QHBoxLayout* pageToolbarLayout = new QHBoxLayout(m_pageToolbar);
-    pageToolbarLayout->setContentsMargins(0, 0, 0, 0);
+    pageToolbarLayout->setContentsMargins(16, 12, 16, 12);
     pageToolbarLayout->setSpacing(6);
+    ks::ui::StylePrimaryToolbar(m_pageToolbar);
 
     m_backupButton = new QPushButton(QIcon(QStringLiteral(":/Icon/log_copy.svg")),
         QStringLiteral("备份右键菜单"), m_pageToolbar);
@@ -82,13 +85,18 @@ void ContextMenuCleanerTab::initializeUi()
     m_latencyButton->setVisible(false);
     m_latencyStopButton->setVisible(false);
     m_latencyStatusLabel = new QLabel(QStringLiteral("尚未测量。"), m_pageToolbar);
+    // 测量结果可在剩余工具区换行，长状态不抬高整个专业页的最小宽度。
+    m_latencyStatusLabel->setWordWrap(true);
+    m_latencyStatusLabel->setMinimumWidth(0);
     m_latencyStatusLabel->setStyleSheet(
         QStringLiteral("QLabel{color:%1;}").arg(KswordTheme::TextSecondaryHex()));
 
-    m_backupButton->setStyleSheet(KswordTheme::ThemedButtonStyle());
-    m_restoreBackupButton->setStyleSheet(KswordTheme::ThemedButtonStyle());
-    m_latencyButton->setStyleSheet(KswordTheme::ThemedButtonStyle());
-    m_latencyStopButton->setStyleSheet(KswordTheme::ThemedButtonStyle());
+    // 常规操作明确实底，测量的可见性、恢复确认和后台状态仍由业务维护。
+    for (QPushButton* button : { m_backupButton, m_restoreBackupButton, m_latencyButton, m_latencyStopButton })
+    {
+        ks::ui::ApplyFlatButtonTheme(button, ks::ui::FlatButtonTone::Neutral,
+            ks::ui::FlatButtonAppearance::Solid);
+    }
 
     pageToolbarLayout->addWidget(m_backupButton);
     pageToolbarLayout->addWidget(m_restoreBackupButton);
@@ -113,7 +121,7 @@ void ContextMenuCleanerTab::initializeUi()
     });
 
     m_areaTabWidget = new QTabWidget(this);
-    ks::ui::StylePageTabs(m_areaTabWidget);
+    ks::ui::StylePageTabsContentFrame(m_areaTabWidget);
     m_areaTabWidget->setObjectName(QStringLiteral("ksContextMenuCleanerAreaTabs"));
     m_rootLayout->addWidget(m_areaTabWidget, 1);
 
@@ -177,8 +185,10 @@ void ContextMenuCleanerTab::createAreaPage(const MenuArea area)
 
     areaWidgets->page = new QWidget(m_areaTabWidget);
     areaWidgets->layout = new QVBoxLayout(areaWidgets->page);
-    areaWidgets->layout->setContentsMargins(0, 0, 0, 0);
-    areaWidgets->layout->setSpacing(6);
+    areaWidgets->layout->setContentsMargins(16, 16, 16, 16);
+    areaWidgets->layout->setSpacing(12);
+    // 每类 Shell 列表仍使用既有详情宿主，仅给专业工作区补齐无描边底面。
+    ks::ui::StylePrimaryContentPanel(areaWidgets->page, false);
 
     areaWidgets->toolbarWidget = new QWidget(areaWidgets->page);
     QHBoxLayout* toolbarLayout = new QHBoxLayout(areaWidgets->toolbarWidget);
@@ -209,13 +219,17 @@ void ContextMenuCleanerTab::createAreaPage(const MenuArea area)
     areaWidgets->filterEdit->setPlaceholderText(QStringLiteral("筛选：名称/显示名/命令/注册表路径/CLSID"));
     ks::ui::StyleSearchField(areaWidgets->filterEdit);
 
-    areaWidgets->refreshButton->setStyleSheet(KswordTheme::ThemedButtonStyle());
-    areaWidgets->deleteButton->setStyleSheet(KswordTheme::ThemedButtonStyle());
+    ks::ui::ApplyFlatButtonTheme(areaWidgets->refreshButton, ks::ui::FlatButtonTone::Neutral,
+        ks::ui::FlatButtonAppearance::Solid);
+    ks::ui::ApplyFlatButtonTheme(areaWidgets->deleteButton, ks::ui::FlatButtonTone::Danger,
+        ks::ui::FlatButtonAppearance::Solid);
     if (areaWidgets->restoreButton != nullptr)
     {
-        areaWidgets->restoreButton->setStyleSheet(KswordTheme::ThemedButtonStyle());
+        ks::ui::ApplyFlatButtonTheme(areaWidgets->restoreButton, ks::ui::FlatButtonTone::Neutral,
+            ks::ui::FlatButtonAppearance::Solid);
     }
-    areaWidgets->copyButton->setStyleSheet(KswordTheme::ThemedButtonStyle());
+    ks::ui::ApplyFlatButtonTheme(areaWidgets->copyButton, ks::ui::FlatButtonTone::Neutral,
+        ks::ui::FlatButtonAppearance::Solid);
 
     toolbarLayout->addWidget(areaWidgets->refreshButton);
     toolbarLayout->addWidget(areaWidgets->deleteButton);

@@ -7,6 +7,8 @@
 #include "../UI/ToolbarMetrics.h"
 #include "../UI/PageControlStyle.h"
 #include "../UI/PrimaryPageStyle.h"
+#include "../UI/TablePresentation.h"
+#include "../UI/ParameterWorkspace.h"
 #include "../UI/SecondaryPageLayout.h"
 #include <QDynamicPropertyChangeEvent>
 #include "../UI/TableInteractionSupport.h"
@@ -1568,6 +1570,18 @@ public:
         update();
     }
 
+    // freezeVisibleTimelineWindow：提交历史快照前保留当前可见 X 窗口；再次选择只换焦点。
+    // 不停止后台采样或实时钟，退出快照后仍可沿用原吸附最新行为。
+    void freezeVisibleTimelineWindow()
+    {
+        if (hasFrozenTimelineWindow())
+        {
+            return;
+        }
+        m_frozenWindowEndMs = windowEndMs(); // 原窗口右端决定每个可见点的 X，不以选中点居中。
+        m_frozenWindowDurationMs = windowDurationMs(); // 一并保存跨度，参数变更不挤动快照 X 位置。
+    }
+
 protected:
     // 隐藏页面不运行绘制节拍；重新显示时恢复真实时间轴，历史快照仍固定在所选时刻。
     void showEvent(QShowEvent* eventPointer) override
@@ -1696,7 +1710,7 @@ protected:
 
     // mousePressEvent：
     // - 单击图表时将时间轴固定到对应历史样本；
-    // - 若点击最右侧样本，则恢复“吸附最新”模式。
+    // - 最右侧样本也属于明确快照选择；实时跟随由原播放/清空等入口恢复。
     void mousePressEvent(QMouseEvent* eventPointer) override
     {
         if (eventPointer == nullptr ||
@@ -1825,9 +1839,20 @@ private:
         std::vector<SeriesPoint> points;             // 只在样本或选择改变时重算。
     };
 
-    // 固定实时窗口的时间跨度，保证像素/秒速度稳定；全量保留仍保留全部原始快照。
+    // 仅有效历史快照读取冻结窗口；取消、清空或原历史淘汰路径立即恢复实时轴。
+    bool hasFrozenTimelineWindow() const
+    {
+        return m_ownerDock != nullptr && !m_ownerDock->m_activityTimelinePinnedToLatest
+            && m_ownerDock->isProcessActivityTableSnapshotActive() && m_frozenWindowDurationMs > 0.0;
+    }
+
+    // 固定实时窗口跨度保证匀速；快照保留提交时跨度，全量留存仍保留全部原始样本。
     double windowDurationMs() const
     {
+        if (hasFrozenTimelineWindow())
+        {
+            return m_frozenWindowDurationMs;
+        }
         const int count = m_ownerDock->m_activityHistoryLimitSpin != nullptr
             ? m_ownerDock->m_activityHistoryLimitSpin->value() : 50;
         return static_cast<double>(m_ownerDock->refreshIntervalMillisecondsFromInput())
@@ -1862,15 +1887,12 @@ private:
         m_liveEndMs = std::max(0.0, elapsedMs - delayMs);
     }
 
-    // 点击历史时冻结图表窗口；悬停预览不改变 pinned 状态，也不驱动进程表重绘。
+    // 点击历史只冻结原窗口，不把所选点移到中央；悬停继续复用同一 X 映射。
     double windowEndMs() const
     {
-        if (!m_ownerDock->m_activityTimelinePinnedToLatest && m_ownerDock->m_activityTableSnapshotIndex >= 0)
+        if (hasFrozenTimelineWindow())
         {
-            const int index = std::clamp(m_ownerDock->m_activityTableSnapshotIndex, 0,
-                static_cast<int>(m_ownerDock->m_activitySamples.size()) - 1);
-            return static_cast<double>(m_ownerDock->m_activitySamples[index].elapsedMs)
-                + windowDurationMs() * 0.5;
+            return m_frozenWindowEndMs;
         }
         return m_liveEndMs;
     }
@@ -2378,6 +2400,8 @@ private:
     int m_focusedSampleIndex = -1;      // m_focusedSampleIndex：当前时间轴定位样本。
     QTimer* m_frameTimer = nullptr; // 独立绘制节拍，隐藏时停止。
     double m_liveEndMs = 0.0; // 连续实时窗口右端，暂停时保持。
+    double m_frozenWindowEndMs = 0.0; // 提交快照时可见窗口右端，后台时钟推进不改变它。
+    double m_frozenWindowDurationMs = 0.0; // 同一快照窗口的跨度，保持点选前后的 X 比例。
     std::uint64_t m_recordingStartTick = 0; // 当前记录会话的单调时钟原点。
     QPoint m_hoverPosition; // 鼠标最后停留的本地坐标，绘制时重新匹配可见采样。
     bool m_hoverActive = false; // 只在鼠标位于实际曲线画布内显示圆点。
@@ -2440,7 +2464,8 @@ protected:
             setValue(sampleIndex);
             if (m_ownerDock != nullptr)
             {
-                m_ownerDock->commitProcessActivityTimelineIndex(sampleIndex);
+                // 旧隐藏滑块保留最右端回到实时的原语义；图表点选不使用该兼容开关。
+                m_ownerDock->commitProcessActivityTimelineIndex(sampleIndex, true);
             }
             eventPointer->accept();
             return;
@@ -4101,30 +4126,19 @@ namespace
         return false;
     }
 
-    // 统一按钮蓝色样式，和现有主题风格保持一致。
+    // 进程页独立操作统一使用有底面的按钮；显式工具入口也与正文按钮共用圆角。
     QString buildBlueButtonStyle(const bool iconOnlyButton,
-        ks::ui::FlatButtonAppearance appearance = ks::ui::FlatButtonAppearance::Auto)
+        ks::ui::FlatButtonAppearance appearance = ks::ui::FlatButtonAppearance::Solid)
     {
-        // 图标工具保持透明常态，普通表单操作保留可辨识实底；几何仍由原参数决定。
-        if (iconOnlyButton && appearance == ks::ui::FlatButtonAppearance::Auto)
-        {
-            appearance = ks::ui::FlatButtonAppearance::Flat;
-        }
         return ks::ui::BuildFlatButtonStyle(ks::ui::FlatButtonTone::Neutral, appearance)
-            + QStringLiteral("QPushButton{border-radius:3px;padding:%1;}")
+            + QStringLiteral("QPushButton{border-radius:5px;padding:%1;}")
                 .arg(iconOnlyButton ? QStringLiteral("4px") : QStringLiteral("4px 10px"));
-    }
-
-    // 下拉框复用共享输入面，保持与数值框和搜索框的中性层次一致。
-    QString buildBlueComboBoxStyle()
-    {
-        return KswordTheme::ThemedComboBoxStyle();
     }
 
     // buildBlueComboBoxPopupViewStyle 作用：
     // - 给 QComboBox::view() 直接设置弹出列表样式；
     // - QComboBox 的 popup 是独立 item view，父级选择器在某些 Qt/Windows 主题下压不住白底；
-    // - 返回：仅作用于 popup view 的 QSS，主框样式仍由 buildBlueComboBoxStyle 负责。
+    // - 返回：仅作用于 popup view 的 QSS，主框样式由共享 StylePrimaryCombo 负责。
     QString buildBlueComboBoxPopupViewStyle()
     {
         return KswordTheme::ThemedComboBoxPopupViewStyle();
@@ -4147,11 +4161,9 @@ namespace
             KswordTheme::TextPrimaryColor(), comboBackgroundColor);
         const QColor popupBackgroundColor = KswordTheme::SurfaceAltColor();
 
-        comboBoxPointer->setStyleSheet(buildBlueComboBoxStyle());
-        if (comboBoxPointer->property("ksword_standalone_input").toBool())
-        {
-            ks::ui::StyleStandaloneInput(comboBoxPointer);
-        }
+        // 主框只由共享组合框样式拥有，避免刷新进程数据时重置圆角或覆盖主题绑定。
+        ks::ui::StylePrimaryCombo(comboBoxPointer);
+        ks::ui::StyleStandaloneInput(comboBoxPointer);
 
         QPalette comboPalette = comboBoxPointer->palette();
         comboPalette.setColor(QPalette::Base, comboBackgroundColor);
@@ -4953,15 +4965,55 @@ void ProcessDock::connectDetailWindowNavigation(ProcessDetailWindow* detailWindo
         });
 }
 
+namespace
+{
+    // 线程风险颜色只在可见项绘制时取当前主题，保留 ThreadTab 按每条记录写入的风险标记。
+    class ThreadRowThemeDelegate final : public QStyledItemDelegate
+    {
+    public:
+        explicit ThreadRowThemeDelegate(QTreeWidget* table)
+            : QStyledItemDelegate(table)
+        {
+        }
+
+    protected:
+        void initStyleOption(QStyleOptionViewItem* option, const QModelIndex& index) const override
+        {
+            QStyledItemDelegate::initStyleOption(option, index);
+            // 原 ThreadTab 仅给风险项写实色背景刷，退出项只写实色前景刷，普通项不写两者。
+            // 直接读取本格已有标记，避免把 Idle 等 PID/TID 重复的多条记录合并，也不扫描快照。
+            const QBrush background = qvariant_cast<QBrush>(index.data(Qt::BackgroundRole));
+            const QBrush foreground = qvariant_cast<QBrush>(index.data(Qt::ForegroundRole));
+            if (background.style() == Qt::SolidPattern)
+            {
+                option->palette.setColor(QPalette::Text, KswordTheme::ErrorColor());
+                option->backgroundBrush = QBrush(KswordTheme::WithAlpha(
+                    KswordTheme::ErrorBackgroundColor(), KswordTheme::IsDarkModeEnabled() ? 140 : 255));
+            }
+            else if (foreground.style() == Qt::SolidPattern)
+            {
+                option->palette.setColor(QPalette::Text, KswordTheme::ExitedRowForegroundColor());
+            }
+            // 普通项、选中态以及其它业务 brush/图标/字体继续由原 Qt 绘制选项维护。
+        }
+
+    };
+}
+
 void ProcessDock::refreshThemeVisuals()
 {
-    // 仅重建当前表格可视层，不触发新的后台枚举任务。
-    // 用途：深浅色切换后，立即刷新“新增/退出”行的主题高亮色。
+    // 主表颜色由 processTableData 实时求值；主题只请求绘制，不重建/排序或清空线程选区。
     applyBlueComboBoxRuntimeStyle(m_strategyCombo);
     applyBlueComboBoxRuntimeStyle(m_viewModeCombo);
     updateThreadColumnPresetButtons();
-    rebuildTable();
-    rebuildThreadTable();
+    for (QAbstractItemView* view : {static_cast<QAbstractItemView*>(m_processTable),
+        static_cast<QAbstractItemView*>(m_threadTable)})
+    {
+        if (view != nullptr && view->isVisible() && view->viewport() != nullptr)
+        {
+            view->viewport()->update(); // 隐藏页重新显示时，委托自然读取最新主题。
+        }
+    }
 }
 
 void ProcessDock::initializeUi()
@@ -4984,12 +5036,13 @@ void ProcessDock::initializeUi()
         m_sideTabWidget->tabBar()->setUsesScrollButtons(true);
     }
     // 内容 Tab 使用低对比底面与强调下划线，主 ADS 导航仍由独立样式管理。
-    ks::ui::StylePageTabs(m_sideTabWidget);
+    ks::ui::StylePageTabsContentFrame(m_sideTabWidget);
 
     // “进程列表”页是本模块核心页面。
     m_processListPage = new QWidget(this);
     m_processPageLayout = new QVBoxLayout(m_processListPage);
-    m_processPageLayout->setContentsMargins(6, 6, 6, 6);
+    // 四边6px留白由Tab框架统一提供；页内不再叠加第二层外围间距。
+    m_processPageLayout->setContentsMargins(0, 0, 0, 0);
     m_processPageLayout->setSpacing(6);
 
     // 初始化上方控制栏和下方表格。
@@ -4997,6 +5050,9 @@ void ProcessDock::initializeUi()
     initializeProcessActivityPanel();
     initializeProcessTable();
     initializeThreadPage();
+    // 保留 ThreadTab 原数据构建与风险优先级，只让静态主题画刷在真正绘制时重新求值。
+    m_threadTable->setProperty("ksword_preserve_custom_table_delegate", true);
+    m_threadTable->setItemDelegate(new ThreadRowThemeDelegate(m_threadTable));
     initializeCrossViewPage();
     initializeCreateProcessPage();
 
@@ -5171,7 +5227,6 @@ void ProcessDock::initializeTopControls()
         m_processSearchLineEdit,
         QStringLiteral("process.tooltip.search"),
         QStringLiteral("切到进程列表页后可直接输入搜索词"));
-    m_processSearchLineEdit->setStyleSheet(buildBlueLineEditStyle());
     ks::ui::StyleSearchField(m_processSearchLineEdit);
     m_processSearchLineEdit->setMaximumWidth(320);
 
@@ -5283,7 +5338,8 @@ void ProcessDock::initializeTopControls()
         m_columnChooserButton,
         QStringLiteral("process.tooltip.column_chooser"),
         QStringLiteral("添加或移除进程列表中显示的列。"));
-    m_columnChooserButton->setStyleSheet(buildBlueButtonStyle(false, ks::ui::FlatButtonAppearance::Solid));
+    ks::ui::ApplyFlatButtonTheme(m_columnChooserButton,
+        ks::ui::FlatButtonTone::Neutral, ks::ui::FlatButtonAppearance::Solid);
 
     // 进程列表设置入口：仅显示齿轮图标，具体选项在独立窗口中即时生效。
     m_processSettingsButton = new QPushButton(QIcon(QStringLiteral(":/Icon/process_settings.svg")), QString(), this);
@@ -5294,11 +5350,12 @@ void ProcessDock::initializeTopControls()
         QStringLiteral("process.tooltip.settings"),
         QStringLiteral("打开进程列表设置"));
 
-    // 按钮统一蓝色风格（图标按钮版本）。
-    const QString buttonStyle = buildBlueButtonStyle(true, ks::ui::FlatButtonAppearance::Solid);
-    m_startButton->setStyleSheet(buttonStyle);
-    m_pauseButton->setStyleSheet(buttonStyle);
-    m_processSettingsButton->setStyleSheet(buttonStyle);
+    // 显式独立图标动作共用实底和状态前景，避免悬停与主题切换后退回局部旧色。
+    for (QPushButton* action : { m_startButton, m_pauseButton, m_processSettingsButton })
+    {
+        ks::ui::ApplyFlatButtonTheme(action,
+            ks::ui::FlatButtonTone::Neutral, ks::ui::FlatButtonAppearance::Solid);
+    }
 
     // 第一行按功能顺序排列，所有相邻控件统一使用布局的 8px 间距：
     // ① 枚举与视图：决定“列出哪些进程、怎么组织”；
@@ -5344,7 +5401,8 @@ void ProcessDock::initializeProcessActivityPanel()
         m_activityClearButton,
         QStringLiteral("process.activity.tooltip.clear"),
         QStringLiteral("清空当前刷新同步记录的进程活动样本。"));
-    m_activityClearButton->setStyleSheet(buildBlueButtonStyle(false, ks::ui::FlatButtonAppearance::Solid));
+    ks::ui::ApplyFlatButtonTheme(m_activityClearButton,
+        ks::ui::FlatButtonTone::Neutral, ks::ui::FlatButtonAppearance::Solid);
 
     m_activityHistoryModeCombo = new QComboBox(m_activityPanelWidget);
     m_activityHistoryModeCombo->addItem(QStringLiteral("不记录历史"), static_cast<int>(ActivityHistoryMode::None));
@@ -5379,19 +5437,18 @@ void ProcessDock::initializeProcessActivityPanel()
         QStringLiteral("process.activity.history.tooltip.limit"),
         QStringLiteral("保留最近的采样次数，默认 50 次；减少次数会立即移除更早的历史样本。"));
 
-    const QString metricButtonStyle = ks::ui::BuildFlatButtonStyle()
-        + QStringLiteral("QPushButton{border-radius:3px;padding:3px 8px;}");
-
     // 指标按钮必须可独立开关：
     // - 默认全部点亮，用户打开页面即可看到 CPU/内存/磁盘/网络/GPU 全部曲线；
     // - 后续可以按需关闭单项指标，避免曲线过密。
     auto createMetricButton =
-        [this, &metricButtonStyle](const QString& text, const bool checkedByDefault)
+        [this](const QString& text, const bool checkedByDefault)
         {
             QPushButton* button = new QPushButton(text, m_activityPanelWidget);
             button->setCheckable(true);
             button->setChecked(checkedByDefault);
-            button->setStyleSheet(metricButtonStyle);
+            // 指标是独立开关而非互斥分段；保留 checked 语义，共用工具按钮状态。
+            ks::ui::ApplyFlatButtonTheme(button,
+                ks::ui::FlatButtonTone::Neutral, ks::ui::FlatButtonAppearance::Solid);
             button->setToolTip(QStringLiteral("切换该指标是否绘制在上方百分比折线图中。"));
             return button;
         };
@@ -5424,7 +5481,9 @@ void ProcessDock::initializeProcessActivityPanel()
     ProcessWindowPickerDragButton* processPickerButton = new ProcessWindowPickerDragButton(m_activityPanelWidget);
     processPickerButton->setIcon(QIcon(IconWindowPickerTarget));
     KswordTheme::ApplyCompactIconButtonMetrics(processPickerButton);
-    processPickerButton->setStyleSheet(buildBlueButtonStyle(true));
+    // 拾取属于工具栏独立动作，不能使用透明常态把图标直接压在工具面上。
+    ks::ui::ApplyFlatButtonTheme(processPickerButton,
+        ks::ui::FlatButtonTone::Neutral, ks::ui::FlatButtonAppearance::Solid);
     processPickerButton->setToolTip(QStringLiteral("按住并拖拽准星到目标窗口，松开后按该窗口 PID 筛选进程并打开进程详细信息"));
     languageManager.bindToolTip(
         processPickerButton,
@@ -5727,17 +5786,8 @@ void ProcessDock::initializeProcessTable()
         toColumnIndex(TableColumn::Ram) + 1);
     headerView->setStretchLastSection(false);
     headerView->setContextMenuPolicy(Qt::CustomContextMenu);
-    headerView->setStyleSheet(QStringLiteral(
-        "QHeaderView::section {"
-        "  color: %1;"
-        "  background: transparent; /* %2 */"
-        "  border: 1px solid %3;"
-        "  padding: 4px;"
-        "  font-weight: 600;"
-        "}")
-        .arg(KswordTheme::PrimaryBlueHex)
-        .arg(KswordTheme::SurfaceHex())
-        .arg(KswordTheme::BorderHex()));
+    // 表头底色和圆角由共享外壳负责，保留原列尺寸、菜单和排序行为。
+    ks::ui::ApplyTablePresentation(m_processTable);
 
     // 列布局配置必须在首次套用视图预设之前读入：
     // applyViewMode 会在铺完预设后叠加用户覆盖，顺序反了会让自定义列在启动时被冲掉。
@@ -5768,19 +5818,11 @@ void ProcessDock::initializeCreateProcessPage()
     m_createProcessPageLayout->setContentsMargins(6, 6, 6, 6);
     m_createProcessPageLayout->setSpacing(6);
 
-    QScrollArea* scrollArea = new QScrollArea(m_createProcessPage);
-    scrollArea->setWidgetResizable(true);
-    scrollArea->setFrameShape(QFrame::NoFrame);
-    applyTransparentContainerStyle(scrollArea);
-    m_createProcessPageLayout->addWidget(scrollArea, 1);
-
-    QWidget* contentWidget = new QWidget(scrollArea);
-    applyTransparentContainerStyle(contentWidget);
-    QVBoxLayout* contentLayout = new QVBoxLayout(contentWidget);
-    contentLayout->setContentsMargins(2, 2, 2, 2);
-    // 参数组间留白高于组内行距，所有参数和结果仍在同一滚动页面。
-    contentLayout->setSpacing(16);
-    scrollArea->setWidget(contentWidget);
+    auto* workspace = new ks::ui::ParameterWorkspace(m_createProcessPage, 600);
+    workspace->useWideParameterLayout(60);
+    m_createProcessPageLayout->addWidget(workspace);
+    QVBoxLayout* contentLayout = workspace->parameters();
+    QWidget* contentWidget = contentLayout->parentWidget();
 
     const QString inputStyle = buildBlueLineEditStyle();
     const QString buttonStyle = buildBlueButtonStyle(false);
@@ -5802,13 +5844,13 @@ void ProcessDock::initializeCreateProcessPage()
             std::vector<QCheckBox*>* outputCheckBoxList) -> QGroupBox*
     {
         QGroupBox* groupBox = new QGroupBox(groupTitle, parentWidget);
-        ks::ui::StylePrimaryGroup(groupBox);
+        ks::ui::StyleParameterSection(groupBox);
         QGridLayout* groupLayout = new QGridLayout(groupBox);
         groupLayout->setContentsMargins(6, 6, 6, 6);
         groupLayout->setHorizontalSpacing(10);
         groupLayout->setVerticalSpacing(4);
 
-        const int columnCount = 3;
+        const int columnCount = 2;
         for (std::size_t index = 0; index < definitionList.size(); ++index)
         {
             const BitmaskFlagDefinition& definition = definitionList[index];
@@ -5835,8 +5877,8 @@ void ProcessDock::initializeCreateProcessPage()
 
     // 1) 创建方式 + 令牌来源配置。
     QGroupBox* methodGroup = new QGroupBox("创建方式 / 令牌来源", contentWidget);
-    ks::ui::StylePrimaryGroup(methodGroup);
-    QGridLayout* methodLayout = new QGridLayout(methodGroup);
+    ks::ui::StyleParameterSection(methodGroup);
+    QFormLayout* methodLayout = new QFormLayout(methodGroup);
     methodLayout->setHorizontalSpacing(8);
     methodLayout->setVerticalSpacing(6);
     m_createMethodCombo = new QComboBox(methodGroup);
@@ -5854,13 +5896,11 @@ void ProcessDock::initializeCreateProcessPage()
     m_tokenDesiredAccessEdit->setStyleSheet(inputStyle);
 
     // 方法选择区域补充中文语义，避免只看英文 API 名不易理解。
-    methodLayout->addWidget(new QLabel("API（创建方式）:", methodGroup), 0, 0);
-    methodLayout->addWidget(m_createMethodCombo, 0, 1, 1, 3);
-    methodLayout->addWidget(new QLabel("源 PID（令牌来源进程）:", methodGroup), 1, 0);
-    methodLayout->addWidget(m_tokenSourcePidEdit, 1, 1);
-    methodLayout->addWidget(new QLabel("令牌访问掩码（DesiredAccess）:", methodGroup), 1, 2);
-    methodLayout->addWidget(m_tokenDesiredAccessEdit, 1, 3);
-    methodLayout->addWidget(m_tokenDuplicatePrimaryCheck, 2, 0, 1, 4);
+    // 长标签在列宽不足时由表单换行，字段保留原对象及已有业务连接。
+    methodLayout->addRow(new QLabel("API（创建方式）:", methodGroup), m_createMethodCombo);
+    methodLayout->addRow(new QLabel("源 PID（令牌来源进程）:", methodGroup), m_tokenSourcePidEdit);
+    methodLayout->addRow(new QLabel("令牌访问掩码（DesiredAccess）:", methodGroup), m_tokenDesiredAccessEdit);
+    methodLayout->addRow(m_tokenDuplicatePrimaryCheck);
 
     // Token DesiredAccess 位标志勾选区：
     // - 覆盖最常见 TOKEN_* / 标准权限 / GENERIC_*；
@@ -5870,12 +5910,12 @@ void ProcessDock::initializeCreateProcessPage()
         "Token DesiredAccess 位标志组合",
         TokenDesiredAccessDefinitions,
         &m_tokenDesiredAccessChecks);
-    methodLayout->addWidget(tokenAccessGroup, 3, 0, 1, 4);
+    methodLayout->addRow(ks::ui::FoldParameterSection(tokenAccessGroup));
     contentLayout->addWidget(methodGroup);
 
     // 2) CreateProcessW 基础参数。
     QGroupBox* basicGroup = new QGroupBox("CreateProcessW 参数（全部可选 Null）", contentWidget);
-    ks::ui::StylePrimaryGroup(basicGroup);
+    ks::ui::StyleParameterSection(basicGroup);
     QGridLayout* basicLayout = new QGridLayout(basicGroup);
     basicLayout->setHorizontalSpacing(8);
     basicLayout->setVerticalSpacing(6);
@@ -5915,20 +5955,21 @@ void ProcessDock::initializeCreateProcessPage()
     m_useEnvironmentCheck->setChecked(false);
     m_environmentUnicodeCheck->setChecked(true);
 
-    basicLayout->addWidget(m_useApplicationNameCheck, 0, 0);
-    basicLayout->addWidget(m_applicationNameEdit, 0, 1, 1, 2);
-    basicLayout->addWidget(m_applicationBrowseButton, 0, 3);
-    basicLayout->addWidget(m_useCommandLineCheck, 1, 0);
-    basicLayout->addWidget(m_commandLineEdit, 1, 1, 1, 3);
-    basicLayout->addWidget(m_useCurrentDirectoryCheck, 2, 0);
-    basicLayout->addWidget(m_currentDirectoryEdit, 2, 1, 1, 2);
-    basicLayout->addWidget(m_currentDirectoryBrowseButton, 2, 3);
-    basicLayout->addWidget(m_useEnvironmentCheck, 3, 0);
-    basicLayout->addWidget(m_environmentEditor, 3, 1, 2, 3);
-    basicLayout->addWidget(m_environmentUnicodeCheck, 5, 1, 1, 3);
-    basicLayout->addWidget(new QLabel("dwCreationFlags（创建标志）:", basicGroup), 6, 0);
-    basicLayout->addWidget(m_creationFlagsEdit, 6, 1);
-    basicLayout->addWidget(m_inheritHandleCheck, 6, 2, 1, 2);
+    basicLayout->setColumnStretch(0, 1);
+    basicLayout->addWidget(m_useApplicationNameCheck, 0, 0, 1, 2);
+    basicLayout->addWidget(m_applicationNameEdit, 1, 0);
+    basicLayout->addWidget(m_applicationBrowseButton, 1, 1);
+    basicLayout->addWidget(m_useCommandLineCheck, 2, 0, 1, 2);
+    basicLayout->addWidget(m_commandLineEdit, 3, 0, 1, 2);
+    basicLayout->addWidget(m_useCurrentDirectoryCheck, 4, 0, 1, 2);
+    basicLayout->addWidget(m_currentDirectoryEdit, 5, 0);
+    basicLayout->addWidget(m_currentDirectoryBrowseButton, 5, 1);
+    basicLayout->addWidget(m_useEnvironmentCheck, 6, 0, 1, 2);
+    basicLayout->addWidget(m_environmentEditor, 7, 0, 1, 2);
+    basicLayout->addWidget(m_environmentUnicodeCheck, 8, 0, 1, 2);
+    basicLayout->addWidget(new QLabel("dwCreationFlags（创建标志）:", basicGroup), 9, 0);
+    basicLayout->addWidget(m_creationFlagsEdit, 10, 0, 1, 2);
+    basicLayout->addWidget(m_inheritHandleCheck, 11, 0, 1, 2);
 
     // dwCreationFlags 位标志勾选区：
     // - 列出 CreateProcess 常见全部标志；
@@ -5938,13 +5979,13 @@ void ProcessDock::initializeCreateProcessPage()
         "dwCreationFlags 位标志组合",
         CreateProcessFlagDefinitions,
         &m_creationFlagChecks);
-    basicLayout->addWidget(creationFlagsGroup, 7, 0, 1, 4);
+    basicLayout->addWidget(ks::ui::FoldParameterSection(creationFlagsGroup, true), 12, 0, 1, 2);
     contentLayout->addWidget(basicGroup);
 
     // 3) PROCESS / THREAD SECURITY_ATTRIBUTES。
     QGroupBox* securityGroup = new QGroupBox("SECURITY_ATTRIBUTES（Process / Thread）", contentWidget);
-    ks::ui::StylePrimaryGroup(securityGroup);
-    QGridLayout* securityLayout = new QGridLayout(securityGroup);
+    ks::ui::StyleParameterSection(securityGroup);
+    QFormLayout* securityLayout = new QFormLayout(securityGroup);
     securityLayout->setHorizontalSpacing(8);
     securityLayout->setVerticalSpacing(6);
 
@@ -5963,24 +6004,22 @@ void ProcessDock::initializeCreateProcessPage()
     m_threadSecurityLengthEdit->setStyleSheet(inputStyle);
     m_threadSecurityDescriptorEdit->setStyleSheet(inputStyle);
 
-    securityLayout->addWidget(m_useProcessSecurityCheck, 0, 0);
-    securityLayout->addWidget(new QLabel("nLength（结构体长度）", securityGroup), 0, 1);
-    securityLayout->addWidget(m_processSecurityLengthEdit, 0, 2);
-    securityLayout->addWidget(new QLabel("lpSecurityDescriptor（安全描述符指针）", securityGroup), 0, 3);
-    securityLayout->addWidget(m_processSecurityDescriptorEdit, 0, 4);
-    securityLayout->addWidget(m_processSecurityInheritCheck, 0, 5);
-    securityLayout->addWidget(m_useThreadSecurityCheck, 1, 0);
-    securityLayout->addWidget(new QLabel("nLength（结构体长度）", securityGroup), 1, 1);
-    securityLayout->addWidget(m_threadSecurityLengthEdit, 1, 2);
-    securityLayout->addWidget(new QLabel("lpSecurityDescriptor（安全描述符指针）", securityGroup), 1, 3);
-    securityLayout->addWidget(m_threadSecurityDescriptorEdit, 1, 4);
-    securityLayout->addWidget(m_threadSecurityInheritCheck, 1, 5);
-    contentLayout->addWidget(securityGroup);
+    // 两个安全结构各自纵向成组，不再横跨六列挤出参数栏。
+    securityLayout->addRow(m_useProcessSecurityCheck);
+    securityLayout->addRow(new QLabel("nLength（结构体长度）", securityGroup), m_processSecurityLengthEdit);
+    securityLayout->addRow(new QLabel("lpSecurityDescriptor（安全描述符指针）", securityGroup), m_processSecurityDescriptorEdit);
+    securityLayout->addRow(m_processSecurityInheritCheck);
+    securityLayout->addRow(m_useThreadSecurityCheck);
+    securityLayout->addRow(new QLabel("nLength（结构体长度）", securityGroup), m_threadSecurityLengthEdit);
+    securityLayout->addRow(new QLabel("lpSecurityDescriptor（安全描述符指针）", securityGroup), m_threadSecurityDescriptorEdit);
+    securityLayout->addRow(m_threadSecurityInheritCheck);
+    QWidget* securitySection = ks::ui::FoldParameterSection(securityGroup); // 低频安全结构保留折叠入口。
+    contentLayout->addWidget(securitySection);
 
     // 4) STARTUPINFOW 全字段。
     QGroupBox* startupGroup = new QGroupBox("STARTUPINFOW（全部字段）", contentWidget);
-    ks::ui::StylePrimaryGroup(startupGroup);
-    QGridLayout* startupLayout = new QGridLayout(startupGroup);
+    ks::ui::StyleParameterSection(startupGroup);
+    QFormLayout* startupLayout = new QFormLayout(startupGroup);
     startupLayout->setHorizontalSpacing(8);
     startupLayout->setVerticalSpacing(6);
     m_useStartupInfoCheck = new QCheckBox("启用 lpStartupInfo（启动信息结构体，取消则传 NULL）", startupGroup);
@@ -6018,38 +6057,31 @@ void ProcessDock::initializeCreateProcessPage()
         startupEdit->setStyleSheet(inputStyle);
     }
 
-    int startupRow = 0;
-    startupLayout->addWidget(m_useStartupInfoCheck, startupRow++, 0, 1, 6);
-    const auto addStartupField = [&startupLayout, &startupRow](const QString& labelText, QWidget* editorWidget, const int colOffset)
+    startupLayout->addRow(m_useStartupInfoCheck);
+    const auto addStartupField = [&startupLayout](const QString& labelText, QWidget* editorWidget, const int colOffset)
         {
-            startupLayout->addWidget(new QLabel(labelText), startupRow, colOffset);
-            startupLayout->addWidget(editorWidget, startupRow, colOffset + 1);
+            Q_UNUSED(colOffset);
+            startupLayout->addRow(new QLabel(labelText), editorWidget);
         };
 
     addStartupField("cb（结构体大小）", m_siCbEdit, 0);
     addStartupField("lpReserved（保留字符串）", m_siReservedEdit, 2);
     addStartupField("lpDesktop（目标桌面）", m_siDesktopEdit, 4);
-    ++startupRow;
     addStartupField("lpTitle（窗口标题）", m_siTitleEdit, 0);
     addStartupField("dwX（窗口X坐标）", m_siXEdit, 2);
     addStartupField("dwY（窗口Y坐标）", m_siYEdit, 4);
-    ++startupRow;
     addStartupField("dwXSize（窗口宽）", m_siXSizeEdit, 0);
     addStartupField("dwYSize（窗口高）", m_siYSizeEdit, 2);
     addStartupField("dwXCountChars（控制台宽）", m_siXCountCharsEdit, 4);
-    ++startupRow;
     addStartupField("dwYCountChars（控制台高）", m_siYCountCharsEdit, 0);
     addStartupField("dwFillAttribute（控制台属性）", m_siFillAttributeEdit, 2);
     addStartupField("dwFlags（启动标志）", m_siFlagsEdit, 4);
-    ++startupRow;
     addStartupField("wShowWindow（显示方式）", m_siShowWindowEdit, 0);
     addStartupField("cbReserved2（保留2长度）", m_siCbReserved2Edit, 2);
     addStartupField("lpReserved2（保留2指针）", m_siReserved2PtrEdit, 4);
-    ++startupRow;
     addStartupField("hStdInput（标准输入句柄）", m_siStdInputEdit, 0);
     addStartupField("hStdOutput（标准输出句柄）", m_siStdOutputEdit, 2);
     addStartupField("hStdError（标准错误句柄）", m_siStdErrorEdit, 4);
-    ++startupRow;
 
     // STARTUPINFO.dwFillAttribute 位标志勾选区：
     // - 提供前景/背景颜色与样式位的可视化组合。
@@ -6058,7 +6090,7 @@ void ProcessDock::initializeCreateProcessPage()
         "STARTUPINFO.dwFillAttribute 位标志组合",
         ConsoleFillAttributeDefinitions,
         &m_startupFillAttributeChecks);
-    startupLayout->addWidget(startupFillAttrGroup, startupRow++, 0, 1, 6);
+    startupLayout->addRow(ks::ui::FoldParameterSection(startupFillAttrGroup));
 
     // STARTUPINFO.dwFlags 位标志勾选区：
     // - 列出 STARTF_* 标志；
@@ -6068,14 +6100,15 @@ void ProcessDock::initializeCreateProcessPage()
         "STARTUPINFO.dwFlags 位标志组合",
         StartupInfoFlagDefinitions,
         &m_startupFlagChecks);
-    startupLayout->addWidget(startupFlagsGroup, startupRow++, 0, 1, 6);
+    startupLayout->addRow(ks::ui::FoldParameterSection(startupFlagsGroup));
 
-    contentLayout->addWidget(startupGroup);
+    QWidget* startupSection = ks::ui::FoldParameterSection(startupGroup, true); // 常用启动字段默认展开。
+    contentLayout->addWidget(startupSection);
 
     // 5) PROCESS_INFORMATION 全字段。
     QGroupBox* processInfoGroup = new QGroupBox("PROCESS_INFORMATION（输出结构体，支持自定义初值）", contentWidget);
-    ks::ui::StylePrimaryGroup(processInfoGroup);
-    QGridLayout* processInfoLayout = new QGridLayout(processInfoGroup);
+    ks::ui::StyleParameterSection(processInfoGroup);
+    QFormLayout* processInfoLayout = new QFormLayout(processInfoGroup);
     processInfoLayout->setHorizontalSpacing(8);
     processInfoLayout->setVerticalSpacing(6);
 
@@ -6091,20 +6124,17 @@ void ProcessDock::initializeCreateProcessPage()
     m_piPidEdit->setStyleSheet(inputStyle);
     m_piTidEdit->setStyleSheet(inputStyle);
 
-    processInfoLayout->addWidget(m_useProcessInfoCheck, 0, 0, 1, 4);
-    processInfoLayout->addWidget(new QLabel("hProcess（输出进程句柄）", processInfoGroup), 1, 0);
-    processInfoLayout->addWidget(m_piProcessHandleEdit, 1, 1);
-    processInfoLayout->addWidget(new QLabel("hThread（输出线程句柄）", processInfoGroup), 1, 2);
-    processInfoLayout->addWidget(m_piThreadHandleEdit, 1, 3);
-    processInfoLayout->addWidget(new QLabel("dwProcessId（输出PID）", processInfoGroup), 2, 0);
-    processInfoLayout->addWidget(m_piPidEdit, 2, 1);
-    processInfoLayout->addWidget(new QLabel("dwThreadId（输出TID）", processInfoGroup), 2, 2);
-    processInfoLayout->addWidget(m_piTidEdit, 2, 3);
-    contentLayout->addWidget(processInfoGroup);
+    processInfoLayout->addRow(m_useProcessInfoCheck);
+    processInfoLayout->addRow(new QLabel("hProcess（输出进程句柄）", processInfoGroup), m_piProcessHandleEdit);
+    processInfoLayout->addRow(new QLabel("hThread（输出线程句柄）", processInfoGroup), m_piThreadHandleEdit);
+    processInfoLayout->addRow(new QLabel("dwProcessId（输出PID）", processInfoGroup), m_piPidEdit);
+    processInfoLayout->addRow(new QLabel("dwThreadId（输出TID）", processInfoGroup), m_piTidEdit);
+    QWidget* processInfoSection = ks::ui::FoldParameterSection(processInfoGroup); // 输出结构自定义初值仍低频折叠。
+    contentLayout->addWidget(processInfoSection);
 
     // 6) Token 特权编辑器。
     QGroupBox* tokenPrivilegeGroup = new QGroupBox("Token 特权调整（AdjustTokenPrivileges）", contentWidget);
-    ks::ui::StylePrimaryGroup(tokenPrivilegeGroup);
+    ks::ui::StyleParameterSection(tokenPrivilegeGroup);
     QVBoxLayout* tokenPrivilegeLayout = new QVBoxLayout(tokenPrivilegeGroup);
     const QStringList privilegeNames = tokenPrivilegeNames();
     m_tokenPrivilegeTable = new ks::ui::VisibleTableWidget(privilegeNames.size(), 2, tokenPrivilegeGroup);
@@ -6171,25 +6201,31 @@ void ProcessDock::initializeCreateProcessPage()
         m_tokenPrivilegeTable->setCellWidget(row, 1, actionCombo);
     }
 
-    QHBoxLayout* tokenActionLayout = new QHBoxLayout();
+    QVBoxLayout* tokenActionLayout = new QVBoxLayout();
     m_applyTokenPrivilegeButton = new QPushButton("仅应用令牌调整（不创建）", tokenPrivilegeGroup);
     m_resetTokenPrivilegeButton = new QPushButton("重置全部特权动作为保持", tokenPrivilegeGroup);
     m_applyTokenPrivilegeButton->setStyleSheet(buttonStyle);
     m_resetTokenPrivilegeButton->setStyleSheet(buttonStyle);
     tokenActionLayout->addWidget(m_applyTokenPrivilegeButton);
     tokenActionLayout->addWidget(m_resetTokenPrivilegeButton);
-    tokenActionLayout->addStretch(1);
-    ks::ui::NormalizeToolbarRow(tokenActionLayout);
+    // 令牌动作文字较长，纵向排列避免窄列中两个按钮横向裁切。
+    ks::ui::NormalizeToolbarControl(m_applyTokenPrivilegeButton);
+    ks::ui::NormalizeToolbarControl(m_resetTokenPrivilegeButton);
 
     tokenPrivilegeLayout->addWidget(m_tokenPrivilegeTable, 1);
     tokenPrivilegeLayout->addLayout(tokenActionLayout);
-    contentLayout->addWidget(tokenPrivilegeGroup);
+    QWidget* tokenPrivilegeSection = ks::ui::FoldParameterSection(tokenPrivilegeGroup); // 令牌特权保留独立折叠。
+    contentLayout->addWidget(tokenPrivilegeSection);
+
+    // 创建方式/基础参数在第一列，启动信息/低频结构在第二列；窄屏按原序恢复单列。
+    ks::ui::ArrangeParameterColumns(contentLayout, {methodGroup, basicGroup},
+        {securitySection, startupSection, processInfoSection, tokenPrivilegeSection}, 320);
 
     // 7) 操作按钮 + 输出日志。
     QGroupBox* actionGroup = new QGroupBox("执行与结果", contentWidget);
-    ks::ui::StylePrimaryGroup(actionGroup);
+    ks::ui::StyleParameterSection(actionGroup);
     QVBoxLayout* actionLayout = new QVBoxLayout(actionGroup);
-    QHBoxLayout* actionButtonLayout = new QHBoxLayout();
+    QHBoxLayout* actionButtonLayout = workspace->actions();
     m_launchProcessButton = new QPushButton("执行创建进程", actionGroup);
     m_resetCreateFormButton = new QPushButton("恢复默认配置", actionGroup);
     m_launchProcessButton->setStyleSheet(buttonStyle);
@@ -6206,9 +6242,9 @@ void ProcessDock::initializeCreateProcessPage()
     m_createResultOutput->setStyleSheet(inputStyle);
     m_createResultOutput->setPlaceholderText("这里显示请求参数摘要、API 返回结果和失败错误码。");
 
-    actionLayout->addLayout(actionButtonLayout);
     actionLayout->addWidget(m_createResultOutput, 1);
-    contentLayout->addWidget(actionGroup, 1);
+    workspace->results()->addWidget(actionGroup, 1);
+    workspace->finish();
 
     // 默认值补充：命令行默认跟随 applicationName。
     m_commandLineEdit->setPlaceholderText("例如: \"C:\\Windows\\System32\\notepad.exe\" C:\\test.txt");
@@ -9522,6 +9558,16 @@ void ProcessDock::appendProcessActivitySample()
         sample.processes.push_back(std::move(processPoint));
     }
 
+    // 查看快照时只暂停顶部图表历史追加及其自动裁剪，防止最近 N 次淘汰选中点。
+    // 系统枚举/计数器继续更新；独立详情仍接收本轮真实采样，历史队列不额外扩容。
+    // 原播放/清空等入口退出快照后继续追加；用户改保留数量仍走明确的 trim 路径。
+    if (isProcessActivityTableSnapshotActive())
+    {
+        appendProcessActivitySampleToDetailWindows(sample);
+        updateProcessActivityStatusLabel();
+        return;
+    }
+
     m_activitySamples.push_back(std::move(sample));
     const std::size_t removedSampleCount = trimProcessActivitySamples();
     if (m_activityChartWidget != nullptr)
@@ -9657,7 +9703,9 @@ void ProcessDock::refreshProcessActivityTimeline(const std::size_t removedSample
         ? std::max(0, m_activityTimelineSlider->value() - static_cast<int>(removedSampleCount))
         : m_activityTimelineSlider->value();
     const int previousMaximum = m_activityTimelineSlider->maximum();
-    const bool shouldPinToLatest = m_activityTimelinePinnedToLatest || previousValue >= previousMaximum;
+    const bool snapshotActive = isProcessActivityTableSnapshotActive(); // 最新索引仍可能是已选快照。
+    const bool shouldPinToLatest = m_activityTimelinePinnedToLatest
+        || (!snapshotActive && previousValue >= previousMaximum);
 
     m_activityTimelineSliderUpdating = true;
     m_activityTimelineSlider->setRange(0, std::max(0, sampleCount - 1));
@@ -9674,7 +9722,8 @@ void ProcessDock::refreshProcessActivityTimeline(const std::size_t removedSample
     {
         const int restoredValue = std::clamp(previousValue, 0, sampleCount - 1);
         m_activityTimelineSlider->setValue(restoredValue);
-        m_activityTimelinePinnedToLatest = (restoredValue >= sampleCount - 1);
+        // 有效快照不因索引碰巧在最右端而恢复实时，后台新增一条样本也不能重 pin。
+        m_activityTimelinePinnedToLatest = !snapshotActive && (restoredValue >= sampleCount - 1);
     }
     m_activityTimelineSliderUpdating = oldUpdating;
 
@@ -9748,7 +9797,7 @@ void ProcessDock::showProcessActivitySnapshotForIndex(const int sampleIndex)
     previewProcessActivitySnapshotForIndex(sampleIndex);
 }
 
-void ProcessDock::commitProcessActivityTimelineIndex(const int sampleIndex)
+void ProcessDock::commitProcessActivityTimelineIndex(const int sampleIndex, const bool followLatestWhenSelected)
 {
     if (m_activitySamples.empty())
     {
@@ -9761,12 +9810,17 @@ void ProcessDock::commitProcessActivityTimelineIndex(const int sampleIndex)
     }
 
     const int safeIndex = std::clamp(sampleIndex, 0, static_cast<int>(m_activitySamples.size()) - 1);
-    const bool latestSelected =
-        (m_activityTimelineSlider != nullptr && safeIndex >= m_activityTimelineSlider->maximum()) ||
-        (safeIndex >= static_cast<int>(m_activitySamples.size()) - 1);
+    const bool followLatest = followLatestWhenSelected
+        && ((m_activityTimelineSlider != nullptr && safeIndex >= m_activityTimelineSlider->maximum())
+            || (safeIndex >= static_cast<int>(m_activitySamples.size()) - 1));
 
-    m_activityTimelinePinnedToLatest = latestSelected;
-    m_activityTableSnapshotIndex = latestSelected ? -1 : safeIndex;
+    // 必须先冻结旧的可见轴，再修改快照身份；历史点之间切换不重新排列折线。
+    if (!followLatest && m_activityChartWidget != nullptr)
+    {
+        m_activityChartWidget->freezeVisibleTimelineWindow();
+    }
+    m_activityTimelinePinnedToLatest = followLatest;
+    m_activityTableSnapshotIndex = followLatest ? -1 : safeIndex;
     if (m_activityTimelineSlider != nullptr && m_activityTimelineSlider->value() != safeIndex)
     {
         const bool oldUpdating = m_activityTimelineSliderUpdating;

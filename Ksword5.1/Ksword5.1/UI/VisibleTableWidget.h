@@ -31,6 +31,9 @@ namespace ks::ui
 
     inline constexpr char TableActionBarModeProperty[] =
         "KSWORD_TABLE_INTERACTION_ACTION_BAR_MODE";
+    // 内部冻结/对比表复用源表的操作条；全局登记不得再为它安装第二套动作。
+    inline constexpr char InheritedTableActionBarProperty[] =
+        "KSWORD_TABLE_INTERACTION_INHERITED_ACTION_BAR";
     inline constexpr char PreserveCustomTableHeaderStyleProperty[] =
         "KSWORD_TABLE_INTERACTION_PRESERVE_CUSTOM_HEADER_STYLE";
 
@@ -509,7 +512,7 @@ namespace ks::ui
     // Tiny or purely presentational tables can explicitly select Compact or None.
     inline TableActionBarMode EffectiveTableActionBarMode(const QTableView* tableView)
     {
-        if (tableView == nullptr)
+        if (tableView == nullptr || tableView->property(InheritedTableActionBarProperty).toBool())
         {
             return TableActionBarMode::None;
         }

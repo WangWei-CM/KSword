@@ -2,6 +2,7 @@
 #include "../UI/VisibleTableWidget.h"
 #include "../UI/ToolbarMetrics.h"
 #include "../UI/FlatButtonTheme.h"
+#include "../UI/PrimaryPageStyle.h"
 
 #include "../ArkDriverClient/ArkDriverClient.h"
 #include "../Internationalization/LanguageManager.h"
@@ -269,13 +270,7 @@ namespace
         return static_cast<int>(column);
     }
 
-    // presetButtonStyle：按选中状态绘制 A/B 列组按钮。
-    QString presetButtonStyle(const bool selected)
-    {
-        // 业务列预设仍按当前属性选择强调态，固定宽度和字重保持原值。
-        return ks::ui::BuildFlatButtonStyle(selected ? ks::ui::FlatButtonTone::Accent : ks::ui::FlatButtonTone::Neutral)
-            + QStringLiteral("QPushButton{min-width:26px;max-width:26px;padding:3px 0;border-radius:0;font-weight:700;}");
-    }
+
 }
 
 ProcessMessageHookWindow::ProcessMessageHookWindow(
@@ -336,7 +331,7 @@ void ProcessMessageHookWindow::initializeUi()
         static_cast<int>(QueryScope::RelatedToProcess));
     m_scopeCombo->setToolTip(hookWindowText(QStringLiteral(
         "选择按目标线程、Hook 安装者或两者查询；筛选同时在 R0 和 R3 生效。")));
-    m_scopeCombo->setStyleSheet(KswordTheme::ThemedComboBoxStyle());
+    ks::ui::StylePrimaryCombo(m_scopeCombo);
     m_scopeCombo->setMinimumContentsLength(18);
     scopeLabel->setBuddy(m_scopeCombo);
 
@@ -818,8 +813,7 @@ void ProcessMessageHookWindow::applyColumnPreset(const QString& presetName)
 void ProcessMessageHookWindow::updateColumnPresetButtons()
 {
     const QString preset = m_table->property("kswordColumnPreset").toString();
-    m_columnAButton->setStyleSheet(presetButtonStyle(preset == QStringLiteral("A")));
-    m_columnBButton->setStyleSheet(presetButtonStyle(preset == QStringLiteral("B")));
+    // 分段控件唯一拥有状态外观，不再先写旧矩形高亮再被共享宿主纠正。
     ks::ui::SetSegmentedButtonSelected(m_columnAButton, preset == QStringLiteral("A"));
     ks::ui::SetSegmentedButtonSelected(m_columnBButton, preset == QStringLiteral("B"));
 }
@@ -827,6 +821,7 @@ void ProcessMessageHookWindow::updateColumnPresetButtons()
 void ProcessMessageHookWindow::showHeaderContextMenu(const QPoint& localPosition)
 {
     QMenu menu(this);
+    menu.setStyleSheet(KswordTheme::ContextMenuStyle());
     QAction* titleAction = menu.addAction(hookWindowText(QStringLiteral("显示的列")));
     titleAction->setEnabled(false);
     menu.addSeparator();
@@ -882,6 +877,7 @@ void ProcessMessageHookWindow::showTableContextMenu(const QPoint& localPosition)
     }
 
     QMenu menu(this);
+    menu.setStyleSheet(KswordTheme::ContextMenuStyle());
     QAction* copyCellAction = menu.addAction(
         QIcon(QStringLiteral(":/Icon/process_copy_cell.svg")),
         hookWindowText(QStringLiteral("复制单元格")));

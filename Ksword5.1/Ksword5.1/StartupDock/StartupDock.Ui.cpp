@@ -276,7 +276,7 @@ void StartupDock::initializeTabs()
 {
     m_sideTabWidget = new QTabWidget(this);
     m_sideTabWidget->setTabPosition(QTabWidget::West);
-    ks::ui::StylePageTabs(m_sideTabWidget);
+    ks::ui::StylePageTabsContentFrame(m_sideTabWidget);
 
     m_allPage = createSingleTablePage(&m_allTable, m_sideTabWidget);
     m_logonPage = createSingleTablePage(&m_logonTable, m_sideTabWidget);

@@ -1,4 +1,4 @@
-#include "WindowChrome.h"
+﻿#include "WindowChrome.h"
 
 #include "../theme.h"
 
@@ -28,6 +28,8 @@ namespace
     // kDwmBorderColorAttribute 作用：
     // - DWMWA_BORDER_COLOR（Win11+），控制窗口细边框颜色。
     constexpr DWORD kDwmBorderColorAttribute = 34;
+    // 系统默认圆角策略：让最大化、贴靠、辅助功能及系统版本共同决定窗口外形。
+    constexpr DWORD kDwmCornerPreferenceAttribute = 33;
     // kDwmCaptionColorAttribute 作用：
     // - DWMWA_CAPTION_COLOR（Win11+），直接把标题栏染成指定颜色；
     // - 这是子窗口标题栏与主题背景融为一体的关键属性。
@@ -50,7 +52,7 @@ namespace
 
     // shouldApplyChromeToWidget 作用：
     // - 判断某个窗口是否应由本模块染色标题栏；
-    // - 无边框窗口（主窗口、启动页、通知卡片、ThemedMessageBox）没有原生标题栏，跳过；
+    // - 无边框窗口（主窗口、启动页、通知卡片）没有原生标题栏，跳过；
     // - Popup/ToolTip 等瞬态表面同样没有标题栏，跳过。
     bool shouldApplyChromeToWidget(const QWidget* widgetPointer)
     {
@@ -169,6 +171,10 @@ namespace ks::ui
             kDwmUseImmersiveDarkModeAttribute,
             &immersiveDarkModeValue,
             sizeof(immersiveDarkModeValue));
+
+        const DWORD cornerPreference = 0; // DWMWCP_DEFAULT，不强制方角或圆角。
+        (void)::DwmSetWindowAttribute(windowHandle, kDwmCornerPreferenceAttribute,
+            &cornerPreference, sizeof(cornerPreference));
 
         // Win11+：直接染色标题栏/文字/边框；旧系统返回 E_INVALIDARG，静默忽略。
         const COLORREF captionColorValue = toColorRef(captionColor);

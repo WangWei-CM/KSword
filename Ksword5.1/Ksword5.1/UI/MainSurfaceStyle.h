@@ -14,6 +14,7 @@ namespace ks::ui
         QColor alternate; // 内容交替行，低于结构层之间的明暗差。
         QColor toolbar;   // 操作带，与数据面相邻但可辨认。
         QColor header;    // 表头层，固定作为读表入口。
+        QColor input;     // 编辑与普通动作共用固定层级，不随嵌套父容器继续变亮。
         QColor border;    // 低饱和的结构边界。
     };
 

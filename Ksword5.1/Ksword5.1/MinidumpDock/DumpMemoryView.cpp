@@ -4,6 +4,9 @@
 // ============================================================
 
 #include "DumpMemoryView.h"
+#include "../UI/PrimaryPageStyle.h"
+#include "../UI/FlatButtonTheme.h"
+#include "../UI/ToolbarMetrics.h"
 #include "../UI/StructuredFieldView.h"
 
 #include "Internationalization/LanguageManager.h"
@@ -54,11 +57,6 @@ namespace
             .arg(KswordTheme::BorderHex())
             .arg(KswordTheme::SurfaceHex())
             .arg(KswordTheme::TextPrimaryHex());
-    }
-
-    QString buttonStyle()
-    {
-        return KswordTheme::ThemedButtonStyle();
     }
 
     bool parseUnsignedAddress(const QString& text, std::uint64_t* const valueOut)
@@ -120,9 +118,13 @@ DumpMemoryView::DumpMemoryView(QWidget* parent)
     m_nextButton = new QPushButton(this);
     m_addressEdit->setStyleSheet(inputStyle());
     m_readSizeCombo->setStyleSheet(inputStyle());
+    // 专业内存内容保持自绘，外部地址与长度控件采用共享输入外观。
+    ks::ui::StyleStandaloneInput(m_addressEdit);
+    ks::ui::StylePrimaryCombo(m_readSizeCombo);
     for (QPushButton* const button : { m_readButton, m_previousButton, m_nextButton })
     {
-        button->setStyleSheet(buttonStyle());
+        ks::ui::ApplyFlatButtonTheme(button, ks::ui::FlatButtonTone::Neutral,
+            ks::ui::FlatButtonAppearance::Solid);
     }
 
     toolbarLayout->addWidget(m_addressLabel);
@@ -132,6 +134,7 @@ DumpMemoryView::DumpMemoryView(QWidget* parent)
     toolbarLayout->addWidget(m_readButton);
     toolbarLayout->addWidget(m_previousButton);
     toolbarLayout->addWidget(m_nextButton);
+    ks::ui::NormalizeToolbarRow(toolbarLayout);
     rootLayout->addLayout(toolbarLayout);
 
     // 映射说明直接使用原生字段模型；复制与导出由模型按需生成。

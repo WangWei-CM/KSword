@@ -29,7 +29,8 @@ namespace ks::ui
     // ApplyThemeItemForeground 标记树节点的指定列；不修改节点文本、层级或业务缓存索引。
     void ApplyThemeItemForeground(QTreeWidgetItem* item, int column, ItemForegroundRole role);
 
-    // RefreshThemeItemForegrounds 只刷新带专用角色的既有项；不重建模型、筛选、选择或业务数据。
+    // 已安装本组件委托时仅请求绘制，按真实可见行取主题；其它委托兼容刷新专属角色画刷。
+    // 不重建模型、筛选、选择或业务数据。
     // 调用者在 palette 传播完成后排队调用；view 为非拥有指针，空指针安全透传。
     void RefreshThemeItemForegrounds(QAbstractItemView* view);
 

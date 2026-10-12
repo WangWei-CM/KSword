@@ -7,6 +7,8 @@
 #include "../UI/ToolbarMetrics.h"
 #include "../UI/PageControlStyle.h"
 #include "../UI/PrimaryPageStyle.h"
+#include "../UI/ThemeBinding.h"
+#include "../UI/MainSurfaceStyle.h"
 #include "DirectKernelCallMonitorWidget.h"
 #include "KernelCallbackMonitorWidget.h"
 #include "MonitorTextViewer.h"
@@ -692,12 +694,6 @@ namespace
         return true;
     }
 
-    // 按主题统一按钮风格。
-    QString blueButtonStyle()
-    {
-        return KswordTheme::ThemedButtonStyle();
-    }
-
     // 输入框统一样式。
     QString blueInputStyle()
     {
@@ -849,27 +845,17 @@ namespace
         return placeholderWidget;
     }
 
-    // 表头统一样式。
-    QString blueHeaderStyle()
-    {
-        return QStringLiteral(
-            "QHeaderView::section{color:%1;background:%2;border:0;border-bottom:1px solid %3;padding:4px 8px;font-weight:600;}")
-            .arg(KswordTheme::TextPrimaryHex())
-            .arg(KswordTheme::SurfaceAltHex())
-            .arg(KswordTheme::BorderHex());
-    }
-
     // collapsePanelStyle 作用：
-    // - 为 WMI/ETW 顶部独立折叠面板提供主题自适应边框与背景；
+    // - 为 WMI/ETW 顶部独立折叠面板提供不累积变亮的圆角数据底面；
     // - 返回：可直接应用到折叠面板宿主 QWidget 的样式表。
-    QString collapsePanelStyle()
+    QString collapsePanelStyle(const QWidget* panel)
     {
         return QStringLiteral(
             "QWidget[kswordCollapsePanel=\"true\"]{"
             "  background:%1;"
             "  color:%2;"
-            "  border:1px solid %3;"
-            "  border-radius:5px;"
+            "  border:0;"
+            "  border-radius:8px;"
             "}"
             "QWidget[kswordCollapseContent=\"true\"]{"
             "  background:transparent;"
@@ -877,9 +863,9 @@ namespace
             "  color:%2;"
             "  border:none;"
             "}")
-            .arg(KswordTheme::SurfaceHex())
-            .arg(KswordTheme::TextPrimaryHex())
-            .arg(KswordTheme::BorderHex());
+            .arg(ks::ui::UsesMainSurfaceHierarchy(panel)
+                ? ks::ui::MainWindowSurfaceColors().content.name() : KswordTheme::SurfaceHex())
+            .arg(KswordTheme::TextPrimaryHex());
     }
 
     // collapseHeaderButtonStyle 作用：
@@ -905,7 +891,15 @@ namespace
     {
         QWidget* sectionWidget = new QWidget(parent);
         sectionWidget->setProperty("kswordCollapsePanel", QStringLiteral("true"));
-        sectionWidget->setStyleSheet(collapsePanelStyle());
+        // 仅此明确折叠控件持有主题绑定，样式未变化时不重复 polish 子树。
+        ks::ui::BindWidgetTheme(sectionWidget, [sectionWidget]()
+        {
+            const QString style = collapsePanelStyle(sectionWidget);
+            if (sectionWidget->styleSheet() != style)
+            {
+                sectionWidget->setStyleSheet(style);
+            }
+        });
         sectionWidget->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Maximum);
 
         QVBoxLayout* sectionLayout = new QVBoxLayout(sectionWidget);
@@ -918,12 +912,28 @@ namespace
         headerButton->setCheckable(true);
         headerButton->setChecked(expanded);
         headerButton->setArrowType(expanded ? Qt::DownArrow : Qt::RightArrow);
-        headerButton->setStyleSheet(collapseHeaderButtonStyle());
+        // 仅此明确折叠控件持有主题绑定，样式未变化时不重复 polish 子树。
+        ks::ui::BindWidgetTheme(headerButton, [headerButton]()
+        {
+            const QString style = collapseHeaderButtonStyle();
+            if (headerButton->styleSheet() != style)
+            {
+                headerButton->setStyleSheet(style);
+            }
+        });
         headerButton->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
 
         QWidget* contentHostWidget = new QWidget(sectionWidget);
         contentHostWidget->setProperty("kswordCollapseContent", QStringLiteral("true"));
-        contentHostWidget->setStyleSheet(collapsePanelStyle());
+        // 仅此明确折叠控件持有主题绑定，样式未变化时不重复 polish 子树。
+        ks::ui::BindWidgetTheme(contentHostWidget, [contentHostWidget]()
+        {
+            const QString style = collapsePanelStyle(contentHostWidget);
+            if (contentHostWidget->styleSheet() != style)
+            {
+                contentHostWidget->setStyleSheet(style);
+            }
+        });
         contentHostWidget->setVisible(expanded);
         contentHostWidget->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Maximum);
 
@@ -951,43 +961,6 @@ namespace
             });
 
         return sectionWidget;
-    }
-
-    // refreshIndependentCollapseTheme 作用：
-    // - 递归刷新独立折叠段样式，响应深浅主题切换；
-    // - 入参 rootWidget：需要扫描的根控件；
-    // - 返回：无返回值。
-    void refreshIndependentCollapseTheme(QWidget* rootWidget)
-    {
-        if (rootWidget == nullptr)
-        {
-            return;
-        }
-
-        const QList<QWidget*> widgetList = rootWidget->findChildren<QWidget*>();
-        for (QWidget* widgetPointer : widgetList)
-        {
-            if (widgetPointer == nullptr)
-            {
-                continue;
-            }
-            if (widgetPointer->property("kswordCollapsePanel").toString() == QStringLiteral("true")
-                || widgetPointer->property("kswordCollapseContent").toString() == QStringLiteral("true"))
-            {
-                widgetPointer->setStyleSheet(collapsePanelStyle());
-            }
-        }
-
-        const QList<QToolButton*> headerButtonList = rootWidget->findChildren<QToolButton*>();
-        for (QToolButton* buttonPointer : headerButtonList)
-        {
-            if (buttonPointer != nullptr
-                && buttonPointer->parentWidget() != nullptr
-                && buttonPointer->parentWidget()->property("kswordCollapsePanel").toString() == QStringLiteral("true"))
-            {
-                buttonPointer->setStyleSheet(collapseHeaderButtonStyle());
-            }
-        }
     }
 
     void stopActiveKswordTraceSessionsByPrefix(const QStringList& sessionPrefixList)
@@ -4681,8 +4654,7 @@ bool MonitorDock::event(QEvent* eventPointer)
             || eventPointer->type() == QEvent::ApplicationPaletteChange
             || eventPointer->type() == QEvent::StyleChange))
     {
-        refreshIndependentCollapseTheme(m_wmiPage);
-        refreshIndependentCollapseTheme(m_etwPage);
+        // 折叠面板自身绑定主题；这里只维护 ETW 配置区域的高度约束。
         updateEtwCollapseHeight();
     }
     return handled;
@@ -4715,6 +4687,7 @@ void MonitorDock::ensureDirectKernelCallTabInitialized()
     }
 
     m_directKernelCallWidget = new DirectKernelCallMonitorWidget(m_directKernelCallHostPage);
+    m_directKernelCallHostPage->setProperty("ksword_page_frame_host", true); // 只标记此明确惰性壳。
     hostLayout->addWidget(m_directKernelCallWidget, 1);
 }
 
@@ -4742,6 +4715,7 @@ void MonitorDock::ensureKernelCallbackTabInitialized()
     }
 
     m_kernelCallbackWidget = new KernelCallbackMonitorWidget(m_kernelCallbackHostPage);
+    m_kernelCallbackHostPage->setProperty("ksword_page_frame_host", true);
     hostLayout->addWidget(m_kernelCallbackWidget, 1);
 }
 
@@ -4763,6 +4737,7 @@ void MonitorDock::ensureWinApiTabInitialized()
         }
 
         m_winApiWidget = new WinAPIDock(m_winApiPage);
+        m_winApiPage->setProperty("ksword_page_frame_host", true);
         hostLayout->addWidget(m_winApiWidget, 1);
     }
 
@@ -4917,11 +4892,11 @@ void MonitorDock::initializeUi()
     // - 监控页本体包含“进程定向 / WinAPI / WMI / ETW”四个标签；
     // - 性能四宫格图已经独立到左下角“监视面板”Dock。
     m_rootLayout = new QVBoxLayout(this);
-    m_rootLayout->setContentsMargins(6, 6, 6, 6);
+    m_rootLayout->setContentsMargins(0, 0, 0, 0); // 惰性监控页共用一次内容框架留白。
     m_rootLayout->setSpacing(6);
 
     m_sideTabWidget = new QTabWidget(this);
-    ks::ui::StylePageTabs(m_sideTabWidget);
+    ks::ui::StylePageTabsContentFrame(m_sideTabWidget);
     m_rootLayout->addWidget(m_sideTabWidget, 1);
 
     m_processTraceWidget = new ProcessTraceMonitorWidget(m_sideTabWidget);
@@ -5534,8 +5509,11 @@ void MonitorDock::initializeWmiTab()
     m_wmiProviderPanelLayout->setContentsMargins(3, 3, 3, 3);
     m_wmiProviderPanelLayout->setSpacing(4);
 
-    m_wmiProviderControlLayout = new QHBoxLayout();
-    m_wmiProviderControlLayout->setContentsMargins(0, 0, 0, 0);
+    // 选择辅助只包裹工具行，Provider 和订阅内容不再增加第二层亮色底板。
+    QWidget* wmiProviderToolbar = new QWidget(m_wmiProviderPanel);
+    ks::ui::StylePrimaryToolbar(wmiProviderToolbar);
+    m_wmiProviderControlLayout = new QHBoxLayout(wmiProviderToolbar);
+    m_wmiProviderControlLayout->setContentsMargins(8, 6, 8, 6);
     m_wmiProviderControlLayout->setSpacing(4);
 
     m_wmiProviderFilterEdit = new QLineEdit(m_wmiProviderPanel);
@@ -5545,7 +5523,8 @@ void MonitorDock::initializeWmiTab()
 
     m_wmiProviderRefreshButton = new QPushButton(QIcon(":/Icon/process_refresh.svg"), QString(), m_wmiProviderPanel);
     m_wmiProviderRefreshButton->setToolTip(QStringLiteral("刷新WMI Provider"));
-    m_wmiProviderRefreshButton->setStyleSheet(blueButtonStyle());
+    ks::ui::ApplyFlatButtonTheme(m_wmiProviderRefreshButton, ks::ui::FlatButtonTone::Neutral,
+        ks::ui::FlatButtonAppearance::Solid);
     m_wmiProviderRefreshButton->setFixedWidth(32);
 
     m_wmiProviderStatusLabel = new QLabel(QStringLiteral("● 待刷新"), m_wmiProviderPanel);
@@ -5578,7 +5557,6 @@ void MonitorDock::initializeWmiTab()
     m_wmiProviderTableView->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_wmiProviderTableView->setSelectionMode(QAbstractItemView::SingleSelection);
     m_wmiProviderTableView->setEditTriggers(QAbstractItemView::NoEditTriggers);
-    m_wmiProviderTableView->horizontalHeader()->setStyleSheet(blueHeaderStyle());
     m_wmiProviderTableView->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
     m_wmiProviderTableView->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
     m_wmiProviderTableView->verticalHeader()->setDefaultSectionSize(20);
@@ -5587,7 +5565,7 @@ void MonitorDock::initializeWmiTab()
     m_wmiProviderTableView->setMinimumHeight(120);
     m_wmiProviderTableView->setMaximumHeight(160);
 
-    m_wmiProviderPanelLayout->addLayout(m_wmiProviderControlLayout);
+    m_wmiProviderPanelLayout->addWidget(wmiProviderToolbar);
     m_wmiProviderPanelLayout->addWidget(m_wmiProviderTableView, 1);
     m_wmiTopConfigLayout->addWidget(createIndependentCollapseSection(
         m_wmiTopConfigPanel,
@@ -5601,8 +5579,10 @@ void MonitorDock::initializeWmiTab()
     m_wmiSubscribeLayout->setContentsMargins(3, 3, 3, 3);
     m_wmiSubscribeLayout->setSpacing(4);
 
-    m_wmiEventClassControlLayout = new QHBoxLayout();
-    m_wmiEventClassControlLayout->setContentsMargins(0, 0, 0, 0);
+    QWidget* wmiClassToolbar = new QWidget(m_wmiSubscribePanel);
+    ks::ui::StylePrimaryToolbar(wmiClassToolbar);
+    m_wmiEventClassControlLayout = new QHBoxLayout(wmiClassToolbar);
+    m_wmiEventClassControlLayout->setContentsMargins(8, 6, 8, 6);
     m_wmiEventClassControlLayout->setSpacing(4);
 
     // 这三个是“选择辅助”而非流程控制：原先用 ▶/⏸ 会与同一面板的
@@ -5610,18 +5590,21 @@ void MonitorDock::initializeWmiTab()
     // 播放类图标只保留给真正的流程控制，这里改用短文字，语义无歧义。
     m_wmiSelectAllClassesButton = new QPushButton(QStringLiteral("全选"), m_wmiSubscribePanel);
     m_wmiSelectAllClassesButton->setToolTip(QStringLiteral("全选事件类"));
-    m_wmiSelectAllClassesButton->setStyleSheet(blueButtonStyle());
+    ks::ui::ApplyFlatButtonTheme(m_wmiSelectAllClassesButton, ks::ui::FlatButtonTone::Neutral,
+        ks::ui::FlatButtonAppearance::Solid);
 
     m_wmiSelectNoneClassesButton = new QPushButton(QStringLiteral("全不选"), m_wmiSubscribePanel);
     m_wmiSelectNoneClassesButton->setToolTip(QStringLiteral("全不选事件类"));
-    m_wmiSelectNoneClassesButton->setStyleSheet(blueButtonStyle());
+    ks::ui::ApplyFlatButtonTheme(m_wmiSelectNoneClassesButton, ks::ui::FlatButtonTone::Neutral,
+        ks::ui::FlatButtonAppearance::Solid);
 
     m_wmiSelectWin32ClassesButton = new QPushButton(
         QIcon(":/Icon/filter_funnel.svg"),
         QStringLiteral("仅 Win32"),
         m_wmiSubscribePanel);
     m_wmiSelectWin32ClassesButton->setToolTip(QStringLiteral("仅选择Win32_*"));
-    m_wmiSelectWin32ClassesButton->setStyleSheet(blueButtonStyle());
+    ks::ui::ApplyFlatButtonTheme(m_wmiSelectWin32ClassesButton, ks::ui::FlatButtonTone::Neutral,
+        ks::ui::FlatButtonAppearance::Solid);
 
     m_wmiEventClassControlLayout->addWidget(new QLabel(QStringLiteral("事件类"), m_wmiSubscribePanel));
     m_wmiEventClassControlLayout->addStretch(1);
@@ -5646,7 +5629,6 @@ void MonitorDock::initializeWmiTab()
     // 右侧事件类表改为无表头紧凑模式，减少高度占用并提升可见行数。
     m_wmiEventClassTable->horizontalHeader()->setVisible(false);
     m_wmiEventClassTable->verticalHeader()->setVisible(false);
-    m_wmiEventClassTable->horizontalHeader()->setStyleSheet(blueHeaderStyle());
     m_wmiEventClassTable->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
     m_wmiEventClassTable->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
     m_wmiEventClassTable->horizontalHeader()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
@@ -5683,29 +5665,35 @@ void MonitorDock::initializeWmiTab()
     // 保持单行输入并压缩高度，给类列表与结果表留出更多可视行。
     m_wmiWhereEditor->setFixedHeight(24);
 
-    m_wmiSubscribeControlLayout = new QHBoxLayout();
-    m_wmiSubscribeControlLayout->setContentsMargins(0, 0, 0, 0);
+    QWidget* wmiSubscribeToolbar = new QWidget(m_wmiSubscribePanel);
+    ks::ui::StylePrimaryToolbar(wmiSubscribeToolbar);
+    m_wmiSubscribeControlLayout = new QHBoxLayout(wmiSubscribeToolbar);
+    m_wmiSubscribeControlLayout->setContentsMargins(8, 6, 8, 6);
     m_wmiSubscribeControlLayout->setSpacing(4);
 
     // 订阅控制保留在右侧面板内，形成“配置+控制”一体区，减少纵向重复占位。
     m_wmiStartSubscribeButton = new QPushButton(QIcon(":/Icon/process_start.svg"), QString(), m_wmiSubscribePanel);
     m_wmiStartSubscribeButton->setToolTip(QStringLiteral("开始订阅"));
-    m_wmiStartSubscribeButton->setStyleSheet(blueButtonStyle());
+    ks::ui::ApplyFlatButtonTheme(m_wmiStartSubscribeButton, ks::ui::FlatButtonTone::Accent,
+        ks::ui::FlatButtonAppearance::Solid);
     m_wmiStartSubscribeButton->setFixedWidth(32);
 
     m_wmiStopSubscribeButton = new QPushButton(QIcon(":/Icon/process_terminate.svg"), QString(), m_wmiSubscribePanel);
     m_wmiStopSubscribeButton->setToolTip(QStringLiteral("停止订阅"));
-    m_wmiStopSubscribeButton->setStyleSheet(blueButtonStyle());
+    ks::ui::ApplyFlatButtonTheme(m_wmiStopSubscribeButton, ks::ui::FlatButtonTone::Neutral,
+        ks::ui::FlatButtonAppearance::Solid);
     m_wmiStopSubscribeButton->setFixedWidth(32);
 
     m_wmiPauseSubscribeButton = new QPushButton(QIcon(":/Icon/process_pause.svg"), QString(), m_wmiSubscribePanel);
     m_wmiPauseSubscribeButton->setToolTip(QStringLiteral("暂停/继续订阅"));
-    m_wmiPauseSubscribeButton->setStyleSheet(blueButtonStyle());
+    ks::ui::ApplyFlatButtonTheme(m_wmiPauseSubscribeButton, ks::ui::FlatButtonTone::Neutral,
+        ks::ui::FlatButtonAppearance::Solid);
     m_wmiPauseSubscribeButton->setFixedWidth(32);
 
     m_wmiExportButton = new QPushButton(QIcon(":/Icon/log_export.svg"), QString(), m_wmiSubscribePanel);
     m_wmiExportButton->setToolTip(QStringLiteral("导出当前WMI结果到文件"));
-    m_wmiExportButton->setStyleSheet(blueButtonStyle());
+    ks::ui::ApplyFlatButtonTheme(m_wmiExportButton, ks::ui::FlatButtonTone::Neutral,
+        ks::ui::FlatButtonAppearance::Solid);
     m_wmiExportButton->setFixedWidth(32);
 
     m_wmiSubscribeStatusLabel = new QLabel(QStringLiteral("● 未订阅"), m_wmiSubscribePanel);
@@ -5720,11 +5708,11 @@ void MonitorDock::initializeWmiTab()
     m_wmiSubscribeControlLayout->addWidget(m_wmiSubscribeStatusLabel);
     ks::ui::NormalizeToolbarRow(m_wmiSubscribeControlLayout);
 
-    m_wmiSubscribeLayout->addLayout(m_wmiEventClassControlLayout);
+    m_wmiSubscribeLayout->addWidget(wmiClassToolbar);
     m_wmiSubscribeLayout->addWidget(m_wmiEventClassTable, 1);
     m_wmiSubscribeLayout->addLayout(whereLayout);
     m_wmiSubscribeLayout->addWidget(m_wmiWhereEditor, 0);
-    m_wmiSubscribeLayout->addLayout(m_wmiSubscribeControlLayout, 0);
+    m_wmiSubscribeLayout->addWidget(wmiSubscribeToolbar, 0);
     // 初始化时先按“紧凑高度”收敛事件类表，防止首帧就出现多余滚动条。
     updateWmiSubscribePanelCompactLayout();
 
@@ -5753,7 +5741,6 @@ void MonitorDock::initializeWmiTab()
     m_wmiEventTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_wmiEventTable->setAlternatingRowColors(true);
     m_wmiEventTable->setContextMenuPolicy(Qt::CustomContextMenu);
-    m_wmiEventTable->horizontalHeader()->setStyleSheet(blueHeaderStyle());
     m_wmiEventTable->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
     m_wmiEventTable->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
     m_wmiEventTable->horizontalHeader()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
@@ -5762,8 +5749,9 @@ void MonitorDock::initializeWmiTab()
 
     // 结果筛选条：提供全字段/分字段/正则/大小写/反向匹配与贴底滚动控制。
     QWidget* wmiFilterWidget = new QWidget(m_wmiPage);
+    ks::ui::StylePrimaryToolbar(wmiFilterWidget);
     QVBoxLayout* wmiFilterLayout = new QVBoxLayout(wmiFilterWidget);
-    wmiFilterLayout->setContentsMargins(0, 0, 0, 0);
+    wmiFilterLayout->setContentsMargins(8, 6, 8, 6);
     wmiFilterLayout->setSpacing(4);
 
     QHBoxLayout* wmiFilterTopRow = new QHBoxLayout();
@@ -5798,7 +5786,8 @@ void MonitorDock::initializeWmiTab()
     m_wmiEventKeepBottomCheck = new QCheckBox(QStringLiteral("保持表格在底部"), wmiFilterWidget);
     m_wmiEventKeepBottomCheck->setChecked(true);
     m_wmiEventFilterClearButton = new QPushButton(QIcon(":/Icon/log_clear.svg"), QString(), wmiFilterWidget);
-    m_wmiEventFilterClearButton->setStyleSheet(blueButtonStyle());
+    ks::ui::ApplyFlatButtonTheme(m_wmiEventFilterClearButton, ks::ui::FlatButtonTone::Neutral,
+        ks::ui::FlatButtonAppearance::Solid);
     m_wmiEventFilterClearButton->setToolTip(QStringLiteral("清空所有WMI筛选条件"));
     m_wmiEventFilterClearButton->setFixedWidth(34);
     m_wmiEventFilterStatusLabel = new QLabel(QStringLiteral("可见: 0 / 0"), wmiFilterWidget);
@@ -5934,13 +5923,16 @@ void MonitorDock::initializeEtwTab()
     m_etwProviderPanelLayout->setContentsMargins(4, 4, 4, 4);
     m_etwProviderPanelLayout->setSpacing(6);
 
-    m_etwProviderControlLayout = new QHBoxLayout();
-    m_etwProviderControlLayout->setContentsMargins(0, 0, 0, 0);
+    QWidget* etwProviderToolbar = new QWidget(m_etwProviderPanel);
+    ks::ui::StylePrimaryToolbar(etwProviderToolbar);
+    m_etwProviderControlLayout = new QHBoxLayout(etwProviderToolbar);
+    m_etwProviderControlLayout->setContentsMargins(8, 6, 8, 6);
     m_etwProviderControlLayout->setSpacing(6);
 
     m_etwProviderRefreshButton = new QPushButton(QIcon(":/Icon/process_refresh.svg"), QString(), m_etwProviderPanel);
     m_etwProviderRefreshButton->setToolTip(QStringLiteral("刷新ETW Provider"));
-    m_etwProviderRefreshButton->setStyleSheet(blueButtonStyle());
+    ks::ui::ApplyFlatButtonTheme(m_etwProviderRefreshButton, ks::ui::FlatButtonTone::Neutral,
+        ks::ui::FlatButtonAppearance::Solid);
     m_etwProviderRefreshButton->setFixedWidth(34);
 
     m_etwProviderStatusLabel = new QLabel(QStringLiteral("● 待刷新"), m_etwProviderPanel);
@@ -5984,10 +5976,12 @@ void MonitorDock::initializeEtwTab()
     etwPresetHeaderLayout->addWidget(m_etwPresetCategoryCombo, 1);
     m_etwPresetSelectAllButton = new QPushButton(QStringLiteral("全选显示"), etwPresetWidget);
     m_etwPresetSelectAllButton->setToolTip(QStringLiteral("勾选当前分类中显示的所有经典内核事件和 Provider"));
-    m_etwPresetSelectAllButton->setStyleSheet(blueButtonStyle());
+    ks::ui::ApplyFlatButtonTheme(m_etwPresetSelectAllButton, ks::ui::FlatButtonTone::Neutral,
+        ks::ui::FlatButtonAppearance::Solid);
     m_etwPresetClearAllButton = new QPushButton(QStringLiteral("全取消"), etwPresetWidget);
     m_etwPresetClearAllButton->setToolTip(QStringLiteral("取消当前分类中显示的所有经典内核事件和 Provider"));
-    m_etwPresetClearAllButton->setStyleSheet(blueButtonStyle());
+    ks::ui::ApplyFlatButtonTheme(m_etwPresetClearAllButton, ks::ui::FlatButtonTone::Neutral,
+        ks::ui::FlatButtonAppearance::Solid);
     etwPresetHeaderLayout->addWidget(m_etwPresetSelectAllButton);
     etwPresetHeaderLayout->addWidget(m_etwPresetClearAllButton);
     ks::ui::NormalizeToolbarRow(etwPresetHeaderLayout);
@@ -6026,10 +6020,12 @@ void MonitorDock::initializeEtwTab()
     etwAllProviderHeaderLayout->addWidget(m_etwSystemProviderSearchEdit, 1);
     m_etwSystemProviderSelectAllButton = new QPushButton(QStringLiteral("全选显示"), etwAllProviderWidget);
     m_etwSystemProviderSelectAllButton->setToolTip(QStringLiteral("勾选搜索结果中显示的所有系统 Provider"));
-    m_etwSystemProviderSelectAllButton->setStyleSheet(blueButtonStyle());
+    ks::ui::ApplyFlatButtonTheme(m_etwSystemProviderSelectAllButton, ks::ui::FlatButtonTone::Neutral,
+        ks::ui::FlatButtonAppearance::Solid);
     m_etwSystemProviderClearAllButton = new QPushButton(QStringLiteral("全取消"), etwAllProviderWidget);
     m_etwSystemProviderClearAllButton->setToolTip(QStringLiteral("取消搜索结果中显示的所有系统 Provider"));
-    m_etwSystemProviderClearAllButton->setStyleSheet(blueButtonStyle());
+    ks::ui::ApplyFlatButtonTheme(m_etwSystemProviderClearAllButton, ks::ui::FlatButtonTone::Neutral,
+        ks::ui::FlatButtonAppearance::Solid);
     etwAllProviderHeaderLayout->addWidget(m_etwSystemProviderSelectAllButton);
     etwAllProviderHeaderLayout->addWidget(m_etwSystemProviderClearAllButton);
     ks::ui::NormalizeToolbarRow(etwAllProviderHeaderLayout);
@@ -6043,7 +6039,7 @@ void MonitorDock::initializeEtwTab()
     etwProviderSplitLayout->addWidget(etwPresetWidget, 1);
     etwProviderSplitLayout->addWidget(etwAllProviderWidget, 2);
 
-    m_etwProviderPanelLayout->addLayout(m_etwProviderControlLayout);
+    m_etwProviderPanelLayout->addWidget(etwProviderToolbar);
     m_etwProviderPanelLayout->addLayout(etwProviderSplitLayout, 1);
 
     m_etwSessionPanel = new QWidget(etwProviderSessionPanel);
@@ -6051,18 +6047,22 @@ void MonitorDock::initializeEtwTab()
     m_etwSessionPanelLayout->setContentsMargins(4, 4, 4, 4);
     m_etwSessionPanelLayout->setSpacing(6);
 
-    m_etwSessionControlLayout = new QHBoxLayout();
-    m_etwSessionControlLayout->setContentsMargins(0, 0, 0, 0);
+    QWidget* etwSessionToolbar = new QWidget(m_etwSessionPanel);
+    ks::ui::StylePrimaryToolbar(etwSessionToolbar);
+    m_etwSessionControlLayout = new QHBoxLayout(etwSessionToolbar);
+    m_etwSessionControlLayout->setContentsMargins(8, 6, 8, 6);
     m_etwSessionControlLayout->setSpacing(6);
 
     m_etwSessionRefreshButton = new QPushButton(QIcon(":/Icon/process_refresh.svg"), QString(), m_etwSessionPanel);
     m_etwSessionRefreshButton->setToolTip(QStringLiteral("枚举系统活动 ETW 会话"));
-    m_etwSessionRefreshButton->setStyleSheet(blueButtonStyle());
+    ks::ui::ApplyFlatButtonTheme(m_etwSessionRefreshButton, ks::ui::FlatButtonTone::Neutral,
+        ks::ui::FlatButtonAppearance::Solid);
     m_etwSessionRefreshButton->setFixedWidth(34);
 
     m_etwSessionStopButton = new QPushButton(QIcon(":/Icon/process_terminate.svg"), QString(), m_etwSessionPanel);
     m_etwSessionStopButton->setToolTip(QStringLiteral("结束选中的 ETW 会话"));
-    m_etwSessionStopButton->setStyleSheet(blueButtonStyle());
+    ks::ui::ApplyFlatButtonTheme(m_etwSessionStopButton, ks::ui::FlatButtonTone::Danger,
+        ks::ui::FlatButtonAppearance::Solid);
     m_etwSessionStopButton->setFixedWidth(34);
     m_etwSessionStopButton->setEnabled(false);
 
@@ -6075,7 +6075,7 @@ void MonitorDock::initializeEtwTab()
     m_etwSessionControlLayout->addWidget(m_etwSessionStopButton);
     m_etwSessionControlLayout->addWidget(m_etwSessionStatusLabel);
     ks::ui::NormalizeToolbarRow(m_etwSessionControlLayout);
-    m_etwSessionPanelLayout->addLayout(m_etwSessionControlLayout);
+    m_etwSessionPanelLayout->addWidget(etwSessionToolbar);
 
     m_etwSessionTable = new ks::ui::VisibleTableWidget(m_etwSessionPanel);
     // 活动会话是管理辅助清单，紧凑复制/导出保留调查入口。
@@ -6093,7 +6093,6 @@ void MonitorDock::initializeEtwTab()
     m_etwSessionTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_etwSessionTable->setAlternatingRowColors(true);
     m_etwSessionTable->verticalHeader()->setVisible(false);
-    m_etwSessionTable->horizontalHeader()->setStyleSheet(blueHeaderStyle());
     m_etwSessionTable->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
     m_etwSessionTable->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
     m_etwSessionTable->horizontalHeader()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
@@ -6124,7 +6123,8 @@ void MonitorDock::initializeEtwTab()
 
     m_etwManualProviderEdit = new QLineEdit(capturePanel);
     m_etwManualProviderEdit->setPlaceholderText(QStringLiteral("可选：手动输入Provider"));
-    m_etwManualProviderEdit->setStyleSheet(blueInputStyle());
+    ks::ui::StyleStandaloneInput(m_etwManualProviderEdit);
+    ks::ui::NormalizeToolbarControl(m_etwManualProviderEdit);
 
     m_etwLevelCombo = new QComboBox(capturePanel);
     ks::ui::StylePrimaryCombo(m_etwLevelCombo);
@@ -6138,23 +6138,27 @@ void MonitorDock::initializeEtwTab()
     m_etwLevelCombo->setCurrentIndex(3);
 
     m_etwKeywordMaskEdit = new QLineEdit(capturePanel);
-    m_etwKeywordMaskEdit->setStyleSheet(blueInputStyle());
+    ks::ui::StyleStandaloneInput(m_etwKeywordMaskEdit);
+    ks::ui::NormalizeToolbarControl(m_etwKeywordMaskEdit);
     m_etwKeywordMaskEdit->setText(QStringLiteral("0xFFFFFFFFFFFFFFFF"));
 
     m_etwBufferSizeSpin = new QSpinBox(capturePanel);
     m_etwBufferSizeSpin->setRange(64, 4096);
     m_etwBufferSizeSpin->setValue(256);
-    m_etwBufferSizeSpin->setStyleSheet(blueInputStyle());
+    ks::ui::StyleStandaloneInput(m_etwBufferSizeSpin);
+    ks::ui::NormalizeToolbarControl(m_etwBufferSizeSpin);
 
     m_etwMinBufferSpin = new QSpinBox(capturePanel);
     m_etwMinBufferSpin->setRange(2, 128);
     m_etwMinBufferSpin->setValue(16);
-    m_etwMinBufferSpin->setStyleSheet(blueInputStyle());
+    ks::ui::StyleStandaloneInput(m_etwMinBufferSpin);
+    ks::ui::NormalizeToolbarControl(m_etwMinBufferSpin);
 
     m_etwMaxBufferSpin = new QSpinBox(capturePanel);
     m_etwMaxBufferSpin->setRange(4, 256);
     m_etwMaxBufferSpin->setValue(64);
-    m_etwMaxBufferSpin->setStyleSheet(blueInputStyle());
+    ks::ui::StyleStandaloneInput(m_etwMaxBufferSpin);
+    ks::ui::NormalizeToolbarControl(m_etwMaxBufferSpin);
 
     formLayout->addRow(QStringLiteral("手动Provider"), m_etwManualProviderEdit);
     formLayout->addRow(QStringLiteral("级别"), m_etwLevelCombo);
@@ -6163,29 +6167,36 @@ void MonitorDock::initializeEtwTab()
     formLayout->addRow(QStringLiteral("最小缓冲区"), m_etwMinBufferSpin);
     formLayout->addRow(QStringLiteral("最大缓冲区"), m_etwMaxBufferSpin);
 
-    m_etwCaptureControlLayout = new QHBoxLayout();
-    m_etwCaptureControlLayout->setContentsMargins(0, 0, 0, 0);
+    // 采集动作保持在折叠配置之外，整行使用与 WMI 一致的圆角工具底面。
+    QWidget* etwCaptureToolbar = new QWidget(m_etwPage);
+    ks::ui::StylePrimaryToolbar(etwCaptureToolbar);
+    m_etwCaptureControlLayout = new QHBoxLayout(etwCaptureToolbar);
+    m_etwCaptureControlLayout->setContentsMargins(8, 6, 8, 6);
     m_etwCaptureControlLayout->setSpacing(6);
 
     // ETW 控制按钮挪到折叠栏外（父控件改为 m_etwPage），避免折叠页过高。
     m_etwStartButton = new QPushButton(QIcon(":/Icon/process_start.svg"), QString(), m_etwPage);
     m_etwStartButton->setToolTip(QStringLiteral("开始监听"));
-    m_etwStartButton->setStyleSheet(blueButtonStyle());
+    ks::ui::ApplyFlatButtonTheme(m_etwStartButton, ks::ui::FlatButtonTone::Accent,
+        ks::ui::FlatButtonAppearance::Solid);
     m_etwStartButton->setFixedWidth(34);
 
     m_etwStopButton = new QPushButton(QIcon(":/Icon/process_terminate.svg"), QString(), m_etwPage);
     m_etwStopButton->setToolTip(QStringLiteral("停止监听"));
-    m_etwStopButton->setStyleSheet(blueButtonStyle());
+    ks::ui::ApplyFlatButtonTheme(m_etwStopButton, ks::ui::FlatButtonTone::Neutral,
+        ks::ui::FlatButtonAppearance::Solid);
     m_etwStopButton->setFixedWidth(34);
 
     m_etwPauseButton = new QPushButton(QIcon(":/Icon/process_pause.svg"), QString(), m_etwPage);
     m_etwPauseButton->setToolTip(QStringLiteral("暂停/继续"));
-    m_etwPauseButton->setStyleSheet(blueButtonStyle());
+    ks::ui::ApplyFlatButtonTheme(m_etwPauseButton, ks::ui::FlatButtonTone::Neutral,
+        ks::ui::FlatButtonAppearance::Solid);
     m_etwPauseButton->setFixedWidth(34);
 
     m_etwExportButton = new QPushButton(QIcon(":/Icon/log_export.svg"), QString(), m_etwPage);
     m_etwExportButton->setToolTip(QStringLiteral("导出TSV"));
-    m_etwExportButton->setStyleSheet(blueButtonStyle());
+    ks::ui::ApplyFlatButtonTheme(m_etwExportButton, ks::ui::FlatButtonTone::Neutral,
+        ks::ui::FlatButtonAppearance::Solid);
     m_etwExportButton->setFixedWidth(34);
 
     m_etwCaptureStatusLabel = new QLabel(QStringLiteral("● 未监听"), m_etwPage);
@@ -6210,7 +6221,7 @@ void MonitorDock::initializeEtwTab()
     initializeEtwFilterPanels();
 
     // 把 ETW 控制栏放在折叠栏外，统一和 WMI 的操作区布局。
-    m_etwLayout->addLayout(m_etwCaptureControlLayout, 0);
+    m_etwLayout->addWidget(etwCaptureToolbar, 0);
 
     // ETW 时间轴：
     // - 复用“进程定向”页的紧凑瀑布流控件，保证两个监控页的交互语义一致；
@@ -6244,7 +6255,6 @@ void MonitorDock::initializeEtwTab()
     m_etwEventTable->verticalHeader()->setDefaultSectionSize(22);
     m_etwEventTable->verticalHeader()->setMinimumWidth(78);
     m_etwEventTable->setContextMenuPolicy(Qt::CustomContextMenu);
-    m_etwEventTable->horizontalHeader()->setStyleSheet(blueHeaderStyle());
     // 高频追加时禁止 ResizeToContents：该模式会反复扫描已有行计算列宽，
     // 大量 ETW 事件到达时会放大每次 insert/setItem 的布局成本。
     m_etwEventTable->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Interactive);
@@ -6313,7 +6323,8 @@ QWidget* MonitorDock::createEtwSimpleFilterPanel(const EtwFilterStage stage, QWi
         QIcon(QStringLiteral(":/Icon/log_clear.svg")),
         QStringLiteral("清空"),
         uiState.panelWidget);
-    uiState.clearButton->setStyleSheet(blueButtonStyle());
+    ks::ui::ApplyFlatButtonTheme(uiState.clearButton, ks::ui::FlatButtonTone::Neutral,
+        ks::ui::FlatButtonAppearance::Solid);
     headerLayout->addWidget(titleLabel);
     headerLayout->addWidget(uiState.enabledCheck);
     headerLayout->addStretch(1);
@@ -6637,19 +6648,26 @@ void MonitorDock::initializeEtwFilterPanels()
             actionLayout->setSpacing(6);
 
             addGroupButtonOut = new QPushButton(QIcon(":/Icon/plus.svg"), QStringLiteral("新增规则组"), panelOut);
-            addGroupButtonOut->setStyleSheet(blueButtonStyle());
+            ks::ui::ApplyFlatButtonTheme(addGroupButtonOut, ks::ui::FlatButtonTone::Neutral,
+                ks::ui::FlatButtonAppearance::Solid);
             applyButtonOut = new QPushButton(QIcon(":/Icon/log_track.svg"), QStringLiteral("应用"), panelOut);
-            applyButtonOut->setStyleSheet(blueButtonStyle());
+            ks::ui::ApplyFlatButtonTheme(applyButtonOut, ks::ui::FlatButtonTone::Accent,
+                ks::ui::FlatButtonAppearance::Solid);
             clearButtonOut = new QPushButton(QIcon(":/Icon/log_clear.svg"), QStringLiteral("清空"), panelOut);
-            clearButtonOut->setStyleSheet(blueButtonStyle());
+            ks::ui::ApplyFlatButtonTheme(clearButtonOut, ks::ui::FlatButtonTone::Neutral,
+                ks::ui::FlatButtonAppearance::Solid);
             loadDefaultButtonOut = new QPushButton(QIcon(":/Icon/codeeditor_open.svg"), QStringLiteral("加载默认"), panelOut);
-            loadDefaultButtonOut->setStyleSheet(blueButtonStyle());
+            ks::ui::ApplyFlatButtonTheme(loadDefaultButtonOut, ks::ui::FlatButtonTone::Neutral,
+                ks::ui::FlatButtonAppearance::Solid);
             saveDefaultButtonOut = new QPushButton(QIcon(":/Icon/log_export.svg"), QStringLiteral("保存默认"), panelOut);
-            saveDefaultButtonOut->setStyleSheet(blueButtonStyle());
+            ks::ui::ApplyFlatButtonTheme(saveDefaultButtonOut, ks::ui::FlatButtonTone::Neutral,
+                ks::ui::FlatButtonAppearance::Solid);
             importButtonOut = new QPushButton(QIcon(":/Icon/codeeditor_open.svg"), QStringLiteral("导入"), panelOut);
-            importButtonOut->setStyleSheet(blueButtonStyle());
+            ks::ui::ApplyFlatButtonTheme(importButtonOut, ks::ui::FlatButtonTone::Neutral,
+                ks::ui::FlatButtonAppearance::Solid);
             exportButtonOut = new QPushButton(QIcon(":/Icon/log_export.svg"), QStringLiteral("导出"), panelOut);
-            exportButtonOut->setStyleSheet(blueButtonStyle());
+            ks::ui::ApplyFlatButtonTheme(exportButtonOut, ks::ui::FlatButtonTone::Neutral,
+                ks::ui::FlatButtonAppearance::Solid);
 
             actionLayout->addWidget(addGroupButtonOut);
             actionLayout->addWidget(applyButtonOut);
@@ -7337,7 +7355,8 @@ void MonitorDock::addEtwFilterRuleGroup(const EtwFilterStage stage)
     groupState->enabledCheck->setChecked(true);
     groupState->removeGroupButton = new QPushButton(QIcon(":/Icon/log_cancel_track.svg"), QString(), groupState->containerWidget);
     groupState->removeGroupButton->setToolTip(QStringLiteral("删除当前规则组"));
-    groupState->removeGroupButton->setStyleSheet(blueButtonStyle());
+    ks::ui::ApplyFlatButtonTheme(groupState->removeGroupButton, ks::ui::FlatButtonTone::Neutral,
+        ks::ui::FlatButtonAppearance::Solid);
     groupState->removeGroupButton->setFixedWidth(32);
     headerLayout->addWidget(groupState->titleLabel);
     headerLayout->addWidget(groupState->enabledCheck);

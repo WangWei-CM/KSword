@@ -1,8 +1,12 @@
+#include "../Framework.h"
 #include "WindowControlInspection.h"
 #include "WindowControlInspectionInput.h"
 #include "WindowControlInspectionOverlay.h"
 #include "WindowListInteraction.h"
 #include "../Internationalization/LanguageManager.h"
+#include "../UI/FlatButtonTheme.h"
+#include "../UI/ThemeAccentIcon.h"
+#include "../UI/ToolbarMetrics.h"
 #include "../theme.h"
 #include <QApplication>
 #include <QCheckBox>
@@ -29,6 +33,19 @@ namespace ks::control_inspection
         { return ks::i18n::sourceText(QString::fromUtf8(source)); }
         HWND native(QWidget* widget) { return reinterpret_cast<HWND>(widget->winId()); }
 
+        // SetActionIcon：保留原始 SVG 轮廓，绘制时从真实按钮状态读取当前主题色。
+        // resourcePath 只在动作含义变化时替换，语言或色板刷新不重复生成图标。
+        void SetActionIcon(QToolButton* button, const QString& resourcePath)
+        {
+            if (button->property("ksword_control_action_icon_resource").toString() == resourcePath)
+            {
+                return;
+            }
+            button->setProperty("ksword_control_action_icon_resource", resourcePath);
+            button->setProperty("ksword_theme_icon_managed", true);
+            button->setIcon(ks::ui::MakeThemeButtonAccentIcon(QIcon(resourcePath), QColor(), button));
+        }
+
         class Page final : public QWidget
         {
         public:
@@ -39,19 +56,35 @@ namespace ks::control_inspection
                 setMinimumSize(0, 0); setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Ignored);
                 auto* layout = new QVBoxLayout(this);
                 auto* toolbar = new QHBoxLayout;
-                m_pick = new QToolButton(this); m_pick->setObjectName(QStringLiteral("ks_control_pick"));
-                m_pick->setCheckable(true); m_pick->setText(QString::fromUtf8("↖"));
-                KswordTheme::ApplyCompactIconButtonMetrics(m_pick);
-                m_pause = new QToolButton(this); m_pause->setObjectName(QStringLiteral("ks_control_pause"));
+                // 三个操作统一使用实底 SVG 按钮，不再由字体渲染细小且不稳定的 Unicode 符号。
+                m_pick = new QToolButton(this);
+                m_pick->setObjectName(QStringLiteral("ks_control_pick"));
+                m_pick->setCheckable(true);
+                SetActionIcon(m_pick, QStringLiteral(":/Icon/window_picker_aim.svg"));
+                m_pause = new QToolButton(this);
+                m_pause->setObjectName(QStringLiteral("ks_control_pause"));
                 m_pause->setCheckable(true);
-                m_refresh = new QToolButton(this); m_refresh->setObjectName(QStringLiteral("ks_control_refresh"));
+                m_refresh = new QToolButton(this);
+                m_refresh->setObjectName(QStringLiteral("ks_control_refresh"));
+                SetActionIcon(m_refresh, QStringLiteral(":/Icon/process_refresh.svg"));
                 m_scope = new QComboBox(this); m_scope->setObjectName(QStringLiteral("ks_control_scope"));
                 m_scope->addItems({T("所属顶层窗口"), T("原 HWND 子树")});
                 m_view = new QComboBox(this); m_view->setObjectName(QStringLiteral("ks_control_view"));
                 m_view->addItems({T("UIA 控件树"), T("UIA 原始树"), T("Win32 子窗口树")});
-                for (auto* button : {m_pause, m_refresh}) KswordTheme::ApplyStandardIconButtonMetrics(button);
+                for (auto* button : {m_pick, m_pause, m_refresh})
+                {
+                    // button 是当前登记动作；共享主题保留 checked/disabled 和原业务连接。
+                    button->setToolButtonStyle(Qt::ToolButtonIconOnly);
+                    button->setAutoRaise(false);
+                    button->setCursor(Qt::PointingHandCursor);
+                    ks::ui::ApplyFlatButtonTheme(button, ks::ui::FlatButtonTone::Neutral,
+                        ks::ui::FlatButtonAppearance::Solid);
+                }
                 toolbar->addWidget(m_pick); toolbar->addWidget(m_pause); toolbar->addWidget(m_refresh);
                 toolbar->addWidget(m_scope); toolbar->addWidget(m_view); toolbar->addStretch(); layout->addLayout(toolbar);
+                // 首次登记前准备暂停图标，让整行几何将全部纯图标动作统一为至少 28px。
+                SetActionIcon(m_pause, QStringLiteral(":/Icon/process_pause.svg"));
+                ks::ui::NormalizeToolbarRow(toolbar);
                 auto* options = new QHBoxLayout;
                 m_all = new QCheckBox(T("全部框选"), this); m_all->setChecked(true);
                 m_tips = new QCheckBox(T("悬浮提示"), this); m_tips->setChecked(true);
@@ -117,9 +150,11 @@ namespace ks::control_inspection
             void retranslate()
             {
                 m_pick->setToolTip(T("选择控件（Ctrl+Shift+C）；Esc 取消拾取"));
-                m_pause->setText(m_paused ? QStringLiteral("▷") : QStringLiteral("Ⅱ"));
-                m_pause->setToolTip(m_paused ? T("继续") : T("暂停"));
-                m_refresh->setText(QStringLiteral("⟳")); m_refresh->setToolTip(T("刷新"));
+                // 暂停/继续图标随现有检查状态切换，热主题颜色由图标引擎独立读取。
+                SetActionIcon(m_pause, m_paused ? QStringLiteral(":/Icon/process_start.svg")
+                    : QStringLiteral(":/Icon/process_pause.svg"));
+                m_pause->setToolTip(m_paused ? T("继续控件检查") : T("暂停控件检查"));
+                m_refresh->setToolTip(T("刷新控件树"));
                 m_all->setText(T("全部框选")); m_tips->setText(T("悬浮提示"));
                 m_scope->setItemText(0, T("所属顶层窗口")); m_scope->setItemText(1, T("原 HWND 子树"));
                 m_view->setItemText(0, T("UIA 控件树")); m_view->setItemText(1, T("UIA 原始树"));
@@ -141,7 +176,7 @@ namespace ks::control_inspection
                         setPick(false); m_pickWaiting = true;
                         m_collector.hit(request(), point, ++m_serial, true);
                     });
-                if (!PickerShortcutAvailable()) m_status->setText(T("拾取快捷键不可用，可使用箭头按钮。"));
+                if (!PickerShortcutAvailable()) m_status->setText(T("拾取快捷键不可用，可使用瞄准按钮。"));
             }
             void activate()
             {

@@ -1,5 +1,6 @@
 #include "MiscDock.h"
 #include "../UI/PageControlStyle.h"
+#include "../UI/PrimaryPageStyle.h"
 
 #include "BootEditor/BootEditorTab.h"
 #include "ApplicationControlPage.h"
@@ -37,6 +38,7 @@ namespace
     // - 返回：已挂到占位控件上的垂直布局。
     QVBoxLayout* buildHostLayout(QWidget* hostWidget)
     {
+        hostWidget->setProperty("ksword_page_frame_host", true); // 明确的单页惰性壳允许框架读取真实页外围。
         QVBoxLayout* hostLayout = new QVBoxLayout(hostWidget);
         hostLayout->setContentsMargins(0, 0, 0, 0);
         hostLayout->setSpacing(0);
@@ -62,7 +64,7 @@ void MiscDock::initializeUi()
 
     // 主 Tab 承载所有杂项工具，保持 Dock 外层只暴露一个统一入口。
     m_mainTabWidget = new QTabWidget(this);
-    ks::ui::StylePageTabs(m_mainTabWidget);
+    ks::ui::StylePageTabsContentFrame(m_mainTabWidget);
     m_mainTabWidget->setObjectName(QStringLiteral("ksMiscDockMainTab"));
     m_rootLayout->addWidget(m_mainTabWidget, 1);
 
@@ -596,6 +598,13 @@ void MiscDock::initializePluginPage()
     }
 
     QVBoxLayout* const hostLayout = buildHostLayout(m_pluginHostWidget);
-    m_pluginPage = ks::plugin_host::createTabPluginContainer(m_pluginHostWidget);
-    hostLayout->addWidget(m_pluginPage, 1);
+    // 插件原生子窗口仍由原宿主持有，只为其外围增加明确的无描边工作面。
+    auto* pluginPanel = new QWidget(m_pluginHostWidget); // 外壳不接管插件内部 palette/QSS。
+    auto* pluginLayout = new QVBoxLayout(pluginPanel);
+    pluginLayout->setSpacing(12);
+    ks::ui::StyleWorkspacePage(pluginPanel);
+    ks::ui::StylePrimaryContentPanel(pluginPanel, false);
+    m_pluginPage = ks::plugin_host::createTabPluginContainer(pluginPanel);
+    pluginLayout->addWidget(m_pluginPage, 1);
+    hostLayout->addWidget(pluginPanel, 1);
 }

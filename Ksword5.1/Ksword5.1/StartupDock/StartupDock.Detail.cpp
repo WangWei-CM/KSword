@@ -44,16 +44,20 @@ namespace
     ks::ui::FieldDocument buildEntryDetailText(const StartupDock::StartupEntry& entry)
     {
         ks::ui::FieldDocument detailText;
+        // 原字段按对象摘要、来源与动作拆页，仍直接展示原记录值，不解析报告文本。
+        detailText.section(QStringLiteral("常规信息"));
         detailText.field(QStringLiteral("名称"), QStringLiteral("%1").arg(entry.itemNameText));
         detailText.field(QStringLiteral("分类"), QStringLiteral("%1").arg(ks::i18n::sourceText(entry.categoryText)));
         detailText.field(QStringLiteral("发布者"), QStringLiteral("%1").arg(entry.publisherText.isEmpty() ? emptyValueText() : entry.publisherText));
         detailText.field(QStringLiteral("镜像路径"), QStringLiteral("%1").arg(entry.imagePathText.isEmpty() ? emptyValueText() : entry.imagePathText));
         detailText.field(QStringLiteral("命令"), QStringLiteral("%1").arg(entry.commandText.isEmpty() ? emptyValueText() : entry.commandText));
+        detailText.section(QStringLiteral("来源位置"));
         detailText.field(QStringLiteral("来源位置"), QStringLiteral("%1").arg(entry.locationText.isEmpty() ? emptyValueText() : entry.locationText));
         detailText.field(QStringLiteral("分组位置"), QStringLiteral("%1").arg(entry.locationGroupText.isEmpty() ? emptyValueText() : entry.locationGroupText));
         detailText.field(QStringLiteral("注册表值名"), QStringLiteral("%1").arg(entry.registryValueNameText.isEmpty() ? emptyValueText() : entry.registryValueNameText));
         detailText.field(QStringLiteral("用户/上下文"), QStringLiteral("%1").arg(entry.userText.isEmpty() ? emptyValueText() : ks::i18n::sourceText(entry.userText)));
         detailText.field(QStringLiteral("类型"), QStringLiteral("%1").arg(entry.sourceTypeText.isEmpty() ? emptyValueText() : ks::i18n::sourceText(entry.sourceTypeText)));
+        detailText.section(QStringLiteral("状态"));
         detailText.field(QStringLiteral("状态"), QStringLiteral("%1").arg(buildStatusText(entry.backendEntry)));
         detailText.field(QStringLiteral("可启用"), QStringLiteral("%1").arg(boolText(entry.backendEntry.canEnable)));
         detailText.field(QStringLiteral("可禁用"), QStringLiteral("%1").arg(boolText(entry.backendEntry.canDisable)));
@@ -114,22 +118,30 @@ namespace
         QDialog detailDialog(parentWidget);
         detailDialog.setObjectName(QStringLiteral("StartupDockDetailDialog"));
         detailDialog.setWindowTitle(titleText);
-        detailDialog.resize(860, 620);
+        detailDialog.resize(1000, 700);
         // 详情弹窗强制使用不透明背景，避免浅色模式下出现黑底。
         detailDialog.setStyleSheet(KswordTheme::OpaqueDialogStyle(detailDialog.objectName()));
 
         QVBoxLayout* layout = new QVBoxLayout(&detailDialog);
-        ks::ui::StructuredFieldView* detailEditor = new ks::ui::StructuredFieldView(&detailDialog);
-
-        detailEditor->setDocument(detailText);
+        layout->setContentsMargins(0, 0, 0, 0);
+        layout->setSpacing(0);
+        layout->addWidget(ks::ui::CreateDetailSummaryHeader(&detailDialog, titleText));
+        // 全部字段保留在同一规范文档内，复制全部和导出仍覆盖整个启动项。
+        auto* body = new QWidget(&detailDialog);
+        auto* bodyLayout = new QVBoxLayout(body);
+        bodyLayout->setContentsMargins(16, 12, 16, 12);
+        auto* source = new ks::ui::StructuredFieldView(body);
+        source->setDocument(detailText);
+        bodyLayout->addWidget(ks::ui::CreateDetailFieldProjection(source, body), 1);
+        layout->addWidget(body, 1);
 
         QDialogButtonBox* buttonBox = new QDialogButtonBox(QDialogButtonBox::Close, &detailDialog);
         QObject::connect(buttonBox, &QDialogButtonBox::rejected, &detailDialog, &QDialog::reject);
         QObject::connect(buttonBox, &QDialogButtonBox::accepted, &detailDialog, &QDialog::accept);
 
-        layout->addWidget(detailEditor, 1);
         layout->addWidget(buttonBox, 0);
         ks::ui::ApplyDetailDialogChrome(&detailDialog);
+        ks::ui::InstallDetailWindowFramework(&detailDialog);
         detailDialog.exec();
     }
 

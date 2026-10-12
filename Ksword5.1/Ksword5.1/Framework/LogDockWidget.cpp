@@ -5,6 +5,10 @@
 #include "../UI/TableInteractionSupport.h"
 #include "../UI/VisibleTableWidget.h"
 #include "../UI/ThemeAccentIcon.h"
+#include "../UI/FlatButtonTheme.h"
+#include "../UI/PrimaryPageStyle.h"
+#include "../UI/ThemeBinding.h"
+#include "../UI/ToolbarMetrics.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -35,6 +39,7 @@
 #include <QPointer>
 #include <QPushButton>
 #include <QScrollBar>
+#include <QShowEvent>
 #include <QSize>
 #include <QSpinBox>
 #include <QStringList>
@@ -258,80 +263,6 @@ namespace
             .arg(KswordTheme::TextPrimaryHex());
     }
 
-    // buildBlueButtonStyleSheet 作用：
-    // - 生成日志面板图标按钮透明背景样式；
-    // - 默认背景透明，仅在 hover/pressed 时给轻量高亮。
-    // 返回值：QSS 字符串。
-    QString buildBlueButtonStyleSheet()
-    {
-        return QStringLiteral(
-            "QPushButton {"
-            "  color: %1;"
-            "  background: transparent;"
-            "  border: 1px solid transparent;"
-            "  border-radius: 4px;"
-            "  padding: 4px;"
-            "}"
-            "QPushButton:hover {"
-            "  background: %2;"
-            "  border: 1px solid %3;"
-            "}"
-            "QPushButton:pressed {"
-            "  background: %4;"
-            "  border: 1px solid %5;"
-            "}")
-            .arg(KswordTheme::TextPrimaryHex())
-            .arg(KswordTheme::RgbaColorName(KswordTheme::AccentColor(KswordTheme::AccentRole::Blue), 28))
-            .arg(KswordTheme::RgbaColorName(KswordTheme::AccentColor(KswordTheme::AccentRole::Blue), 96))
-            .arg(KswordTheme::RgbaColorName(KswordTheme::AccentColor(KswordTheme::AccentRole::Blue), 46))
-            .arg(KswordTheme::RgbaColorName(KswordTheme::AccentColor(KswordTheme::AccentRole::Blue), 136));
-    }
-
-    // buildBlueHeaderStyleSheet 作用：
-    // - 统一日志表格头部文本为主题蓝色。
-    // 返回值：QHeaderView section 样式字符串。
-    QString buildBlueHeaderStyleSheet()
-    {
-        return QStringLiteral(
-            "QHeaderView::section {"
-            "  color: %1;"
-            "  background: transparent; /* %2 */"
-            "  border: 1px solid %3;"
-            "  padding: 4px;"
-            "  font-weight: 600;"
-            "}")
-            .arg(KswordTheme::PrimaryBlueHex)
-            .arg(KswordTheme::SurfaceHex())
-            .arg(KswordTheme::BorderHex());
-    }
-
-    // buildBlueInputStyleSheet 作用：
-    // - 生成日志工具栏里数字输入框/标签的主题样式；
-    // - 显式指定背景、前景和 hover/focus 边框，避免深色模式下继承到浅色白块；
-    // - 返回值：可直接应用到 QSpinBox/QLabel 的 QSS 字符串。
-    QString buildBlueInputStyleSheet()
-    {
-        return QStringLiteral(
-            "QSpinBox {"
-            "  color: %3;"
-            "  background: %2;"
-            "  border: 1px solid %1;"
-            "  border-radius: 3px;"
-            "  padding: 2px 6px;"
-            "}"
-            "QSpinBox:hover, QSpinBox:focus {"
-            "  border: 1px solid %4;"
-            "}"
-            // 步进按钮不在这里覆写：全局基线已经给出带箭头、带 hover/到限反馈的
-            // 完整实现，本地再改成透明无边框只会退回“看不出是按钮”的样子。
-            "QLabel {"
-            "  color: %3;"
-            "}")
-            .arg(KswordTheme::BorderHex())
-            .arg(KswordTheme::SurfaceHex())
-            .arg(KswordTheme::TextPrimaryHex())
-            .arg(KswordTheme::PrimaryBlueHex);
-    }
 }
 
 LogDockWidget::LogDockWidget(QWidget* parent)
@@ -351,6 +282,12 @@ void LogDockWidget::refreshNow()
     refreshTableFromManager(true);
 }
 
+void LogDockWidget::showEvent(QShowEvent* event)
+{
+    QWidget::showEvent(event);
+    refreshTableFromManager(true);
+}
+
 void LogDockWidget::initializeUi()
 {
     // 根布局：上下排列两层（单行工具栏 + 表格）。
@@ -362,7 +299,7 @@ void LogDockWidget::initializeUi()
     // - 三个动作按钮与全部过滤/状态复选框全部放在同一行；
     // - 满足“所有复选框和按钮全部堆到一行”的布局要求。
     m_actionLayout = new QHBoxLayout();
-    m_actionLayout->setContentsMargins(6, 6, 6, 4);
+    m_actionLayout->setContentsMargins(6, 6, 6, 6);
     m_actionLayout->setSpacing(6);
 
     m_exportButton = new QPushButton(createBlueThemedIcon(IconExportPath), QString(), this);
@@ -426,22 +363,24 @@ void LogDockWidget::initializeUi()
     m_copyVisibleButton->setCursor(Qt::PointingHandCursor);
     m_autoScrollCheck->setChecked(true);
 
-    // 把日志区按钮背景改为透明，仅保留图标与悬停反馈。
-    const QString blueButtonStyle = buildBlueButtonStyleSheet();
-    m_exportButton->setStyleSheet(blueButtonStyle);
-    m_clearButton->setStyleSheet(blueButtonStyle);
-    m_copyVisibleButton->setStyleSheet(blueButtonStyle);
-
-    // 把复选框文字与指示器统一改为欢迎页同款蓝色。
-    const QString blueCheckBoxStyle = buildBlueCheckBoxStyleSheet();
-    m_debugCheck->setStyleSheet(blueCheckBoxStyle);
-    m_infoCheck->setStyleSheet(blueCheckBoxStyle);
-    m_warnCheck->setStyleSheet(blueCheckBoxStyle);
-    m_errorCheck->setStyleSheet(blueCheckBoxStyle);
-    m_fatalCheck->setStyleSheet(blueCheckBoxStyle);
-    m_detailCheck->setStyleSheet(blueCheckBoxStyle);
-    m_autoScrollCheck->setStyleSheet(blueCheckBoxStyle);
-    m_visibleLimitSpin->setStyleSheet(buildBlueInputStyleSheet());
+    // 普通图标动作有中性实底，状态颜色与字号变化由共享组件维护。
+    for (auto* button : {m_exportButton, m_clearButton, m_copyVisibleButton})
+    {
+        ks::ui::ApplyFlatButtonTheme(button, ks::ui::FlatButtonTone::Neutral,
+            ks::ui::FlatButtonAppearance::Solid);
+    }
+    for (auto* check : {m_debugCheck, m_infoCheck, m_warnCheck, m_errorCheck,
+        m_fatalCheck, m_detailCheck, m_autoScrollCheck})
+    {
+        const QPointer<QCheckBox> target(check);
+        ks::ui::BindWidgetTheme(check, [target]()
+        {
+            if (!target) return;
+            const QString style = buildBlueCheckBoxStyleSheet();
+            if (target->styleSheet() != style) target->setStyleSheet(style);
+        });
+    }
+    ks::ui::StyleStandaloneInput(m_visibleLimitSpin);
 
     // Debug 默认关闭：避免日志输出 Dock 首次打开时被调试级别噪声淹没。
     m_debugCheck->setChecked(false);
@@ -465,10 +404,10 @@ void LogDockWidget::initializeUi()
     QLabel* visibleLimitLabel = new QLabel(QStringLiteral("展示最近日志条数:"), this);
     languageManager.bindText(visibleLimitLabel, QStringLiteral("log.label.visible_limit"), QStringLiteral("展示最近日志条数:"));
     visibleLimitLabel->setToolTip(m_visibleLimitSpin->toolTip());
-    visibleLimitLabel->setStyleSheet(buildBlueInputStyleSheet());
     m_actionLayout->addWidget(visibleLimitLabel);
     m_actionLayout->addWidget(m_visibleLimitSpin);
     m_actionLayout->addStretch(1);
+    ks::ui::NormalizeToolbarRow(m_actionLayout);
 
     // 第三层：日志表格，要求不可编辑且占满 Dock。
     // 选择策略：
@@ -518,7 +457,7 @@ void LogDockWidget::initializeUi()
     horizontalHeader->setSectionResizeMode(FileColumn, QHeaderView::Interactive);
     horizontalHeader->setSectionResizeMode(FunctionColumn, QHeaderView::Interactive);
     horizontalHeader->setStretchLastSection(false);
-    horizontalHeader->setStyleSheet(buildBlueHeaderStyleSheet());
+    // 表格头部使用共享基线；日志等级、内容委托与动态行高仍由此页维护。
     horizontalHeader->setVisible(false);
 
     // 等级列只容纳彩色方块，因此锁定窄列宽。
@@ -602,6 +541,10 @@ void LogDockWidget::initializeRefreshTimer()
 
 void LogDockWidget::refreshTableFromManager(const bool forceRefresh)
 {
+    // 日志仍完整保存在全局管理器；仅延后隐藏面板的快照筛选、模型与行高提交。
+    // 不推进 m_lastRevision，Show 或用户显式请求会同步最新数据。
+    if (!forceRefresh && !isVisible()) return;
+
     // 右键菜单处于 exec 嵌套事件循环时，模型 reset 会让菜单记录的行号失效。
     // 同类刷新只保留最新一次，菜单关闭后再回投，保证复制/跟踪仍针对右键时的日志行。
     const QPointer<LogDockWidget> safeThis(this);

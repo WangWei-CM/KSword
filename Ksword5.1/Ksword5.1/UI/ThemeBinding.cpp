@@ -1,20 +1,25 @@
 #include "ThemeBinding.h"
+#include "./MainSurfaceStyle.h"
 #include "../theme.h"
 #include <QAbstractSpinBox>
 #include <QLineEdit>
 
 #include <QApplication>
 #include <QEvent>
+#include <QElapsedTimer>
 #include <QList>
 #include <QObject>
 #include <QPalette>
 #include <QPointer>
+#include <QSet>
 #include <QThread>
 #include <QTimer>
 #include <QVariant>
 #include <QWidget>
 
 #include <algorithm>
+#include <deque>
+#include <list>
 #include <utility>
 
 namespace
@@ -22,6 +27,7 @@ namespace
     // kBindingProperty 保存控件自身的绑定对象；该对象由控件的 QObject 子树持有。
     constexpr char kBindingProperty[] = "KSWORD_EXPLICIT_THEME_BINDING";
     constexpr char kSearchFieldProperty[] = "KSWORD_SEARCH_FIELD_THEME"; // 已明确登记的搜索框。
+    constexpr char kLineFieldProperty[] = "KSWORD_LINE_FIELD_THEME"; // 独立单行字段共用输入角色。
     constexpr char kSearchStyleBegin[] = "/* KSWORD_SEARCH_FIELD_BEGIN */"; // 本组件样式起点。
     constexpr char kSearchStyleEnd[] = "/* KSWORD_SEARCH_FIELD_END */"; // 本组件样式终点。
     constexpr char kSpinStyleBegin[] = "/* KSWORD_SPIN_FIELD_BEGIN */"; // 数值框独有颜色片段起点。
@@ -74,10 +80,11 @@ namespace
         }
 
     private:
-        // drain 对弱引用快照逐一刷新；回调可创建或删除其他绑定，不破坏正在遍历的队列。
+        // drain 限时处理弱引用队列；回调可创建/删除绑定，不影响未消费项的去重身份。
         void drain();
-        QList<QPointer<WidgetThemeBinding>> m_bindings; // 存活登记项，不拥有控件。
-        QList<QPointer<WidgetThemeBinding>> m_pending;  // 本轮待刷新项，保持登记顺序。
+        std::list<QPointer<WidgetThemeBinding>> m_bindings; // 稳定迭代器，登记/销毁无需扫描全部绑定。
+        std::deque<QPointer<WidgetThemeBinding>> m_pending; // 常数时间取队首，保持登记顺序。
+        QSet<WidgetThemeBinding*> m_pendingMembership; // 仅作常数时间去重；实际队列仍持弱引用。
         bool m_scheduled = false; // 合并同一轮重复主题事件的调度门禁。
     };
 
@@ -140,7 +147,10 @@ namespace
             if (lifetime != nullptr && widget != nullptr && preserveLocal)
             {
                 // Qt setStyleSheet 会把后设的局部 palette 还原为旧 QSS 基线，因此需要显式恢复。
-                widget->setPalette(localPalette);
+                if (widget->palette() != localPalette)
+                {
+                    widget->setPalette(localPalette); // 无变化时不再次广播整棵子树的PaletteChange。
+                }
             }
             if (lifetime != nullptr)
             {
@@ -154,13 +164,13 @@ namespace
         }
 
     protected:
-        // 局部 palette 或语言变化可能改变角色文本；自身 setStyleSheet 的重入事件不再排队。
+        // 自身setStyleSheet的局部Palette重入不排队；真实语言/应用主题广播仍保留后续刷新。
         bool eventFilter(QObject* watched, QEvent* event) override
         {
-            if (!m_applying && m_registry != nullptr && event != nullptr &&
-                (event->type() == QEvent::PaletteChange ||
-                    event->type() == QEvent::ApplicationPaletteChange ||
-                    event->type() == QEvent::LanguageChange))
+            if (m_registry != nullptr && event != nullptr &&
+                (event->type() == QEvent::ApplicationPaletteChange ||
+                    event->type() == QEvent::LanguageChange ||
+                    (!m_applying && event->type() == QEvent::PaletteChange)))
             {
                 m_registry->schedule(this);
             }
@@ -179,11 +189,13 @@ namespace
     // add 将对象放入唯一登记表，并安排首次刷新；不在控件构造期间同步执行样式函数。
     void ThemeBindingRegistry::add(WidgetThemeBinding* binding)
     {
-        // 动态页面反复开关时及时清理死亡登记项，不等用户下次切换主题。
-        m_bindings.erase(std::remove_if(m_bindings.begin(), m_bindings.end(),
-            [](const QPointer<WidgetThemeBinding>& current) { return current.isNull(); }),
-            m_bindings.end());
-        m_bindings.append(binding);
+        // 每个绑定只增加一个节点；销毁时原位移除，创建大页不再形成逐项全表扫描。
+        const auto registration = m_bindings.emplace(m_bindings.end(), binding);
+        connect(binding, &QObject::destroyed, this, [this, registration, binding]()
+        {
+            m_bindings.erase(registration);
+            m_pendingMembership.remove(binding); // 防止释放后同址新对象被旧待刷新地址误判为已排队。
+        });
         schedule(binding);
     }
 
@@ -195,9 +207,10 @@ namespace
         }
         // weakBinding 为当前对象的弱引用；重复事件只保留一次待刷新记录。
         const QPointer<WidgetThemeBinding> weakBinding(binding);
-        if (!m_pending.contains(weakBinding))
+        if (!m_pendingMembership.contains(binding))
         {
-            m_pending.append(weakBinding);
+            m_pendingMembership.insert(binding);
+            m_pending.push_back(weakBinding);
         }
         if (m_scheduled)
         {
@@ -209,10 +222,7 @@ namespace
 
     void ThemeBindingRegistry::scheduleAll()
     {
-        // 清理死亡登记项；只遍历明确接入的对象，避免主题切换扫描整个 UI。
-        m_bindings.erase(std::remove_if(m_bindings.begin(), m_bindings.end(),
-            [](const QPointer<WidgetThemeBinding>& binding) { return binding.isNull(); }),
-            m_bindings.end());
+        // 只遍历存活登记项一次，排队去重由哈希表负责；换肤由二次方查找变为线性处理。
         for (const auto& binding : m_bindings)
         {
             schedule(binding.data());
@@ -221,16 +231,33 @@ namespace
 
     void ThemeBindingRegistry::drain()
     {
-        // 先分离本轮队列；回调新增的登记项进入下一轮，避免遍历容器因重入失效。
-        auto pending = std::move(m_pending); // 只包含本轮待刷新的弱引用。
-        m_pending.clear();
-        m_scheduled = false;
-        for (const auto& binding : pending)
+        // 尚未消费的子控件继续保持membership，父样式的PaletteChange不再将它们重复入队。
+        // 只在实际取出时解除去重，保留回调重登记及真正嵌套更新的后续刷新。
+        QElapsedTimer slice;
+        slice.start();
+        const std::size_t initialCount = m_pending.size();
+        for (std::size_t index = 0; index < initialCount && !m_pending.empty(); ++index)
         {
+            const QPointer<WidgetThemeBinding> binding = m_pending.front();
+            m_pending.pop_front();
             if (binding != nullptr)
             {
+                m_pendingMembership.remove(binding.data());
                 binding->apply();
             }
+            // 不在同一次GUI回调里刷新全部页面，给输入、布局和绘制留出事件循环机会。
+            // 单个业务回调仍必须自己有界；这里不能中断正在执行的setStyleSheet。
+            if (slice.elapsed() >= 6)
+            {
+                break;
+            }
+        }
+        // 处理期间始终保留scheduled，嵌套事件循环不会启动第二个drain消费同一队列。
+        m_scheduled = false;
+        if (!m_pending.empty())
+        {
+            m_scheduled = true;
+            QTimer::singleShot(0, this, [this]() { drain(); });
         }
     }
 
@@ -295,7 +322,8 @@ bool ks::ui::BindSpinBoxTheme(QAbstractSpinBox* spinBox)
         {
             return;
         }
-        const QColor background = KswordTheme::ControlInputSurfaceColor(); // 与同排搜索/组合框共用输入面。
+        const QColor background = UsesMainSurfaceHierarchy(guardedSpin)
+            ? MainWindowSurfaceColors().input : KswordTheme::ControlInputSurfaceColor();
         const QColor hoverBackground = KswordTheme::ControlInputHoverColor(background);
         const QColor focusBackground = KswordTheme::ControlInputFocusColor(background);
         const QColor backgrounds[] = {background, hoverBackground, focusBackground};
@@ -333,7 +361,8 @@ bool ks::ui::BindSpinBoxTheme(QAbstractSpinBox* spinBox)
         {
             return;
         }
-        const QColor background = KswordTheme::ControlInputSurfaceColor();
+        const QColor background = UsesMainSurfaceHierarchy(guardedEditor)
+            ? MainWindowSurfaceColors().input : KswordTheme::ControlInputSurfaceColor();
         const QColor backgrounds[] = {background, KswordTheme::ControlInputHoverColor(background),
             KswordTheme::ControlInputFocusColor(background)}; // 内部文字随外层三态底面校准。
         const QColor foreground = KswordTheme::EnsureTextContrastForBackgrounds(
@@ -357,14 +386,14 @@ bool ks::ui::BindSpinBoxTheme(QAbstractSpinBox* spinBox)
     return outerBound && editorBound;
 }
 
-bool ks::ui::BindSearchFieldTheme(QLineEdit* searchField)
+bool ks::ui::BindLineEditTheme(QLineEdit* searchField)
 {
     if (searchField == nullptr)
     {
         return false;
     }
-    // 表格布局反复核验专用搜索框时不重复登记，已安装的绑定仍负责热主题刷新。
-    if (searchField->property(kSearchFieldProperty).toBool() && HasWidgetThemeBinding(searchField))
+    // 同一字段重复接入不增加绑定，原有独立业务配色由明确接入方负责清理。
+    if (searchField->property(kLineFieldProperty).toBool() && HasWidgetThemeBinding(searchField))
     {
         return true;
     }
@@ -388,7 +417,10 @@ bool ks::ui::BindSearchFieldTheme(QLineEdit* searchField)
         {
             background = KswordTheme::SurfaceAltColor();
         }
-        background = KswordTheme::ControlInputSurfaceColor(pageSurface, background);
+        // 主页面固定采用编辑层，不从已变亮的父容器继续计算更亮的底面。
+        const bool mainSurface = UsesMainSurfaceHierarchy(guardedField);
+        background = mainSurface ? MainWindowSurfaceColors().input
+            : KswordTheme::ControlInputSurfaceColor(pageSurface, background);
         const QColor hoverBackground = KswordTheme::ControlInputHoverColor(background);
         const QColor focusBackground = KswordTheme::ControlInputFocusColor(background);
         const QColor backgrounds[] = {background, hoverBackground, focusBackground};
@@ -403,9 +435,11 @@ bool ks::ui::BindSearchFieldTheme(QLineEdit* searchField)
             return preferred;
         };
         const QColor foreground = KswordTheme::EnsureTextContrastForBackgrounds(opaqueForeground(
-            parentColors.color(QPalette::Active, QPalette::Text), KswordTheme::TextPrimaryColor()), backgrounds, 3);
+            mainSurface ? KswordTheme::TextPrimaryColor() : parentColors.color(QPalette::Active, QPalette::Text),
+            KswordTheme::TextPrimaryColor()), backgrounds, 3);
         const QColor placeholder = KswordTheme::EnsureTextContrastForBackgrounds(opaqueForeground(
-            parentColors.color(QPalette::Active, QPalette::PlaceholderText), KswordTheme::TextSecondaryColor()), backgrounds, 3);
+            mainSurface ? KswordTheme::TextSecondaryColor() : parentColors.color(QPalette::Active, QPalette::PlaceholderText),
+            KswordTheme::TextSecondaryColor()), backgrounds, 3);
         const QColor disabledForeground = KswordTheme::EnsureTextContrast(opaqueForeground(
             parentColors.color(QPalette::Disabled, QPalette::Text), KswordTheme::TextDisabledColor()), background, 3.0);
         const QColor disabledPlaceholder = KswordTheme::EnsureTextContrast(opaqueForeground(
@@ -450,8 +484,17 @@ bool ks::ui::BindSearchFieldTheme(QLineEdit* searchField)
     });
     if (bound && !guardedField.isNull())
     {
-        guardedField->setProperty(kSearchFieldProperty, true);
+        guardedField->setProperty(kLineFieldProperty, true);
     }
+    return bound;
+}
+
+// 搜索沿用单行字段完整配色，不改变具体过滤词、输入行为或页面已登记的搜索几何。
+bool ks::ui::BindSearchFieldTheme(QLineEdit* searchField)
+{
+    if (searchField == nullptr) return false;
+    const bool bound = BindLineEditTheme(searchField);
+    if (bound) searchField->setProperty(kSearchFieldProperty, true);
     return bound;
 }
 

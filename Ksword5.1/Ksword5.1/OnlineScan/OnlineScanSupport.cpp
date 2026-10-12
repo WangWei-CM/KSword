@@ -1,5 +1,6 @@
 #include "OnlineScanSupport.h"
 #include "../UI/DetailDialogChrome.h"
+#include "../UI/UI_All.h"
 
 #include "../UI/CodeEditorWidget.h"
 #include "../theme.h"
@@ -229,7 +230,7 @@ void ks::online_scan::showResultDialog(
     QDialog resultDialog(parentWidget);
     resultDialog.setObjectName(QStringLiteral("onlineScanResultDialog"));
     resultDialog.setWindowTitle(titleText);
-    resultDialog.resize(880, 640);
+    ks::ui::applyResponsiveWindowGeometry(&resultDialog, parentWidget, QSize(880, 640), QSize(480, 360));
     resultDialog.setStyleSheet(KswordTheme::OpaqueDialogStyle(resultDialog.objectName()));
 
     // dialogLayout 作用：上方放摘要，下方放 CodeEditorWidget，底部放复制与关闭按钮。
@@ -237,15 +238,17 @@ void ks::online_scan::showResultDialog(
     dialogLayout->setContentsMargins(10, 10, 10, 10);
     dialogLayout->setSpacing(8);
 
-    QLabel* summaryLabel = new QLabel(summaryText, &resultDialog);
-    summaryLabel->setWordWrap(true);
-    summaryLabel->setContentsMargins(10, 8, 10, 8);
-    dialogLayout->addWidget(summaryLabel, 0);
+    // 云端报告摘要固定在顶部，原始 JSON 保留内置编辑器的单一滚动。
+    dialogLayout->addWidget(ks::ui::CreateDetailSummaryHeader(
+        &resultDialog, titleText, summaryText));
 
     CodeEditorWidget* resultEditor = new CodeEditorWidget(&resultDialog);
     resultEditor->setReadOnly(true);
     resultEditor->setRawText(detailJsonText);
-    dialogLayout->addWidget(resultEditor, 1);
+    auto* reportCard = ks::ui::CreateDetailCard(QString(), &resultDialog);
+    reportCard->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+    qobject_cast<QVBoxLayout*>(reportCard->layout())->addWidget(resultEditor, 1);
+    dialogLayout->addWidget(reportCard, 1);
 
     QDialogButtonBox* buttonBox = new QDialogButtonBox(QDialogButtonBox::Close, &resultDialog);
     QPushButton* copyButton = buttonBox->addButton(QStringLiteral("复制结果"), QDialogButtonBox::ActionRole);

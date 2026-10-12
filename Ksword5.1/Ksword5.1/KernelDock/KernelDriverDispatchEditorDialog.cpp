@@ -1,5 +1,6 @@
 #include "KernelDriverDispatchEditorDialog.h"
 #include "../UI/SecondaryPageLayout.h"
+#include "../UI/DetailPresentation.h"
 #include "../UI/ToolbarMetrics.h"
 #include "../UI/VisibleTableWidget.h"
 
@@ -122,10 +123,12 @@ void KernelDriverDispatchEditorDialog::initializeUi()
     m_table->horizontalHeader()->setStretchLastSection(true);
     m_table->setStyleSheet(
         QStringLiteral(
-            "QTableWidget{background:transparent;color:%1;}"
-            "QHeaderView::section{color:%2;background:transparent;border:1px solid %3;font-weight:600;}")
+            "QTableWidget{color:%1;}"
+            "QHeaderView::section{color:%1;background:%2;border:0;"
+            "border-bottom:1px solid %3;font-weight:500;padding:4px 8px;}")
             .arg(KswordTheme::TextPrimaryHex())
-            .arg(KswordTheme::PrimaryBlueHex)
+            // 编辑器保留事务表语义，表头遵循统一中性层次而不再强制透明蓝字。
+            .arg(KswordTheme::SurfaceAltHex())
             .arg(KswordTheme::BorderHex()));
     m_table->setColumnWidth(ColumnMajor, 82);
     m_table->setColumnWidth(ColumnSymbol, 230);
@@ -239,6 +242,8 @@ void KernelDriverDispatchEditorDialog::initializeUi()
         }
     });
     setActionsEnabled(false);
+    // 事务表和动作保留原模型，由共享详情框架整理摘要、字段与滚动边界。
+    ks::ui::InstallDetailWindowFramework(this);
 }
 
 void KernelDriverDispatchEditorDialog::refreshDriverSnapshot()

@@ -362,11 +362,11 @@ void DriverDock::applyTranslatedHeaders()
 void DriverDock::initializeUi()
 {
     m_rootLayout = new QVBoxLayout(this);
-    m_rootLayout->setContentsMargins(6, 6, 6, 6);
+    m_rootLayout->setContentsMargins(0, 0, 0, 0); // 外围留白由内容Tab统一提供一次。
     m_rootLayout->setSpacing(6);
 
     m_tabWidget = new QTabWidget(this);
-    ks::ui::StylePageTabs(m_tabWidget);
+    ks::ui::StylePageTabsContentFrame(m_tabWidget);
     m_rootLayout->addWidget(m_tabWidget, 1);
 
     initializeServiceTab();
@@ -556,6 +556,11 @@ void DriverDock::initializeOperateTab()
     m_descriptionEdit = new QLineEdit(m_operatePage);
     m_descriptionEdit->setPlaceholderText(
         driverText("driver.form.description.placeholder", QStringLiteral("描述（可选）")));
+    // 驱动操作页的四个编辑字段明确登记输入层，不改变服务参数或验证行为。
+    for (QLineEdit* field : {m_serviceNameEdit, m_displayNameEdit, m_binaryPathEdit, m_descriptionEdit})
+    {
+        ks::ui::StyleStandaloneInput(field);
+    }
 
     m_browsePathButton = new QPushButton(m_operatePage);
     m_browsePathButton->setIcon(QIcon(":/Icon/process_open_folder.svg"));
@@ -785,6 +790,7 @@ void DriverDock::initializeObjectInfoTab()
     queryLayout->setSpacing(6);
 
     m_objectDriverNameEdit = new QLineEdit(m_objectInfoPage);
+    ks::ui::StyleStandaloneInput(m_objectDriverNameEdit);
     m_objectDriverNameEdit->setPlaceholderText(
         driverText("driver.object.driver_name.placeholder", QStringLiteral("\\Driver\\Null 或 Null")));
     m_objectDriverNameEdit->setToolTip(
@@ -842,7 +848,9 @@ void DriverDock::initializeObjectInfoTab()
     m_objectInfoLayout->addWidget(m_objectInfoSummaryEdit);
 
     m_objectDetailTabWidget = new QTabWidget(m_objectInfoPage);
-    ks::ui::StylePageTabs(m_objectDetailTabWidget);
+    // DriverObject 等五个结果页是对象查询的子层级，沿用共享子页导航和等边内容框。
+    ks::ui::StyleChildPageTabs(m_objectDetailTabWidget);
+    ks::ui::StylePageTabsContentFrame(m_objectDetailTabWidget);
     m_objectInfoLayout->addWidget(m_objectDetailTabWidget, 1);
 
     auto configureReadOnlyTable = [](QTableWidget* table)

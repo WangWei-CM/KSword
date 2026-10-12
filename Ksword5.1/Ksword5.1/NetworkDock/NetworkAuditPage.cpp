@@ -877,7 +877,8 @@ void NetworkAuditPage::initializeUi()
 
     m_refreshButton = new QPushButton(QStringLiteral("刷新"), this);
     // 此动作使用纯色主题，保留页面原有图标、状态和业务连接。
-    ks::ui::ApplyFlatButtonTheme(m_refreshButton, ks::ui::FlatButtonTone::Neutral);
+    ks::ui::ApplyFlatButtonTheme(m_refreshButton, ks::ui::FlatButtonTone::Neutral,
+        ks::ui::FlatButtonAppearance::Solid);
     m_refreshButton->setIcon(QIcon(QStringLiteral(":/Icon/process_refresh.svg")));
     m_headerLayout->addWidget(m_refreshButton);
     ks::ui::NormalizeToolbarRow(m_headerLayout);
@@ -885,7 +886,7 @@ void NetworkAuditPage::initializeUi()
     m_rootLayout->addLayout(m_headerLayout);
 
     m_sectionTabWidget = new QTabWidget(this);
-    ks::ui::StylePageTabs(m_sectionTabWidget);
+    ks::ui::StylePageTabsContentFrame(m_sectionTabWidget);
     m_sectionTabWidget->setTabPosition(QTabWidget::North);
     m_rootLayout->addWidget(m_sectionTabWidget, 1);
 
@@ -897,9 +898,10 @@ void NetworkAuditPage::initializeUi()
 
     // 连接管理动作已合并到 Cross-View，不再单独占用顶层 Tab。
     QWidget* const crossToolbar = new QWidget(m_crossViewPage);
+    // 两条操作行使用与其他网络工具相同的工具面，不再与结果面混为同层。
     ks::ui::StylePrimaryToolbar(crossToolbar);
     QVBoxLayout* const crossToolbarLayout = new QVBoxLayout(crossToolbar);
-    crossToolbarLayout->setContentsMargins(8, 4, 8, 4);
+    crossToolbarLayout->setContentsMargins(12, 10, 12, 10);
     crossToolbarLayout->setSpacing(8);
     QHBoxLayout* crossSearchLayout = new QHBoxLayout();
     crossSearchLayout->setContentsMargins(0, 0, 0, 0);
@@ -919,7 +921,8 @@ void NetworkAuditPage::initializeUi()
 
     m_crossAutoRefreshButton = new QPushButton(QStringLiteral("自动刷新"), m_crossViewPage);
     // 此动作使用纯色主题，保留页面原有图标、状态和业务连接。
-    ks::ui::ApplyFlatButtonTheme(m_crossAutoRefreshButton, ks::ui::FlatButtonTone::Neutral);
+    ks::ui::ApplyFlatButtonTheme(m_crossAutoRefreshButton, ks::ui::FlatButtonTone::Neutral,
+        ks::ui::FlatButtonAppearance::Solid);
     m_crossAutoRefreshButton->setIcon(QIcon(QStringLiteral(":/Icon/process_refresh.svg")));
     m_crossAutoRefreshButton->setToolTip(QStringLiteral("每 2.2 秒自动刷新 TCP/UDP Cross-View"));
     m_crossAutoRefreshButton->setCheckable(true);
@@ -928,7 +931,8 @@ void NetworkAuditPage::initializeUi()
 
     m_crossTerminateButton = new QPushButton(QStringLiteral("终止 TCP"), m_crossViewPage);
     // 此动作使用纯色主题，保留页面原有图标、状态和业务连接。
-    ks::ui::ApplyFlatButtonTheme(m_crossTerminateButton, ks::ui::FlatButtonTone::Danger);
+    ks::ui::ApplyFlatButtonTheme(m_crossTerminateButton, ks::ui::FlatButtonTone::Danger,
+        ks::ui::FlatButtonAppearance::Solid);
     m_crossTerminateButton->setIcon(QIcon(QStringLiteral(":/Icon/process_terminate.svg")));
     m_crossTerminateButton->setToolTip(QStringLiteral("终止选中的 R3 IPv4 TCP 活动连接"));
     m_crossTerminateButton->setEnabled(false);
@@ -936,7 +940,8 @@ void NetworkAuditPage::initializeUi()
 
     m_clearProcessFilterButton = new QPushButton(QStringLiteral("清除 PID 筛选"), m_crossViewPage);
     // 此动作使用纯色主题，保留页面原有图标、状态和业务连接。
-    ks::ui::ApplyFlatButtonTheme(m_clearProcessFilterButton, ks::ui::FlatButtonTone::Neutral);
+    ks::ui::ApplyFlatButtonTheme(m_clearProcessFilterButton, ks::ui::FlatButtonTone::Neutral,
+        ks::ui::FlatButtonAppearance::Solid);
     m_clearProcessFilterButton->setIcon(QIcon(QStringLiteral(":/Icon/log_clear.svg")));
     m_clearProcessFilterButton->setToolTip(QStringLiteral("显示全部进程的 TCP/UDP 连接"));
     m_clearProcessFilterButton->setEnabled(false);
@@ -1063,7 +1068,7 @@ void NetworkAuditPage::initializeUi()
     wfpLayout->setContentsMargins(4, 4, 4, 4);
     wfpLayout->setSpacing(6);
     m_wfpTabWidget = new QTabWidget(m_wfpPage);
-    ks::ui::StylePageTabs(m_wfpTabWidget);
+    ks::ui::StylePageTabsContentFrame(m_wfpTabWidget);
     m_wfpTabWidget->setTabPosition(QTabWidget::North);
     wfpLayout->addWidget(m_wfpTabWidget, 1);
 
@@ -1102,7 +1107,7 @@ void NetworkAuditPage::initializeUi()
     ndisLayout->setContentsMargins(4, 4, 4, 4);
     ndisLayout->setSpacing(6);
     m_ndisTabWidget = new QTabWidget(m_ndisPage);
-    ks::ui::StylePageTabs(m_ndisTabWidget);
+    ks::ui::StylePageTabsContentFrame(m_ndisTabWidget);
     m_ndisTabWidget->setTabPosition(QTabWidget::North);
     ndisLayout->addWidget(m_ndisTabWidget, 1);
     m_ndisAdapterTable = buildWfpTable(m_ndisPage, { QStringLiteral("名称"), QStringLiteral("描述"), QStringLiteral("IfIndex"), QStringLiteral("状态"), QStringLiteral("MAC"), QStringLiteral("速率"), QStringLiteral("连接") });
@@ -1147,6 +1152,10 @@ void NetworkAuditPage::initializeUi()
     installCopyMenu(m_nsiSummaryTable);
     nsiLayout->addWidget(m_nsiSummaryTable, 1);
     m_sectionTabWidget->addTab(m_nsiPage, QStringLiteral("NSI"));
+    // 证据模型和专业分割器保留，只统一各列表页的阅读基线。
+    for (QWidget* page : {m_crossViewPage, m_afdPage, m_wfpPage, m_ndisPage, m_nsiPage})
+        ks::ui::StyleWorkspacePage(page);
+
 }
 
 void NetworkAuditPage::initializeConnections()

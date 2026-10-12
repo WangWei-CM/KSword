@@ -1,6 +1,7 @@
 #include "BootEditorTab.h"
 #include "../../UI/PageControlStyle.h"
 #include "../../UI/PrimaryPageStyle.h"
+#include "../../UI/ParameterWorkspace.h"
 #include "../../UI/ToolbarMetrics.h"
 #include "../../UI/CodeTextEdit.h"
 
@@ -70,27 +71,6 @@ namespace
     QString buildBlueToolButtonStyle()
     {
         return KswordTheme::ThemedButtonStyle();
-    }
-
-    // buildBlueInputStyle：
-    // - 统一输入类控件（编辑框/下拉框/数值框）边框与焦点反馈；
-    // - 提升整页视觉一致性。
-    QString buildBlueInputStyle()
-    {
-        return QStringLiteral(
-            "QLineEdit,QSpinBox{"
-            "  border:1px solid %2;"
-            "  border-radius:3px;"
-            "  background:%3;"
-            "  color:%4;"
-            "  padding:2px 6px;"
-            "}"
-            "QLineEdit:focus,QSpinBox:focus{border:1px solid %1;}")
-            .arg(KswordTheme::PrimaryBlueHex)
-            .arg(KswordTheme::BorderHex())
-            .arg(KswordTheme::SurfaceHex())
-            .arg(KswordTheme::TextPrimaryHex())
-            + KswordTheme::ThemedComboBoxStyle();
     }
 
     // isCurrentProcessElevated：
@@ -177,7 +157,8 @@ void BootEditorTab::initializeUi()
     // - 中部上方条目表与下方三栏编辑区；
     // - 底部状态摘要。
     m_rootLayout = new QVBoxLayout(this);
-    m_rootLayout->setContentsMargins(6, 6, 6, 6);
+    // ParameterWorkspace 已自带 16px 留白，外层只提供阅读基线。
+    ks::ui::StyleWorkspacePage(this, 0);
     m_rootLayout->setSpacing(6);
 
     initializeToolbar();
@@ -185,6 +166,7 @@ void BootEditorTab::initializeUi()
 
     m_statusLabel = new QLabel(QStringLiteral("状态：尚未加载 BCD 数据"), this);
     m_statusLabel->setWordWrap(true);
+    m_statusLabel->setContentsMargins(16, 0, 16, 0);
     m_rootLayout->addWidget(m_statusLabel);
 }
 
@@ -193,8 +175,9 @@ void BootEditorTab::initializeToolbar()
     // 顶部工具栏主要承载“高频全局操作”。
     m_toolbarWidget = new QWidget(this);
     m_toolbarLayout = new QHBoxLayout(m_toolbarWidget);
-    m_toolbarLayout->setContentsMargins(0, 0, 0, 0);
+    m_toolbarLayout->setContentsMargins(16, 12, 16, 12);
     m_toolbarLayout->setSpacing(6);
+    ks::ui::StylePrimaryToolbar(m_toolbarWidget);
     m_rootLayout->addWidget(m_toolbarWidget);
 
     // btnFactory：
@@ -259,12 +242,13 @@ void BootEditorTab::initializeToolbar()
 
 void BootEditorTab::initializeCenterPane()
 {
-    // 主体改为上下布局：
-    // - 上半区只放条目表，避免被编辑区挤压；
-    // - 下半区放编辑区，再细分为基础字段、高级开关、原始输出三栏。
-    m_mainSplitter = new QSplitter(Qt::Vertical, this);
+    // 参数表单占左侧，条目选择器与命令回执在右侧共享高度。
+    auto* workspace = new ks::ui::ParameterWorkspace(this, 500);
+    workspace->useWideParameterLayout(60);
+    m_rootLayout->addWidget(workspace, 1);
+    m_mainSplitter = new QSplitter(Qt::Vertical, workspace);
     m_mainSplitter->setChildrenCollapsible(false);
-    m_rootLayout->addWidget(m_mainSplitter, 1);
+    workspace->results()->addWidget(m_mainSplitter, 1);
 
     // 上方表格：展示当前 BCD 条目列表。
     m_entryTable = new ks::ui::VisibleTableWidget(m_mainSplitter);
@@ -299,31 +283,14 @@ void BootEditorTab::initializeCenterPane()
     entryHeader->setSectionResizeMode(kColumnPath, QHeaderView::Stretch);
     entryHeader->setSectionResizeMode(kColumnFlags, QHeaderView::ResizeToContents);
 
-    // 下方编辑区：
-    // - 第一栏承载基础字段、传统引导快捷操作与应用按钮；
-    // - 第二栏承载高级开关与自定义命令；
-    // - 第三栏独立承载原始输出，避免日志区域挤占配置控件。
-    m_editorPane = new QWidget(m_mainSplitter);
-    m_editorPaneLayout = new QVBoxLayout(m_editorPane);
-    m_editorPaneLayout->setContentsMargins(0, 0, 0, 0);
-    m_editorPaneLayout->setSpacing(6);
-
-    QSplitter* editorColumnsSplitter = new QSplitter(Qt::Horizontal, m_editorPane);
-    editorColumnsSplitter->setChildrenCollapsible(false);
-    m_editorPaneLayout->addWidget(editorColumnsSplitter, 1);
-
-    QWidget* leftEditorColumn = new QWidget(editorColumnsSplitter);
-    QVBoxLayout* leftEditorLayout = new QVBoxLayout(leftEditorColumn);
-    leftEditorLayout->setContentsMargins(0, 0, 0, 0);
-    // 三栏编辑保留同屏密度，仅拉开各自内部不同任务分区的距离。
-    leftEditorLayout->setSpacing(16);
-
-    QWidget* middleEditorColumn = new QWidget(editorColumnsSplitter);
-    QVBoxLayout* middleEditorLayout = new QVBoxLayout(middleEditorColumn);
-    middleEditorLayout->setContentsMargins(0, 0, 0, 0);
-    middleEditorLayout->setSpacing(16);
-
-    QWidget* outputEditorColumn = new QWidget(editorColumnsSplitter);
+    // 合并原来两列输入；各设置分区按自然高度排列，低频开关可展开。
+    m_editorPane = workspace;
+    m_editorPaneLayout = workspace->parameters();
+    QWidget* leftEditorColumn = workspace;
+    QWidget* middleEditorColumn = workspace;
+    QVBoxLayout* leftEditorLayout = workspace->parameters();
+    QVBoxLayout* middleEditorLayout = workspace->parameters();
+    QWidget* outputEditorColumn = new QWidget(m_mainSplitter);
     QVBoxLayout* outputEditorLayout = new QVBoxLayout(outputEditorColumn);
     outputEditorLayout->setContentsMargins(0, 0, 0, 0);
     outputEditorLayout->setSpacing(6);
@@ -333,11 +300,14 @@ void BootEditorTab::initializeCenterPane()
     ks::ui::StylePrimaryGroup(basicGroup);
     QFormLayout* basicLayout = new QFormLayout(basicGroup);
     basicLayout->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
+    basicLayout->setRowWrapPolicy(QFormLayout::WrapLongRows);
 
     m_identifierValueLabel = new QLabel(QStringLiteral("-"), basicGroup);
     m_identifierValueLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    m_identifierValueLabel->setWordWrap(true);
     m_typeValueLabel = new QLabel(QStringLiteral("-"), basicGroup);
     m_typeValueLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    m_typeValueLabel->setWordWrap(true);
     m_descriptionEdit = new QLineEdit(basicGroup);
     m_deviceEdit = new QLineEdit(basicGroup);
     m_osDeviceEdit = new QLineEdit(basicGroup);
@@ -353,14 +323,13 @@ void BootEditorTab::initializeCenterPane()
     m_timeoutSpin->setRange(0, 999);
     m_timeoutSpin->setSuffix(QStringLiteral(" 秒"));
 
-    m_descriptionEdit->setStyleSheet(buildBlueInputStyle());
-    m_deviceEdit->setStyleSheet(buildBlueInputStyle());
-    m_osDeviceEdit->setStyleSheet(buildBlueInputStyle());
-    m_pathEdit->setStyleSheet(buildBlueInputStyle());
-    m_systemRootEdit->setStyleSheet(buildBlueInputStyle());
-    m_localeEdit->setStyleSheet(buildBlueInputStyle());
-    m_bootMenuPolicyCombo->setStyleSheet(buildBlueInputStyle());
-    m_timeoutSpin->setStyleSheet(buildBlueInputStyle());
+    // BCD 编辑字段沿用共享输入层；不能在组合框已登记主题后再覆盖整份旧 QSS。
+    for (QLineEdit* field : {m_descriptionEdit, m_deviceEdit, m_osDeviceEdit,
+        m_pathEdit, m_systemRootEdit, m_localeEdit})
+    {
+        ks::ui::StyleStandaloneInput(field);
+    }
+    ks::ui::StyleStandaloneInput(m_timeoutSpin);
 
     basicLayout->addRow(QStringLiteral("标识符"), m_identifierValueLabel);
     basicLayout->addRow(QStringLiteral("对象类型"), m_typeValueLabel);
@@ -373,6 +342,7 @@ void BootEditorTab::initializeCenterPane()
     basicLayout->addRow(QStringLiteral("启动菜单策略"), m_bootMenuPolicyCombo);
     basicLayout->addRow(QStringLiteral("菜单等待超时"), m_timeoutSpin);
 
+    ks::ui::StyleParameterSection(basicGroup);
     leftEditorLayout->addWidget(basicGroup);
 
     // 传统引导快捷组：
@@ -392,7 +362,7 @@ void BootEditorTab::initializeCenterPane()
     legacyLayout->addWidget(m_legacyModeHintLabel);
 
     QWidget* legacyActionWidget = new QWidget(legacyGroup);
-    QHBoxLayout* legacyActionLayout = new QHBoxLayout(legacyActionWidget);
+    QVBoxLayout* legacyActionLayout = new QVBoxLayout(legacyActionWidget);
     legacyActionLayout->setContentsMargins(0, 0, 0, 0);
     legacyActionLayout->setSpacing(6);
 
@@ -413,11 +383,11 @@ void BootEditorTab::initializeCenterPane()
         QStringLiteral("对当前选中引导项执行：bcdedit /set <id> bootmenupolicy Standard"));
     m_setStandardForSelectedButton->setIcon(QIcon(QStringLiteral(":/Icon/process_refresh.svg")));
     legacyActionLayout->addWidget(m_setStandardForSelectedButton);
-    legacyActionLayout->addStretch(1);
-
-    ks::ui::NormalizeToolbarRow(legacyActionLayout);
+    for (QPushButton* button : { m_setLegacyForSelectedButton, m_setLegacyForDefaultButton, m_setStandardForSelectedButton })
+        ks::ui::NormalizeToolbarControl(button);
     legacyLayout->addWidget(legacyActionWidget);
-    leftEditorLayout->addWidget(legacyGroup);
+    QWidget* legacySection = ks::ui::FoldParameterSection(legacyGroup); // 低频 Legacy 操作仍可折叠。
+    leftEditorLayout->addWidget(legacySection);
 
     // 高级开关组。
     QGroupBox* flagGroup = new QGroupBox(QStringLiteral("高级开关"), middleEditorColumn);
@@ -440,7 +410,6 @@ void BootEditorTab::initializeCenterPane()
     m_safeBootCombo->addItem(QStringLiteral("最小安全模式"), QStringLiteral("minimal"));
     m_safeBootCombo->addItem(QStringLiteral("网络安全模式"), QStringLiteral("network"));
     m_safeBootCombo->addItem(QStringLiteral("命令行安全模式"), QStringLiteral("alternateshell"));
-    m_safeBootCombo->setStyleSheet(buildBlueInputStyle());
 
     flagLayout->addWidget(m_testSigningCheck);
     flagLayout->addWidget(m_noIntegrityCheck);
@@ -450,13 +419,12 @@ void BootEditorTab::initializeCenterPane()
     flagLayout->addWidget(m_recoveryEnabledCheck);
     flagLayout->addWidget(new QLabel(QStringLiteral("safeboot 模式"), flagGroup));
     flagLayout->addWidget(m_safeBootCombo);
-    middleEditorLayout->addWidget(flagGroup);
+    QWidget* flagSection = ks::ui::FoldParameterSection(flagGroup, true); // 常用引导开关默认可见。
+    middleEditorLayout->addWidget(flagSection);
 
     // 应用动作区：分离“当前条目修改”和“bootmgr 全局参数”。
-    QWidget* actionWidget = new QWidget(leftEditorColumn);
-    QHBoxLayout* actionLayout = new QHBoxLayout(actionWidget);
-    actionLayout->setContentsMargins(0, 0, 0, 0);
-    actionLayout->setSpacing(6);
+    QWidget* actionWidget = workspace;
+    QHBoxLayout* actionLayout = workspace->actions();
 
     m_applyEntryButton = new QPushButton(QStringLiteral("应用当前条目"), actionWidget);
     m_applyEntryButton->setToolTip(QStringLiteral("按基础字段与高级开关写回当前选中的 BCD 条目"));
@@ -469,12 +437,10 @@ void BootEditorTab::initializeCenterPane()
     m_reloadOneButton->setIcon(QIcon(QStringLiteral(":/Icon/process_refresh.svg")));
 
     actionLayout->addWidget(m_applyEntryButton);
-    actionLayout->addWidget(m_applyBootMgrButton);
+    basicLayout->addRow(m_applyBootMgrButton);
     actionLayout->addWidget(m_reloadOneButton);
     actionLayout->addStretch(1);
     ks::ui::NormalizeToolbarRow(actionLayout);
-    leftEditorLayout->addWidget(actionWidget);
-    leftEditorLayout->addStretch(1);
 
     // 自定义命令组：支持输入任意 bcdedit 参数。
     QGroupBox* customGroup = new QGroupBox(QStringLiteral("自定义命令"), middleEditorColumn);
@@ -486,7 +452,7 @@ void BootEditorTab::initializeCenterPane()
     m_customCommandEdit = new QLineEdit(customGroup);
     m_customCommandEdit->setPlaceholderText(QStringLiteral("示例：/set {current} bootmenupolicy Legacy"));
     m_customCommandEdit->setToolTip(QStringLiteral("只填写 bcdedit 后面的参数；也支持完整输入 bcdedit ..."));
-    m_customCommandEdit->setStyleSheet(buildBlueInputStyle());
+    ks::ui::StyleStandaloneInput(m_customCommandEdit);
     m_runCustomCommandButton = new QPushButton(QStringLiteral("执行"), customGroup);
     m_runCustomCommandButton->setToolTip(QStringLiteral("执行自定义 bcdedit 命令并输出原始结果"));
     m_runCustomCommandButton->setIcon(QIcon(QStringLiteral(":/Icon/process_start.svg")));
@@ -494,12 +460,10 @@ void BootEditorTab::initializeCenterPane()
     customLayout->addWidget(m_customCommandEdit, 1);
     customLayout->addWidget(m_runCustomCommandButton, 0);
     ks::ui::NormalizeToolbarRow(customLayout);
-    middleEditorLayout->addWidget(customGroup);
-    middleEditorLayout->addStretch(1);
+    QWidget* customSection = ks::ui::FoldParameterSection(customGroup); // 任意命令保持低频入口。
+    middleEditorLayout->addWidget(customSection);
 
-    // 原始输出组：
-    // - 独立放入第三栏，形成稳定的日志观察区域；
-    // - 与第二栏的高级开关/自定义命令分离，避免横向扩展时互相挤压。
+    // 原始输出位于右侧条目表下方，不再占用参数栏或产生第三个窄列。
     QGroupBox* outputGroup = new QGroupBox(QStringLiteral("原始输出"), outputEditorColumn);
     ks::ui::StylePrimaryGroup(outputGroup);
     QVBoxLayout* outputLayout = new QVBoxLayout(outputGroup);
@@ -512,19 +476,18 @@ void BootEditorTab::initializeCenterPane()
     m_rawOutputEdit->setPlaceholderText(QStringLiteral("这里显示 bcdedit 原始输出与命令执行日志。"));
     m_rawOutputEdit->setMinimumHeight(180);
     outputLayout->addWidget(m_rawOutputEdit);
+    ks::ui::StyleParameterSection(outputGroup);
     outputEditorLayout->addWidget(outputGroup, 1);
 
-    // 分割比例：
-    // - 上表格优先保证可读；
-    // - 下编辑区仍保留足够空间进行批量操作。
+    // 右侧表格优先保证条目可读，下方保留命令输出的连续观察区域。
     m_mainSplitter->setStretchFactor(0, 6);
     m_mainSplitter->setStretchFactor(1, 5);
     m_mainSplitter->setSizes(QList<int>{ 380, 320 });
 
-    editorColumnsSplitter->setStretchFactor(0, 4);
-    editorColumnsSplitter->setStretchFactor(1, 3);
-    editorColumnsSplitter->setStretchFactor(2, 5);
-    editorColumnsSplitter->setSizes(QList<int>{ 360, 320, 420 });
+    // 基础字段与开关宽屏互补两列，保持原控件、选择条目与写回流程。
+    ks::ui::ArrangeParameterColumns(workspace->parameters(),
+        { basicGroup, legacySection }, { flagSection, customSection }, 300);
+    workspace->finish();
 }
 
 void BootEditorTab::initializeConnections()

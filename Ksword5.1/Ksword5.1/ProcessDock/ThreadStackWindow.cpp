@@ -88,29 +88,6 @@ namespace
             .toUpper();
     }
 
-    // buildOpaqueDialogStyle 作用：覆盖父级透明样式，保证栈窗口可读。
-    // 参数 objectName：窗口 objectName。
-    // 返回：QSS。
-    QString buildOpaqueDialogStyle(const QString& objectName)
-    {
-        return QStringLiteral(
-            "QDialog#%1{"
-            "  background-color:palette(window) !important;"
-            "  color:palette(text) !important;"
-            "}"
-            "QDialog#%1 QTreeWidget,"
-            "QDialog#%1 QAbstractScrollArea,"
-            "QDialog#%1 QAbstractScrollArea::viewport{"
-            "  background-color:palette(base) !important;"
-            "  color:palette(text) !important;"
-            "}"
-            "QDialog#%1 QHeaderView::section{"
-            "  background:transparent !important;"
-            "  background-color:transparent !important;"
-            "  color:palette(text) !important;"
-            "}")
-            .arg(objectName);
-    }
 
     // queryThreadBasicInfo 作用：通过 NtQueryInformationThread 查询 TEB 和 ClientId。
     // 参数 threadHandle：线程句柄。
@@ -488,7 +465,7 @@ void ThreadStackWindow::initializeUi()
     setObjectName(QStringLiteral("ThreadStackWindowRoot"));
     setAttribute(Qt::WA_StyledBackground, true);
     setAutoFillBackground(true);
-    setStyleSheet(buildOpaqueDialogStyle(objectName()));
+    // 根表面与表头仅由下方共享详情主题拥有，避免旧透明规则覆盖统一分层。
     setWindowTitle(QStringLiteral("线程调用栈 - TID %1").arg(m_target.threadId));
     ks::ui::applyResponsiveWindowGeometry(
         this,
@@ -507,12 +484,14 @@ void ThreadStackWindow::initializeUi()
     m_refreshButton = new QPushButton(QIcon(":/Icon/process_refresh.svg"), QString(), this);
     KswordTheme::ApplyCompactIconButtonMetrics(m_refreshButton);
     m_refreshButton->setToolTip(QStringLiteral("重新捕获调用栈"));
-    m_refreshButton->setStyleSheet(ks::ui::BuildFlatButtonStyle() + QStringLiteral("QPushButton,QToolButton{border-radius:3px;padding:4px 10px;font-weight:600;}"));
+    ks::ui::ApplyFlatButtonTheme(m_refreshButton, ks::ui::FlatButtonTone::Neutral,
+        ks::ui::FlatButtonAppearance::Solid);
 
     m_copyButton = new QPushButton(QIcon(":/Icon/process_copy_row.svg"), QString(), this);
     KswordTheme::ApplyCompactIconButtonMetrics(m_copyButton);
     m_copyButton->setToolTip(QStringLiteral("复制全部调用栈"));
-    m_copyButton->setStyleSheet(ks::ui::BuildFlatButtonStyle() + QStringLiteral("QPushButton,QToolButton{border-radius:3px;padding:4px 10px;font-weight:600;}"));
+    ks::ui::ApplyFlatButtonTheme(m_copyButton, ks::ui::FlatButtonTone::Neutral,
+        ks::ui::FlatButtonAppearance::Solid);
 
     m_targetLabel = new QLabel(this);
     m_targetLabel->setMinimumWidth(0);

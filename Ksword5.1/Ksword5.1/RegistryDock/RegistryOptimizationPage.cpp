@@ -1535,19 +1535,13 @@ void RegistryOptimizationPage::applyColumnPreset(const ColumnPreset preset)
 
 void RegistryOptimizationPage::refreshColumnPresetButtonStyles()
 {
-    const QString inactiveStyle = KswordTheme::ThemedButtonStyle();
-    // 列预设使用实心主题强调，业务自定义显隐仍解除 A/B 高亮。
-    const QString activeStyle = ks::ui::BuildFlatButtonStyle(ks::ui::FlatButtonTone::Accent)
-        + QStringLiteral("QPushButton{border-radius:3px;padding:3px 8px;font-weight:700;}");
-
+    // 业务只更新列组选中态，底面、圆角和过渡由已安装的分段控件统一维护。
     if (m_columnPresetAButton != nullptr)
     {
-        m_columnPresetAButton->setStyleSheet(m_columnPreset == ColumnPreset::A ? activeStyle : inactiveStyle);
         ks::ui::SetSegmentedButtonSelected(m_columnPresetAButton, m_columnPreset == ColumnPreset::A);
     }
     if (m_columnPresetBButton != nullptr)
     {
-        m_columnPresetBButton->setStyleSheet(m_columnPreset == ColumnPreset::B ? activeStyle : inactiveStyle);
         ks::ui::SetSegmentedButtonSelected(m_columnPresetBButton, m_columnPreset == ColumnPreset::B);
     }
 }

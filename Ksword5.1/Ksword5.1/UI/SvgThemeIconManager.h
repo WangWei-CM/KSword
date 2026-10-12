@@ -11,7 +11,9 @@
 #include <QColor>
 #include <QIcon>
 #include <QObject>
+#include <QPointer>
 
+#include <deque>
 #include <functional>
 
 class QAction;
@@ -83,6 +85,9 @@ namespace ks::ui
         // 入参为待更新控件；同一控件只排一次，销毁后自动放弃，默认色仍适配共享按钮。
         void scheduleWidgetRefresh(QWidget* widgetPointer);
 
+        // drainWidgetRefreshes 将运行期增量任务合并为有限分片，不为每个 Style/Show 开独立定时器。
+        void drainWidgetRefreshes();
+
         // 下列函数分别处理 QWidget、QAction、Tab 和单个 QIcon。
         int applyToWidget(QWidget* widgetPointer, int* cacheHitCount);
         bool applyToAction(QAction* actionPointer, int* cacheHitCount);
@@ -92,5 +97,7 @@ namespace ks::ui
         bool m_filterInstalled = false; // m_filterInstalled：全局事件过滤器是否已安装。
         bool m_customTintActive = false; // m_customTintActive：是否着色普通槽位；默认色仅管共享按钮。
         QColor m_themeColor; // m_themeColor：本轮集中着色使用的强调色。
+        std::deque<QPointer<QWidget>> m_pendingWidgetRefreshes; // 增量任务弱引用，销毁后原位跳过。
+        bool m_widgetRefreshScheduled = false; // 整个处理期保持门闩，避免嵌套循环双重排空。
     };
 }

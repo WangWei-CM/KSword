@@ -203,7 +203,6 @@ private:
     // - 作用：监听全局调色板/样式变化，刷新本页自定义 Collapse 的动态样式；
     // - 处理：先交给 QWidget 基类，再按事件类型重刷折叠面板；
     // - 返回：返回 QWidget::event 的处理结果。
-    bool event(QEvent* eventPointer) override;
 
     // ========================= UI 初始化 =========================
     void initializeUi();
@@ -324,9 +323,8 @@ private:
     static QString blueButtonStyle();
     static QString blueInputStyle();
     static QString blueHeaderStyle();
-    static QString collapsePanelStyle();
+    static QString collapsePanelStyle(const QWidget* panel);
     static QString collapseHeaderButtonStyle();
-    static void refreshCollapseTheme(QWidget* rootWidget);
     static QString providerTypeFromName(const QString& providerNameText);
     static QString now100nsText();
     static std::uint64_t currentSystemTime100ns();

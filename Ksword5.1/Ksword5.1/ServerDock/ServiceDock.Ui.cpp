@@ -74,6 +74,7 @@ void ServiceDock::initializeUi()
 {
     m_rootLayout = new QVBoxLayout(this);
     m_rootLayout->setContentsMargins(6, 6, 6, 6);
+    ks::ui::StyleWorkspaceContentFrame(this); // 服务主页面直接承接ADS导航，使用页根外角。
     m_rootLayout->setSpacing(6);
 
     initializeToolbar();

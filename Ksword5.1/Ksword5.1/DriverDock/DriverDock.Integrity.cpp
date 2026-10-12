@@ -1,5 +1,6 @@
 #include "../UI/StructuredFieldView.h"
 #include "../UI/ToolbarMetrics.h"
+#include "../UI/PrimaryPageStyle.h"
 #include "DriverDock.Internal.h"
 #include "../UI/IntegrityRiskPresentation.h"
 #include "../UI/TableInteractionSupport.h"
@@ -329,6 +330,9 @@ void DriverDock::initializeIntegrityTab()
     m_integrityModuleBaseEdit->setPlaceholderText(
         driverText("driver.integrity.form.module_base.placeholder", QStringLiteral("模块基址（可选）")));
     m_integrityModuleBaseEdit->setMaximumWidth(150);
+    // 名称与基址是独立参数输入，不能继承透明工具带而失去边界。
+    ks::ui::StyleStandaloneInput(m_integrityDriverNameEdit);
+    ks::ui::StyleStandaloneInput(m_integrityModuleBaseEdit);
 
     m_integrityFillFromSelectionButton = new QPushButton(QIcon(QStringLiteral(":/Icon/process_details.svg")), QString(), m_integrityPage);
     KswordTheme::ApplyCompactIconButtonMetrics(m_integrityFillFromSelectionButton);

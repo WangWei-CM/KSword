@@ -250,3 +250,91 @@ KSword 主程序位于 `Ksword5.1/Ksword5.1`（Qt 6.9.3 Widgets + Qt Advanced Do
 - 分段整组底色使用 `ControlInputSurfaceColor`，与页面维持可见对比；不能再用 Window/SurfaceAlt 的中间混色，它会在内存工作台等页面与底板重合。按钮组、搜索范围 QTabBar、自绘 HexViewSegmented 三种适配器共用，文字/图标继续按实际选中和未选底面校准。
 - 动画中在选中面内外裁剪绘制两种对比度前景，避免过渡时字/图标与底色相同；原按钮 setParent 后需恢复隐式可见，显式业务隐藏继续保留。节拍按所在屏幕频率，遵循系统动画开关；隐藏与布局变化停止旧几何。编辑器查找/跳转/类别分段通过只读快照适配，原命中矩形和提示不变。
 - `UI/ThemedSlider` 保留 QSlider 的输入与信号，用原 QStyleOption 的真实 handle 位置绘制连续填充、浅轨道和圆把手，包含 RTL、反向及禁用态；设置、窗口透明度和 DWM 两处透明度均明确接入。
+
+
+## 参数表单页框架（2026-10-11）
+
+- `UI/ParameterWorkspace` 将参数独立滚动、固定执行区与结果区分开；窄窗口改上下分栏。使用 `StyleParameterSection` 明确选择标题分隔线，用 `FoldParameterSection` 折叠非 checkable 的低频参数分组。只有显式登记的参数区补齐输入底色、下拉和数值框主题，不全局重排或扫描业务页面。
+- 用户在两页试用后已批准逐页推广；当前 26 个同类参数操作页接入工作区，另有 5 处专业页面只统一明确参数区。纯列表、仪表盘、专业编辑器与 HVM 生命周期页保留原结构。具体范围和接入限制见 `docs/参数表单框架接入.md`；直接编译交用户验收，不启动审计。
+- 参数框架参考图使用无描边的色块，禁止复用带 1px 外框的 `StylePrimaryContentPanel`。只保留低对比度分隔线；原生 QToolButton 的 arrowType 会产生亮色大三角，折叠标题改为自绘小号空心折角。参数分组使用自然高度，避免 QGridLayout 将额外高度均分为巨大行距。编辑区应同时绑定 QSS 和 palette，保证 CodeTextEdit 行号、当前行与语法色采样到真实底色；只读结果与面板同底，编辑输入单独铺底。
+- 参数面板和结果面板采用 16px 等边内边距、至少 10pt/14px 字号。横向适配同时依赖页面拆多列、组合框最小内容宽度、QFormLayout 换行和长选项文字换行，不能仅隐藏水平条。原 QCheckBox/QRadioButton 保留对象/文本/可访问性/信号，只在明确参数区自绘换行标签与测量高度；标签点击仍交给原生按钮处理。折叠标题自绘省略文本后必须同步缩小 minimumSizeHint，否则原生长标题仍会撑宽参数栏。
+- 参数/日志并非固定窄左宽右。页面可用 `useWideParameterLayout(percent)` 明确分配宽屏比例，`ArrangeParameterColumns` 显式指定两列分区，窄屏恢复原阅读顺序；保留用户拖动比例。请求构造与创建进程等日志较少页面默认展开常用参数。普通状态/专业页使用 `StyleWorkspacePage`、无描边 `StylePrimaryContentPanel(false)`、`StyleWorkspaceTextViews` 单独更新，不因不适合参数框架就保留旧透明控件。无描边面板在独立窗口也必须有实底；边框 QSS 的替换参数保持连续，不能把带未替换 %N 的字符串再作为参数注入。
+
+## 导航连接与固定表面层级（2026-10-11）
+
+- 普通页签由 `UI/PageControlStyle.cpp` 共用完整状态样式；最新外框通过 `StylePageTabsContentFrame` 明确接入，只在最外层绘圆角。旧“首工具条补角”和自动清零父布局顶部的路径已删除。保留原 TabBar/StackedWidget、页序与命中，子栏缩进仅作用于 tab-bar，不再右移内容；ADS 外壳自身间隔为0。
+- 主窗口底板、内容、工具带、表头、输入直接从 `MainWindowSurfaceColors` 固定求值，不能从每层父 palette 再抬高明度。大面板/工具底统一 8px，独立按钮/输入 5px；同一组件内部拼接处允许 0px（参数执行区、冻结辅助窗格和数值框内部编辑器）。背景图/穿透模式仍走既有保护。
+- `StyleStandaloneInput` 为未绑定的明确独立输入补完整颜色绑定，已有业务绑定只对齐圆角；单行字段用 `BindLineEditTheme`，搜索沿用同一配色但保留原过滤行为。主页面按钮、搜索、数值框和下拉框共用固定输入层，正常/悬停/焦点文字单独校准对比，输入背景校准保留中性色相。线程 A/B 不得在状态更新时重写旧 FlatButton QSS；纯工具动作需明确实底，内部清除/导航等例外按用途选择。
+- `PageTabMotion` 与 `DockTabSelectionAnimation` 仅移动导航选中底面和下划线，180ms、经过时间插值、按实际屏幕刷新率使用 PreciseTimer，遵循系统客户端动画开关。原业务页不截图或位移，原文字/图标/输入与子栏滑动保持；ADS 工厂基类绘制后调用动画绘制入口，覆盖旧静态标记，避免双重高亮。
+- QSS border-radius 不裁剪表头或视口子控件，不能只声明圆角就认为实际可见。`RoundedViewSurface` 对普通表/树的四个 8px 圆外极角补真实祖先背景，鼠标穿透、无 setMask/整父截图；专业自绘 opt-out 与冻结辅助窗格保持原外壳。角片背景只走微型 palette/PE_Widget，防止大视图重绘或父面板圆外再次被填实。
+- 主窗口 3px 外沿 overlay 是缩放命中层，非置顶时不绘制蓝色外框/角标，置顶保留提示。不能直接删除 overlay 或取消原 WM_NCHITTEST 缩放；置顶成功和外观刷新都需同步其视觉状态。
+- 表格内部 `ComparisonTableView` 复用源表操作条并声明 `InheritedTableActionBarProperty`，全局登记不再安装第二条；比对期间无用途的冻结/新增快照隐藏，返回实时、快照清理仍由源条负责。差异过滤改变行数后须更新复制/导出可用性；零行禁用属于有效状态，不能靠开启无效按钮掩盖重复宿主。
+- 顶部进程图提交快照前冻结原可见窗口的右端与跨度，禁止按所选时间加半个跨度居中。图上任一点（含最新点）均进入快照状态，后台刷新不得仅因索引在最右侧而重新吸附。查看时只暂停顶部历史队列追加/自动裁剪，系统枚举和独立详情性能记录继续；播放、清空等明确动作恢复实时，保留数量的用户调整仍执行原裁剪。
+- 凹角反馈中的全高1px竖线曾被误当作导航覆盖层残留：实际截图 `#3d5670` 对应 ADS `depthOverlayStyle` 外框，后置 MainSurfaceStyle 只换底色不会取消边框。原规则与最终宿主规则均需 border:0。历史上向首工具条内角填 rail 色的方案已被用户否定并删除，不得恢复。
+- 用户明确圆角必须落在最外层框架，不能覆盖内部控件已有圆角。`StylePageTabsContentFrame` 登记6px pane留白，进程/线程页外围layout归0；页坐标先向外扩展这6px还原外框，再以外半径14px（内部8px+留白6px）绘四角，使内外圆心重合、弧线间隔也为6px。pane留白沿用page底色，角片只填最外弧线之外的rail色；无描边，不新增全高覆盖层。未登记页不批量改变。
+- 用户随后明确要求全软件UI复查和推广。本轮扩展到51个导航/结果/页根入口，见 `docs/UI标准覆盖复查-20261011.md`。框架只接管明确页根/自适应滚动内容的外围边距，内部卡片16px保留；纯嵌套Tab只计最内层，惰性代理用 `ksword_page_frame_host` 明确标记。竖向Tab同样支持；服务/欢迎通过 `StyleWorkspaceContentFrame` 登记页根。背景穿透模式不绘实色角片，专业编辑器内部及原生插件窗口不强行接入。
+
+
+## 详情窗口与弹窗更新（2026-10-11）
+
+- 用户要求详情窗口采用全宽对象摘要、左侧分组导航、右侧无描边卡片；允许系统决定窗口外沿方圆角。`DetailDialogChrome` 使用 Window/Surface 两层，导航选中为中性底加主题色文字，侧栏由 `DetailPresentation` 按窗口宽度调整。
+- `DetailPresentation` 提供内部标题卡片和字段双列，复用 `ArrangeParameterColumns`，窄窗回到单列、QFormLayout 允许长行换行。进程概览去掉 660px 最小宽度和页外重复滚动区；详情只保留分组卡片，字段数据仍来自同一 StructuredFieldView 文档。
+- `StyleStandaloneInput` 使用共享 ToolbarMetrics 高度公式，独立输入字号变化时更新高度；必须排除 QComboBox/QAbstractSpinBox 内部的 QLineEdit，不能重复撑高组合控件。
+- `ThemedMessageBox` 淘汰悬浮自绘标题栏与强制无边框，不改变按钮角色和关闭返回值。主题操作合并到事件队列；Qt 在样式应用时会重建 QMessageBox 网格，因此最低宽度 spacer 必须在套样式、处理按钮之后加到当前网格，而不是只设窗口 minimumWidth 或提前加到旧网格。
+- 原生窗口 `WindowChrome` 使用 DWMWCP_DEFAULT；方圆角、最大化和贴靠由系统决定。主窗口及其它原本无边框的专用窗口不由本模块强改窗口类型。
+- 用户在本轮明确要求停止自动测试，由用户实测。停止后只完成 Release 编译及源码收尾；既有离屏结果不等同于真实窗口、DWM 外沿或业务验收。
+
+- **UI 验证方式（用户明确要求）**：创建伪窗口/独立 UI 夹具只适用于开发机无法正常编译主程序的情况。能够编译时必须直接使用主程序查看和验证，不再构建离屏替代窗口。若用户要求自行测试，则停止自动测试，仅继续已授权的编译。
+
+
+## 共享详情框架统一安装（2026-10-11）
+
+- 用户纠正实现方式：详情必须使用共享框架，不逐窗复制/维护摘要、导航或卡片布局。统一入口 `InstallDetailWindowFramework` 只登记控制器；`PrepareDetailWindowForShow` 在构造结束后的首个Show、首帧绘制前完成窗口摘要/原Tab导航/文档卡片/自适应字段及滚动区安装。各模块只提供实际身份、字段和动作配置，业务模型不由框架复制。
+- `GlobalDialogTheme` 为普通业务QDialog安装结构，已登记二级工具同样装结构但保留Secondary颜色所有权。Qt文件/颜色/字体/单项输入选择器和带 `ksword_detail_keep_layout` 的共享设置页保留已有结构。ProcessDetailWindow为QWidget，明确从ConfigureDetailDialogRoot接入。
+- `DetailFieldProjection` 直接复用原StructuredFieldView搜索/复制/导出控件，原source仍持规范文档。详情固定分组卡片，`setDocumentOnly()` 删除旧树与格式下拉，停止隐藏树重建、列测量和其排队回调。字段分组匹配时保留整组搜索语义；数值刷新原位更新，只有结构变化重建卡片。
+- 卡片实底由DetailCard绘制，正文间隔和滚动Canvas走Window层，避免QSS对子面板再次铺矩形实底导致错误色块/黑色角缝。共享框架根QSS必须让GlobalDialogTheme保持唯一所有权，否则双方增删末尾块会产生StyleChange循环。
+- 只有投影自身有滚动区才关闭多余外滚动壳；自然高卡片scrollBody=false必须保留唯一外层纵向滚动。QSplitter替换使用占位并保留非零用户比例，隐藏页首次布局前全零sizes不应恢复为显式折叠。
+- 文件自建侧栏Tab必须标记ksword_detail_tabs避免重复导航；启动项卡片须来自同一完整文档，不能按section拆source而改变复制全部/导出范围。覆盖清单见 `docs/详情共享框架接入-20261011.md`。不运行自动测试/伪窗口，原Release编译交用户实测。
+
+- 结构观察只接入布局/惰性页面宿主的ChildAdded，合并最小子树；主题或字体变化只刷新根样式，不监听全部叶控件的Show/FontChange并扫描整窗。卡片投影与专业编辑器内部不参与通用结构遍历。
+- `MemoryWorkbenchView`、`WorkbenchDiagnosticsHost`、`WorkbenchTextView` 使用 `ksword_detail_keep_layout` 保留整个专业子树：业务代码仍依赖Stack内原fields身份及tree指针，不能把它们替换成详情卡片。详情窗口外壳仍照常接入；父控制器也不能进入有独立控制器的子窗口。
+- 根QSS必须单一拥有：GlobalDialogTheme拥有普通QDialog；进程详情以 `ksword_detail_theme_owner` 声明业务拥有Chrome。框架不得追加又被业务changeEvent删除的相同块，StyleChange也不能触发文档重建。根样式/调色板及卡片标签只有实际变化才写入，禁止逐按钮手工重复polish。
+- 字号下限统一安装处补齐14px/10pt，保留更大字号及字体家族。`StyleSecondaryTabs` 与普通Tab同用PageTabMotion，静态下划线透明让动画唯一绘制，不另设持续全页刷新计时器。
+- 文档投影以documentRevision/语言/主题/搜索键合并通知；隐藏Tab只留dirty，Show首帧同步使用最新快照。规范字段相同的document-only快照不增代次、不发通知，纯搜索/主题不重新flatten；真实数值变化原位更新，值样式与行可见状态只在变化时写入。
+- `StructuredFieldView` 本身直接作为Tab/Stack页时不能替换页对象：清掉旧布局后在source内部安装 `CreateDetailFieldProjection(source, source)`，保持原页索引/标题/currentWidget及业务指针。该模式不重挂或隐藏source，重复接入查其直接投影子节点，避免父子循环和重复宿主。
+
+## UI 适配与性能补漏（2026-10-11）
+
+- 文件详情同样以 `ksword_detail_theme_owner` 保留完整业务根主题；GlobalDialogTheme为其安装共享结构但让出颜色。`ApplyDetailDialogChrome` 与框架维护同一个完整拥有块，不重复追加或覆盖根主题。侧导航比较源图标身份，不能拿主题加工后的显示图标key误判源变化。
+- ThemeBinding登记使用稳定节点并在destroyed时原位删除，pending哈希只作去重，真正队列仍是QPointer且保持登记顺序。drain先分离队列/清membership，保留嵌套新请求；销毁时清pending地址，避免同址新对象误判。禁止恢复每次新增绑定的全表清理或增长队列逐项contains。
+- 主页面外框/圆角控制器区分几何与底色dirty；宿主、几何、样式不变时不重装事件过滤器/重画，真实主题、重挂、DPR仍更新。单面板outline变化只刷新自己的绑定，不能广播全软件换肤。
+- 参数编辑器只在真实样式/palette变化时全文重高亮，重复finish不累加padding。浮动详情隐藏后不替换全文，显示入口先从规范源回填；相同文本不重建镜像文档。
+- 进程历史、CPU核心历史和磁盘ETW/速率采样不因隐藏停止；隐藏的图表向量转换、动画、线程排序和活动表UI提交延后Show。CPU主题/语言重绘不能重复追加历史；身份清理必须真正清空图形。逐核表复用item，只更新真实变化的文本。
+- BCD、磁盘编辑外部参数、权限访问评估/身份启动、HWID和电源字段已补共享输入接入；专业HEX内部保留。实际范围与源码触发链见 `docs/UI适配与性能补漏-20261011.md`，不得把编译通过当逐页视觉/性能验收。
+
+## 全导航逐页补漏（2026-10-11）
+
+- 从 MainWindow 17 个主入口和 3 个辅助 Dock 展开实际 Tab、惰性子页及动态工厂；逐页矩阵见 `docs/UI逐页复查-20261011.md` 及其三份分区清单。不得只统计调用样式 helper 的父入口，或把不可达旧页面、动态实例数当成已运行页数。
+- ParameterWorkspace 容器 QSS 也会阻断 FlatButtonFilter 的祖先样式判定。记录 `ksword_parameter_surface_style_block` 完整精确块，仅从颜色所有权判断中排除该块和已登记几何；额外业务规则仍保留。固定底栏的未绑定普通直接动作明确 Solid，已有 Danger/Accent/专用状态 binding 不接管。
+- 安装 Segmented 后禁止业务刷新再写旧 FlatButtonStyle；只更新共享选择态。Scanner/Minidump 的动态宽表应在创建工厂一次安装，覆盖全部生成页并保留右键自定义空选态。
+- 页内详情同样必须淘汰隐藏旧树：Handle Object Header/Type 直接提交唯一 FieldDocument，不再先 clear/new QTreeWidgetItem 再生成同字段文档。持续事件表模型兼任归档/保留职责，不能用隐藏提前 return 改变采集语义。
+- WMI/ETW/进程定向折叠主题在工厂分别绑定段、内容、标题，禁止 StyleChange 再 findChildren 扫全页。ProgressDock 同一进度更新不重写相同卡片 QSS。LogDock 隐藏周期刷新不更新 revision，Show 经过原菜单屏障同步最新管理器历史；全量导出不受显示条数限制。
+
+## 主题与首开延迟（2026-10-11）
+
+- DetailWindowFramework 只收当前 Stack 页；真正换宿主后才重收结构。Qt Stack 先 Show 后 currentChanged，详情旧字段树的 Show 回填必须合并排队，让同步投影先消费；未投影源继续回填。专业 keep_layout 仍保留同步 tree() 模型行为。
+- ThemeBinding 的 pending membership 保留到真实取出，不能先清整批再应用父样式，否则尚待处理子项被 PaletteChange 再次排队。FIFO 分片约6ms让出事件循环，销毁清地址、同址新对象和真正语言/应用主题广播继续保留；单个 setStyleSheet 仍不能被中断。
+- 组合框主题不能为所有 QWidget Show 递归 findChild，也不能换肤时调用所有 Combo.view() 提前创建隐藏 Popup。只按真正 Popup 的 Qt 所有权父链定位，已打开列表换肤，下次展开接当前主题。
+- TablePresentation 自身QSS有 applying 门禁，已初始化隐藏表延后Show；主题委托已按可见项实时取语义色时，不在 Palette 广播扫全部模型回写画刷。冻结辅助窗格复用源委托。
+- RelativeLuminance 8位通道线性化预算256值，保持原公式/阈值；MainSurfaceColors按主题代次缓存但preview旁路；两个按钮selector同外观复用五态配方。不是预加载全部业务窗口，也不把源码优化当作实机耗时测量。说明见 `docs/UI主题与弹窗延迟修复-20261011.md`。
+- R0“需要启用”是QMessageBox，不进入详情卡片框架。提示前SCM只读检查须后台化并在查询前合并通知；回UI不仅探析构lifetime，还要核验实际退出/服务启停代次，不能让旧STOPPED结果覆盖新启停或退出时再弹启用框。消息框图标复用现成QIcon或已映射原生资源缓存，禁止每次polish走EXE Shell图标查询。
+- SecondaryPageLayout也记录完整中性拥有块；FlatButtonTheme只精确排除该块，不忽略业务附加QSS。明确二级底栏的无配色普通动作补Solid，残留managed标记不能抢回已被业务重写的颜色；显式Flat/风险色和专用binding保留。控件检查工具动作使用真实SVG/16px/实底，不能用Unicode箭头和暂停符号代替可辨图标。用户要求全部修改收齐后统一编译，不每个截图/按钮单独编译。
+
+### 按钮闪掉与单次换肤硬开销补漏
+
+- Dock 构造后禁止下发全后代 `QWidget` 透明规则；只给明确 Dock 根节点属性声明透明，并记录完整 `ksword_dock_root_surface_style_block` 供按钮颜色所有权精确排除。
+- 图标替代文字不改变普通 QPushButton 的动作语义；`ThemedButtonStyle` 明确 Solid，Auto 对 QPushButton 只按 `isFlat()` 决定透明。旧 Auto 标记不能撤销页面已经声明的 Solid/Flat/Navigation，显式 API 仍能重新声明。
+- SVG 同一按钮的原图/强调色包装须复用。逐帧状态配方/对比度/着色分别按真实输入缓存，保留预览旁路、业务覆盖、完整色精度、mode/state/DPR 和原生禁用输入。增量补色也应按共享预算合并排队，不能每个 Polish 单独开计时回调。
+- 定时权限刷新只在实际样式变化时写 QSS。CustomTitleBar 状态更新不得反复 Shell 查询 EXE、重建原图和重登记相同按钮绑定；真实主题代次和资源变化仍更新。普通浮动纯色使用 solid QBrush，不分配整窗纹理。
+- 主题事件不重建进程/线程业务表；动态数据角色和风险委托在绘制时读取当前色。普通审计表中性色交给 palette/alternating，保留业务风险原色。
+- 全应用旧色补偿主入口使用分片队列；新主题取消旧调度时必须保留未完成的 A→B→C 基线链，分别检查局部 QSS 和显式 palette 的业务接管。只读快照及单个 Qt 样式调用不承诺时间硬上限。详情见 `docs/UI按钮消失与换肤卡顿修复-20261011.md`，未经用户实测不报告耗时提升。

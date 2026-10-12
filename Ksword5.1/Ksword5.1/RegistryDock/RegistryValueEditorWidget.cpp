@@ -1,5 +1,6 @@
 #include "RegistryValueEditorWidget.h"
 #include "../UI/PageControlStyle.h"
+#include "../UI/PrimaryPageStyle.h"
 #include "../UI/SecondaryPageLayout.h"
 #include "../UI/ToolbarMetrics.h"
 #include "RegistryValueCodec.h"
@@ -111,12 +112,15 @@ RegistryValueEditorWidget::RegistryValueEditorWidget(QWidget* parent) : QWidget(
     fields->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
     fields->setRowWrapPolicy(QFormLayout::WrapLongRows);
     m_name = new QLineEdit(this);
+    // 值编辑器可内嵌工作台或独立弹出，字段自身拥有主题，不能依赖弹窗祖先样式。
+    ks::ui::StyleStandaloneInput(m_name);
     m_name->setObjectName(QStringLiteral("registry_value_name"));
     // QLineEdit's default 32767-character ceiling must not truncate a loaded
     // name or turn the displayed name into the submission identity.
     m_name->setMaxLength(1024 * 1024);
     m_name->setPlaceholderText(trText(QStringLiteral("留空表示（默认）值")));
     m_type = new QComboBox(this);
+    ks::ui::StylePrimaryCombo(m_type);
     m_type->setObjectName(QStringLiteral("registry_value_type"));
     struct TypeChoice { quint32 type; const char* name; };
     const TypeChoice choices[] = {
@@ -175,9 +179,11 @@ RegistryValueEditorWidget::RegistryValueEditorWidget(QWidget* parent) : QWidget(
     m_hexNumber = new QLineEdit(numberPage);
     m_hexNumber->setObjectName(QStringLiteral("registry_value_hex_number"));
     m_hexNumber->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
+    ks::ui::StyleStandaloneInput(m_hexNumber);
     m_decimalNumber = new QLineEdit(numberPage);
     m_decimalNumber->setObjectName(QStringLiteral("registry_value_decimal_number"));
     m_decimalNumber->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
+    ks::ui::StyleStandaloneInput(m_decimalNumber);
     numberFields->addRow(trText(QStringLiteral("十六进制")), m_hexNumber);
     numberFields->addRow(trText(QStringLiteral("十进制")), m_decimalNumber);
     ks::ui::StyleSecondaryForm(numberFields, 120);
@@ -211,6 +217,7 @@ RegistryValueEditorWidget::RegistryValueEditorWidget(QWidget* parent) : QWidget(
     rawLayout->addLayout(fileTools);
     auto* lengthTools = new QHBoxLayout;
     m_resizeSize = new QLineEdit(rawPage);
+    ks::ui::StyleStandaloneInput(m_resizeSize);
     m_resizeSize->setObjectName(QStringLiteral("registry_value_byte_length"));
     m_resizeSize->setPlaceholderText(trText(QStringLiteral("字节数")));
     auto* resizeButton = new QPushButton(trText(QStringLiteral("调整长度")), rawPage);

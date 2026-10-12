@@ -27,6 +27,10 @@ namespace ks::ui
     // 只替换拥有的无线框颜色片段，保留 value/suffix、页面样式尺寸、步进按钮与编辑状态。
     bool BindSpinBoxTheme(QAbstractSpinBox* spinBox);
 
+    // 页面明确登记独立单行字段，绑定固定输入层和各状态的文字/占位色。
+    // 不设置搜索语义、尺寸、验证器或文本；内部 Combo/Spin 编辑器不调用此入口。
+    bool BindLineEditTheme(QLineEdit* field);
+
     // 仅为页面明确登记的表格搜索框绑定无线框底色、文字和占位提示色。
     // 保留现有 padding/尺寸、输入内容、具体 placeholder、验证器和过滤信号。
     // 透明父 palette 回退主题表面色；普通输入框和数值控件不自动接入。

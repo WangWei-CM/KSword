@@ -17,6 +17,9 @@
 #include "../UI/TableInteractionSupport.h"
 #include "../UI/DetailLayoutRegistry.h"
 #include "../UI/DetailDialogChrome.h"
+#include "../UI/DetailPresentation.h"
+#include "../UI/PrimaryPageStyle.h"
+#include "../UI/ParameterWorkspace.h"
 #include "../PluginHost.h"
 
 #include <QTimer>
@@ -24,8 +27,10 @@
 #include <QEasingCurve>
 #include <QHash>
 #include <QMouseEvent>
+#include <QPaintEvent>
 #include <QResizeEvent>
 #include <QVariantAnimation>
+#include <QScopedValueRollback>
 
 using namespace process_detail_window_internal;
 
@@ -38,6 +43,53 @@ using namespace process_detail_window_internal;
 
 namespace
 {
+    constexpr char kProcessDetailThemePalette[] = "ksword_process_detail_theme_palette"; // 最近业务主题的目标调色板。
+    constexpr char kProcessDetailThemeStyle[] = "ksword_process_detail_theme_style"; // 最近业务主题的目标根样式。
+
+    // 业务窗口独占根主题，Window用于页底，Surface只用于字段/卡片，不从自身旧palette派生。
+    QPalette processDetailThemePalette(const QWidget* window)
+    {
+        QPalette colors = qApp ? qApp->palette() : window->palette();
+        colors.setColor(QPalette::Window, KswordTheme::WindowColor());
+        colors.setColor(QPalette::WindowText, KswordTheme::TextPrimaryColor());
+        colors.setColor(QPalette::Base, KswordTheme::SurfaceColor());
+        colors.setColor(QPalette::AlternateBase, KswordTheme::SurfaceAltColor());
+        colors.setColor(QPalette::Text, KswordTheme::TextPrimaryColor());
+        colors.setColor(QPalette::PlaceholderText, KswordTheme::TextSecondaryColor());
+        colors.setColor(QPalette::Mid, KswordTheme::BorderColor());
+        colors.setColor(QPalette::Highlight, KswordTheme::AccentColor(KswordTheme::AccentRole::Blue));
+        colors.setColor(QPalette::HighlightedText, KswordTheme::OnAccentColor());
+        return colors;
+    }
+
+    // 只对真实改变的局部主题写QSS，避免标题/状态反复触发子控件polish。
+    void applyProcessDetailLocalStyle(QWidget* widget, const QString& style)
+    {
+        if (widget && widget->styleSheet() != style)
+        {
+            widget->setStyleSheet(style);
+        }
+    }
+
+    // 进程图标只在路径、主题或像素倍率变化时重新生成；缺失路径由既有后台静态查询补齐。
+    // label 保存自己的显示键，不改变进程身份与共享的路径图标缓存。
+    bool processDetailIconNeedsRefresh(QLabel* label, const QString& path)
+    {
+        const QVariant previousPath = label->property("ksword_detail_icon_path");
+        const quint64 generation = KswordTheme::ThemeSeedGeneration;
+        const qreal pixelRatio = label->devicePixelRatioF();
+        if (previousPath.isValid() && previousPath.toString() == path
+            && label->property("ksword_detail_icon_theme").toULongLong() == generation
+            && label->property("ksword_detail_icon_dpr").toReal() == pixelRatio)
+        {
+            return false;
+        }
+        label->setProperty("ksword_detail_icon_path", path);
+        label->setProperty("ksword_detail_icon_theme", QVariant::fromValue(generation));
+        label->setProperty("ksword_detail_icon_dpr", pixelRatio);
+        return true;
+    }
+
     bool generalSignatureStateUndecided(const QString& state)
     {
         return state.isEmpty() || state == QStringLiteral("Unknown") || state == QStringLiteral("Unavailable")
@@ -45,291 +97,6 @@ namespace
             || state == QStringLiteral("KernelOnly(Hidden?)") || state == QStringLiteral("CIDTable(可能为误报)")
             || state == QStringLiteral("历史快照");
     }
-
-    // This is a native compact projection of the canonical field model. It
-    // never reads values back from labels or keeps a parallel report/cache.
-    class ProcessGeneralOverview final : public QWidget
-    {
-    public:
-        explicit ProcessGeneralOverview(ks::ui::StructuredFieldView*& fields, QWidget* parent, QHBoxLayout* controls)
-            : QWidget(parent)
-        {
-            auto* layout = new QVBoxLayout(this);
-            layout->setContentsMargins(0, 0, 0, 0);
-            layout->setSpacing(6);
-            auto* style = new QComboBox(this);
-            style->setObjectName(QStringLiteral("ProcessGeneralPresentation"));
-            style->addItem(ks::i18n::sourceText(QStringLiteral("紧凑双列")));
-            style->addItem(ks::i18n::sourceText(QStringLiteral("分区")));
-            style->addItem(ks::i18n::sourceText(QStringLiteral("树状")));
-            style->setMinimumHeight(30);
-            controls->addWidget(style);
-            auto* copy = new QPushButton(QIcon(QStringLiteral(":/Icon/process_copy_row.svg")),
-                ks::i18n::sourceText(QStringLiteral("复制全部信息")), this);
-            auto* exportButton = new QPushButton(ks::i18n::sourceText(QStringLiteral("导出")), this);
-            exportButton->setObjectName(QStringLiteral("ProcessGeneralExport"));
-            for (auto* button : { copy, exportButton })
-            {
-                button->setStyleSheet(ks::ui::BuildFlatButtonStyle() + QStringLiteral("QPushButton,QToolButton{border-radius:3px;padding:4px 10px;font-weight:600;}"));
-                button->setMinimumHeight(30);
-                button->setIconSize(QSize(16, 16));
-            }
-            controls->addWidget(copy);
-            controls->addWidget(exportButton);
-            m_dense = new QWidget(this);
-            m_dense->setObjectName(QStringLiteral("ProcessGeneralDenseProjection"));
-            layout->addWidget(m_dense);
-            fields = new ks::ui::StructuredFieldView(this);
-            m_fields = fields;
-            m_fields->setMinimumHeight(480);
-            m_fields->hide();
-            layout->addWidget(m_fields);
-            QObject::connect(m_fields, &ks::ui::StructuredFieldView::documentChanged,
-                this, [this]() { rebuild(); });
-            QObject::connect(copy, &QPushButton::clicked, this, [this]() {
-                if (QApplication::clipboard()) QApplication::clipboard()->setText(m_fields->plainText());
-            });
-            QObject::connect(exportButton, &QPushButton::clicked, this, [this]() {
-                const ks::ui::FieldDocument snapshot = m_fields->document();
-                const QPointer<ProcessGeneralOverview> safe(this);
-                const QString path = QFileDialog::getSaveFileName(this, ks::i18n::sourceText(QStringLiteral("导出属性")),
-                    QStringLiteral("process-properties.txt"), QStringLiteral("Text (*.txt);;All files (*)"));
-                if (!safe || path.isEmpty()) return;
-                QSaveFile file(path);
-                const QByteArray bytes = snapshot.toPlainText(true).toUtf8();
-                if (!file.open(QIODevice::WriteOnly) || file.write(bytes) != bytes.size() || !file.commit())
-                    QMessageBox::warning(safe.data(), ks::i18n::sourceText(QStringLiteral("导出失败")), file.errorString());
-            });
-            QObject::connect(style, &QComboBox::currentIndexChanged, this, [this](int index) {
-                m_dense->setVisible(index == 0);
-                m_fields->setVisible(index != 0);
-                if (index != 0) m_fields->setPresentation(index == 1
-                    ? ks::ui::StructuredFieldView::Presentation::Sections
-                    : ks::ui::StructuredFieldView::Presentation::Tree);
-            });
-        }
-
-    protected:
-        void changeEvent(QEvent* event) override
-        {
-            QWidget::changeEvent(event);
-            if (event && m_fields && (event->type() == QEvent::LanguageChange
-                || event->type() == QEvent::ApplicationPaletteChange || event->type() == QEvent::PaletteChange))
-            {
-                const QPointer<ProcessGeneralOverview> safe(this);
-                QTimer::singleShot(0, this, [safe]() { if (safe) safe->rebuild(); });
-            }
-        }
-
-    private:
-        // 详情标签使用可读的次级文字；其背景是分组表面，不使用输入框的占位灰色。
-        // label 为本页的字段名或说明，主题更新时原位改色，保留选择与滚动位置。
-        static void applySupportingTextTheme(QLabel* label)
-        {
-            const QColor text = KswordTheme::EnsureTextContrast(KswordTheme::TextSecondaryColor(),
-                KswordTheme::SurfaceAltColor(), 4.5);
-            const QString style = QStringLiteral("color:%1;font-weight:400;").arg(text.name(QColor::HexRgb));
-            if (label->styleSheet() != style)
-            {
-                label->setStyleSheet(style);
-            }
-        }
-
-        const ks::ui::FieldNode* field(const QString& name) const
-        {
-            for (const auto& section : m_fields->document().nodes)
-                for (const auto& node : section.children)
-                    if (node.kind == ks::ui::FieldNode::Kind::Field && node.name == name) return &node;
-            return nullptr;
-        }
-
-        void addRow(QFormLayout* form, QWidget* parent, const ks::ui::FieldNode& node)
-        {
-            auto* caption = new QLabel(ks::i18n::sourceText(node.name), parent);
-            caption->setObjectName(QStringLiteral("ProcessGeneralProjectedCaption"));
-            caption->setProperty("ks_general_field_name", node.name);
-            caption->setTextFormat(Qt::PlainText);
-            applySupportingTextTheme(caption);
-            auto* value = new QLabel(node.translateValue ? ks::i18n::sourceText(node.value) : node.value, parent);
-            value->setTextFormat(Qt::PlainText);
-            value->setProperty("ks_i18n_preserve_data_text", true);
-            value->setProperty("ks_general_field_name", node.name);
-            value->setObjectName(QStringLiteral("ProcessGeneralProjectedValue"));
-            value->setWordWrap(false);
-            value->setMinimumWidth(0);
-            value->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-            updateValueLabel(value, node);
-            value->setTextInteractionFlags(Qt::TextSelectableByMouse | Qt::TextSelectableByKeyboard);
-            value->setContextMenuPolicy(Qt::CustomContextMenu);
-            const QString name = node.name;
-            QObject::connect(value, &QWidget::customContextMenuRequested, this, [this, value, name](const QPoint& point) {
-                // Capture the model value before opening a reentrant menu.
-                const auto* node = field(name);
-                const QString copied = node ? (node->translateValue ? ks::i18n::sourceText(node->value) : node->value) : QString();
-                const QPoint position = value->mapToGlobal(point);
-                QMenu menu;
-                QAction* action = menu.addAction(ks::i18n::sourceText(QStringLiteral("复制")));
-                if (menu.exec(position) == action && QApplication::clipboard()) QApplication::clipboard()->setText(copied);
-            });
-            form->addRow(caption, value);
-        }
-
-        void updateValueLabel(QLabel* label, const ks::ui::FieldNode& node)
-        {
-            QString display = node.translateValue ? ks::i18n::sourceText(node.value) : node.value;
-            QColor color = KswordTheme::TextPrimaryColor();
-            int weight = node.name == QStringLiteral("CPU 占用") || node.name == QStringLiteral("工作集")
-                || node.name == QStringLiteral("私有提交") ? 600 : 400;
-            QString role = QStringLiteral("default");
-            const bool enabled = node.translateValue && (node.value == QStringLiteral("Enabled") || node.value == QStringLiteral("Enabled (permanent)")
-                || (node.name == QStringLiteral("管理员") && node.value == QStringLiteral("是")));
-            const bool disabled = node.translateValue && (node.value == QStringLiteral("Disabled")
-                || (node.name == QStringLiteral("管理员") && node.value == QStringLiteral("否")));
-            const bool undecided = node.translateValue && (node.name == QStringLiteral("数字签名")
-                ? generalSignatureStateUndecided(node.value)
-                : node.value.isEmpty() || node.value == QStringLiteral("Unknown")
-                    || node.value == QStringLiteral("Unavailable") || node.value == QStringLiteral("Pending"));
-            if (enabled || disabled)
-            {
-                color = enabled ? signatureTrustedColor() : signatureUntrustedColor();
-                weight = 700;
-                role = enabled ? QStringLiteral("success") : QStringLiteral("error");
-                display.prepend(QStringLiteral("■ "));
-            }
-            else if (node.name == QStringLiteral("数字签名"))
-            {
-                bool trusted = false;
-                for (const auto& status : node.children)
-                    if (status.name == QStringLiteral("受信任的发布者")) trusted = status.value == QStringLiteral("是");
-                color = undecided ? statusSecondaryColor() : trusted ? signatureTrustedColor() : signatureUntrustedColor();
-                weight = undecided ? 600 : 700;
-                role = undecided ? QStringLiteral("pending") : trusted ? QStringLiteral("success") : QStringLiteral("error");
-                display.prepend(QStringLiteral("■ "));
-            }
-            else if (undecided)
-            {
-                color = statusSecondaryColor();
-                role = QStringLiteral("pending");
-            }
-            label->setProperty("ks_general_semantic_role", role);
-            label->setText(display);
-            label->setToolTip(node.translateValue ? ks::i18n::sourceText(node.value) : node.value);
-            label->setStyleSheet(buildStateLabelStyle(color, weight));
-        }
-
-        QFormLayout* form(QGridLayout* grid, int column)
-        {
-            auto* rows = new QFormLayout;
-            rows->setLabelAlignment(Qt::AlignRight | Qt::AlignVCenter);
-            rows->setHorizontalSpacing(18);
-            rows->setVerticalSpacing(6);
-            rows->setFieldGrowthPolicy(QFormLayout::ExpandingFieldsGrow);
-            grid->addLayout(rows, 0, column, Qt::AlignTop);
-            grid->setColumnStretch(column, 1);
-            return rows;
-        }
-
-        void rebuild()
-        {
-            if (!m_fields) return;
-            // A model update normally changes values only. Reuse projected
-            // widgets so text selection and scrolling survive live refreshes.
-            const bool hasDiagnostic = std::any_of(m_fields->document().nodes.cbegin(), m_fields->document().nodes.cend(),
-                [](const ks::ui::FieldNode& node) { return node.name == QStringLiteral("诊断"); });
-            const auto values = m_dense->findChildren<QLabel*>(QStringLiteral("ProcessGeneralProjectedValue"));
-            if (!values.isEmpty() && m_dense->property("ks_has_diagnostic").toBool() == hasDiagnostic)
-            {
-                // 热切主题只更新既有标签，不为颜色变化重新创建双列字段。
-                for (auto* caption : m_dense->findChildren<QLabel*>(QStringLiteral("ProcessGeneralProjectedCaption")))
-                {
-                    applySupportingTextTheme(caption);
-                }
-                for (auto* value : values)
-                    if (const auto* node = field(value->property("ks_general_field_name").toString()))
-                        updateValueLabel(value, *node);
-                for (auto* note : m_dense->findChildren<QLabel*>(QStringLiteral("ProcessGeneralProjectedNote")))
-                {
-                    applySupportingTextTheme(note);
-                    for (const auto& section : m_fields->document().nodes)
-                        if (section.name == note->property("ks_general_note_section").toString())
-                        {
-                            int index = 0;
-                            for (const auto& node : section.children)
-                                if (node.kind == ks::ui::FieldNode::Kind::Note && index++ == note->property("ks_general_note_index").toInt())
-                                { note->setText(ks::i18n::sourceText(node.value)); break; }
-                        }
-                }
-                return;
-            }
-            if (auto* previous = m_dense->layout())
-            {
-                while (auto* item = previous->takeAt(0)) { delete item->widget(); delete item; }
-                delete previous;
-            }
-            m_dense->setProperty("ks_has_diagnostic", hasDiagnostic);
-            auto* layout = new QVBoxLayout(m_dense);
-            layout->setContentsMargins(0, 0, 0, 0);
-            layout->setSpacing(8);
-            auto* overview = new QGroupBox(ks::i18n::sourceText(QStringLiteral("概览与资源")), m_dense);
-            QFont overviewTitleFont = overview->font();
-            overviewTitleFont.setBold(true);
-            overview->setFont(overviewTitleFont);
-            overview->setStyleSheet(QStringLiteral("QGroupBox::title{font-weight:700;}"));
-            auto* overviewGrid = new QGridLayout(overview);
-            overviewGrid->setContentsMargins(8, 12, 8, 8);
-            overviewGrid->setHorizontalSpacing(28);
-            auto* left = form(overviewGrid, 0);
-            auto* right = form(overviewGrid, 1);
-            const QStringList leftNames{QStringLiteral("PID"),QStringLiteral("父 PID"),QStringLiteral("启动时间"),QStringLiteral("运行时长"),QStringLiteral("用户"),QStringLiteral("管理员"),QStringLiteral("完整性级别"),QStringLiteral("提升类型"),QStringLiteral("架构"),QStringLiteral("Session ID")};
-            const QStringList rightNames{QStringLiteral("优先级"),QStringLiteral("CPU 占用"),QStringLiteral("CPU 单核等效"),QStringLiteral("GPU 占用"),QStringLiteral("DISK 吞吐"),QStringLiteral("网络下行"),QStringLiteral("网络上行"),QStringLiteral("线程数量"),QStringLiteral("句柄数量"),QStringLiteral("工作集"),QStringLiteral("私有提交"),QStringLiteral("峰值工作集"),QStringLiteral("页错误"),QStringLiteral("数字签名")};
-            QSet<QString> displayed;
-            for (const auto& name : leftNames) if (const auto* node = field(name)) { addRow(left, overview, *node); displayed.insert(name); }
-            for (const auto& name : rightNames) if (const auto* node = field(name)) { addRow(right, overview, *node); displayed.insert(name); }
-            layout->addWidget(overview);
-            for (const auto& section : m_fields->document().nodes)
-            {
-                QVector<const ks::ui::FieldNode*> remaining;
-                QVector<const ks::ui::FieldNode*> notes;
-                for (const auto& node : section.children)
-                {
-                    if (node.kind == ks::ui::FieldNode::Kind::Field && !displayed.contains(node.name)) remaining.push_back(&node);
-                    if (node.kind == ks::ui::FieldNode::Kind::Note) notes.push_back(&node);
-                }
-                if (remaining.isEmpty() && notes.isEmpty()) continue;
-                auto* group = new QGroupBox(ks::i18n::sourceText(section.name), m_dense);
-                QFont groupTitleFont = group->font();
-                groupTitleFont.setBold(true);
-                group->setFont(groupTitleFont);
-                group->setStyleSheet(QStringLiteral("QGroupBox::title{font-weight:700;}"));
-                if (!section.initiallyExpanded) { group->setCheckable(true); group->setChecked(false); }
-                auto* grid = new QGridLayout(group);
-                grid->setContentsMargins(8, 12, 8, 8);
-                grid->setHorizontalSpacing(28);
-                auto* a = form(grid, 0);
-                auto* b = form(grid, 1);
-                const int midpoint = (remaining.size() + 1) / 2;
-                for (int i = 0; i < remaining.size(); ++i) addRow(i < midpoint ? a : b, group, *remaining.at(i));
-                int row = 1;
-                for (const auto* note : notes)
-                {
-                    auto* label = new QLabel(ks::i18n::sourceText(note->value), group);
-                    label->setObjectName(QStringLiteral("ProcessGeneralProjectedNote"));
-                    label->setProperty("ks_general_note_section", section.name);
-                    label->setProperty("ks_general_note_index", row - 1);
-                    label->setTextFormat(Qt::PlainText);
-                    applySupportingTextTheme(label);
-                    label->setWordWrap(true);
-                    label->setProperty("ks_i18n_preserve_data_text", true);
-                    label->setTextInteractionFlags(Qt::TextSelectableByMouse);
-                    grid->addWidget(label, row++, 0, 1, 2);
-                }
-                layout->addWidget(group);
-            }
-        }
-
-        ks::ui::StructuredFieldView* m_fields = nullptr;
-        QWidget* m_dense = nullptr;
-    };
 
     constexpr int kInitialDetailDataRefreshDelayMs = 350;
     constexpr int kAffinityMatrixColumnCount = 6;
@@ -898,12 +665,32 @@ namespace
             m_timeHeader = timeHeader;
             m_copyLatestText = copyLatestText;
             m_copyHistoryText = copyHistoryText;
-            m_animationProgress = 0.0;
             m_seriesAnimation->stop();
-            m_seriesAnimation->start();
+            // 隐藏和空图只保存完整历史，避免无可见帧时仍启动260ms动画计时器。
+            if (isVisible() && !m_timestamps.empty())
+            {
+                m_animationProgress = 0.0;
+                m_seriesAnimation->start();
+            }
+            else
+            {
+                m_animationProgress = 1.0;
+                update();
+            }
         }
 
     protected:
+        // 切页后立即收尾旧动画；原始曲线数据仍留存，重新显示由窗口提交最新快照。
+        bool event(QEvent* eventPointer) override
+        {
+            if (eventPointer != nullptr && eventPointer->type() == QEvent::Hide && m_seriesAnimation != nullptr)
+            {
+                m_seriesAnimation->stop();
+                m_animationProgress = 1.0;
+            }
+            return QWidget::event(eventPointer);
+        }
+
         void paintEvent(QPaintEvent* eventPointer) override
         {
             (void)eventPointer;
@@ -1225,9 +1012,12 @@ namespace
                     ++historyIt;
                 }
             }
-            synchronizeHeight();
-            updateGeometry();
-            update();
+            // 隐藏时仍记录每个核心的历史；可见布局留到Show，固定高度不重复通知父布局。
+            if (isVisible())
+            {
+                synchronizeHeight();
+                update();
+            }
         }
 
         QSize sizeHint() const override
@@ -1250,7 +1040,8 @@ namespace
         bool event(QEvent* eventPointer) override
         {
             const bool handled = QWidget::event(eventPointer);
-            if (eventPointer != nullptr && eventPointer->type() == QEvent::Resize)
+            if (eventPointer != nullptr &&
+                (eventPointer->type() == QEvent::Resize || eventPointer->type() == QEvent::Show))
             {
                 synchronizeHeight();
             }
@@ -1488,21 +1279,14 @@ namespace
                     ++threadIt;
                 }
             }
-            std::stable_sort(
-                m_threadValues.begin(),
-                m_threadValues.end(),
-                [](const ProcessDetailWindow::ThreadCpuCoreValue& left,
-                   const ProcessDetailWindow::ThreadCpuCoreValue& right) {
-                    if (left.cpuPercent != right.cpuPercent)
-                    {
-                        return left.cpuPercent > right.cpuPercent;
-                    }
-                    return left.threadId < right.threadId;
-                });
             m_multipleProcessorGroups = multipleProcessorGroups;
-            synchronizeHeight();
-            updateGeometry();
-            update();
+            m_sortPending = true;
+            // 线程历史与展开状态持续维护，只有显示顺序与尺寸计算按可见性合并。
+            if (isVisible())
+            {
+                synchronizeVisibleValues();
+                update();
+            }
         }
 
         QSize sizeHint() const override
@@ -1525,7 +1309,11 @@ namespace
         bool event(QEvent* eventPointer) override
         {
             const bool handled = QWidget::event(eventPointer);
-            if (eventPointer != nullptr && eventPointer->type() == QEvent::Resize)
+            if (eventPointer != nullptr && eventPointer->type() == QEvent::Show)
+            {
+                synchronizeVisibleValues();
+            }
+            else if (eventPointer != nullptr && eventPointer->type() == QEvent::Resize)
             {
                 synchronizeHeight();
             }
@@ -1544,6 +1332,7 @@ namespace
             const QColor primaryTextColor = KswordTheme::TextPrimaryColor();
             const QColor secondaryTextColor = KswordTheme::TextSecondaryColor();
             qreal cardTop = 0.0;
+            const QRect exposedRect = eventPointer != nullptr ? eventPointer->rect() : rect();
 
             for (int index = 0; index < static_cast<int>(m_threadValues.size()); ++index)
             {
@@ -1557,6 +1346,15 @@ namespace
                     static_cast<qreal>(width()),
                     currentCardHeight);
                 cardTop += currentCardHeight + kGridSpacing;
+                // 滚动内容可能包含大量线程；视口外卡片保留数据，只跳过文字和折线路径生成。
+                if (cardRect.bottom() < exposedRect.top() - 1)
+                {
+                    continue;
+                }
+                if (cardRect.top() > exposedRect.bottom() + 1)
+                {
+                    break;
+                }
 
                 painter.setPen(QPen(borderColor, 1.0));
                 painter.setBrush(cardColor);
@@ -1699,6 +1497,25 @@ namespace
 
     private:
         using CoreHistoryMap = std::unordered_map<std::uint32_t, std::deque<double>>;
+
+        // 首次可见或收到可见样本时排序一次；高度真正变化时setFixedHeight自行通知布局。
+        void synchronizeVisibleValues()
+        {
+            if (m_sortPending)
+            {
+                std::stable_sort(m_threadValues.begin(), m_threadValues.end(),
+                    [](const ProcessDetailWindow::ThreadCpuCoreValue& left,
+                       const ProcessDetailWindow::ThreadCpuCoreValue& right) {
+                        if (left.cpuPercent != right.cpuPercent)
+                        {
+                            return left.cpuPercent > right.cpuPercent;
+                        }
+                        return left.threadId < right.threadId;
+                    });
+                m_sortPending = false;
+            }
+            synchronizeHeight();
+        }
 
         static constexpr int kCollapsedCardHeight = 44;
         static constexpr int kGridSpacing = 8;
@@ -1863,6 +1680,7 @@ namespace
         std::vector<ProcessDetailWindow::ThreadCpuCoreValue> m_threadValues;
         std::unordered_map<std::uint32_t, CoreHistoryMap> m_historyByThreadId;
         QSet<std::uint32_t> m_expandedThreadIds;
+        bool m_sortPending = false; // 隐藏期间多个样本只需在Show时提交最终排序。
         bool m_multipleProcessorGroups = false;
     };
 }
@@ -2053,6 +1871,8 @@ ProcessDetailWindow::ProcessDetailWindow(const ks::process::ProcessRecord& baseR
     : QWidget(parent)
     , m_baseRecord(baseRecord)
 {
+    // 声明根QSS业务所有权要早于所有主题与框架入口，避免两方轮流覆盖根样式。
+    setProperty("ksword_detail_theme_owner", true);
     // 构造入口日志：记录目标 PID 与 identity 关键字段。
     kLogEvent ctorStartEvent;
     info << ctorStartEvent
@@ -2222,6 +2042,9 @@ void ProcessDetailWindow::updateBaseRecord(const ks::process::ProcessRecord& bas
         ++m_keyboardRefreshTicket;
         m_performanceHistory.clear();
         m_cpuCoreViewSample = CpuCoreViewSample{};
+        // 身份切换清掉旧图形的数据；隐藏页保留dirty，不能在新对象上显示旧进程曲线。
+        refreshPerformanceHistoryCharts();
+        refreshCpuCoreView(true);
     }
     refreshDetailTabTexts();
     if (shouldTryStaticBackgroundRefresh || identityChanged)
@@ -2295,16 +2118,42 @@ void ProcessDetailWindow::setCpuCoreViewSample(CpuCoreViewSample sample)
 {
     // 页面采用懒加载；尚未构造控件时只保存最新区间，首次进入即可直接展示。
     m_cpuCoreViewSample = std::move(sample);
-    refreshCpuCoreView();
+    refreshCpuCoreView(true);
+}
+
+bool ProcessDetailWindow::eventFilter(QObject* watched, QEvent* event)
+{
+    // Show 已设置可见标志；这里只提交已有数据，不枚举、不重建页面或修改根主题。
+    if (event != nullptr && event->type() == QEvent::Show)
+    {
+        if (watched == m_performanceTab && m_performanceChartsDirty)
+        {
+            refreshPerformanceHistoryCharts();
+        }
+        else if (watched == m_cpuCoreTab && m_cpuCorePresentationDirty)
+        {
+            refreshCpuCoreView();
+        }
+    }
+    return QWidget::eventFilter(watched, event);
 }
 
 void ProcessDetailWindow::changeEvent(QEvent* event)
 {
     QWidget::changeEvent(event);
 
-    // 主题切换时立即重建内部样式，避免旧主题颜色残留。
-    if (event == nullptr)
+    // 自己写palette/QSS产生的同步事件不能落到数据刷新路径。
+    if (event == nullptr || m_themeStyleApplying)
     {
+        return;
+    }
+
+    if (event->type() == QEvent::LanguageChange)
+    {
+        // 只有语言变化重建译文；普通样式事件不能重新读取图标、文件和对象详情。
+        refreshDetailTabTexts();
+        refreshPerformanceHistoryCharts();
+        refreshCpuCoreView();
         return;
     }
 
@@ -2317,8 +2166,19 @@ void ProcessDetailWindow::changeEvent(QEvent* event)
         return;
     }
 
-    applyThemeStyle();
-    refreshDetailTabTexts();
+    const QPalette desiredPalette = processDetailThemePalette(this);
+    const QString desiredStyle = buildProcessDetailRootStyle();
+    const bool themeChanged = !property(kProcessDetailThemePalette).isValid()
+        || property(kProcessDetailThemePalette).value<QPalette>() != desiredPalette
+        || property(kProcessDetailThemeStyle).toString() != desiredStyle;
+    if (themeChanged || styleSheet() != desiredStyle || palette() != desiredPalette)
+    {
+        applyThemeStyle();
+    }
+    if (!themeChanged)
+    {
+        return; // 同一主题下的StyleChange没有状态数据或文字需要重建。
+    }
 
     if (m_threadInspectStatusLabel != nullptr)
     {
@@ -2409,8 +2269,6 @@ void ProcessDetailWindow::changeEvent(QEvent* event)
             m_keyboardStatusLabel->setStyleSheet(buildStateLabelStyle(statusIdleColor(), 600));
         }
     }
-
-    refreshKernelObjectTabTexts();
 }
 
 void ProcessDetailWindow::applyThemeStyle()
@@ -2419,28 +2277,26 @@ void ProcessDetailWindow::applyThemeStyle()
     {
         return;
     }
-    m_themeStyleApplying = true;
+    QScopedValueRollback<bool> applying(m_themeStyleApplying, true); // 所有退出路径自动释放主题重入门禁。
 
     // 显式设置窗口调色板：
     // - Win11 下必须手动强制窗口背景，避免被系统自动接管为亮色。
-    const bool darkModeEnabled = KswordTheme::IsDarkModeEnabled();
-    QPalette themedPalette = (qApp != nullptr) ? qApp->palette() : palette();
-    themedPalette.setColor(QPalette::Window, KswordTheme::SurfaceColor());
-    themedPalette.setColor(QPalette::WindowText, KswordTheme::TextPrimaryColor());
-    themedPalette.setColor(QPalette::Base, KswordTheme::SurfaceColor());
-    themedPalette.setColor(QPalette::AlternateBase, KswordTheme::SurfaceAltColor());
-    themedPalette.setColor(QPalette::Text, KswordTheme::TextPrimaryColor());
-    themedPalette.setColor(QPalette::PlaceholderText, KswordTheme::TextSecondaryColor());
-    themedPalette.setColor(QPalette::Mid, KswordTheme::BorderColor());
-    themedPalette.setColor(QPalette::Highlight, KswordTheme::AccentColor(KswordTheme::AccentRole::Blue));
-    themedPalette.setColor(QPalette::HighlightedText, KswordTheme::OnAccentColor());
-
-    setPalette(themedPalette);
+    const QPalette themedPalette = processDetailThemePalette(this);
+    const QString rootStyle = buildProcessDetailRootStyle();
+    const bool colorsChanged = !property(kProcessDetailThemePalette).isValid()
+        || property(kProcessDetailThemePalette).value<QPalette>() != themedPalette;
+    if (palette() != themedPalette)
+    {
+        setPalette(themedPalette);
+    }
     setAutoFillBackground(true);
     setAttribute(Qt::WA_StyledBackground, true);
-    setStyleSheet(buildProcessDetailRootStyle());
+    if (styleSheet() != rootStyle)
+    {
+        setStyleSheet(rootStyle);
+    }
 
-    // 内容页与滚动 viewport 共用主 Surface；导航用 AlternateBase 分层。
+    // 内容页与共享外框共用Window底板；内部卡片/字段保持独立Surface层。
     const std::vector<QWidget*> tabPageList{
         m_detailTab,
         m_performanceTab,
@@ -2462,45 +2318,52 @@ void ProcessDetailWindow::applyThemeStyle()
         {
             continue;
         }
-        tabPage->setPalette(themedPalette);
+        if (tabPage->palette() != themedPalette)
+        {
+            tabPage->setPalette(themedPalette);
+        }
         tabPage->setAutoFillBackground(true);
         tabPage->setAttribute(Qt::WA_StyledBackground, true);
     }
 
-    if (m_processCpuCoreGrid != nullptr)
+    if (colorsChanged && m_processCpuCoreGrid != nullptr)
     {
         m_processCpuCoreGrid->update();
     }
-    if (m_threadCpuCoreGrid != nullptr)
+    if (colorsChanged && m_threadCpuCoreGrid != nullptr)
     {
         m_threadCpuCoreGrid->update();
     }
 
     if (m_cpuCoreTitleLabel != nullptr)
     {
-        m_cpuCoreTitleLabel->setStyleSheet(QStringLiteral("font-size:16px;font-weight:700;color:%1;")
+        applyProcessDetailLocalStyle(m_cpuCoreTitleLabel, QStringLiteral("font-size:16px;font-weight:700;color:%1;")
             .arg(KswordTheme::TextPrimaryHex()));
     }
     if (m_cpuCoreDescriptionLabel != nullptr)
     {
-        m_cpuCoreDescriptionLabel->setStyleSheet(QStringLiteral("color:%1;")
+        applyProcessDetailLocalStyle(m_cpuCoreDescriptionLabel, QStringLiteral("color:%1;")
             .arg(KswordTheme::TextSecondaryHex()));
     }
     const QString cpuCoreSummaryStyle = QStringLiteral("font-size:20px;font-weight:700;color:%1;")
         .arg(KswordTheme::AccentColor(KswordTheme::AccentRole::Blue).name());
     if (m_cpuCoreSystemValueLabel != nullptr)
     {
-        m_cpuCoreSystemValueLabel->setStyleSheet(cpuCoreSummaryStyle);
+        applyProcessDetailLocalStyle(m_cpuCoreSystemValueLabel, cpuCoreSummaryStyle);
     }
     if (m_cpuCoreEquivalentValueLabel != nullptr)
     {
-        m_cpuCoreEquivalentValueLabel->setStyleSheet(cpuCoreSummaryStyle);
+        applyProcessDetailLocalStyle(m_cpuCoreEquivalentValueLabel, cpuCoreSummaryStyle);
     }
-    refreshCpuCoreView();
+    if (colorsChanged)
+    {
+        refreshPerformanceHistoryCharts(); // 已构造的曲线配色跟随主题，隐藏时仅保留dirty。
+        refreshCpuCoreView(); // 真正换色才刷新颜色相关读数，普通StyleChange不重新构建核心卡片。
+    }
 
     if (m_signatureCheckBox != nullptr)
     {
-        m_signatureCheckBox->setStyleSheet(QStringLiteral(
+        applyProcessDetailLocalStyle(m_signatureCheckBox, QStringLiteral(
             "QCheckBox { color:%1; font-weight:600; }")
             .arg(KswordTheme::TextPrimaryHex()));
     }
@@ -2510,15 +2373,16 @@ void ProcessDetailWindow::applyThemeStyle()
         const QString comboStyle = KswordTheme::ThemedComboBoxStyle();
         if (m_tokenRawInfoClassCombo != nullptr)
         {
-            m_tokenRawInfoClassCombo->setStyleSheet(comboStyle);
+            applyProcessDetailLocalStyle(m_tokenRawInfoClassCombo, comboStyle);
         }
         if (m_tokenRawInputModeCombo != nullptr)
         {
-            m_tokenRawInputModeCombo->setStyleSheet(comboStyle);
+            applyProcessDetailLocalStyle(m_tokenRawInputModeCombo, comboStyle);
         }
     }
 
-    m_themeStyleApplying = false;
+    setProperty(kProcessDetailThemePalette, QVariant::fromValue(themedPalette));
+    setProperty(kProcessDetailThemeStyle, rootStyle);
 }
 
 void ProcessDetailWindow::initializeUi()
@@ -2534,8 +2398,21 @@ void ProcessDetailWindow::initializeUi()
 
     // 页面区保留 QTabWidget，避免影响现有页面跳转、currentChanged 与惰性刷新逻辑。
     // 原生 QTabBar 隐藏后，以左侧单列导航提供全部页面入口。
-    m_rootLayout = new QHBoxLayout(this);
+    auto* windowLayout = new QVBoxLayout(this);
     ks::ui::ConfigureDetailDialogRoot(this);
+    auto* summaryHeader = new QWidget(this);
+    summaryHeader->setObjectName(QLatin1String("ksword_process_detail_header"));
+    summaryHeader->setProperty("ksword_detail_header", true);
+    summaryHeader->setAttribute(Qt::WA_StyledBackground);
+    auto* summaryLayout = new QVBoxLayout(summaryHeader);
+    summaryLayout->setContentsMargins(16, 14, 16, 14);
+    summaryLayout->setSpacing(8);
+    windowLayout->addWidget(summaryHeader);
+    auto* body = new QWidget(this);
+    m_rootLayout = new QHBoxLayout(body);
+    m_rootLayout->setContentsMargins(0, 0, 0, 0);
+    m_rootLayout->setSpacing(0);
+    windowLayout->addWidget(body, 1);
 
     m_tabNavigation = new QWidget(this);
     m_tabNavigation->setObjectName(QStringLiteral("ProcessDetailTabNavigation"));
@@ -2546,6 +2423,7 @@ void ProcessDetailWindow::initializeUi()
     tabNavigationLayout->setSpacing(5);
 
     m_tabWidget = new QTabWidget(this);
+    m_tabWidget->setProperty("ksword_detail_tabs", true);
     // QTabWidget 会取所有已构造页面中最大的 minimumSizeHint。详情页采用懒加载，
     // 若沿用默认尺寸策略，新页面创建时会把该提示传播给顶层窗口并触发自动扩张。
     m_tabWidget->setMinimumSize(0, 0);
@@ -3752,19 +3630,13 @@ void ProcessDetailWindow::initializeDetailTab()
         label->setWordWrap(true);
         label->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
     };
-    auto* outerLayout = new QVBoxLayout(m_detailTab);
-    outerLayout->setContentsMargins(0, 0, 0, 0);
-    auto* detailScroll = new QScrollArea(m_detailTab);
-    detailScroll->setObjectName(QStringLiteral("ProcessGeneralPageScroll"));
-    detailScroll->setWidgetResizable(true);
-    detailScroll->setFrameShape(QFrame::NoFrame);
-    auto* detailContent = new QWidget(detailScroll);
-    detailContent->setMinimumWidth(660);
-    detailScroll->setWidget(detailContent);
-    outerLayout->addWidget(detailScroll);
+    // 页级容器不再包裹第二层滚动；只有卡片正文或树视图自身滚动。
+    QWidget* detailContent = m_detailTab;
     m_detailLayout = new QVBoxLayout(detailContent);
-    m_detailLayout->setContentsMargins(8, 8, 8, 8);
-    m_detailLayout->setSpacing(8);
+    m_detailLayout->setContentsMargins(16, 12, 16, 12);
+    m_detailLayout->setSpacing(10);
+    QWidget* summaryHeader = findChild<QWidget*>(QLatin1String("ksword_process_detail_header"));
+    auto* summaryLayout = qobject_cast<QVBoxLayout*>(summaryHeader->layout());
     // 顶部：40px 图标 + 进程名与 PID。
     QHBoxLayout* titleLayout = new QHBoxLayout();
     m_processIconLabel = new QLabel(m_detailTab);
@@ -3777,7 +3649,7 @@ void ProcessDetailWindow::initializeDetailTab()
     titleLayout->addWidget(m_processIconLabel, 0, Qt::AlignTop);
     titleLayout->addWidget(m_processTitleLabel, 1);
     titleLayout->addStretch(1);
-    m_detailLayout->addLayout(titleLayout);
+    summaryLayout->addLayout(titleLayout);
 
     // 路径行：只读输入框 + 复制 + 打开文件夹 + 现有文件详情窗口入口。
     QHBoxLayout* pathLayout = new QHBoxLayout();
@@ -3788,6 +3660,7 @@ void ProcessDetailWindow::initializeDetailTab()
     pathLayout->addWidget(pathLabel);
     m_pathLineEdit = new QLineEdit(m_detailTab);
     m_pathLineEdit->setReadOnly(true);
+    ks::ui::StyleStandaloneInput(m_pathLineEdit);
     m_copyPathButton = new QPushButton(QIcon(":/Icon/process_copy_cell.svg"), QString(), m_detailTab);
     m_openPathFolderButton = new QPushButton(QIcon(":/Icon/process_open_folder.svg"), QString(), m_detailTab);
     m_openFileDetailButton = new QPushButton(QIcon(":/Icon/process_details.svg"), QString(), m_detailTab);
@@ -3801,7 +3674,8 @@ void ProcessDetailWindow::initializeDetailTab()
     pathLayout->addWidget(m_copyPathButton);
     pathLayout->addWidget(m_openPathFolderButton);
     pathLayout->addWidget(m_openFileDetailButton);
-    m_detailLayout->addLayout(pathLayout);
+    // 进程身份与文件动作位于全宽摘要栏，切换资源/安全页时仍然可见。
+    summaryLayout->addLayout(pathLayout);
 
     // 命令行行：只读输入框 + 复制。
     QHBoxLayout* commandLayout = new QHBoxLayout();
@@ -3814,6 +3688,7 @@ void ProcessDetailWindow::initializeDetailTab()
     m_commandLineEdit->setReadOnly(true);
     m_commandLineEdit->setMinimumWidth(0);
     m_commandLineEdit->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
+    ks::ui::StyleStandaloneInput(m_commandLineEdit);
     m_copyCommandButton = new QPushButton(QIcon(":/Icon/process_copy_cell.svg"), QString(), m_detailTab);
     languageManager.bindText(m_copyCommandButton, QStringLiteral("process.detail.action.copy"), QStringLiteral("复制"));
     commandLayout->addWidget(m_commandLineEdit, 1);
@@ -3847,32 +3722,42 @@ void ProcessDetailWindow::initializeDetailTab()
 
     QHBoxLayout* detailActionLayout = new QHBoxLayout();
     m_refreshDetailOverviewButton = new QPushButton(QIcon(":/Icon/process_refresh.svg"), QString(), m_detailTab);
-    languageManager.bindText(m_refreshDetailOverviewButton, QStringLiteral("process.detail.action.refresh"), QStringLiteral("刷新运行时详细数据"));
+    m_refreshDetailOverviewButton->setToolTip(ks::i18n::text(
+        QStringLiteral("process.detail.action.refresh"), QStringLiteral("刷新运行时详细数据")));
+    m_refreshDetailOverviewButton->setFixedWidth(30);
     m_detailOverviewStatusLabel = new QLabel(m_detailTab);
     languageManager.bindText(m_detailOverviewStatusLabel, QStringLiteral("process.detail.status.waiting"), QStringLiteral("● 等待读取运行时详细数据"));
     configureCopyableLabel(m_detailOverviewStatusLabel);
-    detailActionLayout->addWidget(m_refreshDetailOverviewButton);
-    detailActionLayout->addWidget(m_detailOverviewStatusLabel, 1);
+    auto* pageTitle = new QLabel(ks::i18n::sourceText(QStringLiteral("详细信息")), m_detailTab);
+    QFont pageTitleFont = pageTitle->font();
+    pageTitleFont.setBold(true);
+    pageTitle->setFont(pageTitleFont);
+    detailActionLayout->addWidget(pageTitle);
     m_detailLayout->addLayout(detailActionLayout);
+    m_detailLayout->addWidget(m_detailOverviewStatusLabel);
 
     for (auto* button : {m_copyPathButton, m_openPathFolderButton, m_openFileDetailButton,
         m_copyCommandButton, m_detailOpenHandleDockButton, m_gotoParentButton, m_refreshDetailOverviewButton})
     {
-        button->setStyleSheet(ks::ui::BuildFlatButtonStyle() + QStringLiteral("QPushButton,QToolButton{border-radius:3px;padding:4px 10px;font-weight:600;}"));
+        ks::ui::ApplyFlatButtonTheme(button, ks::ui::FlatButtonTone::Neutral,
+            ks::ui::FlatButtonAppearance::Solid);
         ks::ui::NormalizeToolbarControl(button);
     }
-    m_detailLayout->addWidget(new ProcessGeneralOverview(m_generalFields, detailContent, detailActionLayout));
+    // 进程概览与其它详情窗口复用同一文档卡片框架，不再维护独立投影布局。
+    m_generalFields = new ks::ui::StructuredFieldView(detailContent);
+    m_detailLayout->addWidget(ks::ui::CreateDetailFieldProjection(m_generalFields, detailContent), 1);
+    detailActionLayout->addWidget(m_refreshDetailOverviewButton);
     // 路径与运行时操作行使用共同几何；父进程图标保留 20px，仅调整按钮。
     ks::ui::NormalizeToolbarRow(pathLayout);
     ks::ui::NormalizeToolbarRow(commandLayout);
     parentLayout->setSpacing(8);
     ks::ui::NormalizeToolbarRow(detailActionLayout);
-    m_detailLayout->addStretch(1);
 }
 
 
 void ProcessDetailWindow::initializePerformanceTab()
 {
+    m_performanceTab->installEventFilter(this);
     auto& languageManager = ks::i18n::LanguageManager::instance();
     const auto configureCopyableLabel = [&languageManager](QLabel* label) {
         if (label == nullptr)
@@ -3971,20 +3856,17 @@ void ProcessDetailWindow::initializePerformanceTab()
 
 void ProcessDetailWindow::refreshPerformanceHistoryCharts()
 {
-    if (m_performanceHistoryStatusLabel == nullptr)
+    m_performanceChartsDirty = true;
+    // 数据入队和1800点裁剪仍在每次样本更新执行；只有不可见的图形转换延后。
+    if (m_performanceHistoryStatusLabel == nullptr || !m_performanceTab->isVisible())
     {
         return;
     }
+    m_performanceChartsDirty = false;
 
     const auto text = [](const QString& key) {
         return ks::i18n::text(key, QString());
     };
-    if (m_performanceHistory.empty())
-    {
-        m_performanceHistoryStatusLabel->setText(text(QStringLiteral("process.detail.performance.status.empty")));
-        return;
-    }
-
     std::vector<qint64> timestamps;
     std::vector<double> cpuValues;
     std::vector<double> cpuCoreValues;
@@ -4098,6 +3980,12 @@ void ProcessDetailWindow::refreshPerformanceHistoryCharts()
         QStringLiteral("%"),
         100.0);
 
+    // 空历史同样已经提交到六个图表，避免身份切换/清空后残留上一对象的曲线。
+    if (timestamps.empty())
+    {
+        m_performanceHistoryStatusLabel->setText(text(QStringLiteral("process.detail.performance.status.empty")));
+        return;
+    }
     const QString beginTime = QDateTime::fromMSecsSinceEpoch(timestamps.front()).toString(QStringLiteral("HH:mm:ss"));
     const QString endTime = QDateTime::fromMSecsSinceEpoch(timestamps.back()).toString(QStringLiteral("HH:mm:ss"));
     m_performanceHistoryStatusLabel->setText(
@@ -4109,6 +3997,7 @@ void ProcessDetailWindow::refreshPerformanceHistoryCharts()
 
 void ProcessDetailWindow::initializeCpuCoreTab()
 {
+    m_cpuCoreTab->installEventFilter(this);
     auto& languageManager = ks::i18n::LanguageManager::instance();
     QVBoxLayout* layout = nullptr;
     QWidget* const contentWidget = createScrollableTabContent(m_cpuCoreTab, layout, 12, 10);
@@ -4204,11 +4093,12 @@ void ProcessDetailWindow::initializeCpuCoreTab()
     layout->addWidget(threadGroup);
     layout->addStretch(1);
 
-    refreshCpuCoreView();
+    refreshCpuCoreView(true);
 }
 
-void ProcessDetailWindow::refreshCpuCoreView()
+void ProcessDetailWindow::refreshCpuCoreView(const bool appendHistory)
 {
+    m_cpuCorePresentationDirty = true;
     if (m_cpuCoreStatusLabel == nullptr ||
         m_processCpuCoreGrid == nullptr ||
         m_threadCpuCoreGrid == nullptr)
@@ -4217,6 +4107,24 @@ void ProcessDetailWindow::refreshCpuCoreView()
     }
 
     const CpuCoreViewSample& sample = m_cpuCoreViewSample;
+    // 新采样必须记录，包括隐藏期间；换主题、换语言和重新显示只刷新外观。
+    if (appendHistory)
+    {
+        const bool multipleProcessorGroups = !sample.processCores.empty() && std::any_of(
+            sample.processCores.cbegin(), sample.processCores.cend(),
+            [&sample](const CpuCoreValue& core) {
+                return core.group != sample.processCores.front().group;
+            });
+        static_cast<CpuCoreUsageGridWidget*>(m_processCpuCoreGrid)->setCoreValues(
+            sample.processCores, multipleProcessorGroups);
+        static_cast<CpuThreadUsageCardGridWidget*>(m_threadCpuCoreGrid)->setThreadValues(
+            sample.threads, multipleProcessorGroups);
+    }
+    if (!m_cpuCoreTab->isVisible())
+    {
+        return;
+    }
+    m_cpuCorePresentationDirty = false;
     if (m_cpuCoreSystemValueLabel != nullptr)
     {
         m_cpuCoreSystemValueLabel->setText(
@@ -4256,20 +4164,7 @@ void ProcessDetailWindow::refreshCpuCoreView()
         statusColor = signatureTrustedColor();
     }
     m_cpuCoreStatusLabel->setText(statusText);
-    m_cpuCoreStatusLabel->setStyleSheet(buildStateLabelStyle(statusColor, 600));
-
-    const bool multipleProcessorGroups = !sample.processCores.empty() && std::any_of(
-        sample.processCores.cbegin(),
-        sample.processCores.cend(),
-        [&sample](const CpuCoreValue& core) {
-            return core.group != sample.processCores.front().group;
-        });
-    static_cast<CpuCoreUsageGridWidget*>(m_processCpuCoreGrid)->setCoreValues(
-        sample.processCores,
-        multipleProcessorGroups);
-    static_cast<CpuThreadUsageCardGridWidget*>(m_threadCpuCoreGrid)->setThreadValues(
-        sample.threads,
-        multipleProcessorGroups);
+    applyProcessDetailLocalStyle(m_cpuCoreStatusLabel, buildStateLabelStyle(statusColor, 600));
 }
 
 void ProcessDetailWindow::initializeThreadTab()
@@ -5271,6 +5166,8 @@ void ProcessDetailWindow::initializeActionTab()
             ks::ui::NormalizeToolbarControl(buttonItem);
         }
     }
+    // 明确操作页的网格参数复用共享字段主题，不让组合框或路径输入继承透明底。
+    ks::ui::StyleParameterFields(actionContent);
 }
 
 void ProcessDetailWindow::initializeModuleTab()
@@ -5863,6 +5760,8 @@ void ProcessDetailWindow::initializeTokenSwitchTab()
     const QString comboStyle = KswordTheme::ThemedComboBoxStyle();
     m_tokenRawInfoClassCombo->setStyleSheet(comboStyle);
     m_tokenRawInputModeCombo->setStyleSheet(comboStyle);
+    // 原始令牌参数沿用现有解析与权限校验，只统一输入和长选项的呈现。
+    ks::ui::StyleParameterFields(tokenSwitchContent);
 }
 
 void ProcessDetailWindow::initializePebTab()
@@ -6610,12 +6509,25 @@ void ProcessDetailWindow::initializeConnections()
 void ProcessDetailWindow::refreshDetailTabTexts()
 {
     if (m_generalFields == nullptr) return;
-    m_processIconLabel->setPixmap(resolveProcessIcon(m_baseRecord.imagePath, 40).pixmap(40, 40));
+    const QString path = QString::fromStdString(m_baseRecord.imagePath);
+    // 数值快照通常不改变图标；只在真实显示键变化时查图标并栅格化。
+    const QString iconKey = QString::fromStdString(m_identityKey) + QLatin1Char('\n') + path;
+    if (processDetailIconNeedsRefresh(m_processIconLabel, iconKey))
+    {
+        m_processIconLabel->setPixmap(resolveProcessIcon(m_baseRecord.imagePath, 40).pixmap(40, 40));
+    }
     m_processTitleLabel->setText(QStringLiteral("%1  ·  PID %2")
         .arg(QString::fromStdString(m_baseRecord.processName)).arg(m_baseRecord.pid));
-    const QString path = QString::fromStdString(m_baseRecord.imagePath);
-    m_pathLineEdit->setText(path);
-    m_commandLineEdit->setText(QString::fromStdString(m_baseRecord.commandLine));
+    // QLineEdit::setText还会重置选择/撤销状态；相同路径与命令行不反复回填。
+    if (m_pathLineEdit->text() != path)
+    {
+        m_pathLineEdit->setText(path);
+    }
+    const QString commandLine = QString::fromStdString(m_baseRecord.commandLine);
+    if (m_commandLineEdit->text() != commandLine)
+    {
+        m_commandLineEdit->setText(commandLine);
+    }
     m_detailOpenHandleDockButton->setVisible(m_baseRecord.pid != 0);
     const QFileInfo imageInfo(path);
     m_openFileDetailButton->setEnabled(imageInfo.exists() && imageInfo.isFile());
@@ -6747,7 +6659,7 @@ void ProcessDetailWindow::refreshKernelObjectTabTexts()
     if (m_kernelObjectR0StatusValue != nullptr)
     {
         m_kernelObjectR0StatusValue->setText(detailProcessR0StatusText(m_baseRecord.r0Status));
-        m_kernelObjectR0StatusValue->setStyleSheet(
+        applyProcessDetailLocalStyle(m_kernelObjectR0StatusValue,
             buildStateLabelStyle(
                 m_baseRecord.r0Status == KSWORD_ARK_PROCESS_R0_STATUS_OK
                 ? statusIdleColor()
@@ -6772,7 +6684,7 @@ void ProcessDetailWindow::refreshKernelObjectTabTexts()
             objectTableAvailable,
             m_baseRecord.r0ObjectTableAddress,
             m_baseRecord.r0ObjectTableSource));
-        m_kernelObjectHandleTableValue->setStyleSheet(
+        applyProcessDetailLocalStyle(m_kernelObjectHandleTableValue,
             buildStateLabelStyle(objectTableAvailable ? statusIdleColor() : statusSecondaryColor(), 700));
     }
     if (m_kernelObjectSectionObjectValue != nullptr)
@@ -6782,7 +6694,7 @@ void ProcessDetailWindow::refreshKernelObjectTabTexts()
             sectionObjectAvailable,
             m_baseRecord.r0SectionObjectAddress,
             m_baseRecord.r0SectionObjectSource));
-        m_kernelObjectSectionObjectValue->setStyleSheet(
+        applyProcessDetailLocalStyle(m_kernelObjectSectionObjectValue,
             buildStateLabelStyle(sectionObjectAvailable ? statusIdleColor() : statusSecondaryColor(), 700));
     }
 
@@ -6829,20 +6741,31 @@ void ProcessDetailWindow::refreshParentProcessSection()
         << m_baseRecord.parentPid
         << eol;
 
-    // 默认先隐藏“转到父进程”，只有父进程仍存在才显示。
-    m_gotoParentButton->setVisible(false);
-    m_gotoParentButton->setProperty("parent_pid", QVariant());
-
     if (m_baseRecord.parentPid == 0)
     {
+        m_gotoParentButton->setVisible(false);
+        if (m_gotoParentButton->property("parent_pid").isValid())
+        {
+            m_gotoParentButton->setProperty("parent_pid", QVariant());
+        }
         m_parentInfoLabel->setText("无父进程信息");
-        m_parentIconLabel->setPixmap(QIcon(":/Icon/process_main.svg").pixmap(20, 20));
+        if (processDetailIconNeedsRefresh(m_parentIconLabel, QString()))
+        {
+            m_parentIconLabel->setPixmap(QIcon(":/Icon/process_main.svg").pixmap(20, 20));
+        }
         return;
     }
 
     const std::uint32_t parentPid = m_baseRecord.parentPid;
     const std::string parentName = ks::process::GetProcessNameByPID(parentPid);
     const bool parentAlive = !parentName.empty();
+    // 保留每轮父进程活性检查，但不再先隐藏又显示同一个按钮触发两次整行布局。
+    m_gotoParentButton->setVisible(parentAlive);
+    const QVariant parentPidValue = parentAlive ? QVariant::fromValue(parentPid) : QVariant();
+    if (m_gotoParentButton->property("parent_pid") != parentPidValue)
+    {
+        m_gotoParentButton->setProperty("parent_pid", parentPidValue);
+    }
 
     if (parentAlive)
     {
@@ -6851,9 +6774,12 @@ void ProcessDetailWindow::refreshParentProcessSection()
             .arg(QString::fromStdString(parentName))
             .arg(parentPid));
         const std::string parentPath = ks::process::QueryProcessPathByPid(parentPid);
-        m_parentIconLabel->setPixmap(resolveProcessIcon(parentPath, 20).pixmap(20, 20));
-        m_gotoParentButton->setVisible(true);
-        m_gotoParentButton->setProperty("parent_pid", QVariant::fromValue(parentPid));
+        const QString parentIconKey = QString::number(parentPid) + QLatin1Char('\n')
+            + QString::fromStdString(parentPath);
+        if (processDetailIconNeedsRefresh(m_parentIconLabel, parentIconKey))
+        {
+            m_parentIconLabel->setPixmap(resolveProcessIcon(parentPath, 20).pixmap(20, 20));
+        }
         kLogEvent refreshParentAliveEvent;
         dbg << refreshParentAliveEvent
             << "[ProcessDetailWindow] refreshParentProcessSection: 父进程可访问, parentPid="
@@ -6863,7 +6789,10 @@ void ProcessDetailWindow::refreshParentProcessSection()
     else
     {
         m_parentInfoLabel->setText(QString("父进程已退出或不可访问 (PID: %1)").arg(parentPid));
-        m_parentIconLabel->setPixmap(QIcon(":/Icon/process_main.svg").pixmap(20, 20));
+        if (processDetailIconNeedsRefresh(m_parentIconLabel, QString()))
+        {
+            m_parentIconLabel->setPixmap(QIcon(":/Icon/process_main.svg").pixmap(20, 20));
+        }
         kLogEvent refreshParentDeadEvent;
         info << refreshParentDeadEvent
             << "[ProcessDetailWindow] refreshParentProcessSection: 父进程不可访问, parentPid="
@@ -6874,6 +6803,13 @@ void ProcessDetailWindow::refreshParentProcessSection()
 
 void ProcessDetailWindow::updateWindowTitle()
 {
+    const QString desiredTitle = QString("进程详细信息 - %1 (PID %2)")
+        .arg(QString::fromStdString(m_baseRecord.processName.empty() ? "Unknown" : m_baseRecord.processName))
+        .arg(m_baseRecord.pid);
+    if (windowTitle() == desiredTitle)
+    {
+        return;
+    }
     // 标题更新日志：便于多窗口场景排查标题错乱。
     kLogEvent updateTitleEvent;
     dbg << updateTitleEvent
@@ -6881,9 +6817,6 @@ void ProcessDetailWindow::updateWindowTitle()
         << m_baseRecord.pid
         << eol;
 
-    setWindowTitle(
-        QString("进程详细信息 - %1 (PID %2)")
-        .arg(QString::fromStdString(m_baseRecord.processName.empty() ? "Unknown" : m_baseRecord.processName))
-        .arg(m_baseRecord.pid));
+    setWindowTitle(desiredTitle);
 }
 

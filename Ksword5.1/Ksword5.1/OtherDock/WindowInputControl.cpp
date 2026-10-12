@@ -2,15 +2,23 @@
 #include "DwmZOrderControl.h"
 #include "../ArkDriverClient/ArkDriverClient.h"
 #include "../Internationalization/LanguageManager.h"
+#include "../UI/FlatButtonTheme.h"
+#include "../UI/FlowLayout.h"
+#include "../UI/ParameterWorkspace.h"
+#include "../UI/PrimaryPageStyle.h"
+#include "../UI/ToolbarMetrics.h"
+#include <QBoxLayout>
 #include <QComboBox>
 #include <QCoreApplication>
 #include <QDir>
 #include <QEvent>
+#include <QFrame>
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
 #include <QPushButton>
+#include <QResizeEvent>
 #include <QScrollArea>
 #include <QThread>
 #include <QVBoxLayout>
@@ -30,6 +38,67 @@ namespace ks::window_input
         {
             const auto value = QString::fromUtf8(source);
             ks::i18n::LanguageManager::instance().bindText(object, value, value);
+            // 普通动作沿用现有释义作提示，换语言时和按钮文字同时更新。
+            if (auto* button = qobject_cast<QPushButton*>(object))
+            {
+                ks::i18n::LanguageManager::instance().bindToolTip(button, value, value);
+                ks::ui::ApplyFlatButtonTheme(button, ks::ui::FlatButtonTone::Neutral,
+                    ks::ui::FlatButtonAppearance::Solid);
+                ks::ui::NormalizeToolbarControl(button);
+            }
+        }
+
+        // 并列分区按实际宽度切换方向；只移动原控件布局，不触发任何系统操作。
+        class SectionRow final : public QWidget
+        {
+        public:
+            explicit SectionRow(QWidget* parent, int breakpoint = 1040)
+                : QWidget(parent), breakpoint_(breakpoint)
+            {
+                layout_ = new QBoxLayout(QBoxLayout::TopToBottom, this);
+                layout_->setContentsMargins(0, 0, 0, 0);
+                layout_->setSpacing(12);
+                setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Maximum);
+            }
+
+            // 原分区保持自然高度，窄窗口允许说明和表单在内部换行。
+            void Add(QWidget* section)
+            {
+                section->setMinimumWidth(0);
+                section->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+                layout_->addWidget(section, 1);
+            }
+
+        protected:
+            void resizeEvent(QResizeEvent* event) override
+            {
+                QWidget::resizeEvent(event);
+                const auto direction = event->size().width() >= breakpoint_
+                    ? QBoxLayout::LeftToRight : QBoxLayout::TopToBottom;
+                if (layout_->direction() != direction)
+                {
+                    layout_->setDirection(direction);
+                }
+            }
+
+        private:
+            QBoxLayout* layout_ = nullptr; // 仅管理两个已有功能分区的位置。
+            int breakpoint_ = 1040; // 保证并列时每区仍有可读的正文宽度。
+        };
+
+        // 分组在无外框的中性色面板内保留标题和轻分隔，四边均留16px。
+        QWidget* SectionPanel(QGroupBox* group, QWidget* parent)
+        {
+            auto* panel = new QWidget(parent);
+            auto* layout = new QVBoxLayout(panel);
+            layout->setContentsMargins(16, 16, 16, 16);
+            layout->setSpacing(0);
+            layout->addWidget(group);
+            ks::ui::StylePrimaryContentPanel(panel, false);
+            ks::ui::StyleParameterSection(group);
+            group->layout()->setContentsMargins(0, 22, 0, 0);
+            ks::ui::StyleParameterFields(group);
+            return panel;
         }
 
         std::wstring AgentPath()
@@ -92,11 +161,21 @@ namespace ks::window_input
                 : QWidget(parent), identity_(identity)
             {
                 auto* root = new QVBoxLayout(this);
+                ks::ui::StyleWorkspacePage(this, includeAgentPanel ? 16 : 0);
                 auto* scroll = includeAgentPanel ? new QScrollArea(this) : nullptr;
-                if (scroll) { scroll->setWidgetResizable(true); root->addWidget(scroll); }
+                if (scroll)
+                {
+                    scroll->setWidgetResizable(true);
+                    scroll->setFrameShape(QFrame::NoFrame);
+                    root->addWidget(scroll);
+                }
                 auto* content = new QWidget(scroll ? static_cast<QWidget*>(scroll) : this);
                 auto* layout = new QVBoxLayout(content);
+                layout->setContentsMargins(0, 0, 0, 0);
+                layout->setSpacing(12);
                 if (includeAgentPanel) layout->addWidget(CreateAgentPanel(content));
+                // 输入控制与画面排序是两条独立操作链，宽屏并列便于同时阅读状态。
+                auto* sections = new SectionRow(content, 1160);
                 auto* group = new QGroupBox(content);
                 Bind(group, "鼠标与键盘输入");
                 auto* input = new QVBoxLayout(group);
@@ -114,21 +193,25 @@ namespace ks::window_input
                 Label(group, "跨 UIAccess 会将窗口移入 UIAccess 层，再调整真实窗口顺序；点击随原生顺序分发。遮挡点击还会持续把画面移到 DWM 最后，需要先加载 DWM 代理。", input);
                 Label(group, "原 Band 内的模式不改变窗口层级。跨 UIAccess 调整是一次操作，其他窗口之后仍可能改变顺序。恢复会还原原 Band 和置顶状态。", input);
                 Label(group, "设置在关闭本页后继续保留。退出 KSword 前请恢复；本页也可恢复全部输入设置。", input);
-                auto* actions = new QHBoxLayout;
+                auto* actions = new ks::ui::FlowLayout(nullptr, 0, 8, 8);
                 apply_ = new QPushButton(group);
                 restore_ = new QPushButton(group);
                 query_ = new QPushButton(group);
                 Bind(apply_, "应用输入设置");
                 Bind(restore_, "恢复本次修改");
                 Bind(query_, "读取当前输入状态");
+                ks::ui::ApplyFlatButtonTheme(apply_, ks::ui::FlatButtonTone::Accent,
+                    ks::ui::FlatButtonAppearance::Solid);
                 actions->addWidget(apply_);
                 actions->addWidget(restore_);
                 actions->addWidget(query_);
                 input->addLayout(actions);
                 status_ = Label(group, "尚未读取输入状态。", input, false);
-                layout->addWidget(group);
+                status_->setContentsMargins(0, 8, 0, 0);
+                sections->Add(SectionPanel(group, sections));
                 dwmControl_ = dwm_order::CreateControl(identity, content);
-                layout->addWidget(dwmControl_);
+                sections->Add(SectionPanel(static_cast<QGroupBox*>(dwmControl_), sections));
+                layout->addWidget(sections);
                 layout->addStretch();
                 if (scroll) scroll->setWidget(content);
                 else root->addWidget(content);
@@ -222,30 +305,39 @@ namespace ks::window_input
             explicit AgentPanel(QWidget* parent) : QWidget(parent)
             {
                 auto* layout = new QVBoxLayout(this);
+                layout->setContentsMargins(0, 0, 0, 0);
+                layout->setSpacing(0);
+                // 代理状态与版本兼容性分别占一块，避免所有说明沿整页拉成长行。
+                auto* sections = new SectionRow(this);
                 auto* dwm = new QGroupBox(this);
                 Bind(dwm, "DWM 排序代理");
                 auto* dwmLayout = new QVBoxLayout(dwm);
                 Label(dwm, "加载当前会话的 DWM 代理后，可直接在本页调整画面顺序。加载代理本身不会改变任何窗口顺序。", dwmLayout);
-                auto* actions = new QHBoxLayout;
+                auto* actions = new ks::ui::FlowLayout(nullptr, 0, 8, 8);
                 load_ = new QPushButton(dwm);
                 check_ = new QPushButton(dwm);
                 stop_ = new QPushButton(dwm);
                 Bind(load_, "加载 DWM 代理");
                 Bind(check_, "检查 DWM 状态");
                 Bind(stop_, "停止保持并恢复全部输入设置");
+                ks::ui::ApplyFlatButtonTheme(load_, ks::ui::FlatButtonTone::Accent,
+                    ks::ui::FlatButtonAppearance::Solid);
                 for (auto* button : {load_, check_, stop_}) actions->addWidget(button);
                 dwmLayout->addLayout(actions);
                 dwmStatus_ = Label(dwm, "尚未检查 DWM 状态。", dwmLayout, false);
-                layout->addWidget(dwm);
+                dwmStatus_->setContentsMargins(0, 8, 0, 0);
+                sections->Add(SectionPanel(dwm, sections));
                 auto* win32k = new QGroupBox(this);
                 Bind(win32k, "Win32k 输入控制");
                 auto* win32kLayout = new QVBoxLayout(win32k);
                 Label(win32k, "可直接应用跨 UIAccess 模式，每次操作都会检查兼容性。此按钮仅查询支持状态，无需预先开启。当前适配 26100.9022。", win32kLayout);
                 kernel_ = new QPushButton(win32k);
                 Bind(kernel_, "检查 Win32k 兼容性");
-                win32kLayout->addWidget(kernel_);
+                win32kLayout->addWidget(kernel_, 0, Qt::AlignLeft);
                 kernelStatus_ = Label(win32k, "尚未检查 Win32k 状态。", win32kLayout, false);
-                layout->addWidget(win32k);
+                kernelStatus_->setContentsMargins(0, 8, 0, 0);
+                sections->Add(SectionPanel(win32k, sections));
+                layout->addWidget(sections);
                 connect(load_, &QPushButton::clicked, this, [this] { Start(1); });
                 connect(check_, &QPushButton::clicked, this, [this] { Start(0); });
                 connect(stop_, &QPushButton::clicked, this, [this] { Start(2); });
@@ -365,29 +457,43 @@ namespace ks::window_input
             explicit InjectionPage(QWidget* parent) : QWidget(parent)
             {
                 auto* root = new QVBoxLayout(this);
+                ks::ui::StyleWorkspacePage(this);
                 auto* scroll = new QScrollArea(this);
                 scroll->setWidgetResizable(true);
+                scroll->setFrameShape(QFrame::NoFrame);
                 root->addWidget(scroll);
                 auto* content = new QWidget(scroll);
                 layout_ = new QVBoxLayout(content);
-                Label(content, "在这里选择目标窗口，即可使用与窗口页相同的输入、跨 UIAccess 和 DWM 排序功能。", layout_);
-                auto* row = new QHBoxLayout;
-                targets_ = new QComboBox(content);
+                layout_->setContentsMargins(0, 0, 0, 0);
+                layout_->setSpacing(12);
+                // 目标输入独立成面板；句柄/列表占一行，动作在窄窗口自然换行。
+                auto* targetPanel = new QWidget(content);
+                auto* targetLayout = new QVBoxLayout(targetPanel);
+                targetLayout->setContentsMargins(16, 16, 16, 16);
+                targetLayout->setSpacing(12);
+                ks::ui::StylePrimaryContentPanel(targetPanel, false);
+                Label(targetPanel, "在这里选择目标窗口，即可使用与窗口页相同的输入、跨 UIAccess 和 DWM 排序功能。", targetLayout);
+                auto* row = new ks::ui::FlowLayout(nullptr, 0, 8, 8);
+                targets_ = new QComboBox(targetPanel);
                 targets_->setEditable(true);
                 targets_->setInsertPolicy(QComboBox::NoInsert);
                 targets_->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
                 targets_->setMinimumContentsLength(24);
                 ks::i18n::LanguageManager::instance().bindPlaceholder(targets_->lineEdit(),
                     QStringLiteral("window.dwm_order.reference_hint"), QStringLiteral("十六进制 0x1234 或十进制句柄"));
-                auto* open = new QPushButton(content);
+                auto* open = new QPushButton(targetPanel);
                 Bind(open, "打开目标窗口设置");
-                refresh_ = new QPushButton(content);
+                ks::ui::ApplyFlatButtonTheme(open, ks::ui::FlatButtonTone::Accent,
+                    ks::ui::FlatButtonAppearance::Solid);
+                refresh_ = new QPushButton(targetPanel);
                 Bind(refresh_, "刷新窗口列表");
-                row->addWidget(targets_, 1);
+                targetLayout->addWidget(targets_);
                 row->addWidget(refresh_);
                 row->addWidget(open);
-                layout_->addLayout(row);
-                status_ = Label(content, "尚未选择目标窗口。", layout_, false);
+                targetLayout->addLayout(row);
+                status_ = Label(targetPanel, "尚未选择目标窗口。", targetLayout, false);
+                ks::ui::StyleParameterFields(targetPanel);
+                layout_->addWidget(targetPanel);
                 agents_ = new AgentPanel(content);
                 layout_->addWidget(agents_);
                 layout_->addStretch();

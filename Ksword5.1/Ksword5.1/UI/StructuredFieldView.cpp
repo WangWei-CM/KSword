@@ -23,6 +23,7 @@
 #include <QScrollBar>
 #include <QSet>
 #include <QShortcut>
+#include <QShowEvent>
 #include <QSignalBlocker>
 #include <QStyle>
 #include <QStyledItemDelegate>
@@ -42,6 +43,28 @@ namespace ks::ui
     namespace
     {
         enum PropertyRole { KindRole = Qt::UserRole + 176, KeyRole, RowRole, ValueRole };
+
+        // 文档模式只比较规范字段，不触及控件；相同采样快照无需再次通知卡片展开/筛选。
+        bool sameFieldNodes(const QVector<FieldNode>& first, const QVector<FieldNode>& second)
+        {
+            if (first.size() != second.size())
+            {
+                return false;
+            }
+            for (qsizetype index = 0; index < first.size(); ++index)
+            {
+                const FieldNode& left = first.at(index); // 当前快照的规范节点。
+                const FieldNode& right = second.at(index); // 调用方提交的对应节点。
+                if (left.kind != right.kind || left.name != right.name || left.value != right.value
+                    || left.translateValue != right.translateValue || left.translateName != right.translateName
+                    || left.initiallyExpanded != right.initiallyExpanded
+                    || !sameFieldNodes(left.children, right.children))
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
 
         bool writeDocumentText(const FieldDocument& document, const QString& filePath, QString* error)
         {
@@ -343,10 +366,45 @@ namespace ks::ui
         setPresentation(sessionPresentation());
     }
 
+    // 卡片详情保留原报告对象和工具信号，但不再同时维护第二份隐藏树模型。
+    void StructuredFieldView::setDocumentOnly()
+    {
+        if (m_documentOnly)
+        {
+            return;
+        }
+        m_documentOnly = true;
+        m_hiddenTreeDirty = false;
+        m_hiddenTreeLayoutDirty = false;
+        m_presentation = Presentation::Sections;
+        m_searchActive = false;
+        m_expansionBeforeSearch.clear();
+        if (m_tree)
+        {
+            QTreeWidget* obsoleteTree = m_tree; // 先断开成员指针，析构事件或排队回调不得再拿旧树。
+            m_tree = nullptr;
+            obsoleteTree->viewport()->removeEventFilter(this);
+            delete obsoleteTree;
+        }
+        QComboBox* obsoleteStyle = m_style; // 旧格式控件永久退出详情投影。
+        m_style = nullptr;
+        delete obsoleteStyle;
+        m_title->hide();
+    }
+
     void StructuredFieldView::setDocument(const FieldDocument& document)
     {
+        if (m_documentOnly && m_document.title == document.title
+            && sameFieldNodes(m_document.nodes, document.nodes))
+        {
+            return;
+        }
         m_document = document;
-        rebuild();
+        ++m_documentRevision;
+        if (!m_documentOnly)
+        {
+            rebuild();
+        }
         if (!m_documentNotificationPending)
         {
             m_documentNotificationPending = true;
@@ -360,6 +418,17 @@ namespace ks::ui
 
     void StructuredFieldView::rebuild()
     {
+        if (m_documentOnly || !m_tree)
+        {
+            return;
+        }
+        if (shouldDeferHiddenTree())
+        {
+            m_hiddenTreeDirty = true;
+            return; // 文档/导出代次仍即时更新，隐藏Tab不构造旧模型和逐字段测量。
+        }
+        m_hiddenTreeDirty = false;
+        m_hiddenTreeLayoutDirty = false;
         QHash<QString, bool> expanded;
         QSet<QString> selected;
         QString current;
@@ -447,6 +516,10 @@ namespace ks::ui
 
     QString StructuredFieldView::exportItems(const bool selectedOnly) const
     {
+        if (m_documentOnly || !m_tree)
+        {
+            return selectedOnly ? QString() : plainText();
+        }
         QStringList lines;
         walkItems(m_tree->invisibleRootItem(), [&](QTreeWidgetItem* item)
         {
@@ -461,7 +534,7 @@ namespace ks::ui
     {
         FieldCopySnapshot snapshot;
         snapshot.all = plainText();
-        if (clicked.isValid() && clicked.model() == m_tree->model())
+        if (m_tree && clicked.isValid() && clicked.model() == m_tree->model())
         {
             snapshot.hasRow = true;
             snapshot.value = clicked.data(ValueRole).toString();
@@ -475,6 +548,15 @@ namespace ks::ui
 
     void StructuredFieldView::applySearch()
     {
+        if (m_documentOnly || !m_tree)
+        {
+            return; // 搜索信号仍由同一输入发出，筛选由唯一卡片宿主处理。
+        }
+        if (shouldDeferHiddenTree())
+        {
+            m_hiddenTreeDirty = true;
+            return; // 保留搜索框的最新查询，显示时从最新文档一次重建并筛选。
+        }
         const QString query = m_search->text().trimmed();
         const bool active = !query.isEmpty();
         if (active && !m_searchActive)
@@ -507,20 +589,38 @@ namespace ks::ui
 
     void StructuredFieldView::setPresentation(const Presentation presentation)
     {
+        if (m_documentOnly)
+        {
+            return; // 已删除的旧视图不再参与会话格式状态，也不重建被淘汰的树。
+        }
         m_presentation = presentation;
         sessionPresentation() = presentation;
         QSignalBlocker blocker(m_style);
         m_style->setCurrentIndex(presentation == Presentation::Tree ? 1 : 0);
         applyPresentation();
+        emit presentationChanged();
     }
 
     void StructuredFieldView::applyPresentation()
     {
+        if (m_documentOnly || !m_tree)
+        {
+            return;
+        }
+        if (shouldDeferHiddenTree())
+        {
+            m_hiddenTreeLayoutDirty = true;
+            return;
+        }
         const bool sections = m_presentation == Presentation::Sections;
         m_tree->setRootIsDecorated(!sections);
         m_tree->setIndentation(sections ? 14 : 20);
         m_tree->setAlternatingRowColors(!sections);
         static_cast<PropertyDelegate*>(m_tree->itemDelegate())->sections = sections;
+        if (m_hiddenTreeDirty)
+        {
+            return; // Show随后重建最新文档，不先为已过期的旧行安排一次布局。
+        }
         updateColumns();
         m_tree->doItemsLayout();
         m_tree->viewport()->update();
@@ -528,6 +628,15 @@ namespace ks::ui
 
     void StructuredFieldView::updateColumns()
     {
+        if (m_documentOnly || !m_tree)
+        {
+            return;
+        }
+        if (shouldDeferHiddenTree())
+        {
+            m_hiddenTreeLayoutDirty = true;
+            return;
+        }
         const int width = m_tree->viewport()->width();
         const int desired = std::clamp(width / 3, 112, 260);
         if (!m_tree->wordWrap())
@@ -578,38 +687,125 @@ namespace ks::ui
 
     void StructuredFieldView::updateTranslations()
     {
+        if (!m_export || !m_search || !m_copy)
+        {
+            return; // 构造阶段的主题/语言广播尚未创建工具控件时不访问空指针。
+        }
         m_export->setToolTip(translated(QStringLiteral("导出文本")));
         m_export->setAccessibleName(translated(QStringLiteral("导出文本")));
         m_search->setPlaceholderText(translated(QStringLiteral("搜索属性")));
         m_search->setAccessibleName(translated(QStringLiteral("搜索属性")));
-        m_style->setItemText(0, translated(QStringLiteral("分区")));
-        m_style->setItemText(1, translated(QStringLiteral("树形")));
-        m_style->setAccessibleName(translated(QStringLiteral("显示样式")));
+        if (m_style)
+        {
+            m_style->setItemText(0, translated(QStringLiteral("分区")));
+            m_style->setItemText(1, translated(QStringLiteral("树形")));
+            m_style->setAccessibleName(translated(QStringLiteral("显示样式")));
+        }
         m_copy->setText(translated(QStringLiteral("复制全部")));
-        m_tree->setHeaderLabels({translated(QStringLiteral("属性")), translated(QStringLiteral("值"))});
+        if (m_tree)
+        {
+            m_tree->setHeaderLabels({translated(QStringLiteral("属性")), translated(QStringLiteral("值"))});
+        }
     }
 
     void StructuredFieldView::changeEvent(QEvent* event)
     {
         QWidget::changeEvent(event);
-        if (!m_tree) return;
         if (event->type() == QEvent::LanguageChange)
         {
             updateTranslations();
             rebuild();
         }
-        else if (event->type() == QEvent::FontChange || event->type() == QEvent::ApplicationFontChange ||
-            event->type() == QEvent::PaletteChange || event->type() == QEvent::ApplicationPaletteChange)
+        else if (!m_documentOnly && m_tree &&
+            (event->type() == QEvent::FontChange || event->type() == QEvent::ApplicationFontChange ||
+                event->type() == QEvent::PaletteChange || event->type() == QEvent::ApplicationPaletteChange))
         {
+            if (shouldDeferHiddenTree())
+            {
+                m_hiddenTreeLayoutDirty = true;
+                return; // QApplication换肤仍广播到隐藏旧树，但不触发其全文测量和doItemsLayout。
+            }
             updateColumns();
             m_tree->doItemsLayout();
             m_tree->viewport()->update();
         }
     }
 
+    bool StructuredFieldView::belongsToSharedDetail() const
+    {
+        const QWidget* owner = window(); // 仅共享详情根实际登记后启用，不推断普通隐藏编辑器用途。
+        for (const QWidget* parent = this; parent; parent = parent->parentWidget())
+        {
+            if (parent->property("ksword_detail_keep_layout").toBool())
+            {
+                return false; // 专业工作台仍依赖tree()及其原生模型的即时状态。
+            }
+            if (parent == owner)
+            {
+                break;
+            }
+        }
+        return owner && owner->property("ksword_detail_framework_controller").value<QObject*>() != nullptr;
+    }
+
+    bool StructuredFieldView::shouldDeferHiddenTree() const
+    {
+        // 切页Show后的业务currentChanged槽也可能提交新文档；排队fallback前仍不重建待淘汰树。
+        return !m_documentOnly && m_tree && (!isVisible() || m_treeShowPending) && belongsToSharedDetail();
+    }
+
+    void StructuredFieldView::flushDeferredTree()
+    {
+        if (m_documentOnly || !m_tree || !isVisible()
+            || (!m_hiddenTreeDirty && !m_hiddenTreeLayoutDirty))
+        {
+            return;
+        }
+        m_hiddenTreeLayoutDirty = false;
+        applyPresentation();
+        if (m_hiddenTreeDirty)
+        {
+            rebuild();
+        }
+    }
+
+    // Qt先Show新Stack页再发currentChanged；让同步共享投影先消费文档，避免刚建旧树就删除。
+    void StructuredFieldView::showEvent(QShowEvent* event)
+    {
+        QWidget::showEvent(event);
+        if (m_documentOnly || !m_tree || (!m_hiddenTreeDirty && !m_hiddenTreeLayoutDirty))
+        {
+            return;
+        }
+        if (!belongsToSharedDetail())
+        {
+            flushDeferredTree(); // 普通视图和专业工作台保留原有同步显示语义。
+            return;
+        }
+        if (m_treeShowPending)
+        {
+            return;
+        }
+        m_treeShowPending = true;
+        QTimer::singleShot(0, this, [this]()
+        {
+            m_treeShowPending = false;
+            flushDeferredTree(); // source被销毁则Qt取消回调；已投影、隐藏或清脏时不恢复旧树。
+        });
+    }
+
     void StructuredFieldView::resizeEvent(QResizeEvent* event)
     {
         QWidget::resizeEvent(event);
+        if (m_documentOnly || !m_tree)
+        {
+            return;
+        }
+        if (shouldDeferHiddenTree())
+        {
+            m_hiddenTreeLayoutDirty = true;
+            return;
+        }
         updateColumns();
         m_tree->doItemsLayout();
     }
@@ -621,10 +817,24 @@ namespace ks::ui
         // event turn, once Qt has finished its own resize/layout work.
         if (m_tree && watched == m_tree->viewport() && event->type() == QEvent::Resize && !m_layoutPending)
         {
+            if (shouldDeferHiddenTree())
+            {
+                m_hiddenTreeLayoutDirty = true;
+                return QWidget::eventFilter(watched, event);
+            }
             m_layoutPending = true;
             QTimer::singleShot(0, this, [this]
             {
                 m_layoutPending = false;
+                if (m_documentOnly || !m_tree)
+                {
+                    return; // 排队回调可能发生在接入卡片并销毁旧树之后。
+                }
+                if (shouldDeferHiddenTree())
+                {
+                    m_hiddenTreeLayoutDirty = true;
+                    return; // 排队期间已切走该Tab时，不能继续为隐藏旧树安排布局。
+                }
                 updateColumns();
                 m_tree->doItemsLayout();
             });
@@ -639,6 +849,10 @@ namespace ks::ui
 
     void StructuredFieldView::showCopyMenu(const QPoint& position)
     {
+        if (m_documentOnly || !m_tree)
+        {
+            return;
+        }
         const auto clicked = m_tree->indexAt(position);
         if (clicked.isValid())
         {

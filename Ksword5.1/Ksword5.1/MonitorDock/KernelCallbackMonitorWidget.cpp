@@ -8,6 +8,8 @@
 #include "../UI/VisibleTableWidget.h"
 #include "../UI/ToolbarMetrics.h"
 #include "../UI/PageControlStyle.h"
+#include "../UI/PrimaryPageStyle.h"
+#include "../UI/FlatButtonTheme.h"
 #include "../theme.h"
 
 #include <QAbstractTableModel>
@@ -523,6 +525,7 @@ void KernelCallbackMonitorWidget::initializeUi()
     m_rootLayout->setSpacing(6);
 
     QWidget* controlPanel = new QWidget(this);
+    ks::ui::StylePrimaryToolbar(controlPanel);
     QGridLayout* controlLayout = new QGridLayout(controlPanel);
     controlLayout->setContentsMargins(6, 6, 6, 6);
     controlLayout->setHorizontalSpacing(8);
@@ -552,6 +555,8 @@ void KernelCallbackMonitorWidget::initializeUi()
     m_maxRowsSpin->setRange(1000, 100000);
     m_maxRowsSpin->setSingleStep(1000);
     m_maxRowsSpin->setValue(20000);
+    ks::ui::StyleStandaloneInput(m_maxRowsSpin);
+    ks::ui::NormalizeToolbarControl(m_maxRowsSpin);
     controlLayout->addWidget(m_maxRowsSpin, 1, 1, 1, 2);
     m_startButton = createCallbackIconButton(
         controlPanel,
@@ -573,6 +578,14 @@ void KernelCallbackMonitorWidget::initializeUi()
         controlPanel,
         QStringLiteral(":/Icon/log_export.svg"),
         QStringLiteral("导出当前可见事件为 CSV"));
+    // 五个固定动作保留原对象与连接，只明确其共同底面和启动主动作的层级。
+    for (QPushButton* button : {m_stopButton, m_pauseButton, m_clearButton, m_exportButton})
+    {
+        ks::ui::ApplyFlatButtonTheme(button, ks::ui::FlatButtonTone::Neutral,
+            ks::ui::FlatButtonAppearance::Solid);
+    }
+    ks::ui::ApplyFlatButtonTheme(m_startButton, ks::ui::FlatButtonTone::Accent,
+        ks::ui::FlatButtonAppearance::Solid);
     QHBoxLayout* buttonLayout = new QHBoxLayout();
     buttonLayout->setContentsMargins(0, 0, 0, 0);
     buttonLayout->setSpacing(6);
@@ -589,12 +602,14 @@ void KernelCallbackMonitorWidget::initializeUi()
     m_rootLayout->addWidget(controlPanel, 0);
 
     QWidget* filterPanel = new QWidget(this);
+    ks::ui::StylePrimaryToolbar(filterPanel);
     QGridLayout* filterLayout = new QGridLayout(filterPanel);
     filterLayout->setContentsMargins(6, 6, 6, 6);
     filterLayout->setHorizontalSpacing(6);
     filterLayout->setVerticalSpacing(6);
     filterLayout->addWidget(new QLabel(QStringLiteral("类别"), filterPanel), 0, 0);
     m_categoryFilterCombo = new QComboBox(filterPanel);
+    ks::ui::StylePrimaryCombo(m_categoryFilterCombo);
     m_categoryFilterCombo->addItem(QStringLiteral("全部类别"), QVariant::fromValue<qulonglong>(0U));
     m_categoryFilterCombo->addItem(QStringLiteral("进程"), QVariant::fromValue<qulonglong>(KSWORD_ARK_CALLBACK_MONITOR_CATEGORY_PROCESS));
     m_categoryFilterCombo->addItem(QStringLiteral("线程"), QVariant::fromValue<qulonglong>(KSWORD_ARK_CALLBACK_MONITOR_CATEGORY_THREAD));

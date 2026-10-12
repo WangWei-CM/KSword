@@ -243,14 +243,21 @@ void MainWindow::applyHvmButtonState()
     {
         return;
     }
-    m_hvmStatusButton->setStyleSheet(
-        buildHvmButtonStyle(resolveHvmButtonState(
-            m_hvmAvailability,
-            m_hvmResidentActive,
-            m_hvmFaulted,
-            m_hvmAvailable)));
+    // 周期状态仍查询，实际状态/主题不变时不重复制造 StyleChange 和图标重建。
+    const QString hvmStyle = buildHvmButtonStyle(resolveHvmButtonState(
+        m_hvmAvailability,
+        m_hvmResidentActive,
+        m_hvmFaulted,
+        m_hvmAvailable));
+    if (m_hvmStatusButton->styleSheet() != hvmStyle)
+    {
+        m_hvmStatusButton->setStyleSheet(hvmStyle);
+    }
     // 操作进行中禁用按钮：常驻切换与保持自检都会独占驱动侧状态锁。
-    m_hvmStatusButton->setEnabled(!m_hvmOperationRunning);
+    if (m_hvmStatusButton->isEnabled() != !m_hvmOperationRunning)
+    {
+        m_hvmStatusButton->setEnabled(!m_hvmOperationRunning);
+    }
     /*
      * 提示文字跟随显示名。
      *

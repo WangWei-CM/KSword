@@ -45,7 +45,10 @@ namespace
     // This branch serves actual text documents and logs only.
     void setMirrorText(CodeEditorWidget* target, CodeEditorWidget*, const QString& text)
     {
-        target->setRawText(text);
+        if (target && target->text() != text)
+        {
+            target->setRawText(text); // 相同报告不清空文档、选择和高亮缓存。
+        }
     }
 
     CodeEditorWidget* createReadOnlyInlineEditor(
@@ -280,7 +283,8 @@ void ks::ui::DetailLayoutHost::handleViewClicked(
 
 void ks::ui::DetailLayoutHost::handleDetailChanged(const QString& detailText)
 {
-    if (m_scheme == ks::settings::DetailDisplayScheme::Floating && !m_floatingEditor.isNull())
+    if (m_scheme == ks::settings::DetailDisplayScheme::Floating && !m_floatingEditor.isNull()
+        && !m_floatingWindow.isNull() && m_floatingWindow->isVisible())
     {
         setMirrorText(m_floatingEditor.data(), m_detailEditor.data(), detailText);
     }
@@ -309,7 +313,11 @@ void ks::ui::DetailLayoutHost::handleFieldDocumentChanged()
 {
     if (m_structuredView.isNull()) return;
     const auto document = m_structuredView->document();
-    if (!m_floatingFields.isNull()) m_floatingFields->setDocument(document);
+    // 隐藏的复用弹窗不重建文档；showFloatingWindow会在显示前读取同一源的最新快照。
+    if (!m_floatingFields.isNull() && !m_floatingWindow.isNull() && m_floatingWindow->isVisible())
+    {
+        m_floatingFields->setDocument(document);
+    }
     if (m_scheme != ks::settings::DetailDisplayScheme::Embedded || m_tableView.isNull()) return;
     const QModelIndex current = m_tableView->currentIndex();
     const QPersistentModelIndex row(current.isValid() ? current.sibling(current.row(), 0) : QModelIndex());

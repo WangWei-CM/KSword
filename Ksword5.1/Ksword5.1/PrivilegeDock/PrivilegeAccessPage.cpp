@@ -2,6 +2,7 @@
 #include "PrivilegeAccessPage.h"
 #include "../UI/ToolbarMetrics.h"
 #include "../UI/PrimaryPageStyle.h"
+#include "../UI/ParameterWorkspace.h"
 #include "PrivilegeAccessBackend.h"
 #include "../UI/CodeEditorWidget.h"
 #include "../Internationalization/LanguageManager.h"
@@ -56,27 +57,34 @@ namespace
             auto* layout = new QVBoxLayout(this);
             layout->setContentsMargins(8, 8, 8, 8);
             layout->setSpacing(6);
+            // 参数独立滚动，评估/实际打开入口固定，ACE 和报告保留右侧空间。
+            auto* workspace = new ks::ui::ParameterWorkspace(this, 440);
+            layout->addWidget(workspace);
             auto* explanation = new QLabel(text("privilege.workbench.access.intro",
                 "选择进程主令牌与对象，分别查看描述符评估、完整性约束和实际句柄打开结果。"), this);
             explanation->setWordWrap(true);
-            layout->addWidget(explanation);
+            workspace->parameters()->addWidget(explanation);
 
+            // 标签在字段上方，PID 与当前进程快捷操作保持相邻。
+            auto* form = new QFormLayout;
+            form->setRowWrapPolicy(QFormLayout::WrapAllRows);
+            form->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
             auto* subjectRow = new QHBoxLayout;
-            subjectRow->addWidget(new QLabel(text("privilege.workbench.access.pid", "进程 PID"), this));
             m_pid = new QLineEdit(QString::number(GetCurrentProcessId()), this);
+            // PID、对象路径和权限掩码是独立参数字段，保留原解析与校验，仅接入输入主题。
+            ks::ui::StyleStandaloneInput(m_pid);
             m_pid->setObjectName(QStringLiteral("privilege_access_pid"));
-            m_pid->setMaximumWidth(150);
-            subjectRow->addWidget(m_pid);
+            subjectRow->addWidget(m_pid, 1);
             auto* current = new QPushButton(text("privilege.workbench.access.current", "当前进程"), this);
             subjectRow->addWidget(current);
-            subjectRow->addWidget(new QLabel(text("privilege.workbench.access.object_kind", "对象类型"), this));
+            form->addRow(text("privilege.workbench.access.pid", "进程 PID"), subjectRow);
             m_kind = new QComboBox(this);
             ks::ui::StylePrimaryCombo(m_kind);
             m_kind->setObjectName(QStringLiteral("privilege_access_kind"));
             m_kind->addItem(text("privilege.workbench.access.kind.file", "文件或目录"), int(ObjectKind::File));
             m_kind->addItem(text("privilege.workbench.access.kind.registry", "注册表项"), int(ObjectKind::Registry));
             m_kind->addItem(text("privilege.workbench.access.kind.service", "服务"), int(ObjectKind::Service));
-            subjectRow->addWidget(m_kind);
+            form->addRow(text("privilege.workbench.access.object_kind", "对象类型"), m_kind);
             m_viewLabel = new QLabel(text("privilege.workbench.access.registry_view", "注册表视图"), this);
             m_view = new QComboBox(this);
             ks::ui::StylePrimaryCombo(m_view);
@@ -85,32 +93,24 @@ namespace
             m_view->addItem(QStringLiteral("32-bit"), qulonglong(KEY_WOW64_32KEY));
             m_viewLabel->hide();
             m_view->hide();
-            subjectRow->addStretch();
-            layout->addLayout(subjectRow);
             ks::ui::NormalizeToolbarRow(subjectRow);
 
             auto* pathRow = new QHBoxLayout;
-            pathRow->addWidget(new QLabel(text("privilege.workbench.access.path", "对象名称"), this));
             m_path = new QLineEdit(QCoreApplication::applicationFilePath(), this);
+            ks::ui::StyleStandaloneInput(m_path);
             m_path->setObjectName(QStringLiteral("privilege_access_path"));
             pathRow->addWidget(m_path, 1);
             m_browse = new QPushButton(text("privilege.workbench.access.browse", "选择文件"), this);
             pathRow->addWidget(m_browse);
-            layout->addLayout(pathRow);
+            form->addRow(text("privilege.workbench.access.path", "对象名称"), pathRow);
             ks::ui::NormalizeToolbarRow(pathRow);
             m_pathHint = new QLabel(this);
             m_pathHint->setWordWrap(true);
-            layout->addWidget(m_pathHint);
+            form->addRow(m_pathHint);
             updateKind();
-            auto* viewRow = new QHBoxLayout;
-            viewRow->addWidget(m_viewLabel);
-            viewRow->addWidget(m_view);
-            viewRow->addStretch();
-            layout->addLayout(viewRow);
-            ks::ui::NormalizeToolbarRow(viewRow);
+            form->addRow(m_viewLabel, m_view);
 
-            auto* accessRow = new QHBoxLayout;
-            accessRow->addWidget(new QLabel(text("privilege.workbench.access.operation", "请求权限"), this));
+            // 权限预设和实际掩码各占整行，长权限名不再压缩掩码字段。
             m_preset = new QComboBox(this);
             // 请求权限预设需有完整选择器底面，不能与只读说明混为一体。
             ks::ui::StylePrimaryCombo(m_preset);
@@ -124,16 +124,14 @@ namespace
             m_preset->addItem(text("privilege.workbench.access.preset.write_dac", "修改 DACL 权（只评估）"), qulonglong(WRITE_DAC));
             m_preset->addItem(text("privilege.workbench.access.preset.write_owner", "修改所有者权（只评估）"), qulonglong(WRITE_OWNER));
             m_preset->addItem(text("privilege.workbench.access.preset.custom", "自定义掩码"));
-            accessRow->addWidget(m_preset);
+            form->addRow(text("privilege.workbench.access.operation", "请求权限"), m_preset);
             m_mask = new QLineEdit(hex(GENERIC_READ), this);
+            ks::ui::StyleStandaloneInput(m_mask);
             m_mask->setObjectName(QStringLiteral("privilege_access_mask"));
-            m_mask->setMaximumWidth(170);
-            accessRow->addWidget(m_mask);
-            accessRow->addStretch();
-            layout->addLayout(accessRow);
-            ks::ui::NormalizeToolbarRow(accessRow);
+            form->addRow(m_mask);
+            workspace->parameters()->addLayout(form);
 
-            auto* actions = new QHBoxLayout;
+            auto* actions = new QVBoxLayout;
             m_assess = new QPushButton(text("privilege.workbench.access.assess", "评估描述符"), this);
             m_assess->setObjectName(QStringLiteral("privilege_access_assess"));
             m_probe = new QPushButton(text("privilege.workbench.access.probe", "测试实际打开"), this);
@@ -148,9 +146,11 @@ namespace
             actions->addWidget(m_cancel);
             m_status = new QLabel(text("privilege.workbench.access.ready", "等待评估"), this);
             m_status->setWordWrap(true);
-            actions->addWidget(m_status, 1);
-            layout->addLayout(actions);
-            ks::ui::NormalizeToolbarRow(actions);
+            workspace->actions()->addLayout(actions, 1);
+            workspace->results()->addWidget(m_status);
+            ks::ui::NormalizeToolbarControl(m_assess);
+            ks::ui::NormalizeToolbarControl(m_probe);
+            ks::ui::NormalizeToolbarControl(m_cancel);
 
             auto* split = new QSplitter(Qt::Vertical, this);
             m_table = new ks::ui::VisibleTableWidget(split);
@@ -180,7 +180,8 @@ namespace
                 "先评估描述符；实际打开测试需要当前评估快照，输入变化后必须重新评估。")));
             split->setStretchFactor(0, 3);
             split->setStretchFactor(1, 2);
-            layout->addWidget(split, 1);
+            workspace->results()->addWidget(split, 1);
+            workspace->finish();
 
             connect(current, &QPushButton::clicked, this, [this]() { m_pid->setText(QString::number(GetCurrentProcessId())); });
             connect(m_browse, &QPushButton::clicked, this, [this]()

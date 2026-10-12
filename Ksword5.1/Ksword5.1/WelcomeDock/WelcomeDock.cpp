@@ -2,6 +2,7 @@
 #include "../UI/FlatButtonTheme.h"
 #include "../UI/ToolbarMetrics.h"
 #include "../UI/PrimaryPageStyle.h"
+#include "../UI/PageControlStyle.h"
 
 #include "../HardwareDock/HardwareDock.h"
 #include "../Internationalization/LanguageManager.h"
@@ -255,7 +256,8 @@ WelcomeDock::WelcomeDock(QWidget* parent)
     m_mainLayout->addLayout(headerRightLayout, 1);
 
     QVBoxLayout* rootLayout = new QVBoxLayout(this);
-    rootLayout->setContentsMargins(16, 14, 16, 14);
+    rootLayout->setContentsMargins(16, 16, 16, 16);
+    ks::ui::StyleWorkspaceContentFrame(this, 16); // 欢迎页保留较宽阅读留白，四边与外弧一致。
     rootLayout->setSpacing(16);
     rootLayout->addLayout(m_mainLayout, 0);
 

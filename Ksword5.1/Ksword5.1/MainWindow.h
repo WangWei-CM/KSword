@@ -531,11 +531,11 @@ private:
 
     // updateResizeBorderOverlays 作用：
     // - 根据当前窗口尺寸重新摆放四条 3px 边框；
-    // - 最大化时隐藏边框，窗口化时显示并置顶。
+    // - 最大化时隐藏命中层；窗口化时保留命中，非置顶状态不绘制提示。
     void updateResizeBorderOverlays();
 
     // applyResizeBorderOverlayStyle 作用：
-    // - 按当前主题主蓝色刷新四条边框控件样式；
+    // - 置顶使用主题主蓝色，非置顶不绘制；始终保留原缩放命中区；
     // - 主题切换后可重复调用。
     void applyResizeBorderOverlayStyle();
 
@@ -677,10 +677,10 @@ private:
     QWidget* m_mainRootContainer = nullptr; // m_mainRootContainer：主窗口根容器（承载标题栏+Dock 管理器）。
     QVBoxLayout* m_mainRootLayout = nullptr; // m_mainRootLayout：主窗口根容器纵向布局。
     ads::CDockManager* m_pDockManager = nullptr; // m_pDockManager：ADS Dock 管理器主对象。
-    QWidget* m_resizeBorderTop = nullptr; // m_resizeBorderTop：顶部 3px 主题蓝色缩放边框。
-    QWidget* m_resizeBorderBottom = nullptr; // m_resizeBorderBottom：底部 3px 主题蓝色缩放边框。
-    QWidget* m_resizeBorderLeft = nullptr; // m_resizeBorderLeft：左侧 3px 主题蓝色缩放边框。
-    QWidget* m_resizeBorderRight = nullptr; // m_resizeBorderRight：右侧 3px 主题蓝色缩放边框。
+    QWidget* m_resizeBorderTop = nullptr; // 顶部 3px 缩放命中层，置顶才显示蓝色。
+    QWidget* m_resizeBorderBottom = nullptr; // 底部 3px 缩放命中层，置顶才显示蓝色。
+    QWidget* m_resizeBorderLeft = nullptr; // 左侧 3px 缩放命中层，置顶才显示蓝色。
+    QWidget* m_resizeBorderRight = nullptr; // 右侧 3px 缩放命中层，置顶才显示蓝色。
     QWidget* m_resizeCornerBottomLeft = nullptr; // m_resizeCornerBottomLeft：左下角 6x6 主题蓝色三角形缩放提示。
     QWidget* m_resizeCornerBottomRight = nullptr; // m_resizeCornerBottomRight：右下角 6x6 主题蓝色三角形缩放提示。
 

@@ -1,6 +1,7 @@
 #include "TablePresentation.h"
 #include "VisibleTableWidget.h"
 #include "./MainSurfaceStyle.h"
+#include "./RoundedViewSurface.h"
 #include "../theme.h"
 
 #include <QApplication>
@@ -26,6 +27,29 @@ namespace
     constexpr char kOriginalGrid[] = "ksword_table_presentation_original_grid";
     constexpr char kPending[] = "ksword_table_presentation_pending";
     constexpr char kInstalled[] = "ksword_table_presentation_installed";
+    constexpr char kApplying[] = "ksword_table_presentation_applying";
+    constexpr char kInitialized[] = "ksword_table_presentation_initialized";
+
+    // 本组件写入QSS产生的事件不回投自己；真实外部主题/字体通知仍由过滤器维护。
+    class PresentationChange final
+    {
+    public:
+        explicit PresentationChange(QAbstractItemView* view)
+            : m_view(view), m_previous(view->property(kApplying).toBool())
+        {
+            view->setProperty(kApplying, true);
+            view->setProperty(kInitialized, true);
+        }
+
+        ~PresentationChange()
+        {
+            if (m_view) m_view->setProperty(kApplying, m_previous);
+        }
+
+    private:
+        QPointer<QAbstractItemView> m_view;
+        bool m_previous;
+    };
 
     QString withoutPresentationBlock(QString style)
     {
@@ -65,9 +89,12 @@ namespace
         return qobject_cast<const QTableView*>(view) != nullptr || qobject_cast<const QTreeView*>(view) != nullptr;
     }
 
-    void schedulePresentation(QAbstractItemView* view)
+    void schedulePresentation(QAbstractItemView* view, bool deferHidden = false)
     {
-        if (!supportedView(view) || view->property(kPending).toBool()) return;
+        if (!supportedView(view)) return;
+        // 已初始化隐藏表只留原几何，Show时必然重算最新主题；首次Polish仍建立呈现基线。
+        if (deferHidden && !view->isVisible() && view->property(kInitialized).toBool()) return;
+        if (view->property(kPending).toBool()) return;
         view->setProperty(kPending, true);
         const QPointer<QAbstractItemView> guardedView(view);
         QTimer::singleShot(0, view, [guardedView]()
@@ -91,12 +118,18 @@ namespace
             {
             case QEvent::Polish:
             case QEvent::Show:
+                schedulePresentation(qobject_cast<QAbstractItemView*>(source));
+                break;
             case QEvent::StyleChange:
             case QEvent::FontChange:
             case QEvent::PaletteChange:
+                // 仅忽略此表格自己的样式回声，不吞真正的应用主题广播。
+                if (source->property(kApplying).toBool()) break;
+                schedulePresentation(qobject_cast<QAbstractItemView*>(source), true);
+                break;
             case QEvent::ApplicationPaletteChange:
                 // Only the view itself, never header/viewport/popup Show/Resize internals.
-                schedulePresentation(qobject_cast<QAbstractItemView*>(source));
+                schedulePresentation(qobject_cast<QAbstractItemView*>(source), true);
                 break;
             default:
                 break;
@@ -185,10 +218,13 @@ namespace ks::ui
     void ApplyTablePresentation(QAbstractItemView* view, const bool normalizeHeader)
     {
         if (!supportedView(view)) return;
+        const PresentationChange applying(view);
         view->setProperty(kNormalizeHeader, normalizeHeader);
         auto* table = qobject_cast<QTableView*>(view);
         if (PreservesCustomTablePresentation(view))
         {
+            // 专业自绘保留原外壳，同时撤掉此前可能已安装的极角装饰。
+            SetRoundedViewSurfaceEnabled(view, false);
             replacePresentationBlock(view, {});
             replacePresentationBlock(columnHeader(view), {});
             if (table != nullptr) replacePresentationBlock(table->verticalHeader(), {});
@@ -219,7 +255,7 @@ namespace ks::ui
         // 外围轻描边区分并排表格；冻结辅助窗格是同一表格内容，不重复加圆角边界。
         const bool auxiliaryPane = view->property("KSWORD_TABLE_INTERACTION_FROZEN_PANE_AUXILIARY").toBool();
         const QString outerFrame = auxiliaryPane ? QStringLiteral("border:0;border-radius:0;")
-            : QStringLiteral("border:1px solid %1;border-radius:6px;").arg(
+            : QStringLiteral("border:1px solid %1;border-radius:8px;").arg(
                 mainSurface ? surfaces.border.name()
                     : KswordTheme::BlendColors(KswordTheme::SurfaceColor(), KswordTheme::BorderColor(), 150).name());
         const QColor rowBackgrounds[] = {surfaces.content, surfaces.alternate};
@@ -237,6 +273,10 @@ namespace ks::ui
             "QTableView::item,QTableWidget::item,QTreeView::item,QTreeWidget::item{padding:%1;}"
             "QTableCornerButton::section{background:%2;border:0;border-bottom:1px solid %3;}")
             .arg(cellPadding, headerSurface, headerBorder, outerFrame, dataSurface));
+
+        // QSS 圆角只约束外框，不能裁剪子表头/viewport；四个极角显式补父背景。
+        // 冻结辅助窗格属于连体内部拼接，保持方角并让主表负责整个外壳。
+        SetRoundedViewSurfaceEnabled(view, !auxiliaryPane);
 
         // normalizeHeader=false and the existing header-specific opt-out retain custom geometry.
         if (!normalizeHeader || (table != nullptr && PreservesCustomTableHeaderStyle(table)))

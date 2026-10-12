@@ -1211,7 +1211,7 @@ namespace
             }
 
             m_tabs = new QTabWidget(this);
-            ks::ui::StylePageTabs(m_tabs);
+            ks::ui::StylePageTabsContentFrame(m_tabs); // 宿主自己的扫描结果使用统一框架。
             if (descriptor.visualization.enabled)
             {
                 m_resultTable = new ks::ui::VisibleTableWidget(m_tabs);

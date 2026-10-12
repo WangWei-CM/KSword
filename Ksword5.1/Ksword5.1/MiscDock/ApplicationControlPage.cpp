@@ -1,6 +1,8 @@
 #include "../UI/StructuredFieldView.h"
 #include "../UI/PageControlStyle.h"
 #include "../UI/PrimaryPageStyle.h"
+#include "../UI/ParameterWorkspace.h"
+#include "../UI/FlatButtonTheme.h"
 #include "../UI/SecondaryPageLayout.h"
 #include "../UI/ToolbarMetrics.h"
 #include "ApplicationControlPage.h"
@@ -506,14 +508,13 @@ namespace ks::misc
     void ApplicationControlPage::initializeUi()
     {
         m_rootLayout = new QVBoxLayout(this);
-        m_rootLayout->setContentsMargins(0, 0, 0, 0);
-        m_rootLayout->setSpacing(6);
+        ks::ui::StyleWorkspacePage(this);
 
         m_toolbarWidget = new QWidget(this);
         // 页面公共动作采用单条工具带，子页的策略与结果区域不再重复铺背景。
         ks::ui::StylePrimaryToolbar(m_toolbarWidget);
         auto* toolbarLayout = new QHBoxLayout(m_toolbarWidget);
-        toolbarLayout->setContentsMargins(6, 4, 6, 4);
+        toolbarLayout->setContentsMargins(16, 12, 16, 12);
         toolbarLayout->setSpacing(8);
 
         m_refreshButton = new QPushButton(QIcon(QStringLiteral(":/Icon/process_refresh.svg")), QStringLiteral("刷新"), m_toolbarWidget);
@@ -522,6 +523,8 @@ namespace ks::misc
         m_exportButton->setToolTip(QStringLiteral("导出当前页主表格为 TSV"));
         m_statusLabel = new QLabel(QStringLiteral("状态: 正在加载…"), m_toolbarWidget);
         m_statusLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
+        m_statusLabel->setWordWrap(true);
+        m_statusLabel->setMinimumWidth(0);
 
         toolbarLayout->addWidget(m_refreshButton);
         toolbarLayout->addWidget(m_exportButton);
@@ -531,7 +534,7 @@ namespace ks::misc
         m_rootLayout->addWidget(m_toolbarWidget, 0);
 
         m_tabWidget = new QTabWidget(this);
-        ks::ui::StylePageTabs(m_tabWidget);
+        ks::ui::StylePageTabsContentFrame(m_tabWidget);
         m_rootLayout->addWidget(m_tabWidget, 1);
 
         m_appLockerPage = buildAppLockerPage();
@@ -548,6 +551,14 @@ namespace ks::misc
         m_tabWidget->addTab(m_eventPage, QIcon(QStringLiteral(":/Icon/process_details.svg")), QStringLiteral("事件日志"));
         m_tabWidget->addTab(m_fileDiagnosisPage, QIcon(QStringLiteral(":/Icon/process_details.svg")), QStringLiteral("文件诊断"));
 
+        // 明确登记本页的普通操作，不改策略权限、启用状态与写入确认。
+        for (QPushButton* button : { m_refreshButton, m_exportButton, m_appLockerEditButton,
+            m_wdacEditButton, m_defenderEditButton, m_fileBrowseButton, m_fileDiagnoseButton })
+        {
+            ks::ui::ApplyFlatButtonTheme(button, ks::ui::FlatButtonTone::Neutral,
+                ks::ui::FlatButtonAppearance::Solid);
+        }
+
         connect(m_refreshButton, &QPushButton::clicked, this, [this]() { refreshAsync(); });
         connect(m_exportButton, &QPushButton::clicked, this, [this]() { exportCurrentTableTsv(); });
     }
@@ -556,8 +567,10 @@ namespace ks::misc
     {
         auto* page = new QWidget(this);
         auto* layout = new QVBoxLayout(page);
-        layout->setContentsMargins(0, 0, 0, 0);
-        layout->setSpacing(6);
+        // 策略摘要和原表格共用无描边工作面，保留各页的列表高度分配。
+        layout->setContentsMargins(16, 16, 16, 16);
+        layout->setSpacing(12);
+        ks::ui::StylePrimaryContentPanel(page, false);
 
         m_appLockerSummary = new ks::ui::StructuredFieldView(page);
 
@@ -594,8 +607,9 @@ namespace ks::misc
     {
         auto* page = new QWidget(this);
         auto* layout = new QVBoxLayout(page);
-        layout->setContentsMargins(0, 0, 0, 0);
-        layout->setSpacing(6);
+        layout->setContentsMargins(16, 16, 16, 16);
+        layout->setSpacing(12);
+        ks::ui::StylePrimaryContentPanel(page, false);
 
         m_wdacSummary = new ks::ui::StructuredFieldView(page);
 
@@ -637,8 +651,9 @@ namespace ks::misc
     {
         auto* page = new QWidget(this);
         auto* layout = new QVBoxLayout(page);
-        layout->setContentsMargins(0, 0, 0, 0);
-        layout->setSpacing(6);
+        layout->setContentsMargins(16, 16, 16, 16);
+        layout->setSpacing(12);
+        ks::ui::StylePrimaryContentPanel(page, false);
 
         m_defenderSummary = new ks::ui::StructuredFieldView(page);
 
@@ -674,8 +689,9 @@ namespace ks::misc
     {
         auto* page = new QWidget(this);
         auto* layout = new QVBoxLayout(page);
-        layout->setContentsMargins(0, 0, 0, 0);
-        layout->setSpacing(6);
+        layout->setContentsMargins(16, 16, 16, 16);
+        layout->setSpacing(12);
+        ks::ui::StylePrimaryContentPanel(page, false);
 
         m_platformSummary = new ks::ui::StructuredFieldView(page);
 
@@ -696,8 +712,9 @@ namespace ks::misc
     {
         auto* page = new QWidget(this);
         auto* layout = new QVBoxLayout(page);
-        layout->setContentsMargins(0, 0, 0, 0);
-        layout->setSpacing(6);
+        layout->setContentsMargins(16, 16, 16, 16);
+        layout->setSpacing(12);
+        ks::ui::StylePrimaryContentPanel(page, false);
 
         auto* filterRow = new QWidget(page);
         auto* filterLayout = new QHBoxLayout(filterRow);
@@ -764,8 +781,9 @@ namespace ks::misc
     {
         auto* page = new QWidget(this);
         auto* layout = new QVBoxLayout(page);
-        layout->setContentsMargins(0, 0, 0, 0);
-        layout->setSpacing(6);
+        layout->setContentsMargins(16, 16, 16, 16);
+        layout->setSpacing(12);
+        ks::ui::StylePrimaryContentPanel(page, false);
 
         auto* inputRow = new QWidget(page);
         auto* inputLayout = new QHBoxLayout(inputRow);
@@ -781,6 +799,8 @@ namespace ks::misc
         inputLayout->addWidget(m_filePathEdit, 1);
         inputLayout->addWidget(m_fileBrowseButton);
         inputLayout->addWidget(m_fileDiagnoseButton);
+        // 文件路径是明确输入区，搜索/表格内置编辑器不在此登记范围。
+        ks::ui::StyleParameterFields(inputRow);
 
         m_fileDiagnosisSummary = new ks::ui::StructuredFieldView(page);
 

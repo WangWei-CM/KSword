@@ -3,6 +3,7 @@
 #include "../UI/PrimaryPageStyle.h"
 #include "../UI/ToolbarMetrics.h"
 #include "../UI/DetailDialogChrome.h"
+#include "../UI/UI_All.h"
 #include "DriverDock.Internal.h"
 #include "../UI/TableInteractionSupport.h"
 #include "../UI/VisibleTableWidget.h"
@@ -907,17 +908,19 @@ void DriverDock::showSelectedUnloadedPiddbDetailDialog()
         driverText(
             "driver.unloaded.dialog.title",
             QStringLiteral("已卸载驱动详情")));
-    dialog.resize(860, 620);
+    ks::ui::applyResponsiveWindowGeometry(&dialog, this, QSize(860, 620), QSize(480, 360));
     dialog.setStyleSheet(
         KswordTheme::OpaqueDialogStyle(dialog.objectName()));
     QVBoxLayout* layout = new QVBoxLayout(&dialog);
     layout->setContentsMargins(10, 10, 10, 10);
     layout->setSpacing(8);
+    // 驱动标识与卡片正文分开，保留原字段文档作为复制来源。
+    layout->addWidget(ks::ui::CreateDetailSummaryHeader(&dialog, dialog.windowTitle()));
 
     ks::ui::StructuredFieldView* editor = new ks::ui::StructuredFieldView(&dialog);
 
     editor->setDocument(detail);
-    layout->addWidget(editor, 1);
+    layout->addWidget(ks::ui::CreateDetailFieldProjection(editor, &dialog), 1);
 
     QDialogButtonBox* buttonBox =
         new QDialogButtonBox(QDialogButtonBox::Close, &dialog);

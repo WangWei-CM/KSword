@@ -4437,7 +4437,7 @@ void HardwareDock::startInitialSamplingAfterFirstPaint()
 void HardwareDock::initializeUi()
 {
     m_rootLayout = new QVBoxLayout(this);
-    m_rootLayout->setContentsMargins(4, 4, 4, 4);
+    m_rootLayout->setContentsMargins(0, 0, 0, 0); // Tab自身统一6px内容留白。
     m_rootLayout->setSpacing(6);
 
     // 顶部横向页签：
@@ -4445,7 +4445,7 @@ void HardwareDock::initializeUi()
     // - 页签按内容宽度排列，空间不足时使用滚动按钮，避免强行压缩文字；
     // - 用户可见名称统一使用清晰中文，内部协议缩写放到页面说明中。
     m_sideTabWidget = new QTabWidget(this);
-    ks::ui::StylePageTabs(m_sideTabWidget);
+    ks::ui::StylePageTabsContentFrame(m_sideTabWidget);
     configureCompressibleWidget(m_sideTabWidget, QSizePolicy::Expanding, QSizePolicy::Expanding);
     m_sideTabWidget->setTabPosition(QTabWidget::North);
     m_sideTabWidget->setDocumentMode(true);
@@ -5030,6 +5030,8 @@ void HardwareDock::beginUtilizationWindowPick()
     }
     QDialog* const prompt = new QDialog(m_utilizationFloatingWindow.data(),
         Qt::Tool | Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint);
+    // 鼠标拾取提示不是属性窗，保持原提示/取消结构及其相对浮窗位置。
+    prompt->setProperty("ksword_detail_keep_layout", true);
     prompt->setAttribute(Qt::WA_DeleteOnClose);
     QVBoxLayout* const layout = new QVBoxLayout(prompt);
     layout->addWidget(new QLabel(ks::i18n::contextText(
@@ -5038,6 +5040,7 @@ void HardwareDock::beginUtilizationWindowPick()
     QPushButton* const cancel = new QPushButton(ks::i18n::contextText(
         QStringLiteral("hardware.utilization.floating.pick_cancel"),
         QStringLiteral("取消")), prompt);
+    ks::ui::NormalizeToolbarControl(cancel);
     layout->addWidget(cancel);
     connect(cancel, &QPushButton::clicked, prompt, &QDialog::reject);
     connect(prompt, &QDialog::finished, this, [this]()
@@ -7321,6 +7324,7 @@ void HardwareDock::ensureDiskMonitorTabInitialized()
 
     m_diskMonitorPage = new DiskMonitorPage(m_diskMonitorHostPage);
     hostLayout->addWidget(m_diskMonitorPage, 1);
+    m_diskMonitorHostPage->setProperty("ksword_page_frame_host", true); // 消除占位壳与真实页重复外围间距。
 }
 
 void HardwareDock::ensureOtherDevicesTabInitialized()
@@ -7351,6 +7355,7 @@ void HardwareDock::ensureOtherDevicesTabInitialized()
 
     m_otherDevicesPage = new HardwareOtherDevicesPage(m_otherDevicesHostPage);
     hostLayout->addWidget(m_otherDevicesPage, 1);
+    m_otherDevicesHostPage->setProperty("ksword_page_frame_host", true);
 }
 
 void HardwareDock::initializeCoreCharts()
@@ -10952,7 +10957,24 @@ void HardwareDock::updateCpuDetailTable(
     const int rowCount = std::max(
         static_cast<int>(coreUsageList.size()),
         static_cast<int>(powerInfoList.size()));
-    m_cpuDetailTable->setRowCount(rowCount);
+    if (m_cpuDetailTable->rowCount() != rowCount)
+    {
+        m_cpuDetailTable->setRowCount(rowCount);
+    }
+
+    // 每秒采样继续保留完整模型；只更新改变的字段，避免隐藏页也反复分配全部表格项。
+    const auto updateCell = [this](const int row, const int column, const QString& value)
+    {
+        QTableWidgetItem* item = m_cpuDetailTable->item(row, column); // 复用原单元格及其选择身份。
+        if (item == nullptr)
+        {
+            m_cpuDetailTable->setItem(row, column, new QTableWidgetItem(value));
+        }
+        else if (item->text() != value)
+        {
+            item->setText(value);
+        }
+    };
 
     const QString sensorText = buildCpuSensorText(false);
     QString temperatureText = QStringLiteral("N/A");
@@ -10982,13 +11004,13 @@ void HardwareDock::updateCpuDetailTable(
             limitMhzText = QString::number(snapshot.limitMhz);
         }
 
-        m_cpuDetailTable->setItem(rowIndex, 0, new QTableWidgetItem(coreName));
-        m_cpuDetailTable->setItem(rowIndex, 1, new QTableWidgetItem(usageText));
-        m_cpuDetailTable->setItem(rowIndex, 2, new QTableWidgetItem(currentMhzText));
-        m_cpuDetailTable->setItem(rowIndex, 3, new QTableWidgetItem(maxMhzText));
-        m_cpuDetailTable->setItem(rowIndex, 4, new QTableWidgetItem(limitMhzText));
-        m_cpuDetailTable->setItem(rowIndex, 5, new QTableWidgetItem(temperatureText));
-        m_cpuDetailTable->setItem(rowIndex, 6, new QTableWidgetItem(voltageText));
+        updateCell(rowIndex, 0, coreName);
+        updateCell(rowIndex, 1, usageText);
+        updateCell(rowIndex, 2, currentMhzText);
+        updateCell(rowIndex, 3, maxMhzText);
+        updateCell(rowIndex, 4, limitMhzText);
+        updateCell(rowIndex, 5, temperatureText);
+        updateCell(rowIndex, 6, voltageText);
     }
 
     if (m_cpuDetailLabel != nullptr)

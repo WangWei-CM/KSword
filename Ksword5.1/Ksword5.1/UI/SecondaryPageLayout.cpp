@@ -1,7 +1,9 @@
 #include "../Framework.h"
 #include "./SecondaryPageLayout.h"
 #include "./ThemeBinding.h"
+#include "./FlatButtonTheme.h"
 #include "./ToolbarMetrics.h"
+#include "./PageTabMotion.h"
 #include "../theme.h"
 
 #include <QDialogButtonBox>
@@ -11,6 +13,7 @@
 #include <QLabel>
 #include <QPointer>
 #include <QPushButton>
+#include <QToolButton>
 #include <QStackedWidget>
 #include <QTabBar>
 #include <QTabWidget>
@@ -31,10 +34,79 @@ namespace
         {
             style.remove(first, last + end.size() - first);
         }
-        style = style.trimmed() + QLatin1Char('\n') + begin + rules + end;
+        const QString ownedBlock = begin + rules + end;
+        widget->setProperty("ksword_secondary_style_block", ownedBlock);
+        style = style.trimmed() + QLatin1Char('\n') + ownedBlock;
         if (widget->styleSheet() != style)
         {
             widget->setStyleSheet(style);
+        }
+    }
+
+    // 已登记底栏只处理布局中的普通动作，不扫描其它页面或重置业务按钮状态/颜色。
+    void styleFooterAction(QAbstractButton* button)
+    {
+        if (!qobject_cast<QPushButton*>(button) && !qobject_cast<QToolButton*>(button))
+        {
+            return;
+        }
+        ks::ui::NormalizeToolbarControl(button);
+        QString remaining = button->styleSheet();
+        remaining.remove(ks::ui::ToolbarControlGeometryStyle().trimmed());
+        remaining.remove(ks::ui::ToolbarIconGeometryStyle().trimmed());
+        if (button->property("ksword_flat_button_managed").toBool())
+        {
+            // managed标记可能在业务改成专用QSS后仍保留；只剔除实际共享块，不能抢回业务色。
+            const QString begin = QStringLiteral("/*KSWORD_FLAT_BUTTON_BEGIN*/");
+            const QString end = QStringLiteral("/*KSWORD_FLAT_BUTTON_END*/");
+            const qsizetype first = remaining.indexOf(begin);
+            const qsizetype last = first < 0 ? -1 : remaining.indexOf(end, first);
+            if (first >= 0 && last >= first)
+            {
+                remaining.remove(first, last + end.size() - first);
+            }
+            if (button->property("ksword_flat_button_appearance").toInt()
+                == static_cast<int>(ks::ui::FlatButtonAppearance::Auto)
+                && remaining.trimmed().isEmpty())
+            {
+                ks::ui::ApplyFlatButtonTheme(button,
+                    static_cast<ks::ui::FlatButtonTone>(button->property("ksword_flat_button_tone").toInt()),
+                    ks::ui::FlatButtonAppearance::Solid);
+            }
+            return; // 显式Danger/Accent/Flat策略和其原信号由业务继续持有。
+        }
+        if (ks::ui::HasWidgetThemeBinding(button))
+        {
+            return;
+        }
+        if (remaining.trimmed().isEmpty())
+        {
+            ks::ui::ApplyFlatButtonTheme(button, ks::ui::FlatButtonTone::Neutral,
+                ks::ui::FlatButtonAppearance::Solid);
+        }
+    }
+
+    void styleFooterLayout(QLayout* layout)
+    {
+        if (!layout)
+        {
+            return;
+        }
+        for (int index = 0; index < layout->count(); ++index)
+        {
+            QLayoutItem* item = layout->itemAt(index);
+            if (item->layout())
+            {
+                styleFooterLayout(item->layout());
+            }
+            else if (auto* box = qobject_cast<QDialogButtonBox*>(item->widget()))
+            {
+                for (auto* button : box->buttons()) styleFooterAction(button);
+            }
+            else
+            {
+                styleFooterAction(qobject_cast<QAbstractButton*>(item->widget()));
+            }
         }
     }
 
@@ -197,6 +269,12 @@ namespace ks::ui
         bar->setProperty("ksword_secondary_tabs", true);
         bar->setExpanding(false);
         bar->setUsesScrollButtons(true);
+        InstallPageTabMotion(bar, []()
+        {
+            const QColor selected = KswordTheme::WindowColor();
+            return PageTabMotionColors{selected, KswordTheme::EnsureTextContrast(
+                KswordTheme::ControlAccentColor(), selected, 3.0)};
+        });
         const QPointer<QTabBar> target(bar);
         BindWidgetTheme(bar, [target]()
         {
@@ -209,11 +287,11 @@ namespace ks::ui
                 "QTabBar[ksword_secondary_tabs=\"true\"]{background:transparent;border-bottom:1px solid %1;}"
                 "QTabBar[ksword_secondary_tabs=\"true\"]::tab{background:transparent;color:%2;"
                 "border:0;border-bottom:2px solid transparent;padding:8px 14px;margin:0;min-height:16px;}"
-                "QTabBar[ksword_secondary_tabs=\"true\"]::tab:selected{color:%3;border-bottom-color:%4;}"
-                "QTabBar[ksword_secondary_tabs=\"true\"]::tab:hover{background:%5;color:%3;}"
-                "QTabBar[ksword_secondary_tabs=\"true\"]::tab:disabled{color:%6;}")
+                "QTabBar[ksword_secondary_tabs=\"true\"]::tab:selected{color:%3;border-bottom-color:transparent;}"
+                "QTabBar[ksword_secondary_tabs=\"true\"]::tab:hover{background:%4;color:%3;}"
+                "QTabBar[ksword_secondary_tabs=\"true\"]::tab:disabled{color:%5;}")
                 .arg(KswordTheme::BorderColor().name(), KswordTheme::TextSecondaryColor().name(),
-                    KswordTheme::TextPrimaryColor().name(), KswordTheme::ControlAccentColor().name(),
+                    KswordTheme::TextPrimaryColor().name(),
                     KswordTheme::BlendColors(base, KswordTheme::ControlAccentColor(), 16).name(),
                     KswordTheme::TextDisabledColor().name());
             SetOwnedStyle(target, rules + (target->property("ksword_settings_tabs").toBool()
@@ -307,6 +385,26 @@ namespace ks::ui
             footer->layout()->setContentsMargins(16, 8, 16, 8);
             footer->layout()->setSpacing(8);
         }
+        if (auto* box = qobject_cast<QDialogButtonBox*>(footer))
+        {
+            for (auto* button : box->buttons()) styleFooterAction(button);
+        }
+        else
+        {
+            styleFooterLayout(footer->layout());
+        }
+        // 常见构造顺序先登记底栏再加按钮；只补这一行的构造尾部，不建立全局遍历。
+        QTimer::singleShot(0, footer, [footer]()
+        {
+            if (auto* box = qobject_cast<QDialogButtonBox*>(footer))
+            {
+                for (auto* button : box->buttons()) styleFooterAction(button);
+            }
+            else
+            {
+                styleFooterLayout(footer->layout());
+            }
+        });
         const QPointer<QWidget> target(footer);
         BindWidgetTheme(footer, [target]()
         {

@@ -219,6 +219,8 @@ namespace ks::ui
     MemoryWorkbenchView::MemoryWorkbenchView(QWidget* parent)
         : QWidget(parent)
     {
+        // 专业编辑/诊断布局由工作台统一维护，详情安装器仅接管它所属窗口的外围结构。
+        setProperty("ksword_detail_keep_layout", true);
         auto& shared = WorkbenchShared::Instance();
 
         // 1) WorkbenchTarget：用共享单例产出的服务构造，本视图私有。

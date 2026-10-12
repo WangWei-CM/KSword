@@ -1,7 +1,9 @@
-#include "MainWindow.h"
+﻿#include "MainWindow.h"
 #include "UI/ToolbarMetrics.h"
 #include "UI/SecondaryPageLayout.h"
 #include "UI/MainSurfaceStyle.h"
+#include "UI/PageControlStyle.h"
+#include "UI/DockTabSelectionAnimation.h"
 #include "UI/PageNavigationBridge.h"
 #include "UI/McpLocalBridge.h"
 #include "UI/McpHexCanvasAdapter.h"
@@ -605,10 +607,18 @@ namespace
             setMouseTracking(true);
         }
 
+        // 置顶才显示角标；关闭提示只影响绘制，原角落缩放命中区继续保留。
+        void setHintVisible(bool visible)
+        {
+            m_hintVisible = visible;
+            update(); // 主题换色时，即使可见状态相同也重画当前颜色。
+        }
+
     protected:
         void paintEvent(QPaintEvent* event) override
         {
             Q_UNUSED(event);
+            if (!m_hintVisible) return;
 
             QPainter painter(this);
             painter.setRenderHint(QPainter::Antialiasing, false);
@@ -636,6 +646,7 @@ namespace
 
     private:
         Corner m_corner; // m_corner：标记当前控件绘制左下角还是右下角三角形。
+        bool m_hintVisible = false; // 非置顶默认不绘制外沿提示。
     };
 
     // dockTabHoverFillColor 作用：
@@ -796,7 +807,7 @@ namespace
     }
 
     // refreshAdsDockTabVisualIdentities 作用：
-    // - 扫描某个根窗口下已经存在的 ADS 标签并补齐动态属性；
+    // - 按 ADS 容器的实际 Dock 登记表定位标签并补齐动态属性；
     // - 适用于 restoreState 或浮动窗口创建后产生/迁移的标签。
     // 入参 rootWidget：扫描根节点；为空时直接返回。
     // 返回：无返回值。
@@ -807,20 +818,44 @@ namespace
             return;
         }
 
-        const QList<ads::CDockWidgetTab*> dockTabs =
-            rootWidget->findChildren<ads::CDockWidgetTab*>();
-        for (ads::CDockWidgetTab* dockTab : dockTabs)
+        // Dock 页面可能包含数千控件；导航身份不需要两次递归进入业务页。
+        // manager 登记表含隐藏/自动隐藏 Dock，浮动容器直接提供所属 Dock 列表。
+        QList<ads::CDockWidget*> dockWidgets;
+        if (auto* manager = qobject_cast<ads::CDockManager*>(rootWidget))
         {
-            configureDockTabStyleSurface(dockTab, kKswordDockTabPropertyName);
-            applyDockTabTextColor(dockTab, dockTab->property("activeTab").toBool());
+            dockWidgets = manager->dockWidgetsMap().values();
         }
-
-        const QList<ads::CAutoHideTab*> autoHideTabs =
-            rootWidget->findChildren<ads::CAutoHideTab*>();
-        for (ads::CAutoHideTab* autoHideTab : autoHideTabs)
+        else if (auto* floating = qobject_cast<ads::CFloatingDockContainer*>(rootWidget))
         {
-            configureDockTabStyleSurface(autoHideTab, kKswordAutoHideTabPropertyName);
-            applyDockTabTextColor(autoHideTab, autoHideTab->property("activeTab").toBool());
+            dockWidgets = floating->dockWidgets();
+        }
+        else if (auto* container = qobject_cast<ads::CDockContainerWidget*>(rootWidget))
+        {
+            // 通用容器的汇总方法受保护，使用公开分区列表，仍不递归进入业务控件树。
+            for (int areaIndex = 0; areaIndex < container->dockAreaCount(); ++areaIndex)
+            {
+                ads::CDockAreaWidget* area = container->dockArea(areaIndex); // 当前真实 Dock 分区。
+                if (area != nullptr)
+                {
+                    dockWidgets.append(area->dockWidgets());
+                }
+            }
+        }
+        for (ads::CDockWidget* dockWidget : dockWidgets)
+        {
+            if (dockWidget == nullptr)
+            {
+                continue;
+            }
+            configureAdsDockTabVisualIdentity(dockWidget);
+            for (QWidget* tab : {static_cast<QWidget*>(dockWidget->tabWidget()),
+                static_cast<QWidget*>(dockWidget->sideTabWidget())})
+            {
+                if (tab != nullptr)
+                {
+                    applyDockTabTextColor(tab, tab->property("activeTab").toBool());
+                }
+            }
         }
     }
 
@@ -971,6 +1006,12 @@ namespace
         void paintEvent(QPaintEvent* paintEventObject) override
         {
             ads::CDockWidgetTab::paintEvent(paintEventObject);
+            // 原标签继续绘制文字与处理输入，动画组件只负责连续移动的底面和选中线。
+            QPainter painter(this);
+            if (ks::ui::PaintAnimatedDockTabSelection(this, painter))
+            {
+                return;
+            }
             if (!isEnabled() || !underMouse())
             {
                 return;
@@ -980,7 +1021,6 @@ namespace
             // 选中标签保持背景色派生底面，并补回被背景补绘覆盖的主题色选中标记。
             // 子 QLabel 会在父控件 paintEvent 返回后再绘制，因此文字不会被遮住。
             const bool activeTab = property("activeTab").toBool();
-            QPainter painter(this);
             painter.setPen(Qt::NoPen);
             painter.setBrush(dockTabHoverFillColor(activeTab));
             painter.drawRect(paintEventObject != nullptr ? paintEventObject->rect() : rect());
@@ -1391,7 +1431,8 @@ namespace
 
     // comboBoxForPopupView 作用：
     // - 输入：QComboBox 弹出列表使用的 QAbstractItemView；
-    // - 处理：先按 QObject 父链定位所属组合框，再以 QApplication 控件集合兜底；
+    // - 处理：按 Qt Popup 的 QObject 所有权父链定位所属组合框；
+    //   setView 的自定义视图同样由组合框容器接管，不创建其它组合框的隐藏视图。
     // - 返回：所属组合框，无法确认时返回 nullptr。
     QComboBox* comboBoxForPopupView(QAbstractItemView* const itemView)
     {
@@ -1408,21 +1449,6 @@ namespace
             }
         }
 
-        QWidget* const popupWindow = itemView->window();
-        if (popupWindow == nullptr || !popupWindow->windowFlags().testFlag(Qt::Popup))
-        {
-            return nullptr;
-        }
-
-        const QWidgetList allWidgetList = QApplication::allWidgets();
-        for (QWidget* const widget : allWidgetList)
-        {
-            QComboBox* const comboBox = qobject_cast<QComboBox*>(widget);
-            if (comboBox != nullptr && comboBox->view() == itemView)
-            {
-                return comboBox;
-            }
-        }
         return nullptr;
     }
 
@@ -1621,7 +1647,7 @@ namespace
 
     // GlobalComboPopupThemeFilter 作用：
     // - 监听应用范围内的控件显示事件；
-    // - 对新建、懒加载和主题切换后的普通组合框，在当前 Show 分发结束后更新 Popup 主题；
+    // - 只处理实际 Popup 的容器/视图，在当前 Show 分发结束后更新主题；
     // - 组合框本体可保留业务局部样式，但只要 Popup 没有直接样式就统一补齐不透明列表表面。
     class GlobalComboPopupThemeFilter final : public QObject
     {
@@ -1655,13 +1681,21 @@ namespace
                 }
                 return QObject::eventFilter(watchedObject, eventObject);
             }
+            // 普通窗口/卡片的每个子控件都会收到 Show，不能逐个递归查整棵详情树。
+            // 仅 Popup 顶层容器查找一次视图；视图自身的 Show 使用直接类型判断。
             QAbstractItemView* itemView = qobject_cast<QAbstractItemView*>(watchedObject);
-            if (itemView == nullptr)
+            if (watchedWidget == nullptr || (itemView == nullptr && !watchedWidget->isWindow()))
             {
-                if (watchedWidget != nullptr)
-                {
-                    itemView = watchedWidget->findChild<QAbstractItemView*>();
-                }
+                return QObject::eventFilter(watchedObject, eventObject);
+            }
+            QWidget* const popupWindow = watchedWidget != nullptr ? watchedWidget->window() : nullptr;
+            if (popupWindow == nullptr || !popupWindow->windowFlags().testFlag(Qt::Popup))
+            {
+                return QObject::eventFilter(watchedObject, eventObject);
+            }
+            if (itemView == nullptr && watchedWidget == popupWindow)
+            {
+                itemView = popupWindow->findChild<QAbstractItemView*>();
             }
 
             QComboBox* combo = comboBoxForPopupView(itemView);
@@ -1722,7 +1756,11 @@ namespace
             const bool noExplicitMenuStyle = menuWidget->styleSheet().trimmed().isEmpty();
             if (noExplicitMenuStyle || autoThemedByKsword)
             {
-                menuWidget->setStyleSheet(KswordTheme::ContextMenuStyle());
+                const QString menuStyle = KswordTheme::ContextMenuStyle();
+                if (menuWidget->styleSheet() != menuStyle)
+                {
+                    menuWidget->setStyleSheet(menuStyle);
+                }
                 menuWidget->setProperty("ksword_auto_context_menu_themed", true);
             }
             if (isKswordPopupTopMostTrackingEnabled())
@@ -2282,8 +2320,14 @@ namespace
             return;
         }
 
-        verticalHeader->setDefaultSectionSize(compactSectionSize);
-        tableView->setProperty(kKswordCompactRowHeightAppliedPropertyName, true);
+        if (verticalHeader->defaultSectionSize() != compactSectionSize)
+        {
+            verticalHeader->setDefaultSectionSize(compactSectionSize);
+        }
+        if (!tableView->property(kKswordCompactRowHeightAppliedPropertyName).toBool())
+        {
+            tableView->setProperty(kKswordCompactRowHeightAppliedPropertyName, true);
+        }
     }
 
     class GlobalTableSelectionOutlineFilter final : public QObject
@@ -2369,7 +2413,7 @@ namespace
 
     // ensureGlobalComboPopupThemeFilterInstalled 作用：
     // - 安装一次应用级组合框 Popup 主题过滤器；
-    // - 同时刷新已创建组合框，保证主题切换后下一次展开立即使用不透明背景。
+    // - 主题变化只刷新正在显示的 Popup，下次展开由 Show 接入，避免预建所有隐藏列表。
     void ensureGlobalComboPopupThemeFilterInstalled()
     {
         QApplication* appInstance = qobject_cast<QApplication*>(QCoreApplication::instance());
@@ -2385,10 +2429,17 @@ namespace
             appInstance->installEventFilter(comboPopupThemeFilter);
         }
 
-        const QWidgetList allWidgetList = appInstance->allWidgets();
-        for (QWidget* const widget : allWidgetList)
+        // topLevelWidgets 只枚举窗口，不进入每个页签的全部子控件。
+        // 尚未打开的组合框保持 Qt 的惰性 Popup 创建，避免主题按钮变成隐式预加载。
+        for (QWidget* const popupWindow : appInstance->topLevelWidgets())
         {
-            applyOpaqueComboPopupTheme(qobject_cast<QComboBox*>(widget));
+            if (popupWindow == nullptr || !popupWindow->isVisible()
+                || !popupWindow->windowFlags().testFlag(Qt::Popup))
+            {
+                continue;
+            }
+            QAbstractItemView* const itemView = popupWindow->findChild<QAbstractItemView*>();
+            scheduleOpaqueComboPopupTheme(comboBoxForPopupView(itemView));
         }
     }
 
@@ -2424,11 +2475,13 @@ namespace
         }
 
         static GlobalTableSelectionOutlineFilter* tableSelectionOutlineFilter = nullptr;
-        if (tableSelectionOutlineFilter == nullptr)
+        if (tableSelectionOutlineFilter != nullptr)
         {
-            tableSelectionOutlineFilter = new GlobalTableSelectionOutlineFilter(appInstance);
-            appInstance->installEventFilter(tableSelectionOutlineFilter);
+            // 后续新表格由实际 Show 接入，选中描边读取当前主题，无需主题切换再扫全应用。
+            return;
         }
+        tableSelectionOutlineFilter = new GlobalTableSelectionOutlineFilter(appInstance);
+        appInstance->installEventFilter(tableSelectionOutlineFilter);
 
         for (QWidget* widget : appInstance->allWidgets())
         {
@@ -2465,7 +2518,10 @@ namespace
                 continue;
             }
 
-            itemView->setFont(applicationFont);
+            if (itemView->font() != applicationFont)
+            {
+                itemView->setFont(applicationFont);
+            }
 
             // 紧凑行高是按字体算出来的，字体换了就必须跟着重算，
             // 否则调大字号后行高不变会把文字压扁。
@@ -3734,6 +3790,39 @@ namespace
             serviceState == SERVICE_CONTINUE_PENDING;
     }
 
+    // R0PromptServiceState：只读预检结果；查询失败仍保持原行为，不猜测驱动状态或弹启用框。
+    struct R0PromptServiceState
+    {
+        bool known = false; // known：SCM 状态已确认，服务不存在也属于已确认未运行。
+        bool running = false; // running：与原查询共用运行/启动中状态定义。
+    };
+
+    // queryR0PromptServiceState：工作线程执行提示前的 SCM 查询，无 UI、无启停或权限修改。
+    R0PromptServiceState queryR0PromptServiceState()
+    {
+        R0PromptServiceState result;
+        ScopedServiceHandle scmHandle(::OpenSCManagerW(nullptr, SERVICES_ACTIVE_DATABASE, SC_MANAGER_CONNECT));
+        if (!scmHandle.isValid())
+        {
+            return result;
+        }
+        ScopedServiceHandle serviceHandle(::OpenServiceW(scmHandle.get(), kR0DriverServiceName, SERVICE_QUERY_STATUS));
+        if (!serviceHandle.isValid())
+        {
+            result.known = (::GetLastError() == ERROR_SERVICE_DOES_NOT_EXIST);
+            return result;
+        }
+        // status/errorCode 只承接原有 QueryServiceStatusEx，不持有窗口或 DriverClient 句柄。
+        SERVICE_STATUS_PROCESS status{};
+        DWORD errorCode = ERROR_SUCCESS;
+        result.known = queryServiceStatus(serviceHandle.get(), status, errorCode);
+        if (result.known)
+        {
+            result.running = isRunningLikeServiceState(status.dwCurrentState);
+        }
+        return result;
+    }
+
     // enableCurrentProcessPrivilege 作用：
     // - 尝试为当前进程启用指定权限（例如 SeLoadDriverPrivilege）；
     // - 用于 NtUnloadDriver 调用前的权限准备。
@@ -3877,6 +3966,9 @@ namespace
     //         MainWindow 是单实例窗口，这里用文件级静态状态即可覆盖全部入口；
     // - 返回：无；true 表示线程池里已经有一次启停任务在跑。
     std::atomic_bool g_r0ServiceOperationInFlight{ false };
+    // g_r0ServiceOperationGeneration：每次接受启停即递增，使提示预检的旧 SCM 快照永久失效。
+    // 不能只检查 inFlight：启停在预检回投前完成后，门闩已释放，但旧的 STOPPED 仍不可信。
+    std::atomic<quint64> g_r0ServiceOperationGeneration{ 0 };
 
     // executeR0ServiceStopOnWorker 作用：
     // - 输入：无；服务名固定取 kR0DriverServiceName；
@@ -4723,6 +4815,11 @@ namespace
         const int normalizedOpacityPercent = normalizeOpacityPercent(imageOpacityPercent);
         // effectiveSourceImage 用途：透明度为零时跳过合成，同时不访问任何文件路径。
         const QPixmap* effectiveSourceImage = normalizedOpacityPercent > 0 ? sourceImage : nullptr;
+        if (effectiveSourceImage == nullptr || effectiveSourceImage->isNull())
+        {
+            // 纯色不依赖窗口尺寸，不分配/填充整窗像素，也不因 Resize 换纹理键触发 PaletteChange。
+            return QBrush(baseColor);
+        }
         const quint64 sourceImageCacheKey =
             effectiveSourceImage == nullptr ? 0 : effectiveSourceImage->cacheKey();
 
@@ -5557,6 +5654,12 @@ void MainWindow::closeEvent(QCloseEvent* event)
         return;
     }
 
+    // 暂存确认已经允许退出，之后才撤销通知；普通托盘 hide 不进入本阶段。
+    // 异步停驱会保留事件循环，窗口仍存活时也不能再让旧预检弹出新的 R0 选择框。
+    m_r0UnavailablePromptArmed = false;
+    m_r0UnavailablePromptShowing = false;
+    m_r0NotificationLifetime->store(false, std::memory_order_release);
+
     // 救援实例临时借用驱动和布局；退出时不覆盖主实例的配置，也不停止全局 R0 服务。
     if (qApp != nullptr && qApp->property("ksword_rescue_desktop").toBool())
     {
@@ -5805,9 +5908,10 @@ void MainWindow::updateResizeBorderOverlays()
 
 void MainWindow::applyResizeBorderOverlayStyle()
 {
-    const QString borderStyleText = QStringLiteral(
-        "background:%1;"
-        "border:none;").arg(KswordTheme::PrimaryBlueBorderHex);
+    // 边缘命中层保持存在；只有置顶时才绘制原蓝色提示，普通窗口不显示大外框。
+    const QString borderStyleText = m_windowPinned ? QStringLiteral(
+        "QWidget{background:%1;border:none;}").arg(KswordTheme::PrimaryBlueBorderHex)
+        : QStringLiteral("QWidget{background:transparent;border:none;}");
 
     const std::array<QWidget*, 4> borderWidgets = {
         m_resizeBorderTop,
@@ -5824,11 +5928,11 @@ void MainWindow::applyResizeBorderOverlayStyle()
     }
     if (m_resizeCornerBottomLeft != nullptr)
     {
-        m_resizeCornerBottomLeft->update();
+        static_cast<ResizeCornerTriangleWidget*>(m_resizeCornerBottomLeft)->setHintVisible(m_windowPinned);
     }
     if (m_resizeCornerBottomRight != nullptr)
     {
-        m_resizeCornerBottomRight->update();
+        static_cast<ResizeCornerTriangleWidget*>(m_resizeCornerBottomRight)->setHintVisible(m_windowPinned);
     }
 }
 
@@ -6049,7 +6153,7 @@ void MainWindow::showEvent(QShowEvent* event)
 
     // 主窗口真正可交互后再接管 R0 缺失通知。启动期存在日志轮询等 best-effort
     // 探测，它们不应在用户尚未操作任何内核功能时弹出“启用 R0”对话框。
-    if (!m_r0UnavailablePromptArmed)
+    if (!m_r0UnavailablePromptArmed && m_r0NotificationLifetime->load(std::memory_order_acquire))
     {
         m_r0UnavailablePromptArmed = true;
         // weakLifetime 在窗口成员销毁后仍可安全检查，不依赖 QObject 裸指针存活。
@@ -7118,6 +7222,7 @@ void MainWindow::setPinnedWindowState(const bool pinnedState, const bool emitLog
 
     if (m_windowPinned == pinnedState)
     {
+        applyResizeBorderOverlayStyle(); // 启动回填同状态时也同步边缘绘制提示。
         if (QApplication* appInstance = qobject_cast<QApplication*>(QCoreApplication::instance()))
         {
             appInstance->setProperty(kKswordMainWindowTopMostPropertyName, m_windowPinned);
@@ -7162,6 +7267,7 @@ void MainWindow::setPinnedWindowState(const bool pinnedState, const bool emitLog
     }
 
     m_windowPinned = pinnedState;
+    applyResizeBorderOverlayStyle(); // 只在实际置顶切换成功后改变提示，不影响缩放命中。
     if (QApplication* appInstance = qobject_cast<QApplication*>(QCoreApplication::instance()))
     {
         appInstance->setProperty(kKswordMainWindowTopMostPropertyName, m_windowPinned);
@@ -7760,7 +7866,7 @@ void MainWindow::refreshTitleActionButtonStyles()
     };
     for (QToolButton* button : topActionButtonList)
     {
-        if (button != nullptr)
+        if (button != nullptr && button->styleSheet() != topActionButtonStyle)
         {
             button->setStyleSheet(topActionButtonStyle);
         }
@@ -7874,6 +7980,8 @@ void MainWindow::showSettingsPanelFromMenu(bool showLanguageTab)
 {
     QDialog settingsDialog(this);
     settingsDialog.setWindowTitle(QStringLiteral("设置"));
+    // 设置页已由SettingsPresentation管理自适应布局，保留该共享设置框架。
+    settingsDialog.setProperty("ksword_detail_keep_layout", true);
     settingsDialog.setModal(false);
     ks::ui::StyleSecondaryWindow(&settingsDialog);
     ks::ui::applyResponsiveWindowGeometry(&settingsDialog, this, QSize(1240, 780), QSize(720, 520));
@@ -8427,81 +8535,129 @@ void MainWindow::attachPrivilegeStatusButtonsToPrimaryDockTabBar()
 
 void MainWindow::handleR0DriverUnavailable(const unsigned long win32Error)
 {
-    // 所有 ArkDriverClient 调用都会汇聚到这里。只在窗口已可交互时提示，且把短时间内
-    // 多个页面/后台任务的失败合并为一个选择，避免用户刚打开一个 R0 页面就被连续打断。
-    if (!m_r0UnavailablePromptArmed || m_r0UnavailablePromptShowing)
+    Q_UNUSED(win32Error);
+    // 先合并通知，再把只读 SCM 查询放到线程池，避免弹框前在 UI 线程等待系统服务调用。
+    // pending 与正在显示共用同一守卫，预检期间多个页面的失败不会另起查询或重复提示。
+    if (!m_r0UnavailablePromptArmed || m_r0UnavailablePromptShowing
+        || g_r0ServiceOperationInFlight.load(std::memory_order_acquire)
+        || (qApp != nullptr && qApp->property("ksword_memory_quit_guard_active").toBool()))
     {
-        return;
-    }
-
-    bool serviceRunning = false;
-    if (!queryR0DriverServiceRunning(serviceRunning, false))
-    {
-        return;
-    }
-    if (serviceRunning)
-    {
-        m_r0DriverServiceRunning = true;
-        refreshPrivilegeStatusButtons();
-        return;
-    }
-
-    m_r0DriverServiceRunning = false;
-    if (m_suppressR0PromptsForSession || m_currentAppearanceSettings.suppressR0FeaturePrompts)
-    {
-        refreshPrivilegeStatusButtons();
         return;
     }
     m_r0UnavailablePromptShowing = true;
+    const quint64 serviceOperationGeneration = g_r0ServiceOperationGeneration.load(std::memory_order_acquire);
+    const QPointer<MainWindow> guardedWindow(this); // guardedWindow：仅 UI 回投时读取窗口指针。
+    const std::weak_ptr<std::atomic_bool> weakLifetime = m_r0NotificationLifetime;
+    QThreadPool::globalInstance()->start([guardedWindow, weakLifetime, serviceOperationGeneration]()
+        {
+            const std::shared_ptr<std::atomic_bool> lifetime = weakLifetime.lock();
+            if (!lifetime || !lifetime->load(std::memory_order_acquire))
+            {
+                return;
+            }
+            // 排队期间已有启停则不再读取即将变化的 SCM 状态，仍回 UI 清理本次 pending。
+            R0PromptServiceState serviceState;
+            if (!g_r0ServiceOperationInFlight.load(std::memory_order_acquire)
+                && g_r0ServiceOperationGeneration.load(std::memory_order_acquire) == serviceOperationGeneration)
+            {
+                serviceState = queryR0PromptServiceState();
+            }
+            QCoreApplication* const application = QCoreApplication::instance();
+            if (application == nullptr)
+            {
+                return;
+            }
+            // 服务状态与窗口状态都在回 UI 后重新决定；没有任何驱动加载或自动启用行为。
+            QMetaObject::invokeMethod(application, [guardedWindow, weakLifetime, serviceState, serviceOperationGeneration]()
+                {
+                    const std::shared_ptr<std::atomic_bool> queuedLifetime = weakLifetime.lock();
+                    if (guardedWindow.isNull() || !queuedLifetime
+                        || !queuedLifetime->load(std::memory_order_acquire))
+                    {
+                        return;
+                    }
+                    MainWindow* const window = guardedWindow.data();
+                    if (!window->m_r0UnavailablePromptArmed || !serviceState.known
+                        || g_r0ServiceOperationInFlight.load(std::memory_order_acquire)
+                        || g_r0ServiceOperationGeneration.load(std::memory_order_acquire) != serviceOperationGeneration
+                        || (qApp != nullptr && qApp->property("ksword_memory_quit_guard_active").toBool()))
+                    {
+                        window->m_r0UnavailablePromptShowing = false;
+                        return;
+                    }
+                    window->m_r0DriverServiceRunning = serviceState.running;
+                    if (serviceState.running || window->m_suppressR0PromptsForSession
+                        || window->m_currentAppearanceSettings.suppressR0FeaturePrompts)
+                    {
+                        window->m_r0UnavailablePromptShowing = false;
+                        window->refreshPrivilegeStatusButtons();
+                        return;
+                    }
+                    const bool isAdmin = window->hasAdminPrivilege();
+                    QMessageBox prompt(window);
+                    prompt.setIcon(QMessageBox::Warning);
+                    prompt.setWindowTitle(ks::i18n::text(
+                        QStringLiteral("r0.enable_required.title"),
+                        QStringLiteral("需要启用 R0")));
+                    prompt.setText(ks::i18n::text(
+                        QStringLiteral("r0.enable_required.message"),
+                        QStringLiteral("当前操作需要 R0 驱动，但 KswordARK 驱动服务尚未启用。\n\n是否现在启用 R0？")));
+                    prompt.setInformativeText(ks::i18n::text(
+                        QStringLiteral("r0.enable_required.hint"),
+                        QStringLiteral("启用后可继续使用依赖内核权限的功能；R0 状态按钮会显示为已启用。")));
+                    QCheckBox* const suppressForSessionCheckBox = new QCheckBox(
+                        ks::i18n::text(
+                            QStringLiteral("r0.enable_required.suppress_session"),
+                            QStringLiteral("本次不再提醒")));
+                    prompt.setCheckBox(suppressForSessionCheckBox);
+                    QPushButton* const enableButton = prompt.addButton(
+                        ks::i18n::text(
+                            isAdmin
+                            ? QStringLiteral("r0.enable_required.enable_now")
+                            : QStringLiteral("r0.enable_required.elevate_and_enable"),
+                            isAdmin ? QStringLiteral("启用 R0") : QStringLiteral("以管理员身份重启并启用 R0")),
+                        QMessageBox::AcceptRole);
+                    prompt.addButton(
+                        ks::i18n::text(QStringLiteral("r0.enable_required.cancel"), QStringLiteral("暂不启用")),
+                        QMessageBox::RejectRole);
+                    prompt.exec();
 
-    const bool isAdmin = hasAdminPrivilege();
-    QMessageBox prompt(this);
-    prompt.setIcon(QMessageBox::Warning);
-    prompt.setWindowTitle(ks::i18n::text(
-        QStringLiteral("r0.enable_required.title"),
-        QStringLiteral("需要启用 R0")));
-    prompt.setText(ks::i18n::text(
-        QStringLiteral("r0.enable_required.message"),
-        QStringLiteral("当前操作需要 R0 驱动，但 KswordARK 驱动服务尚未启用。\n\n是否现在启用 R0？")));
-    prompt.setInformativeText(ks::i18n::text(
-        QStringLiteral("r0.enable_required.hint"),
-        QStringLiteral("启用后可继续使用依赖内核权限的功能；R0 状态按钮会显示为已启用。")));
-    QCheckBox* const suppressForSessionCheckBox = new QCheckBox(
-        ks::i18n::text(
-            QStringLiteral("r0.enable_required.suppress_session"),
-            QStringLiteral("本次不再提醒")));
-    prompt.setCheckBox(suppressForSessionCheckBox);
-    QPushButton* const enableButton = prompt.addButton(
-        ks::i18n::text(
-            isAdmin
-            ? QStringLiteral("r0.enable_required.enable_now")
-            : QStringLiteral("r0.enable_required.elevate_and_enable"),
-            isAdmin ? QStringLiteral("启用 R0") : QStringLiteral("以管理员身份重启并启用 R0")),
-        QMessageBox::AcceptRole);
-    prompt.addButton(
-        ks::i18n::text(QStringLiteral("r0.enable_required.cancel"), QStringLiteral("暂不启用")),
-        QMessageBox::RejectRole);
-    prompt.exec();
+                    if (guardedWindow.isNull())
+                    {
+                        return;
+                    }
+                    window->m_r0UnavailablePromptShowing = false;
+                    // 模态事件循环内也可能接受退出，已经结束的窗口不能再提交后续驱动动作。
+                    if (!window->m_r0UnavailablePromptArmed
+                        || !queuedLifetime->load(std::memory_order_acquire))
+                    {
+                        return;
+                    }
+                    if (suppressForSessionCheckBox->isChecked())
+                    {
+                        window->m_suppressR0PromptsForSession = true;
+                    }
+                    // “本次不再提醒”仍按用户选择保留；另一项启停只阻止这个旧提示重复执行驱动动作。
+                    if (g_r0ServiceOperationInFlight.load(std::memory_order_acquire)
+                        || g_r0ServiceOperationGeneration.load(std::memory_order_acquire) != serviceOperationGeneration)
+                    {
+                        return;
+                    }
+                    if (prompt.clickedButton() != enableButton)
+                    {
+                        window->refreshPrivilegeStatusButtons();
+                        return;
+                    }
 
-    m_r0UnavailablePromptShowing = false;
-    if (suppressForSessionCheckBox->isChecked())
-    {
-        m_suppressR0PromptsForSession = true;
-    }
-    if (prompt.clickedButton() != enableButton)
-    {
-        refreshPrivilegeStatusButtons();
-        return;
-    }
+                    if (!isAdmin)
+                    {
+                        window->requestAdminElevationRestart(true);
+                        return;
+                    }
 
-    if (!isAdmin)
-    {
-        requestAdminElevationRestart(true);
-        return;
-    }
-
-    enableR0ForUserRequest();
-    Q_UNUSED(win32Error);
+                    window->enableR0ForUserRequest();
+                }, Qt::QueuedConnection);
+        }, 1); // 交互预检优先于尚未执行的普通枚举，不抢占已运行任务。
 }
 
 void MainWindow::handleR0PermissionRequired(const unsigned long win32Error)
@@ -8544,12 +8700,18 @@ void MainWindow::applyDdmaButtonState()
     // 在两次配置之间是完全静止的。首帧必须靠 m_ddmaButtonPainted 放行——
     // 代次与成员都从 0 开始，只比代次会把首帧误判成"无变化"。
     const std::uint64_t generation = ksword::memory_backend::ddmaSessionGeneration();
-    if (m_ddmaButtonPainted && generation == m_ddmaSessionGeneration)
+    const qulonglong themeGeneration = KswordTheme::ThemeSeedGeneration;
+    const QString languageId = ks::i18n::LanguageManager::instance().currentLanguageId();
+    if (m_ddmaButtonPainted && generation == m_ddmaSessionGeneration
+        && m_ddmaStatusButton->property("ksword_ddma_theme_generation").toULongLong() == themeGeneration
+        && m_ddmaStatusButton->property("ksword_ddma_language").toString() == languageId)
     {
         return;
     }
     m_ddmaSessionGeneration = generation;
     m_ddmaButtonPainted = true;
+    m_ddmaStatusButton->setProperty("ksword_ddma_theme_generation", themeGeneration);
+    m_ddmaStatusButton->setProperty("ksword_ddma_language", languageId);
 
     const ksword::memory_backend::DdmaSession& session =
         ksword::memory_backend::currentDdmaSession();
@@ -8558,7 +8720,11 @@ void MainWindow::applyDdmaButtonState()
     // 也画成亮的，否则指示灯会比实际能力乐观。
     const bool resident = ksword::memory_backend::isDdmaUsable(session, &reason);
 
-    m_ddmaStatusButton->setStyleSheet(buildR0ButtonStyle(resident));
+    const QString ddmaStyle = buildR0ButtonStyle(resident);
+    if (m_ddmaStatusButton->styleSheet() != ddmaStyle)
+    {
+        m_ddmaStatusButton->setStyleSheet(ddmaStyle);
+    }
     if (resident)
     {
         m_ddmaStatusButton->setToolTip(
@@ -8656,7 +8822,11 @@ void MainWindow::refreshPrivilegeStatusButtons()
     applyPrivilegeButtonStyle(m_systemStatusButton, systemEnabled);
     if (m_r0StatusButton != nullptr)
     {
-        m_r0StatusButton->setStyleSheet(buildR0ButtonStyle(r0Enabled));
+        const QString r0Style = buildR0ButtonStyle(r0Enabled);
+        if (m_r0StatusButton->styleSheet() != r0Style)
+        {
+            m_r0StatusButton->setStyleSheet(r0Style);
+        }
     }
     // HVM 只用缓存值刷新外观：状态查询是阻塞 IOCTL，必须走后台。
     applyHvmButtonState();
@@ -8762,7 +8932,12 @@ void MainWindow::applyPrivilegeButtonStyle(QPushButton* button, const bool activ
     {
         return;
     }
-    button->setStyleSheet(buildPrivilegeButtonStyle(activeState));
+    // 周期权限查询保留，状态与主题相同时不再制造 StyleChange 和 SVG/布局后续刷新。
+    const QString privilegeStyle = buildPrivilegeButtonStyle(activeState);
+    if (button->styleSheet() != privilegeStyle)
+    {
+        button->setStyleSheet(privilegeStyle);
+    }
 }
 
 bool MainWindow::hasUiAccessPrivilege() const
@@ -9664,6 +9839,9 @@ bool MainWindow::stopR0DriverService(const bool suppressErrorDialog)
         return false;
     }
 
+    // 接受停驱时立即淘汰此前的提示预检；即使停驱很快结束也不能回写旧的服务状态。
+    g_r0ServiceOperationGeneration.fetch_add(1, std::memory_order_acq_rel);
+
     // 停驱前的句柄收敛必须留在 UI 线程：它要停掉日志轮询线程与回调弹窗管理器，
     // 这些对象的生命周期由主窗口持有，不能在工作线程上碰。
     prepareR0DriverServiceStop();
@@ -9917,6 +10095,9 @@ bool MainWindow::startR0DriverService(const bool suppressPrivilegeElevationPromp
         // 已有一次 R0 启停在后台执行，重复请求直接丢弃，避免并发操作同一个 SCM 服务。
         return false;
     }
+
+    // 接受启用意图即淘汰旧预检；后续文件校验失败和错误框也不能恢复旧的 STOPPED 提示。
+    g_r0ServiceOperationGeneration.fetch_add(1, std::memory_order_acq_rel);
 
     const QString driverPath = QDir(QCoreApplication::applicationDirPath()).absoluteFilePath(QStringLiteral("KswordARK.sys"));
     const QString nativeDriverPath = QDir::toNativeSeparators(driverPath);
@@ -10233,19 +10414,19 @@ QWidget* MainWindow::createDockPlaceholderWidget(const QString& titleText) const
 {
     QWidget* placeholderWidget = new QWidget();
     placeholderWidget->setObjectName(QStringLiteral("ksLazyDockPlaceholder_%1").arg(titleText));
+    placeholderWidget->setProperty("ksword_lazy_dock_placeholder", true);
     placeholderWidget->setAutoFillBackground(false);
     placeholderWidget->setAttribute(Qt::WA_StyledBackground, false);
     // 进度条的槽与块必须在这里显式声明：
-    // - 上面的 QWidget{background:transparent !important} 会连 QProgressBar 一起命中，
-    //   不带 !important 的全局进度条基线样式会被它压掉，槽变成完全透明；
+    // - 占位根和说明标签保持透明，不能用 QWidget 全后代规则清掉进度槽底色；
     // - 因此这里用同等强度的 !important 重新指定槽色与块色，不依赖层叠顺序。
     placeholderWidget->setStyleSheet(
         QStringLiteral(
-            "QWidget{"
+            "QWidget[ksword_lazy_dock_placeholder=\"true\"]{"
             "  background:transparent !important;"
             "  background-color:transparent !important;"
             "}"
-            "QLabel{"
+            "QWidget[ksword_lazy_dock_placeholder=\"true\"] QLabel{"
             "  background:transparent !important;"
             "  background-color:transparent !important;"
             "}"
@@ -10486,13 +10667,17 @@ void MainWindow::ensureDockContentInitialized(ads::CDockWidget* dockWidget)
     {
         realWidget->setAutoFillBackground(false);
         realWidget->setAttribute(Qt::WA_StyledBackground, false);
-        realWidget->setStyleSheet(
-            realWidget->styleSheet()
-            + QStringLiteral(
-                "QWidget{"
-                "  background:transparent;"
-                "  background-color:transparent;"
-                "}"));
+        // 只让 Dock 根容器透出主背景，内部卡片、输入和按钮仍保留各自的实底。
+        // 旧 QWidget 全后代规则在构造结束后重抛整页 StyleChange，并清掉尚未登记控件的背景。
+        const QString dockRootStyle = QStringLiteral(
+            "QWidget[ksword_dock_content_root=\"true\"]{"
+            "background:transparent;background-color:transparent;}");
+        realWidget->setProperty("ksword_dock_content_root", true);
+        realWidget->setProperty("ksword_dock_root_surface_style_block", dockRootStyle);
+        if (!realWidget->styleSheet().contains(dockRootStyle))
+        {
+            realWidget->setStyleSheet(realWidget->styleSheet() + dockRootStyle);
+        }
     }
 
     // HVM 页与内核页同理：内部是分隔条 + 表格 + 详情，外面再套一层 QScrollArea
@@ -12204,7 +12389,11 @@ void MainWindow::applyAppearanceSettings(
     // 无条件调用而不是只在变化时调用：这是一次纯属性写入，没有重建、没有查询，
     // 比"判断哪些字段变了"更省，也少一处会漏判的条件。
     applyPrivilegeButtonVisibility();
-    ks::ui::DetailLayoutRegistry::applyGlobalScheme(settings.detailDisplayScheme);
+    if (isInitialAppearanceApply || previousSettings.detailDisplayScheme != settings.detailDisplayScheme)
+    {
+        // 保存主题/通知配置不改变详情布局，避免再次遍历并重排全部已登记的详情面板。
+        ks::ui::DetailLayoutRegistry::applyGlobalScheme(settings.detailDisplayScheme);
+    }
     if (smoothScrollingChanged)
     {
         ks::ui::SetGlobalSmoothScrollingEnabled(settings.smoothScrollingEnabled);
@@ -12294,15 +12483,24 @@ void MainWindow::applyAppearanceSettings(
         mainPalette.setColor(QPalette::ToolTipText, textColor);
         mainPalette.setColor(QPalette::Highlight, KswordTheme::PrimaryBlueColor);
         mainPalette.setColor(QPalette::HighlightedText, KswordTheme::OnAccentColor());
-        QApplication::setPalette(mainPalette);
-        setPalette(mainPalette);
+        if (QApplication::palette() != mainPalette)
+        {
+            QApplication::setPalette(mainPalette);
+        }
+        if (palette() != mainPalette)
+        {
+            setPalette(mainPalette);
+        }
         // 背景穿透模式下主窗口不能自绘不透明底，否则穿透像素被 palette 底色盖住。
         setAutoFillBackground(!testAttribute(Qt::WA_TranslucentBackground));
 
         QPalette toolTipPalette = mainPalette;
         toolTipPalette.setColor(QPalette::ToolTipBase, baseColor);
         toolTipPalette.setColor(QPalette::ToolTipText, textColor);
-        QToolTip::setPalette(toolTipPalette);
+        if (QToolTip::palette() != toolTipPalette)
+        {
+            QToolTip::setPalette(toolTipPalette);
+        }
 
         globalAppStyleChanged = applyGlobalApplicationStyleBlocks(
             ks::ui::BuildGlobalBaseControlStyleBlock(),
@@ -12336,7 +12534,10 @@ void MainWindow::applyAppearanceSettings(
             dockPalette.setColor(QPalette::Window, windowBackgroundColor);
             dockPalette.setColor(QPalette::WindowText, windowTextColor);
             dockPalette.setColor(QPalette::Text, textColor);
-            m_pDockManager->setPalette(dockPalette);
+            if (m_pDockManager->palette() != dockPalette)
+            {
+                m_pDockManager->setPalette(dockPalette);
+            }
             // 透明背景模式下 DockManager 不能自绘不透明底，否则整块盖住云母材质。
             m_pDockManager->setAutoFillBackground(!testAttribute(Qt::WA_TranslucentBackground));
         }
@@ -12368,8 +12569,14 @@ void MainWindow::applyAppearanceSettings(
         {
             QApplication::setFont(applicationFont);
         }
-        applyApplicationFontToItemViews(applicationFont);
-        QToolTip::setFont(QApplication::font());
+        if (applicationFontChanged || isInitialAppearanceApply)
+        {
+            applyApplicationFontToItemViews(applicationFont);
+        }
+        if (QToolTip::font() != QApplication::font())
+        {
+            QToolTip::setFont(QApplication::font());
+        }
     }
 
     // 把滚轮和文本渲染策略写入全局属性。无关配置保存时不再写入这些属性。
@@ -12483,20 +12690,29 @@ void MainWindow::applyAppearanceSettings(
         // 必须排在各面板主动重建之后，避免刚重建好的新色又被扫描一遍做无用功。
         // 明确登记的控件按角色重新求值；存量控件继续使用旧色值补偿，不猜测已登记样式。
         ks::ui::RefreshWidgetThemeBindings();
-        themeColorRemapResult = ks::ui::RemapStaleThemeColors(staleThemeColorSnapshot);
-        if (themeColorRemapResult.rewrittenWidgetCount > 0
-            || themeColorRemapResult.rewrittenPaletteWidgetCount > 0
-            || themeColorRemapResult.ambiguousColorCount > 0)
-        {
-            dbg << appearanceApplyEvent
-                << "[MainWindow] 存量样式表主题色重映射"
-                << ", mappedColors=" << themeColorRemapResult.mappedColorCount
-                << ", ambiguousColors=" << themeColorRemapResult.ambiguousColorCount
-                << ", inspectedWidgets=" << themeColorRemapResult.inspectedWidgetCount
-                << ", rewrittenWidgets=" << themeColorRemapResult.rewrittenWidgetCount
-                << ", rewrittenPalettes=" << themeColorRemapResult.rewrittenPaletteWidgetCount
-                << eol;
-        }
+        // 全应用旧色补偿分片处理，返回值只表示排队统计；真实改写数在完成回调报告。
+        // 上下文/QPointer 防析构，退出 lifetime 防异步停驱期间出现过期完成通知。
+        const QPointer<MainWindow> remapWindow(this);
+        const std::weak_ptr<std::atomic_bool> remapLifetime = m_r0NotificationLifetime;
+        themeColorRemapResult = ks::ui::ScheduleStaleThemeColorRemap(
+            staleThemeColorSnapshot, this,
+            [remapWindow, remapLifetime](const ks::ui::ThemeColorRemapResult& completedResult)
+            {
+                const auto lifetime = remapLifetime.lock();
+                if (remapWindow.isNull() || !lifetime || !lifetime->load(std::memory_order_acquire))
+                {
+                    return;
+                }
+                kLogEvent remapCompletedEvent;
+                dbg << remapCompletedEvent
+                    << "[MainWindow] 存量样式表主题色分片重映射完成"
+                    << ", mappedColors=" << completedResult.mappedColorCount
+                    << ", ambiguousColors=" << completedResult.ambiguousColorCount
+                    << ", inspectedWidgets=" << completedResult.inspectedWidgetCount
+                    << ", rewrittenWidgets=" << completedResult.rewrittenWidgetCount
+                    << ", rewrittenPalettes=" << completedResult.rewrittenPaletteWidgetCount
+                    << eol;
+            });
 
         runtimeProgress.update(
             88,
@@ -12594,10 +12810,10 @@ void MainWindow::applyAppearanceSettings(
         << (svgThemeIconApplyResult.skippedDefaultTheme ? "true" : "false")
         << ", svgIconElapsedMs="
         << svgThemeIconApplyResult.elapsedMilliseconds
-        << ", styleRemapWidgets="
-        << themeColorRemapResult.rewrittenWidgetCount
-        << ", styleRemapPalettes="
-        << themeColorRemapResult.rewrittenPaletteWidgetCount
+        << ", styleRemapQueuedWidgets="
+        << themeColorRemapResult.scheduledWidgetCount
+        << ", styleRemapMappedColors="
+        << themeColorRemapResult.mappedColorCount
         << ", styleRemapAmbiguous="
         << themeColorRemapResult.ambiguousColorCount
         << "，styleElapsedMs="
@@ -12919,14 +13135,21 @@ void MainWindow::rebuildWindowBackgroundBrush(const bool includeBackgroundImage)
 
     QPalette mainPalette = palette();
     mainPalette.setColor(QPalette::Window, baseColor);
-    setPalette(mainPalette);
+    // 主题入口已经下发同一背景色时，背景图/材质刷新不能再传播一次整树 PaletteChange。
+    if (palette() != mainPalette)
+    {
+        setPalette(mainPalette);
+    }
     setAutoFillBackground(!translucencyActive);
 
     if (m_pDockManager != nullptr)
     {
         QPalette dockPalette = m_pDockManager->palette();
         dockPalette.setColor(QPalette::Window, baseColor);
-        m_pDockManager->setPalette(dockPalette);
+        if (m_pDockManager->palette() != dockPalette)
+        {
+            m_pDockManager->setPalette(dockPalette);
+        }
         // DockManager 只负责透明内容层，背景统一由根容器绘制。
         m_pDockManager->setAutoFillBackground(false);
     }
@@ -12962,7 +13185,10 @@ void MainWindow::applyFloatingDockContainerAppearance(ads::CFloatingDockContaine
     floatingPalette.setColor(
         QPalette::WindowText,
         KswordTheme::MainBackgroundTextColor());
-    floatingWidget->setPalette(floatingPalette);
+    if (floatingWidget->palette() != floatingPalette)
+    {
+        floatingWidget->setPalette(floatingPalette);
+    }
     floatingWidget->setAutoFillBackground(true);
     floatingWidget->setAttribute(Qt::WA_StyledBackground, false);
 
@@ -12975,7 +13201,12 @@ void MainWindow::applyFloatingDockContainerAppearance(ads::CFloatingDockContaine
             m_currentAppearanceSettings,
             darkModeEnabled,
             enableDockContentTransparency);
-    floatingWidget->setStyleSheet(appearanceStyleSheet);
+    // 尺寸/背景图刷新仍需换画刷，但配色规则没有变化时不重抛整棵浮动页的 StyleChange。
+    if (floatingWidget->styleSheet() != appearanceStyleSheet)
+    {
+        floatingWidget->setStyleSheet(appearanceStyleSheet);
+    }
+    // 仍校验真实导航结构，已改为 ADS 登记表遍历，惰性新 Dock 不会因样式相同而漏接入。
     refreshAdsDockTabVisualIdentities(floatingWidget);
 
     ads::CDockContainerWidget* dockContainer = floatingWidget->dockContainer();
@@ -12984,7 +13215,10 @@ void MainWindow::applyFloatingDockContainerAppearance(ads::CFloatingDockContaine
         QPalette dockContainerPalette = dockContainer->palette();
         dockContainerPalette.setColor(QPalette::Window, baseColor);
         dockContainerPalette.setBrush(QPalette::Window, backgroundBrush);
-        dockContainer->setPalette(dockContainerPalette);
+        if (dockContainer->palette() != dockContainerPalette)
+        {
+            dockContainer->setPalette(dockContainerPalette);
+        }
         dockContainer->setAutoFillBackground(true);
         dockContainer->setAttribute(Qt::WA_StyledBackground, false);
     }
@@ -13023,16 +13257,7 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
         KswordTheme::SurfaceColor(),
         darkModeEnabled ? 240 : 242);
     const QString panelBorderColor = borderColorText;
-    const QString inactiveTabColor = surfaceAltBackgroundText;
-    const QString inactiveTabTextColor = primaryTextColor;
-    const QString activeTabColor = KswordTheme::ActiveTabBackgroundHex();
-    const QString activeTabTextColor = KswordTheme::ActiveTabTextHex();
-    // normalTabHoverColor 作用：
-    // - 只控制普通 QTabBar 的未选中悬停态；
-    // - 浅色模式使用明确的浅灰色，避免继承/回退到黑色背景；
-    // - ADS Dock tab 继续使用下面的 dockTabChildHoverColor，不在这里改动。
-    const QString normalTabHoverColor = KswordTheme::ThemeColorName(
-        darkModeEnabled ? KswordTheme::PrimaryBlueSubtleColor() : KswordTheme::SurfaceMutedColor());
+
     const QString tooltipStyle = QStringLiteral(
         "QToolTip{"
         "  background-color:%1 !important;"
@@ -13093,11 +13318,11 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
             windowTextColor);
 
     // depthOverlayStyle 作用：
-    // - 为 Dock 面板、分组、表格和 Tab 增加边界/圆角/轻阴影感；
+    // - 工作区外壳不描边；只为内容分组和卡片保留各自的边界与圆角；
     // - 让当前 Tab 使用与图标错开的深浅对比色，避免蓝色图标在蓝底上不可见。
     const QString depthOverlayStyle = QStringLiteral(
         "ads--CDockAreaWidget{"
-        "  border:1px solid %1 !important;"
+        "  border:0 !important;"
         "  border-radius:8px;"
         "  background:%2 !important;"
         "}"
@@ -13129,7 +13354,7 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
         "}"
         "QTabWidget::pane{"
         "  border:none !important;"
-        "  border-radius:0px;"
+        "  border-radius:8px;"
         "  background:%2 !important;"
         "  top:0px;"
         "}")
@@ -13143,29 +13368,8 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
     const QString buttonInteractionStyle = ks::ui::BuildFlatButtonStyle(
         ks::ui::FlatButtonTone::Neutral);
 
-    // tabStyle 作用：统一普通 Tab 与 ADS Dock Tab 的颜色、边距和选中态。
-    // 字号不在这里设置，保证所有 Tab 栏继承 Qt 默认应用字号。
-    const QString tabStyle = QStringLiteral(
-        "QTabBar{border:none !important;}"
-        "QTabBar::tab{"
-        " background-color:%1 !important;color:%2 !important;"
-        " border:none !important;border-radius:0px !important;"
-        " padding:3px 12px;min-height:22px;margin:0px;}"
-        "QTabBar::tab:left,QTabBar::tab:right{padding:5px 6px;}"
-        "QTabBar::tab:selected{"
-        " background-color:%3 !important;color:%4 !important;font-weight:700;}"
-        "QTabBar::tab:hover:!selected,"
-        "QMainWindow QTabBar::tab:hover:!selected,"
-        "QMainWindow QTabBar::tab:pressed:!selected{"
-        " background-color:%5 !important;background:%5 !important;color:%2 !important;}"
-        "QMainWindow QTabBar::tab:selected:hover,"
-        "QMainWindow QTabBar::tab:selected:pressed{"
-        " background-color:%3 !important;background:%3 !important;color:%4 !important;}")
-        .arg(inactiveTabColor)
-        .arg(inactiveTabTextColor)
-        .arg(activeTabColor)
-        .arg(activeTabTextColor)
-        .arg(normalTabHoverColor);
+    // 普通业务标签共用完整状态和圆角；ADS 主导航继续使用独立 Dock 角色。
+    const QString tabStyle = ks::ui::BuildPageTabsStyleSheet(!enableDockContentTransparency);
 
     const QString sharedOverlayStyle = depthOverlayStyle
         + buttonInteractionStyle
@@ -13348,34 +13552,8 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
         "}")
         .arg(surfaceBackgroundText)
         .arg(primaryTextColor);
-    // finalOrdinaryTabHoverStyle 作用：
-    // - 作为普通 QTabWidget/QTabBar 的最终 hover/pressed 兜底；
-    // - 深色模式使用深灰、浅色模式使用浅灰，避免基础 QSS 或平台 palette 反向回退；
-    // - 选择器刻意避开 ads--CDockWidgetTab/ads--CAutoHideTab，所以不影响 ADS Dock 标签。
-    const QString ordinaryTabHoverColor = darkModeEnabled
-        ? KswordTheme::SurfaceMutedColorHex()
-        : KswordTheme::SurfaceAltColorHex();
-    const QString finalOrdinaryTabHoverStyle = QStringLiteral(
-        "QMainWindow QTabWidget QTabBar::tab:hover:!selected,"
-        "QMainWindow QTabWidget QTabBar::tab:pressed:!selected,"
-        "QTabWidget QTabBar::tab:hover:!selected,"
-        "QTabWidget QTabBar::tab:pressed:!selected{"
-        "  background-color:%1 !important;"
-        "  background:%1 !important;"
-        "  color:%2 !important;"
-        "}"
-        "QMainWindow QTabWidget QTabBar::tab:selected:hover,"
-        "QMainWindow QTabWidget QTabBar::tab:selected:pressed,"
-        "QTabWidget QTabBar::tab:selected:hover,"
-        "QTabWidget QTabBar::tab:selected:pressed{"
-        "  background-color:%3 !important;"
-        "  background:%3 !important;"
-        "  color:%4 !important;"
-        "}")
-        .arg(ordinaryTabHoverColor)
-        .arg(primaryTextColor)
-        .arg(activeTabColor)
-        .arg(activeTabTextColor);
+    // 普通页签最后追加相同状态规则，避免旧hover兜底重写已统一的底面和文字。
+    const QString finalOrdinaryTabHoverStyle = ks::ui::BuildPageTabsStyleSheet(!enableDockContentTransparency);
 
     if (!darkModeEnabled)
     {

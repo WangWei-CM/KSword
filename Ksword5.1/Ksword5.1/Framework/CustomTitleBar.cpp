@@ -9,12 +9,12 @@
 #include <QAction>
 #include <QApplication>
 #include <QCoreApplication>
-#include <QFileIconProvider>
-#include <QFileInfo>
 #include <QGuiApplication>
 #include <QGridLayout>
 #include <QHBoxLayout>
 #include <QIcon>
+#include <QImage>
+#include <QHash>
 #include <QLabel>
 #include <QLineEdit>
 #include <QMenu>
@@ -252,28 +252,56 @@ namespace
 #endif
 
     // resolveApplicationPreviewIcon：
-    // - 作用：优先从可执行文件路径提取系统壳层图标；
-    // - 目标：让左上角图标与资源管理器中文件预览保持一致；
-    // - 传出：成功返回可执行文件图标，失败返回空图标。
-    QIcon resolveApplicationPreviewIcon()
+    // - 作用：复用已加载图标，缺省时缓存进程内 AppIcon.rc 原生资源；
+    // - 目标：保留 EXE 应用图标，主题/窗口状态刷新不再同步查询文件系统与 Shell；
+    // - 传入宿主窗口；传出应用图标，失败返回空图标。
+    QIcon resolveApplicationPreviewIcon(const QWidget* hostWindow)
     {
-        // executablePathText 用途：保存当前进程可执行文件绝对路径。
-        const QString executablePathText = QCoreApplication::applicationFilePath();
-        if (executablePathText.trimmed().isEmpty())
+        const QIcon applicationIcon = QApplication::windowIcon();
+        if (!applicationIcon.isNull())
         {
-            return QIcon();
+            return applicationIcon;
         }
-
-        // executableFileInfo 用途：描述当前可执行文件路径，供壳层图标提供器读取。
-        const QFileInfo executableFileInfo(executablePathText);
-        if (!executableFileInfo.exists())
+        if (hostWindow != nullptr && !hostWindow->windowIcon().isNull())
         {
-            return QIcon();
+            return hostWindow->windowIcon();
         }
+        // LR_SHARED 句柄由模块拥有，只缓存 Qt 副本，不进入 Shell 文件图标提供器。
+        static const QIcon nativeApplicationIcon = []()
+        {
+            const HICON nativeIcon = reinterpret_cast<HICON>(::LoadImageW(
+                ::GetModuleHandleW(nullptr), L"IDI_APP_ICON", IMAGE_ICON, 32, 32,
+                LR_DEFAULTCOLOR | LR_SHARED));
+            return nativeIcon != nullptr
+                ? QIcon(QPixmap::fromImage(QImage::fromHICON(nativeIcon)))
+                : QIcon();
+        }();
+        return nativeApplicationIcon;
+    }
 
-        // iconProvider 用途：向系统壳层查询与资源管理器一致的文件图标。
-        QFileIconProvider iconProvider;
-        return iconProvider.icon(executableFileInfo);
+    // applyTitleButtonIcon：只在真实状态资源变化时换原图，源 QIcon 复用让主题引擎继续缓存各状态。
+    void applyTitleButtonIcon(QPushButton* button, const QString& resourcePath)
+    {
+        if (button == nullptr)
+        {
+            return;
+        }
+        if (button->property("ksword_title_icon_source_path").toString() != resourcePath || button->icon().isNull())
+        {
+            static QHash<QString, QIcon> sourceIcons; // 固定标题栏资源集合，不随业务文件或进程数量增长。
+            auto entry = sourceIcons.constFind(resourcePath);
+            if (entry == sourceIcons.constEnd())
+            {
+                sourceIcons.insert(resourcePath, QIcon(resourcePath));
+                entry = sourceIcons.constFind(resourcePath);
+            }
+            button->setIcon(entry.value());
+            button->setProperty("ksword_title_icon_source_path", resourcePath);
+        }
+        if (button->iconSize() != QSize(kControlIconSize, kControlIconSize))
+        {
+            button->setIconSize(QSize(kControlIconSize, kControlIconSize));
+        }
     }
 }
 
@@ -291,24 +319,42 @@ namespace ks::ui
 
     void CustomTitleBar::setPinnedState(const bool pinnedState)
     {
+        if (m_isPinned == pinnedState)
+        {
+            return;
+        }
         m_isPinned = pinnedState;
         updateVisualState();
     }
 
     void CustomTitleBar::setCaptureProtectionState(const bool protectedState)
     {
+        if (m_captureProtectionEnabled == protectedState)
+        {
+            return;
+        }
         m_captureProtectionEnabled = protectedState;
         updateVisualState();
     }
 
     void CustomTitleBar::setMaximizedState(const bool maximizedState)
     {
+        if (m_isMaximized == maximizedState)
+        {
+            return;
+        }
         m_isMaximized = maximizedState;
         updateVisualState();
     }
 
     void CustomTitleBar::setDarkModeEnabled(const bool darkModeEnabled)
     {
+        // 同深浅模式换强调色仍必须刷新，以主题种子代次确认颜色是否也已同步。
+        if (m_darkModeEnabled == darkModeEnabled
+            && property("ksword_title_theme_generation").toULongLong() == KswordTheme::ThemeSeedGeneration)
+        {
+            return;
+        }
         m_darkModeEnabled = darkModeEnabled;
         updateVisualState();
     }
@@ -764,6 +810,16 @@ namespace ks::ui
 
     void CustomTitleBar::updateThemeStyle()
     {
+        // 纯窗口状态变化不影响颜色模板；完整根样式仍由本组件拥有时直接复用。
+        // 预览种子不复用正式代次，实际外部 QSS 改写也必须重新核验模板。
+        const QString appliedStyle = property("ksword_title_applied_style").toString();
+        if (KswordTheme::ActiveThemePreviewSeeds == nullptr
+            && property("ksword_title_buttons_bound").toBool()
+            && property("ksword_title_theme_generation").toULongLong() == KswordTheme::ThemeSeedGeneration
+            && !appliedStyle.isEmpty() && appliedStyle == styleSheet())
+        {
+            return;
+        }
         const QString titleBarBackgroundText = KswordTheme::MainBackgroundColorHex();
         const QString titleBarBorderText = KswordTheme::BorderColorHex();
         const QString titleTextColorText = KswordTheme::MainBackgroundTextColorHex();
@@ -851,15 +907,25 @@ namespace ks::ui
             .replace(QStringLiteral("__TITLE_BUTTON_PRESSED__"), KswordTheme::PrimaryBluePressedHex)
             .replace(QStringLiteral("__TITLE_CLOSE_HOVER__"), KswordTheme::AccentHex(KswordTheme::AccentRole::Red, 53, 27))
             .replace(QStringLiteral("__TITLE_CLOSE_PRESSED__"), KswordTheme::AccentHex(KswordTheme::AccentRole::Red, 30, 4));
-        setStyleSheet(titleBarStyleSheetText);
+        if (styleSheet() != titleBarStyleSheetText)
+        {
+            setStyleSheet(titleBarStyleSheetText);
+        }
+        setProperty("ksword_title_applied_style", titleBarStyleSheetText);
+        setProperty("ksword_title_theme_generation", KswordTheme::ThemeSeedGeneration);
         // 标题栏六个功能控件逐项接入纯色规则，保留输入组边框、按钮尺寸与窗口信号。
         // 子按钮自己的样式优先于标题栏的背景兜底，图标也能取得相同的真实状态底色。
-        ks::ui::ApplyFlatButtonTheme(m_inputModeButton, ks::ui::FlatButtonTone::Neutral, ks::ui::FlatButtonAppearance::Flat);
-        for (QPushButton* button : {m_captureProtectionButton, m_pinButton, m_minButton, m_maxButton})
+        // 颜色回调自身读取当前主题，明确 Flat 的六个动作只登记一次，不能每轮重注册同一绑定。
+        if (!property("ksword_title_buttons_bound").toBool())
         {
-            ks::ui::ApplyFlatButtonTheme(button, ks::ui::FlatButtonTone::Neutral, ks::ui::FlatButtonAppearance::Flat);
+            setProperty("ksword_title_buttons_bound", true);
+            ks::ui::ApplyFlatButtonTheme(m_inputModeButton, ks::ui::FlatButtonTone::Neutral, ks::ui::FlatButtonAppearance::Flat);
+            for (QPushButton* button : {m_captureProtectionButton, m_pinButton, m_minButton, m_maxButton})
+            {
+                ks::ui::ApplyFlatButtonTheme(button, ks::ui::FlatButtonTone::Neutral, ks::ui::FlatButtonAppearance::Flat);
+            }
+            ks::ui::ApplyFlatButtonTheme(m_closeButton, ks::ui::FlatButtonTone::Danger, ks::ui::FlatButtonAppearance::Flat);
         }
-        ks::ui::ApplyFlatButtonTheme(m_closeButton, ks::ui::FlatButtonTone::Danger, ks::ui::FlatButtonAppearance::Flat);
 
     }
 
@@ -872,42 +938,37 @@ namespace ks::ui
         // - 截屏屏蔽按钮根据保护状态切换眼睛/闭眼；
         // - 图钉根据置顶状态切换空心/实心；
         // - 最大化按钮根据窗口状态切换最大化/还原图标。
-        m_captureProtectionButton->setIcon(QIcon(
+        applyTitleButtonIcon(m_captureProtectionButton,
             m_captureProtectionEnabled
             ? QStringLiteral(":/Icon/titlebar_capture_protected.svg")
-            : QStringLiteral(":/Icon/titlebar_capture_allowed.svg")));
+            : QStringLiteral(":/Icon/titlebar_capture_allowed.svg"));
         m_captureProtectionButton->setToolTip(m_captureProtectionEnabled
             ? QStringLiteral("截屏屏蔽已开启：点击后允许截屏")
             : QStringLiteral("截屏屏蔽已关闭：点击后在截图/录屏中隐藏或黑屏"));
-        m_captureProtectionButton->setIconSize(QSize(kControlIconSize, kControlIconSize));
 
-        m_pinButton->setIcon(QIcon(
+        applyTitleButtonIcon(m_pinButton,
             m_isPinned
             ? QStringLiteral(":/Icon/titlebar_pin_fill.svg")
-            : QStringLiteral(":/Icon/titlebar_pin_line.svg")));
+            : QStringLiteral(":/Icon/titlebar_pin_line.svg"));
         m_pinButton->setToolTip(m_isPinned
             ? QStringLiteral("取消窗口置顶")
             : QStringLiteral("置顶窗口"));
-        m_pinButton->setIconSize(QSize(kControlIconSize, kControlIconSize));
 
-        m_minButton->setIcon(QIcon(QStringLiteral(":/Icon/titlebar_minimize.svg")));
-        m_minButton->setIconSize(QSize(kControlIconSize, kControlIconSize));
+        applyTitleButtonIcon(m_minButton, QStringLiteral(":/Icon/titlebar_minimize.svg"));
 
-        m_maxButton->setIcon(QIcon(
+        applyTitleButtonIcon(m_maxButton,
             m_isMaximized
             ? QStringLiteral(":/Icon/titlebar_restore.svg")
-            : QStringLiteral(":/Icon/titlebar_maximize.svg")));
+            : QStringLiteral(":/Icon/titlebar_maximize.svg"));
         m_maxButton->setToolTip(m_isMaximized
             ? QStringLiteral("还原主窗口")
             : QStringLiteral("最大化主窗口"));
-        m_maxButton->setIconSize(QSize(kControlIconSize, kControlIconSize));
 
-        m_closeButton->setIcon(QIcon(QStringLiteral(":/Icon/titlebar_close.svg")));
-        m_closeButton->setIconSize(QSize(kControlIconSize, kControlIconSize));
+        applyTitleButtonIcon(m_closeButton, QStringLiteral(":/Icon/titlebar_close.svg"));
 
         updateTitleInputModeVisuals();
 
-        QIcon appIcon = resolveApplicationPreviewIcon();
+        QIcon appIcon = resolveApplicationPreviewIcon(window());
         if (appIcon.isNull() && window() != nullptr)
         {
             appIcon = window()->windowIcon();
@@ -920,7 +981,11 @@ namespace ks::ui
         {
             appIcon = QIcon(QStringLiteral(":/Image/Resource/Logo/MainLogo.png"));
         }
-        m_appIconLabel->setPixmap(appIcon.pixmap(kAppIconSize, kAppIconSize));
+        const QPixmap appPixmap = appIcon.pixmap(kAppIconSize, kAppIconSize);
+        if (m_appIconLabel->pixmap().cacheKey() != appPixmap.cacheKey())
+        {
+            m_appIconLabel->setPixmap(appPixmap);
+        }
     }
 
     void CustomTitleBar::updateCommandLineWidth()

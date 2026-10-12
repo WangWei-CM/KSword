@@ -5,6 +5,7 @@
 #include "../UI/DetailDialogChrome.h"
 #include "../UI/ThemeBinding.h"
 #include "../UI/StructuredFieldView.h"
+#include "../UI/DetailPresentation.h"
 
 #include "KernelKnowledgeCatalog.h"
 #include "../ArkDriverClient/ArkDriverClient.h"
@@ -815,6 +816,8 @@ void KernelKnowledgeTab::collectCurrentEvidence()
                     document.note(QStringLiteral("边界：此快照证明当前 R3→WDF→WDM 请求上下文与 R0 业务来源注册状态；业务扫描的当前数据、DynData 降级与 partial 状态必须在「打开相关功能」页中单独采集。"));
                 }
                 editor->setDocument(document);
+                // 证据数据仍由原文档持有，共享框架建立摘要和可自适应卡片。
+                ks::ui::InstallDetailWindowFramework(dialog);
                 ks::ui::ApplyDetailDialogChrome(dialog);
                 dialog->show();
             },

@@ -3,6 +3,8 @@
 #include "../UI/VisibleTableWidget.h"
 #include "../UI/ToolbarMetrics.h"
 #include "../UI/PageControlStyle.h"
+#include "../UI/PrimaryPageStyle.h"
+#include "../UI/FlatButtonTheme.h"
 #include "../Internationalization/LanguageManager.h"
 
 #include "../ArkDriverClient/ArkDriverClient.h"
@@ -1159,8 +1161,11 @@ void MonitorDock::initializeArkRiskCenterTab()
     pageLayout->setContentsMargins(6, 6, 6, 6);
     pageLayout->setSpacing(6);
 
-    QHBoxLayout* toolbarLayout = new QHBoxLayout();
-    toolbarLayout->setContentsMargins(0, 0, 0, 0);
+    // 只读风险查询与导出属于同一工具面，状态与证据颜色继续由风险逻辑管理。
+    QWidget* toolbar = new QWidget(m_arkRiskCenterPage);
+    ks::ui::StylePrimaryToolbar(toolbar);
+    QHBoxLayout* toolbarLayout = new QHBoxLayout(toolbar);
+    toolbarLayout->setContentsMargins(8, 6, 8, 6);
     toolbarLayout->setSpacing(8);
 
     m_arkRiskRefreshButton = new QPushButton(QIcon(QStringLiteral(":/Icon/process_refresh.svg")), QStringLiteral("刷新风险"), m_arkRiskCenterPage);
@@ -1174,6 +1179,11 @@ void MonitorDock::initializeArkRiskCenterTab()
     m_arkRiskFilterEdit->setPlaceholderText(QStringLiteral("过滤来源/分类/标题/详情/JSON"));
     m_arkRiskExportJsonButton = new QPushButton(QStringLiteral("导出 JSON"), m_arkRiskCenterPage);
     m_arkRiskExportCsvButton = new QPushButton(QStringLiteral("导出 CSV"), m_arkRiskCenterPage);
+    for (QPushButton* button : {m_arkRiskRefreshButton, m_arkRiskExportJsonButton, m_arkRiskExportCsvButton})
+    {
+        ks::ui::ApplyFlatButtonTheme(button, ks::ui::FlatButtonTone::Neutral,
+            ks::ui::FlatButtonAppearance::Solid);
+    }
     m_arkRiskStatusLabel = new QLabel(QStringLiteral("状态：等待刷新"), m_arkRiskCenterPage);
     m_arkRiskStatusLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
     m_arkRiskStatusLabel->setStyleSheet(QStringLiteral("color:%1; font-weight:600;").arg(KswordTheme::TextSecondaryHex()));
@@ -1185,7 +1195,7 @@ void MonitorDock::initializeArkRiskCenterTab()
     toolbarLayout->addWidget(m_arkRiskExportCsvButton);
     toolbarLayout->addWidget(m_arkRiskStatusLabel);
     ks::ui::NormalizeToolbarRow(toolbarLayout);
-    pageLayout->addLayout(toolbarLayout);
+    pageLayout->addWidget(toolbar);
 
     QSplitter* splitter = new QSplitter(Qt::Vertical, m_arkRiskCenterPage);
     pageLayout->addWidget(splitter, 1);

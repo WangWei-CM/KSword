@@ -22,6 +22,7 @@ class QCheckBox;
 class QHBoxLayout;
 class QPushButton;
 class QSpinBox;
+class QShowEvent;
 class QTableView;
 class QTimer;
 class QVBoxLayout;
@@ -44,6 +45,10 @@ public:
 
     // refreshNow：独立日志窗口重新显示时强制同步最新日志快照。
     void refreshNow();
+
+protected:
+    // 隐藏时不重建表格，重新显示前读取日志管理器保存的最新完整历史。
+    void showEvent(QShowEvent* event) override;
 
 private:
     // initializeUi 作用：

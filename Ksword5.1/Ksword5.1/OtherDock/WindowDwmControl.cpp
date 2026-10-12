@@ -20,6 +20,11 @@
 #include <QApplication>
 #include "../UI/CodeEditorWidget.h"
 #include "../UI/CodeTextEdit.h"
+#include "../UI/FlatButtonTheme.h"
+#include "../UI/FlowLayout.h"
+#include "../UI/ParameterWorkspace.h"
+#include "../UI/PrimaryPageStyle.h"
+#include "../UI/ToolbarMetrics.h"
 #include <QCheckBox>
 #include <QClipboard>
 #include <QColor>
@@ -176,6 +181,12 @@ namespace ks::window::dwmctl
     {
         QPushButton* button = new QPushButton(uiText(key, label), parent);
         bindUiText(button, key, label);
+        // 普通动作明确提供实底和统一行高；危险操作仍由原业务确认框控制。
+        ks::i18n::LanguageManager::instance().bindToolTip(button,
+            QString::fromLatin1(key), QString::fromUtf8(label));
+        ks::ui::ApplyFlatButtonTheme(button, ks::ui::FlatButtonTone::Neutral,
+            ks::ui::FlatButtonAppearance::Solid);
+        ks::ui::NormalizeToolbarControl(button);
         return button;
     }
 
@@ -590,8 +601,7 @@ namespace ks::window::dwmctl
         void buildUi()
         {
             QVBoxLayout* rootLayout = new QVBoxLayout(this);
-            rootLayout->setContentsMargins(8, 8, 8, 8);
-            rootLayout->setSpacing(6);
+            ks::ui::StyleWorkspacePage(this);
 
             rootLayout->addLayout(buildHeaderRow());
 
@@ -601,14 +611,22 @@ namespace ks::window::dwmctl
             splitter->setStretchFactor(0, 3);
             splitter->setStretchFactor(1, 2);
             rootLayout->addWidget(splitter, 1);
+            // 本页属于属性详情；保留原来的控制/预览结构，只接入可读表面和分区。
+            for (auto* group : findChildren<QGroupBox*>())
+            {
+                ks::ui::StyleParameterSection(group);
+            }
+            ks::ui::StyleParameterFields(this);
+            ks::ui::StyleWorkspaceTextViews(this);
         }
 
         // buildHeaderRow：
         // - 作用：构建顶部信息条（目标句柄、系统构建号、全局动作按钮）；
-        // - 传出：可直接加入根布局的水平布局。
-        QHBoxLayout* buildHeaderRow()
+        // - 传出：目标信息及可折行动作组成的纵向布局。
+        QVBoxLayout* buildHeaderRow()
         {
-            QHBoxLayout* headerLayout = new QHBoxLayout();
+            QVBoxLayout* headerLayout = new QVBoxLayout();
+            headerLayout->setSpacing(8);
 
             QLabel* targetLabel = new QLabel(
                 uiText("window.dwm.header.target", "目标 HWND: %1    系统构建号: %2")
@@ -618,7 +636,9 @@ namespace ks::window::dwmctl
                         : QString::number(windowsBuild())),
                 this);
             targetLabel->setWordWrap(true);
-            headerLayout->addWidget(targetLabel, 1);
+            headerLayout->addWidget(targetLabel);
+            // 状态独占一行，原动作只换成可折行工具带，避免窄页裁掉按钮含义。
+            auto* actions = new ks::ui::FlowLayout(nullptr, 0, 8, 8);
 
             m_frameChangeCheck = new QCheckBox(
                 uiText("window.dwm.header.force_frame_change", "写入后强制重算边框"), this);
@@ -627,16 +647,17 @@ namespace ks::window::dwmctl
                 "window.dwm.header.force_frame_change_tip",
                 "部分属性只有在窗口重新计算非客户区之后才会显示出来；使用异步 SetWindowPos，不会因目标线程卡死而挂起本程序。"));
             bindUiText(m_frameChangeCheck, "window.dwm.header.force_frame_change", "写入后强制重算边框");
-            headerLayout->addWidget(m_frameChangeCheck, 0);
+            actions->addWidget(m_frameChangeCheck);
 
             QPushButton* readAllButton = makeButton(this, "window.dwm.action.read_all", "读取全部");
             QPushButton* restoreButton = makeButton(this, "window.dwm.action.restore_default", "恢复系统默认");
             QPushButton* copyButton = makeButton(this, "window.dwm.action.copy_report", "复制报告");
             QPushButton* exportButton = makeButton(this, "window.dwm.action.export_report", "导出报告");
-            headerLayout->addWidget(readAllButton, 0);
-            headerLayout->addWidget(restoreButton, 0);
-            headerLayout->addWidget(copyButton, 0);
-            headerLayout->addWidget(exportButton, 0);
+            actions->addWidget(readAllButton);
+            actions->addWidget(restoreButton);
+            actions->addWidget(copyButton);
+            actions->addWidget(exportButton);
+            headerLayout->addLayout(actions);
 
             connect(readAllButton, &QPushButton::clicked, this, [this]() {
                 readAllAttributes(true);
@@ -663,11 +684,13 @@ namespace ks::window::dwmctl
         {
             QScrollArea* scrollArea = new QScrollArea(parent);
             scrollArea->setWidgetResizable(true);
+            scrollArea->setFrameShape(QFrame::NoFrame);
 
             QWidget* container = new QWidget(scrollArea);
             QVBoxLayout* containerLayout = new QVBoxLayout(container);
-            containerLayout->setContentsMargins(0, 0, 0, 0);
-            containerLayout->setSpacing(8);
+            containerLayout->setContentsMargins(16, 16, 16, 16);
+            containerLayout->setSpacing(16);
+            ks::ui::StylePrimaryContentPanel(container, false);
 
             containerLayout->addWidget(buildPresetGroup(container));
             containerLayout->addWidget(buildEnumeratedGroup(container));
@@ -922,14 +945,14 @@ namespace ks::window::dwmctl
             QHBoxLayout* transitionLayout = new QHBoxLayout();
             QPushButton* invalidateIconicButton =
                 makeButton(group, "window.dwm.action.invalidate_iconic", "作废静态缩略图缓存");
-            invalidateIconicButton->setToolTip(uiText(
-                "window.dwm.action.invalidate_iconic_tip",
+            ks::i18n::LanguageManager::instance().bindToolTip(invalidateIconicButton,
+                QStringLiteral("window.dwm.action.invalidate_iconic_tip"), QString::fromUtf8(
                 "DwmInvalidateIconicBitmaps：丢弃 DWM 为该窗口缓存的静态缩略图与实时预览位图，强制下次重新采集。"
                 "实测仅对本进程窗口有效，跨进程调用返回 E_INVALIDARG。"));
             QPushButton* transitionOwnedButton =
                 makeButton(group, "window.dwm.action.transition_owned", "触发属主窗口重定位过渡");
-            transitionOwnedButton->setToolTip(uiText(
-                "window.dwm.action.transition_owned_tip",
+            ks::i18n::LanguageManager::instance().bindToolTip(transitionOwnedButton,
+                QStringLiteral("window.dwm.action.transition_owned_tip"), QString::fromUtf8(
                 "DwmTransitionOwnedWindow：让 DWM 对该窗口播放一次 REPOSITION 过渡动画，可用于验证过渡是否被禁用。"
                 "实测仅对本进程窗口有效，跨进程调用返回 E_INVALIDARG。"));
             transitionLayout->addWidget(invalidateIconicButton, 0);
@@ -1071,8 +1094,9 @@ namespace ks::window::dwmctl
         {
             QWidget* container = new QWidget(parent);
             QVBoxLayout* layout = new QVBoxLayout(container);
-            layout->setContentsMargins(0, 0, 0, 0);
-            layout->setSpacing(6);
+            layout->setContentsMargins(16, 16, 16, 16);
+            layout->setSpacing(16);
+            ks::ui::StylePrimaryContentPanel(container, false);
 
             QGroupBox* thumbnailGroup = makeGroup(container, "window.dwm.group.thumbnail", "实时缩略图（DWM Thumbnail）");
             QVBoxLayout* thumbnailLayout = new QVBoxLayout(thumbnailGroup);

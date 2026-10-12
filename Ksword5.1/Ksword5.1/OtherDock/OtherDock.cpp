@@ -12,6 +12,8 @@
 #include "../UI/VisibleTableWidget.h"
 #include "../UI/AdaptivePageScroll.h"
 #include "../UI/DetailDialogChrome.h"
+#include "../UI/DetailPresentation.h"
+#include "../UI/FlowLayout.h"
 #include "../UI/UI_All.h"
 
 // ============================================================
@@ -1221,15 +1223,12 @@ private:
             return;
         }
 
-        QGroupBox* groupBox = new QGroupBox(groupTitleText, parentWidget);
-        QGridLayout* gridLayout = new QGridLayout(groupBox);
-        gridLayout->setContentsMargins(12, 16, 12, 12);
-        gridLayout->setHorizontalSpacing(24);
-        gridLayout->setVerticalSpacing(8);
-        gridLayout->setColumnStretch(0, 1);
-        gridLayout->setColumnStretch(1, 1);
+        QWidget* groupBox = ks::ui::CreateDetailCard(groupTitleText, parentWidget);
+        auto* groupLayout = qobject_cast<QVBoxLayout*>(groupBox->layout());
+        // 样式位保持原按钮和绑定，流式排列会随可用宽度换行。
+        auto* gridLayout = new ks::ui::FlowLayout(nullptr, 0, 16, 8);
+        groupLayout->addLayout(gridLayout);
 
-        int itemIndex = 0;
         for (const WindowStyleFlagDefinition& definition : definitionList)
         {
             // checkboxText：显示样式位名称，便于和文档/Win32 常量直接对应。
@@ -1239,10 +1238,7 @@ private:
             const QString checkboxTip = QString::fromUtf8(definition.styleDescriptionText);
             flagCheckBox->setToolTip(checkboxTip);
 
-            const int rowIndex = itemIndex / 2;
-            const int colIndex = itemIndex % 2;
-            gridLayout->addWidget(flagCheckBox, rowIndex, colIndex);
-            ++itemIndex;
+            gridLayout->addWidget(flagCheckBox);
 
             StyleCheckBinding binding;
             binding.styleNameText = checkboxText;
@@ -1547,34 +1543,33 @@ private:
         QVBoxLayout* rootLayout = new QVBoxLayout(this);
         ks::ui::ConfigureDetailDialogRoot(this);
 
+        QWidget* summaryHeader = ks::ui::CreateDetailSummaryHeader(this,
+            m_info.titleText.isEmpty() ? QStringLiteral("<无标题>") : m_info.titleText,
+            hwndToText(m_info.hwndValue), QIcon(QStringLiteral(":/Icon/process_details.svg")));
+        rootLayout->addWidget(summaryHeader);
         m_tabWidget = new QTabWidget(this);
         // 只排列左侧入口；底层页签索引仍由各窗口属性模块保留。
         using NavKind = ks::ui::DetailNavigationKind;
         ks::ui::SetDetailTabGroups(m_tabWidget, {
             {NavKind::General, {0, 2}}, {NavKind::Ownership, {1}},
             {NavKind::Interaction, {3, 6, 4}}, {NavKind::Internals, {5}},
-            {NavKind::Display, {7, 8}}});
-        ks::ui::IsolateMinimumSize(m_tabWidget);
-        ks::ui::IsolateMinimumSize(m_tabWidget->findChild<QStackedWidget*>());
-        m_tabWidget->setUsesScrollButtons(true);
+            {NavKind::Display, {7, 8, 9}}});
+        // 共享shell已经隔离页签/堆叠控件最小尺寸，并由分组导航替代原TabBar。
         rootLayout->addWidget(ks::ui::CreateDetailTabShell(m_tabWidget, this), 1);
 
         // ==================== 1. 基础属性 Tab（合并前四个页签） ====================
         QWidget* basicPage = new QWidget(m_tabWidget);
         QWidget* basicContent = ks::ui::EnablePageInnerScroll(basicPage);
         QVBoxLayout* basicLayout = new QVBoxLayout(basicContent);
-        basicLayout->setContentsMargins(8, 8, 8, 8);
-        basicLayout->setSpacing(8);
+        basicLayout->setContentsMargins(16, 16, 16, 16);
+        basicLayout->setSpacing(12);
         const int fieldHeight = std::max(28, fontMetrics().height() + 12);
 
-        // 常规信息分组：集中展示句柄关系和标题类名等关键字段。
-        QGroupBox* generalGroup = new QGroupBox(QStringLiteral("常规信息"), basicContent);
-        QGridLayout* generalLayout = new QGridLayout(generalGroup);
-        generalLayout->setContentsMargins(14, 18, 14, 14);
-        generalLayout->setHorizontalSpacing(16);
-        generalLayout->setVerticalSpacing(10);
-        generalLayout->setColumnStretch(1, 1);
-        generalLayout->setColumnStretch(3, 1);
+        // 常规字段使用独立卡片和自适应双列，不再让四列表格决定窗口最小宽度。
+        QWidget* generalGroup = ks::ui::CreateDetailCard(QStringLiteral("常规信息"), basicContent);
+        QFormLayout* generalLeft = nullptr;
+        QFormLayout* generalRight = nullptr;
+        ks::ui::AddDetailFieldColumns(generalGroup, generalLeft, generalRight);
         m_handleLabel = new QLabel(generalGroup);
         m_parentHandleLabel = new QLabel(generalGroup);
         m_ownerHandleLabel = new QLabel(generalGroup);
@@ -1584,14 +1579,7 @@ private:
         m_stateLabel = new QLabel(generalGroup);
         m_relationLabel = new QLabel(generalGroup);
         m_titleEdit->setReadOnly(true);
-        m_titleEdit->setMinimumHeight(fieldHeight);
-        const auto addGeneralField = [generalLayout, generalGroup](
-            const QString& text, QWidget* value, int row, int column, int span = 1) {
-            auto* label = new QLabel(text, generalGroup);
-            label->setAlignment(Qt::AlignLeft | Qt::AlignTop);
-            generalLayout->addWidget(label, row, column);
-            generalLayout->addWidget(value, row, column + 1, 1, span);
-        };
+        ks::ui::StyleStandaloneInput(m_titleEdit);
         for (QLabel* label : {m_handleLabel, m_parentHandleLabel, m_ownerHandleLabel,
                  m_classNameLabel, m_instanceLabel, m_stateLabel, m_relationLabel})
         {
@@ -1600,35 +1588,23 @@ private:
             label->setMinimumWidth(0);
             label->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
         }
-        addGeneralField(QStringLiteral("标题"), m_titleEdit, 0, 0, 3);
-        addGeneralField(QStringLiteral("类名"), m_classNameLabel, 1, 0, 3);
-        addGeneralField(QStringLiteral("句柄"), m_handleLabel, 2, 0);
-        addGeneralField(QStringLiteral("实例句柄"), m_instanceLabel, 2, 2);
-        addGeneralField(QStringLiteral("父句柄"), m_parentHandleLabel, 3, 0);
-        addGeneralField(QStringLiteral("所有者句柄"), m_ownerHandleLabel, 3, 2);
-        addGeneralField(QStringLiteral("状态摘要"), m_stateLabel, 4, 0);
-        addGeneralField(QStringLiteral("关系摘要"), m_relationLabel, 4, 2);
-        basicLayout->addWidget(generalGroup, 0);
+        generalLeft->addRow(QStringLiteral("标题"), m_titleEdit);
+        generalLeft->addRow(QStringLiteral("类名"), m_classNameLabel);
+        generalLeft->addRow(QStringLiteral("句柄"), m_handleLabel);
+        generalLeft->addRow(QStringLiteral("父句柄"), m_parentHandleLabel);
+        generalRight->addRow(QStringLiteral("实例句柄"), m_instanceLabel);
+        generalRight->addRow(QStringLiteral("所有者句柄"), m_ownerHandleLabel);
+        generalRight->addRow(QStringLiteral("状态摘要"), m_stateLabel);
+        generalRight->addRow(QStringLiteral("关系摘要"), m_relationLabel);
+        basicLayout->addWidget(generalGroup);
 
-        // 位置与状态分组：把可编辑位置和状态控制并排展示，减少标签切换。
-        QGroupBox* layoutStateGroup = new QGroupBox(QStringLiteral("位置与状态"), basicContent);
-        QHBoxLayout* layoutStateLayout = new QHBoxLayout(layoutStateGroup);
-        layoutStateLayout->setContentsMargins(14, 18, 14, 14);
-        layoutStateLayout->setSpacing(24);
-        QWidget* positionPanel = new QWidget(layoutStateGroup);
-        QGridLayout* positionLayout = new QGridLayout(positionPanel);
-        positionLayout->setContentsMargins(0, 0, 0, 0);
-        positionLayout->setHorizontalSpacing(12);
-        positionLayout->setVerticalSpacing(10);
-        positionLayout->setColumnStretch(1, 1);
-        positionLayout->setColumnStretch(3, 1);
-        QWidget* statePanel = new QWidget(layoutStateGroup);
-        QFormLayout* stateLayout = new QFormLayout(statePanel);
-        stateLayout->setContentsMargins(0, 0, 0, 0);
-        stateLayout->setHorizontalSpacing(12);
-        stateLayout->setVerticalSpacing(10);
-        stateLayout->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
-
+        // 位置/状态两列沿用原成员控件，窄窗自动纵排并让字段标签换行。
+        QWidget* layoutStateGroup = ks::ui::CreateDetailCard(QStringLiteral("位置与状态"), basicContent);
+        QFormLayout* positionLayout = nullptr;
+        QFormLayout* stateLayout = nullptr;
+        ks::ui::AddDetailFieldColumns(layoutStateGroup, positionLayout, stateLayout);
+        QWidget* positionPanel = positionLayout->parentWidget();
+        QWidget* statePanel = stateLayout->parentWidget();
         m_xSpin = new QSpinBox(positionPanel);
         m_ySpin = new QSpinBox(positionPanel);
         m_widthSpin = new QSpinBox(positionPanel);
@@ -1643,20 +1619,16 @@ private:
         }
         m_widthSpin->setRange(1, 32768);
         m_heightSpin->setRange(1, 32768);
-
         QPushButton* centerScreenButton = new QPushButton(QIcon(":/Icon/process_tree.svg"), QStringLiteral("居中到屏幕"), positionPanel);
         centerScreenButton->setToolTip(QStringLiteral("把窗口移动到主屏幕中央"));
-        centerScreenButton->setStyleSheet(blueButtonStyle());
-        positionLayout->addWidget(new QLabel(QStringLiteral("X"), positionPanel), 0, 0);
-        positionLayout->addWidget(m_xSpin, 0, 1);
-        positionLayout->addWidget(new QLabel(QStringLiteral("Y"), positionPanel), 0, 2);
-        positionLayout->addWidget(m_ySpin, 0, 3);
-        positionLayout->addWidget(new QLabel(QStringLiteral("宽度"), positionPanel), 1, 0);
-        positionLayout->addWidget(m_widthSpin, 1, 1);
-        positionLayout->addWidget(new QLabel(QStringLiteral("高度"), positionPanel), 1, 2);
-        positionLayout->addWidget(m_heightSpin, 1, 3);
-        centerScreenButton->setMinimumHeight(fieldHeight);
-        positionLayout->addWidget(centerScreenButton, 2, 1, 1, 3, Qt::AlignLeft);
+        ks::ui::ApplyFlatButtonTheme(centerScreenButton, ks::ui::FlatButtonTone::Neutral,
+            ks::ui::FlatButtonAppearance::Solid);
+        ks::ui::NormalizeToolbarControl(centerScreenButton);
+        positionLayout->addRow(QStringLiteral("X"), m_xSpin);
+        positionLayout->addRow(QStringLiteral("Y"), m_ySpin);
+        positionLayout->addRow(QStringLiteral("宽度"), m_widthSpin);
+        positionLayout->addRow(QStringLiteral("高度"), m_heightSpin);
+        positionLayout->addRow(centerScreenButton);
 
         m_topMostCheck = new QCheckBox(QStringLiteral("置顶窗口"), statePanel);
         m_alphaSlider = new ks::ui::ThemedSlider(Qt::Horizontal, statePanel);
@@ -1679,16 +1651,17 @@ private:
         stateLayout->addRow(QStringLiteral("透明度"), m_alphaSlider);
         stateLayout->addRow(QStringLiteral("当前 Alpha"), m_alphaSpin);
 
-        layoutStateLayout->addWidget(positionPanel, 3, Qt::AlignTop);
-        layoutStateLayout->addWidget(statePanel, 2, Qt::AlignTop);
         basicLayout->addWidget(layoutStateGroup, 0);
 
         // 复选框与报告各占完整宽度，避免代码编辑器工具栏挤占样式列表。
-        QGroupBox* styleGroup = new QGroupBox(QStringLiteral("样式与外观"), basicContent);
-        QVBoxLayout* styleLayout = new QVBoxLayout(styleGroup);
-        styleLayout->setContentsMargins(14, 18, 14, 14);
-        styleLayout->setSpacing(10);
-        styleGroup->setMinimumHeight(fieldHeight * 11 + 64);
+        // 样式编辑作为独立页，复选框页和结构化报告分别滚动，避免基础页再包一层滚动区。
+        QWidget* stylePage = new QWidget(m_tabWidget);
+        auto* stylePageLayout = new QVBoxLayout(stylePage);
+        stylePageLayout->setContentsMargins(16, 16, 16, 16);
+        QWidget* styleGroup = ks::ui::CreateDetailCard(QStringLiteral("样式与外观"), stylePage);
+        styleGroup->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+        QVBoxLayout* styleLayout = qobject_cast<QVBoxLayout*>(styleGroup->layout());
+        stylePageLayout->addWidget(styleGroup, 1);
 
         QHBoxLayout* styleActionLayout = new QHBoxLayout();
         QLabel* styleHintLabel = new QLabel(QStringLiteral("勾选样式位后点击应用"), styleGroup);
@@ -1714,7 +1687,8 @@ private:
         styleTabs->setUsesScrollButtons(true);
         const auto createStylePage = [styleTabs]() {
             auto* page = new QWidget(styleTabs);
-            auto* layout = new QVBoxLayout(page);
+            QWidget* content = ks::ui::EnablePageInnerScroll(page);
+            auto* layout = new QVBoxLayout(content);
             layout->setContentsMargins(0, 8, 0, 0);
             return std::make_pair(page, layout);
         };
@@ -1745,11 +1719,12 @@ private:
 
         m_styleText->setToolTip(QStringLiteral("显示实时样式值与每个位的解释状态。"));
         ks::ui::IsolateMinimumSize(m_styleText);
-        styleTabs->addTab(m_styleText, QStringLiteral("样式明细"));
-        ks::i18n::LanguageManager::instance().bindTab(styleTabs, m_styleText,
+        QWidget* styleSummaryPage = ks::ui::CreateDetailFieldProjection(m_styleText, styleTabs);
+        styleTabs->addTab(styleSummaryPage, QStringLiteral("样式明细"));
+        ks::i18n::LanguageManager::instance().bindTab(styleTabs, styleSummaryPage,
             QStringLiteral("window.detail.style.summary"), QStringLiteral("样式明细"));
         styleLayout->addWidget(styleTabs, 1);
-        basicLayout->addWidget(styleGroup, 1);
+        basicLayout->addStretch(1);
 
         connect(centerScreenButton, &QPushButton::clicked, this, [this]() {
             QScreen* screen = QGuiApplication::primaryScreen();
@@ -1786,7 +1761,7 @@ private:
         processLayout->setSpacing(6);
         m_processThreadText = new ks::ui::StructuredFieldView(processPage);
 
-        processLayout->addWidget(m_processThreadText, 1);
+        processLayout->addWidget(ks::ui::CreateDetailFieldProjection(m_processThreadText, processLayout->parentWidget()), 1);
         m_tabWidget->addTab(processPage, QIcon(QStringLiteral(":/Icon/process_threads.svg")), QStringLiteral("进程与线程"));
         ks::i18n::LanguageManager::instance().bindTab(
             m_tabWidget, processPage, QStringLiteral("window.detail.tab.process"), QStringLiteral("进程与线程"));
@@ -1798,7 +1773,7 @@ private:
         classLayout->setSpacing(6);
         m_classText = new ks::ui::StructuredFieldView(classPage);
 
-        classLayout->addWidget(m_classText, 1);
+        classLayout->addWidget(ks::ui::CreateDetailFieldProjection(m_classText, classLayout->parentWidget()), 1);
         m_tabWidget->addTab(classPage, QIcon(QStringLiteral(":/Icon/knowledge_book.svg")), QStringLiteral("类信息"));
         ks::i18n::LanguageManager::instance().bindTab(
             m_tabWidget, classPage, QStringLiteral("window.detail.tab.class"), QStringLiteral("类信息"));
@@ -1818,8 +1793,9 @@ private:
         // 概览文本：保留原有消息队列状态、焦点等摘要，便于快速判断窗口活性。
         m_hookText = new ks::ui::StructuredFieldView(hookPage);
 
-        m_hookText->setMaximumHeight(260);
-        hookLayout->addWidget(m_hookText, 0);
+        auto* hookSplitter = new QSplitter(Qt::Vertical, hookPage);
+        hookSplitter->setChildrenCollapsible(false);
+        hookSplitter->addWidget(ks::ui::CreateDetailFieldProjection(m_hookText, hookSplitter));
 
         // 控制条：开始/停止/清空/自动滚动/最大行数，风格对齐其他按钮。
         QHBoxLayout* monitorControlLayout = new QHBoxLayout();
@@ -1850,11 +1826,21 @@ private:
 
         m_messageModeLabel = new QLabel(QStringLiteral("采集模式：未启动"), hookPage);
         m_messageCountLabel = new QLabel(QStringLiteral("已记录: 0, 丢弃: 0"), hookPage);
-        monitorControlLayout->addWidget(m_messageModeLabel, 0);
-        monitorControlLayout->addWidget(m_messageCountLabel, 0);
         monitorControlLayout->addStretch(1);
         hookLayout->addLayout(monitorControlLayout);
         ks::ui::NormalizeToolbarRow(monitorControlLayout);
+
+        // 状态说明使用独立可换行行，不能和输入/启停动作一起撑宽消息工具条。
+        auto* monitorStatusLayout = new QHBoxLayout();
+        monitorStatusLayout->setSpacing(16);
+        for (QLabel* status : {m_messageModeLabel, m_messageCountLabel})
+        {
+            status->setWordWrap(true);
+            status->setMinimumWidth(0);
+            status->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+            monitorStatusLayout->addWidget(status, 1);
+        }
+        hookLayout->addLayout(monitorStatusLayout);
 
         // 消息表：按行展示捕获数据，接近 Spy++ 的消息流视角。
         m_messageTable = new ks::ui::VisibleTableWidget(hookPage);
@@ -1879,7 +1865,10 @@ private:
         m_messageTable->verticalHeader()->setVisible(false);
         m_messageTable->horizontalHeader()->setStretchLastSection(true);
         m_messageTable->setContextMenuPolicy(Qt::CustomContextMenu);
-        hookLayout->addWidget(m_messageTable, 1);
+        hookSplitter->addWidget(m_messageTable);
+        hookSplitter->setStretchFactor(0, 1);
+        hookSplitter->setStretchFactor(1, 3);
+        hookLayout->addWidget(hookSplitter, 1);
 
         // 表格右键：支持复制整行，方便与日志或抓包结果做对比分析。
         connect(m_messageTable, &QTableWidget::customContextMenuRequested, this, [this](const QPoint& pos) {
@@ -1940,7 +1929,7 @@ private:
         advancedLayout->setSpacing(6);
         m_advancedText = new ks::ui::StructuredFieldView(advancedPage);
 
-        advancedLayout->addWidget(m_advancedText, 1);
+        advancedLayout->addWidget(ks::ui::CreateDetailFieldProjection(m_advancedText, advancedLayout->parentWidget()), 1);
         m_tabWidget->addTab(advancedPage, QIcon(QStringLiteral(":/Icon/process_settings.svg")), QStringLiteral("高级属性"));
         ks::i18n::LanguageManager::instance().bindTab(
             m_tabWidget, advancedPage, QStringLiteral("window.detail.tab.advanced"), QStringLiteral("高级属性"));
@@ -1953,22 +1942,23 @@ private:
         ks::i18n::LanguageManager::instance().bindTab(m_tabWidget, inputPage,
             QStringLiteral("window.input.tab"), QStringLiteral("窗口输入与顺序"));
 
-        // ==================== 底部按钮 ====================
-        QWidget* footer = new QWidget(this);
-        footer->setObjectName(QStringLiteral("ks_detail_footer"));
+        // 样式页追加到旧入口之后，原消息/输入/高级索引保持。
+        m_tabWidget->addTab(stylePage, QIcon(QStringLiteral(":/Icon/process_settings.svg")), QStringLiteral("样式与外观"));
+
+        // 对象动作置于全宽摘要右侧；窗口内容拥有自己的滚动而动作始终可见。
+        QWidget* footer = new QWidget(summaryHeader);
         QHBoxLayout* buttonLayout = new QHBoxLayout(footer);
-        buttonLayout->setContentsMargins(8, 6, 8, 6);
-        rootLayout->addWidget(footer);
-        buttonLayout->addStretch(1);
+        buttonLayout->setContentsMargins(0, 0, 0, 0);
+        qobject_cast<QHBoxLayout*>(summaryHeader->layout())->addWidget(footer);
         m_refreshButton = new QPushButton(QIcon(":/Icon/process_refresh.svg"), QString(), this);
         m_applyButton = new QPushButton(QIcon(":/Icon/process_start.svg"), QString(), this);
         m_exportButton = new QPushButton(QIcon(":/Icon/log_export.svg"), QString(), this);
         m_closeButton = new QPushButton(QIcon(":/Icon/process_terminate.svg"), QString(), this);
         auto& language = ks::i18n::LanguageManager::instance();
-        language.bindText(m_refreshButton, QStringLiteral("window.detail.action.refresh"), QStringLiteral("刷新"));
+        language.bindToolTip(m_refreshButton, QStringLiteral("window.detail.action.refresh"), QStringLiteral("刷新"));
         language.bindText(m_applyButton, QStringLiteral("window.detail.action.apply"), QStringLiteral("应用修改"));
-        language.bindText(m_exportButton, QStringLiteral("window.detail.action.export"), QStringLiteral("导出信息"));
-        language.bindText(m_closeButton, QStringLiteral("window.detail.action.close"), QStringLiteral("关闭"));
+        language.bindToolTip(m_exportButton, QStringLiteral("window.detail.action.export"), QStringLiteral("导出信息"));
+        language.bindToolTip(m_closeButton, QStringLiteral("window.detail.action.close"), QStringLiteral("关闭"));
 
         m_refreshButton->setToolTip(QStringLiteral("刷新窗口属性"));
         m_applyButton->setToolTip(QStringLiteral("应用修改"));
@@ -1978,7 +1968,8 @@ private:
 
         for (QPushButton* button : { m_refreshButton, m_applyButton, m_exportButton, m_closeButton })
         {
-            button->setStyleSheet(blueButtonStyle());
+            ks::ui::ApplyFlatButtonTheme(button, ks::ui::FlatButtonTone::Neutral,
+                ks::ui::FlatButtonAppearance::Solid);
             button->setMinimumHeight(32);
             button->setIconSize(KswordTheme::StandardIconSize());
             buttonLayout->addWidget(button, 0);
@@ -1995,6 +1986,8 @@ private:
             exportInfo();
         });
         connect(m_closeButton, &QPushButton::clicked, this, &QDialog::close);
+        // 明确登记同一个共享详情框架，扩展页加入后继续使用统一表单和主题规则。
+        ks::ui::InstallDetailWindowFramework(this);
     }
 
     // 刷新运行时信息：对句柄重新采样，避免显示陈旧数据。
@@ -3276,7 +3269,7 @@ void OtherDock::initializeUi()
 
     // 中部主内容：Tab1=窗口列表，Tab2=桌面管理（SwitchDesktop）。
     m_contentTabWidget = new QTabWidget(this);
-    ks::ui::StylePageTabs(m_contentTabWidget);
+    ks::ui::StylePageTabsContentFrame(m_contentTabWidget);
     m_rootLayout->addWidget(m_contentTabWidget, 1);
 
     m_windowListPage = new QWidget(m_contentTabWidget);

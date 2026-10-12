@@ -2,6 +2,7 @@
 #include "../../UI/ToolbarMetrics.h"
 #include "../../UI/VisibleTableWidget.h"
 #include "../../UI/FlatButtonTheme.h"
+#include "../../UI/PrimaryPageStyle.h"
 
 #include "../../theme.h"
 
@@ -189,8 +190,16 @@ namespace ks::misc
     void SoundSourcePage::initializeUi()
     {
         auto* rootLayout = new QVBoxLayout(this);
-        rootLayout->setContentsMargins(12, 12, 12, 12);
         rootLayout->setSpacing(8);
+        ks::ui::StyleWorkspacePage(this);
+
+        // 采样概览与会话列表分层；不改动专用 A/B/C 列组和短周期采样逻辑。
+        auto* overviewPanel = new QWidget(this); // 标题、工具和采样摘要共用中性色面。
+        auto* overviewLayout = new QVBoxLayout(overviewPanel);
+        overviewLayout->setContentsMargins(16, 16, 16, 16);
+        overviewLayout->setSpacing(12);
+        ks::ui::StylePrimaryContentPanel(overviewPanel, false);
+        rootLayout->addWidget(overviewPanel);
 
         m_titleLabel = new QLabel(
             m_processIdFilter == 0U
@@ -199,7 +208,7 @@ namespace ks::misc
             this);
         m_titleLabel->setToolTip(
             QStringLiteral("R3 采样 Core Audio 会话峰值、状态、音量与端点；R0 多源交叉核验会话 PID，只佐证进程身份，不读取或修改音频流。"));
-        rootLayout->addWidget(m_titleLabel);
+        overviewLayout->addWidget(m_titleLabel);
 
         auto* toolbarLayout = new QHBoxLayout();
         toolbarLayout->setSpacing(6);
@@ -259,17 +268,16 @@ namespace ks::misc
         toolbarLayout->addLayout(presetLayout);
         toolbarLayout->addStretch(1);
         ks::ui::NormalizeToolbarRow(toolbarLayout);
-        rootLayout->addLayout(toolbarLayout);
+        overviewLayout->addLayout(toolbarLayout);
 
         m_summaryLabel = new QLabel(
             QStringLiteral("尚未采样声音来源。"),
             this);
         m_summaryLabel->setWordWrap(true);
-        rootLayout->addWidget(m_summaryLabel);
+        overviewLayout->addWidget(m_summaryLabel);
 
         m_statusLabel = new QLabel(QStringLiteral("等待刷新"), this);
         m_statusLabel->setWordWrap(true);
-        rootLayout->addWidget(m_statusLabel);
 
         m_table = new QTableWidget(this);
         // 音频会话短周期峰值已有专用列视图，保留复制导出，收拢快照条。
@@ -287,6 +295,8 @@ namespace ks::misc
         m_table->horizontalHeader()->setToolTip(
             QStringLiteral("右键表头可逐列显示或隐藏；手动调整后进入自定义列布局"));
         rootLayout->addWidget(m_table, 1);
+        // 进度与失败说明保留独立状态行，结果区域获得全部剩余高度。
+        rootLayout->addWidget(m_statusLabel);
 
         m_refreshTimer = new QTimer(this);
         m_refreshTimer->setInterval(kAutoRefreshIntervalMs);
@@ -761,19 +771,17 @@ namespace ks::misc
             QStringLiteral("font-size:16px;font-weight:700;color:%1;")
             .arg(KswordTheme::TextPrimaryColorHex()));
         m_summaryLabel->setStyleSheet(
-            QStringLiteral("font-weight:600;color:%1;")
+            QStringLiteral("font-weight:400;color:%1;")
             .arg(KswordTheme::TextPrimaryColorHex()));
         m_statusLabel->setStyleSheet(
             QStringLiteral("color:%1;")
             .arg(KswordTheme::TextSecondaryColorHex()));
 
-        // 纯色按钮保留列组 checked 态；刷新按钮仍受原采样 enabled 状态控制。
-        const QString presetButtonStyle = ks::ui::BuildFlatButtonStyle(ks::ui::FlatButtonTone::Neutral)
-            + QStringLiteral("QToolButton{border-radius:4px;}");
-        m_refreshButton->setStyleSheet(presetButtonStyle);
-        m_overviewPresetButton->setStyleSheet(presetButtonStyle);
-        m_audioPresetButton->setStyleSheet(presetButtonStyle);
-        m_kernelPresetButton->setStyleSheet(presetButtonStyle);
+        // 列组底面和动画由 SegmentedControl 唯一绘制；主题刷新只处理独立刷新动作。
+        m_refreshButton->setStyleSheet(
+            ks::ui::BuildFlatButtonStyle(ks::ui::FlatButtonTone::Neutral,
+                ks::ui::FlatButtonAppearance::Solid)
+            + QStringLiteral("QToolButton{border-radius:5px;}"));
     }
 
     QString SoundSourcePage::recordKey(

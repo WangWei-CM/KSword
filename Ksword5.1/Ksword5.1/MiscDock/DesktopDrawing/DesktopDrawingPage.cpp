@@ -1,5 +1,6 @@
 #include "DesktopDrawingPage.h"
 #include "../../UI/PrimaryPageStyle.h"
+#include "../../UI/ParameterWorkspace.h"
 #include "../../UI/ToolbarMetrics.h"
 
 #include "../../Internationalization/LanguageManager.h"
@@ -60,15 +61,16 @@ namespace ks::misc
     {
         auto& language = ks::i18n::LanguageManager::instance();
         auto* root = new QVBoxLayout(this);
-        root->setContentsMargins(12, 12, 12, 12);
         root->setSpacing(10);
+        ks::ui::StyleWorkspacePage(this);
 
         auto* scroll = new QScrollArea(this);
         scroll->setWidgetResizable(true);
         scroll->setFrameShape(QFrame::NoFrame);
         m_settings = new QWidget(scroll);
         auto* form = new QFormLayout(m_settings);
-        form->setContentsMargins(0, 0, 0, 0);
+        form->setContentsMargins(16, 16, 16, 16);
+        ks::ui::StylePrimaryContentPanel(m_settings, false);
         // 简短表单保持一屏可读，标签与字段使用固定间距。
         form->setHorizontalSpacing(16);
         form->setVerticalSpacing(8);
@@ -122,6 +124,8 @@ namespace ks::misc
         m_colorButton = new QPushButton(m_settings);
         updateColorButton();
         addRow(QStringLiteral("misc.desktop_drawing.color"), QStringLiteral("图案颜色"), m_colorButton);
+        // 绘制结果在桌面上，此页保留单列表单，不创建空的结果面板。
+        ks::ui::StyleParameterFields(m_settings);
         scroll->setWidget(m_settings);
         root->addWidget(scroll, 1);
 

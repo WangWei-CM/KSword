@@ -1,5 +1,8 @@
 #include "NetworkDock.InternalCommon.h"
 #include "../UI/ToolbarMetrics.h"
+#include "../UI/PrimaryPageStyle.h"
+#include "../UI/FlatButtonTheme.h"
+#include "../UI/ParameterWorkspace.h"
 #include "../UI/SecondaryPageLayout.h"
 #include "../Framework/PrivilegeElevationPrompt.h"
 #include "../UI/VisibleTableWidget.h"
@@ -405,21 +408,37 @@ void NetworkDock::initializeRouteTableTab()
     m_routeTableLayout = new QVBoxLayout(m_routeTablePage);
     m_routeTableLayout->setContentsMargins(6, 6, 6, 6);
     m_routeTableLayout->setSpacing(6);
-    m_routeTableControlLayout = new QHBoxLayout();
+    // 本页动作行显式接入共享工具面，结果表仍保留原始模型与伸缩策略。
+    auto* routeTableToolbar = new QWidget(m_routeTablePage);
+    ks::ui::StylePrimaryToolbar(routeTableToolbar);
+    m_routeTableControlLayout = new QHBoxLayout(routeTableToolbar);
+    m_routeTableControlLayout->setContentsMargins(8, 4, 8, 4);
     m_routeTableControlLayout->setSpacing(6);
 
     m_refreshRouteButton = new QPushButton(m_routeTablePage);
     m_refreshRouteButton->setIcon(QIcon(":/Icon/process_refresh.svg"));
     m_refreshRouteButton->setToolTip(QStringLiteral("刷新 IPv4/IPv6 路由表"));
+    ks::ui::ApplyFlatButtonTheme(m_refreshRouteButton,
+        ks::ui::FlatButtonTone::Neutral, ks::ui::FlatButtonAppearance::Solid);
+    KswordTheme::ApplyCompactIconButtonMetrics(m_refreshRouteButton);
     m_addRouteButton = new QPushButton(m_routeTablePage);
     m_addRouteButton->setIcon(QIcon(":/Icon/process_start.svg"));
     m_addRouteButton->setToolTip(QStringLiteral("新增路由，默认仅在本次启动有效"));
+    ks::ui::ApplyFlatButtonTheme(m_addRouteButton,
+        ks::ui::FlatButtonTone::Neutral, ks::ui::FlatButtonAppearance::Solid);
+    KswordTheme::ApplyCompactIconButtonMetrics(m_addRouteButton);
     m_editRouteButton = new QPushButton(m_routeTablePage);
     m_editRouteButton->setIcon(QIcon(":/Icon/process_details.svg"));
     m_editRouteButton->setToolTip(QStringLiteral("编辑选中路由"));
+    ks::ui::ApplyFlatButtonTheme(m_editRouteButton,
+        ks::ui::FlatButtonTone::Neutral, ks::ui::FlatButtonAppearance::Solid);
+    KswordTheme::ApplyCompactIconButtonMetrics(m_editRouteButton);
     m_removeRouteButton = new QPushButton(m_routeTablePage);
     m_removeRouteButton->setIcon(QIcon(":/Icon/log_clear.svg"));
     m_removeRouteButton->setToolTip(QStringLiteral("删除选中活动路由及其同名持久副本"));
+    ks::ui::ApplyFlatButtonTheme(m_removeRouteButton,
+        ks::ui::FlatButtonTone::Danger, ks::ui::FlatButtonAppearance::Solid);
+    KswordTheme::ApplyCompactIconButtonMetrics(m_removeRouteButton);
     m_routeStatusLabel = new QLabel(QStringLiteral("状态：等待刷新"), m_routeTablePage);
     m_routeStatusLabel->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
     m_routeTableControlLayout->addWidget(m_refreshRouteButton);
@@ -427,7 +446,7 @@ void NetworkDock::initializeRouteTableTab()
     m_routeTableControlLayout->addWidget(m_editRouteButton);
     m_routeTableControlLayout->addWidget(m_removeRouteButton);
     m_routeTableControlLayout->addWidget(m_routeStatusLabel, 1);
-    m_routeTableLayout->addLayout(m_routeTableControlLayout);
+    m_routeTableLayout->addWidget(routeTableToolbar);
     ks::ui::NormalizeToolbarRow(m_routeTableControlLayout);
 
     m_routeTable = new ks::ui::VisibleTableWidget(m_routeTablePage);
@@ -749,24 +768,40 @@ void NetworkDock::initializeArpCacheTab()
     m_arpCacheLayout->setContentsMargins(6, 6, 6, 6);
     m_arpCacheLayout->setSpacing(6);
 
-    m_arpCacheControlLayout = new QHBoxLayout();
+    // 本页动作行显式接入共享工具面，结果表仍保留原始模型与伸缩策略。
+    auto* arpCacheToolbar = new QWidget(m_arpCachePage);
+    ks::ui::StylePrimaryToolbar(arpCacheToolbar);
+    m_arpCacheControlLayout = new QHBoxLayout(arpCacheToolbar);
+    m_arpCacheControlLayout->setContentsMargins(8, 4, 8, 4);
     m_arpCacheControlLayout->setSpacing(6);
 
     m_refreshArpButton = new QPushButton(m_arpCachePage);
     m_refreshArpButton->setIcon(QIcon(":/Icon/process_refresh.svg"));
     m_refreshArpButton->setToolTip(QStringLiteral("刷新 ARP 缓存列表"));
+    ks::ui::ApplyFlatButtonTheme(m_refreshArpButton,
+        ks::ui::FlatButtonTone::Neutral, ks::ui::FlatButtonAppearance::Solid);
+    KswordTheme::ApplyCompactIconButtonMetrics(m_refreshArpButton);
 
     m_addArpButton = new QPushButton(m_arpCachePage);
     m_addArpButton->setIcon(QIcon(":/Icon/process_start.svg"));
     m_addArpButton->setToolTip(QStringLiteral("新增静态 ARP 缓存项"));
+    ks::ui::ApplyFlatButtonTheme(m_addArpButton,
+        ks::ui::FlatButtonTone::Neutral, ks::ui::FlatButtonAppearance::Solid);
+    KswordTheme::ApplyCompactIconButtonMetrics(m_addArpButton);
 
     m_removeArpButton = new QPushButton(m_arpCachePage);
     m_removeArpButton->setIcon(QIcon(":/Icon/log_clear.svg"));
     m_removeArpButton->setToolTip(QStringLiteral("删除选中的 ARP 缓存项"));
+    ks::ui::ApplyFlatButtonTheme(m_removeArpButton,
+        ks::ui::FlatButtonTone::Danger, ks::ui::FlatButtonAppearance::Solid);
+    KswordTheme::ApplyCompactIconButtonMetrics(m_removeArpButton);
 
     m_flushArpButton = new QPushButton(m_arpCachePage);
     m_flushArpButton->setIcon(QIcon(":/Icon/log_clear.svg"));
     m_flushArpButton->setToolTip(QStringLiteral("清空全部 ARP 缓存"));
+    ks::ui::ApplyFlatButtonTheme(m_flushArpButton,
+        ks::ui::FlatButtonTone::Danger, ks::ui::FlatButtonAppearance::Solid);
+    KswordTheme::ApplyCompactIconButtonMetrics(m_flushArpButton);
 
     m_arpStatusLabel = new QLabel(QStringLiteral("状态：等待刷新"), m_arpCachePage);
     m_arpStatusLabel->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
@@ -776,7 +811,7 @@ void NetworkDock::initializeArpCacheTab()
     m_arpCacheControlLayout->addWidget(m_removeArpButton);
     m_arpCacheControlLayout->addWidget(m_flushArpButton);
     m_arpCacheControlLayout->addWidget(m_arpStatusLabel, 1);
-    m_arpCacheLayout->addLayout(m_arpCacheControlLayout);
+    m_arpCacheLayout->addWidget(arpCacheToolbar);
     ks::ui::NormalizeToolbarRow(m_arpCacheControlLayout);
 
     m_arpTable = new ks::ui::VisibleTableWidget(m_arpCachePage);
@@ -808,24 +843,36 @@ void NetworkDock::initializeDnsCacheTab()
     m_dnsCacheLayout->setContentsMargins(6, 6, 6, 6);
     m_dnsCacheLayout->setSpacing(6);
 
-    m_dnsCacheControlLayout = new QHBoxLayout();
+    // 本页动作行显式接入共享工具面，结果表仍保留原始模型与伸缩策略。
+    auto* dnsCacheToolbar = new QWidget(m_dnsCachePage);
+    ks::ui::StylePrimaryToolbar(dnsCacheToolbar);
+    m_dnsCacheControlLayout = new QHBoxLayout(dnsCacheToolbar);
+    m_dnsCacheControlLayout->setContentsMargins(8, 4, 8, 4);
     m_dnsCacheControlLayout->setSpacing(6);
 
     m_refreshDnsButton = new QPushButton(QStringLiteral("刷新"), m_dnsCachePage);
     m_refreshDnsButton->setIcon(QIcon(":/Icon/process_refresh.svg"));
     m_refreshDnsButton->setToolTip(QStringLiteral("刷新 DNS 缓存列表"));
+    ks::ui::ApplyFlatButtonTheme(m_refreshDnsButton,
+        ks::ui::FlatButtonTone::Neutral, ks::ui::FlatButtonAppearance::Solid);
 
     m_dnsEntryEdit = new QLineEdit(m_dnsCachePage);
     m_dnsEntryEdit->setPlaceholderText(QStringLiteral("输入要删除的 DNS 域名，或先在表格里选择"));
     m_dnsEntryEdit->setToolTip(QStringLiteral("删除指定域名的 DNS 缓存条目"));
+    // 指定域名是操作参数，不作为结果过滤搜索处理。
+    ks::ui::StyleStandaloneInput(m_dnsEntryEdit);
 
     m_removeDnsButton = new QPushButton(QStringLiteral("删除"), m_dnsCachePage);
     m_removeDnsButton->setIcon(QIcon(":/Icon/log_clear.svg"));
     m_removeDnsButton->setToolTip(QStringLiteral("删除输入框域名或表格选中的 DNS 缓存条目，支持多选"));
+    ks::ui::ApplyFlatButtonTheme(m_removeDnsButton,
+        ks::ui::FlatButtonTone::Danger, ks::ui::FlatButtonAppearance::Solid);
 
     m_flushDnsButton = new QPushButton(QStringLiteral("清空"), m_dnsCachePage);
     m_flushDnsButton->setIcon(QIcon(":/Icon/log_clear.svg"));
     m_flushDnsButton->setToolTip(QStringLiteral("清空 DNS 缓存"));
+    ks::ui::ApplyFlatButtonTheme(m_flushDnsButton,
+        ks::ui::FlatButtonTone::Danger, ks::ui::FlatButtonAppearance::Solid);
 
     m_dnsStatusLabel = new QLabel(QStringLiteral("状态：等待刷新"), m_dnsCachePage);
     m_dnsStatusLabel->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
@@ -835,7 +882,7 @@ void NetworkDock::initializeDnsCacheTab()
     m_dnsCacheControlLayout->addWidget(m_removeDnsButton);
     m_dnsCacheControlLayout->addWidget(m_flushDnsButton);
     m_dnsCacheControlLayout->addWidget(m_dnsStatusLabel, 1);
-    m_dnsCacheLayout->addLayout(m_dnsCacheControlLayout);
+    m_dnsCacheLayout->addWidget(dnsCacheToolbar);
     ks::ui::NormalizeToolbarRow(m_dnsCacheControlLayout);
 
     m_dnsTable = new ks::ui::VisibleTableWidget(m_dnsCachePage);
@@ -862,11 +909,13 @@ void NetworkDock::initializeAliveHostScanTab()
 {
     m_aliveScanPage = new QWidget(this);
     m_aliveScanLayout = new QVBoxLayout(m_aliveScanPage);
-    m_aliveScanLayout->setContentsMargins(6, 6, 6, 6);
-    m_aliveScanLayout->setSpacing(6);
+    m_aliveScanLayout->setContentsMargins(0, 0, 0, 0);
+    auto* workspace = new ks::ui::ParameterWorkspace(m_aliveScanPage, 360); // 扫描参数独立滚动。
+    m_aliveScanLayout->addWidget(workspace);
 
-    m_aliveScanControlLayout = new QHBoxLayout();
-    m_aliveScanControlLayout->setSpacing(6);
+    m_aliveScanControlLayout = workspace->actions();
+    auto* scanForm = new QFormLayout; // 原横向输入拆为单列，确保 IP 字段完整可用。
+    scanForm->setRowWrapPolicy(QFormLayout::WrapAllRows);
 
     QLabel* startIpLabel = new QLabel(QStringLiteral("起始IP:"), m_aliveScanPage);
     m_aliveScanStartIpEdit = new QLineEdit(m_aliveScanPage);
@@ -892,25 +941,23 @@ void NetworkDock::initializeAliveHostScanTab()
     m_stopAliveScanButton->setToolTip(QStringLiteral("停止当前主机扫描任务"));
     m_stopAliveScanButton->setEnabled(false);
 
-    m_aliveScanControlLayout->addWidget(startIpLabel);
-    m_aliveScanControlLayout->addWidget(m_aliveScanStartIpEdit);
-    m_aliveScanControlLayout->addWidget(endIpLabel);
-    m_aliveScanControlLayout->addWidget(m_aliveScanEndIpEdit);
-    m_aliveScanControlLayout->addWidget(timeoutLabel);
-    m_aliveScanControlLayout->addWidget(m_aliveScanTimeoutSpin);
+    scanForm->addRow(startIpLabel, m_aliveScanStartIpEdit);
+    scanForm->addRow(endIpLabel, m_aliveScanEndIpEdit);
+    scanForm->addRow(timeoutLabel, m_aliveScanTimeoutSpin);
+    workspace->parameters()->addLayout(scanForm);
     m_aliveScanControlLayout->addWidget(m_startAliveScanButton);
     m_aliveScanControlLayout->addWidget(m_stopAliveScanButton);
-    m_aliveScanLayout->addLayout(m_aliveScanControlLayout);
-    ks::ui::NormalizeToolbarRow(m_aliveScanControlLayout);
+    m_aliveScanControlLayout->addStretch();
 
     m_aliveScanProgressBar = new QProgressBar(m_aliveScanPage);
     m_aliveScanProgressBar->setRange(0, 100);
     m_aliveScanProgressBar->setValue(0);
     m_aliveScanProgressBar->setFormat(QStringLiteral("0%"));
-    m_aliveScanLayout->addWidget(m_aliveScanProgressBar);
+    workspace->results()->addWidget(m_aliveScanProgressBar);
 
     m_aliveScanStatusLabel = new QLabel(QStringLiteral("状态：待机"), m_aliveScanPage);
-    m_aliveScanLayout->addWidget(m_aliveScanStatusLabel);
+    m_aliveScanStatusLabel->setWordWrap(true);
+    workspace->results()->addWidget(m_aliveScanStatusLabel);
 
     m_aliveScanTable = new ks::ui::VisibleTableWidget(m_aliveScanPage);
     // 单次发现结果需要导出，不需要每个结果表的冻结/对比操作。
@@ -929,7 +976,8 @@ void NetworkDock::initializeAliveHostScanTab()
     m_aliveScanTable->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
     // 横向滚动条不强制关闭：默认由全局列宽自适应压入 viewport，用户拖宽列后按需出现。
     installCopyCurrentRowMenu(m_aliveScanTable);
-    m_aliveScanLayout->addWidget(m_aliveScanTable, 1);
+    workspace->results()->addWidget(m_aliveScanTable, 1);
+    workspace->finish();
 
     m_sideTabWidget->addTab(m_aliveScanPage, QIcon(":/Icon/process_main.svg"), QStringLiteral("存活主机"));
 }

@@ -103,7 +103,7 @@ void KernelIoctlAuditTab::initializeUi()
     rootLayout->addLayout(toolbar);
 
     m_innerTabs = new QTabWidget(this);
-    ks::ui::StylePageTabs(m_innerTabs);
+    ks::ui::StylePageTabsContentFrame(m_innerTabs);
     m_driverPage = new QWidget(m_innerTabs);
     m_devicePage = new QWidget(m_innerTabs);
     m_dispatchPage = new QWidget(m_innerTabs);

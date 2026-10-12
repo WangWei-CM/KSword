@@ -1,5 +1,6 @@
 #include "VirtualLocationPage.h"
 #include "../../UI/PrimaryPageStyle.h"
+#include "../../UI/ParameterWorkspace.h"
 #include "../../UI/ToolbarMetrics.h"
 
 #include "../../Internationalization/LanguageManager.h"
@@ -185,8 +186,14 @@ namespace ks::misc
         auto& language = ks::i18n::LanguageManager::instance();
 
         auto* rootLayout = new QVBoxLayout(this);
-        rootLayout->setContentsMargins(12, 12, 12, 12);
+        ks::ui::StyleWorkspacePage(this, 0);
         rootLayout->setSpacing(10);
+
+        // 生效范围说明和内部工作区分别管理留白，避免参数框外再套一圈。
+        auto* introduction = new QWidget(this); // 范围说明仍固定在页顶。
+        auto* introductionLayout = new QVBoxLayout(introduction);
+        introductionLayout->setContentsMargins(16, 16, 16, 0);
+        rootLayout->addWidget(introduction);
 
         // ===================== 生效范围说明 =====================
         m_scopeLabel = new QLabel(this);
@@ -199,7 +206,12 @@ namespace ks::misc
                 "本页把坐标写成 Windows 的“系统默认位置”，只对通过 Windows 位置服务取位置的程序生效，"
                 "而且要在系统拿不到更精确的定位源时才会被采用。浏览器网页定位、自带 IP 库或自建定位 SDK 的应用不受影响。"
                 "修改只落在注册表上，随时可以用“清除虚拟定位”还原。"));
-        rootLayout->addWidget(m_scopeLabel);
+        introductionLayout->addWidget(m_scopeLabel);
+
+        // 单列坐标编辑与只读定位证据并排，避免经纬度横排挤出参数边界。
+        auto* workspace = new ks::ui::ParameterWorkspace(this, 480);
+        workspace->useWideParameterLayout(55);
+        rootLayout->addWidget(workspace, 1);
 
         // ===================== 当前状态 =====================
         auto* statusGroup = new QGroupBox(this);
@@ -235,7 +247,7 @@ namespace ks::misc
         m_rawValueView = new ks::ui::StructuredFieldView(statusGroup);
         m_rawValueView->setObjectName(QStringLiteral("ksVirtualLocationRawView"));
         m_rawValueView->setMinimumHeight(160);
-        m_rawValueView->setMaximumHeight(240);
+        m_rawValueView->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
         m_rawValueView->setDocument(ks::ui::FieldDocument{}.note(QStringLiteral("默认位置注册表属性将在刷新后显示。")));
         language.bindToolTip(
             m_rawValueView,
@@ -279,7 +291,8 @@ namespace ks::misc
         statusButtonLayout->addStretch(1);
         ks::ui::NormalizeToolbarRow(statusButtonLayout);
         statusLayout->addLayout(statusButtonLayout);
-        rootLayout->addWidget(statusGroup);
+        ks::ui::StyleParameterSection(statusGroup);
+        workspace->results()->addWidget(statusGroup, 1);
 
         // ===================== 虚拟坐标 =====================
         auto* inputGroup = new QGroupBox(this);
@@ -310,7 +323,7 @@ namespace ks::misc
             QStringLiteral(
                 "从国内地图复制来的坐标多半是 GCJ-02 或 BD-09；选对坐标系后会自动换算成 WGS-84 再写入系统。"));
         inputLayout->addWidget(systemLabel, 0, 0);
-        inputLayout->addWidget(m_coordinateSystemCombo, 0, 1, 1, 3);
+        inputLayout->addWidget(m_coordinateSystemCombo, 0, 1);
 
         auto* presetLabel = new QLabel(inputGroup);
         language.bindText(
@@ -331,7 +344,7 @@ namespace ks::misc
                     QString::fromUtf8(presets[presetIndex].nameText)));
         }
         inputLayout->addWidget(presetLabel, 1, 0);
-        inputLayout->addWidget(m_presetCombo, 1, 1, 1, 3);
+        inputLayout->addWidget(m_presetCombo, 1, 1);
 
         auto* latitudeLabel = new QLabel(inputGroup);
         language.bindText(
@@ -359,8 +372,8 @@ namespace ks::misc
 
         inputLayout->addWidget(latitudeLabel, 2, 0);
         inputLayout->addWidget(m_latitudeSpin, 2, 1);
-        inputLayout->addWidget(longitudeLabel, 2, 2);
-        inputLayout->addWidget(m_longitudeSpin, 2, 3);
+        inputLayout->addWidget(longitudeLabel, 3, 0);
+        inputLayout->addWidget(m_longitudeSpin, 3, 1);
 
         auto* altitudeLabel = new QLabel(inputGroup);
         language.bindText(
@@ -394,21 +407,21 @@ namespace ks::misc
                 QStringLiteral("misc.virtual_location.input.meter.suffix"),
                 QStringLiteral(" 米")));
 
-        inputLayout->addWidget(altitudeLabel, 3, 0);
-        inputLayout->addWidget(m_altitudeSpin, 3, 1);
-        inputLayout->addWidget(accuracyLabel, 3, 2);
-        inputLayout->addWidget(m_accuracySpin, 3, 3);
+        inputLayout->addWidget(altitudeLabel, 4, 0);
+        inputLayout->addWidget(m_altitudeSpin, 4, 1);
+        inputLayout->addWidget(accuracyLabel, 5, 0);
+        inputLayout->addWidget(m_accuracySpin, 5, 1);
 
         m_conversionLabel = new QLabel(inputGroup);
         m_conversionLabel->setWordWrap(true);
         m_conversionLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
         m_conversionLabel->setStyleSheet(
             QStringLiteral("color:%1;").arg(KswordTheme::TextSecondaryHex()));
-        inputLayout->addWidget(m_conversionLabel, 4, 0, 1, 4);
+        inputLayout->addWidget(m_conversionLabel, 6, 0, 1, 2);
 
         inputLayout->setColumnStretch(1, 1);
-        inputLayout->setColumnStretch(3, 1);
-        rootLayout->addWidget(inputGroup);
+        ks::ui::StyleParameterSection(inputGroup);
+        workspace->parameters()->addWidget(inputGroup);
 
         // ===================== 操作 =====================
         auto* actionGroup = new QGroupBox(this);
@@ -476,8 +489,9 @@ namespace ks::misc
                m_useLiveFixButton, m_restartServiceButton }) {
             button->setStyleSheet(KswordTheme::ThemedButtonStyle());
         }
-        buttonLayout->addWidget(m_applyButton);
-        buttonLayout->addWidget(m_clearButton);
+        workspace->actions()->addWidget(m_applyButton);
+        workspace->actions()->addWidget(m_clearButton);
+        workspace->actions()->addStretch(1);
         buttonLayout->addWidget(m_useLiveFixButton);
         buttonLayout->addWidget(m_restartServiceButton);
         buttonLayout->addStretch(1);
@@ -491,10 +505,13 @@ namespace ks::misc
             m_resultLabel,
             QStringLiteral("misc.virtual_location.action.idle"),
             QStringLiteral("尚未执行任何操作。"));
-        actionLayout->addWidget(m_resultLabel);
-        rootLayout->addWidget(actionGroup);
-
-        rootLayout->addStretch(1);
+        workspace->results()->addWidget(m_resultLabel);
+        ks::ui::StyleParameterSection(actionGroup);
+        workspace->parameters()->addWidget(actionGroup);
+        // 定位字段数量适中，宽屏仅将坐标与全系统选项并排，不扩成整页表单。
+        ks::ui::ArrangeParameterColumns(workspace->parameters(),
+            { inputGroup }, { actionGroup }, 300);
+        workspace->finish();
     }
 
     void VirtualLocationPage::initializeConnections()

@@ -148,7 +148,7 @@ void KernelSlatIommuAuditTab::initializeUi()
 
     auto* splitter = new QSplitter(Qt::Vertical, this);
     auto* evidenceTabs = new QTabWidget(splitter);
-    ks::ui::StylePageTabs(evidenceTabs);
+    ks::ui::StylePageTabsContentFrame(evidenceTabs);
 
     m_probeTable = new ks::ui::VisibleTableWidget(evidenceTabs);
     // 虚拟/物理别名探针差异需要保留现场快照比较。

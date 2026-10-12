@@ -1,4 +1,5 @@
 #include "MemoryDock.Internal.h"
+#include "../UI/ParameterWorkspace.h"
 #include "../UI/ToolbarMetrics.h"
 #include "../UI/PageControlStyle.h"
 #include "../UI/PrimaryPageStyle.h"
@@ -369,27 +370,17 @@ void MemoryDock::initializeProcessMemoryEvidenceTab()
         << eol;
 
     m_tabProcessMemoryEvidence = new QWidget(m_tabWidget);
-    // 页面自带内部滚动壳：内容放不下时在页内滚动，不把 Dock 撑高。页面指针身份不变。
-    QWidget* const tabContent = ks::ui::EnablePageInnerScroll(m_tabProcessMemoryEvidence);
-    QVBoxLayout* tabLayout = new QVBoxLayout(tabContent);
+    // 参数独立滚动，刷新固定在参数栏底部，表格和详情持续保留结果区高度。
+    QVBoxLayout* tabLayout = new QVBoxLayout(m_tabProcessMemoryEvidence);
     tabLayout->setContentsMargins(6, 6, 6, 6);
     tabLayout->setSpacing(6);
+    auto* workspace = new ks::ui::ParameterWorkspace(m_tabProcessMemoryEvidence, 420);
+    tabLayout->addWidget(workspace);
 
-    // 第一层动作行：只放刷新、两个过滤开关和状态标签，原来十一个控件挤一行已经无法阅读。
-    QHBoxLayout* actionLayout = new QHBoxLayout();
-    actionLayout->setContentsMargins(0, 0, 0, 0);
-    actionLayout->setSpacing(8);
-
+    // 执行动作由工作区固定承载，本地筛选仍只改变当前结果视图。
     m_processMemoryEvidenceRefreshButton = new QPushButton(QIcon(QStringLiteral(":/Icon/process_refresh.svg")), QStringLiteral("刷新"), m_tabProcessMemoryEvidence);
     m_processMemoryEvidenceRefreshButton->setToolTip(QStringLiteral("按当前附加进程采集内存证据"));
     m_processMemoryEvidenceRefreshButton->setStyleSheet(buildBlueButtonStyle());
-
-    // 竖线分隔符把动作区和开关区在视觉上切开，颜色取动态边框角色，跟随主题切换。
-    QFrame* actionSeparator = new QFrame(m_tabProcessMemoryEvidence);
-    actionSeparator->setFrameShape(QFrame::VLine);
-    actionSeparator->setFrameShadow(QFrame::Plain);
-    actionSeparator->setFixedWidth(1);
-    actionSeparator->setStyleSheet(QStringLiteral("color:%1;").arg(KswordTheme::BorderHex()));
 
     m_processMemoryEvidenceRiskOnlyCheck = new QCheckBox(QStringLiteral("仅显示风险项"), m_tabProcessMemoryEvidence);
     m_processMemoryEvidenceRiskOnlyCheck->setChecked(true);
@@ -405,18 +396,15 @@ void MemoryDock::initializeProcessMemoryEvidenceTab()
     m_processMemoryEvidenceStatusLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
     m_processMemoryEvidenceStatusLabel->setStyleSheet(QStringLiteral("color:%1; font-weight:600;").arg(KswordTheme::TextSecondaryHex()));
 
-    actionLayout->addWidget(m_processMemoryEvidenceRefreshButton);
-    actionLayout->addWidget(actionSeparator);
-    actionLayout->addWidget(m_processMemoryEvidenceRiskOnlyCheck);
-    actionLayout->addWidget(m_processMemoryEvidenceImageOnlyCheck);
-    actionLayout->addWidget(m_processMemoryEvidenceStatusLabel, 1);
-    ks::ui::NormalizeToolbarRow(actionLayout);
-    tabLayout->addLayout(actionLayout);
+    workspace->actions()->addWidget(m_processMemoryEvidenceRefreshButton);
+    workspace->actions()->addStretch();
+    m_processMemoryEvidenceStatusLabel->setWordWrap(true);
+    workspace->results()->addWidget(m_processMemoryEvidenceStatusLabel);
 
-    // 第二层扫描范围分组：四组带标签的输入按 2x2 网格排布，字段名不再是裸标签挤在动作行里。
+    // 扫描范围的标签和值逐行配对，避免多列字段挤占地址输入宽度。
     QGroupBox* scopeGroup = new QGroupBox(QStringLiteral("扫描范围"), m_tabProcessMemoryEvidence);
     // 范围条件和证据表分区，避免输入区与表格背景连成一片。
-    ks::ui::StylePrimaryGroup(scopeGroup);
+    ks::ui::StyleParameterSection(scopeGroup);
     QGridLayout* scopeLayout = new QGridLayout(scopeGroup);
     scopeLayout->setContentsMargins(10, 8, 10, 8);
     scopeLayout->setHorizontalSpacing(8);
@@ -456,20 +444,22 @@ void MemoryDock::initializeProcessMemoryEvidenceTab()
         fieldLabel->setStyleSheet(QStringLiteral("color:%1;").arg(KswordTheme::TextSecondaryHex()));
     }
 
+    // 原 2x2 横排改成标签在上、输入在下；过滤和范围均保持原信号对象。
     scopeLayout->addWidget(startFieldLabel, 0, 0);
-    scopeLayout->addWidget(m_processMemoryEvidenceStartEdit, 0, 1);
-    scopeLayout->addWidget(endFieldLabel, 0, 2);
-    scopeLayout->addWidget(m_processMemoryEvidenceEndEdit, 0, 3);
-    scopeLayout->addWidget(maxRowsFieldLabel, 1, 0);
-    scopeLayout->addWidget(m_processMemoryEvidenceMaxRowsSpin, 1, 1);
-    scopeLayout->addWidget(filterFieldLabel, 1, 2);
-    scopeLayout->addWidget(m_processMemoryEvidenceFilterEdit, 1, 3);
-    scopeLayout->setColumnStretch(1, 1);
-    scopeLayout->setColumnStretch(3, 2);
-    tabLayout->addWidget(scopeGroup);
+    scopeLayout->addWidget(m_processMemoryEvidenceStartEdit, 1, 0);
+    scopeLayout->addWidget(endFieldLabel, 2, 0);
+    scopeLayout->addWidget(m_processMemoryEvidenceEndEdit, 3, 0);
+    scopeLayout->addWidget(maxRowsFieldLabel, 4, 0);
+    scopeLayout->addWidget(m_processMemoryEvidenceMaxRowsSpin, 5, 0);
+    scopeLayout->addWidget(filterFieldLabel, 6, 0);
+    scopeLayout->addWidget(m_processMemoryEvidenceFilterEdit, 7, 0);
+    scopeLayout->addWidget(m_processMemoryEvidenceRiskOnlyCheck, 8, 0);
+    scopeLayout->addWidget(m_processMemoryEvidenceImageOnlyCheck, 9, 0);
+    scopeLayout->setColumnStretch(0, 1);
+    workspace->parameters()->addWidget(scopeGroup);
 
     QSplitter* splitter = new QSplitter(Qt::Vertical, m_tabProcessMemoryEvidence);
-    tabLayout->addWidget(splitter, 1);
+    workspace->results()->addWidget(splitter, 1);
 
     m_processMemoryEvidenceTable = new ks::ui::VisibleTableWidget(splitter);
     // 进程页级证据可重复采样，保留独立现场对比。
@@ -517,6 +507,7 @@ void MemoryDock::initializeProcessMemoryEvidenceTab()
     splitter->setStretchFactor(0, 3);
     splitter->setStretchFactor(1, 2);
 
+    workspace->finish();
     m_tabWidget->addTab(m_tabProcessMemoryEvidence, QStringLiteral("进程内存证据"));
 }
 

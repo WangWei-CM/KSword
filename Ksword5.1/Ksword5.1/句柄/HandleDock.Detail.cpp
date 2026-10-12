@@ -2,6 +2,7 @@
 #include "../UI/TableInteractionSupport.h"
 #include "../ksword/log/log.h"
 #include "../theme.h"
+#include "../UI/StructuredFieldView.h"
 
 // ============================================================
 // HandleDock.Detail.cpp
@@ -108,24 +109,7 @@ bool HandleDock::tryApplyHandleDetailRefreshResult(const std::uint64_t refreshTi
     {
         return true;
     }
-    if (ks::ui::IsItemViewUiCommitBlockedByContextMenu({ m_handleDetailTable }))
-    {
-        const auto snapshot = std::make_shared<HandleDetailRefreshResult>(refreshResult); // 值结果。
-        const QPointer<HandleDock> safeThis(this); // 仅主线程延期回调使用的生命周期守卫。
-        if (ks::ui::DeferItemViewUiCommitIfContextMenuOpen(this,
-            QStringLiteral("handle-dock-detail-snapshot"), { m_handleDetailTable },
-            [safeThis, refreshTicket, expectedRow, snapshot]()
-            {
-                if (!safeThis.isNull()
-                    && safeThis->tryApplyHandleDetailRefreshResult(refreshTicket, expectedRow, *snapshot))
-                {
-                    safeThis->m_handleDetailOperation->completeDeferred(refreshTicket);
-                }
-            }))
-        {
-            return false;
-        }
-    }
+    // 详情已是稳定字段文档；旧隐藏树不存在，不再为它执行无意义的菜单延期与重建。
     applyHandleDetailRefreshResult(refreshTicket, refreshResult);
     return true;
 }
@@ -139,19 +123,18 @@ void HandleDock::applyHandleDetailRefreshResult(
         return;
     }
 
-    if (m_handleDetailTable == nullptr)
+    if (m_handleDetailFields == nullptr)
     {
         return;
     }
-    m_handleDetailTable->clear();
-
+    // 唯一文档直接来自同一异步结果，投影原位更新真实变化字段。
+    ks::ui::FieldDocument document;
+    document.section(QStringLiteral("Object Header"));
     for (const HandleDetailField& field : refreshResult.fields)
     {
-        auto* item = new QTreeWidgetItem();
-        item->setText(0, field.keyText);
-        item->setText(1, field.valueText);
-        m_handleDetailTable->addTopLevelItem(item);
+        document.field(field.keyText, field.valueText);
     }
+    m_handleDetailFields->setDocument(document);
 
     QString statusText = QStringLiteral("● 详情刷新完成 %1 ms").arg(refreshResult.elapsedMs);
     if (!refreshResult.diagnosticText.trimmed().isEmpty())
@@ -203,9 +186,9 @@ void HandleDock::showHandleDetailPlaceholder(const QString& messageText)
     {
         m_handleDetailStatusLabel->setText(messageText);
     }
-    if (m_handleDetailTable == nullptr)
+    // 状态提示已有单独标签，选择清空时只清空规范文档，不制造占位字段。
+    if (m_handleDetailFields != nullptr)
     {
-        return;
+        m_handleDetailFields->setDocument(ks::ui::FieldDocument{});
     }
-    m_handleDetailTable->clear();
 }

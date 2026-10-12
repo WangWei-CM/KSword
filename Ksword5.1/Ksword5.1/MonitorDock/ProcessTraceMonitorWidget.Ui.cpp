@@ -6,6 +6,7 @@
 #include "../UI/ThemeBinding.h"
 #include "../UI/ThemeStatusRole.h"
 #include "../UI/ThemeAccentIcon.h"
+#include "../UI/FlatButtonTheme.h"
 
 // ============================================================
 // ProcessTraceMonitorWidget.Ui.cpp
@@ -95,7 +96,15 @@ QWidget* ProcessTraceMonitorWidget::createConfigurationCollapseSection(
     // - Maximum 垂直策略确保配置段按内容高度参与布局，不挤占事件表弹性区域。
     QWidget* sectionWidget = new QWidget(parentWidget);
     sectionWidget->setProperty("kswordCollapsePanel", QStringLiteral("true"));
-    sectionWidget->setStyleSheet(collapsePanelStyle());
+    // 仅此明确折叠控件持有主题绑定，样式未变化时不重复 polish 子树。
+    ks::ui::BindWidgetTheme(sectionWidget, [sectionWidget]()
+    {
+        const QString style = collapsePanelStyle(sectionWidget);
+        if (sectionWidget->styleSheet() != style)
+        {
+            sectionWidget->setStyleSheet(style);
+        }
+    });
     sectionWidget->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Maximum);
 
     QVBoxLayout* sectionLayout = new QVBoxLayout(sectionWidget);
@@ -111,7 +120,15 @@ QWidget* ProcessTraceMonitorWidget::createConfigurationCollapseSection(
     headerButton->setCheckable(true);
     headerButton->setChecked(expanded);
     headerButton->setArrowType(expanded ? Qt::DownArrow : Qt::RightArrow);
-    headerButton->setStyleSheet(collapseHeaderButtonStyle());
+    // 仅此明确折叠控件持有主题绑定，样式未变化时不重复 polish 子树。
+    ks::ui::BindWidgetTheme(headerButton, [headerButton]()
+    {
+        const QString style = collapseHeaderButtonStyle();
+        if (headerButton->styleSheet() != style)
+        {
+            headerButton->setStyleSheet(style);
+        }
+    });
     headerButton->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
 
     // 内容宿主：
@@ -119,7 +136,15 @@ QWidget* ProcessTraceMonitorWidget::createConfigurationCollapseSection(
     // - 内容页本身由 initializeUi 构建并交给宿主布局托管。
     QWidget* contentHostWidget = new QWidget(sectionWidget);
     contentHostWidget->setProperty("kswordCollapseContent", QStringLiteral("true"));
-    contentHostWidget->setStyleSheet(collapsePanelStyle());
+    // 仅此明确折叠控件持有主题绑定，样式未变化时不重复 polish 子树。
+    ks::ui::BindWidgetTheme(contentHostWidget, [contentHostWidget]()
+    {
+        const QString style = collapsePanelStyle(contentHostWidget);
+        if (contentHostWidget->styleSheet() != style)
+        {
+            contentHostWidget->setStyleSheet(style);
+        }
+    });
     contentHostWidget->setVisible(expanded);
     contentHostWidget->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Maximum);
 
@@ -175,11 +200,16 @@ void ProcessTraceMonitorWidget::initializeUi()
     // - 提供当前进程快照、关键词过滤与“添加到监控目标”入口；
     // - 手动 PID 添加与过滤栏放在同一行，减少顶部纵向占用。
     m_availablePanel = new QWidget(m_topSplitter);
+    ks::ui::StylePrimaryContentPanel(m_availablePanel, false);
     QVBoxLayout* availableLayout = new QVBoxLayout(m_availablePanel);
     availableLayout->setContentsMargins(6, 6, 6, 6);
     availableLayout->setSpacing(6);
 
-    QHBoxLayout* availableHeaderLayout = new QHBoxLayout();
+    // 目标选择动作拥有一个中性工具面；搜索与手动 PID 都使用共享独立输入底色。
+    QWidget* availableToolbar = new QWidget(m_availablePanel);
+    ks::ui::StylePrimaryToolbar(availableToolbar);
+    QHBoxLayout* availableHeaderLayout = new QHBoxLayout(availableToolbar);
+    availableHeaderLayout->setContentsMargins(8, 6, 8, 6);
     availableHeaderLayout->setSpacing(6);
     availableHeaderLayout->addWidget(new QLabel(QStringLiteral("可选进程"), m_availablePanel), 0);
 
@@ -214,7 +244,7 @@ void ProcessTraceMonitorWidget::initializeUi()
 
     m_manualPidEdit = new QLineEdit(m_availablePanel);
     m_manualPidEdit->setPlaceholderText(QStringLiteral("输入十进制或 0x 十六进制 PID"));
-    m_manualPidEdit->setStyleSheet(blueInputStyle());
+    ks::ui::StyleStandaloneInput(m_manualPidEdit);
     m_manualPidEdit->setMinimumWidth(120);
     m_manualPidEdit->setMaximumWidth(160);
     availableHeaderLayout->addWidget(m_manualPidEdit, 0);
@@ -226,7 +256,7 @@ void ProcessTraceMonitorWidget::initializeUi()
     m_addManualPidButton->setStyleSheet(blueButtonStyle());
     availableHeaderLayout->addWidget(m_addManualPidButton, 0);
 
-    availableLayout->addLayout(availableHeaderLayout);
+    availableLayout->addWidget(availableToolbar);
     ks::ui::NormalizeToolbarRow(availableHeaderLayout);
 
     m_availableStatusLabel = new QLabel(QStringLiteral("● 等待首次刷新进程快照"), m_availablePanel);
@@ -253,8 +283,6 @@ void ProcessTraceMonitorWidget::initializeUi()
     m_availableTable->setContextMenuPolicy(Qt::CustomContextMenu);
     m_availableTable->setSortingEnabled(false);
     m_availableTable->verticalHeader()->setVisible(false);
-    m_availableTable->horizontalHeader()->setStyleSheet(blueHeaderStyle());
-    m_availableTable->setStyleSheet(blueInputStyle());
     m_availableTable->setAutoFillBackground(false);
     m_availableTable->setAttribute(Qt::WA_StyledBackground, true);
     if (m_availableTable->viewport() != nullptr)
@@ -273,11 +301,15 @@ void ProcessTraceMonitorWidget::initializeUi()
     // - 运行期若 ETW 识别到“目标进程拉起子进程”，也会自动加入本列表；
     // - 当列表中的进程收到 ETW 退出事件时，会自动从本列表移除。
     m_targetPanel = new QWidget(m_topSplitter);
+    ks::ui::StylePrimaryContentPanel(m_targetPanel, false);
     QVBoxLayout* targetLayout = new QVBoxLayout(m_targetPanel);
     targetLayout->setContentsMargins(6, 6, 6, 6);
     targetLayout->setSpacing(6);
 
-    QHBoxLayout* targetHeaderLayout = new QHBoxLayout();
+    QWidget* targetToolbar = new QWidget(m_targetPanel);
+    ks::ui::StylePrimaryToolbar(targetToolbar);
+    QHBoxLayout* targetHeaderLayout = new QHBoxLayout(targetToolbar);
+    targetHeaderLayout->setContentsMargins(8, 6, 8, 6);
     targetHeaderLayout->setSpacing(6);
     targetHeaderLayout->addWidget(new QLabel(QStringLiteral("监控目标"), m_targetPanel), 0);
     targetHeaderLayout->addStretch(1);
@@ -296,7 +328,7 @@ void ProcessTraceMonitorWidget::initializeUi()
     m_clearTargetButton->setStyleSheet(blueButtonStyle());
     targetHeaderLayout->addWidget(m_clearTargetButton, 0);
 
-    targetLayout->addLayout(targetHeaderLayout);
+    targetLayout->addWidget(targetToolbar);
     ks::ui::NormalizeToolbarRow(targetHeaderLayout);
 
     m_targetStatusLabel = new QLabel(QStringLiteral("● 当前没有监控目标"), m_targetPanel);
@@ -321,8 +353,6 @@ void ProcessTraceMonitorWidget::initializeUi()
     m_targetTable->setSelectionMode(QAbstractItemView::ExtendedSelection);
     m_targetTable->setContextMenuPolicy(Qt::CustomContextMenu);
     m_targetTable->verticalHeader()->setVisible(false);
-    m_targetTable->horizontalHeader()->setStyleSheet(blueHeaderStyle());
-    m_targetTable->setStyleSheet(blueInputStyle());
     m_targetTable->setAutoFillBackground(false);
     m_targetTable->setAttribute(Qt::WA_StyledBackground, true);
     if (m_targetTable->viewport() != nullptr)
@@ -393,6 +423,7 @@ void ProcessTraceMonitorWidget::initializeUi()
     // - 类型单独做下拉框，其他字段使用文本过滤；
     // - 结果表刷新后统一走 applyEventFilter，便于维持交互一致性。
     m_filterPanel = new QWidget(m_configurationPanel);
+    ks::ui::StylePrimaryToolbar(m_filterPanel);
     QGridLayout* filterLayout = new QGridLayout(m_filterPanel);
     filterLayout->setContentsMargins(6, 6, 6, 6);
     filterLayout->setHorizontalSpacing(6);
@@ -483,6 +514,18 @@ void ProcessTraceMonitorWidget::initializeUi()
 
     configurationLayout->addWidget(m_filterPanel, 0);
 
+    // 仅登记已逐项确认的配置和采集动作，禁止再让纯图标因 Auto 外观丢失底色。
+    for (QPushButton* button : {m_availableRefreshButton, m_createTargetButton,
+        m_addSelectedButton, m_addManualPidButton, m_removeTargetButton,
+        m_clearTargetButton, m_stopButton, m_pauseButton, m_exportButton,
+        m_eventClearFilterButton})
+    {
+        ks::ui::ApplyFlatButtonTheme(button, ks::ui::FlatButtonTone::Neutral,
+            ks::ui::FlatButtonAppearance::Solid);
+    }
+    ks::ui::ApplyFlatButtonTheme(m_startButton, ks::ui::FlatButtonTone::Accent,
+        ks::ui::FlatButtonAppearance::Solid);
+
     m_configurationCollapseWidget = createConfigurationCollapseSection(
         this,
         QStringLiteral("进程定向配置 / 筛选"),
@@ -526,8 +569,6 @@ void ProcessTraceMonitorWidget::initializeUi()
     m_eventTable->setSelectionMode(QAbstractItemView::ExtendedSelection);
     m_eventTable->setContextMenuPolicy(Qt::CustomContextMenu);
     m_eventTable->verticalHeader()->setVisible(false);
-    m_eventTable->horizontalHeader()->setStyleSheet(blueHeaderStyle());
-    m_eventTable->setStyleSheet(blueInputStyle());
     m_eventTable->setAutoFillBackground(false);
     m_eventTable->setAttribute(Qt::WA_StyledBackground, true);
     if (m_eventTable->viewport() != nullptr)

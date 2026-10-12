@@ -4,13 +4,18 @@
 #include "../theme.h"
 
 #include <QApplication>
+#include <QAbstractItemView>
 #include <QBrush>
+#include <QElapsedTimer>
 #include <QHash>
 #include <QPalette>
 #include <QPointer>
 #include <QSet>
+#include <QThread>
+#include <QTimer>
 #include <QWidget>
 #include <QWidgetList>
+#include <memory>
 
 namespace ks::ui
 {
@@ -404,6 +409,402 @@ namespace ks::ui
             }
             return paletteChanged;
         }
+
+        using ColorMapping = QHash<QRgb, QRgb>; // 单趟颜色转换，保持原文本/画刷匹配边界。
+        using SharedColorMapping = std::shared_ptr<const ColorMapping>; // 同一原主题的控件共享转换链。
+
+        // 只识别共享表格组件唯一且完整的拥有块，缺失/重复/不完整时保持整串所有权保护。
+        struct TableStyleParts
+        {
+            QString before, block, after; // 原顺序保留，框架的新块不能被旧主题映射污染。
+            bool complete = false;       // 完整拥有块才允许独立比较业务字串。
+        };
+
+        TableStyleParts SplitTablePresentationStyle(const QString& style)
+        {
+            const QString begin = QStringLiteral("/*KSWORD_TABLE_PRESENTATION_BEGIN*/"); // 精确组件起点。
+            const QString end = QStringLiteral("/*KSWORD_TABLE_PRESENTATION_END*/"); // 精确组件终点。
+            const qsizetype first = style.indexOf(begin);
+            const qsizetype last = style.indexOf(end);
+            if (first < 0 || last < first || style.indexOf(begin, first + begin.size()) >= 0
+                || style.indexOf(end, last + end.size()) >= 0)
+            {
+                return {style, {}, {}, false};
+            }
+            const qsizetype length = last + end.size() - first; // 拥有标记也随当前块原位保留。
+            return {style.left(first), style.mid(first, length), style.mid(first + length), true};
+        }
+
+        bool SameBusinessStyle(const QString& expected, const QString& current)
+        {
+            if (expected == current)
+            {
+                return true;
+            }
+            const TableStyleParts oldParts = SplitTablePresentationStyle(expected); // 排队来源。
+            const TableStyleParts newParts = SplitTablePresentationStyle(current); // 组件可能已经换肤。
+            return oldParts.complete && newParts.complete
+                && oldParts.before + oldParts.after == newParts.before + newParts.after;
+        }
+
+        // 仅对实际呈现表格启用逐角色保护；普通窗口仍采用整份显式 palette 基线检查。
+        bool HasTablePresentation(QWidget* widget, const QString& style)
+        {
+            return qobject_cast<QAbstractItemView*>(widget) != nullptr
+                && SplitTablePresentationStyle(style).complete;
+        }
+
+        // RewriteTablePalette：共享 Base/AlternateBase 留给表格主题，其余角色须逐项仍等于旧源。
+        bool RewriteTablePalette(const QPalette& expected, const QHash<int, SharedColorMapping>& mappings,
+            QPalette& current)
+        {
+            bool changed = false; // 只有仍自行拥有的纯色画刷实际映射才写 palette。
+            for (auto iterator = mappings.constBegin(); iterator != mappings.constEnd(); ++iterator)
+            {
+                const auto group = static_cast<QPalette::ColorGroup>(iterator.key() / QPalette::NColorRoles);
+                const auto role = static_cast<QPalette::ColorRole>(iterator.key() % QPalette::NColorRoles);
+                const QBrush brush = current.brush(group, role); // 业务当前角色画刷。
+                if (!expected.isBrushSet(group, role) || !current.isBrushSet(group, role)
+                    || expected.brush(group, role) != brush || brush.style() != Qt::SolidPattern)
+                {
+                    continue;
+                }
+                const QColor color = brush.color(); // 保持该角色原始透明度。
+                const auto mapped = iterator.value()->constFind(qRgb(color.red(), color.green(), color.blue()));
+                if (mapped != iterator.value()->constEnd())
+                {
+                    current.setColor(group, role, QColor(qRed(mapped.value()), qGreen(mapped.value()),
+                        qBlue(mapped.value()), color.alpha()));
+                    changed = true;
+                }
+            }
+            return changed;
+        }
+
+        // ComposeColorMappings：等价于先运行 previous 再运行 next，但最终只写一次控件。
+        // 原键优先保留首次匹配，不能用逐颜色 replace 把同一轮 A→B 意外串成 A→C。
+        SharedColorMapping ComposeColorMappings(
+            const SharedColorMapping& previous, const SharedColorMapping& next)
+        {
+            if (!previous || previous->isEmpty())
+            {
+                return next;
+            }
+            if (!next || next->isEmpty())
+            {
+                return previous;
+            }
+            ColorMapping composed = *previous; // 旧基线直接到最新主题的合成映射。
+            for (auto iterator = composed.begin(); iterator != composed.end(); ++iterator)
+            {
+                iterator.value() = next->value(iterator.value(), iterator.value());
+            }
+            for (auto iterator = next->constBegin(); iterator != next->constEnd(); ++iterator)
+            {
+                if (!previous->contains(iterator.key()))
+                {
+                    composed.insert(iterator.key(), iterator.value());
+                }
+            }
+            // 往返主题后已经回到原值的键不需要触发 Qt 样式重算。
+            for (auto iterator = composed.begin(); iterator != composed.end();)
+            {
+                if (iterator.key() == iterator.value())
+                {
+                    iterator = composed.erase(iterator);
+                }
+                else
+                {
+                    ++iterator;
+                }
+            }
+            return std::make_shared<const ColorMapping>(std::move(composed));
+        }
+
+        // SameExplicitPalette：只比较自行设置的角色，忽略 QApplication 已更新的继承角色。
+        // 渐变/纹理也参与所有权比较，但实际重写仍由 RewritePaletteColors 跳过这些画刷。
+        bool SameExplicitPalette(const QPalette& expected, const QPalette& current)
+        {
+            if (expected.resolveMask() != current.resolveMask())
+            {
+                return false;
+            }
+            if (expected == current)
+            {
+                return true;
+            }
+            for (int groupIndex = 0; groupIndex < QPalette::NColorGroups; ++groupIndex)
+            {
+                const auto group = static_cast<QPalette::ColorGroup>(groupIndex); // 当前比较的色组。
+                for (int roleIndex = 0; roleIndex < QPalette::NColorRoles; ++roleIndex)
+                {
+                    const auto role = static_cast<QPalette::ColorRole>(roleIndex); // 当前显式角色。
+                    if (expected.isBrushSet(group, role) != current.isBrushSet(group, role)
+                        || (expected.isBrushSet(group, role)
+                            && expected.brush(group, role) != current.brush(group, role)))
+                    {
+                        return false;
+                    }
+                }
+            }
+            return true;
+        }
+
+        // ThemeColorRemapQueue：每片只操作已登记控件，完成后释放基线而不常驻全部页面。
+        // 不安装叶控件过滤器，不触碰模型或文本格式；全应用请求只读一次控件/值快照。
+        class ThemeColorRemapQueue final : public QObject
+        {
+        public:
+            explicit ThemeColorRemapQueue(QApplication* app) : QObject(app)
+            {
+            }
+
+            // schedule 返回排队统计；同步阶段只读，不调用 setPalette/setStyleSheet。
+            ThemeColorRemapResult schedule(const ThemeColorSnapshot& previousSnapshot,
+                QObject* completionContext, std::function<void(const ThemeColorRemapResult&)> completion)
+            {
+                ThemeColorRemapResult result; // 本次请求映射和排队统计，不冒充完成计数。
+                const SharedColorMapping nextMapping = std::make_shared<const ColorMapping>(BuildColorMapping(
+                    previousSnapshot.colorTexts, CollectThemeColors(), &result.ambiguousColorCount));
+                result.mappedColorCount = static_cast<int>(nextMapping->size());
+
+                // 字体等设置可能重用同一颜色主题；没有未完成旧链时不能白扫全部 QWidget。
+                if (nextMapping->isEmpty() && m_cursor >= m_work.size())
+                {
+                    ++m_generation;
+                    m_work.clear();
+                    m_cursor = 0;
+                    m_slicePending = false;
+                    m_result = result;
+                    m_completionContext = completionContext;
+                    m_completion = std::move(completion);
+                    scheduleSlice();
+                    return result;
+                }
+
+                // 只索引尚未完成且仍活着的对象；同地址重新创建的 QWidget 不继承旧转换链。
+                QHash<QWidget*, const WidgetWork*> unfinished; // 上代未写入控件的真实身份。
+                for (qsizetype index = m_cursor; index < m_work.size(); ++index)
+                {
+                    if (QWidget* widget = m_work.at(index).widget.data())
+                    {
+                        unfinished.insert(widget, &m_work.at(index));
+                    }
+                }
+                QHash<const ColorMapping*, SharedColorMapping> composedCache; // 同一源映射每请求只合成一次。
+                const auto continueMapping = [&composedCache, &nextMapping](const SharedColorMapping& oldMapping)
+                {
+                    const ColorMapping* key = oldMapping.get(); // 仅在本次请求内使用，shared_ptr 保持源寿命。
+                    const auto found = composedCache.constFind(key);
+                    if (found != composedCache.constEnd())
+                    {
+                        return found.value();
+                    }
+                    const SharedColorMapping composed = ComposeColorMappings(oldMapping, nextMapping);
+                    composedCache.insert(key, composed);
+                    return composed;
+                };
+
+                QList<WidgetWork> replacement; // 新代只保存当前仍需处理的控件，不累计历史任务。
+                const QWidgetList snapshot = QApplication::allWidgets();
+                replacement.reserve(snapshot.size());
+                for (QWidget* widget : snapshot)
+                {
+                    if (widget == nullptr || HasWidgetThemeBinding(widget))
+                    {
+                        continue;
+                    }
+                    WidgetWork work; // 字串与显式 palette 分别保留基线及映射链。
+                    work.widget = widget;
+                    work.style = widget->styleSheet();
+                    work.hasPalette = widget->testAttribute(Qt::WA_SetPalette);
+                    if (work.style.isEmpty() && !work.hasPalette)
+                    {
+                        continue;
+                    }
+                    if (work.hasPalette)
+                    {
+                        work.palette = widget->palette();
+                    }
+                    work.styleMapping = nextMapping;
+                    work.paletteMapping = nextMapping;
+                    const WidgetWork* oldWork = unfinished.value(widget, nullptr); // 同对象的未处理旧任务。
+                    if (oldWork != nullptr)
+                    {
+                        // 只有源仍与旧基线相同才继续旧链；业务主动重建的字段从新主题代次开始。
+                        if (SameBusinessStyle(oldWork->style, work.style))
+                        {
+                            work.styleMapping = continueMapping(oldWork->styleMapping);
+                        }
+                        if (work.hasPalette && oldWork->hasPalette
+                            && SameExplicitPalette(oldWork->palette, work.palette))
+                        {
+                            work.paletteMapping = continueMapping(oldWork->paletteMapping);
+                        }
+                    }
+                    work.tablePresentation = HasTablePresentation(widget, work.style);
+                    if (work.hasPalette && work.tablePresentation)
+                    {
+                        // 表格组件可先换两种底色，不能因此丢掉其它未更新角色的 A→B→C 转换链。
+                        for (int groupIndex = 0; groupIndex < QPalette::NColorGroups; ++groupIndex)
+                        {
+                            const auto group = static_cast<QPalette::ColorGroup>(groupIndex); // 当前色组。
+                            for (int roleIndex = 0; roleIndex < QPalette::NColorRoles; ++roleIndex)
+                            {
+                                const auto role = static_cast<QPalette::ColorRole>(roleIndex); // 当前独立角色。
+                                if (role == QPalette::Base || role == QPalette::AlternateBase
+                                    || !work.palette.isBrushSet(group, role))
+                                {
+                                    continue;
+                                }
+                                const int key = groupIndex * QPalette::NColorRoles + roleIndex; // 角色身份。
+                                SharedColorMapping mapping = work.paletteMapping; // 整份旧源未变时保留其原转换链。
+                                if (oldWork != nullptr && oldWork->tablePresentation && oldWork->hasPalette
+                                    && oldWork->palette.isBrushSet(group, role)
+                                    && oldWork->palette.brush(group, role) == work.palette.brush(group, role))
+                                {
+                                    mapping = continueMapping(oldWork->tablePaletteMappings.value(key));
+                                }
+                                if (!mapping->isEmpty())
+                                {
+                                    work.tablePaletteMappings.insert(key, mapping);
+                                }
+                            }
+                        }
+                    }
+                    if ((!work.style.isEmpty() && !work.styleMapping->isEmpty())
+                        || (work.hasPalette && (work.tablePresentation
+                            ? !work.tablePaletteMappings.isEmpty() : !work.paletteMapping->isEmpty())))
+                    {
+                        replacement.append(std::move(work));
+                    }
+                }
+                ++m_generation; // 旧计时器失效，未完成的源颜色已经合入 replacement。
+                m_work = std::move(replacement);
+                m_cursor = 0;
+                m_slicePending = false;
+                result.scheduledWidgetCount = static_cast<int>(m_work.size());
+                m_result = result;
+                m_completionContext = completionContext;
+                m_completion = std::move(completion);
+                scheduleSlice();
+                return result;
+            }
+
+        private:
+            struct WidgetWork
+            {
+                QPointer<QWidget> widget; // 真实控件身份，析构后基线不能转交同地址的新对象。
+                QString style;           // 排队时的原始局部 QSS，变化后不再接管。
+                QPalette palette;        // 仅用显式角色检查来源，写入从当前 palette 保留继承值。
+                bool hasPalette = false; // Qt::WA_SetPalette 原边界，不固化原本的继承调色板。
+                SharedColorMapping styleMapping;   // QSS 未完成的主题转换链。
+                SharedColorMapping paletteMapping; // 显式 palette 未完成的转换链。
+                bool tablePresentation = false; // 仅完整共享表格拥有块允许逐角色保护。
+                QHash<int, SharedColorMapping> tablePaletteMappings; // 表格其它显式角色独立保留主题链。
+            };
+
+            // scheduleSlice：零延迟排队而不进入嵌套事件循环，首片也由事件循环调度。
+            void scheduleSlice()
+            {
+                if (m_slicePending)
+                {
+                    return;
+                }
+                m_slicePending = true;
+                const quint64 generation = m_generation; // 此计时回调所属主题请求。
+                QTimer::singleShot(0, this, [this, generation]()
+                {
+                    if (generation != m_generation)
+                    {
+                        return;
+                    }
+                    m_slicePending = false;
+                    drain(generation);
+                });
+            }
+
+            // drain：目标约 6ms 后让出；单个 Qt polish 不能抢占，因此不是耗时硬上限。
+            void drain(const quint64 generation)
+            {
+                QElapsedTimer budget; // 当前切片实际耗时，只在控件之间判断是否让出。
+                budget.start();
+                while (m_cursor < m_work.size() && budget.elapsed() < 6)
+                {
+                    const WidgetWork work = m_work.at(m_cursor); // Setter 可触发新请求，不能持有队列元素引用。
+                    QWidget* widget = work.widget.data();
+                    if (widget != nullptr && !HasWidgetThemeBinding(widget))
+                    {
+                        QPalette currentPalette = widget->palette(); // 保留当前继承值，绝不写回旧全局角色。
+                        bool paletteChanged = false; // 仅同一业务基线的角色可参与转换。
+                        if (work.hasPalette && widget->testAttribute(Qt::WA_SetPalette))
+                        {
+                            paletteChanged = work.tablePresentation
+                                ? (HasTablePresentation(widget, widget->styleSheet())
+                                    && RewriteTablePalette(work.palette, work.tablePaletteMappings, currentPalette))
+                                : (SameExplicitPalette(work.palette, currentPalette)
+                                    && RewritePaletteColors(*work.paletteMapping, currentPalette));
+                        }
+                        if (paletteChanged)
+                        {
+                            widget->setPalette(currentPalette);
+                            if (generation != m_generation)
+                            {
+                                return;
+                            }
+                            ++m_result.rewrittenPaletteWidgetCount;
+                        }
+                        // Palette 写入可能析构控件或改写其 QSS，重新核对寿命与当前局部源。
+                        widget = work.widget.data();
+                        if (widget != nullptr && !HasWidgetThemeBinding(widget))
+                        {
+                            const QString currentStyle = widget->styleSheet(); // 当前业务仍拥有的字串基线。
+                            if (!currentStyle.isEmpty() && SameBusinessStyle(work.style, currentStyle))
+                            {
+                                ++m_result.inspectedWidgetCount;
+                                // 只映射业务前后片段，当前 TablePresentation 新块保留原顺序和颜色。
+                                const TableStyleParts parts = SplitTablePresentationStyle(currentStyle);
+                                const QString rewritten = RewriteColorsInText(*work.styleMapping, parts.before)
+                                    + parts.block + RewriteColorsInText(*work.styleMapping, parts.after);
+                                if (rewritten != currentStyle)
+                                {
+                                    widget->setStyleSheet(rewritten);
+                                    if (generation != m_generation)
+                                    {
+                                        return;
+                                    }
+                                    ++m_result.rewrittenWidgetCount;
+                                }
+                            }
+                        }
+                    }
+                    // 当前控件两种字段完成后再前进，新请求能看见部分完成控件的剩余旧源。
+                    ++m_cursor;
+                }
+                if (m_cursor < m_work.size())
+                {
+                    scheduleSlice();
+                    return;
+                }
+                const ThemeColorRemapResult completed = m_result; // 回调只报告当前请求实际完成统计。
+                const QPointer<QObject> context = m_completionContext; // 回调所依赖业务对象的寿命。
+                auto completion = std::move(m_completion); // 先释放队列，允许回调安全发起下一主题请求。
+                m_work.clear();
+                m_cursor = 0;
+                if (!context.isNull() && completion)
+                {
+                    completion(completed);
+                }
+            }
+
+            QList<WidgetWork> m_work; // 当前请求快照，完成时释放全部值和 QPointer。
+            qsizetype m_cursor = 0;   // 尚未完成控件下标，处理中不提前移动。
+            quint64 m_generation = 0; // 最新调度代次，旧计时器不能继续写入。
+            bool m_slicePending = false; // 合并每代切片调度。
+            ThemeColorRemapResult m_result; // 当前请求的实际完成计数。
+            QPointer<QObject> m_completionContext; // 不延长窗口/应用业务对象的寿命。
+            std::function<void(const ThemeColorRemapResult&)> m_completion; // 最新请求完成通知。
+        };
     }
 
     ThemeColorSnapshot CaptureThemeColorSnapshot()
@@ -519,5 +920,23 @@ namespace ks::ui
             }
         }
         return result;
+    }
+
+    ThemeColorRemapResult ScheduleStaleThemeColorRemap(const ThemeColorSnapshot& previousSnapshot,
+        QObject* completionContext, std::function<void(const ThemeColorRemapResult&)> completion)
+    {
+        QApplication* app = qobject_cast<QApplication*>(QCoreApplication::instance()); // 当前 GUI 应用。
+        if (app == nullptr || QThread::currentThread() != app->thread()
+            || previousSnapshot.colorTexts.isEmpty())
+        {
+            return {};
+        }
+        // 队列由 QApplication 管理寿命；应用退出后不能访问旧实例的计时器或 QWidget。
+        static QPointer<ThemeColorRemapQueue> queue;
+        if (queue.isNull())
+        {
+            queue = new ThemeColorRemapQueue(app);
+        }
+        return queue->schedule(previousSnapshot, completionContext, std::move(completion));
     }
 }

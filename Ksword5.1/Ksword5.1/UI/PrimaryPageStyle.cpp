@@ -11,9 +11,32 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QPointer>
+#include <QBoxLayout>
+#include <QFont>
 
 namespace
 {
+    // 独立表单没有工具行观察器；字号变化时按同一规则更新高度，不重复登记。
+    class StandaloneInputMetrics final : public QObject
+    {
+    public:
+        explicit StandaloneInputMetrics(QWidget* input) : QObject(input), m_input(input)
+        {
+            input->installEventFilter(this);
+        }
+    protected:
+        bool eventFilter(QObject* source, QEvent* event) override
+        {
+            if (event->type() == QEvent::FontChange || event->type() == QEvent::ApplicationFontChange)
+            {
+                ks::ui::NormalizeToolbarControl(m_input);
+            }
+            return QObject::eventFilter(source, event);
+        }
+    private:
+        QWidget* m_input = nullptr; // 父控件拥有观察器，二者同时销毁。
+    };
+
     // 各控件只替换自己拥有的样式片段，避免丢掉页面既有几何规则。
     void ReplacePrimaryStyle(QWidget* widget, const QString& rules)
     {
@@ -52,6 +75,13 @@ namespace ks::ui
         {
             return;
         }
+        // 独立单行输入与按钮共用字体测量高度；组合控件内部编辑器已在上方排除。
+        NormalizeToolbarControl(input);
+        if (!input->property("ksword_standalone_metrics").toBool())
+        {
+            input->setProperty("ksword_standalone_metrics", true);
+            new StandaloneInputMetrics(input);
+        }
         input->setProperty("ksword_standalone_input", true);
         const QString geometry = QStringLiteral(
             "\nQComboBox[ksword_standalone_input=\"true\"],"
@@ -62,6 +92,13 @@ namespace ks::ui
         if (!input->styleSheet().contains(geometry))
         {
             input->setStyleSheet(input->styleSheet() + geometry);
+        }
+        // 明确独立输入才接管完整底色；已有业务主题绑定保留所有权，不覆盖状态语义。
+        if (!HasWidgetThemeBinding(input))
+        {
+            if (auto* combo = qobject_cast<QComboBox*>(input)) StylePrimaryCombo(combo);
+            else if (auto* spin = qobject_cast<QAbstractSpinBox*>(input)) BindSpinBoxTheme(spin);
+            else if (auto* edit = qobject_cast<QLineEdit*>(input)) BindLineEditTheme(edit);
         }
     }
 
@@ -79,7 +116,9 @@ namespace ks::ui
             if (target)
             {
                 // 控件自身的完整状态规则优先于 Dock 透明祖先，热切换不留下旧色快照。
-                ReplacePrimaryStyle(target, KswordTheme::ThemedComboBoxStyle());
+                const QColor surface = UsesMainSurfaceHierarchy(target)
+                    ? MainWindowSurfaceColors().input : KswordTheme::ControlInputSurfaceColor();
+                ReplacePrimaryStyle(target, KswordTheme::ThemedComboBoxStyle(surface));
                 if (target->property("ksword_standalone_input").toBool())
                 {
                     StyleStandaloneInput(target);
@@ -108,10 +147,26 @@ namespace ks::ui
                 KswordTheme::TextSecondaryColor(), surface, 4.5);
             const QColor disabled = KswordTheme::EnsureTextContrast(
                 KswordTheme::TextDisabledColor(), surface, 3.0);
+            // 参数工作区用标题与细分隔线表达分区，不在两栏面板内重复堆大边框。
+            if (target->property("ksword_parameter_section").toBool())
+            {
+                const bool hasTitle = !target->title().isEmpty();
+                const QColor separator = KswordTheme::BlendColors(surface, KswordTheme::BorderColor(), 70);
+                ReplacePrimaryStyle(target, QStringLiteral(
+                    "QGroupBox[ksword_parameter_section=\"true\"]{background:transparent;"
+                    "border:0;border-top:%4px solid %1;border-radius:0;margin-top:%5px;padding-top:0;}"
+                    "QGroupBox[ksword_parameter_section=\"true\"]::title{"
+                    "subcontrol-origin:margin;subcontrol-position:top left;left:0;"
+                    "padding:0 0 5px 0;background:transparent;color:%2;font-weight:600;}"
+                    "QGroupBox[ksword_parameter_section=\"true\"]::title:disabled{color:%3;}")
+                    .arg(separator.name(), title.name(), disabled.name())
+                    .arg(hasTitle ? 1 : 0).arg(hasTitle ? 18 : 0));
+                return;
+            }
             // 仅命中此分组自身，嵌套业务控件、表格语义底色及选中态保持原所有权。
             ReplacePrimaryStyle(target, QStringLiteral(
                 "QGroupBox[ksword_primary_group=\"true\"]{background:%1;"
-                "border:1px solid %2;border-radius:6px;margin-top:10px;padding-top:6px;}"
+                "border:1px solid %2;border-radius:8px;margin-top:10px;padding-top:6px;}"
                 "QGroupBox[ksword_primary_group=\"true\"]::title{"
                 "subcontrol-origin:margin;subcontrol-position:top left;left:10px;"
                 "padding:0 5px;background:%1;color:%3;font-weight:600;}"
@@ -135,22 +190,29 @@ namespace ks::ui
             {
                 const bool mainSurface = UsesMainSurfaceHierarchy(target);
                 const MainSurfaceColors surfaces = MainWindowSurfaceColors();
-                // 工具带只画底面和一条下边界，不把所有按钮包成重复卡片。
+                // 独立工具带与内容板统一圆角，以底色差表达层级，不再拼接一块方形底面。
                 ReplacePrimaryStyle(target, QStringLiteral(
                     "QWidget[ksword_primary_toolbar=\"true\"]{"
-                    "background:%1;border:0;border-bottom:1px solid %2;}")
-                    .arg(mainSurface ? surfaces.toolbar.name() : KswordTheme::SurfaceColor().name(),
-                        mainSurface ? surfaces.border.name() : KswordTheme::BorderColor().name()));
+                    "background:%1;border:0;border-radius:8px;}")
+                    .arg(mainSurface ? surfaces.toolbar.name() : KswordTheme::SurfaceColor().name()));
             }
         });
     }
 
-    void StylePrimaryContentPanel(QWidget* panel)
+    void StylePrimaryContentPanel(QWidget* panel, bool outline)
     {
-        if (!panel || panel->property("ksword_primary_content_panel").toBool())
+        if (!panel)
         {
             return;
         }
+        const bool changed = panel->property("ksword_primary_content_panel_outlined").isValid()
+            && panel->property("ksword_primary_content_panel_outlined").toBool() != outline;
+        panel->setProperty("ksword_primary_content_panel_outlined", outline);
+        if (panel->property("ksword_primary_content_panel").toBool() && !changed)
+        {
+            return;
+        }
+        // 单面板边界模式改变只替换并排队自己的绑定，不广播全应用主题刷新。
         panel->setProperty("ksword_primary_content_panel", true);
         panel->setAttribute(Qt::WA_StyledBackground, true);
         const QPointer<QWidget> target(panel); // 沿用原面板对象，图表采样和绘图逻辑不变。
@@ -162,11 +224,40 @@ namespace ks::ui
             }
             const bool mainSurface = UsesMainSurfaceHierarchy(target);
             const MainSurfaceColors surfaces = MainWindowSurfaceColors();
+            const bool outlined = target->property("ksword_primary_content_panel_outlined").toBool();
+            const QString background = mainSurface ? surfaces.content.name()
+                : outlined ? QStringLiteral("transparent") : KswordTheme::SurfaceColor().name();
+            const QString rules = outlined ? QStringLiteral(
+                "QWidget[ksword_primary_content_panel=\"true\"]{background:%1;border:1px solid %2;border-radius:8px;}")
+                    .arg(background, mainSurface ? surfaces.border.name() : KswordTheme::BorderColor().name())
+                : QStringLiteral(
+                    "QWidget[ksword_primary_content_panel=\"true\"]{background:%1;border:0;border-radius:8px;}").arg(background);
+            ReplacePrimaryStyle(target, rules);
+        });
+    }
+
+    void StyleWorkspacePage(QWidget* page, int margin)
+    {
+        if (!page) return;
+        page->setProperty("ksword_workspace_page", true);
+        page->setAttribute(Qt::WA_StyledBackground);
+        QFont body = page->font();
+        if (body.pixelSize() > 0) body.setPixelSize(qMax(14, body.pixelSize()));
+        else body.setPointSizeF(qMax(10.0, body.pointSizeF()));
+        page->setFont(body);
+        if (page->layout())
+        {
+            page->layout()->setContentsMargins(margin, margin, margin, margin);
+            if (auto* box = qobject_cast<QBoxLayout*>(page->layout())) box->setSpacing(12);
+        }
+        const QPointer<QWidget> target(page);
+        BindWidgetTheme(page, [target]()
+        {
+            if (!target) return;
+            const QColor canvas = UsesMainSurfaceHierarchy(target)
+                ? MainWindowSurfaceColors().canvas : KswordTheme::WindowColor();
             ReplacePrimaryStyle(target, QStringLiteral(
-                "QWidget[ksword_primary_content_panel=\"true\"]{"
-                "background:%1;border:1px solid %2;border-radius:6px;}")
-                .arg(mainSurface ? surfaces.content.name() : QStringLiteral("transparent"),
-                    mainSurface ? surfaces.border.name() : KswordTheme::BorderColor().name()));
+                "QWidget[ksword_workspace_page=\"true\"]{background:%1;border:0;border-radius:8px;}").arg(canvas.name()));
         });
     }
 

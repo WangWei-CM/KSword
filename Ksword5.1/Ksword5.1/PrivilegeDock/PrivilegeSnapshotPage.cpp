@@ -1,5 +1,6 @@
 #include "PrivilegeSnapshotPage.h"
 #include "../UI/PageControlStyle.h"
+#include "../UI/PrimaryPageStyle.h"
 #include "../UI/ToolbarMetrics.h"
 #include "PrivilegeSnapshotModel.h"
 #include "PrivilegeAccountPages.h"
@@ -77,6 +78,8 @@ namespace ks::privilege
                 m_includeToken = new QCheckBox(snapshotText(QStringLiteral("包含所选进程令牌")), this);
                 m_includeToken->setChecked(true);
                 m_pid = new QSpinBox(this);
+                // 快照 PID 是独立参数，尺寸与数值前景一起交给共享输入主题。
+                ks::ui::StyleStandaloneInput(m_pid);
                 m_pid->setRange(1, INT_MAX);
                 m_pid->setValue(static_cast<int>(GetCurrentProcessId()));
                 selectors->addWidget(m_includeToken);

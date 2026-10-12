@@ -1,4 +1,7 @@
 #include "HvmWatchPanel.h"
+#include "./ToolbarMetrics.h"
+#include "./FlatButtonTheme.h"
+#include "./VisibleTableWidget.h"
 
 #include "KernelDisassemblyDialog.h"
 #include "HvmControl.h"
@@ -76,6 +79,8 @@ void HvmWatchPanel::buildUi()
     rootLayout->addWidget(m_hintLabel);
 
     m_table = new QTableWidget(0, WatchColumnCount, this);
+    // 面板已有复制/导出完整证据及监视生命周期动作，不叠加通用快照工具条。
+    ks::ui::SetTableActionBarMode(m_table, ks::ui::TableActionBarMode::None);
     m_table->setObjectName(QStringLiteral("HvmWatchTable"));
     m_table->setHorizontalHeaderLabels(QStringList()
         << text(QStringLiteral("编号"))
@@ -158,6 +163,18 @@ void HvmWatchPanel::buildUi()
     // 第三行专给"RIP 归不到模块"那条路：整页反汇编与写入者内存都只服务它。
     buttons->addWidget(m_writerMemoryButton, 2, 0);
     buttons->addWidget(m_writerPageButton, 2, 1);
+    // 三组明确的操作入口共用按钮高度与实底，不改监视/证据动作或可用性判定。
+    buttons->setHorizontalSpacing(8);
+    buttons->setVerticalSpacing(8);
+    for (QPushButton* button : {m_addButton, m_rearmButton, m_removeButton,
+        m_clearButton, m_refreshButton, m_copyButton, m_eventButton, m_disassembleButton,
+        m_memoryButton, m_moduleButton, m_processButton, m_exportButton,
+        m_writerMemoryButton, m_writerPageButton})
+    {
+        ks::ui::NormalizeToolbarControl(button);
+        ks::ui::ApplyFlatButtonTheme(button,
+            ks::ui::FlatButtonTone::Neutral, ks::ui::FlatButtonAppearance::Solid);
+    }
     rootLayout->addLayout(buttons);
 
     m_detail = new ks::ui::StructuredFieldView(this);

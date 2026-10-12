@@ -137,7 +137,6 @@ namespace ks::misc
         void clearColumnPresetSelection();
         void updateColumnPresetButtons();
         void showHeaderContextMenu(const QPoint& position);
-        static QString buildPresetButtonStyle(bool leftButton);
         static QTableWidgetItem* createReadOnlyItem(const QString& textValue);
 
         // ---- ClipboardGuardPage.RuleEditor.cpp：右键菜单、规则对话框、详情弹窗 ----

@@ -4,6 +4,8 @@
 #include "../UI/PageControlStyle.h"
 #include "../UI/FlatButtonTheme.h"
 #include "../UI/DetailDialogChrome.h"
+#include "../UI/DetailPresentation.h"
+#include "../UI/StructuredFieldView.h"
 #include "../UI/CodeTextEdit.h"
 #include "../UI/UI_All.h"
 #include "../UI/VisibleTableWidget.h"
@@ -74,97 +76,13 @@ namespace
             .arg(listenPort);
     }
 
-    // buildHttpsDetailWindowStyle 作用：
-    // - 为 HTTPS 详情窗生成独立主题样式；
-    // - 重点覆盖 QPlainTextEdit/QTabWidget/QLabel，修复深色模式下残留白底。
-    QString buildHttpsDetailWindowStyle()
-    {
-        const QString windowBackground = KswordTheme::SurfaceHex();
-        const QString panelBackground = KswordTheme::SurfaceAltHex();
-        // 静音底色在 palette 里没有对应角色，退一档取 alternate-base；
-        // 输入区仍有 1px 边框区分，视觉差异可以忽略。
-        const QString inputBackground = KswordTheme::SurfaceAltHex();
-        const QString borderColor = KswordTheme::BorderHex();
-        const QString textColor = KswordTheme::TextPrimaryHex();
-        const QString secondaryTextColor = KswordTheme::TextSecondaryHex();
-        const QString accentColor = KswordTheme::PrimaryBlueHex;
-
-        return QStringLiteral(
-            "QWidget{"
-            "  background:%1;"
-            "  color:%2;"
-            "}"
-            "QLabel{"
-            "  background:transparent;"
-            "  color:%2;"
-            "}"
-            "QTabWidget::pane{"
-            "  background:%3;"
-            "  border:1px solid %4;"
-            "  border-radius:4px;"
-            "}"
-            "QTabBar::tab{"
-            "  background:%1;"
-            "  color:%5;"
-            "  border:1px solid %4;"
-            "  padding:6px 12px;"
-            "  margin-right:2px;"
-            "  border-top-left-radius:4px;"
-            "  border-top-right-radius:4px;"
-            "}"
-            "QTabBar::tab:selected{"
-            "  background:%3;"
-            "  color:%2;"
-            "  border-bottom-color:%3;"
-            "}"
-            "QPlainTextEdit{"
-            "  background:%6;"
-            "  color:%2;"
-            "  border:1px solid %4;"
-            "  selection-background-color:%7;"
-            "  selection-color:%8;"
-            "}"
-            "QMenu{"
-            "  background:%6;"
-            "  color:%2;"
-            "  border:1px solid %4;"
-            "}"
-            "QMenu::item:selected{"
-            "  background:%7;"
-            "  color:%8;"
-            "}"
-            "QMenu::separator{"
-            "  height:1px;"
-            "  background:%4;"
-            "  margin:2px 6px;"
-            "}")
-            .arg(windowBackground)
-            .arg(textColor)
-            .arg(panelBackground)
-            .arg(borderColor)
-            .arg(secondaryTextColor)
-            .arg(inputBackground)
-            .arg(accentColor)
-            .arg(KswordTheme::OnAccentDynamicHex());
-    }
-
+    // HTTPS详情使用共享摘要/文档卡片/内容导航，原始字节视图保持。
     class HttpsParsedDetailWindow final : public QWidget
     {
     public:
         explicit HttpsParsedDetailWindow(const ks::network::HttpsProxyParsedEntry& parsedEntry, QWidget* parent = nullptr)
             : QWidget(parent)
         {
-            // wrapFieldHtml 作用：
-            // - 把长字段包装成可自动换行的富文本块；
-            // - 避免长路径/长主机名把详情窗横向撑出屏幕。
-            const auto wrapFieldHtml =
-                [](const QString& fieldText) -> QString
-                {
-                    return QStringLiteral(
-                        "<div style='white-space:pre-wrap;word-break:break-all;'>%1</div>")
-                        .arg(fieldText.toHtmlEscaped());
-                };
-
             setAttribute(Qt::WA_DeleteOnClose, true);
             setWindowFlag(Qt::Window, true);
             setAttribute(Qt::WA_StyledBackground, true);
@@ -177,51 +95,44 @@ namespace
                 parent,
                 QSize(1376, 720),
                 QSize(720, 480));
-            setStyleSheet(buildHttpsDetailWindowStyle());
-
             QVBoxLayout* rootLayout = new QVBoxLayout(this);
-            rootLayout->setContentsMargins(8, 8, 8, 8);
-            rootLayout->setSpacing(6);
+            ks::ui::ConfigureDetailDialogRoot(this);
+            rootLayout->addWidget(ks::ui::CreateDetailSummaryHeader(this, windowTitle(),
+                parsedEntry.clientProcessText, QIcon(QStringLiteral(":/Icon/process_details.svg"))));
 
-            QLabel* metaLabel = new QLabel(this);
-            metaLabel->setWordWrap(true);
-            metaLabel->setTextFormat(Qt::RichText);
-            metaLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
-            metaLabel->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Maximum);
-            metaLabel->setStyleSheet(QStringLiteral("padding:8px 10px;border:0;"));
-            metaLabel->setText(QStringLiteral(
-                "时间: %1<br/>客户端: %2<br/>进程: %3<br/>目标: %4:%5<br/>事件: %6<br/>方法: %7<br/>路径: %8<br/>状态码: %9<br/>内容类型: %10<br/>内容长度: %11<br/>耗时: %12 ms<br/>上行/下行: %13 / %14 字节<br/>TLS: %15<br/>ALPN: %16<br/>密码套件: %17<br/>SNI: %18<br/>证书主体: %19<br/>证书签发者: %20<br/>证书到期: %21<br/>证书 SHA-256: %22<br/>详情: %23")
-                .arg(QDateTime::fromMSecsSinceEpoch(static_cast<qint64>(parsedEntry.timestampMs)).toString(QStringLiteral("yyyy-MM-dd HH:mm:ss.zzz")))
-                .arg(wrapFieldHtml(parsedEntry.clientEndpointText))
-                .arg(wrapFieldHtml(parsedEntry.clientProcessText))
-                .arg(wrapFieldHtml(parsedEntry.targetHostText))
-                .arg(parsedEntry.targetPort)
-                .arg(wrapFieldHtml(parsedEntry.eventTypeText))
-                .arg(wrapFieldHtml(parsedEntry.methodText))
-                .arg(wrapFieldHtml(parsedEntry.pathText))
-                .arg(parsedEntry.statusCode)
-                .arg(wrapFieldHtml(parsedEntry.contentTypeText))
-                .arg(parsedEntry.contentLength >= 0 ? QString::number(parsedEntry.contentLength) : QStringLiteral("未知"))
-                .arg(parsedEntry.elapsedMs)
-                .arg(parsedEntry.uploadBytes)
-                .arg(parsedEntry.downloadBytes)
-                .arg(wrapFieldHtml(parsedEntry.tlsVersionText))
-                .arg(wrapFieldHtml(parsedEntry.alpnText))
-                .arg(wrapFieldHtml(parsedEntry.cipherSuiteText))
-                .arg(wrapFieldHtml(parsedEntry.sniText))
-                .arg(wrapFieldHtml(parsedEntry.certificateSubjectText))
-                .arg(wrapFieldHtml(parsedEntry.certificateIssuerText))
-                .arg(wrapFieldHtml(parsedEntry.certificateExpiryText))
-                .arg(wrapFieldHtml(parsedEntry.certificateSha256Text))
-                .arg(wrapFieldHtml(parsedEntry.detailText)));
-            rootLayout->addWidget(metaLabel);
-
+            // 元数据保留真实字段，不再用23行富文本摘要占据全部窗口高度。
+            ks::ui::FieldDocument metadata;
+            metadata.section(QStringLiteral("常规信息"));
+            metadata.field(QStringLiteral("时间"), QDateTime::fromMSecsSinceEpoch(static_cast<qint64>(parsedEntry.timestampMs)).toString(QStringLiteral("yyyy-MM-dd HH:mm:ss.zzz")));
+            metadata.field(QStringLiteral("客户端"), parsedEntry.clientEndpointText);
+            metadata.field(QStringLiteral("进程"), parsedEntry.clientProcessText);
+            metadata.field(QStringLiteral("目标"), QStringLiteral("%1:%2").arg(parsedEntry.targetHostText).arg(parsedEntry.targetPort));
+            metadata.field(QStringLiteral("事件"), parsedEntry.eventTypeText);
+            metadata.field(QStringLiteral("方法"), parsedEntry.methodText);
+            metadata.field(QStringLiteral("路径"), parsedEntry.pathText);
+            metadata.field(QStringLiteral("状态码"), QString::number(parsedEntry.statusCode));
+            metadata.field(QStringLiteral("内容类型"), parsedEntry.contentTypeText);
+            metadata.field(QStringLiteral("内容长度"), parsedEntry.contentLength >= 0 ? QString::number(parsedEntry.contentLength) : QStringLiteral("未知"));
+            metadata.field(QStringLiteral("耗时"), QStringLiteral("%1 ms").arg(parsedEntry.elapsedMs));
+            metadata.field(QStringLiteral("上行/下行"), QStringLiteral("%1 / %2 字节").arg(parsedEntry.uploadBytes).arg(parsedEntry.downloadBytes));
+            metadata.section(QStringLiteral("TLS"));
+            metadata.field(QStringLiteral("TLS"), parsedEntry.tlsVersionText);
+            metadata.field(QStringLiteral("ALPN"), parsedEntry.alpnText);
+            metadata.field(QStringLiteral("密码套件"), parsedEntry.cipherSuiteText);
+            metadata.field(QStringLiteral("SNI"), parsedEntry.sniText);
+            metadata.field(QStringLiteral("证书主体"), parsedEntry.certificateSubjectText);
+            metadata.field(QStringLiteral("证书签发者"), parsedEntry.certificateIssuerText);
+            metadata.field(QStringLiteral("证书到期"), parsedEntry.certificateExpiryText);
+            metadata.field(QStringLiteral("证书 SHA-256"), parsedEntry.certificateSha256Text);
+            metadata.field(QStringLiteral("详情"), parsedEntry.detailText);
             QTabWidget* tabWidget = new QTabWidget(this);
-            ks::ui::StylePageTabs(tabWidget);
+            auto* metadataSource = new ks::ui::StructuredFieldView(tabWidget);
+            metadataSource->setDocument(metadata);
+            tabWidget->addTab(ks::ui::CreateDetailFieldProjection(metadataSource, tabWidget), QStringLiteral("常规信息"));
 
             QWidget* hexPage = new QWidget(tabWidget);
             QVBoxLayout* hexLayout = new QVBoxLayout(hexPage);
-            hexLayout->setContentsMargins(0, 0, 0, 0);
+            hexLayout->setContentsMargins(16, 16, 16, 16);
             hexLayout->setSpacing(4);
 
             QLabel* hintLabel = new QLabel(QStringLiteral("下方展示 HTTPS 事件原始字节。"), hexPage);
@@ -245,18 +156,20 @@ namespace
 
             QWidget* textPage = new QWidget(tabWidget);
             QVBoxLayout* textLayout = new QVBoxLayout(textPage);
-            textLayout->setContentsMargins(0, 0, 0, 0);
+            textLayout->setContentsMargins(16, 16, 16, 16);
             textLayout->setSpacing(4);
 
             QPlainTextEdit* textEditor = new CodeTextEdit(textPage);
             static_cast<CodeTextEdit*>(textEditor)->setSyntaxLanguage(CodeTextEdit::SyntaxLanguage::PlainText);
             textEditor->setReadOnly(true);
-            textEditor->setLineWrapMode(QPlainTextEdit::NoWrap);
+            textEditor->setLineWrapMode(QPlainTextEdit::WidgetWidth);
             textEditor->setPlainText(QString::fromUtf8(parsedEntry.rawBytes));
             textLayout->addWidget(textEditor, 1);
             tabWidget->addTab(textPage, QStringLiteral("文本"));
-            ks::ui::SetDetailTabGroups(tabWidget, {{ks::ui::DetailNavigationKind::Content, {0, 1}}});
+            ks::ui::SetDetailTabGroups(tabWidget, {{ks::ui::DetailNavigationKind::General, {0}},
+                {ks::ui::DetailNavigationKind::Content, {1, 2}}});
             rootLayout->addWidget(ks::ui::CreateDetailTabShell(tabWidget, this), 1);
+            ks::ui::InstallDetailWindowFramework(this);
             ks::ui::ApplyDetailDialogChrome(this);
         }
     };
@@ -524,40 +437,48 @@ void NetworkDock::initializeHttpsAnalyzeTab()
     m_httpsListenAddressEdit = new QLineEdit(QStringLiteral("127.0.0.1"), m_httpsAnalyzePage);
     m_httpsListenAddressEdit->setToolTip(QStringLiteral("HTTPS代理监听地址。"));
     m_httpsListenAddressEdit->setMaximumWidth(140);
+    // 监听地址是独立参数输入，不能借用搜索字段或透明祖先的底色。
+    ks::ui::StyleStandaloneInput(m_httpsListenAddressEdit);
 
     m_httpsListenPortSpin = new QSpinBox(m_httpsAnalyzePage);
     m_httpsListenPortSpin->setRange(1, 65535);
     m_httpsListenPortSpin->setValue(8889);
+    ks::ui::StyleStandaloneInput(m_httpsListenPortSpin);
     m_httpsListenPortSpin->setToolTip(QStringLiteral("HTTPS代理监听端口。"));
 
     m_httpsStartProxyButton = new QPushButton(QStringLiteral("启动代理"), m_httpsAnalyzePage);
     // 页面明确选择动作语义；颜色变化不改变确认或执行路径。
-    ks::ui::ApplyFlatButtonTheme(m_httpsStartProxyButton, ks::ui::FlatButtonTone::Accent);
+    ks::ui::ApplyFlatButtonTheme(m_httpsStartProxyButton, ks::ui::FlatButtonTone::Accent,
+        ks::ui::FlatButtonAppearance::Solid);
     m_httpsStartProxyButton->setIcon(QIcon(":/Icon/process_start.svg"));
     // 抓取范围并入启动按钮：用户在这里决定要不要开，也正是在这里需要知道抓不到什么。
     m_httpsStartProxyButton->setToolTip(QStringLiteral("启动本地 HTTPS 解析代理。只记录经过本地系统代理的 HTTP/1.1 流量；QUIC/HTTP/3、直连流量和启用证书锁定的应用不会进入本表。"));
 
     m_httpsStopProxyButton = new QPushButton(QStringLiteral("停止代理"), m_httpsAnalyzePage);
     // 页面明确选择动作语义；颜色变化不改变确认或执行路径。
-    ks::ui::ApplyFlatButtonTheme(m_httpsStopProxyButton, ks::ui::FlatButtonTone::Neutral);
+    ks::ui::ApplyFlatButtonTheme(m_httpsStopProxyButton, ks::ui::FlatButtonTone::Neutral,
+        ks::ui::FlatButtonAppearance::Solid);
     m_httpsStopProxyButton->setIcon(QIcon(":/Icon/process_pause.svg"));
     m_httpsStopProxyButton->setToolTip(QStringLiteral("停止本地 HTTPS 解析代理。"));
 
     m_httpsTrustCertButton = new QPushButton(QStringLiteral("信任证书"), m_httpsAnalyzePage);
     // 页面明确选择动作语义；颜色变化不改变确认或执行路径。
-    ks::ui::ApplyFlatButtonTheme(m_httpsTrustCertButton, ks::ui::FlatButtonTone::Accent);
+    ks::ui::ApplyFlatButtonTheme(m_httpsTrustCertButton, ks::ui::FlatButtonTone::Accent,
+        ks::ui::FlatButtonAppearance::Solid);
     m_httpsTrustCertButton->setIcon(QIcon(":/Icon/process_details.svg"));
     m_httpsTrustCertButton->setToolTip(QStringLiteral("一键生成并信任 HTTPS 代理根证书。"));
 
     m_httpsApplyProxyButton = new QPushButton(QStringLiteral("应用系统代理"), m_httpsAnalyzePage);
     // 页面明确选择动作语义；颜色变化不改变确认或执行路径。
-    ks::ui::ApplyFlatButtonTheme(m_httpsApplyProxyButton, ks::ui::FlatButtonTone::Accent);
+    ks::ui::ApplyFlatButtonTheme(m_httpsApplyProxyButton, ks::ui::FlatButtonTone::Accent,
+        ks::ui::FlatButtonAppearance::Solid);
     m_httpsApplyProxyButton->setIcon(QIcon(":/Icon/process_main.svg"));
     m_httpsApplyProxyButton->setToolTip(QStringLiteral("把系统代理切换到本地 HTTPS 代理。"));
 
     m_httpsClearProxyButton = new QPushButton(QStringLiteral("还原系统代理"), m_httpsAnalyzePage);
     // 页面明确选择动作语义；颜色变化不改变确认或执行路径。
-    ks::ui::ApplyFlatButtonTheme(m_httpsClearProxyButton, ks::ui::FlatButtonTone::Neutral);
+    ks::ui::ApplyFlatButtonTheme(m_httpsClearProxyButton, ks::ui::FlatButtonTone::Neutral,
+        ks::ui::FlatButtonAppearance::Solid);
     m_httpsClearProxyButton->setIcon(QIcon(":/Icon/log_clear.svg"));
     m_httpsClearProxyButton->setToolTip(QStringLiteral("恢复本页应用 HTTPS 代理前保存的系统代理配置。"));
 
@@ -587,6 +508,7 @@ void NetworkDock::initializeHttpsAnalyzeTab()
     m_httpsParsedFilterEdit->setToolTip(QStringLiteral("实时筛选当前 HTTPS 解析记录，不影响代理转发或完整缓存。"));
     m_httpsParsedEventFilterCombo = new QComboBox(m_httpsAnalyzePage);
     ks::ui::StylePrimaryCombo(m_httpsParsedEventFilterCombo);
+    ks::ui::StyleStandaloneInput(m_httpsParsedEventFilterCombo);
     m_httpsParsedEventFilterCombo->addItem(QStringLiteral("全部事件"));
     m_httpsParsedEventFilterCombo->addItem(QStringLiteral("CONNECT"));
     m_httpsParsedEventFilterCombo->addItem(QStringLiteral("TLS"));
@@ -597,12 +519,14 @@ void NetworkDock::initializeHttpsAnalyzeTab()
     m_httpsParsedEventFilterCombo->setToolTip(QStringLiteral("按 HTTPS 代理事件类型筛选。"));
     m_httpsClearParsedButton = new QPushButton(QStringLiteral("清空解析结果"), m_httpsAnalyzePage);
     // 页面明确选择动作语义；颜色变化不改变确认或执行路径。
-    ks::ui::ApplyFlatButtonTheme(m_httpsClearParsedButton, ks::ui::FlatButtonTone::Neutral);
+    ks::ui::ApplyFlatButtonTheme(m_httpsClearParsedButton, ks::ui::FlatButtonTone::Neutral,
+        ks::ui::FlatButtonAppearance::Solid);
     m_httpsClearParsedButton->setIcon(QIcon(":/Icon/log_clear.svg"));
     m_httpsClearParsedButton->setToolTip(QStringLiteral("清空解析表和详情缓存，不停止 HTTPS 代理。"));
     m_httpsExportParsedButton = new QPushButton(QStringLiteral("导出可见 CSV"), m_httpsAnalyzePage);
     // 页面明确选择动作语义；颜色变化不改变确认或执行路径。
-    ks::ui::ApplyFlatButtonTheme(m_httpsExportParsedButton, ks::ui::FlatButtonTone::Neutral);
+    ks::ui::ApplyFlatButtonTheme(m_httpsExportParsedButton, ks::ui::FlatButtonTone::Neutral,
+        ks::ui::FlatButtonAppearance::Solid);
     m_httpsExportParsedButton->setIcon(QIcon(":/Icon/log_copy.svg"));
     m_httpsExportParsedButton->setToolTip(QStringLiteral("将当前筛选后可见的 HTTPS 解析记录导出为 UTF-8 CSV。"));
     m_httpsAutoScrollCheck = new QCheckBox(QStringLiteral("自动滚动"), m_httpsAnalyzePage);

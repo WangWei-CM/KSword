@@ -187,9 +187,6 @@ private:
 
 private:
     QVBoxLayout* m_rootLayout = nullptr;               // m_rootLayout：根布局。
-    QToolButton* m_sessionCollapseButton = nullptr;    // m_sessionCollapseButton：唯一配置折叠标题按钮，统一收纳目标进程、Agent 与 Fake Success。
-    QWidget* m_sessionCollapseContent = nullptr;       // m_sessionCollapseContent：唯一折叠内容区，上部进程选择、下部左右配置。
-    QSplitter* m_topSplitter = nullptr;                // m_topSplitter：Agent 会话与 Fake Success 的左右分栏。
     QWidget* m_processPanel = nullptr;                 // m_processPanel：顶部进程下拉选择面板。
     QWidget* m_sessionPanel = nullptr;                 // m_sessionPanel：左侧 WinAPI Agent 会话配置面板。
     QWidget* m_filterPanel = nullptr;                  // m_filterPanel：底部事件筛选面板。

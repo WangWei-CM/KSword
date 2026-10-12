@@ -92,12 +92,13 @@ NetworkDock::NetworkDock(QWidget* parent)
 
     // 多线程下载刷新定时器：
     // - 周期刷新任务表/分段表/总进度条；
-    // - 即使当前不在下载页，只要存在运行中任务也维持刷新。
+    // - 下载后台独立运行；只有下载页实际可见时才构造任务表和分段表。
     m_multiDownloadRefreshTimer = new QTimer(this);
     m_multiDownloadRefreshTimer->setInterval(180);
     connect(m_multiDownloadRefreshTimer, &QTimer::timeout, this, [this]()
         {
-            if (m_sideTabWidget == nullptr || m_sideTabWidget->currentWidget() != m_multiThreadDownloadPage)
+            if (!isVisible() || m_sideTabWidget == nullptr
+                || m_sideTabWidget->currentWidget() != m_multiThreadDownloadPage)
             {
                 return;
             }

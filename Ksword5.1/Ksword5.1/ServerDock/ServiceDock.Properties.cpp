@@ -2,9 +2,14 @@
 #include "ServiceDock.Internal.h"
 #include "../UI/ToolbarMetrics.h"
 #include "../UI/CodeTextEdit.h"
+#include "../UI/DetailPresentation.h"
+#include "../UI/PrimaryPageStyle.h"
+#include "../UI/FlatButtonTheme.h"
+#include "../UI/FlowLayout.h"
 #include "../theme.h"
 
 #include <QFileDialog>
+#include <QScrollArea>
 #include <QSignalBlocker>
 #include <QVariant>
 
@@ -87,7 +92,41 @@ namespace
         button->setIcon(createBlueIcon(iconPath, KswordTheme::CompactIconSize()));
         KswordTheme::ApplyCompactIconButtonMetrics(button);
         button->setToolTip(toolTipText);
+        ks::ui::ApplyFlatButtonTheme(button, ks::ui::FlatButtonTone::Neutral,
+            ks::ui::FlatButtonAppearance::Solid);
+        ks::ui::NormalizeToolbarControl(button);
         return button;
+    }
+
+    // 服务编辑页只让卡片正文滚动，顶部重载和保存始终可达；表格页仍自行滚动。
+    // page/root：原业务页与顶层布局；返回正文的纵向布局，所有字段对象保持不变。
+    QVBoxLayout* createServiceCardBody(QWidget* page, QVBoxLayout* root)
+    {
+        auto* scroll = new QScrollArea(page);
+        scroll->setFrameShape(QFrame::NoFrame);
+        scroll->setWidgetResizable(true);
+        scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        scroll->setMinimumSize(0, 0);
+        scroll->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Ignored);
+        auto* content = new QWidget(scroll);
+        content->setMinimumWidth(0);
+        content->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+        auto* body = new QVBoxLayout(content);
+        body->setContentsMargins(0, 0, 0, 0);
+        body->setSpacing(12);
+        body->setAlignment(Qt::AlignTop);
+        scroll->setWidget(content);
+        root->addWidget(scroll, 1);
+        return body;
+    }
+
+    // 将字段值约束在当前列内，长账户名或类型说明按窗口宽度换行，不撑宽页面。
+    void configureServiceValue(QLabel* value)
+    {
+        value->setWordWrap(true);
+        value->setMinimumWidth(0);
+        value->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+        value->setTextInteractionFlags(Qt::TextSelectableByMouse);
     }
 
     // buildRecoveryActionCombo 作用：
@@ -100,6 +139,7 @@ namespace
         comboBox->addItem(QStringLiteral("重新启动服务"), static_cast<int>(SC_ACTION_RESTART));
         comboBox->addItem(QStringLiteral("运行程序"), static_cast<int>(SC_ACTION_RUN_COMMAND));
         comboBox->addItem(QStringLiteral("重新启动计算机"), static_cast<int>(SC_ACTION_REBOOT));
+        ks::ui::StylePrimaryCombo(comboBox);
         return comboBox;
     }
 
@@ -294,8 +334,8 @@ void ServiceDock::initializeDetailTabs()
 void ServiceDock::initializeGeneralTab()
 {
     QVBoxLayout* rootLayout = new QVBoxLayout(m_generalTabPage);
-    rootLayout->setContentsMargins(8, 8, 8, 8);
-    rootLayout->setSpacing(8);
+    rootLayout->setContentsMargins(16, 12, 16, 12);
+    rootLayout->setSpacing(12);
 
     QWidget* actionRowWidget = new QWidget(m_generalTabPage);
     QHBoxLayout* actionRowLayout = new QHBoxLayout(actionRowWidget);
@@ -319,11 +359,13 @@ void ServiceDock::initializeGeneralTab()
     ks::ui::NormalizeToolbarRow(actionRowLayout);
     rootLayout->addWidget(actionRowWidget, 0);
 
-    QFormLayout* formLayout = new QFormLayout();
-    formLayout->setLabelAlignment(Qt::AlignLeft | Qt::AlignVCenter);
-    formLayout->setFormAlignment(Qt::AlignTop);
-    formLayout->setHorizontalSpacing(10);
-    formLayout->setVerticalSpacing(8);
+    // 常规配置与运行状态分成独立卡片；正文仅有这一层滚动。
+    QVBoxLayout* body = createServiceCardBody(m_generalTabPage, rootLayout);
+    QWidget* generalCard = ks::ui::CreateDetailCard(QStringLiteral("常规"), m_generalTabPage);
+    auto* formLayout = new QFormLayout();
+    ks::ui::ConfigureDetailForm(formLayout);
+    qobject_cast<QVBoxLayout*>(generalCard->layout())->addLayout(formLayout);
+    body->addWidget(generalCard);
 
     m_generalServiceNameEdit = new QLineEdit(m_generalTabPage);
     m_generalServiceNameEdit->setReadOnly(true);
@@ -335,11 +377,17 @@ void ServiceDock::initializeGeneralTab()
     descriptionEditor->setLineNumbersVisible(false);
     descriptionEditor->setCompactMode(true);
     m_generalDescriptionEdit = descriptionEditor;
-    m_generalDescriptionEdit->setFixedHeight(96);
+    m_generalDescriptionEdit->setMinimumHeight(72);
+    m_generalDescriptionEdit->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
     m_generalStartTypeCombo = new QComboBox(m_generalTabPage);
     m_generalStartTypeCombo->addItem(QStringLiteral("自动"), static_cast<qulonglong>(SERVICE_AUTO_START));
     m_generalStartTypeCombo->addItem(QStringLiteral("手动"), static_cast<qulonglong>(SERVICE_DEMAND_START));
     m_generalStartTypeCombo->addItem(QStringLiteral("禁用"), static_cast<qulonglong>(SERVICE_DISABLED));
+    ks::ui::StylePrimaryCombo(m_generalStartTypeCombo);
+    for (QLineEdit* input : {m_generalServiceNameEdit, m_generalDisplayNameEdit, m_generalBinaryPathEdit})
+    {
+        ks::ui::StyleStandaloneInput(input);
+    }
     m_generalDelayedAutoCheck = new QCheckBox(QStringLiteral("延迟自动启动"), m_generalTabPage);
     m_generalStartTypeCombo->setToolTip(
         QStringLiteral("设置该服务的启动方式：自动=开机自启，手动=按需启动，禁用=禁止启动"));
@@ -347,11 +395,11 @@ void ServiceDock::initializeGeneralTab()
         QStringLiteral("开机后延迟一段时间再启动该服务，可减轻开机瞬间的负载"));
 
     QWidget* startTypeRowWidget = new QWidget(m_generalTabPage);
-    QHBoxLayout* startTypeRowLayout = new QHBoxLayout(startTypeRowWidget);
+    auto* startTypeRowLayout = new ks::ui::FlowLayout(startTypeRowWidget, 0, 8, 6);
     startTypeRowLayout->setContentsMargins(0, 0, 0, 0);
     startTypeRowLayout->setSpacing(8);
-    startTypeRowLayout->addWidget(m_generalStartTypeCombo, 1);
-    startTypeRowLayout->addWidget(m_generalDelayedAutoCheck, 0);
+    startTypeRowLayout->addWidget(m_generalStartTypeCombo);
+    startTypeRowLayout->addWidget(m_generalDelayedAutoCheck);
 
     m_generalStateValueLabel = new QLabel(QStringLiteral("-"), m_generalTabPage);
     m_generalPidValueLabel = new QLabel(QStringLiteral("-"), m_generalTabPage);
@@ -364,12 +412,22 @@ void ServiceDock::initializeGeneralTab()
     formLayout->addRow(QStringLiteral("路径"), m_generalBinaryPathEdit);
     formLayout->addRow(QStringLiteral("描述"), m_generalDescriptionEdit);
     formLayout->addRow(QStringLiteral("启动类型"), startTypeRowWidget);
-    formLayout->addRow(QStringLiteral("状态"), m_generalStateValueLabel);
-    formLayout->addRow(QStringLiteral("PID"), m_generalPidValueLabel);
-    formLayout->addRow(QStringLiteral("账户"), m_generalAccountValueLabel);
-    formLayout->addRow(QStringLiteral("类型"), m_generalTypeValueLabel);
-    formLayout->addRow(QStringLiteral("错误控制"), m_generalErrorControlValueLabel);
-    rootLayout->addLayout(formLayout, 1);
+    // 宽窗将状态分成两列；收窄后恢复完整顺序，标签和值共同换行。
+    QWidget* stateCard = ks::ui::CreateDetailCard(QStringLiteral("状态"), m_generalTabPage);
+    QFormLayout* first = nullptr;
+    QFormLayout* second = nullptr;
+    ks::ui::AddDetailFieldColumns(stateCard, first, second);
+    for (QLabel* value : {m_generalStateValueLabel, m_generalPidValueLabel,
+        m_generalAccountValueLabel, m_generalTypeValueLabel, m_generalErrorControlValueLabel})
+    {
+        configureServiceValue(value);
+    }
+    first->addRow(QStringLiteral("状态"), m_generalStateValueLabel);
+    first->addRow(QStringLiteral("PID"), m_generalPidValueLabel);
+    first->addRow(QStringLiteral("账户"), m_generalAccountValueLabel);
+    second->addRow(QStringLiteral("类型"), m_generalTypeValueLabel);
+    second->addRow(QStringLiteral("错误控制"), m_generalErrorControlValueLabel);
+    body->addWidget(stateCard);
 
     connect(m_generalStartButton, &QToolButton::clicked, this, [this]() { startSelectedService(); });
     connect(m_generalStopButton, &QToolButton::clicked, this, [this]() { stopSelectedService(); });
@@ -383,8 +441,8 @@ void ServiceDock::initializeGeneralTab()
 void ServiceDock::initializeLogonTab()
 {
     QVBoxLayout* rootLayout = new QVBoxLayout(m_logonTabPage);
-    rootLayout->setContentsMargins(8, 8, 8, 8);
-    rootLayout->setSpacing(8);
+    rootLayout->setContentsMargins(16, 12, 16, 12);
+    rootLayout->setSpacing(12);
 
     QWidget* actionRowWidget = new QWidget(m_logonTabPage);
     QHBoxLayout* actionRowLayout = new QHBoxLayout(actionRowWidget);
@@ -414,14 +472,21 @@ void ServiceDock::initializeLogonTab()
     m_logonConfirmPasswordEdit->setEchoMode(QLineEdit::Password);
     m_logonBrowseButton = buildPropertyActionButton(m_logonTabPage, ":/Icon/process_open_folder.svg", QStringLiteral("输入或浏览服务登录帐户"));
 
-    rootLayout->addWidget(m_logonLocalSystemRadio, 0);
-    rootLayout->addWidget(m_logonDesktopInteractCheck, 0);
-    rootLayout->addWidget(m_logonAccountRadio, 0);
+    // 身份选项与账户凭据分别成卡片，避免单列表单把空白高度分配给每一行。
+    QVBoxLayout* body = createServiceCardBody(m_logonTabPage, rootLayout);
+    QWidget* identityCard = ks::ui::CreateDetailCard(QStringLiteral("登录"), m_logonTabPage);
+    auto* identityLayout = qobject_cast<QVBoxLayout*>(identityCard->layout());
+    identityLayout->addWidget(m_logonLocalSystemRadio);
+    identityLayout->addWidget(m_logonDesktopInteractCheck);
+    identityLayout->addWidget(m_logonAccountRadio);
+    body->addWidget(identityCard);
+    for (QLineEdit* input : {m_logonAccountEdit, m_logonPasswordEdit, m_logonConfirmPasswordEdit})
+    {
+        ks::ui::StyleStandaloneInput(input);
+    }
 
     QFormLayout* formLayout = new QFormLayout();
-    formLayout->setLabelAlignment(Qt::AlignLeft | Qt::AlignVCenter);
-    formLayout->setHorizontalSpacing(10);
-    formLayout->setVerticalSpacing(8);
+    ks::ui::ConfigureDetailForm(formLayout);
 
     QWidget* accountRowWidget = new QWidget(m_logonTabPage);
     QHBoxLayout* accountRowLayout = new QHBoxLayout(accountRowWidget);
@@ -433,7 +498,9 @@ void ServiceDock::initializeLogonTab()
     formLayout->addRow(QStringLiteral("帐户"), accountRowWidget);
     formLayout->addRow(QStringLiteral("密码"), m_logonPasswordEdit);
     formLayout->addRow(QStringLiteral("确认密码"), m_logonConfirmPasswordEdit);
-    rootLayout->addLayout(formLayout, 1);
+    QWidget* credentialsCard = ks::ui::CreateDetailCard(QStringLiteral("帐户"), m_logonTabPage);
+    qobject_cast<QVBoxLayout*>(credentialsCard->layout())->addLayout(formLayout);
+    body->addWidget(credentialsCard);
 
     connect(m_logonLocalSystemRadio, &QRadioButton::toggled, this, [this](bool) { refreshLogonTabUiState(); });
     connect(m_logonAccountRadio, &QRadioButton::toggled, this, [this](bool) { refreshLogonTabUiState(); });
@@ -445,8 +512,8 @@ void ServiceDock::initializeLogonTab()
 void ServiceDock::initializeRecoveryTab()
 {
     QVBoxLayout* rootLayout = new QVBoxLayout(m_recoveryTabPage);
-    rootLayout->setContentsMargins(8, 8, 8, 8);
-    rootLayout->setSpacing(8);
+    rootLayout->setContentsMargins(16, 12, 16, 12);
+    rootLayout->setSpacing(12);
 
     QWidget* actionRowWidget = new QWidget(m_recoveryTabPage);
     QHBoxLayout* actionRowLayout = new QHBoxLayout(actionRowWidget);
@@ -460,10 +527,13 @@ void ServiceDock::initializeRecoveryTab()
     ks::ui::NormalizeToolbarRow(actionRowLayout);
     rootLayout->addWidget(actionRowWidget, 0);
 
-    QFormLayout* formLayout = new QFormLayout();
-    formLayout->setLabelAlignment(Qt::AlignLeft | Qt::AlignVCenter);
-    formLayout->setHorizontalSpacing(10);
-    formLayout->setVerticalSpacing(8);
+    // 失败策略与恢复程序分组；双列阈值由共享详情布局按当前字体和宽度决定。
+    QVBoxLayout* body = createServiceCardBody(m_recoveryTabPage, rootLayout);
+    QWidget* failureCard = ks::ui::CreateDetailCard(QStringLiteral("恢复"), m_recoveryTabPage);
+    QFormLayout* formLayout = nullptr;
+    QFormLayout* timingForm = nullptr;
+    ks::ui::AddDetailFieldColumns(failureCard, formLayout, timingForm);
+    body->addWidget(failureCard);
 
     m_recoveryFirstActionCombo = buildRecoveryActionCombo(m_recoveryTabPage);
     m_recoverySecondActionCombo = buildRecoveryActionCombo(m_recoveryTabPage);
@@ -490,6 +560,12 @@ void ServiceDock::initializeRecoveryTab()
     m_recoveryRebootMessageEdit = new QLineEdit(m_recoveryTabPage);
     m_recoveryProgramEdit = new QLineEdit(m_recoveryTabPage);
     m_recoveryArgumentsEdit = new QLineEdit(m_recoveryTabPage);
+    for (QLineEdit* input : {m_recoveryRebootMessageEdit, m_recoveryProgramEdit, m_recoveryArgumentsEdit})
+    {
+        ks::ui::StyleStandaloneInput(input);
+    }
+    ks::ui::StyleStandaloneInput(m_recoveryResetDaysSpin);
+    ks::ui::StyleStandaloneInput(m_recoveryRestartMinutesSpin);
     m_recoveryAppendFailCountCheck = new QCheckBox(QStringLiteral("将失败计数附加到命令行结尾 (/fail=%1%)"), m_recoveryTabPage);
     m_recoveryAppendFailCountCheck->setToolTip(
         QStringLiteral("运行恢复程序时，在命令行末尾附加当前是第几次失败"));
@@ -505,14 +581,18 @@ void ServiceDock::initializeRecoveryTab()
     formLayout->addRow(QStringLiteral("第一次失败"), m_recoveryFirstActionCombo);
     formLayout->addRow(QStringLiteral("第二次失败"), m_recoverySecondActionCombo);
     formLayout->addRow(QStringLiteral("后续失败"), m_recoverySubsequentActionCombo);
-    formLayout->addRow(QStringLiteral("重置失败计数"), m_recoveryResetDaysSpin);
-    formLayout->addRow(QStringLiteral("重新启动服务"), m_recoveryRestartMinutesSpin);
-    formLayout->addRow(QStringLiteral("错误停止"), m_recoveryFailureActionsFlagCheck);
-    formLayout->addRow(QStringLiteral("重启消息"), m_recoveryRebootMessageEdit);
-    formLayout->addRow(QStringLiteral("程序"), programRowWidget);
-    formLayout->addRow(QStringLiteral("命令行参数"), m_recoveryArgumentsEdit);
-    formLayout->addRow(QStringLiteral("失败计数"), m_recoveryAppendFailCountCheck);
-    rootLayout->addLayout(formLayout, 1);
+    timingForm->addRow(QStringLiteral("重置失败计数"), m_recoveryResetDaysSpin);
+    timingForm->addRow(QStringLiteral("重新启动服务"), m_recoveryRestartMinutesSpin);
+    timingForm->addRow(QStringLiteral("错误停止"), m_recoveryFailureActionsFlagCheck);
+    QWidget* programCard = ks::ui::CreateDetailCard(QStringLiteral("程序"), m_recoveryTabPage);
+    auto* programForm = new QFormLayout();
+    ks::ui::ConfigureDetailForm(programForm);
+    programForm->addRow(QStringLiteral("重启消息"), m_recoveryRebootMessageEdit);
+    programForm->addRow(QStringLiteral("程序"), programRowWidget);
+    programForm->addRow(QStringLiteral("命令行参数"), m_recoveryArgumentsEdit);
+    programForm->addRow(QStringLiteral("失败计数"), m_recoveryAppendFailCountCheck);
+    qobject_cast<QVBoxLayout*>(programCard->layout())->addLayout(programForm);
+    body->addWidget(programCard);
 
     connect(m_recoveryFirstActionCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int) { refreshRecoveryTabUiState(); });
     connect(m_recoverySecondActionCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int) { refreshRecoveryTabUiState(); });
@@ -525,25 +605,25 @@ void ServiceDock::initializeRecoveryTab()
 void ServiceDock::initializeDependencyTab()
 {
     QVBoxLayout* rootLayout = new QVBoxLayout(m_dependencyTabPage);
-    rootLayout->setContentsMargins(4, 4, 4, 4);
-    rootLayout->setSpacing(4);
+    rootLayout->setContentsMargins(16, 12, 16, 12);
+    rootLayout->setSpacing(12);
 
     m_dependencyEditor = new ks::ui::StructuredFieldView(m_dependencyTabPage);
 
     m_dependencyEditor->setDocument(ks::ui::FieldDocument{}.note(QStringLiteral("未选择服务")));
-    rootLayout->addWidget(m_dependencyEditor, 1);
+    rootLayout->addWidget(ks::ui::CreateDetailFieldProjection(m_dependencyEditor, m_dependencyTabPage), 1);
 }
 
 void ServiceDock::initializeAuditTab()
 {
     QVBoxLayout* rootLayout = new QVBoxLayout(m_auditTabPage);
-    rootLayout->setContentsMargins(4, 4, 4, 4);
-    rootLayout->setSpacing(4);
+    rootLayout->setContentsMargins(16, 12, 16, 12);
+    rootLayout->setSpacing(12);
 
     m_auditEditor = new ks::ui::StructuredFieldView(m_auditTabPage);
 
     m_auditEditor->setDocument(ks::ui::FieldDocument{}.note(QStringLiteral("未选择服务")));
-    rootLayout->addWidget(m_auditEditor, 1);
+    rootLayout->addWidget(ks::ui::CreateDetailFieldProjection(m_auditEditor, m_auditTabPage), 1);
 }
 
 void ServiceDock::refreshGeneralTabUiState()

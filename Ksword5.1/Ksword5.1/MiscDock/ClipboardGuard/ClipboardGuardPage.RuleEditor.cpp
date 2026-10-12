@@ -1,5 +1,6 @@
 #include "ClipboardGuardPage.h"
 #include "../../UI/DetailDialogChrome.h"
+#include "../../UI/UI_All.h"
 #include "../../theme.h"
 #include "../../UI/CodeEditorWidget.h"
 #include "../../UI/StructuredFieldView.h"
@@ -60,13 +61,18 @@ namespace ks::misc
             dialogValue->setAutoFillBackground(true);
             dialogValue->setStyleSheet(buildOpaqueDialogStyle(objectNameText));
             dialogValue->setWindowTitle(titleText);
-            dialogValue->resize(720, 480);
+            ks::ui::applyResponsiveWindowGeometry(dialogValue, parentWidget,
+                QSize(840, 560), QSize(480, 360));
 
             QVBoxLayout* const layoutValue = new QVBoxLayout(dialogValue);
             layoutValue->setContentsMargins(8, 8, 8, 8);
+            layoutValue->addWidget(ks::ui::CreateDetailSummaryHeader(dialogValue, titleText));
             CodeEditorWidget* const editorValue = new CodeEditorWidget(dialogValue);
             editorValue->setReadOnly(true);
-            layoutValue->addWidget(editorValue);
+            auto* contentCard = ks::ui::CreateDetailCard(QString(), dialogValue);
+            contentCard->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+            qobject_cast<QVBoxLayout*>(contentCard->layout())->addWidget(editorValue, 1);
+            layoutValue->addWidget(contentCard, 1);
             if (editorOut != nullptr)
             {
                 *editorOut = editorValue;
@@ -388,12 +394,13 @@ namespace ks::misc
         dialog->setObjectName(QStringLiteral("ClipboardGuardContentsDialog"));
         dialog->setWindowTitle(QStringLiteral("剪贴板内容"));
         dialog->setStyleSheet(buildOpaqueDialogStyle(dialog->objectName()));
-        dialog->resize(720, 480);
+        ks::ui::applyResponsiveWindowGeometry(dialog, this, QSize(840, 560), QSize(480, 360));
         auto* layout = new QVBoxLayout(dialog);
+        layout->addWidget(ks::ui::CreateDetailSummaryHeader(dialog, dialog->windowTitle()));
         auto* tabs = new QTabWidget(dialog);
         auto* fields = new ks::ui::StructuredFieldView(tabs);
         fields->setDocument(metadata);
-        tabs->addTab(fields, QStringLiteral("属性"));
+        tabs->addTab(ks::ui::CreateDetailFieldProjection(fields, tabs), QStringLiteral("属性"));
         auto* raw = new CodeEditorWidget(tabs);
         raw->setReadOnly(true);
         raw->setRawText(rawText);

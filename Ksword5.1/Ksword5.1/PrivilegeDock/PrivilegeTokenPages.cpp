@@ -2,6 +2,7 @@
 #include "../UI/PageControlStyle.h"
 #include "../UI/PrimaryPageStyle.h"
 #include "../UI/ToolbarMetrics.h"
+#include "../UI/ParameterWorkspace.h"
 #include "../Internationalization/LanguageManager.h"
 #include "../UI/VisibleTableWidget.h"
 #include "../UI/ThemeStatusRole.h"
@@ -1171,17 +1172,27 @@ namespace
         explicit IdentityLaunchPage(QWidget* parent) : QWidget(parent)
         {
             auto* layout = new QVBoxLayout(this);
+            // 启动参数独立滚动，启动动作固定，实际令牌证据在右侧持续可见。
+            auto* workspace = new ks::ui::ParameterWorkspace(this, 460);
+            layout->addWidget(workspace);
             auto* form = new QFormLayout;
+            form->setRowWrapPolicy(QFormLayout::WrapAllRows);
+            form->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
             auto* pathRow = new QHBoxLayout;
             m_image = new QLineEdit(this);
+            // 身份启动字段属于普通参数输入，复用共享尺寸和热主题，不接管启动逻辑。
+            ks::ui::StyleStandaloneInput(m_image);
             m_image->setPlaceholderText(text("privilege.workbench.launch.image_hint", QStringLiteral("可执行文件的完整路径（.exe）")));
             auto* browse = new QPushButton(text("privilege.workbench.launch.browse", QStringLiteral("浏览")), this);
             pathRow->addWidget(m_image, 1); pathRow->addWidget(browse);
             ks::ui::NormalizeToolbarRow(pathRow);
             form->addRow(text("privilege.workbench.launch.image", QStringLiteral("程序")), pathRow);
             m_arguments = new QLineEdit(this);
+            ks::ui::StyleStandaloneInput(m_arguments);
             form->addRow(text("privilege.workbench.launch.arguments", QStringLiteral("参数")), m_arguments);
-            m_directory = new QLineEdit(this); m_directory->setReadOnly(true);
+            m_directory = new QLineEdit(this);
+            m_directory->setReadOnly(true);
+            ks::ui::StyleStandaloneInput(m_directory);
             form->addRow(text("privilege.workbench.launch.directory", QStringLiteral("工作目录（程序所在目录）")), m_directory);
             m_mode = new QComboBox(this);
             ks::ui::StylePrimaryCombo(m_mode);
@@ -1190,10 +1201,11 @@ namespace
             m_mode->addItem(QStringLiteral("SYSTEM"), static_cast<int>(ks::process::RunAsIdentity::System));
             m_mode->addItem(QStringLiteral("TrustedInstaller"), static_cast<int>(ks::process::RunAsIdentity::TrustedInstaller));
             form->addRow(text("privilege.workbench.launch.identity", QStringLiteral("请求身份")), m_mode);
-            layout->addLayout(form);
+            workspace->parameters()->addLayout(form);
             auto* note = new QLabel(text("privilege.workbench.launch.note", QStringLiteral("复用现有身份启动后端，目标用户环境和交互式会话由后端设置。SYSTEM / TrustedInstaller 需要当前 KSword 已提升；TrustedInstaller 可能启动服务。工作目录固定为程序目录。实际身份以启动后的令牌为准。")), this);
-            note->setWordWrap(true); layout->addWidget(note);
-            auto* bar = new QHBoxLayout;
+            note->setWordWrap(true);
+            workspace->parameters()->addWidget(note);
+            auto* launchActions = new QVBoxLayout;
             m_launch = new QPushButton(text("privilege.workbench.launch.start", QStringLiteral("以所选身份启动")), this);
             m_launch->setObjectName(QStringLiteral("privilege_identity_launch"));
             m_launch->setEnabled(false);
@@ -1202,18 +1214,26 @@ namespace
             m_baseline->setEnabled(false);
             m_refresh = new QPushButton(text("privilege.workbench.launch.refresh", QStringLiteral("刷新已启动进程令牌")), this);
             m_refresh->setEnabled(false);
-            bar->addWidget(m_launch); bar->addWidget(m_availability); bar->addWidget(m_baseline); bar->addWidget(m_refresh);
-            ks::ui::NormalizeToolbarRow(bar);
-            layout->addLayout(bar);
+            // 两个会启动进程的动作固定在参数栏；可用性检查和令牌刷新按各自作用放置。
+            launchActions->addWidget(m_launch);
+            launchActions->addWidget(m_baseline);
+            workspace->actions()->addLayout(launchActions, 1);
+            workspace->parameters()->addWidget(m_availability);
+            workspace->results()->addWidget(m_refresh, 0, Qt::AlignLeft);
+            for (QPushButton* action : {m_launch, m_availability, m_baseline, m_refresh})
+            {
+                ks::ui::NormalizeToolbarControl(action);
+            }
             auto* searchBar = new QHBoxLayout;
             m_differences = new QCheckBox(text("privilege.workbench.tokens.differences", QStringLiteral("只显示差异")), this);
             m_search = new QLineEdit(this);
             m_search->setPlaceholderText(text("privilege.workbench.tokens.search", QStringLiteral("搜索字段、SID 或权限")));
             auto* copy = new QPushButton(text("privilege.workbench.tokens.copy_sid", QStringLiteral("复制选中 SID")), this);
             searchBar->addWidget(m_differences); searchBar->addWidget(m_search, 1); searchBar->addWidget(copy);
-            layout->addLayout(searchBar);
+            workspace->results()->addLayout(searchBar);
             m_identity = new QLabel(this); m_identity->setWordWrap(true);
-            m_identity->setTextInteractionFlags(Qt::TextSelectableByMouse); layout->addWidget(m_identity);
+            m_identity->setTextInteractionFlags(Qt::TextSelectableByMouse);
+            workspace->results()->addWidget(m_identity);
             m_table = table(this, { text("privilege.workbench.tokens.field", QStringLiteral("字段")),
                 text("privilege.workbench.launch.actual", QStringLiteral("所选身份实例的实际令牌")),
                 text("privilege.workbench.launch.ordinary_actual", QStringLiteral("普通用户实例的实际令牌")),
@@ -1223,9 +1243,12 @@ namespace
             ks::ui::StyleSearchField(m_search);
             ks::ui::NormalizeToolbarRow(searchBar);
             ks::ui::SetTableActionBarMode(m_table, ks::ui::TableActionBarMode::Compact);
-            layout->addWidget(m_table, 1);
+            workspace->results()->addWidget(m_table, 1);
             m_status = new QLabel(text("privilege.workbench.launch.idle", QStringLiteral("尚未启动程序；身份可用性检查不会请求 UAC 或启动服务。")), this);
-            m_status->setWordWrap(true); m_status->setTextInteractionFlags(Qt::TextSelectableByMouse); layout->addWidget(m_status);
+            m_status->setWordWrap(true);
+            m_status->setTextInteractionFlags(Qt::TextSelectableByMouse);
+            workspace->results()->addWidget(m_status);
+            workspace->finish();
             connect(browse, &QPushButton::clicked, this, [this]()
             {
                 const QPointer<QWidget> pageGuard(this);

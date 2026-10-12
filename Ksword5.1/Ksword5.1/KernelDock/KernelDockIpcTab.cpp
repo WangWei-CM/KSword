@@ -1,6 +1,7 @@
 #include "../UI/StructuredFieldView.h"
 #include "../UI/PageControlStyle.h"
 #include "../UI/ToolbarMetrics.h"
+#include "../UI/PrimaryPageStyle.h"
 #include "KernelDockIpcTab.h"
 #include "KernelDock.h"
 #include "../UI/VisibleTableWidget.h"
@@ -261,7 +262,7 @@ void KernelDockIpcTab::initializeUi()
     rootLayout->setSpacing(6);
 
     m_innerTabWidget = new QTabWidget(this);
-    ks::ui::StylePageTabs(m_innerTabWidget);
+    ks::ui::StylePageTabsContentFrame(m_innerTabWidget);
     m_innerTabWidget->setIconSize(QSize(16, 16));
     rootLayout->addWidget(m_innerTabWidget, 1);
 
@@ -342,6 +343,9 @@ void KernelDockIpcTab::initializeAlpcPage()
     m_alpcHandleEdit->setPlaceholderText(kernelText("kernel.ipc.toolbar.handle.placeholder", QStringLiteral("句柄值（十六进制）")));
     m_alpcHandleEdit->setClearButtonEnabled(true);
     m_alpcHandleEdit->setStyleSheet(blueInputStyle());
+    // 原局部透明输入规则由字段自身的主题绑定接管，PID与句柄值仍各自解析。
+    ks::ui::StyleStandaloneInput(m_alpcProcessIdEdit);
+    ks::ui::StyleStandaloneInput(m_alpcHandleEdit);
 
     m_alpcStatusLabel = new QLabel(kernelText("kernel.ipc.status.waiting", QStringLiteral("状态：等待查询")), m_alpcPage);
     m_alpcStatusLabel->setStyleSheet(statusLabelStyle(KswordTheme::TextSecondaryHex()));

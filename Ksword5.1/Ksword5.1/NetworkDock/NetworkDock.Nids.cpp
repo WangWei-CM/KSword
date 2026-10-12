@@ -229,6 +229,7 @@ void NetworkDock::initializeNidsTab()
     QLabel* severityFilterLabel = new QLabel(QStringLiteral("等级:"), m_nidsPage);
     m_nidsSeverityFilterCombo = new QComboBox(m_nidsPage);
     ks::ui::StylePrimaryCombo(m_nidsSeverityFilterCombo);
+    ks::ui::StyleStandaloneInput(m_nidsSeverityFilterCombo);
     m_nidsSeverityFilterCombo->addItem(QStringLiteral("全部"), static_cast<int>(ks::network::NidsAlertSeverity::Low));
     m_nidsSeverityFilterCombo->addItem(QStringLiteral("中危+"), static_cast<int>(ks::network::NidsAlertSeverity::Medium));
     m_nidsSeverityFilterCombo->addItem(QStringLiteral("高危+"), static_cast<int>(ks::network::NidsAlertSeverity::High));
@@ -241,6 +242,7 @@ void NetworkDock::initializeNidsTab()
     ks::ui::ApplyFlatButtonTheme(m_nidsClearButton, ks::ui::FlatButtonTone::Neutral,
         ks::ui::FlatButtonAppearance::Solid);
     m_nidsClearButton->setIcon(QIcon(":/Icon/log_clear.svg"));
+    KswordTheme::ApplyCompactIconButtonMetrics(m_nidsClearButton);
     m_nidsClearButton->setToolTip(QStringLiteral("清空 NIDS 告警和检测窗口"));
 
     m_nidsStatusLabel = new QLabel(m_nidsPage);

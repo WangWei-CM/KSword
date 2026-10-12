@@ -16,6 +16,7 @@
 #include "UI/ThemeControlGlyphs.h"
 
 #include <cmath>
+#include <array>
 
 namespace KswordTheme
 {
@@ -224,16 +225,24 @@ namespace KswordTheme
 
     inline double RelativeLuminance(const QColor& colorValue)
     {
-        const auto linearize = [](const int channelValue) {
-            const double channel = static_cast<double>(channelValue) / 255.0;
-            return channel <= 0.03928
-                ? channel / 12.92
-                : std::pow((channel + 0.055) / 1.055, 2.4);
-        };
+        // QColor在原算法中也按8位通道求值；保留同一公式，通道线性化只预算一次。
+        // 对比度亮度搜索会反复访问同一256个输入，不再每个候选色执行三次pow。
+        static const std::array<double, 256> linearChannels = []()
+        {
+            std::array<double, 256> channels{};
+            for (int value = 0; value < 256; ++value)
+            {
+                const double channel = static_cast<double>(value) / 255.0;
+                channels[value] = channel <= 0.03928
+                    ? channel / 12.92
+                    : std::pow((channel + 0.055) / 1.055, 2.4);
+            }
+            return channels;
+        }();
 
-        return 0.2126 * linearize(colorValue.red())
-            + 0.7152 * linearize(colorValue.green())
-            + 0.0722 * linearize(colorValue.blue());
+        return 0.2126 * linearChannels[ClampChannel(colorValue.red())]
+            + 0.7152 * linearChannels[ClampChannel(colorValue.green())]
+            + 0.0722 * linearChannels[ClampChannel(colorValue.blue())];
     }
 
     inline double ContrastRatio(const QColor& firstColor, const QColor& secondColor)
@@ -1810,31 +1819,26 @@ ads--CDockWidgetTab[activeTab="true"] QLabel,ads--CDockWidgetTab[activeTab="true
     // （changeEvent 处理 ApplicationPaletteChange，或每次显示时重新生成样式）。
 
     // ControlCornerRadius 作用：统一按钮、组合框本体及组合框 Popup 的外轮廓圆角。
-    inline constexpr int ControlCornerRadius = 3;
+    inline constexpr int ControlCornerRadius = 5;
 
     inline QString ThemedButtonStyle()
     {
         // 对话框和普通页面共用实心无线框状态色，几何仍保持原来的紧凑按钮尺寸。
-        return ks::ui::BuildFlatButtonStyle(ks::ui::FlatButtonTone::Neutral)
+        return ks::ui::BuildFlatButtonStyle(ks::ui::FlatButtonTone::Neutral,
+            ks::ui::FlatButtonAppearance::Solid)
             + QStringLiteral(
                 "QPushButton,QToolButton{border-radius:%1px;padding:4px 10px;font-weight:600;}")
                 .arg(ControlCornerRadius);
     }
     // 单行输入、搜索与组合框共用中性表面；调用方可传独立页面的实际底色。
-    // 正常态先从 SurfaceAlt/Muted 派生，底面对比不足时仅提高中性明暗差。
+    // 正常态先从 SurfaceAlt/Muted 派生，底面对比不足时保留色相并只补足最小明暗差。
     inline QColor ControlInputSurfaceColor(
         const QColor& pageSurface = SurfaceColor(),
         const QColor& alternateSurface = SurfaceAltColor())
     {
         QColor surface = BlendColors(alternateSurface, SurfaceMutedColor(), 64);
         surface.setAlpha(255);
-        if (ContrastRatio(surface, pageSurface) < 1.25)
-        {
-            const QColor contrastSeed = RelativeLuminance(pageSurface) < 0.25
-                ? QColor(Qt::white) : QColor(Qt::black);
-            surface = BlendColors(pageSurface, contrastSeed, 30);
-        }
-        return surface;
+        return EnsureTextContrast(surface, pageSurface, 1.28);
     }
 
     // 交互态用少量主题色形成反馈，保持与正常编辑面相同的视觉重量。
@@ -1880,9 +1884,9 @@ ads--CDockWidgetTab[activeTab="true"] QLabel,ads--CDockWidgetTab[activeTab="true
             .arg(ControlCornerRadius);
     }
 
-    inline QString ThemedComboBoxStyle()
+    inline QString ThemedComboBoxStyle(const QColor& surfaceColor = ControlInputSurfaceColor())
     {
-        const QColor surfaceColor = ControlInputSurfaceColor(); // 普通输入面与搜索/数值框一致。
+        // 页面可传真实输入层；默认调用仍沿用独立窗口的输入角色。
         const QColor hoverColor = ControlInputHoverColor(surfaceColor);
         const QColor focusColor = ControlInputFocusColor(surfaceColor);
         const QColor mutedColor = SurfaceMutedColor(); // 禁用态保留可辨认的中性轮廓。

@@ -1,5 +1,6 @@
 #include "KernelDriverImageEditorDialog.h"
 #include "../UI/SecondaryPageLayout.h"
+#include "../UI/DetailPresentation.h"
 #include "../UI/ToolbarMetrics.h"
 #include "../UI/VisibleTableWidget.h"
 
@@ -277,7 +278,6 @@ void KernelDriverImageEditorDialog::initializeUi()
     detailLabel->setStyleSheet(QStringLiteral("font-weight:600;"));
     rootLayout->addWidget(detailLabel);
     m_detailEditor = new ks::ui::StructuredFieldView(this);
-    m_detailEditor->setMinimumHeight(210);
     rootLayout->addWidget(m_detailEditor, 1);
 
     auto* footer = new QWidget(this);
@@ -317,6 +317,8 @@ void KernelDriverImageEditorDialog::initializeUi()
         abandonRecoveryRecord();
     });
     setActionsEnabled(false, false);
+    // 事务表和动作保留原模型，由共享详情框架整理摘要、字段与滚动边界。
+    ks::ui::InstallDetailWindowFramework(this);
 }
 
 // 身份首查不要求 DriverStart 非零，因此字段被改坏后仍可按对象名进入事务恢复路径。

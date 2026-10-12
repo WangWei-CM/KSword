@@ -1,4 +1,5 @@
 #include "StorageControllerResearchDialog.h"
+#include "../../UI/ParameterWorkspace.h"
 #include "../../UI/ToolbarMetrics.h"
 #include "../../UI/VisibleTableWidget.h"
 #include "StorageControllerInput.h"
@@ -89,14 +90,9 @@ namespace ks::misc
     {
         setWindowTitle(QStringLiteral("KSword Controller / 存储控制器"));
         setMinimumSize(0, 0);
-        auto* outer = new QVBoxLayout(this);
-        outer->setContentsMargins(0, 0, 0, 0);
-        auto* scroll = new QScrollArea(this);
-        scroll->setWidgetResizable(true);
-        auto* content = new QWidget(scroll);
-        scroll->setWidget(content);
-        outer->addWidget(scroll);
-        QVBoxLayout* root = new QVBoxLayout(content);
+        auto* root = new QVBoxLayout(this);
+        root->setContentsMargins(12, 12, 12, 12);
+        root->setSpacing(10);
 
         m_riskLabel = new QLabel(
             QStringLiteral(
@@ -109,6 +105,10 @@ namespace ks::misc
         ks::ui::ApplyStatusRole(m_riskLabel, ks::ui::StatusRole::Warning);
         root->addWidget(m_riskLabel);
 
+        // 风险说明常驻，事务参数与审计结果分栏，保留全部写入确认链路。
+        auto* workspace = new ks::ui::ParameterWorkspace(this, 500);
+        root->addWidget(workspace, 1);
+
         QGroupBox* stateGroup = new QGroupBox(QStringLiteral("资源与一致性"), this);
         QVBoxLayout* stateLayout = new QVBoxLayout(stateGroup);
         m_identityLabel = new QLabel(QStringLiteral("控制器：未查询"), stateGroup);
@@ -119,7 +119,8 @@ namespace ks::misc
         m_stateLabel->setWordWrap(true);
         stateLayout->addWidget(m_identityLabel);
         stateLayout->addWidget(m_stateLabel);
-        root->addWidget(stateGroup);
+        ks::ui::StyleParameterSection(stateGroup);
+        workspace->results()->addWidget(stateGroup);
 
         QGridLayout* sessionLayout = new QGridLayout();
         m_refreshButton = new QPushButton(QStringLiteral("刷新状态"), this);
@@ -131,9 +132,9 @@ namespace ks::misc
         m_auditButton = new QPushButton(QStringLiteral("刷新审计"), this);
         sessionLayout->addWidget(m_refreshButton, 0, 0);
         sessionLayout->addWidget(m_acquireButton, 0, 1);
-        sessionLayout->addWidget(m_releaseButton, 0, 2);
-        sessionLayout->addWidget(m_resetButton, 1, 0);
-        sessionLayout->addWidget(m_auditButton, 1, 1);
+        sessionLayout->addWidget(m_releaseButton, 1, 0);
+        sessionLayout->addWidget(m_resetButton, 1, 1);
+        sessionLayout->addWidget(m_auditButton, 2, 0, 1, 2);
         // 控制器会话动作是两行栅格，保留布局，只统一动作尺寸与间距。
         sessionLayout->setHorizontalSpacing(8);
         sessionLayout->setVerticalSpacing(8);
@@ -141,11 +142,12 @@ namespace ks::misc
         {
             ks::ui::NormalizeToolbarControl(button);
         }
-        root->addLayout(sessionLayout);
+        workspace->parameters()->addLayout(sessionLayout);
 
         QGroupBox* transferGroup = new QGroupBox(QStringLiteral("事务化原始访问"), this);
         QVBoxLayout* transferLayout = new QVBoxLayout(transferGroup);
         QFormLayout* rangeLayout = new QFormLayout();
+        rangeLayout->setRowWrapPolicy(QFormLayout::WrapLongRows);
         m_offsetEdit = new QLineEdit(QStringLiteral("0x0"), transferGroup);
         m_lengthEdit = new QLineEdit(QStringLiteral("0x1000"), transferGroup);
         rangeLayout->addRow(QStringLiteral("字节偏移"), m_offsetEdit);
@@ -164,8 +166,8 @@ namespace ks::misc
         m_readButton->setToolTip(QStringLiteral("读取该区间并建立“条件写”比对快照，供后续按快照安全写入"));
         m_writeButton->setToolTip(QStringLiteral("仅当区间内容仍与快照一致时才写入，写完再读回校验，防止误写"));
         m_rollbackButton = new QPushButton(QStringLiteral("回滚最近一次写入"), transferGroup);
-        transferButtons->addWidget(m_readButton);
-        transferButtons->addWidget(m_writeButton);
+        workspace->actions()->addWidget(m_readButton);
+        workspace->actions()->addWidget(m_writeButton);
         transferButtons->addWidget(m_rollbackButton);
         transferButtons->setSpacing(8);
         ks::ui::NormalizeToolbarControl(m_offsetEdit);
@@ -174,7 +176,8 @@ namespace ks::misc
         ks::ui::NormalizeToolbarControl(m_writeButton);
         ks::ui::NormalizeToolbarControl(m_rollbackButton);
         transferLayout->addLayout(transferButtons);
-        root->addWidget(transferGroup, 2);
+        ks::ui::StyleParameterSection(transferGroup);
+        workspace->parameters()->addWidget(transferGroup);
 
         m_auditTable = new QTableWidget(this);
         m_auditTable->setColumnCount(7);
@@ -192,14 +195,15 @@ namespace ks::misc
         m_auditTable->setMinimumHeight(160);
         // 事务审计流水已有序号与日志，保留紧凑复制导出。
         ks::ui::SetTableActionBarMode(m_auditTable, ks::ui::TableActionBarMode::Compact);
-        root->addWidget(m_auditTable, 1);
+        workspace->results()->addWidget(m_auditTable, 1);
 
         // 内置编辑器负责主题、复制和查找；日志缓冲单独维持 500 块上限。
         m_logEdit = new CodeEditorWidget(this);
         m_logEdit->setObjectName(QStringLiteral("storage_controller_log"));
         m_logEdit->setReadOnly(true);
-        m_logEdit->setMaximumHeight(120);
-        root->addWidget(m_logEdit);
+        m_logEdit->setMinimumHeight(120);
+        workspace->results()->addWidget(m_logEdit, 1);
+        workspace->finish();
 
         connect(m_refreshButton, &QPushButton::clicked, this, [this]() { refreshState(); });
         connect(m_acquireButton, &QPushButton::clicked, this, [this]() { acquireSession(); });

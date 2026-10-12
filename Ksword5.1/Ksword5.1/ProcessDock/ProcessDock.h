@@ -824,7 +824,8 @@ private:
     void updateProcessActivityStatusLabel();
     void previewProcessActivitySnapshotForIndex(int sampleIndex);
     void showProcessActivitySnapshotForIndex(int sampleIndex);
-    void commitProcessActivityTimelineIndex(int sampleIndex);
+    // 明确选择样本默认冻结当前 X 窗口；仅旧滑块兼容入口可显式保留最右端跟随实时。
+    void commitProcessActivityTimelineIndex(int sampleIndex, bool followLatestWhenSelected = false);
     // handleProcessWindowPickerRelease 作用：
     // - 接收“进程页准星拖拽拾取”释放坐标；
     // - 按窗口页同类逻辑命中鼠标下窗口并解析所属 PID；
@@ -1186,7 +1187,7 @@ private:
     QPushButton* m_activityProcessPickerButton = nullptr; // 准星拖拽按钮：按目标窗口 PID 过滤进程并打开进程详情。
     QLabel* m_activitySnapshotLabel = nullptr;      // 时间轴悬停快照摘要。
     bool m_activityRecordingEnabled = false;        // m_activityRecordingEnabled：由刷新状态派生，刷新即记录。
-    bool m_activityTimelinePinnedToLatest = true;   // 时间轴在最右侧时自动吸附最新。
+    bool m_activityTimelinePinnedToLatest = true;   // 明确实时状态才跟随最新；图上点选最新样本也冻结。
     bool m_activityTimelineSliderUpdating = false;  // 程序更新滑块时屏蔽用户态判定。
     int m_activityTableSnapshotIndex = -1;           // 下方进程表当前绑定的历史样本，-1 表示实时列表。
     std::uint64_t m_activityNextSequence = 0;       // 记录样本序号。

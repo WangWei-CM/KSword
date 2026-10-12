@@ -1,6 +1,7 @@
 #pragma once
 #include "./FlatButtonTheme.h"
 #include "./DetailNavigationGroups.h"
+#include "./DetailPresentation.h"
 
 // 只共享详情外框；页面、模型、索引和业务动作继续由原控件持有。
 #include "../theme.h"
@@ -27,17 +28,19 @@ namespace ks::ui
             "QWidget[ksword_detail_shell=\"true\"] QStackedWidget{background:%1;border:0;}"
             "QWidget[ksword_detail_shell=\"true\"] QScrollArea{background:%1;border:0;padding:0;margin:0;}"
             "QWidget[ksword_detail_shell=\"true\"] QScrollArea > QWidget{background:%1;}"
+            "QWidget[ksword_detail_shell=\"true\"] QWidget[ksword_detail_framework_body=\"true\"]{background:%1;border:0;}"
             "QWidget[ksword_detail_shell=\"true\"] QAbstractItemView{border:0;}"
-            // 内容分组用完整细线框区分范围，控件仍保留纯色样式，字段行本身不加网格。
-            "QWidget[ksword_detail_shell=\"true\"] QGroupBox{background:%3;border:1px solid %4;border-radius:6px;margin-top:10px;padding-top:8px;}"
-            "QWidget[ksword_detail_shell=\"true\"] QGroupBox::title{subcontrol-origin:margin;left:8px;padding:0 7px;color:%2;background:%3;font-weight:600;}"
-            "QWidget[ksword_detail_shell=\"true\"] QWidget[ksword_detail_sidebar=\"true\"],QWidget[ksword_detail_shell=\"true\"] QScrollArea[ksword_detail_sidebar=\"true\"],QWidget[ksword_detail_shell=\"true\"] QScrollArea[ksword_detail_sidebar=\"true\"] > QWidget,QWidget[ksword_detail_shell=\"true\"] QScrollArea[ksword_detail_sidebar=\"true\"] > QWidget > QWidget{background:%3;border:0;padding:0;margin:0;}"
+            // 标题放进无描边卡片内部，旧GroupBox也不再沿标题切开一圈线框。
+            "QWidget[ksword_detail_shell=\"true\"] QGroupBox{background:%3;border:0;border-radius:8px;margin-top:0;padding-top:28px;}"
+            "QWidget[ksword_detail_shell=\"true\"] QGroupBox::title{subcontrol-origin:padding;subcontrol-position:top left;left:16px;top:10px;padding:0;color:%2;background:transparent;font-weight:600;}"
+            "QWidget[ksword_detail_shell=\"true\"] QWidget[ksword_detail_header=\"true\"]{background:%1;border:0;border-bottom:1px solid %4;}"
+            "QWidget[ksword_detail_shell=\"true\"] QWidget[ksword_detail_sidebar=\"true\"],QWidget[ksword_detail_shell=\"true\"] QScrollArea[ksword_detail_sidebar=\"true\"],QWidget[ksword_detail_shell=\"true\"] QScrollArea[ksword_detail_sidebar=\"true\"] > QWidget,QWidget[ksword_detail_shell=\"true\"] QScrollArea[ksword_detail_sidebar=\"true\"] > QWidget > QWidget{background:%1;border:0;padding:0;margin:0;}"
             // 分界仅画在滚动区的外缘，导航项与 viewport 不重复描边。
             "QWidget[ksword_detail_shell=\"true\"] QScrollArea[ksword_detail_sidebar=\"true\"]{border-right:1px solid %4;}"
             "QWidget[ksword_detail_shell=\"true\"] QWidget[ksword_detail_sidebar=\"true\"] QToolButton{border-radius:5px;padding:8px 10px;text-align:left;}"
             "QWidget[ksword_detail_shell=\"true\"] QWidget#ks_detail_footer{background:%1;border:0;border-top:1px solid %4;}")
-            .arg(KswordTheme::SurfaceHex(), KswordTheme::TextPrimaryHex(), KswordTheme::SurfaceAltHex(),
-                KswordTheme::BorderHex());
+            .arg(KswordTheme::WindowColorHex(), KswordTheme::TextPrimaryHex(), KswordTheme::SurfaceHex(),
+                KswordTheme::BlendColors(KswordTheme::WindowColor(), KswordTheme::BorderColor(), 96).name());
         if (!rootObjectName.isEmpty())
             style.replace(QStringLiteral("QWidget[ksword_detail_shell=\"true\"]"),
                 QStringLiteral("QWidget#%1[ksword_detail_shell=\"true\"]").arg(rootObjectName));
@@ -49,6 +52,12 @@ namespace ks::ui
         if (window == nullptr) return;
         window->setProperty("ksword_detail_shell", true);
         window->setAttribute(Qt::WA_StyledBackground, true);
+        // 详情正文建立可读字号下限，保留用户字体家族及更大的字号。
+        QFont body = window->font();
+        if (body.pixelSize() > 0) body.setPixelSize(qMax(14, body.pixelSize()));
+        else body.setPointSizeF(qMax(10.0, body.pointSizeF()));
+        window->setFont(body);
+        InstallDetailWindowFramework(window);
         if (window->layout() != nullptr)
         {
             window->layout()->setContentsMargins(0, 0, 0, 0);
@@ -72,7 +81,27 @@ namespace ks::ui
         ConfigureDetailDialogRoot(window);
         // 单页详情的根layout也排列摘要、工具和状态，它们的业务间距不能被当作外框清掉。
         if (window->layout() != nullptr) window->layout()->setSpacing(spacing);
-        window->setStyleSheet(window->styleSheet() + BuildDetailDialogChromeStyle(window->objectName()));
+        if (window->property("ksword_global_dialog_theme").toBool()
+            || window->property("ksword_detail_theme_owner").toBool())
+        {
+            return; // 已有根主题拥有者生成同一套Chrome，不能再追加第二份。
+        }
+        // 与安装器维护同一个完整块；多次接入或换色都替换原块，不累加全窗QSS。
+        const QString begin = QStringLiteral("/* KSWORD_DETAIL_FRAMEWORK_BEGIN */");
+        const QString end = QStringLiteral("/* KSWORD_DETAIL_FRAMEWORK_END */");
+        QString style = window->styleSheet();
+        const qsizetype first = style.indexOf(begin);
+        const qsizetype last = first < 0 ? -1 : style.indexOf(end, first);
+        if (first >= 0 && last >= first)
+        {
+            style.remove(first, last + end.size() - first);
+        }
+        style = style.trimmed() + QLatin1Char('\n') + begin
+            + BuildDetailDialogChromeStyle(window->objectName()) + end;
+        if (window->styleSheet() != style)
+        {
+            window->setStyleSheet(style);
+        }
     }
 
     inline void ConfigureDetailNavigation(QScrollArea* scroll, QWidget* navigation, const int width = 240)
@@ -87,7 +116,7 @@ namespace ks::ui
         scroll->setWidgetResizable(true);
         scroll->setFrameShape(QFrame::NoFrame);
         scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-        scroll->setFixedWidth(width);
+        InstallDetailSidebarSizing(scroll, width);
         // 宽度由真实viewport分配，不再为不存在的滚动条保留16px空白。
         if (navigation->layout() != nullptr)
         {
@@ -159,13 +188,41 @@ namespace ks::ui
             for (int index = 0; index < m_tabButtons.size(); ++index)
             {
                 QToolButton* button = m_tabButtons.at(index);
-                button->setText(m_tabs->tabText(index));
-                button->setToolTip(m_tabs->tabToolTip(index).isEmpty() ? m_tabs->tabText(index) : m_tabs->tabToolTip(index));
+                const QString title = m_tabs->tabText(index); // 原Tab元数据仍是唯一来源。
+                const QString tip = m_tabs->tabToolTip(index).isEmpty() ? title : m_tabs->tabToolTip(index);
+                if (button->text() != title)
+                {
+                    button->setText(title);
+                }
+                if (button->toolTip() != tip)
+                {
+                    button->setToolTip(tip);
+                }
                 const QIcon icon = m_tabs->tabIcon(index);
-                button->setIcon(icon.isNull() ? QIcon(QStringLiteral(":/Icon/process_details.svg")) : icon);
-                button->setEnabled(m_tabs->isTabEnabled(index));
-                button->setVisible(m_tabs->isTabVisible(index));
-                button->setChecked(m_tabs->currentIndex() == index);
+                const QIcon desiredIcon = icon.isNull() ? m_fallbackIcon : icon;
+                const QVariant previousIcon = button->property("ksword_detail_navigation_icon_key");
+                // 比较源图标身份；按钮主题可能替换显示图标，不能反复拿加工后的key当源变化。
+                if (!previousIcon.isValid() || previousIcon.toLongLong() != desiredIcon.cacheKey()
+                    || button->icon().isNull())
+                {
+                    button->setProperty("ksword_detail_navigation_icon_key", desiredIcon.cacheKey());
+                    button->setIcon(desiredIcon);
+                }
+                const bool enabled = m_tabs->isTabEnabled(index);
+                const bool visible = m_tabs->isTabVisible(index);
+                const bool checked = m_tabs->currentIndex() == index;
+                if (button->isEnabled() != enabled)
+                {
+                    button->setEnabled(enabled);
+                }
+                if (button->isHidden() == visible)
+                {
+                    button->setVisible(visible);
+                }
+                if (button->isChecked() != checked)
+                {
+                    button->setChecked(checked);
+                }
             }
             ArrangeDetailNavigationGroups(m_navigation, m_tabs, m_buttons);
         }
@@ -173,6 +230,7 @@ namespace ks::ui
         QPointer<QWidget> m_navigation;
         QButtonGroup* m_buttons;
         QList<QPointer<QToolButton>> m_tabButtons;
+        QIcon m_fallbackIcon{QStringLiteral(":/Icon/process_details.svg")}; // 同一控制器复用默认图标缓存。
         bool m_refreshPending = false;
     };
 

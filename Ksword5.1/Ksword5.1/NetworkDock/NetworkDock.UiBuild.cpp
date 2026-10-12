@@ -5,6 +5,7 @@
 #include "../UI/ToolbarMetrics.h"
 #include "../UI/PageControlStyle.h"
 #include "../UI/PrimaryPageStyle.h"
+#include "../UI/ParameterWorkspace.h"
 #include "NetworkFirewallPage.h"
 #include "NetworkAuditPage.h"
 #include "./PortDiagnosticsPage.h"
@@ -17,14 +18,15 @@ using namespace network_dock_detail;
 void NetworkDock::initializeUi()
 {
     m_rootLayout = new QVBoxLayout(this);
-    m_rootLayout->setContentsMargins(4, 4, 4, 4);
-    m_rootLayout->setSpacing(4);
+    // 根层只有一个导航控件，去除额外外边距，使网络与进程页签保持同一接缝。
+    m_rootLayout->setContentsMargins(0, 0, 0, 0);
+    m_rootLayout->setSpacing(0);
 
     // 顶部横排 Tab：
     // - 网络功能页签数量已较多，改成顶部横排后避免左侧竖排标签挤出纵向滚动条；
     // - 保留统一 QTabWidget 结构，不改变各功能页内部实现。
     m_sideTabWidget = new QTabWidget(this);
-    ks::ui::StylePageTabs(m_sideTabWidget);
+    ks::ui::StylePageTabsContentFrame(m_sideTabWidget);
     m_sideTabWidget->setTabPosition(QTabWidget::North);
     m_sideTabWidget->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     m_rootLayout->addWidget(m_sideTabWidget, 1);
@@ -74,18 +76,21 @@ void NetworkDock::initializeTrafficMonitorTab()
     // 此动作使用纯色主题，保留页面原有图标、状态和业务连接。
     ks::ui::ApplyFlatButtonTheme(m_startMonitorButton, ks::ui::FlatButtonTone::Accent, ks::ui::FlatButtonAppearance::Solid);
     m_startMonitorButton->setIcon(QIcon(":/Icon/process_start.svg"));
+    KswordTheme::ApplyCompactIconButtonMetrics(m_startMonitorButton);
     m_startMonitorButton->setToolTip(QStringLiteral("启动网络流量监控"));
 
     m_stopMonitorButton = new QPushButton(m_trafficMonitorPage);
     // 此动作使用纯色主题，保留页面原有图标、状态和业务连接。
     ks::ui::ApplyFlatButtonTheme(m_stopMonitorButton, ks::ui::FlatButtonTone::Neutral, ks::ui::FlatButtonAppearance::Solid);
     m_stopMonitorButton->setIcon(QIcon(":/Icon/process_pause.svg"));
+    KswordTheme::ApplyCompactIconButtonMetrics(m_stopMonitorButton);
     m_stopMonitorButton->setToolTip(QStringLiteral("停止网络流量监控"));
 
     m_clearPacketButton = new QPushButton(m_trafficMonitorPage);
     // 此动作使用纯色主题，保留页面原有图标、状态和业务连接。
     ks::ui::ApplyFlatButtonTheme(m_clearPacketButton, ks::ui::FlatButtonTone::Neutral, ks::ui::FlatButtonAppearance::Solid);
     m_clearPacketButton->setIcon(QIcon(":/Icon/log_clear.svg"));
+    KswordTheme::ApplyCompactIconButtonMetrics(m_clearPacketButton);
     m_clearPacketButton->setToolTip(QStringLiteral("清空当前流量列表"));
 
     m_networkPluginButton = new QPushButton(QStringLiteral("插件"), m_trafficMonitorPage);
@@ -120,6 +125,7 @@ void NetworkDock::initializeTrafficMonitorTab()
     m_monitorFilterToggleButton->setCheckable(true);
     m_monitorFilterToggleButton->setChecked(false);
     m_monitorFilterToggleButton->setIcon(QIcon(":/Icon/filter_funnel.svg"));
+    KswordTheme::ApplyCompactIconButtonMetrics(m_monitorFilterToggleButton);
     m_monitorFilterToggleButton->setToolTip(QStringLiteral("展开/收起网络筛选器配置"));
 
     QLabel* filterTitleLabel = new QLabel(QStringLiteral("网络筛选器"), m_trafficMonitorPage);
@@ -424,7 +430,7 @@ void NetworkDock::initializeConnectionManageTab()
 
     // 子页签：分别展示 TCP 与 UDP。
     m_connectionSubTabWidget = new QTabWidget(m_connectionManagePage);
-    ks::ui::StylePageTabs(m_connectionSubTabWidget);
+    ks::ui::StylePageTabsContentFrame(m_connectionSubTabWidget);
     m_connectionSubTabWidget->setTabPosition(QTabWidget::North);
     m_connectionSubTabWidget->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     m_connectionManageLayout->addWidget(m_connectionSubTabWidget, 1);
@@ -562,23 +568,19 @@ void NetworkDock::initializeManualRequestTab()
     m_manualRequestLayout->setContentsMargins(6, 6, 6, 6);
     m_manualRequestLayout->setSpacing(6);
 
-    // 关键改动（响应“窄窗口不出现滚动条”）：
-    // 1) 移除外层 QScrollArea，避免页面在宽度变化时出现额外滚动条；
-    // 2) 改为直接把各功能分组挂到页面主布局，交给布局系统自适应压缩。
-    QWidget* contentWidget = m_manualRequestPage;
-    QVBoxLayout* contentLayout = m_manualRequestLayout;
-    contentLayout->setContentsMargins(2, 2, 2, 2);
-    // 请求参数组保持内部紧凑，以组间 16px 留白引导从参数读向执行结果。
-    contentLayout->setSpacing(16);
+    // 参数独立滚动，结果单独展示，操作固定在参数栏底部。
+    auto* workspace = new ks::ui::ParameterWorkspace(m_manualRequestPage, 480);
+    workspace->useWideParameterLayout(60);
+    m_manualRequestLayout->addWidget(workspace);
+    QVBoxLayout* contentLayout = workspace->parameters();
+    QWidget* contentWidget = contentLayout->parentWidget();
 
     // 1) API 与 socket 参数分组：支持模式切换和手动覆盖底层参数。
     QGroupBox* apiGroup = new QGroupBox(QStringLiteral("API 与 Socket 参数"), contentWidget);
-    ks::ui::StylePrimaryGroup(apiGroup);
-    QGridLayout* apiLayout = new QGridLayout(apiGroup);
+    ks::ui::StyleParameterSection(apiGroup);
+    QFormLayout* apiLayout = new QFormLayout(apiGroup);
     apiLayout->setHorizontalSpacing(8);
     apiLayout->setVerticalSpacing(6);
-    apiLayout->setColumnStretch(1, 1);
-    apiLayout->setColumnStretch(3, 1);
 
     m_manualApiCombo = new QComboBox(apiGroup);
     ks::ui::StylePrimaryCombo(m_manualApiCombo);
@@ -599,27 +601,24 @@ void NetworkDock::initializeManualRequestTab()
     m_manualProtocolEdit->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     m_manualSocketFlagsEdit->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
 
-    apiLayout->addWidget(new QLabel(QStringLiteral("请求模式:"), apiGroup), 0, 0);
-    apiLayout->addWidget(m_manualApiCombo, 0, 1, 1, 3);
-    apiLayout->addWidget(m_manualOverrideSocketParameterCheck, 1, 0, 1, 4);
-    apiLayout->addWidget(new QLabel(QStringLiteral("addressFamily:"), apiGroup), 2, 0);
-    apiLayout->addWidget(m_manualAddressFamilyEdit, 2, 1);
-    apiLayout->addWidget(new QLabel(QStringLiteral("socketType:"), apiGroup), 2, 2);
-    apiLayout->addWidget(m_manualSocketTypeEdit, 2, 3);
-    apiLayout->addWidget(new QLabel(QStringLiteral("protocol:"), apiGroup), 3, 0);
-    apiLayout->addWidget(m_manualProtocolEdit, 3, 1);
-    apiLayout->addWidget(new QLabel(QStringLiteral("socketFlags:"), apiGroup), 3, 2);
-    apiLayout->addWidget(m_manualSocketFlagsEdit, 3, 3);
+    apiLayout->addRow(new QLabel(QStringLiteral("请求模式:"), apiGroup), m_manualApiCombo);
+    // 宽屏为参数留出足够空间，底层参数默认可见，仍可由用户折叠。
+    auto* socketGroup = new QGroupBox(QStringLiteral("手动覆盖 socket 参数"), apiGroup);
+    auto* socketLayout = new QFormLayout(socketGroup);
+    socketLayout->addRow(m_manualOverrideSocketParameterCheck);
+    socketLayout->addRow(new QLabel(QStringLiteral("addressFamily:"), socketGroup), m_manualAddressFamilyEdit);
+    socketLayout->addRow(new QLabel(QStringLiteral("socketType:"), socketGroup), m_manualSocketTypeEdit);
+    socketLayout->addRow(new QLabel(QStringLiteral("protocol:"), socketGroup), m_manualProtocolEdit);
+    socketLayout->addRow(new QLabel(QStringLiteral("socketFlags:"), socketGroup), m_manualSocketFlagsEdit);
+    apiLayout->addRow(ks::ui::FoldParameterSection(socketGroup, true));
     contentLayout->addWidget(apiGroup);
 
     // 2) 端点与行为参数分组：覆盖 bind/connect/超时/选项等细节。
     QGroupBox* endpointGroup = new QGroupBox(QStringLiteral("端点与行为参数"), contentWidget);
-    ks::ui::StylePrimaryGroup(endpointGroup);
-    QGridLayout* endpointLayout = new QGridLayout(endpointGroup);
+    ks::ui::StyleParameterSection(endpointGroup);
+    QFormLayout* endpointLayout = new QFormLayout(endpointGroup);
     endpointLayout->setHorizontalSpacing(8);
     endpointLayout->setVerticalSpacing(6);
-    endpointLayout->setColumnStretch(1, 1);
-    endpointLayout->setColumnStretch(3, 1);
 
     m_manualEnableBindCheck = new QCheckBox(QStringLiteral("启用本地 bind"), endpointGroup);
     m_manualEnableBindCheck->setToolTip(QStringLiteral("勾选后先 bind(localAddress:localPort) 再执行连接/发送。"));
@@ -654,36 +653,29 @@ void NetworkDock::initializeManualRequestTab()
     m_manualSendFlagsEdit->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     m_manualReceiveFlagsEdit->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
 
-    endpointLayout->addWidget(m_manualEnableBindCheck, 0, 0, 1, 2);
-    endpointLayout->addWidget(new QLabel(QStringLiteral("本地地址:"), endpointGroup), 1, 0);
-    endpointLayout->addWidget(m_manualLocalAddressEdit, 1, 1);
-    endpointLayout->addWidget(new QLabel(QStringLiteral("本地端口:"), endpointGroup), 1, 2);
-    endpointLayout->addWidget(m_manualLocalPortSpin, 1, 3);
-    endpointLayout->addWidget(new QLabel(QStringLiteral("远端地址:"), endpointGroup), 2, 0);
-    endpointLayout->addWidget(m_manualRemoteAddressEdit, 2, 1);
-    endpointLayout->addWidget(new QLabel(QStringLiteral("远端端口:"), endpointGroup), 2, 2);
-    endpointLayout->addWidget(m_manualRemotePortSpin, 2, 3);
-    endpointLayout->addWidget(m_manualConnectBeforeSendCheck, 3, 0, 1, 2);
-    endpointLayout->addWidget(m_manualReuseAddressCheck, 3, 2);
-    endpointLayout->addWidget(m_manualNoDelayCheck, 3, 3);
-    endpointLayout->addWidget(new QLabel(QStringLiteral("发送超时(ms):"), endpointGroup), 4, 0);
-    endpointLayout->addWidget(m_manualSendTimeoutSpin, 4, 1);
-    endpointLayout->addWidget(new QLabel(QStringLiteral("接收超时(ms):"), endpointGroup), 4, 2);
-    endpointLayout->addWidget(m_manualRecvTimeoutSpin, 4, 3);
-    endpointLayout->addWidget(new QLabel(QStringLiteral("sendFlags:"), endpointGroup), 5, 0);
-    endpointLayout->addWidget(m_manualSendFlagsEdit, 5, 1);
-    endpointLayout->addWidget(new QLabel(QStringLiteral("recvFlags:"), endpointGroup), 5, 2);
-    endpointLayout->addWidget(m_manualReceiveFlagsEdit, 5, 3);
+    endpointLayout->addRow(new QLabel(QStringLiteral("远端地址:"), endpointGroup), m_manualRemoteAddressEdit);
+    endpointLayout->addRow(new QLabel(QStringLiteral("远端端口:"), endpointGroup), m_manualRemotePortSpin);
+    endpointLayout->addRow(m_manualConnectBeforeSendCheck);
+    auto* transportGroup = new QGroupBox(QStringLiteral("高级"), endpointGroup);
+    auto* transportLayout = new QFormLayout(transportGroup);
+    transportLayout->addRow(m_manualEnableBindCheck);
+    transportLayout->addRow(new QLabel(QStringLiteral("本地地址:"), transportGroup), m_manualLocalAddressEdit);
+    transportLayout->addRow(new QLabel(QStringLiteral("本地端口:"), transportGroup), m_manualLocalPortSpin);
+    transportLayout->addRow(new QLabel(QStringLiteral("发送超时(ms):"), transportGroup), m_manualSendTimeoutSpin);
+    transportLayout->addRow(new QLabel(QStringLiteral("接收超时(ms):"), transportGroup), m_manualRecvTimeoutSpin);
+    transportLayout->addRow(new QLabel(QStringLiteral("sendFlags:"), transportGroup), m_manualSendFlagsEdit);
+    transportLayout->addRow(new QLabel(QStringLiteral("recvFlags:"), transportGroup), m_manualReceiveFlagsEdit);
+    transportLayout->addRow(m_manualReuseAddressCheck);
+    transportLayout->addRow(m_manualNoDelayCheck);
+    endpointLayout->addRow(ks::ui::FoldParameterSection(transportGroup, true));
     contentLayout->addWidget(endpointGroup);
 
     // 3) 载荷与接收参数分组：支持文本/HEX 输入与响应读取开关。
     QGroupBox* payloadGroup = new QGroupBox(QStringLiteral("载荷与响应读取"), contentWidget);
-    ks::ui::StylePrimaryGroup(payloadGroup);
-    QGridLayout* payloadLayout = new QGridLayout(payloadGroup);
+    ks::ui::StyleParameterSection(payloadGroup);
+    QFormLayout* payloadLayout = new QFormLayout(payloadGroup);
     payloadLayout->setHorizontalSpacing(8);
     payloadLayout->setVerticalSpacing(6);
-    payloadLayout->setColumnStretch(1, 1);
-    payloadLayout->setColumnStretch(4, 1);
 
     m_manualPayloadFormatCombo = new QComboBox(payloadGroup);
     m_manualPayloadFormatCombo->addItem(QStringLiteral("ASCII 文本"), static_cast<int>(ks::network::ManualPayloadFormat::AsciiText));
@@ -696,7 +688,8 @@ void NetworkDock::initializeManualRequestTab()
     payloadEditor->setCompactMode(true);
     m_manualPayloadEditor = payloadEditor;
     m_manualPayloadEditor->setPlaceholderText(QStringLiteral("在此输入请求载荷。"));
-    m_manualPayloadEditor->setFixedHeight(96);
+    m_manualPayloadEditor->setMinimumHeight(150);
+    m_manualPayloadEditor->setMaximumHeight(240);
     m_manualPayloadEditor->setLineWrapMode(QPlainTextEdit::WidgetWidth);
     m_manualPayloadEditor->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
 
@@ -708,30 +701,33 @@ void NetworkDock::initializeManualRequestTab()
     m_manualShutdownSendCheck = new QCheckBox(QStringLiteral("发送后 shutdown(SD_SEND)"), payloadGroup);
     m_manualShutdownSendCheck->setChecked(false);
 
-    payloadLayout->addWidget(new QLabel(QStringLiteral("载荷格式:"), payloadGroup), 0, 0);
-    payloadLayout->addWidget(m_manualPayloadFormatCombo, 0, 1);
-    payloadLayout->addWidget(m_manualReceiveAfterSendCheck, 0, 2);
-    payloadLayout->addWidget(new QLabel(QStringLiteral("最大读取字节:"), payloadGroup), 0, 3);
-    payloadLayout->addWidget(m_manualReceiveMaxBytesSpin, 0, 4);
-    payloadLayout->addWidget(m_manualShutdownSendCheck, 1, 0, 1, 2);
-    payloadLayout->addWidget(m_manualPayloadEditor, 2, 0, 1, 5);
+    payloadLayout->addRow(new QLabel(QStringLiteral("载荷格式:"), payloadGroup), m_manualPayloadFormatCombo);
+    payloadLayout->addRow(m_manualPayloadEditor);
+    payloadLayout->addRow(m_manualReceiveAfterSendCheck);
+    payloadLayout->addRow(new QLabel(QStringLiteral("最大读取字节:"), payloadGroup), m_manualReceiveMaxBytesSpin);
+    payloadLayout->addRow(m_manualShutdownSendCheck);
     contentLayout->addWidget(payloadGroup);
+
+    // API/载荷和端点/行为各自自然排列；参数栏不足两列时恢复 API→端点→载荷顺序。
+    ks::ui::ArrangeParameterColumns(contentLayout, {apiGroup, payloadGroup}, {endpointGroup}, 300);
 
     // 4) 执行与结果分组：执行请求、重置参数、输出结果日志。
     QGroupBox* actionGroup = new QGroupBox(QStringLiteral("执行与结果"), contentWidget);
-    ks::ui::StylePrimaryGroup(actionGroup);
+    ks::ui::StyleParameterSection(actionGroup);
     QVBoxLayout* actionLayout = new QVBoxLayout(actionGroup);
-    QHBoxLayout* actionButtonLayout = new QHBoxLayout();
+    QHBoxLayout* actionButtonLayout = workspace->actions();
 
     m_manualExecuteButton = new QPushButton(QStringLiteral("执行请求"), actionGroup);
     // 此动作使用纯色主题，保留页面原有图标、状态和业务连接。
-    ks::ui::ApplyFlatButtonTheme(m_manualExecuteButton, ks::ui::FlatButtonTone::Accent);
+    ks::ui::ApplyFlatButtonTheme(m_manualExecuteButton, ks::ui::FlatButtonTone::Accent,
+        ks::ui::FlatButtonAppearance::Solid);
     m_manualExecuteButton->setIcon(QIcon(":/Icon/process_start.svg"));
     m_manualExecuteButton->setToolTip(QStringLiteral("按上方参数立即执行一次网络请求。"));
 
     m_manualResetButton = new QPushButton(QStringLiteral("恢复默认参数"), actionGroup);
     // 此动作使用纯色主题，保留页面原有图标、状态和业务连接。
-    ks::ui::ApplyFlatButtonTheme(m_manualResetButton, ks::ui::FlatButtonTone::Neutral);
+    ks::ui::ApplyFlatButtonTheme(m_manualResetButton, ks::ui::FlatButtonTone::Neutral,
+        ks::ui::FlatButtonAppearance::Solid);
     m_manualResetButton->setIcon(QIcon(":/Icon/log_clear.svg"));
     m_manualResetButton->setToolTip(QStringLiteral("重置请求构造页全部参数。"));
 
@@ -748,9 +744,9 @@ void NetworkDock::initializeManualRequestTab()
     m_manualResultOutput->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     m_manualResultOutput->setPlaceholderText(QStringLiteral("执行结果、响应摘要和错误码会显示在这里。"));
 
-    actionLayout->addLayout(actionButtonLayout);
     actionLayout->addWidget(m_manualResultOutput, 1);
-    contentLayout->addWidget(actionGroup, 1);
+    workspace->results()->addWidget(actionGroup, 1);
+    workspace->finish();
 
     // 构建完成后先按默认模式回填一组“可直接执行”的参数。
     resetManualRequestForm();

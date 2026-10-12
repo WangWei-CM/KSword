@@ -1,4 +1,8 @@
 #include "HvmGuestVmPanel.h"
+#include "./AdaptivePageScroll.h"
+#include "./PrimaryPageStyle.h"
+#include "./ToolbarMetrics.h"
+#include "./FlatButtonTheme.h"
 
 #include "../Internationalization/LanguageManager.h"
 #include "../ksword/service/service.h"
@@ -61,6 +65,8 @@ HvmGuestVmPanel::HvmGuestVmPanel(QWidget* parent)
     outer->setContentsMargins(0, 0, 0, 0);
 
     auto* const scroll = new QScrollArea(this);
+    // 明确登记唯一的页面滚动壳，外框留白由共享框架计算，步骤卡片保留内部留白。
+    scroll->setObjectName(QString::fromLatin1(ks::ui::kAdaptivePageScrollObjectName));
     scroll->setWidgetResizable(true);
     scroll->setFrameShape(QFrame::NoFrame);
     auto* const host = new QWidget(scroll);
@@ -96,6 +102,7 @@ HvmGuestVmPanel::HvmGuestVmPanel(QWidget* parent)
     connect(m_refresh, &QPushButton::clicked, this, [this]() { refreshAsync(); });
     buttonRow->addWidget(m_refresh);
     buttonRow->addStretch(1);
+    ks::ui::NormalizeToolbarRow(buttonRow);
     layout->addLayout(buttonRow);
 
     m_stepAllowNested = addStep(layout, 1,
@@ -195,7 +202,9 @@ HvmGuestVmPanel::StepRow HvmGuestVmPanel::addStep(
 
     auto* const box = new QFrame(parentLayout->parentWidget());
     row.container = box;
-    box->setFrameShape(QFrame::StyledPanel);
+    // 五步（AMD 为四步）均由此工厂创建，使用共享内容面代替原生方形面板边框。
+    box->setFrameShape(QFrame::NoFrame);
+    ks::ui::StylePrimaryContentPanel(box);
     auto* const boxLayout = new QVBoxLayout(box);
     boxLayout->setContentsMargins(12, 10, 12, 10);
     boxLayout->setSpacing(6);
@@ -212,6 +221,9 @@ HvmGuestVmPanel::StepRow HvmGuestVmPanel::addStep(
     headerRow->addWidget(row.status);
 
     row.action = new QPushButton(actionText, box);
+    ks::ui::NormalizeToolbarControl(row.action);
+    ks::ui::ApplyFlatButtonTheme(row.action,
+        ks::ui::FlatButtonTone::Neutral, ks::ui::FlatButtonAppearance::Solid);
     connect(row.action, &QPushButton::clicked, this, onClicked);
     headerRow->addWidget(row.action);
     boxLayout->addLayout(headerRow);
