@@ -178,6 +178,7 @@ KSword 主程序位于 `Ksword5.1/Ksword5.1`（Qt 6.9.3 Widgets + Qt Advanced Do
 - 单行输入、搜索、数值框、组合框及普通实心按钮使用 `ControlInputSurfaceColor` 的中性表面，hover/focus 保持同一层次。内部 Spin/Combo 编辑器透明无框；主窗口末尾不能重新强制透明输入面和描边。表格操作栏与进程控制明确使用 Solid，标题/导航工具仍保留自身语义。
 - 表头采用 SurfaceMuted 与单条底部分隔，详情分组采用 SurfaceAlt 与标题线；普通属性名使用可读次级文字而非 PlaceholderText。禁止为单元格添加 `border:0`，否则 Qt QSS 会吞掉模型 BackgroundRole。
 - 悬浮滚动条闲置 1100ms 后用 180ms 淡出，滚动或靠近内容边缘唤醒，悬停/拖动期间保持；完全隐藏后鼠标穿透。刷新内容与范围更新不重启闲置计时，原生滚动对象、单位与信号不变。
+- 悬浮细线不能声明WA_NoSystemBackground或不透明Paint：透明/淡出绘制必须恢复下面的视口像素。滚动、缩放、范围/步长改变、悬停宽度变化和隐藏前，只对覆盖条对应的视口窄带update；不能在Paint中反向update视口形成循环，也不无条件刷新整表。外观用透明局部QScrollBar规则隔离全局轨道底色，原生条、坐标、数据与动画逻辑保留。进程详情内嵌内存区域表的滚动条残影截图触发此修复，用户自行实测。
 
 ### 进程控制与多表分区
 
