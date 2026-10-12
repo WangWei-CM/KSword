@@ -354,3 +354,9 @@ KSword 主程序位于 `Ksword5.1/Ksword5.1`（Qt 6.9.3 Widgets + Qt Advanced Do
 
 - ParameterWorkspace参数滚动区不能只给外部面板绑定实底：QScrollArea视口和setWidget后的表单会填充继承的Window色，透明分区于是露出页根深色黑块。scroll/viewport/form三层须通过原共享surface绑定保持同一卡片色，内部canvas半径0，外部卡片8；沿用完整中性拥有块，避免新增规则被按钮所有权误判为业务覆盖。系统变速页截图反馈触发此修复，不改分区或滚动结构。
 - 2026-10-12 CKS截图再次暴露嵌套Tab正文误用StyleWorkspacePage而铺成页根黑底；参数内普通页壳改用StyleParameterCanvas，pane按参数祖先沿用content色。普通共享Tab的PageTabFocusStyle只在键盘输入后绘原生焦点primitive，鼠标点击隐藏焦点矩形，保留原栏焦点策略与输入语义。
+
+## 透明模式圆角回归（2026-10-12）
+
+- 透明不改变外方框资格：PageTabEnvelope / WorkspaceFrame 继续使用原 hasSquare 判断与14/8/6几何，但不能因 main_surface_hierarchy=false 隐藏外角。历史“穿透模式不绘外角”的说明不再适用。用户最终确认深色导航连接处无误。
+- RoundedViewSurface 的微型背景必须从透明色开始，不能用继承的不透明 Window 色垫底；圆外用 Source 替换，包括真实 alpha。仅改混合模式仍会把浅色极角补成不透明 Window 方块。主根自绘背景是特例：只借 ksMainRootContainer 对应8px区域的背景绘制，不带 DrawChildren，保留图片、直透着色和alpha=1命中底，不做整父截图。
+- 真实主程序两张表四角及主Tab外角通过浅/深×透明/普通四组合，服务页检查整页入口，另检查热换肤和缩放重显。验收与后端/DPI边界见 `docs/透明模式圆角回归修复-20261012.md`；像素采样要重定位 HWND/frame 偏移，外角参照未选中导航底面，不误采选中标签色。

@@ -400,9 +400,9 @@ namespace
             m_surfaceDirty = false;
             const QRect outer = m_page->rect(); // 页根就是最外层边界，不以内侧内容定位。
             const int radius = kPageCornerRadius + m_inset;
-            const QVariant surface = m_page->window()->property("ksword_main_surface_hierarchy");
+            // 透明只改变底面合成，不改变最外方框的资格及14/8/6同心几何。
             const bool visible = hasSquareWorkspaceBoundary(m_page, m_inset)
-                && m_page->isVisible() && (!surface.isValid() || surface.toBool())
+                && m_page->isVisible()
                 && outer.width() >= radius * 2 && outer.height() >= radius * 2;
             for (int index = 0; index < 4; ++index)
             {
@@ -748,8 +748,7 @@ namespace
             if (!lifetime || !m_surface || !bar || !retainCurrentPage(page)) return;
             // 页面已被pane内缩；向外还原这层间隔，角片必须放在外框而不是页面控件上。
             const int inset = pageFrameInset(m_tabs);
-            const QVariant mainSurface = m_tabs->window()->property("ksword_main_surface_hierarchy");
-            const bool opaqueFrame = !mainSurface.isValid() || mainSurface.toBool(); // 穿透模式不补实色角片。
+            // 透明模式也保留最外层过渡，颜色仍由导航底面角色提供，不铺内部内容或新增描边。
             const bool squareBoundary = hasSquareTabBoundary(m_tabs); // 有留白不等于外面有方框。
             const int outerRadius = kPageCornerRadius + inset; // 8+6=14，圆角处也保持6px径向间隔。
             const QRect opening = page ? QRect(page->mapTo(m_tabs, QPoint()), page->size())
@@ -757,7 +756,7 @@ namespace
             for (int index = 0; index < 4; ++index)
             {
                 const QPointer<PageContentCorner> corner = m_contentCorners[index];
-                const bool visible = squareBoundary && inset > 0 && opaqueFrame && page && m_tabs->isVisible()
+                const bool visible = squareBoundary && inset > 0 && page && m_tabs->isVisible()
                     && opening.width() >= outerRadius * 2 && opening.height() >= outerRadius * 2;
                 if (!corner) continue;
                 if (!visible)

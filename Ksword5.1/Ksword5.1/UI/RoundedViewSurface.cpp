@@ -9,6 +9,7 @@
 #include <QPainter>
 #include <QPainterPath>
 #include <QPointer>
+#include <QRegion>
 #include <QStyle>
 #include <QStyleOption>
 #include <QTimer>
@@ -68,10 +69,13 @@ namespace
             inside.addEllipse(ellipse);
             outside = outside.subtracted(inside);
 
-            // 背景缓存只有本角片大小；不调用 QWidget::render，避免祖先/子控件递归重绘。
+            // 背景缓存只有本角片大小；不抓取整张父面板，也不绘制任何祖先的子树。
             const QImage backdrop = paintAncestorBackdrop();
             QPainter painter(this);
             painter.setRenderHint(QPainter::Antialiasing);
+            // 圆外像素替换为真实祖先背景（包括其alpha）；透明SourceOver无法清掉方形表头/视口。
+            // 只替换圆外路径，抗锯齿覆盖率继续保留圆弧内原有表格像素。
+            painter.setCompositionMode(QPainter::CompositionMode_Source);
             painter.setPen(Qt::NoPen);
             painter.setBrush(QBrush(backdrop));
             painter.drawPath(outside);
@@ -86,8 +90,12 @@ namespace
                 static_cast<int>(std::ceil(height() * ratio))), QImage::Format_ARGB32_Premultiplied);
             image.setDevicePixelRatio(ratio);
             const bool mainSurface = ks::ui::UsesMainSurfaceHierarchy(m_view);
+            const bool transparentSurface = ks::ui::UsesTransparentMainSurface(m_view); // 穿透宿主的底板由系统合成。
             const ks::ui::MainSurfaceColors colors = ks::ui::MainWindowSurfaceColors();
-            image.fill(mainSurface ? colors.canvas : palette().color(QPalette::Window));
+            // 角片继承的Window色可能仍不透明；不能用它垫底，否则透明祖先永远无法恢复alpha。
+            const QColor base = transparentSurface ? QColor(Qt::transparent)
+                : (mainSurface ? colors.canvas : palette().color(QPalette::Window));
+            image.fill(base);
             QPainter painter(&image);
             QVector<QWidget*> ancestors; // 从窗口到最近父面板依序叠加自身背景，不绘制其子树。
             for (QWidget* ancestor = m_view->parentWidget(); ancestor != nullptr;
@@ -98,6 +106,15 @@ namespace
 
             for (QWidget* ancestor : ancestors)
             {
+                // 主根自绘背景包含图片、直透着色及alpha=1命中底，PE_Widget无法重现它。
+                // 只借其本角片对应区域的背景绘制；不带DrawChildren，不能递归回当前表格。
+                if (transparentSurface && ancestor->objectName() == QStringLiteral("ksMainRootContainer"))
+                {
+                    const QPoint origin = mapTo(ancestor, QPoint()); // 对齐背景图的真实窗口坐标。
+                    ancestor->render(&painter, QPoint(), QRegion(QRect(origin, size())),
+                        QWidget::DrawWindowBackground);
+                    continue;
+                }
                 // 没有 QSS 底面的传统祖先才补 palette；有圆角 QSS 的面板交 PE_Widget 绘制。
                 // 不能提前铺满某个面板角色，否则父面板本身的圆外区域也会被误填实。
                 if (ancestor->autoFillBackground())
