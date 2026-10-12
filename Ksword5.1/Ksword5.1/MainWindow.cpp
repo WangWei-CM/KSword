@@ -5314,6 +5314,8 @@ MainWindow::MainWindow(
     setWindowFlag(Qt::FramelessWindowHint, true);
     setWindowFlag(Qt::WindowSystemMenuHint, true);
     setWindowFlag(Qt::WindowMinMaxButtonsHint, true);
+    // 主窗口外沿明确接入共享圆角区域；原标题栏、3px命中层和系统缩放消息保持原职责。
+    ks::ui::InstallRoundedFramelessWindowFrame(this);
 
     // Dock 全局配置：
     // - 仅允许声明了 DockWidgetClosable 的辅助 Dock 显示活动标签关闭按钮；

@@ -5,7 +5,7 @@
 // 作用：
 // 1) 把主题色同步到所有“原生标题栏”顶层窗口（子窗口、对话框、浮动 Dock）；
 // 2) 使用 DWM 属性染色标题栏/边框，解决系统默认白色标题栏与深色主题割裂问题；
-// 3) 与 MainWindow 的自绘标题栏分工：主窗口不经过本模块，其余顶层窗口统一接管。
+// 3) 与自绘标题栏分工：无边框主窗口只明确接入圆角外形，不接管其标题栏颜色。
 // ============================================================
 
 class QApplication;
@@ -33,4 +33,9 @@ namespace ks::ui
     // 参数 topLevelWidget：目标顶层窗口。
     // 返回值：无。
     void ApplyWindowChrome(QWidget* topLevelWidget);
+
+    // InstallRoundedFramelessWindowFrame：明确登记自有无边框顶层窗口的8px圆角区域。
+    // 构造结束前调用一次；透明/普通背景共用外形，最大化或全屏清除区域，保留原缩放命中。
+    // 参数 topLevelWidget：自有窗口；空指针、非顶层或非无边框窗口忽略。返回值：无。
+    void InstallRoundedFramelessWindowFrame(QWidget* topLevelWidget);
 }

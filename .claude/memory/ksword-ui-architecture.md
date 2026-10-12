@@ -360,3 +360,8 @@ KSword 主程序位于 `Ksword5.1/Ksword5.1`（Qt 6.9.3 Widgets + Qt Advanced Do
 - 透明不改变外方框资格：PageTabEnvelope / WorkspaceFrame 继续使用原 hasSquare 判断与14/8/6几何，但不能因 main_surface_hierarchy=false 隐藏外角。历史“穿透模式不绘外角”的说明不再适用。用户最终确认深色导航连接处无误。
 - RoundedViewSurface 的微型背景必须从透明色开始，不能用继承的不透明 Window 色垫底；圆外用 Source 替换，包括真实 alpha。仅改混合模式仍会把浅色极角补成不透明 Window 方块。主根自绘背景是特例：只借 ksMainRootContainer 对应8px区域的背景绘制，不带 DrawChildren，保留图片、直透着色和alpha=1命中底，不做整父截图。
 - 真实主程序两张表四角及主Tab外角通过浅/深×透明/普通四组合，服务页检查整页入口，另检查热换肤和缩放重显。验收与后端/DPI边界见 `docs/透明模式圆角回归修复-20261012.md`；像素采样要重定位 HWND/frame 偏移，外角参照未选中导航底面，不误采选中标签色。
+
+## 主窗口圆角外沿（2026-10-12）
+
+- 用户随后明确要求主窗口边缘圆角，主窗口通过WindowChrome的显式InstallRoundedFramelessWindowFrame接入8px顶层区域；普通原生窗口继续按系统策略。逐像素透明宿主不能依靠DWM提示保证圆角，区域仅作用于窗口外形，不用于表格或专业内部。最大化/全屏清除mask，保留自绘标题栏、原缩放命中和句柄生命周期。
+- 新外沿Release构建通过；用户按物理Escape停止Computer Use，未完成新外沿实机验证，不可沿用表格圆角验收结论。范围、Qt跨DPI源码依据及待验收项见 `docs/主窗口圆角外沿-20261012.md`。

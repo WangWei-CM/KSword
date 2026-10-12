@@ -5,7 +5,9 @@
 #include <QApplication>
 #include <QColor>
 #include <QEvent>
+#include <QPainterPath>
 #include <QPointer>
+#include <QRegion>
 #include <QVariant>
 #include <QWidget>
 
@@ -20,6 +22,86 @@
 
 namespace
 {
+    constexpr int kRoundedWindowRadius = 8; // 自有无边框窗口的逻辑圆角，不增加外沿描边。
+    constexpr char kRoundedWindowFrameProperty[] = "ksword_rounded_window_frame"; // 防止同一窗口重复登记。
+
+    // 只观察明确登记的顶层窗口；原生区域同时裁剪子控件与磨砂，不进入业务页/表格内部。
+    class RoundedWindowFrame final : public QObject
+    {
+    public:
+        explicit RoundedWindowFrame(QWidget* window)
+            : QObject(window), m_window(window)
+        {
+            window->installEventFilter(this);
+            refreshShape(); // 在原生窗口创建/首帧之前登记初始区域。
+        }
+
+    protected:
+        // 只刷新顶层外形；不重排页面、不改窗口标志、不接管鼠标和原有WM_NCHITTEST。
+        bool eventFilter(QObject* watched, QEvent* event) override
+        {
+            if (watched != m_window || !event)
+            {
+                return false;
+            }
+            const QPointer<QObject> source(watched); // setMask可能同步触发原生窗口消息。
+            switch (event->type())
+            {
+            case QEvent::Resize:
+            case QEvent::Show:
+            case QEvent::WindowStateChange:
+            case QEvent::WinIdChange:
+            case QEvent::DevicePixelRatioChange:
+                refreshShape();
+                break;
+            default:
+                break;
+            }
+            return source.isNull();
+        }
+
+    private:
+        // 传入/返回均为空；只在形状实际变化时设置区域，Qt按当前DPR同步到原生窗口。
+        void refreshShape()
+        {
+            if (!m_window || m_applying)
+            {
+                return;
+            }
+            const bool square = m_window->isMaximized() || m_window->isFullScreen(); // 铺满工作区时保留方角。
+            QRegion shape; // 空区域表示清除mask，最大化/全屏不残留旧尺寸或角落缺口。
+            if (!square && !m_window->rect().isEmpty())
+            {
+                const int radius = qMin(kRoundedWindowRadius,
+                    qMin(m_window->width(), m_window->height()) / 2); // 小尺寸同样不生成越界圆弧。
+                QPainterPath outline; // 仅顶层窗口外轮廓，内部卡片和专业视口不改变。
+                outline.addRoundedRect(QRectF(m_window->rect()), radius, radius);
+                shape = QRegion(outline.toFillPolygon().toPolygon());
+            }
+            if (m_window->mask() == shape)
+            {
+                return;
+            }
+            const QPointer<RoundedWindowFrame> lifetime(this); // 原生区域变更后复核控制器生命周期。
+            m_applying = true;
+            if (shape.isEmpty())
+            {
+                m_window->clearMask();
+            }
+            else
+            {
+                m_window->setMask(shape);
+            }
+            if (lifetime)
+            {
+                m_applying = false;
+            }
+        }
+
+        QPointer<QWidget> m_window; // 控制器随原窗口销毁，不保留悬空几何指针。
+        bool m_applying = false; // 合并setMask产生的同步原生消息，防止递归修改区域。
+    };
+
 #ifdef Q_OS_WIN
     // kDwmUseImmersiveDarkModeAttribute 作用：
     // - DWMWA_USE_IMMERSIVE_DARK_MODE（Win10 20H1+）；
@@ -128,6 +210,19 @@ namespace
 
 namespace ks::ui
 {
+    void InstallRoundedFramelessWindowFrame(QWidget* topLevelWidget)
+    {
+        // 显式接入自有顶层无边框窗口；不批量改变系统选择器、弹窗、HUD或第三方窗口。
+        if (!topLevelWidget || !topLevelWidget->isWindow()
+            || !(topLevelWidget->windowFlags() & Qt::FramelessWindowHint)
+            || topLevelWidget->property(kRoundedWindowFrameProperty).toBool())
+        {
+            return;
+        }
+        topLevelWidget->setProperty(kRoundedWindowFrameProperty, true);
+        new RoundedWindowFrame(topLevelWidget);
+    }
+
     void ApplyWindowChrome(QWidget* topLevelWidget)
     {
 #ifdef Q_OS_WIN
