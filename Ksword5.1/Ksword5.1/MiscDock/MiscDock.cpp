@@ -8,6 +8,7 @@
 #include "ClipboardGuard/ClipboardGuardPage.h"
 #include "ContextMenuCleaner/ContextMenuCleanerTab.h"
 #include "DisableDse/DisableDsePage.h"
+#include "CKS/CksPage.h"
 #include "Experimental/BugcheckGuardPage.h"
 #include "DiskEditor/DiskEditorTab.h"
 #include "RenderBenchmark/RenderBenchmarkPage.h"
@@ -80,6 +81,7 @@ void MiscDock::initializeUi()
     m_virtualLocationHostWidget = new QWidget(m_mainTabWidget);
     m_bugcheckGuardHostWidget = new QWidget(m_mainTabWidget);
     m_disableDseHostWidget = new QWidget(m_mainTabWidget);
+    m_cksHostWidget = new QWidget(m_mainTabWidget);
     m_contextMenuCleanerHostWidget = new QWidget(m_mainTabWidget);
     m_diskEditorHostWidget = new QWidget(m_mainTabWidget);
     m_applicationControlHostWidget = new QWidget(m_mainTabWidget);
@@ -154,6 +156,17 @@ void MiscDock::initializeUi()
         m_disableDseHostWidget,
         QStringLiteral("misc.disable_dse.tab"),
         QStringLiteral("禁用签名验证"));
+
+    // CKS 是带签名策略的驱动信任管理，与临时关闭 DSE 的操作完全分开。
+    m_cksTabIndex = m_mainTabWidget->addTab(
+        m_cksHostWidget,
+        QIcon(QStringLiteral(":/Icon/process_details.svg")),
+        QStringLiteral("CKS 管理"));
+    ks::i18n::LanguageManager::instance().bindTab(
+        m_mainTabWidget,
+        m_cksHostWidget,
+        QStringLiteral("misc.cks.tab"),
+        QStringLiteral("CKS 管理"));
 
     // Shell 关联管理页：
     // - 覆盖右键菜单、URL 绑定、打开方式和 Explorer 第三方主页项；
@@ -316,6 +329,11 @@ void MiscDock::ensureTabInitialized(const int tabIndex)
     if (tabIndex == m_disableDseTabIndex)
     {
         initializeDisableDsePage();
+        return;
+    }
+    if (tabIndex == m_cksTabIndex)
+    {
+        initializeCksPage();
         return;
     }
     if (tabIndex == m_contextMenuCleanerTabIndex)
@@ -487,6 +505,18 @@ void MiscDock::initializeDisableDsePage()
     QVBoxLayout* const hostLayout = buildHostLayout(m_disableDseHostWidget);
     m_disableDsePage = new ks::misc::DisableDsePage(m_disableDseHostWidget);
     hostLayout->addWidget(m_disableDsePage, 1);
+}
+
+void MiscDock::initializeCksPage()
+{
+    if (m_cksHostWidget == nullptr || m_cksPage != nullptr)
+    {
+        return;
+    }
+
+    QVBoxLayout* const hostLayout = buildHostLayout(m_cksHostWidget);
+    m_cksPage = new ks::misc::CksPage(m_cksHostWidget);
+    hostLayout->addWidget(m_cksPage, 1);
 }
 
 void MiscDock::initializeContextMenuCleanerTab()

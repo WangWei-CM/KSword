@@ -28,6 +28,7 @@ namespace ks::misc
     class VirtualLocationPage;
     class BugcheckGuardPage;
     class DisableDsePage;
+    class CksPage;
     class RenderBenchmarkPage;
     class DesktopDrawingPage;
     class ClipboardGuardPage;
@@ -78,6 +79,7 @@ private:
     void initializeVirtualLocationPage();
     void initializeBugcheckGuardPage();
     void initializeDisableDsePage();
+    void initializeCksPage();
     void initializeContextMenuCleanerTab();
     void initializeDiskEditorTab();
     void initializeApplicationControlPage();
@@ -108,6 +110,7 @@ private:
     QWidget* m_virtualLocationHostWidget = nullptr;     // m_virtualLocationHostWidget：虚拟定位页占位控件。
     QWidget* m_bugcheckGuardHostWidget = nullptr;       // m_bugcheckGuardHostWidget：实验性页占位控件。
     QWidget* m_disableDseHostWidget = nullptr;          // m_disableDseHostWidget：驱动签名强制页占位控件。
+    QWidget* m_cksHostWidget = nullptr;                 // m_cksHostWidget：CKS 管理页占位控件。
     QWidget* m_contextMenuCleanerHostWidget = nullptr;  // m_contextMenuCleanerHostWidget：Shell 关联管理页占位控件。
     QWidget* m_diskEditorHostWidget = nullptr;          // m_diskEditorHostWidget：磁盘编辑页占位控件。
     QWidget* m_applicationControlHostWidget = nullptr;  // m_applicationControlHostWidget：应用控制页占位控件。
@@ -126,6 +129,7 @@ private:
     int m_virtualLocationTabIndex = -1;     // m_virtualLocationTabIndex：虚拟定位页页签索引。
     int m_bugcheckGuardTabIndex = -1;       // m_bugcheckGuardTabIndex：实验性页页签索引。
     int m_disableDseTabIndex = -1;          // m_disableDseTabIndex：驱动签名强制页页签索引。
+    int m_cksTabIndex = -1;                 // m_cksTabIndex：CKS 管理页页签索引。
     int m_contextMenuCleanerTabIndex = -1;  // m_contextMenuCleanerTabIndex：Shell 关联管理页页签索引。
     int m_diskEditorTabIndex = -1;          // m_diskEditorTabIndex：磁盘编辑页页签索引。
     int m_applicationControlTabIndex = -1;  // m_applicationControlTabIndex：应用控制页页签索引。
@@ -149,6 +153,7 @@ private:
     ks::misc::BugcheckGuardPage* m_bugcheckGuardPage = nullptr; // m_bugcheckGuardPage：实验性持续拦截与蓝屏缓冲控制页。
     bool m_bugcheckDiagnosticsVisible = false; // m_bugcheckDiagnosticsVisible：蓝屏诊断入口是否由配置或本次安装授权显示。
     ks::misc::DisableDsePage* m_disableDsePage = nullptr; // m_disableDsePage：驱动签名强制（DSE）开关页。
+    ks::misc::CksPage* m_cksPage = nullptr; // m_cksPage：自定义内核签名者管理页。
     ks::misc::RenderBenchmarkPage* m_renderBenchmarkPage = nullptr; // m_renderBenchmarkPage：窗口渲染与 DWM 合成基准页。
     ks::misc::DesktopDrawingPage* m_desktopDrawingPage = nullptr; // 无绘制窗口的桌面图案控制页。
     QWidget* m_windowInjectionPage = nullptr;

@@ -32,6 +32,7 @@
 - Codex 子进程可能同时缺少 `PROCESSOR_ARCHITECTURE` 与 `PROCESSOR_ARCHITEW6432`。MSVC 的 `Microsoft.Cpp.ToolsetLocation.props` 会因此把工程内的 `PreferredToolArchitecture=x64` 改为 x86；大工程的 LTCG 随后可能报 `C1002`，32 位链接器再自行重试 64 位也会留下失败退出码，不能当作完整构建通过。
 - 使用仓库构建脚本：它仅选择 `Bin/amd64/MSBuild.exe`，校验入口 PE，并同时传入 `/p:PreferredToolArchitecture=x64`、`/p:PROCESSOR_ARCHITECTURE=AMD64` 与 `/p:PROCESSOR_ARCHITEW6432=AMD64`。构建前读回 `PreferredToolArchitecture` 与 `VC_ExecutablePath_x64`，未解析成 HostX64 即拒绝。
 - `ToolsetLocation.props` 的根节点含 `TreatAsLocalProperty="PreferredToolArchitecture"`，会覆盖该全局属性；只传工具偏好仍不够。2026-09-30 的只读 MSBuild 属性输出证实：两项宿主架构为空时工具偏好仍变成 x86。
+- 2026-10-12 再次确认：外置同名构建 skill 脚本若漏传三项 x64 属性，可能先使用 HostX86 链接器并在 `KernelDock.KernelHooks.cpp` 的 LTCG 第二遍报 `C1002`；本次改用仓库 `tools/Invoke-KSwordBuildCheck.ps1` 后，脚本回读 HostX64，Release/x64 Build 成功。优先使用仓库脚本，不把这种宿主工具失配归因于新页面源码。
 - CE 的发布入口、调试适配 DLL 与项目构建仅使用 x64。
 
 ## Qt 部署重复覆盖

@@ -185,6 +185,12 @@
     <ClCompile Include="MiscDock\DisableDse\DisableDsePage.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="MiscDock\CKS\CksBackend.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="MiscDock\CKS\CksPage.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="MiscDock\Experimental\BugcheckGuardPage.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -2171,6 +2177,12 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="MiscDock\DisableDse\DisableDsePage.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="MiscDock\CKS\CksBackend.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="MiscDock\CKS\CksPage.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="MiscDock\Experimental\BugcheckGuardPage.h">
