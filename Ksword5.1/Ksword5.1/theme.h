@@ -1824,7 +1824,8 @@ ads--CDockWidgetTab[activeTab="true"] QLabel,ads--CDockWidgetTab[activeTab="true
     inline QString ThemedButtonStyle()
     {
         // 对话框和普通页面共用实心无线框状态色，几何仍保持原来的紧凑按钮尺寸。
-        return ks::ui::BuildFlatButtonStyle(ks::ui::FlatButtonTone::Neutral)
+        return ks::ui::BuildFlatButtonStyle(ks::ui::FlatButtonTone::Neutral,
+            ks::ui::FlatButtonAppearance::Solid)
             + QStringLiteral(
                 "QPushButton,QToolButton{border-radius:%1px;padding:4px 10px;font-weight:600;}")
                 .arg(ControlCornerRadius);

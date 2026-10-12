@@ -40507,6 +40507,9 @@
     "驱动事件序号": "驱动事件序号",
     "KswordFrameworkSplashWindow": "KswordFrameworkSplashWindow",
     "support@ksword.dev": "support@ksword.dev",
-    "编译于 %1": "编译于 %1"
+    "编译于 %1": "编译于 %1",
+    ", styleRemapMappedColors=": ", styleRemapMappedColors=",
+    ", styleRemapQueuedWidgets=": ", styleRemapQueuedWidgets=",
+    "[MainWindow] 存量样式表主题色分片重映射完成": "[MainWindow] 存量样式表主题色分片重映射完成"
   }
 }

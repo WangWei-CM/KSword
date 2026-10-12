@@ -40507,6 +40507,9 @@
     "驱动事件序号": "Driver event sequence",
     "KswordFrameworkSplashWindow": "KswordFrameworkSplashWindow",
     "support@ksword.dev": "support@ksword.dev",
-    "编译于 %1": "Compile at %1"
+    "编译于 %1": "Compile at %1",
+    ", styleRemapMappedColors=": ", styleRemapMappedColors=",
+    ", styleRemapQueuedWidgets=": ", styleRemapQueuedWidgets=",
+    "[MainWindow] 存量样式表主题色分片重映射完成": "[MainWindow] Existing style color remapping completed in slices"
   }
 }

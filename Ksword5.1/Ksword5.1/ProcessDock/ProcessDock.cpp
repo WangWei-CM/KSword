@@ -4965,15 +4965,55 @@ void ProcessDock::connectDetailWindowNavigation(ProcessDetailWindow* detailWindo
         });
 }
 
+namespace
+{
+    // 线程风险颜色只在可见项绘制时取当前主题，保留 ThreadTab 按每条记录写入的风险标记。
+    class ThreadRowThemeDelegate final : public QStyledItemDelegate
+    {
+    public:
+        explicit ThreadRowThemeDelegate(QTreeWidget* table)
+            : QStyledItemDelegate(table)
+        {
+        }
+
+    protected:
+        void initStyleOption(QStyleOptionViewItem* option, const QModelIndex& index) const override
+        {
+            QStyledItemDelegate::initStyleOption(option, index);
+            // 原 ThreadTab 仅给风险项写实色背景刷，退出项只写实色前景刷，普通项不写两者。
+            // 直接读取本格已有标记，避免把 Idle 等 PID/TID 重复的多条记录合并，也不扫描快照。
+            const QBrush background = qvariant_cast<QBrush>(index.data(Qt::BackgroundRole));
+            const QBrush foreground = qvariant_cast<QBrush>(index.data(Qt::ForegroundRole));
+            if (background.style() == Qt::SolidPattern)
+            {
+                option->palette.setColor(QPalette::Text, KswordTheme::ErrorColor());
+                option->backgroundBrush = QBrush(KswordTheme::WithAlpha(
+                    KswordTheme::ErrorBackgroundColor(), KswordTheme::IsDarkModeEnabled() ? 140 : 255));
+            }
+            else if (foreground.style() == Qt::SolidPattern)
+            {
+                option->palette.setColor(QPalette::Text, KswordTheme::ExitedRowForegroundColor());
+            }
+            // 普通项、选中态以及其它业务 brush/图标/字体继续由原 Qt 绘制选项维护。
+        }
+
+    };
+}
+
 void ProcessDock::refreshThemeVisuals()
 {
-    // 仅重建当前表格可视层，不触发新的后台枚举任务。
-    // 用途：深浅色切换后，立即刷新“新增/退出”行的主题高亮色。
+    // 主表颜色由 processTableData 实时求值；主题只请求绘制，不重建/排序或清空线程选区。
     applyBlueComboBoxRuntimeStyle(m_strategyCombo);
     applyBlueComboBoxRuntimeStyle(m_viewModeCombo);
     updateThreadColumnPresetButtons();
-    rebuildTable();
-    rebuildThreadTable();
+    for (QAbstractItemView* view : {static_cast<QAbstractItemView*>(m_processTable),
+        static_cast<QAbstractItemView*>(m_threadTable)})
+    {
+        if (view != nullptr && view->isVisible() && view->viewport() != nullptr)
+        {
+            view->viewport()->update(); // 隐藏页重新显示时，委托自然读取最新主题。
+        }
+    }
 }
 
 void ProcessDock::initializeUi()
@@ -5010,6 +5050,9 @@ void ProcessDock::initializeUi()
     initializeProcessActivityPanel();
     initializeProcessTable();
     initializeThreadPage();
+    // 保留 ThreadTab 原数据构建与风险优先级，只让静态主题画刷在真正绘制时重新求值。
+    m_threadTable->setProperty("ksword_preserve_custom_table_delegate", true);
+    m_threadTable->setItemDelegate(new ThreadRowThemeDelegate(m_threadTable));
     initializeCrossViewPage();
     initializeCreateProcessPage();
 

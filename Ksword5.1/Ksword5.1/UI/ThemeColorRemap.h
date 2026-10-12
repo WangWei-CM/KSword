@@ -17,6 +17,9 @@
 #include <QColor>
 #include <QPalette>
 #include <QString>
+#include <functional>
+
+class QObject;
 
 namespace ks::ui
 {
@@ -37,7 +40,7 @@ namespace ks::ui
     {
         // mappedColorCount：真正发生变化并参与重写的颜色条目数。
         int mappedColorCount = 0;
-        // ambiguousColorCount：旧值相同但新值不同的冲突条目数，这些颜色被整体跳过。
+        // ambiguousColorCount：旧值相同但新值不同的冲突条目数，按静态 token 登记顺序取优先值。
         int ambiguousColorCount = 0;
         // inspectedWidgetCount：扫描过的、styleSheet 非空的控件数。
         int inspectedWidgetCount = 0;
@@ -45,6 +48,8 @@ namespace ks::ui
         int rewrittenWidgetCount = 0;
         // rewrittenPaletteWidgetCount：实际被改写局部 QPalette 的控件数。
         int rewrittenPaletteWidgetCount = 0;
+        // scheduledWidgetCount：异步入口本次登记的待检查控件数，不代表已经完成改写。
+        int scheduledWidgetCount = 0;
     };
 
     // RemapStaleThemeColors 作用：把存量控件 styleSheet 里的旧 token 颜色改写成新值。
@@ -55,9 +60,21 @@ namespace ks::ui
     //       之后 QApplication::setPalette 再也影响不到这些角色，表格的底色、文字色和
     //       选中色因此会停在构造时的主题。只动确实设过的 group/role，alpha 保持不变。
     // 返回：本次重映射的统计结果。
-    // 调用方式：MainWindow::applyAppearanceSettings 在 QApplication palette 与全局样式块
-    //           都已更新之后调用，确保被重建过的样式表不会再被回退。
+    // 同步兼容入口：保留值验证等现有消费者；主程序换肤使用下面的 Schedule 入口。
     ThemeColorRemapResult RemapStaleThemeColors(const ThemeColorSnapshot& previousSnapshot);
+
+    // ScheduleStaleThemeColorRemap：主程序换肤使用的分片入口，必须在 GUI 线程调用。
+    // 返回值只有映射/排队统计；真正扫描和写入结果在最新任务完成后由 completion 报告。
+    // completionContext 限定回调寿命；控件通过 QPointer 跟踪，途中销毁安全跳过。
+    // 新请求替代旧调度，但未处理的旧颜色映射链保留，连续 A→B→C 不遗漏 A 色。
+    // 控件的局部 QSS/显式 palette 偏离排队基线后不改写该字段，保留业务接管。
+    // 完整 TablePresentation 块单独保留当前值，只比较/改写其外的业务 QSS；
+    // 这类表格的 Base/AlternateBase 由组件拥有，其余显式角色逐画刷保护并保留旧色转换链。
+    // 单个 Qt 样式调用不能中断；其余工作按时间片排队，不调用 processEvents。
+    ThemeColorRemapResult ScheduleStaleThemeColorRemap(
+        const ThemeColorSnapshot& previousSnapshot,
+        QObject* completionContext,
+        std::function<void(const ThemeColorRemapResult&)> completion = {});
 
     // RemapStaleThemeColorsInText 作用：对单段样式文本执行同一套颜色重写。
     // 供构造期缓存了样式文本、又不在 QApplication::allWidgets() 范围内的调用方复用。

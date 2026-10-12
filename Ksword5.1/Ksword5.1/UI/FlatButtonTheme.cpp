@@ -6,11 +6,13 @@
 
 #include <QAbstractButton>
 #include <QApplication>
+#include <QHash>
 #include <QEvent>
 #include <QPalette>
 #include <QPointer>
 #include <QPushButton>
 #include <QToolButton>
+#include <QVariant>
 #include <memory>
 #include <array>
 
@@ -51,6 +53,12 @@ namespace
         {
             style.remove(secondaryBlock);
         }
+        // Dock 根透明块只负责根表面，不能阻断子按钮明确声明的配色所有权。
+        const QString dockBlock = owner->property("ksword_dock_root_surface_style_block").toString();
+        if (!dockBlock.isEmpty())
+        {
+            style.remove(dockBlock);
+        }
         return style.trimmed();
     }
 
@@ -77,8 +85,8 @@ namespace
             return true;
         }
         const auto* push = qobject_cast<const QPushButton*>(button);
-        return push != nullptr && (push->isFlat()
-            || (push->text().isEmpty() && !push->icon().isNull()));
+        // 图标替代动作文字不会改变按钮语义；只有页面明确 setFlat 才使用透明工具外观。
+        return push != nullptr && push->isFlat();
     }
 
     ks::ui::FlatButtonAppearance resolvedAppearance(ks::ui::FlatButtonTone tone,
@@ -90,6 +98,42 @@ namespace
         }
         return tone == ks::ui::FlatButtonTone::Neutral && toolButton
             ? ks::ui::FlatButtonAppearance::Flat : ks::ui::FlatButtonAppearance::Solid;
+    }
+
+    // 同一配色被大量按钮和逐帧图标查询重复使用，按真实颜色、状态与主题代次复用计算。
+    // QColor 保留完整精度参与相等判定，哈希只负责索引，不以近似 RGB 代替实际输入。
+    struct ButtonColorKey
+    {
+        std::array<QColor, 6> colors; // 配方读取的六个 palette 角色，顺序固定。
+        quint64 generation; // 全局语义种子与回退色的有效代次。
+        ks::ui::FlatButtonTone tone; // 页面声明的动作色。
+        ks::ui::FlatButtonAppearance appearance; // 当前 Solid/Flat/导航语义。
+        ks::ui::FlatButtonState state; // 悬停、按下、选中与禁用分别缓存。
+
+        bool operator==(const ButtonColorKey& other) const
+        {
+            return colors == other.colors && generation == other.generation
+                && tone == other.tone && appearance == other.appearance && state == other.state;
+        }
+    };
+
+    // qHash 只消费稳定输入；色彩哈希碰撞仍由 QColor 的完整相等检查消解。
+    size_t qHash(const ButtonColorKey& key, size_t seed = 0)
+    {
+        seed = qHashMulti(seed, key.generation, static_cast<int>(key.tone),
+            static_cast<int>(key.appearance), static_cast<int>(key.state));
+        for (const QColor& color : key.colors)
+        {
+            seed = qHashMulti(seed, static_cast<quint64>(color.rgba64()), color.isValid());
+        }
+        return seed;
+    }
+
+    // 每线程有限缓存不持有任何控件；预览阶段旁路，避免尚未应用的种子污染正式颜色。
+    QHash<ButtonColorKey, ks::ui::FlatButtonStateColors>& buttonColorCache()
+    {
+        static thread_local QHash<ButtonColorKey, ks::ui::FlatButtonStateColors> cache;
+        return cache;
     }
 
     // 透明 QSS 会将父 Base/Button/Window 改成透明黑；向上找真实表面，最后使用应用色板。
@@ -242,6 +286,13 @@ namespace
                             latestAppearance = candidate;
                         }
                     }
+                    // 旧工厂的 Auto 标记不能撤销页面明确选择；显式 API 调用仍能重新声明外观。
+                    const QVariant declared = button->property("ksword_flat_button_appearance");
+                    if (latestAppearance == static_cast<int>(ks::ui::FlatButtonAppearance::Auto)
+                        && button->property("ksword_flat_button_managed").toBool() && declared.isValid())
+                    {
+                        latestAppearance = declared.toInt();
+                    }
                     if (!button->property("ksword_flat_button_managed").toBool()
                         || button->property("ksword_flat_button_tone").toInt() != latestTone
                         || button->property("ksword_flat_button_appearance").toInt() != latestAppearance)
@@ -261,6 +312,23 @@ namespace
 ks::ui::FlatButtonStateColors ks::ui::FlatButtonColorsForState(const QPalette& palette,
     FlatButtonTone tone, FlatButtonAppearance appearance, FlatButtonState state)
 {
+    const ButtonColorKey key{{palette.color(QPalette::Active, QPalette::Base),
+        palette.color(QPalette::Active, QPalette::Highlight),
+        palette.color(QPalette::Active, QPalette::AlternateBase),
+        palette.color(QPalette::Active, QPalette::Text),
+        palette.color(QPalette::Active, QPalette::HighlightedText),
+        palette.color(QPalette::Disabled, QPalette::Text)},
+        KswordTheme::ThemeSeedGeneration, tone, appearance, state};
+    const bool cacheable = KswordTheme::ActiveThemePreviewSeeds == nullptr;
+    auto& cache = buttonColorCache(); // 所有返回颜色由相同真实输入限定，不冻结交互状态。
+    if (cacheable)
+    {
+        const auto cached = cache.constFind(key);
+        if (cached != cache.constEnd())
+        {
+            return cached.value();
+        }
+    }
     // 透明父级可能给出 alpha=0 的黑；使用表面角色回退，不能只把 alpha 强制改成255。
     QColor surface = palette.color(QPalette::Active, QPalette::Base);
     if (!surface.isValid() || surface.alpha() == 0)
@@ -331,6 +399,14 @@ ks::ui::FlatButtonStateColors ks::ui::FlatButtonColorsForState(const QPalette& p
     }
     result.foreground = KswordTheme::EnsureTextContrast(preferred, result.background,
         state == FlatButtonState::Disabled ? 3.0 : 4.5);
+    if (cacheable)
+    {
+        if (cache.size() >= 512)
+        {
+            cache.clear(); // 边界有限，用户长期试色不会累积无限历史配方。
+        }
+        cache.insert(key, result);
+    }
     return result;
 }
 
@@ -374,6 +450,7 @@ void ks::ui::ApplyFlatButtonTheme(QAbstractButton* button, FlatButtonTone tone, 
             return;
         }
         const QPalette colors = buttonPalette(guardedButton.data());
+        const auto actualAppearance = resolvedAppearance(tone, appearance, toolPresentation(guardedButton.data()));
         const QString block = QLatin1String(beginMarker) + buildStyle(tone, appearance, colors, guardedButton.data())
             + QLatin1String(endMarker);
         const QString style = replaceOwnedBlock(currentStyle, block);
@@ -382,8 +459,22 @@ void ks::ui::ApplyFlatButtonTheme(QAbstractButton* button, FlatButtonTone tone, 
         {
             guardedButton->setStyleSheet(style);
         }
-        if (!guardedButton.isNull())
+        if (!guardedButton.isNull() && guardedButton->styleSheet() == style)
         {
+            // 排队换肤期间局部 QSS 可能仍是上一主题；图标须按已经真正下发的五态底色校准。
+            QVariantList appliedBackgrounds; // 保存真实正常/悬停/按下/选中/禁用底面，而非当前全局种子。
+            for (const auto state : {FlatButtonState::Normal, FlatButtonState::Hover,
+                FlatButtonState::Pressed, FlatButtonState::Checked, FlatButtonState::Disabled})
+            {
+                appliedBackgrounds.append(QVariant::fromValue(
+                    FlatButtonColorsForState(colors, tone, actualAppearance, state).background));
+            }
+            // 记录最后实际下发的完整样式及配方，逐帧图标无需再扫描同一祖先 QSS 链。
+            // 页面后来追加/替换任意规则时精确字符串不相等，查询立即回到所有权检查。
+            guardedButton->setProperty("ksword_flat_button_applied_style", style);
+            guardedButton->setProperty("ksword_flat_button_applied_tone", static_cast<int>(tone));
+            guardedButton->setProperty("ksword_flat_button_applied_appearance", static_cast<int>(appearance));
+            guardedButton->setProperty("ksword_flat_button_applied_backgrounds", appliedBackgrounds);
             guardedButton->setProperty("ksword_flat_button_pending", false);
             guardedButton->setProperty("ksword_flat_button_initial_color_style", QVariant());
         }
@@ -409,62 +500,74 @@ bool ks::ui::TryGetFlatButtonBackground(const QAbstractButton* button,
         return false;
     }
     int tone = -1; // 只从仍实际存在的拥有标记读取，避免旧 managed 属性覆盖页面数据色。
-    for (const QWidget* owner = button; owner != nullptr; owner = owner->parentWidget())
-    {
-        const QString style = buttonColorOwnershipStyle(owner);
-        qsizetype latestPosition = -1;
-        for (int candidate = 0; candidate <= 3; ++candidate)
-        {
-            const qsizetype position = style.lastIndexOf(
-                QStringLiteral("/*KSWORD_FLAT_BUTTON_TONE_%1*/").arg(candidate));
-            if (position > latestPosition)
-            {
-                latestPosition = position;
-                tone = candidate;
-            }
-        }
-        // 祖先未知 QSS 可能比应用基线更优先；必须和自动绑定使用相同所有权边界。
-        if (!style.isEmpty() && tone < 0)
-        {
-            return false;
-        }
-        if (tone >= 0)
-        {
-            break;
-        }
-    }
-    if (tone < 0)
-    {
-        // 没有本地覆盖的应用默认按钮使用全局同一 Neutral 块。
-        if (!buttonColorOwnershipStyle(button).isEmpty() || QApplication::instance() == nullptr
-            || !qApp->styleSheet().contains(QLatin1String(beginMarker)))
-        {
-            return false;
-        }
-        tone = static_cast<int>(FlatButtonTone::Neutral);
-    }
     FlatButtonAppearance appearance = FlatButtonAppearance::Auto;
-    for (const QWidget* owner = button; owner != nullptr; owner = owner->parentWidget())
+    const QString appliedStyle = button->property("ksword_flat_button_applied_style").toString();
+    const bool exactAppliedStyle = !appliedStyle.isEmpty() && button->styleSheet() == appliedStyle;
+    if (exactAppliedStyle)
     {
-        const QString style = buttonColorOwnershipStyle(owner);
-        qsizetype latest = -1;
-        for (int candidate = 0; candidate <= static_cast<int>(FlatButtonAppearance::Navigation); ++candidate)
+        // 完整局部块仍存在且未被页面重写，局部选择器优先于祖先，直接使用实际已下发的配方。
+        tone = button->property("ksword_flat_button_applied_tone").toInt();
+        appearance = static_cast<FlatButtonAppearance>(
+            button->property("ksword_flat_button_applied_appearance").toInt());
+    }
+    else
+    {
+        for (const QWidget* owner = button; owner != nullptr; owner = owner->parentWidget())
         {
-            const qsizetype position = style.lastIndexOf(
-                QStringLiteral("/*KSWORD_FLAT_BUTTON_APPEARANCE_%1*/").arg(candidate));
-            if (position > latest)
+            const QString style = buttonColorOwnershipStyle(owner);
+            qsizetype latestPosition = -1;
+            for (int candidate = 0; candidate <= 3; ++candidate)
             {
-                latest = position;
-                appearance = static_cast<FlatButtonAppearance>(candidate);
+                const qsizetype position = style.lastIndexOf(
+                    QStringLiteral("/*KSWORD_FLAT_BUTTON_TONE_%1*/").arg(candidate));
+                if (position > latestPosition)
+                {
+                    latestPosition = position;
+                    tone = candidate;
+                }
+            }
+            // 祖先未知 QSS 可能比应用基线更优先；必须和自动绑定使用相同所有权边界。
+            if (!style.isEmpty() && tone < 0)
+            {
+                return false;
+            }
+            if (tone >= 0)
+            {
+                break;
             }
         }
-        if (latest >= 0)
+        if (tone < 0)
         {
-            break;
+            // 没有本地覆盖的应用默认按钮使用全局同一 Neutral 块。
+            if (!buttonColorOwnershipStyle(button).isEmpty() || QApplication::instance() == nullptr
+                || !qApp->styleSheet().contains(QLatin1String(beginMarker)))
+            {
+                return false;
+            }
+            tone = static_cast<int>(FlatButtonTone::Neutral);
         }
-        if (!style.isEmpty())
+        for (const QWidget* owner = button; owner != nullptr; owner = owner->parentWidget())
         {
-            break;
+            const QString style = buttonColorOwnershipStyle(owner);
+            qsizetype latest = -1;
+            for (int candidate = 0; candidate <= static_cast<int>(FlatButtonAppearance::Navigation); ++candidate)
+            {
+                const qsizetype position = style.lastIndexOf(
+                    QStringLiteral("/*KSWORD_FLAT_BUTTON_APPEARANCE_%1*/").arg(candidate));
+                if (position > latest)
+                {
+                    latest = position;
+                    appearance = static_cast<FlatButtonAppearance>(candidate);
+                }
+            }
+            if (latest >= 0)
+            {
+                break;
+            }
+            if (!style.isEmpty())
+            {
+                break;
+            }
         }
     }
     appearance = resolvedAppearance(static_cast<FlatButtonTone>(tone), appearance,
@@ -485,6 +588,16 @@ bool ks::ui::TryGetFlatButtonBackground(const QAbstractButton* button,
     if (!button->isEnabled() || mode == QIcon::Disabled)
     {
         actualState = FlatButtonState::Disabled;
+    }
+    if (exactAppliedStyle)
+    {
+        const QVariantList backgrounds = button->property("ksword_flat_button_applied_backgrounds").toList();
+        const qsizetype stateIndex = static_cast<qsizetype>(actualState);
+        if (backgrounds.size() == 5 && backgrounds.at(stateIndex).value<QColor>().isValid())
+        {
+            *background = backgrounds.at(stateIndex).value<QColor>();
+            return true;
+        }
     }
     const FlatButtonStateColors colors = FlatButtonColorsForState(buttonPalette(button),
         static_cast<FlatButtonTone>(tone), appearance, actualState);

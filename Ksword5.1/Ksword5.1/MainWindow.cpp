@@ -807,7 +807,7 @@ namespace
     }
 
     // refreshAdsDockTabVisualIdentities 作用：
-    // - 扫描某个根窗口下已经存在的 ADS 标签并补齐动态属性；
+    // - 按 ADS 容器的实际 Dock 登记表定位标签并补齐动态属性；
     // - 适用于 restoreState 或浮动窗口创建后产生/迁移的标签。
     // 入参 rootWidget：扫描根节点；为空时直接返回。
     // 返回：无返回值。
@@ -818,20 +818,36 @@ namespace
             return;
         }
 
-        const QList<ads::CDockWidgetTab*> dockTabs =
-            rootWidget->findChildren<ads::CDockWidgetTab*>();
-        for (ads::CDockWidgetTab* dockTab : dockTabs)
+        // Dock 页面可能包含数千控件；导航身份不需要两次递归进入业务页。
+        // manager 登记表含隐藏/自动隐藏 Dock，浮动容器直接提供所属 Dock 列表。
+        QList<ads::CDockWidget*> dockWidgets;
+        if (auto* manager = qobject_cast<ads::CDockManager*>(rootWidget))
         {
-            configureDockTabStyleSurface(dockTab, kKswordDockTabPropertyName);
-            applyDockTabTextColor(dockTab, dockTab->property("activeTab").toBool());
+            dockWidgets = manager->dockWidgetsMap().values();
         }
-
-        const QList<ads::CAutoHideTab*> autoHideTabs =
-            rootWidget->findChildren<ads::CAutoHideTab*>();
-        for (ads::CAutoHideTab* autoHideTab : autoHideTabs)
+        else if (auto* floating = qobject_cast<ads::CFloatingDockContainer*>(rootWidget))
         {
-            configureDockTabStyleSurface(autoHideTab, kKswordAutoHideTabPropertyName);
-            applyDockTabTextColor(autoHideTab, autoHideTab->property("activeTab").toBool());
+            dockWidgets = floating->dockWidgets();
+        }
+        else if (auto* container = qobject_cast<ads::CDockContainerWidget*>(rootWidget))
+        {
+            dockWidgets = container->dockWidgets();
+        }
+        for (ads::CDockWidget* dockWidget : dockWidgets)
+        {
+            if (dockWidget == nullptr)
+            {
+                continue;
+            }
+            configureAdsDockTabVisualIdentity(dockWidget);
+            for (QWidget* tab : {static_cast<QWidget*>(dockWidget->tabWidget()),
+                static_cast<QWidget*>(dockWidget->sideTabWidget())})
+            {
+                if (tab != nullptr)
+                {
+                    applyDockTabTextColor(tab, tab->property("activeTab").toBool());
+                }
+            }
         }
     }
 
@@ -4791,6 +4807,11 @@ namespace
         const int normalizedOpacityPercent = normalizeOpacityPercent(imageOpacityPercent);
         // effectiveSourceImage 用途：透明度为零时跳过合成，同时不访问任何文件路径。
         const QPixmap* effectiveSourceImage = normalizedOpacityPercent > 0 ? sourceImage : nullptr;
+        if (effectiveSourceImage == nullptr || effectiveSourceImage->isNull())
+        {
+            // 纯色不依赖窗口尺寸，不分配/填充整窗像素，也不因 Resize 换纹理键触发 PaletteChange。
+            return QBrush(baseColor);
+        }
         const quint64 sourceImageCacheKey =
             effectiveSourceImage == nullptr ? 0 : effectiveSourceImage->cacheKey();
 
@@ -7837,7 +7858,7 @@ void MainWindow::refreshTitleActionButtonStyles()
     };
     for (QToolButton* button : topActionButtonList)
     {
-        if (button != nullptr)
+        if (button != nullptr && button->styleSheet() != topActionButtonStyle)
         {
             button->setStyleSheet(topActionButtonStyle);
         }
@@ -8671,12 +8692,18 @@ void MainWindow::applyDdmaButtonState()
     // 在两次配置之间是完全静止的。首帧必须靠 m_ddmaButtonPainted 放行——
     // 代次与成员都从 0 开始，只比代次会把首帧误判成"无变化"。
     const std::uint64_t generation = ksword::memory_backend::ddmaSessionGeneration();
-    if (m_ddmaButtonPainted && generation == m_ddmaSessionGeneration)
+    const qulonglong themeGeneration = KswordTheme::ThemeSeedGeneration;
+    const QString languageId = ks::i18n::LanguageManager::instance().currentLanguageId();
+    if (m_ddmaButtonPainted && generation == m_ddmaSessionGeneration
+        && m_ddmaStatusButton->property("ksword_ddma_theme_generation").toULongLong() == themeGeneration
+        && m_ddmaStatusButton->property("ksword_ddma_language").toString() == languageId)
     {
         return;
     }
     m_ddmaSessionGeneration = generation;
     m_ddmaButtonPainted = true;
+    m_ddmaStatusButton->setProperty("ksword_ddma_theme_generation", themeGeneration);
+    m_ddmaStatusButton->setProperty("ksword_ddma_language", languageId);
 
     const ksword::memory_backend::DdmaSession& session =
         ksword::memory_backend::currentDdmaSession();
@@ -8685,7 +8712,11 @@ void MainWindow::applyDdmaButtonState()
     // 也画成亮的，否则指示灯会比实际能力乐观。
     const bool resident = ksword::memory_backend::isDdmaUsable(session, &reason);
 
-    m_ddmaStatusButton->setStyleSheet(buildR0ButtonStyle(resident));
+    const QString ddmaStyle = buildR0ButtonStyle(resident);
+    if (m_ddmaStatusButton->styleSheet() != ddmaStyle)
+    {
+        m_ddmaStatusButton->setStyleSheet(ddmaStyle);
+    }
     if (resident)
     {
         m_ddmaStatusButton->setToolTip(
@@ -8783,7 +8814,11 @@ void MainWindow::refreshPrivilegeStatusButtons()
     applyPrivilegeButtonStyle(m_systemStatusButton, systemEnabled);
     if (m_r0StatusButton != nullptr)
     {
-        m_r0StatusButton->setStyleSheet(buildR0ButtonStyle(r0Enabled));
+        const QString r0Style = buildR0ButtonStyle(r0Enabled);
+        if (m_r0StatusButton->styleSheet() != r0Style)
+        {
+            m_r0StatusButton->setStyleSheet(r0Style);
+        }
     }
     // HVM 只用缓存值刷新外观：状态查询是阻塞 IOCTL，必须走后台。
     applyHvmButtonState();
@@ -8889,7 +8924,12 @@ void MainWindow::applyPrivilegeButtonStyle(QPushButton* button, const bool activ
     {
         return;
     }
-    button->setStyleSheet(buildPrivilegeButtonStyle(activeState));
+    // 周期权限查询保留，状态与主题相同时不再制造 StyleChange 和 SVG/布局后续刷新。
+    const QString privilegeStyle = buildPrivilegeButtonStyle(activeState);
+    if (button->styleSheet() != privilegeStyle)
+    {
+        button->setStyleSheet(privilegeStyle);
+    }
 }
 
 bool MainWindow::hasUiAccessPrivilege() const
@@ -10366,19 +10406,19 @@ QWidget* MainWindow::createDockPlaceholderWidget(const QString& titleText) const
 {
     QWidget* placeholderWidget = new QWidget();
     placeholderWidget->setObjectName(QStringLiteral("ksLazyDockPlaceholder_%1").arg(titleText));
+    placeholderWidget->setProperty("ksword_lazy_dock_placeholder", true);
     placeholderWidget->setAutoFillBackground(false);
     placeholderWidget->setAttribute(Qt::WA_StyledBackground, false);
     // 进度条的槽与块必须在这里显式声明：
-    // - 上面的 QWidget{background:transparent !important} 会连 QProgressBar 一起命中，
-    //   不带 !important 的全局进度条基线样式会被它压掉，槽变成完全透明；
+    // - 占位根和说明标签保持透明，不能用 QWidget 全后代规则清掉进度槽底色；
     // - 因此这里用同等强度的 !important 重新指定槽色与块色，不依赖层叠顺序。
     placeholderWidget->setStyleSheet(
         QStringLiteral(
-            "QWidget{"
+            "QWidget[ksword_lazy_dock_placeholder=\"true\"]{"
             "  background:transparent !important;"
             "  background-color:transparent !important;"
             "}"
-            "QLabel{"
+            "QWidget[ksword_lazy_dock_placeholder=\"true\"] QLabel{"
             "  background:transparent !important;"
             "  background-color:transparent !important;"
             "}"
@@ -10619,13 +10659,17 @@ void MainWindow::ensureDockContentInitialized(ads::CDockWidget* dockWidget)
     {
         realWidget->setAutoFillBackground(false);
         realWidget->setAttribute(Qt::WA_StyledBackground, false);
-        realWidget->setStyleSheet(
-            realWidget->styleSheet()
-            + QStringLiteral(
-                "QWidget{"
-                "  background:transparent;"
-                "  background-color:transparent;"
-                "}"));
+        // 只让 Dock 根容器透出主背景，内部卡片、输入和按钮仍保留各自的实底。
+        // 旧 QWidget 全后代规则在构造结束后重抛整页 StyleChange，并清掉尚未登记控件的背景。
+        const QString dockRootStyle = QStringLiteral(
+            "QWidget[ksword_dock_content_root=\"true\"]{"
+            "background:transparent;background-color:transparent;}");
+        realWidget->setProperty("ksword_dock_content_root", true);
+        realWidget->setProperty("ksword_dock_root_surface_style_block", dockRootStyle);
+        if (!realWidget->styleSheet().contains(dockRootStyle))
+        {
+            realWidget->setStyleSheet(realWidget->styleSheet() + dockRootStyle);
+        }
     }
 
     // HVM 页与内核页同理：内部是分隔条 + 表格 + 详情，外面再套一层 QScrollArea
@@ -12638,20 +12682,29 @@ void MainWindow::applyAppearanceSettings(
         // 必须排在各面板主动重建之后，避免刚重建好的新色又被扫描一遍做无用功。
         // 明确登记的控件按角色重新求值；存量控件继续使用旧色值补偿，不猜测已登记样式。
         ks::ui::RefreshWidgetThemeBindings();
-        themeColorRemapResult = ks::ui::RemapStaleThemeColors(staleThemeColorSnapshot);
-        if (themeColorRemapResult.rewrittenWidgetCount > 0
-            || themeColorRemapResult.rewrittenPaletteWidgetCount > 0
-            || themeColorRemapResult.ambiguousColorCount > 0)
-        {
-            dbg << appearanceApplyEvent
-                << "[MainWindow] 存量样式表主题色重映射"
-                << ", mappedColors=" << themeColorRemapResult.mappedColorCount
-                << ", ambiguousColors=" << themeColorRemapResult.ambiguousColorCount
-                << ", inspectedWidgets=" << themeColorRemapResult.inspectedWidgetCount
-                << ", rewrittenWidgets=" << themeColorRemapResult.rewrittenWidgetCount
-                << ", rewrittenPalettes=" << themeColorRemapResult.rewrittenPaletteWidgetCount
-                << eol;
-        }
+        // 全应用旧色补偿分片处理，返回值只表示排队统计；真实改写数在完成回调报告。
+        // 上下文/QPointer 防析构，退出 lifetime 防异步停驱期间出现过期完成通知。
+        const QPointer<MainWindow> remapWindow(this);
+        const std::weak_ptr<std::atomic_bool> remapLifetime = m_r0NotificationLifetime;
+        themeColorRemapResult = ks::ui::ScheduleStaleThemeColorRemap(
+            staleThemeColorSnapshot, this,
+            [remapWindow, remapLifetime](const ks::ui::ThemeColorRemapResult& completedResult)
+            {
+                const auto lifetime = remapLifetime.lock();
+                if (remapWindow.isNull() || !lifetime || !lifetime->load(std::memory_order_acquire))
+                {
+                    return;
+                }
+                kLogEvent remapCompletedEvent;
+                dbg << remapCompletedEvent
+                    << "[MainWindow] 存量样式表主题色分片重映射完成"
+                    << ", mappedColors=" << completedResult.mappedColorCount
+                    << ", ambiguousColors=" << completedResult.ambiguousColorCount
+                    << ", inspectedWidgets=" << completedResult.inspectedWidgetCount
+                    << ", rewrittenWidgets=" << completedResult.rewrittenWidgetCount
+                    << ", rewrittenPalettes=" << completedResult.rewrittenPaletteWidgetCount
+                    << eol;
+            });
 
         runtimeProgress.update(
             88,
@@ -12749,10 +12802,10 @@ void MainWindow::applyAppearanceSettings(
         << (svgThemeIconApplyResult.skippedDefaultTheme ? "true" : "false")
         << ", svgIconElapsedMs="
         << svgThemeIconApplyResult.elapsedMilliseconds
-        << ", styleRemapWidgets="
-        << themeColorRemapResult.rewrittenWidgetCount
-        << ", styleRemapPalettes="
-        << themeColorRemapResult.rewrittenPaletteWidgetCount
+        << ", styleRemapQueuedWidgets="
+        << themeColorRemapResult.scheduledWidgetCount
+        << ", styleRemapMappedColors="
+        << themeColorRemapResult.mappedColorCount
         << ", styleRemapAmbiguous="
         << themeColorRemapResult.ambiguousColorCount
         << "，styleElapsedMs="
@@ -13145,6 +13198,7 @@ void MainWindow::applyFloatingDockContainerAppearance(ads::CFloatingDockContaine
     {
         floatingWidget->setStyleSheet(appearanceStyleSheet);
     }
+    // 仍校验真实导航结构，已改为 ADS 登记表遍历，惰性新 Dock 不会因样式相同而漏接入。
     refreshAdsDockTabVisualIdentities(floatingWidget);
 
     ads::CDockContainerWidget* dockContainer = floatingWidget->dockContainer();

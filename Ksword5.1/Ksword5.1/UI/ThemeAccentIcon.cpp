@@ -10,9 +10,11 @@
 #include <QPainter>
 #include <QPalette>
 #include <QPixmap>
+#include <QPixmapCache>
 #include <QPointer>
 #include <QStyle>
 #include <QStyleOption>
+#include <array>
 #include <cmath>
 
 namespace ks::ui
@@ -20,7 +22,7 @@ namespace ks::ui
     namespace
     {
         // ThemeAccentIconEngine 保留未着色轮廓，每次绘制独立读取当前主题颜色。
-        // 不保存主题色缓存，也不遍历模型项，因此懒加载和恢复默认使用同一源图。
+        // 绘制缓存按真实颜色和设备请求区分，不遍历模型项，不冻结主题或按钮状态。
         class ThemeAccentIconEngine final : public QIconEngine
         {
         public:
@@ -112,7 +114,10 @@ namespace ks::ui
                         *flatButtonBackgroundKnown = true;
                     }
                     // 普通标签可能请求任意模式，按共享父/子导航真实底面统一校准。
-                    return PageTabIconContrastColor(preferred);
+                    return cachedGenericForeground(mode, state, [preferred]()
+                    {
+                        return PageTabIconContrastColor(preferred);
+                    });
                 }
 
                 // buttonBackground 用途：仅由共享按钮组件确认拥有的实际状态底色。
@@ -138,28 +143,57 @@ namespace ks::ui
                     QColor preferred = disabled
                         ? colors.color(QPalette::Disabled, QPalette::ButtonText) : buttonAccent;
                     preferred.setAlpha(255); // 禁用色也保留原轮廓 alpha，不能把父级透明色当作图标透明度。
-                    return KswordTheme::EnsureTextContrast(preferred, buttonBackground, 3.0);
+                    // 同一按钮未变的实际前景/底色不在每次 paint 再做 HSL 逐档搜索。
+                    if (m_buttonContrastPreferred != preferred || m_buttonContrastBackground != buttonBackground
+                        || !m_buttonContrastColor.isValid())
+                    {
+                        m_buttonContrastPreferred = preferred;
+                        m_buttonContrastBackground = buttonBackground;
+                        m_buttonContrastColor = KswordTheme::EnsureTextContrast(preferred, buttonBackground, 3.0);
+                    }
+                    return m_buttonContrastColor;
                 }
 
                 // 非共享样式、菜单和模型没有已知按钮底色，保留原有通用图标角色。
                 // 不凭旧 managed 属性猜测数据原色，不把全局 Active 改成 Neutral。
-                if (mode == QIcon::Selected || state == QIcon::On)
+                return cachedGenericForeground(mode, state, [mode, state, accent]()
                 {
-                    return KswordTheme::EnsureTextContrast(accent, KswordTheme::PrimaryAccentColor(), 3.0);
-                }
-                if (mode == QIcon::Active)
+                    if (mode == QIcon::Selected || state == QIcon::On)
+                    {
+                        return KswordTheme::EnsureTextContrast(accent, KswordTheme::PrimaryAccentColor(), 3.0);
+                    }
+                    if (mode == QIcon::Active)
+                    {
+                        return KswordTheme::EnsureTextContrast(accent, KswordTheme::ControlAccentColor(), 3.0);
+                    }
+                    const QColor surfaces[] = {KswordTheme::SurfaceColor(),
+                        KswordTheme::SurfaceAltColor(), KswordTheme::SurfaceMutedColor()}; // 三种真实中性底面。
+                    const QColor preferred = mode == QIcon::Disabled
+                        ? KswordTheme::BlendColors(surfaces[0], accent, 96) : accent;
+                    return KswordTheme::EnsureTextContrastForBackgrounds(preferred, surfaces, 3, 3.0);
+                });
+            }
+
+            // 普通图标每个模式/状态有独立槽位；仅正式主题代次可缓存，同步预览必须即时求值。
+            template<typename Calculate>
+            QColor cachedGenericForeground(QIcon::Mode mode, QIcon::State state, Calculate calculate) const
+            {
+                const std::size_t index = static_cast<std::size_t>(mode) * 2 + static_cast<std::size_t>(state);
+                if (index >= m_genericForeground.size() || KswordTheme::ActiveThemePreviewSeeds != nullptr)
                 {
-                    return KswordTheme::EnsureTextContrast(accent, KswordTheme::ControlAccentColor(), 3.0);
+                    return calculate();
                 }
-                const QColor surfaces[] = {KswordTheme::SurfaceColor(),
-                    KswordTheme::SurfaceAltColor(), KswordTheme::SurfaceMutedColor()}; // 普通图标明确覆盖三种中性表面。
-                const QColor preferred = mode == QIcon::Disabled
-                    ? KswordTheme::BlendColors(surfaces[0], accent, 96) : accent;
-                return KswordTheme::EnsureTextContrastForBackgrounds(preferred, surfaces, 3, 3.0);
+                auto& entry = m_genericForeground[index]; // 固定八槽缓存，不保留无限主题历史。
+                if (entry.generation != KswordTheme::ThemeSeedGeneration || !entry.color.isValid())
+                {
+                    entry.color = calculate();
+                    entry.generation = KswordTheme::ThemeSeedGeneration;
+                }
+                return entry.color;
             }
 
             // renderPixmap：按源引擎提供的 mode/state/DPR 取得透明轮廓，替换可见像素色。
-            // size 为逻辑尺寸，scale 为设备像素比；无效请求返回空位图，结果不持久缓存。
+            // size 为逻辑尺寸，scale 为设备像素比；颜色或源图/DPR改变自然产生不同缓存身份。
             QPixmap renderPixmap(const QSize& size, QIcon::Mode mode, QIcon::State state, qreal scale) const
             {
                 if (size.isEmpty() || !std::isfinite(scale) || scale <= 0.0)
@@ -176,16 +210,31 @@ namespace ks::ui
                     return themedPixmap;
                 }
 
+                bool flatButtonBackgroundKnown = false; // 实际底色校准决定是否允许原生禁用灰化。
+                const QColor foreground = foregroundColor(mode, state, &flatButtonBackgroundKnown);
+                QStyle* applicationStyle = QApplication::style(); // 未知控件的禁用效果由当前样式生成。
+                const bool nativeDisabled = mode == QIcon::Disabled && !flatButtonBackgroundKnown;
+                // 源位图身份包含尺寸/DPR/mode/state；完整色值及原生禁用输入共同限定结果。
+                const QString cacheKey = QStringLiteral("ksword-accent-pixmap/%1/%2/%3/%4/%5/%6/%7/%8")
+                    .arg(themedPixmap.cacheKey()).arg(static_cast<quint64>(foreground.rgba64()))
+                    .arg(themedPixmap.width()).arg(themedPixmap.height())
+                    .arg(themedPixmap.devicePixelRatioF(), 0, 'g', 17)
+                    .arg(nativeDisabled ? QApplication::palette().cacheKey() : 0)
+                    .arg(nativeDisabled ? reinterpret_cast<quintptr>(applicationStyle) : 0)
+                    .arg(nativeDisabled);
+                QPixmap cachedPixmap; // Qt 全局有限缓存承担淘汰，不在每个图标引擎保留无限历史。
+                if (QPixmapCache::find(cacheKey, &cachedPixmap))
+                {
+                    return cachedPixmap;
+                }
+
                 // painter 用途：仅在临时副本上使用 SourceIn，不修改共享源图缓存。
                 QPainter painter(&themedPixmap);
                 painter.setCompositionMode(QPainter::CompositionMode_SourceIn);
-                bool flatButtonBackgroundKnown = false; // 是否已按共享按钮真实底色完成校准。
-                painter.fillRect(themedPixmap.rect(), foregroundColor(
-                    mode, state, &flatButtonBackgroundKnown));
+                painter.fillRect(themedPixmap.rect(), foreground);
                 painter.end();
 
                 // applicationStyle/styleOption 用途：让 Qt 按当前 palette 生成真实禁用态。
-                QStyle* applicationStyle = QApplication::style();
                 // 共享按钮禁用态已经用 disabled palette 和实际底色求得前景。
                 // 二次 generatedIconPixmap 灰化会破坏刚保证的对比度，只保留未知控件旧行为。
                 if (mode == QIcon::Disabled && !flatButtonBackgroundKnown && applicationStyle != nullptr)
@@ -197,6 +246,7 @@ namespace ks::ui
                     themedPixmap = applicationStyle->generatedIconPixmap(mode, themedPixmap, &styleOption);
                     themedPixmap.setDevicePixelRatio(sourceScale);
                 }
+                QPixmapCache::insert(cacheKey, themedPixmap);
                 return themedPixmap;
             }
 
@@ -204,6 +254,15 @@ namespace ks::ui
             QColor m_fixedAccent; // 无效表示随全局种子变化；有效表示管理器本轮主体色。
             QPointer<QAbstractButton> m_button; // 仅按钮包装持有的弱上下文，销毁后自动失效。
             bool m_neutralTab = false; // 普通 Tab 已明确采用中性选中底，不借用按钮配色。
+            struct ForegroundEntry
+            {
+                quint64 generation = 0; // 当前八个模式槽位的主题身份。
+                QColor color; // 已校准的普通图标前景。
+            };
+            mutable std::array<ForegroundEntry, 8> m_genericForeground; // Normal/Active/Disabled/Selected × Off/On。
+            mutable QColor m_buttonContrastPreferred; // 最近按钮请求的完整偏好色。
+            mutable QColor m_buttonContrastBackground; // 同次请求实际底面，改变即重新计算。
+            mutable QColor m_buttonContrastColor; // 仅复用与这两种真实颜色完全相同的结果。
         };
     }
 

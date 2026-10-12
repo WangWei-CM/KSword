@@ -552,18 +552,45 @@ void ks::ui::SvgThemeIconManager::scheduleWidgetRefresh(QWidget* widgetPointer)
     {
         return;
     }
-    widgetPointer->setProperty(PendingIconRefreshProperty, true);
-    const QPointer<QWidget> safeWidget(widgetPointer); // 防止排队期间控件销毁。
-    QTimer::singleShot(0, this, [this, safeWidget]()
+    // 无图标的普通布局、标签和编辑器不需要增量补色，不把每个 Polish 转成排队任务。
+    const auto* button = qobject_cast<QAbstractButton*>(widgetPointer);
+    const bool buttonIcon = button != nullptr && !button->icon().isNull()
+        && !button->inherits("QLineEditIconButton")
+        && !button->property("ksword_theme_icon_managed").toBool();
+    const bool tabIcons = qobject_cast<QTabWidget*>(widgetPointer) != nullptr;
+    const bool windowIcon = widgetPointer->isWindow() && !widgetPointer->windowIcon().isNull()
+        && (m_customTintActive || widgetPointer->property(LastWindowIconKeyProperty).isValid());
+    if (!buttonIcon && !tabIcons && !windowIcon && directWidgetActions(widgetPointer).isEmpty())
     {
+        return;
+    }
+    widgetPointer->setProperty(PendingIconRefreshProperty, true);
+    m_pendingWidgetRefreshes.emplace_back(widgetPointer);
+    if (!m_widgetRefreshScheduled)
+    {
+        m_widgetRefreshScheduled = true;
+        QTimer::singleShot(0, this, [this]() { drainWidgetRefreshes(); });
+    }
+}
+
+// 增量任务按已有图标预算处理；输入、布局、绘制能在片间执行，不在样式派发中泵事件。
+void ks::ui::SvgThemeIconManager::drainWidgetRefreshes()
+{
+    QElapsedTimer sliceTimer; // 本片实际执行时间；无法中断一个正在执行的控件回调。
+    sliceTimer.start();
+    const std::size_t initialCount = m_pendingWidgetRefreshes.size(); // 回调新增项留给下一片。
+    for (std::size_t index = 0; index < initialCount && !m_pendingWidgetRefreshes.empty(); ++index)
+    {
+        const QPointer<QWidget> safeWidget = m_pendingWidgetRefreshes.front();
+        m_pendingWidgetRefreshes.pop_front();
         if (safeWidget == nullptr)
         {
-            return;
+            continue;
         }
         safeWidget->setProperty(PendingIconRefreshProperty, false);
         if (!m_themeColor.isValid())
         {
-            return;
+            continue;
         }
         int ignoredCacheHits = 0; // 增量补色不计入启动批处理统计。
         (void)applyToWidget(safeWidget, &ignoredCacheHits);
@@ -572,7 +599,17 @@ void ks::ui::SvgThemeIconManager::scheduleWidgetRefresh(QWidget* widgetPointer)
         {
             (void)applyToAction(actionPointer, &ignoredCacheHits);
         }
-    });
+        if (sliceTimer.elapsed() >= IconApplySliceBudgetMilliseconds)
+        {
+            break;
+        }
+    }
+    m_widgetRefreshScheduled = false;
+    if (!m_pendingWidgetRefreshes.empty())
+    {
+        m_widgetRefreshScheduled = true;
+        QTimer::singleShot(0, this, [this]() { drainWidgetRefreshes(); });
+    }
 }
 
 int ks::ui::SvgThemeIconManager::applyToWidget(
@@ -632,8 +669,16 @@ int ks::ui::SvgThemeIconManager::applyToWidget(
                 // 两个按钮即使源图相同，tone/父 palette/checked 都可能不同，不能共用此引擎。
                 if (!replacementIcon.isNull() && sharedButtonTheme)
                 {
-                    replacementIcon = MakeThemeButtonAccentIcon(
-                        originalIcon, m_themeColor, buttonPointer);
+                    // 包装只持有本按钮弱上下文，状态/底色由绘制时查询；样式事件不需新建同一引擎。
+                    if (buttonPointer->property("ksword_button_surface_source").toLongLong() != originalIcon.cacheKey()
+                        || buttonPointer->property("ksword_button_surface_accent").value<QColor>() != m_themeColor)
+                    {
+                        buttonPointer->setProperty("ksword_button_surface_source", originalIcon.cacheKey());
+                        buttonPointer->setProperty("ksword_button_surface_accent", m_themeColor);
+                        buttonPointer->setProperty("ksword_button_surface_icon",
+                            MakeThemeButtonAccentIcon(originalIcon, m_themeColor, buttonPointer));
+                    }
+                    replacementIcon = buttonPointer->property("ksword_button_surface_icon").value<QIcon>();
                 }
                 if (!replacementIcon.isNull() && replacementIcon.cacheKey() != currentIcon.cacheKey())
                 {
@@ -897,7 +942,9 @@ QIcon ks::ui::SvgThemeIconManager::themedIcon(
         return rememberSourceKeyedResult(QIcon());
     }
 
-    const QByteArray cacheKey = iconCacheKey(normalizedImage, m_themeColor);
+    // Normal/Off 的像素签名相同不代表其它模式或高 DPI 轮廓相同，完整引擎还须按源身份区分。
+    const QByteArray cacheKey = iconCacheKey(normalizedImage, m_themeColor)
+        + '/' + QByteArray::number(sourceIconKey);
     const auto cachedIterator = cachedTintedIcons().constFind(cacheKey);
     if (cachedIterator != cachedTintedIcons().constEnd())
     {
@@ -913,6 +960,10 @@ QIcon ks::ui::SvgThemeIconManager::themedIcon(
     const QIcon replacementIcon = MakeThemeAccentIcon(sourceIcon, m_themeColor);
     if (!replacementIcon.isNull())
     {
+        if (cachedTintedIcons().size() >= MaximumSourceIconCacheEntries)
+        {
+            cachedTintedIcons().clear(); // 源身份参与索引后仍保持有限历史，不保留无限引擎。
+        }
         cachedTintedIcons().insert(cacheKey, replacementIcon);
     }
     return rememberSourceKeyedResult(replacementIcon);

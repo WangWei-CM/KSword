@@ -7,6 +7,7 @@
 #include "../UI/ParameterWorkspace.h"
 #include "../UI/PrimaryPageStyle.h"
 #include "../UI/FlatButtonTheme.h"
+#include "../UI/ThemeAccentIcon.h"
 #include <QGridLayout>
 #include <QGroupBox>
 #include "../UI/ThemeStatusRole.h"
@@ -17,7 +18,7 @@
 // 作用：
 // 1) 集中构建 WinAPI Dock 的控件层次与布局；
 // 2) 保持头文件简洁，避免 UI 代码继续堆大；
-// 3) 为按钮统一设置图标、tooltip 和蓝色主题样式。
+// 3) 为按钮统一设置语义 SVG、tooltip 和共享主题状态样式。
 // ============================================================
 
 #include <QAbstractItemView>
@@ -35,7 +36,6 @@
 #include <QPushButton>
 #include <QSize>
 #include <QSplitter>
-#include <QStyle>
 #include <QTableWidget>
 #include <QTimer>
 #include <QTabWidget>
@@ -45,13 +45,27 @@
 
 namespace
 {
+    // configureActionIcon：只接入本页审核过的单色 SVG，进程的多色 Shell 图标不走这里。
+    // resourcePath 是资源库原始轮廓；按钮状态和当前底面在绘制时由共享主题引擎读取。
+    void configureActionIcon(QPushButton* buttonPointer, const QString& resourcePath)
+    {
+        if (buttonPointer == nullptr)
+        {
+            return;
+        }
+        buttonPointer->setProperty("ksword_theme_icon_managed", true);
+        buttonPointer->setIcon(ks::ui::MakeThemeButtonAccentIcon(QIcon(resourcePath), QColor(), buttonPointer));
+        buttonPointer->setIconSize(QSize(16, 16));
+        buttonPointer->setCursor(Qt::PointingHandCursor);
+    }
+
     // configureIconButton：
     // - 作用：统一设置“仅图标按钮”的图标、提示与尺寸；
     // - 调用：刷新、浏览、开始、停止、导出等简单语义按钮都走这里；
     // - 返回：无返回值，控件为空时直接跳过。
     void configureIconButton(
         QPushButton* buttonPointer,
-        const QIcon& iconValue,
+        const QString& resourcePath,
         const QString& toolTipText)
     {
         if (buttonPointer == nullptr)
@@ -59,11 +73,12 @@ namespace
             return;
         }
 
-        buttonPointer->setIcon(iconValue);
+        configureActionIcon(buttonPointer, resourcePath);
         buttonPointer->setText(QString());
         buttonPointer->setToolTip(toolTipText);
         buttonPointer->setFixedWidth(34);
-        buttonPointer->setIconSize(QSize(18, 18));
+        // 普通动作遵守共享字号和高度；图标方块随字体变化保持完整点击区域。
+        ks::ui::NormalizeToolbarControl(buttonPointer);
     }
 
     // createPanelFrame：
@@ -130,9 +145,8 @@ void WinAPIDock::initializeUi()
     m_processRefreshButton = new QPushButton(m_processPanel);
     configureIconButton(
         m_processRefreshButton,
-        style()->standardIcon(QStyle::SP_BrowserReload),
+        QStringLiteral(":/Icon/process_refresh.svg"),
         QStringLiteral("刷新进程候选列表"));
-    m_processRefreshButton->setStyleSheet(blueButtonStyle());
 
     m_processStatusLabel = new QLabel(QStringLiteral("● 输入进程名或刷新候选列表"), m_processPanel);
     ks::ui::ApplyStatusRole(m_processStatusLabel, ks::ui::StatusRole::Idle);
@@ -182,9 +196,8 @@ void WinAPIDock::initializeUi()
     m_browseAgentDllButton = new QPushButton(dllPathRowWidget);
     configureIconButton(
         m_browseAgentDllButton,
-        style()->standardIcon(QStyle::SP_DirOpenIcon),
+        QStringLiteral(":/Icon/process_open_folder.svg"),
         QStringLiteral("浏览 Agent DLL 路径"));
-    m_browseAgentDllButton->setStyleSheet(blueButtonStyle());
 
     dllPathLayout->addWidget(m_agentDllPathEdit, 1);
     dllPathLayout->addWidget(m_browseAgentDllButton, 0);
@@ -289,37 +302,32 @@ void WinAPIDock::initializeUi()
     m_startButton = new QPushButton(m_sessionPanel);
     configureIconButton(
         m_startButton,
-        style()->standardIcon(QStyle::SP_MediaPlay),
+        QStringLiteral(":/Icon/process_start.svg"),
         QStringLiteral("启动 WinAPI 监控"));
-    m_startButton->setStyleSheet(blueButtonStyle());
 
     m_stopButton = new QPushButton(m_sessionPanel);
     configureIconButton(
         m_stopButton,
-        style()->standardIcon(QStyle::SP_MediaStop),
+        QStringLiteral(":/Icon/process_stop.svg"),
         QStringLiteral("停止 WinAPI 监控"));
-    m_stopButton->setStyleSheet(blueButtonStyle());
 
     m_terminateHookButton = new QPushButton(m_sessionPanel);
     configureIconButton(
         m_terminateHookButton,
-        style()->standardIcon(QStyle::SP_BrowserStop),
+        QStringLiteral(":/Icon/process_terminate.svg"),
         QStringLiteral("手动终止目标进程中的 Hook"));
-    m_terminateHookButton->setStyleSheet(blueButtonStyle());
 
     m_exportButton = new QPushButton(m_sessionPanel);
     configureIconButton(
         m_exportButton,
-        style()->standardIcon(QStyle::SP_DialogSaveButton),
+        QStringLiteral(":/Icon/log_export.svg"),
         QStringLiteral("导出当前可见事件为 TSV"));
-    m_exportButton->setStyleSheet(blueButtonStyle());
 
     m_clearEventButton = new QPushButton(m_sessionPanel);
     configureIconButton(
         m_clearEventButton,
-        style()->standardIcon(QStyle::SP_DialogResetButton),
+        QStringLiteral(":/Icon/log_clear.svg"),
         QStringLiteral("清空当前事件表"));
-    m_clearEventButton->setStyleSheet(blueButtonStyle());
 
     sessionButtonLayout->addWidget(m_startButton, 0);
     sessionButtonLayout->addWidget(m_stopButton, 0);
@@ -409,14 +417,15 @@ void WinAPIDock::initializeUi()
     m_fakeRemoveRuleButton = new QPushButton(QStringLiteral("删除选中"), fakeSuccessPanel);
     m_fakeApplyRuleButton = new QPushButton(QStringLiteral("应用规则并启动"), fakeSuccessPanel);
     m_fakeStopRuleButton = new QPushButton(QStringLiteral("停止会话"), fakeSuccessPanel);
+    // Fake Success 保留解释性文字，用同一套图标区分增删规则与会话启停。
+    configureActionIcon(m_fakeAddRuleButton, QStringLiteral(":/Icon/plus.svg"));
+    configureActionIcon(m_fakeRemoveRuleButton, QStringLiteral(":/Icon/log_clear.svg"));
+    configureActionIcon(m_fakeApplyRuleButton, QStringLiteral(":/Icon/process_start.svg"));
+    configureActionIcon(m_fakeStopRuleButton, QStringLiteral(":/Icon/process_stop.svg"));
     m_fakeAddRuleButton->setToolTip(QStringLiteral("把上方输入加入规则表；启动 WinAPI 监控时写入 Agent 配置并生效。"));
     m_fakeRemoveRuleButton->setToolTip(QStringLiteral("删除规则表当前选中的 Fake Success 规则。"));
     m_fakeApplyRuleButton->setToolTip(QStringLiteral("用当前规则表写入配置并启动 WinAPI Agent。若会话已运行，请先停止再应用。"));
     m_fakeStopRuleButton->setToolTip(QStringLiteral("停止当前 WinAPI Agent 会话；Fake Success 不支持运行中热更新。"));
-    m_fakeAddRuleButton->setStyleSheet(blueButtonStyle());
-    m_fakeRemoveRuleButton->setStyleSheet(blueButtonStyle());
-    m_fakeApplyRuleButton->setStyleSheet(blueButtonStyle());
-    m_fakeStopRuleButton->setStyleSheet(blueButtonStyle());
     // 规则动作按两列排列，保留真实确认/停止入口，不压缩成四个挤在一起的按钮。
     fakeButtonLayout->addWidget(m_fakeAddRuleButton, 0, 0);
     fakeButtonLayout->addWidget(m_fakeRemoveRuleButton, 0, 1);
@@ -475,9 +484,8 @@ void WinAPIDock::initializeUi()
     m_eventFilterClearButton = new QPushButton(m_filterPanel);
     configureIconButton(
         m_eventFilterClearButton,
-        style()->standardIcon(QStyle::SP_DialogResetButton),
+        QStringLiteral(":/Icon/log_cancel_track.svg"),
         QStringLiteral("清空事件过滤条件"));
-    m_eventFilterClearButton->setStyleSheet(blueButtonStyle());
 
     m_eventKeepBottomCheck = new QCheckBox(QStringLiteral("保持贴底"), m_filterPanel);
     m_eventKeepBottomCheck->setChecked(true);

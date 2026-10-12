@@ -329,3 +329,12 @@ KSword 主程序位于 `Ksword5.1/Ksword5.1`（Qt 6.9.3 Widgets + Qt Advanced Do
 - RelativeLuminance 8位通道线性化预算256值，保持原公式/阈值；MainSurfaceColors按主题代次缓存但preview旁路；两个按钮selector同外观复用五态配方。不是预加载全部业务窗口，也不把源码优化当作实机耗时测量。说明见 `docs/UI主题与弹窗延迟修复-20261011.md`。
 - R0“需要启用”是QMessageBox，不进入详情卡片框架。提示前SCM只读检查须后台化并在查询前合并通知；回UI不仅探析构lifetime，还要核验实际退出/服务启停代次，不能让旧STOPPED结果覆盖新启停或退出时再弹启用框。消息框图标复用现成QIcon或已映射原生资源缓存，禁止每次polish走EXE Shell图标查询。
 - SecondaryPageLayout也记录完整中性拥有块；FlatButtonTheme只精确排除该块，不忽略业务附加QSS。明确二级底栏的无配色普通动作补Solid，残留managed标记不能抢回已被业务重写的颜色；显式Flat/风险色和专用binding保留。控件检查工具动作使用真实SVG/16px/实底，不能用Unicode箭头和暂停符号代替可辨图标。用户要求全部修改收齐后统一编译，不每个截图/按钮单独编译。
+
+### 按钮闪掉与单次换肤硬开销补漏
+
+- Dock 构造后禁止下发全后代 `QWidget` 透明规则；只给明确 Dock 根节点属性声明透明，并记录完整 `ksword_dock_root_surface_style_block` 供按钮颜色所有权精确排除。
+- 图标替代文字不改变普通 QPushButton 的动作语义；`ThemedButtonStyle` 明确 Solid，Auto 对 QPushButton 只按 `isFlat()` 决定透明。旧 Auto 标记不能撤销页面已经声明的 Solid/Flat/Navigation，显式 API 仍能重新声明。
+- SVG 同一按钮的原图/强调色包装须复用。逐帧状态配方/对比度/着色分别按真实输入缓存，保留预览旁路、业务覆盖、完整色精度、mode/state/DPR 和原生禁用输入。增量补色也应按共享预算合并排队，不能每个 Polish 单独开计时回调。
+- 定时权限刷新只在实际样式变化时写 QSS。CustomTitleBar 状态更新不得反复 Shell 查询 EXE、重建原图和重登记相同按钮绑定；真实主题代次和资源变化仍更新。普通浮动纯色使用 solid QBrush，不分配整窗纹理。
+- 主题事件不重建进程/线程业务表；动态数据角色和风险委托在绘制时读取当前色。普通审计表中性色交给 palette/alternating，保留业务风险原色。
+- 全应用旧色补偿主入口使用分片队列；新主题取消旧调度时必须保留未完成的 A→B→C 基线链，分别检查局部 QSS 和显式 palette 的业务接管。只读快照及单个 Qt 样式调用不承诺时间硬上限。详情见 `docs/UI按钮消失与换肤卡顿修复-20261011.md`，未经用户实测不报告耗时提升。

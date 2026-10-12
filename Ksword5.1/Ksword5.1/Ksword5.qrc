@@ -48,6 +48,7 @@
         <file alias="process_list.svg">Resource/Icon/system/scrollable_list_line.svg</file>
         <file alias="process_start.svg">Resource/Icon/media/play_line.svg</file>
         <file alias="process_pause.svg">Resource/Icon/media/pause_line.svg</file>
+        <file alias="process_stop.svg">Resource/Icon/media/stop_line.svg</file>
         <file alias="process_copy_cell.svg">Resource/Icon/file/copy_line.svg</file>
         <file alias="process_copy_row.svg">Resource/Icon/file/clipboard_line.svg</file>
         <file alias="process_terminate.svg">Resource/Icon/system/close_circle_line.svg</file>

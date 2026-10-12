@@ -9,6 +9,7 @@
 #include "../UI/PageControlStyle.h"
 #include "../UI/PrimaryPageStyle.h"
 #include "../UI/ToolbarMetrics.h"
+#include "../UI/ThemeBinding.h"
 
 #include "../ArkDriverClient/ArkDriverClient.h"
 #include "../OnlineScan/SandboxUploadActions.h"
@@ -28,6 +29,7 @@
 #include <QCoreApplication>
 #include <QDateTime>
 #include <QDir>
+#include <QEvent>
 #include <QFile>
 #include <QFileInfo>
 #include <QFileIconProvider>
@@ -1707,17 +1709,88 @@ namespace
         tablePalette.setColor(QPalette::WindowText, KswordTheme::TextPrimaryColor());
         tablePalette.setColor(QPalette::HighlightedText, KswordTheme::OnAccentColor());
         tablePalette.setColor(QPalette::Highlight, KswordTheme::AccentColor(KswordTheme::AccentRole::Blue));
-        table->setPalette(tablePalette);
+        if (table->palette() != tablePalette)
+        {
+            table->setPalette(tablePalette);
+        }
         table->setAlternatingRowColors(!usesTransparentBackground);
         table->setAutoFillBackground(!usesTransparentBackground);
         table->setAttribute(Qt::WA_StyledBackground, usesTransparentBackground);
         if (table->viewport() != nullptr)
         {
-            table->viewport()->setPalette(tablePalette);
+            if (table->viewport()->palette() != tablePalette)
+            {
+                table->viewport()->setPalette(tablePalette);
+            }
             table->viewport()->setAutoFillBackground(!usesTransparentBackground);
             table->viewport()->setAttribute(Qt::WA_StyledBackground, usesTransparentBackground);
         }
     }
+
+    void refreshAuditTableTheme(QTableWidget* table)
+    {
+        if (table == nullptr)
+        {
+            return;
+        }
+
+        // 只替换本页拥有的表格规则，保留共享表格呈现及额外业务样式块。
+        const QString oldRules = table->property("ksword_window_audit_style_block").toString();
+        const QString rules = table->property("ksword_transparent_audit_table").toBool()
+            ? transparentAuditTableStyle() : auditTableStyle();
+        QString style = table->styleSheet();
+        if (oldRules != rules || !style.contains(rules))
+        {
+            if (!oldRules.isEmpty())
+            {
+                style.remove(oldRules);
+            }
+            if (!style.isEmpty() && !style.endsWith(QChar('\n')))
+            {
+                style += QChar('\n');
+            }
+            style += rules;
+            table->setProperty("ksword_window_audit_style_block", rules);
+            const QPointer<QTableWidget> guardedTable(table);
+            if (table->styleSheet() != style)
+            {
+                table->setStyleSheet(style);
+            }
+            if (guardedTable == nullptr)
+            {
+                return;
+            }
+        }
+        applyAuditTablePalette(table);
+        if (table->viewport() != nullptr)
+        {
+            table->viewport()->update();
+        }
+    }
+
+    class AuditTableThemeOnShow final : public QObject
+    {
+    public:
+        explicit AuditTableThemeOnShow(QTableWidget* table)
+            : QObject(table), m_table(table)
+        {
+            table->installEventFilter(this);
+        }
+
+    protected:
+        bool eventFilter(QObject* watched, QEvent* event) override
+        {
+            if (watched == m_table.data() && event->type() == QEvent::Show)
+            {
+                // 隐藏 Tab 换肤时无需改树；首次重新展示在绘制前补齐当前主题。
+                refreshAuditTableTheme(m_table.data());
+            }
+            return QObject::eventFilter(watched, event);
+        }
+
+    private:
+        QPointer<QTableWidget> m_table; // 过滤器与表格同寿命，不跨页面保存裸指针。
+    };
 
     // applyTransparentAuditTableBackground 作用：
     // - 输入 table：需要穿透父级背景的 WindowDock 审计表；
@@ -1731,8 +1804,7 @@ namespace
         }
 
         table->setProperty("ksword_transparent_audit_table", true);
-        table->setStyleSheet(transparentAuditTableStyle());
-        applyAuditTablePalette(table);
+        refreshAuditTableTheme(table);
     }
 
     // copyTableCurrentRow 作用：
@@ -2764,8 +2836,6 @@ namespace
             return;
         }
         const bool wasSorting = table->isSortingEnabled();
-        const bool usesTransparentBackground =
-            table->property("ksword_transparent_audit_table").toBool();
         table->setSortingEnabled(false);
         table->setVisible(true);
         table->clearContents();
@@ -2786,18 +2856,8 @@ namespace
                 QTableWidgetItem* item = new QTableWidgetItem(cellText);
                 item->setFlags(item->flags() & ~Qt::ItemIsEditable);
                 item->setToolTip(cellText);
-                // 单元格前景/背景：
-                // - 透明审计表不写入 item 背景刷，让每格穿透到父级 Tab 页；
-                // - 其它审计表保留交替底色，保证独立页面的行可读性；
-                // - item 仍由 QTableWidget 接管生命周期。
-                item->setForeground(QBrush(KswordTheme::TextPrimaryColor()));
-                if (!usesTransparentBackground)
-                {
-                    item->setBackground(QBrush(
-                        (rowIndex % 2) == 0
-                        ? KswordTheme::SurfaceColor()
-                        : KswordTheme::SurfaceAltColor()));
-                }
+                // 普通单元格随 palette/交替行取得当前主题色，不保存构造时的中性画刷。
+                // 独立业务写入的 Foreground/BackgroundRole 仍由原委托处理。
                 if (hasProcessIconColumn &&
                     hasProcessPathColumn &&
                     columnIndex == processIconColumn &&
@@ -2948,68 +3008,16 @@ void WindowDock::refreshThemeVisuals()
 
     for (QTableWidget* const table : auditTables)
     {
-        if (table == nullptr)
+        if (table == nullptr || !table->isVisible())
         {
             continue;
         }
-
-        // usesTransparentBackground 用途：主题刷新后保留原有背景穿透语义。
-        const bool usesTransparentBackground =
-            table->property("ksword_transparent_audit_table").toBool();
-        table->setStyleSheet(
-            usesTransparentBackground
-                ? transparentAuditTableStyle()
-                : auditTableStyle());
-        applyAuditTablePalette(table);
-
-        // 已存在的 item 保存了创建时的 QBrush，必须逐项更新，不能只依赖新 palette。
-        for (int rowIndex = 0; rowIndex < table->rowCount(); ++rowIndex)
-        {
-            for (int columnIndex = 0; columnIndex < table->columnCount(); ++columnIndex)
-            {
-                QTableWidgetItem* const item = table->item(rowIndex, columnIndex);
-                if (item == nullptr)
-                {
-                    continue;
-                }
-
-                item->setForeground(QBrush(KswordTheme::TextPrimaryColor()));
-                item->setBackground(
-                    usesTransparentBackground
-                        ? QBrush()
-                        : QBrush(
-                            (rowIndex % 2) == 0
-                                ? KswordTheme::SurfaceColor()
-                                : KswordTheme::SurfaceAltColor()));
-            }
-        }
-        if (table->viewport() != nullptr)
-        {
-            table->viewport()->update();
-        }
-        table->update();
+        refreshAuditTableTheme(table);
     }
 
-    // presetButtons 用途：刷新所有通过动态属性标识的 A/B 按钮，不改变其选中状态。
-    const QList<QPushButton*> presetButtons = findChildren<QPushButton*>();
-    for (QPushButton* const button : presetButtons)
-    {
-        if (button == nullptr
-            || !button->property(kColumnPresetSelectedProperty).isValid())
-        {
-            continue;
-        }
-        ks::ui::SetSegmentedButtonSelected(button,
-            button->property(kColumnPresetSelectedProperty).toBool());
-    }
+    // A/B 分段控件在绘制时读取主题，换肤不重新写选中状态或扫描内嵌页面。
 
-    if (m_queryWindowDetailButton != nullptr)
-    {
-        // 独立查询动作保留统一底面和几何，不在换肤时恢复旧圆角及留白。
-        ks::ui::ApplyFlatButtonTheme(m_queryWindowDetailButton, ks::ui::FlatButtonTone::Neutral,
-            ks::ui::FlatButtonAppearance::Solid);
-        ks::ui::NormalizeToolbarControl(m_queryWindowDetailButton);
-    }
+    // 独立查询按钮由构造时登记的 Solid 绑定刷新，换肤不重复登记或重新处理几何。
 }
 
 void WindowDock::showEvent(QShowEvent* showEventPointer)
@@ -3075,8 +3083,16 @@ void WindowDock::initializeUi()
         table->setWordWrap(false);
         table->setTextElideMode(Qt::ElideRight);
         table->setMinimumHeight(120);
-        table->setStyleSheet(auditTableStyle());
-        applyAuditTablePalette(table);
+        refreshAuditTableTheme(table);
+        new AuditTableThemeOnShow(table);
+        const QPointer<QTableWidget> guardedTable(table);
+        ks::ui::BindWidgetTheme(table, [guardedTable]()
+            {
+                if (guardedTable != nullptr && guardedTable->isVisible())
+                {
+                    refreshAuditTableTheme(guardedTable.data());
+                }
+            });
         table->verticalHeader()->setVisible(false);
         table->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
         table->horizontalHeader()->setStretchLastSection(true);
@@ -3292,6 +3308,8 @@ void WindowDock::initializeUi()
         detailToolLayout->setSpacing(6);
         m_queryWindowDetailButton = new QPushButton(QIcon(QStringLiteral(":/Icon/process_tree.svg")), QStringLiteral("查询选中窗口详情"), detailPage);
         m_queryWindowDetailButton->setToolTip(QStringLiteral("只对当前选中 HWND 按需查询 win32k window detail，不批量扫描全部窗口"));
+        ks::ui::ApplyFlatButtonTheme(m_queryWindowDetailButton, ks::ui::FlatButtonTone::Neutral,
+            ks::ui::FlatButtonAppearance::Solid); // 一次登记，真实主题变化由共享绑定处理。
         detailToolLayout->addWidget(m_queryWindowDetailButton, 0);
         QLabel* detailHintLabel = new QLabel(QStringLiteral("详情区：先显示快照，按需补充单 HWND runtime readiness/tagWND 诊断。"), detailPage);
         detailHintLabel->setStyleSheet(
