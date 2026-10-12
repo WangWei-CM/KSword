@@ -3,6 +3,7 @@
 #include "./McpUiController.h"
 #include <QPointer>
 #include <QString>
+#include <QSet>
 #include <memory>
 
 class QLocalServer;
@@ -28,14 +29,20 @@ namespace ks::ui
         QString lastError() const; // 返回启动失败的诊断文本，仅供日志/诊断使用。
         // 只允许主程序内建代码登记特殊控件读取；不通过 IPC 接受类名或回调。
         void registerReadAdapter(const QByteArray& className, McpUiController::ReadAdapter adapter);
+        void setActivitySink(McpUiController::ActivitySink sink); // 连接与请求日志共用主窗口的有界存储。
 
     private:
         void acceptConnection(QLocalSocket* socket); // 校验身份并绑定有界单请求会话。
+        void reportActivity(const QString& pattern, const QStringList& arguments = {}); // 只转发固定模板和元数据。
+        void reportRequest(quint32 peerPid, const QString& method, const QString& requestId,
+            const QJsonObject& response); // 不输出参数、业务结果或未知方法原文。
         QPointer<QWidget> m_host; // 所有 UI 对象的宿主与生命周期边界。
         std::unique_ptr<McpUiController> m_controller; // GUI 线程中的固定控件方法适配器。
         QLocalServer* m_server = nullptr; // QObject 子对象，只有显式 start 后监听。
         QString m_endpoint; // PID 隔离的本地服务名称。
         QString m_lastError; // 启动错误的值快照，不保存令牌或用户输入。
+        McpUiController::ActivitySink m_activitySink; // 主窗口拥有实际日志缓冲。
+        QSet<quint32> m_loggedPeers; // 每个客户端 PID 首次接入记录一次，避免短连接轮询刷屏。
         bool m_closed = false; // 宿主拆除后拒绝新请求与重启。
         int m_connections = 0; // 当前被本服务接纳的本地连接计数。
     };

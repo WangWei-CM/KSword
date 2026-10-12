@@ -7943,6 +7943,14 @@ void MainWindow::showSettingsPanelFromMenu(bool showLanguageTab)
         settingsPanel, &SettingsDock::setMcpServiceState);
     settingsPanel->setMcpServiceState(m_mcpLocalBridge && m_mcpLocalBridge->isListening(),
         m_mcpLocalBridge ? m_mcpLocalBridge->endpoint() : QString(), m_mcpServiceError);
+    // 打开时回填完整有界日志；后续增量排队投递，不在 MCP 请求/派发栈内改动编辑器。
+    settingsPanel->setMcpOperationLog(m_mcpOperationLog.join(QLatin1Char('\n')));
+    connect(this, &MainWindow::mcpOperationLogAppended,
+        settingsPanel, &SettingsDock::appendMcpOperationLog, Qt::QueuedConnection);
+    connect(this, &MainWindow::mcpOperationLogCleared,
+        settingsPanel, &SettingsDock::clearMcpOperationLog, Qt::QueuedConnection);
+    connect(settingsPanel, &SettingsDock::mcpOperationLogClearRequested,
+        this, &MainWindow::clearMcpOperationLog);
     if (showLanguageTab)
     {
         settingsPanel->showLanguageSettingsTab();

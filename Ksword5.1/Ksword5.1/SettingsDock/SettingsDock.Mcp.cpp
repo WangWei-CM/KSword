@@ -6,6 +6,7 @@
 #include "../UI/ThemeAccentIcon.h"
 #include "../UI/ThemeStatusRole.h"
 #include "../theme.h"
+#include "../../../shared/usermode/KswordMcpProtocol.h"
 
 #include <QApplication>
 #include <QCheckBox>
@@ -159,6 +160,15 @@ void SettingsDock::initializeMcpTab()
     auto* columns = ks::ui::CreateSecondaryColumns(service, client, m_mcpTab, 900, 1, 1);
     auto* settingsScroll = ks::ui::CreateSecondaryFormScroll(columns, m_mcpTab); // 自然高参数滚动区。
     root->addWidget(settingsScroll, 0);
+    // 配置与日志共用剩余高度，参数/会话状态始终可见，文本各自承担内部滚动。
+    auto* outputTabs = new QTabWidget(m_mcpTab); // 本页内部输出导航，不另造详情外框。
+    outputTabs->setObjectName(QStringLiteral("mcp_output_tabs"));
+    ks::ui::StyleSecondaryTabs(outputTabs);
+    root->addWidget(outputTabs, 1);
+    auto* configPage = new QWidget(outputTabs); // 原配置预览保留自身控件与文档身份。
+    auto* configLayout = new QVBoxLayout(configPage);
+    configLayout->setContentsMargins(0, 0, 0, 0);
+    configLayout->setSpacing(8);
     auto* previewRow = new QHBoxLayout(); // 配置标题与复制动作固定在预览上方。
     previewRow->addWidget(ks::settings::ui::Label(m_mcpTab, QStringLiteral("settings.mcp.preview"),
         QStringLiteral("配置预览")), 1);
@@ -167,15 +177,42 @@ void SettingsDock::initializeMcpTab()
         QStringLiteral("复制完整 MCP 客户端配置"), ks::ui::FlatButtonTone::Neutral);
     previewRow->addWidget(m_mcpCopyButton);
     ks::ui::NormalizeToolbarRow(previewRow);
-    root->addLayout(previewRow);
+    configLayout->addLayout(previewRow);
     m_mcpConfigPreview = new CodeEditorWidget(m_mcpTab);
     m_mcpConfigPreview->setObjectName(QStringLiteral("mcp_config_preview"));
     m_mcpConfigPreview->setReadOnly(true);
     m_mcpConfigPreview->setWordWrapEnabled(true);
     m_mcpConfigPreview->setMinimumHeight(180);
-    root->addWidget(m_mcpConfigPreview, 1);
+    configLayout->addWidget(m_mcpConfigPreview, 1);
     m_mcpConfigHintLabel = McpHint(m_mcpTab, QStringLiteral("settings.mcp.connection_hint"), QString());
-    root->addWidget(m_mcpConfigHintLabel);
+    configLayout->addWidget(m_mcpConfigHintLabel);
+    outputTabs->addTab(configPage, QStringLiteral("配置预览"));
+    language.bindTab(outputTabs, configPage, QStringLiteral("settings.mcp.preview"), QStringLiteral("配置预览"));
+
+    auto* logPage = new QWidget(outputTabs); // 操作日志使用同一个规范文档，复制与导出保持完整。
+    auto* logLayout = new QVBoxLayout(logPage);
+    logLayout->setContentsMargins(0, 0, 0, 0);
+    logLayout->setSpacing(8);
+    auto* logToolbar = new QHBoxLayout(); // 说明与清空动作固定，正文独立滚动。
+    logToolbar->addWidget(McpHint(logPage, QStringLiteral("settings.mcp.log_hint"),
+        QStringLiteral("保留最近1000条。记录调用派发与错误，不代表业务完成；不记录输入值或读取结果。")), 1);
+    m_mcpClearLogButton = McpIconButton(logPage, QStringLiteral("mcp_operation_log_clear"),
+        QStringLiteral(":/Icon/log_clear.svg"), QStringLiteral("settings.mcp.log_clear"),
+        QStringLiteral("清空本次 MCP 操作日志"), ks::ui::FlatButtonTone::Neutral);
+    m_mcpClearLogButton->setEnabled(false);
+    logToolbar->addWidget(m_mcpClearLogButton);
+    ks::ui::NormalizeToolbarRow(logToolbar);
+    logLayout->addLayout(logToolbar);
+    m_mcpLogViewer = new CodeEditorWidget(logPage);
+    m_mcpLogViewer->setObjectName(QStringLiteral("mcp_operation_log"));
+    m_mcpLogViewer->setReadOnly(true);
+    m_mcpLogViewer->setWordWrapEnabled(true);
+    m_mcpLogViewer->setMaximumBlockCount(ks::mcp::MaxActivityLogLines);
+    m_mcpLogViewer->setMinimumHeight(180);
+    logLayout->addWidget(m_mcpLogViewer, 1);
+    outputTabs->addTab(logPage, QStringLiteral("操作日志"));
+    language.bindTab(outputTabs, logPage, QStringLiteral("settings.mcp.log"), QStringLiteral("操作日志"));
+    connect(m_mcpClearLogButton, &QPushButton::clicked, this, &SettingsDock::mcpOperationLogClearRequested);
     m_tabWidget->addTab(m_mcpTab, QStringLiteral("MCP"));
     language.bindTab(m_tabWidget, m_mcpTab, QStringLiteral("settings.tab.mcp"), QStringLiteral("MCP"));
 
@@ -218,6 +255,27 @@ void SettingsDock::initializeMcpTab()
     refreshMcpServiceState();
 }
 
+// 主窗口为唯一日志源；设置窗口重开时回填最近记录，不清除服务的历史。
+void SettingsDock::setMcpOperationLog(const QString& text)
+{
+    m_mcpLogViewer->setRawText(text);
+    m_mcpClearLogButton->setEnabled(!text.isEmpty());
+}
+
+// 原文增量追加沿用共享编辑器的尾部跟随规则，用户阅读旧记录时不跳动。
+void SettingsDock::appendMcpOperationLog(const QString& line)
+{
+    m_mcpLogViewer->appendRawText(line, true);
+    m_mcpClearLogButton->setEnabled(true);
+}
+
+// 收到统一清空通知后删除当前文档，搜索、复制与导出不保留旧镜像。
+void SettingsDock::clearMcpOperationLog()
+{
+    m_mcpLogViewer->clear();
+    m_mcpClearLogButton->setEnabled(false);
+}
+
 // 输入主窗口回填的真实状态；错误和值始终按普通文本显示，不解释为富文本。
 void SettingsDock::setMcpServiceState(bool running, const QString& endpoint, const QString& error)
 {
@@ -233,6 +291,11 @@ void SettingsDock::refreshMcpServiceState()
     if (!m_mcpStatusLabel)
     {
         return;
+    }
+    if (m_mcpLogViewer)
+    {
+        // 状态与语言刷新共用入口，空日志提示不混入原始记录正文。
+        m_mcpLogViewer->setPlaceholderText(ks::i18n::sourceText(QStringLiteral("本次会话尚无 MCP 操作记录。")));
     }
     m_mcpStatusLabel->setText(ks::i18n::sourceText(m_mcpServiceRunning
         ? QStringLiteral("运行中") : (m_mcpServiceError.isEmpty()

@@ -50,6 +50,9 @@ public:
 
     // 输入真实监听状态、端点与错误；主窗口在打开设置或启停后调用，不保存偏好。
     void setMcpServiceState(bool running, const QString& endpoint, const QString& error);
+    void setMcpOperationLog(const QString& text); // 回填主窗口保留的完整日志，原文不翻译。
+    void appendMcpOperationLog(const QString& line); // 增量追加，阅读旧记录时保持滚动位置。
+    void clearMcpOperationLog(); // 收到主窗口清空通知后重置当前视图。
 
 protected:
     void changeEvent(QEvent* event) override;
@@ -67,6 +70,7 @@ signals:
 
     // 用户请求本次会话启停；主窗口处理后回填真实状态，取消设置不回滚此即时动作。
     void mcpServiceEnabledRequested(bool enabled);
+    void mcpOperationLogClearRequested(); // 用户即时清空本次 MCP 日志，不提交其它设置。
 
     // bugcheckDiagnosticsAutoInstallChanged 作用：通知主窗口更新本次已加载配置与页面入口显示状态。
     void bugcheckDiagnosticsAutoInstallChanged(bool enabled);
@@ -300,6 +304,8 @@ private:
     QPushButton* m_mcpStopButton = nullptr; // 本次停止动作。
     QPushButton* m_mcpCopyButton = nullptr; // 复制完整客户端配置。
     CodeEditorWidget* m_mcpConfigPreview = nullptr; // 配置规范文本的唯一文档。
+    CodeEditorWidget* m_mcpLogViewer = nullptr; // 只读操作日志，共用编辑器搜索/复制/导出。
+    QPushButton* m_mcpClearLogButton = nullptr; // 清空主窗口保留的本次日志。
     bool m_mcpServiceRunning = false; // 主窗口回填的真实监听状态。
     QString m_mcpServiceEndpoint; // 当前 PID 端点的值快照。
     QString m_mcpServiceError; // 最近一次监听失败的值快照。

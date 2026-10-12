@@ -20,6 +20,7 @@
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QString>
+#include <QStringList>
 #include <QByteArray>
 #include <QPixmap>
 #include <QToolButton>
@@ -167,6 +168,8 @@ signals:
 
     // 本地 MCP 监听状态变化；所有打开的设置页共用真实状态与错误快照。
     void mcpServiceStateChanged(bool running, const QString& endpoint, const QString& error);
+    void mcpOperationLogAppended(const QString& line); // 有界日志新增，设置页排队接收避免重入调用栈。
+    void mcpOperationLogCleared(); // 本次日志清空，同时通知所有打开的设置页。
 
 protected:
     // eventFilter 作用：
@@ -399,6 +402,8 @@ private:
     // - showLanguageTab=true 时直接定位到语言设置页。
     void showSettingsPanelFromMenu(bool showLanguageTab = false);
     void setMcpServiceEnabled(bool enabled); // 本次启停，不改自动启动偏好或网络配置。
+    void appendMcpOperationLog(const QString& text); // 附加时间戳并裁剪旧记录，入参不含业务正文。
+    void clearMcpOperationLog(); // 即时清空本次内存日志，不修改配置或其它全局日志。
     void toggleLogOutputWindow();
     void persistLogOutputWindowGeometry();
     void restoreLogOutputWindowGeometry();
@@ -742,6 +747,7 @@ private:
     ks::ui::PageNavigationBridge* m_pageNavigationBridge = nullptr; // 不在主程序增加导航按钮。
     ks::ui::McpLocalBridge* m_mcpLocalBridge = nullptr; // 在页面及驱动后端拆除前关闭。
     QString m_mcpServiceError; // 最近一次启动失败，设置页可重试并清除此值。
+    QStringList m_mcpOperationLog; // 跨 MCP 启停和设置窗口重开保留的有界操作记录。
     ks::ui::CommandExecutionPopup* m_commandExecutionPopup = nullptr; // m_commandExecutionPopup：标题栏 CMD 选项弹层。
     bool m_windowPinned = false;                        // m_windowPinned：主窗口当前是否置顶。
     bool m_captureProtectionEnabled = false;            // m_captureProtectionEnabled：主窗口当前是否启用截屏屏蔽。

@@ -3,8 +3,10 @@
 #include "Internationalization/LanguageManager.h"
 #include "UI/McpLocalBridge.h"
 #include "UI/McpHexCanvasAdapter.h"
+#include "../../shared/usermode/KswordMcpProtocol.h"
 
 #include <QCoreApplication>
+#include <QDateTime>
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QPointer>
@@ -23,6 +25,7 @@ void MainWindow::setMcpServiceEnabled(bool enabled)
             m_mcpLocalBridge = nullptr;
             info << mcpEvent << ks::i18n::sourceText(QStringLiteral("本地 MCP 服务已停止。"))
                 .toUtf8().toStdString() << eol;
+            appendMcpOperationLog(ks::i18n::sourceText(QStringLiteral("本地 MCP 服务已停止。")));
         }
         m_mcpServiceError.clear();
         emit mcpServiceStateChanged(false, QString(), QString());
@@ -84,6 +87,21 @@ void MainWindow::setMcpServiceEnabled(bool enabled)
         }
         return nullptr;
     });
+    // 接收方由主窗口持有，日志只进入内存；设置页通过排队信号消费，避免传输栈重入。
+    const QPointer<MainWindow> host(this); // 服务关闭或窗口销毁后不再使用裸宿主。
+    m_mcpLocalBridge->setActivitySink([host](const QString& pattern, const QStringList& arguments)
+    {
+        if (host)
+        {
+            // 底层保持 Qt 独立，主程序按当前语言翻译固定模板后再填入安全元数据。
+            QString text = ks::i18n::sourceText(pattern); // 翻译模板，不翻译 ID、方法和机器码。
+            for (const QString& argument : arguments)
+            {
+                text = text.arg(argument);
+            }
+            host->appendMcpOperationLog(text);
+        }
+    });
     ks::ui::registerMcpHexCanvasAdapter(m_mcpLocalBridge); // 自绘画布仍只读取现有缓存。
     const bool started = m_mcpLocalBridge->start(); // 设置页按真实 listen 结果显示状态。
     m_mcpServiceError = started ? QString() : m_mcpLocalBridge->lastError();
@@ -91,6 +109,7 @@ void MainWindow::setMcpServiceEnabled(bool enabled)
     const QString diagnostic = started
         ? ks::i18n::sourceText(QStringLiteral("本地 MCP 桥已启用：%1")).arg(endpoint)
         : ks::i18n::sourceText(QStringLiteral("本地 MCP 桥启动失败：%1")).arg(m_mcpServiceError);
+    appendMcpOperationLog(diagnostic);
     if (started)
     {
         info << mcpEvent << diagnostic.toUtf8().toStdString() << eol;
@@ -104,4 +123,27 @@ void MainWindow::setMcpServiceEnabled(bool enabled)
         warn << mcpEvent << diagnostic.toUtf8().toStdString() << eol;
     }
     emit mcpServiceStateChanged(started, endpoint, m_mcpServiceError);
+}
+
+// 时间戳与有限单行记录组成规范日志源；只裁剪历史，不从设置页拉取另一份正文。
+void MainWindow::appendMcpOperationLog(const QString& text)
+{
+    QString message = text.left(1024); // 限制诊断长度，防止 OS 错误文本撑大缓冲。
+    message.replace(QLatin1Char('\r'), QStringLiteral("\\r"));
+    message.replace(QLatin1Char('\n'), QStringLiteral("\\n"));
+    const QString line = QDateTime::currentDateTime().toString(QStringLiteral("yyyy-MM-dd HH:mm:ss.zzz"))
+        + QStringLiteral(" | ") + message; // 保留每次调用的精确本地时间。
+    m_mcpOperationLog.append(line);
+    while (m_mcpOperationLog.size() > ks::mcp::MaxActivityLogLines)
+    {
+        m_mcpOperationLog.removeFirst();
+    }
+    emit mcpOperationLogAppended(line);
+}
+
+// 清空只作用于本次 MCP 内存日志，服务监听和已排队业务调用保持原语义。
+void MainWindow::clearMcpOperationLog()
+{
+    m_mcpOperationLog.clear();
+    emit mcpOperationLogCleared();
 }

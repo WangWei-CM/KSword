@@ -115,7 +115,26 @@ McpUiController::~McpUiController()
 // close：取消尚未执行的调用，不阻塞原有业务；历史 ID 从此不得再使用。
 void McpUiController::close()
 {
+    if (m_closed)
+    {
+        return;
+    }
     m_closed = true;
+    // 未派发调用明确记录取消；嵌套事件循环中的调用只记中断，不推断业务结果。
+    const auto operations = m_operations; // 日志回调期间不遍历可被关闭流程修改的原表。
+    const QPointer<McpUiController> self(this); // 日志接收方也不能延长控制器生命周期。
+    for (auto it = operations.cbegin(); it != operations.cend(); ++it)
+    {
+        if (it->state == QStringLiteral("queued") || it->state == QStringLiteral("dispatching"))
+        {
+            reportActivity(it.key(), it->state == QStringLiteral("queued")
+                ? QStringLiteral("cancelled") : QStringLiteral("interrupted"));
+            if (!self)
+            {
+                return;
+            }
+        }
+    }
     m_objects.clear();
     m_ids.clear();
     m_menuOwners.clear();
@@ -128,6 +147,21 @@ void McpUiController::close()
     m_readAdapters.clear();
     m_pageList = {};
     m_pageOpen = {};
+}
+
+// 接收方由主程序显式登记；回调只收到生成的操作身份、状态和固定错误码。
+void McpUiController::setActivitySink(ActivitySink sink)
+{
+    m_activitySink = std::move(sink);
+}
+
+void McpUiController::reportActivity(const QString& id, const QString& state, const QString& error)
+{
+    const ActivitySink sink = m_activitySink; // 副本保护回调栈，不依赖关闭期间的成员存活。
+    if (sink)
+    {
+        sink(QStringLiteral("调用回执 %1 | 状态=%2 | 错误=%3"), {id, state, error});
+    }
 }
 
 QJsonObject McpUiController::ok(const QJsonObject& data)
@@ -748,10 +782,16 @@ QJsonObject McpUiController::enqueue(QObject* target, std::function<QString()> d
         if (!error.isEmpty())
         {
             m_operations[id] = {QStringLiteral("failed"), error};
+            reportActivity(id, QStringLiteral("failed"), error);
             return;
         }
         m_operations[id].state = QStringLiteral("dispatching");
         QPointer<McpUiController> self(this); // 控件槽可关闭主窗口并销毁桥。
+        reportActivity(id, QStringLiteral("dispatching"));
+        if (!self || m_closed)
+        {
+            return;
+        }
         error = dispatch();
         if (!self || m_closed || !m_operations.contains(id))
         {
@@ -759,6 +799,7 @@ QJsonObject McpUiController::enqueue(QObject* target, std::function<QString()> d
         }
         m_operations[id] = {error.isEmpty() ? QStringLiteral("dispatched")
             : QStringLiteral("failed"), error};
+        reportActivity(id, m_operations[id].state, error);
     });
     return {{QStringLiteral("status"), QStringLiteral("accepted")},
         {QStringLiteral("data"), QJsonObject{{QStringLiteral("operation_id"), id},

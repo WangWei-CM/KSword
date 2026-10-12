@@ -8,6 +8,7 @@
 #include <QLocalServer>
 #include <QLocalSocket>
 #include <QTimer>
+#include <QUuid>
 #include <QWidget>
 #include <Windows.h>
 #include <vector>
@@ -72,7 +73,7 @@ namespace ks::ui
         }
 
         // 校验真实管道客户：同机、同会话、同 SID、同完整性级别才进入 GUI 分派。
-        bool isLocalPeer(QLocalSocket* socket)
+        bool isLocalPeer(QLocalSocket* socket, quint32* verifiedPid)
         {
             const HANDLE pipe = reinterpret_cast<HANDLE>(socket->socketDescriptor()); // Qt 原生管道句柄。
             ULONG peerPid = 0; // 由操作系统提供，不相信 JSON 中的 PID。
@@ -83,6 +84,7 @@ namespace ks::ui
             {
                 return false;
             }
+            *verifiedPid = static_cast<quint32>(peerPid); // PID 只从系统句柄读取，不采信 JSON。
             const BOOL hasPeerName = ::GetNamedPipeClientComputerNameW(pipe, peerComputer,
                 static_cast<ULONG>(std::size(peerComputer))); // Win32 本机连接可返回 ERROR_PIPE_LOCAL。
             const DWORD peerNameError = hasPeerName ? ERROR_SUCCESS : ::GetLastError();
@@ -226,6 +228,50 @@ namespace ks::ui
         return m_lastError;
     }
 
+    // 主窗口在 start 前登记；操作回执与传输事件共用同一个本地接收方。
+    void McpLocalBridge::setActivitySink(McpUiController::ActivitySink sink)
+    {
+        m_activitySink = std::move(sink);
+        m_controller->setActivitySink(m_activitySink);
+    }
+
+    void McpLocalBridge::reportActivity(const QString& pattern, const QStringList& arguments)
+    {
+        const auto sink = m_activitySink; // 回调副本保护服务关闭和接收方销毁的嵌套栈。
+        if (sink)
+        {
+            sink(pattern, arguments);
+        }
+    }
+
+    // 日志方法名限定协议白名单，请求标识只保留 UUID，响应仅取状态/错误/操作身份。
+    void McpLocalBridge::reportRequest(quint32 peerPid, const QString& method,
+        const QString& requestId, const QJsonObject& response)
+    {
+        if (!m_activitySink)
+        {
+            return;
+        }
+        const QString status = response.value(QStringLiteral("status")).toString(); // 服务生成的状态。
+        if (method == QStringLiteral("operation_status") && status == QStringLiteral("ok"))
+        {
+            return; // 正常轮询由真实派发状态日志代替，避免每次查询重复生成记录。
+        }
+        const QStringList methods{QStringLiteral("hello"), QStringLiteral("pages"),
+            QStringLiteral("open_page"), QStringLiteral("snapshot"), QStringLiteral("action"),
+            QStringLiteral("set_field"), QStringLiteral("read_table"), QStringLiteral("select_row"),
+            QStringLiteral("read_text"), QStringLiteral("read_custom"), QStringLiteral("operation_status")};
+        const QString safeMethod = methods.contains(method) ? method : QStringLiteral("unknown_method");
+        const QUuid uuid(requestId); // 非 UUID 请求身份不写原文，防止把输入当作日志内容。
+        const QString safeId = uuid.isNull() ? QStringLiteral("non_uuid") : uuid.toString(QUuid::WithoutBraces);
+        const QString errorCode = response.value(QStringLiteral("error")).toObject()
+            .value(QStringLiteral("code")).toString(); // 仅固定机器码，不读取结果正文。
+        const QString operation = response.value(QStringLiteral("data")).toObject()
+            .value(QStringLiteral("operation_id")).toString(); // 控制器生成的原生回执身份。
+        reportActivity(QStringLiteral("请求 %1 | 客户端 PID=%2 | 方法=%3 | 状态=%4 | 回执=%5 | 错误=%6"),
+            {safeId, QString::number(peerPid), safeMethod, status, operation, errorCode});
+    }
+
     void McpLocalBridge::registerReadAdapter(const QByteArray& className, McpUiController::ReadAdapter adapter)
     {
         if (!m_closed)
@@ -241,10 +287,16 @@ namespace ks::ui
             return;
         }
         socket->setParent(this);
-        if (m_closed || m_connections >= ks::mcp::MaxConnections || !isLocalPeer(socket))
+        quint32 peerPid = 0; // 当前管道的系统 PID；身份校验失败时也不记录令牌或 SID。
+        if (m_closed || m_connections >= ks::mcp::MaxConnections || !isLocalPeer(socket, &peerPid))
         {
             socket->abort();
             socket->deleteLater();
+            if (!m_closed)
+            {
+                reportActivity(QStringLiteral("拒绝 MCP 连接 | 客户端 PID=%1 | 原因=身份或连接上限校验失败"),
+                    {QString::number(peerPid)});
+            }
             return;
         }
         ++m_connections;
@@ -259,7 +311,7 @@ namespace ks::ui
         });
         const auto buffer = std::make_shared<QByteArray>(); // 当前连接唯一请求的 UTF-8 帧。
         const auto handled = std::make_shared<bool>(false); // 一个连接只分派一次，避免重复副作用。
-        const auto receive = [this, socket, buffer, handled]()
+        const auto receive = [this, socket, buffer, handled, peerPid]()
         {
             if (*handled || m_closed)
             {
@@ -270,6 +322,8 @@ namespace ks::ui
             {
                 *handled = true;
                 socket->abort();
+                reportActivity(QStringLiteral("拒绝 MCP 请求 | 客户端 PID=%1 | 原因=请求超出长度上限"),
+                    {QString::number(peerPid)});
                 return;
             }
             const qsizetype newline = buffer->indexOf('\n'); // 帧结束位置；JSON 内换行必须转义。
@@ -321,9 +375,27 @@ namespace ks::ui
                 response.insert(QStringLiteral("id"), id);
                 bytes = QJsonDocument(response).toJson(QJsonDocument::Compact) + '\n';
             }
+            // 每个已验证客户端首次接入记录一次；后续短连接只写方法与结果。
+            const QPointer<McpLocalBridge> loggedBridge(this); // 日志接收方可触发宿主关闭。
+            const QPointer<QLocalSocket> loggedSocket(socket); // 关闭桥时当前连接可能已被作废。
+            if (!m_loggedPeers.contains(peerPid) && m_loggedPeers.size() < 64)
+            {
+                m_loggedPeers.insert(peerPid);
+                reportActivity(QStringLiteral("接受 MCP 客户端 | PID=%1"), {QString::number(peerPid)});
+            }
+            if (!loggedBridge || !loggedSocket || m_closed)
+            {
+                return;
+            }
+            reportRequest(peerPid, method, id, response);
+            if (!loggedBridge || !loggedSocket || m_closed)
+            {
+                return;
+            }
             if (socket->write(bytes) != bytes.size())
             {
                 socket->abort();
+                reportActivity(QStringLiteral("MCP 回执发送失败 | 客户端 PID=%1"), {QString::number(peerPid)});
                 return;
             }
             socket->disconnectFromServer();

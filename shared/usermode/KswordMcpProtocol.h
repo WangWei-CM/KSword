@@ -8,5 +8,6 @@ namespace ks::mcp
     inline constexpr int MaxResponseBytes = 2 * 1024 * 1024; // 单次 UTF-8 响应及换行的上限。
     inline constexpr int MaxConnections = 8; // 同时存在的本地请求连接上限。
     inline constexpr int ConnectionTimeoutMs = 15000; // 未完成连接的总存活时间上限。
+    inline constexpr int MaxActivityLogLines = 1000; // 本次主程序生命周期内保留的操作日志条数。
     inline constexpr char EndpointPrefix[] = "ksword-mcp-"; // 后接当前主程序 PID。
 }

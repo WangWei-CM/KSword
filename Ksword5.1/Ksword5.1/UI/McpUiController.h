@@ -11,6 +11,7 @@
 #include <QPersistentModelIndex>
 #include <QQueue>
 #include <QString>
+#include <QStringList>
 #include <functional>
 
 class QAbstractItemModel;
@@ -25,6 +26,7 @@ public:
     using PageList = std::function<QJsonArray()>; // 只列页面，不创建惰性内容。
     using PageOpen = std::function<QWidget*(const QString&)>; // 原导航返回页面根。
     using ReadAdapter = std::function<QJsonObject(QObject*, const QJsonObject&)>; // 自绘只读扩展。
+    using ActivitySink = std::function<void(const QString&, const QStringList&)>; // 日志模板与元数据分离。
 
     // host 为所有权边界；两个回调由主窗口提供。全部调用限定 GUI 线程。
     McpUiController(QWidget* host, PageList list, PageOpen open);
@@ -33,6 +35,7 @@ public:
     QJsonObject request(const QString& method, const QJsonObject& params);
     // 应用在 GUI 线程显式登记类型；callback 返回统一 status/data/error 对象。
     void registerReadAdapter(const QByteArray& className, ReadAdapter adapter);
+    void setActivitySink(ActivitySink sink); // GUI 线程登记本地日志接收方，空回调关闭记录。
 
 private:
     // 对象 ID 只在当前进程/桥实例有效；QPointer 拒绝销毁后地址复用。
@@ -75,11 +78,13 @@ private:
     QJsonObject selectRow(const QJsonObject& params);
     QString modelRevision(QAbstractItemView* view);
     QJsonObject enqueue(QObject* target, std::function<QString()> dispatch);
+    void reportActivity(const QString& id, const QString& state, const QString& error = {});
 
     // 控制器状态全部由 GUI 线程读写；所有排队 lambda 以控制器作为 context。
     QPointer<QWidget> m_host; // 主窗口及其所属窗口的访问边界。
     PageList m_pageList; // 页面目录回调，不产生页面初始化副作用。
     PageOpen m_pageOpen; // 原有主窗口导航与惰性构建回调。
+    ActivitySink m_activitySink; // 固定日志接收方，不接收请求参数或读取内容。
     QString m_epoch; // 每次桥构造的随机实例身份。
     quint64 m_nextObject = 0; // 对象编号单调增长，永不以指针作为外部 ID。
     quint64 m_nextOperation = 0; // 排队操作回执的单调编号。
