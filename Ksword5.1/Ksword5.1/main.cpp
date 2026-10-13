@@ -1503,6 +1503,8 @@ int main(int argc, char* argv[])
     }
 
     if (startupSettings.autoRequestAdminOnStartup
+        // MCP 普通自动启动遵守安装时的权限选择，本次覆盖不写回保存的启动偏好。
+        && !(hasCommandLineArgument(L"--mcp") && hasCommandLineArgument(L"--mcp-no-auto-elevation"))
         && !rescueSession.active()
         && !privilegeRestartLaunch
         && !isCurrentProcessElevated())

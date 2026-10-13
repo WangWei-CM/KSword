@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from pathlib import Path
 from typing import Annotated, Any, Literal
 
 import jsonschema
@@ -15,6 +16,7 @@ from pydantic import Field
 from protocol import (BridgeError, bounded_id, bounded_int, bounded_value,
                       parent_path, require_confirmation, validate_pid)
 from winpipe import BridgeClient, PipeTimeouts
+from launcher import ManagedBridgeClient, StartupOptions
 
 # 类型别名用于官方 SDK 自动生成严格的工具参数 schema。
 ObjectId = Annotated[str, Field(min_length=1, max_length=256)]
@@ -48,8 +50,8 @@ class StrictFastMCP(FastMCP):
         return await super().call_tool(name, arguments)
 
 
-def create_server(client: BridgeClient) -> FastMCP:
-    """输入固定 PID 的桥客户端；返回仅由 main 以 stdio 运行的 MCP server。"""
+def create_server(client: BridgeClient | ManagedBridgeClient) -> FastMCP:
+    """输入固定 PID 或明确路径的桥客户端；返回以 stdio 运行的 MCP server。"""
     mcp = StrictFastMCP(
         "KSword GUI",
         instructions=(
@@ -62,6 +64,8 @@ def create_server(client: BridgeClient) -> FastMCP:
         log_level="WARNING",
     )
     slots = asyncio.BoundedSemaphore(4)  # 最多四个仍在执行的原生 I/O，防止线程池排队无界。
+    # auto 模式的首次工具调用可能启动主程序，不能继续声明整个调用绝对只读。
+    read_annotations = NAVIGATION if getattr(client, "may_start_gui", False) else READ_ONLY
 
     def release_cancelled_worker(worker: asyncio.Task[dict[str, Any]]) -> None:
         """调用方取消后等原生线程真正结束再释放并发槽，并消费无人接收的异常。"""
@@ -90,13 +94,13 @@ def create_server(client: BridgeClient) -> FastMCP:
                 slots.release()
 
     # ksword_hello：无输入，返回当前桥的版本、PID 和能力回执。
-    @mcp.tool(annotations=READ_ONLY)
+    @mcp.tool(annotations=read_annotations)
     async def ksword_hello() -> dict[str, Any]:
         """Query bridge version, PID and capabilities; does not start KSword or load a driver."""
         return await invoke("hello", {})
 
     # ksword_pages：无输入，返回页面目录；不会自动打开懒加载页。
-    @mcp.tool(annotations=READ_ONLY)
+    @mcp.tool(annotations=read_annotations)
     async def ksword_pages() -> dict[str, Any]:
         """List navigable GUI pages, including currently uninitialized lazy pages."""
         return await invoke("pages", {})
@@ -109,7 +113,7 @@ def create_server(client: BridgeClient) -> FastMCP:
         return await invoke("open_page", {"page_id": page_id})
 
     # ksword_snapshot：页面/根对象与节点、深度预算为输入，返回有界平铺控件树。
-    @mcp.tool(annotations=READ_ONLY)
+    @mcp.tool(annotations=read_annotations)
     async def ksword_snapshot(
         page_id: OptionalId = "",
         root_id: OptionalId = "",
@@ -153,7 +157,7 @@ def create_server(client: BridgeClient) -> FastMCP:
                                           "submit": submit, "confirmed": confirmed})
 
     # ksword_read_table：目标及父行路径、窗口参数为输入，返回切片和模型修订身份。
-    @mcp.tool(annotations=READ_ONLY)
+    @mcp.tool(annotations=read_annotations)
     async def ksword_read_table(
         object_id: ObjectId,
         row_start: RowIndex = 0,
@@ -196,7 +200,7 @@ def create_server(client: BridgeClient) -> FastMCP:
                                            "confirmed": confirmed})
 
     # ksword_read_text：目标及 UTF-16 范围为输入，返回有界文字片段与原有状态。
-    @mcp.tool(annotations=READ_ONLY)
+    @mcp.tool(annotations=read_annotations)
     async def ksword_read_text(
         object_id: ObjectId,
         offset: RowIndex = 0,
@@ -210,7 +214,7 @@ def create_server(client: BridgeClient) -> FastMCP:
                                           "length": length})
 
     # ksword_read_custom：目标及适配器选项为输入，返回主程序预注册控件的只读快照。
-    @mcp.tool(annotations=READ_ONLY)
+    @mcp.tool(annotations=read_annotations)
     async def ksword_read_custom(
         object_id: ObjectId,
         options: dict[str, Any] = {},
@@ -223,7 +227,7 @@ def create_server(client: BridgeClient) -> FastMCP:
         return await invoke("read_custom", {"object_id": object_id, "options": options.copy()})
 
     # ksword_operation_status：operation_id 为输入，返回控件调用状态而非业务完成状态。
-    @mcp.tool(annotations=READ_ONLY)
+    @mcp.tool(annotations=read_annotations)
     async def ksword_operation_status(operation_id: ObjectId) -> dict[str, Any]:
         """Query queued/dispatching/dispatched/failed control invocation state; verify business results separately."""
         bounded_id(operation_id, "operation_id")
@@ -233,16 +237,27 @@ def create_server(client: BridgeClient) -> FastMCP:
 
 
 def parse_arguments() -> argparse.Namespace:
-    """解析必填目标 PID 和有限秒数预算；无 GUI 自动发现或启动功能。"""
+    """解析固定 PID 或明确程序路径，以及用户安装时选择的启动策略。"""
     parser = argparse.ArgumentParser(description="KSword local GUI MCP stdio sidecar")
-    parser.add_argument("--pid", required=True, type=int,
+    target = parser.add_mutually_exclusive_group(required=True)
+    target.add_argument("--pid", type=int,
                         help="PID of the KSword process explicitly started with --mcp")
+    target.add_argument("--ksword-exe", type=Path, help="Absolute path to Ksword5.1.exe")
+    parser.add_argument("--startup-policy", choices=("fail", "auto"), default="fail")
+    parser.add_argument("--startup-elevated", action="store_true")
+    parser.add_argument("--startup-timeout", type=float, default=30.0, metavar="SECONDS")
     parser.add_argument("--connect-timeout", type=float, default=2.0, metavar="SECONDS")
     parser.add_argument("--write-timeout", type=float, default=2.0, metavar="SECONDS")
     parser.add_argument("--read-timeout", type=float, default=10.0, metavar="SECONDS")
     arguments = parser.parse_args()
     try:
-        validate_pid(arguments.pid)
+        if arguments.pid is not None:
+            validate_pid(arguments.pid)
+            if arguments.startup_policy != "fail" or arguments.startup_elevated or arguments.startup_timeout != 30.0:
+                raise ValueError("Startup options require --ksword-exe")
+        else:
+            StartupOptions(arguments.ksword_exe, arguments.startup_policy,
+                           arguments.startup_elevated, arguments.startup_timeout)
         PipeTimeouts(arguments.connect_timeout, arguments.write_timeout, arguments.read_timeout)
     except (BridgeError, ValueError) as exc:
         parser.error(str(exc))
@@ -250,11 +265,15 @@ def parse_arguments() -> argparse.Namespace:
 
 
 def main() -> None:
-    """从命令行创建固定进程客户端，stdio 的 stdout 专供官方 MCP 协议。"""
+    """从用户配置创建桥客户端；stdout 始终专供 MCP，不用于启动诊断输出。"""
     arguments = parse_arguments()
     timeouts = PipeTimeouts(arguments.connect_timeout, arguments.write_timeout,
                             arguments.read_timeout)
-    client = BridgeClient(arguments.pid, timeouts=timeouts)
+    if arguments.pid is not None:
+        client = BridgeClient(arguments.pid, timeouts=timeouts)
+    else:
+        client = ManagedBridgeClient(StartupOptions(arguments.ksword_exe, arguments.startup_policy,
+                                                   arguments.startup_elevated, arguments.startup_timeout), timeouts)
     create_server(client).run(transport="stdio")
 
 

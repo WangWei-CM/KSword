@@ -118,6 +118,7 @@ private:
     void collectMcpSettingsFromUi(ks::settings::AppearanceSettings& settings) const;
     void refreshMcpServiceState(); // 根据最近的真实状态刷新文案和启停按钮。
     void refreshMcpClientConfiguration(); // 仅更新当前 PID 的配置预览，不运行脚本。
+    void refreshMcpInstallPrompt(); // 读取随程序嵌入的规范提示词，语言切换时刷新原文。
 
     // initializeBugcheckDiagnosticsControls 作用：在“功能”标签追加配置化蓝屏诊断的三种操作。
     // 调用方式：initializeFeaturesTab 创建完已有分组后调用。
@@ -306,6 +307,8 @@ private:
     CodeEditorWidget* m_mcpConfigPreview = nullptr; // 配置规范文本的唯一文档。
     CodeEditorWidget* m_mcpLogViewer = nullptr; // 只读操作日志，共用编辑器搜索/复制/导出。
     QPushButton* m_mcpClearLogButton = nullptr; // 清空主窗口保留的本次日志。
+    CodeEditorWidget* m_mcpInstallPromptViewer = nullptr; // 与发布 README 同源的 agent 安装提示词。
+    QPushButton* m_mcpInstallPromptCopyButton = nullptr; // 复制完整提示词供 agent 执行安装。
     bool m_mcpServiceRunning = false; // 主窗口回填的真实监听状态。
     QString m_mcpServiceEndpoint; // 当前 PID 端点的值快照。
     QString m_mcpServiceError; // 最近一次监听失败的值快照。

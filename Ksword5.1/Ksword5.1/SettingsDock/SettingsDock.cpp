@@ -243,6 +243,7 @@ void SettingsDock::changeEvent(QEvent* event)
         refreshBugcheckDiagnosticsStatusText();
         refreshMcpServiceState();
         refreshMcpClientConfiguration();
+        refreshMcpInstallPrompt();
         updateApplyButtonState();
     }
     if (event->type() == QEvent::ApplicationFontChange)

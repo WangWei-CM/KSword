@@ -15,6 +15,7 @@
 #include <QCoreApplication>
 #include <QDir>
 #include <QFileDialog>
+#include <QFile>
 #include <QFileInfo>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -213,6 +214,33 @@ void SettingsDock::initializeMcpTab()
     outputTabs->addTab(logPage, QStringLiteral("操作日志"));
     language.bindTab(outputTabs, logPage, QStringLiteral("settings.mcp.log"), QStringLiteral("操作日志"));
     connect(m_mcpClearLogButton, &QPushButton::clicked, this, &SettingsDock::mcpOperationLogClearRequested);
+    // 安装引导作为独立文本输出页，继续复用共享导航、编辑器与完整复制语义。
+    auto* installPage = new QWidget(outputTabs); // 不执行安装，只提供用户交给 agent 的提示词。
+    auto* installLayout = new QVBoxLayout(installPage);
+    installLayout->setContentsMargins(0, 0, 0, 0);
+    installLayout->setSpacing(8);
+    auto* installToolbar = new QHBoxLayout(); // 说明与复制动作固定在正文上方。
+    installToolbar->addWidget(McpHint(installPage, QStringLiteral("settings.mcp.install_hint"),
+        QStringLiteral("复制后发给 agent：安装前会询问是否下载 KSword、未运行时的策略，以及自动启动时的权限。")), 1);
+    m_mcpInstallPromptCopyButton = McpIconButton(installPage, QStringLiteral("mcp_install_prompt_copy"),
+        QStringLiteral(":/Icon/codeeditor_copy.svg"), QStringLiteral("settings.mcp.install_copy"),
+        QStringLiteral("复制 MCP 一键安装提示词"), ks::ui::FlatButtonTone::Neutral);
+    installToolbar->addWidget(m_mcpInstallPromptCopyButton);
+    ks::ui::NormalizeToolbarRow(installToolbar);
+    installLayout->addLayout(installToolbar);
+    m_mcpInstallPromptViewer = new CodeEditorWidget(installPage);
+    m_mcpInstallPromptViewer->setObjectName(QStringLiteral("mcp_install_prompt"));
+    m_mcpInstallPromptViewer->setReadOnly(true);
+    m_mcpInstallPromptViewer->setWordWrapEnabled(true);
+    m_mcpInstallPromptViewer->setMinimumHeight(180);
+    installLayout->addWidget(m_mcpInstallPromptViewer, 1);
+    outputTabs->addTab(installPage, QStringLiteral("安装提示词"));
+    language.bindTab(outputTabs, installPage, QStringLiteral("settings.mcp.install_tab"), QStringLiteral("安装提示词"));
+    connect(m_mcpInstallPromptCopyButton, &QPushButton::clicked, this, [this]()
+    {
+        QApplication::clipboard()->setText(m_mcpInstallPromptViewer->text()); // 只复制规范正文。
+    });
+    refreshMcpInstallPrompt();
     m_tabWidget->addTab(m_mcpTab, QStringLiteral("MCP"));
     language.bindTab(m_tabWidget, m_mcpTab, QStringLiteral("settings.tab.mcp"), QStringLiteral("MCP"));
 
@@ -274,6 +302,29 @@ void SettingsDock::clearMcpOperationLog()
 {
     m_mcpLogViewer->clear();
     m_mcpClearLogButton->setEnabled(false);
+}
+
+// 资源与发布 README 使用同一文件；完整原文交给语言包翻译，不从页面另造安装步骤。
+void SettingsDock::refreshMcpInstallPrompt()
+{
+    if (!m_mcpInstallPromptViewer)
+    {
+        return;
+    }
+    static const QString source = []() // 资源只读一次，不在主题或字段更新时反复查文件。
+    {
+        QFile prompt(QStringLiteral(":/Data/mcp_agent_install_prompt.txt")); // 随 exe 发布的提示词。
+        return prompt.open(QIODevice::ReadOnly)
+            ? QString::fromUtf8(prompt.readAll()).replace(QStringLiteral("\r\n"), QStringLiteral("\n")).trimmed()
+            : QString(); // 资源换行统一后与语言包的规范短提示词键一致。
+    }();
+    const QString text = source.isEmpty()
+        ? ks::i18n::sourceText(QStringLiteral("安装提示词暂不可用。")) : ks::i18n::sourceText(source);
+    if (m_mcpInstallPromptViewer->text() != text)
+    {
+        m_mcpInstallPromptViewer->setRawText(text);
+    }
+    m_mcpInstallPromptCopyButton->setEnabled(!source.isEmpty());
 }
 
 // 输入主窗口回填的真实状态；错误和值始终按普通文本显示，不解释为富文本。

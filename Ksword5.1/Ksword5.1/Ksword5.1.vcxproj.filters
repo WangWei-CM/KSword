@@ -3432,6 +3432,9 @@
   </ItemGroup>
   <ItemGroup>
     <None Include="qtvars.pro" />
+    <None Include="..\..\tools\ksword_mcp\agent_install_prompt.txt">
+      <Filter>Profile Files</Filter>
+    </None>
     <None Include="..\..\tools\compress_qt_profile_json.py">
       <Filter>Profile Files</Filter>
     </None>

@@ -1268,6 +1268,9 @@
     "settings.tab.language": "Language",
     "settings.tab.online_scan": "Online Scanning",
     "settings.tab.mcp": "MCP",
+    "settings.mcp.install_tab": "Installation prompt",
+    "settings.mcp.install_hint": "Copy this to your agent: it will ask whether to download KSword, what to do when it is not running, and which privileges to use for auto-start.",
+    "settings.mcp.install_copy": "Copy the MCP installation prompt",
     "settings.mcp.log": "Operation log",
     "settings.mcp.log_hint": "Keeps the latest 1000 entries. Records UI dispatch and errors, not business completion; input values and read results are not logged.",
     "settings.mcp.log_clear": "Clear the MCP operation log for this session",
@@ -6759,6 +6762,11 @@
     "notification.copy.log_template": "%1\n%2\n%3\nFile: %4\nFunction: %5\nGUID: %6"
   },
   "source_translations": {
+    "请在你当前使用的 MCP 服务列表中安装 KSword MCP（https://github.com/KSwordDEV/MCP）：\n1. 先询问我是否同时下载 KSword；未运行时自动启动还是返回失败；若自动启动，是否使用管理员权限。\n2. 使用独立 Python 环境，按当前 agent 的原生格式注册 stdio 服务，保留其它 MCP 配置。\n3. 根据我的回答配置启动和权限策略；不要自行改变权限或重启已有 KSword。\n4. 验证工具发现和只读连接，不执行驱动装卸、结束进程或内存写入。\n完整安装指南：https://raw.githubusercontent.com/KSwordDEV/MCP/main/INSTALL_FOR_AGENTS.md": "Install KSword MCP (https://github.com/KSwordDEV/MCP) in the MCP server list used by your current agent:\n1. Ask whether to also download KSword; auto-start or fail when it is not running; and, only for auto-start, whether to use administrator privileges.\n2. Use an isolated Python environment and the current agent native stdio configuration format; preserve other MCP entries.\n3. Configure startup and privilege policies from my answers; do not silently change privileges or restart an existing KSword.\n4. Verify tool discovery and read-only connectivity; do not load or unload drivers, terminate processes, or write memory.\nFull installation guide: https://raw.githubusercontent.com/KSwordDEV/MCP/main/INSTALL_FOR_AGENTS.md",
+    "安装提示词": "Installation prompt",
+    "复制后发给 agent：安装前会询问是否下载 KSword、未运行时的策略，以及自动启动时的权限。": "Copy this to your agent: it will ask whether to download KSword, what to do when it is not running, and which privileges to use for auto-start.",
+    "复制 MCP 一键安装提示词": "Copy the MCP installation prompt",
+    "安装提示词暂不可用。": "The installation prompt is unavailable.",
     "cancelled": "cancelled",
     "interrupted": "interrupted",
     "unknown_method": "unknown_method",

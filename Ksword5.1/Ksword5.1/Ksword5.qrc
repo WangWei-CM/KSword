@@ -9,6 +9,7 @@
     </qresource>
     <qresource prefix="/Data">
         <file alias="startup_registry_locations.txt">StartupDock/startup_registry_locations.txt</file>
+        <file alias="mcp_agent_install_prompt.txt">../../tools/ksword_mcp/agent_install_prompt.txt</file>
     </qresource>
     <qresource prefix="/Icon">
         <!-- 日志面板使用的图标资源（均来自 Resource/Icon 图标库） -->

@@ -1295,6 +1295,7 @@
     <None Include="qtvars.pro" />
     <None Include="..\..\tools\compress_qt_profile_json.py" />
     <None Include="..\..\tools\i18n_language_pack.py" />
+    <None Include="..\..\tools\ksword_mcp\agent_install_prompt.txt" />
     <None Include="..\..\LICENSE" />
     <None Include="..\..\COMMUNITY_COVENANT.md" />
     <None Include="..\..\third_party\zydis\LICENSE-Zycore.txt" />

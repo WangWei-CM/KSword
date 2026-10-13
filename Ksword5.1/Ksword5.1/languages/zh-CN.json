@@ -1268,6 +1268,9 @@
     "settings.tab.language": "语言",
     "settings.tab.online_scan": "在线扫描",
     "settings.tab.mcp": "MCP",
+    "settings.mcp.install_tab": "安装提示词",
+    "settings.mcp.install_hint": "复制后发给 agent：安装前会询问是否下载 KSword、未运行时的策略，以及自动启动时的权限。",
+    "settings.mcp.install_copy": "复制 MCP 一键安装提示词",
     "settings.mcp.log": "操作日志",
     "settings.mcp.log_hint": "保留最近1000条。记录调用派发与错误，不代表业务完成；不记录输入值或读取结果。",
     "settings.mcp.log_clear": "清空本次 MCP 操作日志",
@@ -6759,6 +6762,11 @@
     "notification.copy.log_template": "%1\n%2\n%3\n文件：%4\n函数：%5\nGUID：%6"
   },
   "source_translations": {
+    "请在你当前使用的 MCP 服务列表中安装 KSword MCP（https://github.com/KSwordDEV/MCP）：\n1. 先询问我是否同时下载 KSword；未运行时自动启动还是返回失败；若自动启动，是否使用管理员权限。\n2. 使用独立 Python 环境，按当前 agent 的原生格式注册 stdio 服务，保留其它 MCP 配置。\n3. 根据我的回答配置启动和权限策略；不要自行改变权限或重启已有 KSword。\n4. 验证工具发现和只读连接，不执行驱动装卸、结束进程或内存写入。\n完整安装指南：https://raw.githubusercontent.com/KSwordDEV/MCP/main/INSTALL_FOR_AGENTS.md": "请在你当前使用的 MCP 服务列表中安装 KSword MCP（https://github.com/KSwordDEV/MCP）：\n1. 先询问我是否同时下载 KSword；未运行时自动启动还是返回失败；若自动启动，是否使用管理员权限。\n2. 使用独立 Python 环境，按当前 agent 的原生格式注册 stdio 服务，保留其它 MCP 配置。\n3. 根据我的回答配置启动和权限策略；不要自行改变权限或重启已有 KSword。\n4. 验证工具发现和只读连接，不执行驱动装卸、结束进程或内存写入。\n完整安装指南：https://raw.githubusercontent.com/KSwordDEV/MCP/main/INSTALL_FOR_AGENTS.md",
+    "安装提示词": "安装提示词",
+    "复制后发给 agent：安装前会询问是否下载 KSword、未运行时的策略，以及自动启动时的权限。": "复制后发给 agent：安装前会询问是否下载 KSword、未运行时的策略，以及自动启动时的权限。",
+    "复制 MCP 一键安装提示词": "复制 MCP 一键安装提示词",
+    "安装提示词暂不可用。": "安装提示词暂不可用。",
     "cancelled": "cancelled",
     "interrupted": "interrupted",
     "unknown_method": "unknown_method",
