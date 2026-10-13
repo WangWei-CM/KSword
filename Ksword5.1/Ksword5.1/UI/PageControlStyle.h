@@ -57,7 +57,7 @@ namespace ks::ui
     // 复合主页面明确登记方形页根；挂到已有页面框架内时不再绘内部外角。
     void StyleWorkspaceContentFrame(QWidget* page, int inset = 6);
 
-    // 子级保持轻底面与左缩进，顶部直接接父栏；原子栏方向动画继续使用原入口。
+    // 子级与父栏共享连续轨道，紧凑圆角选中面和6px标签起点区分层级；保留原方向动画。
     void StyleChildPageTabs(QTabWidget* tabs);
 
     // 主窗口普通页签的最终回退样式，使用与明确登记页面相同的颜色和几何。

@@ -174,6 +174,21 @@ namespace
             const bool vertical = m_bar->shape() == QTabBar::RoundedWest
                 || m_bar->shape() == QTabBar::RoundedEast || m_bar->shape() == QTabBar::TriangularWest
                 || m_bar->shape() == QTabBar::TriangularEast;
+            if (m_bar->property("ksword_page_tabs_child").toBool()
+                && !m_bar->property("ksword_joined_result_tabs").toBool())
+            {
+                // 子导航的背景与QSS悬停面使用同一内缩；复用当前插值矩形，不新增动画或命中层。
+                const QRectF selection = m_current.adjusted(1, 2, -1, -2); // 对应子栏的1/2px边距。
+                painter.drawRoundedRect(selection, 5, 5);
+                painter.setBrush(colors.marker);
+                const qreal span = std::max(qreal(0), std::min(qreal(28),
+                    (vertical ? selection.height() : selection.width()) - 12)); // 短标记降低重复层级的强调。
+                const QRectF marker = vertical
+                    ? QRectF(selection.left() + 1, selection.center().y() - span / 2, 1.5, span)
+                    : QRectF(selection.center().x() - span / 2, selection.bottom() - 2, span, 1.5);
+                painter.drawRoundedRect(marker, 0.75, 0.75);
+                return;
+            }
             if (vertical)
             {
                 painter.drawRoundedRect(m_current, 5, 5);

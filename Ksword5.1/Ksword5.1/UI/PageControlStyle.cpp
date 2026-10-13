@@ -24,6 +24,7 @@ namespace
         QColor page; // 页面底板，留给明确内容卡片更高一级的表面。
         QColor selected; // 选中页签的轻中性表面，不使用实心强调底。
         QColor hovered; // 未选中悬停时的轻变化。
+        bool childNavigation = false; // 父子导航使用紧凑圆角面，连体结果Tab保持原页签形状。
     };
 
     // 主窗口使用工作区层级，独立窗口使用现有表面角色；子栏与父栏用不同强度。
@@ -31,14 +32,15 @@ namespace
     {
         const ks::ui::MainSurfaceColors mainColors = ks::ui::MainWindowSurfaceColors();
         PageTabColors colors;
+        colors.childNavigation = child && !joined;
         colors.page = mainSurface ? mainColors.canvas : KswordTheme::WindowColor();
         // 导航与工具面必须不同色：同色补在圆外会把原工具带圆角填成方角。
         colors.rail = mainSurface ? mainColors.content : KswordTheme::SurfaceAltColor();
         colors.selected = mainSurface ? mainColors.header : KswordTheme::SurfaceAltColor();
         if (child)
         {
-            // 子栏只在选中项上铺轻底面，完整底板贴近页面，避免两排导航看似同级。
-            colors.rail = colors.page;
+            // 父子导航共享连续的内容层轨道，以紧凑选中面区分层级，不插入深色断层。
+            colors.rail = mainSurface ? mainColors.content : KswordTheme::SurfaceAltColor();
             colors.selected = mainSurface ? mainColors.toolbar : KswordTheme::SurfaceColor();
         }
         if (joined)
@@ -61,7 +63,10 @@ namespace
         const QColor hoverText = KswordTheme::EnsureTextContrastForBackgrounds(
             KswordTheme::TextPrimaryColor(), selectedBackgrounds, 3, 4.5);
         const QColor selectedText = KswordTheme::EnsureTextContrastForBackgrounds(
-            KswordTheme::TextPrimaryColor(), selectedBackgrounds, 3, 4.5);
+            colors.childNavigation ? KswordTheme::ControlAccentColor() : KswordTheme::TextPrimaryColor(),
+            selectedBackgrounds, 3, 4.5);
+        const QColor disabledText = KswordTheme::EnsureTextContrastForBackgrounds(
+            KswordTheme::TextDisabledColor(), selectedBackgrounds, 3, 4.5); // 禁用文字仍可辨认。
         const QColor marker = KswordTheme::EnsureTextContrast(
             KswordTheme::ControlAccentColor(), colors.selected, 3.0);
         // 颜色均以完整 QSS 规则一次替换，不能向样式参数中再注入未替换的占位符。
@@ -81,13 +86,13 @@ namespace
             "%1 QToolButton:hover{background:%3;color:%4;}")
             .arg(selector, text.name(), colors.hovered.name(), hoverText.name(),
                 colors.selected.name(), selectedText.name(), marker.name(),
-                KswordTheme::TextDisabledColor().name(), colors.rail.name());
-        if (child)
+                disabledText.name(), colors.rail.name());
+        if (child && colors.childNavigation)
         {
-            // 缩小下级页签而不增加上下空白，选中标记继续保留同一强调下边线。
+            // 子导航保留自然文字宽度；状态共享同一内缩与圆角，不复制父级贴边页签造型。
             rules += QStringLiteral(
-                "%1::tab{padding:3px 10px;min-height:18px;"
-                "border-top-left-radius:4px;border-top-right-radius:4px;}").arg(selector);
+                "%1::tab{padding:3px 10px;min-height:18px;margin:2px 1px;"
+                "border:0;border-radius:5px;}").arg(selector);
         }
         if (animated)
         {
@@ -230,9 +235,10 @@ namespace
             "QTabWidget[ksword_page_tabs_widget=\"true\"]::pane{"
             "border:0;border-radius:%3px;top:0px;background:%1;padding:%2px;}")
             .arg(background).arg(inset).arg(inset > 0 || joined ? 0 : kPageCornerRadius);
-        if (joined || (tabs->property("ksword_standard_tabs_gap").toBool() && !child))
+        if (joined || (tabs->property("ksword_standard_tabs_gap").toBool()
+            && !child && delegatedPageTabs(tabs) == nullptr))
         {
-            // 连体结果与默认普通Tab均保留6px接缝，普通Tab不改变上方组件的关系和颜色。
+            // 结果区保留6px接缝；直接承接子导航的父Tab不额外叠加这一层间隔。
             // 不恢复左右/底部的pane内缩，结果外边界仍与整条Tab栏对齐。
             QString separationEdge = QStringLiteral("top"); // 间隔跟随标签所在边，不改标签栏本身。
             switch (tabs->tabPosition())
@@ -255,8 +261,8 @@ namespace
         }
         if (child && tabs->tabPosition() == QTabWidget::North)
         {
-            // 子栏的层级缩进只作用于标签，不能把整页内容向右挤8px。
-            rules += QStringLiteral("QTabWidget[ksword_page_tabs_widget=\"true\"]::tab-bar{left:8px;}");
+            // 标签起点对齐共享6px内容留白，层级缩进不改变整页和结果组件的外边界。
+            rules += QStringLiteral("QTabWidget[ksword_page_tabs_widget=\"true\"]::tab-bar{left:6px;}");
         }
         const QString previous = tabs->property("ksword_page_tabs_owned_pane_style").toString();
         if (previous == rules && tabs->styleSheet().contains(rules))
