@@ -521,6 +521,9 @@
     <ClCompile Include="MemoryDock\MemoryDock.ProcessRegion.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="MemoryDock\MemoryDock.RegionDump.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="MemoryDock\MemoryDock.SearchParseAndFilter.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>

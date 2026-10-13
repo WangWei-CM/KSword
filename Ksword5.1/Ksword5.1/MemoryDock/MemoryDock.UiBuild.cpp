@@ -1,4 +1,5 @@
 #include "MemoryDock.Internal.h"
+#include "../UI/AsyncOperation.h"
 #include "SystemMemoryAuditPage.h"
 #include "DdmaPage.h"
 #include "../UI/AdaptivePageScroll.h" // ks::ui::EnablePageInnerScroll / IsolateMinimumSize：页内滚动壳与最小尺寸隔离。
@@ -119,6 +120,12 @@ MemoryDock::MemoryDock(QWidget* parent)
 
 MemoryDock::~MemoryDock()
 {
+    // 首先关闭后台投递门禁；正在读取的区域转储将在下一分块边界取消原子文件发布。
+    if (m_regionDumpOperation != nullptr)
+    {
+        tryCancelMemoryRegionDump();
+        m_regionDumpOperation->close();
+    }
     // 析构开始日志：便于定位窗口关闭时的后台任务状态。
     kLogEvent destroyStartEvent;
     info << destroyStartEvent

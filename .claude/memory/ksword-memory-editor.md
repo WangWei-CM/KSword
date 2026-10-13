@@ -1,5 +1,7 @@
 # 统一内存编辑器与汇编
 
+- 区域原始 Dump（Issue #216）由 `MemoryDock.RegionDump.cpp` 实现，菜单按 UserRole 的基址/长度冻结区域、PID/创建时间和独立 QUERY_INFORMATION/SYNCHRONIZE 租约。R3/R0 固定读取、完整读门禁、QSaveFile 原子发布；取消与提交用 atomic 阶段仲裁，后台控制器与带轮次的独立进度收口。附加句柄没有 SYNCHRONIZE，不能复用其等待权限；kPro.addReusable 仅按 owner/taskName 去重，步骤名不同并不能隔离进度。范围和验证边界见 [区域 Dump 核对](../../docs/Issue-216-内存区域Dump核对.md)。
+
 - `UI/MemoryEditorWidget` 是后端无关的快照编辑器，主程序的普通/R0/R-1/DDMA 内存、影子页、Hook 补丁、内核证据与转储内存入口共用。内部 Hex/反汇编/文本/对比视图使用同一份字节缓存；控件不调用任何内存写入接口。用户修改后须通过所属页面显式应用（影子页/Hook 由安装动作提交）。完整组件核查与保留边界见 `docs/内存编辑器组件清单.md`；独立 ARKLight Win32 客户端仍使用自身组件，不声称全仓已移除旧 Hex 工具。
 - `MemoryEditorWidget::hexEditor()` 仅用于保留书签、断点等既有 Hex 集成。程序直接调用 Hex 的 `setByteArray` / `setByteAtAbsoluteAddress` 后，须调用 `refreshFromHexEditor()`；新读取应使用 `setSnapshot` 建立基线。成功写回必须以实际回读数据创建新快照，不能把暂存字节直接当作已成功写入。
 - `MemoryEditHistory.Core` 只存 before/after 差异块，限制 32 MiB/256 步；一次 `refreshFromHexEditor` 聚合为一步（汇编、模板、粘贴与字符串修改）。Ctrl+Z 撤销，Ctrl+Y/Ctrl+Shift+Z 重做；新编辑切断 redo 分支。新快照、实际写回后接受及放弃修改均清空历史，不能借历史撤销真实写入。单次操作超出容量保留当前缓存但清除不可跨越的历史；回放前核对相关字节，失配拒绝整步回放。

@@ -58,6 +58,7 @@ class DdmaPage;
 // 项目内 UI 组件前置声明：只用指针，避免把表格组件头拉进本头文件。
 namespace ks::ui
 {
+    class AsyncOperation; // 区域转储后台任务：只持值请求并支持关窗取消。
     class StructuredFieldView;
     class VisibleTableWidget;
     class MemoryWorkbenchView; // 内存工作台视图：懒创建，只用指针。
@@ -523,6 +524,37 @@ private:
     // - 返回：无。
     void refreshMemoryRegionList(bool forceRequery);
 
+    // requestDumpMemoryRegion：菜单前冻结进程句柄/创建时间和区域，选择路径后异步导出。
+    // pid/processName 用于身份和提示；targetProcess 为独立租约；region/backend 固定导出范围和通道。
+    void requestDumpMemoryRegion(
+        std::uint32_t pid,
+        const QString& processName,
+        const std::shared_ptr<void>& targetProcess,
+        std::uint64_t creationTime,
+        const RegionEntry& region,
+        ksword::memory_backend::MemoryAccessBackend backend);
+
+    // tryCancelMemoryRegionDump：提交前原子接受取消；已进入提交阶段时返回 false。
+    bool tryCancelMemoryRegionDump();
+
+    // RegionDumpPhase：取消与原子发布共用的值状态，后台不借用页面指针。
+    enum class RegionDumpPhase { Reading, CancelRequested, Committing, Committed, Failed };
+
+    // dumpMemoryRegionToFile：后台只读分块导出原始字节，失败/取消不替换已有文件。
+    // 输入固定身份、区域、后端、输出路径、进度编号及取消探针；失败写入内部原因码和详情。
+    static bool dumpMemoryRegionToFile(
+        std::uint32_t pid,
+        const std::shared_ptr<void>& targetProcess,
+        std::uint64_t creationTime,
+        const RegionEntry& region,
+        ksword::memory_backend::MemoryAccessBackend backend,
+        const QString& dumpFilePath,
+        int progressPid,
+        const std::function<bool()>& canceled,
+        QString& errorTextOut,
+        const std::function<bool()>& beginCommit = {},
+        const std::function<void(std::uint64_t, std::uint64_t)>& progress = {});
+
     // enumerateMemoryRegionsByVirtualQuery：
     // - 作用：对附加进程执行 VirtualQueryEx 遍历。
     // - 参数 processHandle：目标进程句柄。
@@ -945,6 +977,9 @@ private:
     std::atomic<bool> m_moduleRefreshInProgress{ false }; // 模块刷新是否进行中（异步任务状态）。
     std::atomic<std::uint64_t> m_moduleRefreshTicket{ 0 }; // 模块刷新票据（丢弃过期结果）。
     int m_dumpMemoryProgressPid = 0;        // Dump 内存任务的进度条 PID。
+    ks::ui::AsyncOperation* m_regionDumpOperation = nullptr; // QObject 子对象，串行管理区域转储。
+    std::shared_ptr<std::atomic<RegionDumpPhase>> m_regionDumpPhase; // 提交与取消的仲裁状态。
+    int m_regionDumpProgressPid = 0;         // 区域转储独立进度，避免与整进程 Dump 互相覆盖。
     std::vector<RegionEntry> m_regionCache;   // 区域缓存（Tab2/Tab3 复用）。
 
     std::vector<SearchResultEntry> m_searchResultCache; // 扫描结果缓存（Tab3）。

@@ -1,4 +1,5 @@
 #include "MemoryDock.Internal.h"
+#include "../UI/AsyncOperation.h"
 #include "../UI/TableContextMenu.h"
 #include "../UI/ToolbarMetrics.h"
 #include "../UI/SecondaryPageLayout.h"
@@ -711,10 +712,67 @@ void MemoryDock::initializeConnections()
 
         m_regionTable->setCurrentCell(row, clickedItem->column());
 
-        QMenu menu(this);
+        // 排序/筛选后的行号不能索引缓存；菜单前按原始地址、大小冻结区域与目标租约。
+        const QTableWidgetItem* exportBaseItem = m_regionTable->item(row, 0);
+        const QTableWidgetItem* exportSizeItem = m_regionTable->item(row, 1);
+        const std::uint64_t exportBase = exportBaseItem != nullptr ? exportBaseItem->data(Qt::UserRole).toULongLong() : 0;
+        const std::uint64_t exportSize = exportSizeItem != nullptr ? exportSizeItem->data(Qt::UserRole).toULongLong() : 0;
+        const auto cachedRegion = std::find_if(m_regionCache.cbegin(), m_regionCache.cend(),
+            [exportBase, exportSize](const RegionEntry& entry)
+            {
+                return entry.baseAddress == exportBase && entry.regionSize == exportSize;
+            });
+        const RegionEntry exportRegion = cachedRegion != m_regionCache.cend() ? *cachedRegion : RegionEntry{};
+        const std::uint32_t exportPid = m_attachedPid; // 本次菜单所属进程，不在模态菜单结束后重取。
+        const QString exportProcessName = m_attachedProcessName;
+        const std::shared_ptr<void> attachedLease = duplicateAttachedProcessHandleForWorker();
+        FILETIME exportCreated{}, exportExited{}, exportKernel{}, exportUser{};
+        const bool attachedIdentityValid = exportPid != 0 && attachedLease
+            && ::GetProcessId(attachedLease.get()) == exportPid
+            && ::GetProcessTimes(attachedLease.get(), &exportCreated, &exportExited, &exportKernel, &exportUser);
+        const std::uint64_t exportCreationTime = (static_cast<std::uint64_t>(exportCreated.dwHighDateTime) << 32U)
+            | exportCreated.dwLowDateTime;
+        // 原附加句柄不含 SYNCHRONIZE；导出单独申请查询/等待租约，不给 R0 强加 VM_READ。
+        HANDLE dumpHandle = attachedIdentityValid
+            ? ::OpenProcess(PROCESS_QUERY_INFORMATION | SYNCHRONIZE, FALSE, exportPid) : nullptr;
+        const std::shared_ptr<void> exportHandle(dumpHandle, [](void* handle)
+        {
+            if (handle != nullptr)
+            {
+                ::CloseHandle(handle);
+            }
+        });
+        FILETIME dumpCreated{}, dumpExited{}, dumpKernel{}, dumpUser{};
+        const bool exportIdentityValid = dumpHandle != nullptr
+            && ::WaitForSingleObject(dumpHandle, 0) == WAIT_TIMEOUT
+            && ::GetProcessTimes(dumpHandle, &dumpCreated, &dumpExited, &dumpKernel, &dumpUser)
+            && ((static_cast<std::uint64_t>(dumpCreated.dwHighDateTime) << 32U) | dumpCreated.dwLowDateTime) == exportCreationTime;
+        const bool dumpBusy = m_regionDumpOperation != nullptr
+            && (m_regionDumpOperation->isInFlight() || m_regionDumpOperation->hasPending());
+        const bool canExport = exportIdentityValid && exportCreationTime != 0
+            && exportRegion.regionSize != 0 && exportRegion.state == MEM_COMMIT && !dumpBusy;
+
+        // 无 QObject 父级避免页面销毁时删除栈上菜单；返回后仍须检查页面寿命。
+        QPointer<MemoryDock> guardThis(this);
+        QMenu menu;
         menu.setStyleSheet(KswordTheme::ContextMenuStyle());
         QAction* viewAction = menu.addAction("查看此区域");
         QAction* r0ReadAction = menu.addAction("R0读取此区域");
+        QAction* r3DumpAction = menu.addAction(QIcon(QStringLiteral(":/Icon/log_export.svg")),
+            ks::i18n::sourceText(QStringLiteral("R3导出此区域Dump…")));
+        QAction* r0DumpAction = menu.addAction(QIcon(QStringLiteral(":/Icon/log_export.svg")),
+            ks::i18n::sourceText(QStringLiteral("R0导出此区域Dump…")));
+        r3DumpAction->setEnabled(canExport && isReadableProtect(exportRegion.protect));
+        r0DumpAction->setEnabled(canExport);
+        menu.setToolTipsVisible(true);
+        const QString dumpHint = ks::i18n::sourceText(QStringLiteral("将所选已提交区域保存为原始 .bin；读取失败或提交前取消时保留原文件。"));
+        const QString unavailableHint = ks::i18n::sourceText(QStringLiteral("需要有效目标和已提交区域；已有区域导出时请等待或取消。"));
+        r3DumpAction->setToolTip(r3DumpAction->isEnabled() ? dumpHint
+            : ks::i18n::sourceText(QStringLiteral("R3导出需要可读区域、有效目标且没有其它区域导出。")));
+        r0DumpAction->setToolTip(r0DumpAction->isEnabled() ? dumpHint : unavailableHint);
+        QAction* cancelDumpAction = menu.addAction(QIcon(QStringLiteral(":/Icon/process_terminate.svg")),
+            ks::i18n::sourceText(QStringLiteral("取消区域导出")));
+        cancelDumpAction->setVisible(dumpBusy);
         QAction* copyAction = menu.addAction("复制基址");
         QAction* copyRowAction = menu.addAction("复制当前行");
         // 声明业务菜单已提供此能力，避免共享表格菜单追加重复项。
@@ -732,8 +790,31 @@ void MemoryDock::initializeConnections()
                 {m_attachedPid, identity, navigationAddress, ks::ui::x64dbg_navigation::View::Dump});
         }
         QAction* selectedAction = menu.exec(m_regionTable->viewport()->mapToGlobal(localPosition));
-        if (selectedAction == nullptr)
+        if (guardThis.isNull() || selectedAction == nullptr)
         {
+            return;
+        }
+
+        // 两个入口显式固定后端；区域和目标来自菜单前的值快照，不跟随随后选择变化。
+        if (selectedAction == r3DumpAction || selectedAction == r0DumpAction)
+        {
+            requestDumpMemoryRegion(exportPid, exportProcessName, exportHandle, exportCreationTime,
+                exportRegion, selectedAction == r3DumpAction
+                    ? ksword::memory_backend::MemoryAccessBackend::UserMode
+                    : ksword::memory_backend::MemoryAccessBackend::StandardDriver);
+            return;
+        }
+        if (selectedAction == cancelDumpAction)
+        {
+            if (m_regionDumpOperation != nullptr)
+            {
+                if (!tryCancelMemoryRegionDump())
+                {
+                    QMessageBox::information(this,
+                        ks::i18n::sourceText(QStringLiteral("导出内存区域")),
+                        ks::i18n::sourceText(QStringLiteral("该区域已进入提交阶段或已经结束，无法取消。")));
+                }
+            }
             return;
         }
 

@@ -328,6 +328,7 @@
     <ClCompile Include="MemoryDock\MemoryDock.UiBuild.cpp" />
     <ClCompile Include="MemoryDock\MemoryDock.UiWireAndStatus.cpp" />
     <ClCompile Include="MemoryDock\MemoryDock.ProcessRegion.cpp" />
+    <ClCompile Include="MemoryDock\MemoryDock.RegionDump.cpp" />
     <ClCompile Include="MemoryDock\MemoryDock.SearchParseAndFilter.cpp" />
     <ClCompile Include="MemoryDock\MemoryDock.SearchFlow.cpp" />
     <ClCompile Include="MemoryDock\PhysicalPageScan.cpp" />
