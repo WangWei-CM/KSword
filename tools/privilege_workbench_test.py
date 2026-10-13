@@ -43,7 +43,7 @@ def main() -> None:
     files += [source / name for name in ('Internationalization/LanguageManager.cpp',
         'UI/ThemeStatusRole.cpp', 'UI/ThemeControlGlyphs.cpp', 'UI/CodeEditorWidget.cpp',
         'UI/CodeTextEdit.cpp', 'UI/CodeEditorFileSession.cpp',
-        'UI/StructuredFieldView.cpp', 'UI/TypedSyntaxDocument.cpp', 'ksword/process/process_run_as.cpp',
+        'UI/StructuredFieldView.cpp', 'UI/FieldDocument.cpp', 'UI/TypedSyntaxDocument.cpp', 'ksword/process/process_run_as.cpp',
         'MiscDock/DiskEditor/StorageControllerResearchDialog.cpp',
         'ArkDriverClient/ArkStorageControllerClient.cpp')]
     generated = output / 'privilege-review-moc_CodeEditorWidget.cpp'

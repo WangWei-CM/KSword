@@ -386,3 +386,13 @@ KSword 主程序位于 `Ksword5.1/Ksword5.1`（Qt 6.9.3 Widgets + Qt Advanced Do
 - `ParameterWorkspace` 自身声明 `ksword_parameter_workspace` 布局边界，详情框架与字段树延迟判定识别它。不能复用 `ksword_detail_keep_layout`，后者还会让 `StandardWidgetTheme` 将普通参数控件当专业内部跳过。
 - 参数框架内的显式投影沿用其正文底色；祖先查询止于当前窗口，主题缓存记录实际画布、表面和文字色。PEB 只读说明默认显示并共用参数滚动，动作固定、摘要独立滚动。
 - 最终 Release/x64 与双语审计通过，真实 PEB 深浅主题、窄窗、最大化、搜索及重入已验证；线程四种方案、R0 采样、真实 DPI/背景矩阵未验收。范围与证据见 [Issue 222 修复记录](../../docs/Issue-222-PEB布局修复.md)。
+
+## 复杂报告投影（Issue 223，2026-10-13）
+
+- 大型结构报告由业务源显式声明 `ksword_complex_report_source`，经原 `DetailFieldProjection` 接入 `ComplexReportView`；不能按字符长度或字段数量擅自改造普通详情。原 `StructuredFieldView` 转为 document-only，完整搜索、复制与导出仍共用唯一规范 `FieldDocument`。
+- `ComplexReportModel` 使用稳定规范路径与整数索引，字段组只投影真实 Offset/Type 属性摘要；值/状态更新使用 `dataChanged`，真正拓扑变化才 reset。源类型/字段保持原默认折叠，合成全文子行不混入规范计数和复制。
+- 复杂树只绘可见行。顶层报告分区拥有一张全宽卡片，分支缩进槽与正文共底，只在首末行外沿圆角；类型工具带、深层字段和共同属性面各有明确职责，不能逐字段堆复制按钮或叠亮背景。卡边判断只能查模型拓扑与展开状态，`sizeHint` 内不得查询 `visualRect/indexBelow` 递归进入布局。
+- 状态点来自生产者明确元数据，不按提示文字或刷新成功猜测采样成功；摘要 QToolButton 必须 TextBesideIcon，显式拥有语义色图标，避免标准图标主题把红/橙点染蓝。
+- 搜索后代命中保留祖先，直接命中分组才接受整组；清空恢复展开、选中与阅读位置。普通值刷新不全树收旧展开状态，真正 aboutToBeReset 时才收集；缩放和展开变化合并重测，不能把模型提交测量或计时器间隔说成 GUI 帧率保证。
+- 用户最新图指出混用方圆角、配色及层级问题，必须在真实主程序整页和字段展开态分别核对；构建、无窗口 Core 模型回归与实机 UI 验收独立记录，驱动不可用时仍保留采样与真实 DPI/背景矩阵的未验收边界。详见 [Issue 223 记录](../../docs/Issue-223-复杂报告子页.md)。
+- 自绘轻强调选中面不能直接取属于默认亮蓝 Highlight 的 HighlightedText；文字沿用主题正文前景，再按实际卡面校准。主程序已实看深浅主题、799px窄窗、真实目录展开和搜索恢复；最后选中态修正再次重开最终产物核对，不把其它旧报告或驱动采样纳入已验收。

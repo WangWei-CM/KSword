@@ -58,6 +58,7 @@ namespace ks::ui
                 if (left.kind != right.kind || left.name != right.name || left.value != right.value
                     || left.translateValue != right.translateValue || left.translateName != right.translateName
                     || left.initiallyExpanded != right.initiallyExpanded
+                    || left.status != right.status || left.summaryLabel != right.summaryLabel
                     || !sameFieldNodes(left.children, right.children))
                 {
                     return false;
@@ -87,22 +88,6 @@ namespace ks::ui
         QString translated(const QString& source)
         {
             return ks::i18n::sourceText(source);
-        }
-
-        void appendText(const FieldNode& node, QStringList& lines, const int depth,
-            const bool localize)
-        {
-            const auto name = localize && node.translateName ? translated(node.name) : node.name;
-            const auto value = localize && node.translateValue ? translated(node.value) : node.value;
-            const QString indentation(depth * 2, QLatin1Char(' '));
-            if (node.kind == FieldNode::Kind::Section)
-                lines.append(indentation + QLatin1Char('[') + name + QLatin1Char(']'));
-            else if (node.kind == FieldNode::Kind::Note)
-                lines.append(indentation + (localize ? translated(node.value) : node.value));
-            else
-                lines.append(indentation + name + QStringLiteral(": ") + value);
-            for (const auto& child : node.children)
-                appendText(child, lines, depth + (node.kind == FieldNode::Kind::Field ? 1 : 0), localize);
         }
 
         void walkItems(QTreeWidgetItem* parent,
@@ -234,48 +219,6 @@ namespace ks::ui
         private:
             QTreeWidget* m_tree;
         };
-    }
-
-    FieldDocument& FieldDocument::section(const QString& title)
-    {
-        FieldNode node;
-        node.kind = FieldNode::Kind::Section;
-        node.name = title;
-        nodes.append(node);
-        return *this;
-    }
-
-    FieldDocument& FieldDocument::field(const QString& name, const QString& value,
-        const bool translateValue)
-    {
-        FieldNode node;
-        node.kind = FieldNode::Kind::Field;
-        node.name = name;
-        node.value = value;
-        node.translateValue = translateValue;
-        if (!nodes.isEmpty() && nodes.last().kind == FieldNode::Kind::Section)
-            nodes.last().children.append(node);
-        else nodes.append(node);
-        return *this;
-    }
-
-    FieldDocument& FieldDocument::note(const QString& body)
-    {
-        FieldNode node;
-        node.kind = FieldNode::Kind::Note;
-        node.value = body;
-        if (!nodes.isEmpty() && nodes.last().kind == FieldNode::Kind::Section)
-            nodes.last().children.append(node);
-        else nodes.append(node);
-        return *this;
-    }
-
-    QString FieldDocument::toPlainText(const bool localize) const
-    {
-        QStringList lines;
-        if (!title.isEmpty()) lines.append(localize ? translated(title) : title);
-        for (const auto& node : nodes) appendText(node, lines, 0, localize);
-        return lines.join(QLatin1Char('\n'));
     }
 
     StructuredFieldView::StructuredFieldView(QWidget* parent) : QWidget(parent)

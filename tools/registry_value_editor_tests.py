@@ -66,7 +66,7 @@ def main() -> int:
                 app / "UI" / "CodeEditorWidget.cpp",
                 app / "UI" / "CodeTextEdit.cpp",
                 app / "UI" / "CodeEditorFileSession.cpp",
-                app / "UI" / "StructuredFieldView.cpp",
+                app / "UI" / "StructuredFieldView.cpp", app / "UI" / "FieldDocument.cpp",
                 app / "UI" / "TypedSyntaxDocument.cpp",
                 app / "UI" / "TablePresentation.cpp",
                 app / "Internationalization" / "LanguageManager.cpp",
@@ -92,7 +92,7 @@ def main() -> int:
                    app / "RegistryDock" / "RegistryAdvancedDialogs.cpp"}
     editor_sources = {app / "UI" / name for name in
                       ("CodeEditorWidget.cpp", "CodeTextEdit.cpp", "CodeEditorFileSession.cpp",
-                       "StructuredFieldView.cpp", "TypedSyntaxDocument.cpp", "TablePresentation.cpp")}
+                       "StructuredFieldView.cpp", "FieldDocument.cpp", "TypedSyntaxDocument.cpp", "TablePresentation.cpp")}
     editor_header_time = max((app / "UI" / name).stat().st_mtime for name in
                              ("CodeEditorWidget.h", "CodeTextEdit.h", "CodeEditorFileSession.h",
                               "StructuredFieldView.h", "TypedSyntaxDocument.h", "TablePresentation.h"))

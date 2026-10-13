@@ -31,7 +31,7 @@ $textApp = 'Ksword5.1/Ksword5.1'
 $textSources = @(
     'tools/tests/unified_text_views_tests.cpp',
     "$textApp/UI/CodeEditorWidget.cpp", "$textApp/UI/CodeTextEdit.cpp", "$textApp/UI/CodeEditorFileSession.cpp",
-    "$textApp/UI/StructuredFieldView.cpp", "$textApp/UI/TypedSyntaxDocument.cpp", "$textApp/UI/DetailLayoutHost.cpp", "$textApp/UI/DetailLayoutHost.Binding.cpp",
+    "$textApp/UI/StructuredFieldView.cpp", "$textApp/UI/FieldDocument.cpp", "$textApp/UI/TypedSyntaxDocument.cpp", "$textApp/UI/DetailLayoutHost.cpp", "$textApp/UI/DetailLayoutHost.Binding.cpp",
     "$textApp/UI/DetailLayoutHost.Compatibility.cpp", "$textApp/UI/EmbeddedRowDelegate.cpp",
     "$textApp/UI/MemoryWorkbench/MemoryRowCanvas.cpp", "$textApp/UI/MemoryWorkbench/WorkbenchTextView.cpp", "$textApp/UI/MemoryWorkbench/HexCanvasFormat.cpp",
     "$textApp/UI/FlowLayout.cpp", "$textApp/UI/ThemeStatusRole.cpp", "$textApp/UI/ThemeControlGlyphs.cpp", "$textApp/UI/SmoothScrollSupport.cpp", "$textApp/UI/FlatButtonTheme.cpp", "$textApp/UI/ThemeBinding.cpp", "$textApp/UI/ThemeAccentIcon.cpp",

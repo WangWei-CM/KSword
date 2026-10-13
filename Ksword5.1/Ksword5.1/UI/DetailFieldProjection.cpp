@@ -4,6 +4,7 @@
 #include "./ThemeBinding.h"
 #include "./ToolbarMetrics.h"
 #include "./MainSurfaceStyle.h"
+#include "./ComplexReportView.h"
 #include "../Internationalization/LanguageManager.h"
 #include "../theme.h"
 #include <QApplication>
@@ -134,27 +135,38 @@ namespace
             {
                 m_search->show();
             }
-            m_body = new QWidget(this);
-            m_body->setProperty("ksword_detail_document_body", true);
-            m_body->setMinimumWidth(0);
-            m_body->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
-            m_cards = new QVBoxLayout(m_body);
-            m_cards->setContentsMargins(0, 0, 0, 0);
-            m_cards->setSpacing(14);
-            m_cards->setAlignment(Qt::AlignTop);
-            if (scrollBody)
+            if (source->property("ksword_complex_report_source").toBool())
             {
-                m_scroll = new QScrollArea(this);
-                m_scroll->setFrameShape(QFrame::NoFrame);
-                m_scroll->setWidgetResizable(true);
-                m_scroll->setMinimumSize(0, 0);
-                m_scroll->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Ignored);
-                m_scroll->setWidget(m_body);
-                root->addWidget(m_scroll, 1);
+                // 复杂报告保留原规范源和工具动作，仅正文改为模型视口，不进入展平卡片路径。
+                m_complexReport = new ks::ui::ComplexReportView(this);
+                tools->insertWidget(m_search ? 1 : 0, m_complexReport->expandAllButton());
+                ks::ui::NormalizeToolbarRow(tools);
+                root->addWidget(m_complexReport, 1);
             }
             else
             {
-                root->addWidget(m_body);
+                m_body = new QWidget(this);
+                m_body->setProperty("ksword_detail_document_body", true);
+                m_body->setMinimumWidth(0);
+                m_body->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+                m_cards = new QVBoxLayout(m_body);
+                m_cards->setContentsMargins(0, 0, 0, 0);
+                m_cards->setSpacing(14);
+                m_cards->setAlignment(Qt::AlignTop);
+                if (scrollBody)
+                {
+                    m_scroll = new QScrollArea(this);
+                    m_scroll->setFrameShape(QFrame::NoFrame);
+                    m_scroll->setWidgetResizable(true);
+                    m_scroll->setMinimumSize(0, 0);
+                    m_scroll->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Ignored);
+                    m_scroll->setWidget(m_body);
+                    root->addWidget(m_scroll, 1);
+                }
+                else
+                {
+                    root->addWidget(m_body);
+                }
             }
             source->setProperty("ksword_detail_projection_source", true);
             if (!embeddedSource)
@@ -251,6 +263,21 @@ namespace
             if (themeChanged)
             {
                 applyProjectionStyle(); // 同一投影只更新一个主题块，避免逐字段重写QSS造成大量repolish。
+            }
+            if (m_complexReport)
+            {
+                if (dataChanged) m_complexReport->setDocument(m_source->document());
+                if (themeChanged) m_complexReport->refreshTheme();
+                if (searchChanged) m_complexReport->setSearchText(query);
+                m_documentRevision = revision;
+                m_language = language;
+                m_theme = theme;
+                m_query = query;
+                m_renderedTranslationRevision = translationRevision;
+                m_snapshotReady = true;
+                m_refreshing = false;
+                if (m_source && m_source->documentRevision() != revision) scheduleRefresh();
+                return; // 不能为复杂目录另外维护一份隐藏的展平 QLabel 树。
             }
             // 同一个文档与语言只展开一次；纯主题和搜索请求直接使用现有行绑定。
             const auto sections = dataChanged ? displaySections(m_source->document()) : QVector<DisplaySection>();
@@ -486,6 +513,7 @@ namespace
             }
         }
         QPointer<ks::ui::StructuredFieldView> m_source; // 保留规范数据源及原导出入口。
+        ks::ui::ComplexReportView* m_complexReport = nullptr; // 显式复杂报告正文，普通详情保持原卡片。
         QPointer<QLineEdit> m_search; // 原搜索控件，不维护平行查询字符串。
         QWidget* m_body = nullptr;
         QVBoxLayout* m_cards = nullptr;

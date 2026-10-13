@@ -684,6 +684,10 @@
     <ClCompile Include="UI\PrimaryPageStyle.cpp" />
     <ClCompile Include="UI\DetailPresentation.cpp" />
     <ClCompile Include="UI\DetailFieldProjection.cpp" />
+    <ClCompile Include="UI\ComplexReportModel.cpp" />
+    <ClCompile Include="UI\ComplexReportDelegate.cpp" />
+    <ClCompile Include="UI\ComplexReportView.cpp" />
+    <ClCompile Include="UI\FieldDocument.cpp" />
     <ClCompile Include="UI\DetailWindowFramework.cpp" />
     <ClCompile Include="UI\ParameterWorkspace.cpp" />
     <ClCompile Include="UI\MainSurfaceStyle.cpp" />
@@ -1147,6 +1151,9 @@
     <QtMoc Include="SettingsDock\SettingsDock.h" />
     <QtMoc Include="UI\CodeEditorWidget.h" />
     <QtMoc Include="UI\StructuredFieldView.h" />
+    <ClInclude Include="UI\ComplexReportModel.h" />
+    <ClInclude Include="UI\ComplexReportDelegate.h" />
+    <ClInclude Include="UI\ComplexReportView.h" />
     <QtMoc Include="UI\WindowPickerButton.h" />
     <QtMoc Include="UI\KernelDisassemblyDialog.h" />
     <ClInclude Include="UI\MemoryAssembly.h" />

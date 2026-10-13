@@ -2638,6 +2638,9 @@ namespace
         document.section(titleText);
         if (!result.io.ok)
         {
+            // 采样区状态直接来自传输结果；未支持与实际读取失败分别保留警告和错误。
+            document.nodes.first().status = result.unsupported
+                ? ks::ui::FieldNode::Status::Warning : ks::ui::FieldNode::Status::Error;
             document.note(readableRuntimeIoMessage(
                 QString::fromStdString(result.io.message),
                 titleText,
@@ -2646,6 +2649,23 @@ namespace
             return document;
         }
 
+        // 只有明确的 OK 才标成功；部分/截断和请求失败按协议状态显示，不解析说明文字。
+        switch (result.status)
+        {
+        case KSWORD_ARK_RUNTIME_FIELD_SAMPLE_STATUS_OK:
+            document.nodes.first().status = ks::ui::FieldNode::Status::Success;
+            break;
+        case KSWORD_ARK_RUNTIME_FIELD_SAMPLE_STATUS_PARTIAL:
+        case KSWORD_ARK_RUNTIME_FIELD_SAMPLE_STATUS_TRUNCATED:
+            document.nodes.first().status = ks::ui::FieldNode::Status::Warning;
+            break;
+        case KSWORD_ARK_RUNTIME_FIELD_SAMPLE_STATUS_LOOKUP_FAILED:
+        case KSWORD_ARK_RUNTIME_FIELD_SAMPLE_STATUS_INVALID_REQUEST:
+            document.nodes.first().status = ks::ui::FieldNode::Status::Error;
+            break;
+        default:
+            break;
+        }
         document.field(QStringLiteral("Status"), QStringLiteral("%1").arg(runtimeFieldSampleStatusText(result.status)));
         document.field(QStringLiteral("Object"), QStringLiteral("%1").arg(uint64ToHex(result.objectAddress)));
         document.field(QStringLiteral("Returned/Total"), QStringLiteral("%1/%2").arg(result.returnedCount).arg(result.totalCount));
@@ -2662,6 +2682,20 @@ namespace
             const QString nameText = runtimeFieldSampleNameOrId(entry);
             const QString typeText = runtimeFieldSampleTypeOrUnknown(entry);
             document.section(QStringLiteral("%1").arg(nameText));
+            // 每个字段保留自己的采样状态，不被同批其它字段的成功覆盖。
+            if (entry.status == KSWORD_ARK_RUNTIME_FIELD_SAMPLE_ROW_STATUS_OK)
+            {
+                document.nodes.last().status = ks::ui::FieldNode::Status::Success;
+            }
+            else if (entry.status == KSWORD_ARK_RUNTIME_FIELD_SAMPLE_ROW_STATUS_READ_FAILED)
+            {
+                document.nodes.last().status = ks::ui::FieldNode::Status::Error;
+            }
+            else if (entry.status == KSWORD_ARK_RUNTIME_FIELD_SAMPLE_ROW_STATUS_OFFSET_REJECTED
+                || entry.status == KSWORD_ARK_RUNTIME_FIELD_SAMPLE_ROW_STATUS_SIZE_REJECTED)
+            {
+                document.nodes.last().status = ks::ui::FieldNode::Status::Warning;
+            }
             document.field(QStringLiteral("Type"), QStringLiteral("%1").arg(typeText));
             document.field(QStringLiteral("Offset/Size"), QStringLiteral("%1 / %2 bytes, BytesRead=%3")
                 .arg(uint64ToHex(entry.offset))
@@ -3561,6 +3595,7 @@ void ProcessDetailWindow::requestAsyncSelectedThreadRuntimeSample()
                     QStringLiteral("DynData status 查询没有返回额外说明。"),
                     false);
                 deepIdentityGuard.section(QStringLiteral("PDB Deep Runtime Identity Guard"));
+                deepIdentityGuard.nodes.first().status = ks::ui::FieldNode::Status::Warning;
                 deepIdentityGuard.field(QStringLiteral("结论"), QStringLiteral("不匹配，跳过只读采样"), true);
                 deepIdentityGuard.field(QStringLiteral("原因"), QStringLiteral("DynData status 查询不可用，无法校验 deep offset 与当前内核 identity。%1").arg(readableDynDataMessage), true);
             }
@@ -6322,6 +6357,7 @@ void ProcessDetailWindow::requestAsyncSectionRefresh()
                     false);
                 deepIdentityGuard.section(QStringLiteral("PDB Deep Runtime Identity Guard"));
                 deepIdentityGuard.field(QStringLiteral("结论"), QStringLiteral("不匹配，跳过只读采样"), true);
+                deepIdentityGuard.nodes.first().status = ks::ui::FieldNode::Status::Warning;
                 deepIdentityGuard.field(QStringLiteral("原因"), QStringLiteral("DynData status 查询不可用，无法校验 deep offset 与当前内核 identity。%1").arg(readableDynDataMessage), true);
             }
             const std::vector<ksword::ark::RuntimeFieldSampleRequestItem> processSampleItems =
@@ -6384,6 +6420,28 @@ void ProcessDetailWindow::requestAsyncSectionRefresh()
                 };
 
             document.section(QStringLiteral("R0 Process Runtime Detail"));
+            document.nodes.last().summaryLabel = QStringLiteral("运行时");
+            // 分区语义来自这一次传输和详情协议，目录是否存在不参与运行时成功判断。
+            if (!processDetailResult.io.ok)
+            {
+                document.nodes.last().status = processDetailResult.unsupported
+                    ? ks::ui::FieldNode::Status::Warning : ks::ui::FieldNode::Status::Error;
+            }
+            else if (processDetailResult.response.status == KSWORD_ARK_DETAIL_STATUS_OK)
+            {
+                document.nodes.last().status = ks::ui::FieldNode::Status::Success;
+            }
+            else if (processDetailResult.response.status == KSWORD_ARK_DETAIL_STATUS_PARTIAL
+                || processDetailResult.response.status == KSWORD_ARK_DETAIL_STATUS_UNSUPPORTED
+                || processDetailResult.response.status == KSWORD_ARK_DETAIL_STATUS_CAPABILITY_MISSING)
+            {
+                document.nodes.last().status = ks::ui::FieldNode::Status::Warning;
+            }
+            else if (processDetailResult.response.status == KSWORD_ARK_DETAIL_STATUS_LOOKUP_FAILED
+                || processDetailResult.response.status == KSWORD_ARK_DETAIL_STATUS_READ_FAILED)
+            {
+                document.nodes.last().status = ks::ui::FieldNode::Status::Error;
+            }
             if (processDetailResult.io.ok)
             {
                 const KSWORD_ARK_PROCESS_DETAIL_RESPONSE& processDetail =
@@ -6430,19 +6488,35 @@ void ProcessDetailWindow::requestAsyncSectionRefresh()
                 document.field(QStringLiteral("说明"), fieldText(readableMessage));
             }
 
-            document.section(QStringLiteral("PDB Deep Runtime Sample - process_detail"));
+            // identity 与采样结果各自拥有分区，跳过说明不能附到 guard 后留下空采样标题。
+            if (!deepIdentityGuard.nodes.isEmpty())
+            {
+                deepIdentityGuard.nodes.first().summaryLabel = QStringLiteral("身份校验");
+            }
             appendFields(document, deepIdentityGuard);
             if (!deepIdentityMatched)
             {
+                document.section(QStringLiteral("PDB Deep Runtime Sample - process_detail"));
+                document.nodes.last().summaryLabel = QStringLiteral("采样");
+                document.nodes.last().status = ks::ui::FieldNode::Status::Warning;
                 document.note(QStringLiteral("deep catalog identity 未与当前 ntoskrnl 匹配，已跳过 R0 字段采样，避免错误偏移。"));
             }
             else if (processSampleItems.empty())
             {
+                document.section(QStringLiteral("PDB Deep Runtime Sample - process_detail"));
+                document.nodes.last().summaryLabel = QStringLiteral("采样");
+                document.nodes.last().status = ks::ui::FieldNode::Status::Warning;
                 document.note(QStringLiteral("PDB deep offset JSON 未提供可安全采样的小字段，或 profiles\\pdb_deep_offsets 未找到。"));
             }
             else
             {
-                appendFields(document, runtimeFieldSampleResultDocument(processSampleResult, QStringLiteral("进程 PDB deep 字段采样")));
+                auto sampleDocument = runtimeFieldSampleResultDocument(processSampleResult, QStringLiteral("进程 PDB deep 字段采样"));
+                sampleDocument.nodes.first().summaryLabel = QStringLiteral("采样");
+                // 同一采样结果的字段归入本分区，避免最多 64 条字段各自占一个顶层摘要。
+                for (qsizetype index = 1; index < sampleDocument.nodes.size(); ++index)
+                    sampleDocument.nodes.first().children.append(sampleDocument.nodes.at(index));
+                sampleDocument.nodes.resize(1);
+                appendFields(document, sampleDocument); // 实际采样继续使用原生产者提供的真实状态。
             }
 
             appendFields(document, buildPdbRuntimeCatalogPreview(QStringLiteral("process_detail"), 64, 1024));
@@ -6474,6 +6548,32 @@ void ProcessDetailWindow::requestAsyncSectionRefresh()
                 false);
 
             document.section(QStringLiteral("R0 Section Query"));
+            // 成功但截断/不支持远程映射仍标警告，保留当前查询的真实完整性边界。
+            if (!sectionResult.io.ok)
+            {
+                document.nodes.last().status = ks::ui::FieldNode::Status::Error;
+            }
+            else if (sectionResult.queryStatus == KSWORD_ARK_SECTION_QUERY_STATUS_OK)
+            {
+                const bool incomplete = (sectionResult.fieldFlags
+                    & (KSWORD_ARK_SECTION_FIELD_MAPPING_TRUNCATED | KSWORD_ARK_SECTION_FIELD_REMOTE_MAPPING_UNSUPPORTED)) != 0U;
+                document.nodes.last().status = incomplete
+                    ? ks::ui::FieldNode::Status::Warning : ks::ui::FieldNode::Status::Success;
+            }
+            else if (sectionResult.queryStatus == KSWORD_ARK_SECTION_QUERY_STATUS_PROCESS_LOOKUP_FAILED
+                || sectionResult.queryStatus == KSWORD_ARK_SECTION_QUERY_STATUS_MAPPING_QUERY_FAILED)
+            {
+                document.nodes.last().status = ks::ui::FieldNode::Status::Error;
+            }
+            else if (sectionResult.queryStatus == KSWORD_ARK_SECTION_QUERY_STATUS_PARTIAL
+                || sectionResult.queryStatus == KSWORD_ARK_SECTION_QUERY_STATUS_DYNDATA_MISSING
+                || sectionResult.queryStatus == KSWORD_ARK_SECTION_QUERY_STATUS_SECTION_OBJECT_MISSING
+                || sectionResult.queryStatus == KSWORD_ARK_SECTION_QUERY_STATUS_CONTROL_AREA_MISSING
+                || sectionResult.queryStatus == KSWORD_ARK_SECTION_QUERY_STATUS_REMOTE_UNSUPPORTED
+                || sectionResult.queryStatus == KSWORD_ARK_SECTION_QUERY_STATUS_BUFFER_TOO_SMALL)
+            {
+                document.nodes.last().status = ks::ui::FieldNode::Status::Warning;
+            }
             document.field(QStringLiteral("IO说明"), fieldText(readableSectionIoMessage));
             if (!sectionResult.io.ok)
             {
@@ -6511,9 +6611,11 @@ void ProcessDetailWindow::requestAsyncSectionRefresh()
                 {
                     for (const auto& mappingEntry : sectionResult.mappings)
                     {
-                        document.section(QStringLiteral("%1 | PID=%2").arg(mappingTypeText(mappingEntry.viewMapType)).arg(mappingEntry.processId));
-                        document.field(QStringLiteral("Start VA"), uint64ToHex(mappingEntry.startVa));
-                        document.field(QStringLiteral("End VA"), uint64ToHex(mappingEntry.endVa));
+                        ks::ui::FieldDocument mappingDocument; // 每条映射属于同一分区，避免空标题和碎片化顶层摘要。
+                        mappingDocument.section(QStringLiteral("%1 | PID=%2").arg(mappingTypeText(mappingEntry.viewMapType)).arg(mappingEntry.processId));
+                        mappingDocument.field(QStringLiteral("Start VA"), uint64ToHex(mappingEntry.startVa));
+                        mappingDocument.field(QStringLiteral("End VA"), uint64ToHex(mappingEntry.endVa));
+                        document.nodes.last().children.append(mappingDocument.nodes.first());
                     }
                 }
             }

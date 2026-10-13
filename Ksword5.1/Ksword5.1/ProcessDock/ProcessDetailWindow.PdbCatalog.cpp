@@ -456,6 +456,8 @@ namespace process_detail_window_internal
           if (found != previewCache.constEnd()) return found.value(); }
         ks::ui::FieldDocument preview;
         preview.section(QStringLiteral("PDB Deep Runtime Catalog - %1").arg(domainName));
+        // 目录摘要只显示真实 domain 身份，不把静态偏移目录误标成运行时采样成功。
+        preview.nodes.first().summaryLabel = domainName;
         const auto finish = [&]() { QMutexLocker lock(&cacheMutex); previewCache.insert(cacheKey, preview); return preview; };
         const QString jsonPath = findNtosDeepOffsetJsonPath();
         if (jsonPath.isEmpty())
@@ -497,6 +499,7 @@ namespace process_detail_window_internal
                     if (field.isEmpty()) continue;
                     ks::ui::FieldDocument fieldDocument;
                     fieldDocument.section(jsonString(field, QStringLiteral("qualifiedName"), jsonString(field, QStringLiteral("fieldName"), QStringLiteral("<unknown field>"))));
+                    fieldDocument.nodes.first().initiallyExpanded = false; // 属性在用户展开字段时才呈现。
                     fieldDocument.field(QStringLiteral("Offset"), jsonString(field, QStringLiteral("offsetHex"), QStringLiteral("<no offset>")));
                     fieldDocument.field(QStringLiteral("Type"), jsonString(field, QStringLiteral("fieldType"), QStringLiteral("<unknown type>")));
                     const QJsonObject bits = field.value(QStringLiteral("bitField")).toObject();
@@ -564,6 +567,9 @@ namespace process_detail_window_internal
 
         const auto finishWithDetail = [&detailDocument, detailDocumentOut](const bool matchValue, const QString& reasonText) -> bool
         {
+            // 这里只证明 identity 是否匹配，不能把该状态传播成全部目录已成功采样。
+            detailDocument.nodes.first().status = matchValue
+                ? ks::ui::FieldNode::Status::Success : ks::ui::FieldNode::Status::Warning;
             detailDocument.field(QStringLiteral("结论"), QStringLiteral("%1").arg(matchValue ? QStringLiteral("匹配，可执行只读采样") : QStringLiteral("不匹配，跳过只读采样")));
             detailDocument.field(QStringLiteral("原因"), QStringLiteral("%1").arg(reasonText));
             if (detailDocumentOut != nullptr)

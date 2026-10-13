@@ -14,7 +14,7 @@ def main():
     env['QT_QPA_PLATFORM']='offscreen';env['QT_PLUGIN_PATH']=str(qt/'share/qt6/plugins')
     flags=['-std=c++20','-O1','-g0','-DNOMINMAX','-DUNICODE','-D_UNICODE','-I'+str(root)]
     for module in ('','QtCore','QtGui','QtWidgets','QtSvg'):flags+=['-isystem',str(qt/'include/qt6'/module)]
-    shared=['UI/CodeEditorWidget.cpp','UI/CodeTextEdit.cpp','UI/CodeEditorFileSession.cpp','UI/StructuredFieldView.cpp','UI/TypedSyntaxDocument.cpp','UI/ThemeStatusRole.cpp','UI/ThemeControlGlyphs.cpp','Internationalization/LanguageManager.cpp']
+    shared=['UI/CodeEditorWidget.cpp','UI/CodeTextEdit.cpp','UI/CodeEditorFileSession.cpp','UI/StructuredFieldView.cpp', 'UI/FieldDocument.cpp','UI/TypedSyntaxDocument.cpp','UI/ThemeStatusRole.cpp','UI/ThemeControlGlyphs.cpp','Internationalization/LanguageManager.cpp']
     objects=[]
     reusable=root/'work/native-privilege-workbench'
     headers=[app/'UI'/name for name in ('CodeEditorWidget.h','CodeTextEdit.h','CodeEditorFileSession.h',

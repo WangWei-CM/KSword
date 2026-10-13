@@ -1592,6 +1592,18 @@
     <ClCompile Include="UI\DetailFieldProjection.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="UI\ComplexReportModel.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="UI\ComplexReportDelegate.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="UI\ComplexReportView.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="UI\FieldDocument.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="UI\DetailWindowFramework.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -2719,6 +2731,15 @@
     <QtMoc Include="UI\StructuredFieldView.h">
       <Filter>Header Files</Filter>
     </QtMoc>
+    <ClInclude Include="UI\ComplexReportModel.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="UI\ComplexReportDelegate.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="UI\ComplexReportView.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <QtMoc Include="UI\CodeEditorWidget.h">
       <Filter>Header Files</Filter>
     </QtMoc>

@@ -50,10 +50,8 @@ def main():
     qt = (root / args.qt_root).resolve() if not args.qt_root.is_absolute() else args.qt_root
     output = root / "work/report-property-model-tests"
     output.mkdir(parents=True, exist_ok=True)
-    model = (app / "UI/StructuredFieldView.cpp").read_text(encoding="utf-8-sig")
-    model = model[:model.index("    StructuredFieldView::StructuredFieldView(")] + "\n}\n"
-    model = re.sub(r'#include "([^"\n]+)"', lambda m: '#include "' + (app / "UI" / m[1]).resolve().as_posix() + '"', model)
-    (output / "production-model.cpp").write_text(model, encoding="utf-8")
+    # 使用独立生产规范文档模块，完整保留原实现，不生成另一份序列化前缀。
+    model_source = app / "UI/FieldDocument.cpp"
     device_source = (app / "HardwareDock/HardwareDeviceManagerPage.cpp").read_text(encoding="utf-8-sig")
     device_header = (app / "HardwareDock/HardwareDeviceManagerPage.h").read_text(encoding="utf-8-sig")
     device_struct = function(device_header, "struct DeviceEntry") + ";"
@@ -206,7 +204,7 @@ int main(int argc, char** argv) {
     flags = ["-std=c++20", "-O1", "-g0", "-ffunction-sections", "-fdata-sections", "-DNOMINMAX", "-DUNICODE", "-D_UNICODE", "-I" + str(root)]
     for module in ("", "QtCore", "QtGui", "QtWidgets"):
         flags += ["-isystem", str(qt / "include/qt6" / module)]
-    sources = [output / "production-model.cpp", output / "producer-conservation.cpp", app / "PrivilegeDock/PrivilegeAccessReport.cpp"]
+    sources = [model_source, output / "producer-conservation.cpp", app / "PrivilegeDock/PrivilegeAccessReport.cpp"]
     objects = []
     for source in sources:
         obj = output / (source.stem + ".o")

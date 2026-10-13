@@ -26,7 +26,7 @@ $detailSources = @(
     'tools/detail_pane_tests.cpp', "$detailApp/UI/DetailLayoutHost.cpp", "$detailApp/UI/DetailLayoutHost.Binding.cpp",
     "$detailApp/UI/DetailLayoutHost.Compatibility.cpp", "$detailApp/UI/DetailLayoutRegistry.cpp", "$detailApp/UI/EmbeddedRowDelegate.cpp",
     "$detailApp/UI/CodeEditorWidget.cpp", "$detailApp/UI/CodeTextEdit.cpp", "$detailApp/UI/CodeEditorFileSession.cpp",
-    "$detailApp/UI/StructuredFieldView.cpp",
+    "$detailApp/UI/StructuredFieldView.cpp", "$detailApp/UI/FieldDocument.cpp",
     "$detailApp/UI/FlowLayout.cpp", "$detailApp/UI/ThemeStatusRole.cpp", "$detailApp/UI/ThemeControlGlyphs.cpp",
     "$detailApp/UI/SmoothScrollSupport.cpp", "$detailApp/UI/FlatButtonTheme.cpp", "$detailApp/UI/ThemeBinding.cpp", "$detailApp/UI/ThemeAccentIcon.cpp", "$detailApp/Internationalization/LanguageManager.cpp"
 )

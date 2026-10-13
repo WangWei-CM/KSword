@@ -19,7 +19,7 @@ $componentSources = @(
     'Ksword5.1\Ksword5.1\UI\CodeEditorWidget.cpp',
     'Ksword5.1\Ksword5.1\UI\CodeTextEdit.cpp',
     'Ksword5.1\Ksword5.1\UI\CodeEditorFileSession.cpp',
-    'Ksword5.1\Ksword5.1\UI\StructuredFieldView.cpp', 'Ksword5.1\Ksword5.1\UI\TypedSyntaxDocument.cpp',
+    'Ksword5.1\Ksword5.1\UI\StructuredFieldView.cpp', 'Ksword5.1\Ksword5.1\UI\FieldDocument.cpp', 'Ksword5.1\Ksword5.1\UI\TypedSyntaxDocument.cpp',
         'Ksword5.1\Ksword5.1\UI\GlobalUiBaseStyle.cpp',
     'Ksword5.1\Ksword5.1\UI\ThemeStatusRole.cpp',
     'Ksword5.1\Ksword5.1\UI\SvgThemeIconManager.cpp',

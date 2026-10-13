@@ -11,9 +11,8 @@ def main():
     qt=(root/args.qt_root).resolve();out=root/'work/report-monitor-model-tests';out.mkdir(parents=True,exist_ok=True)
     source=(app/'MonitorDock/MonitorDock.cpp').read_text(encoding='utf-8-sig');header=(app/'MonitorDock/MonitorDock.h').read_text(encoding='utf-8-sig')
     capture=(app/'MonitorDock/ProcessTraceMonitorWidget.Capture.cpp').read_text(encoding='utf-8-sig');capture_header=(app/'MonitorDock/ProcessTraceMonitorWidget.h').read_text(encoding='utf-8-sig')
-    model=(app/'UI/StructuredFieldView.cpp').read_text(encoding='utf-8-sig');model=model[:model.index('    StructuredFieldView::StructuredFieldView(')]+'\n}\n'
-    model=re.sub(r'#include "([^"\n]+)"',lambda m:'#include "'+(app/'UI'/m[1]).resolve().as_posix()+'"',model)
-    (out/'model.cpp').write_text(model,encoding='utf-8')
+    # 规范序列化直接编译独立生产模块，不再截取 QWidget 实现前缀或复制 serializer。
+    model_source=app/'UI/FieldDocument.cpp'
     structs='\n'.join(function(source,'    struct '+name)+';' for name in ['EtwSchemaPropertyEntry','EtwSchemaEntry','EtwDecodedPropertyEntry','EtwSemanticSummary'])
     producers='\n'.join(function(source,name) for name in ['    QString etwProviderDisplayName(', '    std::uint32_t etwRelatedProcessId(', '    std::uint32_t etwRelatedThreadId(', '    void etwUpdateRelatedIdentity(', '    QByteArray serializeEtwArchiveRow(', '    bool deserializeEtwArchiveRow(', '    QJsonObject buildEtwDetailObject(', '    ks::ui::FieldNode monitorJsonNode('])
     constants='\n'.join(re.findall(r'    constexpr [^;]+kEtwArchive\w+[^;]*;',source[:source.index('    QByteArray serializeEtwArchiveRow(')]))
@@ -110,8 +109,8 @@ int main(int argc,char**argv){
     compiler=shutil.which(args.compiler)or args.compiler;flags=['-std=c++20','-O1','-g0','-ffunction-sections','-fdata-sections','-DNOMINMAX','-DUNICODE','-D_UNICODE','-I'+str(root)]
     for module in ['','QtCore','QtGui','QtWidgets']:flags+=['-isystem',str(qt/'include/qt6'/module)]
     objects=[]
-    for name in ['model','conservation']:
-      obj=out/(name+'.o');subprocess.run([compiler,*flags,'-c',str(out/(name+'.cpp')),'-o',str(obj)],cwd=root,check=True,timeout=180);objects.append(str(obj))
+    for production_source in [model_source,out/'conservation.cpp']:
+      obj=out/(production_source.stem+'.o');subprocess.run([compiler,*flags,'-c',str(production_source),'-o',str(obj)],cwd=root,check=True,timeout=180);objects.append(str(obj))
     binary=out/'conservation.exe';subprocess.run([compiler,*objects,'-Wl,--gc-sections','-L'+str(qt/'lib'),'-lQt6Core','-lQt6Gui','-lQt6Widgets','-o',str(binary)],cwd=root,check=True,timeout=120)
     env=dict(os.environ);env['PATH']=str(qt/'bin')+os.pathsep+env.get('PATH','')
     run=subprocess.run([str(binary)],cwd=root,env=env,capture_output=True,text=True,timeout=60)

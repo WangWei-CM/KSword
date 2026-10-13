@@ -21,6 +21,8 @@ namespace ks::ui
     struct FieldNode
     {
         enum class Kind { Section, Field, Note };
+        // 报告摘要只使用生产者明确提供的状态，不从任意中英文说明中猜测成功或失败。
+        enum class Status { Neutral, Info, Success, Warning, Error };
         Kind kind = Kind::Field;
         QString name;
         QString value;
@@ -28,6 +30,8 @@ namespace ks::ui
         QVector<FieldNode> children;
         bool initiallyExpanded = true;
         bool translateName = true;
+        Status status = Status::Neutral; // 独立来源的真实状态；未提供时保持中性。
+        QString summaryLabel; // 摘要条的短标题；为空时显示原分区名，不改变规范文档。
     };
 
     struct FieldDocument
@@ -38,7 +42,7 @@ namespace ks::ui
         // Fields and notes append to the most recently started section, or to
         // the document root before the first section. Nested data can be built
         // directly through FieldNode::children without retaining UI pointers.
-        FieldDocument& section(const QString& title);
+        FieldDocument& section(const QString& sectionTitle);
         FieldDocument& field(const QString& name, const QString& value,
             bool translateValue = false);
         FieldDocument& note(const QString& body);

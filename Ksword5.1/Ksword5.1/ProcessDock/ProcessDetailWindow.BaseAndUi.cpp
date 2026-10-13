@@ -24,6 +24,7 @@
 #include "../PluginHost.h"
 
 #include <QTimer>
+#include <QStackedWidget>
 #include <QCloseEvent>
 #include <QEasingCurve>
 #include <QHash>
@@ -5331,10 +5332,37 @@ void ProcessDetailWindow::initializeKernelObjectTab()
         << "[ProcessDetailWindow] initializeKernelObjectTab: 构建 Process Detail Evidence 页面。"
         << eol;
 
+    // 事实概览、专业监视与复杂报告分工明确；报告视口不再嵌入整页滚动形成双重滚动。
+    auto* evidenceRoot = new QVBoxLayout(m_kernelObjectTab);
+    evidenceRoot->setContentsMargins(0, 0, 0, 0); // 唯一四边留白由内部导航共享外壳接管。
+    auto* evidenceTabs = new QTabWidget(m_kernelObjectTab);
+    evidenceTabs->setObjectName(QStringLiteral("ksword_process_evidence_tabs"));
+    evidenceTabs->setProperty("ksword_detail_nested_tabs", true);
+    evidenceTabs->setMinimumSize(0, 0);
+    evidenceTabs->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Ignored);
+    ks::ui::StyleChildPageTabs(evidenceTabs); // 详情自身导航之下的子级采用共享紧凑导航层级。
+    ks::ui::StylePageTabsContentFrame(evidenceTabs, 6);
+    evidenceRoot->addWidget(evidenceTabs, 1);
+    auto* overviewPage = new QWidget(evidenceTabs); // 原有运行状态和字段来源，继续独立自然滚动。
+    auto* watchPage = new QWidget(evidenceTabs); // 原 HVM 监视动作与依赖状态，不改变业务调用。
+    auto* reportPage = new QWidget(evidenceTabs); // 固定工具行和唯一树正文视口。
+    evidenceTabs->addTab(overviewPage, QStringLiteral("概览"));
+    evidenceTabs->addTab(watchPage, QStringLiteral("字段监视"));
+    evidenceTabs->addTab(reportPage, QStringLiteral("结构报告"));
+    if (auto* stack = evidenceTabs->findChild<QStackedWidget*>(QString(), Qt::FindDirectChildrenOnly))
+    {
+        stack->setMinimumSize(0, 0);
+        stack->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Ignored);
+    }
+    auto* watchLayout = new QVBoxLayout(watchPage);
+    watchLayout->setContentsMargins(0, 0, 0, 0);
+    auto* reportLayout = new QVBoxLayout(reportPage);
+    reportLayout->setContentsMargins(0, 0, 0, 0);
+    reportLayout->setSpacing(8);
     QWidget* const kernelObjectContent = createScrollableTabContent(
-        m_kernelObjectTab,
+        overviewPage,
         m_kernelObjectLayout,
-        6,
+        0,
         8);
 
     QGroupBox* summaryGroup = new QGroupBox(QStringLiteral("R0 扩展摘要"), kernelObjectContent);
@@ -5503,7 +5531,8 @@ void ProcessDetailWindow::initializeKernelObjectTab()
     m_watchStatusLabel = new QLabel(QString(), watchGroup);
     m_watchStatusLabel->setWordWrap(true);
     watchGroupLayout->addWidget(m_watchStatusLabel);
-    m_kernelObjectLayout->addWidget(watchGroup);
+    watchLayout->addWidget(watchGroup);
+    watchLayout->addStretch(1);
 
     // 六个按钮共用一条路径，只有"取哪个字段"不同。
     connect(m_watchActiveProcessLinksButton, &QPushButton::clicked, this,
@@ -5519,15 +5548,23 @@ void ProcessDetailWindow::initializeKernelObjectTab()
     connect(m_watchProcessPteButton, &QPushButton::clicked, this,
         [this]() { startKernelFieldWatch(KernelFieldWatchTarget::ProcessObjectPte); });
 
-    QGroupBox* sectionGroup = new QGroupBox(QStringLiteral("Section / ControlArea 映射关系"), kernelObjectContent);
+    // 报告标题与动作固定；内部的分区卡片由共享报告绘制，不再额外套一层 GroupBox。
+    auto* sectionGroup = new QWidget(reportPage);
     QVBoxLayout* sectionGroupLayout = new QVBoxLayout(sectionGroup);
-    sectionGroupLayout->setContentsMargins(8, 8, 8, 8);
-    sectionGroupLayout->setSpacing(6);
+    sectionGroupLayout->setContentsMargins(0, 0, 0, 0);
+    sectionGroupLayout->setSpacing(8);
 
     QHBoxLayout* sectionTopBarLayout = new QHBoxLayout();
+    auto* reportTitle = new QLabel(QStringLiteral("结构报告"), sectionGroup); // 页面标题与刷新状态同排，留白分隔摘要和正文。
+    QFont reportTitleFont = reportTitle->font();
+    reportTitleFont.setWeight(QFont::DemiBold);
+    reportTitle->setFont(reportTitleFont);
+    sectionTopBarLayout->addWidget(reportTitle);
     m_refreshSectionInfoButton = new QPushButton(QIcon(":/Icon/process_refresh.svg"), QStringLiteral("刷新 Section"), sectionGroup);
     m_refreshSectionInfoButton->setToolTip(QStringLiteral("通过 R0 查询当前进程 SectionObject、ControlArea 和映射摘要"));
     m_sectionInfoStatusLabel = new QLabel(QStringLiteral("● 尚未刷新"), sectionGroup);
+    m_sectionInfoStatusLabel->setWordWrap(true); // 长诊断状态在窄窗自然换行，不能压缩正文宽度。
+    m_sectionInfoStatusLabel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
     m_sectionInfoStatusLabel->setStyleSheet(
         QStringLiteral("color:%1; font-weight:600;")
         .arg(KswordTheme::TextSecondaryHex()));
@@ -5537,9 +5574,10 @@ void ProcessDetailWindow::initializeKernelObjectTab()
     sectionGroupLayout->addLayout(sectionTopBarLayout);
 
     m_sectionInfoOutput = new ks::ui::StructuredFieldView(sectionGroup);
+    m_sectionInfoOutput->setProperty("ksword_complex_report_source", true);
     m_sectionInfoOutput->setDocument(fieldNotice(QStringLiteral("Section/ControlArea 查询结果将在此处显示。")));
-    sectionGroupLayout->addWidget(m_sectionInfoOutput, 1);
-    m_kernelObjectLayout->addWidget(sectionGroup, 1);
+    sectionGroupLayout->addWidget(ks::ui::CreateDetailFieldProjection(m_sectionInfoOutput, sectionGroup), 1);
+    reportLayout->addWidget(sectionGroup, 1);
 
     m_kernelObjectLayout->addStretch(1);
 }
