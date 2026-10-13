@@ -1559,6 +1559,9 @@
     <ClCompile Include="UI\TableInteractionSupport.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="UI\TableContextMenu.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="UI\FlatButtonTheme.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -2917,6 +2920,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="UI\TableInteractionSupport.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="UI\TableContextMenu.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="UI\FlatButtonTheme.h">

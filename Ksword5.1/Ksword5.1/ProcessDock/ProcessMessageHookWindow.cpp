@@ -1,4 +1,5 @@
 #include "ProcessMessageHookWindow.h"
+#include "../UI/TableContextMenu.h"
 #include "../UI/VisibleTableWidget.h"
 #include "../UI/ToolbarMetrics.h"
 #include "../UI/FlatButtonTheme.h"
@@ -881,9 +882,13 @@ void ProcessMessageHookWindow::showTableContextMenu(const QPoint& localPosition)
     QAction* copyCellAction = menu.addAction(
         QIcon(QStringLiteral(":/Icon/process_copy_cell.svg")),
         hookWindowText(QStringLiteral("复制单元格")));
+    // 声明业务菜单已提供此能力，避免共享表格菜单追加重复项。
+    ks::ui::SetTableContextActionRole(copyCellAction, ks::ui::TableContextActionRole::CopyCell);
     QAction* copyRowAction = menu.addAction(
         QIcon(QStringLiteral(":/Icon/process_copy_row.svg")),
         hookWindowText(QStringLiteral("复制当前行")));
+    // 声明业务菜单已提供此能力，避免共享表格菜单追加重复项。
+    ks::ui::SetTableContextActionRole(copyRowAction, ks::ui::TableContextActionRole::CopyRows);
     QAction* copyAllAction = menu.addAction(
         QIcon(QStringLiteral(":/Icon/process_copy_row.svg")),
         hookWindowText(QStringLiteral("复制全部行")));

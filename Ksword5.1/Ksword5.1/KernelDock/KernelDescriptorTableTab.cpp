@@ -1,4 +1,5 @@
 #include "KernelDescriptorTableTab.h"
+#include "../UI/TableContextMenu.h"
 #include "../UI/PageControlStyle.h"
 #include "../UI/ToolbarMetrics.h"
 
@@ -968,7 +969,11 @@ void KernelDescriptorTableTab::showCopyMenu(const QPoint& position)
     const int row = index.isValid() ? index.row() : m_table->currentRow();
     QMenu menu(this);
     QAction* copyCell = menu.addAction(kernelText("kernel.descriptor.copy.cell", QStringLiteral("复制单元格")));
+    // 声明业务菜单已提供此能力，避免共享表格菜单追加重复项。
+    ks::ui::SetTableContextActionRole(copyCell, ks::ui::TableContextActionRole::CopyCell);
     QAction* copyRow = menu.addAction(kernelText("kernel.descriptor.copy.row", QStringLiteral("复制当前行")));
+    // 声明业务菜单已提供此能力，避免共享表格菜单追加重复项。
+    ks::ui::SetTableContextActionRole(copyRow, ks::ui::TableContextActionRole::CopyRows);
     QAction* copyAll = menu.addAction(kernelText("kernel.descriptor.copy.all", QStringLiteral("复制全部行")));
     menu.addSeparator();
     QMenu* advancedAnalysis = menu.addMenu(

@@ -1,4 +1,5 @@
 #include "VirusTotalOnlineScan.h"
+#include "../UI/TableContextMenu.h"
 #include "../UI/PageControlStyle.h"
 #include "../UI/ToolbarMetrics.h"
 #include "../UI/DetailDialogChrome.h"
@@ -1194,7 +1195,11 @@ namespace
                 QMenu contextMenu(table);
                 contextMenu.setStyleSheet(KswordTheme::ContextMenuStyle());
                 QAction* copyCellAction = contextMenu.addAction(QStringLiteral("复制单元格"));
+                // 声明业务菜单已提供此能力，避免共享表格菜单追加重复项。
+                ks::ui::SetTableContextActionRole(copyCellAction, ks::ui::TableContextActionRole::CopyCell);
                 QAction* copyRowAction = contextMenu.addAction(QStringLiteral("复制当前行"));
+                // 声明业务菜单已提供此能力，避免共享表格菜单追加重复项。
+                ks::ui::SetTableContextActionRole(copyRowAction, ks::ui::TableContextActionRole::CopyRows);
                 const bool hasItem = clickedItem != nullptr || table->currentItem() != nullptr;
                 copyCellAction->setEnabled(hasItem);
                 copyRowAction->setEnabled(hasItem);
@@ -1238,6 +1243,8 @@ namespace
                 QAction* copyFieldAction = contextMenu.addAction(QStringLiteral("复制字段"));
                 QAction* copyValueAction = contextMenu.addAction(QStringLiteral("复制值"));
                 QAction* copyRowAction = contextMenu.addAction(QStringLiteral("复制当前行"));
+                // 声明业务菜单已提供此能力，避免共享表格菜单追加重复项。
+                ks::ui::SetTableContextActionRole(copyRowAction, ks::ui::TableContextActionRole::CopyRows);
                 const bool hasItem = clickedItem != nullptr || tree->currentItem() != nullptr;
                 copyFieldAction->setEnabled(hasItem);
                 copyValueAction->setEnabled(hasItem);

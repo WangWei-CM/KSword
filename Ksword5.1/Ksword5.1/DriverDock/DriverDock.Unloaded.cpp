@@ -1,4 +1,5 @@
 #include "../UI/StructuredFieldView.h"
+#include "../UI/TableContextMenu.h"
 #include "../UI/PageControlStyle.h"
 #include "../UI/PrimaryPageStyle.h"
 #include "../UI/ToolbarMetrics.h"
@@ -817,6 +818,8 @@ void DriverDock::showUnloadedPiddbContextMenu(
         driverText(
             "driver.menu.copy_row",
             QStringLiteral("复制当前行")));
+    // 声明业务菜单已提供此能力，避免共享表格菜单追加重复项。
+    ks::ui::SetTableContextActionRole(copyRowAction, ks::ui::TableContextActionRole::CopyRows);
     QAction* copyVisibleAction = contextMenu.addAction(
         QIcon(QStringLiteral(":/Icon/log_copy.svg")),
         driverText(

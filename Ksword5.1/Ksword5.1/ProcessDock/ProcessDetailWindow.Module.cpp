@@ -1,4 +1,5 @@
 #include "ProcessDetailWindow.InternalCommon.h"
+#include "../UI/TableContextMenu.h"
 #include "../UI/ToolbarMetrics.h"
 #include "../UI/FlatButtonTheme.h"
 #include "../UI/DetailDialogChrome.h"
@@ -344,7 +345,11 @@ void ProcessDetailWindow::showModuleContextMenu(const QPoint& localPosition)
         .arg(KswordTheme::OnAccentHex()));
 
     QAction* copyCellAction = contextMenu.addAction(QIcon(":/Icon/process_copy_cell.svg"), "复制单元格");
+    // 声明业务菜单已提供此能力，避免共享表格菜单追加重复项。
+    ks::ui::SetTableContextActionRole(copyCellAction, ks::ui::TableContextActionRole::CopyCell);
     QAction* copyRowAction = contextMenu.addAction(QIcon(":/Icon/process_copy_row.svg"), "复制行");
+    // 声明业务菜单已提供此能力，避免共享表格菜单追加重复项。
+    ks::ui::SetTableContextActionRole(copyRowAction, ks::ui::TableContextActionRole::CopyRows);
     contextMenu.addSeparator();
     QAction* gotoModuleAction = contextMenu.addAction(QIcon(":/Icon/process_details.svg"), "查看模块详情");
     if (const auto* module = selectedModuleRecord(); module != nullptr && m_baseRecord.creationTime100ns != 0)

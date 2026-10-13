@@ -1,4 +1,5 @@
 #include "../UI/StructuredFieldView.h"
+#include "../UI/TableContextMenu.h"
 #include "../UI/FlatButtonTheme.h"
 #include "../UI/ThemeBinding.h"
 #include "OtherDock.h"
@@ -1880,6 +1881,8 @@ private:
             // 显式填充菜单背景，避免浅色模式下继承透明样式出现黑底。
             menu.setStyleSheet(KswordTheme::ContextMenuStyle());
             QAction* copyRowAction = menu.addAction(QStringLiteral("复制选中行"));
+            // 声明业务菜单已提供此能力，避免共享表格菜单追加重复项。
+            ks::ui::SetTableContextActionRole(copyRowAction, ks::ui::TableContextActionRole::CopyRows);
             QAction* selectedAction = menu.exec(m_messageTable->viewport()->mapToGlobal(pos));
             if (selectedAction != copyRowAction)
             {

@@ -1,4 +1,5 @@
 #include "../UI/StructuredFieldView.h"
+#include "../UI/TableContextMenu.h"
 #include "../UI/DetailDialogChrome.h"
 #include "WinAPIDock.h"
 #include "../UI/CodeEditorWidget.h"
@@ -1623,7 +1624,11 @@ void WinAPIDock::showEventContextMenu(const QPoint& position)
     QMenu menu(this);
     menu.setStyleSheet(KswordTheme::ContextMenuStyle());
     QAction* copyCellAction = menu.addAction(QStringLiteral("复制单元格"));
+    // 声明业务菜单已提供此能力，避免共享表格菜单追加重复项。
+    ks::ui::SetTableContextActionRole(copyCellAction, ks::ui::TableContextActionRole::CopyCell);
     QAction* copyRowAction = menu.addAction(QStringLiteral("复制整行"));
+    // 声明业务菜单已提供此能力，避免共享表格菜单追加重复项。
+    ks::ui::SetTableContextActionRole(copyRowAction, ks::ui::TableContextActionRole::CopyRows);
     const QTableWidgetItem* processIdItem = m_eventTable->item(row, EventColumnPidTid);
     std::uint32_t processId = 0;
     const bool hasProcessId = processIdItem != nullptr &&

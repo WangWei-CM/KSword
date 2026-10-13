@@ -1,4 +1,5 @@
 #include "ProcessDock.h"
+#include "../UI/TableContextMenu.h"
 #include "../UI/FlatButtonTheme.h"
 #include "../UI/ThemeBinding.h"
 #include "../UI/ToolbarMetrics.h"
@@ -1483,9 +1484,13 @@ void ProcessDock::showThreadTableContextMenu(const QPoint& localPosition)
     QAction* copyCellAction = contextMenu.addAction(
         blueTintedIcon(":/Icon/process_copy_cell.svg"),
         "复制单元格");
+    // 声明业务菜单已提供此能力，避免共享表格菜单追加重复项。
+    ks::ui::SetTableContextActionRole(copyCellAction, ks::ui::TableContextActionRole::CopyCell);
     QAction* copyRowAction = contextMenu.addAction(
         blueTintedIcon(":/Icon/process_copy_row.svg"),
         "复制行");
+    // 声明业务菜单已提供此能力，避免共享表格菜单追加重复项。
+    ks::ui::SetTableContextActionRole(copyRowAction, ks::ui::TableContextActionRole::CopyRows);
     contextMenu.addSeparator();
     QAction* detailAction = contextMenu.addAction(
         blueTintedIcon(":/Icon/process_details.svg"),

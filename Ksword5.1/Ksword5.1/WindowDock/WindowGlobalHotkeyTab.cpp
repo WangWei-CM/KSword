@@ -1,4 +1,5 @@
 #include "WindowGlobalHotkeyTab.h"
+#include "../UI/TableContextMenu.h"
 #include "../UI/FlatButtonTheme.h"
 
 #include "../Framework.h"
@@ -646,7 +647,11 @@ void WindowGlobalHotkeyTab::showCopyMenu(const QPoint& position)
     const int row = index.isValid() ? index.row() : m_table->currentRow();
     QMenu menu(this);
     QAction* copyCell = menu.addAction(allHotkeyText("window.global_hotkey.copy.cell", QStringLiteral("复制单元格")));
+    // 声明业务菜单已提供此能力，避免共享表格菜单追加重复项。
+    ks::ui::SetTableContextActionRole(copyCell, ks::ui::TableContextActionRole::CopyCell);
     QAction* copyRow = menu.addAction(allHotkeyText("window.global_hotkey.copy.row", QStringLiteral("复制当前行")));
+    // 声明业务菜单已提供此能力，避免共享表格菜单追加重复项。
+    ks::ui::SetTableContextActionRole(copyRow, ks::ui::TableContextActionRole::CopyRows);
     QAction* copyAll = menu.addAction(allHotkeyText("window.global_hotkey.copy.all", QStringLiteral("复制全部行")));
     const QTableWidgetItem* processIdItem = row >= 0 ? m_table->item(row, ColumnPid) : nullptr;
     bool processIdOk = false;

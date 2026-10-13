@@ -5,6 +5,7 @@
 // QMenu 默认样式在某些页面会继承透明背景，浅色模式下可能黑底黑字（见 AGENTS.md）。
 
 #include "AddressBookPanel.h"
+#include "../TableContextMenu.h"
 
 #include "AddressBookModel.h"
 
@@ -189,6 +190,8 @@ namespace ks::ui
             [this]() { copyCurrentRowField(CopyField::Value); });
 
         QAction* const copyRowAction = menu.addAction(QStringLiteral("复制行 (Ctrl+C)"));
+        // 地址簿保留专业行格式，共享菜单只补单元格复制与导出。
+        ks::ui::SetTableContextActionRole(copyRowAction, ks::ui::TableContextActionRole::CopyRows);
         copyRowAction->setEnabled(hasTarget);
         connect(copyRowAction, &QAction::triggered, this,
             [this]() { copyCurrentRowField(CopyField::Row); });

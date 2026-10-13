@@ -1,5 +1,6 @@
 
 #include "KernelDeviceDriverObjectsTab.h"
+#include "../UI/TableContextMenu.h"
 #include "../UI/PageControlStyle.h"
 #include "../UI/PrimaryPageStyle.h"
 #include "../UI/ToolbarMetrics.h"
@@ -596,9 +597,15 @@ void KernelDeviceDriverObjectsTab::showTableContextMenu(const QPoint& localPosit
     QMenu menu(this);
     menu.setStyleSheet(KswordTheme::ContextMenuStyle());
     QAction* copyCellAction = menu.addAction(kernelText("kernel.device_driver.menu.copy_cell", QStringLiteral("复制单元格")));
+    // 声明业务菜单已提供此能力，避免共享表格菜单追加重复项。
+    ks::ui::SetTableContextActionRole(copyCellAction, ks::ui::TableContextActionRole::CopyCell);
     QAction* copyRowAction = menu.addAction(kernelText("kernel.device_driver.menu.copy_row", QStringLiteral("复制当前行")));
+    // 声明业务菜单已提供此能力，避免共享表格菜单追加重复项。
+    ks::ui::SetTableContextActionRole(copyRowAction, ks::ui::TableContextActionRole::CopyRows);
     QAction* copyTsvAction = menu.addAction(kernelText("kernel.device_driver.menu.copy_visible_tsv", QStringLiteral("复制可见结果 TSV")));
     QAction* exportAction = menu.addAction(kernelText("kernel.device_driver.menu.export_tsv", QStringLiteral("导出 TSV")));
+    // 声明业务菜单已提供此能力，避免共享表格菜单追加重复项。
+    ks::ui::SetTableContextActionRole(exportAction, ks::ui::TableContextActionRole::ExportRows);
     menu.addSeparator();
     QAction* dispatchEditorAction = menu.addAction(
         kernelText(

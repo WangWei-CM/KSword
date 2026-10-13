@@ -40,6 +40,7 @@
 #include <QMessageBox>
 #include <QMetaObject>
 #include <QPalette>
+#include <QPersistentModelIndex>
 #include <QPointer>
 #include <QPushButton>
 #include <QSaveFile>
@@ -80,7 +81,6 @@ namespace
     constexpr char kInstalledProperty[] = "KSWORD_TABLE_INTERACTION_SUPPORT_INSTALLED";
     constexpr char kActionBarProperty[] = "KSWORD_TABLE_INTERACTION_ACTION_BAR";
     constexpr char kStandardContextMenuProperty[] = "KSWORD_TABLE_INTERACTION_STANDARD_CONTEXT_MENU";
-    constexpr char kContextActionsInstalledProperty[] = "KSWORD_TABLE_INTERACTION_CONTEXT_ACTIONS_INSTALLED";
     constexpr char kComparisonActiveProperty[] = "KSWORD_TABLE_INTERACTION_COMPARISON_ACTIVE";
     constexpr int kActionBarHeight = 32;
     constexpr quint64 kBytesPerMiB = 1024ULL * 1024ULL;
@@ -2535,8 +2535,39 @@ namespace
         }
     }
 
-    // showStandardTableContextMenu 作用：显示无业务右键表格使用的复制和导出菜单。
-    void showStandardTableContextMenu(QTableView* tableView, const QPoint& globalPosition)
+    // 输入菜单、表格和右键单元格；补缺失能力，行操作继续使用已有共享实现。
+    void populateTableContextActions(
+        QMenu* menu,
+        QTableView* tableView,
+        const QModelIndex& clickedIndex)
+    {
+        const QPointer<QTableView> guardedTable(tableView); // 保护菜单打开期间的来源表。
+        ks::ui::PopulateTableContextMenu(
+            menu,
+            tableView,
+            clickedIndex,
+            !selectedVisibleRows(tableView, true).isEmpty(),
+            [guardedTable]()
+            {
+                if (!guardedTable.isNull())
+                {
+                    copySelectedRowsToClipboard(guardedTable.data());
+                }
+            },
+            [guardedTable]()
+            {
+                if (!guardedTable.isNull())
+                {
+                    exportSelectedRowsToTsv(guardedTable.data());
+                }
+            });
+    }
+
+    // showStandardTableContextMenu 作用：显示无业务右键表格使用的单元格/行复制和导出菜单。
+    void showStandardTableContextMenu(
+        QTableView* tableView,
+        const QPoint& globalPosition,
+        const QModelIndex& clickedIndex)
     {
         if (tableView == nullptr)
         {
@@ -2546,80 +2577,21 @@ namespace
         QMenu menu(tableView);
         menu.setProperty(kStandardContextMenuProperty, true);
         applyContextMenuStyle(&menu);
-        QAction* copyAction = menu.addAction(
-            QIcon(QStringLiteral(":/Icon/log_copy.svg")),
-            localizedSourceText("复制选中行（TSV）"));
-        QAction* exportAction = menu.addAction(
-            QIcon(QStringLiteral(":/Icon/log_export.svg")),
-            localizedSourceText("导出选中行（TSV）"));
-
-        copyAction->setEnabled(!selectedVisibleRows(tableView, true).isEmpty());
-        exportAction->setEnabled(!selectedVisibleRows(tableView, true).isEmpty());
-
-        QAction* selectedAction = menu.exec(globalPosition);
-        if (selectedAction == copyAction)
-        {
-            copySelectedRowsToClipboard(tableView);
-        }
-        else if (selectedAction == exportAction)
-        {
-            exportSelectedRowsToTsv(tableView);
-        }
+        populateTableContextActions(&menu, tableView, clickedIndex);
+        menu.exec(globalPosition);
     }
 
-    // appendTableContextActions 作用：向业务右键菜单追加选中行复制和导出动作。
-    void appendTableContextActions(QMenu* menu, QTableView* contextTableView = nullptr)
+    // appendTableContextActions 作用：向业务右键菜单补齐未声明的共享复制和导出能力。
+    void appendTableContextActions(
+        QMenu* menu,
+        QTableView* contextTableView,
+        const QModelIndex& clickedIndex)
     {
-        if (menu == nullptr ||
-            menu->property(kStandardContextMenuProperty).toBool() ||
-            menu->property(kContextActionsInstalledProperty).toBool())
+        if (menu == nullptr || menu->property(kStandardContextMenuProperty).toBool())
         {
             return;
         }
-
-        // tableView 用途：保存本次菜单对应的表格，优先使用右键事件来源。
-        QTableView* tableView = contextTableView;
-        if (tableView == nullptr)
-        {
-            tableView = qobject_cast<QTableView*>(menu->parent());
-        }
-        if (tableView == nullptr)
-        {
-            return;
-        }
-
-        // 已存在业务菜单项后再添加分隔线，使全局动作保持在菜单末尾。
-        menu->setProperty(kContextActionsInstalledProperty, true);
-        if (!menu->actions().isEmpty())
-        {
-            menu->addSeparator();
-        }
-        applyContextMenuStyle(menu);
-        QAction* copyAction = menu->addAction(
-            QIcon(QStringLiteral(":/Icon/log_copy.svg")),
-            localizedSourceText("复制选中行（TSV）"));
-        QAction* exportAction = menu->addAction(
-            QIcon(QStringLiteral(":/Icon/log_export.svg")),
-            localizedSourceText("导出选中行（TSV）"));
-
-        // guardedTable 用途：在菜单存续期间安全引用其来源表格。
-        const QPointer<QTableView> guardedTable(tableView);
-        copyAction->setEnabled(!selectedVisibleRows(tableView, true).isEmpty());
-        exportAction->setEnabled(!selectedVisibleRows(tableView, true).isEmpty());
-        QObject::connect(copyAction, &QAction::triggered, menu, [guardedTable]()
-            {
-                if (!guardedTable.isNull())
-                {
-                    copySelectedRowsToClipboard(guardedTable.data());
-                }
-            });
-        QObject::connect(exportAction, &QAction::triggered, menu, [guardedTable]()
-            {
-                if (!guardedTable.isNull())
-                {
-                    exportSelectedRowsToTsv(guardedTable.data());
-                }
-            });
+        populateTableContextActions(menu, contextTableView, clickedIndex);
     }
 
     void selectContextRow(QTableView* tableView, const QModelIndex& clickedIndex)
@@ -2691,7 +2663,11 @@ namespace
                     QAbstractItemView* contextItemView = m_pendingContextItemView.data();
                     QTableView* contextTableView =
                         qobject_cast<QTableView*>(contextItemView);
-                    appendTableContextActions(shownMenu, contextTableView);
+                    // 表头菜单只使用刷新屏障；列显隐/排序菜单不混入正文复制项。
+                    if (m_pendingContextIsTableBody)
+                    {
+                        appendTableContextActions(shownMenu, contextTableView, m_pendingContextCell);
+                    }
                     if (contextItemView != nullptr)
                     {
                         // 同一个菜单对象一次显示只登记一次；Hide/销毁都会解除刷新屏障。
@@ -2719,6 +2695,8 @@ namespace
                                 });
                         }
                         m_pendingContextItemView.clear();
+                        m_pendingContextCell = QPersistentModelIndex();
+                        m_pendingContextIsTableBody = false;
                         ++m_pendingContextSequence;
                     }
                 }
@@ -2745,6 +2723,18 @@ namespace
             {
                 // 业务菜单显示前记录来源；QTableView 与 QTreeView 共用同一生命周期屏障。
                 m_pendingContextItemView = contextItemView;
+                QTableView* contextTable = tableForEventObject(watchedObject); // 表头与正文分开。
+                m_pendingContextIsTableBody = contextTable != nullptr;
+                m_pendingContextCell = QPersistentModelIndex();
+                if (contextTable != nullptr)
+                {
+                    const auto* contextEvent = static_cast<QContextMenuEvent*>(eventObject);
+                    const QPoint position = watchedObject == contextTable
+                        ? contextTable->viewport()->mapFrom(contextTable, contextEvent->pos())
+                        : contextEvent->pos(); // 转成视口坐标再命中实际列。
+                    m_pendingContextCell = contextEvent->reason() == QContextMenuEvent::Keyboard
+                        ? contextTable->currentIndex() : contextTable->indexAt(position);
+                }
                 ++m_pendingContextSequence;
                 const unsigned long long pendingContextSequence = m_pendingContextSequence;
                 QTimer::singleShot(0, this, [this, pendingContextSequence]()
@@ -2752,6 +2742,8 @@ namespace
                         if (m_pendingContextSequence == pendingContextSequence)
                         {
                             m_pendingContextItemView.clear();
+                            m_pendingContextCell = QPersistentModelIndex();
+                            m_pendingContextIsTableBody = false;
                         }
                     });
             }
@@ -2793,11 +2785,9 @@ namespace
             if (comparisonActive && eventType == QEvent::ContextMenu)
             {
                 auto* contextMenuEvent = static_cast<QContextMenuEvent*>(eventObject);
-                const QPoint viewportPosition = watchedObject == tableView
-                    ? tableView->viewport()->mapFrom(tableView, contextMenuEvent->pos())
-                    : contextMenuEvent->pos();
-                selectContextRow(tableView, tableView->indexAt(viewportPosition));
-                showStandardTableContextMenu(tableView, contextMenuEvent->globalPos());
+                const QModelIndex clickedIndex = m_pendingContextCell; // 比对视图也复制实际命中格。
+                selectContextRow(tableView, clickedIndex);
+                showStandardTableContextMenu(tableView, contextMenuEvent->globalPos(), clickedIndex);
                 contextMenuEvent->accept();
                 return true;
             }
@@ -2830,17 +2820,14 @@ namespace
             else if (eventType == QEvent::ContextMenu)
             {
                 auto* contextMenuEvent = static_cast<QContextMenuEvent*>(eventObject);
-                const QPoint viewportPosition = watchedObject == tableView
-                    ? tableView->viewport()->mapFrom(tableView, contextMenuEvent->pos())
-                    : contextMenuEvent->pos();
-                const QModelIndex clickedIndex = tableView->indexAt(viewportPosition);
+                const QModelIndex clickedIndex = m_pendingContextCell; // 空白点击保持无效，键盘用当前格。
                 selectContextRow(tableView, clickedIndex);
 
                 // 在事件发生时判断当前策略，不能在构造期把 Default 改成 Custom
                 // 并接上通用菜单：页面随后接入的业务菜单会被先弹出的复制菜单遮住。
                 if (tableView->contextMenuPolicy() == Qt::DefaultContextMenu)
                 {
-                    showStandardTableContextMenu(tableView, contextMenuEvent->globalPos());
+                    showStandardTableContextMenu(tableView, contextMenuEvent->globalPos(), clickedIndex);
                     contextMenuEvent->accept();
                     return true;
                 }
@@ -2852,6 +2839,8 @@ namespace
     private:
         // m_pendingContextItemView 用途：保存当前业务右键菜单应绑定的表格或树来源。
         QPointer<QAbstractItemView> m_pendingContextItemView;
+        QPersistentModelIndex m_pendingContextCell; // 本次正文右键的单元格身份。
+        bool m_pendingContextIsTableBody = false; // 防止给表头/工具菜单添加单元格动作。
         // m_pendingContextSequence 用途：区分连续右键事件，保证延迟清理仅影响同一次事件。
         unsigned long long m_pendingContextSequence = 0ULL;
         // m_openContextMenuItemViews 用途：把当前可见业务菜单绑定到触发它的表格或树。

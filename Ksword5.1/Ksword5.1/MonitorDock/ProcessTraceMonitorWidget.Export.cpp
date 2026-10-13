@@ -1,4 +1,5 @@
 #include "ProcessTraceMonitorWidget.h"
+#include "../UI/TableContextMenu.h"
 #include "../theme.h"
 
 // ============================================================
@@ -104,7 +105,11 @@ void ProcessTraceMonitorWidget::showEventContextMenu(const QPoint& position)
     menu.addSeparator();
     QAction* copyDetailAction = menu.addAction(QIcon(":/Icon/log_copy.svg"), QStringLiteral("复制返回详情文本"));
     QAction* copyCellAction = menu.addAction(QIcon(":/Icon/log_copy.svg"), QStringLiteral("复制单元格"));
+    // 声明业务菜单已提供此能力，避免共享表格菜单追加重复项。
+    ks::ui::SetTableContextActionRole(copyCellAction, ks::ui::TableContextActionRole::CopyCell);
     QAction* copyRowAction = menu.addAction(QIcon(":/Icon/log_clipboard.svg"), QStringLiteral("复制整行"));
+    // 声明业务菜单已提供此能力，避免共享表格菜单追加重复项。
+    ks::ui::SetTableContextActionRole(copyRowAction, ks::ui::TableContextActionRole::CopyRows);
     menu.addSeparator();
     QAction* gotoProcessAction = menu.addAction(QIcon(":/Icon/process_details.svg"), QStringLiteral("转到进程详细信息"));
     ks::online_scan::addVirusTotalSandboxMenu(

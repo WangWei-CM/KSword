@@ -1,4 +1,5 @@
 #include "HandleDock.h"
+#include "../UI/TableContextMenu.h"
 #include "../UI/ToolbarMetrics.h"
 #include "../UI/SecondaryPageLayout.h"
 
@@ -1414,7 +1415,11 @@ void HandleDock::showHandleTableContextMenu(const QPoint& localPosition)
     QMenu menu(this);
     menu.setStyleSheet(KswordTheme::ContextMenuStyle());
     QAction* copyCellAction = menu.addAction(QIcon(":/Icon/handle_copy.svg"), QStringLiteral("复制单元格"));
+    // 声明业务菜单已提供此能力，避免共享表格菜单追加重复项。
+    ks::ui::SetTableContextActionRole(copyCellAction, ks::ui::TableContextActionRole::CopyCell);
     QAction* copyRowAction = menu.addAction(QIcon(":/Icon/handle_copy_row.svg"), QStringLiteral("复制整行"));
+    // 声明业务菜单已提供此能力，避免共享表格菜单追加重复项。
+    ks::ui::SetTableContextActionRole(copyRowAction, ks::ui::TableContextActionRole::CopyRows);
     const auto itemKind = static_cast<ks::handle::HandleTreeItemKind>(
         clickedItem->data(0, ks::handle::HandleTreeItemKindRole).toInt());
     const QString ruleId = clickedItem->data(0, ks::handle::HandleTreeRuleIdRole).toString();

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "./TableContextMenu.h"
+
 class QApplication;
 class QAbstractItemView;
 class QObject;
@@ -95,7 +97,7 @@ namespace ks::ui
     // InstallGlobalTableInteractionSupport 作用：
     // - 为应用内所有 QTableView/QTableWidget 统一提供 Ctrl 多选、Ctrl+C 复制和 TSV 导出；
     // - 未开启持续排序的 QTableWidget 可点击表头执行一次性排序，刷新填表时不会发生行错位；
-    // - 保留业务表格的原有右键菜单，并在其末尾追加复制选中行和导出选中行；
+    // - 保留业务菜单，只补缺失的单元格复制、选中行复制和导出；业务动作通过角色去重；
     // - 每张表顶部预留紧凑操作区并放置导出按钮，动态创建的表格也会自动接入。
     void InstallGlobalTableInteractionSupport(QApplication* appInstance);
 

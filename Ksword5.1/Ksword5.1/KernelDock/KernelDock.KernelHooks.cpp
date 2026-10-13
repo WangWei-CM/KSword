@@ -1,4 +1,5 @@
 #include "../UI/StructuredFieldView.h"
+#include "../UI/TableContextMenu.h"
 #include "../UI/PageControlStyle.h"
 #include "../UI/PrimaryPageStyle.h"
 #include "../UI/ToolbarMetrics.h"
@@ -3026,6 +3027,8 @@ void KernelDock::showTimerDpcContextMenu(const QPoint& localPosition)
     menu.setStyleSheet(KswordTheme::ContextMenuStyle());
     QAction* refreshAction = menu.addAction(QIcon(":/Icon/process_refresh.svg"), kernelText("kernel.timer_dpc.menu.refresh", QStringLiteral("刷新 KTIMER/DPC")));
     QAction* copyRowsAction = menu.addAction(QIcon(":/Icon/process_copy_row.svg"), kernelText("kernel.context.menu.copy_row", QStringLiteral("复制选中行（TSV）")));
+    // 声明业务菜单已提供此能力，避免共享表格菜单追加重复项。
+    ks::ui::SetTableContextActionRole(copyRowsAction, ks::ui::TableContextActionRole::CopyRows);
     QAction* copyDetailAction = menu.addAction(kernelText("kernel.hooks.menu.copy_detail", QStringLiteral("复制详情（选中行）")));
     copyRowsAction->setEnabled(!selectedIndices.empty());
     copyDetailAction->setEnabled(!selectedIndices.empty());
@@ -3112,6 +3115,8 @@ void KernelDock::showShadowSsdtContextMenu(const QPoint& localPosition)
     QMenu* copyMenu = menu.addMenu(QIcon(":/Icon/process_copy_row.svg"), kernelText("kernel.context.menu.copy", QStringLiteral("复制")));
     QAction* copyCurrentColumnAction = copyMenu->addAction(QIcon(":/Icon/process_copy_cell.svg"), kernelText("kernel.hooks.menu.copy_current_column", QStringLiteral("复制当前列（选中行）")));
     QAction* copyRowsAction = copyMenu->addAction(QIcon(":/Icon/process_copy_row.svg"), kernelText("kernel.context.menu.copy_row", QStringLiteral("复制选中行（TSV）")));
+    // 声明业务菜单已提供此能力，避免共享表格菜单追加重复项。
+    ks::ui::SetTableContextActionRole(copyRowsAction, ks::ui::TableContextActionRole::CopyRows);
     QAction* copyRowsWithHeaderAction = copyMenu->addAction(kernelText("kernel.hooks.menu.copy_header_rows", QStringLiteral("复制表头+选中行（TSV）")));
     QAction* copyDetailAction = copyMenu->addAction(kernelText("kernel.hooks.menu.copy_detail", QStringLiteral("复制详情（选中行）")));
     copyMenu->addSeparator();
@@ -3282,6 +3287,8 @@ void KernelDock::showInlineHookContextMenu(const QPoint& localPosition)
     QMenu* copyMenu = menu.addMenu(QIcon(":/Icon/process_copy_row.svg"), kernelText("kernel.context.menu.copy", QStringLiteral("复制")));
     QAction* copyCurrentColumnAction = copyMenu->addAction(QIcon(":/Icon/process_copy_cell.svg"), kernelText("kernel.hooks.menu.copy_current_column", QStringLiteral("复制当前列（选中行）")));
     QAction* copyRowsAction = copyMenu->addAction(QIcon(":/Icon/process_copy_row.svg"), kernelText("kernel.context.menu.copy_row", QStringLiteral("复制选中行（TSV）")));
+    // 声明业务菜单已提供此能力，避免共享表格菜单追加重复项。
+    ks::ui::SetTableContextActionRole(copyRowsAction, ks::ui::TableContextActionRole::CopyRows);
     QAction* copyRowsWithHeaderAction = copyMenu->addAction(kernelText("kernel.hooks.menu.copy_header_rows", QStringLiteral("复制表头+选中行（TSV）")));
     QAction* copyDetailAction = copyMenu->addAction(kernelText("kernel.hooks.menu.copy_detail", QStringLiteral("复制详情（选中行）")));
     copyMenu->addSeparator();
@@ -3403,6 +3410,8 @@ void KernelDock::showIatEatHookContextMenu(const QPoint& localPosition)
     QMenu* copyMenu = menu.addMenu(QIcon(":/Icon/process_copy_row.svg"), kernelText("kernel.context.menu.copy", QStringLiteral("复制")));
     QAction* copyCurrentColumnAction = copyMenu->addAction(QIcon(":/Icon/process_copy_cell.svg"), kernelText("kernel.hooks.menu.copy_current_column", QStringLiteral("复制当前列（选中行）")));
     QAction* copyRowsAction = copyMenu->addAction(QIcon(":/Icon/process_copy_row.svg"), kernelText("kernel.context.menu.copy_row", QStringLiteral("复制选中行（TSV）")));
+    // 声明业务菜单已提供此能力，避免共享表格菜单追加重复项。
+    ks::ui::SetTableContextActionRole(copyRowsAction, ks::ui::TableContextActionRole::CopyRows);
     QAction* copyRowsWithHeaderAction = copyMenu->addAction(kernelText("kernel.hooks.menu.copy_header_rows", QStringLiteral("复制表头+选中行（TSV）")));
     QAction* copyDetailAction = copyMenu->addAction(kernelText("kernel.hooks.menu.copy_detail", QStringLiteral("复制详情（选中行）")));
     copyMenu->addSeparator();

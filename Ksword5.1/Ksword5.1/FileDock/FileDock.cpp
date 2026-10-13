@@ -1,4 +1,5 @@
 ﻿#include "FileDock.h"
+#include "../UI/TableContextMenu.h"
 #include "../UI/FlatButtonTheme.h"
 #include "../UI/ThemeBinding.h"
 #include "../Framework/DestructiveActionConfirmation.h"
@@ -4476,6 +4477,8 @@ namespace
             QAction* copyRowAction = menu.addAction(
                 QIcon(QStringLiteral(":/Icon/process_copy_row.svg")),
                 QStringLiteral("复制当前行"));
+            // 声明业务菜单已提供此能力，避免共享表格菜单追加重复项。
+            ks::ui::SetTableContextActionRole(copyRowAction, ks::ui::TableContextActionRole::CopyRows);
             copyRowAction->setEnabled(tableWidget->currentRow() >= 0);
             const QTableWidgetItem* processIdItem =
                 processIdColumn >= 0 && processIdColumn < tableWidget->columnCount() && tableWidget->currentRow() >= 0
@@ -4548,6 +4551,8 @@ namespace
             QAction* copyRowAction = menu.addAction(
                 QIcon(QStringLiteral(":/Icon/process_copy_row.svg")),
                 QStringLiteral("复制当前行"));
+            // 声明业务菜单已提供此能力，避免共享表格菜单追加重复项。
+            ks::ui::SetTableContextActionRole(copyRowAction, ks::ui::TableContextActionRole::CopyRows);
             copyRowAction->setEnabled(treeWidget->currentItem() != nullptr);
             QTreeWidgetItem* const processIdItem = treeWidget->currentItem();
             bool processIdOk = false;
@@ -12038,6 +12043,8 @@ namespace
                     QMenu menu(table);
                     menu.setStyleSheet(buildContextMenuStyle());
                     QAction* copyRowsAction = menu.addAction(QStringLiteral("复制选中行"));
+                    // 声明业务菜单已提供此能力，避免共享表格菜单追加重复项。
+                    ks::ui::SetTableContextActionRole(copyRowsAction, ks::ui::TableContextActionRole::CopyRows);
                     QAction* copyDllAction = menu.addAction(QStringLiteral("复制 DLL 名称"));
                     QAction* selectedAction = menu.exec(table->viewport()->mapToGlobal(position));
                     if (selectedAction == nullptr)
@@ -15499,6 +15506,8 @@ void FileDock::installRecoveryTableMenu()
         QAction* copyRowAction = menu.addAction(
             QIcon(QStringLiteral(":/Icon/process_copy_row.svg")),
             QStringLiteral("复制当前行"));
+        // 声明业务菜单已提供此能力，避免共享表格菜单追加重复项。
+        ks::ui::SetTableContextActionRole(copyRowAction, ks::ui::TableContextActionRole::CopyRows);
         copyRowAction->setEnabled(currentRow >= 0);
 
         QAction* selectedAction =

@@ -1,4 +1,5 @@
 #include "PrivilegeAccountPages.h"
+#include "../UI/TableContextMenu.h"
 #include "../UI/PageControlStyle.h"
 #include "../UI/PrimaryPageStyle.h"
 #include "../UI/ToolbarMetrics.h"
@@ -520,6 +521,8 @@ namespace
             copySid->setEnabled(!sid.isEmpty());
             QObject::connect(copySid, &QAction::triggered, menu, [sid]() { QApplication::clipboard()->setText(sid); });
             QAction* copyRow = menu->addAction(privilegeText("privilege.workbench.groups.copy_row", QStringLiteral("复制行")));
+            // 声明业务菜单已提供此能力，避免共享表格菜单追加重复项。
+            ks::ui::SetTableContextActionRole(copyRow, ks::ui::TableContextActionRole::CopyRows);
             QObject::connect(copyRow, &QAction::triggered, menu, [values]() { QApplication::clipboard()->setText(values.join(QLatin1Char('\t'))); });
             menu->popup(table->viewport()->mapToGlobal(point));
         });

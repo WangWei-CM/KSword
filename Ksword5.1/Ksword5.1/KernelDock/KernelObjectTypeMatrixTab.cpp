@@ -1,4 +1,5 @@
 #include "KernelObjectTypeMatrixTab.h"
+#include "../UI/TableContextMenu.h"
 #include "../UI/PageControlStyle.h"
 #include "../UI/ToolbarMetrics.h"
 #include "../UI/VisibleTableWidget.h"
@@ -690,6 +691,8 @@ void KernelObjectTypeMatrixTab::showContextMenu(const QPoint& localPosition)
     QAction* copyRowAction = menu.addAction(
         QIcon(QStringLiteral(":/Icon/process_copy_row.svg")),
         kernelText("kernel.object_type.menu.copy_row", QStringLiteral("复制当前行")));
+    // 声明业务菜单已提供此能力，避免共享表格菜单追加重复项。
+    ks::ui::SetTableContextActionRole(copyRowAction, ks::ui::TableContextActionRole::CopyRows);
     copyRowAction->setEnabled(m_table->currentRow() >= 0);
     const QAction* selectedAction = menu.exec(m_table->viewport()->mapToGlobal(localPosition));
     if (selectedAction == copyRowAction)

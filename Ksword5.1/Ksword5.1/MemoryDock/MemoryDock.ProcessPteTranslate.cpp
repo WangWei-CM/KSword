@@ -1,4 +1,5 @@
 #include "MemoryDock.Internal.h"
+#include "../UI/TableContextMenu.h"
 #include "../UI/ParameterWorkspace.h"
 #include "../UI/ToolbarMetrics.h"
 #include "../UI/StructuredFieldView.h"
@@ -154,6 +155,8 @@ namespace
             QMenu menu(table);
             menu.setStyleSheet(pteMenuStyle());
             QAction* copyRowAction = menu.addAction(QIcon(QStringLiteral(":/Icon/process_copy_row.svg")), QStringLiteral("复制当前行"));
+            // 声明业务菜单已提供此能力，避免共享表格菜单追加重复项。
+            ks::ui::SetTableContextActionRole(copyRowAction, ks::ui::TableContextActionRole::CopyRows);
             // 菜单项也补上 tooltip：与页面内其它按钮保持一致的可发现性。
             copyRowAction->setToolTip(QStringLiteral("把选中行的全部列以制表符分隔复制到剪贴板"));
             copyRowAction->setEnabled(table->currentRow() >= 0);

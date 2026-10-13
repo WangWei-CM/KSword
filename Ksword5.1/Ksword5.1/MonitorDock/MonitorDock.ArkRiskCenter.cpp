@@ -1,4 +1,5 @@
 #include "../UI/StructuredFieldView.h"
+#include "../UI/TableContextMenu.h"
 #include "MonitorDock.h"
 #include "../UI/VisibleTableWidget.h"
 #include "../UI/ToolbarMetrics.h"
@@ -252,6 +253,8 @@ namespace
             QMenu menu(table);
             menu.setStyleSheet(arkRiskTableMenuStyle());
             QAction* copyRowAction = menu.addAction(QStringLiteral("复制当前行"));
+            // 声明业务菜单已提供此能力，避免共享表格菜单追加重复项。
+            ks::ui::SetTableContextActionRole(copyRowAction, ks::ui::TableContextActionRole::CopyRows);
             copyRowAction->setEnabled(table->currentRow() >= 0);
 
             quint32 processId = 0U;

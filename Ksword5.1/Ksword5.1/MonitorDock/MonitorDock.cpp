@@ -1,5 +1,6 @@
 
 #include "../UI/FlatButtonTheme.h"
+#include "../UI/TableContextMenu.h"
 #include "MonitorDock.h"
 #include "../../../shared/ui/KsPainterChart.h"
 #include <MonitorDock/EtwArchiveCompression.h>
@@ -733,6 +734,8 @@ namespace
             QAction* copyRowAction = menu.addAction(
                 QIcon(QStringLiteral(":/Icon/log_clipboard.svg")),
                 QStringLiteral("复制整行"));
+            // 声明业务菜单已提供此能力，避免共享表格菜单追加重复项。
+            ks::ui::SetTableContextActionRole(copyRowAction, ks::ui::TableContextActionRole::CopyRows);
             copyRowAction->setEnabled(tableWidget->currentRow() >= 0);
             if (menu.exec(tableWidget->viewport()->mapToGlobal(localPosition)) != copyRowAction)
             {
@@ -784,6 +787,8 @@ namespace
             QAction* copyRowAction = menu.addAction(
                 QIcon(QStringLiteral(":/Icon/log_clipboard.svg")),
                 QStringLiteral("复制整行"));
+            // 声明业务菜单已提供此能力，避免共享表格菜单追加重复项。
+            ks::ui::SetTableContextActionRole(copyRowAction, ks::ui::TableContextActionRole::CopyRows);
             copyRowAction->setEnabled(tableView->currentIndex().isValid());
             if (menu.exec(tableView->viewport()->mapToGlobal(localPosition)) != copyRowAction)
             {
@@ -10559,7 +10564,11 @@ void MonitorDock::showWmiEventContextMenu(const QPoint& position)
     menu.addSeparator();
     QAction* copyDetailAction = menu.addAction(QIcon(":/Icon/log_copy.svg"), QStringLiteral("复制返回详情文本"));
     QAction* copyCellAction = menu.addAction(QIcon(":/Icon/log_copy.svg"), QStringLiteral("复制单元格"));
+    // 声明业务菜单已提供此能力，避免共享表格菜单追加重复项。
+    ks::ui::SetTableContextActionRole(copyCellAction, ks::ui::TableContextActionRole::CopyCell);
     QAction* copyRowAction = menu.addAction(QIcon(":/Icon/log_clipboard.svg"), QStringLiteral("复制整行"));
+    // 声明业务菜单已提供此能力，避免共享表格菜单追加重复项。
+    ks::ui::SetTableContextActionRole(copyRowAction, ks::ui::TableContextActionRole::CopyRows);
     menu.addSeparator();
     QAction* gotoProcessAction = menu.addAction(QIcon(":/Icon/process_details.svg"), QStringLiteral("转到进程详细信息"));
     ks::online_scan::addVirusTotalSandboxMenu(
@@ -11204,6 +11213,8 @@ void MonitorDock::showEtwSessionContextMenu(const QPoint& position)
     QAction* copyRowAction = menu.addAction(
         QIcon(QStringLiteral(":/Icon/log_clipboard.svg")),
         ks::i18n::sourceText(QStringLiteral("复制整行")));
+    // 声明业务菜单已提供此能力，避免共享表格菜单追加重复项。
+    ks::ui::SetTableContextActionRole(copyRowAction, ks::ui::TableContextActionRole::CopyRows);
     copyRowAction->setToolTip(ks::i18n::sourceText(QStringLiteral("复制当前行所有列（TSV）")));
     copyRowAction->setEnabled(canCopyRow);
     menu.addSeparator();
@@ -14017,7 +14028,11 @@ void MonitorDock::showEtwEventContextMenu(const QPoint& position)
     menu.addSeparator();
     QAction* copyDetailAction = menu.addAction(QIcon(":/Icon/log_copy.svg"), QStringLiteral("复制返回详情文本"));
     QAction* copyCellAction = menu.addAction(QIcon(":/Icon/log_copy.svg"), QStringLiteral("复制单元格"));
+    // 声明业务菜单已提供此能力，避免共享表格菜单追加重复项。
+    ks::ui::SetTableContextActionRole(copyCellAction, ks::ui::TableContextActionRole::CopyCell);
     QAction* copyRowAction = menu.addAction(QIcon(":/Icon/log_clipboard.svg"), QStringLiteral("复制整行"));
+    // 声明业务菜单已提供此能力，避免共享表格菜单追加重复项。
+    ks::ui::SetTableContextActionRole(copyRowAction, ks::ui::TableContextActionRole::CopyRows);
     menu.addSeparator();
     QAction* gotoProcessAction = menu.addAction(QIcon(":/Icon/process_details.svg"), QStringLiteral("转到进程详细信息"));
     std::uint32_t relatedPid = 0;

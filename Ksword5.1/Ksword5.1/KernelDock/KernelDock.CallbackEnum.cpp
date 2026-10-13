@@ -1,4 +1,5 @@
 #include "KernelDock.h"
+#include "../UI/TableContextMenu.h"
 #include "../UI/PageControlStyle.h"
 #include "../UI/ToolbarMetrics.h"
 #include "../UI/DetailDialogChrome.h"
@@ -2981,6 +2982,8 @@ void KernelDock::showCallbackEnumContextMenu(const QPoint& localPosition)
     QAction* copySelectedRowsAction = copyMenu->addAction(
         QIcon(":/Icon/process_copy_row.svg"),
         kernelText("kernel.context.menu.copy_row", QStringLiteral("复制选中行（TSV）")));
+    // 声明业务菜单已提供此能力，避免共享表格菜单追加重复项。
+    ks::ui::SetTableContextActionRole(copySelectedRowsAction, ks::ui::TableContextActionRole::CopyRows);
     QAction* copySelectedRowsWithHeaderAction = copyMenu->addAction(
         kernelText("kernel.callback.enum.menu.copy_header_rows", QStringLiteral("复制表头+选中行（TSV）")));
     QAction* copyDetailAction = copyMenu->addAction(

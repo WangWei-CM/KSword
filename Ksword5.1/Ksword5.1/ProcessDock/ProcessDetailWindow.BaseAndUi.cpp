@@ -1,4 +1,5 @@
 ﻿#include "ProcessDetailWindow.InternalCommon.h"
+#include "../UI/TableContextMenu.h"
 #include "../UI/FlatButtonTheme.h"
 #include "../UI/ThemeBinding.h"
 #include "../UI/ToolbarMetrics.h"
@@ -4382,6 +4383,8 @@ void ProcessDetailWindow::initializeThreadTab()
         QAction* copyRowAction = menu.addAction(
             QIcon(QStringLiteral(":/Icon/process_copy_row.svg")),
             QStringLiteral("复制当前行"));
+        // 声明业务菜单已提供此能力，避免共享表格菜单追加重复项。
+        ks::ui::SetTableContextActionRole(copyRowAction, ks::ui::TableContextActionRole::CopyRows);
         copyRowAction->setEnabled(m_threadInspectTable->currentRow() >= 0);
         const int selectedThreadRow = m_threadInspectTable->currentRow();
         const QTableWidgetItem* const selectedThreadIdItem =
@@ -5996,7 +5999,11 @@ void ProcessDetailWindow::initializeKernelCallbackTab()
             QMenu menu(m_kernelCallbackTable);
             menu.setStyleSheet(buildProcessDetailMenuStyle());
             QAction* copyCellAction = menu.addAction(QStringLiteral("复制当前单元格"));
+            // 声明业务菜单已提供此能力，避免共享表格菜单追加重复项。
+            ks::ui::SetTableContextActionRole(copyCellAction, ks::ui::TableContextActionRole::CopyCell);
             QAction* copyRowAction = menu.addAction(QStringLiteral("复制当前行"));
+            // 声明业务菜单已提供此能力，避免共享表格菜单追加重复项。
+            ks::ui::SetTableContextActionRole(copyRowAction, ks::ui::TableContextActionRole::CopyRows);
             QAction* copyAllAction = menu.addAction(QStringLiteral("复制全部"));
             const int currentRow = m_kernelCallbackTable->currentRow();
             const int currentColumn = m_kernelCallbackTable->currentColumn();

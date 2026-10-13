@@ -1,4 +1,5 @@
 #include "BootEditorTab.h"
+#include "../../UI/TableContextMenu.h"
 #include "../../UI/PageControlStyle.h"
 #include "../../UI/PrimaryPageStyle.h"
 #include "../../UI/ParameterWorkspace.h"
@@ -616,6 +617,8 @@ void BootEditorTab::initializeConnections()
             // 显式填充菜单背景，避免浅色模式下继承透明样式出现黑底。
             menu.setStyleSheet(KswordTheme::ContextMenuStyle());
             QAction* copyRowAction = menu.addAction(QIcon(QStringLiteral(":/Icon/log_copy.svg")), QStringLiteral("复制当前行"));
+            // 声明业务菜单已提供此能力，避免共享表格菜单追加重复项。
+            ks::ui::SetTableContextActionRole(copyRowAction, ks::ui::TableContextActionRole::CopyRows);
             QAction* selectedAction = menu.exec(m_entryTable->viewport()->mapToGlobal(localPos));
             if (selectedAction == copyRowAction)
             {

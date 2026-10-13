@@ -1,4 +1,5 @@
 #include "MemoryDock.Internal.h"
+#include "../UI/TableContextMenu.h"
 #include "../UI/ToolbarMetrics.h"
 #include "../UI/SecondaryPageLayout.h"
 #include <QGroupBox>
@@ -601,6 +602,8 @@ void MemoryDock::initializeConnections()
         menu.setStyleSheet(KswordTheme::ContextMenuStyle());
         QAction* copyBaseAction = menu.addAction("复制基址");
         QAction* copyRowAction = menu.addAction("复制当前行");
+        // 声明业务菜单已提供此能力，避免共享表格菜单追加重复项。
+        ks::ui::SetTableContextActionRole(copyRowAction, ks::ui::TableContextActionRole::CopyRows);
         QAction* jumpViewerAction = menu.addAction("跳转到内存查看器");
         QAction* selectedAction = menu.exec(m_moduleTable->viewport()->mapToGlobal(localPosition));
         if (selectedAction == nullptr)
@@ -714,6 +717,8 @@ void MemoryDock::initializeConnections()
         QAction* r0ReadAction = menu.addAction("R0读取此区域");
         QAction* copyAction = menu.addAction("复制基址");
         QAction* copyRowAction = menu.addAction("复制当前行");
+        // 声明业务菜单已提供此能力，避免共享表格菜单追加重复项。
+        ks::ui::SetTableContextActionRole(copyRowAction, ks::ui::TableContextActionRole::CopyRows);
         QAction* searchAction = menu.addAction("搜索此区域");
         std::uint64_t navigationAddress = 0;
         FILETIME created{}, exited{}, kernel{}, user{};
@@ -978,6 +983,8 @@ void MemoryDock::initializeConnections()
         QAction* copyAddressAction = menu.addAction("复制地址");
         QAction* copyValueAction = menu.addAction("复制值");
         QAction* copyRowAction = menu.addAction("复制当前行");
+        // 声明业务菜单已提供此能力，避免共享表格菜单追加重复项。
+        ks::ui::SetTableContextActionRole(copyRowAction, ks::ui::TableContextActionRole::CopyRows);
         QAction* selectedAction = menu.exec(m_searchResultTable->viewport()->mapToGlobal(localPosition));
         if (selectedAction == nullptr)
         {

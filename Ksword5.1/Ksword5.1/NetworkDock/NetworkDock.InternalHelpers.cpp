@@ -1,4 +1,5 @@
 #include "NetworkDock.InternalHelpers.h"
+#include "../UI/TableContextMenu.h"
 #include "../UI/PageControlStyle.h"
 #include "../UI/DetailDialogChrome.h"
 #include "../UI/DetailPresentation.h"
@@ -81,6 +82,8 @@ namespace network_dock_detail
                 QAction* copyRowAction = contextMenu.addAction(
                     QIcon(QStringLiteral(":/Icon/process_copy_row.svg")),
                     actionText);
+                // 声明业务菜单已提供此能力，避免共享表格菜单追加重复项。
+                ks::ui::SetTableContextActionRole(copyRowAction, ks::ui::TableContextActionRole::CopyRows);
                 copyRowAction->setEnabled(tableWidget->currentRow() >= 0);
                 quint32 processId = 0;
                 if (processIdColumn >= 0 && processIdColumn < tableWidget->columnCount() &&

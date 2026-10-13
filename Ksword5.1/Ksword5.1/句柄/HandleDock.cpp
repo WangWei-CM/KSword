@@ -1,4 +1,5 @@
 #include "HandleDock.h"
+#include "../UI/TableContextMenu.h"
 #include "../UI/FlatButtonTheme.h"
 #include "../UI/ThemeBinding.h"
 #include "../UI/PageControlStyle.h"
@@ -100,6 +101,8 @@ namespace
                 QAction* copyRowAction = menu.addAction(
                     QIcon(QStringLiteral(":/Icon/handle_copy_row.svg")),
                     QStringLiteral("复制当前行"));
+                // 声明业务菜单已提供此能力，避免共享表格菜单追加重复项。
+                ks::ui::SetTableContextActionRole(copyRowAction, ks::ui::TableContextActionRole::CopyRows);
                 copyRowAction->setEnabled(clickedItem != nullptr);
                 if (menu.exec(treeWidget->viewport()->mapToGlobal(localPosition)) != copyRowAction ||
                     clickedItem == nullptr ||

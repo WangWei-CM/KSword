@@ -1,4 +1,5 @@
 #include "NetworkDock.InternalCommon.h"
+#include "../UI/TableContextMenu.h"
 #include "../UI/ToolbarMetrics.h"
 #include "../UI/PrimaryPageStyle.h"
 #include "../UI/FlatButtonTheme.h"
@@ -317,8 +318,14 @@ void NetworkDock::initializeNidsTab()
         viewPacketDetailAction->setEnabled(hasRelatedPacket);
         menu.addSeparator();
         QAction* copyCellAction = menu.addAction(QIcon(QStringLiteral(":/Icon/log_copy.svg")), QStringLiteral("复制单元格"));
+        // 声明业务菜单已提供此能力，避免共享表格菜单追加重复项。
+        ks::ui::SetTableContextActionRole(copyCellAction, ks::ui::TableContextActionRole::CopyCell);
         QAction* copyRowAction = menu.addAction(QIcon(QStringLiteral(":/Icon/process_copy_row.svg")), QStringLiteral("复制当前行"));
+        // 声明业务菜单已提供此能力，避免共享表格菜单追加重复项。
+        ks::ui::SetTableContextActionRole(copyRowAction, ks::ui::TableContextActionRole::CopyRows);
         QAction* copySelectedRowsAction = menu.addAction(QIcon(QStringLiteral(":/Icon/log_clipboard.svg")), QStringLiteral("复制选中行"));
+        // 声明业务菜单已提供此能力，避免共享表格菜单追加重复项。
+        ks::ui::SetTableContextActionRole(copySelectedRowsAction, ks::ui::TableContextActionRole::CopyRows);
         const int currentRow = m_nidsAlertTable->currentRow();
         const QTableWidgetItem* processIdItem = currentRow >= 0
             ? m_nidsAlertTable->item(currentRow, toNidsAlertColumn(NidsAlertTableColumn::Pid))

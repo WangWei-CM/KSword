@@ -1,4 +1,5 @@
 #include "ProcessTraceMonitorWidget.h"
+#include "../UI/TableContextMenu.h"
 #include "../UI/SecondaryPageLayout.h"
 #include "../UI/ToolbarMetrics.h"
 #include "../theme.h"
@@ -1453,9 +1454,13 @@ void ProcessTraceMonitorWidget::showAvailableContextMenu(const QPoint& position)
     QAction* copyCurrentAction = menu.addAction(
         QIcon(QStringLiteral(":/Icon/process_copy_row.svg")),
         QStringLiteral("复制当前行"));
+    // 声明业务菜单已提供此能力，避免共享表格菜单追加重复项。
+    ks::ui::SetTableContextActionRole(copyCurrentAction, ks::ui::TableContextActionRole::CopyRows);
     QAction* copySelectedAction = menu.addAction(
         QIcon(QStringLiteral(":/Icon/log_clipboard.svg")),
         QStringLiteral("复制选中行"));
+    // 声明业务菜单已提供此能力，避免共享表格菜单追加重复项。
+    ks::ui::SetTableContextActionRole(copySelectedAction, ks::ui::TableContextActionRole::CopyRows);
 
     addSelectedAction->setEnabled(!running && !selectedRows.empty());
     copyCurrentAction->setEnabled(currentRow >= 0);
@@ -1516,9 +1521,13 @@ void ProcessTraceMonitorWidget::showTargetContextMenu(const QPoint& position)
     QAction* copyCurrentAction = menu.addAction(
         QIcon(QStringLiteral(":/Icon/process_copy_row.svg")),
         QStringLiteral("复制当前行"));
+    // 声明业务菜单已提供此能力，避免共享表格菜单追加重复项。
+    ks::ui::SetTableContextActionRole(copyCurrentAction, ks::ui::TableContextActionRole::CopyRows);
     QAction* copySelectedAction = menu.addAction(
         QIcon(QStringLiteral(":/Icon/log_clipboard.svg")),
         QStringLiteral("复制选中行"));
+    // 声明业务菜单已提供此能力，避免共享表格菜单追加重复项。
+    ks::ui::SetTableContextActionRole(copySelectedAction, ks::ui::TableContextActionRole::CopyRows);
     menu.addSeparator();
     QAction* removeSelectedAction = menu.addAction(
         QIcon(":/Icon/process_pause.svg"),

@@ -1,4 +1,5 @@
 #include "MemoryDock.Internal.h"
+#include "../UI/TableContextMenu.h"
 #include "../UI/ParameterWorkspace.h"
 #include "../UI/ToolbarMetrics.h"
 #include "../UI/PageControlStyle.h"
@@ -282,6 +283,8 @@ namespace
             QAction* copyRowAction = menu.addAction(
                 QIcon(QStringLiteral(":/Icon/process_copy_row.svg")),
                 QStringLiteral("复制当前行"));
+            // 声明业务菜单已提供此能力，避免共享表格菜单追加重复项。
+            ks::ui::SetTableContextActionRole(copyRowAction, ks::ui::TableContextActionRole::CopyRows);
             copyRowAction->setEnabled(rowIndex >= 0 && rowIndex < table->rowCount());
             // 内核内存证据的 VA 是内核虚拟地址：在工作台里切到内核范围打开。
             (void)addOpenInWorkbenchAction(

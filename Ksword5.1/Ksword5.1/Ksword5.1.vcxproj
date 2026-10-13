@@ -675,6 +675,7 @@
     <ClCompile Include="UI\TableHeaderSortingSupport.cpp" />
     <ClCompile Include="UI\IntegrityRiskPresentation.cpp" />
     <ClCompile Include="UI\TableInteractionSupport.cpp" />
+    <ClCompile Include="UI\TableContextMenu.cpp" />
     <ClCompile Include="UI\ThemeBinding.cpp" />
     <ClCompile Include="UI\SecondaryPageLayout.cpp" />
     <ClCompile Include="UI\PrimaryPageStyle.cpp" />
@@ -960,6 +961,7 @@
     <ClInclude Include="UI\TableHeaderSortingSupport.h" />
     <ClInclude Include="UI\IntegrityRiskPresentation.h" />
     <ClInclude Include="UI\TableInteractionSupport.h" />
+    <ClInclude Include="UI\TableContextMenu.h" />
     <ClInclude Include="UI\ThemeBinding.h" />
     <ClInclude Include="UI\FlatButtonTheme.h" />
     <ClInclude Include="UI\FloatingScrollbars.h" />

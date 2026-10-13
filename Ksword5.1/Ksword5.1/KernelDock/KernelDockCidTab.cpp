@@ -1,4 +1,5 @@
 #include "../UI/StructuredFieldView.h"
+#include "../UI/TableContextMenu.h"
 #include "../UI/PageControlStyle.h"
 #include "../UI/ToolbarMetrics.h"
 #include "KernelDockCidTab.h"
@@ -636,6 +637,8 @@ void KernelDockCidTab::showContextMenu(const QPoint& localPosition)
     QMenu menu(this);
     menu.setStyleSheet(menuStyle());
     QAction* copyRowAction = menu.addAction(kernelText("kernel.cid.menu.copy_row", QStringLiteral("复制当前行")));
+    // 声明业务菜单已提供此能力，避免共享表格菜单追加重复项。
+    ks::ui::SetTableContextActionRole(copyRowAction, ks::ui::TableContextActionRole::CopyRows);
     copyRowAction->setEnabled(m_table->currentRow() >= 0);
     const CidEvidenceRow* evidenceRow = selectedRow();
     QAction* openProcessAction = menu.addAction(

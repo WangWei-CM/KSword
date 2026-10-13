@@ -1,4 +1,5 @@
 #include "KernelIoTimerTab.h"
+#include "../UI/TableContextMenu.h"
 #include "../UI/PageControlStyle.h"
 #include "../UI/ToolbarMetrics.h"
 #include "../UI/VisibleTableWidget.h"
@@ -697,9 +698,13 @@ void KernelIoTimerTab::showContextMenu(const QPoint& localPosition)
     QAction* copyCellAction = menu.addAction(
         QIcon(QStringLiteral(":/Icon/process_copy_cell.svg")),
         ioTimerText("kernel.iotimer.menu.copy_cell", QStringLiteral("复制单元格")));
+    // 声明业务菜单已提供此能力，避免共享表格菜单追加重复项。
+    ks::ui::SetTableContextActionRole(copyCellAction, ks::ui::TableContextActionRole::CopyCell);
     QAction* copyRowAction = menu.addAction(
         QIcon(QStringLiteral(":/Icon/process_copy_row.svg")),
         ioTimerText("kernel.iotimer.menu.copy_row", QStringLiteral("复制当前行")));
+    // 声明业务菜单已提供此能力，避免共享表格菜单追加重复项。
+    ks::ui::SetTableContextActionRole(copyRowAction, ks::ui::TableContextActionRole::CopyRows);
     const bool canControl =
         !m_refreshRunning.load(std::memory_order_relaxed) && selectedRow() != nullptr;
     startAction->setEnabled(canControl);

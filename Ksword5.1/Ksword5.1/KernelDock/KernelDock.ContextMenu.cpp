@@ -1,5 +1,6 @@
 
 #include "KernelDock.h"
+#include "../UI/TableContextMenu.h"
 
 // ============================================================
 // KernelDock.ContextMenu.cpp
@@ -197,12 +198,16 @@ void KernelDock::showObjectNamespaceContextMenu(const QPoint& localPosition)
 
     QMenu* copyMenu = contextMenu.addMenu(QIcon(":/Icon/process_copy_row.svg"), kernelText("kernel.context.menu.copy", QStringLiteral("复制")));
     QAction* copyCellAction = copyMenu->addAction(QIcon(":/Icon/process_copy_cell.svg"), kernelText("kernel.context.menu.copy_cell", QStringLiteral("复制当前单元格")));
+    // 声明业务菜单已提供此能力，避免共享表格菜单追加重复项。
+    ks::ui::SetTableContextActionRole(copyCellAction, ks::ui::TableContextActionRole::CopyCell);
     QAction* copyObjectNameAction = copyMenu->addAction(kernelText("kernel.context.object.copy_name", QStringLiteral("复制对象名")));
     QAction* copyObjectTypeAction = copyMenu->addAction(kernelText("kernel.context.object.copy_type", QStringLiteral("复制对象类型")));
     QAction* copyFullPathAction = copyMenu->addAction(kernelText("kernel.context.object.copy_full_path", QStringLiteral("复制完整路径")));
     QAction* copySymbolicTargetAction = copyMenu->addAction(kernelText("kernel.context.object.copy_symbolic_target", QStringLiteral("复制符号链接目标")));
     QAction* copyEnumApiAction = copyMenu->addAction(kernelText("kernel.context.object.copy_enum_api", QStringLiteral("复制枚举 API")));
     QAction* copyRowAction = copyMenu->addAction(QIcon(":/Icon/process_copy_row.svg"), kernelText("kernel.context.menu.copy_row", QStringLiteral("复制当前行")));
+    // 声明业务菜单已提供此能力，避免共享表格菜单追加重复项。
+    ks::ui::SetTableContextActionRole(copyRowAction, ks::ui::TableContextActionRole::CopyRows);
     QAction* copySameRootRowsAction = copyMenu->addAction(kernelText("kernel.context.object.copy_same_directory", QStringLiteral("复制同目录路径全部行")));
 
     copyObjectNameAction->setEnabled(hasEntry);
@@ -451,11 +456,15 @@ void KernelDock::showAtomContextMenu(const QPoint& localPosition)
 
     QMenu* copyMenu = contextMenu.addMenu(QIcon(":/Icon/process_copy_row.svg"), kernelText("kernel.context.menu.copy", QStringLiteral("复制")));
     QAction* copyCellAction = copyMenu->addAction(QIcon(":/Icon/process_copy_cell.svg"), kernelText("kernel.context.menu.copy_cell", QStringLiteral("复制当前单元格")));
+    // 声明业务菜单已提供此能力，避免共享表格菜单追加重复项。
+    ks::ui::SetTableContextActionRole(copyCellAction, ks::ui::TableContextActionRole::CopyCell);
     QAction* copyValueAction = copyMenu->addAction(kernelText("kernel.context.atom.copy_value", QStringLiteral("复制Atom值")));
     QAction* copyHexAction = copyMenu->addAction(kernelText("kernel.context.atom.copy_hex", QStringLiteral("复制十六进制")));
     QAction* copyNameAction = copyMenu->addAction(kernelText("kernel.context.atom.copy_name", QStringLiteral("复制名称")));
     QAction* copySourceAction = copyMenu->addAction(kernelText("kernel.context.atom.copy_source", QStringLiteral("复制来源")));
     QAction* copyRowAction = copyMenu->addAction(QIcon(":/Icon/process_copy_row.svg"), kernelText("kernel.context.menu.copy_row", QStringLiteral("复制当前行")));
+    // 声明业务菜单已提供此能力，避免共享表格菜单追加重复项。
+    ks::ui::SetTableContextActionRole(copyRowAction, ks::ui::TableContextActionRole::CopyRows);
 
     copyValueAction->setEnabled(hasEntry);
     copyHexAction->setEnabled(hasEntry);

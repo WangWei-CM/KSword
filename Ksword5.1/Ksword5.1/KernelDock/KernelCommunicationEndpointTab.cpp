@@ -1,4 +1,5 @@
 #include "KernelCommunicationEndpointTab.h"
+#include "../UI/TableContextMenu.h"
 #include "../UI/PageControlStyle.h"
 #include "../UI/ToolbarMetrics.h"
 #include "KernelDock.h"
@@ -315,6 +316,8 @@ void KernelCommunicationEndpointTab::showContextMenu(const QPoint& localPosition
     QMenu menu(this);
     menu.setStyleSheet(KswordTheme::ContextMenuStyle());
     QAction* copyRowAction = menu.addAction(kernelText("kernel.communication_endpoint.menu.copy_row", QStringLiteral("复制当前行")));
+    // 声明业务菜单已提供此能力，避免共享表格菜单追加重复项。
+    ks::ui::SetTableContextActionRole(copyRowAction, ks::ui::TableContextActionRole::CopyRows);
     copyRowAction->setEnabled(m_table->currentRow() >= 0);
     const QAction* selectedAction = menu.exec(m_table->viewport()->mapToGlobal(localPosition));
     if (selectedAction == copyRowAction)

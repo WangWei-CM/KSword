@@ -119,6 +119,7 @@ cl %CLFLAGS% ^
   "%UI%\WorkbenchSessionBar.cpp" "%UI%\WriteModeSwitch.cpp" "%UI%\WorkbenchStatusBar.cpp" "%UI%\WorkbenchConfirmations.cpp" "%UI%\WorkbenchStringWriteDialog.cpp" ^
   "%UI%\WorkbenchMessages.cpp" "%UI%\WorkbenchSettings.cpp" "%UI%\WorkbenchActions.cpp" ^
   "%UI%\AddressBookStore.cpp" "%UI%\AddressBookModel.cpp" "%UI%\AddressBookModel.StoreSync.cpp" "%UI%\AddressBookPanel.cpp" "%UI%\AddressBookPanel.RowActions.cpp" "%UI%\AddressBookPanel.Menu.cpp" ^
+  "%APP%\UI\TableContextMenu.cpp" ^
   "%UI%\Int3Controller.cpp" "%UI%\Int3PatchPanel.cpp" "%UI%\WorkbenchBookIntake.cpp" ^
   "%APP%\UI\X64DbgNavigation.cpp" "%APP%\UI\FlowLayout.cpp" "%APP%\UI\ThemeStatusRole.cpp" "%APP%\UI\GlobalUiBaseStyle.cpp" "%APP%\UI\FloatingScrollbars.cpp" "%APP%\UI\ThemeControlGlyphs.cpp" ^
   /Fo"%OBJ%\\"

@@ -80,6 +80,7 @@ cl /nologo /std:c++latest /Zc:__cplusplus /permissive- /utf-8 /EHsc /MD /W4 /WX 
   "%FIX%\wpE_tests.Wave2.Store.cpp" "%FIX%\wpE_tests.Wave2.Model.cpp" "%FIX%\wpE_tests.Wave2.Panel.cpp" ^
   "%FIX%\wpE_tests.Wave2.PanelMore.cpp" "%FIX%\wpE_tests.Wave2.NewMutations.cpp" "%FIX%\wpE_tests.Replay3.cpp" ^
   "%UI%\AddressBookStore.cpp" "%UI%\AddressBookModel.cpp" "%UI%\AddressBookModel.StoreSync.cpp" "%UI%\AddressBookPanel.cpp" "%UI%\AddressBookPanel.RowActions.cpp" "%UI%\AddressBookPanel.Menu.cpp" ^
+  "%APP%\UI\TableContextMenu.cpp" ^
   "%UI%\HexViewWidgets.cpp" "%UI%\HexViewWidgets.Text.cpp" "%UI%\HexViewFormat.cpp" "%FLOW%\FlowLayout.cpp" ^
   "%MOC%\moc_AddressBookStore.cpp" "%MOC%\moc_AddressBookModel.cpp" "%MOC%\moc_AddressBookPanel.cpp" "%MOC%\moc_HexViewWidgets.cpp" ^
   "%CORE%\MemoryAddressBook.cpp" "%CORE%\MemoryAddressBook.Serialize.cpp" ^

@@ -1,4 +1,5 @@
 #include "KernelDock.h"
+#include "../UI/TableContextMenu.h"
 #include "../UI/PageControlStyle.h"
 #include "../UI/ToolbarMetrics.h"
 #include "../UI/ParameterWorkspace.h"
@@ -723,6 +724,8 @@ namespace
             QAction* copyRowAction = contextMenu.addAction(
                 QIcon(QStringLiteral(":/Icon/process_copy_row.svg")),
                 kernelText("kernel.callback.intercept.menu.copy_current_row", QStringLiteral("复制当前行")));
+            // 声明业务菜单已提供此能力，避免共享表格菜单追加重复项。
+            ks::ui::SetTableContextActionRole(copyRowAction, ks::ui::TableContextActionRole::CopyRows);
             copyRowAction->setEnabled(tableWidget->currentRow() >= 0);
             const QTableWidgetItem* processIdItem =
                 processIdColumn >= 0 && processIdColumn < tableWidget->columnCount() && tableWidget->currentRow() >= 0

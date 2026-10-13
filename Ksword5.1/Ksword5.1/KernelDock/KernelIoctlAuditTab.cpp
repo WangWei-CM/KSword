@@ -1,4 +1,5 @@
 #include "KernelIoctlAuditTab.h"
+#include "../UI/TableContextMenu.h"
 #include "../UI/PageControlStyle.h"
 #include "../UI/ToolbarMetrics.h"
 
@@ -638,6 +639,8 @@ void KernelIoctlAuditTab::showCopyMenu(QTableWidget* table, const QPoint& positi
     const int row = index.isValid() ? index.row() : -1;
     QMenu menu(this);
     QAction* copyRow = menu.addAction(kernelText("kernel.ioctl_audit.copy_row", QStringLiteral("复制当前行")));
+    // 声明业务菜单已提供此能力，避免共享表格菜单追加重复项。
+    ks::ui::SetTableContextActionRole(copyRow, ks::ui::TableContextActionRole::CopyRows);
     QAction* copyAll = menu.addAction(kernelText("kernel.ioctl_audit.copy_all", QStringLiteral("复制全部行")));
     copyRow->setEnabled(row >= 0);
     copyAll->setEnabled(table->rowCount() > 0);

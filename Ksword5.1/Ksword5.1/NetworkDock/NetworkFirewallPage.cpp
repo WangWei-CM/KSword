@@ -1,4 +1,5 @@
 #include "../UI/StructuredFieldView.h"
+#include "../UI/TableContextMenu.h"
 #include "../UI/FlatButtonTheme.h"
 #include "NetworkFirewallPage.h"
 #include "../UI/CodeEditorWidget.h"
@@ -149,6 +150,8 @@ namespace
                 QAction* copyRowAction = contextMenu.addAction(
                     QIcon(QStringLiteral(":/Icon/process_copy_row.svg")),
                     QStringLiteral("复制当前行"));
+                // 声明业务菜单已提供此能力，避免共享表格菜单追加重复项。
+                ks::ui::SetTableContextActionRole(copyRowAction, ks::ui::TableContextActionRole::CopyRows);
                 copyRowAction->setEnabled(tableWidget->currentRow() >= 0);
                 QAction* addBlockRuleAction = nullptr;
                 if (addBlockRuleHandler)
@@ -3895,6 +3898,8 @@ void NetworkFirewallPage::showRuleContextMenu(const QPoint& localPosition)
     QAction* copyAction = menu.addAction(
         QIcon(QStringLiteral(":/Icon/process_copy_row.svg")),
         QStringLiteral("复制当前行"));
+    // 声明业务菜单已提供此能力，避免共享表格菜单追加重复项。
+    ks::ui::SetTableContextActionRole(copyAction, ks::ui::TableContextActionRole::CopyRows);
     copyAction->setEnabled(m_ruleTable->currentRow() >= 0);
 
     const QAction* selectedAction = menu.exec(

@@ -1,4 +1,5 @@
 #include "NetworkDock.InternalCommon.h"
+#include "../UI/TableContextMenu.h"
 #include "NetworkAuditPage.h"
 #include "NetworkFirewallPage.h"
 #include "../ArkDriverClient/ArkDriverClient.h"
@@ -501,6 +502,8 @@ void NetworkDock::initializeConnections()
             contextMenu.setStyleSheet(KswordTheme::ContextMenuStyle());
             QAction* terminateAction = contextMenu.addAction(QIcon(":/Icon/process_terminate.svg"), QStringLiteral("终止此 TCP 连接"));
             QAction* copyRowAction = contextMenu.addAction(QIcon(":/Icon/process_copy_row.svg"), QStringLiteral("复制行"));
+            // 声明业务菜单已提供此能力，避免共享表格菜单追加重复项。
+            ks::ui::SetTableContextActionRole(copyRowAction, ks::ui::TableContextActionRole::CopyRows);
             QAction* trackProcessAction = contextMenu.addAction(QIcon(":/Icon/log_track.svg"), QStringLiteral("跟踪此进程"));
             QAction* gotoProcessDetailAction = contextMenu.addAction(QIcon(":/Icon/process_details.svg"), QStringLiteral("转到进程详细信息"));
             QAction* uploadVirusTotalAction = ks::online_scan::addVirusTotalSandboxMenu(
@@ -603,6 +606,8 @@ void NetworkDock::initializeConnections()
             QMenu contextMenu(this);
             contextMenu.setStyleSheet(KswordTheme::ContextMenuStyle());
             QAction* copyRowAction = contextMenu.addAction(QIcon(":/Icon/process_copy_row.svg"), QStringLiteral("复制行"));
+            // 声明业务菜单已提供此能力，避免共享表格菜单追加重复项。
+            ks::ui::SetTableContextActionRole(copyRowAction, ks::ui::TableContextActionRole::CopyRows);
             QAction* trackProcessAction = contextMenu.addAction(QIcon(":/Icon/log_track.svg"), QStringLiteral("跟踪此进程"));
             QAction* gotoProcessDetailAction = contextMenu.addAction(QIcon(":/Icon/process_details.svg"), QStringLiteral("转到进程详细信息"));
             QAction* uploadVirusTotalAction = ks::online_scan::addVirusTotalSandboxMenu(
@@ -919,6 +924,8 @@ void NetworkDock::initializeConnections()
                 QStringLiteral("预填阻断规则"));
             addBlockRuleAction->setEnabled(m_firewallPage != nullptr);
             QAction* copyRowAction = contextMenu.addAction(QIcon(":/Icon/process_copy_row.svg"), QStringLiteral("复制行"));
+            // 声明业务菜单已提供此能力，避免共享表格菜单追加重复项。
+            ks::ui::SetTableContextActionRole(copyRowAction, ks::ui::TableContextActionRole::CopyRows);
             QAction* copyAsciiAction = contextMenu.addAction(QIcon(":/Icon/process_copy_row.svg"), QStringLiteral("复制选中报文ASCII"));
             // 仅正文复制动作：不拼接报文头部元信息，只输出 payload 的 ASCII 文本。
             QAction* copyPayloadAsciiOnlyAction = contextMenu.addAction(

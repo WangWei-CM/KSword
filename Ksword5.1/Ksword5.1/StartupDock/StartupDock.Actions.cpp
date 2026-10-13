@@ -1,4 +1,5 @@
 #include "StartupDock.Internal.h"
+#include "../UI/TableContextMenu.h"
 #include "../OnlineScan/SandboxUploadActions.h"
 #include "../Framework/PrivilegeElevationPrompt.h"
 
@@ -382,6 +383,8 @@ void StartupDock::showEntryContextMenu(
     QAction* copyAction = contextMenu.addAction(
         createBlueIcon(":/Icon/log_copy.svg"),
         startupText("startup.menu.copy_row", QStringLiteral("复制整行")));
+    // 声明业务菜单已提供此能力，避免共享表格菜单追加重复项。
+    ks::ui::SetTableContextActionRole(copyAction, ks::ui::TableContextActionRole::CopyRows);
     QAction* openFileAction = contextMenu.addAction(
         createBlueIcon(":/Icon/process_open_folder.svg"),
         startupText("startup.menu.open_file", QStringLiteral("打开文件位置")));

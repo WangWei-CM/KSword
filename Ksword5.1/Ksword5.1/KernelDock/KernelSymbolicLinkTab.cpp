@@ -1,4 +1,5 @@
 #include "KernelSymbolicLinkTab.h"
+#include "../UI/TableContextMenu.h"
 #include "../UI/PageControlStyle.h"
 #include "../UI/ToolbarMetrics.h"
 #include "KernelDock.h"
@@ -314,9 +315,13 @@ void KernelSymbolicLinkTab::showContextMenu(const QPoint& position)
     QMenu menu(this);
     menu.setStyleSheet(KswordTheme::ContextMenuStyle());
     QAction* copyCellAction = menu.addAction(kernelText("kernel.symbolic_link.menu.copy_cell", QStringLiteral("复制单元格")));
+    // 声明业务菜单已提供此能力，避免共享表格菜单追加重复项。
+    ks::ui::SetTableContextActionRole(copyCellAction, ks::ui::TableContextActionRole::CopyCell);
     QAction* copyTargetAction = menu.addAction(kernelText("kernel.symbolic_link.menu.copy_target", QStringLiteral("复制 targetPath")));
     QAction* copyDosAction = menu.addAction(kernelText("kernel.symbolic_link.menu.copy_dos_candidate", QStringLiteral("复制 dosCandidate")));
     QAction* copyRowAction = menu.addAction(kernelText("kernel.symbolic_link.menu.copy_row", QStringLiteral("复制整行")));
+    // 声明业务菜单已提供此能力，避免共享表格菜单追加重复项。
+    ks::ui::SetTableContextActionRole(copyRowAction, ks::ui::TableContextActionRole::CopyRows);
     QAction* filterTargetAction = menu.addAction(kernelText("kernel.symbolic_link.menu.filter_target", QStringLiteral("按此目标路径过滤")));
 
     const QAction* selectedAction = menu.exec(m_table->viewport()->mapToGlobal(position));

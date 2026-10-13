@@ -107,6 +107,8 @@ KSword 主程序位于 `Ksword5.1/Ksword5.1`（Qt 6.9.3 Widgets + Qt Advanced Do
 
 ## 通用表格交互
 
+- Issue #220 的复制菜单能力统一由 `UI/TableContextMenu` 管理。业务 QAction 创建后用 `SetTableContextActionRole` 声明 CopyCell/CopyRows/ExportRows；检查递归包含已创建子菜单，不依赖翻译标题。共享层只补缺失能力，复用菜单时重绑实际来源与右键单元格，表头菜单不追加正文复制项。覆盖和验证记录见 [表格复制菜单核对](../../docs/Issue-220-表格复制菜单核对.md)。
+
 - 2026-10-07：窗口列表由 `WindowDock` 内嵌的 `OtherDock` 实现，默认筛选“所有窗口”，仍叠加外部 PID 与关键字过滤，包含退出保留一轮的无效窗口。自动刷新默认开启、间隔 1000 ms；在信号连接完成后勾选以实际启动定时器。定时采样调用 `refreshWindowListAsync(false)`，不注册或更新全局 `kPro` 任务，手动刷新保留进度通知。
 - 窗口列表列宽由 `WindowListInteraction.h::configureWindowListColumnSizing` 收口：关闭该树的全局 `TableColumnAutoFit`，标题列 Stretch，其他列使用 Qt 原生 ResizeToContents，按实际子节点、字体与进程图标定宽，窄视口允许横向滚动。全局适配会接管成 Interactive，并按 48 行抽样/压缩，单纯 setColumnWidth 会被再次覆盖；不要叠加全局和原生两套列宽控制。
 - 2026-10-05：窗口列表（`OtherDock`，含进程详情内嵌列表）支持 Ctrl/Shift 多选；批量置顶/取消置顶、显示/隐藏、启用/禁用采用统一目标状态，避免混合选区逐项反转。防截图操作按顶层 HWND 去重，进程操作按 PID 去重；菜单打开前复制窗口快照，不能持有异步枚举缓存的指针跨越 `QMenu::exec` 或反馈弹窗。树刷新使用通用菜单/Ctrl 提交屏障，并按 HWND/PID/TID/进程创建时间恢复选区；屏障期间新快照替换后也必须核验旧树项身份，不能仅凭 HWND 找到新快照就操作。

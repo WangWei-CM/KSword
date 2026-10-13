@@ -1,4 +1,5 @@
 #include "LogDockWidget.h"
+#include "../UI/TableContextMenu.h"
 #include "../Internationalization/LanguageManager.h"
 #include "../theme.h"
 #include "../UI/FlatTableModel.h"
@@ -833,6 +834,8 @@ void LogDockWidget::showTableContextMenu(const QPoint& position)
         QAction* copySelectedRowsAction = contextMenu.addAction(
             createBlueThemedIcon(IconCopyPath),
             ks::i18n::contextText(QStringLiteral("log.menu.copy"), QStringLiteral("复制")));
+        // 声明业务菜单已提供此能力，避免共享表格菜单追加重复项。
+        ks::ui::SetTableContextActionRole(copySelectedRowsAction, ks::ui::TableContextActionRole::CopyRows);
         copySelectedRowsAction->setEnabled(!selectedRowIndexes.empty());
 
         QAction* selectedAction = contextMenu.exec(m_logTable->viewport()->mapToGlobal(position));
@@ -846,9 +849,13 @@ void LogDockWidget::showTableContextMenu(const QPoint& position)
     QAction* copyCellAction = contextMenu.addAction(
         createBlueThemedIcon(IconCopyPath),
         ks::i18n::contextText(QStringLiteral("log.menu.copy_cell"), QStringLiteral("复制单元格")));
+    // 声明业务菜单已提供此能力，避免共享表格菜单追加重复项。
+    ks::ui::SetTableContextActionRole(copyCellAction, ks::ui::TableContextActionRole::CopyCell);
     QAction* copyRowAction = contextMenu.addAction(
         createBlueThemedIcon(IconClipboardPath),
         ks::i18n::contextText(QStringLiteral("log.menu.copy_row"), QStringLiteral("复制行")));
+    // 声明业务菜单已提供此能力，避免共享表格菜单追加重复项。
+    ks::ui::SetTableContextActionRole(copyRowAction, ks::ui::TableContextActionRole::CopyRows);
 
     // 若未点中有效单元格，则复制操作不可用。
     copyCellAction->setEnabled(hasValidCell);

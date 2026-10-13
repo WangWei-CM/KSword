@@ -1,4 +1,5 @@
 ﻿#include "RegistryDock/RegistryDock.h"
+#include "UI/TableContextMenu.h"
 #include "RegistryDock/RegistryValueEditorWidget.h"
 #include "RegistryDock/RegistryWorkbenchAccess.h"
 #include "RegistryDock/RegistryDocument.h"
@@ -681,6 +682,8 @@ void RegistryDock::initializeConnections()
         QMenu menu(this);
         menu.setStyleSheet(KswordTheme::ContextMenuStyle());
         QAction* copyRowAction = menu.addAction(QIcon(":/Icon/process_copy_row.svg"), QStringLiteral("复制当前行"));
+        // 声明业务菜单已提供此能力，避免共享表格菜单追加重复项。
+        ks::ui::SetTableContextActionRole(copyRowAction, ks::ui::TableContextActionRole::CopyRows);
         copyRowAction->setEnabled(row >= 0);
         QAction* deleteValueAction = menu.addAction(QIcon(":/Icon/process_terminate.svg"), QStringLiteral("删除该值"));
         deleteValueAction->setEnabled(isValueResult && valueNameItem != nullptr);

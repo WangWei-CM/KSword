@@ -30,6 +30,7 @@ $componentSources = @(
     'Ksword5.1\Ksword5.1\UI\CommandExecutionPopup.cpp',
     'Ksword5.1\Ksword5.1\UI\ThemeBinding.cpp', 'Ksword5.1\Ksword5.1\UI\FlatButtonTheme.cpp',
     'Ksword5.1\Ksword5.1\UI\TableInteractionSupport.cpp',
+    'Ksword5.1\Ksword5.1\UI\TableContextMenu.cpp',
     'Ksword5.1\Ksword5.1\UI\TablePresentation.cpp',
     'Ksword5.1\Ksword5.1\UI\UiCommitCoordinator.cpp',
     'Ksword5.1\Ksword5.1\UI\ResultTableHost.cpp',

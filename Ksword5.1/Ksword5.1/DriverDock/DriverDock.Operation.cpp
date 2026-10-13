@@ -1,4 +1,5 @@
 #include "../UI/StructuredFieldView.h"
+#include "../UI/TableContextMenu.h"
 #include "DriverDock.Internal.h"
 #include "DriverDock.ModuleDumpFile.h"
 #include "../MemoryDock/MemoryAccessBackend.h"
@@ -2119,6 +2120,8 @@ void DriverDock::showServiceTableContextMenu(const QPoint& localPosition)
     QAction* copyRowAction = contextMenu.addAction(
         QIcon(":/Icon/process_copy_row.svg"),
         driverText("driver.menu.copy_row", QStringLiteral("复制当前行")));
+    // 声明业务菜单已提供此能力，避免共享表格菜单追加重复项。
+    ks::ui::SetTableContextActionRole(copyRowAction, ks::ui::TableContextActionRole::CopyRows);
     QAction* searchDriverOnlineAction = contextMenu.addAction(
         QIcon(":/Icon/file_find.svg"),
         driverText(
@@ -2728,6 +2731,8 @@ void DriverDock::showModuleTableContextMenu(const QPoint& localPosition)
     QAction* copyRowAction = contextMenu.addAction(
         QIcon(":/Icon/process_copy_row.svg"),
         driverText("driver.menu.copy_row", QStringLiteral("复制当前行")));
+    // 声明业务菜单已提供此能力，避免共享表格菜单追加重复项。
+    ks::ui::SetTableContextActionRole(copyRowAction, ks::ui::TableContextActionRole::CopyRows);
     QAction* searchDriverOnlineAction = contextMenu.addAction(
         QIcon(":/Icon/file_find.svg"),
         driverText(

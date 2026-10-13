@@ -1,4 +1,5 @@
 #include "DirectKernelCallMonitorWidget.h"
+#include "../UI/TableContextMenu.h"
 #include "../UI/VisibleTableWidget.h"
 #include "../UI/ToolbarMetrics.h"
 #include "../UI/PageControlStyle.h"
@@ -2232,6 +2233,8 @@ void DirectKernelCallMonitorWidget::showEventContextMenu(const QPoint& position)
     menu.setStyleSheet(KswordTheme::ContextMenuStyle());
     QAction* detailAction = menu.addAction(QStringLiteral("查看详情"));
     QAction* copyRowAction = menu.addAction(QStringLiteral("复制当前行"));
+    // 声明业务菜单已提供此能力，避免共享表格菜单追加重复项。
+    ks::ui::SetTableContextActionRole(copyRowAction, ks::ui::TableContextActionRole::CopyRows);
     QAction* copyDetailAction = menu.addAction(QStringLiteral("复制详情"));
     const QTableWidgetItem* processIdItem = m_eventTable->item(row, EventColumnPidTid);
     std::uint32_t processId = 0;
