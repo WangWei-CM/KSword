@@ -371,6 +371,8 @@ namespace ks::ui
     ParameterWorkspace::ParameterWorkspace(QWidget* parent, int parameterWidth)
         : QWidget(parent), m_parameterWidth(parameterWidth)
     {
+        // 共享参数骨架拥有分栏、滚动和固定动作区；详情兼容框架只整理外围导航，避免二次接管。
+        setProperty("ksword_parameter_workspace", true);
         // 放大正文而保留用户字体家族；Qt 负责 DPI，不改变应用级字号与其他专业视图。
         QFont body = font();
         if (body.pixelSize() > 0) body.setPixelSize(qMax(14, body.pixelSize()));

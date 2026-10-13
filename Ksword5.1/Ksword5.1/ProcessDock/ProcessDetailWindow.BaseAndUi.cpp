@@ -5797,25 +5797,31 @@ void ProcessDetailWindow::initializePebTab()
     m_pebLayout->setContentsMargins(6, 6, 6, 6);
     m_pebLayout->setSpacing(6);
 
-    QHBoxLayout* pebTopBarLayout = new QHBoxLayout();
+    // 参数、固定执行区和只读结果由共享骨架分别承载，详情兼容层不再重排内部滚动。
+    auto* workspace = new ks::ui::ParameterWorkspace(m_pebTab, 500); // PEB 参数与现场结果同屏。
+    workspace->useWideParameterLayout(55);
+    m_pebLayout->addWidget(workspace, 1);
+
     m_refreshPebButton = new QPushButton(QIcon(":/Icon/process_refresh.svg"), "刷新PEB", m_pebTab);
     m_refreshPebButton->setToolTip("异步刷新 PEB、命令行、当前目录、环境块与安全标志");
     m_applyPebEditButton = new QPushButton(QIcon(":/Icon/process_settings.svg"), QStringLiteral("应用修改"), m_pebTab);
-    m_applyPebEditButton->setToolTip(QStringLiteral("把下方可编辑字段写回目标进程。字符串字段优先写入现有缓冲区；空间不足时会尝试远程分配新缓冲区。"));
+    m_applyPebEditButton->setToolTip(QStringLiteral("把可编辑字段写回目标进程。字符串字段优先写入现有缓冲区；空间不足时会尝试远程分配新缓冲区。"));
     m_pebStatusLabel = new QLabel("● 尚未刷新", m_pebTab);
     m_pebStatusLabel->setStyleSheet(
         QStringLiteral("color:%1; font-weight:600;")
         .arg(KswordTheme::TextSecondaryHex()));
-    pebTopBarLayout->addWidget(m_refreshPebButton);
-    pebTopBarLayout->addWidget(m_applyPebEditButton);
-    pebTopBarLayout->addWidget(m_pebStatusLabel, 1);
-    ks::ui::NormalizeToolbarRow(pebTopBarLayout);
-    m_pebLayout->addLayout(pebTopBarLayout);
+    m_pebStatusLabel->setWordWrap(true);
+    workspace->actions()->addWidget(m_refreshPebButton);
+    workspace->actions()->addWidget(m_applyPebEditButton);
+    workspace->actions()->addStretch(1);
+    workspace->results()->addWidget(m_pebStatusLabel);
+    ks::ui::ApplyFlatButtonTheme(m_applyPebEditButton, ks::ui::FlatButtonTone::Accent,
+        ks::ui::FlatButtonAppearance::Solid);
 
-    QGroupBox* editableGroup = new QGroupBox(QStringLiteral("PEB 可编辑字段（R3 写入目标进程内存）"), m_pebTab);
-    QGridLayout* editableGrid = new QGridLayout(editableGroup);
-    editableGrid->setContentsMargins(8, 8, 8, 8);
-    editableGrid->setSpacing(6);
+    // 自然高度表单允许长标签换行；窄窗口由参数正文滚动，不截掉字段或拉大行间空白。
+    auto* editableGroup = new QGroupBox(QStringLiteral("PEB 可编辑字段（R3 写入目标进程内存）"), workspace);
+    auto* editableForm = new QFormLayout(editableGroup); // 所有输入保留原对象和写入信号。
+    ks::ui::ConfigureDetailForm(editableForm);
 
     m_pebTargetCombo = new QComboBox(editableGroup);
     m_pebTargetCombo->addItem(QStringLiteral("NativePEB"), QStringLiteral("NativePEB"));
@@ -5850,40 +5856,25 @@ void ProcessDetailWindow::initializePebTab()
     m_pebPriorityClassCombo->addItem(QStringLiteral("HIGH"), static_cast<unsigned int>(HIGH_PRIORITY_CLASS));
     m_pebPriorityClassCombo->addItem(QStringLiteral("REALTIME"), static_cast<unsigned int>(REALTIME_PRIORITY_CLASS));
 
-    editableGrid->addWidget(new QLabel(QStringLiteral("目标PEB"), editableGroup), 0, 0);
-    editableGrid->addWidget(m_pebTargetCombo, 0, 1);
-    editableGrid->addWidget(new QLabel(QStringLiteral("CommandLine"), editableGroup), 1, 0);
-    editableGrid->addWidget(m_pebCommandLineEdit, 1, 1, 1, 3);
-    editableGrid->addWidget(new QLabel(QStringLiteral("ImagePathName"), editableGroup), 2, 0);
-    editableGrid->addWidget(m_pebImagePathEdit, 2, 1, 1, 3);
-    editableGrid->addWidget(new QLabel(QStringLiteral("CurrentDirectory"), editableGroup), 3, 0);
-    editableGrid->addWidget(m_pebCurrentDirectoryEdit, 3, 1, 1, 3);
-    editableGrid->addWidget(new QLabel(QStringLiteral("环境变量名"), editableGroup), 4, 0);
-    editableGrid->addWidget(m_pebEnvironmentNameEdit, 4, 1);
-    editableGrid->addWidget(new QLabel(QStringLiteral("环境变量值"), editableGroup), 4, 2);
-    editableGrid->addWidget(m_pebEnvironmentValueEdit, 4, 3);
-    editableGrid->addWidget(new QLabel(QStringLiteral("ImageBaseAddress"), editableGroup), 5, 0);
-    editableGrid->addWidget(m_pebImageBaseEdit, 5, 1);
-    editableGrid->addWidget(new QLabel(QStringLiteral("AffinityMask"), editableGroup), 5, 2);
-    editableGrid->addWidget(m_pebAffinityMaskEdit, 5, 3);
-    editableGrid->addWidget(new QLabel(QStringLiteral("PriorityClass"), editableGroup), 6, 0);
-    editableGrid->addWidget(m_pebPriorityClassCombo, 6, 1);
-    auto* editableScroll = new QScrollArea(m_pebTab);
-    editableScroll->setWidgetResizable(true);
-    editableScroll->setFrameShape(QFrame::NoFrame);
-    editableScroll->setMinimumSize(0, 0);
-    editableScroll->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Ignored);
-    editableScroll->setMaximumHeight(280);
-    editableScroll->setWidget(editableGroup);
-    m_pebLayout->addWidget(editableScroll, 1);
+    editableForm->addRow(QStringLiteral("目标PEB"), m_pebTargetCombo);
+    editableForm->addRow(QStringLiteral("CommandLine"), m_pebCommandLineEdit);
+    editableForm->addRow(QStringLiteral("ImagePathName"), m_pebImagePathEdit);
+    editableForm->addRow(QStringLiteral("CurrentDirectory"), m_pebCurrentDirectoryEdit);
+    editableForm->addRow(QStringLiteral("环境变量名"), m_pebEnvironmentNameEdit);
+    editableForm->addRow(QStringLiteral("环境变量值"), m_pebEnvironmentValueEdit);
+    editableForm->addRow(QStringLiteral("ImageBaseAddress"), m_pebImageBaseEdit);
+    editableForm->addRow(QStringLiteral("AffinityMask"), m_pebAffinityMaskEdit);
+    editableForm->addRow(QStringLiteral("PriorityClass"), m_pebPriorityClassCombo);
+    ks::ui::StyleParameterSection(editableGroup);
+    workspace->parameters()->addWidget(editableGroup);
 
-    m_pebDetailOutput = new ks::ui::StructuredFieldView(m_pebTab);
+    // 显式投影复用规范字段文档、搜索、复制和导出，摘要独立滚动并占据结果区剩余空间。
+    m_pebDetailOutput = new ks::ui::StructuredFieldView(workspace);
     m_pebDetailOutput->setDocument(fieldNotice(QStringLiteral("PEB 与地址空间摘要将在此处显示。")));
-    m_pebLayout->addWidget(m_pebDetailOutput, 2);
+    workspace->results()->addWidget(ks::ui::CreateDetailFieldProjection(m_pebDetailOutput, workspace), 1);
 
-    // 只读字段说明属于程序生成的详情文本，使用统一编辑器以便英语模式即时重绘。
-    m_pebReadonlyReasonOutput = new ks::ui::StructuredFieldView(m_pebTab);
-    m_pebReadonlyReasonOutput->setMaximumHeight(220);
+    // 不可写字段的解释默认展示，纳入已有参数滚动区；不再控制已隐藏的数据源来折叠投影。
+    m_pebReadonlyReasonOutput = new ks::ui::StructuredFieldView(workspace);
     ks::ui::FieldDocument readonlyFields;
     readonlyFields.section(QStringLiteral("不可直接修改/不建议直接修改"));
     readonlyFields.field(QStringLiteral("KernelCpuMs/UserCpuMs/WorkingSet/PrivateUsage/IO计数/PageFaultCount"), QStringLiteral("系统统计计数，只能由内核/调度器/内存管理器更新。"), true);
@@ -5892,22 +5883,9 @@ void ProcessDetailWindow::initializePebTab()
     readonlyFields.field(QStringLiteral("HeapCount/HeapBlock"), QStringLiteral("需要堆管理器一致性，不在 PEB 页直接写。"), true);
     readonlyFields.field(QStringLiteral("ProcessParameters/Environment"), QStringLiteral("本页会按需更新字符串字段/环境项，不建议手工乱改指针。"), true);
     m_pebReadonlyReasonOutput->setDocument(readonlyFields);
-    m_pebReadonlyReasonOutput->hide();
-    auto* readonlyReasonButton = new QToolButton(m_pebTab);
-    readonlyReasonButton->setText(QStringLiteral("不可直接修改/不建议直接修改"));
-    readonlyReasonButton->setCheckable(true);
-    readonlyReasonButton->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
-    readonlyReasonButton->setArrowType(Qt::RightArrow);
-    connect(readonlyReasonButton, &QToolButton::toggled, m_pebTab, [this, readonlyReasonButton](bool open) {
-        readonlyReasonButton->setArrowType(open ? Qt::DownArrow : Qt::RightArrow);
-        m_pebReadonlyReasonOutput->setVisible(open);
-    });
-    m_pebLayout->addWidget(readonlyReasonButton, 0);
-    m_pebLayout->addWidget(m_pebReadonlyReasonOutput, 1);
-
-    const QString buttonStyle = buildBlueButtonStyle();
-    m_refreshPebButton->setStyleSheet(buttonStyle);
-    m_applyPebEditButton->setStyleSheet(buttonStyle);
+    workspace->parameters()->addWidget(ks::ui::CreateDetailFieldProjection(
+        m_pebReadonlyReasonOutput, workspace, false));
+    workspace->finish(); // 共享输入底色、行高和圆角在首帧前统一接入。
 }
 
 void ProcessDetailWindow::initializeKernelCallbackTab()

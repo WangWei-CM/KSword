@@ -3,6 +3,7 @@
 #include "./PrimaryPageStyle.h"
 #include "./ThemeBinding.h"
 #include "./ToolbarMetrics.h"
+#include "./MainSurfaceStyle.h"
 #include "../Internationalization/LanguageManager.h"
 #include "../theme.h"
 #include <QApplication>
@@ -231,8 +232,8 @@ namespace
             }
             const quint64 revision = m_source->documentRevision(); // 当前完整规范快照身份。
             const QString language = ks::i18n::LanguageManager::instance().currentLanguageId();
-            const QString theme = KswordTheme::WindowColorHex() + KswordTheme::SurfaceHex()
-                + KswordTheme::TextPrimaryHex() + KswordTheme::TextSecondaryHex()
+            const QString theme = projectionCanvasColor().name() + KswordTheme::SurfaceColorHex()
+                + KswordTheme::TextPrimaryColorHex() + KswordTheme::TextSecondaryColorHex()
                 + KswordTheme::SuccessColor().name(QColor::HexArgb)
                 + KswordTheme::ErrorColor().name(QColor::HexArgb);
             const QString query = m_search ? m_search->text().trimmed() : QString();
@@ -403,6 +404,24 @@ namespace
             }
         }
 
+        // 输入是当前宿主链，返回实际画布颜色；独立详情不能穿过顶层窗口继承 owner 的参数表面。
+        QColor projectionCanvasColor() const
+        {
+            QWidget* topLevel = window(); // Qt 的窗口父对象仍可指向另一窗口中的业务控件。
+            for (QWidget* ancestor = parentWidget(); ancestor; ancestor = ancestor->parentWidget())
+            {
+                if (ancestor->property("ksword_parameter_surface").toBool())
+                {
+                    return ks::ui::MainWindowSurfaceColors().content;
+                }
+                if (ancestor == topLevel)
+                {
+                    break;
+                }
+            }
+            return KswordTheme::WindowColor();
+        }
+
         // 集中生成投影自己的精确主题块；状态色仍按卡片实底校准，不覆盖外部额外业务规则。
         void applyProjectionStyle()
         {
@@ -414,12 +433,12 @@ namespace
             const QString end = QStringLiteral("/* KSWORD_DETAIL_PROJECTION_END */");
             const QString block = begin + QStringLiteral(
                 "QWidget[ksword_detail_projection=\"true\"],QWidget[ksword_detail_document_body=\"true\"]{background:%1;border:0;}"
-                "QScrollArea{background:%1;border:0;}"
+                "QScrollArea,QScrollArea > QWidget{background:%1;border:0;}"
                 "QLabel[ksword_detail_field_label=\"true\"]{background:transparent;color:%2;}"
                 "QLabel[ksword_detail_field_value=\"true\"]{background:transparent;color:%3;}"
                 "QLabel[ksword_detail_field_value=\"true\"][ksword_detail_field_semantic=\"success\"]{color:%4;}"
                 "QLabel[ksword_detail_field_value=\"true\"][ksword_detail_field_semantic=\"error\"]{color:%5;}")
-                .arg(KswordTheme::WindowColorHex(), KswordTheme::TextSecondaryHex(),
+                .arg(projectionCanvasColor().name(), KswordTheme::TextSecondaryHex(),
                     readableColor(KswordTheme::TextPrimaryColor()), readableColor(KswordTheme::SuccessColor()),
                     readableColor(KswordTheme::ErrorColor())) + end;
             QString style = styleSheet(); // 保留其它拥有者定点添加的样式，只替换框架拥有的块。

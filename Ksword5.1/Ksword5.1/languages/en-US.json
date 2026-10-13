@@ -25452,6 +25452,7 @@
     "找到匹配": "Match Found",
     "把上方输入加入规则表；启动 WinAPI 监控时写入 Agent 配置并生效。": "Add input from above to rule table; write Agent configuration and apply when starting WinAPI monitoring.",
     "把下方可编辑字段写回目标进程。字符串字段优先写入现有缓冲区；空间不足时会尝试远程分配新缓冲区。": "Write editable fields below back to the target process. String fields prioritize writing to existing buffers; if space is insufficient, attempt remote allocation of a new buffer.",
+    "把可编辑字段写回目标进程。字符串字段优先写入现有缓冲区；空间不足时会尝试远程分配新缓冲区。": "Write editable fields back to the target process. String fields prioritize writing to existing buffers; if space is insufficient, attempt remote allocation of a new buffer.",
     "把下方复选框状态写回目标进程令牌": "Write checkbox states from below back to the target process token",
     "把当前可见结果导出为 TSV": "Export current visible results as TSV",
     "把当前进程设为关键进程": "Set current process as critical process",

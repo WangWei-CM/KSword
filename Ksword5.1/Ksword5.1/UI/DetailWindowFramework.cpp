@@ -1,5 +1,6 @@
 #include "./DetailPresentation.h"
 #include "./DetailDialogChrome.h"
+#include "./DetailLayoutRegistry.h"
 #include "./StructuredFieldView.h"
 #include "./PrimaryPageStyle.h"
 #include "./PageControlStyle.h"
@@ -32,7 +33,9 @@ namespace
     bool replaceDetailWidget(QWidget* original, Factory create)
     {
         QWidget* parent = original ? original->parentWidget() : nullptr;
-        const bool explicitlyHidden = original && original->isHidden();
+        // 惰性构造的子控件也可能暂时隐藏；只继承业务显式 hide，不能让新宿主永久不可见。
+        const bool explicitlyHidden = original && original->isHidden()
+            && original->testAttribute(Qt::WA_WState_ExplicitShowHide);
         if (auto* splitter = qobject_cast<QSplitter*>(parent))
         {
             const int index = splitter->indexOf(original);
@@ -162,7 +165,9 @@ namespace
         {
             for (auto* parent = widget; parent; parent = parent->parentWidget())
             {
-                if (parent->property("ksword_detail_keep_layout").toBool())
+                // 参数骨架只保留布局，普通控件仍接标准主题；专业保护标记继续保留原含义。
+                if (parent->property("ksword_detail_keep_layout").toBool()
+                    || parent->property("ksword_parameter_workspace").toBool())
                 {
                     return true;
                 }
@@ -395,9 +400,11 @@ namespace
                     continue;
                 }
                 const bool scrollBody = !insideDetailScroll(source, m_window);
-                if (qobject_cast<QStackedWidget*>(source->parentWidget()))
+                // 已登记详情布局的字段源也是稳定面板身份，不能重挂后让宿主继续操纵旧面板。
+                const bool managedDetailPane = ks::ui::DetailLayoutRegistry::hostFor(source) != nullptr;
+                if (qobject_cast<QStackedWidget*>(source->parentWidget()) || managedDetailPane)
                 {
-                    // 原字段对象就是Tab/Stack页：保留页身份、索引和业务引用，只替换内部布局。
+                    // Tab/Stack页和受管详情面板只替换内部布局，保留索引、父子契约和业务显隐引用。
                     source->setDocumentOnly();
                     delete source->layout(); // Qt只删除布局项；原搜索和报告动作仍由source拥有。
                     source->setMinimumSize(0, 0);

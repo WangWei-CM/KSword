@@ -736,9 +736,10 @@ namespace ks::ui
         const QWidget* owner = window(); // 仅共享详情根实际登记后启用，不推断普通隐藏编辑器用途。
         for (const QWidget* parent = this; parent; parent = parent->parentWidget())
         {
-            if (parent->property("ksword_detail_keep_layout").toBool())
+            if (parent->property("ksword_detail_keep_layout").toBool()
+                || parent->property("ksword_parameter_workspace").toBool())
             {
-                return false; // 专业工作台仍依赖tree()及其原生模型的即时状态。
+                return false; // 专业工作台和未投影参数字段仍依赖原生树的同步首显。
             }
             if (parent == owner)
             {
