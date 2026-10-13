@@ -195,7 +195,7 @@ class SDKTests(unittest.IsolatedAsyncioTestCase):
         async with stdio_client(parameters) as (reader, writer):
             async with ClientSession(reader, writer) as session:
                 initialized = await session.initialize()
-                self.assertEqual(initialized.serverInfo.name, "KSword GUI")
+                self.assertEqual(initialized.serverInfo.name, "KSword")
                 listed = await session.list_tools()
                 self.assertEqual(len(listed.tools), 11)
                 rejected = await session.call_tool("ksword_action", {"object_id": "x"})

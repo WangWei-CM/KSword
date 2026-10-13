@@ -1,25 +1,58 @@
 ```text
 请在当前 agent 使用的 MCP 服务列表中安装 KSword MCP（https://github.com/KSwordDEV/MCP）。
-1. 询问是否下载 KSword、未运行时自动启动还是返回失败；仅在自动启动时询问管理员权限。管理员启动由我确认 Windows UAC，无需预先提权 agent。
-2. 使用独立 Python 虚拟环境，核验 Python、server.py 和 Ksword5.1.exe 的实际绝对路径。
+1. 询问使用 GUI、CLI 还是两者，以及是否下载 KSword。GUI 模式询问未运行时自动启动还是失败；仅在自动启动时询问管理员权限，由我确认 Windows UAC。
+2. 使用 ksword-mcp 的 pip/npm 包及独立 Python 环境，核验入口和 Ksword5.1.exe / KswordCLI.exe 的实际绝对路径；CLI 不自动启动 GUI 或提权。
 3. 确认实际客户端和原生配置落点；注册前保留可恢复基线，只改 KSword 条目，核验其它配置不变，不猜原值或覆盖并发修改。
 4. 按我的回答配置启动和权限策略，不自行改变选择、不重启已有 KSword。
-5. 分别验证并报告：原生注册、独立 stdio 工具发现、当前 agent 工具加载、hello/pages/snapshot 的 GUI 只读连接。
+5. 分别验证并报告原生注册、独立 stdio 工具发现、当前 agent 工具加载；GUI 使用 hello/pages/snapshot，CLI 使用 status/help 做只读连接验证。
 6. 条件不满足时继续完成独立安装与发现，明确未通过项、具体错误和用户所需操作；基线保留到验收完成。
-7. 验证不执行驱动装卸、结束进程或内存写入，不创建提权代理或代答 UAC。
+7. 验证不执行原始 IOCTL、驱动装卸、结束进程或内存写入，不创建提权代理或代答 UAC。
 完整安装指南：https://raw.githubusercontent.com/KSwordDEV/MCP/main/INSTALL_FOR_AGENTS.md
 ```
 
-# KSword Qt 对象桥 MCP
+# KSword MCP
 
-这个 sidecar 使用 [官方 MCP Python v1 SDK](https://github.com/modelcontextprotocol/python-sdk/tree/v1.26.0)，以 stdio 向 MCP 客户端提供 11 个工具，再通过本机命名管道操作 KSword 的 Qt 控件。GUI 与 sidecar 是独立进程。
+通过 stdio 提供 KSword 的 Qt 对象桥、原生 CLI 和原始驱动 IOCTL 工具。使用 [官方 MCP Python v1 SDK](https://github.com/modelcontextprotocol/python-sdk/tree/v1.26.0)，GUI、CLI 与 sidecar 是独立进程；CLI 模式可以单独运行。
+
+## pip / npm 安装
+
+需要本地 Windows、Python 3.10+ 和兼容的 KSword。包提供 MCP 服务，KSword 主程序、CLI 和驱动从 [官方 Releases](https://github.com/KSwordDEV/KSword/releases) 获取。下载和 GUI 启动策略由用户选择。
+
+pip 使用独立虚拟环境：
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install ksword-mcp
+.\.venv\Scripts\ksword-mcp.exe --ksword-cli-exe "C:/Applications/KSword/Release/KswordCLI.exe"
+```
+
+npm 需要 Node.js 18+ 和已有 Python 3.10+；入口在版本化用户缓存中准备独立 Python 环境，运行同一份 Python 实现。先完成 `--prepare`，再注册到 MCP 客户端，避免初次依赖安装耗尽客户端握手时间：
+
+```powershell
+npx --yes ksword-mcp@0.1.0 --prepare
+npx --yes ksword-mcp@0.1.0 --ksword-cli-exe "C:/Applications/KSword/Release/KswordCLI.exe"
+```
+
+需要指定解释器时设置 `KSWORD_MCP_PYTHON` 为真实完整路径；`KSWORD_MCP_CACHE_DIR` 可指定独立缓存的绝对路径。默认缓存为用户主目录下 `.cache/ksword-mcp/<version>`。安装诊断走 stderr，stdout 保留给 MCP；npm 不改系统 Python 或 MCP 客户端的依赖。
+
+使用这些选项时，在 MCP 服务配置的 `env` 字段显式传入，并让 `--prepare` 使用同样的值；部分客户端不会继承 PowerShell 中的环境变量。
+
+包与源码入口都支持以下参数：
+
+| 模式 | 参数与工具 |
+| --- | --- |
+| CLI | `--ksword-cli-exe C:/.../KswordCLI.exe`，4 个 CLI/IOCTL 工具，GUI 无需运行 |
+| GUI + CLI | `--ksword-exe C:/.../Ksword5.1.exe`，11 个 GUI 工具及4个 CLI/IOCTL 工具；默认寻找同目录 `KswordCLI.exe`，可显式指定 CLI 路径 |
+| 指定 GUI 实例 | `--pid 12345`，11 个 GUI 工具；添加 `--ksword-cli-exe` 可同时启用 CLI |
+
+`--version` 输出包版本；`--help` 查看参数。CLI 每次调用创建一次原生命令进程，继承 MCP 服务的权限，不自动启动 GUI、装载驱动或申请管理员权限。GUI 的 UAC 授权范围保持为对象桥，CLI 的权限条件按原生命令帮助处理。
 
 ## 启动
 
-需要 Windows、Python 3.10 及以上和匹配当前源码构建的 KSword 主程序。先在仓库根目录安装依赖：
+从主仓库源码运行时，在独立环境安装整个包：
 
 ```powershell
-python -m pip install -r tools\ksword_mcp\requirements.txt
+python -m pip install ./tools/ksword_mcp
 ```
 
 可从主程序顶部“设置 → MCP”即时启用或停止对象桥；默认关闭。“随程序启动”点击设置窗口底部“应用”后保存，下次启动生效。“取消”放弃待保存偏好和路径，本次启停是即时操作。也可用 `--mcp` 仅对本次启动启用桥。如果主程序已有运行实例，该参数不会改变旧实例的状态，应直接在旧实例的 MCP 设置页启用，或先正常关闭旧实例再启动：
@@ -38,6 +71,8 @@ python tools\ksword_mcp\server.py --pid 12345
 固定 PID 模式下，GUI 重启后需要更新参数。推荐改用 --ksword-exe 按明确的完整映像路径寻找当前实例；默认不自动启动，用户明确选择 --startup-policy auto 后，首次工具调用才会尝试启动。sidecar 不下载主程序、不安装驱动，也不修改 KSword 设置。
 
 MCP 设置页显示实际监听状态、当前 PID 和命名管道，可填写 Python 命令与 sidecar 脚本路径，并预览/复制下面两种客户端配置。预览使用当前输入，路径在点击“应用”后保存。主程序按标准 Release 位置自动寻找仓库中的 `tools/ksword_mcp/server.py`；安装位置不同或发行目录缺少 sidecar 时可手动选择。复制前会检查命令非空和脚本存在，但不会验证或安装 Python 依赖，也不会修改客户端全局配置。
+
+新版配置预览在 exe 同目录存在 `KswordCLI.exe` 时追加 CLI 路径，两种格式共用同一参数数组。已有客户端条目需重新注册或手动追加 `--ksword-cli-exe` 才会加载这4个新工具；先读取原生 help 核验 CLI 版本。
 
 “设置 → MCP → 操作日志”显示最近1000条服务、连接、请求和操作派发记录，支持共享编辑器的搜索、复制、导出以及即时清空。日志在当前主程序生命周期内保留，重开设置或启停 MCP 不会丢失，退出后不写入磁盘。记录包含时间、客户端 PID、白名单方法、请求 UUID、调用回执和机器错误码；输入值、读取结果、未知方法原文和非 UUID 请求身份不进入日志。成功的操作状态轮询不重复刷屏。`dispatched` 仍只表示控件调用派发，不能作为业务完成依据。
 
@@ -64,7 +99,7 @@ python server.py --ksword-exe "C:/path/to/Release/Ksword5.1.exe" --startup-polic
 
 主程序可从 [官方 Releases](https://github.com/KSwordDEV/KSword/releases) 获取。稳定版可能早于 MCP，应同时检查用户允许使用的 pre-release，选择说明明确兼容的主程序包，避开仅 PDB 的附件。没有兼容构建时仍可完成注册和独立工具发现，明确 GUI 连接待验证；下载成功不等于已经兼容。
 
-独立发布仓库根目录就是这些脚本所在目录；主仓库内仍位于 `tools/ksword_mcp/`。安装到独立目录后，用该目录的 `requirements.txt` 创建虚拟环境，客户端 command 使用虚拟环境 Python 的完整路径，args 使用已安装 `server.py` 的完整路径。
+独立发布仓库根目录就是这些文件所在目录；主仓库内仍位于 `tools/ksword_mcp/`。源码安装使用 `python -m pip install .`；旧 `server.py` 入口继续兼容，依赖旁边的 `ksword_mcp/` 包目录。Release 构建会将两者一起复制到 `Release/tools/ksword_mcp/`。
 
 ## 客户端配置示例
 
@@ -112,6 +147,16 @@ args = ["C:/path/to/MCP/server.py", "--ksword-exe", "C:/path/to/Release/Ksword5.
 | `ksword_read_text(object_id, offset?, length?)` | 按 Qt UTF-16 单位读取有界文本片段 |
 | `ksword_read_custom(object_id, options?)` | 读取主程序预注册的特殊控件只读适配器 |
 | `ksword_operation_status(operation_id)` | 查询控件调用调度状态 |
+| `ksword_cli_status()` | 读取 CLI 的真实路径、文件存在性与超时配置；不执行程序 |
+| `ksword_cli_help(command?)` | 读取原生 help；例如 `["system", "ioctl", "call"]` |
+| `ksword_cli_execute(arguments, confirmed?, json_output?)` | 调用一次 CLI argv，返回真实退出码、stdout/stderr 和可解析的 JSON |
+| `ksword_ioctl(code, input_hex?, output_bytes?, confirmed?)` | 通过 CLI 和现有 ArkDriverClient 向 KSword 控制设备发送一次原始 IOCTL |
+
+CLI 操作先用 `ksword_cli_status` 检查配置，再用 `ksword_cli_help` 查阅原生命令。任意 CLI 命令和原始 IOCTL 都要求 `confirmed=true`；原生命令需要的 `--confirm` 仍由调用方按帮助提供。`ksword_cli_execute` 默认加 `--json`，旧文本命令可设置 `json_output=false`。进程退出码和业务 JSON 原样返回，不把 CLI 的非零退出码当作成功。
+
+`ksword_ioctl` 的 `code` 是 uint32，`input_hex` 是原始字节，输入/输出各上限1 MiB，输出容量默认4096字节。输入通过本次独占临时文件传给 CLI，结束后清理；只输出 `bytesReturned` 范围内的十六进制数据。编码和缓冲区 ABI 须来自配套 `shared/driver/`，需要原生指针或额外内存管理的协议使用相应原生 CLI 命令。Win32 传输成功不代替响应中的业务状态；不会自动加载驱动、提权或重发。
+
+`--cli-timeout` 默认为30秒，最大120秒；stdout/stderr 各限8 MiB。超时仅结束本次创建的 CLI 子进程，操作结果可能未知，应读取状态后再决定下一步。
 
 先调用 `ksword_pages`、`ksword_open_page` 和 `ksword_snapshot` 获取当前对象 ID，之后读取或操作对应控件。对象 ID 是本次进程中的不透明身份，控件销毁后失效；再次创建的控件应重新取 snapshot。树模型用 `parent_rows` 指定父节点路径，选行时同时传入最近一次 `read_table` 返回的 revision。
 
@@ -142,12 +187,17 @@ args = ["C:/path/to/MCP/server.py", "--ksword-exe", "C:/path/to/Release/Ksword5.
 
 ## 验证
 
-从仓库根目录运行：
+从独立仓库根目录运行；主仓库先进入 `tools/ksword_mcp`：
 
 ```powershell
-python -m unittest discover -s tools\ksword_mcp -p test_sidecar.py -v
+python -m unittest discover -s . -p "test_*.py" -v
+npm test
 ```
 
 回归验证帧预算、严格 JSON、ID 配对、无动作重试、参数与确认边界；Windows 回归创建测试进程自己的临时命名管道，检查分片读写、三个阶段的有限超时、服务端身份校验和取消后的句柄回收。官方 `ClientSession` 还会启动真实 sidecar 子进程，验证 stdio 握手、`list_tools` 和 `isError` 回传。
 
 这组测试不会启动产品 GUI 或加载驱动。真实 Qt 对象桥夹具的跨进程测试由仓库独立测试入口负责；产品主程序、驱动和全部业务页面的验收需要分别进行。
+
+## 包发布
+
+独立仓库使用 `.github/workflows/release.yml` 从 `v<version>` 标签构建并通过 GitHub OIDC 发布 npm/PyPI；版本须同时匹配 `package.json`、`pyproject.toml` 和 `ksword_mcp/__init__.py`。配置字段和操作见 [PUBLISHING.md](PUBLISHING.md)。许可证保持 [KSword Community Source License 1.6](LICENSE)。

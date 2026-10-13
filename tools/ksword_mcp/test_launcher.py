@@ -41,7 +41,7 @@ class FakeRuntime:
 class StartupTests(unittest.TestCase):
     """目标选择、显式策略和无业务重试边界，不接触 GUI 或系统配置。"""
     def setUp(self):
-        self.path = Path("C:/KSword/Release/Ksword5.1.exe")
+        self.path = Path("KSword/Release/Ksword5.1.exe").absolute()
 
     def options(self, policy="fail", elevated=False, timeout=30):
         return StartupOptions(self.path, policy, elevated, timeout)
@@ -141,6 +141,7 @@ class StartupTests(unittest.TestCase):
         tools = asyncio.run(server.list_tools())
         self.assertTrue(next(t for t in tools if t.name == "ksword_hello").annotations.readOnlyHint)
 
+    @unittest.skipUnless(os.name == "nt", "Windows launch API regression")
     def test_normal_launch_requires_compatible_client_and_build(self):
         runtime = WindowsRuntime.__new__(WindowsRuntime)
         runtime.kernel = Mock()
@@ -156,6 +157,7 @@ class StartupTests(unittest.TestCase):
                 runtime.launch(self.options("auto"))
             popen.assert_not_called()
 
+    @unittest.skipUnless(os.name == "nt", "Windows launch API regression")
     def test_normal_launch_uses_safe_argv_and_does_not_change_settings(self):
         runtime = WindowsRuntime.__new__(WindowsRuntime)
         runtime.kernel = Mock()
@@ -168,6 +170,7 @@ class StartupTests(unittest.TestCase):
             self.assertEqual(popen.call_args.args[0], [str(self.path), "--mcp", "--mcp-no-auto-elevation"])
             self.assertNotIn("shell", popen.call_args.kwargs)
 
+    @unittest.skipUnless(os.name == "nt", "Windows launch API regression")
     def test_admin_launch_rejects_low_integrity_client(self):
         runtime = WindowsRuntime.__new__(WindowsRuntime)
         runtime.kernel = Mock()
@@ -175,6 +178,7 @@ class StartupTests(unittest.TestCase):
         with self.assertRaisesRegex(BridgeError, "unsupported_client_integrity"):
             runtime.launch(self.options("auto", elevated=True))
 
+    @unittest.skipUnless(os.name == "nt", "Windows launch API regression")
     def test_admin_launch_uses_windows_runas_without_broker(self):
         runtime = WindowsRuntime.__new__(WindowsRuntime)
         runtime.kernel = Mock()
@@ -192,6 +196,7 @@ class StartupTests(unittest.TestCase):
         self.assertEqual(runtime.uac_target, (123, 7))
         runtime.kernel.CloseHandle.assert_called_once_with(77)
 
+    @unittest.skipUnless(os.name == "nt", "Windows launch API regression")
     def test_normal_client_requests_uac_with_its_process_identity(self):
         runtime = WindowsRuntime.__new__(WindowsRuntime)
         runtime.kernel, runtime.shell = Mock(), Mock()
@@ -209,6 +214,7 @@ class StartupTests(unittest.TestCase):
         self.assertEqual(info.fMask, 0x140)
         self.assertEqual(runtime.uac_target, (123, 7))
 
+    @unittest.skipUnless(os.name == "nt", "Windows launch API regression")
     def test_uac_cancellation_is_specific_and_does_not_retry(self):
         runtime = WindowsRuntime.__new__(WindowsRuntime)
         runtime.kernel, runtime.shell = Mock(), Mock()
@@ -220,6 +226,7 @@ class StartupTests(unittest.TestCase):
         runtime.shell.ShellExecuteExW.assert_called_once()
         runtime.kernel.GetProcessId.assert_not_called()
 
+    @unittest.skipUnless(os.name == "nt", "Windows launch API regression")
     def test_old_build_is_rejected_before_uac_from_normal_client(self):
         runtime = WindowsRuntime.__new__(WindowsRuntime)
         runtime.kernel, runtime.shell = Mock(), Mock()
@@ -231,6 +238,7 @@ class StartupTests(unittest.TestCase):
                 runtime.launch(self.options("auto", elevated=True))
         runtime.shell.ShellExecuteExW.assert_not_called()
 
+    @unittest.skipUnless(os.name == "nt", "Windows launch API regression")
     def test_uac_peer_requires_exact_pid_creation_user_and_session(self):
         runtime = WindowsRuntime.__new__(WindowsRuntime)
         runtime.kernel, runtime.advapi = Mock(), Mock()

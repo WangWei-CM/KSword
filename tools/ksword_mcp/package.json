@@ -1,0 +1,13 @@
+{
+  "name": "ksword-mcp",
+  "version": "0.1.0",
+  "description": "KSword MCP server for GUI, native CLI and raw driver IOCTL access",
+  "license": "SEE LICENSE IN LICENSE",
+  "repository": {"type": "git", "url": "https://github.com/KSwordDEV/MCP.git"},
+  "homepage": "https://github.com/KSwordDEV/MCP",
+  "bugs": "https://github.com/KSwordDEV/MCP/issues",
+  "bin": {"ksword-mcp": "bin/ksword-mcp.cjs"},
+  "engines": {"node": ">=18"},
+  "files": ["bin", "ksword_mcp", "pyproject.toml", "README.md", "LICENSE", "INSTALL_FOR_AGENTS.md", "PUBLISHING.md", "agent_install_prompt.txt"],
+  "scripts": {"test": "node --test tests/node-launcher.test.cjs"}
+}

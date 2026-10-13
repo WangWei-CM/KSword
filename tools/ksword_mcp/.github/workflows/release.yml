@@ -1,0 +1,108 @@
+name: Publish npm and PyPI
+
+on:
+  workflow_dispatch:
+    inputs:
+      registry:
+        description: 'Registry to publish (none builds reviewable packages only)'
+        type: choice
+        options: [none, all, npm, pypi]
+        default: none
+
+permissions:
+  contents: read
+
+concurrency:
+  group: packages-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  tests:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, ubuntu-latest]
+        python: ['3.10', '3.13']
+    env:
+      PUBLISH_REGISTRY: ${{ inputs.registry }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - run: python scripts/check_version.py
+      - run: python -m pip install .
+      - run: python -m unittest discover -s . -p "test_*.py" -v
+      - run: npm test
+      - run: python scripts/verify_stdio.py --command python
+
+  build:
+    needs: tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.13'
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - run: python -m pip install build twine
+      - run: python -m build --outdir dist/python
+      - run: python -m twine check dist/python/*
+      - run: mkdir -p dist/npm && npm pack --pack-destination dist/npm
+      - run: python scripts/verify_packages.py
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: ksword-mcp-release
+          path: dist/**
+          if-no-files-found: error
+
+  publish-pypi:
+    if: inputs.registry == 'all' || inputs.registry == 'pypi'
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/ksword-mcp/
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
+        with:
+          name: ksword-mcp-release
+          path: dist
+      - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
+        with:
+          packages-dir: dist/python/
+
+  publish-npm:
+    if: inputs.registry == 'all' || inputs.registry == 'npm'
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: npm
+      url: https://www.npmjs.com/package/ksword-mcp
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24'
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
+        with:
+          name: ksword-mcp-release
+          path: dist
+      - run: npm --version
+      - run: npm publish dist/npm/*.tgz --access public --provenance

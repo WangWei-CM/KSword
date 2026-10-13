@@ -12,3 +12,7 @@
 - sidecar 保留固定 PID 调试模式，并支持 `--ksword-exe` 完整路径模式，默认 `--startup-policy fail`；显式 auto 才在工具调用时启动。普通自动启动使用 `--mcp-no-auto-elevation`；管理员自动启动使用 Windows runas，用户确认 UAC，不要求先提权 agent。普通客户端只信任 ShellExecuteEx 返回的 GUI PID + 创建时间，GUI 只信任 `--mcp-uac-client` 指定的同用户/会话活进程。取消返回 uac_cancelled，旧 GUI/授权随 sidecar 退出失效均明确失败；不重启已有实例、不创建提权代理、不重试业务请求。
 - 完整安装指南要求识别实际客户端/内置 CLI/配置作用域，核实重定向后的 Python/脚本/主程序真实路径；注册前保留配置原始基线到验收结束，原生命令对非目标条目的规范化不能当作保持不变，也不能覆盖并发修改。分别报告原生注册、独立 stdio 发现、当前 agent 工具加载、GUI hello/pages/snapshot 连接；临时 SDK 不提前取得实际会话的 UAC 授权。
 - 复选框此前仅公开press/toggle，set_field不接受QAbstractButton布尔字段，会返回unsupported_control。通用桥现在为可勾选按钮公开field_type=boolean、value与set_field；布尔设值同值不点击，变值走原生click并回读，保留clicked/toggled、单选互斥和业务拒绝。字符串/数字与布尔submit被拒绝。真实GUI回归入口tools/ksword_mcp/verify_live_checkbox.py要求显式安全对象，并恢复原勾选状态；此能力不等同于模型单元格勾选。
+- `tools/ksword_mcp/ksword_mcp/` 是 pip/npm 共用实现，根部四个 Python 模块只保留兼容入口。`--ksword-cli-exe` 提供4个 CLI/IOCTL 工具，可独立于 GUI 运行；GUI 程序路径模式默认寻找同目录 CLI，PID 模式需明确追加 CLI 路径。发现和 status 不启动程序；原生 help 只读，任意 CLI 命令及原始 IOCTL 要求明确确认。
+- `KswordCLI system ioctl call` 只通过既有 ArkDriverClient 向固定 KSword 控制设备发送一次有界请求，不自动加载驱动、提权或重试。输入/输出各上限1 MiB，只输出实际返回长度；MCP 用独占临时文件传输入并清理，权限沿用 CLI 调用者。传输成功与响应 ABI/业务状态分开判断。
+- 主程序 `CopyMcpSidecar` 构建目标复制根部入口与嵌套包到 `Release/tools/ksword_mcp/`，不能只复制旧 `server.py`。独立发布仓库 `release.yml` 使用 GitHub OIDC，registry 账户端需绑定 KSwordDEV/MCP、release.yml 和 npm/pypi 环境；本地 GitHub 认证不替代 registry 信任配置。
+- 设置页 JSON/TOML 预览共用参数数组；主程序同目录存在 `KswordCLI.exe` 时追加明确 CLI 路径。只生成配置、不执行 CLI 或安装依赖；已有客户端条目不会被自动改写。

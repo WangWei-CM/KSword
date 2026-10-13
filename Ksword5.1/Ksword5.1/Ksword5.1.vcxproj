@@ -1459,6 +1459,21 @@
     <Delete Files="@(KswordArkPdbDeepOffsetLibrary->'$(KswordArkPdbDeepOffsetTargetDir)%(Filename)%(Extension)')" Condition="Exists('$(KswordProfileCompressor)') And '@(KswordArkPdbDeepOffsetLibrary)' != ''" />
     <Warning Condition="!Exists('$(KswordProfileCompressor)')" Text="Profile compressor was not found; PDB deep offset libraries were not compressed: $(KswordProfileCompressor)" />
   </Target>
+  <Target Name="CopyMcpSidecar" AfterTargets="Build">
+    <PropertyGroup>
+      <KswordMcpSourceRoot>$(MSBuildProjectDirectory)\..\..\tools\ksword_mcp\</KswordMcpSourceRoot>
+      <KswordMcpTargetRoot>$(TargetDir)tools\ksword_mcp\</KswordMcpTargetRoot>
+    </PropertyGroup>
+    <ItemGroup>
+      <KswordMcpRootFiles Include="$(KswordMcpSourceRoot)server.py;$(KswordMcpSourceRoot)launcher.py;$(KswordMcpSourceRoot)protocol.py;$(KswordMcpSourceRoot)winpipe.py;$(KswordMcpSourceRoot)requirements.txt;$(KswordMcpSourceRoot)README.md;$(KswordMcpSourceRoot)INSTALL_FOR_AGENTS.md;$(KswordMcpSourceRoot)PUBLISHING.md;$(KswordMcpSourceRoot)agent_install_prompt.txt;$(KswordMcpSourceRoot)pyproject.toml;$(KswordMcpSourceRoot)package.json;$(KswordMcpSourceRoot)LICENSE" />
+      <KswordMcpPackageFiles Include="$(KswordMcpSourceRoot)ksword_mcp\**\*.py" />
+      <KswordMcpNodeFiles Include="$(KswordMcpSourceRoot)bin\*.cjs" />
+    </ItemGroup>
+    <Copy SourceFiles="@(KswordMcpRootFiles)" DestinationFolder="$(KswordMcpTargetRoot)" SkipUnchangedFiles="true" />
+    <Error Condition="'@(KswordMcpPackageFiles)' == ''" Text="KSword MCP Python package is missing." />
+    <Copy SourceFiles="@(KswordMcpPackageFiles)" DestinationFiles="@(KswordMcpPackageFiles->'$(KswordMcpTargetRoot)ksword_mcp\%(RecursiveDir)%(Filename)%(Extension)')" SkipUnchangedFiles="true" />
+    <Copy SourceFiles="@(KswordMcpNodeFiles)" DestinationFolder="$(KswordMcpTargetRoot)bin\" SkipUnchangedFiles="true" />
+  </Target>
   <Target Name="CopyTaskmgrHijackScript" AfterTargets="Build">
     <PropertyGroup>
       <TaskmgrHijackScriptSource>$(MSBuildProjectDirectory)\..\..\TaskmgrHijack.ps1</TaskmgrHijackScriptSource>

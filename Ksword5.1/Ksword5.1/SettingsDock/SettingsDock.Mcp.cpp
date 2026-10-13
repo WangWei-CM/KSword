@@ -394,8 +394,16 @@ void SettingsDock::refreshMcpClientConfiguration()
     const QString path = m_mcpSidecarPathEdit->text().trimmed(); // 用户明确输入的脚本位置。
     const QString script = path.isEmpty() ? QString() // 相对路径也按当前位置生成绝对路径。
         : QDir::fromNativeSeparators(QFileInfo(path).absoluteFilePath());
-    const QJsonArray args{script, QStringLiteral("--pid"),
+    QJsonArray args{script, QStringLiteral("--pid"),
         QString::number(QCoreApplication::applicationPid())}; // 本次 GUI 的真实进程身份。
+    // 发行目录提供原生 CLI 时，JSON/TOML 的同一参数文档同时启用 CLI/IOCTL 工具。
+    const QFileInfo cli(QDir(QCoreApplication::applicationDirPath())
+        .filePath(QStringLiteral("KswordCLI.exe")));
+    if (cli.isFile())
+    {
+        args.append(QStringLiteral("--ksword-cli-exe"));
+        args.append(QDir::fromNativeSeparators(cli.absoluteFilePath()));
+    }
     QString configuration; // 预览、复制与编辑器导出的同一规范正文。
     if (m_mcpConfigFormatCombo->currentIndex() == 0)
     {

@@ -1,0 +1,7 @@
+include LICENSE README.md INSTALL_FOR_AGENTS.md PUBLISHING.md agent_install_prompt.txt
+include package.json requirements.txt server.py launcher.py protocol.py winpipe.py
+include test_cli.py test_launcher.py test_sidecar.py
+recursive-include bin *.cjs
+recursive-include tests *.cjs
+recursive-include scripts *.py
+global-exclude __pycache__ *.py[cod]
