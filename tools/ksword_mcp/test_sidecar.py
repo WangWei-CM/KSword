@@ -395,6 +395,8 @@ class NativePipeTests(unittest.TestCase):
             self.assertTrue(api.GetProcessHandleCount(api.GetCurrentProcess(), ctypes.byref(count)))
             return count.value
 
+        # 基线也先回收前一项测试的不可达对象，避免只在结束时收集导致句柄数下降。
+        gc.collect()
         before = handle_count()
         worker, stop, errors = self.start_fixture("read_timeout")
         with self.assertRaisesRegex(BridgeError, "pipe_timeout"):
