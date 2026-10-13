@@ -106,7 +106,7 @@ args = ["C:/path/to/MCP/server.py", "--ksword-exe", "C:/path/to/Release/Ksword5.
 | `ksword_open_page(page_id)` | 通过原有导航打开页面并初始化内容 |
 | `ksword_snapshot(page_id?, root_id?, max_nodes?, depth?)` | 获取有界 Qt 控件树、支持动作与可用状态 |
 | `ksword_action(object_id, action?, confirmed?)` | `press`、`toggle` 或 `show_menu` |
-| `ksword_set_field(object_id, value, submit?, confirmed?)` | 模拟支持控件的用户编辑；可请求原有提交动作 |
+| `ksword_set_field(object_id, value, submit?, confirmed?)` | 模拟支持控件的用户编辑；复选框/单选及可勾选按钮使用布尔值指定状态 |
 | `ksword_read_table(object_id, row_start?, row_count?, column_start?, column_count?, parent_rows?)` | 获取模型切片、表头与 revision |
 | `ksword_select_row(object_id, row, revision, parent_rows?, confirmed?)` | 仅在模型 revision 相符时选中对应行 |
 | `ksword_read_text(object_id, offset?, length?)` | 按 Qt UTF-16 单位读取有界文本片段 |
@@ -118,6 +118,10 @@ args = ["C:/path/to/MCP/server.py", "--ksword-exe", "C:/path/to/Release/Ksword5.
 `action`、`set_field` 和 `select_row` 必须显式传 `confirmed=true`，否则返回 MCP 工具错误。参数先按工具 JSON schema 校验，字符串 `"true"` 或 `"{}"` 不会被转换成布尔确认或对象选项；未知顶层参数会被拒绝。原有业务确认弹窗仍然保留，需按 GUI 正常流程处理。这个确认参数表示调用方已授权当前控件动作，不会绕过 KSword 的业务校验。
 
 回执 `status=accepted` 以及 operation 状态 `queued`、`dispatching`、`dispatched`、`failed` 只描述控件调用。`dispatched` 表示完成了控件方法调用，后台任务可能仍在执行，也可能正在等待业务弹窗。应另行读取对应表格、文本或页面状态判断业务结果。
+
+普通复选框使用 `ksword_set_field(object_id, value=true, confirmed=true)` 勾选，`value=false` 取消；重复设置相同值不会反向切换。snapshot 对可勾选按钮提供 `field_type="boolean"`、`checked`、`value` 与 `set_field` 能力。`ksword_action(..., action="toggle")` 则是反转当前状态；不应把“指定勾选”与“反转”混用。
+
+布尔字段只接受 JSON 的 true/false，不接受字符串 `"true"` 或数字1，且不支持 `submit=true`。修改使用控件原生 click，保留 clicked/toggled、单选互斥和业务校验；业务拒绝指定状态时回执为 `value_rejected`。表格模型单元格的勾选不等同于独立 QCheckBox，不能把表格 object_id 当作普通布尔字段使用。
 
 特殊控件通过主程序预注册的只读适配器扩展。`ksword_read_custom` 只接收对象 ID 和 JSON 对象选项，GUI 按对象实际 Qt 类匹配适配器；客户端不能指定类名、调用任意方法或执行反射。新增只读控件支持只需在主程序注册适配器，无需修改中央协议或 sidecar。
 

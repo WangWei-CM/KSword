@@ -390,7 +390,10 @@ QJsonObject McpUiController::describe(QObject* object, const QString& parentId)
         if (button->isCheckable())
         {
             actions.append(QStringLiteral("toggle"));
+            actions.append(QStringLiteral("set_field")); // 明确宣告布尔字段，agent可指定状态而非盲目反转。
+            node.insert(QStringLiteral("field_type"), QStringLiteral("boolean"));
             node.insert(QStringLiteral("checked"), button->isChecked());
+            node.insert(QStringLiteral("value"), button->isChecked()); // 与set_field对应的真实值，旧checked字段保留。
         }
         QMenu* menu = nullptr; // 只登记实际按钮菜单，不能任意授予外部菜单归属。
         if (auto* tool = qobject_cast<QToolButton*>(button))

@@ -1,4 +1,5 @@
 #include "./McpUiController.h"
+#include <QAbstractButton>
 #include <QAbstractItemModel>
 #include <QApplication>
 #include <QComboBox>
@@ -105,15 +106,18 @@ QJsonObject McpUiController::setField(const QJsonObject& params)
     const bool numericControl = qobject_cast<QSpinBox*>(target)
         || qobject_cast<QDoubleSpinBox*>(target) || qobject_cast<QTabWidget*>(target)
         || qobject_cast<QTabBar*>(target);
-    if ((stringControl && !value.isString()) || (numericControl && !value.isDouble()))
+    const auto* checkButton = qobject_cast<QAbstractButton*>(target); // 复选框、单选按钮与可勾选按钮共用Qt语义。
+    const bool booleanControl = checkButton && checkButton->isCheckable(); // 不把普通执行按钮当成布尔字段。
+    if ((stringControl && !value.isString()) || (numericControl && !value.isDouble())
+        || (booleanControl && !value.isBool()))
     {
         return fail(QStringLiteral("invalid_value"));
     }
-    if (!stringControl && !numericControl && !qobject_cast<QComboBox*>(target))
+    if (!stringControl && !numericControl && !booleanControl && !qobject_cast<QComboBox*>(target))
     {
         return fail(QStringLiteral("unsupported_control"));
     }
-    if (submit && (qobject_cast<QPlainTextEdit*>(target) || qobject_cast<QTextEdit*>(target)
+    if (submit && (booleanControl || qobject_cast<QPlainTextEdit*>(target) || qobject_cast<QTextEdit*>(target)
         || qobject_cast<QTabWidget*>(target) || qobject_cast<QTabBar*>(target)))
     {
         return fail(QStringLiteral("unsupported_submit"));
@@ -129,6 +133,25 @@ QJsonObject McpUiController::setField(const QJsonObject& params)
         if (!widget || !widget->isEnabled() || !widget->isVisible())
         {
             return QStringLiteral("control_unavailable");
+        }
+        if (auto* button = qobject_cast<QAbstractButton*>(target))
+        {
+            QPointer<QAbstractButton> guarded(button); // clicked/toggled业务槽可关闭控件或整个桥。
+            if (!button->isCheckable())
+            {
+                return QStringLiteral("control_unavailable"); // 排队后能力变化不能变成执行普通按钮。
+            }
+            const bool desired = value.toBool(); // 已在入队前要求真实JSON布尔，不能把字符串或数字当成勾选。
+            if (button->isChecked() == desired)
+            {
+                return {}; // 指定状态具有幂等性；重复设置不得点击并反转原值。
+            }
+            button->click(); // 原生用户动作保留clicked/toggled、单选互斥和业务校验，不直接setChecked。
+            if (!guarded || !continuing())
+            {
+                return {}; // 业务主动关窗仍是已派发，不能读取已销毁对象。
+            }
+            return button->isChecked() == desired ? QString{} : QStringLiteral("value_rejected");
         }
         if (auto* line = qobject_cast<QLineEdit*>(target))
         {

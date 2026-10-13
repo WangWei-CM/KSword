@@ -138,6 +138,17 @@ class ProtocolTests(unittest.TestCase):
 class SDKTests(unittest.IsolatedAsyncioTestCase):
     """用真实 FastMCP 工具执行和官方 ClientSession 验证 stdio 服务。"""
 
+    async def test_checkbox_values_preserve_json_type(self) -> None:
+        """布尔勾选值完整转发，字符串true不能被SDK变成布尔并绕过GUI字段类型校验。"""
+        transport = RecordingTransport(status="accepted")
+        server = create_server(BridgeClient(1, transport))
+        for value in (True, False, "true", "false"):
+            with self.subTest(value=value):
+                await server.call_tool("ksword_set_field", {"object_id": "check", "value": value, "confirmed": True})
+                actual = transport.calls[-1]["params"]["value"]
+                self.assertEqual(actual, value)
+                self.assertIs(type(actual), type(value))
+
     async def test_tools_and_confirmation(self) -> None:
         """检查十一个 schema、默认拒绝动作和严格 bool，成功动作保留参数。"""
         transport = RecordingTransport(status="accepted")

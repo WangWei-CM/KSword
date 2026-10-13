@@ -149,7 +149,7 @@ def create_server(client: BridgeClient | ManagedBridgeClient) -> FastMCP:
         submit: StrictBool = False,
         confirmed: StrictBool = False,
     ) -> dict[str, Any]:
-        """Set a supported Qt field through its user-edit semantics; submit requests its normal commit action."""
+        """Set a supported Qt field through its user-edit semantics. Use true/false for checkboxes, radio buttons and checkable buttons; repeated setting preserves the chosen state. submit requests a text/numeric commit and is unsupported for boolean fields."""
         require_confirmation(confirmed)
         bounded_id(object_id, "object_id")
         bounded_value(value)
