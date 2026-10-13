@@ -236,9 +236,11 @@ jobs:
           import subprocess
           import sys
 
+          # NUL 分隔保留中文及换行文件名，避免把 Git 的引号/转义当作实际路径。
           paths = subprocess.check_output(
-              ["git", "ls-files", "--", "*.json"], text=True
-          ).splitlines()
+              ["git", "ls-files", "-z", "--", "*.json"]
+          ).split(b"\0")
+          paths = [path for path in paths if path]
           for raw_path in paths:
               with open(raw_path, encoding="utf-8-sig") as source:
                   json.load(source)

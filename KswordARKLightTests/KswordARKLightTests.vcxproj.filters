@@ -1239,9 +1239,21 @@
     <ClCompile Include="..\shared\usermode\backend\startup\StartupEnumerator.cpp">
       <Filter>Shared R3 Backend</Filter>
     </ClCompile>
+    <ClCompile Include="..\shared\usermode\backend\startup\StartupHidden.cpp">
+      <Filter>Shared R3 Backend</Filter>
+    </ClCompile>
+    <ClCompile Include="..\shared\usermode\backend\startup\StartupText.cpp">
+      <Filter>Shared R3 Backend</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\shared\usermode\backend\startup\StartupEnumerator.h">
+      <Filter>Shared R3 Backend</Filter>
+    </ClInclude>
+    <ClInclude Include="..\shared\usermode\backend\startup\StartupInternal.h">
+      <Filter>Shared R3 Backend</Filter>
+    </ClInclude>
+    <ClInclude Include="..\shared\usermode\backend\startup\StartupText.h">
       <Filter>Shared R3 Backend</Filter>
     </ClInclude>
   </ItemGroup>
