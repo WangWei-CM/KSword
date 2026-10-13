@@ -1,0 +1,233 @@
+{
+  "research_date": "2026-10-12",
+  "method": "Local read-only IDA 9.1 analysis; important control flow checked against assembly. No system configuration mutation or driver execution.",
+  "runtime": {
+    "os_build": "26300.9022",
+    "edition": "ProfessionalWorkstation",
+    "display_version": "26H2",
+    "ci_options_hex": "0xF701",
+    "ci_options_query_class": 103,
+    "ci_options_ntstatus": 0,
+    "secure_boot_query_class": 145,
+    "secure_boot_ntstatus": 0,
+    "secure_boot_enabled": true,
+    "secure_boot_capable": true,
+    "licensed_registry": 1,
+    "product_license_query": {
+      "api": "ntdll!NtQueryLicenseValue",
+      "name": "CodeIntegrity-AllowConfigurablePolicy-CustomKernelSigners",
+      "ntstatus": "0x00000000",
+      "type": 4,
+      "required_length": 4,
+      "value": 1
+    },
+    "cks_locked_enabled_registry": 0,
+    "ssde_service_query": {
+      "command": "sc.exe query ssde",
+      "exit_code": 1060,
+      "meaning": "No service with the exact name ssde is installed; other service names were not enumerated."
+    },
+    "citool_query_result": "0x80070005",
+    "cks_effective_telemetry": "not captured"
+  },
+  "binaries": [
+    {
+      "name": "ci.dll",
+      "file_version": "10.0.26100.8941",
+      "sha256": "B8CC50FBD7C5E916FCCBB87F577485AB461FA8FFA8870E7599405E50C125659D",
+      "rsds": {
+        "pdb": "ci.pdb",
+        "guid": "81938abc-afd1-575f-511f-ffaf1515f2a4",
+        "age": 1
+      }
+    },
+    {
+      "name": "winload.efi",
+      "file_version": "10.0.26100.9022",
+      "sha256": "AD269F5CDD571EBFDD507F8041189D6C52B9A3262663994490F3A4FC37129980",
+      "rsds": {
+        "pdb": "winload_prod.pdb",
+        "guid": "b1c103b5-afe1-1c92-3b37-b4cbed88d500",
+        "age": 2
+      }
+    },
+    {
+      "name": "skci.dll",
+      "file_version": "10.0.26100.9022",
+      "sha256": "EB70EA62FAD55D3148ECAFD10BA2DC8A3A01A02941200315C8E28ED6EAEECD06",
+      "rsds": {
+        "pdb": "skci.pdb",
+        "guid": "edd07cb8-5b33-6221-ea9e-190813f3df69",
+        "age": 1
+      }
+    },
+    {
+      "name": "vbssysprep.dll",
+      "file_version": "10.0.26100.9022",
+      "sha256": "3754131676D55FECDC02ED5DB241B3BAA36B3B853684A9729C71003181ECA3CF",
+      "rsds": {
+        "pdb": "VbsSysprep.pdb",
+        "guid": "afe0aef4-b891-4629-6762-4c090e72fc34",
+        "age": 1
+      }
+    }
+  ],
+  "image_base": "0x180000000",
+  "local_observations": [
+    {
+      "binary": "ci.dll",
+      "symbol": "CipUpdateCustomKernelSignerEnabledState",
+      "rva": "0x18CB4",
+      "observation": "Existing protected enrollment DWORD takes precedence over caller initialization candidate. Distinct first-initialization handling exists."
+    },
+    {
+      "binary": "ci.dll",
+      "symbol": "CipCheckLicensing",
+      "rva": "0x55830",
+      "observation": "Only direct code caller found for the enrollment reader/initializer; consumes boot-context candidate. Product license query is separate."
+    },
+    {
+      "binary": "ci.dll",
+      "symbol": "CiInitializePolicy",
+      "rva": "0x54EE0",
+      "observation": "Calls licensing/enrollment initialization before initializing policy from loader data."
+    },
+    {
+      "binary": "ci.dll",
+      "symbol": "SIPolicyAreCustomKernelSignersAllowed",
+      "rva": "0x75B94",
+      "observation": "Enrollment gate checked before base-policy and signature conditions."
+    },
+    {
+      "binary": "ci.dll",
+      "symbol": "SIPolicyCheckCustomKernelSignersAllowed",
+      "rva": "0x75C18",
+      "observation": "Enrollment and Secure Boot mode gates remain independent of policy signature properties."
+    },
+    {
+      "binary": "ci.dll",
+      "symbol": "CipUpdateCiSettingsFromPolicies",
+      "rva": "0x6AE24",
+      "observation": "CKS reevaluation requires the existing boot-established CKS developer-mode bit. No call to enrollment initializer in observed refresh chain."
+    },
+    {
+      "binary": "winload.efi",
+      "symbol": "OslInitializeCodeIntegrity",
+      "rva": "0x176E0",
+      "observation": "Reads protected enrollment before policy evaluation. Existing disabled enrollment does not opt into CKS. Assembly checked."
+    },
+    {
+      "binary": "winload.efi",
+      "symbol": "OslBuildCodeIntegrityLoaderBlock",
+      "rva": "0x1980C",
+      "observation": "Serializes policy allowance into CI loader state; system-upgrade indicator is independent, with no observed override of existing disabled enrollment."
+    },
+    {
+      "binary": "winload.efi",
+      "symbol": "SIPolicyAreCustomKernelSignersAllowed",
+      "rva": "0x2430D0",
+      "observation": "Loader requires enrollment gate, Secure Boot mode, base policy and verified signature properties."
+    },
+    {
+      "binary": "winload.efi",
+      "symbol": "SIPolicyVerifyPolicyIsPlatformKeySigned",
+      "rva": "0x1A1504",
+      "observation": "Uses firmware PK and actual UEFI signed-policy verifier. Assembly returns verifier status; pseudocode alone was misleading."
+    },
+    {
+      "binary": "winload.efi",
+      "symbol": "SIPolicyVerifyPolicyIsKekSigned",
+      "rva": "0x1A1624",
+      "observation": "Uses firmware KEK and UEFI signed-policy verifier. Assembly checked: call at RVA 0x1A16C8; preserves result at 0x1A16CD and returns it at 0x1A1703. Pseudocode was misleading."
+    },
+    {
+      "binary": "skci.dll",
+      "symbol": "SkciInitialize",
+      "rva": "0xDD40",
+      "observation": "Initializes the isolated CKS enrollment gate from boot-context licensing and CKS bits. Important assembly branch checked."
+    },
+    {
+      "binary": "skci.dll",
+      "symbol": "SIPolicyAreCustomKernelSignersAllowed",
+      "rva": "0x1E798",
+      "observation": "Checks isolated enrollment gate before base policy and verified signature properties. Only observed direct code references to gate byte were initialization write and this read."
+    },
+    {
+      "binary": "skci.dll",
+      "symbol": "SkciSetCodeIntegrityPolicy",
+      "rva": "0x459E0",
+      "observation": "Policy-update branch delegates to CipRefreshPolicies; no first-enrollment operation in the checked entry."
+    },
+    {
+      "binary": "skci.dll",
+      "symbol": "CipUpdateCiSettingsFromPolicies",
+      "rva": "0x43958",
+      "observation": "Isolated runtime policy refresh also requires the existing boot-established CKS developer-mode bit."
+    },
+    {
+      "binary": "vbssysprep.dll",
+      "symbol": "SysprepGeneralizeEntry",
+      "rva": "0x13D60",
+      "observation": "Observed HVCI/CET configuration generalization, not a dedicated CKS enrollment interface."
+    },
+    {
+      "binary": "vbssysprep.dll",
+      "symbol": "SysprepSpecializeOnlineEntry",
+      "rva": "0x14D40",
+      "observation": "Observed VBS/HVCI specialization entry; does not prove absence of CKS logic in all Setup components."
+    },
+    {
+      "binary": "vbssysprep.dll",
+      "symbol": "SysprepSpecializeOfflineEntry",
+      "rva": "0x14910",
+      "observation": "Observed VBS/HVCI specialization entry; not called during this research."
+    }
+  ],
+  "installation_manifest_evidence": {
+    "scope": "10 name-matched CodeIntegrity manifests in WinSxS/Manifests; 258 .man/.xml/.manifest files in System32/migwiz/dlmanifests and replacementmanifests; no Panther/Rollback log reads.",
+    "decoder": {
+      "format": "DCM/PA30",
+      "api": "ApplyDeltaB",
+      "wcp_file_version": "10.0.26100.9022",
+      "wcp_sha256": "52D37926D1C47EA14ABD3C2F47ECCBB5634B821D1F4AC580BD70B39620C2107B",
+      "resource": "type=614; name=1; language=1033",
+      "dictionary_bytes": 9066,
+      "dictionary_sha256": "0AD8F100F1C56F4A1AAD990DEFADE9191F7D5BE929B930A04160EBBF99CD6B46",
+      "result": "All 10 manifests decoded and XML parsed in memory; wcp.dll code was not loaded."
+    },
+    "codeintegrity_9022": {
+      "source_basename": "amd64_microsoft-windows-codeintegrity_31bf3856ad364e35_10.0.26100.9022_none_3c66f262b4a4814d.manifest",
+      "compressed_sha256": "A6F1414091C7ADD596B44B35A37D29F2F8B6AF7056F86C28097102992A858A29",
+      "decoded_bytes": 31157,
+      "decoded_lines": 285,
+      "decoded_sha256": "F428789AF32ACA23CCFE6C86B87128A702F4A41B0670E8E637033D70123178A3",
+      "registry_protected_definition_lines": [47, 48, 49, 50],
+      "registry_include_lines": [260, 261, 262, 263],
+      "registry_includes": ["CI[IntegrityLevelPolicy]", "CI[UMCIAuditMode]", "CI\\Config\\*[*]", "CI\\Policy\\*[*]"],
+      "registry_exclude_line": 272,
+      "registry_exclude": "CI\\Policy[ManufacturingMode]",
+      "observation": "CI\\Protected appears in ordinary registry defaults, but not in this component's migration include/exclude. No explicit CustomKernelSignerLockedEnabled entry. This does not determine Setup core's whole-hive migration behavior."
+    },
+    "codeintegrity_1746": {
+      "source_basename": "amd64_microsoft-windows-codeintegrity_31bf3856ad364e35_10.0.26100.1746_none_3c1cd932b4dbf4de.manifest",
+      "compressed_sha256": "2EEDC8D8BD5035068AFAB2E8D55AA3118E89F27FE499520188AAA1E244F8084E",
+      "decoded_sha256": "F31878F34438E7E2AC7D40264D6833A6411938DADD4035DFF10C480DC1E9D67E",
+      "observation": "Same migration include/exclude patterns as the checked 9022 component manifest."
+    },
+    "tcblaunch_replacement": {
+      "source_basename": "Tcblaunch-Replacement.man",
+      "sha256": "04BC52444EC80519372D3BB29FAFF81CF8F5A5603D0F2DA23C61F188FFB88345",
+      "line": 37,
+      "observation": "HVCI EnabledBootId in exclude block; unrelated to dedicated CKS enrollment."
+    }
+  },
+  "limitations": [
+    "RVA observations apply only to the recorded binary hashes.",
+    "RSDS identities were extracted from the PE debug directory; separate PDB blob hashes were not audited.",
+    "No firmware key ownership or private key availability verified.",
+    "No runtime policy enumeration, actual CKS telemetry or driver load acceptance obtained.",
+    "No exhaustive analysis of all Setup/recovery components, Secure Kernel host or complete driver validation chain.",
+    "No registry, UEFI, BCD, licensing, policy or kernel-memory modifications performed."
+  ],
+  "raw_analysis_artifacts": "output/cks-local-*.json and output/cks-loader-*.json; binary copies/databases remain local untracked research artifacts"
+}
