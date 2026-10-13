@@ -1,9 +1,15 @@
 #pragma once
-#include "../../../shared/usermode/backend/startup/StartupActions.h"
+#include "StartupModel.h"
+#include <cstdint>
 namespace Ksword::Features::Startup {
-using ks::r3::startup::StartupActionResult;
-using ks::r3::startup::EnableStartupEntry;
-using ks::r3::startup::DisableStartupEntry;
-using ks::r3::startup::DeleteStartupEntry;
-using ks::r3::startup::OpenStartupEntryLocation;
+struct StartupActionResult {
+    bool success = false;
+    std::wstring message;
+    std::uint32_t errorCode = 0;
+    bool unsupported = false;
+};
+StartupActionResult EnableStartupEntry(const StartupEntry& entry);
+StartupActionResult DisableStartupEntry(const StartupEntry& entry);
+StartupActionResult DeleteStartupEntry(const StartupEntry& entry);
+StartupActionResult OpenStartupEntryLocation(const StartupEntry& entry);
 }

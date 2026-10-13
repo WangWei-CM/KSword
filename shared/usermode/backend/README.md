@@ -1,6 +1,6 @@
 # Light/CLI R3 backend
 
-Shared Windows C++20 implementation under `ks::r3`; no Qt or Light headers. Light keeps UI, confirmations, async scheduling and R0 adapters. Existing Qt-free `ksword` implementations remain unchanged.
+Shared Windows C++20 implementation under `ks::r3`; no Qt, Light, CLI or main-program headers. Light keeps UI, confirmations, async scheduling and R0 adapters. The startup backend is an independent semantic port of the main program's `ks::startup` implementation; the main program sources remain unchanged in this migration.
 
 The 66 feature commits and their build/regression results are recorded in [MIGRATION.jsonl](MIGRATION.jsonl). Raw logs are retained locally in `.codex-build-logs/r3-migration/`. Each feature was linked and tested before its commit.
 

@@ -372,17 +372,17 @@ switch ($Feature) {
     }
     'startup-enum' {
         $help=Invoke-Cli @('help','startup','enum')
-        Assert ($help.Contains('registry-only-service') -and $help.Contains('unknown')) 'Startup help and evidence limits'
+        Assert ($help.Contains('image-hijack') -and $help.Contains('hidden') -and $help.Contains('unknown')) 'Startup help and evidence limits'
         Assert ((Invoke-Cli @('startup','enum','--help')) -eq $help) 'Startup inline help'
         foreach ($bad in @(
-            @('startup','enum','--kind','bad','--json'),
+            @('startup','enum','--category','bad','--json'),
             @('startup','enum','--scope','bad','--json'),
             @('startup','enum','--backend','r0','--json'),
             @('startup','enum','--unknown','1','--json')
         )) { Assert (((Invoke-Cli $bad 1) | ConvertFrom-Json).status -eq 'failed') 'Startup invalid arguments' }
         $snapshot=(Invoke-Cli @('startup','enum','--limit','10000','--json') @(0,6)) | ConvertFrom-Json
         Assert ($snapshot.data.userSid -eq [Security.Principal.WindowsIdentity]::GetCurrent().User.Value) 'Startup identity context'
-        Assert (@($snapshot.data.entries | Where-Object {$_.kind -in @('driver','registry-only-service') -and !$_.readOnly}).Count -eq 0) 'Read-only service observations'
+        Assert (@($snapshot.data.entries | Where-Object {$_.category -eq 'hidden' -and !$_.readOnly}).Count -eq 0) 'Hidden observations stay read-only'
         Assert (@($snapshot.data.entries | Where-Object {$_.kind -eq 'task' -and $_.state -ne 'unknown'}).Count -eq 0) 'Task file facade cannot claim enabled state'
         $service=@($snapshot.data.entries | Where-Object serviceName -eq 'EventLog')
         $oracle=Get-CimInstance Win32_Service -Filter "Name='EventLog'"
