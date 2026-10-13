@@ -50,6 +50,7 @@ class WindowsRuntime:
         self.kernel = ctypes.WinDLL("kernel32", use_last_error=True)
         self.advapi = ctypes.WinDLL("advapi32", use_last_error=True)
         self.shell = ctypes.WinDLL("shell32", use_last_error=True)
+        self.uac_target: tuple[int, int] | None = None  # 仅本进程经 UAC 启动的 GUI 身份，不信任其它高权限实例。
         bindings = {
             "CreateToolhelp32Snapshot": ([wintypes.DWORD, wintypes.DWORD], wintypes.HANDLE),
             "Process32FirstW": ([wintypes.HANDLE, ctypes.POINTER(ProcessEntry)], wintypes.BOOL),
@@ -57,6 +58,10 @@ class WindowsRuntime:
             "OpenProcess": ([wintypes.DWORD, wintypes.BOOL, wintypes.DWORD], wintypes.HANDLE),
             "CloseHandle": ([wintypes.HANDLE], wintypes.BOOL),
             "GetCurrentProcess": ([], wintypes.HANDLE),
+            "GetProcessId": ([wintypes.HANDLE], wintypes.DWORD),
+            "GetProcessTimes": ([wintypes.HANDLE, ctypes.POINTER(wintypes.FILETIME),
+                                 ctypes.POINTER(wintypes.FILETIME), ctypes.POINTER(wintypes.FILETIME),
+                                 ctypes.POINTER(wintypes.FILETIME)], wintypes.BOOL),
             "QueryFullProcessImageNameW": ([wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR,
                                             ctypes.POINTER(wintypes.DWORD)], wintypes.BOOL),
             "ProcessIdToSessionId": ([wintypes.DWORD, ctypes.POINTER(wintypes.DWORD)], wintypes.BOOL),
@@ -101,8 +106,16 @@ class WindowsRuntime:
         count = self.advapi.GetSidSubAuthorityCount(sid)[0]
         return self.advapi.GetSidSubAuthority(sid, count - 1)[0] if count else None
 
+    def creation(self, process: Any) -> int | None:
+        """查询进程创建时间，防止 UAC 授权被复用到相同 PID 的新进程。"""
+        created, exited, kernel, user = (wintypes.FILETIME() for _ in range(4))
+        if not self.kernel.GetProcessTimes(process, ctypes.byref(created), ctypes.byref(exited),
+                                           ctypes.byref(kernel), ctypes.byref(user)):
+            return None
+        return (created.dwHighDateTime << 32) | created.dwLowDateTime
+
     def compatible(self, pid: int) -> bool:
-        """连接前复核同用户、同会话、同完整性级别，与 GUI 的准入边界保持一致。"""
+        """同用户/会话；普通连接匹配完整性，UAC 连接只允许本次启动的准确 GUI 身份。"""
         process = self.kernel.OpenProcess(0x1000, False, pid)
         if not process:
             return False
@@ -113,10 +126,13 @@ class WindowsRuntime:
             if user is None or own_user is None:
                 return False
             peer_level, own_level = self.level(process), self.level(own)
+            uac_peer = (own_level == 0x2000 and peer_level == 0x3000
+                        and self.uac_target is not None and self.uac_target[0] == pid
+                        and self.creation(process) == self.uac_target[1])
             return bool(self.kernel.ProcessIdToSessionId(pid, ctypes.byref(session))
                         and self.kernel.ProcessIdToSessionId(os.getpid(), ctypes.byref(own_session))
                         and session.value == own_session.value
-                        and peer_level is not None and peer_level == own_level
+                        and peer_level is not None and (peer_level == own_level or uac_peer)
                         and self.advapi.EqualSid(ctypes.cast(user, ctypes.POINTER(ctypes.c_void_p))[0],
                                                  ctypes.cast(own_user, ctypes.POINTER(ctypes.c_void_p))[0]))
         finally:
@@ -156,8 +172,8 @@ class WindowsRuntime:
     def launch(self, options: StartupOptions) -> None:
         """按用户选定的权限启动一次；不重启旧实例、不改设置，也不代答 UAC。"""
         level = self.level(self.kernel.GetCurrentProcess())
-        if options.elevated and (level is None or level < 0x3000):
-            raise BridgeError("admin_client_required", "Run the MCP client/agent as administrator before requesting an elevated KSword")
+        if options.elevated and level not in (0x2000, 0x3000):
+            raise BridgeError("unsupported_client_integrity", "UAC startup requires a normal or administrator desktop client")
         if not options.elevated and level != 0x2000:
             raise BridgeError("normal_client_required", "Use a normal-permission MCP client for normal KSword startup")
         if not options.executable.is_file():
@@ -171,7 +187,17 @@ class WindowsRuntime:
                              cwd=str(options.executable.parent), stdin=subprocess.DEVNULL,
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             return
-        # ShellExecuteEx 原样交给 Windows；已匹配管理员客户端，stdio 不接管权限提示。
+        # 普通客户端只授权本次 sidecar；UAC 由用户确认，不提升 agent 或创建提权代理。
+        parameters = "--mcp"
+        if level == 0x2000:
+            if options.executable.stat().st_size > 128 * 1024 * 1024 or \
+                    "--mcp-uac-client".encode("utf-16-le") not in options.executable.read_bytes():
+                raise BridgeError("unsupported_ksword_build", "UAC startup from a normal client requires a build with --mcp-uac-client")
+            created = self.creation(self.kernel.GetCurrentProcess())
+            if not created:
+                raise BridgeError("client_identity_unavailable", "Unable to bind UAC consent to the current MCP process")
+            parameters += f" --mcp-uac-client {os.getpid()}:{created}"
+        # ShellExecuteEx 的 runas verb 交由 Windows 显示 UAC；不代答、不重复申请。
         class ShellExecuteInfo(ctypes.Structure):
             _fields_ = [("cbSize", wintypes.DWORD), ("fMask", wintypes.ULONG), ("hwnd", wintypes.HWND),
                         ("lpVerb", wintypes.LPCWSTR), ("lpFile", wintypes.LPCWSTR),
@@ -182,12 +208,20 @@ class WindowsRuntime:
                         ("hIcon", wintypes.HANDLE), ("hProcess", wintypes.HANDLE)]
         info = ShellExecuteInfo()
         info.cbSize = ctypes.sizeof(info)
-        info.fMask, info.lpVerb, info.lpFile = 0x40, "runas", str(options.executable)
-        info.lpParameters, info.lpDirectory, info.nShow = "--mcp", str(options.executable.parent), 1
+        info.fMask, info.lpVerb, info.lpFile = 0x140, "runas", str(options.executable)  # 等待 Shell 完成，保留进程句柄。
+        info.lpParameters, info.lpDirectory, info.nShow = parameters, str(options.executable.parent), 1
         self.shell.ShellExecuteExW.argtypes = [ctypes.POINTER(ShellExecuteInfo)]
         if not self.shell.ShellExecuteExW(ctypes.byref(info)):
-            raise BridgeError("startup_failed", "Windows rejected or cancelled elevated KSword startup")
-        if info.hProcess:
+            code = "uac_cancelled" if ctypes.get_last_error() == 1223 else "startup_failed"
+            raise BridgeError(code, "Windows cancelled or rejected the UAC startup request")
+        if not info.hProcess:
+            raise BridgeError("startup_identity_unavailable", "Windows did not return the started KSword process identity")
+        try:
+            pid, created = self.kernel.GetProcessId(info.hProcess), self.creation(info.hProcess)
+            if not pid or not created:
+                raise BridgeError("startup_identity_unavailable", "Unable to verify the KSword process started through UAC")
+            self.uac_target = (int(pid), created)
+        finally:
             self.kernel.CloseHandle(info.hProcess)
 
 
@@ -208,7 +242,7 @@ class ManagedBridgeClient:
             return None
         compatible = [pid for pid in processes if self.runtime.compatible(pid)]
         if not compatible:
-            raise BridgeError("privilege_mismatch", "KSword and the MCP client must have the same user, session and integrity level")
+            raise BridgeError("privilege_mismatch", "Use the same user/session and matching integrity, or the client that obtained this GUI UAC authorization")
         ready = [pid for pid in compatible if self.runtime.ready(pid)]
         if len(ready) > 1:
             raise BridgeError("multiple_instances", "Several KSword bridges match this path; use --pid to choose explicitly")

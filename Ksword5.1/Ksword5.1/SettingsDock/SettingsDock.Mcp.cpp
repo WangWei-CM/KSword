@@ -221,7 +221,7 @@ void SettingsDock::initializeMcpTab()
     installLayout->setSpacing(8);
     auto* installToolbar = new QHBoxLayout(); // 说明与复制动作固定在正文上方。
     installToolbar->addWidget(McpHint(installPage, QStringLiteral("settings.mcp.install_hint"),
-        QStringLiteral("复制后发给 agent：安装前会询问是否下载 KSword、未运行时的策略，以及自动启动时的权限。")), 1);
+        QStringLiteral("复制后发给 agent：先确认下载和启动策略，管理员启动由你确认 UAC，并核对配置基线与分级验收。")), 1);
     m_mcpInstallPromptCopyButton = McpIconButton(installPage, QStringLiteral("mcp_install_prompt_copy"),
         QStringLiteral(":/Icon/codeeditor_copy.svg"), QStringLiteral("settings.mcp.install_copy"),
         QStringLiteral("复制 MCP 一键安装提示词"), ks::ui::FlatButtonTone::Neutral);
@@ -419,7 +419,7 @@ void SettingsDock::refreshMcpClientConfiguration()
     const bool usable = !command.isEmpty() && QFileInfo(script).isFile(); // 不声称已安装 Python 依赖。
     m_mcpCopyButton->setEnabled(usable);
     m_mcpConfigHintLabel->setText(ks::i18n::sourceText(usable
-        ? QStringLiteral("仅限本机、同用户、同会话与匹配权限的客户端。路径点击“应用”后保存；主程序不会自动安装依赖。")
+        ? QStringLiteral("仅限本机、同用户与同会话；默认匹配权限，UAC 启动仅授权本次客户端。路径点击“应用”后保存；主程序不会自动安装依赖。")
         : QStringLiteral("请填写 Python 命令并选择存在的 sidecar 脚本，再复制配置。")));
     ks::ui::ApplyStatusRole(m_mcpConfigHintLabel,
         usable ? ks::ui::StatusRole::Idle : ks::ui::StatusRole::Warning);

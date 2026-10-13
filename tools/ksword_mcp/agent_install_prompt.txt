@@ -1,6 +1,9 @@
-请在你当前使用的 MCP 服务列表中安装 KSword MCP（https://github.com/KSwordDEV/MCP）：
-1. 先询问我是否同时下载 KSword；未运行时自动启动还是返回失败；若自动启动，是否使用管理员权限。
-2. 使用独立 Python 环境，按当前 agent 的原生格式注册 stdio 服务，保留其它 MCP 配置。
-3. 根据我的回答配置启动和权限策略；不要自行改变权限或重启已有 KSword。
-4. 验证工具发现和只读连接，不执行驱动装卸、结束进程或内存写入。
+请在当前 agent 使用的 MCP 服务列表中安装 KSword MCP（https://github.com/KSwordDEV/MCP）。
+1. 询问是否下载 KSword、未运行时自动启动还是返回失败；仅在自动启动时询问管理员权限。管理员启动由我确认 Windows UAC，无需预先提权 agent。
+2. 使用独立 Python 虚拟环境，核验 Python、server.py 和 Ksword5.1.exe 的实际绝对路径。
+3. 确认实际客户端和原生配置落点；注册前保留可恢复基线，只改 KSword 条目，核验其它配置不变，不猜原值或覆盖并发修改。
+4. 按我的回答配置启动和权限策略，不自行改变选择、不重启已有 KSword。
+5. 分别验证并报告：原生注册、独立 stdio 工具发现、当前 agent 工具加载、hello/pages/snapshot 的 GUI 只读连接。
+6. 条件不满足时继续完成独立安装与发现，明确未通过项、具体错误和用户所需操作；基线保留到验收完成。
+7. 验证不执行驱动装卸、结束进程或内存写入，不创建提权代理或代答 UAC。
 完整安装指南：https://raw.githubusercontent.com/KSwordDEV/MCP/main/INSTALL_FOR_AGENTS.md

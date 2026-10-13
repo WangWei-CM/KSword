@@ -96,7 +96,7 @@ def create_server(client: BridgeClient | ManagedBridgeClient) -> FastMCP:
     # ksword_hello：无输入，返回当前桥的版本、PID 和能力回执。
     @mcp.tool(annotations=read_annotations)
     async def ksword_hello() -> dict[str, Any]:
-        """Query bridge version, PID and capabilities; does not start KSword or load a driver."""
+        """Query bridge version, PID and capabilities; auto policy may start KSword and request UAC. Does not load a driver itself."""
         return await invoke("hello", {})
 
     # ksword_pages：无输入，返回页面目录；不会自动打开懒加载页。

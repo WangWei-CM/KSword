@@ -1,9 +1,12 @@
 ```text
-请在你当前使用的 MCP 服务列表中安装 KSword MCP（https://github.com/KSwordDEV/MCP）：
-1. 先询问我是否同时下载 KSword；未运行时自动启动还是返回失败；若自动启动，是否使用管理员权限。
-2. 使用独立 Python 环境，按当前 agent 的原生格式注册 stdio 服务，保留其它 MCP 配置。
-3. 根据我的回答配置启动和权限策略；不要自行改变权限或重启已有 KSword。
-4. 验证工具发现和只读连接，不执行驱动装卸、结束进程或内存写入。
+请在当前 agent 使用的 MCP 服务列表中安装 KSword MCP（https://github.com/KSwordDEV/MCP）。
+1. 询问是否下载 KSword、未运行时自动启动还是返回失败；仅在自动启动时询问管理员权限。管理员启动由我确认 Windows UAC，无需预先提权 agent。
+2. 使用独立 Python 虚拟环境，核验 Python、server.py 和 Ksword5.1.exe 的实际绝对路径。
+3. 确认实际客户端和原生配置落点；注册前保留可恢复基线，只改 KSword 条目，核验其它配置不变，不猜原值或覆盖并发修改。
+4. 按我的回答配置启动和权限策略，不自行改变选择、不重启已有 KSword。
+5. 分别验证并报告：原生注册、独立 stdio 工具发现、当前 agent 工具加载、hello/pages/snapshot 的 GUI 只读连接。
+6. 条件不满足时继续完成独立安装与发现，明确未通过项、具体错误和用户所需操作；基线保留到验收完成。
+7. 验证不执行驱动装卸、结束进程或内存写入，不创建提权代理或代答 UAC。
 完整安装指南：https://raw.githubusercontent.com/KSwordDEV/MCP/main/INSTALL_FOR_AGENTS.md
 ```
 
@@ -52,12 +55,14 @@ python server.py --ksword-exe "C:/path/to/Release/Ksword5.1.exe" --startup-polic
 
 - `fail`：默认策略，主程序未运行时返回 `ksword_not_running`，不启动任何进程。
 - `auto`：只有工具调用发生后才启动；stdio 初始化和工具发现不启动主程序。默认启动等待30秒，可用 `--startup-timeout` 调整，最大120秒。
-- `--startup-elevated`：仅适用于 auto；要求 agent/MCP 客户端本身已具备匹配的管理员权限。脚本不代答 UAC，也不以提权代理绕过 GUI 的准入校验。
+- `--startup-elevated`：仅适用于 auto；通过 Windows `runas` 显示 UAC，由用户确认，无需先把 agent 改为管理员。取消返回 `uac_cancelled`，不自动重试。
+- 普通 agent 的 UAC 启动需要新版 `--mcp-uac-client` 支持，授权仅绑定本次 sidecar 的真实 PID 与创建时间。GUI 和 sidecar 仍须同用户、同会话；其它普通进程及 PID 复用者被拒绝，不创建提权代理、不持久化授权。
+- sidecar 退出或重新加载后授权失效；已有未授权管理员 GUI 仍会拒绝普通客户端。脚本不会为重新授权关闭、重启或另开已有实例，应报告给用户处理。
 - 普通 auto 使用 `--mcp-no-auto-elevation` 单次覆盖主程序保存的自动申请管理员选项，不改 JSON；需要包含此开关的当前 MCP 构建。管理员客户端不能悄悄将“普通启动”变成管理员启动，会返回 `normal_client_required`。
 - 只匹配指定 exe 的完整路径，并复核用户、会话和完整性级别；已有实例未启用 MCP 时返回 `mcp_not_enabled`，不关闭或重启它；多个可用实例时要求改用 `--pid` 明确选择。
 - 主程序退出后再次调用会重新发现 PID；业务请求只发送一次，失败或超时不自动重试。auto 模式的工具声明会反映可能启动 GUI 的副作用。
 
-主程序可从 [官方 Releases](https://github.com/KSwordDEV/KSword/releases) 获取。agent 应检查候选发行包是否已经包含 MCP 支持，选择主程序包而非仅 PDB 的附件。当前下载地址存在不等于当前公开版本已经支持这些新开关；若尚无兼容发行版，应报告此限制并请求已有兼容构建，不能宣称已连接。
+主程序可从 [官方 Releases](https://github.com/KSwordDEV/KSword/releases) 获取。稳定版可能早于 MCP，应同时检查用户允许使用的 pre-release，选择说明明确兼容的主程序包，避开仅 PDB 的附件。没有兼容构建时仍可完成注册和独立工具发现，明确 GUI 连接待验证；下载成功不等于已经兼容。
 
 独立发布仓库根目录就是这些脚本所在目录；主仓库内仍位于 `tools/ksword_mcp/`。安装到独立目录后，用该目录的 `requirements.txt` 创建虚拟环境，客户端 command 使用虚拟环境 Python 的完整路径，args 使用已安装 `server.py` 的完整路径。
 
@@ -90,7 +95,7 @@ command = "python"
 args = ["C:/path/to/MCP/server.py", "--ksword-exe", "C:/path/to/Release/Ksword5.1.exe", "--startup-policy", "fail"]
 ```
 
-如果 MCP 客户端找不到 `python`，将 `command` 换成安装了上述依赖的 Python 可执行文件完整路径。GUI 和 sidecar 必须满足桥的同用户、同会话及完整性级别准入条件；管理员 GUI 需要在匹配权限的可信客户端中启动 sidecar。
+如果 MCP 客户端找不到 `python`，将 `command` 换成独立环境 Python 的实际完整路径。核对真实客户端及配置作用域，保留基线到验收完成，确认其它配置不变；环境变量重定向和 PATH 中另一版本的 CLI 不能替代真实落点。普通连接匹配完整性级别，UAC 启动仅对本次指定客户端作例外。分别报告“已注册”“独立 stdio 工具发现”“当前 agent 已加载工具”“GUI 只读连接”，不能互相替代。
 
 ## 工具与操作顺序
 

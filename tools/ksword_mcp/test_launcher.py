@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 import asyncio
+import ctypes
+from ctypes import wintypes
+import os
 from pathlib import Path
 from types import SimpleNamespace
 import unittest
@@ -165,11 +168,11 @@ class StartupTests(unittest.TestCase):
             self.assertEqual(popen.call_args.args[0], [str(self.path), "--mcp", "--mcp-no-auto-elevation"])
             self.assertNotIn("shell", popen.call_args.kwargs)
 
-    def test_admin_launch_is_refused_from_normal_client(self):
+    def test_admin_launch_rejects_low_integrity_client(self):
         runtime = WindowsRuntime.__new__(WindowsRuntime)
         runtime.kernel = Mock()
-        runtime.level = Mock(return_value=0x2000)
-        with self.assertRaisesRegex(BridgeError, "admin_client_required"):
+        runtime.level = Mock(return_value=0x1000)
+        with self.assertRaisesRegex(BridgeError, "unsupported_client_integrity"):
             runtime.launch(self.options("auto", elevated=True))
 
     def test_admin_launch_uses_windows_runas_without_broker(self):
@@ -177,13 +180,92 @@ class StartupTests(unittest.TestCase):
         runtime.kernel = Mock()
         runtime.shell = Mock()
         runtime.level = Mock(return_value=0x3000)
-        runtime.shell.ShellExecuteExW.return_value = True
+        runtime.kernel.GetProcessId.return_value = 123
+        runtime.creation = Mock(return_value=7)
+        runtime.shell.ShellExecuteExW.side_effect = lambda pointer: setattr(pointer._obj, "hProcess", 77) or True
         with patch.object(Path, "is_file", return_value=True):
             runtime.launch(self.options("auto", elevated=True))
         info = runtime.shell.ShellExecuteExW.call_args.args[0]._obj
         self.assertEqual(info.lpVerb, "runas")
         self.assertEqual(info.lpFile, str(self.path))
         self.assertEqual(info.lpParameters, "--mcp")
+        self.assertEqual(runtime.uac_target, (123, 7))
+        runtime.kernel.CloseHandle.assert_called_once_with(77)
+
+    def test_normal_client_requests_uac_with_its_process_identity(self):
+        runtime = WindowsRuntime.__new__(WindowsRuntime)
+        runtime.kernel, runtime.shell = Mock(), Mock()
+        runtime.level = Mock(return_value=0x2000)
+        runtime.creation = Mock(side_effect=[5, 7])
+        runtime.kernel.GetProcessId.return_value = 123
+        runtime.shell.ShellExecuteExW.side_effect = lambda pointer: setattr(pointer._obj, "hProcess", 77) or True
+        with patch.object(Path, "is_file", return_value=True), \
+             patch.object(Path, "stat", return_value=SimpleNamespace(st_size=20)), \
+             patch.object(Path, "read_bytes", return_value="--mcp-uac-client".encode("utf-16-le")):
+            runtime.launch(self.options("auto", elevated=True))
+        info = runtime.shell.ShellExecuteExW.call_args.args[0]._obj
+        self.assertEqual(info.lpVerb, "runas")
+        self.assertEqual(info.lpParameters, f"--mcp --mcp-uac-client {os.getpid()}:5")
+        self.assertEqual(info.fMask, 0x140)
+        self.assertEqual(runtime.uac_target, (123, 7))
+
+    def test_uac_cancellation_is_specific_and_does_not_retry(self):
+        runtime = WindowsRuntime.__new__(WindowsRuntime)
+        runtime.kernel, runtime.shell = Mock(), Mock()
+        runtime.level = Mock(return_value=0x3000)
+        runtime.shell.ShellExecuteExW.return_value = False
+        with patch.object(Path, "is_file", return_value=True), patch("ctypes.get_last_error", return_value=1223):
+            with self.assertRaisesRegex(BridgeError, "uac_cancelled"):
+                runtime.launch(self.options("auto", elevated=True))
+        runtime.shell.ShellExecuteExW.assert_called_once()
+        runtime.kernel.GetProcessId.assert_not_called()
+
+    def test_old_build_is_rejected_before_uac_from_normal_client(self):
+        runtime = WindowsRuntime.__new__(WindowsRuntime)
+        runtime.kernel, runtime.shell = Mock(), Mock()
+        runtime.level = Mock(return_value=0x2000)
+        with patch.object(Path, "is_file", return_value=True), \
+             patch.object(Path, "stat", return_value=SimpleNamespace(st_size=20)), \
+             patch.object(Path, "read_bytes", return_value=b"old build"):
+            with self.assertRaisesRegex(BridgeError, "unsupported_ksword_build"):
+                runtime.launch(self.options("auto", elevated=True))
+        runtime.shell.ShellExecuteExW.assert_not_called()
+
+    def test_uac_peer_requires_exact_pid_creation_user_and_session(self):
+        runtime = WindowsRuntime.__new__(WindowsRuntime)
+        runtime.kernel, runtime.advapi = Mock(), Mock()
+        runtime.kernel.GetCurrentProcess.return_value = 1
+        runtime.kernel.OpenProcess.return_value = 2
+        runtime.level = Mock(side_effect=lambda process: 0x2000 if process == 1 else 0x3000)
+        runtime.creation = Mock(return_value=7)
+        token = ctypes.create_string_buffer(ctypes.sizeof(ctypes.c_void_p))
+        ctypes.cast(token, ctypes.POINTER(ctypes.c_void_p))[0] = ctypes.c_void_p(42)
+        runtime.token = Mock(return_value=token)
+        runtime.advapi.EqualSid.return_value = True
+        def session(pid, output):
+            output._obj.value = 1
+            return True
+        runtime.kernel.ProcessIdToSessionId.side_effect = session
+        runtime.uac_target = None
+        self.assertFalse(runtime.compatible(123))  # 不能放行任何同用户 High GUI。
+        runtime.uac_target = (123, 7)
+        self.assertTrue(runtime.compatible(123))
+        self.assertFalse(runtime.compatible(124))
+        runtime.creation.return_value = 8
+        self.assertFalse(runtime.compatible(123))  # 相同 PID 的后继进程不能继承授权。
+        runtime.creation.return_value = 7
+        runtime.advapi.EqualSid.return_value = False
+        self.assertFalse(runtime.compatible(123))
+        runtime.advapi.EqualSid.return_value = True
+        runtime.kernel.ProcessIdToSessionId.side_effect = None
+        runtime.kernel.ProcessIdToSessionId.return_value = False
+        self.assertFalse(runtime.compatible(123))
+
+    def test_hello_description_discloses_possible_uac_startup(self):
+        tools = asyncio.run(create_server(self.client(FakeRuntime(), "auto")).list_tools())
+        description = next(tool for tool in tools if tool.name == "ksword_hello").description
+        self.assertIn("auto policy may start KSword", description)
+        self.assertIn("UAC", description)
 
 
 if __name__ == "__main__":

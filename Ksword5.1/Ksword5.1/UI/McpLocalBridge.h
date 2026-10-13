@@ -43,6 +43,9 @@ namespace ks::ui
         QString m_lastError; // 启动错误的值快照，不保存令牌或用户输入。
         McpUiController::ActivitySink m_activitySink; // 主窗口拥有实际日志缓冲。
         QSet<quint32> m_loggedPeers; // 每个客户端 PID 首次接入记录一次，避免短连接轮询刷屏。
+        quint32 m_uacClientPid = 0; // 本次 runas 启动显式授权的普通 sidecar；不持久化或接受 IPC 改写。
+        quint64 m_uacClientCreated = 0; // 创建时间与系统管道 PID 一起校验，拒绝 PID 复用。
+        bool m_invalidUacGrant = false; // 不完整/非法启动授权必须明确失败，不能自动放宽准入。
         bool m_closed = false; // 宿主拆除后拒绝新请求与重启。
         int m_connections = 0; // 当前被本服务接纳的本地连接计数。
     };

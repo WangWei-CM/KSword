@@ -72,8 +72,17 @@ namespace ks::ui
             return true;
         }
 
-        // 校验真实管道客户：同机、同会话、同 SID、同完整性级别才进入 GUI 分派。
-        bool isLocalPeer(QLocalSocket* socket, quint32* verifiedPid)
+        // 绑定活进程的创建时间；相同 PID 的后继进程不能继承 UAC 授权。
+        bool matchesLiveCreation(HANDLE process, quint64 expected)
+        {
+            FILETIME created{}, exited{}, kernel{}, user{}; // Win32 的原始 100ns 身份，不经 JSON 数值转换。
+            return expected != 0 && ::GetProcessTimes(process, &created, &exited, &kernel, &user)
+                && ::WaitForSingleObject(process, 0) == WAIT_TIMEOUT // 不把进程实际退出码259误当成仍存活。
+                && ((static_cast<quint64>(created.dwHighDateTime) << 32) | created.dwLowDateTime) == expected;
+        }
+
+        // 默认同完整性；仅本次 UAC 指定的活客户端可从 Medium 连接 High GUI，用户/会话仍需匹配。
+        bool isLocalPeer(QLocalSocket* socket, quint32* verifiedPid, quint32 uacPid, quint64 uacCreated)
         {
             const HANDLE pipe = reinterpret_cast<HANDLE>(socket->socketDescriptor()); // Qt 原生管道句柄。
             ULONG peerPid = 0; // 由操作系统提供，不相信 JSON 中的 PID。
@@ -112,7 +121,7 @@ namespace ks::ui
                 return false;
             }
             // UserAccessOption 的 ACL 是第一层；真实令牌 SID 是第二层身份复核。
-            HANDLE peer = ::OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, peerPid);
+            HANDLE peer = ::OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, peerPid);
             if (!peer)
             {
                 return false;
@@ -123,10 +132,13 @@ namespace ks::ui
             DWORD ownIntegrity = 0; // 主程序的权限完整性标签。
             const bool queried = readUser(peer, peerUser) && readUser(::GetCurrentProcess(), ownUser)
                 && readIntegrity(peer, &peerIntegrity)
-                && readIntegrity(::GetCurrentProcess(), &ownIntegrity)
-                && peerIntegrity == ownIntegrity;
+                && readIntegrity(::GetCurrentProcess(), &ownIntegrity);
+            const bool integrityAllowed = queried && (peerIntegrity == ownIntegrity
+                || (ownIntegrity == SECURITY_MANDATORY_HIGH_RID
+                    && peerIntegrity == SECURITY_MANDATORY_MEDIUM_RID && peerPid == uacPid
+                    && matchesLiveCreation(peer, uacCreated)));
             ::CloseHandle(peer);
-            return queried && ::EqualSid(
+            return integrityAllowed && ::EqualSid(
                 reinterpret_cast<TOKEN_USER*>(peerUser.data())->User.Sid,
                 reinterpret_cast<TOKEN_USER*>(ownUser.data())->User.Sid);
         }
@@ -150,7 +162,22 @@ namespace ks::ui
         m_endpoint = QString::fromLatin1(ks::mcp::EndpointPrefix)
             + QString::number(QCoreApplication::applicationPid());
         m_server = new QLocalServer(this);
+        // Qt 的 UserAccessOption 已支持同用户 Medium -> High 管道；应用层仍执行进程身份授权。
         m_server->setSocketOptions(QLocalServer::UserAccessOption);
+        const QStringList arguments = QCoreApplication::arguments(); // 只读本次启动参数，不保存授权。
+        const QString grantFlag = QStringLiteral("--mcp-uac-client");
+        const int grantIndex = arguments.indexOf(grantFlag);
+        if (grantIndex >= 0)
+        {
+            DWORD integrity = 0; // 只有用户通过 runas 启动的 High GUI 能接纳 Medium 客户端。
+            const QStringList identity = arguments.value(grantIndex + 1).split(QLatin1Char(':'));
+            bool pidOk = false, createdOk = false; // 溢出、不完整和重复授权均拒绝。
+            m_uacClientPid = identity.value(0).toUInt(&pidOk);
+            m_uacClientCreated = identity.value(1).toULongLong(&createdOk);
+            m_invalidUacGrant = arguments.count(grantFlag) != 1 || !arguments.contains(QStringLiteral("--mcp"))
+                || identity.size() != 2 || !pidOk || !createdOk || m_uacClientPid == 0 || m_uacClientCreated == 0
+                || !readIntegrity(::GetCurrentProcess(), &integrity) || integrity != SECURITY_MANDATORY_HIGH_RID;
+        }
         m_server->setMaxPendingConnections(ks::mcp::MaxConnections);
         connect(m_server, &QLocalServer::newConnection, this, [this]()
         {
@@ -170,6 +197,11 @@ namespace ks::ui
 
     bool McpLocalBridge::start()
     {
+        if (m_invalidUacGrant)
+        {
+            m_lastError = QStringLiteral("invalid_uac_client_identity"); // 不回显原始参数。
+            return false;
+        }
         if (m_closed || !m_host)
         {
             m_lastError = QStringLiteral("closed");
@@ -187,6 +219,11 @@ namespace ks::ui
         }
         m_host->setProperty("ksword_mcp_endpoint", m_endpoint);
         m_lastError.clear(); // 重试成功后不保留旧错误。
+        if (m_uacClientPid != 0)
+        {
+            reportActivity(QStringLiteral("本次 UAC 授权 MCP 客户端 | PID=%1 | 仅该进程存活期间有效"),
+                {QString::number(m_uacClientPid)});
+        }
         return true;
     }
 
@@ -288,7 +325,8 @@ namespace ks::ui
         }
         socket->setParent(this);
         quint32 peerPid = 0; // 当前管道的系统 PID；身份校验失败时也不记录令牌或 SID。
-        if (m_closed || m_connections >= ks::mcp::MaxConnections || !isLocalPeer(socket, &peerPid))
+        if (m_closed || m_connections >= ks::mcp::MaxConnections
+            || !isLocalPeer(socket, &peerPid, m_uacClientPid, m_uacClientCreated))
         {
             socket->abort();
             socket->deleteLater();
@@ -332,6 +370,14 @@ namespace ks::ui
                 return;
             }
             *handled = true;
+            quint32 currentPid = 0; // 完整请求到达后再次验证，过期客户端不能借慢帧保留授权。
+            if (!isLocalPeer(socket, &currentPid, m_uacClientPid, m_uacClientCreated) || currentPid != peerPid)
+            {
+                socket->abort();
+                reportActivity(QStringLiteral("拒绝 MCP 连接 | 客户端 PID=%1 | 原因=身份或连接上限校验失败"),
+                    {QString::number(peerPid)});
+                return;
+            }
             QJsonParseError parseError; // Qt JSON 解析状态，不通过文本猜测合法性。
             const QJsonDocument document = QJsonDocument::fromJson(buffer->left(newline), &parseError);
             const QJsonObject request = document.object(); // 只接受对象请求与对象参数。
@@ -351,6 +397,7 @@ namespace ks::ui
                     {QStringLiteral("data"), QJsonObject{
                         {QStringLiteral("pid"), QCoreApplication::applicationPid()},
                         {QStringLiteral("endpoint"), m_endpoint},
+                        {QStringLiteral("uac_client_pid"), static_cast<qint64>(m_uacClientPid)},
                         {QStringLiteral("invocation_receipts_only"), true}}}};
             }
             else
