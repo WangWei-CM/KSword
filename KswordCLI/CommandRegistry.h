@@ -114,6 +114,7 @@ void registerSystemEventLog();
 void registerSystemContextMenu();
 void registerSystemTime();
 void registerSystemIoctl();
+void registerRawIoctl();
 void registerKernelNamespace();
 void registerKernelDirectory();
 void registerKernelSymlink();

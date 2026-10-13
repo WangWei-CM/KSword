@@ -12,6 +12,17 @@ KswordCLI.exe system ioctl decode --code 0x222000 --json
 
 data 提供 source、code（十六进制）、normalizedCode（8 位大写十六进制）、codeDecimal（uint32）、deviceType（16 位）、function（12 位）、access/method（2 位）与标准宏名称、common（bit 31）、custom（bit 13）。零和所有 uint32 位模式都能成功解析；越界、负数或格式错误为参数错误 1。编码中的厂家位不证明请求已注册、驱动支持、缓冲区 ABI 正确或操作安全。不查询设备、注册表、驱动，也不发送 DeviceIoControl；原有 `r0 ioctl-registry` 等真实查询命令保持兼容。help 同样不打开设备。本项实测包含驱动停止的 VM 解码，独立 CTL_CODE 宏夹具验证位投影及回组，确认边界／十进制规则与帮助层级。
 
+## KSword 控制设备原始 IOCTL
+
+```powershell
+KswordCLI.exe help system ioctl call
+KswordCLI.exe system ioctl call --code 0x80002000 --input-file request.bin --output-bytes 4096 --confirm --json
+```
+
+`system ioctl call` 使用现有 `ArkDriverClient`，设备固定为 KSword 控制设备；它不加载驱动或改变当前进程权限。`--code` 为 uint32，输入可省略或从 `--input-hex` / `--input-file` 二选一提供，输入和 `--output-bytes` 各上限 1 MiB，输出默认 4096 字节。所有调用都要求 `--confirm`；示例编码仅说明语法，实际编码与二进制布局须来自配套 `shared/driver/` 协议。
+
+JSON 的 `data` 保留 `transportSuccess`、`deviceOpenFailed`、`win32Error`、`inputBytes`、`outputCapacity`、`bytesReturned` 和 `outputHex`。只输出实际返回字节，不输出缓冲区补零尾部。成功只代表 Win32 传输完成，响应结构中的业务状态由调用方按协议解析；失败或超时不自动重发。内置 help 和静态 `system ioctl decode` 不发送请求。
+
 ## 系统时间（迁移项 45）
 
 ```powershell

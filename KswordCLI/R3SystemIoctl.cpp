@@ -14,6 +14,7 @@ Result decode(const Args& a){const auto code=a.u32(L"--code");(void)a.require(L"
 }
 }
 void registerSystemIoctl(){
+    registerRawIoctl();
     addCommand({L"system ioctl decode",L"KswordCLI.exe system ioctl decode --code N [--backend r3] [--json]",L"Decode CTL_CODE fields without opening any device.",
         L"Required: --code uint32 (decimal or 0x hexadecimal). Optional: --backend r3, --json.",
         L"Output: code (hex), normalizedCode (8 uppercase hex digits), codeDecimal (uint32), deviceType (16 bits)/function (12 bits) hex, access/method (2 bits) and standard macro names, common (bit 31) and custom (bit 13). Bits can indicate vendor ranges but do not establish actual driver support or request safety. Zero and all uint32 bit patterns are valid decode inputs. No device handle, registry, IOCTL transmission or R0 fallback; help performs no decode or device access.",decode});
