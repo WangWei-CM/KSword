@@ -373,3 +373,8 @@ KSword 主程序位于 `Ksword5.1/Ksword5.1`（Qt 6.9.3 Widgets + Qt Advanced Do
 - 普通父子Tab使用同一固定内容层轨道，子级以紧凑全圆角选中面与短强调标记表达层级，不再使用页面深底配父级贴边形状。QSS内缩和PageTabMotion绘制须一致，状态前景按三个真实底面校准；动画只更新原栏，不添加业务页计时器。
 - 纯单子Tab或明确惰性壳转交导航时，父级默认6px接缝不得再叠加；工具行/splitter/并列内容仍终止转交。StyleJoinedResultTabs即使有child标记也保留连体结果形状及下方6px间隔，不能套成独立子导航圆角面。
 - 标签起点对齐共享6px留白，不能把整页内容跟着缩进。检查对象命名空间、内核I/O管理、驱动对象结果Tab三种结构，六处明确入口及待用户实测项见 `docs/子级Tab导航衔接-20261012.md`；不把共享代码或编译结果当全软件视觉合规。
+
+## 参数折叠标题与只读资料（2026-10-12）
+
+- `FoldParameterSection` 将组标题交给折叠按钮时，必须通过 `LanguageManager::moveTextBinding` 转移显式词条并清除源控件的运行时 text/title 翻译缓存，再清空组标题；只复制构造期文字会导致热换语言后原标题恢复、按钮仍用旧语言。镜像提示可复用同一词条，原组不再拥有标题显示。
+- CKS 第三子页的历史样本与实时系统证据分开，继续嵌入既有 `ParameterWorkspace`，不新增页根背景。只读资料需要导出时显式启用 `CodeEditorWidget::setReadOnlyExportEnabled`；导出完整文档，不改变原路径、编码或修改状态。该能力不开放打开、普通保存或替换操作。

@@ -744,7 +744,7 @@ void CodeEditorWidget::initializeUi()
     m_fileLabel->setTextFormat(Qt::PlainText);
     m_fileLabel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
     m_toolbarLayout->addWidget(m_fileLabel, 1);
-    for (auto* button : {m_openButton, m_saveButton, m_undoButton, m_redoButton, m_copyButton, m_findButton, m_replaceButton, m_wrapButton})
+    for (auto* button : {m_openButton, m_saveButton, m_saveAsButton, m_undoButton, m_redoButton, m_copyButton, m_findButton, m_replaceButton, m_wrapButton})
         m_toolbarLayout->addWidget(button);
     for (auto* button : {m_newButton, m_saveAsButton, m_cutButton, m_pasteButton, m_gotoButton}) button->hide();
     m_languageCombo = new QComboBox(m_toolbarWidget);
@@ -773,7 +773,8 @@ void CodeEditorWidget::initializeUi()
             action->setEnabled(button->isEnabled());
             action->setChecked(button->isChecked());
             action->setVisible(!m_readOnlyMode || button == m_copyButton || button == m_findButton
-                || button == m_gotoButton || button == m_wrapButton);
+                || button == m_gotoButton || button == m_wrapButton
+                || (button == m_saveAsButton && m_readOnlyExportEnabled));
         });
     }
     menu->addSeparator();
@@ -1186,11 +1187,18 @@ void CodeEditorWidget::refreshReadOnlyUiState()
         m_editor->setReadOnly(m_readOnlyMode);
     }
 
-    // 写入类按钮：只读模式下统一禁用。
+    // 编辑类按钮在只读模式下禁用；明确允许的完整导出复用另存为按钮。
+    const bool readOnlyExport = m_readOnlyMode && m_readOnlyExportEnabled; // readOnlyExport：只读资料的导出资格。
     if (m_newButton != nullptr) m_newButton->setEnabled(!m_readOnlyMode);
     if (m_openButton != nullptr) m_openButton->setEnabled(!m_readOnlyMode);
     if (m_saveButton != nullptr) m_saveButton->setEnabled(!m_readOnlyMode);
-    if (m_saveAsButton != nullptr) m_saveAsButton->setEnabled(!m_readOnlyMode);
+    if (m_saveAsButton != nullptr)
+    {
+        m_saveAsButton->setEnabled(!m_readOnlyMode || readOnlyExport);
+        ks::i18n::LanguageManager::instance().bindToolTip(m_saveAsButton,
+            readOnlyExport ? QStringLiteral("ui.code_editor.export.tip") : QStringLiteral("ui.code_editor.save_as.tip"),
+            readOnlyExport ? QStringLiteral("导出完整文本（UTF-8） Ctrl+Shift+S") : QStringLiteral("另存为 Ctrl+Shift+S"));
+    }
     if (m_replaceButton != nullptr) m_replaceButton->setEnabled(!m_readOnlyMode);
     if (m_replaceOneButton != nullptr) m_replaceOneButton->setEnabled(!m_readOnlyMode);
     if (m_replaceAllButton != nullptr) m_replaceAllButton->setEnabled(!m_readOnlyMode);
@@ -1329,6 +1337,8 @@ void CodeEditorWidget::updateToolbarLayout()
     const bool tiny = width < 420;
     for (auto* button : {m_openButton, m_saveButton, m_undoButton, m_redoButton})
         button->setVisible(!m_readOnlyMode && !compact);
+    // 只读导出宽窗直接显示，窄窗由原“更多”菜单保留入口；编辑模式沿用隐藏的另存为。
+    m_saveAsButton->setVisible(m_readOnlyMode && m_readOnlyExportEnabled && !compact);
     m_replaceButton->setVisible(!m_readOnlyMode && !tiny);
     m_languageCombo->setVisible(!tiny);
     m_documentLabel->setVisible(!tiny);
@@ -1645,6 +1655,11 @@ void CodeEditorWidget::saveTextFile(const bool forceSaveAs)
 {
     if (m_readOnlyMode)
     {
+        // Ctrl+S 仍不能写只读文档；只有显式另存为动作进入完整文本导出。
+        if (forceSaveAs && m_readOnlyExportEnabled)
+        {
+            exportReadOnlyText();
+        }
         return;
     }
 

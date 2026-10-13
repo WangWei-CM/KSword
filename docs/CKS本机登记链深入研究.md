@@ -74,3 +74,13 @@ CiTool 的 `IsAuthorized` 表示 CI token 授权，不需要 token 时等于策�
 实际信任可与第一方诊断字段 `State.Current.CiDeveloperMode_SiPolicyCustomKernelSigners`、`State.PolicyDetails.IsBasePolicy`、`PolicyAllowKernelSigners`、`SignatureType` 对照；CiTool 生效状态与注册表值仍不足以代替目标驱动加载验证。[CI 诊断字段](https://learn.microsoft.com/en-us/windows/privacy/required-diagnostic-events-fields-windows-11-24h2)
 
 以上结论来自静态链路与只读现场，尚无本机首次登记成功、跨重启保持或累积更新兼容性的运行证据。后续安装候选应先在可恢复的独立环境中验证，再形成兼容性结论。
+
+## 主程序资料入口
+
+导航：`杂项 → CKS 管理 → 免重置研究`（第三子页）。页面类型为研究资料与状态诊断；沿用 CKS 已有 `ParameterWorkspace`，通过 `StyleParameterCanvas`、`StylePageTabsContentFrame`、`StyleParameterSection` 和 `FoldParameterSection` 组织正文。两条候选保持展开，低频研究样本折叠；历史样本注明日期，与右侧实时系统证据区分。
+
+研究页结果使用共享 `CodeEditorWidget` 的只读验证模板，搜索、复制与 UTF-8 导出使用同一完整文档。模板状态为“尚未测试”，导出后供后续填写记录；页面只打开资料链接，不执行登记修改、安装或驱动加载。切回现有操作页时恢复原策略表与对应动作。
+
+源码接入检查已完成；语言、构建与实际 GUI 验证结果分别记录，不能以静态接入推定实机外观或候选已经可用。
+
+本次全源语言审计通过（28,910 条源码文本）。Release 构建因 MSVC `C1060` 堆空间不足未通过；日志为 `.codex-build-logs/ksword-build-check-20261012-234515.raw.log`。用户随后要求直接提交，尚未进行新子页的真实 GUI 验证或 CKS 候选实验。

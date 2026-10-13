@@ -1,7 +1,7 @@
 #pragma once
 
-// CKS 管理页：把微软现行部署流程与 SSDE 实验流程分开呈现，
-// 所有写入均要求用户选择具体文件并在页面内再次确认。
+// CKS 管理页：分别呈现微软部署、SSDE 实验与只读免重置研究。
+// 系统写入要求选择具体文件并再次确认；研究子页只展示候选与记录模板。
 
 #include "CksBackend.h"
 
@@ -9,6 +9,7 @@
 
 #include <functional>
 
+class CodeEditorWidget;
 class QEvent;
 class QLabel;
 class QPushButton;
@@ -30,7 +31,7 @@ namespace ks::misc
         void changeEvent(QEvent* event) override;
 
     private:
-        // initializeUi：建立状态、微软流程和 SSDE 流程三个视觉区块。
+        // initializeUi：建立共享状态区以及微软、SSDE、免重置研究三个子页。
         void initializeUi();
         // refresh：后台查询 Windows 许可、CI、SCM 和 CiTool，结果回到 UI 线程。
         void refresh();
@@ -68,6 +69,7 @@ namespace ks::misc
         QPushButton* m_deploy = nullptr; // m_deploy：部署或更新签名策略。
         QPushButton* m_launch = nullptr; // m_launch：启动 SSDE 启用程序。
         QPushButton* m_install = nullptr; // m_install：安装按需启动的 ssde 驱动。
+        CodeEditorWidget* m_researchPlan = nullptr; // m_researchPlan：只读研究验证模板，语言切换时重绘。
         QPushButton* m_start = nullptr; // m_start：本次启动中加载 ssde 驱动。
         QPushButton* m_enableBoot = nullptr; // m_enableBoot：设置下次 BOOT_START。
         QPushButton* m_disableBoot = nullptr; // m_disableBoot：改回按需启动。

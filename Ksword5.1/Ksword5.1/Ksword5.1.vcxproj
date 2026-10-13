@@ -295,6 +295,7 @@
     <ClCompile Include="MiscDock\DisableDse\DisableDsePage.cpp" />
     <ClCompile Include="MiscDock\CKS\CksBackend.cpp" />
     <ClCompile Include="MiscDock\CKS\CksPage.cpp" />
+    <ClCompile Include="MiscDock\CKS\CksResearchPage.cpp" />
     <ClCompile Include="MiscDock\Experimental\BugcheckGuardPage.cpp" />
     <ClCompile Include="MiscDock\DiskEditor\DiskEditorBackend.cpp" />
     <ClCompile Include="MiscDock\DiskEditor\DiskDeletedEntryForensics.cpp" />
@@ -508,6 +509,7 @@
     <ClCompile Include="StartupDock\StartupDock.Services.cpp" />
     <ClCompile Include="StartupDock\StartupDock.Tasks.cpp" />
     <ClCompile Include="UI\CodeEditorWidget.cpp" />
+    <ClCompile Include="UI\CodeEditorWidget.Export.cpp" />
     <ClCompile Include="UI\CodeTextEdit.cpp" />
     <ClCompile Include="UI\CodeEditorFileSession.cpp" />
     <ClCompile Include="UI\EmbeddedRowDelegate.cpp" />
@@ -1039,6 +1041,7 @@
     <ClInclude Include="MiscDock\DisableDse\DisableDsePage.h" />
     <ClInclude Include="MiscDock\CKS\CksBackend.h" />
     <ClInclude Include="MiscDock\CKS\CksPage.h" />
+    <ClInclude Include="MiscDock\CKS\CksResearchPage.h" />
     <ClInclude Include="MiscDock\Experimental\BugcheckGuardPage.h" />
     <ClInclude Include="MiscDock\ContextMenuCleaner\ContextMenuCleanerTab.h" />
     <ClInclude Include="MiscDock\ContextMenuCleaner\ContextMenuCleanerTab.Internal.h" />

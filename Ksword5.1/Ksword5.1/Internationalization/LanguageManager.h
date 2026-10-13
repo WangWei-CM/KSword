@@ -47,6 +47,9 @@ namespace ks::i18n
         QString displayText(const QString& renderedOrSourceText) const;
 
         void bindText(QObject* object, const QString& key, const QString& fallbackText);
+        // moveTextBinding：布局把标题转为导航控件时转移绑定并清除源控件历史翻译缓存。
+        // mirrorToolTip 为 true 时让目标提示与标题共用词条；没有显式源绑定时返回 false。
+        bool moveTextBinding(QObject* source, QObject* target, bool mirrorToolTip = false);
         void bindToolTip(QWidget* widget, const QString& key, const QString& fallbackText);
         void bindPlaceholder(QLineEdit* lineEdit, const QString& key, const QString& fallbackText);
         void bindSuffix(QSpinBox* spinBox, const QString& key, const QString& fallbackText);

@@ -194,6 +194,9 @@
     <ClCompile Include="MiscDock\CKS\CksPage.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="MiscDock\CKS\CksResearchPage.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="MiscDock\Experimental\BugcheckGuardPage.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -1370,6 +1373,9 @@
     <ClCompile Include="UI\CodeEditorWidget.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="UI\CodeEditorWidget.Export.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="UI\CodeTextEdit.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -2201,6 +2207,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="MiscDock\CKS\CksPage.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="MiscDock\CKS\CksResearchPage.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="MiscDock\Experimental\BugcheckGuardPage.h">

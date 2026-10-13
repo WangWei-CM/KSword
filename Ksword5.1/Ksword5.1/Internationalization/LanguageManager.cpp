@@ -1654,6 +1654,38 @@ void ks::i18n::LanguageManager::bindText(
     applyBindings(object);
 }
 
+bool ks::i18n::LanguageManager::moveTextBinding(
+    QObject* source, QObject* target, const bool mirrorToolTip)
+{
+    if (source == nullptr || target == nullptr || source == target)
+    {
+        return false;
+    }
+    const QString key = source->property(kTextKeyProperty).toString(); // key：待转移的显式语义词条。
+    if (key.isEmpty())
+    {
+        return false;
+    }
+    const QString fallback = source->property(kTextFallbackProperty).toString(); // fallback：目标沿用原始正文。
+
+    // 源标题随后由布局清空；旧运行时缓存也要清除，避免下一次换语言恢复原标题。
+    source->setProperty(kTextKeyProperty, QVariant());
+    source->setProperty(kTextFallbackProperty, QVariant());
+    source->setProperty(kRuntimeTextSourceProperty, QVariant());
+    source->setProperty(kRuntimeTextAppliedProperty, QVariant());
+    source->setProperty(kRuntimeTitleSourceProperty, QVariant());
+    source->setProperty(kRuntimeTitleAppliedProperty, QVariant());
+    bindText(target, key, fallback);
+    if (mirrorToolTip)
+    {
+        if (auto* widget = qobject_cast<QWidget*>(target)) // widget：可接收标题提示的目标控件。
+        {
+            bindToolTip(widget, key, fallback);
+        }
+    }
+    return true;
+}
+
 void ks::i18n::LanguageManager::bindToolTip(
     QWidget* widget,
     const QString& key,

@@ -6,6 +6,7 @@
 #include "./MainSurfaceStyle.h"
 #include "./ToolbarMetrics.h"
 #include "./CodeTextEdit.h"
+#include "../Internationalization/LanguageManager.h"
 #include "../theme.h"
 #include <QAbstractItemView>
 #include <QAbstractSpinBox>
@@ -619,6 +620,8 @@ namespace ks::ui
         auto* toggle = new ParameterFoldButton(wrapper);
         toggle->setText(group->title());
         toggle->setToolTip(group->title());
+        // 标题显示所有权转给折叠按钮；源组不再在语言切换后重新长出重复标题。
+        ks::i18n::LanguageManager::instance().moveTextBinding(group, toggle, true);
         toggle->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
         toggle->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
         toggle->setCheckable(true);

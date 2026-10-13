@@ -1,4 +1,5 @@
 #include "CksPage.h"
+#include "CksResearchPage.h"
 
 #include "../../Internationalization/LanguageManager.h"
 #include "../../UI/PrimaryPageStyle.h"
@@ -6,6 +7,7 @@
 #include "../../UI/PageControlStyle.h"
 #include "../../UI/ToolbarMetrics.h"
 #include "../../UI/FlowLayout.h"
+#include "../../UI/CodeEditorWidget.h"
 #include "../../UI/ResultTableHost.h"
 #include "../../UI/TablePresentation.h"
 #include "../../theme.h"
@@ -151,6 +153,10 @@ namespace ks::misc
             m_policyFile->setText(FileLabel(m_policyPath));
             m_helperFile->setText(FileLabel(m_helperPath));
             m_driverFile->setText(FileLabel(m_driverPath));
+            if (m_researchPlan != nullptr)
+            {
+                m_researchPlan->setRawText(CksResearchVerificationTemplate());
+            }
             if (m_hasResult) showResult(m_resultRaw, m_resultSuccess);
         }
     }
@@ -200,7 +206,7 @@ namespace ks::misc
         ks::ui::NormalizeToolbarRow(refreshRow);
         workspace->results()->addWidget(statusGroup);
 
-        auto* routes = new QTabWidget(this); // routes：官方与实验路径不混用操作。
+        auto* routes = new QTabWidget(this); // routes：两种操作流程与免重置研究分别呈现。
         routes->setObjectName(QStringLiteral("ksCksRoutes"));
         ks::ui::StylePageTabsContentFrame(routes);
         workspace->parameters()->addWidget(routes);
@@ -208,10 +214,17 @@ namespace ks::misc
             T(QStringLiteral("misc.cks.official.tab"), QStringLiteral("微软现行流程")));
         auto* experimental = AddRoutePage(routes,
             T(QStringLiteral("misc.cks.ssde.tab"), QStringLiteral("SSDE 实验流程")));
+        auto* research = AddRoutePage(routes,
+            T(QStringLiteral("misc.cks.research.tab"), QStringLiteral("免重置研究")));
         language.bindTab(routes, routes->widget(0), QStringLiteral("misc.cks.official.tab"),
             QStringLiteral("微软现行流程"));
         language.bindTab(routes, routes->widget(1), QStringLiteral("misc.cks.ssde.tab"),
             QStringLiteral("SSDE 实验流程"));
+        language.bindTab(routes, routes->widget(2), QStringLiteral("misc.cks.research.tab"),
+            QStringLiteral("免重置研究"));
+        m_researchPlan = PopulateCksResearchPage(routes->widget(2), research, workspace);
+        workspace->results()->addWidget(m_researchPlan, 1);
+        m_researchPlan->hide();
 
         AddBoundLabel(routes, official, QStringLiteral("misc.cks.official.intro"),
             QStringLiteral("先在受支持的 Windows 11 上准备并审核 App Control 策略：包含 Windows 及现有驱动信任规则、策略更新签名者和自有内核签名者；由 PK/KEK 链中的密钥签名。此页只部署已完成的 .cip，不创建密钥、不扫描磁盘，也不把策略自动改为强制模式。首次启用须按微软文档重置 Windows。"));
@@ -366,10 +379,14 @@ namespace ks::misc
         workspace->actions()->addWidget(ssdeActions);
         ssdeActions->hide();
         connect(routes, &QTabWidget::currentChanged, this,
-            [officialActions, ssdeActions](const int index)
+            [this, officialActions, ssdeActions](const int index)
             {
                 officialActions->setVisible(index == 0);
                 ssdeActions->setVisible(index == 1);
+                // 研究资料显示记录模板；原策略清单与操作回执保留对象及数据。
+                m_researchPlan->setVisible(index == 2);
+                m_policyList->setVisible(index != 2);
+                m_result->setVisible(index != 2);
             });
 
         // 工具行统一行高、间距与按钮主题；参数和结果保留共享画布所有权。

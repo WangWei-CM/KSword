@@ -90,6 +90,10 @@ public:
     // 入参 readOnly：true=只读，false=可编辑。
     void setReadOnly(bool readOnly);
 
+    // setReadOnlyExportEnabled：显式允许只读文档通过原另存为入口导出完整 UTF-8 文本。
+    // 默认关闭；enabled 只控制导出入口，不改变正文只读性、文件路径或编码会话。
+    void setReadOnlyExportEnabled(bool enabled);
+
     // isReadOnly：
     // - 返回当前是否只读。
     bool isReadOnly() const;
@@ -195,6 +199,10 @@ private:
     // - 保存文本到文件。
     // 入参 forceSaveAs：true=强制另存为，false=优先覆盖当前路径。
     void saveTextFile(bool forceSaveAs);
+
+    // exportReadOnlyText：用户选择目标后原子导出完整原文，不绑定目标到当前文档。
+    // 只在只读且显式允许导出时执行；取消或失败不改变目标与文件会话。
+    void exportReadOnlyText();
 
     // refreshReadOnlyUiState：
     // - 根据只读状态更新按钮可用性和面板可见性。
@@ -354,6 +362,9 @@ private:
 
     // m_readOnlyMode：标记当前是否只读模式。
     bool m_readOnlyMode = false;
+
+    // m_readOnlyExportEnabled：仅明确资料页允许只读导出，普通只读窗口默认不新增动作。
+    bool m_readOnlyExportEnabled = false;
 
     // m_destroying：标记组件正在析构。
     // - 输入/处理：析构函数置 true，所有延迟信号回调在刷新 UI 前检查；
