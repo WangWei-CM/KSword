@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import ctypes
+import gc
 import json
 import os
 from pathlib import Path
@@ -401,6 +402,11 @@ class NativePipeTests(unittest.TestCase):
         stop.set()
         worker.join(4)
         self.assertEqual(errors, [])
+        self.assertFalse(worker.is_alive())
+        # 先释放夹具的 Thread/Event 及 cleanup 引用；Python 3.10 自身的锁也使用句柄。
+        self.doCleanups()
+        del worker, stop
+        gc.collect()
         self.assertEqual(handle_count(), before)
 
 
