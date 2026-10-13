@@ -75,6 +75,23 @@ Inspection and system-changing actions have separate entry points. Sensitive ope
 
 Source-available under the [KSword Community Source License v1.6](LICENSE) (not OSI-approved — see [License](#license)).
 
+## Automatically install KSwordMCP using an AI agent.
+
+```text
+Install KSword MCP (https://github.com/KSwordDEV/MCP) into the MCP server list used by the current AI agent.
+
+1. Ask whether to download KSword and whether to automatically launch it when it is not running or return an error instead. Ask about administrator privileges only if automatic launching is selected. I will approve elevation through Windows UAC myself; do not elevate the agent in advance.
+2. Use a dedicated Python virtual environment. Verify the actual absolute paths of Python, server.py, and Ksword5.1.exe.
+3. Identify the actual MCP client and its native configuration location. Before registration, preserve a recoverable baseline. Modify only the KSword entry, verify that all other configuration remains unchanged, and do not guess existing values or overwrite concurrent changes.
+4. Configure the launch and privilege policies exactly as I specify. Do not change my selections or restart an already running KSword instance.
+5. Independently verify and report: native MCP registration, tool discovery through a standalone stdio connection, tool availability in the current agent, and read-only GUI connectivity using hello/pages/snapshot.
+6. If any prerequisites are not met, still complete standalone installation and tool discovery wherever possible. Clearly report failed checks, specific errors, and any actions required from me. Preserve the baseline until acceptance testing is complete.
+7. During verification, do not load or unload drivers, terminate processes, or write to memory. Do not create an elevation proxy or automatically approve UAC prompts.
+
+Complete installation guide:
+https://raw.githubusercontent.com/KSwordDEV/MCP/main/INSTALL_FOR_AGENTS.md
+```
+
 ## Quick Start
 
 Extract the release archive, run `Launcher.exe` as admin. It reads the support manifest and starts the right edition.
