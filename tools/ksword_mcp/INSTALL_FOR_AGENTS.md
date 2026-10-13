@@ -47,10 +47,10 @@ python -m venv .venv
 npm 方式先完成依赖准备：
 
 ```powershell
-npx --yes ksword-mcp@0.1.0 --prepare
+npx --yes ksword-mcp@0.1.1 --prepare
 ```
 
-随后配置 command 为实际 `npx.cmd` 的绝对路径，args 以 `--yes`, `ksword-mcp@0.1.0` 开始。入口会在用户主目录 `.cache/ksword-mcp/0.1.0` 创建独立虚拟环境；可用绝对 `KSWORD_MCP_CACHE_DIR` 指定缓存，用完整 `KSWORD_MCP_PYTHON` 指定基础解释器。依赖准备日志只走 stderr，stdout 专供 MCP。先完成准备再注册，避免客户端握手超时。
+随后配置 command 为实际 `npx.cmd` 的绝对路径，args 以 `--yes`, `ksword-mcp@0.1.1` 开始。入口会在用户主目录 `.cache/ksword-mcp/0.1.1` 创建独立虚拟环境；可用绝对 `KSWORD_MCP_CACHE_DIR` 指定缓存，用完整 `KSWORD_MCP_PYTHON` 指定基础解释器。依赖准备日志只走 stderr，stdout 专供 MCP。先完成准备再注册，避免客户端握手超时。
 
 使用这些环境选项时，将它们写入实际 MCP 条目的 `env` 字段（或该客户端的等价字段），并在 `--prepare` 时使用相同值。部分客户端只继承环境变量白名单，不能假定 PowerShell 中的设置会传到 MCP 服务。
 
@@ -93,7 +93,7 @@ $mcpPython = Join-Path $mcpInstallDir '.venv\Scripts\python.exe'
 根据第4节所选包入口准备 command 和 args，再追加业务目标：
 
 - **pip**：独立 Python 的完整路径，args 前缀为 `-m`, `ksword_mcp`。
-- **npm**：实际 `npx.cmd` 完整路径，args 前缀为 `--yes`, `ksword-mcp@0.1.0`。
+- **npm**：实际 `npx.cmd` 完整路径，args 前缀为 `--yes`, `ksword-mcp@0.1.1`。
 - **源码兼容入口**：独立 Python 完整路径，args 前缀为已核验的 `server.py` 完整路径。
 - **GUI 目标**：`--ksword-exe` 后为真实 `Ksword5.1.exe`；根据用户答案追加下表策略。
 - **CLI 目标**：`--ksword-cli-exe` 后为真实 `KswordCLI.exe`。CLI-only 只提供此目标，不追加 GUI 启动参数。
@@ -143,7 +143,7 @@ CLI-only 的 pip 示例：
 }
 ```
 
-npm 使用同样的业务参数，仅将 command 换为已核验的 `npx.cmd`，args 前缀换为 `--yes`, `ksword-mcp@0.1.0`。不把 `npx ...` 整行命令写进 command 字段。
+npm 使用同样的业务参数，仅将 command 换为已核验的 `npx.cmd`，args 前缀换为 `--yes`, `ksword-mcp@0.1.1`。不把 `npx ...` 整行命令写进 command 字段。
 
 若当前客户端使用 TOML 或注册命令，把同一个 command/args 写入它实际支持的格式。配置路径含空格、反斜杠或中文时，使用对应格式的正确转义；不要把用户凭据、OAuth 回调或令牌放进命令、聊天或提交记录。
 

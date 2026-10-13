@@ -1,6 +1,6 @@
 {
   "name": "ksword-mcp",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "KSword MCP server for GUI, native CLI and raw driver IOCTL access",
   "license": "SEE LICENSE IN LICENSE",
   "repository": {"type": "git", "url": "https://github.com/KSwordDEV/MCP.git"},

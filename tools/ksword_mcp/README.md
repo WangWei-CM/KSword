@@ -29,8 +29,8 @@ python -m venv .venv
 npm 需要 Node.js 18+ 和已有 Python 3.10+；入口在版本化用户缓存中准备独立 Python 环境，运行同一份 Python 实现。先完成 `--prepare`，再注册到 MCP 客户端，避免初次依赖安装耗尽客户端握手时间：
 
 ```powershell
-npx --yes ksword-mcp@0.1.0 --prepare
-npx --yes ksword-mcp@0.1.0 --ksword-cli-exe "C:/Applications/KSword/Release/KswordCLI.exe"
+npx --yes ksword-mcp@0.1.1 --prepare
+npx --yes ksword-mcp@0.1.1 --ksword-cli-exe "C:/Applications/KSword/Release/KswordCLI.exe"
 ```
 
 需要指定解释器时设置 `KSWORD_MCP_PYTHON` 为真实完整路径；`KSWORD_MCP_CACHE_DIR` 可指定独立缓存的绝对路径。默认缓存为用户主目录下 `.cache/ksword-mcp/<version>`。安装诊断走 stderr，stdout 保留给 MCP；npm 不改系统 Python 或 MCP 客户端的依赖。
