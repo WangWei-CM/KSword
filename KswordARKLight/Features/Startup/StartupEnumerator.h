@@ -1,5 +1,5 @@
 #pragma once
-#include "../../../shared/usermode/backend/startup/StartupEnumerator.h"
+#include "StartupModel.h"
 namespace Ksword::Features::Startup {
-using ks::r3::startup::EnumerateStartupEntries;
+StartupEnumerationResult EnumerateStartupEntries();
 }

@@ -60,7 +60,7 @@
     <Link>
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalDependencies>Comctl32.lib;Shell32.lib;Advapi32.lib;Crypt32.lib;Wintrust.lib;Rstrtmgr.lib;Psapi.lib;Ntdll.lib;User32.lib;Gdi32.lib;Comdlg32.lib;Ole32.lib;OleAut32.lib;Setupapi.lib;Cfgmgr32.lib;Tdh.lib;Wevtapi.lib;Version.lib;Shlwapi.lib;Taskschd.lib;Wbemuuid.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>Comctl32.lib;Shell32.lib;Advapi32.lib;Crypt32.lib;Wintrust.lib;Rstrtmgr.lib;Psapi.lib;Ntdll.lib;User32.lib;Gdi32.lib;Comdlg32.lib;Ole32.lib;OleAut32.lib;Setupapi.lib;Cfgmgr32.lib;Tdh.lib;Wevtapi.lib;Version.lib;Shlwapi.lib;Taskschd.lib;Uuid.lib;Wbemuuid.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <AdditionalOptions>"/MANIFESTDEPENDENCY:type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' publicKeyToken='6595b64144ccf1df' language='*' processorArchitecture='*'" %(AdditionalOptions)</AdditionalOptions>
     </Link>
   </ItemDefinitionGroup>
@@ -82,7 +82,7 @@
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <OptimizeReferences>true</OptimizeReferences>
-      <AdditionalDependencies>Comctl32.lib;Shell32.lib;Advapi32.lib;Crypt32.lib;Wintrust.lib;Rstrtmgr.lib;Psapi.lib;Ntdll.lib;User32.lib;Gdi32.lib;Comdlg32.lib;Ole32.lib;OleAut32.lib;Setupapi.lib;Cfgmgr32.lib;Tdh.lib;Wevtapi.lib;Version.lib;Shlwapi.lib;Taskschd.lib;Wbemuuid.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>Comctl32.lib;Shell32.lib;Advapi32.lib;Crypt32.lib;Wintrust.lib;Rstrtmgr.lib;Psapi.lib;Ntdll.lib;User32.lib;Gdi32.lib;Comdlg32.lib;Ole32.lib;OleAut32.lib;Setupapi.lib;Cfgmgr32.lib;Tdh.lib;Wevtapi.lib;Version.lib;Shlwapi.lib;Taskschd.lib;Uuid.lib;Wbemuuid.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <AdditionalOptions>"/MANIFESTDEPENDENCY:type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' publicKeyToken='6595b64144ccf1df' language='*' processorArchitecture='*'" %(AdditionalOptions)</AdditionalOptions>
     </Link>
   </ItemDefinitionGroup>
@@ -216,6 +216,8 @@
     <ClCompile Include="Features\Service\ServiceView.cpp" />
     <ClCompile Include="Features\Startup\StartupFeature.cpp" />
     <ClCompile Include="Features\Startup\StartupModel.cpp" />
+    <ClCompile Include="Features\Startup\StartupLightEnumerator.cpp" />
+    <ClCompile Include="Features\Startup\StartupLightActions.cpp" />
     <ClCompile Include="Features\Startup\StartupView.cpp" />
     <ClCompile Include="Features\Window\WindowFeature.cpp" />
     <ClCompile Include="Features\Window\WindowModel.cpp" />
@@ -670,9 +672,13 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\shared\usermode\backend\startup\StartupEnumerator.h" />
+    <ClInclude Include="..\shared\usermode\backend\startup\StartupInternal.h" />
+    <ClInclude Include="..\shared\usermode\backend\startup\StartupText.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="..\shared\usermode\backend\startup\StartupEnumerator.cpp" />
+    <ClCompile Include="..\shared\usermode\backend\startup\StartupHidden.cpp" />
+    <ClCompile Include="..\shared\usermode\backend\startup\StartupText.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\shared\usermode\backend\startup\StartupActions.h" />
