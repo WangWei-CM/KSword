@@ -266,6 +266,9 @@ jobs:
       - name: Test unified driver release packaging
         run: python tools/test_ci_driver_package.py
 
+      - name: Test manual release template selection
+        run: python tools/test_ci_release_template.py
+
       # 这道门禁原先挂在主程序 vcxproj 的 BeforeTargets="ClCompile" 上，靠"每次
       # 编译 GUI 都会顺带跑一遍"来生效。2026-09-19 主程序对 hvm_ctl 的依赖整条
       # 摘掉，那个目标也一起删了——于是它变成一个谁都不跑的脚本。接到这里来：

@@ -10,6 +10,7 @@ metadata:
 - 先看最新提交对应的 `Source integrity`、用户态构建和 `Driver CI` 日志；`git diff --check` 失败会跳过后续 JSON、i18n 与 IOCTL 审计，修完空白后必须单独补跑这些检查。
 - 跟踪 JSON 路径用 `git ls-files -z` 的原始字节按 NUL 分隔，再用 `utf-8-sig` 严格读取内容。逐行解析默认 Git 输出会把中文路径的 C 风格引号/八进制转义当成文件名，导致文件打开失败；不能靠跳过这些 JSON 或全局改 `core.quotePath` 绕过检查。
 - 共享启动项后端拆出 `StartupHidden.cpp`、`StartupText.cpp` 后，CLI、Light 和 `KswordARKLightTests` 都须登记实现及对应 filters/内部头。生产工程能链接不代表测试工程完整；测试仅保留 `StartupEnumerator.cpp` 会缺失隐藏项枚举及 UTF-8/UTF-16、Trim 辅助符号。
+- 手工发行的 PDB/Symbols 附件可能拥有比完整包更大的 asset id。模板选择函数先排除符号包后缀，再选最新应用包，保留 `Release/` 根目录和后续完整性校验；awk 须消费全部输入，避免 `pipefail` 下的 SIGPIPE。离线回归执行生产函数原文，覆盖同发行资源排序、大小写、中文名称和大候选列表。
 - Actions 的同分支并发取消只适合 PR 更新；`main` push 必须排队完成。否则后续仅改 `.gitignore` 等不命中项目的提交会取消前一条正在构建的有效代码提交，自己又把全部构建标为 skipped，导致最新 `main` 虽显示 workflow success 却没有任何完整 Release 证明。
 - 变更范围检测只能在同工作流、同分支的上一条运行明确为 `completed/success` 时启用；上一条失败、取消、超时、仍未完成、查不到或 Actions API 查询失败时都要 fail-safe 为全量测试，避免把上一提交未取得的验证错误地交给路径过滤跳过。
 - 自动 CI 预发行版只在 `main` push 的用户态 CI 与同 SHA Driver CI 都成功后创建。发布资产同时提供：一个与手工版一致、顶层为 `Release/` 的聚合 7z，以及主程序、Setup、ARKLight、CE x64、CE Launcher、Driver 各模块的原始 artifact ZIP。聚合 7z 以最新非自动手工 7z 提供 Qt、有效 v4 profiles 与静态资源，再覆盖当前/祖先提交的 CI 二进制并内置来源清单。自动版同时使用 `[CI Build] ` 标题和 `ci-build-` tag 双标记，清理时只匹配两者并保留最新 3 个，不能触碰手工预发行版与正式版。发行说明的风险提示使用 `[!CAUTION]`，聚合 7z 与 Setup ZIP 提供可点击下载按钮，其余说明按用途使用 `[!TIP]`、`[!NOTE]` 和 `[!IMPORTANT]`。

@@ -239,7 +239,21 @@ for artifact_name in "${expected_artifacts[@]}"; do
   module_archives+=("$artifact_archive")
 done
 
-# Use the newest non-automatic manual 7z release as the dependency/profile
+# BEGIN manual template selector: the offline regression executes this function.
+# 输入为发行时间、tag、asset id、名称组成的 TSV；输出一条模板记录，空输出由调用方拒绝。
+select_manual_release_template_record() {
+  # 同一发行中的 PDB/Symbols 附件可能更晚上传；只按资源 id 排序会误选符号包。
+  LC_ALL=C sort -r | awk -F '\t' '
+    !selected && NF >= 4 && $4 != "" && tolower($4) !~ /(^|[-_. ])(pdb|symbols?)\.7z$/ {
+      print
+      selected = 1
+    }
+  '
+  # awk 消费全部输入，避免在 pipefail 下让 sort 因提前关闭管道而失败。
+}
+# END manual template selector.
+
+# Use the newest non-automatic manual application 7z as the dependency/profile
 # template. CI then overlays every current core binary and unsigned driver while
 # preserving the same single Release/ directory layout users already receive.
 manual_release_candidates="$({
@@ -251,10 +265,10 @@ manual_release_candidates="$({
   echo "Unable to query the manual release template: $manual_release_candidates" >&2
   exit 1
 }
-manual_release_record="$(printf '%s\n' "$manual_release_candidates" | sort -r | sed -n '1p')"
+manual_release_record="$(printf '%s\n' "$manual_release_candidates" | select_manual_release_template_record)"
 IFS=$'\t' read -r manual_published_at manual_tag manual_asset_id manual_asset_name <<< "$manual_release_record"
 if [[ -z "$manual_asset_id" || -z "$manual_asset_name" ]]; then
-  echo 'No non-automatic manual .7z release is available as a packaging template.' >&2
+  echo 'No non-automatic manual application .7z release is available as a packaging template.' >&2
   exit 1
 fi
 
