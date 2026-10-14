@@ -23,6 +23,7 @@ namespace ks::ui
         enum class Kind { Section, Field, Note };
         // 报告摘要只使用生产者明确提供的状态，不从任意中英文说明中猜测成功或失败。
         enum class Status { Neutral, Info, Success, Warning, Error };
+        enum class ReportRole { Content, Catalog, Collection, Record, Metadata };
         Kind kind = Kind::Field;
         QString name;
         QString value;
@@ -32,6 +33,9 @@ namespace ks::ui
         bool translateName = true;
         Status status = Status::Neutral; // 独立来源的真实状态；未提供时保持中性。
         QString summaryLabel; // 摘要条的短标题；为空时显示原分区名，不改变规范文档。
+        ReportRole reportRole = ReportRole::Content; // 生产者明确区分目录、类型、字段及已投影到列的元数据。
+        int reportedCount = -1; // 原始资料声明的字段数，不能用属性子项数冒充。
+        bool preferredScope = false; // 当前业务对象默认进入的报告范围。
     };
 
     struct FieldDocument

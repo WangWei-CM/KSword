@@ -457,12 +457,26 @@ namespace process_detail_window_internal
         ks::ui::FieldDocument preview;
         preview.section(QStringLiteral("PDB Deep Runtime Catalog - %1").arg(domainName));
         // 目录摘要只显示真实 domain 身份，不把静态偏移目录误标成运行时采样成功。
-        preview.nodes.first().summaryLabel = domainName;
+        const QHash<QString, QString> scopeNames{
+            {QStringLiteral("process_detail"), QStringLiteral("进程结构")},
+            {QStringLiteral("thread_detail"), QStringLiteral("线程结构")},
+            {QStringLiteral("handle_object_detail"), QStringLiteral("句柄与对象")},
+            {QStringLiteral("memory_section_detail"), QStringLiteral("内存与节")},
+            {QStringLiteral("module_driver_detail"), QStringLiteral("模块与驱动")},
+            {QStringLiteral("ipc_alpc_detail"), QStringLiteral("IPC / ALPC")},
+            {QStringLiteral("callback_registry_security"), QStringLiteral("回调与安全")},
+            {QStringLiteral("common_kernel_primitives"), QStringLiteral("内核基础结构")},
+            {QStringLiteral("kernel_global_detail"), QStringLiteral("内核全局符号")}
+        }; // 导航标题表达用途，完整技术标题仍留在规范文档和原文中。
+        preview.nodes.first().summaryLabel = scopeNames.value(domainName, domainName);
+        preview.nodes.first().reportRole = ks::ui::FieldNode::ReportRole::Catalog;
+        preview.nodes.first().preferredScope = domainName == QStringLiteral("process_detail");
         const auto finish = [&]() { QMutexLocker lock(&cacheMutex); previewCache.insert(cacheKey, preview); return preview; };
         const QString jsonPath = findNtosDeepOffsetJsonPath();
         if (jsonPath.isEmpty())
         { preview.note(QStringLiteral("PDB deep offset JSON 未找到；请确认 profiles/pdb_deep_offsets 已随构建复制到程序目录。")); return finish(); }
         preview.field(QStringLiteral("Source"), jsonPath);
+        preview.nodes.first().children.last().reportRole = ks::ui::FieldNode::ReportRole::Metadata;
         QJsonParseError parseError{};
         QString readError;
         const QJsonDocument json = ks::profile::readProfileJsonDocument(jsonPath, &parseError, &readError);
@@ -478,6 +492,9 @@ namespace process_detail_window_internal
             preview.field(QStringLiteral("Types"), QString::number(jsonInt(domain, QStringLiteral("typeCount"), 0)));
             preview.field(QStringLiteral("Fields"), QString::number(jsonInt(domain, QStringLiteral("fieldCount"), 0)));
             preview.field(QStringLiteral("DynDataAliasFields"), QString::number(jsonInt(domain, QStringLiteral("kswordAliasFieldCount"), 0)));
+            preview.nodes.first().reportedCount = jsonInt(domain, QStringLiteral("fieldCount"), 0);
+            for (auto& property : preview.nodes.first().children)
+                property.reportRole = ks::ui::FieldNode::ReportRole::Metadata;
             const QJsonArray types = domain.value(QStringLiteral("types")).toArray();
             int emittedTypes = 0;
             for (const QJsonValue& typeValue : types)
@@ -488,8 +505,12 @@ namespace process_detail_window_internal
                 ks::ui::FieldDocument typeDocument;
                 typeDocument.section(jsonString(type, QStringLiteral("typeName"), QStringLiteral("<unknown type>")));
                 typeDocument.nodes.last().initiallyExpanded = false;
+                typeDocument.nodes.last().reportRole = ks::ui::FieldNode::ReportRole::Collection;
+                typeDocument.nodes.last().reportedCount = jsonInt(type, QStringLiteral("fieldCount"), 0);
                 typeDocument.field(QStringLiteral("Size"), QString::number(jsonInt(type, QStringLiteral("typeSize"), -1)));
                 typeDocument.field(QStringLiteral("Fields"), QString::number(jsonInt(type, QStringLiteral("fieldCount"), 0)));
+                for (auto& property : typeDocument.nodes.first().children)
+                    property.reportRole = ks::ui::FieldNode::ReportRole::Metadata;
                 const QJsonArray fields = type.value(QStringLiteral("fields")).toArray();
                 int emittedFields = 0;
                 for (const QJsonValue& fieldValue : fields)
@@ -500,8 +521,11 @@ namespace process_detail_window_internal
                     ks::ui::FieldDocument fieldDocument;
                     fieldDocument.section(jsonString(field, QStringLiteral("qualifiedName"), jsonString(field, QStringLiteral("fieldName"), QStringLiteral("<unknown field>"))));
                     fieldDocument.nodes.first().initiallyExpanded = false; // 属性在用户展开字段时才呈现。
+                    fieldDocument.nodes.first().reportRole = ks::ui::FieldNode::ReportRole::Record;
                     fieldDocument.field(QStringLiteral("Offset"), jsonString(field, QStringLiteral("offsetHex"), QStringLiteral("<no offset>")));
                     fieldDocument.field(QStringLiteral("Type"), jsonString(field, QStringLiteral("fieldType"), QStringLiteral("<unknown type>")));
+                    for (auto& property : fieldDocument.nodes.first().children)
+                        property.reportRole = ks::ui::FieldNode::ReportRole::Metadata; // 已在偏移和类型列显示，不再重复两行。
                     const QJsonObject bits = field.value(QStringLiteral("bitField")).toObject();
                     if (!bits.isEmpty())
                     { fieldDocument.field(QStringLiteral("Bit offset"), QString::number(jsonInt(bits, QStringLiteral("bitOffset"), -1)));
@@ -533,6 +557,8 @@ namespace process_detail_window_internal
                 if (symbol.isEmpty()) continue;
                 ks::ui::FieldDocument node;
                 node.section(jsonString(symbol, QStringLiteral("symbolName"), QStringLiteral("<unknown symbol>")));
+                node.nodes.first().reportRole = ks::ui::FieldNode::ReportRole::Record;
+                node.nodes.first().initiallyExpanded = false;
                 for (const auto& names : {qMakePair(QStringLiteral("RVA"), QStringLiteral("rvaHex")),
                      qMakePair(QStringLiteral("Kind"), QStringLiteral("kind")),
                      qMakePair(QStringLiteral("Section"), QStringLiteral("sectionName")),
@@ -540,6 +566,7 @@ namespace process_detail_window_internal
                      qMakePair(QStringLiteral("Runtime item ID"), QStringLiteral("runtimeItemIdHex")),
                      qMakePair(QStringLiteral("DynData"), QStringLiteral("kswordItemName"))})
                     node.field(names.first, jsonString(symbol, names.second, QString()));
+                node.nodes.first().children.first().reportRole = ks::ui::FieldNode::ReportRole::Metadata;
                 preview.nodes.first().children += node.nodes;
                 ++emitted;
             }

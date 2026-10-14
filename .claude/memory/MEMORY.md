@@ -18,7 +18,7 @@
 
 - [欢迎页采样与 GPU 遥测蓝屏](ksword-welcome-gpu-telemetry.md) — 首页采样范围、GetNodePerfData 空指针现场、17763 系列禁用与 WDDM 2.4 门槛
 - [KSword UI/主题架构](ksword-ui-architecture.md) — theme.h 动态/静态 token 边界与构建期门禁、全局样式块链路、WindowChrome 标题栏染色、周期后台刷新与全局进度通知边界
-- [复杂报告二级子页](../../docs/Issue-223-复杂报告子页.md) — 显式复杂源、规范模型、整分区卡片与字段行内属性面，完整复制与搜索状态恢复
+- [复杂报告二级子页](../../docs/Issue-223-复杂报告子页.md) — 高密度三列字段、范围/类型直达、附加属性去重与共享原文编辑器
 - [窗口控件检查](ksword-control-inspection.md) — UIA/Win32 独立树、悬停与选中分离、一次性拾取配对、透明覆盖裁剪及隐藏桌面 UIA 回归边界
 - [内存工作台重写（进行中）](ksword-memory-workbench-rewrite.md) — 用户拍板的 D1–D4 决策、Phase 0 七个 Qt-free 逻辑类与 2587 条断言已落地登记、后续阶段与暂定参数、等价变异体的坑；设计文档在 docs/内存工作台重写设计.md
 - [内存工作台夹具并行变异的四个坑](ksword-memwb-parallel-mutation-pitfalls.md) — 环境变量进程级会互相覆盖、并行构建写满系统盘、/W4 /WX 下常量条件变异编不过、NO_SUMMARY 不算被抓到

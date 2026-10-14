@@ -5349,6 +5349,7 @@ void ProcessDetailWindow::initializeKernelObjectTab()
     evidenceTabs->addTab(overviewPage, QStringLiteral("概览"));
     evidenceTabs->addTab(watchPage, QStringLiteral("字段监视"));
     evidenceTabs->addTab(reportPage, QStringLiteral("结构报告"));
+    evidenceTabs->setCurrentWidget(reportPage); // 当前入口主要用于查字段，直接进入正文，概览和专业监视仍可切换。
     if (auto* stack = evidenceTabs->findChild<QStackedWidget*>(QString(), Qt::FindDirectChildrenOnly))
     {
         stack->setMinimumSize(0, 0);
@@ -5554,29 +5555,26 @@ void ProcessDetailWindow::initializeKernelObjectTab()
     sectionGroupLayout->setContentsMargins(0, 0, 0, 0);
     sectionGroupLayout->setSpacing(8);
 
-    QHBoxLayout* sectionTopBarLayout = new QHBoxLayout();
-    auto* reportTitle = new QLabel(QStringLiteral("结构报告"), sectionGroup); // 页面标题与刷新状态同排，留白分隔摘要和正文。
-    QFont reportTitleFont = reportTitle->font();
-    reportTitleFont.setWeight(QFont::DemiBold);
-    reportTitle->setFont(reportTitleFont);
-    sectionTopBarLayout->addWidget(reportTitle);
-    m_refreshSectionInfoButton = new QPushButton(QIcon(":/Icon/process_refresh.svg"), QStringLiteral("刷新 Section"), sectionGroup);
+    auto* reportTools = new QWidget(sectionGroup);
+    QHBoxLayout* sectionTopBarLayout = new QHBoxLayout(reportTools);
+    sectionTopBarLayout->setContentsMargins(0, 0, 0, 0);
+    m_refreshSectionInfoButton = new QPushButton(QIcon(":/Icon/process_refresh.svg"), QString(), reportTools);
+    KswordTheme::ApplyCompactIconButtonMetrics(m_refreshSectionInfoButton);
     m_refreshSectionInfoButton->setToolTip(QStringLiteral("通过 R0 查询当前进程 SectionObject、ControlArea 和映射摘要"));
-    m_sectionInfoStatusLabel = new QLabel(QStringLiteral("● 尚未刷新"), sectionGroup);
-    m_sectionInfoStatusLabel->setWordWrap(true); // 长诊断状态在窄窗自然换行，不能压缩正文宽度。
-    m_sectionInfoStatusLabel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+    m_sectionInfoStatusLabel = new QLabel(QStringLiteral("● 尚未刷新"), reportTools);
+    m_sectionInfoStatusLabel->setMaximumWidth(140);
+    m_sectionInfoStatusLabel->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
     m_sectionInfoStatusLabel->setStyleSheet(
         QStringLiteral("color:%1; font-weight:600;")
         .arg(KswordTheme::TextSecondaryHex()));
     sectionTopBarLayout->addWidget(m_refreshSectionInfoButton);
     sectionTopBarLayout->addWidget(m_sectionInfoStatusLabel, 1);
     ks::ui::NormalizeToolbarRow(sectionTopBarLayout);
-    sectionGroupLayout->addLayout(sectionTopBarLayout);
 
     m_sectionInfoOutput = new ks::ui::StructuredFieldView(sectionGroup);
     m_sectionInfoOutput->setProperty("ksword_complex_report_source", true);
     m_sectionInfoOutput->setDocument(fieldNotice(QStringLiteral("Section/ControlArea 查询结果将在此处显示。")));
-    sectionGroupLayout->addWidget(ks::ui::CreateDetailFieldProjection(m_sectionInfoOutput, sectionGroup), 1);
+    sectionGroupLayout->addWidget(ks::ui::CreateDetailFieldProjection(m_sectionInfoOutput, sectionGroup, true, reportTools), 1);
     reportLayout->addWidget(sectionGroup, 1);
 
     m_kernelObjectLayout->addStretch(1);

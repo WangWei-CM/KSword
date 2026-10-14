@@ -6314,8 +6314,9 @@ void ProcessDetailWindow::requestAsyncSectionRefresh()
     }
     if (m_sectionInfoStatusLabel != nullptr)
     {
-        m_sectionInfoStatusLabel->setText(QStringLiteral("● 正在查询 Section/ControlArea..."));
-        m_sectionInfoStatusLabel->setStyleSheet(buildStateLabelStyle(KswordTheme::PrimaryBlueColor, 700));
+        m_sectionInfoStatusLabel->setText(QStringLiteral("查询中…"));
+        m_sectionInfoStatusLabel->setToolTip(QStringLiteral("正在查询 Section/ControlArea..."));
+        m_sectionInfoStatusLabel->setStyleSheet(buildStateLabelStyle(KswordTheme::PrimaryBlueColor, 500));
     }
 
     // kProgress 当前只暴露 add/set 两阶段接口：
@@ -6548,6 +6549,7 @@ void ProcessDetailWindow::requestAsyncSectionRefresh()
                 false);
 
             document.section(QStringLiteral("R0 Section Query"));
+            document.nodes.last().summaryLabel = QStringLiteral("节映射");
             // 成功但截断/不支持远程映射仍标警告，保留当前查询的真实完整性边界。
             if (!sectionResult.io.ok)
             {
@@ -6653,13 +6655,13 @@ void ProcessDetailWindow::applySectionRefreshResult(const SectionRefreshResult& 
     }
     if (m_sectionInfoStatusLabel != nullptr)
     {
-        QString statusText = QStringLiteral("● 刷新完成 %1 ms").arg(refreshResult.elapsedMs);
-        QString statusStyle = buildStateLabelStyle(statusIdleColor(), 600);
+        QString statusText = QStringLiteral("%1 ms").arg(refreshResult.elapsedMs);
+        QString statusStyle = buildStateLabelStyle(statusIdleColor(), 500);
+        m_sectionInfoStatusLabel->setToolTip(refreshResult.diagnosticText); // 完整诊断保留在提示和专门入口，工具行只给紧凑状态。
         if (!refreshResult.diagnosticText.trimmed().isEmpty())
         {
-            statusText += QStringLiteral(
-                " | 存在诊断；详情已写入日志。");
-            statusStyle = buildStateLabelStyle(statusWarningColor(), 700);
+            statusText += QStringLiteral(" · 诊断");
+            statusStyle = buildStateLabelStyle(statusWarningColor(), 500);
             kLogEvent diagnosticEvent;
             warn << diagnosticEvent
                 << "[ProcessDetailWindow] section refresh completed with diagnostics, pid="

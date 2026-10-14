@@ -59,6 +59,8 @@ namespace ks::ui
                     || left.translateValue != right.translateValue || left.translateName != right.translateName
                     || left.initiallyExpanded != right.initiallyExpanded
                     || left.status != right.status || left.summaryLabel != right.summaryLabel
+                    || left.reportRole != right.reportRole || left.reportedCount != right.reportedCount
+                    || left.preferredScope != right.preferredScope
                     || !sameFieldNodes(left.children, right.children))
                 {
                     return false;

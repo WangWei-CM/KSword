@@ -23,7 +23,7 @@ namespace ks::ui
     void InstallDetailSidebarSizing(QScrollArea* sidebar, int maximumWidth);
     // 原结构化视图继续持有文档与导出逻辑；卡片投影展示同一数据，scrollBody=false用于已有正文滚动区。
     QWidget* CreateDetailFieldProjection(StructuredFieldView* source, QWidget* parent = nullptr,
-        bool scrollBody = true);
+        bool scrollBody = true, QWidget* toolbarPrefix = nullptr);
     // 统一安装窗口布局框架；保留原页签/字段/动作，首次与惰性页面创建后合并整理。
     void InstallDetailWindowFramework(QWidget* window);
     // 构造完成的首次Show安全点调用，首帧绘制前一次性准备结构；普通刷新不重挂布局。

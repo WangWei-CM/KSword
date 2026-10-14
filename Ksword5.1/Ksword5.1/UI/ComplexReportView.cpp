@@ -2,62 +2,62 @@
 #include "./ComplexReportView.h"
 #include "./ComplexReportModel.h"
 #include "./ComplexReportDelegate.h"
+#include "./CodeEditorWidget.h"
+#include "./SegmentedControl.h"
 #include "./FlatButtonTheme.h"
 #include "./ThemeBinding.h"
 #include "./ToolbarMetrics.h"
+#include "./TablePresentation.h"
+#include "./TableColumnAutoFit.h"
 #include "./VisibleTableWidget.h"
 #include "../Internationalization/LanguageManager.h"
 #include "../theme.h"
 #include <QApplication>
 #include <QClipboard>
+#include <QComboBox>
 #include <QElapsedTimer>
+#include <QHeaderView>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QLineEdit>
 #include <QMenu>
-#include <QPainter>
-#include <QPointer>
-#include <QResizeEvent>
 #include <QScrollBar>
 #include <QShortcut>
-#include <QShowEvent>
 #include <QSignalBlocker>
-#include <QSortFilterProxyModel>
-#include <QTimer>
+#include <QTabBar>
 #include <QToolButton>
 #include <QTreeView>
 #include <QVBoxLayout>
 
 namespace
 {
-    // 摘要只呈现来源显式状态；静态目录的中性状态没有虚假的成功标记。
-    QIcon reportStatusIcon(ks::ui::FieldNode::Status status)
-    {
-        if (status == ks::ui::FieldNode::Status::Neutral) return QIcon();
-        QColor color = KswordTheme::InfoColor(); // 未知之外的普通信息状态。
-        if (status == ks::ui::FieldNode::Status::Success) color = KswordTheme::SuccessColor();
-        if (status == ks::ui::FieldNode::Status::Warning) color = KswordTheme::WarningColor();
-        if (status == ks::ui::FieldNode::Status::Error) color = KswordTheme::ErrorColor();
-        color = KswordTheme::EnsureTextContrast(color, KswordTheme::SurfaceAltColor(), 3.0);
-        QPixmap pixmap(12, 12); // 真实语义色的小圆点，不把整条摘要染成风险色。
-        pixmap.fill(Qt::transparent);
-        QPainter painter(&pixmap);
-        painter.setRenderHint(QPainter::Antialiasing);
-        painter.setPen(Qt::NoPen);
-        painter.setBrush(color);
-        painter.drawEllipse(QRectF(3, 3, 6, 6));
-        return QIcon(pixmap);
-    }
+    const QString kDiagnostics = QStringLiteral("ksword_report_diagnostics"); // 仅用于导航身份，不显示为业务文本。
+    QString text(const QString& source) { return ks::i18n::sourceText(source); }
 
-    // 有展开子项的模型索引统一按原树顺序遍历；没有逐行 QWidget，也不依赖可见窗口截取。
-    void visitReport(const QAbstractItemModel* model, const QModelIndex& parent,
-        const std::function<void(const QModelIndex&)>& visitor)
+    // 只在恢复结构或当前搜索结果时遍历模型，不构造每字段控件。
+    void visit(const QAbstractItemModel* model, const QModelIndex& parent,
+        const std::function<void(const QModelIndex&)>& action)
     {
         for (int row = 0; row < model->rowCount(parent); ++row)
         {
             const QModelIndex index = model->index(row, 0, parent);
-            visitor(index);
-            if (model->rowCount(index) > 0) visitReport(model, index, visitor);
+            action(index);
+            visit(model, index, action);
         }
+    }
+
+    // 搜索反馈只计真正记录或叶内容，不把保留的祖先标题算作重复命中。
+    int matches(const QAbstractItemModel* model, const QModelIndex& parent)
+    {
+        int count = 0;
+        for (int row = 0; row < model->rowCount(parent); ++row)
+        {
+            const QModelIndex index = model->index(row, 0, parent);
+            if (static_cast<ks::ui::FieldNode::ReportRole>(index.data(ks::ui::ReportPurposeRole).toInt())
+                == ks::ui::FieldNode::ReportRole::Record || model->rowCount(index) == 0) ++count;
+            else count += matches(model, index);
+        }
+        return count;
     }
 }
 
@@ -68,343 +68,460 @@ namespace ks::ui
         setObjectName(QStringLiteral("ksword_complex_report"));
         setMinimumSize(0, 0);
         setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Ignored);
-        auto* root = new QVBoxLayout(this); // 摘要固定，树视口使用剩余高度。
-        root->setContentsMargins(0, 0, 0, 0);
-        root->setSpacing(8);
-        m_summary = new QWidget(this);
-        m_summary->setObjectName(QStringLiteral("ksword_report_summary"));
-        m_summaryLayout = new QHBoxLayout(m_summary);
-        m_summaryLayout->setContentsMargins(8, 4, 8, 4);
-        m_summaryLayout->setSpacing(6);
-        m_summaryLabel = new QLabel(m_summary);
-        m_summaryLayout->addWidget(m_summaryLabel);
-        m_more = new QToolButton(m_summary);
-        m_more->setPopupMode(QToolButton::InstantPopup);
-        m_moreMenu = new QMenu(m_more);
-        m_more->setMenu(m_moreMenu);
-        m_summaryLayout->addWidget(m_more);
-        root->addWidget(m_summary);
+        m_layout = new QVBoxLayout(this);
+        m_layout->setContentsMargins(0, 0, 0, 0);
+        m_layout->setSpacing(6);
+        auto* navigation = new QHBoxLayout(); // 两个直接选择器替代摘要跳转和多层折叠路径。
+        navigation->setContentsMargins(0, 0, 0, 0);
+        m_scopes = new QComboBox(this);
+        m_scopes->setObjectName(QStringLiteral("ksword_report_scope"));
+        m_types = new QComboBox(this);
+        m_types->setObjectName(QStringLiteral("ksword_report_type"));
+        for (auto* combo : {m_scopes, m_types})
+        {
+            combo->setMinimumWidth(0);
+            combo->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
+            combo->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+            combo->setMinimumContentsLength(10);
+        }
+        navigation->addWidget(m_scopes, 2);
+        navigation->addWidget(m_types, 3);
+        m_count = new QLabel(this);
+        m_count->setMinimumWidth(0);
+        m_count->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+        navigation->addWidget(m_count, 1);
+        m_diagnostics = new QToolButton(this);
+        m_diagnostics->setObjectName(QStringLiteral("ksword_report_diagnostics"));
+        ApplyFlatButtonTheme(m_diagnostics, FlatButtonTone::Neutral, FlatButtonAppearance::Flat);
+        navigation->addWidget(m_diagnostics);
+        m_modes = new QTabBar(this);
+        m_modes->setObjectName(QStringLiteral("ksword_report_mode"));
+        m_modes->addTab(QString());
+        m_modes->addTab(QString());
+        m_modes->setExpanding(false);
+        m_modes->setDrawBase(false);
+        InstallSegmentedTabBar(m_modes);
+        navigation->addWidget(m_modes);
+        NormalizeToolbarRow(navigation);
+        m_layout->addLayout(navigation);
 
-        // 同一规范快照产生模型；代理搜索包括折叠后代，命中分区时保留该分区全部子项。
+        // 原生三列表承担扫描、选择与复制；操作条为 None，整份文档动作由原投影拥有。
         m_model = new ComplexReportModel(this);
-        m_proxy = new QSortFilterProxyModel(this);
+        m_proxy = new ComplexReportFilter(this);
         m_proxy->setSourceModel(m_model);
-        m_proxy->setFilterRole(ReportSearchRole);
-        m_proxy->setFilterCaseSensitivity(Qt::CaseInsensitive);
-        m_proxy->setRecursiveFilteringEnabled(true);
-        m_proxy->setAutoAcceptChildRows(true);
-        m_tree = new ComplexReportTree(this);
+        m_tree = new QTreeView(this);
         m_tree->setObjectName(QStringLiteral("ksword_report_tree"));
         m_tree->setProperty("ks_i18n_preserve_model_data", true);
-        m_tree->setProperty("ks_preserve_table_presentation", true);
-        // 树报告已有规范源工具行；共享 setter 仅接受 QTableView，树显式声明同一模式属性。
         m_tree->setProperty(TableActionBarModeProperty, static_cast<int>(TableActionBarMode::None));
         m_tree->setModel(m_proxy);
-        m_tree->setHeaderHidden(true);
-        m_tree->setFrameShape(QFrame::NoFrame);
-        m_tree->setIndentation(20);
-        m_tree->setUniformRowHeights(false);
-        m_tree->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-        m_tree->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
+        SetTableColumnAutoFitEnabled(m_tree, false); // 三列用途明确，不能按长诊断值的权重把名称压成省略号。
+        m_tree->setItemDelegate(new ComplexReportDelegate(m_tree));
+        m_tree->setUniformRowHeights(true);
+        m_tree->setIndentation(14);
+        m_tree->setAlternatingRowColors(true);
         m_tree->setSelectionBehavior(QAbstractItemView::SelectRows);
         m_tree->setSelectionMode(QAbstractItemView::SingleSelection);
-        m_tree->setMouseTracking(true);
+        m_tree->setEditTriggers(QAbstractItemView::NoEditTriggers);
+        m_tree->setExpandsOnDoubleClick(false);
+        m_tree->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
+        m_tree->setWordWrap(false);
         m_tree->setMinimumSize(0, 0);
         m_tree->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Ignored);
-        m_delegate = new ComplexReportDelegate(m_tree);
-        m_tree->setItemDelegate(m_delegate);
-        m_delegate->setCopyHandler([this](const QModelIndex& index) { copyNode(index); });
+        m_tree->header()->setMinimumSectionSize(60);
+        m_tree->header()->setSectionResizeMode(0, QHeaderView::Interactive);
+        m_tree->header()->setSectionResizeMode(1, QHeaderView::Interactive);
+        m_tree->header()->setSectionResizeMode(2, QHeaderView::Stretch);
+        m_tree->setColumnWidth(0, m_catalogNameWidth);
+        m_tree->setColumnWidth(1, 96);
+        SetTablePresentationDensity(m_tree, TablePresentationDensity::Compact);
+        ApplyTablePresentation(m_tree);
         m_tree->setContextMenuPolicy(Qt::CustomContextMenu);
         connect(m_tree, &QTreeView::customContextMenuRequested, this, &ComplexReportView::showContextMenu);
-        root->addWidget(m_tree, 1);
+        m_layout->addWidget(m_tree, 1);
         m_empty = new QLabel(this);
         m_empty->setObjectName(QStringLiteral("ksword_report_empty_state"));
-        m_empty->setWordWrap(true);
         m_empty->setAlignment(Qt::AlignCenter);
-        root->addWidget(m_empty, 1);
+        m_empty->setWordWrap(true);
+        m_layout->addWidget(m_empty, 1);
 
-        // 原投影把此动作放进同一搜索/复制/导出行，动作不随正文或分区滚走。
-        m_expandAll = new QToolButton(this);
-        m_expandAll->setObjectName(QStringLiteral("ksword_report_expand_all"));
-        m_expandAll->setCheckable(true);
-        ApplyFlatButtonTheme(m_expandAll, FlatButtonTone::Neutral, FlatButtonAppearance::Flat);
-        connect(m_expandAll, &QToolButton::clicked, this, [this](bool expanded)
+        // 低频展开与范围复制放在一个菜单，正文不再逐分区重复堆复制按钮。
+        m_actions = new QToolButton(this);
+        m_actions->setObjectName(QStringLiteral("ksword_report_actions"));
+        m_actions->setPopupMode(QToolButton::InstantPopup);
+        ApplyFlatButtonTheme(m_actions, FlatButtonTone::Neutral, FlatButtonAppearance::Flat);
         {
-            m_bulkExpansion = true;
-            if (expanded) m_tree->expandAll();
-            else m_tree->collapseAll();
-            m_bulkExpansion = false;
-            refreshTheme();
-        });
-        connect(m_tree, &QTreeView::collapsed, this, [this]()
-        {
-            if (!m_bulkExpansion && m_expandAll->isChecked())
+            auto* menu = new QMenu(m_actions); // 菜单在首次点击前安装，避免 InstantPopup 的首次动作丢失。
+            menu->setStyleSheet(KswordTheme::ContextMenuStyle());
+            auto* expand = menu->addAction(text(QStringLiteral("展开当前范围")));
+            auto* collapse = menu->addAction(text(QStringLiteral("收起当前范围")));
+            menu->addSeparator();
+            auto* copy = menu->addAction(text(QStringLiteral("复制当前范围")));
+            connect(expand, &QAction::triggered, this, [this]() { setCurrentExpanded(true); });
+            connect(collapse, &QAction::triggered, this, [this]() { setCurrentExpanded(false); });
+            connect(copy, &QAction::triggered, this, [this]()
             {
-                const QSignalBlocker blocker(m_expandAll);
-                m_expandAll->setChecked(false);
-                refreshTheme();
-            }
+                const QString value = currentScopeText();
+                if (auto* clipboard = QApplication::clipboard()) clipboard->setText(value);
+            });
+            m_actions->setMenu(menu);
+        }
+
+        connect(m_scopes, &QComboBox::currentIndexChanged, this, [this]()
+        {
+            if (m_updatingNavigation) return;
+            m_lastTypes.insert(m_scopePath, m_typePath);
+            m_scopePath = m_scopes->currentData().toString();
+            m_typePath = m_lastTypes.value(m_scopePath);
+            updateTypes(!m_lastTypes.contains(m_scopePath));
+            applyNavigation();
         });
-        auto* copyShortcut = new QShortcut(QKeySequence::Copy, m_tree); // 仅该树及其内部有焦点时复制。
-        copyShortcut->setContext(Qt::WidgetWithChildrenShortcut);
-        connect(copyShortcut, &QShortcut::activated, this, [this]() { copyNode(m_tree->currentIndex()); });
-        const QPointer<ComplexReportView> safe(this); // 主题刷新保留模型、选区、展开和文档身份。
+        connect(m_types, &QComboBox::currentIndexChanged, this, [this]()
+        {
+            if (m_updatingNavigation) return;
+            m_typePath = m_types->currentData().toString();
+            m_lastTypes.insert(m_scopePath, m_typePath);
+            applyNavigation();
+        });
+        connect(m_diagnostics, &QToolButton::clicked, this, [this]()
+        {
+            const int position = m_scopes->findData(kDiagnostics);
+            if (position >= 0) m_scopes->setCurrentIndex(position);
+        });
+        connect(m_modes, &QTabBar::currentChanged, this, [this]()
+        {
+            m_rawDirty = true;
+            updatePresentation();
+        });
+        connect(m_tree, &QTreeView::clicked, this, [this](const QModelIndex& cell)
+        {
+            if (cell.column() != 0) return; // 值列单击用于选择和复制，不顺带折叠。
+            const QModelIndex index = cell.siblingAtColumn(0);
+            const QString path = index.data(ReportPathRole).toString();
+            if (static_cast<FieldNode::ReportRole>(index.data(ReportPurposeRole).toInt()) == FieldNode::ReportRole::Collection)
+            {
+                const int position = m_types->findData(path);
+                if (position >= 0 && m_query.isEmpty()) { m_types->setCurrentIndex(position); return; }
+            }
+            if (m_proxy->rowCount(index) > 0) m_tree->setExpanded(index, !m_tree->isExpanded(index));
+        });
+        auto* copy = new QShortcut(QKeySequence::Copy, m_tree);
+        copy->setContext(Qt::WidgetWithChildrenShortcut);
+        connect(copy, &QShortcut::activated, this, [this]() { copyCell(m_tree->currentIndex(), false); });
+        auto* copyRecord = new QShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+C")), m_tree);
+        copyRecord->setContext(Qt::WidgetWithChildrenShortcut);
+        connect(copyRecord, &QShortcut::activated, this, [this]() { copyCell(m_tree->currentIndex(), true); });
+        auto* find = new QShortcut(QKeySequence::Find, m_tree);
+        find->setContext(Qt::WidgetWithChildrenShortcut);
+        connect(find, &QShortcut::activated, this, [this]() { if (m_search) { m_search->setFocus(); m_search->selectAll(); } });
+        const QPointer<ComplexReportView> safe(this);
         BindWidgetTheme(this, [safe]() { if (safe) safe->refreshTheme(); });
         refreshTheme();
     }
 
+    void ComplexReportView::bindSearchField(QLineEdit* search)
+    {
+        m_search = search;
+        updatePresentation();
+    }
+
+    // 保存稳定路径而非 QModelIndex，文档刷新后仍能恢复对应字段。
     QSet<QString> ComplexReportView::expandedPaths() const
     {
-        QSet<QString> result; // 以规范路径保存状态，不持有可能被重置的 QModelIndex。
-        visitReport(m_proxy, QModelIndex(), [this, &result](const QModelIndex& index)
+        QSet<QString> paths;
+        visit(m_proxy, QModelIndex(), [this, &paths](const QModelIndex& index)
         {
-            if (m_tree->isExpanded(index)) result.insert(index.data(ReportPathRole).toString());
+            if (m_tree->isExpanded(index)) paths.insert(index.data(ReportPathRole).toString());
         });
-        return result;
+        return paths;
     }
 
     void ComplexReportView::restoreExpansion(const QSet<QString>& paths)
     {
-        m_bulkExpansion = true;
         for (const QString& path : paths)
         {
             const QModelIndex index = m_proxy->mapFromSource(m_model->indexForPath(path));
             if (index.isValid()) m_tree->setExpanded(index, true);
         }
-        m_bulkExpansion = false;
     }
 
     void ComplexReportView::setDocument(const FieldDocument& document)
     {
-        QElapsedTimer elapsed; // 计入状态保存、模型提交和摘要更新，不漏掉外围走读成本。
+        QElapsedTimer elapsed;
         elapsed.start();
         QSet<QString> expanded;
         const QString selected = m_tree->currentIndex().data(ReportPathRole).toString();
+        const int column = m_tree->currentIndex().column();
         const int scroll = m_tree->verticalScrollBar()->value();
-        QSet<QString> oldPaths;
-        // 只有真正重置拓扑时才走读旧树；普通数值/状态刷新不全量保存展开状态。
-        const auto resetConnection = connect(m_model, &QAbstractItemModel::modelAboutToBeReset, this, [&]()
-        {
-            expanded = expandedPaths();
-            visitReport(m_model, QModelIndex(), [&oldPaths](const QModelIndex& index)
-            {
-                oldPaths.insert(index.data(ReportPathRole).toString());
-            });
-        }, Qt::DirectConnection);
+        const auto connection = connect(m_model, &QAbstractItemModel::modelAboutToBeReset, this,
+            [&]() { expanded = expandedPaths(); }, Qt::DirectConnection);
         const bool reset = m_model->setDocument(document);
-        disconnect(resetConnection); // 同步重置信号已经结束，不保留局部引用。
+        disconnect(connection);
         const QString language = ks::i18n::LanguageManager::instance().currentLanguageId();
-        if (m_language != language)
-        {
-            m_model->relocalize();
-            m_language = language;
-        }
+        if (m_language != language) { m_model->relocalize(); m_language = language; }
+        updateNavigation(!m_initialized);
+        m_tree->setRootIndex(displayRoot());
         if (reset)
         {
             restoreExpansion(expanded);
-            m_bulkExpansion = true;
-            for (const QModelIndex& index : m_model->initialExpansion())
-            {
-                const QString path = index.data(ReportPathRole).toString();
-                if (!oldPaths.contains(path))
-                {
-                    if (m_query.isEmpty())
-                        m_tree->setExpanded(m_proxy->mapFromSource(index), true);
-                    else m_beforeSearch.insert(path); // 搜索期间到达的新分区，清空后也保留其默认状态。
-                }
-            }
-            m_bulkExpansion = false;
             const QModelIndex current = m_proxy->mapFromSource(m_model->indexForPath(selected));
-            if (current.isValid()) m_tree->setCurrentIndex(current);
+            if (current.isValid()) m_tree->setCurrentIndex(current.siblingAtColumn(qMax(0, column)));
+            m_tree->doItemsLayout();
             m_tree->verticalScrollBar()->setValue(scroll);
         }
-        if (!m_query.isEmpty())
-        {
-            // 普通值更新也可能产生新的搜索命中，不能只在重置模型时展开匹配祖先。
-            m_bulkExpansion = true;
-            m_tree->expandAll();
-            m_bulkExpansion = false;
-        }
-        updateSummary();
-        updateEmptyState();
+        if (!m_query.isEmpty()) expandSearchGroups();
+        m_rawDirty = true;
+        updatePresentation();
         setProperty("ksword_report_update_us", elapsed.nsecsElapsed() / 1000);
     }
 
+    // 顶层目录由生产者标记，诊断合为一个入口；默认范围直接承接当前业务对象。
+    void ComplexReportView::updateNavigation(bool firstDocument)
+    {
+        m_updatingNavigation = true;
+        const QSignalBlocker blocker(m_scopes);
+        m_scopes->clear();
+        m_scopes->addItem(text(QStringLiteral("全部报告")), QString());
+        QString preferred;
+        int catalogCount = 0;
+        int diagnostics = 0;
+        for (const QModelIndex& section : m_model->sectionIndexes())
+        {
+            if (static_cast<FieldNode::ReportRole>(section.data(ReportPurposeRole).toInt()) == FieldNode::ReportRole::Catalog)
+            {
+                const QString path = section.data(ReportPathRole).toString();
+                m_scopes->addItem(section.data(ReportSummaryRole).toString(), path);
+                m_scopes->setItemData(m_scopes->count() - 1, section.data(ReportNameRole), Qt::ToolTipRole);
+                if (section.data(ReportPreferredScopeRole).toBool()) preferred = path;
+                ++catalogCount;
+            }
+            else if (static_cast<FieldNode::Status>(section.data(ReportStatusRole).toInt()) != FieldNode::Status::Neutral) ++diagnostics;
+        }
+        if (catalogCount > 0)
+        {
+            m_scopes->addItem(text(QStringLiteral("运行诊断")), kDiagnostics);
+            if (firstDocument) m_scopePath = preferred.isEmpty() ? m_scopes->itemData(1).toString() : preferred;
+            m_initialized = true;
+        }
+        int position = m_scopes->findData(m_scopePath);
+        if (position < 0) { position = 0; m_scopePath.clear(); }
+        m_scopes->setCurrentIndex(position);
+        m_diagnostics->setVisible(catalogCount > 0);
+        m_diagnostics->setText(text(QStringLiteral("诊断 %1")).arg(diagnostics));
+        m_updatingNavigation = false;
+        updateTypes(firstDocument);
+        m_proxy->setDiagnosticsOnly(m_scopePath == kDiagnostics);
+        m_proxy->setScopePath(m_scopePath == kDiagnostics ? QString() : m_scopePath);
+    }
+
+    void ComplexReportView::updateTypes(bool selectFirst)
+    {
+        const QSignalBlocker blocker(m_types);
+        m_types->clear();
+        m_types->addItem(text(QStringLiteral("全部类型")), QString());
+        const QModelIndex section = scopeIndex();
+        for (int row = 0; row < m_model->rowCount(section) && section.isValid(); ++row)
+        {
+            const QModelIndex type = m_model->index(row, 0, section);
+            if (static_cast<FieldNode::ReportRole>(type.data(ReportPurposeRole).toInt()) == FieldNode::ReportRole::Collection)
+                m_types->addItem(type.data(ReportNameRole).toString(), type.data(ReportPathRole));
+        }
+        int position = m_types->findData(m_typePath);
+        if (selectFirst && m_types->count() > 1) position = 1;
+        if (position < 0) position = 0;
+        m_types->setCurrentIndex(position);
+        m_typePath = m_types->currentData().toString();
+        m_types->setVisible(m_types->count() > 1);
+    }
+
+    QModelIndex ComplexReportView::scopeIndex() const { return m_model->indexForPath(m_scopePath); }
+
+    QModelIndex ComplexReportView::displayRoot() const
+    {
+        const QString path = m_query.isEmpty() && !m_typePath.isEmpty() ? m_typePath : m_scopePath;
+        return m_proxy->mapFromSource(m_model->indexForPath(path));
+    }
+
+    void ComplexReportView::applyNavigation()
+    {
+        if (!m_query.isEmpty())
+        {
+            m_beforeSearch.clear(); // 搜索中换范围时不能把上一范围的阅读位置带到新范围。
+            m_beforeSearchSelected.clear();
+            m_beforeSearchScroll = 0;
+        }
+        m_proxy->setDiagnosticsOnly(m_scopePath == kDiagnostics);
+        m_proxy->setScopePath(m_scopePath == kDiagnostics ? QString() : m_scopePath);
+        m_tree->setRootIndex(displayRoot());
+        if (!m_query.isEmpty()) expandSearchGroups();
+        else if (m_scopePath == kDiagnostics) m_tree->expandToDepth(0);
+        m_tree->scrollToTop();
+        m_rawDirty = true;
+        updatePresentation();
+    }
+
+    // 多词搜索在当前范围所有类型中进行；只展开到字段列表，不把每个命中的属性再全部铺开。
     void ComplexReportView::setSearchText(const QString& query)
     {
-        const QString next = query.trimmed(); // 原搜索字段仍负责输入和完整文档导出。
+        const QString next = query.trimmed();
         if (next == m_query) return;
         if (m_query.isEmpty() && !next.isEmpty())
         {
             m_beforeSearch = expandedPaths();
             m_beforeSearchSelected = m_tree->currentIndex().data(ReportPathRole).toString();
+            m_beforeSearchColumn = qMax(0, m_tree->currentIndex().column());
             m_beforeSearchScroll = m_tree->verticalScrollBar()->value();
         }
         m_query = next;
-        m_proxy->setFilterFixedString(next);
-        m_bulkExpansion = true;
-        if (!next.isEmpty()) m_tree->expandAll();
+        m_proxy->setQuery(next);
+        m_tree->setRootIndex(displayRoot());
+        if (!next.isEmpty()) expandSearchGroups();
         else
         {
             m_tree->collapseAll();
             restoreExpansion(m_beforeSearch);
             const QModelIndex selected = m_proxy->mapFromSource(m_model->indexForPath(m_beforeSearchSelected));
-            if (selected.isValid()) m_tree->setCurrentIndex(selected);
-            m_tree->doItemsLayout(); // 先恢复真实行范围，再恢复阅读位置，避免旧过滤范围把值夹到零。
+            if (selected.isValid()) m_tree->setCurrentIndex(selected.siblingAtColumn(m_beforeSearchColumn));
+            m_tree->doItemsLayout();
             m_tree->verticalScrollBar()->setValue(m_beforeSearchScroll);
             m_beforeSearch.clear();
-            m_beforeSearchSelected.clear();
         }
-        m_bulkExpansion = false;
-        updateEmptyState();
+        updatePresentation();
     }
 
-    void ComplexReportView::updateEmptyState()
+    void ComplexReportView::expandSearchGroups()
     {
-        const bool empty = m_proxy->rowCount() == 0;
-        m_empty->setText(ks::i18n::sourceText(m_query.isEmpty()
-            ? QStringLiteral("暂无报告数据") : QStringLiteral("没有匹配的属性")));
-        m_tree->setVisible(!empty);
-        m_empty->setVisible(empty);
+        visit(m_proxy, displayRoot(), [this](const QModelIndex& index)
+        {
+            const auto purpose = static_cast<FieldNode::ReportRole>(index.data(ReportPurposeRole).toInt());
+            const auto kind = static_cast<ReportNodeKind>(index.data(ReportKindRole).toInt());
+            if (purpose == FieldNode::ReportRole::Collection || kind == ReportNodeKind::Section)
+                m_tree->setExpanded(index, true);
+        });
     }
 
-    void ComplexReportView::updateSummary()
+    void ComplexReportView::setCurrentExpanded(bool expanded)
     {
-        const auto sections = m_model->sectionIndexes(); // 仅少量顶层分区创建跳转按钮。
-        while (m_sections.size() > sections.size())
+        visit(m_proxy, displayRoot(), [this, expanded](const QModelIndex& index)
         {
-            auto* button = m_sections.takeLast();
-            m_summaryLayout->removeWidget(button);
-            delete button;
+            if (m_proxy->rowCount(index) > 0) m_tree->setExpanded(index, expanded);
+        });
+    }
+
+    void ComplexReportView::updatePresentation()
+    {
+        const bool raw = m_modes->currentIndex() == 1;
+        const bool empty = m_proxy->rowCount(displayRoot()) == 0;
+        const bool diagnostics = m_scopePath == kDiagnostics;
+        if (diagnostics != m_diagnosticColumns)
+        {
+            // 用户拖动的列宽保存在对应模式，普通主题/数据刷新不会覆盖手工调整。
+            if (m_diagnosticColumns) m_diagnosticNameWidth = m_tree->columnWidth(0);
+            else m_catalogNameWidth = m_tree->columnWidth(0);
+            m_diagnosticColumns = diagnostics;
+            m_tree->setColumnHidden(1, diagnostics);
+            m_tree->setColumnWidth(0, diagnostics ? m_diagnosticNameWidth : m_catalogNameWidth);
         }
-        while (m_sections.size() < sections.size())
+        m_tree->setVisible(!raw && !empty);
+        m_empty->setText(text(m_query.isEmpty() ? QStringLiteral("暂无报告数据") : QStringLiteral("没有匹配的属性")));
+        m_empty->setVisible(!raw && empty);
+        m_types->setEnabled(raw || m_query.isEmpty());
+        m_count->setText(raw ? text(QStringLiteral("完整原文")) : !m_query.isEmpty()
+            ? text(QStringLiteral("%1 项匹配")).arg(matches(m_proxy, displayRoot()))
+            : text(QStringLiteral("%1 行")).arg(m_proxy->rowCount(displayRoot())));
+        if (m_search)
         {
-            auto* button = new QToolButton(m_summary);
-            button->setProperty("ksword_theme_icon_managed", true); // 状态点由实际来源着色，通用图标主题不能改成蓝色。
-            button->setToolButtonStyle(Qt::ToolButtonTextBesideIcon); // 状态与分区名同时可读，不能退化成孤立色点。
-            button->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
-            ApplyFlatButtonTheme(button, FlatButtonTone::Neutral, FlatButtonAppearance::Flat);
-            NormalizeToolbarControl(button);
-            connect(button, &QToolButton::clicked, this, [this, button]()
+            m_search->setEnabled(!raw);
+            m_search->setPlaceholderText(text(raw ? QStringLiteral("原文中使用 Ctrl+F 查找")
+                : QStringLiteral("搜索当前范围的字段、偏移或类型")));
+        }
+        if (raw)
+        {
+            if (!m_editor)
             {
-                jumpToSection(button->property("ksword_report_section_path").toString());
-            });
-            m_summaryLayout->insertWidget(m_summaryLayout->count() - 1, button);
-            m_sections.append(button);
+                m_editor = new CodeEditorWidget(this);
+                m_editor->setObjectName(QStringLiteral("ksword_report_raw"));
+                m_editor->setProperty("ksword_detail_keep_layout", true);
+                m_editor->setReadOnly(true);
+                m_editor->setReadOnlyExportEnabled(true);
+                m_editor->setMaximumBlockCount(0);
+                m_editor->setWordWrapEnabled(false);
+                m_layout->addWidget(m_editor, 1);
+            }
+            updateRawText();
+            m_editor->show();
         }
-        m_moreMenu->clear();
-        for (int row = 0; row < sections.size(); ++row)
-        {
-            const QModelIndex index = sections.at(row);
-            const QString title = index.data(ReportNameRole).toString();
-            const QString path = index.data(ReportPathRole).toString();
-            const QString shortTitle = index.data(ReportSummaryRole).toString();
-            const QIcon icon = reportStatusIcon(static_cast<FieldNode::Status>(index.data(ReportStatusRole).toInt()));
-            auto* button = m_sections.at(row);
-            button->setText(button->fontMetrics().elidedText(shortTitle.isEmpty() ? title : shortTitle, Qt::ElideRight, 140));
-            button->setToolTip(title);
-            button->setIcon(icon);
-            button->setProperty("ksword_report_section_path", path);
-            auto* action = m_moreMenu->addAction(icon, title);
-            connect(action, &QAction::triggered, this, [this, path]() { jumpToSection(path); });
-        }
-        m_summary->setVisible(!sections.isEmpty());
-        fitSummary();
+        else if (m_editor) m_editor->hide();
     }
 
-    void ComplexReportView::fitSummary()
+    // 原文从同一规范快照按范围序列化，不受字段搜索和折叠影响，也不维护另一份业务来源。
+    void ComplexReportView::updateRawText()
     {
-        int remaining = m_summary->width() - 16 - m_summaryLabel->sizeHint().width()
-            - m_more->sizeHint().width() - 12; // 总览过长时进入同一更多菜单，不出现横向滚动。
-        bool overflow = false;
-        for (auto* button : m_sections)
-        {
-            const int needed = button->sizeHint().width() + 6;
-            const bool visible = !overflow && needed <= remaining;
-            button->setVisible(visible);
-            if (visible) remaining -= needed;
-            else overflow = true;
-        }
-        m_more->setVisible(overflow);
+        if (!m_editor || !m_rawDirty) return;
+        m_editor->replaceRawText(currentScopeText(), false);
+        m_rawDirty = false;
     }
 
-    void ComplexReportView::jumpToSection(const QString& path)
+    QString ComplexReportView::currentScopeText() const
     {
-        const QModelIndex index = m_proxy->mapFromSource(m_model->indexForPath(path));
-        if (!index.isValid()) return; // 被搜索过滤的分区不能跳到错误行。
-        m_tree->setExpanded(index, true);
-        m_tree->setCurrentIndex(index);
-        m_tree->scrollTo(index, QAbstractItemView::PositionAtTop);
+        QString raw;
+        if (m_scopePath == kDiagnostics)
+        {
+            FieldDocument diagnostics;
+            for (const FieldNode& node : m_model->document().nodes)
+                if (node.reportRole != FieldNode::ReportRole::Catalog) diagnostics.nodes.append(node);
+            raw = diagnostics.toPlainText(true);
+        }
+        else raw = m_model->textForIndex(m_model->indexForPath(m_typePath.isEmpty() ? m_scopePath : m_typePath));
+        return raw;
     }
 
-    void ComplexReportView::copyNode(const QModelIndex& index)
+    void ComplexReportView::copyCell(const QModelIndex& index, bool wholeRecord)
     {
         if (!index.isValid()) return;
-        const QString text = m_model->textForIndex(m_proxy->mapToSource(index)); // 点击时取完整规范子树。
-        if (auto* clipboard = QApplication::clipboard()) clipboard->setText(text);
+        const QString value = wholeRecord ? m_model->textForIndex(m_proxy->mapToSource(index)) : index.data().toString();
+        if (auto* clipboard = QApplication::clipboard()) clipboard->setText(value);
     }
 
     void ComplexReportView::showContextMenu(const QPoint& position)
     {
         const QModelIndex index = m_tree->indexAt(position);
         if (!index.isValid()) return;
-        const QString text = m_model->textForIndex(m_proxy->mapToSource(index)); // 菜单前保存，刷新不能使索引悬空。
-        const QPoint globalPosition = m_tree->viewport()->mapToGlobal(position);
-        QMenu menu; // 嵌套 exec 中父窗可销毁，栈上菜单不能再交给父对象 delete。
-        connect(this, &QObject::destroyed, &menu, &QMenu::close);
+        const QString cell = index.data().toString();
+        const QString record = m_model->textForIndex(m_proxy->mapToSource(index));
+        const QPoint global = m_tree->viewport()->mapToGlobal(position);
+        QMenu menu;
         menu.setStyleSheet(KswordTheme::ContextMenuStyle());
-        auto* copy = menu.addAction(ks::i18n::sourceText(QStringLiteral("复制")));
-        if (menu.exec(globalPosition) == copy)
-            if (auto* clipboard = QApplication::clipboard()) clipboard->setText(text);
+        connect(this, &QObject::destroyed, &menu, &QMenu::close);
+        auto* copy = menu.addAction(text(QStringLiteral("复制单元格")));
+        copy->setShortcut(QKeySequence::Copy);
+        auto* copyRecord = menu.addAction(text(QStringLiteral("复制完整字段")));
+        copyRecord->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+C")));
+        const QAction* chosen = menu.exec(global);
+        if (chosen == copy || chosen == copyRecord)
+            if (auto* clipboard = QApplication::clipboard()) clipboard->setText(chosen == copy ? cell : record);
     }
 
+    // 主题只更新共享外观和入口文字；不重建数据、原文或每行图标。
     void ComplexReportView::refreshTheme()
     {
-        m_summaryLabel->setText(ks::i18n::sourceText(QStringLiteral("摘要")));
-        m_more->setText(ks::i18n::sourceText(QStringLiteral("更多分区")));
-        m_more->setToolTip(m_more->text());
-        m_expandAll->setText(ks::i18n::sourceText(m_expandAll->isChecked()
-            ? QStringLiteral("全部收起") : QStringLiteral("全部展开")));
-        m_expandAll->setToolTip(m_expandAll->text());
-        const QString menuStyle = KswordTheme::ContextMenuStyle();
-        if (m_moreMenu->styleSheet() != menuStyle) m_moreMenu->setStyleSheet(menuStyle);
-        const QString style = QStringLiteral(
-            "QWidget#ksword_report_summary{background:%1;border:0;border-radius:8px;}"
-            "QTreeView#ksword_report_tree{background:%2;border:0;outline:0;}"
-            "QTreeView#ksword_report_tree::branch{background:transparent;}")
-            .arg(KswordTheme::SurfaceAltColorHex(), KswordTheme::WindowColorHex());
-        // 精确声明共享非按钮表面块，不能让容器底色被误判为页面接管了按钮交互色。
-        setProperty("ksword_primary_style_block", style);
-        if (styleSheet() != style) setStyleSheet(style);
-        QPalette palette = m_tree->palette(); // 原生分支与焦点同样拥有可读前景。
-        palette.setColor(QPalette::Base, KswordTheme::WindowColor());
-        palette.setColor(QPalette::Text, KswordTheme::TextPrimaryColor());
-        palette.setColor(QPalette::WindowText, KswordTheme::TextPrimaryColor());
-        if (m_tree->palette() != palette) m_tree->setPalette(palette);
-        m_tree->viewport()->update();
-        updateSummary();
-        updateEmptyState();
-    }
-
-    void ComplexReportView::resizeEvent(QResizeEvent* event)
-    {
-        QWidget::resizeEvent(event);
-        if (!m_resizeLayoutPending)
-        {
-            m_resizeLayoutPending = true;
-            QTimer::singleShot(30, this, [this]()
-            {
-                m_resizeLayoutPending = false;
-                m_delegate->invalidateMetrics();
-                m_tree->doItemsLayout(); // 连续缩放合并重测，不逐个 Resize 冷测展开全文。
-            });
-        }
-        fitSummary();
-    }
-
-    void ComplexReportView::showEvent(QShowEvent* event)
-    {
-        QWidget::showEvent(event);
-        fitSummary();
+        m_scopes->setAccessibleName(text(QStringLiteral("报告范围")));
+        m_scopes->setToolTip(text(QStringLiteral("直接切换报告范围")));
+        m_types->setAccessibleName(text(QStringLiteral("结构类型")));
+        m_types->setToolTip(text(QStringLiteral("直接选择类型；搜索时自动查找当前范围的所有类型")));
+        m_diagnostics->setToolTip(text(QStringLiteral("查看运行状态、身份校验和采样诊断")));
+        m_modes->setTabText(0, text(QStringLiteral("字段")));
+        m_modes->setTabText(1, text(QStringLiteral("原文")));
+        m_modes->setTabToolTip(0, text(QStringLiteral("紧凑字段表；单击字段名展开附加属性，Ctrl+C 复制当前单元格")));
+        m_modes->setTabToolTip(1, text(QStringLiteral("查看当前范围完整原文，支持搜索、选择复制和导出")));
+        m_actions->setText(text(QStringLiteral("更多")));
+        m_actions->setToolTip(text(QStringLiteral("展开、收起与复制当前范围")));
+        const auto actions = m_actions->menu()->actions();
+        actions.at(0)->setText(text(QStringLiteral("展开当前范围")));
+        actions.at(1)->setText(text(QStringLiteral("收起当前范围")));
+        actions.at(3)->setText(text(QStringLiteral("复制当前范围")));
+        m_actions->menu()->setStyleSheet(KswordTheme::ContextMenuStyle());
+        m_count->setToolTip(text(QStringLiteral("当前范围与搜索结果数量；原始总数和来源可在原文中查看")));
+        ApplyTablePresentation(m_tree);
+        updatePresentation();
     }
 }

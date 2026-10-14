@@ -101,7 +101,7 @@ namespace
     class DetailFieldProjection final : public QWidget
     {
     public:
-        DetailFieldProjection(ks::ui::StructuredFieldView* source, QWidget* parent, bool scrollBody)
+        DetailFieldProjection(ks::ui::StructuredFieldView* source, QWidget* parent, bool scrollBody, QWidget* toolbarPrefix)
             : QWidget(parent), m_source(source)
         {
             const bool embeddedSource = parent == source; // 原source本身是Tab/Stack页时保留其业务身份。
@@ -117,6 +117,7 @@ namespace
             root->setSpacing(12);
             auto* tools = new QHBoxLayout();
             root->addLayout(tools);
+            if (toolbarPrefix) tools->addWidget(toolbarPrefix); // 业务刷新与文档操作共用一行，避免重复页头占正文高度。
             // 原搜索、复制和导出控件直接复用，所有既有信号和文档导出语义保留。
             m_search = source->findChild<QLineEdit*>();
             if (m_search)
@@ -139,7 +140,10 @@ namespace
             {
                 // 复杂报告保留原规范源和工具动作，仅正文改为模型视口，不进入展平卡片路径。
                 m_complexReport = new ks::ui::ComplexReportView(this);
-                tools->insertWidget(m_search ? 1 : 0, m_complexReport->expandAllButton());
+                tools->addWidget(m_complexReport->actionsButton());
+                m_complexReport->bindSearchField(m_search);
+                root->setSpacing(6);
+                if (m_search) m_search->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
                 ks::ui::NormalizeToolbarRow(tools);
                 root->addWidget(m_complexReport, 1);
             }
@@ -533,7 +537,7 @@ namespace
     };
 }
 
-QWidget* ks::ui::CreateDetailFieldProjection(StructuredFieldView* source, QWidget* parent, bool scrollBody)
+QWidget* ks::ui::CreateDetailFieldProjection(StructuredFieldView* source, QWidget* parent, bool scrollBody, QWidget* toolbarPrefix)
 {
     if (!source)
     {
@@ -553,5 +557,5 @@ QWidget* ks::ui::CreateDetailFieldProjection(StructuredFieldView* source, QWidge
             return child;
         }
     }
-    return new DetailFieldProjection(source, parent ? parent : source->parentWidget(), scrollBody);
+    return new DetailFieldProjection(source, parent ? parent : source->parentWidget(), scrollBody, toolbarPrefix);
 }

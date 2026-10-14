@@ -119,7 +119,7 @@ namespace
         QSignalSpy resets(&model, &QAbstractItemModel::modelReset);
         QSignalSpy changes(&model, &QAbstractItemModel::dataChanged);
         expect(model.setDocument(document), "initial nonempty snapshot resets model");
-        expect(model.rowCount() == 1 && model.columnCount() == 1, "report has one root and one painted column");
+        expect(model.rowCount() == 1 && model.columnCount() == 3, "report exposes three independently readable columns");
         const QModelIndex root = model.index(0, 0);
         const QModelIndex type = model.index(1, 0, root);
         const QModelIndex field = model.index(1, 0, type);
@@ -140,7 +140,7 @@ namespace
         expect(path.contains(QStringLiteral("_PEB.Flag")), "stable path keeps original qualified field name");
         expect(offset.data(ks::ui::ReportSearchRole).toString().contains(QStringLiteral("_PEB"))
             && offset.data(ks::ui::ReportSearchRole).toString().contains(QStringLiteral("0x10")), "search includes ancestors and complete values");
-        expect(!model.index(-1, 0).isValid() && !model.index(0, 1).isValid(), "invalid row and column cannot produce indexes");
+        expect(!model.index(-1, 0).isValid() && !model.index(0, 3).isValid(), "invalid row and column cannot produce indexes");
         resets.clear();
         changes.clear();
         document.nodes[0].children[1].children[1].children[0].value = QStringLiteral("0x20");
@@ -420,6 +420,87 @@ namespace
     }
 }
 
+namespace
+{
+    // 新的直接浏览必须能独立复制列值，隐藏重复属性，并在空匹配时仍严格保持选择的范围。
+    void compactBrowsingContract()
+    {
+        FieldDocument document = catalogDocument();
+        auto& catalog = document.nodes[0];
+        catalog.reportRole = FieldNode::ReportRole::Catalog;
+        catalog.summaryLabel = QStringLiteral("进程结构");
+        catalog.preferredScope = true;
+        catalog.children[0].reportRole = FieldNode::ReportRole::Metadata;
+        auto& type = catalog.children[1];
+        type.reportRole = FieldNode::ReportRole::Collection;
+        type.reportedCount = 1;
+        type.children[0].reportRole = FieldNode::ReportRole::Metadata;
+        auto& field = type.children[1];
+        field.reportRole = FieldNode::ReportRole::Record;
+        for (auto& property : field.children) property.reportRole = FieldNode::ReportRole::Metadata;
+        FieldNode alias;
+        alias.name = QStringLiteral("DynData");
+        alias.value = QStringLiteral("PebFlags");
+        field.children.append(alias);
+        FieldNode other = catalog;
+        other.name = QStringLiteral("OtherCatalog");
+        other.summaryLabel = QStringLiteral("线程结构");
+        other.preferredScope = false;
+        other.children[1].children[1].name = QStringLiteral("_PEB.SecondOnly");
+        document.nodes.append(other);
+        document.section(QStringLiteral("Runtime"));
+        document.nodes.last().status = FieldNode::Status::Warning;
+        document.note(QStringLiteral("Driver unavailable"));
+
+        ComplexReportModel model;
+        QAbstractItemModelTester modelTester(&model, QAbstractItemModelTester::FailureReportingMode::Fatal);
+        model.setDocument(document);
+        const QModelIndex root = model.index(0, 0);
+        const QModelIndex typeIndex = model.index(1, 0, root);
+        const QModelIndex fieldIndex = model.index(1, 0, typeIndex);
+        expect(fieldIndex.data().toString() == QStringLiteral("Flag"), "compact name omits the repeated type qualifier");
+        expect(fieldIndex.siblingAtColumn(1).data().toString() == QStringLiteral("0x10"), "offset is an independently copyable real column");
+        expect(fieldIndex.siblingAtColumn(2).data().toString() == QStringLiteral("uint32"), "type is an independently copyable real column");
+        expect(fieldIndex.siblingAtColumn(1).data(Qt::AccessibleTextRole).toString() == QStringLiteral("0x10"),
+            "accessibility reads the selected column instead of repeating the full row");
+        expect(typeIndex.data(ks::ui::ReportReportedCountRole).toInt() == 1, "type count is supplied field count, not property count");
+        expect(root.data(ks::ui::ReportPreferredScopeRole).toBool(), "producer specifies the default scope");
+        expect(model.rowCount(fieldIndex.siblingAtColumn(1)) == 0, "only the name column owns child properties");
+
+        ks::ui::ComplexReportFilter proxy;
+        proxy.setSourceModel(&model);
+        QAbstractItemModelTester proxyTester(&proxy, QAbstractItemModelTester::FailureReportingMode::Fatal);
+        const QString scope = root.data(ks::ui::ReportPathRole).toString();
+        proxy.setScopePath(scope);
+        expect(proxy.rowCount() == 1, "scope selection removes unrelated catalogs and diagnostics");
+        const QModelIndex visibleRoot = proxy.mapFromSource(root);
+        const QModelIndex visibleType = proxy.mapFromSource(typeIndex);
+        const QModelIndex visibleField = proxy.mapFromSource(fieldIndex);
+        expect(proxy.rowCount(visibleRoot) == 1 && proxy.rowCount(visibleType) == 1, "metadata does not consume browsing rows");
+        expect(proxy.rowCount(visibleField) == 1 && proxy.index(0, 0, visibleField).data().toString() == QStringLiteral("DynData"),
+            "expanded record only shows its additional property");
+        expect(model.textForIndex(fieldIndex).contains(QStringLiteral("Offset: 0x10"))
+            && model.textForIndex(fieldIndex).contains(QStringLiteral("Type: uint32")), "canonical original retains the projected metadata");
+        proxy.setQuery(QStringLiteral("pEb 0x10"));
+        expect(proxy.mapFromSource(fieldIndex).isValid(), "multiple search terms match name context and offset without a qualified path");
+        proxy.setQuery(QStringLiteral("进程结构 0x10"));
+        expect(proxy.mapFromSource(fieldIndex).isValid(), "displayed scope label participates in the same canonical search context");
+        proxy.setQuery(QStringLiteral("SecondOnly"));
+        expect(proxy.rowCount() == 0, "empty scoped search never falls back to another matching catalog");
+        proxy.setScopePath(QString());
+        expect(proxy.rowCount() == 1 && proxy.index(0, 0).data().toString() == QStringLiteral("线程结构"),
+            "all-report search deliberately reaches the other catalog");
+        proxy.setQuery(QString());
+        proxy.setDiagnosticsOnly(true);
+        expect(proxy.rowCount() == 1 && proxy.index(0, 0).data().toString() == QStringLiteral("Runtime"),
+            "diagnostic navigation excludes entire catalog subtrees");
+        QPersistentModelIndex offsetCell(fieldIndex.siblingAtColumn(1));
+        document.nodes[0].children[1].children[1].children[0].value = QStringLiteral("0x18");
+        expect(!model.setDocument(document) && offsetCell.isValid() && offsetCell.data().toString() == QStringLiteral("0x18"),
+            "value refresh preserves the independent offset cell identity");
+    }
+}
+
 int main(int argc, char** argv)
 {
     QCoreApplication application(argc, argv); // 无 QApplication、窗口、离屏平台或 QWidget 对象。
@@ -429,6 +510,7 @@ int main(int argc, char** argv)
     duplicateNames();
     longValueTransitions();
     canonicalCopy();
+    compactBrowsingContract();
     recordScale(15000);
     recordScale(30000);
     std::printf("COMPLEX_REPORT_MODEL_RESULT checks=%d failures=%d\n", checks, failures);

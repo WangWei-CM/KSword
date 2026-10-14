@@ -4,6 +4,7 @@
 #include <QHash>
 #include <QStringList>
 #include <QUrl>
+#include <QRegularExpression>
 #include <algorithm>
 #include <utility>
 
@@ -25,6 +26,11 @@ namespace ks::ui
             QString value; // 完整值，不截断复制、搜索或行内详情。
             QString search; // 原名、完整值和祖先上下文。
             QString summary; // 生产者指定的摘要短标题或原分区名。
+            QString offset; // 来自规范 Offset/RVA 属性的独立偏移列。
+            QString type; // 来自规范 Type 属性的独立类型列。
+            FieldNode::ReportRole purpose = FieldNode::ReportRole::Content;
+            int reportedCount = -1; // 资料声明的字段数，与直接属性数分开。
+            bool preferredScope = false; // 当前业务对象的默认目录。
             FieldNode::Status status = FieldNode::Status::Neutral; // 只接受生产者的真实语义。
             int count = 0; // 规范文档直接子项数，不把合成长值行计入业务数量。
             bool expanded = false; // 首次展开策略，不在值刷新时重设视图状态。
@@ -127,6 +133,21 @@ namespace ks::ui
                     + QLatin1Char('\n') + entry.value;
                 entry.summary = node.summaryLabel.isEmpty()
                     ? localized(node.name, node.translateName) : localized(node.summaryLabel, true);
+                entry.search += QLatin1Char('\n') + entry.summary; // 显示的短标题同样可搜索，后代继承完整上下文。
+                entry.purpose = node.reportRole;
+                entry.reportedCount = node.reportedCount;
+                entry.preferredScope = node.preferredScope;
+                if (node.kind == FieldNode::Kind::Section)
+                {
+                    for (const FieldNode& property : node.children)
+                    {
+                        if (property.kind != FieldNode::Kind::Field) continue;
+                        if (property.name == QStringLiteral("Offset") || property.name == QStringLiteral("RVA"))
+                            entry.offset = localized(property.value, property.translateValue);
+                        else if (property.name == QStringLiteral("Type"))
+                            entry.type = localized(property.value, property.translateValue);
+                    }
+                }
                 entry.status = node.status;
                 entry.count = static_cast<int>(node.children.size());
                 entry.expanded = node.initiallyExpanded && !node.children.isEmpty();
@@ -191,6 +212,8 @@ namespace ks::ui
         {
             return first.name == second.name && first.value == second.value && first.search == second.search
                 && first.summary == second.summary && first.status == second.status
+                && first.offset == second.offset && first.type == second.type && first.purpose == second.purpose
+                && first.reportedCount == second.reportedCount && first.preferredScope == second.preferredScope
                 && first.count == second.count && first.expanded == second.expanded;
         }
 
@@ -259,7 +282,7 @@ namespace ks::ui
                 {
                     last = rows.at(offset);
                 }
-                emit dataChanged(index(first, 0, parentIndex), index(last, 0, parentIndex));
+                emit dataChanged(index(first, 0, parentIndex), index(last, 2, parentIndex));
             }
         }
         return false;
@@ -269,11 +292,12 @@ namespace ks::ui
     void ComplexReportModel::relocalize()
     {
         setDocument(m_state->snapshot);
+        emit headerDataChanged(Qt::Horizontal, 0, 2);
     }
 
     QModelIndex ComplexReportModel::index(int row, int column, const QModelIndex& parent) const
     {
-        if (row < 0 || column != 0 || (parent.isValid() && (parent.model() != this || parent.column() != 0)))
+        if (row < 0 || column < 0 || column >= 3 || (parent.isValid() && (parent.model() != this || parent.column() != 0)))
         {
             return {};
         }
@@ -322,13 +346,13 @@ namespace ks::ui
 
     int ComplexReportModel::columnCount(const QModelIndex& parent) const
     {
-        // 委托绘制同一完整行；外部模型或非首列不能成为本报告的子树宿主。
-        return parent.isValid() && (parent.model() != this || parent.column() != 0) ? 0 : 1;
+        // 字段、偏移、类型/值是可分别选择复制的真实列；只有首列拥有子树。
+        return parent.isValid() && (parent.model() != this || parent.column() != 0) ? 0 : 3;
     }
 
     QVariant ComplexReportModel::data(const QModelIndex& index, int role) const
     {
-        if (!index.isValid() || index.model() != this || index.column() != 0 || index.internalId() == 0
+        if (!index.isValid() || index.model() != this || index.column() < 0 || index.column() >= 3 || index.internalId() == 0
             || index.internalId() > static_cast<quintptr>(m_state->entries.size()))
         {
             return {};
@@ -337,9 +361,20 @@ namespace ks::ui
         switch (role)
         {
         case Qt::DisplayRole:
+            if (index.column() == 0)
+            {
+                if (entry.kind == ReportNodeKind::Note) return ks::i18n::sourceText(QStringLiteral("说明"));
+                return entry.kind == ReportNodeKind::Section && !entry.summary.isEmpty() ? entry.summary : entry.name;
+            }
+            if (index.column() == 1) return entry.offset;
+            if (!entry.type.isEmpty()) return entry.type;
+            if (entry.reportedCount >= 0)
+                return ks::i18n::sourceText(QStringLiteral("%1 个字段")).arg(entry.reportedCount);
+            return entry.value;
         case ReportNameRole: return entry.name;
         case Qt::ToolTipRole:
-        case Qt::AccessibleTextRole: return entry.name + QLatin1Char('\n') + entry.value;
+            return entry.name + QLatin1Char('\n') + entry.value;
+        case Qt::AccessibleTextRole: return data(index, Qt::DisplayRole); // 每个实际单元格只朗读自身内容。
         case ReportKindRole: return static_cast<int>(entry.kind);
         case ReportValueRole: return entry.value;
         case ReportDepthRole: return entry.depth;
@@ -349,8 +384,19 @@ namespace ks::ui
         case ReportStatusRole: return static_cast<int>(entry.status);
         case ReportSearchRole: return entry.search;
         case ReportSummaryRole: return entry.summary;
+        case ReportPurposeRole: return static_cast<int>(entry.purpose);
+        case ReportReportedCountRole: return entry.reportedCount;
+        case ReportPreferredScopeRole: return entry.preferredScope;
         default: return {};
         }
+    }
+
+    // 三列分别承担定位、比较偏移和读取类型/值，避免把多个值塞在一条不对齐的预览中。
+    QVariant ComplexReportModel::headerData(int section, Qt::Orientation orientation, int role) const
+    {
+        if (orientation != Qt::Horizontal || role != Qt::DisplayRole) return {};
+        const QStringList headers{QStringLiteral("字段"), QStringLiteral("偏移"), QStringLiteral("类型 / 值")};
+        return section >= 0 && section < headers.size() ? ks::i18n::sourceText(headers.at(section)) : QVariant();
     }
 
     Qt::ItemFlags ComplexReportModel::flags(const QModelIndex& index) const
@@ -426,5 +472,52 @@ namespace ks::ui
     const FieldDocument& ComplexReportModel::document() const
     {
         return m_state->snapshot;
+    }
+
+    ComplexReportFilter::ComplexReportFilter(QObject* parent) : QSortFilterProxyModel(parent)
+    {
+        setRecursiveFilteringEnabled(true);
+        setAutoAcceptChildRows(false); // 搜索不自动展开/接受整片属性正文。
+    }
+
+    void ComplexReportFilter::setQuery(const QString& query)
+    {
+        const QStringList terms = query.split(QRegularExpression(QStringLiteral("\\s+")), Qt::SkipEmptyParts);
+        if (terms == m_terms) return;
+        m_terms = terms;
+        invalidateFilter();
+    }
+
+    void ComplexReportFilter::setDiagnosticsOnly(bool enabled)
+    {
+        if (m_diagnosticsOnly == enabled) return;
+        m_diagnosticsOnly = enabled;
+        invalidateFilter();
+    }
+
+    bool ComplexReportFilter::filterAcceptsRow(int row, const QModelIndex& parent) const
+    {
+        const QModelIndex index = sourceModel()->index(row, 0, parent);
+        QModelIndex root = index;
+        while (root.parent().isValid()) root = root.parent();
+        if (!m_scopePath.isEmpty() && root.data(ReportPathRole).toString() != m_scopePath) return false;
+        const auto purpose = static_cast<FieldNode::ReportRole>(index.data(ReportPurposeRole).toInt());
+        if (purpose == FieldNode::ReportRole::Metadata
+            || static_cast<ReportNodeKind>(index.data(ReportKindRole).toInt()) == ReportNodeKind::ValueDetail) return false;
+        if (m_diagnosticsOnly)
+        {
+            if (static_cast<FieldNode::ReportRole>(root.data(ReportPurposeRole).toInt()) == FieldNode::ReportRole::Catalog) return false;
+        }
+        const QString text = index.data(ReportSearchRole).toString();
+        for (const QString& term : m_terms)
+            if (!text.contains(term, Qt::CaseInsensitive)) return false;
+        return true;
+    }
+
+    void ComplexReportFilter::setScopePath(const QString& path)
+    {
+        if (m_scopePath == path) return;
+        m_scopePath = path;
+        invalidateFilter();
     }
 }
