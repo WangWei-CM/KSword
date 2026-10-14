@@ -1847,12 +1847,21 @@ private:
             && m_ownerDock->isProcessActivityTableSnapshotActive() && m_frozenWindowDurationMs > 0.0;
     }
 
-    // 固定实时窗口跨度保证匀速；快照保留提交时跨度，全量留存仍保留全部原始样本。
+    // 全量留存按实际历史扩展跨度、压缩点距；最近模式保持固定跨度，快照优先沿用冻结窗口。
     double windowDurationMs() const
     {
         if (hasFrozenTimelineWindow())
         {
             return m_frozenWindowDurationMs;
+        }
+        if (m_ownerDock->m_activityHistoryMode == ProcessDock::ActivityHistoryMode::All)
+        {
+            // 最小跨度保证空态/单点可绘制；全量模式不读取隐藏的“最近次数”输入。
+            const double minimumDurationMs = 2.0
+                * static_cast<double>(m_ownerDock->refreshIntervalMillisecondsFromInput());
+            const double firstSampleMs = m_ownerDock->m_activitySamples.empty() ? 0.0
+                : static_cast<double>(m_ownerDock->m_activitySamples.front().elapsedMs);
+            return std::max(minimumDurationMs, windowEndMs() - firstSampleMs);
         }
         const int count = m_ownerDock->m_activityHistoryLimitSpin != nullptr
             ? m_ownerDock->m_activityHistoryLimitSpin->value() : 50;
@@ -1894,6 +1903,12 @@ private:
         if (hasFrozenTimelineWindow())
         {
             return m_frozenWindowEndMs;
+        }
+        if (m_ownerDock != nullptr && m_ownerDock->m_activityHistoryMode == ProcessDock::ActivityHistoryMode::All
+            && !m_ownerDock->m_activitySamples.empty())
+        {
+            // 全量轴包含最新已留存点；一个周期的实时绘制延迟不能把它排除在右边界外。
+            return std::max(m_liveEndMs, static_cast<double>(m_ownerDock->m_activitySamples.back().elapsedMs));
         }
         return m_liveEndMs;
     }
@@ -2235,7 +2250,7 @@ private:
     // drawLines：只映射可见时间窗口，缓存值不变；三次曲线保留采样值且不超过相邻峰谷。
     void drawLines(QPainter& painter, const QRectF& plotRect) const
     {
-        const double duration = windowDurationMs(); // 固定跨度给出恒定像素/秒。
+        const double duration = windowDurationMs(); // 全量按历史缩放，最近模式保持恒定像素/秒。
         const double endTime = windowEndMs();
         const double startTime = endTime - duration;
         const auto position = [&](const SeriesPoint& point)
