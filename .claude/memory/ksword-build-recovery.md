@@ -5,6 +5,7 @@
 - Invoke-KSwordBuildCheck.ps1 在仓库 Qt 缺失时使用约定的备用 Qt 路径，仍校验 x64 MSBuild 与 HostX64；不降级到 32 位入口。
 - Windows PowerShell 的 Start-Process -PassThru 对象若未持有底层进程句柄，子进程结束后 ExitCode 可能为空。启动后立即读取 Handle，再等待/刷新/读取 ExitCode；空值必须拒绝，不能转为成功。本轮最终构建明确读回 EXIT_CODE=0。
 - 从带 PowerShell 7 环境的终端启动 Windows PowerShell 5.1，继承的 PSModulePath 可能使 Get-FileHash 模块导入失败；使用 pwsh 启动构建助手并先初始化 x64 VS 开发环境可完成构建与产物核验。
+- 2026-10-14：安装技能中的旧构建脚本缺少宿主门禁，主程序 LTCG 曾进入 HostX86/x64 链接器并触发 `C1002` 堆不足；链接器自动重启 HostX64 后继续生成代码也不能抹掉整体退出码 1。使用仓库 `tools/Invoke-KSwordBuildCheck.ps1`，其构建前验证 MSBuild 的 x64 PE 身份、`PreferredToolArchitecture=x64` 和 `VC_ExecutablePath_x64` 中的 HostX64；安装技能副本不能覆盖仓库的强制构建约定。
 
 ## Qt 运行库部署需要 VS 开发环境
 

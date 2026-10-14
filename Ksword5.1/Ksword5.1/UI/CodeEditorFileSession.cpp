@@ -66,7 +66,8 @@ namespace code_editor_file_session
         else
         {
             // 合法 UTF-8 可以包含 U+FFFD；只在字节解码失败时回退本地编码。
-            QStringDecoder decoder(QStringConverter::Utf8);
+            // 输入是完整文件，不能让流式解码器缓存残缺尾巴并把它误判为有效 UTF-8。
+            QStringDecoder decoder(QStringConverter::Utf8, QStringConverter::Flag::Stateless);
             const QString utf8Text = decoder(fileBytes);
             if (decoder.hasError())
             {

@@ -1,0 +1,87 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <ProjectGuid>{D67615E4-AC97-442F-9BFA-9304E303B950}</ProjectGuid>
+    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+    <Fixture Condition="'$(Fixture)' == ''">Catalog</Fixture>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <PlatformToolset>v143</PlatformToolset>
+    <CharacterSet>Unicode</CharacterSet>
+    <UseDebugLibraries>false</UseDebugLibraries>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <PropertyGroup>
+    <!-- 只使用既有 output 目录；三个入口分别生成二进制，不进入产品工程。 -->
+    <OutDir>$(MSBuildThisFileDirectory)..\..\output\</OutDir>
+    <IntDir>$(OutDir)</IntDir>
+    <TLogLocation>$(IntDir)</TLogLocation>
+    <TrackFileAccess>false</TrackFileAccess>
+    <EnableManagedMinimalRebuild>false</EnableManagedMinimalRebuild>
+    <TargetName Condition="'$(Fixture)' == 'Catalog'">memory_debug_process_catalog_tests</TargetName>
+    <TargetName Condition="'$(Fixture)' == 'Target'">issue216_r3_target</TargetName>
+    <TargetName Condition="'$(Fixture)' == 'Codec'">code_editor_file_decode_tests</TargetName>
+    <CLToolPath>$(VCToolsInstallDir)bin\Hostx64\x64\</CLToolPath>
+    <LinkToolPath>$(VCToolsInstallDir)bin\Hostx64\x64\</LinkToolPath>
+  </PropertyGroup>
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <WarningLevel>Level4</WarningLevel>
+      <TreatWarningAsError>true</TreatWarningAsError>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>
+      <PreprocessorDefinitions>NOMINMAX;UNICODE;_UNICODE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <DebugInformationFormat>None</DebugInformationFormat>
+      <AdditionalOptions>/utf-8 /Zc:__cplusplus /permissive- %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <Link>
+      <SubSystem>Console</SubSystem>
+      <GenerateDebugInformation>false</GenerateDebugInformation>
+      <LinkIncremental>false</LinkIncremental>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Fixture)' == 'Codec'">
+    <ClCompile>
+      <PreprocessorDefinitions>QT_CORE_LIB;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <ExternalWarningLevel>TurnOffAllWarnings</ExternalWarningLevel>
+      <AdditionalOptions>/external:I"$(KSWORD_QT_DIR)\include" /external:I"$(KSWORD_QT_DIR)\include\QtCore" %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <Link>
+      <AdditionalLibraryDirectories>$(KSWORD_QT_DIR)\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalDependencies>Qt6Core.lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <ClCompile Include="memory_debug_process_catalog_tests.cpp">
+      <ExcludedFromBuild Condition="'$(Fixture)' != 'Catalog'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="..\..\Ksword5.1\Ksword5.1\MemoryDock\MemoryDebugProcessCatalog.cpp">
+      <ExcludedFromBuild Condition="'$(Fixture)' != 'Catalog'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="issue216_r3_target.cpp">
+      <ExcludedFromBuild Condition="'$(Fixture)' != 'Target'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="code_editor_file_decode_tests.cpp">
+      <ExcludedFromBuild Condition="'$(Fixture)' != 'Codec'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="..\..\Ksword5.1\Ksword5.1\UI\CodeEditorFileSession.cpp">
+      <ExcludedFromBuild Condition="'$(Fixture)' != 'Codec'">true</ExcludedFromBuild>
+    </ClCompile>
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <Target Name="ValidateNativeRegressionInputs" BeforeTargets="PrepareForBuild">
+    <Error Condition="'$(Fixture)' != 'Catalog' and '$(Fixture)' != 'Target' and '$(Fixture)' != 'Codec'" Text="Fixture must be Catalog, Target, or Codec." />
+    <Error Condition="!Exists('$(OutDir)')" Text="The existing repository output directory is required." />
+    <Error Condition="!Exists('$(CLToolPath)cl.exe') or !Exists('$(LinkToolPath)link.exe')" Text="HostX64 MSVC is required." />
+    <Error Condition="'$(Fixture)' == 'Codec' and !Exists('$(KSWORD_QT_DIR)\lib\Qt6Core.lib')" Text="KSWORD_QT_DIR must identify an MSVC Qt SDK." />
+    <Message Importance="high" Text="NATIVE_REGRESSION_FIXTURE=$(Fixture) HOST_COMPILER=$(CLToolPath)cl.exe" />
+  </Target>
+</Project>
