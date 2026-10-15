@@ -1,6 +1,7 @@
 #include "../Framework.h"
 #include "MemoryDebugPage.h"
 #include "MemoryDock.WorkbenchServices.h"
+#include "../theme.h"
 #include "../UI/AdaptivePageScroll.h"
 #include "../UI/AsyncUiDispatcher.h"
 #include "../UI/ToolbarMetrics.h"
