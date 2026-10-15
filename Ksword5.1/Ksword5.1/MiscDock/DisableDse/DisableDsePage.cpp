@@ -6,12 +6,15 @@
 #include "../../UI/ParameterWorkspace.h"
 #include "../../UI/ToolbarMetrics.h"
 #include "../../UI/FlatButtonTheme.h"
+#include "../../UI/SegmentedControl.h"
 
 #include "../../Internationalization/LanguageManager.h"
 #include "../../UI/CodeEditorWidget.h"
 #include "../../theme.h"
 
 #include <QApplication>
+#include <QAbstractButton>
+#include <QDesktopServices>
 #include <QEvent>
 #include <QGroupBox>
 #include <QHBoxLayout>
@@ -20,7 +23,9 @@
 #include <QMetaObject>
 #include <QPointer>
 #include <QPushButton>
+#include <QRadioButton>
 #include <QShowEvent>
+#include <QUrl>
 #include <QVBoxLayout>
 
 #include <thread>
@@ -174,6 +179,7 @@ namespace ks::misc
     {
         QWidget::showEvent(event);
         refreshPosture();
+        refreshKsecStrategyAssessment();
     }
 
     void DisableDsePage::changeEvent(QEvent* event)
@@ -191,6 +197,7 @@ namespace ks::misc
                 translatedLines.append(ks::i18n::displayText(line));
             if (m_traceEdit) m_traceEdit->replaceRawText(translatedLines.join(QLatin1Char('\n')));
             updateStateDisplay();
+            updateKsecStrategyDisplay();
         }
         if (event->type() == QEvent::ApplicationPaletteChange
             || event->type() == QEvent::PaletteChange)
@@ -233,20 +240,10 @@ namespace ks::misc
         auto& language = ks::i18n::LanguageManager::instance();
 
         auto* rootLayout = new QVBoxLayout(this);
-        ks::ui::StyleWorkspacePage(this);
-        rootLayout->setSpacing(16);
-
-        // 独立中性色面承载状态、定位和动作；原分组继续负责标题与业务控件。
-        auto wrapSection = [this](QGroupBox* group)
-        {
-            auto* panel = new QWidget(this); // 面板只提供底色与等边留白。
-            auto* panelLayout = new QVBoxLayout(panel);
-            panelLayout->setContentsMargins(16, 16, 16, 16);
-            panelLayout->setSpacing(0);
-            panelLayout->addWidget(group);
-            ks::ui::StylePrimaryContentPanel(panel, false);
-            return panel;
-        };
+        rootLayout->setContentsMargins(0, 0, 0, 0);
+        rootLayout->setSpacing(0);
+        auto* workspace = new ks::ui::ParameterWorkspace(this, 520);
+        rootLayout->addWidget(workspace);
 
         // ===================== 风险横幅 =====================
         m_warningLabel = new QLabel(this);
@@ -256,7 +253,74 @@ namespace ks::misc
             m_warningLabel,
             QStringLiteral("misc.disable_dse.warning"),
             QStringLiteral("高风险功能：本页直接修改内核里 CI.dll!g_CiOptions 的 4 个字节，关闭后系统将接受未签名驱动。该变量在 PatchGuard 的巡检范围内，长时间保持关闭会触发 CRITICAL_STRUCTURE_CORRUPTION 蓝屏。请在加载完目标驱动后立刻点“恢复”，不要让系统长期停在关闭状态。"));
-        rootLayout->addWidget(m_warningLabel);
+        workspace->parameters()->addWidget(m_warningLabel);
+
+        // ===================== KSecDD 引导方案 =====================
+        // 两项上游 PoC 都没有许可证文件，因此这里只按其公开行为独立实现
+        // 前置条件检查与接入设计，不复制上游源码，也不把“检查通过”冒充实际执行。
+        auto* strategyGroup = new QGroupBox(this);
+        language.bindText(
+            strategyGroup,
+            QStringLiteral("misc.disable_dse.ksec.title"),
+            QStringLiteral("KSecDD 驱动加载引导方案"));
+        auto* strategyLayout = new QVBoxLayout(strategyGroup);
+        strategyLayout->setSpacing(8);
+
+        auto* strategyButtonLayout = new QHBoxLayout();
+        strategyButtonLayout->setSpacing(0);
+        m_kexecDdButton = new QRadioButton(QStringLiteral("KExecDD · LSASS"), strategyGroup);
+        m_kexecDdPlusButton = new QRadioButton(QStringLiteral("KexecDDPlus · Server Silo"), strategyGroup);
+        m_kexecDdButton->setChecked(true);
+        language.bindToolTip(
+            m_kexecDdButton,
+            QStringLiteral("misc.disable_dse.ksec.original.tooltip"),
+            QStringLiteral("复用 LSASS 已建立的 KSecDD 连接；要求 LSA Protection/PPL 关闭。"));
+        language.bindToolTip(
+            m_kexecDdPlusButton,
+            QStringLiteral("misc.disable_dse.ksec.plus.tooltip"),
+            QStringLiteral("在 Server Silo 中建立独立 KSecDD 连接；不受 LSA Protection 前置阻断，但有每次启动最多 4 次的硬限制。"));
+        strategyButtonLayout->addWidget(m_kexecDdButton);
+        strategyButtonLayout->addWidget(m_kexecDdPlusButton);
+        auto* strategySurface = ks::ui::InstallSegmentedButtons(
+            strategyButtonLayout,
+            QList<QAbstractButton*>{ m_kexecDdButton, m_kexecDdPlusButton });
+        strategyLayout->addWidget(strategySurface);
+
+        m_ksecStrategySummaryLabel = new QLabel(strategyGroup);
+        m_ksecStrategySummaryLabel->setWordWrap(true);
+        m_ksecStrategySummaryLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
+        strategyLayout->addWidget(m_ksecStrategySummaryLabel);
+
+        m_ksecStrategyDetailLabel = new QLabel(strategyGroup);
+        m_ksecStrategyDetailLabel->setWordWrap(true);
+        m_ksecStrategyDetailLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
+        strategyLayout->addWidget(m_ksecStrategyDetailLabel);
+
+        auto* strategyActionLayout = new QHBoxLayout();
+        strategyActionLayout->setSpacing(8);
+        m_ksecRefreshButton = new QPushButton(strategyGroup);
+        ks::ui::ApplyFlatButtonTheme(m_ksecRefreshButton, ks::ui::FlatButtonTone::Neutral,
+            ks::ui::FlatButtonAppearance::Solid);
+        language.bindText(
+            m_ksecRefreshButton,
+            QStringLiteral("misc.disable_dse.ksec.refresh"),
+            QStringLiteral("检查前置条件"));
+        strategyActionLayout->addWidget(m_ksecRefreshButton);
+
+        m_ksecSourceButton = new QPushButton(strategyGroup);
+        ks::ui::ApplyFlatButtonTheme(m_ksecSourceButton, ks::ui::FlatButtonTone::Neutral,
+            ks::ui::FlatButtonAppearance::Solid);
+        language.bindText(
+            m_ksecSourceButton,
+            QStringLiteral("misc.disable_dse.ksec.source"),
+            QStringLiteral("打开上游项目"));
+        strategyActionLayout->addWidget(m_ksecSourceButton);
+        strategyActionLayout->addStretch(1);
+        ks::ui::NormalizeToolbarRow(strategyActionLayout);
+        strategyLayout->addLayout(strategyActionLayout);
+
+        ks::ui::StyleParameterSection(strategyGroup);
+        workspace->parameters()->addWidget(strategyGroup);
 
         // ===================== 当前状态 =====================
         auto* postureGroup = new QGroupBox(this);
@@ -283,7 +347,7 @@ namespace ks::misc
         postureLayout->addWidget(m_blockLabel);
 
         ks::ui::StyleParameterSection(postureGroup);
-        rootLayout->addWidget(wrapSection(postureGroup));
+        workspace->parameters()->addWidget(postureGroup);
 
         // ===================== 目标定位 =====================
         auto* locationGroup = new QGroupBox(this);
@@ -299,94 +363,111 @@ namespace ks::misc
         m_locationLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
         locationLayout->addWidget(m_locationLabel);
 
+        ks::ui::StyleParameterSection(locationGroup);
+        workspace->parameters()->addWidget(locationGroup);
+
+        auto* traceTitle = new QLabel(workspace);
+        language.bindText(
+            traceTitle,
+            QStringLiteral("misc.disable_dse.trace.title"),
+            QStringLiteral("定位轨迹与事务日志"));
+        traceTitle->setProperty("ksword_detail_section_title", true);
+        workspace->results()->addWidget(traceTitle);
+
         // 定位与事务保留实际时序消息；追加时翻译，语言切换由页面按消息重绘。
-        m_traceEdit = new CodeEditorWidget(locationGroup);
+        m_traceEdit = new CodeEditorWidget(workspace);
         m_traceEdit->setReadOnly(true);
         m_traceEdit->setMinimumHeight(96);
         language.bindToolTip(
             m_traceEdit,
             QStringLiteral("misc.disable_dse.trace.tooltip"),
             QStringLiteral("定位轨迹与事务日志。定位不使用任何硬编码偏移：从导出的 CiInitialize 反汇编找到 CipInitialize，再在其中找写 g_CiOptions 的指令。"));
-        // 定位轨迹承担页面剩余高度，不再将日志压成窄条后留下大块空白。
-        locationLayout->addWidget(m_traceEdit, 1);
-
-        ks::ui::StyleParameterSection(locationGroup);
-        rootLayout->addWidget(wrapSection(locationGroup), 1);
+        workspace->results()->addWidget(m_traceEdit, 1);
 
         // ===================== 操作 =====================
-        auto* actionGroup = new QGroupBox(this);
-        language.bindText(
-            actionGroup,
-            QStringLiteral("misc.disable_dse.action.title"),
-            QStringLiteral("操作"));
-        auto* actionLayout = new QVBoxLayout(actionGroup);
-        actionLayout->setSpacing(8);
-
-        m_pendingLabel = new QLabel(actionGroup);
+        m_pendingLabel = new QLabel(this);
         m_pendingLabel->setWordWrap(true);
         m_pendingLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
         m_pendingLabel->setVisible(false);
-        actionLayout->addWidget(m_pendingLabel);
+        workspace->parameters()->addWidget(m_pendingLabel);
 
-        auto* buttonLayout = new QHBoxLayout();
-        buttonLayout->setSpacing(8);
-
-        m_refreshButton = new QPushButton(actionGroup);
+        m_refreshButton = new QPushButton(workspace);
         ks::ui::ApplyFlatButtonTheme(m_refreshButton, ks::ui::FlatButtonTone::Neutral,
             ks::ui::FlatButtonAppearance::Solid);
         language.bindText(
             m_refreshButton,
             QStringLiteral("misc.disable_dse.action.refresh"),
             QStringLiteral("刷新状态"));
-        buttonLayout->addWidget(m_refreshButton);
+        workspace->actions()->addWidget(m_refreshButton);
 
-        m_locateButton = new QPushButton(actionGroup);
+        m_locateButton = new QPushButton(workspace);
         ks::ui::ApplyFlatButtonTheme(m_locateButton, ks::ui::FlatButtonTone::Neutral,
             ks::ui::FlatButtonAppearance::Solid);
         language.bindText(
             m_locateButton,
             QStringLiteral("misc.disable_dse.action.locate"),
             QStringLiteral("定位并校验"));
-        buttonLayout->addWidget(m_locateButton);
+        workspace->actions()->addWidget(m_locateButton);
 
-        m_disableButton = new QPushButton(actionGroup);
+        m_disableButton = new QPushButton(workspace);
         ks::ui::ApplyFlatButtonTheme(m_disableButton, ks::ui::FlatButtonTone::Danger,
             ks::ui::FlatButtonAppearance::Solid);
         language.bindText(
             m_disableButton,
             QStringLiteral("misc.disable_dse.action.disable"),
             QStringLiteral("关闭签名强制"));
-        buttonLayout->addWidget(m_disableButton);
+        workspace->actions()->addWidget(m_disableButton);
 
-        m_restoreButton = new QPushButton(actionGroup);
+        m_restoreButton = new QPushButton(workspace);
         ks::ui::ApplyFlatButtonTheme(m_restoreButton, ks::ui::FlatButtonTone::Accent,
             ks::ui::FlatButtonAppearance::Solid);
         language.bindText(
             m_restoreButton,
             QStringLiteral("misc.disable_dse.action.restore"),
             QStringLiteral("恢复原值"));
-        buttonLayout->addWidget(m_restoreButton);
+        workspace->actions()->addWidget(m_restoreButton);
 
-        buttonLayout->addStretch(1);
-        ks::ui::NormalizeToolbarRow(buttonLayout);
-        actionLayout->addLayout(buttonLayout);
+        workspace->actions()->addStretch(1);
+        ks::ui::NormalizeToolbarRow(workspace->actions());
 
-        m_resultLabel = new QLabel(actionGroup);
+        m_resultLabel = new QLabel(workspace);
         m_resultLabel->setWordWrap(true);
         m_resultLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
-        actionLayout->addWidget(m_resultLabel);
+        workspace->results()->addWidget(m_resultLabel);
 
-        ks::ui::StyleParameterSection(actionGroup);
-        rootLayout->addWidget(wrapSection(actionGroup));
-
-        // 只登记本页的日志，QSS 与 palette 同步避免编辑器继续采样透明黑底。
-        ks::ui::StyleWorkspaceTextViews(this);
+        workspace->finish();
 
         applyBannerStyle();
     }
 
     void DisableDsePage::initializeConnections()
     {
+        connect(m_kexecDdButton, &QRadioButton::toggled, this, [this](const bool checked) {
+            if (!checked)
+            {
+                return;
+            }
+            m_ksecStrategy = disable_dse::KsecDdStrategy::LsassInjection;
+            refreshKsecStrategyAssessment();
+        });
+        connect(m_kexecDdPlusButton, &QRadioButton::toggled, this, [this](const bool checked) {
+            if (!checked)
+            {
+                return;
+            }
+            m_ksecStrategy = disable_dse::KsecDdStrategy::ServerSilo;
+            refreshKsecStrategyAssessment();
+        });
+        connect(m_ksecRefreshButton, &QPushButton::clicked, this, [this]() {
+            refreshKsecStrategyAssessment();
+        });
+        connect(m_ksecSourceButton, &QPushButton::clicked, this, [this]() {
+            const QUrl sourceUrl(
+                m_ksecStrategy == disable_dse::KsecDdStrategy::LsassInjection
+                    ? QStringLiteral("https://github.com/floesen/KExecDD")
+                    : QStringLiteral("https://github.com/scrt/KexecDDPlus"));
+            (void)QDesktopServices::openUrl(sourceUrl);
+        });
         connect(m_refreshButton, &QPushButton::clicked, this, [this]() {
             refreshPosture();
         });
@@ -428,6 +509,46 @@ namespace ks::misc
                     + m_posture.failureText,
                 true);
         }
+    }
+
+    void DisableDsePage::refreshKsecStrategyAssessment()
+    {
+        m_ksecAssessment = disable_dse::assessKsecDdStrategy(m_ksecStrategy);
+        updateKsecStrategyDisplay();
+    }
+
+    void DisableDsePage::updateKsecStrategyDisplay()
+    {
+        if (m_ksecStrategySummaryLabel == nullptr || m_ksecStrategyDetailLabel == nullptr)
+        {
+            return;
+        }
+
+        if (m_ksecAssessment.summaryText.isEmpty())
+        {
+            m_ksecStrategySummaryLabel->setText(
+                ks::i18n::text(
+                    QStringLiteral("misc.disable_dse.ksec.unchecked"),
+                    QStringLiteral("尚未检查当前方案的前置条件。")));
+            m_ksecStrategyDetailLabel->clear();
+            return;
+        }
+
+        m_ksecStrategySummaryLabel->setText(
+            ks::i18n::displayText(m_ksecAssessment.summaryText));
+        m_ksecStrategySummaryLabel->setStyleSheet(
+            QStringLiteral("color:%1;font-weight:650;")
+                .arg(m_ksecAssessment.prerequisitesMet
+                    ? KswordTheme::SuccessHex() : KswordTheme::WarningHex()));
+
+        QStringList translatedDetails;
+        for (const QString& detail : m_ksecAssessment.detailLines)
+        {
+            translatedDetails.append(ks::i18n::displayText(detail));
+        }
+        m_ksecStrategyDetailLabel->setText(translatedDetails.join(QLatin1Char('\n')));
+        m_ksecStrategyDetailLabel->setStyleSheet(
+            QStringLiteral("color:%1;").arg(KswordTheme::TextSecondaryHex()));
     }
 
     void DisableDsePage::runLocate()
@@ -699,6 +820,22 @@ namespace ks::misc
             m_restoreButton->setEnabled(
                 allowed && m_valueMatched && m_hasSavedOriginal
                 && m_hasCurrentValue && m_currentValue != m_savedOriginalValue);
+        }
+        if (m_ksecRefreshButton != nullptr)
+        {
+            m_ksecRefreshButton->setEnabled(!m_busy);
+        }
+        if (m_ksecSourceButton != nullptr)
+        {
+            m_ksecSourceButton->setEnabled(true);
+        }
+        if (m_kexecDdButton != nullptr)
+        {
+            m_kexecDdButton->setEnabled(!m_busy);
+        }
+        if (m_kexecDdPlusButton != nullptr)
+        {
+            m_kexecDdPlusButton->setEnabled(!m_busy);
         }
     }
 

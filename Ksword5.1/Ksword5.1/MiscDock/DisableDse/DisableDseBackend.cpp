@@ -564,6 +564,151 @@ namespace ks::misc::disable_dse
         return posture;
     }
 
+    KsecDdAssessment assessKsecDdStrategy(const KsecDdStrategy strategy)
+    {
+        KsecDdAssessment assessment;
+        assessment.strategy = strategy;
+        assessment.buildNumber = currentBuildNumber();
+#if defined(_M_X64)
+        assessment.supportedArchitecture = true;
+#endif
+
+        HANDLE token = nullptr;
+        if (::OpenProcessToken(::GetCurrentProcess(), TOKEN_QUERY, &token) != FALSE)
+        {
+            TOKEN_ELEVATION elevation{};
+            DWORD returned = 0;
+            if (::GetTokenInformation(
+                    token,
+                    TokenElevation,
+                    &elevation,
+                    sizeof(elevation),
+                    &returned) != FALSE)
+            {
+                assessment.elevated = elevation.TokenIsElevated != 0;
+            }
+            ::CloseHandle(token);
+        }
+
+        DWORD runAsPpl = 0;
+        DWORD runAsPplSize = sizeof(runAsPpl);
+        const LSTATUS runAsPplStatus = ::RegGetValueW(
+            HKEY_LOCAL_MACHINE,
+            L"SYSTEM\\CurrentControlSet\\Control\\Lsa",
+            L"RunAsPPL",
+            RRF_RT_REG_DWORD,
+            nullptr,
+            &runAsPpl,
+            &runAsPplSize);
+        DWORD runAsPplBoot = 0;
+        DWORD runAsPplBootSize = sizeof(runAsPplBoot);
+        const LSTATUS runAsPplBootStatus = ::RegGetValueW(
+            HKEY_LOCAL_MACHINE,
+            L"SYSTEM\\CurrentControlSet\\Control\\Lsa",
+            L"RunAsPPLBoot",
+            RRF_RT_REG_DWORD,
+            nullptr,
+            &runAsPplBoot,
+            &runAsPplBootSize);
+        assessment.lsaProtectionConfigured =
+            (runAsPplStatus == ERROR_SUCCESS && runAsPpl != 0)
+            || (runAsPplBootStatus == ERROR_SUCCESS && runAsPplBoot != 0);
+
+        SC_HANDLE serviceManager = ::OpenSCManagerW(
+            nullptr, SERVICES_ACTIVE_DATABASEW, SC_MANAGER_CONNECT);
+        if (serviceManager != nullptr)
+        {
+            SC_HANDLE scheduleService = ::OpenServiceW(
+                serviceManager, L"Schedule", SERVICE_QUERY_STATUS);
+            if (scheduleService != nullptr)
+            {
+                SERVICE_STATUS_PROCESS status{};
+                DWORD bytesNeeded = 0;
+                if (::QueryServiceStatusEx(
+                        scheduleService,
+                        SC_STATUS_PROCESS_INFO,
+                        reinterpret_cast<BYTE*>(&status),
+                        sizeof(status),
+                        &bytesNeeded) != FALSE)
+                {
+                    assessment.scheduleServiceRunning =
+                        status.dwCurrentState == SERVICE_RUNNING;
+                }
+                ::CloseServiceHandle(scheduleService);
+            }
+            ::CloseServiceHandle(serviceManager);
+        }
+
+        const HMODULE ntdll = ::GetModuleHandleW(L"ntdll.dll");
+        const char* const requiredSiloApis[] = {
+            "NtCreateJobObject",
+            "NtSetInformationJobObject",
+            "NtQueryInformationJobObject",
+            "NtCreateDirectoryObjectEx",
+            "NtCreateUserProcess",
+            "NtOpenEvent",
+            "NtSetEvent",
+            "NtOpenFile",
+            "NtDeviceIoControlFile",
+        };
+        assessment.serverSiloApisPresent = ntdll != nullptr;
+        for (const char* const apiName : requiredSiloApis)
+        {
+            if (ntdll == nullptr || ::GetProcAddress(ntdll, apiName) == nullptr)
+            {
+                assessment.serverSiloApisPresent = false;
+                assessment.detailLines.append(
+                    QStringLiteral("缺少 ntdll 入口：%1")
+                        .arg(QString::fromLatin1(apiName)));
+            }
+        }
+
+        assessment.detailLines.prepend(
+            QStringLiteral("系统 build：%1；进程：%2；架构：%3")
+                .arg(assessment.buildNumber)
+                .arg(assessment.elevated ? QStringLiteral("已提升") : QStringLiteral("未提升"))
+                .arg(assessment.supportedArchitecture ? QStringLiteral("x64") : QStringLiteral("不支持")));
+
+        if (strategy == KsecDdStrategy::LsassInjection)
+        {
+            assessment.prerequisitesMet = assessment.supportedArchitecture
+                && assessment.elevated
+                && !assessment.lsaProtectionConfigured;
+            assessment.summaryText = assessment.prerequisitesMet
+                ? QStringLiteral("KExecDD 前置条件表面满足：LSA Protection 未配置；仍需在执行时确认 LSASS 不是 PPL，并验证远程加载与 KSecDD 回读。")
+                : QStringLiteral("KExecDD 当前不可用：需要 x64 管理员进程，且 LSASS 不能以 PPL/LSA Protection 运行。");
+            assessment.detailLines.append(
+                QStringLiteral("LSA Protection 配置：%1；原方案通过 LSASS 现有 KSecDD 连接发送函数返回请求。")
+                    .arg(assessment.lsaProtectionConfigured
+                        ? QStringLiteral("已启用或由固件锁定")
+                        : QStringLiteral("注册表未启用（不等同于已验证运行态）")));
+            assessment.detailLines.append(
+                QStringLiteral("风险：需要向 LSASS 注入辅助模块；写 g_CiOptions 会进入 PatchGuard 风险窗口。"));
+        }
+        else
+        {
+            assessment.prerequisitesMet = assessment.supportedArchitecture
+                && assessment.elevated
+                && assessment.scheduleServiceRunning
+                && assessment.serverSiloApisPresent;
+            assessment.summaryText = assessment.prerequisitesMet
+                ? QStringLiteral("KexecDDPlus 前置条件表面满足：Schedule 在线且 Server Silo 所需入口齐全；实际调用仍需取得含 SeTcbPrivilege 的服务令牌并完成 Silo 内回读。")
+                : QStringLiteral("KexecDDPlus 当前不可用：需要 x64 管理员进程、运行中的 Schedule 服务和完整 Server Silo 原生入口。");
+            assessment.detailLines.append(
+                QStringLiteral("Schedule 服务：%1；Server Silo API：%2；LSA Protection 不构成该方案的前置阻断。")
+                    .arg(assessment.scheduleServiceRunning
+                        ? QStringLiteral("运行中") : QStringLiteral("未运行或不可查询"))
+                    .arg(assessment.serverSiloApisPresent
+                        ? QStringLiteral("齐全") : QStringLiteral("缺失")));
+            assessment.detailLines.append(
+                QStringLiteral("硬性风险：上游说明同一启动周期最多安全调用 4 次，第 5 次会因 KSecDD 释放用户缓冲区而触发 Bug Check；必须跨进程、跨页面统一计数。"));
+        }
+
+        assessment.detailLines.append(
+            QStringLiteral("接入边界：此检查不打开 KSecDD、不注入 LSASS、不创建 Server Silo，也不发送 IOCTL。"));
+        return assessment;
+    }
+
     BlockReason evaluateBlockReason(
         const CodeIntegrityPosture& posture,
         const TargetLocation& location)

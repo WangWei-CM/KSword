@@ -36,6 +36,29 @@ namespace ks::misc::disable_dse
         Driver = 2   // Driver：KswordARK R0 安全状态查询，字段最全。
     };
 
+    // KsecDdStrategy：两项公开 KSecDD PoC 对应的引导方案。
+    enum class KsecDdStrategy
+    {
+        LsassInjection = 0, // KExecDD：在非 PPL 的 LSASS 内复用其 KSecDD 连接。
+        ServerSilo = 1     // KexecDDPlus：在 Server Silo 内建立独立 KSecDD 连接。
+    };
+
+    // KsecDdAssessment：只读前置条件核对结果。
+    // 这里不把“前置条件满足”误报为漏洞调用成功；实际修改仍需单独执行并回读。
+    struct KsecDdAssessment
+    {
+        KsecDdStrategy strategy = KsecDdStrategy::LsassInjection;
+        bool supportedArchitecture = false;
+        bool elevated = false;
+        bool lsaProtectionConfigured = false;
+        bool scheduleServiceRunning = false;
+        bool serverSiloApisPresent = false;
+        bool prerequisitesMet = false;
+        std::uint32_t buildNumber = 0;
+        QString summaryText;
+        QStringList detailLines;
+    };
+
     // BlockReason：
     // - 作用：说明当前为什么不允许改 DSE；None 之外一律禁用操作按钮。
     enum class BlockReason
@@ -111,6 +134,12 @@ namespace ks::misc::disable_dse
     // - 作用：查询当前 CI / HVCI / 安全启动姿态；优先走 R0（字段全），R0 不可用时回退 R3；
     // - 返回：CodeIntegrityPosture；queried 为 false 时看 failureText。
     CodeIntegrityPosture queryPosture();
+
+    // assessKsecDdStrategy：
+    // - 作用：只读核对 KExecDD / KexecDDPlus 的架构、权限、LSA Protection、
+    //   Schedule 服务和 Server Silo API 前置条件；
+    // - 边界：不会打开 KSecDD、注入 LSASS、创建 Silo 或发送漏洞 IOCTL。
+    KsecDdAssessment assessKsecDdStrategy(KsecDdStrategy strategy);
 
     // evaluateBlockReason：
     // - 输入 posture：当前姿态；location：定位结果（可为未定位状态）；

@@ -24,6 +24,7 @@
 
 class QLabel;
 class QPushButton;
+class QRadioButton;
 class QShowEvent;
 class CodeEditorWidget;
 
@@ -58,6 +59,10 @@ namespace ks::misc
 
         // refreshPosture：同步查询 CI / HVCI 姿态并刷新到界面。
         void refreshPosture();
+        // refreshKsecStrategyAssessment：只读核对当前 KSecDD PoC 方案的前置条件。
+        void refreshKsecStrategyAssessment();
+        // updateKsecStrategyDisplay：切换方案或语言后重绘摘要与边界说明。
+        void updateKsecStrategyDisplay();
         // runLocate：在后台线程定位 g_CiOptions，并在定位成功后立即读回校验。
         void runLocate();
         // runApply：在后台线程把 g_CiOptions 写成 desiredValue；
@@ -95,6 +100,8 @@ namespace ks::misc
         QLabel* m_optionsLabel = nullptr;       // m_optionsLabel：CodeIntegrityOptions 位分解。
         QLabel* m_blockLabel = nullptr;         // m_blockLabel：当前为什么不允许操作。
         QLabel* m_locationLabel = nullptr;      // m_locationLabel：g_CiOptions 定位结果摘要。
+        QLabel* m_ksecStrategySummaryLabel = nullptr; // 当前 PoC 方案的准入摘要。
+        QLabel* m_ksecStrategyDetailLabel = nullptr;  // 当前 PoC 方案的实现链与风险边界。
         QLabel* m_pendingLabel = nullptr;       // m_pendingLabel：尚未恢复时的醒目提示。
         QLabel* m_resultLabel = nullptr;        // m_resultLabel：最近一次操作结论。
         CodeEditorWidget* m_traceEdit = nullptr; // m_traceEdit：定位轨迹与事务日志。
@@ -103,6 +110,10 @@ namespace ks::misc
         QPushButton* m_locateButton = nullptr;  // m_locateButton：定位 g_CiOptions 并读回校验。
         QPushButton* m_disableButton = nullptr; // m_disableButton：关闭驱动签名强制。
         QPushButton* m_restoreButton = nullptr; // m_restoreButton：把 g_CiOptions 写回原值。
+        QPushButton* m_ksecRefreshButton = nullptr; // 重新执行只读前置条件核对。
+        QPushButton* m_ksecSourceButton = nullptr;  // 打开当前方案的上游项目。
+        QRadioButton* m_kexecDdButton = nullptr;    // KExecDD / LSASS 方案。
+        QRadioButton* m_kexecDdPlusButton = nullptr;// KexecDDPlus / Server Silo 方案。
 
         disable_dse::CodeIntegrityPosture m_posture; // m_posture：最近一次查询到的姿态。
         disable_dse::TargetLocation m_location;      // m_location：最近一次定位结果。
@@ -113,6 +124,9 @@ namespace ks::misc
         bool m_hasSavedOriginal = false;       // m_hasSavedOriginal：是否记录了待恢复的原值。
         bool m_valueMatched = false;           // m_valueMatched：读回值是否与系统自报值一致，false 时禁止写入。
         bool m_busy = false;                   // m_busy：后台操作进行中。
+        disable_dse::KsecDdStrategy m_ksecStrategy =
+            disable_dse::KsecDdStrategy::LsassInjection;
+        disable_dse::KsecDdAssessment m_ksecAssessment;
 
         // m_blockReason：
         // - 最近一次算出的准入判定，updateStateDisplay 里刷新、updateButtons 里消费；
