@@ -2552,20 +2552,12 @@ KswordARKHvmUninitialize(
     PCALLBACK_OBJECT powerCallbackObject = NULL;
     PVOID powerCallbackRegistration = NULL;
     PVOID processorChangeRegistration = NULL;
+    BOOLEAN teardownComplete = FALSE;
 
     /* Unload is serialized against query/control before releasing pages. */
     if (!g_KswordHvm.Initialized) {
         return;
     }
-    /*
-     * Close the per-processor windows before the module window they derived
-     * from, mirroring the initialization order in reverse.
-     */
-    KswordARKHvmPhysWindowShutdownAll();
-    /* Close the ring -1 window before any other teardown can use it. */
-    KswordARKHvmMemoryShutdown();
-    /* Drain process notifications before releasing any referenced page owners. */
-    KswordARKHvmNestedPageGuardShutdown();
     /* Block new residency before draining either lifecycle callback. */
     g_KswordHvm.ResidentStartAllowed = FALSE;
     InterlockedExchange(
@@ -2587,6 +2579,7 @@ KswordARKHvmUninitialize(
         KeDeregisterProcessorChangeCallback(
             processorChangeRegistration);
     }
+RetryTeardown:
     KeEnterCriticalRegion();
     KswordARKAcquirePushLockExclusive(&g_KswordHvm.Lock);
     KswordARKHvmFreeResourcesLocked(&g_KswordHvm);
@@ -2609,9 +2602,21 @@ KswordARKHvmUninitialize(
             KswordARKHvmStateSet(
                 &g_KswordHvm,
                 KSWORD_ARK_HVM_STATE_ROLLBACK_REQUIRED);
+        } else {
+            /*
+             * ResidentStop/FreeResourcesLocked has now completed VMXOFF on
+             * every processor.  Only this point may release the physical
+             * windows that VM-exit nested-memory paths borrow.
+             */
+            KswordARKHvmPhysWindowShutdownAll();
+            /* The module window is released after all resident readers stop. */
+            KswordARKHvmMemoryShutdown();
+            /* Drain process notifications before releasing page-owner state. */
+            KswordARKHvmNestedPageGuardShutdown();
+            /* Publish completed HVM teardown. */
+            g_KswordHvm.Initialized = FALSE;
+            teardownComplete = TRUE;
         }
-        /* Publish completed HVM teardown. */
-        g_KswordHvm.Initialized = FALSE;
     } else {
         /* Preserve explicit rollback-required evidence on unsafe unload. */
         KswordARKHvmStateSet(
@@ -2627,6 +2632,14 @@ KswordARKHvmUninitialize(
     }
     KswordARKReleasePushLockExclusive(&g_KswordHvm.Lock);
     KeLeaveCriticalRegion();
+    if (!teardownComplete) {
+        LARGE_INTEGER retryInterval;
+
+        /* Keep the image-owned guard/resources alive and retry before return. */
+        retryInterval.QuadPart = -10000LL; /* 1 ms, relative. */
+        KeDelayExecutionThread(KernelMode, FALSE, &retryInterval);
+        goto RetryTeardown;
+    }
     /* Drain debugger lifetime callbacks after every resident reader stopped. */
     KswordARKHvmDebugShutdown();
     if (powerCallbackObject != NULL) {

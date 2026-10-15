@@ -8,6 +8,7 @@
 class QTreeView;
 class QToolButton;
 class QComboBox;
+class QEvent;
 class QLineEdit;
 class QLabel;
 class QTabBar;
@@ -29,6 +30,8 @@ namespace ks::ui
         void refreshTheme();
         QToolButton* actionsButton() const { return m_actions; }
         QTreeView* tree() const { return m_tree; }
+    protected:
+        void changeEvent(QEvent* event) override;
     private:
         void updateNavigation(bool firstDocument);
         void updateTypes(bool selectFirst);

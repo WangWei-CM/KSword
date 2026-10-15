@@ -4,6 +4,13 @@
 #include "../../platform/runtime_signature_scan.h"
 #include "../../platform/pool_compat.h"
 
+/*
+ * The private PspTerminateProcess ABI is not publicly versioned.  The old
+ * four-argument guess was never sufficient proof of parameter roles and is
+ * therefore compile-time disabled until a per-build ABI profile exists.
+ */
+#define KSWORD_ARK_PSP_TERMINATE_ABI_VERIFIED 0
+
 // ntddk.h 不公开这两个 CID/归属查询声明，按既有模块声明可选查询入口。
 NTSYSAPI NTSTATUS NTAPI PsLookupThreadByThreadId(_In_ HANDLE ThreadId, _Outptr_ PETHREAD* Thread);
 NTSYSAPI PEPROCESS NTAPI PsGetThreadProcess(_In_ PETHREAD Thread);
@@ -16,6 +23,11 @@ typedef PETHREAD (NTAPI* KSW_NEXT_PROCESS_THREAD_FN)(PEPROCESS Process, PETHREAD
 NTSTATUS
 KswordARKDriverTerminateProcessPsp(_In_ PEPROCESS Process, _In_ NTSTATUS ExitStatus)
 {
+#if !KSWORD_ARK_PSP_TERMINATE_ABI_VERIFIED
+    UNREFERENCED_PARAMETER(Process);
+    UNREFERENCED_PARAMETER(ExitStatus);
+    return STATUS_NOT_SUPPORTED;
+#else
     // 当前 v4 状态已经过内核 PE 和 RSDS 身份校验，只读取可选函数 RVA。
     KSW_DYN_V4_MODULE_STATE* state = NULL;
     KSW_RUNTIME_IMAGE_VIEW* view = NULL;
@@ -34,7 +46,10 @@ KswordARKDriverTerminateProcessPsp(_In_ PEPROCESS Process, _In_ NTSTATUS ExitSta
     // 安全读取当前入口；更新编译器或内核改变序列时返回不支持，不能猜 ABI。
     UCHAR observedPrologue[sizeof(abi4Prologue)] = { 0 };
     // 入口要求非空对象、PASSIVE_LEVEL 和非当前请求进程，防止 IOCTL 自终止。
-    if (Process == NULL || KeGetCurrentIrql() != PASSIVE_LEVEL || Process == PsGetCurrentProcess()) {
+    if (Process == NULL || KeGetCurrentIrql() != PASSIVE_LEVEL ||
+        Process == PsGetCurrentProcess() ||
+        Process == PsInitialSystemProcess ||
+        HandleToULong(PsGetProcessId(Process)) <= 4UL) {
         return STATUS_INVALID_PARAMETER;
     }
     // v4 更新可并发执行；在共享锁下复制事实，不缓存跨代次函数指针。
@@ -95,6 +110,7 @@ KswordARKDriverTerminateProcessPsp(_In_ PEPROCESS Process, _In_ NTSTATUS ExitSta
     // 成功和失败都释放临时 PE 视图。
     ExFreePoolWithTag(view, 'tPsK');
     return status;
+#endif
 }
 
 NTSTATUS
@@ -108,6 +124,7 @@ KswordARKDriverTerminateProcessViaApc(_In_ PEPROCESS Process, _In_ NTSTATUS Exit
     ULONG visited = 0;
     // 系统线程仍使用原独立入口；不能把系统线程终止误当作普通进程 APC。
     if (Process == NULL || Process == PsInitialSystemProcess ||
+        HandleToULong(PsGetProcessId(Process)) <= 4UL ||
         Process == PsGetCurrentProcess() || KeGetCurrentIrql() != PASSIVE_LEVEL) {
         return STATUS_INVALID_PARAMETER;
     }

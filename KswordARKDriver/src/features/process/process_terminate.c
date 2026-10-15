@@ -1467,15 +1467,15 @@ Return Value:
 
     RtlZeroMemory(&target, sizeof(target));
 
-    // 评估要求：取消低 PID 的终止保护，原代码注释保留。
-    // if (processId == 0U || processId <= 4U) {
-    //     KswordARKDriverLogTerminateMessage(
-    //         device,
-    //         "Warn",
-    //         "R0 terminate rejected: pid=%lu.",
-    //         (unsigned long)processId);
-    //     return STATUS_INVALID_PARAMETER;
-    // }
+    /* Never allow a user request to target the idle/system CID range. */
+    if (processId == 0U || processId <= 4U) {
+        KswordARKDriverLogTerminateMessage(
+            device,
+            "Warn",
+            "R0 terminate rejected: pid=%lu.",
+            (unsigned long)processId);
+        return STATUS_INVALID_PARAMETER;
+    }
 
     status = KswordARKDriverResolveTerminateTarget(device, processId, &target);
     if (!NT_SUCCESS(status)) {
@@ -1505,19 +1505,20 @@ Return Value:
         goto Exit;
     }
 
-    // 评估要求：解析后不再特判低 CID 或 System 对象；对象身份校验仍保留。
-    // if (target.CidProcessId <= 4UL || target.ProcessObject == PsInitialSystemProcess) {
-    //     KswordARKDriverLogTerminateMessage(
-    //         device,
-    //         "Warn",
-    //         "R0 terminate rejected after resolve: requestPid=%lu, cid=%lu, unique=%lu, process=%p.",
-    //         (unsigned long)target.RequestedProcessId,
-    //         (unsigned long)target.CidProcessId,
-    //         (unsigned long)target.UniqueProcessId,
-    //         target.ProcessObject);
-    //     finalStatus = STATUS_INVALID_PARAMETER;
-    //     goto Exit;
-    // }
+    /* Repeat the check after CID resolution to cover PID rewriting/races. */
+    if (target.CidProcessId <= 4UL ||
+        target.ProcessObject == PsInitialSystemProcess) {
+        KswordARKDriverLogTerminateMessage(
+            device,
+            "Warn",
+            "R0 terminate rejected after resolve: requestPid=%lu, cid=%lu, unique=%lu, process=%p.",
+            (unsigned long)target.RequestedProcessId,
+            (unsigned long)target.CidProcessId,
+            (unsigned long)target.UniqueProcessId,
+            target.ProcessObject);
+        finalStatus = STATUS_INVALID_PARAMETER;
+        goto Exit;
+    }
 
     if (device != NULL && target.CidProcessId != target.RequestedProcessId) {
         KSWORD_ARK_SAFETY_CONTEXT resolvedSafetyContext;
@@ -1622,12 +1623,24 @@ Return Value:
         goto Exit;
     }
 
-    // 在清线程之前先尝试真正的 Psp 进程终止，再让目标自身执行 APC 进程终止。
+    // 先探测按版本 profile 受控的私有终止后端，再让目标自身执行 APC 进程终止。
     status = KswordARKDriverTerminateProcessPsp(target.ProcessObject, exitStatus);
-    // 记录真实后端状态，缺失 PDB 符号不冒充成功。
-    KswordARKDriverLogTerminateMessage(device, NT_SUCCESS(status) ? "Info" : "Warn",
-        "R0 terminate PspTerminateProcess: requestPid=%lu, status=0x%08X.",
-        (unsigned long)target.RequestedProcessId, (unsigned int)status);
+    // 私有 ABI 未按版本 profile 核验前固定禁用；这不是本次终止请求的故障。
+    if (status == STATUS_NOT_SUPPORTED) {
+        KswordARKDriverLogTerminateMessage(
+            device,
+            "Info",
+            "R0 terminate PspTerminateProcess disabled: no verified per-build ABI profile, requestPid=%lu.",
+            (unsigned long)target.RequestedProcessId);
+    } else {
+        // 记录真实后端状态，缺失 PDB 符号不冒充成功。
+        KswordARKDriverLogTerminateMessage(
+            device,
+            NT_SUCCESS(status) ? "Info" : "Warn",
+            "R0 terminate PspTerminateProcess: requestPid=%lu, status=0x%08X.",
+            (unsigned long)target.RequestedProcessId,
+            (unsigned int)status);
+    }
     // 私有 API 返回成功也必须确认对象退出。
     if (NT_SUCCESS(status) || status == STATUS_PROCESS_IS_TERMINATING) {
         waitStatus = KswordARKDriverWaitProcessExitByObject(target.ProcessObject, KSWORD_ARK_TERMINATE_WAIT_FALLBACK_MS);
@@ -1899,9 +1912,8 @@ Return Value:
     // 目标对象仅由 R0 解析，先清零以便所有退出路径可安全释放。
     RtlZeroMemory(&target, sizeof(target));
 
-    // 评估要求：取消 Idle/System 与低 PID 的线程终止保护，空 TID 仍拒绝。
-    // if (processId == 0UL || processId <= 4UL || threadId == 0UL) {
-    if (threadId == 0UL) { // 仅拒绝空线程身份。
+    /* Never allow a direct thread request to target the idle/system CID range. */
+    if (processId == 0UL || processId <= 4UL || threadId == 0UL) {
         KswordARKDriverLogTerminateMessage(
             device,
             "Warn",
@@ -1924,20 +1936,21 @@ Return Value:
         return status;
     }
 
-    // 评估要求：取消解析后的 System 对象保护，原代码注释保留。
-    // if (target.CidProcessId <= 4UL || target.ProcessObject == PsInitialSystemProcess) {
-    //     KswordARKDriverLogTerminateMessage(
-    //         device,
-    //         "Warn",
-    //         "R0 terminate-thread rejected after resolve: requestPid=%lu, tid=%lu, cid=%lu, unique=%lu, process=%p.",
-    //         (unsigned long)target.RequestedProcessId,
-    //         (unsigned long)threadId,
-    //         (unsigned long)target.CidProcessId,
-    //         (unsigned long)target.UniqueProcessId,
-    //         target.ProcessObject);
-    //     status = STATUS_INVALID_PARAMETER;
-    //     goto Exit;
-    // }
+    /* Repeat the identity gate after resolving the CID table target. */
+    if (target.CidProcessId <= 4UL ||
+        target.ProcessObject == PsInitialSystemProcess) {
+        KswordARKDriverLogTerminateMessage(
+            device,
+            "Warn",
+            "R0 terminate-thread rejected after resolve: requestPid=%lu, tid=%lu, cid=%lu, unique=%lu, process=%p.",
+            (unsigned long)target.RequestedProcessId,
+            (unsigned long)threadId,
+            (unsigned long)target.CidProcessId,
+            (unsigned long)target.UniqueProcessId,
+            target.ProcessObject);
+        status = STATUS_INVALID_PARAMETER;
+        goto Exit;
+    }
 
     // 按 TID 引用 ETHREAD，再验证它仍属于请求 PID 的已解析 EPROCESS。
     status = PsLookupThreadByThreadId(ULongToHandle(threadId), &threadObject);

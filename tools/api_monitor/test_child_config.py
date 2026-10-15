@@ -5,7 +5,7 @@ import tempfile
 root = Path(__file__).resolve().parents[2]
 source = (root / "APIMonitor_x64/hook/HookTargets.cpp").read_text(encoding="utf-8-sig")
 writer = source[source.index("        std::wstring JoinIniList("):source.index("        // InjectAgentIntoChildProcess")]
-main = r''' 
+main = r'''
 int main() {
  using namespace apimon;
  DWORD pid=GetCurrentProcessId();

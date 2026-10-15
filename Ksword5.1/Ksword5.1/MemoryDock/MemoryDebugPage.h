@@ -5,6 +5,7 @@
 #include <memory>
 
 class QComboBox;
+class QEvent;
 class QLabel;
 class QShowEvent;
 class QToolButton;
@@ -28,9 +29,14 @@ namespace ks::ui
         bool confirmQuit();
         void cancelQuitPreparation();
 
+        // prepareForNavigation：搜索/目录建立前只创建工作台控件树，不刷新目标进程或改变会话。
+        void prepareForNavigation();
+
     protected:
         // showEvent：惰性装配并刷新候选，不自动选择或改变任何目标。
         void showEvent(QShowEvent* event) override;
+        // changeEvent：语言切换时同步图标动作的提示和无障碍名称。
+        void changeEvent(QEvent* event) override;
 
     private:
         // ensureView：幂等装配正式生产服务；refreshProcesses 异步获取轻量进程列表。

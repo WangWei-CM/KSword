@@ -439,9 +439,19 @@ KswordARKBugcheckGuardHook(
     restoreStatus = KswordARKBugcheckGuardRestoreFromCrashPath(); /* Restore only when forwarding, never on a persistent ignore hit. */
     if (!NT_SUCCESS(restoreStatus)) {
         g_KswordArkBugcheckGuard.LastStatus = restoreStatus;
-        InterlockedExchange(&g_KswordArkBugcheckGuard.ErrorIgnored, 1L);
-        InterlockedDecrement(&g_KswordArkBugcheckGuard.HookExecutions);
-        return;
+        /* A failed restore cannot safely return to the faulting caller. */
+        if (target != NULL) {
+            target(BugCheckCode, Parameter1, Parameter2, Parameter3, Parameter4);
+        }
+        /* The original KeBugCheckEx is non-returning; retain a hard stop if a
+         * test shim violates that contract instead of returning from a crash. */
+        KeBugCheckEx(
+            BugCheckCode,
+            Parameter1,
+            Parameter2,
+            Parameter3,
+            Parameter4);
+        __assume(0);
     }
     InterlockedDecrement(&g_KswordArkBugcheckGuard.HookExecutions);
     if (target != NULL) {
@@ -667,13 +677,13 @@ KswordARKBugcheckGuardInitialize(
 #endif
 }
 
-VOID
+NTSTATUS
 KswordARKBugcheckGuardUninitialize(
     VOID
     )
 {
 #if !KSWORD_ARK_BUGCHECK_DIAGNOSTICS_ENABLED
-    return;
+    return STATUS_SUCCESS;
 #else
     NTSTATUS status;
 
@@ -681,6 +691,7 @@ KswordARKBugcheckGuardUninitialize(
     status = KswordARKBugcheckGuardReleaseMappingLocked();
     g_KswordArkBugcheckGuard.LastStatus = status;
     ExReleaseFastMutex(&g_KswordArkBugcheckGuard.ControlLock);
+    return status;
 #endif
 }
 

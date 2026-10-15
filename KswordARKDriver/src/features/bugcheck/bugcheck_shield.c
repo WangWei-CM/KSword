@@ -693,13 +693,13 @@ KswordARKBugcheckShieldInitialize(
 
 // Public uninitialize entry. Called from EvtDriverUnload after the control
 // device becomes invisible to user space, so no additional IOCTLs can race.
-VOID
+NTSTATUS
 KswordARKBugcheckShieldUninitialize(
     VOID
     )
 {
 #if !KSWORD_ARK_BUGCHECK_DIAGNOSTICS_ENABLED
-    return;
+    return STATUS_SUCCESS;
 #else
     NTSTATUS status;
 
@@ -710,6 +710,7 @@ KswordARKBugcheckShieldUninitialize(
     status = KswordARKBugcheckShieldDisableLocked();
     g_KswordArkBugcheckShield.LastStatus = status;
     ExReleaseFastMutex(&g_KswordArkBugcheckShield.ControlLock);
+    return status;
 #endif
 }
 

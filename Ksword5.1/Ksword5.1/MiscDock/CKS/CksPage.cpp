@@ -138,6 +138,17 @@ namespace ks::misc
         updateButtons();
     }
 
+    CksPage::~CksPage()
+    {
+        // CksBackend 的系统调用没有 stop_token 入口；先设置发布门禁，再等待有限的
+        // 查询/操作返回，保证页面和 QObject 树销毁后没有 detached 线程继续回投。
+        m_cancelRequested->store(true, std::memory_order_release);
+        if (m_worker.joinable())
+        {
+            m_worker.join();
+        }
+    }
+
     void CksPage::showEvent(QShowEvent* event)
     {
         QWidget::showEvent(event);
@@ -449,11 +460,16 @@ namespace ks::misc
         m_busy = true;
         updateButtons();
         QPointer<CksPage> page(this); // page：窗口关闭后阻止后台结果写入已析构对象。
-        std::thread([page]() {
+        startWorker([page](const std::shared_ptr<std::atomic_bool>& cancel) {
             const cks::Snapshot snapshot = cks::QuerySnapshot(); // snapshot：工作线程独立采集。
+            if (cancel->load(std::memory_order_acquire))
+            {
+                return;
+            }
             if (QCoreApplication* app = QCoreApplication::instance())
             {
-                QMetaObject::invokeMethod(app, [page, snapshot]() {
+                QMetaObject::invokeMethod(app, [page, snapshot, cancel]() {
+                    if (cancel->load(std::memory_order_acquire)) return;
                     if (!page) return;
                     page->m_snapshot = snapshot;
                     page->m_hasSnapshot = true;
@@ -462,7 +478,7 @@ namespace ks::misc
                     page->updateButtons();
                 }, Qt::QueuedConnection);
             }
-        }).detach();
+        });
     }
 
     void CksPage::showSnapshot()
@@ -644,19 +660,42 @@ namespace ks::misc
         m_busy = true;
         updateButtons();
         QPointer<CksPage> page(this); // page：后台完成时只在存活页面上更新 UI。
-        std::thread([page, operation]() {
+        startWorker([page, operation](const std::shared_ptr<std::atomic_bool>& cancel) {
             QString detail; // detail：后端动作的原始回执。
             const bool success = operation(&detail);
+            if (cancel->load(std::memory_order_acquire))
+            {
+                return;
+            }
             if (QCoreApplication* app = QCoreApplication::instance())
             {
-                QMetaObject::invokeMethod(app, [page, detail, success]() {
+                QMetaObject::invokeMethod(app, [page, detail, success, cancel]() {
+                    if (cancel->load(std::memory_order_acquire)) return;
                     if (!page) return;
                     page->m_busy = false;
                     page->showResult(detail, success);
                     page->refresh();
                 }, Qt::QueuedConnection);
             }
-        }).detach();
+        });
+    }
+
+    void CksPage::startWorker(std::function<void(const std::shared_ptr<std::atomic_bool>&)> task)
+    {
+        // m_busy 保证这里只有 UI 线程串行调用；回收已完成的上一个线程后再替换句柄。
+        m_cancelRequested->store(true, std::memory_order_release);
+        if (m_worker.joinable())
+        {
+            m_worker.join();
+        }
+        const auto cancel = std::make_shared<std::atomic_bool>(false);
+        m_cancelRequested = cancel;
+        m_worker = std::thread([task = std::move(task), cancel]() mutable {
+            if (task)
+            {
+                task(cancel);
+            }
+        });
     }
 
     bool CksPage::confirm(const QString& text)

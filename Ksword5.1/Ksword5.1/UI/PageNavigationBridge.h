@@ -16,7 +16,8 @@ namespace ks::ui
     public:
         using DockList = std::function<QList<ads::CDockWidget*>()>;
         using DockAction = std::function<void(ads::CDockWidget*)>;
-        PageNavigationBridge(QWidget* host, DockList list, DockAction prepare, DockAction activate);
+        PageNavigationBridge(QWidget* host, DockList list, DockAction prepare, DockAction activate,
+            DockAction nestedPrepare = {});
         ~PageNavigationBridge() override;
         void setReady(); // 一级 Dock 框架创建完成后才发布 IPC 入口。
         bool handleMessage(const COPYDATASTRUCT* data, HWND sender);

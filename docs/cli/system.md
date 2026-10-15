@@ -19,7 +19,7 @@ KswordCLI.exe help system ioctl call
 KswordCLI.exe system ioctl call --code 0x80002000 --input-file request.bin --output-bytes 4096 --confirm --json
 ```
 
-`system ioctl call` 使用现有 `ArkDriverClient`，设备固定为 KSword 控制设备；它不加载驱动或改变当前进程权限。`--code` 为 uint32，输入可省略或从 `--input-hex` / `--input-file` 二选一提供，输入和 `--output-bytes` 各上限 1 MiB，输出默认 4096 字节。所有调用都要求 `--confirm`；示例编码仅说明语法，实际编码与二进制布局须来自配套 `shared/driver/` 协议。
+`system ioctl call` 使用现有 `ArkDriverClient`，设备固定为 KSword 控制设备；它不加载驱动或改变当前进程权限。默认会先读取驱动 IOCTL 注册表，拒绝未登记的控制码；只有受信兼容性探测才应额外传 `--allow-unregistered`。`--code` 为 uint32，输入可省略或从 `--input-hex` / `--input-file` 二选一提供，输入和 `--output-bytes` 各上限 1 MiB，输出默认 4096 字节。所有调用都要求 `--confirm`；示例编码仅说明语法，实际编码与二进制布局须来自配套 `shared/driver/` 协议。
 
 JSON 的 `data` 保留 `transportSuccess`、`deviceOpenFailed`、`win32Error`、`inputBytes`、`outputCapacity`、`bytesReturned` 和 `outputHex`。只输出实际返回字节，不输出缓冲区补零尾部。成功只代表 Win32 传输完成，响应结构中的业务状态由调用方按协议解析；失败或超时不自动重发。内置 help 和静态 `system ioctl decode` 不发送请求。
 

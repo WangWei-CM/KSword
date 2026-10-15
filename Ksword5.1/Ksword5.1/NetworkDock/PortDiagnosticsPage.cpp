@@ -145,6 +145,7 @@ PortDiagnosticsPage::PortDiagnosticsPage(QWidget* parent) : QWidget(parent)
     workspace->results()->addWidget(probeGroup);
     m_report = new CodeEditorWidget(this);
     m_report->setReadOnly(true);
+    m_report->setReadOnlyExportEnabled(true);
     m_report->setMaximumHeight(100);
     m_report->hide();
     workspace->results()->addWidget(m_report);

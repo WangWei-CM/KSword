@@ -38,6 +38,7 @@ SHIM = r'''
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <vector>
 
 static const auto uiThread = std::this_thread::get_id();
 static void check(bool condition) {
@@ -103,23 +104,29 @@ struct GpuHardwareSummarySnapshot {
     QString pnpDeviceIdText = QStringLiteral("device");
     double dedicatedMemoryGiB = 8;
 };
+struct FieldNodes {
+    FieldNodes& operator+=(const FieldNodes&) { return *this; }
+};
+namespace ks { namespace ui {
+struct FieldDocument { FieldNodes nodes; bool isEmpty() const { return true; } };
+}}
 static int overviewQueries, detailQueries, signalsDelivered, refreshCalls;
-static QString buildOverviewStaticTextSnapshot() { ++overviewQueries; return QStringLiteral("overview"); }
-static QString buildOverviewPeripheralTextSnapshot(bool details) {
+static ks::ui::FieldDocument buildOverviewFieldsSnapshot() { ++overviewQueries; return {}; }
+static ks::ui::FieldDocument buildOverviewPeripheralFieldsSnapshot(bool details) {
     if (details) ++detailQueries;
-    return QStringLiteral("peripherals");
+    return {};
 }
-static QString buildGpuStaticTextSnapshot() { ++detailQueries; return QStringLiteral("gpu"); }
-static QString buildMemoryStaticTextSnapshot() { ++detailQueries; return QStringLiteral("memory"); }
+static ks::ui::FieldDocument buildGpuFieldsSnapshot() { ++detailQueries; return {}; }
+static ks::ui::FieldDocument buildMemoryFieldsSnapshot() { ++detailQueries; return {}; }
 static MemoryHardwareSummarySnapshot queryMemoryHardwareSummarySnapshot() { ++detailQueries; return {}; }
 static GpuHardwareSummarySnapshot queryGpuHardwareSummarySnapshot() { ++detailQueries; return {}; }
-static QString formatGpuHardwareSummaryText(const GpuHardwareSummarySnapshot&, const QString& text) { return text; }
+static ks::ui::FieldDocument buildGpuHardwareSummaryFields(const GpuHardwareSummarySnapshot&, const ks::ui::FieldDocument&) { return {}; }
 class HardwareDock : public QObject {
 public:
     std::shared_ptr<std::atomic_bool> alive = std::make_shared<std::atomic_bool>(true);
     std::atomic_bool m_staticInfoRefreshing{false};
     bool m_hardwareDetailsSamplingEnabled = false;
-    QString m_cachedOverviewStaticText, m_cachedGpuStaticText, m_cachedMemoryStaticText;
+    ks::ui::FieldDocument m_cachedOverviewFields, m_cachedGpuFields, m_cachedMemoryFields;
     int m_memorySpeedMhz = 0, m_memorySlotUsed = 0, m_memorySlotTotal = 0;
     QString m_memoryFormFactorText, m_gpuAdapterNameText, m_gpuDriverVersionText;
     QString m_gpuDriverDateText, m_gpuPnpDeviceIdText;
@@ -127,7 +134,7 @@ public:
     std::function<void()> onOverview;
     ~HardwareDock() { alive->store(false); }
     void requestAsyncStaticInfoRefresh();
-    void staticOverviewChanged(const QString&) {
+    void staticOverviewFieldsChanged(const ks::ui::FieldDocument&) {
         ++signalsDelivered;
         const auto callback = onOverview;
         if (callback) callback();
@@ -161,7 +168,7 @@ static int runCases() {
         HardwareDock page;
         page.requestAsyncStaticInfoRefresh(); page.requestAsyncStaticInfoRefresh();
         check(workerQueue.size() == 1 && page.m_staticInfoRefreshing.load());
-        work(); check(page.m_cachedOverviewStaticText.isEmpty()); deliver();
+        work(); check(page.m_cachedOverviewFields.isEmpty()); deliver();
         check(overviewQueries == 1 && detailQueries == 0 && signalsDelivered == 1);
         check(!page.m_staticInfoRefreshing.load() && refreshCalls == 1);
         page.requestAsyncStaticInfoRefresh(); work(); deliver();

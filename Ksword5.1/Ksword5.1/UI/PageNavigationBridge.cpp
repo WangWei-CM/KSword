@@ -27,6 +27,7 @@ namespace ks::ui
         QPointer<QWidget> host;
         DockList list;
         DockAction prepare;
+        DockAction nestedPrepare;
         DockAction activate;
         HWND client = nullptr;
         HWND server = nullptr; // 保存原生句柄，析构时不重新调用宿主 winId 创建窗口。
@@ -144,6 +145,10 @@ namespace ks::ui
             if (dock)
             {
                 prepare(dock);
+                if (nestedPrepare)
+                {
+                    nestedPrepare(dock);
+                }
                 if (dock && expected == generation && collecting)
                 {
                     QJsonArray entries;
@@ -236,7 +241,8 @@ namespace ks::ui
         }
     };
 
-    PageNavigationBridge::PageNavigationBridge(QWidget* host, DockList list, DockAction prepare, DockAction activate)
+    PageNavigationBridge::PageNavigationBridge(QWidget* host, DockList list, DockAction prepare, DockAction activate,
+        DockAction nestedPrepare)
         : QObject(host), m_state(std::make_unique<State>())
     {
         m_state->owner = this;
@@ -244,6 +250,7 @@ namespace ks::ui
         m_state->list = std::move(list);
         m_state->prepare = std::move(prepare);
         m_state->activate = std::move(activate);
+        m_state->nestedPrepare = std::move(nestedPrepare);
         m_state->server = reinterpret_cast<HWND>(host->winId());
     }
 
