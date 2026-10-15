@@ -1,6 +1,7 @@
 #include "../Framework.h"
 #include "MemoryDebugPage.h"
 #include "MemoryDock.WorkbenchServices.h"
+#include "../UI/AdaptivePageScroll.h"
 #include "../UI/AsyncUiDispatcher.h"
 #include "../UI/ToolbarMetrics.h"
 #include "../UI/PrimaryPageStyle.h"
@@ -10,6 +11,7 @@
 
 #include <QComboBox>
 #include <QCompleter>
+#include <QEvent>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
@@ -38,7 +40,11 @@ namespace ks::ui
             auto* button = new QToolButton(owner); // 按钮的 QObject 生命周期由页面管理。
             button->setIcon(QIcon(icon));
             button->setToolTip(ks::i18n::sourceText(tooltip));
-            button->setAutoRaise(true);
+            // 图标动作沿用统一的实底与命中尺寸，避免蓝色图标在透明工具行上失去对比。
+            KswordTheme::ApplyCompactIconButtonMetrics(button);
+            ks::ui::ApplyFlatButtonTheme(button, ks::ui::FlatButtonTone::Neutral,
+                ks::ui::FlatButtonAppearance::Solid);
+            button->setAccessibleName(ks::i18n::sourceText(tooltip));
             return button;
         }
     }
@@ -47,7 +53,8 @@ namespace ks::ui
         : QWidget(parent), dispatcher_(std::make_shared<AsyncUiDispatcher>(this))
     {
         setObjectName(QStringLiteral("memory_debug_page"));
-        layout_ = new QVBoxLayout(this);
+        QWidget* const pageContent = ks::ui::EnablePageInnerScroll(this);
+        layout_ = new QVBoxLayout(pageContent);
         layout_->setContentsMargins(6, 6, 6, 6);
         layout_->setSpacing(6);
 
@@ -92,9 +99,12 @@ namespace ks::ui
         targetRow->addWidget(closeButton_);
         ks::ui::NormalizeToolbarRow(targetRow);
         targetLayout->addLayout(targetRow);
-        ks::ui::ApplyFlatButtonTheme(refreshButton_, ks::ui::FlatButtonTone::Neutral);
-        ks::ui::ApplyFlatButtonTheme(selectButton_, ks::ui::FlatButtonTone::Accent);
-        ks::ui::ApplyFlatButtonTheme(closeButton_, ks::ui::FlatButtonTone::Neutral);
+        ks::ui::ApplyFlatButtonTheme(refreshButton_, ks::ui::FlatButtonTone::Neutral,
+            ks::ui::FlatButtonAppearance::Solid);
+        ks::ui::ApplyFlatButtonTheme(selectButton_, ks::ui::FlatButtonTone::Accent,
+            ks::ui::FlatButtonAppearance::Solid);
+        ks::ui::ApplyFlatButtonTheme(closeButton_, ks::ui::FlatButtonTone::Neutral,
+            ks::ui::FlatButtonAppearance::Solid);
 
         // 模块下拉框使用目标层的异步身份快照；模块刷新不主动重定位用户当前地址。
         moduleCombo_ = new QComboBox(this);
@@ -131,6 +141,31 @@ namespace ks::ui
             ensureView();
             refreshProcesses();
         }
+    }
+
+    void MemoryDebugPage::prepareForNavigation()
+    {
+        ensureView();
+    }
+
+    void MemoryDebugPage::changeEvent(QEvent* event)
+    {
+        QWidget::changeEvent(event);
+        if (event == nullptr || event->type() != QEvent::LanguageChange)
+        {
+            return;
+        }
+        const auto updateButton = [](QToolButton* button, const QString& text) {
+            if (button != nullptr)
+            {
+                const QString localized = ks::i18n::sourceText(text);
+                button->setToolTip(localized);
+                button->setAccessibleName(localized);
+            }
+        };
+        updateButton(refreshButton_, QStringLiteral("刷新进程候选"));
+        updateButton(selectButton_, QStringLiteral("打开不附加内存会话"));
+        updateButton(closeButton_, QStringLiteral("关闭内存会话"));
     }
 
     void MemoryDebugPage::ensureView()

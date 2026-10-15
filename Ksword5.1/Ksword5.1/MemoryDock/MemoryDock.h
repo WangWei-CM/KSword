@@ -129,6 +129,8 @@ public:
     //   （工作台跟随 Dock；若它钉在别的进程上会被带回跟随）；
     // - 返回：true=已跳转；false=工作台不可用或被拒绝（原因在工作台状态条里）。
     bool openAddressInWorkbench(std::uint64_t address, bool kernelAddress = false);
+    // prepareNavigationPages：按需准备工作台与内存调试页的真实控件树，供全局导航索引。
+    void prepareNavigationPages();
     std::function<void(const QString&)> openPoolModuleDetails;
 
 protected:
@@ -1047,6 +1049,7 @@ private:
     ks::ui::MemoryWorkbenchView* m_workbenchView = nullptr; // 工作台视图（懒创建，容器页的子对象）。
     QTimer* m_workbenchLivenessTimer = nullptr; // 每秒核验工作台锚定目标。
     bool m_workbenchEmbedded = false;                     // 是否是进程详情窗口里的内嵌实例（视图以内嵌模式创建）。
+    bool m_navigationPagesPrepared = false;               // 导航索引已完成一次嵌套懒页准备。
 
     // 模块表当前缓存对应的进程：模块表可以预览一个并未附加的进程，双击模块基址时必须按
     // 它所属的进程去看（见 jumpToModuleBase）。0 表示缓存为空。

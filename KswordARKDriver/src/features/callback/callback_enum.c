@@ -1380,38 +1380,39 @@ Return Value:
 --*/
 {
     USHORT copyBytes = 0U;
+    UNICODE_STRING sourceCopy;
 
     if (Destination == NULL || DestinationChars == 0UL) {
         return;
     }
     Destination[0] = L'\0';
-    if (Source == NULL || Source->Buffer == NULL || Source->Length == 0U) {
+    RtlZeroMemory(&sourceCopy, sizeof(sourceCopy));
+    if (Source == NULL ||
+        !KswordARKRuntimeReadMemory(Source, &sourceCopy, sizeof(sourceCopy)) ||
+        sourceCopy.Buffer == NULL || sourceCopy.Length == 0U) {
         return;
     }
-    if (Source->Length > Source->MaximumLength && Source->MaximumLength != 0U) {
+    if (sourceCopy.Length > sourceCopy.MaximumLength &&
+        sourceCopy.MaximumLength != 0U) {
         return;
     }
-    if (Source->Length > (USHORT)((DestinationChars - 1UL) * sizeof(WCHAR))) {
+    if (sourceCopy.Length > (USHORT)((DestinationChars - 1UL) * sizeof(WCHAR))) {
         copyBytes = (USHORT)((DestinationChars - 1UL) * sizeof(WCHAR));
     }
     else {
-        copyBytes = Source->Length;
+        copyBytes = sourceCopy.Length;
     }
     if (copyBytes == 0U) {
         return;
     }
-    if (!MmIsAddressValid(Source->Buffer) ||
-        !MmIsAddressValid((PUCHAR)Source->Buffer + copyBytes - sizeof(WCHAR))) {
+    if (!KswordARKRuntimeReadMemory(
+            sourceCopy.Buffer,
+            Destination,
+            copyBytes)) {
+        Destination[0] = L'\0';
         return;
     }
-
-    __try {
-        RtlCopyMemory(Destination, Source->Buffer, copyBytes);
-        Destination[copyBytes / sizeof(WCHAR)] = L'\0';
-    }
-    __except (EXCEPTION_EXECUTE_HANDLER) {
-        Destination[0] = L'\0';
-    }
+    Destination[copyBytes / sizeof(WCHAR)] = L'\0';
 }
 
 static VOID

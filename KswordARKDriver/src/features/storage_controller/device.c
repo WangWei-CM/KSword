@@ -785,7 +785,9 @@ KsccEvtReleaseHardware(
      * Never touch controller registers here.  HardwareActivated remaining set
      * means D0Exit (or failed D0 initialization) could not prove a stop.
      */
-    stopUnverified = context->HardwareActivated;
+    /* Surprise removal also lacks proof that the controller stopped DMA. */
+    stopUnverified = context->HardwareActivated ||
+        InterlockedCompareExchange(&context->SurpriseRemoved, 0L, 0L) != 0L;
     if (stopUnverified) {
         NTSTATUS failureStatus;
 
@@ -793,6 +795,14 @@ KsccEvtReleaseHardware(
             ? STATUS_DEVICE_HARDWARE_ERROR
             : context->LastStatus;
         KsccMarkStopUnverified(context, failureStatus);
+        /*
+         * Never free a queue, common buffer, or BAR while hardware stop is
+         * unproven.  The failed FDO remains marked NoRestart and this callback
+         * returns the failure so KMDF cannot complete a normal release path;
+         * a later PnP recovery/reset must establish quiescence before cleanup.
+         */
+        context->ResourcesPrepared = TRUE;
+        return failureStatus;
     } else {
         KsccClearSessionState(context);
     }

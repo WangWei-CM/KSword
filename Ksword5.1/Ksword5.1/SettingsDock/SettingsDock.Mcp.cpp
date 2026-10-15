@@ -182,6 +182,7 @@ void SettingsDock::initializeMcpTab()
     m_mcpConfigPreview = new CodeEditorWidget(m_mcpTab);
     m_mcpConfigPreview->setObjectName(QStringLiteral("mcp_config_preview"));
     m_mcpConfigPreview->setReadOnly(true);
+    m_mcpConfigPreview->setReadOnlyExportEnabled(true);
     m_mcpConfigPreview->setWordWrapEnabled(true);
     m_mcpConfigPreview->setMinimumHeight(180);
     configLayout->addWidget(m_mcpConfigPreview, 1);
@@ -207,6 +208,7 @@ void SettingsDock::initializeMcpTab()
     m_mcpLogViewer = new CodeEditorWidget(logPage);
     m_mcpLogViewer->setObjectName(QStringLiteral("mcp_operation_log"));
     m_mcpLogViewer->setReadOnly(true);
+    m_mcpLogViewer->setReadOnlyExportEnabled(true);
     m_mcpLogViewer->setWordWrapEnabled(true);
     m_mcpLogViewer->setMaximumBlockCount(ks::mcp::MaxActivityLogLines);
     m_mcpLogViewer->setMinimumHeight(180);
@@ -231,6 +233,7 @@ void SettingsDock::initializeMcpTab()
     m_mcpInstallPromptViewer = new CodeEditorWidget(installPage);
     m_mcpInstallPromptViewer->setObjectName(QStringLiteral("mcp_install_prompt"));
     m_mcpInstallPromptViewer->setReadOnly(true);
+    m_mcpInstallPromptViewer->setReadOnlyExportEnabled(true);
     m_mcpInstallPromptViewer->setWordWrapEnabled(true);
     m_mcpInstallPromptViewer->setMinimumHeight(180);
     installLayout->addWidget(m_mcpInstallPromptViewer, 1);

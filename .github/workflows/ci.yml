@@ -162,13 +162,14 @@ jobs:
           # docs/next/logs/ 里是 kd !analyze、验收套件、飞行记录仪逐字写下来的
           # 转录。kd 的输出本身就带行尾空格，而这些文件的价值恰恰在于"与工具当时
           # 打出来的一模一样"——为过检查去改它，等于把证据改成了别的东西。
-          # Original third-party license texts are retained byte-for-byte, and
-          # unified patches require their leading context-space on blank lines.
-          # Exclude only these imported texts; C/C++ source stays checked.
+          # Imported third-party sources and license texts are retained byte-for-byte,
+          # and unified patches require their leading context-space on blank lines.
+          # Exclude only these imported files; first-party source stays checked.
           $skipLogs = @(
             ':(exclude)docs/next/logs/**',
             ':(exclude)third_party/x64dbg_abi/LICENSE',
             ':(exclude)third_party/x64dbg_runtime_licenses/**',
+            ':(exclude)third_party/qrcodegen/**',
             ':(exclude)X96dbgIntegration/patches/*.patch'
           )
           if ($env:GITHUB_EVENT_NAME -eq 'pull_request') {

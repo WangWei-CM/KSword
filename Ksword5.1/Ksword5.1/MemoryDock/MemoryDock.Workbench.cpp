@@ -75,6 +75,23 @@ void MemoryDock::initializeWorkbenchTab()
     });
 }
 
+void MemoryDock::prepareNavigationPages()
+{
+    if (m_navigationPagesPrepared || m_tabWidget == nullptr)
+    {
+        return;
+    }
+
+    // 目录/搜索请求是显式导航需求：准备真实工作台与调试页，确保嵌套 Tab 的控件
+    // 进入统一索引；不切换当前页、不枚举进程，首次展示仍由各页自己的 showEvent 负责。
+    ensureWorkbenchView();
+    if (m_memoryDebugPage != nullptr)
+    {
+        m_memoryDebugPage->prepareForNavigation();
+    }
+    m_navigationPagesPrepared = true;
+}
+
 // ensureWorkbenchView：幂等地创建视图并完成全部接线。
 // 顺序有要求：先 ConfigureShared（必须在第一个视图之前，且此前不得有人访问共享地址簿），
 // 再创建视图、注入服务、加载设置，最后连接信号并回放"创建之前已经发生的附加"。

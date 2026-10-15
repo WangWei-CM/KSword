@@ -11649,7 +11649,7 @@ void ProcessDock::showTableContextMenu(const QPoint& localPosition)
         processContextText("process.menu.r0_terminate", QStringLiteral("R0结束进程")));
     r0TerminateAction->setToolTip(processContextText(
         "process.menu.r0_terminate.tooltip",
-        QStringLiteral("驱动先清 PP/PPL 保护字节，再依次尝试 ZwTerminateProcess、PspTerminateProcess（需要匹配 PDB）、Normal Kernel APC、逐线程终止、清零可写用户内存。APC 排队后仍须确认退出；保护字节不会还原。")));
+        QStringLiteral("驱动先清 PP/PPL 保护字节，再依次尝试 ZwTerminateProcess、Normal Kernel APC、逐线程终止、清零可写用户内存。私有 PspTerminateProcess ABI 尚未通过按版本 profile 核验，因此当前不可用；APC 排队后仍须确认退出，保护字节不会还原。")));
     QAction* r0TerminateTreeAction = contextMenu.addAction(
         buildR0ActionIcon(":/Icon/process_terminate.svg"),
         processContextText("process.menu.r0_terminate_tree", QStringLiteral("R0结束进程树")));

@@ -52,18 +52,22 @@ Return Value:
 --*/
 {
     ULONG copyBytes = 0UL;
+    UNICODE_STRING sourceCopy;
 
-    if (Source == NULL || Row == NULL || Source->Buffer == NULL ||
-        Source->Length == 0U || Source->Length > Source->MaximumLength ||
-        (Source->Length & (sizeof(WCHAR) - 1U)) != 0U) {
+    RtlZeroMemory(&sourceCopy, sizeof(sourceCopy));
+    if (Source == NULL || Row == NULL ||
+        !KswordARKRuntimeReadMemory(Source, &sourceCopy, sizeof(sourceCopy)) ||
+        sourceCopy.Buffer == NULL || sourceCopy.Length == 0U ||
+        sourceCopy.Length > sourceCopy.MaximumLength ||
+        (sourceCopy.Length & (sizeof(WCHAR) - 1U)) != 0U) {
         return FALSE;
     }
 
     copyBytes = min(
-        (ULONG)Source->Length,
+        (ULONG)sourceCopy.Length,
         (ULONG)((KSWORD_ARK_UNLOADED_DRIVER_NAME_CHARS - 1U) * sizeof(WCHAR)));
     // 名称缓冲区可能随卸载记录被释放，只允许完整的安全复制。
-    if (!KswordARKRuntimeReadMemory(Source->Buffer, Row->driverName, copyBytes)) {
+    if (!KswordARKRuntimeReadMemory(sourceCopy.Buffer, Row->driverName, copyBytes)) {
         RtlZeroMemory(Row->driverName, sizeof(Row->driverName)); // 清除部分复制残留。
         return FALSE; // 未取得完整名称时不发布该行。
     }
@@ -270,18 +274,20 @@ Return Value:
     RtlZeroMemory(&name, sizeof(name));
 
     __try {
-        RtlCopyMemory(
-            &name,
-            (const UCHAR*)Entry + Layout->DriverNameOffset,
-            sizeof(name));
-        RtlCopyMemory(
-            &Row->timeDateStamp,
-            (const UCHAR*)Entry + Layout->TimeDateStampOffset,
-            sizeof(Row->timeDateStamp));
-        RtlCopyMemory(
-            &Row->loadStatus,
-            (const UCHAR*)Entry + Layout->LoadStatusOffset,
-            sizeof(Row->loadStatus));
+        if (!KswordARKRuntimeReadMemory(
+                (const UCHAR*)Entry + Layout->DriverNameOffset,
+                &name,
+                sizeof(name)) ||
+            !KswordARKRuntimeReadMemory(
+                (const UCHAR*)Entry + Layout->TimeDateStampOffset,
+                &Row->timeDateStamp,
+                sizeof(Row->timeDateStamp)) ||
+            !KswordARKRuntimeReadMemory(
+                (const UCHAR*)Entry + Layout->LoadStatusOffset,
+                &Row->loadStatus,
+                sizeof(Row->loadStatus))) {
+            return FALSE;
+        }
     }
     __except (EXCEPTION_EXECUTE_HANDLER) {
         return FALSE;

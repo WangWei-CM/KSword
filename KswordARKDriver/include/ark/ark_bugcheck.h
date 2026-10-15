@@ -102,7 +102,7 @@ KswordARKBugcheckGuardInitialize(
     VOID
     );
 
-VOID
+NTSTATUS
 KswordARKBugcheckGuardUninitialize(
     VOID
     );
@@ -127,7 +127,7 @@ KswordARKBugcheckShieldInitialize(
     VOID
     );
 
-VOID
+NTSTATUS
 KswordARKBugcheckShieldUninitialize(
     VOID
     );

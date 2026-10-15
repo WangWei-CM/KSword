@@ -7,6 +7,7 @@
 #include "./FlatButtonTheme.h"
 #include "./ThemeBinding.h"
 #include "./ToolbarMetrics.h"
+#include "./PrimaryPageStyle.h"
 #include "./TablePresentation.h"
 #include "./TableColumnAutoFit.h"
 #include "./VisibleTableWidget.h"
@@ -16,6 +17,7 @@
 #include <QClipboard>
 #include <QComboBox>
 #include <QElapsedTimer>
+#include <QEvent>
 #include <QHeaderView>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -83,6 +85,8 @@ namespace ks::ui
             combo->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
             combo->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
             combo->setMinimumContentsLength(10);
+            StylePrimaryCombo(combo);
+            StyleStandaloneInput(combo);
         }
         navigation->addWidget(m_scopes, 2);
         navigation->addWidget(m_types, 3);
@@ -111,6 +115,7 @@ namespace ks::ui
         m_proxy->setSourceModel(m_model);
         m_tree = new QTreeView(this);
         m_tree->setObjectName(QStringLiteral("ksword_report_tree"));
+        m_tree->setAccessibleName(text(QStringLiteral("报告字段")));
         m_tree->setProperty("ks_i18n_preserve_model_data", true);
         m_tree->setProperty(TableActionBarModeProperty, static_cast<int>(TableActionBarMode::None));
         m_tree->setModel(m_proxy);
@@ -140,6 +145,7 @@ namespace ks::ui
         m_layout->addWidget(m_tree, 1);
         m_empty = new QLabel(this);
         m_empty->setObjectName(QStringLiteral("ksword_report_empty_state"));
+        m_empty->setAccessibleName(text(QStringLiteral("报告空态")));
         m_empty->setAlignment(Qt::AlignCenter);
         m_empty->setWordWrap(true);
         m_layout->addWidget(m_empty, 1);
@@ -147,6 +153,7 @@ namespace ks::ui
         // 低频展开与范围复制放在一个菜单，正文不再逐分区重复堆复制按钮。
         m_actions = new QToolButton(this);
         m_actions->setObjectName(QStringLiteral("ksword_report_actions"));
+        m_actions->setAccessibleName(text(QStringLiteral("报告操作")));
         m_actions->setPopupMode(QToolButton::InstantPopup);
         ApplyFlatButtonTheme(m_actions, FlatButtonTone::Neutral, FlatButtonAppearance::Flat);
         {
@@ -222,6 +229,15 @@ namespace ks::ui
     {
         m_search = search;
         updatePresentation();
+    }
+
+    void ComplexReportView::changeEvent(QEvent* event)
+    {
+        QWidget::changeEvent(event);
+        if (event != nullptr && event->type() == QEvent::LanguageChange)
+        {
+            refreshTheme();
+        }
     }
 
     // 保存稳定路径而非 QModelIndex，文档刷新后仍能恢复对应字段。
@@ -509,6 +525,12 @@ namespace ks::ui
         m_types->setAccessibleName(text(QStringLiteral("结构类型")));
         m_types->setToolTip(text(QStringLiteral("直接选择类型；搜索时自动查找当前范围的所有类型")));
         m_diagnostics->setToolTip(text(QStringLiteral("查看运行状态、身份校验和采样诊断")));
+        m_diagnostics->setAccessibleName(text(QStringLiteral("运行诊断")));
+        m_modes->setAccessibleName(text(QStringLiteral("报告视图")));
+        m_tree->setAccessibleName(text(QStringLiteral("报告字段")));
+        m_empty->setAccessibleName(text(QStringLiteral("报告空态")));
+        m_actions->setAccessibleName(text(QStringLiteral("报告操作")));
+        m_count->setAccessibleName(text(QStringLiteral("报告计数")));
         m_modes->setTabText(0, text(QStringLiteral("字段")));
         m_modes->setTabText(1, text(QStringLiteral("原文")));
         m_modes->setTabToolTip(0, text(QStringLiteral("紧凑字段表；单击字段名展开附加属性，Ctrl+C 复制当前单元格")));

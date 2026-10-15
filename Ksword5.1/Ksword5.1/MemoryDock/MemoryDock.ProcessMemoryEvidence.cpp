@@ -374,7 +374,8 @@ void MemoryDock::initializeProcessMemoryEvidenceTab()
 
     m_tabProcessMemoryEvidence = new QWidget(m_tabWidget);
     // 参数独立滚动，刷新固定在参数栏底部，表格和详情持续保留结果区高度。
-    QVBoxLayout* tabLayout = new QVBoxLayout(m_tabProcessMemoryEvidence);
+    QWidget* const tabContent = ks::ui::EnablePageInnerScroll(m_tabProcessMemoryEvidence);
+    QVBoxLayout* tabLayout = new QVBoxLayout(tabContent);
     tabLayout->setContentsMargins(6, 6, 6, 6);
     tabLayout->setSpacing(6);
     auto* workspace = new ks::ui::ParameterWorkspace(m_tabProcessMemoryEvidence, 420);
