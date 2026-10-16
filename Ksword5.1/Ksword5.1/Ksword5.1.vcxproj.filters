@@ -197,6 +197,18 @@
     <ClCompile Include="MiscDock\DisableDse\KsecDdSiloPath.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="MiscDock\HvciBypass\HvciBypassBackend.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="MiscDock\HvciBypass\HvciBypassPage.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="MiscDock\HvciBypass\RxpfBackend.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="MiscDock\HvciBypass\RxpfPage.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="MiscDock\CKS\CksBackend.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -2228,6 +2240,18 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="MiscDock\DisableDse\KsecDdExecutor.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="MiscDock\HvciBypass\HvciBypassBackend.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="MiscDock\HvciBypass\HvciBypassPage.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="MiscDock\HvciBypass\RxpfBackend.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="MiscDock\HvciBypass\RxpfPage.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="..\..\shared\driver\KsecDdProtocol.h">

@@ -30,7 +30,8 @@ typedef enum _KSW_RXPF_IOCTL_OPERATION
     KswRxpfIoctlQueryStats,
     KswRxpfIoctlDrainEvents,
     KswRxpfIoctlUnregisterPage,
-    KswRxpfIoctlRunSelfTest
+    KswRxpfIoctlRunSelfTest,
+    KswRxpfIoctlSetHookPoint
 } KSW_RXPF_IOCTL_OPERATION;
 
 typedef union _KSW_RXPF_REQUEST_SNAPSHOT
@@ -41,6 +42,7 @@ typedef union _KSW_RXPF_REQUEST_SNAPSHOT
     KSWORD_ARK_RXPF_WRITE_PAGE_REQUEST WritePage;
     KSWORD_ARK_RXPF_SET_EMULATION_REQUEST SetEmulation;
     KSWORD_ARK_RXPF_DRAIN_EVENTS_REQUEST DrainEvents;
+    KSWORD_ARK_RXPF_SET_HOOK_POINT_REQUEST SetHookPoint;
 } KSW_RXPF_REQUEST_SNAPSHOT;
 
 static BOOLEAN
@@ -54,7 +56,8 @@ KswRxpfIoctlIsMutation(
         Operation == KswRxpfIoctlWritePage ||
         Operation == KswRxpfIoctlSetEmulation ||
         Operation == KswRxpfIoctlUnregisterPage ||
-        Operation == KswRxpfIoctlRunSelfTest;
+        Operation == KswRxpfIoctlRunSelfTest ||
+        Operation == KswRxpfIoctlSetHookPoint;
 }
 
 static NTSTATUS
@@ -102,6 +105,12 @@ KswRxpfIoctlEvaluateSafety(
             L"Terminate and release one RXPF research page";
         safetyContext.TargetTextChars = (USHORT)(RTL_NUMBER_OF(
             L"Terminate and release one RXPF research page") - 1U);
+        break;
+    case KswRxpfIoctlSetHookPoint:
+        safetyContext.TargetText =
+            L"Set or clear an RXPF hook point redirect on a managed page";
+        safetyContext.TargetTextChars = (USHORT)(RTL_NUMBER_OF(
+            L"Set or clear an RXPF hook point redirect on a managed page") - 1U);
         break;
     default:
         safetyContext.TargetText =
@@ -242,6 +251,11 @@ KswRxpfIoctlDispatchFixed(
             &snapshot.Record,
             (KSWORD_ARK_RXPF_SELF_TEST_RESPONSE*)outputBuffer);
         break;
+    case KswRxpfIoctlSetHookPoint:
+        status = KswRxpfRuntimeSetHookPoint(
+            &snapshot.SetHookPoint,
+            (KSWORD_ARK_RXPF_HOOK_POINT_RESPONSE*)outputBuffer);
+        break;
     default:
         status = STATUS_INVALID_DEVICE_REQUEST;
         break;
@@ -343,6 +357,13 @@ KSW_RXPF_DEFINE_IOCTL_HANDLER(
     KswRxpfIoctlRunSelfTest,
     KSWORD_ARK_RXPF_RECORD_REQUEST,
     KSWORD_ARK_RXPF_SELF_TEST_RESPONSE,
+    KSWORD_ARK_RXPF_FLAG_UI_CONFIRMED)
+
+KSW_RXPF_DEFINE_IOCTL_HANDLER(
+    KswordARKRxpfIoctlSetHookPoint,
+    KswRxpfIoctlSetHookPoint,
+    KSWORD_ARK_RXPF_SET_HOOK_POINT_REQUEST,
+    KSWORD_ARK_RXPF_HOOK_POINT_RESPONSE,
     KSWORD_ARK_RXPF_FLAG_UI_CONFIRMED)
 
 #undef KSW_RXPF_DEFINE_IOCTL_HANDLER

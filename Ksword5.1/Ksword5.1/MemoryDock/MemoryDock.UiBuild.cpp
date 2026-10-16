@@ -2,6 +2,8 @@
 #include "../UI/AsyncOperation.h"
 #include "SystemMemoryAuditPage.h"
 #include "DdmaPage.h"
+#include "../MiscDock/HvciBypass/HvciBypassPage.h"
+#include "../MiscDock/HvciBypass/RxpfPage.h"
 #include "../UI/AdaptivePageScroll.h" // ks::ui::EnablePageInnerScroll / IsolateMinimumSize：页内滚动壳与最小尺寸隔离。
 #include "../UI/VisibleTableWidget.h"
 #include "../UI/ThemeBinding.h"
@@ -395,6 +397,26 @@ void MemoryDock::initializeTabs()
     initializeWorkbenchTab();
     // 新独立页面也在旧图标循环之后插入，避免改变旧页面的下标图标映射。
     initializeMemoryDebugTab();
+
+    // HVCI 绕过实验页：standalone 页面，自管理 showEvent 首刷，不跟随 Dock 附加。
+    m_hvciBypassPage = new ks::misc::HvciBypassPage(m_tabWidget);
+    m_tabWidget->addTab(m_hvciBypassPage, QStringLiteral("HVCI 绕过"));
+    m_tabWidget->setTabIcon(
+        m_tabWidget->indexOf(m_hvciBypassPage),
+        QIcon(QStringLiteral(":/Icon/process_priority.svg")));
+    ks::i18n::LanguageManager::instance().bindTab(
+        m_tabWidget, m_hvciBypassPage,
+        QStringLiteral("memory.tab.hvci_bypass"), QStringLiteral("HVCI 绕过"));
+
+    // RXPF 页错误模拟页：standalone 页面，自管理 showEvent 首刷。
+    m_rxpfPage = new ks::misc::RxpfPage(m_tabWidget);
+    m_tabWidget->addTab(m_rxpfPage, QStringLiteral("RXPF 模拟"));
+    m_tabWidget->setTabIcon(
+        m_tabWidget->indexOf(m_rxpfPage),
+        QIcon(QStringLiteral(":/Icon/development/terminal_line.svg")));
+    ks::i18n::LanguageManager::instance().bindTab(
+        m_tabWidget, m_rxpfPage,
+        QStringLiteral("memory.tab.rxpf"), QStringLiteral("RXPF 模拟"));
 
     // 后加的四个证据页原本漏了语义键绑定，这里补齐，让它们也能跟随语言切换。
     ks::i18n::LanguageManager& languageManager = ks::i18n::LanguageManager::instance();

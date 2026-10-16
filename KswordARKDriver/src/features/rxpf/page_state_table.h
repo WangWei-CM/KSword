@@ -39,9 +39,14 @@ typedef struct _KSW_RXPF_PAGE_RECORD
     BOOLEAN MappingIsAlias;
     UCHAR ReservedBoolean;
     UCHAR LastWriteBytes[KSWORD_ARK_RXPF_MAX_WRITE_BYTES];
+    volatile ULONG HookAction;          /* KSWORD_ARK_RXPF_HOOK_ACTION_* */
+    ULONG HookReserved;
+    DECLSPEC_ALIGN(8) volatile LONG64 HookAddress;  /* exact RIP to intercept */
+    ULONGLONG RedirectTarget;           /* resume RIP for REDIRECT action */
     DECLSPEC_ALIGN(8) volatile LONG64 FaultCount;
     DECLSPEC_ALIGN(8) volatile LONG64 EmulatedCount;
     DECLSPEC_ALIGN(8) volatile LONG64 UnsupportedCount;
+    DECLSPEC_ALIGN(8) volatile LONG64 RedirectCount;
 } KSW_RXPF_PAGE_RECORD, *PKSW_RXPF_PAGE_RECORD;
 
 typedef struct _KSW_RXPF_PAGE_TABLE

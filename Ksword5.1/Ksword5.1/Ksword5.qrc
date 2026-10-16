@@ -133,6 +133,18 @@
         <file alias="vt_status_safe.svg">Resource/Icon/online_scan/vt_status_safe.svg</file>
         <file alias="vt_status_threat.svg">Resource/Icon/online_scan/vt_status_threat.svg</file>
 
+        <!-- RXPF 页面指令模拟工具栏图标 -->
+        <file alias="rxpf_query_support.svg">Resource/Icon/device/radar_line.svg</file>
+        <file alias="rxpf_self_test.svg">Resource/Icon/system/check_circle_line.svg</file>
+        <file alias="rxpf_query_stats.svg">Resource/Icon/business/chart_bar_line.svg</file>
+        <file alias="rxpf_drain_events.svg">Resource/Icon/editor/list_check_line.svg</file>
+        <file alias="rxpf_register.svg">Resource/Icon/system/add_circle_line.svg</file>
+        <file alias="rxpf_change.svg">Resource/Icon/device/flash_line.svg</file>
+        <file alias="rxpf_write.svg">Resource/Icon/editor/edit_2_line.svg</file>
+        <file alias="rxpf_emulate.svg">Resource/Icon/development/terminal_line.svg</file>
+        <file alias="rxpf_query_page.svg">Resource/Icon/system/information_line.svg</file>
+        <file alias="rxpf_unregister.svg">Resource/Icon/system/minus_circle_line.svg</file>
+
         <!-- 文本编辑器工具栏图标（全部使用 SVG 资源，禁止回退 MainLogo） -->
         <file alias="codeeditor_new.svg">Resource/Icon/file/file_new_line.svg</file>
         <file alias="codeeditor_open.svg">Resource/Icon/file/folder_open_line.svg</file>

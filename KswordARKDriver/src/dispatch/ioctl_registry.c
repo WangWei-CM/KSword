@@ -114,6 +114,8 @@ NTSTATUS KswordARKMemoryIoctlScanKernelMemoryEvidence(_In_ WDFDEVICE Device, _In
 NTSTATUS KswordARKMemoryIoctlDdmaQueryCapability(_In_ WDFDEVICE Device, _In_ WDFREQUEST Request, _In_ size_t InputBufferLength, _In_ size_t OutputBufferLength, _Out_ size_t* BytesReturned);
 NTSTATUS KswordARKMemoryIoctlDdmaReadPhysical(_In_ WDFDEVICE Device, _In_ WDFREQUEST Request, _In_ size_t InputBufferLength, _In_ size_t OutputBufferLength, _Out_ size_t* BytesReturned);
 NTSTATUS KswordARKMemoryIoctlDdmaWritePhysical(_In_ WDFDEVICE Device, _In_ WDFREQUEST Request, _In_ size_t InputBufferLength, _In_ size_t OutputBufferLength, _Out_ size_t* BytesReturned);
+NTSTATUS KswordARKMemoryIoctlChangeMappedPageProtection(_In_ WDFDEVICE Device, _In_ WDFREQUEST Request, _In_ size_t InputBufferLength, _In_ size_t OutputBufferLength, _Out_ size_t* BytesReturned);
+NTSTATUS KswordARKMemoryIoctlChangeImagePageProtection(_In_ WDFDEVICE Device, _In_ WDFREQUEST Request, _In_ size_t InputBufferLength, _In_ size_t OutputBufferLength, _Out_ size_t* BytesReturned);
 NTSTATUS KswordARKFileIoctlDeletePath(_In_ WDFDEVICE Device, _In_ WDFREQUEST Request, _In_ size_t InputBufferLength, _In_ size_t OutputBufferLength, _Out_ size_t* BytesReturned);
 NTSTATUS KswordARKFileIoctlQueryFileInfo(_In_ WDFDEVICE Device, _In_ WDFREQUEST Request, _In_ size_t InputBufferLength, _In_ size_t OutputBufferLength, _Out_ size_t* BytesReturned);
 NTSTATUS KswordARKFileIoctlEnumDirectory(_In_ WDFDEVICE Device, _In_ WDFREQUEST Request, _In_ size_t InputBufferLength, _In_ size_t OutputBufferLength, _Out_ size_t* BytesReturned);
@@ -299,6 +301,7 @@ NTSTATUS KswordARKRxpfIoctlQueryStats(_In_ WDFDEVICE Device, _In_ WDFREQUEST Req
 NTSTATUS KswordARKRxpfIoctlDrainEvents(_In_ WDFDEVICE Device, _In_ WDFREQUEST Request, _In_ size_t InputBufferLength, _In_ size_t OutputBufferLength, _Out_ size_t* BytesReturned);
 NTSTATUS KswordARKRxpfIoctlUnregisterPage(_In_ WDFDEVICE Device, _In_ WDFREQUEST Request, _In_ size_t InputBufferLength, _In_ size_t OutputBufferLength, _Out_ size_t* BytesReturned);
 NTSTATUS KswordARKRxpfIoctlRunSelfTest(_In_ WDFDEVICE Device, _In_ WDFREQUEST Request, _In_ size_t InputBufferLength, _In_ size_t OutputBufferLength, _Out_ size_t* BytesReturned);
+NTSTATUS KswordARKRxpfIoctlSetHookPoint(_In_ WDFDEVICE Device, _In_ WDFREQUEST Request, _In_ size_t InputBufferLength, _In_ size_t OutputBufferLength, _Out_ size_t* BytesReturned);
 
 static const KSWORD_ARK_IOCTL_ENTRY g_KswordArkIoctlTable[] = {
     { IOCTL_KSWORD_ARK_QUERY_STORAGE_CONTROLLER, KswordARKStorageControllerIoctlQuery, "IOCTL_KSWORD_ARK_QUERY_STORAGE_CONTROLLER", KSWORD_ARK_IOCTL_CAPABILITY_NONE, KSWORD_ARK_IOCTL_FLAG_CONTROLLER_ONLY },
@@ -540,7 +543,10 @@ static const KSWORD_ARK_IOCTL_ENTRY g_KswordArkIoctlTable[] = {
     { IOCTL_KSWORD_ARK_RXPF_QUERY_STATS, KswordARKRxpfIoctlQueryStats, "IOCTL_KSWORD_ARK_RXPF_QUERY_STATS", KSWORD_ARK_IOCTL_CAPABILITY_NONE, KSWORD_ARK_IOCTL_FLAG_QUIET_SUCCESS },
     { IOCTL_KSWORD_ARK_RXPF_DRAIN_EVENTS, KswordARKRxpfIoctlDrainEvents, "IOCTL_KSWORD_ARK_RXPF_DRAIN_EVENTS", KSWORD_ARK_IOCTL_CAPABILITY_NONE, KSWORD_ARK_IOCTL_FLAG_QUIET_SUCCESS },
     { IOCTL_KSWORD_ARK_RXPF_UNREGISTER_PAGE, KswordARKRxpfIoctlUnregisterPage, "IOCTL_KSWORD_ARK_RXPF_UNREGISTER_PAGE", KSWORD_ARK_IOCTL_CAPABILITY_NONE, KSWORD_ARK_IOCTL_FLAG_NONE },
-    { IOCTL_KSWORD_ARK_RXPF_RUN_SELF_TEST, KswordARKRxpfIoctlRunSelfTest, "IOCTL_KSWORD_ARK_RXPF_RUN_SELF_TEST", KSWORD_ARK_IOCTL_CAPABILITY_NONE, KSWORD_ARK_IOCTL_FLAG_NONE }
+    { IOCTL_KSWORD_ARK_RXPF_RUN_SELF_TEST, KswordARKRxpfIoctlRunSelfTest, "IOCTL_KSWORD_ARK_RXPF_RUN_SELF_TEST", KSWORD_ARK_IOCTL_CAPABILITY_NONE, KSWORD_ARK_IOCTL_FLAG_NONE },
+    { IOCTL_KSWORD_ARK_RXPF_SET_HOOK_POINT, KswordARKRxpfIoctlSetHookPoint, "IOCTL_KSWORD_ARK_RXPF_SET_HOOK_POINT", KSWORD_ARK_IOCTL_CAPABILITY_NONE, KSWORD_ARK_IOCTL_FLAG_NONE },
+    { IOCTL_KSWORD_ARK_CHANGE_MAPPED_PAGE_PROTECTION, KswordARKMemoryIoctlChangeMappedPageProtection, "IOCTL_KSWORD_ARK_CHANGE_MAPPED_PAGE_PROTECTION", KSWORD_ARK_IOCTL_CAPABILITY_NONE, KSWORD_ARK_IOCTL_FLAG_NONE },
+    { IOCTL_KSWORD_ARK_CHANGE_IMAGE_PAGE_PROTECTION, KswordARKMemoryIoctlChangeImagePageProtection, "IOCTL_KSWORD_ARK_CHANGE_IMAGE_PAGE_PROTECTION", KSWORD_ARK_IOCTL_CAPABILITY_NONE, KSWORD_ARK_IOCTL_FLAG_NONE }
 };
 
 _Must_inspect_result_

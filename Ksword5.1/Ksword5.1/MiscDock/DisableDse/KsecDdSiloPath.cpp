@@ -157,39 +157,57 @@ namespace
     // 三、跨进程调用计数器
     // ================================================================
 
+    // kVolatileRegKeyPath：
+    // - 作用：volatile 注册表键路径，用于存放启动周期内的 Silo 调用计数；
+    //   REG_OPTION_VOLATILE 保证重启后自动消失，而进程全退出后值仍保留。
+    constexpr wchar_t kVolatileRegKeyPath[] =
+        L"SOFTWARE\\KswordARK\\VolatileCounters";
+
+    // kVolatileRegValueName：计数值的名称。
+    constexpr wchar_t kVolatileRegValueName[] = L"SiloCallCount";
+
     // SiloCallCounter：
-    // - 作用：通过命名共享内存实现跨进程、按启动周期的原子计数器。
-    //   内存段由系统页面文件支持，重启后自动归零。
-    //   使用 InterlockedIncrement 保证多进程并发安全。
+    // - 作用：通过 volatile 注册表键实现跨进程、按启动周期的计数器。
+    //   注册表 REG_OPTION_VOLATILE 键在重启后自动销毁，但在所有进程退出后仍保留值，
+    //   解决了原先命名共享内存在最后一个进程退出后计数归零的问题。
+    //   写入需要管理员权限，与 KSecDD Silo 路径的特权要求一致。
     class SiloCallCounter final
     {
     public:
         SiloCallCounter()
         {
-            // 创建或打开命名共享内存。
-            m_mapping = ::CreateFileMappingW(
-                INVALID_HANDLE_VALUE,
-                nullptr,
-                PAGE_READWRITE,
+            // 创建或打开 volatile 注册表键。
+            DWORD disposition = 0;
+            const LSTATUS createStatus = ::RegCreateKeyExW(
+                HKEY_LOCAL_MACHINE,
+                kVolatileRegKeyPath,
                 0,
-                sizeof(long),
-                proto::kSiloCounterName);
-            if (m_mapping != nullptr)
+                nullptr,
+                REG_OPTION_VOLATILE,
+                KEY_READ | KEY_WRITE,
+                nullptr,
+                &m_key,
+                &disposition);
+            if (createStatus != ERROR_SUCCESS)
             {
-                m_counter = static_cast<volatile long*>(
-                    ::MapViewOfFile(m_mapping, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(long)));
+                m_key = nullptr;
             }
+
+            // 创建命名互斥体，保护 tryAcquire 的 read-increment-write 序列，
+            // 避免两个并发调用方同时读到相同计数导致多放行一次。
+            m_mutex = ::CreateMutexW(
+                nullptr, FALSE, L"Global\\KswordARK_SiloCallCounter");
         }
 
         ~SiloCallCounter()
         {
-            if (m_counter != nullptr)
+            if (m_key != nullptr)
             {
-                ::UnmapViewOfFile(const_cast<long*>(m_counter));
+                ::RegCloseKey(m_key);
             }
-            if (m_mapping != nullptr)
+            if (m_mutex != nullptr)
             {
-                ::CloseHandle(m_mapping);
+                ::CloseHandle(m_mutex);
             }
         }
 
@@ -197,42 +215,86 @@ namespace
         SiloCallCounter& operator=(const SiloCallCounter&) = delete;
 
         // tryAcquire：
-        // - 作用：原子递增计数器，若递增后超过上限则回退并返回 false；
+        // - 作用：在命名互斥体保护下递增注册表计数器，
+        //   若递增后超过上限则回退并返回 false；
         // - 返回：true 表示获准执行一次调用。
-        // - 语义：fail-closed，映射失败时拒绝执行。
+        // - 语义：fail-closed，互斥体或注册表操作失败时拒绝执行。
         bool tryAcquire()
         {
-            if (m_counter == nullptr)
+            if (m_key == nullptr || m_mutex == nullptr)
             {
                 return false;
             }
-            const long newValue = ::InterlockedIncrement(const_cast<long*>(m_counter));
-            if (newValue > proto::kMaxSiloCallsPerBoot)
+
+            // 持有命名互斥体期间完成 read-check-write，防止 TOCTOU 竞态。
+            const DWORD waitResult = ::WaitForSingleObject(m_mutex, 5000);
+            if (waitResult != WAIT_OBJECT_0 && waitResult != WAIT_ABANDONED)
             {
-                // 超出上限，回退计数器。
-                ::InterlockedDecrement(const_cast<long*>(m_counter));
                 return false;
             }
-            return true;
+
+            const long current = readCount();
+            bool acquired = false;
+            if (current >= 0 && current < proto::kMaxSiloCallsPerBoot)
+            {
+                const DWORD newValue = static_cast<DWORD>(current + 1);
+                const LSTATUS setStatus = ::RegSetValueExW(
+                    m_key,
+                    kVolatileRegValueName,
+                    0,
+                    REG_DWORD,
+                    reinterpret_cast<const BYTE*>(&newValue),
+                    sizeof(newValue));
+                acquired = (setStatus == ERROR_SUCCESS);
+            }
+
+            ::ReleaseMutex(m_mutex);
+            return acquired;
         }
 
         // currentCount：
-        // - 作用：只读查询当前计数（非原子快照，仅用于诊断显示）。
+        // - 作用：只读查询当前计数（仅用于诊断显示）。
         long currentCount() const
         {
-            if (m_counter == nullptr)
+            return readCount();
+        }
+
+        // available：注册表键是否打开成功。
+        bool available() const { return m_key != nullptr; }
+
+    private:
+        HKEY m_key = nullptr;      // m_key：volatile 注册表键句柄。
+        HANDLE m_mutex = nullptr;  // m_mutex：命名互斥体，保护 tryAcquire 原子性。
+
+        // readCount：
+        // - 作用：从 volatile 注册表键读取当前计数值；
+        //   值不存在时返回 0（首次调用），失败时返回 -1（fail-closed）。
+        long readCount() const
+        {
+            if (m_key == nullptr)
             {
                 return -1;
             }
-            return ::InterlockedCompareExchange(const_cast<long*>(m_counter), 0, 0);
+            DWORD value = 0;
+            DWORD size = sizeof(value);
+            DWORD type = 0;
+            const LSTATUS queryStatus = ::RegQueryValueExW(
+                m_key,
+                kVolatileRegValueName,
+                nullptr,
+                &type,
+                reinterpret_cast<BYTE*>(&value),
+                &size);
+            if (queryStatus == ERROR_FILE_NOT_FOUND)
+            {
+                return 0;
+            }
+            if (queryStatus != ERROR_SUCCESS || type != REG_DWORD)
+            {
+                return -1;
+            }
+            return static_cast<long>(value);
         }
-
-        // available：共享内存是否映射成功。
-        bool available() const { return m_counter != nullptr; }
-
-    private:
-        HANDLE m_mapping = nullptr;             // m_mapping：共享内存段句柄。
-        volatile long* m_counter = nullptr;     // m_counter：计数器指针。
     };
 
     // ================================================================

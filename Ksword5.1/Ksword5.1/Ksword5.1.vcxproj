@@ -291,6 +291,10 @@
     <ClCompile Include="MiscDock\SystemTime\SystemTimePage.cpp" />
     <ClCompile Include="MiscDock\VirtualLocation\VirtualLocationBackend.cpp" />
     <ClCompile Include="MiscDock\VirtualLocation\VirtualLocationPage.cpp" />
+    <ClCompile Include="MiscDock\HvciBypass\HvciBypassBackend.cpp" />
+    <ClCompile Include="MiscDock\HvciBypass\HvciBypassPage.cpp" />
+    <ClCompile Include="MiscDock\HvciBypass\RxpfBackend.cpp" />
+    <ClCompile Include="MiscDock\HvciBypass\RxpfPage.cpp" />
     <ClCompile Include="MiscDock\DisableDse\DisableDseBackend.cpp" />
     <ClCompile Include="MiscDock\DisableDse\DisableDsePage.cpp" />
     <ClCompile Include="MiscDock\DisableDse\DisableDsePageKsec.cpp" />
@@ -1045,6 +1049,10 @@
     <ClInclude Include="MiscDock\SystemTime\SystemTimePage.h" />
     <ClInclude Include="MiscDock\VirtualLocation\VirtualLocationBackend.h" />
     <ClInclude Include="MiscDock\VirtualLocation\VirtualLocationPage.h" />
+    <ClInclude Include="MiscDock\HvciBypass\HvciBypassBackend.h" />
+    <ClInclude Include="MiscDock\HvciBypass\HvciBypassPage.h" />
+    <ClInclude Include="MiscDock\HvciBypass\RxpfBackend.h" />
+    <ClInclude Include="MiscDock\HvciBypass\RxpfPage.h" />
     <ClInclude Include="MiscDock\DisableDse\DisableDseBackend.h" />
     <ClInclude Include="MiscDock\DisableDse\DisableDsePage.h" />
     <ClInclude Include="MiscDock\DisableDse\KsecDdExecutor.h" />

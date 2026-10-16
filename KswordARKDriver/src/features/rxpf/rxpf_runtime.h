@@ -74,6 +74,12 @@ KswRxpfRuntimeRunSelfTest(
     _Out_ KSWORD_ARK_RXPF_SELF_TEST_RESPONSE* Response
     );
 
+NTSTATUS
+KswRxpfRuntimeSetHookPoint(
+    _In_ const KSWORD_ARK_RXPF_SET_HOOK_POINT_REQUEST* Request,
+    _Out_ KSWORD_ARK_RXPF_HOOK_POINT_RESPONSE* Response
+    );
+
 ULONGLONG
 KswRxpfInvokeTestPage(
     _In_ PVOID PageAddress

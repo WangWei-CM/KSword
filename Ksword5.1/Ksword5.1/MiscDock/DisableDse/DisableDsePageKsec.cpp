@@ -26,7 +26,9 @@ namespace ks::misc
             return;
         }
         setBusy(true);
-        appendTrace(QStringLiteral("开始定位 ntoskrnl 写入桩……"));
+        appendTrace(ks::i18n::text(
+            QStringLiteral("dse.trace.ksec.locating"),
+            QStringLiteral("开始定位 ntoskrnl 写入桩……")));
 
         const QPointer<DisableDsePage> guard(this);
 
@@ -96,8 +98,12 @@ namespace ks::misc
         }
         setBusy(true);
         appendTrace(isRestore
-            ? QStringLiteral("KSecDD 恢复 g_CiOptions……")
-            : QStringLiteral("KSecDD 关闭签名强制……"));
+            ? ks::i18n::text(
+                  QStringLiteral("dse.trace.ksec.restoring"),
+                  QStringLiteral("KSecDD 恢复 g_CiOptions……"))
+            : ks::i18n::text(
+                  QStringLiteral("dse.trace.ksec.disabling"),
+                  QStringLiteral("KSecDD 关闭签名强制……")));
 
         const QPointer<DisableDsePage> guard(this);
         const std::uint64_t gadgetAddr = m_gadgetLocation.kernelAddress;
@@ -111,18 +117,24 @@ namespace ks::misc
         {
             if (m_hasCurrentValue)
             {
+                // 已从驱动直接读取到当前值，作为可靠原值。
                 m_savedOriginalValue = m_currentValue;
+                m_originalIsInferred = false;
             }
             else if (m_posture.ciEnabled)
             {
+                // 警告：此值是从布尔姿态推断而非直接读取 g_CiOptions，
+                // 可能丢失其它内部标志位。恢复时标记为推断值。
                 m_savedOriginalValue = disable_dse::kCiOptionEnforceMask
                     | (m_posture.testSigningEnabled
                         ? disable_dse::kCiOptionTestSign : 0U);
+                m_originalIsInferred = true;
             }
             else
             {
                 // 签名强制已经关闭，没有有意义的原值可供恢复。
                 m_savedOriginalValue = disable_dse::kCiOptionEnforceMask;
+                m_originalIsInferred = true;
             }
             m_hasSavedOriginal = true;
         }
@@ -164,9 +176,10 @@ namespace ks::misc
 
                 if (!result.ok)
                 {
-                    guard->appendTrace(
-                        QStringLiteral("KSecDD 操作失败：%1")
-                            .arg(result.failureText));
+                    guard->appendTrace(ks::i18n::text(
+                        QStringLiteral("dse.trace.ksec.apply_failed"),
+                        QStringLiteral("KSecDD 操作失败：%1"))
+                        .arg(result.failureText));
                     guard->updateStateDisplay();
                     guard->updateButtons();
                     guard->setResultText(
@@ -182,10 +195,16 @@ namespace ks::misc
                 const auto postureAfter = disable_dse::queryPosture();
                 guard->m_posture = postureAfter;
 
+                // 查询姿态失败（source==None）时不可靠——默认值会
+                // 误判关闭成功（ciEnabled 默认 false）。此时标记未验证。
+                const bool postureReliable =
+                    postureAfter.source != disable_dse::PostureSource::None;
+
                 // 关闭时预期 ciEnabled=false，恢复时预期 ciEnabled=true。
-                const bool effectVerified = isRestore
-                    ? postureAfter.ciEnabled
-                    : !postureAfter.ciEnabled;
+                const bool effectVerified = postureReliable
+                    && (isRestore
+                        ? postureAfter.ciEnabled
+                        : !postureAfter.ciEnabled);
 
                 if (effectVerified)
                 {
@@ -195,29 +214,56 @@ namespace ks::misc
 
                 if (isRestore)
                 {
-                    guard->m_hasSavedOriginal = false;
+                    const bool wasInferred = guard->m_originalIsInferred;
                     if (effectVerified)
                     {
-                        guard->appendTrace(QStringLiteral(
-                            "KSecDD 已恢复 g_CiOptions，签名强制已重新启用。"));
+                        // 只在验证通过后才清除恢复记录——
+                        // 失败时保留原值以允许用户重试。
+                        guard->m_hasSavedOriginal = false;
+                        guard->m_originalIsInferred = false;
+                        guard->m_usedKsecPath = false;
+                        guard->appendTrace(ks::i18n::text(
+                            QStringLiteral("dse.trace.ksec.restored"),
+                            QStringLiteral("KSecDD 已恢复 g_CiOptions，签名强制已重新启用。")));
+                        if (wasInferred)
+                        {
+                            guard->appendTrace(ks::i18n::text(
+                                QStringLiteral("dse.trace.ksec.restored_inferred"),
+                                QStringLiteral("注意：恢复值是从布尔姿态推断而非直接读取，可能丢失其它内部标志位。")));
+                        }
                     }
                     else
                     {
-                        guard->appendTrace(QStringLiteral(
-                            "KSecDD IOCTL 返回成功，但签名强制状态未恢复（可能需要重启）。"));
+                        // 恢复未验证通过——保留 m_hasSavedOriginal，
+                        // 允许用户再次尝试恢复。
+                        guard->appendTrace(ks::i18n::text(
+                            QStringLiteral("dse.trace.ksec.restore_unverified"),
+                            QStringLiteral("KSecDD IOCTL 返回成功，但签名强制状态未恢复（可能需要重启）。恢复记录已保留，可再次尝试。")));
                     }
                 }
                 else
                 {
                     if (effectVerified)
                     {
-                        guard->appendTrace(QStringLiteral(
-                            "KSecDD 已关闭签名强制，原值已记录，请尽快恢复。"));
+                        // 记录本次是通过 KSecDD 路径关闭的，
+                        // 析构时需通过同路径恢复。
+                        guard->m_usedKsecPath = true;
+                        guard->appendTrace(ks::i18n::text(
+                            QStringLiteral("dse.trace.ksec.disabled"),
+                            QStringLiteral("KSecDD 已关闭签名强制，原值已记录，请尽快恢复。")));
+                    }
+                    else if (!postureReliable)
+                    {
+                        // 姿态查询本身失败——无法验证效果。
+                        guard->appendTrace(ks::i18n::text(
+                            QStringLiteral("dse.trace.ksec.posture_query_failed"),
+                            QStringLiteral("KSecDD IOCTL 返回成功，但姿态查询失败，无法验证签名强制是否已关闭。")));
                     }
                     else
                     {
-                        guard->appendTrace(QStringLiteral(
-                            "KSecDD IOCTL 返回成功，但签名强制状态未改变——写入可能未生效。"));
+                        guard->appendTrace(ks::i18n::text(
+                            QStringLiteral("dse.trace.ksec.no_effect"),
+                            QStringLiteral("KSecDD IOCTL 返回成功，但签名强制状态未改变——写入可能未生效。")));
                     }
                 }
 

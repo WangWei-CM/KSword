@@ -55,6 +55,12 @@ class CodeEditorWidget;
 class SystemMemoryAuditPage;
 class DdmaPage;
 
+namespace ks::misc
+{
+    class HvciBypassPage;
+    class RxpfPage;
+}
+
 // 项目内 UI 组件前置声明：只用指针，避免把表格组件头拉进本头文件。
 namespace ks::ui
 {
@@ -1044,6 +1050,8 @@ private:
 
     QWidget* m_tabWorkbench = nullptr;                   // 工作台页签的容器页。
     ks::ui::MemoryDebugPage* m_memoryDebugPage = nullptr; // 独立进程内存会话，不跟随 Dock 附加。
+    ks::misc::HvciBypassPage* m_hvciBypassPage = nullptr; // HVCI W^X 绕过实验页。
+    ks::misc::RxpfPage* m_rxpfPage = nullptr;             // RXPF 页错误模拟页。
     ks::ui::MemoryWorkbenchView* m_workbenchView = nullptr; // 工作台视图（懒创建，容器页的子对象）。
     QTimer* m_workbenchLivenessTimer = nullptr; // 每秒核验工作台锚定目标。
     bool m_workbenchEmbedded = false;                     // 是否是进程详情窗口里的内嵌实例（视图以内嵌模式创建）。

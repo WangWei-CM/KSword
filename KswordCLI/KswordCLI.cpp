@@ -1206,6 +1206,8 @@ namespace
         { L"memory", L"scan-exec-pte", L"KswordCLI.exe memory scan-exec-pte --pid PID [--start VA] [--end VA] [--cursor VA] [--max-entries N] [--max-table-reads N] [--flags 0xN] [--limit N]", L"Scan the target process page tables for user-space executable leaves.", L"Required: --pid. Optional: --start, --end, --cursor, --max-entries, --max-table-reads, --flags, --limit.", L"Backed by IOCTL_KSWORD_ARK_SCAN_PROCESS_EXECUTABLE_PTE; reports what the processor treats as executable, independent of VAD protection." },
         { L"memory", L"read-section-pages", L"KswordCLI.exe memory read-section-pages --pid PID --start VA --end VA [--cursor VA] [--max-pages N] [--flags 0xN] [--limit N]", L"Read the image section object's clean reference pages for a mapped range.", L"Required: --pid, --start, --end. Optional: --cursor, --max-pages, --flags, --limit.", L"Backed by IOCTL_KSWORD_ARK_READ_IMAGE_SECTION_PAGES; a second reference source independent of the file on disk. Only prototype PTEs in the architectural valid form are resolved - transition and pagefile encodings are version specific and are reported as not resident rather than decoded, and pages are never faulted in. Set --flags 0x1 to also return the page bytes." },
         { L"memory", L"scan-evidence", L"KswordCLI.exe memory scan-evidence [--flags 0xN] [--max-rows N] [--start VA] [--end VA] [--max-bytes N] [--max-bigpool-rows N] [--sample-bytes N] [--limit N]", L"Scan kernel memory evidence rows.", L"Optional: --flags, --max-rows, --start, --end, --max-bytes, --max-bigpool-rows, --sample-bytes, --limit.", L"" },
+        { L"memory", L"change-mapped-protection", L"KswordCLI.exe memory change-mapped-protection --address VA [--protection 0xN] [--flags 0xN]", L"MDL-based page protection change (HVCI research).", L"Required: --address. Optional: --protection (default PAGE_READWRITE=0x04), --flags (0x1=write test).", L"" },
+        { L"memory", L"change-image-protection", L"KswordCLI.exe memory change-image-protection --address VA [--operation N] [--flags 0xN] [--func-addr VA]", L"MmChangeImageProtection on kernel image page (HVCI research).", L"Required: --address. Optional: --operation (1=RX, 2=READONLY_NX, default 2), --flags (0x1=write test, 0x2=restore), --func-addr (manual MmChangeImageProtection VA).", L"" },
         { L"file", L"delete-path", L"KswordCLI.exe file delete-path --path PATH [--flags 0xN]", L"Delete one path through the driver.", L"Required: --path. Optional: --flags.", L"" },
         { L"file", L"query-info", L"KswordCLI.exe file query-info --path PATH [--flags 0xN]", L"Query file object and basic file metadata.", L"Required: --path. Optional: --flags.", L"" },
         { L"file", L"set-integrity", L"KswordCLI.exe file set-integrity --path PATH (--rid RID | --level untrusted|low|medium|medium-plus|high|system) [--directory] [--flags 0xN] [--confirm]", L"Set a file or directory mandatory integrity label through R0.", L"Required: --path and one integrity selector. Optional: --directory, --flags, --confirm adds UI-confirmed protocol bit.", L"Win32/UNC paths are normalized to the driver NT path convention before IOCTL_KSWORD_ARK_SET_FILE_INTEGRITY." },
@@ -3164,6 +3166,70 @@ namespace
                            << L" last=0x" << static_cast<unsigned long>(row->lastStatus)
                            << std::dec << L" owner='" << fixedWide(row->ownerName, KSWORD_ARK_MEMORY_EVIDENCE_OWNER_NAME_CHARS)
                            << L"' detail='" << fixedWide(row->detail, KSWORD_ARK_MEMORY_EVIDENCE_DETAIL_CHARS) << L"'\n";
+            }
+            return 0;
+        }
+        if (sub == L"change-mapped-protection")
+        {
+            KSWORD_ARK_CHANGE_MAPPED_PAGE_PROTECTION_REQUEST request{};
+            request.targetVirtualAddress = requireOptionU64(args, L"--address");
+            request.newProtection = getOptionU32(args, L"--protection", 0x04U /* PAGE_READWRITE */);
+            request.flags = getOptionU32(args, L"--flags", 0U);
+            std::vector<std::uint8_t> buffer(sizeof(KSWORD_ARK_CHANGE_MAPPED_PAGE_PROTECTION_RESPONSE), 0U);
+            const int rc = sendRawIoctl(L"IOCTL_KSWORD_ARK_CHANGE_MAPPED_PAGE_PROTECTION", IOCTL_KSWORD_ARK_CHANGE_MAPPED_PAGE_PROTECTION, &request, sizeof(request), buffer, io);
+            if (rc != 0) return normalizeIoctlRc(L"memory change-mapped-protection", io, rc);
+            if (io.bytesReturned < sizeof(KSWORD_ARK_CHANGE_MAPPED_PAGE_PROTECTION_RESPONSE)) { std::wcerr << L"error: change-mapped-protection response too small\n"; return 4; }
+            const auto* response = reinterpret_cast<const KSWORD_ARK_CHANGE_MAPPED_PAGE_PROTECTION_RESPONSE*>(buffer.data());
+            std::wcout << L"version=" << response->version << L" size=" << response->size << L"\n"
+                       << L"  mdlAllocStatus=0x" << std::hex << static_cast<unsigned long>(response->mdlAllocStatus)
+                       << L"\n  lockStatus=0x" << static_cast<unsigned long>(response->lockStatus)
+                       << L"\n  mapStatus=0x" << static_cast<unsigned long>(response->mapStatus)
+                       << L"\n  protectStatus=0x" << static_cast<unsigned long>(response->protectStatus)
+                       << L"\n  writeTestStatus=0x" << static_cast<unsigned long>(response->writeTestStatus)
+                       << std::dec
+                       << L"\n  mappedVa=" << hex64(response->mappedVa)
+                       << L"\n  originalPte=" << hex64(response->originalPte)
+                       << L"\n  afterProtectPte=" << hex64(response->afterProtectPte) << L"\n";
+            // 检查链式阶段——任何阶段失败则退出码非零。
+            if (response->protectStatus < 0 || response->mapStatus < 0
+                || response->lockStatus < 0 || response->mdlAllocStatus < 0)
+            {
+                return 1;
+            }
+            return 0;
+        }
+        if (sub == L"change-image-protection")
+        {
+            KSWORD_ARK_CHANGE_IMAGE_PAGE_PROTECTION_REQUEST request{};
+            request.targetVirtualAddress = requireOptionU64(args, L"--address");
+            request.operation = getOptionU32(args, L"--operation", KSWORD_ARK_IMAGE_PROT_OP_READONLY_NX);
+            request.flags = getOptionU32(args, L"--flags", 0U);
+            request.functionAddressOverride = getOptionU64(args, L"--func-addr", 0ULL);
+            std::vector<std::uint8_t> buffer(sizeof(KSWORD_ARK_CHANGE_IMAGE_PAGE_PROTECTION_RESPONSE), 0U);
+            const int rc = sendRawIoctl(L"IOCTL_KSWORD_ARK_CHANGE_IMAGE_PAGE_PROTECTION", IOCTL_KSWORD_ARK_CHANGE_IMAGE_PAGE_PROTECTION, &request, sizeof(request), buffer, io);
+            if (rc != 0) return normalizeIoctlRc(L"memory change-image-protection", io, rc);
+            if (io.bytesReturned < sizeof(KSWORD_ARK_CHANGE_IMAGE_PAGE_PROTECTION_RESPONSE)) { std::wcerr << L"error: change-image-protection response too small\n"; return 4; }
+            const auto* r = reinterpret_cast<const KSWORD_ARK_CHANGE_IMAGE_PAGE_PROTECTION_RESPONSE*>(buffer.data());
+            std::wcout << L"version=" << r->version << L" size=" << r->size << L"\n"
+                       << L"  resolverStatus=0x" << std::hex << static_cast<unsigned long>(r->resolverStatus)
+                       << L"\n  resolvedFunctionVa=" << hex64(r->resolvedFunctionVa)
+                       << L"\n  mdlAllocStatus=0x" << static_cast<unsigned long>(r->mdlAllocStatus)
+                       << L"\n  lockStatus=0x" << static_cast<unsigned long>(r->lockStatus)
+                       << L"\n  imageProtectStatus=0x" << static_cast<unsigned long>(r->imageProtectStatus)
+                       << L"\n  aliasMapStatus=0x" << static_cast<unsigned long>(r->aliasMapStatus)
+                       << L"\n  aliasVa=" << hex64(r->aliasVa)
+                       << L"\n  writeTestStatus=0x" << static_cast<unsigned long>(r->writeTestStatus)
+                       << L"\n  restoreStatus=0x" << static_cast<unsigned long>(r->restoreStatus)
+                       << std::dec
+                       << L"\n  originalPte=" << hex64(r->originalPte)
+                       << L"\n  afterImageProtectPte=" << hex64(r->afterImageProtectPte)
+                       << L"\n  afterRestorePte=" << hex64(r->afterRestorePte) << L"\n";
+            // 检查链式阶段——任何阶段失败则退出码非零。
+            if (r->resolverStatus < 0 || r->mdlAllocStatus < 0
+                || r->lockStatus < 0 || r->imageProtectStatus < 0
+                || r->aliasMapStatus < 0)
+            {
+                return 1;
             }
             return 0;
         }

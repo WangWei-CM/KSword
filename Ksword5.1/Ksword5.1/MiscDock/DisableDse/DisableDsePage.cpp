@@ -148,6 +148,41 @@ namespace ks::misc
             return;
         }
 
+        kLogEvent closeEvent;
+
+        // ——尝试通过与关闭时相同的路径恢复——
+
+        if (m_usedKsecPath && m_gadgetLocation.ok)
+        {
+            // 上次是通过 KSecDD 路径关闭的，优先走同路径恢复。
+            const disable_dse::ExecuteResult ksecResult =
+                (m_ksecStrategy == disable_dse::KsecDdStrategy::LsassInjection)
+                    ? disable_dse::executeViaLsass(
+                          m_gadgetLocation.kernelAddress,
+                          m_location.kernelAddress,
+                          m_savedOriginalValue)
+                    : disable_dse::executeViaSilo(
+                          m_gadgetLocation.kernelAddress,
+                          m_location.kernelAddress,
+                          m_savedOriginalValue);
+
+            if (ksecResult.ok)
+            {
+                const QString message =
+                    QStringLiteral("[DisableDSE] 页面关闭时已通过 KSecDD 把 g_CiOptions 写回原值 %1。")
+                        .arg(formatHex32(m_savedOriginalValue));
+                info << closeEvent << message.toStdString() << eol;
+                return;
+            }
+
+            // KSecDD 恢复失败——回退到 R0 驱动路径。
+            const QString fallbackMessage =
+                QStringLiteral("[DisableDSE] KSecDD 恢复失败（%1），尝试 R0 驱动路径……")
+                    .arg(ksecResult.failureText);
+            warn << closeEvent << fallbackMessage.toStdString() << eol;
+        }
+
+        // R0 驱动路径恢复。
         const disable_dse::ReadbackResult readback =
             disable_dse::readCiOptions(m_location);
         if (!readback.ok || readback.value == m_savedOriginalValue)
@@ -158,7 +193,6 @@ namespace ks::misc
         const disable_dse::ApplyResult result = disable_dse::writeCiOptions(
             m_location, readback.value, m_savedOriginalValue);
 
-        kLogEvent closeEvent;
         if (result.ok)
         {
             const QString message =
@@ -737,7 +771,9 @@ namespace ks::misc
             return;
         }
         setBusy(true);
-        appendTrace(QStringLiteral("开始定位 g_CiOptions……"));
+        appendTrace(ks::i18n::text(
+            QStringLiteral("dse.trace.locating"),
+            QStringLiteral("开始定位 g_CiOptions……")));
 
         const QPointer<DisableDsePage> guardThis(this);
         const disable_dse::CodeIntegrityPosture posture = m_posture;
@@ -827,7 +863,10 @@ namespace ks::misc
         if (!outcome.location.ok)
         {
             m_hasCurrentValue = false;
-            appendTrace(QStringLiteral("定位失败：%1").arg(outcome.location.failureText));
+            appendTrace(ks::i18n::text(
+                QStringLiteral("dse.trace.locate_failed"),
+                QStringLiteral("定位失败：%1"))
+                .arg(outcome.location.failureText));
             updateStateDisplay();
             updateButtons();
             setResultText(
@@ -842,7 +881,10 @@ namespace ks::misc
         if (!outcome.readback.ok)
         {
             m_hasCurrentValue = false;
-            appendTrace(QStringLiteral("读回失败：%1").arg(outcome.readback.failureText));
+            appendTrace(ks::i18n::text(
+                QStringLiteral("dse.trace.readback_failed"),
+                QStringLiteral("读回失败：%1"))
+                .arg(outcome.readback.failureText));
             updateStateDisplay();
             updateButtons();
             setResultText(
@@ -856,16 +898,19 @@ namespace ks::misc
 
         m_currentValue = outcome.readback.value;
         m_hasCurrentValue = true;
-        appendTrace(QStringLiteral("读回 g_CiOptions = %1（%2）")
-                        .arg(formatHex32(outcome.readback.value))
-                        .arg(disable_dse::describeCiOptions(outcome.readback.value)));
+        appendTrace(ks::i18n::text(
+            QStringLiteral("dse.trace.readback_value"),
+            QStringLiteral("读回 g_CiOptions = %1（%2）"))
+            .arg(formatHex32(outcome.readback.value))
+            .arg(disable_dse::describeCiOptions(outcome.readback.value)));
 
         if (!outcome.valueMatched)
         {
-            appendTrace(
-                QStringLiteral("校验不通过：系统自报驱动签名强制为“%1”，而读回值 %2 的强制位与之矛盾。已拒绝后续写入。")
-                    .arg(onOffText(outcome.posture.ciEnabled))
-                    .arg(formatHex32(outcome.readback.value)));
+            appendTrace(ks::i18n::text(
+                QStringLiteral("dse.trace.mismatch"),
+                QStringLiteral("校验不通过：系统自报驱动签名强制为“%1”，而读回值 %2 的强制位与之矛盾。已拒绝后续写入。"))
+                .arg(onOffText(outcome.posture.ciEnabled))
+                .arg(formatHex32(outcome.readback.value)));
             updateStateDisplay();
             updateButtons();
             setResultText(
@@ -876,7 +921,9 @@ namespace ks::misc
             return;
         }
 
-        appendTrace(QStringLiteral("校验通过：读回值的强制签名位与系统自报状态一致。"));
+        appendTrace(ks::i18n::text(
+            QStringLiteral("dse.trace.verify_passed"),
+            QStringLiteral("校验通过：读回值的强制签名位与系统自报状态一致。")));
         updateStateDisplay();
         updateButtons();
         setResultText(
@@ -897,7 +944,10 @@ namespace ks::misc
 
         if (!result.ok)
         {
-            appendTrace(QStringLiteral("操作失败：%1").arg(result.detailText));
+            appendTrace(ks::i18n::text(
+                QStringLiteral("dse.trace.apply_failed"),
+                QStringLiteral("操作失败：%1"))
+                .arg(result.detailText));
             updateStateDisplay();
             updateButtons();
             setResultText(
@@ -916,8 +966,10 @@ namespace ks::misc
         {
             // 恢复成功后清掉待恢复记账，页面析构时就不会再写一次。
             m_hasSavedOriginal = false;
-            appendTrace(QStringLiteral("已恢复 g_CiOptions = %1")
-                            .arg(formatHex32(result.writtenValue)));
+            appendTrace(ks::i18n::text(
+                QStringLiteral("dse.trace.restored"),
+                QStringLiteral("已恢复 g_CiOptions = %1"))
+                .arg(formatHex32(result.writtenValue)));
         }
         else
         {
@@ -927,8 +979,10 @@ namespace ks::misc
                 m_savedOriginalValue = result.previousValue;
                 m_hasSavedOriginal = true;
             }
-            appendTrace(QStringLiteral("已关闭签名强制，原值 %1 已记录，请尽快恢复。")
-                            .arg(formatHex32(m_savedOriginalValue)));
+            appendTrace(ks::i18n::text(
+                QStringLiteral("dse.trace.disabled"),
+                QStringLiteral("已关闭签名强制，原值 %1 已记录，请尽快恢复。"))
+                .arg(formatHex32(m_savedOriginalValue)));
         }
 
         // 写入会改变 CodeIntegrityOptions，重新查一次姿态让展示保持同步。
