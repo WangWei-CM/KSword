@@ -124,6 +124,19 @@ static void run()
             return reply.serial == 50 && reply.hit.name == "Accept";
         return false;
     }), "Tree properties are read on the worker, without requiring an on-screen hover");
+    collector.mutate(request, buttonNode.id, QStringLiteral("Name"), QStringLiteral("Edited"), 51);
+    require(waitFor([&] {
+        for (const auto& reply : collector.take())
+            if (reply.mutation && reply.serial == 51) return SUCCEEDED(reply.error) && reply.hit.name == "Edited";
+        return false;
+    }), "Native title property writes through the collector worker");
+    wchar_t editedTitle[64]{}; ::GetWindowTextW(button, editedTitle, 64);
+    require(QString::fromWCharArray(editedTitle) == QStringLiteral("Edited"), "Native title write reaches target HWND");
+    collector.mutate(request, buttonNode.id, QStringLiteral("Name"), QStringLiteral("Accept"), 52);
+    require(waitFor([&] {
+        for (const auto& reply : collector.take()) if (reply.mutation && reply.serial == 52) return SUCCEEDED(reply.error);
+        return false;
+    }), "Native title property can be restored");
     ::ShowWindow(edit, SW_HIDE);
     ++request.generation; nodes = scan(collector, request);
     bool hidden = false;

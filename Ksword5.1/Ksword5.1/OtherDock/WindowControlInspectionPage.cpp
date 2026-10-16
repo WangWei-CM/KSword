@@ -12,9 +12,11 @@
 #include <QCheckBox>
 #include <QComboBox>
 #include <QDialog>
+#include <QDoubleSpinBox>
 #include <QElapsedTimer>
 #include <QHeaderView>
 #include <QLabel>
+#include <QLineEdit>
 #include <QPointer>
 #include <QSet>
 #include <QSignalBlocker>
@@ -23,7 +25,9 @@
 #include <QTimer>
 #include <QToolButton>
 #include <QTreeWidget>
+#include <QStyledItemDelegate>
 #include <QVBoxLayout>
+#include <limits>
 
 namespace ks::control_inspection
 {
@@ -45,6 +49,107 @@ namespace ks::control_inspection
             button->setProperty("ksword_theme_icon_managed", true);
             button->setIcon(ks::ui::MakeThemeButtonAccentIcon(QIcon(resourcePath), QColor(), button));
         }
+
+        bool editableProperty(const Node& node, const QString& property)
+        {
+            if (node.properties.contains(QStringLiteral("ControlId"))
+                && node.properties.contains(QStringLiteral("Style")))
+                return property == QStringLiteral("Name") || property == QStringLiteral("IsEnabled");
+            if (property == QStringLiteral("Value.Value"))
+                return (node.properties.value(QStringLiteral("Value")) == QStringLiteral("true")
+                    && node.properties.value(QStringLiteral("Value.IsReadOnly")) != QStringLiteral("true"))
+                    || node.window != nullptr;
+            return property == QStringLiteral("RangeValue.Value")
+                ? node.properties.value(QStringLiteral("RangeValue")) == QStringLiteral("true")
+                : property == QStringLiteral("Toggle.State")
+                ? node.properties.value(QStringLiteral("Toggle")) == QStringLiteral("true")
+                : property == QStringLiteral("ExpandCollapse.State")
+                ? node.properties.value(QStringLiteral("ExpandCollapse")) == QStringLiteral("true")
+                : property == QStringLiteral("SelectionItem.IsSelected")
+                ? node.properties.value(QStringLiteral("SelectionItem")) == QStringLiteral("true")
+                : (property == QStringLiteral("Scroll.HorizontalPercent")
+                    || property == QStringLiteral("Scroll.VerticalPercent"))
+                && node.properties.value(QStringLiteral("Scroll")) == QStringLiteral("true");
+        }
+        bool booleanText(const QString& value)
+        {
+            return value.compare(QStringLiteral("true"), Qt::CaseInsensitive) == 0
+                || value.compare(QStringLiteral("false"), Qt::CaseInsensitive) == 0
+                || (value.size() == 1 && (value.at(0).toLower() == QLatin1Char('t')
+                    || value.at(0).toLower() == QLatin1Char('f')));
+        }
+
+        class PropertyDelegate final : public QStyledItemDelegate
+        {
+        public:
+            explicit PropertyDelegate(QObject* parent) : QStyledItemDelegate(parent) {}
+            QWidget* createEditor(QWidget* parent, const QStyleOptionViewItem& option,
+                const QModelIndex& index) const override
+            {
+                Q_UNUSED(option);
+                if (index.column() != 1) return nullptr;
+                const QString key = index.data(Qt::UserRole + 1).toString();
+                const QString current = index.data(Qt::EditRole).toString();
+                if (key == QStringLiteral("Value.Value") && booleanText(current))
+                {
+                    auto* combo = new QComboBox(parent);
+                    combo->addItems({QStringLiteral("false"), QStringLiteral("true")});
+                    return combo;
+                }
+                if (key == QStringLiteral("Value.Value") || key == QStringLiteral("Name"))
+                    return new QLineEdit(parent);
+                if (key == QStringLiteral("IsEnabled") || key == QStringLiteral("SelectionItem.IsSelected"))
+                {
+                    auto* combo = new QComboBox(parent);
+                    combo->addItems({QStringLiteral("false"), QStringLiteral("true")});
+                    return combo;
+                }
+                if (key == QStringLiteral("Toggle.State"))
+                {
+                    auto* combo = new QComboBox(parent);
+                    combo->addItems({QStringLiteral("0"), QStringLiteral("1"), QStringLiteral("2")});
+                    return combo;
+                }
+                if (key == QStringLiteral("ExpandCollapse.State"))
+                {
+                    auto* combo = new QComboBox(parent);
+                    combo->addItems({QStringLiteral("0"), QStringLiteral("1")});
+                    return combo;
+                }
+                if (key == QStringLiteral("RangeValue.Value")
+                    || key == QStringLiteral("Scroll.HorizontalPercent")
+                    || key == QStringLiteral("Scroll.VerticalPercent"))
+                {
+                    auto* spin = new QDoubleSpinBox(parent);
+                    spin->setDecimals(6); spin->setSingleStep(1.0);
+                    bool minOk = false, maxOk = false;
+                    const double minimum = index.data(Qt::UserRole + 3).toDouble(&minOk);
+                    const double maximum = index.data(Qt::UserRole + 4).toDouble(&maxOk);
+                    if (minOk && maxOk && minimum <= maximum) spin->setRange(minimum, maximum);
+                    else if (key != QStringLiteral("RangeValue.Value")) spin->setRange(0.0, 100.0);
+                    else spin->setRange(-std::numeric_limits<double>::max(), std::numeric_limits<double>::max());
+                    return spin;
+                }
+                return nullptr;
+            }
+            void setEditorData(QWidget* editor, const QModelIndex& index) const override
+            {
+                const QString value = index.data(Qt::EditRole).toString();
+                if (auto* line = qobject_cast<QLineEdit*>(editor)) line->setText(value);
+                else if (auto* combo = qobject_cast<QComboBox*>(editor))
+                { const int row = combo->findText(value); if (row >= 0) combo->setCurrentIndex(row); }
+                else if (auto* spin = qobject_cast<QDoubleSpinBox*>(editor)) spin->setValue(value.toDouble());
+            }
+            void setModelData(QWidget* editor, QAbstractItemModel* model,
+                const QModelIndex& index) const override
+            {
+                QString value;
+                if (auto* line = qobject_cast<QLineEdit*>(editor)) value = line->text();
+                else if (auto* combo = qobject_cast<QComboBox*>(editor)) value = combo->currentText();
+                else if (auto* spin = qobject_cast<QDoubleSpinBox*>(editor)) value = QString::number(spin->value(), 'g', 15);
+                model->setData(index, value, Qt::EditRole);
+            }
+        };
 
         class Page final : public QWidget
         {
@@ -102,7 +207,10 @@ namespace ks::control_inspection
                 rightLayout->addWidget(m_origin);
                 m_properties = new QTreeWidget(right); m_properties->setObjectName(QStringLiteral("ks_control_properties"));
                 m_properties->setColumnCount(2); m_properties->setHeaderLabels({T("属性"), T("值")});
-                m_properties->setRootIsDecorated(false); m_properties->setEditTriggers(QAbstractItemView::NoEditTriggers);
+                m_properties->setRootIsDecorated(false);
+                m_properties->setEditTriggers(QAbstractItemView::DoubleClicked
+                    | QAbstractItemView::EditKeyPressed | QAbstractItemView::SelectedClicked);
+                m_properties->setItemDelegate(new PropertyDelegate(m_properties));
                 m_properties->setSelectionMode(QAbstractItemView::ExtendedSelection);
                 m_properties->header()->setStretchLastSection(true); rightLayout->addWidget(m_properties);
                 m_properties->header()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
@@ -116,6 +224,8 @@ namespace ks::control_inspection
                 connect(m_refresh, &QToolButton::clicked, this, [this] { scan(); });
                 connect(m_scope, &QComboBox::currentIndexChanged, this, [this] { changeTarget(); });
                 connect(m_view, &QComboBox::currentIndexChanged, this, [this] { changeTarget(); });
+                connect(m_properties, &QTreeWidget::itemChanged, this,
+                    [this](QTreeWidgetItem* item, int column) { propertyChanged(item, column); });
                 connect(m_tree, &QTreeWidget::currentItemChanged, this, [this](QTreeWidgetItem* item) {
                     if (m_rebuilding || !item) return;
                     const auto found = m_nodes.constFind(item->data(0, Qt::UserRole).toString());
@@ -197,6 +307,7 @@ namespace ks::control_inspection
             {
                 m_suspended = true; setPick(false); ReleaseInput(this);
                 m_collector.cancel(); ++m_generation; ++m_serial; m_pickWaiting = false;
+                m_mutationPending = false; m_properties->setEnabled(true);
                 m_hover = {}; if (m_overlay) m_overlay->hide();
             }
             void setPick(bool armed)
@@ -209,7 +320,8 @@ namespace ks::control_inspection
             }
             void changeTarget()
             {
-                setPick(false); m_selected = {}; m_hover = {}; m_properties->clear();
+                setPick(false); m_selected = {}; m_hover = {}; m_mutationPending = false;
+                m_properties->setEnabled(true); m_properties->clear();
                 m_nodes.clear(); m_nodesDirty = true; m_items.clear(); m_tree->clear(); m_collector.cancel(); ++m_generation;
                 if (m_started && !m_paused) activate();
             }
@@ -228,18 +340,71 @@ namespace ks::control_inspection
             }
             void showProperties(const Node& node, bool hovered)
             {
+                m_propertyNode = node; m_propertyHovered = hovered;
                 m_origin->setText(hovered ? T("鼠标悬停：%1").arg(node.name) : T("树节点选择：%1").arg(node.name));
+                const QSignalBlocker blocker(m_properties);
                 m_properties->clear();
                 auto properties = node.properties;
                 properties.insert(T("信息来源"), m_view->currentIndex() == 2 ? QStringLiteral("Win32") : QStringLiteral("UIA"));
+                if (node.window && !properties.contains(QStringLiteral("Value.Value")))
+                    properties.insert(QStringLiteral("Value.Value"), node.name);
                 properties.insert(T("边界（屏幕物理像素）"), QStringLiteral("%1, %2, %3, %4")
                     .arg(node.bounds.x()).arg(node.bounds.y()).arg(node.bounds.width()).arg(node.bounds.height()));
                 for (auto it = properties.cbegin(); it != properties.cend(); ++it)
-                    new QTreeWidgetItem(m_properties, {it.key(), it.value()});
+                {
+                    auto* item = new QTreeWidgetItem(m_properties, {it.key(), it.value()});
+                    item->setData(0, Qt::UserRole, node.id);
+                    item->setData(0, Qt::UserRole + 1, it.key());
+                    item->setData(0, Qt::UserRole + 2, it.value());
+                    if (it.key() == QStringLiteral("RangeValue.Value"))
+                    {
+                        item->setData(0, Qt::UserRole + 3, node.properties.value(QStringLiteral("RangeValue.Minimum")));
+                        item->setData(0, Qt::UserRole + 4, node.properties.value(QStringLiteral("RangeValue.Maximum")));
+                    }
+                    else if (editableProperty(node, it.key()))
+                    {
+                        item->setFlags(item->flags() | Qt::ItemIsEditable);
+                        item->setToolTip(1, T("修改值"));
+                        QFont valueFont = item->font(1); valueFont.setUnderline(true); item->setFont(1, valueFont);
+                    }
+                }
+            }
+            void propertyChanged(QTreeWidgetItem* item, int column)
+            {
+                if (!item || column != 1 || m_rebuilding || m_mutationPending) return;
+                const QString property = item->data(0, Qt::UserRole + 1).toString();
+                if (!editableProperty(m_propertyNode, property)) return;
+                const QString value = item->text(1);
+                const QString previous = item->data(0, Qt::UserRole + 2).toString();
+                if (value == previous) return;
+                const QString id = item->data(0, Qt::UserRole).toString();
+                if (id.isEmpty()) return;
+                m_mutationPending = true; m_properties->setEnabled(false);
+                m_status->setText(T("正在处理，请稍候…"));
+                m_collector.mutate(request(), id, property, value, ++m_serial);
             }
             void consume(Reply reply)
             {
                 if (reply.generation != m_generation || m_suspended || m_paused) return;
+                if (reply.mutation)
+                {
+                    m_mutationPending = false; m_properties->setEnabled(true);
+                    if (FAILED(reply.error))
+                    {
+                        showProperties(m_propertyNode, m_propertyHovered);
+                        m_status->setText(T("操作失败"));
+                    }
+                    else if (!reply.hit.id.isEmpty())
+                    {
+                        m_nodes[reply.hit.id] = reply.hit;
+                        if (m_selected.id == reply.hit.id) m_selected = reply.hit;
+                        if (m_hover.id == reply.hit.id) m_hover = reply.hit;
+                        showProperties(reply.hit, m_propertyHovered);
+                        m_status->setText(T("操作成功"));
+                    }
+                    else m_status->setText(T("操作成功"));
+                    return;
+                }
                 if (reply.hover)
                 {
                     if (!reply.picked && reply.serial != m_serial) return;
@@ -344,12 +509,12 @@ namespace ks::control_inspection
                 {
                     if (!m_hover.id.isEmpty()) { m_hover = {}; ++m_serial; }
                 }
-                else if (!m_pickWaiting && (cursor != m_cursor || now - m_lastHover >= 600))
+                else if (!m_mutationPending && !m_pickWaiting && (cursor != m_cursor || now - m_lastHover >= 600))
                 { m_collector.hit(request(), cursor, ++m_serial, false); m_lastHover = now; }
                 m_cursor = cursor;
                 const bool dirty = m_collector.takeDirty();
                 m_dirty = m_dirty || dirty;
-                if (m_scanDone && !m_pickWaiting && !m_pick->isChecked()
+                if (!m_mutationPending && m_scanDone && !m_pickWaiting && !m_pick->isChecked()
                     && now - m_lastScan >= 400 && (m_dirty || now - m_lastScan >= 2000))
                 { m_dirty = false; scan(); }
                 updateOverlay();
@@ -378,7 +543,8 @@ namespace ks::control_inspection
             QMap<QString, QTreeWidgetItem*> m_items;
             QSet<QString> m_expanded, m_seen;
             QString m_preserve, m_reveal;
-            Node m_hover, m_selected;
+            Node m_hover, m_selected, m_propertyNode;
+            bool m_propertyHovered = false, m_mutationPending = false;
             QPoint m_cursor;
         };
     }

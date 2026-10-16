@@ -11,6 +11,7 @@
 #include <thread>
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <tuple>
 
 #pragma comment(lib, "UIAutomationCore.lib")
@@ -140,6 +141,121 @@ namespace ks::control_inspection
                 ::VariantClear(&value);
             }
         }
+        bool parseBoolean(QString value, bool& result)
+        {
+            value = value.trimmed();
+            if (!value.compare(QStringLiteral("true"), Qt::CaseInsensitive)
+                || !value.compare(QStringLiteral("on"), Qt::CaseInsensitive)
+                || value == QStringLiteral("1"))
+            { result = true; return true; }
+            if (!value.compare(QStringLiteral("false"), Qt::CaseInsensitive)
+                || !value.compare(QStringLiteral("off"), Qt::CaseInsensitive)
+                || value == QStringLiteral("0"))
+            { result = false; return true; }
+            return false;
+        }
+        HRESULT mutateNative(HWND window, const QString& property, const QString& value);
+        HRESULT mutateElement(IUIAutomationElement* element, const QString& property,
+            const QString& value, HWND nativeWindow)
+        {
+            if (!element) return UIA_E_ELEMENTNOTAVAILABLE;
+            if (property == QStringLiteral("Value.Value"))
+            {
+                ComPtr<IUnknown> object;
+                HRESULT hr = element->GetCurrentPattern(UIA_ValuePatternId, object.GetAddressOf());
+                if (FAILED(hr) || !object)
+                    return nativeWindow ? mutateNative(nativeWindow, QStringLiteral("Name"), value)
+                        : (FAILED(hr) ? hr : UIA_E_NOTSUPPORTED);
+                ComPtr<IUIAutomationValuePattern> pattern;
+                if (FAILED(hr = object.As(&pattern)) || !pattern)
+                    return nativeWindow ? mutateNative(nativeWindow, QStringLiteral("Name"), value)
+                        : (FAILED(hr) ? hr : UIA_E_NOTSUPPORTED);
+                BOOL readOnly = FALSE;
+                if (FAILED(hr = pattern->get_CurrentIsReadOnly(&readOnly)) || readOnly) return readOnly ? UIA_E_INVALIDOPERATION : hr;
+                const std::wstring text = value.toStdWString();
+                BSTR bstr = ::SysAllocStringLen(text.data(), static_cast<UINT>(text.size()));
+                if (!bstr) return E_OUTOFMEMORY;
+                hr = pattern->SetValue(bstr); ::SysFreeString(bstr); return hr;
+            }
+            if (property == QStringLiteral("RangeValue.Value"))
+            {
+                bool ok = false; const double number = value.trimmed().toDouble(&ok);
+                if (!ok || !std::isfinite(number)) return E_INVALIDARG;
+                ComPtr<IUnknown> object;
+                HRESULT hr = element->GetCurrentPattern(UIA_RangeValuePatternId, object.GetAddressOf());
+                if (FAILED(hr) || !object) return FAILED(hr) ? hr : UIA_E_NOTSUPPORTED;
+                ComPtr<IUIAutomationRangeValuePattern> pattern;
+                if (FAILED(hr = object.As(&pattern)) || !pattern) return FAILED(hr) ? hr : UIA_E_NOTSUPPORTED;
+                BOOL readOnly = FALSE;
+                if (FAILED(hr = pattern->get_CurrentIsReadOnly(&readOnly)) || readOnly) return readOnly ? UIA_E_INVALIDOPERATION : hr;
+                double minimum = 0.0, maximum = 0.0;
+                if (SUCCEEDED(pattern->get_CurrentMinimum(&minimum)) && SUCCEEDED(pattern->get_CurrentMaximum(&maximum))
+                    && (number < minimum || number > maximum)) return E_INVALIDARG;
+                return pattern->SetValue(number);
+            }
+            if (property == QStringLiteral("Toggle.State"))
+            {
+                bool ok = false; const int desired = value.trimmed().toInt(&ok);
+                if (!ok || desired < ToggleState_Off || desired > ToggleState_Indeterminate) return E_INVALIDARG;
+                ComPtr<IUnknown> object;
+                HRESULT hr = element->GetCurrentPattern(UIA_TogglePatternId, object.GetAddressOf());
+                if (FAILED(hr) || !object) return FAILED(hr) ? hr : UIA_E_NOTSUPPORTED;
+                ComPtr<IUIAutomationTogglePattern> pattern;
+                if (FAILED(hr = object.As(&pattern)) || !pattern) return FAILED(hr) ? hr : UIA_E_NOTSUPPORTED;
+                for (int attempt = 0; attempt < 3; ++attempt)
+                {
+                    ToggleState state = ToggleState_Off;
+                    if (FAILED(hr = pattern->get_CurrentToggleState(&state))) return hr;
+                    if (state == desired) return S_OK;
+                    if (FAILED(hr = pattern->Toggle())) return hr;
+                }
+                return UIA_E_INVALIDOPERATION;
+            }
+            if (property == QStringLiteral("ExpandCollapse.State"))
+            {
+                bool ok = false; const int desired = value.trimmed().toInt(&ok);
+                if (!ok || (desired != ExpandCollapseState_Collapsed && desired != ExpandCollapseState_Expanded)) return E_INVALIDARG;
+                ComPtr<IUnknown> object;
+                HRESULT hr = element->GetCurrentPattern(UIA_ExpandCollapsePatternId, object.GetAddressOf());
+                if (FAILED(hr) || !object) return FAILED(hr) ? hr : UIA_E_NOTSUPPORTED;
+                ComPtr<IUIAutomationExpandCollapsePattern> pattern;
+                if (FAILED(hr = object.As(&pattern)) || !pattern) return FAILED(hr) ? hr : UIA_E_NOTSUPPORTED;
+                ExpandCollapseState state = ExpandCollapseState_LeafNode;
+                if (FAILED(hr = pattern->get_CurrentExpandCollapseState(&state))) return hr;
+                if (state == desired) return S_OK;
+                return desired == ExpandCollapseState_Collapsed ? pattern->Collapse() : pattern->Expand();
+            }
+            if (property == QStringLiteral("SelectionItem.IsSelected"))
+            {
+                bool selected = false;
+                if (!parseBoolean(value, selected)) return E_INVALIDARG;
+                ComPtr<IUnknown> object;
+                HRESULT hr = element->GetCurrentPattern(UIA_SelectionItemPatternId, object.GetAddressOf());
+                if (FAILED(hr) || !object) return FAILED(hr) ? hr : UIA_E_NOTSUPPORTED;
+                ComPtr<IUIAutomationSelectionItemPattern> pattern;
+                if (FAILED(hr = object.As(&pattern)) || !pattern) return FAILED(hr) ? hr : UIA_E_NOTSUPPORTED;
+                if (selected) return pattern->Select();
+                return pattern->RemoveFromSelection();
+            }
+            if (property == QStringLiteral("Scroll.HorizontalPercent")
+                || property == QStringLiteral("Scroll.VerticalPercent"))
+            {
+                bool ok = false; const double number = value.trimmed().toDouble(&ok);
+                if (!ok || !std::isfinite(number) || number < 0.0 || number > 100.0) return E_INVALIDARG;
+                ComPtr<IUnknown> object;
+                HRESULT hr = element->GetCurrentPattern(UIA_ScrollPatternId, object.GetAddressOf());
+                if (FAILED(hr) || !object) return FAILED(hr) ? hr : UIA_E_NOTSUPPORTED;
+                ComPtr<IUIAutomationScrollPattern> pattern;
+                if (FAILED(hr = object.As(&pattern)) || !pattern) return FAILED(hr) ? hr : UIA_E_NOTSUPPORTED;
+                double horizontal = UIA_ScrollPatternNoScroll, vertical = UIA_ScrollPatternNoScroll;
+                pattern->get_CurrentHorizontalScrollPercent(&horizontal);
+                pattern->get_CurrentVerticalScrollPercent(&vertical);
+                if (property == QStringLiteral("Scroll.HorizontalPercent")) horizontal = number;
+                else vertical = number;
+                return pattern->SetScrollPercent(horizontal, vertical);
+            }
+            return UIA_E_NOTSUPPORTED;
+        }
         Node readNative(HWND window, HWND host, const QString& parent)
         {
             const DpiScope dpi;
@@ -165,6 +281,23 @@ namespace ks::control_inspection
                 {QStringLiteral("IsEnabled"), node.enabled ? QStringLiteral("true") : QStringLiteral("false")},
                 {QStringLiteral("IsOffscreen"), node.offscreen ? QStringLiteral("true") : QStringLiteral("false")}};
             return node;
+        }
+        HRESULT mutateNative(HWND window, const QString& property, const QString& value)
+        {
+            if (!window || !::IsWindow(window)) return UIA_E_ELEMENTNOTAVAILABLE;
+            if (property == QStringLiteral("Name"))
+            {
+                const std::wstring text = value.toStdWString();
+                return ::SetWindowTextW(window, text.c_str()) ? S_OK : HRESULT_FROM_WIN32(::GetLastError());
+            }
+            if (property == QStringLiteral("IsEnabled"))
+            {
+                bool enabled = false;
+                if (!parseBoolean(value, enabled)) return E_INVALIDARG;
+                ::EnableWindow(window, enabled ? TRUE : FALSE);
+                return ::IsWindow(window) ? S_OK : UIA_E_ELEMENTNOTAVAILABLE;
+            }
+            return UIA_E_NOTSUPPORTED;
         }
         // COM events only mark the mailbox dirty; no Qt widgets or translations.
         class Events final : public IUIAutomationStructureChangedEventHandler,
@@ -258,7 +391,8 @@ namespace ks::control_inspection
         quint64 epoch = 0, serial = 0;
         QPoint point;
         QString hitId;
-        bool stopped = false, scan = false, hit = false, picked = false;
+        QString mutationId, mutationProperty, mutationValue;
+        bool stopped = false, scan = false, hit = false, mutate = false, picked = false;
         QVector<Reply> replies;
         std::shared_ptr<std::atomic_bool> dirty = std::make_shared<std::atomic_bool>(false);
         HDESK desktop = nullptr;
@@ -318,18 +452,22 @@ namespace ks::control_inspection
                     QPoint point;
                     quint64 serial = 0;
                     QString hitId;
-                    bool scan = false, hit = false, picked = false;
+                    QString mutationId, mutationProperty, mutationValue;
+                    bool scan = false, hit = false, mutate = false, picked = false;
                     {
                         std::unique_lock<std::mutex> lock(state->mutex);
-                        if (!scanning) state->wake.wait(lock, [&] { return state->stopped || state->scan || state->hit; });
+                        if (!scanning) state->wake.wait(lock, [&] { return state->stopped || state->scan || state->hit || state->mutate; });
                         if (state->stopped) break;
                         request = state->request;
                         if (scanning && current.generation != state->epoch)
                         { pending.clear(); nativePending.clear(); scanning = false; }
                         scan = state->scan; state->scan = false;
                         hit = state->hit; state->hit = false;
+                        mutate = state->mutate; state->mutate = false;
                         point = state->point; serial = state->serial; picked = state->picked;
                         hitId = state->hitId;
+                        mutationId = state->mutationId; mutationProperty = state->mutationProperty;
+                        mutationValue = state->mutationValue;
                     }
                     if (scan)
                     {
@@ -366,6 +504,61 @@ namespace ks::control_inspection
                             }
                         }
                         else publish({current.generation, 0, {}, {}, FAILED(setup) ? setup : E_FAIL, false, false, false});
+                    }
+                    if (mutate)
+                    {
+                        Reply reply;
+                        reply.generation = request.generation;
+                        reply.serial = serial;
+                        reply.mutation = true;
+                        reply.mutationId = mutationId;
+                        reply.mutationProperty = mutationProperty;
+                        if (request.view == View::Native)
+                        {
+                            const auto found = records.constFind(mutationId);
+                            if (found == records.cend()) reply.error = UIA_E_ELEMENTNOTAVAILABLE;
+                            else
+                            {
+                                reply.error = mutateNative(found->window, mutationProperty, mutationValue);
+                                if (SUCCEEDED(reply.error)) reply.hit = readNative(found->window, found->host, found->parent);
+                            }
+                        }
+                        else
+                        {
+                            const auto found = elements.constFind(mutationId);
+                            if (found == elements.cend() || !found->element) reply.error = UIA_E_ELEMENTNOTAVAILABLE;
+                            else
+                            {
+                                const HWND fallbackWindow = records.value(mutationId).window;
+                                ComPtr<IUIAutomationElement> cached;
+                                reply.error = found->element->BuildUpdatedCache(cache.Get(), &cached);
+                                if (SUCCEEDED(reply.error) && cached)
+                                {
+                                    reply.error = mutateElement(cached.Get(), mutationProperty, mutationValue,
+                                        fallbackWindow);
+                                    if (SUCCEEDED(reply.error))
+                                    {
+                                        ComPtr<IUIAutomationElement> updated;
+                                        reply.error = cached->BuildUpdatedCache(cache.Get(), &updated);
+                                        if (SUCCEEDED(reply.error) && updated)
+                                        {
+                                            reply.hit = readElement(updated.Get(), found->host, found->parent);
+                                            readPatternValues(updated.Get(), reply.hit);
+                                            if (mutationProperty == QStringLiteral("Value.Value") && fallbackWindow)
+                                            {
+                                                wchar_t text[4096]{};
+                                                ::GetWindowTextW(fallbackWindow, text, 4096);
+                                                reply.hit.name = QString::fromWCharArray(text);
+                                                reply.hit.properties.insert(QStringLiteral("Value.Value"), reply.hit.name);
+                                            }
+                                            elements[mutationId].element = updated;
+                                            records[mutationId] = reply.hit;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        publish(std::move(reply));
                     }
                     if (hit)
                     {
@@ -495,7 +688,7 @@ namespace ks::control_inspection
     {
         std::lock_guard<std::mutex> lock(m_state->mutex);
         m_state->request = request; m_state->epoch = request.generation;
-        m_state->scan = true; m_state->hit = false; m_state->replies.clear(); m_state->wake.notify_one();
+        m_state->scan = true; m_state->hit = false; m_state->mutate = false; m_state->replies.clear(); m_state->wake.notify_one();
     }
     void Collector::hit(const Request& request, QPoint physical, quint64 serial, bool picked)
     {
@@ -513,10 +706,18 @@ namespace ks::control_inspection
         m_state->request = request; m_state->serial = serial; m_state->hitId = id;
         m_state->picked = false; m_state->hit = true; m_state->wake.notify_one();
     }
+    void Collector::mutate(const Request& request, const QString& id, const QString& property,
+        const QString& value, quint64 serial)
+    {
+        std::lock_guard<std::mutex> lock(m_state->mutex);
+        m_state->request = request; m_state->serial = serial;
+        m_state->mutationId = id; m_state->mutationProperty = property; m_state->mutationValue = value;
+        m_state->mutate = true; m_state->wake.notify_one();
+    }
     void Collector::cancel()
     {
         std::lock_guard<std::mutex> lock(m_state->mutex);
-        ++m_state->epoch; m_state->scan = false; m_state->hit = false; m_state->replies.clear(); m_state->wake.notify_one();
+        ++m_state->epoch; m_state->scan = false; m_state->hit = false; m_state->mutate = false; m_state->replies.clear(); m_state->wake.notify_one();
     }
     QVector<Reply> Collector::take()
     { std::lock_guard<std::mutex> lock(m_state->mutex); QVector<Reply> replies; replies.swap(m_state->replies); return replies; }

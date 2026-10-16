@@ -35,8 +35,9 @@ namespace ks::control_inspection
         QVector<Node> nodes;
         Node hit;
         HRESULT error = S_OK;
-        bool done = false, hover = false, picked = false;
+        bool done = false, hover = false, picked = false, mutation = false;
         bool fromTree = false;
+        QString mutationId, mutationProperty;
     };
 
     // The worker owns COM objects. Its mailbox contains value snapshots only.
@@ -49,6 +50,8 @@ namespace ks::control_inspection
         void scan(const Request& request);
         void hit(const Request& request, QPoint physical, quint64 serial, bool picked);
         void details(const Request& request, const QString& id, quint64 serial);
+        void mutate(const Request& request, const QString& id, const QString& property,
+            const QString& value, quint64 serial);
         void cancel();
         QVector<Reply> take();
         bool takeDirty();
