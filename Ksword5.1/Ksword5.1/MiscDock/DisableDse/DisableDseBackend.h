@@ -36,11 +36,11 @@ namespace ks::misc::disable_dse
         Driver = 2   // Driver：KswordARK R0 安全状态查询，字段最全。
     };
 
-    // KsecDdStrategy：两项公开 KSecDD PoC 对应的引导方案。
+    // KsecDdStrategy：KSecDD 写入 g_CiOptions 的两种引导方案。
     enum class KsecDdStrategy
     {
-        LsassInjection = 0, // KExecDD：在非 PPL 的 LSASS 内复用其 KSecDD 连接。
-        ServerSilo = 1     // KexecDDPlus：在 Server Silo 内建立独立 KSecDD 连接。
+        LsassInjection = 0, // LSASS 注入：在非 PPL 的 LSASS 内复用其 KSecDD 连接。
+        ServerSilo = 1     // Server Silo：在 Server Silo 内建立独立 KSecDD 连接。
     };
 
     // KsecDdAssessment：只读前置条件核对结果。
@@ -136,9 +136,9 @@ namespace ks::misc::disable_dse
     CodeIntegrityPosture queryPosture();
 
     // assessKsecDdStrategy：
-    // - 作用：只读核对 KExecDD / KexecDDPlus 的架构、权限、LSA Protection、
+    // - 作用：只读核对 KSecDD LSASS 注入 / Server Silo 的架构、权限、LSA Protection、
     //   Schedule 服务和 Server Silo API 前置条件；
-    // - 边界：不会打开 KSecDD、注入 LSASS、创建 Silo 或发送漏洞 IOCTL。
+    // - 边界：不会打开 KSecDD、注入 LSASS、创建 Silo 或发送 IOCTL。
     KsecDdAssessment assessKsecDdStrategy(KsecDdStrategy strategy);
 
     // evaluateBlockReason：

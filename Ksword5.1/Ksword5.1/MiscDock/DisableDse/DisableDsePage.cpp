@@ -2,6 +2,7 @@
 // 说明见 DisableDsePage.h。所有内核访问都在 DisableDseBackend 里，本文件只做界面与调度。
 
 #include "DisableDsePage.h"
+#include "KsecDdExecutor.h"
 #include "../../UI/PrimaryPageStyle.h"
 #include "../../UI/ParameterWorkspace.h"
 #include "../../UI/ToolbarMetrics.h"
@@ -14,7 +15,6 @@
 
 #include <QApplication>
 #include <QAbstractButton>
-#include <QDesktopServices>
 #include <QEvent>
 #include <QGroupBox>
 #include <QHBoxLayout>
@@ -76,7 +76,7 @@ namespace
 
     // onOffText：
     // - 输入 enabled：开关状态；
-    // - 作用：统一“开启/关闭”文案；
+    // - 作用：统一"开启/关闭"文案；
     // - 返回：状态文本。
     // 这里刻意不写成单行三元：两个 QStringLiteral 挤在一行会让 i18n 提取器
     // 把中间的 `") : QStringLiteral("` 误当成一条待翻译字面量。
@@ -179,7 +179,15 @@ namespace ks::misc
     {
         QWidget::showEvent(event);
         refreshPosture();
-        refreshKsecStrategyAssessment();
+        // 按当前选中的方案刷新对应的状态显示。
+        if (m_r0DriverButton != nullptr && m_r0DriverButton->isChecked())
+        {
+            updateR0StrategyDisplay();
+        }
+        else
+        {
+            refreshKsecStrategyAssessment();
+        }
     }
 
     void DisableDsePage::changeEvent(QEvent* event)
@@ -197,7 +205,10 @@ namespace ks::misc
                 translatedLines.append(ks::i18n::displayText(line));
             if (m_traceEdit) m_traceEdit->replaceRawText(translatedLines.join(QLatin1Char('\n')));
             updateStateDisplay();
-            updateKsecStrategyDisplay();
+            if (m_r0DriverButton != nullptr && m_r0DriverButton->isChecked())
+                updateR0StrategyDisplay();
+            else
+                updateKsecStrategyDisplay();
         }
         if (event->type() == QEvent::ApplicationPaletteChange
             || event->type() == QEvent::PaletteChange)
@@ -255,22 +266,30 @@ namespace ks::misc
             QStringLiteral("高风险功能：本页直接修改内核里 CI.dll!g_CiOptions 的 4 个字节，关闭后系统将接受未签名驱动。该变量在 PatchGuard 的巡检范围内，长时间保持关闭会触发 CRITICAL_STRUCTURE_CORRUPTION 蓝屏。请在加载完目标驱动后立刻点“恢复”，不要让系统长期停在关闭状态。"));
         workspace->parameters()->addWidget(m_warningLabel);
 
-        // ===================== KSecDD 引导方案 =====================
-        // 两项上游 PoC 都没有许可证文件，因此这里只按其公开行为独立实现
-        // 前置条件检查与接入设计，不复制上游源码，也不把“检查通过”冒充实际执行。
+        // ===================== DSE 关闭方案（三路径选择） =====================
+        // R0 驱动直写 / KSecDD LSASS 注入 / KSecDD Server Silo。
         auto* strategyGroup = new QGroupBox(this);
         language.bindText(
             strategyGroup,
-            QStringLiteral("misc.disable_dse.ksec.title"),
-            QStringLiteral("KSecDD 驱动加载引导方案"));
+            QStringLiteral("misc.disable_dse.strategy.title"),
+            QStringLiteral("DSE 关闭方案"));
         auto* strategyLayout = new QVBoxLayout(strategyGroup);
         strategyLayout->setSpacing(8);
 
+        // 三个互斥方案的分段按钮。
         auto* strategyButtonLayout = new QHBoxLayout();
         strategyButtonLayout->setSpacing(0);
-        m_kexecDdButton = new QRadioButton(QStringLiteral("KExecDD · LSASS"), strategyGroup);
-        m_kexecDdPlusButton = new QRadioButton(QStringLiteral("KexecDDPlus · Server Silo"), strategyGroup);
-        m_kexecDdButton->setChecked(true);
+        m_r0DriverButton = new QRadioButton(
+            QStringLiteral("KswordARK · R0"), strategyGroup);
+        m_kexecDdButton = new QRadioButton(
+            QStringLiteral("KSecDD · LSASS"), strategyGroup);
+        m_kexecDdPlusButton = new QRadioButton(
+            QStringLiteral("KSecDD · Silo"), strategyGroup);
+        m_r0DriverButton->setChecked(true);
+        language.bindToolTip(
+            m_r0DriverButton,
+            QStringLiteral("misc.disable_dse.strategy.r0.tooltip"),
+            QStringLiteral("通过已加载的 KswordARK R0 驱动直接写入 g_CiOptions。需要 R0 驱动在线。"));
         language.bindToolTip(
             m_kexecDdButton,
             QStringLiteral("misc.disable_dse.ksec.original.tooltip"),
@@ -279,13 +298,16 @@ namespace ks::misc
             m_kexecDdPlusButton,
             QStringLiteral("misc.disable_dse.ksec.plus.tooltip"),
             QStringLiteral("在 Server Silo 中建立独立 KSecDD 连接；不受 LSA Protection 前置阻断，但有每次启动最多 4 次的硬限制。"));
+        strategyButtonLayout->addWidget(m_r0DriverButton);
         strategyButtonLayout->addWidget(m_kexecDdButton);
         strategyButtonLayout->addWidget(m_kexecDdPlusButton);
         auto* strategySurface = ks::ui::InstallSegmentedButtons(
             strategyButtonLayout,
-            QList<QAbstractButton*>{ m_kexecDdButton, m_kexecDdPlusButton });
+            QList<QAbstractButton*>{
+                m_r0DriverButton, m_kexecDdButton, m_kexecDdPlusButton });
         strategyLayout->addWidget(strategySurface);
 
+        // 方案摘要与详情标签（三条路径共用，内容随选中路径切换）。
         m_ksecStrategySummaryLabel = new QLabel(strategyGroup);
         m_ksecStrategySummaryLabel->setWordWrap(true);
         m_ksecStrategySummaryLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
@@ -296,9 +318,75 @@ namespace ks::misc
         m_ksecStrategyDetailLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
         strategyLayout->addWidget(m_ksecStrategyDetailLabel);
 
+        // g_CiOptions 定位按钮：R0 和 KSecDD 路径都需要目标地址，放在公共区域。
+        auto* locateLayout = new QHBoxLayout();
+        locateLayout->setSpacing(8);
+        m_locateButton = new QPushButton(strategyGroup);
+        ks::ui::ApplyFlatButtonTheme(m_locateButton, ks::ui::FlatButtonTone::Neutral,
+            ks::ui::FlatButtonAppearance::Solid);
+        language.bindText(
+            m_locateButton,
+            QStringLiteral("misc.disable_dse.action.locate"),
+            QStringLiteral("定位并校验"));
+        language.bindToolTip(
+            m_locateButton,
+            QStringLiteral("misc.disable_dse.action.locate.tooltip"),
+            QStringLiteral("通过 R0 驱动反汇编定位 g_CiOptions 并读回校验。"));
+        locateLayout->addWidget(m_locateButton);
+        locateLayout->addStretch(1);
+        ks::ui::NormalizeToolbarRow(locateLayout);
+        strategyLayout->addLayout(locateLayout);
+
+        // ---------- R0 路径专属容器 ----------
+        m_r0Container = new QWidget(strategyGroup);
+        auto* r0Layout = new QVBoxLayout(m_r0Container);
+        r0Layout->setContentsMargins(0, 0, 0, 0);
+        r0Layout->setSpacing(8);
+
+        // R0 执行动作行：关闭签名强制 / 恢复原值。
+        auto* r0ExecLayout = new QHBoxLayout();
+        r0ExecLayout->setSpacing(8);
+
+        m_disableButton = new QPushButton(m_r0Container);
+        ks::ui::ApplyFlatButtonTheme(m_disableButton, ks::ui::FlatButtonTone::Danger,
+            ks::ui::FlatButtonAppearance::Solid);
+        language.bindText(
+            m_disableButton,
+            QStringLiteral("misc.disable_dse.action.disable"),
+            QStringLiteral("关闭签名强制"));
+        language.bindToolTip(
+            m_disableButton,
+            QStringLiteral("misc.disable_dse.action.disable.tooltip"),
+            QStringLiteral("通过 R0 驱动将 g_CiOptions 写为 0，关闭驱动签名强制。"));
+        r0ExecLayout->addWidget(m_disableButton);
+
+        m_restoreButton = new QPushButton(m_r0Container);
+        ks::ui::ApplyFlatButtonTheme(m_restoreButton, ks::ui::FlatButtonTone::Accent,
+            ks::ui::FlatButtonAppearance::Solid);
+        language.bindText(
+            m_restoreButton,
+            QStringLiteral("misc.disable_dse.action.restore"),
+            QStringLiteral("恢复原值"));
+        language.bindToolTip(
+            m_restoreButton,
+            QStringLiteral("misc.disable_dse.action.restore.tooltip"),
+            QStringLiteral("通过 R0 驱动将 g_CiOptions 写回原值。"));
+        r0ExecLayout->addWidget(m_restoreButton);
+        r0ExecLayout->addStretch(1);
+        ks::ui::NormalizeToolbarRow(r0ExecLayout);
+        r0Layout->addLayout(r0ExecLayout);
+        strategyLayout->addWidget(m_r0Container);
+
+        // ---------- KSecDD 路径专属容器 ----------
+        m_ksecContainer = new QWidget(strategyGroup);
+        auto* ksecLayout = new QVBoxLayout(m_ksecContainer);
+        ksecLayout->setContentsMargins(0, 0, 0, 0);
+        ksecLayout->setSpacing(8);
+
+        // KSecDD 辅助动作行：检查前置条件。
         auto* strategyActionLayout = new QHBoxLayout();
         strategyActionLayout->setSpacing(8);
-        m_ksecRefreshButton = new QPushButton(strategyGroup);
+        m_ksecRefreshButton = new QPushButton(m_ksecContainer);
         ks::ui::ApplyFlatButtonTheme(m_ksecRefreshButton, ks::ui::FlatButtonTone::Neutral,
             ks::ui::FlatButtonAppearance::Solid);
         language.bindText(
@@ -306,18 +394,58 @@ namespace ks::misc
             QStringLiteral("misc.disable_dse.ksec.refresh"),
             QStringLiteral("检查前置条件"));
         strategyActionLayout->addWidget(m_ksecRefreshButton);
-
-        m_ksecSourceButton = new QPushButton(strategyGroup);
-        ks::ui::ApplyFlatButtonTheme(m_ksecSourceButton, ks::ui::FlatButtonTone::Neutral,
-            ks::ui::FlatButtonAppearance::Solid);
-        language.bindText(
-            m_ksecSourceButton,
-            QStringLiteral("misc.disable_dse.ksec.source"),
-            QStringLiteral("打开上游项目"));
-        strategyActionLayout->addWidget(m_ksecSourceButton);
         strategyActionLayout->addStretch(1);
         ks::ui::NormalizeToolbarRow(strategyActionLayout);
-        strategyLayout->addLayout(strategyActionLayout);
+        ksecLayout->addLayout(strategyActionLayout);
+
+        // 写入桩定位结果。
+        m_ksecGadgetLabel = new QLabel(m_ksecContainer);
+        m_ksecGadgetLabel->setWordWrap(true);
+        m_ksecGadgetLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
+        ksecLayout->addWidget(m_ksecGadgetLabel);
+
+        // KSecDD 执行动作行：定位桩 / 关闭 / 恢复。
+        auto* ksecExecLayout = new QHBoxLayout();
+        ksecExecLayout->setSpacing(8);
+        m_ksecLocateGadgetButton = new QPushButton(m_ksecContainer);
+        ks::ui::ApplyFlatButtonTheme(m_ksecLocateGadgetButton,
+            ks::ui::FlatButtonTone::Neutral, ks::ui::FlatButtonAppearance::Solid);
+        language.bindText(m_ksecLocateGadgetButton,
+            QStringLiteral("misc.disable_dse.ksec.locate_gadget"),
+            QStringLiteral("定位写入桩"));
+        language.bindToolTip(m_ksecLocateGadgetButton,
+            QStringLiteral("misc.disable_dse.ksec.locate_gadget.tooltip"),
+            QStringLiteral("在 ntoskrnl 中定位 mov [rcx], edx; ret 字节序列，KSecDD 通过它向内核地址写值。"));
+        ksecExecLayout->addWidget(m_ksecLocateGadgetButton);
+
+        m_ksecDisableButton = new QPushButton(m_ksecContainer);
+        ks::ui::ApplyFlatButtonTheme(m_ksecDisableButton,
+            ks::ui::FlatButtonTone::Danger, ks::ui::FlatButtonAppearance::Solid);
+        language.bindText(m_ksecDisableButton,
+            QStringLiteral("misc.disable_dse.ksec.disable"),
+            QStringLiteral("KSecDD 关闭"));
+        language.bindToolTip(m_ksecDisableButton,
+            QStringLiteral("misc.disable_dse.ksec.disable.tooltip"),
+            QStringLiteral("通过 KSecDD IOCTL 将 g_CiOptions 写为 0，关闭驱动签名强制。不需要 KswordARK R0 驱动。"));
+        ksecExecLayout->addWidget(m_ksecDisableButton);
+
+        m_ksecRestoreButton = new QPushButton(m_ksecContainer);
+        ks::ui::ApplyFlatButtonTheme(m_ksecRestoreButton,
+            ks::ui::FlatButtonTone::Accent, ks::ui::FlatButtonAppearance::Solid);
+        language.bindText(m_ksecRestoreButton,
+            QStringLiteral("misc.disable_dse.ksec.restore"),
+            QStringLiteral("KSecDD 恢复"));
+        language.bindToolTip(m_ksecRestoreButton,
+            QStringLiteral("misc.disable_dse.ksec.restore.tooltip"),
+            QStringLiteral("通过 KSecDD IOCTL 将 g_CiOptions 写回原值。"));
+        ksecExecLayout->addWidget(m_ksecRestoreButton);
+        ksecExecLayout->addStretch(1);
+        ks::ui::NormalizeToolbarRow(ksecExecLayout);
+        ksecLayout->addLayout(ksecExecLayout);
+
+        // 初始状态：R0 选中时隐藏 KSecDD 容器。
+        m_ksecContainer->setVisible(false);
+        strategyLayout->addWidget(m_ksecContainer);
 
         ks::ui::StyleParameterSection(strategyGroup);
         workspace->parameters()->addWidget(strategyGroup);
@@ -391,6 +519,7 @@ namespace ks::misc
         m_pendingLabel->setVisible(false);
         workspace->parameters()->addWidget(m_pendingLabel);
 
+        // 底部操作栏：只保留与路径无关的刷新状态按钮。
         m_refreshButton = new QPushButton(workspace);
         ks::ui::ApplyFlatButtonTheme(m_refreshButton, ks::ui::FlatButtonTone::Neutral,
             ks::ui::FlatButtonAppearance::Solid);
@@ -399,33 +528,6 @@ namespace ks::misc
             QStringLiteral("misc.disable_dse.action.refresh"),
             QStringLiteral("刷新状态"));
         workspace->actions()->addWidget(m_refreshButton);
-
-        m_locateButton = new QPushButton(workspace);
-        ks::ui::ApplyFlatButtonTheme(m_locateButton, ks::ui::FlatButtonTone::Neutral,
-            ks::ui::FlatButtonAppearance::Solid);
-        language.bindText(
-            m_locateButton,
-            QStringLiteral("misc.disable_dse.action.locate"),
-            QStringLiteral("定位并校验"));
-        workspace->actions()->addWidget(m_locateButton);
-
-        m_disableButton = new QPushButton(workspace);
-        ks::ui::ApplyFlatButtonTheme(m_disableButton, ks::ui::FlatButtonTone::Danger,
-            ks::ui::FlatButtonAppearance::Solid);
-        language.bindText(
-            m_disableButton,
-            QStringLiteral("misc.disable_dse.action.disable"),
-            QStringLiteral("关闭签名强制"));
-        workspace->actions()->addWidget(m_disableButton);
-
-        m_restoreButton = new QPushButton(workspace);
-        ks::ui::ApplyFlatButtonTheme(m_restoreButton, ks::ui::FlatButtonTone::Accent,
-            ks::ui::FlatButtonAppearance::Solid);
-        language.bindText(
-            m_restoreButton,
-            QStringLiteral("misc.disable_dse.action.restore"),
-            QStringLiteral("恢复原值"));
-        workspace->actions()->addWidget(m_restoreButton);
 
         workspace->actions()->addStretch(1);
         ks::ui::NormalizeToolbarRow(workspace->actions());
@@ -442,31 +544,68 @@ namespace ks::misc
 
     void DisableDsePage::initializeConnections()
     {
+        // R0 驱动直写方案选中时：显示 R0 容器，隐藏 KSecDD 容器，更新状态。
+        connect(m_r0DriverButton, &QRadioButton::toggled, this, [this](const bool checked) {
+            if (!checked)
+            {
+                return;
+            }
+            if (m_r0Container != nullptr)
+                m_r0Container->setVisible(true);
+            if (m_ksecContainer != nullptr)
+                m_ksecContainer->setVisible(false);
+            updateR0StrategyDisplay();
+            updateButtons();
+        });
+        // KSecDD LSASS 方案选中时：隐藏 R0 容器，显示 KSecDD 容器，执行前置核对。
         connect(m_kexecDdButton, &QRadioButton::toggled, this, [this](const bool checked) {
             if (!checked)
             {
                 return;
             }
+            if (m_r0Container != nullptr)
+                m_r0Container->setVisible(false);
+            if (m_ksecContainer != nullptr)
+                m_ksecContainer->setVisible(true);
             m_ksecStrategy = disable_dse::KsecDdStrategy::LsassInjection;
             refreshKsecStrategyAssessment();
         });
+        // KSecDD Server Silo 方案选中时：同 LSASS 方案的容器切换。
         connect(m_kexecDdPlusButton, &QRadioButton::toggled, this, [this](const bool checked) {
             if (!checked)
             {
                 return;
             }
+            if (m_r0Container != nullptr)
+                m_r0Container->setVisible(false);
+            if (m_ksecContainer != nullptr)
+                m_ksecContainer->setVisible(true);
             m_ksecStrategy = disable_dse::KsecDdStrategy::ServerSilo;
             refreshKsecStrategyAssessment();
         });
         connect(m_ksecRefreshButton, &QPushButton::clicked, this, [this]() {
             refreshKsecStrategyAssessment();
         });
-        connect(m_ksecSourceButton, &QPushButton::clicked, this, [this]() {
-            const QUrl sourceUrl(
-                m_ksecStrategy == disable_dse::KsecDdStrategy::LsassInjection
-                    ? QStringLiteral("https://github.com/floesen/KExecDD")
-                    : QStringLiteral("https://github.com/scrt/KexecDDPlus"));
-            (void)QDesktopServices::openUrl(sourceUrl);
+        connect(m_ksecLocateGadgetButton, &QPushButton::clicked, this, [this]() {
+            runKsecLocateGadget();
+        });
+        connect(m_ksecDisableButton, &QPushButton::clicked, this, [this]() {
+            const QString message = ks::i18n::text(
+                QStringLiteral("misc.disable_dse.ksec.confirm.disable"),
+                QStringLiteral("即将通过 KSecDD 把 g_CiOptions 改成 0。\n\n这条路径不经过 KswordARK R0 驱动，直接利用 ksecdd.sys 在内核模式写入。\n\nPatchGuard 风险与 R0 写入相同：请在加载完驱动后立即恢复。\n\n确定继续吗？"));
+            if (!askConfirmation(
+                    this,
+                    ks::i18n::text(
+                        QStringLiteral("misc.disable_dse.ksec.confirm.title"),
+                        QStringLiteral("KSecDD 关闭签名强制")),
+                    message))
+            {
+                return;
+            }
+            runKsecApply(disable_dse::kDisabledValue, false);
+        });
+        connect(m_ksecRestoreButton, &QPushButton::clicked, this, [this]() {
+            runKsecApply(m_savedOriginalValue, true);
         });
         connect(m_refreshButton, &QPushButton::clicked, this, [this]() {
             refreshPosture();
@@ -551,6 +690,46 @@ namespace ks::misc
             QStringLiteral("color:%1;").arg(KswordTheme::TextSecondaryHex()));
     }
 
+    void DisableDsePage::updateR0StrategyDisplay()
+    {
+        if (m_ksecStrategySummaryLabel == nullptr || m_ksecStrategyDetailLabel == nullptr)
+        {
+            return;
+        }
+
+        // R0 路径的准入取决于驱动是否在线，由 m_blockReason 反映。
+        const bool driverOnline =
+            m_blockReason != disable_dse::BlockReason::DriverUnavailable;
+        if (driverOnline)
+        {
+            m_ksecStrategySummaryLabel->setText(
+                ks::i18n::text(
+                    QStringLiteral("misc.disable_dse.strategy.r0.ready"),
+                    QStringLiteral("KswordARK R0 驱动在线，可直接写入内核。")));
+            m_ksecStrategySummaryLabel->setStyleSheet(
+                QStringLiteral("color:%1;font-weight:650;")
+                    .arg(KswordTheme::SuccessHex()));
+        }
+        else
+        {
+            m_ksecStrategySummaryLabel->setText(
+                ks::i18n::text(
+                    QStringLiteral("misc.disable_dse.strategy.r0.unavailable"),
+                    QStringLiteral("KswordARK R0 驱动不在线。请先在驱动页面加载驱动。")));
+            m_ksecStrategySummaryLabel->setStyleSheet(
+                QStringLiteral("color:%1;font-weight:650;")
+                    .arg(KswordTheme::WarningHex()));
+        }
+
+        // 对 R0 路径简要说明：直接通过 R0 驱动读写内核地址，不经 KSecDD。
+        m_ksecStrategyDetailLabel->setText(
+            ks::i18n::text(
+                QStringLiteral("misc.disable_dse.strategy.r0.detail"),
+                QStringLiteral("通过 KswordARK 自有内核驱动的事务通道读写 g_CiOptions。\n需要 R0 驱动在线且定位校验通过；HVCI 开启时无法使用。")));
+        m_ksecStrategyDetailLabel->setStyleSheet(
+            QStringLiteral("color:%1;").arg(KswordTheme::TextSecondaryHex()));
+    }
+
     void DisableDsePage::runLocate()
     {
         if (m_busy)
@@ -572,7 +751,7 @@ namespace ks::misc
                 outcome.readback = disable_dse::readCiOptions(outcome.location);
                 // 写入前的护栏：g_CiOptions 用的是 CI.dll 内部编码，与系统自报的
                 // CODEINTEGRITY_OPTION_* 不是一套，两个数值本来就不相等，
-                // 因此只比对“强制签名此刻是否生效”这一个语义。地址若定位错了，
+                // 因此只比对"强制签名此刻是否生效"这一个语义。地址若定位错了，
                 // 落在无关内核数据上几乎不可能恰好满足这个关系。
                 outcome.valueMatched = outcome.readback.ok
                     && disable_dse::ciOptionsAgreesWithPosture(
@@ -821,13 +1000,32 @@ namespace ks::misc
                 allowed && m_valueMatched && m_hasSavedOriginal
                 && m_hasCurrentValue && m_currentValue != m_savedOriginalValue);
         }
+        // KSecDD 执行按钮：不需要 R0 驱动在线，但仍受 HVCI / 版本阻断。
+        {
+            const bool ksecPathOk = !m_busy
+                && m_blockReason != disable_dse::BlockReason::UnsupportedBuild
+                && m_blockReason != disable_dse::BlockReason::HvciEnabled;
+            if (m_ksecLocateGadgetButton != nullptr)
+                m_ksecLocateGadgetButton->setEnabled(!m_busy);
+            if (m_ksecDisableButton != nullptr)
+                m_ksecDisableButton->setEnabled(
+                    ksecPathOk && m_gadgetLocation.ok && m_location.ok
+                    && m_ksecAssessment.prerequisitesMet
+                    && (!m_hasCurrentValue || m_currentValue != disable_dse::kDisabledValue));
+            if (m_ksecRestoreButton != nullptr)
+                m_ksecRestoreButton->setEnabled(
+                    ksecPathOk && m_gadgetLocation.ok && m_location.ok
+                    && m_ksecAssessment.prerequisitesMet && m_hasSavedOriginal
+                    && (!m_hasCurrentValue || m_currentValue != m_savedOriginalValue));
+        }
         if (m_ksecRefreshButton != nullptr)
         {
             m_ksecRefreshButton->setEnabled(!m_busy);
         }
-        if (m_ksecSourceButton != nullptr)
+        // 三个方案切换按钮：只要不忙就允许切换。
+        if (m_r0DriverButton != nullptr)
         {
-            m_ksecSourceButton->setEnabled(true);
+            m_r0DriverButton->setEnabled(!m_busy);
         }
         if (m_kexecDdButton != nullptr)
         {
@@ -929,6 +1127,30 @@ namespace ks::misc
             }
         }
 
+        // 写入桩定位结果显示。
+        if (m_ksecGadgetLabel != nullptr)
+        {
+            if (!m_gadgetLocation.ok)
+            {
+                m_ksecGadgetLabel->setText(
+                    ks::i18n::text(
+                        QStringLiteral("misc.disable_dse.ksec.gadget.none"),
+                        QStringLiteral("写入桩尚未定位。点“定位写入桩”搜索 ntoskrnl 中的 mov [rcx], edx; ret。")));
+                m_ksecGadgetLabel->setStyleSheet(
+                    QStringLiteral("color:%1;").arg(KswordTheme::TextSecondaryHex()));
+            }
+            else
+            {
+                m_ksecGadgetLabel->setText(
+                    QStringLiteral("ntoskrnl 基址 %1　RVA 0x%2　写入桩 %3")
+                        .arg(formatHex64(m_gadgetLocation.ntoskrnlBase))
+                        .arg(m_gadgetLocation.rva, 0, 16)
+                        .arg(formatHex64(m_gadgetLocation.kernelAddress)));
+                m_ksecGadgetLabel->setStyleSheet(
+                    QStringLiteral("color:%1;").arg(KswordTheme::SuccessHex()));
+            }
+        }
+
         if (m_pendingLabel != nullptr)
         {
             m_pendingLabel->setVisible(m_hasSavedOriginal);
@@ -938,6 +1160,12 @@ namespace ks::misc
                     QStringLiteral("驱动签名强制当前处于被本页修改的状态，原值 %1 已记录。请在加载完驱动后立即点“恢复原值”；若直接关闭程序，本页会在退出时尝试自动写回。")
                         .arg(formatHex32(m_savedOriginalValue)));
             }
+        }
+
+        // R0 选中时同步刷新 R0 方案摘要（驱动在线状态可能随时变化）。
+        if (m_r0DriverButton != nullptr && m_r0DriverButton->isChecked())
+        {
+            updateR0StrategyDisplay();
         }
     }
 }

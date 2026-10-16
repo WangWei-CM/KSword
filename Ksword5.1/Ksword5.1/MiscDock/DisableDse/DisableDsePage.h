@@ -3,7 +3,7 @@
 // ============================================================
 // DisableDsePage.h
 // 作用：
-// 1) 在“杂项”里提供驱动签名强制（DSE）开关，用于临时加载未签名驱动；
+// 1) 在"杂项"里提供驱动签名强制（DSE）开关，用于临时加载未签名驱动；
 // 2) 展示 CI / HVCI / 安全启动姿态，并把不满足条件的情况直接挡在按钮之前；
 // 3) 定位 CI.dll!g_CiOptions 并展示完整定位轨迹，供用户核对地址是否可信；
 // 4) 关闭前记录原值，提供一键恢复；页面析构时若仍处于关闭状态会自动写回。
@@ -15,6 +15,7 @@
 // ============================================================
 
 #include "DisableDseBackend.h"
+#include "KsecDdExecutor.h"
 
 #include "../../Framework.h"
 
@@ -36,7 +37,7 @@ namespace ks::misc
     class DisableDsePage final : public QWidget
     {
     public:
-        // 构造函数：只建界面，不访问驱动，避免打开“杂项”就触发一次内核查询。
+        // 构造函数：只建界面，不访问驱动，避免打开"杂项"就触发一次内核查询。
         explicit DisableDsePage(QWidget* parent = nullptr);
         // 析构函数：若本页关闭过 DSE 且尚未恢复，在这里做最后一次写回，
         // 避免用户忘记恢复后被 PatchGuard 判定为内核数据被篡改。
@@ -63,11 +64,17 @@ namespace ks::misc
         void refreshKsecStrategyAssessment();
         // updateKsecStrategyDisplay：切换方案或语言后重绘摘要与边界说明。
         void updateKsecStrategyDisplay();
+        // updateR0StrategyDisplay：R0 路径选中时刷新摘要显示（驱动是否在线等）。
+        void updateR0StrategyDisplay();
         // runLocate：在后台线程定位 g_CiOptions，并在定位成功后立即读回校验。
         void runLocate();
         // runApply：在后台线程把 g_CiOptions 写成 desiredValue；
         //   isRestore 只影响文案与状态记账，写入路径完全相同。
         void runApply(std::uint32_t desiredValue, bool isRestore);
+        // runKsecLocateGadget：在后台线程定位 ntoskrnl 中的写入桩。
+        void runKsecLocateGadget();
+        // runKsecApply：通过当前选定的 KSecDD 方案写入 g_CiOptions。
+        void runKsecApply(std::uint32_t desiredValue, bool isRestore);
 
         // LocateOutcome：一次定位 + 读回校验的综合结果，只在线程间传值。
         struct LocateOutcome
@@ -111,9 +118,11 @@ namespace ks::misc
         QPushButton* m_disableButton = nullptr; // m_disableButton：关闭驱动签名强制。
         QPushButton* m_restoreButton = nullptr; // m_restoreButton：把 g_CiOptions 写回原值。
         QPushButton* m_ksecRefreshButton = nullptr; // 重新执行只读前置条件核对。
-        QPushButton* m_ksecSourceButton = nullptr;  // 打开当前方案的上游项目。
-        QRadioButton* m_kexecDdButton = nullptr;    // KExecDD / LSASS 方案。
-        QRadioButton* m_kexecDdPlusButton = nullptr;// KexecDDPlus / Server Silo 方案。
+        QRadioButton* m_r0DriverButton = nullptr;   // R0 驱动直写方案。
+        QRadioButton* m_kexecDdButton = nullptr;    // KSecDD LSASS 注入方案。
+        QRadioButton* m_kexecDdPlusButton = nullptr;// KSecDD Server Silo 方案。
+        QWidget* m_r0Container = nullptr;            // R0 路径专属控件容器，按方案切换可见性。
+        QWidget* m_ksecContainer = nullptr;          // KSecDD 路径专属控件容器，按方案切换可见性。
 
         disable_dse::CodeIntegrityPosture m_posture; // m_posture：最近一次查询到的姿态。
         disable_dse::TargetLocation m_location;      // m_location：最近一次定位结果。
@@ -127,6 +136,11 @@ namespace ks::misc
         disable_dse::KsecDdStrategy m_ksecStrategy =
             disable_dse::KsecDdStrategy::LsassInjection;
         disable_dse::KsecDdAssessment m_ksecAssessment;
+        disable_dse::GadgetLocation m_gadgetLocation;  // m_gadgetLocation：写入桩定位结果。
+        QLabel* m_ksecGadgetLabel = nullptr;            // m_ksecGadgetLabel：桩地址摘要。
+        QPushButton* m_ksecLocateGadgetButton = nullptr;// 定位 ntoskrnl 写入桩。
+        QPushButton* m_ksecDisableButton = nullptr;     // 通过 KSecDD 关闭签名强制。
+        QPushButton* m_ksecRestoreButton = nullptr;     // 通过 KSecDD 恢复原值。
 
         // m_blockReason：
         // - 最近一次算出的准入判定，updateStateDisplay 里刷新、updateButtons 里消费；

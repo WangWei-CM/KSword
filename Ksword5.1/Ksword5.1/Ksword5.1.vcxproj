@@ -293,6 +293,9 @@
     <ClCompile Include="MiscDock\VirtualLocation\VirtualLocationPage.cpp" />
     <ClCompile Include="MiscDock\DisableDse\DisableDseBackend.cpp" />
     <ClCompile Include="MiscDock\DisableDse\DisableDsePage.cpp" />
+    <ClCompile Include="MiscDock\DisableDse\DisableDsePageKsec.cpp" />
+    <ClCompile Include="MiscDock\DisableDse\KsecDdExecutor.cpp" />
+    <ClCompile Include="MiscDock\DisableDse\KsecDdSiloPath.cpp" />
     <ClCompile Include="MiscDock\CKS\CksBackend.cpp" />
     <ClCompile Include="MiscDock\CKS\CksPage.cpp" />
     <ClCompile Include="MiscDock\CKS\CksResearchPage.cpp" />
@@ -1044,6 +1047,8 @@
     <ClInclude Include="MiscDock\VirtualLocation\VirtualLocationPage.h" />
     <ClInclude Include="MiscDock\DisableDse\DisableDseBackend.h" />
     <ClInclude Include="MiscDock\DisableDse\DisableDsePage.h" />
+    <ClInclude Include="MiscDock\DisableDse\KsecDdExecutor.h" />
+    <ClInclude Include="..\..\shared\driver\KsecDdProtocol.h" />
     <ClInclude Include="MiscDock\CKS\CksBackend.h" />
     <ClInclude Include="MiscDock\CKS\CksPage.h" />
     <ClInclude Include="MiscDock\CKS\CksResearchPage.h" />

@@ -675,10 +675,10 @@ namespace ks::misc::disable_dse
                 && assessment.elevated
                 && !assessment.lsaProtectionConfigured;
             assessment.summaryText = assessment.prerequisitesMet
-                ? QStringLiteral("KExecDD 前置条件表面满足：LSA Protection 未配置；仍需在执行时确认 LSASS 不是 PPL，并验证远程加载与 KSecDD 回读。")
-                : QStringLiteral("KExecDD 当前不可用：需要 x64 管理员进程，且 LSASS 不能以 PPL/LSA Protection 运行。");
+                ? QStringLiteral("LSASS 注入前置条件表面满足：LSA Protection 未配置；仍需在执行时确认 LSASS 不是 PPL，并验证远程加载与 KSecDD 回读。")
+                : QStringLiteral("LSASS 注入当前不可用：需要 x64 管理员进程，且 LSASS 不能以 PPL/LSA Protection 运行。");
             assessment.detailLines.append(
-                QStringLiteral("LSA Protection 配置：%1；原方案通过 LSASS 现有 KSecDD 连接发送函数返回请求。")
+                QStringLiteral("LSA Protection 配置：%1；通过 LSASS 现有 KSecDD 连接发送函数返回请求。")
                     .arg(assessment.lsaProtectionConfigured
                         ? QStringLiteral("已启用或由固件锁定")
                         : QStringLiteral("注册表未启用（不等同于已验证运行态）")));
@@ -692,8 +692,8 @@ namespace ks::misc::disable_dse
                 && assessment.scheduleServiceRunning
                 && assessment.serverSiloApisPresent;
             assessment.summaryText = assessment.prerequisitesMet
-                ? QStringLiteral("KexecDDPlus 前置条件表面满足：Schedule 在线且 Server Silo 所需入口齐全；实际调用仍需取得含 SeTcbPrivilege 的服务令牌并完成 Silo 内回读。")
-                : QStringLiteral("KexecDDPlus 当前不可用：需要 x64 管理员进程、运行中的 Schedule 服务和完整 Server Silo 原生入口。");
+                ? QStringLiteral("Server Silo 前置条件表面满足：Schedule 在线且 Server Silo 所需入口齐全；实际调用仍需取得含 SeTcbPrivilege 的服务令牌并完成 Silo 内回读。")
+                : QStringLiteral("Server Silo 当前不可用：需要 x64 管理员进程、运行中的 Schedule 服务和完整 Server Silo 原生入口。");
             assessment.detailLines.append(
                 QStringLiteral("Schedule 服务：%1；Server Silo API：%2；LSA Protection 不构成该方案的前置阻断。")
                     .arg(assessment.scheduleServiceRunning
@@ -701,7 +701,7 @@ namespace ks::misc::disable_dse
                     .arg(assessment.serverSiloApisPresent
                         ? QStringLiteral("齐全") : QStringLiteral("缺失")));
             assessment.detailLines.append(
-                QStringLiteral("硬性风险：上游说明同一启动周期最多安全调用 4 次，第 5 次会因 KSecDD 释放用户缓冲区而触发 Bug Check；必须跨进程、跨页面统一计数。"));
+                QStringLiteral("硬性风险：同一启动周期最多安全调用 4 次，第 5 次会因 KSecDD 释放用户缓冲区而触发 Bug Check；必须跨进程、跨页面统一计数。"));
         }
 
         assessment.detailLines.append(

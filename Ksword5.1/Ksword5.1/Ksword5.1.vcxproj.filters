@@ -188,6 +188,15 @@
     <ClCompile Include="MiscDock\DisableDse\DisableDsePage.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="MiscDock\DisableDse\DisableDsePageKsec.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="MiscDock\DisableDse\KsecDdExecutor.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="MiscDock\DisableDse\KsecDdSiloPath.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="MiscDock\CKS\CksBackend.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -2216,6 +2225,12 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="MiscDock\DisableDse\DisableDsePage.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="MiscDock\DisableDse\KsecDdExecutor.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\shared\driver\KsecDdProtocol.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="MiscDock\CKS\CksBackend.h">
