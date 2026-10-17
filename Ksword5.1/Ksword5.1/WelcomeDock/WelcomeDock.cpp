@@ -1,4 +1,4 @@
-﻿#include "WelcomeDock.h"
+#include "WelcomeDock.h"
 #include "../UI/FlatButtonTheme.h"
 #include "../UI/ToolbarMetrics.h"
 #include "../UI/PrimaryPageStyle.h"
@@ -79,8 +79,8 @@ namespace
         QStringLiteral("ACH@流星"), QStringLiteral("嗯呢呗")
     }};
 
-    const QString kReleaseVersionText = QStringLiteral("5.1.5.1正式版"); // RELEASE_META_VERSION_MARKER
-    const QString kReleaseBuildTimeText = QStringLiteral("2026-10-07 21:32:25.233 +08:00"); // RELEASE_META_BUILD_TIME_MARKER
+    const QString kReleaseVersionText = QStringLiteral("5.2.0.0pre"); // RELEASE_META_VERSION_MARKER
+    const QString kReleaseBuildTimeText = QStringLiteral("2026-10-15 10:25:36.033 +08:00"); // RELEASE_META_BUILD_TIME_MARKER
     const QString kQQGroupInviteUrl = QStringLiteral("https://qm.qq.com/q/5tWNPfIxkk");
     const QString kPplControlRepositoryUrl = QStringLiteral("https://github.com/itm4n/PPLcontrol");
     const QString kSystemInformerRepositoryUrl = QStringLiteral("https://github.com/winsiderss/systeminformer");

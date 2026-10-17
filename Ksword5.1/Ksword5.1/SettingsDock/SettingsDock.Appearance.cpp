@@ -513,4 +513,3 @@ void SettingsDock::initializeAppearanceTab()
     languageManager.bindTab(m_tabWidget, m_appearanceTab, QStringLiteral("settings.tab.appearance"), QStringLiteral("外观"));
 
 }
-

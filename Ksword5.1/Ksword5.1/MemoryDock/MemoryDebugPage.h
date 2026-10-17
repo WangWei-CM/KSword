@@ -5,6 +5,7 @@
 #include <memory>
 
 class QComboBox;
+class QEvent;
 class QLabel;
 class QShowEvent;
 class QToolButton;
@@ -25,13 +26,19 @@ namespace ks::ui
         explicit MemoryDebugPage(QWidget* parent = nullptr);
         ~MemoryDebugPage() override;
 
-        // confirmQuit/cancelQuitPreparation：宿主窗口关闭前调用，与既有暂存离开守卫一致。
+        // confirmQuit：只确认暂存许可，不提前归还运行控制；全部宿主同意后再统一释放。
         bool confirmQuit();
+        bool releaseExecutionForQuit(); // 退出第二阶段，不重复询问暂存许可。
         void cancelQuitPreparation();
+
+        // prepareForNavigation：搜索/目录建立前只创建工作台控件树，不刷新目标进程或改变会话。
+        void prepareForNavigation();
 
     protected:
         // showEvent：惰性装配并刷新候选，不自动选择或改变任何目标。
         void showEvent(QShowEvent* event) override;
+        // changeEvent：语言切换时同步图标动作的提示和无障碍名称。
+        void changeEvent(QEvent* event) override;
 
     private:
         // ensureView：幂等装配正式生产服务；refreshProcesses 异步获取轻量进程列表。
@@ -62,5 +69,7 @@ namespace ks::ui
         MemoryDebugProcessCandidate selectedProcess_; // 名称缓存所属身份，不能套到另一个会话。
         bool refreshing_ = false;                 // 防止并发刷新造成选择器错配。
         bool initialModulePending_ = false;       // 仅首次模块加载自动导航，刷新不抢用户地址。
+        bool quitPrepared_ = false;              // 已批准退出，整页冻结到释放完成或全局取消。
+        bool enabledBeforeQuit_ = true;          // 取消退出时恢复原启用状态，不停止后台租约查询。
     };
 }

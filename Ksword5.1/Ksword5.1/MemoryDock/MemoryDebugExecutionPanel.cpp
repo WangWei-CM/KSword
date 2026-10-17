@@ -12,6 +12,7 @@
 #include "../theme.h"
 
 #include <QComboBox>
+#include <QApplication>
 #include <QDialog>
 #include <QEventLoop>
 #include <QHBoxLayout>
@@ -29,6 +30,13 @@ namespace ks::ui
 {
     namespace
     {
+        // 退出事务只允许只读状态/租约查询；内部 prepareClose 不走此交互门。
+        bool RejectExecutionDuringQuit(const int operation)
+        {
+            return operation != 4 && qApp != nullptr
+                && qApp->property("ksword_memory_quit_guard_active").toBool();
+        }
+
         // 运行期组合消息逐段翻译，不依赖页面初次创建时的语言。
         QString T(const char* source)
         {
@@ -181,6 +189,10 @@ namespace ks::ui
                 const QSignalBlocker blocker(backend_); // 释放完成之前仍展示真实生效的旧后端。
                 backend_->setCurrentIndex(mode_);
             }
+            if (RejectExecutionDuringQuit(0) || !isEnabled())
+            {
+                return;
+            }
             if (!prepareClose())
             {
                 if (!self)
@@ -289,6 +301,10 @@ namespace ks::ui
 
     void MemoryDebugExecutionPanel::execute(const int operation)
     {
+        if (RejectExecutionDuringQuit(operation) || (operation != 4 && !isEnabled()))
+        {
+            return;
+        }
         if (busy_ || pid_ == 0)
         {
             return;

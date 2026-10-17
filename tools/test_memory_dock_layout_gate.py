@@ -514,18 +514,23 @@ def check_dock_chrome(sources: Sources) -> List[str]:
         return [f"{UI_BUILD_REL}: 文件不存在"]
     masked = scan_cpp(text, False)
 
-    # 页签控件加固：创建 -> IsolateMinimumSize -> 加入根布局，顺序不能乱。
+    # 页签控件加固：创建 -> IsolateMinimumSize -> 加入结果组布局，结果组再挂到根布局，顺序不能乱。
     created = masked.find("m_tabWidget = new QTabWidget(")
     isolated = masked.find("IsolateMinimumSize(m_tabWidget)")
-    added = masked.find("m_rootLayout->addWidget(m_tabWidget")
-    if created < 0 or added < 0:
-        violations.append(f"{UI_BUILD_REL}: 找不到 m_tabWidget 的创建或加入根布局语句，门禁需要同步更新")
+    added_match = re.search(r"\b[A-Za-z_]\w*->addWidget\(m_tabWidget(?:\s*,\s*1)?\s*\)", masked)
+    root_group_match = re.search(r"\bm_rootLayout->addWidget\(resultGroup(?:\s*,\s*1)?\s*\)", masked)
+    added = added_match.start() if added_match else -1
+    root_group_added = root_group_match.start() if root_group_match else -1
+    if created < 0 or added < 0 or root_group_added < 0:
+        violations.append(f"{UI_BUILD_REL}: 找不到 m_tabWidget 的创建、结果组挂载或根布局语句，门禁需要同步更新")
     elif isolated < 0:
         violations.append(
             f"{UI_BUILD_REL}: 缺少 ks::ui::IsolateMinimumSize(m_tabWidget)："
             "以后新增页签忘了包壳，会把 Dock 的头部/工具栏/状态栏挤坏而不是页内裁剪")
-    elif not (created < isolated < added):
-        violations.append(f"{UI_BUILD_REL}: IsolateMinimumSize(m_tabWidget) 必须位于创建之后、加入根布局之前")
+    elif not (created < isolated < added < root_group_added):
+        violations.append(
+            f"{UI_BUILD_REL}: IsolateMinimumSize(m_tabWidget) 必须位于创建之后、加入结果组之前，"
+            "结果组再挂入 m_rootLayout")
 
     # 工具栏：进程下拉框最小宽度是工具栏横向下限的最大贡献者。
     combo = re.search(r"m_processCombo\s*->\s*setMinimumWidth\s*\(\s*(\d+)\s*\)", masked)
@@ -633,7 +638,8 @@ class Mutation:
 # MUTATIONS：覆盖报告里"门禁必须抓住"的全部退化。anchor 都取源码里稳定的短片段。
 MUTATIONS: List[Mutation] = [
     Mutation("DDMA 页去掉包壳", "MemoryDock/DdmaPage.cpp",
-             "new QVBoxLayout(ks::ui::EnablePageInnerScroll(this))", "new QVBoxLayout(this)", "DdmaPage"),
+             "QVBoxLayout* rootLayout = new QVBoxLayout(content)",
+             "QVBoxLayout* rootLayout = new QVBoxLayout(this)", "DdmaPage"),
     Mutation("系统内存审计页去掉包壳", "MemoryDock/SystemMemoryAuditPage.cpp",
              "new QVBoxLayout(ks::ui::EnablePageInnerScroll(this))", "new QVBoxLayout(this)", "SystemMemoryAuditPage"),
     Mutation("篡改检测页去掉包壳", "MemoryDock/TamperDetectionPage.cpp",
@@ -651,8 +657,8 @@ MUTATIONS: List[Mutation] = [
              "ks::ui::EnablePageInnerScroll(m_tabProcessMemoryEvidence)", "m_tabProcessMemoryEvidence",
              "m_tabProcessMemoryEvidence"),
     Mutation("新增一个没包壳的页签", UI_BUILD_REL,
-             'm_tabWidget->addTab(m_tabBpBookmark, "断点与书签");',
-             'm_tabWidget->addTab(m_tabBpBookmark, "断点与书签");\n'
+             'm_tabWidget->addTab(m_tabProcessModule, "进程与模块");',
+             'm_tabWidget->addTab(m_tabProcessModule, "进程与模块");\n'
              '    m_tabExtra = new QWidget(m_tabWidget);\n'
              '    m_tabWidget->addTab(m_tabExtra, "extra");',
              "m_tabExtra"),

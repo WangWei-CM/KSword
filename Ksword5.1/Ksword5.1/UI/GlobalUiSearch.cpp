@@ -861,6 +861,11 @@ namespace ks::ui
         m_dockPreparer = std::move(dockPreparer);
     }
 
+    void GlobalUiSearchController::setNestedDockPreparer(NestedDockPreparer nestedDockPreparer)
+    {
+        m_nestedDockPreparer = std::move(nestedDockPreparer);
+    }
+
     void GlobalUiSearchController::setDockActivator(DockActivator dockActivator)
     {
         m_dockActivator = std::move(dockActivator);
@@ -1520,6 +1525,10 @@ namespace ks::ui
                 {
                     m_dockPreparer(dockWidget);
                 }
+                if (m_nestedDockPreparer)
+                {
+                    m_nestedDockPreparer(dockWidget);
+                }
                 collectDockSearchHits(
                     dockWidget,
                     m_activeQueryText,
@@ -1784,6 +1793,10 @@ namespace ks::ui
         if (dockWidget != nullptr && m_dockPreparer)
         {
             m_dockPreparer(dockWidget);
+        }
+        if (dockWidget != nullptr && m_nestedDockPreparer)
+        {
+            m_nestedDockPreparer(dockWidget);
         }
         if (dockWidget != nullptr && m_dockActivator)
         {

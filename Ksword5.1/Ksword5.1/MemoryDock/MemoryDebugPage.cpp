@@ -2,6 +2,8 @@
 #include "MemoryDebugPage.h"
 #include "MemoryDebugExecutionPanel.h"
 #include "MemoryDock.WorkbenchServices.h"
+#include "../theme.h"
+#include "../UI/AdaptivePageScroll.h"
 #include "../UI/AsyncUiDispatcher.h"
 #include "../UI/ToolbarMetrics.h"
 #include "../UI/PrimaryPageStyle.h"
@@ -11,6 +13,7 @@
 
 #include <QComboBox>
 #include <QCompleter>
+#include <QEvent>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
@@ -39,7 +42,11 @@ namespace ks::ui
             auto* button = new QToolButton(owner); // 按钮的 QObject 生命周期由页面管理。
             button->setIcon(QIcon(icon));
             button->setToolTip(ks::i18n::sourceText(tooltip));
-            button->setAutoRaise(true);
+            // 图标动作沿用统一的实底与命中尺寸，避免蓝色图标在透明工具行上失去对比。
+            KswordTheme::ApplyCompactIconButtonMetrics(button);
+            ks::ui::ApplyFlatButtonTheme(button, ks::ui::FlatButtonTone::Neutral,
+                ks::ui::FlatButtonAppearance::Solid);
+            button->setAccessibleName(ks::i18n::sourceText(tooltip));
             return button;
         }
     }
@@ -48,7 +55,8 @@ namespace ks::ui
         : QWidget(parent), dispatcher_(std::make_shared<AsyncUiDispatcher>(this))
     {
         setObjectName(QStringLiteral("memory_debug_page"));
-        layout_ = new QVBoxLayout(this);
+        QWidget* const pageContent = ks::ui::EnablePageInnerScroll(this);
+        layout_ = new QVBoxLayout(pageContent);
         layout_->setContentsMargins(6, 6, 6, 6);
         layout_->setSpacing(6);
 
@@ -93,9 +101,12 @@ namespace ks::ui
         targetRow->addWidget(closeButton_);
         ks::ui::NormalizeToolbarRow(targetRow);
         targetLayout->addLayout(targetRow);
-        ks::ui::ApplyFlatButtonTheme(refreshButton_, ks::ui::FlatButtonTone::Neutral);
-        ks::ui::ApplyFlatButtonTheme(selectButton_, ks::ui::FlatButtonTone::Accent);
-        ks::ui::ApplyFlatButtonTheme(closeButton_, ks::ui::FlatButtonTone::Neutral);
+        ks::ui::ApplyFlatButtonTheme(refreshButton_, ks::ui::FlatButtonTone::Neutral,
+            ks::ui::FlatButtonAppearance::Solid);
+        ks::ui::ApplyFlatButtonTheme(selectButton_, ks::ui::FlatButtonTone::Accent,
+            ks::ui::FlatButtonAppearance::Solid);
+        ks::ui::ApplyFlatButtonTheme(closeButton_, ks::ui::FlatButtonTone::Neutral,
+            ks::ui::FlatButtonAppearance::Solid);
 
         // 模块下拉框使用目标层的异步身份快照；模块刷新不主动重定位用户当前地址。
         moduleCombo_ = new QComboBox(this);
@@ -141,6 +152,31 @@ namespace ks::ui
             ensureView();
             refreshProcesses();
         }
+    }
+
+    void MemoryDebugPage::prepareForNavigation()
+    {
+        ensureView();
+    }
+
+    void MemoryDebugPage::changeEvent(QEvent* event)
+    {
+        QWidget::changeEvent(event);
+        if (event == nullptr || event->type() != QEvent::LanguageChange)
+        {
+            return;
+        }
+        const auto updateButton = [](QToolButton* button, const QString& text) {
+            if (button != nullptr)
+            {
+                const QString localized = ks::i18n::sourceText(text);
+                button->setToolTip(localized);
+                button->setAccessibleName(localized);
+            }
+        };
+        updateButton(refreshButton_, QStringLiteral("刷新进程候选"));
+        updateButton(selectButton_, QStringLiteral("打开不附加内存会话"));
+        updateButton(closeButton_, QStringLiteral("关闭内存会话"));
     }
 
     void MemoryDebugPage::ensureView()
@@ -302,6 +338,10 @@ namespace ks::ui
 
     void MemoryDebugPage::selectProcess()
     {
+        if (quitPrepared_ || (qApp != nullptr && qApp->property("ksword_memory_quit_guard_active").toBool()))
+        {
+            return;
+        }
         if (refreshing_)
         {
             return;
@@ -412,6 +452,10 @@ namespace ks::ui
 
     void MemoryDebugPage::closeSession()
     {
+        if (quitPrepared_ || (qApp != nullptr && qApp->property("ksword_memory_quit_guard_active").toBool()))
+        {
+            return;
+        }
         const QPointer<MemoryDebugPage> self(this); // 离开守卫可嵌套事件循环并关闭宿主。
         if (view_ == nullptr || !view_->target().requestLeave(LeaveReason::PinChange) || !self)
         {
@@ -446,11 +490,23 @@ namespace ks::ui
         {
             return false;
         }
+        if (!quitPrepared_)
+        {
+            enabledBeforeQuit_ = !testAttribute(Qt::WA_ForceDisabled);
+            quitPrepared_ = true;
+            setEnabled(false); // 同时冻结目标、运行控制和专业编辑，后台计时器继续工作。
+        }
+        return true;
+    }
+
+    bool MemoryDebugPage::releaseExecutionForQuit()
+    {
+        const QPointer<MemoryDebugPage> self(this); // 只在所有退出许可均通过后归还控制。
         if (!releaseExecutionControl())
         {
             if (self && view_ != nullptr)
             {
-                view_->cancelQuitPreparation();
+                cancelQuitPreparation();
             }
             return false;
         }
@@ -461,7 +517,7 @@ namespace ks::ui
     {
         const QPointer<MemoryDebugPage> self(this); // HVM 释放时允许正常处理事件，须保护页面销毁。
         const QPointer<MemoryWorkbenchView> view(view_); // 只恢复仍存活的同一专业视图。
-        const bool enabled = view && view->isEnabled(); // 保留进入前的业务启用状态。
+        const bool enabled = view && view->isEnabledTo(this); // 忽略退出冻结的父页，保留视图自身启用状态。
         if (view)
         {
             view->setEnabled(false);
@@ -483,6 +539,11 @@ namespace ks::ui
         if (view_ != nullptr)
         {
             view_->cancelQuitPreparation();
+        }
+        if (quitPrepared_)
+        {
+            quitPrepared_ = false;
+            setEnabled(enabledBeforeQuit_);
         }
     }
 }

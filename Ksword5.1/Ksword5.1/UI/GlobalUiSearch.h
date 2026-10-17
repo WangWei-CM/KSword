@@ -84,6 +84,8 @@ namespace ks::ui
         using DockListProvider = std::function<QList<ads::CDockWidget*>()>;
         // DockPreparer：确保 Dock 懒加载内容已初始化（重入安全）。
         using DockPreparer = std::function<void(ads::CDockWidget*)>;
+        // NestedDockPreparer：在搜索前准备 Dock 内部的懒 Tab，登记真实嵌套导航目标。
+        using NestedDockPreparer = std::function<void(ads::CDockWidget*)>;
         // DockActivator：把 Dock 置前并设为当前页签（含关闭态恢复）。
         using DockActivator = std::function<void(ads::CDockWidget*)>;
 
@@ -112,6 +114,9 @@ namespace ks::ui
         // - 作用：注入 Dock 懒加载初始化回调（搜索前逐个调用）；
         // - 调用：MainWindow 接线时调用一次。
         void setDockPreparer(DockPreparer dockPreparer);
+
+        // setNestedDockPreparer：注入嵌套页准备回调；只在显式搜索/激活时执行。
+        void setNestedDockPreparer(NestedDockPreparer nestedDockPreparer);
 
         // setDockActivator：
         // - 作用：注入 Dock 置前激活回调（激活结果时调用）；
@@ -263,6 +268,7 @@ namespace ks::ui
 
         DockListProvider m_dockListProvider;      // m_dockListProvider：Dock 列表回调。
         DockPreparer m_dockPreparer;              // m_dockPreparer：Dock 懒加载初始化回调。
+        NestedDockPreparer m_nestedDockPreparer;  // m_nestedDockPreparer：嵌套懒页准备回调。
         DockActivator m_dockActivator;            // m_dockActivator：Dock 置前激活回调。
 
         QFrame* m_popupPanel = nullptr;           // m_popupPanel：结果弹层容器（宿主窗口子控件）。

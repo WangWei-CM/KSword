@@ -72,6 +72,8 @@ static void KswordARKRedirectIoctlLog(WDFDEVICE, const char*, const char*, ...) 
 static NTSTATUS KswordARKValidateDeviceIoControlWriteAccess(WDFREQUEST request) {
     return request->writable ? STATUS_SUCCESS : STATUS_ACCESS_DENIED;
 }
+static NTSTATUS KswordARKFileMonitorEnsureFilteringStarted() { return STATUS_SUCCESS; }
+static NTSTATUS KswordARKRedirectNormalizeFilePath(WCHAR*) { return STATUS_SUCCESS; }
 static NTSTATUS KswordARKRetrieveRequiredInputBuffer(WDFREQUEST request, SIZE_T bytes, PVOID* buffer, SIZE_T* actual) {
     *actual = request->inputLength; *buffer = request->buffer.data();
     return bytes <= *actual ? STATUS_SUCCESS : STATUS_BUFFER_TOO_SMALL;

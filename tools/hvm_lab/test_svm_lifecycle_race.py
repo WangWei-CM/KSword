@@ -53,7 +53,7 @@ ADAPTER = r'''
 #define KSWORD_ARK_HVM_IMPLEMENTATION_UNSUPPORTED 0U
 typedef int32_t LONG;
 typedef int32_t NTSTATUS;
-typedef struct { void* Cpus; unsigned Identity; } KSW_SVM_STATE;
+typedef struct { void* Cpus; unsigned Identity; unsigned Count; } KSW_SVM_STATE;
 typedef struct {
     KSW_SVM_STATE* BackendContext;
     LONG ResidentContextPreparing, ResidentProcessorCount, PowerTransitionPending;
@@ -99,6 +99,8 @@ static NTSTATUS KswSvmBroadcast(KSW_SVM_STATE* state, int start)
     runtime_under_test->ResidentProcessorCount = 0;
     return STATUS_SUCCESS;
 }
+static void KswordSvmWatchStopPokes(KSW_SVM_STATE* state) { (void)state; }
+static void KswordSvmWatchStartPokes(KSW_SVM_STATE* state) { (void)state; }
 static void Reset(KSW_HVM_RUNTIME* runtime)
 {
     runtime->BackendContext = &expected_state;
@@ -108,6 +110,7 @@ static void Reset(KSW_HVM_RUNTIME* runtime)
     runtime_under_test = runtime;
     expected_state.Cpus = &expected_state;
     expected_state.Identity = 20;
+    expected_state.Count = 1;
     broadcasts = disarms = acquisitions = releases = 0;
     phase = require_marker = replace_context = force_failure = broadcast_failure = 0;
 }
@@ -118,7 +121,7 @@ CASES = r'''
 int main(void)
 {
     KSW_HVM_RUNTIME runtime;
-    KSW_SVM_STATE retired_state = { &retired_state, 10 };
+    KSW_SVM_STATE retired_state = { &retired_state, 10, 1 };
     NTSTATUS status;
 
     /* Preparing/retiring state is deliberately not a usable broadcast ledger. */

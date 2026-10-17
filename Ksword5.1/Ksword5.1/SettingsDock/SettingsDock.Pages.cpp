@@ -561,4 +561,3 @@ void SettingsDock::initializeFeaturesTab()
             markPendingChanges(QString());
         });
 }
-

@@ -4897,6 +4897,7 @@ void ProcessDock::showEvent(QShowEvent* event)
         m_activityNextSequence = 0;
     }
     m_activityTimelinePinnedToLatest = true;
+    m_activityTableSnapshotActive = false;
     m_activityTableSnapshotIndex = -1;
     m_activityTableSnapshotRecords.clear();
     updateProcessActivityStatusLabel();
@@ -5629,6 +5630,7 @@ void ProcessDock::handleProcessWindowPickerRelease(const QPoint& globalPos)
 
     // 切回实时表格：用户拖窗口定位的是当前系统进程，历史快照表格不应继续覆盖实时列表。
     m_activityTimelinePinnedToLatest = true;
+    m_activityTableSnapshotActive = false;
     m_activityTableSnapshotIndex = -1;
     m_activityTableSnapshotRecords.clear();
     if (m_activityTimelineSlider != nullptr && !m_activitySamples.empty())
@@ -6354,6 +6356,7 @@ void ProcessDock::initializeConnections()
 
     // 内核对比勾选变更后立即刷新，确保列表高亮状态与开关一致。
     connect(m_kernelCompareCheck, &QCheckBox::toggled, this, [this](const bool checked) {
+        m_activityTableSnapshotActive = false;
         m_activityTableSnapshotIndex = -1;
         m_activityTableSnapshotRecords.clear();
         kLogEvent logEvent;
@@ -6378,6 +6381,7 @@ void ProcessDock::initializeConnections()
     // - 勾选时 buildDisplayOrder 使用应用/后台/系统分类；
     // - 取消勾选时直接切换为树状视图，两种状态互斥且无需第二个按钮。
     connect(m_friendlyViewCheck, &QCheckBox::toggled, this, [this](const bool checked) {
+        m_activityTableSnapshotActive = false;
         m_activityTableSnapshotIndex = -1;
         m_activityTableSnapshotRecords.clear();
         // 用户手动切换复选框后退出表头触发的普通扁平模式，并重置友好视图排序会话。
@@ -6399,6 +6403,7 @@ void ProcessDock::initializeConnections()
             return;
         }
 
+        m_activityTableSnapshotActive = false;
         m_activityTableSnapshotIndex = -1;
         m_activityTableSnapshotRecords.clear();
 
@@ -6438,6 +6443,7 @@ void ProcessDock::initializeConnections()
             m_activityNextSequence = 0;
         }
         m_activityTimelinePinnedToLatest = true;
+        m_activityTableSnapshotActive = false;
         m_activityTableSnapshotIndex = -1;
         m_activityTableSnapshotRecords.clear();
         if (m_refreshTimer != nullptr)
@@ -6500,6 +6506,7 @@ void ProcessDock::initializeConnections()
     // 清空记录缓存：重置序号、时间轴和吸附状态。
     connect(m_activityClearButton, &QPushButton::clicked, this, [this]() {
         m_activitySamples.clear();
+        m_activityTableSnapshotActive = false;
         m_activityTableSnapshotIndex = -1;
         m_activityTableSnapshotRecords.clear();
         m_activityNextSequence = 0;
@@ -9576,16 +9583,7 @@ void ProcessDock::appendProcessActivitySample()
         sample.processes.push_back(std::move(processPoint));
     }
 
-    // 查看快照时只暂停顶部图表历史追加及其自动裁剪，防止最近 N 次淘汰选中点。
-    // 系统枚举/计数器继续更新；独立详情仍接收本轮真实采样，历史队列不额外扩容。
-    // 原播放/清空等入口退出快照后继续追加；用户改保留数量仍走明确的 trim 路径。
-    if (isProcessActivityTableSnapshotActive())
-    {
-        appendProcessActivitySampleToDetailWindows(sample);
-        updateProcessActivityStatusLabel();
-        return;
-    }
-
+    // 历史表格快照与顶部折线采样解耦：表格保留选定时刻，折线仍记录后台刷新，避免恢复实时后出现时间空档。
     m_activitySamples.push_back(std::move(sample));
     const std::size_t removedSampleCount = trimProcessActivitySamples();
     if (m_activityChartWidget != nullptr)
@@ -9595,11 +9593,6 @@ void ProcessDock::appendProcessActivitySample()
     if (!m_activitySamples.empty())
     {
         appendProcessActivitySampleToDetailWindows(m_activitySamples.back());
-    }
-    if (m_activityTableSnapshotIndex >= static_cast<int>(m_activitySamples.size()))
-    {
-        m_activityTableSnapshotIndex = -1;
-        m_activityTableSnapshotRecords.clear();
     }
     refreshProcessActivityTimeline(removedSampleCount);
     refreshProcessActivityChart();
@@ -9701,8 +9694,6 @@ std::size_t ProcessDock::trimProcessActivitySamples()
         if (m_activityTableSnapshotIndex < 0)
         {
             m_activityTableSnapshotIndex = -1;
-            m_activityTableSnapshotRecords.clear();
-            m_activityTimelinePinnedToLatest = true;
         }
     }
     return removeCount;
@@ -9749,6 +9740,7 @@ void ProcessDock::refreshProcessActivityTimeline(const std::size_t removedSample
     {
         if (m_activityTimelinePinnedToLatest)
         {
+            m_activityTableSnapshotActive = false;
             m_activityTableSnapshotIndex = -1;
             m_activityTableSnapshotRecords.clear();
         }
@@ -9784,6 +9776,7 @@ void ProcessDock::previewProcessActivitySnapshotForIndex(const int sampleIndex)
 {
     if (m_activitySamples.empty())
     {
+        m_activityTableSnapshotActive = false;
         m_activityTableSnapshotIndex = -1;
         m_activityTableSnapshotRecords.clear();
         if (m_activitySnapshotLabel != nullptr && m_activitySnapshotLabel->isVisible())
@@ -9819,6 +9812,7 @@ void ProcessDock::commitProcessActivityTimelineIndex(const int sampleIndex, cons
 {
     if (m_activitySamples.empty())
     {
+        m_activityTableSnapshotActive = false;
         m_activityTableSnapshotIndex = -1;
         m_activityTableSnapshotRecords.clear();
         previewProcessActivitySnapshotForIndex(-1);
@@ -9838,7 +9832,12 @@ void ProcessDock::commitProcessActivityTimelineIndex(const int sampleIndex, cons
         m_activityChartWidget->freezeVisibleTimelineWindow();
     }
     m_activityTimelinePinnedToLatest = followLatest;
+    m_activityTableSnapshotActive = !followLatest;
     m_activityTableSnapshotIndex = followLatest ? -1 : safeIndex;
+    if (followLatest)
+    {
+        m_activityTableSnapshotRecords.clear();
+    }
     if (m_activityTimelineSlider != nullptr && m_activityTimelineSlider->value() != safeIndex)
     {
         const bool oldUpdating = m_activityTimelineSliderUpdating;
@@ -9855,17 +9854,25 @@ void ProcessDock::commitProcessActivityTimelineIndex(const int sampleIndex, cons
 
 bool ProcessDock::isProcessActivityTableSnapshotActive() const
 {
-    return m_activityTableSnapshotIndex >= 0 &&
-        m_activityTableSnapshotIndex < static_cast<int>(m_activitySamples.size());
+    return m_activityTableSnapshotActive;
 }
 
 void ProcessDock::rebuildProcessActivityTableSnapshotRecords()
 {
-    m_activityTableSnapshotRecords.clear();
     if (!isProcessActivityTableSnapshotActive())
+    {
+        m_activityTableSnapshotRecords.clear();
+        return;
+    }
+
+    // 采样队列可能在历史表格保持期间继续按“最近 N 次”淘汰；此时保留已复制的表格快照。
+    if (m_activityTableSnapshotIndex < 0 ||
+        m_activityTableSnapshotIndex >= static_cast<int>(m_activitySamples.size()))
     {
         return;
     }
+
+    m_activityTableSnapshotRecords.clear();
 
     const ProcessActivitySample& sample =
         m_activitySamples[static_cast<std::size_t>(m_activityTableSnapshotIndex)];
@@ -11649,7 +11656,7 @@ void ProcessDock::showTableContextMenu(const QPoint& localPosition)
         processContextText("process.menu.r0_terminate", QStringLiteral("R0结束进程")));
     r0TerminateAction->setToolTip(processContextText(
         "process.menu.r0_terminate.tooltip",
-        QStringLiteral("驱动先清 PP/PPL 保护字节，再依次尝试 ZwTerminateProcess、PspTerminateProcess（需要匹配 PDB）、Normal Kernel APC、逐线程终止、清零可写用户内存。APC 排队后仍须确认退出；保护字节不会还原。")));
+        QStringLiteral("驱动先清 PP/PPL 保护字节，再依次尝试 ZwTerminateProcess、Normal Kernel APC、逐线程终止、清零可写用户内存。私有 PspTerminateProcess ABI 尚未通过按版本 profile 核验，因此当前不可用；APC 排队后仍须确认退出，保护字节不会还原。")));
     QAction* r0TerminateTreeAction = contextMenu.addAction(
         buildR0ActionIcon(":/Icon/process_terminate.svg"),
         processContextText("process.menu.r0_terminate_tree", QStringLiteral("R0结束进程树")));

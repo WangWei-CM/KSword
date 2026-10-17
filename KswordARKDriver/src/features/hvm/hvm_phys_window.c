@@ -134,6 +134,8 @@ KswordARKHvmPhysWindowPrepare(
     }
     /* Start from a deterministic, unusable window. */
     RtlZeroMemory(Window, sizeof(*Window));
+    /* A successful initialize starts a fresh admission epoch. */
+    InterlockedExchange(&Window->ShutdownRequested, 0L);
     Window->LastResult = KSW_HVM_PHYS_WINDOW_NOT_PREPARED;
     /*
      * Reuse the self-map base the memory module already discovered.
@@ -244,6 +246,14 @@ KswordARKHvmPhysWindowRelease(
     _Inout_ KSW_HVM_PHYS_WINDOW* Window
     )
 {
+    /* Close admission before touching the entry or backing allocation. */
+    if (Window != NULL) {
+        InterlockedExchange(&Window->ShutdownRequested, 1L);
+        /* A VM-exit mapping is short and must release Active before teardown. */
+        while (InterlockedCompareExchange(&Window->Active, 0L, 0L) != 0L) {
+            KeStallExecutionProcessor(1U);
+        }
+    }
     /* Nothing to release on a window that was never prepared. */
     if (Window == NULL || Window->BackingVirtual == NULL) {
         /* Return without touching an absent reservation. */
@@ -361,7 +371,9 @@ KswordARKHvmPhysWindowMap(
         *Mapped = NULL;
     }
     /* Refuse a window that is not complete, and refuse a broken contract. */
-    if (Window == NULL || Mapped == NULL || !Window->Prepared ||
+    if (Window == NULL || Mapped == NULL ||
+        InterlockedCompareExchange(&Window->ShutdownRequested, 0L, 0L) != 0L ||
+        !Window->Prepared ||
         Window->BackingEntry == NULL) {
         if (Window != NULL) {
             Window->LastResult = KSW_HVM_PHYS_WINDOW_NOT_PREPARED;
@@ -404,6 +416,13 @@ KswordARKHvmPhysWindowMap(
         Window->LastResult = KSW_HVM_PHYS_WINDOW_BUSY;
         /* Report the contended window. */
         return KSW_HVM_PHYS_WINDOW_BUSY;
+    }
+    /* Teardown may have closed admission after the initial snapshot. */
+    if (InterlockedCompareExchange(&Window->ShutdownRequested, 0L, 0L) != 0L ||
+        !Window->Prepared || Window->BackingEntry == NULL) {
+        InterlockedExchange(&Window->Active, 0L);
+        Window->LastResult = KSW_HVM_PHYS_WINDOW_NOT_PREPARED;
+        return KSW_HVM_PHYS_WINDOW_NOT_PREPARED;
     }
     observed = *Window->BackingEntry;
     /*

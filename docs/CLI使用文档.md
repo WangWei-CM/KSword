@@ -40,7 +40,7 @@ KswordCLI.exe network connections help
 
 ## 原始 IOCTL 调用
 
-`system ioctl call --code N [--input-hex HEX | --input-file PATH] [--output-bytes N] --confirm [--json]` 通过现有 `ArkDriverClient` 向固定 KSword 控制设备发送一次原始请求。输入／输出各上限 1 MiB；输出默认 4096 字节，原始内容采用十六进制回执，只保留实际返回长度。所有调用都必须确认，不自动加载驱动、提权或重试。编码及缓冲区 ABI 由配套共享协议定义；传输成功不代替响应中的业务状态。详见 [系统工具命令](cli/system.md)。内置帮助入口为 `help system ioctl call`。
+`system ioctl call --code N [--input-hex HEX | --input-file PATH] [--output-bytes N] --confirm [--allow-unregistered] [--json]` 通过现有 `ArkDriverClient` 向固定 KSword 控制设备发送一次原始请求。默认先查询驱动 IOCTL 注册表并拒绝未登记的控制码；`--allow-unregistered` 仅用于明确受信的兼容性探测。输入／输出各上限 1 MiB；输出默认 4096 字节，原始内容采用十六进制回执，只保留实际返回长度。所有调用都必须确认，不自动加载驱动、提权或重试。编码及缓冲区 ABI 由配套共享协议定义；传输成功不代替响应中的业务状态。详见 [系统工具命令](cli/system.md)。内置帮助入口为 `help system ioctl call`。
 
 ## 参数约定
 

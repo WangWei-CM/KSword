@@ -50,6 +50,8 @@ typedef struct _KSW_HVM_PHYS_WINDOW
     UCHAR Reserved0[3];
     /* Hold one at a time: set while a mapping is open, cleared on unmap. */
     volatile LONG Active;
+    /* Prevent new mappings while PASSIVE_LEVEL teardown drains Active. */
+    volatile LONG ShutdownRequested;
     /* Preserve the reserved page this window rewrites the mapping of. */
     PVOID BackingVirtual;
     /* Preserve the reserved page's own frame for drift detection. */

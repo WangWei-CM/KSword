@@ -161,4 +161,3 @@ namespace ks::r3::startup::detail
         bool deleteRegistryTree,
         bool resolveClsidFromValueData);
 }
-

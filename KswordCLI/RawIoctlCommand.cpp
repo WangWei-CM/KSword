@@ -1,6 +1,7 @@
 #include "CommandRegistry.h"
 #include "../Ksword5.1/Ksword5.1/ArkDriverClient/ArkDriverClient.h"
 
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <stdexcept>
@@ -65,14 +66,32 @@ namespace ks::cli
             }
             const auto code = arguments.u32(L"--code"); // CTL_CODE 的完整 uint32 值。
             (void)arguments.require(L"--code");
+            const bool allowUnregistered = arguments.has(L"--allow-unregistered");
             const auto capacity = arguments.u32(L"--output-bytes", 4096U); // 调用方指定的输出上限。
             if (capacity > kMaximumRawBytes)
             {
                 throw std::invalid_argument("raw IOCTL output exceeds 1 MiB");
             }
+            const ksword::ark::DriverClient client; // 唯一控制设备访问入口，沿用现有 ACL/权限。
+            if (!allowUnregistered)
+            {
+                const auto registry = client.queryIoctlRegistry();
+                if (!registry.io.ok || registry.unsupported)
+                {
+                    throw std::invalid_argument(
+                        "raw IOCTL requires a readable driver IOCTL registry; use --allow-unregistered only for an explicitly trusted compatibility probe");
+                }
+                const auto registered = std::find_if(
+                    registry.entries.begin(), registry.entries.end(),
+                    [code](const auto& entry) { return entry.ioControlCode == code; });
+                if (registered == registry.entries.end())
+                {
+                    throw std::invalid_argument(
+                        "raw IOCTL code is not registered by this driver; pass --allow-unregistered only for a trusted compatibility probe");
+                }
+            }
             auto input = readRawInput(arguments); // 驱动调用前完成输入验证。
             std::vector<std::uint8_t> output(capacity, std::uint8_t{0}); // 未返回的缓冲区不输出。
-            const ksword::ark::DriverClient client; // 唯一控制设备访问入口，沿用现有 ACL/权限。
             const auto result = client.deviceIoControl(code,
                 input.empty() ? nullptr : input.data(), static_cast<unsigned long>(input.size()),
                 output.empty() ? nullptr : output.data(), capacity);
@@ -99,10 +118,10 @@ namespace ks::cli
     void registerRawIoctl()
     {
         addCommand({L"system ioctl call",
-            L"KswordCLI.exe system ioctl call --code N [--input-hex HEX | --input-file PATH] [--output-bytes N] --confirm [--json]",
+            L"KswordCLI.exe system ioctl call --code N [--input-hex HEX | --input-file PATH] [--output-bytes N] --confirm [--allow-unregistered] [--json]",
             L"Send one bounded raw IOCTL through the existing KSword ArkDriverClient.",
-            L"Required: --code uint32, --confirm. Optional: --input-hex or --input-file (maximum 1 MiB); --output-bytes 0..1048576 (default 4096); --json.",
-            L"The target is the KSword control device only. Unknown requests may mutate state; every call requires explicit confirmation. No driver load, permission change, automatic retry, ABI inference or zero-filled tail output.",
+            L"Required: --code uint32, --confirm. Optional: --input-hex or --input-file (maximum 1 MiB); --output-bytes 0..1048576 (default 4096); --allow-unregistered; --json.",
+            L"The target is the KSword control device only. The driver registry must prove the code is registered unless --allow-unregistered is explicitly supplied for a trusted compatibility probe. Calls may mutate state and require confirmation. No driver load, permission change, automatic retry, ABI inference or zero-filled tail output.",
             callRawIoctl});
     }
 }

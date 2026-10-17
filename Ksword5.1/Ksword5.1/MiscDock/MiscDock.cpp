@@ -327,7 +327,7 @@ void MiscDock::initializeUi()
         });
 }
 
-void MiscDock::ensureTabInitialized(const int tabIndex)
+void MiscDock::ensureTabInitialized(const int tabIndex, const bool activatePage)
 {
     const ks::ui::ScopedWidgetThemePreparation themePreparation(m_mainTabWidget); // 不逐页复制首显准备。
     if (tabIndex < 0)
@@ -402,7 +402,7 @@ void MiscDock::ensureTabInitialized(const int tabIndex)
     if (tabIndex == m_clipboardGuardTabIndex)
     {
         initializeClipboardGuardPage();
-        if (m_clipboardGuardPage != nullptr)
+        if (activatePage && m_clipboardGuardPage != nullptr)
         {
             m_clipboardGuardPage->notifyPageActivated();
         }
@@ -461,6 +461,22 @@ void MiscDock::activateTabByIndex(const int tabIndex)
     // 直接 setCurrentIndex 可能让调用方拿到尚未初始化的占位控件。
     ensureTabInitialized(tabIndex);
     m_mainTabWidget->setCurrentIndex(tabIndex);
+}
+
+void MiscDock::prepareNavigationPages()
+{
+    if (m_navigationPagesPrepared || m_mainTabWidget == nullptr)
+    {
+        return;
+    }
+
+    // 搜索/目录请求是显式的导航需求，此处只构造页壳与控件树，仍不切换当前页签。
+    // hidden 的蓝屏诊断页由 ensureTabInitialized 按可见配置保持未构造。
+    for (int index = 0; index < m_mainTabWidget->count(); ++index)
+    {
+        ensureTabInitialized(index, false);
+    }
+    m_navigationPagesPrepared = true;
 }
 
 MinidumpDock* MiscDock::activateMinidumpTab()

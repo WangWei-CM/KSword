@@ -75,6 +75,23 @@ void MemoryDock::initializeWorkbenchTab()
     });
 }
 
+void MemoryDock::prepareNavigationPages()
+{
+    if (m_navigationPagesPrepared || m_tabWidget == nullptr)
+    {
+        return;
+    }
+
+    // 目录/搜索请求是显式导航需求：准备真实工作台与调试页，确保嵌套 Tab 的控件
+    // 进入统一索引；不切换当前页、不枚举进程，首次展示仍由各页自己的 showEvent 负责。
+    ensureWorkbenchView();
+    if (m_memoryDebugPage != nullptr)
+    {
+        m_memoryDebugPage->prepareForNavigation();
+    }
+    m_navigationPagesPrepared = true;
+}
+
 // ensureWorkbenchView：幂等地创建视图并完成全部接线。
 // 顺序有要求：先 ConfigureShared（必须在第一个视图之前，且此前不得有人访问共享地址簿），
 // 再创建视图、注入服务、加载设置，最后连接信号并回放"创建之前已经发生的附加"。
@@ -255,15 +272,44 @@ bool MemoryDock::workbenchAllowsProcessChange()
     return m_workbenchView->requestLeave(ks::ui::LeaveReason::DockAttachChange);
 }
 
-// confirmWorkbenchQuit：MainWindow::closeEvent 最前调用。
+// confirmWorkbenchQuit：单详情窗兼容包装；全局退出直接使用下面两个阶段。
 bool MemoryDock::confirmWorkbenchQuit()
 {
+    const QPointer<MemoryDock> self(this); // 许可及释放都可能进入嵌套事件循环。
+    const bool allowed = prepareWorkbenchQuit() && self && releaseWorkbenchExecutionForQuit();
+    if (self && !allowed)
+    {
+        cancelWorkbenchQuit();
+    }
+    return self && allowed;
+}
+
+bool MemoryDock::prepareWorkbenchQuit()
+{
+    const QPointer<MemoryDock> self(this); // 普通工作台确认后须先探活，再访问独立页。
     if (m_workbenchView != nullptr && !m_workbenchView->confirmQuit())
     {
         return false;
     }
+    if (!self)
+    {
+        return false;
+    }
+    if (m_workbenchView != nullptr && !m_workbenchQuitPrepared)
+    {
+        m_workbenchEnabledBeforeQuit = m_workbenchView->isEnabledTo(this);
+        m_workbenchQuitPrepared = true;
+        m_workbenchView->setEnabled(false); // 防止后续 Dock 模态确认期间新增未确认的暂存。
+    }
     // 独立页可留有暂存补丁；主窗口停止驱动前必须同时通过这份会话的离开守卫。
     return m_memoryDebugPage == nullptr || m_memoryDebugPage->confirmQuit();
+}
+
+bool MemoryDock::releaseWorkbenchExecutionForQuit()
+{
+    const QPointer<MemoryDock> self(this); // 不重新运行暂存询问，只归还已经批准的控制权。
+    const bool released = m_memoryDebugPage == nullptr || m_memoryDebugPage->releaseExecutionForQuit();
+    return self && released;
 }
 
 void MemoryDock::cancelWorkbenchQuit()
@@ -271,7 +317,12 @@ void MemoryDock::cancelWorkbenchQuit()
     if (m_workbenchView != nullptr)
     {
         m_workbenchView->cancelQuitPreparation();
+        if (m_workbenchQuitPrepared)
+        {
+            m_workbenchView->setEnabled(m_workbenchEnabledBeforeQuit);
+        }
     }
+    m_workbenchQuitPrepared = false;
     if (m_memoryDebugPage != nullptr)
     {
         m_memoryDebugPage->cancelQuitPreparation();

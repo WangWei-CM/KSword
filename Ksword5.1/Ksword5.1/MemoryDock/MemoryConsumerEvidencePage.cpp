@@ -123,6 +123,7 @@ MemoryConsumerEvidencePage::MemoryConsumerEvidencePage(QWidget* parent) : QWidge
     m_traceLog = new CodeEditorWidget(m_detailTabs);
     // 命令输出按原文追加，容量控制由统一外壳负责。
     m_traceLog->setReadOnly(true);
+    m_traceLog->setReadOnlyExportEnabled(true);
     m_traceLog->setMaximumBlockCount(300); m_detailTabs->addTab(m_traceLog, {});
     resultLayout->addWidget(m_detailTabs, 1);
     m_captureTimer = new QTimer(this); m_captureTimer->setSingleShot(true);

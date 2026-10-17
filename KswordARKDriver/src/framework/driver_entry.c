@@ -512,6 +512,36 @@ KswordARKDriverStartCore(
 
 
 static VOID
+KswordARKDriverShutdownBugcheckDiagnostics(
+    VOID
+    )
+{
+#if KSWORD_ARK_BUGCHECK_DIAGNOSTICS_ENABLED
+    LARGE_INTEGER retryInterval;
+
+    /*
+     * Callback/patch teardown may briefly report STATUS_DEVICE_BUSY while a
+     * crash callback is still on another CPU.  Keep the image resident and
+     * retry at PASSIVE_LEVEL; returning after a failed restore would leave a
+     * callback target in an unloadable image.
+     */
+    retryInterval.QuadPart = -10000LL; /* 1 ms, relative. */
+    for (;;) {
+        NTSTATUS guardStatus = KswordARKBugcheckGuardUninitialize();
+        NTSTATUS shieldStatus = KswordARKBugcheckShieldUninitialize();
+
+        if (NT_SUCCESS(guardStatus) && NT_SUCCESS(shieldStatus)) {
+            break;
+        }
+        KeDelayExecutionThread(
+            KernelMode,
+            FALSE,
+            &retryInterval);
+    }
+#endif
+}
+
+static VOID
 KswordARKDriverShutdownCore(VOID)
 {
     PAGED_CODE();
@@ -557,9 +587,8 @@ KswordARKDriverShutdownCore(VOID)
         KswordARKDriverResetDirectoryScanCache();
 
 #if KSWORD_ARK_BUGCHECK_DIAGNOSTICS_ENABLED
-        // 先还原 Guard 入口与 Shield 回调，再撤销 BGP 资源。
-        KswordARKBugcheckGuardUninitialize();
-        KswordARKBugcheckShieldUninitialize();
+        // 先还原 Guard 入口与 Shield 回调，再撤销 BGP 资源；失败时保留映像并重试。
+        KswordARKDriverShutdownBugcheckDiagnostics();
         KswordARKBugcheckControlUninitialize();
 #endif
 

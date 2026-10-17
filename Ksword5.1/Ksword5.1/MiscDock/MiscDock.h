@@ -59,6 +59,10 @@ public:
     // 入参 visible：true=显示并允许懒加载页面；false=隐藏且不执行页面初始化；返回：无。
     void setBugcheckDiagnosticsVisible(bool visible);
 
+    // prepareNavigationPages：按需构造可见的嵌套页，供全局搜索/Taskbar 目录建立真实路由。
+    // 只执行一次，不改变当前页签；不调用“首次激活”回调，避免目录请求启动轮询。
+    void prepareNavigationPages();
+
 private:
     // initializeUi：
     // - 作用：初始化“杂项”页的控件树，只把页签占位控件建出来；
@@ -69,7 +73,7 @@ private:
     // - 作用：按需构造指定页签对应的真实子页，已构造过则直接返回；
     // - 入参 tabIndex：主 Tab 的页签索引，越界或负数会被忽略；
     // - 返回：无。
-    void ensureTabInitialized(int tabIndex);
+    void ensureTabInitialized(int tabIndex, bool activatePage = true);
 
     // initializeXxx 系列：
     // - 作用：把对应子页构造出来并塞进自己的页签占位控件；
@@ -173,4 +177,5 @@ private:
     ScannerDock* m_scannerPage = nullptr;   // m_scannerPage：PE/ELF/Mach-O 扫描与安全编辑页。
     MinidumpDock* m_minidumpPage = nullptr; // m_minidumpPage：崩溃转储分析页。
     QWidget* m_pluginPage = nullptr;        // m_pluginPage：进程隔离 Tab 插件宿主容器。
+    bool m_navigationPagesPrepared = false; // m_navigationPagesPrepared：导航索引已完成一次嵌套页准备。
 };
