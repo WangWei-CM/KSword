@@ -6680,16 +6680,20 @@ namespace apimon
 #include "ApiCoverageReporting.inc"
 
         // RetryPendingHooksUnlocked 作用：
-        // - 输入：无，使用全局绑定表；
+        // - 输入：detailTextOut 可选，用于接收本轮仍无法安装的 Hook 诊断；
         // - 处理：在调用者已经持有 g_hookOperationMutex 时补装尚未安装的可重试 Hook；
-        // - 返回：无返回值，失败细节在后续 InstallConfiguredHooks 诊断中体现。
-        void RetryPendingHooksUnlocked()
+        // - 返回：无返回值，调用方可用诊断文本判断本轮是否仍有待重试失败。
+        void RetryPendingHooksUnlocked(std::wstring* detailTextOut)
         {
+            if (detailTextOut != nullptr)
+            {
+                detailTextOut->clear();
+            }
             for (HookBinding& bindingValue : g_bindings)
             {
-                (void)TryInstallBinding(bindingValue, nullptr);
+                (void)TryInstallBinding(bindingValue, detailTextOut);
             }
-            (void)InstallFakeSuccessHooks(nullptr);
+            (void)InstallFakeSuccessHooks(detailTextOut);
             (void)InstallRawFallbackHooks();
             RetryExtensionHooks();
             PublishConfiguredCoverage();
@@ -6704,7 +6708,7 @@ namespace apimon
             if (g_hookOperationMutex.try_lock())
             {
                 ScopedInlineHookInternalBypass hookOperationBypassScope;
-                RetryPendingHooksUnlocked();
+                RetryPendingHooksUnlocked(nullptr);
                 g_hookOperationMutex.unlock();
             }
         }
@@ -6783,11 +6787,11 @@ namespace apimon
         PublishConfiguredCoverage();
         return removed;
     }
-    void RetryPendingHooks()
+    void RetryPendingHooks(std::wstring* detailTextOut)
     {
         const std::lock_guard<std::mutex> lock(g_hookOperationMutex);
         ScopedInlineHookInternalBypass hookOperationBypassScope;
-        RetryPendingHooksUnlocked();
+        RetryPendingHooksUnlocked(detailTextOut);
     }
 }
 

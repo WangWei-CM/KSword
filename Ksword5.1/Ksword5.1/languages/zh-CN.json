@@ -9826,6 +9826,7 @@
     "启用后，Agent 会在受支持的 CreateProcess 系列调用成功时自动注入子进程，并继续监控后代；仅支持 x64 进程。": "启用后，Agent 会在受支持的 CreateProcess 系列调用成功时自动注入子进程，并继续监控后代；仅支持 x64 进程。",
     "SessionReady": "SessionReady",
     "InstallHooksFailed": "InstallHooksFailed",
+    "HooksRetry": "HooksRetry",
     "HooksPartial": "HooksPartial",
     "HooksRemoved": "HooksRemoved",
     "WinAPI Hook 安装完成": "WinAPI Hook 安装完成",

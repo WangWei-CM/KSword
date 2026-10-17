@@ -110,6 +110,7 @@ namespace apimon
         // - 返回：无返回值，返回后调用方必须卸载 Hook 并停止管道。
         void WaitForCurrentSessionStop(const MonitorConfig& configValue)
         {
+            std::wstring lastRetryReport;
             while (!g_processDetachRequested.load() && !StopRequested())
             {
                 if (IsStopFlagPresent(configValue) || SessionConfigWasReplaced(configValue))
@@ -117,7 +118,25 @@ namespace apimon
                     RequestStop();
                     break;
                 }
-                RetryPendingHooks();
+                std::wstring retryReport;
+                RetryPendingHooks(&retryReport);
+                // 重试可能持续数秒甚至更久；只在诊断内容变化时上报，避免 250ms
+                // 轮询把同一条 DWM 线程安全失败刷满管道。空报告表示本轮没有新的
+                // 强类型/Fake 失败，清除去重标记，让后续再次失败时可以重新报告。
+                if (retryReport.empty())
+                {
+                    lastRetryReport.clear();
+                }
+                else if (retryReport != lastRetryReport)
+                {
+                    SendMonitorEvent(
+                        ks::winapi_monitor::EventCategory::Internal,
+                        L"Agent",
+                        L"HooksRetry",
+                        1,
+                        retryReport);
+                    lastRetryReport = retryReport;
+                }
                 ::Sleep(kSessionActivePollMs);
             }
         }
