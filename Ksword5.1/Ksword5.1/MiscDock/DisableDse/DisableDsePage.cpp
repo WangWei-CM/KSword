@@ -625,6 +625,21 @@ namespace ks::misc
             runKsecLocateGadget();
         });
         connect(m_ksecDisableButton, &QPushButton::clicked, this, [this]() {
+            // HVCI 开启时追加二次确认。
+            if (m_posture.hvciEnabled)
+            {
+                if (!askConfirmation(
+                        this,
+                        ks::i18n::text(
+                            QStringLiteral("misc.disable_dse.hvci_confirm.title"),
+                            QStringLiteral("HVCI 绕过警告")),
+                        ks::i18n::text(
+                            QStringLiteral("misc.disable_dse.hvci_confirm.message"),
+                            QStringLiteral("当前系统已开启内存完整性（HVCI），g_CiOptions 所在页可能受 Hypervisor SLAT 保护。\n\n强行写入可能导致蓝屏（SYSTEM_SERVICE_EXCEPTION）。\n\n确定要尝试吗？"))))
+                {
+                    return;
+                }
+            }
             const QString message = ks::i18n::text(
                 QStringLiteral("misc.disable_dse.ksec.confirm.disable"),
                 QStringLiteral("即将通过 KSecDD 把 g_CiOptions 改成 0。\n\n这条路径不经过 KswordARK R0 驱动，直接利用 ksecdd.sys 在内核模式写入。\n\nPatchGuard 风险与 R0 写入相同：请在加载完驱动后立即恢复。\n\n确定继续吗？"));
@@ -640,6 +655,20 @@ namespace ks::misc
             runKsecApply(disable_dse::kDisabledValue, false);
         });
         connect(m_ksecRestoreButton, &QPushButton::clicked, this, [this]() {
+            if (m_posture.hvciEnabled)
+            {
+                if (!askConfirmation(
+                        this,
+                        ks::i18n::text(
+                            QStringLiteral("misc.disable_dse.hvci_confirm.title"),
+                            QStringLiteral("HVCI 绕过警告")),
+                        ks::i18n::text(
+                            QStringLiteral("misc.disable_dse.hvci_confirm.message"),
+                            QStringLiteral("当前系统已开启内存完整性（HVCI），g_CiOptions 所在页可能受 Hypervisor SLAT 保护。\n\n强行写入可能导致蓝屏（SYSTEM_SERVICE_EXCEPTION）。\n\n确定要尝试吗？"))))
+                {
+                    return;
+                }
+            }
             runKsecApply(m_savedOriginalValue, true);
         });
         connect(m_refreshButton, &QPushButton::clicked, this, [this]() {
@@ -649,6 +678,21 @@ namespace ks::misc
             runLocate();
         });
         connect(m_disableButton, &QPushButton::clicked, this, [this]() {
+            // HVCI 开启时追加二次确认——写入可能触发 SYSTEM_SERVICE_EXCEPTION 蓝屏。
+            if (m_posture.hvciEnabled)
+            {
+                if (!askConfirmation(
+                        this,
+                        ks::i18n::text(
+                            QStringLiteral("misc.disable_dse.hvci_confirm.title"),
+                            QStringLiteral("HVCI 绕过警告")),
+                        ks::i18n::text(
+                            QStringLiteral("misc.disable_dse.hvci_confirm.message"),
+                            QStringLiteral("当前系统已开启内存完整性（HVCI），g_CiOptions 所在页可能受 Hypervisor SLAT 保护。\n\n强行写入可能导致蓝屏（SYSTEM_SERVICE_EXCEPTION）。\n\n确定要尝试吗？"))))
+                {
+                    return;
+                }
+            }
             const QString message = ks::i18n::text(
                 QStringLiteral("misc.disable_dse.confirm.disable"),
                 QStringLiteral("即将把 g_CiOptions 改成 0，系统将不再校验驱动签名。\n\n该变量在 PatchGuard 的巡检范围内，保持关闭状态会导致蓝屏，请在加载完驱动后立即恢复。\n\n确定继续吗？"));
@@ -664,6 +708,21 @@ namespace ks::misc
             runApply(disable_dse::kDisabledValue, false);
         });
         connect(m_restoreButton, &QPushButton::clicked, this, [this]() {
+            // 恢复同样可能触发 HVCI 拦截，追加确认。
+            if (m_posture.hvciEnabled)
+            {
+                if (!askConfirmation(
+                        this,
+                        ks::i18n::text(
+                            QStringLiteral("misc.disable_dse.hvci_confirm.title"),
+                            QStringLiteral("HVCI 绕过警告")),
+                        ks::i18n::text(
+                            QStringLiteral("misc.disable_dse.hvci_confirm.message"),
+                            QStringLiteral("当前系统已开启内存完整性（HVCI），g_CiOptions 所在页可能受 Hypervisor SLAT 保护。\n\n强行写入可能导致蓝屏（SYSTEM_SERVICE_EXCEPTION）。\n\n确定要尝试吗？"))))
+                {
+                    return;
+                }
+            }
             runApply(m_savedOriginalValue, true);
         });
     }
@@ -1032,7 +1091,10 @@ namespace ks::misc
 
     void DisableDsePage::updateButtons()
     {
-        const bool allowed = !m_busy && m_blockReason == disable_dse::BlockReason::None;
+        // HVCI 不再硬阻止操作——改为点击时弹窗确认。
+        const bool allowed = !m_busy
+            && (m_blockReason == disable_dse::BlockReason::None
+                || m_blockReason == disable_dse::BlockReason::HvciEnabled);
 
         if (m_refreshButton != nullptr)
         {
@@ -1058,8 +1120,7 @@ namespace ks::misc
         // KSecDD 执行按钮：不需要 R0 驱动在线，但仍受 HVCI / 版本阻断。
         {
             const bool ksecPathOk = !m_busy
-                && m_blockReason != disable_dse::BlockReason::UnsupportedBuild
-                && m_blockReason != disable_dse::BlockReason::HvciEnabled;
+                && m_blockReason != disable_dse::BlockReason::UnsupportedBuild;
             if (m_ksecLocateGadgetButton != nullptr)
                 m_ksecLocateGadgetButton->setEnabled(!m_busy);
             if (m_ksecDisableButton != nullptr)

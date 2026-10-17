@@ -742,7 +742,7 @@ namespace ks::misc::disable_dse
         case BlockReason::UnsupportedBuild:
             return QStringLiteral("当前系统早于 Windows 8，DSE 开关在 nt!g_CiEnabled 而不是 CI.dll!g_CiOptions，本页不支持。");
         case BlockReason::HvciEnabled:
-            return QStringLiteral("已开启内存完整性（HVCI）。此时 g_CiOptions 所在页由 Hypervisor 通过 SLAT 保护，R0 写入不会生效，必须先在“Windows 安全中心 → 设备安全性 → 内核隔离”里关闭内存完整性并重启。");
+            return QStringLiteral("已开启内存完整性（HVCI）。g_CiOptions 所在页可能受 Hypervisor SLAT 保护，写入可能被拦截或导致蓝屏。操作前将弹窗确认。");
         case BlockReason::NotLocated:
             return QStringLiteral("尚未定位到 g_CiOptions，请先执行定位。");
         case BlockReason::ValueMismatch:
