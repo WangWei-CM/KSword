@@ -22,19 +22,57 @@ namespace ks::winapi_monitor
         }
         quoted.append(slashes * 2, L'\\'); quoted.push_back(L'"'); return quoted;
     }
-    inline bool remoteImageLoaded(DWORD pid, const std::wstring& path)
+    inline bool remoteImageLoaded(DWORD pid, const std::wstring& path, DWORD* failureOut = nullptr)
     {
+        if (failureOut != nullptr)
+        {
+            *failureOut = ERROR_SUCCESS;
+        }
+
         HANDLE snapshot = INVALID_HANDLE_VALUE;
+        DWORD snapshotError = ERROR_SUCCESS;
         for (unsigned attempt = 0; attempt < 8; ++attempt) {
             snapshot = ::CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid);
-            if (snapshot != INVALID_HANDLE_VALUE || ::GetLastError() != ERROR_BAD_LENGTH) break;
+            if (snapshot != INVALID_HANDLE_VALUE)
+            {
+                break;
+            }
+            snapshotError = ::GetLastError();
+            if (snapshotError != ERROR_BAD_LENGTH)
+            {
+                break;
+            }
         }
-        if (snapshot == INVALID_HANDLE_VALUE) return false;
+        if (snapshot == INVALID_HANDLE_VALUE)
+        {
+            if (failureOut != nullptr)
+            {
+                *failureOut = snapshotError;
+            }
+            return false;
+        }
+
         MODULEENTRY32W module{}; module.dwSize = sizeof(module); bool loaded = false;
-        for (BOOL found = ::Module32FirstW(snapshot, &module); found; found = ::Module32NextW(snapshot, &module)) {
+        BOOL found = ::Module32FirstW(snapshot, &module);
+        while (found)
+        {
             if (_wcsicmp(module.szExePath, path.c_str()) == 0) { loaded = true; break; }
+            found = ::Module32NextW(snapshot, &module);
         }
-        ::CloseHandle(snapshot); return loaded;
+        DWORD enumerationError = ERROR_SUCCESS;
+        if (!loaded)
+        {
+            const DWORD lastError = ::GetLastError();
+            enumerationError = lastError == ERROR_NO_MORE_FILES || lastError == ERROR_SUCCESS
+                ? ERROR_MOD_NOT_FOUND
+                : lastError;
+        }
+        ::CloseHandle(snapshot);
+        if (failureOut != nullptr)
+        {
+            *failureOut = enumerationError;
+        }
+        return loaded;
     }
     inline std::uintptr_t remoteLoaderAddress(DWORD pid, std::wstring* error)
     {
@@ -105,15 +143,36 @@ namespace ks::winapi_monitor
         }
         HANDLE waits[] = {thread, cancelEvent};
         const DWORD wait = cancelEvent ? ::WaitForMultipleObjects(2, waits, FALSE, 10000) : ::WaitForSingleObject(thread, 10000);
-        // GetExitCodeThread truncates a 64-bit HMODULE to DWORD. Verify the target's
-        // module list instead; an exception exit code must not count as a load.
-        const bool loaded = wait == WAIT_OBJECT_0 && remoteImageLoaded(pid, path);
+        // A 64-bit HMODULE is truncated by GetExitCodeThread, but a non-zero return
+        // still proves that LoadLibraryW returned a module. The module snapshot remains
+        // a stronger identity check when available; it is not reliable for every
+        // protected/restricted target and must not turn a successful load into 1114.
+        DWORD loaderExitCode = 0;
+        const bool loaderExitRead = wait == WAIT_OBJECT_0 && ::GetExitCodeThread(thread, &loaderExitCode) != FALSE;
+        DWORD moduleCheckError = ERROR_SUCCESS;
+        const bool moduleFound = wait == WAIT_OBJECT_0 && remoteImageLoaded(pid, path, &moduleCheckError);
+        const bool loaded = wait == WAIT_OBJECT_0 && (moduleFound || (loaderExitRead && loaderExitCode != 0));
         const DWORD failure = wait == WAIT_OBJECT_0 + 1 ? ERROR_OPERATION_ABORTED
             : wait == WAIT_TIMEOUT ? ERROR_TIMEOUT : wait == WAIT_FAILED ? ::GetLastError() : ERROR_DLL_INIT_FAILED;
         // Timed-out remote LoadLibraryW may still read the path. Keep it until target exit.
         if (wait == WAIT_OBJECT_0) ::VirtualFreeEx(process, remote, 0, MEM_RELEASE);
         ::CloseHandle(thread); ::CloseHandle(process);
-        if (!loaded) return platformFailure(error, L"remote Agent load failed or timed out", failure);
+        if (!loaded)
+        {
+            if (error != nullptr)
+            {
+                *error = L"remote Agent load failed or timed out; error=" + std::to_wstring(failure);
+                if (wait == WAIT_OBJECT_0)
+                {
+                    *error += L"; loaderThreadExit=";
+                    *error += loaderExitRead ? std::to_wstring(loaderExitCode) : L"unavailable";
+                    *error += L"; moduleCheck=";
+                    *error += std::to_wstring(moduleCheckError);
+                }
+            }
+            ::SetLastError(failure);
+            return false;
+        }
         return true;
     }
     inline bool injectAgent(DWORD pid, const std::wstring& path, std::wstring* error)
