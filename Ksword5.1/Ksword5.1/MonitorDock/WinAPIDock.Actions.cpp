@@ -762,13 +762,12 @@ bool WinAPIDock::prepareSessionArtifacts(const std::uint32_t pidValue, QString* 
         errorTextOut->clear();
     }
 
-    const QString sessionDirectory = QString::fromStdWString(ks::winapi_monitor::buildSessionDirectory());
-    QDir sessionDir;
-    if (!sessionDir.mkpath(sessionDirectory))
+    std::wstring sessionError;
+    if (!ks::winapi_monitor::addSessionDirectoryReader(pidValue, &sessionError))
     {
         if (errorTextOut != nullptr)
         {
-            *errorTextOut = QStringLiteral("无法创建会话目录：%1").arg(sessionDirectory);
+            *errorTextOut = QStringLiteral("无法准备跨账户会话目录：%1").arg(QString::fromStdWString(sessionError));
         }
         return false;
     }
@@ -1126,6 +1125,13 @@ bool WinAPIDock::writeSessionConfigFile(QString* errorTextOut) const
     outputStream << "root_stop_flag_path=" << m_currentStopFlagPath << '\n';
     outputStream << "stop_flag_path=" << m_currentStopFlagPath << '\n';
     outputStream << "session_id=" << m_currentSessionId << '\n';
+    std::wstring controllerSid;
+    if (!ks::winapi_monitor::currentProcessUserSidString(&controllerSid))
+    {
+        if (errorTextOut != nullptr) *errorTextOut = QStringLiteral("无法读取当前控制端 SID。");
+        return false;
+    }
+    outputStream << "controller_sid=" << QString::fromStdWString(controllerSid) << '\n';
     const auto endpoint = m_injectionBroker ? m_injectionBroker->endpoint() : ks::winapi_monitor::InjectionEndpoint{};
     outputStream << "injection_broker_pipe=" << QString::fromStdWString(endpoint.pipeName) << '\n';
     outputStream << "injection_broker_token=" << QString::fromStdWString(endpoint.token) << '\n';
@@ -1156,6 +1162,12 @@ bool WinAPIDock::writeSessionConfigFile(QString* errorTextOut) const
         {
             *errorTextOut = QStringLiteral("无法原子提交会话配置：%1").arg(m_currentConfigPath);
         }
+        return false;
+    }
+    std::wstring aclError;
+    if (!ks::winapi_monitor::grantSessionFileRead(m_currentConfigPath.toStdWString(), m_currentSessionPid, &aclError))
+    {
+        if (errorTextOut != nullptr) *errorTextOut = QStringLiteral("无法授予目标进程读取会话配置的权限：%1").arg(QString::fromStdWString(aclError));
         return false;
     }
 
@@ -1402,7 +1414,6 @@ void WinAPIDock::stopMonitoringInternal(const bool waitForThread)
 
     ++m_sessionGeneration;
     m_pipeStopFlag.store(true);
-    writeChildStopFlags();
 
     if (!m_currentStopFlagPath.trimmed().isEmpty())
     {
@@ -1411,8 +1422,12 @@ void WinAPIDock::stopMonitoringInternal(const bool waitForThread)
         {
             stopFile.write("stop");
             stopFile.close();
+            std::wstring aclError;
+            (void)ks::winapi_monitor::grantSessionFileRead(
+                m_currentStopFlagPath.toStdWString(), m_currentSessionPid, &aclError);
         }
     }
+    writeChildStopFlags();
 
     m_injectionBroker.reset();
 
@@ -1468,11 +1483,10 @@ void WinAPIDock::terminateHooksForSelectedProcess()
         return;
     }
 
-    const QString sessionDirectory = QString::fromStdWString(ks::winapi_monitor::buildSessionDirectory());
-    QDir sessionDir;
-    if (!sessionDir.mkpath(sessionDirectory))
+    std::wstring sessionError;
+    if (!ks::winapi_monitor::addSessionDirectoryReader(pidValue, &sessionError))
     {
-        QMessageBox::warning(this, QStringLiteral("终止 Hook"), QStringLiteral("无法创建会话目录：%1").arg(sessionDirectory));
+        QMessageBox::warning(this, QStringLiteral("终止 Hook"), QStringLiteral("无法准备会话目录：%1").arg(QString::fromStdWString(sessionError)));
         return;
     }
 
@@ -1485,6 +1499,12 @@ void WinAPIDock::terminateHooksForSelectedProcess()
     }
     stopFile.write("stop");
     stopFile.close();
+    std::wstring aclError;
+    if (!ks::winapi_monitor::grantSessionFileRead(stopFlagPath.toStdWString(), pidValue, &aclError))
+    {
+        QMessageBox::warning(this, QStringLiteral("终止 Hook"), QStringLiteral("无法授予目标进程读取停止标记的权限：%1").arg(QString::fromStdWString(aclError)));
+        return;
+    }
 
     if (m_pipeRunning.load() && m_currentSessionPid == pidValue)
     {

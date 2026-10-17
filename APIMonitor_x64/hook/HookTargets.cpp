@@ -2007,8 +2007,12 @@ namespace apimon
                 return false;
             }
 
-            const std::wstring sessionDirectory = ks::winapi_monitor::buildSessionDirectory();
-            (void)::CreateDirectoryW(sessionDirectory.c_str(), nullptr);
+            std::wstring sessionError;
+            if (!ks::winapi_monitor::addSessionDirectoryReader(childPidValue, &sessionError))
+            {
+                if (errorTextOut != nullptr) *errorTextOut = sessionError;
+                return false;
+            }
 
             const std::wstring childConfigPath = ks::winapi_monitor::buildConfigPathForPid(childPidValue);
             const std::wstring childStopPath = ks::winapi_monitor::buildStopFlagPathForPid(childPidValue);
@@ -2037,6 +2041,7 @@ namespace apimon
                 L"stop_flag_path=" + childStopPath + L"\r\n"
                 L"root_stop_flag_path=" + (configValue.rootStopFlagPath.empty() ? configValue.stopFlagPath : configValue.rootStopFlagPath) + L"\r\n"
                 L"session_id=" + configValue.sessionId + L"_" + std::to_wstring(childPidValue) + L"_" + std::to_wstring(::GetTickCount64()) + L"\r\n"
+                L"controller_sid=" + configValue.controllerSid + L"\r\n"
                 L"agent_dll_path=" + configValue.agentDllPath + L"\r\n"
                 L"injection_broker_pipe=" + configValue.injectionEndpoint.pipeName + L"\r\n"
                 L"injection_broker_token=" + configValue.injectionEndpoint.token + L"\r\n"
@@ -2096,6 +2101,10 @@ namespace apimon
             {
                 if (errorTextOut) *errorTextOut = L"Atomic child config commit failed. error=" + std::to_wstring(::GetLastError());
                 (void)::DeleteFileW(temporaryPath.c_str());
+                return false;
+            }
+            if (!ks::winapi_monitor::grantSessionFileRead(childConfigPath, childPidValue, errorTextOut))
+            {
                 return false;
             }
             if (::GetFileAttributesW(childStopPath.c_str()) != INVALID_FILE_ATTRIBUTES && !::DeleteFileW(childStopPath.c_str()))

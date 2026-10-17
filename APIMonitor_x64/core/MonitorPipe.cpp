@@ -4,6 +4,8 @@
 #include "ApiMonitorMetadata.h"
 #include "../MonitorAgent.h"
 #include "../hook/HookEngine.h"
+#include <Aclapi.h>
+#include <Sddl.h>
 
 namespace apimon
 {
@@ -37,6 +39,72 @@ namespace apimon
         HANDLE g_senderStopEvent = nullptr;            // g_senderStopEvent：中断挂起 OVERLAPPED WriteFile 的手动复位停止事件。
         constexpr DWORD kPipeConnectPollMs = 200;       // kPipeConnectPollMs：等待客户端连接时的轮询间隔。
         constexpr DWORD kPipeConnectTimeoutMs = 45000;  // kPipeConnectTimeoutMs：等待 UI 侧连入的最大时长。
+
+        struct PipeSecurity
+        {
+            PSECURITY_DESCRIPTOR descriptor = nullptr;
+            PACL acl = nullptr;
+            ~PipeSecurity()
+            {
+                if (acl) ::LocalFree(acl);
+                if (descriptor) ::LocalFree(descriptor);
+            }
+        };
+
+        bool BuildPipeSecurity(const std::wstring& controllerSid, PipeSecurity& security,
+            SECURITY_ATTRIBUTES& attributes, std::wstring* errorTextOut)
+        {
+            if (controllerSid.empty()) return true;
+            PSID controller = nullptr;
+            if (!::ConvertStringSidToSidW(controllerSid.c_str(), &controller))
+            {
+                if (errorTextOut) *errorTextOut = L"ConvertStringSidToSidW failed. error=" + std::to_wstring(::GetLastError());
+                return false;
+            }
+            SID_IDENTIFIER_AUTHORITY systemAuthority = SECURITY_NT_AUTHORITY;
+            PSID systemSid = nullptr;
+            if (!::AllocateAndInitializeSid(&systemAuthority, 1, SECURITY_LOCAL_SYSTEM_RID,
+                0, 0, 0, 0, 0, 0, 0, &systemSid))
+            {
+                const DWORD error = ::GetLastError();
+                ::LocalFree(controller);
+                if (errorTextOut) *errorTextOut = L"AllocateAndInitializeSid failed. error=" + std::to_wstring(error);
+                return false;
+            }
+            EXPLICIT_ACCESSW entries[2]{};
+            entries[0].grfAccessPermissions = GENERIC_READ | GENERIC_WRITE | SYNCHRONIZE;
+            entries[0].grfAccessMode = GRANT_ACCESS;
+            entries[0].grfInheritance = NO_INHERITANCE;
+            entries[0].Trustee.TrusteeForm = TRUSTEE_IS_SID;
+            entries[0].Trustee.TrusteeType = TRUSTEE_IS_USER;
+            entries[0].Trustee.ptstrName = reinterpret_cast<LPWSTR>(controller);
+            entries[1].grfAccessPermissions = GENERIC_ALL;
+            entries[1].grfAccessMode = GRANT_ACCESS;
+            entries[1].grfInheritance = NO_INHERITANCE;
+            entries[1].Trustee.TrusteeForm = TRUSTEE_IS_SID;
+            entries[1].Trustee.TrusteeType = TRUSTEE_IS_WELL_KNOWN_GROUP;
+            entries[1].Trustee.ptstrName = reinterpret_cast<LPWSTR>(systemSid);
+            const DWORD aclError = ::SetEntriesInAclW(2, entries, nullptr, &security.acl);
+            ::FreeSid(systemSid);
+            ::LocalFree(controller);
+            if (aclError != ERROR_SUCCESS)
+            {
+                if (errorTextOut) *errorTextOut = L"SetEntriesInAclW for monitor pipe failed. error=" + std::to_wstring(aclError);
+                return false;
+            }
+            security.descriptor = static_cast<PSECURITY_DESCRIPTOR>(::LocalAlloc(LPTR, SECURITY_DESCRIPTOR_MIN_LENGTH));
+            if (!security.descriptor || !::InitializeSecurityDescriptor(security.descriptor, SECURITY_DESCRIPTOR_REVISION)
+                || !::SetSecurityDescriptorDacl(security.descriptor, TRUE, security.acl, FALSE))
+            {
+                const DWORD error = ::GetLastError();
+                if (errorTextOut) *errorTextOut = L"build monitor pipe security descriptor failed. error=" + std::to_wstring(error);
+                return false;
+            }
+            attributes.nLength = sizeof(attributes);
+            attributes.lpSecurityDescriptor = security.descriptor;
+            attributes.bInheritHandle = FALSE;
+            return true;
+        }
 
         // SenderThreadSlot 作用：
         // - 输入：无；
@@ -371,6 +439,15 @@ namespace apimon
         pipeMode |= PIPE_REJECT_REMOTE_CLIENTS;
 #endif
 
+        PipeSecurity pipeSecurity;
+        SECURITY_ATTRIBUTES pipeAttributes{};
+        SECURITY_ATTRIBUTES* const securityAttributes = configValue.controllerSid.empty() ? nullptr : &pipeAttributes;
+        if (securityAttributes != nullptr
+            && !BuildPipeSecurity(configValue.controllerSid, pipeSecurity, pipeAttributes, errorTextOut))
+        {
+            return false;
+        }
+
         HANDLE pipeHandle = ::CreateNamedPipeW(
             configValue.pipeName.c_str(),
             PIPE_ACCESS_OUTBOUND | FILE_FLAG_OVERLAPPED,
@@ -379,7 +456,7 @@ namespace apimon
             64 * 1024,
             64 * 1024,
             0,
-            nullptr);
+            securityAttributes);
         if (pipeHandle == INVALID_HANDLE_VALUE)
         {
             if (errorTextOut != nullptr)

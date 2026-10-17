@@ -600,6 +600,14 @@ void WinAPIDock::writeChildStopFlags()
         {
             stopFile.write("stop");
             stopFile.close();
+            std::wstring aclError;
+            (void)ks::winapi_monitor::grantSessionFileRead(
+                stopFlagPath.toStdWString(), childPidValue, &aclError);
+            if (!m_currentStopFlagPath.trimmed().isEmpty())
+            {
+                (void)ks::winapi_monitor::grantSessionFileRead(
+                    m_currentStopFlagPath.toStdWString(), childPidValue, &aclError);
+            }
         }
     }
 }

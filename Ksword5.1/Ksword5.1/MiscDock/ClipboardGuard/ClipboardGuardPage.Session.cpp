@@ -293,6 +293,13 @@ namespace ks::misc
         }
 
         const QString configPath = QString::fromStdWString(ks::winapi_monitor::buildConfigPathForPid(pid));
+        std::wstring sessionError;
+        if (!ks::winapi_monitor::addSessionDirectoryReader(pid, &sessionError))
+        {
+            if (errorTextOut) *errorTextOut = QStringLiteral("无法准备跨账户会话目录：%1")
+                .arg(QString::fromStdWString(sessionError));
+            return false;
+        }
         if (!QDir().mkpath(QFileInfo(configPath).absolutePath()))
         {
             if (errorTextOut != nullptr)
@@ -328,6 +335,13 @@ namespace ks::misc
         outputStream << "pipe_name=" << QString::fromStdWString(ks::winapi_monitor::buildPipeNameForPid(pid)) << '\n';
         outputStream << "stop_flag_path=" << QString::fromStdWString(ks::winapi_monitor::buildStopFlagPathForPid(pid)) << '\n';
         outputStream << "session_id=" << sessionId << '\n';
+        std::wstring controllerSid;
+        if (!ks::winapi_monitor::currentProcessUserSidString(&controllerSid))
+        {
+            if (errorTextOut) *errorTextOut = QStringLiteral("无法读取当前控制端 SID。");
+            return false;
+        }
+        outputStream << "controller_sid=" << QString::fromStdWString(controllerSid) << '\n';
         outputStream << "agent_dll_path=" << QDir::toNativeSeparators(QString::fromStdWString(agentDllPath)) << '\n';
         // 只开剪贴板分类，不随手把通用文件/注册表/网络/进程/加载器监控一起打开——
         // "剪贴板保护"和通用 API 监控是两个不同的使用场景，这里只要剪贴板这一份。
@@ -350,6 +364,13 @@ namespace ks::misc
             {
                 *errorTextOut = QStringLiteral("会话配置提交失败：%1").arg(configPath);
             }
+            return false;
+        }
+        std::wstring aclError;
+        if (!ks::winapi_monitor::grantSessionFileRead(configPath.toStdWString(), pid, &aclError))
+        {
+            if (errorTextOut) *errorTextOut = QStringLiteral("无法授予目标进程读取会话配置的权限：%1")
+                .arg(QString::fromStdWString(aclError));
             return false;
         }
         // 新配置完整提交后再撤销上一次会话的停止标记；否则常驻 Agent
@@ -490,6 +511,8 @@ namespace ks::misc
         {
             stopFile.write("stop");
             stopFile.close();
+            std::wstring aclError;
+            (void)ks::winapi_monitor::grantSessionFileRead(stopFlagPath.toStdWString(), pid, &aclError);
         }
 
         sessionPointer->stopFlag.store(true);

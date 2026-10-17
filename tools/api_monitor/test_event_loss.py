@@ -58,5 +58,5 @@ int main(){
 with tempfile.TemporaryDirectory(prefix="ksword_loss_") as temp:
  folder=Path(temp);cpp=folder/"fixture.cpp";cpp.write_text(code,encoding="utf-8")
  generate_definitions.generate(root/"APIMonitor_x64/api_monitor_definitions.json",folder)
- subprocess.run(["cl","/nologo","/EHsc","/std:c++17","/utf-8","/I"+str(root/"APIMonitor_x64"),"/I"+str(folder),str(cpp),"/Fe:"+str(folder/"fixture.exe"),"/Fo:"+str(folder/"fixture.obj")],check=True)
+ subprocess.run(["cl","/nologo","/EHsc","/std:c++17","/utf-8","/I"+str(root/"APIMonitor_x64"),"/I"+str(folder),str(cpp),"/Fe:"+str(folder/"fixture.exe"),"/Fo:"+str(folder/"fixture.obj"),"/link","Advapi32.lib"],check=True)
  subprocess.run([str(folder/"fixture.exe")],check=True,timeout=30)

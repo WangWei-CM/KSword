@@ -72,7 +72,7 @@ class LiveFixture:
         self.pid = int(self.process.stdout.readline().decode().strip())
         self.session_text = "fixture-" + uuid.uuid4().hex
         self.session = session_identity(self.session_text)
-        session_directory = Path(tempfile.gettempdir()) / "KswordApiMon"
+        session_directory = Path(os.environ.get("WINDIR", "C:/Windows")) / "Temp" / "KswordApiMon"
         session_directory.mkdir(exist_ok=True)
         self.config = session_directory / f"config_{self.pid}.ini"
         self.stop = session_directory / f"stop_{self.pid}.flag"

@@ -314,6 +314,10 @@ namespace apimon
             configValue.configPath,
             L"agent_dll_path",
             L"");
+        configValue.controllerSid = QueryIniText(
+            configValue.configPath,
+            L"controller_sid",
+            L"");
         configValue.injectionEndpoint.pipeName = QueryIniText(configValue.configPath, L"injection_broker_pipe", L"");
         configValue.injectionEndpoint.token = QueryIniText(configValue.configPath, L"injection_broker_token", L"");
         configValue.injectionEndpoint.hostPid = ::GetPrivateProfileIntW(L"monitor", L"injection_broker_pid", 0, configValue.configPath.c_str());

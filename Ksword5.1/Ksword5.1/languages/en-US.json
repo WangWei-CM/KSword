@@ -40962,6 +40962,11 @@
     "正在导出内存区域": "Exporting memory region",
     "目标进程已改变，请重新选择区域。": "The target process changed. Select the region again.",
     "需要有效目标和已提交区域；已有区域导出时请等待或取消。": "A valid target and committed region are required. Wait for or cancel any current region export.",
-    "[MainWindow] 存量样式表主题色分片重映射完成": "[MainWindow] Existing style color remapping completed in slices"
+    "[MainWindow] 存量样式表主题色分片重映射完成": "[MainWindow] Existing style color remapping completed in slices",
+    "无法准备会话目录：%1": "Unable to prepare the monitor session directory: %1",
+    "无法准备跨账户会话目录：%1": "Unable to prepare the cross-account monitor session directory: %1",
+    "无法授予目标进程读取会话配置的权限：%1": "Unable to grant the target process access to the monitor session configuration: %1",
+    "无法授予目标进程读取停止标记的权限：%1": "Unable to grant the target process access to the monitor stop flag: %1",
+    "无法读取当前控制端 SID。": "Unable to read the current controller SID."
   }
 }

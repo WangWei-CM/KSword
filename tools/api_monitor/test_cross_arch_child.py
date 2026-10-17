@@ -1,5 +1,6 @@
 """Follow an owned child of the other architecture with the production Agent."""
 import configparser
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -56,7 +57,7 @@ with InjectionHost() as host, tempfile.TemporaryDirectory(prefix="ksword_child_a
             result=next(e for e in parent.events if e.api in ("AutoInjectChild","AutoInjectChildFailed"))
             assert result.api=="AutoInjectChild",result.detail
             line=parent.process.stdout.readline().decode().strip();assert line.startswith("CHILD "),line
-            pid=int(line.split()[1]);session_directory=Path(tempfile.gettempdir())/"KswordApiMon"
+            pid=int(line.split()[1]);session_directory=Path(os.environ.get("WINDIR", "C:/Windows"))/"Temp"/"KswordApiMon"
             config_path=session_directory/f"config_{pid}.ini";stop_path=session_directory/f"stop_{pid}.flag"
             config=configparser.ConfigParser(interpolation=None);config.read(config_path,encoding="utf-16")
             values=config["monitor"]

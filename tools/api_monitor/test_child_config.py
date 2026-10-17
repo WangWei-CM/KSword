@@ -42,5 +42,5 @@ int main() {
 with tempfile.TemporaryDirectory(prefix="ksword_child_config_") as temp:
  folder=Path(temp); cpp=folder/"fixture.cpp"
  cpp.write_text('#include <cstdio>\n#include "'+(root/"APIMonitor_x64/core/MonitorConfig.cpp").as_posix()+'"\nnamespace apimon {\n'+writer+'\n}\n'+main,encoding="utf-8")
- subprocess.run(["cl","/nologo","/EHsc","/std:c++17","/utf-8","/I"+str(root/"APIMonitor_x64"),str(cpp),"/Fe:"+str(folder/"fixture.exe"),"/Fo:"+str(folder/"fixture.obj")],check=True)
+ subprocess.run(["cl","/nologo","/EHsc","/std:c++17","/utf-8","/I"+str(root/"APIMonitor_x64"),str(cpp),"/Fe:"+str(folder/"fixture.exe"),"/Fo:"+str(folder/"fixture.obj"),"/link","Advapi32.lib"],check=True)
  subprocess.run([str(folder/"fixture.exe")],check=True)
