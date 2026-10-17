@@ -44,6 +44,7 @@
 #include "../shared/driver/KswordArkKernelIoctl.h"
 #include "../shared/driver/KswordArkKernelObjectIoctl.h"
 #include "../shared/driver/KswordArkMemoryIoctl.h"
+#include "../shared/driver/KswordArkMemoryResult.h"
 #include "../shared/driver/KswordArkDdmaIoctl.h"
 #include "../shared/driver/KswordArkDdmaPlan.h"
 #include "../shared/driver/KswordArkMutationIoctl.h"
@@ -1206,8 +1207,8 @@ namespace
         { L"memory", L"scan-exec-pte", L"KswordCLI.exe memory scan-exec-pte --pid PID [--start VA] [--end VA] [--cursor VA] [--max-entries N] [--max-table-reads N] [--flags 0xN] [--limit N]", L"Scan the target process page tables for user-space executable leaves.", L"Required: --pid. Optional: --start, --end, --cursor, --max-entries, --max-table-reads, --flags, --limit.", L"Backed by IOCTL_KSWORD_ARK_SCAN_PROCESS_EXECUTABLE_PTE; reports what the processor treats as executable, independent of VAD protection." },
         { L"memory", L"read-section-pages", L"KswordCLI.exe memory read-section-pages --pid PID --start VA --end VA [--cursor VA] [--max-pages N] [--flags 0xN] [--limit N]", L"Read the image section object's clean reference pages for a mapped range.", L"Required: --pid, --start, --end. Optional: --cursor, --max-pages, --flags, --limit.", L"Backed by IOCTL_KSWORD_ARK_READ_IMAGE_SECTION_PAGES; a second reference source independent of the file on disk. Only prototype PTEs in the architectural valid form are resolved - transition and pagefile encodings are version specific and are reported as not resident rather than decoded, and pages are never faulted in. Set --flags 0x1 to also return the page bytes." },
         { L"memory", L"scan-evidence", L"KswordCLI.exe memory scan-evidence [--flags 0xN] [--max-rows N] [--start VA] [--end VA] [--max-bytes N] [--max-bigpool-rows N] [--sample-bytes N] [--limit N]", L"Scan kernel memory evidence rows.", L"Optional: --flags, --max-rows, --start, --end, --max-bytes, --max-bigpool-rows, --sample-bytes, --limit.", L"" },
-        { L"memory", L"change-mapped-protection", L"KswordCLI.exe memory change-mapped-protection --address VA [--protection 0xN] [--flags 0xN]", L"MDL-based page protection change (HVCI research).", L"Required: --address. Optional: --protection (default PAGE_READWRITE=0x04), --flags (0x1=write test).", L"" },
-        { L"memory", L"change-image-protection", L"KswordCLI.exe memory change-image-protection --address VA [--operation N] [--flags 0xN] [--func-addr VA]", L"MmChangeImageProtection on kernel image page (HVCI research).", L"Required: --address. Optional: --operation (1=RX, 2=READONLY_NX, default 2), --flags (0x1=write test, 0x2=restore), --func-addr (manual MmChangeImageProtection VA).", L"" },
+        { L"memory", L"change-mapped-protection", L"KswordCLI.exe memory change-mapped-protection --address VA [--protection 0xN] [--flags 0xN]", L"MDL-based page protection change (HVCI research).", L"Required: --address. Optional: --protection (default PAGE_READWRITE=0x04), --flags (0x1=write test).", L"Exit 1 if a required/requested stage fails or remains pending; exit 4 for an incompatible response." },
+        { L"memory", L"change-image-protection", L"KswordCLI.exe memory change-image-protection --address VA [--operation N] [--flags 0xN] [--func-addr VA]", L"MmChangeImageProtection on kernel image page (HVCI research).", L"Required: --address. Optional: --operation (1=RX, 2=READONLY_NX, default 2), --flags (0x1=write test, 0x2=restore), --func-addr (manual MmChangeImageProtection VA).", L"Exit 1 if a required/requested stage fails or remains pending; exit 4 for an incompatible response." },
         { L"file", L"delete-path", L"KswordCLI.exe file delete-path --path PATH [--flags 0xN]", L"Delete one path through the driver.", L"Required: --path. Optional: --flags.", L"" },
         { L"file", L"query-info", L"KswordCLI.exe file query-info --path PATH [--flags 0xN]", L"Query file object and basic file metadata.", L"Required: --path. Optional: --flags.", L"" },
         { L"file", L"set-integrity", L"KswordCLI.exe file set-integrity --path PATH (--rid RID | --level untrusted|low|medium|medium-plus|high|system) [--directory] [--flags 0xN] [--confirm]", L"Set a file or directory mandatory integrity label through R0.", L"Required: --path and one integrity selector. Optional: --directory, --flags, --confirm adds UI-confirmed protocol bit.", L"Win32/UNC paths are normalized to the driver NT path convention before IOCTL_KSWORD_ARK_SET_FILE_INTEGRITY." },
@@ -3190,13 +3191,13 @@ namespace
                        << L"\n  mappedVa=" << hex64(response->mappedVa)
                        << L"\n  originalPte=" << hex64(response->originalPte)
                        << L"\n  afterProtectPte=" << hex64(response->afterProtectPte) << L"\n";
-            // 检查链式阶段——任何阶段失败则退出码非零。
-            if (response->protectStatus < 0 || response->mapStatus < 0
-                || response->lockStatus < 0 || response->mdlAllocStatus < 0)
+            // 先确认固定响应身份；不兼容的版本不解释为执行结果。
+            if (response->version != 1UL || response->size != sizeof(*response))
             {
-                return 1;
+                return 4;
             }
-            return 0;
+            // 只以同步完成为成功，并覆盖用户请求的写测试阶段。
+            return ksword::memory_result::mappedSucceeded(*response, request.flags) ? 0 : 1;
         }
         if (sub == L"change-image-protection")
         {
@@ -3224,14 +3225,12 @@ namespace
                        << L"\n  originalPte=" << hex64(r->originalPte)
                        << L"\n  afterImageProtectPte=" << hex64(r->afterImageProtectPte)
                        << L"\n  afterRestorePte=" << hex64(r->afterRestorePte) << L"\n";
-            // 检查链式阶段——任何阶段失败则退出码非零。
-            if (r->resolverStatus < 0 || r->mdlAllocStatus < 0
-                || r->lockStatus < 0 || r->imageProtectStatus < 0
-                || r->aliasMapStatus < 0)
+            // 恢复失败必须成为非零退出码，未请求的别名/恢复分支则不算失败。
+            if (r->version != 1UL || r->size != sizeof(*r))
             {
-                return 1;
+                return 4;
             }
-            return 0;
+            return ksword::memory_result::imageSucceeded(*r, request.flags) ? 0 : 1;
         }
         if (sub == L"enum-vad")
         {

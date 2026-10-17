@@ -1206,6 +1206,11 @@ KswordARKHvmConfigureResidentVmcsFromAsm(
             }
         }
     }
+    /* 每个处理器首次使用 MBEC 专用根前，必须独立排除旧 EPTP 缓存。 */
+    if (NT_SUCCESS(status) && input.EnableNoAttachMbec != 0U) {
+        /* 任一根失效失败都由既有状态回执和插入回滚拒绝本次 VM-entry。 */
+        status = KswordARKHvmNoAttachInvalidateRootsForEntry(Context->Runtime);
+    }
     /* Last measured C boundary before the assembly entry continuation. */
     if (NT_SUCCESS(status)) {
         /* Includes remaining SSP/entry assembly, not only the VMLAUNCH instruction. */

@@ -64,19 +64,22 @@ namespace ks::misc::hvci_bypass
     struct ExperimentResult
     {
         bool ioSuccess = false;             // IOCTL 是否成功返回。
-        long resolverStatus = 0;            // MmChangeImageProtection 函数解析状态。
-        long mdlAllocStatus = 0;            // MDL 分配状态。
-        long lockStatus = 0;                // 页面锁定状态。
-        long imageProtectStatus = 0;        // 映像保护变更状态（RX → NX）。
-        long aliasMapStatus = 0;            // 别名映射状态。
-        long writeTestStatus = 0;           // 通过别名写入测试状态。
-        long restoreStatus = 0;             // RX 恢复状态。
+        long resolverStatus = 0x103L;       // 函数解析初始为 PENDING，不能显示成已完成。
+        long mdlAllocStatus = 0x103L;       // MDL 分配状态，初始未执行。
+        long lockStatus = 0x103L;           // 页面锁定状态，初始未执行。
+        long imageProtectStatus = 0x103L;   // 映像保护变更状态，初始未执行。
+        long aliasMapStatus = static_cast<long>(0xC00000BBUL); // 初始没有执行别名分支。
+        long writeTestStatus = static_cast<long>(0xC00000BBUL); // 初始没有执行写测试。
+        long restoreStatus = static_cast<long>(0xC00000BBUL); // 初始没有执行恢复。
 
         std::uint64_t resolvedFunctionVa = 0;   // R0 解析到的 MmChangeImageProtection 内核地址。
         std::uint8_t preModifyByte = 0;          // 修改前从目标 VA 读到的原始字节。
         std::uint8_t postWriteByte = 0;          // 通过别名写入后从原始 VA 读回的字节。
         std::uint8_t postRestoreByte = 0;        // 恢复 RX 后从原始 VA 读回的字节。
         std::uint64_t aliasVa = 0;               // R0 分配的别名映射虚拟地址。
+        bool hasPreModifyByte = false;          // 已完成基线读取，且槽位不是读取失败哨兵。
+        bool hasPostWriteByte = false;          // 写分支之后确实取得原始 VA 的读回。
+        bool hasPostRestoreByte = false;        // 恢复分支之后确实取得原始 VA 的读回。
 
         unsigned long flags = 0;            // 本次实验使用的标志位组合。
         QString ioErrorText;                // IOCTL 失败时的错误描述文本。

@@ -91,3 +91,23 @@ if ($LASTEXITCODE -ne 0) { throw 'Thread session fault regression failed.' }
 恢复时只调用一次 `ResumeThread`，不会循环清空外部计数。其它工具若并发增减计数，
 不能将返回结果解释为全进程一致停止或对其它工具计数的隔离保证。析构为尽力恢复；
 控制程序被强制终止不能获得用户态析构恢复保证。本入口没有单步/断点/异常消费能力。
+
+## 保护实验响应判定
+
+`memory_result_reporting_tests.cpp` 仅使用内存中的协议响应，验证必需阶段、显式请求的
+写入/恢复阶段、Pending、版本/长度不兼容，以及字节读回的有效性。未请求的可选阶段
+不会被误报为失败；驱动的 `0xDEAD` 未读哨兵不能被截成真实字节证据。
+该夹具已登记为 `ProtectionResults`，可经原生回归 runner 构建执行。
+
+`python tools/test_memory_result_reporting.py` 另从生产后端提取实际判定文本函数，
+用仓库 Qt Core 和 HostX64 MSVC `/W4 /WX` 编译并执行相同夹具，覆盖恢复未证实、
+未读字节与真实零字节的区分。生成物、源文件 SHA256 和完整日志放在
+`output/review-fixes-20261017/result-reporting/`。两种入口均不访问设备、运行 CLI
+实验或写入任何目标；结果不代替驱动与 GUI 验收。
+
+## 内核服务地址归属
+
+`kernel_service_audit_evidence_tests.cpp` 直接使用生产的 Qt-free 判定头，验证真实地址
+的半开模块范围、整数溢出、重叠归属、前后快照变化、未知地址、缺失能力以及主内核与
+Shadow 精确宿主身份。枚举类别也独立于译文。夹具已登记为 `AuditEvidence`；输入均为
+内存快照，不查询系统、访问驱动或修改服务表。它验证判定逻辑，不证明现场模块快照可信。

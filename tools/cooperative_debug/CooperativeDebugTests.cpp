@@ -2,6 +2,8 @@
 #define NOMINMAX
 #include "../../shared/debug/CooperativeDebugClient.h"
 #include "CooperativeDebugRuntime.h"
+#include "CooperativeDebugRuntimeInternal.h"
+#include <intrin.h>
 #include <cstdio>
 #include <cstring>
 #include <cwchar>
@@ -32,6 +34,11 @@ namespace
         // Stop 请求及完成标记不依赖控制管道继续存活。
         volatile LONG runtimeStopRequested = 0;
         volatile LONG runtimeStopped = 0;
+        // 长单步路径不经过 Sleep，必须穿回下一次真实 Checkpoint 的临界区。
+        volatile LONG longStepRequested = 0;
+        volatile LONG longStepActive = 0;
+        volatile LONG longStepProgress = 0;
+        volatile LONG longStepTf = 1;
         // pid：目标进程标识。
         DWORD pid = 0;
         // creation：进程创建时间身份。
@@ -138,7 +145,8 @@ namespace
             ksword::cooperative::runtime::Stop();
             return 12;
         }
-        // 未知异常应由目标自身 SEH 处理，组件 VEH 不能将其吞掉。
+        // 即使目标线程已持有组件状态锁，未知异常也必须直接交回原 SEH 链。
+        AcquireSRWLockExclusive(&ksword::cooperative::runtime::detail::instance.lock);
         __try
         {
             RaiseException(0xE0421234, 0, 0, nullptr);
@@ -147,6 +155,7 @@ namespace
         {
             InterlockedIncrement(&metrics->unknownHandled);
         }
+        ReleaseSRWLockExclusive(&ksword::cooperative::runtime::detail::instance.lock);
         // created 为进程身份；其余时间是 Windows API 要求的输出参数。
         FILETIME created{};
         // exited：退出时间输出。
@@ -166,6 +175,18 @@ namespace
         InterlockedExchange(&metrics->ready, 1);
         while (InterlockedCompareExchange(&metrics->quit, 0, 0) == 0)
         {
+            if (InterlockedCompareExchange(&metrics->longStepRequested, 0, 0) != 0)
+            {
+                InterlockedExchange(&metrics->longStepActive, 1);
+                while (InterlockedCompareExchange(&metrics->longStepRequested, 0, 0) != 0 &&
+                       InterlockedCompareExchange(&metrics->quit, 0, 0) == 0)
+                {
+                    ksword::cooperative::runtime::Checkpoint();
+                    InterlockedIncrement(&metrics->longStepProgress);
+                    InterlockedExchange(&metrics->longStepTf, static_cast<LONG>(__readeflags() & 0x100U));
+                }
+                InterlockedExchange(&metrics->longStepActive, 0);
+            }
             ksword::cooperative::runtime::Checkpoint();
             InterlockedIncrement(&metrics->progress);
             Sleep(5);
@@ -202,6 +223,22 @@ namespace
             if (!result.ok() || result.state == State::Paused)
                 return result;
             Sleep(5);
+        }
+        return result;
+    }
+
+    // 单步等待只承认新真实停点或明确中断；中断没有当前现场，不能继续假步进。
+    Result StepOutcome(Session &session, const Result &previous)
+    {
+        Result result = session.step(previous.stopId);
+        if (!result.ok() || result.state == State::Paused || result.state == State::Interrupted)
+            return result;
+        for (unsigned attempt = 0; attempt < 2000; ++attempt)
+        {
+            result = session.query();
+            if (!result.ok() || result.state == State::Paused || result.state == State::Interrupted)
+                return result;
+            Sleep(1);
         }
         return result;
     }
@@ -394,6 +431,44 @@ int wmain(int argc, wchar_t **argv)
         const LONG beforeResume = metrics->progress;
         Require(session.resume(stopped.stopId).ok() && Progresses(metrics, beforeResume),
                 "continue resumed real target work");
+        // 保留原50项覆盖，额外连续单步穿过业务循环并重新进入运行时锁获取路径。
+        InterlockedExchange(&metrics->longStepRequested, 1);
+        for (unsigned attempt = 0; attempt < 200 && metrics->longStepActive == 0; ++attempt)
+            Sleep(5);
+        Require(metrics->longStepActive == 1, "long-step business loop reached its checkpoints");
+        Require(session.requestPause().ok(), "long-step path pause requested");
+        stopped = Paused(session);
+        Require(stopped.ok() && stopped.state == State::Paused, "long-step path owns a current stop");
+        const LONG beforeLongStep = metrics->longStepProgress;
+        unsigned completedSteps = 0;
+        bool validStops = true;
+        for (; completedSteps < 2048 && stopped.ok() && stopped.state == State::Paused; ++completedSteps)
+        {
+            const Result previous = stopped;
+            stopped = StepOutcome(session, previous);
+            if (stopped.state == State::Paused &&
+                (stopped.stopId <= previous.stopId || stopped.snapshot.threadId != previous.snapshot.threadId))
+                validStops = false;
+        }
+        std::printf("LONG_STEP_RESULT steps=%u state=%u error=%u progress=%ld->%ld\n", completedSteps,
+                    static_cast<unsigned>(stopped.state), stopped.errorWin32, beforeLongStep,
+                    metrics->longStepProgress);
+        Require(completedSteps > 2 && validStops, "long stepping kept current stop and thread identities");
+        Require(stopped.ok() && stopped.state == State::Interrupted,
+                "stepping into runtime critical section reports Interrupted instead of deadlocking");
+        const ksword::cooperative::RegisterSnapshot emptySnapshot{};
+        Require(stopped.stopId == 0 && std::memcmp(&stopped.snapshot, &emptySnapshot, sizeof(emptySnapshot)) == 0,
+                "interrupted step has no consumable stop or current registers");
+        Require(session.query().state == State::Interrupted, "query preserves explicit interrupted state");
+        for (unsigned attempt = 0; attempt < 200 && metrics->longStepProgress <= beforeLongStep; ++attempt)
+            Sleep(5);
+        Require(metrics->longStepProgress > beforeLongStep && metrics->longStepTf == 0,
+                "interrupted target progresses with its owned TF cleared");
+        NoDebugObject(target);
+        InterlockedExchange(&metrics->longStepRequested, 0);
+        for (unsigned attempt = 0; attempt < 200 && metrics->longStepActive != 0; ++attempt)
+            Sleep(5);
+        Require(metrics->longStepActive == 0, "interrupted business loop left runtime without a stuck lock");
         Require(session.requestPause().ok() && Paused(session).state == State::Paused,
                 "second checkpoint pause available");
         // beforeClose：关闭前真实业务进度。

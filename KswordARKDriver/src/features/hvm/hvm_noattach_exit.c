@@ -468,6 +468,28 @@ NTSTATUS KswordARKHvmNoAttachBuildRootsLocked(KSW_HVM_RUNTIME *Runtime)
     return STATUS_SUCCESS;
 }
 
+NTSTATUS KswordARKHvmNoAttachInvalidateRootsForEntry(KSW_HVM_RUNTIME *Runtime)
+{
+    /* 根表物理页可能来自旧会话；VMXON/VMXOFF 不保证清除其 EPT 缓存。 */
+    if (Runtime == NULL || !KswordARKHvmNoAttachOwned() ||
+        g_KswordNoAttach.NormalEptp == 0ULL ||
+        g_KswordNoAttach.NormalEptp != Runtime->EptPointer ||
+        g_KswordNoAttach.UserGateEptp == 0ULL || g_KswordNoAttach.KernelGateEptp == 0ULL)
+    {
+        /* 台账不完整时不能启动任何依赖此门禁的处理器。 */
+        return STATUS_INVALID_DEVICE_STATE;
+    }
+    /* 基础根由既有入口失效；两个不可变专用根必须在当前处理器分别失效。 */
+    if (KswordARKHvmAsmInveptSingle(g_KswordNoAttach.UserGateEptp) != 0U ||
+        KswordARKHvmAsmInveptSingle(g_KswordNoAttach.KernelGateEptp) != 0U)
+    {
+        /* 不将失效失败降级为成功启动，沿用既有准入回滚路径。 */
+        return STATUS_HV_OPERATION_FAILED;
+    }
+    /* 只有当前处理器的两个新根都完成失效后才允许首次使用。 */
+    return STATUS_SUCCESS;
+}
+
 VOID KswordARKHvmNoAttachResetRootsLocked(KSW_HVM_RUNTIME *Runtime)
 {
     /* 全处理器停止失败时，保留全部映射与身份引用。 */

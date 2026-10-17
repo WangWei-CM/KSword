@@ -11,9 +11,51 @@
 #include <QPointer>
 
 #include <thread>
+#include <utility>
 
 namespace ks::misc
 {
+    // worker 只写此独立槽；页面在 join 后归集，绝不让后台线程访问 QWidget 字段。
+    struct DisableDsePage::PendingKsecApply
+    {
+        disable_dse::ExecuteResult result;
+        disable_dse::CodeIntegrityPosture posture; // 沿用原有只读核验，随结果一并归集。
+        disable_dse::KsecDdStrategy strategy = disable_dse::KsecDdStrategy::LsassInjection;
+        bool isRestore = false;
+    };
+
+    void DisableDsePage::drainPendingKsecApply(const bool forShutdown)
+    {
+        // 后台只投递异步通知，不等待此 UI 线程，故析构 join 不形成互等。
+        if (m_ksecApplyWorker.joinable())
+        {
+            m_ksecApplyWorker.join();
+        }
+        // 先取走唯一待归集槽，嵌套退出或稍后到达的排队通知只能成为空操作。
+        const auto pending = std::move(m_pendingKsecApply);
+        if (!pending)
+        {
+            return;
+        }
+        if (pending->result.ok && !pending->isRestore)
+        {
+            // 即使姿态未知也保留实际执行路径，由原有恢复代码承担最终责任。
+            m_usedKsecPath = true;
+            m_usedKsecStrategy = pending->strategy;
+        }
+        else if (forShutdown && pending->result.ok && pending->isRestore)
+        {
+            // worker 已完成原有只读核验；纯状态归集不查询，也不刷新控件或再次写入。
+            if (pending->posture.source != disable_dse::PostureSource::None
+                && pending->posture.ciEnabled)
+            {
+                m_hasSavedOriginal = false;
+                m_originalIsInferred = false;
+                m_usedKsecPath = false;
+            }
+        }
+    }
+
     // ----------------------------------------------------------------
     // runKsecLocateGadget：
     // - 作用：在后台线程定位 ntoskrnl 中的 mov [rcx], edx; ret 字节序列；
@@ -139,35 +181,49 @@ namespace ks::misc
             m_hasSavedOriginal = true;
         }
 
-        std::thread([guard, gadgetAddr, targetAddr, desiredValue,
-                     strategy, isRestore]()
+        // 在派发前建立结果槽与回调门，正常关闭必须等此槽已由 UI 归集。
+        const auto pending = std::make_shared<PendingKsecApply>();
+        pending->strategy = strategy;
+        pending->isRestore = isRestore;
+        m_pendingKsecApply = pending;
+        const auto lifetime = m_ksecCallbackLifetime;
+        QObject* const completionReceiver = qApp;
+        m_ksecApplyWorker = std::thread([guard, pending, lifetime, completionReceiver,
+                     gadgetAddr, targetAddr, desiredValue, strategy, isRestore]()
         {
-            disable_dse::ExecuteResult result;
+            disable_dse::ExecuteResult executionResult;
 
             // 按选定方案执行。
             if (strategy == disable_dse::KsecDdStrategy::LsassInjection)
             {
-                result = disable_dse::executeViaLsass(
+                executionResult = disable_dse::executeViaLsass(
                     gadgetAddr, targetAddr, desiredValue);
             }
             else
             {
-                result = disable_dse::executeViaSilo(
+                executionResult = disable_dse::executeViaSilo(
                     gadgetAddr, targetAddr, desiredValue);
             }
 
-            if (guard == nullptr)
+            // 结果在独立槽中保留；即使页面进入析构也能由 join 后的归集读取。
+            pending->result = executionResult;
+            if (executionResult.ok)
             {
-                return;
+                // 把原有姿态核验留在同一在途生命周期，归集/析构不再调用外部代码。
+                pending->posture = disable_dse::queryPosture();
             }
-            QMetaObject::invokeMethod(qApp, [guard, result, desiredValue,
-                                              strategy, isRestore]()
+            QMetaObject::invokeMethod(completionReceiver, [guard, pending, lifetime,
+                                              desiredValue, isRestore]()
             {
-                if (guard == nullptr)
+                // 析构门先于 QObject/QPointer 失效，拒绝已排队回调重入半析构对象。
+                if (!lifetime->load(std::memory_order_acquire) || guard == nullptr
+                    || guard->m_pendingKsecApply != pending)
                 {
                     return;
                 }
-                guard->setBusy(false);
+                // 先 join 并归集恢复路径，控件更新和姿态查询都不能抢在结果之前。
+                guard->drainPendingKsecApply(false);
+                const auto& result = pending->result;
 
                 for (const QString& line : result.traceLines)
                 {
@@ -176,6 +232,7 @@ namespace ks::misc
 
                 if (!result.ok)
                 {
+                    guard->setBusy(false);
                     guard->appendTrace(ks::i18n::text(
                         QStringLiteral("dse.trace.ksec.apply_failed"),
                         QStringLiteral("KSecDD 操作失败：%1"))
@@ -192,7 +249,7 @@ namespace ks::misc
                 }
 
                 // IOCTL 报告成功——刷新姿态验证实际效果。
-                const auto postureAfter = disable_dse::queryPosture();
+                const auto& postureAfter = pending->posture;
                 guard->m_posture = postureAfter;
 
                 // 查询姿态失败（source==None）时不可靠——默认值会
@@ -245,10 +302,7 @@ namespace ks::misc
                 {
                     if (effectVerified)
                     {
-                        // 记录本次是通过 KSecDD 路径关闭的，
-                        // 析构时需通过同路径恢复。
-                        guard->m_usedKsecPath = true;
-                        guard->m_usedKsecStrategy = strategy;
+                        // 效果确认只更新显示，不再决定是否保留恢复责任。
                         guard->appendTrace(ks::i18n::text(
                             QStringLiteral("dse.trace.ksec.disabled"),
                             QStringLiteral("KSecDD 已关闭签名强制，原值已记录，请尽快恢复。")));
@@ -268,6 +322,7 @@ namespace ks::misc
                     }
                 }
 
+                guard->setBusy(false);
                 guard->updateStateDisplay();
                 guard->updateButtons();
 
@@ -291,7 +346,7 @@ namespace ks::misc
                                   QStringLiteral("KSecDD 已关闭驱动签名强制。请立即加载目标驱动，然后马上恢复。")),
                         false);
                 }
-            });
-        }).detach();
+            }, Qt::QueuedConnection);
+        });
     }
 }

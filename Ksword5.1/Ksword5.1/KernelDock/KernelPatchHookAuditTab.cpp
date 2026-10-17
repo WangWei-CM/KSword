@@ -9,6 +9,7 @@
 #include "../UI/PrimaryPageStyle.h"
 #include "../UI/ToolbarMetrics.h"
 #include "../UI/VisibleTableWidget.h"
+#include "../UI/ThemeBinding.h"
 #include "../theme.h"
 
 #include <QAbstractItemView>
@@ -30,6 +31,7 @@
 #include <thread>
 
 using ksword::kernel_dock_internal::kernelText;
+namespace audit = ks::kernel::audit;
 
 namespace
 {
@@ -58,41 +60,7 @@ namespace
         return item;
     }
 
-    // SSDT 正常模块名前缀列表，不在此列的视为可疑。
-    const QStringList kSsdtExpectedModules = {
-        QStringLiteral("ntoskrnl"),
-        QStringLiteral("ntkrnlmp"),
-        QStringLiteral("ntkrnlpa"),
-        QStringLiteral("ntkrpamp")
-    };
 
-    // ShadowSSDT 正常模块名前缀列表。
-    const QStringList kShadowSsdtExpectedModules = {
-        QStringLiteral("win32k"),
-        QStringLiteral("win32kfull"),
-        QStringLiteral("win32kbase"),
-        QStringLiteral("cdd")
-    };
-
-    // isExpectedSsdtModule：判断模块名是否属于 SSDT 或 ShadowSSDT 的合法宿主。
-    // - 输入 name：模块名字符串；expected：期望前缀列表。
-    // - 返回：true 表示该模块在期望范围内。
-    bool isExpectedModule(const QString& name, const QStringList& expected)
-    {
-        if (name.isEmpty())
-        {
-            return true;
-        }
-        const QString lower = name.toLower();
-        for (const auto& prefix : expected)
-        {
-            if (lower.startsWith(prefix))
-            {
-                return true;
-            }
-        }
-        return false;
-    }
 }
 
 // ----------------------------------------------------------------
@@ -120,6 +88,7 @@ KernelPatchHookAuditTab::~KernelPatchHookAuditTab()
 
 void KernelPatchHookAuditTab::showEvent(QShowEvent* event)
 {
+    ks::ui::PrepareWidgetThemeBindingsForShow(this); // 首次绘制前消费本页主题绑定。
     QWidget::showEvent(event);
     if (!m_firstShown)
     {
@@ -172,17 +141,12 @@ void KernelPatchHookAuditTab::initializeUi()
     m_categoryFilterCombo = new QComboBox(this);
     ks::ui::StylePrimaryCombo(m_categoryFilterCombo);
     m_categoryFilterCombo->addItem(
-        kernelText("kernel.patch_hook_audit.filter.all_categories",
-                   QStringLiteral("全部类别")));
-    m_categoryFilterCombo->addItem(QStringLiteral("Inline Hook"));
-    m_categoryFilterCombo->addItem(QStringLiteral("IAT"));
-    m_categoryFilterCombo->addItem(QStringLiteral("EAT"));
-    m_categoryFilterCombo->addItem(QStringLiteral("SSDT"));
-    m_categoryFilterCombo->addItem(QStringLiteral("ShadowSSDT"));
-    m_categoryFilterCombo->addItem(QStringLiteral("ObjectType"));
-    m_categoryFilterCombo->addItem(
-        kernelText("kernel.patch_hook_audit.filter.integrity",
-                   QStringLiteral("驱动完整性")));
+        kernelText("kernel.patch_hook_audit.filter.all_categories", QStringLiteral("全部类别")), -1);
+    for (const auto category : {audit::Category::Inline, audit::Category::Iat, audit::Category::Eat,
+        audit::Category::Ssdt, audit::Category::ShadowSsdt, audit::Category::ObjectType, audit::Category::Integrity})
+    {
+        m_categoryFilterCombo->addItem(audit::CategoryText(category), static_cast<int>(category));
+    }
 
     // 风险等级过滤下拉框。
     m_riskFilterCombo = new QComboBox(this);
@@ -205,15 +169,11 @@ void KernelPatchHookAuditTab::initializeUi()
 
     // 汇总标签——显示各风险等级计数。
     m_summaryLabel = new QLabel(this);
-    m_summaryLabel->setStyleSheet(
-        QStringLiteral("font-weight:600;color:%1;")
-            .arg(KswordTheme::TextPrimaryHex()));
+    audit::BindAuditLabel(m_summaryLabel, false);
 
     // 状态标签——显示扫描进度或空闲提示。
     m_statusLabel = new QLabel(this);
-    m_statusLabel->setStyleSheet(
-        QStringLiteral("color:%1;font-weight:600;")
-            .arg(KswordTheme::TextSecondaryHex()));
+    audit::BindAuditLabel(m_statusLabel, true);
 
     // 将控件加入工具栏并归一化行高。
     toolbar->addWidget(m_scanButton);
@@ -221,10 +181,18 @@ void KernelPatchHookAuditTab::initializeUi()
     toolbar->addWidget(m_categoryFilterCombo);
     toolbar->addWidget(m_riskFilterCombo);
     toolbar->addWidget(m_filterEdit, 1);
-    toolbar->addWidget(m_summaryLabel);
-    toolbar->addWidget(m_statusLabel);
+
     ks::ui::NormalizeToolbarRow(toolbar);
     rootLayout->addLayout(toolbar);
+    // 状态在独立自然高度行换行，长译文不挤压工具控件或撑宽窄窗口。
+    auto* statusRow = new QHBoxLayout();
+    m_summaryLabel->setWordWrap(true);
+    m_summaryLabel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+    m_statusLabel->setWordWrap(true);
+    m_statusLabel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+    statusRow->addWidget(m_summaryLabel, 1);
+    statusRow->addWidget(m_statusLabel, 1);
+    rootLayout->addLayout(statusRow);
 
     // --- 结果表格 ---
     m_resultTable = new ks::ui::VisibleTableWidget(this);
@@ -262,6 +230,10 @@ void KernelPatchHookAuditTab::initializeUi()
         QHeaderView::ResizeToContents);
     m_resultTable->horizontalHeader()->setStretchLastSection(true);
     rootLayout->addWidget(m_resultTable, 1);
+    // 概览和地址/字节证据为互补精简列组，保留原模型与快照宿主。
+    audit::InstallColumnPresets(m_resultTable, toolbar,
+        {ColCategory, ColModule, ColTarget, ColRisk, ColDetail},
+        {ColTarget, ColAddress, ColExpected, ColCurrentBytes, ColBaselineBytes});
 
     // --- 信号连接 ---
     connect(m_scanButton, &QPushButton::clicked,
@@ -295,6 +267,8 @@ void KernelPatchHookAuditTab::startFullAudit()
     m_allEntries.clear();
     m_resultTable->setRowCount(0);
     m_summaryLabel->clear();
+    m_summaryLabel->setToolTip(QString());
+    m_statusLabel->setToolTip(QString());
 
     // 创建取消标志——后台线程持有共享所有权。
     m_cancelFlag = std::make_shared<std::atomic_bool>(false);
@@ -311,27 +285,28 @@ void KernelPatchHookAuditTab::startFullAudit()
     std::thread([safeThis, cancelFlag]()
     {
         std::vector<AuditEntry> results;
+        std::vector<audit::QueryIssue> issues; // 保留子查询失败和覆盖缺口。
 
         // 依次执行各子扫描——中途检查取消标志。
         if (!cancelFlag->load())
         {
-            scanInlineHooks(results, cancelFlag);
+            scanInlineHooks(results, cancelFlag, issues);
         }
         if (!cancelFlag->load())
         {
-            scanIatEatHooks(results, cancelFlag);
+            scanIatEatHooks(results, cancelFlag, issues);
         }
         if (!cancelFlag->load())
         {
-            scanSsdtEntries(results, cancelFlag);
+            scanSsdtEntries(results, cancelFlag, issues);
         }
         if (!cancelFlag->load())
         {
-            scanObjectTypeProcedures(results, cancelFlag);
+            scanObjectTypeProcedures(results, cancelFlag, issues);
         }
         if (!cancelFlag->load())
         {
-            scanDriverIntegrity(results, cancelFlag);
+            scanDriverIntegrity(results, cancelFlag, issues);
         }
 
         // 按风险等级排序：Critical 在前。
@@ -345,7 +320,7 @@ void KernelPatchHookAuditTab::startFullAudit()
 
         // 回到 UI 线程提交结果。
         QMetaObject::invokeMethod(qApp,
-            [safeThis, data = std::move(results), wasCancelled]()
+            [safeThis, data = std::move(results), issues = std::move(issues), wasCancelled]()
             {
                 if (safeThis == nullptr)
                 {
@@ -373,6 +348,15 @@ void KernelPatchHookAuditTab::startFullAudit()
                             QStringLiteral("扫描完成")));
                 }
 
+                // 失败/部分结果仍保留已有证据，但不能显示成全部完成。
+                if (!wasCancelled && !issues.empty())
+                {
+                    safeThis->m_statusLabel->setText(ks::i18n::sourceText(
+                        QStringLiteral("未完成：%1 个查询失败或不完整")).arg(issues.size()));
+                }
+                safeThis->m_statusLabel->setToolTip(audit::IssueText(issues));
+                safeThis->m_summaryLabel->setToolTip(issues.empty() ? QString()
+                    : ks::i18n::sourceText(QStringLiteral("当前风险统计仅包含已获取的结果")));
                 // 汇总各风险等级计数。
                 int critical = 0;
                 int warning = 0;
@@ -422,9 +406,7 @@ void KernelPatchHookAuditTab::populateTable()
     m_resultTable->setRowCount(0);
 
     // 读取过滤条件。
-    const int categoryIndex = m_categoryFilterCombo->currentIndex();
-    const QString categoryFilter =
-        (categoryIndex > 0) ? m_categoryFilterCombo->currentText() : QString();
+    const int categoryFilter = m_categoryFilterCombo->currentData().toInt(); // 稳定业务值。
     const int riskIndex = m_riskFilterCombo->currentIndex();
     const QString riskFilter =
         (riskIndex > 0) ? m_riskFilterCombo->currentText() : QString();
@@ -435,7 +417,7 @@ void KernelPatchHookAuditTab::populateTable()
     for (const auto& entry : m_allEntries)
     {
         // 类别过滤。
-        if (!categoryFilter.isEmpty() && entry.category != categoryFilter)
+        if (categoryFilter >= 0 && static_cast<int>(entry.category) != categoryFilter)
         {
             continue;
         }
@@ -455,7 +437,7 @@ void KernelPatchHookAuditTab::populateTable()
         // 通过过滤，插入行。
         m_resultTable->insertRow(row);
         m_resultTable->setItem(row, ColCategory,
-                               readOnlyItem(entry.category));
+                               readOnlyItem(audit::CategoryText(entry.category)));
         m_resultTable->setItem(row, ColModule,
                                readOnlyItem(entry.moduleName));
         m_resultTable->setItem(row, ColTarget,
@@ -475,7 +457,7 @@ void KernelPatchHookAuditTab::populateTable()
         m_resultTable->setItem(row, ColBaselineBytes,
                                readOnlyItem(entry.baselineBytes));
         m_resultTable->setItem(row, ColDetail,
-                               readOnlyItem(entry.detail));
+                               readOnlyItem(ks::i18n::sourceText(entry.detail)));
         ++row;
     }
 }
@@ -491,7 +473,8 @@ void KernelPatchHookAuditTab::populateTable()
 
 void KernelPatchHookAuditTab::scanInlineHooks(
     std::vector<AuditEntry>& out,
-    const std::shared_ptr<std::atomic_bool>& cancel)
+    const std::shared_ptr<std::atomic_bool>& cancel,
+    std::vector<audit::QueryIssue>& issues)
 {
     if (cancel->load())
     {
@@ -501,29 +484,33 @@ void KernelPatchHookAuditTab::scanInlineHooks(
     // 栈构造 DriverClient——无单例。
     const ksword::ark::DriverClient client;
     auto result = client.scanInlineHooks();
-
-    // IOCTL 失败则静默跳过。
-    if (!result.io.ok)
+    if (!audit::CheckQuery(issues, QStringLiteral("Inline Hook"), result.io.ok,
+        result.status == KSWORD_ARK_KERNEL_HOOK_STATUS_CLEAN && result.lastStatus >= 0
+            && result.entries.size() == result.returnedCount
+            && result.returnedCount >= result.totalCount, result.lastStatus, result.io.win32Error))
     {
         return;
     }
 
-    // 遍历结果，过滤出可疑条目。
+    if (std::any_of(result.entries.begin(), result.entries.end(), [](const auto& entry)
+        { return entry.status == KSWORD_ARK_KERNEL_HOOK_STATUS_READ_FAILED; }))
+    {
+        issues.push_back({QStringLiteral("Inline Hook"), QStringLiteral("查询结果不完整"), result.lastStatus, 0});
+    }
     for (const auto& e : result.entries)
     {
         if (cancel->load())
         {
             return;
         }
-        // CLEAN 和 READ_FAILED 不报。
-        if (e.status == KSWORD_ARK_KERNEL_HOOK_STATUS_CLEAN
-            || e.status == KSWORD_ARK_KERNEL_HOOK_STATUS_READ_FAILED)
+        // CLEAN 不报告；读取失败保留覆盖缺口和参考行。
+        if (e.status == KSWORD_ARK_KERNEL_HOOK_STATUS_CLEAN)
         {
             continue;
         }
 
         AuditEntry entry;
-        entry.category = QStringLiteral("Inline Hook");
+        entry.category = audit::Category::Inline;
         entry.moduleName = QString::fromStdWString(e.moduleName);
         entry.targetName = QString::fromStdString(e.functionName);
         entry.address = e.targetAddress;
@@ -555,7 +542,8 @@ void KernelPatchHookAuditTab::scanInlineHooks(
 
 void KernelPatchHookAuditTab::scanIatEatHooks(
     std::vector<AuditEntry>& out,
-    const std::shared_ptr<std::atomic_bool>& cancel)
+    const std::shared_ptr<std::atomic_bool>& cancel,
+    std::vector<audit::QueryIssue>& issues)
 {
     if (cancel->load())
     {
@@ -564,20 +552,26 @@ void KernelPatchHookAuditTab::scanIatEatHooks(
 
     const ksword::ark::DriverClient client;
     auto result = client.enumerateIatEatHooks();
-
-    if (!result.io.ok)
+    if (!audit::CheckQuery(issues, QStringLiteral("IAT/EAT"), result.io.ok,
+        result.status == KSWORD_ARK_KERNEL_HOOK_STATUS_CLEAN && result.lastStatus >= 0
+            && result.entries.size() == result.returnedCount
+            && result.returnedCount >= result.totalCount, result.lastStatus, result.io.win32Error))
     {
         return;
     }
 
+    if (std::any_of(result.entries.begin(), result.entries.end(), [](const auto& entry)
+        { return entry.status == KSWORD_ARK_KERNEL_HOOK_STATUS_READ_FAILED; }))
+    {
+        issues.push_back({QStringLiteral("IAT/EAT"), QStringLiteral("查询结果不完整"), result.lastStatus, 0});
+    }
     for (const auto& e : result.entries)
     {
         if (cancel->load())
         {
             return;
         }
-        if (e.status == KSWORD_ARK_KERNEL_HOOK_STATUS_CLEAN
-            || e.status == KSWORD_ARK_KERNEL_HOOK_STATUS_READ_FAILED)
+        if (e.status == KSWORD_ARK_KERNEL_HOOK_STATUS_CLEAN)
         {
             continue;
         }
@@ -586,8 +580,8 @@ void KernelPatchHookAuditTab::scanIatEatHooks(
         // IAT 和 EAT 分别标注类别。
         entry.category =
             (e.hookClass == KSWORD_ARK_IAT_EAT_HOOK_CLASS_EAT)
-                ? QStringLiteral("EAT")
-                : QStringLiteral("IAT");
+                ? audit::Category::Eat
+                : audit::Category::Iat;
         entry.moduleName = QString::fromStdWString(e.moduleName);
         entry.targetName = QString::fromStdString(e.functionName);
         entry.address = e.currentTarget;
@@ -619,7 +613,8 @@ void KernelPatchHookAuditTab::scanIatEatHooks(
 
 void KernelPatchHookAuditTab::scanSsdtEntries(
     std::vector<AuditEntry>& out,
-    const std::shared_ptr<std::atomic_bool>& cancel)
+    const std::shared_ptr<std::atomic_bool>& cancel,
+    std::vector<audit::QueryIssue>& issues)
 {
     if (cancel->load())
     {
@@ -627,68 +622,52 @@ void KernelPatchHookAuditTab::scanSsdtEntries(
     }
 
     const ksword::ark::DriverClient client;
-
-    // --- SSDT ---
+    for (const bool shadow : {false, true})
     {
-        auto result = client.enumerateSsdt(0UL);
-        if (result.io.ok)
+        if (cancel->load())
         {
-            for (const auto& e : result.entries)
-            {
-                if (cancel->load())
-                {
-                    return;
-                }
-                const QString modName = QString::fromStdString(e.moduleName);
-                // 属于预期内核模块则跳过。
-                if (isExpectedModule(modName, kSsdtExpectedModules))
-                {
-                    continue;
-                }
-
-                AuditEntry entry;
-                entry.category = QStringLiteral("SSDT");
-                entry.moduleName = modName;
-                entry.targetName = QString::fromStdString(e.serviceName);
-                entry.address = e.serviceRoutineAddress;
-                entry.riskLevel = QStringLiteral("Critical");
-                entry.detail = QStringLiteral("#%1").arg(e.serviceIndex);
-                out.push_back(std::move(entry));
-            }
+            return;
         }
-    }
-
-    if (cancel->load())
-    {
-        return;
-    }
-
-    // --- ShadowSSDT ---
-    {
-        auto result = client.enumerateShadowSsdt();
-        if (result.io.ok)
+        const QString stage = shadow ? QStringLiteral("ShadowSSDT") : QStringLiteral("SSDT");
+        const auto before = audit::QueryModules(); // 查询前冻结加载范围。
+        const auto result = shadow ? client.enumerateShadowSsdt() : client.enumerateSsdt(0UL);
+        const auto after = audit::QueryModules(); // 查询后排除卸载/重载后的旧范围。
+        if (!audit::CheckQuery(issues, stage, result.io.ok,
+            result.serviceTableBase != 0 && result.serviceCountFromTable != 0
+                && result.entries.size() == result.returnedCount
+                && result.returnedCount >= result.totalCount, result.io.ntStatus, result.io.win32Error))
         {
-            for (const auto& e : result.entries)
+            continue;
+        }
+        bool unknown = false; // 无法定位的服务必须保留未知状态。
+        for (const auto& source : result.entries)
+        {
+            if (cancel->load())
             {
-                if (cancel->load())
-                {
-                    return;
-                }
-                const QString modName = QString::fromStdString(e.moduleName);
-                if (isExpectedModule(modName, kShadowSsdtExpectedModules))
-                {
-                    continue;
-                }
-
-                AuditEntry entry;
-                entry.category = QStringLiteral("ShadowSSDT");
-                entry.moduleName = modName;
-                entry.targetName = QString::fromStdString(e.serviceName);
-                entry.address = e.serviceRoutineAddress;
-                entry.riskLevel = QStringLiteral("Critical");
-                entry.detail = QStringLiteral("#%1").arg(e.serviceIndex);
-                out.push_back(std::move(entry));
+                return;
             }
+            const auto owner = audit::ResolveServiceOwner(source.serviceRoutineAddress,
+                (source.flags & KSWORD_ARK_SSDT_ENTRY_FLAG_TABLE_ADDRESS_VALID) != 0,
+                shadow, before, after);
+            if (owner.ownership == audit::Ownership::Expected)
+            {
+                continue;
+            }
+            AuditEntry entry; // 导出源模块名不参与目标地址归属。
+            entry.category = shadow ? audit::Category::ShadowSsdt : audit::Category::Ssdt;
+            entry.moduleName = QString::fromStdString(owner.moduleName);
+            entry.targetName = QString::fromStdString(source.serviceName);
+            entry.address = source.serviceRoutineAddress;
+            entry.riskLevel = owner.ownership == audit::Ownership::Unknown
+                ? QStringLiteral("Info") : QStringLiteral("Critical");
+            entry.detail = owner.ownership == audit::Ownership::Unknown
+                ? QStringLiteral("未验证") : QStringLiteral("#%1").arg(source.serviceIndex);
+            unknown = unknown || owner.ownership == audit::Ownership::Unknown;
+            out.push_back(std::move(entry));
+        }
+        if (unknown || !before.available || !after.available)
+        {
+            issues.push_back({stage, QStringLiteral("模块范围不可用或已变化"), after.status, 0});
         }
     }
 }
@@ -700,7 +679,8 @@ void KernelPatchHookAuditTab::scanSsdtEntries(
 
 void KernelPatchHookAuditTab::scanObjectTypeProcedures(
     std::vector<AuditEntry>& out,
-    const std::shared_ptr<std::atomic_bool>& cancel)
+    const std::shared_ptr<std::atomic_bool>& cancel,
+    std::vector<audit::QueryIssue>& issues)
 {
     if (cancel->load())
     {
@@ -709,6 +689,20 @@ void KernelPatchHookAuditTab::scanObjectTypeProcedures(
 
     const ksword::ark::DriverClient client;
     auto result = client.enumObjectTypeProcedures();
+    if (!audit::CheckQuery(issues, QStringLiteral("ObjectType"), result.io.ok && !result.unsupported,
+        !result.truncated && !result.skippedTypes && result.lastStatus >= 0
+            && result.entries.size() == result.returnedCount
+            && result.status == KSWORD_ARK_OBJECT_TYPE_TABLE_STATUS_OK
+            && result.layoutState == KSWORD_ARK_OBJTYPE_LAYOUT_VALIDATED,
+        result.lastStatus, result.io.win32Error))
+    {
+        return;
+    }
+    if (result.layoutState != KSWORD_ARK_OBJTYPE_LAYOUT_VALIDATED)
+    {
+        return; // 未验证的结构不得据此给出确定的劫持结论。
+    }
+
 
     // 响应级状态不影响逐条判断——只要有 entries 就处理。
     for (const auto& e : result.entries)
@@ -724,7 +718,7 @@ void KernelPatchHookAuditTab::scanObjectTypeProcedures(
         }
 
         AuditEntry entry;
-        entry.category = QStringLiteral("ObjectType");
+        entry.category = audit::Category::ObjectType;
         entry.moduleName = QString::fromStdWString(e.ownerModule);
         entry.targetName = QString::fromStdWString(e.typeName);
         entry.address = e.targetAddress;
@@ -758,7 +752,8 @@ void KernelPatchHookAuditTab::scanObjectTypeProcedures(
 
 void KernelPatchHookAuditTab::scanDriverIntegrity(
     std::vector<AuditEntry>& out,
-    const std::shared_ptr<std::atomic_bool>& cancel)
+    const std::shared_ptr<std::atomic_bool>& cancel,
+    std::vector<audit::QueryIssue>& issues)
 {
     if (cancel->load())
     {
@@ -770,7 +765,11 @@ void KernelPatchHookAuditTab::scanDriverIntegrity(
     // queryDriverIntegrity 聚合 DriverObject/LDR/FastIo/CPU/IDT 证据。
     auto result = client.queryDriverIntegrity();
 
-    if (!result.io.ok || result.unsupported)
+    if (!audit::CheckQuery(issues, QStringLiteral("Driver integrity"), result.io.ok && !result.unsupported,
+        result.queryStatus == KSWORD_ARK_DRIVER_INTEGRITY_STATUS_OK && result.statusFlags == 0
+            && result.entries.size() == result.returnedCount
+            && result.returnedCount >= result.totalCount && result.lastStatus >= 0,
+        result.lastStatus, result.io.win32Error))
     {
         return;
     }
@@ -788,9 +787,7 @@ void KernelPatchHookAuditTab::scanDriverIntegrity(
         }
 
         AuditEntry entry;
-        entry.category =
-            kernelText("kernel.patch_hook_audit.filter.integrity",
-                       QStringLiteral("驱动完整性"));
+        entry.category = audit::Category::Integrity;
         entry.moduleName = QString::fromStdWString(e.ownerModule);
         entry.address = e.targetAddress;
 

@@ -5,6 +5,7 @@
 // ObjectType 方法指针和驱动完整性审计合并在一张表中按风险等级展示。
 
 #include <QWidget>
+#include "KernelServiceAuditUi.h"
 
 #include <atomic>
 #include <cstdint>
@@ -44,7 +45,7 @@ private:
     // 不同检测类型的发现被转化为统一格式在同一张表中展示。
     struct AuditEntry
     {
-        QString category;               // category：检测类别（Inline/IAT/EAT/SSDT/…）。
+        ks::kernel::audit::Category category = ks::kernel::audit::Category::Inline; // 稳定类别身份。
         QString moduleName;             // moduleName：所属或宿主模块名。
         QString targetName;             // targetName：函数名、服务号、类型名等标识。
         std::uint64_t address = 0;      // address：当前地址或跳转目标。
@@ -72,27 +73,32 @@ private:
     // scanInlineHooks：扫描 Inline Hook，可疑项追加到 out。
     static void scanInlineHooks(
         std::vector<AuditEntry>& out,
-        const std::shared_ptr<std::atomic_bool>& cancel);
+        const std::shared_ptr<std::atomic_bool>& cancel,
+        std::vector<ks::kernel::audit::QueryIssue>& issues);
 
     // scanIatEatHooks：扫描 IAT/EAT 重定向，可疑项追加到 out。
     static void scanIatEatHooks(
         std::vector<AuditEntry>& out,
-        const std::shared_ptr<std::atomic_bool>& cancel);
+        const std::shared_ptr<std::atomic_bool>& cancel,
+        std::vector<ks::kernel::audit::QueryIssue>& issues);
 
     // scanSsdtEntries：扫描 SSDT 和 ShadowSSDT，非内核模块的服务追加。
     static void scanSsdtEntries(
         std::vector<AuditEntry>& out,
-        const std::shared_ptr<std::atomic_bool>& cancel);
+        const std::shared_ptr<std::atomic_bool>& cancel,
+        std::vector<ks::kernel::audit::QueryIssue>& issues);
 
     // scanObjectTypeProcedures：扫描 ObjectType 方法指针，有风险的追加。
     static void scanObjectTypeProcedures(
         std::vector<AuditEntry>& out,
-        const std::shared_ptr<std::atomic_bool>& cancel);
+        const std::shared_ptr<std::atomic_bool>& cancel,
+        std::vector<ks::kernel::audit::QueryIssue>& issues);
 
     // scanDriverIntegrity：查询驱动/IDT 完整性证据，有风险标志的追加。
     static void scanDriverIntegrity(
         std::vector<AuditEntry>& out,
-        const std::shared_ptr<std::atomic_bool>& cancel);
+        const std::shared_ptr<std::atomic_bool>& cancel,
+        std::vector<ks::kernel::audit::QueryIssue>& issues);
 
     // hex64：格式化 64 位值为 "0x" 前缀十六进制字符串。
     static QString hex64(std::uint64_t value);

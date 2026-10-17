@@ -873,7 +873,23 @@ KswRxpfRuntimeSetHookPoint(
         goto Exit;
     }
 
-    /* Publish the hook point atomically under the writer lock. */
+    /* 活跃故障读者不持控制锁，禁止在仿真启用期间逐字段更改配置。 */
+    if (InterlockedCompareExchange(&record->EmulationEnabled, 0L, 0L) != 0L) {
+        /* 必须先显式停用并完成已有的故障处理器排空。 */
+        status = STATUS_DEVICE_BUSY;
+        /* 此拒绝不改变现有 Hook 地址、动作或目标。 */
+        goto Exit;
+    }
+    /* 控制锁阻止重新启用；等待此前观察到启用状态的无锁读者完整返回。 */
+    KeMemoryBarrier();
+    /* 停用请求即使曾超时，也不能让残留读者观察半份新配置。 */
+    status = KswRxpfDiagnosticsWaitForHandlers(5000UL);
+    /* 无法证明排空时保留所有原有字段，交由调用者稍后重试。 */
+    if (!NT_SUCCESS(status)) {
+        /* 本次没有取得修改故障可见配置的资格。 */
+        goto Exit;
+    }
+    /* 仿真关闭且旧读者排空后，控制锁独占配置直到完整提交。 */
     if (Request->hookAction == KSWORD_ARK_RXPF_HOOK_ACTION_NONE) {
         InterlockedExchange64(&record->HookAddress, 0);
         record->RedirectTarget = 0ULL;

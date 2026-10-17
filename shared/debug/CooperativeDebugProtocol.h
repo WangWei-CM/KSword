@@ -7,7 +7,7 @@
 namespace ksword::cooperative
 {
     // ProtocolVersion：当前协议版本常量。
-    constexpr std::uint32_t ProtocolVersion = 1;
+    constexpr std::uint32_t ProtocolVersion = 2;
     // ProtocolMagic：协议标识常量。
     constexpr std::uint32_t ProtocolMagic = 0x4344534b;
     // DefaultLeaseMs：默认控制租期毫秒数。
@@ -20,7 +20,9 @@ namespace ksword::cooperative
         Running = 1,
         PauseRequested = 2,
         Paused = 3,
-        Exited = 4
+        Exited = 4,
+        // Interrupted：自有 TF 遇到不能安全停驻的运行时临界区，已经撤销并恢复运行。
+        Interrupted = 5
     };
 
     // 操作采用固定长度消息；Step 和 Continue 必须带当前 stopId。

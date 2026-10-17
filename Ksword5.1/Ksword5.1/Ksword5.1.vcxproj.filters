@@ -425,6 +425,9 @@
     <ClCompile Include="KernelDock\KernelShadowComparisonTab.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="KernelDock\KernelServiceAuditUi.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="KernelDock\KernelTextIntegrityTab.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -3102,6 +3105,12 @@
     <ClInclude Include="KernelDock\KernelShadowComparisonTab.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="KernelDock\KernelServiceAuditEvidence.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="KernelDock\KernelServiceAuditUi.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="KernelDock\KernelTextIntegrityTab.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -3316,6 +3325,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="..\..\shared\driver\KswordArkHvmNoAttachIoctl.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\shared\driver\KswordArkMemoryResult.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="..\..\shared\debug\CooperativeDebugClient.h">

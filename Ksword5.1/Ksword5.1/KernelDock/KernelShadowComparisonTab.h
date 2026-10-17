@@ -5,6 +5,7 @@
 // 当前值与基线，高亮被修改或重定向的服务项。
 
 #include <QWidget>
+#include "KernelServiceAuditUi.h"
 
 #include <atomic>
 #include <cstdint>
@@ -48,7 +49,7 @@ private:
         std::uint64_t serviceRoutineAddress = 0; // serviceRoutineAddress：当前解析地址。
         std::uint64_t currentTableValue = 0;     // currentTableValue：服务表原始值。
         QString moduleName;                      // moduleName：当前落点所属模块。
-        bool isSuspicious = false;               // isSuspicious：是否偏离期望模块。
+        ks::kernel::audit::Ownership ownership = ks::kernel::audit::Ownership::Unknown; // 可核验归属。
     };
 
     // initializeUi：构建工具栏和比较结果表。

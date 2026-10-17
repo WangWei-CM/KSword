@@ -20,8 +20,12 @@
 #include "../../Framework.h"
 
 #include <QWidget>
+#include <QPointer>
 
+#include <atomic>
 #include <cstdint>
+#include <memory>
+#include <thread>
 
 class QLabel;
 class QPushButton;
@@ -49,6 +53,8 @@ namespace ks::misc
         // 语义色（Error/Warning 及其背景）在 theme.h 里没有 palette 等价物，
         // 写进 QSS 就被定死在下发那一刻的主题上，主题切换时必须重下发。
         void changeEvent(QEvent* event) override;
+        // 在途写入期间拦住明确宿主的关闭和应用 Quit，先完成恢复责任归集。
+        bool eventFilter(QObject* watched, QEvent* event) override;
 
     private:
         // initializeUi：建出风险横幅、姿态区、定位区与操作区。
@@ -75,6 +81,8 @@ namespace ks::misc
         void runKsecLocateGadget();
         // runKsecApply：通过当前选定的 KSecDD 方案写入 g_CiOptions。
         void runKsecApply(std::uint32_t desiredValue, bool isRestore);
+        // 只等待已有 worker 并归集结果；不发起写入，也不依赖 UI 排队回调。
+        void drainPendingKsecApply(bool forShutdown);
 
         // LocateOutcome：一次定位 + 读回校验的综合结果，只在线程间传值。
         struct LocateOutcome
@@ -137,6 +145,14 @@ namespace ks::misc
             disable_dse::KsecDdStrategy::LsassInjection; // m_usedKsecStrategy：执行时锁定的方案，析构恢复使用此值而非 UI 当前选项。
         bool m_valueMatched = false;           // m_valueMatched：读回值是否与系统自报值一致，false 时禁止写入。
         bool m_busy = false;                   // m_busy：后台操作进行中。
+        // 结果槽独立于 QWidget，只有 join 之后才由 UI/析构读取。
+        struct PendingKsecApply;
+        std::shared_ptr<PendingKsecApply> m_pendingKsecApply;
+        // 析构先关闭回调门，再 join；QPointer 到 QObject 基类析构才会失效。
+        std::shared_ptr<std::atomic_bool> m_ksecCallbackLifetime =
+            std::make_shared<std::atomic_bool>(true);
+        std::thread m_ksecApplyWorker; // 页面拥有唯一在途 mutation 的线程寿命。
+        QPointer<QWidget> m_ksecPrimaryCloseHost; // 只保留创建本页的主窗口宿主。
         disable_dse::KsecDdStrategy m_ksecStrategy =
             disable_dse::KsecDdStrategy::LsassInjection;
         disable_dse::KsecDdAssessment m_ksecAssessment;

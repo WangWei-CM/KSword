@@ -588,21 +588,15 @@ namespace ks::misc
                 .arg(addressHex(result.resolvedFunctionVa)));
         }
 
-        // 读回字节证据——仅在别名映射阶段真正执行并成功后字段才有意义。
-        // 跳过的阶段状态仍为初始值 0（STATUS_SUCCESS），
-        // 必须同时检查前置阶段 imageProtectStatus 才能区分"成功"和"未执行"。
-        const bool aliasOk = result.ioSuccess
-            && (result.imageProtectStatus == 0)
-            && (result.aliasMapStatus == 0);
-        if (aliasOk)
+        // 与判定文本共用后端已经证明的读取标记，不再次按零值猜测证据有效性。
+        const bool hasAnyByte = result.ioSuccess && (result.hasPreModifyByte
+            || result.hasPostWriteByte || result.hasPostRestoreByte);
+        const QString unavailable = QStringLiteral("（未读取或读取失败）");
+        if (hasAnyByte)
         {
-            const QString pre = byteHex(result.preModifyByte);
-            const QString postWrite = (result.writeTestStatus == 0)
-                ? byteHex(result.postWriteByte)
-                : QStringLiteral("（未执行）");
-            const QString postRestore = (result.restoreStatus == 0)
-                ? byteHex(result.postRestoreByte)
-                : QStringLiteral("（未执行）");
+            const QString pre = result.hasPreModifyByte ? byteHex(result.preModifyByte) : unavailable;
+            const QString postWrite = result.hasPostWriteByte ? byteHex(result.postWriteByte) : unavailable;
+            const QString postRestore = result.hasPostRestoreByte ? byteHex(result.postRestoreByte) : unavailable;
             const std::uint8_t expectedXor =
                 static_cast<std::uint8_t>(result.preModifyByte ^ 0xFFU);
             m_evidenceLabel->setText(
@@ -614,12 +608,12 @@ namespace ks::misc
                     "期望 XOR 值 = %5")
                 .arg(pre, postWrite, postRestore,
                      addressHex(result.aliasVa),
-                     byteHex(expectedXor)));
+                     result.hasPreModifyByte ? byteHex(expectedXor) : unavailable));
         }
         else if (result.ioSuccess)
         {
             m_evidenceLabel->setText(
-                QStringLiteral("字节证据不可用：实验未到达别名映射阶段"));
+                QStringLiteral("字节证据不可用：未取得有效读回"));
         }
         else
         {
@@ -634,14 +628,14 @@ namespace ks::misc
         appendTrace(ks::i18n::text(
             QStringLiteral("hvci.trace.result"),
             QStringLiteral("[结果] %1")).arg(verdict));
-        if (aliasOk)
+        if (hasAnyByte)
         {
             appendTrace(ks::i18n::text(
                 QStringLiteral("hvci.trace.byte_evidence"),
                 QStringLiteral("[字节] pre=%1  postWrite=%2  postRestore=%3"))
-                .arg(byteHex(result.preModifyByte))
-                .arg(byteHex(result.postWriteByte))
-                .arg(byteHex(result.postRestoreByte)));
+                .arg(result.hasPreModifyByte ? byteHex(result.preModifyByte) : unavailable)
+                .arg(result.hasPostWriteByte ? byteHex(result.postWriteByte) : unavailable)
+                .arg(result.hasPostRestoreByte ? byteHex(result.postRestoreByte) : unavailable));
         }
     }
 

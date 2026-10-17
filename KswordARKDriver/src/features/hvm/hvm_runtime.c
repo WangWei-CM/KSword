@@ -3660,6 +3660,10 @@ NTSTATUS KswordARKHvmNoAttachLifecycle(BOOLEAN Start, ULONG Flags)
 
     NTSTATUS status = STATUS_SUCCESS;
 
+    /* 与普通控制入口相同，独立记录延后 S0 恢复的收尾结果。 */
+
+    NTSTATUS deferredResumeStatus = STATUS_SUCCESS;
+
     /* Shadow 的启动租约遵守现有 Shadow→HVM 锁顺序。 */
 
     BOOLEAN lease = FALSE;
@@ -3845,6 +3849,29 @@ NTSTATUS KswordARKHvmNoAttachLifecycle(BOOLEAN Start, ULONG Flags)
     /* 清除普通控制面的忙标志。 */
 
     g_KswordHvm.Busy = FALSE;
+
+    /* 普通控制入口同样在 Busy 清除后取得 phase，完成在途 S0 恢复。 */
+
+    deferredResumeStatus = KswordARKHvmAcquireResidentTransition(&g_KswordHvm);
+
+    /* 不在任何其它处理器仍拥有硬件转换时提前重新开放准入。 */
+
+    if (NT_SUCCESS(deferredResumeStatus))
+    {
+        /* 复用同一 helper 恢复卸载所有权并失效睡眠前自检证据。 */
+        deferredResumeStatus = KswordARKHvmCompleteDeferredPowerResumeLocked(&g_KswordHvm);
+        /* 归还转换阶段，保留既有电源回调串行契约。 */
+        KswordARKHvmReleaseResidentTransition(&g_KswordHvm);
+    }
+
+    /* 仍在排空属于既有忙状态，其它收尾失败必须保留为本次失败。 */
+
+    if (!NT_SUCCESS(deferredResumeStatus) && deferredResumeStatus != STATUS_DEVICE_BUSY &&
+        NT_SUCCESS(status))
+    {
+        /* 不用先前的成功覆盖卸载保护或电源恢复错误。 */
+        status = deferredResumeStatus;
+    }
 
     /* 独立会话同样推进通用资源代次。 */
 

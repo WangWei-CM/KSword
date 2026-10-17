@@ -39,7 +39,7 @@ namespace ksword::cooperative
         Result query();
         // 请求目标在下一次主动检查点暂停。
         Result requestPause();
-        // 消费当前停点，真实执行一条机器指令。
+        // 消费当前停点；新 Paused 才完成真实单步，Interrupted 表示已放行且无当前现场。
         Result step(std::uint64_t stopId);
         // 消费当前停点，恢复业务执行。
         Result resume(std::uint64_t stopId);

@@ -137,10 +137,35 @@ namespace ks::misc
         initializeConnections();
         updateStateDisplay();
         updateButtons();
+        // 沿本页明确的父链固定主窗口，不枚举其它页面或顶层窗口。
+        for (QWidget* host = parentWidget(); host != nullptr; host = host->parentWidget())
+        {
+            if (host->inherits("MainWindow"))
+            {
+                m_ksecPrimaryCloseHost = host;
+                break;
+            }
+        }
+        if (qApp != nullptr)
+        {
+            // 应用过滤器先于 MainWindow::closeEvent 执行，不能让停驱抢在 worker 前面。
+            qApp->installEventFilter(this);
+            // exit() 可绕过 Quit 事件；事件循环结束前同步归集，worker 从不等待 UI。
+            connect(qApp, &QCoreApplication::aboutToQuit, this,
+                [this]() { drainPendingKsecApply(true); }, Qt::DirectConnection);
+        }
     }
 
     DisableDsePage::~DisableDsePage()
     {
+        // 先撤销排队回调，再等待；避免归集或既有恢复期间的嵌套事件重入半析构页面。
+        m_ksecCallbackLifetime->store(false, std::memory_order_release);
+        if (qApp != nullptr)
+        {
+            qApp->removeEventFilter(this);
+        }
+        // join 不泵消息且 worker 不等待 UI，完成后才进入既有恢复路径。
+        drainPendingKsecApply(true);
         // 用户可能加载完驱动就直接关了程序。g_CiOptions 停在被改过的状态会被
         // PatchGuard 巡检判定为内核数据被篡改，因此这里做最后一次同步写回。
         if (!m_hasSavedOriginal || !m_location.ok)
@@ -1081,6 +1106,26 @@ namespace ks::misc
         m_resultLabel->setStyleSheet(
             QStringLiteral("color:%1;")
                 .arg(isError ? KswordTheme::ErrorHex() : KswordTheme::SuccessHex()));
+    }
+
+    bool DisableDsePage::eventFilter(QObject* watched, QEvent* event)
+    {
+        // 普通空闲页面不承担全局事件处理成本，也不改变其它窗口行为。
+        if (!m_pendingKsecApply || event == nullptr)
+        {
+            return QWidget::eventFilter(watched, event);
+        }
+        const bool applicationQuit = watched == qApp && event->type() == QEvent::Quit;
+        // 同时覆盖本页、当前浮动宿主和构造时固定的主窗口，停驱前直接拒绝关闭。
+        const bool closingHost = (watched == this || watched == window()
+            || watched == m_ksecPrimaryCloseHost.data())
+            && (event->type() == QEvent::Close || event->type() == QEvent::DeferredDelete);
+        if (applicationQuit || closingHost)
+        {
+            event->ignore();
+            return true;
+        }
+        return QWidget::eventFilter(watched, event);
     }
 
     void DisableDsePage::setBusy(const bool busy)

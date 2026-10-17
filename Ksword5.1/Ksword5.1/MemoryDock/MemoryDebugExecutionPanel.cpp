@@ -585,6 +585,7 @@ namespace ks::ui
         stopped_ = result.state == State::Paused;
         status_->setText(stopped_ ? T("协作线程已停止；可执行真实单步或继续。其它线程继续运行。")
             : result.state == State::PauseRequested ? T("已请求暂停，等待目标的下一个主动检查点。")
+            : result.state == State::Interrupted ? T("协作单步进入组件临界区，已中断并恢复运行；未报告单步完成。可重新请求暂停。")
             : connected_ ? T("协作目标正在运行；尚无当前停止现场。") : T("协作目标已退出或组件不可用。"));
         if (!stopped_)
         {

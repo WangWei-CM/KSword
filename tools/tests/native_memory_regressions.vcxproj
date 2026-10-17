@@ -30,6 +30,8 @@
     <TargetName Condition="'$(Fixture)' == 'Target'">issue216_r3_target</TargetName>
     <TargetName Condition="'$(Fixture)' == 'Codec'">code_editor_file_decode_tests</TargetName>
     <TargetName Condition="'$(Fixture)' == 'Threads'">memory_debug_thread_session_tests</TargetName>
+    <TargetName Condition="'$(Fixture)' == 'ProtectionResults'">memory_result_reporting_tests</TargetName>
+    <TargetName Condition="'$(Fixture)' == 'AuditEvidence'">kernel_service_audit_evidence_tests</TargetName>
     <CLToolPath>$(VCToolsInstallDir)bin\Hostx64\x64\</CLToolPath>
     <LinkToolPath>$(VCToolsInstallDir)bin\Hostx64\x64\</LinkToolPath>
   </PropertyGroup>
@@ -61,6 +63,12 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClCompile Include="kernel_service_audit_evidence_tests.cpp">
+      <ExcludedFromBuild Condition="'$(Fixture)' != 'AuditEvidence'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="memory_result_reporting_tests.cpp">
+      <ExcludedFromBuild Condition="'$(Fixture)' != 'ProtectionResults'">true</ExcludedFromBuild>
+    </ClCompile>
     <ClCompile Include="memory_debug_thread_session_tests.cpp">
       <ExcludedFromBuild Condition="'$(Fixture)' != 'Threads'">true</ExcludedFromBuild>
     </ClCompile>
@@ -85,7 +93,7 @@
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <Target Name="ValidateNativeRegressionInputs" BeforeTargets="PrepareForBuild">
-    <Error Condition="'$(Fixture)' != 'Catalog' and '$(Fixture)' != 'Target' and '$(Fixture)' != 'Codec' and '$(Fixture)' != 'Threads'" Text="Fixture must be Catalog, Target, Codec, or Threads." />
+    <Error Condition="'$(Fixture)' != 'Catalog' and '$(Fixture)' != 'Target' and '$(Fixture)' != 'Codec' and '$(Fixture)' != 'Threads' and '$(Fixture)' != 'ProtectionResults' and '$(Fixture)' != 'AuditEvidence'" Text="Fixture must be Catalog, Target, Codec, Threads, ProtectionResults, or AuditEvidence." />
     <Error Condition="!Exists('$(OutDir)')" Text="The existing repository output directory is required." />
     <Error Condition="!Exists('$(CLToolPath)cl.exe') or !Exists('$(LinkToolPath)link.exe')" Text="HostX64 MSVC is required." />
     <Error Condition="'$(Fixture)' == 'Codec' and !Exists('$(KSWORD_QT_DIR)\lib\Qt6Core.lib')" Text="KSWORD_QT_DIR must identify an MSVC Qt SDK." />

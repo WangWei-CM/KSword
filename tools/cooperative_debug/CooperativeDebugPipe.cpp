@@ -289,7 +289,7 @@ namespace ksword::cooperative::runtime::detail
         // security：创建端点使用的安全属性。
         SECURITY_ATTRIBUTES security{sizeof(security), descriptor, FALSE};
         wchar_t endpoint[160]{};
-        swprintf_s(endpoint, L"\\\\.\\pipe\\KSword.CooperativeDebug.v1.%lu.%llx", instance.pid,
+        swprintf_s(endpoint, L"\\\\.\\pipe\\KSword.CooperativeDebug.v2.%lu.%llx", instance.pid,
                    instance.creation);
         instance.pipe = CreateNamedPipeW(
             endpoint, PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED | FILE_FLAG_FIRST_PIPE_INSTANCE,

@@ -7,6 +7,7 @@
 #define NOMINMAX
 #endif
 #include <atomic>
+#include <cstring>
 #include <mutex>
 #include <sstream>
 #include <windows.h>
@@ -126,7 +127,7 @@ namespace ksword::cooperative
     {
         // text：端点名称格式化缓冲。
         std::wostringstream text;
-        text << L"\\\\.\\pipe\\KSword.CooperativeDebug.v1." << pid << L'.' << std::hex << creationTime100ns;
+        text << L"\\\\.\\pipe\\KSword.CooperativeDebug.v2." << pid << L'.' << std::hex << creationTime100ns;
         return text.str();
     }
 
@@ -243,6 +244,8 @@ namespace ksword::cooperative
         if (WaitForSingleObject(impl_->cancel, 0) == WAIT_OBJECT_0 ||
             impl_->cancellationGeneration.load() != impl_->connectionGeneration)
             error = ERROR_OPERATION_ABORTED;
+        // 非暂停状态必须没有现场，尤其 Interrupted 不能夹带可消费的旧寄存器。
+        const RegisterSnapshot emptySnapshot{};
         if (error == ERROR_SUCCESS &&
             (response.magic != ProtocolMagic || response.version != ProtocolVersion ||
              response.size != sizeof(response) || response.requestId != request.requestId ||
@@ -251,7 +254,9 @@ namespace ksword::cooperative
              (response.state == State::Paused &&
               (response.stopId == 0 || response.snapshot.threadId == 0 || response.snapshot.rip == 0)) ||
              (response.state != State::Paused && response.stopId != 0) ||
-             static_cast<std::uint32_t>(response.state) > static_cast<std::uint32_t>(State::Exited) ||
+             (response.state != State::Paused &&
+              std::memcmp(&response.snapshot, &emptySnapshot, sizeof(emptySnapshot)) != 0) ||
+             static_cast<std::uint32_t>(response.state) > static_cast<std::uint32_t>(State::Interrupted) ||
              (operation != Operation::Open &&
               (response.tokenLow != impl_->tokenLow || response.tokenHigh != impl_->tokenHigh)) ||
              (operation == Operation::Open && response.errorWin32 == 0 &&
@@ -274,8 +279,10 @@ namespace ksword::cooperative
         result.errorWin32 = response.errorWin32;
         result.stopId = response.state == State::Paused ? response.stopId : 0;
         result.snapshot = response.state == State::Paused ? response.snapshot : RegisterSnapshot{};
-        result.detail =
-            response.errorWin32 ? "Cooperative command rejected" : "Cooperative command acknowledged";
+        result.detail = response.errorWin32 ? "Cooperative command rejected"
+                         : response.state == State::Interrupted
+                             ? "Single-step interrupted by runtime critical section; owned TF cleared and target running"
+                             : "Cooperative command acknowledged";
         return result;
     }
 

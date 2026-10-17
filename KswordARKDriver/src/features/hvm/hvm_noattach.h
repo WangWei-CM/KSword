@@ -90,6 +90,8 @@ NTSTATUS KswordARKHvmNoAttachControl(const KSWORD_ARK_HVM_NOATTACH_REQUEST *Requ
 NTSTATUS KswordARKHvmNoAttachLifecycle(BOOLEAN Start, ULONG Flags);
 /* 常驻插入前构建 MBEC 根表；所有页面纳入运行时台账。 */
 NTSTATUS KswordARKHvmNoAttachBuildRootsLocked(KSW_HVM_RUNTIME *Runtime);
+/* 每个处理器首次进入前失效两个专用根；任何失败都拒绝 VM-entry。 */
+NTSTATUS KswordARKHvmNoAttachInvalidateRootsForEntry(KSW_HVM_RUNTIME *Runtime);
 /* 常驻处理器数量归零后才撤销根表指针。 */
 VOID KswordARKHvmNoAttachResetRootsLocked(KSW_HVM_RUNTIME *Runtime);
 /* 仅处理本方会话的模式门禁和 MTF 退出。 */

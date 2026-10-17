@@ -1188,8 +1188,8 @@ KswMemScanForMmChangeImageProtection(
 
     *FoundAddress = NULL;
 
-    /* 通过任意已知内核导出函数定位 ntoskrnl 基址。 */
-    RtlPcToFileHeader((PVOID)(ULONG_PTR)&ExAllocatePool2, &kernelBase);
+    /* 使用既有最低系统也提供的导出定位内核，避免硬导入 ExAllocatePool2。 */
+    RtlPcToFileHeader((PVOID)(ULONG_PTR)&MmGetSystemRoutineAddress, &kernelBase);
     if (kernelBase == NULL) {
         return STATUS_UNSUCCESSFUL;
     }

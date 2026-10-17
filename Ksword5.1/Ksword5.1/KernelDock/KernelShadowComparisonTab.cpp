@@ -10,6 +10,8 @@
 #include "../UI/PrimaryPageStyle.h"
 #include "../UI/ToolbarMetrics.h"
 #include "../UI/VisibleTableWidget.h"
+#include "../UI/ThemeBinding.h"
+#include "../UI/TablePresentation.h"
 #include "../theme.h"
 
 #include <QAbstractItemView>
@@ -29,8 +31,10 @@
 #include <QVBoxLayout>
 
 #include <thread>
+#include <algorithm>
 
 using ksword::kernel_dock_internal::kernelText;
+namespace audit = ks::kernel::audit;
 
 namespace
 {
@@ -61,42 +65,7 @@ namespace
         TargetShadowSsdt = 1   // 影子系统服务描述符表。
     };
 
-    // SSDT 正常模块名前缀列表。
-    const QStringList kSsdtExpectedModules = {
-        QStringLiteral("ntoskrnl"),
-        QStringLiteral("ntkrnlmp"),
-        QStringLiteral("ntkrnlpa"),
-        QStringLiteral("ntkrpamp")
-    };
 
-    // ShadowSSDT 正常模块名前缀列表。
-    const QStringList kShadowSsdtExpectedModules = {
-        QStringLiteral("win32k"),
-        QStringLiteral("win32kfull"),
-        QStringLiteral("win32kbase"),
-        QStringLiteral("cdd")
-    };
-
-    // isSuspiciousModule：判断模块名是否偏离期望列表。
-    // - 输入 name：模块名；expected：期望前缀列表。
-    // - 返回 true 表示该模块不在期望范围内（可疑）。
-    bool isSuspiciousModule(const QString& name, const QStringList& expected)
-    {
-        // 空名字视为未解析，不算可疑。
-        if (name.isEmpty())
-        {
-            return false;
-        }
-        const QString lower = name.toLower();
-        for (const auto& prefix : expected)
-        {
-            if (lower.startsWith(prefix))
-            {
-                return false;
-            }
-        }
-        return true;
-    }
 }
 
 // ----------------------------------------------------------------
@@ -124,6 +93,7 @@ KernelShadowComparisonTab::~KernelShadowComparisonTab()
 
 void KernelShadowComparisonTab::showEvent(QShowEvent* event)
 {
+    ks::ui::PrepareWidgetThemeBindingsForShow(this); // 首帧不沿用尚未消费的旧主题。
     QWidget::showEvent(event);
     if (!m_firstShown)
     {
@@ -180,14 +150,10 @@ void KernelShadowComparisonTab::initializeUi()
 
     // 只看可疑条目复选框。
     m_suspiciousOnlyCheck = new QCheckBox(
-        kernelText(
-            "kernel.shadow_comparison.suspicious_only",
-            QStringLiteral("只看可疑")),
+        ks::i18n::sourceText(QStringLiteral("只看可疑或未验证")),
         this);
     m_suspiciousOnlyCheck->setToolTip(
-        kernelText(
-            "kernel.shadow_comparison.suspicious_only.tooltip",
-            QStringLiteral("勾选后隐藏所属模块正常的服务，只显示偏离期望的条目")));
+        ks::i18n::sourceText(QStringLiteral("勾选后隐藏已验证正常的服务，保留可疑和未验证条目")));
 
     // 文本过滤输入框。
     m_filterEdit = new QLineEdit(this);
@@ -200,15 +166,11 @@ void KernelShadowComparisonTab::initializeUi()
 
     // 汇总标签。
     m_summaryLabel = new QLabel(this);
-    m_summaryLabel->setStyleSheet(
-        QStringLiteral("font-weight:600;color:%1;")
-            .arg(KswordTheme::TextPrimaryHex()));
+    audit::BindAuditLabel(m_summaryLabel, false);
 
     // 状态标签。
     m_statusLabel = new QLabel(this);
-    m_statusLabel->setStyleSheet(
-        QStringLiteral("color:%1;font-weight:600;")
-            .arg(KswordTheme::TextSecondaryHex()));
+    audit::BindAuditLabel(m_statusLabel, true);
 
     // 将控件加入工具栏并归一化行高。
     toolbar->addWidget(m_targetCombo);
@@ -216,10 +178,18 @@ void KernelShadowComparisonTab::initializeUi()
     toolbar->addWidget(m_cancelButton);
     toolbar->addWidget(m_suspiciousOnlyCheck);
     toolbar->addWidget(m_filterEdit, 1);
-    toolbar->addWidget(m_summaryLabel);
-    toolbar->addWidget(m_statusLabel);
+
     ks::ui::NormalizeToolbarRow(toolbar);
     rootLayout->addLayout(toolbar);
+    // 状态在独立自然高度行换行，长译文不挤压工具控件或撑宽窄窗口。
+    auto* statusRow = new QHBoxLayout();
+    m_summaryLabel->setWordWrap(true);
+    m_summaryLabel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+    m_statusLabel->setWordWrap(true);
+    m_statusLabel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+    statusRow->addWidget(m_summaryLabel, 1);
+    statusRow->addWidget(m_statusLabel, 1);
+    rootLayout->addLayout(statusRow);
 
     // --- 结果表格 ---
     m_resultTable = new ks::ui::VisibleTableWidget(this);
@@ -251,6 +221,29 @@ void KernelShadowComparisonTab::initializeUi()
         QHeaderView::ResizeToContents);
     m_resultTable->horizontalHeader()->setStretchLastSection(true);
     rootLayout->addWidget(m_resultTable, 1);
+    audit::InstallColumnPresets(m_resultTable, toolbar,
+        {ColIndex, ColServiceName, ColModule, ColStatus},
+        {ColServiceName, ColAddress, ColTableValue, ColStatus});
+    // 换肤仅更新现有状态文字颜色，不触发服务枚举或模型重建。
+    const QPointer<QTableWidget> themedTable(m_resultTable);
+    ks::ui::BindWidgetTheme(m_resultTable, [themedTable]()
+    {
+        if (!themedTable)
+        {
+            return;
+        }
+        ks::ui::ApplyTablePresentation(themedTable);
+        for (int row = 0; row < themedTable->rowCount(); ++row)
+        {
+            auto* item = themedTable->item(row, ColStatus);
+            if (item != nullptr)
+            {
+                const auto ownership = static_cast<audit::Ownership>(item->data(Qt::UserRole).toInt());
+                item->setForeground(ownership == audit::Ownership::Unexpected
+                    ? QBrush(KswordTheme::ErrorColor()) : QBrush(KswordTheme::TextPrimaryColor()));
+            }
+        }
+    });
 
     // --- 信号连接 ---
     connect(m_scanButton, &QPushButton::clicked,
@@ -275,11 +268,14 @@ void KernelShadowComparisonTab::startComparison()
         return;
     }
     m_scanning = true;
+    m_targetCombo->setEnabled(false);
     m_scanButton->setEnabled(false);
     m_cancelButton->setEnabled(true);
     m_entries.clear();
     m_resultTable->setRowCount(0);
     m_summaryLabel->clear();
+    m_summaryLabel->setToolTip(QString());
+    m_statusLabel->setToolTip(QString());
 
     m_cancelFlag = std::make_shared<std::atomic_bool>(false);
 
@@ -296,22 +292,26 @@ void KernelShadowComparisonTab::startComparison()
     std::thread([safeThis, cancelFlag, target]()
     {
         std::vector<CompareEntry> results;
+        std::vector<audit::QueryIssue> issues; // 保留传输失败和未知覆盖原因。
 
         // 栈构造 DriverClient。
         const ksword::ark::DriverClient client;
 
         // 根据目标选择调用 SSDT 或 ShadowSSDT。
         const bool isShadow = (target == TargetShadowSsdt);
-        const auto& expectedModules = isShadow
-            ? kShadowSsdtExpectedModules
-            : kSsdtExpectedModules;
+        const QString stage = isShadow ? QStringLiteral("ShadowSSDT") : QStringLiteral("SSDT");
+        const auto before = audit::QueryModules(); // 不信任服务行的导出源模块名。
 
         // 发起 IOCTL。
         auto result = isShadow
             ? client.enumerateShadowSsdt()
             : client.enumerateSsdt(0UL);
 
-        if (result.io.ok)
+        const auto after = audit::QueryModules(); // 同一模块前后身份一致才允许判断正常。
+        if (audit::CheckQuery(issues, stage, result.io.ok,
+            result.serviceTableBase != 0 && result.serviceCountFromTable != 0
+                && result.entries.size() == result.returnedCount
+                && result.returnedCount >= result.totalCount, result.io.ntStatus, result.io.win32Error))
         {
             // 遍历所有服务表条目。
             for (const auto& e : result.entries)
@@ -326,20 +326,26 @@ void KernelShadowComparisonTab::startComparison()
                 entry.serviceName = QString::fromStdString(e.serviceName);
                 entry.serviceRoutineAddress = e.serviceRoutineAddress;
                 entry.currentTableValue = e.currentTableValue;
-                entry.moduleName = QString::fromStdString(e.moduleName);
-
-                // 判断是否偏离期望模块。
-                entry.isSuspicious = isSuspiciousModule(
-                    entry.moduleName, expectedModules);
+                const auto owner = audit::ResolveServiceOwner(e.serviceRoutineAddress,
+                    (e.flags & KSWORD_ARK_SSDT_ENTRY_FLAG_TABLE_ADDRESS_VALID) != 0,
+                    isShadow, before, after);
+                entry.moduleName = QString::fromStdString(owner.moduleName);
+                entry.ownership = owner.ownership;
                 results.push_back(std::move(entry));
             }
         }
 
+        if (!before.available || !after.available
+            || std::any_of(results.begin(), results.end(), [](const CompareEntry& entry)
+                { return entry.ownership == audit::Ownership::Unknown; }))
+        {
+            issues.push_back({stage, QStringLiteral("模块范围不可用或已变化"), after.status, 0});
+        }
         const bool wasCancelled = cancelFlag->load();
 
         // 回到 UI 线程提交结果。
         QMetaObject::invokeMethod(qApp,
-            [safeThis, data = std::move(results), wasCancelled]()
+            [safeThis, data = std::move(results), issues = std::move(issues), wasCancelled]()
             {
                 if (safeThis == nullptr)
                 {
@@ -347,6 +353,7 @@ void KernelShadowComparisonTab::startComparison()
                 }
                 safeThis->m_entries = std::move(data);
                 safeThis->m_scanning = false;
+                safeThis->m_targetCombo->setEnabled(true);
                 safeThis->m_scanButton->setEnabled(true);
                 safeThis->m_cancelButton->setEnabled(false);
                 safeThis->populateTable();
@@ -367,22 +374,33 @@ void KernelShadowComparisonTab::startComparison()
                             QStringLiteral("比较完成")));
                 }
 
-                // 统计可疑条目数。
+                if (!wasCancelled && !issues.empty())
+                {
+                    safeThis->m_statusLabel->setText(ks::i18n::sourceText(
+                        QStringLiteral("未完成：%1 个查询失败或不完整")).arg(issues.size()));
+                }
+                safeThis->m_statusLabel->setToolTip(audit::IssueText(issues));
+                // 未验证单独计数，零可疑不代表全部正常。
                 int suspicious = 0;
+                int unknown = 0;
                 for (const auto& e : safeThis->m_entries)
                 {
-                    if (e.isSuspicious)
+                    if (e.ownership == audit::Ownership::Unexpected)
                     {
                         ++suspicious;
+                    }
+                    if (e.ownership == audit::Ownership::Unknown)
+                    {
+                        ++unknown;
                     }
                 }
                 const int total =
                     static_cast<int>(safeThis->m_entries.size());
                 safeThis->m_summaryLabel->setText(
-                    kernelText(
-                        "kernel.shadow_comparison.summary",
-                        QStringLiteral("共 %1 项，可疑 %2 项"))
-                        .arg(total).arg(suspicious));
+                    ks::i18n::sourceText(QStringLiteral("共 %1 项，可疑 %2 项，未验证 %3 项"))
+                        .arg(total).arg(suspicious).arg(unknown));
+                safeThis->m_summaryLabel->setToolTip(issues.empty() ? QString()
+                    : ks::i18n::sourceText(QStringLiteral("当前风险统计仅包含已获取的结果")));
             });
     }).detach();
 }
@@ -414,7 +432,7 @@ void KernelShadowComparisonTab::populateTable()
     for (const auto& entry : m_entries)
     {
         // 只看可疑——跳过正常条目。
-        if (suspiciousOnly && !entry.isSuspicious)
+        if (suspiciousOnly && entry.ownership == audit::Ownership::Expected)
         {
             continue;
         }
@@ -440,15 +458,14 @@ void KernelShadowComparisonTab::populateTable()
             readOnlyItem(entry.moduleName));
 
         // 状态列——可疑条目标红。
-        const QString statusText = entry.isSuspicious
-            ? kernelText("kernel.shadow_comparison.status.suspicious",
-                         QStringLiteral("可疑"))
-            : kernelText("kernel.shadow_comparison.status.normal",
-                         QStringLiteral("正常"));
+        const QString statusText = entry.ownership == audit::Ownership::Unknown
+            ? ks::i18n::sourceText(QStringLiteral("未验证"))
+            : entry.ownership == audit::Ownership::Unexpected
+                ? kernelText("kernel.shadow_comparison.status.suspicious", QStringLiteral("可疑"))
+                : kernelText("kernel.shadow_comparison.status.normal", QStringLiteral("正常"));
         auto* statusItem = readOnlyItem(statusText);
-
-        // 可疑行文字颜色标红以便快速识别。
-        if (entry.isSuspicious)
+        statusItem->setData(Qt::UserRole, static_cast<int>(entry.ownership)); // 换肤使用稳定状态。
+        if (entry.ownership == audit::Ownership::Unexpected)
         {
             statusItem->setForeground(KswordTheme::ErrorColor());
         }
