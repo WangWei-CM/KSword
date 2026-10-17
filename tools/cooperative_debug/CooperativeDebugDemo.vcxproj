@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <ProjectGuid>{7606C438-297B-4B1B-87FC-015F31E39D41}</ProjectGuid>
+    <Keyword>Win32Proj</Keyword>
+    <RootNamespace>CooperativeDebugDemo</RootNamespace>
+    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <PlatformToolset>v143</PlatformToolset>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <Import Project="CooperativeDebug.Common.props" />
+  <ItemGroup>
+    <ClCompile Include="CooperativeDebugDemo.cpp" />
+    <ClInclude Include="CooperativeDebugRuntime.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="CooperativeDebugRuntime.vcxproj">
+      <Project>{1B89B13F-3307-423B-88D7-818E446CD0C8}</Project>
+    </ProjectReference>
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+</Project>

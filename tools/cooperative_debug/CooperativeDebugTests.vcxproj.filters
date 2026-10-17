@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <ClCompile Include="CooperativeDebugTests.cpp" />
+    <ClCompile Include="..\..\shared\debug\CooperativeDebugClient.cpp" />
+    <ClInclude Include="CooperativeDebugRuntime.h" />
+    <ClInclude Include="..\..\shared\debug\CooperativeDebugClient.h" />
+    <ClInclude Include="..\..\shared\debug\CooperativeDebugProtocol.h" />
+  </ItemGroup>
+</Project>

@@ -152,6 +152,7 @@ def main() -> None:
     (OUTPUT / "native_memory_regressions.log").write_text("HOST_TOOL_ARCHITECTURE=x64\n", encoding="utf-8")
     for fixture, executable, marker in (
         ("Catalog", "memory_debug_process_catalog_tests.exe", "CATALOG_CHECKS"),
+        ("Threads", "memory_debug_thread_session_tests.exe", "THREAD_SESSION_CHECKS"),
         ("Codec", "code_editor_file_decode_tests.exe", "FILE_DECODE_CHECKS"),
         ("Target", "issue216_r3_target.exe", "")):
         run([str(msbuild), str(PROJECT), "/t:Build", "/p:Configuration=Release", "/p:Platform=x64",

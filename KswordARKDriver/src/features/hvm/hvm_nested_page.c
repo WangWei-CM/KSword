@@ -399,6 +399,15 @@ NTSTATUS KswordARKHvmNestedPageControl(const KSWORD_ARK_HVM_NESTED_PAGE_REQUEST*
     KeEnterCriticalRegion();
     /* Serialize publication, retirement, lifecycle changes, and retries. */
     ExAcquirePushLockExclusive(&runtime->Lock);
+    /* 独占不附加会话保留全部 EPT/策略身份，查询仍可读取。 */
+    if (KswordARKHvmNoAttachOwned() && Request->operation != KSWORD_ARK_HVM_NESTED_PAGE_QUERY) {
+        /* 预约检查位于同一运行时锁内，不能与 OPEN 形成检查后写入竞态。 */
+        ExReleasePushLockExclusive(&runtime->Lock);
+        /* 此拒绝没有修改资源或通用协议台账。 */
+        KeLeaveCriticalRegion();
+        /* 电源停止后 residentCount=0 也不能接管保留资源。 */
+        return STATUS_DEVICE_BUSY;
+    }
     /* Enumerate roots under the same control serialization. */
     KswordARKHvmResidentNestedRoots(Response);
     /* Decode a request-local fault; no global fault switch remains armed. */

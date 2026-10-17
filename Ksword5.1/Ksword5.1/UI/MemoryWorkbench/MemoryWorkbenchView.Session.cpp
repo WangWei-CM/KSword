@@ -99,6 +99,13 @@ namespace ks::ui
         const bool hasUsableTarget =
             (session.scope != ksword::memwb::Scope::ProcessVirtual) || (session.pid != 0);
 
+        // 新身份尚未读取，不能沿用上一进程的退出警告或成功计数。
+        // 同一已退出目标仅换通道时保留真实退出提示；暂存区锁存不在这里清除。
+        if (memoryDebugMode_ && statusBar_ != nullptr && target_->livenessState() != LivenessState::Exited)
+        {
+            statusBar_->setReadResultText(QString(), false);
+        }
+
         if (hexPane_ != nullptr)
         {
             if (hasUsableTarget)

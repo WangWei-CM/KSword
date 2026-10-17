@@ -1,6 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup>
+    <ClCompile Include="memory_debug_thread_session_tests.cpp"><Filter>Tests</Filter></ClCompile>
+    <ClCompile Include="..\..\Ksword5.1\Ksword5.1\MemoryDock\MemoryDebugThreadSession.cpp"><Filter>Production</Filter></ClCompile>
     <Filter Include="Tests">
       <UniqueIdentifier>{0F043CC3-0509-41EF-A23B-DC27EF059A85}</UniqueIdentifier>
     </Filter>

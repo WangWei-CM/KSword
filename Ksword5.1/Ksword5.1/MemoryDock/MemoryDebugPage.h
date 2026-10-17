@@ -15,8 +15,9 @@ namespace ks::ui
 {
     class AsyncUiDispatcher;
     class MemoryWorkbenchView;
+    class MemoryDebugExecutionPanel;
 
-    // MemoryDebugPage：独立进程内存会话页面；目标持续运行，完全不建立 Windows 调试附加。
+    // MemoryDebugPage：独立内存与运行控制页面；完全不建立 Windows 调试附加。
     // 首次显示才创建工作台/枚举，构造不会访问目标；关闭只走内存改动离开守卫。
     class MemoryDebugPage final : public QWidget
     {
@@ -40,6 +41,7 @@ namespace ks::ui
         void selectProcess();
         // closeSession：用户主动关闭会话；取消离开守卫时保持全部当前状态。
         void closeSession();
+        bool releaseExecutionControl(); // 后台释放期间冻结工作台输入，防止新增未询问的暂存修改。
         // refreshModules/openModule：使用目标层已核对所有者的模块快照导航到基址。
         void refreshModules();
         void openModule();
@@ -52,6 +54,7 @@ namespace ks::ui
         QToolButton* closeButton_ = nullptr;       // 关闭当前内存会话。
         QLabel* status_ = nullptr;                 // 候选/身份失败和退出反馈。
         MemoryWorkbenchView* view_ = nullptr;      // 只属于本页的工作台会话。
+        MemoryDebugExecutionPanel* execution_ = nullptr; // 明确区分线程检查与真实协作单步。
         QTimer* livenessTimer_ = nullptr;          // 查询锚点存活，不暂停目标。
         std::shared_ptr<AsyncUiDispatcher> dispatcher_; // 页面销毁时关闭的回投门禁。
         MemoryDebugProcessCatalog catalog_;       // 当前选择器的不可变身份快照。

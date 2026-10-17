@@ -1253,6 +1253,10 @@ KswordARKHvmAllocateEptPageLocked(
     );
 
 /* Return the process-wide HVM runtime for nonblocking VM-exit telemetry. */
+/* 独占不附加会话预约期间，所有外部策略写入必须拒绝。 */
+BOOLEAN KswordARKHvmNoAttachOwned(VOID);
+/* 任一 resident 处理器离开时立即撤销当前停止，不在 root 排工作项。 */
+VOID KswordARKHvmNoAttachResidentLeaving(VOID);
 KSW_HVM_RUNTIME*
 KswordARKHvmGetRuntime(
     VOID

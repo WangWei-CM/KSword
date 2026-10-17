@@ -16,6 +16,7 @@ Environment:
 --*/
 
 #include "hvm_resident.h"
+#include "hvm_noattach.h"
 #include "hvm_backend.h"
 #include "hvm_metrics.h"
 
@@ -995,6 +996,8 @@ KswordARKHvmConfigureResidentVmcsFromAsm(
     /* Pin the same way for CR4. */
     input.Cr4PinnedMask = Context->Runtime->CrPolicyCr4PinnedMask;
     /* Request address-space switch observation only when asked. */
+    /* 只有专用独占会话启用 MBEC，普通/Shadow/EPTP 切换不改变。 */
+    input.EnableNoAttachMbec = KswordARKHvmNoAttachOwned() ? 1U : 0U;
     input.TrackCr3 = (Context->Runtime->CrPolicyFlags &
         KSWORD_ARK_HVM_CR_POLICY_FLAG_TRACK_CR3) != 0UL ? 1U : 0U;
     /* Request debug-register interception only when asked. */
@@ -1576,6 +1579,8 @@ KswordARKHvmResidentDeactivateCurrent(
     /* Preserve the current guest tables independently of VMX host state. */
     KSW_HVM_SEGMENT_SNAPSHOT guestTables = { 0 };
 
+    /* 通用失败或退出必须撤销当前停止；此入口在 root 只写原子状态。 */
+    KswordARKHvmNoAttachResidentLeaving();
     /* Reject a missing or inactive current processor context. */
     if (Context == NULL ||
         Context->Runtime == NULL ||

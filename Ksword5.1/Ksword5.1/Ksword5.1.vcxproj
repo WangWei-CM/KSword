@@ -362,6 +362,10 @@
     <ClCompile Include="MemoryDock\MemoryDock.Workbench.cpp" />
     <ClCompile Include="MemoryDock\MemoryDebugPage.cpp" />
     <ClCompile Include="MemoryDock\MemoryDebugProcessCatalog.cpp" />
+    <ClCompile Include="MemoryDock\MemoryDebugExecutionPanel.cpp" />
+    <ClCompile Include="MemoryDock\MemoryDebugThreadSession.cpp" />
+    <ClCompile Include="ArkDriverClient\ArkHvmNoAttachClient.cpp" />
+    <ClCompile Include="..\..\shared\debug\CooperativeDebugClient.cpp" />
     <ClCompile Include="MemoryDock\MemoryDock.WorkbenchEntry.cpp" />
     <ClCompile Include="MemoryDock\WorkbenchServicesMapping.cpp" />
     <ClCompile Include="MemoryDock\WorkbenchServicesAudit.cpp" />
@@ -898,6 +902,12 @@
     <ClInclude Include="ksword\file\pe_analyzer.h" />
     <ClInclude Include="MemoryDock\MemoryDebugPage.h" />
     <ClInclude Include="MemoryDock\MemoryDebugProcessCatalog.h" />
+    <ClInclude Include="MemoryDock\MemoryDebugExecutionPanel.h" />
+    <ClInclude Include="MemoryDock\MemoryDebugThreadSession.h" />
+    <ClInclude Include="ArkDriverClient\ArkHvmNoAttachClient.h" />
+    <ClInclude Include="..\..\shared\driver\KswordArkHvmNoAttachIoctl.h" />
+    <ClInclude Include="..\..\shared\debug\CooperativeDebugClient.h" />
+    <ClInclude Include="..\..\shared\debug\CooperativeDebugProtocol.h" />
     <ClInclude Include="ksword\scanner\atomic_file_patch.h" />
     <ClInclude Include="ksword\scanner\binary_scanner.h" />
     <ClInclude Include="ksword\scanner\scanner.h" />

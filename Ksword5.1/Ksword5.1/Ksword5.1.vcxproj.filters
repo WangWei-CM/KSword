@@ -623,6 +623,18 @@
     <ClCompile Include="MemoryDock\MemoryDebugProcessCatalog.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="MemoryDock\MemoryDebugExecutionPanel.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="MemoryDock\MemoryDebugThreadSession.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="ArkDriverClient\ArkHvmNoAttachClient.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\shared\debug\CooperativeDebugClient.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="MemoryDock\MemoryDock.WorkbenchEntry.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -3292,6 +3304,24 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="MemoryDock\MemoryDebugProcessCatalog.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="MemoryDock\MemoryDebugExecutionPanel.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="MemoryDock\MemoryDebugThreadSession.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="ArkDriverClient\ArkHvmNoAttachClient.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\shared\driver\KswordArkHvmNoAttachIoctl.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\shared\debug\CooperativeDebugClient.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\shared\debug\CooperativeDebugProtocol.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="ksword\scanner\atomic_file_patch.h">
