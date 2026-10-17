@@ -5,6 +5,66 @@
 
 namespace ks::winapi_monitor
 {
+    inline void appendInjectionTargetPolicy(HANDLE process, std::wstring* detail)
+    {
+        if (process == nullptr || detail == nullptr)
+        {
+            return;
+        }
+
+        PROCESS_MITIGATION_BINARY_SIGNATURE_POLICY signature{};
+        if (::GetProcessMitigationPolicy(process, ProcessSignaturePolicy, &signature, sizeof(signature)))
+        {
+            DWORD flags = 0;
+            std::memcpy(&flags, &signature, sizeof(flags));
+            *detail += L"; signaturePolicy=" + std::to_wstring(flags);
+        }
+        else
+        {
+            *detail += L"; signaturePolicyError=" + std::to_wstring(::GetLastError());
+        }
+
+        PROCESS_MITIGATION_DYNAMIC_CODE_POLICY dynamicCode{};
+        if (::GetProcessMitigationPolicy(process, ProcessDynamicCodePolicy, &dynamicCode, sizeof(dynamicCode)))
+        {
+            DWORD flags = 0;
+            std::memcpy(&flags, &dynamicCode, sizeof(flags));
+            *detail += L"; dynamicCodePolicy=" + std::to_wstring(flags);
+        }
+        else
+        {
+            *detail += L"; dynamicCodePolicyError=" + std::to_wstring(::GetLastError());
+        }
+
+        PROCESS_MITIGATION_IMAGE_LOAD_POLICY imageLoad{};
+        if (::GetProcessMitigationPolicy(process, ProcessImageLoadPolicy, &imageLoad, sizeof(imageLoad)))
+        {
+            DWORD flags = 0;
+            std::memcpy(&flags, &imageLoad, sizeof(flags));
+            *detail += L"; imageLoadPolicy=" + std::to_wstring(flags);
+        }
+        else
+        {
+            *detail += L"; imageLoadPolicyError=" + std::to_wstring(::GetLastError());
+        }
+
+        using NtQueryInformationProcessFn = LONG (NTAPI*)(HANDLE, ULONG, void*, ULONG, ULONG*);
+        const auto queryProcess = reinterpret_cast<NtQueryInformationProcessFn>(
+            ::GetProcAddress(::GetModuleHandleW(L"ntdll.dll"), "NtQueryInformationProcess"));
+        unsigned char protection = 0;
+        const LONG protectionStatus = queryProcess == nullptr
+            ? static_cast<LONG>(0xC0000002L)
+            : queryProcess(process, 61, &protection, sizeof(protection), nullptr);
+        if (protectionStatus >= 0)
+        {
+            *detail += L"; processProtection=" + std::to_wstring(static_cast<unsigned>(protection));
+        }
+        else
+        {
+            *detail += L"; processProtectionStatus=" + std::to_wstring(static_cast<unsigned long>(protectionStatus));
+        }
+    }
+
     inline std::uint64_t processCreationIdentity(HANDLE process)
     {
         FILETIME creation{}, exit{}, kernel{}, user{};
@@ -156,7 +216,7 @@ namespace ks::winapi_monitor
             : wait == WAIT_TIMEOUT ? ERROR_TIMEOUT : wait == WAIT_FAILED ? ::GetLastError() : ERROR_DLL_INIT_FAILED;
         // Timed-out remote LoadLibraryW may still read the path. Keep it until target exit.
         if (wait == WAIT_OBJECT_0) ::VirtualFreeEx(process, remote, 0, MEM_RELEASE);
-        ::CloseHandle(thread); ::CloseHandle(process);
+        ::CloseHandle(thread);
         if (!loaded)
         {
             if (error != nullptr)
@@ -169,10 +229,13 @@ namespace ks::winapi_monitor
                     *error += L"; moduleCheck=";
                     *error += std::to_wstring(moduleCheckError);
                 }
+                appendInjectionTargetPolicy(process, error);
             }
+            ::CloseHandle(process);
             ::SetLastError(failure);
             return false;
         }
+        ::CloseHandle(process);
         return true;
     }
     inline bool injectAgent(DWORD pid, const std::wstring& path, std::wstring* error)
