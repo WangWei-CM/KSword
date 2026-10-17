@@ -588,12 +588,12 @@ namespace ks::misc
                 .arg(addressHex(result.resolvedFunctionVa)));
         }
 
-        // 读回字节证据——仅在别名映射阶段成功后字段才有实际值。
-        // aliasMapStatus == 0 是 preModifyByte 和 aliasVa 有效的前提；
-        // writeTestStatus == 0 是 postWriteByte 有效的前提；
-        // restoreStatus == 0 是 postRestoreByte 有效的前提。
-        // 未到达的阶段标注"未执行"，防止初始零值冒充实测 0x00。
-        const bool aliasOk = result.ioSuccess && (result.aliasMapStatus == 0);
+        // 读回字节证据——仅在别名映射阶段真正执行并成功后字段才有意义。
+        // 跳过的阶段状态仍为初始值 0（STATUS_SUCCESS），
+        // 必须同时检查前置阶段 imageProtectStatus 才能区分"成功"和"未执行"。
+        const bool aliasOk = result.ioSuccess
+            && (result.imageProtectStatus == 0)
+            && (result.aliasMapStatus == 0);
         if (aliasOk)
         {
             const QString pre = byteHex(result.preModifyByte);
