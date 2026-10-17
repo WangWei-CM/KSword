@@ -95,5 +95,6 @@ namespace ks::misc
         std::vector<hvci_bypass::KernelModuleInfo> m_modules; // m_modules：缓存的模块列表。
         bool m_busy = false;                    // m_busy：后台操作进行中。
         bool m_firstShow = true;                // m_firstShow：首次可见标记。
+        bool m_firstModuleEnum = true;          // m_firstModuleEnum：首次枚举模块时自动选中 CI.dll，后续刷新保留用户选择。
     };
 }

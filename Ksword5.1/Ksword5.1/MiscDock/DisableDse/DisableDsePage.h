@@ -133,6 +133,8 @@ namespace ks::misc
         bool m_hasSavedOriginal = false;       // m_hasSavedOriginal：是否记录了待恢复的原值。
         bool m_originalIsInferred = false;     // m_originalIsInferred：原值是推断的，非直接读取。
         bool m_usedKsecPath = false;           // m_usedKsecPath：最后一次关闭 DSE 是否经由 KSecDD 路径。
+        disable_dse::KsecDdStrategy m_usedKsecStrategy =
+            disable_dse::KsecDdStrategy::LsassInjection; // m_usedKsecStrategy：执行时锁定的方案，析构恢复使用此值而非 UI 当前选项。
         bool m_valueMatched = false;           // m_valueMatched：读回值是否与系统自报值一致，false 时禁止写入。
         bool m_busy = false;                   // m_busy：后台操作进行中。
         disable_dse::KsecDdStrategy m_ksecStrategy =

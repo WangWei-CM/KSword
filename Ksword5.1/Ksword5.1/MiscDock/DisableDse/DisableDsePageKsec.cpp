@@ -161,7 +161,7 @@ namespace ks::misc
                 return;
             }
             QMetaObject::invokeMethod(qApp, [guard, result, desiredValue,
-                                              isRestore]()
+                                              strategy, isRestore]()
             {
                 if (guard == nullptr)
                 {
@@ -248,6 +248,7 @@ namespace ks::misc
                         // 记录本次是通过 KSecDD 路径关闭的，
                         // 析构时需通过同路径恢复。
                         guard->m_usedKsecPath = true;
+                        guard->m_usedKsecStrategy = strategy;
                         guard->appendTrace(ks::i18n::text(
                             QStringLiteral("dse.trace.ksec.disabled"),
                             QStringLiteral("KSecDD 已关闭签名强制，原值已记录，请尽快恢复。")));

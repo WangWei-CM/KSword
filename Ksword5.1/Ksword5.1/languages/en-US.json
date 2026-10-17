@@ -41363,6 +41363,8 @@
     "CI=%1  HVCI=%2  HVCI Strict=%3  安全启动=%4  测试签名=%5  来源=%6": "CI=%1  HVCI=%2  HVCI Strict=%3  Secure Boot=%4  Test Signing=%5  Source=%6",
     "IOCTL 失败：%1": "IOCTL failed: %1",
     "无读回数据": "No readback data",
+    "字节证据不可用：实验未到达别名映射阶段": "Byte evidence unavailable: experiment did not reach alias mapping stage",
+    "（未执行）": "(not executed)",
     "期望 XOR 值 = %5": "Expected XOR value = %5",
     "向 R0 发送 HVCI 绕过实验 IOCTL，完整流程包含：解析→MDL→锁页→变更保护→别名写入→恢复": "Send HVCI bypass experiment IOCTL to R0: resolve → MDL → lock pages → change protection → alias write → restore",
     "重新查询 CI/HVCI 姿态并枚举内核模块列表": "Re-query CI/HVCI posture and enumerate kernel module list",

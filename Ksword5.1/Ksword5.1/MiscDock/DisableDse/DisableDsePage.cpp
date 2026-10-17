@@ -154,9 +154,10 @@ namespace ks::misc
 
         if (m_usedKsecPath && m_gadgetLocation.ok)
         {
-            // 上次是通过 KSecDD 路径关闭的，优先走同路径恢复。
+            // 使用执行时锁定的方案恢复，而非 UI 当前选项——
+            // 防止用户仅浏览另一方案就意外切换恢复路径。
             const disable_dse::ExecuteResult ksecResult =
-                (m_ksecStrategy == disable_dse::KsecDdStrategy::LsassInjection)
+                (m_usedKsecStrategy == disable_dse::KsecDdStrategy::LsassInjection)
                     ? disable_dse::executeViaLsass(
                           m_gadgetLocation.kernelAddress,
                           m_location.kernelAddress,

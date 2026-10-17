@@ -445,9 +445,12 @@ namespace ks::misc
             }
         }
 
-        if (ciIndex >= 0)
+        // 仅首次枚举时自动选中 CI.dll；后续刷新保留用户已选模块，
+        // 避免用户手动选择其它模块并填入偏移后被重置。
+        if (ciIndex >= 0 && m_firstModuleEnum)
         {
             m_moduleCombo->setCurrentIndex(ciIndex);
+            m_firstModuleEnum = false;
         }
         appendTrace(ks::i18n::text(
             QStringLiteral("hvci.trace.module_enum_done"),
@@ -585,9 +588,21 @@ namespace ks::misc
                 .arg(addressHex(result.resolvedFunctionVa)));
         }
 
-        // 读回字节证据。
-        if (result.ioSuccess)
+        // 读回字节证据——仅在别名映射阶段成功后字段才有实际值。
+        // aliasMapStatus == 0 是 preModifyByte 和 aliasVa 有效的前提；
+        // writeTestStatus == 0 是 postWriteByte 有效的前提；
+        // restoreStatus == 0 是 postRestoreByte 有效的前提。
+        // 未到达的阶段标注"未执行"，防止初始零值冒充实测 0x00。
+        const bool aliasOk = result.ioSuccess && (result.aliasMapStatus == 0);
+        if (aliasOk)
         {
+            const QString pre = byteHex(result.preModifyByte);
+            const QString postWrite = (result.writeTestStatus == 0)
+                ? byteHex(result.postWriteByte)
+                : QStringLiteral("（未执行）");
+            const QString postRestore = (result.restoreStatus == 0)
+                ? byteHex(result.postRestoreByte)
+                : QStringLiteral("（未执行）");
             const std::uint8_t expectedXor =
                 static_cast<std::uint8_t>(result.preModifyByte ^ 0xFFU);
             m_evidenceLabel->setText(
@@ -597,11 +612,14 @@ namespace ks::misc
                     "postRestoreByte = %3（恢复 RX 后从原始 VA 读回）\n"
                     "aliasVa = %4\n"
                     "期望 XOR 值 = %5")
-                .arg(byteHex(result.preModifyByte))
-                .arg(byteHex(result.postWriteByte))
-                .arg(byteHex(result.postRestoreByte))
-                .arg(addressHex(result.aliasVa))
-                .arg(byteHex(expectedXor)));
+                .arg(pre, postWrite, postRestore,
+                     addressHex(result.aliasVa),
+                     byteHex(expectedXor)));
+        }
+        else if (result.ioSuccess)
+        {
+            m_evidenceLabel->setText(
+                QStringLiteral("字节证据不可用：实验未到达别名映射阶段"));
         }
         else
         {
@@ -616,7 +634,7 @@ namespace ks::misc
         appendTrace(ks::i18n::text(
             QStringLiteral("hvci.trace.result"),
             QStringLiteral("[结果] %1")).arg(verdict));
-        if (result.ioSuccess)
+        if (aliasOk)
         {
             appendTrace(ks::i18n::text(
                 QStringLiteral("hvci.trace.byte_evidence"),
