@@ -1,0 +1,724 @@
+
+************* Preparing the environment for Debugger Extensions Gallery repositories **************
+   ExtensionRepository : Implicit
+   UseExperimentalFeatureForNugetShare : true
+   AllowNugetExeUpdate : true
+   NonInteractiveNuget : true
+   AllowNugetMSCredentialProviderInstall : true
+   AllowParallelInitializationOfLocalRepositories : true
+
+   EnableRedirectToV8JsProvider : false
+
+   -- Configuring repositories
+      ----> Repository : LocalInstalled, Enabled: true
+      ----> Repository : UserExtensions, Enabled: true
+
+>>>>>>>>>>>>> Preparing the environment for Debugger Extensions Gallery repositories completed, duration 0.000 seconds
+
+************* Waiting for Debugger Extensions Gallery to Initialize **************
+
+>>>>>>>>>>>>> Waiting for Debugger Extensions Gallery to Initialize completed, duration 0.016 seconds
+   ----> Repository : UserExtensions, Enabled: true, Packages count: 0
+   ----> Repository : LocalInstalled, Enabled: true, Packages count: 29
+
+Microsoft (R) Windows Debugger Version 10.0.26100.6584 AMD64
+Copyright (c) Microsoft Corporation. All rights reserved.
+
+
+Loading Dump File [C:\Users\Felix\CLionProjects\KSword\artifacts\symbols\ntkrnlmp.exe\2C33C5081047000\ntkrnlmp.exe]
+
+************* Path validation summary **************
+Response                         Time (ms)     Location
+OK                                             C:\Users\Felix\CLionProjects\KSword\artifacts\symbols
+Symbol search path is: C:\Users\Felix\CLionProjects\KSword\artifacts\symbols
+Executable search path is:
+ModLoad: 00000001`40000000 00000001`41047000   C:\Users\Felix\CLionProjects\KSword\artifacts\symbols\ntkrnlmp.exe\2C33C5081047000\ntkrnlmp.exe
+ntkrnlmp!KiSystemStartup:
+00000001`40a83010 4883ec38        sub     rsp,38h
+0:000> cdb: Reading initial command 'uf ntkrnlmp!KeFlushTb; q'
+ntkrnlmp!KeFlushTb:
+00000001`4025e500 488bc4          mov     rax,rsp
+00000001`4025e503 53              push    rbx
+00000001`4025e504 55              push    rbp
+00000001`4025e505 57              push    rdi
+00000001`4025e506 4883ec60        sub     rsp,60h
+00000001`4025e50a 48897008        mov     qword ptr [rax+8],rsi
+00000001`4025e50e 8bda            mov     ebx,edx
+00000001`4025e510 33f6            xor     esi,esi
+00000001`4025e512 4c8970d0        mov     qword ptr [rax-30h],r14
+00000001`4025e516 48897020        mov     qword ptr [rax+20h],rsi
+00000001`4025e51a 8be9            mov     ebp,ecx
+00000001`4025e51c 40887018        mov     byte ptr [rax+18h],sil
+00000001`4025e520 8b054205ac00    mov     eax,dword ptr [ntkrnlmp!HvlEnlightenments (00000001`40d1ea68)]
+00000001`4025e526 a804            test    al,4
+00000001`4025e528 0f85a2010000    jne     ntkrnlmp!KeFlushTb+0x1d0 (00000001`4025e6d0)
+
+ntkrnlmp!KeFlushTb+0x2e:
+00000001`4025e52e 4038350b33ba00  cmp     byte ptr [ntkrnlmp!KiKvaShadow (00000001`40e01840)],sil
+00000001`4025e535 48c7c7ffffffff  mov     rdi,0FFFFFFFFFFFFFFFFh
+00000001`4025e53c 448d7702        lea     r14d,[rdi+2]
+00000001`4025e540 0f84f31d1e00    je      ntkrnlmp!KeFlushTb+0x1e1e39 (00000001`40440339)
+
+ntkrnlmp!KeFlushTb+0x46:
+00000001`4025e546 413bee          cmp     ebp,r14d
+00000001`4025e549 0f85c1030000    jne     ntkrnlmp!KeFlushTb+0x410 (00000001`4025e910)
+
+ntkrnlmp!KeFlushTb+0x4f:
+00000001`4025e54f 4c89642458      mov     qword ptr [rsp+58h],r12
+00000001`4025e554 450fb6c6        movzx   r8d,r14b
+00000001`4025e558 4c896c2450      mov     qword ptr [rsp+50h],r13
+00000001`4025e55d 41bd03000000    mov     r13d,3
+00000001`4025e563 413bde          cmp     ebx,r14d
+00000001`4025e566 0f84311d1e00    je      ntkrnlmp!KeFlushTb+0x1e1d9d (00000001`4044029d)
+
+ntkrnlmp!KeFlushTb+0x6c:
+00000001`4025e56c 85db            test    ebx,ebx
+00000001`4025e56e 7503            jne     ntkrnlmp!KeFlushTb+0x73 (00000001`4025e573)
+
+ntkrnlmp!KeFlushTb+0x70:
+00000001`4025e570 4532c0          xor     r8b,r8b
+
+ntkrnlmp!KeFlushTb+0x73:
+00000001`4025e573 450f20c4        mov     r12,cr8
+00000001`4025e577 b80c000000      mov     eax,0Ch
+00000001`4025e57c 440f22c0        mov     cr8,rax
+00000001`4025e580 8b051a07ac00    mov     eax,dword ptr [ntkrnlmp!KiIrqlFlags (00000001`40d1eca0)]
+00000001`4025e586 85c0            test    eax,eax
+00000001`4025e588 0f8587020000    jne     ntkrnlmp!KeFlushTb+0x315 (00000001`4025e815)
+
+ntkrnlmp!KeFlushTb+0x8e:
+00000001`4025e58e 4584c0          test    r8b,r8b
+00000001`4025e591 0f85b6030000    jne     ntkrnlmp!KeFlushTb+0x44d (00000001`4025e94d)
+
+ntkrnlmp!KeFlushTb+0x97:
+00000001`4025e597 4c897c2440      mov     qword ptr [rsp+40h],r15
+00000001`4025e59c f0093424        lock or dword ptr [rsp],esi
+00000001`4025e5a0 654c8b3c2520000000 mov   r15,qword ptr gs:[20h]
+00000001`4025e5a9 33d2            xor     edx,edx
+00000001`4025e5ab 41b800010000    mov     r8d,100h
+00000001`4025e5b1 498b4708        mov     rax,qword ptr [r15+8]
+00000001`4025e5b5 498dbfb82d0000  lea     rdi,[r15+2DB8h]
+00000001`4025e5bc 488d4f08        lea     rcx,[rdi+8]
+00000001`4025e5c0 488b98b8000000  mov     rbx,qword ptr [rax+0B8h]
+00000001`4025e5c7 48c70701002000  mov     qword ptr [rdi],200001h
+00000001`4025e5ce e8edd71c00      call    ntkrnlmp!memset (00000001`4042bdc0)
+00000001`4025e5d3 0fb75702        movzx   edx,word ptr [rdi+2]
+00000001`4025e5d7 4c8d8370010000  lea     r8,[rbx+170h]
+00000001`4025e5de 488bcf          mov     rcx,rdi
+00000001`4025e5e1 e8fa140300      call    ntkrnlmp!KiCopyAffinityEx (00000001`4028fae0)
+00000001`4025e5e6 418b4f24        mov     ecx,dword ptr [r15+24h]
+00000001`4025e5ea 488d05bf83ac00  lea     rax,[ntkrnlmp!KiProcessorIndexToNumberMappingTable (00000001`40d269b0)]
+00000001`4025e5f1 448b0488        mov     r8d,dword ptr [rax+rcx*4]
+00000001`4025e5f5 418bc8          mov     ecx,r8d
+00000001`4025e5f8 0fb707          movzx   eax,word ptr [rdi]
+00000001`4025e5fb 4183e03f        and     r8d,3Fh
+00000001`4025e5ff c1e906          shr     ecx,6
+00000001`4025e602 3bc1            cmp     eax,ecx
+00000001`4025e604 7613            jbe     ntkrnlmp!KeFlushTb+0x119 (00000001`4025e619)
+
+ntkrnlmp!KeFlushTb+0x106:
+00000001`4025e606 488d14cf        lea     rdx,[rdi+rcx*8]
+00000001`4025e60a 418bc0          mov     eax,r8d
+00000001`4025e60d 488b4a08        mov     rcx,qword ptr [rdx+8]
+00000001`4025e611 480fb3c1        btr     rcx,rax
+00000001`4025e615 48894a08        mov     qword ptr [rdx+8],rcx
+
+ntkrnlmp!KeFlushTb+0x119:
+00000001`4025e619 0fb7c6          movzx   eax,si
+00000001`4025e61c 663b37          cmp     si,word ptr [rdi]
+00000001`4025e61f 7319            jae     ntkrnlmp!KeFlushTb+0x13a (00000001`4025e63a)
+
+ntkrnlmp!KeFlushTb+0x121:
+00000001`4025e621 0fb7c8          movzx   ecx,ax
+00000001`4025e624 488b54cf08      mov     rdx,qword ptr [rdi+rcx*8+8]
+00000001`4025e629 4885d2          test    rdx,rdx
+00000001`4025e62c 0f8576020000    jne     ntkrnlmp!KeFlushTb+0x3a8 (00000001`4025e8a8)
+
+ntkrnlmp!KeFlushTb+0x132:
+00000001`4025e632 66ffc0          inc     ax
+00000001`4025e635 663b07          cmp     ax,word ptr [rdi]
+00000001`4025e638 72e7            jb      ntkrnlmp!KeFlushTb+0x121 (00000001`4025e621)
+
+ntkrnlmp!KeFlushTb+0x13a:
+00000001`4025e63a 33c9            xor     ecx,ecx
+00000001`4025e63c e8ff2e0d00      call    ntkrnlmp!KiFlushCurrentTbWorker (00000001`40331540)
+
+ntkrnlmp!KeFlushTb+0x141:
+00000001`4025e641 4c8b7c2440      mov     r15,qword ptr [rsp+40h]
+00000001`4025e646 48c7c7ffffffff  mov     rdi,0FFFFFFFFFFFFFFFFh
+
+ntkrnlmp!KeFlushTb+0x14d:
+00000001`4025e64d 8b054d06ac00    mov     eax,dword ptr [ntkrnlmp!KiIrqlFlags (00000001`40d1eca0)]
+00000001`4025e653 4c8b6c2450      mov     r13,qword ptr [rsp+50h]
+00000001`4025e658 85c0            test    eax,eax
+00000001`4025e65a 0f85701c1e00    jne     ntkrnlmp!KeFlushTb+0x1e1dd0 (00000001`404402d0)
+
+ntkrnlmp!KeFlushTb+0x160:
+00000001`4025e660 410fb6c4        movzx   eax,r12b
+00000001`4025e664 440f22c0        mov     cr8,rax
+00000001`4025e668 4c8b642458      mov     r12,qword ptr [rsp+58h]
+
+ntkrnlmp!KeFlushTb+0x16d:
+00000001`4025e66d 48c7c7ffffffff  mov     rdi,0FFFFFFFFFFFFFFFFh
+
+ntkrnlmp!KeFlushTb+0x174:
+00000001`4025e674 488bb42480000000 mov     rsi,qword ptr [rsp+80h]
+00000001`4025e67c 83fd01          cmp     ebp,1
+00000001`4025e67f 751e            jne     ntkrnlmp!KeFlushTb+0x19f (00000001`4025e69f)
+
+ntkrnlmp!KeFlushTb+0x181:
+00000001`4025e681 65488b042588010000 mov   rax,qword ptr gs:[188h]
+00000001`4025e68a 488b88b8000000  mov     rcx,qword ptr [rax+0B8h]
+00000001`4025e691 4883b9e003000000 cmp     qword ptr [rcx+3E0h],0
+00000001`4025e699 0f85c41c1e00    jne     ntkrnlmp!KeFlushTb+0x1e1e63 (00000001`40440363)
+
+ntkrnlmp!KeFlushTb+0x19f:
+00000001`4025e69f 4585f6          test    r14d,r14d
+00000001`4025e6a2 4c8b742448      mov     r14,qword ptr [rsp+48h]
+00000001`4025e6a7 0f84d4000000    je      ntkrnlmp!KeFlushTb+0x281 (00000001`4025e781)
+
+ntkrnlmp!KeFlushTb+0x1ad:
+00000001`4025e6ad 803d4ee9ab0000  cmp     byte ptr [ntkrnlmp!VmTbFlushEnabled (00000001`40d1d002)],0
+00000001`4025e6b4 0f85c11c1e00    jne     ntkrnlmp!KeFlushTb+0x1e1e7b (00000001`4044037b)
+
+ntkrnlmp!KeFlushTb+0x1ba:
+00000001`4025e6ba 833d7f94ab0000  cmp     dword ptr [ntkrnlmp!ExTbFlushActive (00000001`40d17b40)],0
+00000001`4025e6c1 0f85c61c1e00    jne     ntkrnlmp!KeFlushTb+0x1e1e8d (00000001`4044038d)
+
+ntkrnlmp!KeFlushTb+0x1c7:
+00000001`4025e6c7 4883c460        add     rsp,60h
+00000001`4025e6cb 5f              pop     rdi
+00000001`4025e6cc 5d              pop     rbp
+00000001`4025e6cd 5b              pop     rbx
+00000001`4025e6ce c3              ret
+
+ntkrnlmp!KeFlushTb+0x1d0:
+00000001`4025e6d0 a802            test    al,2
+00000001`4025e6d2 0f85e3000000    jne     ntkrnlmp!KeFlushTb+0x2bb (00000001`4025e7bb)
+
+ntkrnlmp!KeFlushTb+0x1d8:
+00000001`4025e6d8 0fbae017        bt      eax,17h
+00000001`4025e6dc 0f82021b1e00    jb      ntkrnlmp!KeFlushTb+0x1e1ce4 (00000001`404401e4)
+
+ntkrnlmp!KeFlushTb+0x1e2:
+00000001`4025e6e2 8b055803ac00    mov     eax,dword ptr [ntkrnlmp!KeNumberProcessors (00000001`40d1ea40)]
+00000001`4025e6e8 83f801          cmp     eax,1
+00000001`4025e6eb 0f843dfeffff    je      ntkrnlmp!KeFlushTb+0x2e (00000001`4025e52e)
+
+ntkrnlmp!KeFlushTb+0x1f1:
+00000001`4025e6f1 85db            test    ebx,ebx
+00000001`4025e6f3 0f85c2000000    jne     ntkrnlmp!KeFlushTb+0x2bb (00000001`4025e7bb)
+
+ntkrnlmp!KeFlushTb+0x1f9:
+00000001`4025e6f9 f0093424        lock or dword ptr [rsp],esi
+00000001`4025e6fd 440f20c7        mov     rdi,cr8
+00000001`4025e701 b80c000000      mov     eax,0Ch
+00000001`4025e706 440f22c0        mov     cr8,rax
+00000001`4025e70a 8b059005ac00    mov     eax,dword ptr [ntkrnlmp!KiIrqlFlags (00000001`40d1eca0)]
+00000001`4025e710 85c0            test    eax,eax
+00000001`4025e712 0f8545010000    jne     ntkrnlmp!KeFlushTb+0x35d (00000001`4025e85d)
+
+ntkrnlmp!KeFlushTb+0x218:
+00000001`4025e718 654c8b0c2520000000 mov   r9,qword ptr gs:[20h]
+00000001`4025e721 0fb7ce          movzx   ecx,si
+00000001`4025e724 498b4108        mov     rax,qword ptr [r9+8]
+00000001`4025e728 488b90b8000000  mov     rdx,qword ptr [rax+0B8h]
+00000001`4025e72f 663bb270010000  cmp     si,word ptr [rdx+170h]
+00000001`4025e736 7324            jae     ntkrnlmp!KeFlushTb+0x25c (00000001`4025e75c)
+
+ntkrnlmp!KeFlushTb+0x238:
+00000001`4025e738 0f1f840000000000 nop     dword ptr [rax+rax]
+
+ntkrnlmp!KeFlushTb+0x240:
+00000001`4025e740 0fb7c1          movzx   eax,cx
+00000001`4025e743 4c8b84c278010000 mov     r8,qword ptr [rdx+rax*8+178h]
+00000001`4025e74b 4d85c0          test    r8,r8
+00000001`4025e74e 753f            jne     ntkrnlmp!KeFlushTb+0x28f (00000001`4025e78f)
+
+ntkrnlmp!KeFlushTb+0x250:
+00000001`4025e750 66ffc1          inc     cx
+00000001`4025e753 663b8a70010000  cmp     cx,word ptr [rdx+170h]
+00000001`4025e75a 72e4            jb      ntkrnlmp!KeFlushTb+0x240 (00000001`4025e740)
+
+ntkrnlmp!KeFlushTb+0x25c:
+00000001`4025e75c 8bcd            mov     ecx,ebp
+00000001`4025e75e e8bd901500      call    ntkrnlmp!KiFlushCurrentTbOnly (00000001`403b7820)
+00000001`4025e763 8b053705ac00    mov     eax,dword ptr [ntkrnlmp!KiIrqlFlags (00000001`40d1eca0)]
+00000001`4025e769 85c0            test    eax,eax
+00000001`4025e76b 0f85c01a1e00    jne     ntkrnlmp!KeFlushTb+0x1e1d31 (00000001`40440231)
+
+ntkrnlmp!KeFlushTb+0x271:
+00000001`4025e771 400fb6c7        movzx   eax,dil
+00000001`4025e775 440f22c0        mov     cr8,rax
+00000001`4025e779 448bf6          mov     r14d,esi
+00000001`4025e77c e9ecfeffff      jmp     ntkrnlmp!KeFlushTb+0x16d (00000001`4025e66d)
+
+ntkrnlmp!KeFlushTb+0x281:
+00000001`4025e781 83fd04          cmp     ebp,4
+00000001`4025e784 0f8523ffffff    jne     ntkrnlmp!KeFlushTb+0x1ad (00000001`4025e6ad)
+
+ntkrnlmp!KeFlushTb+0x28a:
+00000001`4025e78a e9df1b1e00      jmp     ntkrnlmp!KeFlushTb+0x1e1e6e (00000001`4044036e)
+
+ntkrnlmp!KeFlushTb+0x28f:
+00000001`4025e78f 410fb681d0000000 movzx   eax,byte ptr [r9+0D0h]
+00000001`4025e797 663bc8          cmp     cx,ax
+00000001`4025e79a 7509            jne     ntkrnlmp!KeFlushTb+0x2a5 (00000001`4025e7a5)
+
+ntkrnlmp!KeFlushTb+0x29c:
+00000001`4025e79c 4d3b81c8000000  cmp     r8,qword ptr [r9+0C8h]
+00000001`4025e7a3 74ab            je      ntkrnlmp!KeFlushTb+0x250 (00000001`4025e750)
+
+ntkrnlmp!KeFlushTb+0x2a5:
+00000001`4025e7a5 8b05f504ac00    mov     eax,dword ptr [ntkrnlmp!KiIrqlFlags (00000001`40d1eca0)]
+00000001`4025e7ab 85c0            test    eax,eax
+00000001`4025e7ad 0f85431a1e00    jne     ntkrnlmp!KeFlushTb+0x1e1cf6 (00000001`404401f6)
+
+ntkrnlmp!KeFlushTb+0x2b3:
+00000001`4025e7b3 400fb6c7        movzx   eax,dil
+00000001`4025e7b7 440f22c0        mov     cr8,rax
+
+ntkrnlmp!KeFlushTb+0x2bb:
+00000001`4025e7bb b101            mov     cl,1
+00000001`4025e7bd 8d45ff          lea     eax,[rbp-1]
+00000001`4025e7c0 440fb6d1        movzx   r10d,cl
+00000001`4025e7c4 4c8d842490000000 lea     r8,[rsp+90h]
+00000001`4025e7cc 83f801          cmp     eax,1
+00000001`4025e7cf 488d942498000000 lea     rdx,[rsp+98h]
+00000001`4025e7d7 8bcd            mov     ecx,ebp
+00000001`4025e7d9 48c7c7ffffffff  mov     rdi,0FFFFFFFFFFFFFFFFh
+00000001`4025e7e0 440f46d6        cmovbe  r10d,esi
+00000001`4025e7e4 448bf6          mov     r14d,esi
+00000001`4025e7e7 e8e09a1600      call    ntkrnlmp!KiPrepareFlushParameters (00000001`403c82cc)
+00000001`4025e7ec 8bcb            mov     ecx,ebx
+00000001`4025e7ee e8f59d1600      call    ntkrnlmp!KiFlushAffinity (00000001`403c85e8)
+00000001`4025e7f3 440fb6842490000000 movzx r8d,byte ptr [rsp+90h]
+00000001`4025e7fc 488bd0          mov     rdx,rax
+00000001`4025e7ff 488b8c2498000000 mov     rcx,qword ptr [rsp+98h]
+00000001`4025e807 450fb6ca        movzx   r9d,r10b
+00000001`4025e80b e8c0771600      call    ntkrnlmp!KiFlushAddressSpaceTb (00000001`403c5fd0)
+00000001`4025e810 e95ffeffff      jmp     ntkrnlmp!KeFlushTb+0x174 (00000001`4025e674)
+
+ntkrnlmp!KeFlushTb+0x315:
+00000001`4025e815 4184c6          test    r14b,al
+00000001`4025e818 0f8470fdffff    je      ntkrnlmp!KeFlushTb+0x8e (00000001`4025e58e)
+
+ntkrnlmp!KeFlushTb+0x31e:
+00000001`4025e81e 4180fc0f        cmp     r12b,0Fh
+00000001`4025e822 0f8766fdffff    ja      ntkrnlmp!KeFlushTb+0x8e (00000001`4025e58e)
+
+ntkrnlmp!KeFlushTb+0x328:
+00000001`4025e828 65488b042520000000 mov   rax,qword ptr gs:[20h]
+00000001`4025e831 4c8b90b8880000  mov     r10,qword ptr [rax+88B8h]
+00000001`4025e838 458b4a14        mov     r9d,dword ptr [r10+14h]
+00000001`4025e83c 4180fc0c        cmp     r12b,0Ch
+00000001`4025e840 0f84da000000    je      ntkrnlmp!KeFlushTb+0x420 (00000001`4025e920)
+
+ntkrnlmp!KeFlushTb+0x346:
+00000001`4025e846 410fb6cc        movzx   ecx,r12b
+00000001`4025e84a 488bd7          mov     rdx,rdi
+00000001`4025e84d ffc1            inc     ecx
+00000001`4025e84f 48d3e2          shl     rdx,cl
+00000001`4025e852 81e2fc1f0000    and     edx,1FFCh
+00000001`4025e858 e9c8000000      jmp     ntkrnlmp!KeFlushTb+0x425 (00000001`4025e925)
+
+ntkrnlmp!KeFlushTb+0x35d:
+00000001`4025e85d a801            test    al,1
+00000001`4025e85f 0f84b3feffff    je      ntkrnlmp!KeFlushTb+0x218 (00000001`4025e718)
+
+ntkrnlmp!KeFlushTb+0x365:
+00000001`4025e865 4080ff0f        cmp     dil,0Fh
+00000001`4025e869 0f87a9feffff    ja      ntkrnlmp!KeFlushTb+0x218 (00000001`4025e718)
+
+ntkrnlmp!KeFlushTb+0x36f:
+00000001`4025e86f 65488b042520000000 mov   rax,qword ptr gs:[20h]
+00000001`4025e878 4c8b88b8880000  mov     r9,qword ptr [rax+88B8h]
+00000001`4025e87f 458b4114        mov     r8d,dword ptr [r9+14h]
+00000001`4025e883 4080ff0c        cmp     dil,0Ch
+00000001`4025e887 0f84af000000    je      ntkrnlmp!KeFlushTb+0x43c (00000001`4025e93c)
+
+ntkrnlmp!KeFlushTb+0x38d:
+00000001`4025e88d 400fb6cf        movzx   ecx,dil
+00000001`4025e891 48c7c2ffffffff  mov     rdx,0FFFFFFFFFFFFFFFFh
+00000001`4025e898 ffc1            inc     ecx
+00000001`4025e89a 48d3e2          shl     rdx,cl
+00000001`4025e89d 81e2fc1f0000    and     edx,1FFCh
+00000001`4025e8a3 e999000000      jmp     ntkrnlmp!KeFlushTb+0x441 (00000001`4025e941)
+
+ntkrnlmp!KeFlushTb+0x3a8:
+00000001`4025e8a8 410fb68fd0000000 movzx   ecx,byte ptr [r15+0D0h]
+00000001`4025e8b0 663bc1          cmp     ax,cx
+00000001`4025e8b3 750d            jne     ntkrnlmp!KeFlushTb+0x3c2 (00000001`4025e8c2)
+
+ntkrnlmp!KeFlushTb+0x3b5:
+00000001`4025e8b5 493b97c8000000  cmp     rdx,qword ptr [r15+0C8h]
+00000001`4025e8bc 0f8470fdffff    je      ntkrnlmp!KeFlushTb+0x132 (00000001`4025e632)
+
+ntkrnlmp!KeFlushTb+0x3c2:
+00000001`4025e8c2 4533c9          xor     r9d,r9d
+00000001`4025e8c5 4c896c2420      mov     qword ptr [rsp+20h],r13
+00000001`4025e8ca 4c8bc7          mov     r8,rdi
+00000001`4025e8cd 33d2            xor     edx,edx
+00000001`4025e8cf 498bcf          mov     rcx,r15
+00000001`4025e8d2 e8690c0300      call    ntkrnlmp!KiIpiSendRequest (00000001`4028f540)
+00000001`4025e8d7 33c9            xor     ecx,ecx
+00000001`4025e8d9 e8622c0d00      call    ntkrnlmp!KiFlushCurrentTbWorker (00000001`40331540)
+00000001`4025e8de 418b87802d0000  mov     eax,dword ptr [r15+2D80h]
+00000001`4025e8e5 85c0            test    eax,eax
+00000001`4025e8e7 0f8454fdffff    je      ntkrnlmp!KeFlushTb+0x141 (00000001`4025e641)
+
+ntkrnlmp!KeFlushTb+0x3ed:
+00000001`4025e8ed 0f1f00          nop     dword ptr [rax]
+
+ntkrnlmp!KeFlushTb+0x3f0:
+00000001`4025e8f0 ffc6            inc     esi
+00000001`4025e8f2 85358ce9ab00    test    dword ptr [ntkrnlmp!HvlLongSpinCountMask (00000001`40d1d284)],esi
+00000001`4025e8f8 0f84aa191e00    je      ntkrnlmp!KeFlushTb+0x1e1da8 (00000001`404402a8)
+
+ntkrnlmp!KeFlushTb+0x3fe:
+00000001`4025e8fe f390            pause
+
+ntkrnlmp!KeFlushTb+0x400:
+00000001`4025e900 418b87802d0000  mov     eax,dword ptr [r15+2D80h]
+00000001`4025e907 85c0            test    eax,eax
+00000001`4025e909 75e5            jne     ntkrnlmp!KeFlushTb+0x3f0 (00000001`4025e8f0)
+
+ntkrnlmp!KeFlushTb+0x40b:
+00000001`4025e90b e931fdffff      jmp     ntkrnlmp!KeFlushTb+0x141 (00000001`4025e641)
+
+ntkrnlmp!KeFlushTb+0x410:
+00000001`4025e910 85ed            test    ebp,ebp
+00000001`4025e912 751d            jne     ntkrnlmp!KeFlushTb+0x431 (00000001`4025e931)
+
+ntkrnlmp!KeFlushTb+0x414:
+00000001`4025e914 8bcb            mov     ecx,ebx
+00000001`4025e916 e8e1010500      call    ntkrnlmp!KxFlushNonGlobalTb (00000001`402aeafc)
+00000001`4025e91b e94dfdffff      jmp     ntkrnlmp!KeFlushTb+0x16d (00000001`4025e66d)
+
+ntkrnlmp!KeFlushTb+0x420:
+00000001`4025e920 ba00100000      mov     edx,1000h
+
+ntkrnlmp!KeFlushTb+0x425:
+00000001`4025e925 440bca          or      r9d,edx
+00000001`4025e928 45894a14        mov     dword ptr [r10+14h],r9d
+00000001`4025e92c e95dfcffff      jmp     ntkrnlmp!KeFlushTb+0x8e (00000001`4025e58e)
+
+ntkrnlmp!KeFlushTb+0x431:
+00000001`4025e931 83fd02          cmp     ebp,2
+00000001`4025e934 0f8515fcffff    jne     ntkrnlmp!KeFlushTb+0x4f (00000001`4025e54f)
+
+ntkrnlmp!KeFlushTb+0x43a:
+00000001`4025e93a ebd8            jmp     ntkrnlmp!KeFlushTb+0x414 (00000001`4025e914)
+
+ntkrnlmp!KeFlushTb+0x43c:
+00000001`4025e93c ba00100000      mov     edx,1000h
+
+ntkrnlmp!KeFlushTb+0x441:
+00000001`4025e941 440bc2          or      r8d,edx
+00000001`4025e944 45894114        mov     dword ptr [r9+14h],r8d
+00000001`4025e948 e9cbfdffff      jmp     ntkrnlmp!KeFlushTb+0x218 (00000001`4025e718)
+
+ntkrnlmp!KeFlushTb+0x44d:
+00000001`4025e94d 488d0d2ca7ae00  lea     rcx,[ntkrnlmp!KiTbFlushTimeStamp (00000001`40d49080)]
+00000001`4025e954 e887cb0d00      call    ntkrnlmp!KxSetTimeStampBusy (00000001`4033b4e0)
+00000001`4025e959 84c0            test    al,al
+00000001`4025e95b 0f84ecfcffff    je      ntkrnlmp!KeFlushTb+0x14d (00000001`4025e64d)
+
+ntkrnlmp!KeFlushTb+0x461:
+00000001`4025e961 65488b0c2520000000 mov   rcx,qword ptr gs:[20h]
+00000001`4025e96a 488d05cf2b0d00  lea     rax,[ntkrnlmp!KiFlushCurrentTbWorker (00000001`40331540)]
+00000001`4025e971 4889742430      mov     qword ptr [rsp+30h],rsi
+00000001`4025e976 4533c9          xor     r9d,r9d
+00000001`4025e979 4889442428      mov     qword ptr [rsp+28h],rax
+00000001`4025e97e 4533c0          xor     r8d,r8d
+00000001`4025e981 418bd6          mov     edx,r14d
+00000001`4025e984 4c896c2420      mov     qword ptr [rsp+20h],r13
+00000001`4025e989 e89a020500      call    ntkrnlmp!KiIpiSendRequestEx (00000001`402aec28)
+00000001`4025e98e f0ff05eba6ae00  lock inc dword ptr [ntkrnlmp!KiTbFlushTimeStamp (00000001`40d49080)]
+00000001`4025e995 e9b3fcffff      jmp     ntkrnlmp!KeFlushTb+0x14d (00000001`4025e64d)
+
+ntkrnlmp!KeFlushTb+0x49a:
+00000001`4025e99a 654c8b142520000000 mov   r10,qword ptr gs:[20h]
+00000001`4025e9a3 48c7c2ffffffff  mov     rdx,0FFFFFFFFFFFFFFFFh
+00000001`4025e9aa 400fb6cf        movzx   ecx,dil
+00000001`4025e9ae ffc1            inc     ecx
+00000001`4025e9b0 48d3e2          shl     rdx,cl
+00000001`4025e9b3 4d8b8ab8880000  mov     r9,qword ptr [r10+88B8h]
+00000001`4025e9ba 0fb7c2          movzx   eax,dx
+00000001`4025e9bd f7d0            not     eax
+00000001`4025e9bf 458b4114        mov     r8d,dword ptr [r9+14h]
+00000001`4025e9c3 4423c0          and     r8d,eax
+00000001`4025e9c6 45894114        mov     dword ptr [r9+14h],r8d
+00000001`4025e9ca 0f85e3fdffff    jne     ntkrnlmp!KeFlushTb+0x2b3 (00000001`4025e7b3)
+
+ntkrnlmp!KeFlushTb+0x4d0:
+00000001`4025e9d0 e94e181e00      jmp     ntkrnlmp!KeFlushTb+0x1e1d23 (00000001`40440223)
+
+ntkrnlmp!KeFlushTb+0x1e1ce4:
+00000001`404401e4 e873700100      call    ntkrnlmp!KiIsFlushEntire (00000001`4045725c)
+00000001`404401e9 84c0            test    al,al
+00000001`404401eb 0f85cae5e1ff    jne     ntkrnlmp!KeFlushTb+0x2bb (00000001`4025e7bb)
+
+ntkrnlmp!KeFlushTb+0x1e1cf1:
+00000001`404401f1 e9ece4e1ff      jmp     ntkrnlmp!KeFlushTb+0x1e2 (00000001`4025e6e2)
+
+ntkrnlmp!KeFlushTb+0x1e1cf6:
+00000001`404401f6 440f20c1        mov     rcx,cr8
+00000001`404401fa a801            test    al,1
+00000001`404401fc 0f84b1e5e1ff    je      ntkrnlmp!KeFlushTb+0x2b3 (00000001`4025e7b3)
+
+ntkrnlmp!KeFlushTb+0x1e1d02:
+00000001`40440202 80f90f          cmp     cl,0Fh
+00000001`40440205 0f87a8e5e1ff    ja      ntkrnlmp!KeFlushTb+0x2b3 (00000001`4025e7b3)
+
+ntkrnlmp!KeFlushTb+0x1e1d0b:
+00000001`4044020b 4080ff0f        cmp     dil,0Fh
+00000001`4044020f 0f879ee5e1ff    ja      ntkrnlmp!KeFlushTb+0x2b3 (00000001`4025e7b3)
+
+ntkrnlmp!KeFlushTb+0x1e1d15:
+00000001`40440215 80f902          cmp     cl,2
+00000001`40440218 0f8295e5e1ff    jb      ntkrnlmp!KeFlushTb+0x2b3 (00000001`4025e7b3)
+
+ntkrnlmp!KeFlushTb+0x1e1d1e:
+00000001`4044021e e977e7e1ff      jmp     ntkrnlmp!KeFlushTb+0x49a (00000001`4025e99a)
+
+ntkrnlmp!KeFlushTb+0x1e1d23:
+00000001`40440223 498bca          mov     rcx,r10
+00000001`40440226 e825b01200      call    ntkrnlmp!KiRemoveSystemWorkPriorityKick (00000001`4056b250)
+00000001`4044022b 90              nop
+00000001`4044022c e982e5e1ff      jmp     ntkrnlmp!KeFlushTb+0x2b3 (00000001`4025e7b3)
+
+ntkrnlmp!KeFlushTb+0x1e1d31:
+00000001`40440231 440f20c1        mov     rcx,cr8
+00000001`40440235 a801            test    al,1
+00000001`40440237 0f8434e5e1ff    je      ntkrnlmp!KeFlushTb+0x271 (00000001`4025e771)
+
+ntkrnlmp!KeFlushTb+0x1e1d3d:
+00000001`4044023d 80f90f          cmp     cl,0Fh
+00000001`40440240 0f872be5e1ff    ja      ntkrnlmp!KeFlushTb+0x271 (00000001`4025e771)
+
+ntkrnlmp!KeFlushTb+0x1e1d46:
+00000001`40440246 4080ff0f        cmp     dil,0Fh
+00000001`4044024a 0f8721e5e1ff    ja      ntkrnlmp!KeFlushTb+0x271 (00000001`4025e771)
+
+ntkrnlmp!KeFlushTb+0x1e1d50:
+00000001`40440250 80f902          cmp     cl,2
+00000001`40440253 0f8218e5e1ff    jb      ntkrnlmp!KeFlushTb+0x271 (00000001`4025e771)
+
+ntkrnlmp!KeFlushTb+0x1e1d59:
+00000001`40440259 654c8b142520000000 mov   r10,qword ptr gs:[20h]
+00000001`40440262 48c7c2ffffffff  mov     rdx,0FFFFFFFFFFFFFFFFh
+00000001`40440269 400fb6cf        movzx   ecx,dil
+00000001`4044026d ffc1            inc     ecx
+00000001`4044026f 48d3e2          shl     rdx,cl
+00000001`40440272 4d8b8ab8880000  mov     r9,qword ptr [r10+88B8h]
+00000001`40440279 0fb7c2          movzx   eax,dx
+00000001`4044027c f7d0            not     eax
+00000001`4044027e 458b4114        mov     r8d,dword ptr [r9+14h]
+00000001`40440282 4423c0          and     r8d,eax
+00000001`40440285 45894114        mov     dword ptr [r9+14h],r8d
+00000001`40440289 0f85e2e4e1ff    jne     ntkrnlmp!KeFlushTb+0x271 (00000001`4025e771)
+
+ntkrnlmp!KeFlushTb+0x1e1d8f:
+00000001`4044028f 498bca          mov     rcx,r10
+00000001`40440292 e8b9af1200      call    ntkrnlmp!KiRemoveSystemWorkPriorityKick (00000001`4056b250)
+00000001`40440297 90              nop
+00000001`40440298 e9d4e4e1ff      jmp     ntkrnlmp!KeFlushTb+0x271 (00000001`4025e771)
+
+ntkrnlmp!KeFlushTb+0x1e1d9d:
+00000001`4044029d 41bd03000080    mov     r13d,80000003h
+00000001`404402a3 e9cbe2e1ff      jmp     ntkrnlmp!KeFlushTb+0x73 (00000001`4025e573)
+
+ntkrnlmp!KeFlushTb+0x1e1da8:
+00000001`404402a8 8b05bae78d00    mov     eax,dword ptr [ntkrnlmp!HvlEnlightenments (00000001`40d1ea68)]
+00000001`404402ae a840            test    al,40h
+00000001`404402b0 0f8448e6e1ff    je      ntkrnlmp!KeFlushTb+0x3fe (00000001`4025e8fe)
+
+ntkrnlmp!KeFlushTb+0x1e1db6:
+00000001`404402b6 e81573f8ff      call    ntkrnlmp!KiCheckVpBackingLongSpinWaitHypercall (00000001`403c75d0)
+00000001`404402bb 84c0            test    al,al
+00000001`404402bd 0f843be6e1ff    je      ntkrnlmp!KeFlushTb+0x3fe (00000001`4025e8fe)
+
+ntkrnlmp!KeFlushTb+0x1e1dc3:
+00000001`404402c3 8bce            mov     ecx,esi
+00000001`404402c5 e83673f8ff      call    ntkrnlmp!HvlNotifyLongSpinWait (00000001`403c7600)
+00000001`404402ca 90              nop
+00000001`404402cb e930e6e1ff      jmp     ntkrnlmp!KeFlushTb+0x400 (00000001`4025e900)
+
+ntkrnlmp!KeFlushTb+0x1e1dd0:
+00000001`404402d0 440f20c1        mov     rcx,cr8
+00000001`404402d4 4184c6          test    r14b,al
+00000001`404402d7 0f8483e3e1ff    je      ntkrnlmp!KeFlushTb+0x160 (00000001`4025e660)
+
+ntkrnlmp!KeFlushTb+0x1e1ddd:
+00000001`404402dd 80f90f          cmp     cl,0Fh
+00000001`404402e0 0f877ae3e1ff    ja      ntkrnlmp!KeFlushTb+0x160 (00000001`4025e660)
+
+ntkrnlmp!KeFlushTb+0x1e1de6:
+00000001`404402e6 4180fc0f        cmp     r12b,0Fh
+00000001`404402ea 0f8770e3e1ff    ja      ntkrnlmp!KeFlushTb+0x160 (00000001`4025e660)
+
+ntkrnlmp!KeFlushTb+0x1e1df0:
+00000001`404402f0 80f902          cmp     cl,2
+00000001`404402f3 0f8267e3e1ff    jb      ntkrnlmp!KeFlushTb+0x160 (00000001`4025e660)
+
+ntkrnlmp!KeFlushTb+0x1e1df9:
+00000001`404402f9 654c8b142520000000 mov   r10,qword ptr gs:[20h]
+00000001`40440302 488bd7          mov     rdx,rdi
+00000001`40440305 410fb6cc        movzx   ecx,r12b
+00000001`40440309 ffc1            inc     ecx
+00000001`4044030b 48d3e2          shl     rdx,cl
+00000001`4044030e 4d8b8ab8880000  mov     r9,qword ptr [r10+88B8h]
+00000001`40440315 0fb7c2          movzx   eax,dx
+00000001`40440318 f7d0            not     eax
+00000001`4044031a 458b4114        mov     r8d,dword ptr [r9+14h]
+00000001`4044031e 4423c0          and     r8d,eax
+00000001`40440321 45894114        mov     dword ptr [r9+14h],r8d
+00000001`40440325 0f8535e3e1ff    jne     ntkrnlmp!KeFlushTb+0x160 (00000001`4025e660)
+
+ntkrnlmp!KeFlushTb+0x1e1e2b:
+00000001`4044032b 498bca          mov     rcx,r10
+00000001`4044032e e81daf1200      call    ntkrnlmp!KiRemoveSystemWorkPriorityKick (00000001`4056b250)
+00000001`40440333 90              nop
+00000001`40440334 e927e3e1ff      jmp     ntkrnlmp!KeFlushTb+0x160 (00000001`4025e660)
+
+ntkrnlmp!KeFlushTb+0x1e1e39:
+00000001`40440339 8bcd            mov     ecx,ebp
+00000001`4044033b 85ed            test    ebp,ebp
+00000001`4044033d 7417            je      ntkrnlmp!KeFlushTb+0x1e1e56 (00000001`40440356)
+
+ntkrnlmp!KeFlushTb+0x1e1e3f:
+00000001`4044033f 412bce          sub     ecx,r14d
+00000001`40440342 7405            je      ntkrnlmp!KeFlushTb+0x1e1e49 (00000001`40440349)
+
+ntkrnlmp!KeFlushTb+0x1e1e44:
+00000001`40440344 413bce          cmp     ecx,r14d
+00000001`40440347 750d            jne     ntkrnlmp!KeFlushTb+0x1e1e56 (00000001`40440356)
+
+ntkrnlmp!KeFlushTb+0x1e1e49:
+00000001`40440349 8bcb            mov     ecx,ebx
+00000001`4044034b e8ace7e6ff      call    ntkrnlmp!KxFlushNonGlobalTb (00000001`402aeafc)
+00000001`40440350 90              nop
+00000001`40440351 e917e3e1ff      jmp     ntkrnlmp!KeFlushTb+0x16d (00000001`4025e66d)
+
+ntkrnlmp!KeFlushTb+0x1e1e56:
+00000001`40440356 8bcb            mov     ecx,ebx
+00000001`40440358 e8ffc7f6ff      call    ntkrnlmp!KxFlushEntireTb (00000001`403acb5c)
+00000001`4044035d 90              nop
+00000001`4044035e e90ae3e1ff      jmp     ntkrnlmp!KeFlushTb+0x16d (00000001`4025e66d)
+
+ntkrnlmp!KeFlushTb+0x1e1e63:
+00000001`40440363 e884811000      call    ntkrnlmp!VslFlushSecureAddressSpace (00000001`405484ec)
+00000001`40440368 90              nop
+00000001`40440369 e931e3e1ff      jmp     ntkrnlmp!KeFlushTb+0x19f (00000001`4025e69f)
+
+ntkrnlmp!KeFlushTb+0x1e1e6e:
+00000001`4044036e b101            mov     cl,1
+00000001`40440370 e81760e7ff      call    ntkrnlmp!KeFlushProcessWriteBuffers (00000001`402b638c)
+00000001`40440375 90              nop
+00000001`40440376 e932e3e1ff      jmp     ntkrnlmp!KeFlushTb+0x1ad (00000001`4025e6ad)
+
+ntkrnlmp!KeFlushTb+0x1e1e7b:
+00000001`4044037b 448bc5          mov     r8d,ebp
+00000001`4044037e 33d2            xor     edx,edx
+00000001`40440380 33c9            xor     ecx,ecx
+00000001`40440382 e8d5cd0100      call    ntkrnlmp!VmFlushTb (00000001`4045d15c)
+00000001`40440387 90              nop
+00000001`40440388 e92de3e1ff      jmp     ntkrnlmp!KeFlushTb+0x1ba (00000001`4025e6ba)
+
+ntkrnlmp!KeFlushTb+0x1e1e8d:
+00000001`4044038d 440f20c3        mov     rbx,cr8
+00000001`40440391 b80f000000      mov     eax,0Fh
+00000001`40440396 440f22c0        mov     cr8,rax
+00000001`4044039a 8b0500e98d00    mov     eax,dword ptr [ntkrnlmp!KiIrqlFlags (00000001`40d1eca0)]
+00000001`404403a0 85c0            test    eax,eax
+00000001`404403a2 743e            je      ntkrnlmp!KeFlushTb+0x1e1ee2 (00000001`404403e2)
+
+ntkrnlmp!KeFlushTb+0x1e1ea4:
+00000001`404403a4 a801            test    al,1
+00000001`404403a6 743a            je      ntkrnlmp!KeFlushTb+0x1e1ee2 (00000001`404403e2)
+
+ntkrnlmp!KeFlushTb+0x1e1ea8:
+00000001`404403a8 80fb0f          cmp     bl,0Fh
+00000001`404403ab 7735            ja      ntkrnlmp!KeFlushTb+0x1e1ee2 (00000001`404403e2)
+
+ntkrnlmp!KeFlushTb+0x1e1ead:
+00000001`404403ad 65488b042520000000 mov   rax,qword ptr gs:[20h]
+00000001`404403b6 4c8b88b8880000  mov     r9,qword ptr [rax+88B8h]
+00000001`404403bd 458b4114        mov     r8d,dword ptr [r9+14h]
+00000001`404403c1 7507            jne     ntkrnlmp!KeFlushTb+0x1e1eca (00000001`404403ca)
+
+ntkrnlmp!KeFlushTb+0x1e1ec3:
+00000001`404403c3 ba00800000      mov     edx,8000h
+00000001`404403c8 eb11            jmp     ntkrnlmp!KeFlushTb+0x1e1edb (00000001`404403db)
+
+ntkrnlmp!KeFlushTb+0x1e1eca:
+00000001`404403ca 0fb6cb          movzx   ecx,bl
+00000001`404403cd 488bd7          mov     rdx,rdi
+00000001`404403d0 ffc1            inc     ecx
+00000001`404403d2 48d3e2          shl     rdx,cl
+00000001`404403d5 81e2fcff0000    and     edx,0FFFCh
+
+ntkrnlmp!KeFlushTb+0x1e1edb:
+00000001`404403db 440bc2          or      r8d,edx
+00000001`404403de 45894114        mov     dword ptr [r9+14h],r8d
+
+ntkrnlmp!KeFlushTb+0x1e1ee2:
+00000001`404403e2 448bc5          mov     r8d,ebp
+00000001`404403e5 33d2            xor     edx,edx
+00000001`404403e7 33c9            xor     ecx,ecx
+00000001`404403e9 e82aa11c00      call    ntkrnlmp!ExFlushTb (00000001`4060a518)
+00000001`404403ee 8b0dace88d00    mov     ecx,dword ptr [ntkrnlmp!KiIrqlFlags (00000001`40d1eca0)]
+00000001`404403f4 85c9            test    ecx,ecx
+00000001`404403f6 7447            je      ntkrnlmp!KeFlushTb+0x1e1f3f (00000001`4044043f)
+
+ntkrnlmp!KeFlushTb+0x1e1ef8:
+00000001`404403f8 440f20c0        mov     rax,cr8
+00000001`404403fc f6c101          test    cl,1
+00000001`404403ff 743e            je      ntkrnlmp!KeFlushTb+0x1e1f3f (00000001`4044043f)
+
+ntkrnlmp!KeFlushTb+0x1e1f01:
+00000001`40440401 3c0f            cmp     al,0Fh
+00000001`40440403 773a            ja      ntkrnlmp!KeFlushTb+0x1e1f3f (00000001`4044043f)
+
+ntkrnlmp!KeFlushTb+0x1e1f05:
+00000001`40440405 80fb0f          cmp     bl,0Fh
+00000001`40440408 7735            ja      ntkrnlmp!KeFlushTb+0x1e1f3f (00000001`4044043f)
+
+ntkrnlmp!KeFlushTb+0x1e1f0a:
+00000001`4044040a 3c02            cmp     al,2
+00000001`4044040c 7231            jb      ntkrnlmp!KeFlushTb+0x1e1f3f (00000001`4044043f)
+
+ntkrnlmp!KeFlushTb+0x1e1f0e:
+00000001`4044040e 654c8b0c2520000000 mov   r9,qword ptr gs:[20h]
+00000001`40440417 0fb6cb          movzx   ecx,bl
+00000001`4044041a ffc1            inc     ecx
+00000001`4044041c 48d3e7          shl     rdi,cl
+00000001`4044041f 4d8b81b8880000  mov     r8,qword ptr [r9+88B8h]
+00000001`40440426 0fb7c7          movzx   eax,di
+00000001`40440429 f7d0            not     eax
+00000001`4044042b 418b5014        mov     edx,dword ptr [r8+14h]
+00000001`4044042f 23d0            and     edx,eax
+00000001`40440431 41895014        mov     dword ptr [r8+14h],edx
+00000001`40440435 7508            jne     ntkrnlmp!KeFlushTb+0x1e1f3f (00000001`4044043f)
+
+ntkrnlmp!KeFlushTb+0x1e1f37:
+00000001`40440437 498bc9          mov     rcx,r9
+00000001`4044043a e811ae1200      call    ntkrnlmp!KiRemoveSystemWorkPriorityKick (00000001`4056b250)
+
+ntkrnlmp!KeFlushTb+0x1e1f3f:
+00000001`4044043f 0fb6c3          movzx   eax,bl
+00000001`40440442 440f22c0        mov     cr8,rax
+00000001`40440446 e97ce2e1ff      jmp     ntkrnlmp!KeFlushTb+0x1c7 (00000001`4025e6c7)
+quit:
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\atlmfc.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\ObjectiveC.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\concurrency.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\cpp_rest.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\stl.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\Windows.Data.Json.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\Windows.Devices.Geolocation.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\Windows.Devices.Sensors.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\Windows.Media.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\windows.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\winrt.natvis'

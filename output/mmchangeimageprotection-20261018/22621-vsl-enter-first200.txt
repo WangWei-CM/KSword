@@ -1,0 +1,202 @@
+Source: 22621-vsl-enter-cdb-uf.txt; first 200 instructions in CDB uf traversal order. All addresses RVA.
+CDB uf instruction count=368; listed=200
+00338600  488bc4                   mov     rax,rsp
+00338603  48895808                 mov     qword ptr [rax+8],rbx
+00338607  48897010                 mov     qword ptr [rax+10h],rsi
+0033860B  48897818                 mov     qword ptr [rax+18h],rdi
+0033860F  55                       push    rbp
+00338610  4154                     push    r12
+00338612  4155                     push    r13
+00338614  4156                     push    r14
+00338616  4157                     push    r15
+00338618  488d68a1                 lea     rbp,[rax-5Fh]
+0033861C  4881eca0000000           sub     rsp,0A0h
+00338623  488b05b6488d00           mov     rax,qword ptr [ntkrnlmp!_security_cookie (RVA 0xC0CEE0)]
+0033862A  4833c4                   xor     rax,rsp
+0033862D  4889452f                 mov     qword ptr [rbp+2Fh],rax
+00338631  440fb6f9                 movzx   r15d,cl
+00338635  458be0                   mov     r12d,r8d
+00338638  448945cf                 mov     dword ptr [rbp-31h],r8d
+0033863C  33c9                     xor     ecx,ecx
+0033863E  4533c0                   xor     r8d,r8d
+00338641  668955cb                 mov     word ptr [rbp-35h],dx
+00338645  498bd9                   mov     rbx,r9
+00338648  44887dc8                 mov     byte ptr [rbp-38h],r15b
+0033864C  450fb6e8                 movzx   r13d,r8b
+00338650  448845c9                 mov     byte ptr [rbp-37h],r8b
+00338654  418d700f                 lea     esi,[r8+0Fh]
+00338658  448845c7                 mov     byte ptr [rbp-39h],r8b
+0033865C  448af6                   mov     r14b,sil
+0033865F  e844030000               call    ntkrnlmp!HvlQueryVsmConnection (RVA 0x3389A8)
+00338664  84c0                     test    al,al
+00338666  0f84b2010000             je      ntkrnlmp!VslpEnterIumSecureMode+0x21e (RVA 0x33881E)
+0033866C  458839                   mov     byte ptr [r9],r15b
+0033866F  6641895102               mov     word ptr [r9+2],dx
+00338674  65488b042588010000       mov   rax,qword ptr gs:[188h]
+0033867D  488b80d0040000           mov     rax,qword ptr [rax+4D0h]
+00338684  488945e7                 mov     qword ptr [rbp-19h],rax
+00338688  4180ff02                 cmp     r15b,2
+0033868C  0f87383e1100             ja      ntkrnlmp!VslpEnterIumSecureMode+0x113eca (RVA 0x44C4CA)
+00338692  e869edf2ff               call    ntkrnlmp!KeAreInterruptsEnabled (RVA 0x267400)
+00338697  4883caff                 or      rdx,0FFFFFFFFFFFFFFFFh
+0033869B  8d7ef2                   lea     edi,[rsi-0Eh]
+0033869E  4533c0                   xor     r8d,r8d
+003386A1  84c0                     test    al,al
+003386A3  0f84d43e1100             je      ntkrnlmp!VslpEnterIumSecureMode+0x113f7d (RVA 0x44C57D)
+003386A9  65488b342588010000       mov   rsi,qword ptr gs:[188h]
+003386B2  440f20c0                 mov     rax,cr8
+003386B6  443aff                   cmp     r15b,dil
+003386B9  0f84323f1100             je      ntkrnlmp!VslpEnterIumSecureMode+0x113ff1 (RVA 0x44C5F1)
+003386BF  4585e4                   test    r12d,r12d
+003386C2  0f85403f1100             jne     ntkrnlmp!VslpEnterIumSecureMode+0x114008 (RVA 0x44C608)
+003386C8  3c02                     cmp     al,2
+003386CA  0f8355010000             jae     ntkrnlmp!VslpEnterIumSecureMode+0x225 (RVA 0x338825)
+003386D0  8b8e1c030000             mov     ecx,dword ptr [rsi+31Ch]
+003386D6  85c9                     test    ecx,ecx
+003386D8  0f851f3f1100             jne     ntkrnlmp!VslpEnterIumSecureMode+0x113ffd (RVA 0x44C5FD)
+003386DE  44894304                 mov     dword ptr [rbx+4],r8d
+003386E2  4438055b639e00           cmp     byte ptr [ntkrnlmp!VslVsmEnabled (RVA 0xD1EA44)],r8b
+003386E9  0f843d010000             je      ntkrnlmp!VslpEnterIumSecureMode+0x22c (RVA 0x33882C)
+003386EF  408acf                   mov     cl,dil
+003386F2  4439861c030000           cmp     dword ptr [rsi+31Ch],r8d
+003386F9  440f44ef                 cmove   r13d,edi
+003386FD  403ac7                   cmp     al,dil
+00338700  0f8506010000             jne     ntkrnlmp!VslpEnterIumSecureMode+0x20c (RVA 0x33880C)
+00338706  448aef                   mov     r13b,dil
+00338709  660196e4010000           add     word ptr [rsi+1E4h],dx
+00338710  90                       nop
+00338711  84c9                     test    cl,cl
+00338713  742f                     je      ntkrnlmp!VslpEnterIumSecureMode+0x144 (RVA 0x338744)
+00338715  4c89442420               mov     qword ptr [rsp+20h],r8
+0033871A  488d0dbf669200           lea     rcx,[ntkrnlmp!VslpIumThreadSemaphore (RVA 0xC5EDE0)]
+00338721  4533c0                   xor     r8d,r8d
+00338724  4533c9                   xor     r9d,r9d
+00338727  33d2                     xor     edx,edx
+00338729  e84287f4ff               call    ntkrnlmp!KeWaitForSingleObject (RVA 0x280E70)
+0033872E  4533c0                   xor     r8d,r8d
+00338731  448bf8                   mov     r15d,eax
+00338734  85c0                     test    eax,eax
+00338736  0f8888000000             js      ntkrnlmp!VslpEnterIumSecureMode+0x1c4 (RVA 0x3387C4)
+0033873C  448a7dc8                 mov     r15b,byte ptr [rbp-38h]
+00338740  40887dc9                 mov     byte ptr [rbp-37h],dil
+00338744  8b058a639e00             mov     eax,dword ptr [ntkrnlmp!PerfGlobalGroupMask+0x14 (RVA 0xD1EAD4)]
+0033874A  450fb6e7                 movzx   r12d,r15b
+0033874E  a808                     test    al,8
+00338750  0f85bb3e1100             jne     ntkrnlmp!VslpEnterIumSecureMode+0x114011 (RVA 0x44C611)
+00338756  448845c7                 mov     byte ptr [rbp-39h],r8b
+0033875A  448b45e7                 mov     r8d,dword ptr [rbp-19h]
+0033875E  488bd3                   mov     rdx,rbx
+00338761  33c9                     xor     ecx,ecx
+00338763  e8d8870d00               call    ntkrnlmp!HvlSwitchToVsmVtl1 (RVA 0x410F40)
+00338768  4533c0                   xor     r8d,r8d
+0033876B  4c8d4b08                 lea     r9,[rbx+8]
+0033876F  458b39                   mov     r15d,dword ptr [r9]
+00338772  443845c7                 cmp     byte ptr [rbp-39h],r8b
+00338776  0f85db3e1100             jne     ntkrnlmp!VslpEnterIumSecureMode+0x114057 (RVA 0x44C657)
+0033877C  8a4301                   mov     al,byte ptr [rbx+1]
+0033877F  84c0                     test    al,al
+00338781  0f88183f1100             js      ntkrnlmp!VslpEnterIumSecureMode+0x11409f (RVA 0x44C69F)
+00338787  3c06                     cmp     al,6
+00338789  0f84ac3f1100             je      ntkrnlmp!VslpEnterIumSecureMode+0x11413b (RVA 0x44C73B)
+0033878F  403ac7                   cmp     al,dil
+00338792  0f85a4000000             jne     ntkrnlmp!VslpEnterIumSecureMode+0x23c (RVA 0x33883C)
+00338798  443845c9                 cmp     byte ptr [rbp-37h],r8b
+0033879C  7426                     je      ntkrnlmp!VslpEnterIumSecureMode+0x1c4 (RVA 0x3387C4)
+0033879E  488d45e3                 lea     rax,[rbp-1Dh]
+003387A2  448945e3                 mov     dword ptr [rbp-1Dh],r8d
+003387A6  4889442428               mov     qword ptr [rsp+28h],rax
+003387AB  488d0d2e669200           lea     rcx,[ntkrnlmp!VslpIumThreadSemaphore (RVA 0xC5EDE0)]
+003387B2  448bc7                   mov     r8d,edi
+003387B5  c744242008000000         mov     dword ptr [rsp+20h],8
+003387BD  33d2                     xor     edx,edx
+003387BF  e84cc6eeff               call    ntkrnlmp!KeReleaseSemaphoreEx (RVA 0x224E10)
+003387C4  4584ed                   test    r13b,r13b
+003387C7  7408                     je      ntkrnlmp!VslpEnterIumSecureMode+0x1d1 (RVA 0x3387D1)
+003387C9  488bce                   mov     rcx,rsi
+003387CC  e8ffbceeff               call    ntkrnlmp!KeLeaveCriticalRegionThread (RVA 0x2244D0)
+003387D1  4180fe0f                 cmp     r14b,0Fh
+003387D5  0f85a73f1100             jne     ntkrnlmp!VslpEnterIumSecureMode+0x114182 (RVA 0x44C782)
+003387DB  418bc7                   mov     eax,r15d
+003387DE  488b4d2f                 mov     rcx,qword ptr [rbp+2Fh]
+003387E2  4833cc                   xor     rcx,rsp
+003387E5  e8068e0900               call    ntkrnlmp!_security_check_cookie (RVA 0x3D15F0)
+003387EA  4c8d9c24a0000000         lea     r11,[rsp+0A0h]
+003387F2  498b5b30                 mov     rbx,qword ptr [r11+30h]
+003387F6  498b7338                 mov     rsi,qword ptr [r11+38h]
+003387FA  498b7b40                 mov     rdi,qword ptr [r11+40h]
+003387FE  498be3                   mov     rsp,r11
+00338801  415f                     pop     r15
+00338803  415e                     pop     r14
+00338805  415d                     pop     r13
+00338807  415c                     pop     r12
+00338809  5d                       pop     rbp
+0033880A  c3                       ret
+0033880C  3c02                     cmp     al,2
+0033880E  7324                     jae     ntkrnlmp!VslpEnterIumSecureMode+0x234 (RVA 0x338834)
+00338810  4584ed                   test    r13b,r13b
+00338813  0f85f0feffff             jne     ntkrnlmp!VslpEnterIumSecureMode+0x109 (RVA 0x338709)
+00338819  e9f3feffff               jmp     ntkrnlmp!VslpEnterIumSecureMode+0x111 (RVA 0x338711)
+0033881E  b89d0000c0               mov     eax,0C000009Dh
+00338823  ebb9                     jmp     ntkrnlmp!VslpEnterIumSecureMode+0x1de (RVA 0x3387DE)
+00338825  44894304                 mov     dword ptr [rbx+4],r8d
+00338829  897dcf                   mov     dword ptr [rbp-31h],edi
+0033882C  8a4dc7                   mov     cl,byte ptr [rbp-39h]
+0033882F  e9befeffff               jmp     ntkrnlmp!VslpEnterIumSecureMode+0xf2 (RVA 0x3386F2)
+00338834  458ae8                   mov     r13b,r8b
+00338837  e9d5feffff               jmp     ntkrnlmp!VslpEnterIumSecureMode+0x111 (RVA 0x338711)
+0033883C  448a7dc8                 mov     r15b,byte ptr [rbp-38h]
+00338840  443aff                   cmp     r15b,dil
+00338843  0f84633e1100             je      ntkrnlmp!VslpEnterIumSecureMode+0x1140ac (RVA 0x44C6AC)
+00338849  443945cf                 cmp     dword ptr [rbp-31h],r8d
+0033884D  7509                     jne     ntkrnlmp!VslpEnterIumSecureMode+0x258 (RVA 0x338858)
+0033884F  8b4304                   mov     eax,dword ptr [rbx+4]
+00338852  89861c030000             mov     dword ptr [rsi+31Ch],eax
+00338858  0fb65301                 movzx   edx,byte ptr [rbx+1]
+0033885C  8bca                     mov     ecx,edx
+0033885E  85d2                     test    edx,edx
+00338860  7435                     je      ntkrnlmp!VslpEnterIumSecureMode+0x297 (RVA 0x338897)
+00338862  83e902                   sub     ecx,2
+00338865  0f84543e1100             je      ntkrnlmp!VslpEnterIumSecureMode+0x1140bf (RVA 0x44C6BF)
+0033886B  2bcf                     sub     ecx,edi
+0033886D  0f84613e1100             je      ntkrnlmp!VslpEnterIumSecureMode+0x1140d4 (RVA 0x44C6D4)
+00338873  83f902                   cmp     ecx,2
+00338876  741f                     je      ntkrnlmp!VslpEnterIumSecureMode+0x297 (RVA 0x338897)
+00338878  443945cf                 cmp     dword ptr [rbp-31h],r8d
+0033887C  750c                     jne     ntkrnlmp!VslpEnterIumSecureMode+0x28a (RVA 0x33888A)
+0033887E  443aff                   cmp     r15b,dil
+00338881  7407                     je      ntkrnlmp!VslpEnterIumSecureMode+0x28a (RVA 0x33888A)
+00338883  4489861c030000           mov     dword ptr [rsi+31Ch],r8d
+0033888A  448803                   mov     byte ptr [rbx],r8b
+0033888D  6644894302               mov     word ptr [rbx+2],r8w
+00338892  e9adfeffff               jmp     ntkrnlmp!VslpEnterIumSecureMode+0x144 (RVA 0x338744)
+00338897  488bcb                   mov     rcx,rbx
+0033889A  e8959a2600               call    ntkrnlmp!PsDispatchIumService (RVA 0x5A2334)
+0033889F  90                       nop
+003388A0  e98e3e1100               jmp     ntkrnlmp!VslpEnterIumSecureMode+0x114133 (RVA 0x44C733)
+0044C4CA  8b0504268d00             mov     eax,dword ptr [ntkrnlmp!PerfGlobalGroupMask+0x14 (RVA 0xD1EAD4)]
+0044C4D0  bf01000000               mov     edi,1
+0044C4D5  41bd02194000             mov     r13d,401902h
+0044C4DB  410fb7f7                 movzx   esi,r15w
+0044C4DF  448d6703                 lea     r12d,[rdi+3]
+0044C4E3  a808                     test    al,8
+0044C4E5  7436                     je      ntkrnlmp!VslpEnterIumSecureMode+0x113f1d (RVA 0x44C51D)
+0044C4E7  668955d5                 mov     word ptr [rbp-2Bh],dx
+0044C4EB  488d45d3                 lea     rax,[rbp-2Dh]
+0044C4EF  8bd7                     mov     edx,edi
+0044C4F1  488945ef                 mov     qword ptr [rbp-11h],rax
+0044C4F5  41b949050000             mov     r9d,549h
+0044C4FB  6644897dd3               mov     word ptr [rbp-2Dh],r15w
+0044C500  41b8080000a0             mov     r8d,0A0000008h
+0044C506  4c8965f7                 mov     qword ptr [rbp-9],r12
+0044C50A  488d4def                 lea     rcx,[rbp-11h]
+0044C50E  44896c2420               mov     dword ptr [rsp+20h],r13d
+0044C513  448af7                   mov     r14b,dil
+0044C516  e83541e8ff               call    ntkrnlmp!EtwTraceKernelEvent (RVA 0x2D0650)
+0044C51B  eb03                     jmp     ntkrnlmp!VslpEnterIumSecureMode+0x113f20 (RVA 0x44C520)
+0044C51D  458af0                   mov     r14b,r8b
+0044C520  448b45e7                 mov     r8d,dword ptr [rbp-19h]
+0044C524  488bd3                   mov     rdx,rbx
+0044C527  33c9                     xor     ecx,ecx
+0044C529  e8124afcff               call    ntkrnlmp!HvlSwitchToVsmVtl1 (RVA 0x410F40)
+0044C52E  4584f6                   test    r14b,r14b
+0044C531  7438                     je      ntkrnlmp!VslpEnterIumSecureMode+0x113f6b (RVA 0x44C56B)

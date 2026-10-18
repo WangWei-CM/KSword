@@ -1,0 +1,69 @@
+Source: 22621-mi-tb-flush-cdb-uf.txt; first 200 instructions in CDB uf traversal order. All addresses RVA.
+CDB uf instruction count=67; listed=67
+0025E410  4053                     push    rbx
+0025E412  4883ec20                 sub     rsp,20h
+0025E416  488bd9                   mov     rbx,rcx
+0025E419  8b490c                   mov     ecx,dword ptr [rcx+0Ch]
+0025E41C  85c9                     test    ecx,ecx
+0025E41E  7507                     jne     ntkrnlmp!MiFlushTbList+0x17 (RVA 0x25E427)
+0025E420  4883c420                 add     rsp,20h
+0025E424  5b                       pop     rbx
+0025E425  c3                       ret
+0025E427  440fb64304               movzx   r8d,byte ptr [rbx+4]
+0025E42C  4c8b0d1d73a000           mov     r9,qword ptr [ntkrnlmp!MiState+0x710 (RVA 0xC65750)]
+0025E433  4889742430               mov     qword ptr [rsp+30h],rsi
+0025E438  33f6                     xor     esi,esi
+0025E43A  48897c2438               mov     qword ptr [rsp+38h],rdi
+0025E43F  41f6c002                 test    r8b,2
+0025E443  7568                     jne     ntkrnlmp!MiFlushTbList+0x9d (RVA 0x25E4AD)
+0025E445  833b01                   cmp     dword ptr [rbx],1
+0025E448  7563                     jne     ntkrnlmp!MiFlushTbList+0x9d (RVA 0x25E4AD)
+0025E44A  65488b042588010000       mov   rax,qword ptr gs:[188h]
+0025E453  488b90b8000000           mov     rdx,qword ptr [rax+0B8h]
+0025E45A  4839b2f0080000           cmp     qword ptr [rdx+8F0h],rsi
+0025E461  757c                     jne     ntkrnlmp!MiFlushTbList+0xcf (RVA 0x25E4DF)
+0025E463  4839b2e0030000           cmp     qword ptr [rdx+3E0h],rsi
+0025E46A  7573                     jne     ntkrnlmp!MiFlushTbList+0xcf (RVA 0x25E4DF)
+0025E46C  8b03                     mov     eax,dword ptr [rbx]
+0025E46E  8bd6                     mov     edx,esi
+0025E470  488d7b10                 lea     rdi,[rbx+10h]
+0025E474  40387305                 cmp     byte ptr [rbx+5],sil
+0025E478  7505                     jne     ntkrnlmp!MiFlushTbList+0x6f (RVA 0x25E47F)
+0025E47A  4c390f                   cmp     qword ptr [rdi],r9
+0025E47D  7649                     jbe     ntkrnlmp!MiFlushTbList+0xb8 (RVA 0x25E4C8)
+0025E47F  8bc8                     mov     ecx,eax
+0025E481  41f6c001                 test    r8b,1
+0025E485  0f854d1d1e00             jne     ntkrnlmp!MiFlushTbList+0x1e1dc8 (RVA 0x4401D8)
+0025E48B  e870000000               call    ntkrnlmp!KeFlushTb (RVA 0x25E500)
+0025E490  40887305                 mov     byte ptr [rbx+5],sil
+0025E494  806304f7                 and     byte ptr [rbx+4],0F7h
+0025E498  488937                   mov     qword ptr [rdi],rsi
+0025E49B  488b7c2438               mov     rdi,qword ptr [rsp+38h]
+0025E4A0  89730c                   mov     dword ptr [rbx+0Ch],esi
+0025E4A3  488b742430               mov     rsi,qword ptr [rsp+30h]
+0025E4A8  e973ffffff               jmp     ntkrnlmp!MiFlushTbList+0x10 (RVA 0x25E420)
+0025E4AD  8b03                     mov     eax,dword ptr [rbx]
+0025E4AF  83f801                   cmp     eax,1
+0025E4B2  74ba                     je      ntkrnlmp!MiFlushTbList+0x5e (RVA 0x25E46E)
+0025E4B4  41f6c008                 test    r8b,8
+0025E4B8  7507                     jne     ntkrnlmp!MiFlushTbList+0xb1 (RVA 0x25E4C1)
+0025E4BA  ba01000000               mov     edx,1
+0025E4BF  ebaf                     jmp     ntkrnlmp!MiFlushTbList+0x60 (RVA 0x25E470)
+0025E4C1  ba02000000               mov     edx,2
+0025E4C6  eba8                     jmp     ntkrnlmp!MiFlushTbList+0x60 (RVA 0x25E470)
+0025E4C8  41f6c001                 test    r8b,1
+0025E4CC  448bc0                   mov     r8d,eax
+0025E4CF  7519                     jne     ntkrnlmp!MiFlushTbList+0xda (RVA 0x25E4EA)
+0025E4D1  448bca                   mov     r9d,edx
+0025E4D4  488d5318                 lea     rdx,[rbx+18h]
+0025E4D8  e887f31200               call    ntkrnlmp!KeFlushMultipleRangeTb (RVA 0x38D864)
+0025E4DD  ebb5                     jmp     ntkrnlmp!MiFlushTbList+0x84 (RVA 0x25E494)
+0025E4DF  8b03                     mov     eax,dword ptr [rbx]
+0025E4E1  49c7c1ffffffff           mov     r9,0FFFFFFFFFFFFFFFFh
+0025E4E8  eb84                     jmp     ntkrnlmp!MiFlushTbList+0x5e (RVA 0x25E46E)
+0025E4EA  488d5318                 lea     rdx,[rbx+18h]
+0025E4EE  e81d9b1200               call    ntkrnlmp!KeFlushMultipleRangeCurrentTb (RVA 0x388010)
+0025E4F3  eb9f                     jmp     ntkrnlmp!MiFlushTbList+0x84 (RVA 0x25E494)
+004401D8  e8177ff4ff               call    ntkrnlmp!KeFlushCurrentTbOnly (RVA 0x3880F4)
+004401DD  90                       nop
+004401DE  e9ade2e1ff               jmp     ntkrnlmp!MiFlushTbList+0x80 (RVA 0x25E490)

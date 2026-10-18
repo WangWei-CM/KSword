@@ -1,0 +1,312 @@
+
+************* Preparing the environment for Debugger Extensions Gallery repositories **************
+   ExtensionRepository : Implicit
+   UseExperimentalFeatureForNugetShare : true
+   AllowNugetExeUpdate : true
+   NonInteractiveNuget : true
+   AllowNugetMSCredentialProviderInstall : true
+   AllowParallelInitializationOfLocalRepositories : true
+
+   EnableRedirectToV8JsProvider : false
+
+   -- Configuring repositories
+      ----> Repository : LocalInstalled, Enabled: true
+      ----> Repository : UserExtensions, Enabled: true
+
+>>>>>>>>>>>>> Preparing the environment for Debugger Extensions Gallery repositories completed, duration 0.000 seconds
+
+************* Waiting for Debugger Extensions Gallery to Initialize **************
+
+>>>>>>>>>>>>> Waiting for Debugger Extensions Gallery to Initialize completed, duration 0.015 seconds
+   ----> Repository : UserExtensions, Enabled: true, Packages count: 0
+   ----> Repository : LocalInstalled, Enabled: true, Packages count: 29
+
+Microsoft (R) Windows Debugger Version 10.0.26100.6584 AMD64
+Copyright (c) Microsoft Corporation. All rights reserved.
+
+
+Loading Dump File [C:\Users\Felix\CLionProjects\KSword\artifacts\symbols\ntkrnlmp.exe\2C33C5081047000\ntkrnlmp.exe]
+
+************* Path validation summary **************
+Response                         Time (ms)     Location
+OK                                             C:\Users\Felix\CLionProjects\KSword\artifacts\symbols
+Symbol search path is: C:\Users\Felix\CLionProjects\KSword\artifacts\symbols
+Executable search path is:
+ModLoad: 00000001`40000000 00000001`41047000   C:\Users\Felix\CLionProjects\KSword\artifacts\symbols\ntkrnlmp.exe\2C33C5081047000\ntkrnlmp.exe
+ntkrnlmp!KiSystemStartup:
+00000001`40a83010 4883ec38        sub     rsp,38h
+0:000> cdb: Reading initial command 'uf ntkrnlmp!VslpLockPagesForTransfer; q'
+ntkrnlmp!VslpLockPagesForTransfer:
+00000001`403c8304 488bc4          mov     rax,rsp
+00000001`403c8307 44894820        mov     dword ptr [rax+20h],r9d
+00000001`403c830b 44894018        mov     dword ptr [rax+18h],r8d
+00000001`403c830f 48895010        mov     qword ptr [rax+10h],rdx
+00000001`403c8313 48894808        mov     qword ptr [rax+8],rcx
+00000001`403c8317 53              push    rbx
+00000001`403c8318 56              push    rsi
+00000001`403c8319 57              push    rdi
+00000001`403c831a 4154            push    r12
+00000001`403c831c 4155            push    r13
+00000001`403c831e 4156            push    r14
+00000001`403c8320 4157            push    r15
+00000001`403c8322 4883ec30        sub     rsp,30h
+00000001`403c8326 458bd9          mov     r11d,r9d
+00000001`403c8329 458bc8          mov     r9d,r8d
+00000001`403c832c 4c8bd2          mov     r10,rdx
+00000001`403c832f 33f6            xor     esi,esi
+00000001`403c8331 8bfe            mov     edi,esi
+00000001`403c8333 448bb42490000000 mov     r14d,dword ptr [rsp+90h]
+00000001`403c833b 41f6c613        test    r14b,13h
+00000001`403c833f 0f8525f71200    jne     ntkrnlmp!VslpLockPagesForTransfer+0x12f766 (00000001`404f7a6a)
+
+ntkrnlmp!VslpLockPagesForTransfer+0x41:
+00000001`403c8345 4c8bfe          mov     r15,rsi
+00000001`403c8348 4889742420      mov     qword ptr [rsp+20h],rsi
+00000001`403c834d ba00100000      mov     edx,1000h
+00000001`403c8352 4883cbff        or      rbx,0FFFFFFFFFFFFFFFFh
+
+ntkrnlmp!VslpLockPagesForTransfer+0x52:
+00000001`403c8356 498bca          mov     rcx,r10
+00000001`403c8359 81e1ff0f0000    and     ecx,0FFFh
+00000001`403c835f 418bc1          mov     eax,r9d
+00000001`403c8362 4881c1ff0f0000  add     rcx,0FFFh
+00000001`403c8369 4803c8          add     rcx,rax
+00000001`403c836c 48c1e90c        shr     rcx,0Ch
+00000001`403c8370 448d2ccd30000000 lea     r13d,[rcx*8+30h]
+00000001`403c8378 41f6c601        test    r14b,1
+00000001`403c837c 440f45ea        cmovne  r13d,edx
+00000001`403c8380 41f6c604        test    r14b,4
+00000001`403c8384 0f854af71200    jne     ntkrnlmp!VslpLockPagesForTransfer+0x12f7d0 (00000001`404f7ad4)
+
+ntkrnlmp!VslpLockPagesForTransfer+0x86:
+00000001`403c838a 41f6c620        test    r14b,20h
+00000001`403c838e 0f8553f71200    jne     ntkrnlmp!VslpLockPagesForTransfer+0x12f7e3 (00000001`404f7ae7)
+
+ntkrnlmp!VslpLockPagesForTransfer+0x90:
+00000001`403c8394 418bd5          mov     edx,r13d
+00000001`403c8397 b940000000      mov     ecx,40h
+00000001`403c839c 41b8566d7354    mov     r8d,54736D56h
+00000001`403c83a2 e809206e00      call    ntkrnlmp!ExAllocatePool2 (00000001`40aaa3b0)
+00000001`403c83a7 488bf8          mov     rdi,rax
+00000001`403c83aa 448b8c2480000000 mov     r9d,dword ptr [rsp+80h]
+00000001`403c83b2 4c8b542478      mov     r10,qword ptr [rsp+78h]
+00000001`403c83b7 448b9c2488000000 mov     r11d,dword ptr [rsp+88h]
+
+ntkrnlmp!VslpLockPagesForTransfer+0xbb:
+00000001`403c83bf 48897c2428      mov     qword ptr [rsp+28h],rdi
+00000001`403c83c4 4885ff          test    rdi,rdi
+00000001`403c83c7 0f8422f71200    je      ntkrnlmp!VslpLockPagesForTransfer+0x12f7eb (00000001`404f7aef)
+
+ntkrnlmp!VslpLockPagesForTransfer+0xc9:
+00000001`403c83cd 418bd1          mov     edx,r9d
+00000001`403c83d0 488937          mov     qword ptr [rdi],rsi
+00000001`403c83d3 458bc2          mov     r8d,r10d
+00000001`403c83d6 418bc0          mov     eax,r8d
+00000001`403c83d9 25ff0f0000      and     eax,0FFFh
+00000001`403c83de 4805ff0f0000    add     rax,0FFFh
+00000001`403c83e4 4803d0          add     rdx,rax
+00000001`403c83e7 48c1ea0c        shr     rdx,0Ch
+00000001`403c83eb 6683c206        add     dx,6
+00000001`403c83ef 66c1e203        shl     dx,3
+00000001`403c83f3 66895708        mov     word ptr [rdi+8],dx
+00000001`403c83f7 6689770a        mov     word ptr [rdi+0Ah],si
+00000001`403c83fb 498bc2          mov     rax,r10
+00000001`403c83fe 482500f0ffff    and     rax,0FFFFFFFFFFFFF000h
+00000001`403c8404 48894720        mov     qword ptr [rdi+20h],rax
+00000001`403c8408 4181e0ff0f0000  and     r8d,0FFFh
+00000001`403c840f 4489472c        mov     dword ptr [rdi+2Ch],r8d
+00000001`403c8413 44894f28        mov     dword ptr [rdi+28h],r9d
+00000001`403c8417 41f6c606        test    r14b,6
+00000001`403c841b 0f85dff61200    jne     ntkrnlmp!VslpLockPagesForTransfer+0x12f7fc (00000001`404f7b00)
+
+ntkrnlmp!VslpLockPagesForTransfer+0x11d:
+00000001`403c8421 4585c9          test    r9d,r9d
+00000001`403c8424 743c            je      ntkrnlmp!VslpLockPagesForTransfer+0x15e (00000001`403c8462)
+
+ntkrnlmp!VslpLockPagesForTransfer+0x122:
+00000001`403c8426 41b801000000    mov     r8d,1
+00000001`403c842c 4585db          test    r11d,r11d
+00000001`403c842f 450f44c3        cmove   r8d,r11d
+00000001`403c8433 33d2            xor     edx,edx
+00000001`403c8435 488bcf          mov     rcx,rdi
+00000001`403c8438 e843b4f9ff      call    ntkrnlmp!MiProbeAndLockPages (00000001`40363880)
+00000001`403c843d eb23            jmp     ntkrnlmp!VslpLockPagesForTransfer+0x15e (00000001`403c8462)
+
+ntkrnlmp!VslpLockPagesForTransfer+0x15e:
+00000001`403c8462 458be6          mov     r12d,r14d
+00000001`403c8465 4183e410        and     r12d,10h
+00000001`403c8469 7528            jne     ntkrnlmp!VslpLockPagesForTransfer+0x18f (00000001`403c8493)
+
+ntkrnlmp!VslpLockPagesForTransfer+0x167:
+00000001`403c846b 4c893f          mov     qword ptr [rdi],r15
+00000001`403c846e 4c8bff          mov     r15,rdi
+00000001`403c8471 48897c2420      mov     qword ptr [rsp+20h],rdi
+00000001`403c8476 4c8bd7          mov     r10,rdi
+00000001`403c8479 48897c2478      mov     qword ptr [rsp+78h],rdi
+00000001`403c847e 458bcd          mov     r9d,r13d
+00000001`403c8481 4489ac2480000000 mov     dword ptr [rsp+80h],r13d
+00000001`403c8489 ba00100000      mov     edx,1000h
+00000001`403c848e 443bea          cmp     r13d,edx
+00000001`403c8491 7737            ja      ntkrnlmp!VslpLockPagesForTransfer+0x1c6 (00000001`403c84ca)
+
+ntkrnlmp!VslpLockPagesForTransfer+0x18f:
+00000001`403c8493 458bc6          mov     r8d,r14d
+00000001`403c8496 488bd7          mov     rdx,rdi
+00000001`403c8499 488b4c2470      mov     rcx,qword ptr [rsp+70h]
+00000001`403c849e e83d000000      call    ntkrnlmp!VslpLockMdlForTransfer (00000001`403c84e0)
+00000001`403c84a3 448bf8          mov     r15d,eax
+00000001`403c84a6 85c0            test    eax,eax
+00000001`403c84a8 0f8860f61200    js      ntkrnlmp!VslpLockPagesForTransfer+0x12f80a (00000001`404f7b0e)
+
+ntkrnlmp!VslpLockPagesForTransfer+0x1aa:
+00000001`403c84ae 488b442470      mov     rax,qword ptr [rsp+70h]
+00000001`403c84b3 83484008        or      dword ptr [rax+40h],8
+00000001`403c84b7 33c0            xor     eax,eax
+
+ntkrnlmp!VslpLockPagesForTransfer+0x1b5:
+00000001`403c84b9 4883c430        add     rsp,30h
+00000001`403c84bd 415f            pop     r15
+00000001`403c84bf 415e            pop     r14
+00000001`403c84c1 415d            pop     r13
+00000001`403c84c3 415c            pop     r12
+00000001`403c84c5 5f              pop     rdi
+00000001`403c84c6 5e              pop     rsi
+00000001`403c84c7 5b              pop     rbx
+00000001`403c84c8 c3              ret
+
+ntkrnlmp!VslpLockPagesForTransfer+0x1c6:
+00000001`403c84ca 448b9c2488000000 mov     r11d,dword ptr [rsp+88h]
+00000001`403c84d2 e97ffeffff      jmp     ntkrnlmp!VslpLockPagesForTransfer+0x52 (00000001`403c8356)
+
+ntkrnlmp!VslpLockPagesForTransfer+0x12f766:
+00000001`404f7a6a 4181e2ff0f0000  and     r10d,0FFFh
+00000001`404f7a71 498d91ff0f0000  lea     rdx,[r9+0FFFh]
+00000001`404f7a78 4903d2          add     rdx,r10
+00000001`404f7a7b 4881e200f0ffff  and     rdx,0FFFFFFFFFFFFF000h
+00000001`404f7a82 4881fa00a01f00  cmp     rdx,1FA000h
+00000001`404f7a89 763f            jbe     ntkrnlmp!VslpLockPagesForTransfer+0x12f7c6 (00000001`404f7aca)
+
+ntkrnlmp!VslpLockPagesForTransfer+0x12f787:
+00000001`404f7a8b 41bf0d0000c0    mov     r15d,0C000000Dh
+00000001`404f7a91 4883cbff        or      rbx,0FFFFFFFFFFFFFFFFh
+
+ntkrnlmp!VslpLockPagesForTransfer+0x12f791:
+00000001`404f7a95 4183e620        and     r14d,20h
+
+ntkrnlmp!VslpLockPagesForTransfer+0x12f795:
+00000001`404f7a99 4885ff          test    rdi,rdi
+00000001`404f7a9c 0f84d9000000    je      ntkrnlmp!VslpLockPagesForTransfer+0x12f877 (00000001`404f7b7b)
+
+ntkrnlmp!VslpLockPagesForTransfer+0x12f79e:
+00000001`404f7aa2 4c8b27          mov     r12,qword ptr [rdi]
+00000001`404f7aa5 488937          mov     qword ptr [rdi],rsi
+00000001`404f7aa8 f6470a02        test    byte ptr [rdi+0Ah],2
+00000001`404f7aac 7408            je      ntkrnlmp!VslpLockPagesForTransfer+0x12f7b2 (00000001`404f7ab6)
+
+ntkrnlmp!VslpLockPagesForTransfer+0x12f7aa:
+00000001`404f7aae 488bcf          mov     rcx,rdi
+00000001`404f7ab1 e8fa56d4ff      call    ntkrnlmp!MmUnlockPages (00000001`4023d1b0)
+
+ntkrnlmp!VslpLockPagesForTransfer+0x12f7b2:
+00000001`404f7ab6 4585f6          test    r14d,r14d
+00000001`404f7ab9 750a            jne     ntkrnlmp!VslpLockPagesForTransfer+0x12f7c1 (00000001`404f7ac5)
+
+ntkrnlmp!VslpLockPagesForTransfer+0x12f7b7:
+00000001`404f7abb 33d2            xor     edx,edx
+00000001`404f7abd 488bcf          mov     rcx,rdi
+00000001`404f7ac0 e89b2d5b00      call    ntkrnlmp!ExFreePoolWithTag (00000001`40aaa860)
+
+ntkrnlmp!VslpLockPagesForTransfer+0x12f7c1:
+00000001`404f7ac5 498bfc          mov     rdi,r12
+00000001`404f7ac8 ebcf            jmp     ntkrnlmp!VslpLockPagesForTransfer+0x12f795 (00000001`404f7a99)
+
+ntkrnlmp!VslpLockPagesForTransfer+0x12f7c6:
+00000001`404f7aca 4c8b542478      mov     r10,qword ptr [rsp+78h]
+00000001`404f7acf e97108edff      jmp     ntkrnlmp!VslpLockPagesForTransfer+0x41 (00000001`403c8345)
+
+ntkrnlmp!VslpLockPagesForTransfer+0x12f7d0:
+00000001`404f7ad4 4181c5ff0f0000  add     r13d,0FFFh
+00000001`404f7adb 4181e500f0ffff  and     r13d,0FFFFF000h
+00000001`404f7ae2 e9a308edff      jmp     ntkrnlmp!VslpLockPagesForTransfer+0x86 (00000001`403c838a)
+
+ntkrnlmp!VslpLockPagesForTransfer+0x12f7e3:
+00000001`404f7ae7 488bfe          mov     rdi,rsi
+00000001`404f7aea e9d008edff      jmp     ntkrnlmp!VslpLockPagesForTransfer+0xbb (00000001`403c83bf)
+
+ntkrnlmp!VslpLockPagesForTransfer+0x12f7eb:
+00000001`404f7aef 41f6c610        test    r14b,10h
+00000001`404f7af3 7535            jne     ntkrnlmp!VslpLockPagesForTransfer+0x12f826 (00000001`404f7b2a)
+
+ntkrnlmp!VslpLockPagesForTransfer+0x12f7f1:
+00000001`404f7af5 498bff          mov     rdi,r15
+00000001`404f7af8 41bf9a0000c0    mov     r15d,0C000009Ah
+00000001`404f7afe eb95            jmp     ntkrnlmp!VslpLockPagesForTransfer+0x12f791 (00000001`404f7a95)
+
+ntkrnlmp!VslpLockPagesForTransfer+0x12f7fc:
+00000001`404f7b00 488bcf          mov     rcx,rdi
+00000001`404f7b03 e838d5e1ff      call    ntkrnlmp!MmBuildMdlForNonPagedPool (00000001`40315040)
+00000001`404f7b08 90              nop
+00000001`404f7b09 e95409edff      jmp     ntkrnlmp!VslpLockPagesForTransfer+0x15e (00000001`403c8462)
+
+ntkrnlmp!VslpLockPagesForTransfer+0x12f80a:
+00000001`404f7b0e 4585e4          test    r12d,r12d
+00000001`404f7b11 7482            je      ntkrnlmp!VslpLockPagesForTransfer+0x12f791 (00000001`404f7a95)
+
+ntkrnlmp!VslpLockPagesForTransfer+0x12f80f:
+00000001`404f7b13 488bcf          mov     rcx,rdi
+00000001`404f7b16 e89556d4ff      call    ntkrnlmp!MmUnlockPages (00000001`4023d1b0)
+00000001`404f7b1b 33d2            xor     edx,edx
+00000001`404f7b1d 488bcf          mov     rcx,rdi
+00000001`404f7b20 e83b2d5b00      call    ntkrnlmp!ExFreePoolWithTag (00000001`40aaa860)
+00000001`404f7b25 4c8b7c2420      mov     r15,qword ptr [rsp+20h]
+
+ntkrnlmp!VslpLockPagesForTransfer+0x12f826:
+00000001`404f7b2a 65488b042588010000 mov   rax,qword ptr gs:[188h]
+00000001`404f7b33 660198e4010000  add     word ptr [rax+1E4h],bx
+00000001`404f7b3a 90              nop
+00000001`404f7b3b 33d2            xor     edx,edx
+00000001`404f7b3d 488d0df4727600  lea     rcx,[ntkrnlmp!VslpReservedTransferLock (00000001`40c5ee38)]
+00000001`404f7b44 e8f7afd2ff      call    ntkrnlmp!ExAcquirePushLockExclusiveEx (00000001`40222b40)
+00000001`404f7b49 488b3df0727600  mov     rdi,qword ptr [ntkrnlmp!VslpReservedTransferMdl (00000001`40c5ee40)]
+00000001`404f7b50 48897c2428      mov     qword ptr [rsp+28h],rdi
+00000001`404f7b55 4183ce20        or      r14d,20h
+00000001`404f7b59 4489b42490000000 mov     dword ptr [rsp+90h],r14d
+00000001`404f7b61 448b8c2480000000 mov     r9d,dword ptr [rsp+80h]
+00000001`404f7b69 4c8b542478      mov     r10,qword ptr [rsp+78h]
+00000001`404f7b6e 448b9c2488000000 mov     r11d,dword ptr [rsp+88h]
+00000001`404f7b76 e95208edff      jmp     ntkrnlmp!VslpLockPagesForTransfer+0xc9 (00000001`403c83cd)
+
+ntkrnlmp!VslpLockPagesForTransfer+0x12f877:
+00000001`404f7b7b 4585f6          test    r14d,r14d
+00000001`404f7b7e 742e            je      ntkrnlmp!VslpLockPagesForTransfer+0x12f8aa (00000001`404f7bae)
+
+ntkrnlmp!VslpLockPagesForTransfer+0x12f87c:
+00000001`404f7b80 f0480fc11daf727600 lock xadd qword ptr [ntkrnlmp!VslpReservedTransferLock (00000001`40c5ee38)],rbx
+00000001`404f7b89 80e306          and     bl,6
+00000001`404f7b8c 80fb02          cmp     bl,2
+00000001`404f7b8f 750c            jne     ntkrnlmp!VslpLockPagesForTransfer+0x12f899 (00000001`404f7b9d)
+
+ntkrnlmp!VslpLockPagesForTransfer+0x12f88d:
+00000001`404f7b91 488d0da0727600  lea     rcx,[ntkrnlmp!VslpReservedTransferLock (00000001`40c5ee38)]
+00000001`404f7b98 e82350dcff      call    ntkrnlmp!ExfTryToWakePushLock (00000001`402bcbc0)
+
+ntkrnlmp!VslpLockPagesForTransfer+0x12f899:
+00000001`404f7b9d 488d0d94727600  lea     rcx,[ntkrnlmp!VslpReservedTransferLock (00000001`40c5ee38)]
+00000001`404f7ba4 e8c7b1d2ff      call    ntkrnlmp!KeAbPostRelease (00000001`40222d70)
+00000001`404f7ba9 e8c2b3d2ff      call    ntkrnlmp!KeLeaveCriticalRegion (00000001`40222f70)
+
+ntkrnlmp!VslpLockPagesForTransfer+0x12f8aa:
+00000001`404f7bae 418bc7          mov     eax,r15d
+00000001`404f7bb1 e90309edff      jmp     ntkrnlmp!VslpLockPagesForTransfer+0x1b5 (00000001`403c84b9)
+quit:
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\atlmfc.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\ObjectiveC.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\concurrency.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\cpp_rest.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\stl.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\Windows.Data.Json.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\Windows.Devices.Geolocation.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\Windows.Devices.Sensors.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\Windows.Media.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\windows.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\winrt.natvis'

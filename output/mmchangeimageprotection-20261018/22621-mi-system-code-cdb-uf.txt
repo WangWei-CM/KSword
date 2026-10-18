@@ -1,0 +1,686 @@
+
+************* Preparing the environment for Debugger Extensions Gallery repositories **************
+   ExtensionRepository : Implicit
+   UseExperimentalFeatureForNugetShare : true
+   AllowNugetExeUpdate : true
+   NonInteractiveNuget : true
+   AllowNugetMSCredentialProviderInstall : true
+   AllowParallelInitializationOfLocalRepositories : true
+
+   EnableRedirectToV8JsProvider : false
+
+   -- Configuring repositories
+      ----> Repository : LocalInstalled, Enabled: true
+      ----> Repository : UserExtensions, Enabled: true
+
+>>>>>>>>>>>>> Preparing the environment for Debugger Extensions Gallery repositories completed, duration 0.000 seconds
+
+************* Waiting for Debugger Extensions Gallery to Initialize **************
+
+>>>>>>>>>>>>> Waiting for Debugger Extensions Gallery to Initialize completed, duration 0.016 seconds
+   ----> Repository : UserExtensions, Enabled: true, Packages count: 0
+   ----> Repository : LocalInstalled, Enabled: true, Packages count: 29
+
+Microsoft (R) Windows Debugger Version 10.0.26100.6584 AMD64
+Copyright (c) Microsoft Corporation. All rights reserved.
+
+
+Loading Dump File [C:\Users\Felix\CLionProjects\KSword\artifacts\symbols\ntkrnlmp.exe\2C33C5081047000\ntkrnlmp.exe]
+
+************* Path validation summary **************
+Response                         Time (ms)     Location
+OK                                             C:\Users\Felix\CLionProjects\KSword\artifacts\symbols
+Symbol search path is: C:\Users\Felix\CLionProjects\KSword\artifacts\symbols
+Executable search path is:
+ModLoad: 00000001`40000000 00000001`41047000   C:\Users\Felix\CLionProjects\KSword\artifacts\symbols\ntkrnlmp.exe\2C33C5081047000\ntkrnlmp.exe
+ntkrnlmp!KiSystemStartup:
+00000001`40a83010 4883ec38        sub     rsp,38h
+0:000> cdb: Reading initial command 'uf ntkrnlmp!MiSetSystemCodeProtection; q'
+ntkrnlmp!MiSetSystemCodeProtection:
+00000001`40258810 4053            push    rbx
+00000001`40258812 55              push    rbp
+00000001`40258813 56              push    rsi
+00000001`40258814 57              push    rdi
+00000001`40258815 4155            push    r13
+00000001`40258817 4156            push    r14
+00000001`40258819 4157            push    r15
+00000001`4025881b 4881ec50010000  sub     rsp,150h
+00000001`40258822 488b05b7469b00  mov     rax,qword ptr [ntkrnlmp!_security_cookie (00000001`40c0cee0)]
+00000001`40258829 4833c4          xor     rax,rsp
+00000001`4025882c 4889842440010000 mov     qword ptr [rsp+140h],rax
+00000001`40258834 498be8          mov     rbp,r8
+00000001`40258837 4c89442460      mov     qword ptr [rsp+60h],r8
+00000001`4025883c 488bf2          mov     rsi,rdx
+00000001`4025883f 48894c2470      mov     qword ptr [rsp+70h],rcx
+00000001`40258844 488bf9          mov     rdi,rcx
+00000001`40258847 44894c2424      mov     dword ptr [rsp+24h],r9d
+00000001`4025884c 33c0            xor     eax,eax
+00000001`4025884e 488d8c24a0000000 lea     rcx,[rsp+0A0h]
+00000001`40258856 4533ed          xor     r13d,r13d
+00000001`40258859 6689842486000000 mov     word ptr [rsp+86h],ax
+00000001`40258861 33d2            xor     edx,edx
+00000001`40258863 4c896c2448      mov     qword ptr [rsp+48h],r13
+00000001`40258868 41b898000000    mov     r8d,98h
+00000001`4025886e 458bf9          mov     r15d,r9d
+00000001`40258871 e84a351d00      call    ntkrnlmp!memset (00000001`4042bdc0)
+00000001`40258876 418d5d01        lea     ebx,[r13+1]
+00000001`4025887a 4183ff18        cmp     r15d,18h
+00000001`4025887e 740a            je      ntkrnlmp!MiSetSystemCodeProtection+0x7a (00000001`4025888a)
+
+ntkrnlmp!MiSetSystemCodeProtection+0x70:
+00000001`40258880 41f6c710        test    r15b,10h
+00000001`40258884 0f85ca5a2200    jne     ntkrnlmp!MiSetSystemCodeProtection+0x225b44 (00000001`4047e354)
+
+ntkrnlmp!MiSetSystemCodeProtection+0x7a:
+00000001`4025888a 44896c242c      mov     dword ptr [rsp+2Ch],r13d
+
+ntkrnlmp!MiSetSystemCodeProtection+0x7f:
+00000001`4025888f 4c8bf6          mov     r14,rsi
+00000001`40258892 48b80000000080f6ffff mov rax,0FFFFF68000000000h
+00000001`4025889c 49c1e619        shl     r14,19h
+00000001`402588a0 488bc8          mov     rcx,rax
+00000001`402588a3 48c1e119        shl     rcx,19h
+00000001`402588a7 4c2bf1          sub     r14,rcx
+00000001`402588aa 49c1fe10        sar     r14,10h
+00000001`402588ae 498bce          mov     rcx,r14
+00000001`402588b1 e80a1f0000      call    ntkrnlmp!MI_IS_PHYSICAL_ADDRESS (00000001`4025a7c0)
+00000001`402588b6 85c0            test    eax,eax
+00000001`402588b8 0f85a85a2200    jne     ntkrnlmp!MiSetSystemCodeProtection+0x225b56 (00000001`4047e366)
+
+ntkrnlmp!MiSetSystemCodeProtection+0xae:
+00000001`402588be 4c89a424a0010000 mov     qword ptr [rsp+1A0h],r12
+00000001`402588c6 458be7          mov     r12d,r15d
+00000001`402588c9 44897c2428      mov     dword ptr [rsp+28h],r15d
+00000001`402588ce 4181ff00010000  cmp     r15d,100h
+00000001`402588d5 0f84ff020000    je      ntkrnlmp!MiSetSystemCodeProtection+0x3ca (00000001`40258bda)
+
+ntkrnlmp!MiSetSystemCodeProtection+0xcb:
+00000001`402588db 418bc7          mov     eax,r15d
+00000001`402588de 48896c2450      mov     qword ptr [rsp+50h],rbp
+00000001`402588e3 83e005          and     eax,5
+00000001`402588e6 4c896c2468      mov     qword ptr [rsp+68h],r13
+00000001`402588eb 4c896c2438      mov     qword ptr [rsp+38h],r13
+00000001`402588f0 3c05            cmp     al,5
+00000001`402588f2 0f84755a2200    je      ntkrnlmp!MiSetSystemCodeProtection+0x225b5d (00000001`4047e36d)
+
+ntkrnlmp!MiSetSystemCodeProtection+0xe8:
+00000001`402588f8 458bcc          mov     r9d,r12d
+00000001`402588fb 4c8bc5          mov     r8,rbp
+00000001`402588fe 41d1e9          shr     r9d,1
+00000001`40258901 488bd6          mov     rdx,rsi
+00000001`40258904 4183e102        and     r9d,2
+00000001`40258908 488bcf          mov     rcx,rdi
+00000001`4025890b e8c0d40700      call    ntkrnlmp!MiMakeDriverPagesPrivate (00000001`402d5dd0)
+00000001`40258910 85c0            test    eax,eax
+00000001`40258912 0f88635a2200    js      ntkrnlmp!MiSetSystemCodeProtection+0x225b6b (00000001`4047e37b)
+
+ntkrnlmp!MiSetSystemCodeProtection+0x108:
+00000001`40258918 498bce          mov     rcx,r14
+00000001`4025891b e8601e0000      call    ntkrnlmp!MiGetSystemRegionType (00000001`4025a780)
+00000001`40258920 3bc3            cmp     eax,ebx
+00000001`40258922 0f848a030000    je      ntkrnlmp!MiSetSystemCodeProtection+0x4a2 (00000001`40258cb2)
+
+ntkrnlmp!MiSetSystemCodeProtection+0x118:
+00000001`40258928 418bd5          mov     edx,r13d
+00000001`4025892b 488d3dce0da100  lea     rdi,[ntkrnlmp!MiState+0x46c0 (00000001`40c69700)]
+
+ntkrnlmp!MiSetSystemCodeProtection+0x122:
+00000001`40258932 488bcf          mov     rcx,rdi
+00000001`40258935 48897c2430      mov     qword ptr [rsp+30h],rdi
+00000001`4025893a 48c784248800000014000000 mov qword ptr [rsp+88h],14h
+00000001`40258946 89942480000000  mov     dword ptr [rsp+80h],edx
+00000001`4025894d 664489ac2484000000 mov   word ptr [rsp+84h],r13w
+00000001`40258956 4c89ac2490000000 mov     qword ptr [rsp+90h],r13
+00000001`4025895e 4c89ac2498000000 mov     qword ptr [rsp+98h],r13
+00000001`40258966 e8a51a0000      call    ntkrnlmp!MiLockWorkingSetShared (00000001`4025a410)
+00000001`4025896b 88442420        mov     byte ptr [rsp+20h],al
+00000001`4025896f 483bf5          cmp     rsi,rbp
+00000001`40258972 0f87e9010000    ja      ntkrnlmp!MiSetSystemCodeProtection+0x351 (00000001`40258b61)
+
+ntkrnlmp!MiSetSystemCodeProtection+0x168:
+00000001`40258978 48bbf8ffffff7f000000 mov rbx,7FFFFFFFF8h
+00000001`40258982 4d85ed          test    r13,r13
+00000001`40258985 0f84a9010000    je      ntkrnlmp!MiSetSystemCodeProtection+0x324 (00000001`40258b34)
+
+ntkrnlmp!MiSetSystemCodeProtection+0x17b:
+00000001`4025898b 48f7c6ff0f0000  test    rsi,0FFFh
+00000001`40258992 0f8484010000    je      ntkrnlmp!MiSetSystemCodeProtection+0x30c (00000001`40258b1c)
+
+ntkrnlmp!MiSetSystemCodeProtection+0x188:
+00000001`40258998 483b742450      cmp     rsi,qword ptr [rsp+50h]
+00000001`4025899d 0f8754020000    ja      ntkrnlmp!MiSetSystemCodeProtection+0x3e7 (00000001`40258bf7)
+
+ntkrnlmp!MiSetSystemCodeProtection+0x193:
+00000001`402589a3 488b3e          mov     rdi,qword ptr [rsi]
+00000001`402589a6 488bce          mov     rcx,rsi
+00000001`402589a9 e812dd0200      call    ntkrnlmp!MiPteInShadowRange (00000001`402866c0)
+00000001`402589ae 8bd8            mov     ebx,eax
+00000001`402589b0 85c0            test    eax,eax
+00000001`402589b2 0f85ee592200    jne     ntkrnlmp!MiSetSystemCodeProtection+0x225b96 (00000001`4047e3a6)
+
+ntkrnlmp!MiSetSystemCodeProtection+0x1a8:
+00000001`402589b8 48897c2458      mov     qword ptr [rsp+58h],rdi
+00000001`402589bd 40f6c701        test    dil,1
+00000001`402589c1 0f840c5b2200    je      ntkrnlmp!MiSetSystemCodeProtection+0x225cc3 (00000001`4047e4d3)
+
+ntkrnlmp!MiSetSystemCodeProtection+0x1b7:
+00000001`402589c7 488d4c2458      lea     rcx,[rsp+58h]
+00000001`402589cc e87fdc0200      call    ntkrnlmp!MI_READ_PTE_LOCK_FREE (00000001`40286650)
+00000001`402589d1 4c8bf8          mov     r15,rax
+00000001`402589d4 48b8ffffffffff000000 mov rax,0FFFFFFFFFFh
+00000001`402589de 49c1ef0c        shr     r15,0Ch
+00000001`402589e2 4c23f8          and     r15,rax
+00000001`402589e5 48b80000000000deffff mov rax,0FFFFDE0000000000h
+00000001`402589ef 4b8d2c7f        lea     rbp,[r15+r15*2]
+00000001`402589f3 48c1e504        shl     rbp,4
+00000001`402589f7 488bc0          mov     rax,rax
+00000001`402589fa 4803e8          add     rbp,rax
+00000001`402589fd 48837d2800      cmp     qword ptr [rbp+28h],0
+00000001`40258a02 0f8c05010000    jl      ntkrnlmp!MiSetSystemCodeProtection+0x2fd (00000001`40258b0d)
+
+ntkrnlmp!MiSetSystemCodeProtection+0x1f8:
+00000001`40258a08 4533c0          xor     r8d,r8d
+00000001`40258a0b 33d2            xor     edx,edx
+00000001`40258a0d 488bcd          mov     rcx,rbp
+00000001`40258a10 e87b170000      call    ntkrnlmp!MiGetPagePrivilege (00000001`4025a190)
+00000001`40258a15 a840            test    al,40h
+00000001`40258a17 0f85215a2200    jne     ntkrnlmp!MiSetSystemCodeProtection+0x225c2e (00000001`4047e43e)
+
+ntkrnlmp!MiSetSystemCodeProtection+0x20d:
+00000001`40258a1d f7052160ac0000800000 test dword ptr [ntkrnlmp!MiFlags (00000001`40d1ea48)],8000h
+00000001`40258a27 0f85285a2200    jne     ntkrnlmp!MiSetSystemCodeProtection+0x225c45 (00000001`4047e455)
+
+ntkrnlmp!MiSetSystemCodeProtection+0x21d:
+00000001`40258a2d 33db            xor     ebx,ebx
+00000001`40258a2f 895c2440        mov     dword ptr [rsp+40h],ebx
+00000001`40258a33 f0480fba6d183f  lock bts qword ptr [rbp+18h],3Fh
+00000001`40258a3a 0f82335a2200    jb      ntkrnlmp!MiSetSystemCodeProtection+0x225c63 (00000001`4047e473)
+
+ntkrnlmp!MiSetSystemCodeProtection+0x230:
+00000001`40258a40 418bc4          mov     eax,r12d
+00000001`40258a43 48c1e005        shl     rax,5
+00000001`40258a47 334510          xor     eax,dword ptr [rbp+10h]
+00000001`40258a4a 25e0030000      and     eax,3E0h
+00000001`40258a4f 48314510        xor     qword ptr [rbp+10h],rax
+00000001`40258a53 395c242c        cmp     dword ptr [rsp+2Ch],ebx
+00000001`40258a57 0f85375a2200    jne     ntkrnlmp!MiSetSystemCodeProtection+0x225c84 (00000001`4047e494)
+
+ntkrnlmp!MiSetSystemCodeProtection+0x24d:
+00000001`40258a5d 4c8be7          mov     r12,rdi
+00000001`40258a60 4183e442        and     r12d,42h
+00000001`40258a64 0f854e010000    jne     ntkrnlmp!MiSetSystemCodeProtection+0x3a8 (00000001`40258bb8)
+
+ntkrnlmp!MiSetSystemCodeProtection+0x25a:
+00000001`40258a6a 48b8ffffffffffffff7f mov rax,7FFFFFFFFFFFFFFFh
+00000001`40258a74 f048214518      lock and qword ptr [rbp+18h],rax
+00000001`40258a79 4885db          test    rbx,rbx
+00000001`40258a7c 0f85255a2200    jne     ntkrnlmp!MiSetSystemCodeProtection+0x225c97 (00000001`4047e4a7)
+
+ntkrnlmp!MiSetSystemCodeProtection+0x272:
+00000001`40258a82 448b442428      mov     r8d,dword ptr [rsp+28h]
+00000001`40258a87 498bd7          mov     rdx,r15
+00000001`40258a8a 488bce          mov     rcx,rsi
+00000001`40258a8d e8be8efeff      call    ntkrnlmp!MiMakeValidPte (00000001`40241950)
+00000001`40258a92 488bd8          mov     rbx,rax
+00000001`40258a95 8b442428        mov     eax,dword ptr [rsp+28h]
+00000001`40258a99 2405            and     al,5
+00000001`40258a9b 3c04            cmp     al,4
+00000001`40258a9d 0f8425010000    je      ntkrnlmp!MiSetSystemCodeProtection+0x3b8 (00000001`40258bc8)
+
+ntkrnlmp!MiSetSystemCodeProtection+0x293:
+00000001`40258aa3 488bd3          mov     rdx,rbx
+00000001`40258aa6 488bce          mov     rcx,rsi
+00000001`40258aa9 e8621c0000      call    ntkrnlmp!MiWriteValidPteNewProtection (00000001`4025a710)
+00000001`40258aae f705905fac0000030000 test dword ptr [ntkrnlmp!MiFlags (00000001`40d1ea48)],300h
+00000001`40258ab8 7544            jne     ntkrnlmp!MiSetSystemCodeProtection+0x2ee (00000001`40258afe)
+
+ntkrnlmp!MiSetSystemCodeProtection+0x2aa:
+00000001`40258aba bb01000000      mov     ebx,1
+00000001`40258abf 488d8c2480000000 lea     rcx,[rsp+80h]
+00000001`40258ac7 448bc3          mov     r8d,ebx
+00000001`40258aca 4533c9          xor     r9d,r9d
+00000001`40258acd 498bd6          mov     rdx,r14
+00000001`40258ad0 e87b910000      call    ntkrnlmp!MiInsertTbFlushEntry (00000001`40261c50)
+00000001`40258ad5 488b6c2460      mov     rbp,qword ptr [rsp+60h]
+00000001`40258ada 448b7c2424      mov     r15d,dword ptr [rsp+24h]
+
+ntkrnlmp!MiSetSystemCodeProtection+0x2cf:
+00000001`40258adf 4883c608        add     rsi,8
+00000001`40258ae3 4981c600100000  add     r14,1000h
+
+ntkrnlmp!MiSetSystemCodeProtection+0x2da:
+00000001`40258aea 488b7c2430      mov     rdi,qword ptr [rsp+30h]
+00000001`40258aef 483bf5          cmp     rsi,rbp
+00000001`40258af2 776d            ja      ntkrnlmp!MiSetSystemCodeProtection+0x351 (00000001`40258b61)
+
+ntkrnlmp!MiSetSystemCodeProtection+0x2e4:
+00000001`40258af4 448b642428      mov     r12d,dword ptr [rsp+28h]
+00000001`40258af9 e97afeffff      jmp     ntkrnlmp!MiSetSystemCodeProtection+0x168 (00000001`40258978)
+
+ntkrnlmp!MiSetSystemCodeProtection+0x2ee:
+00000001`40258afe 488bd3          mov     rdx,rbx
+00000001`40258b01 488bcf          mov     rcx,rdi
+00000001`40258b04 e8c3010000      call    ntkrnlmp!MI_TIGHTER_PERMISSIONS (00000001`40258ccc)
+00000001`40258b09 85c0            test    eax,eax
+00000001`40258b0b 75ad            jne     ntkrnlmp!MiSetSystemCodeProtection+0x2aa (00000001`40258aba)
+
+ntkrnlmp!MiSetSystemCodeProtection+0x2fd:
+00000001`40258b0d 448b7c2424      mov     r15d,dword ptr [rsp+24h]
+00000001`40258b12 488b6c2460      mov     rbp,qword ptr [rsp+60h]
+00000001`40258b17 e9115b2200      jmp     ntkrnlmp!MiSetSystemCodeProtection+0x225e1d (00000001`4047e62d)
+
+ntkrnlmp!MiSetSystemCodeProtection+0x30c:
+00000001`40258b1c 488d8c2480000000 lea     rcx,[rsp+80h]
+00000001`40258b24 e8e7580000      call    ntkrnlmp!MiFlushTbList (00000001`4025e410)
+00000001`40258b29 498bd5          mov     rdx,r13
+00000001`40258b2c 488bcf          mov     rcx,rdi
+00000001`40258b2f e87c921000      call    ntkrnlmp!MiUnlockPageTableInternal (00000001`40361db0)
+
+ntkrnlmp!MiSetSystemCodeProtection+0x324:
+00000001`40258b34 4c8bee          mov     r13,rsi
+00000001`40258b37 48b80000000080f6ffff mov rax,0FFFFF68000000000h
+00000001`40258b41 49c1ed09        shr     r13,9
+00000001`40258b45 4c23eb          and     r13,rbx
+00000001`40258b48 488bc0          mov     rax,rax
+00000001`40258b4b 4c03e8          add     r13,rax
+00000001`40258b4e 4533c0          xor     r8d,r8d
+00000001`40258b51 498bd5          mov     rdx,r13
+00000001`40258b54 488bcf          mov     rcx,rdi
+00000001`40258b57 e834580100      call    ntkrnlmp!MiLockPageTableInternal (00000001`4026e390)
+00000001`40258b5c e937feffff      jmp     ntkrnlmp!MiSetSystemCodeProtection+0x188 (00000001`40258998)
+
+ntkrnlmp!MiSetSystemCodeProtection+0x351:
+00000001`40258b61 488d8c2480000000 lea     rcx,[rsp+80h]
+00000001`40258b69 e8a2580000      call    ntkrnlmp!MiFlushTbList (00000001`4025e410)
+00000001`40258b6e 4d85ed          test    r13,r13
+00000001`40258b71 740b            je      ntkrnlmp!MiSetSystemCodeProtection+0x36e (00000001`40258b7e)
+
+ntkrnlmp!MiSetSystemCodeProtection+0x363:
+00000001`40258b73 498bd5          mov     rdx,r13
+00000001`40258b76 488bcf          mov     rcx,rdi
+00000001`40258b79 e832921000      call    ntkrnlmp!MiUnlockPageTableInternal (00000001`40361db0)
+
+ntkrnlmp!MiSetSystemCodeProtection+0x36e:
+00000001`40258b7e 0fb6542420      movzx   edx,byte ptr [rsp+20h]
+00000001`40258b83 488bcf          mov     rcx,rdi
+00000001`40258b86 e85538fcff      call    ntkrnlmp!MiUnlockWorkingSetShared (00000001`4021c3e0)
+00000001`40258b8b 8bc3            mov     eax,ebx
+
+ntkrnlmp!MiSetSystemCodeProtection+0x37d:
+00000001`40258b8d 4c8ba424a0010000 mov     r12,qword ptr [rsp+1A0h]
+
+ntkrnlmp!MiSetSystemCodeProtection+0x385:
+00000001`40258b95 488b8c2440010000 mov     rcx,qword ptr [rsp+140h]
+00000001`40258b9d 4833cc          xor     rcx,rsp
+00000001`40258ba0 e84b8a1700      call    ntkrnlmp!_security_check_cookie (00000001`403d15f0)
+00000001`40258ba5 4881c450010000  add     rsp,150h
+00000001`40258bac 415f            pop     r15
+00000001`40258bae 415e            pop     r14
+00000001`40258bb0 415d            pop     r13
+00000001`40258bb2 5f              pop     rdi
+00000001`40258bb3 5e              pop     rsi
+00000001`40258bb4 5d              pop     rbp
+00000001`40258bb5 5b              pop     rbx
+00000001`40258bb6 c3              ret
+
+ntkrnlmp!MiSetSystemCodeProtection+0x3a8:
+00000001`40258bb8 488bcd          mov     rcx,rbp
+00000001`40258bbb e8f0920000      call    ntkrnlmp!MiCaptureDirtyBitToPfn (00000001`40261eb0)
+00000001`40258bc0 488bd8          mov     rbx,rax
+00000001`40258bc3 e9a2feffff      jmp     ntkrnlmp!MiSetSystemCodeProtection+0x25a (00000001`40258a6a)
+
+ntkrnlmp!MiSetSystemCodeProtection+0x3b8:
+00000001`40258bc8 4d85e4          test    r12,r12
+00000001`40258bcb 0f84d2feffff    je      ntkrnlmp!MiSetSystemCodeProtection+0x293 (00000001`40258aa3)
+
+ntkrnlmp!MiSetSystemCodeProtection+0x3c1:
+00000001`40258bd1 4883cb42        or      rbx,42h
+00000001`40258bd5 e9c9feffff      jmp     ntkrnlmp!MiSetSystemCodeProtection+0x293 (00000001`40258aa3)
+
+ntkrnlmp!MiSetSystemCodeProtection+0x3ca:
+00000001`40258bda 488b4f70        mov     rcx,qword ptr [rdi+70h]
+00000001`40258bde e89da7ffff      call    ntkrnlmp!MiSectionControlArea (00000001`40253380)
+00000001`40258be3 4889442468      mov     qword ptr [rsp+68h],rax
+00000001`40258be8 4c896c2438      mov     qword ptr [rsp+38h],r13
+00000001`40258bed 4c896c2450      mov     qword ptr [rsp+50h],r13
+00000001`40258bf2 e921fdffff      jmp     ntkrnlmp!MiSetSystemCodeProtection+0x108 (00000001`40258918)
+
+ntkrnlmp!MiSetSystemCodeProtection+0x3e7:
+00000001`40258bf7 488b442470      mov     rax,qword ptr [rsp+70h]
+00000001`40258bfc 498bde          mov     rbx,r14
+00000001`40258bff 4c8b642438      mov     r12,qword ptr [rsp+38h]
+00000001`40258c04 482b5830        sub     rbx,qword ptr [rax+30h]
+00000001`40258c08 4d85e4          test    r12,r12
+00000001`40258c0b 0f8571572200    jne     ntkrnlmp!MiSetSystemCodeProtection+0x225b72 (00000001`4047e382)
+
+ntkrnlmp!MiSetSystemCodeProtection+0x401:
+00000001`40258c11 488d8c2480000000 lea     rcx,[rsp+80h]
+00000001`40258c19 e8f2570000      call    ntkrnlmp!MiFlushTbList (00000001`4025e410)
+00000001`40258c1e 498bd5          mov     rdx,r13
+00000001`40258c21 488bcf          mov     rcx,rdi
+00000001`40258c24 e887911000      call    ntkrnlmp!MiUnlockPageTableInternal (00000001`40361db0)
+00000001`40258c29 0fb6542420      movzx   edx,byte ptr [rsp+20h]
+00000001`40258c2e 488bcf          mov     rcx,rdi
+00000001`40258c31 e8aa37fcff      call    ntkrnlmp!MiUnlockWorkingSetShared (00000001`4021c3e0)
+00000001`40258c36 488b4c2468      mov     rcx,qword ptr [rsp+68h]
+00000001`40258c3b 4c8d442448      lea     r8,[rsp+48h]
+00000001`40258c40 488bd3          mov     rdx,rbx
+00000001`40258c43 e8d8ceffff      call    ntkrnlmp!MiOffsetToProtos (00000001`40255b20)
+00000001`40258c48 488bcf          mov     rcx,rdi
+00000001`40258c4b 4889442438      mov     qword ptr [rsp+38h],rax
+00000001`40258c50 4c8be0          mov     r12,rax
+00000001`40258c53 e8b8170000      call    ntkrnlmp!MiLockWorkingSetShared (00000001`4025a410)
+00000001`40258c58 4533c0          xor     r8d,r8d
+00000001`40258c5b 498bd5          mov     rdx,r13
+00000001`40258c5e 488bcf          mov     rcx,rdi
+00000001`40258c61 e82a570100      call    ntkrnlmp!MiLockPageTableInternal (00000001`4026e390)
+00000001`40258c66 488b542448      mov     rdx,qword ptr [rsp+48h]
+
+ntkrnlmp!MiSetSystemCodeProtection+0x45b:
+00000001`40258c6b 418b442434      mov     eax,dword ptr [r12+34h]
+00000001`40258c70 418b4c242c      mov     ecx,dword ptr [r12+2Ch]
+00000001`40258c75 25ffffff3f      and     eax,3FFFFFFFh
+00000001`40258c7a 450fb7642420    movzx   r12d,word ptr [r12+20h]
+00000001`40258c80 482bc8          sub     rcx,rax
+00000001`40258c83 482bca          sub     rcx,rdx
+00000001`40258c86 41d1ec          shr     r12d,1
+00000001`40258c89 4183e41f        and     r12d,1Fh
+00000001`40258c8d 4489642428      mov     dword ptr [rsp+28h],r12d
+00000001`40258c92 488d41ff        lea     rax,[rcx-1]
+00000001`40258c96 488d04c6        lea     rax,[rsi+rax*8]
+00000001`40258c9a 4889442450      mov     qword ptr [rsp+50h],rax
+00000001`40258c9f 418bc4          mov     eax,r12d
+00000001`40258ca2 83e005          and     eax,5
+00000001`40258ca5 3c05            cmp     al,5
+00000001`40258ca7 0f85f6fcffff    jne     ntkrnlmp!MiSetSystemCodeProtection+0x193 (00000001`402589a3)
+
+ntkrnlmp!MiSetSystemCodeProtection+0x49d:
+00000001`40258cad e9e6562200      jmp     ntkrnlmp!MiSetSystemCodeProtection+0x225b88 (00000001`4047e398)
+
+ntkrnlmp!MiSetSystemCodeProtection+0x4a2:
+00000001`40258cb2 ba02000000      mov     edx,2
+00000001`40258cb7 e804540d00      call    ntkrnlmp!MiGetSessionVm (00000001`4032e0c0)
+00000001`40258cbc 488bf8          mov     rdi,rax
+00000001`40258cbf e96efcffff      jmp     ntkrnlmp!MiSetSystemCodeProtection+0x122 (00000001`40258932)
+
+ntkrnlmp!MiSetSystemCodeProtection+0x225b44:
+00000001`4047e354 4183e7ef        and     r15d,0FFFFFFEFh
+00000001`4047e358 895c242c        mov     dword ptr [rsp+2Ch],ebx
+00000001`4047e35c 44897c2424      mov     dword ptr [rsp+24h],r15d
+00000001`4047e361 e929a5ddff      jmp     ntkrnlmp!MiSetSystemCodeProtection+0x7f (00000001`4025888f)
+
+ntkrnlmp!MiSetSystemCodeProtection+0x225b56:
+00000001`4047e366 8bc3            mov     eax,ebx
+00000001`4047e368 e928a8ddff      jmp     ntkrnlmp!MiSetSystemCodeProtection+0x385 (00000001`40258b95)
+
+ntkrnlmp!MiSetSystemCodeProtection+0x225b5d:
+00000001`4047e36d 4183e4fe        and     r12d,0FFFFFFFEh
+00000001`4047e371 4489642428      mov     dword ptr [rsp+28h],r12d
+00000001`4047e376 e97da5ddff      jmp     ntkrnlmp!MiSetSystemCodeProtection+0xe8 (00000001`402588f8)
+
+ntkrnlmp!MiSetSystemCodeProtection+0x225b6b:
+00000001`4047e37b 33c0            xor     eax,eax
+00000001`4047e37d e90ba8ddff      jmp     ntkrnlmp!MiSetSystemCodeProtection+0x37d (00000001`40258b8d)
+
+ntkrnlmp!MiSetSystemCodeProtection+0x225b72:
+00000001`4047e382 4d8b642410      mov     r12,qword ptr [r12+10h]
+00000001`4047e387 33d2            xor     edx,edx
+00000001`4047e389 4c89642438      mov     qword ptr [rsp+38h],r12
+00000001`4047e38e 4889542448      mov     qword ptr [rsp+48h],rdx
+00000001`4047e393 e9d3a8ddff      jmp     ntkrnlmp!MiSetSystemCodeProtection+0x45b (00000001`40258c6b)
+
+ntkrnlmp!MiSetSystemCodeProtection+0x225b88:
+00000001`4047e398 4183e4fe        and     r12d,0FFFFFFFEh
+00000001`4047e39c 4489642428      mov     dword ptr [rsp+28h],r12d
+00000001`4047e3a1 e9fda5ddff      jmp     ntkrnlmp!MiSetSystemCodeProtection+0x193 (00000001`402589a3)
+
+ntkrnlmp!MiSetSystemCodeProtection+0x225b96:
+00000001`4047e3a6 f70598068a0000006000 test dword ptr [ntkrnlmp!MiFlags (00000001`40d1ea48)],600000h
+00000001`4047e3b0 0f8402a6ddff    je      ntkrnlmp!MiSetSystemCodeProtection+0x1a8 (00000001`402589b8)
+
+ntkrnlmp!MiSetSystemCodeProtection+0x225ba6:
+00000001`4047e3b6 65488b0c2588010000 mov   rcx,qword ptr gs:[188h]
+00000001`4047e3bf 488b91b8000000  mov     rdx,qword ptr [rcx+0B8h]
+00000001`4047e3c6 80ba9003000001  cmp     byte ptr [rdx+390h],1
+00000001`4047e3cd 0f84e5a5ddff    je      ntkrnlmp!MiSetSystemCodeProtection+0x1a8 (00000001`402589b8)
+
+ntkrnlmp!MiSetSystemCodeProtection+0x225bc3:
+00000001`4047e3d3 40f6c701        test    dil,1
+00000001`4047e3d7 0f84dba5ddff    je      ntkrnlmp!MiSetSystemCodeProtection+0x1a8 (00000001`402589b8)
+
+ntkrnlmp!MiSetSystemCodeProtection+0x225bcd:
+00000001`4047e3dd 40f6c720        test    dil,20h
+00000001`4047e3e1 740a            je      ntkrnlmp!MiSetSystemCodeProtection+0x225bdd (00000001`4047e3ed)
+
+ntkrnlmp!MiSetSystemCodeProtection+0x225bd3:
+00000001`4047e3e3 40f6c742        test    dil,42h
+00000001`4047e3e7 0f85cba5ddff    jne     ntkrnlmp!MiSetSystemCodeProtection+0x1a8 (00000001`402589b8)
+
+ntkrnlmp!MiSetSystemCodeProtection+0x225bdd:
+00000001`4047e3ed 65488b042588010000 mov   rax,qword ptr gs:[188h]
+00000001`4047e3f6 488b88b8000000  mov     rcx,qword ptr [rax+0B8h]
+00000001`4047e3fd 488b9188070000  mov     rdx,qword ptr [rcx+788h]
+00000001`4047e404 4885d2          test    rdx,rdx
+00000001`4047e407 0f84aba5ddff    je      ntkrnlmp!MiSetSystemCodeProtection+0x1a8 (00000001`402589b8)
+
+ntkrnlmp!MiSetSystemCodeProtection+0x225bfd:
+00000001`4047e40d 488bc6          mov     rax,rsi
+00000001`4047e410 48c1e803        shr     rax,3
+00000001`4047e414 25ff010000      and     eax,1FFh
+00000001`4047e419 488b04c2        mov     rax,qword ptr [rdx+rax*8]
+00000001`4047e41d 488bd7          mov     rdx,rdi
+00000001`4047e420 4883ca20        or      rdx,20h
+00000001`4047e424 a820            test    al,20h
+00000001`4047e426 480f44d7        cmove   rdx,rdi
+00000001`4047e42a 488bfa          mov     rdi,rdx
+00000001`4047e42d a842            test    al,42h
+00000001`4047e42f 0f8483a5ddff    je      ntkrnlmp!MiSetSystemCodeProtection+0x1a8 (00000001`402589b8)
+
+ntkrnlmp!MiSetSystemCodeProtection+0x225c25:
+00000001`4047e435 4883cf42        or      rdi,42h
+00000001`4047e439 e97aa5ddff      jmp     ntkrnlmp!MiSetSystemCodeProtection+0x1a8 (00000001`402589b8)
+
+ntkrnlmp!MiSetSystemCodeProtection+0x225c2e:
+00000001`4047e43e f644242406      test    byte ptr [rsp+24h],6
+00000001`4047e443 0f84e4a5ddff    je      ntkrnlmp!MiSetSystemCodeProtection+0x21d (00000001`40258a2d)
+
+ntkrnlmp!MiSetSystemCodeProtection+0x225c39:
+00000001`4047e449 488b7c2430      mov     rdi,qword ptr [rsp+30h]
+00000001`4047e44e 33db            xor     ebx,ebx
+00000001`4047e450 e90ca7ddff      jmp     ntkrnlmp!MiSetSystemCodeProtection+0x351 (00000001`40258b61)
+
+ntkrnlmp!MiSetSystemCodeProtection+0x225c45:
+00000001`4047e455 f644242404      test    byte ptr [rsp+24h],4
+00000001`4047e45a 0f84cda5ddff    je      ntkrnlmp!MiSetSystemCodeProtection+0x21d (00000001`40258a2d)
+
+ntkrnlmp!MiSetSystemCodeProtection+0x225c50:
+00000001`4047e460 488b4528        mov     rax,qword ptr [rbp+28h]
+00000001`4047e464 48c1e83c        shr     rax,3Ch
+00000001`4047e468 2407            and     al,7
+00000001`4047e46a 3c03            cmp     al,3
+00000001`4047e46c 74db            je      ntkrnlmp!MiSetSystemCodeProtection+0x225c39 (00000001`4047e449)
+
+ntkrnlmp!MiSetSystemCodeProtection+0x225c5e:
+00000001`4047e46e e9baa5ddff      jmp     ntkrnlmp!MiSetSystemCodeProtection+0x21d (00000001`40258a2d)
+
+ntkrnlmp!MiSetSystemCodeProtection+0x225c63:
+00000001`4047e473 488d4c2440      lea     rcx,[rsp+40h]
+00000001`4047e478 e893afe3ff      call    ntkrnlmp!KeYieldProcessorEx (00000001`402b9410)
+00000001`4047e47d 488b4518        mov     rax,qword ptr [rbp+18h]
+00000001`4047e481 4885c0          test    rax,rax
+00000001`4047e484 78ed            js      ntkrnlmp!MiSetSystemCodeProtection+0x225c63 (00000001`4047e473)
+
+ntkrnlmp!MiSetSystemCodeProtection+0x225c76:
+00000001`4047e486 f0480fba6d183f  lock bts qword ptr [rbp+18h],3Fh
+00000001`4047e48d 72e4            jb      ntkrnlmp!MiSetSystemCodeProtection+0x225c63 (00000001`4047e473)
+
+ntkrnlmp!MiSetSystemCodeProtection+0x225c7f:
+00000001`4047e48f e9aca5ddff      jmp     ntkrnlmp!MiSetSystemCodeProtection+0x230 (00000001`40258a40)
+
+ntkrnlmp!MiSetSystemCodeProtection+0x225c84:
+00000001`4047e494 ba04000000      mov     edx,4
+00000001`4047e499 488bcd          mov     rcx,rbp
+00000001`4047e49c e85340e6ff      call    ntkrnlmp!MiMarkPfnVerified (00000001`402e24f4)
+00000001`4047e4a1 90              nop
+00000001`4047e4a2 e9b6a5ddff      jmp     ntkrnlmp!MiSetSystemCodeProtection+0x24d (00000001`40258a5d)
+
+ntkrnlmp!MiSetSystemCodeProtection+0x225c97:
+00000001`4047e4a7 488b4528        mov     rax,qword ptr [rbp+28h]
+00000001`4047e4ab 41b801000000    mov     r8d,1
+00000001`4047e4b1 488b0dd08a7e00  mov     rcx,qword ptr [ntkrnlmp!MiState+0x1f48 (00000001`40c66f88)]
+00000001`4047e4b8 488bd3          mov     rdx,rbx
+00000001`4047e4bb 48c1e82b        shr     rax,2Bh
+00000001`4047e4bf 25ff030000      and     eax,3FFh
+00000001`4047e4c4 488b0cc1        mov     rcx,qword ptr [rcx+rax*8]
+00000001`4047e4c8 e88312e6ff      call    ntkrnlmp!MiReleasePageFileInfo (00000001`402df750)
+00000001`4047e4cd 90              nop
+00000001`4047e4ce e9afa5ddff      jmp     ntkrnlmp!MiSetSystemCodeProtection+0x272 (00000001`40258a82)
+
+ntkrnlmp!MiSetSystemCodeProtection+0x225cc3:
+00000001`4047e4d3 480fbae70a      bt      rdi,0Ah
+00000001`4047e4d8 0f824f010000    jb      ntkrnlmp!MiSetSystemCodeProtection+0x225e1d (00000001`4047e62d)
+
+ntkrnlmp!MiSetSystemCodeProtection+0x225cce:
+00000001`4047e4de 480fbae70b      bt      rdi,0Bh
+00000001`4047e4e3 0f831c010000    jae     ntkrnlmp!MiSetSystemCodeProtection+0x225df5 (00000001`4047e605)
+
+ntkrnlmp!MiSetSystemCodeProtection+0x225cd9:
+00000001`4047e4e9 4533c0          xor     r8d,r8d
+00000001`4047e4ec 33d2            xor     edx,edx
+00000001`4047e4ee 488bce          mov     rcx,rsi
+00000001`4047e4f1 e882e4ebff      call    ntkrnlmp!MiLockTransitionLeafPageEx (00000001`4033c978)
+00000001`4047e4f6 4885c0          test    rax,rax
+00000001`4047e4f9 0f8438010000    je      ntkrnlmp!MiSetSystemCodeProtection+0x225e27 (00000001`4047e637)
+
+ntkrnlmp!MiSetSystemCodeProtection+0x225cef:
+00000001`4047e4ff 488bce          mov     rcx,rsi
+00000001`4047e502 e84981e0ff      call    ntkrnlmp!MI_READ_PTE_LOCK_FREE (00000001`40286650)
+00000001`4047e507 488b0df2717e00  mov     rcx,qword ptr [ntkrnlmp!MiState+0x6c0 (00000001`40c65700)]
+00000001`4047e50e 488bd0          mov     rdx,rax
+00000001`4047e511 4885c9          test    rcx,rcx
+00000001`4047e514 7414            je      ntkrnlmp!MiSetSystemCodeProtection+0x225d1a (00000001`4047e52a)
+
+ntkrnlmp!MiSetSystemCodeProtection+0x225d06:
+00000001`4047e516 f6c210          test    dl,10h
+00000001`4047e519 750b            jne     ntkrnlmp!MiSetSystemCodeProtection+0x225d16 (00000001`4047e526)
+
+ntkrnlmp!MiSetSystemCodeProtection+0x225d0b:
+00000001`4047e51b 488bc1          mov     rax,rcx
+00000001`4047e51e 48f7d0          not     rax
+00000001`4047e521 4823c2          and     rax,rdx
+00000001`4047e524 eb04            jmp     ntkrnlmp!MiSetSystemCodeProtection+0x225d1a (00000001`4047e52a)
+
+ntkrnlmp!MiSetSystemCodeProtection+0x225d16:
+00000001`4047e526 4883e0ef        and     rax,0FFFFFFFFFFFFFFEFh
+
+ntkrnlmp!MiSetSystemCodeProtection+0x225d1a:
+00000001`4047e52a 48c1e80c        shr     rax,0Ch
+00000001`4047e52e 48b9ffffffffff000000 mov rcx,0FFFFFFFFFFh
+00000001`4047e538 4823c1          and     rax,rcx
+00000001`4047e53b 4c8d1c40        lea     r11,[rax+rax*2]
+00000001`4047e53f 48b80000000000deffff mov rax,0FFFFDE0000000000h
+00000001`4047e549 49c1e304        shl     r11,4
+00000001`4047e54d 488bc0          mov     rax,rax
+00000001`4047e550 4c03d8          add     r11,rax
+00000001`4047e553 418bcc          mov     ecx,r12d
+00000001`4047e556 83e11f          and     ecx,1Fh
+00000001`4047e559 4881e21ffcffff  and     rdx,0FFFFFFFFFFFFFC1Fh
+00000001`4047e560 48c1e105        shl     rcx,5
+00000001`4047e564 480bd1          or      rdx,rcx
+00000001`4047e567 498b4310        mov     rax,qword ptr [r11+10h]
+00000001`4047e56b 48251ffcffff    and     rax,0FFFFFFFFFFFFFC1Fh
+00000001`4047e571 4889542458      mov     qword ptr [rsp+58h],rdx
+00000001`4047e576 480bc1          or      rax,rcx
+00000001`4047e579 49894310        mov     qword ptr [r11+10h],rax
+00000001`4047e57d 488bc2          mov     rax,rdx
+00000001`4047e580 85db            test    ebx,ebx
+00000001`4047e582 7468            je      ntkrnlmp!MiSetSystemCodeProtection+0x225ddc (00000001`4047e5ec)
+
+ntkrnlmp!MiSetSystemCodeProtection+0x225d74:
+00000001`4047e584 e883bcecff      call    ntkrnlmp!MiPteHasShadow (00000001`4034a20c)
+00000001`4047e589 85c0            test    eax,eax
+00000001`4047e58b 742e            je      ntkrnlmp!MiSetSystemCodeProtection+0x225dab (00000001`4047e5bb)
+
+ntkrnlmp!MiSetSystemCodeProtection+0x225d7d:
+00000001`4047e58d 803d29837e0000  cmp     byte ptr [ntkrnlmp!MiState+0x187d (00000001`40c668bd)],0
+00000001`4047e594 488bc2          mov     rax,rdx
+00000001`4047e597 7512            jne     ntkrnlmp!MiSetSystemCodeProtection+0x225d9b (00000001`4047e5ab)
+
+ntkrnlmp!MiSetSystemCodeProtection+0x225d89:
+00000001`4047e599 f6c201          test    dl,1
+00000001`4047e59c 740d            je      ntkrnlmp!MiSetSystemCodeProtection+0x225d9b (00000001`4047e5ab)
+
+ntkrnlmp!MiSetSystemCodeProtection+0x225d8e:
+00000001`4047e59e 48b90000000000000080 mov rcx,8000000000000000h
+00000001`4047e5a8 480bc1          or      rax,rcx
+
+ntkrnlmp!MiSetSystemCodeProtection+0x225d9b:
+00000001`4047e5ab 488bd0          mov     rdx,rax
+00000001`4047e5ae 488906          mov     qword ptr [rsi],rax
+00000001`4047e5b1 488bce          mov     rcx,rsi
+00000001`4047e5b4 e8f3bbecff      call    ntkrnlmp!MiWritePteShadow (00000001`4034a1ac)
+00000001`4047e5b9 eb34            jmp     ntkrnlmp!MiSetSystemCodeProtection+0x225ddf (00000001`4047e5ef)
+
+ntkrnlmp!MiSetSystemCodeProtection+0x225dab:
+00000001`4047e5bb 65488b042588010000 mov   rax,qword ptr gs:[188h]
+00000001`4047e5c4 488b88b8000000  mov     rcx,qword ptr [rax+0B8h]
+00000001`4047e5cb f7817c08000000100000 test dword ptr [rcx+87Ch],1000h
+00000001`4047e5d5 7429            je      ntkrnlmp!MiSetSystemCodeProtection+0x225df0 (00000001`4047e600)
+
+ntkrnlmp!MiSetSystemCodeProtection+0x225dc7:
+00000001`4047e5d7 488bc2          mov     rax,rdx
+00000001`4047e5da f6c201          test    dl,1
+00000001`4047e5dd 740d            je      ntkrnlmp!MiSetSystemCodeProtection+0x225ddc (00000001`4047e5ec)
+
+ntkrnlmp!MiSetSystemCodeProtection+0x225dcf:
+00000001`4047e5df 48b90000000000000080 mov rcx,8000000000000000h
+00000001`4047e5e9 480bc1          or      rax,rcx
+
+ntkrnlmp!MiSetSystemCodeProtection+0x225ddc:
+00000001`4047e5ec 488906          mov     qword ptr [rsi],rax
+
+ntkrnlmp!MiSetSystemCodeProtection+0x225ddf:
+00000001`4047e5ef 48b8ffffffffffffff7f mov rax,7FFFFFFFFFFFFFFFh
+00000001`4047e5f9 f049214318      lock and qword ptr [r11+18h],rax
+00000001`4047e5fe eb2d            jmp     ntkrnlmp!MiSetSystemCodeProtection+0x225e1d (00000001`4047e62d)
+
+ntkrnlmp!MiSetSystemCodeProtection+0x225df0:
+00000001`4047e600 488916          mov     qword ptr [rsi],rdx
+00000001`4047e603 ebea            jmp     ntkrnlmp!MiSetSystemCodeProtection+0x225ddf (00000001`4047e5ef)
+
+ntkrnlmp!MiSetSystemCodeProtection+0x225df5:
+00000001`4047e605 4885ff          test    rdi,rdi
+00000001`4047e608 7423            je      ntkrnlmp!MiSetSystemCodeProtection+0x225e1d (00000001`4047e62d)
+
+ntkrnlmp!MiSetSystemCodeProtection+0x225dfa:
+00000001`4047e60a 4181ff00010000  cmp     r15d,100h
+00000001`4047e611 741a            je      ntkrnlmp!MiSetSystemCodeProtection+0x225e1d (00000001`4047e62d)
+
+ntkrnlmp!MiSetSystemCodeProtection+0x225e03:
+00000001`4047e613 418bc4          mov     eax,r12d
+00000001`4047e616 48c1e005        shl     rax,5
+00000001`4047e61a 4833c7          xor     rax,rdi
+00000001`4047e61d 25e0030000      and     eax,3E0h
+00000001`4047e622 4833c7          xor     rax,rdi
+00000001`4047e625 4889442458      mov     qword ptr [rsp+58h],rax
+00000001`4047e62a 488906          mov     qword ptr [rsi],rax
+
+ntkrnlmp!MiSetSystemCodeProtection+0x225e1d:
+00000001`4047e62d bb01000000      mov     ebx,1
+00000001`4047e632 e9a8a4ddff      jmp     ntkrnlmp!MiSetSystemCodeProtection+0x2cf (00000001`40258adf)
+
+ntkrnlmp!MiSetSystemCodeProtection+0x225e27:
+00000001`4047e637 bb01000000      mov     ebx,1
+00000001`4047e63c e9a9a4ddff      jmp     ntkrnlmp!MiSetSystemCodeProtection+0x2da (00000001`40258aea)
+quit:
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\atlmfc.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\ObjectiveC.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\concurrency.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\cpp_rest.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\stl.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\Windows.Data.Json.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\Windows.Devices.Geolocation.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\Windows.Devices.Sensors.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\Windows.Media.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\windows.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\winrt.natvis'

@@ -1,0 +1,81 @@
+Source: 22621-mi-write-pte-cdb-uf.txt; first 200 instructions in CDB uf traversal order. All addresses RVA.
+CDB uf instruction count=79; listed=79
+0025A710  48895c2408               mov     qword ptr [rsp+8],rbx
+0025A715  57                       push    rdi
+0025A716  4883ec20                 sub     rsp,20h
+0025A71A  488b19                   mov     rbx,qword ptr [rcx]
+0025A71D  488bf9                   mov     rdi,rcx
+0025A720  48b800d0be7dfbf6ffff     mov rax,0FFFFF6FB7DBED000h
+0025A72A  483bc8                   cmp     rcx,rax
+0025A72D  7332                     jae     ntkrnlmp!MiWriteValidPteNewProtection+0x51 (RVA 0x25A761)
+0025A72F  4833da                   xor     rbx,rdx
+0025A732  48b8000000000000007f     mov rax,7F00000000000000h
+0025A73C  4823d8                   and     rbx,rax
+0025A73F  488bcf                   mov     rcx,rdi
+0025A742  4833da                   xor     rbx,rdx
+0025A745  e876bf0200               call    ntkrnlmp!MiPteInShadowRange (RVA 0x2866C0)
+0025A74A  85c0                     test    eax,eax
+0025A74C  0f851d4b2200             jne     ntkrnlmp!MiWriteValidPteNewProtection+0x224b5f (RVA 0x47F26F)
+0025A752  48891f                   mov     qword ptr [rdi],rbx
+0025A755  488b5c2430               mov     rbx,qword ptr [rsp+30h]
+0025A75A  4883c420                 add     rsp,20h
+0025A75E  5f                       pop     rdi
+0025A75F  c3                       ret
+0025A761  48b8f8d7be7dfbf6ffff     mov rax,0FFFFF6FB7DBED7F8h
+0025A76B  483bf8                   cmp     rdi,rax
+0025A76E  77bf                     ja      ntkrnlmp!MiWriteValidPteNewProtection+0x1f (RVA 0x25A72F)
+0025A770  e9654a2200               jmp     ntkrnlmp!MiWriteValidPteNewProtection+0x224aca (RVA 0x47F1DA)
+0047F1DA  f70564f8890000006000     test dword ptr [ntkrnlmp!MiFlags (RVA 0xD1EA48)],600000h
+0047F1E4  0f8445b5ddff             je      ntkrnlmp!MiWriteValidPteNewProtection+0x1f (RVA 0x25A72F)
+0047F1EA  65488b042588010000       mov   rax,qword ptr gs:[188h]
+0047F1F3  488b88b8000000           mov     rcx,qword ptr [rax+0B8h]
+0047F1FA  80b99003000001           cmp     byte ptr [rcx+390h],1
+0047F201  0f8428b5ddff             je      ntkrnlmp!MiWriteValidPteNewProtection+0x1f (RVA 0x25A72F)
+0047F207  f6c301                   test    bl,1
+0047F20A  0f841fb5ddff             je      ntkrnlmp!MiWriteValidPteNewProtection+0x1f (RVA 0x25A72F)
+0047F210  f6c320                   test    bl,20h
+0047F213  7409                     je      ntkrnlmp!MiWriteValidPteNewProtection+0x224b0e (RVA 0x47F21E)
+0047F215  f6c342                   test    bl,42h
+0047F218  0f8511b5ddff             jne     ntkrnlmp!MiWriteValidPteNewProtection+0x1f (RVA 0x25A72F)
+0047F21E  65488b042588010000       mov   rax,qword ptr gs:[188h]
+0047F227  488b88b8000000           mov     rcx,qword ptr [rax+0B8h]
+0047F22E  4c8b8188070000           mov     r8,qword ptr [rcx+788h]
+0047F235  4d85c0                   test    r8,r8
+0047F238  0f84f1b4ddff             je      ntkrnlmp!MiWriteValidPteNewProtection+0x1f (RVA 0x25A72F)
+0047F23E  488bc7                   mov     rax,rdi
+0047F241  48c1e803                 shr     rax,3
+0047F245  25ff010000               and     eax,1FFh
+0047F24A  498b04c0                 mov     rax,qword ptr [r8+rax*8]
+0047F24E  4c8bc3                   mov     r8,rbx
+0047F251  4983c820                 or      r8,20h
+0047F255  a820                     test    al,20h
+0047F257  4c0f44c3                 cmove   r8,rbx
+0047F25B  498bd8                   mov     rbx,r8
+0047F25E  a842                     test    al,42h
+0047F260  0f84c9b4ddff             je      ntkrnlmp!MiWriteValidPteNewProtection+0x1f (RVA 0x25A72F)
+0047F266  4883cb42                 or      rbx,42h
+0047F26A  e9c0b4ddff               jmp     ntkrnlmp!MiWriteValidPteNewProtection+0x1f (RVA 0x25A72F)
+0047F26F  e898afecff               call    ntkrnlmp!MiPteHasShadow (RVA 0x34A20C)
+0047F274  85c0                     test    eax,eax
+0047F276  742f                     je      ntkrnlmp!MiWriteValidPteNewProtection+0x224b97 (RVA 0x47F2A7)
+0047F278  803d3e767e0000           cmp     byte ptr [ntkrnlmp!MiState+0x187d (RVA 0xC668BD)],0
+0047F27F  7512                     jne     ntkrnlmp!MiWriteValidPteNewProtection+0x224b83 (RVA 0x47F293)
+0047F281  f6c301                   test    bl,1
+0047F284  740d                     je      ntkrnlmp!MiWriteValidPteNewProtection+0x224b83 (RVA 0x47F293)
+0047F286  48b80000000000000080     mov rax,8000000000000000h
+0047F290  480bd8                   or      rbx,rax
+0047F293  488bd3                   mov     rdx,rbx
+0047F296  48891f                   mov     qword ptr [rdi],rbx
+0047F299  488bcf                   mov     rcx,rdi
+0047F29C  e80bafecff               call    ntkrnlmp!MiWritePteShadow (RVA 0x34A1AC)
+0047F2A1  90                       nop
+0047F2A2  e9aeb4ddff               jmp     ntkrnlmp!MiWriteValidPteNewProtection+0x45 (RVA 0x25A755)
+0047F2A7  65488b042588010000       mov   rax,qword ptr gs:[188h]
+0047F2B0  488b88b8000000           mov     rcx,qword ptr [rax+0B8h]
+0047F2B7  f7817c08000000100000     test dword ptr [rcx+87Ch],1000h
+0047F2C1  0f848bb4ddff             je      ntkrnlmp!MiWriteValidPteNewProtection+0x42 (RVA 0x25A752)
+0047F2C7  f6c301                   test    bl,1
+0047F2CA  0f8482b4ddff             je      ntkrnlmp!MiWriteValidPteNewProtection+0x42 (RVA 0x25A752)
+0047F2D0  48b80000000000000080     mov rax,8000000000000000h
+0047F2DA  480bd8                   or      rbx,rax
+0047F2DD  e970b4ddff               jmp     ntkrnlmp!MiWriteValidPteNewProtection+0x42 (RVA 0x25A752)

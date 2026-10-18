@@ -1,0 +1,6 @@
+Source: 22621-mi-pfn-proto-cdb-uf.txt; first 200 instructions in CDB uf traversal order. All addresses RVA.
+CDB uf instruction count=4; listed=4
+002E9660  33c0                     xor     eax,eax
+002E9662  48394128                 cmp     qword ptr [rcx+28h],rax
+002E9666  0f9cc0                   setl    al
+002E9669  c3                       ret

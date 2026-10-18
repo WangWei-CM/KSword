@@ -1,0 +1,18 @@
+Source: 22621-mi-set-cdb-uf.txt; first 200 instructions in CDB uf traversal order. All addresses RVA.
+CDB uf instruction count=16; listed=16
+002EA3D8  4883ec28                 sub     rsp,28h
+002EA3DC  41ffc8                   dec     r8d
+002EA3DF  49ba0000000080f6ffff     mov r10,0FFFFF68000000000h
+002EA3E9  4c03c2                   add     r8,rdx
+002EA3EC  49bbf8ffffff7f000000     mov r11,7FFFFFFFF8h
+002EA3F6  49c1e809                 shr     r8,9
+002EA3FA  4d23c3                   and     r8,r11
+002EA3FD  498bc2                   mov     rax,r10
+002EA400  48c1ea09                 shr     rdx,9
+002EA404  4c03c0                   add     r8,rax
+002EA407  4923d3                   and     rdx,r11
+002EA40A  498bc2                   mov     rax,r10
+002EA40D  4803d0                   add     rdx,rax
+002EA410  e8fbe3f6ff               call    ntkrnlmp!MiSetSystemCodeProtection (RVA 0x258810)
+002EA415  4883c428                 add     rsp,28h
+002EA419  c3                       ret

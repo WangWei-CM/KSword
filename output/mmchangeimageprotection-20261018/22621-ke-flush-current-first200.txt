@@ -1,0 +1,43 @@
+Source: 22621-ke-flush-current-cdb-uf.txt; first 200 instructions in CDB uf traversal order. All addresses RVA.
+CDB uf instruction count=41; listed=41
+003880F4  4053                     push    rbx
+003880F6  4881ec50010000           sub     rsp,150h
+003880FD  488b05dc4d8800           mov     rax,qword ptr [ntkrnlmp!_security_cookie (RVA 0xC0CEE0)]
+00388104  4833c4                   xor     rax,rsp
+00388107  4889842440010000         mov     qword ptr [rsp+140h],rax
+0038810F  488364242800             and     qword ptr [rsp+28h],0
+00388115  8bd9                     mov     ebx,ecx
+00388117  488d4c2430               lea     rcx,[rsp+30h]
+0038811C  33d2                     xor     edx,edx
+0038811E  41b808010000             mov     r8d,108h
+00388124  e8973c0a00               call    ntkrnlmp!memset (RVA 0x42BDC0)
+00388129  8b0539699900             mov     eax,dword ptr [ntkrnlmp!HvlEnlightenments (RVA 0xD1EA68)]
+0038812F  c644242000               mov     byte ptr [rsp+20h],0
+00388134  0fbae017                 bt      eax,17h
+00388138  0f826a581500             jb      ntkrnlmp!KeFlushCurrentTbOnly+0x1558b4 (RVA 0x4DD9A8)
+0038813E  8bcb                     mov     ecx,ebx
+00388140  e8dbf60200               call    ntkrnlmp!KiFlushCurrentTbOnly (RVA 0x3B7820)
+00388145  488b8c2440010000         mov     rcx,qword ptr [rsp+140h]
+0038814D  4833cc                   xor     rcx,rsp
+00388150  e89b940400               call    ntkrnlmp!_security_check_cookie (RVA 0x3D15F0)
+00388155  4881c450010000           add     rsp,150h
+0038815C  5b                       pop     rbx
+0038815D  c3                       ret
+004DD9A8  a802                     test    al,2
+004DD9AA  750f                     jne     ntkrnlmp!KeFlushCurrentTbOnly+0x1558c7 (RVA 0x4DD9BB)
+004DD9AC  8bcb                     mov     ecx,ebx
+004DD9AE  e8a998f7ff               call    ntkrnlmp!KiIsFlushEntire (RVA 0x45725C)
+004DD9B3  84c0                     test    al,al
+004DD9B5  0f8483a7eaff             je      ntkrnlmp!KeFlushCurrentTbOnly+0x4a (RVA 0x38813E)
+004DD9BB  4c8d442420               lea     r8,[rsp+20h]
+004DD9C0  8bcb                     mov     ecx,ebx
+004DD9C2  488d542428               lea     rdx,[rsp+28h]
+004DD9C7  e800a9eeff               call    ntkrnlmp!KiPrepareFlushParameters (RVA 0x3C82CC)
+004DD9CC  488d4c2430               lea     rcx,[rsp+30h]
+004DD9D1  e85e1a0900               call    ntkrnlmp!KiPrepareFlushCurrentAffinity (RVA 0x56F434)
+004DD9D6  448a442420               mov     r8b,byte ptr [rsp+20h]
+004DD9DB  488d542430               lea     rdx,[rsp+30h]
+004DD9E0  488b4c2428               mov     rcx,qword ptr [rsp+28h]
+004DD9E5  e82e85eeff               call    ntkrnlmp!HvlFlushAddressSpaceTb (RVA 0x3C5F18)
+004DD9EA  90                       nop
+004DD9EB  e955a7eaff               jmp     ntkrnlmp!KeFlushCurrentTbOnly+0x51 (RVA 0x388145)

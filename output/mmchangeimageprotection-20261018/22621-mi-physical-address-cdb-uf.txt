@@ -1,0 +1,162 @@
+
+************* Preparing the environment for Debugger Extensions Gallery repositories **************
+   ExtensionRepository : Implicit
+   UseExperimentalFeatureForNugetShare : true
+   AllowNugetExeUpdate : true
+   NonInteractiveNuget : true
+   AllowNugetMSCredentialProviderInstall : true
+   AllowParallelInitializationOfLocalRepositories : true
+
+   EnableRedirectToV8JsProvider : false
+
+   -- Configuring repositories
+      ----> Repository : LocalInstalled, Enabled: true
+      ----> Repository : UserExtensions, Enabled: true
+
+>>>>>>>>>>>>> Preparing the environment for Debugger Extensions Gallery repositories completed, duration 0.000 seconds
+
+************* Waiting for Debugger Extensions Gallery to Initialize **************
+
+>>>>>>>>>>>>> Waiting for Debugger Extensions Gallery to Initialize completed, duration 0.031 seconds
+   ----> Repository : UserExtensions, Enabled: true, Packages count: 0
+   ----> Repository : LocalInstalled, Enabled: true, Packages count: 29
+
+Microsoft (R) Windows Debugger Version 10.0.26100.6584 AMD64
+Copyright (c) Microsoft Corporation. All rights reserved.
+
+
+Loading Dump File [C:\Users\Felix\CLionProjects\KSword\artifacts\symbols\ntkrnlmp.exe\2C33C5081047000\ntkrnlmp.exe]
+
+************* Path validation summary **************
+Response                         Time (ms)     Location
+OK                                             C:\Users\Felix\CLionProjects\KSword\artifacts\symbols
+Symbol search path is: C:\Users\Felix\CLionProjects\KSword\artifacts\symbols
+Executable search path is:
+ModLoad: 00000001`40000000 00000001`41047000   C:\Users\Felix\CLionProjects\KSword\artifacts\symbols\ntkrnlmp.exe\2C33C5081047000\ntkrnlmp.exe
+ntkrnlmp!KiSystemStartup:
+00000001`40a83010 4883ec38        sub     rsp,38h
+0:000> cdb: Reading initial command 'uf ntkrnlmp!MI_IS_PHYSICAL_ADDRESS; q'
+ntkrnlmp!MI_IS_PHYSICAL_ADDRESS:
+00000001`4025a7c0 4053            push    rbx
+00000001`4025a7c2 4883ec20        sub     rsp,20h
+00000001`4025a7c6 48c1e909        shr     rcx,9
+00000001`4025a7ca 49b8f8ffffff7f000000 mov r8,7FFFFFFFF8h
+00000001`4025a7d4 4923c8          and     rcx,r8
+00000001`4025a7d7 48ba0000000080f6ffff mov rdx,0FFFFF68000000000h
+00000001`4025a7e1 41ba04000000    mov     r10d,4
+00000001`4025a7e7 488bc2          mov     rax,rdx
+00000001`4025a7ea 4803c8          add     rcx,rax
+00000001`4025a7ed 48890c24        mov     qword ptr [rsp],rcx
+00000001`4025a7f1 48c1e909        shr     rcx,9
+00000001`4025a7f5 4923c8          and     rcx,r8
+00000001`4025a7f8 488bc2          mov     rax,rdx
+00000001`4025a7fb 4803c8          add     rcx,rax
+00000001`4025a7fe 48894c2408      mov     qword ptr [rsp+8],rcx
+00000001`4025a803 48c1e909        shr     rcx,9
+00000001`4025a807 4923c8          and     rcx,r8
+00000001`4025a80a 488bc2          mov     rax,rdx
+00000001`4025a80d 4803c8          add     rcx,rax
+00000001`4025a810 48894c2410      mov     qword ptr [rsp+10h],rcx
+00000001`4025a815 48c1e909        shr     rcx,9
+00000001`4025a819 4923c8          and     rcx,r8
+00000001`4025a81c 488bc2          mov     rax,rdx
+00000001`4025a81f 4803c8          add     rcx,rax
+00000001`4025a822 49bb00d0be7dfbf6ffff mov r11,0FFFFF6FB7DBED000h
+00000001`4025a82c 48894c2418      mov     qword ptr [rsp+18h],rcx
+00000001`4025a831 418bd2          mov     edx,r10d
+00000001`4025a834 48bbf8d7be7dfbf6ffff mov rbx,0FFFFF6FB7DBED7F8h
+
+ntkrnlmp!MI_IS_PHYSICAL_ADDRESS+0x7e:
+00000001`4025a83e 4c8b4cd4f8      mov     r9,qword ptr [rsp+rdx*8-8]
+00000001`4025a843 48ffca          dec     rdx
+00000001`4025a846 41ffca          dec     r10d
+00000001`4025a849 498b09          mov     rcx,qword ptr [r9]
+00000001`4025a84c 498bc3          mov     rax,r11
+00000001`4025a84f 4c3bc8          cmp     r9,rax
+00000001`4025a852 720c            jb      ntkrnlmp!MI_IS_PHYSICAL_ADDRESS+0xa0 (00000001`4025a860)
+
+ntkrnlmp!MI_IS_PHYSICAL_ADDRESS+0x94:
+00000001`4025a854 488bc3          mov     rax,rbx
+00000001`4025a857 4c3bc8          cmp     r9,rax
+00000001`4025a85a 0f86824a2200    jbe     ntkrnlmp!MI_IS_PHYSICAL_ADDRESS+0x224b22 (00000001`4047f2e2)
+
+ntkrnlmp!MI_IS_PHYSICAL_ADDRESS+0xa0:
+00000001`4025a860 f6c101          test    cl,1
+00000001`4025a863 740a            je      ntkrnlmp!MI_IS_PHYSICAL_ADDRESS+0xaf (00000001`4025a86f)
+
+ntkrnlmp!MI_IS_PHYSICAL_ADDRESS+0xa5:
+00000001`4025a865 84c9            test    cl,cl
+00000001`4025a867 780f            js      ntkrnlmp!MI_IS_PHYSICAL_ADDRESS+0xb8 (00000001`4025a878)
+
+ntkrnlmp!MI_IS_PHYSICAL_ADDRESS+0xa9:
+00000001`4025a869 4883fa01        cmp     rdx,1
+00000001`4025a86d 75cf            jne     ntkrnlmp!MI_IS_PHYSICAL_ADDRESS+0x7e (00000001`4025a83e)
+
+ntkrnlmp!MI_IS_PHYSICAL_ADDRESS+0xaf:
+00000001`4025a86f 33c0            xor     eax,eax
+00000001`4025a871 4883c420        add     rsp,20h
+00000001`4025a875 5b              pop     rbx
+00000001`4025a876 c3              ret
+
+ntkrnlmp!MI_IS_PHYSICAL_ADDRESS+0xb8:
+00000001`4025a878 418bc2          mov     eax,r10d
+00000001`4025a87b 4883c420        add     rsp,20h
+00000001`4025a87f 5b              pop     rbx
+00000001`4025a880 c3              ret
+
+ntkrnlmp!MI_IS_PHYSICAL_ADDRESS+0x224b22:
+00000001`4047f2e2 f7055cf7890000006000 test dword ptr [ntkrnlmp!MiFlags (00000001`40d1ea48)],600000h
+00000001`4047f2ec 0f846eb5ddff    je      ntkrnlmp!MI_IS_PHYSICAL_ADDRESS+0xa0 (00000001`4025a860)
+
+ntkrnlmp!MI_IS_PHYSICAL_ADDRESS+0x224b32:
+00000001`4047f2f2 65488b042588010000 mov   rax,qword ptr gs:[188h]
+00000001`4047f2fb 4c8b80b8000000  mov     r8,qword ptr [rax+0B8h]
+00000001`4047f302 4180b89003000001 cmp     byte ptr [r8+390h],1
+00000001`4047f30a 0f8450b5ddff    je      ntkrnlmp!MI_IS_PHYSICAL_ADDRESS+0xa0 (00000001`4025a860)
+
+ntkrnlmp!MI_IS_PHYSICAL_ADDRESS+0x224b50:
+00000001`4047f310 f6c101          test    cl,1
+00000001`4047f313 0f8456b5ddff    je      ntkrnlmp!MI_IS_PHYSICAL_ADDRESS+0xaf (00000001`4025a86f)
+
+ntkrnlmp!MI_IS_PHYSICAL_ADDRESS+0x224b59:
+00000001`4047f319 f6c120          test    cl,20h
+00000001`4047f31c 7409            je      ntkrnlmp!MI_IS_PHYSICAL_ADDRESS+0x224b67 (00000001`4047f327)
+
+ntkrnlmp!MI_IS_PHYSICAL_ADDRESS+0x224b5e:
+00000001`4047f31e f6c142          test    cl,42h
+00000001`4047f321 0f8539b5ddff    jne     ntkrnlmp!MI_IS_PHYSICAL_ADDRESS+0xa0 (00000001`4025a860)
+
+ntkrnlmp!MI_IS_PHYSICAL_ADDRESS+0x224b67:
+00000001`4047f327 65488b042588010000 mov   rax,qword ptr gs:[188h]
+00000001`4047f330 4c8b80b8000000  mov     r8,qword ptr [rax+0B8h]
+00000001`4047f337 498b8088070000  mov     rax,qword ptr [r8+788h]
+00000001`4047f33e 4885c0          test    rax,rax
+00000001`4047f341 0f8419b5ddff    je      ntkrnlmp!MI_IS_PHYSICAL_ADDRESS+0xa0 (00000001`4025a860)
+
+ntkrnlmp!MI_IS_PHYSICAL_ADDRESS+0x224b87:
+00000001`4047f347 49c1e903        shr     r9,3
+00000001`4047f34b 4181e1ff010000  and     r9d,1FFh
+00000001`4047f352 4a8b04c8        mov     rax,qword ptr [rax+r9*8]
+00000001`4047f356 4c8bc9          mov     r9,rcx
+00000001`4047f359 4983c920        or      r9,20h
+00000001`4047f35d a820            test    al,20h
+00000001`4047f35f 4c0f44c9        cmove   r9,rcx
+00000001`4047f363 498bc9          mov     rcx,r9
+00000001`4047f366 a842            test    al,42h
+00000001`4047f368 0f84f2b4ddff    je      ntkrnlmp!MI_IS_PHYSICAL_ADDRESS+0xa0 (00000001`4025a860)
+
+ntkrnlmp!MI_IS_PHYSICAL_ADDRESS+0x224bae:
+00000001`4047f36e 4883c942        or      rcx,42h
+00000001`4047f372 e9e9b4ddff      jmp     ntkrnlmp!MI_IS_PHYSICAL_ADDRESS+0xa0 (00000001`4025a860)
+quit:
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\atlmfc.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\ObjectiveC.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\concurrency.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\cpp_rest.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\stl.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\Windows.Data.Json.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\Windows.Devices.Geolocation.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\Windows.Devices.Sensors.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\Windows.Media.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\windows.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\winrt.natvis'

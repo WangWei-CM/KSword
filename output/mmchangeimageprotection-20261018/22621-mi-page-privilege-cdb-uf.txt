@@ -1,0 +1,388 @@
+
+************* Preparing the environment for Debugger Extensions Gallery repositories **************
+   ExtensionRepository : Implicit
+   UseExperimentalFeatureForNugetShare : true
+   AllowNugetExeUpdate : true
+   NonInteractiveNuget : true
+   AllowNugetMSCredentialProviderInstall : true
+   AllowParallelInitializationOfLocalRepositories : true
+
+   EnableRedirectToV8JsProvider : false
+
+   -- Configuring repositories
+      ----> Repository : LocalInstalled, Enabled: true
+      ----> Repository : UserExtensions, Enabled: true
+
+>>>>>>>>>>>>> Preparing the environment for Debugger Extensions Gallery repositories completed, duration 0.000 seconds
+
+************* Waiting for Debugger Extensions Gallery to Initialize **************
+
+>>>>>>>>>>>>> Waiting for Debugger Extensions Gallery to Initialize completed, duration 0.031 seconds
+   ----> Repository : UserExtensions, Enabled: true, Packages count: 0
+   ----> Repository : LocalInstalled, Enabled: true, Packages count: 29
+
+Microsoft (R) Windows Debugger Version 10.0.26100.6584 AMD64
+Copyright (c) Microsoft Corporation. All rights reserved.
+
+
+Loading Dump File [C:\Users\Felix\CLionProjects\KSword\artifacts\symbols\ntkrnlmp.exe\2C33C5081047000\ntkrnlmp.exe]
+
+************* Path validation summary **************
+Response                         Time (ms)     Location
+OK                                             C:\Users\Felix\CLionProjects\KSword\artifacts\symbols
+Symbol search path is: C:\Users\Felix\CLionProjects\KSword\artifacts\symbols
+Executable search path is:
+ModLoad: 00000001`40000000 00000001`41047000   C:\Users\Felix\CLionProjects\KSword\artifacts\symbols\ntkrnlmp.exe\2C33C5081047000\ntkrnlmp.exe
+ntkrnlmp!KiSystemStartup:
+00000001`40a83010 4883ec38        sub     rsp,38h
+0:000> cdb: Reading initial command 'uf ntkrnlmp!MiGetPagePrivilege; q'
+ntkrnlmp!MiGetPagePrivilege:
+00000001`4025a190 4053            push    rbx
+00000001`4025a192 55              push    rbp
+00000001`4025a193 56              push    rsi
+00000001`4025a194 57              push    rdi
+00000001`4025a195 4883ec28        sub     rsp,28h
+00000001`4025a199 488b05a848ac00  mov     rax,qword ptr [ntkrnlmp!MiFlags (00000001`40d1ea48)]
+00000001`4025a1a0 498bf8          mov     rdi,r8
+00000001`4025a1a3 8bf2            mov     esi,edx
+00000001`4025a1a5 488bd9          mov     rbx,rcx
+00000001`4025a1a8 0fbae00c        bt      eax,0Ch
+00000001`4025a1ac 7313            jae     ntkrnlmp!MiGetPagePrivilege+0x31 (00000001`4025a1c1)
+
+ntkrnlmp!MiGetPagePrivilege+0x1e:
+00000001`4025a1ae 488b5128        mov     rdx,qword ptr [rcx+28h]
+00000001`4025a1b2 488bca          mov     rcx,rdx
+00000001`4025a1b5 48c1e93c        shr     rcx,3Ch
+00000001`4025a1b9 80e107          and     cl,7
+00000001`4025a1bc 80f903          cmp     cl,3
+00000001`4025a1bf 740c            je      ntkrnlmp!MiGetPagePrivilege+0x3d (00000001`4025a1cd)
+
+ntkrnlmp!MiGetPagePrivilege+0x31:
+00000001`4025a1c1 33c0            xor     eax,eax
+
+ntkrnlmp!MiGetPagePrivilege+0x33:
+00000001`4025a1c3 4883c428        add     rsp,28h
+00000001`4025a1c7 5f              pop     rdi
+00000001`4025a1c8 5e              pop     rsi
+00000001`4025a1c9 5d              pop     rbp
+00000001`4025a1ca 5b              pop     rbx
+00000001`4025a1cb c3              ret
+
+ntkrnlmp!MiGetPagePrivilege+0x3d:
+00000001`4025a1cd 480fbae235      bt      rdx,35h
+00000001`4025a1d2 72ed            jb      ntkrnlmp!MiGetPagePrivilege+0x31 (00000001`4025a1c1)
+
+ntkrnlmp!MiGetPagePrivilege+0x44:
+00000001`4025a1d4 4d85c0          test    r8,r8
+00000001`4025a1d7 740a            je      ntkrnlmp!MiGetPagePrivilege+0x53 (00000001`4025a1e3)
+
+ntkrnlmp!MiGetPagePrivilege+0x49:
+00000001`4025a1d9 0fbae00e        bt      eax,0Eh
+00000001`4025a1dd 0f835b4d2200    jae     ntkrnlmp!MiGetPagePrivilege+0x224dae (00000001`4047ef3e)
+
+ntkrnlmp!MiGetPagePrivilege+0x53:
+00000001`4025a1e3 488b4b08        mov     rcx,qword ptr [rbx+8]
+00000001`4025a1e7 49b80000000000000080 mov r8,8000000000000000h
+00000001`4025a1f1 488be9          mov     rbp,rcx
+00000001`4025a1f4 490be8          or      rbp,r8
+00000001`4025a1f7 4885d2          test    rdx,rdx
+00000001`4025a1fa 0f89454d2200    jns     ntkrnlmp!MiGetPagePrivilege+0x224db5 (00000001`4047ef45)
+
+ntkrnlmp!MiGetPagePrivilege+0x70:
+00000001`4025a200 4c8b5b10        mov     r11,qword ptr [rbx+10h]
+00000001`4025a204 490fbae30a      bt      r11,0Ah
+00000001`4025a209 0f83f44e2200    jae     ntkrnlmp!MiGetPagePrivilege+0x224f73 (00000001`4047f103)
+
+ntkrnlmp!MiGetPagePrivilege+0x7f:
+00000001`4025a20f 488b0deab4a000  mov     rcx,qword ptr [ntkrnlmp!MiState+0x6c0 (00000001`40c65700)]
+00000001`4025a216 4d8bc3          mov     r8,r11
+00000001`4025a219 4885c9          test    rcx,rcx
+00000001`4025a21c 740a            je      ntkrnlmp!MiGetPagePrivilege+0x98 (00000001`4025a228)
+
+ntkrnlmp!MiGetPagePrivilege+0x8e:
+00000001`4025a21e 41f6c010        test    r8b,10h
+00000001`4025a222 0f84a7000000    je      ntkrnlmp!MiGetPagePrivilege+0x13f (00000001`4025a2cf)
+
+ntkrnlmp!MiGetPagePrivilege+0x98:
+00000001`4025a228 49c1f810        sar     r8,10h
+00000001`4025a22c 4d8b10          mov     r10,qword ptr [r8]
+00000001`4025a22f 418b4a38        mov     ecx,dword ptr [r10+38h]
+00000001`4025a233 f6c120          test    cl,20h
+00000001`4025a236 0f84f04e2200    je      ntkrnlmp!MiGetPagePrivilege+0x224f9c (00000001`4047f12c)
+
+ntkrnlmp!MiGetPagePrivilege+0xac:
+00000001`4025a23c 498b5008        mov     rdx,qword ptr [r8+8]
+00000001`4025a240 483bea          cmp     rbp,rdx
+00000001`4025a243 0f8278ffffff    jb      ntkrnlmp!MiGetPagePrivilege+0x31 (00000001`4025a1c1)
+
+ntkrnlmp!MiGetPagePrivilege+0xb9:
+00000001`4025a249 418b482c        mov     ecx,dword ptr [r8+2Ch]
+00000001`4025a24d 488d14ca        lea     rdx,[rdx+rcx*8]
+00000001`4025a251 483bea          cmp     rbp,rdx
+00000001`4025a254 0f8367ffffff    jae     ntkrnlmp!MiGetPagePrivilege+0x31 (00000001`4025a1c1)
+
+ntkrnlmp!MiGetPagePrivilege+0xca:
+00000001`4025a25a 458b4a5c        mov     r9d,dword ptr [r10+5Ch]
+00000001`4025a25e 41f7c100000c00  test    r9d,0C0000h
+00000001`4025a265 0f95c2          setne   dl
+00000001`4025a268 410fbae111      bt      r9d,11h
+00000001`4025a26d 0f92c1          setb    cl
+00000001`4025a270 84d1            test    cl,dl
+00000001`4025a272 0f85be4e2200    jne     ntkrnlmp!MiGetPagePrivilege+0x224fa6 (00000001`4047f136)
+
+ntkrnlmp!MiGetPagePrivilege+0xe8:
+00000001`4025a278 49c1eb05        shr     r11,5
+00000001`4025a27c 0fbae011        bt      eax,11h
+00000001`4025a280 0f82ca4e2200    jb      ntkrnlmp!MiGetPagePrivilege+0x224fc0 (00000001`4047f150)
+
+ntkrnlmp!MiGetPagePrivilege+0xf6:
+00000001`4025a286 41f7c100000c00  test    r9d,0C0000h
+00000001`4025a28d 0f842effffff    je      ntkrnlmp!MiGetPagePrivilege+0x31 (00000001`4025a1c1)
+
+ntkrnlmp!MiGetPagePrivilege+0x103:
+00000001`4025a293 b808000000      mov     eax,8
+00000001`4025a298 41f6c302        test    r11b,2
+00000001`4025a29c 753c            jne     ntkrnlmp!MiGetPagePrivilege+0x14a (00000001`4025a2da)
+
+ntkrnlmp!MiGetPagePrivilege+0x10e:
+00000001`4025a29e 4885ff          test    rdi,rdi
+00000001`4025a2a1 0f841cffffff    je      ntkrnlmp!MiGetPagePrivilege+0x33 (00000001`4025a1c3)
+
+ntkrnlmp!MiGetPagePrivilege+0x117:
+00000001`4025a2a7 498b4a60        mov     rcx,qword ptr [r10+60h]
+00000001`4025a2ab 488b5138        mov     rdx,qword ptr [rcx+38h]
+00000001`4025a2af 48895708        mov     qword ptr [rdi+8],rdx
+00000001`4025a2b3 492baa88000000  sub     rbp,qword ptr [r10+88h]
+00000001`4025a2ba 48c1fd03        sar     rbp,3
+00000001`4025a2be 48c1e50c        shl     rbp,0Ch
+00000001`4025a2c2 48892f          mov     qword ptr [rdi],rbp
+00000001`4025a2c5 4883c428        add     rsp,28h
+00000001`4025a2c9 5f              pop     rdi
+00000001`4025a2ca 5e              pop     rsi
+00000001`4025a2cb 5d              pop     rbp
+00000001`4025a2cc 5b              pop     rbx
+00000001`4025a2cd c3              ret
+
+ntkrnlmp!MiGetPagePrivilege+0x13f:
+00000001`4025a2cf 48f7d1          not     rcx
+00000001`4025a2d2 4c23c1          and     r8,rcx
+00000001`4025a2d5 e94effffff      jmp     ntkrnlmp!MiGetPagePrivilege+0x98 (00000001`4025a228)
+
+ntkrnlmp!MiGetPagePrivilege+0x14a:
+00000001`4025a2da b80b000000      mov     eax,0Bh
+00000001`4025a2df ebbd            jmp     ntkrnlmp!MiGetPagePrivilege+0x10e (00000001`4025a29e)
+
+ntkrnlmp!MiGetPagePrivilege+0x224dae:
+00000001`4047ef3e 33ff            xor     edi,edi
+00000001`4047ef40 e99eb2ddff      jmp     ntkrnlmp!MiGetPagePrivilege+0x53 (00000001`4025a1e3)
+
+ntkrnlmp!MiGetPagePrivilege+0x224db5:
+00000001`4047ef45 4c89642450      mov     qword ptr [rsp+50h],r12
+00000001`4047ef4a 4c89742460      mov     qword ptr [rsp+60h],r14
+00000001`4047ef4f 0fbae011        bt      eax,11h
+00000001`4047ef53 733d            jae     ntkrnlmp!MiGetPagePrivilege+0x224e02 (00000001`4047ef92)
+
+ntkrnlmp!MiGetPagePrivilege+0x224dc5:
+00000001`4047ef55 48c1e519        shl     rbp,19h
+00000001`4047ef59 48b80000000080f6ffff mov rax,0FFFFF68000000000h
+00000001`4047ef63 488bc0          mov     rax,rax
+00000001`4047ef66 48c1e019        shl     rax,19h
+00000001`4047ef6a 49bc000000000080ffff mov r12,0FFFF800000000000h
+00000001`4047ef74 482be8          sub     rbp,rax
+00000001`4047ef77 41be11000000    mov     r14d,11h
+00000001`4047ef7d 48c1fd10        sar     rbp,10h
+00000001`4047ef81 b802000000      mov     eax,2
+00000001`4047ef86 493bec          cmp     rbp,r12
+00000001`4047ef89 440f42f0        cmovb   r14d,eax
+00000001`4047ef8d e95f010000      jmp     ntkrnlmp!MiGetPagePrivilege+0x224f61 (00000001`4047f0f1)
+
+ntkrnlmp!MiGetPagePrivilege+0x224e02:
+00000001`4047ef92 4885c9          test    rcx,rcx
+00000001`4047ef95 7519            jne     ntkrnlmp!MiGetPagePrivilege+0x224e20 (00000001`4047efb0)
+
+ntkrnlmp!MiGetPagePrivilege+0x224e07:
+00000001`4047ef97 448d7104        lea     r14d,[rcx+4]
+00000001`4047ef9b 4885ff          test    rdi,rdi
+00000001`4047ef9e 0f844d010000    je      ntkrnlmp!MiGetPagePrivilege+0x224f61 (00000001`4047f0f1)
+
+ntkrnlmp!MiGetPagePrivilege+0x224e14:
+00000001`4047efa4 48890f          mov     qword ptr [rdi],rcx
+00000001`4047efa7 48894f08        mov     qword ptr [rdi+8],rcx
+00000001`4047efab e941010000      jmp     ntkrnlmp!MiGetPagePrivilege+0x224f61 (00000001`4047f0f1)
+
+ntkrnlmp!MiGetPagePrivilege+0x224e20:
+00000001`4047efb0 48c1e519        shl     rbp,19h
+00000001`4047efb4 48b80000000080f6ffff mov rax,0FFFFF68000000000h
+00000001`4047efbe 488bc0          mov     rax,rax
+00000001`4047efc1 48c1e019        shl     rax,19h
+00000001`4047efc5 49bc000000000080ffff mov r12,0FFFF800000000000h
+00000001`4047efcf 482be8          sub     rbp,rax
+00000001`4047efd2 48c1fd10        sar     rbp,10h
+00000001`4047efd6 493bec          cmp     rbp,r12
+00000001`4047efd9 7230            jb      ntkrnlmp!MiGetPagePrivilege+0x224e7b (00000001`4047f00b)
+
+ntkrnlmp!MiGetPagePrivilege+0x224e4b:
+00000001`4047efdb 8b4310          mov     eax,dword ptr [rbx+10h]
+00000001`4047efde 41be01000000    mov     r14d,1
+00000001`4047efe4 c0e805          shr     al,5
+00000001`4047efe7 a802            test    al,2
+00000001`4047efe9 b840000000      mov     eax,40h
+00000001`4047efee 440f44f0        cmove   r14d,eax
+00000001`4047eff2 4885ff          test    rdi,rdi
+00000001`4047eff5 0f84f6000000    je      ntkrnlmp!MiGetPagePrivilege+0x224f61 (00000001`4047f0f1)
+
+ntkrnlmp!MiGetPagePrivilege+0x224e6b:
+00000001`4047effb 48892f          mov     qword ptr [rdi],rbp
+00000001`4047effe 48c7470800000000 mov     qword ptr [rdi+8],0
+00000001`4047f006 e9e6000000      jmp     ntkrnlmp!MiGetPagePrivilege+0x224f61 (00000001`4047f0f1)
+
+ntkrnlmp!MiGetPagePrivilege+0x224e7b:
+00000001`4047f00b 41be14000000    mov     r14d,14h
+00000001`4047f011 4885ff          test    rdi,rdi
+00000001`4047f014 0f84d7000000    je      ntkrnlmp!MiGetPagePrivilege+0x224f61 (00000001`4047f0f1)
+
+ntkrnlmp!MiGetPagePrivilege+0x224e8a:
+00000001`4047f01a 4c896c2458      mov     qword ptr [rsp+58h],r13
+00000001`4047f01f 4c897c2420      mov     qword ptr [rsp+20h],r15
+00000001`4047f024 85f6            test    esi,esi
+00000001`4047f026 750e            jne     ntkrnlmp!MiGetPagePrivilege+0x224ea6 (00000001`4047f036)
+
+ntkrnlmp!MiGetPagePrivilege+0x224e98:
+00000001`4047f028 488bcb          mov     rcx,rbx
+00000001`4047f02b e82080e7ff      call    ntkrnlmp!MiLockPageInline (00000001`402f7050)
+00000001`4047f030 440fb6f8        movzx   r15d,al
+00000001`4047f034 eb03            jmp     ntkrnlmp!MiGetPagePrivilege+0x224ea9 (00000001`4047f039)
+
+ntkrnlmp!MiGetPagePrivilege+0x224ea6:
+00000001`4047f036 41b711          mov     r15b,11h
+
+ntkrnlmp!MiGetPagePrivilege+0x224ea9:
+00000001`4047f039 488bcb          mov     rcx,rbx
+00000001`4047f03c e8af56dbff      call    ntkrnlmp!MiGetTopLevelPfn (00000001`402346f0)
+00000001`4047f041 48b9ffffffffffffff7f mov rcx,7FFFFFFFFFFFFFFFh
+00000001`4047f04b 4c8b28          mov     r13,qword ptr [rax]
+00000001`4047f04e 49c1ed0d        shr     r13,0Dh
+00000001`4047f052 4983e5f0        and     r13,0FFFFFFFFFFFFFFF0h
+00000001`4047f056 4d0bec          or      r13,r12
+00000001`4047f059 f048214818      lock and qword ptr [rax+18h],rcx
+00000001`4047f05e 85f6            test    esi,esi
+00000001`4047f060 7568            jne     ntkrnlmp!MiGetPagePrivilege+0x224f3a (00000001`4047f0ca)
+
+ntkrnlmp!MiGetPagePrivilege+0x224ed2:
+00000001`4047f062 f048214b18      lock and qword ptr [rbx+18h],rcx
+00000001`4047f067 8b0d33fc8900    mov     ecx,dword ptr [ntkrnlmp!KiIrqlFlags (00000001`40d1eca0)]
+00000001`4047f06d 85c9            test    ecx,ecx
+00000001`4047f06f 7451            je      ntkrnlmp!MiGetPagePrivilege+0x224f32 (00000001`4047f0c2)
+
+ntkrnlmp!MiGetPagePrivilege+0x224ee1:
+00000001`4047f071 440f20c0        mov     rax,cr8
+00000001`4047f075 f6c101          test    cl,1
+00000001`4047f078 7448            je      ntkrnlmp!MiGetPagePrivilege+0x224f32 (00000001`4047f0c2)
+
+ntkrnlmp!MiGetPagePrivilege+0x224eea:
+00000001`4047f07a 3c0f            cmp     al,0Fh
+00000001`4047f07c 7744            ja      ntkrnlmp!MiGetPagePrivilege+0x224f32 (00000001`4047f0c2)
+
+ntkrnlmp!MiGetPagePrivilege+0x224eee:
+00000001`4047f07e 4180ff0f        cmp     r15b,0Fh
+00000001`4047f082 773e            ja      ntkrnlmp!MiGetPagePrivilege+0x224f32 (00000001`4047f0c2)
+
+ntkrnlmp!MiGetPagePrivilege+0x224ef4:
+00000001`4047f084 3c02            cmp     al,2
+00000001`4047f086 723a            jb      ntkrnlmp!MiGetPagePrivilege+0x224f32 (00000001`4047f0c2)
+
+ntkrnlmp!MiGetPagePrivilege+0x224ef8:
+00000001`4047f088 654c8b142520000000 mov   r10,qword ptr gs:[20h]
+00000001`4047f091 48c7c2ffffffff  mov     rdx,0FFFFFFFFFFFFFFFFh
+00000001`4047f098 410fb6cf        movzx   ecx,r15b
+00000001`4047f09c ffc1            inc     ecx
+00000001`4047f09e 48d3e2          shl     rdx,cl
+00000001`4047f0a1 4d8b8ab8880000  mov     r9,qword ptr [r10+88B8h]
+00000001`4047f0a8 0fb7c2          movzx   eax,dx
+00000001`4047f0ab f7d0            not     eax
+00000001`4047f0ad 458b4114        mov     r8d,dword ptr [r9+14h]
+00000001`4047f0b1 4423c0          and     r8d,eax
+00000001`4047f0b4 45894114        mov     dword ptr [r9+14h],r8d
+00000001`4047f0b8 7508            jne     ntkrnlmp!MiGetPagePrivilege+0x224f32 (00000001`4047f0c2)
+
+ntkrnlmp!MiGetPagePrivilege+0x224f2a:
+00000001`4047f0ba 498bca          mov     rcx,r10
+00000001`4047f0bd e88ec10e00      call    ntkrnlmp!KiRemoveSystemWorkPriorityKick (00000001`4056b250)
+
+ntkrnlmp!MiGetPagePrivilege+0x224f32:
+00000001`4047f0c2 410fb6c7        movzx   eax,r15b
+00000001`4047f0c6 440f22c0        mov     cr8,rax
+
+ntkrnlmp!MiGetPagePrivilege+0x224f3a:
+00000001`4047f0ca 4983bde003000000 cmp     qword ptr [r13+3E0h],0
+00000001`4047f0d2 4c8b7c2420      mov     r15,qword ptr [rsp+20h]
+00000001`4047f0d7 7410            je      ntkrnlmp!MiGetPagePrivilege+0x224f59 (00000001`4047f0e9)
+
+ntkrnlmp!MiGetPagePrivilege+0x224f49:
+00000001`4047f0d9 48892f          mov     qword ptr [rdi],rbp
+00000001`4047f0dc 498b85e0030000  mov     rax,qword ptr [r13+3E0h]
+00000001`4047f0e3 48894708        mov     qword ptr [rdi+8],rax
+00000001`4047f0e7 eb03            jmp     ntkrnlmp!MiGetPagePrivilege+0x224f5c (00000001`4047f0ec)
+
+ntkrnlmp!MiGetPagePrivilege+0x224f59:
+00000001`4047f0e9 4533f6          xor     r14d,r14d
+
+ntkrnlmp!MiGetPagePrivilege+0x224f5c:
+00000001`4047f0ec 4c8b6c2458      mov     r13,qword ptr [rsp+58h]
+
+ntkrnlmp!MiGetPagePrivilege+0x224f61:
+00000001`4047f0f1 4c8b642450      mov     r12,qword ptr [rsp+50h]
+00000001`4047f0f6 418bc6          mov     eax,r14d
+00000001`4047f0f9 4c8b742460      mov     r14,qword ptr [rsp+60h]
+00000001`4047f0fe e9c0b0ddff      jmp     ntkrnlmp!MiGetPagePrivilege+0x33 (00000001`4025a1c3)
+
+ntkrnlmp!MiGetPagePrivilege+0x224f73:
+00000001`4047f103 c1e811          shr     eax,11h
+00000001`4047f106 83e001          and     eax,1
+00000001`4047f109 c1e004          shl     eax,4
+00000001`4047f10c 83c003          add     eax,3
+00000001`4047f10f 4885ff          test    rdi,rdi
+00000001`4047f112 0f84abb0ddff    je      ntkrnlmp!MiGetPagePrivilege+0x33 (00000001`4025a1c3)
+
+ntkrnlmp!MiGetPagePrivilege+0x224f88:
+00000001`4047f118 48c70700000000  mov     qword ptr [rdi],0
+00000001`4047f11f 48c7470800000000 mov     qword ptr [rdi+8],0
+00000001`4047f127 e997b0ddff      jmp     ntkrnlmp!MiGetPagePrivilege+0x33 (00000001`4025a1c3)
+
+ntkrnlmp!MiGetPagePrivilege+0x224f9c:
+00000001`4047f12c b802000000      mov     eax,2
+00000001`4047f131 e98db0ddff      jmp     ntkrnlmp!MiGetPagePrivilege+0x33 (00000001`4025a1c3)
+
+ntkrnlmp!MiGetPagePrivilege+0x224fa6:
+00000001`4047f136 498d8a80000000  lea     rcx,[r10+80h]
+00000001`4047f13d 4c3bc1          cmp     r8,rcx
+00000001`4047f140 0f8432b1ddff    je      ntkrnlmp!MiGetPagePrivilege+0xe8 (00000001`4025a278)
+
+ntkrnlmp!MiGetPagePrivilege+0x224fb6:
+00000001`4047f146 b828000000      mov     eax,28h
+00000001`4047f14b e973b0ddff      jmp     ntkrnlmp!MiGetPagePrivilege+0x33 (00000001`4025a1c3)
+
+ntkrnlmp!MiGetPagePrivilege+0x224fc0:
+00000001`4047f150 b802000000      mov     eax,2
+00000001`4047f155 41f7c100000c00  test    r9d,0C0000h
+00000001`4047f15c 0f843cb1ddff    je      ntkrnlmp!MiGetPagePrivilege+0x10e (00000001`4025a29e)
+
+ntkrnlmp!MiGetPagePrivilege+0x224fd2:
+00000001`4047f162 b80a000000      mov     eax,0Ah
+00000001`4047f167 41f6c302        test    r11b,2
+00000001`4047f16b 0f842db1ddff    je      ntkrnlmp!MiGetPagePrivilege+0x10e (00000001`4025a29e)
+
+ntkrnlmp!MiGetPagePrivilege+0x224fe1:
+00000001`4047f171 e964b1ddff      jmp     ntkrnlmp!MiGetPagePrivilege+0x14a (00000001`4025a2da)
+quit:
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\atlmfc.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\ObjectiveC.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\concurrency.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\cpp_rest.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\stl.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\Windows.Data.Json.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\Windows.Devices.Geolocation.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\Windows.Devices.Sensors.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\Windows.Media.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\windows.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\winrt.natvis'

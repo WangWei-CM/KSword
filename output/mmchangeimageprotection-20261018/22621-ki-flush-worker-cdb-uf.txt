@@ -1,0 +1,89 @@
+
+************* Preparing the environment for Debugger Extensions Gallery repositories **************
+   ExtensionRepository : Implicit
+   UseExperimentalFeatureForNugetShare : true
+   AllowNugetExeUpdate : true
+   NonInteractiveNuget : true
+   AllowNugetMSCredentialProviderInstall : true
+   AllowParallelInitializationOfLocalRepositories : true
+
+   EnableRedirectToV8JsProvider : false
+
+   -- Configuring repositories
+      ----> Repository : LocalInstalled, Enabled: true
+      ----> Repository : UserExtensions, Enabled: true
+
+>>>>>>>>>>>>> Preparing the environment for Debugger Extensions Gallery repositories completed, duration 0.000 seconds
+
+************* Waiting for Debugger Extensions Gallery to Initialize **************
+
+>>>>>>>>>>>>> Waiting for Debugger Extensions Gallery to Initialize completed, duration 0.032 seconds
+   ----> Repository : UserExtensions, Enabled: true, Packages count: 0
+   ----> Repository : LocalInstalled, Enabled: true, Packages count: 29
+
+Microsoft (R) Windows Debugger Version 10.0.26100.6584 AMD64
+Copyright (c) Microsoft Corporation. All rights reserved.
+
+
+Loading Dump File [C:\Users\Felix\CLionProjects\KSword\artifacts\symbols\ntkrnlmp.exe\2C33C5081047000\ntkrnlmp.exe]
+
+************* Path validation summary **************
+Response                         Time (ms)     Location
+OK                                             C:\Users\Felix\CLionProjects\KSword\artifacts\symbols
+Symbol search path is: C:\Users\Felix\CLionProjects\KSword\artifacts\symbols
+Executable search path is:
+ModLoad: 00000001`40000000 00000001`41047000   C:\Users\Felix\CLionProjects\KSword\artifacts\symbols\ntkrnlmp.exe\2C33C5081047000\ntkrnlmp.exe
+ntkrnlmp!KiSystemStartup:
+00000001`40a83010 4883ec38        sub     rsp,38h
+0:000> cdb: Reading initial command 'uf ntkrnlmp!KiFlushCurrentTbWorker; q'
+ntkrnlmp!KiFlushCurrentTbWorker:
+00000001`40331540 4883ec28        sub     rsp,28h
+00000001`40331544 803dfbd49e0000  cmp     byte ptr [ntkrnlmp!KiFlushPcid (00000001`40d1ea46)],0
+00000001`4033154b 7430            je      ntkrnlmp!KiFlushCurrentTbWorker+0x3d (00000001`4033157d)
+
+ntkrnlmp!KiFlushCurrentTbWorker+0xd:
+00000001`4033154d 0f20d8          mov     rax,cr3
+00000001`40331550 0f22d8          mov     cr3,rax
+00000001`40331553 65488b042588010000 mov   rax,qword ptr gs:[188h]
+00000001`4033155c 488b88b8000000  mov     rcx,qword ptr [rax+0B8h]
+00000001`40331563 80b99003000000  cmp     byte ptr [rcx+390h],0
+00000001`4033156a 7406            je      ntkrnlmp!KiFlushCurrentTbWorker+0x32 (00000001`40331572)
+
+ntkrnlmp!KiFlushCurrentTbWorker+0x2c:
+00000001`4033156c 4883c428        add     rsp,28h
+00000001`40331570 c3              ret
+
+ntkrnlmp!KiFlushCurrentTbWorker+0x32:
+00000001`40331572 e8894f0e00      call    ntkrnlmp!KiSetUserTbFlushPending (00000001`40416500)
+00000001`40331577 4883c428        add     rsp,28h
+00000001`4033157b c3              ret
+
+ntkrnlmp!KiFlushCurrentTbWorker+0x3d:
+00000001`4033157d 0f20e1          mov     rcx,cr4
+00000001`40331580 48f7c180000200  test    rcx,20080h
+00000001`40331587 7414            je      ntkrnlmp!KiFlushCurrentTbWorker+0x5d (00000001`4033159d)
+
+ntkrnlmp!KiFlushCurrentTbWorker+0x49:
+00000001`40331589 488bc1          mov     rax,rcx
+00000001`4033158c 480fbaf807      btc     rax,7
+00000001`40331591 0f22e0          mov     cr4,rax
+00000001`40331594 0f22e1          mov     cr4,rcx
+00000001`40331597 4883c428        add     rsp,28h
+00000001`4033159b c3              ret
+
+ntkrnlmp!KiFlushCurrentTbWorker+0x5d:
+00000001`4033159d 0f20d8          mov     rax,cr3
+00000001`403315a0 0f22d8          mov     cr3,rax
+00000001`403315a3 ebc7            jmp     ntkrnlmp!KiFlushCurrentTbWorker+0x2c (00000001`4033156c)
+quit:
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\atlmfc.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\ObjectiveC.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\concurrency.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\cpp_rest.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\stl.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\Windows.Data.Json.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\Windows.Devices.Geolocation.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\Windows.Devices.Sensors.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\Windows.Media.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\windows.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\winrt.natvis'

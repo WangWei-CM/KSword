@@ -1,0 +1,102 @@
+
+************* Preparing the environment for Debugger Extensions Gallery repositories **************
+   ExtensionRepository : Implicit
+   UseExperimentalFeatureForNugetShare : true
+   AllowNugetExeUpdate : true
+   NonInteractiveNuget : true
+   AllowNugetMSCredentialProviderInstall : true
+   AllowParallelInitializationOfLocalRepositories : true
+
+   EnableRedirectToV8JsProvider : false
+
+   -- Configuring repositories
+      ----> Repository : LocalInstalled, Enabled: true
+      ----> Repository : UserExtensions, Enabled: true
+
+>>>>>>>>>>>>> Preparing the environment for Debugger Extensions Gallery repositories completed, duration 0.000 seconds
+
+************* Waiting for Debugger Extensions Gallery to Initialize **************
+
+>>>>>>>>>>>>> Waiting for Debugger Extensions Gallery to Initialize completed, duration 0.016 seconds
+   ----> Repository : UserExtensions, Enabled: true, Packages count: 0
+   ----> Repository : LocalInstalled, Enabled: true, Packages count: 29
+
+Microsoft (R) Windows Debugger Version 10.0.26100.6584 AMD64
+Copyright (c) Microsoft Corporation. All rights reserved.
+
+
+Loading Dump File [C:\Users\Felix\CLionProjects\KSword\artifacts\symbols\ntkrnlmp.exe\2C33C5081047000\ntkrnlmp.exe]
+
+************* Path validation summary **************
+Response                         Time (ms)     Location
+OK                                             C:\Users\Felix\CLionProjects\KSword\artifacts\symbols
+Symbol search path is: C:\Users\Felix\CLionProjects\KSword\artifacts\symbols
+Executable search path is:
+ModLoad: 00000001`40000000 00000001`41047000   C:\Users\Felix\CLionProjects\KSword\artifacts\symbols\ntkrnlmp.exe\2C33C5081047000\ntkrnlmp.exe
+ntkrnlmp!KiSystemStartup:
+00000001`40a83010 4883ec38        sub     rsp,38h
+0:000> cdb: Reading initial command 'uf ntkrnlmp!KeFlushCurrentTbOnly; q'
+ntkrnlmp!KeFlushCurrentTbOnly:
+00000001`403880f4 4053            push    rbx
+00000001`403880f6 4881ec50010000  sub     rsp,150h
+00000001`403880fd 488b05dc4d8800  mov     rax,qword ptr [ntkrnlmp!_security_cookie (00000001`40c0cee0)]
+00000001`40388104 4833c4          xor     rax,rsp
+00000001`40388107 4889842440010000 mov     qword ptr [rsp+140h],rax
+00000001`4038810f 488364242800    and     qword ptr [rsp+28h],0
+00000001`40388115 8bd9            mov     ebx,ecx
+00000001`40388117 488d4c2430      lea     rcx,[rsp+30h]
+00000001`4038811c 33d2            xor     edx,edx
+00000001`4038811e 41b808010000    mov     r8d,108h
+00000001`40388124 e8973c0a00      call    ntkrnlmp!memset (00000001`4042bdc0)
+00000001`40388129 8b0539699900    mov     eax,dword ptr [ntkrnlmp!HvlEnlightenments (00000001`40d1ea68)]
+00000001`4038812f c644242000      mov     byte ptr [rsp+20h],0
+00000001`40388134 0fbae017        bt      eax,17h
+00000001`40388138 0f826a581500    jb      ntkrnlmp!KeFlushCurrentTbOnly+0x1558b4 (00000001`404dd9a8)
+
+ntkrnlmp!KeFlushCurrentTbOnly+0x4a:
+00000001`4038813e 8bcb            mov     ecx,ebx
+00000001`40388140 e8dbf60200      call    ntkrnlmp!KiFlushCurrentTbOnly (00000001`403b7820)
+
+ntkrnlmp!KeFlushCurrentTbOnly+0x51:
+00000001`40388145 488b8c2440010000 mov     rcx,qword ptr [rsp+140h]
+00000001`4038814d 4833cc          xor     rcx,rsp
+00000001`40388150 e89b940400      call    ntkrnlmp!_security_check_cookie (00000001`403d15f0)
+00000001`40388155 4881c450010000  add     rsp,150h
+00000001`4038815c 5b              pop     rbx
+00000001`4038815d c3              ret
+
+ntkrnlmp!KeFlushCurrentTbOnly+0x1558b4:
+00000001`404dd9a8 a802            test    al,2
+00000001`404dd9aa 750f            jne     ntkrnlmp!KeFlushCurrentTbOnly+0x1558c7 (00000001`404dd9bb)
+
+ntkrnlmp!KeFlushCurrentTbOnly+0x1558b8:
+00000001`404dd9ac 8bcb            mov     ecx,ebx
+00000001`404dd9ae e8a998f7ff      call    ntkrnlmp!KiIsFlushEntire (00000001`4045725c)
+00000001`404dd9b3 84c0            test    al,al
+00000001`404dd9b5 0f8483a7eaff    je      ntkrnlmp!KeFlushCurrentTbOnly+0x4a (00000001`4038813e)
+
+ntkrnlmp!KeFlushCurrentTbOnly+0x1558c7:
+00000001`404dd9bb 4c8d442420      lea     r8,[rsp+20h]
+00000001`404dd9c0 8bcb            mov     ecx,ebx
+00000001`404dd9c2 488d542428      lea     rdx,[rsp+28h]
+00000001`404dd9c7 e800a9eeff      call    ntkrnlmp!KiPrepareFlushParameters (00000001`403c82cc)
+00000001`404dd9cc 488d4c2430      lea     rcx,[rsp+30h]
+00000001`404dd9d1 e85e1a0900      call    ntkrnlmp!KiPrepareFlushCurrentAffinity (00000001`4056f434)
+00000001`404dd9d6 448a442420      mov     r8b,byte ptr [rsp+20h]
+00000001`404dd9db 488d542430      lea     rdx,[rsp+30h]
+00000001`404dd9e0 488b4c2428      mov     rcx,qword ptr [rsp+28h]
+00000001`404dd9e5 e82e85eeff      call    ntkrnlmp!HvlFlushAddressSpaceTb (00000001`403c5f18)
+00000001`404dd9ea 90              nop
+00000001`404dd9eb e955a7eaff      jmp     ntkrnlmp!KeFlushCurrentTbOnly+0x51 (00000001`40388145)
+quit:
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\atlmfc.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\ObjectiveC.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\concurrency.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\cpp_rest.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\stl.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\Windows.Data.Json.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\Windows.Devices.Geolocation.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\Windows.Devices.Sensors.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\Windows.Media.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\windows.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\winrt.natvis'

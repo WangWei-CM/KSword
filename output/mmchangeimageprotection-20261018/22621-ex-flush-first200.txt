@@ -1,0 +1,22 @@
+Source: 22621-ex-flush-cdb-uf.txt; first 200 instructions in CDB uf traversal order. All addresses RVA.
+CDB uf instruction count=20; listed=20
+0060A518  4883ec28                 sub     rsp,28h
+0060A51C  65488b042588010000       mov   rax,qword ptr gs:[188h]
+0060A525  448bc9                   mov     r9d,ecx
+0060A528  488b88b8000000           mov     rcx,qword ptr [rax+0B8h]
+0060A52F  4183f801                 cmp     r8d,1
+0060A533  7414                     je      ntkrnlmp!ExFlushTb+0x31 (RVA 0x60A549)
+0060A535  488b05fcc65f00           mov     rax,qword ptr [ntkrnlmp!HalIommuDispatch (RVA 0xC06C38)]
+0060A53C  488b0d852a6200           mov     rcx,qword ptr [ntkrnlmp!ExpSvmIommuSystemContext (RVA 0xC2CFC8)]
+0060A543  488b4050                 mov     rax,qword ptr [rax+50h]
+0060A547  eb17                     jmp     ntkrnlmp!ExFlushTb+0x48 (RVA 0x60A560)
+0060A549  488b8988080000           mov     rcx,qword ptr [rcx+888h]
+0060A550  4885c9                   test    rcx,rcx
+0060A553  7416                     je      ntkrnlmp!ExFlushTb+0x53 (RVA 0x60A56B)
+0060A555  488b05dcc65f00           mov     rax,qword ptr [ntkrnlmp!HalIommuDispatch (RVA 0xC06C38)]
+0060A55C  488b4048                 mov     rax,qword ptr [rax+48h]
+0060A560  4c8bc2                   mov     r8,rdx
+0060A563  418bd1                   mov     edx,r9d
+0060A566  e8555ae1ff               call    ntkrnlmp!guard_dispatch_icall (RVA 0x41FFC0)
+0060A56B  4883c428                 add     rsp,28h
+0060A56F  c3                       ret

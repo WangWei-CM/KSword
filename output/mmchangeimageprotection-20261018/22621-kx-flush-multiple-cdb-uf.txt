@@ -1,0 +1,201 @@
+
+************* Preparing the environment for Debugger Extensions Gallery repositories **************
+   ExtensionRepository : Implicit
+   UseExperimentalFeatureForNugetShare : true
+   AllowNugetExeUpdate : true
+   NonInteractiveNuget : true
+   AllowNugetMSCredentialProviderInstall : true
+   AllowParallelInitializationOfLocalRepositories : true
+
+   EnableRedirectToV8JsProvider : false
+
+   -- Configuring repositories
+      ----> Repository : LocalInstalled, Enabled: true
+      ----> Repository : UserExtensions, Enabled: true
+
+>>>>>>>>>>>>> Preparing the environment for Debugger Extensions Gallery repositories completed, duration 0.000 seconds
+
+************* Waiting for Debugger Extensions Gallery to Initialize **************
+
+>>>>>>>>>>>>> Waiting for Debugger Extensions Gallery to Initialize completed, duration 0.031 seconds
+   ----> Repository : UserExtensions, Enabled: true, Packages count: 0
+   ----> Repository : LocalInstalled, Enabled: true, Packages count: 29
+
+Microsoft (R) Windows Debugger Version 10.0.26100.6584 AMD64
+Copyright (c) Microsoft Corporation. All rights reserved.
+
+
+Loading Dump File [C:\Users\Felix\CLionProjects\KSword\artifacts\symbols\ntkrnlmp.exe\2C33C5081047000\ntkrnlmp.exe]
+
+************* Path validation summary **************
+Response                         Time (ms)     Location
+OK                                             C:\Users\Felix\CLionProjects\KSword\artifacts\symbols
+Symbol search path is: C:\Users\Felix\CLionProjects\KSword\artifacts\symbols
+Executable search path is:
+ModLoad: 00000001`40000000 00000001`41047000   C:\Users\Felix\CLionProjects\KSword\artifacts\symbols\ntkrnlmp.exe\2C33C5081047000\ntkrnlmp.exe
+ntkrnlmp!KiSystemStartup:
+00000001`40a83010 4883ec38        sub     rsp,38h
+0:000> cdb: Reading initial command 'uf ntkrnlmp!KxFlushMultipleTb; q'
+ntkrnlmp!KxFlushMultipleTb:
+00000001`4038d944 488bc4          mov     rax,rsp
+00000001`4038d947 48895808        mov     qword ptr [rax+8],rbx
+00000001`4038d94b 48896810        mov     qword ptr [rax+10h],rbp
+00000001`4038d94f 48897018        mov     qword ptr [rax+18h],rsi
+00000001`4038d953 48897820        mov     qword ptr [rax+20h],rdi
+00000001`4038d957 4154            push    r12
+00000001`4038d959 4156            push    r14
+00000001`4038d95b 4157            push    r15
+00000001`4038d95d 4883ec50        sub     rsp,50h
+00000001`4038d961 458bf9          mov     r15d,r9d
+00000001`4038d964 488950d8        mov     qword ptr [rax-28h],rdx
+00000001`4038d968 8948e0          mov     dword ptr [rax-20h],ecx
+00000001`4038d96b 448940e4        mov     dword ptr [rax-1Ch],r8d
+00000001`4038d96f 440f20c7        mov     rdi,cr8
+00000001`4038d973 b90c000000      mov     ecx,0Ch
+00000001`4038d978 440f22c1        mov     cr8,rcx
+00000001`4038d97c 8b051e139900    mov     eax,dword ptr [ntkrnlmp!KiIrqlFlags (00000001`40d1eca0)]
+00000001`4038d982 448d61f5        lea     r12d,[rcx-0Bh]
+00000001`4038d986 4883cdff        or      rbp,0FFFFFFFFFFFFFFFFh
+00000001`4038d98a 85c0            test    eax,eax
+00000001`4038d98c 0f8588000000    jne     ntkrnlmp!KxFlushMultipleTb+0xd6 (00000001`4038da1a)
+
+ntkrnlmp!KxFlushMultipleTb+0x4e:
+00000001`4038d992 654c8b342520000000 mov   r14,qword ptr gs:[20h]
+00000001`4038d99b 4585ff          test    r15d,r15d
+00000001`4038d99e 0f84cc211500    je      ntkrnlmp!KxFlushMultipleTb+0x15222c (00000001`404dfb70)
+
+ntkrnlmp!KxFlushMultipleTb+0x60:
+00000001`4038d9a4 33f6            xor     esi,esi
+00000001`4038d9a6 418bd4          mov     edx,r12d
+
+ntkrnlmp!KxFlushMultipleTb+0x65:
+00000001`4038d9a9 b904000000      mov     ecx,4
+00000001`4038d9ae 4c8d4c2440      lea     r9,[rsp+40h]
+00000001`4038d9b3 453bfc          cmp     r15d,r12d
+00000001`4038d9b6 b804000080      mov     eax,80000004h
+00000001`4038d9bb 4c8bc6          mov     r8,rsi
+00000001`4038d9be 0f45c1          cmovne  eax,ecx
+00000001`4038d9c1 488d4c2440      lea     rcx,[rsp+40h]
+00000001`4038d9c6 48894c2430      mov     qword ptr [rsp+30h],rcx
+00000001`4038d9cb 488d0dfeabffff  lea     rcx,[ntkrnlmp!KiFlushRangeWorker (00000001`403885d0)]
+00000001`4038d9d2 48894c2428      mov     qword ptr [rsp+28h],rcx
+00000001`4038d9d7 498bce          mov     rcx,r14
+00000001`4038d9da 4889442420      mov     qword ptr [rsp+20h],rax
+00000001`4038d9df e84412f2ff      call    ntkrnlmp!KiIpiSendRequestEx (00000001`402aec28)
+00000001`4038d9e4 8b0db6129900    mov     ecx,dword ptr [ntkrnlmp!KiIrqlFlags (00000001`40d1eca0)]
+00000001`4038d9ea 85c9            test    ecx,ecx
+00000001`4038d9ec 0f85d6211500    jne     ntkrnlmp!KxFlushMultipleTb+0x152284 (00000001`404dfbc8)
+
+ntkrnlmp!KxFlushMultipleTb+0xae:
+00000001`4038d9f2 400fb6c7        movzx   eax,dil
+00000001`4038d9f6 440f22c0        mov     cr8,rax
+00000001`4038d9fa 4c8d5c2450      lea     r11,[rsp+50h]
+00000001`4038d9ff 498b5b20        mov     rbx,qword ptr [r11+20h]
+00000001`4038da03 498b6b28        mov     rbp,qword ptr [r11+28h]
+00000001`4038da07 498b7330        mov     rsi,qword ptr [r11+30h]
+00000001`4038da0b 498b7b38        mov     rdi,qword ptr [r11+38h]
+00000001`4038da0f 498be3          mov     rsp,r11
+00000001`4038da12 415f            pop     r15
+00000001`4038da14 415e            pop     r14
+00000001`4038da16 415c            pop     r12
+00000001`4038da18 c3              ret
+
+ntkrnlmp!KxFlushMultipleTb+0xd6:
+00000001`4038da1a 4184c4          test    r12b,al
+00000001`4038da1d 0f846fffffff    je      ntkrnlmp!KxFlushMultipleTb+0x4e (00000001`4038d992)
+
+ntkrnlmp!KxFlushMultipleTb+0xdf:
+00000001`4038da23 4080ff0f        cmp     dil,0Fh
+00000001`4038da27 0f8765ffffff    ja      ntkrnlmp!KxFlushMultipleTb+0x4e (00000001`4038d992)
+
+ntkrnlmp!KxFlushMultipleTb+0xe9:
+00000001`4038da2d 65488b042520000000 mov   rax,qword ptr gs:[20h]
+00000001`4038da36 4c8b88b8880000  mov     r9,qword ptr [rax+88B8h]
+00000001`4038da3d 458b4114        mov     r8d,dword ptr [r9+14h]
+00000001`4038da41 403af9          cmp     dil,cl
+00000001`4038da44 7511            jne     ntkrnlmp!KxFlushMultipleTb+0x113 (00000001`4038da57)
+
+ntkrnlmp!KxFlushMultipleTb+0x102:
+00000001`4038da46 ba00100000      mov     edx,1000h
+
+ntkrnlmp!KxFlushMultipleTb+0x107:
+00000001`4038da4b 440bc2          or      r8d,edx
+00000001`4038da4e 45894114        mov     dword ptr [r9+14h],r8d
+00000001`4038da52 e93bffffff      jmp     ntkrnlmp!KxFlushMultipleTb+0x4e (00000001`4038d992)
+
+ntkrnlmp!KxFlushMultipleTb+0x113:
+00000001`4038da57 400fb6cf        movzx   ecx,dil
+00000001`4038da5b 488bd5          mov     rdx,rbp
+00000001`4038da5e 4103cc          add     ecx,r12d
+00000001`4038da61 48d3e2          shl     rdx,cl
+00000001`4038da64 81e2fc1f0000    and     edx,1FFCh
+00000001`4038da6a ebdf            jmp     ntkrnlmp!KxFlushMultipleTb+0x107 (00000001`4038da4b)
+
+ntkrnlmp!KxFlushMultipleTb+0x15222c:
+00000001`404dfb70 f0830c2400      lock or dword ptr [rsp],0
+00000001`404dfb75 498b4608        mov     rax,qword ptr [r14+8]
+00000001`404dfb79 498db6b82d0000  lea     rsi,[r14+2DB8h]
+00000001`404dfb80 488d4e08        lea     rcx,[rsi+8]
+00000001`404dfb84 33d2            xor     edx,edx
+00000001`404dfb86 41b800010000    mov     r8d,100h
+00000001`404dfb8c 488b98b8000000  mov     rbx,qword ptr [rax+0B8h]
+00000001`404dfb93 83660400        and     dword ptr [rsi+4],0
+00000001`404dfb97 c70601002000    mov     dword ptr [rsi],200001h
+00000001`404dfb9d e81ec2f4ff      call    ntkrnlmp!memset (00000001`4042bdc0)
+00000001`404dfba2 0fb75602        movzx   edx,word ptr [rsi+2]
+00000001`404dfba6 4c8d8370010000  lea     r8,[rbx+170h]
+00000001`404dfbad 488bce          mov     rcx,rsi
+00000001`404dfbb0 e82bffdaff      call    ntkrnlmp!KiCopyAffinityEx (00000001`4028fae0)
+00000001`404dfbb5 418b5624        mov     edx,dword ptr [r14+24h]
+00000001`404dfbb9 488bce          mov     rcx,rsi
+00000001`404dfbbc e83f6addff      call    ntkrnlmp!KeRemoveProcessorAffinityEx (00000001`402b6600)
+00000001`404dfbc1 33d2            xor     edx,edx
+00000001`404dfbc3 e9e1ddeaff      jmp     ntkrnlmp!KxFlushMultipleTb+0x65 (00000001`4038d9a9)
+
+ntkrnlmp!KxFlushMultipleTb+0x152284:
+00000001`404dfbc8 440f20c0        mov     rax,cr8
+00000001`404dfbcc 4184cc          test    r12b,cl
+00000001`404dfbcf 0f841ddeeaff    je      ntkrnlmp!KxFlushMultipleTb+0xae (00000001`4038d9f2)
+
+ntkrnlmp!KxFlushMultipleTb+0x152291:
+00000001`404dfbd5 3c0f            cmp     al,0Fh
+00000001`404dfbd7 0f8715deeaff    ja      ntkrnlmp!KxFlushMultipleTb+0xae (00000001`4038d9f2)
+
+ntkrnlmp!KxFlushMultipleTb+0x152299:
+00000001`404dfbdd 4080ff0f        cmp     dil,0Fh
+00000001`404dfbe1 0f870bdeeaff    ja      ntkrnlmp!KxFlushMultipleTb+0xae (00000001`4038d9f2)
+
+ntkrnlmp!KxFlushMultipleTb+0x1522a3:
+00000001`404dfbe7 3c02            cmp     al,2
+00000001`404dfbe9 0f8203deeaff    jb      ntkrnlmp!KxFlushMultipleTb+0xae (00000001`4038d9f2)
+
+ntkrnlmp!KxFlushMultipleTb+0x1522ab:
+00000001`404dfbef 654c8b0c2520000000 mov   r9,qword ptr gs:[20h]
+00000001`404dfbf8 400fb6cf        movzx   ecx,dil
+00000001`404dfbfc 4103cc          add     ecx,r12d
+00000001`404dfbff 48d3e5          shl     rbp,cl
+00000001`404dfc02 4d8b81b8880000  mov     r8,qword ptr [r9+88B8h]
+00000001`404dfc09 0fb7c5          movzx   eax,bp
+00000001`404dfc0c f7d0            not     eax
+00000001`404dfc0e 418b5014        mov     edx,dword ptr [r8+14h]
+00000001`404dfc12 23d0            and     edx,eax
+00000001`404dfc14 41895014        mov     dword ptr [r8+14h],edx
+00000001`404dfc18 0f85d4ddeaff    jne     ntkrnlmp!KxFlushMultipleTb+0xae (00000001`4038d9f2)
+
+ntkrnlmp!KxFlushMultipleTb+0x1522da:
+00000001`404dfc1e 498bc9          mov     rcx,r9
+00000001`404dfc21 e82ab60800      call    ntkrnlmp!KiRemoveSystemWorkPriorityKick (00000001`4056b250)
+00000001`404dfc26 90              nop
+00000001`404dfc27 e9c6ddeaff      jmp     ntkrnlmp!KxFlushMultipleTb+0xae (00000001`4038d9f2)
+quit:
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\atlmfc.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\ObjectiveC.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\concurrency.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\cpp_rest.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\stl.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\Windows.Data.Json.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\Windows.Devices.Geolocation.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\Windows.Devices.Sensors.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\Windows.Media.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\windows.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\winrt.natvis'

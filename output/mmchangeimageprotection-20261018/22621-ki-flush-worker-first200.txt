@@ -1,0 +1,28 @@
+Source: 22621-ki-flush-worker-cdb-uf.txt; first 200 instructions in CDB uf traversal order. All addresses RVA.
+CDB uf instruction count=26; listed=26
+00331540  4883ec28                 sub     rsp,28h
+00331544  803dfbd49e0000           cmp     byte ptr [ntkrnlmp!KiFlushPcid (RVA 0xD1EA46)],0
+0033154B  7430                     je      ntkrnlmp!KiFlushCurrentTbWorker+0x3d (RVA 0x33157D)
+0033154D  0f20d8                   mov     rax,cr3
+00331550  0f22d8                   mov     cr3,rax
+00331553  65488b042588010000       mov   rax,qword ptr gs:[188h]
+0033155C  488b88b8000000           mov     rcx,qword ptr [rax+0B8h]
+00331563  80b99003000000           cmp     byte ptr [rcx+390h],0
+0033156A  7406                     je      ntkrnlmp!KiFlushCurrentTbWorker+0x32 (RVA 0x331572)
+0033156C  4883c428                 add     rsp,28h
+00331570  c3                       ret
+00331572  e8894f0e00               call    ntkrnlmp!KiSetUserTbFlushPending (RVA 0x416500)
+00331577  4883c428                 add     rsp,28h
+0033157B  c3                       ret
+0033157D  0f20e1                   mov     rcx,cr4
+00331580  48f7c180000200           test    rcx,20080h
+00331587  7414                     je      ntkrnlmp!KiFlushCurrentTbWorker+0x5d (RVA 0x33159D)
+00331589  488bc1                   mov     rax,rcx
+0033158C  480fbaf807               btc     rax,7
+00331591  0f22e0                   mov     cr4,rax
+00331594  0f22e1                   mov     cr4,rcx
+00331597  4883c428                 add     rsp,28h
+0033159B  c3                       ret
+0033159D  0f20d8                   mov     rax,cr3
+003315A0  0f22d8                   mov     cr3,rax
+003315A3  ebc7                     jmp     ntkrnlmp!KiFlushCurrentTbWorker+0x2c (RVA 0x33156C)

@@ -1,0 +1,2 @@
+Raw E8 rel32 candidates in executable sections targeting RVA 0x736CF0.
+Instruction boundaries and symbols require separate CDB verification.

@@ -1,0 +1,211 @@
+Build 22621.4317 nt!MmChangeImageProtection
+PE image base 0x140000000, all addresses below are RVA.
+Hot RVA 0x736CF0..0x736F9A; cold RVA 0x8C908E..0x8C912B.
+Source: cdb -z exact local PE -y exact local PDB store; uf ntkrnlmp!MmChangeImageProtection.
+
+00736CF0  48895c2408               mov     qword ptr [rsp+8],rbx
+00736CF5  44894c2420               mov     dword ptr [rsp+20h],r9d
+00736CFA  4889542410               mov     qword ptr [rsp+10h],rdx
+00736CFF  55                       push    rbp
+00736D00  56                       push    rsi
+00736D01  57                       push    rdi
+00736D02  4154                     push    r12
+00736D04  4155                     push    r13
+00736D06  4156                     push    r14
+00736D08  4157                     push    r15
+00736D0A  4883ec30                 sub     rsp,30h
+00736D0E  418d41ff                 lea     eax,[r9-1]
+00736D12  be01000000               mov     esi,1
+00736D17  498bd8                   mov     rbx,r8
+00736D1A  4c8bea                   mov     r13,rdx
+00736D1D  488bf9                   mov     rdi,rcx
+00736D20  3bc6                     cmp     eax,esi
+00736D22  0f87fa231900             ja      ntkrnlmp!MmChangeImageProtection+0x192432 (RVA 0x8C9122)
+00736D28  8bc3                     mov     eax,ebx
+00736D2A  4889442428               mov     qword ptr [rsp+28h],rax
+00736D2F  483bd8                   cmp     rbx,rax
+00736D32  0f85ea231900             jne     ntkrnlmp!MmChangeImageProtection+0x192432 (RVA 0x8C9122)
+00736D38  8a410a                   mov     al,byte ptr [rcx+0Ah]
+00736D3B  2407                     and     al,7
+00736D3D  3c02                     cmp     al,2
+00736D3F  0f85dd231900             jne     ntkrnlmp!MmChangeImageProtection+0x192432 (RVA 0x8C9122)
+00736D45  83792c00                 cmp     dword ptr [rcx+2Ch],0
+00736D49  0f85d3231900             jne     ntkrnlmp!MmChangeImageProtection+0x192432 (RVA 0x8C9122)
+00736D4F  448b7128                 mov     r14d,dword ptr [rcx+28h]
+00736D53  41f7c6ff0f0000           test    r14d,0FFFh
+00736D5A  0f85c2231900             jne     ntkrnlmp!MmChangeImageProtection+0x192432 (RVA 0x8C9122)
+00736D60  41c1ee0c                 shr     r14d,0Ch
+00736D64  e847020000               call    ntkrnlmp!MmAcquireLoadLock (RVA 0x736FB0)
+00736D69  408ad6                   mov     dl,sil
+00736D6C  488d0dcdc64d00           lea     rcx,[ntkrnlmp!PsLoadedModuleResource (RVA 0xC13440)]
+00736D73  488be8                   mov     rbp,rax
+00736D76  6629b0e4010000           sub     word ptr [rax+1E4h],si
+00736D7D  90                       nop
+00736D7E  66ff88e4010000           dec     word ptr [rax+1E4h]
+00736D85  90                       nop
+00736D86  e83522aeff               call    ntkrnlmp!ExAcquireResourceExclusiveLite (RVA 0x218FC0)
+00736D8B  488b4f20                 mov     rcx,qword ptr [rdi+20h]
+00736D8F  33d2                     xor     edx,edx
+00736D91  e89a36bbff               call    ntkrnlmp!MiLookupDataTableEntry (RVA 0x2EA430)
+00736D96  488bf0                   mov     rsi,rax
+00736D99  4885c0                   test    rax,rax
+00736D9C  0f840e231900             je      ntkrnlmp!MmChangeImageProtection+0x1923c0 (RVA 0x8C90B0)
+00736DA2  4c8b7830                 mov     r15,qword ptr [rax+30h]
+00736DA6  4a8d142b                 lea     rdx,[rbx+r13]
+00736DAA  8b4040                   mov     eax,dword ptr [rax+40h]
+00736DAD  8b4f28                   mov     ecx,dword ptr [rdi+28h]
+00736DB0  4903c7                   add     rax,r15
+00736DB3  48034f20                 add     rcx,qword ptr [rdi+20h]
+00736DB7  483bc8                   cmp     rcx,rax
+00736DBA  0f87e6221900             ja      ntkrnlmp!MmChangeImageProtection+0x1923b6 (RVA 0x8C90A6)
+00736DC0  4d3bef                   cmp     r13,r15
+00736DC3  0f82dd221900             jb      ntkrnlmp!MmChangeImageProtection+0x1923b6 (RVA 0x8C90A6)
+00736DC9  483bd0                   cmp     rdx,rax
+00736DCC  0f87d4221900             ja      ntkrnlmp!MmChangeImageProtection+0x1923b6 (RVA 0x8C90A6)
+00736DD2  488d42ff                 lea     rax,[rdx-1]
+00736DD6  493bc5                   cmp     rax,r13
+00736DD9  0f82c7221900             jb      ntkrnlmp!MmChangeImageProtection+0x1923b6 (RVA 0x8C90A6)
+00736DDF  8b4668                   mov     eax,dword ptr [rsi+68h]
+00736DE2  b900000800               mov     ecx,80000h
+00736DE7  85c1                     test    ecx,eax
+00736DE9  0f859f221900             jne     ntkrnlmp!MmChangeImageProtection+0x19239e (RVA 0x8C908E)
+00736DEF  0bc1                     or      eax,ecx
+00736DF1  33db                     xor     ebx,ebx
+00736DF3  498bcf                   mov     rcx,r15
+00736DF6  894668                   mov     dword ptr [rsi+68h],eax
+00736DF9  e88239b2ff               call    ntkrnlmp!MiGetSystemRegionType (RVA 0x25A780)
+00736DFE  8d4b01                   lea     ecx,[rbx+1]
+00736E01  3bc1                     cmp     eax,ecx
+00736E03  0f848f221900             je      ntkrnlmp!MmChangeImageProtection+0x1923a8 (RVA 0x8C9098)
+00736E09  66014e6c                 add     word ptr [rsi+6Ch],cx
+00736E0D  488d0d2cc64d00           lea     rcx,[ntkrnlmp!PsLoadedModuleResource (RVA 0xC13440)]
+00736E14  e80769aeff               call    ntkrnlmp!ExReleaseResourceLite (RVA 0x21D720)
+00736E19  488bcd                   mov     rcx,rbp
+00736E1C  e8afd6aeff               call    ntkrnlmp!KeLeaveCriticalRegionThread (RVA 0x2244D0)
+00736E21  488bcd                   mov     rcx,rbp
+00736E24  e827020000               call    ntkrnlmp!MmReleaseLoadLock (RVA 0x737050)
+00736E29  85db                     test    ebx,ebx
+00736E2B  0f88f7000000             js      ntkrnlmp!MmChangeImageProtection+0x238 (RVA 0x736F28)
+00736E31  488b4e30                 mov     rcx,qword ptr [rsi+30h]
+00736E35  e88639b2ff               call    ntkrnlmp!MI_IS_PHYSICAL_ADDRESS (RVA 0x25A7C0)
+00736E3A  85c0                     test    eax,eax
+00736E3C  0f8578221900             jne     ntkrnlmp!MmChangeImageProtection+0x1923ca (RVA 0x8C90BA)
+00736E42  4533e4                   xor     r12d,r12d
+00736E45  48ba0000000000deffff     mov rdx,0FFFFDE0000000000h
+00736E4F  4c8d7f30                 lea     r15,[rdi+30h]
+00736E53  4585f6                   test    r14d,r14d
+00736E56  7459                     je      ntkrnlmp!MmChangeImageProtection+0x1c1 (RVA 0x736EB1)
+00736E58  4d8bef                   mov     r13,r15
+00736E5B  498b4500                 mov     rax,qword ptr [r13]
+00736E5F  488d0c40                 lea     rcx,[rax+rax*2]
+00736E63  48c1e104                 shl     rcx,4
+00736E67  488bc2                   mov     rax,rdx
+00736E6A  4803c8                   add     rcx,rax
+00736E6D  48894c2420               mov     qword ptr [rsp+20h],rcx
+00736E72  e8e927bbff               call    ntkrnlmp!MI_PFN_IS_PROTO (RVA 0x2E9660)
+00736E77  85c0                     test    eax,eax
+00736E79  0f853b221900             jne     ntkrnlmp!MmChangeImageProtection+0x1923ca (RVA 0x8C90BA)
+00736E7F  488b4c2420               mov     rcx,qword ptr [rsp+20h]
+00736E84  4533c0                   xor     r8d,r8d
+00736E87  33d2                     xor     edx,edx
+00736E89  e80233b2ff               call    ntkrnlmp!MiGetPagePrivilege (RVA 0x25A190)
+00736E8E  a840                     test    al,40h
+00736E90  0f852e221900             jne     ntkrnlmp!MmChangeImageProtection+0x1923d4 (RVA 0x8C90C4)
+00736E96  41ffc4                   inc     r12d
+00736E99  48ba0000000000deffff     mov rdx,0FFFFDE0000000000h
+00736EA3  4983c508                 add     r13,8
+00736EA7  453be6                   cmp     r12d,r14d
+00736EAA  72af                     jb      ntkrnlmp!MmChangeImageProtection+0x16b (RVA 0x736E5B)
+00736EAC  4c8b6c2478               mov     r13,qword ptr [rsp+78h]
+00736EB1  448b4728                 mov     r8d,dword ptr [rdi+28h]
+00736EB5  41b901000000             mov     r9d,1
+00736EBB  488b5720                 mov     rdx,qword ptr [rdi+20h]
+00736EBF  488bce                   mov     rcx,rsi
+00736EC2  e81135bbff               call    ntkrnlmp!MiSetImageProtection (RVA 0x2EA3D8)
+00736EC7  83bc248800000001         cmp     dword ptr [rsp+88h],1
+00736ECF  7477                     je      ntkrnlmp!MmChangeImageProtection+0x258 (RVA 0x736F48)
+00736ED1  f7056d7b5e0000800000     test dword ptr [ntkrnlmp!MiFlags (RVA 0xD1EA48)],8000h
+00736EDB  0f8501221900             jne     ntkrnlmp!MmChangeImageProtection+0x1923f2 (RVA 0x8C90E2)
+00736EE1  e8ca000000               call    ntkrnlmp!MmAcquireLoadLock (RVA 0x736FB0)
+00736EE6  66ff8de4010000           dec     word ptr [rbp+1E4h]
+00736EED  488d0d4cc54d00           lea     rcx,[ntkrnlmp!PsLoadedModuleResource (RVA 0xC13440)]
+00736EF4  b201                     mov     dl,1
+00736EF6  90                       nop
+00736EF7  e8c420aeff               call    ntkrnlmp!ExAcquireResourceExclusiveLite (RVA 0x218FC0)
+00736EFC  0fba766813               btr     dword ptr [rsi+68h],13h
+00736F01  488d0d38c54d00           lea     rcx,[ntkrnlmp!PsLoadedModuleResource (RVA 0xC13440)]
+00736F08  e81368aeff               call    ntkrnlmp!ExReleaseResourceLite (RVA 0x21D720)
+00736F0D  488bcd                   mov     rcx,rbp
+00736F10  e8bbd5aeff               call    ntkrnlmp!KeLeaveCriticalRegionThread (RVA 0x2244D0)
+00736F15  83caff                   or      edx,0FFFFFFFFh
+00736F18  488bce                   mov     rcx,rsi
+00736F1B  e820020000               call    ntkrnlmp!MiUnloadSystemImage (RVA 0x737140)
+00736F20  488bcd                   mov     rcx,rbp
+00736F23  e828010000               call    ntkrnlmp!MmReleaseLoadLock (RVA 0x737050)
+00736F28  488bcd                   mov     rcx,rbp
+00736F2B  e8a0d5aeff               call    ntkrnlmp!KeLeaveCriticalRegionThread (RVA 0x2244D0)
+00736F30  8bc3                     mov     eax,ebx
+00736F32  488b5c2470               mov     rbx,qword ptr [rsp+70h]
+00736F37  4883c430                 add     rsp,30h
+00736F3B  415f                     pop     r15
+00736F3D  415e                     pop     r14
+00736F3F  415d                     pop     r13
+00736F41  415c                     pop     r12
+00736F43  5f                       pop     rdi
+00736F44  5e                       pop     rsi
+00736F45  5d                       pop     rbp
+00736F46  c3                       ret
+00736F47  cc                       int3    ; alignment byte omitted by CDB uf
+00736F48  f705f67a5e0000400000     test dword ptr [ntkrnlmp!MiFlags (RVA 0xD1EA48)],4000h
+00736F52  741a                     je      ntkrnlmp!MmChangeImageProtection+0x27e (RVA 0x736F6E)
+00736F54  448b442428               mov     r8d,dword ptr [rsp+28h]
+00736F59  498bd5                   mov     rdx,r13
+00736F5C  488bcf                   mov     rcx,rdi
+00736F5F  e824241400               call    ntkrnlmp!VslValidateDynamicCodePages (RVA 0x879388)
+00736F64  8bd8                     mov     ebx,eax
+00736F66  85c0                     test    eax,eax
+00736F68  0f8873ffffff             js      ntkrnlmp!MmChangeImageProtection+0x1f1 (RVA 0x736EE1)
+00736F6E  f705d07a5e0000800000     test dword ptr [ntkrnlmp!MiFlags (RVA 0xD1EA48)],8000h
+00736F78  41b903000000             mov     r9d,3
+00736F7E  0f854a211900             jne     ntkrnlmp!MmChangeImageProtection+0x1923de (RVA 0x8C90CE)
+00736F84  448b4728                 mov     r8d,dword ptr [rdi+28h]
+00736F88  488bce                   mov     rcx,rsi
+00736F8B  488b5720                 mov     rdx,qword ptr [rdi+20h]
+00736F8F  e84434bbff               call    ntkrnlmp!MiSetImageProtection (RVA 0x2EA3D8)
+00736F94  33db                     xor     ebx,ebx
+00736F96  e946ffffff               jmp     ntkrnlmp!MmChangeImageProtection+0x1f1 (RVA 0x736EE1)
+008C908E  bb430000c0               mov     ebx,0C0000043h
+008C9093  e975dde6ff               jmp     ntkrnlmp!MmChangeImageProtection+0x11d (RVA 0x736E0D)
+008C9098  498bcf                   mov     rcx,r15
+008C909B  e89845a6ff               call    ntkrnlmp!MiSessionReferenceImage (RVA 0x32D638)
+008C90A0  90                       nop
+008C90A1  e967dde6ff               jmp     ntkrnlmp!MmChangeImageProtection+0x11d (RVA 0x736E0D)
+008C90A6  bb180000c0               mov     ebx,0C0000018h
+008C90AB  e95ddde6ff               jmp     ntkrnlmp!MmChangeImageProtection+0x11d (RVA 0x736E0D)
+008C90B0  bb250200c0               mov     ebx,0C0000225h
+008C90B5  e953dde6ff               jmp     ntkrnlmp!MmChangeImageProtection+0x11d (RVA 0x736E0D)
+008C90BA  bb180000c0               mov     ebx,0C0000018h
+008C90BF  e91ddee6ff               jmp     ntkrnlmp!MmChangeImageProtection+0x1f1 (RVA 0x736EE1)
+008C90C4  bb450000c0               mov     ebx,0C0000045h
+008C90C9  e913dee6ff               jmp     ntkrnlmp!MmChangeImageProtection+0x1f1 (RVA 0x736EE1)
+008C90CE  81fb2c010000             cmp     ebx,12Ch
+008C90D4  b813000000               mov     eax,13h
+008C90D9  440f44c8                 cmove   r9d,eax
+008C90DD  e9a2dee6ff               jmp     ntkrnlmp!MmChangeImageProtection+0x294 (RVA 0x736F84)
+008C90E2  4585f6                   test    r14d,r14d
+008C90E5  0f84f6dde6ff             je      ntkrnlmp!MmChangeImageProtection+0x1f1 (RVA 0x736EE1)
+008C90EB  418bfe                   mov     edi,r14d
+008C90EE  49be0000000000deffff     mov r14,0FFFFDE0000000000h
+008C90F8  498b07                   mov     rax,qword ptr [r15]
+008C90FB  488d0c40                 lea     rcx,[rax+rax*2]
+008C90FF  48c1e104                 shl     rcx,4
+008C9103  498bc6                   mov     rax,r14
+008C9106  4803c8                   add     rcx,rax
+008C9109  ba18000000               mov     edx,18h
+008C910E  e8b9b3a7ff               call    ntkrnlmp!MiClearPfnImageVerified (RVA 0x3444CC)
+008C9113  4d8d7f08                 lea     r15,[r15+8]
+008C9117  4883ef01                 sub     rdi,1
+008C911B  75db                     jne     ntkrnlmp!MmChangeImageProtection+0x192408 (RVA 0x8C90F8)
+008C911D  e9bfdde6ff               jmp     ntkrnlmp!MmChangeImageProtection+0x1f1 (RVA 0x736EE1)
+008C9122  b80d0000c0               mov     eax,0C000000Dh
+008C9127  e906dee6ff               jmp     ntkrnlmp!MmChangeImageProtection+0x242 (RVA 0x736F32)

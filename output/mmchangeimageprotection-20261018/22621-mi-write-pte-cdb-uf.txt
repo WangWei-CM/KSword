@@ -1,0 +1,172 @@
+
+************* Preparing the environment for Debugger Extensions Gallery repositories **************
+   ExtensionRepository : Implicit
+   UseExperimentalFeatureForNugetShare : true
+   AllowNugetExeUpdate : true
+   NonInteractiveNuget : true
+   AllowNugetMSCredentialProviderInstall : true
+   AllowParallelInitializationOfLocalRepositories : true
+
+   EnableRedirectToV8JsProvider : false
+
+   -- Configuring repositories
+      ----> Repository : LocalInstalled, Enabled: true
+      ----> Repository : UserExtensions, Enabled: true
+
+>>>>>>>>>>>>> Preparing the environment for Debugger Extensions Gallery repositories completed, duration 0.000 seconds
+
+************* Waiting for Debugger Extensions Gallery to Initialize **************
+
+>>>>>>>>>>>>> Waiting for Debugger Extensions Gallery to Initialize completed, duration 0.016 seconds
+   ----> Repository : UserExtensions, Enabled: true, Packages count: 0
+   ----> Repository : LocalInstalled, Enabled: true, Packages count: 29
+
+Microsoft (R) Windows Debugger Version 10.0.26100.6584 AMD64
+Copyright (c) Microsoft Corporation. All rights reserved.
+
+
+Loading Dump File [C:\Users\Felix\CLionProjects\KSword\artifacts\symbols\ntkrnlmp.exe\2C33C5081047000\ntkrnlmp.exe]
+
+************* Path validation summary **************
+Response                         Time (ms)     Location
+OK                                             C:\Users\Felix\CLionProjects\KSword\artifacts\symbols
+Symbol search path is: C:\Users\Felix\CLionProjects\KSword\artifacts\symbols
+Executable search path is:
+ModLoad: 00000001`40000000 00000001`41047000   C:\Users\Felix\CLionProjects\KSword\artifacts\symbols\ntkrnlmp.exe\2C33C5081047000\ntkrnlmp.exe
+ntkrnlmp!KiSystemStartup:
+00000001`40a83010 4883ec38        sub     rsp,38h
+0:000> cdb: Reading initial command 'uf ntkrnlmp!MiWriteValidPteNewProtection; q'
+ntkrnlmp!MiWriteValidPteNewProtection:
+00000001`4025a710 48895c2408      mov     qword ptr [rsp+8],rbx
+00000001`4025a715 57              push    rdi
+00000001`4025a716 4883ec20        sub     rsp,20h
+00000001`4025a71a 488b19          mov     rbx,qword ptr [rcx]
+00000001`4025a71d 488bf9          mov     rdi,rcx
+00000001`4025a720 48b800d0be7dfbf6ffff mov rax,0FFFFF6FB7DBED000h
+00000001`4025a72a 483bc8          cmp     rcx,rax
+00000001`4025a72d 7332            jae     ntkrnlmp!MiWriteValidPteNewProtection+0x51 (00000001`4025a761)
+
+ntkrnlmp!MiWriteValidPteNewProtection+0x1f:
+00000001`4025a72f 4833da          xor     rbx,rdx
+00000001`4025a732 48b8000000000000007f mov rax,7F00000000000000h
+00000001`4025a73c 4823d8          and     rbx,rax
+00000001`4025a73f 488bcf          mov     rcx,rdi
+00000001`4025a742 4833da          xor     rbx,rdx
+00000001`4025a745 e876bf0200      call    ntkrnlmp!MiPteInShadowRange (00000001`402866c0)
+00000001`4025a74a 85c0            test    eax,eax
+00000001`4025a74c 0f851d4b2200    jne     ntkrnlmp!MiWriteValidPteNewProtection+0x224b5f (00000001`4047f26f)
+
+ntkrnlmp!MiWriteValidPteNewProtection+0x42:
+00000001`4025a752 48891f          mov     qword ptr [rdi],rbx
+
+ntkrnlmp!MiWriteValidPteNewProtection+0x45:
+00000001`4025a755 488b5c2430      mov     rbx,qword ptr [rsp+30h]
+00000001`4025a75a 4883c420        add     rsp,20h
+00000001`4025a75e 5f              pop     rdi
+00000001`4025a75f c3              ret
+
+ntkrnlmp!MiWriteValidPteNewProtection+0x51:
+00000001`4025a761 48b8f8d7be7dfbf6ffff mov rax,0FFFFF6FB7DBED7F8h
+00000001`4025a76b 483bf8          cmp     rdi,rax
+00000001`4025a76e 77bf            ja      ntkrnlmp!MiWriteValidPteNewProtection+0x1f (00000001`4025a72f)
+
+ntkrnlmp!MiWriteValidPteNewProtection+0x60:
+00000001`4025a770 e9654a2200      jmp     ntkrnlmp!MiWriteValidPteNewProtection+0x224aca (00000001`4047f1da)
+
+ntkrnlmp!MiWriteValidPteNewProtection+0x224aca:
+00000001`4047f1da f70564f8890000006000 test dword ptr [ntkrnlmp!MiFlags (00000001`40d1ea48)],600000h
+00000001`4047f1e4 0f8445b5ddff    je      ntkrnlmp!MiWriteValidPteNewProtection+0x1f (00000001`4025a72f)
+
+ntkrnlmp!MiWriteValidPteNewProtection+0x224ada:
+00000001`4047f1ea 65488b042588010000 mov   rax,qword ptr gs:[188h]
+00000001`4047f1f3 488b88b8000000  mov     rcx,qword ptr [rax+0B8h]
+00000001`4047f1fa 80b99003000001  cmp     byte ptr [rcx+390h],1
+00000001`4047f201 0f8428b5ddff    je      ntkrnlmp!MiWriteValidPteNewProtection+0x1f (00000001`4025a72f)
+
+ntkrnlmp!MiWriteValidPteNewProtection+0x224af7:
+00000001`4047f207 f6c301          test    bl,1
+00000001`4047f20a 0f841fb5ddff    je      ntkrnlmp!MiWriteValidPteNewProtection+0x1f (00000001`4025a72f)
+
+ntkrnlmp!MiWriteValidPteNewProtection+0x224b00:
+00000001`4047f210 f6c320          test    bl,20h
+00000001`4047f213 7409            je      ntkrnlmp!MiWriteValidPteNewProtection+0x224b0e (00000001`4047f21e)
+
+ntkrnlmp!MiWriteValidPteNewProtection+0x224b05:
+00000001`4047f215 f6c342          test    bl,42h
+00000001`4047f218 0f8511b5ddff    jne     ntkrnlmp!MiWriteValidPteNewProtection+0x1f (00000001`4025a72f)
+
+ntkrnlmp!MiWriteValidPteNewProtection+0x224b0e:
+00000001`4047f21e 65488b042588010000 mov   rax,qword ptr gs:[188h]
+00000001`4047f227 488b88b8000000  mov     rcx,qword ptr [rax+0B8h]
+00000001`4047f22e 4c8b8188070000  mov     r8,qword ptr [rcx+788h]
+00000001`4047f235 4d85c0          test    r8,r8
+00000001`4047f238 0f84f1b4ddff    je      ntkrnlmp!MiWriteValidPteNewProtection+0x1f (00000001`4025a72f)
+
+ntkrnlmp!MiWriteValidPteNewProtection+0x224b2e:
+00000001`4047f23e 488bc7          mov     rax,rdi
+00000001`4047f241 48c1e803        shr     rax,3
+00000001`4047f245 25ff010000      and     eax,1FFh
+00000001`4047f24a 498b04c0        mov     rax,qword ptr [r8+rax*8]
+00000001`4047f24e 4c8bc3          mov     r8,rbx
+00000001`4047f251 4983c820        or      r8,20h
+00000001`4047f255 a820            test    al,20h
+00000001`4047f257 4c0f44c3        cmove   r8,rbx
+00000001`4047f25b 498bd8          mov     rbx,r8
+00000001`4047f25e a842            test    al,42h
+00000001`4047f260 0f84c9b4ddff    je      ntkrnlmp!MiWriteValidPteNewProtection+0x1f (00000001`4025a72f)
+
+ntkrnlmp!MiWriteValidPteNewProtection+0x224b56:
+00000001`4047f266 4883cb42        or      rbx,42h
+00000001`4047f26a e9c0b4ddff      jmp     ntkrnlmp!MiWriteValidPteNewProtection+0x1f (00000001`4025a72f)
+
+ntkrnlmp!MiWriteValidPteNewProtection+0x224b5f:
+00000001`4047f26f e898afecff      call    ntkrnlmp!MiPteHasShadow (00000001`4034a20c)
+00000001`4047f274 85c0            test    eax,eax
+00000001`4047f276 742f            je      ntkrnlmp!MiWriteValidPteNewProtection+0x224b97 (00000001`4047f2a7)
+
+ntkrnlmp!MiWriteValidPteNewProtection+0x224b68:
+00000001`4047f278 803d3e767e0000  cmp     byte ptr [ntkrnlmp!MiState+0x187d (00000001`40c668bd)],0
+00000001`4047f27f 7512            jne     ntkrnlmp!MiWriteValidPteNewProtection+0x224b83 (00000001`4047f293)
+
+ntkrnlmp!MiWriteValidPteNewProtection+0x224b71:
+00000001`4047f281 f6c301          test    bl,1
+00000001`4047f284 740d            je      ntkrnlmp!MiWriteValidPteNewProtection+0x224b83 (00000001`4047f293)
+
+ntkrnlmp!MiWriteValidPteNewProtection+0x224b76:
+00000001`4047f286 48b80000000000000080 mov rax,8000000000000000h
+00000001`4047f290 480bd8          or      rbx,rax
+
+ntkrnlmp!MiWriteValidPteNewProtection+0x224b83:
+00000001`4047f293 488bd3          mov     rdx,rbx
+00000001`4047f296 48891f          mov     qword ptr [rdi],rbx
+00000001`4047f299 488bcf          mov     rcx,rdi
+00000001`4047f29c e80bafecff      call    ntkrnlmp!MiWritePteShadow (00000001`4034a1ac)
+00000001`4047f2a1 90              nop
+00000001`4047f2a2 e9aeb4ddff      jmp     ntkrnlmp!MiWriteValidPteNewProtection+0x45 (00000001`4025a755)
+
+ntkrnlmp!MiWriteValidPteNewProtection+0x224b97:
+00000001`4047f2a7 65488b042588010000 mov   rax,qword ptr gs:[188h]
+00000001`4047f2b0 488b88b8000000  mov     rcx,qword ptr [rax+0B8h]
+00000001`4047f2b7 f7817c08000000100000 test dword ptr [rcx+87Ch],1000h
+00000001`4047f2c1 0f848bb4ddff    je      ntkrnlmp!MiWriteValidPteNewProtection+0x42 (00000001`4025a752)
+
+ntkrnlmp!MiWriteValidPteNewProtection+0x224bb7:
+00000001`4047f2c7 f6c301          test    bl,1
+00000001`4047f2ca 0f8482b4ddff    je      ntkrnlmp!MiWriteValidPteNewProtection+0x42 (00000001`4025a752)
+
+ntkrnlmp!MiWriteValidPteNewProtection+0x224bc0:
+00000001`4047f2d0 48b80000000000000080 mov rax,8000000000000000h
+00000001`4047f2da 480bd8          or      rbx,rax
+00000001`4047f2dd e970b4ddff      jmp     ntkrnlmp!MiWriteValidPteNewProtection+0x42 (00000001`4025a752)
+quit:
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\atlmfc.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\ObjectiveC.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\concurrency.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\cpp_rest.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\stl.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\Windows.Data.Json.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\Windows.Devices.Geolocation.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\Windows.Devices.Sensors.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\Windows.Media.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\windows.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\winrt.natvis'

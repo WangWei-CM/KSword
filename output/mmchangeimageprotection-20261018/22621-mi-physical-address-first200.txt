@@ -1,0 +1,83 @@
+Source: 22621-mi-physical-address-cdb-uf.txt; first 200 instructions in CDB uf traversal order. All addresses RVA.
+CDB uf instruction count=81; listed=81
+0025A7C0  4053                     push    rbx
+0025A7C2  4883ec20                 sub     rsp,20h
+0025A7C6  48c1e909                 shr     rcx,9
+0025A7CA  49b8f8ffffff7f000000     mov r8,7FFFFFFFF8h
+0025A7D4  4923c8                   and     rcx,r8
+0025A7D7  48ba0000000080f6ffff     mov rdx,0FFFFF68000000000h
+0025A7E1  41ba04000000             mov     r10d,4
+0025A7E7  488bc2                   mov     rax,rdx
+0025A7EA  4803c8                   add     rcx,rax
+0025A7ED  48890c24                 mov     qword ptr [rsp],rcx
+0025A7F1  48c1e909                 shr     rcx,9
+0025A7F5  4923c8                   and     rcx,r8
+0025A7F8  488bc2                   mov     rax,rdx
+0025A7FB  4803c8                   add     rcx,rax
+0025A7FE  48894c2408               mov     qword ptr [rsp+8],rcx
+0025A803  48c1e909                 shr     rcx,9
+0025A807  4923c8                   and     rcx,r8
+0025A80A  488bc2                   mov     rax,rdx
+0025A80D  4803c8                   add     rcx,rax
+0025A810  48894c2410               mov     qword ptr [rsp+10h],rcx
+0025A815  48c1e909                 shr     rcx,9
+0025A819  4923c8                   and     rcx,r8
+0025A81C  488bc2                   mov     rax,rdx
+0025A81F  4803c8                   add     rcx,rax
+0025A822  49bb00d0be7dfbf6ffff     mov r11,0FFFFF6FB7DBED000h
+0025A82C  48894c2418               mov     qword ptr [rsp+18h],rcx
+0025A831  418bd2                   mov     edx,r10d
+0025A834  48bbf8d7be7dfbf6ffff     mov rbx,0FFFFF6FB7DBED7F8h
+0025A83E  4c8b4cd4f8               mov     r9,qword ptr [rsp+rdx*8-8]
+0025A843  48ffca                   dec     rdx
+0025A846  41ffca                   dec     r10d
+0025A849  498b09                   mov     rcx,qword ptr [r9]
+0025A84C  498bc3                   mov     rax,r11
+0025A84F  4c3bc8                   cmp     r9,rax
+0025A852  720c                     jb      ntkrnlmp!MI_IS_PHYSICAL_ADDRESS+0xa0 (RVA 0x25A860)
+0025A854  488bc3                   mov     rax,rbx
+0025A857  4c3bc8                   cmp     r9,rax
+0025A85A  0f86824a2200             jbe     ntkrnlmp!MI_IS_PHYSICAL_ADDRESS+0x224b22 (RVA 0x47F2E2)
+0025A860  f6c101                   test    cl,1
+0025A863  740a                     je      ntkrnlmp!MI_IS_PHYSICAL_ADDRESS+0xaf (RVA 0x25A86F)
+0025A865  84c9                     test    cl,cl
+0025A867  780f                     js      ntkrnlmp!MI_IS_PHYSICAL_ADDRESS+0xb8 (RVA 0x25A878)
+0025A869  4883fa01                 cmp     rdx,1
+0025A86D  75cf                     jne     ntkrnlmp!MI_IS_PHYSICAL_ADDRESS+0x7e (RVA 0x25A83E)
+0025A86F  33c0                     xor     eax,eax
+0025A871  4883c420                 add     rsp,20h
+0025A875  5b                       pop     rbx
+0025A876  c3                       ret
+0025A878  418bc2                   mov     eax,r10d
+0025A87B  4883c420                 add     rsp,20h
+0025A87F  5b                       pop     rbx
+0025A880  c3                       ret
+0047F2E2  f7055cf7890000006000     test dword ptr [ntkrnlmp!MiFlags (RVA 0xD1EA48)],600000h
+0047F2EC  0f846eb5ddff             je      ntkrnlmp!MI_IS_PHYSICAL_ADDRESS+0xa0 (RVA 0x25A860)
+0047F2F2  65488b042588010000       mov   rax,qword ptr gs:[188h]
+0047F2FB  4c8b80b8000000           mov     r8,qword ptr [rax+0B8h]
+0047F302  4180b89003000001         cmp     byte ptr [r8+390h],1
+0047F30A  0f8450b5ddff             je      ntkrnlmp!MI_IS_PHYSICAL_ADDRESS+0xa0 (RVA 0x25A860)
+0047F310  f6c101                   test    cl,1
+0047F313  0f8456b5ddff             je      ntkrnlmp!MI_IS_PHYSICAL_ADDRESS+0xaf (RVA 0x25A86F)
+0047F319  f6c120                   test    cl,20h
+0047F31C  7409                     je      ntkrnlmp!MI_IS_PHYSICAL_ADDRESS+0x224b67 (RVA 0x47F327)
+0047F31E  f6c142                   test    cl,42h
+0047F321  0f8539b5ddff             jne     ntkrnlmp!MI_IS_PHYSICAL_ADDRESS+0xa0 (RVA 0x25A860)
+0047F327  65488b042588010000       mov   rax,qword ptr gs:[188h]
+0047F330  4c8b80b8000000           mov     r8,qword ptr [rax+0B8h]
+0047F337  498b8088070000           mov     rax,qword ptr [r8+788h]
+0047F33E  4885c0                   test    rax,rax
+0047F341  0f8419b5ddff             je      ntkrnlmp!MI_IS_PHYSICAL_ADDRESS+0xa0 (RVA 0x25A860)
+0047F347  49c1e903                 shr     r9,3
+0047F34B  4181e1ff010000           and     r9d,1FFh
+0047F352  4a8b04c8                 mov     rax,qword ptr [rax+r9*8]
+0047F356  4c8bc9                   mov     r9,rcx
+0047F359  4983c920                 or      r9,20h
+0047F35D  a820                     test    al,20h
+0047F35F  4c0f44c9                 cmove   r9,rcx
+0047F363  498bc9                   mov     rcx,r9
+0047F366  a842                     test    al,42h
+0047F368  0f84f2b4ddff             je      ntkrnlmp!MI_IS_PHYSICAL_ADDRESS+0xa0 (RVA 0x25A860)
+0047F36E  4883c942                 or      rcx,42h
+0047F372  e9e9b4ddff               jmp     ntkrnlmp!MI_IS_PHYSICAL_ADDRESS+0xa0 (RVA 0x25A860)

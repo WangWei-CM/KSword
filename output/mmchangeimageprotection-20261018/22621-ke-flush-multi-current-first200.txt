@@ -1,0 +1,140 @@
+Source: 22621-ke-flush-multi-current-cdb-uf.txt; first 200 instructions in CDB uf traversal order. All addresses RVA.
+CDB uf instruction count=138; listed=138
+00388010  48895c2418               mov     qword ptr [rsp+18h],rbx
+00388015  55                       push    rbp
+00388016  56                       push    rsi
+00388017  57                       push    rdi
+00388018  4154                     push    r12
+0038801A  4156                     push    r14
+0038801C  4881ec70010000           sub     rsp,170h
+00388023  488b05b64e8800           mov     rax,qword ptr [ntkrnlmp!_security_cookie (RVA 0xC0CEE0)]
+0038802A  4833c4                   xor     rax,rsp
+0038802D  4889842460010000         mov     qword ptr [rsp+160h],rax
+00388035  488364244800             and     qword ptr [rsp+48h],0
+0038803B  418be8                   mov     ebp,r8d
+0038803E  4c8bf2                   mov     r14,rdx
+00388041  8bf9                     mov     edi,ecx
+00388043  33d2                     xor     edx,edx
+00388045  488d4c2450               lea     rcx,[rsp+50h]
+0038804A  41b808010000             mov     r8d,108h
+00388050  e86b3d0a00               call    ntkrnlmp!memset (RVA 0x42BDC0)
+00388055  498b0e                   mov     rcx,qword ptr [r14]
+00388058  8bd5                     mov     edx,ebp
+0038805A  c644244000               mov     byte ptr [rsp+40h],0
+0038805F  e83468f2ff               call    ntkrnlmp!KiIsSecureProcessFlush (RVA 0x2AE898)
+00388064  8b1dfe699900             mov     ebx,dword ptr [ntkrnlmp!HvlEnlightenments (RVA 0xD1EA68)]
+0038806A  408af0                   mov     sil,al
+0038806D  0fbae317                 bt      ebx,17h
+00388071  7273                     jb      ntkrnlmp!KeFlushMultipleRangeCurrentTb+0xd6 (RVA 0x3880E6)
+00388073  32db                     xor     bl,bl
+00388075  4084f6                   test    sil,sil
+00388078  0f8506581500             jne     ntkrnlmp!KeFlushMultipleRangeCurrentTb+0x155874 (RVA 0x4DD884)
+0038807E  84db                     test    bl,bl
+00388080  0f85fe571500             jne     ntkrnlmp!KeFlushMultipleRangeCurrentTb+0x155874 (RVA 0x4DD884)
+00388086  85ff                     test    edi,edi
+00388088  741a                     je      ntkrnlmp!KeFlushMultipleRangeCurrentTb+0x94 (RVA 0x3880A4)
+0038808A  498bde                   mov     rbx,r14
+0038808D  488bf7                   mov     rsi,rdi
+00388090  488b0b                   mov     rcx,qword ptr [rbx]
+00388093  8bd5                     mov     edx,ebp
+00388095  e87e050000               call    ntkrnlmp!KiFlushRangeTb (RVA 0x388618)
+0038809A  488d5b08                 lea     rbx,[rbx+8]
+0038809E  4883ee01                 sub     rsi,1
+003880A2  75ec                     jne     ntkrnlmp!KeFlushMultipleRangeCurrentTb+0x80 (RVA 0x388090)
+003880A4  803d574f990000           cmp     byte ptr [ntkrnlmp!VmTbFlushEnabled (RVA 0xD1D002)],0
+003880AB  0f851f581500             jne     ntkrnlmp!KeFlushMultipleRangeCurrentTb+0x1558c0 (RVA 0x4DD8D0)
+003880B1  833d88fa980000           cmp     dword ptr [ntkrnlmp!ExTbFlushActive (RVA 0xD17B40)],0
+003880B8  0f8525581500             jne     ntkrnlmp!KeFlushMultipleRangeCurrentTb+0x1558d3 (RVA 0x4DD8E3)
+003880BE  488b8c2460010000         mov     rcx,qword ptr [rsp+160h]
+003880C6  4833cc                   xor     rcx,rsp
+003880C9  e822950400               call    ntkrnlmp!_security_check_cookie (RVA 0x3D15F0)
+003880CE  488b9c24b0010000         mov     rbx,qword ptr [rsp+1B0h]
+003880D6  4881c470010000           add     rsp,170h
+003880DD  415e                     pop     r14
+003880DF  415c                     pop     r12
+003880E1  5f                       pop     rdi
+003880E2  5e                       pop     rsi
+003880E3  5d                       pop     rbp
+003880E4  c3                       ret
+003880E6  d0eb                     shr     bl,1
+003880E8  80e301                   and     bl,1
+003880EB  eb88                     jmp     ntkrnlmp!KeFlushMultipleRangeCurrentTb+0x65 (RVA 0x388075)
+004DD884  4c8d442440               lea     r8,[rsp+40h]
+004DD889  8bcd                     mov     ecx,ebp
+004DD88B  488d542448               lea     rdx,[rsp+48h]
+004DD890  e837aaeeff               call    ntkrnlmp!KiPrepareFlushParameters (RVA 0x3C82CC)
+004DD895  488d4c2450               lea     rcx,[rsp+50h]
+004DD89A  e8951b0900               call    ntkrnlmp!KiPrepareFlushCurrentAffinity (RVA 0x56F434)
+004DD89F  448a442440               mov     r8b,byte ptr [rsp+40h]
+004DD8A4  488d542450               lea     rdx,[rsp+50h]
+004DD8A9  488b4c2448               mov     rcx,qword ptr [rsp+48h]
+004DD8AE  448ace                   mov     r9b,sil
+004DD8B1  4c89742430               mov     qword ptr [rsp+30h],r14
+004DD8B6  897c2428                 mov     dword ptr [rsp+28h],edi
+004DD8BA  885c2420                 mov     byte ptr [rsp+20h],bl
+004DD8BE  e86984eeff               call    ntkrnlmp!HvlFlushRangeListTb (RVA 0x3C5D2C)
+004DD8C3  84c0                     test    al,al
+004DD8C5  0f85d9a7eaff             jne     ntkrnlmp!KeFlushMultipleRangeCurrentTb+0x94 (RVA 0x3880A4)
+004DD8CB  e9b6a7eaff               jmp     ntkrnlmp!KeFlushMultipleRangeCurrentTb+0x76 (RVA 0x388086)
+004DD8D0  448bc5                   mov     r8d,ebp
+004DD8D3  498bd6                   mov     rdx,r14
+004DD8D6  8bcf                     mov     ecx,edi
+004DD8D8  e87ff8f7ff               call    ntkrnlmp!VmFlushTb (RVA 0x45D15C)
+004DD8DD  90                       nop
+004DD8DE  e9cea7eaff               jmp     ntkrnlmp!KeFlushMultipleRangeCurrentTb+0xa1 (RVA 0x3880B1)
+004DD8E3  440f20c3                 mov     rbx,cr8
+004DD8E7  41bc0f000000             mov     r12d,0Fh
+004DD8ED  450f22c4                 mov     cr8,r12
+004DD8F1  8b05a9138400             mov     eax,dword ptr [ntkrnlmp!KiIrqlFlags (RVA 0xD1ECA0)]
+004DD8F7  4883ceff                 or      rsi,0FFFFFFFFFFFFFFFFh
+004DD8FB  85c0                     test    eax,eax
+004DD8FD  743e                     je      ntkrnlmp!KeFlushMultipleRangeCurrentTb+0x15592d (RVA 0x4DD93D)
+004DD8FF  a801                     test    al,1
+004DD901  743a                     je      ntkrnlmp!KeFlushMultipleRangeCurrentTb+0x15592d (RVA 0x4DD93D)
+004DD903  413adc                   cmp     bl,r12b
+004DD906  7735                     ja      ntkrnlmp!KeFlushMultipleRangeCurrentTb+0x15592d (RVA 0x4DD93D)
+004DD908  65488b042520000000       mov   rax,qword ptr gs:[20h]
+004DD911  4c8b88b8880000           mov     r9,qword ptr [rax+88B8h]
+004DD918  458b4114                 mov     r8d,dword ptr [r9+14h]
+004DD91C  7507                     jne     ntkrnlmp!KeFlushMultipleRangeCurrentTb+0x155915 (RVA 0x4DD925)
+004DD91E  ba00800000               mov     edx,8000h
+004DD923  eb11                     jmp     ntkrnlmp!KeFlushMultipleRangeCurrentTb+0x155926 (RVA 0x4DD936)
+004DD925  0fb6cb                   movzx   ecx,bl
+004DD928  488bd6                   mov     rdx,rsi
+004DD92B  ffc1                     inc     ecx
+004DD92D  48d3e2                   shl     rdx,cl
+004DD930  81e2fcff0000             and     edx,0FFFCh
+004DD936  440bc2                   or      r8d,edx
+004DD939  45894114                 mov     dword ptr [r9+14h],r8d
+004DD93D  448bc5                   mov     r8d,ebp
+004DD940  498bd6                   mov     rdx,r14
+004DD943  8bcf                     mov     ecx,edi
+004DD945  e8cecb1200               call    ntkrnlmp!ExFlushTb (RVA 0x60A518)
+004DD94A  8b0d50138400             mov     ecx,dword ptr [ntkrnlmp!KiIrqlFlags (RVA 0xD1ECA0)]
+004DD950  85c9                     test    ecx,ecx
+004DD952  7448                     je      ntkrnlmp!KeFlushMultipleRangeCurrentTb+0x15598c (RVA 0x4DD99C)
+004DD954  440f20c0                 mov     rax,cr8
+004DD958  f6c101                   test    cl,1
+004DD95B  743f                     je      ntkrnlmp!KeFlushMultipleRangeCurrentTb+0x15598c (RVA 0x4DD99C)
+004DD95D  413ac4                   cmp     al,r12b
+004DD960  773a                     ja      ntkrnlmp!KeFlushMultipleRangeCurrentTb+0x15598c (RVA 0x4DD99C)
+004DD962  413adc                   cmp     bl,r12b
+004DD965  7735                     ja      ntkrnlmp!KeFlushMultipleRangeCurrentTb+0x15598c (RVA 0x4DD99C)
+004DD967  3c02                     cmp     al,2
+004DD969  7231                     jb      ntkrnlmp!KeFlushMultipleRangeCurrentTb+0x15598c (RVA 0x4DD99C)
+004DD96B  654c8b0c2520000000       mov   r9,qword ptr gs:[20h]
+004DD974  0fb6cb                   movzx   ecx,bl
+004DD977  ffc1                     inc     ecx
+004DD979  48d3e6                   shl     rsi,cl
+004DD97C  4d8b81b8880000           mov     r8,qword ptr [r9+88B8h]
+004DD983  0fb7c6                   movzx   eax,si
+004DD986  f7d0                     not     eax
+004DD988  418b5014                 mov     edx,dword ptr [r8+14h]
+004DD98C  23d0                     and     edx,eax
+004DD98E  41895014                 mov     dword ptr [r8+14h],edx
+004DD992  7508                     jne     ntkrnlmp!KeFlushMultipleRangeCurrentTb+0x15598c (RVA 0x4DD99C)
+004DD994  498bc9                   mov     rcx,r9
+004DD997  e8b4d80800               call    ntkrnlmp!KiRemoveSystemWorkPriorityKick (RVA 0x56B250)
+004DD99C  0fb6c3                   movzx   eax,bl
+004DD99F  440f22c0                 mov     cr8,rax
+004DD9A3  e916a7eaff               jmp     ntkrnlmp!KeFlushMultipleRangeCurrentTb+0xae (RVA 0x3880BE)

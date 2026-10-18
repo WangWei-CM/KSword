@@ -1,0 +1,197 @@
+
+************* Preparing the environment for Debugger Extensions Gallery repositories **************
+   ExtensionRepository : Implicit
+   UseExperimentalFeatureForNugetShare : true
+   AllowNugetExeUpdate : true
+   NonInteractiveNuget : true
+   AllowNugetMSCredentialProviderInstall : true
+   AllowParallelInitializationOfLocalRepositories : true
+
+   EnableRedirectToV8JsProvider : false
+
+   -- Configuring repositories
+      ----> Repository : LocalInstalled, Enabled: true
+      ----> Repository : UserExtensions, Enabled: true
+
+>>>>>>>>>>>>> Preparing the environment for Debugger Extensions Gallery repositories completed, duration 0.000 seconds
+
+************* Waiting for Debugger Extensions Gallery to Initialize **************
+
+>>>>>>>>>>>>> Waiting for Debugger Extensions Gallery to Initialize completed, duration 0.031 seconds
+   ----> Repository : UserExtensions, Enabled: true, Packages count: 0
+   ----> Repository : LocalInstalled, Enabled: true, Packages count: 29
+
+Microsoft (R) Windows Debugger Version 10.0.26100.6584 AMD64
+Copyright (c) Microsoft Corporation. All rights reserved.
+
+
+Loading Dump File [C:\Users\Felix\CLionProjects\KSword\artifacts\symbols\ntkrnlmp.exe\2C33C5081047000\ntkrnlmp.exe]
+
+************* Path validation summary **************
+Response                         Time (ms)     Location
+OK                                             C:\Users\Felix\CLionProjects\KSword\artifacts\symbols
+Symbol search path is: C:\Users\Felix\CLionProjects\KSword\artifacts\symbols
+Executable search path is:
+ModLoad: 00000001`40000000 00000001`41047000   C:\Users\Felix\CLionProjects\KSword\artifacts\symbols\ntkrnlmp.exe\2C33C5081047000\ntkrnlmp.exe
+ntkrnlmp!KiSystemStartup:
+00000001`40a83010 4883ec38        sub     rsp,38h
+0:000> cdb: Reading initial command 'uf ntkrnlmp!MiClearPfnImageVerified; q'
+ntkrnlmp!MiClearPfnImageVerified:
+00000001`403444cc 488bc4          mov     rax,rsp
+00000001`403444cf 48895808        mov     qword ptr [rax+8],rbx
+00000001`403444d3 48896810        mov     qword ptr [rax+10h],rbp
+00000001`403444d7 48897018        mov     qword ptr [rax+18h],rsi
+00000001`403444db 57              push    rdi
+00000001`403444dc 4883ec40        sub     rsp,40h
+00000001`403444e0 0f57c0          xorps   xmm0,xmm0
+00000001`403444e3 8bea            mov     ebp,edx
+00000001`403444e5 0f1140e8        movups  xmmword ptr [rax-18h],xmm0
+00000001`403444e9 488b4128        mov     rax,qword ptr [rcx+28h]
+00000001`403444ed 488bd9          mov     rbx,rcx
+00000001`403444f0 48c1e83c        shr     rax,3Ch
+00000001`403444f4 2407            and     al,7
+00000001`403444f6 3c03            cmp     al,3
+00000001`403444f8 7416            je      ntkrnlmp!MiClearPfnImageVerified+0x44 (00000001`40344510)
+
+ntkrnlmp!MiClearPfnImageVerified+0x2e:
+00000001`403444fa 488b5c2450      mov     rbx,qword ptr [rsp+50h]
+00000001`403444ff 488b6c2458      mov     rbp,qword ptr [rsp+58h]
+00000001`40344504 488b742460      mov     rsi,qword ptr [rsp+60h]
+00000001`40344509 4883c440        add     rsp,40h
+00000001`4034450d 5f              pop     rdi
+00000001`4034450e c3              ret
+
+ntkrnlmp!MiClearPfnImageVerified+0x44:
+00000001`40344510 40f6c504        test    bpl,4
+00000001`40344514 0f84802d1800    je      ntkrnlmp!MiClearPfnImageVerified+0x182dce (00000001`404c729a)
+
+ntkrnlmp!MiClearPfnImageVerified+0x4e:
+00000001`4034451a 40b711          mov     dil,11h
+
+ntkrnlmp!MiClearPfnImageVerified+0x51:
+00000001`4034451d 40f6c508        test    bpl,8
+00000001`40344521 0f85802d1800    jne     ntkrnlmp!MiClearPfnImageVerified+0x182ddb (00000001`404c72a7)
+
+ntkrnlmp!MiClearPfnImageVerified+0x5b:
+00000001`40344527 33d2            xor     edx,edx
+00000001`40344529 488bcb          mov     rcx,rbx
+00000001`4034452c e843e5f9ff      call    ntkrnlmp!MiSetPfnIdentity (00000001`402e2a74)
+00000001`40344531 4080ff11        cmp     dil,11h
+00000001`40344535 74c3            je      ntkrnlmp!MiClearPfnImageVerified+0x2e (00000001`403444fa)
+
+ntkrnlmp!MiClearPfnImageVerified+0x6b:
+00000001`40344537 e9012e1800      jmp     ntkrnlmp!MiClearPfnImageVerified+0x182e71 (00000001`404c733d)
+
+ntkrnlmp!MiClearPfnImageVerified+0x182dce:
+00000001`404c729a e8b1fde2ff      call    ntkrnlmp!MiLockPageInline (00000001`402f7050)
+00000001`404c729f 408af8          mov     dil,al
+00000001`404c72a2 e976d2e7ff      jmp     ntkrnlmp!MiClearPfnImageVerified+0x51 (00000001`4034451d)
+
+ntkrnlmp!MiClearPfnImageVerified+0x182ddb:
+00000001`404c72a7 4c8d442430      lea     r8,[rsp+30h]
+00000001`404c72ac ba01000000      mov     edx,1
+00000001`404c72b1 488bcb          mov     rcx,rbx
+00000001`404c72b4 e8d72ed9ff      call    ntkrnlmp!MiGetPagePrivilege (00000001`4025a190)
+00000001`404c72b9 85c0            test    eax,eax
+00000001`404c72bb 0f8466d2e7ff    je      ntkrnlmp!MiClearPfnImageVerified+0x5b (00000001`40344527)
+
+ntkrnlmp!MiClearPfnImageVerified+0x182df5:
+00000001`404c72c1 48b90000000000deffff mov rcx,0FFFFDE0000000000h
+00000001`404c72cb 488bf3          mov     rsi,rbx
+00000001`404c72ce 482bf1          sub     rsi,rcx
+00000001`404c72d1 48b9abaaaaaaaaaaaaaa mov rcx,0AAAAAAAAAAAAAAABh
+00000001`404c72db 48c1fe04        sar     rsi,4
+00000001`404c72df 480faff1        imul    rsi,rcx
+00000001`404c72e3 a820            test    al,20h
+00000001`404c72e5 7407            je      ntkrnlmp!MiClearPfnImageVerified+0x182e22 (00000001`404c72ee)
+
+ntkrnlmp!MiClearPfnImageVerified+0x182e1b:
+00000001`404c72e7 b800020000      mov     eax,200h
+00000001`404c72ec eb0f            jmp     ntkrnlmp!MiClearPfnImageVerified+0x182e31 (00000001`404c72fd)
+
+ntkrnlmp!MiClearPfnImageVerified+0x182e22:
+00000001`404c72ee 408ac5          mov     al,bpl
+00000001`404c72f1 2410            and     al,10h
+00000001`404c72f3 f6d8            neg     al
+00000001`404c72f5 1bc0            sbb     eax,eax
+00000001`404c72f7 83e010          and     eax,10h
+00000001`404c72fa 83c010          add     eax,10h
+
+ntkrnlmp!MiClearPfnImageVerified+0x182e31:
+00000001`404c72fd 448bc0          mov     r8d,eax
+00000001`404c7300 488d542430      lea     rdx,[rsp+30h]
+00000001`404c7305 410fbae807      bts     r8d,7
+00000001`404c730a 488bce          mov     rcx,rsi
+00000001`404c730d 4080e540        and     bpl,40h
+00000001`404c7311 440f44c0        cmove   r8d,eax
+00000001`404c7315 e89a72f0ff      call    ntkrnlmp!KeSetPagePrivilege (00000001`403ce5b4)
+00000001`404c731a 85c0            test    eax,eax
+00000001`404c731c 0f8905d2e7ff    jns     ntkrnlmp!MiClearPfnImageVerified+0x5b (00000001`40344527)
+
+ntkrnlmp!MiClearPfnImageVerified+0x182e56:
+00000001`404c7322 488364242000    and     qword ptr [rsp+20h],0
+00000001`404c7328 4533c9          xor     r9d,r9d
+00000001`404c732b 4c8bc6          mov     r8,rsi
+00000001`404c732e ba0b150500      mov     edx,5150Bh
+00000001`404c7333 418d491a        lea     ecx,[r9+1Ah]
+00000001`404c7337 e8b4daf4ff      call    ntkrnlmp!KeBugCheckEx (00000001`40414df0)
+00000001`404c733c cc              int     3
+
+ntkrnlmp!MiClearPfnImageVerified+0x182e71:
+00000001`404c733d 48b8ffffffffffffff7f mov rax,7FFFFFFFFFFFFFFFh
+00000001`404c7347 f048214318      lock and qword ptr [rbx+18h],rax
+00000001`404c734c 8b0d4e798500    mov     ecx,dword ptr [ntkrnlmp!KiIrqlFlags (00000001`40d1eca0)]
+00000001`404c7352 85c9            test    ecx,ecx
+00000001`404c7354 744e            je      ntkrnlmp!MiClearPfnImageVerified+0x182ed8 (00000001`404c73a4)
+
+ntkrnlmp!MiClearPfnImageVerified+0x182e8a:
+00000001`404c7356 440f20c0        mov     rax,cr8
+00000001`404c735a f6c101          test    cl,1
+00000001`404c735d 7445            je      ntkrnlmp!MiClearPfnImageVerified+0x182ed8 (00000001`404c73a4)
+
+ntkrnlmp!MiClearPfnImageVerified+0x182e93:
+00000001`404c735f 3c0f            cmp     al,0Fh
+00000001`404c7361 7741            ja      ntkrnlmp!MiClearPfnImageVerified+0x182ed8 (00000001`404c73a4)
+
+ntkrnlmp!MiClearPfnImageVerified+0x182e97:
+00000001`404c7363 4080ff0f        cmp     dil,0Fh
+00000001`404c7367 773b            ja      ntkrnlmp!MiClearPfnImageVerified+0x182ed8 (00000001`404c73a4)
+
+ntkrnlmp!MiClearPfnImageVerified+0x182e9d:
+00000001`404c7369 3c02            cmp     al,2
+00000001`404c736b 7237            jb      ntkrnlmp!MiClearPfnImageVerified+0x182ed8 (00000001`404c73a4)
+
+ntkrnlmp!MiClearPfnImageVerified+0x182ea1:
+00000001`404c736d 654c8b142520000000 mov   r10,qword ptr gs:[20h]
+00000001`404c7376 4883caff        or      rdx,0FFFFFFFFFFFFFFFFh
+00000001`404c737a 400fb6cf        movzx   ecx,dil
+00000001`404c737e ffc1            inc     ecx
+00000001`404c7380 48d3e2          shl     rdx,cl
+00000001`404c7383 4d8b8ab8880000  mov     r9,qword ptr [r10+88B8h]
+00000001`404c738a 0fb7c2          movzx   eax,dx
+00000001`404c738d f7d0            not     eax
+00000001`404c738f 458b4114        mov     r8d,dword ptr [r9+14h]
+00000001`404c7393 4423c0          and     r8d,eax
+00000001`404c7396 45894114        mov     dword ptr [r9+14h],r8d
+00000001`404c739a 7508            jne     ntkrnlmp!MiClearPfnImageVerified+0x182ed8 (00000001`404c73a4)
+
+ntkrnlmp!MiClearPfnImageVerified+0x182ed0:
+00000001`404c739c 498bca          mov     rcx,r10
+00000001`404c739f e8ac3e0a00      call    ntkrnlmp!KiRemoveSystemWorkPriorityKick (00000001`4056b250)
+
+ntkrnlmp!MiClearPfnImageVerified+0x182ed8:
+00000001`404c73a4 400fb6c7        movzx   eax,dil
+00000001`404c73a8 440f22c0        mov     cr8,rax
+00000001`404c73ac e949d1e7ff      jmp     ntkrnlmp!MiClearPfnImageVerified+0x2e (00000001`403444fa)
+quit:
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\atlmfc.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\ObjectiveC.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\concurrency.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\cpp_rest.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\stl.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\Windows.Data.Json.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\Windows.Devices.Geolocation.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\Windows.Devices.Sensors.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\Windows.Media.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\windows.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\winrt.natvis'

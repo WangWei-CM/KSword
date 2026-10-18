@@ -1,0 +1,94 @@
+Source: 22621-vsl-validate-cdb-uf.txt; first 200 instructions in CDB uf traversal order. All addresses RVA.
+CDB uf instruction count=92; listed=92
+00879388  48895c2420               mov     qword ptr [rsp+20h],rbx
+0087938D  56                       push    rsi
+0087938E  57                       push    rdi
+0087938F  4156                     push    r14
+00879391  4881ec30010000           sub     rsp,130h
+00879398  488b05413b3900           mov     rax,qword ptr [ntkrnlmp!_security_cookie (RVA 0xC0CEE0)]
+0087939F  4833c4                   xor     rax,rsp
+008793A2  4889842428010000         mov     qword ptr [rsp+128h],rax
+008793AA  418bf0                   mov     esi,r8d
+008793AD  488bda                   mov     rbx,rdx
+008793B0  488bf9                   mov     rdi,rcx
+008793B3  33d2                     xor     edx,edx
+008793B5  448d4268                 lea     r8d,[rdx+68h]
+008793B9  488d8c2480000000         lea     rcx,[rsp+80h]
+008793C1  e8fa29bbff               call    ntkrnlmp!memset (RVA 0x42BDC0)
+008793C6  0f57c0                   xorps   xmm0,xmm0
+008793C9  f30f7f8424fc000000       movdqu xmmword ptr [rsp+0FCh],xmm0
+008793D2  4533f6                   xor     r14d,r14d
+008793D5  4489b4240c010000         mov     dword ptr [rsp+10Ch],r14d
+008793DD  4c89b42420010000         mov     qword ptr [rsp+120h],r14
+008793E5  33d2                     xor     edx,edx
+008793E7  458d4648                 lea     r8d,[r14+48h]
+008793EB  488d4c2430               lea     rcx,[rsp+30h]
+008793F0  e8cb29bbff               call    ntkrnlmp!memset (RVA 0x42BDC0)
+008793F5  8b572c                   mov     edx,dword ptr [rdi+2Ch]
+008793F8  035728                   add     edx,dword ptr [rdi+28h]
+008793FB  488b4f20                 mov     rcx,qword ptr [rdi+20h]
+008793FF  e8bc49a9ff               call    ntkrnlmp!MmSizeOfMdl (RVA 0x30DDC0)
+00879404  4c8bc8                   mov     r9,rax
+00879407  448bc7                   mov     r8d,edi
+0087940A  418bd0                   mov     edx,r8d
+0087940D  41baff0f0000             mov     r10d,0FFFh
+00879413  4923d2                   and     rdx,r10
+00879416  4903d2                   add     rdx,r10
+00879419  4803d0                   add     rdx,rax
+0087941C  48c1ea0c                 shr     rdx,0Ch
+00879420  4883fa01                 cmp     rdx,1
+00879424  0f87ea260b00             ja      ntkrnlmp!VslValidateDynamicCodePages+0xb278c (RVA 0x92BB14)
+0087942A  4c89b424f0000000         mov     qword ptr [rsp+0F0h],r14
+00879432  6683c206                 add     dx,6
+00879436  66c1e203                 shl     dx,3
+0087943A  66899424f8000000         mov     word ptr [rsp+0F8h],dx
+00879442  664489b424fa000000       mov   word ptr [rsp+0FAh],r14w
+0087944B  488bc7                   mov     rax,rdi
+0087944E  482500f0ffff             and     rax,0FFFFFFFFFFFFF000h
+00879454  4889842410010000         mov     qword ptr [rsp+110h],rax
+0087945C  4523c2                   and     r8d,r10d
+0087945F  448984241c010000         mov     dword ptr [rsp+11Ch],r8d
+00879467  44898c2418010000         mov     dword ptr [rsp+118h],r9d
+0087946F  4533c0                   xor     r8d,r8d
+00879472  33d2                     xor     edx,edx
+00879474  488d8c24f0000000         lea     rcx,[rsp+0F0h]
+0087947C  e8cf299fff               call    ntkrnlmp!MmProbeAndLockPages (RVA 0x26BE50)
+00879481  eb05                     jmp     ntkrnlmp!VslValidateDynamicCodePages+0x100 (RVA 0x879488)
+00879488  4489742420               mov     dword ptr [rsp+20h],r14d
+0087948D  4533c9                   xor     r9d,r9d
+00879490  448bc6                   mov     r8d,esi
+00879493  488bd3                   mov     rdx,rbx
+00879496  488d4c2430               lea     rcx,[rsp+30h]
+0087949B  e864eeb4ff               call    ntkrnlmp!VslpLockPagesForTransfer (RVA 0x3C8304)
+008794A0  8bd8                     mov     ebx,eax
+008794A2  85c0                     test    eax,eax
+008794A4  7855                     js      ntkrnlmp!VslValidateDynamicCodePages+0x173 (RVA 0x8794FB)
+008794A6  4889bc2488000000         mov     qword ptr [rsp+88h],rdi
+008794AE  488b842420010000         mov     rax,qword ptr [rsp+120h]
+008794B6  4889842490000000         mov     qword ptr [rsp+90h],rax
+008794BE  488b442430               mov     rax,qword ptr [rsp+30h]
+008794C3  4889842498000000         mov     qword ptr [rsp+98h],rax
+008794CB  488b442468               mov     rax,qword ptr [rsp+68h]
+008794D0  48898424a0000000         mov     qword ptr [rsp+0A0h],rax
+008794D8  ba1f000000               mov     edx,1Fh
+008794DD  4c8d8c2480000000         lea     r9,[rsp+80h]
+008794E5  4533c0                   xor     r8d,r8d
+008794E8  b102                     mov     cl,2
+008794EA  e811f1abff               call    ntkrnlmp!VslpEnterIumSecureMode (RVA 0x338600)
+008794EF  8bd8                     mov     ebx,eax
+008794F1  488d4c2430               lea     rcx,[rsp+30h]
+008794F6  e881f0b4ff               call    ntkrnlmp!VslpUnlockPagesForTransfer (RVA 0x3C857C)
+008794FB  488d8c24f0000000         lea     rcx,[rsp+0F0h]
+00879503  e8a83c9cff               call    ntkrnlmp!MmUnlockPages (RVA 0x23D1B0)
+00879508  8bc3                     mov     eax,ebx
+0087950A  488b8c2428010000         mov     rcx,qword ptr [rsp+128h]
+00879512  4833cc                   xor     rcx,rsp
+00879515  e8d680b5ff               call    ntkrnlmp!_security_check_cookie (RVA 0x3D15F0)
+0087951A  488b9c2468010000         mov     rbx,qword ptr [rsp+168h]
+00879522  4881c430010000           add     rsp,130h
+00879529  415e                     pop     r14
+0087952B  5f                       pop     rdi
+0087952C  5e                       pop     rsi
+0087952D  c3                       ret
+0092BB14  b80d0000c0               mov     eax,0C000000Dh
+0092BB19  e9ecd9f4ff               jmp     ntkrnlmp!VslValidateDynamicCodePages+0x182 (RVA 0x87950A)

@@ -1,0 +1,47 @@
+Source: 22621-ki-flush-current-only-cdb-uf.txt; first 200 instructions in CDB uf traversal order. All addresses RVA.
+CDB uf instruction count=45; listed=45
+003B7820  4883ec28                 sub     rsp,28h
+003B7824  803d15a0a40000           cmp     byte ptr [ntkrnlmp!KiKvaShadow (RVA 0xE01840)],0
+003B782B  0f849b9c0900             je      ntkrnlmp!KiFlushCurrentTbOnly+0x99cac (RVA 0x4514CC)
+003B7831  83f901                   cmp     ecx,1
+003B7834  753d                     jne     ntkrnlmp!KiFlushCurrentTbOnly+0x53 (RVA 0x3B7873)
+003B7836  803d0972960000           cmp     byte ptr [ntkrnlmp!KiFlushPcid (RVA 0xD1EA46)],0
+003B783D  0f84779c0900             je      ntkrnlmp!KiFlushCurrentTbOnly+0x99c9a (RVA 0x4514BA)
+003B7843  0f20d8                   mov     rax,cr3
+003B7846  0f22d8                   mov     cr3,rax
+003B7849  65488b042588010000       mov   rax,qword ptr gs:[188h]
+003B7852  488b88b8000000           mov     rcx,qword ptr [rax+0B8h]
+003B7859  80b99003000000           cmp     byte ptr [rcx+390h],0
+003B7860  7406                     je      ntkrnlmp!KiFlushCurrentTbOnly+0x48 (RVA 0x3B7868)
+003B7862  4883c428                 add     rsp,28h
+003B7866  c3                       ret
+003B7868  e893ec0500               call    ntkrnlmp!KiSetUserTbFlushPending (RVA 0x416500)
+003B786D  4883c428                 add     rsp,28h
+003B7871  c3                       ret
+003B7873  85c9                     test    ecx,ecx
+003B7875  7405                     je      ntkrnlmp!KiFlushCurrentTbOnly+0x5c (RVA 0x3B787C)
+003B7877  83f902                   cmp     ecx,2
+003B787A  75ba                     jne     ntkrnlmp!KiFlushCurrentTbOnly+0x16 (RVA 0x3B7836)
+003B787C  0f20d8                   mov     rax,cr3
+003B787F  0f22d8                   mov     cr3,rax
+003B7882  ebde                     jmp     ntkrnlmp!KiFlushCurrentTbOnly+0x42 (RVA 0x3B7862)
+004514BA  0f20e1                   mov     rcx,cr4
+004514BD  48f7c180000200           test    rcx,20080h
+004514C4  0f84b263f6ff             je      ntkrnlmp!KiFlushCurrentTbOnly+0x5c (RVA 0x3B787C)
+004514CA  eb33                     jmp     ntkrnlmp!KiFlushCurrentTbOnly+0x99cdf (RVA 0x4514FF)
+004514CC  85c9                     test    ecx,ecx
+004514CE  7412                     je      ntkrnlmp!KiFlushCurrentTbOnly+0x99cc2 (RVA 0x4514E2)
+004514D0  83e901                   sub     ecx,1
+004514D3  0f84a363f6ff             je      ntkrnlmp!KiFlushCurrentTbOnly+0x5c (RVA 0x3B787C)
+004514D9  83f901                   cmp     ecx,1
+004514DC  0f849a63f6ff             je      ntkrnlmp!KiFlushCurrentTbOnly+0x5c (RVA 0x3B787C)
+004514E2  803d5dd58c0000           cmp     byte ptr [ntkrnlmp!KiFlushPcid (RVA 0xD1EA46)],0
+004514E9  0f855463f6ff             jne     ntkrnlmp!KiFlushCurrentTbOnly+0x23 (RVA 0x3B7843)
+004514EF  0f20e1                   mov     rcx,cr4
+004514F2  48f7c180000200           test    rcx,20080h
+004514F9  0f847d63f6ff             je      ntkrnlmp!KiFlushCurrentTbOnly+0x5c (RVA 0x3B787C)
+004514FF  488bc1                   mov     rax,rcx
+00451502  480fbaf807               btc     rax,7
+00451507  0f22e0                   mov     cr4,rax
+0045150A  0f22e1                   mov     cr4,rcx
+0045150D  e95063f6ff               jmp     ntkrnlmp!KiFlushCurrentTbOnly+0x42 (RVA 0x3B7862)

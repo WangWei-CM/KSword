@@ -1,0 +1,202 @@
+Source: 22621-ke-flush-tb-cdb-uf.txt; first 200 instructions in CDB uf traversal order. All addresses RVA.
+CDB uf instruction count=441; listed=200
+0025E500  488bc4                   mov     rax,rsp
+0025E503  53                       push    rbx
+0025E504  55                       push    rbp
+0025E505  57                       push    rdi
+0025E506  4883ec60                 sub     rsp,60h
+0025E50A  48897008                 mov     qword ptr [rax+8],rsi
+0025E50E  8bda                     mov     ebx,edx
+0025E510  33f6                     xor     esi,esi
+0025E512  4c8970d0                 mov     qword ptr [rax-30h],r14
+0025E516  48897020                 mov     qword ptr [rax+20h],rsi
+0025E51A  8be9                     mov     ebp,ecx
+0025E51C  40887018                 mov     byte ptr [rax+18h],sil
+0025E520  8b054205ac00             mov     eax,dword ptr [ntkrnlmp!HvlEnlightenments (RVA 0xD1EA68)]
+0025E526  a804                     test    al,4
+0025E528  0f85a2010000             jne     ntkrnlmp!KeFlushTb+0x1d0 (RVA 0x25E6D0)
+0025E52E  4038350b33ba00           cmp     byte ptr [ntkrnlmp!KiKvaShadow (RVA 0xE01840)],sil
+0025E535  48c7c7ffffffff           mov     rdi,0FFFFFFFFFFFFFFFFh
+0025E53C  448d7702                 lea     r14d,[rdi+2]
+0025E540  0f84f31d1e00             je      ntkrnlmp!KeFlushTb+0x1e1e39 (RVA 0x440339)
+0025E546  413bee                   cmp     ebp,r14d
+0025E549  0f85c1030000             jne     ntkrnlmp!KeFlushTb+0x410 (RVA 0x25E910)
+0025E54F  4c89642458               mov     qword ptr [rsp+58h],r12
+0025E554  450fb6c6                 movzx   r8d,r14b
+0025E558  4c896c2450               mov     qword ptr [rsp+50h],r13
+0025E55D  41bd03000000             mov     r13d,3
+0025E563  413bde                   cmp     ebx,r14d
+0025E566  0f84311d1e00             je      ntkrnlmp!KeFlushTb+0x1e1d9d (RVA 0x44029D)
+0025E56C  85db                     test    ebx,ebx
+0025E56E  7503                     jne     ntkrnlmp!KeFlushTb+0x73 (RVA 0x25E573)
+0025E570  4532c0                   xor     r8b,r8b
+0025E573  450f20c4                 mov     r12,cr8
+0025E577  b80c000000               mov     eax,0Ch
+0025E57C  440f22c0                 mov     cr8,rax
+0025E580  8b051a07ac00             mov     eax,dword ptr [ntkrnlmp!KiIrqlFlags (RVA 0xD1ECA0)]
+0025E586  85c0                     test    eax,eax
+0025E588  0f8587020000             jne     ntkrnlmp!KeFlushTb+0x315 (RVA 0x25E815)
+0025E58E  4584c0                   test    r8b,r8b
+0025E591  0f85b6030000             jne     ntkrnlmp!KeFlushTb+0x44d (RVA 0x25E94D)
+0025E597  4c897c2440               mov     qword ptr [rsp+40h],r15
+0025E59C  f0093424                 lock or dword ptr [rsp],esi
+0025E5A0  654c8b3c2520000000       mov   r15,qword ptr gs:[20h]
+0025E5A9  33d2                     xor     edx,edx
+0025E5AB  41b800010000             mov     r8d,100h
+0025E5B1  498b4708                 mov     rax,qword ptr [r15+8]
+0025E5B5  498dbfb82d0000           lea     rdi,[r15+2DB8h]
+0025E5BC  488d4f08                 lea     rcx,[rdi+8]
+0025E5C0  488b98b8000000           mov     rbx,qword ptr [rax+0B8h]
+0025E5C7  48c70701002000           mov     qword ptr [rdi],200001h
+0025E5CE  e8edd71c00               call    ntkrnlmp!memset (RVA 0x42BDC0)
+0025E5D3  0fb75702                 movzx   edx,word ptr [rdi+2]
+0025E5D7  4c8d8370010000           lea     r8,[rbx+170h]
+0025E5DE  488bcf                   mov     rcx,rdi
+0025E5E1  e8fa140300               call    ntkrnlmp!KiCopyAffinityEx (RVA 0x28FAE0)
+0025E5E6  418b4f24                 mov     ecx,dword ptr [r15+24h]
+0025E5EA  488d05bf83ac00           lea     rax,[ntkrnlmp!KiProcessorIndexToNumberMappingTable (RVA 0xD269B0)]
+0025E5F1  448b0488                 mov     r8d,dword ptr [rax+rcx*4]
+0025E5F5  418bc8                   mov     ecx,r8d
+0025E5F8  0fb707                   movzx   eax,word ptr [rdi]
+0025E5FB  4183e03f                 and     r8d,3Fh
+0025E5FF  c1e906                   shr     ecx,6
+0025E602  3bc1                     cmp     eax,ecx
+0025E604  7613                     jbe     ntkrnlmp!KeFlushTb+0x119 (RVA 0x25E619)
+0025E606  488d14cf                 lea     rdx,[rdi+rcx*8]
+0025E60A  418bc0                   mov     eax,r8d
+0025E60D  488b4a08                 mov     rcx,qword ptr [rdx+8]
+0025E611  480fb3c1                 btr     rcx,rax
+0025E615  48894a08                 mov     qword ptr [rdx+8],rcx
+0025E619  0fb7c6                   movzx   eax,si
+0025E61C  663b37                   cmp     si,word ptr [rdi]
+0025E61F  7319                     jae     ntkrnlmp!KeFlushTb+0x13a (RVA 0x25E63A)
+0025E621  0fb7c8                   movzx   ecx,ax
+0025E624  488b54cf08               mov     rdx,qword ptr [rdi+rcx*8+8]
+0025E629  4885d2                   test    rdx,rdx
+0025E62C  0f8576020000             jne     ntkrnlmp!KeFlushTb+0x3a8 (RVA 0x25E8A8)
+0025E632  66ffc0                   inc     ax
+0025E635  663b07                   cmp     ax,word ptr [rdi]
+0025E638  72e7                     jb      ntkrnlmp!KeFlushTb+0x121 (RVA 0x25E621)
+0025E63A  33c9                     xor     ecx,ecx
+0025E63C  e8ff2e0d00               call    ntkrnlmp!KiFlushCurrentTbWorker (RVA 0x331540)
+0025E641  4c8b7c2440               mov     r15,qword ptr [rsp+40h]
+0025E646  48c7c7ffffffff           mov     rdi,0FFFFFFFFFFFFFFFFh
+0025E64D  8b054d06ac00             mov     eax,dword ptr [ntkrnlmp!KiIrqlFlags (RVA 0xD1ECA0)]
+0025E653  4c8b6c2450               mov     r13,qword ptr [rsp+50h]
+0025E658  85c0                     test    eax,eax
+0025E65A  0f85701c1e00             jne     ntkrnlmp!KeFlushTb+0x1e1dd0 (RVA 0x4402D0)
+0025E660  410fb6c4                 movzx   eax,r12b
+0025E664  440f22c0                 mov     cr8,rax
+0025E668  4c8b642458               mov     r12,qword ptr [rsp+58h]
+0025E66D  48c7c7ffffffff           mov     rdi,0FFFFFFFFFFFFFFFFh
+0025E674  488bb42480000000         mov     rsi,qword ptr [rsp+80h]
+0025E67C  83fd01                   cmp     ebp,1
+0025E67F  751e                     jne     ntkrnlmp!KeFlushTb+0x19f (RVA 0x25E69F)
+0025E681  65488b042588010000       mov   rax,qword ptr gs:[188h]
+0025E68A  488b88b8000000           mov     rcx,qword ptr [rax+0B8h]
+0025E691  4883b9e003000000         cmp     qword ptr [rcx+3E0h],0
+0025E699  0f85c41c1e00             jne     ntkrnlmp!KeFlushTb+0x1e1e63 (RVA 0x440363)
+0025E69F  4585f6                   test    r14d,r14d
+0025E6A2  4c8b742448               mov     r14,qword ptr [rsp+48h]
+0025E6A7  0f84d4000000             je      ntkrnlmp!KeFlushTb+0x281 (RVA 0x25E781)
+0025E6AD  803d4ee9ab0000           cmp     byte ptr [ntkrnlmp!VmTbFlushEnabled (RVA 0xD1D002)],0
+0025E6B4  0f85c11c1e00             jne     ntkrnlmp!KeFlushTb+0x1e1e7b (RVA 0x44037B)
+0025E6BA  833d7f94ab0000           cmp     dword ptr [ntkrnlmp!ExTbFlushActive (RVA 0xD17B40)],0
+0025E6C1  0f85c61c1e00             jne     ntkrnlmp!KeFlushTb+0x1e1e8d (RVA 0x44038D)
+0025E6C7  4883c460                 add     rsp,60h
+0025E6CB  5f                       pop     rdi
+0025E6CC  5d                       pop     rbp
+0025E6CD  5b                       pop     rbx
+0025E6CE  c3                       ret
+0025E6D0  a802                     test    al,2
+0025E6D2  0f85e3000000             jne     ntkrnlmp!KeFlushTb+0x2bb (RVA 0x25E7BB)
+0025E6D8  0fbae017                 bt      eax,17h
+0025E6DC  0f82021b1e00             jb      ntkrnlmp!KeFlushTb+0x1e1ce4 (RVA 0x4401E4)
+0025E6E2  8b055803ac00             mov     eax,dword ptr [ntkrnlmp!KeNumberProcessors (RVA 0xD1EA40)]
+0025E6E8  83f801                   cmp     eax,1
+0025E6EB  0f843dfeffff             je      ntkrnlmp!KeFlushTb+0x2e (RVA 0x25E52E)
+0025E6F1  85db                     test    ebx,ebx
+0025E6F3  0f85c2000000             jne     ntkrnlmp!KeFlushTb+0x2bb (RVA 0x25E7BB)
+0025E6F9  f0093424                 lock or dword ptr [rsp],esi
+0025E6FD  440f20c7                 mov     rdi,cr8
+0025E701  b80c000000               mov     eax,0Ch
+0025E706  440f22c0                 mov     cr8,rax
+0025E70A  8b059005ac00             mov     eax,dword ptr [ntkrnlmp!KiIrqlFlags (RVA 0xD1ECA0)]
+0025E710  85c0                     test    eax,eax
+0025E712  0f8545010000             jne     ntkrnlmp!KeFlushTb+0x35d (RVA 0x25E85D)
+0025E718  654c8b0c2520000000       mov   r9,qword ptr gs:[20h]
+0025E721  0fb7ce                   movzx   ecx,si
+0025E724  498b4108                 mov     rax,qword ptr [r9+8]
+0025E728  488b90b8000000           mov     rdx,qword ptr [rax+0B8h]
+0025E72F  663bb270010000           cmp     si,word ptr [rdx+170h]
+0025E736  7324                     jae     ntkrnlmp!KeFlushTb+0x25c (RVA 0x25E75C)
+0025E738  0f1f840000000000         nop     dword ptr [rax+rax]
+0025E740  0fb7c1                   movzx   eax,cx
+0025E743  4c8b84c278010000         mov     r8,qword ptr [rdx+rax*8+178h]
+0025E74B  4d85c0                   test    r8,r8
+0025E74E  753f                     jne     ntkrnlmp!KeFlushTb+0x28f (RVA 0x25E78F)
+0025E750  66ffc1                   inc     cx
+0025E753  663b8a70010000           cmp     cx,word ptr [rdx+170h]
+0025E75A  72e4                     jb      ntkrnlmp!KeFlushTb+0x240 (RVA 0x25E740)
+0025E75C  8bcd                     mov     ecx,ebp
+0025E75E  e8bd901500               call    ntkrnlmp!KiFlushCurrentTbOnly (RVA 0x3B7820)
+0025E763  8b053705ac00             mov     eax,dword ptr [ntkrnlmp!KiIrqlFlags (RVA 0xD1ECA0)]
+0025E769  85c0                     test    eax,eax
+0025E76B  0f85c01a1e00             jne     ntkrnlmp!KeFlushTb+0x1e1d31 (RVA 0x440231)
+0025E771  400fb6c7                 movzx   eax,dil
+0025E775  440f22c0                 mov     cr8,rax
+0025E779  448bf6                   mov     r14d,esi
+0025E77C  e9ecfeffff               jmp     ntkrnlmp!KeFlushTb+0x16d (RVA 0x25E66D)
+0025E781  83fd04                   cmp     ebp,4
+0025E784  0f8523ffffff             jne     ntkrnlmp!KeFlushTb+0x1ad (RVA 0x25E6AD)
+0025E78A  e9df1b1e00               jmp     ntkrnlmp!KeFlushTb+0x1e1e6e (RVA 0x44036E)
+0025E78F  410fb681d0000000         movzx   eax,byte ptr [r9+0D0h]
+0025E797  663bc8                   cmp     cx,ax
+0025E79A  7509                     jne     ntkrnlmp!KeFlushTb+0x2a5 (RVA 0x25E7A5)
+0025E79C  4d3b81c8000000           cmp     r8,qword ptr [r9+0C8h]
+0025E7A3  74ab                     je      ntkrnlmp!KeFlushTb+0x250 (RVA 0x25E750)
+0025E7A5  8b05f504ac00             mov     eax,dword ptr [ntkrnlmp!KiIrqlFlags (RVA 0xD1ECA0)]
+0025E7AB  85c0                     test    eax,eax
+0025E7AD  0f85431a1e00             jne     ntkrnlmp!KeFlushTb+0x1e1cf6 (RVA 0x4401F6)
+0025E7B3  400fb6c7                 movzx   eax,dil
+0025E7B7  440f22c0                 mov     cr8,rax
+0025E7BB  b101                     mov     cl,1
+0025E7BD  8d45ff                   lea     eax,[rbp-1]
+0025E7C0  440fb6d1                 movzx   r10d,cl
+0025E7C4  4c8d842490000000         lea     r8,[rsp+90h]
+0025E7CC  83f801                   cmp     eax,1
+0025E7CF  488d942498000000         lea     rdx,[rsp+98h]
+0025E7D7  8bcd                     mov     ecx,ebp
+0025E7D9  48c7c7ffffffff           mov     rdi,0FFFFFFFFFFFFFFFFh
+0025E7E0  440f46d6                 cmovbe  r10d,esi
+0025E7E4  448bf6                   mov     r14d,esi
+0025E7E7  e8e09a1600               call    ntkrnlmp!KiPrepareFlushParameters (RVA 0x3C82CC)
+0025E7EC  8bcb                     mov     ecx,ebx
+0025E7EE  e8f59d1600               call    ntkrnlmp!KiFlushAffinity (RVA 0x3C85E8)
+0025E7F3  440fb6842490000000       movzx r8d,byte ptr [rsp+90h]
+0025E7FC  488bd0                   mov     rdx,rax
+0025E7FF  488b8c2498000000         mov     rcx,qword ptr [rsp+98h]
+0025E807  450fb6ca                 movzx   r9d,r10b
+0025E80B  e8c0771600               call    ntkrnlmp!KiFlushAddressSpaceTb (RVA 0x3C5FD0)
+0025E810  e95ffeffff               jmp     ntkrnlmp!KeFlushTb+0x174 (RVA 0x25E674)
+0025E815  4184c6                   test    r14b,al
+0025E818  0f8470fdffff             je      ntkrnlmp!KeFlushTb+0x8e (RVA 0x25E58E)
+0025E81E  4180fc0f                 cmp     r12b,0Fh
+0025E822  0f8766fdffff             ja      ntkrnlmp!KeFlushTb+0x8e (RVA 0x25E58E)
+0025E828  65488b042520000000       mov   rax,qword ptr gs:[20h]
+0025E831  4c8b90b8880000           mov     r10,qword ptr [rax+88B8h]
+0025E838  458b4a14                 mov     r9d,dword ptr [r10+14h]
+0025E83C  4180fc0c                 cmp     r12b,0Ch
+0025E840  0f84da000000             je      ntkrnlmp!KeFlushTb+0x420 (RVA 0x25E920)
+0025E846  410fb6cc                 movzx   ecx,r12b
+0025E84A  488bd7                   mov     rdx,rdi
+0025E84D  ffc1                     inc     ecx
+0025E84F  48d3e2                   shl     rdx,cl
+0025E852  81e2fc1f0000             and     edx,1FFCh
+0025E858  e9c8000000               jmp     ntkrnlmp!KeFlushTb+0x425 (RVA 0x25E925)
+0025E85D  a801                     test    al,1
+0025E85F  0f84b3feffff             je      ntkrnlmp!KeFlushTb+0x218 (RVA 0x25E718)
+0025E865  4080ff0f                 cmp     dil,0Fh
+0025E869  0f87a9feffff             ja      ntkrnlmp!KeFlushTb+0x218 (RVA 0x25E718)
+0025E86F  65488b042520000000       mov   rax,qword ptr gs:[20h]
+0025E878  4c8b88b8880000           mov     r9,qword ptr [rax+88B8h]

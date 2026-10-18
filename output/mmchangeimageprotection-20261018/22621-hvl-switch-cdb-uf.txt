@@ -1,0 +1,113 @@
+
+************* Preparing the environment for Debugger Extensions Gallery repositories **************
+   ExtensionRepository : Implicit
+   UseExperimentalFeatureForNugetShare : true
+   AllowNugetExeUpdate : true
+   NonInteractiveNuget : true
+   AllowNugetMSCredentialProviderInstall : true
+   AllowParallelInitializationOfLocalRepositories : true
+
+   EnableRedirectToV8JsProvider : false
+
+   -- Configuring repositories
+      ----> Repository : LocalInstalled, Enabled: true
+      ----> Repository : UserExtensions, Enabled: true
+
+>>>>>>>>>>>>> Preparing the environment for Debugger Extensions Gallery repositories completed, duration 0.000 seconds
+
+************* Waiting for Debugger Extensions Gallery to Initialize **************
+
+>>>>>>>>>>>>> Waiting for Debugger Extensions Gallery to Initialize completed, duration 0.015 seconds
+   ----> Repository : UserExtensions, Enabled: true, Packages count: 0
+   ----> Repository : LocalInstalled, Enabled: true, Packages count: 29
+
+Microsoft (R) Windows Debugger Version 10.0.26100.6584 AMD64
+Copyright (c) Microsoft Corporation. All rights reserved.
+
+
+Loading Dump File [C:\Users\Felix\CLionProjects\KSword\artifacts\symbols\ntkrnlmp.exe\2C33C5081047000\ntkrnlmp.exe]
+
+************* Path validation summary **************
+Response                         Time (ms)     Location
+OK                                             C:\Users\Felix\CLionProjects\KSword\artifacts\symbols
+Symbol search path is: C:\Users\Felix\CLionProjects\KSword\artifacts\symbols
+Executable search path is:
+ModLoad: 00000001`40000000 00000001`41047000   C:\Users\Felix\CLionProjects\KSword\artifacts\symbols\ntkrnlmp.exe\2C33C5081047000\ntkrnlmp.exe
+ntkrnlmp!KiSystemStartup:
+00000001`40a83010 4883ec38        sub     rsp,38h
+0:000> cdb: Reading initial command 'uf ntkrnlmp!HvlSwitchToVsmVtl1; q'
+ntkrnlmp!HvlSwitchToVsmVtl1:
+00000001`40410f40 4881ec38010000  sub     rsp,138h
+00000001`40410f47 488d842400010000 lea     rax,[rsp+100h]
+00000001`40410f4f 0f29742430      movaps  xmmword ptr [rsp+30h],xmm6
+00000001`40410f54 0f297c2440      movaps  xmmword ptr [rsp+40h],xmm7
+00000001`40410f59 440f29442450    movaps  xmmword ptr [rsp+50h],xmm8
+00000001`40410f5f 440f294c2460    movaps  xmmword ptr [rsp+60h],xmm9
+00000001`40410f65 440f29542470    movaps  xmmword ptr [rsp+70h],xmm10
+00000001`40410f6b 440f295880      movaps  xmmword ptr [rax-80h],xmm11
+00000001`40410f70 440f296090      movaps  xmmword ptr [rax-70h],xmm12
+00000001`40410f75 440f2968a0      movaps  xmmword ptr [rax-60h],xmm13
+00000001`40410f7a 440f2970b0      movaps  xmmword ptr [rax-50h],xmm14
+00000001`40410f7f 440f2978c0      movaps  xmmword ptr [rax-40h],xmm15
+00000001`40410f84 488968f8        mov     qword ptr [rax-8],rbp
+00000001`40410f88 488918          mov     qword ptr [rax],rbx
+00000001`40410f8b 48897808        mov     qword ptr [rax+8],rdi
+00000001`40410f8f 48897010        mov     qword ptr [rax+10h],rsi
+00000001`40410f93 4c896018        mov     qword ptr [rax+18h],r12
+00000001`40410f97 4c896820        mov     qword ptr [rax+20h],r13
+00000001`40410f9b 4c897028        mov     qword ptr [rax+28h],r14
+00000001`40410f9f 4c897830        mov     qword ptr [rax+30h],r15
+00000001`40410fa3 4889542408      mov     qword ptr [rsp+8],rdx
+00000001`40410fa8 488b1a          mov     rbx,qword ptr [rdx]
+00000001`40410fab f3440f6f5208    movdqu  xmm10,xmmword ptr [rdx+8]
+00000001`40410fb1 f3440f6f5a18    movdqu  xmm11,xmmword ptr [rdx+18h]
+00000001`40410fb7 f3440f6f6228    movdqu  xmm12,xmmword ptr [rdx+28h]
+00000001`40410fbd f3440f6f6a38    movdqu  xmm13,xmmword ptr [rdx+38h]
+00000001`40410fc3 f3440f6f7248    movdqu  xmm14,xmmword ptr [rdx+48h]
+00000001`40410fc9 f3440f6f7a58    movdqu  xmm15,xmmword ptr [rdx+58h]
+00000001`40410fcf 4d8bc8          mov     r9,r8
+00000001`40410fd2 450f20c0        mov     r8,cr8
+00000001`40410fd6 65488b3c2588010000 mov   rdi,qword ptr gs:[188h]
+00000001`40410fdf 488b0582089f00  mov     rax,qword ptr [ntkrnlmp!HvlpVsmVtlCallVa (00000001`40e01868)]
+00000001`40410fe6 e8a5000000      call    ntkrnlmp!HvlpSwitchToVsmVtl1RetpolineHelper (00000001`40411090)
+00000001`40410feb 488b542408      mov     rdx,qword ptr [rsp+8]
+00000001`40410ff0 48891a          mov     qword ptr [rdx],rbx
+00000001`40410ff3 f3440f7f5208    movdqu  xmmword ptr [rdx+8],xmm10
+00000001`40410ff9 f3440f7f5a18    movdqu  xmmword ptr [rdx+18h],xmm11
+00000001`40410fff f3440f7f6228    movdqu  xmmword ptr [rdx+28h],xmm12
+00000001`40411005 f3440f7f6a38    movdqu  xmmword ptr [rdx+38h],xmm13
+00000001`4041100b f3440f7f7248    movdqu  xmmword ptr [rdx+48h],xmm14
+00000001`40411011 f3440f7f7a58    movdqu  xmmword ptr [rdx+58h],xmm15
+00000001`40411017 488d8c2400010000 lea     rcx,[rsp+100h]
+00000001`4041101f 0f28742430      movaps  xmm6,xmmword ptr [rsp+30h]
+00000001`40411024 0f287c2440      movaps  xmm7,xmmword ptr [rsp+40h]
+00000001`40411029 440f28442450    movaps  xmm8,xmmword ptr [rsp+50h]
+00000001`4041102f 440f284c2460    movaps  xmm9,xmmword ptr [rsp+60h]
+00000001`40411035 440f28542470    movaps  xmm10,xmmword ptr [rsp+70h]
+00000001`4041103b 440f285980      movaps  xmm11,xmmword ptr [rcx-80h]
+00000001`40411040 440f286190      movaps  xmm12,xmmword ptr [rcx-70h]
+00000001`40411045 440f2869a0      movaps  xmm13,xmmword ptr [rcx-60h]
+00000001`4041104a 440f2871b0      movaps  xmm14,xmmword ptr [rcx-50h]
+00000001`4041104f 440f2879c0      movaps  xmm15,xmmword ptr [rcx-40h]
+00000001`40411054 488b19          mov     rbx,qword ptr [rcx]
+00000001`40411057 488b7908        mov     rdi,qword ptr [rcx+8]
+00000001`4041105b 488b7110        mov     rsi,qword ptr [rcx+10h]
+00000001`4041105f 4c8b6118        mov     r12,qword ptr [rcx+18h]
+00000001`40411063 4c8b6920        mov     r13,qword ptr [rcx+20h]
+00000001`40411067 4c8b7128        mov     r14,qword ptr [rcx+28h]
+00000001`4041106b 4c8b7930        mov     r15,qword ptr [rcx+30h]
+00000001`4041106f 488b69f8        mov     rbp,qword ptr [rcx-8]
+00000001`40411073 4881c438010000  add     rsp,138h
+00000001`4041107a c3              ret
+quit:
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\atlmfc.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\ObjectiveC.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\concurrency.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\cpp_rest.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\stl.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\Windows.Data.Json.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\Windows.Devices.Geolocation.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\Windows.Devices.Sensors.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\Windows.Media.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\windows.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\winrt.natvis'

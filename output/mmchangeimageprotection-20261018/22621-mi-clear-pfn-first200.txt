@@ -1,0 +1,106 @@
+Source: 22621-mi-clear-pfn-cdb-uf.txt; first 200 instructions in CDB uf traversal order. All addresses RVA.
+CDB uf instruction count=104; listed=104
+003444CC  488bc4                   mov     rax,rsp
+003444CF  48895808                 mov     qword ptr [rax+8],rbx
+003444D3  48896810                 mov     qword ptr [rax+10h],rbp
+003444D7  48897018                 mov     qword ptr [rax+18h],rsi
+003444DB  57                       push    rdi
+003444DC  4883ec40                 sub     rsp,40h
+003444E0  0f57c0                   xorps   xmm0,xmm0
+003444E3  8bea                     mov     ebp,edx
+003444E5  0f1140e8                 movups  xmmword ptr [rax-18h],xmm0
+003444E9  488b4128                 mov     rax,qword ptr [rcx+28h]
+003444ED  488bd9                   mov     rbx,rcx
+003444F0  48c1e83c                 shr     rax,3Ch
+003444F4  2407                     and     al,7
+003444F6  3c03                     cmp     al,3
+003444F8  7416                     je      ntkrnlmp!MiClearPfnImageVerified+0x44 (RVA 0x344510)
+003444FA  488b5c2450               mov     rbx,qword ptr [rsp+50h]
+003444FF  488b6c2458               mov     rbp,qword ptr [rsp+58h]
+00344504  488b742460               mov     rsi,qword ptr [rsp+60h]
+00344509  4883c440                 add     rsp,40h
+0034450D  5f                       pop     rdi
+0034450E  c3                       ret
+00344510  40f6c504                 test    bpl,4
+00344514  0f84802d1800             je      ntkrnlmp!MiClearPfnImageVerified+0x182dce (RVA 0x4C729A)
+0034451A  40b711                   mov     dil,11h
+0034451D  40f6c508                 test    bpl,8
+00344521  0f85802d1800             jne     ntkrnlmp!MiClearPfnImageVerified+0x182ddb (RVA 0x4C72A7)
+00344527  33d2                     xor     edx,edx
+00344529  488bcb                   mov     rcx,rbx
+0034452C  e843e5f9ff               call    ntkrnlmp!MiSetPfnIdentity (RVA 0x2E2A74)
+00344531  4080ff11                 cmp     dil,11h
+00344535  74c3                     je      ntkrnlmp!MiClearPfnImageVerified+0x2e (RVA 0x3444FA)
+00344537  e9012e1800               jmp     ntkrnlmp!MiClearPfnImageVerified+0x182e71 (RVA 0x4C733D)
+004C729A  e8b1fde2ff               call    ntkrnlmp!MiLockPageInline (RVA 0x2F7050)
+004C729F  408af8                   mov     dil,al
+004C72A2  e976d2e7ff               jmp     ntkrnlmp!MiClearPfnImageVerified+0x51 (RVA 0x34451D)
+004C72A7  4c8d442430               lea     r8,[rsp+30h]
+004C72AC  ba01000000               mov     edx,1
+004C72B1  488bcb                   mov     rcx,rbx
+004C72B4  e8d72ed9ff               call    ntkrnlmp!MiGetPagePrivilege (RVA 0x25A190)
+004C72B9  85c0                     test    eax,eax
+004C72BB  0f8466d2e7ff             je      ntkrnlmp!MiClearPfnImageVerified+0x5b (RVA 0x344527)
+004C72C1  48b90000000000deffff     mov rcx,0FFFFDE0000000000h
+004C72CB  488bf3                   mov     rsi,rbx
+004C72CE  482bf1                   sub     rsi,rcx
+004C72D1  48b9abaaaaaaaaaaaaaa     mov rcx,0AAAAAAAAAAAAAAABh
+004C72DB  48c1fe04                 sar     rsi,4
+004C72DF  480faff1                 imul    rsi,rcx
+004C72E3  a820                     test    al,20h
+004C72E5  7407                     je      ntkrnlmp!MiClearPfnImageVerified+0x182e22 (RVA 0x4C72EE)
+004C72E7  b800020000               mov     eax,200h
+004C72EC  eb0f                     jmp     ntkrnlmp!MiClearPfnImageVerified+0x182e31 (RVA 0x4C72FD)
+004C72EE  408ac5                   mov     al,bpl
+004C72F1  2410                     and     al,10h
+004C72F3  f6d8                     neg     al
+004C72F5  1bc0                     sbb     eax,eax
+004C72F7  83e010                   and     eax,10h
+004C72FA  83c010                   add     eax,10h
+004C72FD  448bc0                   mov     r8d,eax
+004C7300  488d542430               lea     rdx,[rsp+30h]
+004C7305  410fbae807               bts     r8d,7
+004C730A  488bce                   mov     rcx,rsi
+004C730D  4080e540                 and     bpl,40h
+004C7311  440f44c0                 cmove   r8d,eax
+004C7315  e89a72f0ff               call    ntkrnlmp!KeSetPagePrivilege (RVA 0x3CE5B4)
+004C731A  85c0                     test    eax,eax
+004C731C  0f8905d2e7ff             jns     ntkrnlmp!MiClearPfnImageVerified+0x5b (RVA 0x344527)
+004C7322  488364242000             and     qword ptr [rsp+20h],0
+004C7328  4533c9                   xor     r9d,r9d
+004C732B  4c8bc6                   mov     r8,rsi
+004C732E  ba0b150500               mov     edx,5150Bh
+004C7333  418d491a                 lea     ecx,[r9+1Ah]
+004C7337  e8b4daf4ff               call    ntkrnlmp!KeBugCheckEx (RVA 0x414DF0)
+004C733C  cc                       int     3
+004C733D  48b8ffffffffffffff7f     mov rax,7FFFFFFFFFFFFFFFh
+004C7347  f048214318               lock and qword ptr [rbx+18h],rax
+004C734C  8b0d4e798500             mov     ecx,dword ptr [ntkrnlmp!KiIrqlFlags (RVA 0xD1ECA0)]
+004C7352  85c9                     test    ecx,ecx
+004C7354  744e                     je      ntkrnlmp!MiClearPfnImageVerified+0x182ed8 (RVA 0x4C73A4)
+004C7356  440f20c0                 mov     rax,cr8
+004C735A  f6c101                   test    cl,1
+004C735D  7445                     je      ntkrnlmp!MiClearPfnImageVerified+0x182ed8 (RVA 0x4C73A4)
+004C735F  3c0f                     cmp     al,0Fh
+004C7361  7741                     ja      ntkrnlmp!MiClearPfnImageVerified+0x182ed8 (RVA 0x4C73A4)
+004C7363  4080ff0f                 cmp     dil,0Fh
+004C7367  773b                     ja      ntkrnlmp!MiClearPfnImageVerified+0x182ed8 (RVA 0x4C73A4)
+004C7369  3c02                     cmp     al,2
+004C736B  7237                     jb      ntkrnlmp!MiClearPfnImageVerified+0x182ed8 (RVA 0x4C73A4)
+004C736D  654c8b142520000000       mov   r10,qword ptr gs:[20h]
+004C7376  4883caff                 or      rdx,0FFFFFFFFFFFFFFFFh
+004C737A  400fb6cf                 movzx   ecx,dil
+004C737E  ffc1                     inc     ecx
+004C7380  48d3e2                   shl     rdx,cl
+004C7383  4d8b8ab8880000           mov     r9,qword ptr [r10+88B8h]
+004C738A  0fb7c2                   movzx   eax,dx
+004C738D  f7d0                     not     eax
+004C738F  458b4114                 mov     r8d,dword ptr [r9+14h]
+004C7393  4423c0                   and     r8d,eax
+004C7396  45894114                 mov     dword ptr [r9+14h],r8d
+004C739A  7508                     jne     ntkrnlmp!MiClearPfnImageVerified+0x182ed8 (RVA 0x4C73A4)
+004C739C  498bca                   mov     rcx,r10
+004C739F  e8ac3e0a00               call    ntkrnlmp!KiRemoveSystemWorkPriorityKick (RVA 0x56B250)
+004C73A4  400fb6c7                 movzx   eax,dil
+004C73A8  440f22c0                 mov     cr8,rax
+004C73AC  e949d1e7ff               jmp     ntkrnlmp!MiClearPfnImageVerified+0x2e (RVA 0x3444FA)

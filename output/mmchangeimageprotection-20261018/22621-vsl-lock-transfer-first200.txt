@@ -1,0 +1,189 @@
+Source: 22621-vsl-lock-transfer-cdb-uf.txt; first 200 instructions in CDB uf traversal order. All addresses RVA.
+CDB uf instruction count=187; listed=187
+003C8304  488bc4                   mov     rax,rsp
+003C8307  44894820                 mov     dword ptr [rax+20h],r9d
+003C830B  44894018                 mov     dword ptr [rax+18h],r8d
+003C830F  48895010                 mov     qword ptr [rax+10h],rdx
+003C8313  48894808                 mov     qword ptr [rax+8],rcx
+003C8317  53                       push    rbx
+003C8318  56                       push    rsi
+003C8319  57                       push    rdi
+003C831A  4154                     push    r12
+003C831C  4155                     push    r13
+003C831E  4156                     push    r14
+003C8320  4157                     push    r15
+003C8322  4883ec30                 sub     rsp,30h
+003C8326  458bd9                   mov     r11d,r9d
+003C8329  458bc8                   mov     r9d,r8d
+003C832C  4c8bd2                   mov     r10,rdx
+003C832F  33f6                     xor     esi,esi
+003C8331  8bfe                     mov     edi,esi
+003C8333  448bb42490000000         mov     r14d,dword ptr [rsp+90h]
+003C833B  41f6c613                 test    r14b,13h
+003C833F  0f8525f71200             jne     ntkrnlmp!VslpLockPagesForTransfer+0x12f766 (RVA 0x4F7A6A)
+003C8345  4c8bfe                   mov     r15,rsi
+003C8348  4889742420               mov     qword ptr [rsp+20h],rsi
+003C834D  ba00100000               mov     edx,1000h
+003C8352  4883cbff                 or      rbx,0FFFFFFFFFFFFFFFFh
+003C8356  498bca                   mov     rcx,r10
+003C8359  81e1ff0f0000             and     ecx,0FFFh
+003C835F  418bc1                   mov     eax,r9d
+003C8362  4881c1ff0f0000           add     rcx,0FFFh
+003C8369  4803c8                   add     rcx,rax
+003C836C  48c1e90c                 shr     rcx,0Ch
+003C8370  448d2ccd30000000         lea     r13d,[rcx*8+30h]
+003C8378  41f6c601                 test    r14b,1
+003C837C  440f45ea                 cmovne  r13d,edx
+003C8380  41f6c604                 test    r14b,4
+003C8384  0f854af71200             jne     ntkrnlmp!VslpLockPagesForTransfer+0x12f7d0 (RVA 0x4F7AD4)
+003C838A  41f6c620                 test    r14b,20h
+003C838E  0f8553f71200             jne     ntkrnlmp!VslpLockPagesForTransfer+0x12f7e3 (RVA 0x4F7AE7)
+003C8394  418bd5                   mov     edx,r13d
+003C8397  b940000000               mov     ecx,40h
+003C839C  41b8566d7354             mov     r8d,54736D56h
+003C83A2  e809206e00               call    ntkrnlmp!ExAllocatePool2 (RVA 0xAAA3B0)
+003C83A7  488bf8                   mov     rdi,rax
+003C83AA  448b8c2480000000         mov     r9d,dword ptr [rsp+80h]
+003C83B2  4c8b542478               mov     r10,qword ptr [rsp+78h]
+003C83B7  448b9c2488000000         mov     r11d,dword ptr [rsp+88h]
+003C83BF  48897c2428               mov     qword ptr [rsp+28h],rdi
+003C83C4  4885ff                   test    rdi,rdi
+003C83C7  0f8422f71200             je      ntkrnlmp!VslpLockPagesForTransfer+0x12f7eb (RVA 0x4F7AEF)
+003C83CD  418bd1                   mov     edx,r9d
+003C83D0  488937                   mov     qword ptr [rdi],rsi
+003C83D3  458bc2                   mov     r8d,r10d
+003C83D6  418bc0                   mov     eax,r8d
+003C83D9  25ff0f0000               and     eax,0FFFh
+003C83DE  4805ff0f0000             add     rax,0FFFh
+003C83E4  4803d0                   add     rdx,rax
+003C83E7  48c1ea0c                 shr     rdx,0Ch
+003C83EB  6683c206                 add     dx,6
+003C83EF  66c1e203                 shl     dx,3
+003C83F3  66895708                 mov     word ptr [rdi+8],dx
+003C83F7  6689770a                 mov     word ptr [rdi+0Ah],si
+003C83FB  498bc2                   mov     rax,r10
+003C83FE  482500f0ffff             and     rax,0FFFFFFFFFFFFF000h
+003C8404  48894720                 mov     qword ptr [rdi+20h],rax
+003C8408  4181e0ff0f0000           and     r8d,0FFFh
+003C840F  4489472c                 mov     dword ptr [rdi+2Ch],r8d
+003C8413  44894f28                 mov     dword ptr [rdi+28h],r9d
+003C8417  41f6c606                 test    r14b,6
+003C841B  0f85dff61200             jne     ntkrnlmp!VslpLockPagesForTransfer+0x12f7fc (RVA 0x4F7B00)
+003C8421  4585c9                   test    r9d,r9d
+003C8424  743c                     je      ntkrnlmp!VslpLockPagesForTransfer+0x15e (RVA 0x3C8462)
+003C8426  41b801000000             mov     r8d,1
+003C842C  4585db                   test    r11d,r11d
+003C842F  450f44c3                 cmove   r8d,r11d
+003C8433  33d2                     xor     edx,edx
+003C8435  488bcf                   mov     rcx,rdi
+003C8438  e843b4f9ff               call    ntkrnlmp!MiProbeAndLockPages (RVA 0x363880)
+003C843D  eb23                     jmp     ntkrnlmp!VslpLockPagesForTransfer+0x15e (RVA 0x3C8462)
+003C8462  458be6                   mov     r12d,r14d
+003C8465  4183e410                 and     r12d,10h
+003C8469  7528                     jne     ntkrnlmp!VslpLockPagesForTransfer+0x18f (RVA 0x3C8493)
+003C846B  4c893f                   mov     qword ptr [rdi],r15
+003C846E  4c8bff                   mov     r15,rdi
+003C8471  48897c2420               mov     qword ptr [rsp+20h],rdi
+003C8476  4c8bd7                   mov     r10,rdi
+003C8479  48897c2478               mov     qword ptr [rsp+78h],rdi
+003C847E  458bcd                   mov     r9d,r13d
+003C8481  4489ac2480000000         mov     dword ptr [rsp+80h],r13d
+003C8489  ba00100000               mov     edx,1000h
+003C848E  443bea                   cmp     r13d,edx
+003C8491  7737                     ja      ntkrnlmp!VslpLockPagesForTransfer+0x1c6 (RVA 0x3C84CA)
+003C8493  458bc6                   mov     r8d,r14d
+003C8496  488bd7                   mov     rdx,rdi
+003C8499  488b4c2470               mov     rcx,qword ptr [rsp+70h]
+003C849E  e83d000000               call    ntkrnlmp!VslpLockMdlForTransfer (RVA 0x3C84E0)
+003C84A3  448bf8                   mov     r15d,eax
+003C84A6  85c0                     test    eax,eax
+003C84A8  0f8860f61200             js      ntkrnlmp!VslpLockPagesForTransfer+0x12f80a (RVA 0x4F7B0E)
+003C84AE  488b442470               mov     rax,qword ptr [rsp+70h]
+003C84B3  83484008                 or      dword ptr [rax+40h],8
+003C84B7  33c0                     xor     eax,eax
+003C84B9  4883c430                 add     rsp,30h
+003C84BD  415f                     pop     r15
+003C84BF  415e                     pop     r14
+003C84C1  415d                     pop     r13
+003C84C3  415c                     pop     r12
+003C84C5  5f                       pop     rdi
+003C84C6  5e                       pop     rsi
+003C84C7  5b                       pop     rbx
+003C84C8  c3                       ret
+003C84CA  448b9c2488000000         mov     r11d,dword ptr [rsp+88h]
+003C84D2  e97ffeffff               jmp     ntkrnlmp!VslpLockPagesForTransfer+0x52 (RVA 0x3C8356)
+004F7A6A  4181e2ff0f0000           and     r10d,0FFFh
+004F7A71  498d91ff0f0000           lea     rdx,[r9+0FFFh]
+004F7A78  4903d2                   add     rdx,r10
+004F7A7B  4881e200f0ffff           and     rdx,0FFFFFFFFFFFFF000h
+004F7A82  4881fa00a01f00           cmp     rdx,1FA000h
+004F7A89  763f                     jbe     ntkrnlmp!VslpLockPagesForTransfer+0x12f7c6 (RVA 0x4F7ACA)
+004F7A8B  41bf0d0000c0             mov     r15d,0C000000Dh
+004F7A91  4883cbff                 or      rbx,0FFFFFFFFFFFFFFFFh
+004F7A95  4183e620                 and     r14d,20h
+004F7A99  4885ff                   test    rdi,rdi
+004F7A9C  0f84d9000000             je      ntkrnlmp!VslpLockPagesForTransfer+0x12f877 (RVA 0x4F7B7B)
+004F7AA2  4c8b27                   mov     r12,qword ptr [rdi]
+004F7AA5  488937                   mov     qword ptr [rdi],rsi
+004F7AA8  f6470a02                 test    byte ptr [rdi+0Ah],2
+004F7AAC  7408                     je      ntkrnlmp!VslpLockPagesForTransfer+0x12f7b2 (RVA 0x4F7AB6)
+004F7AAE  488bcf                   mov     rcx,rdi
+004F7AB1  e8fa56d4ff               call    ntkrnlmp!MmUnlockPages (RVA 0x23D1B0)
+004F7AB6  4585f6                   test    r14d,r14d
+004F7AB9  750a                     jne     ntkrnlmp!VslpLockPagesForTransfer+0x12f7c1 (RVA 0x4F7AC5)
+004F7ABB  33d2                     xor     edx,edx
+004F7ABD  488bcf                   mov     rcx,rdi
+004F7AC0  e89b2d5b00               call    ntkrnlmp!ExFreePoolWithTag (RVA 0xAAA860)
+004F7AC5  498bfc                   mov     rdi,r12
+004F7AC8  ebcf                     jmp     ntkrnlmp!VslpLockPagesForTransfer+0x12f795 (RVA 0x4F7A99)
+004F7ACA  4c8b542478               mov     r10,qword ptr [rsp+78h]
+004F7ACF  e97108edff               jmp     ntkrnlmp!VslpLockPagesForTransfer+0x41 (RVA 0x3C8345)
+004F7AD4  4181c5ff0f0000           add     r13d,0FFFh
+004F7ADB  4181e500f0ffff           and     r13d,0FFFFF000h
+004F7AE2  e9a308edff               jmp     ntkrnlmp!VslpLockPagesForTransfer+0x86 (RVA 0x3C838A)
+004F7AE7  488bfe                   mov     rdi,rsi
+004F7AEA  e9d008edff               jmp     ntkrnlmp!VslpLockPagesForTransfer+0xbb (RVA 0x3C83BF)
+004F7AEF  41f6c610                 test    r14b,10h
+004F7AF3  7535                     jne     ntkrnlmp!VslpLockPagesForTransfer+0x12f826 (RVA 0x4F7B2A)
+004F7AF5  498bff                   mov     rdi,r15
+004F7AF8  41bf9a0000c0             mov     r15d,0C000009Ah
+004F7AFE  eb95                     jmp     ntkrnlmp!VslpLockPagesForTransfer+0x12f791 (RVA 0x4F7A95)
+004F7B00  488bcf                   mov     rcx,rdi
+004F7B03  e838d5e1ff               call    ntkrnlmp!MmBuildMdlForNonPagedPool (RVA 0x315040)
+004F7B08  90                       nop
+004F7B09  e95409edff               jmp     ntkrnlmp!VslpLockPagesForTransfer+0x15e (RVA 0x3C8462)
+004F7B0E  4585e4                   test    r12d,r12d
+004F7B11  7482                     je      ntkrnlmp!VslpLockPagesForTransfer+0x12f791 (RVA 0x4F7A95)
+004F7B13  488bcf                   mov     rcx,rdi
+004F7B16  e89556d4ff               call    ntkrnlmp!MmUnlockPages (RVA 0x23D1B0)
+004F7B1B  33d2                     xor     edx,edx
+004F7B1D  488bcf                   mov     rcx,rdi
+004F7B20  e83b2d5b00               call    ntkrnlmp!ExFreePoolWithTag (RVA 0xAAA860)
+004F7B25  4c8b7c2420               mov     r15,qword ptr [rsp+20h]
+004F7B2A  65488b042588010000       mov   rax,qword ptr gs:[188h]
+004F7B33  660198e4010000           add     word ptr [rax+1E4h],bx
+004F7B3A  90                       nop
+004F7B3B  33d2                     xor     edx,edx
+004F7B3D  488d0df4727600           lea     rcx,[ntkrnlmp!VslpReservedTransferLock (RVA 0xC5EE38)]
+004F7B44  e8f7afd2ff               call    ntkrnlmp!ExAcquirePushLockExclusiveEx (RVA 0x222B40)
+004F7B49  488b3df0727600           mov     rdi,qword ptr [ntkrnlmp!VslpReservedTransferMdl (RVA 0xC5EE40)]
+004F7B50  48897c2428               mov     qword ptr [rsp+28h],rdi
+004F7B55  4183ce20                 or      r14d,20h
+004F7B59  4489b42490000000         mov     dword ptr [rsp+90h],r14d
+004F7B61  448b8c2480000000         mov     r9d,dword ptr [rsp+80h]
+004F7B69  4c8b542478               mov     r10,qword ptr [rsp+78h]
+004F7B6E  448b9c2488000000         mov     r11d,dword ptr [rsp+88h]
+004F7B76  e95208edff               jmp     ntkrnlmp!VslpLockPagesForTransfer+0xc9 (RVA 0x3C83CD)
+004F7B7B  4585f6                   test    r14d,r14d
+004F7B7E  742e                     je      ntkrnlmp!VslpLockPagesForTransfer+0x12f8aa (RVA 0x4F7BAE)
+004F7B80  f0480fc11daf727600       lock xadd qword ptr [ntkrnlmp!VslpReservedTransferLock (RVA 0xC5EE38)],rbx
+004F7B89  80e306                   and     bl,6
+004F7B8C  80fb02                   cmp     bl,2
+004F7B8F  750c                     jne     ntkrnlmp!VslpLockPagesForTransfer+0x12f899 (RVA 0x4F7B9D)
+004F7B91  488d0da0727600           lea     rcx,[ntkrnlmp!VslpReservedTransferLock (RVA 0xC5EE38)]
+004F7B98  e82350dcff               call    ntkrnlmp!ExfTryToWakePushLock (RVA 0x2BCBC0)
+004F7B9D  488d0d94727600           lea     rcx,[ntkrnlmp!VslpReservedTransferLock (RVA 0xC5EE38)]
+004F7BA4  e8c7b1d2ff               call    ntkrnlmp!KeAbPostRelease (RVA 0x222D70)
+004F7BA9  e8c2b3d2ff               call    ntkrnlmp!KeLeaveCriticalRegion (RVA 0x222F70)
+004F7BAE  418bc7                   mov     eax,r15d
+004F7BB1  e90309edff               jmp     ntkrnlmp!VslpLockPagesForTransfer+0x1b5 (RVA 0x3C84B9)

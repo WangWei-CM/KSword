@@ -1,0 +1,67 @@
+Source: 22621-ke-set-page-cdb-uf.txt; first 200 instructions in CDB uf traversal order. All addresses RVA.
+CDB uf instruction count=65; listed=65
+003CE5B4  48895c2420               mov     qword ptr [rsp+20h],rbx
+003CE5B9  55                       push    rbp
+003CE5BA  56                       push    rsi
+003CE5BB  57                       push    rdi
+003CE5BC  488d6c24b9               lea     rbp,[rsp-47h]
+003CE5C1  4881eca0000000           sub     rsp,0A0h
+003CE5C8  488b0511e98300           mov     rax,qword ptr [ntkrnlmp!_security_cookie (RVA 0xC0CEE0)]
+003CE5CF  4833c4                   xor     rax,rsp
+003CE5D2  48894537                 mov     qword ptr [rbp+37h],rax
+003CE5D6  418bd8                   mov     ebx,r8d
+003CE5D9  488bf2                   mov     rsi,rdx
+003CE5DC  488bf9                   mov     rdi,rcx
+003CE5DF  410fbae008               bt      r8d,8
+003CE5E4  0f82f0360800             jb      ntkrnlmp!KeSetPagePrivilege+0x83726 (RVA 0x451CDA)
+003CE5EA  0fbae30a                 bt      ebx,0Ah
+003CE5EE  0f83ff360800             jae     ntkrnlmp!KeSetPagePrivilege+0x8373f (RVA 0x451CF3)
+003CE5F4  33d2                     xor     edx,edx
+003CE5F6  488d4dc7                 lea     rcx,[rbp-39h]
+003CE5FA  448d4268                 lea     r8d,[rdx+68h]
+003CE5FE  e8bdd70500               call    ntkrnlmp!memset (RVA 0x42BDC0)
+003CE603  baf6000000               mov     edx,0F6h
+003CE608  0f1006                   movups  xmm0,xmmword ptr [rsi]
+003CE60B  4c8d4dc7                 lea     r9,[rbp-39h]
+003CE60F  48897dcf                 mov     qword ptr [rbp-31h],rdi
+003CE613  4533c0                   xor     r8d,r8d
+003CE616  b102                     mov     cl,2
+003CE618  f30f7f45d7               movdqu  xmmword ptr [rbp-29h],xmm0
+003CE61D  e8de9ff6ff               call    ntkrnlmp!VslpEnterIumSecureMode (RVA 0x338600)
+003CE622  488b4d37                 mov     rcx,qword ptr [rbp+37h]
+003CE626  4833cc                   xor     rcx,rsp
+003CE629  e8c22f0000               call    ntkrnlmp!_security_check_cookie (RVA 0x3D15F0)
+003CE62E  488b9c24d8000000         mov     rbx,qword ptr [rsp+0D8h]
+003CE636  4881c4a0000000           add     rsp,0A0h
+003CE63D  5f                       pop     rdi
+003CE63E  5e                       pop     rsi
+003CE63F  5d                       pop     rbp
+003CE640  c3                       ret
+00451CDA  33d2                     xor     edx,edx
+00451CDC  488d4dc7                 lea     rcx,[rbp-39h]
+00451CE0  448d4268                 lea     r8d,[rdx+68h]
+00451CE4  e8d7a0fdff               call    ntkrnlmp!memset (RVA 0x42BDC0)
+00451CE9  baf5000000               mov     edx,0F5h
+00451CEE  e915c9f7ff               jmp     ntkrnlmp!KeSetPagePrivilege+0x54 (RVA 0x3CE608)
+00451CF3  f6c306                   test    bl,6
+00451CF6  7435                     je      ntkrnlmp!KeSetPagePrivilege+0x83779 (RVA 0x451D2D)
+00451CF8  33c0                     xor     eax,eax
+00451CFA  f6c302                   test    bl,2
+00451CFD  7414                     je      ntkrnlmp!KeSetPagePrivilege+0x8375f (RVA 0x451D13)
+00451CFF  4181e000080000           and     r8d,800h
+00451D06  e8d1730f00               call    ntkrnlmp!VslMakeProtectedPageExecutable (RVA 0x5490DC)
+00451D0B  85c0                     test    eax,eax
+00451D0D  0f880fc9f7ff             js      ntkrnlmp!KeSetPagePrivilege+0x6e (RVA 0x3CE622)
+00451D13  f6c304                   test    bl,4
+00451D16  0f8406c9f7ff             je      ntkrnlmp!KeSetPagePrivilege+0x6e (RVA 0x3CE622)
+00451D1C  488bd6                   mov     rdx,rsi
+00451D1F  488bcf                   mov     rcx,rdi
+00451D22  e851740f00               call    ntkrnlmp!VslMakeProtectedPageWritable (RVA 0x549178)
+00451D27  90                       nop
+00451D28  e9f5c8f7ff               jmp     ntkrnlmp!KeSetPagePrivilege+0x6e (RVA 0x3CE622)
+00451D2D  33d2                     xor     edx,edx
+00451D2F  488d4dc7                 lea     rcx,[rbp-39h]
+00451D33  448d4268                 lea     r8d,[rdx+68h]
+00451D37  e884a0fdff               call    ntkrnlmp!memset (RVA 0x42BDC0)
+00451D3C  baf3000000               mov     edx,0F3h
+00451D41  e9c2c8f7ff               jmp     ntkrnlmp!KeSetPagePrivilege+0x54 (RVA 0x3CE608)

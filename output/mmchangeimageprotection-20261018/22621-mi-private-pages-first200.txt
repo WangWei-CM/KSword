@@ -1,0 +1,202 @@
+Source: 22621-mi-private-pages-cdb-uf.txt; first 200 instructions in CDB uf traversal order. All addresses RVA.
+CDB uf instruction count=514; listed=200
+002D5DD0  48895c2418               mov     qword ptr [rsp+18h],rbx
+002D5DD5  44894c2420               mov     dword ptr [rsp+20h],r9d
+002D5DDA  4889542410               mov     qword ptr [rsp+10h],rdx
+002D5DDF  48894c2408               mov     qword ptr [rsp+8],rcx
+002D5DE4  55                       push    rbp
+002D5DE5  56                       push    rsi
+002D5DE6  57                       push    rdi
+002D5DE7  4154                     push    r12
+002D5DE9  4155                     push    r13
+002D5DEB  4156                     push    r14
+002D5DED  4157                     push    r15
+002D5DEF  4881eca0000000           sub     rsp,0A0h
+002D5DF6  4533ed                   xor     r13d,r13d
+002D5DF9  48b80000000080f6ffff     mov rax,0FFFFF68000000000h
+002D5E03  44896c2444               mov     dword ptr [rsp+44h],r13d
+002D5E08  418bf9                   mov     edi,r9d
+002D5E0B  4c896c2470               mov     qword ptr [rsp+70h],r13
+002D5E10  4d8be0                   mov     r12,r8
+002D5E13  44886c2431               mov     byte ptr [rsp+31h],r13b
+002D5E18  488bda                   mov     rbx,rdx
+002D5E1B  488bf1                   mov     rsi,rcx
+002D5E1E  488bc0                   mov     rax,rax
+002D5E21  48c1e019                 shl     rax,19h
+002D5E25  488bca                   mov     rcx,rdx
+002D5E28  48c1e119                 shl     rcx,19h
+002D5E2C  482bc8                   sub     rcx,rax
+002D5E2F  4889842480000000         mov     qword ptr [rsp+80h],rax
+002D5E37  48c1f910                 sar     rcx,10h
+002D5E3B  e84049f8ff               call    ntkrnlmp!MiGetSystemRegionType (RVA 0x25A780)
+002D5E40  83f801                   cmp     eax,1
+002D5E43  0f84bc050000             je      ntkrnlmp!MiMakeDriverPagesPrivate+0x635 (RVA 0x2D6405)
+002D5E49  4c896c2450               mov     qword ptr [rsp+50h],r13
+002D5E4E  488d05ab389900           lea     rax,[ntkrnlmp!MiState+0x46c0 (RVA 0xC69700)]
+002D5E55  0fb788ae000000           movzx   ecx,word ptr [rax+0AEh]
+002D5E5C  4c8d86a0000000           lea     r8,[rsi+0A0h]
+002D5E63  4889442438               mov     qword ptr [rsp+38h],rax
+002D5E68  488b0519119900           mov     rax,qword ptr [ntkrnlmp!MiState+0x1f48 (RVA 0xC66F88)]
+002D5E6F  488b04c8                 mov     rax,qword ptr [rax+rcx*8]
+002D5E73  418bcd                   mov     ecx,r13d
+002D5E76  4889442478               mov     qword ptr [rsp+78h],rax
+002D5E7B  40f6c703                 test    dil,3
+002D5E7F  7516                     jne     ntkrnlmp!MiMakeDriverPagesPrivate+0xc7 (RVA 0x2D5E97)
+002D5E81  8b05c18ba400             mov     eax,dword ptr [ntkrnlmp!MiFlags (RVA 0xD1EA48)]
+002D5E87  2500c00000               and     eax,0C000h
+002D5E8C  3d00c00000               cmp     eax,0C000h
+002D5E91  0f84a9831c00             je      ntkrnlmp!MiMakeDriverPagesPrivate+0x1c8470 (RVA 0x49E240)
+002D5E97  8bd7                     mov     edx,edi
+002D5E99  4c896c2468               mov     qword ptr [rsp+68h],r13
+002D5E9E  83e204                   and     edx,4
+002D5EA1  4d8d7068                 lea     r14,[r8+68h]
+002D5EA5  8bc1                     mov     eax,ecx
+002D5EA7  89542458                 mov     dword ptr [rsp+58h],edx
+002D5EAB  83c801                   or      eax,1
+002D5EAE  4c89b42488000000         mov     qword ptr [rsp+88h],r14
+002D5EB6  85d2                     test    edx,edx
+002D5EB8  48c7c7ffffffff           mov     rdi,0FFFFFFFFFFFFFFFFh
+002D5EBF  488bf3                   mov     rsi,rbx
+002D5EC2  48897c2448               mov     qword ptr [rsp+48h],rdi
+002D5EC7  0f44c1                   cmove   eax,ecx
+002D5ECA  4d8bfd                   mov     r15,r13
+002D5ECD  8944245c                 mov     dword ptr [rsp+5Ch],eax
+002D5ED1  498bdd                   mov     rbx,r13
+002D5ED4  65488b042588010000       mov   rax,qword ptr gs:[188h]
+002D5EDD  44896c2440               mov     dword ptr [rsp+40h],r13d
+002D5EE2  66ff88e6010000           dec     word ptr [rax+1E6h]
+002D5EE9  90                       nop
+002D5EEA  65488b2c2588010000       mov   rbp,qword ptr gs:[188h]
+002D5EF3  fa                       cli
+002D5EF4  0fb68518030000           movzx   eax,byte ptr [rbp+318h]
+002D5EFB  85c0                     test    eax,eax
+002D5EFD  0f8439050000             je      ntkrnlmp!MiMakeDriverPagesPrivate+0x66c (RVA 0x2D643C)
+002D5F03  0fbcc8                   bsf     ecx,eax
+002D5F06  0fb6c0                   movzx   eax,al
+002D5F09  0fb3c8                   btr     eax,ecx
+002D5F0C  894c2440                 mov     dword ptr [rsp+40h],ecx
+002D5F10  888518030000             mov     byte ptr [rbp+318h],al
+002D5F16  65488b0c2520000000       mov   rcx,qword ptr gs:[20h]
+002D5F1F  4c8b81b8880000           mov     r8,qword ptr [rcx+88B8h]
+002D5F26  4d85c0                   test    r8,r8
+002D5F29  0f85f8010000             jne     ntkrnlmp!MiMakeDriverPagesPrivate+0x357 (RVA 0x2D6127)
+002D5F2F  fb                       sti
+002D5F30  8b442440                 mov     eax,dword ptr [rsp+40h]
+002D5F34  488d9da0060000           lea     rbx,[rbp+6A0h]
+002D5F3B  48b90000000080000000     mov rcx,8000000000h
+002D5F45  488d1440                 lea     rdx,[rax+rax*2]
+002D5F49  498bc6                   mov     rax,r14
+002D5F4C  482b0555f69800           sub     rax,qword ptr [ntkrnlmp!MiState+0x568 (RVA 0xC655A8)]
+002D5F53  48c1e205                 shl     rdx,5
+002D5F57  4803da                   add     rbx,rdx
+002D5F5A  483bc1                   cmp     rax,rcx
+002D5F5D  0f82c8040000             jb      ntkrnlmp!MiMakeDriverPagesPrivate+0x65b (RVA 0x2D642B)
+002D5F63  b8ffffffff               mov     eax,0FFFFFFFFh
+002D5F68  894308                   mov     dword ptr [rbx+8],eax
+002D5F6B  48b9fcffffffffffff7f     mov rcx,7FFFFFFFFFFFFFFCh
+002D5F75  498bc6                   mov     rax,r14
+002D5F78  90                       nop
+002D5F79  4823c1                   and     rax,rcx
+002D5F7C  488903                   mov     qword ptr [rbx],rax
+002D5F7F  f0490fba2e00             lock bts qword ptr [r14],0
+002D5F85  0f82bf821c00             jb      ntkrnlmp!MiMakeDriverPagesPrivate+0x1c847a (RVA 0x49E24A)
+002D5F8B  4885db                   test    rbx,rbx
+002D5F8E  7404                     je      ntkrnlmp!MiMakeDriverPagesPrivate+0x1c4 (RVA 0x2D5F94)
+002D5F90  c6431201                 mov     byte ptr [rbx+12h],1
+002D5F94  488b6c2438               mov     rbp,qword ptr [rsp+38h]
+002D5F99  488bcd                   mov     rcx,rbp
+002D5F9C  e86f44f8ff               call    ntkrnlmp!MiLockWorkingSetShared (RVA 0x25A410)
+002D5FA1  88442430                 mov     byte ptr [rsp+30h],al
+002D5FA5  4c39a424e8000000         cmp     qword ptr [rsp+0E8h],r12
+002D5FAD  0f87c3000000             ja      ntkrnlmp!MiMakeDriverPagesPrivate+0x2a6 (RVA 0x2D6076)
+002D5FB3  4c8bb424e0000000         mov     r14,qword ptr [rsp+0E0h]
+002D5FBB  48bbf8ffffff7f000000     mov rbx,7FFFFFFFF8h
+002D5FC5  4d85ff                   test    r15,r15
+002D5FC8  0f842c010000             je      ntkrnlmp!MiMakeDriverPagesPrivate+0x32a (RVA 0x2D60FA)
+002D5FCE  48f7c6ff0f0000           test    rsi,0FFFh
+002D5FD5  0f8414010000             je      ntkrnlmp!MiMakeDriverPagesPrivate+0x31f (RVA 0x2D60EF)
+002D5FDB  488b1e                   mov     rbx,qword ptr [rsi]
+002D5FDE  488bce                   mov     rcx,rsi
+002D5FE1  e8da06fbff               call    ntkrnlmp!MiPteInShadowRange (RVA 0x2866C0)
+002D5FE6  85c0                     test    eax,eax
+002D5FE8  0f8570821c00             jne     ntkrnlmp!MiMakeDriverPagesPrivate+0x1c848e (RVA 0x49E25E)
+002D5FEE  48899c2498000000         mov     qword ptr [rsp+98h],rbx
+002D5FF6  4885db                   test    rbx,rbx
+002D5FF9  7451                     je      ntkrnlmp!MiMakeDriverPagesPrivate+0x27c (RVA 0x2D604C)
+002D5FFB  f6c301                   test    bl,1
+002D5FFE  0f84f9020000             je      ntkrnlmp!MiMakeDriverPagesPrivate+0x52d (RVA 0x2D62FD)
+002D6004  488d8c2498000000         lea     rcx,[rsp+98h]
+002D600C  e83f06fbff               call    ntkrnlmp!MI_READ_PTE_LOCK_FREE (RVA 0x286650)
+002D6011  48c1e80c                 shr     rax,0Ch
+002D6015  48b9ffffffffff000000     mov rcx,0FFFFFFFFFFh
+002D601F  4823c1                   and     rax,rcx
+002D6022  48ba0000000000deffff     mov rdx,0FFFFDE0000000000h
+002D602C  488d2c40                 lea     rbp,[rax+rax*2]
+002D6030  48c1e504                 shl     rbp,4
+002D6034  488bc2                   mov     rax,rdx
+002D6037  4803e8                   add     rbp,rax
+002D603A  488b4528                 mov     rax,qword ptr [rbp+28h]
+002D603E  4885c0                   test    rax,rax
+002D6041  0f8808010000             js      ntkrnlmp!MiMakeDriverPagesPrivate+0x37f (RVA 0x2D614F)
+002D6047  488b6c2438               mov     rbp,qword ptr [rsp+38h]
+002D604C  4883c608                 add     rsi,8
+002D6050  493bf4                   cmp     rsi,r12
+002D6053  0f8662ffffff             jbe     ntkrnlmp!MiMakeDriverPagesPrivate+0x1eb (RVA 0x2D5FBB)
+002D6059  4d85ff                   test    r15,r15
+002D605C  740b                     je      ntkrnlmp!MiMakeDriverPagesPrivate+0x299 (RVA 0x2D6069)
+002D605E  498bd7                   mov     rdx,r15
+002D6061  488bcd                   mov     rcx,rbp
+002D6064  e847bd0800               call    ntkrnlmp!MiUnlockPageTableInternal (RVA 0x361DB0)
+002D6069  0fb6442430               movzx   eax,byte ptr [rsp+30h]
+002D606E  4c8bb42488000000         mov     r14,qword ptr [rsp+88h]
+002D6076  0fb6d0                   movzx   edx,al
+002D6079  488bcd                   mov     rcx,rbp
+002D607C  e85f63f4ff               call    ntkrnlmp!MiUnlockWorkingSetShared (RVA 0x21C3E0)
+002D6081  65488b1c2588010000       mov   rbx,qword ptr gs:[188h]
+002D608A  f0490fc13e               lock xadd qword ptr [r14],rdi
+002D608F  4080e706                 and     dil,6
+002D6093  4080ff02                 cmp     dil,2
+002D6097  0f8429030000             je      ntkrnlmp!MiMakeDriverPagesPrivate+0x5f6 (RVA 0x2D63C6)
+002D609D  498bce                   mov     rcx,r14
+002D60A0  e8cbccf4ff               call    ntkrnlmp!KeAbPostRelease (RVA 0x222D70)
+002D60A5  90                       nop
+002D60A6  668383e601000001         add     word ptr [rbx+1E6h],1
+002D60AE  7511                     jne     ntkrnlmp!MiMakeDriverPagesPrivate+0x2f1 (RVA 0x2D60C1)
+002D60B0  488d8398000000           lea     rax,[rbx+98h]
+002D60B7  90                       nop
+002D60B8  483900                   cmp     qword ptr [rax],rax
+002D60BB  0f853a030000             jne     ntkrnlmp!MiMakeDriverPagesPrivate+0x62b (RVA 0x2D63FB)
+002D60C1  488b442448               mov     rax,qword ptr [rsp+48h]
+002D60C6  4883f8ff                 cmp     rax,0FFFFFFFFFFFFFFFFh
+002D60CA  0f85d6831c00             jne     ntkrnlmp!MiMakeDriverPagesPrivate+0x1c86d6 (RVA 0x49E4A6)
+002D60D0  488b9c24f0000000         mov     rbx,qword ptr [rsp+0F0h]
+002D60D8  418bc5                   mov     eax,r13d
+002D60DB  4881c4a0000000           add     rsp,0A0h
+002D60E2  415f                     pop     r15
+002D60E4  415e                     pop     r14
+002D60E6  415d                     pop     r13
+002D60E8  415c                     pop     r12
+002D60EA  5f                       pop     rdi
+002D60EB  5e                       pop     rsi
+002D60EC  5d                       pop     rbp
+002D60ED  c3                       ret
+002D60EF  498bd7                   mov     rdx,r15
+002D60F2  488bcd                   mov     rcx,rbp
+002D60F5  e8b6bc0800               call    ntkrnlmp!MiUnlockPageTableInternal (RVA 0x361DB0)
+002D60FA  4c8bfe                   mov     r15,rsi
+002D60FD  48b80000000080f6ffff     mov rax,0FFFFF68000000000h
+002D6107  49c1ef09                 shr     r15,9
+002D610B  4c23fb                   and     r15,rbx
+002D610E  488bc0                   mov     rax,rax
+002D6111  4c03f8                   add     r15,rax
+002D6114  4533c0                   xor     r8d,r8d
+002D6117  498bd7                   mov     rdx,r15
+002D611A  488bcd                   mov     rcx,rbp
+002D611D  e86e82f9ff               call    ntkrnlmp!MiLockPageTableInternal (RVA 0x26E390)
+002D6122  e9b4feffff               jmp     ntkrnlmp!MiMakeDriverPagesPrivate+0x20b (RVA 0x2D5FDB)
+002D6127  410f0d08                 prefetchw [r8]
+002D612B  418b00                   mov     eax,dword ptr [r8]
+002D612E  8bd0                     mov     edx,eax
+002D6130  0fbaf215                 btr     edx,15h
+002D6134  f0410fb110               lock cmpxchg dword ptr [r8],edx
+002D6139  75f3                     jne     ntkrnlmp!MiMakeDriverPagesPrivate+0x35e (RVA 0x2D612E)

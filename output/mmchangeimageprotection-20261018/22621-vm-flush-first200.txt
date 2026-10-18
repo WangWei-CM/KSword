@@ -1,0 +1,16 @@
+Source: 22621-vm-flush-cdb-uf.txt; first 200 instructions in CDB uf traversal order. All addresses RVA.
+CDB uf instruction count=14; listed=14
+0045D15C  4883ec28                 sub     rsp,28h
+0045D160  448bc9                   mov     r9d,ecx
+0045D163  4183f801                 cmp     r8d,1
+0045D167  7527                     jne     ntkrnlmp!VmFlushTb+0x34 (RVA 0x45D190)
+0045D169  65488b042588010000       mov   rax,qword ptr gs:[188h]
+0045D172  4c8b80b8000000           mov     r8,qword ptr [rax+0B8h]
+0045D179  498b88f0080000           mov     rcx,qword ptr [r8+8F0h]
+0045D180  4885c9                   test    rcx,rcx
+0045D183  740b                     je      ntkrnlmp!VmFlushTb+0x34 (RVA 0x45D190)
+0045D185  4c8bc2                   mov     r8,rdx
+0045D188  418bd1                   mov     edx,r9d
+0045D18B  e80a060000               call    ntkrnlmp!VmpFlushTb (RVA 0x45D79A)
+0045D190  4883c428                 add     rsp,28h
+0045D194  c3                       ret

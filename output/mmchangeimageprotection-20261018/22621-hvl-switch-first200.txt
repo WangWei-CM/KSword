@@ -1,0 +1,64 @@
+Source: 22621-hvl-switch-cdb-uf.txt; first 200 instructions in CDB uf traversal order. All addresses RVA.
+CDB uf instruction count=62; listed=62
+00410F40  4881ec38010000           sub     rsp,138h
+00410F47  488d842400010000         lea     rax,[rsp+100h]
+00410F4F  0f29742430               movaps  xmmword ptr [rsp+30h],xmm6
+00410F54  0f297c2440               movaps  xmmword ptr [rsp+40h],xmm7
+00410F59  440f29442450             movaps  xmmword ptr [rsp+50h],xmm8
+00410F5F  440f294c2460             movaps  xmmword ptr [rsp+60h],xmm9
+00410F65  440f29542470             movaps  xmmword ptr [rsp+70h],xmm10
+00410F6B  440f295880               movaps  xmmword ptr [rax-80h],xmm11
+00410F70  440f296090               movaps  xmmword ptr [rax-70h],xmm12
+00410F75  440f2968a0               movaps  xmmword ptr [rax-60h],xmm13
+00410F7A  440f2970b0               movaps  xmmword ptr [rax-50h],xmm14
+00410F7F  440f2978c0               movaps  xmmword ptr [rax-40h],xmm15
+00410F84  488968f8                 mov     qword ptr [rax-8],rbp
+00410F88  488918                   mov     qword ptr [rax],rbx
+00410F8B  48897808                 mov     qword ptr [rax+8],rdi
+00410F8F  48897010                 mov     qword ptr [rax+10h],rsi
+00410F93  4c896018                 mov     qword ptr [rax+18h],r12
+00410F97  4c896820                 mov     qword ptr [rax+20h],r13
+00410F9B  4c897028                 mov     qword ptr [rax+28h],r14
+00410F9F  4c897830                 mov     qword ptr [rax+30h],r15
+00410FA3  4889542408               mov     qword ptr [rsp+8],rdx
+00410FA8  488b1a                   mov     rbx,qword ptr [rdx]
+00410FAB  f3440f6f5208             movdqu  xmm10,xmmword ptr [rdx+8]
+00410FB1  f3440f6f5a18             movdqu  xmm11,xmmword ptr [rdx+18h]
+00410FB7  f3440f6f6228             movdqu  xmm12,xmmword ptr [rdx+28h]
+00410FBD  f3440f6f6a38             movdqu  xmm13,xmmword ptr [rdx+38h]
+00410FC3  f3440f6f7248             movdqu  xmm14,xmmword ptr [rdx+48h]
+00410FC9  f3440f6f7a58             movdqu  xmm15,xmmword ptr [rdx+58h]
+00410FCF  4d8bc8                   mov     r9,r8
+00410FD2  450f20c0                 mov     r8,cr8
+00410FD6  65488b3c2588010000       mov   rdi,qword ptr gs:[188h]
+00410FDF  488b0582089f00           mov     rax,qword ptr [ntkrnlmp!HvlpVsmVtlCallVa (RVA 0xE01868)]
+00410FE6  e8a5000000               call    ntkrnlmp!HvlpSwitchToVsmVtl1RetpolineHelper (RVA 0x411090)
+00410FEB  488b542408               mov     rdx,qword ptr [rsp+8]
+00410FF0  48891a                   mov     qword ptr [rdx],rbx
+00410FF3  f3440f7f5208             movdqu  xmmword ptr [rdx+8],xmm10
+00410FF9  f3440f7f5a18             movdqu  xmmword ptr [rdx+18h],xmm11
+00410FFF  f3440f7f6228             movdqu  xmmword ptr [rdx+28h],xmm12
+00411005  f3440f7f6a38             movdqu  xmmword ptr [rdx+38h],xmm13
+0041100B  f3440f7f7248             movdqu  xmmword ptr [rdx+48h],xmm14
+00411011  f3440f7f7a58             movdqu  xmmword ptr [rdx+58h],xmm15
+00411017  488d8c2400010000         lea     rcx,[rsp+100h]
+0041101F  0f28742430               movaps  xmm6,xmmword ptr [rsp+30h]
+00411024  0f287c2440               movaps  xmm7,xmmword ptr [rsp+40h]
+00411029  440f28442450             movaps  xmm8,xmmword ptr [rsp+50h]
+0041102F  440f284c2460             movaps  xmm9,xmmword ptr [rsp+60h]
+00411035  440f28542470             movaps  xmm10,xmmword ptr [rsp+70h]
+0041103B  440f285980               movaps  xmm11,xmmword ptr [rcx-80h]
+00411040  440f286190               movaps  xmm12,xmmword ptr [rcx-70h]
+00411045  440f2869a0               movaps  xmm13,xmmword ptr [rcx-60h]
+0041104A  440f2871b0               movaps  xmm14,xmmword ptr [rcx-50h]
+0041104F  440f2879c0               movaps  xmm15,xmmword ptr [rcx-40h]
+00411054  488b19                   mov     rbx,qword ptr [rcx]
+00411057  488b7908                 mov     rdi,qword ptr [rcx+8]
+0041105B  488b7110                 mov     rsi,qword ptr [rcx+10h]
+0041105F  4c8b6118                 mov     r12,qword ptr [rcx+18h]
+00411063  4c8b6920                 mov     r13,qword ptr [rcx+20h]
+00411067  4c8b7128                 mov     r14,qword ptr [rcx+28h]
+0041106B  4c8b7930                 mov     r15,qword ptr [rcx+30h]
+0041106F  488b69f8                 mov     rbp,qword ptr [rcx-8]
+00411073  4881c438010000           add     rsp,138h
+0041107A  c3                       ret

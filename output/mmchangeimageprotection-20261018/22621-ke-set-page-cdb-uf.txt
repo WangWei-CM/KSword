@@ -1,0 +1,138 @@
+
+************* Preparing the environment for Debugger Extensions Gallery repositories **************
+   ExtensionRepository : Implicit
+   UseExperimentalFeatureForNugetShare : true
+   AllowNugetExeUpdate : true
+   NonInteractiveNuget : true
+   AllowNugetMSCredentialProviderInstall : true
+   AllowParallelInitializationOfLocalRepositories : true
+
+   EnableRedirectToV8JsProvider : false
+
+   -- Configuring repositories
+      ----> Repository : LocalInstalled, Enabled: true
+      ----> Repository : UserExtensions, Enabled: true
+
+>>>>>>>>>>>>> Preparing the environment for Debugger Extensions Gallery repositories completed, duration 0.000 seconds
+
+************* Waiting for Debugger Extensions Gallery to Initialize **************
+
+>>>>>>>>>>>>> Waiting for Debugger Extensions Gallery to Initialize completed, duration 0.016 seconds
+   ----> Repository : UserExtensions, Enabled: true, Packages count: 0
+   ----> Repository : LocalInstalled, Enabled: true, Packages count: 29
+
+Microsoft (R) Windows Debugger Version 10.0.26100.6584 AMD64
+Copyright (c) Microsoft Corporation. All rights reserved.
+
+
+Loading Dump File [C:\Users\Felix\CLionProjects\KSword\artifacts\symbols\ntkrnlmp.exe\2C33C5081047000\ntkrnlmp.exe]
+
+************* Path validation summary **************
+Response                         Time (ms)     Location
+OK                                             C:\Users\Felix\CLionProjects\KSword\artifacts\symbols
+Symbol search path is: C:\Users\Felix\CLionProjects\KSword\artifacts\symbols
+Executable search path is:
+ModLoad: 00000001`40000000 00000001`41047000   C:\Users\Felix\CLionProjects\KSword\artifacts\symbols\ntkrnlmp.exe\2C33C5081047000\ntkrnlmp.exe
+ntkrnlmp!KiSystemStartup:
+00000001`40a83010 4883ec38        sub     rsp,38h
+0:000> cdb: Reading initial command 'uf ntkrnlmp!KeSetPagePrivilege; q'
+ntkrnlmp!KeSetPagePrivilege:
+00000001`403ce5b4 48895c2420      mov     qword ptr [rsp+20h],rbx
+00000001`403ce5b9 55              push    rbp
+00000001`403ce5ba 56              push    rsi
+00000001`403ce5bb 57              push    rdi
+00000001`403ce5bc 488d6c24b9      lea     rbp,[rsp-47h]
+00000001`403ce5c1 4881eca0000000  sub     rsp,0A0h
+00000001`403ce5c8 488b0511e98300  mov     rax,qword ptr [ntkrnlmp!_security_cookie (00000001`40c0cee0)]
+00000001`403ce5cf 4833c4          xor     rax,rsp
+00000001`403ce5d2 48894537        mov     qword ptr [rbp+37h],rax
+00000001`403ce5d6 418bd8          mov     ebx,r8d
+00000001`403ce5d9 488bf2          mov     rsi,rdx
+00000001`403ce5dc 488bf9          mov     rdi,rcx
+00000001`403ce5df 410fbae008      bt      r8d,8
+00000001`403ce5e4 0f82f0360800    jb      ntkrnlmp!KeSetPagePrivilege+0x83726 (00000001`40451cda)
+
+ntkrnlmp!KeSetPagePrivilege+0x36:
+00000001`403ce5ea 0fbae30a        bt      ebx,0Ah
+00000001`403ce5ee 0f83ff360800    jae     ntkrnlmp!KeSetPagePrivilege+0x8373f (00000001`40451cf3)
+
+ntkrnlmp!KeSetPagePrivilege+0x40:
+00000001`403ce5f4 33d2            xor     edx,edx
+00000001`403ce5f6 488d4dc7        lea     rcx,[rbp-39h]
+00000001`403ce5fa 448d4268        lea     r8d,[rdx+68h]
+00000001`403ce5fe e8bdd70500      call    ntkrnlmp!memset (00000001`4042bdc0)
+00000001`403ce603 baf6000000      mov     edx,0F6h
+
+ntkrnlmp!KeSetPagePrivilege+0x54:
+00000001`403ce608 0f1006          movups  xmm0,xmmword ptr [rsi]
+00000001`403ce60b 4c8d4dc7        lea     r9,[rbp-39h]
+00000001`403ce60f 48897dcf        mov     qword ptr [rbp-31h],rdi
+00000001`403ce613 4533c0          xor     r8d,r8d
+00000001`403ce616 b102            mov     cl,2
+00000001`403ce618 f30f7f45d7      movdqu  xmmword ptr [rbp-29h],xmm0
+00000001`403ce61d e8de9ff6ff      call    ntkrnlmp!VslpEnterIumSecureMode (00000001`40338600)
+
+ntkrnlmp!KeSetPagePrivilege+0x6e:
+00000001`403ce622 488b4d37        mov     rcx,qword ptr [rbp+37h]
+00000001`403ce626 4833cc          xor     rcx,rsp
+00000001`403ce629 e8c22f0000      call    ntkrnlmp!_security_check_cookie (00000001`403d15f0)
+00000001`403ce62e 488b9c24d8000000 mov     rbx,qword ptr [rsp+0D8h]
+00000001`403ce636 4881c4a0000000  add     rsp,0A0h
+00000001`403ce63d 5f              pop     rdi
+00000001`403ce63e 5e              pop     rsi
+00000001`403ce63f 5d              pop     rbp
+00000001`403ce640 c3              ret
+
+ntkrnlmp!KeSetPagePrivilege+0x83726:
+00000001`40451cda 33d2            xor     edx,edx
+00000001`40451cdc 488d4dc7        lea     rcx,[rbp-39h]
+00000001`40451ce0 448d4268        lea     r8d,[rdx+68h]
+00000001`40451ce4 e8d7a0fdff      call    ntkrnlmp!memset (00000001`4042bdc0)
+00000001`40451ce9 baf5000000      mov     edx,0F5h
+00000001`40451cee e915c9f7ff      jmp     ntkrnlmp!KeSetPagePrivilege+0x54 (00000001`403ce608)
+
+ntkrnlmp!KeSetPagePrivilege+0x8373f:
+00000001`40451cf3 f6c306          test    bl,6
+00000001`40451cf6 7435            je      ntkrnlmp!KeSetPagePrivilege+0x83779 (00000001`40451d2d)
+
+ntkrnlmp!KeSetPagePrivilege+0x83744:
+00000001`40451cf8 33c0            xor     eax,eax
+00000001`40451cfa f6c302          test    bl,2
+00000001`40451cfd 7414            je      ntkrnlmp!KeSetPagePrivilege+0x8375f (00000001`40451d13)
+
+ntkrnlmp!KeSetPagePrivilege+0x8374b:
+00000001`40451cff 4181e000080000  and     r8d,800h
+00000001`40451d06 e8d1730f00      call    ntkrnlmp!VslMakeProtectedPageExecutable (00000001`405490dc)
+00000001`40451d0b 85c0            test    eax,eax
+00000001`40451d0d 0f880fc9f7ff    js      ntkrnlmp!KeSetPagePrivilege+0x6e (00000001`403ce622)
+
+ntkrnlmp!KeSetPagePrivilege+0x8375f:
+00000001`40451d13 f6c304          test    bl,4
+00000001`40451d16 0f8406c9f7ff    je      ntkrnlmp!KeSetPagePrivilege+0x6e (00000001`403ce622)
+
+ntkrnlmp!KeSetPagePrivilege+0x83768:
+00000001`40451d1c 488bd6          mov     rdx,rsi
+00000001`40451d1f 488bcf          mov     rcx,rdi
+00000001`40451d22 e851740f00      call    ntkrnlmp!VslMakeProtectedPageWritable (00000001`40549178)
+00000001`40451d27 90              nop
+00000001`40451d28 e9f5c8f7ff      jmp     ntkrnlmp!KeSetPagePrivilege+0x6e (00000001`403ce622)
+
+ntkrnlmp!KeSetPagePrivilege+0x83779:
+00000001`40451d2d 33d2            xor     edx,edx
+00000001`40451d2f 488d4dc7        lea     rcx,[rbp-39h]
+00000001`40451d33 448d4268        lea     r8d,[rdx+68h]
+00000001`40451d37 e884a0fdff      call    ntkrnlmp!memset (00000001`4042bdc0)
+00000001`40451d3c baf3000000      mov     edx,0F3h
+00000001`40451d41 e9c2c8f7ff      jmp     ntkrnlmp!KeSetPagePrivilege+0x54 (00000001`403ce608)
+quit:
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\atlmfc.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\ObjectiveC.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\concurrency.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\cpp_rest.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\stl.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\Windows.Data.Json.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\Windows.Devices.Geolocation.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\Windows.Devices.Sensors.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\Windows.Media.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\windows.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\winrt.natvis'

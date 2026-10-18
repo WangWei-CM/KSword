@@ -1,0 +1,274 @@
+
+************* Preparing the environment for Debugger Extensions Gallery repositories **************
+   ExtensionRepository : Implicit
+   UseExperimentalFeatureForNugetShare : true
+   AllowNugetExeUpdate : true
+   NonInteractiveNuget : true
+   AllowNugetMSCredentialProviderInstall : true
+   AllowParallelInitializationOfLocalRepositories : true
+
+   EnableRedirectToV8JsProvider : false
+
+   -- Configuring repositories
+      ----> Repository : LocalInstalled, Enabled: true
+      ----> Repository : UserExtensions, Enabled: true
+
+>>>>>>>>>>>>> Preparing the environment for Debugger Extensions Gallery repositories completed, duration 0.000 seconds
+
+************* Waiting for Debugger Extensions Gallery to Initialize **************
+
+>>>>>>>>>>>>> Waiting for Debugger Extensions Gallery to Initialize completed, duration 0.016 seconds
+   ----> Repository : UserExtensions, Enabled: true, Packages count: 0
+   ----> Repository : LocalInstalled, Enabled: true, Packages count: 29
+
+Microsoft (R) Windows Debugger Version 10.0.26100.6584 AMD64
+Copyright (c) Microsoft Corporation. All rights reserved.
+
+
+Loading Dump File [C:\Users\Felix\CLionProjects\KSword\artifacts\symbols\ntkrnlmp.exe\2C33C5081047000\ntkrnlmp.exe]
+
+************* Path validation summary **************
+Response                         Time (ms)     Location
+OK                                             C:\Users\Felix\CLionProjects\KSword\artifacts\symbols
+Symbol search path is: C:\Users\Felix\CLionProjects\KSword\artifacts\symbols
+Executable search path is:
+ModLoad: 00000001`40000000 00000001`41047000   C:\Users\Felix\CLionProjects\KSword\artifacts\symbols\ntkrnlmp.exe\2C33C5081047000\ntkrnlmp.exe
+ntkrnlmp!KiSystemStartup:
+00000001`40a83010 4883ec38        sub     rsp,38h
+0:000> cdb: Reading initial command 'uf ntkrnlmp!MiInsertTbFlushEntry; q'
+ntkrnlmp!MiInsertTbFlushEntry:
+00000001`40261c50 48895c2418      mov     qword ptr [rsp+18h],rbx
+00000001`40261c55 56              push    rsi
+00000001`40261c56 57              push    rdi
+00000001`40261c57 4156            push    r14
+00000001`40261c59 4883ec20        sub     rsp,20h
+00000001`40261c5d 488bd9          mov     rbx,rcx
+00000001`40261c60 bf00100000      mov     edi,1000h
+00000001`40261c65 438d0cc9        lea     ecx,[r9+r9*8]
+00000001`40261c69 498bf0          mov     rsi,r8
+00000001`40261c6c 48d3e7          shl     rdi,cl
+00000001`40261c6f 4c8bf2          mov     r14,rdx
+00000001`40261c72 833b01          cmp     dword ptr [rbx],1
+00000001`40261c75 0f8595010000    jne     ntkrnlmp!MiInsertTbFlushEntry+0x1c0 (00000001`40261e10)
+
+ntkrnlmp!MiInsertTbFlushEntry+0x2b:
+00000001`40261c7b 448b430c        mov     r8d,dword ptr [rbx+0Ch]
+00000001`40261c7f 48896c2440      mov     qword ptr [rsp+40h],rbp
+00000001`40261c84 4c897c2448      mov     qword ptr [rsp+48h],r15
+00000001`40261c89 4c8d7b04        lea     r15,[rbx+4]
+00000001`40261c8d 4585c0          test    r8d,r8d
+00000001`40261c90 0f848b000000    je      ntkrnlmp!MiInsertTbFlushEntry+0xd1 (00000001`40261d21)
+
+ntkrnlmp!MiInsertTbFlushEntry+0x46:
+00000001`40261c96 41f60704        test    byte ptr [r15],4
+00000001`40261c9a 0f8581000000    jne     ntkrnlmp!MiInsertTbFlushEntry+0xd1 (00000001`40261d21)
+
+ntkrnlmp!MiInsertTbFlushEntry+0x50:
+00000001`40261ca0 458d50ff        lea     r10d,[r8-1]
+00000001`40261ca4 418be9          mov     ebp,r9d
+00000001`40261ca7 4a8b44d318      mov     rax,qword ptr [rbx+r10*8+18h]
+00000001`40261cac 488bc8          mov     rcx,rax
+00000001`40261caf 48c1e90a        shr     rcx,0Ah
+00000001`40261cb3 83e103          and     ecx,3
+00000001`40261cb6 483bcd          cmp     rcx,rbp
+00000001`40261cb9 0f85dc010000    jne     ntkrnlmp!MiInsertTbFlushEntry+0x24b (00000001`40261e9b)
+
+ntkrnlmp!MiInsertTbFlushEntry+0x6f:
+00000001`40261cbf 488bd0          mov     rdx,rax
+00000001`40261cc2 482500f0ffff    and     rax,0FFFFFFFFFFFFF000h
+00000001`40261cc8 81e2ff030000    and     edx,3FFh
+00000001`40261cce 488d4a01        lea     rcx,[rdx+1]
+00000001`40261cd2 480fafcf        imul    rcx,rdi
+00000001`40261cd6 4803c8          add     rcx,rax
+00000001`40261cd9 493bce          cmp     rcx,r14
+00000001`40261cdc 0f85e3000000    jne     ntkrnlmp!MiInsertTbFlushEntry+0x175 (00000001`40261dc5)
+
+ntkrnlmp!MiInsertTbFlushEntry+0x92:
+00000001`40261ce2 488d0432        lea     rax,[rdx+rsi]
+00000001`40261ce6 483bc2          cmp     rax,rdx
+00000001`40261ce9 0f86d6000000    jbe     ntkrnlmp!MiInsertTbFlushEntry+0x175 (00000001`40261dc5)
+
+ntkrnlmp!MiInsertTbFlushEntry+0x9f:
+00000001`40261cef 483dff030000    cmp     rax,3FFh
+00000001`40261cf5 0f87ca000000    ja      ntkrnlmp!MiInsertTbFlushEntry+0x175 (00000001`40261dc5)
+
+ntkrnlmp!MiInsertTbFlushEntry+0xab:
+00000001`40261cfb 4a8b44d318      mov     rax,qword ptr [rbx+r10*8+18h]
+00000001`40261d00 4a8d14d3        lea     rdx,[rbx+r10*8]
+00000001`40261d04 48017310        add     qword ptr [rbx+10h],rsi
+00000001`40261d08 488d0c30        lea     rcx,[rax+rsi]
+00000001`40261d0c 4833c8          xor     rcx,rax
+00000001`40261d0f 81e1ff030000    and     ecx,3FFh
+00000001`40261d15 4833c8          xor     rcx,rax
+00000001`40261d18 48894a18        mov     qword ptr [rdx+18h],rcx
+00000001`40261d1c e98b000000      jmp     ntkrnlmp!MiInsertTbFlushEntry+0x15c (00000001`40261dac)
+
+ntkrnlmp!MiInsertTbFlushEntry+0xd1:
+00000001`40261d21 418be9          mov     ebp,r9d
+00000001`40261d24 458d50ff        lea     r10d,[r8-1]
+00000001`40261d28 498bc7          mov     rax,r15
+00000001`40261d2b 4585c0          test    r8d,r8d
+00000001`40261d2e 0f8594000000    jne     ntkrnlmp!MiInsertTbFlushEntry+0x178 (00000001`40261dc8)
+
+ntkrnlmp!MiInsertTbFlushEntry+0xe4:
+00000001`40261d34 443b4308        cmp     r8d,dword ptr [rbx+8]
+00000001`40261d38 0f8354010000    jae     ntkrnlmp!MiInsertTbFlushEntry+0x242 (00000001`40261e92)
+
+ntkrnlmp!MiInsertTbFlushEntry+0xee:
+00000001`40261d3e 4885f6          test    rsi,rsi
+00000001`40261d41 7469            je      ntkrnlmp!MiInsertTbFlushEntry+0x15c (00000001`40261dac)
+
+ntkrnlmp!MiInsertTbFlushEntry+0xf3:
+00000001`40261d43 83e503          and     ebp,3
+00000001`40261d46 48c1e50a        shl     rbp,0Ah
+
+ntkrnlmp!MiInsertTbFlushEntry+0xfa:
+00000001`40261d4a 488d46ff        lea     rax,[rsi-1]
+00000001`40261d4e 498bce          mov     rcx,r14
+00000001`40261d51 483dff030000    cmp     rax,3FFh
+00000001`40261d57 ba00040000      mov     edx,400h
+00000001`40261d5c 480f46d6        cmovbe  rdx,rsi
+00000001`40261d60 4881e100f0ffff  and     rcx,0FFFFFFFFFFFFF000h
+00000001`40261d67 482bf2          sub     rsi,rdx
+00000001`40261d6a 488d42ff        lea     rax,[rdx-1]
+00000001`40261d6e 25ff030000      and     eax,3FFh
+00000001`40261d73 480bc1          or      rax,rcx
+00000001`40261d76 488bcf          mov     rcx,rdi
+00000001`40261d79 480fafca        imul    rcx,rdx
+00000001`40261d7d 480bc5          or      rax,rbp
+00000001`40261d80 4c03f1          add     r14,rcx
+00000001`40261d83 418bc8          mov     ecx,r8d
+00000001`40261d86 488944cb18      mov     qword ptr [rbx+rcx*8+18h],rax
+00000001`40261d8b 448b430c        mov     r8d,dword ptr [rbx+0Ch]
+00000001`40261d8f 48015310        add     qword ptr [rbx+10h],rdx
+00000001`40261d93 41ffc0          inc     r8d
+00000001`40261d96 418bc8          mov     ecx,r8d
+00000001`40261d99 4489430c        mov     dword ptr [rbx+0Ch],r8d
+00000001`40261d9d 443b4308        cmp     r8d,dword ptr [rbx+8]
+00000001`40261da1 0f84a5000000    je      ntkrnlmp!MiInsertTbFlushEntry+0x1fc (00000001`40261e4c)
+
+ntkrnlmp!MiInsertTbFlushEntry+0x157:
+00000001`40261da7 4885f6          test    rsi,rsi
+00000001`40261daa 759e            jne     ntkrnlmp!MiInsertTbFlushEntry+0xfa (00000001`40261d4a)
+
+ntkrnlmp!MiInsertTbFlushEntry+0x15c:
+00000001`40261dac 4c8b7c2448      mov     r15,qword ptr [rsp+48h]
+00000001`40261db1 488b6c2440      mov     rbp,qword ptr [rsp+40h]
+00000001`40261db6 488b5c2450      mov     rbx,qword ptr [rsp+50h]
+00000001`40261dbb 4883c420        add     rsp,20h
+00000001`40261dbf 415e            pop     r14
+00000001`40261dc1 5f              pop     rdi
+00000001`40261dc2 5e              pop     rsi
+00000001`40261dc3 c3              ret
+
+ntkrnlmp!MiInsertTbFlushEntry+0x175:
+00000001`40261dc5 498bc7          mov     rax,r15
+
+ntkrnlmp!MiInsertTbFlushEntry+0x178:
+00000001`40261dc8 f60004          test    byte ptr [rax],4
+00000001`40261dcb 0f8563ffffff    jne     ntkrnlmp!MiInsertTbFlushEntry+0xe4 (00000001`40261d34)
+
+ntkrnlmp!MiInsertTbFlushEntry+0x181:
+00000001`40261dd1 4a8b44d318      mov     rax,qword ptr [rbx+r10*8+18h]
+00000001`40261dd6 4e8d14d3        lea     r10,[rbx+r10*8]
+00000001`40261dda 488bc8          mov     rcx,rax
+00000001`40261ddd 48c1e90a        shr     rcx,0Ah
+00000001`40261de1 83e103          and     ecx,3
+00000001`40261de4 483bcd          cmp     rcx,rbp
+00000001`40261de7 0f8547ffffff    jne     ntkrnlmp!MiInsertTbFlushEntry+0xe4 (00000001`40261d34)
+
+ntkrnlmp!MiInsertTbFlushEntry+0x19d:
+00000001`40261ded 4c8bcf          mov     r9,rdi
+00000001`40261df0 488bc8          mov     rcx,rax
+00000001`40261df3 4c0fafce        imul    r9,rsi
+00000001`40261df7 4881e100f0ffff  and     rcx,0FFFFFFFFFFFFF000h
+00000001`40261dfe 4b8d1431        lea     rdx,[r9+r14]
+00000001`40261e02 483bca          cmp     rcx,rdx
+00000001`40261e05 0f8529ffffff    jne     ntkrnlmp!MiInsertTbFlushEntry+0xe4 (00000001`40261d34)
+
+ntkrnlmp!MiInsertTbFlushEntry+0x1bb:
+00000001`40261e0b e902f02100      jmp     ntkrnlmp!MiInsertTbFlushEntry+0x21f1c2 (00000001`40480e12)
+
+ntkrnlmp!MiInsertTbFlushEntry+0x1c0:
+00000001`40261e10 0fb64304        movzx   eax,byte ptr [rbx+4]
+00000001`40261e14 a808            test    al,8
+00000001`40261e16 0f855ffeffff    jne     ntkrnlmp!MiInsertTbFlushEntry+0x2b (00000001`40261c7b)
+
+ntkrnlmp!MiInsertTbFlushEntry+0x1cc:
+00000001`40261e1c 48b90000000080f6ffff mov rcx,0FFFFF68000000000h
+00000001`40261e26 4c3bf1          cmp     r14,rcx
+00000001`40261e29 0f824cfeffff    jb      ntkrnlmp!MiInsertTbFlushEntry+0x2b (00000001`40261c7b)
+
+ntkrnlmp!MiInsertTbFlushEntry+0x1df:
+00000001`40261e2f 48b9fffffffffff6ffff mov rcx,0FFFFF6FFFFFFFFFFh
+00000001`40261e39 4c3bf1          cmp     r14,rcx
+00000001`40261e3c 0f8739feffff    ja      ntkrnlmp!MiInsertTbFlushEntry+0x2b (00000001`40261c7b)
+
+ntkrnlmp!MiInsertTbFlushEntry+0x1f2:
+00000001`40261e42 0c08            or      al,8
+00000001`40261e44 884304          mov     byte ptr [rbx+4],al
+00000001`40261e47 e92ffeffff      jmp     ntkrnlmp!MiInsertTbFlushEntry+0x2b (00000001`40261c7b)
+
+ntkrnlmp!MiInsertTbFlushEntry+0x1fc:
+00000001`40261e4c 41f60704        test    byte ptr [r15],4
+00000001`40261e50 0f8551ffffff    jne     ntkrnlmp!MiInsertTbFlushEntry+0x157 (00000001`40261da7)
+
+ntkrnlmp!MiInsertTbFlushEntry+0x206:
+00000001`40261e56 488bd1          mov     rdx,rcx
+00000001`40261e59 4c8d0d706c0d00  lea     r9,[ntkrnlmp!MiTbFlushSort (00000001`40338ad0)]
+00000001`40261e60 488d4b18        lea     rcx,[rbx+18h]
+00000001`40261e64 41b808000000    mov     r8d,8
+00000001`40261e6a e8d11e1700      call    ntkrnlmp!qsort (00000001`403d3d40)
+00000001`40261e6f 488bcb          mov     rcx,rbx
+00000001`40261e72 e8e5500d00      call    ntkrnlmp!MiCompressTbFlushList (00000001`40336f5c)
+00000001`40261e77 448b430c        mov     r8d,dword ptr [rbx+0Ch]
+00000001`40261e7b 443b4308        cmp     r8d,dword ptr [rbx+8]
+00000001`40261e7f 0f8522ffffff    jne     ntkrnlmp!MiInsertTbFlushEntry+0x157 (00000001`40261da7)
+
+ntkrnlmp!MiInsertTbFlushEntry+0x235:
+00000001`40261e85 4885f6          test    rsi,rsi
+00000001`40261e88 0f841effffff    je      ntkrnlmp!MiInsertTbFlushEntry+0x15c (00000001`40261dac)
+
+ntkrnlmp!MiInsertTbFlushEntry+0x23e:
+00000001`40261e8e 4c894310        mov     qword ptr [rbx+10h],r8
+
+ntkrnlmp!MiInsertTbFlushEntry+0x242:
+00000001`40261e92 c6430501        mov     byte ptr [rbx+5],1
+00000001`40261e96 e911ffffff      jmp     ntkrnlmp!MiInsertTbFlushEntry+0x15c (00000001`40261dac)
+
+ntkrnlmp!MiInsertTbFlushEntry+0x24b:
+00000001`40261e9b 498bc7          mov     rax,r15
+00000001`40261e9e e925ffffff      jmp     ntkrnlmp!MiInsertTbFlushEntry+0x178 (00000001`40261dc8)
+
+ntkrnlmp!MiInsertTbFlushEntry+0x21f1c2:
+00000001`40480e12 488bc8          mov     rcx,rax
+00000001`40480e15 81e1ff030000    and     ecx,3FFh
+00000001`40480e1b 488d1431        lea     rdx,[rcx+rsi]
+00000001`40480e1f 483bd1          cmp     rdx,rcx
+00000001`40480e22 0f860c0fdeff    jbe     ntkrnlmp!MiInsertTbFlushEntry+0xe4 (00000001`40261d34)
+
+ntkrnlmp!MiInsertTbFlushEntry+0x21f1d8:
+00000001`40480e28 4881faff030000  cmp     rdx,3FFh
+00000001`40480e2f 0f87ff0edeff    ja      ntkrnlmp!MiInsertTbFlushEntry+0xe4 (00000001`40261d34)
+
+ntkrnlmp!MiInsertTbFlushEntry+0x21f1e5:
+00000001`40480e35 48017310        add     qword ptr [rbx+10h],rsi
+00000001`40480e39 492bc1          sub     rax,r9
+00000001`40480e3c 488d0c30        lea     rcx,[rax+rsi]
+00000001`40480e40 4833c8          xor     rcx,rax
+00000001`40480e43 81e1ff030000    and     ecx,3FFh
+00000001`40480e49 4833c8          xor     rcx,rax
+00000001`40480e4c 49894a18        mov     qword ptr [r10+18h],rcx
+00000001`40480e50 e9570fdeff      jmp     ntkrnlmp!MiInsertTbFlushEntry+0x15c (00000001`40261dac)
+quit:
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\atlmfc.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\ObjectiveC.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\concurrency.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\cpp_rest.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\stl.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\Windows.Data.Json.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\Windows.Devices.Geolocation.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\Windows.Devices.Sensors.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\Windows.Media.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\windows.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\winrt.natvis'

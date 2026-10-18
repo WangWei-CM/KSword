@@ -1,0 +1,161 @@
+Source: 22621-mi-insert-flush-cdb-uf.txt; first 200 instructions in CDB uf traversal order. All addresses RVA.
+CDB uf instruction count=159; listed=159
+00261C50  48895c2418               mov     qword ptr [rsp+18h],rbx
+00261C55  56                       push    rsi
+00261C56  57                       push    rdi
+00261C57  4156                     push    r14
+00261C59  4883ec20                 sub     rsp,20h
+00261C5D  488bd9                   mov     rbx,rcx
+00261C60  bf00100000               mov     edi,1000h
+00261C65  438d0cc9                 lea     ecx,[r9+r9*8]
+00261C69  498bf0                   mov     rsi,r8
+00261C6C  48d3e7                   shl     rdi,cl
+00261C6F  4c8bf2                   mov     r14,rdx
+00261C72  833b01                   cmp     dword ptr [rbx],1
+00261C75  0f8595010000             jne     ntkrnlmp!MiInsertTbFlushEntry+0x1c0 (RVA 0x261E10)
+00261C7B  448b430c                 mov     r8d,dword ptr [rbx+0Ch]
+00261C7F  48896c2440               mov     qword ptr [rsp+40h],rbp
+00261C84  4c897c2448               mov     qword ptr [rsp+48h],r15
+00261C89  4c8d7b04                 lea     r15,[rbx+4]
+00261C8D  4585c0                   test    r8d,r8d
+00261C90  0f848b000000             je      ntkrnlmp!MiInsertTbFlushEntry+0xd1 (RVA 0x261D21)
+00261C96  41f60704                 test    byte ptr [r15],4
+00261C9A  0f8581000000             jne     ntkrnlmp!MiInsertTbFlushEntry+0xd1 (RVA 0x261D21)
+00261CA0  458d50ff                 lea     r10d,[r8-1]
+00261CA4  418be9                   mov     ebp,r9d
+00261CA7  4a8b44d318               mov     rax,qword ptr [rbx+r10*8+18h]
+00261CAC  488bc8                   mov     rcx,rax
+00261CAF  48c1e90a                 shr     rcx,0Ah
+00261CB3  83e103                   and     ecx,3
+00261CB6  483bcd                   cmp     rcx,rbp
+00261CB9  0f85dc010000             jne     ntkrnlmp!MiInsertTbFlushEntry+0x24b (RVA 0x261E9B)
+00261CBF  488bd0                   mov     rdx,rax
+00261CC2  482500f0ffff             and     rax,0FFFFFFFFFFFFF000h
+00261CC8  81e2ff030000             and     edx,3FFh
+00261CCE  488d4a01                 lea     rcx,[rdx+1]
+00261CD2  480fafcf                 imul    rcx,rdi
+00261CD6  4803c8                   add     rcx,rax
+00261CD9  493bce                   cmp     rcx,r14
+00261CDC  0f85e3000000             jne     ntkrnlmp!MiInsertTbFlushEntry+0x175 (RVA 0x261DC5)
+00261CE2  488d0432                 lea     rax,[rdx+rsi]
+00261CE6  483bc2                   cmp     rax,rdx
+00261CE9  0f86d6000000             jbe     ntkrnlmp!MiInsertTbFlushEntry+0x175 (RVA 0x261DC5)
+00261CEF  483dff030000             cmp     rax,3FFh
+00261CF5  0f87ca000000             ja      ntkrnlmp!MiInsertTbFlushEntry+0x175 (RVA 0x261DC5)
+00261CFB  4a8b44d318               mov     rax,qword ptr [rbx+r10*8+18h]
+00261D00  4a8d14d3                 lea     rdx,[rbx+r10*8]
+00261D04  48017310                 add     qword ptr [rbx+10h],rsi
+00261D08  488d0c30                 lea     rcx,[rax+rsi]
+00261D0C  4833c8                   xor     rcx,rax
+00261D0F  81e1ff030000             and     ecx,3FFh
+00261D15  4833c8                   xor     rcx,rax
+00261D18  48894a18                 mov     qword ptr [rdx+18h],rcx
+00261D1C  e98b000000               jmp     ntkrnlmp!MiInsertTbFlushEntry+0x15c (RVA 0x261DAC)
+00261D21  418be9                   mov     ebp,r9d
+00261D24  458d50ff                 lea     r10d,[r8-1]
+00261D28  498bc7                   mov     rax,r15
+00261D2B  4585c0                   test    r8d,r8d
+00261D2E  0f8594000000             jne     ntkrnlmp!MiInsertTbFlushEntry+0x178 (RVA 0x261DC8)
+00261D34  443b4308                 cmp     r8d,dword ptr [rbx+8]
+00261D38  0f8354010000             jae     ntkrnlmp!MiInsertTbFlushEntry+0x242 (RVA 0x261E92)
+00261D3E  4885f6                   test    rsi,rsi
+00261D41  7469                     je      ntkrnlmp!MiInsertTbFlushEntry+0x15c (RVA 0x261DAC)
+00261D43  83e503                   and     ebp,3
+00261D46  48c1e50a                 shl     rbp,0Ah
+00261D4A  488d46ff                 lea     rax,[rsi-1]
+00261D4E  498bce                   mov     rcx,r14
+00261D51  483dff030000             cmp     rax,3FFh
+00261D57  ba00040000               mov     edx,400h
+00261D5C  480f46d6                 cmovbe  rdx,rsi
+00261D60  4881e100f0ffff           and     rcx,0FFFFFFFFFFFFF000h
+00261D67  482bf2                   sub     rsi,rdx
+00261D6A  488d42ff                 lea     rax,[rdx-1]
+00261D6E  25ff030000               and     eax,3FFh
+00261D73  480bc1                   or      rax,rcx
+00261D76  488bcf                   mov     rcx,rdi
+00261D79  480fafca                 imul    rcx,rdx
+00261D7D  480bc5                   or      rax,rbp
+00261D80  4c03f1                   add     r14,rcx
+00261D83  418bc8                   mov     ecx,r8d
+00261D86  488944cb18               mov     qword ptr [rbx+rcx*8+18h],rax
+00261D8B  448b430c                 mov     r8d,dword ptr [rbx+0Ch]
+00261D8F  48015310                 add     qword ptr [rbx+10h],rdx
+00261D93  41ffc0                   inc     r8d
+00261D96  418bc8                   mov     ecx,r8d
+00261D99  4489430c                 mov     dword ptr [rbx+0Ch],r8d
+00261D9D  443b4308                 cmp     r8d,dword ptr [rbx+8]
+00261DA1  0f84a5000000             je      ntkrnlmp!MiInsertTbFlushEntry+0x1fc (RVA 0x261E4C)
+00261DA7  4885f6                   test    rsi,rsi
+00261DAA  759e                     jne     ntkrnlmp!MiInsertTbFlushEntry+0xfa (RVA 0x261D4A)
+00261DAC  4c8b7c2448               mov     r15,qword ptr [rsp+48h]
+00261DB1  488b6c2440               mov     rbp,qword ptr [rsp+40h]
+00261DB6  488b5c2450               mov     rbx,qword ptr [rsp+50h]
+00261DBB  4883c420                 add     rsp,20h
+00261DBF  415e                     pop     r14
+00261DC1  5f                       pop     rdi
+00261DC2  5e                       pop     rsi
+00261DC3  c3                       ret
+00261DC5  498bc7                   mov     rax,r15
+00261DC8  f60004                   test    byte ptr [rax],4
+00261DCB  0f8563ffffff             jne     ntkrnlmp!MiInsertTbFlushEntry+0xe4 (RVA 0x261D34)
+00261DD1  4a8b44d318               mov     rax,qword ptr [rbx+r10*8+18h]
+00261DD6  4e8d14d3                 lea     r10,[rbx+r10*8]
+00261DDA  488bc8                   mov     rcx,rax
+00261DDD  48c1e90a                 shr     rcx,0Ah
+00261DE1  83e103                   and     ecx,3
+00261DE4  483bcd                   cmp     rcx,rbp
+00261DE7  0f8547ffffff             jne     ntkrnlmp!MiInsertTbFlushEntry+0xe4 (RVA 0x261D34)
+00261DED  4c8bcf                   mov     r9,rdi
+00261DF0  488bc8                   mov     rcx,rax
+00261DF3  4c0fafce                 imul    r9,rsi
+00261DF7  4881e100f0ffff           and     rcx,0FFFFFFFFFFFFF000h
+00261DFE  4b8d1431                 lea     rdx,[r9+r14]
+00261E02  483bca                   cmp     rcx,rdx
+00261E05  0f8529ffffff             jne     ntkrnlmp!MiInsertTbFlushEntry+0xe4 (RVA 0x261D34)
+00261E0B  e902f02100               jmp     ntkrnlmp!MiInsertTbFlushEntry+0x21f1c2 (RVA 0x480E12)
+00261E10  0fb64304                 movzx   eax,byte ptr [rbx+4]
+00261E14  a808                     test    al,8
+00261E16  0f855ffeffff             jne     ntkrnlmp!MiInsertTbFlushEntry+0x2b (RVA 0x261C7B)
+00261E1C  48b90000000080f6ffff     mov rcx,0FFFFF68000000000h
+00261E26  4c3bf1                   cmp     r14,rcx
+00261E29  0f824cfeffff             jb      ntkrnlmp!MiInsertTbFlushEntry+0x2b (RVA 0x261C7B)
+00261E2F  48b9fffffffffff6ffff     mov rcx,0FFFFF6FFFFFFFFFFh
+00261E39  4c3bf1                   cmp     r14,rcx
+00261E3C  0f8739feffff             ja      ntkrnlmp!MiInsertTbFlushEntry+0x2b (RVA 0x261C7B)
+00261E42  0c08                     or      al,8
+00261E44  884304                   mov     byte ptr [rbx+4],al
+00261E47  e92ffeffff               jmp     ntkrnlmp!MiInsertTbFlushEntry+0x2b (RVA 0x261C7B)
+00261E4C  41f60704                 test    byte ptr [r15],4
+00261E50  0f8551ffffff             jne     ntkrnlmp!MiInsertTbFlushEntry+0x157 (RVA 0x261DA7)
+00261E56  488bd1                   mov     rdx,rcx
+00261E59  4c8d0d706c0d00           lea     r9,[ntkrnlmp!MiTbFlushSort (RVA 0x338AD0)]
+00261E60  488d4b18                 lea     rcx,[rbx+18h]
+00261E64  41b808000000             mov     r8d,8
+00261E6A  e8d11e1700               call    ntkrnlmp!qsort (RVA 0x3D3D40)
+00261E6F  488bcb                   mov     rcx,rbx
+00261E72  e8e5500d00               call    ntkrnlmp!MiCompressTbFlushList (RVA 0x336F5C)
+00261E77  448b430c                 mov     r8d,dword ptr [rbx+0Ch]
+00261E7B  443b4308                 cmp     r8d,dword ptr [rbx+8]
+00261E7F  0f8522ffffff             jne     ntkrnlmp!MiInsertTbFlushEntry+0x157 (RVA 0x261DA7)
+00261E85  4885f6                   test    rsi,rsi
+00261E88  0f841effffff             je      ntkrnlmp!MiInsertTbFlushEntry+0x15c (RVA 0x261DAC)
+00261E8E  4c894310                 mov     qword ptr [rbx+10h],r8
+00261E92  c6430501                 mov     byte ptr [rbx+5],1
+00261E96  e911ffffff               jmp     ntkrnlmp!MiInsertTbFlushEntry+0x15c (RVA 0x261DAC)
+00261E9B  498bc7                   mov     rax,r15
+00261E9E  e925ffffff               jmp     ntkrnlmp!MiInsertTbFlushEntry+0x178 (RVA 0x261DC8)
+00480E12  488bc8                   mov     rcx,rax
+00480E15  81e1ff030000             and     ecx,3FFh
+00480E1B  488d1431                 lea     rdx,[rcx+rsi]
+00480E1F  483bd1                   cmp     rdx,rcx
+00480E22  0f860c0fdeff             jbe     ntkrnlmp!MiInsertTbFlushEntry+0xe4 (RVA 0x261D34)
+00480E28  4881faff030000           cmp     rdx,3FFh
+00480E2F  0f87ff0edeff             ja      ntkrnlmp!MiInsertTbFlushEntry+0xe4 (RVA 0x261D34)
+00480E35  48017310                 add     qword ptr [rbx+10h],rsi
+00480E39  492bc1                   sub     rax,r9
+00480E3C  488d0c30                 lea     rcx,[rax+rsi]
+00480E40  4833c8                   xor     rcx,rax
+00480E43  81e1ff030000             and     ecx,3FFh
+00480E49  4833c8                   xor     rcx,rax
+00480E4C  49894a18                 mov     qword ptr [r10+18h],rcx
+00480E50  e9570fdeff               jmp     ntkrnlmp!MiInsertTbFlushEntry+0x15c (RVA 0x261DAC)

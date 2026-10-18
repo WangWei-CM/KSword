@@ -1,0 +1,787 @@
+
+************* Preparing the environment for Debugger Extensions Gallery repositories **************
+   ExtensionRepository : Implicit
+   UseExperimentalFeatureForNugetShare : true
+   AllowNugetExeUpdate : true
+   NonInteractiveNuget : true
+   AllowNugetMSCredentialProviderInstall : true
+   AllowParallelInitializationOfLocalRepositories : true
+
+   EnableRedirectToV8JsProvider : false
+
+   -- Configuring repositories
+      ----> Repository : LocalInstalled, Enabled: true
+      ----> Repository : UserExtensions, Enabled: true
+
+>>>>>>>>>>>>> Preparing the environment for Debugger Extensions Gallery repositories completed, duration 0.000 seconds
+
+************* Waiting for Debugger Extensions Gallery to Initialize **************
+
+>>>>>>>>>>>>> Waiting for Debugger Extensions Gallery to Initialize completed, duration 0.016 seconds
+   ----> Repository : UserExtensions, Enabled: true, Packages count: 0
+   ----> Repository : LocalInstalled, Enabled: true, Packages count: 29
+
+Microsoft (R) Windows Debugger Version 10.0.26100.6584 AMD64
+Copyright (c) Microsoft Corporation. All rights reserved.
+
+
+Loading Dump File [C:\Users\Felix\CLionProjects\KSword\artifacts\symbols\ntkrnlmp.exe\2C33C5081047000\ntkrnlmp.exe]
+
+************* Path validation summary **************
+Response                         Time (ms)     Location
+OK                                             C:\Users\Felix\CLionProjects\KSword\artifacts\symbols
+Symbol search path is: C:\Users\Felix\CLionProjects\KSword\artifacts\symbols
+Executable search path is:
+ModLoad: 00000001`40000000 00000001`41047000   C:\Users\Felix\CLionProjects\KSword\artifacts\symbols\ntkrnlmp.exe\2C33C5081047000\ntkrnlmp.exe
+ntkrnlmp!KiSystemStartup:
+00000001`40a83010 4883ec38        sub     rsp,38h
+0:000> cdb: Reading initial command 'uf ntkrnlmp!MiMakeDriverPagesPrivate; q'
+ntkrnlmp!MiMakeDriverPagesPrivate:
+00000001`402d5dd0 48895c2418      mov     qword ptr [rsp+18h],rbx
+00000001`402d5dd5 44894c2420      mov     dword ptr [rsp+20h],r9d
+00000001`402d5dda 4889542410      mov     qword ptr [rsp+10h],rdx
+00000001`402d5ddf 48894c2408      mov     qword ptr [rsp+8],rcx
+00000001`402d5de4 55              push    rbp
+00000001`402d5de5 56              push    rsi
+00000001`402d5de6 57              push    rdi
+00000001`402d5de7 4154            push    r12
+00000001`402d5de9 4155            push    r13
+00000001`402d5deb 4156            push    r14
+00000001`402d5ded 4157            push    r15
+00000001`402d5def 4881eca0000000  sub     rsp,0A0h
+00000001`402d5df6 4533ed          xor     r13d,r13d
+00000001`402d5df9 48b80000000080f6ffff mov rax,0FFFFF68000000000h
+00000001`402d5e03 44896c2444      mov     dword ptr [rsp+44h],r13d
+00000001`402d5e08 418bf9          mov     edi,r9d
+00000001`402d5e0b 4c896c2470      mov     qword ptr [rsp+70h],r13
+00000001`402d5e10 4d8be0          mov     r12,r8
+00000001`402d5e13 44886c2431      mov     byte ptr [rsp+31h],r13b
+00000001`402d5e18 488bda          mov     rbx,rdx
+00000001`402d5e1b 488bf1          mov     rsi,rcx
+00000001`402d5e1e 488bc0          mov     rax,rax
+00000001`402d5e21 48c1e019        shl     rax,19h
+00000001`402d5e25 488bca          mov     rcx,rdx
+00000001`402d5e28 48c1e119        shl     rcx,19h
+00000001`402d5e2c 482bc8          sub     rcx,rax
+00000001`402d5e2f 4889842480000000 mov     qword ptr [rsp+80h],rax
+00000001`402d5e37 48c1f910        sar     rcx,10h
+00000001`402d5e3b e84049f8ff      call    ntkrnlmp!MiGetSystemRegionType (00000001`4025a780)
+00000001`402d5e40 83f801          cmp     eax,1
+00000001`402d5e43 0f84bc050000    je      ntkrnlmp!MiMakeDriverPagesPrivate+0x635 (00000001`402d6405)
+
+ntkrnlmp!MiMakeDriverPagesPrivate+0x79:
+00000001`402d5e49 4c896c2450      mov     qword ptr [rsp+50h],r13
+00000001`402d5e4e 488d05ab389900  lea     rax,[ntkrnlmp!MiState+0x46c0 (00000001`40c69700)]
+
+ntkrnlmp!MiMakeDriverPagesPrivate+0x85:
+00000001`402d5e55 0fb788ae000000  movzx   ecx,word ptr [rax+0AEh]
+00000001`402d5e5c 4c8d86a0000000  lea     r8,[rsi+0A0h]
+00000001`402d5e63 4889442438      mov     qword ptr [rsp+38h],rax
+00000001`402d5e68 488b0519119900  mov     rax,qword ptr [ntkrnlmp!MiState+0x1f48 (00000001`40c66f88)]
+00000001`402d5e6f 488b04c8        mov     rax,qword ptr [rax+rcx*8]
+00000001`402d5e73 418bcd          mov     ecx,r13d
+00000001`402d5e76 4889442478      mov     qword ptr [rsp+78h],rax
+00000001`402d5e7b 40f6c703        test    dil,3
+00000001`402d5e7f 7516            jne     ntkrnlmp!MiMakeDriverPagesPrivate+0xc7 (00000001`402d5e97)
+
+ntkrnlmp!MiMakeDriverPagesPrivate+0xb1:
+00000001`402d5e81 8b05c18ba400    mov     eax,dword ptr [ntkrnlmp!MiFlags (00000001`40d1ea48)]
+00000001`402d5e87 2500c00000      and     eax,0C000h
+00000001`402d5e8c 3d00c00000      cmp     eax,0C000h
+00000001`402d5e91 0f84a9831c00    je      ntkrnlmp!MiMakeDriverPagesPrivate+0x1c8470 (00000001`4049e240)
+
+ntkrnlmp!MiMakeDriverPagesPrivate+0xc7:
+00000001`402d5e97 8bd7            mov     edx,edi
+00000001`402d5e99 4c896c2468      mov     qword ptr [rsp+68h],r13
+00000001`402d5e9e 83e204          and     edx,4
+00000001`402d5ea1 4d8d7068        lea     r14,[r8+68h]
+00000001`402d5ea5 8bc1            mov     eax,ecx
+00000001`402d5ea7 89542458        mov     dword ptr [rsp+58h],edx
+00000001`402d5eab 83c801          or      eax,1
+00000001`402d5eae 4c89b42488000000 mov     qword ptr [rsp+88h],r14
+00000001`402d5eb6 85d2            test    edx,edx
+00000001`402d5eb8 48c7c7ffffffff  mov     rdi,0FFFFFFFFFFFFFFFFh
+00000001`402d5ebf 488bf3          mov     rsi,rbx
+00000001`402d5ec2 48897c2448      mov     qword ptr [rsp+48h],rdi
+00000001`402d5ec7 0f44c1          cmove   eax,ecx
+00000001`402d5eca 4d8bfd          mov     r15,r13
+00000001`402d5ecd 8944245c        mov     dword ptr [rsp+5Ch],eax
+00000001`402d5ed1 498bdd          mov     rbx,r13
+00000001`402d5ed4 65488b042588010000 mov   rax,qword ptr gs:[188h]
+00000001`402d5edd 44896c2440      mov     dword ptr [rsp+40h],r13d
+00000001`402d5ee2 66ff88e6010000  dec     word ptr [rax+1E6h]
+00000001`402d5ee9 90              nop
+00000001`402d5eea 65488b2c2588010000 mov   rbp,qword ptr gs:[188h]
+00000001`402d5ef3 fa              cli
+00000001`402d5ef4 0fb68518030000  movzx   eax,byte ptr [rbp+318h]
+00000001`402d5efb 85c0            test    eax,eax
+00000001`402d5efd 0f8439050000    je      ntkrnlmp!MiMakeDriverPagesPrivate+0x66c (00000001`402d643c)
+
+ntkrnlmp!MiMakeDriverPagesPrivate+0x133:
+00000001`402d5f03 0fbcc8          bsf     ecx,eax
+00000001`402d5f06 0fb6c0          movzx   eax,al
+00000001`402d5f09 0fb3c8          btr     eax,ecx
+00000001`402d5f0c 894c2440        mov     dword ptr [rsp+40h],ecx
+00000001`402d5f10 888518030000    mov     byte ptr [rbp+318h],al
+00000001`402d5f16 65488b0c2520000000 mov   rcx,qword ptr gs:[20h]
+00000001`402d5f1f 4c8b81b8880000  mov     r8,qword ptr [rcx+88B8h]
+00000001`402d5f26 4d85c0          test    r8,r8
+00000001`402d5f29 0f85f8010000    jne     ntkrnlmp!MiMakeDriverPagesPrivate+0x357 (00000001`402d6127)
+
+ntkrnlmp!MiMakeDriverPagesPrivate+0x15f:
+00000001`402d5f2f fb              sti
+00000001`402d5f30 8b442440        mov     eax,dword ptr [rsp+40h]
+00000001`402d5f34 488d9da0060000  lea     rbx,[rbp+6A0h]
+00000001`402d5f3b 48b90000000080000000 mov rcx,8000000000h
+00000001`402d5f45 488d1440        lea     rdx,[rax+rax*2]
+00000001`402d5f49 498bc6          mov     rax,r14
+00000001`402d5f4c 482b0555f69800  sub     rax,qword ptr [ntkrnlmp!MiState+0x568 (00000001`40c655a8)]
+00000001`402d5f53 48c1e205        shl     rdx,5
+00000001`402d5f57 4803da          add     rbx,rdx
+00000001`402d5f5a 483bc1          cmp     rax,rcx
+00000001`402d5f5d 0f82c8040000    jb      ntkrnlmp!MiMakeDriverPagesPrivate+0x65b (00000001`402d642b)
+
+ntkrnlmp!MiMakeDriverPagesPrivate+0x193:
+00000001`402d5f63 b8ffffffff      mov     eax,0FFFFFFFFh
+
+ntkrnlmp!MiMakeDriverPagesPrivate+0x198:
+00000001`402d5f68 894308          mov     dword ptr [rbx+8],eax
+00000001`402d5f6b 48b9fcffffffffffff7f mov rcx,7FFFFFFFFFFFFFFCh
+00000001`402d5f75 498bc6          mov     rax,r14
+00000001`402d5f78 90              nop
+00000001`402d5f79 4823c1          and     rax,rcx
+00000001`402d5f7c 488903          mov     qword ptr [rbx],rax
+
+ntkrnlmp!MiMakeDriverPagesPrivate+0x1af:
+00000001`402d5f7f f0490fba2e00    lock bts qword ptr [r14],0
+00000001`402d5f85 0f82bf821c00    jb      ntkrnlmp!MiMakeDriverPagesPrivate+0x1c847a (00000001`4049e24a)
+
+ntkrnlmp!MiMakeDriverPagesPrivate+0x1bb:
+00000001`402d5f8b 4885db          test    rbx,rbx
+00000001`402d5f8e 7404            je      ntkrnlmp!MiMakeDriverPagesPrivate+0x1c4 (00000001`402d5f94)
+
+ntkrnlmp!MiMakeDriverPagesPrivate+0x1c0:
+00000001`402d5f90 c6431201        mov     byte ptr [rbx+12h],1
+
+ntkrnlmp!MiMakeDriverPagesPrivate+0x1c4:
+00000001`402d5f94 488b6c2438      mov     rbp,qword ptr [rsp+38h]
+00000001`402d5f99 488bcd          mov     rcx,rbp
+00000001`402d5f9c e86f44f8ff      call    ntkrnlmp!MiLockWorkingSetShared (00000001`4025a410)
+00000001`402d5fa1 88442430        mov     byte ptr [rsp+30h],al
+00000001`402d5fa5 4c39a424e8000000 cmp     qword ptr [rsp+0E8h],r12
+00000001`402d5fad 0f87c3000000    ja      ntkrnlmp!MiMakeDriverPagesPrivate+0x2a6 (00000001`402d6076)
+
+ntkrnlmp!MiMakeDriverPagesPrivate+0x1e3:
+00000001`402d5fb3 4c8bb424e0000000 mov     r14,qword ptr [rsp+0E0h]
+
+ntkrnlmp!MiMakeDriverPagesPrivate+0x1eb:
+00000001`402d5fbb 48bbf8ffffff7f000000 mov rbx,7FFFFFFFF8h
+00000001`402d5fc5 4d85ff          test    r15,r15
+00000001`402d5fc8 0f842c010000    je      ntkrnlmp!MiMakeDriverPagesPrivate+0x32a (00000001`402d60fa)
+
+ntkrnlmp!MiMakeDriverPagesPrivate+0x1fe:
+00000001`402d5fce 48f7c6ff0f0000  test    rsi,0FFFh
+00000001`402d5fd5 0f8414010000    je      ntkrnlmp!MiMakeDriverPagesPrivate+0x31f (00000001`402d60ef)
+
+ntkrnlmp!MiMakeDriverPagesPrivate+0x20b:
+00000001`402d5fdb 488b1e          mov     rbx,qword ptr [rsi]
+00000001`402d5fde 488bce          mov     rcx,rsi
+00000001`402d5fe1 e8da06fbff      call    ntkrnlmp!MiPteInShadowRange (00000001`402866c0)
+00000001`402d5fe6 85c0            test    eax,eax
+00000001`402d5fe8 0f8570821c00    jne     ntkrnlmp!MiMakeDriverPagesPrivate+0x1c848e (00000001`4049e25e)
+
+ntkrnlmp!MiMakeDriverPagesPrivate+0x21e:
+00000001`402d5fee 48899c2498000000 mov     qword ptr [rsp+98h],rbx
+00000001`402d5ff6 4885db          test    rbx,rbx
+00000001`402d5ff9 7451            je      ntkrnlmp!MiMakeDriverPagesPrivate+0x27c (00000001`402d604c)
+
+ntkrnlmp!MiMakeDriverPagesPrivate+0x22b:
+00000001`402d5ffb f6c301          test    bl,1
+00000001`402d5ffe 0f84f9020000    je      ntkrnlmp!MiMakeDriverPagesPrivate+0x52d (00000001`402d62fd)
+
+ntkrnlmp!MiMakeDriverPagesPrivate+0x234:
+00000001`402d6004 488d8c2498000000 lea     rcx,[rsp+98h]
+00000001`402d600c e83f06fbff      call    ntkrnlmp!MI_READ_PTE_LOCK_FREE (00000001`40286650)
+00000001`402d6011 48c1e80c        shr     rax,0Ch
+00000001`402d6015 48b9ffffffffff000000 mov rcx,0FFFFFFFFFFh
+00000001`402d601f 4823c1          and     rax,rcx
+00000001`402d6022 48ba0000000000deffff mov rdx,0FFFFDE0000000000h
+00000001`402d602c 488d2c40        lea     rbp,[rax+rax*2]
+00000001`402d6030 48c1e504        shl     rbp,4
+00000001`402d6034 488bc2          mov     rax,rdx
+00000001`402d6037 4803e8          add     rbp,rax
+00000001`402d603a 488b4528        mov     rax,qword ptr [rbp+28h]
+00000001`402d603e 4885c0          test    rax,rax
+00000001`402d6041 0f8808010000    js      ntkrnlmp!MiMakeDriverPagesPrivate+0x37f (00000001`402d614f)
+
+ntkrnlmp!MiMakeDriverPagesPrivate+0x277:
+00000001`402d6047 488b6c2438      mov     rbp,qword ptr [rsp+38h]
+
+ntkrnlmp!MiMakeDriverPagesPrivate+0x27c:
+00000001`402d604c 4883c608        add     rsi,8
+
+ntkrnlmp!MiMakeDriverPagesPrivate+0x280:
+00000001`402d6050 493bf4          cmp     rsi,r12
+00000001`402d6053 0f8662ffffff    jbe     ntkrnlmp!MiMakeDriverPagesPrivate+0x1eb (00000001`402d5fbb)
+
+ntkrnlmp!MiMakeDriverPagesPrivate+0x289:
+00000001`402d6059 4d85ff          test    r15,r15
+00000001`402d605c 740b            je      ntkrnlmp!MiMakeDriverPagesPrivate+0x299 (00000001`402d6069)
+
+ntkrnlmp!MiMakeDriverPagesPrivate+0x28e:
+00000001`402d605e 498bd7          mov     rdx,r15
+00000001`402d6061 488bcd          mov     rcx,rbp
+00000001`402d6064 e847bd0800      call    ntkrnlmp!MiUnlockPageTableInternal (00000001`40361db0)
+
+ntkrnlmp!MiMakeDriverPagesPrivate+0x299:
+00000001`402d6069 0fb6442430      movzx   eax,byte ptr [rsp+30h]
+00000001`402d606e 4c8bb42488000000 mov     r14,qword ptr [rsp+88h]
+
+ntkrnlmp!MiMakeDriverPagesPrivate+0x2a6:
+00000001`402d6076 0fb6d0          movzx   edx,al
+00000001`402d6079 488bcd          mov     rcx,rbp
+00000001`402d607c e85f63f4ff      call    ntkrnlmp!MiUnlockWorkingSetShared (00000001`4021c3e0)
+00000001`402d6081 65488b1c2588010000 mov   rbx,qword ptr gs:[188h]
+00000001`402d608a f0490fc13e      lock xadd qword ptr [r14],rdi
+00000001`402d608f 4080e706        and     dil,6
+00000001`402d6093 4080ff02        cmp     dil,2
+00000001`402d6097 0f8429030000    je      ntkrnlmp!MiMakeDriverPagesPrivate+0x5f6 (00000001`402d63c6)
+
+ntkrnlmp!MiMakeDriverPagesPrivate+0x2cd:
+00000001`402d609d 498bce          mov     rcx,r14
+00000001`402d60a0 e8cbccf4ff      call    ntkrnlmp!KeAbPostRelease (00000001`40222d70)
+00000001`402d60a5 90              nop
+00000001`402d60a6 668383e601000001 add     word ptr [rbx+1E6h],1
+00000001`402d60ae 7511            jne     ntkrnlmp!MiMakeDriverPagesPrivate+0x2f1 (00000001`402d60c1)
+
+ntkrnlmp!MiMakeDriverPagesPrivate+0x2e0:
+00000001`402d60b0 488d8398000000  lea     rax,[rbx+98h]
+00000001`402d60b7 90              nop
+00000001`402d60b8 483900          cmp     qword ptr [rax],rax
+00000001`402d60bb 0f853a030000    jne     ntkrnlmp!MiMakeDriverPagesPrivate+0x62b (00000001`402d63fb)
+
+ntkrnlmp!MiMakeDriverPagesPrivate+0x2f1:
+00000001`402d60c1 488b442448      mov     rax,qword ptr [rsp+48h]
+00000001`402d60c6 4883f8ff        cmp     rax,0FFFFFFFFFFFFFFFFh
+00000001`402d60ca 0f85d6831c00    jne     ntkrnlmp!MiMakeDriverPagesPrivate+0x1c86d6 (00000001`4049e4a6)
+
+ntkrnlmp!MiMakeDriverPagesPrivate+0x300:
+00000001`402d60d0 488b9c24f0000000 mov     rbx,qword ptr [rsp+0F0h]
+00000001`402d60d8 418bc5          mov     eax,r13d
+00000001`402d60db 4881c4a0000000  add     rsp,0A0h
+00000001`402d60e2 415f            pop     r15
+00000001`402d60e4 415e            pop     r14
+00000001`402d60e6 415d            pop     r13
+00000001`402d60e8 415c            pop     r12
+00000001`402d60ea 5f              pop     rdi
+00000001`402d60eb 5e              pop     rsi
+00000001`402d60ec 5d              pop     rbp
+00000001`402d60ed c3              ret
+
+ntkrnlmp!MiMakeDriverPagesPrivate+0x31f:
+00000001`402d60ef 498bd7          mov     rdx,r15
+00000001`402d60f2 488bcd          mov     rcx,rbp
+00000001`402d60f5 e8b6bc0800      call    ntkrnlmp!MiUnlockPageTableInternal (00000001`40361db0)
+
+ntkrnlmp!MiMakeDriverPagesPrivate+0x32a:
+00000001`402d60fa 4c8bfe          mov     r15,rsi
+00000001`402d60fd 48b80000000080f6ffff mov rax,0FFFFF68000000000h
+00000001`402d6107 49c1ef09        shr     r15,9
+00000001`402d610b 4c23fb          and     r15,rbx
+00000001`402d610e 488bc0          mov     rax,rax
+00000001`402d6111 4c03f8          add     r15,rax
+00000001`402d6114 4533c0          xor     r8d,r8d
+00000001`402d6117 498bd7          mov     rdx,r15
+00000001`402d611a 488bcd          mov     rcx,rbp
+00000001`402d611d e86e82f9ff      call    ntkrnlmp!MiLockPageTableInternal (00000001`4026e390)
+00000001`402d6122 e9b4feffff      jmp     ntkrnlmp!MiMakeDriverPagesPrivate+0x20b (00000001`402d5fdb)
+
+ntkrnlmp!MiMakeDriverPagesPrivate+0x357:
+00000001`402d6127 410f0d08        prefetchw [r8]
+00000001`402d612b 418b00          mov     eax,dword ptr [r8]
+
+ntkrnlmp!MiMakeDriverPagesPrivate+0x35e:
+00000001`402d612e 8bd0            mov     edx,eax
+00000001`402d6130 0fbaf215        btr     edx,15h
+00000001`402d6134 f0410fb110      lock cmpxchg dword ptr [r8],edx
+00000001`402d6139 75f3            jne     ntkrnlmp!MiMakeDriverPagesPrivate+0x35e (00000001`402d612e)
+
+ntkrnlmp!MiMakeDriverPagesPrivate+0x36b:
+00000001`402d613b 0fbae015        bt      eax,15h
+00000001`402d613f 0f83eafdffff    jae     ntkrnlmp!MiMakeDriverPagesPrivate+0x15f (00000001`402d5f2f)
+
+ntkrnlmp!MiMakeDriverPagesPrivate+0x375:
+00000001`402d6145 e806512900      call    ntkrnlmp!KiRemoveSystemWorkPriorityKick (00000001`4056b250)
+00000001`402d614a e9e0fdffff      jmp     ntkrnlmp!MiMakeDriverPagesPrivate+0x15f (00000001`402d5f2f)
+
+ntkrnlmp!MiMakeDriverPagesPrivate+0x37f:
+00000001`402d614f 480fbae028      bt      rax,28h
+00000001`402d6154 720d            jb      ntkrnlmp!MiMakeDriverPagesPrivate+0x393 (00000001`402d6163)
+
+ntkrnlmp!MiMakeDriverPagesPrivate+0x386:
+00000001`402d6156 488b4508        mov     rax,qword ptr [rbp+8]
+00000001`402d615a 4885c0          test    rax,rax
+00000001`402d615d 0f8990811c00    jns     ntkrnlmp!MiMakeDriverPagesPrivate+0x1c8523 (00000001`4049e2f3)
+
+ntkrnlmp!MiMakeDriverPagesPrivate+0x393:
+00000001`402d6163 8b8c24f8000000  mov     ecx,dword ptr [rsp+0F8h]
+00000001`402d616a f6c101          test    cl,1
+00000001`402d616d 7416            je      ntkrnlmp!MiMakeDriverPagesPrivate+0x3b5 (00000001`402d6185)
+
+ntkrnlmp!MiMakeDriverPagesPrivate+0x39f:
+00000001`402d616f 480fbae30b      bt      rbx,0Bh
+00000001`402d6174 0f82cdfeffff    jb      ntkrnlmp!MiMakeDriverPagesPrivate+0x277 (00000001`402d6047)
+
+ntkrnlmp!MiMakeDriverPagesPrivate+0x3aa:
+00000001`402d617a 480fbae309      bt      rbx,9
+00000001`402d617f 0f83c2feffff    jae     ntkrnlmp!MiMakeDriverPagesPrivate+0x277 (00000001`402d6047)
+
+ntkrnlmp!MiMakeDriverPagesPrivate+0x3b5:
+00000001`402d6185 8b5d10          mov     ebx,dword ptr [rbp+10h]
+00000001`402d6188 48c1eb05        shr     rbx,5
+00000001`402d618c 83e31f          and     ebx,1Fh
+00000001`402d618f f705af88a40000800000 test dword ptr [ntkrnlmp!MiFlags (00000001`40d1ea48)],8000h
+00000001`402d6199 0f855f811c00    jne     ntkrnlmp!MiMakeDriverPagesPrivate+0x1c852e (00000001`4049e2fe)
+
+ntkrnlmp!MiMakeDriverPagesPrivate+0x3cf:
+00000001`402d619f 44392d96329900  cmp     dword ptr [ntkrnlmp!MiState+0x43fc (00000001`40c6943c)],r13d
+00000001`402d61a6 0f857b811c00    jne     ntkrnlmp!MiMakeDriverPagesPrivate+0x1c8557 (00000001`4049e327)
+
+ntkrnlmp!MiMakeDriverPagesPrivate+0x3dc:
+00000001`402d61ac 44396c2458      cmp     dword ptr [rsp+58h],r13d
+00000001`402d61b1 0f85ec010000    jne     ntkrnlmp!MiMakeDriverPagesPrivate+0x5d3 (00000001`402d63a3)
+
+ntkrnlmp!MiMakeDriverPagesPrivate+0x3e7:
+00000001`402d61b7 488b442448      mov     rax,qword ptr [rsp+48h]
+00000001`402d61bc 483bc7          cmp     rax,rdi
+00000001`402d61bf 0f84bc000000    je      ntkrnlmp!MiMakeDriverPagesPrivate+0x4b1 (00000001`402d6281)
+
+ntkrnlmp!MiMakeDriverPagesPrivate+0x3f5:
+00000001`402d61c5 4c8d3440        lea     r14,[rax+rax*2]
+00000001`402d61c9 49c1e604        shl     r14,4
+00000001`402d61cd 488bc2          mov     rax,rdx
+00000001`402d61d0 488b4c2478      mov     rcx,qword ptr [rsp+78h]
+00000001`402d61d5 4c8d442444      lea     r8,[rsp+44h]
+00000001`402d61da 8bd3            mov     edx,ebx
+00000001`402d61dc 4c03f0          add     r14,rax
+00000001`402d61df e84c050000      call    ntkrnlmp!MiUseProtectedSlabAllocatorForDriverPage (00000001`402d6730)
+00000001`402d61e4 4533c0          xor     r8d,r8d
+00000001`402d61e7 498bce          mov     rcx,r14
+00000001`402d61ea 418d5001        lea     edx,[r8+1]
+00000001`402d61ee 85c0            test    eax,eax
+00000001`402d61f0 0f855e811c00    jne     ntkrnlmp!MiMakeDriverPagesPrivate+0x1c8584 (00000001`4049e354)
+
+ntkrnlmp!MiMakeDriverPagesPrivate+0x426:
+00000001`402d61f6 e895fa0300      call    ntkrnlmp!MiCheckSlabPfnBitmap (00000001`40315c90)
+00000001`402d61fb 85c0            test    eax,eax
+00000001`402d61fd 7415            je      ntkrnlmp!MiMakeDriverPagesPrivate+0x444 (00000001`402d6214)
+
+ntkrnlmp!MiMakeDriverPagesPrivate+0x42f:
+00000001`402d61ff ba04000000      mov     edx,4
+00000001`402d6204 498bce          mov     rcx,r14
+00000001`402d6207 e868050000      call    ntkrnlmp!MiCheckSlabPage (00000001`402d6774)
+00000001`402d620c 85c0            test    eax,eax
+00000001`402d620e 0f845d811c00    je      ntkrnlmp!MiMakeDriverPagesPrivate+0x1c85a1 (00000001`4049e371)
+
+ntkrnlmp!MiMakeDriverPagesPrivate+0x444:
+00000001`402d6214 448b4c245c      mov     r9d,dword ptr [rsp+5Ch]
+00000001`402d6219 488bde          mov     rbx,rsi
+00000001`402d621c 4c8b442448      mov     r8,qword ptr [rsp+48h]
+00000001`402d6221 488bd6          mov     rdx,rsi
+00000001`402d6224 48c1e319        shl     rbx,19h
+00000001`402d6228 482b9c2480000000 sub     rbx,qword ptr [rsp+80h]
+00000001`402d6230 48c1fb10        sar     rbx,10h
+00000001`402d6234 488bcb          mov     rcx,rbx
+00000001`402d6237 e8c4eefaff      call    ntkrnlmp!MiCopyOnWrite (00000001`40285100)
+00000001`402d623c 4c8b8c24e0000000 mov     r9,qword ptr [rsp+0E0h]
+00000001`402d6244 4c396c2450      cmp     qword ptr [rsp+50h],r13
+00000001`402d6249 0f8584010000    jne     ntkrnlmp!MiMakeDriverPagesPrivate+0x603 (00000001`402d63d3)
+
+ntkrnlmp!MiMakeDriverPagesPrivate+0x47f:
+00000001`402d624f 44386c2431      cmp     byte ptr [rsp+31h],r13b
+00000001`402d6254 0f8539811c00    jne     ntkrnlmp!MiMakeDriverPagesPrivate+0x1c85c3 (00000001`4049e393)
+
+ntkrnlmp!MiMakeDriverPagesPrivate+0x48a:
+00000001`402d625a f705e487a40000800000 test dword ptr [ntkrnlmp!MiFlags (00000001`40d1ea48)],8000h
+00000001`402d6264 488b6c2438      mov     rbp,qword ptr [rsp+38h]
+00000001`402d6269 48897c2448      mov     qword ptr [rsp+48h],rdi
+00000001`402d626e 0f85c6811c00    jne     ntkrnlmp!MiMakeDriverPagesPrivate+0x1c866a (00000001`4049e43a)
+
+ntkrnlmp!MiMakeDriverPagesPrivate+0x4a4:
+00000001`402d6274 4c8bb424e0000000 mov     r14,qword ptr [rsp+0E0h]
+00000001`402d627c e9cbfdffff      jmp     ntkrnlmp!MiMakeDriverPagesPrivate+0x27c (00000001`402d604c)
+
+ntkrnlmp!MiMakeDriverPagesPrivate+0x4b1:
+00000001`402d6281 488b6c2438      mov     rbp,qword ptr [rsp+38h]
+00000001`402d6286 498bd7          mov     rdx,r15
+00000001`402d6289 488bcd          mov     rcx,rbp
+00000001`402d628c e81fbb0800      call    ntkrnlmp!MiUnlockPageTableInternal (00000001`40361db0)
+00000001`402d6291 0fb6542430      movzx   edx,byte ptr [rsp+30h]
+00000001`402d6296 488bcd          mov     rcx,rbp
+00000001`402d6299 e84261f4ff      call    ntkrnlmp!MiUnlockWorkingSetShared (00000001`4021c3e0)
+00000001`402d629e 4c8bb424e0000000 mov     r14,qword ptr [rsp+0E0h]
+00000001`402d62a6 33d2            xor     edx,edx
+00000001`402d62a8 498d8ea0000000  lea     rcx,[r14+0A0h]
+00000001`402d62af e8a8010000      call    ntkrnlmp!MiUnlockLoaderEntry (00000001`402d645c)
+00000001`402d62b4 488b4c2478      mov     rcx,qword ptr [rsp+78h]
+00000001`402d62b9 4533c0          xor     r8d,r8d
+00000001`402d62bc 8bd3            mov     edx,ebx
+00000001`402d62be e805374400      call    ntkrnlmp!MiAllocateDriverPage (00000001`407199c8)
+00000001`402d62c3 33d2            xor     edx,edx
+00000001`402d62c5 4889442448      mov     qword ptr [rsp+48h],rax
+00000001`402d62ca 498d8ea0000000  lea     rcx,[r14+0A0h]
+00000001`402d62d1 488bd8          mov     rbx,rax
+00000001`402d62d4 e80f020000      call    ntkrnlmp!MiLockLoaderEntry (00000001`402d64e8)
+00000001`402d62d9 488bcd          mov     rcx,rbp
+00000001`402d62dc e82f41f8ff      call    ntkrnlmp!MiLockWorkingSetShared (00000001`4025a410)
+00000001`402d62e1 4533c0          xor     r8d,r8d
+00000001`402d62e4 498bd7          mov     rdx,r15
+00000001`402d62e7 488bcd          mov     rcx,rbp
+00000001`402d62ea e8a180f9ff      call    ntkrnlmp!MiLockPageTableInternal (00000001`4026e390)
+00000001`402d62ef 483bdf          cmp     rbx,rdi
+00000001`402d62f2 0f84a3811c00    je      ntkrnlmp!MiMakeDriverPagesPrivate+0x1c86cb (00000001`4049e49b)
+
+ntkrnlmp!MiMakeDriverPagesPrivate+0x528:
+00000001`402d62f8 e953fdffff      jmp     ntkrnlmp!MiMakeDriverPagesPrivate+0x280 (00000001`402d6050)
+
+ntkrnlmp!MiMakeDriverPagesPrivate+0x52d:
+00000001`402d62fd 480fbae30a      bt      rbx,0Ah
+00000001`402d6302 0f8344fdffff    jae     ntkrnlmp!MiMakeDriverPagesPrivate+0x27c (00000001`402d604c)
+
+ntkrnlmp!MiMakeDriverPagesPrivate+0x538:
+00000001`402d6308 498bd7          mov     rdx,r15
+00000001`402d630b 488bcd          mov     rcx,rbp
+00000001`402d630e e89dba0800      call    ntkrnlmp!MiUnlockPageTableInternal (00000001`40361db0)
+00000001`402d6313 0fb6542430      movzx   edx,byte ptr [rsp+30h]
+00000001`402d6318 488bcd          mov     rcx,rbp
+00000001`402d631b e8c060f4ff      call    ntkrnlmp!MiUnlockWorkingSetShared (00000001`4021c3e0)
+00000001`402d6320 33d2            xor     edx,edx
+00000001`402d6322 498d8ea0000000  lea     rcx,[r14+0A0h]
+00000001`402d6329 e82e010000      call    ntkrnlmp!MiUnlockLoaderEntry (00000001`402d645c)
+00000001`402d632e 488bee          mov     rbp,rsi
+00000001`402d6331 4533c9          xor     r9d,r9d
+00000001`402d6334 48c1e519        shl     rbp,19h
+00000001`402d6338 4533c0          xor     r8d,r8d
+00000001`402d633b 482bac2480000000 sub     rbp,qword ptr [rsp+80h]
+00000001`402d6343 33c9            xor     ecx,ecx
+00000001`402d6345 48c1fd10        sar     rbp,10h
+00000001`402d6349 488bd5          mov     rdx,rbp
+00000001`402d634c e8af5cf9ff      call    ntkrnlmp!MmAccessFault (00000001`4026c000)
+00000001`402d6351 4c63f0          movsxd  r14,eax
+00000001`402d6354 85c0            test    eax,eax
+00000001`402d6356 0f8804811c00    js      ntkrnlmp!MiMakeDriverPagesPrivate+0x1c8690 (00000001`4049e460)
+
+ntkrnlmp!MiMakeDriverPagesPrivate+0x58c:
+00000001`402d635c 488b8c24e0000000 mov     rcx,qword ptr [rsp+0E0h]
+00000001`402d6364 33d2            xor     edx,edx
+00000001`402d6366 4881c1a0000000  add     rcx,0A0h
+00000001`402d636d e876010000      call    ntkrnlmp!MiLockLoaderEntry (00000001`402d64e8)
+00000001`402d6372 488b6c2438      mov     rbp,qword ptr [rsp+38h]
+00000001`402d6377 488bcd          mov     rcx,rbp
+00000001`402d637a e89140f8ff      call    ntkrnlmp!MiLockWorkingSetShared (00000001`4025a410)
+00000001`402d637f 4585f6          test    r14d,r14d
+00000001`402d6382 0f880b811c00    js      ntkrnlmp!MiMakeDriverPagesPrivate+0x1c86c3 (00000001`4049e493)
+
+ntkrnlmp!MiMakeDriverPagesPrivate+0x5b8:
+00000001`402d6388 4533c0          xor     r8d,r8d
+00000001`402d638b 498bd7          mov     rdx,r15
+00000001`402d638e 488bcd          mov     rcx,rbp
+00000001`402d6391 e8fa7ff9ff      call    ntkrnlmp!MiLockPageTableInternal (00000001`4026e390)
+00000001`402d6396 4c8bb424e0000000 mov     r14,qword ptr [rsp+0E0h]
+00000001`402d639e e9adfcffff      jmp     ntkrnlmp!MiMakeDriverPagesPrivate+0x280 (00000001`402d6050)
+
+ntkrnlmp!MiMakeDriverPagesPrivate+0x5d3:
+00000001`402d63a3 418b86c4000000  mov     eax,dword ptr [r14+0C4h]
+00000001`402d63aa a801            test    al,1
+00000001`402d63ac 0f8505feffff    jne     ntkrnlmp!MiMakeDriverPagesPrivate+0x3e7 (00000001`402d61b7)
+
+ntkrnlmp!MiMakeDriverPagesPrivate+0x5e2:
+00000001`402d63b2 f6452308        test    byte ptr [rbp+23h],8
+00000001`402d63b6 0f84fbfdffff    je      ntkrnlmp!MiMakeDriverPagesPrivate+0x3e7 (00000001`402d61b7)
+
+ntkrnlmp!MiMakeDriverPagesPrivate+0x5ec:
+00000001`402d63bc 488b6c2438      mov     rbp,qword ptr [rsp+38h]
+00000001`402d63c1 e986fcffff      jmp     ntkrnlmp!MiMakeDriverPagesPrivate+0x27c (00000001`402d604c)
+
+ntkrnlmp!MiMakeDriverPagesPrivate+0x5f6:
+00000001`402d63c6 498bce          mov     rcx,r14
+00000001`402d63c9 e8f267feff      call    ntkrnlmp!ExfTryToWakePushLock (00000001`402bcbc0)
+00000001`402d63ce e9cafcffff      jmp     ntkrnlmp!MiMakeDriverPagesPrivate+0x2cd (00000001`402d609d)
+
+ntkrnlmp!MiMakeDriverPagesPrivate+0x603:
+00000001`402d63d3 4c396c2470      cmp     qword ptr [rsp+70h],r13
+00000001`402d63d8 0f8571feffff    jne     ntkrnlmp!MiMakeDriverPagesPrivate+0x47f (00000001`402d624f)
+
+ntkrnlmp!MiMakeDriverPagesPrivate+0x60e:
+00000001`402d63de 498b4930        mov     rcx,qword ptr [r9+30h]
+00000001`402d63e2 e841740500      call    ntkrnlmp!MiSessionLookupImage (00000001`4032d828)
+00000001`402d63e7 4889442470      mov     qword ptr [rsp+70h],rax
+00000001`402d63ec 44386840        cmp     byte ptr [rax+40h],r13b
+00000001`402d63f0 0f8459feffff    je      ntkrnlmp!MiMakeDriverPagesPrivate+0x47f (00000001`402d624f)
+
+ntkrnlmp!MiMakeDriverPagesPrivate+0x626:
+00000001`402d63f6 e9937f1c00      jmp     ntkrnlmp!MiMakeDriverPagesPrivate+0x1c85be (00000001`4049e38e)
+
+ntkrnlmp!MiMakeDriverPagesPrivate+0x62b:
+00000001`402d63fb e8a047feff      call    ntkrnlmp!KiCheckForKernelApcDelivery (00000001`402baba0)
+00000001`402d6400 e9bcfcffff      jmp     ntkrnlmp!MiMakeDriverPagesPrivate+0x2f1 (00000001`402d60c1)
+
+ntkrnlmp!MiMakeDriverPagesPrivate+0x635:
+00000001`402d6405 65488b042588010000 mov   rax,qword ptr gs:[188h]
+00000001`402d640e 488b88b8000000  mov     rcx,qword ptr [rax+0B8h]
+00000001`402d6415 488b8158050000  mov     rax,qword ptr [rcx+558h]
+00000001`402d641c 4889442450      mov     qword ptr [rsp+50h],rax
+00000001`402d6421 e89a7c0500      call    ntkrnlmp!MiGetSessionVm (00000001`4032e0c0)
+00000001`402d6426 e92afaffff      jmp     ntkrnlmp!MiMakeDriverPagesPrivate+0x85 (00000001`402d5e55)
+
+ntkrnlmp!MiMakeDriverPagesPrivate+0x65b:
+00000001`402d642b 488b8db8000000  mov     rcx,qword ptr [rbp+0B8h]
+00000001`402d6432 e8f935fdff      call    ntkrnlmp!MmGetSessionIdEx (00000001`402a9a30)
+00000001`402d6437 e92cfbffff      jmp     ntkrnlmp!MiMakeDriverPagesPrivate+0x198 (00000001`402d5f68)
+
+ntkrnlmp!MiMakeDriverPagesPrivate+0x66c:
+00000001`402d643c 488bd5          mov     rdx,rbp
+00000001`402d643f 498bce          mov     rcx,r14
+00000001`402d6442 e871db0300      call    ntkrnlmp!KiAbTryReclaimOrphanedEntries (00000001`40313fb8)
+00000001`402d6447 85c0            test    eax,eax
+00000001`402d6449 0f8430fbffff    je      ntkrnlmp!MiMakeDriverPagesPrivate+0x1af (00000001`402d5f7f)
+
+ntkrnlmp!MiMakeDriverPagesPrivate+0x67f:
+00000001`402d644f e9affaffff      jmp     ntkrnlmp!MiMakeDriverPagesPrivate+0x133 (00000001`402d5f03)
+
+ntkrnlmp!MiMakeDriverPagesPrivate+0x1c8470:
+00000001`4049e240 b902000000      mov     ecx,2
+00000001`4049e245 e94d7ce3ff      jmp     ntkrnlmp!MiMakeDriverPagesPrivate+0xc7 (00000001`402d5e97)
+
+ntkrnlmp!MiMakeDriverPagesPrivate+0x1c847a:
+00000001`4049e24a 4d8bc6          mov     r8,r14
+00000001`4049e24d 488bd3          mov     rdx,rbx
+00000001`4049e250 498bce          mov     rcx,r14
+00000001`4049e253 e898d1e1ff      call    ntkrnlmp!ExfAcquirePushLockExclusiveEx (00000001`402bb3f0)
+00000001`4049e258 90              nop
+00000001`4049e259 e92d7de3ff      jmp     ntkrnlmp!MiMakeDriverPagesPrivate+0x1bb (00000001`402d5f8b)
+
+ntkrnlmp!MiMakeDriverPagesPrivate+0x1c848e:
+00000001`4049e25e f705e007880000006000 test dword ptr [ntkrnlmp!MiFlags (00000001`40d1ea48)],600000h
+00000001`4049e268 0f84807de3ff    je      ntkrnlmp!MiMakeDriverPagesPrivate+0x21e (00000001`402d5fee)
+
+ntkrnlmp!MiMakeDriverPagesPrivate+0x1c849e:
+00000001`4049e26e 65488b042588010000 mov   rax,qword ptr gs:[188h]
+00000001`4049e277 488b88b8000000  mov     rcx,qword ptr [rax+0B8h]
+00000001`4049e27e 80b99003000001  cmp     byte ptr [rcx+390h],1
+00000001`4049e285 0f84637de3ff    je      ntkrnlmp!MiMakeDriverPagesPrivate+0x21e (00000001`402d5fee)
+
+ntkrnlmp!MiMakeDriverPagesPrivate+0x1c84bb:
+00000001`4049e28b f6c301          test    bl,1
+00000001`4049e28e 0f845a7de3ff    je      ntkrnlmp!MiMakeDriverPagesPrivate+0x21e (00000001`402d5fee)
+
+ntkrnlmp!MiMakeDriverPagesPrivate+0x1c84c4:
+00000001`4049e294 f6c320          test    bl,20h
+00000001`4049e297 7409            je      ntkrnlmp!MiMakeDriverPagesPrivate+0x1c84d2 (00000001`4049e2a2)
+
+ntkrnlmp!MiMakeDriverPagesPrivate+0x1c84c9:
+00000001`4049e299 f6c342          test    bl,42h
+00000001`4049e29c 0f854c7de3ff    jne     ntkrnlmp!MiMakeDriverPagesPrivate+0x21e (00000001`402d5fee)
+
+ntkrnlmp!MiMakeDriverPagesPrivate+0x1c84d2:
+00000001`4049e2a2 65488b042588010000 mov   rax,qword ptr gs:[188h]
+00000001`4049e2ab 488b88b8000000  mov     rcx,qword ptr [rax+0B8h]
+00000001`4049e2b2 488b9188070000  mov     rdx,qword ptr [rcx+788h]
+00000001`4049e2b9 4885d2          test    rdx,rdx
+00000001`4049e2bc 0f842c7de3ff    je      ntkrnlmp!MiMakeDriverPagesPrivate+0x21e (00000001`402d5fee)
+
+ntkrnlmp!MiMakeDriverPagesPrivate+0x1c84f2:
+00000001`4049e2c2 488bc6          mov     rax,rsi
+00000001`4049e2c5 48c1e803        shr     rax,3
+00000001`4049e2c9 25ff010000      and     eax,1FFh
+00000001`4049e2ce 488b04c2        mov     rax,qword ptr [rdx+rax*8]
+00000001`4049e2d2 488bd3          mov     rdx,rbx
+00000001`4049e2d5 4883ca20        or      rdx,20h
+00000001`4049e2d9 a820            test    al,20h
+00000001`4049e2db 480f44d3        cmove   rdx,rbx
+00000001`4049e2df 488bda          mov     rbx,rdx
+00000001`4049e2e2 a842            test    al,42h
+00000001`4049e2e4 0f84047de3ff    je      ntkrnlmp!MiMakeDriverPagesPrivate+0x21e (00000001`402d5fee)
+
+ntkrnlmp!MiMakeDriverPagesPrivate+0x1c851a:
+00000001`4049e2ea 4883cb42        or      rbx,42h
+00000001`4049e2ee e9fb7ce3ff      jmp     ntkrnlmp!MiMakeDriverPagesPrivate+0x21e (00000001`402d5fee)
+
+ntkrnlmp!MiMakeDriverPagesPrivate+0x1c8523:
+00000001`4049e2f3 0f854e7de3ff    jne     ntkrnlmp!MiMakeDriverPagesPrivate+0x277 (00000001`402d6047)
+
+ntkrnlmp!MiMakeDriverPagesPrivate+0x1c8529:
+00000001`4049e2f9 e9657ee3ff      jmp     ntkrnlmp!MiMakeDriverPagesPrivate+0x393 (00000001`402d6163)
+
+ntkrnlmp!MiMakeDriverPagesPrivate+0x1c852e:
+00000001`4049e2fe 4c396c2450      cmp     qword ptr [rsp+50h],r13
+00000001`4049e303 7509            jne     ntkrnlmp!MiMakeDriverPagesPrivate+0x1c853e (00000001`4049e30e)
+
+ntkrnlmp!MiMakeDriverPagesPrivate+0x1c8535:
+00000001`4049e305 f6c102          test    cl,2
+00000001`4049e308 0f84917ee3ff    je      ntkrnlmp!MiMakeDriverPagesPrivate+0x3cf (00000001`402d619f)
+
+ntkrnlmp!MiMakeDriverPagesPrivate+0x1c853e:
+00000001`4049e30e f6c302          test    bl,2
+00000001`4049e311 0f84887ee3ff    je      ntkrnlmp!MiMakeDriverPagesPrivate+0x3cf (00000001`402d619f)
+
+ntkrnlmp!MiMakeDriverPagesPrivate+0x1c8547:
+00000001`4049e317 488b6c2438      mov     rbp,qword ptr [rsp+38h]
+00000001`4049e31c 41bd450000c0    mov     r13d,0C0000045h
+00000001`4049e322 e9327de3ff      jmp     ntkrnlmp!MiMakeDriverPagesPrivate+0x289 (00000001`402d6059)
+
+ntkrnlmp!MiMakeDriverPagesPrivate+0x1c8557:
+00000001`4049e327 4c396c2450      cmp     qword ptr [rsp+50h],r13
+00000001`4049e32c 0f847a7ee3ff    je      ntkrnlmp!MiMakeDriverPagesPrivate+0x3dc (00000001`402d61ac)
+
+ntkrnlmp!MiMakeDriverPagesPrivate+0x1c8562:
+00000001`4049e332 f6c302          test    bl,2
+00000001`4049e335 0f84717ee3ff    je      ntkrnlmp!MiMakeDriverPagesPrivate+0x3dc (00000001`402d61ac)
+
+ntkrnlmp!MiMakeDriverPagesPrivate+0x1c856b:
+00000001`4049e33b 488b8424e0000000 mov     rax,qword ptr [rsp+0E0h]
+00000001`4049e343 f7406800000008  test    dword ptr [rax+68h],8000000h
+00000001`4049e34a 75cb            jne     ntkrnlmp!MiMakeDriverPagesPrivate+0x1c8547 (00000001`4049e317)
+
+ntkrnlmp!MiMakeDriverPagesPrivate+0x1c857c:
+00000001`4049e34c 4c8bf0          mov     r14,rax
+00000001`4049e34f e9587ee3ff      jmp     ntkrnlmp!MiMakeDriverPagesPrivate+0x3dc (00000001`402d61ac)
+
+ntkrnlmp!MiMakeDriverPagesPrivate+0x1c8584:
+00000001`4049e354 e83779e7ff      call    ntkrnlmp!MiCheckSlabPfnBitmap (00000001`40315c90)
+00000001`4049e359 85c0            test    eax,eax
+00000001`4049e35b 7414            je      ntkrnlmp!MiMakeDriverPagesPrivate+0x1c85a1 (00000001`4049e371)
+
+ntkrnlmp!MiMakeDriverPagesPrivate+0x1c858d:
+00000001`4049e35d 8b542444        mov     edx,dword ptr [rsp+44h]
+00000001`4049e361 498bce          mov     rcx,r14
+00000001`4049e364 e80b84e3ff      call    ntkrnlmp!MiCheckSlabPage (00000001`402d6774)
+00000001`4049e369 85c0            test    eax,eax
+00000001`4049e36b 0f85a37ee3ff    jne     ntkrnlmp!MiMakeDriverPagesPrivate+0x444 (00000001`402d6214)
+
+ntkrnlmp!MiMakeDriverPagesPrivate+0x1c85a1:
+00000001`4049e371 4839742468      cmp     qword ptr [rsp+68h],rsi
+00000001`4049e376 0f84987ee3ff    je      ntkrnlmp!MiMakeDriverPagesPrivate+0x444 (00000001`402d6214)
+
+ntkrnlmp!MiMakeDriverPagesPrivate+0x1c85ac:
+00000001`4049e37c 498bce          mov     rcx,r14
+00000001`4049e37f e8dc68e4ff      call    ntkrnlmp!MiReleaseFreshPage (00000001`402e4c60)
+00000001`4049e384 4889742468      mov     qword ptr [rsp+68h],rsi
+00000001`4049e389 e9f37ee3ff      jmp     ntkrnlmp!MiMakeDriverPagesPrivate+0x4b1 (00000001`402d6281)
+
+ntkrnlmp!MiMakeDriverPagesPrivate+0x1c85be:
+00000001`4049e38e c644243101      mov     byte ptr [rsp+31h],1
+
+ntkrnlmp!MiMakeDriverPagesPrivate+0x1c85c3:
+00000001`4049e393 488bd6          mov     rdx,rsi
+00000001`4049e396 498bc9          mov     rcx,r9
+00000001`4049e399 e8ee68e3ff      call    ntkrnlmp!MiDriverPageMustStayResident (00000001`402d4c8c)
+00000001`4049e39e 84c0            test    al,al
+00000001`4049e3a0 0f84b47ee3ff    je      ntkrnlmp!MiMakeDriverPagesPrivate+0x48a (00000001`402d625a)
+
+ntkrnlmp!MiMakeDriverPagesPrivate+0x1c85d6:
+00000001`4049e3a6 44896c2460      mov     dword ptr [rsp+60h],r13d
+00000001`4049e3ab f0480fba6d183f  lock bts qword ptr [rbp+18h],3Fh
+00000001`4049e3b2 731c            jae     ntkrnlmp!MiMakeDriverPagesPrivate+0x1c8600 (00000001`4049e3d0)
+
+ntkrnlmp!MiMakeDriverPagesPrivate+0x1c85e4:
+00000001`4049e3b4 488d4c2460      lea     rcx,[rsp+60h]
+00000001`4049e3b9 e852b0e1ff      call    ntkrnlmp!KeYieldProcessorEx (00000001`402b9410)
+00000001`4049e3be 488b4518        mov     rax,qword ptr [rbp+18h]
+00000001`4049e3c2 4885c0          test    rax,rax
+00000001`4049e3c5 78ed            js      ntkrnlmp!MiMakeDriverPagesPrivate+0x1c85e4 (00000001`4049e3b4)
+
+ntkrnlmp!MiMakeDriverPagesPrivate+0x1c85f7:
+00000001`4049e3c7 f0480fba6d183f  lock bts qword ptr [rbp+18h],3Fh
+00000001`4049e3ce 72e4            jb      ntkrnlmp!MiMakeDriverPagesPrivate+0x1c85e4 (00000001`4049e3b4)
+
+ntkrnlmp!MiMakeDriverPagesPrivate+0x1c8600:
+00000001`4049e3d0 488bcd          mov     rcx,rbp
+00000001`4049e3d3 e83ce8daff      call    ntkrnlmp!MiRemoveLockedPageChargeAndDecRef (00000001`4024cc14)
+00000001`4049e3d8 48b8ffffffffffffff7f mov rax,7FFFFFFFFFFFFFFFh
+00000001`4049e3e2 f048214518      lock and qword ptr [rbp+18h],rax
+00000001`4049e3e7 44896c2464      mov     dword ptr [rsp+64h],r13d
+00000001`4049e3ec f0490fba6e183f  lock bts qword ptr [r14+18h],3Fh
+00000001`4049e3f3 731c            jae     ntkrnlmp!MiMakeDriverPagesPrivate+0x1c8641 (00000001`4049e411)
+
+ntkrnlmp!MiMakeDriverPagesPrivate+0x1c8625:
+00000001`4049e3f5 488d4c2464      lea     rcx,[rsp+64h]
+00000001`4049e3fa e811b0e1ff      call    ntkrnlmp!KeYieldProcessorEx (00000001`402b9410)
+00000001`4049e3ff 498b4618        mov     rax,qword ptr [r14+18h]
+00000001`4049e403 4885c0          test    rax,rax
+00000001`4049e406 78ed            js      ntkrnlmp!MiMakeDriverPagesPrivate+0x1c8625 (00000001`4049e3f5)
+
+ntkrnlmp!MiMakeDriverPagesPrivate+0x1c8638:
+00000001`4049e408 f0490fba6e183f  lock bts qword ptr [r14+18h],3Fh
+00000001`4049e40f 72e4            jb      ntkrnlmp!MiMakeDriverPagesPrivate+0x1c8625 (00000001`4049e3f5)
+
+ntkrnlmp!MiMakeDriverPagesPrivate+0x1c8641:
+00000001`4049e411 ba01000000      mov     edx,1
+00000001`4049e416 498bce          mov     rcx,r14
+00000001`4049e419 e88688e5ff      call    ntkrnlmp!MiAddLockedPageCharge (00000001`402f6ca4)
+00000001`4049e41e 48b8ffffffffffffff7f mov rax,7FFFFFFFFFFFFFFFh
+00000001`4049e428 f049214618      lock and qword ptr [r14+18h],rax
+00000001`4049e42d 4c8b8c24e0000000 mov     r9,qword ptr [rsp+0E0h]
+00000001`4049e435 e9207ee3ff      jmp     ntkrnlmp!MiMakeDriverPagesPrivate+0x48a (00000001`402d625a)
+
+ntkrnlmp!MiMakeDriverPagesPrivate+0x1c866a:
+00000001`4049e43a 498b4628        mov     rax,qword ptr [r14+28h]
+00000001`4049e43e 48c1e83c        shr     rax,3Ch
+00000001`4049e442 2407            and     al,7
+00000001`4049e444 3c03            cmp     al,3
+00000001`4049e446 0f85287ee3ff    jne     ntkrnlmp!MiMakeDriverPagesPrivate+0x4a4 (00000001`402d6274)
+
+ntkrnlmp!MiMakeDriverPagesPrivate+0x1c867c:
+00000001`4049e44c 4c8bc3          mov     r8,rbx
+00000001`4049e44f 488bd5          mov     rdx,rbp
+00000001`4049e452 498bc9          mov     rcx,r9
+00000001`4049e455 e8be931700      call    ntkrnlmp!MiMakeDriverPageStayResident (00000001`40617818)
+00000001`4049e45a 90              nop
+00000001`4049e45b e9147ee3ff      jmp     ntkrnlmp!MiMakeDriverPagesPrivate+0x4a4 (00000001`402d6274)
+
+ntkrnlmp!MiMakeDriverPagesPrivate+0x1c8690:
+00000001`4049e460 483bb424e8000000 cmp     rsi,qword ptr [rsp+0E8h]
+00000001`4049e468 740e            je      ntkrnlmp!MiMakeDriverPagesPrivate+0x1c86a8 (00000001`4049e478)
+
+ntkrnlmp!MiMakeDriverPagesPrivate+0x1c869a:
+00000001`4049e46a f68424f800000008 test    byte ptr [rsp+0F8h],8
+00000001`4049e472 0f85e47ee3ff    jne     ntkrnlmp!MiMakeDriverPagesPrivate+0x58c (00000001`402d635c)
+
+ntkrnlmp!MiMakeDriverPagesPrivate+0x1c86a8:
+00000001`4049e478 4c8bcb          mov     r9,rbx
+00000001`4049e47b 4c89742420      mov     qword ptr [rsp+20h],r14
+00000001`4049e480 4c8bc5          mov     r8,rbp
+00000001`4049e483 ba00300000      mov     edx,3000h
+00000001`4049e488 b91a000000      mov     ecx,1Ah
+00000001`4049e48d e85e69f7ff      call    ntkrnlmp!KeBugCheckEx (00000001`40414df0)
+00000001`4049e492 cc              int     3
+
+ntkrnlmp!MiMakeDriverPagesPrivate+0x1c86c3:
+00000001`4049e493 4d8bfd          mov     r15,r13
+00000001`4049e496 e9d97de3ff      jmp     ntkrnlmp!MiMakeDriverPagesPrivate+0x4a4 (00000001`402d6274)
+
+ntkrnlmp!MiMakeDriverPagesPrivate+0x1c86cb:
+00000001`4049e49b 41bd170000c0    mov     r13d,0C0000017h
+00000001`4049e4a1 e9b37be3ff      jmp     ntkrnlmp!MiMakeDriverPagesPrivate+0x289 (00000001`402d6059)
+
+ntkrnlmp!MiMakeDriverPagesPrivate+0x1c86d6:
+00000001`4049e4a6 488d0c40        lea     rcx,[rax+rax*2]
+00000001`4049e4aa 48b80000000000deffff mov rax,0FFFFDE0000000000h
+00000001`4049e4b4 48c1e104        shl     rcx,4
+00000001`4049e4b8 488bd0          mov     rdx,rax
+00000001`4049e4bb 4803ca          add     rcx,rdx
+00000001`4049e4be e89d67e4ff      call    ntkrnlmp!MiReleaseFreshPage (00000001`402e4c60)
+00000001`4049e4c3 90              nop
+00000001`4049e4c4 e9077ce3ff      jmp     ntkrnlmp!MiMakeDriverPagesPrivate+0x300 (00000001`402d60d0)
+quit:
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\atlmfc.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\ObjectiveC.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\concurrency.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\cpp_rest.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\stl.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\Windows.Data.Json.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\Windows.Devices.Geolocation.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\Windows.Devices.Sensors.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\Windows.Media.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\windows.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\winrt.natvis'

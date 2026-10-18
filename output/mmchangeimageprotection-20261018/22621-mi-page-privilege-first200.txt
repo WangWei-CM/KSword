@@ -1,0 +1,202 @@
+Source: 22621-mi-page-privilege-cdb-uf.txt; first 200 instructions in CDB uf traversal order. All addresses RVA.
+CDB uf instruction count=225; listed=200
+0025A190  4053                     push    rbx
+0025A192  55                       push    rbp
+0025A193  56                       push    rsi
+0025A194  57                       push    rdi
+0025A195  4883ec28                 sub     rsp,28h
+0025A199  488b05a848ac00           mov     rax,qword ptr [ntkrnlmp!MiFlags (RVA 0xD1EA48)]
+0025A1A0  498bf8                   mov     rdi,r8
+0025A1A3  8bf2                     mov     esi,edx
+0025A1A5  488bd9                   mov     rbx,rcx
+0025A1A8  0fbae00c                 bt      eax,0Ch
+0025A1AC  7313                     jae     ntkrnlmp!MiGetPagePrivilege+0x31 (RVA 0x25A1C1)
+0025A1AE  488b5128                 mov     rdx,qword ptr [rcx+28h]
+0025A1B2  488bca                   mov     rcx,rdx
+0025A1B5  48c1e93c                 shr     rcx,3Ch
+0025A1B9  80e107                   and     cl,7
+0025A1BC  80f903                   cmp     cl,3
+0025A1BF  740c                     je      ntkrnlmp!MiGetPagePrivilege+0x3d (RVA 0x25A1CD)
+0025A1C1  33c0                     xor     eax,eax
+0025A1C3  4883c428                 add     rsp,28h
+0025A1C7  5f                       pop     rdi
+0025A1C8  5e                       pop     rsi
+0025A1C9  5d                       pop     rbp
+0025A1CA  5b                       pop     rbx
+0025A1CB  c3                       ret
+0025A1CD  480fbae235               bt      rdx,35h
+0025A1D2  72ed                     jb      ntkrnlmp!MiGetPagePrivilege+0x31 (RVA 0x25A1C1)
+0025A1D4  4d85c0                   test    r8,r8
+0025A1D7  740a                     je      ntkrnlmp!MiGetPagePrivilege+0x53 (RVA 0x25A1E3)
+0025A1D9  0fbae00e                 bt      eax,0Eh
+0025A1DD  0f835b4d2200             jae     ntkrnlmp!MiGetPagePrivilege+0x224dae (RVA 0x47EF3E)
+0025A1E3  488b4b08                 mov     rcx,qword ptr [rbx+8]
+0025A1E7  49b80000000000000080     mov r8,8000000000000000h
+0025A1F1  488be9                   mov     rbp,rcx
+0025A1F4  490be8                   or      rbp,r8
+0025A1F7  4885d2                   test    rdx,rdx
+0025A1FA  0f89454d2200             jns     ntkrnlmp!MiGetPagePrivilege+0x224db5 (RVA 0x47EF45)
+0025A200  4c8b5b10                 mov     r11,qword ptr [rbx+10h]
+0025A204  490fbae30a               bt      r11,0Ah
+0025A209  0f83f44e2200             jae     ntkrnlmp!MiGetPagePrivilege+0x224f73 (RVA 0x47F103)
+0025A20F  488b0deab4a000           mov     rcx,qword ptr [ntkrnlmp!MiState+0x6c0 (RVA 0xC65700)]
+0025A216  4d8bc3                   mov     r8,r11
+0025A219  4885c9                   test    rcx,rcx
+0025A21C  740a                     je      ntkrnlmp!MiGetPagePrivilege+0x98 (RVA 0x25A228)
+0025A21E  41f6c010                 test    r8b,10h
+0025A222  0f84a7000000             je      ntkrnlmp!MiGetPagePrivilege+0x13f (RVA 0x25A2CF)
+0025A228  49c1f810                 sar     r8,10h
+0025A22C  4d8b10                   mov     r10,qword ptr [r8]
+0025A22F  418b4a38                 mov     ecx,dword ptr [r10+38h]
+0025A233  f6c120                   test    cl,20h
+0025A236  0f84f04e2200             je      ntkrnlmp!MiGetPagePrivilege+0x224f9c (RVA 0x47F12C)
+0025A23C  498b5008                 mov     rdx,qword ptr [r8+8]
+0025A240  483bea                   cmp     rbp,rdx
+0025A243  0f8278ffffff             jb      ntkrnlmp!MiGetPagePrivilege+0x31 (RVA 0x25A1C1)
+0025A249  418b482c                 mov     ecx,dword ptr [r8+2Ch]
+0025A24D  488d14ca                 lea     rdx,[rdx+rcx*8]
+0025A251  483bea                   cmp     rbp,rdx
+0025A254  0f8367ffffff             jae     ntkrnlmp!MiGetPagePrivilege+0x31 (RVA 0x25A1C1)
+0025A25A  458b4a5c                 mov     r9d,dword ptr [r10+5Ch]
+0025A25E  41f7c100000c00           test    r9d,0C0000h
+0025A265  0f95c2                   setne   dl
+0025A268  410fbae111               bt      r9d,11h
+0025A26D  0f92c1                   setb    cl
+0025A270  84d1                     test    cl,dl
+0025A272  0f85be4e2200             jne     ntkrnlmp!MiGetPagePrivilege+0x224fa6 (RVA 0x47F136)
+0025A278  49c1eb05                 shr     r11,5
+0025A27C  0fbae011                 bt      eax,11h
+0025A280  0f82ca4e2200             jb      ntkrnlmp!MiGetPagePrivilege+0x224fc0 (RVA 0x47F150)
+0025A286  41f7c100000c00           test    r9d,0C0000h
+0025A28D  0f842effffff             je      ntkrnlmp!MiGetPagePrivilege+0x31 (RVA 0x25A1C1)
+0025A293  b808000000               mov     eax,8
+0025A298  41f6c302                 test    r11b,2
+0025A29C  753c                     jne     ntkrnlmp!MiGetPagePrivilege+0x14a (RVA 0x25A2DA)
+0025A29E  4885ff                   test    rdi,rdi
+0025A2A1  0f841cffffff             je      ntkrnlmp!MiGetPagePrivilege+0x33 (RVA 0x25A1C3)
+0025A2A7  498b4a60                 mov     rcx,qword ptr [r10+60h]
+0025A2AB  488b5138                 mov     rdx,qword ptr [rcx+38h]
+0025A2AF  48895708                 mov     qword ptr [rdi+8],rdx
+0025A2B3  492baa88000000           sub     rbp,qword ptr [r10+88h]
+0025A2BA  48c1fd03                 sar     rbp,3
+0025A2BE  48c1e50c                 shl     rbp,0Ch
+0025A2C2  48892f                   mov     qword ptr [rdi],rbp
+0025A2C5  4883c428                 add     rsp,28h
+0025A2C9  5f                       pop     rdi
+0025A2CA  5e                       pop     rsi
+0025A2CB  5d                       pop     rbp
+0025A2CC  5b                       pop     rbx
+0025A2CD  c3                       ret
+0025A2CF  48f7d1                   not     rcx
+0025A2D2  4c23c1                   and     r8,rcx
+0025A2D5  e94effffff               jmp     ntkrnlmp!MiGetPagePrivilege+0x98 (RVA 0x25A228)
+0025A2DA  b80b000000               mov     eax,0Bh
+0025A2DF  ebbd                     jmp     ntkrnlmp!MiGetPagePrivilege+0x10e (RVA 0x25A29E)
+0047EF3E  33ff                     xor     edi,edi
+0047EF40  e99eb2ddff               jmp     ntkrnlmp!MiGetPagePrivilege+0x53 (RVA 0x25A1E3)
+0047EF45  4c89642450               mov     qword ptr [rsp+50h],r12
+0047EF4A  4c89742460               mov     qword ptr [rsp+60h],r14
+0047EF4F  0fbae011                 bt      eax,11h
+0047EF53  733d                     jae     ntkrnlmp!MiGetPagePrivilege+0x224e02 (RVA 0x47EF92)
+0047EF55  48c1e519                 shl     rbp,19h
+0047EF59  48b80000000080f6ffff     mov rax,0FFFFF68000000000h
+0047EF63  488bc0                   mov     rax,rax
+0047EF66  48c1e019                 shl     rax,19h
+0047EF6A  49bc000000000080ffff     mov r12,0FFFF800000000000h
+0047EF74  482be8                   sub     rbp,rax
+0047EF77  41be11000000             mov     r14d,11h
+0047EF7D  48c1fd10                 sar     rbp,10h
+0047EF81  b802000000               mov     eax,2
+0047EF86  493bec                   cmp     rbp,r12
+0047EF89  440f42f0                 cmovb   r14d,eax
+0047EF8D  e95f010000               jmp     ntkrnlmp!MiGetPagePrivilege+0x224f61 (RVA 0x47F0F1)
+0047EF92  4885c9                   test    rcx,rcx
+0047EF95  7519                     jne     ntkrnlmp!MiGetPagePrivilege+0x224e20 (RVA 0x47EFB0)
+0047EF97  448d7104                 lea     r14d,[rcx+4]
+0047EF9B  4885ff                   test    rdi,rdi
+0047EF9E  0f844d010000             je      ntkrnlmp!MiGetPagePrivilege+0x224f61 (RVA 0x47F0F1)
+0047EFA4  48890f                   mov     qword ptr [rdi],rcx
+0047EFA7  48894f08                 mov     qword ptr [rdi+8],rcx
+0047EFAB  e941010000               jmp     ntkrnlmp!MiGetPagePrivilege+0x224f61 (RVA 0x47F0F1)
+0047EFB0  48c1e519                 shl     rbp,19h
+0047EFB4  48b80000000080f6ffff     mov rax,0FFFFF68000000000h
+0047EFBE  488bc0                   mov     rax,rax
+0047EFC1  48c1e019                 shl     rax,19h
+0047EFC5  49bc000000000080ffff     mov r12,0FFFF800000000000h
+0047EFCF  482be8                   sub     rbp,rax
+0047EFD2  48c1fd10                 sar     rbp,10h
+0047EFD6  493bec                   cmp     rbp,r12
+0047EFD9  7230                     jb      ntkrnlmp!MiGetPagePrivilege+0x224e7b (RVA 0x47F00B)
+0047EFDB  8b4310                   mov     eax,dword ptr [rbx+10h]
+0047EFDE  41be01000000             mov     r14d,1
+0047EFE4  c0e805                   shr     al,5
+0047EFE7  a802                     test    al,2
+0047EFE9  b840000000               mov     eax,40h
+0047EFEE  440f44f0                 cmove   r14d,eax
+0047EFF2  4885ff                   test    rdi,rdi
+0047EFF5  0f84f6000000             je      ntkrnlmp!MiGetPagePrivilege+0x224f61 (RVA 0x47F0F1)
+0047EFFB  48892f                   mov     qword ptr [rdi],rbp
+0047EFFE  48c7470800000000         mov     qword ptr [rdi+8],0
+0047F006  e9e6000000               jmp     ntkrnlmp!MiGetPagePrivilege+0x224f61 (RVA 0x47F0F1)
+0047F00B  41be14000000             mov     r14d,14h
+0047F011  4885ff                   test    rdi,rdi
+0047F014  0f84d7000000             je      ntkrnlmp!MiGetPagePrivilege+0x224f61 (RVA 0x47F0F1)
+0047F01A  4c896c2458               mov     qword ptr [rsp+58h],r13
+0047F01F  4c897c2420               mov     qword ptr [rsp+20h],r15
+0047F024  85f6                     test    esi,esi
+0047F026  750e                     jne     ntkrnlmp!MiGetPagePrivilege+0x224ea6 (RVA 0x47F036)
+0047F028  488bcb                   mov     rcx,rbx
+0047F02B  e82080e7ff               call    ntkrnlmp!MiLockPageInline (RVA 0x2F7050)
+0047F030  440fb6f8                 movzx   r15d,al
+0047F034  eb03                     jmp     ntkrnlmp!MiGetPagePrivilege+0x224ea9 (RVA 0x47F039)
+0047F036  41b711                   mov     r15b,11h
+0047F039  488bcb                   mov     rcx,rbx
+0047F03C  e8af56dbff               call    ntkrnlmp!MiGetTopLevelPfn (RVA 0x2346F0)
+0047F041  48b9ffffffffffffff7f     mov rcx,7FFFFFFFFFFFFFFFh
+0047F04B  4c8b28                   mov     r13,qword ptr [rax]
+0047F04E  49c1ed0d                 shr     r13,0Dh
+0047F052  4983e5f0                 and     r13,0FFFFFFFFFFFFFFF0h
+0047F056  4d0bec                   or      r13,r12
+0047F059  f048214818               lock and qword ptr [rax+18h],rcx
+0047F05E  85f6                     test    esi,esi
+0047F060  7568                     jne     ntkrnlmp!MiGetPagePrivilege+0x224f3a (RVA 0x47F0CA)
+0047F062  f048214b18               lock and qword ptr [rbx+18h],rcx
+0047F067  8b0d33fc8900             mov     ecx,dword ptr [ntkrnlmp!KiIrqlFlags (RVA 0xD1ECA0)]
+0047F06D  85c9                     test    ecx,ecx
+0047F06F  7451                     je      ntkrnlmp!MiGetPagePrivilege+0x224f32 (RVA 0x47F0C2)
+0047F071  440f20c0                 mov     rax,cr8
+0047F075  f6c101                   test    cl,1
+0047F078  7448                     je      ntkrnlmp!MiGetPagePrivilege+0x224f32 (RVA 0x47F0C2)
+0047F07A  3c0f                     cmp     al,0Fh
+0047F07C  7744                     ja      ntkrnlmp!MiGetPagePrivilege+0x224f32 (RVA 0x47F0C2)
+0047F07E  4180ff0f                 cmp     r15b,0Fh
+0047F082  773e                     ja      ntkrnlmp!MiGetPagePrivilege+0x224f32 (RVA 0x47F0C2)
+0047F084  3c02                     cmp     al,2
+0047F086  723a                     jb      ntkrnlmp!MiGetPagePrivilege+0x224f32 (RVA 0x47F0C2)
+0047F088  654c8b142520000000       mov   r10,qword ptr gs:[20h]
+0047F091  48c7c2ffffffff           mov     rdx,0FFFFFFFFFFFFFFFFh
+0047F098  410fb6cf                 movzx   ecx,r15b
+0047F09C  ffc1                     inc     ecx
+0047F09E  48d3e2                   shl     rdx,cl
+0047F0A1  4d8b8ab8880000           mov     r9,qword ptr [r10+88B8h]
+0047F0A8  0fb7c2                   movzx   eax,dx
+0047F0AB  f7d0                     not     eax
+0047F0AD  458b4114                 mov     r8d,dword ptr [r9+14h]
+0047F0B1  4423c0                   and     r8d,eax
+0047F0B4  45894114                 mov     dword ptr [r9+14h],r8d
+0047F0B8  7508                     jne     ntkrnlmp!MiGetPagePrivilege+0x224f32 (RVA 0x47F0C2)
+0047F0BA  498bca                   mov     rcx,r10
+0047F0BD  e88ec10e00               call    ntkrnlmp!KiRemoveSystemWorkPriorityKick (RVA 0x56B250)
+0047F0C2  410fb6c7                 movzx   eax,r15b
+0047F0C6  440f22c0                 mov     cr8,rax
+0047F0CA  4983bde003000000         cmp     qword ptr [r13+3E0h],0
+0047F0D2  4c8b7c2420               mov     r15,qword ptr [rsp+20h]
+0047F0D7  7410                     je      ntkrnlmp!MiGetPagePrivilege+0x224f59 (RVA 0x47F0E9)
+0047F0D9  48892f                   mov     qword ptr [rdi],rbp
+0047F0DC  498b85e0030000           mov     rax,qword ptr [r13+3E0h]
+0047F0E3  48894708                 mov     qword ptr [rdi+8],rax
+0047F0E7  eb03                     jmp     ntkrnlmp!MiGetPagePrivilege+0x224f5c (RVA 0x47F0EC)
+0047F0E9  4533f6                   xor     r14d,r14d
+0047F0EC  4c8b6c2458               mov     r13,qword ptr [rsp+58h]
+0047F0F1  4c8b642450               mov     r12,qword ptr [rsp+50h]
+0047F0F6  418bc6                   mov     eax,r14d
