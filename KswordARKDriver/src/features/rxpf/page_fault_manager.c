@@ -806,6 +806,54 @@ KswRxpfPageFaultDispatch(
         goto ManagedFailure;
     }
 
+    /* Hook point: redirect execution when the faulting RIP matches the hook. */
+    {
+        ULONG hookAction = record->HookAction;
+        ULONGLONG hookAddr = (ULONGLONG)record->HookAddress;
+
+        if (hookAction == KSWORD_ARK_RXPF_HOOK_ACTION_REDIRECT &&
+            hookAddr != 0ULL &&
+            Frame->Rip == hookAddr &&
+            record->RedirectTarget != 0ULL) {
+            /* All GPRs are preserved in the resume frame from the snapshot. */
+            ResumeFrameOut->Rip = record->RedirectTarget;
+            *ResumeRspOut = entryRsp;
+            InterlockedIncrement64(&record->RedirectCount);
+            InterlockedIncrement64(&record->EmulatedCount);
+            record->LastStatus = STATUS_SUCCESS;
+            record->LastFailureReason =
+                KSWORD_ARK_RXPF_EMULATION_REDIRECTED;
+            KswRxpfDiagnosticsCountEmulatedInstruction();
+            KswRxpfDiagnosticsRecord(
+                processorIndex,
+                cr2,
+                originalFrame.Rip,
+                originalFrame.ErrorCode,
+                (ULONGLONG)record->RecordId,
+                KSWORD_ARK_RXPF_DECODE_HOOK_REDIRECT,
+                KSWORD_ARK_RXPF_EMULATION_REDIRECTED,
+                record->RedirectTarget,
+                STATUS_SUCCESS);
+            action = KSW_RXPF_DISPATCH_HANDLED;
+            goto Exit;
+        }
+        if (hookAction == KSWORD_ARK_RXPF_HOOK_ACTION_LOG &&
+            hookAddr != 0ULL &&
+            Frame->Rip == hookAddr) {
+            /* Record the hook hit then fall through to normal emulation. */
+            KswRxpfDiagnosticsRecord(
+                processorIndex,
+                cr2,
+                originalFrame.Rip,
+                originalFrame.ErrorCode,
+                (ULONGLONG)record->RecordId,
+                KSWORD_ARK_RXPF_DECODE_HOOK_REDIRECT,
+                KSWORD_ARK_RXPF_EMULATION_SUCCESS,
+                originalFrame.Rip,
+                STATUS_SUCCESS);
+        }
+    }
+
     /* Emulate one complete whitelisted instruction or preserve the fault. */
     status = KswRxpfX64EmulateOne(&emulation);
     if (!NT_SUCCESS(status) ||

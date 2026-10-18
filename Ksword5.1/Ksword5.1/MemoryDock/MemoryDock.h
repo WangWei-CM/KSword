@@ -55,6 +55,12 @@ class CodeEditorWidget;
 class SystemMemoryAuditPage;
 class DdmaPage;
 
+namespace ks::misc
+{
+    class HvciBypassPage;
+    class RxpfPage;
+}
+
 // 项目内 UI 组件前置声明：只用指针，避免把表格组件头拉进本头文件。
 namespace ks::ui
 {
@@ -114,6 +120,9 @@ public:
     // - 调用方式：MainWindow::closeEvent 最前调用（其后半段会停 R0 驱动，晚了 int3 还原必失败）；
     // - 返回：true=可以继续退出（工作台未创建时恒为 true）；false=用户取消，应放弃本次关闭。
     bool confirmWorkbenchQuit();
+    // 全局退出拆成许可和释放两阶段；详情窗仍使用上面的单宿主兼容包装。
+    bool prepareWorkbenchQuit();
+    bool releaseWorkbenchExecutionForQuit();
     // 全局退出被取消时，撤销这次退出专用的保留补丁许可。
     void cancelWorkbenchQuit();
 
@@ -1046,10 +1055,14 @@ private:
 
     QWidget* m_tabWorkbench = nullptr;                   // 工作台页签的容器页。
     ks::ui::MemoryDebugPage* m_memoryDebugPage = nullptr; // 独立进程内存会话，不跟随 Dock 附加。
+    ks::misc::HvciBypassPage* m_hvciBypassPage = nullptr; // HVCI W^X 绕过实验页。
+    ks::misc::RxpfPage* m_rxpfPage = nullptr;             // RXPF 页错误模拟页。
     ks::ui::MemoryWorkbenchView* m_workbenchView = nullptr; // 工作台视图（懒创建，容器页的子对象）。
     QTimer* m_workbenchLivenessTimer = nullptr; // 每秒核验工作台锚定目标。
     bool m_workbenchEmbedded = false;                     // 是否是进程详情窗口里的内嵌实例（视图以内嵌模式创建）。
     bool m_navigationPagesPrepared = false;               // 导航索引已完成一次嵌套懒页准备。
+    bool m_workbenchQuitPrepared = false;                 // 普通工作台退出许可通过后保持冻结。
+    bool m_workbenchEnabledBeforeQuit = true;             // 取消退出时恢复该视图自己的原启用状态。
 
     // 模块表当前缓存对应的进程：模块表可以预览一个并未附加的进程，双击模块基址时必须按
     // 它所属的进程去看（见 jumpToModuleBase）。0 表示缓存为空。

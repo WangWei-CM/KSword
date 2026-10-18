@@ -15,6 +15,7 @@ Environment:
 --*/
 
 #include "ark/ark_driver.h"
+#include "../features/hvm/hvm_noattach.h"
 #include "device_control.tmh"
 
 #include <wdmsec.h>
@@ -83,6 +84,10 @@ Return Value:
     PWDFDEVICE_INIT deviceInit = NULL;
     WDFDEVICE device = WDF_NO_HANDLE;
     WDF_OBJECT_ATTRIBUTES deviceAttributes;
+    /* 控制文件 Cleanup 撤销其独占不附加会话，不影响其它 IOCTL。 */
+    WDF_OBJECT_ATTRIBUTES fileAttributes;
+    /* 关闭标志处理 Cleanup 早于 OPEN 发布的竞态。 */
+    WDF_FILEOBJECT_CONFIG fileConfiguration;
     UNICODE_STRING sddlText;
     NTSTATUS status = STATUS_SUCCESS;
 
@@ -116,6 +121,12 @@ Return Value:
     WdfDeviceInitSetDeviceType(deviceInit, FILE_DEVICE_UNKNOWN);
     WdfDeviceInitSetExclusive(deviceInit, FALSE);
     WdfDeviceInitSetIoType(deviceInit, WdfDeviceIoBuffered);
+    /* 文件对象拥有轻量 Closing 状态，所有打开方式都能正常关闭。 */
+    WDF_FILEOBJECT_CONFIG_INIT(&fileConfiguration, WDF_NO_EVENT_CALLBACK, WDF_NO_EVENT_CALLBACK, KswordARKHvmNoAttachFileCleanup);
+    /* 不替换设备自己的 DEVICE_CONTEXT。 */
+    WDF_OBJECT_ATTRIBUTES_INIT_CONTEXT_TYPE(&fileAttributes, KSW_HVM_NOATTACH_FILE_CONTEXT);
+    /* 生命周期回调仅撤销 publication 和排队，不在 Cleanup 等待 VMX。 */
+    WdfDeviceInitSetFileObjectConfig(deviceInit, &fileConfiguration, &fileAttributes);
     WdfDeviceInitSetIoInCallerContextCallback(deviceInit, KswordARKDriverEvtIoInCallerContext);
 
     WDF_OBJECT_ATTRIBUTES_INIT_CONTEXT_TYPE(&deviceAttributes, DEVICE_CONTEXT);

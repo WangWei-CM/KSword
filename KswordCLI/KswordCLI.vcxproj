@@ -161,6 +161,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="ArkDriverExtended.h" />
+    <ClInclude Include="..\shared\driver\KswordArkMemoryResult.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="CommandRegistry.cpp" />

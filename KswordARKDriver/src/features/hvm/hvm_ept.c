@@ -824,6 +824,8 @@ KswordARKHvmEptRuleControlLocked(
     _In_ BOOLEAN DebuggerOwned
     )
 {
+    /* 独占不附加会话保留全部不可变根，外部仅允许查询。 */
+    if (KswordARKHvmNoAttachOwned() && Request != NULL && Request->operation != KSWORD_ARK_HVM_EPT_RULE_QUERY) { return STATUS_DEVICE_BUSY; }
     NTSTATUS status = STATUS_SUCCESS;
     ULONG slotIndex = 0UL;
     KSW_HVM_EPT_RULE_SLOT* slot = NULL;

@@ -770,3 +770,90 @@ typedef struct _KSWORD_ARK_SCAN_KERNEL_MEMORY_EVIDENCE_RESPONSE
     unsigned long reserved;
     KSWORD_ARK_KERNEL_MEMORY_EVIDENCE_ROW rows[1];
 } KSWORD_ARK_SCAN_KERNEL_MEMORY_EVIDENCE_RESPONSE;
+
+// ============================================================
+// MDL-based page protection change (research / HVCI experiment)
+// ============================================================
+#define KSWORD_ARK_IOCTL_FUNCTION_CHANGE_MAPPED_PAGE_PROTECTION 0x920UL
+
+#define IOCTL_KSWORD_ARK_CHANGE_MAPPED_PAGE_PROTECTION \
+    CTL_CODE( \
+        KSWORD_ARK_IOCTL_DEVICE_TYPE, \
+        KSWORD_ARK_IOCTL_FUNCTION_CHANGE_MAPPED_PAGE_PROTECTION, \
+        METHOD_BUFFERED, \
+        FILE_WRITE_ACCESS)
+
+#define KSWORD_ARK_CHANGE_PROTECTION_FLAG_WRITE_TEST 0x00000001UL
+
+typedef struct _KSWORD_ARK_CHANGE_MAPPED_PAGE_PROTECTION_REQUEST
+{
+    unsigned long long targetVirtualAddress;
+    unsigned long newProtection;
+    unsigned long flags;
+} KSWORD_ARK_CHANGE_MAPPED_PAGE_PROTECTION_REQUEST;
+
+typedef struct _KSWORD_ARK_CHANGE_MAPPED_PAGE_PROTECTION_RESPONSE
+{
+    unsigned long version;
+    unsigned long size;
+    long mdlAllocStatus;
+    long lockStatus;
+    long mapStatus;
+    long protectStatus;
+    long writeTestStatus;
+    unsigned long reserved0;
+    unsigned long long mappedVa;
+    unsigned long long originalPte;
+    unsigned long long afterProtectPte;
+} KSWORD_ARK_CHANGE_MAPPED_PAGE_PROTECTION_RESPONSE;
+
+/* ================================================================
+ * HVCI 研究实验: MmChangeImageProtection
+ *
+ * 在内核映像页上调用未导出的 MmChangeImageProtection，
+ * 并测试 VTL1 对映像保护变更的安全调用响应。
+ * 签名扫描在运行时定位函数，不依赖特定 build profile。
+ * ================================================================ */
+
+#define KSWORD_ARK_IOCTL_FUNCTION_CHANGE_IMAGE_PAGE_PROTECTION 0x922UL
+
+#define IOCTL_KSWORD_ARK_CHANGE_IMAGE_PAGE_PROTECTION \
+    CTL_CODE( \
+        KSWORD_ARK_IOCTL_DEVICE_TYPE, \
+        KSWORD_ARK_IOCTL_FUNCTION_CHANGE_IMAGE_PAGE_PROTECTION, \
+        METHOD_BUFFERED, \
+        FILE_WRITE_ACCESS)
+
+#define KSWORD_ARK_IMAGE_PROT_FLAG_WRITE_TEST          0x00000001UL
+#define KSWORD_ARK_IMAGE_PROT_FLAG_RESTORE             0x00000002UL
+#define KSWORD_ARK_IMAGE_PROT_FLAG_UNMAP_BEFORE_RESTORE 0x00000004UL
+
+#define KSWORD_ARK_IMAGE_PROT_OP_RX          1UL
+#define KSWORD_ARK_IMAGE_PROT_OP_READONLY_NX 2UL
+
+typedef struct _KSWORD_ARK_CHANGE_IMAGE_PAGE_PROTECTION_REQUEST
+{
+    unsigned long long targetVirtualAddress;
+    unsigned long operation;
+    unsigned long flags;
+    unsigned long long functionAddressOverride;
+} KSWORD_ARK_CHANGE_IMAGE_PAGE_PROTECTION_REQUEST;
+
+typedef struct _KSWORD_ARK_CHANGE_IMAGE_PAGE_PROTECTION_RESPONSE
+{
+    unsigned long version;
+    unsigned long size;
+    long resolverStatus;
+    long mdlAllocStatus;
+    long lockStatus;
+    long imageProtectStatus;
+    long aliasMapStatus;
+    long writeTestStatus;
+    long restoreStatus;
+    unsigned long reserved0;
+    unsigned long long resolvedFunctionVa;
+    unsigned long long originalPte;
+    unsigned long long afterImageProtectPte;
+    unsigned long long aliasVa;
+    unsigned long long afterRestorePte;
+} KSWORD_ARK_CHANGE_IMAGE_PAGE_PROTECTION_RESPONSE;

@@ -49,6 +49,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="ArkDriverExtended.h"><Filter>头文件</Filter></ClInclude>
+    <ClInclude Include="..\shared\driver\KswordArkMemoryResult.h"><Filter>头文件</Filter></ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="CommandRegistry.cpp" />

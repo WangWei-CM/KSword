@@ -132,6 +132,8 @@ Environment:
 #define KSW_VMX_SECONDARY_EPT_VIOLATION_VE (1UL << 18)
 /* Identify the secondary control enabling the VMFUNC instruction. */
 #define KSW_VMX_SECONDARY_ENABLE_VM_FUNCTIONS (1UL << 13)
+/* Intel MBEC 分离用户与 supervisor 取指权限，只供独占调试使用。 */
+#define KSW_VMX_SECONDARY_NOATTACH_MBEC (1UL << 22)
 /* Identify VM function 0, EPTP switching, inside the function controls. */
 #define KSW_VMX_VM_FUNCTION_EPTP_SWITCHING (1ULL << 0)
 #define KSW_VMX_PRIMARY_SECONDARY_CONTROLS (1UL << 31)
@@ -969,6 +971,8 @@ KswordARKHvmConfigureVmcs(
     /* 同时启用 EPT 与 Windows 已经通过 CPUID 观察到的指令执行门控。 */
     secondaryControls = KswordARKHvmAdjustControls(
         KSW_VMX_SECONDARY_EPT |
+            /* 根表已经在普通准备阶段补齐所有层级的 UserExecute。 */
+            (Input->EnableNoAttachMbec != 0U ? KSW_VMX_SECONDARY_NOATTACH_MBEC : 0UL) |
             /*
              * Request EPT-violation #VE only when the caller asked for it and
              * owns an information area.  AdjustControls clamps against the
@@ -989,6 +993,8 @@ KswordARKHvmConfigureVmcs(
                 : 0UL) |
             requiredInstructionControls,
         secondaryCapability);
+    /* MBEC 被硬件裁掉时禁止启动，不能用普通 EPT 解释三种模式根。 */
+    if (Input->EnableNoAttachMbec != 0U && (secondaryControls & KSW_VMX_SECONDARY_NOATTACH_MBEC) == 0UL) { return STATUS_NOT_SUPPORTED; }
     /* 成对保存调试、PAT、EFER 与受支持的扩展处理器状态。 */
     exitControls = KswordARKHvmAdjustControls(
         KSW_VMX_EXIT_SAVE_DEBUG_CONTROLS |

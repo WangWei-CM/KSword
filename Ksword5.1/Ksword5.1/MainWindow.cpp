@@ -5564,7 +5564,7 @@ void MainWindow::closeEvent(QCloseEvent* event)
     {
         // memoryDock：当前迭代独立的弱指针副本，追加晚到 Dock 时不依赖 vector 中可能失效的引用。
         const QPointer<MemoryDock> memoryDock = workbenchDocks[dockIndex];
-        if (memoryDock && !memoryDock->confirmWorkbenchQuit())
+        if (memoryDock && !memoryDock->prepareWorkbenchQuit())
         {
             memoryQuitAllowed = false;
             break;
@@ -5574,6 +5574,32 @@ void MainWindow::closeEvent(QCloseEvent* event)
             break;
         }
         appendNewWorkbenchDocks();
+    }
+    // 所有 Dock 的暂存许可都通过后才归还执行控制，取消后续确认不会提前放行前一目标。
+    // 第二阶段不重复 confirmQuit；部分释放失败时保留实际状态及恢复入口，统一撤销许可。
+    if (closeGuardSelf && memoryQuitAllowed)
+    {
+        for (std::size_t dockIndex = 0; dockIndex < workbenchDocks.size(); ++dockIndex)
+        {
+            const QPointer<MemoryDock> memoryDock = workbenchDocks[dockIndex];
+            if (memoryDock && !memoryDock->releaseWorkbenchExecutionForQuit())
+            {
+                memoryQuitAllowed = false;
+                break;
+            }
+            if (!closeGuardSelf)
+            {
+                break;
+            }
+            // HVM 释放会处理事件；若此时才创建新 Dock，本轮中止，下一次退出重新统一确认。
+            const std::size_t preparedCount = workbenchDocks.size();
+            appendNewWorkbenchDocks();
+            if (workbenchDocks.size() != preparedCount)
+            {
+                memoryQuitAllowed = false;
+                break;
+            }
+        }
     }
     if (!closeGuardSelf || !memoryQuitAllowed)
     {

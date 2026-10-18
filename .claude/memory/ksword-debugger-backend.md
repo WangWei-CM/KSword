@@ -56,3 +56,13 @@
 - **2026-10-07 x64dbg 地址导航**：新增 `X96dbgIntegration/NavigationBridge` 窄插件（dp64/dp32）与 `NavigationProtocol/NavigationClient`，`X96dbgExecutablePlugin` 增加 navigate，主程序统一 `UI/X64DbgNavigation` 入口。按目标 PID+创建时间查询已有桥接会话，同目标仅 GUI CPU/Dump 导航并回 ACK；不同目标开独立实例，未知调试器占用不抢占。桥接没有运行控制/attach API；新实例由 launcher `-p` 附加并等本次系统断点暂停后定位，保持暂停。原版安装需加载同桥接。ACK 不能用进程启动成功或命令入队成功替代。
 - 自有假 SDK 的真实 named-pipe 测试覆盖身份错配、非法协议/操作、运行/暂停保持、回调超时取消后不延迟定位，以及 pending 回调禁止卸载。未操作用户调试进程，未实测真实 x64dbg GUI/首次系统断点附加。普通进程伪句柄 `GetCurrentProcess()` 为 -1，不能按文件 `INVALID_HANDLE_VALUE` 判断为无效；创建时间查询需要允许这个伪句柄。
 - **2026-10-07 中断恢复后对抗审查**：回调入口检查取消不足以保护慢 snapshot/CIP；所有前置查询结束后、第一条 GUI 副作用前用 Pending/Committed/Cancelled/Finished 原子阶段仲裁。取消赢则不跳转；已提交超时返回 ERROR_IO_PENDING，UI 明示结果未确认且不自动重试。CIP 一次冻结于提交前。服务端 WriteFile 完成不代表客户端消费，立即 DisconnectNamedPipe 实测 2000 次中丢 5 次回复；协议升至 v2，客户端完整核验回复后发带 requestId 的 typed Receipt，服务端只用有界 I/O 等待再断开，不使用可能无界阻塞的 FlushFileBuffers。修复后独立压力 2000/2000，删除回执及把 CIP 移到提交后两种变异均被持久测试抓到；launcher 工程/filter 同步登记两个导航头。工作台菜单拒绝无创建时间的弱会话，不给缓存 PID 补授新进程身份。
+
+## 2026-10-17 不附加内存调试
+
+- “内存 → 内存调试”的运行控制独立于原 `DebuggerBackend` 和 Titan/CE 原生调试循环。R3 线程检查只增加、归还自己的一次线程挂起计数；PID/TID 都绑定创建时间并保留对象句柄。原生自有进程 47 项、故障转发 66 项通过，不代表主程序 GUI 或 HVM 硬件验收。
+- `shared/debug/CooperativeDebugClient.*` 与 `tools/cooperative_debug/` 提供目标主动静态链接的 VEH 调试组件，使用真实检查点与自有 TF 异常单步，不自动注入。关闭取消 I/O 并断连，服务端按 owner/租约释放；TF 在途时不能卸载异常消费者或把线程所有权交给新会话。真实 50 项断言通过，步进前后 DebugPort=0、DebugObject=STATUS_PORT_NOT_SET/null；不据此宣称任意第三方进程无需组件可调试。
+- 实验 HVM 路径使用独立 `KswordArkHvmNoAttachIoctl.h` 与 `ArkHvmNoAttachClient`，通过预建的 MBEC 三根表、当前 ETHREAD/TEB/CPL 核验、MTF 和独立 sessionId/stopId 控制一个用户态线程。只支持满足条件的 Intel 独占生命周期；已有外部 HVM 状态不接管。查询或选择模式不启动 HVM。
+- VMX root 不等待 GUI、不分配；通用 fault 退出也必须先撤销停止发布。快照与状态同代读取，Step/Continue 消费停点后仍需复核真实现场；CONTINUE_PENDING 不得当成已运行。当前 GPR 显示不包含 XSTATE，运行路径仍须遵守既有 FXSAVE/legacy SIMD 保护。退出失败保留映射、引用与恢复身份，文件 Cleanup、owner/目标死亡和电源通知各有撤销责任。
+- 页面离开先询问暂存守卫，取消不能先释放暂停；确认后关闭运行控制期间冻结工作台输入。HVM OPEN 回执丢失时先用同一持有设备文件查询自己会话，再尝试 Close，不能换句柄接管别的页面。
+- 独立内存目标换代时要清退旧 `WorkbenchStatusBar::m_readResultText`；反汇编读取未必产生 HEX baseline/`onProviderJobLanded`，不能等它覆盖旧退出警告。同一已退出目标只换通道仍保留真实警告，不清暂存区脏锁存，也不把空状态写成读取成功。
+- 使用说明与准确验证边界见 `docs/内存调试模式.md`，一手研究及旧 HVM 仍依赖 Windows #DB 的边界见 `docs/不附加单步调试研究.md`。实验 HVM 的源码/编译结果不能替代 MBEC/MTF 实机运行证据；本轮未自动加载新驱动或操作测试 VM。

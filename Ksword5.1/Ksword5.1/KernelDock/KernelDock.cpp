@@ -34,7 +34,11 @@
 #include "KernelObjectDirectoryDeepTab.h"
 #include "KernelObjectTypeMatrixTab.h"
 #include "KernelObjectTypeProcedureTab.h"
+#include "KernelPatchHookAuditTab.h"
 #include "KernelPlatformAuditTab.h"
+#include "KernelShadowComparisonTab.h"
+#include "../MiscDock/HvciBypass/HvciBypassPage.h"
+#include "../MiscDock/HvciBypass/RxpfPage.h"
 #include "KernelSymbolicLinkTab.h"
 #include "KernelThreadAuditTab.h"
 #include "../SettingsDock/AppearanceSettings.h"
@@ -536,6 +540,28 @@ void KernelDock::initializeUi()
             "kernel.main.tab.callback.tooltip",
             QStringLiteral("驱动回调拦截规则管理与询问事件处理")));
 
+    // 统一 Patch/Hook 审计页——聚合全部 hook 类型的一键扫描。
+    m_patchHookAuditTabIndex = m_kernelAuditInnerTabWidget->addTab(
+        new KernelPatchHookAuditTab(m_kernelAuditInnerTabWidget),
+        tabIcon(QStringLiteral(":/Icon/process_critical.svg")),
+        kernelText("kernel.main.tab.patch_hook_audit.title", QStringLiteral("统一审计")));
+    m_kernelAuditInnerTabWidget->setTabToolTip(
+        m_patchHookAuditTabIndex,
+        kernelText(
+            "kernel.main.tab.patch_hook_audit.tooltip",
+            QStringLiteral("一键扫描 Inline Hook、IAT/EAT、SSDT、ObjectType 和驱动完整性，按风险汇总")));
+
+    // Shadow 比较页——逐条对比 SSDT / ShadowSSDT 所属模块。
+    m_shadowComparisonTabIndex = m_kernelAuditInnerTabWidget->addTab(
+        new KernelShadowComparisonTab(m_kernelAuditInnerTabWidget),
+        tabIcon(QStringLiteral(":/Icon/process_details.svg")),
+        kernelText("kernel.main.tab.shadow_comparison.title", QStringLiteral("Shadow 比较")));
+    m_kernelAuditInnerTabWidget->setTabToolTip(
+        m_shadowComparisonTabIndex,
+        kernelText(
+            "kernel.main.tab.shadow_comparison.tooltip",
+            QStringLiteral("逐条对比 SSDT 或 ShadowSSDT 服务表当前值与期望模块，高亮被修改的条目")));
+
     m_kernelAuditTabIndex = m_tabWidget->addTab(
         m_kernelAuditPage,
         tabIcon(QStringLiteral(":/Icon/process_critical.svg")),
@@ -606,6 +632,32 @@ void KernelDock::initializeUi()
         kernelText(
             "kernel.main.tab.vbs_posture.tooltip",
             QStringLiteral("区分 HVCI 策略位与运行时证据，识别「策略说开着但实际没跑」，并列出审计模式/测试签名/CI 调试等降级项")));
+
+    // HVCI W^X 绕过实验页：standalone 页面，自管理 showEvent 首刷。
+    m_hvciBypassTabIndex = m_miscInnerTabWidget->addTab(
+        new ks::misc::HvciBypassPage(m_miscInnerTabWidget),
+        tabIcon(QStringLiteral(":/Icon/process_priority.svg")),
+        kernelText(
+            "kernel.main.tab.hvci_bypass.title",
+            QStringLiteral("HVCI 绕过")));
+    m_miscInnerTabWidget->setTabToolTip(
+        m_hvciBypassTabIndex,
+        kernelText(
+            "kernel.main.tab.hvci_bypass.tooltip",
+            QStringLiteral("HVCI W^X 保护绕过实验：通过 MmChangeImageProtection 与 MDL 别名验证写入可执行内存")));
+
+    // RXPF 页错误模拟页：standalone 页面，自管理 showEvent 首刷。
+    m_rxpfTabIndex = m_miscInnerTabWidget->addTab(
+        new ks::misc::RxpfPage(m_miscInnerTabWidget),
+        tabIcon(QStringLiteral(":/Icon/development/terminal_line.svg")),
+        kernelText(
+            "kernel.main.tab.rxpf.title",
+            QStringLiteral("RXPF 模拟")));
+    m_miscInnerTabWidget->setTabToolTip(
+        m_rxpfTabIndex,
+        kernelText(
+            "kernel.main.tab.rxpf.tooltip",
+            QStringLiteral("RX 页错误模拟：通过影子 IDT 与指令模拟器在 NX 页上截获并模拟执行")));
 
     m_timerDpcTabIndex = m_tabWidget->addTab(
         m_timerDpcPage,
@@ -747,6 +799,8 @@ void KernelDock::updateTabIconContrast()
         m_miscInnerTabWidget->setTabIcon(m_ntQueryTabIndex, tabIcon(QStringLiteral(":/Icon/process_details.svg")));
         m_miscInnerTabWidget->setTabIcon(m_textIntegrityTabIndex, tabIcon(QStringLiteral(":/Icon/process_details.svg")));
         m_miscInnerTabWidget->setTabIcon(m_vbsPostureTabIndex, tabIcon(QStringLiteral(":/Icon/process_priority.svg")));
+        m_miscInnerTabWidget->setTabIcon(m_hvciBypassTabIndex, tabIcon(QStringLiteral(":/Icon/process_priority.svg")));
+        m_miscInnerTabWidget->setTabIcon(m_rxpfTabIndex, tabIcon(QStringLiteral(":/Icon/development/terminal_line.svg")));
         m_miscInnerTabWidget->setTabIcon(m_knowledgeTabIndex, tabIcon(QStringLiteral(":/Icon/knowledge_book.svg")));
     }
 
@@ -809,6 +863,14 @@ void KernelDock::updateTabIconContrast()
         else if (miscCurrentIndex == m_knowledgeTabIndex)
         {
             m_miscInnerTabWidget->setTabIcon(miscCurrentIndex, selectedTabIcon(QStringLiteral(":/Icon/knowledge_book.svg")));
+        }
+        else if (miscCurrentIndex == m_hvciBypassTabIndex)
+        {
+            m_miscInnerTabWidget->setTabIcon(miscCurrentIndex, selectedTabIcon(QStringLiteral(":/Icon/process_priority.svg")));
+        }
+        else if (miscCurrentIndex == m_rxpfTabIndex)
+        {
+            m_miscInnerTabWidget->setTabIcon(miscCurrentIndex, selectedTabIcon(QStringLiteral(":/Icon/development/terminal_line.svg")));
         }
     }
 }

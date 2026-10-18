@@ -60,6 +60,7 @@
 #include "../../../shared/driver/KswordArkSystemTimeIoctl.h"
 #include "../../../shared/driver/KswordArkResearchIoctl.h"
 #include "../../../shared/driver/KswordArkClipboardPolicyIoctl.h"
+#include "../../../shared/driver/KswordArkRxPfIoctl.h"
 
 namespace ksword::ark
 {

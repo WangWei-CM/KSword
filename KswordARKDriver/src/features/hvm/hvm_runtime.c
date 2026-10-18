@@ -18,6 +18,7 @@ Environment:
 --*/
 
 #include "hvm_internal.h"
+#include "hvm_noattach.h"
 #include "hvm_backend.h"
 /* Shared masks keep GUI admission and lifecycle registration consistent. */
 #include "driver/KswordArkHvmRequest.h"
@@ -976,6 +977,8 @@ KswordARKHvmPowerStateCallback(
     if ((ULONG_PTR)Argument2 == FALSE) {
         /* Block every new resident transition before taking its phase gate. */
         InterlockedExchange(&runtime->PowerTransitionPending, 1L);
+        /* S0 退出先撤销不附加停止权，异步收尾不得遗留目标门禁。 */
+        KswordARKHvmNoAttachRevoke();
         InterlockedIncrement(&runtime->PowerTransitionGeneration);
         KswordARKHvmStateSet(
             runtime,
@@ -1097,6 +1100,8 @@ KswordARKHvmFreeResourcesLocked(
         return;
     }
     /* Retire debugger pins only after every resident CPU returned ownership. */
+    /* 页释放以前先清除已无 resident 读者的不附加根表指针。 */
+    KswordARKHvmNoAttachResetRootsLocked(Runtime);
     KswordARKHvmDebugResetLocked(Runtime);
     /* Drop the control-register policy along with the VMCS it fed. */
     KswordARKHvmCrPolicyResetLocked(Runtime);
@@ -2343,6 +2348,8 @@ KswordARKHvmInitialize(
     g_KswordHvm.Initialized = TRUE;
     /* A missing notification guard disables EPT debugging without failing driver load. */
     (void)KswordARKHvmDebugInitialize();
+    /* 初始化通知不代表用户授权准备或启动 hypervisor。 */
+    (void)KswordARKHvmNoAttachInitialize();
     /*
      * The one place a plain store to StateFlags is correct: this runs before
      * ExRegisterCallback publishes the power callback, so the second writer
@@ -2558,6 +2565,8 @@ KswordARKHvmUninitialize(
     if (!g_KswordHvm.Initialized) {
         return;
     }
+    /* 先退休不附加会话和目标引用，再销毁其依赖的通用运行时。 */
+    KswordARKHvmNoAttachShutdown();
     /* Block new residency before draining either lifecycle callback. */
     g_KswordHvm.ResidentStartAllowed = FALSE;
     InterlockedExchange(
@@ -3284,6 +3293,15 @@ KswordARKHvmControl(
     KswordARKAcquirePushLockExclusive(&g_KswordHvm.Lock);
     oldStateFlags = g_KswordHvm.StateFlags;
     oldGeneration = g_KswordHvm.Generation;
+    /* 独占会话期间外部 STOP/TEARDOWN 也不能抢走本模块资源。 */
+    if (KswordARKHvmNoAttachOwned()) {
+        /* 只读状态使用 QUERY，不能借 CONTROL 修改保留的硬件所有权。 */
+        status = STATUS_DEVICE_BUSY;
+        /* 保留通用协议的明确忙状态。 */
+        Response->status = KSWORD_ARK_HVM_CONTROL_STATUS_BUSY;
+        /* 不执行任何生命周期变更。 */
+        goto Complete;
+    }
     if (g_KswordHvm.Busy) {
         status = STATUS_DEVICE_BUSY;
         Response->status =
@@ -3640,6 +3658,262 @@ KswordARKHvmPlatformProbe(
     /* Return the explicit architecture boundary. */
     return STATUS_NOT_SUPPORTED;
 #endif
+}
+
+/* 不附加调试只能从空闲运行时取得自己的完整生命周期。 */
+NTSTATUS KswordARKHvmNoAttachLifecycle(BOOLEAN Start, ULONG Flags)
+
+{
+
+    /* 使用固定普通协议参数复用现有准备和全核插入实现。 */
+
+    KSWORD_ARK_CONTROL_HVM_REQUEST request = {0};
+
+    /* 保留每个阶段的原始错误，不把失败改成能力不可用。 */
+
+    NTSTATUS status = STATUS_SUCCESS;
+
+    /* 与普通控制入口相同，独立记录延后 S0 恢复的收尾结果。 */
+
+    NTSTATUS deferredResumeStatus = STATUS_SUCCESS;
+
+    /* Shadow 的启动租约遵守现有 Shadow→HVM 锁顺序。 */
+
+    BOOLEAN lease = FALSE;
+
+    /* 未建立预约的调用没有任何资源控制权。 */
+
+    if (!KswordARKHvmNoAttachOwned())
+    {
+        return STATUS_INVALID_DEVICE_STATE;
+    }
+
+    /* 只有启动路径获取共享后端恢复租约。 */
+
+    if (Start)
+    {
+
+        /* 锁顺序不能在获取运行时锁以后倒转。 */
+
+        status = KswordARKDebuggerShadowAcquireStartLease();
+
+        /* 失败以前没有修改任何 HVM 资源。 */
+
+        if (!NT_SUCCESS(status))
+        {
+            return status;
+        }
+
+        /* 标记唯一需要归还的租约。 */
+
+        lease = TRUE;
+    }
+
+    /* 所有可阻塞工作都留在普通内核控制面。 */
+
+    KeEnterCriticalRegion();
+
+    /* 与常规 HVM 准备、清理、电源收尾串行。 */
+
+    KswordARKAcquirePushLockExclusive(&g_KswordHvm.Lock);
+
+    /* 初始化和电源状态必须先于任何资源分配验证。 */
+
+    if (!g_KswordHvm.Initialized || g_KswordHvm.Busy ||
+
+        (Start && InterlockedCompareExchange(&g_KswordHvm.PowerTransitionPending, 0L, 0L) != 0L))
+    {
+
+        /* 未取得资源时不能清理外部的保留状态。 */
+
+        status = STATUS_DEVICE_BUSY;
+
+        /* 统一归还控制锁和启动租约。 */
+
+        goto FinishNoAttach;
+    }
+
+    /* OPEN 必须明确拒绝任何外部准备、常驻或非 Intel 后端。 */
+
+    if (Start && (g_KswordHvm.BackendId != KSWORD_ARK_HVM_BACKEND_VMX ||
+
+                  g_KswordHvm.QueryStatus != KSWORD_ARK_HVM_QUERY_STATUS_OK ||
+
+                  (g_KswordHvm.StateFlags & KSWORD_ARK_HVM_STATE_RESOURCES_READY) != 0UL ||
+
+                  g_KswordHvm.PreparedProcessorCount != 0UL ||
+
+                  InterlockedCompareExchange(&g_KswordHvm.ResidentProcessorCount, 0L, 0L) != 0L))
+    {
+
+        /* 预约不赋予接管外部 HVM 的资格。 */
+
+        status = STATUS_DEVICE_BUSY;
+
+        /* 此分支绝不执行 STOP 或 TEARDOWN。 */
+
+        goto FinishNoAttach;
+    }
+
+    /* 只有此处在同一运行时锁内取得的资源才能由 CLOSE 释放。 */
+
+    if (Start)
+    {
+        InterlockedExchange(&g_KswordNoAttach.ResourcesOwned, 1L);
+    }
+
+    /* 生命周期操作期间不允许常规控制器并行进入。 */
+
+    g_KswordHvm.Busy = TRUE;
+
+    /* 现有准备接口只读取经过固定的 flags。 */
+
+    request.flags =
+        KSWORD_ARK_HVM_CONTROL_FLAG_UI_CONFIRMED | KSWORD_ARK_HVM_CONTROL_FLAG_FORCE |
+
+        ((Flags & KSWORD_ARK_HVM_NOATTACH_ALLOW_NESTED) != 0UL ? KSWORD_ARK_HVM_CONTROL_FLAG_ALLOW_NESTED
+                                                               : 0UL);
+
+    /* 先完成零 VMX 指令的预分配与全 CPU 能力一致性检查。 */
+
+    if (Start)
+    {
+        status = KswordARKHvmPrepareLocked(&g_KswordHvm, &request);
+    }
+
+    /* 常驻准入必须取得真实逐核 VMXON/VMXOFF 自检证据，FORCE 不能替代。 */
+
+    if (Start && NT_SUCCESS(status))
+    {
+        status = KswordARKHvmSelfTestLocked(&g_KswordHvm, &request);
+    }
+
+    /* MBEC 根表全部在 resident 进入之前完成。 */
+
+    if (Start && NT_SUCCESS(status))
+    {
+        status = KswordARKHvmNoAttachBuildRootsLocked(&g_KswordHvm);
+    }
+
+    /* 未退出的 owner/目标才允许取得硬件所有权。 */
+
+    if (Start && NT_SUCCESS(status) && InterlockedCompareExchange(&g_KswordNoAttach.Enabled, 0L, 0L) == 0L)
+    {
+        status = STATUS_CANCELLED;
+    }
+
+    /* 全核插入复用已经验证的生命周期和回滚实现。 */
+
+    if (Start && NT_SUCCESS(status))
+    {
+        status = KswordARKHvmResidentStart(&g_KswordHvm, request.flags);
+    }
+
+    /* CLOSE 和启动失败都只处理本模块刚取得的资源。 */
+
+    if (!Start || !NT_SUCCESS(status))
+    {
+
+        /* 先执行全核停止，失败时禁止释放仍被处理器引用的映射。 */
+
+        NTSTATUS stopStatus = KswordARKHvmResidentStop(&g_KswordHvm);
+
+        /* 只有全部处理器退出后才归还 EPT/VMCS 页。 */
+
+        if (NT_SUCCESS(stopStatus) &&
+            InterlockedCompareExchange(&g_KswordHvm.ResidentProcessorCount, 0L, 0L) == 0L)
+        {
+
+            /* 清理函数保留原有电源、处理器和物理页窗口约束。 */
+
+            KswordARKHvmFreeResourcesLocked(&g_KswordHvm);
+
+            /* VOID 清理内部仍可拒绝，必须读回完整页台账再归还所有权。 */
+
+            if (g_KswordHvm.EptPageCount == 0UL && g_KswordHvm.EptPointer == 0ULL &&
+
+                g_KswordHvm.PreparedProcessorCount == 0UL &&
+
+                InterlockedCompareExchange(&g_KswordHvm.ResidentProcessorCount, 0L, 0L) == 0L)
+            {
+
+                /* 只有实际释放完成才解除本次资源所有权。 */
+
+                InterlockedExchange(&g_KswordNoAttach.ResourcesOwned, 0L);
+            }
+            else
+            {
+
+                /* 保留 refs/sessionId/映射以供明确重试恢复。 */
+
+                status =
+                    NT_SUCCESS(g_KswordHvm.LastStatus) ? STATUS_HV_OPERATION_FAILED : g_KswordHvm.LastStatus;
+            }
+        }
+        else
+        {
+
+            /* 需要保留 sessionId 和引用供明确的 CLOSE 重试。 */
+
+            status = NT_SUCCESS(stopStatus) ? STATUS_HV_OPERATION_FAILED : stopStatus;
+        }
+    }
+
+    /* 清除普通控制面的忙标志。 */
+
+    g_KswordHvm.Busy = FALSE;
+
+    /* 普通控制入口同样在 Busy 清除后取得 phase，完成在途 S0 恢复。 */
+
+    deferredResumeStatus = KswordARKHvmAcquireResidentTransition(&g_KswordHvm);
+
+    /* 不在任何其它处理器仍拥有硬件转换时提前重新开放准入。 */
+
+    if (NT_SUCCESS(deferredResumeStatus))
+    {
+        /* 复用同一 helper 恢复卸载所有权并失效睡眠前自检证据。 */
+        deferredResumeStatus = KswordARKHvmCompleteDeferredPowerResumeLocked(&g_KswordHvm);
+        /* 归还转换阶段，保留既有电源回调串行契约。 */
+        KswordARKHvmReleaseResidentTransition(&g_KswordHvm);
+    }
+
+    /* 仍在排空属于既有忙状态，其它收尾失败必须保留为本次失败。 */
+
+    if (!NT_SUCCESS(deferredResumeStatus) && deferredResumeStatus != STATUS_DEVICE_BUSY &&
+        NT_SUCCESS(status))
+    {
+        /* 不用先前的成功覆盖卸载保护或电源恢复错误。 */
+        status = deferredResumeStatus;
+    }
+
+    /* 独立会话同样推进通用资源代次。 */
+
+    g_KswordHvm.Generation += 1UL;
+
+    /* 保存真实硬件结果供原有状态页查询。 */
+
+    g_KswordHvm.LastStatus = status;
+
+FinishNoAttach:
+
+    /* 先归还运行时锁，保持既有 Shadow→HVM 顺序。 */
+
+    KswordARKReleasePushLockExclusive(&g_KswordHvm.Lock);
+
+    /* 恢复调用者原有 APC 状态。 */
+
+    KeLeaveCriticalRegion();
+
+    /* START 的临时租约在唯一出口归还。 */
+
+    if (lease)
+    {
+        KswordARKDebuggerShadowReleaseStartLease();
+    }
+
+    /* 明确区分启动、关闭和失败后的恢复状态。 */
+
+    return status;
 }
 
 NTSTATUS

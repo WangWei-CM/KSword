@@ -85,7 +85,9 @@ typedef struct _KSW_HVM_VMCS_INPUT
      * what keeps that from being an escalation path.
      */
     UCHAR EnableVmFunctions;
-    USHORT Reserved;
+    /* 仅独占不附加会话允许请求 MBEC，普通 EPT 路径保持关闭。 */
+    UCHAR EnableNoAttachMbec;
+    UCHAR Reserved;
     /*
      * Interrupt descriptor table to install as HOST_IDTR_BASE, or zero to keep
      * using the guest's own.

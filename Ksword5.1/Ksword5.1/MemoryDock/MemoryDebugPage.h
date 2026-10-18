@@ -16,8 +16,9 @@ namespace ks::ui
 {
     class AsyncUiDispatcher;
     class MemoryWorkbenchView;
+    class MemoryDebugExecutionPanel;
 
-    // MemoryDebugPage：独立进程内存会话页面；目标持续运行，完全不建立 Windows 调试附加。
+    // MemoryDebugPage：独立内存与运行控制页面；完全不建立 Windows 调试附加。
     // 首次显示才创建工作台/枚举，构造不会访问目标；关闭只走内存改动离开守卫。
     class MemoryDebugPage final : public QWidget
     {
@@ -25,8 +26,9 @@ namespace ks::ui
         explicit MemoryDebugPage(QWidget* parent = nullptr);
         ~MemoryDebugPage() override;
 
-        // confirmQuit/cancelQuitPreparation：宿主窗口关闭前调用，与既有暂存离开守卫一致。
+        // confirmQuit：只确认暂存许可，不提前归还运行控制；全部宿主同意后再统一释放。
         bool confirmQuit();
+        bool releaseExecutionForQuit(); // 退出第二阶段，不重复询问暂存许可。
         void cancelQuitPreparation();
 
         // prepareForNavigation：搜索/目录建立前只创建工作台控件树，不刷新目标进程或改变会话。
@@ -46,6 +48,7 @@ namespace ks::ui
         void selectProcess();
         // closeSession：用户主动关闭会话；取消离开守卫时保持全部当前状态。
         void closeSession();
+        bool releaseExecutionControl(); // 后台释放期间冻结工作台输入，防止新增未询问的暂存修改。
         // refreshModules/openModule：使用目标层已核对所有者的模块快照导航到基址。
         void refreshModules();
         void openModule();
@@ -58,6 +61,7 @@ namespace ks::ui
         QToolButton* closeButton_ = nullptr;       // 关闭当前内存会话。
         QLabel* status_ = nullptr;                 // 候选/身份失败和退出反馈。
         MemoryWorkbenchView* view_ = nullptr;      // 只属于本页的工作台会话。
+        MemoryDebugExecutionPanel* execution_ = nullptr; // 明确区分线程检查与真实协作单步。
         QTimer* livenessTimer_ = nullptr;          // 查询锚点存活，不暂停目标。
         std::shared_ptr<AsyncUiDispatcher> dispatcher_; // 页面销毁时关闭的回投门禁。
         MemoryDebugProcessCatalog catalog_;       // 当前选择器的不可变身份快照。
@@ -65,5 +69,7 @@ namespace ks::ui
         MemoryDebugProcessCandidate selectedProcess_; // 名称缓存所属身份，不能套到另一个会话。
         bool refreshing_ = false;                 // 防止并发刷新造成选择器错配。
         bool initialModulePending_ = false;       // 仅首次模块加载自动导航，刷新不抢用户地址。
+        bool quitPrepared_ = false;              // 已批准退出，整页冻结到释放完成或全局取消。
+        bool enabledBeforeQuit_ = true;          // 取消退出时恢复原启用状态，不停止后台租约查询。
     };
 }

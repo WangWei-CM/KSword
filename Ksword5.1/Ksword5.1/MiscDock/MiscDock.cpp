@@ -14,6 +14,8 @@
 #include "DiskEditor/DiskEditorTab.h"
 #include "RenderBenchmark/RenderBenchmarkPage.h"
 #include "DesktopDrawing/DesktopDrawingPage.h"
+#include "HvciBypass/HvciBypassPage.h"
+#include "HvciBypass/RxpfPage.h"
 #include "SoundSource/SoundSourcePage.h"
 #include "SystemTime/SystemTimePage.h"
 #include "VirtualLocation/VirtualLocationPage.h"
@@ -90,6 +92,8 @@ void MiscDock::initializeUi()
     m_renderBenchmarkHostWidget = new QWidget(m_mainTabWidget);
     m_desktopDrawingHostWidget = new QWidget(m_mainTabWidget);
     m_windowInjectionHostWidget = new QWidget(m_mainTabWidget);
+    m_hvciBypassHostWidget = new QWidget(m_mainTabWidget);
+    m_rxpfHostWidget = new QWidget(m_mainTabWidget);
     m_scannerHostWidget = new QWidget(m_mainTabWidget);
     m_minidumpHostWidget = new QWidget(m_mainTabWidget);
     m_pluginHostWidget = new QWidget(m_mainTabWidget);
@@ -235,6 +239,32 @@ void MiscDock::initializeUi()
         m_windowInjectionHostWidget, QStringLiteral("DWM / Win32k 注入"));
     ks::i18n::LanguageManager::instance().bindTab(m_mainTabWidget,
         m_windowInjectionHostWidget, QStringLiteral("misc.window_injection.tab"), QStringLiteral("DWM / Win32k 注入"));
+
+    // HVCI 绕过实验页：
+    // - 在 HVCI 启用的环境下测试 MmChangeImageProtection 能否将映像页改成 NX、
+    //   通过 MDL 别名写入修改后的内容、再恢复 RX 权限使修改持久化。
+    m_hvciBypassTabIndex = m_mainTabWidget->addTab(
+        m_hvciBypassHostWidget,
+        QIcon(QStringLiteral(":/Icon/codeeditor_replace.svg")),
+        QStringLiteral("HVCI 绕过"));
+    ks::i18n::LanguageManager::instance().bindTab(
+        m_mainTabWidget,
+        m_hvciBypassHostWidget,
+        QStringLiteral("misc.hvci_bypass.tab"),
+        QStringLiteral("HVCI 绕过"));
+
+    // RXPF 模拟执行实验页：
+    // - 接管影子 IDT 的 #PF 向量，对被标记为 NX 的内核映像页进行 x64 指令模拟；
+    // - 无需恢复 RX 权限即可在 HVCI 下执行被修改的代码页。
+    m_rxpfTabIndex = m_mainTabWidget->addTab(
+        m_rxpfHostWidget,
+        QIcon(QStringLiteral(":/Icon/development/terminal_line.svg")),
+        QStringLiteral("RXPF 模拟"));
+    ks::i18n::LanguageManager::instance().bindTab(
+        m_mainTabWidget,
+        m_rxpfHostWidget,
+        QStringLiteral("misc.rxpf.tab"),
+        QStringLiteral("RXPF 模拟"));
 
     // 以下三页原本是顶层 Dock，为精简 dock 栏入口并入杂项：
     // - 页签顺序沿用它们在原 dock 栏中的相对先后（扫描器 -> 转储分析 -> 插件）；
@@ -391,6 +421,16 @@ void MiscDock::ensureTabInitialized(const int tabIndex, const bool activatePage)
     if (tabIndex == m_windowInjectionTabIndex)
     {
         initializeWindowInjectionPage();
+        return;
+    }
+    if (tabIndex == m_hvciBypassTabIndex)
+    {
+        initializeHvciBypassPage();
+        return;
+    }
+    if (tabIndex == m_rxpfTabIndex)
+    {
+        initializeRxpfPage();
         return;
     }
     if (tabIndex == m_scannerTabIndex)
@@ -643,6 +683,30 @@ void MiscDock::initializeWindowInjectionPage()
     auto* layout = buildHostLayout(m_windowInjectionHostWidget);
     m_windowInjectionPage = ks::window_input::CreateInjectionPage(m_windowInjectionHostWidget);
     layout->addWidget(m_windowInjectionPage);
+}
+
+void MiscDock::initializeHvciBypassPage()
+{
+    if (m_hvciBypassHostWidget == nullptr || m_hvciBypassPage != nullptr)
+    {
+        return;
+    }
+
+    QVBoxLayout* const hostLayout = buildHostLayout(m_hvciBypassHostWidget);
+    m_hvciBypassPage = new ks::misc::HvciBypassPage(m_hvciBypassHostWidget);
+    hostLayout->addWidget(m_hvciBypassPage, 1);
+}
+
+void MiscDock::initializeRxpfPage()
+{
+    if (m_rxpfHostWidget == nullptr || m_rxpfPage != nullptr)
+    {
+        return;
+    }
+
+    QVBoxLayout* const hostLayout = buildHostLayout(m_rxpfHostWidget);
+    m_rxpfPage = new ks::misc::RxpfPage(m_rxpfHostWidget);
+    hostLayout->addWidget(m_rxpfPage, 1);
 }
 
 void MiscDock::initializeMinidumpPage()

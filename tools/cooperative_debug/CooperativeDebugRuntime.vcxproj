@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <ProjectGuid>{1B89B13F-3307-423B-88D7-818E446CD0C8}</ProjectGuid>
+    <Keyword>Win32Proj</Keyword>
+    <RootNamespace>CooperativeDebugRuntime</RootNamespace>
+    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Label="Configuration">
+    <ConfigurationType>StaticLibrary</ConfigurationType>
+    <PlatformToolset>v143</PlatformToolset>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <Import Project="$(VCTargetsPath)\BuildCustomizations\masm.props" />
+  <Import Project="CooperativeDebug.Common.props" />
+  <ItemGroup>
+    <ClCompile Include="CooperativeDebugRuntime.cpp" />
+    <ClCompile Include="CooperativeDebugPipe.cpp" />
+    <ClInclude Include="CooperativeDebugRuntime.h" />
+    <ClInclude Include="CooperativeDebugRuntimeInternal.h" />
+    <ClInclude Include="..\..\shared\debug\CooperativeDebugProtocol.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <MASM Include="CooperativeDebugTrap.asm" />
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <Import Project="$(VCTargetsPath)\BuildCustomizations\masm.targets" />
+</Project>

@@ -22,3 +22,92 @@
 
 进程目录与自有目标检查是本机 Win32 回归，解码检查是 Qt Core 逻辑回归。
 这些检查不替代主程序 GUI、R0 驱动、调试器或其它真实目标的验收。
+
+## 不附加线程会话
+
+`memory_debug_thread_session_tests.cpp` 直接编译生产
+`MemoryDebugThreadSession.cpp`。只启动本测试二进制作为目标，使用父子共享进度
+独立核对暂停、恢复与其它线程仍运行；不会附加调试器、注入、设置 TF/DR/INT3、
+写目标上下文或操作用户进程。测试对象均隐藏启动，正常结束经事件通知。
+
+2026-10-17 的 HostX64 MSVC 19.44.35207、Windows SDK 10.0.26100.0、
+C++17 `/W4 /WX` 构建与本机受控执行通过：普通构建 **47/47**，
+故障构建 **66/66**。普通构建完整输出为
+`output/memory_debug_thread_session_tests.log`，尾行为
+`THREAD_SESSION_CHECKS=47 FAILURES=0`。故障构建完整输出为
+`output/memory_debug_thread_session_fault_tests.log`，尾行为
+`THREAD_SESSION_CHECKS=66 FAILURES=0`；产物分别为
+`output/memory_debug_thread_session_tests.exe` 和
+`output/memory_debug_thread_session_fault_tests.exe`，均不提交。
+
+普通构建覆盖创建时间/owner 强身份、自身目标拒绝、RIP/RSP 等真实只读上下文、
+一次单线程暂停、重复操作、外部已有暂停的拒绝与配平、连续临时快照无计数泄漏、
+close/析构恢复，以及暂停中目标自行退出。前后独立
+`CheckRemoteDebuggerPresent` 都为 false。故障构建只将生产实现的
+`GetThreadContext`、`ResumeThread`、`WaitForSingleObject` 替换成一次失败后
+继续转发真实 Win32 的入口；覆盖捕获失败仍恢复、恢复失败保留句柄/身份/一次计数、
+恢复重试、close 失败不丢所有权、双失败保留原因、失效句柄等待报错和析构再恢复。
+这些受控故障检查与未替换 Win32 的普通执行分别保留，不能替代产品 GUI 验收。
+
+在仓库根目录可用下列精确工具链参数重现；沿用既有 `output/`：
+
+```powershell
+$threadVc='C:/Program Files (x86)/Microsoft Visual Studio/2022/BuildTools/VC/Tools/MSVC/14.44.35207'
+$threadSdk='C:/Program Files (x86)/Windows Kits/10'
+$threadCompiler=Join-Path $threadVc 'bin/Hostx64/x64/cl.exe'
+$threadIncludes=@('/external:I'+(Join-Path $threadVc 'include'))
+foreach($threadPart in @('ucrt','shared','um')) {
+    $threadIncludes+='/external:I'+(Join-Path $threadSdk ('Include/10.0.26100.0/'+$threadPart))
+}
+$threadLibs=@('/LIBPATH:'+(Join-Path $threadVc 'lib/x64'))
+foreach($threadPart in @('ucrt','um')) {
+    $threadLibs+='/LIBPATH:'+(Join-Path $threadSdk ('Lib/10.0.26100.0/'+$threadPart+'/x64'))
+}
+$env:PreferredToolArchitecture='x64'
+$env:PROCESSOR_ARCHITECTURE='AMD64'
+$env:PROCESSOR_ARCHITEW6432='AMD64'
+$env:PATH=(Join-Path $threadVc 'bin/Hostx64/x64')+';'+$env:PATH
+& $threadCompiler /nologo /std:c++17 /permissive- /utf-8 /EHsc /MD /W4 /WX /external:W0 /O1 `
+    /DNOMINMAX /DWIN32_LEAN_AND_MEAN @threadIncludes `
+    'tools/tests/memory_debug_thread_session_tests.cpp' `
+    'Ksword5.1/Ksword5.1/MemoryDock/MemoryDebugThreadSession.cpp' `
+    /Fooutput/ /Feoutput/memory_debug_thread_session_tests.exe /link @threadLibs
+if ($LASTEXITCODE -ne 0) { throw 'Thread session native build failed.' }
+& ./output/memory_debug_thread_session_tests.exe
+if ($LASTEXITCODE -ne 0) { throw 'Thread session native regression failed.' }
+
+# 故障版本在测试文件末尾包含生产 cpp，只编译测试文件，避免重复链接实现。
+& $threadCompiler /nologo /std:c++17 /permissive- /utf-8 /EHsc /MD /W4 /WX /external:W0 /O1 `
+    /DNOMINMAX /DWIN32_LEAN_AND_MEAN /DMEMORY_DEBUG_THREAD_SESSION_FAULT_TESTS @threadIncludes `
+    'tools/tests/memory_debug_thread_session_tests.cpp' `
+    /Fooutput/memory_debug_thread_session_fault_tests.obj `
+    /Feoutput/memory_debug_thread_session_fault_tests.exe /link @threadLibs
+if ($LASTEXITCODE -ne 0) { throw 'Thread session fault build failed.' }
+& ./output/memory_debug_thread_session_fault_tests.exe
+if ($LASTEXITCODE -ne 0) { throw 'Thread session fault regression failed.' }
+```
+
+暂停计数由 Windows 线程共享，不提供调用方所有权标记；会话只记录自己增加的一次，
+恢复时只调用一次 `ResumeThread`，不会循环清空外部计数。其它工具若并发增减计数，
+不能将返回结果解释为全进程一致停止或对其它工具计数的隔离保证。析构为尽力恢复；
+控制程序被强制终止不能获得用户态析构恢复保证。本入口没有单步/断点/异常消费能力。
+
+## 保护实验响应判定
+
+`memory_result_reporting_tests.cpp` 仅使用内存中的协议响应，验证必需阶段、显式请求的
+写入/恢复阶段、Pending、版本/长度不兼容，以及字节读回的有效性。未请求的可选阶段
+不会被误报为失败；驱动的 `0xDEAD` 未读哨兵不能被截成真实字节证据。
+该夹具已登记为 `ProtectionResults`，可经原生回归 runner 构建执行。
+
+`python tools/test_memory_result_reporting.py` 另从生产后端提取实际判定文本函数，
+用仓库 Qt Core 和 HostX64 MSVC `/W4 /WX` 编译并执行相同夹具，覆盖恢复未证实、
+未读字节与真实零字节的区分。生成物、源文件 SHA256 和完整日志放在
+`output/review-fixes-20261017/result-reporting/`。两种入口均不访问设备、运行 CLI
+实验或写入任何目标；结果不代替驱动与 GUI 验收。
+
+## 内核服务地址归属
+
+`kernel_service_audit_evidence_tests.cpp` 直接使用生产的 Qt-free 判定头，验证真实地址
+的半开模块范围、整数溢出、重叠归属、前后快照变化、未知地址、缺失能力以及主内核与
+Shadow 精确宿主身份。枚举类别也独立于译文。夹具已登记为 `AuditEvidence`；输入均为
+内存快照，不查询系统、访问驱动或修改服务表。它验证判定逻辑，不证明现场模块快照可信。

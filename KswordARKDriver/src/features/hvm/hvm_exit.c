@@ -16,6 +16,7 @@ Environment:
 --*/
 
 #include "hvm_exit.h"
+#include "hvm_noattach.h"
 #include "hvm_exit_emulate.h"
 #include "hvm_cr_policy.h"
 #include "hvm_ept_view.h"
@@ -2477,6 +2478,16 @@ KswordARKHvmResidentVmExitDispatchBody(
         return handled
             ? KSW_HVM_EXIT_ACTION_DEVIRTUALIZE
             : KSW_HVM_EXIT_ACTION_FATAL;
+    }
+    /* 原有全核故障退出门优先；不附加门禁不能阻止其它处理器回滚。 */
+    {
+        /* 模块只认领自己制造的 MBEC 取指与单次 MTF，不向 guest 注入异常。 */
+        ULONG noAttachAction = KSW_HVM_EXIT_ACTION_RESUME;
+        /* 保持现有 VMCALL STOP 的精确 RIP 续跑路径。 */
+        if (KswordARKHvmNoAttachHandleExit(Context, Frame, basicReason, telemetry.Qualification, &noAttachAction)) {
+            /* 不把新的当前停止伪装成历史 telemetry 事件。 */
+            return noAttachAction;
+        }
     }
     /* Read address fields only for exits where Intel defines their content. */
     if (basicReason == KSW_VMX_EXIT_EPT_VIOLATION ||

@@ -792,3 +792,129 @@ Complete:
     KswRxpfSetLastStatus(status);
     return status;
 }
+
+static VOID
+KswRxpfFillHookPointResponse(
+    _In_opt_ const KSW_RXPF_PAGE_RECORD* Record,
+    _Out_ KSWORD_ARK_RXPF_HOOK_POINT_RESPONSE* Response
+    )
+{
+    /* Snapshot the hook-point fields from the record under the writer lock. */
+    RtlZeroMemory(Response, sizeof(*Response));
+    Response->version = KSWORD_ARK_RXPF_PROTOCOL_VERSION;
+    Response->size = sizeof(*Response);
+    if (Record == NULL) {
+        return;
+    }
+    Response->recordId = (ULONGLONG)Record->RecordId;
+    Response->hookAddress = (ULONGLONG)Record->HookAddress;
+    Response->hookAction = Record->HookAction;
+    Response->state = (ULONG)Record->State;
+    Response->redirectTarget = Record->RedirectTarget;
+    Response->redirectCount = (ULONGLONG)Record->RedirectCount;
+    Response->lastStatus = Record->LastStatus;
+}
+
+NTSTATUS
+KswRxpfRuntimeSetHookPoint(
+    _In_ const KSWORD_ARK_RXPF_SET_HOOK_POINT_REQUEST* Request,
+    _Out_ KSWORD_ARK_RXPF_HOOK_POINT_RESPONSE* Response
+    )
+{
+    PKSW_RXPF_PAGE_RECORD record = NULL;
+    NTSTATUS status = STATUS_SUCCESS;
+
+    /* Validate inputs before touching any shared state. */
+    if (Request == NULL || Response == NULL ||
+        Request->reserved != 0UL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    status = KswRxpfValidateHeader(
+        &Request->header,
+        sizeof(*Request),
+        KSWORD_ARK_RXPF_FLAG_UI_CONFIRMED);
+    if (!NT_SUCCESS(status) || !KswRxpfRuntimeReady()) {
+        return NT_SUCCESS(status) ? STATUS_DELETE_PENDING : status;
+    }
+
+    /* Only NONE, REDIRECT and LOG are valid actions. */
+    if (Request->hookAction > KSWORD_ARK_RXPF_HOOK_ACTION_LOG) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    /* REDIRECT must supply both an address and a target. */
+    if (Request->hookAction == KSWORD_ARK_RXPF_HOOK_ACTION_REDIRECT &&
+        (Request->hookAddress == 0ULL || Request->redirectTarget == 0ULL)) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    /* LOG must supply an address. */
+    if (Request->hookAction == KSWORD_ARK_RXPF_HOOK_ACTION_LOG &&
+        Request->hookAddress == 0ULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    KswRxpfPageTableAcquireExclusive(&g_KswRxpfRuntime.PageTable);
+    record = KswRxpfPageTableFindByIdLocked(
+        &g_KswRxpfRuntime.PageTable,
+        Request->recordId);
+    if (record == NULL) {
+        status = STATUS_NOT_FOUND;
+        goto Exit;
+    }
+    /* The page must be in the RW/NX state to accept a hook point. */
+    if (record->State != KSWORD_ARK_RXPF_PAGE_STATE_RW_NX) {
+        status = STATUS_INVALID_DEVICE_STATE;
+        goto Exit;
+    }
+    /* The hook address must fall within the managed page. */
+    if (Request->hookAction != KSWORD_ARK_RXPF_HOOK_ACTION_NONE &&
+        (Request->hookAddress < (ULONGLONG)record->PageBase ||
+         Request->hookAddress >= (ULONGLONG)record->PageBase + PAGE_SIZE)) {
+        status = STATUS_INVALID_ADDRESS;
+        goto Exit;
+    }
+
+    /* 活跃故障读者不持控制锁，禁止在仿真启用期间逐字段更改配置。 */
+    if (InterlockedCompareExchange(&record->EmulationEnabled, 0L, 0L) != 0L) {
+        /* 必须先显式停用并完成已有的故障处理器排空。 */
+        status = STATUS_DEVICE_BUSY;
+        /* 此拒绝不改变现有 Hook 地址、动作或目标。 */
+        goto Exit;
+    }
+    /* 控制锁阻止重新启用；等待此前观察到启用状态的无锁读者完整返回。 */
+    KeMemoryBarrier();
+    /* 停用请求即使曾超时，也不能让残留读者观察半份新配置。 */
+    status = KswRxpfDiagnosticsWaitForHandlers(5000UL);
+    /* 无法证明排空时保留所有原有字段，交由调用者稍后重试。 */
+    if (!NT_SUCCESS(status)) {
+        /* 本次没有取得修改故障可见配置的资格。 */
+        goto Exit;
+    }
+    /* 仿真关闭且旧读者排空后，控制锁独占配置直到完整提交。 */
+    if (Request->hookAction == KSWORD_ARK_RXPF_HOOK_ACTION_NONE) {
+        InterlockedExchange64(&record->HookAddress, 0);
+        record->RedirectTarget = 0ULL;
+        InterlockedExchange(
+            (volatile LONG*)&record->HookAction,
+            (LONG)KSWORD_ARK_RXPF_HOOK_ACTION_NONE);
+    } else {
+        record->RedirectTarget = Request->redirectTarget;
+        InterlockedExchange64(
+            &record->HookAddress,
+            (LONG64)Request->hookAddress);
+        KeMemoryBarrier();
+        InterlockedExchange(
+            (volatile LONG*)&record->HookAction,
+            (LONG)Request->hookAction);
+    }
+    InterlockedIncrement(&g_KswRxpfRuntime.Generation);
+    record->LastStatus = STATUS_SUCCESS;
+
+Exit:
+    if (record != NULL) {
+        record->LastStatus = status;
+    }
+    KswRxpfFillHookPointResponse(record, Response);
+    KswRxpfPageTableReleaseExclusive(&g_KswRxpfRuntime.PageTable);
+    KswRxpfSetLastStatus(status);
+    return status;
+}

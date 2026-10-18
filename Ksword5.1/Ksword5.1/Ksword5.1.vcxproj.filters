@@ -188,6 +188,27 @@
     <ClCompile Include="MiscDock\DisableDse\DisableDsePage.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="MiscDock\DisableDse\DisableDsePageKsec.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="MiscDock\DisableDse\KsecDdExecutor.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="MiscDock\DisableDse\KsecDdSiloPath.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="MiscDock\HvciBypass\HvciBypassBackend.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="MiscDock\HvciBypass\HvciBypassPage.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="MiscDock\HvciBypass\RxpfBackend.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="MiscDock\HvciBypass\RxpfPage.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="MiscDock\CKS\CksBackend.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -398,6 +419,15 @@
     <ClCompile Include="KernelDock\KernelSlatIommuAuditTab.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="KernelDock\KernelPatchHookAuditTab.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="KernelDock\KernelShadowComparisonTab.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="KernelDock\KernelServiceAuditUi.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="KernelDock\KernelTextIntegrityTab.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -594,6 +624,18 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="MemoryDock\MemoryDebugProcessCatalog.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="MemoryDock\MemoryDebugExecutionPanel.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="MemoryDock\MemoryDebugThreadSession.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="ArkDriverClient\ArkHvmNoAttachClient.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\shared\debug\CooperativeDebugClient.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="MemoryDock\MemoryDock.WorkbenchEntry.cpp">
@@ -2218,6 +2260,24 @@
     <ClInclude Include="MiscDock\DisableDse\DisableDsePage.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="MiscDock\DisableDse\KsecDdExecutor.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="MiscDock\HvciBypass\HvciBypassBackend.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="MiscDock\HvciBypass\HvciBypassPage.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="MiscDock\HvciBypass\RxpfBackend.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="MiscDock\HvciBypass\RxpfPage.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\shared\driver\KsecDdProtocol.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="MiscDock\CKS\CksBackend.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -3039,6 +3099,18 @@
     <ClInclude Include="KernelDock\KernelSlatIommuAuditTab.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="KernelDock\KernelPatchHookAuditTab.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="KernelDock\KernelShadowComparisonTab.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="KernelDock\KernelServiceAuditEvidence.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="KernelDock\KernelServiceAuditUi.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="KernelDock\KernelTextIntegrityTab.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -3241,6 +3313,27 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="MemoryDock\MemoryDebugProcessCatalog.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="MemoryDock\MemoryDebugExecutionPanel.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="MemoryDock\MemoryDebugThreadSession.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="ArkDriverClient\ArkHvmNoAttachClient.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\shared\driver\KswordArkHvmNoAttachIoctl.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\shared\driver\KswordArkMemoryResult.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\shared\debug\CooperativeDebugClient.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\shared\debug\CooperativeDebugProtocol.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="ksword\scanner\atomic_file_patch.h">

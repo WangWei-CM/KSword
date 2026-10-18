@@ -3002,6 +3002,11 @@
       "detail": "EPT debugger stops require a stopped private-EPT preparation and a harness-owned native debug session. VMX transition and guest debug exceptions need dedicated hardware acceptance."
     },
     {
+      "ioctl": "HVM_NOATTACH",
+      "reason": "virtualization-lifecycle",
+      "detail": "显式 OPEN 会独占准备并启动 Intel MBEC/MTF 常驻；普通 CI 仅做协议、源码与构建检查，不加载驱动、不启动 VM，也不把能力查询当真实单步验收。"
+    },
+    {
       "ioctl": "CONTROL_IO_TIMER",
       "reason": "no-cli-path",
       "detail": "KswordCLI 当前没有对应子命令，无法在本 harness 内触发；属于覆盖缺口，不是安全排除。"
@@ -3197,6 +3202,11 @@
       "detail": "RXPF 安装 #PF 钩子并做指令模拟，属实验机制；同时无 CLI 入口。"
     },
     {
+      "ioctl": "RXPF_SET_HOOK_POINT",
+      "reason": "experimental-page-fault-hooking",
+      "detail": "RXPF 钩点机制：在已注册 NX 页上设置执行重定向或日志钩点，属实验机制；同时无 CLI 入口。"
+    },
+    {
       "ioctl": "RXPF_UNREGISTER_PAGE",
       "reason": "experimental-page-fault-hooking",
       "detail": "RXPF 安装 #PF 钩子并做指令模拟，属实验机制；同时无 CLI 入口。"
@@ -3255,6 +3265,16 @@
       "ioctl": "WRITE_RAW_DISK",
       "reason": "destroys-host-storage",
       "detail": "裸盘写入会破坏 CI 机器的卷结构；同IOCTL的V1与捕获写V2均排除实机执行，V2设备GUID/原值/别名/长度门禁由离线mock验证。"
+    },
+    {
+      "ioctl": "CHANGE_MAPPED_PAGE_PROTECTION",
+      "reason": "hvci-research-experiment",
+      "detail": "通过 MDL 路径变更内核代码页保护属性的 HVCI 研究 IOCTL。在 HVCI 开启的机器上可能触发 bugcheck，不适合自动化 CI。"
+    },
+    {
+      "ioctl": "CHANGE_IMAGE_PAGE_PROTECTION",
+      "reason": "hvci-research-experiment",
+      "detail": "签名扫描定位 MmChangeImageProtection 并在内核映像页上调用。仅限手动 HVCI 研究环境。"
     },
     {
       "ioctl": "CLOSE_HANDLE",

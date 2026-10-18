@@ -1,5 +1,6 @@
 #include "../Framework.h"
 #include "MemoryDebugPage.h"
+#include "MemoryDebugExecutionPanel.h"
 #include "MemoryDock.WorkbenchServices.h"
 #include "../theme.h"
 #include "../UI/AdaptivePageScroll.h"
@@ -59,13 +60,13 @@ namespace ks::ui
         layout_->setContentsMargins(6, 6, 6, 6);
         layout_->setSpacing(6);
 
-        // 模式说明始终可见；此页只提供内存操作，不把运行目标伪装成调试停止状态。
+        // 内存访问与运行控制共用目标身份，但不借用 Windows 调试事件或其它 Dock 会话。
         auto* explanation = new QLabel(this); // 随布局换行的固定能力说明。
         explanation->setWordWrap(true);
         explanation->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
         ks::i18n::LanguageManager::instance().bindText(explanation,
             QStringLiteral("memory.debug.mode"),
-            QStringLiteral("不附加模式：目标持续运行，可读写内存和反汇编；不提供暂停、单步或断点。"));
+            QStringLiteral("不附加模式：内存与反汇编、R3 单线程检查，以及目标主动启用组件的 VEH 单步；均不建立 Windows 调试附加。"));
         layout_->addWidget(explanation);
 
         // 候选选择独立于旧 Dock，输入内容只能匹配当前快照，不能凭 PID 猜测目标身份。
@@ -116,6 +117,15 @@ namespace ks::ui
         ks::ui::StylePrimaryCombo(moduleCombo_);
         targetLayout->addWidget(moduleCombo_);
         layout_->addWidget(targetToolbar);
+        execution_ = new MemoryDebugExecutionPanel(this);
+        execution_->onStoppedAddress = [this](const std::uint64_t address)
+        {
+            if (view_ != nullptr)
+            {
+                (void)view_->showDisassemblyAt(address);
+            }
+        };
+        layout_->addWidget(execution_);
         status_ = new QLabel(Text("请选择进程以打开内存会话。"), this);
         status_->setWordWrap(true);
         status_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
@@ -328,6 +338,10 @@ namespace ks::ui
 
     void MemoryDebugPage::selectProcess()
     {
+        if (quitPrepared_ || (qApp != nullptr && qApp->property("ksword_memory_quit_guard_active").toBool()))
+        {
+            return;
+        }
         if (refreshing_)
         {
             return;
@@ -366,7 +380,17 @@ namespace ks::ui
             status_->setText(Text("无法核验该进程身份，请刷新列表或检查访问权限。"));
             return;
         }
-        const QPointer<MemoryDebugPage> self(this); // 暂存离开守卫可能触发宿主销毁。
+        // 先询问原有暂存离开守卫；用户取消时不能先恢复仍由本页暂停的线程。
+        const QPointer<MemoryDebugPage> self(this); // 守卫和 HVM 退出都可能处理嵌套事件循环。
+        if (!view_->target().requestLeave(LeaveReason::PinChange) || !self)
+        {
+            return;
+        }
+        // 真正更换目标之前归还运行控制；失败时仍保留旧目标与恢复入口。
+        if (!releaseExecutionControl() || !self)
+        {
+            return;
+        }
         if (!view_->target().requestPin(candidate.pid, candidate.createTime100ns))
         {
             if (self)
@@ -381,9 +405,10 @@ namespace ks::ui
         }
         processName_ = QString::fromStdWString(candidate.name);
         selectedProcess_ = candidate;
+        execution_->setTarget(candidate.pid, candidate.createTime100ns);
         initialModulePending_ = true;
         closeButton_->setEnabled(true);
-        status_->setText(Text("内存会话：%1 · PID %2 · 目标持续运行")
+        status_->setText(Text("内存会话：%1 · PID %2 · 运行状态见控制区")
             .arg(processName_).arg(candidate.pid));
         refreshModules();
     }
@@ -427,7 +452,19 @@ namespace ks::ui
 
     void MemoryDebugPage::closeSession()
     {
+        if (quitPrepared_ || (qApp != nullptr && qApp->property("ksword_memory_quit_guard_active").toBool()))
+        {
+            return;
+        }
         const QPointer<MemoryDebugPage> self(this); // 离开守卫可嵌套事件循环并关闭宿主。
+        if (view_ == nullptr || !view_->target().requestLeave(LeaveReason::PinChange) || !self)
+        {
+            return;
+        }
+        if (!releaseExecutionControl() || !self)
+        {
+            return;
+        }
         if (view_ == nullptr || !view_->clearMemoryDebugTarget() || !self)
         {
             return;
@@ -435,15 +472,66 @@ namespace ks::ui
         initialModulePending_ = false;
         processName_.clear();
         selectedProcess_ = {};
+        execution_->setTarget(0, 0);
         moduleCombo_->clear();
         moduleCombo_->setEnabled(false);
         closeButton_->setEnabled(false);
-        status_->setText(Text("内存会话已关闭，目标继续运行。"));
+        status_->setText(Text("内存会话已关闭，已释放本会话的运行控制。"));
     }
 
     bool MemoryDebugPage::confirmQuit()
     {
-        return view_ == nullptr || view_->confirmQuit();
+        const QPointer<MemoryDebugPage> self(this); // 取消暂存提示时保留已有运行控制。
+        if (view_ != nullptr && !view_->confirmQuit())
+        {
+            return false;
+        }
+        if (!self)
+        {
+            return false;
+        }
+        if (!quitPrepared_)
+        {
+            enabledBeforeQuit_ = !testAttribute(Qt::WA_ForceDisabled);
+            quitPrepared_ = true;
+            setEnabled(false); // 同时冻结目标、运行控制和专业编辑，后台计时器继续工作。
+        }
+        return true;
+    }
+
+    bool MemoryDebugPage::releaseExecutionForQuit()
+    {
+        const QPointer<MemoryDebugPage> self(this); // 只在所有退出许可均通过后归还控制。
+        if (!releaseExecutionControl())
+        {
+            if (self && view_ != nullptr)
+            {
+                cancelQuitPreparation();
+            }
+            return false;
+        }
+        return !self.isNull();
+    }
+
+    bool MemoryDebugPage::releaseExecutionControl()
+    {
+        const QPointer<MemoryDebugPage> self(this); // HVM 释放时允许正常处理事件，须保护页面销毁。
+        const QPointer<MemoryWorkbenchView> view(view_); // 只恢复仍存活的同一专业视图。
+        const bool enabled = view && view->isEnabledTo(this); // 忽略退出冻结的父页，保留视图自身启用状态。
+        if (view)
+        {
+            view->setEnabled(false);
+        }
+        const bool released = execution_->prepareClose(); // 实际 IOCTL 与全核等待由运行面板放到 worker。
+        if (!self)
+        {
+            return false;
+        }
+        if (view)
+        {
+            view->setEnabled(enabled);
+        }
+        return released;
     }
 
     void MemoryDebugPage::cancelQuitPreparation()
@@ -451,6 +539,11 @@ namespace ks::ui
         if (view_ != nullptr)
         {
             view_->cancelQuitPreparation();
+        }
+        if (quitPrepared_)
+        {
+            quitPrepared_ = false;
+            setEnabled(enabledBeforeQuit_);
         }
     }
 }
