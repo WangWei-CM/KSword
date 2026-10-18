@@ -369,7 +369,6 @@ KswRxpfRestoreIpi(
         return 1ULL;
     }
 
-    /* Installed rows must return to the exact IDTR captured on that CPU. */
     __lidt(&cpu->OriginalIdtr);
     RtlZeroMemory(&verifyIdtr, sizeof(verifyIdtr));
     __sidt(&verifyIdtr);
@@ -527,7 +526,27 @@ KswRxpfPageFaultInstall(
         goto Exit;
     }
 
-    /* The IPI callback performs only SIDT/LIDT and fixed-row stores. */
+    /* 预检：VBS/Hyper-V 会拦截 LIDT 并引发 #GP，而 #GP 的 SEH 派发
+       在任何 IRQL 下都触发 CFG 违规（0x139 Arg1=0xA），无法用 SEH 兜底。
+       改用 CPUID 检测：若 hypervisor 是 Microsoft Hyper-V，LIDT 被拦截。 */
+    {
+        int cpuInfo[4] = {0};
+
+        __cpuid(cpuInfo, 1);
+        if (cpuInfo[2] & (1 << 31)) {
+            /* hypervisor present — 检查是否 Microsoft Hyper-V */
+            __cpuid(cpuInfo, 0x40000000);
+            if (cpuInfo[1] == 0x7263694D &&   /* "Micr" */
+                cpuInfo[2] == 0x666F736F &&   /* "osof" */
+                cpuInfo[3] == 0x76482074) {   /* "t Hv" */
+                status = STATUS_NOT_SUPPORTED;
+                KswRxpfFreeShadowTables();
+                goto Exit;
+            }
+        }
+    }
+
+    /* IPI 回调只执行 SIDT/LIDT 和定长行写入。 */
     (void)KeIpiGenericCall(KswRxpfInstallIpi, 0ULL);
     cpuCount = InterlockedCompareExchange(
         &g_KswRxpfPageFault.CpuCount,

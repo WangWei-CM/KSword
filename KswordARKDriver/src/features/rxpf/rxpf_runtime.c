@@ -315,7 +315,11 @@ KswRxpfRuntimeRegisterPage(
     if (!NT_SUCCESS(status) || !KswRxpfRuntimeReady()) {
         return NT_SUCCESS(status) ? STATUS_DELETE_PENDING : status;
     }
+    /* AllocatedTest 和 ExternalImage 不依赖 IDT 模拟自检：
+       AllocatedTest 本身就是自检入口；ExternalImage 只走
+       MmChangeImageProtection + 可写别名，整条路径不碰 IDT。 */
     if (Request->targetKind != KSWORD_ARK_RXPF_TARGET_ALLOCATED_TEST &&
+        Request->targetKind != KSWORD_ARK_RXPF_TARGET_EXTERNAL_IMAGE &&
         InterlockedCompareExchange(
             &g_KswRxpfRuntime.AllocatedSelfTestPassed,
             1,
@@ -459,6 +463,8 @@ KswRxpfRuntimeWritePage(
             0) != 0) {
         status = STATUS_DEVICE_BUSY;
     } else {
+        /* 诊断：0x00FF 标记 runtime 即将调用 Write 处理器。 */
+        record->LastFailureReason = 0x00FFU;
         status = KswRxpfImageProtectionWrite(
             record,
             Request->offset,

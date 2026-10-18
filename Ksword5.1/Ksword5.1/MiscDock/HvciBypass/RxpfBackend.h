@@ -94,6 +94,7 @@ namespace ks::misc::rxpf
         unsigned long lastFailureReason = 0; // 最近一次失败的原因枚举。
         unsigned long originalProtection = 0;  // 原始保护属性。
         unsigned long currentProtection = 0;   // 当前保护属性。
+        unsigned long writableAliasProtection = 0; // 别名实际保护（PAGE_READWRITE=可写）。
     };
 
     // ----------------------------------------------------------
@@ -241,7 +242,8 @@ namespace ks::misc::rxpf
     PageInfo unregisterPage(std::uint64_t recordId);
 
     // runSelfTest：运行驱动内置的端到端自检。
-    SelfTestInfo runSelfTest();
+    // - recordId：必须是已注册且处于 RW_NX 状态的 SelfImageTest/AllocatedTest 记录。
+    SelfTestInfo runSelfTest(std::uint64_t recordId);
 
     // setHookPoint：设置或清除已注册页面上的钩点。
     // - recordId：注册时返回的记录 ID。

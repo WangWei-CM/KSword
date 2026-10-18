@@ -949,7 +949,11 @@ namespace ks::misc
                     .arg(info.recordId)
                     .arg(hexU32(static_cast<unsigned long>(info.lastStatus))));
             });
-        watcher->setFuture(QtConcurrent::run(rxpf::runSelfTest));
+        // recordId：当前已注册页面的 ID，自检需要已处于 RW_NX 状态的记录。
+        const auto recordId = m_currentRecordId;
+        watcher->setFuture(QtConcurrent::run([recordId]() {
+            return rxpf::runSelfTest(recordId);
+        }));
     }
 
     void RxpfPage::doUnregister()

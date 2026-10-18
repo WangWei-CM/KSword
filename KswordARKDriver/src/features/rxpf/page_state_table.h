@@ -37,7 +37,8 @@ typedef struct _KSW_RXPF_PAGE_RECORD
     BOOLEAN OwnsMdlPages;
     BOOLEAN PagesLockedByProbe;
     BOOLEAN MappingIsAlias;
-    UCHAR ReservedBoolean;
+    BOOLEAN MdlLockedForWrite;
+    BOOLEAN ChangeProtectionApplied; /* MmChangeImageProtection 已生效，释放前需恢复 RX。 */
     UCHAR LastWriteBytes[KSWORD_ARK_RXPF_MAX_WRITE_BYTES];
     volatile ULONG HookAction;          /* KSWORD_ARK_RXPF_HOOK_ACTION_* */
     ULONG HookReserved;

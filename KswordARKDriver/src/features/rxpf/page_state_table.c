@@ -92,7 +92,7 @@ KswRxpfPageTableInsertLocked(
     if (InterlockedCompareExchange(&Table->Accepting, 1, 1) == 0) {
         return STATUS_DELETE_PENDING;
     }
-    if (Source->PageBase <= (LONG64)KSW_RXPF_PAGE_TOMBSTONE ||
+    if ((ULONGLONG)Source->PageBase <= KSW_RXPF_PAGE_TOMBSTONE ||
         (((ULONGLONG)Source->PageBase) & (PAGE_SIZE - 1ULL)) != 0ULL) {
         return STATUS_DATATYPE_MISALIGNMENT;
     }

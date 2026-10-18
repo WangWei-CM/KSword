@@ -28,6 +28,7 @@
 - [统一内存编辑器与汇编](ksword-memory-editor.md) — Tab4/Tab6/R-1 共用快照编辑器、Intel 汇编语法、暂存与后端绑定、写前比对和最终回读
 - [标题栏全局搜索/双模式输入](ksword-global-ui-search.md) — GlobalUiSearch 架构、页面路径/高亮跳转链路、i18n 审计恒等词条与语言包定点插入约定
 - [MSVC/WDK 构建恢复](ksword-build-recovery.md) — `LNK1000 IMAGE::BuildImage` 的一次性 WPO 禁用重建，以及驱动 x64 `ApiValidator` 后置校验边界
+- [RXPF HVCI 写入屏障](ksword-rxpf-hvci-write-barrier.md) — IoWriteAccess 0x1A 不可捕获、别名只读 AV 可捕获、直接写也 0x1A；VTL0 无法写 g_CiOptions
 - [驱动候选地址安全读取](ksword-driver-safe-read.md) — 不可信内核地址统一使用 `KswordARKRuntimeReadMemory`，以及 Release 同构函数符号归因注意事项
 - [KSecDD 驱动加载引导方案](ksword-ksecdd-dse-bootstrap.md) — KExecDD/LSASS 与 KexecDDPlus/Server Silo 的前置条件、许可证与运行风险边界
 - [已卸载驱动来源布局](ksword-unloaded-driver-layout.md) — NtosActive 与单项可用性的区别、精确全局 RVA 的局部运行时布局补全、离线回归与实机边界

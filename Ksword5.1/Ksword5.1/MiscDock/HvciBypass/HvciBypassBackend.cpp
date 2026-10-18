@@ -370,29 +370,89 @@ namespace ks::misc::hvci_bypass
             return lines.join(QChar('\n'));
         }
 
-        // 各分支可能独立完成，直接报告实际回执，不从前一阶段推断后续未执行。
-        lines.append(stageResultLine(QStringLiteral("函数解析"), result.resolverStatus));
-        lines.append(stageResultLine(QStringLiteral("MDL 分配"), result.mdlAllocStatus));
-        lines.append(stageResultLine(QStringLiteral("页面锁定"), result.lockStatus));
-        lines.append(stageResultLine(QStringLiteral("映像保护变更"), result.imageProtectStatus));
-        if ((result.flags & kFlagWriteTest) != 0UL)
+        // ----------------------------------------------------------
+        // 各阶段状态报告。
+        // chainedStages：按驱动执行顺序排列的阶段列表。
+        // 前一个阶段失败后，后续阶段标记"跳过"而非误报成功。
+        // ----------------------------------------------------------
+        struct StageEntry
         {
-            lines.append(stageResultLine(QStringLiteral("别名映射"), result.aliasMapStatus));
-            lines.append(stageResultLine(QStringLiteral("写入测试"), result.writeTestStatus));
-        }
-        if ((result.flags & kFlagRestore) != 0UL)
+            QString name;
+            long status;
+            bool conditional;   // 是否有条件显示。
+            bool show;          // conditional=true 时是否显示。
+            bool breaksChain;   // 失败时是否中断后续阶段的"已执行"标记。
+        };
+
+        // stages：驱动按顺序执行的链式阶段。
+        // breaksChain=false：驱动不以此阶段的返回值门控后续阶段。
+        // MmChangeImageProtection 返回错误时，驱动仍继续执行别名映射和写入。
+        const StageEntry stages[] = {
+            { QStringLiteral("函数解析"), result.resolverStatus,
+              false, true, true },
+            { QStringLiteral("MDL 分配"), result.mdlAllocStatus,
+              false, true, true },
+            { QStringLiteral("页面锁定"), result.lockStatus,
+              false, true, true },
+            { QStringLiteral("映像保护变更"), result.imageProtectStatus,
+              false, true, false },
+            { QStringLiteral("别名映射"), result.aliasMapStatus,
+              false, true, true },
+            { QStringLiteral("写入测试"), result.writeTestStatus,
+              true, (result.flags & kFlagWriteTest) != 0UL, true },
+            { QStringLiteral("RX 恢复"), result.restoreStatus,
+              true, (result.flags & kFlagRestore) != 0UL, true },
+        };
+
+        // chainBroken：前面某个阶段失败，后续阶段未被执行。
+        bool chainBroken = false;
+        for (const auto& stage : stages)
         {
-            lines.append(stageResultLine(QStringLiteral("RX 恢复"), result.restoreStatus));
-        }
-        if (result.resolvedFunctionVa != 0ULL)
-        {
-            lines.append(QStringLiteral("         MmChangeImageProtection VA = 0x%1")
-                .arg(result.resolvedFunctionVa, 16, 16, QChar('0')));
-        }
-        if (result.aliasVa != 0ULL)
-        {
-            lines.append(QStringLiteral("         别名 VA = 0x%1")
-                .arg(result.aliasVa, 16, 16, QChar('0')));
+            if (stage.conditional && !stage.show)
+            {
+                continue;
+            }
+
+            // 恢复独立于别名/写测试失败执行，不能被前面的链断裂掩盖。
+            if (stage.name == QStringLiteral("RX 恢复"))
+            {
+                lines.append(stage.status == 0 ? stageResultLine(stage.name, stage.status)
+                    : QStringLiteral("[阶段] %1  未完成或未执行 (NTSTATUS=%2)")
+                        .arg(stage.name, formatNtStatus(stage.status)));
+            }
+            else if (chainBroken)
+            {
+                // 前置阶段已失败——本阶段未执行。
+                lines.append(QStringLiteral("[阶段] %1  跳过（前置失败）")
+                    .arg(stage.name));
+            }
+            else
+            {
+                lines.append(stageResultLine(stage.name, stage.status));
+                // 仅在 breaksChain 阶段失败时，标记后续链断裂。
+                if (stage.status < 0 && stage.breaksChain)
+                {
+                    chainBroken = true;
+                }
+            }
+
+            // 特殊行：函数解析后显示 VA。
+            if (stage.name == QStringLiteral("函数解析")
+                && result.resolvedFunctionVa != 0ULL)
+            {
+                lines.append(QStringLiteral(
+                    "         MmChangeImageProtection VA = 0x%1")
+                    .arg(result.resolvedFunctionVa, 16, 16, QChar('0')));
+            }
+
+            // 特殊行：别名映射后显示别名 VA。
+            if (stage.name == QStringLiteral("别名映射")
+                && result.aliasVa != 0ULL)
+            {
+                lines.append(QStringLiteral(
+                    "         别名 VA = 0x%1")
+                    .arg(result.aliasVa, 16, 16, QChar('0')));
+            }
         }
 
         // ----------------------------------------------------------
@@ -436,8 +496,148 @@ namespace ks::misc::hvci_bypass
             return lines.join(QChar('\n'));
         }
 
-        // 阶段结果与局部读回仅描述本次观测，不能推出整体安全保护状态。
-        lines.append(QStringLiteral("[结论] 已报告各请求阶段的状态与有效读回；整体保护状态仍需独立核验。"));
+        // ----------------------------------------------------------
+        // 综合判定。
+        // 优先级：IOCTL 失败 > 签名扫描失败 > 映像保护被拒 >
+        //          写入被拦截 > 写入静默丢弃 > 绕过确认。
+        // ----------------------------------------------------------
+        lines.append(QString());
+
+        // requestedWriteTest：本次实验是否包含写入测试。
+        const bool requestedWriteTest =
+            (result.flags & kFlagWriteTest) != 0UL;
+
+        // requestedRestore：本次实验是否包含 RX 恢复。
+        const bool requestedRestore =
+            (result.flags & kFlagRestore) != 0UL;
+
+        // writeSucceeded：写入测试阶段的 NTSTATUS 是否成功。
+        const bool writeSucceeded =
+            requestedWriteTest && result.writeTestStatus >= 0;
+
+        // expectedByte：写入测试使用 XOR 0xFF 反转原始字节。
+        const auto expectedByte =
+            static_cast<std::uint8_t>(result.preModifyByte ^ 0xFF);
+
+        // byteActuallyChanged：写入后字节是否确实变成了反转值。
+        const bool byteActuallyChanged =
+            requestedWriteTest && (result.postWriteByte == expectedByte);
+
+        // aliasWriteConfirmed：别名映射成功且 XOR 写入穿透到物理页。
+        // 这是最终判定——无论 MmChangeImageProtection 是否成功。
+        // 驱动在 imageProtectStatus 返回错误时仍继续执行别名映射，
+        // 因此数据页（非 RX）目标也可能写入穿透。
+        const bool aliasWriteConfirmed =
+            result.aliasMapStatus >= 0
+            && writeSucceeded
+            && byteActuallyChanged;
+
+        if (result.resolverStatus < 0)
+        {
+            // 签名扫描失败：该系统可能不存在 MmChangeImageProtection。
+            lines.append(QStringLiteral(
+                "[结论] MmChangeImageProtection 签名扫描失败（%1），"
+                "该系统版本可能不支持此函数。")
+                .arg(formatNtStatus(result.resolverStatus)));
+        }
+        else if (aliasWriteConfirmed)
+        {
+            // MDL 别名写入穿透确认。
+            // MmChangeImageProtection 在数据页上会返回 0xc0000018，
+            // 但别名映射和写入仍然穿透 HVCI 保护。
+            QString suffix;
+            if (result.imageProtectStatus < 0)
+            {
+                suffix = QStringLiteral(
+                    "（MmChangeImageProtection 返回 %1，"
+                    "目标可能是数据页而非 RX 代码页）")
+                    .arg(formatNtStatus(result.imageProtectStatus));
+            }
+
+            // byteStillModified：恢复操作后修改字节是否仍保留。
+            const bool byteStillModified =
+                result.postRestoreByte == expectedByte;
+
+            if (!requestedRestore)
+            {
+                lines.append(QStringLiteral(
+                    "[结论] 写入穿透已确认：MDL 别名成功修改了内核映像页"
+                    "内容（0x%1 → 0x%2）。未请求恢复。%3")
+                    .arg(result.preModifyByte, 2, 16, QChar('0'))
+                    .arg(expectedByte, 2, 16, QChar('0'))
+                    .arg(suffix));
+            }
+            else if (byteStillModified)
+            {
+                lines.append(QStringLiteral(
+                    "[结论] HVCI 绕过已确认：MDL 别名写入穿透了映像保护，"
+                    "恢复后修改仍然保留"
+                    "（0x%1 → 0x%2）。%3")
+                    .arg(result.preModifyByte, 2, 16, QChar('0'))
+                    .arg(expectedByte, 2, 16, QChar('0'))
+                    .arg(suffix));
+            }
+            else
+            {
+                lines.append(QStringLiteral(
+                    "[结论] 写入穿透，但恢复后读回不一致"
+                    "（期望 0x%1，实际 0x%2）。%3")
+                    .arg(expectedByte, 2, 16, QChar('0'))
+                    .arg(result.postRestoreByte, 2, 16, QChar('0'))
+                    .arg(suffix));
+            }
+        }
+        else if (result.imageProtectStatus < 0)
+        {
+            // 映像保护变更被拒绝且别名写入也未穿透。
+            if (result.aliasMapStatus >= 0 && requestedWriteTest)
+            {
+                lines.append(QStringLiteral(
+                    "[结论] MmChangeImageProtection 被拒绝（%1），"
+                    "别名映射成功但写入未穿透目标字节。")
+                    .arg(formatNtStatus(result.imageProtectStatus)));
+            }
+            else
+            {
+                lines.append(QStringLiteral(
+                    "[结论] MmChangeImageProtection 被拒绝（%1），"
+                    "别名写入未成功。")
+                    .arg(formatNtStatus(result.imageProtectStatus)));
+            }
+        }
+        else if (result.aliasMapStatus >= 0
+            && requestedWriteTest && result.writeTestStatus < 0)
+        {
+            // 别名写入被拦截：保护变更成功但 VTL1 拒绝了写入。
+            lines.append(QStringLiteral(
+                "[结论] 别名写入被拦截（%1）。"
+                "映像保护变更成功，但 VTL1 拒绝了通过别名的写入。")
+                .arg(formatNtStatus(result.writeTestStatus)));
+        }
+        else if (result.aliasMapStatus >= 0
+            && writeSucceeded && !byteActuallyChanged)
+        {
+            // 写入被静默丢弃：IOCTL 报告成功但字节未改变。
+            lines.append(QStringLiteral(
+                "[结论] 写入被静默丢弃：IOCTL 报告成功，但目标字节"
+                "未改变（仍为 0x%1），Hypervisor 可能在 SLAT 层面拦截了写入。")
+                .arg(result.postWriteByte, 2, 16, QChar('0')));
+        }
+        else if (result.resolverStatus < 0
+            || result.mdlAllocStatus < 0
+            || result.lockStatus < 0
+            || result.aliasMapStatus < 0)
+        {
+            // 前置阶段失败，无法完成实验。
+            lines.append(QStringLiteral(
+                "[结论] 实验前置阶段失败，请根据各阶段状态判断原因。"));
+        }
+        else
+        {
+            // 其它未覆盖的组合。
+            lines.append(QStringLiteral(
+                "[结论] 实验已完成，请根据各阶段状态和读回值综合判断。"));
+        }
 
         return lines.join(QChar('\n'));
     }

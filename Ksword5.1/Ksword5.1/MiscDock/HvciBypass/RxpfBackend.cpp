@@ -13,6 +13,12 @@
 // ArkDriverClient 提供 DriverClient、IoResult 和共享协议结构体。
 #include "../../ArkDriverClient/ArkDriverClient.h"
 
+// 诊断文件输出所需的 Qt 头文件。
+#include <QFile>
+#include <QCoreApplication>
+#include <QDateTime>
+#include <cstdio>
+
 #include <QStringList>
 
 // Framework.h 是主程序统一入口，拉入 Qt、日志和 ksword 工具链。
@@ -81,6 +87,7 @@ namespace
         info.lastFailureReason = resp.lastFailureReason;
         info.originalProtection = resp.originalProtection;
         info.currentProtection = resp.currentProtection;
+        info.writableAliasProtection = resp.writableAliasProtection;
         return info;
     }
 }
@@ -143,6 +150,7 @@ namespace ks::misc::rxpf
         // request：注册请求体。
         KSWORD_ARK_RXPF_REGISTER_PAGE_REQUEST request{};
         request.header = buildRequestHeader(true, KSWORD_ARK_RXPF_FLAG_CAPTURE_BACKUP);
+        request.header.size = sizeof(request);
         request.targetKind = targetKind;
         request.targetAddress = targetAddress;
 
@@ -156,6 +164,33 @@ namespace ks::misc::rxpf
             static_cast<unsigned long>(sizeof(request)),
             &response,
             static_cast<unsigned long>(sizeof(response)));
+
+        // 诊断：记录 REGISTER 结果到文件。
+        {
+            char buf[512];
+            std::snprintf(buf, sizeof(buf),
+                "=== rxpf::registerPage %s ===\ntargetKind=%lu targetAddress=0x%llx sizeof=%zu\nok=%d win32=%lu bytesReturned=%lu\n",
+                QDateTime::currentDateTime().toString(Qt::ISODate).toUtf8().constData(),
+                targetKind, targetAddress, sizeof(request),
+                static_cast<int>(io.ok),
+                static_cast<unsigned long>(io.win32Error),
+                static_cast<unsigned long>(io.bytesReturned));
+            QByteArray msg(buf);
+            if (io.ok) {
+                std::snprintf(buf, sizeof(buf),
+                    "response::state=%u recordId=%llu origProt=0x%x curProt=0x%x pageBase=0x%llx\n",
+                    response.state, response.recordId,
+                    response.originalProtection, response.currentProtection,
+                    response.pageBase);
+                msg += buf;
+            }
+            msg += '\n';
+            QFile diagFile(QCoreApplication::applicationDirPath()
+                + QStringLiteral("/rxpf_diag.log"));
+            diagFile.open(QIODevice::Append | QIODevice::Text);
+            diagFile.write(msg);
+            diagFile.close();
+        }
 
         if (!io.ok)
         {
@@ -176,7 +211,29 @@ namespace ks::misc::rxpf
         // request：基于 recordId 的操作请求。
         KSWORD_ARK_RXPF_RECORD_REQUEST request{};
         request.header = buildRequestHeader();
+        request.header.size = sizeof(request);
         request.recordId = recordId;
+
+        // 诊断：把请求原始字节写到本地文件。
+        {
+            const auto* raw =
+                reinterpret_cast<const unsigned char*>(&request);
+            QByteArray hex;
+            for (std::size_t i = 0; i < sizeof(request); ++i)
+                hex += QByteArray::number(raw[i], 16).rightJustified(2, '0') + ' ';
+            char buf[512];
+            std::snprintf(buf, sizeof(buf),
+                "=== rxpf::changePage %s ===\nsizeof=%zu IOCTL=0x%x recordId=%llu\nraw=[%s]\n",
+                QDateTime::currentDateTime().toString(Qt::ISODate).toUtf8().constData(),
+                sizeof(request),
+                static_cast<unsigned>(IOCTL_KSWORD_ARK_RXPF_CHANGE_PAGE),
+                recordId, hex.trimmed().constData());
+            QFile diagFile(QCoreApplication::applicationDirPath()
+                + QStringLiteral("/rxpf_diag.log"));
+            diagFile.open(QIODevice::Append | QIODevice::Text);
+            diagFile.write(buf);
+            diagFile.close();
+        }
 
         KSWORD_ARK_RXPF_PAGE_RESPONSE response{};
 
@@ -187,6 +244,32 @@ namespace ks::misc::rxpf
             static_cast<unsigned long>(sizeof(request)),
             &response,
             static_cast<unsigned long>(sizeof(response)));
+
+        // 诊断：追加 DeviceIoControl 结果到文件。
+        {
+            char buf[512];
+            std::snprintf(buf, sizeof(buf),
+                "rxpf::changePage result ok=%d win32=%lu bytesReturned=%lu sizeof=%zu\n",
+                static_cast<int>(io.ok),
+                static_cast<unsigned long>(io.win32Error),
+                static_cast<unsigned long>(io.bytesReturned),
+                sizeof(response));
+            QByteArray msg(buf);
+            if (io.ok) {
+                std::snprintf(buf, sizeof(buf),
+                    "response::state=%u lastStatus=0x%x origProt=0x%x curProt=0x%x alias=0x%llx\n",
+                    response.state, response.lastStatus,
+                    response.originalProtection, response.currentProtection,
+                    response.writableAlias);
+                msg += buf;
+            }
+            msg += '\n';
+            QFile diagFile(QCoreApplication::applicationDirPath()
+                + QStringLiteral("/rxpf_diag.log"));
+            diagFile.open(QIODevice::Append | QIODevice::Text);
+            diagFile.write(msg);
+            diagFile.close();
+        }
 
         if (!io.ok)
         {
@@ -206,6 +289,7 @@ namespace ks::misc::rxpf
 
         KSWORD_ARK_RXPF_RECORD_REQUEST request{};
         request.header = buildRequestHeader();
+        request.header.size = sizeof(request);
         request.recordId = recordId;
 
         KSWORD_ARK_RXPF_PAGE_RESPONSE response{};
@@ -240,6 +324,7 @@ namespace ks::misc::rxpf
         // request：写入请求体。
         KSWORD_ARK_RXPF_WRITE_PAGE_REQUEST request{};
         request.header = buildRequestHeader();
+        request.header.size = sizeof(request);
         request.recordId = recordId;
         request.offset = offset;
 
@@ -282,6 +367,7 @@ namespace ks::misc::rxpf
         // request：模拟控制请求体。
         KSWORD_ARK_RXPF_SET_EMULATION_REQUEST request{};
         request.header = buildRequestHeader();
+        request.header.size = sizeof(request);
         request.recordId = recordId;
         // enable：1=启用，0=禁用。
         request.enable = enable ? 1UL : 0UL;
@@ -362,6 +448,7 @@ namespace ks::misc::rxpf
         // request：事件拉取请求体。
         KSWORD_ARK_RXPF_DRAIN_EVENTS_REQUEST request{};
         request.header = buildRequestHeader();
+        request.header.size = sizeof(request);
         request.afterSequence = afterSequence;
         // maxRows：截断到协议上限 64 行。
         request.maxRows = std::min<unsigned long>(
@@ -428,6 +515,7 @@ namespace ks::misc::rxpf
 
         KSWORD_ARK_RXPF_RECORD_REQUEST request{};
         request.header = buildRequestHeader();
+        request.header.size = sizeof(request);
         request.recordId = recordId;
 
         KSWORD_ARK_RXPF_PAGE_RESPONSE response{};
@@ -451,12 +539,17 @@ namespace ks::misc::rxpf
 
     // ================================================================
     // runSelfTest：运行驱动内置的端到端自检。
+    // 调用方必须先 registerPage + changePage 使记录处于 RW_NX 状态。
     // ================================================================
-    SelfTestInfo runSelfTest()
+    SelfTestInfo runSelfTest(const std::uint64_t recordId)
     {
         SelfTestInfo result;
 
-        auto header = buildRequestHeader();
+        // request：自检需要完整的 RecordRequest（header + recordId）。
+        KSWORD_ARK_RXPF_RECORD_REQUEST request{};
+        request.header = buildRequestHeader();
+        request.header.size = sizeof(request);
+        request.recordId = recordId;
 
         // response：自检结果响应。
         KSWORD_ARK_RXPF_SELF_TEST_RESPONSE response{};
@@ -464,8 +557,8 @@ namespace ks::misc::rxpf
         const ksword::ark::DriverClient client;
         const auto io = client.deviceIoControl(
             IOCTL_KSWORD_ARK_RXPF_RUN_SELF_TEST,
-            &header,
-            static_cast<unsigned long>(sizeof(header)),
+            &request,
+            static_cast<unsigned long>(sizeof(request)),
             &response,
             static_cast<unsigned long>(sizeof(response)));
 

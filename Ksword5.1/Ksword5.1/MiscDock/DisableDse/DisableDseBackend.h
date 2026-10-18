@@ -171,10 +171,14 @@ namespace ks::misc::disable_dse
     // - 作用：按 prepare → dry-run → commit → 复读的顺序走 R0 事务化内核写；
     //   expectedValue 会作为事务的 expected-before，R0 侧比对不上会直接拒绝提交；
     // - 返回：ApplyResult；ok 为 true 表示写入并复读一致。
+    // writeCiOptions：
+    // - hvciEnabled：当为 true 时走 RXPF 框架（MmChangeImageProtection + 可写别名），
+    //   否则走常规变更事务（mutation transaction）。
     ApplyResult writeCiOptions(
         const TargetLocation& location,
         std::uint32_t expectedValue,
-        std::uint32_t desiredValue);
+        std::uint32_t desiredValue,
+        bool hvciEnabled = false);
 
     // describeOptions：
     // - 输入 options：SystemCodeIntegrityInformation 报告的 CodeIntegrityOptions 位图；

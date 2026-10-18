@@ -4,6 +4,7 @@
 #include "DisableDseBackend.h"
 
 #include "../../ArkDriverClient/ArkDriverClient.h"
+#include "../HvciBypass/RxpfBackend.h"
 
 #include <windows.h>
 
@@ -718,10 +719,9 @@ namespace ks::misc::disable_dse
         {
             return BlockReason::UnsupportedBuild;
         }
-        if (posture.queried && posture.hvciEnabled)
-        {
-            return BlockReason::HvciEnabled;
-        }
+        // HVCI 不硬阻断：writeCiOptions 会尝试 RXPF 路径，但 VTL1 SLAT
+        // 保护使写入安全失败（STATUS_ACCESS_VIOLATION，不会崩溃）。
+        // 写入路径仍可运行以验证并报告失败原因。
         if (!driverAvailable())
         {
             return BlockReason::DriverUnavailable;
@@ -742,7 +742,7 @@ namespace ks::misc::disable_dse
         case BlockReason::UnsupportedBuild:
             return QStringLiteral("当前系统早于 Windows 8，DSE 开关在 nt!g_CiEnabled 而不是 CI.dll!g_CiOptions，本页不支持。");
         case BlockReason::HvciEnabled:
-            return QStringLiteral("已开启内存完整性（HVCI）。g_CiOptions 所在页可能受 Hypervisor SLAT 保护，写入可能被拦截或导致蓝屏。操作前将弹窗确认。");
+            return QStringLiteral("已检测到 HVCI（内存完整性）。g_CiOptions 所在物理页受 VTL1 SLAT 只读保护，写入将安全失败而非崩溃。");
         case BlockReason::NotLocated:
             return QStringLiteral("尚未定位到 g_CiOptions，请先执行定位。");
         case BlockReason::ValueMismatch:
@@ -1013,7 +1013,8 @@ namespace ks::misc::disable_dse
     ApplyResult writeCiOptions(
         const TargetLocation& location,
         const std::uint32_t expectedValue,
-        const std::uint32_t desiredValue)
+        const std::uint32_t desiredValue,
+        const bool hvciEnabled)
     {
         ApplyResult result;
         result.previousValue = expectedValue;
@@ -1031,6 +1032,156 @@ namespace ks::misc::disable_dse
             return result;
         }
 
+        // ======== HVCI 路径：通过 RXPF 框架尝试写入 ========
+        // 实测确认：VTL1 的 SLAT 保护作用于物理帧，IoReadAccess MDL 创建的
+        // 别名只读，写入返回 STATUS_ACCESS_VIOLATION（不会崩溃）。
+        if (hvciEnabled)
+        {
+            // 1. 查询 RXPF 子系统支持状态。
+            const auto support = rxpf::querySupport();
+            if (!support.ioSuccess)
+            {
+                result.detailText = QStringLiteral(
+                    "RXPF 查询失败：%1").arg(support.ioErrorText);
+                return result;
+            }
+
+            // 2. 检查构建匹配——MmChangeImageProtection 需要精确匹配。
+            if ((support.supportFlags &
+                KSWORD_ARK_RXPF_SUPPORT_BUILD_MATCH) == 0UL)
+            {
+                result.detailText = QStringLiteral(
+                    "RXPF 不支持当前系统构建（%1），HVCI 环境下无法写入。")
+                    .arg(rxpf::buildStatusText(support.buildStatus));
+                return result;
+            }
+
+            // 3. DSE 写入路径只走 MmChangeImageProtection + 可写别名，
+            //    不触碰 IDT 模拟，因此不需要运行完整自检。
+            //    构建匹配（上方步骤 2）已足以保证 MmChangeImageProtection 可用。
+            //    若自检曾触发 LIDT 崩溃（VBS/Hyper-V 拦截），此处跳过可避免蓝屏。
+            if ((support.supportFlags &
+                KSWORD_ARK_RXPF_SUPPORT_ALLOCATED_TEST_PASSED) == 0UL)
+            {
+                result.traceLines.append(
+                    QStringLiteral("IDT 模拟自检未通过（跳过——写入路径不需要 IDT）"));
+            }
+
+            // 4. 计算页基址和页内偏移。
+            const std::uint64_t pageBase =
+                location.kernelAddress & ~0xFFFULL;
+            const unsigned long pageOffset =
+                static_cast<unsigned long>(
+                    location.kernelAddress & 0xFFFULL);
+
+            result.traceLines.append(
+                QStringLiteral("RXPF 目标页：基址=0x%1 偏移=0x%2")
+                    .arg(pageBase, 16, 16, QChar('0'))
+                    .arg(pageOffset, 0, 16));
+
+            // 5. 注册外部映像页。
+            auto regInfo = rxpf::registerPage(
+                rxpf::kTargetExternalImage, pageBase);
+            if (!regInfo.ioSuccess ||
+                regInfo.state != KSWORD_ARK_RXPF_PAGE_STATE_RX)
+            {
+                result.detailText = QStringLiteral(
+                    "RXPF 注册失败：状态=%1 NT=0x%2 %3")
+                    .arg(regInfo.state)
+                    .arg(static_cast<unsigned long>(regInfo.lastStatus),
+                        8, 16, QChar('0'))
+                    .arg(regInfo.ioErrorText);
+                return result;
+            }
+            const std::uint64_t recordId = regInfo.recordId;
+            result.traceLines.append(
+                QStringLiteral("注册成功，记录 ID=%1").arg(recordId));
+
+            // 6. 变更保护：RX → RW/NX（MmChangeImageProtection 超级调用）。
+            auto changeInfo = rxpf::changePage(recordId);
+            if (!changeInfo.ioSuccess ||
+                changeInfo.state != KSWORD_ARK_RXPF_PAGE_STATE_RW_NX)
+            {
+                result.detailText = QStringLiteral(
+                    "RXPF 保护变更失败：状态=%1 NT=0x%2 %3")
+                    .arg(changeInfo.state)
+                    .arg(static_cast<unsigned long>(changeInfo.lastStatus),
+                        8, 16, QChar('0'))
+                    .arg(changeInfo.ioErrorText);
+                rxpf::unregisterPage(recordId);
+                return result;
+            }
+            result.traceLines.append(
+                QStringLiteral("保护已变更为 RW/NX，可写别名=0x%1 别名保护=0x%2")
+                    .arg(changeInfo.writableAlias, 16, 16, QChar('0'))
+                    .arg(changeInfo.writableAliasProtection, 2, 16, QChar('0')));
+
+            // 6.5 门禁：别名实际可写才继续，否则写入注定失败。
+            //     数据节（无 IMAGE_SCN_MEM_EXECUTE）在 HVCI 下 VTL1
+            //     不释放 SLAT 写保护，别名保持只读。
+            if (changeInfo.writableAliasProtection != PAGE_READWRITE)
+            {
+                result.detailText = QStringLiteral(
+                    "g_CiOptions 位于数据节（保护=0x%1），HVCI 下 VTL1 仅对"
+                    "可执行节（.text）释放 SLAT 写保护。\n"
+                    "数据节的 SLAT 写入限制无法通过 MmChangeImageProtection 解除。")
+                    .arg(changeInfo.originalProtection, 2, 16, QChar('0'));
+                rxpf::unregisterPage(recordId);
+                return result;
+            }
+
+            // 7. 通过可写别名写入目标值（4 字节）。
+            QByteArray writeBytes(
+                reinterpret_cast<const char*>(&desiredValue),
+                kCiOptionsSize);
+            auto writeInfo = rxpf::writePage(
+                recordId, pageOffset, writeBytes);
+            if (!writeInfo.ioSuccess)
+            {
+                // HVCI 下 VTL1 SLAT 保护使写入安全失败（0xC0000005），
+                // METHOD_BUFFERED 不拷回输出缓冲，lastStatus 会是 0。
+                result.detailText = QStringLiteral(
+                    "RXPF 写入失败（HVCI 环境下 VTL1 SLAT 阻止了写入）：%1\n"
+                    "g_CiOptions 所在物理页被 VTL1 标记为只读，VTL0 无法绕过。")
+                    .arg(writeInfo.ioErrorText);
+                rxpf::unregisterPage(recordId);
+                return result;
+            }
+            result.traceLines.append(
+                QStringLiteral("RXPF 写入 %1 字节完成")
+                    .arg(kCiOptionsSize));
+
+            // 8. 注销页面——释放 MDL 和别名映射。
+            rxpf::unregisterPage(recordId);
+            result.traceLines.append(
+                QStringLiteral("RXPF 页面已注销"));
+
+            // 9. 复读校验——确认物理页上的值真的变了。
+            const ReadbackResult verify = readCiOptions(location);
+            if (!verify.ok)
+            {
+                result.detailText = QStringLiteral(
+                    "RXPF 写入后复读失败：%1").arg(verify.failureText);
+                return result;
+            }
+            if (verify.value != desiredValue)
+            {
+                result.detailText = QStringLiteral(
+                    "RXPF 写入后复读不一致：期望 0x%1，实际 0x%2。"
+                    "写入可能被更高层保护拦截。")
+                    .arg(desiredValue, 8, 16, QChar('0'))
+                    .arg(verify.value, 8, 16, QChar('0'));
+                return result;
+            }
+
+            result.ok = true;
+            result.traceLines.append(
+                QStringLiteral("复读校验通过：0x%1")
+                    .arg(verify.value, 8, 16, QChar('0')));
+            return result;
+        }
+
+        // ======== 常规路径：变更事务（无 HVCI）========
         std::vector<std::uint8_t> expectedBytes(kCiOptionsSize, 0U);
         std::vector<std::uint8_t> desiredBytes(kCiOptionsSize, 0U);
         std::memcpy(expectedBytes.data(), &expectedValue, kCiOptionsSize);
