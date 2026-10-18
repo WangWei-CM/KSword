@@ -4,11 +4,28 @@
  * 不修改页保护、不注入代码，也不读取或修改 VMCS。
  * 两次 SIDT 只能报告调用方可见的 IDTR；相同读数不能证明不存在 VM-exit。
  * CPUID 的 hypervisor-present 位不能证明 VBS/HVCI 已启用或正在运行。
+ * CI 选项和 hypervisor vendor 仅记录现场，不能证明 LIDT 或 #PF 的 VM-exit 路径。
  * 本文件是独立的 x64 WDM 示例，不加入 KSword 产品驱动，不需要用户态组件。
  */
 
 #include <ntddk.h> /* 使用公开 WDK 内核类型、IRQL、版本查询和调试输出接口。 */
 #include <intrin.h> /* 使用 MSVC 的只读 SIDT 与 CPUID 编译器内建函数。 */
+
+#define VBS_OBSERVER_SYSTEM_CODEINTEGRITY_INFORMATION 103UL /* WDK 未声明此查询类，使用微软公开的编号。 */
+#define VBS_OBSERVER_HVCI_KMCI_ENABLED 0x400UL /* 用公开 CI 位解释回执，而不推断 VBS 运行状态。 */
+
+typedef struct _VBS_OBSERVER_CODEINTEGRITY_INFORMATION
+{
+    ULONG Length; /* 内核按此字段验证查询缓冲区的完整长度。 */
+    ULONG CodeIntegrityOptions; /* 仅在查询成功时解释返回的选项。 */
+} VBS_OBSERVER_CODEINTEGRITY_INFORMATION;
+
+NTSYSAPI NTSTATUS NTAPI ZwQuerySystemInformation(
+    _In_ ULONG SystemInformationClass,
+    _Out_writes_bytes_opt_(SystemInformationLength) PVOID SystemInformation,
+    _In_ ULONG SystemInformationLength,
+    _Out_opt_ PULONG ReturnLength
+    ); /* WDK 此处缺少公开原型，保持与仓库既有声明的 ABI 一致。 */
 
 #if !defined(_M_AMD64) /* 本示例只描述 x64 的 10 字节 IDTR 表示。 */
 #error This observer requires the x64 WDK target.
@@ -52,6 +69,10 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath)
     PROCESSOR_NUMBER processorAfter = { 0 }; /* 保存第二次 SIDT 后的处理器组和编号。 */
     KIRQL previousIrql = PASSIVE_LEVEL; /* 保存短暂提升前的 IRQL，以便完整恢复。 */
     int processorInfo[4] = { 0 }; /* 接收 CPUID leaf 1 的 EAX、EBX、ECX、EDX。 */
+    int hypervisorInfo[4] = { 0 }; /* 仅在处理器报告存在 hypervisor 后查询 vendor leaf。 */
+    CHAR hypervisorVendor[13] = { 0 }; /* 固定 12 字节签名后补 NUL，避免无界打印。 */
+    VBS_OBSERVER_CODEINTEGRITY_INFORMATION ciInformation = { 0 }; /* 失败时不把未测值解释为零。 */
+    NTSTATUS ciStatus; /* 单独保留查询失败，不影响 SIDT 观察。 */
     ULONG hypervisorPresent; /* 仅表示 CPUID 通告存在 hypervisor，不表示 VBS。 */
     BOOLEAN sameProcessor; /* 比较两个处理器身份字段，不使用含填充的结构比较。 */
     BOOLEAN sameIdtr; /* 比较两次可见 IDTR 的基址和限长。 */
@@ -62,6 +83,19 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath)
     versionStatus = RtlGetVersion(&version); /* 只读查询当前 Windows 的基础版本。 */
     __cpuid(processorInfo, 1); /* 只读查询处理器及 hypervisor 通告的特征位。 */
     hypervisorPresent = ((ULONG)processorInfo[2] >> 31) & 1UL; /* 提取 hypervisor-present 位。 */
+    if (hypervisorPresent != 0UL) /* 无 hypervisor 时不把保留 leaf 的输出误标为供应商。 */
+    {
+        __cpuid(hypervisorInfo, 0x40000000); /* 仅将供应商签名用于现场诊断。 */
+        RtlCopyMemory(&hypervisorVendor[0], &hypervisorInfo[1], sizeof(ULONG)); /* EBX 是签名前四字节。 */
+        RtlCopyMemory(&hypervisorVendor[4], &hypervisorInfo[2], sizeof(ULONG)); /* ECX 紧接 EBX。 */
+        RtlCopyMemory(&hypervisorVendor[8], &hypervisorInfo[3], sizeof(ULONG)); /* EDX 填充最后四字节。 */
+    }
+    ciInformation.Length = sizeof(ciInformation); /* 查询要求调用方提供结构大小。 */
+    ciStatus = ZwQuerySystemInformation(
+        VBS_OBSERVER_SYSTEM_CODEINTEGRITY_INFORMATION,
+        &ciInformation,
+        sizeof(ciInformation),
+        NULL); /* 在 PASSIVE_LEVEL 查询，不把失败当作 HVCI 关闭。 */
 
     __try /* 只记录 Windows 提供的可捕获异常，不宣称能够捕获 bugcheck。 */
     {
@@ -92,6 +126,30 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath)
         "[VbsObserver] OS_STATUS=0x%08lX OS=%lu.%lu build=%lu HYPERVISOR_PRESENT=%lu\n",
         (ULONG)versionStatus, version.dwMajorVersion, version.dwMinorVersion,
         version.dwBuildNumber, hypervisorPresent); /* 在恢复 IRQL 后输出环境快照。 */
+    if (hypervisorPresent != 0UL) /* 供应商字符串只是 CPUID 自报值。 */
+    {
+        DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL,
+            "[VbsObserver] HYPERVISOR_VENDOR=%s MAX_LEAF=0x%08X\n",
+            hypervisorVendor, (unsigned int)hypervisorInfo[0]); /* 明确来源于 leaf 0x40000000。 */
+    }
+    else /* 没有相应的自报字段时保留未知状态。 */
+    {
+        DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL,
+            "[VbsObserver] HYPERVISOR_VENDOR=NOT_MEASURED\n"); /* 不编造供应商身份。 */
+    }
+    if (NT_SUCCESS(ciStatus)) /* 只在成功回执下解释 0x400。 */
+    {
+        DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL,
+            "[VbsObserver] CI_QUERY_STATUS=0x%08lX CODE_INTEGRITY_OPTIONS=0x%08lX HVCI_KMCI_FLAG=%u\n",
+            (ULONG)ciStatus, ciInformation.CodeIntegrityOptions,
+            (unsigned int)((ciInformation.CodeIntegrityOptions & VBS_OBSERVER_HVCI_KMCI_ENABLED) != 0UL)); /* 保留原始掩码供复核。 */
+    }
+    else /* 查询失败仍继续剩余只读观察。 */
+    {
+        DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL,
+            "[VbsObserver] CI_QUERY_STATUS=0x%08lX CODE_INTEGRITY_OPTIONS=NOT_MEASURED HVCI_KMCI_FLAG=NOT_MEASURED\n",
+            (ULONG)ciStatus); /* 保留错误码，而不把失败折叠成假阴性。 */
+    }
     DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL,
         "[VbsObserver] SAMPLE_STATUS=0x%08lX CPU_BEFORE=%u:%u CPU_AFTER=%u:%u\n",
         (ULONG)sampleStatus, (unsigned int)processorBefore.Group,
@@ -110,7 +168,15 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath)
     }
 
     DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL,
-        "[VbsObserver] VBS=NOT_MEASURED HVCI=NOT_MEASURED LIDT=NOT_MEASURED "
+        "[VbsObserver] VBS_RUNTIME=NOT_MEASURED LIDT=NOT_MEASURED "
         "PF_DELIVERY=NOT_MEASURED VMCS=NOT_MEASURED VM_EXITS=NOT_MEASURED\n"); /* 明确证据边界。 */
+    DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL,
+        "[VbsObserver] PHASE_A=%s\n",
+        (NT_SUCCESS(versionStatus) && NT_SUCCESS(ciStatus) && NT_SUCCESS(sampleStatus))
+        ? "SNAPSHOT_COMPLETE" : "PARTIAL"); /* 任一查询失败都不宣称完整。 */
+    DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL,
+        "[VbsObserver] PHASE_B=NOT_MEASURED PHASE_C=NOT_MEASURED\n"); /* 不把只读观察伪装成指令或故障实测。 */
+    DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL,
+        "[VbsObserver] === INCOMPLETE ===\n"); /* 明确未执行要求中的改变 IDT 和页故障阶段。 */
     return sampleStatus; /* 无资源需回滚；让系统获得真实的快照状态。 */
 }
