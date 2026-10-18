@@ -1,0 +1,23 @@
+{
+  "path": "C:\\Windows\\System32\\ci.dll",
+  "sha256": "b8cc50fbd7c5e916fccbb87f577485ab461fa8ffa8870e7599405e50c125659d",
+  "file_size": 1171552,
+  "image_base": 6442450944,
+  "timestamp": 654012640,
+  "codeview": {
+    "guid": "81938abc-afd1-575f-511f-ffaf1515f2a4",
+    "age": 1,
+    "pdb_name": "ci.pdb"
+  },
+  "target_rva": null,
+  "exports_MmChangeImageProtection": null,
+  "imports_MmChangeImageProtection": [],
+  "imports_ntoskrnl_count": 262,
+  "name_string_offsets": {
+    "ascii": -1,
+    "utf16le": -1
+  },
+  "direct_calls": [],
+  "direct_jumps": [],
+  "absolute_pointers": []
+}

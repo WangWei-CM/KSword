@@ -1,0 +1,24 @@
+{
+  "path": "C:\\Windows\\System32\\ntoskrnl.exe",
+  "sha256": "cb0603cd0bc46bfb2d94963e8a525c3c78ba90e3739e09deeb3185fc71613c7b",
+  "file_size": 13088888,
+  "image_base": 5368709120,
+  "timestamp": 985407553,
+  "codeview": {
+    "guid": "9daab201-5e4c-abf6-9800-9dbd0548b669",
+    "age": 1,
+    "pdb_name": "ntkrnlmp.pdb"
+  },
+  "target_rva": 10887936,
+  "exports_MmChangeImageProtection": 10887936,
+  "imports_MmChangeImageProtection": [],
+  "imports_ntoskrnl_count": 0,
+  "name_string_offsets": {
+    "ascii": 1455425,
+    "utf16le": -1
+  },
+  "direct_calls": [],
+  "direct_jumps": [],
+  "absolute_pointers": [],
+  "rip_references": []
+}

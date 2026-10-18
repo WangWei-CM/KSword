@@ -1,0 +1,286 @@
+
+************* Preparing the environment for Debugger Extensions Gallery repositories **************
+   ExtensionRepository : Implicit
+   UseExperimentalFeatureForNugetShare : true
+   AllowNugetExeUpdate : true
+   NonInteractiveNuget : true
+   AllowNugetMSCredentialProviderInstall : true
+   AllowParallelInitializationOfLocalRepositories : true
+
+   EnableRedirectToV8JsProvider : false
+
+   -- Configuring repositories
+      ----> Repository : LocalInstalled, Enabled: true
+      ----> Repository : UserExtensions, Enabled: true
+
+>>>>>>>>>>>>> Preparing the environment for Debugger Extensions Gallery repositories completed, duration 0.000 seconds
+
+************* Waiting for Debugger Extensions Gallery to Initialize **************
+
+>>>>>>>>>>>>> Waiting for Debugger Extensions Gallery to Initialize completed, duration 0.015 seconds
+   ----> Repository : UserExtensions, Enabled: true, Packages count: 0
+   ----> Repository : LocalInstalled, Enabled: true, Packages count: 29
+
+Microsoft (R) Windows Debugger Version 10.0.26100.6584 AMD64
+Copyright (c) Microsoft Corporation. All rights reserved.
+
+
+Loading Dump File [C:\Windows\System32\ntoskrnl.exe]
+
+************* Path validation summary **************
+Response                         Time (ms)     Location
+OK                                             C:\Users\Felix\CLionProjects\KSword\output\mmchangeimageprotection-20261018\symbols
+Symbol search path is: C:\Users\Felix\CLionProjects\KSword\output\mmchangeimageprotection-20261018\symbols
+Executable search path is:
+ModLoad: 00000001`40000000 00000001`41450000   C:\Windows\System32\ntoskrnl.exe
+ntoskrnl!KiSystemStartup:
+00000001`40b563e0 4883ec38        sub     rsp,38h
+0:000> cdb: Reading initial command 'uf ntoskrnl!MmChangeImageProtection; q'
+ntoskrnl!MmChangeImageProtection:
+00000001`40a62300 488bc4          mov     rax,rsp
+00000001`40a62303 48895808        mov     qword ptr [rax+8],rbx
+00000001`40a62307 48896810        mov     qword ptr [rax+10h],rbp
+00000001`40a6230b 48897018        mov     qword ptr [rax+18h],rsi
+00000001`40a6230f 44894820        mov     dword ptr [rax+20h],r9d
+00000001`40a62313 57              push    rdi
+00000001`40a62314 4154            push    r12
+00000001`40a62316 4155            push    r13
+00000001`40a62318 4156            push    r14
+00000001`40a6231a 4157            push    r15
+00000001`40a6231c 4883ec30        sub     rsp,30h
+00000001`40a62320 8360c800        and     dword ptr [rax-38h],0
+00000001`40a62324 498bd8          mov     rbx,r8
+00000001`40a62327 418d41ff        lea     eax,[r9-1]
+00000001`40a6232b 4c8be2          mov     r12,rdx
+00000001`40a6232e 488bf9          mov     rdi,rcx
+00000001`40a62331 83f801          cmp     eax,1
+00000001`40a62334 0f872d020000    ja      ntoskrnl!MmChangeImageProtection+0x267 (00000001`40a62567)
+
+ntoskrnl!MmChangeImageProtection+0x3a:
+00000001`40a6233a 448beb          mov     r13d,ebx
+00000001`40a6233d 493bdd          cmp     rbx,r13
+00000001`40a62340 0f8521020000    jne     ntoskrnl!MmChangeImageProtection+0x267 (00000001`40a62567)
+
+ntoskrnl!MmChangeImageProtection+0x46:
+00000001`40a62346 8a410a          mov     al,byte ptr [rcx+0Ah]
+00000001`40a62349 2407            and     al,7
+00000001`40a6234b 3c02            cmp     al,2
+00000001`40a6234d 0f8514020000    jne     ntoskrnl!MmChangeImageProtection+0x267 (00000001`40a62567)
+
+ntoskrnl!MmChangeImageProtection+0x53:
+00000001`40a62353 83792c00        cmp     dword ptr [rcx+2Ch],0
+00000001`40a62357 0f850a020000    jne     ntoskrnl!MmChangeImageProtection+0x267 (00000001`40a62567)
+
+ntoskrnl!MmChangeImageProtection+0x5d:
+00000001`40a6235d 8b6928          mov     ebp,dword ptr [rcx+28h]
+00000001`40a62360 f7c5ff0f0000    test    ebp,0FFFh
+00000001`40a62366 0f85fb010000    jne     ntoskrnl!MmChangeImageProtection+0x267 (00000001`40a62567)
+
+ntoskrnl!MmChangeImageProtection+0x6c:
+00000001`40a6236c 488b4920        mov     rcx,qword ptr [rcx+20h]
+00000001`40a62370 488d542420      lea     rdx,[rsp+20h]
+00000001`40a62375 c1ed0c          shr     ebp,0Ch
+00000001`40a62378 e85b9f81ff      call    ntoskrnl!MiLockLoadedDataTableEntryIfNecessary (00000001`4027c2d8)
+00000001`40a6237d 488bf0          mov     rsi,rax
+00000001`40a62380 4885c0          test    rax,rax
+00000001`40a62383 0f8596000000    jne     ntoskrnl!MmChangeImageProtection+0x11f (00000001`40a6241f)
+
+ntoskrnl!MmChangeImageProtection+0x89:
+00000001`40a62389 bb250200c0      mov     ebx,0C0000225h
+00000001`40a6238e eb6f            jmp     ntoskrnl!MmChangeImageProtection+0xff (00000001`40a623ff)
+
+ntoskrnl!MmChangeImageProtection+0x90:
+00000001`40a62390 448b4728        mov     r8d,dword ptr [rdi+28h]
+00000001`40a62394 41b901000000    mov     r9d,1
+00000001`40a6239a 488b5720        mov     rdx,qword ptr [rdi+20h]
+00000001`40a6239e 488bce          mov     rcx,rsi
+00000001`40a623a1 e83a3686ff      call    ntoskrnl!MiSetImageProtection (00000001`402c59e0)
+00000001`40a623a6 837c247801      cmp     dword ptr [rsp+78h],1
+00000001`40a623ab 0f8522010000    jne     ntoskrnl!MmChangeImageProtection+0x1d3 (00000001`40a624d3)
+
+ntoskrnl!MmChangeImageProtection+0xb1:
+00000001`40a623b1 48f7050c37560000400000 test qword ptr [ntoskrnl!MiFlags (00000001`40fc5ac8)],4000h
+00000001`40a623bc 0f8560010000    jne     ntoskrnl!MmChangeImageProtection+0x222 (00000001`40a62522)
+
+ntoskrnl!MmChangeImageProtection+0xc2:
+00000001`40a623c2 48f705fb36560000800000 test qword ptr [ntoskrnl!MiFlags (00000001`40fc5ac8)],8000h
+00000001`40a623cd 41b903000000    mov     r9d,3
+00000001`40a623d3 0f8570010000    jne     ntoskrnl!MmChangeImageProtection+0x249 (00000001`40a62549)
+
+ntoskrnl!MmChangeImageProtection+0xd9:
+00000001`40a623d9 448b4728        mov     r8d,dword ptr [rdi+28h]
+00000001`40a623dd 488bce          mov     rcx,rsi
+00000001`40a623e0 488b5720        mov     rdx,qword ptr [rdi+20h]
+00000001`40a623e4 e8f73586ff      call    ntoskrnl!MiSetImageProtection (00000001`402c59e0)
+00000001`40a623e9 33db            xor     ebx,ebx
+
+ntoskrnl!MmChangeImageProtection+0xeb:
+00000001`40a623eb 0fba766813      btr     dword ptr [rsi+68h],13h
+
+ntoskrnl!MmChangeImageProtection+0xf0:
+00000001`40a623f0 837c242000      cmp     dword ptr [rsp+20h],0
+00000001`40a623f5 7408            je      ntoskrnl!MmChangeImageProtection+0xff (00000001`40a623ff)
+
+ntoskrnl!MmChangeImageProtection+0xf7:
+00000001`40a623f7 488bce          mov     rcx,rsi
+00000001`40a623fa e8519881ff      call    ntoskrnl!MmUnlockLoadedDataTableEntry (00000001`4027bc50)
+
+ntoskrnl!MmChangeImageProtection+0xff:
+00000001`40a623ff 8bc3            mov     eax,ebx
+
+ntoskrnl!MmChangeImageProtection+0x101:
+00000001`40a62401 488b5c2460      mov     rbx,qword ptr [rsp+60h]
+00000001`40a62406 488b6c2468      mov     rbp,qword ptr [rsp+68h]
+00000001`40a6240b 488b742470      mov     rsi,qword ptr [rsp+70h]
+00000001`40a62410 4883c430        add     rsp,30h
+00000001`40a62414 415f            pop     r15
+00000001`40a62416 415e            pop     r14
+00000001`40a62418 415d            pop     r13
+00000001`40a6241a 415c            pop     r12
+00000001`40a6241c 5f              pop     rdi
+00000001`40a6241d c3              ret
+
+ntoskrnl!MmChangeImageProtection+0x11f:
+00000001`40a6241f 4c8b4030        mov     r8,qword ptr [rax+30h]
+00000001`40a62423 498d141c        lea     rdx,[r12+rbx]
+00000001`40a62427 8b4040          mov     eax,dword ptr [rax+40h]
+00000001`40a6242a 8b4f28          mov     ecx,dword ptr [rdi+28h]
+00000001`40a6242d 4903c0          add     rax,r8
+00000001`40a62430 48034f20        add     rcx,qword ptr [rdi+20h]
+00000001`40a62434 483bc8          cmp     rcx,rax
+00000001`40a62437 0f8720010000    ja      ntoskrnl!MmChangeImageProtection+0x25d (00000001`40a6255d)
+
+ntoskrnl!MmChangeImageProtection+0x13d:
+00000001`40a6243d 4d3be0          cmp     r12,r8
+00000001`40a62440 0f8217010000    jb      ntoskrnl!MmChangeImageProtection+0x25d (00000001`40a6255d)
+
+ntoskrnl!MmChangeImageProtection+0x146:
+00000001`40a62446 483bd0          cmp     rdx,rax
+00000001`40a62449 0f870e010000    ja      ntoskrnl!MmChangeImageProtection+0x25d (00000001`40a6255d)
+
+ntoskrnl!MmChangeImageProtection+0x14f:
+00000001`40a6244f 488d42ff        lea     rax,[rdx-1]
+00000001`40a62453 493bc4          cmp     rax,r12
+00000001`40a62456 0f8201010000    jb      ntoskrnl!MmChangeImageProtection+0x25d (00000001`40a6255d)
+
+ntoskrnl!MmChangeImageProtection+0x15c:
+00000001`40a6245c 8b4668          mov     eax,dword ptr [rsi+68h]
+00000001`40a6245f b900000800      mov     ecx,80000h
+00000001`40a62464 85c1            test    ecx,eax
+00000001`40a62466 0f85d3000000    jne     ntoskrnl!MmChangeImageProtection+0x23f (00000001`40a6253f)
+
+ntoskrnl!MmChangeImageProtection+0x16c:
+00000001`40a6246c 0bc1            or      eax,ecx
+00000001`40a6246e 33db            xor     ebx,ebx
+00000001`40a62470 498bc8          mov     rcx,r8
+00000001`40a62473 894668          mov     dword ptr [rsi+68h],eax
+00000001`40a62476 e835bd89ff      call    ntoskrnl!MI_IS_PHYSICAL_ADDRESS (00000001`402fe1b0)
+00000001`40a6247b 85c0            test    eax,eax
+00000001`40a6247d 0f85ee000000    jne     ntoskrnl!MmChangeImageProtection+0x271 (00000001`40a62571)
+
+ntoskrnl!MmChangeImageProtection+0x183:
+00000001`40a62483 4c8d7f30        lea     r15,[rdi+30h]
+00000001`40a62487 4533f6          xor     r14d,r14d
+
+ntoskrnl!MmChangeImageProtection+0x18a:
+00000001`40a6248a 48ba0000000000deffff mov rdx,0FFFFDE0000000000h
+00000001`40a62494 443bf5          cmp     r14d,ebp
+00000001`40a62497 0f83f3feffff    jae     ntoskrnl!MmChangeImageProtection+0x90 (00000001`40a62390)
+
+ntoskrnl!MmChangeImageProtection+0x19d:
+00000001`40a6249d 4b8b0cf7        mov     rcx,qword ptr [r15+r14*8]
+00000001`40a624a1 488d0c49        lea     rcx,[rcx+rcx*2]
+00000001`40a624a5 48c1e104        shl     rcx,4
+00000001`40a624a9 488bc2          mov     rax,rdx
+00000001`40a624ac 4803c8          add     rcx,rax
+00000001`40a624af 488b4128        mov     rax,qword ptr [rcx+28h]
+00000001`40a624b3 4885c0          test    rax,rax
+00000001`40a624b6 0f88b5000000    js      ntoskrnl!MmChangeImageProtection+0x271 (00000001`40a62571)
+
+ntoskrnl!MmChangeImageProtection+0x1bc:
+00000001`40a624bc 4533c0          xor     r8d,r8d
+00000001`40a624bf 33d2            xor     edx,edx
+00000001`40a624c1 e83a6d83ff      call    ntoskrnl!MiGetPagePrivilege (00000001`40299200)
+00000001`40a624c6 a840            test    al,40h
+00000001`40a624c8 0f85ad000000    jne     ntoskrnl!MmChangeImageProtection+0x27b (00000001`40a6257b)
+
+ntoskrnl!MmChangeImageProtection+0x1ce:
+00000001`40a624ce 41ffc6          inc     r14d
+00000001`40a624d1 ebb7            jmp     ntoskrnl!MmChangeImageProtection+0x18a (00000001`40a6248a)
+
+ntoskrnl!MmChangeImageProtection+0x1d3:
+00000001`40a624d3 48f705ea35560000800000 test qword ptr [ntoskrnl!MiFlags (00000001`40fc5ac8)],8000h
+00000001`40a624de 0f8407ffffff    je      ntoskrnl!MmChangeImageProtection+0xeb (00000001`40a623eb)
+
+ntoskrnl!MmChangeImageProtection+0x1e4:
+00000001`40a624e4 85ed            test    ebp,ebp
+00000001`40a624e6 0f84fffeffff    je      ntoskrnl!MmChangeImageProtection+0xeb (00000001`40a623eb)
+
+ntoskrnl!MmChangeImageProtection+0x1ec:
+00000001`40a624ec 8bfd            mov     edi,ebp
+00000001`40a624ee 48bd0000000000deffff mov rbp,0FFFFDE0000000000h
+
+ntoskrnl!MmChangeImageProtection+0x1f8:
+00000001`40a624f8 498b07          mov     rax,qword ptr [r15]
+00000001`40a624fb 488d0c40        lea     rcx,[rax+rax*2]
+00000001`40a624ff 48c1e104        shl     rcx,4
+00000001`40a62503 488bc5          mov     rax,rbp
+00000001`40a62506 4803c8          add     rcx,rax
+00000001`40a62509 ba09000000      mov     edx,9
+00000001`40a6250e e88d9f8cff      call    ntoskrnl!MiClearPfnImageVerified (00000001`4032c4a0)
+00000001`40a62513 4d8d7f08        lea     r15,[r15+8]
+00000001`40a62517 4883ef01        sub     rdi,1
+00000001`40a6251b 75db            jne     ntoskrnl!MmChangeImageProtection+0x1f8 (00000001`40a624f8)
+
+ntoskrnl!MmChangeImageProtection+0x21d:
+00000001`40a6251d e9c9feffff      jmp     ntoskrnl!MmChangeImageProtection+0xeb (00000001`40a623eb)
+
+ntoskrnl!MmChangeImageProtection+0x222:
+00000001`40a62522 458bc5          mov     r8d,r13d
+00000001`40a62525 498bd4          mov     rdx,r12
+00000001`40a62528 488bcf          mov     rcx,rdi
+00000001`40a6252b e85c000000      call    ntoskrnl!VslValidateDynamicCodePages (00000001`40a6258c)
+00000001`40a62530 8bd8            mov     ebx,eax
+00000001`40a62532 85c0            test    eax,eax
+00000001`40a62534 0f88b1feffff    js      ntoskrnl!MmChangeImageProtection+0xeb (00000001`40a623eb)
+
+ntoskrnl!MmChangeImageProtection+0x23a:
+00000001`40a6253a e983feffff      jmp     ntoskrnl!MmChangeImageProtection+0xc2 (00000001`40a623c2)
+
+ntoskrnl!MmChangeImageProtection+0x23f:
+00000001`40a6253f bb430000c0      mov     ebx,0C0000043h
+00000001`40a62544 e9a7feffff      jmp     ntoskrnl!MmChangeImageProtection+0xf0 (00000001`40a623f0)
+
+ntoskrnl!MmChangeImageProtection+0x249:
+00000001`40a62549 81fb2c010000    cmp     ebx,12Ch
+00000001`40a6254f b813000000      mov     eax,13h
+00000001`40a62554 440f44c8        cmove   r9d,eax
+00000001`40a62558 e97cfeffff      jmp     ntoskrnl!MmChangeImageProtection+0xd9 (00000001`40a623d9)
+
+ntoskrnl!MmChangeImageProtection+0x25d:
+00000001`40a6255d bb180000c0      mov     ebx,0C0000018h
+00000001`40a62562 e989feffff      jmp     ntoskrnl!MmChangeImageProtection+0xf0 (00000001`40a623f0)
+
+ntoskrnl!MmChangeImageProtection+0x267:
+00000001`40a62567 b80d0000c0      mov     eax,0C000000Dh
+00000001`40a6256c e990feffff      jmp     ntoskrnl!MmChangeImageProtection+0x101 (00000001`40a62401)
+
+ntoskrnl!MmChangeImageProtection+0x271:
+00000001`40a62571 bb180000c0      mov     ebx,0C0000018h
+00000001`40a62576 e970feffff      jmp     ntoskrnl!MmChangeImageProtection+0xeb (00000001`40a623eb)
+
+ntoskrnl!MmChangeImageProtection+0x27b:
+00000001`40a6257b bb450000c0      mov     ebx,0C0000045h
+00000001`40a62580 e966feffff      jmp     ntoskrnl!MmChangeImageProtection+0xeb (00000001`40a623eb)
+quit:
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\atlmfc.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\ObjectiveC.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\concurrency.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\cpp_rest.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\stl.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\Windows.Data.Json.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\Windows.Devices.Geolocation.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\Windows.Devices.Sensors.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\Windows.Media.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\windows.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\winrt.natvis'

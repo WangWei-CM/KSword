@@ -1,0 +1,27 @@
+{
+  "path": "C:\\Users\\Felix\\CLionProjects\\KSword\\artifacts\\symbols\\ntkrnlmp.exe\\2C33C5081047000\\ntkrnlmp.exe",
+  "sha256": "8214b4f98d1e18df604bf2a9ed0cb3c6c4df062a95181964e3da5e359cca4008",
+  "file_size": 12060128,
+  "image_base": 5368709120,
+  "timestamp": 741590280,
+  "codeview": {
+    "guid": "9074fc2b-82ed-2b7e-1cb3-366b64be62f9",
+    "age": 1,
+    "pdb_name": "ntkrnlmp.pdb"
+  },
+  "target_rva": 7564528,
+  "exports_MmChangeImageProtection": 7564528,
+  "imports_MmChangeImageProtection": [],
+  "imports_ntoskrnl_count": 0,
+  "name_string_offsets": {
+    "ascii": 1404270,
+    "utf16le": -1
+  },
+  "direct_calls": [],
+  "direct_jumps": [],
+  "absolute_pointers": [],
+  "rip_references": [],
+  "symbol_lookup": {
+    "target_by_name": 7564528
+  }
+}

@@ -1,0 +1,58 @@
+[
+  {
+    "site_rva": "0xA62378",
+    "instruction": "call 0x27c2d8",
+    "bytes": "e85b9f81ff",
+    "target_rva": "0x27C2D8",
+    "target_symbol": "MiLockLoadedDataTableEntryIfNecessary"
+  },
+  {
+    "site_rva": "0xA623A1",
+    "instruction": "call 0x2c59e0",
+    "bytes": "e83a3686ff",
+    "target_rva": "0x2C59E0",
+    "target_symbol": "MiSetImageProtection"
+  },
+  {
+    "site_rva": "0xA623E4",
+    "instruction": "call 0x2c59e0",
+    "bytes": "e8f73586ff",
+    "target_rva": "0x2C59E0",
+    "target_symbol": "MiSetImageProtection"
+  },
+  {
+    "site_rva": "0xA623FA",
+    "instruction": "call 0x27bc50",
+    "bytes": "e8519881ff",
+    "target_rva": "0x27BC50",
+    "target_symbol": "MmUnlockLoadedDataTableEntry"
+  },
+  {
+    "site_rva": "0xA62476",
+    "instruction": "call 0x2fe1b0",
+    "bytes": "e835bd89ff",
+    "target_rva": "0x2FE1B0",
+    "target_symbol": "MI_IS_PHYSICAL_ADDRESS"
+  },
+  {
+    "site_rva": "0xA624C1",
+    "instruction": "call 0x299200",
+    "bytes": "e83a6d83ff",
+    "target_rva": "0x299200",
+    "target_symbol": "MiGetPagePrivilege"
+  },
+  {
+    "site_rva": "0xA6250E",
+    "instruction": "call 0x32c4a0",
+    "bytes": "e88d9f8cff",
+    "target_rva": "0x32C4A0",
+    "target_symbol": "MiClearPfnImageVerified"
+  },
+  {
+    "site_rva": "0xA6252B",
+    "instruction": "call 0xa6258c",
+    "bytes": "e85c000000",
+    "target_rva": "0xA6258C",
+    "target_symbol": "VslValidateDynamicCodePages"
+  }
+]

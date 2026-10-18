@@ -1,0 +1,1475 @@
+[
+  {
+    "rva": "0x27C2D8",
+    "symbol": "MiLockLoadedDataTableEntryIfNecessary",
+    "extent_end_rva": "0x27C318",
+    "extent_source": "next public symbol (first .pdata end 0x27C30F)",
+    "instructions_shown": 24,
+    "all_instructions_shown": true,
+    "calls": [
+      {
+        "site_rva": "0x27C2FA",
+        "bytes": "e819000000",
+        "instruction": "call 0x27c318",
+        "target_rva": "0x27C318",
+        "target_symbol": "MiLockLoadedDataTableEntry"
+      },
+      {
+        "site_rva": "0x27C308",
+        "bytes": "e81f030000",
+        "instruction": "call 0x27c62c",
+        "target_rva": "0x27C62C",
+        "target_symbol": "MmFindDataTableEntryByAddress"
+      }
+    ]
+  },
+  {
+    "rva": "0x2C59E0",
+    "symbol": "MiSetImageProtection",
+    "extent_end_rva": "0x2C5A30",
+    "extent_source": "next public symbol (first .pdata end 0x2C5A28)",
+    "instructions_shown": 26,
+    "all_instructions_shown": true,
+    "calls": [
+      {
+        "site_rva": "0x2C5A1D",
+        "bytes": "e80e000000",
+        "instruction": "call 0x2c5a30",
+        "target_rva": "0x2C5A30",
+        "target_symbol": "MiSetSystemCodeProtection"
+      }
+    ]
+  },
+  {
+    "rva": "0x27BC50",
+    "symbol": "MmUnlockLoadedDataTableEntry",
+    "extent_end_rva": "0x27BC88",
+    "extent_source": "next public symbol (first .pdata end 0x27BC81)",
+    "instructions_shown": 20,
+    "all_instructions_shown": true,
+    "calls": [
+      {
+        "site_rva": "0x27BC56",
+        "bytes": "e8e9fdffff",
+        "instruction": "call 0x27ba44",
+        "target_rva": "0x27BA44",
+        "target_symbol": "MiUnlockLoaderEntry"
+      },
+      {
+        "site_rva": "0x27BC6B",
+        "bytes": "e818000000",
+        "instruction": "call 0x27bc88",
+        "target_rva": "0x27BC88",
+        "target_symbol": "MiReleaseLoadLock"
+      }
+    ]
+  },
+  {
+    "rva": "0x2FE1B0",
+    "symbol": "MI_IS_PHYSICAL_ADDRESS",
+    "extent_end_rva": "0x2FE300",
+    "extent_source": "next public symbol (first .pdata end 0x2FE2F2)",
+    "instructions_shown": 101,
+    "all_instructions_shown": true,
+    "calls": []
+  },
+  {
+    "rva": "0x299200",
+    "symbol": "MiGetPagePrivilege",
+    "extent_end_rva": "0x299580",
+    "extent_source": "next public symbol (first .pdata end 0x299228)",
+    "instructions_shown": 200,
+    "all_instructions_shown": false,
+    "calls": [
+      {
+        "site_rva": "0x299433",
+        "bytes": "e8f8430b00",
+        "instruction": "call 0x34d830",
+        "target_rva": "0x34D830",
+        "target_symbol": "MiGetTopLevelPfn"
+      },
+      {
+        "site_rva": "0x29943E",
+        "bytes": "e87d430b00",
+        "instruction": "call 0x34d7c0",
+        "target_rva": "0x34D7C0",
+        "target_symbol": "MiGetPageTablePfnBuddyRaw"
+      }
+    ]
+  },
+  {
+    "rva": "0x32C4A0",
+    "symbol": "MiClearPfnImageVerified",
+    "extent_end_rva": "0x32C640",
+    "extent_source": "next public symbol (first .pdata end 0x32C4D5)",
+    "instructions_shown": 117,
+    "all_instructions_shown": true,
+    "calls": [
+      {
+        "site_rva": "0x32C509",
+        "bytes": "e8f2ccf6ff",
+        "instruction": "call 0x299200",
+        "target_rva": "0x299200",
+        "target_symbol": "MiGetPagePrivilege"
+      },
+      {
+        "site_rva": "0x32C572",
+        "bytes": "e87d010000",
+        "instruction": "call 0x32c6f4",
+        "target_rva": "0x32C6F4",
+        "target_symbol": "VslRemoveProtectedPage"
+      },
+      {
+        "site_rva": "0x32C584",
+        "bytes": "e86793edff",
+        "instruction": "call 0x2058f0",
+        "target_rva": "0x2058F0",
+        "target_symbol": "MiSetPfnIdentity"
+      },
+      {
+        "site_rva": "0x32C594",
+        "bytes": "e89787f0ff",
+        "instruction": "call 0x234d30",
+        "target_rva": "0x234D30",
+        "target_symbol": "MiUnlockPageInline/MiUnlockPage"
+      },
+      {
+        "site_rva": "0x32C5B2",
+        "bytes": "e8bd010000",
+        "instruction": "call 0x32c774",
+        "target_rva": "0x32C774",
+        "target_symbol": "VslMakeProtectedPageExecutable"
+      },
+      {
+        "site_rva": "0x32C5F9",
+        "bytes": "e8a2d8efff",
+        "instruction": "call 0x229ea0",
+        "target_rva": "0x229EA0",
+        "target_symbol": "KiCheckVpBackingLongSpinWaitHypercall"
+      },
+      {
+        "site_rva": "0x32C604",
+        "bytes": "e867d8efff",
+        "instruction": "call 0x229e70",
+        "target_rva": "0x229E70",
+        "target_symbol": "HvlNotifyLongSpinWait"
+      },
+      {
+        "site_rva": "0x32C60B",
+        "bytes": "e88086f0ff",
+        "instruction": "call 0x234c90",
+        "target_rva": "0x234C90",
+        "target_symbol": "MiLockPageInline"
+      },
+      {
+        "site_rva": "0x32C631",
+        "bytes": "e8ca0f1d00",
+        "instruction": "call 0x4fd600",
+        "target_rva": "0x4FD600",
+        "target_symbol": "KeBugCheckEx"
+      }
+    ]
+  },
+  {
+    "rva": "0xA6258C",
+    "symbol": "VslValidateDynamicCodePages",
+    "extent_end_rva": "0xA62740",
+    "extent_source": "next public symbol (first .pdata end 0xA6273A)",
+    "instructions_shown": 100,
+    "all_instructions_shown": true,
+    "calls": [
+      {
+        "site_rva": "0xA625C5",
+        "bytes": "e876e1c5ff",
+        "instruction": "call 0x6c0740",
+        "target_rva": "0x6C0740",
+        "target_symbol": "memset"
+      },
+      {
+        "site_rva": "0xA625F4",
+        "bytes": "e847e1c5ff",
+        "instruction": "call 0x6c0740",
+        "target_rva": "0x6C0740",
+        "target_symbol": "memset"
+      },
+      {
+        "site_rva": "0xA62603",
+        "bytes": "e88826a0ff",
+        "instruction": "call 0x464c90",
+        "target_rva": "0x464C90",
+        "target_symbol": "MmSizeOfMdl"
+      },
+      {
+        "site_rva": "0xA62680",
+        "bytes": "e81bc189ff",
+        "instruction": "call 0x2fe7a0",
+        "target_rva": "0x2FE7A0",
+        "target_symbol": "MmProbeAndLockPages"
+      },
+      {
+        "site_rva": "0xA6269F",
+        "bytes": "e8688c7aff",
+        "instruction": "call 0x20b30c",
+        "target_rva": "0x20B30C",
+        "target_symbol": "VslpLockPagesForTransfer"
+      },
+      {
+        "site_rva": "0xA626EE",
+        "bytes": "e86d6589ff",
+        "instruction": "call 0x2f8c60",
+        "target_rva": "0x2F8C60",
+        "target_symbol": "VslpEnterIumSecureMode"
+      },
+      {
+        "site_rva": "0xA626FA",
+        "bytes": "e8b9947aff",
+        "instruction": "call 0x20bbb8",
+        "target_rva": "0x20BBB8",
+        "target_symbol": "VslpUnlockPagesForTransfer"
+      },
+      {
+        "site_rva": "0xA62707",
+        "bytes": "e844957aff",
+        "instruction": "call 0x20bc50",
+        "target_rva": "0x20BC50",
+        "target_symbol": "MmUnlockPages"
+      },
+      {
+        "site_rva": "0xA62719",
+        "bytes": "e87239c4ff",
+        "instruction": "call 0x6a6090",
+        "target_rva": "0x6A6090",
+        "target_symbol": "_security_check_cookie"
+      }
+    ]
+  },
+  {
+    "rva": "0x2C5A30",
+    "symbol": "MiSetSystemCodeProtection",
+    "extent_end_rva": "0x2C6240",
+    "extent_source": "next public symbol (first .pdata end 0x2C6230)",
+    "instructions_shown": 200,
+    "all_instructions_shown": false,
+    "calls": [
+      {
+        "site_rva": "0x2C5AA0",
+        "bytes": "e80b870300",
+        "instruction": "call 0x2fe1b0",
+        "target_rva": "0x2FE1B0",
+        "target_symbol": "MI_IS_PHYSICAL_ADDRESS"
+      },
+      {
+        "site_rva": "0x2C5AED",
+        "bytes": "e87e070000",
+        "instruction": "call 0x2c6270",
+        "target_rva": "0x2C6270",
+        "target_symbol": "MiMakeDriverPagesPrivate"
+      },
+      {
+        "site_rva": "0x2C5B08",
+        "bytes": "e8c3aefcff",
+        "instruction": "call 0x2909d0",
+        "target_rva": "0x2909D0",
+        "target_symbol": "MiLockWorkingSetShared"
+      },
+      {
+        "site_rva": "0x2C5B55",
+        "bytes": "e87aeeffff",
+        "instruction": "call 0x2c49d4",
+        "target_rva": "0x2C49D4",
+        "target_symbol": "MiMarkPfnVerified"
+      },
+      {
+        "site_rva": "0x2C5B8D",
+        "bytes": "e8be190a00",
+        "instruction": "call 0x367550",
+        "target_rva": "0x367550",
+        "target_symbol": "MiMakeValidPte"
+      },
+      {
+        "site_rva": "0x2C5BA7",
+        "bytes": "e844fafcff",
+        "instruction": "call 0x2955f0",
+        "target_rva": "0x2955F0",
+        "target_symbol": "MiWriteValidPteNewProtection"
+      },
+      {
+        "site_rva": "0x2C5BCB",
+        "bytes": "e870060000",
+        "instruction": "call 0x2c6240",
+        "target_rva": "0x2C6240",
+        "target_symbol": "MI_TIGHTER_PERMISSIONS"
+      },
+      {
+        "site_rva": "0x2C5C87",
+        "bytes": "e87435fdff",
+        "instruction": "call 0x299200",
+        "target_rva": "0x299200",
+        "target_symbol": "MiGetPagePrivilege"
+      },
+      {
+        "site_rva": "0x2C5CCB",
+        "bytes": "e870b7feff",
+        "instruction": "call 0x2b1440",
+        "target_rva": "0x2B1440",
+        "target_symbol": "MiCaptureDirtyBitToPfn"
+      },
+      {
+        "site_rva": "0x2C5CF5",
+        "bytes": "e8d66cf6ff",
+        "instruction": "call 0x22c9d0",
+        "target_rva": "0x22C9D0",
+        "target_symbol": "MiFlushTbList"
+      },
+      {
+        "site_rva": "0x2C5CFA",
+        "bytes": "e88189f6ff",
+        "instruction": "call 0x22e680",
+        "target_rva": "0x22E680",
+        "target_symbol": "MiReleaseProcessorFlushList"
+      },
+      {
+        "site_rva": "0x2C5D10",
+        "bytes": "e8eb92f5ff",
+        "instruction": "call 0x21f000",
+        "target_rva": "0x21F000",
+        "target_symbol": "MiUnlockPageTableInternal/MiUnlockPageTable"
+      },
+      {
+        "site_rva": "0x2C5D23",
+        "bytes": "e848b7fcff",
+        "instruction": "call 0x291470",
+        "target_rva": "0x291470",
+        "target_symbol": "MiUnlockWorkingSetShared"
+      },
+      {
+        "site_rva": "0x2C5D45",
+        "bytes": "e806f90300",
+        "instruction": "call 0x305650",
+        "target_rva": "0x305650",
+        "target_symbol": "MiGetProcessorFlushList"
+      }
+    ]
+  },
+  {
+    "rva": "0x32C6F4",
+    "symbol": "VslRemoveProtectedPage",
+    "extent_end_rva": "0x32C774",
+    "extent_source": "next public symbol (first .pdata end 0x32C76C)",
+    "instructions_shown": 40,
+    "all_instructions_shown": true,
+    "calls": [
+      {
+        "site_rva": "0x32C725",
+        "bytes": "e816403900",
+        "instruction": "call 0x6c0740",
+        "target_rva": "0x6C0740",
+        "target_symbol": "memset"
+      },
+      {
+        "site_rva": "0x32C74B",
+        "bytes": "e810c5fcff",
+        "instruction": "call 0x2f8c60",
+        "target_rva": "0x2F8C60",
+        "target_symbol": "VslpEnterIumSecureMode"
+      },
+      {
+        "site_rva": "0x32C75B",
+        "bytes": "e830993700",
+        "instruction": "call 0x6a6090",
+        "target_rva": "0x6A6090",
+        "target_symbol": "_security_check_cookie"
+      }
+    ]
+  },
+  {
+    "rva": "0x32C774",
+    "symbol": "VslMakeProtectedPageExecutable",
+    "extent_end_rva": "0x32C80C",
+    "extent_source": "next public symbol (first .pdata end 0x32C803)",
+    "instructions_shown": 45,
+    "all_instructions_shown": true,
+    "calls": [
+      {
+        "site_rva": "0x32C7AC",
+        "bytes": "e88f3f3900",
+        "instruction": "call 0x6c0740",
+        "target_rva": "0x6C0740",
+        "target_symbol": "memset"
+      },
+      {
+        "site_rva": "0x32C7D8",
+        "bytes": "e883c4fcff",
+        "instruction": "call 0x2f8c60",
+        "target_rva": "0x2F8C60",
+        "target_symbol": "VslpEnterIumSecureMode"
+      },
+      {
+        "site_rva": "0x32C7E8",
+        "bytes": "e8a3983700",
+        "instruction": "call 0x6a6090",
+        "target_rva": "0x6A6090",
+        "target_symbol": "_security_check_cookie"
+      }
+    ]
+  },
+  {
+    "rva": "0x2F8C60",
+    "symbol": "VslpEnterIumSecureMode",
+    "extent_end_rva": "0x2F90E8",
+    "extent_source": "next public symbol (first .pdata end 0x2F8CC4)",
+    "instructions_shown": 200,
+    "all_instructions_shown": false,
+    "calls": [
+      {
+        "site_rva": "0x2F8CE0",
+        "bytes": "e80bf70300",
+        "instruction": "call 0x3383f0",
+        "target_rva": "0x3383F0",
+        "target_symbol": "KeAreInterruptsEnabled"
+      },
+      {
+        "site_rva": "0x2F8DA0",
+        "bytes": "e8bbf3ffff",
+        "instruction": "call 0x2f8160",
+        "target_rva": "0x2F8160",
+        "target_symbol": "EtwTraceKernelEvent"
+      },
+      {
+        "site_rva": "0x2F8DAF",
+        "bytes": "e87cdb3a00",
+        "instruction": "call 0x6a6930",
+        "target_rva": "0x6A6930",
+        "target_symbol": "HvlSwitchToVsmVtl1"
+      },
+      {
+        "site_rva": "0x2F8DF9",
+        "bytes": "e862f3ffff",
+        "instruction": "call 0x2f8160",
+        "target_rva": "0x2F8160",
+        "target_symbol": "EtwTraceKernelEvent"
+      },
+      {
+        "site_rva": "0x2F8E83",
+        "bytes": "e850c51f00",
+        "instruction": "call 0x4f53d8",
+        "target_rva": "0x4F53D8",
+        "target_symbol": "KiLowerIrqlProcessIrqlFlags"
+      },
+      {
+        "site_rva": "0x2F8EA3",
+        "bytes": "e8e89ff6ff",
+        "instruction": "call 0x262e90",
+        "target_rva": "0x262E90",
+        "target_symbol": "KeReleaseSemaphore"
+      },
+      {
+        "site_rva": "0x2F8EB0",
+        "bytes": "e86bb6f7ff",
+        "instruction": "call 0x274520",
+        "target_rva": "0x274520",
+        "target_symbol": "KeLeaveCriticalRegionThread"
+      },
+      {
+        "site_rva": "0x2F8ED6",
+        "bytes": "e8b5d13a00",
+        "instruction": "call 0x6a6090",
+        "target_rva": "0x6A6090",
+        "target_symbol": "_security_check_cookie"
+      },
+      {
+        "site_rva": "0x2F8F39",
+        "bytes": "e8b2d8f1ff",
+        "instruction": "call 0x2167f0",
+        "target_rva": "0x2167F0",
+        "target_symbol": "KeWaitForSingleObject"
+      },
+      {
+        "site_rva": "0x2F8F88",
+        "bytes": "e813db3a00",
+        "instruction": "call 0x6a6aa0",
+        "target_rva": "0x6A6AA0",
+        "target_symbol": "VslpDispatchIumSyscall"
+      }
+    ]
+  },
+  {
+    "rva": "0x20B30C",
+    "symbol": "VslpLockPagesForTransfer",
+    "extent_end_rva": "0x20B60C",
+    "extent_source": "next public symbol (first .pdata end 0x20B603)",
+    "instructions_shown": 189,
+    "all_instructions_shown": true,
+    "calls": [
+      {
+        "site_rva": "0x20B3AA",
+        "bytes": "e8411d9700",
+        "instruction": "call 0xb7d0f0",
+        "target_rva": "0xB7D0F0",
+        "target_symbol": "ExAllocatePool2"
+      },
+      {
+        "site_rva": "0x20B436",
+        "bytes": "e865330f00",
+        "instruction": "call 0x2fe7a0",
+        "target_rva": "0x2FE7A0",
+        "target_symbol": "MmProbeAndLockPages"
+      },
+      {
+        "site_rva": "0x20B474",
+        "bytes": "e893010000",
+        "instruction": "call 0x20b60c",
+        "target_rva": "0x20B60C",
+        "target_symbol": "VslpLockMdlForTransfer"
+      },
+      {
+        "site_rva": "0x20B50B",
+        "bytes": "e870210f00",
+        "instruction": "call 0x2fd680",
+        "target_rva": "0x2FD680",
+        "target_symbol": "MmBuildMdlForNonPagedPool"
+      },
+      {
+        "site_rva": "0x20B529",
+        "bytes": "e822070000",
+        "instruction": "call 0x20bc50",
+        "target_rva": "0x20BC50",
+        "target_symbol": "MmUnlockPages"
+      },
+      {
+        "site_rva": "0x20B533",
+        "bytes": "e838239700",
+        "instruction": "call 0xb7d870",
+        "target_rva": "0xB7D870",
+        "target_symbol": "ExFreePoolWithTag"
+      },
+      {
+        "site_rva": "0x20B55A",
+        "bytes": "e811ce0000",
+        "instruction": "call 0x218370",
+        "target_rva": "0x218370",
+        "target_symbol": "KeAbPreAcquire"
+      },
+      {
+        "site_rva": "0x20B57F",
+        "bytes": "e84cc80000",
+        "instruction": "call 0x217dd0",
+        "target_rva": "0x217DD0",
+        "target_symbol": "ExfAcquirePushLockExclusiveEx"
+      }
+    ]
+  },
+  {
+    "rva": "0x20BBB8",
+    "symbol": "VslpUnlockPagesForTransfer",
+    "extent_end_rva": "0x20BC50",
+    "extent_source": "next public symbol (first .pdata end 0x20BC43)",
+    "instructions_shown": 56,
+    "all_instructions_shown": true,
+    "calls": [
+      {
+        "site_rva": "0x20BBCF",
+        "bytes": "e87c000000",
+        "instruction": "call 0x20bc50",
+        "target_rva": "0x20BC50",
+        "target_symbol": "MmUnlockPages"
+      },
+      {
+        "site_rva": "0x20BBEC",
+        "bytes": "e85f000000",
+        "instruction": "call 0x20bc50",
+        "target_rva": "0x20BC50",
+        "target_symbol": "MmUnlockPages"
+      },
+      {
+        "site_rva": "0x20BC00",
+        "bytes": "e86b1c9700",
+        "instruction": "call 0xb7d870",
+        "target_rva": "0xB7D870",
+        "target_symbol": "ExFreePoolWithTag"
+      },
+      {
+        "site_rva": "0x20BC38",
+        "bytes": "e833f70600",
+        "instruction": "call 0x27b370",
+        "target_rva": "0x27B370",
+        "target_symbol": "ExfTryToWakePushLock"
+      }
+    ]
+  },
+  {
+    "rva": "0x34D830",
+    "symbol": "MiGetTopLevelPfn",
+    "extent_end_rva": "0x34D9A0",
+    "extent_source": "next public symbol (first .pdata end 0x34D993)",
+    "instructions_shown": 111,
+    "all_instructions_shown": true,
+    "calls": [
+      {
+        "site_rva": "0x34D8DF",
+        "bytes": "e81cfd1a00",
+        "instruction": "call 0x4fd600",
+        "target_rva": "0x4FD600",
+        "target_symbol": "KeBugCheckEx"
+      },
+      {
+        "site_rva": "0x34D91C",
+        "bytes": "e86f873500",
+        "instruction": "call 0x6a6090",
+        "target_rva": "0x6A6090",
+        "target_symbol": "_security_check_cookie"
+      },
+      {
+        "site_rva": "0x34D980",
+        "bytes": "e81bc5edff",
+        "instruction": "call 0x229ea0",
+        "target_rva": "0x229EA0",
+        "target_symbol": "KiCheckVpBackingLongSpinWaitHypercall"
+      },
+      {
+        "site_rva": "0x34D98C",
+        "bytes": "e8dfc4edff",
+        "instruction": "call 0x229e70",
+        "target_rva": "0x229E70",
+        "target_symbol": "HvlNotifyLongSpinWait"
+      }
+    ]
+  },
+  {
+    "rva": "0x34D7C0",
+    "symbol": "MiGetPageTablePfnBuddyRaw",
+    "extent_end_rva": "0x34D830",
+    "extent_source": "next public symbol (first .pdata end 0x34D822)",
+    "instructions_shown": 43,
+    "all_instructions_shown": true,
+    "calls": []
+  },
+  {
+    "rva": "0x367550",
+    "symbol": "MiMakeValidPte",
+    "extent_end_rva": "0x3677B0",
+    "extent_source": "next public symbol (first .pdata end 0x367556)",
+    "instructions_shown": 143,
+    "all_instructions_shown": true,
+    "calls": [
+      {
+        "site_rva": "0x36775A",
+        "bytes": "e851000000",
+        "instruction": "call 0x3677b0",
+        "target_rva": "0x3677B0",
+        "target_symbol": "MiUserPdeOrAbove"
+      }
+    ]
+  },
+  {
+    "rva": "0x2955F0",
+    "symbol": "MiWriteValidPteNewProtection",
+    "extent_end_rva": "0x295780",
+    "extent_source": "next public symbol (first .pdata end 0x295773)",
+    "instructions_shown": 102,
+    "all_instructions_shown": true,
+    "calls": [
+      {
+        "site_rva": "0x295743",
+        "bytes": "e818140100",
+        "instruction": "call 0x2a6b60",
+        "target_rva": "0x2A6B60",
+        "target_symbol": "MiCheckLinearProtectedPteAccessedBit"
+      },
+      {
+        "site_rva": "0x295752",
+        "bytes": "e8f1310100",
+        "instruction": "call 0x2a8948",
+        "target_rva": "0x2A8948",
+        "target_symbol": "MiSanitizeShadowPxe"
+      },
+      {
+        "site_rva": "0x295769",
+        "bytes": "e81e350100",
+        "instruction": "call 0x2a8c8c",
+        "target_rva": "0x2A8C8C",
+        "target_symbol": "MiWritePteShadow"
+      }
+    ]
+  },
+  {
+    "rva": "0x22C9D0",
+    "symbol": "MiFlushTbList",
+    "extent_end_rva": "0x22D544",
+    "extent_source": "next public symbol (first .pdata end 0x22CA05)",
+    "instructions_shown": 200,
+    "all_instructions_shown": false,
+    "calls": [
+      {
+        "site_rva": "0x22CB6F",
+        "bytes": "e86c0a0000",
+        "instruction": "call 0x22d5e0",
+        "target_rva": "0x22D5E0",
+        "target_symbol": "VmFlushTb"
+      },
+      {
+        "site_rva": "0x22CB9F",
+        "bytes": "e8a0090000",
+        "instruction": "call 0x22d544",
+        "target_rva": "0x22D544",
+        "target_symbol": "ExFlushTb"
+      },
+      {
+        "site_rva": "0x22CBB5",
+        "bytes": "e81e882c00",
+        "instruction": "call 0x4f53d8",
+        "target_rva": "0x4F53D8",
+        "target_symbol": "KiLowerIrqlProcessIrqlFlags"
+      },
+      {
+        "site_rva": "0x22CC23",
+        "bytes": "e868944700",
+        "instruction": "call 0x6a6090",
+        "target_rva": "0x6A6090",
+        "target_symbol": "_security_check_cookie"
+      }
+    ]
+  },
+  {
+    "rva": "0x2C49D4",
+    "symbol": "MiMarkPfnVerified",
+    "extent_end_rva": "0x2C4B2C",
+    "extent_source": "next public symbol (first .pdata end 0x2C4B24)",
+    "instructions_shown": 97,
+    "all_instructions_shown": true,
+    "calls": [
+      {
+        "site_rva": "0x2C4A43",
+        "bytes": "e8a80ef4ff",
+        "instruction": "call 0x2058f0",
+        "target_rva": "0x2058F0",
+        "target_symbol": "MiSetPfnIdentity"
+      },
+      {
+        "site_rva": "0x2C4A5E",
+        "bytes": "e8cd02f7ff",
+        "instruction": "call 0x234d30",
+        "target_rva": "0x234D30",
+        "target_symbol": "MiUnlockPageInline/MiUnlockPage"
+      },
+      {
+        "site_rva": "0x2C4A85",
+        "bytes": "e80602f7ff",
+        "instruction": "call 0x234c90",
+        "target_rva": "0x234C90",
+        "target_symbol": "MiLockPageInline"
+      },
+      {
+        "site_rva": "0x2C4ABB",
+        "bytes": "e8e053f6ff",
+        "instruction": "call 0x229ea0",
+        "target_rva": "0x229EA0",
+        "target_symbol": "KiCheckVpBackingLongSpinWaitHypercall"
+      },
+      {
+        "site_rva": "0x2C4AC6",
+        "bytes": "e8a553f6ff",
+        "instruction": "call 0x229e70",
+        "target_rva": "0x229E70",
+        "target_symbol": "HvlNotifyLongSpinWait"
+      },
+      {
+        "site_rva": "0x2C4B05",
+        "bytes": "e8f646fdff",
+        "instruction": "call 0x299200",
+        "target_rva": "0x299200",
+        "target_symbol": "MiGetPagePrivilege"
+      },
+      {
+        "site_rva": "0x2C4B1A",
+        "bytes": "e8757b0600",
+        "instruction": "call 0x32c694",
+        "target_rva": "0x32C694",
+        "target_symbol": "KeSetPagePrivilege"
+      }
+    ]
+  },
+  {
+    "rva": "0x2B1440",
+    "symbol": "MiCaptureDirtyBitToPfn",
+    "extent_end_rva": "0x2B1500",
+    "extent_source": "next public symbol (first .pdata end 0x2B1462)",
+    "instructions_shown": 66,
+    "all_instructions_shown": true,
+    "calls": [
+      {
+        "site_rva": "0x2B14C0",
+        "bytes": "e8174bf9ff",
+        "instruction": "call 0x245fdc",
+        "target_rva": "0x245FDC",
+        "target_symbol": "MiClearPageFileReservation"
+      },
+      {
+        "site_rva": "0x2B14CF",
+        "bytes": "e8d82e0000",
+        "instruction": "call 0x2b43ac",
+        "target_rva": "0x2B43AC",
+        "target_symbol": "MiCanPfnOriginalPteBeLost"
+      }
+    ]
+  },
+  {
+    "rva": "0x6A6930",
+    "symbol": "HvlSwitchToVsmVtl1",
+    "extent_end_rva": "0x6A6A80",
+    "extent_source": "next public symbol (first .pdata end 0x6A6A6B)",
+    "instructions_shown": 69,
+    "all_instructions_shown": true,
+    "calls": [
+      {
+        "site_rva": "0x6A69D6",
+        "bytes": "e8a5000000",
+        "instruction": "call 0x6a6a80",
+        "target_rva": "0x6A6A80",
+        "target_symbol": "HvlpSwitchToVsmVtl1RetpolineHelper"
+      }
+    ]
+  },
+  {
+    "rva": "0x6A6AA0",
+    "symbol": "VslpDispatchIumSyscall",
+    "extent_end_rva": "0x6A6AF0",
+    "extent_source": "next public symbol (first .pdata end 0x6A6AE6)",
+    "instructions_shown": 33,
+    "all_instructions_shown": true,
+    "calls": [
+      {
+        "site_rva": "0x6A6AD2",
+        "bytes": "ffd0",
+        "instruction": "call rax",
+        "target_rva": null,
+        "target_symbol": null
+      }
+    ]
+  },
+  {
+    "rva": "0x229EA0",
+    "symbol": "KiCheckVpBackingLongSpinWaitHypercall",
+    "extent_end_rva": "0x229F10",
+    "extent_source": "next public symbol (first .pdata end 0x229F08)",
+    "instructions_shown": 39,
+    "all_instructions_shown": true,
+    "calls": []
+  },
+  {
+    "rva": "0x229E70",
+    "symbol": "HvlNotifyLongSpinWait",
+    "extent_end_rva": "0x229EA0",
+    "extent_source": "next public symbol (first .pdata end 0x229E9A)",
+    "instructions_shown": 16,
+    "all_instructions_shown": true,
+    "calls": [
+      {
+        "site_rva": "0x229E8F",
+        "bytes": "e8ac410000",
+        "instruction": "call 0x22e040",
+        "target_rva": "0x22E040",
+        "target_symbol": "HvcallInitiateHypercall"
+      }
+    ]
+  },
+  {
+    "rva": "0x6A6A80",
+    "symbol": "HvlpSwitchToVsmVtl1RetpolineHelper",
+    "extent_end_rva": "0x6A6AA0",
+    "extent_source": "next public symbol (first .pdata end 0x6A6A85)",
+    "instructions_shown": 22,
+    "all_instructions_shown": true,
+    "calls": []
+  },
+  {
+    "rva": "0x2A7450",
+    "symbol": "MiInsertTbFlushEntry",
+    "extent_end_rva": "0x2A76D4",
+    "extent_source": "next public symbol (first .pdata end 0x2A7483)",
+    "instructions_shown": 171,
+    "all_instructions_shown": true,
+    "calls": [
+      {
+        "site_rva": "0x2A7648",
+        "bytes": "e843932500",
+        "instruction": "call 0x500990",
+        "target_rva": "0x500990",
+        "target_symbol": "qsort"
+      },
+      {
+        "site_rva": "0x2A7650",
+        "bytes": "e81f9b1900",
+        "instruction": "call 0x441174",
+        "target_rva": "0x441174",
+        "target_symbol": "MiCompressTbFlushList"
+      }
+    ]
+  },
+  {
+    "rva": "0x310240",
+    "symbol": "MiOffsetToProtos",
+    "extent_end_rva": "0x3104D0",
+    "extent_source": "next public symbol (first .pdata end 0x310275)",
+    "instructions_shown": 166,
+    "all_instructions_shown": true,
+    "calls": [
+      {
+        "site_rva": "0x31025F",
+        "bytes": "e86c020000",
+        "instruction": "call 0x3104d0",
+        "target_rva": "0x3104D0",
+        "target_symbol": "MiGetControlAreaPtes"
+      },
+      {
+        "site_rva": "0x31029B",
+        "bytes": "e8a0043b00",
+        "instruction": "call 0x6c0740",
+        "target_rva": "0x6C0740",
+        "target_symbol": "memset"
+      },
+      {
+        "site_rva": "0x3102C7",
+        "bytes": "e8d4030000",
+        "instruction": "call 0x3106a0",
+        "target_rva": "0x3106A0",
+        "target_symbol": "ExAcquireSpinLockShared"
+      },
+      {
+        "site_rva": "0x31034A",
+        "bytes": "e889501e00",
+        "instruction": "call 0x4f53d8",
+        "target_rva": "0x4F53D8",
+        "target_symbol": "KiLowerIrqlProcessIrqlFlags"
+      },
+      {
+        "site_rva": "0x31039B",
+        "bytes": "e8b071fdff",
+        "instruction": "call 0x2e7550",
+        "target_rva": "0x2E7550",
+        "target_symbol": "MiLocatePagefileSubsection"
+      },
+      {
+        "site_rva": "0x3103AD",
+        "bytes": "e89ecbffff",
+        "instruction": "call 0x30cf50",
+        "target_rva": "0x30CF50",
+        "target_symbol": "ExReleaseSpinLockSharedFromDpcLevel"
+      },
+      {
+        "site_rva": "0x3104B5",
+        "bytes": "e8de0a0200",
+        "instruction": "call 0x330f98",
+        "target_rva": "0x330F98",
+        "target_symbol": "ExpReleaseSpinLockSharedFromDpcLevelInstrumented"
+      }
+    ]
+  },
+  {
+    "rva": "0x296680",
+    "symbol": "MI_READ_PTE_LOCK_FREE",
+    "extent_end_rva": "0x296720",
+    "extent_source": "next public symbol (first .pdata end 0x296714)",
+    "instructions_shown": 51,
+    "all_instructions_shown": true,
+    "calls": []
+  },
+  {
+    "rva": "0x2B3080",
+    "symbol": "MiInvalidPteConforms",
+    "extent_end_rva": "0x2B30B4",
+    "extent_source": "next public symbol (first .pdata end 0x2B30AE)",
+    "instructions_shown": 24,
+    "all_instructions_shown": true,
+    "calls": []
+  },
+  {
+    "rva": "0x4FD1E8",
+    "symbol": "MiRestrictSystemCodeProtection",
+    "extent_end_rva": "0x4FD268",
+    "extent_source": "next public symbol (first .pdata end 0x4FD25F)",
+    "instructions_shown": 45,
+    "all_instructions_shown": true,
+    "calls": []
+  },
+  {
+    "rva": "0x22D5E0",
+    "symbol": "VmFlushTb",
+    "extent_end_rva": "0x22D620",
+    "extent_source": "next public symbol (first .pdata end 0x22D61A)",
+    "instructions_shown": 21,
+    "all_instructions_shown": true,
+    "calls": [
+      {
+        "site_rva": "0x22D60F",
+        "bytes": "e8ccefffff",
+        "instruction": "call 0x22c5e0",
+        "target_rva": "0x22C5E0",
+        "target_symbol": "VmpFlushTb"
+      }
+    ]
+  },
+  {
+    "rva": "0x22D544",
+    "symbol": "ExFlushTb",
+    "extent_end_rva": "0x22D5E0",
+    "extent_source": "next public symbol (first .pdata end 0x22D5DA)",
+    "instructions_shown": 44,
+    "all_instructions_shown": true,
+    "calls": [
+      {
+        "site_rva": "0x22D599",
+        "bytes": "e8626f4800",
+        "instruction": "call 0x6b4500",
+        "target_rva": "0x6B4500",
+        "target_symbol": "guard_dispatch_icall/guard_dispatch_icall_no_overrides"
+      },
+      {
+        "site_rva": "0x22D5D3",
+        "bytes": "e8286f4800",
+        "instruction": "call 0x6b4500",
+        "target_rva": "0x6B4500",
+        "target_symbol": "guard_dispatch_icall/guard_dispatch_icall_no_overrides"
+      }
+    ]
+  },
+  {
+    "rva": "0x22C5E0",
+    "symbol": "VmpFlushTb",
+    "extent_end_rva": "0x22C9D0",
+    "extent_source": "next public symbol (first .pdata end 0x22C9CA)",
+    "instructions_shown": 200,
+    "all_instructions_shown": false,
+    "calls": [
+      {
+        "site_rva": "0x22C620",
+        "bytes": "e88f2b0000",
+        "instruction": "call 0x22f1b4",
+        "target_rva": "0x22F1B4",
+        "target_symbol": "VmpProcessContextLockExclusive"
+      },
+      {
+        "site_rva": "0x22C69D",
+        "bytes": "e85e2b0000",
+        "instruction": "call 0x22f200",
+        "target_rva": "0x22F200",
+        "target_symbol": "VmpConvertPortionVpnRangeToGpnRange"
+      },
+      {
+        "site_rva": "0x22C6E9",
+        "bytes": "e8b6ad2300",
+        "instruction": "call 0x4674a4",
+        "target_rva": "0x4674A4",
+        "target_symbol": "VmpInsertInvalidateListRange"
+      },
+      {
+        "site_rva": "0x22C6F7",
+        "bytes": "e8f0ab2300",
+        "instruction": "call 0x4672ec",
+        "target_rva": "0x4672EC",
+        "target_symbol": "VmpInvalidateOutstandingFaults"
+      },
+      {
+        "site_rva": "0x22C721",
+        "bytes": "e8be9c1a00",
+        "instruction": "call 0x3d63e4",
+        "target_rva": "0x3D63E4",
+        "target_symbol": "VmpProcessInvalidateList"
+      },
+      {
+        "site_rva": "0x22C72C",
+        "bytes": "e823fd2500",
+        "instruction": "call 0x48c454",
+        "target_rva": "0x48C454",
+        "target_symbol": "VmpProcessContextUnlockExclusive"
+      },
+      {
+        "site_rva": "0x22C79A",
+        "bytes": "e8152a0000",
+        "instruction": "call 0x22f1b4",
+        "target_rva": "0x22F1B4",
+        "target_symbol": "VmpProcessContextLockExclusive"
+      },
+      {
+        "site_rva": "0x22C835",
+        "bytes": "e8c6290000",
+        "instruction": "call 0x22f200",
+        "target_rva": "0x22F200",
+        "target_symbol": "VmpConvertPortionVpnRangeToGpnRange"
+      },
+      {
+        "site_rva": "0x22C863",
+        "bytes": "e83cac2300",
+        "instruction": "call 0x4674a4",
+        "target_rva": "0x4674A4",
+        "target_symbol": "VmpInsertInvalidateListRange"
+      },
+      {
+        "site_rva": "0x22C871",
+        "bytes": "e876aa2300",
+        "instruction": "call 0x4672ec",
+        "target_rva": "0x4672EC",
+        "target_symbol": "VmpInvalidateOutstandingFaults"
+      },
+      {
+        "site_rva": "0x22C8D7",
+        "bytes": "e824290000",
+        "instruction": "call 0x22f200",
+        "target_rva": "0x22F200",
+        "target_symbol": "VmpConvertPortionVpnRangeToGpnRange"
+      }
+    ]
+  },
+  {
+    "rva": "0x22D620",
+    "symbol": "HvlFlushRangeListTb",
+    "extent_end_rva": "0x22DAF0",
+    "extent_source": "next public symbol (first .pdata end 0x22D65C)",
+    "instructions_shown": 200,
+    "all_instructions_shown": false,
+    "calls": [
+      {
+        "site_rva": "0x22D743",
+        "bytes": "e858684800",
+        "instruction": "call 0x6b3fa0",
+        "target_rva": "0x6B3FA0",
+        "target_symbol": "RtlInterlockedPopEntrySList/ExpInterlockedPopEntrySList/RtlpInterlockedPopEntrySList"
+      },
+      {
+        "site_rva": "0x22D7A8",
+        "bytes": "e8230f0000",
+        "instruction": "call 0x22e6d0",
+        "target_rva": "0x22E6D0",
+        "target_symbol": "HvlpCopyFlushVaList"
+      },
+      {
+        "site_rva": "0x22D827",
+        "bytes": "e8281f0000",
+        "instruction": "call 0x22f754",
+        "target_rva": "0x22F754",
+        "target_symbol": "VslSlowFlushSecureRangeList"
+      },
+      {
+        "site_rva": "0x22D843",
+        "bytes": "e8f8070000",
+        "instruction": "call 0x22e040",
+        "target_rva": "0x22E040",
+        "target_symbol": "HvcallInitiateHypercall"
+      },
+      {
+        "site_rva": "0x22D84D",
+        "bytes": "e83e060000",
+        "instruction": "call 0x22de90",
+        "target_rva": "0x22DE90",
+        "target_symbol": "HvlpReleaseHypercallPage"
+      },
+      {
+        "site_rva": "0x22D925",
+        "bytes": "e8c6010000",
+        "instruction": "call 0x22daf0",
+        "target_rva": "0x22DAF0",
+        "target_symbol": "HvcallFastExtended"
+      },
+      {
+        "site_rva": "0x22D955",
+        "bytes": "e836874700",
+        "instruction": "call 0x6a6090",
+        "target_rva": "0x6A6090",
+        "target_symbol": "_security_check_cookie"
+      },
+      {
+        "site_rva": "0x22D99D",
+        "bytes": "e83edb1a00",
+        "instruction": "call 0x3db4e0",
+        "target_rva": "0x3DB4E0",
+        "target_symbol": "HvlpFlushRangeListTbEx"
+      }
+    ]
+  },
+  {
+    "rva": "0x22BDD0",
+    "symbol": "KiIpiSendRequest",
+    "extent_end_rva": "0x22C480",
+    "extent_source": "next public symbol (first .pdata end 0x22C46D)",
+    "instructions_shown": 200,
+    "all_instructions_shown": false,
+    "calls": [
+      {
+        "site_rva": "0x22BE61",
+        "bytes": "e8da484900",
+        "instruction": "call 0x6c0740",
+        "target_rva": "0x6C0740",
+        "target_symbol": "memset"
+      },
+      {
+        "site_rva": "0x22BE7A",
+        "bytes": "e8c1484900",
+        "instruction": "call 0x6c0740",
+        "target_rva": "0x6C0740",
+        "target_symbol": "memset"
+      }
+    ]
+  },
+  {
+    "rva": "0x22C480",
+    "symbol": "KiFlushRangeWorker",
+    "extent_end_rva": "0x22C5E0",
+    "extent_source": "next public symbol (first .pdata end 0x22C5DA)",
+    "instructions_shown": 93,
+    "all_instructions_shown": true,
+    "calls": [
+      {
+        "site_rva": "0x22C5A5",
+        "bytes": "e8e69a4700",
+        "instruction": "call 0x6a6090",
+        "target_rva": "0x6A6090",
+        "target_symbol": "_security_check_cookie"
+      },
+      {
+        "site_rva": "0x22C5C9",
+        "bytes": "e822f54700",
+        "instruction": "call 0x6abaf0",
+        "target_rva": "0x6ABAF0",
+        "target_symbol": "KiSetUserTbFlushPending"
+      },
+      {
+        "site_rva": "0x22C5D3",
+        "bytes": "e818f54700",
+        "instruction": "call 0x6abaf0",
+        "target_rva": "0x6ABAF0",
+        "target_symbol": "KiSetUserTbFlushPending"
+      }
+    ]
+  },
+  {
+    "rva": "0x3324F4",
+    "symbol": "VslGetNestedPageProtectionFlags",
+    "extent_end_rva": "0x332574",
+    "extent_source": "next public symbol (first .pdata end 0x33256C)",
+    "instructions_shown": 37,
+    "all_instructions_shown": true,
+    "calls": [
+      {
+        "site_rva": "0x33251D",
+        "bytes": "e81ee23800",
+        "instruction": "call 0x6c0740",
+        "target_rva": "0x6C0740",
+        "target_symbol": "memset"
+      },
+      {
+        "site_rva": "0x332542",
+        "bytes": "e8493b3700",
+        "instruction": "call 0x6a6090",
+        "target_rva": "0x6A6090",
+        "target_symbol": "_security_check_cookie"
+      }
+    ]
+  },
+  {
+    "rva": "0x22E040",
+    "symbol": "HvcallInitiateHypercall",
+    "extent_end_rva": "0x22E120",
+    "extent_source": "next public symbol (first .pdata end 0x22E064)",
+    "instructions_shown": 70,
+    "all_instructions_shown": true,
+    "calls": [
+      {
+        "site_rva": "0x22E0A6",
+        "bytes": "ffd0",
+        "instruction": "call rax",
+        "target_rva": null,
+        "target_symbol": null
+      },
+      {
+        "site_rva": "0x22E0CA",
+        "bytes": "e8c17f4700",
+        "instruction": "call 0x6a6090",
+        "target_rva": "0x6A6090",
+        "target_symbol": "_security_check_cookie"
+      },
+      {
+        "site_rva": "0x22E0E9",
+        "bytes": "e8926c0f00",
+        "instruction": "call 0x324d80",
+        "target_rva": "0x324D80",
+        "target_symbol": "EtwGetKernelTraceTimestamp"
+      },
+      {
+        "site_rva": "0x22E10D",
+        "bytes": "e876930f00",
+        "instruction": "call 0x327488",
+        "target_rva": "0x327488",
+        "target_symbol": "EtwTraceHvHypercall"
+      }
+    ]
+  },
+  {
+    "rva": "0x22DAF0",
+    "symbol": "HvcallFastExtended",
+    "extent_end_rva": "0x22DDD0",
+    "extent_source": "next public symbol (first .pdata end 0x22DDC8)",
+    "instructions_shown": 200,
+    "all_instructions_shown": false,
+    "calls": [
+      {
+        "site_rva": "0x22DB5E",
+        "bytes": "e80d7d4800",
+        "instruction": "call 0x6b5870",
+        "target_rva": "0x6B5870",
+        "target_symbol": "HvcallpExtendedFastHypercall"
+      },
+      {
+        "site_rva": "0x22DC12",
+        "bytes": "e819450400",
+        "instruction": "call 0x272130",
+        "target_rva": "0x272130",
+        "target_symbol": "EtwpLogKernelEvent"
+      },
+      {
+        "site_rva": "0x22DC26",
+        "bytes": "e865844700",
+        "instruction": "call 0x6a6090",
+        "target_rva": "0x6A6090",
+        "target_symbol": "_security_check_cookie"
+      },
+      {
+        "site_rva": "0x22DC4F",
+        "bytes": "e87c7c4800",
+        "instruction": "call 0x6b58d0",
+        "target_rva": "0x6B58D0",
+        "target_symbol": "HvcallpExtendedFastHypercallWithOutput"
+      },
+      {
+        "site_rva": "0x22DD02",
+        "bytes": "e829440400",
+        "instruction": "call 0x272130",
+        "target_rva": "0x272130",
+        "target_symbol": "EtwpLogKernelEvent"
+      },
+      {
+        "site_rva": "0x22DDA4",
+        "bytes": "e847200900",
+        "instruction": "call 0x2bfdf0",
+        "target_rva": "0x2BFDF0",
+        "target_symbol": "KeQueryPerformanceCounter"
+      },
+      {
+        "site_rva": "0x22DDAF",
+        "bytes": "e82c260900",
+        "instruction": "call 0x2c03e0",
+        "target_rva": "0x2C03E0",
+        "target_symbol": "RtlGetSystemTimePrecise"
+      },
+      {
+        "site_rva": "0x22DDBA",
+        "bytes": "e8b5880f00",
+        "instruction": "call 0x326674",
+        "target_rva": "0x326674",
+        "target_symbol": "EtwpGetHostPerfCounter"
+      }
+    ]
+  },
+  {
+    "rva": "0x3DB4E0",
+    "symbol": "HvlpFlushRangeListTbEx",
+    "extent_end_rva": "0x3DB5D0",
+    "extent_source": "next public symbol (first .pdata end 0x3DB5C7)",
+    "instructions_shown": 72,
+    "all_instructions_shown": true,
+    "calls": [
+      {
+        "site_rva": "0x3DB54C",
+        "bytes": "e87f000000",
+        "instruction": "call 0x3db5d0",
+        "target_rva": "0x3DB5D0",
+        "target_symbol": "HvlpCountFlushVaList"
+      },
+      {
+        "site_rva": "0x3DB56F",
+        "bytes": "e848030000",
+        "instruction": "call 0x3db8bc",
+        "target_rva": "0x3DB8BC",
+        "target_symbol": "HvlpAllowFastFlushList"
+      },
+      {
+        "site_rva": "0x3DB591",
+        "bytes": "e85e000000",
+        "instruction": "call 0x3db5f4",
+        "target_rva": "0x3DB5F4",
+        "target_symbol": "HvlpFastFlushListTbEx"
+      },
+      {
+        "site_rva": "0x3DB5C0",
+        "bytes": "e86b170000",
+        "instruction": "call 0x3dcd30",
+        "target_rva": "0x3DCD30",
+        "target_symbol": "HvlpSlowFlushListTbEx"
+      }
+    ]
+  },
+  {
+    "rva": "0x22F754",
+    "symbol": "VslSlowFlushSecureRangeList",
+    "extent_end_rva": "0x22F860",
+    "extent_source": "next public symbol (first .pdata end 0x22F859)",
+    "instructions_shown": 73,
+    "all_instructions_shown": true,
+    "calls": [
+      {
+        "site_rva": "0x22F79A",
+        "bytes": "e8a10f4900",
+        "instruction": "call 0x6c0740",
+        "target_rva": "0x6C0740",
+        "target_symbol": "memset"
+      },
+      {
+        "site_rva": "0x22F7D5",
+        "bytes": "e886940c00",
+        "instruction": "call 0x2f8c60",
+        "target_rva": "0x2F8C60",
+        "target_symbol": "VslpEnterIumSecureMode"
+      },
+      {
+        "site_rva": "0x22F7EF",
+        "bytes": "e89c684700",
+        "instruction": "call 0x6a6090",
+        "target_rva": "0x6A6090",
+        "target_symbol": "_security_check_cookie"
+      }
+    ]
+  },
+  {
+    "rva": "0x6B5870",
+    "symbol": "HvcallpExtendedFastHypercall",
+    "extent_end_rva": "0x6B58D0",
+    "extent_source": "next public symbol (first .pdata end 0x6B58C9)",
+    "instructions_shown": 33,
+    "all_instructions_shown": true,
+    "calls": [
+      {
+        "site_rva": "0x6B58BF",
+        "bytes": "ffd0",
+        "instruction": "call rax",
+        "target_rva": null,
+        "target_symbol": null
+      }
+    ]
+  },
+  {
+    "rva": "0x6B58D0",
+    "symbol": "HvcallpExtendedFastHypercallWithOutput",
+    "extent_end_rva": "0x6B59F0",
+    "extent_source": "next public symbol (first .pdata end 0x6B59DD)",
+    "instructions_shown": 93,
+    "all_instructions_shown": true,
+    "calls": [
+      {
+        "site_rva": "0x6B58DD",
+        "bytes": "e88effffff",
+        "instruction": "call 0x6b5870",
+        "target_rva": "0x6B5870",
+        "target_symbol": "HvcallpExtendedFastHypercall"
+      }
+    ]
+  }
+]
