@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003" DefaultTargets="Build" ToolsVersion="17.0">
   <ItemGroup Label="ProjectConfigurations">
     <ProjectConfiguration Include="Debug|x64">
@@ -717,6 +717,7 @@
     <ClCompile Include="UI\SettingsPresentation.cpp" />
     <ClCompile Include="UI\PageControlStyle.cpp" />
     <ClCompile Include="UI\PageTabMotion.cpp" />
+    <ClCompile Include="UI\PerfTrace.cpp" />
     <ClCompile Include="UI\PageTabFocusStyle.cpp" />
     <ClCompile Include="UI\DockTabSelectionAnimation.cpp" />
     <ClCompile Include="UI\RoundedViewSurface.cpp" />
@@ -966,6 +967,7 @@
     <ClInclude Include="UI\ToolbarMetrics.h" />
     <ClInclude Include="UI\PageControlStyle.h" />
     <ClInclude Include="UI\PageTabMotion.h" />
+    <ClInclude Include="UI\PerfTrace.h" />
     <ClInclude Include="UI\PageTabFocusStyle.h" />
     <ClInclude Include="UI\DockTabSelectionAnimation.h" />
     <ClInclude Include="UI\RoundedViewSurface.h" />

@@ -1,5 +1,6 @@
 #include "../Framework.h"
 #include "./PageTabMotion.h"
+#include "./PerfTrace.h"
 
 #include <QElapsedTimer>
 #include <QEasingCurve>
@@ -105,6 +106,8 @@ namespace
             {
                 return;
             }
+            // 采集：页签切换的同步几何计算与动画启动耗时。
+            ks::ui::PerfScope motionPerf("perf_tab_motion", m_bar->objectName());
             const QRectF target = selectedRect();
             m_index = m_bar->currentIndex();
             if (animate && target == m_target)

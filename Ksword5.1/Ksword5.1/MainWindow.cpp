@@ -1,10 +1,11 @@
-﻿#include "MainWindow.h"
+#include "MainWindow.h"
 #include "UI/ToolbarMetrics.h"
 #include "UI/SecondaryPageLayout.h"
 #include "UI/MainSurfaceStyle.h"
 #include "UI/PageControlStyle.h"
 #include "UI/DockTabSelectionAnimation.h"
 #include "UI/PageNavigationBridge.h"
+#include "UI/PerfTrace.h"
 #include "UI/McpLocalBridge.h"
 #include "UI/McpHexCanvasAdapter.h"
 #include "UI/UI_All.h"
@@ -7172,6 +7173,8 @@ void MainWindow::activateDockForSearchNavigation(ads::CDockWidget* dockWidget)
         return;
     }
 
+    // 采集：激活已有 Dock（可能触发惰性挂载）整体作为一个操作边界。
+    ks::ui::PerfScope activatePerf("perf_dock_activate", dockWidget->windowTitle());
     ensureDockContentInitialized(dockWidget);
     withTemporaryNonTopMostForDockSwitch([dockWidget]()
         {
@@ -10494,6 +10497,8 @@ void MainWindow::ensureDockContentInitialized(ads::CDockWidget* dockWidget)
     const QString dockTitleText = dockWidget->windowTitle().trimmed().isEmpty()
         ? dockKey
         : dockWidget->windowTitle().trimmed();
+    // 采集：整个惰性挂载（构造真实内容 + 首帧主题准备 + 刷新）作为一个操作边界。
+    ks::ui::PerfScope lazyMountPerf("perf_dock_mount", dockKey);
     dockWidget->setProperty("ks_lazy_initializing", true);
     const int progressPid = kPro.add(this, "页面", QStringLiteral("打开%1页").arg(dockTitleText).toStdString());
     kPro.set(progressPid, QStringLiteral("准备加载%1页").arg(dockTitleText).toStdString(), 0, 8.0f);
@@ -10715,7 +10720,11 @@ void MainWindow::ensureDockContentInitialized(ads::CDockWidget* dockWidget)
     const QPointer<MainWindow> windowLifetime(this); // 局部主题或布局回调可能关闭所属窗口。
     const QPointer<QWidget> contentLifetime(realWidget);
     const QPointer<ads::CDockWidget> dockLifetime(dockWidget);
-    ks::ui::PrepareWidgetThemeBindingsForShow(realWidget);
+    {
+        // 采集：只测量可见分支主题绑定的首帧准备耗时，不含其后的布局与刷新。
+        ks::ui::PerfScope themePreparePerf("perf_dock_theme_prepare", dockKey);
+        ks::ui::PrepareWidgetThemeBindingsForShow(realWidget);
+    }
     if (!windowLifetime || !contentLifetime || !dockLifetime)
     {
         return;
@@ -11470,6 +11479,26 @@ void MainWindow::setupDockLayout()
             setCentralWidget(m_pDockManager);
         }
     }
+
+    // 采集：注册现场上下文（当前聚焦 Dock），并记录 Dock 切换标记，
+    // 使停顿记录能标明“卡在哪次切换、哪个 Dock”。
+    // 提供者存活期长于窗口本身，必须用 QPointer 兜住已经销毁的主窗口。
+    const QPointer<MainWindow> windowGuard(this);
+    ks::ui::SetPerfTraceContextProvider([windowGuard]() -> QString
+        {
+            if (windowGuard == nullptr || windowGuard->m_pDockManager == nullptr)
+            {
+                return QString();
+            }
+            ads::CDockWidget* focusedDock = windowGuard->m_pDockManager->focusedDockWidget();
+            return focusedDock == nullptr ? QString() : focusedDock->windowTitle();
+        });
+    connect(m_pDockManager, &ads::CDockManager::focusedDockWidgetChanged, this,
+        [](ads::CDockWidget* /*previousDock*/, ads::CDockWidget* currentDock)
+        {
+            ks::ui::RecordPerfMark("perf_dock_focus",
+                currentDock == nullptr ? QString() : currentDock->windowTitle());
+        });
 
     const bool mainWindowUpdatesWereEnabled = updatesEnabled();
     const bool dockManagerUpdatesWereEnabled = m_pDockManager->updatesEnabled();

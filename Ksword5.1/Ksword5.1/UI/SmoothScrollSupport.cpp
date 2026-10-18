@@ -1,5 +1,7 @@
 #include "SmoothScrollSupport.h"
 
+#include "./PerfTrace.h"
+
 #include <QAbstractItemView>
 #include <QAbstractScrollArea>
 #include <QApplication>
@@ -82,6 +84,15 @@ namespace
         int target() const { return m_target; }
         void stop()
         {
+            // 采集：动画结束或被新滚动打断时，记录总时长与驱动帧数。
+            if (m_running && m_perfActive)
+            {
+                ks::ui::RecordPerfSpanWithCount("perf_scroll_animation",
+                    m_bar.isNull() ? QString() : m_bar->objectName(),
+                    m_clock.isValid() ? m_clock.elapsed() : 0, m_perfFrames);
+            }
+            m_perfActive = false;
+            m_perfFrames = 0;
             m_running = false;
             m_timer.stop();
             disconnect(m_frameConnection);
@@ -105,6 +116,9 @@ namespace
             }
             m_clock.start();
             m_running = true;
+            // 采集：本段动画开始累计帧数，由 advance 推进。
+            m_perfActive = true;
+            m_perfFrames = 0;
             for (QWidget* parent = m_bar->parentWidget(); parent; parent = parent->parentWidget())
             {
                 if (auto* area = qobject_cast<QAbstractScrollArea*>(parent))
@@ -154,6 +168,10 @@ namespace
 
         void advance()
         {
+            if (m_perfActive)
+            {
+                ++m_perfFrames; // 采集：每推进一帧累加，用于判断滚动是否由逐帧动画驱动。
+            }
             if (!m_running || m_bar.isNull() || !m_bar->isEnabled() || !m_bar->window()->isVisible())
             {
                 stop();
@@ -196,6 +214,8 @@ namespace
         int m_durationMs = kWheelAnimationDurationMs;
         bool m_writing = false;
         bool m_running = false;
+        bool m_perfActive = false; // 采集：本段动画是否正在累计帧数。
+        int m_perfFrames = 0;      // 采集：本段动画已推进的帧数。
     };
 
     // 保留原 QTabBar 和连接，借助 Qt 的像素滚动路径移动标签，避免切页触发懒加载。
@@ -478,6 +498,10 @@ namespace
             {
                 return QObject::eventFilter(watchedObject, eventObject);
             }
+
+            // 采集：滚轮在全局过滤器内的同步处理耗时；逐帧动画由动画记录单独统计。
+            ks::ui::PerfScope wheelPerf("perf_scroll_wheel",
+                QString::fromUtf8(scrollArea->metaObject()->className()));
 
             auto* wheelEvent = static_cast<QWheelEvent*>(eventObject);
             if (wheelEvent->modifiers().testFlag(Qt::ControlModifier) ||

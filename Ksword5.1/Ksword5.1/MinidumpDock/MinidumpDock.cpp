@@ -11,6 +11,7 @@
 
 #include "MinidumpDock.h"
 #include "../UI/PageControlStyle.h"
+#include "../UI/PerfTrace.h"
 #include "../UI/ToolbarMetrics.h"
 #include "../UI/VisibleTableWidget.h"
 
@@ -502,6 +503,8 @@ void MinidumpDock::finishParse(
         return;
     }
 
+    // 采集：解析完成回到 UI 线程后的整体收尾（含结果渲染）耗时。
+    ks::ui::PerfScope finishParsePerf("perf_dump_finish_parse", QString());
     setBusy(false);
     m_lastResult = std::move(result);
     renderResult(*m_lastResult);

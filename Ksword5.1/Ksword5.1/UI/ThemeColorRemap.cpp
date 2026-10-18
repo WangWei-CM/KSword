@@ -1,5 +1,6 @@
 #include "ThemeColorRemap.h"
 #include "ThemeBinding.h"
+#include "./PerfTrace.h"
 
 #include "../theme.h"
 
@@ -727,6 +728,8 @@ namespace ks::ui
             // drain：目标约 6ms 后让出；单个 Qt polish 不能抢占，因此不是耗时硬上限。
             void drain(const quint64 generation)
             {
+                // 采集：单个主题重映射切片的实际耗时；切片持续偏高说明换肤一直占用 UI 线程。
+                ks::ui::PerfScope slicePerf("perf_theme_remap_slice", QString());
                 QElapsedTimer budget; // 当前切片实际耗时，只在控件之间判断是否让出。
                 budget.start();
                 while (m_cursor < m_work.size() && budget.elapsed() < 6)

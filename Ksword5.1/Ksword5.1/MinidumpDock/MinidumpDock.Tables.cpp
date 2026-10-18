@@ -25,6 +25,7 @@
 #include "MinidumpFormat.h"
 #include "UI/CodeEditorWidget.h"
 #include "UI/MemoryWorkbench/SnapshotWorkbenchWidget.h"
+#include "UI/PerfTrace.h"
 #include "UI/TableHeaderSortingSupport.h"
 #include "theme.h"
 
@@ -75,6 +76,9 @@ namespace
         table->setSortingEnabled(false);
         table->clearContents();
         table->setRowCount(0);
+        // 采集：记录填充起点，供 endFill 计算单表填充总耗时。
+        table->setProperty("perf_fill_start_ms",
+            QVariant::fromValue<qlonglong>(ks::ui::PerfTraceNowMs()));
     }
 
     // endFill 作用：批量填充完毕后恢复刷新并自适应列宽（限制最大宽度）。
@@ -95,6 +99,10 @@ namespace
                 std::min(table->columnWidth(column), 420));
         }
         table->setUpdatesEnabled(true);
+        // 采集：单张表的清空、逐格填充与列宽自适应总耗时，附带最终行数。
+        const qint64 fillStartMs = table->property("perf_fill_start_ms").toLongLong();
+        ks::ui::RecordPerfSpanWithCount("perf_dump_table_fill", table->objectName(),
+            ks::ui::PerfTraceNowMs() - fillStartMs, table->rowCount());
     }
 }
 
@@ -323,6 +331,8 @@ QWidget* MinidumpDock::createStructuredTablePage(
 
 void MinidumpDock::renderResult(const ks::minidump::DumpParseResult& result)
 {
+    // 采集：整页结果重建（十余张表）作为一个操作边界，用于定位转储分析无响应。
+    ks::ui::PerfScope renderPerf("perf_dump_render", QStringLiteral("render_result"));
     clearResultTabs();
 
     // ===================== 诊断结论页（放在最前，是本页的主产出） =====================
