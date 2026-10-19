@@ -13,6 +13,7 @@
 #include "../UI/FlatButtonTheme.h"
 #include "../UI/ParameterWorkspace.h"
 #include "../UI/PerfTrace.h"
+#include "../UI/TableColumnAutoFit.h"
 #include <QFormLayout>
 #include "../Internationalization/LanguageManager.h"
 
@@ -774,6 +775,12 @@ void MemoryDock::initializeProcessModuleTab()
     ks::ui::NormalizeToolbarRow(processTopBarLayout);
 
     m_processTable = new ks::ui::VisibleTableWidget(processPanel);
+    // 进程选择器是轻量业务表：不安装全局快照/冻结/搜索宿主，避免滚轮时
+    // 同时驱动通用表格布局、浮动滚动条和滚动动画；页面自己的过滤逻辑仍保留。
+    m_processTable->setProperty("ksword_disable_global_table_interaction", true);
+    m_processTable->setProperty("ksword_disable_smooth_scroll", true);
+    m_processTable->setProperty("ksword_preserve_native_scrollbars", true);
+    ks::ui::SetTableColumnAutoFitEnabled(m_processTable, false);
     // 这里是附加目标选择器，主进程页已有现场功能，不重复放快照栏。
     ks::ui::SetTableActionBarMode(m_processTable, ks::ui::TableActionBarMode::None);
     m_processTable->setColumnCount(5);
