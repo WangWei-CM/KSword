@@ -65,8 +65,6 @@
 
 namespace
 {
-    constexpr char kDisableGlobalTableInteractionProperty[] =
-        "ksword_disable_global_table_interaction";
     using ks::ui::TableComparisonModel;
     using ks::ui::TableComparisonResult;
     using ks::ui::TableFrozenPaneController;
@@ -2618,11 +2616,6 @@ namespace
     // 全局发现只是兼容适配层；实际模型、列能力由每张表的宿主维护。
     void configureTable(QTableView* tableView)
     {
-        if (tableView == nullptr ||
-            tableView->property(kDisableGlobalTableInteractionProperty).toBool())
-        {
-            return;
-        }
         if (auto* const host = ks::ui::ResultTableHost::ensure(tableView))
         {
             host->refresh();
@@ -2633,9 +2626,7 @@ namespace
     void scheduleTableConfiguration(QTableView* tableView)
     {
         constexpr char pending[] = "ksword_table_interaction_configuration_pending";
-        if (tableView == nullptr ||
-            tableView->property(kDisableGlobalTableInteractionProperty).toBool() ||
-            tableView->property(pending).toBool()) return;
+        if (tableView == nullptr || tableView->property(pending).toBool()) return;
         tableView->setProperty(pending, true);
         const QPointer<QTableView> guardedTable(tableView);
         QTimer::singleShot(0, tableView, [guardedTable]()
@@ -2728,11 +2719,6 @@ namespace
 
             const QEvent::Type eventType = eventObject->type();
             QAbstractItemView* contextItemView = itemViewForEventObject(watchedObject);
-            if (contextItemView != nullptr &&
-                contextItemView->property(kDisableGlobalTableInteractionProperty).toBool())
-            {
-                return QObject::eventFilter(watchedObject, eventObject);
-            }
             if (contextItemView != nullptr && eventType == QEvent::ContextMenu)
             {
                 // 业务菜单显示前记录来源；QTableView 与 QTreeView 共用同一生命周期屏障。

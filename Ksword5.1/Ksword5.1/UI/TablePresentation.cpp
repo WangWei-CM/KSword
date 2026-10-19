@@ -29,8 +29,6 @@ namespace
     constexpr char kInstalled[] = "ksword_table_presentation_installed";
     constexpr char kApplying[] = "ksword_table_presentation_applying";
     constexpr char kInitialized[] = "ksword_table_presentation_initialized";
-    constexpr char kDisableGlobalTableInteractionProperty[] =
-        "ksword_disable_global_table_interaction";
 
     // 本组件写入QSS产生的事件不回投自己；真实外部主题/字体通知仍由过滤器维护。
     class PresentationChange final
@@ -93,8 +91,7 @@ namespace
 
     void schedulePresentation(QAbstractItemView* view, bool deferHidden = false)
     {
-        if (!supportedView(view) ||
-            view->property(kDisableGlobalTableInteractionProperty).toBool()) return;
+        if (!supportedView(view)) return;
         // 已初始化隐藏表只留原几何，Show时必然重算最新主题；首次Polish仍建立呈现基线。
         if (deferHidden && !view->isVisible() && view->property(kInitialized).toBool()) return;
         if (view->property(kPending).toBool()) return;
@@ -231,8 +228,7 @@ namespace ks::ui
 
     void ApplyTablePresentation(QAbstractItemView* view, const bool normalizeHeader)
     {
-        if (!supportedView(view) ||
-            view->property(kDisableGlobalTableInteractionProperty).toBool()) return;
+        if (!supportedView(view)) return;
         const PresentationChange applying(view);
         view->setProperty(kNormalizeHeader, normalizeHeader);
         auto* table = qobject_cast<QTableView*>(view);
