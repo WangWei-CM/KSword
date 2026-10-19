@@ -49,6 +49,11 @@ namespace ks::misc::rxpf
     // kFlagCaptureBackup：请求 R0 在变更前备份原始字节。
     inline constexpr unsigned long kFlagCaptureBackup = 0x00000002UL;
 
+    // kFlagSkipBackupRestore：Unregister 专用；令 R0 跳过 ReleaseRecord
+    // 自动把 Backup 恢复到物理页。R3 写入的字节保留到 PTE 回 RX 之后。
+    // 调用方必须自己负责在 PatchGuard 扫描前把字节改回去（否则必蓝屏）。
+    inline constexpr unsigned long kFlagSkipBackupRestore = 0x00000004UL;
+
     // ----------------------------------------------------------
     // SupportInfo：RXPF 子系统支持状态查询结果。
     // ----------------------------------------------------------
@@ -182,6 +187,21 @@ namespace ks::misc::rxpf
     inline constexpr unsigned long kHookActionLog = 2UL;
 
     // ----------------------------------------------------------
+    // BackupInfo：Phase G 读 Record->Backup 子段的响应。
+    // ----------------------------------------------------------
+    struct BackupInfo
+    {
+        bool ioSuccess = false;             // IOCTL 是否成功返回。
+        QString ioErrorText;                // IOCTL 失败时的错误描述。
+        std::uint64_t recordId = 0;         // 回显请求的记录 ID。
+        unsigned long offset = 0;           // 回显请求的页内偏移。
+        unsigned long length = 0;           // 回显请求的字节数。
+        bool hasBackup = false;             // Record->Backup 是否存在（Register 带 CAPTURE_BACKUP）。
+        long lastStatus = 0;                // 最近一次操作的 NTSTATUS。
+        QByteArray bytes;                   // 从 Backup 读到的字节；length==0 或 hasBackup==false 时为空。
+    };
+
+    // ----------------------------------------------------------
     // HookPointInfo：钩点设置操作的响应。
     // ----------------------------------------------------------
     struct HookPointInfo
@@ -239,11 +259,25 @@ namespace ks::misc::rxpf
 
     // unregisterPage：注销已注册的页面并恢复原始保护。
     // - recordId：注册时返回的记录 ID。
-    PageInfo unregisterPage(std::uint64_t recordId);
+    // - skipBackupRestore：true 时附带 kFlagSkipBackupRestore，令 R0 不自动
+    //   把 Backup 还原到物理页；R3 写入字节保留到 PTE 回 RX（Phase G 路径，
+    //   有 BSOD 风险，调用方必须尽快改回原字节）。默认 false 走安全路径。
+    PageInfo unregisterPage(std::uint64_t recordId,
+        bool skipBackupRestore = false);
 
     // runSelfTest：运行驱动内置的端到端自检。
     // - recordId：必须是已注册且处于 RW_NX 状态的 SelfImageTest/AllocatedTest 记录。
     SelfTestInfo runSelfTest(std::uint64_t recordId);
+
+    // queryBackup：读 Record->Backup 的子段。供 KernelHookWizard 在
+    // Unregister(SKIP_RESTORE) 之前把原字节缓存到 R3 作恢复用。
+    // - recordId：注册时返回的记录 ID；必须是带 kFlagCaptureBackup 注册的记录。
+    // - offset：页内偏移（0 ~ PAGE_SIZE-1）。
+    // - length：读取字节数（1 ~ 64）。
+    // 返回值：hasBackup=false 表示 Record 未带 Backup（没传 CAPTURE_BACKUP），
+    //         或 recordId 已失效；bytes 空；lastStatus=STATUS_NOT_FOUND。
+    BackupInfo queryBackup(std::uint64_t recordId,
+        unsigned long offset, unsigned long length);
 
     // setHookPoint：设置或清除已注册页面上的钩点。
     // - recordId：注册时返回的记录 ID。

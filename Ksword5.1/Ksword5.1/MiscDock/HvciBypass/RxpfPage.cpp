@@ -362,7 +362,24 @@ namespace ks::misc
         m_queryPageBtn->setEnabled(false);
         actionLayout2->addWidget(m_queryPageBtn);
 
-        // 注销按钮。
+        // Phase G 开关：注销时跳过驱动的 Backup→page 自动恢复。
+        // checked 时 Unregister 不还原原字节 → R3 写入保留到 PTE 回 RX，
+        // 调用方必须在 PatchGuard 扫到之前自己改回去，否则必蓝屏。
+        // 默认 off（走 Phase F 安全往返路径），tooltip 明确警告。
+        m_keepModifiedToggle = makeIconButton(
+            QStringLiteral("rxpf_keep_modified.svg"),
+            QStringLiteral("保留 R3 写入字节；注销后 Backup 不自动恢复（有蓝屏风险）"),
+            actionRow2);
+        m_keepModifiedToggle->setCheckable(true);
+        m_keepModifiedToggle->setChecked(false);
+        // Accent + Flat：未勾时透明工具按钮；勾中后 FlatButtonState::Checked
+        // 会由共享主题给到强调底色，视觉提示"保留修改"这档危险模式已开。
+        ks::ui::ApplyFlatButtonTheme(m_keepModifiedToggle,
+            ks::ui::FlatButtonTone::Accent,
+            ks::ui::FlatButtonAppearance::Flat);
+        actionLayout2->addWidget(m_keepModifiedToggle);
+
+        // 注销按钮（保留原整串键 tooltip，兼容既有 i18n 词条）。
         m_unregisterBtn = makeIconButton(
             QStringLiteral("rxpf_unregister.svg"),
             QStringLiteral("注销页面并恢复原始保护"),
@@ -966,17 +983,27 @@ namespace ks::misc
             return;
         }
 
+        // 读取 Phase G 开关状态：checked = 不自动恢复 Backup。
+        // 读在 setBusy 前，以便 appendTrace 的措辞与真实 flag 一致。
+        const bool keepModified = m_keepModifiedToggle != nullptr
+            && m_keepModifiedToggle->isChecked();
+
         setBusy(true);
         appendTrace(ks::i18n::text(
-            QStringLiteral("rxpf.trace.unregistering_page"),
-            QStringLiteral("[%1] 正在注销页面 (ID=%2)..."))
+            keepModified
+                ? QStringLiteral("rxpf.trace.unregistering_page_keep")
+                : QStringLiteral("rxpf.trace.unregistering_page"),
+            keepModified
+                ? QStringLiteral(
+                    "[%1] 正在注销页面 (ID=%2) [保留修改：Backup 不恢复]...")
+                : QStringLiteral("[%1] 正在注销页面 (ID=%2)..."))
             .arg(timestamp())
             .arg(m_currentRecordId));
 
         const auto recordId = m_currentRecordId;
         auto* watcher = new QFutureWatcher<rxpf::PageInfo>(this);
         connect(watcher, &QFutureWatcher<rxpf::PageInfo>::finished,
-            this, [this, watcher]()
+            this, [this, watcher, keepModified]()
             {
                 const auto info = watcher->result();
                 watcher->deleteLater();
@@ -997,12 +1024,21 @@ namespace ks::misc
                 updateStateDisplay(info);
 
                 appendTrace(ks::i18n::text(
-                    QStringLiteral("rxpf.trace.page_unregistered"),
-                    QStringLiteral("[%1] 页面已注销"))
+                    keepModified
+                        ? QStringLiteral("rxpf.trace.page_unregistered_keep")
+                        : QStringLiteral("rxpf.trace.page_unregistered"),
+                    keepModified
+                        ? QStringLiteral(
+                            "[%1] 页面已注销；R3 写入字节保留 - 若未恢复则 PatchGuard 必蓝屏")
+                        : QStringLiteral("[%1] 页面已注销"))
                     .arg(timestamp()));
             });
+        // keepModified 透传给 Backend，决定是否带 FLAG_SKIP_BACKUP_RESTORE。
         watcher->setFuture(QtConcurrent::run(
-            [recordId]() { return rxpf::unregisterPage(recordId); }));
+            [recordId, keepModified]()
+            {
+                return rxpf::unregisterPage(recordId, keepModified);
+            }));
     }
 
     // ================================================================

@@ -1,5 +1,6 @@
 ﻿#include "MainWindow.h"
 #include "UI/ToolbarMetrics.h"
+#include "UI/KernelHookWizard.h"
 #include "UI/SecondaryPageLayout.h"
 #include "UI/MainSurfaceStyle.h"
 #include "UI/PageControlStyle.h"
@@ -7713,6 +7714,24 @@ void MainWindow::initMenus()
             QStringLiteral("问题反馈"));
     });
 
+    // ======== 工具 ========（Phase G：聚合"内核 Hook"工作流到独立 wizard）
+    m_toolsMenuButton = new QToolButton(titleActionContainer);
+    m_toolsMenuButton->setObjectName(QStringLiteral("ksToolsMenuButton"));
+    m_toolsMenuButton->setText(QStringLiteral("工具"));
+    m_toolsMenuButton->setToolTip(QStringLiteral("内核 Hook 向导等高级工具"));
+    languageManager.bindText(m_toolsMenuButton, QStringLiteral("menu.tools"), QStringLiteral("工具"));
+    languageManager.bindToolTip(m_toolsMenuButton, QStringLiteral("menu.tools.tooltip"), QStringLiteral("内核 Hook 向导等高级工具"));
+    m_toolsMenu = new QMenu(m_toolsMenuButton);
+    m_toolsMenu->setObjectName(QStringLiteral("ksToolsMenu"));
+    configureTitleMenuButton(m_toolsMenuButton, m_toolsMenu);
+
+    QAction* const kernelHookWizardAction = m_toolsMenu->addAction(QStringLiteral("内核 Hook 向导"));
+    languageManager.bindText(kernelHookWizardAction, QStringLiteral("menu.tools.kernel_hook_wizard"), QStringLiteral("内核 Hook 向导"));
+    connect(kernelHookWizardAction, &QAction::triggered, this, [this]() {
+        // Wizard 自己管生命周期 (WA_DeleteOnClose)；菜单只给入口。
+        ks::ui::KernelHookWizard::openWizard(this);
+    });
+
     // ======== 窗口 ========
     m_windowMenuButton = new QToolButton(titleActionContainer);
     m_windowMenuButton->setObjectName(QStringLiteral("ksWindowMenuButton"));
@@ -7725,6 +7744,7 @@ void MainWindow::initMenus()
     configureTitleMenuButton(m_windowMenuButton, m_windowMenu);
 
     titleActionLayout->addWidget(m_optionsMenuButton);
+    titleActionLayout->addWidget(m_toolsMenuButton);
     titleActionLayout->addWidget(m_windowMenuButton);
     titleActionLayout->addWidget(m_githubMenuButton);
     m_customTitleBar->setCustomLeftWidget(titleActionContainer);
@@ -7837,6 +7857,7 @@ void MainWindow::refreshTitleActionButtonStyles()
     const QString topActionButtonStyle = buildTitleActionButtonStyle();
     const QList<QToolButton*> topActionButtonList{
         m_optionsMenuButton,
+        m_toolsMenuButton,
         m_githubMenuButton,
         m_windowMenuButton
     };

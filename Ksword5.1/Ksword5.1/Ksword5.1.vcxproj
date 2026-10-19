@@ -549,6 +549,7 @@
     <ClCompile Include="UI\HvmEptLeafProbe.cpp" />
     <ClCompile Include="UI\HvmWriteAccessGate.cpp" />
     <ClCompile Include="UI\HvmHookWizard.cpp" />
+    <ClCompile Include="UI\KernelHookWizard.cpp" />
     <ClCompile Include="UI\HvmHookWizard.Patch.cpp" />
     <ClCompile Include="UI\HvmHookWizard.Verify.cpp" />
     <ClCompile Include="UI\HvmControl.cpp" />
@@ -1199,6 +1200,7 @@
     <QtMoc Include="UI\HvmMemoryDialog.h" />
     <QtMoc Include="UI\HvmViewDialog.h" />
     <QtMoc Include="UI\HvmHookWizard.h" />
+    <QtMoc Include="UI\KernelHookWizard.h" />
     <QtMoc Include="UI\HvmDomainDialog.h" />
     <QtMoc Include="UI\HvmMsrPolicyDialog.h" />
     <QtMoc Include="UI\HvmProcessDialog.h" />

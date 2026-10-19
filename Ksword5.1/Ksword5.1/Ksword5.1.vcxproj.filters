@@ -1496,6 +1496,9 @@
     <ClCompile Include="UI\HvmHookWizard.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="UI\KernelHookWizard.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="UI\HvmHookWizard.Patch.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -2882,6 +2885,9 @@
       <Filter>Header Files</Filter>
     </QtMoc>
     <QtMoc Include="UI\HvmHookWizard.h">
+      <Filter>Header Files</Filter>
+    </QtMoc>
+    <QtMoc Include="UI\KernelHookWizard.h">
       <Filter>Header Files</Filter>
     </QtMoc>
   </ItemGroup>

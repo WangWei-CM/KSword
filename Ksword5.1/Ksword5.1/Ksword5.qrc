@@ -144,6 +144,7 @@
         <file alias="rxpf_emulate.svg">Resource/Icon/development/terminal_line.svg</file>
         <file alias="rxpf_query_page.svg">Resource/Icon/system/information_line.svg</file>
         <file alias="rxpf_unregister.svg">Resource/Icon/system/minus_circle_line.svg</file>
+        <file alias="rxpf_keep_modified.svg">Resource/Icon/system/warning_line.svg</file>
 
         <!-- 文本编辑器工具栏图标（全部使用 SVG 资源，禁止回退 MainLogo） -->
         <file alias="codeeditor_new.svg">Resource/Icon/file/file_new_line.svg</file>

@@ -766,6 +766,8 @@ private:
     QMenu* m_githubMenu = nullptr;               // m_githubMenu：项目主页/发行版/问题反馈。
     QToolButton* m_windowMenuButton = nullptr;   // m_windowMenuButton：标题栏“窗口”顶级菜单。
     QMenu* m_windowMenu = nullptr;               // m_windowMenu：辅助 Dock 显示/隐藏复选菜单与日志输出窗口。
+    QToolButton* m_toolsMenuButton = nullptr;    // m_toolsMenuButton：标题栏"工具"顶级菜单。
+    QMenu* m_toolsMenu = nullptr;                // m_toolsMenu：内核 Hook 向导等高级实验工具的入口。
     QPushButton* m_uiAccessStatusButton = nullptr; // m_uiAccessStatusButton：触发 UIAccess fallback 或降级回普通实例的入口。
     QPushButton* m_adminStatusButton = nullptr;
     QPushButton* m_debugStatusButton = nullptr;

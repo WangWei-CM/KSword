@@ -99,6 +99,7 @@ namespace ks::misc
         QPushButton* m_writeBtn = nullptr;         // 写入数据。
         QPushButton* m_emulateBtn = nullptr;       // 启用/禁用模拟。
         QPushButton* m_queryPageBtn = nullptr;     // 查询页面。
+        QPushButton* m_keepModifiedToggle = nullptr; // Phase G：注销时跳过 Backup 自动恢复。
         QPushButton* m_unregisterBtn = nullptr;    // 注销页面。
 
         // ===================== 结果区 =====================

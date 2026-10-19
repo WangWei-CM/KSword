@@ -508,13 +508,23 @@ namespace ks::misc::rxpf
 
     // ================================================================
     // unregisterPage：注销已注册的页面并恢复原始保护。
+    // skipBackupRestore=true 时附带 FLAG_SKIP_BACKUP_RESTORE，让 R0
+    // ReleaseRecord 跳过 Backup → page 的自动恢复，保留 R3 写入字节
+    // 直到 PTE 回 RX（Phase G 路径）。
     // ================================================================
-    PageInfo unregisterPage(const std::uint64_t recordId)
+    PageInfo unregisterPage(const std::uint64_t recordId,
+        const bool skipBackupRestore)
     {
         PageInfo result;
 
+        // 根据 skipBackupRestore 选择附加 flag：默认不加（走 Phase F 安全路径），
+        // 显式打开时加 KSWORD_ARK_RXPF_FLAG_SKIP_BACKUP_RESTORE。
+        const unsigned long extraFlags = skipBackupRestore
+            ? KSWORD_ARK_RXPF_FLAG_SKIP_BACKUP_RESTORE
+            : 0UL;
+
         KSWORD_ARK_RXPF_RECORD_REQUEST request{};
-        request.header = buildRequestHeader();
+        request.header = buildRequestHeader(true, extraFlags);
         request.header.size = sizeof(request);
         request.recordId = recordId;
 
@@ -800,3 +810,62 @@ namespace ks::misc::rxpf
     }
 
 } // namespace ks::misc::rxpf
+
+namespace ks::misc::rxpf
+{
+    // ================================================================
+    // queryBackup：读 Record->Backup 的子段。
+    // Phase G wizard 用它在 Unregister(SKIP_RESTORE) 前把原字节缓存到 R3，
+    // 以便 payload 触发后能走 Register+Change+Write(backup)+Unregister 恢复。
+    // ================================================================
+    BackupInfo queryBackup(const std::uint64_t recordId,
+        const unsigned long offset, const unsigned long length)
+    {
+        // 结果对象：失败时 bytes 保持空，调用方据 ioSuccess / hasBackup 判断。
+        BackupInfo result;
+        result.recordId = recordId;
+        result.offset = offset;
+        result.length = length;
+
+        // 组装请求：header + recordId + offset + length。
+        KSWORD_ARK_RXPF_QUERY_BACKUP_REQUEST request{};
+        request.header = buildRequestHeader();
+        request.header.size = sizeof(request);
+        request.recordId = recordId;
+        request.offset = offset;
+        request.length = length;
+
+        KSWORD_ARK_RXPF_QUERY_BACKUP_RESPONSE response{};
+
+        // 发 IOCTL；失败路径只填 ioErrorText 返回。
+        const ksword::ark::DriverClient client;
+        const auto io = client.deviceIoControl(
+            IOCTL_KSWORD_ARK_RXPF_QUERY_BACKUP,
+            &request,
+            static_cast<unsigned long>(sizeof(request)),
+            &response,
+            static_cast<unsigned long>(sizeof(response)));
+        if (!io.ok)
+        {
+            result.ioErrorText = makeIoErrorText(io);
+            return result;
+        }
+
+        // 成功：转译 R0 字段到 R3 结构。
+        result.ioSuccess = true;
+        result.recordId = response.recordId;
+        result.offset = response.offset;
+        result.length = response.length;
+        result.hasBackup = response.hasBackup != 0UL;
+        result.lastStatus = response.lastStatus;
+        if (result.hasBackup && response.length > 0UL
+            && response.length <= KSWORD_ARK_RXPF_MAX_WRITE_BYTES)
+        {
+            // 把 Backup 字节段作为 QByteArray 返回；避免 R3 直接触碰 C 数组。
+            result.bytes = QByteArray(
+                reinterpret_cast<const char*>(response.bytes),
+                static_cast<int>(response.length));
+        }
+        return result;
+    }
+}
