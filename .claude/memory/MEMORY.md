@@ -28,7 +28,14 @@
 - [统一内存编辑器与汇编](ksword-memory-editor.md) — Tab4/Tab6/R-1 共用快照编辑器、Intel 汇编语法、暂存与后端绑定、写前比对和最终回读
 - [标题栏全局搜索/双模式输入](ksword-global-ui-search.md) — GlobalUiSearch 架构、页面路径/高亮跳转链路、i18n 审计恒等词条与语言包定点插入约定
 - [MSVC/WDK 构建恢复](ksword-build-recovery.md) — `LNK1000 IMAGE::BuildImage` 的一次性 WPO 禁用重建，以及驱动 x64 `ApiValidator` 后置校验边界
-- [RXPF HVCI 写入屏障](ksword-rxpf-hvci-write-barrier.md) — IoWriteAccess 0x1A 不可捕获、别名只读 AV 可捕获、直接写也 0x1A；VTL0 无法写 g_CiOptions
+- [RXPF HVCI 写入屏障](ksword-rxpf-hvci-write-barrier.md) — MmChangeImageProtection 只对原本 RX 的页释放 SLAT 写保护；.data/.rdata 第一步 CHANGE 就拿不到 RW 别名；g_CiOptions 结构性不可写
+- [RXPF 没有影子 IDT 等于半成品](ksword-rxpf-is-half-useless-without-shadow-idt.md) — HVCI 下只能改 .text 字节且不可执行；DSE/hook/热补丁/所有常见用例全部结构性不可行；**物理机 LIDT 实测 2026-10-18 = `STATUS_PRIVILEGED_INSTRUCTION`，影子 IDT 路线终局关死**
+- [RXPF mode=1 restore 结构性拒绝](ksword-rxpf-mode1-restore-structural-fail.md) — 对测试驱动的 .rxpftst 段 mode=1 恒返回 0xC0000005（内容未改也拒），SHA-512 digest 救不了；顺带修 MDL 别名顺序与 Hyper-V 下 SELF_IMAGE_TEST 门禁
+- [RXPF mode=1 在 26H2 实体机实证](ksword-rxpf-mode1-realhardware-26h2-confirmed.md) — 全防护开启（CI/HVCI/HVCI Strict/Secure Boot，TestSigning 关），mode=1 restore 保留 0xB7；本项目目前最强的 HVCI 被绕过实证
+- [Claude 把 RXPF 能力推理错了](claude-rxpf-capability-confusion.md) — WRITE ok ≠ 项目可用；一个会话连犯三次；读到 ok=True 时必须进一步看 alias 保护位
+- [VBS 三层机制分开看](ksword-vbs-hvci-kdp-hvpt-distinction.md) — HVCI/KDP/HVPT 分管执行/物理帧/翻译；HVPT 才是封 remap 的那一层；SecurityServicesRunning 含 7 才是 HVPT running
+- [现有 RXPF handler 的受理范围](ksword-rxpf-current-handler-scope.md) — 三道门：只接内核取指 NX fault（P=1/W=0/I/D=1/CR2==RIP）、PFN 身份复核、注册时 lock PFN；任何改 PFN 或接数据缺页的方案不是现代码能承载
+- [Claude 把 VBS 三层机制混成一堵墙](claude-conflated-vbs-mechanisms.md) — "HVCI 页表只读"是统称错误；讨论 PTE/PFN/translation 方案前先查 HVPT 是否在跑
 - [驱动候选地址安全读取](ksword-driver-safe-read.md) — 不可信内核地址统一使用 `KswordARKRuntimeReadMemory`，以及 Release 同构函数符号归因注意事项
 - [KSecDD 驱动加载引导方案](ksword-ksecdd-dse-bootstrap.md) — KExecDD/LSASS 与 KexecDDPlus/Server Silo 的前置条件、许可证与运行风险边界
 - [已卸载驱动来源布局](ksword-unloaded-driver-layout.md) — NtosActive 与单项可用性的区别、精确全局 RVA 的局部运行时布局补全、离线回归与实机边界
