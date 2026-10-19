@@ -380,12 +380,38 @@ namespace ks::ui
         auto* presetRow = new QHBoxLayout();
         presetRow->addWidget(new QLabel(QStringLiteral("Payload 预设："), page));
         m_payloadPresetCombo = new QComboBox(page);
+        // 预设按钮：常用的"真·控制流篡改" payload 一键填入
+        // 分三组：短 payload（最小破坏）/ 返回常量（短路函数）/ 跳转骨架（用户填 displacement）
         m_payloadPresetCombo->addItem(QStringLiteral("自定义（不自动覆盖）"), QString());
-        m_payloadPresetCombo->addItem(QStringLiteral("ret (C3)"), QStringLiteral("C3"));
-        m_payloadPresetCombo->addItem(QStringLiteral("xor eax,eax; ret (33 C0 C3)"),
+        // --- 单字节/最小破坏 ---
+        m_payloadPresetCombo->addItem(QStringLiteral("ret (C3) — 立即返回"),
+            QStringLiteral("C3"));
+        m_payloadPresetCombo->addItem(QStringLiteral("NOP (90) — 继续执行后一字节"),
+            QStringLiteral("90"));
+        m_payloadPresetCombo->addItem(QStringLiteral("int 3 (CC) — 立即蓝屏/断点"),
+            QStringLiteral("CC"));
+        // --- 短路函数：返回 0（约定 NTSTATUS SUCCESS / BOOL FALSE / 整数 0） ---
+        m_payloadPresetCombo->addItem(QStringLiteral("xor eax,eax; ret (33 C0 C3) — 32bit 返回 0"),
             QStringLiteral("33 C0 C3"));
-        m_payloadPresetCombo->addItem(QStringLiteral("NOP (90)"), QStringLiteral("90"));
-        m_payloadPresetCombo->addItem(QStringLiteral("int 3 (CC)"), QStringLiteral("CC"));
+        m_payloadPresetCombo->addItem(QStringLiteral("xor rax,rax; ret (48 31 C0 C3) — 64bit 返回 0"),
+            QStringLiteral("48 31 C0 C3"));
+        m_payloadPresetCombo->addItem(QStringLiteral("mov eax,0; ret (B8 00 00 00 00 C3) — 32bit 返回 0 常量版"),
+            QStringLiteral("B8 00 00 00 00 C3"));
+        m_payloadPresetCombo->addItem(QStringLiteral("mov rax,0; ret (48 C7 C0 00 00 00 00 C3) — 64bit 返回 0 常量版"),
+            QStringLiteral("48 C7 C0 00 00 00 00 C3"));
+        // --- 短路函数：返回 1（约定 NTSTATUS 非零错误 / BOOL TRUE） ---
+        m_payloadPresetCombo->addItem(QStringLiteral("mov eax,1; ret (B8 01 00 00 00 C3) — 32bit 返回 1"),
+            QStringLiteral("B8 01 00 00 00 C3"));
+        m_payloadPresetCombo->addItem(QStringLiteral("mov rax,1; ret (48 C7 C0 01 00 00 00 C3) — 64bit 返回 1"),
+            QStringLiteral("48 C7 C0 01 00 00 00 C3"));
+        // --- 短路函数：返回 -1（约定 BOOL FALSE 的另一种 / 常见错误码 0xFFFFFFFF） ---
+        m_payloadPresetCombo->addItem(QStringLiteral("or eax,-1; ret (83 C8 FF C3) — 32bit 返回 0xFFFFFFFF"),
+            QStringLiteral("83 C8 FF C3"));
+        // --- 跳转骨架：填 00 的 displacement 用户自改 ---
+        m_payloadPresetCombo->addItem(QStringLiteral("jmp rel32 骨架 (E9 00 00 00 00) — 用户自填 displacement"),
+            QStringLiteral("E9 00 00 00 00"));
+        m_payloadPresetCombo->addItem(QStringLiteral("call rel32 骨架 (E8 00 00 00 00) — 用户自填 displacement"),
+            QStringLiteral("E8 00 00 00 00"));
         m_payloadPresetCombo->setToolTip(QStringLiteral(
             "快捷填充 payload hex 输入框；选任何一项都只是便捷填充，payload 本身可任意编辑"));
         m_payloadPresetCombo->setMinimumWidth(260);
