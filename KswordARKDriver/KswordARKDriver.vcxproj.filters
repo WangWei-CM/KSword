@@ -1563,6 +1563,9 @@
     <ClCompile Include="src\features\rxpf\rxpf_ioctl.c">
       <Filter>Source Files\Features\RXPF</Filter>
     </ClCompile>
+    <ClCompile Include="src\features\rxpf\rxpf_sha512.c">
+      <Filter>Source Files\Features\RXPF</Filter>
+    </ClCompile>
     <ClCompile Include="src\features\rxpf\rxpf_runtime.c">
       <Filter>Source Files\Features\RXPF</Filter>
     </ClCompile>
@@ -1588,6 +1591,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="src\features\rxpf\rxpf_diagnostics.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="src\features\rxpf\rxpf_sha512.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="src\features\rxpf\rxpf_runtime.h">

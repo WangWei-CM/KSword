@@ -31,7 +31,9 @@ typedef enum _KSW_RXPF_IOCTL_OPERATION
     KswRxpfIoctlDrainEvents,
     KswRxpfIoctlUnregisterPage,
     KswRxpfIoctlRunSelfTest,
-    KswRxpfIoctlSetHookPoint
+    KswRxpfIoctlSetHookPoint,
+    /* Phase G：读 Record->Backup 的子段，供 R3 wizard 在 Unregister(SKIP) 后恢复原字节用 */
+    KswRxpfIoctlQueryBackup
 } KSW_RXPF_IOCTL_OPERATION;
 
 typedef union _KSW_RXPF_REQUEST_SNAPSHOT
@@ -43,6 +45,7 @@ typedef union _KSW_RXPF_REQUEST_SNAPSHOT
     KSWORD_ARK_RXPF_SET_EMULATION_REQUEST SetEmulation;
     KSWORD_ARK_RXPF_DRAIN_EVENTS_REQUEST DrainEvents;
     KSWORD_ARK_RXPF_SET_HOOK_POINT_REQUEST SetHookPoint;
+    KSWORD_ARK_RXPF_QUERY_BACKUP_REQUEST QueryBackup;
 } KSW_RXPF_REQUEST_SNAPSHOT;
 
 static BOOLEAN
@@ -256,6 +259,12 @@ KswRxpfIoctlDispatchFixed(
             &snapshot.SetHookPoint,
             (KSWORD_ARK_RXPF_HOOK_POINT_RESPONSE*)outputBuffer);
         break;
+    case KswRxpfIoctlQueryBackup:
+        /* Phase G：读 Record->Backup 子段，供 wizard 恢复原字节 */
+        status = KswRxpfRuntimeQueryBackup(
+            &snapshot.QueryBackup,
+            (KSWORD_ARK_RXPF_QUERY_BACKUP_RESPONSE*)outputBuffer);
+        break;
     default:
         status = STATUS_INVALID_DEVICE_REQUEST;
         break;
@@ -350,7 +359,8 @@ KSW_RXPF_DEFINE_IOCTL_HANDLER(
     KswRxpfIoctlUnregisterPage,
     KSWORD_ARK_RXPF_RECORD_REQUEST,
     KSWORD_ARK_RXPF_PAGE_RESPONSE,
-    KSWORD_ARK_RXPF_FLAG_UI_CONFIRMED)
+    (KSWORD_ARK_RXPF_FLAG_UI_CONFIRMED |
+     KSWORD_ARK_RXPF_FLAG_SKIP_BACKUP_RESTORE))
 
 KSW_RXPF_DEFINE_IOCTL_HANDLER(
     KswordARKRxpfIoctlRunSelfTest,
@@ -364,6 +374,13 @@ KSW_RXPF_DEFINE_IOCTL_HANDLER(
     KswRxpfIoctlSetHookPoint,
     KSWORD_ARK_RXPF_SET_HOOK_POINT_REQUEST,
     KSWORD_ARK_RXPF_HOOK_POINT_RESPONSE,
+    KSWORD_ARK_RXPF_FLAG_UI_CONFIRMED)
+
+KSW_RXPF_DEFINE_IOCTL_HANDLER(
+    KswordARKRxpfIoctlQueryBackup,
+    KswRxpfIoctlQueryBackup,
+    KSWORD_ARK_RXPF_QUERY_BACKUP_REQUEST,
+    KSWORD_ARK_RXPF_QUERY_BACKUP_RESPONSE,
     KSWORD_ARK_RXPF_FLAG_UI_CONFIRMED)
 
 #undef KSW_RXPF_DEFINE_IOCTL_HANDLER

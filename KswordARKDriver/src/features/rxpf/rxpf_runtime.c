@@ -315,10 +315,13 @@ KswRxpfRuntimeRegisterPage(
     if (!NT_SUCCESS(status) || !KswRxpfRuntimeReady()) {
         return NT_SUCCESS(status) ? STATUS_DELETE_PENDING : status;
     }
-    /* AllocatedTest 和 ExternalImage 不依赖 IDT 模拟自检：
-       AllocatedTest 本身就是自检入口；ExternalImage 只走
-       MmChangeImageProtection + 可写别名，整条路径不碰 IDT。 */
+    /* AllocatedTest 本身就是自检入口；SelfImageTest 和 ExternalImage
+       只走 MmChangeImageProtection + 可写别名——mode=1 恢复路径
+       完全不碰影子 IDT，无需依赖 IDT 模拟自检通过。
+       因此三者均豁免 AllocatedSelfTestPassed 门禁，
+       仅 RunSelfTest 本身仍在 PageFaultInstall 层面把关。 */
     if (Request->targetKind != KSWORD_ARK_RXPF_TARGET_ALLOCATED_TEST &&
+        Request->targetKind != KSWORD_ARK_RXPF_TARGET_SELF_IMAGE_TEST &&
         Request->targetKind != KSWORD_ARK_RXPF_TARGET_EXTERNAL_IMAGE &&
         InterlockedCompareExchange(
             &g_KswRxpfRuntime.AllocatedSelfTestPassed,
@@ -624,7 +627,8 @@ KswRxpfRuntimeUnregisterPage(
     status = KswRxpfValidateHeader(
         &Request->header,
         sizeof(*Request),
-        KSWORD_ARK_RXPF_FLAG_UI_CONFIRMED);
+        (KSWORD_ARK_RXPF_FLAG_UI_CONFIRMED |
+         KSWORD_ARK_RXPF_FLAG_SKIP_BACKUP_RESTORE));
     if (!NT_SUCCESS(status) || !KswRxpfRuntimeReady()) {
         return NT_SUCCESS(status) ? STATUS_DELETE_PENDING : status;
     }
@@ -637,6 +641,12 @@ KswRxpfRuntimeUnregisterPage(
         status = STATUS_NOT_FOUND;
     } else {
         KswRxpfFillPageResponse(record, Response);
+        /* Phase F：Unregister 请求若带 SKIP_BACKUP_RESTORE，让 ReleaseRecord
+         * 保留 R3 写入字节不自动恢复，以便实用 payload 场景。 */
+        record->SkipBackupRestoreOnRelease =
+            ((Request->header.flags &
+              KSWORD_ARK_RXPF_FLAG_SKIP_BACKUP_RESTORE) != 0UL)
+            ? TRUE : FALSE;
         KswRxpfPageTableBeginRemoveLocked(
             &g_KswRxpfRuntime.PageTable,
             record);
@@ -663,12 +673,15 @@ KswRxpfRuntimeUnregisterPage(
 
     KswRxpfPageTableAcquireExclusive(&g_KswRxpfRuntime.PageTable);
     KswRxpfImageProtectionReleaseRecord(record);
+    /* RestoreExecutableProtection 结果在 Record->LastStatus，
+     * ClearRemovedLocked 会清空该槽——在此之前捕获。 */
+    Response->lastStatus = record->LastStatus;
     KswRxpfPageTableClearRemovedLocked(
         &g_KswRxpfRuntime.PageTable,
         record);
     InterlockedIncrement(&g_KswRxpfRuntime.Generation);
     KswRxpfPageTableReleaseExclusive(&g_KswRxpfRuntime.PageTable);
-    KswRxpfSetLastStatus(STATUS_SUCCESS);
+    KswRxpfSetLastStatus(Response->lastStatus);
     return STATUS_SUCCESS;
 }
 
@@ -922,5 +935,70 @@ Exit:
     KswRxpfFillHookPointResponse(record, Response);
     KswRxpfPageTableReleaseExclusive(&g_KswRxpfRuntime.PageTable);
     KswRxpfSetLastStatus(status);
+    return status;
+}
+
+/*
+ * Phase G：读 Record->Backup 的子段。
+ * - 校验 header（UI_CONFIRMED only）、runtime ready
+ * - 校验 offset/length 不超 PAGE_SIZE、无溢出、length<=MAX_WRITE_BYTES
+ * - 持 PageTable 独占锁查 record；Backup=NULL 返 STATUS_NOT_FOUND 并清 hasBackup
+ * - 否则拷贝 [offset, offset+length) 到 response.bytes，hasBackup=1
+ */
+NTSTATUS
+KswRxpfRuntimeQueryBackup(
+    _In_ const KSWORD_ARK_RXPF_QUERY_BACKUP_REQUEST* Request,
+    _Out_ KSWORD_ARK_RXPF_QUERY_BACKUP_RESPONSE* Response
+    )
+{
+    PKSW_RXPF_PAGE_RECORD record = NULL;
+    NTSTATUS status = STATUS_SUCCESS;
+
+    if (Request == NULL || Response == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    status = KswRxpfValidateHeader(
+        &Request->header,
+        sizeof(*Request),
+        KSWORD_ARK_RXPF_FLAG_UI_CONFIRMED);
+    if (!NT_SUCCESS(status) || !KswRxpfRuntimeReady()) {
+        return NT_SUCCESS(status) ? STATUS_DELETE_PENDING : status;
+    }
+
+    /* 严格 bounds check：避免溢出与越页读 */
+    if (Request->length == 0UL ||
+        Request->length > KSWORD_ARK_RXPF_MAX_WRITE_BYTES ||
+        (ULONGLONG)Request->offset + (ULONGLONG)Request->length > (ULONGLONG)PAGE_SIZE ||
+        (ULONGLONG)Request->offset + (ULONGLONG)Request->length < (ULONGLONG)Request->offset) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    RtlZeroMemory(Response, sizeof(*Response));
+    Response->version = KSWORD_ARK_RXPF_PROTOCOL_VERSION;
+    Response->size = sizeof(*Response);
+    Response->recordId = Request->recordId;
+    Response->offset = Request->offset;
+    Response->length = Request->length;
+
+    KswRxpfPageTableAcquireExclusive(&g_KswRxpfRuntime.PageTable);
+    record = KswRxpfPageTableFindByIdLocked(
+        &g_KswRxpfRuntime.PageTable,
+        Request->recordId);
+    if (record == NULL) {
+        status = STATUS_NOT_FOUND;
+    } else if (record->Backup == NULL) {
+        /* 未带 CAPTURE_BACKUP flag 注册的记录没有原页快照 */
+        Response->hasBackup = 0UL;
+        status = STATUS_NOT_FOUND;
+    } else {
+        Response->hasBackup = 1UL;
+        RtlCopyMemory(
+            Response->bytes,
+            (PUCHAR)record->Backup + Request->offset,
+            Request->length);
+    }
+    Response->lastStatus = status;
+    KswRxpfPageTableReleaseExclusive(&g_KswRxpfRuntime.PageTable);
     return status;
 }

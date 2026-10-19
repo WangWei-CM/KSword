@@ -379,6 +379,7 @@
     <ClCompile Include="src\features\rxpf\page_state_table.c" />
     <ClCompile Include="src\features\rxpf\rxpf_diagnostics.c" />
     <ClCompile Include="src\features\rxpf\rxpf_ioctl.c" />
+    <ClCompile Include="src\features\rxpf\rxpf_sha512.c" />
     <ClCompile Include="src\features\rxpf\rxpf_runtime.c" />
     <ClCompile Include="src\features\rxpf\rxpf_self_test.c" />
     <ClCompile Include="src\features\rxpf\x64_instruction_emulator.c" />
@@ -601,6 +602,7 @@
     <ClInclude Include="src\features\rxpf\page_state_table.h" />
     <ClInclude Include="src\features\rxpf\rxpf_diagnostics.h" />
     <ClInclude Include="src\features\rxpf\rxpf_runtime.h" />
+    <ClInclude Include="src\features\rxpf\rxpf_sha512.h" />
     <ClInclude Include="src\features\rxpf\rxpf_self_test.h" />
     <ClInclude Include="src\features\rxpf\x64_instruction_emulator.h" />
     <ClInclude Include="src\features\system_time\system_time_counter.h" />

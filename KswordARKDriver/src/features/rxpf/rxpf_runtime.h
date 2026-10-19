@@ -80,6 +80,17 @@ KswRxpfRuntimeSetHookPoint(
     _Out_ KSWORD_ARK_RXPF_HOOK_POINT_RESPONSE* Response
     );
 
+/*
+ * Phase G：读 Record->Backup（CAPTURE_BACKUP flag 下保存的原页快照）的子段。
+ * 供 R3 wizard 在 Unregister(SKIP_RESTORE) 之前把原字节缓存到 R3 作恢复用。
+ * Record->Backup 为 NULL（未带 CAPTURE_BACKUP）→ STATUS_NOT_FOUND。
+ */
+NTSTATUS
+KswRxpfRuntimeQueryBackup(
+    _In_ const KSWORD_ARK_RXPF_QUERY_BACKUP_REQUEST* Request,
+    _Out_ KSWORD_ARK_RXPF_QUERY_BACKUP_RESPONSE* Response
+    );
+
 ULONGLONG
 KswRxpfInvokeTestPage(
     _In_ PVOID PageAddress
