@@ -25,6 +25,8 @@
 #include <QApplication>
 #include <QByteArray>
 #include <QComboBox>
+#include <algorithm>
+#include <memory>
 #include <QDateTime>
 #include <QFileInfo>
 #include <QFutureWatcher>
@@ -367,39 +369,56 @@ namespace ks::ui
 
         auto* hint = new QLabel(QStringLiteral(
             "<b>第 3 步：写入 payload</b><br>"
-            "选一个预设 payload 或输入自定义 hex（最多 64 字节）。写入会覆盖目标页从 offset=0 开始的字节；原字节已在上一步存到 Backup 可随后恢复。<br>"
-            "<i>常用预设：<code>C3</code>=ret 立即返回（1字节，最小破坏）；<code>33 C0 C3</code>=xor eax,eax; ret（返回 0）；<code>90</code>=NOP（继续执行后续原字节）。</i>"),
+            "任意 hex 字符串作为 payload，长度与页内偏移由你自己定。"
+            "预设只是一键填充，不代表只能用这些。原字节已在上一步存入 Backup 可随后恢复。<br>"
+            "<i>payload+offset 的合法范围由驱动按单页约束校验；GUI 不替你拒绝。</i>"),
             page);
         hint->setWordWrap(true);
         layout->addWidget(hint);
 
+        // Payload 预设下拉：仅做"一键填充 hex 输入框"的便捷功能，不限制用户输入
         auto* presetRow = new QHBoxLayout();
         presetRow->addWidget(new QLabel(QStringLiteral("Payload 预设："), page));
         m_payloadPresetCombo = new QComboBox(page);
-        m_payloadPresetCombo->addItem(QStringLiteral("ret (C3) — 1 字节立即返回"),
-            QStringLiteral("C3"));
-        m_payloadPresetCombo->addItem(QStringLiteral("xor eax,eax; ret (33 C0 C3) — 返回 0"),
+        m_payloadPresetCombo->addItem(QStringLiteral("自定义（不自动覆盖）"), QString());
+        m_payloadPresetCombo->addItem(QStringLiteral("ret (C3)"), QStringLiteral("C3"));
+        m_payloadPresetCombo->addItem(QStringLiteral("xor eax,eax; ret (33 C0 C3)"),
             QStringLiteral("33 C0 C3"));
-        m_payloadPresetCombo->addItem(QStringLiteral("NOP (90) — 1 字节 NOP"),
-            QStringLiteral("90"));
-        m_payloadPresetCombo->addItem(QStringLiteral("int 3 (CC) — 1 字节断点"),
-            QStringLiteral("CC"));
-        m_payloadPresetCombo->addItem(QStringLiteral("自定义"), QString());
+        m_payloadPresetCombo->addItem(QStringLiteral("NOP (90)"), QStringLiteral("90"));
+        m_payloadPresetCombo->addItem(QStringLiteral("int 3 (CC)"), QStringLiteral("CC"));
+        m_payloadPresetCombo->setToolTip(QStringLiteral(
+            "快捷填充 payload hex 输入框；选任何一项都只是便捷填充，payload 本身可任意编辑"));
         m_payloadPresetCombo->setMinimumWidth(260);
         presetRow->addWidget(m_payloadPresetCombo);
         presetRow->addStretch();
         layout->addLayout(presetRow);
 
+        // Payload hex 输入：用户任意字节序列（长度不设 GUI 侧上限，由 driver 校验）
         auto* hexRow = new QHBoxLayout();
         hexRow->addWidget(new QLabel(QStringLiteral("Payload (hex)："), page));
         m_payloadHexEdit = new QLineEdit(QStringLiteral("C3"), page);
-        m_payloadHexEdit->setMinimumWidth(260);
-        m_payloadHexEdit->setPlaceholderText(QStringLiteral("例如：33 C0 C3"));
+        m_payloadHexEdit->setMinimumWidth(360);
+        m_payloadHexEdit->setPlaceholderText(QStringLiteral(
+            "任意 hex，空格可选，例如 48 83 EC 20 ...；长度不设 GUI 上限"));
+        m_payloadHexEdit->setToolTip(QStringLiteral(
+            "用户任意 hex 字符串；GUI 不设 payload 长度上限，由驱动按单页约束校验"));
         hexRow->addWidget(m_payloadHexEdit);
         hexRow->addStretch();
         layout->addLayout(hexRow);
 
-        // 预设选中自动填 hex；选"自定义"保留现值供用户编辑
+        // Payload offset 输入：用户指定页内写入偏移（支持 0x 前缀 hex / 十进制）
+        auto* offsetRow = new QHBoxLayout();
+        offsetRow->addWidget(new QLabel(QStringLiteral("Offset (页内)："), page));
+        m_payloadOffsetEdit = new QLineEdit(QStringLiteral("0"), page);
+        m_payloadOffsetEdit->setMinimumWidth(140);
+        m_payloadOffsetEdit->setPlaceholderText(QStringLiteral("0x0 ~ 0xFFF 或十进制"));
+        m_payloadOffsetEdit->setToolTip(QStringLiteral(
+            "页内写入偏移；用户任意指定；offset+payload 长度是否越页由驱动校验"));
+        offsetRow->addWidget(m_payloadOffsetEdit);
+        offsetRow->addStretch();
+        layout->addLayout(offsetRow);
+
+        // 预设选中：仅当 data 非空（非"自定义"）才覆盖 hex 输入框，避免覆盖用户正在编辑的内容
         connect(m_payloadPresetCombo,
             QOverload<int>::of(&QComboBox::currentIndexChanged),
             this, [this](int) {
@@ -641,14 +660,18 @@ namespace ks::ui
                                     setBusy(false);
                                     return;
                                 }
-                                m_plan.backupBytes = bk.bytes;
+                                // 这里的 16 字节只是页头预览给用户看，不作为恢复数据：
+                                // 用户的 payloadOffset / payload.size() 可能完全不同，
+                                // 真正用于恢复的 backup 字节在第 3 步 Write 时按用户选的
+                                // (offset, size) 分段 QueryBackup 读入 m_plan.backupBytes。
                                 m_backupHexLabel->setText(
-                                    QStringLiteral("原字节 (前 %1 字节)：%2")
+                                    QStringLiteral("原字节 (页头前 %1 字节预览，仅显示)：%2")
                                         .arg(bk.length).arg(bytesToHex(bk.bytes)));
                                 m_prepareStatusLabel->setText(QStringLiteral(
                                     "状态：准备完成，可进入第 3 步"));
                                 appendTrace(QStringLiteral(
-                                    "QueryBackup OK bytes=%1").arg(bytesToHex(bk.bytes)));
+                                    "QueryBackup preview bytes=%1").arg(bytesToHex(bk.bytes)));
+                                m_plan.backupBytes.clear();
                                 setBusy(false);
                             });
                         w3->setFuture(QtConcurrent::run([rid2]() -> rxpf::BackupInfo {
@@ -669,32 +692,69 @@ namespace ks::ui
     // ========================================================================
     void KernelHookWizard::onWritePayloadClicked()
     {
+        // 前置：必须已完成第 2 步 Register+Change 拿到 recordId
         if (m_plan.recordId == 0ULL) {
             appendTrace(QStringLiteral("请先在第 2 步完成准备"));
             return;
         }
+
+        // 1) 解析 payload hex：空输入直接拒；长度不设 GUI 上限，交给驱动按单页约束
         const QByteArray payload = parseHexBytes(m_payloadHexEdit->text());
-        if (payload.isEmpty() || payload.size() > 64) {
-            appendTrace(QStringLiteral("Payload hex 解析失败或长度非 1..64 字节"));
+        if (payload.isEmpty()) {
+            appendTrace(QStringLiteral("Payload hex 解析失败或为空"));
             return;
         }
-        m_plan.payload = payload;
-        m_plan.payloadOffset = 0;
-        setBusy(true);
-        m_writeStatusLabel->setText(QStringLiteral("状态：Write 中..."));
-        appendTrace(QStringLiteral("Write(offset=0, len=%1) bytes=%2")
-            .arg(payload.size()).arg(bytesToHex(payload)));
 
+        // 2) 解析用户指定的页内 offset：支持 0x 前缀 hex 与十进制；只拒"解析失败"或负数
+        bool offsetOk = false;
+        const QString offsetText = m_payloadOffsetEdit->text().trimmed();
+        const QString normalizedOffsetText = offsetText.startsWith(QStringLiteral("0x"),
+            Qt::CaseInsensitive)
+            ? offsetText.mid(2)
+            : offsetText;
+        const int offsetBase = offsetText.startsWith(QStringLiteral("0x"),
+            Qt::CaseInsensitive)
+            ? 16
+            : 10;
+        const qulonglong parsedOffset = normalizedOffsetText.toULongLong(&offsetOk, offsetBase);
+        if (!offsetOk) {
+            appendTrace(QStringLiteral("Offset 解析失败：%1").arg(offsetText));
+            return;
+        }
+
+        // 3) 把用户选择全部塞进 plan，供后续恢复步骤使用；不在 GUI 侧 clamp，由驱动校验
+        m_plan.payload = payload;
+        m_plan.payloadOffset = static_cast<unsigned long>(parsedOffset & 0xFFFFFFFFULL);
+
+        setBusy(true);
+        m_writeStatusLabel->setText(QStringLiteral("状态：QueryBackup + Write 中..."));
+        appendTrace(QStringLiteral("Write(offset=0x%1, len=%2) bytes=%3")
+            .arg(static_cast<quint64>(m_plan.payloadOffset), 0, 16)
+            .arg(payload.size())
+            .arg(bytesToHex(payload)));
+
+        // 4) Worker thread: 先分段 QueryBackup 读准确 (offset, size) 的原字节用于恢复，
+        //    再 Write(offset, payload) 下用户 payload。QueryBackup 单段 ≤ 64 字节是协议上限，
+        //    用户 payload 长度无 GUI 上限 → 需要分段循环；任意一段失败整体失败。
+        //    backup 字节通过 shared_ptr 跨线程回传给 UI finished 回调。
         const quint64 rid = m_plan.recordId;
+        const unsigned long offsetArg = m_plan.payloadOffset;
+        auto backupHolder = std::make_shared<QByteArray>();
         auto* w = new QFutureWatcher<rxpf::PageInfo>(this);
         connect(w, &QFutureWatcher<rxpf::PageInfo>::finished, this,
-            [this, w]() {
+            [this, w, backupHolder]() {
                 const auto info = w->result();
                 w->deleteLater();
                 if (!info.ioSuccess) {
                     appendTrace(QStringLiteral("Write 失败：%1").arg(info.ioErrorText));
                     m_writeStatusLabel->setText(QStringLiteral("状态：Write 失败"));
+                    // Write 失败时清空 cached backup，避免第 5 步用错数据写回
+                    m_plan.backupBytes.clear();
                 } else {
+                    // Write OK：把 Write 之前读到的准确 backup 字节 cache 进 plan 供第 5 步恢复
+                    m_plan.backupBytes = *backupHolder;
+                    appendTrace(QStringLiteral("Backup cached len=%1 bytes=%2")
+                        .arg(backupHolder->size()).arg(bytesToHex(*backupHolder)));
                     appendTrace(QStringLiteral("Write OK status=%1")
                         .arg(formatHex4(static_cast<quint32>(info.lastStatus))));
                     m_writeStatusLabel->setText(QStringLiteral(
@@ -702,8 +762,30 @@ namespace ks::ui
                 }
                 setBusy(false);
             });
-        w->setFuture(QtConcurrent::run([rid, payload]() -> rxpf::PageInfo {
-            return rxpf::writePage(rid, 0UL, payload);
+        w->setFuture(QtConcurrent::run([rid, offsetArg, payload, backupHolder]() -> rxpf::PageInfo {
+            // 分段 QueryBackup：协议上限 64 字节/段，用户 payload 任意长 → 按 chunk 循环
+            constexpr int kQueryBackupChunk = 64;
+            for (int readIndex = 0; readIndex < payload.size(); readIndex += kQueryBackupChunk) {
+                const int remaining = payload.size() - readIndex;
+                const int thisChunk = std::min(kQueryBackupChunk, remaining);
+                const auto qb = rxpf::queryBackup(rid,
+                    offsetArg + static_cast<unsigned long>(readIndex),
+                    static_cast<unsigned long>(thisChunk));
+                if (!qb.ioSuccess || !qb.hasBackup) {
+                    // 构造失败态 PageInfo 让 UI 回调走失败分支
+                    rxpf::PageInfo fail;
+                    fail.ioSuccess = false;
+                    fail.ioErrorText = qb.ioErrorText.isEmpty()
+                        ? QStringLiteral("QueryBackup 分段失败 offset=%1 len=%2")
+                            .arg(static_cast<quint64>(offsetArg + readIndex), 0, 16)
+                            .arg(thisChunk)
+                        : qb.ioErrorText;
+                    return fail;
+                }
+                backupHolder->append(qb.bytes);
+            }
+            // Backup 全部读完才 Write；Write 本身可以写任意长度 payload（driver 校验越页）
+            return rxpf::writePage(rid, offsetArg, payload);
         }));
     }
 
@@ -764,9 +846,10 @@ namespace ks::ui
 
         const quint64 va = m_plan.targetVa;
         const QByteArray backup = m_plan.backupBytes;
+        const unsigned long restoreOffset = m_plan.payloadOffset;
         auto* w = new QFutureWatcher<rxpf::PageInfo>(this);
         connect(w, &QFutureWatcher<rxpf::PageInfo>::finished, this,
-            [this, w, backup]() {
+            [this, w, backup, restoreOffset]() {
                 const auto reg = w->result();
                 w->deleteLater();
                 if (!reg.ioSuccess) {
@@ -778,7 +861,7 @@ namespace ks::ui
                 const quint64 rid = reg.recordId;
                 auto* w2 = new QFutureWatcher<rxpf::PageInfo>(this);
                 connect(w2, &QFutureWatcher<rxpf::PageInfo>::finished, this,
-                    [this, w2, rid, backup]() {
+                    [this, w2, rid, backup, restoreOffset]() {
                         const auto chg = w2->result();
                         w2->deleteLater();
                         if (!chg.ioSuccess) {
@@ -827,8 +910,9 @@ namespace ks::ui
                                     return rxpf::unregisterPage(rid, /*skip=*/false);
                                 }));
                             });
-                        w3->setFuture(QtConcurrent::run([rid, backup]() -> rxpf::PageInfo {
-                            return rxpf::writePage(rid, 0UL, backup);
+                        // 用用户在第 3 步指定的 payloadOffset 把 backup 写回同一位置
+                        w3->setFuture(QtConcurrent::run([rid, backup, restoreOffset]() -> rxpf::PageInfo {
+                            return rxpf::writePage(rid, restoreOffset, backup);
                         }));
                     });
                 w2->setFuture(QtConcurrent::run([rid]() -> rxpf::PageInfo {

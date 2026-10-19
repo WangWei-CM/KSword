@@ -62,8 +62,8 @@ namespace ks::ui
         QByteArray backupBytes;             // QueryBackup 读到的原字节（用于恢复）
 
         // 第 3 步 Write payload 后锁定：
-        QByteArray payload;                 // 要写入的 payload（1~64 字节）
-        unsigned long payloadOffset = 0;    // 写入的页内偏移（通常 0）
+        QByteArray payload;                 // 要写入的 payload（1..PAGE_SIZE 字节，由用户决定）
+        unsigned long payloadOffset = 0;    // 用户指定的页内偏移（0..PAGE_SIZE-1）
 
         // 第 4 步 Unregister(SKIP_RESTORE) 后锁定：
         long mode1Status = 0;               // Unregister 的 mode=1 返回状态
@@ -138,8 +138,9 @@ namespace ks::ui
         QLabel* m_backupHexLabel = nullptr; // 显示 Backup 前 16 字节 hex
 
         // 第 3 页：Write payload
-        QComboBox* m_payloadPresetCombo = nullptr; // 预设：ret / xor-ret / nop / int3 / 自定义
-        QLineEdit* m_payloadHexEdit = nullptr;     // 自定义 payload hex
+        QComboBox* m_payloadPresetCombo = nullptr; // 预设 payload 快捷填充（选中会覆盖 hex 输入框）
+        QLineEdit* m_payloadHexEdit = nullptr;     // 用户任意 payload hex；不设 GUI 侧长度上限，由 driver 校验
+        QLineEdit* m_payloadOffsetEdit = nullptr;  // 用户指定的页内写入偏移（hex / dec 均可）
         QPushButton* m_writeBtn = nullptr;
         QLabel* m_writeStatusLabel = nullptr;
 
