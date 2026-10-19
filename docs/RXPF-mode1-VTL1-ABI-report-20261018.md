@@ -54,7 +54,7 @@
 ### 稳的（high confidence，被 3/3 对抗 refuter 承认）
 
 - **mode=1 对 CI.dll+0x1000 实测可返 `STATUS_SUCCESS`**。**唯一样本**；NTOS/NDIS/FLTMGR 等其他 catalog 签名模块均**未实测**，不能外推。已验证的 payload 仅 0x90 和 0xCC 两种 1 字节覆盖 @ offset=0。
-- **本机 MiFlags & 0x4000 = 1**（间接证据）：`.rxpftst` 实验返 `0xC0000005`，而 `nt!MmChangeImageProtection` 的直接返回码（见 22621-report §Branches 表）里不包含 `0xC0000005`，故该值必然来自 `VslValidateDynamicCodePages` 内部 SEH #PF 转换；因此 VSL/VTL1 分支没有被跳过。
+- **本机 MiFlags & 0x4000 = 1**：原间接证据——`.rxpftst` 实验返 `0xC0000005`，而 `nt!MmChangeImageProtection` 的直接返回码（见 22621-report §Branches 表）里不包含 `0xC0000005`，故该值必然来自 `VslValidateDynamicCodePages` 内部 SEH #PF 转换；因此 VSL/VTL1 分支没有被跳过。**2026-10-19 已由 next-exp #7 R0 直读 `nt!MiFlags` 直接验证**：VM 26300.9457 全防护下 qword `0x000000C4F985FA6C`，bit 0x4000 = 1。
 - **MmChangeImageProtection 4 参数签名** 与 MDL 约束 `(MdlFlags & 7) == 2`、mode 分支语义经 22621 静态反汇编证实。
 - **外层返回 `STATUS_SUCCESS` 仅表示 VslValidate 返回非负值**（可能是 0 也可能是 0x12C）；VTL0 边界无法区分。
 - **mode=1 restore 真的让修改后的字节保留在 RX 页上，26H2 实体机 CI/HVCI/HVCI-Strict/Secure-Boot 全开实证**（2026-10-19 primary evidence，详见 §6 实验 #7 与 [`.claude/memory/ksword-rxpf-mode1-realhardware-26h2-confirmed.md`](../.claude/memory/ksword-rxpf-mode1-realhardware-26h2-confirmed.md)）：R0 来源姿态 `CI=启用  HVCI=启用  HVCI Strict=启用  安全启动=启用  测试签名=关闭  来源=R0`，MmChangeImageProtection VA `0xfffff80498662300`，别名 VA `0xffffa882a687d000`；函数解析 / MDL 分配 / 页面锁定 / 映像保护变更 / 别名映射 / 写入测试 / RX 恢复七个阶段**全部**返 `(0x00000000)`；字节三元组 `pre=0X48  postWrite=0XB7  postRestore=0XB7`，"HVCI 绕过已确认：MDL 别名写入穿透了映像保护，恢复后修改仍然保留（0x48 → 0xb7）"。该样本独立于 CI.dll+0x1000 单样本，直接把之前 "Phase F SUCCESS 不独立证明放行修改字节" 的保留态升级为 **已证伪**；但 moduleName/offset、UBR、CI.dll version/sha256、nt-symbol-identity.json 等 §2 TBD-OPS 字段仍待操作者在实体机上补齐。
@@ -614,7 +614,11 @@ Win32 错误转 NTSTATUS 的常见对照：
 - **next-exp #1 — EXTERNAL_IMAGE bad-digest 对照**：临时解除 EXTERNAL_IMAGE 的 `STATUS_NOT_SUPPORTED` 短路，分别传 (随机 32B / SHA-256(页) / SHA-512(页)[0x20,0x40))，看 mode=1 返回能否区分 digest 内容——关掉 "VTL1 验 digest" 归因争议。
 - **next-exp #2 — BugCheck Arg 捕获**：开 `CrashOnCtrlScroll` + `AlwaysKeepMemoryDump`，重跑 §6 实验 #3/#4，用 cdb `!analyze -v; .cxr; r; u @rip L8; kb` 固定 BugCheck Code / Arg1-4 / 故障 RIP 是否真落在 CI.dll+0x1000..+0x1008 内。
 - **next-exp #4 — 扩模块覆盖**：NTOS/NDIS/FLTMGR 各跑一轮等价 CI.dll+0x1000 实验，验证 "mode=1 对 catalog 内 Microsoft 签名模块放行" 是否可外推（当前 §6 实验 #7 的 26H2 PageBase 还没对应到具体模块名）。
-- **next-exp #7 — MiFlags dword 直读**：R0 探针直接读 `nt!MiFlags(RVA 0xD1EA48)` dword，直接确认 `0x4000` 位状态，替代 §3 "稳的" 第 3 条的间接推理。
+- **next-exp #7 — MiFlags qword 直读 — 已完成**（2026-10-19，VM 26H2 build 26300.9457 CI/HVCI/HVCI-Strict/Secure Boot 全开）：
+  - 原条目的 `RVA 0xD1EA48` **已过期**（可能是旧 build 偏移），本机 build 26300.9457 的 PDB 符号查询 (`ntkrnlmp.pdb` GUID `C29EBFB06B78B3C020DCA66D99713F9E` Age=1) 显示 `MiFlags` 真实 RVA = **`0xFC6AC8`**（public symbol, segment 27:0x1AC8）。
+  - R0 读 `nt base + 0xFC6AC8 = 0xfffff803abbc6ac8` → `query-pte` 得 PA `0x1013C6AC8`（2 MB large page, pde `0x8A000001012009E3`, NX=1）→ `read-phys` 回 8 字节 `6c fa 85 f9 c4 00 00 00` ⇒ MiFlags qword = **`0x000000C4F985FA6C`**。
+  - **`bit 0x4000` (StrongCodeGuarantees) = 1** ✓ —— HVCI running + Enforced 场景下的预期值，直接验证 §3 "稳的" 第 3 条的间接推理。
+  - 工具链：`KswordCLI memory query-pte` + `memory read-phys`（`read-va` 对 kernel 大页返 win32=87, 走物理地址旁路可读）。
 - **next-exp #8 — live PTE qword 回读**：Phase F SUCCESS 后 Unregister 前，R0 定位目标 PTE qword 并回读 NX/Present bit，把 livePteSnapshot 写入 Response，替换 originalProtection 的循环证据（见 A-4 / A-5 注记）。
 
 ### Phase F → Phase G 代码接口已就绪
