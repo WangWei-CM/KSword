@@ -3182,6 +3182,11 @@
       "detail": "KswordCLI 当前没有对应子命令，无法在本 harness 内触发；属于覆盖缺口，不是安全排除。"
     },
     {
+      "ioctl": "RXPF_QUERY_BACKUP",
+      "reason": "no-cli-path",
+      "detail": "KswordCLI 当前没有对应子命令，无法在本 harness 内触发；属于覆盖缺口，不是安全排除。供 GUI 的 KernelHookWizard 在 Phase G 恢复步骤用。"
+    },
+    {
       "ioctl": "RXPF_QUERY_SUPPORT",
       "reason": "no-cli-path",
       "detail": "KswordCLI 当前没有对应子命令，无法在本 harness 内触发；属于覆盖缺口，不是安全排除。"
