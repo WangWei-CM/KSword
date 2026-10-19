@@ -613,7 +613,19 @@ Win32 错误转 NTSTATUS 的常见对照：
 
 - **next-exp #1 — EXTERNAL_IMAGE bad-digest 对照**：临时解除 EXTERNAL_IMAGE 的 `STATUS_NOT_SUPPORTED` 短路，分别传 (随机 32B / SHA-256(页) / SHA-512(页)[0x20,0x40))，看 mode=1 返回能否区分 digest 内容——关掉 "VTL1 验 digest" 归因争议。
 - **next-exp #2 — BugCheck Arg 捕获**：开 `CrashOnCtrlScroll` + `AlwaysKeepMemoryDump`，重跑 §6 实验 #3/#4，用 cdb `!analyze -v; .cxr; r; u @rip L8; kb` 固定 BugCheck Code / Arg1-4 / 故障 RIP 是否真落在 CI.dll+0x1000..+0x1008 内。
-- **next-exp #4 — 扩模块覆盖**：NTOS/NDIS/FLTMGR 各跑一轮等价 CI.dll+0x1000 实验，验证 "mode=1 对 catalog 内 Microsoft 签名模块放行" 是否可外推（当前 §6 实验 #7 的 26H2 PageBase 还没对应到具体模块名）。
+- **next-exp #4 — 扩模块覆盖 — 已完成**（2026-10-19，VM 26H2 build 26300.9457 全防护开启）：
+  - **结论：mode=1/2 对 catalog 内 Microsoft 签名的 4 KB 常规页模块可外推**，但 **ntoskrnl 本身的 .text 用 2 MB 大页布局，MmChangeImageProtection 结构性拒绝大页**（独立于签名的第二道门）。
+  - 对照数据（三个成功模块的 PTE top byte 全部从 `0x09` 翻到 `0x89` 又回 `0x09`，模式完全一致）：
+
+| 模块 | 目标 VA 偏移 | 页类型 | `imageProtectStatus` | PTE qword |
+|---|---|---|---|---|
+| **ntoskrnl.exe** | base + 0x10000 | **2 MB 大页** | `0xC0000018 CONFLICTING_ADDRESSES` | 不变（PTE=0, 走 PDE 大页） |
+| **ndis.sys** | base + 0x1000 | 4 KB 常规 | `0x0 SUCCESS` | `0x9…121` → `0x8…121` → `0x9…121` ✓ |
+| **fltmgr.sys** | base + 0x1000 | 4 KB 常规 | `0x0 SUCCESS` | 同上 ✓ |
+| **CI.dll**（对照） | base + 0x1000 | 4 KB 常规 | `0x0 SUCCESS` | 同上 ✓ |
+
+  - **ntoskrnl 大页硬门禁的意义**：之前认为 "nt 内核能被 mode=2 Change" 的推理在本机 build 结构上成立但实践上不可达——nt .text 以 2 MB 大页映射，MmChangeImageProtection 的内部逻辑拒绝接受大页目标。要操作 nt 本身必须先想办法让 nt .text 切回 4 KB 页（例如重编译 kernel 或靠调试 flag），本会话未探索。
+  - §6 实验 #7 的 26H2 primary-evidence PageBase `0xFFFFF80429FE0000` 对应 size 0x1450000（和 ntoskrnl 相同），结合本次 #4 发现，说明实体机 primary-evidence 的那次 mode=1 成功**不是** nt 本身，而是**另一个 catalog 内常规页模块**——需要 ops 在实体机对照 R0 日志里的模块枚举表确定具体 moduleName（见 §6 中 `<TBD-OPS>` 占位符）。
 - **next-exp #7 — MiFlags qword 直读 — 已完成**（2026-10-19，VM 26H2 build 26300.9457 CI/HVCI/HVCI-Strict/Secure Boot 全开）：
   - 原条目的 `RVA 0xD1EA48` **已过期**（可能是旧 build 偏移），本机 build 26300.9457 的 PDB 符号查询 (`ntkrnlmp.pdb` GUID `C29EBFB06B78B3C020DCA66D99713F9E` Age=1) 显示 `MiFlags` 真实 RVA = **`0xFC6AC8`**（public symbol, segment 27:0x1AC8）。
   - R0 读 `nt base + 0xFC6AC8 = 0xfffff803abbc6ac8` → `query-pte` 得 PA `0x1013C6AC8`（2 MB large page, pde `0x8A000001012009E3`, NX=1）→ `read-phys` 回 8 字节 `6c fa 85 f9 c4 00 00 00` ⇒ MiFlags qword = **`0x000000C4F985FA6C`**。
