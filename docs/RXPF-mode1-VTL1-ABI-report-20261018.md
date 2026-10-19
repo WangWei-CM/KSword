@@ -611,7 +611,14 @@ Win32 错误转 NTSTATUS 的常见对照：
 
 本节 next-exp 编号与 [`.claude/memory/ksword-rxpf-mode1-restore-structural-fail.md`](../.claude/memory/ksword-rxpf-mode1-restore-structural-fail.md) 一致。已完成的（#3 keep-modified / #5 auto-restore / #6 Phase F 整合 / 26H2 primary evidence #7）不再重复列出。
 
-- **next-exp #1 — EXTERNAL_IMAGE bad-digest 对照**：临时解除 EXTERNAL_IMAGE 的 `STATUS_NOT_SUPPORTED` 短路，分别传 (随机 32B / SHA-256(页) / SHA-512(页)[0x20,0x40))，看 mode=1 返回能否区分 digest 内容——关掉 "VTL1 验 digest" 归因争议。
+- **next-exp #1 — EXTERNAL_IMAGE bad-digest 对照 — 归档**（2026-10-19 决策，由 §6 #7 primary evidence 间接回答）：
+  - **原目标**：临时解除 EXTERNAL_IMAGE 的 `STATUS_NOT_SUPPORTED` 短路，分别传 (随机 32B / SHA-256(页) / SHA-512(页)[0x20,0x40))，看 mode=1 返回能否区分 digest 内容——关掉 "VTL1 验 digest" 归因争议。
+  - **已间接回答**：§6 实验 #7 (26H2 实体机 primary evidence) 和 next-exp #2 (0xFC BugCheck) 一起证明，mode=1 走 EXTERNAL_IMAGE 的 fallback 分支（`refVA=pageBase, refLen=PAGE_SIZE`，见 `image_protection_manager.c:KswRxpfRestoreExecutableProtection` 的 else 分支）对 CI.dll+0x1000 返回 `STATUS_SUCCESS` 且**保留修改字节**（0x48→0xB7→0xB7）。这说明 **VTL1 在 fallback 模式下未严格验内容**（若严格验 SHA-X(页)，修改字节会使 digest 不匹配并返错）。
+  - **残留小尾巴**（不影响主结论，供后续接续者选做）：fallback 分支里 VTL1 到底做了什么？两种候选假设：
+    - H1：VTL1 识别 `refLen == PAGE_SIZE` 为"全页模式"，跳过 digest 比对（可能依赖其他鉴权）
+    - H2：VTL1 调用 `MmChangeImageProtection` 时根本没有强制 digest 比对的通路（纯 SLAT 翻位操作）
+    - 要分辨 H1/H2，需扩展 CHANGE_PAGE 协议传 32B digest + 解除 EXTERNAL_IMAGE 短路 + 三组对照（工程量约 100 行驱动改动 + Rebuild + 签名部署 + 实验，约 1 小时）。本会话决策推迟，理由：核心结论（HVCI mode=1 可用于 CI 旁路）已由 §6 #7 和 next-exp #2 直接证据覆盖；#1 的边际价值仅是进一步细化 VTL1 的内部语义，不改变可利用性结论。
+  - **归档不等于否决**：若后续发现 §3 "稳的" 结论在某台机器上失效、或 primary evidence 需要进一步归因到 VTL1 的具体校验算法时，接续者可按原设计重启 #1，参照 `image_protection_manager.c:1302 KswRxpfPrepareReferenceDigest` 的 EXTERNAL_IMAGE 分支和 `shared/driver/KswordArkRxPfIoctl.h:_KSWORD_ARK_RXPF_RECORD_REQUEST` 的 header.flags 扩展位。
 - **next-exp #2 — BugCheck Arg 捕获 — 已完成**（2026-10-19，VM 26H2 build 26300.9457 CI/HVCI/HVCI-Strict/Secure Boot 全开）：
   - **流程**：`CrashDumpEnabled=2 + AlwaysKeepMemoryDump=1 + AutoReboot=1` 配好；用 `KswordCLI memory change-image-protection --address <CI.dll+0x1000> --operation 2 --flags 0x1`（mode=2 翻 NX + writeTest，不恢复）；R0 返回 `imageProtectStatus=0x0` + `writeTestStatus=0x0` + `restoreStatus=0xC00000BB`（NOT_SUPPORTED，因未传 flags 0x2）；约 1 分钟后 VM 自发 BSOD + AutoReboot；拉 `C:\WINDOWS\Minidump\101926-4203-01.dmp` 到宿主用 cdb `!analyze -v` 分析。
   - **BugCheck 完整参数**（minidump 原文）：
