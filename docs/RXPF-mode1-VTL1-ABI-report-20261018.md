@@ -619,7 +619,15 @@ Win32 错误转 NTSTATUS 的常见对照：
   - R0 读 `nt base + 0xFC6AC8 = 0xfffff803abbc6ac8` → `query-pte` 得 PA `0x1013C6AC8`（2 MB large page, pde `0x8A000001012009E3`, NX=1）→ `read-phys` 回 8 字节 `6c fa 85 f9 c4 00 00 00` ⇒ MiFlags qword = **`0x000000C4F985FA6C`**。
   - **`bit 0x4000` (StrongCodeGuarantees) = 1** ✓ —— HVCI running + Enforced 场景下的预期值，直接验证 §3 "稳的" 第 3 条的间接推理。
   - 工具链：`KswordCLI memory query-pte` + `memory read-phys`（`read-va` 对 kernel 大页返 win32=87, 走物理地址旁路可读）。
-- **next-exp #8 — live PTE qword 回读**：Phase F SUCCESS 后 Unregister 前，R0 定位目标 PTE qword 并回读 NX/Present bit，把 livePteSnapshot 写入 Response，替换 originalProtection 的循环证据（见 A-4 / A-5 注记）。
+- **next-exp #8 — live PTE qword 回读 — 已完成**（2026-10-19，VM 26H2 build 26300.9457 全防护开启）：
+  - 目标：CI.dll + 0x1000 = `0xfffff8063dd11000`（4 KB 常规页，非大页，PTE 可直接 query）
+  - R0 用 `KswordCLI memory query-pte` 读 PTE qword 对三态直接观测：
+    - Change 前 PTE = `0x090000010513B121` (top byte `0x09`, bit 63 = 0, NX=0 → **RX**)
+    - `change-image-protection --operation 2` 后 PTE = `0x890000010513B121` (top byte `0x89`, bit 63 = 1, NX=1 → **R-only/NX**)
+    - `change-image-protection --operation 1` 后 PTE = `0x090000010513B121` (**完全回到初始 qword**, NX=0 → **RX**)
+  - **直接证据取代循环证据**：原 §5.5 `originalProtection=0x20` 是 PE 节头 characteristics 静态推算（见 A-4 / A-5 注记），现在 live PTE qword 独立确认 mode=2 把 bit 63 (NX) 从 0 翻到 1、mode=1 让 PTE 恢复到初始 qword。
+  - 副产物：MmChangeImageProtection 本机 VA = `0xFFFFF806AC25DDB0`（RVA = 0xA5DDB0，R0 的 `resolvedFunctionVa` 字段直接给）。`originalPte=0xCC` 这个 R0 字段**不是** PTE qword，只是 PE 节头推的 1 byte 保护位，容易误读。
+  - 工具链同 #7：`query-pte` 读 PTE，`change-image-protection` 跑 Register+Change（flags 0 时 R0 日志报 `aliasMapStatus=STATUS_NOT_SUPPORTED` 跳 alias 阶段，但 `imageProtectStatus=0` 已覆盖本实验目标）。
 
 ### Phase F → Phase G 代码接口已就绪
 
