@@ -755,6 +755,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     """
     parser = argparse.ArgumentParser(description="Generate KswordARK PDB offset profiles")
     parser.add_argument("--kphdyn", default="third_party/systeminformer_dyn/kphdyn.xml", help="Path to kphdyn.xml")
+    parser.add_argument(
+        "--kphdyn-extra",
+        action="append",
+        default=[],
+        help=(
+            "Additional kphdyn.xml files to merge after --kphdyn. May be repeated. "
+            "Rows are concatenated in order; later rows with the same (file, version, arch) "
+            "replace earlier ones, mirroring 'last wins' semantics without upstream edits."
+        ),
+    )
     parser.add_argument("--symbol-root", default=DEFAULT_SYMBOL_ROOT, help="Corpus/cache root")
     parser.add_argument("--symbol-server", default=DEFAULT_SYMBOL_SERVER, help="Microsoft symbol server base URL")
     parser.add_argument("--llvm-pdbutil", default=DEFAULT_LLVM_PDBUTIL, help="Path to llvm-pdbutil.exe")
@@ -2629,7 +2639,13 @@ def main(argv: list[str] | None = None) -> int:
 
     root = Path(args.symbol_root)
     files = {item.strip().lower() for item in args.file.split(",") if item.strip()}
-    entries = list(iter_kphdyn_entries(Path(args.kphdyn), args.arch, args.version, files))
+    entries_by_key: dict[tuple[str, str, str], KphDynEntry] = {}
+    kphdyn_sources: list[Path] = [Path(args.kphdyn)]
+    kphdyn_sources.extend(Path(p) for p in (args.kphdyn_extra or []))
+    for source in kphdyn_sources:
+        for entry in iter_kphdyn_entries(source, args.arch, args.version, files):
+            entries_by_key[(entry.file_name.lower(), entry.version, entry.arch)] = entry
+    entries = list(entries_by_key.values())
     if not entries:
         print("No matching kphdyn entries found.", file=sys.stderr)
         return 2
