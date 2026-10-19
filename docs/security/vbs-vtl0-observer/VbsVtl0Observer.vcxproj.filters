@@ -3,12 +3,17 @@
   <ItemGroup>
     <Filter Include="Source Files">
       <UniqueIdentifier>{242FF5AE-4586-4EC8-B548-A06C5324749E}</UniqueIdentifier>
-      <Extensions>c</Extensions>
+      <Extensions>c;asm</Extensions>
     </Filter>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="VbsVtl0Observer.c">
       <Filter>Source Files</Filter>
     </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <MASM Include="VbsVtl0Stub.asm">
+      <Filter>Source Files</Filter>
+    </MASM>
   </ItemGroup>
 </Project>

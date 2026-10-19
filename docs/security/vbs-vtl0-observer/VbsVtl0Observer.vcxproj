@@ -29,6 +29,7 @@
     <SignMode>Off</SignMode>
     <EnableInf2Cat>false</EnableInf2Cat>
     <RunCodeAnalysis>false</RunCodeAnalysis>
+    <SpectreMitigation>false</SpectreMitigation>
   </PropertyGroup>
   <ItemDefinitionGroup>
     <ClCompile>
@@ -37,15 +38,23 @@
       <CompileAs>CompileAsC</CompileAs>
       <Optimization>MaxSpeed</Optimization>
       <BufferSecurityCheck>true</BufferSecurityCheck>
+      <SpectreMitigation>false</SpectreMitigation>
       <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
     <Link>
       <TreatLinkerWarningAsErrors>true</TreatLinkerWarningAsErrors>
       <GenerateDebugInformation>true</GenerateDebugInformation>
     </Link>
+    <MASM>
+      <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+    </MASM>
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="VbsVtl0Observer.c" />
+  </ItemGroup>
+  <ItemGroup>
+    <MASM Include="VbsVtl0Stub.asm" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>

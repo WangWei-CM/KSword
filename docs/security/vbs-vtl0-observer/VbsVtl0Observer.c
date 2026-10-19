@@ -1,18 +1,91 @@
 /*
- * VBS architecture research tool -- read-only architectural observation.
- * 仅观察：不执行 LIDT，不复制或修改 IDT，不安装异常钩子，不触发页故障，
- * 不修改页保护、不注入代码，也不读取或修改 VMCS。
- * 两次 SIDT 只能报告调用方可见的 IDTR；相同读数不能证明不存在 VM-exit。
- * CPUID 的 hypervisor-present 位不能证明 VBS/HVCI 已启用或正在运行。
- * CI 选项和 hypervisor vendor 仅记录现场，不能证明 LIDT 或 #PF 的 VM-exit 路径。
+ * VBS architecture research tool —— 测量 VTL0 下的 IDTR 写入与 #PF 交付路径。
+ *
+ * 本驱动分四个阶段，每个阶段均单处理器、单次、即测即还：
+ *   Phase A：现场快照（OS 版本 / CPUID / CodeIntegrityOptions / SIDT 两次）。
+ *   Phase B：在当前 CPU 上尝试一次 LIDT：把 IDT 拷贝到 NonPagedPoolNx，患换
+ *            第 14 项（#PF）为计数桩，LIDT 后立即 SIDT 回读；只问 IDTR 是否生效。
+ *   Phase C：仅当 Phase B 报告 LIDT 生效时触发一次已知的用户态非法读，看
+ *            计数桩是否被交付（计数器是否被 lock inc 修改）；桩内链回原始处理器。
+ *   Phase D：无论 Phase C 结果如何，立即 LIDT 回退到原 IDTR，释放拷贝，恢复亲和性。
+ *
+ * 本驱动不长期挂钩任何向量、不修改任何页保护、不写入内核映像；LIDT 与 IDT 拷贝
+ * 在当前 CPU 上保留的时间仅限于 Phase C 的几行代码。SIDT 变化可能来自 Hyper-V
+ * 的指令模拟，计数器增量可能来自异常重注入；这些语义限制在报告里写明，不自称
+ * 已经证伪或证实其中任何一条。
+ *
  * 本文件是独立的 x64 WDM 示例，不加入 KSword 产品驱动，不需要用户态组件。
  */
 
 #include <ntddk.h> /* 使用公开 WDK 内核类型、IRQL、版本查询和调试输出接口。 */
-#include <intrin.h> /* 使用 MSVC 的只读 SIDT 与 CPUID 编译器内建函数。 */
+#include <ntstrsafe.h> /* 为报告拼接提供带长度的 printf 变体。 */
+#include <intrin.h> /* 使用 MSVC 的 SIDT/LIDT 与 CPUID 编译器内建函数。 */
 
 #define VBS_OBSERVER_SYSTEM_CODEINTEGRITY_INFORMATION 103UL /* WDK 未声明此查询类，使用微软公开的编号。 */
 #define VBS_OBSERVER_HVCI_KMCI_ENABLED 0x400UL /* 用公开 CI 位解释回执，而不推断 VBS 运行状态。 */
+#define VBS_OBSERVER_POOL_TAG 'OsbV' /* "VbsO" 小端 ASCII，便于 !poolused 排查残留。 */
+#define VBS_OBSERVER_PF_VECTOR 14UL /* x64 的 #PF 向量号，固定为 14。 */
+#define VBS_OBSERVER_IDT_ENTRY_SIZE 16UL /* x64 IDT 门描述符固定 16 字节。 */
+#define VBS_OBSERVER_REPORT_CHARS 4096UL /* Registry 中保留 4K 字符存放完整报告。 */
+#define VBS_OBSERVER_LINE_CHARS 256UL /* 单行上限；DbgPrintEx 和报告行共用。 */
+
+/* 全局报告缓冲：Phase 中逐行累积，DriverEntry 末尾一次性写入 Registry。 */
+static WCHAR g_VbsObserverReport[VBS_OBSERVER_REPORT_CHARS];
+static ULONG g_VbsObserverReportLength = 0; /* 下一次写入的起始偏移（字符数）。 */
+
+/* 用途：把一行结果同时写到 DbgPrintEx 和报告缓冲，便于内核调试器与 Registry 对账。 */
+static VOID VbsObserverRecord(PCSTR Format, ...)
+{
+    va_list args;
+    CHAR narrow[VBS_OBSERVER_LINE_CHARS];
+    WCHAR wide[VBS_OBSERVER_LINE_CHARS];
+    NTSTATUS cvt;
+    ANSI_STRING asrc;
+    UNICODE_STRING udst;
+    size_t narrowLen = 0;
+    size_t copy;
+
+    va_start(args, Format);
+    (VOID)RtlStringCbVPrintfA(narrow, sizeof(narrow), Format, args);
+    va_end(args);
+    DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "%s", narrow);
+
+    /* 把窄字符行转成宽字符，追加到报告缓冲；缓冲满后丢弃新内容但不越界。 */
+    (VOID)RtlStringCbLengthA(narrow, sizeof(narrow), &narrowLen);
+    RtlInitAnsiString(&asrc, narrow);
+    udst.Buffer = wide;
+    udst.MaximumLength = sizeof(wide);
+    udst.Length = 0;
+    cvt = RtlAnsiStringToUnicodeString(&udst, &asrc, FALSE);
+    if (!NT_SUCCESS(cvt)) { return; }
+    copy = udst.Length / sizeof(WCHAR);
+    if (g_VbsObserverReportLength + copy + 1 >= VBS_OBSERVER_REPORT_CHARS) { return; }
+    RtlCopyMemory(&g_VbsObserverReport[g_VbsObserverReportLength], wide, copy * sizeof(WCHAR));
+    g_VbsObserverReportLength += (ULONG)copy;
+    g_VbsObserverReport[g_VbsObserverReportLength] = L'\0';
+    UNREFERENCED_PARAMETER(narrowLen);
+}
+
+/* 用途：把报告缓冲作为 REG_SZ 写到 HKLM\Software\VbsVtl0Observer\LastRun。 */
+static VOID VbsObserverFlushToRegistry(VOID)
+{
+    UNICODE_STRING keyPath;
+    OBJECT_ATTRIBUTES oa;
+    HANDLE hKey = NULL;
+    NTSTATUS st;
+    UNICODE_STRING valueName;
+    ULONG byteCount;
+
+    RtlInitUnicodeString(&keyPath, L"\\Registry\\Machine\\Software\\VbsVtl0Observer");
+    InitializeObjectAttributes(&oa, &keyPath, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
+    st = ZwCreateKey(&hKey, KEY_WRITE, &oa, 0, NULL, REG_OPTION_NON_VOLATILE, NULL);
+    if (!NT_SUCCESS(st)) { return; }
+
+    RtlInitUnicodeString(&valueName, L"LastRun");
+    byteCount = (g_VbsObserverReportLength + 1) * sizeof(WCHAR); /* 含结尾 NUL。 */
+    (VOID)ZwSetValueKey(hKey, &valueName, 0, REG_SZ, g_VbsObserverReport, byteCount);
+    (VOID)ZwClose(hKey);
+}
 
 typedef struct _VBS_OBSERVER_CODEINTEGRITY_INFORMATION
 {
@@ -37,9 +110,33 @@ typedef struct _VBS_OBSERVER_IDTR /* 保存 IDTR 的可见限长和基址，不�
     USHORT Limit; /* 保存 IDT 的字节限长。 */
     ULONG64 Base; /* 保存 IDT 的 64 位线性基址。 */
 } VBS_OBSERVER_IDTR; /* 定义仅用于本次栈上观测的类型。 */
+
+typedef struct _VBS_OBSERVER_IDT_ENTRY /* x64 门描述符按硬件布局解包。 */
+{
+    USHORT OffsetLow;   /* 处理器地址的低 16 位，CPU 用它拼回完整 RIP。 */
+    USHORT Selector;    /* 处理器用来加载 CS，不在本阶段改动。 */
+    UCHAR  IstReserved; /* 低 3 位为 IST 栈索引，高 5 位保留必须为零。 */
+    UCHAR  TypeAttr;    /* 低 4 位 Type、位 4 零、位 5-6 DPL、位 7 Present。 */
+    USHORT OffsetMid;   /* 处理器地址的 16-31 位。 */
+    ULONG  OffsetHigh;  /* 处理器地址的 32-63 位。 */
+    ULONG  Reserved;    /* 保留位，拷贝时逐字节保持原值。 */
+} VBS_OBSERVER_IDT_ENTRY;
 #pragma pack(pop) /* 恢复其余类型的默认对齐。 */
 
 C_ASSERT(sizeof(VBS_OBSERVER_IDTR) == 10); /* 编译期检查 SIDT 输出缓冲区尺寸。 */
+C_ASSERT(sizeof(VBS_OBSERVER_IDT_ENTRY) == VBS_OBSERVER_IDT_ENTRY_SIZE); /* 门描述符尺寸由硬件决定。 */
+
+/*
+ * 共享状态：计数桩原子增量 g_VbsPfCounter，并把控制转发给 g_VbsOriginalPfHandler。
+ * 两者都在驱动的非分页 .data 节中；lock inc 要求地址非分页且可写，jmp [mem]
+ * 要求内存可读。__declspec(align(16)) 让读/写不跨越缓存行，减少同一 Load/Store
+ * 被拆成两次总线事务的可能性。
+ */
+__declspec(align(16)) volatile LONG64 g_VbsPfCounter = 0;
+__declspec(align(16)) volatile PVOID g_VbsOriginalPfHandler = NULL;
+
+/* 计数桩定义于 VbsVtl0Stub.asm；此处仅取其地址填入 IDT 项，不直接从 C 调用。 */
+extern void VbsPfCountingStub(void);
 
 DRIVER_INITIALIZE DriverEntry; /* 声明系统加载入口并保留 WDK 的调用约定。 */
 DRIVER_UNLOAD VbsObserverUnload; /* 声明无资源需要清理的卸载入口。 */
@@ -51,11 +148,28 @@ VOID VbsObserverUnload(PDRIVER_OBJECT DriverObject)
     UNREFERENCED_PARAMETER(DriverObject); /* 明确该观察器没有设备或资源要撤销。 */
 }
 
+/* 用途：拼接门描述符的三段偏移，还原 64 位处理器地址，不解引用该地址。 */
+static ULONG64 VbsReadIdtEntryHandler(const VBS_OBSERVER_IDT_ENTRY* Entry)
+{
+    return ((ULONG64)Entry->OffsetLow) |
+           (((ULONG64)Entry->OffsetMid) << 16) |
+           (((ULONG64)Entry->OffsetHigh) << 32);
+}
+
+/* 用途：把 64 位处理器地址分拆写回门描述符的三段偏移，保留其它字段原值。 */
+static VOID VbsWriteIdtEntryHandler(VBS_OBSERVER_IDT_ENTRY* Entry, ULONG64 Address)
+{
+    Entry->OffsetLow  = (USHORT)(Address & 0xFFFFULL);
+    Entry->OffsetMid  = (USHORT)((Address >> 16) & 0xFFFFULL);
+    Entry->OffsetHigh = (ULONG)((Address >> 32) & 0xFFFFFFFFULL);
+}
+
 /*
- * 用途：在 DriverEntry 的 PASSIVE_LEVEL 上下文完成一次只读快照并输出结果。
- * 输入：系统提供的驱动对象和注册表路径；输出：快照的 NTSTATUS。
- * 仅在两次 SIDT 的短区间提升 IRQL，保证线程不迁移；所有输出在恢复后进行。
- * finally 只处理正常退出或可展开的异常，不保证从系统 bugcheck 中恢复。
+ * 用途：在 DriverEntry 的 PASSIVE_LEVEL 上下文完成四阶段测量并输出结果。
+ * 输入：系统提供的驱动对象和注册表路径；输出：Phase A 快照的 NTSTATUS。
+ * Phase B/C/D 的失败不改变返回值（否则 sc start 会把观察数据当成错误丢弃）。
+ * 所有涉及 LIDT/SIDT 的区间都在 DISPATCH_LEVEL 下执行，且已通过亲和性
+ * 固定到同一 CPU；#PF 触发在 PASSIVE_LEVEL 下执行以便 __except 正常展开。
  */
 _Use_decl_annotations_
 NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath)
@@ -76,6 +190,7 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath)
     ULONG hypervisorPresent; /* 仅表示 CPUID 通告存在 hypervisor，不表示 VBS。 */
     BOOLEAN sameProcessor; /* 比较两个处理器身份字段，不使用含填充的结构比较。 */
     BOOLEAN sameIdtr; /* 比较两次可见 IDTR 的基址和限长。 */
+    BOOLEAN phaseAComplete; /* Phase A 任一子查询失败都降级为 PARTIAL。 */
 
     UNREFERENCED_PARAMETER(RegistryPath); /* 不读取或修改任何服务注册表配置。 */
     DriverObject->DriverUnload = VbsObserverUnload; /* 注册标准卸载回调，不安装异常钩子。 */
@@ -121,36 +236,37 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath)
         processorBefore.Number == processorAfter.Number); /* 检查重复读取的 CPU 身份。 */
     sameIdtr = (original.Base == repeated.Base &&
         original.Limit == repeated.Limit); /* 检查未更改 IDTR 时的同值预期。 */
+    phaseAComplete = NT_SUCCESS(versionStatus) && NT_SUCCESS(ciStatus) && NT_SUCCESS(sampleStatus);
 
-    DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL,
+    VbsObserverRecord(
         "[VbsObserver] OS_STATUS=0x%08lX OS=%lu.%lu build=%lu HYPERVISOR_PRESENT=%lu\n",
         (ULONG)versionStatus, version.dwMajorVersion, version.dwMinorVersion,
         version.dwBuildNumber, hypervisorPresent); /* 在恢复 IRQL 后输出环境快照。 */
     if (hypervisorPresent != 0UL) /* 供应商字符串只是 CPUID 自报值。 */
     {
-        DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL,
+        VbsObserverRecord(
             "[VbsObserver] HYPERVISOR_VENDOR=%s MAX_LEAF=0x%08X\n",
             hypervisorVendor, (unsigned int)hypervisorInfo[0]); /* 明确来源于 leaf 0x40000000。 */
     }
     else /* 没有相应的自报字段时保留未知状态。 */
     {
-        DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL,
+        VbsObserverRecord(
             "[VbsObserver] HYPERVISOR_VENDOR=NOT_MEASURED\n"); /* 不编造供应商身份。 */
     }
     if (NT_SUCCESS(ciStatus)) /* 只在成功回执下解释 0x400。 */
     {
-        DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL,
+        VbsObserverRecord(
             "[VbsObserver] CI_QUERY_STATUS=0x%08lX CODE_INTEGRITY_OPTIONS=0x%08lX HVCI_KMCI_FLAG=%u\n",
             (ULONG)ciStatus, ciInformation.CodeIntegrityOptions,
             (unsigned int)((ciInformation.CodeIntegrityOptions & VBS_OBSERVER_HVCI_KMCI_ENABLED) != 0UL)); /* 保留原始掩码供复核。 */
     }
     else /* 查询失败仍继续剩余只读观察。 */
     {
-        DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL,
+        VbsObserverRecord(
             "[VbsObserver] CI_QUERY_STATUS=0x%08lX CODE_INTEGRITY_OPTIONS=NOT_MEASURED HVCI_KMCI_FLAG=NOT_MEASURED\n",
             (ULONG)ciStatus); /* 保留错误码，而不把失败折叠成假阴性。 */
     }
-    DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL,
+    VbsObserverRecord(
         "[VbsObserver] SAMPLE_STATUS=0x%08lX CPU_BEFORE=%u:%u CPU_AFTER=%u:%u\n",
         (ULONG)sampleStatus, (unsigned int)processorBefore.Group,
         (unsigned int)processorBefore.Number, (unsigned int)processorAfter.Group,
@@ -158,25 +274,267 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath)
 
     if (NT_SUCCESS(sampleStatus)) /* 仅在完整采集成功后判断重复读数，不把零值当证据。 */
     {
-        DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL,
+        VbsObserverRecord(
             "[VbsObserver] ORIGINAL_IDT=%p LIMIT=0x%04X REPEAT_IDT=%p LIMIT=0x%04X\n",
             (PVOID)(ULONG_PTR)original.Base, (unsigned int)original.Limit,
             (PVOID)(ULONG_PTR)repeated.Base, (unsigned int)repeated.Limit); /* 输出两次可见 IDTR。 */
-        DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL,
+        VbsObserverRecord(
             "[VbsObserver] EXPECT_SAME_CPU=1 MATCH=%u EXPECT_SAME_IDTR=1 MATCH=%u\n",
             (unsigned int)sameProcessor, (unsigned int)sameIdtr); /* 只检验重复快照的稳定性。 */
     }
 
-    DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL,
-        "[VbsObserver] VBS_RUNTIME=NOT_MEASURED LIDT=NOT_MEASURED "
-        "PF_DELIVERY=NOT_MEASURED VMCS=NOT_MEASURED VM_EXITS=NOT_MEASURED\n"); /* 明确证据边界。 */
-    DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL,
+    VbsObserverRecord(
         "[VbsObserver] PHASE_A=%s\n",
-        (NT_SUCCESS(versionStatus) && NT_SUCCESS(ciStatus) && NT_SUCCESS(sampleStatus))
-        ? "SNAPSHOT_COMPLETE" : "PARTIAL"); /* 任一查询失败都不宣称完整。 */
-    DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL,
-        "[VbsObserver] PHASE_B=NOT_MEASURED PHASE_C=NOT_MEASURED\n"); /* 不把只读观察伪装成指令或故障实测。 */
-    DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL,
-        "[VbsObserver] === INCOMPLETE ===\n"); /* 明确未执行要求中的改变 IDT 和页故障阶段。 */
-    return sampleStatus; /* 无资源需回滚；让系统获得真实的快照状态。 */
+        phaseAComplete ? "SNAPSHOT_COMPLETE" : "PARTIAL"); /* 任一查询失败都不宣称完整。 */
+
+    /* -------------------------------------------------------------------- *
+     * Phase B：在固定的当前 CPU 上尝试 LIDT，立即 SIDT 回读判断是否生效。
+     * 只有 Phase A 的 SIDT 本身成功才有参考基址可以回退；否则跳过 B/C/D。
+     * -------------------------------------------------------------------- */
+    if (!NT_SUCCESS(sampleStatus))
+    {
+        VbsObserverRecord(
+            "[VbsObserver] PHASE_B=NOT_TESTED PHASE_C=NOT_TESTED PHASE_D=NOT_TESTED\n");
+        VbsObserverRecord(
+            "[VbsObserver] === INCOMPLETE ===\n");
+        VbsObserverFlushToRegistry();
+        return sampleStatus;
+    }
+
+    /*
+     * 固定到当前 CPU：Ex 版本只处理当前处理器组，与我们的单 CPU 测量目标匹配；
+     * 保存返回值用于 KeRevertToUserGroupAffinityThreadEx 的配对调用。
+     */
+    PROCESSOR_NUMBER currentProc = { 0 };
+    (VOID)KeGetCurrentProcessorNumberEx(&currentProc);
+    GROUP_AFFINITY targetAffinity = { 0 };
+    GROUP_AFFINITY savedAffinity = { 0 };
+    targetAffinity.Group = currentProc.Group;
+    targetAffinity.Mask = ((KAFFINITY)1) << currentProc.Number;
+    KeSetSystemGroupAffinityThread(&targetAffinity, &savedAffinity);
+
+    /*
+     * 本阶段的本地变量集中声明：MSVC 允许混合声明，但集中声明让 __try 的
+     * 变量作用域更清晰，便于 Phase D 的清理用同一组句柄。
+     */
+    PVOID idtCopy = NULL; /* NonPagedPoolNx 分配的 IDT 副本首地址。 */
+    SIZE_T idtBytes = (SIZE_T)original.Limit + 1; /* IDTR.Limit 的语义是"最后一个合法字节的偏移"。 */
+    VBS_OBSERVER_IDTR postLidt = { 0 }; /* LIDT 之后的 SIDT 回读。 */
+    VBS_OBSERVER_IDTR postRestore = { 0 }; /* 还原后的 SIDT 回读。 */
+    NTSTATUS lidtStatus = STATUS_SUCCESS; /* LIDT 自身是否抛出可捕获异常。 */
+    NTSTATUS restoreStatus = STATUS_SUCCESS; /* 还原时是否抛出可捕获异常。 */
+    NTSTATUS pfStatus = STATUS_UNSUCCESSFUL; /* Phase C 读取非法地址的异常码。 */
+    BOOLEAN lidtInstalled = FALSE; /* LIDT 后 SIDT 回读的新基址是否等于我们指定的基址。 */
+    BOOLEAN lidtAttempted = FALSE; /* 是否真的执行了 __lidt（分配失败则不执行）。 */
+    LONG64 counterSnapshot = 0; /* Phase C 结束后原子读到的计数器值。 */
+    ULONG64 originalPfHandlerAddress = 0; /* 从 IDT 第 14 项提取的原始处理器地址，仅用于日志。 */
+    VBS_OBSERVER_IDT_ENTRY* pfEntry = NULL; /* IDT 副本中的第 14 项，便于两次写入。 */
+
+    idtCopy = ExAllocatePool2(POOL_FLAG_NON_PAGED, idtBytes, VBS_OBSERVER_POOL_TAG);
+    if (idtCopy == NULL)
+    {
+        VbsObserverRecord(
+            "[VbsObserver] PHASE_B=ALLOC_FAILED idt_bytes=%Iu\n", idtBytes);
+        VbsObserverRecord(
+            "[VbsObserver] PHASE_C=NOT_TESTED PHASE_D=NOT_TESTED\n");
+        KeRevertToUserGroupAffinityThread(&savedAffinity);
+        VbsObserverRecord(
+            "[VbsObserver] === INCOMPLETE ===\n");
+        VbsObserverFlushToRegistry();
+        return sampleStatus;
+    }
+
+    /*
+     * 从原 IDT 拷贝 Limit+1 字节到 NonPagedPoolNx；IDT 由硬件以数据方式读取，
+     * 不需要可执行；修改 pfEntry 后基本结构仍与原 IDT 等价，所有未修改向量
+     * 继续走原 Windows 处理器。
+     */
+    RtlCopyMemory(idtCopy, (PVOID)(ULONG_PTR)original.Base, idtBytes);
+    pfEntry = (VBS_OBSERVER_IDT_ENTRY*)((UCHAR*)idtCopy + VBS_OBSERVER_PF_VECTOR * VBS_OBSERVER_IDT_ENTRY_SIZE);
+    originalPfHandlerAddress = VbsReadIdtEntryHandler(pfEntry);
+
+    /*
+     * 预先清零计数器并把原处理器地址发布到全局；这两处写入必须在 LIDT 之前
+     * 完成且 lock 之前的 store 要对其它逻辑处理器可见，否则一旦 LIDT 立刻
+     * 生效，桩的 jmp [g_VbsOriginalPfHandler] 可能读到 NULL 跳进 0 地址。
+     */
+    (VOID)InterlockedExchange64(&g_VbsPfCounter, 0);
+    (VOID)InterlockedExchangePointer((PVOID volatile*)&g_VbsOriginalPfHandler,
+        (PVOID)(ULONG_PTR)originalPfHandlerAddress);
+
+    /*
+     * 把 IDT 副本第 14 项的处理器地址改到计数桩，Selector/IST/TypeAttr/Reserved
+     * 都从原项继承。只有 Offset 三段被改写。
+     */
+    VbsWriteIdtEntryHandler(pfEntry, (ULONG64)(ULONG_PTR)&VbsPfCountingStub);
+
+    VBS_OBSERVER_IDTR newIdtr;
+    newIdtr.Limit = original.Limit; /* 使用相同 Limit，意味着向量数量与原 IDT 一致。 */
+    newIdtr.Base = (ULONG64)(ULONG_PTR)idtCopy;
+
+    __try
+    {
+        KeRaiseIrql(DISPATCH_LEVEL, &previousIrql); /* 阻止调度和 DPC 排队中间插入。 */
+        __try
+        {
+            __lidt(&newIdtr); /* 期望改变 IDTR；若 Hyper-V 拒绝则此处抛异常或静默吞下。 */
+            lidtAttempted = TRUE;
+            __sidt(&postLidt); /* 立即回读 IDTR；基址未变即视为"被静默吞下"。 */
+        }
+        __finally
+        {
+            KeLowerIrql(previousIrql);
+        }
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        lidtStatus = GetExceptionCode();
+    }
+
+    lidtInstalled = NT_SUCCESS(lidtStatus) &&
+                    lidtAttempted &&
+                    postLidt.Base == newIdtr.Base &&
+                    postLidt.Limit == newIdtr.Limit;
+
+    if (!NT_SUCCESS(lidtStatus))
+    {
+        VbsObserverRecord(
+            "[VbsObserver] PHASE_B=LIDT_EXCEPTION status=0x%08lX requested_base=%p\n",
+            (ULONG)lidtStatus, (PVOID)(ULONG_PTR)newIdtr.Base);
+    }
+    else if (lidtInstalled)
+    {
+        VbsObserverRecord(
+            "[VbsObserver] PHASE_B=LIDT_SUCCEEDED new_base=%p new_limit=0x%04X original_pf_handler=%p stub=%p\n",
+            (PVOID)(ULONG_PTR)postLidt.Base, (unsigned int)postLidt.Limit,
+            (PVOID)(ULONG_PTR)originalPfHandlerAddress,
+            (PVOID)(ULONG_PTR)&VbsPfCountingStub);
+        VbsObserverRecord(
+            "[VbsObserver] PHASE_B_NOTE=SIDT_change_may_reflect_hypervisor_emulation\n");
+    }
+    else
+    {
+        VbsObserverRecord(
+            "[VbsObserver] PHASE_B=LIDT_SILENTLY_DROPPED requested_base=%p observed_base=%p observed_limit=0x%04X\n",
+            (PVOID)(ULONG_PTR)newIdtr.Base,
+            (PVOID)(ULONG_PTR)postLidt.Base, (unsigned int)postLidt.Limit);
+    }
+
+    /* -------------------------------------------------------------------- *
+     * Phase C：只有 LIDT 真正改变了 IDTR 基址才有必要触发 #PF；否则跳过并
+     * 直接进入 Phase D 的还原。即便桩没装上，Phase D 的 LIDT 回退也要跑，
+     * 以保证我们不留下任何被改过的 IDTR。
+     * -------------------------------------------------------------------- */
+    if (lidtInstalled)
+    {
+        /*
+         * 读取用户态非法地址（null 页里的任意位置）从内核态会 #PF；KiPageFault
+         * 会检查到用户地址被内核读、CPL=0、有 __try 帧，再派发为访问冲突。
+         * 这是公开的 Windows 行为，不是未定义行为。
+         */
+        __try
+        {
+            volatile UCHAR dummy = *(volatile UCHAR*)(ULONG_PTR)1;
+            UNREFERENCED_PARAMETER(dummy);
+            pfStatus = STATUS_SUCCESS; /* 若没有抛异常，这一行会设置为"没抛"信号。 */
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            pfStatus = GetExceptionCode();
+        }
+
+        counterSnapshot = InterlockedCompareExchange64(&g_VbsPfCounter, 0, 0);
+
+        if (counterSnapshot > 0)
+        {
+            VbsObserverRecord(
+                "[VbsObserver] PHASE_C=PF_COUNTER_INCREMENTED counter=%I64d pf_status=0x%08lX\n",
+                counterSnapshot, (ULONG)pfStatus);
+            VbsObserverRecord(
+                "[VbsObserver] PHASE_C_NOTE=increment_may_follow_hypervisor_reinjection\n");
+        }
+        else if (pfStatus == STATUS_ACCESS_VIOLATION)
+        {
+            VbsObserverRecord(
+                "[VbsObserver] PHASE_C=PF_COUNTER_ZERO pf_status=0x%08lX\n", (ULONG)pfStatus);
+            VbsObserverRecord(
+                "[VbsObserver] PHASE_C_NOTE=exception_dispatched_without_stub_increment\n");
+        }
+        else
+        {
+            VbsObserverRecord(
+                "[VbsObserver] PHASE_C=PF_NOT_CAUGHT pf_status=0x%08lX counter=%I64d\n",
+                (ULONG)pfStatus, counterSnapshot);
+        }
+    }
+    else
+    {
+        VbsObserverRecord(
+            "[VbsObserver] PHASE_C=NOT_TESTED reason=lidt_not_installed\n");
+    }
+
+    /* -------------------------------------------------------------------- *
+     * Phase D：无论 B/C 结果如何都要还原 IDTR 并释放拷贝。只有 LIDT 真的
+     * 改过基址才有必要再 LIDT 一次；但清理分配和亲和性是无条件的。
+     * -------------------------------------------------------------------- */
+    if (lidtInstalled)
+    {
+        __try
+        {
+            KeRaiseIrql(DISPATCH_LEVEL, &previousIrql);
+            __try
+            {
+                __lidt(&original); /* 回退到 Phase A 记录的原始 IDTR。 */
+                __sidt(&postRestore); /* 再读一次确认 IDTR 已回到原值。 */
+            }
+            __finally
+            {
+                KeLowerIrql(previousIrql);
+            }
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            restoreStatus = GetExceptionCode();
+        }
+
+        if (!NT_SUCCESS(restoreStatus))
+        {
+            VbsObserverRecord(
+                "[VbsObserver] PHASE_D=RESTORE_EXCEPTION status=0x%08lX\n", (ULONG)restoreStatus);
+        }
+        else if (postRestore.Base == original.Base && postRestore.Limit == original.Limit)
+        {
+            VbsObserverRecord(
+                "[VbsObserver] PHASE_D=RESTORED base=%p limit=0x%04X\n",
+                (PVOID)(ULONG_PTR)postRestore.Base, (unsigned int)postRestore.Limit);
+        }
+        else
+        {
+            VbsObserverRecord(
+                "[VbsObserver] PHASE_D=RESTORE_DIVERGED expected_base=%p observed_base=%p\n",
+                (PVOID)(ULONG_PTR)original.Base, (PVOID)(ULONG_PTR)postRestore.Base);
+        }
+    }
+    else
+    {
+        VbsObserverRecord(
+            "[VbsObserver] PHASE_D=SKIPPED reason=idtr_never_changed\n");
+    }
+
+    /*
+     * 释放前先把全局指针清空：确保一旦有晚到的 #PF 恰好进桩，jmp 不会跳到
+     * 已被释放的内存。桩里的读操作对 NULL 指针跳转会导致 #GP，
+     * 但那比"跳进已释放的 pool 内容"更可诊断。
+     */
+    (VOID)InterlockedExchangePointer((PVOID volatile*)&g_VbsOriginalPfHandler, NULL);
+    ExFreePool(idtCopy);
+    KeRevertToUserGroupAffinityThread(&savedAffinity);
+
+    VbsObserverRecord(
+        "[VbsObserver] === %s ===\n",
+        phaseAComplete && NT_SUCCESS(lidtStatus) && NT_SUCCESS(restoreStatus)
+        ? "COMPLETE" : "INCOMPLETE");
+
+    VbsObserverFlushToRegistry(); /* 把完整报告落盘到 HKLM\\Software\\VbsVtl0Observer\\LastRun。 */
+    return sampleStatus; /* Phase B/C/D 的失败已在日志中展开，不改变 Phase A 的返回值。 */
 }
