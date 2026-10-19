@@ -6,6 +6,7 @@
 #include "UI/DockTabSelectionAnimation.h"
 #include "UI/PageNavigationBridge.h"
 #include "UI/PerfTrace.h"
+#include "UI/UiAnimationGate.h"
 #include "UI/McpLocalBridge.h"
 #include "UI/McpHexCanvasAdapter.h"
 #include "UI/UI_All.h"
@@ -28,6 +29,7 @@
 #include <QTimer>
 #include <QApplication>
 #include <QCoreApplication>
+#include <QCursor>
 #include <QDateTime>
 #include <QCheckBox>
 #include <QDesktopServices>
@@ -1614,7 +1616,7 @@ namespace
         cancelPopupFade(popup);
         BOOL animationsEnabled = TRUE; // 尊重系统减少动画选项。
         SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, &animationsEnabled, 0);
-        if (!animationsEnabled)
+        if (!animationsEnabled || !ks::ui::AreUiAnimationsEnabled())
         {
             return;
         }
@@ -10522,6 +10524,8 @@ void MainWindow::ensureDockContentInitialized(ads::CDockWidget* dockWidget)
         QStringLiteral("正在创建%1页内容").arg(dockTitleText),
         30);
 
+    // 采集：内容构造（各 Dock 的 new）单独计时，用于判断挂载耗时是否集中在页面主体构造。
+    ks::ui::PerfScope constructPerf("perf_dock_construct", dockKey);
     if (dockKey == QStringLiteral("process"))
     {
         if (m_processWidget == nullptr)
@@ -10637,6 +10641,7 @@ void MainWindow::ensureDockContentInitialized(ads::CDockWidget* dockWidget)
             m_bugcheckDiagnosticsEntryRequestedForSession);
         realWidget = m_miscWidget;
     }
+    constructPerf.finish(); // 采集：内容构造阶段结束（尚未做挂载与主题准备）。
     if (realWidget == nullptr)
     {
         kPro.set(progressPid, QStringLiteral("%1页无需加载").arg(dockTitleText).toStdString(), 0, 100.0f);
@@ -10652,6 +10657,8 @@ void MainWindow::ensureDockContentInitialized(ads::CDockWidget* dockWidget)
     // KernelDock 挂载策略：
     // - 没有背景图时保持根控件自绘，避免 ADS 恢复布局后露出黑色父容器；
     // - 有背景图时允许根控件透明，把底图透出来，仅由全局 QSS 保持表格/树/列表可读。
+    // 采集：根容器尺寸策略与根样式块设置单独计时；setStyleSheet 会向整棵子树重抛 StyleChange。
+    ks::ui::PerfScope rootStylePerf("perf_dock_root_style", dockKey);
     realWidget->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     if (isKernelDock)
     {
@@ -10691,6 +10698,7 @@ void MainWindow::ensureDockContentInitialized(ads::CDockWidget* dockWidget)
         dockWidget->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     }
 
+    rootStylePerf.finish(); // 采集：根容器样式设置阶段结束。
     kPro.set(progressPid, QStringLiteral("正在挂载%1页").arg(dockTitleText).toStdString(), 0, 72.0f);
     // 占位页最后一次刷新：挂载真实内容后它就被 takeWidget 摘下并 deleteLater，
     // 因此 100% 那一帧没有意义，不再往上刷。
@@ -10698,6 +10706,8 @@ void MainWindow::ensureDockContentInitialized(ads::CDockWidget* dockWidget)
         dockWidget,
         QStringLiteral("正在挂载%1页").arg(dockTitleText),
         80);
+    // 采集：把真实内容挂到 ADS 父链（摘旧控件、setWidget、页签视觉身份）单独计时。
+    ks::ui::PerfScope attachPerf("perf_dock_attach", dockKey);
     QWidget* oldWidget = dockWidget->takeWidget();
     dockWidget->setWidget(
         realWidget,
@@ -10709,6 +10719,7 @@ void MainWindow::ensureDockContentInitialized(ads::CDockWidget* dockWidget)
     {
         oldWidget->deleteLater();
     }
+    attachPerf.finish(); // 采集：挂载阶段结束（尚未做主题准备与布局整理）。
 
     if (realWidget == m_processWidget)
     {
@@ -10729,6 +10740,8 @@ void MainWindow::ensureDockContentInitialized(ads::CDockWidget* dockWidget)
     {
         return;
     }
+    // 采集：首帧布局整理与局部刷新单独计时。
+    ks::ui::PerfScope layoutPerf("perf_dock_layout", dockKey);
     if (QLayout* contentLayout = realWidget->layout())
     {
         contentLayout->activate();
@@ -10746,6 +10759,7 @@ void MainWindow::ensureDockContentInitialized(ads::CDockWidget* dockWidget)
     realWidget->update();
     dockWidget->update();
     kPro.set(progressPid, QStringLiteral("%1页加载完成").arg(dockTitleText).toStdString(), 0, 100.0f);
+    layoutPerf.finish(); // 采集：布局与刷新阶段结束。
 
     if (realWidget == m_kernelWidget && m_pendingR0DynDataRefresh)
     {
@@ -11480,24 +11494,132 @@ void MainWindow::setupDockLayout()
         }
     }
 
-    // 采集：注册现场上下文（当前聚焦 Dock），并记录 Dock 切换标记，
+    // 采集：注册现场上下文（当前 Dock），并记录 Dock 切换标记，
     // 使停顿记录能标明“卡在哪次切换、哪个 Dock”。
+    // ADS 的 focusedDockWidget() 只有 FocusHighlighting 打开时才有值，
+    // 因此现场提供者按“ADS 焦点 → Qt 焦点祖先 → 当前可见 DockArea”依次回退。
     // 提供者存活期长于窗口本身，必须用 QPointer 兜住已经销毁的主窗口。
     const QPointer<MainWindow> windowGuard(this);
-    ks::ui::SetPerfTraceContextProvider([windowGuard]() -> QString
+    const QPointer<ads::CDockManager> dockManagerGuard(m_pDockManager);
+    const auto describePerfDock = [](ads::CDockWidget* dockWidget) -> QString
+    {
+        if (dockWidget == nullptr)
         {
-            if (windowGuard == nullptr || windowGuard->m_pDockManager == nullptr)
+            return QString();
+        }
+        QString description = dockWidget->windowTitle();
+        if (description.isEmpty())
+        {
+            description = dockWidget->property("ks_lazy_key").toString();
+        }
+        if (!dockWidget->objectName().isEmpty())
+        {
+            if (!description.isEmpty())
+            {
+                description += QLatin1Char(' ');
+            }
+            description += QLatin1Char('[') + dockWidget->objectName() + QLatin1Char(']');
+        }
+        return description;
+    };
+    ks::ui::SetPerfTraceContextProvider([windowGuard, dockManagerGuard]() -> QString
+        {
+            if (windowGuard == nullptr || dockManagerGuard == nullptr)
             {
                 return QString();
             }
-            ads::CDockWidget* focusedDock = windowGuard->m_pDockManager->focusedDockWidget();
-            return focusedDock == nullptr ? QString() : focusedDock->windowTitle();
+            ads::CDockWidget* currentDock = dockManagerGuard->focusedDockWidget();
+            if (currentDock == nullptr)
+            {
+                for (QWidget* widget = QApplication::focusWidget(); widget != nullptr;
+                    widget = widget->parentWidget())
+                {
+                    if (auto* dock = qobject_cast<ads::CDockWidget*>(widget))
+                    {
+                        currentDock = dock;
+                        break;
+                    }
+                }
+            }
+            if (currentDock == nullptr)
+            {
+                for (QWidget* widget = QApplication::widgetAt(QCursor::pos()); widget != nullptr;
+                    widget = widget->parentWidget())
+                {
+                    if (auto* dock = qobject_cast<ads::CDockWidget*>(widget))
+                    {
+                        currentDock = dock;
+                        break;
+                    }
+                }
+            }
+            if (currentDock == nullptr)
+            {
+                const auto areas = dockManagerGuard->findChildren<ads::CDockAreaWidget*>();
+                for (ads::CDockAreaWidget* area : areas)
+                {
+                    if (area != nullptr && area->isVisible() && area->currentDockWidget() != nullptr)
+                    {
+                        currentDock = area->currentDockWidget();
+                        break;
+                    }
+                }
+            }
+            if (currentDock == nullptr)
+            {
+                return QString();
+            }
+            QString description = currentDock->windowTitle();
+            if (description.isEmpty())
+            {
+                description = currentDock->property("ks_lazy_key").toString();
+            }
+            if (!currentDock->objectName().isEmpty())
+            {
+                if (!description.isEmpty())
+                {
+                    description += QLatin1Char(' ');
+                }
+                description += QLatin1Char('[') + currentDock->objectName() + QLatin1Char(']');
+            }
+            return description;
         });
-    connect(m_pDockManager, &ads::CDockManager::focusedDockWidgetChanged, this,
-        [](ads::CDockWidget* /*previousDock*/, ads::CDockWidget* currentDock)
+
+    const auto connectPerfDockArea = [describePerfDock](ads::CDockAreaWidget* area)
+    {
+        if (area == nullptr || area->property("ksword_perf_trace_connected").toBool())
+        {
+            return;
+        }
+        area->setProperty("ksword_perf_trace_connected", true);
+        QObject::connect(area, &ads::CDockAreaWidget::currentChanged, area,
+            [area, describePerfDock](int)
+            {
+                ks::ui::RecordPerfMark("perf_dock_focus",
+                    describePerfDock(area->currentDockWidget()));
+            });
+        if (area->currentDockWidget() != nullptr)
         {
             ks::ui::RecordPerfMark("perf_dock_focus",
-                currentDock == nullptr ? QString() : currentDock->windowTitle());
+                describePerfDock(area->currentDockWidget()));
+        }
+    };
+    for (ads::CDockAreaWidget* area : m_pDockManager->findChildren<ads::CDockAreaWidget*>())
+    {
+        connectPerfDockArea(area);
+    }
+    connect(m_pDockManager, &ads::CDockManager::dockAreaCreated, this,
+        [connectPerfDockArea](ads::CDockAreaWidget* area)
+        {
+            connectPerfDockArea(area);
+        });
+    connect(m_pDockManager, &ads::CDockManager::focusedDockWidgetChanged, this,
+        [describePerfDock](ads::CDockWidget* /*previousDock*/, ads::CDockWidget* currentDock)
+        {
+            if (currentDock != nullptr)
+            {
+                ks::ui::RecordPerfMark("perf_dock_focus", describePerfDock(currentDock));
+            }
         });
 
     const bool mainWindowUpdatesWereEnabled = updatesEnabled();
@@ -12433,6 +12555,10 @@ void MainWindow::applyAppearanceSettings(
     const bool smoothScrollingChanged =
         isInitialAppearanceApply
         || previousSettings.smoothScrollingEnabled != settings.smoothScrollingEnabled;
+    // 动画总开关变化也要重算平滑滚动，因为总开关关闭时滚轮必须直接跳转。
+    const bool uiAnimationsChanged =
+        isInitialAppearanceApply
+        || previousSettings.uiAnimationsEnabled != settings.uiAnimationsEnabled;
     const bool topMostChanged =
         isInitialAppearanceApply
         || previousSettings.startupTopMostEnabled != settings.startupTopMostEnabled;
@@ -12457,9 +12583,12 @@ void MainWindow::applyAppearanceSettings(
         // 保存主题/通知配置不改变详情布局，避免再次遍历并重排全部已登记的详情面板。
         ks::ui::DetailLayoutRegistry::applyGlobalScheme(settings.detailDisplayScheme);
     }
-    if (smoothScrollingChanged)
+    ks::ui::SetGlobalUiAnimationsEnabled(settings.uiAnimationsEnabled);
+    if (smoothScrollingChanged || uiAnimationsChanged)
     {
-        ks::ui::SetGlobalSmoothScrollingEnabled(settings.smoothScrollingEnabled);
+        // 总开关覆盖平滑滚动：关闭界面动画时不做逐帧缓动。
+        ks::ui::SetGlobalSmoothScrollingEnabled(
+            settings.smoothScrollingEnabled && settings.uiAnimationsEnabled);
     }
     RuntimeAppearanceProgress runtimeProgress(runtimeProgressRequired);
 

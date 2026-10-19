@@ -12,10 +12,12 @@
 #include "../UI/PrimaryPageStyle.h"
 #include "../UI/FlatButtonTheme.h"
 #include "../UI/ParameterWorkspace.h"
+#include "../UI/PerfTrace.h"
 #include <QFormLayout>
 #include "../Internationalization/LanguageManager.h"
 
 #include <QCompleter> // 进程下拉的包含式补全需要完整类型。
+#include <QSignalBlocker>
 
 #include <functional>
 #include <utility>
@@ -361,16 +363,22 @@ void MemoryDock::initializeTabs()
     resultLayout->addWidget(m_tabWidget, 1);
     m_rootLayout->addWidget(resultGroup, 1);
 
-    initializeProcessModuleTab();
-    initializeMemoryRegionTab();
-    initializeMemorySearchTab();
-    initializeKernelExecutableMemoryScanTab();
-    initializeKernelMemoryEvidenceTab();
-    initializeProcessPteTranslateTab();
-    initializeProcessMemoryEvidenceTab();
-    initializeSystemMemoryAuditTab();
-    initializeTamperDetectionTab();
-    initializeDdmaTab();
+    // 采集：MemoryDock 首开构造拆到每个内部页，区分“哪一页构造慢”和外层挂载/主题开销。
+    const auto initializeMeasuredTab = [this](const char* tabKey, auto initializer)
+    {
+        ks::ui::PerfScope tabPerf("perf_memory_tab_construct", QString::fromUtf8(tabKey));
+        (this->*initializer)();
+    };
+    initializeMeasuredTab("process_module", &MemoryDock::initializeProcessModuleTab);
+    initializeMeasuredTab("regions", &MemoryDock::initializeMemoryRegionTab);
+    initializeMeasuredTab("search", &MemoryDock::initializeMemorySearchTab);
+    initializeMeasuredTab("kernel_executable", &MemoryDock::initializeKernelExecutableMemoryScanTab);
+    initializeMeasuredTab("kernel_evidence", &MemoryDock::initializeKernelMemoryEvidenceTab);
+    initializeMeasuredTab("process_pte", &MemoryDock::initializeProcessPteTranslateTab);
+    initializeMeasuredTab("process_evidence", &MemoryDock::initializeProcessMemoryEvidenceTab);
+    initializeMeasuredTab("system_audit", &MemoryDock::initializeSystemMemoryAuditTab);
+    initializeMeasuredTab("tamper_detection", &MemoryDock::initializeTamperDetectionTab);
+    initializeMeasuredTab("ddma", &MemoryDock::initializeDdmaTab);
 
     // 原有 10 个页签的图标集中在这里设置：分散到各构建函数里会漏，也不好统一调整语义。
     // 下标顺序与上面的构建顺序严格一一对应。
@@ -394,12 +402,15 @@ void MemoryDock::initializeTabs()
 
     // 内存工作台页签必须在图标循环之后插入：上面的图标按下标对应原有页签顺序，
     // 先插会让后面所有页签的图标整体错位。它自己的图标与语言键在 initializeWorkbenchTab 里设置。
-    initializeWorkbenchTab();
+    initializeMeasuredTab("workbench", &MemoryDock::initializeWorkbenchTab);
     // 新独立页面也在旧图标循环之后插入，避免改变旧页面的下标图标映射。
-    initializeMemoryDebugTab();
+    initializeMeasuredTab("memory_debug", &MemoryDock::initializeMemoryDebugTab);
 
     // HVCI 绕过实验页：standalone 页面，自管理 showEvent 首刷，不跟随 Dock 附加。
-    m_hvciBypassPage = new ks::misc::HvciBypassPage(m_tabWidget);
+    {
+        ks::ui::PerfScope tabPerf("perf_memory_tab_construct", QStringLiteral("hvci_bypass"));
+        m_hvciBypassPage = new ks::misc::HvciBypassPage(m_tabWidget);
+    }
     m_tabWidget->addTab(m_hvciBypassPage, QStringLiteral("HVCI 绕过"));
     m_tabWidget->setTabIcon(
         m_tabWidget->indexOf(m_hvciBypassPage),
@@ -409,7 +420,10 @@ void MemoryDock::initializeTabs()
         QStringLiteral("memory.tab.hvci_bypass"), QStringLiteral("HVCI 绕过"));
 
     // RXPF 页错误模拟页：standalone 页面，自管理 showEvent 首刷。
-    m_rxpfPage = new ks::misc::RxpfPage(m_tabWidget);
+    {
+        ks::ui::PerfScope tabPerf("perf_memory_tab_construct", QStringLiteral("rxpf"));
+        m_rxpfPage = new ks::misc::RxpfPage(m_tabWidget);
+    }
     m_tabWidget->addTab(m_rxpfPage, QStringLiteral("RXPF 模拟"));
     m_tabWidget->setTabIcon(
         m_tabWidget->indexOf(m_rxpfPage),
@@ -448,17 +462,73 @@ void MemoryDock::initializeTabs()
 
 void MemoryDock::initializeSystemMemoryAuditTab()
 {
-    m_systemMemoryAuditPage = new SystemMemoryAuditPage(m_tabWidget);
-    m_systemMemoryAuditPage->openModuleDetails = [this](const QString& path) {
+    // 系统审计页包含多张表、归因图和 PFN/Hyper-V 子页，首开构造成本明显高于其它
+    // MemoryDock 页面。先挂轻量占位页，首次切入时由 ensureSystemMemoryAuditPage 原位替换。
+    m_systemMemoryAuditPlaceholder = new QWidget(m_tabWidget);
+    m_tabWidget->addTab(m_systemMemoryAuditPlaceholder, QStringLiteral("系统内存审计"));
+    ks::i18n::LanguageManager::instance().bindTab(
+        m_tabWidget,
+        m_systemMemoryAuditPlaceholder,
+        QStringLiteral("memory.tab.system_memory_audit"),
+        QStringLiteral("系统内存审计"));
+}
+
+void MemoryDock::ensureSystemMemoryAuditPage()
+{
+    if (m_systemMemoryAuditPage != nullptr ||
+        m_systemMemoryAuditPlaceholder == nullptr ||
+        m_systemMemoryAuditPageConstructing ||
+        m_tabWidget == nullptr)
+    {
+        return;
+    }
+
+    const int tabIndex = m_tabWidget->indexOf(m_systemMemoryAuditPlaceholder);
+    if (tabIndex < 0)
+    {
+        return;
+    }
+
+    m_systemMemoryAuditPageConstructing = true;
+    const bool wasCurrent = m_tabWidget->currentWidget() == m_systemMemoryAuditPlaceholder;
+    const QString tabText = m_tabWidget->tabText(tabIndex);
+    const QIcon tabIcon = m_tabWidget->tabIcon(tabIndex);
+
+    auto* const page = new SystemMemoryAuditPage(m_tabWidget);
+    page->openModuleDetails = [this](const QString& path) {
         const auto handler = openPoolModuleDetails;
         if (handler) { handler(path); }
     };
-    m_tabWidget->addTab(m_systemMemoryAuditPage, QStringLiteral("系统内存审计"));
+    page->setDdmaSessionProvider(
+        [this]() -> const ksword::memory_backend::DdmaSession& {
+            return currentDdmaSession();
+        });
+
+    {
+        const QSignalBlocker blocker(m_tabWidget);
+        m_tabWidget->removeTab(tabIndex);
+        m_tabWidget->insertTab(tabIndex, page, tabText);
+        m_tabWidget->setTabIcon(tabIndex, tabIcon);
+    }
     ks::i18n::LanguageManager::instance().bindTab(
         m_tabWidget,
-        m_systemMemoryAuditPage,
+        page,
         QStringLiteral("memory.tab.system_memory_audit"),
         QStringLiteral("系统内存审计"));
+
+    QWidget* const placeholder = m_systemMemoryAuditPlaceholder;
+    m_systemMemoryAuditPlaceholder = nullptr;
+    m_systemMemoryAuditPage = page;
+    m_systemMemoryAuditPageConstructing = false;
+    if (placeholder != nullptr)
+    {
+        placeholder->deleteLater();
+    }
+
+    if (wasCurrent)
+    {
+        m_tabWidget->setCurrentIndex(tabIndex);
+    }
 }
 
 void MemoryDock::initializeTamperDetectionTab()

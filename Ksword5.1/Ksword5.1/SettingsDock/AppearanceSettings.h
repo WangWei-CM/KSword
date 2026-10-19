@@ -81,6 +81,8 @@ namespace ks::settings
     // startupWindowScaleFactor：主窗口启动缩放因子（1.0=100%，重启后生效）；
     // startupScaleRecommendPromptDisabled：小屏推荐缩放提示是否不再弹出。
     // unlockerShellContextMenuEnabled：是否启用“系统右键-文件解锁器”菜单（下次启动生效）。
+    // uiAnimationsEnabled：应用内界面动画总开关（滚动缓动、页签切换、菜单弹出、浮动滚动条淡出等）；
+    //   默认启用；关闭后上述过渡立即到位，且覆盖 smoothScrollingEnabled。
     // smoothScrollingEnabled：是否对全局滚动区域启用滚轮缓动；
     // sliderWheelAdjustEnabled：是否允许滚轮调整滑块、下拉框和数值输入框，以及切换标签页；沿用旧配置键，默认关闭。
     // fontFamily：应用界面字体族；空值表示沿用系统默认字体。
@@ -133,6 +135,7 @@ namespace ks::settings
         double startupWindowScaleFactor = 1.0;
         bool startupScaleRecommendPromptDisabled = false;
         bool unlockerShellContextMenuEnabled = false;
+        bool uiAnimationsEnabled = true;
         bool smoothScrollingEnabled = true;
         bool sliderWheelAdjustEnabled = false;
         DetailDisplayScheme detailDisplayScheme = DetailDisplayScheme::BottomCollapsed;

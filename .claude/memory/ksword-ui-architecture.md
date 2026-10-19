@@ -402,3 +402,10 @@ KSword 主程序位于 `Ksword5.1/Ksword5.1`（Qt 6.9.3 Widgets + Qt Advanced Do
 - 范围必须进入 `ComplexReportFilter` 的接受条件，不能只设 tree root：所选根被过滤为无效索引时，视图会意外退回全部根。多词搜索匹配完整规范上下文和显示短标题；清空恢复状态，搜索中换范围清掉旧范围的位置。
 - 原文、字段表与数值增量通知共用规范身份；三列分别提供真实可访问文本。首份数据才选择默认范围，刷新不重新选择类型。可选 toolbarPrefix 合并既有业务刷新与文档工具行，不给普通详情强加额外布局。
 - 验证使用真实主程序与生产目录；已观察正常/799px窄窗约23行字段、深浅主题、单元格复制、类型记忆和原文切换。驱动不可用时只验错误态和静态目录；不能推定实际采样、所有旧详情或DPI/背景矩阵均已通过。证据见 [Issue 223 记录](../../docs/Issue-223-复杂报告子页.md)。
+
+## 性能采集与 Dock 现场（2026-10-18）
+
+- `QApplication` 全局事件过滤器在 `QWidget::event()` 前收到 Paint/LayoutRequest；要测量事件分发后的耗时，应给目标控件投递一次 queued 回调，并以控件属性合并同一轮待测事件，避免逐帧日志和重复计时。当前仅覆盖 `QTableWidget`/`QScrollArea` 及其 viewport/content，记录 `perf_scroll_paint`、`perf_scroll_layout`。
+- ADS 的 `CDockManager::focusedDockWidget()` 受 `FocusHighlighting` 配置控制，关闭时恒为 `nullptr`。性能现场应按 ADS 焦点、Qt 焦点祖先、鼠标所在控件祖先、当前可见 DockArea 的顺序回退；Dock 切页应监听 `CDockAreaWidget::currentChanged`，不能只依赖 `focusedDockWidgetChanged`。
+- 性能 `last` 操作标记必须带单调时钟有效期；滚轮等高频入口可写入短期标记，否则旧页签操作会污染后续停顿归因。编译采集阶段保持 `KSWORD_PERF_TRACE_ENABLED=1`，发布前改回 `0`。
+- 关闭阶段 `QPointer<MainWindow>` 可能在派生类析构期间仍非空，而其 DockManager 子对象已先行销毁；异步性能上下文必须同时捕获 `QPointer<CDockManager>`，并在对象树查询（尤其 `findChildren`）前检查管理器存活，不能只检查宿主窗口。

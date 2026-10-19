@@ -1,5 +1,6 @@
 #include "../Framework.h"
 #include "./DockTabSelectionAnimation.h"
+#include "./UiAnimationGate.h"
 #include "../include/ads/DockAreaTabBar.h"
 #include "../include/ads/DockWidgetTab.h"
 #include "../theme.h"
@@ -29,7 +30,9 @@ namespace ks::ui
         bool clientAnimationsEnabled()
         {
             BOOL enabled = TRUE; // 操作系统返回的客户端动画启用值。
-            return !SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, &enabled, 0) || enabled;
+            // 系统“减少动画”与设置页“界面动画”相互独立，任一关闭即不播放动画。
+            return (!SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, &enabled, 0) || enabled)
+                && ks::ui::AreUiAnimationsEnabled();
         }
 
         // 一栏对应一个控制器，仅负责导航几何；不截图、移动或触发业务内容页。

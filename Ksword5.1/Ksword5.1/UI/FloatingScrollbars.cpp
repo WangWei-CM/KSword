@@ -1,4 +1,5 @@
 #include "./FloatingScrollbars.h"
+#include "./UiAnimationGate.h"
 
 #include "../theme.h"
 
@@ -99,7 +100,17 @@ namespace
                 {
                     m_fade.setStartValue(m_opacity);
                     m_fade.setEndValue(0.0);
-                    m_fade.start();
+                    if (ks::ui::AreUiAnimationsEnabled())
+                    {
+                        m_fade.start();
+                    }
+                    else
+                    {
+                        // 关闭界面动画时直接淡出到位，不做逐帧过渡。
+                        m_opacity = 0.0;
+                        refreshBackdrop();
+                        update();
+                    }
                 }
             });
             connect(&m_fade, &QVariantAnimation::valueChanged, this, [this](const QVariant& value)

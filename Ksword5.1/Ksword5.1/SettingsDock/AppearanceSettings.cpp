@@ -413,6 +413,7 @@ namespace
         defaultSettings.startupWindowScaleFactor = 1.0;
         defaultSettings.startupScaleRecommendPromptDisabled = false;
         defaultSettings.unlockerShellContextMenuEnabled = false;
+        defaultSettings.uiAnimationsEnabled = true;
         defaultSettings.smoothScrollingEnabled = true;
         defaultSettings.sliderWheelAdjustEnabled = false;
         defaultSettings.fontFamily.clear();
@@ -779,6 +780,9 @@ ks::settings::AppearanceSettings ks::settings::loadAppearanceSettings()
     loadedSettings.unlockerShellContextMenuEnabled = rootObject
         .value(QStringLiteral("unlocker_shell_context_menu_enabled"))
         .toBool(loadedSettings.unlockerShellContextMenuEnabled);
+    loadedSettings.uiAnimationsEnabled = rootObject
+        .value(QStringLiteral("ui_animations_enabled"))
+        .toBool(loadedSettings.uiAnimationsEnabled);
     loadedSettings.smoothScrollingEnabled = rootObject
         .value(QStringLiteral("smooth_scrolling_enabled"))
         .toBool(loadedSettings.smoothScrollingEnabled);
@@ -991,6 +995,9 @@ bool ks::settings::saveAppearanceSettings(const AppearanceSettings& settings, QS
     rootObject.insert(
         QStringLiteral("unlocker_shell_context_menu_enabled"),
         settings.unlockerShellContextMenuEnabled);
+    rootObject.insert(
+        QStringLiteral("ui_animations_enabled"),
+        settings.uiAnimationsEnabled);
     rootObject.insert(
         QStringLiteral("smooth_scrolling_enabled"),
         settings.smoothScrollingEnabled);

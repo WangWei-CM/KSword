@@ -95,7 +95,7 @@ void MemoryDock::initializeConnections()
         // 刷新动作按当前页签的"页面控件"路由（而不是数字下标），减少无关页面刷新开销；
         // 这样日后在页签中间插入新页，刷新钮也不会错位到相邻的页面。
         // currentPage：当前选中页签对应的页面控件；没有任何页签时为空指针。
-        QWidget* const currentPage = m_tabWidget->currentWidget();
+        QWidget* currentPage = m_tabWidget->currentWidget();
         // tabIndex：当前页签下标，只用于下面的日志，不参与路由判断。
         const int tabIndex = m_tabWidget->currentIndex();
         kLogEvent refreshClickEvent;
@@ -109,6 +109,11 @@ void MemoryDock::initializeConnections()
         if (currentPage == nullptr)
         {
             return;
+        }
+        if (currentPage == m_systemMemoryAuditPlaceholder)
+        {
+            ensureSystemMemoryAuditPage();
+            currentPage = m_tabWidget->currentWidget();
         }
         if (currentPage == m_systemMemoryAuditPage)
         {
@@ -173,6 +178,10 @@ void MemoryDock::initializeConnections()
         });
 
     connect(m_tabWidget, &QTabWidget::currentChanged, this, [this](int) {
+        if (m_tabWidget->currentWidget() == m_systemMemoryAuditPlaceholder)
+        {
+            ensureSystemMemoryAuditPage();
+        }
         if (m_tabWidget->currentWidget() == m_systemMemoryAuditPage)
         {
             m_systemMemoryAuditPage->refreshSnapshot();

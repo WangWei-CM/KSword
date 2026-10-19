@@ -1694,6 +1694,9 @@
     <ClCompile Include="UI\PerfTrace.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="UI\UiAnimationGate.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="UI\PageTabFocusStyle.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -2929,6 +2932,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="UI\PerfTrace.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="UI\UiAnimationGate.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="UI\PageTabFocusStyle.h">

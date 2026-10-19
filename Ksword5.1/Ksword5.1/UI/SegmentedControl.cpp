@@ -1,5 +1,6 @@
 #include "../Framework.h"
 #include "./SegmentedControl.h"
+#include "./UiAnimationGate.h"
 #include "../theme.h"
 
 #include <QAbstractButton>
@@ -40,7 +41,9 @@ namespace
     bool clientAnimationsEnabled()
     {
         BOOL enabled = TRUE;
-        return !SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, &enabled, 0) || enabled;
+        // 系统“减少动画”与设置页“界面动画”相互独立，任一关闭即不播放动画。
+        return (!SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, &enabled, 0) || enabled)
+            && ks::ui::AreUiAnimationsEnabled();
     }
 
     // 仅保存动画几何；快速切换从当前可见位置开始，隐藏或布局变化立即停止旧帧。

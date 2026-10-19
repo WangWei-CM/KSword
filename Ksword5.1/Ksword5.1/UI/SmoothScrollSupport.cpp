@@ -16,8 +16,11 @@
 #include <QPlainTextEdit>
 #include <QPointer>
 #include <QPointingDevice>
+#include <QPaintEvent>
 #include <QScreen>
+#include <QScrollArea>
 #include <QScrollBar>
+#include <QTableWidget>
 #include <QScopedValueRollback>
 #include <QSignalBlocker>
 #include <QTabBar>
@@ -45,7 +48,35 @@ namespace
     constexpr int kWheelAnimationDurationMs = 180;
     constexpr int kPixelAnimationDurationMs = 100;
     constexpr int kTabWheelStepPixels = 48;
+    constexpr int kViewportProbeMinimumMs = 2;
+    constexpr char kViewportPaintProbePendingProperty[] =
+        "ksword_perf_viewport_paint_probe_pending";
+    constexpr char kViewportLayoutProbePendingProperty[] =
+        "ksword_perf_viewport_layout_probe_pending";
     thread_local const QEvent* g_tabScrollFrame = nullptr;
+
+    QString scrollAreaPerfLabel(const QAbstractScrollArea* area)
+    {
+        if (area == nullptr)
+        {
+            return QString();
+        }
+        QString label = QString::fromUtf8(area->metaObject()->className());
+        if (!area->objectName().isEmpty())
+        {
+            label += QLatin1Char('/') + area->objectName();
+        }
+        for (const QWidget* parent = area->parentWidget(); parent != nullptr;
+            parent = parent->parentWidget())
+        {
+            if (!parent->windowTitle().isEmpty())
+            {
+                label += QStringLiteral(" [") + parent->windowTitle() + QLatin1Char(']');
+                break;
+            }
+        }
+        return label;
+    }
 
     // 滚动条仍使用原生整数像素值；独立时钟避免 QWidget 动画驱动约 60Hz 的默认节拍。
     // GPU 视口由呈现回调驱动；普通视口每次 tick 读取所属屏幕。
@@ -90,9 +121,14 @@ namespace
                 ks::ui::RecordPerfSpanWithCount("perf_scroll_animation",
                     m_bar.isNull() ? QString() : m_bar->objectName(),
                     m_clock.isValid() ? m_clock.elapsed() : 0, m_perfFrames);
+                // 采集：单帧实际写入/刷新累计耗时；与总时长之差即 UI 线程被阻塞的等待时间。
+                ks::ui::RecordPerfSpanWithCount("perf_scroll_animation_work",
+                    m_bar.isNull() ? QString() : m_bar->objectName(),
+                    m_perfWorkMs, m_perfFrames);
             }
             m_perfActive = false;
             m_perfFrames = 0;
+            m_perfWorkMs = 0;
             m_running = false;
             m_timer.stop();
             disconnect(m_frameConnection);
@@ -119,6 +155,7 @@ namespace
             // 采集：本段动画开始累计帧数，由 advance 推进。
             m_perfActive = true;
             m_perfFrames = 0;
+            m_perfWorkMs = 0;
             for (QWidget* parent = m_bar->parentWidget(); parent; parent = parent->parentWidget())
             {
                 if (auto* area = qobject_cast<QAbstractScrollArea*>(parent))
@@ -170,10 +207,12 @@ namespace
         {
             if (m_perfActive)
             {
-                ++m_perfFrames; // 采集：每推进一帧累加，用于判断滚动是否由逐帧动画驱动。
+                ++m_perfFrames;           // 采集：每推进一帧累加，用于判断滚动是否由逐帧动画驱动。
+                m_perfFrameClock.start(); // 采集：开始计量本帧实际写入与刷新耗时。
             }
             if (!m_running || m_bar.isNull() || !m_bar->isEnabled() || !m_bar->window()->isVisible())
             {
+                accumulateFrameWork();
                 stop();
                 return;
             }
@@ -200,6 +239,16 @@ namespace
                 // 整数像素缓动尾段可能连续两帧 value 相同，也必须维持下一次呈现回调。
                 m_frameSource->update();
             }
+            accumulateFrameWork();
+        }
+
+        // 采集：把本帧实际写入/刷新耗时累加到当前动画，供 stop 时区分帧数与单帧开销。
+        void accumulateFrameWork()
+        {
+            if (m_perfActive && m_perfFrameClock.isValid())
+            {
+                m_perfWorkMs += m_perfFrameClock.elapsed();
+            }
         }
 
         QPointer<QScrollBar> m_bar;
@@ -214,8 +263,10 @@ namespace
         int m_durationMs = kWheelAnimationDurationMs;
         bool m_writing = false;
         bool m_running = false;
-        bool m_perfActive = false; // 采集：本段动画是否正在累计帧数。
-        int m_perfFrames = 0;      // 采集：本段动画已推进的帧数。
+        bool m_perfActive = false;      // 采集：本段动画是否正在累计帧数。
+        int m_perfFrames = 0;           // 采集：本段动画已推进的帧数。
+        qint64 m_perfWorkMs = 0;        // 采集：本段动画帧内写入/刷新累计耗时。
+        QElapsedTimer m_perfFrameClock; // 采集：单帧写入耗时计时。
     };
 
     // 保留原 QTabBar 和连接，借助 Qt 的像素滚动路径移动标签，避免切页触发懒加载。
@@ -450,6 +501,15 @@ namespace
                 }
             }
 
+            // 全局过滤器只能在 QWidget::event() 前收到 Paint/LayoutRequest；
+            // 通过同一控件的 queued 回调跨过本次事件分发，测量视口事件真正返回前的耗时。
+            // 只采集 QTableWidget/QScrollArea 及其 viewport，避免把整棵控件树变成日志热点。
+            if (eventObject->type() == QEvent::Paint ||
+                eventObject->type() == QEvent::LayoutRequest)
+            {
+                scheduleViewportProbe(watchedObject, eventObject->type());
+            }
+
             const bool tabStructureEvent = eventObject->type() == QEvent::Resize ||
                 eventObject->type() == QEvent::Hide || eventObject->type() == QEvent::StyleChange ||
                 eventObject->type() == QEvent::LayoutRequest || eventObject->type() == QEvent::FontChange;
@@ -501,7 +561,9 @@ namespace
 
             // 采集：滚轮在全局过滤器内的同步处理耗时；逐帧动画由动画记录单独统计。
             ks::ui::PerfScope wheelPerf("perf_scroll_wheel",
-                QString::fromUtf8(scrollArea->metaObject()->className()));
+                scrollAreaPerfLabel(scrollArea));
+            // 滚轮本身通常很快；标记它作为后续重绘停顿的最近用户操作。
+            ks::ui::RecordPerfMark("perf_scroll_wheel", scrollAreaPerfLabel(scrollArea));
 
             auto* wheelEvent = static_cast<QWheelEvent*>(eventObject);
             if (wheelEvent->modifiers().testFlag(Qt::ControlModifier) ||
@@ -642,6 +704,79 @@ namespace
                     break;
             }
             return nullptr;
+        }
+
+        void scheduleViewportProbe(QObject* watchedObject, QEvent::Type eventType)
+        {
+            QWidget* watchedWidget = qobject_cast<QWidget*>(watchedObject);
+            if (watchedWidget == nullptr)
+            {
+                return;
+            }
+
+            QAbstractScrollArea* area = nullptr;
+            if (auto* directArea = qobject_cast<QAbstractScrollArea*>(watchedWidget))
+            {
+                area = directArea;
+            }
+            else
+            {
+                for (QWidget* parent = watchedWidget->parentWidget(); parent != nullptr;
+                    parent = parent->parentWidget())
+                {
+                    auto* candidate = qobject_cast<QAbstractScrollArea*>(parent);
+                    if (candidate != nullptr &&
+                        (candidate->viewport() == watchedWidget ||
+                         (qobject_cast<QScrollArea*>(candidate) != nullptr &&
+                          qobject_cast<QScrollArea*>(candidate)->widget() == watchedWidget)))
+                    {
+                        area = candidate;
+                        break;
+                    }
+                }
+            }
+            if (area == nullptr ||
+                (qobject_cast<QTableWidget*>(area) == nullptr &&
+                 qobject_cast<QScrollArea*>(area) == nullptr))
+            {
+                return;
+            }
+            const auto* scrollArea = qobject_cast<QScrollArea*>(area);
+            if (watchedWidget != area && watchedWidget != area->viewport() &&
+                (scrollArea == nullptr || scrollArea->widget() != watchedWidget))
+            {
+                return;
+            }
+
+            const char* pendingProperty = eventType == QEvent::Paint
+                ? kViewportPaintProbePendingProperty
+                : kViewportLayoutProbePendingProperty;
+            if (area->property(pendingProperty).toBool())
+            {
+                return;
+            }
+            const char* operationToken = eventType == QEvent::Paint
+                ? "perf_scroll_paint" : "perf_scroll_layout";
+            const QString targetLabel = scrollAreaPerfLabel(area) +
+                (watchedWidget == area->viewport() ? QStringLiteral("/viewport") :
+                    QStringLiteral("/content"));
+            const qint64 startMs = ks::ui::PerfTraceNowMs();
+            area->setProperty(pendingProperty, true);
+            QPointer<QAbstractScrollArea> guard(area);
+            QTimer::singleShot(0, area, [guard, pendingProperty, targetLabel, operationToken, startMs]()
+            {
+                if (guard == nullptr)
+                {
+                    return;
+                }
+                guard->setProperty(pendingProperty, false);
+                const qint64 elapsedMs = std::max<qint64>(
+                    0, ks::ui::PerfTraceNowMs() - startMs);
+                if (elapsedMs >= kViewportProbeMinimumMs)
+                {
+                    ks::ui::RecordPerfSpan(operationToken, targetLabel, elapsedMs);
+                }
+            });
         }
 
         TabStripAnimator* tabAnimator(QTabBar* bar)

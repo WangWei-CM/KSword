@@ -460,6 +460,9 @@ private:
     // m_hvmDisplayNameCombo 作用：选择硬件虚拟化按钮上显示 HVM / R-1。
     QComboBox* m_hvmDisplayNameCombo = nullptr;
 
+    // m_uiAnimationsCheckBox 作用：应用内界面动画总开关；关闭后平滑滚动一并失效。
+    QCheckBox* m_uiAnimationsCheckBox = nullptr;
+
     // m_smoothScrollingCheckBox 作用：设置全局滚动区域是否启用滚轮缓动。
     QCheckBox* m_smoothScrollingCheckBox = nullptr;
 

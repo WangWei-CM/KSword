@@ -352,6 +352,11 @@ private:
     // - 处理逻辑：聚合物理分布、内核进程快照、Pool Tag 与 Big Pool 证据。
     void initializeSystemMemoryAuditTab();
 
+    // ensureSystemMemoryAuditPage：
+    // - 作用：首次切入系统内存审计 Tab 时，把轻量占位页替换为真实页面；
+    // - 约束：保持原 Tab 索引、标题、语言绑定和 DDMA 会话接线。
+    void ensureSystemMemoryAuditPage();
+
     // initializeDdmaTab：
     // - 作用：构建 Tab12（DDMA）界面；
     // - 处理逻辑：页面自身负责通道配置，本函数只负责挂载与注册会话变化回调。
@@ -950,6 +955,8 @@ private:
     // ========================================================
 
     SystemMemoryAuditPage* m_systemMemoryAuditPage = nullptr; // 系统级物理内存归因页面。
+    QWidget* m_systemMemoryAuditPlaceholder = nullptr;       // 首次切页前的轻量占位页。
+    bool m_systemMemoryAuditPageConstructing = false;        // 防止切页/刷新重入构造。
 
     // ========================================================
     // Tab12：DDMA（磁盘直接内存访问）

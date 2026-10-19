@@ -43,6 +43,8 @@ namespace
     constexpr qint64 kStallIgnoreMs = 10000;
     // 向上查找页签栏时的最大父级层数，避免在超深控件树里长时间遍历。
     constexpr int kMaxAncestorWalk = 16;
+    // 用户操作标记只对紧随其后的短暂停顿有效，避免旧页签长期污染后续日志。
+    constexpr qint64 kLastMarkLifetimeMs = 1500;
 }
 
 namespace ks::ui
@@ -79,6 +81,7 @@ namespace ks::ui
             {
                 QMutexLocker locker(&m_mutex);
                 m_lastMark = QString::fromUtf8(operationToken) + QLatin1Char(':') + targetLabel;
+                m_lastMarkAtMs = referenceClock().elapsed();
             }
             QJsonObject record;
             fillCommon(record, operationToken, targetLabel);
@@ -176,9 +179,19 @@ namespace ks::ui
 
             QString lastMark;
             std::function<QString()> provider;
+            const qint64 nowMs = referenceClock().elapsed();
             {
                 QMutexLocker locker(&m_mutex);
-                lastMark = m_lastMark;
+                if (!m_lastMark.isEmpty() && m_lastMarkAtMs >= 0 &&
+                    nowMs >= m_lastMarkAtMs && nowMs - m_lastMarkAtMs <= kLastMarkLifetimeMs)
+                {
+                    lastMark = m_lastMark;
+                }
+                else if (nowMs - m_lastMarkAtMs > kLastMarkLifetimeMs)
+                {
+                    m_lastMark.clear();
+                    m_lastMarkAtMs = -1;
+                }
                 provider = m_contextProvider;
             }
             // 上下文提供者可能读取界面状态，必须在释放锁之后再调用，避免反向加锁。
@@ -283,6 +296,7 @@ namespace ks::ui
         QTimer m_heartbeat;             // 事件循环心跳，用于检测 UI 停顿。
         QElapsedTimer m_heartbeatClock; // 上一次心跳到现在的实际经过时间。
         QString m_lastMark;             // 最近一次用户操作标记。
+        qint64 m_lastMarkAtMs = -1;     // 最近一次用户操作标记的单调时钟时间。
         std::function<QString()> m_contextProvider; // 现场上下文提供者。
     };
 

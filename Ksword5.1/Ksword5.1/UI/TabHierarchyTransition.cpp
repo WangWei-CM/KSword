@@ -1,5 +1,6 @@
 #include "../Framework.h"
 #include "./TabHierarchyTransition.h"
+#include "./UiAnimationGate.h"
 #include "./PageControlStyle.h"
 #include "../theme.h"
 
@@ -198,6 +199,10 @@ namespace
                     if (!m_tabs || !page || generation != m_generation || m_tabs->currentWidget() != page)
                     {
                         return;
+                    }
+                    if (!ks::ui::AreUiAnimationsEnabled())
+                    {
+                        return; // 关闭界面动画时直接切页，不构建覆盖层与动画。
                     }
                     const TabStripSnapshot incoming = snapshot(page);
                     if (outgoing.image.isNull() && incoming.image.isNull())
