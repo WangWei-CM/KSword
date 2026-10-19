@@ -13,19 +13,28 @@
 
 ## 1. 摘要
 
-RXPF write-only mode 在 HVCI 环境下完成端到端验证。该模式通过
+RXPF write-only mode 在 HVCI 环境下完成**写入路径**端到端验证。该模式通过
 `MmChangeImageProtection(PAGE_READONLY)` 令 VTL1 释放物理页上的 SLAT 写保护，
 再通过 `MmProtectMdlSystemAddress(mdl, PAGE_READWRITE)` 将 VTL0 别名 PTE 升级为可写，
-实现对内核映像 .text 节的写入，全程不依赖影子 IDT 或指令模拟。
+实现对内核映像 .text 节字节的写入，全程不依赖影子 IDT 或指令模拟。
+
+**重要边界：**本节验证的是"把字节写入物理页"的管道；写入后的字节**不可执行**
+（原页 PTE 停在 PAGE_READONLY，VTL1 SLAT 保持 NX），因此单独使用 write-only mode
+**无法达成 DSE 绕过、inline hook、热补丁等常见目标**——那些目标需要字节能被 CPU 执行
+或被安全数据能被读取，两者都需要进一步条件（影子 IDT 或可写数据页），
+而这两个条件都不被 HVCI 允许。详见 §8。
 
 ### 关键结论
 
 - **5 个内核模块的 .text 节确认可写**（CI.dll / FLTMGR.SYS / ndis.sys / tcpip.sys / NETIO.SYS）
-- **WRITE IOCTL 三种负载全部成功**（4B NOP、5B JMP stub、64B 任意块）
-- **HOOK IOCTL 配置路径正常**（LOG / REDIRECT / CLEAR）
-- **UNREGISTER 正确恢复原始保护**
+- **WRITE IOCTL 三种负载全部写入成功**（4B NOP、5B JMP stub、64B 任意块）；
+  "写入成功"仅指字节出现在物理页上，不代表字节会被执行或代码行为改变
+- **`.data`/`.rdata` 页第一步 CHANGE 就拿不到 RW 别名**（实测 CI.dll +0x30000/+0x38000/+0x3C000）；
+  这意味着 `g_CiOptions` 等 CI 数据状态结构性不可写
+- **HOOK IOCTL 配置路径正常**（LOG / REDIRECT / CLEAR）；实际触发需要影子 IDT，当前不可用
+- **UNREGISTER 正确恢复 PTE 和别名**；但如果字节已改且未还原，VTL1 拒绝把页回到 PAGE_EXECUTE_READ
 - ntoskrnl.exe 与 hal.dll 的 +0x1000 页实际落入只读数据节（origP=0x02），非 .text
-- 影子 IDT 在 Hyper-V 下被正确阻止（CPUID "Microsoft Hv" 检测），write-only 模式不受影响
+- 影子 IDT 在 Hyper-V 下被 CPUID "Microsoft Hv" 检测阻止；物理机 VBS 下行为未验证
 
 ---
 
@@ -176,27 +185,44 @@ UNREGISTER→ ok  state=2  origP=0x20 (恢复)
 
 ---
 
-## 8. 应用场景
+## 8. 实际可行性评估（修正）
 
-Write-only 模式在 HVCI 环境下可用于：
+**本节早期草稿中列出了"DSE 绕过 / Inline Hook / 热补丁"等用例，这些声明错误。**
+Write-only mode 在 HVCI 环境下**不满足**这些用例的实际需求，具体原因如下：
 
-1. **DSE 绕过**：修改 CI.dll 中的 `g_CiOptions` 或代码完整性校验函数
-2. **Inline Hook**：向 .text 节写入 JMP stub（5 字节 E9 相对跳转），重定向内核函数
-3. **热补丁**：修改内核模块中的已知漏洞函数字节码
-4. **安全研究**：在不关闭 HVCI 的前提下测试内核代码修改效果
+### 8.1 为什么这些用例都走不通
 
-已验证可修改的模块：CI.dll、FLTMGR.SYS、ndis.sys、tcpip.sys、NETIO.SYS。
-ntoskrnl.exe 的 .text 需要精确的节偏移定位（非固定 +0x1000）。
+| 候选用例 | 为什么走不通 |
+|---------|------------|
+| **DSE 绕过** | `g_CiOptions` 在 CI.dll 的 .data 节；`MmChangeImageProtection` 只对原本 `PAGE_EXECUTE_READ` 的页释放 SLAT 写保护，.data/.rdata 页第一步 CHANGE 就拿不到 PAGE_READWRITE 别名（实测 CI+0x30000/0x38000/0x3C000 别名均停在 0x02）。CI 的所有数据状态同理。 |
+| **Inline Hook** | 可以把 5 字节 JMP 写进 .text 页的物理帧，但原页 PTE 停在 PAGE_READONLY 且 VTL1 的 SLAT 保持 NX，CPU 执行到该字节时触发 #PF-NX。没有影子 IDT 做模拟就是普通的 NX 违例，走系统的 KiPageFault，一般结局是进程崩溃或 BSOD。 |
+| **热补丁** | 同上，字节能写但不执行。 |
+| **安全研究 / 对比修改前后 CPU 行为** | 单独使用 write-only mode 无法观察到任何执行层面的差异（新字节不执行），只能观察到物理页的字节内容本身。 |
+
+### 8.2 实际能做的事情
+
+| 能力 | 现实价值 |
+|------|---------|
+| 读取 .text 页的字节（通过原 VA 或别名） | 调试辅助，但 ReadProcessMemory / nt!MmCopyVirtualMemory 已能做到，无需走 RXPF |
+| 把 .text 字节暂时改掉再还原 | 单看字节的"存在性"没有可利用方；没有执行就没有行为改变 |
+| 后续如果能装影子 IDT，接 #PF 模拟 | 这才是 RXPF 原始设计目标，但当前被 Hyper-V 挡住 |
+
+**结论：Write-only mode 本身是半成品，必须与影子 IDT 搭档才构成完整 RXPF；
+当前 Hyper-V 下不可装影子 IDT（CPUID "Microsoft Hv" 检测拦下），
+物理机 VBS 下 LIDT 是否被接受为唯一未解问题。**
 
 ---
 
 ## 9. 已知限制
 
-1. **非原子写入**：WRITE IOCTL 最大 64 字节，大范围修改需多次调用
-2. **无执行拦截**：影子 IDT 在 Hyper-V 下不可用，无法拦截/模拟被修改代码的执行
-3. **单页粒度**：每次 REGISTER 针对一个 4KB 页面
-4. **连续快速操作限制**：7+ 个模块的快速 CHANGE 循环可能导致 VTL1 SLAT 操作累积异常
-5. **ntoskrnl/hal 需要精确偏移**：这两个模块的 .text 节起始偏移不在 +0x1000
+1. **只能动 .text**：`MmChangeImageProtection` 只对原本 `PAGE_EXECUTE_READ` 的页释放 VTL1 SLAT 写保护，.data/.rdata/.rsrc 全部结构性不可写
+2. **写入的字节不可执行**：原页 PTE 停在 PAGE_READONLY，CPU 执行到即 #PF-NX
+3. **恢复可执行受 VTL1 校验**：UNREGISTER 调用 `MmChangeImageProtection(PAGE_EXECUTE_READ)` 时 VTL1 校验页内容，字节改过且未还原时拒绝
+4. **非原子写入**：WRITE IOCTL 最大 64 字节，大范围修改需多次调用
+5. **无执行拦截**：影子 IDT 在 Hyper-V 下不可用（CPUID 检测阻止），物理机 VBS 下行为未知
+6. **单页粒度**：每次 REGISTER 针对一个 4KB 页面
+7. **连续快速操作限制**：7+ 个模块的快速 CHANGE 循环可能导致 VTL1 SLAT 操作累积异常（实测两次独立复现）
+8. **ntoskrnl/hal 需要精确偏移**：这两个模块的 .text 节起始偏移不在 +0x1000
 
 ---
 
