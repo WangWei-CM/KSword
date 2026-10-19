@@ -353,7 +353,7 @@ status = g_KswRxpfImageProtection.MmChangeImageProtection(
 |---|------|------|-------------|---------|---------------|
 | 1 | `.rxpftst` (SELF_IMAGE_TEST) | Register+Change+Write(NOP)+Unregister | `0xC0000005` | OK | — |
 | 2 | `.rxpftst` (SELF_IMAGE_TEST) | Register+Change+**no write**+Unregister | `0xC0000005` | OK | — |
-| 3 | CI.dll +0x1000 (EXTERNAL_IMAGE) | Register+Change+Write(0x90@0)+Unregister | `0x00000000` SUCCESS | 几秒后 BSOD（第二次复现时明确捕获） | **Phase G 复现 BugCheck 完整捕获**（2026-10-19，26H2 VM，见 §15 next-exp #2 已完成项）：Code=`0xFC` **ATTEMPTED_EXECUTE_OF_NOEXECUTE_MEMORY**，Arg1 故障 VA=`0xfffff807702e1598`（=CI.dll+**0x1598**，落在被改页 +0x1000..+0x1FFF 内），Arg2 PTE=`0x8900000105b3b121`（**bit 63 NX = 1**，mode=2 的 NX 位已到 CPU），栈：`nt+0x4a732f → KeBugCheckEx(0xFC) → CI+0x1598`——真实执行流落到被 NX 的 .text 页 |
+| 3 | CI.dll +0x1000 (EXTERNAL_IMAGE) | Register+Change+Write(0x90@0)+Unregister | `0x00000000` SUCCESS | 几秒后 BSOD（第二次复现时明确捕获） | **BugCheck 捕获不完备**（见 §15 next-exp #2 已完成项的"已修订"说明）：拿到了 Code=`0xFC` + Arg1=CI.dll+0x1598 + Arg2 PTE NX=1 + 栈 `nt+0x4a732f → KeBugCheckEx → CI+0x1598`，**但本次实际走的是 `change-image-protection` IOCTL (0x922) + flags=0x1 writeTest（字节立即恢复），不是本行所写的 RXPF Register+Change+Write+Unregister 链**。证据只证明 mode=2 的 NX 位到了 CPU 和 OS 想 fetch CI+0x1598（原始指令），**没有证明 CPU 执行到任何修改字节**。要正确捕获本行实验的 BugCheck，需用 RXPF Phase G 完整流程 + payload 瞄准可识别偏移。 |
 | 4 | CI.dll +0x1000 (EXTERNAL_IMAGE) | Register+Change+Write(0xCC@0)+Unregister | 未捕获到（立即蓝屏） | 立即 BSOD | **无 Arg 捕获** |
 | 5 | CI.dll +0x1000 (EXTERNAL_IMAGE) | Register+Change+**no write**+Unregister | `0x00000000` SUCCESS | OK，二次 Register origProt=0x20 ✓ | — |
 
@@ -619,17 +619,27 @@ Win32 错误转 NTSTATUS 的常见对照：
     - H2：VTL1 调用 `MmChangeImageProtection` 时根本没有强制 digest 比对的通路（纯 SLAT 翻位操作）
     - 要分辨 H1/H2，需扩展 CHANGE_PAGE 协议传 32B digest + 解除 EXTERNAL_IMAGE 短路 + 三组对照（工程量约 100 行驱动改动 + Rebuild + 签名部署 + 实验，约 1 小时）。本会话决策推迟，理由：核心结论（HVCI mode=1 可用于 CI 旁路）已由 §6 #7 和 next-exp #2 直接证据覆盖；#1 的边际价值仅是进一步细化 VTL1 的内部语义，不改变可利用性结论。
   - **归档不等于否决**：若后续发现 §3 "稳的" 结论在某台机器上失效、或 primary evidence 需要进一步归因到 VTL1 的具体校验算法时，接续者可按原设计重启 #1，参照 `image_protection_manager.c:1302 KswRxpfPrepareReferenceDigest` 的 EXTERNAL_IMAGE 分支和 `shared/driver/KswordArkRxPfIoctl.h:_KSWORD_ARK_RXPF_RECORD_REQUEST` 的 header.flags 扩展位。
-- **next-exp #2 — BugCheck Arg 捕获 — 已完成**（2026-10-19，VM 26H2 build 26300.9457 CI/HVCI/HVCI-Strict/Secure Boot 全开）：
-  - **流程**：`CrashDumpEnabled=2 + AlwaysKeepMemoryDump=1 + AutoReboot=1` 配好；用 `KswordCLI memory change-image-protection --address <CI.dll+0x1000> --operation 2 --flags 0x1`（mode=2 翻 NX + writeTest，不恢复）；R0 返回 `imageProtectStatus=0x0` + `writeTestStatus=0x0` + `restoreStatus=0xC00000BB`（NOT_SUPPORTED，因未传 flags 0x2）；约 1 分钟后 VM 自发 BSOD + AutoReboot；拉 `C:\WINDOWS\Minidump\101926-4203-01.dmp` 到宿主用 cdb `!analyze -v` 分析。
+- **next-exp #2 — BugCheck Arg 捕获 — 部分完成（已修订过度宣称）**（2026-10-19，VM 26H2 build 26300.9457 CI/HVCI/HVCI-Strict/Secure Boot 全开）：
+  - **流程**：`CrashDumpEnabled=2 + AlwaysKeepMemoryDump=1 + AutoReboot=1` 配好；用 `KswordCLI memory change-image-protection --address <CI.dll+0x1000> --operation 2 --flags 0x1`（mode=2 翻 NX + writeTest）；R0 返回 `imageProtectStatus=0x0` + `writeTestStatus=0x0` + `restoreStatus=0xC00000BB`；约 1 分钟后 VM 自发 BSOD + AutoReboot；拉 `C:\WINDOWS\Minidump\101926-4203-01.dmp` 到宿主用 cdb `!analyze -v` 分析。
   - **BugCheck 完整参数**（minidump 原文）：
-    - **Code = `0xFC` ATTEMPTED_EXECUTE_OF_NOEXECUTE_MEMORY**
-    - **Arg1 = `0xfffff807702e1598`** —— 故障 VA = CI.dll (`0xfffff807702e0000`) + **`0x1598`**，**完全落在被改页 +0x1000..+0x1FFF 内**
-    - **Arg2 = `0x8900000105b3b121`** —— PTE qword，**bit 63 (NX) = 1**，直接确认 mode=2 的 R-only NX 位到了 CPU（与 next-exp #8 的 live PTE 回读一致：顶字节 `0x89` = NX+Present）
+    - Code = **`0xFC` ATTEMPTED_EXECUTE_OF_NOEXECUTE_MEMORY**
+    - Arg1 = `0xfffff807702e1598`（= CI.dll + `0x1598`，落在被 NX 的页范围 +0x1000..+0x1FFF 内）
+    - Arg2 = `0x8900000105b3b121`（PTE qword，bit 63 (NX) = 1）
     - Arg3 = `0xffffc0041e9162e0`（reserved）；Arg4 = `0x2`（reserved）
     - 栈：`nt+0x4a732f → KeBugCheckEx(0xFC) → CI+0x1598`
-  - **原预期范围（CI.dll+0x1000..+0x1008）过窄**：#2 原文写的是"故障 RIP 真落在 CI.dll+0x1000..+0x1008 内"，这是 payload 字节的范围。实际 NX 粒度是**整页 4 KB**，Arg1 落在 CI.dll+0x1598 说明**页内另一处真实被调用的 .text 指令被 NX 捕获**，而非被改的首几个字节。两者都在被改页内，均符合 Phase G 语义。
-  - **直接后果**：CI.dll+0x1598 是**真实的被执行入口**（否则不会命中），故 **mode=1 restore 清掉 NX 位后（§3 实证），下次此执行流就会执行被我们改过的字节** —— 这是 Phase G CI 旁路可行性的直接 CPU 层证据。
-  - **PatchGuard 未先触发**：BSOD 为 `0xFC` 而非 `0x109 CRITICAL_STRUCTURE_CORRUPTION`，说明 NX 捕获比 PG 周期扫描更快命中（本次约 1 分钟）；若要观测 PG 自身的检测结论需延长"不执行到的 payload 残留窗口"（例如改页中真空区域而非被调用的 code path）。
+  - **实际证明的事**：
+    - mode=2 的 R-only NX 位真的到了 CPU（与 next-exp #8 的 live PTE 回读一致：顶字节 `0x89` = NX+Present）
+    - CI.dll+0x1598 这个地址在 OS 的指令 fetch 请求路径上（但那是**原始指令**）
+  - **已修订的过度宣称**（2026-10-19 后续发现）：
+    - **本次我用的 IOCTL 不是 §6 #3 的 RXPF 协议链（0x901/0x902/0x904/0x908），而是 `memory_ioctl.c` 的 `IOCTL_KSWORD_ARK_CHANGE_IMAGE_PAGE_PROTECTION (0x922)`**。两者走完全不同的代码路径（`image_protection_manager.c:KswRxpf*` vs `memory_ioctl.c:CHANGE_IMAGE_PAGE_PROTECTION`）。原文把这两条流程混为一谈。
+    - **本次 flags=0x1 (WRITE_TEST only, 无 `UNMAP_BEFORE_RESTORE=0x4`)**：按 `memory_ioctl.c:1546-1549` 的 persistWrite 判断，writeTest 执行后字节**立即被恢复**，`*aliasByte = savedByte;`。所以页面内容**没有留下任何修改**。
+    - **因此本次 BugCheck 根本不涉及"修改字节"**：Arg1=CI+0x1598 只证明 OS 想 fetch 这个地址上的**原始指令**，被 NX 位捕获。不构成"CPU 执行了修改字节"的证据。
+    - 原文的"CI.dll+0x1598 是真实的被执行入口，mode=1 restore 后此执行流就会执行被改字节"属于**超出证据范围的推论**，撤回。
+  - **要真正证明 CPU 执行了修改字节，正确实验是**：
+    - **方案 X（轻量，单字节 XOR）**：`change-image-protection --flags 0x7`（WRITE_TEST | RESTORE | UNMAP_BEFORE_RESTORE），字节在页首 pageBase+0 处持久为 `原字节 ^ 0xFF`，PTE 回 RX；等自然执行到页首第 1 字节 → 若 CPU 执行到这里 → 蓝屏，Arg1 == `pageBase + 0` 即 **CI.dll+0x1000** → 直接证据。
+    - **方案 Y（完整 payload）**：RXPF Phase G 完整链（Register(CB) + Change(mode=2) + Write(payload) + Change(mode=1 restore) + Unregister(SKIP_BACKUP_RESTORE)），`payload` 瞄准 CI.dll 的**已知高频入口**（如某个导出函数的 entry），字节设为 `int3` (0xCC)；等那个函数被调用 → #BP → Arg1 == payload 地址 → 直接证据。
+    - 两者都要求 **Arg1 == 我们精确知道的修改字节地址**。本次 Arg1=+0x1598 和任何修改字节无关。
+  - **PatchGuard 未触发**：BSOD 是 `0xFC` 而非 `0x109`，是因为 NX 捕获比 PG 周期扫描更快命中（本次约 1 分钟内），**与 payload/修改字节无关**（因为本次没留下修改字节）。
   - 判据工具链：`cdb -z <dmp> -y C:\Symbols -cf <script>`（本地符号路径，禁在线符号服务器）；minidump 虽然只有寄存器+栈但 BugCheck Code/Arg1-4 从 dump header 可直读。
 - **next-exp #4 — 扩模块覆盖 — 已完成**（2026-10-19，VM 26H2 build 26300.9457 全防护开启）：
   - **结论：mode=1/2 对 catalog 内 Microsoft 签名的 4 KB 常规页模块可外推**，但 **ntoskrnl 本身的 .text 用 2 MB 大页布局，MmChangeImageProtection 结构性拒绝大页**（独立于签名的第二道门）。
