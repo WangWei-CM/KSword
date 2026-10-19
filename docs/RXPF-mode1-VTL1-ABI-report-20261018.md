@@ -353,7 +353,7 @@ status = g_KswRxpfImageProtection.MmChangeImageProtection(
 |---|------|------|-------------|---------|---------------|
 | 1 | `.rxpftst` (SELF_IMAGE_TEST) | Register+Change+Write(NOP)+Unregister | `0xC0000005` | OK | — |
 | 2 | `.rxpftst` (SELF_IMAGE_TEST) | Register+Change+**no write**+Unregister | `0xC0000005` | OK | — |
-| 3 | CI.dll +0x1000 (EXTERNAL_IMAGE) | Register+Change+Write(0x90@0)+Unregister | `0x00000000` SUCCESS | 几秒后 BSOD（第二次复现时明确捕获） | **无 Arg 捕获**（仅 Windows bucket 字符串 "What failed: CI.dll"，缺 BugCheck Code/Arg1-4/trap frame） |
+| 3 | CI.dll +0x1000 (EXTERNAL_IMAGE) | Register+Change+Write(0x90@0)+Unregister | `0x00000000` SUCCESS | 几秒后 BSOD（第二次复现时明确捕获） | **Phase G 复现 BugCheck 完整捕获**（2026-10-19，26H2 VM，见 §15 next-exp #2 已完成项）：Code=`0xFC` **ATTEMPTED_EXECUTE_OF_NOEXECUTE_MEMORY**，Arg1 故障 VA=`0xfffff807702e1598`（=CI.dll+**0x1598**，落在被改页 +0x1000..+0x1FFF 内），Arg2 PTE=`0x8900000105b3b121`（**bit 63 NX = 1**，mode=2 的 NX 位已到 CPU），栈：`nt+0x4a732f → KeBugCheckEx(0xFC) → CI+0x1598`——真实执行流落到被 NX 的 .text 页 |
 | 4 | CI.dll +0x1000 (EXTERNAL_IMAGE) | Register+Change+Write(0xCC@0)+Unregister | 未捕获到（立即蓝屏） | 立即 BSOD | **无 Arg 捕获** |
 | 5 | CI.dll +0x1000 (EXTERNAL_IMAGE) | Register+Change+**no write**+Unregister | `0x00000000` SUCCESS | OK，二次 Register origProt=0x20 ✓ | — |
 
@@ -612,7 +612,18 @@ Win32 错误转 NTSTATUS 的常见对照：
 本节 next-exp 编号与 [`.claude/memory/ksword-rxpf-mode1-restore-structural-fail.md`](../.claude/memory/ksword-rxpf-mode1-restore-structural-fail.md) 一致。已完成的（#3 keep-modified / #5 auto-restore / #6 Phase F 整合 / 26H2 primary evidence #7）不再重复列出。
 
 - **next-exp #1 — EXTERNAL_IMAGE bad-digest 对照**：临时解除 EXTERNAL_IMAGE 的 `STATUS_NOT_SUPPORTED` 短路，分别传 (随机 32B / SHA-256(页) / SHA-512(页)[0x20,0x40))，看 mode=1 返回能否区分 digest 内容——关掉 "VTL1 验 digest" 归因争议。
-- **next-exp #2 — BugCheck Arg 捕获**：开 `CrashOnCtrlScroll` + `AlwaysKeepMemoryDump`，重跑 §6 实验 #3/#4，用 cdb `!analyze -v; .cxr; r; u @rip L8; kb` 固定 BugCheck Code / Arg1-4 / 故障 RIP 是否真落在 CI.dll+0x1000..+0x1008 内。
+- **next-exp #2 — BugCheck Arg 捕获 — 已完成**（2026-10-19，VM 26H2 build 26300.9457 CI/HVCI/HVCI-Strict/Secure Boot 全开）：
+  - **流程**：`CrashDumpEnabled=2 + AlwaysKeepMemoryDump=1 + AutoReboot=1` 配好；用 `KswordCLI memory change-image-protection --address <CI.dll+0x1000> --operation 2 --flags 0x1`（mode=2 翻 NX + writeTest，不恢复）；R0 返回 `imageProtectStatus=0x0` + `writeTestStatus=0x0` + `restoreStatus=0xC00000BB`（NOT_SUPPORTED，因未传 flags 0x2）；约 1 分钟后 VM 自发 BSOD + AutoReboot；拉 `C:\WINDOWS\Minidump\101926-4203-01.dmp` 到宿主用 cdb `!analyze -v` 分析。
+  - **BugCheck 完整参数**（minidump 原文）：
+    - **Code = `0xFC` ATTEMPTED_EXECUTE_OF_NOEXECUTE_MEMORY**
+    - **Arg1 = `0xfffff807702e1598`** —— 故障 VA = CI.dll (`0xfffff807702e0000`) + **`0x1598`**，**完全落在被改页 +0x1000..+0x1FFF 内**
+    - **Arg2 = `0x8900000105b3b121`** —— PTE qword，**bit 63 (NX) = 1**，直接确认 mode=2 的 R-only NX 位到了 CPU（与 next-exp #8 的 live PTE 回读一致：顶字节 `0x89` = NX+Present）
+    - Arg3 = `0xffffc0041e9162e0`（reserved）；Arg4 = `0x2`（reserved）
+    - 栈：`nt+0x4a732f → KeBugCheckEx(0xFC) → CI+0x1598`
+  - **原预期范围（CI.dll+0x1000..+0x1008）过窄**：#2 原文写的是"故障 RIP 真落在 CI.dll+0x1000..+0x1008 内"，这是 payload 字节的范围。实际 NX 粒度是**整页 4 KB**，Arg1 落在 CI.dll+0x1598 说明**页内另一处真实被调用的 .text 指令被 NX 捕获**，而非被改的首几个字节。两者都在被改页内，均符合 Phase G 语义。
+  - **直接后果**：CI.dll+0x1598 是**真实的被执行入口**（否则不会命中），故 **mode=1 restore 清掉 NX 位后（§3 实证），下次此执行流就会执行被我们改过的字节** —— 这是 Phase G CI 旁路可行性的直接 CPU 层证据。
+  - **PatchGuard 未先触发**：BSOD 为 `0xFC` 而非 `0x109 CRITICAL_STRUCTURE_CORRUPTION`，说明 NX 捕获比 PG 周期扫描更快命中（本次约 1 分钟）；若要观测 PG 自身的检测结论需延长"不执行到的 payload 残留窗口"（例如改页中真空区域而非被调用的 code path）。
+  - 判据工具链：`cdb -z <dmp> -y C:\Symbols -cf <script>`（本地符号路径，禁在线符号服务器）；minidump 虽然只有寄存器+栈但 BugCheck Code/Arg1-4 从 dump header 可直读。
 - **next-exp #4 — 扩模块覆盖 — 已完成**（2026-10-19，VM 26H2 build 26300.9457 全防护开启）：
   - **结论：mode=1/2 对 catalog 内 Microsoft 签名的 4 KB 常规页模块可外推**，但 **ntoskrnl 本身的 .text 用 2 MB 大页布局，MmChangeImageProtection 结构性拒绝大页**（独立于签名的第二道门）。
   - 对照数据（三个成功模块的 PTE top byte 全部从 `0x09` 翻到 `0x89` 又回 `0x09`，模式完全一致）：
