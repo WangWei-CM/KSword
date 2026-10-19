@@ -216,6 +216,7 @@ void KernelDock::initializeSsdtTab()
     m_ssdtTable->setContextMenuPolicy(Qt::CustomContextMenu);
     m_ssdtTable->verticalHeader()->setVisible(false);
     m_ssdtTable->horizontalHeader()->setStyleSheet(headerStyle());
+    m_ssdtTable->horizontalHeader()->setResizeContentsPrecision(100);
     m_ssdtTable->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
     m_ssdtTable->horizontalHeader()->setSectionResizeMode(static_cast<int>(SsdtColumn::ServiceName), QHeaderView::Stretch);
     m_ssdtTable->setColumnWidth(static_cast<int>(SsdtColumn::Index), 90);

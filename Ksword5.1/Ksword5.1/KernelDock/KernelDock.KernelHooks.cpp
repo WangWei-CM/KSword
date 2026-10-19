@@ -983,6 +983,11 @@ namespace
         tableWidget->setCornerButtonEnabled(false);
         tableWidget->verticalHeader()->setVisible(false);
         tableWidget->horizontalHeader()->setStyleSheet(kernelHookHeaderStyle());
+        // ResizeToContents otherwise scans every populated row on each layout.
+        // Kernel hook snapshots can contain hundreds of entries; cap the
+        // measurement sample so a tab switch cannot turn into an O(rows)
+        // synchronous relayout while retaining content-aware widths.
+        tableWidget->horizontalHeader()->setResizeContentsPrecision(100);
         tableWidget->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
     }
 

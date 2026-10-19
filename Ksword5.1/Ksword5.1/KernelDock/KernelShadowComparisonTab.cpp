@@ -217,6 +217,7 @@ void KernelShadowComparisonTab::initializeUi()
     m_resultTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_resultTable->setAlternatingRowColors(true);
     m_resultTable->verticalHeader()->setVisible(false);
+    m_resultTable->horizontalHeader()->setResizeContentsPrecision(100);
     m_resultTable->horizontalHeader()->setSectionResizeMode(
         QHeaderView::ResizeToContents);
     m_resultTable->horizontalHeader()->setStretchLastSection(true);

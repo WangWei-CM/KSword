@@ -2113,6 +2113,7 @@ void KernelDock::initializeCallbackEnumTab()
     m_callbackEnumTable->setContextMenuPolicy(Qt::CustomContextMenu);
     m_callbackEnumTable->verticalHeader()->setVisible(false);
     m_callbackEnumTable->horizontalHeader()->setStyleSheet(callbackEnumHeaderStyle());
+    m_callbackEnumTable->horizontalHeader()->setResizeContentsPrecision(100);
     m_callbackEnumTable->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
     m_callbackEnumTable->horizontalHeader()->setSectionResizeMode(static_cast<int>(CallbackEnumColumn::Name), QHeaderView::Stretch);
     m_callbackEnumTable->setColumnWidth(static_cast<int>(CallbackEnumColumn::Trust), 170);
@@ -2154,6 +2155,7 @@ void KernelDock::initializeCallbackEnumTab()
     m_minifilterCallbackTree->setUniformRowHeights(true);
     m_minifilterCallbackTree->setStyleSheet(callbackEnumSelectionStyle());
     m_minifilterCallbackTree->header()->setStyleSheet(callbackEnumHeaderStyle());
+    m_minifilterCallbackTree->header()->setResizeContentsPrecision(100);
     m_minifilterCallbackTree->header()->setSectionResizeMode(QHeaderView::ResizeToContents);
     m_minifilterCallbackTree->header()->setSectionResizeMode(0, QHeaderView::Stretch);
     m_minifilterCallbackTree->setColumnWidth(2, 180);

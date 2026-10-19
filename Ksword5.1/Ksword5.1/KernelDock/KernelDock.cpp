@@ -1117,6 +1117,7 @@ void KernelDock::initializeObjectNamespaceTab()
     m_objectNamespacePropertyTable->setContextMenuPolicy(Qt::CustomContextMenu);
     m_objectNamespacePropertyTable->setCornerButtonEnabled(false);
     m_objectNamespacePropertyTable->verticalHeader()->setVisible(false);
+    m_objectNamespacePropertyTable->horizontalHeader()->setResizeContentsPrecision(100);
     m_objectNamespacePropertyTable->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
     m_objectNamespacePropertyTable->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
     m_objectNamespacePropertyTable->setColumnWidth(0, 220);
@@ -1207,6 +1208,7 @@ void KernelDock::initializeAtomTableTab()
     m_atomTable->setCornerButtonEnabled(false);
     m_atomTable->verticalHeader()->setVisible(false);
 
+    m_atomTable->horizontalHeader()->setResizeContentsPrecision(100);
     m_atomTable->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
     m_atomTable->horizontalHeader()->setSectionResizeMode(static_cast<int>(AtomColumn::Name), QHeaderView::Stretch);
     m_atomTable->setColumnWidth(static_cast<int>(AtomColumn::Value), 110);
@@ -1289,6 +1291,7 @@ void KernelDock::initializeNtQueryTab()
     m_ntQueryTable->setCornerButtonEnabled(false);
     m_ntQueryTable->verticalHeader()->setVisible(false);
 
+    m_ntQueryTable->horizontalHeader()->setResizeContentsPrecision(100);
     m_ntQueryTable->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
     m_ntQueryTable->horizontalHeader()->setSectionResizeMode(static_cast<int>(NtQueryColumn::Summary), QHeaderView::Stretch);
 
