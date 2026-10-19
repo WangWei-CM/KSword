@@ -29,6 +29,7 @@ namespace
     constexpr char kInstalled[] = "ksword_table_presentation_installed";
     constexpr char kApplying[] = "ksword_table_presentation_applying";
     constexpr char kInitialized[] = "ksword_table_presentation_initialized";
+    constexpr char kThemeDirty[] = "ksword_table_presentation_theme_dirty";
 
     // 本组件写入QSS产生的事件不回投自己；真实外部主题/字体通知仍由过滤器维护。
     class PresentationChange final
@@ -43,7 +44,11 @@ namespace
 
         ~PresentationChange()
         {
-            if (m_view) m_view->setProperty(kApplying, m_previous);
+            if (m_view)
+            {
+                m_view->setProperty(kApplying, m_previous);
+                m_view->setProperty(kThemeDirty, false);
+            }
         }
 
     private:
@@ -124,6 +129,11 @@ namespace
                 // Show 到达时视图构造已完成；先统一 frame/grid/表头，避免先绘旧尺寸再跳变。
                 const QPointer<QAbstractItemView> view(qobject_cast<QAbstractItemView*>(source));
                 if (!supportedView(view.data()) || view->property(kApplying).toBool()) break;
+                if (view->property(kInitialized).toBool() &&
+                    !view->property(kThemeDirty).toBool())
+                {
+                    break;
+                }
                 view->setProperty(kPending, false); // 消费旧首次请求，旧计时回调不再重复改样式。
                 if (view.isNull()) return true;
                 const QVariant normalize = view->property(kNormalizeHeader);
@@ -136,10 +146,12 @@ namespace
             case QEvent::PaletteChange:
                 // 仅忽略此表格自己的样式回声，不吞真正的应用主题广播。
                 if (source->property(kApplying).toBool()) break;
+                source->setProperty(kThemeDirty, true);
                 schedulePresentation(qobject_cast<QAbstractItemView*>(source), true);
                 break;
             case QEvent::ApplicationPaletteChange:
                 // Only the view itself, never header/viewport/popup Show/Resize internals.
+                source->setProperty(kThemeDirty, true);
                 schedulePresentation(qobject_cast<QAbstractItemView*>(source), true);
                 break;
             default:

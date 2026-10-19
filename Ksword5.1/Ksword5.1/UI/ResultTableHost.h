@@ -77,6 +77,7 @@ namespace ks::ui
         QList<ResultTableColumn> m_columns;        // 逻辑列到稳定键的显式映射。
         ResultTableCapabilities m_capabilities;    // 页面声明的能力或存量默认值。
         bool m_explicitColumns = false;            // 是否使用业务定义而非兼容列号。
+        bool m_configured = false;                 // 通用交互已安装，模型更新不重复重排主题/操作条。
         bool m_refreshing = false;                 // 防止 QSS/属性变化造成同步重入。
         bool m_refreshScheduled = false;           // 合并模型结构变化的 queued 更新。
         QList<QMetaObject::Connection> m_modelConnections; // 换绑时明确断开旧模型信号。
