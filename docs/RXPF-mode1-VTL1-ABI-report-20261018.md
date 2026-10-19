@@ -605,7 +605,7 @@ Win32 错误转 NTSTATUS 的常见对照：
 - **PatchGuard 的检测窗口**是几分钟到几小时，取决于扫描周期。改了内容即使没执行到，PG 也会最终 bugcheck
 - **测试证书签名的驱动**在 testsigning on 的 VM 上可以加载，但不要尝试在 production HVCI 机上用
 - **禁止**在线符号服务器，禁止创建分支
-- 本任务只对 Hyper-V 来宾验证过，物理机 HVCI 行为未验
+- 本任务已在两处环境验证：(1) Hyper-V 来宾（CI/HVCI/HVCI-Strict/Secure Boot 全开，详见 §6 实验 #1–#6 + §15 next-exp #4/#7/#8/#2 已完成项）；(2) 26H2 实体机（全防护开启，详见 §6 实验 #7 primary evidence 与 [`.claude/memory/ksword-rxpf-mode1-realhardware-26h2-confirmed.md`](../.claude/memory/ksword-rxpf-mode1-realhardware-26h2-confirmed.md)）；两处结论一致（mode=1 restore 对修改后字节放行、PTE 顶字节 0x89↔0x09 直接可读、Phase G keep-modified 触发 0xFC NX 捕获）
 
 ## 15. 下一步接续者该做的
 
