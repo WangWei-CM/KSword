@@ -28,6 +28,7 @@
 
 #include "../Internationalization/LanguageManager.h"
 #include <QIcon>
+#include <QPointer>
 #include <QTabBar>
 #include <QTabWidget>
 #include <QTimer>
@@ -329,123 +330,181 @@ void MiscDock::initializeUi()
 
 void MiscDock::ensureTabInitialized(const int tabIndex, const bool activatePage)
 {
-    const ks::ui::ScopedWidgetThemePreparation themePreparation(m_mainTabWidget); // 不逐页复制首显准备。
     if (tabIndex < 0)
     {
         return;
     }
 
+    // 真正创建/挂载时才持有首帧守卫；复用页在业务激活后仅消费真实 dirty。
+    const auto ensurePage = [](QWidget* host, const bool needsConstruction, const auto& initialize)
+    {
+        if (needsConstruction)
+        {
+            const ks::ui::ScopedWidgetThemePreparation themePreparation(host);
+            initialize();
+            return;
+        }
+        const QPointer<QWidget> page(host); // 激活回调可能关闭或重挂宿主。
+        initialize();
+        if (page != nullptr && page->isVisible())
+        {
+            ks::ui::PrepareWidgetThemeBindingsForShow(page.data());
+        }
+    };
+
     if (tabIndex == m_themeCheckTabIndex)
     {
-        if (!m_themeCheckPage)
-        {
-            auto* layout = buildHostLayout(m_themeCheckHostWidget);
-            m_themeCheckPage = new ks::misc::ThemeCheckPage(m_themeCheckHostWidget);
-            layout->addWidget(m_themeCheckPage);
-        }
+        ensurePage(m_themeCheckHostWidget, m_themeCheckPage == nullptr, [this]() {
+            if (!m_themeCheckPage)
+            {
+                auto* layout = buildHostLayout(m_themeCheckHostWidget);
+                m_themeCheckPage = new ks::misc::ThemeCheckPage(m_themeCheckHostWidget);
+                layout->addWidget(m_themeCheckPage);
+            }
+        });
         return;
     }
 
     if (tabIndex == m_bootEditorTabIndex)
     {
-        initializeBootEditorTab();
+        ensurePage(m_bootEditorHostWidget, m_bootEditorTab == nullptr && m_bootEditorHostWidget != nullptr, [this]() {
+            initializeBootEditorTab();
+        });
         return;
     }
     if (tabIndex == m_soundSourceTabIndex)
     {
-        initializeSoundSourcePage();
+        ensurePage(m_soundSourceHostWidget, m_soundSourcePage == nullptr && m_soundSourceHostWidget != nullptr, [this]() {
+            initializeSoundSourcePage();
+        });
         return;
     }
     if (tabIndex == m_systemTimeTabIndex)
     {
-        initializeSystemTimePage();
+        ensurePage(m_systemTimeHostWidget, m_systemTimePage == nullptr && m_systemTimeHostWidget != nullptr, [this]() {
+            initializeSystemTimePage();
+        });
         return;
     }
     if (tabIndex == m_virtualLocationTabIndex)
     {
-        initializeVirtualLocationPage();
+        ensurePage(m_virtualLocationHostWidget, m_virtualLocationPage == nullptr && m_virtualLocationHostWidget != nullptr, [this]() {
+            initializeVirtualLocationPage();
+        });
         return;
     }
     if (tabIndex == m_bugcheckGuardTabIndex)
     {
         if (m_bugcheckDiagnosticsVisible)
         {
-            initializeBugcheckGuardPage();
+            ensurePage(m_bugcheckGuardHostWidget, m_bugcheckGuardPage == nullptr && m_bugcheckGuardHostWidget != nullptr, [this]() {
+                initializeBugcheckGuardPage();
+            });
         }
         return;
     }
     if (tabIndex == m_disableDseTabIndex)
     {
-        initializeDisableDsePage();
+        ensurePage(m_disableDseHostWidget, m_disableDsePage == nullptr && m_disableDseHostWidget != nullptr, [this]() {
+            initializeDisableDsePage();
+        });
         return;
     }
     if (tabIndex == m_cksTabIndex)
     {
-        initializeCksPage();
+        ensurePage(m_cksHostWidget, m_cksPage == nullptr && m_cksHostWidget != nullptr, [this]() {
+            initializeCksPage();
+        });
         return;
     }
     if (tabIndex == m_contextMenuCleanerTabIndex)
     {
-        initializeContextMenuCleanerTab();
+        ensurePage(m_contextMenuCleanerHostWidget, m_contextMenuCleanerTab == nullptr && m_contextMenuCleanerHostWidget != nullptr, [this]() {
+            initializeContextMenuCleanerTab();
+        });
         return;
     }
     if (tabIndex == m_diskEditorTabIndex)
     {
-        initializeDiskEditorTab();
+        ensurePage(m_diskEditorHostWidget, m_diskEditorTab == nullptr && m_diskEditorHostWidget != nullptr, [this]() {
+            initializeDiskEditorTab();
+        });
         return;
     }
     if (tabIndex == m_applicationControlTabIndex)
     {
-        initializeApplicationControlPage();
+        ensurePage(m_applicationControlHostWidget, m_applicationControlPage == nullptr && m_applicationControlHostWidget != nullptr, [this]() {
+            initializeApplicationControlPage();
+        });
         return;
     }
     if (tabIndex == m_clipboardGuardTabIndex)
     {
-        initializeClipboardGuardPage();
-        if (activatePage && m_clipboardGuardPage != nullptr)
-        {
-            m_clipboardGuardPage->notifyPageActivated();
-        }
+        ensurePage(m_clipboardGuardHostWidget,
+            m_clipboardGuardPage == nullptr && m_clipboardGuardHostWidget != nullptr,
+            [this, activatePage]() {
+                initializeClipboardGuardPage();
+                if (activatePage && m_clipboardGuardPage != nullptr)
+                {
+                    m_clipboardGuardPage->notifyPageActivated();
+                }
+            });
         return;
     }
     if (tabIndex == m_renderBenchmarkTabIndex)
     {
-        initializeRenderBenchmarkPage();
+        ensurePage(m_renderBenchmarkHostWidget, m_renderBenchmarkPage == nullptr && m_renderBenchmarkHostWidget != nullptr, [this]() {
+            initializeRenderBenchmarkPage();
+        });
         return;
     }
     if (tabIndex == m_desktopDrawingTabIndex)
     {
-        initializeDesktopDrawingPage();
+        ensurePage(m_desktopDrawingHostWidget, m_desktopDrawingPage == nullptr && m_desktopDrawingHostWidget != nullptr, [this]() {
+            initializeDesktopDrawingPage();
+        });
         return;
     }
     if (tabIndex == m_windowInjectionTabIndex)
     {
-        initializeWindowInjectionPage();
+        ensurePage(m_windowInjectionHostWidget, m_windowInjectionPage == nullptr && m_windowInjectionHostWidget != nullptr, [this]() {
+            initializeWindowInjectionPage();
+        });
         return;
     }
     if (tabIndex == m_hvciBypassTabIndex)
     {
-        initializeHvciBypassPage();
+        ensurePage(m_hvciBypassHostWidget, m_hvciBypassPage == nullptr && m_hvciBypassHostWidget != nullptr, [this]() {
+            initializeHvciBypassPage();
+        });
         return;
     }
     if (tabIndex == m_rxpfTabIndex)
     {
-        initializeRxpfPage();
+        ensurePage(m_rxpfHostWidget, m_rxpfPage == nullptr && m_rxpfHostWidget != nullptr, [this]() {
+            initializeRxpfPage();
+        });
         return;
     }
     if (tabIndex == m_scannerTabIndex)
     {
-        initializeScannerPage();
+        ensurePage(m_scannerHostWidget, m_scannerPage == nullptr && m_scannerHostWidget != nullptr, [this]() {
+            initializeScannerPage();
+        });
         return;
     }
     if (tabIndex == m_minidumpTabIndex)
     {
-        initializeMinidumpPage();
+        ensurePage(m_minidumpHostWidget, m_minidumpPage == nullptr && m_minidumpHostWidget != nullptr, [this]() {
+            initializeMinidumpPage();
+        });
         return;
     }
     if (tabIndex == m_pluginTabIndex)
     {
-        initializePluginPage();
+        ensurePage(m_pluginHostWidget, m_pluginPage == nullptr && m_pluginHostWidget != nullptr, [this]() {
+            initializePluginPage();
+        });
         return;
     }
 }
