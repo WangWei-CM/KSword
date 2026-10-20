@@ -6,6 +6,7 @@
 #include "../Framework/PrivilegeElevationPrompt.h"
 #include "../OnlineScan/SandboxUploadActions.h"
 #include "../UI/TableInteractionSupport.h"
+#include "../UI/AsyncUiDispatcher.h"
 #include "../UI/ThemeStatusRole.h"
 #include "../theme.h"
 
@@ -18,6 +19,14 @@
 // ============================================================
 
 #include <QApplication>
+#include <QAbstractItemView>
+#include <QImage>
+#include <QPersistentModelIndex>
+#include <QPixmap>
+#include <QQueue>
+#include <QRunnable>
+#include <QScrollBar>
+#include <QThreadPool>
 #include <QCheckBox>
 #include <QClipboard>
 #include <QComboBox>
@@ -28,7 +37,6 @@
 #include <QDir>
 #include <QFile>
 #include <QFileDialog>
-#include <QFileIconProvider>
 #include <QFileInfo>
 #include <QIcon>
 #include <QLabel>
@@ -59,6 +67,9 @@
 #define NOMINMAX
 #endif
 #include <TlHelp32.h>
+#include <Shellapi.h>
+
+#pragma comment(lib, "Shell32.lib")
 #include "../../../shared/ApiMonitorInjection.h"
 
 namespace
@@ -132,22 +143,203 @@ namespace
         return processList;
     }
 
-    // processIconForPath：
-    // - 作用：为进程下拉框解析系统文件图标；
-    // - 处理：优先按 imagePath 获取 shell 图标，失败时回退项目内置进程图标；
-    // - 返回：可直接设置到 QComboBox item 的 QIcon。
-    QIcon processIconForPath(const QString& imagePathText)
+    // Pure value scheduler: at most two Shell requests and one bounded visible demand.
+    // Completed failures also stay cached, so an unreadable path is not retried on every paint.
+    struct ProcessIconDemandState
     {
-        static QFileIconProvider iconProvider;
-        if (!imagePathText.trimmed().isEmpty())
+        static constexpr int MaximumInFlight = 2;
+        static constexpr qsizetype MaximumDemand = 129;
+        static constexpr qsizetype MaximumCached = 512;
+        QStringList demand;
+        QSet<QString> inFlight;
+        QSet<QString> completed;
+        QQueue<QString> completedOrder;
+
+        void replaceDemand(const QStringList& paths)
         {
-            const QIcon fileIcon = iconProvider.icon(QFileInfo(imagePathText));
-            if (!fileIcon.isNull())
+            demand.clear();
+            QSet<QString> seen;
+            for (const QString& path : paths)
             {
-                return fileIcon;
+                if (path.isEmpty() || seen.contains(path)) continue;
+                seen.insert(path);
+                demand.append(path);
+                if (demand.size() == MaximumDemand) break;
             }
         }
-        return QIcon(QStringLiteral(":/Icon/process_main.svg"));
+
+        QString takeNext()
+        {
+            if (inFlight.size() >= MaximumInFlight) return {};
+            for (const QString& path : demand)
+            {
+                if (!inFlight.contains(path) && !completed.contains(path))
+                {
+                    inFlight.insert(path);
+                    return path;
+                }
+            }
+            return {};
+        }
+
+        QString complete(const QString& path)
+        {
+            inFlight.remove(path);
+            if (completed.contains(path)) return {};
+            completed.insert(path);
+            completedOrder.enqueue(path);
+            if (completedOrder.size() <= MaximumCached) return {};
+            const QString evicted = completedOrder.dequeue();
+            completed.remove(evicted);
+            return evicted;
+        }
+    };
+
+    const QIcon& processPlaceholderIcon()
+    {
+        static const QIcon icon(QStringLiteral(":/Icon/process_main.svg"));
+        return icon;
+    }
+
+    QString processIconPathKey(const QString& path)
+    {
+        return QDir::fromNativeSeparators(path.trimmed()).toCaseFolded();
+    }
+
+    QImage extractProcessSelectorIcon(const QString& path)
+    {
+        SHFILEINFOW shellInfo{};
+        const auto result = ::SHGetFileInfoW(reinterpret_cast<const wchar_t*>(path.utf16()),
+            0, &shellInfo, sizeof(shellInfo), SHGFI_ICON | SHGFI_LARGEICON);
+        if (result == 0 || shellInfo.hIcon == nullptr) return {};
+        const QImage image = QImage::fromHICON(shellInfo.hIcon);
+        ::DestroyIcon(shellInfo.hIcon);
+        return image;
+    }
+
+    // QObject owns only projection/cache state. Workers own values and a closeable dispatcher;
+    // neither closing this page nor refreshing its candidate model waits for Shell.
+    class ProcessSelectorIconLoader final : public QObject
+    {
+    public:
+        explicit ProcessSelectorIconLoader(QComboBox* combo, QLabel* selectedIcon)
+            : QObject(combo), m_combo(combo), m_selectedIcon(selectedIcon), m_dispatcher(std::make_shared<ks::ui::AsyncUiDispatcher>(this))
+        {
+            setObjectName(QStringLiteral("winapi-process-icon-loader"));
+            m_timer.setSingleShot(true);
+            m_timer.setInterval(0);
+            connect(&m_timer, &QTimer::timeout, this, [this]() { refreshDemand(); });
+            combo->installEventFilter(this);
+            combo->view()->installEventFilter(this);
+            combo->view()->viewport()->installEventFilter(this);
+            connect(combo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this]() { schedule(); });
+            connect(combo->view()->verticalScrollBar(), &QScrollBar::valueChanged,
+                this, [this]() { schedule(); });
+        }
+
+        ~ProcessSelectorIconLoader() override { m_dispatcher->close(); }
+
+        void schedule() { if (!m_timer.isActive()) m_timer.start(); }
+
+    protected:
+        bool eventFilter(QObject* watched, QEvent* event) override
+        {
+            switch (event->type())
+            {
+            case QEvent::Show:
+            case QEvent::Hide:
+            case QEvent::Resize:
+            case QEvent::Wheel:
+            case QEvent::KeyRelease:
+                schedule();
+                break;
+            default: break;
+            }
+            return QObject::eventFilter(watched, event);
+        }
+
+    private:
+        static QThreadPool& extractionPool()
+        {
+            static QThreadPool pool;
+            static const bool configured = []() {
+                pool.setMaxThreadCount(ProcessIconDemandState::MaximumInFlight);
+                pool.setExpiryTimeout(1000);
+                return true;
+            }();
+            (void)configured;
+            return pool;
+        }
+
+        void refreshDemand()
+        {
+            QStringList paths;
+            QHash<QString, QString> originalPaths;
+            QVector<QPersistentModelIndex> indexes;
+            auto addRow = [this, &paths, &originalPaths, &indexes](const int row) {
+                if (row < 0 || row >= m_combo->count()) return;
+                const QModelIndex index = m_combo->model()->index(row, m_combo->modelColumn(), m_combo->rootModelIndex());
+                const QString path = index.data(Qt::UserRole + 2).toString().trimmed();
+                const QString key = processIconPathKey(path);
+                if (key.isEmpty()) return;
+                indexes.append(QPersistentModelIndex(index));
+                paths.append(key);
+                originalPaths.insert(key, path);
+            };
+            // The selected candidate gets first priority; unopened/hidden candidates do no work.
+            if (m_combo->isVisible()) addRow(m_combo->currentIndex());
+            QAbstractItemView* view = m_combo->view();
+            if (m_combo->isVisible() && view->isVisible())
+            {
+                const QModelIndex first = view->indexAt(QPoint(2, 2));
+                const QModelIndex last = view->indexAt(QPoint(2, std::max(2, view->viewport()->height() - 2)));
+                const int firstRow = first.isValid() ? first.row() : 0;
+                const int lastRow = last.isValid() ? last.row() : firstRow + 127;
+                for (int row = firstRow; row <= lastRow && row < firstRow + 128; ++row) addRow(row);
+            }
+            m_state.replaceDemand(paths);
+            for (const QPersistentModelIndex& index : indexes)
+            {
+                if (!index.isValid()) continue;
+                const QString key = processIconPathKey(index.data(Qt::UserRole + 2).toString());
+                const auto cached = m_icons.constFind(key);
+                if (cached != m_icons.constEnd())
+                {
+                    const QIcon current = qvariant_cast<QIcon>(index.data(Qt::DecorationRole));
+                    if (current.cacheKey() != cached->cacheKey())
+                        m_combo->model()->setData(index, *cached, Qt::DecorationRole);
+                }
+            }
+            if (m_selectedIcon != nullptr && m_combo->currentIndex() >= 0)
+                m_selectedIcon->setPixmap(m_combo->itemIcon(m_combo->currentIndex()).pixmap(20, 20));            for (QString key = m_state.takeNext(); !key.isEmpty(); key = m_state.takeNext())
+            {
+                const QString path = originalPaths.value(key);
+                const auto dispatcher = m_dispatcher;
+                extractionPool().start(QRunnable::create([this, dispatcher, key, path]() {
+                    QImage image;
+                    try { image = extractProcessSelectorIcon(path); } catch (...) {}
+                    dispatcher->post([this, key, image = std::move(image)]() {
+                        const QString evicted = m_state.complete(key);
+                        if (!evicted.isEmpty()) m_icons.remove(evicted);
+                        m_icons.insert(key, image.isNull() ? processPlaceholderIcon() : QIcon(QPixmap::fromImage(image)));
+                        schedule();
+                    });
+                }));
+            }
+        }
+
+        QComboBox* m_combo;
+        QPointer<QLabel> m_selectedIcon;
+        QTimer m_timer;
+        ProcessIconDemandState m_state;
+        QHash<QString, QIcon> m_icons;
+        std::shared_ptr<ks::ui::AsyncUiDispatcher> m_dispatcher;
+    };
+
+    ProcessSelectorIconLoader* processIconLoader(QComboBox* combo, QLabel* selectedIcon)
+    {
+        auto* existing = combo->findChild<QObject*>(QStringLiteral("winapi-process-icon-loader"), Qt::FindDirectChildrenOnly);
+        return existing != nullptr ? static_cast<ProcessSelectorIconLoader*>(existing) : new ProcessSelectorIconLoader(combo, selectedIcon);
     }
 
     // processDisplayName：
@@ -534,7 +726,7 @@ void WinAPIDock::populateProcessSelector(const std::vector<ks::process::ProcessR
             const QString processName = QString::fromStdString(
                 record.processName.empty() ? std::string("<Unknown>") : record.processName);
             const QString imagePathText = QString::fromStdString(record.imagePath);
-            const QIcon processIcon = processIconForPath(imagePathText);
+            const QIcon processIcon = processPlaceholderIcon();
             const QString displayText = processDisplayName(record);
             m_processCombo->addItem(processIcon, displayText, QVariant::fromValue(static_cast<quint32>(record.pid)));
 
@@ -571,6 +763,7 @@ void WinAPIDock::populateProcessSelector(const std::vector<ks::process::ProcessR
         m_processStatusLabel->setText(QStringLiteral("● 已刷新 %1 个进程").arg(m_processList.size()));
         ks::ui::ApplyStatusRole(m_processStatusLabel, ks::ui::StatusRole::Success);
     }
+    processIconLoader(m_processCombo, m_processIconLabel)->schedule();
     updateProcessSelectorStatus();
 }
 
