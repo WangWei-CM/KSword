@@ -100,6 +100,7 @@ namespace ks::ui
         void applyPrepared(ComplexReportModel::FilterSnapshot prepared);
         int matchCount(const QModelIndex& proxyRoot = {}) const;
         QStringList expansionPaths() const;
+        ComplexReportModel::FilterSnapshot preparedSnapshot() const { return m_prepared; }
         void setQuery(const QString& query);
         void setDiagnosticsOnly(bool enabled);
         void setScopePath(const QString& path);

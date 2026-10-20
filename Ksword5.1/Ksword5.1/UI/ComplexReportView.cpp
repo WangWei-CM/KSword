@@ -59,6 +59,19 @@ namespace
 
 namespace ks::ui
 {
+    struct ComplexReportView::ReadingRestore
+    {
+        QSet<QString> collapse;
+        QSet<QString> expand;
+        QSet<QString>::const_iterator collapsePosition;
+        QSet<QString>::const_iterator expandPosition;
+        QString selected;
+        int column = 0;
+        int scroll = 0;
+        quint64 documentTicket = 0;
+        quint64 filterTicket = 0;
+    };
+
     ComplexReportView::ComplexReportView(QWidget* parent)
         : QWidget(parent), m_dispatcher(std::make_shared<AsyncUiDispatcher>(this))
     {
@@ -242,6 +255,8 @@ namespace ks::ui
             m_rawDirty = true;
             m_language = ks::i18n::LanguageManager::instance().currentLanguageId();
             m_projectionDirty = true;
+            ++m_readingGeneration;
+            ++m_expansionGeneration;
             ++*m_filterGeneration;
             m_candidate.reset();
             ++*m_prepareGeneration; // Cancel an obsolete language projection before any queued return.
@@ -254,22 +269,84 @@ namespace ks::ui
     // 保存稳定路径而非 QModelIndex，文档刷新后仍能恢复对应字段。
     QSet<QString> ComplexReportView::expandedPaths() const
     {
-        return m_expandedPaths;
+        return m_readingRestore ? m_readingRestore->expand : m_expandedPaths;
     }
 
-    void ComplexReportView::restoreExpansion(const QSet<QString>& paths)
+    void ComplexReportView::restoreReading(const QSet<QString>& paths, const QString& selected,
+        int column, int scroll, bool collapse)
     {
+        auto restore = std::shared_ptr<ReadingRestore>(new ReadingRestore, [](ReadingRestore* retired)
+        { QThreadPool::globalInstance()->start([retired]() { delete retired; }); });
+        if (collapse) restore->collapse = m_expandedPaths;
+        restore->expand = paths;
+        restore->collapsePosition = restore->collapse.cbegin();
+        restore->expandPosition = restore->expand.cbegin();
+        restore->selected = selected;
+        restore->column = column;
+        restore->scroll = scroll;
+        restore->documentTicket = m_prepareGeneration->load();
+        restore->filterTicket = m_filterGeneration->load();
+        // Keep target sets immutable while tree signals build a new current expansion set.
+        m_expandedPaths.clear();
+        m_readingRestore = std::move(restore);
+        continueReadingRestore(++m_readingGeneration);
+    }
+
+    void ComplexReportView::continueReadingRestore(quint64 ticket)
+    {
+        if (ticket != m_readingGeneration || !m_readingRestore || !isVisible() || m_preparing) return;
         const QPointer<ComplexReportView> alive(this);
+        const auto request = m_readingRestore;
         const auto documentGeneration = m_prepareGeneration;
         const auto filterGeneration = m_filterGeneration;
-        const quint64 documentTicket = documentGeneration->load();
-        const quint64 filterTicket = filterGeneration->load();
-        for (const QString& path : paths)
+        const auto currentRequest = [&]()
         {
+            return alive && ticket == m_readingGeneration && documentGeneration->load() == request->documentTicket
+                && filterGeneration->load() == request->filterTicket;
+        };
+        if (!currentRequest()) return;
+        QElapsedTimer elapsed;
+        elapsed.start();
+        int count = 0;
+        while (count++ < 128 && elapsed.elapsed() < 4)
+        {
+            ReadingRestore& restore = *m_readingRestore;
+            const bool collapsing = restore.collapsePosition != restore.collapse.cend();
+            if (!collapsing && restore.expandPosition == restore.expand.cend()) break;
+            const QString path = collapsing ? *restore.collapsePosition++ : *restore.expandPosition++;
             const QModelIndex index = m_proxy->mapFromSource(m_model->indexForPath(path));
-            if (index.isValid()) m_tree->setExpanded(index, true);
-            if (!alive || documentGeneration->load() != documentTicket || filterGeneration->load() != filterTicket) return;
+            if (index.isValid()) m_tree->setExpanded(index, !collapsing);
+            if (!currentRequest() || !m_readingRestore) return;
+            if (index.isValid())
+            {
+                if (collapsing) m_expandedPaths.remove(path);
+                else m_expandedPaths.insert(path);
+            }
         }
+        if (m_readingRestore->collapsePosition != m_readingRestore->collapse.cend()
+            || m_readingRestore->expandPosition != m_readingRestore->expand.cend())
+        {
+            QTimer::singleShot(0, this, [this, ticket]() { continueReadingRestore(ticket); });
+            return;
+        }
+        auto completed = std::move(m_readingRestore);
+        const QModelIndex current = m_proxy->mapFromSource(m_model->indexForPath(completed->selected));
+        if (current.isValid()) m_tree->setCurrentIndex(current.siblingAtColumn(completed->column));
+        if (!currentRequest()) return;
+        m_tree->doItemsLayout();
+        if (!currentRequest()) return;
+        m_tree->verticalScrollBar()->setValue(completed->scroll);
+        if (!currentRequest()) return;
+        if (m_query.isEmpty() && m_restoreAfterSearch)
+        {
+            m_beforeSearch.clear();
+            m_restoreAfterSearch = false;
+        }
+        if (!m_query.isEmpty()) expandSearchGroups();
+        else if (m_scopePath == kDiagnostics) m_tree->expandToDepth(0);
+        if (!currentRequest()) return;
+        updatePresentation();
+        QThreadPool::globalInstance()->start([retired = std::move(completed)]() {});
     }
 
     ComplexReportView::~ComplexReportView()
@@ -277,6 +354,9 @@ namespace ks::ui
         m_dispatcher->close();
         ++*m_prepareGeneration;
         ++*m_filterGeneration;
+        auto pending = std::move(m_requestedDocument);
+        auto restore = std::move(m_readingRestore);
+        QThreadPool::globalInstance()->start([pending = std::move(pending), restore = std::move(restore)]() {});
     }
 
     void ComplexReportView::showEvent(QShowEvent* event)
@@ -284,7 +364,8 @@ namespace ks::ui
         QWidget::showEvent(event);
         if (m_projectionDirty) prepareDocument();
         else if (m_searchPending) scheduleSearch(false);
-        else if (!m_query.isEmpty() && m_expansionOffset < m_searchExpansion.size())
+        else if (m_readingRestore) continueReadingRestore(m_readingGeneration);
+        else if (!m_query.isEmpty() && m_searchExpansion && m_expansionOffset < m_searchExpansion->expansionPaths.size())
             continueSearchExpansion(m_expansionGeneration);
     }
 
@@ -292,7 +373,11 @@ namespace ks::ui
     {
         ++*m_filterGeneration;
         m_candidate.reset();
+        auto retired = std::move(m_requestedDocument);
         m_requestedDocument = document;
+        ++m_readingGeneration;
+        ++m_expansionGeneration;
+        QThreadPool::globalInstance()->start([retired = std::move(retired)]() {});
         m_projectionDirty = true;
         ++*m_prepareGeneration;
         if (isVisible()) prepareDocument();
@@ -342,6 +427,12 @@ namespace ks::ui
     {
         const quint64 ticket = ++*m_filterGeneration;
         ++m_expansionGeneration;
+        if (m_readingRestore && !m_preparing)
+        {
+            ++m_readingGeneration;
+            auto retired = std::move(m_readingRestore);
+            QThreadPool::globalInstance()->start([retired = std::move(retired)]() {});
+        }
         m_searchPending = true;
         const QPointer<ComplexReportView> alive(this);
         const auto documentGeneration = m_prepareGeneration;
@@ -365,6 +456,7 @@ namespace ks::ui
         const quint64 ticket = generation->load();
         const quint64 documentTicket = documentGeneration->load();
         const QString query = m_query;
+        const QSet<QString> expandedState = expandedPaths();
         QString scope = !m_initialized ? ComplexReportModel::preferredScopePath(source)
             : m_scopePath == kDiagnostics ? QString() : m_scopePath;
         if (!scope.isEmpty() && !ComplexReportModel::containsPath(source, scope)) scope.clear();
@@ -372,14 +464,18 @@ namespace ks::ui
         const QPointer<ComplexReportView> safe(this);
         const auto dispatcher = m_dispatcher;
         QThreadPool::globalInstance()->start([source, candidate, generation, ticket, documentGeneration,
-            documentTicket, query, scope, diagnostics, safe, dispatcher]()
+            documentTicket, query, scope, diagnostics, expandedState, safe, dispatcher]()
         {
             const auto cancelled = [generation, ticket, documentGeneration, documentTicket]()
             { return generation->load() != ticket || documentGeneration->load() != documentTicket; };
             auto prepared = ComplexReportModel::prepareFilter(source, query, scope, diagnostics, cancelled);
             if (!prepared || cancelled()) return;
+            auto independentExpansion = std::shared_ptr<QSet<QString>>(new QSet<QString>(expandedState),
+                [](QSet<QString>* retired) { QThreadPool::globalInstance()->start([retired]() { delete retired; }); });
+            independentExpansion->detach();
+            if (cancelled()) return;
             dispatcher->post([safe, prepared = std::move(prepared), candidate,
-                generation, ticket, documentGeneration, documentTicket]()
+                generation, ticket, documentGeneration, documentTicket, independentExpansion]()
             {
                 auto expectedCandidate = candidate;
                 const auto current = [&]()
@@ -397,11 +493,16 @@ namespace ks::ui
                 }
                 QElapsedTimer elapsed;
                 elapsed.start();
-                const QString selected = safe->m_tree->currentIndex().data(ReportPathRole).toString();
-                const int column = qMax(0, safe->m_tree->currentIndex().column());
-                const int scroll = safe->m_tree->verticalScrollBar()->value();
+                const QString selected = safe->m_readingRestore ? safe->m_readingRestore->selected
+                    : safe->m_tree->currentIndex().data(ReportPathRole).toString();
+                const int column = safe->m_readingRestore ? safe->m_readingRestore->column
+                    : qMax(0, safe->m_tree->currentIndex().column());
+                const int scroll = safe->m_readingRestore ? safe->m_readingRestore->scroll
+                    : safe->m_tree->verticalScrollBar()->value();
                 QSet<QString> expanded;
-                if (candidate && candidate->reset) expanded = safe->expandedPaths();
+                const bool wasRestoring = bool(safe->m_readingRestore);
+                if (candidate && (candidate->reset || wasRestoring)) expanded = safe->expandedPaths();
+                safe->m_expandedPaths.swap(*independentExpansion);
                 safe->m_proxy->stagePrepared(prepared);
                 if (!current()) return;
                 if (candidate)
@@ -432,42 +533,26 @@ namespace ks::ui
                 }
                 safe->m_preparing = false;
                 safe->m_searchPending = false;
-                if (candidate && candidate->reset)
-                {
-                    safe->m_expandedPaths.clear();
-                    safe->restoreExpansion(expanded);
-                    if (!current()) return;
-                    const QModelIndex selectedIndex = safe->m_proxy->mapFromSource(safe->m_model->indexForPath(selected));
-                    if (selectedIndex.isValid()) safe->m_tree->setCurrentIndex(selectedIndex.siblingAtColumn(column));
-                    if (!current()) return;
-                    safe->m_tree->doItemsLayout();
-                    if (!current()) return;
-                    safe->m_tree->verticalScrollBar()->setValue(scroll);
-                    if (!current()) return;
-                }
+                bool restoring = false;
                 if (safe->m_restoreAfterSearch && safe->m_query.isEmpty())
                 {
-                    safe->m_tree->collapseAll();
-                    if (!current()) return;
-                    safe->m_expandedPaths.clear();
-                    safe->restoreExpansion(safe->m_beforeSearch);
-                    if (!current()) return;
-                    const QModelIndex selectedIndex = safe->m_proxy->mapFromSource(safe->m_model->indexForPath(safe->m_beforeSearchSelected));
-                    if (selectedIndex.isValid()) safe->m_tree->setCurrentIndex(selectedIndex.siblingAtColumn(safe->m_beforeSearchColumn));
-                    if (!current()) return;
-                    safe->m_tree->doItemsLayout();
-                    if (!current()) return;
-                    safe->m_tree->verticalScrollBar()->setValue(safe->m_beforeSearchScroll);
-                    if (!current()) return;
-                    safe->m_beforeSearch.clear();
-                    safe->m_restoreAfterSearch = false;
+                    safe->restoreReading(safe->m_beforeSearch, safe->m_beforeSearchSelected,
+                        safe->m_beforeSearchColumn, safe->m_beforeSearchScroll, true);
+                    restoring = true;
                 }
-                if (!safe->m_query.isEmpty()) safe->expandSearchGroups();
-                else if (safe->m_scopePath == kDiagnostics) safe->m_tree->expandToDepth(0);
+                else if (candidate && (candidate->reset || wasRestoring))
+                {
+                    safe->restoreReading(expanded, selected, column, scroll, false);
+                    restoring = true;
+                }
+                if (!current()) return;
+                if (!restoring && !safe->m_query.isEmpty()) safe->expandSearchGroups();
+                else if (!restoring && safe->m_scopePath == kDiagnostics) safe->m_tree->expandToDepth(0);
                 if (!current()) return;
                 safe->updatePresentation();
                 if (!current()) return;
                 safe->setProperty("ksword_report_update_us", elapsed.nsecsElapsed() / 1000);
+                QThreadPool::globalInstance()->start([retired = independentExpansion]() {});
             });
         });
     }
@@ -560,9 +645,10 @@ namespace ks::ui
         if (m_query.isEmpty() && !next.isEmpty() && !m_restoreAfterSearch)
         {
             m_beforeSearch = expandedPaths();
-            m_beforeSearchSelected = m_tree->currentIndex().data(ReportPathRole).toString();
-            m_beforeSearchColumn = qMax(0, m_tree->currentIndex().column());
-            m_beforeSearchScroll = m_tree->verticalScrollBar()->value();
+            m_beforeSearchSelected = m_readingRestore ? m_readingRestore->selected
+                : m_tree->currentIndex().data(ReportPathRole).toString();
+            m_beforeSearchColumn = m_readingRestore ? m_readingRestore->column : qMax(0, m_tree->currentIndex().column());
+            m_beforeSearchScroll = m_readingRestore ? m_readingRestore->scroll : m_tree->verticalScrollBar()->value();
         }
         m_restoreAfterSearch = next.isEmpty();
         m_query = next;
@@ -571,14 +657,16 @@ namespace ks::ui
 
     void ComplexReportView::expandSearchGroups()
     {
-        m_searchExpansion = m_proxy->expansionPaths();
+        m_searchExpansion = m_proxy->preparedSnapshot();
         m_expansionOffset = 0;
         continueSearchExpansion(++m_expansionGeneration);
     }
 
     void ComplexReportView::continueSearchExpansion(quint64 ticket)
     {
-        if (ticket != m_expansionGeneration || m_query.isEmpty() || !isVisible()) return;
+        if (ticket != m_expansionGeneration || m_query.isEmpty() || !isVisible() || m_preparing || m_searchPending) return;
+        const auto expansion = m_searchExpansion;
+        if (!expansion) return;
         QElapsedTimer elapsed;
         elapsed.start();
         int count = 0;
@@ -587,14 +675,14 @@ namespace ks::ui
         const auto filterGeneration = m_filterGeneration;
         const quint64 documentTicket = documentGeneration->load();
         const quint64 filterTicket = filterGeneration->load();
-        while (m_expansionOffset < m_searchExpansion.size() && count++ < 128 && elapsed.elapsed() < 4)
+        while (m_expansionOffset < expansion->expansionPaths.size() && count++ < 128 && elapsed.elapsed() < 4)
         {
-            const QModelIndex index = m_proxy->mapFromSource(m_model->indexForPath(m_searchExpansion.at(m_expansionOffset++)));
+            const QModelIndex index = m_proxy->mapFromSource(m_model->indexForPath(expansion->expansionPaths.at(m_expansionOffset++)));
             if (index.isValid()) m_tree->setExpanded(index, true);
             if (!alive || ticket != m_expansionGeneration || documentGeneration->load() != documentTicket
                 || filterGeneration->load() != filterTicket) return;
         }
-        if (m_expansionOffset < m_searchExpansion.size())
+        if (m_expansionOffset < expansion->expansionPaths.size())
             QTimer::singleShot(0, this, [this, ticket]() { continueSearchExpansion(ticket); });
     }
 
@@ -610,9 +698,9 @@ namespace ks::ui
     {
         const bool raw = m_modes->currentIndex() == 1;
         const bool empty = m_proxy->rowCount(displayRoot()) == 0;
-        m_tree->setEnabled(!m_preparing && !m_searchPending);
+        m_tree->setEnabled(!m_preparing && !m_searchPending && !m_readingRestore);
         m_scopes->setEnabled(!m_preparing);
-        m_actions->setEnabled(!m_preparing && !m_searchPending);
+        m_actions->setEnabled(!m_preparing && !m_searchPending && !m_readingRestore);
         m_diagnostics->setEnabled(!m_preparing);
         const bool diagnostics = m_scopePath == kDiagnostics;
         if (diagnostics != m_diagnosticColumns)
@@ -625,10 +713,10 @@ namespace ks::ui
             m_tree->setColumnWidth(0, diagnostics ? m_diagnosticNameWidth : m_catalogNameWidth);
         }
         m_tree->setVisible(!raw && !empty);
-        m_empty->setText(text(m_preparing || m_searchPending ? QStringLiteral("正在加载...") : m_query.isEmpty() ? QStringLiteral("暂无报告数据") : QStringLiteral("没有匹配的属性")));
+        m_empty->setText(text(m_preparing || m_searchPending || m_readingRestore ? QStringLiteral("正在加载...") : m_query.isEmpty() ? QStringLiteral("暂无报告数据") : QStringLiteral("没有匹配的属性")));
         m_empty->setVisible(!raw && empty);
         m_types->setEnabled(!m_preparing && (raw || m_query.isEmpty()));
-        m_count->setText(m_preparing || m_searchPending ? text(QStringLiteral("正在加载...")) : raw ? text(QStringLiteral("完整原文")) : !m_query.isEmpty()
+        m_count->setText(m_preparing || m_searchPending || m_readingRestore ? text(QStringLiteral("正在加载...")) : raw ? text(QStringLiteral("完整原文")) : !m_query.isEmpty()
             ? text(QStringLiteral("%1 项匹配")).arg(m_proxy->matchCount(displayRoot()))
             : text(QStringLiteral("%1 行")).arg(m_proxy->rowCount(displayRoot())));
         if (m_search)
@@ -651,7 +739,7 @@ namespace ks::ui
                 m_layout->addWidget(m_editor, 1);
             }
             const QPointer<ComplexReportView> alive(this);
-            if (!m_preparing) updateRawText();
+            if (!m_preparing && !m_readingRestore) updateRawText();
             if (!alive) return;
             m_editor->show();
         }

@@ -56,7 +56,9 @@ namespace ks::ui
         QModelIndex scopeIndex() const;
         QModelIndex displayRoot() const;
         QSet<QString> expandedPaths() const;
-        void restoreExpansion(const QSet<QString>& paths);
+        struct ReadingRestore;
+        void restoreReading(const QSet<QString>& paths, const QString& selected, int column, int scroll, bool collapse);
+        void continueReadingRestore(quint64 ticket);
         std::shared_ptr<AsyncUiDispatcher> m_dispatcher; // Close before any derived teardown.
         ComplexReportModel* m_model = nullptr; // 唯一完整规范快照，原文和复制均从这里读取。
         ComplexReportFilter* m_proxy = nullptr; // 元数据去重与多词匹配，不重建第二份字段数据。
@@ -85,9 +87,11 @@ namespace ks::ui
         std::shared_ptr<const ComplexReportModel::PreparedDocument> m_candidate;
         std::shared_ptr<std::atomic<quint64>> m_filterGeneration = std::make_shared<std::atomic<quint64>>(0);
         QSet<QString> m_expandedPaths;
-        QStringList m_searchExpansion;
+        ComplexReportModel::FilterSnapshot m_searchExpansion;
         qsizetype m_expansionOffset = 0;
         quint64 m_expansionGeneration = 0;
+        std::shared_ptr<ReadingRestore> m_readingRestore;
+        quint64 m_readingGeneration = 0;
         bool m_restoreAfterSearch = false;
         bool m_searchPending = false;
         bool m_preparing = false;
