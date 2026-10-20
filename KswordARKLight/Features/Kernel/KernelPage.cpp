@@ -28,6 +28,7 @@
 #include <limits>
 #include <set>
 #include <sstream>
+#include <stdexcept>
 #include <unordered_map>
 
 namespace Ksword::Features::Kernel {
@@ -1488,6 +1489,12 @@ struct KernelObjectNamespaceTreeNodeState {
 namespace {
 bool KernelUsesValueProjection(const KernelFeatureId featureId) {
     switch(featureId) {
+    case KernelFeatureId::NamedPipe:
+    case KernelFeatureId::BaseNamedObjects:
+    case KernelFeatureId::SymbolicLink:
+    case KernelFeatureId::DeviceDriverObjects:
+    case KernelFeatureId::ObjectTypeMatrix:
+    case KernelFeatureId::CommunicationEndpoint:
     case KernelFeatureId::DynData:
     case KernelFeatureId::DriverStatus:
     case KernelFeatureId::CallbackEnumeration:
@@ -1744,7 +1751,8 @@ LRESULT KernelPage::HandleMessage(HWND hwnd, const UINT msg, const WPARAM wParam
             if (const KernelFeatureDescriptor* descriptor = CurrentDescriptor();
                 descriptor != nullptr &&
                 descriptor->id == KernelFeatureId::DeviceDriverObjects &&
-                !currentRawColumns_.empty()) {
+                (!currentRawColumns_.empty() || pendingProjectionSources_.contains(descriptor->id))) {
+                if(KernelUsesValueProjection(descriptor->id)){RequestCachedValueProjection(descriptor->id);return 0;}
                 currentColumns_ = currentRawColumns_;
                 currentRows_ = *currentRawRows_;
                 RebuildObjectNamespaceListFromCache(descriptor->id);
@@ -1758,7 +1766,8 @@ LRESULT KernelPage::HandleMessage(HWND hwnd, const UINT msg, const WPARAM wParam
             if (const KernelFeatureDescriptor* descriptor = CurrentDescriptor();
                 descriptor != nullptr &&
                 descriptor->id == KernelFeatureId::BaseNamedObjects &&
-                !currentRawColumns_.empty()) {
+                (!currentRawColumns_.empty() || pendingProjectionSources_.contains(descriptor->id))) {
+                if(KernelUsesValueProjection(descriptor->id)){RequestCachedValueProjection(descriptor->id);return 0;}
                 currentColumns_ = currentRawColumns_;
                 currentRows_ = *currentRawRows_;
                 RebuildObjectNamespaceListFromCache(descriptor->id);
@@ -5784,6 +5793,16 @@ void KernelPage::ApplyCachedValueProjection(std::shared_ptr<KernelValueProjectio
     if(newSource){sortColumn_=-1;sortAscending_=true;pendingSorts_.erase(descriptor->id);}
     if(pending!=pendingProjectionSources_.end() && pending->second==source) pendingProjectionSources_.erase(pending);
     applyingCachedProjection_=true;
+    const std::array<HWND,4> choiceWindows{deviceDriverDirectoryCombo_,deviceDriverTypeCombo_,baseNamedScopeCombo_,baseNamedTypeCombo_};
+    for(std::size_t index=0;index<projection->choices.size();++index) {
+        const auto& choice=projection->choices[index];const auto window=choiceWindows[index];
+        if(!window || !choice.changed)continue;
+        ::SendMessageW(window,WM_SETREDRAW,FALSE,0);
+        ::SendMessageW(window,CB_RESETCONTENT,0,0);
+        for(const auto& item:choice.items)::SendMessageW(window,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(item.c_str()));
+        ::SendMessageW(window,CB_SETCURSEL,static_cast<WPARAM>(choice.selected),0);
+        ::SendMessageW(window,WM_SETREDRAW,TRUE,0);::InvalidateRect(window,nullptr,FALSE);
+    }
     Ksword::Ui::ScopedListViewRedrawLock resultLock(resultList_);
     if(schemaChanged) {
         ClearResultGridOnly();
@@ -5807,6 +5826,7 @@ void KernelPage::RebuildKernelHookListFromCache(const KernelFeatureId featureId)
 }
 
 void KernelPage::RebuildObjectNamespaceListFromCache(const KernelFeatureId featureId) {
+    if(KernelUsesValueProjection(featureId)){RequestCachedValueProjection(featureId);return;}
     // RebuildObjectNamespaceListFromCache reshapes generic KernelFacade rows
     // into the original KernelDock object-namespace tree/table schemas. Inputs
     // are currentColumns_/currentRows_ from AddDynamicResultRow; processing adds
