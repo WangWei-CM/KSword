@@ -326,7 +326,7 @@ Taskbar::Taskbar(QScreen* targetScreen, TaskbarSharedState* sharedState,
     setFixedHeight(kTaskbarLogicalHeight);
     setAttribute(Qt::WA_TranslucentBackground, false);
 
-    centralWidget = new QWidget(this);
+    centralWidget = new TaskbarColorSurface(this);
     QVBoxLayout* vLayout = new QVBoxLayout(centralWidget);
     vLayout->setContentsMargins(0, 0, 0, 0);
     vLayout->setSpacing(0);
@@ -516,7 +516,7 @@ Taskbar::Taskbar(QScreen* targetScreen, TaskbarSharedState* sharedState,
     connect(alertFlashAnimation, &QVariantAnimation::valueChanged, this, [this](const QVariant& value) {
         if (earthquakePresentation)
         {
-            applyTaskbarTheme(true, value.value<QColor>());
+            updateTaskbarBackground(value.value<QColor>());
         }
     });
     connect(alertFlashAnimation, &QVariantAnimation::finished, this, [this]() {
@@ -525,9 +525,9 @@ Taskbar::Taskbar(QScreen* targetScreen, TaskbarSharedState* sharedState,
             return;
         }
         alertFlashBright = false;
-        applyTaskbarTheme(true, QColor(QStringLiteral("#480000")));
+        updateTaskbarBackground(QColor(QStringLiteral("#480000")));
         alertFlashBright = true;
-        applyTaskbarTheme(true, QColor(QStringLiteral("#D90000")));
+        updateTaskbarBackground(QColor(QStringLiteral("#D90000")));
         startAlertFlashCycle();
     });
     applyTaskbarTheme(false, QColor(QStringLiteral("#0A0F16")));

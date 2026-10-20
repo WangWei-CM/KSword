@@ -57,6 +57,13 @@ private:
     QLabel* timeLabel;                   // 时间文本标签
     QLabel* contentLabel;                // 左侧当前用户名文本，警报态与其它 Taskbar 文本同步变为白色。
     QLabel* logoLabel;                   // 左侧 Logo 标签。
+    bool m_taskbarForegroundInitialized = false;
+    bool m_taskbarAlertForeground = false;
+    qint64 m_taskbarLogoSourceKey = 0;
+    int m_taskbarLogoHeight = 0;
+    qreal m_taskbarLogoDpr = 0;
+    QPixmap m_taskbarNormalLogo;
+    QPixmap m_taskbarAlertLogo;
     QPixmap logoPixmap;                  // 左侧 Logo 原图，保留透明通道用于警报态着色。
 
     QWidget* networkSpeedContainer;      // 网络速率显示容器
@@ -130,11 +137,14 @@ private:
         const std::function<void()>& completed);
     void stopCentralAnimations();
     void applyTaskbarTheme(bool earthquakeAlert, const QColor& backgroundColor);
+    void updateTaskbarBackground(const QColor& color);
+    void refreshTaskbarLogo(bool earthquakeAlert);
     void startAlertFlashCycle();
     void flashNotificationBackground();
     void showSettingsDialog();
 
 protected:
+    bool event(QEvent* event) override;
     // 在窗口关闭时确保注销 AppBar 并安全停止后台线程。
     void closeEvent(QCloseEvent* event) override;
     // 窗口尺寸变化时同步整条 Taskbar 提亮层的覆盖范围。
