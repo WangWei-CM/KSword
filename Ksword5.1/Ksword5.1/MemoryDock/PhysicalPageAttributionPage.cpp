@@ -12,6 +12,7 @@
 #include "../UI/AdaptivePageScroll.h"
 #include "../UI/VisibleTableWidget.h"
 #include "../UI/TableInteractionSupport.h"
+#include "../UI/TableColumnAutoFit.h"
 #include <QDateTime>
 #include <QCheckBox>
 #include <QCryptographicHash>
@@ -30,6 +31,8 @@
 #include <QProgressBar>
 #include <QPushButton>
 #include <QSaveFile>
+#include <QScrollBar>
+#include <QSignalBlocker>
 #include <QSpinBox>
 #include <QSplitter>
 #include <QTabWidget>
@@ -153,6 +156,21 @@ void number(QTableWidget* table, int row, int column, std::uint64_t value, bool 
     table->setItem(row, column, item);
 }
 }
+
+struct PhysicalPageAttributionPage::GroupIndex {
+    struct Row { QString kind, owner, search; };
+    std::shared_ptr<const ksword::pfn::Scan> scan;
+    QStringList kinds;
+    QString unavailable, hint;
+    std::vector<Row> rows;
+};
+struct PhysicalPageAttributionPage::GroupFilterJob {
+    std::atomic_bool done{false}, cancel{false};
+    std::uint64_t revision = 0;
+    std::shared_ptr<const GroupIndex> index;
+    std::vector<std::size_t> matches;
+    bool failed = false;
+};
 
 struct PhysicalPageAttributionPage::Inspection {
     std::atomic_bool done{false};
@@ -308,7 +326,19 @@ PhysicalPageAttributionPage::PhysicalPageAttributionPage(QWidget* parent) : QWid
     connect(m_inspectButton, &QPushButton::clicked, this, [this] { inspectPfn(); });
     connect(m_pfn, &QLineEdit::returnPressed, this, [this] { inspectPfn(); });
     connect(m_exportButton, &QPushButton::clicked, this, [this] { exportEvidence(); });
-    connect(m_filter, &QLineEdit::textChanged, this, [this] { rebuildGroups(); });
+    m_groupFilterTimer = new QTimer(this);
+    m_groupFilterTimer->setSingleShot(true);
+    m_groupFilterTimer->setInterval(120);
+    connect(m_groupFilterTimer, &QTimer::timeout, this, [this] { startGroupFilter(); });
+    connect(m_filter, &QLineEdit::textChanged, this, [this] {
+        ++m_groupFilterRevision;
+        if (m_groupFilterJob) { m_groupFilterJob->cancel.store(true); }
+        m_groupProjectionDirty = false;
+        m_groups->setEnabled(false);
+        m_groupFilterPending = true;
+        m_groupFilterTimer->start();
+    });
+    connect(m_tabs, &QTabWidget::currentChanged, this, [this] { applyGroupProjection(); });
     connect(m_categories, &QTableWidget::cellClicked, this, [this](int row, int) {
         if (const auto* item = m_categories->item(row, 0)) { selectCategory(item->data(Qt::UserRole).toInt()); }
     });
@@ -334,11 +364,15 @@ PhysicalPageAttributionPage::PhysicalPageAttributionPage(QWidget* parent) : QWid
     connect(timer, &QTimer::timeout, this, [this] { poll(); });
     timer->start();
     retranslate();
+    ks::ui::SetTableColumnAutoFitEnabled(m_groups, false);
+    const std::array<int, 6> widths{160, 300, 90, 120, 120, 150};
+    for (int i = 0; i < static_cast<int>(widths.size()); ++i) { m_groups->setColumnWidth(i, widths[i]); }
     rebuild();
 }
 
 PhysicalPageAttributionPage::~PhysicalPageAttributionPage()
 {
+    if (m_groupFilterJob) { m_groupFilterJob->cancel.store(true); }
     if (m_job) { m_job->cancel.store(true); }
     if (m_mappingJob) { m_mappingJob->cancel.store(true); }
     if (m_exportJob) { m_exportJob->cancel.store(true); }
@@ -432,6 +466,18 @@ void PhysicalPageAttributionPage::startMappings()
 
 void PhysicalPageAttributionPage::poll()
 {
+    if (m_groupFilterJob && m_groupFilterJob->done.load()) {
+        const auto job = std::move(m_groupFilterJob);
+        if (!job->cancel.load() && !job->failed && job->revision == m_groupFilterRevision
+            && job->index && job->index->scan == m_scan) {
+            m_groupIndex = job->index;
+            m_groupRows = std::move(job->matches);
+            m_groupProjectionDirty = true;
+        }
+        if (job->failed && job->revision == m_groupFilterRevision) { m_summary->setText(L("Unable to start the scan worker.")); }
+    }
+    if (m_groupFilterPending && !m_groupFilterJob && !m_groupFilterTimer->isActive()) { startGroupFilter(); }
+    applyGroupProjection();
     if (m_job && m_job->done.load()) {
         { std::lock_guard<std::mutex> lock(m_job->mutex); m_lastAttempt = m_job->result; }
         m_job.reset();
@@ -748,23 +794,84 @@ void PhysicalPageAttributionPage::rebuild()
 
 void PhysicalPageAttributionPage::rebuildGroups()
 {
+    ++m_groupFilterRevision;
+    if (m_groupFilterJob) { m_groupFilterJob->cancel.store(true); }
+    m_groupProjectionDirty = false;
+    m_groups->setEnabled(false);
+    m_groupFilterPending = true;
+    m_groupFilterTimer->stop();
+    startGroupFilter();
+}
+
+void PhysicalPageAttributionPage::startGroupFilter()
+{
+    if (m_groupFilterJob || !m_groupFilterPending) { return; }
+    m_groupFilterPending = false;
+    if (!m_scan) { m_groupRows.clear(); m_groupProjectionDirty = true; applyGroupProjection(); return; }
+    QStringList kinds;
+    for (const auto name : useNames) { kinds.append(L(name)); }
+    const auto unavailable = L("Unavailable");
+    const auto hint = L(" [source hint; lifetime unverified]");
+    const auto filter = m_filter->text().trimmed();
+    const auto scan = m_scan;
+    const auto cached = m_groupIndex;
+    const auto job = std::make_shared<GroupFilterJob>();
+    job->revision = m_groupFilterRevision;
+    m_groupFilterJob = job;
+    try { std::thread([job, scan, cached, kinds, unavailable, hint, filter] {
+        try {
+            auto index = cached;
+            if (!index || index->scan != scan || index->kinds != kinds
+                || index->unavailable != unavailable || index->hint != hint) {
+                auto fresh = std::make_shared<GroupIndex>();
+                fresh->scan = scan; fresh->kinds = kinds; fresh->unavailable = unavailable; fresh->hint = hint;
+                fresh->rows.reserve(scan->groups.size());
+                for (std::size_t i = 0; i < scan->groups.size(); ++i) {
+                    if ((i & 63U) == 0 && job->cancel.load()) { break; }
+                    const auto& group = scan->groups[i];
+                    GroupIndex::Row row;
+                    row.owner = group.name.isEmpty() ? (group.key ? hex(group.key) : unavailable) : group.name;
+                    if (group.use == Use::Private && !group.name.isEmpty() && !group.ownerLifetimeVerified) { row.owner += hint; }
+                    row.kind = kinds.value(static_cast<int>(group.use));
+                    row.search = row.owner + row.kind + QString::number(group.pid);
+                    fresh->rows.push_back(std::move(row));
+                }
+                index = std::move(fresh);
+            }
+            if (!job->cancel.load()) {
+                job->index = index;
+                for (std::size_t i = 0; i < index->rows.size() && job->matches.size() < 300; ++i) {
+                    if ((i & 63U) == 0 && job->cancel.load()) { break; }
+                    if (filter.isEmpty() || index->rows[i].search.contains(filter, Qt::CaseInsensitive)) { job->matches.push_back(i); }
+                }
+            }
+        } catch (...) { job->failed = true; }
+        job->done.store(true);
+    }).detach(); } catch (...) { job->failed = true; job->done.store(true); }
+}
+
+void PhysicalPageAttributionPage::applyGroupProjection()
+{
+    if (!m_groupProjectionDirty || !m_groups->isVisible()) { return; }
+    m_groupProjectionDirty = false;
+    const auto* selected = m_groups->item(m_groups->currentRow(), 0);
+    const auto selectedPfn = selected ? selected->data(Qt::UserRole).toULongLong() : 0;
+    const bool hadSelection = selected != nullptr;
+    const int scroll = m_groups->verticalScrollBar()->value();
+    const QSignalBlocker blocker(m_groups);
+    m_groups->setUpdatesEnabled(false);
     m_groups->setRowCount(0);
-    if (!m_scan) { return; }
-    const QString filter = m_filter->text().trimmed();
-    for (const auto& group : m_scan->groups) {
-        QString owner = group.name.isEmpty() ? (group.key ? hex(group.key) : L("Unavailable")) : group.name;
-        if (group.use == Use::Private && !group.name.isEmpty() && !group.ownerLifetimeVerified) {
-            owner += L(" [source hint; lifetime unverified]");
-        }
-        const QString kind = L(useNames[static_cast<std::size_t>(group.use)]);
-        if (!filter.isEmpty() && !(owner + kind + QString::number(group.pid)).contains(filter, Qt::CaseInsensitive)) { continue; }
+    int restored = -1;
+    if (m_scan && m_groupIndex && m_groupIndex->scan == m_scan) {
+        for (const auto index : m_groupRows) {
+            const auto& group = m_scan->groups[index];
+            const auto& labels = m_groupIndex->rows[index];
         const int row = m_groups->rowCount();
-        if (row >= 300) { break; }
         m_groups->insertRow(row);
-        auto* item = new QTableWidgetItem(kind);
+        auto* item = new QTableWidgetItem(labels.kind);
         item->setData(Qt::UserRole, QVariant::fromValue<qulonglong>(group.firstPfn));
         m_groups->setItem(row, 0, item);
-        auto* ownerItem = new QTableWidgetItem(owner);
+        auto* ownerItem = new QTableWidgetItem(labels.owner);
         QString ownerEvidence = L("Collection interval: %1 to %2 (%3 ms)").arg(m_scan->started, m_scan->finished).arg(m_scan->elapsedMs);
         if (group.pid) {
             ownerEvidence += QStringLiteral("\n") + L("Owner seen before / after: %1 / %2")
@@ -780,8 +887,13 @@ void PhysicalPageAttributionPage::rebuildGroups()
         number(m_groups, row, 3, group.pages * pageBytes);
         number(m_groups, row, 4, group.activePages * pageBytes);
         m_groups->setItem(row, 5, new QTableWidgetItem(hex(group.firstPfn)));
+        if (hadSelection && group.firstPfn == selectedPfn) { restored = row; }
     }
-    m_groups->resizeColumnsToContents();
+    }
+    if (restored >= 0) { m_groups->setCurrentCell(restored, 0); }
+    m_groups->verticalScrollBar()->setValue(scroll);
+    m_groups->setUpdatesEnabled(true);
+    m_groups->setEnabled(true);
 }
 
 void PhysicalPageAttributionPage::selectCategory(int use)

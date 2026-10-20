@@ -13,6 +13,7 @@ class QTableWidget;
 class QTabWidget;
 class MemoryAttributionChart;
 class QCheckBox;
+class QTimer;
 class MemoryConsumerEvidencePage;
 
 class PhysicalPageAttributionPage final : public QWidget {
@@ -31,6 +32,8 @@ private:
     void poll();
     void rebuild();
     void rebuildGroups();
+    void startGroupFilter();
+    void applyGroupProjection();
     void selectCategory(int use);
     void inspectPfn();
     void showMappings(std::uint64_t pfn);
@@ -64,6 +67,15 @@ private:
     int m_selectedCategory = -1;
     std::shared_ptr<ksword::pfn::ScanJob> m_job;
     std::shared_ptr<ksword::pfn::Scan> m_scan;
+    struct GroupIndex;
+    struct GroupFilterJob;
+    std::shared_ptr<const GroupIndex> m_groupIndex;
+    std::shared_ptr<GroupFilterJob> m_groupFilterJob;
+    std::vector<std::size_t> m_groupRows;
+    QTimer* m_groupFilterTimer = nullptr;
+    std::uint64_t m_groupFilterRevision = 0;
+    bool m_groupFilterPending = false;
+    bool m_groupProjectionDirty = false;
     std::shared_ptr<ksword::pfn::Scan> m_lastAttempt;
     bool m_latestAttemptFailed = false;
     std::vector<ksword::pfn::AuditCriterionSample> m_auditHistory;
