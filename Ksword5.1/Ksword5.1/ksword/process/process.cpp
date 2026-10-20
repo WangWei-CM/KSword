@@ -6238,8 +6238,11 @@ namespace ks::process
         const std::uint32_t pid,
         const bool includeSignatureCheck,
         const bool requireVerifiedProcessIdentity,
-        const std::uint64_t expectedCreationTime100ns)
+        const std::uint64_t expectedCreationTime100ns,
+        const std::function<bool()>& cancelled)
     {
+        const auto stopped = [&cancelled] { return cancelled && cancelled(); };
+        if (stopped()) { return {}; }
         ProcessModuleSnapshot snapshot;
         snapshot.modules.clear();
         snapshot.threads.clear();
@@ -6321,8 +6324,9 @@ namespace ks::process
         // fillModuleSignature 作用：
         // - 统一填充模块签名显示文本、厂家、可信标记；
         // - includeSignatureCheck=false 时保持 Pending（快速模式）。
-        const auto fillModuleSignature = [includeSignatureCheck](ProcessModuleRecord& moduleRecord)
+        const auto fillModuleSignature = [includeSignatureCheck, &stopped](ProcessModuleRecord& moduleRecord)
             {
+                if (stopped()) { return; }
                 if (includeSignatureCheck)
                 {
                     const FileSignatureInfo signatureInfo = QueryFileSignatureInfo(moduleRecord.modulePath);
@@ -6349,6 +6353,7 @@ namespace ks::process
             {
                 do
                 {
+                    if (stopped()) { break; }
                     if (threadEntry.th32OwnerProcessID != pid)
                     {
                         continue;
@@ -6400,6 +6405,8 @@ namespace ks::process
             ::CloseHandle(threadSnapshotHandle);
         }
 
+        if (stopped()) { return {}; }
+
         // 第一优先：Toolhelp 模块枚举（常规路径）。
         bool moduleEnumerated = false;
         HANDLE moduleSnapshotHandle = ::CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, ToDwordPid(pid));
@@ -6419,11 +6426,13 @@ namespace ks::process
             {
                 do
                 {
+                    if (stopped()) { break; }
                     ProcessModuleRecord moduleRecord{};
                     moduleRecord.moduleName = ks::str::Utf16ToUtf8(moduleEntry.szModule);
                     moduleRecord.modulePath = ks::str::Utf16ToUtf8(moduleEntry.szExePath);
                     moduleRecord.moduleBaseAddress = reinterpret_cast<std::uint64_t>(moduleEntry.modBaseAddr);
                     moduleRecord.moduleSizeBytes = static_cast<std::uint32_t>(moduleEntry.modBaseSize);
+                    if (stopped()) { break; }
                     moduleRecord.entryPointRva = QueryImageEntryPointRvaByPath(moduleRecord.modulePath);
                     moduleRecord.runningState = "Loaded";
                     fillModuleSignature(moduleRecord);
@@ -6438,6 +6447,8 @@ namespace ks::process
             }
             ::CloseHandle(moduleSnapshotHandle);
         }
+
+        if (stopped()) { return {}; }
 
         // Toolhelp 失败时，回退 PSAPI，解决“模块始终为 0”问题。
         if (!moduleEnumerated)
@@ -6486,6 +6497,7 @@ namespace ks::process
             std::vector<wchar_t> modulePathBuffer(32768U, L'\0');
             for (std::size_t moduleIndex = 0; moduleIndex < moduleCount; ++moduleIndex)
             {
+                if (stopped()) { break; }
                 const HMODULE moduleHandle = moduleHandleBuffer[moduleIndex];
                 if (moduleHandle == nullptr)
                 {
@@ -6526,6 +6538,7 @@ namespace ks::process
                 }
                 else
                 {
+                    if (stopped()) { break; }
                     moduleRecord.entryPointRva = QueryImageEntryPointRvaByPath(moduleRecord.modulePath);
                 }
 
@@ -6542,6 +6555,7 @@ namespace ks::process
             ::CloseHandle(processHandle);
         }
 
+        if (stopped()) { return {}; }
         if (!moduleEnumerated)
         {
             appendDiagnostic("No module enumeration path succeeded.");
@@ -6556,25 +6570,29 @@ namespace ks::process
 
     ProcessModuleSnapshot EnumerateProcessModulesAndThreads(
         const std::uint32_t pid,
-        const bool includeSignatureCheck)
+        const bool includeSignatureCheck,
+        const std::function<bool()>& cancelled)
     {
         return EnumerateProcessModulesAndThreadsInternal(
             pid,
             includeSignatureCheck,
             false,
-            0U);
+            0U,
+            cancelled);
     }
 
     ProcessModuleSnapshot EnumerateProcessModulesAndThreadsIfIdentityMatches(
         const std::uint32_t pid,
         const std::uint64_t expectedCreationTime100ns,
-        const bool includeSignatureCheck)
+        const bool includeSignatureCheck,
+        const std::function<bool()>& cancelled)
     {
         return EnumerateProcessModulesAndThreadsInternal(
             pid,
             includeSignatureCheck,
             true,
-            expectedCreationTime100ns);
+            expectedCreationTime100ns,
+            cancelled);
     }
 
     bool UnloadModuleByBaseAddressIfIdentityMatches(

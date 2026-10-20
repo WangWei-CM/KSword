@@ -166,6 +166,7 @@ private:
     struct ProcessEntry
     {
         std::uint32_t pid = 0;          // 进程 PID。
+        std::uint64_t creationTime100ns = 0; // 同一枚举快照的进程强身份。
         std::uint32_t sessionId = 0;    // 会话 ID。
         QString processName;            // 进程名。
         // CPU 占用率。需要两次采样相减才算得出，所以"这一轮算不出来"是一个真实
@@ -454,6 +455,8 @@ private:
     // - 参数 pid：目标进程 PID。
     // - 返回：true 表示枚举成功；false 表示失败。
     bool refreshModuleListForPid(std::uint32_t pid);
+    void startPendingModuleRefresh();
+    void pollModuleRefresh();
 
     // rebuildModuleTableFromCache：
     // - 作用：按当前过滤条件把 m_moduleCache 重绘到模块表。
@@ -994,6 +997,12 @@ private:
     std::vector<ModuleEntry> m_moduleCache;   // 模块缓存（Tab1 使用）。
     std::atomic<bool> m_moduleRefreshInProgress{ false }; // 模块刷新是否进行中（异步任务状态）。
     std::atomic<std::uint64_t> m_moduleRefreshTicket{ 0 }; // 模块刷新票据（丢弃过期结果）。
+    struct ModuleRefreshRequest { std::uint32_t pid = 0; std::uint64_t creation = 0; bool signatures = false; };
+    struct ModuleRefreshJob;
+    std::shared_ptr<ModuleRefreshJob> m_moduleRefreshJob;
+    std::shared_ptr<std::atomic_bool> m_moduleRefreshLifetime = std::make_shared<std::atomic_bool>(false);
+    std::optional<ModuleRefreshRequest> m_moduleRefreshPending;
+    QTimer* m_moduleRefreshPoll = nullptr;
     int m_dumpMemoryProgressPid = 0;        // Dump 内存任务的进度条 PID。
     ks::ui::AsyncOperation* m_regionDumpOperation = nullptr; // QObject 子对象，串行管理区域转储。
     std::shared_ptr<std::atomic<RegionDumpPhase>> m_regionDumpPhase; // 提交与取消的仲裁状态。

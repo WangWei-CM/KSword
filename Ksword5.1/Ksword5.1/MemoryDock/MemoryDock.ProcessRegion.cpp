@@ -11,6 +11,7 @@
 #include <QRunnable>
 #include <QSaveFile>
 #include <QSet>
+#include <QTimer>
 #include <QThread> // QThread::idealThreadCount：CPU 占用率的分母要按逻辑核数归一化。
 #include <QVector>
 
@@ -824,6 +825,7 @@ void MemoryDock::refreshProcessList(const bool keepSelection)
                     {
                         ProcessEntry entry{};
                         entry.pid = snapshotRow.pid;
+                        entry.creationTime100ns = snapshotRow.creationTime100ns;
                         entry.sessionId = snapshotRow.sessionId;
                         entry.processName = snapshotRow.processName;
                         entry.workingSetMB = snapshotRow.workingSetMB;
@@ -1111,6 +1113,7 @@ void MemoryDock::updateProcessComboFromCache()
         m_processCombo->addItem(text, QVariant::fromValue(static_cast<uint>(entry.pid)));
         const int row = m_processCombo->count() - 1;
         m_processCombo->setItemData(row, entry.processName, Qt::UserRole + 1);
+        m_processCombo->setItemData(row, QVariant::fromValue<qulonglong>(entry.creationTime100ns), Qt::UserRole + 2);
     }
 
     // 当前附加 PID 还存在时，默认选中它。
@@ -1252,38 +1255,46 @@ void MemoryDock::rebuildModuleTableFromCache()
         << eol;
 }
 
+struct MemoryDock::ModuleRefreshJob {
+    ModuleRefreshRequest request;
+    std::uint64_t ticket = 0, creation = 0, elapsedMs = 0;
+    std::size_t moduleCount = 0, threadCount = 0;
+    std::atomic_bool cancel{false}, done{false};
+    std::shared_ptr<std::atomic_bool> lifetime;
+    bool cancelled() const { return cancel.load() || (lifetime && lifetime->load()); }
+    QString diagnostic;
+    std::vector<ModuleEntry> modules;
+};
+
 bool MemoryDock::refreshModuleListForPid(const std::uint32_t pid)
 {
-    // 模块刷新改为异步，避免签名校验和模块枚举阻塞主线程。
-    kLogEvent refreshModuleStartEvent;
-    info << refreshModuleStartEvent
-        << "[MemoryDock] refreshModuleListForPid: 请求刷新模块, pid="
-        << pid
-        << eol;
-
-    if (pid == 0)
-    {
-        // pid 为 0 表示当前无有效目标，直接清空缓存和表格。
-        m_moduleCache.clear();
-        m_moduleCachePid = 0U;
-        m_moduleCacheCreateTime = 0U;
+    // Explicit refresh/attach consumes any still-pending combo selection timer.
+    if (m_processComboChangeTimer && m_processComboChangeTimer->isActive()) { m_processComboChangeTimer->stop(); }
+    const bool includeSignatureCheck = m_moduleSignatureCheck && m_moduleSignatureCheck->isChecked();
+    std::uint64_t creation = 0;
+    for (const auto& entry : m_processCache) { if (entry.pid == pid) { creation = entry.creationTime100ns; break; } }
+    const ModuleRefreshRequest request{pid, creation, includeSignatureCheck};
+    const auto sameRequest = [&request](const ModuleRefreshRequest& other) {
+        return request.pid == other.pid && request.creation == other.creation && request.signatures == other.signatures;
+    };
+    if (pid && m_moduleRefreshJob && !m_moduleRefreshJob->cancel.load()
+        && sameRequest(m_moduleRefreshJob->request) && !m_moduleRefreshPending) { return true; }
+    if (pid && m_moduleRefreshPending && sameRequest(*m_moduleRefreshPending)) { return true; }
+    m_moduleRefreshTicket.fetch_add(1);
+    if (m_moduleRefreshJob) { m_moduleRefreshJob->cancel.store(true); }
+    if (!pid) {
+        m_moduleRefreshPending.reset(); m_moduleRefreshInProgress.store(false);
+        m_moduleCache.clear(); m_moduleCachePid = 0; m_moduleCacheCreateTime = 0;
         rebuildModuleTableFromCache();
-        if (m_moduleStatusLabel != nullptr)
-        {
+        if (m_moduleRefreshButton) { m_moduleRefreshButton->setEnabled(true); }
+        if (m_moduleStatusLabel) {
             m_moduleStatusLabel->setText("● 未选择有效进程");
-            m_moduleStatusLabel->setStyleSheet(
-                QStringLiteral("color:%1; font-weight:700;")
-                    .arg(KswordTheme::ErrorColor().name(QColor::HexRgb)));
+            m_moduleStatusLabel->setStyleSheet(QStringLiteral("color:%1; font-weight:700;").arg(KswordTheme::ErrorColor().name(QColor::HexRgb)));
         }
         return false;
     }
-
-    // 每次请求生成一个递增 ticket；旧任务回调时会被丢弃。
-    const std::uint64_t refreshTicket = m_moduleRefreshTicket.fetch_add(1) + 1;
-    const bool includeSignatureCheck =
-        (m_moduleSignatureCheck != nullptr) && m_moduleSignatureCheck->isChecked();
+    m_moduleRefreshPending = request;
     m_moduleRefreshInProgress.store(true);
-
     // 刷新期间更新状态栏并临时禁用按钮，避免用户误以为点击无效而反复触发。
     if (m_moduleRefreshButton != nullptr)
     {
@@ -1299,105 +1310,83 @@ bool MemoryDock::refreshModuleListForPid(const std::uint32_t pid)
             QStringLiteral("color:%1; font-weight:700;").arg(KswordTheme::PrimaryBlueHex));
     }
 
-    // 使用 QPointer 守护 this，避免窗口销毁后异步回调访问悬空对象。
-    // 枚举走全局线程池而不是裸 detach 线程：连续切换进程时并发被池上限挡住，
-    // 不会因为每次切换都新建一条线程把系统拖垮。
-    const QPointer<MemoryDock> selfGuard(this);
-    QRunnable* const refreshModuleTask = QRunnable::create(
-        [selfGuard, pid, includeSignatureCheck, refreshTicket]() {
-        if (selfGuard == nullptr)
-        {
-            return;
-        }
 
-        // 后台线程仅执行耗时枚举和数据转换，不直接操作任何 Qt 控件。
-        // 先读一次目标进程的创建时间（与工作台锚点同一取法，取不到为 0）：缓存落地后它与 pid 一起
-        // 记在 m_moduleCachePid / m_moduleCacheCreateTime，供模块表预览"未附加的进程"时核对进程实例。
-        const ks::ui::AnchorInfo creationAnchor = ks::ui::AcquireAnchorForPid(pid);
-        const std::uint64_t moduleCreateTime = creationAnchor.createTime100ns;
-        ks::ui::ReleaseAnchorHandle(creationAnchor.handle);
+    if (!m_moduleRefreshPoll) {
+        m_moduleRefreshPoll = new QTimer(this); m_moduleRefreshPoll->setInterval(25);
+        connect(m_moduleRefreshPoll, &QTimer::timeout, this, [this] { pollModuleRefresh(); });
+        connect(this, &QObject::destroyed, [lifetime = m_moduleRefreshLifetime] { lifetime->store(true); });
+    }
+    startPendingModuleRefresh();
+    m_moduleRefreshPoll->start();
+    return true;
+}
 
-        const auto refreshStartTime = std::chrono::steady_clock::now();
-        const ks::process::ProcessModuleSnapshot moduleSnapshot =
-            ks::process::EnumerateProcessModulesAndThreads(pid, includeSignatureCheck);
-
-        std::vector<ModuleEntry> moduleCache;
-        moduleCache.reserve(moduleSnapshot.modules.size());
-        for (const ks::process::ProcessModuleRecord& moduleRecord : moduleSnapshot.modules)
-        {
-            ModuleEntry entry{};
-            entry.fullPath = QString::fromStdString(moduleRecord.modulePath);
-            entry.moduleName = QFileInfo(entry.fullPath).fileName();
-            entry.baseAddress = moduleRecord.moduleBaseAddress;
-            entry.sizeBytes = moduleRecord.moduleSizeBytes;
-            entry.signatureState = QString::fromStdString(moduleRecord.signatureState);
-            entry.signatureTrusted = moduleRecord.signatureTrusted;
-            entry.entryPointOffset = moduleRecord.entryPointRva;
-            entry.runningState = QString::fromStdString(moduleRecord.runningState);
-            entry.threadIdText = QString::fromStdString(moduleRecord.threadIdText);
-            entry.representativeThreadId = moduleRecord.representativeThreadId;
-            moduleCache.push_back(std::move(entry));
-        }
-        std::sort(moduleCache.begin(), moduleCache.end(), [](const ModuleEntry& left, const ModuleEntry& right) {
-            return left.baseAddress < right.baseAddress;
-            });
-
-        const std::uint64_t elapsedMs = static_cast<std::uint64_t>(
-            std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::steady_clock::now() - refreshStartTime).count());
-        const std::size_t moduleCount = moduleSnapshot.modules.size();
-        const std::size_t threadCount = moduleSnapshot.threads.size();
-        const QString diagnosticText = QString::fromStdString(moduleSnapshot.diagnosticText).trimmed();
-
-        // 结果回到主线程落地，确保 Qt 视图更新线程安全。
-        QMetaObject::invokeMethod(selfGuard.data(), [selfGuard,
-            pid,
-            moduleCreateTime,
-            includeSignatureCheck,
-            refreshTicket,
-            elapsedMs,
-            moduleCount,
-            threadCount,
-            diagnosticText,
-            moduleCache = std::move(moduleCache)]() mutable {
-                if (selfGuard == nullptr)
-                {
-                    return;
-                }
-
-                // 如果 ticket 已过期，说明用户又发起了新刷新，旧结果直接丢弃。
-                if (refreshTicket < selfGuard->m_moduleRefreshTicket.load())
-                {
-                    kLogEvent staleModuleEvent;
-                    dbg << staleModuleEvent
-                        << "[MemoryDock] refreshModuleListForPid: 丢弃过期模块结果, ticket="
-                        << refreshTicket
-                        << ", latestTicket="
-                        << selfGuard->m_moduleRefreshTicket.load()
-                        << eol;
-                    return;
-                }
-
-                auto moduleCacheSnapshot =
-                    std::make_shared<std::vector<ModuleEntry>>(std::move(moduleCache));
-                auto commitModuleSnapshot = [
-                    selfGuard,
-                    pid,
-                    moduleCreateTime,
-                    includeSignatureCheck,
-                    refreshTicket,
-                    elapsedMs,
-                    moduleCount,
-                    threadCount,
-                    diagnosticText,
-                    moduleCacheSnapshot]() mutable
-                {
-                    if (selfGuard == nullptr ||
-                        refreshTicket < selfGuard->m_moduleRefreshTicket.load())
-                    {
-                        return;
+void MemoryDock::startPendingModuleRefresh()
+{
+    if (m_moduleRefreshJob || !m_moduleRefreshPending) { return; }
+    auto job = std::make_shared<ModuleRefreshJob>();
+    job->request = *m_moduleRefreshPending; m_moduleRefreshPending.reset();
+    job->ticket = m_moduleRefreshTicket.load(); m_moduleRefreshJob = job;
+    job->lifetime = m_moduleRefreshLifetime;
+    // Worker and teardown share only task state, with one lifecycle subscription per Dock.
+    try { QThreadPool::globalInstance()->start([job] {
+        try {
+            if (!job->cancelled()) {
+                const auto start = std::chrono::steady_clock::now();
+                const auto anchor = ks::ui::AcquireAnchorForPid(job->request.pid);
+                job->creation = anchor.createTime100ns;
+                ks::ui::ReleaseAnchorHandle(anchor.handle);
+                if (!job->cancelled() && (!job->request.creation || job->request.creation == job->creation)) {
+                    const auto cancelled = [job] { return job->cancelled(); };
+                    const auto snapshot = job->creation
+                        ? ks::process::EnumerateProcessModulesAndThreadsIfIdentityMatches(job->request.pid, job->creation, job->request.signatures, cancelled)
+                        : ks::process::EnumerateProcessModulesAndThreads(job->request.pid, job->request.signatures, cancelled);
+                    job->moduleCount = snapshot.modules.size(); job->threadCount = snapshot.threads.size();
+                    job->diagnostic = QString::fromStdString(snapshot.diagnosticText).trimmed();
+                    job->modules.reserve(snapshot.modules.size());
+                    for (const auto& record : snapshot.modules) {
+                        if (job->cancelled()) { break; }
+                        ModuleEntry entry{};
+                        entry.fullPath = QString::fromStdString(record.modulePath); entry.moduleName = QFileInfo(entry.fullPath).fileName();
+                        entry.baseAddress = record.moduleBaseAddress; entry.sizeBytes = record.moduleSizeBytes;
+                        entry.signatureState = QString::fromStdString(record.signatureState); entry.signatureTrusted = record.signatureTrusted;
+                        entry.entryPointOffset = record.entryPointRva; entry.runningState = QString::fromStdString(record.runningState);
+                        entry.threadIdText = QString::fromStdString(record.threadIdText); entry.representativeThreadId = record.representativeThreadId;
+                        job->modules.push_back(std::move(entry));
                     }
+                    if (!job->cancelled()) { std::sort(job->modules.begin(), job->modules.end(), [](const auto& a, const auto& b) { return a.baseAddress < b.baseAddress; }); }
+                } else if (!job->cancelled()) {
+                    job->creation = job->request.creation;
+                    job->diagnostic = QString::number(ERROR_INVALID_PARAMETER);
+                }
+                job->elapsedMs = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count());
+            }
+        } catch (...) { job->diagnostic = QString::number(ERROR_GEN_FAILURE); }
+        job->done.store(true);
+    }); } catch (...) { job->diagnostic = QString::number(ERROR_GEN_FAILURE); job->done.store(true); }
+}
 
+void MemoryDock::pollModuleRefresh()
+{
+    if (!m_moduleRefreshJob || !m_moduleRefreshJob->done.load()) { return; }
+    auto job = std::move(m_moduleRefreshJob);
+    if (job->cancel.load() || job->ticket != m_moduleRefreshTicket.load()) {
+        startPendingModuleRefresh();
+        if (!m_moduleRefreshJob) { m_moduleRefreshPoll->stop(); }
+        return;
+    }
+    const QPointer<MemoryDock> selfGuard(this);
+    const auto refreshTicket = job->ticket;
+    const auto pid = job->request.pid;
+    const auto moduleCreateTime = job->creation;
+    const auto includeSignatureCheck = job->request.signatures;
+    const auto elapsedMs = job->elapsedMs;
+    const auto moduleCount = job->moduleCount, threadCount = job->threadCount;
+    const auto diagnosticText = job->diagnostic;
+    const auto moduleCacheSnapshot = std::make_shared<std::vector<ModuleEntry>>(std::move(job->modules));
+    const auto commitModuleSnapshot = [selfGuard, refreshTicket, pid, moduleCreateTime, includeSignatureCheck,
+        elapsedMs, moduleCount, threadCount, diagnosticText, moduleCacheSnapshot] {
+        if (!selfGuard || refreshTicket != selfGuard->m_moduleRefreshTicket.load()) { return; }
                     // 缓存和树必须原子落地；菜单打开时不能先换缓存再保留旧节点。
                     selfGuard->m_moduleCache = std::move(*moduleCacheSnapshot);
                     selfGuard->m_moduleCachePid = pid;
@@ -1449,23 +1438,11 @@ bool MemoryDock::refreshModuleListForPid(const std::uint32_t pid)
                         << ", diagnostic="
                         << diagnosticText.toStdString()
                         << eol;
-                };
-
-                if (ks::ui::DeferItemViewUiCommitIfContextMenuOpen(
-                        selfGuard.data(),
-                        QStringLiteral("memory-process-modules-snapshot-apply"),
-                        {selfGuard->m_moduleTable},
-                        commitModuleSnapshot))
-                {
-                    return;
-                }
-                commitModuleSnapshot();
-            }, Qt::QueuedConnection);
-        });
-    refreshModuleTask->setAutoDelete(true);
-    QThreadPool::globalInstance()->start(refreshModuleTask);
-
-    return true;
+    };
+    m_moduleRefreshPoll->stop();
+    if (ks::ui::DeferItemViewUiCommitIfContextMenuOpen(this, QStringLiteral("memory-process-modules-snapshot-apply"),
+        {m_moduleTable}, commitModuleSnapshot)) { return; }
+    commitModuleSnapshot();
 }
 
 bool MemoryDock::attachToProcess(
@@ -1725,6 +1702,8 @@ void MemoryDock::detachProcess()
 
     // 同步抬高模块刷新 ticket，确保旧的异步模块回调不会覆盖“已分离”状态。
     m_moduleRefreshTicket.fetch_add(1);
+    m_moduleRefreshPending.reset();
+    if (m_moduleRefreshJob) { m_moduleRefreshJob->cancel.store(true); }
     m_moduleRefreshInProgress.store(false);
     if (m_moduleRefreshButton != nullptr)
     {

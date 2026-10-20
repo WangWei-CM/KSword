@@ -472,7 +472,9 @@ void MemoryDock::initializeConnections()
                 break;
             }
         }
-        refreshModuleListForPid(pid);
+        // 所有选择入口都复用同一去抖通道；相同 combo 项也必须可显式刷新。
+        m_pendingModuleRefreshPid = pid;
+        m_processComboChangeTimer->start();
         });
 
     connect(m_processTable, &QTableWidget::cellDoubleClicked, this, [this](int row, int column) {
