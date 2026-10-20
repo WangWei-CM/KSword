@@ -14,6 +14,7 @@
 #include <QComboBox>
 
 #include <QEvent>
+#include <QElapsedTimer>
 #include <QDynamicPropertyChangeEvent>
 #include <QFrame>
 #include <QGroupBox>
@@ -466,14 +467,10 @@ namespace
                     m_tableView.data());
                 captureBaselineHiddenRows();
             }
-            else
-            {
-                restoreBaselineHiddenRows();
-            }
-
             m_resultFilterActive = true;
             m_resultFilterQuery = normalizedQuery;
-            applyResultFilterRows();
+            refreshSearchColumns();
+            scheduleFilterReapply(true);
 
             scheduleRefresh();
             return true;
@@ -493,7 +490,11 @@ namespace
             m_modelMutationPrepared = false;
             m_keepSearchAccessVisible = false;
             m_resultFilterQuery.clear();
-            m_baselineHiddenRowList.clear();
+            m_filterRows.clear();
+            m_rowLookup.clear();
+            m_dirtyRows.clear();
+            m_allRowsDirty = false;
+            m_filterCursor = 0;
 
             if (stateChanged)
             {
@@ -515,7 +516,7 @@ namespace
         void refreshModelBinding()
         {
             QAbstractItemModel* const model = m_tableView.isNull() ? nullptr : m_tableView->model();
-            if (m_filterModel == model)
+            if (m_filterModel == model && m_filterRoot == m_tableView->rootIndex())
             {
                 return;
             }
@@ -539,7 +540,9 @@ namespace
                 return;
             }
 
+            refreshModelBinding();
             QTableView* tableView = m_tableView.data();
+            refreshSearchColumns();
             if (auto* cache = dedicatedSearchCache(tableView))
             {
                 cache->observeTable(tableView, this, [this]() { scheduleRefresh(); });
@@ -589,6 +592,11 @@ namespace
     protected:
         bool eventFilter(QObject* watchedObject, QEvent* eventObject) override
         {
+            if (eventObject != nullptr && watchedObject == m_tableView.data()
+                && eventObject->type() == QEvent::Show)
+            {
+                scheduleFilterReapply(false);
+            }
             if (eventObject != nullptr
                 && (eventObject->type() == QEvent::Resize
                     || eventObject->type() == QEvent::LayoutRequest
@@ -604,177 +612,291 @@ namespace
     private:
         void observeFilterModel(QAbstractItemModel* model)
         {
-            if (m_filterModel == model)
-            {
-                return;
-            }
+            const QModelIndex root = m_tableView.isNull() ? QModelIndex() : m_tableView->rootIndex();
+            if (m_filterModel == model && m_filterRoot == root) return;
             m_resultFilterActive = false;
             m_modelMutationPrepared = false;
-            m_baselineHiddenRowList.clear();
-            if (!m_filterModel.isNull())
-            {
-                QObject::disconnect(m_filterModel.data(), nullptr, this, nullptr);
-            }
-
+            m_filterRows.clear();
+            m_rowLookup.clear();
+            m_dirtyRows.clear();
+            m_allRowsDirty = false;
+            m_filterCursor = 0;
+            if (!m_filterModel.isNull()) disconnect(m_filterModel.data(), nullptr, this, nullptr);
             m_filterModel = model;
-            if (model == nullptr)
-            {
-                return;
-            }
+            m_filterRoot = root;
+            if (model == nullptr) return;
 
-            // 结构变化前先撤销附加隐藏，变化后重新采集业务原有隐藏状态。
-            const auto prepareMutation = [this]() {
-                prepareForModelMutation();
+            connect(model, &QAbstractItemModel::dataChanged, this,
+                [this](const QModelIndex& first, const QModelIndex& last, const QList<int>& roles) {
+                    if (!m_resultFilterActive || first.parent() != m_filterRoot
+                        || (!roles.isEmpty() && !roles.contains(Qt::DisplayRole))) return;
+                    bool relevant = false;
+                    for (int column = first.column(); column <= last.column(); ++column)
+                    {
+                        if (m_searchColumns.contains(column)) { relevant = true; break; }
+                    }
+                    if (relevant) markRowsDirty(first.row(), last.row());
+                });
+            connect(model, &QAbstractItemModel::rowsInserted, this,
+                [this](const QModelIndex& parent, int first, int last) {
+                    if (!m_resultFilterActive || parent != m_filterRoot) return;
+                    for (int row = first; row <= last; ++row)
+                    {
+                        FilterRowState state;
+                        state.key = ++m_nextRowKey;
+                        state.identity = m_filterModel->index(row, 0, m_filterRoot);
+                        m_filterRows.insert(row, state);
+                    }
+                    rebuildRowLookup(first);
+                    if (m_allRowsDirty && first < m_filterCursor) m_filterCursor += last - first + 1;
+                    markRowsDirty(first, last);
+                });
+            connect(model, &QAbstractItemModel::rowsAboutToBeRemoved, this,
+                [this](const QModelIndex& parent, int first, int last) {
+                    if (!m_resultFilterActive || parent != m_filterRoot) return;
+                    if (m_allRowsDirty && first < m_filterCursor)
+                    {
+                        m_filterCursor -= std::min(last + 1, m_filterCursor) - first;
+                    }
+                    for (int row = first; row <= last; ++row)
+                    {
+                        m_rowLookup.remove(m_filterRows.at(row).key);
+                        m_dirtyRows.remove(m_filterRows.at(row).key);
+                    }
+                    m_filterRows.remove(first, last - first + 1);
+                    rebuildRowLookup(first);
+                });
+            connect(model, &QAbstractItemModel::rowsRemoved, this,
+                [this]() { scheduleFilterReapply(false); });
+            const auto reordered = [this]() {
+                if (!m_resultFilterActive) return;
+                // Persistent indexes follow model sorting/moves, so baseline visibility
+                // remains attached to the business row rather than its previous number.
+                if (!m_filterRows.isEmpty() && m_filterRows.first().identity.isValid())
+                {
+                    std::sort(m_filterRows.begin(), m_filterRows.end(),
+                        [](const FilterRowState& a, const FilterRowState& b) {
+                            return a.identity.row() < b.identity.row();
+                        });
+                }
+                rebuildRowLookup();
+                for (int row = 0; row < m_filterRows.size(); ++row) applyRowVisibility(row);
+                if (m_allRowsDirty) { m_filterCursor = 0; }
+                scheduleFilterReapply(false);
             };
-            const auto finishMutation = [this]() {
+            connect(model, &QAbstractItemModel::layoutChanged, this, reordered);
+            connect(model, &QAbstractItemModel::rowsMoved, this,
+                [this, reordered](const QModelIndex& source, int first, int last,
+                    const QModelIndex& destination, int destinationRow) {
+                    if (!m_resultFilterActive) return;
+                    if (source == m_filterRoot && destination == m_filterRoot) { reordered(); return; }
+                    if (source == m_filterRoot)
+                    {
+                        for (int row = first; row <= last; ++row)
+                        {
+                            m_rowLookup.remove(m_filterRows.at(row).key);
+                            m_dirtyRows.remove(m_filterRows.at(row).key);
+                        }
+                        m_filterRows.remove(first, last - first + 1);
+                        rebuildRowLookup(first);
+                        if (m_allRowsDirty) m_filterCursor = 0;
+                    }
+                    else if (destination == m_filterRoot)
+                    {
+                        for (int row = destinationRow; row < destinationRow + last - first + 1; ++row)
+                        {
+                            FilterRowState state;
+                            state.key = ++m_nextRowKey;
+                            state.identity = m_filterModel->index(row, 0, m_filterRoot);
+                            m_filterRows.insert(row, state);
+                        }
+                        rebuildRowLookup(destinationRow);
+                        if (m_allRowsDirty && destinationRow < m_filterCursor)
+                            m_filterCursor += last - first + 1;
+                        markRowsDirty(destinationRow, destinationRow + last - first);
+                    }
+                    scheduleFilterReapply(false);
+                });
+            const auto columnsChanged = [this]() {
+                if (!m_resultFilterActive) return;
+                for (int row = 0; row < m_filterRows.size(); ++row)
+                {
+                    m_filterRows[row].identity = m_filterModel->index(row, 0, m_filterRoot);
+                }
+                refreshSearchColumns();
                 scheduleFilterReapply(true);
             };
-            connect(model, &QAbstractItemModel::rowsAboutToBeInserted, this, prepareMutation);
-            connect(model, &QAbstractItemModel::rowsAboutToBeRemoved, this, prepareMutation);
-            connect(model, &QAbstractItemModel::rowsAboutToBeMoved, this, prepareMutation);
-            connect(model, &QAbstractItemModel::columnsAboutToBeInserted, this, prepareMutation);
-            connect(model, &QAbstractItemModel::columnsAboutToBeRemoved, this, prepareMutation);
-            connect(model, &QAbstractItemModel::columnsAboutToBeMoved, this, prepareMutation);
-            connect(model, &QAbstractItemModel::layoutAboutToBeChanged, this, prepareMutation);
-            connect(model, &QAbstractItemModel::modelAboutToBeReset, this, prepareMutation);
-
-            connect(model, &QAbstractItemModel::rowsInserted, this, finishMutation);
-            connect(model, &QAbstractItemModel::rowsRemoved, this, finishMutation);
-            connect(model, &QAbstractItemModel::rowsMoved, this, finishMutation);
-            connect(model, &QAbstractItemModel::columnsInserted, this, finishMutation);
-            connect(model, &QAbstractItemModel::columnsRemoved, this, finishMutation);
-            connect(model, &QAbstractItemModel::columnsMoved, this, finishMutation);
-            connect(model, &QAbstractItemModel::layoutChanged, this, finishMutation);
-            connect(model, &QAbstractItemModel::modelReset, this, finishMutation);
-            connect(
-                model,
-                &QAbstractItemModel::dataChanged,
-                this,
-                [this]() { scheduleFilterReapply(false); });
-        }
-
-        void prepareForModelMutation()
-        {
-            if (!m_resultFilterActive || m_modelMutationPrepared)
-            {
-                return;
-            }
-            restoreBaselineHiddenRows();
-            m_baselineHiddenRowList.clear();
-            m_modelMutationPrepared = true;
-        }
-
-        void scheduleFilterReapply(const bool recaptureBaseline)
-        {
-            if (!m_resultFilterActive || m_filterRefreshPending)
-            {
-                return;
-            }
-            m_filterRefreshPending = true;
-            const quint64 generation = m_filterGeneration;
-            QTimer::singleShot(0, this, [this, recaptureBaseline, generation]() {
-                if (generation != m_filterGeneration)
-                {
-                    return;
-                }
+            connect(model, &QAbstractItemModel::columnsInserted, this, columnsChanged);
+            connect(model, &QAbstractItemModel::columnsRemoved, this, columnsChanged);
+            connect(model, &QAbstractItemModel::columnsMoved, this, columnsChanged);
+            connect(model, &QAbstractItemModel::modelAboutToBeReset, this, [this]() {
+                ++m_filterGeneration;
                 m_filterRefreshPending = false;
-                if (!m_resultFilterActive || m_tableView.isNull())
-                {
-                    return;
-                }
-
-                if (recaptureBaseline || m_modelMutationPrepared)
-                {
-                    captureBaselineHiddenRows();
-                    m_modelMutationPrepared = false;
-                }
-                else
-                {
-                    restoreBaselineHiddenRows();
-                }
-                applyResultFilterRows();
-                scheduleRefresh();
+                m_filterRows.clear();
+                m_rowLookup.clear();
+                m_dirtyRows.clear();
+                m_allRowsDirty = false;
+                m_filterCursor = 0;
+            });
+            connect(model, &QAbstractItemModel::modelReset, this, [this]() {
+                if (!m_resultFilterActive) return;
+                m_filterRoot = m_tableView->rootIndex();
+                captureBaselineHiddenRows(true);
+                refreshSearchColumns();
+                scheduleFilterReapply(true);
             });
         }
 
-        void captureBaselineHiddenRows()
+        void refreshSearchColumns()
         {
-            m_baselineHiddenRowList.clear();
-            if (m_tableView.isNull() || m_tableView->model() == nullptr)
+            if (m_tableView.isNull() || m_tableView->model() == nullptr) return;
+            QVector<int> columns;
+            for (int column = 0; column < m_tableView->model()->columnCount(m_tableView->rootIndex()); ++column)
             {
+                if (!m_tableView->isColumnHidden(column)
+                    || ks::ui::isColumnHiddenByFreeze(m_tableView.data(), column)) columns.push_back(column);
+            }
+            if (columns != m_searchColumns)
+            {
+                m_searchColumns = columns;
+                if (m_resultFilterActive) scheduleFilterReapply(true);
+            }
+        }
+
+        void rebuildRowLookup(const int first = 0)
+        {
+            for (int row = first; row < m_filterRows.size(); ++row)
+                m_rowLookup.insert(m_filterRows.at(row).key, row);
+        }
+
+        void markRowsDirty(int first, int last)
+        {
+            if (!m_resultFilterActive || m_filterModel.isNull()) return;
+            first = std::max(0, first);
+            last = std::min(last, static_cast<int>(m_filterRows.size()) - 1);
+            if (first == 0 && last + 1 == m_filterRows.size())
+            {
+                scheduleFilterReapply(true);
                 return;
             }
-
-            const int rowCount = m_tableView->model()->rowCount();
-            m_baselineHiddenRowList.reserve(rowCount);
-            for (int rowIndex = 0; rowIndex < rowCount; ++rowIndex)
+            for (int row = first; row <= last; ++row)
             {
-                m_baselineHiddenRowList.push_back(
-                    ks::ui::IsTableRowHiddenByLegacyFilter(m_tableView.data(), rowIndex));
+                m_dirtyRows.insert(m_filterRows.at(row).key);
+            }
+            scheduleFilterReapply(false);
+        }
+
+        void scheduleFilterReapply(const bool allRows)
+        {
+            if (!m_resultFilterActive) return;
+            if (allRows)
+            {
+                m_allRowsDirty = true;
+                m_filterCursor = 0;
+                m_dirtyRows.clear();
+            }
+            if (m_filterRefreshPending || m_tableView.isNull() || !m_tableView->isVisible()
+                || (!m_allRowsDirty && m_dirtyRows.isEmpty())) return;
+            m_filterRefreshPending = true;
+            const quint64 generation = m_filterGeneration;
+            QTimer::singleShot(0, this, [this, generation]() {
+                if (generation != m_filterGeneration) return;
+                m_filterRefreshPending = false;
+                applyResultFilterRows();
+            });
+        }
+
+        void captureBaselineHiddenRows(const bool deferBaseline = false)
+        {
+            m_filterRows.clear();
+            m_rowLookup.clear();
+            if (m_tableView.isNull() || m_tableView->model() == nullptr) return;
+            const int rowCount = m_tableView->model()->rowCount(m_tableView->rootIndex());
+            m_filterRows.reserve(rowCount);
+            for (int row = 0; row < rowCount; ++row)
+            {
+                FilterRowState state;
+                state.key = ++m_nextRowKey;
+                state.baselinePending = deferBaseline;
+                state.identity = m_tableView->model()->index(row, 0, m_tableView->rootIndex());
+                if (!deferBaseline)
+                    state.baselineHidden = ks::ui::IsTableRowHiddenByLegacyFilter(m_tableView.data(), row);
+                m_filterRows.push_back(state);
+                m_rowLookup.insert(state.key, row);
             }
         }
 
         void restoreBaselineHiddenRows()
         {
-            if (m_tableView.isNull()
-                || m_tableView->model() == nullptr
-                || m_filterModel != m_tableView->model())
-            {
-                return;
-            }
-
+            if (m_tableView.isNull() || m_filterModel != m_tableView->model()
+                || m_filterRoot != m_tableView->rootIndex()) return;
             ks::ui::ClearTableSearchRowFilter(m_tableView.data());
         }
 
-        bool rowMatchesQuery(const int rowIndex) const
+        bool rowMatchesQuery(const int row) const
         {
-            if (m_tableView.isNull() || m_tableView->model() == nullptr)
+            if (m_filterModel.isNull()) return false;
+            for (int column : m_searchColumns)
             {
-                return false;
-            }
-
-            QAbstractItemModel* model = m_tableView->model();
-            for (int columnIndex = 0;
-                 columnIndex < model->columnCount();
-                 ++columnIndex)
-            {
-                if (m_tableView->isColumnHidden(columnIndex)
-                    && !ks::ui::isColumnHiddenByFreeze(m_tableView.data(), columnIndex))
-                {
-                    continue;
-                }
-                const QString cellText = model
-                    ->index(rowIndex, columnIndex)
-                    .data(Qt::DisplayRole)
-                    .toString();
-                if (cellText.contains(m_resultFilterQuery, Qt::CaseInsensitive))
-                {
-                    return true;
-                }
+                if (m_filterModel->index(row, column, m_filterRoot).data(Qt::DisplayRole)
+                    .toString().contains(m_resultFilterQuery, Qt::CaseInsensitive)) return true;
             }
             return false;
         }
 
+        void applyRowVisibility(const int row)
+        {
+            const auto& state = m_filterRows.at(row);
+            if (state.baselinePending) return;
+            ks::ui::SetTableSearchRowExcluded(m_tableView.data(), row,
+                state.baselineHidden || !state.matches);
+        }
+
         void applyResultFilterRows()
         {
-            if (!m_resultFilterActive
-                || m_tableView.isNull()
-                || m_tableView->model() == nullptr)
+            if (!m_resultFilterActive || m_tableView.isNull() || m_filterModel.isNull()
+                || m_filterModel != m_tableView->model() || !m_tableView->isVisible()) return;
+            QElapsedTimer slice;
+            slice.start();
+            int processed = 0;
+            while (m_allRowsDirty || !m_dirtyRows.isEmpty())
             {
-                return;
+                int row = -1;
+                if (m_allRowsDirty)
+                {
+                    if (m_filterCursor >= m_filterRows.size())
+                    {
+                        m_allRowsDirty = false;
+                        m_filterCursor = 0;
+                        continue;
+                    }
+                    row = m_filterCursor++;
+                    m_dirtyRows.remove(m_filterRows.at(row).key);
+                }
+                else
+                {
+                    const quint64 key = *m_dirtyRows.cbegin();
+                    m_dirtyRows.remove(key);
+                    row = m_rowLookup.value(key, -1);
+                }
+                if (row < 0 || row >= m_filterRows.size()) continue;
+                auto& state = m_filterRows[row];
+                if (state.baselinePending)
+                {
+                    // Business code commonly hides rows immediately after endInsertRows/
+                    // endResetModel. Capture only after those synchronous handlers finish.
+                    state.baselineHidden = ks::ui::IsTableRowHiddenByLegacyFilter(m_tableView.data(), row);
+                    state.baselinePending = false;
+                }
+                if (!state.baselineHidden) state.matches = rowMatchesQuery(row);
+                applyRowVisibility(row);
+                if ((++processed % 32) == 0 && slice.elapsed() >= 4)
+                {
+                    scheduleFilterReapply(false);
+                    return;
+                }
             }
-
-            const int rowCount = m_tableView->model()->rowCount();
-            if (m_baselineHiddenRowList.size() != rowCount)
-            {
-                captureBaselineHiddenRows();
-            }
-            for (int rowIndex = 0; rowIndex < rowCount; ++rowIndex)
-            {
-                const bool baselineHidden = m_baselineHiddenRowList.at(rowIndex);
-                ks::ui::SetTableSearchRowExcluded(m_tableView.data(), rowIndex,
-                    baselineHidden || !rowMatchesQuery(rowIndex));
-            }
+            scheduleRefresh();
         }
 
         void installObservers()
@@ -797,7 +919,7 @@ namespace
                         m_tableView->horizontalHeader(),
                         &QHeaderView::geometriesChanged,
                         this,
-                        [this]() { scheduleRefresh(); });
+                        [this]() { refreshSearchColumns(); scheduleRefresh(); });
                 }
             }
             if (!m_hostWidget.isNull())
@@ -886,7 +1008,22 @@ namespace
         QToolButton* m_searchButton = nullptr; // m_searchButton：激活标题栏表格搜索的图标按钮。
         QMargins m_originalHostMargins;      // m_originalHostMargins：操作条原始布局边距。
         QPointer<QAbstractItemModel> m_filterModel; // m_filterModel：过滤启用时观察的当前模型。
-        QVector<bool> m_baselineHiddenRowList; // m_baselineHiddenRowList：启用过滤前逐行隐藏快照。
+        struct FilterRowState
+        {
+            quint64 key = 0;
+            QPersistentModelIndex identity;
+            bool baselineHidden = false;
+            bool baselinePending = true;
+            bool matches = true;
+        };
+        QVector<FilterRowState> m_filterRows; // Business baseline and query acceptance have separate owners.
+        QPersistentModelIndex m_filterRoot;
+        QSet<quint64> m_dirtyRows;
+        QHash<quint64, int> m_rowLookup;
+        quint64 m_nextRowKey = 0;
+        QVector<int> m_searchColumns;
+        bool m_allRowsDirty = false;
+        int m_filterCursor = 0;
         QString m_resultFilterQuery;         // m_resultFilterQuery：当前结果专显关键词。
         int m_reservedHostWidth = 0;         // m_reservedHostWidth：当前为搜索入口预留的右侧宽度。
         bool m_resultFilterActive = false;   // m_resultFilterActive：是否已附加通用行过滤。
