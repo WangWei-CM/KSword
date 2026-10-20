@@ -2,6 +2,7 @@
 
 #include <QFutureWatcher>
 #include <QColor>
+#include <QCache>
 #include <QHash>
 #include <QIcon>
 #include <QImage>
@@ -162,8 +163,7 @@ private:
     QColor m_effectiveBackgroundColor = QColor(10, 15, 22); // 资源轨道下方的实际合成底色。
     QHash<QString, CounterSample> m_previousSamples;
     QHash<QString, QString> m_imagePathByIdentity;
-    QHash<QString, QIcon> m_iconCacheByIdentity;
-    QHash<QString, QIcon> m_iconCacheByPath;
+    QCache<QString, QIcon> m_iconCacheByPath{512};
     QHash<QString, QTreeWidgetItem*> m_itemByKey;
     QTimer* m_applyTimer = nullptr;
     QVector<PresentationRow> m_pendingRows;
