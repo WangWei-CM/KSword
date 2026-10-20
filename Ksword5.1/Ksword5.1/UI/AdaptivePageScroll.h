@@ -22,6 +22,7 @@
 
 #include "./MainSurfaceStyle.h"
 #include "./ThemeBinding.h"
+#include "../theme.h"
 #include <QFrame>
 #include <QEvent>
 #include <QPainter>
@@ -36,15 +37,18 @@
 namespace ks::ui
 {
     // 普通主工作区的滚动正文原本透出同一canvas实色；这里显式全矩形填充，
-    // 使Qt能够复用backingstore移动。真正透明宿主与独立详情窗保持原透明策略。
+    // 使Qt能够复用backingstore移动。真正透明宿主与未登记角色的独立窗保持原策略。
     class AdaptivePageCanvas final : public QWidget
     {
     public:
         explicit AdaptivePageCanvas(QWidget* parent) : QWidget(parent) {}
         void prepareSurface()
         {
-            const QColor color = MainWindowSurfaceColors().canvas;
-            const bool solid = UsesMainSurfaceHierarchy(this) && color.alpha() == 255;
+            // DetailDialogChrome明确将所有QScrollArea/viewport设为WindowColor实底；
+            // 仅识别当前顶层的共享shell标记，不沿祖先跨进其它独立窗口猜测颜色。
+            const bool detailSurface = window()->property("ksword_detail_shell").toBool();
+            const QColor color = detailSurface ? KswordTheme::WindowColor() : MainWindowSurfaceColors().canvas;
+            const bool solid = (UsesMainSurfaceHierarchy(this) || detailSurface) && color.alpha() == 255;
             const bool changed = m_solid != solid || m_surface != color;
             m_solid = solid;
             m_surface = color;

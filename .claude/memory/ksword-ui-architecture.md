@@ -409,3 +409,10 @@ KSword 主程序位于 `Ksword5.1/Ksword5.1`（Qt 6.9.3 Widgets + Qt Advanced Do
 - ADS 的 `CDockManager::focusedDockWidget()` 受 `FocusHighlighting` 配置控制，关闭时恒为 `nullptr`。性能现场应按 ADS 焦点、Qt 焦点祖先、鼠标所在控件祖先、当前可见 DockArea 的顺序回退；Dock 切页应监听 `CDockAreaWidget::currentChanged`，不能只依赖 `focusedDockWidgetChanged`。
 - 性能 `last` 操作标记必须带单调时钟有效期；滚轮等高频入口可写入短期标记，否则旧页签操作会污染后续停顿归因。编译采集阶段保持 `KSWORD_PERF_TRACE_ENABLED=1`，发布前改回 `0`。
 - 关闭阶段 `QPointer<MainWindow>` 可能在派生类析构期间仍非空，而其 DockManager 子对象已先行销毁；异步性能上下文必须同时捕获 `QPointer<CDockManager>`，并在对象树查询（尤其 `findChildren`）前检查管理器存活，不能只检查宿主窗口。
+
+## 移动滚动画布的不透明契约（2026-10-20）
+
+- `QScrollArea` 移动正文若仅靠QSS实底，Qt仍可能把正文视为nonopaque，普通小步滚动会使整个可见正文失效。不能把所有Widget全局标成`WA_OpaquePaintEvent`；只有专用画布在`paintEvent`对完整矩形实填、实际alpha为255时才声明该属性。
+- `ParameterWorkspace`的form是明确0圆角实底，使用同一content颜色源填充。`AdaptivePageScroll`普通主宿主使用固定`MainSurface.canvas`；共享详情Chrome已明确给`QScrollArea`及viewport设置`WindowColor`，详情画布只认当前顶层的`ksword_detail_shell`角色。未知独立窗口不沿祖先跨窗猜底色，主宿主壁纸/透明分支保留原合成。
+- 外部卡片/页根的圆角与内部移动正文是不同职责。正文全矩形实填须与其既定底面同色；未来新增不同背景角色时应先扩展共享surface策略，不能继续沿用默认canvas。主题绑定放在滚动壳上，避免业务给content绑定`StyleWorkspacePage`时替换该契约；只监听明确canvas的Show/Parent/Style/Palette生命周期。
+- 当前这组补丁只做源码、HostX64编译与抽取生产policy的纯逻辑验证；真实主程序Paint region、DPI/背景/外角和首帧仍由用户手测。paint面积变化不能直接宣称FPS或耗时倍数。
