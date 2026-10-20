@@ -1355,12 +1355,13 @@ void DriverDock::refreshLoadedModuleEvidenceAsync()
         m_moduleEvidenceOperation = std::make_unique<ks::ui::AsyncOperation>(this);
         m_moduleEvidenceOperation->setStateChangedCallback([this]()
         {
+            const bool wasQuerying = m_moduleEvidenceQuerying;
             m_moduleEvidenceQuerying = m_moduleEvidenceOperation->isBusy();
             if (m_refreshModuleEvidenceButton != nullptr)
             {
                 m_refreshModuleEvidenceButton->setEnabled(!m_moduleEvidenceQuerying);
             }
-            if (m_moduleEvidenceQuerying)
+            if (m_moduleEvidenceQuerying || wasQuerying)
             {
                 updateLoadedModuleEvidenceStatusText();
             }
@@ -1433,6 +1434,8 @@ void DriverDock::refreshLoadedModuleEvidenceAsync()
             if (!guardThis.isNull() && guardThis->m_moduleEvidenceQueryTicket == ticketValue &&
                 guardThis->m_moduleEvidenceStatusLabel != nullptr)
             {
+                // The idle notification must preserve an explicit failure receipt.
+                guardThis->m_moduleEvidenceQuerying = false;
                 guardThis->m_moduleEvidenceStatusLabel->setText(driverText(
                     "driver.evidence.status.scan_failed", QStringLiteral("扫描失败")));
             }
