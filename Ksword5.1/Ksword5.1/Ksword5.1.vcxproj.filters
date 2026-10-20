@@ -2551,6 +2551,9 @@
     <ClInclude Include="..\..\shared\driver\KswordArkSystemTimeIoctl.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="MemoryDock\DdmaPhysicalWriteTransaction.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="..\..\shared\driver\KswordArkDriverDispatchIoctl.h">
       <Filter>Header Files</Filter>
     </ClInclude>

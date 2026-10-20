@@ -934,6 +934,7 @@
     <ClInclude Include="MemoryDock\MemoryDebugProcessCatalog.h" />
     <ClInclude Include="MemoryDock\MemoryDebugExecutionPanel.h" />
     <ClInclude Include="MemoryDock\MemoryDebugThreadSession.h" />
+    <ClInclude Include="MemoryDock\DdmaPhysicalWriteTransaction.h" />
     <ClInclude Include="ArkDriverClient\ArkHvmNoAttachClient.h" />
     <ClInclude Include="..\..\shared\driver\KswordArkHvmNoAttachIoctl.h" />
     <ClInclude Include="..\..\shared\driver\KswordArkMemoryResult.h" />

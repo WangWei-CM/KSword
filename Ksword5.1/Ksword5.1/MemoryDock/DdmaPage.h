@@ -31,10 +31,12 @@
 #include <QString>
 #include "../UI/StructuredFieldView.h"
 #include <QWidget>
+#include <QPointer>
 
 #include <atomic>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <vector>
 
 class QCheckBox;
@@ -44,6 +46,8 @@ class QLabel;
 class QLineEdit;
 class QPushButton;
 class QSpinBox;
+class QShowEvent;
+class QHideEvent;
 class QTableWidget;
 namespace ks::ui
 {
@@ -81,6 +85,9 @@ protected:
     // - 作用：深浅色切换后重新下发语义色样式；
     // - 参数 event：Qt 事件对象。
     void changeEvent(QEvent* event) override;
+    void showEvent(QShowEvent* event) override;
+    void hideEvent(QHideEvent* event) override;
+    bool eventFilter(QObject* watched, QEvent* event) override;
 
 private:
     // ========================================================
@@ -212,6 +219,12 @@ private:
 
     // writePhysicalFromUi：把十六进制视图里改动过的字节用 DDMA 写回物理内存。
     void writePhysicalFromUi();
+    struct PhysicalWriteState;
+    bool accessWriteContextMatches(const PhysicalWriteState& state) const;
+    void submitPhysicalWrite(std::shared_ptr<PhysicalWriteState> state);
+    void confirmPhysicalWriteForce(std::shared_ptr<PhysicalWriteState> state);
+    bool canPresentOperationPopup() const;
+    void schedulePendingForce();
 
     // compareBackendsFromUi：
     // - 作用：对同一物理地址分别用标准通道与 DDMA 各读一页并逐字节比对；
@@ -233,6 +246,11 @@ private:
 
     ksword::memory_backend::DdmaSession m_session;      // 当前会话配置。
     std::vector<ksword::ark::DdmaDiskEntry> m_diskCache; // 最近一次探测到的磁盘。
+    std::shared_ptr<PhysicalWriteState> m_pendingForceWrite;
+    QPointer<QWidget> m_exposureWindow;
+    bool m_pageExposed = false;
+    bool m_windowExposed = false;
+    bool m_forcePromptScheduled = false;
     bool m_operationBusy = false;
     bool m_probeCompleted = false;                      // 是否至少成功探测过一次。
     bool m_kernelDebuggerEnabled = false;               // 探测到的内核调试状态。

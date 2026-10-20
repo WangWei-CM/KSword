@@ -24090,6 +24090,8 @@
     "取消并关闭当前消息框": "Cancel and close current message box",
     "取消当前下载任务，已写入的临时文件内容会保留": "Cancel current download task; written temporary file contents will be retained",
     "取消当前进程的关键进程标记": "Remove critical flag from current process",
+    "正在执行 DDMA 写入与读回校验...": "Executing DDMA write and readback verification...",
+    "DDMA 写入事务已结束，但当前会话已变化。原事务结果保留在日志中；请重新读取。": "The DDMA write transaction ended, but the current session changed. The original result is in the log; read a new snapshot.",
     "取消扫描": "Cancel scan",
     "取消挂起 Thread": "Suspend Thread cancel",
     "取消挂起Thread": "Resume SuspendThread",
