@@ -594,11 +594,12 @@ QString WindowGlobalHotkeyTab::rowClipboardText(
     if (includeHeader)
     {
         QStringList headers;
+        const QAbstractItemModel* model = table->model();
         for (int column = 0; column < table->columnCount(); ++column)
         {
-            headers << (table->horizontalHeaderItem(column) == nullptr
+            headers << (model == nullptr
                 ? QString()
-                : table->horizontalHeaderItem(column)->text());
+                : model->headerData(column, Qt::Horizontal, Qt::DisplayRole).toString());
         }
         lines << headers.join(QLatin1Char('\t'));
     }
