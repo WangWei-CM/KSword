@@ -62,12 +62,13 @@ namespace ks::ui
 
         // 记录一次操作边界耗时；itemCount 为负表示不写入计数字段。
         void recordSpan(const char* operationToken, const QString& targetLabel,
-            qint64 durationMs, qint64 itemCount)
+            qint64 durationNs, qint64 itemCount)
         {
             QJsonObject record;
             fillCommon(record, operationToken, targetLabel);
             record.insert(QStringLiteral("event"), QStringLiteral("span"));
-            record.insert(QStringLiteral("ms"), static_cast<double>(durationMs));
+            record.insert(QStringLiteral("ms"), durationNs / 1000000.0);
+            record.insert(QStringLiteral("duration_ns"), static_cast<double>(durationNs));
             if (itemCount >= 0)
             {
                 record.insert(QStringLiteral("count"), static_cast<double>(itemCount));
@@ -302,13 +303,24 @@ namespace ks::ui
 
     void RecordPerfSpan(const char* operationToken, const QString& targetLabel, qint64 durationMs)
     {
-        PerfTrace::instance().recordSpan(operationToken, targetLabel, durationMs, -1);
+        PerfTrace::instance().recordSpan(operationToken, targetLabel, durationMs * 1000000, -1);
     }
 
     void RecordPerfSpanWithCount(const char* operationToken, const QString& targetLabel,
         qint64 durationMs, qint64 itemCount)
     {
-        PerfTrace::instance().recordSpan(operationToken, targetLabel, durationMs, itemCount);
+        PerfTrace::instance().recordSpan(operationToken, targetLabel, durationMs * 1000000, itemCount);
+    }
+
+    void RecordPerfSpanNs(const char* operationToken, const QString& targetLabel,
+        qint64 durationNs, qint64 itemCount)
+    {
+        PerfTrace::instance().recordSpan(operationToken, targetLabel, durationNs, itemCount);
+    }
+
+    qint64 PerfTraceNowNs()
+    {
+        return referenceClock().nsecsElapsed();
     }
 
     void RecordPerfMark(const char* operationToken, const QString& targetLabel)
@@ -345,7 +357,7 @@ namespace ks::ui
         }
         m_finished = true;
         PerfTrace::instance().recordSpan(
-            m_operationToken, m_targetLabel, m_clock.elapsed(), m_itemCount);
+            m_operationToken, m_targetLabel, m_clock.nsecsElapsed(), m_itemCount);
     }
 }
 

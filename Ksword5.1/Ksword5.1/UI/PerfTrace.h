@@ -31,6 +31,11 @@ namespace ks::ui
     // 获取全局单调时钟经过的毫秒数；分片计时需要与日志时间轴对齐时使用。
     qint64 PerfTraceNowMs();
 
+    // 纳秒墙钟区间；队列探针表示事件入口至回投执行的延迟，不是 Paint/Layout CPU 耗时。
+    qint64 PerfTraceNowNs();
+    void RecordPerfSpanNs(const char* operationToken, const QString& targetLabel,
+        qint64 durationNs, qint64 itemCount = -1);
+
     // 由宿主注册上下文提供者：返回当前聚焦的 dock/页签描述，供停顿记录携带现场。
     void SetPerfTraceContextProvider(std::function<QString()> provider);
 
@@ -64,6 +69,8 @@ namespace ks::ui
     inline void RecordPerfSpanWithCount(const char*, const QString&, qint64, qint64) {}
     inline void RecordPerfMark(const char*, const QString&) {}
     inline qint64 PerfTraceNowMs() { return 0; }
+    inline qint64 PerfTraceNowNs() { return 0; }
+    inline void RecordPerfSpanNs(const char*, const QString&, qint64, qint64 = -1) {}
     inline void SetPerfTraceContextProvider(std::function<QString()>) {}
 
     // 关闭时的作用域计时器空实现：签名与开启时一致，调用点不需要条件编译。

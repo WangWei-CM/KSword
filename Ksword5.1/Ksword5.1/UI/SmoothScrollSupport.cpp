@@ -49,7 +49,7 @@ namespace
     constexpr int kPixelAnimationDurationMs = 100;
     constexpr int kTabWheelStepPixels = 48;
 #if KSWORD_PERF_TRACE_ENABLED
-    constexpr int kViewportProbeMinimumMs = 2;
+    constexpr qint64 kViewportProbeMinimumNs = 2000000;
 #endif
     thread_local const QEvent* g_tabScrollFrame = nullptr;
 
@@ -512,7 +512,8 @@ namespace
             }
 
 #if KSWORD_PERF_TRACE_ENABLED
-            // 全局过滤器位于 QWidget::event() 前；queued 回调记录事件分发及队列等待的合计延迟。
+            // 全局过滤器位于 QWidget::event() 前；只量入口至 queued 回调的墙钟延迟。
+            // 此区间可与其它探针重叠，包含其它 UI 工作，不能当作 Paint/Layout 耗时或求和。
             // 只采集 QTableWidget/QScrollArea 及其 viewport，避免把整棵控件树变成日志热点。
             if (eventObject->type() == QEvent::Paint ||
                 eventObject->type() == QEvent::LayoutRequest)
@@ -779,13 +780,13 @@ namespace
             }
             *pending |= pendingBit;
             const char* operationToken = eventType == QEvent::Paint
-                ? "perf_scroll_paint" : "perf_scroll_layout";
+                ? "perf_scroll_paint_queue_latency" : "perf_scroll_layout_queue_latency";
             const QString targetLabel = scrollAreaPerfLabel(area) +
                 (watchedWidget == area->viewport() ? QStringLiteral("/viewport") :
                     QStringLiteral("/content"));
-            const qint64 startMs = ks::ui::PerfTraceNowMs();
+            const qint64 startNs = ks::ui::PerfTraceNowNs();
             QPointer<QAbstractScrollArea> guard(area);
-            QTimer::singleShot(0, this, [this, guard, pendingBit, targetLabel, operationToken, startMs]()
+            QTimer::singleShot(0, this, [this, guard, pendingBit, targetLabel, operationToken, startNs]()
             {
                 if (guard == nullptr)
                 {
@@ -797,11 +798,11 @@ namespace
                     return;
                 }
                 *pending &= ~pendingBit;
-                const qint64 elapsedMs = std::max<qint64>(
-                    0, ks::ui::PerfTraceNowMs() - startMs);
-                if (elapsedMs >= kViewportProbeMinimumMs)
+                const qint64 elapsedNs = std::max<qint64>(
+                    0, ks::ui::PerfTraceNowNs() - startNs);
+                if (elapsedNs >= kViewportProbeMinimumNs)
                 {
-                    ks::ui::RecordPerfSpan(operationToken, targetLabel, elapsedMs);
+                    ks::ui::RecordPerfSpanNs(operationToken, targetLabel, elapsedNs);
                 }
             });
         }
