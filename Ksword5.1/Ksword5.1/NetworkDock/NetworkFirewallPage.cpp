@@ -23,7 +23,6 @@
 #include "../theme.h"
 #include "../Framework/PrivilegeElevationPrompt.h"
 #include "../Internationalization/LanguageManager.h"
-#include "../UI/GlobalDialogTheme.h"
 #include "../ksword/process/process.h"
 
 #include <QAbstractItemModel>
@@ -867,7 +866,6 @@ namespace
         {
             setWindowTitle(initialRuleEntry == nullptr ? QStringLiteral("新增防火墙规则") : QStringLiteral("编辑防火墙规则"));
             resize(900, 470);
-            ks::ui::RefreshGlobalDialogTheme();
             ks::ui::StyleSecondaryWindow(this);
 
             QVBoxLayout* rootLayout = new QVBoxLayout(this);
