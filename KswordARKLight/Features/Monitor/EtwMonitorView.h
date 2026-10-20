@@ -22,7 +22,9 @@ struct EtwEventFilterResult {
     std::uint64_t generation = 0;
     std::wstring query;
     bool useRegex = false;
-    std::vector<std::size_t> visibleIndexes;
+    std::uint64_t firstSequence = 0;
+    std::uint64_t endSequence = 0;
+    std::vector<std::uint64_t> visibleSequences;
 };
 
 // EtwMonitorView is the ETW-only monitoring page. Inputs are parent HWND and
@@ -72,7 +74,14 @@ private:
     // inputs; processing is mutex-protected; there is no return value.
     void clearPendingEvents();
 
-    void appendEventsToView(const std::vector<EtwEvent>& events);
+    void appendEventsToView(std::vector<EtwEvent> events);
+    struct ViewAnchor {
+        std::vector<std::uint64_t> selected;
+        std::uint64_t top = UINT64_MAX;
+        bool followTail = false;
+    };
+    ViewAnchor captureViewAnchor() const;
+    void commitEventProjection(const ViewAnchor& anchor);
     void requestLocalFilter(std::wstring query);
     void applyLocalFilter(EtwEventFilterResult result);
     void clearEventList();
@@ -104,7 +113,14 @@ private:
     HWND localFilterBar_ = nullptr;
     HWND eventList_ = nullptr;
     HIMAGELIST eventImageList_ = nullptr;
-    std::vector<EtwEvent> eventRows_;
+    std::vector<std::shared_ptr<const EtwEvent>> eventRows_;
+    std::uint64_t firstEventSequence_ = 0;
+    std::uint64_t nextEventSequence_ = 0;
+    std::uint64_t filteredThroughSequence_ = 0;
+    std::uint64_t localFilterGeneration_ = 0;
+    std::uint64_t appliedFilterGeneration_ = 0;
+    bool eventProjectionDirty_ = false;
+    ViewAnchor deferredViewAnchor_;
     std::vector<std::size_t> visibleEventIndexes_;
     std::wstring localFilterQuery_;
     bool localFilterUseRegex_ = false;

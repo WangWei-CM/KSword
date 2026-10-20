@@ -21,6 +21,7 @@
 #include <sstream>
 #include <string_view>
 #include <vector>
+#include <unordered_set>
 
 namespace Ksword::Features::Monitor {
 namespace {
@@ -248,6 +249,11 @@ LRESULT EtwMonitorView::handleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
         ::SetTimer(hwnd_, kEventFlushTimerId, kEventFlushIntervalMs, nullptr);
         updateButtonState();
         return 0;
+    case WM_SHOWWINDOW:
+        if (wParam && eventProjectionDirty_) {
+            commitEventProjection(deferredViewAnchor_);
+        }
+        break;
     case WM_SIZE:
         layout();
         return 0;
@@ -483,7 +489,7 @@ void EtwMonitorView::flushPendingEvents() {
     }
 
     if (!batch.empty()) {
-        appendEventsToView(batch);
+        appendEventsToView(std::move(batch));
     }
 }
 
@@ -496,9 +502,63 @@ void EtwMonitorView::clearPendingEvents() {
     pendingEvents_.clear();
 }
 
+EtwMonitorView::ViewAnchor EtwMonitorView::captureViewAnchor() const {
+    if (eventProjectionDirty_) return deferredViewAnchor_;
+    ViewAnchor anchor;
+    const auto sequenceAt = [this](const int item) {
+        return item >= 0 && static_cast<std::size_t>(item) < visibleEventIndexes_.size()
+            ? firstEventSequence_ + visibleEventIndexes_[static_cast<std::size_t>(item)] : UINT64_MAX;
+    };
+    for (int item = ListView_GetNextItem(eventList_, -1, LVNI_SELECTED); item >= 0;
+         item = ListView_GetNextItem(eventList_, item, LVNI_SELECTED)) {
+        anchor.selected.push_back(sequenceAt(item));
+    }
+    const int top = ListView_GetTopIndex(eventList_);
+    anchor.top = sequenceAt(top);
+    anchor.followTail = visibleEventIndexes_.empty() ||
+        top + ListView_GetCountPerPage(eventList_) >= static_cast<int>(visibleEventIndexes_.size()) - 1;
+    return anchor;
+}
+
+void EtwMonitorView::commitEventProjection(const ViewAnchor& anchor) {
+    if (!::IsWindowVisible(hwnd_)) {
+        deferredViewAnchor_ = anchor;
+        eventProjectionDirty_ = true;
+        return;
+    }
+    eventProjectionDirty_ = false;
+    ListView_SetItemCountEx(eventList_, static_cast<int>(visibleEventIndexes_.size()), LVSICF_NOINVALIDATEALL | LVSICF_NOSCROLL);
+    ListView_SetItemState(eventList_, -1, 0, LVIS_SELECTED | LVIS_FOCUSED);
+    int topItem = -1;
+    bool focused = false;
+    const std::unordered_set<std::uint64_t> selected(anchor.selected.begin(), anchor.selected.end());
+    for (std::size_t item = 0; item < visibleEventIndexes_.size(); ++item) {
+        const auto sequence = firstEventSequence_ + visibleEventIndexes_[item];
+        if (sequence == anchor.top) topItem = static_cast<int>(item);
+        if (selected.contains(sequence)) {
+            ListView_SetItemState(eventList_, static_cast<int>(item),
+                LVIS_SELECTED | (focused ? 0 : LVIS_FOCUSED), LVIS_SELECTED | LVIS_FOCUSED);
+            focused = true;
+        }
+    }
+    if (anchor.followTail && !visibleEventIndexes_.empty()) {
+        ListView_EnsureVisible(eventList_, static_cast<int>(visibleEventIndexes_.size()) - 1, FALSE);
+    } else if (topItem >= 0) {
+        ListView_EnsureVisible(eventList_, topItem, FALSE);
+    }
+    ::InvalidateRect(eventList_, nullptr, FALSE);
+}
+
 void EtwMonitorView::requestLocalFilter(std::wstring query) {
+    const ViewAnchor anchor = captureViewAnchor();
+    const bool useRegex = Ksword::Ui::GetFilterBarRegexEnabled(localFilterBar_);
+    const bool changed = query != localFilterQuery_ || useRegex != localFilterUseRegex_;
     localFilterQuery_ = std::move(query);
-    localFilterUseRegex_ = Ksword::Ui::GetFilterBarRegexEnabled(localFilterBar_);
+    localFilterUseRegex_ = useRegex;
+    if (changed) {
+        ++localFilterGeneration_;
+        filteredThroughSequence_ = firstEventSequence_;
+    }
     if (eventList_ == nullptr) {
         return;
     }
@@ -507,18 +567,26 @@ void EtwMonitorView::requestLocalFilter(std::wstring query) {
         for (std::size_t index = 0; index < visibleEventIndexes_.size(); ++index) {
             visibleEventIndexes_[index] = index;
         }
-        ListView_SetItemCountEx(eventList_, static_cast<int>(visibleEventIndexes_.size()), LVSICF_NOINVALIDATEALL | LVSICF_NOSCROLL);
-        ::InvalidateRect(eventList_, nullptr, FALSE);
+        commitEventProjection(anchor);
         return;
     }
     if (!localFilterTask_) {
         return;
     }
-    const auto snapshot = std::make_shared<const std::vector<EtwEvent>>(eventRows_);
-    const std::uint64_t generation = eventGeneration_;
-    const bool useRegex = localFilterUseRegex_;
+    // Arriving data never supersedes a matching in-flight segment. Only a
+    // different query invalidates it; the accepted segment schedules its tail.
+    if (!changed && localFilterTask_->running()) {
+        return;
+    }
+    const std::uint64_t firstSequence = (std::max)(filteredThroughSequence_, firstEventSequence_);
+    if (firstSequence >= nextEventSequence_) {
+        return;
+    }
+    const auto begin = eventRows_.begin() + static_cast<std::ptrdiff_t>(firstSequence - firstEventSequence_);
+    const auto snapshot = std::make_shared<const std::vector<std::shared_ptr<const EtwEvent>>>(begin, eventRows_.end());
+    const std::uint64_t generation = localFilterGeneration_;
     localFilterTask_->request(
-        [snapshot, generation, useRegex, query = localFilterQuery_]() mutable {
+        [snapshot, generation, useRegex, firstSequence, query = localFilterQuery_]() mutable {
             EtwEventFilterResult result{};
             result.generation = generation;
             result.query = std::move(query);
@@ -533,10 +601,12 @@ void EtwMonitorView::requestLocalFilter(std::wstring query) {
                     regexReady = false;
                 }
             }
-            result.visibleIndexes.reserve(snapshot->size());
+            result.firstSequence = firstSequence;
+            result.endSequence = firstSequence + snapshot->size();
+            result.visibleSequences.reserve(snapshot->size());
             for (std::size_t index = 0; index < snapshot->size(); ++index) {
-                if (MatchesEvent((*snapshot)[index], result.query, regexReady ? &compiled : nullptr)) {
-                    result.visibleIndexes.push_back(index);
+                if (MatchesEvent(*(*snapshot)[index], result.query, regexReady ? &compiled : nullptr)) {
+                    result.visibleSequences.push_back(firstSequence + index);
                 }
             }
             return result;
@@ -551,28 +621,46 @@ void EtwMonitorView::requestLocalFilter(std::wstring query) {
 }
 
 void EtwMonitorView::applyLocalFilter(EtwEventFilterResult result) {
-    if (result.generation != eventGeneration_ || result.query != localFilterQuery_ ||
+    if (result.generation != localFilterGeneration_ || result.query != localFilterQuery_ ||
         result.useRegex != localFilterUseRegex_) {
+        requestLocalFilter(localFilterQuery_);
         return;
     }
-    visibleEventIndexes_ = std::move(result.visibleIndexes);
-    ListView_SetItemCountEx(eventList_, static_cast<int>(visibleEventIndexes_.size()), LVSICF_NOINVALIDATEALL | LVSICF_NOSCROLL);
-    updateStatusText(L"ETW 本地筛选结果：" + std::to_wstring(visibleEventIndexes_.size()) + L" 项。");
-    ::InvalidateRect(eventList_, nullptr, FALSE);
+    const ViewAnchor anchor = captureViewAnchor();
+    if (appliedFilterGeneration_ != result.generation) {
+        visibleEventIndexes_.clear();
+        appliedFilterGeneration_ = result.generation;
+    }
+    for (const std::uint64_t sequence : result.visibleSequences) {
+        if (sequence >= firstEventSequence_ && sequence < nextEventSequence_) {
+            visibleEventIndexes_.push_back(static_cast<std::size_t>(sequence - firstEventSequence_));
+        }
+    }
+    filteredThroughSequence_ = (std::max)(filteredThroughSequence_, result.endSequence);
+    commitEventProjection(anchor);
+    if (::IsWindowVisible(hwnd_)) {
+        updateStatusText(L"ETW 本地筛选结果：" + std::to_wstring(visibleEventIndexes_.size()) + L" 项。");
+    }
+    requestLocalFilter(localFilterQuery_);
 }
 
-void EtwMonitorView::appendEventsToView(const std::vector<EtwEvent>& events) {
+void EtwMonitorView::appendEventsToView(std::vector<EtwEvent> events) {
     if (events.empty() || eventList_ == nullptr) {
         return;
     }
 
-    const int itemCountBefore = static_cast<int>(visibleEventIndexes_.size());
-    const bool followTail = itemCountBefore == 0 ||
-        ListView_GetTopIndex(eventList_) + ListView_GetCountPerPage(eventList_) >= itemCountBefore - 1;
-    eventRows_.insert(eventRows_.end(), events.begin(), events.end());
+    const ViewAnchor anchor = captureViewAnchor();
+    for (auto& event : events) {
+        eventRows_.push_back(std::make_shared<const EtwEvent>(std::move(event)));
+        ++nextEventSequence_;
+    }
     if (eventRows_.size() > kMaxEventRows) {
         const std::size_t trimmed = eventRows_.size() - kMaxEventRows;
         eventRows_.erase(eventRows_.begin(), eventRows_.begin() + static_cast<std::ptrdiff_t>(trimmed));
+        firstEventSequence_ += trimmed;
+        visibleEventIndexes_.erase(std::remove_if(visibleEventIndexes_.begin(), visibleEventIndexes_.end(),
+            [trimmed](const std::size_t index) { return index < trimmed; }), visibleEventIndexes_.end());
+        for (auto& index : visibleEventIndexes_) index -= trimmed;
     }
     ++eventGeneration_;
     if (localFilterQuery_.empty()) {
@@ -583,11 +671,7 @@ void EtwMonitorView::appendEventsToView(const std::vector<EtwEvent>& events) {
     } else {
         requestLocalFilter(localFilterQuery_);
     }
-    ListView_SetItemCountEx(eventList_, static_cast<int>(visibleEventIndexes_.size()), LVSICF_NOINVALIDATEALL | LVSICF_NOSCROLL);
-    if (followTail && !visibleEventIndexes_.empty()) {
-        ListView_EnsureVisible(eventList_, static_cast<int>(visibleEventIndexes_.size() - 1), FALSE);
-    }
-    ::InvalidateRect(eventList_, nullptr, FALSE);
+    commitEventProjection(anchor);
 }
 
 // handleVirtualEventDisplayInfo answers only the ListView's visible-cell
@@ -603,7 +687,7 @@ bool EtwMonitorView::handleVirtualEventDisplayInfo(NMLVDISPINFOW* displayInfo) {
     if (sourceIndex >= eventRows_.size()) {
         return false;
     }
-    const EtwEvent& eventRow = eventRows_[sourceIndex];
+    const EtwEvent& eventRow = *eventRows_[sourceIndex];
     if ((displayInfo->item.mask & LVIF_TEXT) != 0) {
         switch (displayInfo->item.iSubItem) {
         case 0: eventTextScratch_ = NumberText(eventRow.processId); break;
@@ -633,6 +717,12 @@ void EtwMonitorView::clearEventList() {
     // - return: none.  No historical rows are reinserted or repainted.
     visibleEventIndexes_.clear();
     ++eventGeneration_;
+    ++localFilterGeneration_;
+    firstEventSequence_ = nextEventSequence_;
+    filteredThroughSequence_ = nextEventSequence_;
+    appliedFilterGeneration_ = localFilterGeneration_;
+    eventProjectionDirty_ = false;
+    deferredViewAnchor_ = {};
     ListView_SetItemCountEx(eventList_, 0, LVSICF_NOINVALIDATEALL | LVSICF_NOSCROLL);
     ::InvalidateRect(eventList_, nullptr, FALSE);
 }
@@ -767,7 +857,7 @@ bool EtwMonitorView::selectedEvent(EtwEvent* eventRow) const {
         return false;
     }
     if (eventRow) {
-        *eventRow = eventRows_[sourceIndex];
+        *eventRow = *eventRows_[sourceIndex];
     }
     return true;
 }
@@ -829,7 +919,7 @@ void EtwMonitorView::copyVisibleEventRows() {
         if (sourceIndex >= eventRows_.size()) {
             continue;
         }
-        const EtwEvent& eventRow = eventRows_[sourceIndex];
+        const EtwEvent& eventRow = *eventRows_[sourceIndex];
         output << eventRow.timeText << L'\t'
                << eventRow.providerText << L'\t'
                << eventRow.processId << L'\t'
@@ -842,7 +932,17 @@ void EtwMonitorView::copyVisibleEventRows() {
 }
 
 void EtwMonitorView::exportVisibleEventRows() {
-    const std::wstring text = BuildVisibleEtwEventsTsv(eventRows_, visibleEventIndexes_);
+    std::vector<EtwEvent> exportRows;
+    std::vector<std::size_t> exportIndexes;
+    exportRows.reserve(visibleEventIndexes_.size());
+    exportIndexes.reserve(visibleEventIndexes_.size());
+    for (const auto index : visibleEventIndexes_) {
+        if (index < eventRows_.size()) {
+            exportIndexes.push_back(exportRows.size());
+            exportRows.push_back(*eventRows_[index]);
+        }
+    }
+    const std::wstring text = BuildVisibleEtwEventsTsv(exportRows, exportIndexes);
     if (text.empty()) {
         updateStatusText(L"没有可导出的 ETW 可见结果。");
         return;
