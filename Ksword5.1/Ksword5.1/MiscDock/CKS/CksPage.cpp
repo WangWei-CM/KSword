@@ -36,7 +36,7 @@
 #include <QUrl>
 #include <QVBoxLayout>
 
-#include <thread>
+#include <utility>
 
 namespace
 {
@@ -138,7 +138,17 @@ namespace ks::misc
         {
             operation = new ks::ui::AsyncOperation(this);
         }
+        m_backendOperation = new ks::ui::AsyncOperation(this);
         initializeUi();
+        m_backendOperation->setStateChangedCallback([this]() {
+            if (!m_backendOperation->isInFlight() && m_busy)
+            {
+                m_busy = false;
+                showResult(T(QStringLiteral("misc.cks.detail.task_failed"),
+                    QStringLiteral("后台任务未返回有效回执，请刷新状态。")), false);
+                updateButtons();
+            }
+        });
         for (int slot = 0; slot < static_cast<int>(m_fileHashOperations.size()); ++slot)
         {
             m_fileHashOperations[slot]->setStateChangedCallback([this, slot]() {
@@ -159,13 +169,9 @@ namespace ks::misc
         {
             operation->close();
         }
-        // CksBackend 的系统调用没有 stop_token 入口；先设置发布门禁，再等待有限的
-        // 查询/操作返回，保证页面和 QObject 树销毁后没有 detached 线程继续回投。
-        m_cancelRequested->store(true, std::memory_order_release);
-        if (m_worker.joinable())
-        {
-            m_worker.join();
-        }
+        // Accepted tool work owns an exit lease; closing the page only revokes GUI delivery.
+        // The value worker completes its tool wait, readback and cleanup without borrowing this page.
+        m_backendOperation->close();
     }
 
     void CksPage::showEvent(QShowEvent* event)
@@ -470,32 +476,34 @@ namespace ks::misc
 
     void CksPage::refresh()
     {
-        if (m_busy)
-        {
-            return;
-        }
+        if (m_busy) return;
         m_busy = true;
         updateButtons();
-        QPointer<CksPage> page(this); // page：窗口关闭后阻止后台结果写入已析构对象。
-        startWorker([page](const std::shared_ptr<std::atomic_bool>& cancel) {
-            const cks::Snapshot snapshot = cks::QuerySnapshot(); // snapshot：工作线程独立采集。
-            if (cancel->load(std::memory_order_acquire))
-            {
-                return;
-            }
-            if (QCoreApplication* app = QCoreApplication::instance())
-            {
-                QMetaObject::invokeMethod(app, [page, snapshot, cancel]() {
-                    if (cancel->load(std::memory_order_acquire)) return;
-                    if (!page) return;
-                    page->m_snapshot = snapshot;
-                    page->m_hasSnapshot = true;
-                    page->m_busy = false;
-                    page->showSnapshot();
-                    page->updateButtons();
-                }, Qt::QueuedConnection);
-            }
-        });
+        // QuerySnapshot owns a CiTool process. Use a transaction lease so application exit
+        // waits asynchronously for the bounded tool cleanup even after this page closes.
+        const auto accepted = m_backendOperation->submitTransaction<int, cks::Snapshot>(0,
+            [](const int&) { return cks::QuerySnapshot(); },
+            [this](const cks::Snapshot& snapshot, std::uint64_t) {
+                m_snapshot = snapshot;
+                m_hasSnapshot = true;
+                m_busy = false;
+                showSnapshot();
+                updateButtons();
+                return true;
+            },
+            [this](std::exception_ptr) {
+                m_busy = false;
+                showResult(T(QStringLiteral("misc.cks.detail.task_failed"),
+                    QStringLiteral("后台任务未返回有效回执，请刷新状态。")), false);
+                updateButtons();
+            });
+        if (accepted == 0)
+        {
+            m_busy = false;
+            showResult(T(QStringLiteral("misc.cks.detail.task_failed"),
+                QStringLiteral("后台任务未返回有效回执，请刷新状态。")), false);
+            updateButtons();
+        }
     }
 
     void CksPage::showSnapshot()
@@ -721,49 +729,41 @@ namespace ks::misc
 
     void CksPage::runOperation(const std::function<bool(QString*)>& operation)
     {
-        if (m_busy)
-        {
-            return;
-        }
+        if (m_busy) return;
         m_busy = true;
         updateButtons();
-        QPointer<CksPage> page(this); // page：后台完成时只在存活页面上更新 UI。
-        startWorker([page, operation](const std::shared_ptr<std::atomic_bool>& cancel) {
-            QString detail; // detail：后端动作的原始回执。
-            const bool success = operation(&detail);
-            if (cancel->load(std::memory_order_acquire))
-            {
-                return;
-            }
-            if (QCoreApplication* app = QCoreApplication::instance())
-            {
-                QMetaObject::invokeMethod(app, [page, detail, success, cancel]() {
-                    if (cancel->load(std::memory_order_acquire)) return;
-                    if (!page) return;
-                    page->m_busy = false;
-                    page->showResult(detail, success);
-                    page->refresh();
-                }, Qt::QueuedConnection);
-            }
-        });
-    }
-
-    void CksPage::startWorker(std::function<void(const std::shared_ptr<std::atomic_bool>&)> task)
-    {
-        // m_busy 保证这里只有 UI 线程串行调用；回收已完成的上一个线程后再替换句柄。
-        m_cancelRequested->store(true, std::memory_order_release);
-        if (m_worker.joinable())
+        using Operation = std::function<bool(QString*)>;
+        using Receipt = std::pair<std::pair<bool, QString>, cks::Snapshot>;
+        // Existing callers capture only their frozen path or no state. Once accepted,
+        // the operation and its final system readback complete regardless of page lifetime.
+        const auto accepted = m_backendOperation->submitTransaction<Operation, Receipt>(operation,
+            [](const Operation& execute) {
+                QString detail;
+                const bool success = execute(&detail);
+                return Receipt{{success, std::move(detail)}, cks::QuerySnapshot()};
+            },
+            [this](const Receipt& receipt, std::uint64_t) {
+                m_snapshot = receipt.second;
+                m_hasSnapshot = true;
+                m_busy = false;
+                showResult(receipt.first.second, receipt.first.first);
+                showSnapshot();
+                updateButtons();
+                return true;
+            },
+            [this](std::exception_ptr) {
+                m_busy = false;
+                showResult(T(QStringLiteral("misc.cks.detail.task_failed"),
+                    QStringLiteral("后台任务未返回有效回执，请刷新状态。")), false);
+                updateButtons();
+            });
+        if (accepted == 0)
         {
-            m_worker.join();
+            m_busy = false;
+            showResult(T(QStringLiteral("misc.cks.detail.task_failed"),
+                QStringLiteral("后台任务未返回有效回执，请刷新状态。")), false);
+            updateButtons();
         }
-        const auto cancel = std::make_shared<std::atomic_bool>(false);
-        m_cancelRequested = cancel;
-        m_worker = std::thread([task = std::move(task), cancel]() mutable {
-            if (task)
-            {
-                task(cancel);
-            }
-        });
     }
 
     bool CksPage::confirm(const QString& text)
