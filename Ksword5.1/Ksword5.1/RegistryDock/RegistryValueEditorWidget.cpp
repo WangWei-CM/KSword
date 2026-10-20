@@ -1,4 +1,12 @@
 #include "RegistryValueEditorWidget.h"
+namespace {
+const ks::ui::PageNavigationTabDefinition kRegistryValueNavigation[] = {
+    {"data", "", "", "数据", true},
+    {"raw", "", "", "原始字节", false},
+    {"compare", "", "", "修改对照", false}
+};
+}
+
 #include "../UI/PageControlStyle.h"
 #include "../UI/PrimaryPageStyle.h"
 #include "../UI/SecondaryPageLayout.h"
@@ -308,7 +316,7 @@ RegistryValueEditorWidget::RegistryValueEditorWidget(QWidget* parent) : QWidget(
     auto* rawHint = new QLabel(trText(QStringLiteral("此类型使用完整原始字节编辑器。")), m_typedPages);
     rawHint->setWordWrap(true);
     m_typedPages->addWidget(rawHint);
-    m_tabs->addTab(m_typedPages, trText(QStringLiteral("数据")));
+    m_navigationTabs.add(kRegistryValueNavigation[0], m_tabs, m_typedPages);
 
     auto* rawPage = new QWidget(m_tabs);
     auto* rawLayout = new QVBoxLayout(rawPage);
@@ -339,7 +347,7 @@ RegistryValueEditorWidget::RegistryValueEditorWidget(QWidget* parent) : QWidget(
     m_hex->setObjectName(QStringLiteral("registry_value_raw_hex"));
     m_hex->setEditable(true);
     rawLayout->addWidget(m_hex, 1);
-    m_tabs->addTab(rawPage, trText(QStringLiteral("原始字节")));
+    m_navigationTabs.add(kRegistryValueNavigation[1], m_tabs, rawPage);
 
     auto* comparePage = new QWidget(m_tabs);
     auto* compareLayout = new QVBoxLayout(comparePage);
@@ -361,7 +369,7 @@ RegistryValueEditorWidget::RegistryValueEditorWidget(QWidget* parent) : QWidget(
     m_after->setStatusBarVisible(false);
     afterLayout->addWidget(m_after, 1);
     compareLayout->addWidget(compareSplit, 1);
-    m_tabs->addTab(comparePage, trText(QStringLiteral("修改对照")));
+    m_navigationTabs.add(kRegistryValueNavigation[2], m_tabs, comparePage);
     root->addWidget(m_tabs, 1);
     m_state = new QLabel(this);
     m_state->setTextFormat(Qt::PlainText);
@@ -980,3 +988,17 @@ void RegistryValueEditorWidget::changeEvent(QEvent* event)
     if (event->type() == QEvent::ApplicationPaletteChange || event->type() == QEvent::PaletteChange)
         applyControlStyles();
 }
+
+ks::ui::PageNavigationCatalog RegistryValueEditorWidget::navigationCatalog(const RegistryValueEditorWidget* existing)
+{
+    ks::ui::PageNavigationCatalog schema;
+    for (const auto& definition : kRegistryValueNavigation)
+        schema.append(ks::ui::PageNavigationTabDescriptor(definition));
+    return existing ? existing->m_navigationTabs.describe(std::move(schema)) : schema;
+}
+QWidget* RegistryValueEditorWidget::activateNavigationDescriptor(const QString& id)
+{
+    return m_navigationTabs.activate(id, navigationCatalog(this));
+}
+namespace { const bool kRegistryValueNavigationRegistered =
+    ks::ui::RegisterTypedPageNavigationCatalog<RegistryValueEditorWidget>(QStringLiteral("registry.value_editor")); }

@@ -3,6 +3,7 @@
 #include <QByteArray>
 #include <QString>
 #include <QWidget>
+#include "../UI/PageNavigationTabCatalog.h"
 
 namespace ks::ui
 {
@@ -33,6 +34,9 @@ class RegistryValueEditorWidget final : public QWidget
     Q_OBJECT
 
 public:
+    static ks::ui::PageNavigationCatalog navigationCatalog(const RegistryValueEditorWidget* existing = nullptr);
+    QWidget* activateNavigationDescriptor(const QString& id);
+
     explicit RegistryValueEditorWidget(QWidget* parent = nullptr);
     ~RegistryValueEditorWidget() override;
     void setValue(const QString& keyPath, const QString& name, quint32 type,
@@ -48,6 +52,8 @@ protected:
     void changeEvent(QEvent* event) override;
 
 private:
+    ks::ui::PageNavigationTabCatalog m_navigationTabs;
+
     quint32 currentType() const;
     void loadTypedEditor();
     void loadHexEditor();
