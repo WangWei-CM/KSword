@@ -1,3 +1,4 @@
+#include "../UI/AsyncOperation.h"
 #include "../UI/StructuredFieldView.h"
 #include "../UI/TableContextMenu.h"
 #include "../UI/ToolbarMetrics.h"
@@ -10,6 +11,7 @@
 #include "../UI/TableColumnAutoFit.h"
 #include "../UI/DetailLayoutRegistry.h"
 
+#include <system_error>
 #include <QPointer>
 #include <QRunnable>
 
@@ -17,6 +19,15 @@ using namespace ksword::driver_dock_internal;
 
 namespace
 {
+    bool samePiDdbIdentity(const ksword::ark::PiDdbEntry& first,
+        const ksword::ark::PiDdbEntry& second)
+    {
+        return first.entryAddress == second.entryAddress &&
+            first.timeDateStamp == second.timeDateStamp &&
+            first.loadStatus == second.loadStatus && first.driverName == second.driverName;
+    }
+
+
     enum class IntegrityColumn : int
     {
         Class = 0,
@@ -743,17 +754,74 @@ bool DriverDock::selectedPiDdbEntryIdentity(
     return true;
 }
 
+ksword::ark::PiDdbDeleteResult DriverDock::executePiDdbRequest(
+    const ksword::ark::PiDdbEntry& expected, bool commit)
+{
+    const ksword::ark::DriverClient client;
+    return client.deletePiDdbEntry(expected, commit, commit);
+}
+
+void DriverDock::updatePiDdbDeleteButtonState()
+{
+    const bool busy = (m_piDdbPreflightOperation && m_piDdbPreflightOperation->isBusy()) ||
+        (m_piDdbCommitOperation && m_piDdbCommitOperation->isBusy());
+    if (!busy && m_piDdbDeletePhase != PiDdbDeletePhase::WaitingConfirmation)
+        m_piDdbDeletePhase = PiDdbDeletePhase::Idle;
+    if (m_unloadedPiddbDeleteButton != nullptr)
+        m_unloadedPiddbDeleteButton->setEnabled(!busy &&
+            m_piDdbDeletePhase == PiDdbDeletePhase::Idle && selectedPiDdbEntryIdentity(nullptr));
+}
+
+void DriverDock::showPiDdbDeleteException(
+    const ksword::ark::PiDdbEntry& expected, std::exception_ptr failure)
+{
+    QString detail = QString::number(ERROR_UNHANDLED_EXCEPTION);
+    try { if (failure) std::rethrow_exception(failure); }
+    catch (const std::exception& error) { detail = QString::fromUtf8(error.what()); }
+    catch (...) {}
+    m_piDdbDeletePhase = PiDdbDeletePhase::Idle;
+    const QPointer<DriverDock> guardThis(this);
+    QMessageBox::critical(this,
+        driverText("driver.piddb.delete.title", QStringLiteral("删除 PiDDB 表项")),
+        driverText("driver.piddb.delete.exception", QStringLiteral("PiDDB 操作未能取得完整回执：%1"))
+            .arg(QString::fromStdWString(expected.driverName) + QLatin1Char('\n') + detail));
+    if (guardThis == nullptr) return;
+    updatePiDdbDeleteButtonState();
+}
+
 void DriverDock::deleteSelectedPiDdbEntry()
 {
+    if (m_piDdbDeletePhase != PiDdbDeletePhase::Idle) return;
     ksword::ark::PiDdbEntry expected{};
-    if (!selectedPiDdbEntryIdentity(&expected))
+    if (!selectedPiDdbEntryIdentity(&expected)) return;
+    if (!m_piDdbPreflightOperation)
     {
-        return;
+        m_piDdbPreflightOperation = std::make_unique<ks::ui::AsyncOperation>(this);
+        m_piDdbCommitOperation = std::make_unique<ks::ui::AsyncOperation>(this);
+        m_piDdbPreflightOperation->setStateChangedCallback([this]() { updatePiDdbDeleteButtonState(); });
+        m_piDdbCommitOperation->setStateChangedCallback([this]() { updatePiDdbDeleteButtonState(); });
     }
+    m_piDdbDeletePhase = PiDdbDeletePhase::Preflighting;
+    m_unloadedPiddbDeleteButton->setEnabled(false);
+    m_piDdbPreflightOperation->submit<ksword::ark::PiDdbEntry, ksword::ark::PiDdbDeleteResult>(
+        expected,
+        [](const ksword::ark::PiDdbEntry& identity, const ks::ui::AsyncOperationToken& token)
+        {
+            if (token.isCanceled()) return ksword::ark::PiDdbDeleteResult{};
+            return executePiDdbRequest(identity, false);
+        },
+        [this, expected](const ksword::ark::PiDdbDeleteResult& preflight, std::uint64_t)
+        {
+            confirmPiDdbDelete(expected, preflight);
+            return true;
+        },
+        [this, expected](std::exception_ptr failure) { showPiDdbDeleteException(expected, failure); });
+}
 
-    const ksword::ark::DriverClient client;
-    const ksword::ark::PiDdbDeleteResult preflight =
-        client.deletePiDdbEntry(expected, false, false);
+void DriverDock::confirmPiDdbDelete(const ksword::ark::PiDdbEntry& expected,
+    const ksword::ark::PiDdbDeleteResult& preflight)
+{
+    const QPointer<DriverDock> guardThis(this);
     if (!preflight.io.ok ||
         preflight.status != KSWORD_ARK_PIDDB_DELETE_STATUS_FORCE_REQUIRED)
     {
@@ -769,9 +837,22 @@ void DriverDock::deleteSelectedPiDdbEntry()
                 .arg(preflight.status)
                 .arg(formatNtStatusText(preflight.lastStatus))
                 .arg(describeDriverCollection(preflight.io)));
+        if (guardThis == nullptr) return;
+        m_piDdbDeletePhase = PiDdbDeletePhase::Idle;
+        updatePiDdbDeleteButtonState();
         return;
     }
 
+
+    ksword::ark::PiDdbEntry current{};
+    if (!selectedPiDdbEntryIdentity(&current) || !samePiDdbIdentity(current, expected))
+    {
+        // The readonly preflight may have completed after selection/source refresh.
+        m_piDdbDeletePhase = PiDdbDeletePhase::Idle;
+        updatePiDdbDeleteButtonState();
+        return;
+    }
+    m_piDdbDeletePhase = PiDdbDeletePhase::WaitingConfirmation;
     QMessageBox::warning(
         this,
         driverText(
@@ -786,6 +867,7 @@ void DriverDock::deleteSelectedPiDdbEntry()
             .arg(QString::fromStdWString(expected.driverName))
             .arg(expected.timeDateStamp, 8, 16, QLatin1Char('0'))
             .arg(hex64(expected.entryAddress)));
+    if (guardThis == nullptr) return;
 
     bool accepted = false;
     const QString confirmation = QInputDialog::getText(
@@ -799,41 +881,62 @@ void DriverDock::deleteSelectedPiDdbEntry()
         QLineEdit::Normal,
         QString(),
         &accepted);
+    if (guardThis == nullptr) return;
     if (!accepted || confirmation != QStringLiteral("DELETE PIDDB"))
     {
+        m_piDdbDeletePhase = PiDdbDeletePhase::Idle;
+        updatePiDdbDeleteButtonState();
         return;
     }
 
-    const ksword::ark::PiDdbDeleteResult deleted =
-        client.deletePiDdbEntry(expected, true, true);
-    if (!deleted.io.ok ||
-        deleted.status != KSWORD_ARK_PIDDB_DELETE_STATUS_OK)
-    {
-        QMessageBox::critical(
-            this,
-            driverText(
-                "driver.piddb.delete.title",
-                QStringLiteral("删除 PiDDB 表项")),
-            driverText(
-                "driver.piddb.delete.failed",
-                QStringLiteral("删除失败。状态 %1，NTSTATUS %2。\n%3"))
-                .arg(deleted.status)
-                .arg(formatNtStatusText(deleted.lastStatus))
-                .arg(describeDriverCollection(deleted.io)));
-        return;
-    }
 
-    QMessageBox::information(
-        this,
-        driverText(
-            "driver.piddb.delete.title",
-            QStringLiteral("删除 PiDDB 表项")),
-        driverText(
-            "driver.piddb.delete.completed",
-            QStringLiteral(
-                "精确表项已删除，并在同一内核锁保护下复核为不存在。剩余 %1 项。"))
-            .arg(deleted.remainingRows));
-    refreshUnloadedDriversAsync();
+    m_piDdbDeletePhase = PiDdbDeletePhase::Committing;
+    const auto ticket = m_piDdbCommitOperation->submitTransaction<ksword::ark::PiDdbEntry, ksword::ark::PiDdbDeleteResult>(
+        expected,
+        [](const ksword::ark::PiDdbEntry& identity) { return executePiDdbRequest(identity, true); },
+        [this](const ksword::ark::PiDdbDeleteResult& deleted, std::uint64_t)
+        {
+            const QPointer<DriverDock> commitOwner(this);
+            if (!deleted.io.ok ||
+                deleted.status != KSWORD_ARK_PIDDB_DELETE_STATUS_OK)
+            {
+                QMessageBox::critical(
+                    this,
+                    driverText(
+                        "driver.piddb.delete.title",
+                        QStringLiteral("删除 PiDDB 表项")),
+                    driverText(
+                        "driver.piddb.delete.failed",
+                        QStringLiteral("删除失败。状态 %1，NTSTATUS %2。\n%3"))
+                        .arg(deleted.status)
+                        .arg(formatNtStatusText(deleted.lastStatus))
+                        .arg(describeDriverCollection(deleted.io)));
+                if (commitOwner == nullptr) return true;
+                m_piDdbDeletePhase = PiDdbDeletePhase::Idle;
+                updatePiDdbDeleteButtonState();
+                return true;
+            }
+
+            QMessageBox::information(
+                this,
+                driverText(
+                    "driver.piddb.delete.title",
+                    QStringLiteral("删除 PiDDB 表项")),
+                driverText(
+                    "driver.piddb.delete.completed",
+                    QStringLiteral(
+                        "精确表项已删除，并在同一内核锁保护下复核为不存在。剩余 %1 项。"))
+                    .arg(deleted.remainingRows));
+            if (commitOwner == nullptr) return true;
+            m_piDdbDeletePhase = PiDdbDeletePhase::Idle;
+            updatePiDdbDeleteButtonState();
+            refreshUnloadedDriversAsync();
+            return true;
+        },
+        [this, expected](std::exception_ptr failure) { showPiDdbDeleteException(expected, failure); });
+    if (ticket == 0)
+        showPiDdbDeleteException(expected, std::make_exception_ptr(
+            std::system_error(std::error_code(ERROR_OPERATION_ABORTED, std::system_category()))));
 }
 
 void DriverDock::showSelectedDriverIntegrityDetail()

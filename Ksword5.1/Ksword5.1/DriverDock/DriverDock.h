@@ -21,6 +21,9 @@
 #include <QWidget>
 
 #include <array>    // std::array：五个对象投影各自记录已消费的快照与语言代次。
+#include <exception>
+namespace ks::ui { class AsyncOperation; }
+
 #include <atomic>   // std::atomic_bool：调试捕获线程运行标记。
 #include <deque>    // 最近调试记录按固定容量保留，避免头删搬移。
 #include <mutex>    // 捕获线程只接纳值数据，文档仍由 GUI 线程拥有。
@@ -394,6 +397,16 @@ private:
     // - 处理逻辑：复用 R0 preflight、固定短语确认和删除后同锁复核；
     // - 返回：无；成功后重新查询当前 PiDDB 来源。
     void deleteSelectedPiDdbEntry();
+    void confirmPiDdbDelete(const ksword::ark::PiDdbEntry& expected,
+        const ksword::ark::PiDdbDeleteResult& preflight);
+    void updatePiDdbDeleteButtonState();
+    void showPiDdbDeleteException(const ksword::ark::PiDdbEntry& expected, std::exception_ptr failure);
+    static ksword::ark::PiDdbDeleteResult executePiDdbRequest(
+        const ksword::ark::PiDdbEntry& expected, bool commit);
+    enum class PiDdbDeletePhase { Idle, Preflighting, WaitingConfirmation, Committing };
+    PiDdbDeletePhase m_piDdbDeletePhase = PiDdbDeletePhase::Idle;
+    std::unique_ptr<ks::ui::AsyncOperation> m_piDdbPreflightOperation;
+    std::unique_ptr<ks::ui::AsyncOperation> m_piDdbCommitOperation;
 
     // showSelectedDriverIntegrityDetail：
     // - 展示当前选中完整性证据行的详情文本；

@@ -8,6 +8,7 @@
   "text_direction": "ltr",
   "fallback": "en-US",
   "translations": {
+    "driver.piddb.delete.exception": "PiDDB 操作未能取得完整回执：%1",
     "registry.value.pending_text": "正在准备当前文本草稿，请稍候…",
     "正在准备当前文本草稿，请稍候…": "正在准备当前文本草稿，请稍候…",
     "registry.value.pending_import": "正在读取原始字节，请稍候…",
@@ -7012,6 +7013,7 @@
     "notification.copy.log_template": "%1\n%2\n%3\n文件：%4\n函数：%5\nGUID：%6"
   },
   "source_translations": {
+    "PiDDB 操作未能取得完整回执：%1": "PiDDB 操作未能取得完整回执：%1",
     "正在准备当前文本草稿，请稍候…": "正在准备当前文本草稿，请稍候…",
     "正在读取原始字节，请稍候…": "正在读取原始字节，请稍候…",
     "文本草稿准备失败；请重试编辑或恢复原值。": "文本草稿准备失败；请重试编辑或恢复原值。",

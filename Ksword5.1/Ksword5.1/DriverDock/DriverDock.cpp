@@ -1,3 +1,4 @@
+#include "../UI/AsyncOperation.h"
 #include "DriverDock.Internal.h"
 #include "../UI/AsyncOperation.h"
 
@@ -546,6 +547,8 @@ DriverDock::~DriverDock()
     if (m_moduleEvidenceOperation != nullptr) { m_moduleEvidenceOperation->close(); }
     if (m_serviceStatusOperation) { m_serviceStatusOperation->close(); }
     if (m_serviceRegistrationOperation) { m_serviceRegistrationOperation->close(); }
+    if (m_piDdbPreflightOperation) m_piDdbPreflightOperation->close();
+    if (m_piDdbCommitOperation) m_piDdbCommitOperation->close();
     releaseDebugOutputCapture();
 
     // 自身驱动页的业务对象仍由 KernelDock 持有；独立销毁 DriverDock 时将页面接回，

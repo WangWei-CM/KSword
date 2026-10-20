@@ -1651,11 +1651,7 @@ void DriverDock::initializeConnections()
             &QTableWidget::currentCellChanged,
             this,
             [this](int, int, int, int) {
-                if (m_unloadedPiddbDeleteButton != nullptr)
-                {
-                    m_unloadedPiddbDeleteButton->setEnabled(
-                        selectedPiDdbEntryIdentity(nullptr));
-                }
+                updatePiDdbDeleteButtonState();
             });
         connect(
             m_unloadedPiddbRefreshButton,
