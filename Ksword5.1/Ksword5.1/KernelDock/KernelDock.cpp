@@ -2,6 +2,7 @@
 #include "KernelDock.h"
 #include "../UI/TableContextMenu.h"
 #include "../UI/PageControlStyle.h"
+#include "../UI/LazyPageContent.h"
 #include "../UI/ToolbarMetrics.h"
 #include "../UI/VisibleTableWidget.h"
 #include "../UI/ThemeBinding.h"
@@ -984,22 +985,34 @@ void KernelDock::initializeObjectNamespaceTab()
         tabIcon(QStringLiteral(":/Icon/process_tree.svg")),
         kernelText("kernel.main.inner_tab.overview", QStringLiteral("总览")));
     m_objectNamespaceInnerTabWidget->addTab(
-        new KernelObjectDirectoryDeepTab(m_objectNamespaceInnerTabWidget),
+        new ks::ui::LazyPageContent(m_objectNamespaceInnerTabWidget, [](QWidget* page) -> QWidget* {
+            return new KernelObjectDirectoryDeepTab(page);
+        }),
         tabIcon(QStringLiteral(":/Icon/process_tree.svg")),
         kernelText("kernel.main.inner_tab.directory_recursion", QStringLiteral("目录递归")));
     m_objectNamespaceInnerTabWidget->addTab(
-        new KernelBaseNamedObjectsTab(m_objectNamespaceInnerTabWidget),
+        new ks::ui::LazyPageContent(m_objectNamespaceInnerTabWidget, [](QWidget* page) -> QWidget* {
+            return new KernelBaseNamedObjectsTab(page);
+        }),
         tabIcon(QStringLiteral(":/Icon/process_threads.svg")),
         QStringLiteral("BaseNamedObjects"));
     m_objectNamespaceInnerTabWidget->addTab(
-        new KernelSymbolicLinkTab(m_objectNamespaceInnerTabWidget),
+        new ks::ui::LazyPageContent(m_objectNamespaceInnerTabWidget, [](QWidget* page) -> QWidget* {
+            return new KernelSymbolicLinkTab(page);
+        }),
         tabIcon(QStringLiteral(":/Icon/process_refresh.svg")),
         kernelText("kernel.main.inner_tab.symbolic_link", QStringLiteral("符号链接")));
     m_objectNamespaceInnerTabWidget->addTab(
-        new KernelDeviceDriverObjectsTab(m_objectNamespaceInnerTabWidget),
+        new ks::ui::LazyPageContent(m_objectNamespaceInnerTabWidget, [](QWidget* page) -> QWidget* {
+            return new KernelDeviceDriverObjectsTab(page);
+        }),
         tabIcon(QStringLiteral(":/Icon/process_details.svg")),
         kernelText("kernel.main.inner_tab.device_driver", QStringLiteral("设备与驱动")));
-    auto* ioTimerTab = new KernelIoTimerTab(m_objectNamespaceInnerTabWidget);
+    auto* ioTimerTab = new ks::ui::LazyPageContent(m_objectNamespaceInnerTabWidget, [](QWidget* page) -> QWidget* {
+        auto* content = new KernelIoTimerTab(page);
+        content->requestInitialRefresh();
+        return content;
+    });
     const int ioTimerInnerTabIndex = m_objectNamespaceInnerTabWidget->addTab(
         ioTimerTab,
         tabIcon(QStringLiteral(":/Icon/process_threads.svg")),
@@ -1009,14 +1022,22 @@ void KernelDock::initializeObjectNamespaceTab()
         kernelText(
             "kernel.main.inner_tab.io_timer.tooltip",
             QStringLiteral("枚举 DEVICE_OBJECT.Timer，并提供经三重身份校验的公开 WDM 启动/停止操作")));
-    auto* ioctlAuditTab = new KernelIoctlAuditTab(m_objectNamespaceInnerTabWidget);
+    auto* ioctlAuditTab = new ks::ui::LazyPageContent(m_objectNamespaceInnerTabWidget, [](QWidget* page) -> QWidget* {
+        auto* content = new KernelIoctlAuditTab(page);
+        content->requestInitialRefresh();
+        return content;
+    });
     m_objectNamespaceInnerTabWidget->addTab(
         ioctlAuditTab,
         tabIcon(QStringLiteral(":/Icon/process_list.svg")),
         kernelText("kernel.main.inner_tab.ioctl_audit", QStringLiteral("IOCTL 派遣表")));
     // ObjectType 方法指针检查：只核对类型表/类型对象地址会漏掉被改写的二级方法指针（Open/Parse/...），
     // 首刷同样只在用户切入子页后才发起 R0 查询。
-    auto* objectTypeProcedureTab = new KernelObjectTypeProcedureTab(m_objectNamespaceInnerTabWidget);
+    auto* objectTypeProcedureTab = new ks::ui::LazyPageContent(m_objectNamespaceInnerTabWidget, [](QWidget* page) -> QWidget* {
+        auto* content = new KernelObjectTypeProcedureTab(page);
+        content->requestInitialRefresh();
+        return content;
+    });
     const int objectTypeProcedureTabIndex = m_objectNamespaceInnerTabWidget->addTab(
         objectTypeProcedureTab,
         tabIcon(QStringLiteral(":/Icon/process_list.svg")),
@@ -1027,27 +1048,11 @@ void KernelDock::initializeObjectNamespaceTab()
             "kernel.main.inner_tab.object_type_procedures.tooltip",
             QStringLiteral("逐个读取 OBJECT_TYPE 里的八个方法指针并核对归属模块，布局未通过运行时自验证时如实显示检查未启用")));
     m_objectNamespaceInnerTabWidget->addTab(
-        new KernelObjectTypeMatrixTab(m_objectNamespaceInnerTabWidget),
+        new ks::ui::LazyPageContent(m_objectNamespaceInnerTabWidget, [](QWidget* page) -> QWidget* {
+            return new KernelObjectTypeMatrixTab(page);
+        }),
         tabIcon(QStringLiteral(":/Icon/process_list.svg")),
         kernelText("kernel.main.inner_tab.object_type", QStringLiteral("对象类型")));
-
-    // IOCTL 审计与 IoTimer 都会对每个 DriverObject 发起 R0 查询。KernelDock 即使不是
-    // 当前主 Dock 也会为布局恢复而创建，因此只能在用户实际切入子页后开始首轮采集。
-    connect(m_objectNamespaceInnerTabWidget, &QTabWidget::currentChanged, this,
-        [this, ioctlAuditTab, ioTimerTab, objectTypeProcedureTab](const int tabIndex) {
-            if (m_objectNamespaceInnerTabWidget->widget(tabIndex) == ioctlAuditTab)
-            {
-                ioctlAuditTab->requestInitialRefresh();
-            }
-            else if (m_objectNamespaceInnerTabWidget->widget(tabIndex) == ioTimerTab)
-            {
-                ioTimerTab->requestInitialRefresh();
-            }
-            else if (m_objectNamespaceInnerTabWidget->widget(tabIndex) == objectTypeProcedureTab)
-            {
-                objectTypeProcedureTab->requestInitialRefresh();
-            }
-        });
 
     m_objectNamespaceToolLayout = new QHBoxLayout();
     m_objectNamespaceToolLayout->setContentsMargins(0, 0, 0, 0);

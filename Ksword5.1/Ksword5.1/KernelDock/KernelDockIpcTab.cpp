@@ -1,6 +1,7 @@
 #include "../UI/StructuredFieldView.h"
 #include "../UI/TableContextMenu.h"
 #include "../UI/PageControlStyle.h"
+#include "../UI/LazyPageContent.h"
 #include "../UI/ToolbarMetrics.h"
 #include "../UI/PrimaryPageStyle.h"
 #include "KernelDockIpcTab.h"
@@ -249,11 +250,7 @@ KernelDockIpcTab::KernelDockIpcTab(QWidget* parent)
     : QWidget(parent)
 {
     initializeUi();
-    initializeConnections();
 
-    QMetaObject::invokeMethod(this, [this]() {
-        refreshAlpcQuery();
-    }, Qt::QueuedConnection);
 }
 
 void KernelDockIpcTab::initializeUi()
@@ -268,20 +265,29 @@ void KernelDockIpcTab::initializeUi()
     rootLayout->addWidget(m_innerTabWidget, 1);
 
     m_innerTabWidget->addTab(
-        new KernelNamedPipeTab(m_innerTabWidget),
+        new ks::ui::LazyPageContent(m_innerTabWidget, [](QWidget* page) -> QWidget* {
+            return new KernelNamedPipeTab(page);
+        }),
         QIcon(QStringLiteral(":/Icon/process_list.svg")),
         QStringLiteral("NamedPipe"));
     m_innerTabWidget->setTabToolTip(0, kernelText("kernel.ipc.tab.named_pipe.tooltip", QStringLiteral("只读 NPFS NamedPipe 目录枚举")));
 
-    initializeAlpcPage();
+    auto* alpcShell = new ks::ui::LazyPageContent(m_innerTabWidget, [this](QWidget*) -> QWidget* {
+        initializeAlpcPage();
+        initializeConnections();
+        refreshAlpcQuery();
+        return m_alpcPage;
+    });
     m_innerTabWidget->addTab(
-        m_alpcPage,
+        alpcShell,
         QIcon(QStringLiteral(":/Icon/process_details.svg")),
         QStringLiteral("ALPC"));
     m_innerTabWidget->setTabToolTip(1, kernelText("kernel.ipc.tab.alpc.tooltip", QStringLiteral("只读 ALPC 端口关系查询")));
 
     m_innerTabWidget->addTab(
-        new KernelCommunicationEndpointTab(m_innerTabWidget),
+        new ks::ui::LazyPageContent(m_innerTabWidget, [](QWidget* page) -> QWidget* {
+            return new KernelCommunicationEndpointTab(page);
+        }),
         QIcon(QStringLiteral(":/Icon/process_critical.svg")),
         kernelText("kernel.ipc.tab.communication.title", QStringLiteral("通信对象")));
     m_innerTabWidget->setTabToolTip(2, kernelText("kernel.ipc.tab.communication.tooltip", QStringLiteral("只读 ALPC/RPC 通信端点聚合")));
