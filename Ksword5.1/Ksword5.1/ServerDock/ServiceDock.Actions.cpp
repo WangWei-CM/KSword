@@ -1,3 +1,4 @@
+#include "../UI/TableRowFilterSupport.h"
 #include "ServiceDock.Internal.h"
 #include "../Framework/PrivilegeElevationPrompt.h"
 #include "../theme.h"
@@ -157,7 +158,7 @@ void ServiceDock::showServiceContextMenu(const QPoint& localPos)
     openBinaryPropertiesAction->setEnabled(!selectedServiceName().isEmpty());
     jumpFileDockBinaryAction->setEnabled(!selectedServiceName().isEmpty());
     jumpFileDockServiceDllAction->setEnabled(!selectedServiceName().isEmpty());
-    exportListAction->setEnabled(m_serviceTable != nullptr && m_serviceTable->rowCount() > 0);
+    exportListAction->setEnabled(m_serviceTable != nullptr && m_visibleServiceCount > 0);
     exportServiceJsonAction->setEnabled(!selectedServiceName().isEmpty());
 
     QAction* selectedAction = contextMenu.exec(m_serviceTable->viewport()->mapToGlobal(localPos));
@@ -883,6 +884,7 @@ void ServiceDock::exportCurrentListAsTsv()
 
     for (int rowIndex = 0; rowIndex < m_serviceTable->rowCount(); ++rowIndex)
     {
+        if (ks::ui::IsTableRowExcludedByFilter(m_serviceTable, rowIndex)) continue;
         QTableWidgetItem* nameItem = m_serviceTable->item(rowIndex, toServiceColumn(ServiceColumn::Name));
         if (nameItem == nullptr)
         {

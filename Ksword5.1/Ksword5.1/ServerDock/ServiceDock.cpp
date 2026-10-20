@@ -1,5 +1,6 @@
 #include "ServiceDock.Internal.h"
 #include "../UI/TableInteractionSupport.h"
+#include "../UI/TableRowFilterSupport.h"
 
 using namespace service_dock_detail;
 
@@ -27,7 +28,14 @@ ServiceDock::~ServiceDock()
 
 void ServiceDock::showEvent(QShowEvent* event)
 {
+    if (m_serviceRowsDirty) rebuildServiceTable();
     QWidget::showEvent(event);
+    if (!m_pendingFocusServiceName.isEmpty())
+    {
+        const QString pending = m_pendingFocusServiceName;
+        m_pendingFocusServiceName.clear();
+        focusServiceByName(pending);
+    }
 
     if (m_initialRefreshDone)
     {
@@ -60,7 +68,7 @@ void ServiceDock::focusServiceByName(const QString& serviceNameText)
     for (int rowIndex = 0; rowIndex < m_serviceTable->rowCount(); ++rowIndex)
     {
         QTableWidgetItem* nameItem = m_serviceTable->item(rowIndex, toServiceColumn(ServiceColumn::Name));
-        if (nameItem == nullptr)
+        if (ks::ui::IsTableRowExcludedByFilter(m_serviceTable, rowIndex) || nameItem == nullptr)
         {
             continue;
         }
@@ -75,7 +83,7 @@ void ServiceDock::focusServiceByName(const QString& serviceNameText)
         }
     }
 
-    if (m_serviceTable->rowCount() == 0 || m_refreshInProgress)
+    if (m_visibleServiceCount == 0 || m_refreshInProgress)
     {
         requestAsyncRefresh(true);
     }
@@ -211,9 +219,16 @@ void ServiceDock::applyRefreshResult(
         });
 
     m_serviceList = std::move(serviceList);
+    m_serviceIndexByName.clear();
+    m_serviceIndexByName.reserve(static_cast<qsizetype>(m_serviceList.size()));
+    for (int index = 0; index < static_cast<int>(m_serviceList.size()); ++index)
+    {
+        const QString key = m_serviceList[static_cast<std::size_t>(index)].serviceNameText.toCaseFolded();
+        if (!m_serviceIndexByName.contains(key)) m_serviceIndexByName.insert(key, index);
+    }
     rebuildServiceTable();
 
-    if (!m_pendingFocusServiceName.trimmed().isEmpty())
+    if (isVisible() && !m_pendingFocusServiceName.trimmed().isEmpty())
     {
         const QString pendingNameText = m_pendingFocusServiceName;
         m_pendingFocusServiceName.clear();

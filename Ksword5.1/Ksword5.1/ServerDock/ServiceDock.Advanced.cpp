@@ -406,7 +406,7 @@ ks::ui::FieldDocument ServiceDock::buildExportDetailText(const ServiceEntry& ent
 {
     ks::ui::FieldDocument detailLineList;
     detailLineList.field(QStringLiteral("当前服务"), QStringLiteral("%1").arg(entry.serviceNameText));
-    detailLineList.field(QStringLiteral("当前可见服务数"), QStringLiteral("%1").arg(m_serviceTable == nullptr ? 0 : m_serviceTable->rowCount()));
+    detailLineList.field(QStringLiteral("当前可见服务数"), QStringLiteral("%1").arg(m_visibleServiceCount));
     detailLineList.field(QStringLiteral("导出列表"), QStringLiteral("支持 TSV（当前筛选结果）"), true);
     detailLineList.field(QStringLiteral("导出单服务"), QStringLiteral("支持 JSON（完整配置快照）"), true);
     detailLineList.field(QStringLiteral("刷新策略"), QStringLiteral("支持“刷新当前服务”与“刷新全部服务”分层更新"), true);

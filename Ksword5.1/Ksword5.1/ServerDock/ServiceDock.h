@@ -13,6 +13,7 @@
 
 #include <QWidget>
 #include <QStringList>
+#include <QHash>
 
 #include <atomic>   // std::atomic_bool：后台刷新状态标记。
 #include <cstdint>  // std::uint32_t：PID 等数值字段。
@@ -39,6 +40,7 @@ class QToolButton;
 class QTabWidget;
 class QVBoxLayout;
 class CodeEditorWidget;
+class QTimer;
 
 class ServiceDock final : public QWidget
 {
@@ -161,10 +163,11 @@ private:
 
     // ===================== 列表与详情 =====================
     void rebuildServiceTable();
+    void applyServiceTableFilter();
     bool entryMatchesCurrentFilter(const ServiceEntry& entry) const;
     bool serviceLessThan(const ServiceEntry& left, const ServiceEntry& right) const;
     void updateSummaryText();
-    void syncToolbarStateWithSelection();
+    void syncToolbarStateWithSelection(bool preserveEdits = false);
     void onServiceSelectionChanged();
     void updateDetailViewsFromSelection();
     ks::ui::FieldDocument buildAuditTabText(const ServiceEntry& entry) const;
@@ -330,6 +333,10 @@ private:
     ks::ui::StructuredFieldView* m_auditEditor = nullptr;        // m_auditEditor：审计文本编辑器（只读）。
 
     // ===================== 数据与状态 =====================
+    QHash<QString, int> m_serviceIndexByName;
+    QTimer* m_filterDebounceTimer = nullptr;
+    bool m_serviceRowsDirty = false;
+    int m_visibleServiceCount = 0;
     std::vector<ServiceEntry> m_serviceList;          // m_serviceList：服务缓存列表。
     std::atomic_bool m_refreshInProgress{ false };    // m_refreshInProgress：后台刷新进行中标志。
     std::atomic_bool m_refreshQueued{ false };        // m_refreshQueued：刷新排队标志。
