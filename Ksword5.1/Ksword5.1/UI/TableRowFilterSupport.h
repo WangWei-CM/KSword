@@ -17,6 +17,13 @@ namespace ks::ui
 
     void ApplyTableRowFilter(QTableView* tableView,
         const QSet<QPersistentModelIndex>& excludedRows);
+    // Optional large-filter projection: commit canonical identities immediately,
+    // then converge row visibility in 4ms/256-row GUI slices. Replacements supersede
+    // pending work; source model and row identities remain unchanged. The caller
+    // keeps its existing filtering status while projectionPending() is true.
+    void ApplyTableRowFilterIncrementally(QTableView* tableView,
+        const QSet<QPersistentModelIndex>& excludedRows);
+    bool IsTableRowFilterProjectionPending(const QTableView* tableView);
     bool IsTableRowExcludedByFilter(const QTableView* tableView, int row);
     bool HasTableRowsPassingFilters(const QTableView* tableView);
     quint64 TableRowFilterIdentityRevision(const QTableView* tableView);

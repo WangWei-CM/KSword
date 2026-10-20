@@ -2362,6 +2362,7 @@ namespace
                 ks::ui::HasTableRowsPassingFilters(activeTable) &&
                 activeTable->model()->columnCount() > 0;
             const bool controlsAvailable =
+                !ks::ui::IsTableRowFilterProjectionPending(activeTable) &&
                 !m_snapshotCaptureInProgress &&
                 !m_comparisonInProgress &&
                 !m_pauseCaptureInProgress;

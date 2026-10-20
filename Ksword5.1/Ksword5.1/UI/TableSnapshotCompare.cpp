@@ -717,6 +717,11 @@ namespace ks::ui
             return snapshot;
         }
 
+        if (IsTableRowFilterProjectionPending(tableView))
+        {
+            snapshot.sourceInvalidated = true;
+            return snapshot;
+        }
         QAbstractItemModel* model = tableView->model();
         snapshot.estimatedBytes = estimatedSnapshotStorageBytes(snapshot);
         if (QThread::currentThread() != tableView->thread() ||

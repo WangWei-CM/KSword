@@ -1,5 +1,6 @@
 #include "TableFreezeSupport.h"
 #include "TableRowFilterIdentityState.h"
+#include "TableInteractionSupport.h"
 #include <QDynamicPropertyChangeEvent>
 
 #include "VisibleTableWidget.h"
@@ -1571,6 +1572,14 @@ namespace ks::ui
                         if (guard && (oldSize == 0 || newSize == 0)) guard->rowVisibilityChanged(row);
                     });
                 state->setExclusiveBusinessOwnership(table->property("ksword_table_filter_exclusive_business").toBool());
+                table->installEventFilter(state);
+                state->setProjectionDeferrer([guard](std::function<void()> resume) {
+                    // Hidden views retain canonical identities and queued deltas;
+                    // their own Show event resumes projection without retry timers.
+                    if (!guard || !guard->isVisible()) return true;
+                    return DeferTableUiCommitIfContextMenuOpen(guard.data(),
+                        QStringLiteral("table_row_filter_projection"), {guard.data()}, std::move(resume));
+                });
             }
             return state;
         }
@@ -1593,6 +1602,16 @@ namespace ks::ui
     void ApplyTableRowFilter(QTableView* table, const QSet<QPersistentModelIndex>& excluded)
     {
         if (auto* state = rowFilterState(filterSource(table), true)) state->setBusiness(excluded);
+    }
+    void ApplyTableRowFilterIncrementally(QTableView* table,
+        const QSet<QPersistentModelIndex>& excluded)
+    {
+        if (auto* state = rowFilterState(filterSource(table), true)) state->setBusiness(excluded, true);
+    }
+    bool IsTableRowFilterProjectionPending(const QTableView* table)
+    {
+        auto* state = rowFilterState(filterSource(table), false);
+        return state && state->projectionPending();
     }
     bool IsTableRowExcludedByFilter(const QTableView* table, int row)
     {
