@@ -8,6 +8,8 @@
   "text_direction": "ltr",
   "fallback": "en-US",
   "translations": {
+    "window.layer.events.sample": "采样 %1；关联事件序号 %2–%3（%4 个相关事件），不是逐事件瞬时状态。",
+    "window.layer.events.dropped": "事件入口队列溢出：丢弃 %1 条（序号 %2–%3）；原始事件导出保留该计数。",
     "misc.shell.refreshing": "正在刷新注册表快照…",
     "misc.cks.detail.task_failed": "后台任务未返回有效回执，请刷新状态。",
     "misc.cks.file.hashing": "正在计算 SHA-256…",

@@ -8,6 +8,8 @@
   "text_direction": "ltr",
   "fallback": "zh-CN",
   "translations": {
+    "window.layer.events.sample": "Sampled at %1; associated event sequences %2–%3 (%4 relevant events), not per-event instantaneous state.",
+    "window.layer.events.dropped": "Event ingress overflow: dropped %1 records (sequences %2–%3); raw event export retains this count.",
     "misc.shell.refreshing": "Refreshing the registry snapshot…",
     "misc.cks.detail.task_failed": "The background task returned no valid receipt. Refresh the system status.",
     "misc.cks.file.hashing": "Calculating SHA-256…",
