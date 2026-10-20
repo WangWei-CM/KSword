@@ -116,7 +116,7 @@ namespace
 bool ServiceDock::queryServiceFailureSettings(
     const QString& serviceNameText,
     ServiceRecoverySettings* settingsOut,
-    QString* errorTextOut) const
+    QString* errorTextOut)
 {
     if (settingsOut == nullptr || serviceNameText.trimmed().isEmpty())
     {

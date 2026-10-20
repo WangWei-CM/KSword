@@ -4,6 +4,7 @@
 #include "../UI/AsyncCleanupRegistry.h"
 #include "../UI/TableRowFilterSupport.h"
 #include "../Internationalization/LanguageManager.h"
+#include <QHideEvent>
 
 using namespace service_dock_detail;
 
@@ -14,6 +15,8 @@ ServiceDock::ServiceDock(QWidget* parent)
     m_refreshOperation->setStateChangedCallback([this]() { reconcileRefreshState(); });
     m_exportOperation = std::make_unique<ks::ui::AsyncOperation>(this);
     m_exportOperation->setStateChangedCallback([this]() { reconcileExportReceipt(); });
+    m_detailOperation = std::make_unique<ks::ui::AsyncOperation>(this);
+    m_detailOperation->setStateChangedCallback([this]() { reconcileDetailReceipt(); });
     initializeUi();
     initializeConnections();
     syncToolbarStateWithSelection();
@@ -24,6 +27,7 @@ ServiceDock::ServiceDock(QWidget* parent)
 
 ServiceDock::~ServiceDock()
 {
+    m_detailOperation->close();
     m_exportOperation->close();
     m_refreshOperation->close();
 
@@ -44,6 +48,7 @@ void ServiceDock::showEvent(QShowEvent* event)
 {
     if (m_serviceRowsDirty) rebuildServiceTable();
     QWidget::showEvent(event);
+    requestCurrentDetail();
     if (!m_pendingFocusServiceName.isEmpty())
     {
         const QString pending = m_pendingFocusServiceName;
@@ -215,12 +220,14 @@ bool ServiceDock::applyRefreshResult(const ServiceRefreshResult& result, const s
     const QString& errorText = result.errorText;
     const bool success = result.success;
     m_serviceList = std::move(*result.rows);
+    m_detailServiceStates.clear();
     m_serviceIndexByName.clear();
     m_serviceIndexByName.reserve(static_cast<qsizetype>(m_serviceList.size()));
     for (int index = 0; index < static_cast<int>(m_serviceList.size()); ++index)
     {
         const QString key = m_serviceList[static_cast<std::size_t>(index)].serviceNameText.toCaseFolded();
         if (!m_serviceIndexByName.contains(key)) m_serviceIndexByName.insert(key, index);
+        m_detailServiceStates.insert(key, m_serviceList[static_cast<std::size_t>(index)].currentState);
     }
     rebuildServiceTable();
 
@@ -274,5 +281,13 @@ void ServiceDock::applyServiceUpdateToCache(const ServiceEntry& updatedEntry)
     if (entryIndex >= 0 && entryIndex < static_cast<int>(m_serviceList.size()))
     {
         m_serviceList[static_cast<std::size_t>(entryIndex)] = updatedEntry;
+        m_detailServiceStates.insert(updatedEntry.serviceNameText.toCaseFolded(), updatedEntry.currentState);
     }
+}
+
+void ServiceDock::hideEvent(QHideEvent* event)
+{
+    m_detailPendingReceipt = false;
+    m_detailOperation->cancel();
+    QWidget::hideEvent(event);
 }

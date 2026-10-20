@@ -842,7 +842,7 @@ void ServiceDock::onServiceSelectionChanged()
     syncToolbarStateWithSelection();
 }
 
-ks::ui::FieldDocument ServiceDock::buildAuditTabText(const ServiceEntry& entry) const
+ks::ui::FieldDocument ServiceDock::buildAuditTabText(const ServiceEntry& entry, const int visibleCount, const std::function<bool()>& shouldStop)
 {
     ks::ui::FieldDocument document;
     document.section(QStringLiteral("独立来源"));
@@ -856,10 +856,12 @@ ks::ui::FieldDocument ServiceDock::buildAuditTabText(const ServiceEntry& entry) 
         section.children = content.nodes;
         document.nodes.append(std::move(section));
     };
-    appendSection(QStringLiteral("触发器"), buildTriggerDetailText(entry));
-    appendSection(QStringLiteral("安全"), buildSecurityDetailText(entry));
+    if (shouldStop()) return {};
+    appendSection(QStringLiteral("触发器"), buildTriggerDetailText(entry, shouldStop));
+    if (shouldStop()) return {};
+    appendSection(QStringLiteral("安全"), buildSecurityDetailText(entry, shouldStop));
     appendSection(QStringLiteral("风险"), buildRiskDetailText(entry));
-    appendSection(QStringLiteral("导出"), buildExportDetailText(entry));
+    appendSection(QStringLiteral("导出"), buildExportDetailText(entry, visibleCount));
     return document;
 }
 

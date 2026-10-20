@@ -6,6 +6,9 @@
 #include "../UI/PrimaryPageStyle.h"
 #include "../UI/FlatButtonTheme.h"
 #include "../UI/FlowLayout.h"
+#include "../UI/AsyncOperation.h"
+#include "../UI/AsyncCleanupRegistry.h"
+#include "../Internationalization/LanguageManager.h"
 #include "../theme.h"
 
 #include <QFileDialog>
@@ -285,39 +288,7 @@ void ServiceDock::initializeDetailTabs()
     detailRenderTimer->setSingleShot(true);
     setProperty(kDetailRenderTimerProperty, QVariant::fromValue<QObject*>(detailRenderTimer));
 
-    connect(detailRenderTimer, &QTimer::timeout, this, [this]()
-        {
-            const int selectedIndex = findServiceIndexByName(selectedServiceName());
-            if (selectedIndex < 0 || selectedIndex >= static_cast<int>(m_serviceList.size()))
-            {
-                return;
-            }
-
-            const ServiceEntry& selectedEntry = m_serviceList[static_cast<std::size_t>(selectedIndex)];
-            QWidget* const visibleDetailPage = (m_detailTabWidget == nullptr)
-                ? nullptr
-                : m_detailTabWidget->currentWidget();
-
-            // 回填期间沿用与 updateDetailViewsFromSelection 相同的信号屏蔽语义。
-            const bool previousSyncFlag = m_detailUiSyncInProgress;
-            m_detailUiSyncInProgress = true;
-            if (visibleDetailPage == m_recoveryTabPage
-                && !isDetailPageRenderedFor(m_recoveryTabPage, selectedEntry.serviceNameText))
-            {
-                populateRecoveryTab(selectedEntry);
-            }
-            else if (visibleDetailPage == m_dependencyTabPage
-                && !isDetailPageRenderedFor(m_dependencyTabPage, selectedEntry.serviceNameText))
-            {
-                populateDependencyTab(selectedEntry);
-            }
-            else if (visibleDetailPage == m_auditTabPage
-                && !isDetailPageRenderedFor(m_auditTabPage, selectedEntry.serviceNameText))
-            {
-                populateAuditTab(selectedEntry);
-            }
-            m_detailUiSyncInProgress = previousSyncFlag;
-        });
+    connect(detailRenderTimer, &QTimer::timeout, this, [this]() { requestCurrentDetail(); });
 
     connect(m_detailTabWidget, &QTabWidget::currentChanged, this, [this](const int)
         {
@@ -526,9 +497,13 @@ void ServiceDock::initializeRecoveryTab()
     actionRowLayout->addWidget(m_recoveryApplyButton);
     ks::ui::NormalizeToolbarRow(actionRowLayout);
     rootLayout->addWidget(actionRowWidget, 0);
+    m_recoveryStatusLabel = new QLabel(m_recoveryTabPage);
+    m_recoveryStatusLabel->setWordWrap(true);
+    rootLayout->addWidget(m_recoveryStatusLabel, 0);
 
     // 失败策略与恢复程序分组；双列阈值由共享详情布局按当前字体和宽度决定。
     QVBoxLayout* body = createServiceCardBody(m_recoveryTabPage, rootLayout);
+    m_recoveryFields = body->parentWidget();
     QWidget* failureCard = ks::ui::CreateDetailCard(QStringLiteral("恢复"), m_recoveryTabPage);
     QFormLayout* formLayout = nullptr;
     QFormLayout* timingForm = nullptr;
@@ -738,9 +713,11 @@ void ServiceDock::populateLogonTab(const ServiceEntry& entry)
 
 void ServiceDock::populateRecoveryTab(const ServiceEntry& entry)
 {
-    ServiceRecoverySettings settings;
-    QString errorText;
-    const bool queryOk = queryServiceFailureSettings(entry.serviceNameText, &settings, &errorText);
+    const auto& snapshot = m_detailResults[static_cast<int>(DetailKind::Recovery)];
+    if (!snapshot || snapshot->revision != m_detailRevision || snapshot->serviceName.compare(entry.serviceNameText, Qt::CaseInsensitive) != 0) return;
+    const ServiceRecoverySettings& settings = snapshot->recovery;
+    const QString& errorText = snapshot->error;
+    const bool queryOk = snapshot->queryOk;
 
     const QSignalBlocker firstBlocker(m_recoveryFirstActionCombo);
     const QSignalBlocker secondBlocker(m_recoverySecondActionCombo);
@@ -779,6 +756,9 @@ void ServiceDock::populateRecoveryTab(const ServiceEntry& entry)
         m_recoveryProgramEdit->setPlaceholderText(QString());
     }
     refreshRecoveryTabUiState();
+    m_recoveryStatusLabel->setText(queryOk ? QString() : errorText);
+    m_recoveryFields->setEnabled(true);
+    m_recoveryApplyButton->setEnabled(entry.scmRecordPresent);
     markDetailPageRendered(m_recoveryTabPage, entry.serviceNameText);
 }
 
@@ -786,7 +766,7 @@ void ServiceDock::populateDependencyTab(const ServiceEntry& entry)
 {
     if (m_dependencyEditor != nullptr)
     {
-        m_dependencyEditor->setDocument(buildDependencyDetailText(entry));
+        m_dependencyEditor->setDocument(m_detailResults[static_cast<int>(DetailKind::Dependency)]->document);
     }
     markDetailPageRendered(m_dependencyTabPage, entry.serviceNameText);
 }
@@ -795,7 +775,7 @@ void ServiceDock::populateAuditTab(const ServiceEntry& entry)
 {
     if (m_auditEditor != nullptr)
     {
-        m_auditEditor->setDocument(buildAuditTabText(entry));
+        m_auditEditor->setDocument(m_detailResults[static_cast<int>(DetailKind::Audit)]->document);
     }
     markDetailPageRendered(m_auditTabPage, entry.serviceNameText);
 }
@@ -806,6 +786,12 @@ void ServiceDock::updateDetailViewsFromSelection()
     const bool hasSelection = selectedIndex >= 0 && selectedIndex < static_cast<int>(m_serviceList.size());
     QTimer* const detailRenderTimer = detailRenderTimerOf(this);
 
+    ++m_detailRevision;
+    m_detailPendingReceipt = false;
+    m_detailOperation->cancel();
+    for (auto& snapshot : m_detailResults) snapshot.reset();
+    m_recoveryFields->setEnabled(false);
+    m_recoveryStatusLabel->setText(hasSelection ? ks::i18n::sourceText(QStringLiteral("服务详情尚未加载，请切换到对应页签。")) : QString());
     m_detailUiSyncInProgress = true;
     if (!hasSelection)
     {
@@ -878,7 +864,7 @@ void ServiceDock::updateDetailViewsFromSelection()
     if (m_generalReloadButton != nullptr) { m_generalReloadButton->setEnabled(enableApplyButtons); }
     if (m_logonApplyButton != nullptr) { m_logonApplyButton->setEnabled(enableApplyButtons); }
     if (m_logonReloadButton != nullptr) { m_logonReloadButton->setEnabled(enableApplyButtons); }
-    if (m_recoveryApplyButton != nullptr) { m_recoveryApplyButton->setEnabled(enableApplyButtons); }
+    if (m_recoveryApplyButton != nullptr) { m_recoveryApplyButton->setEnabled(false); }
     if (m_recoveryReloadButton != nullptr) { m_recoveryReloadButton->setEnabled(enableApplyButtons); }
 }
 
@@ -909,4 +895,114 @@ void ServiceDock::browseRecoveryProgramPath()
     {
         m_recoveryProgramEdit->setText(QDir::toNativeSeparators(filePath));
     }
+}
+
+void ServiceDock::setDetailUnavailable(const DetailKind kind, const QString& text)
+{
+    if (kind == DetailKind::Recovery)
+    {
+        m_recoveryStatusLabel->setText(text);
+        m_recoveryFields->setEnabled(false);
+        m_recoveryApplyButton->setEnabled(false);
+    }
+    else if (kind == DetailKind::Dependency) m_dependencyEditor->setDocument(ks::ui::FieldDocument{}.note(text));
+    else m_auditEditor->setDocument(ks::ui::FieldDocument{}.note(text));
+}
+
+void ServiceDock::reconcileDetailReceipt()
+{
+    if (!m_detailPendingReceipt || m_detailOperation->isInFlight()) return;
+    m_detailPendingReceipt = false;
+    if (isVisible() && m_detailPendingRevision == m_detailRevision)
+        setDetailUnavailable(m_detailPendingKind, ks::i18n::sourceText(QStringLiteral("服务详情未返回有效结果，请重载后重试。")));
+}
+
+void ServiceDock::requestCurrentDetail()
+{
+    if (!isVisible()) return;
+    const int index = findServiceIndexByName(selectedServiceName());
+    if (index < 0 || index >= static_cast<int>(m_serviceList.size())) return;
+    const ServiceEntry entry = m_serviceList[static_cast<std::size_t>(index)];
+    const QWidget* page = m_detailTabWidget->currentWidget();
+    DetailKind kind;
+    if (page == m_recoveryTabPage) kind = DetailKind::Recovery;
+    else if (page == m_dependencyTabPage) kind = DetailKind::Dependency;
+    else if (page == m_auditTabPage) kind = DetailKind::Audit;
+    else return;
+    const auto& cached = m_detailResults[static_cast<int>(kind)];
+    if (cached && cached->revision == m_detailRevision)
+    {
+        if (!isDetailPageRenderedFor(page, entry.serviceNameText)) applyCurrentDetail(*cached);
+        return;
+    }
+    if (m_detailPendingReceipt && m_detailPendingRevision == m_detailRevision && m_detailPendingKind == kind && m_detailOperation->isInFlight()) return;
+    reconcileDetailReceipt();
+    struct Request {
+        ServiceEntry entry;
+        QHash<QString, DWORD> states;
+        std::uint64_t revision;
+        DetailKind kind;
+        int visibleCount;
+        std::shared_ptr<std::atomic_bool> stopping;
+        std::shared_ptr<ks::ui::AsyncCleanupRegistry::Lease> lease;
+    } request{entry, m_detailServiceStates, m_detailRevision, kind, m_visibleServiceCount};
+    request.stopping = std::make_shared<std::atomic_bool>(false);
+    request.lease = ks::ui::AsyncCleanupRegistry::global().acquire([flag = request.stopping]() { flag->store(true); });
+    if (!request.lease)
+    {
+        setDetailUnavailable(kind, ks::i18n::sourceText(QStringLiteral("宿主正在关闭，服务详情未提交。")));
+        return;
+    }
+    m_detailPendingRevision = m_detailRevision;
+    m_detailPendingKind = kind;
+    m_detailPendingReceipt = true;
+    setDetailUnavailable(kind, ks::i18n::sourceText(QStringLiteral("正在读取服务详情...")));
+    const auto ticket = m_detailOperation->submit<Request, ServiceDetailResult>(std::move(request),
+        [](const Request& input, const ks::ui::AsyncOperationToken& token) {
+            ServiceDetailResult result;
+            result.serviceName = input.entry.serviceNameText;
+            result.revision = input.revision;
+            result.kind = input.kind;
+            const auto shouldStop = [&]() { return token.isCanceled() || input.stopping->load(); };
+            if (shouldStop()) { result.stopped = true; return result; }
+            if (input.kind == DetailKind::Recovery)
+                result.queryOk = queryServiceFailureSettings(result.serviceName, &result.recovery, &result.error);
+            else if (input.kind == DetailKind::Dependency)
+                result.document = buildDependencyDetailText(input.entry, input.states, shouldStop);
+            else result.document = buildAuditTabText(input.entry, input.visibleCount, shouldStop);
+            result.stopped = shouldStop();
+            return result;
+        },
+        [this](const ServiceDetailResult& result, std::uint64_t) {
+            m_detailPendingReceipt = false;
+            if (result.revision != m_detailRevision || result.serviceName.compare(selectedServiceName(), Qt::CaseInsensitive) != 0) return true;
+            if (result.stopped)
+            {
+                if (isVisible()) setDetailUnavailable(result.kind, ks::i18n::sourceText(QStringLiteral("服务详情读取已停止，请重载后重试。")));
+                return true;
+            }
+            m_detailResults[static_cast<int>(result.kind)] = std::make_shared<ServiceDetailResult>(result);
+            if (isVisible()) applyCurrentDetail(result);
+            return true;
+        },
+        [this](std::exception_ptr) {
+            m_detailPendingReceipt = false;
+            if (isVisible()) setDetailUnavailable(m_detailPendingKind, ks::i18n::sourceText(QStringLiteral("服务详情未返回有效结果，请重载后重试。")));
+        });
+    if (!ticket) reconcileDetailReceipt();
+}
+
+void ServiceDock::applyCurrentDetail(const ServiceDetailResult& result)
+{
+    if (result.revision != m_detailRevision) return;
+    const int index = findServiceIndexByName(selectedServiceName());
+    if (index < 0 || index >= static_cast<int>(m_serviceList.size())) return;
+    const ServiceEntry& entry = m_serviceList[static_cast<std::size_t>(index)];
+    if (result.serviceName.compare(entry.serviceNameText, Qt::CaseInsensitive) != 0) return;
+    const bool previous = m_detailUiSyncInProgress;
+    m_detailUiSyncInProgress = true;
+    if (result.kind == DetailKind::Recovery && m_detailTabWidget->currentWidget() == m_recoveryTabPage) populateRecoveryTab(entry);
+    else if (result.kind == DetailKind::Dependency && m_detailTabWidget->currentWidget() == m_dependencyTabPage) populateDependencyTab(entry);
+    else if (result.kind == DetailKind::Audit && m_detailTabWidget->currentWidget() == m_auditTabPage) populateAuditTab(entry);
+    m_detailUiSyncInProgress = previous;
 }

@@ -33,6 +33,7 @@ class QLineEdit;
 class QPoint;
 class QPushButton;
 class QShowEvent;
+class QHideEvent;
 class QSplitter;
 class QSpinBox;
 class QTableWidget;
@@ -70,6 +71,7 @@ protected:
     // - 页面第一次显示时发起首轮服务刷新；
     // - 避免主窗口启动阶段被全量服务枚举阻塞。
     void showEvent(QShowEvent* event) override;
+    void hideEvent(QHideEvent* event) override;
 
 public:
     // ServiceColumn：
@@ -149,6 +151,23 @@ private:
         bool appendFailureCount = false;                    // appendFailureCount：是否追加 /fail=%1%。
     };
 
+    enum class DetailKind { Recovery, Dependency, Audit };
+    struct ServiceDetailResult
+    {
+        QString serviceName;
+        std::uint64_t revision = 0;
+        DetailKind kind = DetailKind::Recovery;
+        ServiceRecoverySettings recovery;
+        QString error;
+        bool queryOk = false;
+        bool stopped = false;
+        ks::ui::FieldDocument document;
+    };
+    void requestCurrentDetail();
+    void applyCurrentDetail(const ServiceDetailResult& result);
+    void reconcileDetailReceipt();
+    void setDetailUnavailable(DetailKind kind, const QString& text);
+
     // ===================== 初始化 =====================
     void initializeUi();
     void initializeToolbar();
@@ -180,14 +199,14 @@ private:
     void syncToolbarStateWithSelection(bool preserveEdits = false);
     void onServiceSelectionChanged();
     void updateDetailViewsFromSelection();
-    ks::ui::FieldDocument buildAuditTabText(const ServiceEntry& entry) const;
+    static ks::ui::FieldDocument buildAuditTabText(const ServiceEntry& entry, int visibleCount, const std::function<bool()>& shouldStop);
     QString buildBasicInfoText(const ServiceEntry& entry) const;
     QString buildConfigInfoText(const ServiceEntry& entry) const;
-    ks::ui::FieldDocument buildDependencyDetailText(const ServiceEntry& entry) const;
-    ks::ui::FieldDocument buildTriggerDetailText(const ServiceEntry& entry) const;
-    ks::ui::FieldDocument buildSecurityDetailText(const ServiceEntry& entry) const;
-    ks::ui::FieldDocument buildRiskDetailText(const ServiceEntry& entry) const;
-    ks::ui::FieldDocument buildExportDetailText(const ServiceEntry& entry) const;
+    static ks::ui::FieldDocument buildDependencyDetailText(const ServiceEntry& entry, const QHash<QString, DWORD>& states, const std::function<bool()>& shouldStop);
+    static ks::ui::FieldDocument buildTriggerDetailText(const ServiceEntry& entry, const std::function<bool()>& shouldStop);
+    static ks::ui::FieldDocument buildSecurityDetailText(const ServiceEntry& entry, const std::function<bool()>& shouldStop);
+    static ks::ui::FieldDocument buildRiskDetailText(const ServiceEntry& entry);
+    static ks::ui::FieldDocument buildExportDetailText(const ServiceEntry& entry, int visibleCount);
     void initializeGeneralTab();
     void initializeLogonTab();
     void initializeRecoveryTab();
@@ -244,10 +263,10 @@ private:
     void applyServiceUpdateToCache(const ServiceEntry& updatedEntry);
     QString queryServiceDllPathByName(const QString& serviceNameText) const;
     bool isServiceFilePresent(const QString& filePathText) const;
-    bool queryServiceFailureSettings(
+    static bool queryServiceFailureSettings(
         const QString& serviceNameText,
         ServiceRecoverySettings* settingsOut,
-        QString* errorTextOut) const;
+        QString* errorTextOut);
     bool applyServiceFailureSettings(
         const QString& serviceNameText,
         const ServiceRecoverySettings& settings,
@@ -342,6 +361,16 @@ private:
     // - 满足“可操作项不放在文本编辑器里”的要求。
     ks::ui::StructuredFieldView* m_dependencyEditor = nullptr;   // m_dependencyEditor：依存关系文本编辑器（只读）。
     ks::ui::StructuredFieldView* m_auditEditor = nullptr;        // m_auditEditor：审计文本编辑器（只读）。
+
+    QLabel* m_recoveryStatusLabel = nullptr;
+    QWidget* m_recoveryFields = nullptr;
+    std::unique_ptr<ks::ui::AsyncOperation> m_detailOperation;
+    std::shared_ptr<const ServiceDetailResult> m_detailResults[3];
+    QHash<QString, DWORD> m_detailServiceStates;
+    std::uint64_t m_detailRevision = 0;
+    std::uint64_t m_detailPendingRevision = 0;
+    DetailKind m_detailPendingKind = DetailKind::Recovery;
+    bool m_detailPendingReceipt = false;
 
     // ===================== 数据与状态 =====================
     std::unique_ptr<ks::ui::AsyncOperation> m_exportOperation;
