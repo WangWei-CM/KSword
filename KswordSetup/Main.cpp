@@ -1157,14 +1157,13 @@ bool LaunchKsword(const std::wstring& dir) {
 // PerformInstall executes the full install transaction. Input is options;
 // processing extracts payload, applies optional actions, prompts for reboot, and
 // output is the final result model for follow-up launch/reboot behavior.
-InstallResult PerformInstall(const InstallOptions& o) {
-    InstallResult r;
+void PerformInstall(const InstallOptions& o, InstallResult& r) {
     AppendLog(&r.logText, L"开始安装到: " + o.installDir);
     if (FileExistsInDir(o.installDir, kLauncherExe) || FileExistsInDir(o.installDir, kMainExe)) {
         AppendLog(&r.logText, L"检测到已有安装，按合并覆盖方式更新。");
     }
     r.ok = ExtractPayload(o, &r.logText) && r.ok;
-    if (!r.ok) return r;
+    if (!r.ok) return;
     r.ok = WriteSettings(o, &r.logText) && r.ok;
     r.ok = CreateShortcuts(o, &r.logText) && r.ok;
     if (o.replaceTaskmgr) r.ok = InstallTaskmgr(o, &r.logText) && r.ok;
@@ -1174,7 +1173,7 @@ InstallResult PerformInstall(const InstallOptions& o) {
         r.rebootSuggested = testOk; // The owner asks after the worker completes.
     }
     AppendLog(&r.logText, r.ok ? L"安装完成。" : L"安装完成，但存在失败项，请查看日志。");
-    return r;
+    return;
 }
 
 // StartInstall handles the Install button and elevated continuation. Input is
@@ -1209,8 +1208,12 @@ void StartInstall() {
     task->worker = std::thread([task]() {
         const HRESULT com = ::CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
         g_workerInstallTask = task.get();
-        try { task->result = PerformInstall(task->options); }
-        catch (...) { task->failure = std::current_exception(); }
+        try { PerformInstall(task->options, task->result); }
+        catch (...) {
+            task->failure = std::current_exception();
+            task->result.ok = false;
+            task->result.rebootSuggested = false;
+        }
         g_workerInstallTask = nullptr;
         if (SUCCEEDED(com)) ::CoUninitialize();
         Fl::awake();
@@ -1270,7 +1273,13 @@ void PollInstallTask(void* timer) {
     g_installTask.reset();
     if (g_installButton) g_installButton->activate();
     if (g_browseButton) g_browseButton->activate();
-    if (task->failure) std::rethrow_exception(task->failure);
+    if (task->failure) {
+        // The accepted result owns diagnostics from its first phase, including
+        // an exceptional early return. Complete through the normal failure UI.
+        const std::wstring failure = L"安装完成，但存在失败项，请查看日志。\r\n";
+        task->result.logText += failure;
+        if (!closed && g_status) g_status->append_text(WideToUtf8(failure).c_str());
+    }
     if (closed) return;
     if (task->result.rebootSuggested) {
         SetInstallerShellDialogMode(true);
