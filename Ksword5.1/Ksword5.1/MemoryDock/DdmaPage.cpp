@@ -17,6 +17,7 @@
 #include <QFile>
 #include <QFutureWatcher>
 #include <QPromise>
+#include <QPointer>
 #include <QGridLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
@@ -1762,29 +1763,91 @@ void DdmaPage::readPhysicalFromUi()
             this, QStringLiteral("DDMA"), QStringLiteral("物理地址解析失败，请填写 0x 十六进制地址。"));
         return;
     }
-    if (m_accessMemoryEditor->hasChanges()
-        && QMessageBox::question(this, QStringLiteral("DDMA"),
-            QStringLiteral("当前缓存存在未应用的改动。是否丢弃改动并读取新快照？"),
-            QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes)
-    {
-        return;
-    }
-
+    // Freeze the complete request and pending edit witness before entering a
+    // modal loop. Busy is acquired now so reentrant actions cannot start I/O.
     const std::uint64_t lengthBytes = static_cast<std::uint64_t>(m_accessLengthSpin->value());
     const auto readSession = m_session;
     const auto generation = ksword::memory_backend::ddmaSessionGeneration();
-    m_accessStatusLabel->setText(QStringLiteral("正在通过 DDMA 读取物理内存..."));
-    const auto outcome = ksword::memory_backend::readPhysical(
-        ksword::memory_backend::MemoryAccessBackend::Ddma,
-        readSession, physicalAddress, lengthBytes);
-
-    if (!outcome.ok || outcome.partial || outcome.data.size() != static_cast<qsizetype>(lengthBytes))
+    const auto pendingAtPrompt = m_accessMemoryEditor->data();
+    const auto baselineAtPrompt = m_accessMemoryEditor->originalBytes();
+    const bool needsDiscardDecision = m_accessMemoryEditor->hasChanges();
+    m_operationBusy = true;
+    refreshOperationState();
+    const QPointer<DdmaPage> alive(this);
+    const bool discardAllowed = !needsDiscardDecision
+        || QMessageBox::question(this, QStringLiteral("DDMA"),
+            QStringLiteral("当前缓存存在未应用的改动。是否丢弃改动并读取新快照？"),
+            QMessageBox::Yes | QMessageBox::No, QMessageBox::No) == QMessageBox::Yes;
+    if (!alive) { return; }
+    if (!discardAllowed)
     {
-        resetAccessSnapshot();
-        const QString failure = !outcome.failureText.isEmpty() ? outcome.failureText
-            : QStringLiteral("DDMA 读取长度不足：%1/%2 字节。")
-                .arg(outcome.data.size()).arg(lengthBytes);
-        QString statusText = QStringLiteral("DDMA 读取失败：%1").arg(failure);
+        m_operationBusy = false;
+        refreshOperationState();
+        return;
+    }
+    if (generation != ksword::memory_backend::ddmaSessionGeneration()
+        || !sameDdmaSession(readSession, m_session)
+        || m_accessMemoryEditor->data() != pendingAtPrompt
+        || m_accessMemoryEditor->originalBytes() != baselineAtPrompt)
+    {
+        m_operationBusy = false;
+        refreshOperationState();
+        m_accessStatusLabel->setText(QStringLiteral("DDMA 会话或内存快照已变化，请重新读取后再写入。"));
+        return;
+    }
+    m_accessStatusLabel->setText(QStringLiteral("正在通过 DDMA 读取物理内存..."));
+    submitPageTransaction<ksword::memory_backend::AccessOutcome>(this,
+        [readSession, generation, physicalAddress, lengthBytes]() {
+        if (generation != ksword::memory_backend::ddmaSessionGeneration())
+        {
+            ksword::memory_backend::AccessOutcome stale;
+            stale.failureText = QStringLiteral("DDMA session changed; read a new snapshot before retrying.");
+            return stale;
+        }
+        return ksword::memory_backend::readPhysical(
+            ksword::memory_backend::MemoryAccessBackend::Ddma,
+            readSession, physicalAddress, lengthBytes);
+    }, [this, readSession, generation, physicalAddress, lengthBytes](const auto& completed) {
+        m_operationBusy = false;
+        refreshOperationState();
+        if (generation != ksword::memory_backend::ddmaSessionGeneration())
+        {
+            m_accessStatusLabel->setText(QStringLiteral("DDMA session changed; read a new snapshot before retrying."));
+            return;
+        }
+        auto outcome = completed.value;
+        if (!completed.failure.isEmpty()) { outcome.failureText = completed.failure; }
+
+        if (!outcome.ok || outcome.partial || outcome.data.size() != static_cast<qsizetype>(lengthBytes))
+        {
+            resetAccessSnapshot();
+            const QString failure = !outcome.failureText.isEmpty() ? outcome.failureText
+                : QStringLiteral("DDMA 读取长度不足：%1/%2 字节。")
+                    .arg(outcome.data.size()).arg(lengthBytes);
+            QString statusText = QStringLiteral("DDMA 读取失败：%1").arg(failure);
+            if (outcome.scratchDirty)
+            {
+                statusText += QStringLiteral(
+                    " 严重告警：暂存扇区未能还原，磁盘上留下了脏扇区，请立即检查 LBA %1 起的内容。")
+                    .arg(readSession.scratchLba);
+            }
+            m_accessStatusLabel->setText(statusText);
+            if (isVisible()) { QMessageBox::warning(this, QStringLiteral("DDMA"), failure); }
+            return;
+        }
+
+        m_snapshotAddress = physicalAddress;
+        m_snapshotSession = readSession;
+        m_snapshotSessionGeneration = generation;
+        m_originalBytes = outcome.data;
+        m_editedBytes = m_originalBytes;
+        m_hasSnapshot = true;
+        const auto architecture = m_accessMemoryEditor->currentArchitecture();
+        m_accessMemoryEditor->setSnapshot(m_originalBytes, m_snapshotAddress,
+            architecture, m_snapshotAddress, ddmaSnapshotIdentity(generation, readSession));
+        refreshAccessEditorState();
+
+        QString statusText = QStringLiteral("DDMA 读取成功，共 %1 字节。").arg(m_originalBytes.size());
         if (outcome.scratchDirty)
         {
             statusText += QStringLiteral(
@@ -1792,29 +1855,7 @@ void DdmaPage::readPhysicalFromUi()
                 .arg(readSession.scratchLba);
         }
         m_accessStatusLabel->setText(statusText);
-        QMessageBox::warning(this, QStringLiteral("DDMA"), failure);
-        return;
-    }
-
-    m_snapshotAddress = physicalAddress;
-    m_snapshotSession = readSession;
-    m_snapshotSessionGeneration = generation;
-    m_originalBytes = outcome.data;
-    m_editedBytes = m_originalBytes;
-    m_hasSnapshot = true;
-    const auto architecture = m_accessMemoryEditor->currentArchitecture();
-    m_accessMemoryEditor->setSnapshot(m_originalBytes, m_snapshotAddress,
-        architecture, m_snapshotAddress, ddmaSnapshotIdentity(generation, readSession));
-    refreshAccessEditorState();
-
-    QString statusText = QStringLiteral("DDMA 读取成功，共 %1 字节。").arg(m_originalBytes.size());
-    if (outcome.scratchDirty)
-    {
-        statusText += QStringLiteral(
-            " 严重告警：暂存扇区未能还原，磁盘上留下了脏扇区，请立即检查 LBA %1 起的内容。")
-            .arg(readSession.scratchLba);
-    }
-    m_accessStatusLabel->setText(statusText);
+    });
 }
 
 void DdmaPage::writePhysicalFromUi()
@@ -2035,114 +2076,142 @@ void DdmaPage::compareBackendsFromUi()
         m_compareResultLabel->setText(QStringLiteral("正在复核..."));
     }
 
-    const ksword::memory_backend::AccessOutcome standardOutcome =
-        ksword::memory_backend::readPhysical(
+    const auto session = m_session;
+    const auto generation = ksword::memory_backend::ddmaSessionGeneration();
+    struct CompareResult
+    {
+        ksword::memory_backend::AccessOutcome standard;
+        ksword::memory_backend::AccessOutcome ddma;
+    };
+    m_operationBusy = true;
+    refreshOperationState();
+    submitPageTransaction<CompareResult>(this,
+        [session, generation, pageBase]() {
+        CompareResult result;
+        if (generation != ksword::memory_backend::ddmaSessionGeneration())
+        {
+            result.standard.failureText = QStringLiteral("DDMA session changed; read a new snapshot before retrying.");
+            return result;
+        }
+        result.standard = ksword::memory_backend::readPhysical(
             ksword::memory_backend::MemoryAccessBackend::StandardDriver,
-            m_session,
-            pageBase,
-            KSWORD_ARK_DDMA_TRANSFER_BYTES);
-    const ksword::memory_backend::AccessOutcome ddmaOutcome =
-        ksword::memory_backend::readPhysical(
+            session, pageBase, KSWORD_ARK_DDMA_TRANSFER_BYTES);
+        result.ddma = ksword::memory_backend::readPhysical(
             ksword::memory_backend::MemoryAccessBackend::Ddma,
-            m_session,
-            pageBase,
-            KSWORD_ARK_DDMA_TRANSFER_BYTES);
-
-    if (!standardOutcome.ok || !ddmaOutcome.ok)
-    {
-        // 一侧失败时不能下"两者一致"或"两者不一致"的结论，只能如实说哪一侧没读到。
-        const QString detail = !standardOutcome.ok
-            ? QStringLiteral("标准通道读取失败：%1").arg(standardOutcome.failureText)
-            : QStringLiteral("DDMA 读取失败：%1").arg(ddmaOutcome.failureText);
-        if (m_compareResultLabel != nullptr)
+            session, pageBase, KSWORD_ARK_DDMA_TRANSFER_BYTES);
+        return result;
+    }, [this, generation, pageBase](const auto& completed) {
+        m_operationBusy = false;
+        refreshOperationState();
+        if (generation != ksword::memory_backend::ddmaSessionGeneration())
         {
-            m_compareResultLabel->setText(
-                QStringLiteral("无法比对，%1").arg(detail));
-            m_compareResultLabel->setStyleSheet(
-                QStringLiteral("color:%1;").arg(KswordTheme::WarningHex()));
+            m_compareResultLabel->setText(QStringLiteral("DDMA session changed; read a new snapshot before retrying."));
+            return;
         }
-        return;
-    }
+        auto standardOutcome = completed.value.standard;
+        const auto& ddmaOutcome = completed.value.ddma;
+        if (!completed.failure.isEmpty()) { standardOutcome.failureText = completed.failure; }
 
-    const qsizetype compareLength =
-        std::min<qsizetype>(standardOutcome.data.size(), ddmaOutcome.data.size());
-    qsizetype diffCount = 0;
-    int shownRows = 0;
-    for (qsizetype index = 0; index < compareLength; ++index)
-    {
-        if (standardOutcome.data[index] == ddmaOutcome.data[index])
+        if (!standardOutcome.ok || !ddmaOutcome.ok || standardOutcome.partial || ddmaOutcome.partial
+            || standardOutcome.data.size() != static_cast<qsizetype>(KSWORD_ARK_DDMA_TRANSFER_BYTES)
+            || ddmaOutcome.data.size() != static_cast<qsizetype>(KSWORD_ARK_DDMA_TRANSFER_BYTES) || ddmaOutcome.scratchDirty)
         {
-            continue;
-        }
-        ++diffCount;
-        if (shownRows >= kCompareSampleRows)
-        {
-            continue;
-        }
-        const int row = m_compareTable->rowCount();
-        m_compareTable->insertRow(row);
-        m_compareTable->setItem(row, 0,
-            new QTableWidgetItem(formatAddress(pageBase + static_cast<std::uint64_t>(index))));
-        m_compareTable->setItem(row, 1, new QTableWidgetItem(
-            QStringLiteral("%1").arg(
-                static_cast<std::uint8_t>(standardOutcome.data[index]), 2, 16, QChar('0')).toUpper()));
-        m_compareTable->setItem(row, 2, new QTableWidgetItem(
-            QStringLiteral("%1").arg(
-                static_cast<std::uint8_t>(ddmaOutcome.data[index]), 2, 16, QChar('0')).toUpper()));
-        ++shownRows;
-    }
-    m_compareTable->resizeColumnsToContents();
-
-    if (m_compareResultLabel == nullptr)
-    {
-        return;
-    }
-    if (diffCount == 0)
-    {
-        // "一致"在一张退化页上什么都不证明：整页只有同一个字节时，一条彻底
-        // 坏掉的 DDMA（比如什么都没搬、缓冲区留着全零）同样会与标准通道逐字节
-        // 相等，于是这里报绿。而这条判据本身正是用来判断 DDMA 通路成不成立
-        // 的——拿它当证据之前，必须先排除"两边都没读到有意义的内容"。
-        bool uniformPage = true;
-        for (qsizetype index = 1; index < compareLength; ++index)
-        {
-            if (standardOutcome.data[index] != standardOutcome.data[0])
+            // 一侧失败时不能下"两者一致"或"两者不一致"的结论，只能如实说哪一侧没读到。
+            const QString detail = ddmaOutcome.scratchDirty
+                ? QStringLiteral("DDMA scratch sectors could not be restored; further DDMA operations are unsafe.")
+                : (!standardOutcome.ok ? QStringLiteral("标准通道读取失败：%1").arg(standardOutcome.failureText)
+                    : QStringLiteral("DDMA 读取失败：%1").arg(ddmaOutcome.failureText.isEmpty()
+                        ? QStringLiteral("DDMA transaction returned incomplete data.") : ddmaOutcome.failureText));
+            if (m_compareResultLabel != nullptr)
             {
-                uniformPage = false;
-                break;
+                m_compareResultLabel->setText(
+                    QStringLiteral("无法比对，%1").arg(detail));
+                m_compareResultLabel->setStyleSheet(
+                    QStringLiteral("color:%1;").arg(KswordTheme::WarningHex()));
             }
+            return;
         }
-        if (compareLength > 0 && uniformPage)
+
+        const qsizetype compareLength =
+            std::min<qsizetype>(standardOutcome.data.size(), ddmaOutcome.data.size());
+        qsizetype diffCount = 0;
+        int shownRows = 0;
+        for (qsizetype index = 0; index < compareLength; ++index)
         {
-            m_compareResultLabel->setText(QStringLiteral("物理页 %1：整页 %2 字节都是同一个值 0x%3，两个后端一致不构成 DDMA 通路成立的证据——什么都没搬过来的实现也会得到同样的结果。请换一张内容有区分度的页再比对，例如某个已加载模块 PE 头所在的物理页。")
-                .arg(formatAddress(pageBase))
-                .arg(compareLength)
-                .arg(static_cast<std::uint8_t>(standardOutcome.data[0]), 2, 16, QChar('0')));
-            m_compareResultLabel->setStyleSheet(
-                QStringLiteral("color:%1;").arg(KswordTheme::WarningHex()));
+            if (standardOutcome.data[index] == ddmaOutcome.data[index])
+            {
+                continue;
+            }
+            ++diffCount;
+            if (shownRows >= kCompareSampleRows)
+            {
+                continue;
+            }
+            const int row = m_compareTable->rowCount();
+            m_compareTable->insertRow(row);
+            m_compareTable->setItem(row, 0,
+                new QTableWidgetItem(formatAddress(pageBase + static_cast<std::uint64_t>(index))));
+            m_compareTable->setItem(row, 1, new QTableWidgetItem(
+                QStringLiteral("%1").arg(
+                    static_cast<std::uint8_t>(standardOutcome.data[index]), 2, 16, QChar('0')).toUpper()));
+            m_compareTable->setItem(row, 2, new QTableWidgetItem(
+                QStringLiteral("%1").arg(
+                    static_cast<std::uint8_t>(ddmaOutcome.data[index]), 2, 16, QChar('0')).toUpper()));
+            ++shownRows;
+        }
+        m_compareTable->resizeColumnsToContents();
+
+        if (m_compareResultLabel == nullptr)
+        {
+            return;
+        }
+        if (diffCount == 0)
+        {
+            // "一致"在一张退化页上什么都不证明：整页只有同一个字节时，一条彻底
+            // 坏掉的 DDMA（比如什么都没搬、缓冲区留着全零）同样会与标准通道逐字节
+            // 相等，于是这里报绿。而这条判据本身正是用来判断 DDMA 通路成不成立
+            // 的——拿它当证据之前，必须先排除"两边都没读到有意义的内容"。
+            bool uniformPage = true;
+            for (qsizetype index = 1; index < compareLength; ++index)
+            {
+                if (standardOutcome.data[index] != standardOutcome.data[0])
+                {
+                    uniformPage = false;
+                    break;
+                }
+            }
+            if (compareLength > 0 && uniformPage)
+            {
+                m_compareResultLabel->setText(QStringLiteral("物理页 %1：整页 %2 字节都是同一个值 0x%3，两个后端一致不构成 DDMA 通路成立的证据——什么都没搬过来的实现也会得到同样的结果。请换一张内容有区分度的页再比对，例如某个已加载模块 PE 头所在的物理页。")
+                    .arg(formatAddress(pageBase))
+                    .arg(compareLength)
+                    .arg(static_cast<std::uint8_t>(standardOutcome.data[0]), 2, 16, QChar('0')));
+                m_compareResultLabel->setStyleSheet(
+                    QStringLiteral("color:%1;").arg(KswordTheme::WarningHex()));
+            }
+            else
+            {
+                m_compareResultLabel->setText(QStringLiteral(
+                    "物理页 %1：两个后端读到的 %2 字节完全一致，没有观察到重定向迹象。")
+                    .arg(formatAddress(pageBase))
+                    .arg(compareLength));
+                m_compareResultLabel->setStyleSheet(
+                    QStringLiteral("color:%1;").arg(KswordTheme::SuccessHex()));
+            }
         }
         else
         {
             m_compareResultLabel->setText(QStringLiteral(
-                "物理页 %1：两个后端读到的 %2 字节完全一致，没有观察到重定向迹象。")
+                "物理页 %1：共 %2 字节中有 %3 字节不一致（表中最多展示 %4 条）。"
+                "标准通道受 SLAT 约束，DDMA 不受约束，这种差异通常意味着该页被上层虚拟化重定向或隐藏。")
                 .arg(formatAddress(pageBase))
-                .arg(compareLength));
+                .arg(compareLength)
+                .arg(diffCount)
+                .arg(kCompareSampleRows));
             m_compareResultLabel->setStyleSheet(
-                QStringLiteral("color:%1;").arg(KswordTheme::SuccessHex()));
+                QStringLiteral("color:%1;").arg(KswordTheme::WarningHex()));
         }
-    }
-    else
-    {
-        m_compareResultLabel->setText(QStringLiteral(
-            "物理页 %1：共 %2 字节中有 %3 字节不一致（表中最多展示 %4 条）。"
-            "标准通道受 SLAT 约束，DDMA 不受约束，这种差异通常意味着该页被上层虚拟化重定向或隐藏。")
-            .arg(formatAddress(pageBase))
-            .arg(compareLength)
-            .arg(diffCount)
-            .arg(kCompareSampleRows));
-        m_compareResultLabel->setStyleSheet(
-            QStringLiteral("color:%1;").arg(KswordTheme::WarningHex()));
-    }
+    });
 }
 
 bool DdmaPage::parseAddressText(const QString& text, std::uint64_t& valueOut)
