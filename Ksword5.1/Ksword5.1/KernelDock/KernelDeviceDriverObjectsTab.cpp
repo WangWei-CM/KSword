@@ -29,6 +29,8 @@
 #include <QFileDialog>
 #include <QHBoxLayout>
 #include <QHeaderView>
+#include <QPersistentModelIndex>
+#include <limits>
 #include <QLabel>
 #include <QLineEdit>
 #include <QMenu>
@@ -40,6 +42,8 @@
 #include <QSizePolicy>
 #include <QTableWidget>
 #include <QTableWidgetItem>
+#include <QTimer>
+#include <QScrollBar>
 #include <QStringList>
 #include <QTimer>
 #include <QVBoxLayout>
@@ -254,6 +258,13 @@ void KernelDeviceDriverObjectsTab::initializeUi()
 // - 返回：无返回值。
 void KernelDeviceDriverObjectsTab::initializeConnections()
 {
+    connect(m_tableWidget->horizontalHeader(), &QHeaderView::sortIndicatorChanged, this, [this](int, Qt::SortOrder) {
+        m_lastDirectoryFilter.clear();
+        m_lastTypeFilter.clear();
+        m_lastKeywordFilter.clear();
+        rebuildVisibleRows();
+    }, Qt::QueuedConnection);
+
     connect(m_refreshButton, &QPushButton::clicked, this, [this]() {
         refreshAsync();
     });
@@ -270,9 +281,11 @@ void KernelDeviceDriverObjectsTab::initializeConnections()
         rebuildVisibleRows();
     });
 
-    connect(m_keywordEdit, &QLineEdit::textChanged, this, [this](const QString&) {
-        rebuildVisibleRows();
-    });
+    m_filterTimer = new QTimer(this);
+    m_filterTimer->setSingleShot(true);
+    m_filterTimer->setInterval(120);
+    connect(m_filterTimer, &QTimer::timeout, this, [this]() { rebuildVisibleRows(); });
+    connect(m_keywordEdit, &QLineEdit::textChanged, this, [this](const QString&) { m_filterTimer->start(); });
 
     connect(m_tableWidget, &QTableWidget::customContextMenuRequested, this, [this](const QPoint& localPosition) {
         showTableContextMenu(localPosition);
@@ -365,9 +378,13 @@ void KernelDeviceDriverObjectsTab::applyRefreshResult(
         return;
     }
 
+    m_filterTimer->stop();
     m_allRows = std::move(rows);
+    m_projectionDirty = true;
+    m_filterActive = false;
+    m_unfilteredSourceIndex = std::numeric_limits<std::size_t>::max();
     populateFilterCombos(m_allRows);
-    rebuildVisibleRows();
+    rebuildVisibleRows(false);
 }
 
 // populateFilterCombos：
@@ -427,16 +444,9 @@ void KernelDeviceDriverObjectsTab::populateFilterCombos(const std::vector<Kernel
 // - 输入 entry：待判断的一行；
 // - 处理：按目录、类型和关键字做只读过滤；
 // - 返回：true 表示该行应保留显示。
-bool KernelDeviceDriverObjectsTab::matchesCurrentFilters(const KernelDeviceDriverObjectEntry& entry) const
+bool KernelDeviceDriverObjectsTab::matchesCurrentFilters(const KernelDeviceDriverObjectEntry& entry,
+    const QString& directoryFilterText, const QString& typeFilterText, const QString& keywordText) const
 {
-    const QString directoryFilterText = m_directoryFilterCombo != nullptr
-        ? m_directoryFilterCombo->currentData().toString().trimmed()
-        : QString();
-    const QString typeFilterText = m_typeFilterCombo != nullptr
-        ? m_typeFilterCombo->currentData().toString().trimmed()
-        : QString();
-    const QString keywordText = m_keywordEdit != nullptr ? m_keywordEdit->text().trimmed() : QString();
-
     if (!directoryFilterText.isEmpty() && directoryFilterText != QStringLiteral("*"))
     {
         if (entry.directoryPathText.compare(directoryFilterText, Qt::CaseInsensitive) != 0)
@@ -478,18 +488,62 @@ bool KernelDeviceDriverObjectsTab::matchesCurrentFilters(const KernelDeviceDrive
 // rebuildVisibleRows：
 // - 处理：根据当前过滤条件构建可见行并刷新表格；
 // - 返回：无返回值。
-void KernelDeviceDriverObjectsTab::rebuildVisibleRows()
+void KernelDeviceDriverObjectsTab::rebuildVisibleRows(const bool allowDeferred)
 {
-    m_visibleRows.clear();
-    for (const KernelDeviceDriverObjectEntry& entry : m_allRows)
+    const QPointer<KernelDeviceDriverObjectsTab> guard(this);
+    if (allowDeferred && ks::ui::DeferTableUiCommitIfContextMenuOpen(this, QStringLiteral("kernel-device-driver-filter"),
+        {m_tableWidget}, [guard]() { if (guard) guard->rebuildVisibleRows(); })) return;
+    const QString directory = m_directoryFilterCombo->currentData().toString().trimmed();
+    const QString type = m_typeFilterCombo->currentData().toString().trimmed();
+    const QString keyword = m_keywordEdit->text().trimmed();
+    if (!m_projectionDirty && directory == m_lastDirectoryFilter && type == m_lastTypeFilter && keyword == m_lastKeywordFilter) return;
+    const bool active = (!directory.isEmpty() && directory != QStringLiteral("*"))
+        || (!type.isEmpty() && type != QStringLiteral("*")) || !keyword.isEmpty();
+    if (m_projectionDirty)
     {
-        if (matchesCurrentFilters(entry))
-        {
-            m_visibleRows.push_back(entry);
-        }
+        m_projectionDirty = false;
+        rebuildTableWidget();
     }
-
-    rebuildTableWidget();
+    if (active && !m_filterActive)
+    {
+        m_unfilteredSourceIndex = sourceIndexForTableRow(m_tableWidget->currentRow());
+        m_unfilteredHorizontalScroll = m_tableWidget->horizontalScrollBar()->value();
+        m_unfilteredVerticalScroll = m_tableWidget->verticalScrollBar()->value();
+    }
+    m_visibleIndexes.clear();
+    m_visibleIndexes.reserve(m_allRows.size());
+    int firstVisible = -1;
+    int restoredRow = -1;
+    for (int row = 0; row < m_tableWidget->rowCount(); ++row)
+    {
+        const auto sourceIndex = sourceIndexForTableRow(row);
+        const bool visible = sourceIndex < m_allRows.size() && matchesCurrentFilters(m_allRows[sourceIndex], directory, type, keyword);
+        m_tableWidget->setRowHidden(row, !visible);
+        if (visible)
+        {
+            m_visibleIndexes.push_back(sourceIndex);
+            if (firstVisible < 0) firstVisible = row;
+        }
+        if (!active && m_filterActive && sourceIndex == m_unfilteredSourceIndex) restoredRow = row;
+    }
+    // Business TSV has always used canonical snapshot order, independent of header sorting.
+    std::sort(m_visibleIndexes.begin(), m_visibleIndexes.end());
+    if (restoredRow >= 0) m_tableWidget->selectRow(restoredRow);
+    else if (m_tableWidget->currentRow() >= 0 && m_tableWidget->isRowHidden(m_tableWidget->currentRow()))
+    {
+        if (firstVisible >= 0) m_tableWidget->selectRow(firstVisible);
+        else { m_tableWidget->setCurrentItem(nullptr); m_tableWidget->clearSelection(); }
+    }
+    if (!active && m_filterActive)
+    {
+        m_tableWidget->horizontalScrollBar()->setValue(m_unfilteredHorizontalScroll);
+        m_tableWidget->verticalScrollBar()->setValue(m_unfilteredVerticalScroll);
+        m_unfilteredSourceIndex = std::numeric_limits<std::size_t>::max();
+    }
+    m_filterActive = active;
+    m_lastDirectoryFilter = directory;
+    m_lastTypeFilter = type;
+    m_lastKeywordFilter = keyword;
     updateStatusText();
 }
 
@@ -507,11 +561,11 @@ void KernelDeviceDriverObjectsTab::rebuildTableWidget()
     m_tableWidget->setUpdatesEnabled(false);
     m_tableWidget->clearContents();
     m_tableWidget->setRowCount(0);
-    m_tableWidget->setRowCount(static_cast<int>(m_visibleRows.size()));
+    m_tableWidget->setRowCount(static_cast<int>(m_allRows.size()));
 
-    for (int rowIndex = 0; rowIndex < static_cast<int>(m_visibleRows.size()); ++rowIndex)
+    for (int rowIndex = 0; rowIndex < static_cast<int>(m_allRows.size()); ++rowIndex)
     {
-        const KernelDeviceDriverObjectEntry& entry = m_visibleRows[static_cast<std::size_t>(rowIndex)];
+        const KernelDeviceDriverObjectEntry& entry = m_allRows[static_cast<std::size_t>(rowIndex)];
         const QString targetText = entry.targetPathText.isEmpty()
             ? kernelText("kernel.device_driver.placeholder.no_target", QStringLiteral("<无>"))
             : entry.targetPathText;
@@ -523,6 +577,8 @@ void KernelDeviceDriverObjectsTab::rebuildTableWidget()
         m_tableWidget->setItem(rowIndex, 4, makeReadOnlyItem(targetText));
         m_tableWidget->setItem(rowIndex, 5, makeReadOnlyItem(entry.statusText));
         m_tableWidget->setItem(rowIndex, 6, makeReadOnlyItem(entry.capabilityHintText));
+        for (int column = 0; column < m_tableWidget->columnCount(); ++column)
+            m_tableWidget->item(rowIndex, column)->setData(Qt::UserRole, static_cast<qulonglong>(rowIndex));
     }
 
     m_tableWidget->setUpdatesEnabled(true);
@@ -560,7 +616,7 @@ void KernelDeviceDriverObjectsTab::updateStatusText(const QString& errorText)
         return;
     }
 
-    if (m_visibleRows.empty())
+    if (m_visibleIndexes.empty())
     {
         m_statusLabel->setText(kernelText("kernel.device_driver.status.filter_empty", QStringLiteral("状态：已加载 %1 条，当前过滤后无可见结果。")).arg(m_allRows.size()));
         m_statusLabel->setStyleSheet(statusLabelStyle(KswordTheme::WarningHex()));
@@ -570,7 +626,7 @@ void KernelDeviceDriverObjectsTab::updateStatusText(const QString& errorText)
     m_statusLabel->setText(
         kernelText("kernel.device_driver.status.summary", QStringLiteral("状态：已加载 %1 条，当前显示 %2 条。"))
         .arg(m_allRows.size())
-        .arg(m_visibleRows.size()));
+        .arg(m_visibleIndexes.size()));
     m_statusLabel->setStyleSheet(statusLabelStyle(KswordTheme::SuccessHex()));
 }
 
@@ -594,6 +650,9 @@ void KernelDeviceDriverObjectsTab::showTableContextMenu(const QPoint& localPosit
     const int row = clickedItem != nullptr ? clickedItem->row() : -1;
     const int column = clickedItem != nullptr ? clickedItem->column() : -1;
 
+    const QPersistentModelIndex clickedIndex(m_tableWidget->model()->index(row, column));
+    const QPointer<KernelDeviceDriverObjectsTab> ownerGuard(this);
+    const auto sourceIndex = sourceIndexForTableRow(row);
     QMenu menu(this);
     menu.setStyleSheet(KswordTheme::ContextMenuStyle());
     QAction* copyCellAction = menu.addAction(kernelText("kernel.device_driver.menu.copy_cell", QStringLiteral("复制单元格")));
@@ -616,30 +675,31 @@ void KernelDeviceDriverObjectsTab::showTableContextMenu(const QPoint& localPosit
             "kernel.device_driver.menu.image_editor",
             QStringLiteral("打开 DriverObject / KLDR 镜像编辑器")));
 
-    const bool editableDriverObject = row >= 0 &&
-        row < static_cast<int>(m_visibleRows.size()) &&
-        !m_visibleRows[static_cast<std::size_t>(row)].isScopeEntry &&
-        !m_visibleRows[static_cast<std::size_t>(row)].isDirectory &&
-        (m_visibleRows[static_cast<std::size_t>(row)].fullPathText.startsWith(
+    const bool editableDriverObject = sourceIndex < m_allRows.size() &&
+        !m_allRows[sourceIndex].isScopeEntry &&
+        !m_allRows[sourceIndex].isDirectory &&
+        (m_allRows[sourceIndex].fullPathText.startsWith(
             QStringLiteral("\\Driver\\"), Qt::CaseInsensitive) ||
-         m_visibleRows[static_cast<std::size_t>(row)].fullPathText.startsWith(
+         m_allRows[sourceIndex].fullPathText.startsWith(
             QStringLiteral("\\FileSystem\\"), Qt::CaseInsensitive));
+    const QString editorTarget = editableDriverObject ? m_allRows[sourceIndex].fullPathText : QString();
 
     copyCellAction->setEnabled(row >= 0 && column >= 0);
     copyRowAction->setEnabled(row >= 0);
-    copyTsvAction->setEnabled(!m_visibleRows.empty());
-    exportAction->setEnabled(!m_visibleRows.empty());
+    copyTsvAction->setEnabled(!m_visibleIndexes.empty());
+    exportAction->setEnabled(!m_visibleIndexes.empty());
     dispatchEditorAction->setEnabled(editableDriverObject);
     imageEditorAction->setEnabled(editableDriverObject);
 
     QAction* selectedAction = menu.exec(m_tableWidget->viewport()->mapToGlobal(localPosition));
-    if (selectedAction == copyCellAction)
+    if (ownerGuard.isNull()) return;
+    if (selectedAction == copyCellAction && clickedIndex.isValid())
     {
-        copyCellAt(row, column);
+        copyCellAt(clickedIndex.row(), clickedIndex.column());
     }
-    else if (selectedAction == copyRowAction)
+    else if (selectedAction == copyRowAction && clickedIndex.isValid())
     {
-        copyRowAt(row);
+        copyRowAt(clickedIndex.row());
     }
     else if (selectedAction == copyTsvAction)
     {
@@ -649,18 +709,14 @@ void KernelDeviceDriverObjectsTab::showTableContextMenu(const QPoint& localPosit
     {
         exportVisibleRowsAsTsv();
     }
-    else if (selectedAction == dispatchEditorAction && editableDriverObject)
+    else if (selectedAction == dispatchEditorAction && editableDriverObject && clickedIndex.isValid())
     {
-        const KernelDeviceDriverObjectEntry& entry =
-            m_visibleRows[static_cast<std::size_t>(row)];
-        KernelDriverDispatchEditorDialog dialog(entry.fullPathText, this);
+        KernelDriverDispatchEditorDialog dialog(editorTarget, this);
         dialog.exec();
     }
-    else if (selectedAction == imageEditorAction && editableDriverObject)
+    else if (selectedAction == imageEditorAction && editableDriverObject && clickedIndex.isValid())
     {
-        const KernelDeviceDriverObjectEntry& entry =
-            m_visibleRows[static_cast<std::size_t>(row)];
-        KernelDriverImageEditorDialog dialog(entry.fullPathText, this);
+        KernelDriverImageEditorDialog dialog(editorTarget, this);
         dialog.exec();
     }
 }
@@ -724,7 +780,7 @@ void KernelDeviceDriverObjectsTab::copyVisibleRowsAsTsv() const
 // - 返回：无返回值。
 void KernelDeviceDriverObjectsTab::exportVisibleRowsAsTsv()
 {
-    if (m_visibleRows.empty())
+    if (m_visibleIndexes.empty())
     {
         QMessageBox::information(this, kernelText("kernel.device_driver.export.title", QStringLiteral("导出 TSV")), kernelText("kernel.device_driver.export.no_rows", QStringLiteral("当前没有可导出的可见结果。")));
         return;
@@ -772,8 +828,9 @@ QString KernelDeviceDriverObjectsTab::rowsToTsv(const bool includeHeader) const
         }.join(QStringLiteral("\t")));
     }
 
-    for (const KernelDeviceDriverObjectEntry& entry : m_visibleRows)
+    for (const std::size_t sourceIndex : m_visibleIndexes)
     {
+        const KernelDeviceDriverObjectEntry& entry = m_allRows[sourceIndex];
         lines.push_back(QStringList{
             sanitizeTsvField(entry.directoryPathText),
             sanitizeTsvField(entry.objectNameText),
@@ -813,4 +870,13 @@ QTableWidgetItem* KernelDeviceDriverObjectsTab::makeReadOnlyItem(const QString& 
     item->setFlags(item->flags() & ~Qt::ItemIsEditable);
     item->setToolTip(text);
     return item;
+}
+
+std::size_t KernelDeviceDriverObjectsTab::sourceIndexForTableRow(const int row) const
+{
+    const auto* item = m_tableWidget != nullptr ? m_tableWidget->item(row, 0) : nullptr;
+    if (item == nullptr) return m_allRows.size();
+    bool converted = false;
+    const auto sourceIndex = item->data(Qt::UserRole).toULongLong(&converted);
+    return converted && sourceIndex < m_allRows.size() ? static_cast<std::size_t>(sourceIndex) : m_allRows.size();
 }
