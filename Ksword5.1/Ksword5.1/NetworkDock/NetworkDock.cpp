@@ -1,3 +1,4 @@
+#include "../UI/AsyncUiDispatcher.h"
 #include "NetworkDock.InternalCommon.h"
 #include "HttpsProxyService.h"
 #include "../ArkDriverClient/ArkDriverClient.h"
@@ -145,6 +146,10 @@ NetworkDock::NetworkDock(QWidget* parent)
 
 NetworkDock::~NetworkDock()
 {
+    if (m_multiDownloadDispatcher != nullptr)
+    {
+        m_multiDownloadDispatcher->close();
+    }
     // Close delivery before member teardown; read workers only retain value state.
     if (m_routeReadOperation != nullptr) m_routeReadOperation->close();
     if (m_arpReadOperation != nullptr) m_arpReadOperation->close();

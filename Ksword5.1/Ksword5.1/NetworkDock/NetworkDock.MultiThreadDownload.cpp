@@ -3,6 +3,7 @@
 #include "../UI/ParameterWorkspace.h"
 #include "../UI/FlatButtonTheme.h"
 #include "../UI/VisibleTableWidget.h"
+#include "../UI/AsyncUiDispatcher.h"
 #include "../theme.h"
 
 // ============================================================
@@ -23,6 +24,7 @@
 #include <QUrl>
 
 #include <cwchar>
+#include <cerrno>
 #include <functional>
 #include <limits>
 #include <string>
@@ -232,6 +234,16 @@ namespace
             return false;
         }
 
+        // All waits run in a worker. A canceled request leaves at the next bounded network step.
+        if (::WinHttpSetTimeouts(sessionHandle.get(), 5000, 10000, 10000, 10000) == FALSE)
+        {
+            if (errorTextOut != nullptr)
+            {
+                *errorTextOut = QStringLiteral("创建下载会话失败。");
+            }
+            return false;
+        }
+
         WinHttpHandleGuard connectHandle(::WinHttpConnect(
             sessionHandle.get(),
             urlParts.hostText.c_str(),
@@ -302,7 +314,19 @@ namespace
             return false;
         }
 
-        const std::uint64_t totalBytes = static_cast<std::uint64_t>(std::wcstoull(contentLengthText.c_str(), nullptr, 10));
+        errno = 0;
+        wchar_t* lengthEnd = nullptr;
+        const std::uint64_t totalBytes = static_cast<std::uint64_t>(std::wcstoull(contentLengthText.c_str(), &lengthEnd, 10));
+        if (contentLengthText.find_first_not_of(L"0123456789") != std::wstring::npos || errno == ERANGE || lengthEnd == contentLengthText.c_str()
+            || lengthEnd == nullptr || *lengthEnd != L'\0'
+            || totalBytes > static_cast<std::uint64_t>(std::numeric_limits<LONGLONG>::max()))
+        {
+            if (errorTextOut != nullptr)
+            {
+                *errorTextOut = QStringLiteral("响应中的 Content-Length 无效或超出文件大小上限。");
+            }
+            return false;
+        }
         const std::wstring acceptRangesText = queryHeaderWideText(headRequestHandle.get(), WINHTTP_QUERY_ACCEPT_RANGES);
         const QString acceptRangesQString = QString::fromWCharArray(acceptRangesText.c_str()).toLower();
 
@@ -380,72 +404,125 @@ namespace
         return fileNameText;
     }
 
-    QString buildUniqueOutputPath(const QString& directoryPathText, const QString& fileNameText)
+    // Reserve each name with CREATE_NEW: concurrent preparations can never truncate each other.
+    bool prepareUniqueOutputFile(
+        const QString& directoryPathText, const QString& fileNameText,
+        const std::uint64_t totalBytes, const std::function<bool()>& isCanceled,
+        QString* outputPathOut, QString* errorTextOut)
     {
-        QDir directory(directoryPathText);
-        QString outputPathText = directory.filePath(fileNameText);
-        if (!QFileInfo::exists(outputPathText))
+        const QDir directory(directoryPathText);
+        const QFileInfo nameInfo(fileNameText);
+        for (int index = 0; index < 10000; ++index)
         {
-            return outputPathText;
-        }
-
-        const QFileInfo info(fileNameText);
-        const QString baseNameText = info.completeBaseName();
-        const QString suffixText = info.suffix();
-        int indexValue = 1;
-        while (indexValue < 10000)
-        {
-            const QString candidateNameText = suffixText.isEmpty()
-                ? QStringLiteral("%1(%2)").arg(baseNameText).arg(indexValue)
-                : QStringLiteral("%1(%2).%3").arg(baseNameText).arg(indexValue).arg(suffixText);
-            outputPathText = directory.filePath(candidateNameText);
-            if (!QFileInfo::exists(outputPathText))
+            if (isCanceled())
             {
-                return outputPathText;
+                *errorTextOut = QStringLiteral("任务已取消。");
+                return false;
             }
-            ++indexValue;
-        }
-        return directory.filePath(fileNameText);
-    }
-
-    bool prepareOutputFile(const QString& outputFilePathText, const std::uint64_t totalBytes, QString* errorTextOut)
-    {
-        const std::wstring outputPathWideText = outputFilePathText.toStdWString();
-        HANDLE outputFileHandle = ::CreateFileW(
-            outputPathWideText.c_str(),
-            GENERIC_WRITE,
-            FILE_SHARE_READ | FILE_SHARE_WRITE,
-            nullptr,
-            CREATE_ALWAYS,
-            FILE_ATTRIBUTE_NORMAL,
-            nullptr);
-        if (outputFileHandle == INVALID_HANDLE_VALUE)
-        {
-            if (errorTextOut != nullptr)
+            const QString candidateName = index == 0 ? fileNameText
+                : nameInfo.suffix().isEmpty()
+                    ? QStringLiteral("%1(%2)").arg(nameInfo.completeBaseName()).arg(index)
+                    : QStringLiteral("%1(%2).%3").arg(nameInfo.completeBaseName()).arg(index).arg(nameInfo.suffix());
+            const QString outputPath = directory.filePath(candidateName);
+            const std::wstring outputPathWide = outputPath.toStdWString();
+            HANDLE outputHandle = ::CreateFileW(outputPathWide.c_str(), GENERIC_WRITE,
+                FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
+            if (outputHandle == INVALID_HANDLE_VALUE)
             {
-                *errorTextOut = QStringLiteral("创建输出文件失败，错误码=%1").arg(::GetLastError());
+                const DWORD error = ::GetLastError();
+                if (error == ERROR_FILE_EXISTS || error == ERROR_ALREADY_EXISTS)
+                {
+                    continue;
+                }
+                *errorTextOut = QStringLiteral("创建输出文件失败，错误码=%1").arg(error);
+                return false;
             }
-            return false;
-        }
 
-        bool resultOk = true;
-        if (totalBytes > 0)
-        {
-            LARGE_INTEGER sizeValue{};
-            sizeValue.QuadPart = static_cast<LONGLONG>(totalBytes);
-            if (::SetFilePointerEx(outputFileHandle, sizeValue, nullptr, FILE_BEGIN) == FALSE
-                || ::SetEndOfFile(outputFileHandle) == FALSE)
+            // Publish ownership even on cancellation/allocation failure; retain the partial file as before.
+            *outputPathOut = outputPath;
+            bool ready = !isCanceled();
+            if (ready && totalBytes > 0)
             {
-                resultOk = false;
-                if (errorTextOut != nullptr)
+                LARGE_INTEGER size{};
+                size.QuadPart = static_cast<LONGLONG>(totalBytes);
+                ready = ::SetFilePointerEx(outputHandle, size, nullptr, FILE_BEGIN) != FALSE
+                    && ::SetEndOfFile(outputHandle) != FALSE;
+                if (!ready)
                 {
                     *errorTextOut = QStringLiteral("预分配输出文件失败，错误码=%1").arg(::GetLastError());
                 }
             }
+            ::CloseHandle(outputHandle);
+            if (isCanceled())
+            {
+                *errorTextOut = QStringLiteral("任务已取消。");
+                return false;
+            }
+            return ready;
         }
+        *errorTextOut = QStringLiteral("创建输出文件失败，错误码=%1").arg(ERROR_FILE_EXISTS);
+        return false;
+    }
 
-        ::CloseHandle(outputFileHandle);
-        return resultOk;
+    struct DownloadPreparationResult
+    {
+        WinHttpUrlParts urlParts;
+        QString outputPath;
+        QString errorText;
+        std::uint64_t totalBytes = 0;
+        bool supportsRange = false;
+    };
+
+    // No QObject/widget is borrowed by this transaction; only the immutable request and cancel flag.
+    DownloadPreparationResult prepareDownload(
+        const QString& urlText, const QString& directoryText, const QString& fileNameText,
+        const std::function<bool()>& isCanceled)
+    {
+        DownloadPreparationResult result;
+        if (isCanceled())
+        {
+            return result;
+        }
+        if (!ensureDirectoryReady(directoryText, &result.errorText) || isCanceled())
+        {
+            return result;
+        }
+        if (!parseWinHttpUrlParts(urlText, &result.urlParts, &result.errorText) || isCanceled())
+        {
+            return result;
+        }
+        QString metaError;
+        if (!queryRemoteFileMeta(result.urlParts, &result.totalBytes, &result.supportsRange, &metaError))
+        {
+            result.errorText = QStringLiteral("读取远端文件信息失败：%1").arg(metaError);
+            return result;
+        }
+        if (isCanceled())
+        {
+            return result;
+        }
+        prepareUniqueOutputFile(directoryText, fileNameText, result.totalBytes,
+            isCanceled, &result.outputPath, &result.errorText);
+        return result;
+    }
+
+    // Count unlaunched slots explicitly: a resource failure must not escape the Qt delivery callback.
+    template<class Launch, class Failure>
+    std::size_t launchDownloadWorkersSafely(const std::size_t count, Launch&& launch, Failure&& failure)
+    {
+        for (std::size_t index = 0; index < count; ++index)
+        {
+            try
+            {
+                launch(index);
+            }
+            catch (...)
+            {
+                failure(index, count - index);
+                return index;
+            }
+        }
+        return count;
     }
 
     bool downloadSegmentToFile(
@@ -459,6 +536,14 @@ namespace
         const std::function<void(std::uint64_t)>& chunkCallback,
         QString* errorTextOut)
     {
+        if (cancelFlag != nullptr && cancelFlag->load())
+        {
+            if (errorTextOut != nullptr)
+            {
+                *errorTextOut = QStringLiteral("任务已取消。");
+            }
+            return false;
+        }
         WinHttpHandleGuard sessionHandle(::WinHttpOpen(
             L"Ksword-MultiDownload/2026.04",
             WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
@@ -466,6 +551,16 @@ namespace
             WINHTTP_NO_PROXY_BYPASS,
             0));
         if (!sessionHandle.valid())
+        {
+            if (errorTextOut != nullptr)
+            {
+                *errorTextOut = QStringLiteral("创建下载会话失败。");
+            }
+            return false;
+        }
+
+        // All waits run in a worker. A canceled request leaves at the next bounded network step.
+        if (::WinHttpSetTimeouts(sessionHandle.get(), 5000, 10000, 10000, 10000) == FALSE)
         {
             if (errorTextOut != nullptr)
             {
@@ -972,197 +1067,237 @@ void NetworkDock::startMultiThreadDownloadTask()
     }
 
     const QString directoryText = m_multiDownloadSaveDirEdit->text().trimmed();
-    QString directoryErrorText;
-    if (!ensureDirectoryReady(directoryText, &directoryErrorText))
-    {
-        QMessageBox::warning(this, QStringLiteral("多线程下载"), directoryErrorText);
-        warn << startEvent
-            << "[NetworkDock] 多线程下载启动失败：目录不可用, reason="
-            << directoryErrorText.toStdString()
-            << eol;
-        return;
-    }
-
-    WinHttpUrlParts urlParts;
-    QString parseErrorText;
-    if (!parseWinHttpUrlParts(urlText, &urlParts, &parseErrorText))
-    {
-        QMessageBox::warning(this, QStringLiteral("多线程下载"), parseErrorText);
-        warn << startEvent
-            << "[NetworkDock] 多线程下载启动失败：URL解析失败, reason="
-            << parseErrorText.toStdString()
-            << eol;
-        return;
-    }
-
-    std::uint64_t totalBytes = 0;
-    bool supportsRange = false;
-    QString metaErrorText;
-    if (!queryRemoteFileMeta(urlParts, &totalBytes, &supportsRange, &metaErrorText))
-    {
-        QMessageBox::warning(this, QStringLiteral("多线程下载"), QStringLiteral("读取远端文件信息失败：%1").arg(metaErrorText));
-        warn << startEvent
-            << "[NetworkDock] 多线程下载启动失败：读取远端文件信息失败, reason="
-            << metaErrorText.toStdString()
-            << eol;
-        return;
-    }
-
     const int taskId = m_multiDownloadNextTaskId++;
-    const QString fileNameText = buildSafeOutputFileName(downloadUrl, taskId);
-    const QString outputPathText = buildUniqueOutputPath(directoryText, fileNameText);
-
-    QString prepareErrorText;
-    if (!prepareOutputFile(outputPathText, totalBytes, &prepareErrorText))
-    {
-        QMessageBox::warning(this, QStringLiteral("多线程下载"), prepareErrorText);
-        warn << startEvent
-            << "[NetworkDock] 多线程下载启动失败：输出文件准备失败, reason="
-            << prepareErrorText.toStdString()
-            << eol;
-        return;
-    }
-
-    std::shared_ptr<MultiThreadDownloadTaskState> taskState = std::make_shared<MultiThreadDownloadTaskState>();
+    auto taskState = std::make_shared<MultiThreadDownloadTaskState>();
     taskState->taskId = taskId;
     taskState->urlText = urlText;
-    taskState->savePathText = outputPathText;
-    taskState->fileNameText = fileNameText;
+    taskState->fileNameText = buildSafeOutputFileName(downloadUrl, taskId);
     taskState->requestedThreadCount = std::max(1, m_multiDownloadThreadCountSpin->value());
-    taskState->supportsRange = supportsRange;
-    taskState->totalBytes = totalBytes;
-    taskState->statusText = QStringLiteral("下载中");
-
-    const ks::network::DownloadPlan downloadPlan = ks::network::BuildDownloadSegmentPlan(
-        totalBytes,
-        taskState->requestedThreadCount,
-        taskState->supportsRange);
-    taskState->actualThreadCount = downloadPlan.actualThreadCount;
-
-    if (downloadPlan.emptyFile)
-    {
-        std::shared_ptr<MultiThreadDownloadSegmentState> segmentState = std::make_shared<MultiThreadDownloadSegmentState>();
-        segmentState->rangeBeginByte = downloadPlan.segments.front().beginByte;
-        segmentState->rangeEndByte = downloadPlan.segments.front().endByte;
-        segmentState->finished.store(true);
-        segmentState->statusText = QStringLiteral("空文件");
-        taskState->segmentStateList.push_back(segmentState);
-        taskState->finished.store(true);
-        taskState->statusText = QStringLiteral("已完成（空文件）");
-    }
-    else
-    {
-        for (const ks::network::DownloadSegmentPlan& segmentPlan : downloadPlan.segments)
-        {
-            std::shared_ptr<MultiThreadDownloadSegmentState> segmentState = std::make_shared<MultiThreadDownloadSegmentState>();
-            segmentState->rangeBeginByte = segmentPlan.beginByte;
-            segmentState->rangeEndByte = segmentPlan.endByte;
-            segmentState->statusText = QStringLiteral("等待中");
-            taskState->segmentStateList.push_back(segmentState);
-        }
-
-        taskState->runningWorkerCount.store(downloadPlan.actualThreadCount);
-        const bool useRange = downloadPlan.useRange;
-        for (const std::shared_ptr<MultiThreadDownloadSegmentState>& segmentState : taskState->segmentStateList)
-        {
-            std::thread([taskState, segmentState, urlParts, useRange]()
-                {
-                    {
-                        std::lock_guard<std::mutex> segmentGuard(segmentState->statusMutex);
-                        segmentState->statusText = QStringLiteral("下载中");
-                    }
-
-                    QString downloadErrorText;
-                    const bool downloadOk = downloadSegmentToFile(
-                        urlParts,
-                        taskState->savePathText,
-                        segmentState->rangeBeginByte,
-                        segmentState->rangeEndByte,
-                        useRange,
-                        &taskState->cancelRequested,
-                        &taskState->pauseRequested,
-                        [taskState, segmentState](const std::uint64_t chunkBytes)
-                        {
-                            segmentState->downloadedBytes.fetch_add(chunkBytes);
-                            taskState->downloadedBytes.fetch_add(chunkBytes);
-                        },
-                        &downloadErrorText);
-
-                    if (!downloadOk)
-                    {
-                        taskState->cancelRequested.store(true);
-                        const bool canceledByUser = taskState->canceled.load();
-                        if (!canceledByUser)
-                        {
-                            taskState->failed.store(true);
-                        }
-                        {
-                            std::lock_guard<std::mutex> segmentGuard(segmentState->statusMutex);
-                            segmentState->statusText = canceledByUser ? QStringLiteral("已取消") : QStringLiteral("失败");
-                        }
-                        {
-                            std::lock_guard<std::mutex> taskGuard(taskState->statusMutex);
-                            taskState->statusText = canceledByUser ? QStringLiteral("已取消") : QStringLiteral("失败");
-                            if (!canceledByUser && taskState->errorReasonText.isEmpty())
-                            {
-                                taskState->errorReasonText = downloadErrorText;
-                            }
-                        }
-                    }
-                    else
-                    {
-                        segmentState->finished.store(true);
-                        std::lock_guard<std::mutex> segmentGuard(segmentState->statusMutex);
-                        segmentState->statusText = QStringLiteral("完成");
-                    }
-
-                    const int remainWorker = taskState->runningWorkerCount.fetch_sub(1) - 1;
-                    if (remainWorker <= 0)
-                    {
-                        taskState->finished.store(true);
-                        if (taskState->canceled.load())
-                        {
-                            std::lock_guard<std::mutex> taskGuard(taskState->statusMutex);
-                            taskState->statusText = QStringLiteral("已取消");
-                        }
-                        else if (!taskState->failed.load())
-                        {
-                            taskState->downloadedBytes.store(taskState->totalBytes);
-                            std::lock_guard<std::mutex> taskGuard(taskState->statusMutex);
-                            taskState->statusText = QStringLiteral("已完成");
-                        }
-                    }
-                }).detach();
-        }
-    }
-
+    taskState->actualThreadCount = 0;
+    taskState->preparing.store(true);
+    taskState->statusText = QStringLiteral("等待中");
     {
         std::lock_guard<std::mutex> guard(m_multiDownloadTaskMutex);
         m_multiDownloadTaskList.push_back(taskState);
     }
-
     if (m_multiDownloadSelectedTaskId == 0)
     {
-        m_multiDownloadSelectedTaskId = taskState->taskId;
+        m_multiDownloadSelectedTaskId = taskId;
     }
-
-    if (m_multiDownloadStatusLabel != nullptr)
+    if (m_multiDownloadDispatcher == nullptr)
     {
-        m_multiDownloadStatusLabel->setText(
-            QStringLiteral("状态：任务 #%1 已启动，输出=%2")
-            .arg(taskState->taskId)
-            .arg(taskState->savePathText));
+        m_multiDownloadDispatcher = std::make_shared<ks::ui::AsyncUiDispatcher>(this);
     }
+    const auto dispatcher = m_multiDownloadDispatcher;
+    try
+    {
+        std::thread([owner = this, dispatcher, taskState, directoryText]()
+            {
+                const auto canceled = [taskState]() { return taskState->cancelRequested.load(); };
+                DownloadPreparationResult result;
+                try
+                {
+                    result = prepareDownload(taskState->urlText, directoryText, taskState->fileNameText, canceled);
+                }
+                catch (...)
+                {
+                    result.errorText = QStringLiteral("创建下载会话失败。");
+                }
+                dispatcher->post([owner, taskState, result]()
+                    {
+                        QString errorForDialog;
+                        taskState->preparing.store(false);
+                        taskState->savePathText = result.outputPath;
+                        if (taskState->cancelRequested.load())
+                        {
+                            taskState->canceled.store(true);
+                            taskState->finished.store(true);
+                            std::lock_guard<std::mutex> lock(taskState->statusMutex);
+                            taskState->statusText = QStringLiteral("已取消");
+                        }
+                        else if (!result.errorText.isEmpty() || result.outputPath.isEmpty())
+                        {
+                            taskState->failed.store(true);
+                            taskState->finished.store(true);
+                            std::lock_guard<std::mutex> lock(taskState->statusMutex);
+                            taskState->statusText = QStringLiteral("失败");
+                            taskState->errorReasonText = result.errorText;
+                            errorForDialog = result.errorText;
+                        }
+                        else
+                        {
+                            taskState->supportsRange = result.supportsRange;
+                            taskState->totalBytes = result.totalBytes;
+                            taskState->statusText = QStringLiteral("下载中");
+                            const ks::network::DownloadPlan downloadPlan = ks::network::BuildDownloadSegmentPlan(
+                                taskState->totalBytes,
+                                taskState->requestedThreadCount,
+                                taskState->supportsRange);
+                            taskState->actualThreadCount = downloadPlan.actualThreadCount;
 
-    info << startEvent
-        << "[NetworkDock] 多线程下载任务启动, taskId=" << taskState->taskId
-        << ", requestedThreads=" << taskState->requestedThreadCount
-        << ", actualThreads=" << taskState->actualThreadCount
-        << ", totalBytes=" << static_cast<unsigned long long>(taskState->totalBytes)
-        << ", supportsRange=" << (taskState->supportsRange ? "true" : "false")
-        << ", outputPath=" << taskState->savePathText.toStdString()
-        << eol;
+                            if (downloadPlan.emptyFile)
+                            {
+                                std::shared_ptr<MultiThreadDownloadSegmentState> segmentState = std::make_shared<MultiThreadDownloadSegmentState>();
+                                segmentState->rangeBeginByte = downloadPlan.segments.front().beginByte;
+                                segmentState->rangeEndByte = downloadPlan.segments.front().endByte;
+                                segmentState->finished.store(true);
+                                segmentState->statusText = QStringLiteral("空文件");
+                                taskState->segmentStateList.push_back(segmentState);
+                                taskState->finished.store(true);
+                                taskState->statusText = QStringLiteral("已完成（空文件）");
+                            }
+                            else
+                            {
+                                for (const ks::network::DownloadSegmentPlan& segmentPlan : downloadPlan.segments)
+                                {
+                                    std::shared_ptr<MultiThreadDownloadSegmentState> segmentState = std::make_shared<MultiThreadDownloadSegmentState>();
+                                    segmentState->rangeBeginByte = segmentPlan.beginByte;
+                                    segmentState->rangeEndByte = segmentPlan.endByte;
+                                    segmentState->statusText = QStringLiteral("等待中");
+                                    taskState->segmentStateList.push_back(segmentState);
+                                }
 
+                                taskState->runningWorkerCount.store(downloadPlan.actualThreadCount);
+                                const bool useRange = downloadPlan.useRange;
+                                const std::size_t launchedCount = launchDownloadWorkersSafely(
+                                    taskState->segmentStateList.size(),
+                                    [taskState, urlParts = result.urlParts, useRange](const std::size_t index)
+                                    {
+                                        const auto segmentState = taskState->segmentStateList[index];
+                                        std::thread([taskState, segmentState, urlParts, useRange]()
+                                        {
+                                            {
+                                                std::lock_guard<std::mutex> segmentGuard(segmentState->statusMutex);
+                                                segmentState->statusText = QStringLiteral("下载中");
+                                            }
+
+                                            QString downloadErrorText;
+                                            const bool downloadOk = downloadSegmentToFile(
+                                                urlParts,
+                                                taskState->savePathText,
+                                                segmentState->rangeBeginByte,
+                                                segmentState->rangeEndByte,
+                                                useRange,
+                                                &taskState->cancelRequested,
+                                                &taskState->pauseRequested,
+                                                [taskState, segmentState](const std::uint64_t chunkBytes)
+                                                {
+                                                    segmentState->downloadedBytes.fetch_add(chunkBytes);
+                                                    taskState->downloadedBytes.fetch_add(chunkBytes);
+                                                },
+                                                &downloadErrorText);
+
+                                            if (!downloadOk)
+                                            {
+                                                taskState->cancelRequested.store(true);
+                                                const bool canceledByUser = taskState->canceled.load();
+                                                if (!canceledByUser)
+                                                {
+                                                    taskState->failed.store(true);
+                                                }
+                                                {
+                                                    std::lock_guard<std::mutex> segmentGuard(segmentState->statusMutex);
+                                                    segmentState->statusText = canceledByUser ? QStringLiteral("已取消") : QStringLiteral("失败");
+                                                }
+                                                {
+                                                    std::lock_guard<std::mutex> taskGuard(taskState->statusMutex);
+                                                    taskState->statusText = canceledByUser ? QStringLiteral("已取消") : QStringLiteral("失败");
+                                                    if (!canceledByUser && taskState->errorReasonText.isEmpty())
+                                                    {
+                                                        taskState->errorReasonText = downloadErrorText;
+                                                    }
+                                                }
+                                            }
+                                            else
+                                            {
+                                                segmentState->finished.store(true);
+                                                std::lock_guard<std::mutex> segmentGuard(segmentState->statusMutex);
+                                                segmentState->statusText = QStringLiteral("完成");
+                                            }
+
+                                            const int remainWorker = taskState->runningWorkerCount.fetch_sub(1) - 1;
+                                            if (remainWorker <= 0)
+                                            {
+                                                if (taskState->canceled.load())
+                                                {
+                                                    std::lock_guard<std::mutex> taskGuard(taskState->statusMutex);
+                                                    taskState->statusText = QStringLiteral("已取消");
+                                                }
+                                                else if (!taskState->failed.load())
+                                                {
+                                                    taskState->downloadedBytes.store(taskState->totalBytes);
+                                                    std::lock_guard<std::mutex> taskGuard(taskState->statusMutex);
+                                                    taskState->statusText = QStringLiteral("已完成");
+                                                }
+                                                taskState->finished.store(true);
+                                            }
+                                        }).detach();
+                                    },
+                                    [taskState, &errorForDialog](const std::size_t firstNotLaunched, const std::size_t notLaunched)
+                                    {
+                                        taskState->failed.store(true);
+                                        taskState->cancelRequested.store(true);
+                                        errorForDialog = QStringLiteral("创建下载会话失败。");
+                                        {
+                                            std::lock_guard<std::mutex> taskGuard(taskState->statusMutex);
+                                            taskState->statusText = QStringLiteral("失败");
+                                            if (taskState->errorReasonText.isEmpty())
+                                            {
+                                                taskState->errorReasonText = errorForDialog;
+                                            }
+                                        }
+                                        for (std::size_t index = firstNotLaunched; index < taskState->segmentStateList.size(); ++index)
+                                        {
+                                            const auto& segment = taskState->segmentStateList[index];
+                                            std::lock_guard<std::mutex> segmentGuard(segment->statusMutex);
+                                            segment->statusText = QStringLiteral("失败");
+                                        }
+                                        // Planned slots prevent an early worker from finishing the task during launch.
+                                        // Retire only the slots with no worker; already launched workers retire themselves.
+                                        const int unstarted = static_cast<int>(notLaunched);
+                                        if (taskState->runningWorkerCount.fetch_sub(unstarted) - unstarted <= 0)
+                                        {
+                                            taskState->finished.store(true);
+                                        }
+                                    });
+                                taskState->actualThreadCount = static_cast<int>(launchedCount);
+                            }
+
+                            kLogEvent startEvent;
+                            info << startEvent
+                                << "[NetworkDock] 多线程下载任务启动, taskId=" << taskState->taskId
+                                << ", requestedThreads=" << taskState->requestedThreadCount
+                                << ", actualThreads=" << taskState->actualThreadCount
+                                << ", totalBytes=" << static_cast<unsigned long long>(taskState->totalBytes)
+                                << ", supportsRange=" << (taskState->supportsRange ? "true" : "false")
+                                << ", outputPath=" << taskState->savePathText.toStdString()
+                                << eol;
+
+                        }
+                        // Errors and the reserved output path remain in the main task row, including clipboard jobs.
+                        owner->refreshMultiThreadDownloadUi();
+                        if (!errorForDialog.isEmpty() && !taskState->canceled.load())
+                        {
+                            QMessageBox::warning(owner, QStringLiteral("多线程下载"), errorForDialog);
+                        }
+                    }, [taskState]()
+                    {
+                        // Closing/dropped UI delivery must retire values without touching any QObject.
+                        taskState->canceled.store(true);
+                        taskState->cancelRequested.store(true);
+                        taskState->preparing.store(false);
+                        taskState->finished.store(true);
+                    });
+            }).detach();
+    }
+    catch (...)
+    {
+        taskState->preparing.store(false);
+        taskState->failed.store(true);
+        taskState->finished.store(true);
+        taskState->statusText = QStringLiteral("失败");
+        taskState->errorReasonText = QStringLiteral("创建下载会话失败。");
+    }
     refreshMultiThreadDownloadUi();
 }
 
@@ -1175,9 +1310,8 @@ bool NetworkDock::startMultiThreadDownloadTaskFromInput(
         return false;
     }
 
-    // 启动前后快照：
-    // - 通过任务数量是否增长判断“是否成功创建了新任务”；
-    // - 该方法复用原有 startMultiThreadDownloadTask 校验和下载逻辑。
+    // True means the preparation transaction was accepted, not that HEAD/file preparation succeeded.
+    // Later errors and the reserved output path are reported on the main download task row.
     std::size_t taskCountBefore = 0;
     {
         std::lock_guard<std::mutex> guard(m_multiDownloadTaskMutex);
@@ -1219,7 +1353,7 @@ std::shared_ptr<NetworkDock::MultiThreadDownloadTaskState> NetworkDock::findMult
 void NetworkDock::setMultiThreadDownloadTaskPaused(const int taskId, const bool paused)
 {
     const std::shared_ptr<MultiThreadDownloadTaskState> taskState = findMultiThreadDownloadTaskById(taskId);
-    if (taskState == nullptr || taskState->finished.load() || taskState->cancelRequested.load())
+    if (taskState == nullptr || taskState->preparing.load() || taskState->finished.load() || taskState->cancelRequested.load())
     {
         return;
     }
@@ -1336,6 +1470,7 @@ void NetworkDock::refreshMultiThreadDownloadUi()
 
         setCellText(m_multiDownloadTaskTable, row, MultiDownloadTaskColumnId, QString::number(taskState->taskId));
         setCellText(m_multiDownloadTaskTable, row, MultiDownloadTaskColumnFile, taskState->fileNameText);
+        m_multiDownloadTaskTable->item(row, MultiDownloadTaskColumnFile)->setToolTip(taskState->savePathText);
         setCellText(m_multiDownloadTaskTable, row, MultiDownloadTaskColumnUrl, taskState->urlText);
         setCellText(
             m_multiDownloadTaskTable,
@@ -1397,7 +1532,7 @@ void NetworkDock::refreshMultiThreadDownloadUi()
             pauseButton->setText(taskPaused ? QStringLiteral("继续") : QStringLiteral("暂停"));
             pauseButton->setIcon(QIcon(taskPaused ? ":/Icon/process_start.svg" : ":/Icon/process_pause.svg"));
             pauseButton->setToolTip(taskPaused ? QStringLiteral("继续当前下载任务") : QStringLiteral("暂停当前下载任务"));
-            pauseButton->setEnabled(taskActionEnabled);
+            pauseButton->setEnabled(taskActionEnabled && !taskState->preparing.load());
         }
         if (cancelButton != nullptr)
         {

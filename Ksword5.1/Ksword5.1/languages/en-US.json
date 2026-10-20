@@ -6950,6 +6950,7 @@
     "notification.copy.log_template": "%1\n%2\n%3\nFile: %4\nFunction: %5\nGUID: %6"
   },
   "source_translations": {
+    "响应中的 Content-Length 无效或超出文件大小上限。": "The response Content-Length is invalid or exceeds the file size limit.",
     "DDMA transaction failed unexpectedly.": "DDMA transaction failed unexpectedly.",
     "DDMA transaction queue is full; wait for the current operation and retry.": "DDMA transaction queue is full; wait for the current operation and retry.",
     "DDMA scratch sectors could not be restored; further DDMA operations are unsafe.": "DDMA scratch sectors could not be restored; further DDMA operations are unsafe.",

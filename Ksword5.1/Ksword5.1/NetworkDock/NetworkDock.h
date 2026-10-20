@@ -61,6 +61,8 @@ class MultiThreadDownloadSegmentBarWidget;
 class NetworkFirewallPage;
 class NetworkAuditPage;
 
+namespace ks::ui { class AsyncUiDispatcher; }
+
 namespace ks::ui { class AsyncOperation; }
 
 namespace ks::network
@@ -314,6 +316,7 @@ private:
         std::uint64_t totalBytes = 0; // totalBytes：目标文件总字节数。
         std::atomic<std::uint64_t> downloadedBytes{ 0 }; // downloadedBytes：任务累计已下载字节数。
         std::atomic_int runningWorkerCount{ 0 }; // runningWorkerCount：仍在运行的下载线程数量。
+        std::atomic_bool preparing{ false }; // preparing：目录/HEAD/文件准备尚未完成；普通结果字段仅GUI发布。
         std::atomic_bool finished{ false }; // finished：任务是否已完成（成功或失败结束）。
         std::atomic_bool failed{ false }; // failed：任务是否失败结束。
         std::atomic_bool cancelRequested{ false }; // cancelRequested：任务是否收到取消请求。
@@ -1611,6 +1614,7 @@ private:
     std::shared_ptr<AliveScanTaskState> m_aliveScanTaskState = std::make_shared<AliveScanTaskState>();
 
     // 多线程下载任务运行状态：支持多任务并行与界面周期刷新。
+    std::shared_ptr<ks::ui::AsyncUiDispatcher> m_multiDownloadDispatcher; // 析构第一步关闭，后台只持共享门禁。
     mutable std::mutex m_multiDownloadTaskMutex; // m_multiDownloadTaskMutex：下载任务列表并发访问锁。
     std::vector<std::shared_ptr<MultiThreadDownloadTaskState>> m_multiDownloadTaskList; // m_multiDownloadTaskList：下载任务状态集合。
     int m_multiDownloadNextTaskId = 1; // m_multiDownloadNextTaskId：新建任务编号递增计数器。

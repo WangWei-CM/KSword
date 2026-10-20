@@ -617,10 +617,11 @@ void NetworkDock::showMultiThreadDownloadClipboardPrompt(const QString& urlText)
         });
     connect(startButton, &QPushButton::clicked, promptDialog, [this, promptDialog, urlEdit, saveDirEdit]()
         {
-            const bool started = startMultiThreadDownloadTaskFromInput(
+            // Accepted means queued preparation; asynchronous failures remain visible in the main task row.
+            const bool accepted = startMultiThreadDownloadTaskFromInput(
                 urlEdit->text().trimmed(),
                 saveDirEdit->text().trimmed());
-            if (started)
+            if (accepted)
             {
                 promptDialog->close();
             }
