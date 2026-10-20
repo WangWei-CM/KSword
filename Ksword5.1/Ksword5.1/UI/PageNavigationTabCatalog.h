@@ -41,6 +41,7 @@ namespace ks::ui
                     QString::fromLatin1(definition.languageKey), QString::fromUtf8(definition.sourceTitle));
             m_entries.insert(descriptor.id, {tabs, page});
         }
+        void remove(const QString& id) { m_entries.remove(id); }
         PageNavigationCatalog describe(PageNavigationCatalog schema) const
         {
             for (auto& descriptor : schema)

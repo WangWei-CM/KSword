@@ -1,4 +1,5 @@
 #include "ScannerDock.h"
+#include "../UI/MemoryWorkbench/SnapshotWorkbenchWidget.h"
 #include "../UI/PageControlStyle.h"
 #include "../UI/ToolbarMetrics.h"
 #include "../UI/ParameterWorkspace.h"
@@ -38,11 +39,20 @@
 #include <QTableWidgetItem>
 #include <QThreadPool>
 #include <QVBoxLayout>
+#include <QUuid>
 
 #include <limits>
 #include <mutex>
 #include <utility>
 #include <vector>
+
+namespace {
+const ks::ui::PageNavigationTabDefinition kScannerNavigation[] = {
+    {"analysis", "", "scanner.tab.analysis", "可视化分析", true},
+    {"inspection", "", "scanner.tab.inspection", "结构化扫描", false},
+    {"editor", "", "scanner.tab.editor", "安全字节编辑", false}
+};
+}
 
 // ScannerAsyncState 作用：把 worker 的回投目标放在共享互斥状态中。
 // 析构函数先清空 owner；worker 只有在同一把锁保护下才能提交 queued 调用，
@@ -224,7 +234,7 @@ void ScannerDock::buildUi()
     m_resultTabs->setDocumentMode(true);
     ks::ui::StylePageTabsContentFrame(m_resultTabs);
     inspectionLayout->addWidget(m_resultTabs);
-    m_mainTabs->addTab(m_inspectionPage, QString());
+    m_navigationTabs.add(navigationDefinition(1), m_mainTabs, m_inspectionPage);
 
     // 编辑页没有独立结果面板，保留单栏；参数正文滚动，确认动作固定在底部。
     m_editorPage = new QWidget(m_mainTabs);
@@ -295,7 +305,7 @@ void ScannerDock::buildUi()
     ks::ui::NormalizeToolbarRow(applyLayout);
     ks::ui::ApplyFlatButtonTheme(m_applyPatchButton, ks::ui::FlatButtonTone::Danger);
     editorLayout->addLayout(applyLayout);
-    m_mainTabs->addTab(m_editorPage, QString());
+    m_navigationTabs.add(navigationDefinition(2), m_mainTabs, m_editorPage);
 
     // 所有按钮和回车动作都通过 ScannerDock 方法进入同一套校验流程。
     connect(m_browseButton, &QPushButton::clicked, this, [this]() { chooseFile(); });
@@ -328,10 +338,10 @@ void ScannerDock::retranslateUi()
         "在后台只读解析 PE、ELF、Mach-O 或 ISO9660/Joliet 结构与攻击路径"));
     m_mainTabs->setTabText(
         m_mainTabs->indexOf(m_inspectionPage),
-        translated("scanner.tab.inspection", "结构化扫描"));
+        ks::ui::PageNavigationTabDescriptor(navigationDefinition(1)).title);
     m_mainTabs->setTabText(
         m_mainTabs->indexOf(m_editorPage),
-        translated("scanner.tab.editor", "安全字节编辑"));
+        ks::ui::PageNavigationTabDescriptor(navigationDefinition(2)).title);
     m_offsetLabel->setText(translated("scanner.editor.offset", "文件偏移"));
     m_replacementLabel->setText(translated("scanner.editor.replacement", "替换字节（十六进制）"));
     m_replacementEdit->setToolTip(translated(
@@ -524,6 +534,8 @@ QTableWidget* ScannerDock::createReadOnlyTable(QWidget* parent) const
 
 void ScannerDock::clearResultTabs()
 {
+    for (const auto& page : m_resultNavigationSchema) m_navigationTabs.remove(page.id);
+    m_resultNavigationSchema.clear();
     while (m_resultTabs->count() > 0)
     {
         QWidget* page = m_resultTabs->widget(0);
@@ -574,11 +586,11 @@ void ScannerDock::renderResult(const ks::scanner::BinaryScanResult& result)
             new QTableWidgetItem(ks::i18n::sourceText(fromUtf8(field.value))));
     }
     summaryTable->resizeColumnsToContents();
-    m_resultTabs->addTab(summaryTable, translated("scanner.result.summary", "摘要"));
+    addResultNavigationTab(summaryTable, translated("scanner.result.summary", "摘要"));
 
     if (!result.attackPath.evidence.empty())
     {
-        m_resultTabs->addTab(
+        addResultNavigationTab(
             createAttackPathPage(result),
             translated("scanner.result.attack_path", "攻击路径"));
     }
@@ -601,7 +613,7 @@ void ScannerDock::renderResult(const ks::scanner::BinaryScanResult& result)
             new QTableWidgetItem(ks::i18n::sourceText(fromUtf8(field.value))));
     }
     headerTable->resizeColumnsToContents();
-    m_resultTabs->addTab(headerTable, translated("scanner.result.headers", "文件头"));
+    addResultNavigationTab(headerTable, translated("scanner.result.headers", "文件头"));
 
     for (const ks::scanner::BinaryTable& sourceTable : result.tables)
     {
@@ -650,7 +662,7 @@ void ScannerDock::renderResult(const ks::scanner::BinaryScanResult& result)
         {
             title += translated("scanner.result.truncated_suffix", "（已截断）");
         }
-        m_resultTabs->addTab(
+        addResultNavigationTab(
             createStructuredTablePage(table, table->columnCount()),
             title);
     }
@@ -686,7 +698,7 @@ void ScannerDock::renderResult(const ks::scanner::BinaryScanResult& result)
                     : QString()));
     }
     diagnosticsTable->resizeColumnsToContents();
-    m_resultTabs->addTab(
+    addResultNavigationTab(
         diagnosticsTable,
         translated("scanner.result.diagnostics", "诊断"));
 }
@@ -1014,3 +1026,63 @@ void ScannerDock::setPatchBusy(const bool busy)
     m_backupCheckBox->setEnabled(!busy);
     m_riskCheckBox->setEnabled(!busy);
 }
+
+const ks::ui::PageNavigationTabDefinition& ScannerDock::navigationDefinition(const int index)
+{
+    return kScannerNavigation[index];
+}
+void ScannerDock::addResultNavigationTab(QWidget* page, const QString& title)
+{
+    const QString id = QStringLiteral("result:") + QUuid::createUuid().toString(QUuid::WithoutBraces);
+    const QByteArray idBytes = id.toUtf8();
+    const QByteArray titleBytes = title.toUtf8();
+    const ks::ui::PageNavigationTabDefinition definition{idBytes.constData(), "inspection", "", titleBytes.constData(),
+        m_resultNavigationSchema.isEmpty()};
+    m_navigationTabs.add(definition, m_resultTabs, page);
+    m_resultTabs->setTabText(m_resultTabs->indexOf(page), title);
+    m_resultNavigationSchema.append(ks::ui::PageNavigationTabDescriptor(definition));
+}
+ks::ui::PageNavigationCatalog ScannerDock::navigationCatalog(const ScannerDock* existing)
+{
+    ks::ui::PageNavigationCatalog schema;
+    for (int index = 0; index < 3; ++index)
+    {
+        schema.append(ks::ui::PageNavigationTabDescriptor(navigationDefinition(index)));
+        if (index == 1 && existing) schema += existing->m_resultNavigationSchema;
+    }
+    if (existing) schema = existing->m_navigationTabs.describe(std::move(schema));
+    // 子目录由原编辑器拥有，不送入本页Tab表重写状态。
+    auto children = ks::ui::SnapshotWorkbenchWidget::navigationCatalog(existing ? existing->m_analysisEditor : nullptr);
+    for (auto& child : children)
+    {
+        child.id.prepend(QStringLiteral("analysis:"));
+        child.parentId = child.parentId.isEmpty() ? QStringLiteral("analysis") : QStringLiteral("analysis:") + child.parentId;
+    }
+    for (qsizetype index = children.size(); index > 0; --index) schema.insert(1, children[index - 1]);
+    return schema;
+}
+QWidget* ScannerDock::activateNavigationDescriptor(const QString& id)
+{
+    const QString prefix = QStringLiteral("analysis:");
+    if (!id.startsWith(prefix)) return m_navigationTabs.activate(id, navigationCatalog(this));
+    const QPointer<ScannerDock> self(this);
+    const QPointer<QWidget> root(m_analysisPage);
+    const QPointer<ks::ui::SnapshotWorkbenchWidget> editor(m_analysisEditor);
+    const auto permitted = [self, &id](bool current) {
+        if (!self) return false;
+        const auto resolved = ks::ui::ResolvePageNavigationCatalog(navigationCatalog(self), QString());
+        if (!resolved) return false;
+        for (const auto& page : *resolved)
+            if (page.page.id == id) return page.page.visible && page.page.enabled && (!current || page.page.current);
+        return false;
+    };
+    if (!root || !editor || !permitted(false)) return nullptr;
+    if (!m_navigationTabs.activate(QStringLiteral("analysis"), navigationCatalog(this))) return nullptr;
+    if (!self || !root || !editor || self->m_analysisPage != root || self->m_analysisEditor != editor || !permitted(false)) return nullptr;
+    const QPointer<QWidget> target(editor->activateNavigationDescriptor(id.mid(prefix.size())));
+    if (!self || !root || !editor || !target || self->m_analysisPage != root || self->m_analysisEditor != editor
+        || !self->m_mainTabs || self->m_mainTabs->currentWidget() != root || !permitted(true)) return nullptr;
+    return target.data();
+}
+namespace { const bool kScannerNavigationRegistered =
+    ks::ui::RegisterTypedPageNavigationCatalog<ScannerDock>(QStringLiteral("misc.scanner")); }

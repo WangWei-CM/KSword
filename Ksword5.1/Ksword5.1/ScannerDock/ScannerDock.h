@@ -3,6 +3,7 @@
 #include <QString>
 #include <QStringList>
 #include <QWidget>
+#include "../UI/PageNavigationTabCatalog.h"
 
 #include <atomic>
 #include <cstdint>
@@ -39,6 +40,9 @@ namespace ks::scanner
 class ScannerDock final : public QWidget
 {
 public:
+    static ks::ui::PageNavigationCatalog navigationCatalog(const ScannerDock* existing = nullptr);
+    QWidget* activateNavigationDescriptor(const QString& id);
+
     // 构造函数作用：建立扫描器界面并进入“等待选择文件”状态。
     // 参数 parent：Qt 父控件；返回值：无。
     explicit ScannerDock(QWidget* parent = nullptr);
@@ -52,6 +56,11 @@ protected:
     void changeEvent(QEvent* event) override;
 
 private:
+    static const ks::ui::PageNavigationTabDefinition& navigationDefinition(int index);
+    void addResultNavigationTab(QWidget* page, const QString& title);
+    ks::ui::PageNavigationTabCatalog m_navigationTabs;
+    ks::ui::PageNavigationCatalog m_resultNavigationSchema;
+
     // 以下函数分别负责构建/重译界面、选择目标，以及启动异步扫描或写入。
     void buildUi();
     void buildAnalysisUi();

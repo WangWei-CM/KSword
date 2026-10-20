@@ -104,7 +104,7 @@ void ScannerDock::buildAnalysisUi()
     m_analysisEditor->setAddressKind(ks::ui::SnapshotAddressKind::FileOffset);
     m_analysisEditor->setEditable(false);
     layout->addWidget(m_analysisEditor, 1);
-    m_mainTabs->addTab(m_analysisPage, QString());
+    m_navigationTabs.add(navigationDefinition(0), m_mainTabs, m_analysisPage);
     m_analysisPage->setEnabled(false);
 
     m_overviewBar->offsetActivated = [this](const std::uint64_t offset) { navigateAnalysisOffset(offset); };
@@ -162,7 +162,7 @@ void ScannerDock::buildAnalysisUi()
 void ScannerDock::retranslateAnalysisUi()
 {
     if (!m_analysisPage) return;
-    m_mainTabs->setTabText(m_mainTabs->indexOf(m_analysisPage), translated("scanner.tab.analysis", "可视化分析"));
+    m_mainTabs->setTabText(m_mainTabs->indexOf(m_analysisPage), ks::ui::PageNavigationTabDescriptor(navigationDefinition(0)).title);
     m_overviewBar->setAccessibleName(translated("scanner.analysis.overview", "文件区段总览"));
     m_analysisSectionLabel->setText(translated("scanner.analysis.section", "区段"));
     m_analysisEntryButton->setText(translated("scanner.analysis.entry", "入口点"));
