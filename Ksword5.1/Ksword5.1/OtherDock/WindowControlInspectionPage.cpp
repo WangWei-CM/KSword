@@ -254,7 +254,7 @@ namespace ks::control_inspection
                 QWidget::changeEvent(event);
                 if (event->type() == QEvent::LanguageChange) retranslate();
                 if (event->type() == QEvent::ApplicationPaletteChange || event->type() == QEvent::PaletteChange)
-                    if (m_overlay) { m_overlay->setPalette(palette()); m_overlay->update(); }
+                    if (m_overlay && m_overlay->palette() != palette()) m_overlay->setPalette(palette());
             }
         private:
             void retranslate()
@@ -396,6 +396,7 @@ namespace ks::control_inspection
                     }
                     else if (!reply.hit.id.isEmpty())
                     {
+                        if (!SameOverlayNode(m_nodes.value(reply.hit.id), reply.hit)) m_nodesDirty = true;
                         m_nodes[reply.hit.id] = reply.hit;
                         if (m_selected.id == reply.hit.id) m_selected = reply.hit;
                         if (m_hover.id == reply.hit.id) m_hover = reply.hit;
@@ -445,7 +446,9 @@ namespace ks::control_inspection
                         if (parent) parent->addChild(item); else m_tree->addTopLevelItem(item);
                     }
                     item->setText(0, node.type); item->setText(1, node.name); item->setData(0, Qt::UserRole, node.id);
-                    item->setToolTip(0, node.id); m_items.insert(node.id, item); m_nodes.insert(node.id, node);
+                    item->setToolTip(0, node.id); m_items.insert(node.id, item);
+                    if (!SameOverlayNode(m_nodes.value(node.id), node)) m_nodesDirty = true;
+                    m_nodes.insert(node.id, node);
                     m_seen.insert(node.id);
                     if (node.id == m_preserve) { m_tree->setCurrentItem(item); m_selected = node; }
                     if (m_expanded.contains(node.id) || node.parent.isEmpty()) item->setExpanded(true);
@@ -464,7 +467,7 @@ namespace ks::control_inspection
                     QVector<QTreeWidgetItem*> deletions;
                     for (const auto& id : removed)
                     {
-                        auto* item = m_items.take(id); m_nodes.remove(id);
+                        auto* item = m_items.take(id); m_nodes.remove(id); m_nodesDirty = true;
                         if (!item->parent() || !removed.contains(item->parent()->data(0, Qt::UserRole).toString())) deletions.push_back(item);
                     }
                     m_rebuilding = true; for (auto* item : deletions) delete item; m_rebuilding = false;
@@ -475,17 +478,18 @@ namespace ks::control_inspection
                 if (FAILED(m_scanError)) status += T("；部分信息不可用（0x%1）").arg(static_cast<quint32>(m_scanError), 8, 16, QLatin1Char('0'));
                 if (m_scanDone && m_nodes.size() <= 1 && m_view->currentIndex() != 2)
                     status += T("；目标未暴露更多 UIA 控件，可切换 Win32 子窗口树。" );
-                m_status->setText(status); m_nodesDirty = true; updateOverlay();
+                m_status->setText(status); updateOverlay();
             }
             void updateOverlay()
             {
                 if (m_paused || m_suspended || !m_started) return;
                 if (!m_overlay) m_overlay = CreateOverlay(m_detail);
-                if (m_nodesDirty) { m_sceneNodes = m_nodes.values(); m_nodesDirty = false; }
-                m_overlay->setPalette(palette());
+                if (m_nodesDirty) { m_sceneNodes = m_nodes.values(); m_nodesDirty = false; ++m_sceneRevision; }
+                if (m_overlay->palette() != palette()) m_overlay->setPalette(palette());
+                if (m_overlay->font() != font()) m_overlay->setFont(font());
                 if (!m_overlay->isVisible()) { m_overlay->show(); FitOverlay(m_overlay); }
                 UpdateOverlay(m_overlay, m_sceneNodes, m_hover, m_selected,
-                    m_all->isChecked(), m_tips->isChecked(), m_cursor);
+                    m_all->isChecked(), m_tips->isChecked(), m_cursor, m_sceneRevision);
             }
             void tick()
             {
@@ -532,6 +536,7 @@ namespace ks::control_inspection
             QPointer<QWidget> m_overlay;
             QVector<Node> m_sceneNodes;
             bool m_nodesDirty = true;
+            quint64 m_sceneRevision = 0;
             Collector m_collector;
             QTimer m_timer;
             QElapsedTimer m_clock;
