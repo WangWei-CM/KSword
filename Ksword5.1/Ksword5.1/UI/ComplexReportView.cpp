@@ -40,6 +40,14 @@ namespace
     const QString kDiagnostics = QStringLiteral("ksword_report_diagnostics"); // 仅用于导航身份，不显示为业务文本。
     QString text(const QString& source) { return ks::i18n::sourceText(source); }
 
+    void retirePaths(QSet<QString>& paths)
+    {
+        if (paths.isEmpty()) return;
+        QSet<QString> retired;
+        retired.swap(paths);
+        QThreadPool::globalInstance()->start([retired = std::move(retired)]() {});
+    }
+
     // 只在恢复结构或当前搜索结果时遍历模型，不构造每字段控件。
     void visit(const QAbstractItemModel* model, const QModelIndex& parent,
         const std::function<void(const QModelIndex&)>& action)
@@ -287,7 +295,7 @@ namespace ks::ui
         restore->documentTicket = m_prepareGeneration->load();
         restore->filterTicket = m_filterGeneration->load();
         // Keep target sets immutable while tree signals build a new current expansion set.
-        m_expandedPaths.clear();
+        retirePaths(m_expandedPaths);
         m_readingRestore = std::move(restore);
         continueReadingRestore(++m_readingGeneration);
     }
@@ -339,7 +347,7 @@ namespace ks::ui
         if (!currentRequest()) return;
         if (m_query.isEmpty() && m_restoreAfterSearch)
         {
-            m_beforeSearch.clear();
+            retirePaths(m_beforeSearch);
             m_restoreAfterSearch = false;
         }
         if (!m_query.isEmpty()) expandSearchGroups();
@@ -356,7 +364,10 @@ namespace ks::ui
         ++*m_filterGeneration;
         auto pending = std::move(m_requestedDocument);
         auto restore = std::move(m_readingRestore);
-        QThreadPool::globalInstance()->start([pending = std::move(pending), restore = std::move(restore)]() {});
+        auto expanded = std::move(m_expandedPaths);
+        auto beforeSearch = std::move(m_beforeSearch);
+        QThreadPool::globalInstance()->start([pending = std::move(pending), restore = std::move(restore),
+            expanded = std::move(expanded), beforeSearch = std::move(beforeSearch)]() {});
     }
 
     void ComplexReportView::showEvent(QShowEvent* event)
@@ -405,16 +416,17 @@ namespace ks::ui
             if (!prepared.next || cancelled()) return;
             dispatcher->post([safe, generation, ticket, prepared = std::move(prepared), language]() mutable
             {
-                if (safe && generation->load() == ticket && !safe->isVisible())
-                {
-                    safe->m_projectionDirty = true;
-                    safe->m_preparing = false; // Hidden pages retain the latest canonical request only.
-                }
-                if (safe && generation->load() == ticket && safe->isVisible())
+                if (safe && generation->load() == ticket)
                 {
                     safe->m_candidate = std::make_shared<ComplexReportModel::PreparedDocument>(std::move(prepared));
                     safe->m_language = language;
-                    safe->scheduleSearch(false);
+                    if (safe->isVisible()) safe->scheduleSearch(false);
+                    else
+                    {
+                        // Retain prepared values without touching the hidden model/view.
+                        safe->m_projectionDirty = false;
+                        safe->m_searchPending = true;
+                    }
                 }
                 // The previous large state and request closures are retired outside the GUI thread,
                 // including stale results delivered after a newer request or window destruction.
@@ -486,8 +498,8 @@ namespace ks::ui
                 if (!current()) return;
                 if (!safe->isVisible())
                 {
-                    if (candidate) safe->m_projectionDirty = true;
-                    safe->m_preparing = false;
+                    safe->m_projectionDirty = false;
+                    safe->m_preparing = bool(candidate);
                     safe->m_searchPending = true;
                     return;
                 }
@@ -628,7 +640,7 @@ namespace ks::ui
     {
         if (!m_query.isEmpty())
         {
-            m_beforeSearch.clear(); // 搜索中换范围时不能把上一范围的阅读位置带到新范围。
+            retirePaths(m_beforeSearch); // 搜索中换范围时不能把上一范围的阅读位置带到新范围。
             m_beforeSearchSelected.clear();
             m_beforeSearchScroll = 0;
         }
@@ -644,6 +656,7 @@ namespace ks::ui
         if (next == m_query) return;
         if (m_query.isEmpty() && !next.isEmpty() && !m_restoreAfterSearch)
         {
+            retirePaths(m_beforeSearch);
             m_beforeSearch = expandedPaths();
             m_beforeSearchSelected = m_readingRestore ? m_readingRestore->selected
                 : m_tree->currentIndex().data(ReportPathRole).toString();
