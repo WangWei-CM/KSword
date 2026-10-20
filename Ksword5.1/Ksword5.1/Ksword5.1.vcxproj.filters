@@ -257,6 +257,9 @@
     <ClCompile Include="MiscDock\DisableDse\DisableDsePageKsec.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="UI\MemoryWorkbench\WorkbenchWriteLedger.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="MiscDock\DisableDse\KsecDdExecutor.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -779,6 +782,9 @@
     <ClCompile Include="MonitorDock\ProcessTraceMonitorWidget.Ui.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="UI\MemoryWorkbench\WorkbenchFrozenWriteContext.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="MonitorDock\ProcessTraceMonitorWidget.Actions.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -1095,6 +1101,9 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="SettingsDock\AppearanceSettings.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="UI\MemoryWorkbench\WorkbenchFrozenWriteContext.Native.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="Internationalization\LanguageManager.cpp">
@@ -2252,6 +2261,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="MemoryDock\HyperVMemoryEvidence.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="UI\MemoryWorkbench\WorkbenchFrozenWriteContext.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="MemoryDock\HyperVMemoryPage.h">
@@ -3796,6 +3808,9 @@
     <ClCompile Include="MiscDock\DiskEditor\StorageControllerResearchDialog.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClInclude Include="UI\MemoryWorkbench\WorkbenchWriteLedger.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="MiscDock\DiskEditor\StorageControllerResearchDialog.h">
       <Filter>Header Files</Filter>
     </ClInclude>

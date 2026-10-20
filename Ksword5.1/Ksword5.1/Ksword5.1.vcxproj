@@ -301,6 +301,7 @@
     <ClCompile Include="MiscDock\VirtualLocation\VirtualLocationBackend.cpp" />
     <ClCompile Include="MiscDock\VirtualLocation\VirtualLocationPage.cpp" />
     <ClCompile Include="MiscDock\HvciBypass\HvciBypassBackend.cpp" />
+    <ClCompile Include="UI\MemoryWorkbench\WorkbenchWriteLedger.cpp" />
     <ClCompile Include="MiscDock\HvciBypass\HvciBypassPage.cpp" />
     <ClCompile Include="MiscDock\HvciBypass\RxpfBackend.cpp" />
     <ClCompile Include="MiscDock\HvciBypass\RxpfPage.cpp" />
@@ -531,6 +532,7 @@
     <ClCompile Include="StartupDock\StartupDock.Tasks.cpp" />
     <ClCompile Include="UI\CodeEditorWidget.cpp" />
     <ClCompile Include="UI\CodeEditorWidget.Export.cpp" />
+    <ClCompile Include="UI\MemoryWorkbench\WorkbenchFrozenWriteContext.Native.cpp" />
     <ClCompile Include="UI\CodeTextEdit.cpp" />
     <ClCompile Include="UI\CodeEditorFileSession.cpp" />
     <ClCompile Include="UI\EmbeddedRowDelegate.cpp" />
@@ -572,6 +574,7 @@
     <ClCompile Include="ProcessDock\ProcessDetailWindow.HvmWatch.cpp" />
     <ClCompile Include="UI\HvmEventDialog.cpp" />
     <ClCompile Include="UI\HvmCrPolicyDialog.cpp" />
+    <ClCompile Include="UI\MemoryWorkbench\WorkbenchFrozenWriteContext.cpp" />
     <ClCompile Include="UI\CommandExecutionPopup.cpp" />
     <ClCompile Include="UI\WindowChrome.cpp" />
     <ClCompile Include="UI\RescueDesktopSession.cpp" />
@@ -859,6 +862,7 @@
     <ClInclude Include="..\..\shared\evidence\memory_workbench\MemoryWriteOperation.h" />
     <ClInclude Include="UI\BudgetedPlainTextTransfer.h" />
     <ClInclude Include="UI\ModelTextSearchCursor.h" />
+    <ClInclude Include="UI\MemoryWorkbench\WorkbenchFrozenWriteContext.h" />
     <ClInclude Include="UI\TableRowFilterSupport.h" />
     <ClInclude Include="UI\TableRowFilterIdentityState.h" />
     <ClInclude Include="..\..\shared\evidence\SerialTransactionQueue.h" />
@@ -980,6 +984,7 @@
     <ClInclude Include="UI\AdaptivePageScroll.h" />
     <ClInclude Include="..\..\shared\evidence\HookPatchCompose.h" />
     <ClInclude Include="..\..\shared\evidence\MemoryAddressInput.h" />
+    <ClInclude Include="UI\MemoryWorkbench\WorkbenchWriteLedger.h" />
     <ClInclude Include="UI\HvmEptLeafProbe.h" />
     <ClInclude Include="UI\HvmWriteAccessGate.h" />
     <ClInclude Include="UI\HvmHookPlan.h" />
