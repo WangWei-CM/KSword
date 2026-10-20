@@ -577,6 +577,106 @@ namespace
         }
     }
 
+
+    void UnansweredInvalidationTests()
+    {
+        for (const bool approvalPhase : { false, true })
+        {
+            for (int changed = 0; changed < 3; ++changed)
+            {
+                Script script;
+                script.approval = approvalPhase;
+                Fixture f(script);
+                MemoryWriteOperation operation(f.Input(approvalPhase), f.store, [&f] { return f.Current(); });
+                const auto expected = approvalPhase ? MemoryWriteOperation::Step::NeedApproval
+                    : MemoryWriteOperation::Step::NeedUi;
+                Check(operation.Advance() == expected, "unanswered invalidation reaches expected prompt");
+                const auto serial = operation.RequestSerial();
+                const auto calls = f.store.calls;
+                const auto acceptedBefore = static_cast<std::size_t>(std::count_if(operation.Result().audit.begin(),
+                    operation.Result().audit.end(), [](const AuditRecord& a) { return a.event == AuditEvent::UiConfirmAccepted; }));
+                if (changed == 0) ++f.session.attachGeneration;
+                else if (changed == 1) f.revisions.BumpSource();
+                else f.revisions.BumpContent();
+                Check(operation.Advance() == MemoryWriteOperation::Step::Finished,
+                    "no-answer resume retires changed session/source/content");
+                Check(operation.Result().report.outcome == CommitOutcome::Stale
+                    && operation.Result().report.needsReread, "unanswered invalidation reports Stale");
+                Check(f.store.calls == calls, "unanswered invalidation repeats no read/write");
+                Check(operation.Result().report.bytesWritten == 0 && operation.Result().report.blocksWritten == 0,
+                    "unanswered invalidation has no accepted mutation");
+                Check(operation.CurrentState() == MemoryWriteOperation::State::Staged,
+                    "unanswered invalidation preserves pending state");
+                Check(operation.Result().audit.front().event == AuditEvent::CommitStarted
+                    && operation.Result().audit.back().event == AuditEvent::CommitFinished,
+                    "unanswered invalidation preserves canonical start/finish");
+                Check(std::none_of(operation.Result().audit.begin(), operation.Result().audit.end(),
+                    [](const AuditRecord& a) { return a.event == AuditEvent::UiConfirmDenied
+                        || a.event == AuditEvent::ApprovalAnswered; }),
+                    "no-answer resume invents no denial or explicit approval answer");
+                const auto acceptedAfter = static_cast<std::size_t>(std::count_if(operation.Result().audit.begin(),
+                    operation.Result().audit.end(), [](const AuditRecord& a) { return a.event == AuditEvent::UiConfirmAccepted; }));
+                Check(acceptedAfter == acceptedBefore, "unanswered invalidation invents no UI acceptance");
+                Check(!operation.AnswerUi(serial, true)
+                    && !operation.AnswerApproval(serial, ApprovalAnswer::RestOfBatch),
+                    "late answers cannot revive invalidated prompt");
+                const auto receipts = operation.Result().audit.size();
+                Check(operation.Advance() == MemoryWriteOperation::Step::Finished
+                    && operation.Result().audit.size() == receipts && f.store.calls == calls,
+                    "invalidated finish is idempotent");
+                Check(f.overlay.PendingByteCount() == 6, "invalidated unanswered job leaves pending bytes");
+            }
+        }
+        {
+            Script script;
+            script.approval = true;
+            Fixture f(script);
+            MemoryWriteOperation operation(f.Input(true), f.store, [&f] { return f.Current(); });
+            Check(operation.Advance() == MemoryWriteOperation::Step::NeedApproval, "first approval requested");
+            Check(operation.AnswerApproval(operation.RequestSerial(), ApprovalAnswer::ThisBlockOnly),
+                "first actual answer accepted");
+            Check(operation.Advance() == MemoryWriteOperation::Step::NeedApproval
+                && operation.PendingApproval().blockIndex == 1, "second approval remains unanswered");
+            const auto calls = f.store.calls;
+            f.revisions.BumpSource();
+            Check(operation.Advance() == MemoryWriteOperation::Step::Finished
+                && operation.Result().report.outcome == CommitOutcome::Stale,
+                "later unanswered approval retires stale batch");
+            Check(operation.Result().report.bytesWritten == 2 && operation.Result().report.blocksWritten == 1
+                && operation.Result().verifiedBlocks.size() == 1 && operation.CurrentState() == MemoryWriteOperation::State::Failed,
+                "later invalidation retains verified prior block and partial failure state");
+            Check(f.store.calls == calls, "later invalidation does not retry second block");
+            Check(std::count_if(operation.Result().audit.begin(), operation.Result().audit.end(),
+                [](const AuditRecord& a) { return a.event == AuditEvent::ApprovalAnswered; }) == 1,
+                "later invalidation preserves exactly the prior actual answer");
+        }
+        for (const bool approvalPhase : { false, true })
+        {
+            for (const bool ownerLoss : { false, true })
+            {
+                Script script;
+                script.approval = approvalPhase;
+                Fixture f(script);
+                MemoryWriteOperation operation(f.Input(approvalPhase), f.store, [&f] { return f.Current(); });
+                Check(operation.Advance() == (approvalPhase ? MemoryWriteOperation::Step::NeedApproval
+                    : MemoryWriteOperation::Step::NeedUi), "stop priority reaches unanswered prompt");
+                const auto calls = f.store.calls;
+                f.revisions.BumpContent();
+                if (ownerLoss) f.ownerAlive = false; else f.stopRequested = true;
+                Check(operation.Advance() == MemoryWriteOperation::Step::Finished
+                    && operation.Result().report.outcome == CommitOutcome::UserCancelled
+                    && operation.Result().interrupted, "stop/owner loss retains priority over stale epoch");
+                Check(operation.Result().report.failureText == (ownerLoss
+                    ? "write operation owner was lost at a safe boundary"
+                    : "write operation stopped at a safe boundary"), "original stop/owner-loss reason preserved");
+                Check(f.store.calls == calls, "stop/owner loss repeats no I/O");
+                Check(std::none_of(operation.Result().audit.begin(), operation.Result().audit.end(),
+                    [](const AuditRecord& a) { return a.event == AuditEvent::ApprovalAnswered
+                        || a.event == AuditEvent::UiConfirmDenied; }), "stop/owner loss invents no user answer");
+            }
+        }
+    }
+
     void HeldWorkerTest()
     {
         Fixture f;
@@ -648,6 +748,7 @@ int main()
         EquivalenceTests();
         ContinuationTests();
         BoundaryTests();
+        UnansweredInvalidationTests();
         HeldWorkerTest();
         std::cout << "PASS " << checks << " checks; ordered old/new audit and port transcripts\n";
         return 0;

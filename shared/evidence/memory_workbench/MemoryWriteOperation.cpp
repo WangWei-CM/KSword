@@ -367,7 +367,9 @@ namespace ksword::memwb
         }
         if (phase_ == Phase::AwaitUi || phase_ == Phase::AwaitApproval)
         {
-            if (!Boundary(false)) return Finish();
+            // A no-answer resume also retires stale prompts. It must not
+            // synthesize a user answer merely to release an invalidated job.
+            if (!Boundary()) return Finish();
             return phase_ == Phase::AwaitUi ? Step::NeedUi : Step::NeedApproval;
         }
         if (phase_ == Phase::AfterUi)
