@@ -55,6 +55,11 @@
 #include <QSplitter>
 #include <QStringList>
 #include <QStyledItemDelegate>
+#include <QStandardItemModel>
+#include <QSignalBlocker>
+#include <QScopedValueRollback>
+#include <QElapsedTimer>
+#include <QEvent>
 #include <QStyle>
 #include <QTabWidget>
 #include <QTableView>
@@ -1578,11 +1583,10 @@ namespace
             return;
         }
 
-        comboBox->setStyleSheet(callbackRuleComboStyle());
-        if (comboBox->view() != nullptr)
-        {
-            comboBox->view()->setStyleSheet(KswordTheme::ThemedComboBoxPopupViewStyle());
-        }
+        const QString style = callbackRuleComboStyle();
+        if (comboBox->styleSheet() != style) comboBox->setStyleSheet(style);
+        // The standard combo popup lifecycle supplies popup theme on first show.
+        // Do not construct every hidden rule popup during import/group updates.
     }
 
     // resolveFileMonitorProcessNameText：
@@ -1731,6 +1735,10 @@ public:
         initializeUi();
         initializeConnections();
 
+        m_ruleProjectionTimer = new QTimer(this);
+        m_ruleProjectionTimer->setInterval(0);
+        connect(m_ruleProjectionTimer, &QTimer::timeout, this, [this]() { projectPendingRules(); });
+        m_ruleTabWidget->installEventFilter(this);
         addDefaultGroupIfNeeded();
         refreshRuleGroupComboOptions();
         reloadRuntimeState();
@@ -2150,10 +2158,7 @@ private:
 
         connect(m_ruleTabWidget, &QTabWidget::currentChanged, m_hostPage, [this](int) {
             // 当前所有回调类型均已经接入规则表；切换 Tab 时保持工具按钮可用。
-            m_addRuleButton->setEnabled(currentRuleTable() != nullptr);
-            m_removeRuleButton->setEnabled(currentRuleTable() != nullptr);
-            m_moveRuleUpButton->setEnabled(currentRuleTable() != nullptr);
-            m_moveRuleDownButton->setEnabled(currentRuleTable() != nullptr);
+            scheduleRuleProjection();
         });
 
         connect(m_startFileMonitorFsctlButton, &QPushButton::clicked, m_hostPage, [this]() {
@@ -4090,6 +4095,7 @@ private:
         QTableWidget* ruleTable,
         const quint32 callbackType)
     {
+        if (!m_pendingRuleRows.value(callbackType).isEmpty()) return;
         if (ruleTable == nullptr)
         {
             return;
@@ -4273,11 +4279,13 @@ private:
             QIcon(QStringLiteral(":/Icon/codeeditor_paste.svg")),
             kernelText("kernel.callback.intercept.context_menu.paste_rule", QStringLiteral("粘贴为新规则")));
 
-        removeRuleAction->setEnabled(hasCurrentRule);
-        moveUpRuleAction->setEnabled(hasCurrentRule && logicalRuleIndex > 0);
-        moveDownRuleAction->setEnabled(hasCurrentRule && logicalRuleIndex < (ruleCount - 1));
+        const bool projectionComplete = m_pendingRuleRows.value(callbackType).isEmpty();
+        addRuleAction->setEnabled(projectionComplete);
+        removeRuleAction->setEnabled(projectionComplete && hasCurrentRule);
+        moveUpRuleAction->setEnabled(projectionComplete && hasCurrentRule && logicalRuleIndex > 0);
+        moveDownRuleAction->setEnabled(projectionComplete && hasCurrentRule && logicalRuleIndex < (ruleCount - 1));
         copyRuleAction->setEnabled(hasCurrentRule);
-        pasteRuleAction->setEnabled(QApplication::clipboard() != nullptr &&
+        pasteRuleAction->setEnabled(projectionComplete && QApplication::clipboard() != nullptr &&
             !QApplication::clipboard()->text().trimmed().isEmpty());
 
         QAction* selectedAction = contextMenu.exec(ruleTable->viewport()->mapToGlobal(localPos));
@@ -4295,6 +4303,7 @@ private:
             }
         }
 
+        if (selectedAction != copyRuleAction && !m_pendingRuleRows.value(callbackType).isEmpty()) return;
         if (selectedAction == addRuleAction)
         {
             addRuleToCurrentTab();
@@ -4434,6 +4443,8 @@ private:
                 }
             }
         }
+        for (auto iterator = m_pendingRuleRows.cbegin(); iterator != m_pendingRuleRows.cend(); ++iterator)
+            for (const auto& rule : iterator.value()) maxRuleId = std::max(maxRuleId, rule.ruleId);
         return maxRuleId + 1U;
     }
 
@@ -4909,6 +4920,7 @@ private:
     void addRuleToCurrentTab()
     {
         const quint32 callbackType = currentRuleCallbackType();
+        if (!m_pendingRuleRows.value(callbackType).isEmpty()) return;
         QTableWidget* ruleTable = currentRuleTable();
         if (ruleTable == nullptr)
         {
@@ -4949,6 +4961,7 @@ private:
 
     void removeCurrentRule()
     {
+        if (!m_pendingRuleRows.value(currentRuleCallbackType()).isEmpty()) return;
         QTableWidget* ruleTable = currentRuleTable();
         const quint32 callbackType = currentRuleCallbackType();
         if (ruleTable == nullptr)
@@ -4972,11 +4985,8 @@ private:
         ruleList.removeAt(currentRuleIndex);
 
         m_ignoreUiSignal = true;
-        ruleTable->setRowCount(0);
-        for (const CallbackRuleModel& ruleModel : ruleList)
-        {
-            appendRuleRow(ruleTable, callbackType, ruleModel);
-        }
+        ruleTable->removeRow(currentRuleIndex * 2 + 1);
+        ruleTable->removeRow(currentRuleIndex * 2);
         m_ignoreUiSignal = false;
 
         if (ruleCountOfTable(ruleTable) > 0)
@@ -4990,6 +5000,7 @@ private:
 
     void moveCurrentRule(const int direction)
     {
+        if (!m_pendingRuleRows.value(currentRuleCallbackType()).isEmpty()) return;
         QTableWidget* ruleTable = currentRuleTable();
         const quint32 callbackType = currentRuleCallbackType();
         if (ruleTable == nullptr)
@@ -5024,11 +5035,14 @@ private:
         }
 
         m_ignoreUiSignal = true;
-        ruleTable->setRowCount(0);
-        for (const CallbackRuleModel& ruleModel : ruleList)
-        {
-            appendRuleRow(ruleTable, callbackType, ruleModel);
-        }
+        const int first = std::min(currentRuleIndex, targetRuleIndex);
+        // Recreate only the two exchanged rule pairs; preserve every other editor.
+        for (int removed = 0; removed < 4; ++removed) ruleTable->removeRow(first * 2);
+        appendRuleRow(ruleTable, callbackType, ruleList[first], first);
+        appendRuleRow(ruleTable, callbackType, ruleList[first + 1], first + 1);
+        for (int index = 0; index < ruleList.size(); ++index)
+            if (auto* item = ruleTable->item(index * 2, static_cast<int>(RuleColumn::Priority)))
+                item->setText(QString::number(ruleList[index].priority));
         m_ignoreUiSignal = false;
 
         ruleTable->setCurrentCell(targetRuleIndex * 2, static_cast<int>(RuleColumn::RuleName));
@@ -5038,17 +5052,19 @@ private:
     void appendRuleRow(
         QTableWidget* ruleTable,
         const quint32 callbackType,
-        const CallbackRuleModel& ruleModel)
+        const CallbackRuleModel& ruleModel,
+        const int insertLogicalIndex = -1)
     {
         if (ruleTable == nullptr)
         {
             return;
         }
 
-        const int headerRow = ruleTable->rowCount();
+        const int headerRow = insertLogicalIndex < 0 ? ruleTable->rowCount() : insertLogicalIndex * 2;
         const int detailRow = headerRow + 1;
         ruleTable->insertRow(headerRow);
         ruleTable->insertRow(detailRow);
+        const QPersistentModelIndex ruleAnchor(ruleTable->model()->index(headerRow, 0));
 
         // 每条规则使用两排展示：左侧启用/RuleID 跨两排，右侧第一排放规则属性。
         // 第二排从 GroupID 开始放匹配详情，避免匹配条件脱离表格布局。
@@ -5093,7 +5109,9 @@ private:
         }
         const int matchModeIndex = matchModeCombo->findData(ruleModel.matchMode);
         matchModeCombo->setCurrentIndex(matchModeIndex >= 0 ? matchModeIndex : 0);
-        connect(matchModeCombo, &QComboBox::currentIndexChanged, m_hostPage, [this, ruleTable, headerRow, callbackType](int) {
+        connect(matchModeCombo, &QComboBox::currentIndexChanged, m_hostPage, [this, ruleTable, ruleAnchor, callbackType](int) {
+            if (!ruleAnchor.isValid()) return;
+            const int headerRow = ruleAnchor.row();
             if (m_ignoreUiSignal)
             {
                 return;
@@ -5139,7 +5157,9 @@ private:
         }
         const int actionIndex = actionCombo->findData(ruleModel.action);
         actionCombo->setCurrentIndex(actionIndex >= 0 ? actionIndex : 0);
-        connect(actionCombo, &QComboBox::currentIndexChanged, m_hostPage, [this, ruleTable, headerRow](int) {
+        connect(actionCombo, &QComboBox::currentIndexChanged, m_hostPage, [this, ruleTable, ruleAnchor](int) {
+            if (!ruleAnchor.isValid()) return;
+            const int headerRow = ruleAnchor.row();
             if (m_ignoreUiSignal)
             {
                 return;
@@ -5223,66 +5243,107 @@ private:
         refreshRuleGroupComboForCell(groupCombo, ruleModel.groupId);
     }
 
-    void refreshRuleGroupComboForCell(QComboBox* groupCombo, const quint32 selectedGroupId)
+    bool eventFilter(QObject* watched, QEvent* event) override
     {
-        if (groupCombo == nullptr)
+        if (watched == m_ruleTabWidget && event != nullptr)
         {
+            if (event->type() == QEvent::Show) scheduleRuleProjection();
+            else if (event->type() == QEvent::Hide && m_ruleProjectionTimer != nullptr) m_ruleProjectionTimer->stop();
+        }
+        return QObject::eventFilter(watched, event);
+    }
+
+    void scheduleRuleProjection()
+    {
+        const bool pending = !m_pendingRuleRows.value(currentRuleCallbackType()).isEmpty();
+        const bool editable = currentRuleTable() != nullptr && !pending;
+        m_addRuleButton->setEnabled(editable);
+        m_removeRuleButton->setEnabled(editable);
+        m_moveRuleUpButton->setEnabled(editable);
+        m_moveRuleDownButton->setEnabled(editable);
+        if (m_ruleProjectionTimer == nullptr) return;
+        if (pending && m_ruleTabWidget->isVisible()) m_ruleProjectionTimer->start();
+        else m_ruleProjectionTimer->stop();
+    }
+
+    void projectPendingRules()
+    {
+        if (m_ruleTabWidget == nullptr || !m_ruleTabWidget->isVisible()) { scheduleRuleProjection(); return; }
+        const quint32 type = currentRuleCallbackType();
+        QTableWidget* table = currentRuleTable();
+        if (table == nullptr) { scheduleRuleProjection(); return; }
+        auto pending = m_pendingRuleRows.find(type);
+        if (pending == m_pendingRuleRows.end()) { scheduleRuleProjection(); return; }
+        if (ks::ui::IsItemViewUiCommitBlockedByContextMenu({table}))
+        {
+            m_ruleProjectionTimer->stop();
+            const QPointer<CallbackInterceptController> guard(this);
+            ks::ui::DeferItemViewUiCommitIfContextMenuOpen(this, QStringLiteral("callback-rule-import-projection"),
+                {table}, [guard]() { if (guard) guard->scheduleRuleProjection(); });
             return;
         }
-
-        applyRuleComboStyle(groupCombo);
-        groupCombo->blockSignals(true);
-        groupCombo->clear();
-        for (int rowIndex = 0; rowIndex < m_groupTable->rowCount(); ++rowIndex)
+        const QScopedValueRollback<bool> silence(m_ignoreUiSignal, true);
+        QElapsedTimer budget; budget.start();
+        int count = 0;
+        while (!pending->isEmpty() && count < 4 && (count == 0 || budget.elapsed() < 3))
         {
-            QTableWidgetItem* groupIdItem = m_groupTable->item(rowIndex, static_cast<int>(GroupColumn::Id));
-            QTableWidgetItem* groupNameItem = m_groupTable->item(rowIndex, static_cast<int>(GroupColumn::Name));
-            if (groupIdItem == nullptr || groupNameItem == nullptr)
-            {
-                continue;
-            }
-
-            quint32 groupId = 0U;
-            if (!parseUnsignedText(groupIdItem->text(), &groupId))
-            {
-                continue;
-            }
-            groupCombo->addItem(
-                QStringLiteral("[%1] %2").arg(groupId).arg(groupNameItem->text().trimmed()),
-                groupId);
+            const auto rule = pending->takeFirst();
+            appendRuleRow(table, type, rule);
+            ++count;
         }
+        if (pending->isEmpty()) { m_pendingRuleRows.erase(pending); updateStatusLabel(); }
+        else m_statusLabel->setText(kernelText("kernel.callback.intercept.rules.loading", QStringLiteral("正在加载规则编辑器，剩余 %1 条")).arg(pending->size()));
+        scheduleRuleProjection();
+    }
 
+    void refreshRuleGroupComboForCell(QComboBox* groupCombo, const quint32 selectedGroupId)
+    {
+        if (groupCombo == nullptr) return;
+        if (m_groupOptionsModel == nullptr) refreshRuleGroupComboOptions();
+        const QSignalBlocker blocker(groupCombo);
+        if (groupCombo->model() != m_groupOptionsModel) groupCombo->setModel(m_groupOptionsModel);
         int targetIndex = groupCombo->findData(selectedGroupId);
-        if (targetIndex < 0)
-        {
-            targetIndex = 0;
-        }
-        groupCombo->setCurrentIndex(targetIndex);
-        groupCombo->blockSignals(false);
+        groupCombo->setCurrentIndex(targetIndex < 0 ? 0 : targetIndex);
     }
 
     void refreshRuleGroupComboOptions()
     {
-        for (auto iterator = m_ruleTableMap.begin(); iterator != m_ruleTableMap.end(); ++iterator)
+        QVector<QPair<quint32, QString>> options;
+        for (int row = 0; row < m_groupTable->rowCount(); ++row)
         {
-            QTableWidget* ruleTable = iterator.value();
-            if (ruleTable == nullptr)
-            {
-                continue;
-            }
-
-            for (int rowIndex = 0; rowIndex < ruleTable->rowCount(); rowIndex += 2)
-            {
-                auto* groupCombo = qobject_cast<QComboBox*>(
-                    ruleTable->cellWidget(rowIndex, static_cast<int>(RuleColumn::GroupId)));
-                quint32 selectedGroupId = firstGroupId();
-                if (groupCombo != nullptr)
-                {
-                    selectedGroupId = static_cast<quint32>(groupCombo->currentData().toUInt());
-                }
-                refreshRuleGroupComboForCell(groupCombo, selectedGroupId);
-            }
+            const auto* id = m_groupTable->item(row, static_cast<int>(GroupColumn::Id));
+            const auto* name = m_groupTable->item(row, static_cast<int>(GroupColumn::Name));
+            quint32 value = 0U;
+            if (id != nullptr && name != nullptr && parseUnsignedText(id->text(), &value))
+                options.push_back({value, QStringLiteral("[%1] %2").arg(value).arg(name->text().trimmed())});
         }
+        if (m_groupOptionsModel != nullptr && options == m_groupOptions) return;
+        struct Selection { QPointer<QComboBox> combo; quint32 group; bool blocked; };
+        QVector<Selection> selections;
+        for (auto table = m_ruleTableMap.cbegin(); table != m_ruleTableMap.cend(); ++table)
+            if (table.value() != nullptr)
+                for (int row = 0; row < table.value()->rowCount(); row += 2)
+                    if (auto* combo = qobject_cast<QComboBox*>(table.value()->cellWidget(row, static_cast<int>(RuleColumn::GroupId))))
+                        selections.push_back({combo, static_cast<quint32>(combo->currentData().toUInt()), combo->blockSignals(true)});
+        if (m_groupOptionsModel == nullptr) m_groupOptionsModel = new QStandardItemModel(this);
+        m_groupOptionsModel->clear();
+        for (const auto& option : options)
+        {
+            auto* item = new QStandardItem(option.second);
+            item->setData(option.first, Qt::UserRole);
+            m_groupOptionsModel->appendRow(item);
+        }
+        m_groupOptions = std::move(options);
+        for (auto pending = m_pendingRuleRows.begin(); pending != m_pendingRuleRows.end(); ++pending)
+            for (auto& rule : pending.value())
+                if (std::none_of(m_groupOptions.cbegin(), m_groupOptions.cend(), [&rule](const auto& option) { return option.first == rule.groupId; }))
+                    rule.groupId = m_groupOptions.isEmpty() ? 0U : m_groupOptions.front().first;
+        for (const auto& selection : selections)
+            if (selection.combo)
+            {
+                refreshRuleGroupComboForCell(selection.combo, selection.group);
+                selection.combo->blockSignals(selection.blocked);
+            }
     }
 
     quint32 currentRuleCallbackType() const
@@ -5497,6 +5558,7 @@ private:
             ruleListOut->push_back(ruleModel);
         }
 
+        ruleListOut->append(m_pendingRuleRows.value(callbackType));
         return true;
     }
 
@@ -6003,6 +6065,8 @@ private:
     void populateUiFromConfig(const CallbackConfigDocument& configDocument)
     {
         m_ignoreUiSignal = true;
+        m_pendingRuleRows.clear();
+        if (m_ruleProjectionTimer != nullptr) m_ruleProjectionTimer->stop();
 
         if (m_globalEnabledCheck != nullptr)
         {
@@ -6023,6 +6087,7 @@ private:
             appendGroupRow(groupModel);
         }
         addDefaultGroupIfNeeded();
+        refreshRuleGroupComboOptions();
 
         for (auto iterator = m_ruleTableMap.begin(); iterator != m_ruleTableMap.end(); ++iterator)
         {
@@ -6052,11 +6117,12 @@ private:
             {
                 continue;
             }
-            appendRuleRow(ruleTable, ruleModel.callbackType, ruleModel);
+            m_pendingRuleRows[ruleModel.callbackType].push_back(ruleModel);
         }
 
         m_ignoreUiSignal = false;
         refreshRuleGroupComboOptions();
+        scheduleRuleProjection();
     }
 
 private:
@@ -6075,6 +6141,10 @@ private:
     QPushButton* m_moveGroupUpButton = nullptr;
     QPushButton* m_moveGroupDownButton = nullptr;
     QTableWidget* m_groupTable = nullptr;
+    QHash<quint32, QList<CallbackRuleModel>> m_pendingRuleRows;
+    QTimer* m_ruleProjectionTimer = nullptr;
+    QStandardItemModel* m_groupOptionsModel = nullptr;
+    QVector<QPair<quint32, QString>> m_groupOptions;
 
     QPushButton* m_addRuleButton = nullptr;
     QPushButton* m_removeRuleButton = nullptr;
