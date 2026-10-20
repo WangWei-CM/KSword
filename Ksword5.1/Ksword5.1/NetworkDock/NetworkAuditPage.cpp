@@ -821,6 +821,13 @@ void NetworkAuditPage::focusProcessIds(const QSet<quint32>& processIds)
 {
     m_processFilterSet = processIds;
     activateCrossView();
+    updateProcessFilterLabel();
+    updateCrossViewActionState();
+    refreshAllSnapshotsAsync(true);
+}
+
+void NetworkAuditPage::updateProcessFilterLabel()
+{
     if (m_crossFilterLabel != nullptr)
     {
         QStringList processIdTextList;
@@ -841,8 +848,6 @@ void NetworkAuditPage::focusProcessIds(const QSet<quint32>& processIds)
                 : QStringLiteral("PID：%1")
                     .arg(processIdTextList.join(',')));
     }
-    updateCrossViewActionState();
-    refreshAllSnapshotsAsync(true);
 }
 
 void NetworkAuditPage::activateCrossView()
@@ -912,6 +917,8 @@ void NetworkAuditPage::initializeUi()
 
     // TCP/UDP cross-view。
     m_crossViewPage = new QWidget(this);
+    m_auditPageFactories.insert(m_crossViewPage, [this]()
+    {
     QVBoxLayout* crossLayout = new QVBoxLayout(m_crossViewPage);
     crossLayout->setContentsMargins(6, 10, 6, 6);
     crossLayout->setSpacing(8);
@@ -1051,10 +1058,16 @@ void NetworkAuditPage::initializeUi()
     m_crossViewSplitter->setStretchFactor(0, 3);
     m_crossViewSplitter->setStretchFactor(1, 2);
     crossLayout->addWidget(m_crossViewSplitter, 1);
+    initializeCrossViewConnections();
+    updateProcessFilterLabel();
+    for (auto* table : {m_tcpTable, m_udpTable, m_crossSummaryTable}) m_dirtyAuditTables.insert(table);
+    });
     network_navigation_detail::AddTab(m_sectionTabWidget, m_crossViewPage, QStringLiteral("audit.cross-view"));
 
     // AFD。
     m_afdPage = new QWidget(this);
+    m_auditPageFactories.insert(m_afdPage, [this]()
+    {
     QVBoxLayout* afdLayout = new QVBoxLayout(m_afdPage);
     afdLayout->setContentsMargins(4, 4, 4, 4);
     afdLayout->setSpacing(6);
@@ -1080,6 +1093,8 @@ void NetworkAuditPage::initializeUi()
     m_afdTable->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
     installCopyMenu(m_afdTable, 0);
     afdLayout->addWidget(m_afdTable, 1);
+    m_dirtyAuditTables.insert(m_afdTable);
+    });
     network_navigation_detail::AddTab(m_sectionTabWidget, m_afdPage, QStringLiteral("audit.afd"));
 
     // WFP。
@@ -1092,33 +1107,14 @@ void NetworkAuditPage::initializeUi()
     m_wfpTabWidget->setTabPosition(QTabWidget::North);
     wfpLayout->addWidget(m_wfpTabWidget, 1);
 
-    auto buildWfpTable = [](QWidget* parent, const QStringList& headers) -> QTableWidget*
-    {
-        QTableWidget* table = new ks::ui::VisibleTableWidget(parent);
-        table->setColumnCount(headers.size());
-        table->setHorizontalHeaderLabels(headers);
-        table->setEditTriggers(QAbstractItemView::NoEditTriggers);
-        table->setSelectionBehavior(QAbstractItemView::SelectRows);
-        table->setSelectionMode(QAbstractItemView::SingleSelection);
-        table->verticalHeader()->setVisible(false);
-        table->horizontalHeader()->setStretchLastSection(true);
-        table->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
-        installCopyMenu(table);
-        return table;
-    };
-    m_wfpProviderTable = buildWfpTable(m_wfpPage, { QStringLiteral("名称"), QStringLiteral("描述"), QStringLiteral("GUID"), QStringLiteral("Flags"), QStringLiteral("Service"), QStringLiteral("数据大小") });
-    m_wfpSubLayerTable = buildWfpTable(m_wfpPage, { QStringLiteral("名称"), QStringLiteral("描述"), QStringLiteral("GUID"), QStringLiteral("Flags"), QStringLiteral("Provider"), QStringLiteral("Weight") });
-    m_wfpCalloutTable = buildWfpTable(m_wfpPage, { QStringLiteral("名称"), QStringLiteral("描述"), QStringLiteral("GUID"), QStringLiteral("Flags"), QStringLiteral("Provider"), QStringLiteral("Layer"), QStringLiteral("CalloutId") });
-    m_wfpFilterTable = buildWfpTable(m_wfpPage, { QStringLiteral("名称"), QStringLiteral("描述"), QStringLiteral("GUID"), QStringLiteral("Flags"), QStringLiteral("Provider"), QStringLiteral("Layer"), QStringLiteral("Sublayer"), QStringLiteral("Weight"), QStringLiteral("Action"), QStringLiteral("Conditions"), QStringLiteral("FilterId") });
-    // Provider/Sublayer/Callout 为配置目录；Filter 才是需要现场对比的主策略清单。
-    ks::ui::SetTableActionBarMode(m_wfpProviderTable, ks::ui::TableActionBarMode::Compact);
-    ks::ui::SetTableActionBarMode(m_wfpSubLayerTable, ks::ui::TableActionBarMode::Compact);
-    ks::ui::SetTableActionBarMode(m_wfpCalloutTable, ks::ui::TableActionBarMode::Compact);
-    ks::ui::SetTableActionBarMode(m_wfpFilterTable, ks::ui::TableActionBarMode::Full);
-    network_navigation_detail::AddTab(m_wfpTabWidget, m_wfpProviderTable, QStringLiteral("audit.wfp.provider"));
-    network_navigation_detail::AddTab(m_wfpTabWidget, m_wfpSubLayerTable, QStringLiteral("audit.wfp.sublayer"));
-    network_navigation_detail::AddTab(m_wfpTabWidget, m_wfpCalloutTable, QStringLiteral("audit.wfp.callout"));
-    network_navigation_detail::AddTab(m_wfpTabWidget, m_wfpFilterTable, QStringLiteral("audit.wfp.filter"));
+    addLazyAuditTableTab(m_wfpTabWidget, &NetworkAuditPage::m_wfpProviderTable,
+        { QStringLiteral("名称"), QStringLiteral("描述"), QStringLiteral("GUID"), QStringLiteral("Flags"), QStringLiteral("Service"), QStringLiteral("数据大小") }, QStringLiteral("audit.wfp.provider"), false);
+    addLazyAuditTableTab(m_wfpTabWidget, &NetworkAuditPage::m_wfpSubLayerTable,
+        { QStringLiteral("名称"), QStringLiteral("描述"), QStringLiteral("GUID"), QStringLiteral("Flags"), QStringLiteral("Provider"), QStringLiteral("Weight") }, QStringLiteral("audit.wfp.sublayer"), false);
+    addLazyAuditTableTab(m_wfpTabWidget, &NetworkAuditPage::m_wfpCalloutTable,
+        { QStringLiteral("名称"), QStringLiteral("描述"), QStringLiteral("GUID"), QStringLiteral("Flags"), QStringLiteral("Provider"), QStringLiteral("Layer"), QStringLiteral("CalloutId") }, QStringLiteral("audit.wfp.callout"), false);
+    addLazyAuditTableTab(m_wfpTabWidget, &NetworkAuditPage::m_wfpFilterTable,
+        { QStringLiteral("名称"), QStringLiteral("描述"), QStringLiteral("GUID"), QStringLiteral("Flags"), QStringLiteral("Provider"), QStringLiteral("Layer"), QStringLiteral("Sublayer"), QStringLiteral("Weight"), QStringLiteral("Action"), QStringLiteral("Conditions"), QStringLiteral("FilterId") }, QStringLiteral("audit.wfp.filter"), true);
     network_navigation_detail::AddTab(m_sectionTabWidget, m_wfpPage, QStringLiteral("audit.wfp"));
 
     // NDIS。
@@ -1130,23 +1126,20 @@ void NetworkAuditPage::initializeUi()
     ks::ui::StylePageTabsContentFrame(m_ndisTabWidget);
     m_ndisTabWidget->setTabPosition(QTabWidget::North);
     ndisLayout->addWidget(m_ndisTabWidget, 1);
-    m_ndisAdapterTable = buildWfpTable(m_ndisPage, { QStringLiteral("名称"), QStringLiteral("描述"), QStringLiteral("IfIndex"), QStringLiteral("状态"), QStringLiteral("MAC"), QStringLiteral("速率"), QStringLiteral("连接") });
-    m_ndisBindingTable = buildWfpTable(m_ndisPage, { QStringLiteral("网卡"), QStringLiteral("显示名"), QStringLiteral("ComponentId"), QStringLiteral("启用"), QStringLiteral("InstanceId") });
-    m_ndisProtocolTable = buildWfpTable(m_ndisPage, { QStringLiteral("别名"), QStringLiteral("IfIndex"), QStringLiteral("地址族"), QStringLiteral("连接"), QStringLiteral("Metric"), QStringLiteral("MTU") });
-    m_ndisUnknownTable = buildWfpTable(m_ndisPage, { QStringLiteral("类型"), QStringLiteral("组件"), QStringLiteral("所属模块"), QStringLiteral("对象地址"), QStringLiteral("详情") });
-    // 网卡与绑定页按配置目录处理，未知证据页保留完整快照以便记录边界。
-    ks::ui::SetTableActionBarMode(m_ndisAdapterTable, ks::ui::TableActionBarMode::Compact);
-    ks::ui::SetTableActionBarMode(m_ndisBindingTable, ks::ui::TableActionBarMode::Compact);
-    ks::ui::SetTableActionBarMode(m_ndisProtocolTable, ks::ui::TableActionBarMode::Compact);
-    ks::ui::SetTableActionBarMode(m_ndisUnknownTable, ks::ui::TableActionBarMode::Full);
-    network_navigation_detail::AddTab(m_ndisTabWidget, m_ndisAdapterTable, QStringLiteral("audit.ndis.miniport"));
-    network_navigation_detail::AddTab(m_ndisTabWidget, m_ndisBindingTable, QStringLiteral("audit.ndis.binding"));
-    network_navigation_detail::AddTab(m_ndisTabWidget, m_ndisProtocolTable, QStringLiteral("audit.ndis.protocol"));
-    network_navigation_detail::AddTab(m_ndisTabWidget, m_ndisUnknownTable, QStringLiteral("audit.ndis.unknown"));
+    addLazyAuditTableTab(m_ndisTabWidget, &NetworkAuditPage::m_ndisAdapterTable,
+        { QStringLiteral("名称"), QStringLiteral("描述"), QStringLiteral("IfIndex"), QStringLiteral("状态"), QStringLiteral("MAC"), QStringLiteral("速率"), QStringLiteral("连接") }, QStringLiteral("audit.ndis.miniport"), false);
+    addLazyAuditTableTab(m_ndisTabWidget, &NetworkAuditPage::m_ndisBindingTable,
+        { QStringLiteral("网卡"), QStringLiteral("显示名"), QStringLiteral("ComponentId"), QStringLiteral("启用"), QStringLiteral("InstanceId") }, QStringLiteral("audit.ndis.binding"), false);
+    addLazyAuditTableTab(m_ndisTabWidget, &NetworkAuditPage::m_ndisProtocolTable,
+        { QStringLiteral("别名"), QStringLiteral("IfIndex"), QStringLiteral("地址族"), QStringLiteral("连接"), QStringLiteral("Metric"), QStringLiteral("MTU") }, QStringLiteral("audit.ndis.protocol"), false);
+    addLazyAuditTableTab(m_ndisTabWidget, &NetworkAuditPage::m_ndisUnknownTable,
+        { QStringLiteral("类型"), QStringLiteral("组件"), QStringLiteral("所属模块"), QStringLiteral("对象地址"), QStringLiteral("详情") }, QStringLiteral("audit.ndis.unknown"), true);
     network_navigation_detail::AddTab(m_sectionTabWidget, m_ndisPage, QStringLiteral("audit.ndis"));
 
     // NSI。
     m_nsiPage = new QWidget(this);
+    m_auditPageFactories.insert(m_nsiPage, [this]()
+    {
     QVBoxLayout* nsiLayout = new QVBoxLayout(m_nsiPage);
     nsiLayout->setContentsMargins(4, 4, 4, 4);
     nsiLayout->setSpacing(6);
@@ -1169,11 +1162,66 @@ void NetworkAuditPage::initializeUi()
     m_nsiSummaryTable->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
     installCopyMenu(m_nsiSummaryTable);
     nsiLayout->addWidget(m_nsiSummaryTable, 1);
+    m_dirtyAuditTables.insert(m_nsiSummaryTable);
+    });
     network_navigation_detail::AddTab(m_sectionTabWidget, m_nsiPage, QStringLiteral("audit.nsi"));
+
     // 证据模型和专业分割器保留，只统一各列表页的阅读基线。
     for (QWidget* page : {m_crossViewPage, m_afdPage, m_wfpPage, m_ndisPage, m_nsiPage})
         ks::ui::StyleWorkspacePage(page);
 
+}
+
+void NetworkAuditPage::addLazyAuditTableTab(QTabWidget* tabs,
+    QTableWidget* NetworkAuditPage::* member, const QStringList& headers,
+    const QString& id, bool fullToolbar)
+{
+    QWidget* const page = new QWidget(tabs);
+    auto* const layout = new QVBoxLayout(page);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(0);
+    m_auditPageFactories.insert(page, [this, page, layout, member, headers, fullToolbar]()
+    {
+        auto* const table = new ks::ui::VisibleTableWidget(page);
+        this->*member = table;
+        table->setColumnCount(headers.size());
+        table->setHorizontalHeaderLabels(headers);
+        table->setEditTriggers(QAbstractItemView::NoEditTriggers);
+        table->setSelectionBehavior(QAbstractItemView::SelectRows);
+        table->setSelectionMode(QAbstractItemView::SingleSelection);
+        table->verticalHeader()->setVisible(false);
+        table->horizontalHeader()->setStretchLastSection(true);
+        table->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
+        installCopyMenu(table);
+        ks::ui::SetTableActionBarMode(table, fullToolbar
+            ? ks::ui::TableActionBarMode::Full : ks::ui::TableActionBarMode::Compact);
+        layout->addWidget(table);
+        m_dirtyAuditTables.insert(table);
+    });
+    network_navigation_detail::AddTab(tabs, page, id);
+}
+
+bool NetworkAuditPage::ensureCurrentAuditPage()
+{
+    const QPointer<NetworkAuditPage> guard(this);
+    while (isVisible() && m_sectionTabWidget != nullptr)
+    {
+        QWidget* page = m_sectionTabWidget->currentWidget();
+        if (page == m_wfpPage && m_wfpTabWidget != nullptr) page = m_wfpTabWidget->currentWidget();
+        else if (page == m_ndisPage && m_ndisTabWidget != nullptr) page = m_ndisTabWidget->currentWidget();
+        auto factory = m_auditPageFactories.take(page);
+        if (!factory) return true;
+        m_constructingAuditPage = true;
+        {
+            ks::ui::ScopedWidgetThemePreparation prepare(page);
+            factory();
+        }
+        if (guard.isNull()) return false;
+        m_constructingAuditPage = false;
+        // Theme preparation can change the active branch. Revalidate its identity
+        // before the first data projection; never build an unselected sibling.
+    }
+    return !guard.isNull();
 }
 
 void NetworkAuditPage::initializeConnections()
@@ -1183,14 +1231,6 @@ void NetworkAuditPage::initializeConnections()
         refreshAllSnapshotsAsync(true);
     });
 
-    connect(m_crossAutoRefreshButton, &QPushButton::toggled, this, [this](const bool enabled)
-    {
-        if (m_crossAutoRefreshTimer == nullptr)
-        {
-            return;
-        }
-        enabled ? m_crossAutoRefreshTimer->start() : m_crossAutoRefreshTimer->stop();
-    });
     connect(m_crossAutoRefreshTimer, &QTimer::timeout, this, [this]()
     {
         if (isVisible()
@@ -1200,11 +1240,6 @@ void NetworkAuditPage::initializeConnections()
             refreshCrossViewAsync();
         }
     });
-    if (m_crossAutoRefreshButton != nullptr && m_crossAutoRefreshButton->isChecked())
-    {
-        m_crossAutoRefreshTimer->start();
-    }
-
     // 采集与投影分离：切页只消费当前分支，尚未查看的表继续保留规范快照。
     for (QTabWidget* tabs : { m_sectionTabWidget, m_wfpTabWidget, m_ndisTabWidget })
     {
@@ -1212,6 +1247,24 @@ void NetworkAuditPage::initializeConnections()
         {
             presentVisibleSnapshot();
         });
+    }
+
+
+}
+
+void NetworkAuditPage::initializeCrossViewConnections()
+{
+    connect(m_crossAutoRefreshButton, &QPushButton::toggled, this, [this](const bool enabled)
+    {
+        if (m_crossAutoRefreshTimer == nullptr)
+        {
+            return;
+        }
+        enabled ? m_crossAutoRefreshTimer->start() : m_crossAutoRefreshTimer->stop();
+    });
+    if (m_crossAutoRefreshButton != nullptr && m_crossAutoRefreshButton->isChecked())
+    {
+        m_crossAutoRefreshTimer->start();
     }
 
     connect(m_crossSearchEdit, &QLineEdit::textChanged, this, [this](const QString&)
@@ -2199,10 +2252,14 @@ void NetworkAuditPage::presentVisibleSnapshot()
         m_projectionRequestedWhileBusy = true;
         return;
     }
-    if (!isVisible() || m_latestAuditSnapshot == nullptr || m_sectionTabWidget == nullptr)
+    if (m_constructingAuditPage)
     {
+        m_projectionRequestedWhileBusy = true;
         return;
     }
+    if (!isVisible() || m_sectionTabWidget == nullptr) return;
+    if (!ensureCurrentAuditPage()) return;
+    if (!isVisible() || m_sectionTabWidget == nullptr || m_latestAuditSnapshot == nullptr) return;
 
     QTableWidget* table = nullptr;
     QWidget* const section = m_sectionTabWidget->currentWidget();

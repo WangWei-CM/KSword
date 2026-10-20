@@ -288,6 +288,11 @@ private:
     // - 输入：无；
     // - 返回：无。
     void initializeUi();
+    void initializeCrossViewConnections();
+    void updateProcessFilterLabel();
+    bool ensureCurrentAuditPage();
+    void addLazyAuditTableTab(QTabWidget* tabs, QTableWidget* NetworkAuditPage::* member,
+        const QStringList& headers, const QString& id, bool fullToolbar);
 
     // initializeConnections 作用：
     // - 连接刷新按钮和表格交互；
@@ -481,6 +486,8 @@ private:
     QTableWidget* m_nsiSummaryTable = nullptr;
 
     std::shared_ptr<AuditSnapshot> m_latestAuditSnapshot; // 最新完整规范数据；采集不受页面隐藏影响。
+    QHash<QWidget*, std::function<void()>> m_auditPageFactories;
+    bool m_constructingAuditPage = false;
     QSet<QTableWidget*> m_dirtyAuditTables; // 未投影表只保留规范数据，不构造隐藏 item。
     bool m_projectionRequestedWhileBusy = false;
     bool m_projectionInProgress = false; // 防止投影期间同步 Show/currentChanged 重入。
