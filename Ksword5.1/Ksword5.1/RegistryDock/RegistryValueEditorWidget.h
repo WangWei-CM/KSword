@@ -7,6 +7,7 @@
 namespace ks::ui
 {
     class HexView;
+    class AsyncOperation;
 }
 class QComboBox;
 class QLabel;
@@ -15,6 +16,7 @@ class QPlainTextEdit;
 class QPushButton;
 class QStackedWidget;
 class QTabWidget;
+class QTimer;
 
 struct RegistryValueDraft
 {
@@ -32,6 +34,7 @@ class RegistryValueEditorWidget final : public QWidget
 
 public:
     explicit RegistryValueEditorWidget(QWidget* parent = nullptr);
+    ~RegistryValueEditorWidget() override;
     void setValue(const QString& keyPath, const QString& name, quint32 type,
         const QByteArray& raw, bool createMode = false);
     bool value(RegistryValueDraft* out, QString* errorOut = nullptr) const;
@@ -51,6 +54,8 @@ private:
     void updateComparison();
     void updateState();
     void editText();
+    void prepareTextDraft();
+    void invalidateDraftPreparation();
     void editNumber(bool hexadecimal);
     void stageBytes(const QByteArray& bytes);
     void changeType();
@@ -84,6 +89,13 @@ private:
     QLineEdit* m_resizeSize = nullptr;
     ks::ui::HexView* m_before = nullptr;
     ks::ui::HexView* m_after = nullptr;
+
+    QTimer* m_textPreparationTimer = nullptr;
+    ks::ui::AsyncOperation* m_textOperation = nullptr;
+    ks::ui::AsyncOperation* m_importOperation = nullptr;
+    ks::ui::AsyncOperation* m_exportOperation = nullptr;
+    bool m_textPreparationPending = false;
+    bool m_importPending = false;
 
     QString m_keyPath;
     QString m_originalName;

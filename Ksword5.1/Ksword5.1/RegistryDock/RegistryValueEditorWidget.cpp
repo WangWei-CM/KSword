@@ -6,6 +6,7 @@
 #include "RegistryValueCodec.h"
 #include "../UI/MemoryWorkbench/HexView.h"
 #include "../UI/ThemeStatusRole.h"
+#include "../UI/AsyncOperation.h"
 #include "../Internationalization/LanguageManager.h"
 #include "../theme.h"
 
@@ -31,6 +32,7 @@
 #include <QStackedWidget>
 #include <QStringList>
 #include <QTabWidget>
+#include <QTimer>
 #include <QVBoxLayout>
 
 #include <Windows.h>
@@ -85,6 +87,105 @@ namespace
         return {};
     }
 
+    enum class RegistryTextError { None, Oversized, InvalidString, InvalidMultiString };
+    struct RegistryTextRequest
+    {
+        quint64 revision = 0;
+        quint32 type = 0;
+        QString text;
+        QString originalText;
+        QByteArray originalBytes;
+        bool restoreOriginal = false;
+    };
+    struct RegistryTextResult
+    {
+        quint64 revision = 0;
+        QByteArray bytes;
+        RegistryTextError error = RegistryTextError::None;
+        QString expanded;
+        bool expansionValid = false;
+    };
+
+    RegistryTextResult prepareRegistryText(const RegistryTextRequest& request)
+    {
+        RegistryTextResult result;
+        result.revision = request.revision;
+        const bool multi = request.type == ks::registry::TypeMultiString;
+        if (request.restoreOriginal && request.text == request.originalText)
+            result.bytes = request.originalBytes;
+        else if (request.text.size() > (kMaximumReplacementBytes - (multi ? 4 : 2)) / 2)
+            result.error = RegistryTextError::Oversized;
+        else
+        {
+            std::string encoded;
+            bool valid = false;
+            if (multi)
+            {
+                std::vector<std::u16string> items;
+                if (!request.text.isEmpty())
+                    for (const auto& line : request.text.split(QLatin1Char('\n'), Qt::KeepEmptyParts))
+                        items.push_back(line.toStdU16String());
+                valid = ks::registry::EncodeMultiString(items, &encoded);
+            }
+            else
+                valid = ks::registry::EncodeString(request.text.toStdU16String(), &encoded);
+            if (!valid)
+                result.error = multi ? RegistryTextError::InvalidMultiString : RegistryTextError::InvalidString;
+            else if (encoded.size() > static_cast<std::size_t>(kMaximumReplacementBytes))
+                result.error = RegistryTextError::Oversized;
+            else
+                result.bytes = qtBytes(encoded);
+        }
+        if (request.type == ks::registry::TypeExpandString && result.error == RegistryTextError::None)
+        {
+            const auto* source = reinterpret_cast<LPCWSTR>(request.text.utf16());
+            const DWORD required = ExpandEnvironmentStringsW(source, nullptr, 0);
+            if (required > 0 && required <= static_cast<DWORD>(kMaximumReplacementBytes / 2))
+            {
+                std::wstring expanded(required, L'\0');
+                const DWORD copied = ExpandEnvironmentStringsW(source, expanded.data(), required);
+                result.expansionValid = copied > 0 && copied <= required;
+                if (result.expansionValid)
+                    result.expanded = QString::fromWCharArray(expanded.data(), static_cast<qsizetype>(copied - 1));
+            }
+        }
+        return result;
+    }
+
+    enum class RegistryReadError { None, Open, Oversized, Changed };
+    struct RegistryReadResult
+    {
+        quint64 revision = 0;
+        QByteArray bytes;
+        QString error;
+        RegistryReadError kind = RegistryReadError::None;
+    };
+    struct RegistryReadRequest { QString path; quint64 revision = 0; };
+    RegistryReadResult readRegistryBytes(const RegistryReadRequest& request)
+    {
+        RegistryReadResult result;
+        result.revision = request.revision;
+        QFile file(request.path);
+        if (!file.open(QIODevice::ReadOnly))
+        { result.kind = RegistryReadError::Open; result.error = file.errorString(); return result; }
+        const qint64 expected = file.size();
+        if (expected > kMaximumReplacementBytes)
+        { result.kind = RegistryReadError::Oversized; return result; }
+        result.bytes = file.read(kMaximumReplacementBytes + 1);
+        if (file.error() != QFileDevice::NoError || result.bytes.size() != expected || !file.atEnd())
+        { result.kind = RegistryReadError::Changed; result.bytes.clear(); }
+        return result;
+    }
+    struct RegistryWriteRequest { QString path; QByteArray bytes; quint64 revision = 0; };
+    struct RegistryWriteResult { QString error; quint64 revision = 0; };
+    RegistryWriteResult writeRegistryBytes(const RegistryWriteRequest& request)
+    {
+        QSaveFile file(request.path);
+        if (!file.open(QIODevice::WriteOnly) || file.write(request.bytes) != request.bytes.size() || !file.commit())
+            return {file.errorString(), request.revision};
+        return {{}, request.revision};
+    }
+
     QPlainTextEdit* plainEditor(QWidget* parent, bool readOnly = false)
     {
         auto* editor = new CodeTextEdit(parent);
@@ -97,6 +198,13 @@ namespace
 
 RegistryValueEditorWidget::RegistryValueEditorWidget(QWidget* parent) : QWidget(parent)
 {
+    m_textOperation = new ks::ui::AsyncOperation(this);
+    m_importOperation = new ks::ui::AsyncOperation(this);
+    m_exportOperation = new ks::ui::AsyncOperation(this);
+    m_textPreparationTimer = new QTimer(this);
+    m_textPreparationTimer->setSingleShot(true);
+    m_textPreparationTimer->setInterval(120);
+    connect(m_textPreparationTimer, &QTimer::timeout, this, &RegistryValueEditorWidget::prepareTextDraft);
     setObjectName(QStringLiteral("registry_value_editor"));
     setMinimumWidth(280);
     auto* root = new QVBoxLayout(this);
@@ -266,6 +374,8 @@ RegistryValueEditorWidget::RegistryValueEditorWidget(QWidget* parent) : QWidget(
 
     connect(m_name, &QLineEdit::textChanged, this, [this] {
         if (m_syncing) return;
+        if (m_textPreparationPending) { editText(); return; }
+        invalidateDraftPreparation();
         m_operationError.clear();
         updateState();
         emit draftChanged();
@@ -277,6 +387,7 @@ RegistryValueEditorWidget::RegistryValueEditorWidget(QWidget* parent) : QWidget(
     connect(m_decimalNumber, &QLineEdit::textChanged, this, [this] { editNumber(false); });
     connect(m_hex, &ks::ui::HexView::byteEdited, this, [this] {
         if (m_syncing) return;
+        invalidateDraftPreparation();
         m_working = m_hex->buffer();
         m_comparisonNeedsRefresh = true;
         m_dataError.clear();
@@ -292,8 +403,44 @@ RegistryValueEditorWidget::RegistryValueEditorWidget(QWidget* parent) : QWidget(
     connect(exportButton, &QPushButton::clicked, this, &RegistryValueEditorWidget::exportBytes);
     connect(resizeButton, &QPushButton::clicked, this, &RegistryValueEditorWidget::resizeBytes);
     connect(m_consoleColor, &QPushButton::clicked, this, &RegistryValueEditorWidget::chooseConsoleColor);
+    m_exportOperation->setStateChangedCallback([this, exportButton] {
+        exportButton->setEnabled(!m_exportOperation->isInFlight());
+    });
+    m_textOperation->setStateChangedCallback([this] {
+        if (!m_textPreparationPending || m_textOperation->isInFlight() || m_textPreparationTimer->isActive()) return;
+        m_textPreparationPending = false;
+        m_tabs->setTabEnabled(1, true);
+        m_tabs->setTabEnabled(2, true);
+        m_dataError = trText(QStringLiteral("文本草稿准备失败；请重试编辑或恢复原值。"));
+        updateState();
+        emit draftChanged();
+    });
+    m_importOperation->setStateChangedCallback([this] {
+        if (!m_importPending || m_importOperation->isInFlight()) return;
+        m_importPending = false;
+        m_operationError = trText(QStringLiteral("文件读取失败或长度发生变化；草稿未改变。"));
+        updateState();
+        emit draftChanged();
+    });
     applyControlStyles();
     setValue({}, {}, ks::registry::TypeString, QByteArray(2, '\0'), true);
+}
+
+RegistryValueEditorWidget::~RegistryValueEditorWidget()
+{
+    m_textOperation->close();
+    m_importOperation->close();
+    m_exportOperation->close();
+}
+
+void RegistryValueEditorWidget::invalidateDraftPreparation()
+{
+    ++m_revision;
+    m_textPreparationTimer->stop();
+    m_textPreparationPending = false;
+    m_importPending = false;
+    m_tabs->setTabEnabled(1, true);
+    m_tabs->setTabEnabled(2, true);
 }
 
 quint32 RegistryValueEditorWidget::currentType() const
@@ -304,7 +451,9 @@ quint32 RegistryValueEditorWidget::currentType() const
 void RegistryValueEditorWidget::setValue(const QString& keyPath, const QString& name,
     quint32 type, const QByteArray& raw, bool createMode)
 {
-    ++m_revision;
+    invalidateDraftPreparation();
+    m_textOperation->cancel();
+    m_importOperation->cancel();
     m_syncing = true;
     m_keyPath = keyPath;
     m_originalName = name;
@@ -366,6 +515,10 @@ bool RegistryValueEditorWidget::value(RegistryValueDraft* out, QString* errorOut
         return fail(trText(QStringLiteral("值名不能包含 NUL 字符。")));
     if (name.size() > 16383)
         return fail(trText(QStringLiteral("值名超过 16383 个 UTF-16 字符；名称未截断。")));
+    if (m_textPreparationPending)
+        return fail(trText(QStringLiteral("正在准备当前文本草稿，请稍候…")));
+    if (m_importPending)
+        return fail(trText(QStringLiteral("正在读取原始字节，请稍候…")));
     if (!m_dataError.isEmpty())
         return fail(m_dataError);
     *out = {name, currentType(), m_working};
@@ -376,7 +529,7 @@ bool RegistryValueEditorWidget::value(RegistryValueDraft* out, QString* errorOut
 bool RegistryValueEditorWidget::isModified() const
 {
     return (m_createMode && (m_name->text() != m_originalName || currentType() != m_originalType))
-        || !m_dataError.isEmpty() || m_working != m_original;
+        || m_textPreparationPending || !m_dataError.isEmpty() || m_working != m_original;
 }
 
 void RegistryValueEditorWidget::discardChanges()
@@ -479,6 +632,7 @@ void RegistryValueEditorWidget::updateComparison()
 
 void RegistryValueEditorWidget::stageBytes(const QByteArray& bytes)
 {
+    invalidateDraftPreparation();
     m_working = bytes;
     m_comparisonNeedsRefresh = true;
     if (bytes != m_original) m_formatWarning.clear();
@@ -496,50 +650,70 @@ void RegistryValueEditorWidget::editText()
 {
     if (m_syncing) return;
     const quint32 type = currentType();
-    const bool multi = type == ks::registry::TypeMultiString;
-    if (!multi && type != ks::registry::TypeString && type != ks::registry::TypeExpandString) return;
-    const QString text = (multi ? m_multi : m_text)->toPlainText();
-    if (m_originalTypedValid && type == m_originalType && text == m_originalTypedText)
-    {
-        stageBytes(m_original);
-        if (type == ks::registry::TypeExpandString) updateExpandPreview();
-        return;
-    }
-    if (text.size() > (kMaximumReplacementBytes - (multi ? 4 : 2)) / 2)
-        m_dataError = trText(QStringLiteral("文本编码后超过 32 MiB 编辑上限；数据未截断。"));
-    else
-    {
-        std::string encoded;
-        bool valid;
-        if (multi)
-        {
-            std::vector<std::u16string> items;
-            if (!text.isEmpty())
-                for (const auto& line : text.split(QLatin1Char('\n'), Qt::KeepEmptyParts))
-                    items.push_back(line.toStdU16String());
-            valid = ks::registry::EncodeMultiString(items, &encoded);
-            if (!valid) m_dataError = trText(QStringLiteral("多字符串项目不能为空或包含 NUL、无效 UTF-16；请移除空行。"));
-        }
-        else
-        {
-            valid = ks::registry::EncodeString(text.toStdU16String(), &encoded);
-            if (!valid) m_dataError = trText(QStringLiteral("字符串不能包含 NUL 或无效 UTF-16；原始格式可在字节页编辑。"));
-        }
-        if (valid && encoded.size() <= static_cast<std::size_t>(kMaximumReplacementBytes))
-        {
-            stageBytes(qtBytes(encoded));
-            if (type == ks::registry::TypeExpandString) updateExpandPreview();
-            return;
-        }
-        if (valid) m_dataError = trText(QStringLiteral("文本编码后超过 32 MiB 编辑上限；数据未截断。"));
-    }
+    if (type != ks::registry::TypeMultiString && type != ks::registry::TypeString
+        && type != ks::registry::TypeExpandString) return;
+    // The signal path performs no full-document read, comparison or encoding.
+    ++m_revision;
+    m_textPreparationPending = false;
+    m_textOperation->cancel();
+    m_importPending = false;
+    m_textPreparationPending = true;
+    m_dataError.clear();
+    m_operationError.clear();
+    m_tabs->setTabEnabled(1, false);
+    m_tabs->setTabEnabled(2, false);
+    m_textPreparationTimer->start();
     updateState();
     emit draftChanged();
+}
+
+void RegistryValueEditorWidget::prepareTextDraft()
+{
+    if (!m_textPreparationPending) return;
+    const quint32 type = currentType();
+    RegistryTextRequest request{m_revision, type,
+        (type == ks::registry::TypeMultiString ? m_multi : m_text)->toPlainText(),
+        m_originalTypedText, m_original, m_originalTypedValid && type == m_originalType};
+    m_textOperation->submit<RegistryTextRequest, RegistryTextResult>(std::move(request),
+        [](const RegistryTextRequest& value, const ks::ui::AsyncOperationToken&) {
+            return prepareRegistryText(value);
+        }, [this, type](const RegistryTextResult& result, std::uint64_t) {
+            if (result.revision != m_revision || !m_textPreparationPending || type != currentType()) return true;
+            m_textPreparationPending = false;
+            m_tabs->setTabEnabled(1, true);
+            m_tabs->setTabEnabled(2, true);
+            if (result.error == RegistryTextError::None)
+            {
+                if (type == ks::registry::TypeExpandString)
+                    m_expanded->setPlainText(result.expansionValid ? result.expanded
+                        : trText(QStringLiteral("环境变量展开失败或预览超过上限；原文不变。")));
+                stageBytes(result.bytes); // draftChanged may synchronously close the editor.
+                return true;
+            }
+            if (result.error == RegistryTextError::Oversized)
+                m_dataError = trText(QStringLiteral("文本编码后超过 32 MiB 编辑上限；数据未截断。"));
+            else if (result.error == RegistryTextError::InvalidMultiString)
+                m_dataError = trText(QStringLiteral("多字符串项目不能为空或包含 NUL、无效 UTF-16；请移除空行。"));
+            else
+                m_dataError = trText(QStringLiteral("字符串不能包含 NUL 或无效 UTF-16；原始格式可在字节页编辑。"));
+            updateState();
+            emit draftChanged();
+            return true;
+        }, [this, revision = m_revision](std::exception_ptr) {
+            if (revision != m_revision) return;
+            m_textPreparationPending = false;
+            m_tabs->setTabEnabled(1, true);
+            m_tabs->setTabEnabled(2, true);
+            m_dataError = trText(QStringLiteral("文本草稿准备失败；请重试编辑或恢复原值。"));
+            updateState();
+            emit draftChanged();
+        });
 }
 
 void RegistryValueEditorWidget::editNumber(bool hexadecimal)
 {
     if (m_syncing || !isNumberType(currentType())) return;
+    invalidateDraftPreparation();
     const quint32 type = currentType();
     const unsigned bits = type == ks::registry::TypeQword ? 64 : 32;
     const QByteArray input = (hexadecimal ? m_hexNumber : m_decimalNumber)->text().trimmed().toLatin1();
@@ -564,6 +738,7 @@ void RegistryValueEditorWidget::editNumber(bool hexadecimal)
 void RegistryValueEditorWidget::changeType()
 {
     if (m_syncing || !m_createMode) return;
+    invalidateDraftPreparation();
     const bool previousSync = m_syncing;
     m_syncing = true;
     m_working = currentType() == m_originalType ? m_original : defaultData(currentType());
@@ -625,29 +800,44 @@ void RegistryValueEditorWidget::importBytes()
     const QPointer<RegistryValueEditorWidget> guard(this);
     const QString path = QFileDialog::getOpenFileName(this, trText(QStringLiteral("导入注册表原始字节")));
     if (!guard || revision != m_revision || path.isEmpty()) return;
-    QFile file(path);
-    if (!file.open(QIODevice::ReadOnly))
-        m_operationError = file.errorString();
-    else if (file.size() > kMaximumReplacementBytes)
-        m_operationError = trText(QStringLiteral("导入文件超过 32 MiB 编辑上限；草稿未改变。"));
-    else
-    {
-        const qint64 expected = file.size();
-        const QByteArray bytes = file.read(kMaximumReplacementBytes + 1);
-        if (file.error() != QFileDevice::NoError || bytes.size() != expected || !file.atEnd())
-            m_operationError = trText(QStringLiteral("文件读取失败或长度发生变化；草稿未改变。"));
-        else
-        {
-            m_typedNeedsRefresh = true;
-            stageBytes(bytes);
-            return;
-        }
-    }
+    invalidateDraftPreparation();
+    m_importPending = true;
+    const quint64 importRevision = m_revision;
     updateState();
+    emit draftChanged();
+    if (!guard || importRevision != m_revision || !m_importPending) return;
+    m_importOperation->submit<RegistryReadRequest, RegistryReadResult>({path, importRevision},
+        [](const RegistryReadRequest& value, const ks::ui::AsyncOperationToken&) {
+            return readRegistryBytes(value);
+        }, [this](const RegistryReadResult& result, std::uint64_t) {
+            if (result.revision != m_revision || !m_importPending) return true;
+            m_importPending = false;
+            if (result.kind == RegistryReadError::None)
+            {
+                m_typedNeedsRefresh = true;
+                stageBytes(result.bytes);
+                return true;
+            }
+            if (result.kind == RegistryReadError::Open) m_operationError = result.error;
+            else if (result.kind == RegistryReadError::Oversized)
+                m_operationError = trText(QStringLiteral("导入文件超过 32 MiB 编辑上限；草稿未改变。"));
+            else
+                m_operationError = trText(QStringLiteral("文件读取失败或长度发生变化；草稿未改变。"));
+            updateState();
+            emit draftChanged();
+            return true;
+        }, [this, importRevision](std::exception_ptr) {
+            if (importRevision != m_revision) return;
+            m_importPending = false;
+            m_operationError = trText(QStringLiteral("文件读取失败或长度发生变化；草稿未改变。"));
+            updateState();
+            emit draftChanged();
+        });
 }
 
 void RegistryValueEditorWidget::exportBytes()
 {
+    if (m_exportOperation->isBusy()) return;
     RegistryValueDraft draft;
     QString error;
     if (!value(&draft, &error))
@@ -659,13 +849,27 @@ void RegistryValueEditorWidget::exportBytes()
     const quint64 revision = m_revision;
     const QPointer<RegistryValueEditorWidget> guard(this);
     const QString path = QFileDialog::getSaveFileName(this, trText(QStringLiteral("导出注册表原始字节")));
-    if (!guard || revision != m_revision || path.isEmpty()) return;
-    QSaveFile file(path);
-    if (!file.open(QIODevice::WriteOnly) || file.write(draft.data) != draft.data.size() || !file.commit())
-        m_operationError = trText(QStringLiteral("字节导出失败：%1")).arg(file.errorString());
-    else
-        m_operationError.clear();
-    updateState();
+    if (!guard || revision != m_revision || path.isEmpty() || m_exportOperation->isBusy()) return;
+    const auto accepted = m_exportOperation->submitTransaction<RegistryWriteRequest, RegistryWriteResult>({path, draft.data, revision},
+        [](const RegistryWriteRequest& value) { return writeRegistryBytes(value); },
+        [this](const RegistryWriteResult& result, std::uint64_t) {
+            if (result.revision != m_revision) return true;
+            m_operationError = result.error.isEmpty() ? QString()
+                : trText(QStringLiteral("字节导出失败：%1")).arg(result.error);
+            updateState();
+            return true;
+        }, [this, revision](std::exception_ptr) {
+            if (revision != m_revision) return;
+            m_operationError = trText(QStringLiteral("字节导出失败：%1"))
+                .arg(trText(QStringLiteral("后台任务失败")));
+            updateState();
+        });
+    if (accepted == 0)
+    {
+        m_operationError = trText(QStringLiteral("字节导出失败：%1"))
+            .arg(trText(QStringLiteral("后台任务失败")));
+        updateState();
+    }
 }
 
 void RegistryValueEditorWidget::resizeBytes()
