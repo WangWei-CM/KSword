@@ -1,5 +1,7 @@
 #include "../UI/StructuredFieldView.h"
 #include "TamperDetectionPage.h"
+#include "MemoryDock.ReadOnlyModels.h"
+#include "../UI/TableInteractionSupport.h"
 #include "../UI/ToolbarMetrics.h"
 #include "../UI/PrimaryPageStyle.h"
 #include "../UI/FlatButtonTheme.h"
@@ -413,6 +415,13 @@ namespace ksword::memory_dock
 
         formLayout->addWidget(new QLabel(QStringLiteral("扫描目标"), this), 0, 0);
         m_targetCombo = new QComboBox(this);
+        m_candidateModel = new ks::memory_detail::CoreListModel(m_targetCombo);
+        m_targetCombo->setProperty("ks_i18n_preserve_model_data", true);
+        m_targetCombo->setModel(m_candidateModel);
+        m_candidateModel->publish(1, [](int, int role) -> QVariant {
+            if (role == Qt::UserRole) { return -1; }
+            return role == Qt::DisplayRole ? QVariant(ks::i18n::sourceText(QStringLiteral("自定义范围"))) : QVariant();
+        });
         ks::ui::StylePrimaryCombo(m_targetCombo);
         // 长模块名称交给下拉列表展示，不能由sizeHint撑宽整页。
         m_targetCombo->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
@@ -538,6 +547,7 @@ namespace ksword::memory_dock
     void TamperDetectionPage::setAttachedProcess(
         const std::uint32_t processId, const QString& processName)
     {
+        ++m_candidateContextGeneration;
         m_attachedPid = processId;
         m_attachedProcessName = processName;
         ++m_channelTargetEpoch;
@@ -545,22 +555,33 @@ namespace ksword::memory_dock
         updateRunButtonState();
     }
 
-    void TamperDetectionPage::setModuleCandidates(const std::vector<ModuleCandidate>& candidates)
+    void TamperDetectionPage::setModuleCandidates(const std::shared_ptr<const ModuleCandidateSnapshot>& candidates)
     {
-        m_moduleCandidates = candidates;
-        const QString previousText = m_targetCombo->currentText();
-        {
-            const QSignalBlocker blocker(m_targetCombo);
-            m_targetCombo->clear();
-            m_targetCombo->addItem(QStringLiteral("自定义范围"), QVariant::fromValue(-1));
-            for (int index = 0; index < static_cast<int>(candidates.size()); ++index)
-            {
-                m_targetCombo->addItem(candidates[static_cast<std::size_t>(index)].displayText, index);
-            }
-            const int restoredIndex = m_targetCombo->findText(previousText);
-            m_targetCombo->setCurrentIndex(restoredIndex >= 0 ? restoredIndex : 0);
-        }
-        updateRunButtonState();
+        if (!candidates) { return; }
+        const QPointer<TamperDetectionPage> owner(this);
+        const auto generation = m_candidateContextGeneration;
+        const auto commit = [owner, candidates, generation] {
+            if (!owner || owner->m_candidateContextGeneration != generation) { return; }
+            if (candidates == owner->m_moduleCandidates) { return; }
+            const int selected = owner->m_targetCombo->currentData().toInt();
+            const auto previous = selected >= 0 && selected < static_cast<int>(owner->m_moduleCandidates->entries.size())
+                ? ModuleCandidateSnapshot::identity(owner->m_moduleCandidates->entries[static_cast<std::size_t>(selected)]) : QString();
+            QSignalBlocker blocker(owner->m_targetCombo);
+            owner->m_moduleCandidates = candidates;
+            owner->m_candidateModel->publish(static_cast<int>(candidates->entries.size()) + 1, [candidates](const int row, const int role) -> QVariant {
+                if (role == Qt::UserRole) { return row - 1; }
+                if (row == 0) { return role == Qt::DisplayRole ? QVariant(ks::i18n::sourceText(QStringLiteral("自定义范围"))) : QVariant(); }
+                const auto& candidate = candidates->entries[static_cast<std::size_t>(row - 1)];
+                return role == Qt::DisplayRole || role == Qt::ToolTipRole ? QVariant(candidate.displayText) : QVariant();
+            });
+            if (!owner) { blocker.dismiss(); return; }
+            owner->m_targetCombo->setCurrentIndex(candidates->rowsByKey.contains(previous) ? candidates->rowsByKey.value(previous) + 1 : 0);
+            if (!owner) { blocker.dismiss(); return; }
+            owner->updateRunButtonState();
+            if (!owner) { blocker.dismiss(); }
+        };
+        if (ks::ui::DeferUiCommitIfComboBoxPopupOpen(this, QStringLiteral("memory-tamper-module-candidates"), commit)) { return; }
+        commit();
     }
 
     void TamperDetectionPage::refreshChannelAvailability()
@@ -648,7 +669,7 @@ namespace ksword::memory_dock
         // 归一化出了问题。
         const int targetIndex = m_targetCombo->currentData().toInt();
         const bool moduleSelected =
-            targetIndex >= 0 && targetIndex < static_cast<int>(m_moduleCandidates.size());
+            targetIndex >= 0 && targetIndex < static_cast<int>(m_moduleCandidates->entries.size());
         m_useOnDiskImageCheck->setEnabled(moduleSelected);
         if (!moduleSelected)
         {
@@ -687,10 +708,10 @@ namespace ksword::memory_dock
         const int targetIndex = m_targetCombo->currentData().toInt();
         const std::uint64_t maxPages = static_cast<std::uint64_t>(m_maxPageSpin->value());
 
-        if (targetIndex >= 0 && targetIndex < static_cast<int>(m_moduleCandidates.size()))
+        if (targetIndex >= 0 && targetIndex < static_cast<int>(m_moduleCandidates->entries.size()))
         {
             const ModuleCandidate& candidate =
-                m_moduleCandidates[static_cast<std::size_t>(targetIndex)];
+                m_moduleCandidates->entries[static_cast<std::size_t>(targetIndex)];
             startOut = candidate.baseAddress & ~(kPageBytes - 1ULL);
             const std::uint64_t modulePages =
                 (candidate.sizeBytes + kPageBytes - 1ULL) / kPageBytes;
@@ -740,10 +761,10 @@ namespace ksword::memory_dock
             m_useOnDiskImageCheck->isEnabled() && m_useOnDiskImageCheck->isChecked();
         const int selectedTargetIndex = m_targetCombo->currentData().toInt();
         if (selectedTargetIndex >= 0
-            && selectedTargetIndex < static_cast<int>(m_moduleCandidates.size()))
+            && selectedTargetIndex < static_cast<int>(m_moduleCandidates->entries.size()))
         {
             const ModuleCandidate& candidate =
-                m_moduleCandidates[static_cast<std::size_t>(selectedTargetIndex)];
+                m_moduleCandidates->entries[static_cast<std::size_t>(selectedTargetIndex)];
             request.moduleBaseAddress = candidate.baseAddress;
             request.moduleFilePath = candidate.filePath;
         }

@@ -515,6 +515,7 @@ private:
     // - 说明：附加成功与模块缓存落地两处都要调用。少了任一处，那一页的目标下拉
     //   就会停在上一个进程的模块上——而它会照样跑，只是扫的是别的进程的地址。
     void syncTamperDetectionTargets();
+    static std::shared_ptr<const ksword::memory_dock::TamperDetectionPage::ModuleCandidateSnapshot> prepareTamperModuleCandidates(const std::vector<ModuleEntry>& modules);
 
     // applyProcessTableFilter：
     // - 作用：按 m_processFilterEdit 的关键字隐藏/显示进程表的行，并更新计数标签；
@@ -1146,6 +1147,7 @@ private:
     QString m_moduleCacheStatusTemplate;
     bool m_regionCachePartial = false;
     std::uint32_t m_regionCacheError = 0;
+    std::shared_ptr<const ksword::memory_dock::TamperDetectionPage::ModuleCandidateSnapshot> m_tamperCandidateSnapshot = ks::memory_detail::ValueStorage<ksword::memory_dock::TamperDetectionPage::ModuleCandidateSnapshot>();
     std::uint32_t m_moduleCachePid = 0;
     // 上面那个进程在缓存落地时的创建时间（100ns，0=没取到）：钉住预览进程时用它核对"仍是同一个进程实例"。
     std::uint64_t m_moduleCacheCreateTime = 0;

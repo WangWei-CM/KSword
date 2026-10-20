@@ -948,31 +948,30 @@ void MemoryDock::commitProcessSnapshot(const std::shared_ptr<PreparedProcessSnap
     }
 }
 
+std::shared_ptr<const ksword::memory_dock::TamperDetectionPage::ModuleCandidateSnapshot> MemoryDock::prepareTamperModuleCandidates(const std::vector<ModuleEntry>& modules)
+{
+    using Page = ksword::memory_dock::TamperDetectionPage;
+    auto snapshot = ks::memory_detail::ValueStorage<Page::ModuleCandidateSnapshot>();
+    snapshot->entries.reserve(modules.size()); snapshot->rowsByKey.reserve(static_cast<int>(modules.size()));
+    for (const auto& module : modules) {
+        Page::ModuleCandidate candidate;
+        candidate.displayText = QString("%1  (%2 KB)").arg(module.moduleName).arg(module.sizeBytes / 1024ULL);
+        candidate.filePath = module.fullPath; candidate.baseAddress = module.baseAddress; candidate.sizeBytes = module.sizeBytes;
+        const auto key = Page::ModuleCandidateSnapshot::identity(candidate);
+        if (!snapshot->rowsByKey.contains(key)) { snapshot->rowsByKey.insert(key, static_cast<int>(snapshot->entries.size())); }
+        snapshot->entries.push_back(std::move(candidate));
+    }
+    return snapshot;
+}
+
 void MemoryDock::syncTamperDetectionTargets()
 {
-    if (m_tamperDetectionPage == nullptr)
-    {
-        return;
-    }
-    m_tamperDetectionPage->setAttachedProcess(m_attachedPid, m_attachedProcessName);
-
-    // 模块列表转成"可扫描目标"。只传基址和大小：篡改检测页不需要知道签名、
-    // 入口点之类的东西，多传一份就会多一处需要同步的状态。
-    std::vector<ksword::memory_dock::TamperDetectionPage::ModuleCandidate> candidates;
-    candidates.reserve(m_moduleCache->size());
-    for (const ModuleEntry& module : *m_moduleCache)
-    {
-        ksword::memory_dock::TamperDetectionPage::ModuleCandidate candidate;
-        candidate.displayText = QString("%1  (%2 KB)")
-            .arg(module.moduleName)
-            .arg(module.sizeBytes / 1024ULL);
-        // 磁盘映像那条参考路径要按加载基址归一化文件字节，所以完整路径必须带过去。
-        candidate.filePath = module.fullPath;
-        candidate.baseAddress = module.baseAddress;
-        candidate.sizeBytes = module.sizeBytes;
-        candidates.push_back(std::move(candidate));
-    }
-    m_tamperDetectionPage->setModuleCandidates(candidates);
+    if (!m_tamperDetectionPage) { return; }
+    const QPointer<MemoryDock> owner(this);
+    const QPointer<ksword::memory_dock::TamperDetectionPage> page(m_tamperDetectionPage);
+    page->setAttachedProcess(m_attachedPid, m_attachedProcessName);
+    if (!owner || !page) { return; }
+    page->setModuleCandidates(m_moduleCachePid == m_attachedPid ? m_tamperCandidateSnapshot : ks::memory_detail::ValueStorage<ksword::memory_dock::TamperDetectionPage::ModuleCandidateSnapshot>());
 }
 
 void MemoryDock::applyProcessTableFilter()
@@ -1012,6 +1011,7 @@ struct MemoryDock::ModuleRefreshJob {
     bool cancelled() const { return cancel.load() || (lifetime && lifetime->load()); }
     QString diagnostic;
     std::vector<ModuleEntry> modules;
+    std::shared_ptr<const ksword::memory_dock::TamperDetectionPage::ModuleCandidateSnapshot> candidates;
 };
 
 bool MemoryDock::refreshModuleListForPid(const std::uint32_t pid)
@@ -1032,7 +1032,7 @@ bool MemoryDock::refreshModuleListForPid(const std::uint32_t pid)
     if (m_moduleRefreshJob) { m_moduleRefreshJob->cancel.store(true); }
     if (!pid) {
         m_moduleRefreshPending.reset(); m_moduleRefreshInProgress.store(false);
-        m_moduleCache = ks::memory_detail::ValueStorage<std::vector<ModuleEntry>>(); m_moduleCacheStatusTemplate.clear(); m_moduleCachePid = 0; m_moduleCacheCreateTime = 0;
+        m_moduleCache = ks::memory_detail::ValueStorage<std::vector<ModuleEntry>>(); m_moduleCacheStatusTemplate.clear(); m_tamperCandidateSnapshot = ks::memory_detail::ValueStorage<ksword::memory_dock::TamperDetectionPage::ModuleCandidateSnapshot>(); m_moduleCachePid = 0; m_moduleCacheCreateTime = 0;
         rebuildModuleTableFromCache();
         if (m_moduleRefreshButton) { m_moduleRefreshButton->setEnabled(true); }
         if (m_moduleStatusLabel) {
@@ -1102,7 +1102,7 @@ void MemoryDock::startPendingModuleRefresh()
                         entry.threadIdText = QString::fromStdString(record.threadIdText); entry.representativeThreadId = record.representativeThreadId;
                         job->modules.push_back(std::move(entry));
                     }
-                    if (!job->cancelled()) { std::sort(job->modules.begin(), job->modules.end(), [](const auto& a, const auto& b) { return a.baseAddress < b.baseAddress; }); }
+                    if (!job->cancelled()) { std::sort(job->modules.begin(), job->modules.end(), [](const auto& a, const auto& b) { return a.baseAddress < b.baseAddress; }); job->candidates = prepareTamperModuleCandidates(job->modules); }
                 } else if (!job->cancelled()) {
                     job->creation = job->request.creation;
                     job->diagnostic = QString::number(ERROR_INVALID_PARAMETER);
@@ -1131,12 +1131,14 @@ void MemoryDock::pollModuleRefresh()
     const auto elapsedMs = job->elapsedMs;
     const auto moduleCount = job->moduleCount, threadCount = job->threadCount;
     const auto diagnosticText = job->diagnostic;
+    const auto candidates = job->candidates ? job->candidates : ks::memory_detail::ValueStorage<ksword::memory_dock::TamperDetectionPage::ModuleCandidateSnapshot>();
     const auto moduleCacheSnapshot = ks::memory_detail::ValueStorage<std::vector<ModuleEntry>>(std::move(job->modules));
     const auto commitModuleSnapshot = [selfGuard, refreshTicket, pid, moduleCreateTime, includeSignatureCheck,
-        elapsedMs, moduleCount, threadCount, diagnosticText, moduleCacheSnapshot] {
+        elapsedMs, moduleCount, threadCount, diagnosticText, moduleCacheSnapshot, candidates] {
         if (!selfGuard || refreshTicket != selfGuard->m_moduleRefreshTicket.load()) { return; }
                     // 缓存和树必须原子落地；菜单打开时不能先换缓存再保留旧节点。
                     selfGuard->m_moduleCache = moduleCacheSnapshot;
+                    selfGuard->m_tamperCandidateSnapshot = candidates;
                     selfGuard->m_moduleCachePid = pid;
                     selfGuard->m_moduleCacheCreateTime = moduleCreateTime;
                     selfGuard->rebuildModuleTableFromCache();
@@ -1520,7 +1522,7 @@ void MemoryDock::detachProcess()
     m_canReadWriteMemory = false;
 
     // 分离时清理依赖上下文的数据缓存。
-    m_moduleCache = ks::memory_detail::ValueStorage<std::vector<ModuleEntry>>(); m_moduleCacheStatusTemplate.clear();
+    m_moduleCache = ks::memory_detail::ValueStorage<std::vector<ModuleEntry>>(); m_moduleCacheStatusTemplate.clear(); m_tamperCandidateSnapshot = ks::memory_detail::ValueStorage<ksword::memory_dock::TamperDetectionPage::ModuleCandidateSnapshot>();
     m_moduleCachePid = 0U;
     m_moduleCacheCreateTime = 0U;
     m_regionCache = ks::memory_detail::ValueStorage<std::vector<RegionEntry>>(); m_regionCachePartial = false; m_regionCacheError = 0;
