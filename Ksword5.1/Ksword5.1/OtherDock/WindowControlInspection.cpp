@@ -393,7 +393,7 @@ namespace ks::control_inspection
         QString hitId;
         QString mutationId, mutationProperty, mutationValue;
         bool stopped = false, scan = false, hit = false, mutate = false, picked = false;
-        QVector<Reply> replies;
+        ReplyMailbox replies;
         std::shared_ptr<std::atomic_bool> dirty = std::make_shared<std::atomic_bool>(false);
         HDESK desktop = nullptr;
         ~State() { if (desktop) ::CloseDesktop(desktop); }
@@ -443,8 +443,11 @@ namespace ks::control_inspection
                 Request current;
                 bool scanning = false;
                 const auto publish = [&](Reply reply) {
-                    std::lock_guard<std::mutex> lock(state->mutex);
-                    if (!state->stopped && state->epoch == reply.generation) state->replies.push_back(std::move(reply));
+                    std::unique_lock<std::mutex> lock(state->mutex);
+                    if (!reply.hover && !reply.mutation)
+                        state->wake.wait(lock, [&] { return state->stopped || state->epoch != reply.generation
+                            || !state->replies.treeFull(); });
+                    if (!state->stopped && state->epoch == reply.generation) state->replies.push(std::move(reply));
                 };
                 for (;;)
                 {
@@ -453,10 +456,13 @@ namespace ks::control_inspection
                     quint64 serial = 0;
                     QString hitId;
                     QString mutationId, mutationProperty, mutationValue;
-                    bool scan = false, hit = false, mutate = false, picked = false;
+                    bool scan = false, hit = false, mutate = false, picked = false, scanBudget = false;
                     {
                         std::unique_lock<std::mutex> lock(state->mutex);
-                        if (!scanning) state->wake.wait(lock, [&] { return state->stopped || state->scan || state->hit || state->mutate; });
+                        if (!scanning || state->replies.treeFull())
+                            state->wake.wait(lock, [&] { return state->stopped || state->scan || state->hit || state->mutate
+                                || (scanning && !state->replies.treeFull()); });
+                        scanBudget = !state->replies.treeFull();
                         if (state->stopped) break;
                         request = state->request;
                         if (scanning && current.generation != state->epoch)
@@ -613,7 +619,7 @@ namespace ks::control_inspection
                         }
                         publish(std::move(reply));
                     }
-                    if (scanning)
+                    if (scanning && scanBudget)
                     {
                         Reply batch; batch.generation = current.generation;
                         for (int count = 0; count < 64; ++count)
@@ -719,7 +725,19 @@ namespace ks::control_inspection
         std::lock_guard<std::mutex> lock(m_state->mutex);
         ++m_state->epoch; m_state->scan = false; m_state->hit = false; m_state->mutate = false; m_state->replies.clear(); m_state->wake.notify_one();
     }
-    QVector<Reply> Collector::take()
-    { std::lock_guard<std::mutex> lock(m_state->mutex); QVector<Reply> replies; replies.swap(m_state->replies); return replies; }
+    QVector<Reply> Collector::take(const qsizetype maximum)
+    {
+        std::lock_guard<std::mutex> lock(m_state->mutex);
+        auto replies = m_state->replies.take(maximum);
+        m_state->wake.notify_one();
+        return replies;
+    }
+    QVector<Reply> Collector::takeControl(const qsizetype maximum)
+    {
+        std::lock_guard<std::mutex> lock(m_state->mutex);
+        return m_state->replies.take(maximum, true);
+    }
+    bool Collector::hasReplies()
+    { std::lock_guard<std::mutex> lock(m_state->mutex); return !m_state->replies.empty(); }
     bool Collector::takeDirty() { return m_state->dirty->exchange(false); }
 }

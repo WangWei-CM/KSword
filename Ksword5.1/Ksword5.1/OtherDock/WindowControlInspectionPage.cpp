@@ -7,6 +7,7 @@
 #include "../UI/FlatButtonTheme.h"
 #include "../UI/ThemeAccentIcon.h"
 #include "../UI/ToolbarMetrics.h"
+#include "../UI/TableInteractionSupport.h"
 #include "../theme.h"
 #include <QApplication>
 #include <QCheckBox>
@@ -28,6 +29,8 @@
 #include <QStyledItemDelegate>
 #include <QVBoxLayout>
 #include <limits>
+#include <optional>
+#include <deque>
 
 namespace ks::control_inspection
 {
@@ -215,7 +218,7 @@ namespace ks::control_inspection
                 m_properties->header()->setStretchLastSection(true); rightLayout->addWidget(m_properties);
                 m_properties->header()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
                 splitter->setSizes({450, 550}); layout->addWidget(splitter, 1);
-                m_status = new QLabel(T("等待首次检查"), this); m_status->setWordWrap(true); layout->addWidget(m_status);
+                m_status = new QLabel(T("等待首次检查"), this); m_statusText = m_status->text(); m_status->setWordWrap(true); layout->addWidget(m_status);
                 m_detail = window(); m_detail->installEventFilter(this);
                 m_timer.setInterval(40); connect(&m_timer, &QTimer::timeout, this, [this] { tick(); }); m_timer.start();
                 m_clock.start();
@@ -230,10 +233,14 @@ namespace ks::control_inspection
                     if (m_rebuilding || !item) return;
                     const auto found = m_nodes.constFind(item->data(0, Qt::UserRole).toString());
                     if (found == m_nodes.cend()) return;
-                    m_selected = *found; m_preserve = m_selected.id; m_hover = {};
+                    setSelectionIntent(*found); m_hover = {};
                     showProperties(m_selected, false); updateOverlay();
                     if (!m_paused && !m_suspended) m_collector.details(request(), m_selected.id, ++m_serial);
                 });
+                connect(m_tree, &QTreeWidget::itemExpanded, this, [this](QTreeWidgetItem* item)
+                    { if (!m_rebuilding) m_expanded.insert(item->data(0, Qt::UserRole).toString()); });
+                connect(m_tree, &QTreeWidget::itemCollapsed, this, [this](QTreeWidgetItem* item)
+                    { if (!m_rebuilding) m_expanded.remove(item->data(0, Qt::UserRole).toString()); });
                 connect(m_all, &QCheckBox::toggled, this, [this] { updateOverlay(); });
                 connect(m_tips, &QCheckBox::toggled, this, [this] { updateOverlay(); });
                 retranslate();
@@ -242,7 +249,12 @@ namespace ks::control_inspection
             { ReleaseInput(this); m_collector.cancel(); delete m_overlay.data(); if (s_active == this) s_active.clear(); }
         protected:
             void showEvent(QShowEvent* event) override
-            { QWidget::showEvent(event); if (!m_started) { m_started = true; activate(); } }
+            {
+                QWidget::showEvent(event);
+                if (!m_started) { m_started = true; activate(); }
+                if (m_status->text() != m_statusText) m_status->setText(m_statusText);
+                renderPendingProperties(); schedulePump();
+            }
             bool eventFilter(QObject* watched, QEvent* event) override
             {
                 if (watched == m_detail && (event->type() == QEvent::Close || event->type() == QEvent::Hide))
@@ -286,7 +298,7 @@ namespace ks::control_inspection
                         setPick(false); m_pickWaiting = true;
                         m_collector.hit(request(), point, ++m_serial, true);
                     });
-                if (!PickerShortcutAvailable()) m_status->setText(T("拾取快捷键不可用，可使用瞄准按钮。"));
+                if (!PickerShortcutAvailable()) setStatus(T("拾取快捷键不可用，可使用瞄准按钮。"));
             }
             void activate()
             {
@@ -299,7 +311,7 @@ namespace ks::control_inspection
             {
                 if (!m_started) return;
                 m_paused = paused; m_pause->setChecked(paused);
-                if (paused) { suspend(); m_status->setText(T("检查已暂停，可继续浏览控件树。")); }
+                if (paused) { suspend(); setStatus(T("检查已暂停，可继续浏览控件树。")); }
                 else activate();
                 retranslate();
             }
@@ -315,7 +327,7 @@ namespace ks::control_inspection
                 if (m_paused || m_suspended || !m_started) armed = false;
                 if (s_active != this) armed = false;
                 if (s_active == this && !ArmPicker(armed))
-                { armed = false; m_status->setText(T("无法开启控件拾取，目标输入未被拦截。")); }
+                { armed = false; setStatus(T("无法开启控件拾取，目标输入未被拦截。")); }
                 const QSignalBlocker blocker(m_pick); m_pick->setChecked(armed);
             }
             void changeTarget()
@@ -323,22 +335,51 @@ namespace ks::control_inspection
                 setPick(false); m_selected = {}; m_hover = {}; m_mutationPending = false;
                 m_properties->setEnabled(true); m_properties->clear();
                 m_nodes.clear(); m_nodesDirty = true; m_items.clear(); m_tree->clear(); m_collector.cancel(); ++m_generation;
+                m_pendingReply.reset(); m_projectionQueue.clear(); m_projectionQueued.clear();
+                m_retireIds.clear(); m_hierarchyIds.clear(); m_seenOrder.clear(); m_expanded.clear();
+                m_retireCursor = m_hierarchyCursor = 0; m_retiring = false;
+                m_pendingPropertyNode = {}; m_propertyNode = {}; m_propertiesDirty = false;
                 if (m_started && !m_paused) activate();
             }
             void scan()
             {
                 if (!m_root || !::IsWindow(m_root)) return;
                 setPick(false);
-                m_expanded.clear();
-                for (auto it = m_items.cbegin(); it != m_items.cend(); ++it)
-                    if (it.value()->isExpanded()) m_expanded.insert(it.key());
                 m_preserve = m_selected.id;
-                m_seen.clear();
+                m_seen.clear(); m_seenOrder.clear(); m_pendingReply.reset();
+                m_retireIds.clear(); m_retiring = false;
                 ++m_generation; ++m_serial; m_pickWaiting = false; m_scanDone = false; m_scanError = S_OK;
                 m_lastScan = m_clock.elapsed(); m_collector.scan(request());
-                m_status->setText(T("正在扫描控件…")); updateOverlay();
+                setStatus(T("正在扫描控件…")); updateOverlay();
             }
-            void showProperties(const Node& node, bool hovered)
+            void setSelectionIntent(const Node& node)
+            {
+                m_selected = node; m_preserve = node.id; m_reveal.clear();
+            }
+            bool canProjectUi() const
+            {
+                return isVisible() && !ks::ui::IsItemViewUiCommitBlockedByContextMenu({m_tree, m_properties});
+            }
+            void setStatus(const QString& text)
+            {
+                m_statusText = text;
+                if (isVisible() && m_status->text() != text) m_status->setText(text);
+            }
+            void showProperties(const Node& node, bool hovered, bool force = false)
+            {
+                if (!force && SameOverlayNode(m_pendingPropertyNode, node) && m_pendingPropertyNode.window == node.window
+                    && m_pendingPropertyNode.parent == node.parent && m_pendingPropertyNode.properties == node.properties
+                    && m_pendingPropertyHovered == hovered) return;
+                m_pendingPropertyNode = node; m_pendingPropertyHovered = hovered; m_propertiesDirty = true;
+                renderPendingProperties();
+            }
+            void renderPendingProperties()
+            {
+                if (!m_propertiesDirty || !canProjectUi()) return;
+                m_propertiesDirty = false;
+                renderProperties(m_pendingPropertyNode, m_pendingPropertyHovered);
+            }
+            void renderProperties(const Node& node, bool hovered)
             {
                 m_propertyNode = node; m_propertyHovered = hovered;
                 m_origin->setText(hovered ? T("鼠标悬停：%1").arg(node.name) : T("树节点选择：%1").arg(node.name));
@@ -380,7 +421,7 @@ namespace ks::control_inspection
                 const QString id = item->data(0, Qt::UserRole).toString();
                 if (id.isEmpty()) return;
                 m_mutationPending = true; m_properties->setEnabled(false);
-                m_status->setText(T("正在处理，请稍候…"));
+                setStatus(T("正在处理，请稍候…"));
                 m_collector.mutate(request(), id, property, value, ++m_serial);
             }
             void consume(Reply reply)
@@ -391,19 +432,19 @@ namespace ks::control_inspection
                     m_mutationPending = false; m_properties->setEnabled(true);
                     if (FAILED(reply.error))
                     {
-                        showProperties(m_propertyNode, m_propertyHovered);
-                        m_status->setText(T("操作失败"));
+                        showProperties(m_propertyNode, m_propertyHovered, true);
+                        setStatus(T("操作失败"));
                     }
                     else if (!reply.hit.id.isEmpty())
                     {
                         if (!SameOverlayNode(m_nodes.value(reply.hit.id), reply.hit)) m_nodesDirty = true;
-                        m_nodes[reply.hit.id] = reply.hit;
+                        m_nodes[reply.hit.id] = reply.hit; queueProjection(reply.hit.id);
                         if (m_selected.id == reply.hit.id) m_selected = reply.hit;
                         if (m_hover.id == reply.hit.id) m_hover = reply.hit;
-                        showProperties(reply.hit, m_propertyHovered);
-                        m_status->setText(T("操作成功"));
+                        showProperties(reply.hit, m_propertyHovered, true);
+                        setStatus(T("操作成功"));
                     }
-                    else m_status->setText(T("操作成功"));
+                    else setStatus(T("操作成功"));
                     return;
                 }
                 if (reply.hover)
@@ -413,8 +454,8 @@ namespace ks::control_inspection
                     if (reply.hit.id.isEmpty())
                     {
                         if (!reply.fromTree) m_hover = {};
-                        if (reply.picked) m_status->setText(T("未读取到该位置的控件，已恢复正常操作。"));
-                        else if (FAILED(reply.error)) m_status->setText(T("属性读取失败（0x%1），保留最近可用信息。")
+                        if (reply.picked) setStatus(T("未读取到该位置的控件，已恢复正常操作。"));
+                        else if (FAILED(reply.error)) setStatus(T("属性读取失败（0x%1），保留最近可用信息。")
                             .arg(static_cast<quint32>(reply.error), 8, 16, QLatin1Char('0')));
                         return;
                     }
@@ -422,7 +463,7 @@ namespace ks::control_inspection
                     showProperties(reply.hit, !reply.fromTree);
                     if (reply.picked)
                     {
-                        m_selected = reply.hit;
+                        setSelectionIntent(reply.hit);
                         auto* item = m_items.value(reply.hit.id);
                         if (item) { const QSignalBlocker blocker(m_tree);
                             for (auto* ancestor = item->parent(); ancestor; ancestor = ancestor->parent()) ancestor->setExpanded(true);
@@ -431,13 +472,51 @@ namespace ks::control_inspection
                     }
                     updateOverlay(); return;
                 }
-                if (FAILED(reply.error)) m_scanError = reply.error;
-                m_rebuilding = true;
-                for (const auto& node : reply.nodes)
+            }
+            void queueProjection(const QString& id)
+            {
+                if (!m_projectionQueued.contains(id))
+                { m_projectionQueued.insert(id); m_projectionQueue.push_back(id); }
+            }
+            void consumeNode(const Node& node)
+            {
+                if (node.id.isEmpty()) return;
+                if (!SameOverlayNode(m_nodes.value(node.id), node)) m_nodesDirty = true;
+                m_nodes.insert(node.id, node);
+                if (!m_seen.contains(node.id)) { m_seen.insert(node.id); m_seenOrder.append(node.id); }
+                queueProjection(node.id);
+            }
+            bool projectOne()
+            {
+                if (m_projectionQueue.empty())
                 {
-                    if (node.id.isEmpty()) continue;
+                    if (m_hierarchyCursor >= m_hierarchyIds.size()) return false;
+                    queueProjection(m_hierarchyIds[m_hierarchyCursor++]);
+                }
+                const QString id = m_projectionQueue.front();
+                const QSignalBlocker blocker(m_tree); m_rebuilding = true;
+                const auto found = m_nodes.constFind(id);
+                auto* item = m_items.value(id);
+                if (found == m_nodes.cend())
+                {
+                    // One child transfer per budget unit prevents a stale parent
+                    // from recursively deleting a 10000-node subtree in one call.
+                    if (item && item->childCount() != 0)
+                    {
+                        m_tree->addTopLevelItem(item->takeChild(item->childCount() - 1));
+                        m_rebuilding = false; return true;
+                    }
+                    m_items.remove(id); delete item;
+                }
+                else
+                {
+                    const Node& node = *found;
                     auto* parent = m_items.value(node.parent);
-                    auto* item = m_items.value(node.id);
+                    // A transient absent parent is reconciled in source order
+                    // after the complete generation. Never create a Qt cycle.
+                    for (auto* ancestor = parent; ancestor; ancestor = ancestor->parent())
+                        if (ancestor == item) { parent = nullptr; break; }
+                    const bool created = item == nullptr;
                     if (!item) item = parent ? new QTreeWidgetItem(parent) : new QTreeWidgetItem(m_tree);
                     else if (item->parent() != parent)
                     {
@@ -445,40 +524,94 @@ namespace ks::control_inspection
                         else m_tree->takeTopLevelItem(m_tree->indexOfTopLevelItem(item));
                         if (parent) parent->addChild(item); else m_tree->addTopLevelItem(item);
                     }
-                    item->setText(0, node.type); item->setText(1, node.name); item->setData(0, Qt::UserRole, node.id);
-                    item->setToolTip(0, node.id); m_items.insert(node.id, item);
-                    if (!SameOverlayNode(m_nodes.value(node.id), node)) m_nodesDirty = true;
-                    m_nodes.insert(node.id, node);
-                    m_seen.insert(node.id);
-                    if (node.id == m_preserve) { m_tree->setCurrentItem(item); m_selected = node; }
-                    if (m_expanded.contains(node.id) || node.parent.isEmpty()) item->setExpanded(true);
-                    if (node.id == m_reveal)
+                    if (item->text(0) != node.type) item->setText(0, node.type);
+                    if (item->text(1) != node.name) item->setText(1, node.name);
+                    if (created) { item->setData(0, Qt::UserRole, id); item->setToolTip(0, id); m_items.insert(id, item); }
+                    if (id == m_preserve) { m_tree->setCurrentItem(item); m_selected = node; }
+                    if (m_expanded.contains(id) || (created && node.parent.isEmpty())) item->setExpanded(true);
+                    if (id == m_reveal && id == m_preserve)
                     {
                         for (auto* ancestor = item->parent(); ancestor; ancestor = ancestor->parent()) ancestor->setExpanded(true);
                         m_tree->setCurrentItem(item); m_tree->scrollToItem(item); m_reveal.clear();
                     }
                 }
                 m_rebuilding = false;
-                if (reply.done)
+                m_projectionQueue.pop_front(); m_projectionQueued.remove(id);
+                return true;
+            }
+            void schedulePump()
+            {
+                if (m_pumpScheduled || !m_started || m_paused || m_suspended) return;
+                m_pumpScheduled = true;
+                QTimer::singleShot(0, this, [this] { m_pumpScheduled = false; pump(); });
+            }
+            void pump()
+            {
+                if (!m_started || m_paused || m_suspended || s_active != this) return;
+                const QPointer<Page> self(this);
+                const bool project = canProjectUi();
+                if (isVisible() && !project)
+                    ks::ui::DeferItemViewUiCommitIfContextMenuOpen(this, QStringLiteral("control-inspection-projection"),
+                        {m_tree, m_properties}, [self] { if (self) self->schedulePump(); });
+                QElapsedTimer budget; budget.start();
+                int units = 0;
+                while (units < 64 && (units == 0 || budget.elapsed() < 4))
                 {
-                    m_scanDone = true;
-                    QSet<QString> removed;
-                    for (auto it = m_items.cbegin(); it != m_items.cend(); ++it) if (!m_seen.contains(it.key())) removed.insert(it.key());
-                    QVector<QTreeWidgetItem*> deletions;
-                    for (const auto& id : removed)
+                    auto control = m_collector.takeControl();
+                    if (!control.isEmpty()) { consume(std::move(control.front())); ++units; continue; }
+                    m_preferProjection = !m_preferProjection;
+                    if (project && m_preferProjection && projectOne()) { ++units; continue; }
+                    if (m_retiring)
                     {
-                        auto* item = m_items.take(id); m_nodes.remove(id); m_nodesDirty = true;
-                        if (!item->parent() || !removed.contains(item->parent()->data(0, Qt::UserRole).toString())) deletions.push_back(item);
+                        if (m_retireCursor < m_retireIds.size())
+                        {
+                            const auto id = m_retireIds[m_retireCursor++];
+                            if (!m_seen.contains(id))
+                            {
+                                m_nodes.remove(id); m_nodesDirty = true; queueProjection(id);
+                                if (m_selected.id == id) m_selected = {};
+                            }
+                            ++units; continue;
+                        }
+                        m_retiring = false; m_retireIds.clear(); m_scanDone = true;
+                        m_hierarchyIds = m_seenOrder; m_hierarchyCursor = 0;
                     }
-                    m_rebuilding = true; for (auto* item : deletions) delete item; m_rebuilding = false;
-                    if (!m_selected.id.isEmpty() && !m_nodes.contains(m_selected.id)) m_selected = {};
+                    if (!m_pendingReply)
+                    {
+                        auto replies = m_collector.take(1);
+                        if (!replies.isEmpty()) { m_pendingReply = std::move(replies.front()); m_replyCursor = 0; }
+                    }
+                    if (m_pendingReply)
+                    {
+                        auto& reply = *m_pendingReply;
+                        if (reply.hover || reply.mutation)
+                        { consume(std::move(reply)); m_pendingReply.reset(); ++units; continue; }
+                        if (reply.generation != m_generation) { m_pendingReply.reset(); ++units; continue; }
+                        if (FAILED(reply.error)) m_scanError = reply.error;
+                        if (m_replyCursor < reply.nodes.size())
+                        { consumeNode(reply.nodes[m_replyCursor++]); ++units; continue; }
+                        if (reply.done)
+                        {
+                            m_retiring = true; m_retireIds = m_nodes.keys(); m_retireCursor = 0;
+                        }
+                        m_pendingReply.reset(); ++units; continue;
+                    }
+                    if (project && projectOne()) { ++units; continue; }
+                    break;
                 }
-                QString status = T("目标：%1　已识别：%2　%3").arg(QStringLiteral("0x%1").arg(reinterpret_cast<quintptr>(m_root), 0, 16))
-                    .arg(m_nodes.size()).arg(m_scanDone ? T("扫描完成") : T("正在扫描"));
-                if (FAILED(m_scanError)) status += T("；部分信息不可用（0x%1）").arg(static_cast<quint32>(m_scanError), 8, 16, QLatin1Char('0'));
-                if (m_scanDone && m_nodes.size() <= 1 && m_view->currentIndex() != 2)
-                    status += T("；目标未暴露更多 UIA 控件，可切换 Win32 子窗口树。" );
-                m_status->setText(status); updateOverlay();
+                if (project) renderPendingProperties();
+                if (m_clock.elapsed() - m_lastStatus >= 100)
+                {
+                    m_lastStatus = m_clock.elapsed();
+                    QString status = T("目标：%1　已识别：%2　%3").arg(QStringLiteral("0x%1").arg(reinterpret_cast<quintptr>(m_root), 0, 16))
+                        .arg(m_nodes.size()).arg((m_scanDone && m_projectionQueue.empty() && m_hierarchyCursor >= m_hierarchyIds.size()) ? T("扫描完成") : T("正在扫描"));
+                    if (FAILED(m_scanError)) status += T("；部分信息不可用（0x%1）").arg(static_cast<quint32>(m_scanError), 8, 16, QLatin1Char('0'));
+                    if (m_scanDone && m_projectionQueue.empty() && m_nodes.size() <= 1 && m_view->currentIndex() != 2)
+                        status += T("；目标未暴露更多 UIA 控件，可切换 Win32 子窗口树。" );
+                    setStatus(status);
+                }
+                if (m_pendingReply || m_retiring || m_collector.hasReplies()
+                    || (project && (!m_projectionQueue.empty() || m_hierarchyCursor < m_hierarchyIds.size()))) schedulePump();
             }
             void updateOverlay()
             {
@@ -495,14 +628,14 @@ namespace ks::control_inspection
             {
                 if (!m_started || m_paused || s_active != this) return;
                 if (!ks::window::windowIdentityMatches(reinterpret_cast<quintptr>(m_original), m_pid, m_tid, m_created))
-                { setPaused(true); m_status->setText(T("目标窗口已失效，检查已结束。")); m_pick->setEnabled(false); m_pause->setEnabled(false); return; }
+                { setPaused(true); setStatus(T("目标窗口已失效，检查已结束。")); m_pick->setEnabled(false); m_pause->setEnabled(false); return; }
                 if (m_scope->currentIndex() == 0 && ::GetAncestor(m_original, GA_ROOT) != m_root)
                 { changeTarget(); return; }
                 const bool hidden = !m_detail->isVisible() || m_detail->isMinimized()
                     || !::IsWindowVisible(m_root) || ::IsIconic(m_root);
                 if (hidden) { if (!m_suspended) suspend(); return; }
                 if (m_suspended) { m_suspended = false; configureInput(); scan(); }
-                for (auto& reply : m_collector.take()) consume(std::move(reply));
+                pump();
                 const qint64 now = m_clock.elapsed();
                 if (m_overlay && now - m_lastClip >= 120)
                 { m_dirty = ClipOverlay(m_overlay, m_root, native(m_detail)) || m_dirty; m_lastClip = now; }
@@ -536,6 +669,16 @@ namespace ks::control_inspection
             QPointer<QWidget> m_overlay;
             QVector<Node> m_sceneNodes;
             bool m_nodesDirty = true;
+            bool m_pumpScheduled = false, m_preferProjection = false, m_retiring = false;
+            bool m_propertiesDirty = false, m_pendingPropertyHovered = false;
+            std::optional<Reply> m_pendingReply;
+            qsizetype m_replyCursor = 0, m_retireCursor = 0, m_hierarchyCursor = 0;
+            QVector<QString> m_retireIds, m_hierarchyIds, m_seenOrder;
+            std::deque<QString> m_projectionQueue;
+            QSet<QString> m_projectionQueued;
+            Node m_pendingPropertyNode;
+            QString m_statusText;
+            qint64 m_lastStatus = -100;
             quint64 m_sceneRevision = 0;
             Collector m_collector;
             QTimer m_timer;
