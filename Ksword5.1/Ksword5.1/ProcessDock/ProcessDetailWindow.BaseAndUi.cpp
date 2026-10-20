@@ -1365,6 +1365,7 @@ namespace
             const bool multipleProcessorGroups)
         {
             m_threadValues = std::move(threadValues);
+            m_cardLayoutDirty = true;
             QSet<std::uint32_t> liveThreadIds;
             for (const ProcessDetailWindow::ThreadCpuCoreValue& thread : m_threadValues)
             {
@@ -1461,7 +1462,13 @@ namespace
 
         void paintEvent(QPaintEvent* eventPointer) override
         {
-            (void)eventPointer;
+            const QRegion exposedRegion = eventPointer != nullptr
+                ? eventPointer->region() : QRegion(rect());
+            if (exposedRegion.isEmpty())
+            {
+                return;
+            }
+            ensureCardLayout(std::max(1, width()));
             QPainter painter(this);
             painter.setRenderHint(QPainter::Antialiasing, true);
 
@@ -1470,29 +1477,26 @@ namespace
             const QColor borderColor = KswordTheme::BorderColor();
             const QColor primaryTextColor = KswordTheme::TextPrimaryColor();
             const QColor secondaryTextColor = KswordTheme::TextSecondaryColor();
-            qreal cardTop = 0.0;
-            const QRect exposedRect = eventPointer != nullptr ? eventPointer->rect() : rect();
+            const QRectF exposedBounds = QRectF(exposedRegion.boundingRect()).adjusted(-2.0, -2.0, 2.0, 2.0);
+            const int firstCardIndex = std::max(0, static_cast<int>(std::upper_bound(
+                m_cardTops.cbegin(), m_cardTops.cend(), exposedBounds.top()) - m_cardTops.cbegin()) - 1);
 
-            for (int index = 0; index < static_cast<int>(m_threadValues.size()); ++index)
+            for (int index = firstCardIndex; index < static_cast<int>(m_threadValues.size()); ++index)
             {
                 const ProcessDetailWindow::ThreadCpuCoreValue& thread =
                     m_threadValues[static_cast<std::size_t>(index)];
                 const bool expanded = m_expandedThreadIds.contains(thread.threadId);
-                const qreal currentCardHeight = cardHeight(thread, width());
-                const QRectF cardRect(
-                    0.0,
-                    cardTop,
-                    static_cast<qreal>(width()),
-                    currentCardHeight);
-                cardTop += currentCardHeight + kGridSpacing;
-                // 滚动内容可能包含大量线程；视口外卡片保留数据，只跳过文字和折线路径生成。
-                if (cardRect.bottom() < exposedRect.top() - 1)
-                {
-                    continue;
-                }
-                if (cardRect.top() > exposedRect.bottom() + 1)
+                const qreal cardTop = m_cardTops[static_cast<std::size_t>(index)];
+                const qreal currentCardHeight = m_cardTops[static_cast<std::size_t>(index) + 1U]
+                    - cardTop - kGridSpacing;
+                const QRectF cardRect(0.0, cardTop, static_cast<qreal>(width()), currentCardHeight);
+                if (cardRect.top() > exposedBounds.bottom())
                 {
                     break;
+                }
+                if (!exposedRegion.intersects(cardRect.adjusted(-1.0, -1.0, 1.0, 1.0).toAlignedRect()))
+                {
+                    continue;
                 }
 
                 painter.setPen(QPen(borderColor, 1.0));
@@ -1561,35 +1565,51 @@ namespace
                     (bodyWidth - kCoreGridSpacing * (columnCount - 1))
                         / static_cast<qreal>(columnCount));
                 const auto threadHistoryIt = m_historyByThreadId.find(thread.threadId);
-                for (int coreIndex = 0; coreIndex < static_cast<int>(thread.cores.size()); ++coreIndex)
+                const int coreCount = static_cast<int>(thread.cores.size());
+                const int rowCount = (coreCount + columnCount - 1) / columnCount;
+                const int firstRow = std::max(0, static_cast<int>(std::floor((exposedBounds.top() - bodyTop) / (kCoreChartHeight + kCoreGridSpacing))));
+                const int lastRow = std::min(rowCount - 1, static_cast<int>(std::floor((exposedBounds.bottom() - bodyTop) / (kCoreChartHeight + kCoreGridSpacing))));
+                const int firstColumn = std::max(0, static_cast<int>(std::floor((exposedBounds.left() - bodyLeft) / (coreCardWidth + kCoreGridSpacing))));
+                const int lastColumn = std::min(columnCount - 1, static_cast<int>(std::floor((exposedBounds.right() - bodyLeft) / (coreCardWidth + kCoreGridSpacing))));
+                for (int row = firstRow; row <= lastRow; ++row)
                 {
-                    const ProcessDetailWindow::CpuCoreValue& core =
-                        thread.cores[static_cast<std::size_t>(coreIndex)];
-                    const int row = coreIndex / columnCount;
-                    const int column = coreIndex % columnCount;
-                    const QRectF coreCardRect(
-                        bodyLeft + column * (coreCardWidth + kCoreGridSpacing),
-                        bodyTop + row * (kCoreChartHeight + kCoreGridSpacing),
-                        coreCardWidth,
-                        kCoreChartHeight);
-                    const std::deque<double>* history = nullptr;
-                    if (threadHistoryIt != m_historyByThreadId.end())
+                    for (int column = firstColumn; column <= lastColumn; ++column)
                     {
-                        const auto coreHistoryIt = threadHistoryIt->second.find(core.processorIndex);
-                        if (coreHistoryIt != threadHistoryIt->second.end())
+                        const int coreIndex = row * columnCount + column;
+                        if (coreIndex >= coreCount)
                         {
-                            history = &coreHistoryIt->second;
+                            break;
                         }
+                        const QRectF coreCardRect(
+                            bodyLeft + column * (coreCardWidth + kCoreGridSpacing),
+                            bodyTop + row * (kCoreChartHeight + kCoreGridSpacing),
+                            coreCardWidth,
+                            kCoreChartHeight);
+                        if (!exposedRegion.intersects(coreCardRect.adjusted(-1.0, -1.0, 1.0, 1.0).toAlignedRect()))
+                        {
+                            continue;
+                        }
+                        const ProcessDetailWindow::CpuCoreValue& core =
+                            thread.cores[static_cast<std::size_t>(coreIndex)];
+                        const std::deque<double>* history = nullptr;
+                        if (threadHistoryIt != m_historyByThreadId.end())
+                        {
+                            const auto coreHistoryIt = threadHistoryIt->second.find(core.processorIndex);
+                            if (coreHistoryIt != threadHistoryIt->second.end())
+                            {
+                                history = &coreHistoryIt->second;
+                            }
+                        }
+                        drawCoreChart(
+                            painter,
+                            coreCardRect,
+                            core,
+                            history,
+                            cpuColor,
+                            borderColor,
+                            primaryTextColor,
+                            secondaryTextColor);
                     }
-                    drawCoreChart(
-                        painter,
-                        coreCardRect,
-                        core,
-                        history,
-                        cpuColor,
-                        borderColor,
-                        primaryTextColor,
-                        secondaryTextColor);
                 }
             }
 
@@ -1608,10 +1628,16 @@ namespace
                 return;
             }
 
-            qreal top = 0.0;
-            for (const ProcessDetailWindow::ThreadCpuCoreValue& thread : m_threadValues)
+            ensureCardLayout(std::max(1, width()));
+            const qreal clickY = eventPointer->position().y();
+            const int index = std::max(0, static_cast<int>(std::upper_bound(
+                m_cardTops.cbegin(), m_cardTops.cend(), clickY) - m_cardTops.cbegin()) - 1);
+            if (index < static_cast<int>(m_threadValues.size()))
             {
-                const qreal height = cardHeight(thread, width());
+                const ProcessDetailWindow::ThreadCpuCoreValue& thread =
+                    m_threadValues[static_cast<std::size_t>(index)];
+                const qreal top = m_cardTops[static_cast<std::size_t>(index)];
+                const qreal height = m_cardTops[static_cast<std::size_t>(index) + 1U] - top - kGridSpacing;
                 const QRectF cardRect(0.0, top, static_cast<qreal>(width()), height);
                 if (cardRect.contains(eventPointer->position()))
                 {
@@ -1623,13 +1649,13 @@ namespace
                     {
                         m_expandedThreadIds.insert(thread.threadId);
                     }
+                    m_cardLayoutDirty = true;
                     synchronizeHeight();
                     updateGeometry();
                     update();
                     eventPointer->accept();
                     return;
                 }
-                top += height + kGridSpacing;
             }
             QWidget::mousePressEvent(eventPointer);
         }
@@ -1652,6 +1678,7 @@ namespace
                         return left.threadId < right.threadId;
                     });
                 m_sortPending = false;
+                m_cardLayoutDirty = true;
             }
             synchronizeHeight();
         }
@@ -1698,19 +1725,44 @@ namespace
                     : 0);
         }
 
+        // One prefix layout serves painting, hit testing and the current-width height query.
+        // It contains positions only; all histories and stable thread identities stay in their existing maps.
+        void ensureCardLayout(const int availableWidth) const
+        {
+            if (!m_cardLayoutDirty && m_cardLayoutWidth == availableWidth)
+            {
+                return;
+            }
+            m_cardTops.resize(m_threadValues.size() + 1U);
+            qreal top = 0.0;
+            for (std::size_t index = 0; index < m_threadValues.size(); ++index)
+            {
+                m_cardTops[index] = top;
+                top += cardHeight(m_threadValues[index], availableWidth) + kGridSpacing;
+            }
+            m_cardTops.back() = top;
+            m_cardLayoutWidth = availableWidth;
+            m_cardLayoutDirty = false;
+        }
+
         int contentHeightForWidth(const int availableWidth) const
         {
             if (m_threadValues.empty())
             {
                 return kCollapsedCardHeight;
             }
-            int height = 0;
-            for (const ProcessDetailWindow::ThreadCpuCoreValue& thread : m_threadValues)
+            // sizeHint may ask about its 820px reference; do not evict the visible-width index for it.
+            if (availableWidth != std::max(1, width()))
             {
-                height += cardHeight(thread, availableWidth);
+                int height = (static_cast<int>(m_threadValues.size()) - 1) * kGridSpacing;
+                for (const ProcessDetailWindow::ThreadCpuCoreValue& thread : m_threadValues)
+                {
+                    height += cardHeight(thread, availableWidth);
+                }
+                return height;
             }
-            height += (static_cast<int>(m_threadValues.size()) - 1) * kGridSpacing;
-            return height;
+            ensureCardLayout(availableWidth);
+            return static_cast<int>(m_cardTops.back() - kGridSpacing);
         }
 
         QString coordinateText(const ProcessDetailWindow::CpuCoreValue& core) const
@@ -1819,6 +1871,9 @@ namespace
         std::vector<ProcessDetailWindow::ThreadCpuCoreValue> m_threadValues;
         std::unordered_map<std::uint32_t, CoreHistoryMap> m_historyByThreadId;
         QSet<std::uint32_t> m_expandedThreadIds;
+        mutable std::vector<qreal> m_cardTops;
+        mutable int m_cardLayoutWidth = -1;
+        mutable bool m_cardLayoutDirty = true;
         bool m_sortPending = false; // 隐藏期间多个样本只需在Show时提交最终排序。
         bool m_multipleProcessorGroups = false;
     };
