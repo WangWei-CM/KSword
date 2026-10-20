@@ -77,7 +77,6 @@ namespace ks::ui
         QString m_scopePath; // 空为全部报告，特殊值为诊断，其余为规范分区路径。
         QString m_typePath; // 当前类型的规范身份；空表示当前范围的全部类型。
         QString m_query; // 当前搜索词，搜索遍及所选范围的所有类型。
-        QString m_language; // 本地化显示代次，不改变规范节点身份。
         QSet<QString> m_beforeSearch; // 搜索前的展开状态。
         QString m_beforeSearchSelected; // 搜索前选中的规范字段。
         int m_beforeSearchColumn = 0; // 搜索前实际选中的值列。

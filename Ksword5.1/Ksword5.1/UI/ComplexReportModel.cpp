@@ -327,44 +327,36 @@ namespace ks::ui
         return result;
     }
 
+    // GUI installs precomputed topology/display decisions; stable integer IDs retain persistent indexes.
     ComplexReportModel::InstallResult ComplexReportModel::installPrepared(const PreparedDocument& prepared)
     {
         // A reentrant latest query can reuse the exact State that an earlier delivery installed.
         if (prepared.next && prepared.next == m_state) return InstallResult::Updated;
         if (!prepared.next || prepared.base != m_state) return InstallResult::Rejected;
-        const QPointer<ComplexReportModel> alive(this);
-        const bool reset = applyPrepared(prepared);
-        if (!alive || m_state != prepared.next) return InstallResult::Rejected;
-        return reset ? InstallResult::Reset : InstallResult::Updated;
-    }
-
-    // GUI installs precomputed topology/display decisions; stable integer IDs retain persistent indexes.
-    bool ComplexReportModel::applyPrepared(const PreparedDocument& prepared)
-    {
-        if (!prepared.next || prepared.base != m_state) return false;
         const bool headersChanged = m_state->headers != prepared.next->headers;
         const QPointer<ComplexReportModel> alive(this);
         if (prepared.reset) beginResetModel();
-        if (!alive) return false;
+        if (!alive) return InstallResult::Rejected;
         m_state = prepared.next;
         if (prepared.reset) endResetModel();
-        if (!alive || m_state != prepared.next) return false;
+        if (!alive || m_state != prepared.next) return InstallResult::Rejected;
         if (!prepared.reset) for (const ChangedRange& range : prepared.changes)
         {
             const QModelIndex parentIndex = range.parent < 0 ? QModelIndex()
                 : indexForPath(m_state->entries.at(range.parent).path);
             emit dataChanged(index(range.first, 0, parentIndex), index(range.last, 2, parentIndex));
-            if (!alive || m_state != prepared.next) return false;
+            if (!alive || m_state != prepared.next) return InstallResult::Rejected;
         }
         if (headersChanged) emit headerDataChanged(Qt::Horizontal, 0, 2);
-        return prepared.reset;
+        if (!alive || m_state != prepared.next) return InstallResult::Rejected;
+        return prepared.reset ? InstallResult::Reset : InstallResult::Updated;
     }
 
     // Synchronous compatibility entry for QtCore callers. The report widget uses the worker API.
     bool ComplexReportModel::setDocument(const FieldDocument& document)
     {
-        return applyPrepared(prepareDocument(document,
-            [](const QString& source) { return ks::i18n::sourceText(source); }, m_state));
+        return installPrepared(prepareDocument(document,
+            [](const QString& source) { return ks::i18n::sourceText(source); }, m_state)) == InstallResult::Reset;
     }
 
     // 语言变化只重算显示缓存；规范名称、路径及层级不随语言变化。
@@ -633,7 +625,6 @@ namespace ks::ui
                 ? 1 : result->matchesBelow.at(item);
             if (entry.parent < 0)
             {
-                ++result->rootRows;
                 result->rootMatches += count;
             }
             else

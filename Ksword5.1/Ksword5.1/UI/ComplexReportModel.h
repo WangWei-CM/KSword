@@ -56,7 +56,6 @@ namespace ks::ui
             QVector<int> childRows;
             QStringList expansionPaths;
             int rootMatches = 0;
-            int rootRows = 0;
         };
         using FilterSnapshot = std::shared_ptr<const FilterState>;
         static FilterSnapshot prepareFilter(Snapshot source, const QString& query, const QString& scopePath,
@@ -68,7 +67,6 @@ namespace ks::ui
         Snapshot snapshot() const { return m_state; }
         enum class InstallResult { Rejected, Updated, Reset };
         InstallResult installPrepared(const PreparedDocument& prepared);
-        bool applyPrepared(const PreparedDocument& prepared);
         explicit ComplexReportModel(QObject* parent = nullptr);
         ~ComplexReportModel() override;
         bool setDocument(const FieldDocument& document);

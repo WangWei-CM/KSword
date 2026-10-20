@@ -261,7 +261,6 @@ namespace ks::ui
         {
             // 语言是原文版本的一部分；不依赖父投影随后恰好再次提交 document。
             m_rawDirty = true;
-            m_language = ks::i18n::LanguageManager::instance().currentLanguageId();
             m_projectionDirty = true;
             ++m_readingGeneration;
             ++m_expansionGeneration;
@@ -404,22 +403,20 @@ namespace ks::ui
         updatePresentation();
         if (!safe || generation->load() != ticket) return;
         const auto translator = ks::i18n::LanguageManager::instance().sourceTextSnapshot();
-        const QString language = translator.languageId();
         const auto previous = m_model->snapshot();
         const FieldDocument document = m_requestedDocument;
         const auto dispatcher = m_dispatcher;
-        QThreadPool::globalInstance()->start([generation, ticket, translator, language, previous, document, safe, dispatcher]()
+        QThreadPool::globalInstance()->start([generation, ticket, translator, previous, document, safe, dispatcher]()
         {
             const auto cancelled = [generation, ticket]() { return generation->load() != ticket; };
             auto prepared = ComplexReportModel::prepareDocument(document,
                 [translator](const QString& source) { return translator.sourceText(source); }, previous, cancelled);
             if (!prepared.next || cancelled()) return;
-            dispatcher->post([safe, generation, ticket, prepared = std::move(prepared), language]() mutable
+            dispatcher->post([safe, generation, ticket, prepared = std::move(prepared)]() mutable
             {
                 if (safe && generation->load() == ticket)
                 {
                     safe->m_candidate = std::make_shared<ComplexReportModel::PreparedDocument>(std::move(prepared));
-                    safe->m_language = language;
                     if (safe->isVisible()) safe->scheduleSearch(false);
                     else
                     {
