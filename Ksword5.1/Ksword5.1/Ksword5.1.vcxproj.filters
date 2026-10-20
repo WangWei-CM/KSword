@@ -46,6 +46,9 @@
     <Filter Include="Header Files\MemoryWorkbench\Shared">
       <UniqueIdentifier>{a8a0d876-0ad9-417d-bfbe-2bff029a73d1}</UniqueIdentifier>
     </Filter>
+    <ClCompile Include="UI\CompleteExport.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="..\..\shared\evidence\memory_workbench\MemoryWriteOperation.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -70,6 +73,9 @@
     <ClCompile Include="PrivilegeDock\PrivilegeTokenPages.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClInclude Include="UI\CompleteExport.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="MonitorDock\ProcessTraceEventMetadata.h">
       <Filter>Header Files</Filter>
     </ClInclude>
