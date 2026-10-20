@@ -669,8 +669,10 @@ namespace
                 }
             }
             m_series = std::move(series);
+            m_linePathsValid = false;
             m_unitText = unitText;
             m_fixedMaximum = fixedMaximum;
+            m_axisMaximum = chartMaximum();
             m_emptyText = emptyText;
             m_timeHeader = timeHeader;
             m_copyLatestText = copyLatestText;
@@ -722,7 +724,7 @@ namespace
                 return;
             }
 
-            const double axisMaximum = chartMaximum();
+            const double axisMaximum = m_axisMaximum;
             drawGrid(painter, plotRect, axisMaximum, borderColor, textColor);
             drawLines(painter, plotRect, axisMaximum);
             drawLegend(painter, textColor);
@@ -847,8 +849,23 @@ namespace
             return startRatio + (targetRatio - startRatio) * m_animationProgress;
         }
 
-        void drawLines(QPainter& painter, const QRectF& plotRect, const double axisMaximum) const
+        // 路径只依赖数据、坐标与动画进度；普通expose/滚动/换色不再重复投影1800点。
+        void ensureLinePaths(const QRectF& plotRect, const double axisMaximum)
         {
+            const qreal pixelRatio = devicePixelRatioF();
+            if (m_linePathsValid && m_cachedPlotRect == plotRect
+                && m_cachedAxisMaximum == axisMaximum && m_cachedPixelRatio == pixelRatio
+                && m_cachedAnimationProgress == m_animationProgress)
+            {
+                return;
+            }
+            m_cachedLinePaths.clear();
+            m_cachedLinePaths.reserve(m_series.size());
+            m_cachedPlotRect = plotRect;
+            m_cachedAxisMaximum = axisMaximum;
+            m_cachedPixelRatio = pixelRatio;
+            m_cachedAnimationProgress = m_animationProgress;
+            m_linePathsValid = true;
             const std::size_t pointCount = m_timestamps.size();
             if (pointCount == 0U)
             {
@@ -857,11 +874,12 @@ namespace
 
             for (const Series& series : m_series)
             {
+                m_cachedLinePaths.emplace_back();
+                QPainterPath& linePath = m_cachedLinePaths.back();
                 if (series.values.empty())
                 {
                     continue;
                 }
-                QPainterPath linePath;
                 const std::size_t seriesPointCount = std::min(pointCount, series.values.size());
                 for (std::size_t pointIndex = 0; pointIndex < seriesPointCount; ++pointIndex)
                 {
@@ -886,9 +904,17 @@ namespace
                         linePath.lineTo(x, y);
                     }
                 }
-                painter.setPen(QPen(series.color, 2.0));
+            }
+        }
+
+        void drawLines(QPainter& painter, const QRectF& plotRect, const double axisMaximum)
+        {
+            ensureLinePaths(plotRect, axisMaximum);
+            for (std::size_t seriesIndex = 0; seriesIndex < m_cachedLinePaths.size(); ++seriesIndex)
+            {
+                painter.setPen(QPen(m_series[seriesIndex].color, 2.0));
                 painter.setBrush(Qt::NoBrush);
-                painter.drawPath(linePath);
+                painter.drawPath(m_cachedLinePaths[seriesIndex]);
             }
         }
 
@@ -972,6 +998,13 @@ namespace
         QString m_copyLatestText;
         QString m_copyHistoryText;
         double m_fixedMaximum = 0.0;
+        double m_axisMaximum = 1.0;
+        std::vector<QPainterPath> m_cachedLinePaths;
+        QRectF m_cachedPlotRect;
+        double m_cachedAxisMaximum = 1.0;
+        double m_cachedAnimationProgress = 1.0;
+        qreal m_cachedPixelRatio = 0.0;
+        bool m_linePathsValid = false;
         QHash<QString, double> m_previousLatestValueByLabel;
         std::size_t m_previousPointCount = 0U;
         bool m_historyWindowShifted = false;
