@@ -25,6 +25,7 @@
 #include <QList>
 #include <QMenu>
 #include <QPainter>
+#include <QPaintEvent>
 #include <QPixmap>
 #include <QPointer>
 #include <QSet>
@@ -420,7 +421,9 @@ int ks::ui::SvgThemeIconManager::runIconApplySlice(
         ++sliceState.nextWidgetIndex;
         if (widgetPointer != nullptr)
         {
+            const QPointer<QWidget> guardedWidget(widgetPointer);
             recoloredCount += applyToWidget(widgetPointer, cacheHitCount);
+            if (!guardedWidget) continue;
 
             const QList<QAction*> actionList =
                 directWidgetActions(widgetPointer);
@@ -437,6 +440,8 @@ int ks::ui::SvgThemeIconManager::runIconApplySlice(
                     ++recoloredCount;
                 }
             }
+            if (guardedWidget)
+                rememberWidgetRefresh(guardedWidget, directWidgetActions(guardedWidget));
         }
 
         if ((sliceState.nextWidgetIndex % IconApplyBudgetCheckStride) == 0 &&
@@ -495,10 +500,30 @@ bool ks::ui::SvgThemeIconManager::eventFilter(
     if (widgetPointer != nullptr &&
         (eventType == QEvent::Polish || eventType == QEvent::Show ||
          eventType == QEvent::ActionAdded || eventType == QEvent::ActionChanged ||
-         eventType == QEvent::WindowIconChange ||
-         (eventType == QEvent::StyleChange && qobject_cast<QAbstractButton*>(widgetPointer))))
+         eventType == QEvent::ActionRemoved || eventType == QEvent::WindowIconChange ||
+         eventType == QEvent::ParentChange || eventType == QEvent::StyleChange ||
+         eventType == QEvent::DevicePixelRatioChange || eventType == QEvent::ScreenChangeInternal))
     {
-        scheduleWidgetRefresh(widgetPointer);
+        // Show本身不代表源图或主题改变。已登记控件只做常量身份检查，
+        // 不再反复扫描Tab槽位、共享按钮样式和直接动作后才发现无需更新。
+        if (eventType != QEvent::Show || needsWidgetRefreshForShow(widgetPointer))
+        {
+            auto state = m_widgetRefreshStates.find(widgetPointer);
+            if (state != m_widgetRefreshStates.end()) state->dirty = true;
+            scheduleWidgetRefresh(widgetPointer);
+        }
+    }
+    else if (widgetPointer != nullptr &&
+        (eventType == QEvent::ChildAdded || eventType == QEvent::ChildRemoved))
+    {
+        // QObject的ChildAdded可能发生在QAction构造完成前；已登记宿主排队后
+        // 再发现直接动作，不能因当时的动态类型尚未就绪而永久跳过。
+        auto state = m_widgetRefreshStates.find(widgetPointer);
+        if (state != m_widgetRefreshStates.end())
+        {
+            state->dirty = true;
+            scheduleWidgetRefresh(widgetPointer, true);
+        }
     }
     else if (eventType == QEvent::Paint)
     {
@@ -561,8 +586,12 @@ bool ks::ui::SvgThemeIconManager::eventFilter(
                 ? qobject_cast<QTabWidget*>(tabBarPointer->parentWidget()) : nullptr;
             if (tabWidgetPointer != nullptr)
             {
+                const auto* paint = static_cast<QPaintEvent*>(eventObject);
                 for (int tabIndex = 0; tabIndex < tabWidgetPointer->count(); ++tabIndex)
                 {
+                    // setTabIcon非空换非空只有局部update，没有IconChanged信号；
+                    // 保留这条兼容兜底，但只检查本次真正重绘的标签。
+                    if (!paint->region().intersects(tabBarPointer->tabRect(tabIndex))) continue;
                     QWidget* pagePointer = tabWidgetPointer->widget(tabIndex); // 标签所属页面。
                     const QIcon currentIcon = tabWidgetPointer->tabIcon(tabIndex); // 当前标签图标。
                     if (pagePointer != nullptr && !currentIcon.isNull() &&
@@ -579,7 +608,89 @@ bool ks::ui::SvgThemeIconManager::eventFilter(
     return QObject::eventFilter(watchedObject, eventObject);
 }
 
-void ks::ui::SvgThemeIconManager::scheduleWidgetRefresh(QWidget* widgetPointer)
+bool ks::ui::SvgThemeIconManager::needsWidgetRefreshForShow(QWidget* widgetPointer) const
+{
+    const auto state = m_widgetRefreshStates.constFind(widgetPointer);
+    if (state == m_widgetRefreshStates.constEnd() || state->dirty
+        || state->generation != iconApplyGenerationCounter()
+        || state->devicePixelRatio != widgetPointer->devicePixelRatioF()) return true;
+    if (const auto* button = qobject_cast<QAbstractButton*>(widgetPointer);
+        button && state->buttonIconKey != button->icon().cacheKey()) return true;
+    if (widgetPointer->isWindow()
+        && state->windowIconKey != widgetPointer->windowIcon().cacheKey()) return true;
+    if (const auto* tabs = qobject_cast<QTabWidget*>(widgetPointer);
+        tabs && state->tabCount != tabs->count()) return true;
+    return false;
+}
+
+void ks::ui::SvgThemeIconManager::rememberWidgetRefresh(
+    QWidget* widgetPointer, const QList<QAction*>& actions)
+{
+    auto state = m_widgetRefreshStates.find(widgetPointer);
+    const auto* button = qobject_cast<QAbstractButton*>(widgetPointer);
+    const auto* tabs = qobject_cast<QTabWidget*>(widgetPointer);
+    if (state == m_widgetRefreshStates.end())
+    {
+        // 不为普通无图标容器创建热切状态；首次Show仍可发现后来加入的动作。
+        if (!button && !tabs && actions.isEmpty()
+            && !(widgetPointer->isWindow() && !widgetPointer->windowIcon().isNull())) return;
+        state = m_widgetRefreshStates.insert(widgetPointer, WidgetRefreshState{});
+        connect(widgetPointer, &QObject::destroyed, this, [this, widgetPointer]()
+        {
+            auto destroyed = m_widgetRefreshStates.find(widgetPointer);
+            if (destroyed == m_widgetRefreshStates.end()) return;
+            for (const auto& watch : destroyed->actions)
+            {
+                disconnect(watch.changed);
+                disconnect(watch.destroyed);
+            }
+            m_widgetRefreshStates.erase(destroyed);
+        });
+    }
+    // owned QAction即使不在QWidget::actions()中，也会在changed时使宿主dirty；
+    // 不用每次Show再次findChildren并读取所有图标。脱离/销毁时移除对应监听。
+    for (auto action = state->actions.begin(); action != state->actions.end();)
+    {
+        if (!actions.contains(action.key()))
+        {
+            disconnect(action->changed);
+            disconnect(action->destroyed);
+            action = state->actions.erase(action);
+        }
+        else ++action;
+    }
+    const QPointer<QWidget> guardedWidget(widgetPointer);
+    for (QAction* action : actions)
+    {
+        if (!action || state->actions.contains(action)) continue;
+        ActionRefreshWatch watch;
+        watch.changed = connect(action, &QAction::changed, this, [this, guardedWidget]()
+        {
+            if (!guardedWidget) return;
+            auto dirty = m_widgetRefreshStates.find(guardedWidget);
+            if (dirty != m_widgetRefreshStates.end()) dirty->dirty = true;
+            scheduleWidgetRefresh(guardedWidget);
+        });
+        watch.destroyed = connect(action, &QObject::destroyed, this,
+            [this, guardedWidget, action]()
+        {
+            if (!guardedWidget) return;
+            auto dirty = m_widgetRefreshStates.find(guardedWidget);
+            if (dirty == m_widgetRefreshStates.end()) return;
+            dirty->actions.remove(action);
+            dirty->dirty = true;
+        });
+        state->actions.insert(action, watch);
+    }
+    state->generation = iconApplyGenerationCounter();
+    state->dirty = false;
+    state->devicePixelRatio = widgetPointer->devicePixelRatioF();
+    state->buttonIconKey = button ? button->icon().cacheKey() : 0;
+    state->windowIconKey = widgetPointer->isWindow() ? widgetPointer->windowIcon().cacheKey() : 0;
+    state->tabCount = tabs ? tabs->count() : 0;
+}
+
+void ks::ui::SvgThemeIconManager::scheduleWidgetRefresh(QWidget* widgetPointer, bool forceDiscovery)
 {
     if (widgetPointer == nullptr || widgetPointer->property(PendingIconRefreshProperty).toBool())
     {
@@ -593,7 +704,7 @@ void ks::ui::SvgThemeIconManager::scheduleWidgetRefresh(QWidget* widgetPointer)
     const bool tabIcons = qobject_cast<QTabWidget*>(widgetPointer) != nullptr;
     const bool windowIcon = widgetPointer->isWindow() && !widgetPointer->windowIcon().isNull()
         && (m_customTintActive || widgetPointer->property(LastWindowIconKeyProperty).isValid());
-    if (!buttonIcon && !tabIcons && !windowIcon && directWidgetActions(widgetPointer).isEmpty())
+    if (!forceDiscovery && !buttonIcon && !tabIcons && !windowIcon && directWidgetActions(widgetPointer).isEmpty())
     {
         return;
     }
@@ -632,6 +743,8 @@ void ks::ui::SvgThemeIconManager::drainWidgetRefreshes()
         {
             (void)applyToAction(actionPointer, &ignoredCacheHits);
         }
+        if (safeWidget)
+            rememberWidgetRefresh(safeWidget, directWidgetActions(safeWidget));
         if (sliceTimer.elapsed() >= IconApplySliceBudgetMilliseconds)
         {
             break;
