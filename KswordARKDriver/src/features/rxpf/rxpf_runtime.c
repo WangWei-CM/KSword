@@ -1015,15 +1015,13 @@ KswRxpfRuntimeQueryBackup(
 NTSTATUS
 KswRxpfRuntimeAtomicCommit(
     _In_ const KSWORD_ARK_RXPF_ATOMIC_COMMIT_REQUEST* Request,
-    _Out_ KSWORD_ARK_RXPF_ATOMIC_COMMIT_RESPONSE* Response
+    _Out_ KSWORD_ARK_RXPF_PAGE_RESPONSE* Response
     )
 {
     KSW_RXPF_PAGE_RECORD source;
     PKSW_RXPF_PAGE_RECORD record = NULL;
     NTSTATUS status = STATUS_SUCCESS;
     BOOLEAN inserted = FALSE;
-    BOOLEAN requestExecProof = FALSE;
-    ULONGLONG executionCallTarget = 0ULL;
 
     /* 基本参数校验 */
     if (Request == NULL || Response == NULL || Request->reserved != 0UL) {
@@ -1033,14 +1031,10 @@ KswRxpfRuntimeAtomicCommit(
     status = KswRxpfValidateHeader(
         &Request->header,
         sizeof(*Request),
-        KSWORD_ARK_RXPF_FLAG_UI_CONFIRMED |
-            KSWORD_ARK_RXPF_FLAG_EXECUTE_PROOF);
+        KSWORD_ARK_RXPF_FLAG_UI_CONFIRMED);
     if (!NT_SUCCESS(status) || !KswRxpfRuntimeReady()) {
         return NT_SUCCESS(status) ? STATUS_DELETE_PENDING : status;
     }
-
-    requestExecProof = (Request->header.flags &
-        KSWORD_ARK_RXPF_FLAG_EXECUTE_PROOF) != 0UL;
 
     /* 只接受 EXTERNAL_IMAGE 目标——原子提交的唯一使用场景 */
     if (Request->targetKind != KSWORD_ARK_RXPF_TARGET_EXTERNAL_IMAGE) {
@@ -1053,22 +1047,6 @@ KswRxpfRuntimeAtomicCommit(
         (ULONGLONG)Request->offset + Request->length > PAGE_SIZE ||
         (ULONGLONG)Request->offset + Request->length < Request->offset) {
         return STATUS_INVALID_PARAMETER;
-    }
-
-    /*
-     * EXECUTE_PROOF 要求 payload 至少包含 mov rax, imm64; ret 的 12 字节
-     * 结构：48 B8 <imm64> C3，首尾 opcode 由 driver 强制校验，中间 imm64
-     * 的值由调用方决定并与 R3 的 expectedReturnValue 比对。
-     * 这一致性检查只在 driver 侧生效——R3 侧 CLI 自己拼合 payload，
-     * 不额外校验，避免在构造正确 payload 的工具链里重复断言。
-     */
-    if (requestExecProof) {
-        if (Request->length < 12UL ||
-            Request->bytes[0] != 0x48U ||
-            Request->bytes[1] != 0xB8U ||
-            Request->bytes[10] != 0xC3U) {
-            return STATUS_INVALID_PARAMETER;
-        }
     }
 
     /* ── 阶段 1：创建 record（无 CAPTURE_BACKUP，原子流程不需要备份）── */
@@ -1139,61 +1117,17 @@ Cleanup:
         record->SkipBackupRestoreOnRelease = FALSE;
     }
 
-    /*
-     * EXECUTE_PROOF：预先拍下调用地址——ReleaseRecord 可能触碰 record 的
-     * 可见状态（WritableAlias、LastStatus 等），且 mode=1 之后页面即
-     * 回到 RX，驱动可直接 CALL rcx 跳进 payload。此处 pageBase 为
-     * EXTERNAL_IMAGE 的物理页基址，与 Request->offset 相加后即是我们
-     * 刚刚写入 mov rax, imm64; ret 的那 12 字节的起点。
-     */
-    if (requestExecProof && NT_SUCCESS(status) && record != NULL) {
-        executionCallTarget =
-            (ULONGLONG)record->PageBase + Request->offset;
-    }
-
     KswRxpfImageProtectionReleaseRecord(record);
     /* ── NX 窗口在 ReleaseRecord 中 mode=1 调用后关闭 ── */
 
-    /*
-     * ── EXECUTE_PROOF：mode=1 已完成，页面回到 RX，字节已 persist ──
-     * 持有 PageTable 排它锁 + IRQL = PASSIVE，直接 call rcx 进 payload。
-     * payload 必须是 mov rax, imm64; ret 的 12 字节，call 后立即 ret 回来，
-     * 栈/RBP 不受污染。__try/__except 捕获 #UD/#PF/CET 等异常——
-     *   - executionAttempted = 1 表示我们尝试过 call
-     *   - executionFaulted = 1 表示 SEH 捕获了异常
-     *   - executionReturnValue = RAX（SEH 捕获时固定为 0）
-     *   - executionStatus = STATUS_SUCCESS 或 GetExceptionCode()
-     * 调用方对比 executionReturnValue 与期望 sentinel 就能直接判定
-     * "CPU 真的取指并执行了那 11 个 byte"。
-     */
-    if (executionCallTarget != 0ULL) {
-        ULONGLONG returnedValue = 0ULL;
-        NTSTATUS executionStatus = STATUS_SUCCESS;
-
-        Response->executionAttempted = 1UL;
-        Response->executionCallSiteAddress = executionCallTarget;
-        Response->executionCallSiteOffset = Request->offset;
-        __try {
-            returnedValue = KswRxpfInvokeTestPage(
-                (PVOID)(ULONG_PTR)executionCallTarget);
-        }
-        __except (EXCEPTION_EXECUTE_HANDLER) {
-            executionStatus = GetExceptionCode();
-            Response->executionFaulted = 1UL;
-            returnedValue = 0ULL;
-        }
-        Response->executionReturnValue = returnedValue;
-        Response->executionStatus = executionStatus;
-    }
-
     /* 在 ClearRemovedLocked 销毁槽之前捕获最终状态 */
-    Response->page.lastStatus = record->LastStatus;
-    KswRxpfFillPageResponse(record, &Response->page);
+    Response->lastStatus = record->LastStatus;
+    KswRxpfFillPageResponse(record, Response);
     KswRxpfPageTableClearRemovedLocked(
         &g_KswRxpfRuntime.PageTable,
         record);
     InterlockedIncrement(&g_KswRxpfRuntime.Generation);
     KswRxpfPageTableReleaseExclusive(&g_KswRxpfRuntime.PageTable);
-    KswRxpfSetLastStatus(NT_SUCCESS(status) ? Response->page.lastStatus : status);
+    KswRxpfSetLastStatus(NT_SUCCESS(status) ? Response->lastStatus : status);
     return status;
 }

@@ -68,15 +68,6 @@
  * 在短窗口内把字节改回去（否则 PatchGuard/异常指令会蓝屏）。
  */
 #define KSWORD_ARK_RXPF_FLAG_SKIP_BACKUP_RESTORE 0x00000004UL
-/*
- * ATOMIC_COMMIT 专用：mode=1 PTE 恢复到 RX 之后、ClearRemoved 之前，
- * driver 自己从 R0 直接 CALL payload 一次，把 RAX 回带到
- * ATOMIC_COMMIT_RESPONSE.executionReturnValue。__try/__except 保护。
- * 用于**直接**证明 payload 被 CPU 取指执行，而不是依赖 BugCheck/WER 的
- * 间接触发。调用方必须保证 payload 是自包含的（典型 48 B8 <imm64> C3，
- * 12 字节，mov rax, imm64; ret），且 ret 后栈干净。
- */
-#define KSWORD_ARK_RXPF_FLAG_EXECUTE_PROOF 0x00000008UL
 
 #define KSWORD_ARK_RXPF_TARGET_ALLOCATED_TEST 1UL
 #define KSWORD_ARK_RXPF_TARGET_SELF_IMAGE_TEST 2UL
@@ -376,21 +367,3 @@ typedef struct _KSWORD_ARK_RXPF_ATOMIC_COMMIT_REQUEST
     unsigned long length;
     unsigned char bytes[KSWORD_ARK_RXPF_MAX_WRITE_BYTES];
 } KSWORD_ARK_RXPF_ATOMIC_COMMIT_REQUEST;
-
-/*
- * ATOMIC_COMMIT 专用响应：原 PAGE_RESPONSE 的所有字段 + 执行证明字段。
- * 与 PAGE_RESPONSE 独立定义以避免扩大后者（后者被 5 个 IOCTL 共用，
- * 旧 R3 调用者按旧 size 分配 buffer，追加字段会使它们收到 BUFFER_TOO_SMALL）。
- * 执行证明字段仅在请求含 KSWORD_ARK_RXPF_FLAG_EXECUTE_PROOF 时有效；
- * 其余情况下 executionAttempted = 0。
- */
-typedef struct _KSWORD_ARK_RXPF_ATOMIC_COMMIT_RESPONSE
-{
-    KSWORD_ARK_RXPF_PAGE_RESPONSE page;
-    unsigned long executionAttempted;
-    unsigned long executionFaulted;
-    long executionStatus;
-    unsigned long executionCallSiteOffset;
-    unsigned long long executionReturnValue;
-    unsigned long long executionCallSiteAddress;
-} KSWORD_ARK_RXPF_ATOMIC_COMMIT_RESPONSE;
