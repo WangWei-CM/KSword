@@ -669,6 +669,23 @@ Win32 错误转 NTSTATUS 的常见对照：
   - 副产物：MmChangeImageProtection 本机 VA = `0xFFFFF806AC25DDB0`（RVA = 0xA5DDB0，R0 的 `resolvedFunctionVa` 字段直接给）。`originalPte=0xCC` 这个 R0 字段**不是** PTE qword，只是 PE 节头推的 1 byte 保护位，容易误读。
   - 工具链同 #7：`query-pte` 读 PTE，`change-image-protection` 跑 Register+Change（flags 0 时 R0 日志报 `aliasMapStatus=STATUS_NOT_SUPPORTED` 跳 alias 阶段，但 `imageProtectStatus=0` 已覆盖本实验目标）。
 
+- **next-exp #9 — 26300 UBR 覆盖适配 — 已完成**（2026-10-19，为 Phase G RXPF 链在 VM 26H2 build 26300.9711 上跑通铺路）：
+  - **背景**：原 `g_KswRxpfBuildProfiles[]` 只覆盖 26220 和 22621，VM 跑在 26300（9457 → Windows Update 自动升级到 9711），RXPF `KswRxpfResolveExactBuild` 在 build gate 查不到 profile，`BuildSupported` 返 FALSE，`KswRxpfCreateExternalImagePage` line 894 直接 `STATUS_NOT_SUPPORTED` ⇒ Register(EXTERNAL_IMAGE) Win32=50。
+  - **做法**：改 `image_protection_manager.c` 加第 3 条 `KSW_RXPF_26300_*` profile（PDB GUID / TimeDateStamp / SizeOfImage / CheckSum / MmChangeImageProtection RVA / 64 字节 prologue signature）；commit `aff55995` (9457) → `ee6bdcf8` (bump 到 9711)；Rebuild + EV 签名 + 部署，Register(EXTERNAL_IMAGE) 从 Win32=50 变 `recordId=1 origProt=0x20` ✓。
+  - **副产物**：发现 §6 #3/#7 之前的"RXPF Register+Change+Write+Unregister 四步链"描述和实际做的事从未对上过——historical 实验（包括 §6 #7 primary evidence）走的其实都是 `memory_ioctl.c` 的 `change-image-protection` 单发 IOCTL（flags=0x7 pattern），不是 RXPF 协议链；RXPF Phase G 真正跑通是本会话首次。
+  - 对接续者：若将来 Windows Update 又把 UBR 升到别的号，`extract_nt_meta.py` 直接读新 nt 的 PE 元数据 + 签名字节扫一遍替换 `KSW_RXPF_26300_*` 常量即可（9457 → 9711 验证了同 build family 内 prologue 字节 100% 一致，只是 RVA / TimeDateStamp / CheckSum / PDB GUID 变）。
+  - **已知残留**：严格匹配策略跨 UBR 必须手工更新；用户已提出过 "能不能适配所有近似版本" 的 fuzzy fallback 需求（build number 相同即在 .text 段扫签名字节），作为未来可选工程记入本节 #10 后的候选。
+- **next-exp #10 — "CPU 真的执行修改字节" 直接证据 — 未完成，归档**（2026-10-19，本会话止步于此）：
+  - **背景**：本会话累计 **6 次独立 BugCheck 0xFC 实证** 显示 **mode=2 的 R-only NX 位到了 CPU**（PTE Arg2 bit 63=1）且 Arg1 恒为 `CI.dll+0x1598`（真实 .text fetch 入口）。但 6 次 Arg1 都是**原始指令地址**，不是修改字节地址——证据链缺最后一跳。
+  - **GUI 走 RXPF Phase G 完整链 (Register+Change(mode=2)+Write+Unregister(SKIP_BACKUP_RESTORE)) 物理不可行**：Change(mode=2) 到 Unregister 之间 PTE 一直 NX，用户态异步点击"页 2→3→4"根本来不及（毫秒级 fetch 就命中 CI.dll+0x1598 → 立即 0xFC），GUI 从未走到页 4。
+  - **要走通的候选工程（Z 方案）**：在 driver 加一个新 IOCTL `IOCTL_KSWORD_ARK_RXPF_ATOMIC_FLIP_WRITE_RESTORE`，R0 一次 call 原子完成 Register+Change(mode=2)+Write(payload)+Change(mode=1 restore)+Unregister(SKIP_BACKUP_RESTORE)，把 NX 窗口压到驱动态单函数，CPU 没空 fetch。工程量约 1 小时（协议头 + handler + Rebuild + 签名 + 部署 + 实验）。本会话未实施。
+  - **保留的硬证据**（供接续者直接复用，不要再重复走 memory_ioctl 的 writeTest 探路）：
+    - 6 份 BugCheck 0xFC minidump 均在 VM `C:\WINDOWS\Minidump\*.dmp`
+    - Arg1 恒 `CI.dll+0x1598`、Arg2 恒 `0x89...NX=1`
+    - PTE live qword 回读（next-exp #8）独立确认 mode=1/2 的 NX bit 翻转到 CPU
+    - §6 #7 primary evidence 独立确认字节 0x48→0xB7→0xB7 持久
+  - **可利用性结论对现状不变**：HVCI 下 mode=1 restore 让修改字节保留 + mode=2 的 NX 翻转可见于 CPU，两条独立证据链已经构成 "RXPF 可用于 CI 旁路" 的强推论；差的只是把推论闭环成实证，不改变 §3 "稳的" 列表。
+
 ### Phase F → Phase G 代码接口已就绪
 
 - `FLAG_SKIP_BACKUP_RESTORE = 0x4` 已加（§5.3）
