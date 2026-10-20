@@ -5,6 +5,7 @@
 #include "UI/PageControlStyle.h"
 #include "UI/DockTabSelectionAnimation.h"
 #include "UI/PageNavigationBridge.h"
+#include "UI/PageNavigationCatalog.h"
 #include "UI/PerfTrace.h"
 #include "UI/UiAnimationGate.h"
 #include "UI/CoordinatedApplicationQuit.h"
@@ -7242,6 +7243,15 @@ void MainWindow::initGlobalUiSearchController()
         return;
     }
 
+    // 退出排空事件期间也可能执行已排队的目录/搜索分片，所有导航回调共用拒新门禁。
+    const QPointer<MainWindow> navigationOwner(this);
+    const QPointer<ads::CDockManager> navigationManager(m_pDockManager);
+    const std::weak_ptr<std::atomic_bool> navigationLifetime = m_r0NotificationLifetime;
+    const auto navigationAdmission = [navigationOwner, navigationManager, navigationLifetime]() {
+        const auto live = navigationLifetime.lock();
+        return navigationOwner && navigationManager && live && live->load(std::memory_order_acquire);
+    };
+
     // 弹层宿主是主窗口本体：无边框窗口下用子控件弹层可避免焦点被独立窗口抢走。
     m_globalUiSearchController = new ks::ui::GlobalUiSearchController(
         this,
@@ -7270,17 +7280,17 @@ void MainWindow::initGlobalUiSearchController()
         [this](const QString& commandText, const ks::ui::CommandExecutionOptions& options) {
             executeCommandWithOptions(commandText, options);
         });
-    m_globalUiSearchController->setDockListProvider([this]() {
-        return collectSearchableDockWidgets();
+    m_globalUiSearchController->setDockListProvider([this, navigationAdmission]() {
+        return navigationAdmission() ? collectSearchableDockWidgets() : QList<ads::CDockWidget*>{};
     });
-    m_globalUiSearchController->setDockPreparer([this](ads::CDockWidget* dockWidget) {
-        ensureDockContentInitialized(dockWidget);
+    m_globalUiSearchController->setDockPreparer([this, navigationAdmission](ads::CDockWidget* dockWidget) {
+        if (navigationAdmission()) ensureDockContentInitialized(dockWidget);
     });
-    m_globalUiSearchController->setNestedDockPreparer([this](ads::CDockWidget* dockWidget) {
-        prepareNestedDockContentForNavigation(dockWidget);
+    m_globalUiSearchController->setNestedDockPreparer([this, navigationAdmission](ads::CDockWidget* dockWidget) {
+        if (navigationAdmission()) prepareNestedDockContentForNavigation(dockWidget);
     });
-    m_globalUiSearchController->setDockActivator([this](ads::CDockWidget* dockWidget) {
-        activateDockForSearchNavigation(dockWidget);
+    m_globalUiSearchController->setDockActivator([this, navigationAdmission](ads::CDockWidget* dockWidget) {
+        if (navigationAdmission()) activateDockForSearchNavigation(dockWidget);
     });
     connect(
         m_globalUiSearchController,
@@ -7304,16 +7314,65 @@ void MainWindow::initGlobalUiSearchController()
         m_customTitleBar->isSearchInputModeActive());
 
     // Taskbar 独立呈现目录；主程序复用已有 Dock 初始化/激活路径，只发布一级功能页。
-    m_pageNavigationBridge = new ks::ui::PageNavigationBridge(this, [this]()
+    m_pageNavigationBridge = new ks::ui::PageNavigationBridge(this, [this, navigationAdmission]()
     {
+        if (!navigationAdmission()) return QList<ads::CDockWidget*>{};
         auto docks = collectSearchableDockWidgets();
         docks.removeAll(m_dockLog);
         docks.removeAll(m_dockMonitor);
         docks.removeAll(m_dockCurrentOp);
         return docks;
-    }, [this](ads::CDockWidget* dock) { ensureDockContentInitialized(dock); },
-        [this](ads::CDockWidget* dock) { activateDockForSearchNavigation(dock); },
-        [this](ads::CDockWidget* dock) { prepareNestedDockContentForNavigation(dock); });
+    }, [this, navigationAdmission](ads::CDockWidget* dock) { if (navigationAdmission()) ensureDockContentInitialized(dock); },
+        [this, navigationAdmission](ads::CDockWidget* dock) { if (navigationAdmission()) activateDockForSearchNavigation(dock); },
+        [this, navigationAdmission](ads::CDockWidget* dock) { if (navigationAdmission()) prepareNestedDockContentForNavigation(dock); });
+
+    // 实际控制器成员避开ADS scroll wrapper；只映射已有对象，不执行任何惰性工厂。
+    const auto existingNavigationContent = [this, navigationOwner, navigationManager, navigationLifetime]
+        (ads::CDockWidget* dock) -> QWidget*
+    {
+        const auto live = navigationLifetime.lock();
+        if (!navigationOwner || !navigationManager || !live || !live->load(std::memory_order_acquire)) return nullptr;
+        if (dock == m_dockWelcome) return m_welcomeWidget;
+        if (dock == m_dockProcess) return m_processWidget;
+        if (dock == m_dockNetwork) return m_networkWidget;
+        if (dock == m_dockMemory) return m_memoryWidget;
+        if (dock == m_dockFile) return m_fileWidget;
+        if (dock == m_dockDriver) return m_driverWidget;
+        if (dock == m_dockKernel) return m_kernelWidget;
+        if (dock == m_dockHvm) return m_hvmWidget;
+        if (dock == m_dockMonitorTab) return m_monitorWidget;
+        if (dock == m_dockHardware) return m_hardwareWidget;
+        if (dock == m_dockPrivilege) return m_privilegeWidget;
+        if (dock == m_dockWindow) return m_windowWidget;
+        if (dock == m_dockRegistry) return m_registryWidget;
+        if (dock == m_dockHandle) return m_handleWidget;
+        if (dock == m_dockStartup) return m_startupWidget;
+        if (dock == m_dockService) return m_serviceWidget;
+        if (dock == m_dockMisc) return m_miscWidget;
+        return nullptr;
+    };
+    const auto catalogProvider = [navigationOwner, navigationManager, navigationLifetime, existingNavigationContent]
+        (ads::CDockWidget* dock) -> std::optional<ks::ui::PageNavigationCatalog>
+    {
+        const auto live = navigationLifetime.lock();
+        if (!dock || !navigationOwner || !navigationManager || !live || !live->load(std::memory_order_acquire)) return std::nullopt;
+        const QString key = dock->property("ks_dock_layout_key").toString();
+        return ks::ui::RegisteredPageNavigationCatalog(key, existingNavigationContent(dock));
+    };
+    const auto catalogNavigator = [navigationOwner, navigationManager, navigationLifetime, existingNavigationContent]
+        (ads::CDockWidget* dock, const QString& id) -> QWidget*
+    {
+        const auto live = navigationLifetime.lock();
+        if (!dock || !navigationOwner || !navigationManager || !live || !live->load(std::memory_order_acquire)) return nullptr;
+        return ks::ui::NavigateRegisteredPageNavigationCatalog(
+            dock->property("ks_dock_layout_key").toString(), existingNavigationContent(dock), id);
+    };
+    const auto searchCompleteness = [navigationAdmission](ads::CDockWidget* dock) {
+        return navigationAdmission() && dock && ks::ui::RegisteredPageNavigationCatalogSearchComplete(
+            dock->property("ks_dock_layout_key").toString());
+    };
+    m_globalUiSearchController->setPageCatalog(catalogProvider, catalogNavigator, searchCompleteness);
+    m_pageNavigationBridge->setPageCatalog(catalogProvider, catalogNavigator);
 
     connect(
         m_customTitleBar,

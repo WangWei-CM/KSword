@@ -28,6 +28,7 @@ namespace ks::ui
             QPointer<ads::CDockWidget> dock; // 当前实例实际拥有的一级页面。
             QPointer<QWidget> page;         // 页对象身份；不使用易变化的标题或序号跳转。
             bool pageRequired = false;     // 区分一级入口和已经销毁的子页。
+            QString descriptorId;           // 静态工厂局部ID，仅在用户激活时解析真实页面。
         };
         PageNavigationBridge* owner;
         QPointer<QWidget> host;
@@ -35,6 +36,8 @@ namespace ks::ui
         DockAction prepare;
         DockAction nestedPrepare;
         DockAction activate;
+        PageNavigationCatalogProvider catalogProvider;
+        PageNavigationCatalogNavigator catalogNavigator;
         HWND client = nullptr;
         HWND server = nullptr; // 保存原生句柄，析构时不重新调用宿主 winId 创建窗口。
         QString request;
@@ -173,6 +176,16 @@ namespace ks::ui
             return id;
         }
 
+        QString addDescriptorRoute(ads::CDockWidget* dock, const QString& descriptorId)
+        {
+            const QString dockId = addRoute(dock, nullptr);
+            const QString id = QUuid::createUuidV5(QUuid(dockId), descriptorId.toUtf8())
+                .toString(QUuid::WithoutBraces);
+            routes.insert(id, Route{dock, nullptr, false, descriptorId});
+            catalogRouteIds.insert(id);
+            return id;
+        }
+
         void removeExpiredRoutes()
         {
             for (auto route = routes.begin(); route != routes.end();)
@@ -274,19 +287,49 @@ namespace ks::ui
                     {QStringLiteral("revision"), completedRevision}});
                 return;
             }
+            const QPointer<PageNavigationBridge> lifetime(owner);
             const int column = nextDock++;
             QPointer<ads::CDockWidget> dock = pending[column];
             if (dock)
             {
-                prepare(dock);
-                if (nestedPrepare)
+                std::optional<QVector<ResolvedPageNavigationDescriptor>> descriptors;
+                if (catalogProvider)
                 {
-                    nestedPrepare(dock);
+                    const auto provider = catalogProvider;
+                    const auto catalog = provider(dock);
+                    if (!lifetime || expected != generation || !collecting) return;
+                    if (catalog && dock)
+                        descriptors = ResolvePageNavigationCatalog(*catalog, dock->windowTitle());
+                }
+                if (!descriptors)
+                {
+                    // 未迁移或schema无效时保留真实页面回退，不以漏目录换取冷开速度。
+                    if (dock) prepare(dock);
+                    if (!lifetime || expected != generation || !collecting) return;
+                    if (nestedPrepare && dock) nestedPrepare(dock);
+                    if (!lifetime || expected != generation || !collecting) return;
                 }
                 if (dock && expected == generation && collecting)
                 {
                     QJsonArray entries;
-                    collect(dock->widget(), dock, QStringList{dock->windowTitle()}, entries);
+                    if (descriptors)
+                    {
+                        for (const auto& descriptor : *descriptors)
+                        {
+                            if (!descriptor.page.visible) continue;
+                            entries.append(QJsonObject{
+                                {QStringLiteral("id"), addDescriptorRoute(dock, descriptor.page.id)},
+                                {QStringLiteral("title"), descriptor.page.title.left(256)},
+                                {QStringLiteral("path"), descriptor.path.join(QStringLiteral(" / ")).left(1024)},
+                                {QStringLiteral("depth"), descriptor.depth},
+                                {QStringLiteral("enabled"), descriptor.page.enabled},
+                                {QStringLiteral("current"), dock->isCurrentTab() && descriptor.page.current}});
+                        }
+                    }
+                    else
+                    {
+                        collect(dock->widget(), dock, QStringList{dock->windowTitle()}, entries);
+                    }
                     // 长目录按 32 项分包，单条名称/路径也有限长，不静默丢掉整列。
                     for (int start = 0; start < entries.size(); start += 32)
                     {
@@ -346,38 +389,81 @@ namespace ks::ui
                 return;
             }
             const Route target = *found;
-            // 激活前存外到内的导航链，切父页时可能触发惰性构建，逐步重新核验对象身份。
-            QList<QPointer<QWidget>> chain;
-            for (QWidget* page = target.page; page && page != target.dock; page = page->parentWidget())
+            const QPointer<PageNavigationBridge> lifetime(owner);
+            if (!target.descriptorId.isEmpty())
             {
-                if (qobject_cast<QStackedWidget*>(page->parentWidget()))
+                bool permitted = false;
+                if (catalogProvider && catalogNavigator)
                 {
-                    chain.prepend(page);
+                    const auto provider = catalogProvider;
+                    const auto catalog = provider(target.dock);
+                    if (!lifetime) return;
+                    if (catalog && target.dock)
+                    {
+                        if (const auto pages = ResolvePageNavigationCatalog(*catalog, target.dock->windowTitle()))
+                        {
+                            for (const auto& page : *pages)
+                            {
+                                if (page.page.id == target.descriptorId)
+                                {
+                                    permitted = page.page.visible && page.page.enabled;
+                                    break;
+                                }
+                            }
+                        }
+                    }
                 }
+                if (!permitted)
+                {
+                    reply(QJsonObject{{QStringLiteral("type"), QStringLiteral("stale")}});
+                    return;
+                }
+                const auto navigator = catalogNavigator;
+                activate(target.dock); // 只有用户已选中目录项时才允许构造Dock。
+                if (!lifetime) return;
+                if (!target.dock || navigator(target.dock, target.descriptorId) == nullptr)
+                {
+                    if (lifetime) reply(QJsonObject{{QStringLiteral("type"), QStringLiteral("stale")}});
+                    return;
+                }
+                if (!lifetime) return;
             }
-            activate(target.dock);
-            for (const QPointer<QWidget>& page : chain)
+            else
             {
-                if (!page)
+                QList<QPointer<QWidget>> chain;
+                for (QWidget* page = target.page; page && page != target.dock; page = page->parentWidget())
                 {
-                    reply(QJsonObject{{QStringLiteral("type"), QStringLiteral("stale")}});
-                    return;
+                    if (qobject_cast<QStackedWidget*>(page->parentWidget())) chain.prepend(page);
                 }
-                auto* stack = qobject_cast<QStackedWidget*>(page->parentWidget());
-                auto* tabs = stack ? qobject_cast<QTabWidget*>(stack->parentWidget()) : nullptr;
-                const int index = stack ? stack->indexOf(page) : -1;
-                if (index < 0 || (tabs && (!tabs->isTabEnabled(index) || !tabs->isTabVisible(index))))
+                activate(target.dock);
+                if (!lifetime) return;
+                for (const QPointer<QWidget>& page : chain)
                 {
-                    reply(QJsonObject{{QStringLiteral("type"), QStringLiteral("stale")}});
-                    return;
+                    if (!page)
+                    {
+                        reply(QJsonObject{{QStringLiteral("type"), QStringLiteral("stale")}});
+                        return;
+                    }
+                    auto* stack = qobject_cast<QStackedWidget*>(page->parentWidget());
+                    auto* tabs = stack ? qobject_cast<QTabWidget*>(stack->parentWidget()) : nullptr;
+                    const int index = stack ? stack->indexOf(page) : -1;
+                    if (index < 0 || (tabs && (!tabs->isTabEnabled(index) || !tabs->isTabVisible(index))))
+                    {
+                        reply(QJsonObject{{QStringLiteral("type"), QStringLiteral("stale")}});
+                        return;
+                    }
+                    tabs ? tabs->setCurrentIndex(index) : stack->setCurrentIndex(index);
+                    if (!lifetime) return;
                 }
-                tabs ? tabs->setCurrentIndex(index) : stack->setCurrentIndex(index);
             }
             if (host)
             {
                 if (host->isMinimized()) host->showNormal();
+                if (!lifetime) return;
                 host->raise();
+                if (!lifetime) return;
                 host->activateWindow();
+                if (!lifetime) return;
             }
             reply(QJsonObject{{QStringLiteral("type"), QStringLiteral("activated")}});
         }
@@ -395,6 +481,13 @@ namespace ks::ui
         m_state->activate = std::move(activate);
         m_state->nestedPrepare = std::move(nestedPrepare);
         m_state->server = reinterpret_cast<HWND>(host->winId());
+    }
+
+    void PageNavigationBridge::setPageCatalog(
+        PageNavigationCatalogProvider provider, PageNavigationCatalogNavigator navigator)
+    {
+        m_state->catalogProvider = std::move(provider);
+        m_state->catalogNavigator = std::move(navigator);
     }
 
     void PageNavigationBridge::setReady()

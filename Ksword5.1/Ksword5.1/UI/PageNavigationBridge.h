@@ -1,4 +1,5 @@
 #pragma once
+#include "./PageNavigationCatalog.h"
 #include <QObject>
 #include <QList>
 #include <functional>
@@ -19,6 +20,7 @@ namespace ks::ui
         PageNavigationBridge(QWidget* host, DockList list, DockAction prepare, DockAction activate,
             DockAction nestedPrepare = {});
         ~PageNavigationBridge() override;
+        void setPageCatalog(PageNavigationCatalogProvider provider, PageNavigationCatalogNavigator navigator);
         void setReady(); // 一级 Dock 框架创建完成后才发布 IPC 入口。
         bool handleMessage(const COPYDATASTRUCT* data, HWND sender);
     private:

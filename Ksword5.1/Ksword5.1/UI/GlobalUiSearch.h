@@ -14,6 +14,7 @@
 //    Dock 激活均通过回调注入，便于复用与单元验证。
 // ============================================================
 
+#include "./PageNavigationCatalog.h"
 #include <QObject>
 #include <QList>
 #include <QPersistentModelIndex>
@@ -66,6 +67,9 @@ namespace ks::ui
         QPersistentModelIndex targetModelIndex;    // targetModelIndex：表格单元格命中的稳定模型索引。
         QString matchedText;                       // matchedText：命中控件的完整原始文本（单行化处理后）。
         QString pagePathText;                      // pagePathText：形如“内核 › 回调审计”的页面路径文本。
+        QString navigationDescriptorId;
+        bool navigationEnabled = true;
+        bool navigationRoot = false;
         int matchRank = 2;                         // matchRank：排序权重（0=整串相等，1=前缀，2=包含）。
     };
 
@@ -111,6 +115,9 @@ namespace ks::ui
         // - 作用：注入参与搜索的 Dock 列表回调；
         // - 调用：MainWindow 接线时调用一次。
         void setDockListProvider(DockListProvider dockListProvider);
+
+        void setPageCatalog(PageNavigationCatalogProvider provider, PageNavigationCatalogNavigator navigator,
+            PageNavigationCatalogSearchCompleteness searchCompleteness = {});
 
         // setDockPreparer：
         // - 作用：注入 Dock 懒加载初始化回调（搜索前逐个调用）；
@@ -271,6 +278,9 @@ namespace ks::ui
         DockListProvider m_dockListProvider;      // m_dockListProvider：Dock 列表回调。
         DockPreparer m_dockPreparer;              // m_dockPreparer：Dock 懒加载初始化回调。
         NestedDockPreparer m_nestedDockPreparer;  // m_nestedDockPreparer：嵌套懒页准备回调。
+        PageNavigationCatalogProvider m_pageCatalogProvider;
+        PageNavigationCatalogSearchCompleteness m_pageCatalogSearchCompleteness;
+        PageNavigationCatalogNavigator m_pageCatalogNavigator;
         DockActivator m_dockActivator;            // m_dockActivator：Dock 置前激活回调。
 
         QFrame* m_popupPanel = nullptr;           // m_popupPanel：结果弹层容器（宿主窗口子控件）。

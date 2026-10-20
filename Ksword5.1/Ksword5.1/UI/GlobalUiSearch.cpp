@@ -253,6 +253,57 @@ namespace
         return fullPathParts.join(QStringLiteral(" › "));
     }
 
+    // 静态标题/检索描述来自同源工厂；每条命中保留局部ID，只有用户激活才解析widget。
+    void collectCatalogSearchHits(ads::CDockWidget* dock, const QString& query,
+        const QVector<ks::ui::ResolvedPageNavigationDescriptor>& pages,
+        QVector<ks::ui::UiSearchHit>& hits, bool currentPageOnly)
+    {
+        int appended = 0;
+        for (const auto& descriptor : pages)
+        {
+            if (!descriptor.page.visible || (currentPageOnly && !descriptor.page.current)) continue;
+            QStringList candidates = descriptor.page.searchTexts;
+            candidates.prepend(descriptor.page.title);
+            QString best;
+            int bestRank = 3;
+            for (const QString& text : candidates)
+            {
+                const QString normalized = normalizeUiText(stripMnemonicMarkers(text));
+                const int position = normalized.indexOf(query, 0, Qt::CaseInsensitive);
+                if (position < 0) continue;
+                const int rank = resolveMatchRank(normalized, query, position);
+                if (rank < bestRank) { best = normalized; bestRank = rank; }
+            }
+            if (best.isEmpty()) continue;
+            ks::ui::UiSearchHit hit;
+            hit.pageDockWidget = dock;
+            hit.navigationDescriptorId = descriptor.page.id;
+            hit.navigationEnabled = descriptor.page.enabled;
+            hit.matchedText = best;
+            hit.pagePathText = descriptor.path.join(QStringLiteral(" › "));
+            hit.matchRank = bestRank;
+            hits.append(std::move(hit));
+            if (++appended >= kMaxHitsPerDock) break;
+        }
+    }
+
+    // 主Dock身份与标题在惰性壳创建时已经存在，是独立于业务widget的冷导航源。
+    void collectDockTitleSearchHit(ads::CDockWidget* dock, const QString& query,
+        QVector<ks::ui::UiSearchHit>& hits)
+    {
+        if (dock == nullptr) return;
+        const QString title = normalizeUiText(stripMnemonicMarkers(dock->windowTitle()));
+        const int position = title.indexOf(query, 0, Qt::CaseInsensitive);
+        if (position < 0) return;
+        ks::ui::UiSearchHit hit;
+        hit.pageDockWidget = dock;
+        hit.navigationRoot = true;
+        hit.matchedText = title;
+        hit.pagePathText = title;
+        hit.matchRank = resolveMatchRank(title, query, position);
+        hits.append(std::move(hit));
+    }
+
     // collectDockSearchHits：
     // - 作用：在单个 Dock 的控件树内做关键词匹配并追加命中；
     // - 索引来源：QLabel 文本、按钮文本、分组框标题、QTabWidget 页签、
@@ -845,6 +896,15 @@ namespace ks::ui
     void GlobalUiSearchController::setDockListProvider(DockListProvider dockListProvider)
     {
         m_dockListProvider = std::move(dockListProvider);
+    }
+
+    void GlobalUiSearchController::setPageCatalog(
+        PageNavigationCatalogProvider provider, PageNavigationCatalogNavigator navigator,
+        PageNavigationCatalogSearchCompleteness searchCompleteness)
+    {
+        m_pageCatalogProvider = std::move(provider);
+        m_pageCatalogNavigator = std::move(navigator);
+        m_pageCatalogSearchCompleteness = std::move(searchCompleteness);
     }
 
     void GlobalUiSearchController::setDockPreparer(DockPreparer dockPreparer)
@@ -1533,10 +1593,29 @@ namespace ks::ui
                 {
                     updateSearchProgressUi(dock->windowTitle());
                     const QPointer<GlobalUiSearchController> alive(this);
-                    if (m_dockPreparer) m_dockPreparer(dock.data());
-                    if (!alive || searchGeneration != m_searchGeneration || !m_searchInProgress) return;
-                    if (dock && m_nestedDockPreparer) m_nestedDockPreparer(dock.data());
-                    if (!alive || searchGeneration != m_searchGeneration || !m_searchInProgress) return;
+                    std::optional<QVector<ResolvedPageNavigationDescriptor>> descriptors;
+                    if (m_pageCatalogProvider)
+                    {
+                        const auto provider = m_pageCatalogProvider;
+                        const auto catalog = provider(dock);
+                        if (!alive || searchGeneration != m_searchGeneration || !m_searchInProgress) return;
+                        if (dock && catalog) descriptors = ResolvePageNavigationCatalog(*catalog, dock->windowTitle());
+                    }
+                    bool searchComplete = false;
+                    if (descriptors && m_pageCatalogSearchCompleteness)
+                    {
+                        const auto completeness = m_pageCatalogSearchCompleteness;
+                        searchComplete = completeness(dock);
+                        if (!alive || searchGeneration != m_searchGeneration || !m_searchInProgress) return;
+                    }
+                    if (!descriptors || !searchComplete)
+                    {
+                        // 纯导航目录不代表冷页正文完整；未证明全文覆盖时保留原factory正文搜索。
+                        if (dock && m_dockPreparer) m_dockPreparer(dock.data());
+                        if (!alive || searchGeneration != m_searchGeneration || !m_searchInProgress) return;
+                        if (dock && m_nestedDockPreparer) m_nestedDockPreparer(dock.data());
+                        if (!alive || searchGeneration != m_searchGeneration || !m_searchInProgress) return;
+                    }
                     if (dock) m_dockSearchCursor = std::make_shared<DockSearchCursor>(dock.data(),
                         m_activeQueryText, m_activeSearchScope == UiSearchScope::CurrentPage);
                 }
@@ -1546,7 +1625,36 @@ namespace ks::ui
                     return;
                 }
                 if (m_dockSearchCursor)
+                {
+                    // 保留TS07每个widget/model分片与epoch；只在该Dock完成后追加最新目录投影。
                     m_currentHitList += m_dockSearchCursor->matches();
+                    const QPointer<GlobalUiSearchController> alive(this);
+                    if (dock && m_pageCatalogProvider)
+                    {
+                        const auto provider = m_pageCatalogProvider;
+                        const auto catalog = provider(dock);
+                        if (!alive || searchGeneration != m_searchGeneration || !m_searchInProgress) return;
+                        if (dock && catalog)
+                            if (const auto descriptors = ResolvePageNavigationCatalog(*catalog, dock->windowTitle()))
+                                collectCatalogSearchHits(dock, m_activeQueryText, *descriptors, m_currentHitList,
+                                    m_activeSearchScope == UiSearchScope::CurrentPage);
+                    }
+                    if (dock) collectDockTitleSearchHit(dock, m_activeQueryText, m_currentHitList);
+                    const auto hitKey = [](const UiSearchHit& hit) {
+                        return QString::number(reinterpret_cast<quintptr>(hit.pageDockWidget.data()), 16)
+                            + QLatin1Char('\x1f') + hit.pagePathText + QLatin1Char('\x1f') + hit.matchedText;
+                    };
+                    QSet<QString> liveKeys;
+                    for (const auto& hit : m_currentHitList)
+                        if (hit.navigationDescriptorId.isEmpty() && !hit.navigationRoot) liveKeys.insert(hitKey(hit));
+                    for (qsizetype index = 0; index < m_currentHitList.size();)
+                    {
+                        const auto& hit = m_currentHitList[index];
+                        if ((!hit.navigationDescriptorId.isEmpty() || hit.navigationRoot) && liveKeys.contains(hitKey(hit)))
+                            m_currentHitList.removeAt(index);
+                        else ++index;
+                    }
+                }
                 m_dockSearchCursor.reset();
                 if (dock) applySearchResultFiltersToDock(dock.data(),
                     m_activeSearchScope == UiSearchScope::CurrentPage);
@@ -1567,6 +1675,7 @@ namespace ks::ui
     {
         m_currentHitList.erase(std::remove_if(m_currentHitList.begin(), m_currentHitList.end(),
             [](const UiSearchHit& hit) {
+                if (hit.navigationRoot || !hit.navigationDescriptorId.isEmpty()) return hit.pageDockWidget.isNull();
                 if (hit.targetWidget.isNull()) return true;
                 if (!hit.targetTableView) return false;
                 return !hit.targetModelIndex.isValid()
@@ -1624,6 +1733,7 @@ namespace ks::ui
         for (const UiSearchHit& hitEntry : m_currentHitList)
         {
             auto* listItem = new QListWidgetItem(m_resultListWidget);
+            if (!hitEntry.navigationEnabled) listItem->setFlags(listItem->flags() & ~Qt::ItemIsEnabled);
             listItem->setToolTip(
                 hitEntry.matchedText
                 + QStringLiteral("\n")
@@ -1803,8 +1913,31 @@ namespace ks::ui
         }
 
         const UiSearchHit hitEntry = m_currentHitList.at(rowIndex);
-        ads::CDockWidget* dockWidget = hitEntry.pageDockWidget.data();
-        QTableView* targetTableView = hitEntry.targetTableView.data();
+        if (!hitEntry.navigationEnabled) return;
+        const QPointer<GlobalUiSearchController> lifetime(this);
+        const auto permittedDescriptor = [this, &hitEntry, lifetime]()
+        {
+            if (!hitEntry.pageDockWidget || !m_pageCatalogProvider || !m_pageCatalogNavigator) return false;
+            const auto provider = m_pageCatalogProvider;
+            const auto catalog = provider(hitEntry.pageDockWidget);
+            if (!lifetime || !hitEntry.pageDockWidget || !catalog) return false;
+            const auto pages = ResolvePageNavigationCatalog(*catalog, hitEntry.pageDockWidget->windowTitle());
+            if (!pages) return false;
+            for (const auto& page : *pages)
+            {
+                if (page.page.id == hitEntry.navigationDescriptorId)
+                    return page.page.visible && page.page.enabled;
+            }
+            return false;
+        };
+        if (!hitEntry.navigationDescriptorId.isEmpty() && !permittedDescriptor())
+        {
+            if (!lifetime) return;
+            dismissPopup();
+            return;
+        }
+        QPointer<ads::CDockWidget> dockWidget = hitEntry.pageDockWidget;
+        QPointer<QTableView> targetTableView = hitEntry.targetTableView;
         if (dockWidget == nullptr && targetTableView == nullptr)
         {
             dismissPopup();
@@ -1815,10 +1948,22 @@ namespace ks::ui
         {
             m_dockPreparer(dockWidget);
         }
-        if (dockWidget != nullptr && m_nestedDockPreparer)
+        if (!lifetime) return;
+        const bool descriptorHit = !hitEntry.navigationDescriptorId.isEmpty();
+        if (dockWidget != nullptr && m_nestedDockPreparer && !descriptorHit && !hitEntry.navigationRoot)
         {
-            m_nestedDockPreparer(dockWidget);
+            // 真实widget命中保留兼容路径；静态ID和根入口只创建用户接受的目标分支。
+            bool catalogAvailable = false;
+            if (m_pageCatalogProvider)
+            {
+                const auto provider = m_pageCatalogProvider;
+                const auto catalog = provider(dockWidget);
+                if (!lifetime) return;
+                catalogAvailable = dockWidget && catalog && ResolvePageNavigationCatalog(*catalog, dockWidget->windowTitle()).has_value();
+            }
+            if (!catalogAvailable && dockWidget) m_nestedDockPreparer(dockWidget);
         }
+        if (!lifetime) return;
         if (dockWidget != nullptr && m_dockActivator)
         {
             m_dockActivator(dockWidget);
@@ -1826,6 +1971,7 @@ namespace ks::ui
         else if (dockWidget != nullptr)
         {
             dockWidget->toggleView(true);
+            if (!lifetime || !dockWidget) return;
             dockWidget->raise();
         }
         else if (targetTableView != nullptr && targetTableView->window() != nullptr)
@@ -1835,7 +1981,15 @@ namespace ks::ui
             targetTableView->window()->activateWindow();
         }
 
-        QWidget* targetWidget = hitEntry.targetWidget.data();
+        if (!lifetime) return;
+        QPointer<QWidget> targetWidget = hitEntry.targetWidget;
+        if (descriptorHit)
+        {
+            if (!permittedDescriptor()) { if (lifetime) dismissPopup(); return; }
+            const auto navigator = m_pageCatalogNavigator;
+            targetWidget = navigator(hitEntry.pageDockWidget, hitEntry.navigationDescriptorId);
+            if (!lifetime) return;
+        }
         dismissPopup();
         if (targetWidget == nullptr)
         {
@@ -1843,6 +1997,7 @@ namespace ks::ui
         }
 
         revealHitTargetWithinPage(targetWidget);
+        if (!lifetime || !targetWidget) return;
 
         // 页签切换与 Dock 置前后等一拍布局，再滚动一次并点亮高亮。
         QPointer<QWidget> guardedTarget(targetWidget);
