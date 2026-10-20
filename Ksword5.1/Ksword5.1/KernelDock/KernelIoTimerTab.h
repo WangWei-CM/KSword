@@ -13,6 +13,7 @@
 
 #include <atomic>  // std::atomic_bool：首轮/手动刷新互斥。
 #include <cstdint> // std::uintXX_t：固定宽度地址与计数。
+#include <limits>
 #include <vector>  // std::vector：后台快照与 UI 行缓存。
 
 #include "../UI/StructuredFieldView.h"
@@ -22,6 +23,7 @@ class QLineEdit;
 class QPoint;
 class QPushButton;
 class QTableWidget;
+class QTimer;
 
 // KernelIoTimerTab：旧版 SKT64 IoTimer 视图的安全等效实现。
 class KernelIoTimerTab final : public QWidget
@@ -80,6 +82,7 @@ private:
     void refreshAsync();
     void applySnapshot(const Snapshot& snapshot);
     void rebuildTable();
+    void applyFilter(bool allowDeferred = true);
     void updateDetail();
     void updateControlActions();
     void showContextMenu(const QPoint& localPosition);
@@ -97,6 +100,11 @@ private:
     QLineEdit* m_filterEdit = nullptr;
     QLabel* m_statusLabel = nullptr;
     QTableWidget* m_table = nullptr;
+    QTimer* m_filterTimer = nullptr;
+    bool m_filterActive = false;
+    std::size_t m_unfilteredSourceIndex = std::numeric_limits<std::size_t>::max();
+    int m_unfilteredHorizontalScroll = 0;
+    int m_unfilteredVerticalScroll = 0;
     ks::ui::StructuredFieldView* m_detailEditor = nullptr;
 
     std::vector<IoTimerRow> m_rows;
