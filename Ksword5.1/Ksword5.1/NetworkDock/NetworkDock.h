@@ -483,17 +483,9 @@ private:
     void launchNidsAnalysisBatch();
     void retireNidsAnalysisSession();
     QIcon resolveNidsProcessIcon(const ks::network::NidsAlert& alert);
-    void registerNidsIconRow(const ks::network::NidsAlert& alert, int row);
-    void pruneNidsIconRows(const QString& path);
     void scheduleNidsIconWork();
     void launchNidsIconWork();
     void applyNidsAnalysisBatch(const std::shared_ptr<network_dock_detail::NidsAnalysisBatch>& batch);
-
-    // appendNidsAlertRow：
-    // - 作用：把单条 NIDS 告警追加到表格末尾。
-    // - 参数 alertRecord：待显示告警。
-    // - 返回：无。
-    void appendNidsAlertRow(const ks::network::NidsAlert& alertRecord);
 
     // rebuildNidsAlertTable：
     // - 作用：按当前等级过滤重建 NIDS 告警表。
@@ -510,11 +502,6 @@ private:
     // - 返回：无。
     void updateNidsStatusLabel();
 
-    // nidsAlertPassesFilter：
-    // - 作用：判断告警是否满足当前等级过滤。
-    // - 参数 alertRecord：待判断告警。
-    // - 返回：true=显示；false=隐藏。
-    bool nidsAlertPassesFilter(const ks::network::NidsAlert& alertRecord) const;
 
     // onStatusMessageArrived：
     // - 作用：显示后台状态文本并同步按钮状态。
@@ -1355,7 +1342,11 @@ private:
     QComboBox* m_nidsSeverityFilterCombo = nullptr; // 告警等级过滤。
     QPushButton* m_nidsClearButton = nullptr; // 清空 NIDS 告警按钮。
     QLabel* m_nidsStatusLabel = nullptr;      // NIDS 运行状态标签。
-    QTableWidget* m_nidsAlertTable = nullptr; // NIDS 告警表。
+    QTableView* m_nidsAlertTable = nullptr;
+    class NidsAlertModel;
+    class NidsAlertProxy;
+    NidsAlertModel* m_nidsAlertModel = nullptr;
+    NidsAlertProxy* m_nidsAlertProxy = nullptr; // NIDS 告警表。
 
     // ========================= Tab3：进程限速 ====================
     QWidget* m_rateLimitPage = nullptr;           // 进程限速页容器。
@@ -1558,7 +1549,6 @@ private:
     QCache<QString, QIcon> m_nidsIconCache{512}; // Disposable rendering only; canonical alert identity never capped here.
     QSet<QString> m_nidsIconPendingPaths;
     std::deque<QString> m_nidsIconQueue;
-    QHash<QString, QVector<QPersistentModelIndex>> m_nidsIconRows;
     QTimer* m_rateLimitRefreshTimer = nullptr; // 限速规则轮询刷新定时器。
     QTimer* m_packetFlushTimer = nullptr;      // 报文批量刷新定时器（UI 节流关键）。
     QTimer* m_r0TrafficRefreshTimer = nullptr; // R0 WFP 逐包增量查询轮询定时器。
@@ -1633,9 +1623,9 @@ private:
 
     static constexpr std::size_t kMaxNidsAlertCount = 2000; // NIDS 告警缓存上限。
     bool m_nidsProjectionNeedsRebuild = false;
-    std::unordered_map<const ks::network::NidsAlert*, QPersistentModelIndex> m_nidsProjectedRows;
+    bool m_nidsProjectionInProgress = false;
     std::array<std::size_t, 4> m_nidsRetainedSeverityCounts{};
-    std::deque<ks::network::NidsAlert> m_nidsAlertList; // NIDS 告警缓存，按时间顺序保存。
+    std::deque<std::shared_ptr<const ks::network::NidsAlert>> m_nidsAlertList; // NIDS 告警缓存，按时间顺序保存。
     std::uint64_t m_nidsAnalyzedPacketCount = 0; // 已送入 NIDS 的报文数量。
     std::uint64_t m_nidsTotalAlertCount = 0;     // 本轮累计告警数量。
 

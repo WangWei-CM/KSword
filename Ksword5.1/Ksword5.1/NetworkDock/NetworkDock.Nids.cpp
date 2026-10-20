@@ -15,6 +15,10 @@
 #include "../theme.h"
 
 #include <QApplication>
+#include <QAbstractTableModel>
+#include <QSortFilterProxyModel>
+#include <QTableView>
+#include "../Internationalization/LanguageManager.h"
 #include <QBrush>
 #include <QImage>
 #include <QPixmap>
@@ -102,14 +106,6 @@ namespace
         }
     }
 
-    // createNidsCell：创建统一的只读 NIDS 表格单元格。
-    QTableWidgetItem* createNidsCell(const QString& cellText)
-    {
-        QTableWidgetItem* tableItem = new QTableWidgetItem(cellText);
-        tableItem->setFlags(tableItem->flags() & ~Qt::ItemIsEditable);
-        return tableItem;
-    }
-
     // nidsSeverityIndex：等级转 int，用于过滤和排序。
     int nidsSeverityIndex(const ks::network::NidsAlertSeverity severity)
     {
@@ -120,19 +116,18 @@ namespace
     // - 输入：NIDS 表格指针和行号；
     // - 处理：按当前列顺序读取整行，使用 TSV 拼接；
     // - 返回：可直接复制到剪贴板或表格工具的文本。
-    QString nidsTableRowText(QTableWidget* table, const int rowIndex)
+    QString nidsTableRowText(QTableView* table, const int rowIndex)
     {
-        if (table == nullptr || rowIndex < 0 || rowIndex >= table->rowCount())
+        if (table == nullptr || rowIndex < 0 || rowIndex >= table->model()->rowCount())
         {
             return QString();
         }
 
         QStringList fields;
-        fields.reserve(table->columnCount());
-        for (int columnIndex = 0; columnIndex < table->columnCount(); ++columnIndex)
+        fields.reserve(table->model()->columnCount());
+        for (int columnIndex = 0; columnIndex < table->model()->columnCount(); ++columnIndex)
         {
-            const QTableWidgetItem* item = table->item(rowIndex, columnIndex);
-            fields.push_back(item != nullptr ? item->text() : QString());
+            fields.push_back(table->model()->index(rowIndex, columnIndex).data().toString());
         }
         return fields.join(QLatin1Char('\t'));
     }
@@ -141,7 +136,7 @@ namespace
     // - 输入：NIDS 表格指针；
     // - 处理：收集选择模型中的行号并去重排序，空选择时回退当前行；
     // - 返回：需要复制的行号列表。
-    std::vector<int> nidsSelectedRows(QTableWidget* table)
+    std::vector<int> nidsSelectedRows(QTableView* table)
     {
         std::set<int> rowSet;
         if (table != nullptr)
@@ -150,9 +145,9 @@ namespace
             {
                 rowSet.insert(index.row());
             }
-            if (rowSet.empty() && table->currentRow() >= 0)
+            if (rowSet.empty() && table->currentIndex().row() >= 0)
             {
-                rowSet.insert(table->currentRow());
+                rowSet.insert(table->currentIndex().row());
             }
         }
         return std::vector<int>(rowSet.begin(), rowSet.end());
@@ -162,7 +157,7 @@ namespace
     // - 输入：NIDS 表格和待复制行号；
     // - 处理：逐行生成 TSV，多行使用换行分隔；
     // - 返回：无，复制失败时静默保持 UI 稳定。
-    void copyNidsRowsToClipboard(QTableWidget* table, const std::vector<int>& rowList)
+    void copyNidsRowsToClipboard(QTableView* table, const std::vector<int>& rowList)
     {
         if (table == nullptr || QApplication::clipboard() == nullptr || rowList.empty())
         {
@@ -191,23 +186,17 @@ namespace
     // - 处理：从时间列的 Qt::UserRole 取出该告警关联的报文序号；
     // - 返回：取到非零序号时为 true，行号越界、单元格缺失或序号无效时为 false。
     bool nidsAlertSequenceForRow(
-        QTableWidget* table,
+        QTableView* table,
         const int row,
         const int timeColumn,
         std::uint64_t& sequenceIdOut)
     {
-        if (table == nullptr || row < 0 || row >= table->rowCount())
+        if (table == nullptr || row < 0 || row >= table->model()->rowCount())
         {
             return false;
         }
 
-        const QTableWidgetItem* timeItem = table->item(row, timeColumn);
-        if (timeItem == nullptr)
-        {
-            return false;
-        }
-
-        const QVariant sequenceVariant = timeItem->data(Qt::UserRole);
+        const QVariant sequenceVariant = table->model()->index(row, timeColumn).data(Qt::UserRole);
         if (!sequenceVariant.isValid())
         {
             return false;
@@ -258,6 +247,127 @@ namespace
     }
 }
 
+class NetworkDock::NidsAlertModel final : public QAbstractTableModel
+{
+public:
+    using Alert = std::shared_ptr<const ks::network::NidsAlert>;
+    explicit NidsAlertModel(NetworkDock* owner, QStringList headers)
+        : QAbstractTableModel(owner), m_owner(owner), m_headers(std::move(headers)) {}
+    int rowCount(const QModelIndex& parent = {}) const override { return parent.isValid() ? 0 : static_cast<int>(m_rows.size()); }
+    int columnCount(const QModelIndex& parent = {}) const override { return parent.isValid() ? 0 : m_headers.size(); }
+    Alert alertAt(int row) const { return row >= 0 && row < rowCount() ? m_rows[static_cast<std::size_t>(row)] : Alert(); }
+    QVariant headerData(int section, Qt::Orientation orientation, int role = Qt::DisplayRole) const override
+    {
+        if (orientation == Qt::Horizontal && role == Qt::DisplayRole && section >= 0 && section < m_headers.size())
+            return ks::i18n::displayText(m_headers[section]);
+        return QAbstractTableModel::headerData(section, orientation, role);
+    }
+    QVariant data(const QModelIndex& index, int role = Qt::DisplayRole) const override
+    {
+        const auto value = alertAt(index.row());
+        if (!index.isValid() || !value || index.column() < 0 || index.column() >= columnCount()) return {};
+        const auto& a = *value;
+        const auto column = static_cast<NidsAlertTableColumn>(index.column());
+        if (role == Qt::UserRole)
+        {
+            if (column == NidsAlertTableColumn::Time) return QVariant::fromValue(static_cast<qulonglong>(a.sequenceId));
+            if (column == NidsAlertTableColumn::Severity) return nidsSeverityIndex(a.severity);
+            return {};
+        }
+        if (role == Qt::ForegroundRole && column == NidsAlertTableColumn::Severity) return QBrush(nidsSeverityColor(a.severity));
+        if (role == Qt::DecorationRole && column == NidsAlertTableColumn::ProcessName && m_owner)
+            return m_owner->resolveNidsProcessIcon(a);
+        if (role != Qt::DisplayRole && role != Qt::ToolTipRole) return {};
+        switch (column)
+        {
+        case NidsAlertTableColumn::Time: return toQString(ks::network::FormatUnixTimestampMs(a.timestampMs, false));
+        case NidsAlertTableColumn::Severity: return ks::i18n::sourceText(nidsSeverityText(a.severity));
+        case NidsAlertTableColumn::Category: return toQString(a.category);
+        case NidsAlertTableColumn::Rule: return toQString(a.ruleId);
+        case NidsAlertTableColumn::Protocol: return toQString(ks::network::PacketProtocolToString(a.protocol));
+        case NidsAlertTableColumn::Direction: return toQString(ks::network::PacketDirectionToString(a.direction));
+        case NidsAlertTableColumn::Pid: return QString::number(a.processId);
+        case NidsAlertTableColumn::ProcessName: return toQString(a.processName);
+        case NidsAlertTableColumn::LocalEndpoint: return formatEndpointText(a.localAddress, a.localPort);
+        case NidsAlertTableColumn::RemoteEndpoint: return formatEndpointText(a.remoteAddress, a.remotePort);
+        case NidsAlertTableColumn::Detail: return QStringLiteral("%1：%2").arg(toQString(a.title)).arg(toQString(a.detail));
+        default: return {};
+        }
+    }
+    Qt::ItemFlags flags(const QModelIndex& index) const override
+    { return index.isValid() ? Qt::ItemIsEnabled | Qt::ItemIsSelectable : Qt::NoItemFlags; }
+    bool containsPath(const QString& path) const { return m_paths.contains(path); }
+    void refreshIcons()
+    {
+        if (!m_rows.empty()) emit dataChanged(index(0, toNidsAlertColumn(NidsAlertTableColumn::ProcessName)),
+            index(rowCount() - 1, toNidsAlertColumn(NidsAlertTableColumn::ProcessName)), {Qt::DecorationRole});
+    }
+    bool synchronize(std::vector<Alert> incoming)
+    {
+        const QPointer<NidsAlertModel> guard(this);
+        std::size_t removed = 0;
+        if (incoming.empty()) removed = m_rows.size();
+        else while (removed < m_rows.size() && m_rows[removed] != incoming.front()) ++removed;
+        if (removed != 0)
+        {
+            beginRemoveRows({}, 0, static_cast<int>(removed) - 1);
+            if (!guard) return false;
+            for (std::size_t i = 0; i < removed; ++i)
+            {
+                const auto path = QString::fromUtf8(m_rows[i]->processImagePath.c_str());
+                auto found = m_paths.find(path);
+                if (found != m_paths.end() && --found.value() == 0) m_paths.erase(found);
+            }
+            m_rows.erase(m_rows.begin(), m_rows.begin() + static_cast<std::ptrdiff_t>(removed));
+            endRemoveRows();
+            if (!guard) return false;
+        }
+        const auto kept = m_rows.size();
+        if (incoming.size() > kept)
+        {
+            // Reserve before beginning a Qt insert; canonical values remain shared,
+            // and data() formats only requested cells instead of building 11 items.
+            m_rows.reserve(incoming.size());
+            beginInsertRows({}, static_cast<int>(kept), static_cast<int>(incoming.size()) - 1);
+            if (!guard) return false;
+            for (std::size_t i = kept; i < incoming.size(); ++i)
+            {
+                ++m_paths[QString::fromUtf8(incoming[i]->processImagePath.c_str())];
+                m_rows.push_back(std::move(incoming[i]));
+            }
+            endInsertRows();
+            if (!guard) return false;
+        }
+        return true;
+    }
+private:
+    QPointer<NetworkDock> m_owner;
+    QStringList m_headers;
+    std::vector<Alert> m_rows;
+    QHash<QString, int> m_paths; // Rendering membership only; no process/identity lookup.
+};
+
+class NetworkDock::NidsAlertProxy final : public QSortFilterProxyModel
+{
+public:
+    explicit NidsAlertProxy(QObject* parent) : QSortFilterProxyModel(parent) { setDynamicSortFilter(false); }
+    void setMinimumSeverity(int value)
+    {
+        if (m_minimumSeverity == value) return;
+        m_minimumSeverity = value;
+        invalidateFilter();
+    }
+protected:
+    bool filterAcceptsRow(int row, const QModelIndex& parent) const override
+    {
+        return sourceModel()->index(row, static_cast<int>(NidsAlertTableColumn::Severity), parent)
+            .data(Qt::UserRole).toInt() >= m_minimumSeverity;
+    }
+private:
+    int m_minimumSeverity = 0;
+};
+
+
 void NetworkDock::initializeNidsTab()
 {
     m_nidsPage = new QWidget(this);
@@ -307,11 +417,9 @@ void NetworkDock::initializeNidsTab()
     m_nidsLayout->addWidget(alertToolbar);
     ks::ui::NormalizeToolbarRow(m_nidsControlLayout);
 
-    m_nidsAlertTable = new ks::ui::VisibleTableWidget(m_nidsPage);
-    // 告警是需要导出与保留快照的独立证据列表。
+    m_nidsAlertTable = new ks::ui::TableActionTableView(m_nidsPage);
     ks::ui::SetTableActionBarMode(m_nidsAlertTable, ks::ui::TableActionBarMode::Full);
-    m_nidsAlertTable->setColumnCount(toNidsAlertColumn(NidsAlertTableColumn::Count));
-    m_nidsAlertTable->setHorizontalHeaderLabels({
+    m_nidsAlertModel = new NidsAlertModel(this, {
         QStringLiteral("时间"),
         QStringLiteral("等级"),
         QStringLiteral("分类"),
@@ -324,6 +432,12 @@ void NetworkDock::initializeNidsTab()
         QStringLiteral("远端端点"),
         QStringLiteral("详情")
         });
+    m_nidsAlertProxy = new NidsAlertProxy(this);
+    m_nidsAlertProxy->setSourceModel(m_nidsAlertModel);
+    m_nidsAlertTable->setModel(m_nidsAlertProxy);
+    m_nidsAlertTable->setProperty("ks_i18n_preserve_model_data", true);
+    m_nidsAlertTable->setSortingEnabled(true);
+    m_nidsAlertProxy->sort(-1); // Preserve collection order until an explicit header sort.
     m_nidsAlertTable->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_nidsAlertTable->setSelectionMode(QAbstractItemView::ExtendedSelection);
     m_nidsAlertTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
@@ -333,7 +447,7 @@ void NetworkDock::initializeNidsTab()
     m_nidsAlertTable->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
     m_nidsLayout->addWidget(m_nidsAlertTable, 1);
 
-    connect(m_nidsAlertTable, &QTableWidget::customContextMenuRequested, this, [this](const QPoint& localPosition)
+    connect(m_nidsAlertTable, &QTableView::customContextMenuRequested, this, [this](const QPoint& localPosition)
     {
         // 右键菜单：
         // - 输入：用户在 NIDS 告警表中的点击位置；
@@ -349,7 +463,7 @@ void NetworkDock::initializeNidsTab()
         const QModelIndex clickedIndex = m_nidsAlertTable->indexAt(localPosition);
         if (clickedIndex.isValid())
         {
-            m_nidsAlertTable->setCurrentCell(clickedIndex.row(), clickedIndex.column());
+            m_nidsAlertTable->setCurrentIndex(clickedIndex);
         }
 
         QMenu menu(m_nidsAlertTable);
@@ -358,7 +472,7 @@ void NetworkDock::initializeNidsTab()
         std::uint64_t relatedPacketSequenceId = 0;
         const bool hasRelatedPacket = nidsAlertSequenceForRow(
             m_nidsAlertTable,
-            m_nidsAlertTable->currentRow(),
+            m_nidsAlertTable->currentIndex().row(),
             toNidsAlertColumn(NidsAlertTableColumn::Time),
             relatedPacketSequenceId);
         QAction* viewPacketDetailAction = menu.addAction(
@@ -375,27 +489,22 @@ void NetworkDock::initializeNidsTab()
         QAction* copySelectedRowsAction = menu.addAction(QIcon(QStringLiteral(":/Icon/log_clipboard.svg")), QStringLiteral("复制选中行"));
         // 声明业务菜单已提供此能力，避免共享表格菜单追加重复项。
         ks::ui::SetTableContextActionRole(copySelectedRowsAction, ks::ui::TableContextActionRole::CopyRows);
-        const int currentRow = m_nidsAlertTable->currentRow();
-        const QTableWidgetItem* processIdItem = currentRow >= 0
-            ? m_nidsAlertTable->item(currentRow, toNidsAlertColumn(NidsAlertTableColumn::Pid))
-            : nullptr;
+        const int currentRow = m_nidsAlertTable->currentIndex().row();
+        const QModelIndex processIdIndex = m_nidsAlertTable->model()->index(currentRow, toNidsAlertColumn(NidsAlertTableColumn::Pid));
         std::uint32_t processId = 0;
-        const bool hasProcessId = processIdItem != nullptr &&
-            ks::online_scan::tryParsePidFromText(processIdItem->text(), &processId) &&
+        const bool hasProcessId = processIdIndex.isValid() &&
+            ks::online_scan::tryParsePidFromText(processIdIndex.data().toString(), &processId) &&
             processId != 0U;
         QAction* openProcessDetailAction = menu.addAction(
             QIcon(QStringLiteral(":/Icon/process_details.svg")),
             QStringLiteral("转到进程详细信息"));
         openProcessDetailAction->setEnabled(hasProcessId);
         std::optional<ks::network::NidsAlert> blockRuleEvidence;
-        if (hasRelatedPacket)
+        if (m_nidsAlertModel != nullptr && m_nidsAlertProxy != nullptr)
         {
-            const auto evidence = std::find_if(m_nidsAlertList.cbegin(), m_nidsAlertList.cend(),
-                [relatedPacketSequenceId](const ks::network::NidsAlert& record)
-                {
-                    return record.sequenceId == relatedPacketSequenceId;
-                });
-            if (evidence != m_nidsAlertList.cend()) blockRuleEvidence = *evidence;
+            const auto evidence = m_nidsAlertModel->alertAt(m_nidsAlertProxy->mapToSource(
+                m_nidsAlertTable->currentIndex()).row());
+            if (evidence) blockRuleEvidence = *evidence; // Exact selected alert, including multi-rule packets.
         }
         QAction* addBlockRuleAction = menu.addAction(
             QIcon(QStringLiteral(":/Icon/process_terminate.svg")),
@@ -411,13 +520,11 @@ void NetworkDock::initializeNidsTab()
                 // 处理：读取 PID 列并解析发起进程 EXE 路径。
                 // 返回：待上传路径和来源说明；PID 缺失或进程已退出时返回 errorText。
                 ks::online_scan::SandboxUploadTarget uploadTarget;
-                const int rowIndex = m_nidsAlertTable != nullptr ? m_nidsAlertTable->currentRow() : -1;
-                const QTableWidgetItem* pidItem =
-                    (m_nidsAlertTable != nullptr && rowIndex >= 0)
-                    ? m_nidsAlertTable->item(rowIndex, toNidsAlertColumn(NidsAlertTableColumn::Pid))
-                    : nullptr;
+                const int rowIndex = m_nidsAlertTable != nullptr ? m_nidsAlertTable->currentIndex().row() : -1;
+                const QModelIndex pidIndex = m_nidsAlertTable != nullptr
+                    ? m_nidsAlertTable->model()->index(rowIndex, toNidsAlertColumn(NidsAlertTableColumn::Pid)) : QModelIndex();
                 std::uint32_t targetPid = 0;
-                if (pidItem == nullptr || !ks::online_scan::tryParsePidFromText(pidItem->text(), &targetPid))
+                if (!pidIndex.isValid() || !ks::online_scan::tryParsePidFromText(pidIndex.data().toString(), &targetPid))
                 {
                     uploadTarget.errorText = QStringLiteral("当前 NIDS 告警没有可解析 PID。");
                     return uploadTarget;
@@ -427,8 +534,8 @@ void NetworkDock::initializeNidsTab()
                 uploadTarget.sourceText = QStringLiteral("NIDS 告警 PID=%1").arg(targetPid);
                 return uploadTarget;
             });
-        const bool hasCurrentCell = m_nidsAlertTable->currentRow() >= 0 && m_nidsAlertTable->currentColumn() >= 0;
-        const bool hasCurrentRow = m_nidsAlertTable->currentRow() >= 0;
+        const bool hasCurrentCell = m_nidsAlertTable->currentIndex().row() >= 0 && m_nidsAlertTable->currentIndex().column() >= 0;
+        const bool hasCurrentRow = m_nidsAlertTable->currentIndex().row() >= 0;
         copyCellAction->setEnabled(hasCurrentCell);
         copyRowAction->setEnabled(hasCurrentRow);
         copySelectedRowsAction->setEnabled(!nidsSelectedRows(m_nidsAlertTable).empty());
@@ -461,17 +568,13 @@ void NetworkDock::initializeNidsTab()
         }
         else if (selectedAction == copyCellAction)
         {
-            const QTableWidgetItem* item = m_nidsAlertTable->item(
-                m_nidsAlertTable->currentRow(),
-                m_nidsAlertTable->currentColumn());
-            if (item != nullptr && QApplication::clipboard() != nullptr)
-            {
-                QApplication::clipboard()->setText(item->text());
-            }
+            const QModelIndex index = m_nidsAlertTable->currentIndex();
+            if (index.isValid() && QApplication::clipboard() != nullptr)
+                QApplication::clipboard()->setText(index.data().toString());
         }
         else if (selectedAction == copyRowAction)
         {
-            copyNidsRowsToClipboard(m_nidsAlertTable, std::vector<int>{ m_nidsAlertTable->currentRow() });
+            copyNidsRowsToClipboard(m_nidsAlertTable, std::vector<int>{ m_nidsAlertTable->currentIndex().row() });
         }
         else if (selectedAction == copySelectedRowsAction)
         {
@@ -573,50 +676,20 @@ void NetworkDock::applyNidsAnalysisBatch(const std::shared_ptr<NidsAnalysisBatch
     m_nidsAnalyzedPacketCount += batch->analyzedPackets;
     if (batch->alerts.empty()) { updateNidsStatusLabel(); return; }
     const auto& alertList = batch->alerts;
-    bool canProject = m_nidsPage != nullptr && m_nidsPage->isVisible()
-        && m_nidsAlertTable != nullptr && !m_nidsProjectionNeedsRebuild
-        && m_nidsProjectedRows.size() == static_cast<std::size_t>(m_nidsAlertTable->rowCount())
-        && !ks::ui::IsTableUiCommitBlockedByContextMenu({m_nidsAlertTable});
-    if (!canProject) m_nidsProjectionNeedsRebuild = true;
+    m_nidsProjectionNeedsRebuild = true;
     for (const ks::network::NidsAlert& alertRecord : alertList)
     {
-        m_nidsAlertList.push_back(alertRecord);
+        m_nidsAlertList.push_back(std::make_shared<const ks::network::NidsAlert>(alertRecord));
         const int appendedSeverity = nidsSeverityIndex(alertRecord.severity);
         if (appendedSeverity >= 0 && appendedSeverity < static_cast<int>(m_nidsRetainedSeverityCounts.size()))
             ++m_nidsRetainedSeverityCounts[static_cast<std::size_t>(appendedSeverity)];
         ++m_nidsTotalAlertCount;
         while (m_nidsAlertList.size() > kMaxNidsAlertCount)
         {
-            const auto projected = m_nidsProjectedRows.find(&m_nidsAlertList.front());
-            if (projected != m_nidsProjectedRows.end())
-            {
-                // The persistent source index follows one-shot sorting and is
-                // invalidated safely if an external reset removed the row.
-                if (canProject)
-                {
-                    if (projected->second.isValid()
-                        && projected->second.model() == m_nidsAlertTable->model())
-                    {
-                        m_nidsAlertTable->removeRow(projected->second.row());
-                    }
-                    else
-                    {
-                        canProject = false;
-                        m_nidsProjectionNeedsRebuild = true;
-                    }
-                }
-                m_nidsProjectedRows.erase(projected);
-            }
-            pruneNidsIconRows(QString::fromUtf8(m_nidsAlertList.front().processImagePath.c_str()));
-            const int removedSeverity = nidsSeverityIndex(m_nidsAlertList.front().severity);
+            const int removedSeverity = nidsSeverityIndex(m_nidsAlertList.front()->severity);
             if (removedSeverity >= 0 && removedSeverity < static_cast<int>(m_nidsRetainedSeverityCounts.size()))
                 --m_nidsRetainedSeverityCounts[static_cast<std::size_t>(removedSeverity)];
             m_nidsAlertList.pop_front();
-        }
-
-        if (canProject && nidsAlertPassesFilter(m_nidsAlertList.back()))
-        {
-            appendNidsAlertRow(m_nidsAlertList.back());
         }
 
         kLogEvent nidsAlertEvent;
@@ -633,66 +706,14 @@ void NetworkDock::applyNidsAnalysisBatch(const std::shared_ptr<NidsAnalysisBatch
     {
         rebuildNidsAlertTable();
     }
-    else if (canProject && m_nidsAlertTable != nullptr && m_nidsAlertTable->rowCount() > 0)
-    {
-        m_nidsAlertTable->scrollToBottom();
-    }
 
     updateNidsStatusLabel();
-}
-
-void NetworkDock::appendNidsAlertRow(const ks::network::NidsAlert& alertRecord)
-{
-    if (m_nidsAlertTable == nullptr)
-    {
-        return;
-    }
-
-    const int newRow = m_nidsAlertTable->rowCount();
-    m_nidsAlertTable->setRowCount(newRow + 1);
-
-    const QString timeText = toQString(ks::network::FormatUnixTimestampMs(alertRecord.timestampMs, false));
-    const QString severityText = nidsSeverityText(alertRecord.severity);
-    const QString protocolText = toQString(ks::network::PacketProtocolToString(alertRecord.protocol));
-    const QString directionText = toQString(ks::network::PacketDirectionToString(alertRecord.direction));
-    const QString pidText = QString::number(alertRecord.processId);
-    const QString processNameText = toQString(alertRecord.processName);
-    const QString localEndpointText = formatEndpointText(alertRecord.localAddress, alertRecord.localPort);
-    const QString remoteEndpointText = formatEndpointText(alertRecord.remoteAddress, alertRecord.remotePort);
-    const QString detailText = QStringLiteral("%1：%2")
-        .arg(toQString(alertRecord.title))
-        .arg(toQString(alertRecord.detail));
-
-    QTableWidgetItem* timeItem = createNidsCell(timeText);
-    timeItem->setData(Qt::UserRole, static_cast<qulonglong>(alertRecord.sequenceId));
-    m_nidsAlertTable->setItem(newRow, toNidsAlertColumn(NidsAlertTableColumn::Time), timeItem);
-
-    QTableWidgetItem* severityItem = createNidsCell(severityText);
-    severityItem->setForeground(QBrush(nidsSeverityColor(alertRecord.severity)));
-    severityItem->setData(Qt::UserRole, nidsSeverityIndex(alertRecord.severity));
-    m_nidsAlertTable->setItem(newRow, toNidsAlertColumn(NidsAlertTableColumn::Severity), severityItem);
-
-    m_nidsAlertTable->setItem(newRow, toNidsAlertColumn(NidsAlertTableColumn::Category), createNidsCell(toQString(alertRecord.category)));
-    m_nidsAlertTable->setItem(newRow, toNidsAlertColumn(NidsAlertTableColumn::Rule), createNidsCell(toQString(alertRecord.ruleId)));
-    m_nidsAlertTable->setItem(newRow, toNidsAlertColumn(NidsAlertTableColumn::Protocol), createNidsCell(protocolText));
-    m_nidsAlertTable->setItem(newRow, toNidsAlertColumn(NidsAlertTableColumn::Direction), createNidsCell(directionText));
-    m_nidsAlertTable->setItem(newRow, toNidsAlertColumn(NidsAlertTableColumn::Pid), createNidsCell(pidText));
-
-    QTableWidgetItem* processNameItem = createNidsCell(processNameText);
-    processNameItem->setIcon(resolveNidsProcessIcon(alertRecord));
-    m_nidsAlertTable->setItem(newRow, toNidsAlertColumn(NidsAlertTableColumn::ProcessName), processNameItem);
-    registerNidsIconRow(alertRecord, processNameItem->row());
-
-    m_nidsAlertTable->setItem(newRow, toNidsAlertColumn(NidsAlertTableColumn::LocalEndpoint), createNidsCell(localEndpointText));
-    m_nidsAlertTable->setItem(newRow, toNidsAlertColumn(NidsAlertTableColumn::RemoteEndpoint), createNidsCell(remoteEndpointText));
-    m_nidsAlertTable->setItem(newRow, toNidsAlertColumn(NidsAlertTableColumn::Detail), createNidsCell(detailText));
-    m_nidsProjectedRows[&alertRecord] = QPersistentModelIndex(
-        m_nidsAlertTable->model()->index(timeItem->row(), toNidsAlertColumn(NidsAlertTableColumn::Time)));
 }
 
 void NetworkDock::rebuildNidsAlertTable()
 {
     m_nidsProjectionNeedsRebuild = true;
+    if (m_nidsProjectionInProgress) return;
     if (m_nidsPage == nullptr || !m_nidsPage->isVisible()) return;
     if (m_nidsAlertTable == nullptr)
     {
@@ -715,24 +736,18 @@ void NetworkDock::rebuildNidsAlertTable()
         return;
     }
 
-    m_nidsAlertTable->setUpdatesEnabled(false);
-    m_nidsIconRows.clear();
-    m_nidsProjectedRows.clear();
-    m_nidsAlertTable->setRowCount(0);
-    for (const ks::network::NidsAlert& alertRecord : m_nidsAlertList)
-    {
-        if (!nidsAlertPassesFilter(alertRecord))
-        {
-            continue;
-        }
-        appendNidsAlertRow(alertRecord);
-    }
+    const int minSeverity = m_nidsSeverityFilterCombo != nullptr ? m_nidsSeverityFilterCombo->currentData().toInt() : 0;
+    std::vector<NidsAlertModel::Alert> projection(m_nidsAlertList.cbegin(), m_nidsAlertList.cend());
     m_nidsProjectionNeedsRebuild = false;
-    m_nidsAlertTable->setUpdatesEnabled(true);
-    if (m_nidsAlertTable->rowCount() > 0)
-    {
-        m_nidsAlertTable->scrollToBottom();
-    }
+    m_nidsProjectionInProgress = true;
+    if (!m_nidsAlertModel->synchronize(std::move(projection)) || !safeThis) return;
+    m_nidsAlertProxy->setMinimumSeverity(minSeverity);
+    if (!safeThis) return;
+    m_nidsProjectionInProgress = false;
+    if (m_nidsProjectionNeedsRebuild)
+        QTimer::singleShot(0, this, [safeThis]() { if (safeThis) safeThis->synchronizeVisibleNidsProjection(); });
+    else if (m_nidsAlertProxy->rowCount() > 0) m_nidsAlertTable->scrollToBottom();
+
 }
 
 void NetworkDock::clearNidsAlerts()
@@ -765,17 +780,18 @@ void NetworkDock::clearNidsAlerts()
     m_nidsIconCache.clear();
     if (m_nidsIconOperation != nullptr) m_nidsIconOperation->cancel();
     if (m_nidsAnalysisOperation != nullptr) m_nidsAnalysisOperation->cancel();
-    m_nidsIconRows.clear();
-    m_nidsProjectedRows.clear();
     m_nidsProjectionNeedsRebuild = false;
     m_nidsAlertList.clear();
     m_nidsRetainedSeverityCounts.fill(0);
     m_nidsAnalyzedPacketCount = 0;
     m_nidsTotalAlertCount = 0;
-    if (m_nidsAlertTable != nullptr)
+    if (m_nidsAlertModel != nullptr && !m_nidsProjectionInProgress)
     {
-        m_nidsAlertTable->setRowCount(0);
+        m_nidsProjectionInProgress = true;
+        if (!m_nidsAlertModel->synchronize({}) || !safeThis) return;
+        m_nidsProjectionInProgress = false;
     }
+    else m_nidsProjectionNeedsRebuild = true;
     updateNidsStatusLabel();
 
     kLogEvent clearNidsEvent;
@@ -810,17 +826,6 @@ void NetworkDock::updateNidsStatusLabel()
         + QStringLiteral(" | 等待分析 %1 包").arg(static_cast<qulonglong>(pending)));
 }
 
-bool NetworkDock::nidsAlertPassesFilter(const ks::network::NidsAlert& alertRecord) const
-{
-    if (m_nidsSeverityFilterCombo == nullptr)
-    {
-        return true;
-    }
-
-    const int minSeverity = m_nidsSeverityFilterCombo->currentData().toInt();
-    return nidsSeverityIndex(alertRecord.severity) >= minSeverity;
-}
-
 QIcon NetworkDock::resolveNidsProcessIcon(const ks::network::NidsAlert& alert)
 {
     const QString path = QString::fromUtf8(alert.processImagePath.c_str());
@@ -833,24 +838,6 @@ QIcon NetworkDock::resolveNidsProcessIcon(const ks::network::NidsAlert& alert)
         scheduleNidsIconWork();
     }
     return QIcon(QStringLiteral(":/Icon/process_main.svg"));
-}
-
-void NetworkDock::registerNidsIconRow(const ks::network::NidsAlert& alert, int row)
-{
-    if (!m_nidsAlertTable || row < 0) return;
-    const QString path = QString::fromUtf8(alert.processImagePath.c_str());
-    if (!path.isEmpty()) m_nidsIconRows[path].push_back(QPersistentModelIndex(
-        m_nidsAlertTable->model()->index(row, toNidsAlertColumn(NidsAlertTableColumn::ProcessName))));
-}
-
-void NetworkDock::pruneNidsIconRows(const QString& path)
-{
-    auto found = m_nidsIconRows.find(path);
-    if (found == m_nidsIconRows.end()) return;
-    auto& rows = found.value();
-    rows.erase(std::remove_if(rows.begin(), rows.end(), [](const QPersistentModelIndex& index)
-    { return !index.isValid(); }), rows.end());
-    if (rows.empty()) m_nidsIconRows.erase(found);
 }
 
 void NetworkDock::scheduleNidsIconWork()
@@ -892,8 +879,7 @@ void NetworkDock::launchNidsIconWork()
     {
         const auto path = m_nidsIconQueue.front();
         m_nidsIconQueue.pop_front();
-        pruneNidsIconRows(path);
-        if (!m_nidsIconRows.contains(path)) { m_nidsIconPendingPaths.remove(path); continue; }
+        if (m_nidsAlertModel == nullptr || !m_nidsAlertModel->containsPath(path)) { m_nidsIconPendingPaths.remove(path); continue; }
         paths.push_back(path);
     }
     if (paths.empty()) return;
@@ -905,25 +891,19 @@ void NetworkDock::launchNidsIconWork()
         {
             if (!guard) return true;
             for (const auto& path : paths) guard->m_nidsIconPendingPaths.remove(path);
+            bool changed = false;
             for (const auto& image : images)
             {
                 if (!guard) return true;
-                guard->pruneNidsIconRows(image.path);
-                if (!guard->m_nidsIconRows.contains(image.path)) continue;
+                if (guard->m_nidsAlertModel == nullptr || !guard->m_nidsAlertModel->containsPath(image.path)) continue;
                 const QIcon icon = image.image.isNull() ? QIcon(QStringLiteral(":/Icon/process_main.svg"))
                     : QIcon(QPixmap::fromImage(image.image)); // GUI only
                 guard->m_nidsIconCache.insert(image.path, new QIcon(icon));
                 if (guard->m_nidsPage == nullptr || !guard->m_nidsPage->isVisible())
                 { guard->m_nidsProjectionNeedsRebuild = true; continue; }
-                const auto rows = guard->m_nidsIconRows.value(image.path);
-                for (const auto& index : rows)
-                {
-                    if (!guard) return true;
-                    if (index.isValid() && guard->m_nidsAlertTable
-                        && index.model() == guard->m_nidsAlertTable->model())
-                        guard->m_nidsAlertTable->model()->setData(index, icon, Qt::DecorationRole);
-                }
+                changed = true;
             }
+            if (changed && guard && guard->m_nidsAlertModel) guard->m_nidsAlertModel->refreshIcons();
             return true;
         },
         [guard, paths](std::exception_ptr)

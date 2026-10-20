@@ -1,5 +1,6 @@
 #include "NetworkDock.NidsAnalysis.h"
 #include <QItemSelectionModel>
+#include <QTableView>
 #include "NetworkDock.InternalCommon.h"
 #include "../UI/TableContextMenu.h"
 #include "NetworkAuditPage.h"
@@ -224,18 +225,13 @@ void NetworkDock::initializeConnections()
         });
     const auto nidsAlertSequenceForRow = [this](const int row, std::uint64_t& sequenceIdOut) -> bool
         {
-            if (m_nidsAlertTable == nullptr || row < 0 || row >= m_nidsAlertTable->rowCount())
+            if (m_nidsAlertTable == nullptr || row < 0 || row >= m_nidsAlertTable->model()->rowCount())
             {
                 return false;
             }
 
-            QTableWidgetItem* timeItem = m_nidsAlertTable->item(row, toNidsAlertColumn(NidsAlertTableColumn::Time));
-            if (timeItem == nullptr)
-            {
-                return false;
-            }
-
-            const QVariant sequenceVariant = timeItem->data(Qt::UserRole);
+            const QVariant sequenceVariant = m_nidsAlertTable->model()->index(
+                row, toNidsAlertColumn(NidsAlertTableColumn::Time)).data(Qt::UserRole);
             if (!sequenceVariant.isValid())
             {
                 return false;
@@ -243,11 +239,11 @@ void NetworkDock::initializeConnections()
             sequenceIdOut = static_cast<std::uint64_t>(sequenceVariant.toULongLong());
             return sequenceIdOut != 0;
         };
-    connect(m_nidsAlertTable, &QTableWidget::cellDoubleClicked, this,
-        [this, nidsAlertSequenceForRow](const int row, const int /*column*/)
+    connect(m_nidsAlertTable, &QTableView::doubleClicked, this,
+        [this, nidsAlertSequenceForRow](const QModelIndex& index)
         {
             std::uint64_t sequenceId = 0;
-            if (nidsAlertSequenceForRow(row, sequenceId))
+            if (nidsAlertSequenceForRow(index.row(), sequenceId))
             {
                 openPacketDetailWindowBySequenceId(sequenceId);
             }
