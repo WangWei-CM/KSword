@@ -1,6 +1,7 @@
 #include "DiskEditorTab.h"
 #include "DiskEditorBackend.h"
 #include "DiskEditorFormat.h"
+#include "../../UI/AsyncOperation.h"
 #include "../../UI/MemoryWorkbench/HexView.h"
 #include "../../Framework/PrivilegeElevationPrompt.h"
 #include "../../SettingsDock/AppearanceSettings.h"
@@ -210,43 +211,86 @@ namespace ks::misc
         // 已有风险策略仍由宿主提供；共享事务只执行同一冻结来源的验证和写入。
         unsigned long flags = KSWORD_ARK_RAW_DISK_FLAG_UI_CONFIRMED_WRITE | KSWORD_ARK_RAW_DISK_FLAG_FUA;
         if (systemDisk) flags |= KSWORD_ARK_RAW_DISK_FLAG_ALLOW_SYSTEM_DISK_WRITE;
-        const DiskWritePorts ports{
-            [captured](QString& identity, QString& error) {
-                return DiskEditorBackend::queryCaptureIdentity(captured.source, identity, error);
-            },
-            [captured](QByteArray& bytes, QString& error) {
-                // 写事务的前后回读同样绑定实际实例，不允许退回未验证读取。
-                bool unsupported = false;
-                return DiskEditorBackend::readCapturedBytesWithBackend(captured,
-                    static_cast<std::uint32_t>(captured.original.size()), bytes, unsupported, error);
-            },
-            [captured, flags](const QByteArray& bytes, QString& error) {
-                return DiskEditorBackend::writeCapturedBytesWithBackend(captured, bytes, flags, error);
-            }
+        struct WriteRequest
+        {
+            DiskCapturedRange captured;
+            QByteArray replacement;
+            unsigned long flags;
         };
         m_busy = true;
+        m_writeTransactionPending = true;
+        m_readOnlyCheck->setEnabled(false);
+        m_hexEditor->setEditable(false);
         setControlsEnabledForBusy(true);
-        const DiskWriteReceipt receipt = ApplyCapturedDiskWrite(captured, replacement, ports);
-        if (!alive) return;
-        m_busy = false;
-        if (!receipt.success || !stillCurrent())
+        const auto accepted = m_writeOperation->submitTransaction<WriteRequest, DiskWriteReceipt>(
+            {captured, replacement, flags},
+            [](const WriteRequest& request) {
+                const DiskCapturedRange captured = request.captured;
+                const unsigned long flags = request.flags;
+                const DiskWritePorts ports{
+                    [captured](QString& identity, QString& error) {
+                        return DiskEditorBackend::queryCaptureIdentity(captured.source, identity, error);
+                    },
+                    [captured](QByteArray& bytes, QString& error) {
+                        // 写事务的前后回读同样绑定实际实例，不允许退回未验证读取。
+                        bool unsupported = false;
+                        return DiskEditorBackend::readCapturedBytesWithBackend(captured,
+                            static_cast<std::uint32_t>(captured.original.size()), bytes, unsupported, error);
+                    },
+                    [captured, flags](const QByteArray& bytes, QString& error) {
+                        return DiskEditorBackend::writeCapturedBytesWithBackend(captured, bytes, flags, error);
+                    }
+                };
+                return ApplyCapturedDiskWrite(captured, request.replacement, ports);
+            },
+            [this, captured, replacement, backendName](const DiskWriteReceipt& receipt, std::uint64_t) {
+                finishWriteTransactionUi();
+                const auto* selected = currentDisk();
+                const bool stillCurrent = m_capturedRange && selected && !m_readOnlyCheck->isChecked()
+                    && CapturedDiskMatches(captured, *selected, currentRawBackend(), m_captureGeneration)
+                    && m_capturedRange->deviceIdentity == captured.deviceIdentity
+                    && m_capturedRange->original == captured.original
+                    && m_hexEditor->buffer() == replacement;
+                if (!receipt.success || !stillCurrent)
+                {
+                    // 写入失败/身份冲突/回读不符均不接受编辑缓存为新基线。
+                    invalidateCapturedRange();
+                    setControlsEnabledForBusy(false);
+                    const QString error = receipt.error.isEmpty()
+                        ? QStringLiteral("写回未通过完整验证，请重新读取磁盘。") : receipt.error;
+                    appendLog(QStringLiteral("写回失败：%1").arg(error));
+                    QMessageBox::critical(this, QStringLiteral("磁盘编辑"), error);
+                    return true;
+                }
+                m_capturedRange->original = receipt.observed;
+                m_loadedBytes = receipt.observed;
+                m_hexEditor->setBuffer(captured.offset, receipt.observed);
+                updateDirtyState(false);
+                setControlsEnabledForBusy(false);
+                appendLog(QStringLiteral("写回完成（已回读验证）：访问层=%1，%2 字节 @ %3。")
+                    .arg(backendName).arg(receipt.observed.size()).arg(diskeditor_detail::HexOffsetText(captured.offset)));
+                refreshStructureReportAsync(QStringLiteral("写回后刷新结构解析"));
+                return true;
+            },
+            [this](std::exception_ptr) {
+                finishWriteTransactionUi();
+                invalidateCapturedRange();
+                setControlsEnabledForBusy(false);
+                appendLog(QStringLiteral("写回未通过完整验证，请重新读取磁盘。"));
+            });
+        if (accepted == 0)
         {
-            // 写入失败/身份冲突/回读不符均不接受编辑缓存为新基线。
-            invalidateCapturedRange();
+            finishWriteTransactionUi();
             setControlsEnabledForBusy(false);
-            const QString error = receipt.error.isEmpty()
-                ? QStringLiteral("写回未通过完整验证，请重新读取磁盘。") : receipt.error;
-            appendLog(QStringLiteral("写回失败：%1").arg(error));
-            QMessageBox::critical(this, QStringLiteral("磁盘编辑"), error);
-            return;
+            appendLog(QStringLiteral("写回已拒绝：请先读取当前磁盘并关闭只读保护。"));
         }
-        m_capturedRange->original = receipt.observed;
-        m_loadedBytes = receipt.observed;
-        m_hexEditor->setBuffer(captured.offset, receipt.observed);
-        updateDirtyState(false);
-        setControlsEnabledForBusy(false);
-        appendLog(QStringLiteral("写回完成（已回读验证）：访问层=%1，%2 字节 @ %3。")
-            .arg(backendName).arg(receipt.observed.size()).arg(diskeditor_detail::HexOffsetText(captured.offset)));
-        refreshStructureReportAsync(QStringLiteral("写回后刷新结构解析"));
+    }
+
+    void DiskEditorTab::finishWriteTransactionUi()
+    {
+        m_writeTransactionPending = false;
+        m_busy = false;
+        m_readOnlyCheck->setEnabled(true);
+        m_hexEditor->setEditable(!m_readOnlyCheck->isChecked());
     }
 }

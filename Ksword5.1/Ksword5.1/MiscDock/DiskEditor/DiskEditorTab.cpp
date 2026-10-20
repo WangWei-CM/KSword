@@ -1,5 +1,6 @@
 #include "DiskEditorTab.h"
 #include "../../UI/TableContextMenu.h"
+#include "../../UI/AsyncOperation.h"
 #include <QList>
 #include "../../UI/PageControlStyle.h"
 #include "../../UI/PrimaryPageStyle.h"
@@ -298,9 +299,24 @@ namespace ks::misc
     DiskEditorTab::DiskEditorTab(QWidget* parent)
         : QWidget(parent)
     {
+        m_writeOperation = new ks::ui::AsyncOperation(this);
         initializeUi();
         initializeConnections();
+        m_writeOperation->setStateChangedCallback([this]() {
+            if (m_writeTransactionPending && !m_writeOperation->isInFlight())
+            {
+                finishWriteTransactionUi();
+                invalidateCapturedRange();
+                setControlsEnabledForBusy(false);
+                appendLog(QStringLiteral("写回未通过完整验证，请重新读取磁盘。"));
+            }
+        });
         refreshDiskListAsync(false);
+    }
+
+    DiskEditorTab::~DiskEditorTab()
+    {
+        m_writeOperation->close();
     }
 
     void DiskEditorTab::initializeUi()

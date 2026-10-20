@@ -36,6 +36,7 @@ class QVBoxLayout;
 namespace ks::ui
 {
     class HexView;
+    class AsyncOperation;
 }
 
 namespace ks::misc
@@ -57,7 +58,7 @@ namespace ks::misc
         // 析构函数：
         // - 后台回投使用 QPointer；
         // - 无需手动等待线程。
-        ~DiskEditorTab() override = default;
+        ~DiskEditorTab() override;
 
     private:
         // initializeUi：
@@ -280,6 +281,7 @@ namespace ks::misc
         // - busy 为 true 时表示正在读/写/刷新；
         // - 无返回值。
         void setControlsEnabledForBusy(bool busy);
+        void finishWriteTransactionUi();
 
     private:
         QVBoxLayout* m_rootLayout = nullptr;        // m_rootLayout：页面根布局。
@@ -337,6 +339,8 @@ namespace ks::misc
         std::uint64_t m_readGeneration = 0;         // m_readGeneration：只有所属异步读可以结束 busy 状态。
         std::uint64_t m_loadedBaseOffset = 0;       // m_loadedBaseOffset：HEX 缓冲对应磁盘偏移。
         int m_selectedPartitionIndex = -1;          // m_selectedPartitionIndex：当前分区索引。
+        ks::ui::AsyncOperation* m_writeOperation = nullptr;
+        bool m_writeTransactionPending = false;
         bool m_busy = false;                        // m_busy：后台任务互斥标志。
         bool m_dirty = false;                       // m_dirty：当前 HEX 缓冲是否已修改。
     };
