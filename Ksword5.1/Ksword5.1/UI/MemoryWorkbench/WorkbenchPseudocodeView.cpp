@@ -248,6 +248,7 @@ namespace ks::ui
         const QPointer<WorkbenchPseudocodeView> self(this);
         const auto epoch = ++epoch_;
         hasRequest_ = false;
+        requestContentStamp_.reset();
         waitingForBytes_ = false;
         stopProgress();
         if (!self || epoch != epoch_) return;
@@ -268,11 +269,15 @@ namespace ks::ui
     bool WorkbenchPseudocodeView::requestStillCurrent() const
     {
         if (!hasRequest_ || !ContextMatches(context_, requestContext_)) return false;
+        const auto stamp = provider_ ? provider_->ContentStamp(context_.baseAddress, context_.length) : std::nullopt;
+        if (stamp && requestContentStamp_ == stamp) return true;
         DecompilerRequest current;
         QString reason;
-        return buildRequest(current, reason) && current.bytes == request_.bytes
+        const bool unchanged = buildRequest(current, reason) && current.bytes == request_.bytes
             && current.baseAddress == request_.baseAddress && current.selectedAddress == request_.selectedAddress
             && current.inputKind == request_.inputKind && current.x64 == request_.x64;
+        if (unchanged) requestContentStamp_ = stamp;
+        return unchanged;
     }
 
     // refreshView：无关页回填不作废 C；输入窗口发生变化时取消旧请求并要求显式重分析。
@@ -317,6 +322,7 @@ namespace ks::ui
         }
         request_ = request;
         requestContext_ = context_;
+        requestContentStamp_ = provider_ ? provider_->ContentStamp(context_.baseAddress, context_.length) : std::nullopt;
         hasRequest_ = true;
         beginProgress(continuedWaiting ? &continuedClock : nullptr);
         if (!self || epoch_ != epoch) return;

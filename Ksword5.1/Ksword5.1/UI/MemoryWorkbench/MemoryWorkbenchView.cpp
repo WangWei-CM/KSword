@@ -178,6 +178,13 @@ namespace ks::ui
             return window;
         }
 
+        std::optional<std::vector<std::uint64_t>> ContentStamp(
+            std::uint64_t address, std::uint64_t length) const override
+        {
+            const auto* canvas = hexPane_ ? hexPane_->canvas() : nullptr;
+            return canvas ? canvas->contentStamp(address, length) : std::nullopt;
+        }
+
         // AddressBits：取当前地址位数；本类不持有会话，只能退回 overlay 的基线
         // 位数概念不存在——因此由外层（currentBytesProvider 的调用方）在
         // setAddressSpace 时另行调用三个子页的 setAddressBits，本函数给一个

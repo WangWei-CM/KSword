@@ -419,6 +419,10 @@ namespace ks::ui
             std::uint64_t firstAddress,
             std::uint64_t lastAddress) const;
 
+        // Collision-free, bounded page-version signature; does not read byte data or touch LRU.
+        // Large callers without a bounded shared window retain byte-for-byte fallback.
+        std::optional<std::vector<std::uint64_t>> contentStamp(std::uint64_t address, std::uint64_t length) const;
+
         // ---------------- 模式与外观 ----------------
 
         // setEditable：是否允许编辑手势（还需要 overlay 非空）。
@@ -767,7 +771,7 @@ namespace ks::ui
         void applySelectionChange(const ksword::memwb::HexViewport::Selection& before);
         // 跨同步通知后核对实际选区；同一来源内重入导航也会使旧通知作废。
         bool selectionStillMatches(const ksword::memwb::HexViewport::Selection& expected) const;
-        void scheduleContentChanged();
+        void scheduleContentChanged(std::optional<HexFetchRange> changedPages = std::nullopt);
         bool collectCachedRange(
             std::uint64_t firstAddress,
             std::uint64_t lastAddress,
@@ -867,6 +871,8 @@ namespace ks::ui
         std::vector<std::pair<int, const HighlightLayer*>> m_layerSnapshot; // 层快照（层号降序，高层优先匹配）
         std::uint64_t m_lastPaintedRows = 0;                        // 最近一次绘制的行数
         bool m_refetchQueued = false;                               // 是否已排队一次补读（可见页被淘汰时）
+        std::uint64_t m_contentEpoch = 0, m_nextPageContentVersion = 0;
+        std::map<std::uint64_t, std::uint64_t> m_pageContentVersions;
         bool m_contentChangedQueued = false;                        // 是否已排队一次 contentChanged（用于同一轮事件循环内合并）
     };
 }
