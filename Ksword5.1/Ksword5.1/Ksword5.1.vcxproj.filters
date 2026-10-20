@@ -2710,6 +2710,9 @@
     <ClInclude Include="..\..\shared\evidence\memory_workbench\MemoryIoPort.h">
       <Filter>Header Files\MemoryWorkbench\Shared</Filter>
     </ClInclude>
+    <ClInclude Include="..\..\shared\evidence\memory_workbench\MemoryReadSchedule.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="..\..\shared\evidence\memory_workbench\MemoryPageReader.h">
       <Filter>Header Files\MemoryWorkbench\Shared</Filter>
     </ClInclude>

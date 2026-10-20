@@ -1271,6 +1271,7 @@
     <ClInclude Include="..\..\shared\evidence\memory_workbench\MemoryTargetSession.h" />
     <ClInclude Include="..\..\shared\evidence\memory_workbench\MemoryValueDecode.h" />
     <ClInclude Include="..\..\shared\evidence\memory_workbench\MemoryIoPort.h" />
+    <ClInclude Include="..\..\shared\evidence\memory_workbench\MemoryReadSchedule.h" />
     <ClInclude Include="..\..\shared\evidence\memory_workbench\MemoryPageReader.h" />
     <ClInclude Include="..\..\shared\evidence\memory_workbench\MemoryIoByteStore.h" />
     <ClInclude Include="..\..\shared\evidence\memory_workbench\MemoryKernelMutation.h" />

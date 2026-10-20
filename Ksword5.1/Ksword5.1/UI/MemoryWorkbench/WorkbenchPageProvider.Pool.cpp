@@ -61,7 +61,10 @@ namespace ks::ui
         // 而不调用 run()——这些任务永远不会产生任何回调，也就不需要（也没有
         // 机会）单独处理它们各自的取消标志。这一步把"等待时间随排队积压线性
         // 增长"的风险砍掉，剩下的等待上限就是"至多一个正在跑的任务"。
-        pool_.clear();
+        // Provider-owned descriptors were already removed. Keep the sole dispatched
+        // runnable: even a not-yet-started cancelled job must run and Finish so its
+        // physical-worker slot retires before another source can dispatch.
+
 
         // 第二步：给仍记在账上的任务（此刻只可能是"正在跑的那一个"，因为
         // 刚被 clear() 丢弃的那些从未被记进这张表之外的任何地方访问——它们的

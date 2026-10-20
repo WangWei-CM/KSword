@@ -158,6 +158,7 @@
 #include "../../../../shared/evidence/memory_workbench/MemoryChannelGate.h"
 #include "../../../../shared/evidence/memory_workbench/MemoryIoPort.h"
 #include "../../../../shared/evidence/memory_workbench/MemoryPageReader.h"
+#include "../../../../shared/evidence/memory_workbench/MemoryReadSchedule.h"
 
 #include <QObject>
 #include <QPointer>
@@ -333,7 +334,7 @@ namespace ks::ui
         // InFlightJob：一次 RequestPages 调用对应的内部记账，定义在 .cpp。
         struct InFlightJob;
 
-        enum class ReadPurpose { Browse, ExplicitRetry, PostWrite, ExplicitRead };
+        using ReadPurpose = ksword::memwb::MemoryReadSchedule::Purpose;
         void requestPages(const std::vector<HexFetchRange>& ranges,
             std::uint64_t sourceRevision, ReadPurpose purpose);
 
@@ -359,6 +360,10 @@ namespace ks::ui
             // 去重，否则写后重读会被吞掉，见文件头 N2 一节）。
             std::shared_ptr<std::atomic<bool>> started;
             ReadPurpose purpose = ReadPurpose::Browse;
+            std::uint64_t targetRevision = 0;
+            std::uint64_t jobGeneration = 0;
+            std::function<void()> start;
+
         };
 
         // PausedRangeRecord（N6 修复新增）：见文件头"Wave 3 第二轮...N6"一节。
@@ -398,6 +403,11 @@ namespace ks::ui
             const std::vector<HexFetchRange>& ranges,
             ReadPurpose purpose);
 
+        void dispatchNextJob();
+        void discardQueuedJob(std::uint64_t ticket);
+        void cancelUnownedPages(const std::vector<HexFetchRange>& ranges, std::uint64_t canvasRevision);
+        bool pageInterested(std::uint64_t pageStart, std::uint64_t canvasRevision) const;
+
         // normalizeRangeForRetry：把一段可能未页对齐、也可能超过缓存容量的范围
         // 规整成页对齐、页数不超过 HexViewport::kMaxCachedPages 的范围，供
         // retryFailedRanges 使用（D7/D11）。pageCount 为 0 的输入原样返回（调用方
@@ -423,6 +433,13 @@ namespace ks::ui
         std::map<std::uint64_t, PendingJobRecord> pendingJobs_;
         std::vector<HexFetchRange> viewportInterest_;
         std::uint64_t viewportInterestCanvasRevision_ = 0;
+        bool hasViewportInterest_ = false;
+        std::uint64_t viewportInterestRevision_ = 0;
+        ksword::memwb::MemoryReadSchedule readSchedule_;
+        std::optional<std::uint64_t> dispatchedTicket_;
+        std::optional<std::uint64_t> poisonTargetRevision_;
+        bool dispatching_ = false;
+
         // scratchLatched_ / scratchLatchedForRevision_：DDMA 脏扇区闩锁与其所属
         // **目标**代次（决策 2 之前这里存的是画布代次，已按裁决改键）。
         bool scratchLatched_ = false;
