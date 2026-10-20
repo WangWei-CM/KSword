@@ -25,6 +25,7 @@
 #include <QStringList>
 
 #include <algorithm>
+#include <array>
 #include <utility>
 
 namespace process_detail_window_internal
@@ -141,6 +142,90 @@ namespace process_detail_window_internal
             return normalizedText;
         }
 
+
+        // Metadata is read from one open file identity, including NTFS ChangeTime.
+        // Domain previews, runtime candidates and PE/PDB identity checks share
+        // the same immutable parsed document. Failed reads are never cached.
+        struct CatalogFileIdentity
+        {
+            QString path;
+            ULONGLONG volume = 0;
+            std::array<unsigned char, 16> fileId{};
+            LONGLONG size = 0;
+            LONGLONG writeTime = 0;
+            LONGLONG changeTime = 0;
+            bool valid = false;
+
+            bool operator==(const CatalogFileIdentity& other) const
+            {
+                return valid && other.valid && path == other.path
+                    && volume == other.volume && fileId == other.fileId
+                    && size == other.size && writeTime == other.writeTime
+                    && changeTime == other.changeTime;
+            }
+        };
+
+        CatalogFileIdentity queryCatalogFileIdentity(const QString& path)
+        {
+            CatalogFileIdentity identity;
+            const QFileInfo info(path);
+            identity.path = info.canonicalFilePath();
+            if (identity.path.isEmpty()) identity.path = info.absoluteFilePath();
+            const HANDLE file = ::CreateFileW(reinterpret_cast<LPCWSTR>(identity.path.utf16()),
+                FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+            if (file == INVALID_HANDLE_VALUE) return identity;
+            FILE_ID_INFO id{};
+            FILE_BASIC_INFO basic{};
+            FILE_STANDARD_INFO standard{};
+            identity.valid = ::GetFileInformationByHandleEx(file, FileIdInfo, &id, sizeof(id))
+                && ::GetFileInformationByHandleEx(file, FileBasicInfo, &basic, sizeof(basic))
+                && ::GetFileInformationByHandleEx(file, FileStandardInfo, &standard, sizeof(standard));
+            ::CloseHandle(file);
+            identity.volume = id.VolumeSerialNumber;
+            std::copy(std::begin(id.FileId.Identifier), std::end(id.FileId.Identifier), identity.fileId.begin());
+            identity.size = standard.EndOfFile.QuadPart;
+            identity.writeTime = basic.LastWriteTime.QuadPart;
+            identity.changeTime = basic.ChangeTime.QuadPart;
+            return identity;
+        }
+
+        QJsonDocument readCatalogJsonDocument(const QString& path,
+            QJsonParseError* parseError, QString* readError = nullptr)
+        {
+            struct Entry { CatalogFileIdentity identity; QJsonDocument document; };
+            static QMutex mutex;
+            static QHash<QString, Entry> documents;
+            // This function is used by existing background collectors only.
+            // Serializing load+parse coalesces concurrent cold domain requests.
+            const QMutexLocker lock(&mutex);
+            const CatalogFileIdentity identity = queryCatalogFileIdentity(path);
+            const auto found = documents.constFind(identity.path);
+            if (found != documents.constEnd() && found->identity == identity)
+            {
+                if (parseError != nullptr) *parseError = QJsonParseError{};
+                if (readError != nullptr) readError->clear();
+                return found->document;
+            }
+            QJsonParseError error{};
+            const QJsonDocument document = ks::profile::readProfileJsonDocument(path, &error, readError);
+            if (parseError != nullptr) *parseError = error;
+            if (error.error == QJsonParseError::NoError && document.isObject()
+                && identity == queryCatalogFileIdentity(path))
+            {
+                // Only a tiny parsed-document cache is bounded, never canonical
+                // business data. An evicted path can always be read again.
+                if (!documents.contains(identity.path) && documents.size() >= 4)
+                    documents.erase(documents.begin());
+                documents.insert(identity.path, Entry{identity, document});
+            }
+            else
+            {
+                documents.remove(identity.path);
+            }
+            return document;
+        }
+
         // readJsonObjectFromFile 作用：
         // - 输入 pathText：JSON 文件路径；
         // - 处理：只读打开并解析对象根；
@@ -149,7 +234,7 @@ namespace process_detail_window_internal
         {
             QJsonParseError parseError{};
             QString readErrorText;
-            const QJsonDocument document = ks::profile::readProfileJsonDocument(pathText, &parseError, &readErrorText);
+            const QJsonDocument document = readCatalogJsonDocument(pathText, &parseError, &readErrorText);
             if (parseError.error != QJsonParseError::NoError || !document.isObject())
             {
                 if (detailTextOut != nullptr)
@@ -449,11 +534,6 @@ namespace process_detail_window_internal
     ks::ui::FieldDocument buildPdbRuntimeCatalogPreview(
         const QString& domainName, const int maxTypes, const int maxFieldsPerType)
     {
-        static QMutex cacheMutex;
-        static QHash<QString, ks::ui::FieldDocument> previewCache;
-        const QString cacheKey = QStringLiteral("%1|%2|%3").arg(domainName).arg(maxTypes).arg(maxFieldsPerType);
-        { QMutexLocker lock(&cacheMutex); const auto found = previewCache.constFind(cacheKey);
-          if (found != previewCache.constEnd()) return found.value(); }
         ks::ui::FieldDocument preview;
         preview.section(QStringLiteral("PDB Deep Runtime Catalog - %1").arg(domainName));
         // 目录摘要只显示真实 domain 身份，不把静态偏移目录误标成运行时采样成功。
@@ -471,7 +551,7 @@ namespace process_detail_window_internal
         preview.nodes.first().summaryLabel = scopeNames.value(domainName, domainName);
         preview.nodes.first().reportRole = ks::ui::FieldNode::ReportRole::Catalog;
         preview.nodes.first().preferredScope = domainName == QStringLiteral("process_detail");
-        const auto finish = [&]() { QMutexLocker lock(&cacheMutex); previewCache.insert(cacheKey, preview); return preview; };
+        const auto finish = [&]() { return preview; };
         const QString jsonPath = findNtosDeepOffsetJsonPath();
         if (jsonPath.isEmpty())
         { preview.note(QStringLiteral("PDB deep offset JSON 未找到；请确认 profiles/pdb_deep_offsets 已随构建复制到程序目录。")); return finish(); }
@@ -479,7 +559,7 @@ namespace process_detail_window_internal
         preview.nodes.first().children.last().reportRole = ks::ui::FieldNode::ReportRole::Metadata;
         QJsonParseError parseError{};
         QString readError;
-        const QJsonDocument json = ks::profile::readProfileJsonDocument(jsonPath, &parseError, &readError);
+        const QJsonDocument json = readCatalogJsonDocument(jsonPath, &parseError, &readError);
         if (parseError.error != QJsonParseError::NoError || !json.isObject())
         { preview.note(QStringLiteral("PDB deep offset JSON 解析失败：%1；文件=%2").arg(readError.isEmpty() ? parseError.errorString() : readError).arg(jsonPath)); return finish(); }
         const QJsonObject catalog = json.object().value(QStringLiteral("runtimeDetailCatalog")).toObject();
@@ -709,7 +789,7 @@ namespace process_detail_window_internal
         }
 
         QJsonParseError parseError{};
-        const QJsonDocument document = ks::profile::readProfileJsonDocument(jsonPath, &parseError);
+        const QJsonDocument document = readCatalogJsonDocument(jsonPath, &parseError);
         if (parseError.error != QJsonParseError::NoError || !document.isObject())
         {
             return items;
