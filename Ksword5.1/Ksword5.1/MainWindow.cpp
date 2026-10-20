@@ -11752,8 +11752,9 @@ void MainWindow::setupDockLayout()
         }
     }
 
+#if KSWORD_PERF_TRACE_ENABLED
     // 采集：注册现场上下文（当前 Dock），并记录 Dock 切换标记，
-    // 使停顿记录能标明“卡在哪次切换、哪个 Dock”。
+    // 只标明观察时的 Dock；心跳整个区间不归因于末尾页签。
     // ADS 的 focusedDockWidget() 只有 FocusHighlighting 打开时才有值，
     // 因此现场提供者按“ADS 焦点 → Qt 焦点祖先 → 当前可见 DockArea”依次回退。
     // 提供者存活期长于窗口本身，必须用 QPointer 兜住已经销毁的主窗口。
@@ -11858,7 +11859,7 @@ void MainWindow::setupDockLayout()
             });
         if (area->currentDockWidget() != nullptr)
         {
-            ks::ui::RecordPerfMark("perf_dock_focus",
+            ks::ui::RecordPerfMark("perf_dock_initial_state",
                 describePerfDock(area->currentDockWidget()));
         }
     };
@@ -11880,6 +11881,7 @@ void MainWindow::setupDockLayout()
             }
         });
 
+#endif
     const bool mainWindowUpdatesWereEnabled = updatesEnabled();
     const bool dockManagerUpdatesWereEnabled = m_pDockManager->updatesEnabled();
     setUpdatesEnabled(false);

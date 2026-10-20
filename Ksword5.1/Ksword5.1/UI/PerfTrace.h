@@ -58,7 +58,8 @@ namespace ks::ui
     private:
         const char* m_operationToken = nullptr;
         QString m_targetLabel;
-        QElapsedTimer m_clock;
+        qint64 m_startedAtNs = 0;
+        quint64 m_scopeId = 0;
         qint64 m_itemCount = -1;
         bool m_finished = false;
     };

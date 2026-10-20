@@ -6,6 +6,7 @@
 #include <QByteArray>
 #include <QCoreApplication>
 #include <QDir>
+#include <QDateTime>
 #include <QEvent>
 #include <QFile>
 #include <QJsonDocument>
@@ -16,18 +17,21 @@
 #include <QString>
 #include <QTimer>
 #include <QVector>
+#include <QUuid>
+#include <atomic>
 #include <utility>
 
 namespace
 {
     // 全局单调时钟：日志时间轴、分片计时与停顿记录共用同一基准，保证跨模块时间可比。
-    QElapsedTimer& referenceClock()
+    const QElapsedTimer& referenceClock()
     {
-        static QElapsedTimer clock;
-        if (!clock.isValid())
+        static const QElapsedTimer clock = []()
         {
-            clock.start();
-        }
+            QElapsedTimer started;
+            started.start();
+            return started;
+        }();
         return clock;
     }
 
@@ -43,8 +47,6 @@ namespace
     constexpr qint64 kStallIgnoreMs = 10000;
     // 向上查找页签栏时的最大父级层数，避免在超深控件树里长时间遍历。
     constexpr int kMaxAncestorWalk = 16;
-    // 用户操作标记只对紧随其后的短暂停顿有效，避免旧页签长期污染后续日志。
-    constexpr qint64 kLastMarkLifetimeMs = 1500;
 }
 
 namespace ks::ui
@@ -62,13 +64,20 @@ namespace ks::ui
 
         // 记录一次操作边界耗时；itemCount 为负表示不写入计数字段。
         void recordSpan(const char* operationToken, const QString& targetLabel,
-            qint64 durationNs, qint64 itemCount)
+            qint64 durationNs, qint64 itemCount, quint64 scopeId = 0, qint64 startedAtNs = -1)
         {
+            const qint64 endedAtNs = referenceClock().nsecsElapsed();
             QJsonObject record;
             fillCommon(record, operationToken, targetLabel);
             record.insert(QStringLiteral("event"), QStringLiteral("span"));
             record.insert(QStringLiteral("ms"), durationNs / 1000000.0);
             record.insert(QStringLiteral("duration_ns"), static_cast<double>(durationNs));
+            record.insert(QStringLiteral("begin_ns"), static_cast<double>(
+                startedAtNs >= 0 ? startedAtNs : endedAtNs - durationNs));
+            record.insert(QStringLiteral("end_ns"), static_cast<double>(endedAtNs));
+            record.insert(QStringLiteral("measurement"), QStringLiteral("elapsed_wall"));
+            if (scopeId != 0)
+                record.insert(QStringLiteral("scope_id"), QString::number(scopeId));
             if (itemCount >= 0)
             {
                 record.insert(QStringLiteral("count"), static_cast<double>(itemCount));
@@ -76,14 +85,21 @@ namespace ks::ui
             enqueue(record);
         }
 
-        // 记录一次标记，不计时；停顿记录会带上最近一次标记，便于对齐用户操作。
+        quint64 beginScope(const char* operationToken, const QString& targetLabel, qint64 atNs)
+        {
+            const quint64 id = m_nextScopeId.fetch_add(1, std::memory_order_relaxed);
+            QJsonObject record;
+            fillCommon(record, operationToken, targetLabel);
+            record.insert(QStringLiteral("event"), QStringLiteral("scope_begin"));
+            record.insert(QStringLiteral("scope_id"), QString::number(id));
+            record.insert(QStringLiteral("begin_ns"), static_cast<double>(atNs));
+            enqueue(record);
+            return id;
+        }
+
+        // 标记仅表示该时间点观察到的状态，不能归因此前整个心跳区间。
         void recordMark(const char* operationToken, const QString& targetLabel)
         {
-            {
-                QMutexLocker locker(&m_mutex);
-                m_lastMark = QString::fromUtf8(operationToken) + QLatin1Char(':') + targetLabel;
-                m_lastMarkAtMs = referenceClock().elapsed();
-            }
             QJsonObject record;
             fillCommon(record, operationToken, targetLabel);
             record.insert(QStringLiteral("event"), QStringLiteral("mark"));
@@ -133,7 +149,7 @@ namespace ks::ui
             QObject::connect(&m_flushTimer, &QTimer::timeout, this, [this]() { flush(); });
             m_flushTimer.start();
 
-            m_heartbeatClock.start();
+            m_previousHeartbeatNs = referenceClock().nsecsElapsed();
             m_heartbeat.setTimerType(Qt::PreciseTimer);
             m_heartbeat.setInterval(kHeartbeatIntervalMs);
             QObject::connect(&m_heartbeat, &QTimer::timeout, this, [this]() { onHeartbeat(); });
@@ -144,6 +160,11 @@ namespace ks::ui
             session.insert(QStringLiteral("t"), 0.0);
             session.insert(QStringLiteral("event"), QStringLiteral("session"));
             session.insert(QStringLiteral("op"), QStringLiteral("perf_session_start"));
+            session.insert(QStringLiteral("session_id"), m_sessionId);
+            session.insert(QStringLiteral("utc"), QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs));
+            session.insert(QStringLiteral("qt"), QString::fromLatin1(qVersion()));
+            session.insert(QStringLiteral("build_stamp"), QStringLiteral(__DATE__ " " __TIME__));
+            session.insert(QStringLiteral("exe"), QCoreApplication::applicationFilePath());
             if (QCoreApplication::instance() != nullptr)
             {
                 session.insert(QStringLiteral("target"),
@@ -155,8 +176,9 @@ namespace ks::ui
         // 心跳回调：事件循环被长时间占住时，定时器的实际间隔会明显超出理论值。
         void onHeartbeat()
         {
-            const qint64 elapsed = m_heartbeatClock.restart();
-            const qint64 overrun = elapsed - kHeartbeatIntervalMs;
+            const qint64 endedAtNs = referenceClock().nsecsElapsed();
+            const qint64 startedAtNs = std::exchange(m_previousHeartbeatNs, endedAtNs);
+            const qint64 overrun = (endedAtNs - startedAtNs) / 1000000 - kHeartbeatIntervalMs;
             if (overrun < kStallThresholdMs || overrun > kStallIgnoreMs)
             {
                 return;
@@ -165,6 +187,11 @@ namespace ks::ui
             fillCommon(record, "perf_ui_stall", QString());
             record.insert(QStringLiteral("event"), QStringLiteral("stall"));
             record.insert(QStringLiteral("ms"), static_cast<double>(overrun));
+            record.insert(QStringLiteral("begin_ns"), static_cast<double>(startedAtNs));
+            record.insert(QStringLiteral("end_ns"), static_cast<double>(endedAtNs));
+            record.insert(QStringLiteral("interval_ns"), static_cast<double>(endedAtNs - startedAtNs));
+            record.insert(QStringLiteral("measurement"), QStringLiteral("heartbeat_overrun"));
+            record.insert(QStringLiteral("attribution"), QStringLiteral("unattributed_interval"));
             enqueue(record);
         }
 
@@ -172,27 +199,17 @@ namespace ks::ui
         void fillCommon(QJsonObject& record, const char* operationToken, const QString& targetLabel)
         {
             record.insert(QStringLiteral("t"), static_cast<double>(referenceClock().elapsed()));
+            record.insert(QStringLiteral("t_ns"), static_cast<double>(referenceClock().nsecsElapsed()));
+            record.insert(QStringLiteral("session_id"), m_sessionId);
             record.insert(QStringLiteral("op"), QString::fromUtf8(operationToken));
             if (!targetLabel.isEmpty())
             {
                 record.insert(QStringLiteral("target"), targetLabel);
             }
 
-            QString lastMark;
             std::function<QString()> provider;
-            const qint64 nowMs = referenceClock().elapsed();
             {
                 QMutexLocker locker(&m_mutex);
-                if (!m_lastMark.isEmpty() && m_lastMarkAtMs >= 0 &&
-                    nowMs >= m_lastMarkAtMs && nowMs - m_lastMarkAtMs <= kLastMarkLifetimeMs)
-                {
-                    lastMark = m_lastMark;
-                }
-                else if (nowMs - m_lastMarkAtMs > kLastMarkLifetimeMs)
-                {
-                    m_lastMark.clear();
-                    m_lastMarkAtMs = -1;
-                }
                 provider = m_contextProvider;
             }
             // 上下文提供者可能读取界面状态，必须在释放锁之后再调用，避免反向加锁。
@@ -201,12 +218,8 @@ namespace ks::ui
                 const QString context = provider();
                 if (!context.isEmpty())
                 {
-                    record.insert(QStringLiteral("ctx"), context);
+                    record.insert(QStringLiteral("context_at_record_end"), context);
                 }
-            }
-            if (!lastMark.isEmpty())
-            {
-                record.insert(QStringLiteral("last"), lastMark);
             }
         }
 
@@ -295,9 +308,9 @@ namespace ks::ui
         QFile m_file;                   // 采集文件，首次落盘时打开并持续追加。
         QTimer m_flushTimer;            // 定时批量落盘。
         QTimer m_heartbeat;             // 事件循环心跳，用于检测 UI 停顿。
-        QElapsedTimer m_heartbeatClock; // 上一次心跳到现在的实际经过时间。
-        QString m_lastMark;             // 最近一次用户操作标记。
-        qint64 m_lastMarkAtMs = -1;     // 最近一次用户操作标记的单调时钟时间。
+        qint64 m_previousHeartbeatNs = 0;
+        const QString m_sessionId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+        std::atomic<quint64> m_nextScopeId{1};
         std::function<QString()> m_contextProvider; // 现场上下文提供者。
     };
 
@@ -341,7 +354,8 @@ namespace ks::ui
     PerfScope::PerfScope(const char* operationToken, QString targetLabel)
         : m_operationToken(operationToken), m_targetLabel(std::move(targetLabel))
     {
-        m_clock.start();
+        m_startedAtNs = referenceClock().nsecsElapsed();
+        m_scopeId = PerfTrace::instance().beginScope(m_operationToken, m_targetLabel, m_startedAtNs);
     }
 
     PerfScope::~PerfScope()
@@ -357,7 +371,8 @@ namespace ks::ui
         }
         m_finished = true;
         PerfTrace::instance().recordSpan(
-            m_operationToken, m_targetLabel, m_clock.nsecsElapsed(), m_itemCount);
+            m_operationToken, m_targetLabel, referenceClock().nsecsElapsed() - m_startedAtNs,
+            m_itemCount, m_scopeId, m_startedAtNs);
     }
 }
 
