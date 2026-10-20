@@ -676,13 +676,20 @@ namespace ks::ui
                             [this, w3]() {
                                 const auto bk = w3->result();
                                 w3->deleteLater();
+                                // QueryBackup 失败降级为警告：预览字节只用于 UI 展示，
+                                // Register(CAPTURE_BACKUP) + Change(mode=2) 已经完成，用户仍可继续
+                                // 第 3 步 Write 和第 4 步 Unregister，所以不 return 阻塞流程。
+                                // 真实的 payload 恢复由第 5 步"恢复&验证"里的 Register+Change+Write(backup)+Unregister 承担。
                                 if (!bk.ioSuccess || !bk.hasBackup) {
                                     appendTrace(QStringLiteral(
-                                        "QueryBackup 失败：%1 (hasBackup=%2)")
+                                        "QueryBackup 预览失败（降级为警告，可继续）：%1 (hasBackup=%2)")
                                         .arg(bk.ioErrorText)
                                         .arg(bk.hasBackup ? "true" : "false"));
+                                    m_backupHexLabel->setText(QStringLiteral(
+                                        "原字节预览：读取失败（不影响后续步骤）"));
                                     m_prepareStatusLabel->setText(QStringLiteral(
-                                        "状态：QueryBackup 失败"));
+                                        "状态：准备完成（QueryBackup 预览失败，已跳过），可进入第 3 步"));
+                                    m_plan.backupBytes.clear();
                                     setBusy(false);
                                     return;
                                 }
@@ -783,6 +790,10 @@ namespace ks::ui
                         .arg(backupHolder->size()).arg(bytesToHex(*backupHolder)));
                     appendTrace(QStringLiteral("Write OK status=%1")
                         .arg(formatHex4(static_cast<quint32>(info.lastStatus))));
+                    // 若 worker 用 ioErrorText 带回 warning（例如 QueryBackup 降级），trace 一行
+                    if (!info.ioErrorText.isEmpty()) {
+                        appendTrace(info.ioErrorText);
+                    }
                     m_writeStatusLabel->setText(QStringLiteral(
                         "状态：payload 已写入可写别名，可进入第 4 步"));
                 }
@@ -790,7 +801,11 @@ namespace ks::ui
             });
         w->setFuture(QtConcurrent::run([rid, offsetArg, payload, backupHolder]() -> rxpf::PageInfo {
             // 分段 QueryBackup：协议上限 64 字节/段，用户 payload 任意长 → 按 chunk 循环
+            // Phase G keep-modified 场景下 backup 不是必需（用户可能选择不恢复），
+            // QueryBackup 失败就跳过 backup 直接 Write；第 5 步"恢复"时如果 backup 为空
+            // 会提示"无 backup 可恢复"，由用户决定是否重启清理。
             constexpr int kQueryBackupChunk = 64;
+            bool backupSucceeded = true;
             for (int readIndex = 0; readIndex < payload.size(); readIndex += kQueryBackupChunk) {
                 const int remaining = payload.size() - readIndex;
                 const int thisChunk = std::min(kQueryBackupChunk, remaining);
@@ -798,20 +813,20 @@ namespace ks::ui
                     offsetArg + static_cast<unsigned long>(readIndex),
                     static_cast<unsigned long>(thisChunk));
                 if (!qb.ioSuccess || !qb.hasBackup) {
-                    // 构造失败态 PageInfo 让 UI 回调走失败分支
-                    rxpf::PageInfo fail;
-                    fail.ioSuccess = false;
-                    fail.ioErrorText = qb.ioErrorText.isEmpty()
-                        ? QStringLiteral("QueryBackup 分段失败 offset=%1 len=%2")
-                            .arg(static_cast<quint64>(offsetArg + readIndex), 0, 16)
-                            .arg(thisChunk)
-                        : qb.ioErrorText;
-                    return fail;
+                    backupSucceeded = false;
+                    backupHolder->clear();
+                    break;
                 }
                 backupHolder->append(qb.bytes);
             }
-            // Backup 全部读完才 Write；Write 本身可以写任意长度 payload（driver 校验越页）
-            return rxpf::writePage(rid, offsetArg, payload);
+            // 不管 backup 成不成功都走 Write；Write 本身可以写任意长度 payload（driver 校验越页）
+            rxpf::PageInfo info = rxpf::writePage(rid, offsetArg, payload);
+            if (info.ioSuccess && !backupSucceeded) {
+                // 用 ioErrorText 字段 hack 带一条警告，让回调把它拼到 trace 里但不走失败分支
+                info.ioErrorText = QStringLiteral(
+                    "WARN: QueryBackup 失败，payload 已写入但 backup 为空，第 5 步无法原字节恢复");
+            }
+            return info;
         }));
     }
 
