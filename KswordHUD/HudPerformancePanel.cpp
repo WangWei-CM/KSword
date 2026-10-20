@@ -522,7 +522,8 @@ HudPerformancePanel::HudPerformancePanel(QWidget* parent)
     }
 
     requestAsyncStaticInfoRefresh();
-    requestAsyncSensorRefresh();
+    // Sensor queries are demand-driven by buildCpuSensorText(forceRefresh).
+    // No current production view consumes temperature/voltage values.
 
     m_liveSampleWatcher = new QFutureWatcher<LiveSampleResult>(this);
     connect(m_liveSampleWatcher, &QFutureWatcher<LiveSampleResult>::finished, this, [this]()
@@ -1573,10 +1574,6 @@ void HudPerformancePanel::applyLiveSampleResult(const LiveSampleResult& liveSamp
         &liveSampleResult.systemPerfSnapshot,
         liveSampleResult.systemPerfOk);
 
-    if ((m_sampleCounter % 5) == 1)
-    {
-        requestAsyncSensorRefresh();
-    }
     if ((m_sampleCounter % 60) == 1)
     {
         requestAsyncStaticInfoRefresh();
