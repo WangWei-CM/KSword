@@ -8,6 +8,10 @@
   "text_direction": "ltr",
   "fallback": "zh-CN",
   "translations": {
+    "handle.filter.preparing": "● Preparing handle filter results...",
+    "● 正在准备句柄筛选结果...": "● Preparing handle filter results...",
+    "handle.filter.failed": "● Handle filtering failed. Apply the rules again or refresh.",
+    "● 句柄筛选失败，请重试应用规则或刷新。": "● Handle filtering failed. Apply the rules again or refresh.",
     "monitor.export.in_progress": "Export in progress",
     "monitor.export.result_unconfirmed_title": "Export result unconfirmed",
     "monitor.export.result_unconfirmed": "Export result is not confirmed. Check the target file: %1",
@@ -7042,6 +7046,8 @@
     "notification.copy.log_template": "%1\n%2\n%3\nFile: %4\nFunction: %5\nGUID: %6"
   },
   "source_translations": {
+    "● 正在准备句柄筛选结果...": "● Preparing handle filter results...",
+    "● 句柄筛选失败，请重试应用规则或刷新。": "● Handle filtering failed. Apply the rules again or refresh.",
     "导出进行中": "Export in progress",
     "导出结果待确认": "Export result unconfirmed",
     "导出结果尚未确认，请核对目标文件：%1": "Export result is not confirmed. Check the target file: %1",

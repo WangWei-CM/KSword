@@ -8,6 +8,10 @@
   "text_direction": "ltr",
   "fallback": "en-US",
   "translations": {
+    "handle.filter.preparing": "● 正在准备句柄筛选结果...",
+    "● 正在准备句柄筛选结果...": "● 正在准备句柄筛选结果...",
+    "handle.filter.failed": "● 句柄筛选失败，请重试应用规则或刷新。",
+    "● 句柄筛选失败，请重试应用规则或刷新。": "● 句柄筛选失败，请重试应用规则或刷新。",
     "monitor.export.in_progress": "导出进行中",
     "monitor.export.result_unconfirmed_title": "导出结果待确认",
     "monitor.export.result_unconfirmed": "导出结果尚未确认，请核对目标文件：%1",
@@ -7042,6 +7046,8 @@
     "notification.copy.log_template": "%1\n%2\n%3\n文件：%4\n函数：%5\nGUID：%6"
   },
   "source_translations": {
+    "● 正在准备句柄筛选结果...": "● 正在准备句柄筛选结果...",
+    "● 句柄筛选失败，请重试应用规则或刷新。": "● 句柄筛选失败，请重试应用规则或刷新。",
     "导出进行中": "导出进行中",
     "导出结果待确认": "导出结果待确认",
     "导出结果尚未确认，请核对目标文件：%1": "导出结果尚未确认，请核对目标文件：%1",
