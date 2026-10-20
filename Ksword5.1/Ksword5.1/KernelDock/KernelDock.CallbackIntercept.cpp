@@ -5,6 +5,9 @@
 #include "../UI/ToolbarMetrics.h"
 #include "../UI/ParameterWorkspace.h"
 #include "../UI/CodeTextEdit.h"
+#include "../UI/CodeEditorWidget.h"
+#include "../UI/SecondaryPageLayout.h"
+#include "../UI/UI_All.h"
 #include "../UI/VisibleTableWidget.h"
 
 #include "KernelDock.CallbackIntercept.h"
@@ -26,6 +29,8 @@
 #include <QComboBox>
 #include <QCoreApplication>
 #include <QDateTime>
+#include <QDialog>
+#include <QTextDocument>
 #include <QDir>
 #include <QFile>
 #include <QFileDialog>
@@ -1951,12 +1956,32 @@ private:
         ks::ui::StylePageTabsContentFrame(logTabWidget);
         m_appLogEditor = new CodeTextEdit(logTabWidget);
         static_cast<CodeTextEdit*>(m_appLogEditor)->setSyntaxLanguage(CodeTextEdit::SyntaxLanguage::PlainText);
-        m_eventLogEditor = new CodeTextEdit(logTabWidget);
+        auto* eventLogPage = new QWidget(logTabWidget);
+        auto* eventLogLayout = new QVBoxLayout(eventLogPage);
+        eventLogLayout->setContentsMargins(0, 0, 0, 0);
+        eventLogLayout->setSpacing(6);
+        auto* eventLogTools = new QHBoxLayout();
+        auto* openArchiveButton = new QPushButton(kernelText("kernel.callback.intercept.logs.open_full", QStringLiteral("完整事件日志")), eventLogPage);
+        auto* retention = new QLabel(kernelText("kernel.callback.intercept.logs.recent_window", QStringLiteral("此处显示最近 4096 行；完整搜索、复制和导出请打开完整日志。")), eventLogPage);
+        retention->setWordWrap(true);
+        eventLogTools->addWidget(openArchiveButton);
+        eventLogTools->addWidget(retention, 1);
+        ks::ui::NormalizeToolbarRow(eventLogTools);
+        eventLogLayout->addLayout(eventLogTools);
+        m_eventLogEditor = new CodeTextEdit(eventLogPage);
         static_cast<CodeTextEdit*>(m_eventLogEditor)->setSyntaxLanguage(CodeTextEdit::SyntaxLanguage::PlainText);
+        m_eventLogEditor->document()->setMaximumBlockCount(4096);
+        eventLogLayout->addWidget(m_eventLogEditor, 1);
+        m_eventLogFlushTimer = new QTimer(this);
+        m_eventLogFlushTimer->setSingleShot(true);
+        m_eventLogFlushTimer->setInterval(16);
+        connect(m_eventLogFlushTimer, &QTimer::timeout, this, [this]() { flushEventLogWindow(); });
+        connect(openArchiveButton, &QPushButton::clicked, this, [this]() { openCompleteEventLog(); });
+        m_eventLogEditor->installEventFilter(this);
         m_appLogEditor->setReadOnly(true);
         m_eventLogEditor->setReadOnly(true);
         ksword::kernel_navigation::addTab(logTabWidget, m_appLogEditor, "audit.intercept.application");
-        ksword::kernel_navigation::addTab(logTabWidget, m_eventLogEditor, "audit.intercept.events");
+        ksword::kernel_navigation::addTab(logTabWidget, eventLogPage, "audit.intercept.events");
         rootLayout->addWidget(logTabWidget, 0);
 
         auto* fileMonitorFrame = new QFrame(scrollContent);
@@ -4397,7 +4422,34 @@ private:
         const QString lineText = QStringLiteral("[%1] %2")
             .arg(QDateTime::currentDateTime().toString(QStringLiteral("HH:mm:ss")))
             .arg(logText);
-        m_eventLogEditor->appendPlainText(lineText);
+        m_eventLogArchive.push_back(lineText);
+        m_pendingEventLogLines.push_back(lineText);
+        while (m_pendingEventLogLines.size() > 4096) m_pendingEventLogLines.removeFirst();
+        if (m_eventLogEditor->isVisible() && !m_eventLogFlushTimer->isActive()) m_eventLogFlushTimer->start();
+    }
+
+    void flushEventLogWindow()
+    {
+        if (m_eventLogEditor == nullptr || !m_eventLogEditor->isVisible() || m_pendingEventLogLines.isEmpty()) return;
+        const auto lines = std::exchange(m_pendingEventLogLines, {});
+        m_eventLogEditor->appendPlainText(lines.join(QLatin1Char('\n')));
+    }
+
+    void openCompleteEventLog()
+    {
+        auto* dialog = new QDialog(m_hostPage);
+        dialog->setAttribute(Qt::WA_DeleteOnClose);
+        dialog->setWindowTitle(kernelText("kernel.callback.intercept.logs.full_title", QStringLiteral("完整事件日志（%1 条）")).arg(m_eventLogArchive.size()));
+        auto* layout = new QVBoxLayout(dialog);
+        ks::ui::StyleSecondaryWindow(dialog);
+        ks::ui::StyleSecondaryContentLayout(layout);
+        auto* editor = new CodeEditorWidget(dialog);
+        editor->setReadOnly(true);
+        editor->setReadOnlyExportEnabled(true);
+        editor->setRawText(m_eventLogArchive.join(QLatin1Char('\n')));
+        layout->addWidget(editor, 1);
+        ks::ui::applyResponsiveWindowGeometry(dialog, m_hostPage, QSize(1000, 720), QSize(480, 320));
+        dialog->show();
     }
 
     quint32 allocateNextGroupId() const
@@ -5245,6 +5297,8 @@ private:
 
     bool eventFilter(QObject* watched, QEvent* event) override
     {
+        if (watched == m_eventLogEditor && event != nullptr && event->type() == QEvent::Show
+            && m_eventLogFlushTimer != nullptr && !m_pendingEventLogLines.isEmpty()) m_eventLogFlushTimer->start();
         if (watched == m_ruleTabWidget && event != nullptr)
         {
             if (event->type() == QEvent::Show) scheduleRuleProjection();
@@ -6197,6 +6251,9 @@ private:
 
     QPlainTextEdit* m_appLogEditor = nullptr;
     QPlainTextEdit* m_eventLogEditor = nullptr;
+    QStringList m_eventLogArchive;
+    QStringList m_pendingEventLogLines;
+    QTimer* m_eventLogFlushTimer = nullptr;
 
     QPushButton* m_startFileMonitorFsctlButton = nullptr;
     QPushButton* m_drainFileMonitorButton = nullptr;
