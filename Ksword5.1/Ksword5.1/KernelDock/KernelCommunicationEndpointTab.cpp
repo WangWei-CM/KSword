@@ -112,6 +112,7 @@ void KernelCommunicationEndpointTab::initializeUi()
     rootLayout->addLayout(toolbarLayout);
 
     m_table = new ks::ui::VisibleTableWidget(this);
+    ks::ui::SetTableRowFilterBusinessOwnership(m_table, ks::ui::TableRowFilterBusinessOwnership::ExclusiveSharedIdentity);
     // 通信端点增删是主要排查内容，保留跨次采集对比。
     ks::ui::SetTableActionBarMode(m_table, ks::ui::TableActionBarMode::Full);
     m_table->setColumnCount(static_cast<int>(CommunicationEndpointColumn::Count));

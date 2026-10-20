@@ -223,6 +223,7 @@ void KernelDeviceDriverObjectsTab::initializeUi()
     m_rootLayout->addWidget(m_filterWidget, 0);
 
     m_tableWidget = new ks::ui::VisibleTableWidget(this);
+    ks::ui::SetTableRowFilterBusinessOwnership(m_tableWidget, ks::ui::TableRowFilterBusinessOwnership::ExclusiveSharedIdentity);
     // 设备/驱动对象清单需要捕获新增与消失对象，保留现场对比。
     ks::ui::SetTableActionBarMode(m_tableWidget, ks::ui::TableActionBarMode::Full);
     m_tableWidget->setColumnCount(7);

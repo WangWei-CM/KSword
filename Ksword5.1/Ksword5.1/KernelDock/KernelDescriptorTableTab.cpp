@@ -180,6 +180,7 @@ void KernelDescriptorTableTab::initializeUi()
 
     auto* splitter = new QSplitter(Qt::Vertical, this);
     m_table = new ks::ui::VisibleTableWidget(splitter);
+    ks::ui::SetTableRowFilterBusinessOwnership(m_table, ks::ui::TableRowFilterBusinessOwnership::ExclusiveSharedIdentity);
     // IDT/GDT 完整性现场支持恢复及基线比较，保留完整快照栏。
     ks::ui::SetTableActionBarMode(m_table, ks::ui::TableActionBarMode::Full);
     m_table->setColumnCount(ColumnCount);

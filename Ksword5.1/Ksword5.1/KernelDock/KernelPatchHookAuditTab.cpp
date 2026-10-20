@@ -200,6 +200,7 @@ void KernelPatchHookAuditTab::initializeUi()
 
     // --- 结果表格 ---
     m_resultTable = new ks::ui::VisibleTableWidget(this);
+    ks::ui::SetTableRowFilterBusinessOwnership(m_resultTable, ks::ui::TableRowFilterBusinessOwnership::ExclusiveSharedIdentity);
     // 统一审计结果需要留存和导出。
     ks::ui::SetTableActionBarMode(
         m_resultTable, ks::ui::TableActionBarMode::Full);

@@ -222,6 +222,7 @@ void KernelThreadAuditTab::initializeUi()
     // 表格与 ks::ui::StructuredFieldView 由纵向 splitter 组织，详情窗口保持项目统一编辑器。
     auto* splitter = new QSplitter(Qt::Vertical, this);
     m_table = new QTableWidget(splitter);
+    ks::ui::SetTableRowFilterBusinessOwnership(m_table, ks::ui::TableRowFilterBusinessOwnership::ExclusiveSharedIdentity);
     // 系统/工作队列线程的变化与地址来源需要保留完整快照栏。
     ks::ui::SetTableActionBarMode(m_table, ks::ui::TableActionBarMode::Full);
     m_table->setColumnCount(static_cast<int>(Column::Count));

@@ -211,6 +211,7 @@ void KernelDockCidTab::initializeUi()
     rootLayout->addLayout(m_toolbarLayout);
 
     m_table = new ks::ui::VisibleTableWidget(this);
+    ks::ui::SetTableRowFilterBusinessOwnership(m_table, ks::ui::TableRowFilterBusinessOwnership::ExclusiveSharedIdentity);
     // CID 多源对象异常与消失需要保存现场以供比较。
     ks::ui::SetTableActionBarMode(m_table, ks::ui::TableActionBarMode::Full);
     m_table->setColumnCount(static_cast<int>(CidColumn::Count));

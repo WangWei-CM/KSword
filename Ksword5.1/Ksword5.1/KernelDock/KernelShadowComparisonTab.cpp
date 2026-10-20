@@ -197,6 +197,7 @@ void KernelShadowComparisonTab::initializeUi()
 
     // --- 结果表格 ---
     m_resultTable = new ks::ui::VisibleTableWidget(this);
+    ks::ui::SetTableRowFilterBusinessOwnership(m_resultTable, ks::ui::TableRowFilterBusinessOwnership::ExclusiveSharedIdentity);
     // 完整操作条用于比较结果的复制和导出。
     ks::ui::SetTableActionBarMode(
         m_resultTable, ks::ui::TableActionBarMode::Full);
