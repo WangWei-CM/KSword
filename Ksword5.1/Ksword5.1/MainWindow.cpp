@@ -996,7 +996,9 @@ namespace
             {
                 handled = ads::CDockWidgetTab::event(eventObject);
             }
-            if (shouldSyncTextAfterEvent || shouldRepaintAfterEvent)
+            // HoverMove 只推进原有绘制；进入/离开和真实主题/状态事件才同步文字。
+            if (shouldSyncTextAfterEvent || (shouldRepaintAfterEvent
+                && eventObject->type() != QEvent::HoverMove))
             {
                 syncDockTabTextColor();
             }
@@ -1085,7 +1087,9 @@ namespace
                     eventObject->type() == QEvent::Show);
 
             const bool handled = ads::CAutoHideTab::event(eventObject);
-            if (shouldSyncTextAfterEvent || shouldRepaintAfterEvent)
+            // HoverMove 只推进原有绘制；进入/离开和真实主题/状态事件才同步文字。
+            if (shouldSyncTextAfterEvent || (shouldRepaintAfterEvent
+                && eventObject->type() != QEvent::HoverMove))
             {
                 syncDockTabTextColor();
             }
