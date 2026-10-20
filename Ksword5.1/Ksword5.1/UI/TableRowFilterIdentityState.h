@@ -236,6 +236,45 @@ namespace ks::ui
             if (incremental) scheduleProjection(); else flushProjection();
         }
 
+        // Producer-computed differences avoid rebuilding/normalizing the full
+        // canonical exclusion set on every append or small condition delta.
+        // Added exclusions win if both inputs normalize to the same row.
+        // The caller validates its source snapshot generation before invoking.
+        void setBusinessDelta(const QSet<QPersistentModelIndex>& excluded,
+            const QSet<QPersistentModelIndex>& included)
+        {
+            if (!prepareResetGeneration()) return;
+            capturePending();
+            m_incrementalBusiness = true;
+            QSet<QPersistentModelIndex> added, removed;
+            added.reserve(excluded.size()); removed.reserve(included.size());
+            for (const auto& index : excluded)
+            {
+                const auto id = identity(index);
+                if (id.isValid()) added.insert(id);
+            }
+            for (const auto& index : included)
+            {
+                const auto id = identity(index);
+                if (id.isValid() && !added.contains(id)) removed.insert(id);
+            }
+            bool changed = false;
+            for (const auto& id : removed)
+            {
+                if (m_business.remove(id))
+                { m_projectionRows.insert(id); changed = true; }
+            }
+            for (const auto& id : added)
+            {
+                if (!m_business.contains(id))
+                { m_business.insert(id); m_projectionRows.insert(id); changed = true; }
+            }
+            if (!changed) return;
+            ++m_projectionEpoch;
+            notifyChanged(); // complete canonical delta before visibility writes
+            scheduleProjection();
+        }
+
         void setSearch(int row, bool excluded)
         {
             if (!prepareResetGeneration()) return;

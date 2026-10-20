@@ -1686,6 +1686,12 @@ namespace ks::ui
     {
         if (auto* state = rowFilterState(filterSource(table), true)) state->setBusiness(excluded, true);
     }
+    void ApplyTableRowFilterDelta(QTableView* table,
+        const QSet<QPersistentModelIndex>& excluded,
+        const QSet<QPersistentModelIndex>& included)
+    {
+        if (auto* state = rowFilterState(filterSource(table), true)) state->setBusinessDelta(excluded, included);
+    }
     bool IsTableRowFilterProjectionPending(const QTableView* table)
     {
         auto* state = rowFilterState(filterSource(table), false);

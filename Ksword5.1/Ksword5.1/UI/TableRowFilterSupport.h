@@ -23,6 +23,14 @@ namespace ks::ui
     // keeps its existing filtering status while projectionPending() is true.
     void ApplyTableRowFilterIncrementally(QTableView* tableView,
         const QSet<QPersistentModelIndex>& excludedRows);
+    // Incremental append/trim producers compute a pure value delta on their
+    // worker, validate the source generation, then create only changed indexes.
+    // This edits the existing canonical business layer in O(delta) average work;
+    // search/legacy/freeze layers still compose and projection remains budgeted.
+    // New exclusions win if a row appears in both sets. Reset invalidates all ids.
+    void ApplyTableRowFilterDelta(QTableView* tableView,
+        const QSet<QPersistentModelIndex>& newlyExcludedRows,
+        const QSet<QPersistentModelIndex>& newlyIncludedRows);
     bool IsTableRowFilterProjectionPending(const QTableView* tableView);
     bool IsTableRowExcludedByFilter(const QTableView* tableView, int row);
     bool HasTableRowsPassingFilters(const QTableView* tableView);
