@@ -2327,30 +2327,37 @@ private:
         painter.restore();
     }
 
-    // 鼠标进入绘图区时显示所有可见真实采样点；提示和焦点线仍定位最近样本。
+    // 完整时间轴二分命中，只标出当前真实采样；历史密集点不逐帧重复绘制。
     void drawHoverPoints(QPainter& painter, const QRectF& plotRect) const
     {
-        if (!m_hoverActive)
+        if (!m_hoverActive || m_ownerDock == nullptr)
         {
             return;
         }
+        const int sampleIndex = sampleIndexAtX(m_hoverPosition.x());
+        if (sampleIndex < 0)
+        {
+            return;
+        }
+        const double sampleTime = static_cast<double>(m_ownerDock->m_activitySamples[
+            static_cast<std::size_t>(sampleIndex)].elapsedMs);
         const double endTime = windowEndMs();
         const double duration = windowDurationMs();
-        const double startTime = endTime - duration;
         painter.save();
         painter.setClipRect(plotRect);
         for (const auto& series : m_cachedSeries)
         {
-            auto point = std::lower_bound(series.points.begin(), series.points.end(), startTime,
+            const auto point = std::lower_bound(series.points.begin(), series.points.end(), sampleTime,
                 [](const SeriesPoint& value, double time) { return value.timeMs < time; });
+            if (point == series.points.end() || point->timeMs != sampleTime)
+            {
+                continue;
+            }
             painter.setPen(QPen(KswordTheme::SurfaceColor(), 1.4));
             painter.setBrush(processActivityMetricColor(series.metric));
-            for (; point != series.points.end() && point->timeMs <= endTime; ++point)
-            {
-                const double x = plotRect.right() + (point->timeMs - endTime) / duration * plotRect.width();
-                const double y = plotRect.bottom() - point->percent / 100.0 * plotRect.height();
-                painter.drawEllipse(QPointF(x, y), 3.4, 3.4);
-            }
+            const double x = plotRect.right() + (point->timeMs - endTime) / duration * plotRect.width();
+            const double y = plotRect.bottom() - point->percent / 100.0 * plotRect.height();
+            painter.drawEllipse(QPointF(x, y), 3.4, 3.4);
         }
         painter.restore();
     }
@@ -9981,6 +9988,28 @@ QString ProcessDock::buildProcessActivitySnapshotText(const int sampleIndex) con
     const int safeIndex = std::clamp(sampleIndex, 0, static_cast<int>(m_activitySamples.size()) - 1);
     const ProcessActivitySample& sample = m_activitySamples[static_cast<std::size_t>(safeIndex)];
     const std::vector<std::string> selectionKeys = currentProcessActivitySelectionKeys();
+    std::uint32_t metricMask = 0;
+    for (const ProcessActivityMetric metric : {ProcessActivityMetric::Cpu, ProcessActivityMetric::Memory,
+        ProcessActivityMetric::Disk, ProcessActivityMetric::Network, ProcessActivityMetric::Gpu})
+    {
+        if (isProcessActivityMetricEnabled(metric))
+        {
+            metricMask |= 1U << static_cast<unsigned>(metric);
+        }
+    }
+    const QString languageId = ks::i18n::LanguageManager::instance().currentLanguageId();
+    if (m_activitySnapshotTextCacheValid &&
+        m_activitySnapshotTextSequence == sample.sequence &&
+        m_activitySnapshotTextRecordingTick == m_activityRecordingStartTick100ns &&
+        m_activitySnapshotTextFirstSequence == m_activitySamples.front().sequence &&
+        m_activitySnapshotTextLastSequence == m_activitySamples.back().sequence &&
+        m_activitySnapshotTextSelectionKeys == selectionKeys &&
+        m_activitySnapshotTextMetricMask == metricMask &&
+        m_activitySnapshotTextMemoryMB == m_activityTotalPhysicalMemoryMB &&
+        m_activitySnapshotTextLanguageId == languageId)
+    {
+        return m_activitySnapshotTextCache;
+    }
 
     const double cpuValue = processActivitySampleMetricValue(sample, ProcessActivityMetric::Cpu, selectionKeys);
     const double memoryValue = processActivitySampleMetricValue(sample, ProcessActivityMetric::Memory, selectionKeys);
@@ -10096,6 +10125,16 @@ QString ProcessDock::buildProcessActivitySnapshotText(const int sampleIndex) con
         text += QStringLiteral(" | 进程数: %1").arg(static_cast<qulonglong>(sample.processes.size()));
     }
 
+    m_activitySnapshotTextCache = text;
+    m_activitySnapshotTextSequence = sample.sequence;
+    m_activitySnapshotTextRecordingTick = m_activityRecordingStartTick100ns;
+    m_activitySnapshotTextFirstSequence = m_activitySamples.front().sequence;
+    m_activitySnapshotTextLastSequence = m_activitySamples.back().sequence;
+    m_activitySnapshotTextSelectionKeys = selectionKeys;
+    m_activitySnapshotTextMetricMask = metricMask;
+    m_activitySnapshotTextMemoryMB = m_activityTotalPhysicalMemoryMB;
+    m_activitySnapshotTextLanguageId = languageId;
+    m_activitySnapshotTextCacheValid = true;
     return text;
 }
 

@@ -1201,6 +1201,18 @@ private:
     std::deque<ProcessActivitySample> m_activitySamples; // 有界双端记录缓存，淘汰旧样本时不搬移整个序列。
     std::vector<ks::process::ProcessRecord> m_activityTableSnapshotRecords; // 历史样本映射出的进程表记录。
 
+    // Tooltip 与摘要共用同一完整文档缓存；数据/身份/指标/语言变化均失效。
+    mutable bool m_activitySnapshotTextCacheValid = false;
+    mutable std::uint64_t m_activitySnapshotTextSequence = 0;
+    mutable std::uint64_t m_activitySnapshotTextRecordingTick = 0;
+    mutable std::uint64_t m_activitySnapshotTextFirstSequence = 0;
+    mutable std::uint64_t m_activitySnapshotTextLastSequence = 0;
+    mutable std::uint32_t m_activitySnapshotTextMetricMask = 0;
+    mutable double m_activitySnapshotTextMemoryMB = 0.0;
+    mutable std::vector<std::string> m_activitySnapshotTextSelectionKeys;
+    mutable QString m_activitySnapshotTextLanguageId;
+    mutable QString m_activitySnapshotTextCache;
+
     // ======== 进程表格 ========
     QTableView* m_processTable = nullptr;     // 进程列表表格视图（支持列拖动/排序/右键）。
     QDialog* m_dmaProcessOpDialog = nullptr;  // DMA 进程操作窗口（按需创建，复用同一个）。
