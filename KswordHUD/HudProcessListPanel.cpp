@@ -5,11 +5,12 @@
 #include <QApplication>
 #include <QDateTime>
 #include <QDir>
-#include <QFileIconProvider>
-#include <QFileInfo>
 #include <QFrame>
 #include <QElapsedTimer>
 #include <QSignalBlocker>
+#include <QScrollBar>
+#include <QStyle>
+#include <QPixmap>
 #include <QFont>
 #include <QHeaderView>
 #include <QHideEvent>
@@ -44,6 +45,9 @@
 #include <pdhmsg.h>
 #include <iphlpapi.h>
 #include <tcpestats.h>
+#include <shellapi.h>
+#include <shlobj.h>
+#include <objbase.h>
 
 #include <algorithm>
 #include <array>
@@ -55,6 +59,8 @@
 #pragma comment(lib, "Psapi.lib")
 #pragma comment(lib, "Pdh.lib")
 #pragma comment(lib, "Iphlpapi.lib")
+#pragma comment(lib, "Shell32.lib")
+#pragma comment(lib, "Ole32.lib")
 
 namespace
 {
@@ -651,8 +657,18 @@ HudProcessListPanel::HudProcessListPanel(QWidget* parent)
         1,
         ::GetActiveProcessorCount(ALL_PROCESSOR_GROUPS)));
 
-    m_fileIconProvider = new QFileIconProvider();
     initializeUi();
+    m_fallbackIcon = QApplication::style()->standardIcon(QStyle::SP_FileIcon);
+    m_iconWatcher = new QFutureWatcher<IconResult>(this);
+    connect(m_iconWatcher, &QFutureWatcher<IconResult>::finished, this, [this]() {
+        const auto result = m_iconWatcher->result();
+        const QIcon icon = result.pixels.isNull() ? m_fallbackIcon : QIcon(QPixmap::fromImage(result.pixels));
+        m_iconCacheByPath.insert(result.key, icon);
+        requestNextIcon();
+    });
+    connect(m_treeWidget->verticalScrollBar(), &QScrollBar::valueChanged, this, [this]() { requestNextIcon(); });
+    connect(m_treeWidget, &QTreeWidget::itemExpanded, this, [this]() { requestNextIcon(); });
+    connect(m_treeWidget, &QTreeWidget::itemCollapsed, this, [this]() { requestNextIcon(); });
 
     m_applyTimer = new QTimer(this);
     m_applyTimer->setInterval(0);
@@ -673,8 +689,6 @@ HudProcessListPanel::HudProcessListPanel(QWidget* parent)
 HudProcessListPanel::~HudProcessListPanel()
 {
     stopRefreshing();
-    delete m_fileIconProvider;
-    m_fileIconProvider = nullptr;
 }
 
 void HudProcessListPanel::showEvent(QShowEvent* event)
@@ -682,6 +696,7 @@ void HudProcessListPanel::showEvent(QShowEvent* event)
     QWidget::showEvent(event);
     if (!m_pendingRows.isEmpty() || !m_pendingRemovals.isEmpty()) m_applyTimer->start();
     startRefreshing();
+    requestNextIcon();
 }
 
 void HudProcessListPanel::hideEvent(QHideEvent* event)
@@ -1340,7 +1355,9 @@ void HudProcessListPanel::applyRefreshChunk()
     m_treeWidget->setUpdatesEnabled(false);
     int budget = 128;
     while (budget-- > 0 && elapsed.elapsed() < 4 && m_removeOffset < m_pendingRemovals.size()) {
-        auto* item = m_itemByKey.take(m_pendingRemovals.at(m_removeOffset++));
+        const QString removedKey = m_pendingRemovals.at(m_removeOffset++);
+        m_iconPathByRowKey.remove(removedKey);
+        auto* item = m_itemByKey.take(removedKey);
         if (!item) continue;
         // Surviving descendants retain their objects until their new parent is projected.
         const auto children = item->takeChildren();
@@ -1379,6 +1396,7 @@ void HudProcessListPanel::applyRefreshChunk()
         for (int col = 0; col < row.cells.size(); ++col)
             if (item->text(col) != row.cells.at(col)) item->setText(col, row.cells.at(col));
         if (!row.group) {
+            m_iconPathByRowKey.insert(row.key, row.entry.imagePath);
             const auto icon = resolveProcessIcon(row.entry);
             if (item->icon(NameColumn).cacheKey() != icon.cacheKey()) item->setIcon(NameColumn, icon);
             if (item->data(NameColumn, kTerminateProcessIdentityListRole).toList() != row.terminateIdentities)
@@ -1391,6 +1409,7 @@ void HudProcessListPanel::applyRefreshChunk()
     m_treeWidget->setUpdatesEnabled(true);
     if (m_applyOffset == m_pendingRows.size() && m_removeOffset == m_pendingRemovals.size()) {
         m_applyTimer->stop(); m_pendingRows.clear(); m_pendingRemovals.clear();
+        requestNextIcon();
     }
 }
 
@@ -1631,54 +1650,63 @@ QString HudProcessListPanel::buildProcessInstanceKey(
 
 QIcon HudProcessListPanel::resolveProcessIcon(const ProcessEntry& entry)
 {
-    const QString processInstanceKey =
-        buildProcessInstanceKey(entry.pid, entry.creationTime100ns);
-    if (!processInstanceKey.isEmpty())
-    {
-        const auto identityCacheIterator = m_iconCacheByIdentity.constFind(processInstanceKey);
-        if (identityCacheIterator != m_iconCacheByIdentity.cend())
-        {
-            return identityCacheIterator.value();
-        }
+    const QString identity = buildProcessInstanceKey(entry.pid, entry.creationTime100ns) + QLatin1Char('|') + iconCacheKey(entry.imagePath, devicePixelRatioF());
+    const auto found = m_iconCacheByIdentity.constFind(identity);
+    if (!identity.isEmpty() && found != m_iconCacheByIdentity.cend()) return found.value();
+    const auto path = m_iconCacheByPath.constFind(iconCacheKey(entry.imagePath, devicePixelRatioF()));
+    if (path != m_iconCacheByPath.cend()) {
+        if (!identity.isEmpty()) m_iconCacheByIdentity.insert(identity, path.value());
+        return path.value();
     }
+    return m_fallbackIcon;
+}
 
-    if (!entry.imagePath.isEmpty())
-    {
-        const auto pathCacheIterator = m_iconCacheByPath.constFind(entry.imagePath);
-        if (pathCacheIterator != m_iconCacheByPath.cend())
-        {
-            if (!processInstanceKey.isEmpty())
-            {
-                m_iconCacheByIdentity.insert(processInstanceKey, pathCacheIterator.value());
-            }
-            return pathCacheIterator.value();
-        }
+QString HudProcessListPanel::iconCacheKey(const QString& path, qreal dpr)
+{
+    return path + QLatin1Char('|') + QString::number(qMax(16, qRound(18 * dpr)));
+}
 
-        if (m_fileIconProvider != nullptr)
-        {
-            const QFileInfo fileInfo(entry.imagePath);
-            if (fileInfo.exists())
-            {
-                const QIcon resolvedIcon = m_fileIconProvider->icon(fileInfo);
-                if (!resolvedIcon.isNull())
-                {
-                    m_iconCacheByPath.insert(entry.imagePath, resolvedIcon);
-                    if (!processInstanceKey.isEmpty())
-                    {
-                        m_iconCacheByIdentity.insert(processInstanceKey, resolvedIcon);
-                    }
-                    return resolvedIcon;
-                }
-            }
-        }
+HudProcessListPanel::IconResult HudProcessListPanel::collectIconPixels(QString path, qreal dpr)
+{
+    IconResult result; result.path = std::move(path); result.key = iconCacheKey(result.path, dpr);
+    const HRESULT apartment = ::CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    HICON icon = nullptr;
+    const int pixels = qMax(16, qRound(18 * dpr));
+    // Ask the executable resource decoder for the actual physical display size.
+    ::SHDefExtractIconW(reinterpret_cast<LPCWSTR>(result.path.utf16()), 0, 0, &icon, nullptr, MAKELONG(pixels, pixels));
+    if (!icon) {
+        SHFILEINFOW info{};
+        if (::SHGetFileInfoW(reinterpret_cast<LPCWSTR>(result.path.utf16()), 0, &info, sizeof(info), SHGFI_ICON | SHGFI_LARGEICON)) icon = info.hIcon;
     }
-
-    const QIcon fallbackIcon = QApplication::style()->standardIcon(QStyle::SP_FileIcon);
-    if (!processInstanceKey.isEmpty())
-    {
-        m_iconCacheByIdentity.insert(processInstanceKey, fallbackIcon);
+    if (icon) {
+        result.pixels = QImage::fromHICON(icon);
+        result.pixels.setDevicePixelRatio(dpr);
+        ::DestroyIcon(icon);
     }
-    return fallbackIcon;
+    if (SUCCEEDED(apartment)) ::CoUninitialize();
+    return result;
+}
+
+void HudProcessListPanel::requestNextIcon()
+{
+    if (!m_iconWatcher || !isVisible() || m_iconWatcher->isRunning()
+        || (::GetAsyncKeyState(VK_LCONTROL) & 0x8000) != 0) return;
+    QString pendingPath;
+    const qreal dpr = devicePixelRatioF();
+    auto* item = m_treeWidget->itemAt(QPoint(2, 0));
+    if (!item && m_treeWidget->topLevelItemCount()) item = m_treeWidget->topLevelItem(0);
+    while (item && m_treeWidget->visualItemRect(item).top() < m_treeWidget->viewport()->height()) {
+        const QString key = item->data(NameColumn, kExpansionKeyRole).toString();
+        const QString path = m_iconPathByRowKey.value(key);
+        if (!path.isEmpty()) {
+            const auto cached = m_iconCacheByPath.constFind(iconCacheKey(path, dpr));
+            if (cached != m_iconCacheByPath.cend()) {
+                if (item->icon(NameColumn).cacheKey() != cached.value().cacheKey()) item->setIcon(NameColumn, cached.value());
+            } else if (pendingPath.isEmpty()) pendingPath = path;
+        }
+        item = m_treeWidget->itemBelow(item);
+    }
+    if (!pendingPath.isEmpty()) m_iconWatcher->setFuture(QtConcurrent::run([pendingPath, dpr]() { return collectIconPixels(pendingPath, dpr); }));
 }
 
 double HudProcessListPanel::usageRatioForEntry(

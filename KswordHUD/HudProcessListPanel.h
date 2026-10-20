@@ -4,6 +4,7 @@
 #include <QColor>
 #include <QHash>
 #include <QIcon>
+#include <QImage>
 #include <QSet>
 #include <QVector>
 #include <QVariant>
@@ -11,7 +12,6 @@
 #include <array>
 #include <QWidget>
 
-class QFileIconProvider;
 class QHideEvent;
 class QPoint;
 class QShowEvent;
@@ -112,6 +112,10 @@ private:
         double maxNetKBps = 0.0;
     };
 
+    struct IconResult { QString path; QString key; QImage pixels; };
+    void requestNextIcon();
+    static QString iconCacheKey(const QString& path, qreal dpr);
+    static IconResult collectIconPixels(QString path, qreal dpr);
     void initializeUi();
     void applyTreeWidgetStyle();
     void showContextMenu(const QPoint& localPosition);
@@ -147,7 +151,9 @@ private:
 
     QTreeWidget* m_treeWidget = nullptr;
     QStyledItemDelegate* m_metricDelegate = nullptr;
-    QFileIconProvider* m_fileIconProvider = nullptr;
+    QFutureWatcher<IconResult>* m_iconWatcher = nullptr;
+    QIcon m_fallbackIcon;
+    QHash<QString, QString> m_iconPathByRowKey;
     QTimer* m_refreshTimer = nullptr;
     QFutureWatcher<RefreshResult>* m_refreshWatcher = nullptr;
     bool m_refreshInProgress = false;
