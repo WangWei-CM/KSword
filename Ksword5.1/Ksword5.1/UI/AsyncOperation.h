@@ -69,7 +69,7 @@ namespace ks::ui
         // cleanup 只可持值资源，不得访问页面或其他 QObject。
         template<class Request, class Result, class Worker, class Apply, class Failure>
         std::uint64_t submit(Request request, Worker worker, Apply apply,
-            Failure failure, Cleanup cleanup = {})
+            Failure failure, Cleanup cleanup = {}, int workerPriority = 0)
         {
             Job job; // 主线程保存应用回调，后台任务不捕获它们。
             job.apply = [apply = std::move(apply)](const std::any& payload, std::uint64_t ticket)
@@ -78,7 +78,7 @@ namespace ks::ui
                 return apply(*result, ticket);
             };
             job.failure = std::move(failure);
-            job.launch = [request = std::move(request), worker = std::move(worker)](
+            job.launch = [request = std::move(request), worker = std::move(worker), workerPriority](
                 const AsyncOperationToken& token)
             {
                 // worker 不持页面守卫；业务查询仍使用既有全局 Qt 线程池。
@@ -100,7 +100,7 @@ namespace ks::ui
                     }
                 });
                 task->setAutoDelete(true);
-                QThreadPool::globalInstance()->start(task);
+                QThreadPool::globalInstance()->start(task, workerPriority);
             };
             return enqueue(std::move(job), std::move(cleanup));
         }
