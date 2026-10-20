@@ -1652,6 +1652,9 @@
     <ClCompile Include="UI\IntegrityRiskPresentation.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="UI\ImmutableValueTable.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="UI\TableInteractionSupport.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -3115,6 +3118,12 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="UI\TableSnapshotCompare.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="UI\ImmutableValueTable.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="UI\ImmutableValueTableModel.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="UI\VisibleTableWidget.h">

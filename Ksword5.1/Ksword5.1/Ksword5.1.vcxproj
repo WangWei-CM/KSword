@@ -695,6 +695,7 @@
     <ClCompile Include="UI\TableFreezeSupport.cpp" />
     <ClCompile Include="UI\TableHeaderSortingSupport.cpp" />
     <ClCompile Include="UI\IntegrityRiskPresentation.cpp" />
+    <ClCompile Include="UI\ImmutableValueTable.cpp" />
     <ClCompile Include="UI\TableInteractionSupport.cpp" />
     <ClCompile Include="UI\TableContextMenu.cpp" />
     <ClCompile Include="UI\ThemeBinding.cpp" />
@@ -1025,6 +1026,8 @@
     <ClInclude Include="UI\TableSearchSupport.h" />
     <ClInclude Include="UI\TextSearchReplaceSupport.h" />
     <ClInclude Include="UI\TableSnapshotCompare.h" />
+    <ClInclude Include="UI\ImmutableValueTable.h" />
+    <ClInclude Include="UI\ImmutableValueTableModel.h" />
     <ClInclude Include="UI\VisibleTableWidget.h" />
     <ClInclude Include="UI\UI_All.h" />
     <QtMoc Include="DriverDock\DriverDock.h" />
