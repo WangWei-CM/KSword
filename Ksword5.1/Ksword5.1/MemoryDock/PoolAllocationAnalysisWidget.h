@@ -14,9 +14,10 @@ class QLabel;
 class QLineEdit;
 #include "../UI/StructuredFieldView.h"
 class QPushButton;
-class QSortFilterProxyModel;
+struct PoolPreparedProjection;
 class QTableView;
 class QTimer;
+class QShowEvent;
 class PoolAllocationTableModel;
 class PoolStackListModel;
 
@@ -41,15 +42,18 @@ public:
 
 protected:
     void changeEvent(QEvent* event) override;
+    void showEvent(QShowEvent* event) override;
 
 private:
     struct ReadJob;
     struct ResolveJob;
+    struct ProjectionJob;
     void pollJobs();
     void startRead(const QString& path);
     void cancelJobs();
     void rebuildRows();
-    void indexResult();
+    void requestProjection(bool rebuild = false);
+    void clearProjection();
     void clearStackModel();
     void selectRow();
     void selectStack();
@@ -74,14 +78,18 @@ private:
     QTableView* m_table = nullptr;
     PoolAllocationTableModel* m_model = nullptr;
     PoolStackListModel* m_stackModel = nullptr;
-    QSortFilterProxyModel* m_proxy = nullptr;
+    QTimer* m_projectionDebounce = nullptr;
+    std::shared_ptr<ProjectionJob> m_projectionJob;
+    std::shared_ptr<const PoolPreparedProjection> m_prepared;
+    std::uint64_t m_projectionVersion = 0, m_publishedVersion = 0;
+    bool m_rebuildProjection = false, m_projectionFailed = false;
+    int m_sortColumn = 5;
+    Qt::SortOrder m_sortOrder = Qt::DescendingOrder;
     QTimer* m_poll = nullptr;
     std::shared_ptr<ReadJob> m_readJob;
     std::shared_ptr<ResolveJob> m_resolveJob;
     std::shared_ptr<const ks::evidence::pool::TraceReadResult> m_result;
-    std::unordered_map<std::uint64_t, const ks::evidence::pool::TraceImage*> m_images;
-    std::unordered_set<std::uint64_t> m_kernelImages;
-    std::unordered_map<std::uint64_t, const ks::evidence::pool::Group*> m_groups;
+
     ReadProvider m_reader;
     ResolveProvider m_resolver;
     std::function<void(const QString&)> m_openModuleDetails;

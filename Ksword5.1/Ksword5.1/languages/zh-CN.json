@@ -6954,6 +6954,8 @@
     "notification.copy.log_template": "%1\n%2\n%3\n文件：%4\n函数：%5\nGUID：%6"
   },
   "source_translations": {
+    "Pool table projection failed.": "池分配表格投影失败。",
+    "Updating pool allocation table...": "正在更新池分配表格...",
     "正在准备字段...": "正在准备字段...",
     "AsyncCleanupRegistry.h": "AsyncCleanupRegistry.h",
     "shutdown gate closed": "退出门禁已关闭",
