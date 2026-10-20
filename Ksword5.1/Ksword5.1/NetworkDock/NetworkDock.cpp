@@ -146,6 +146,11 @@ NetworkDock::NetworkDock(QWidget* parent)
 
 NetworkDock::~NetworkDock()
 {
+    // Detach the GUI consumer before any service teardown can deliver callbacks.
+    if (m_httpsProxyService != nullptr)
+    {
+        m_httpsProxyService->setParsedCallback({});
+    }
     if (m_multiDownloadDispatcher != nullptr)
     {
         m_multiDownloadDispatcher->close();
@@ -229,10 +234,9 @@ void NetworkDock::showEvent(QShowEvent* event)
     {
         m_httpsProxyService->setParsedCallback([this](const ks::network::HttpsProxyParsedEntry& parsedEntry)
             {
-                QMetaObject::invokeMethod(this, [this, parsedEntry]()
-                    {
-                        onHttpsProxyParsedEntryArrived(parsedEntry);
-                    }, Qt::QueuedConnection);
+                // The service dispatcher already delivers on this GUI thread.
+                // A second queued hop copies the event and adds avoidable backlog.
+                onHttpsProxyParsedEntryArrived(parsedEntry);
             });
         m_httpsProxyService->setStatusCallback([this](const QString& statusText)
             {
