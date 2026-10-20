@@ -1887,6 +1887,17 @@ void NetworkDock::startMultiThreadDownloadTask()
                 {
                     result.errorText = QStringLiteral("创建下载会话失败。");
                 }
+                const auto retireUndeliveredPreparation = [taskState]()
+                {
+                    // This value fallback must also cover argument/functor allocation
+                    // before AsyncUiDispatcher can own its onCanceled callback.
+                    taskState->canceled.store(true);
+                    taskState->cancelRequested.store(true);
+                    taskState->preparing.store(false);
+                    taskState->finished.store(true);
+                };
+                try
+                {
                 dispatcher->post([owner, taskState, result]()
                     {
                         QString errorForDialog;
@@ -2064,14 +2075,12 @@ void NetworkDock::startMultiThreadDownloadTask()
                         {
                             QMessageBox::warning(owner, QStringLiteral("多线程下载"), errorForDialog);
                         }
-                    }, [taskState]()
-                    {
-                        // Closing/dropped UI delivery must retire values without touching any QObject.
-                        taskState->canceled.store(true);
-                        taskState->cancelRequested.store(true);
-                        taskState->preparing.store(false);
-                        taskState->finished.store(true);
-                    });
+                    }, retireUndeliveredPreparation);
+                }
+                catch (...)
+                {
+                    retireUndeliveredPreparation();
+                }
             }).detach();
     }
     catch (...)
