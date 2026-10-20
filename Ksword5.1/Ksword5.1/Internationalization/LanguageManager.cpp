@@ -24,6 +24,7 @@
 #include <QMutexLocker>
 #include <QPlainTextEdit>
 #include <QPointer>
+#include <QPersistentModelIndex>
 #include <QRegularExpression>
 #include <QScopedValueRollback>
 #include <QSet>
@@ -78,7 +79,6 @@ namespace
     constexpr auto kTabToolTipKeyProperty = "ks_i18n_tab_tooltip_key";
     constexpr auto kTabToolTipFallbackProperty = "ks_i18n_tab_tooltip_fallback";
 
-    constexpr auto kRuntimeRefreshPendingProperty = "ks_i18n_runtime_refresh_pending";
     constexpr auto kRuntimeWindowTitleSourceProperty = "ks_i18n_runtime_window_title_source";
     constexpr auto kRuntimeWindowTitleAppliedProperty = "ks_i18n_runtime_window_title_applied";
     constexpr auto kRuntimeToolTipSourceProperty = "ks_i18n_runtime_tooltip_source";
@@ -1316,6 +1316,9 @@ struct ks::i18n::LanguageManager::State
     QCache<QString, QString> packedSourceResults{ kSourceCacheBytes };
     QString sourceLanguageId;
     quint64 sourceGeneration = 0;
+    // GUI-thread queue: a pending ancestor covers pending descendants.
+    QList<QPointer<QObject>> pendingRuntimeRoots;
+    bool runtimeDrainPending = false;
 };
 
 struct ks::i18n::LanguageManager::PackRef
@@ -2208,21 +2211,52 @@ void ks::i18n::LanguageManager::ensureApplicationEventFilter()
 
 void ks::i18n::LanguageManager::scheduleRuntimeTranslation(QObject* object)
 {
-    if (object == nullptr || m_applyingRuntimeTranslations
-        || object->property(kRuntimeRefreshPendingProperty).toBool())
+    if (object == nullptr || m_applyingRuntimeTranslations)
     {
         return;
     }
 
-    object->setProperty(kRuntimeRefreshPendingProperty, true);
-    const QPointer<QObject> guardedObject(object);
-    QTimer::singleShot(0, this, [this, guardedObject]() {
-        if (guardedObject.isNull())
+    const auto covers = [](QObject* ancestor, QObject* child) {
+        for (QObject* current = child; current != nullptr; current = current->parent())
+        {
+            if (current == ancestor)
+            {
+                return true;
+            }
+        }
+        return false;
+    };
+    auto& pending = m_state->pendingRuntimeRoots;
+    for (const QPointer<QObject>& queued : pending)
+    {
+        if (!queued.isNull() && covers(queued.data(), object))
         {
             return;
         }
-        guardedObject->setProperty(kRuntimeRefreshPendingProperty, false);
-        applyRuntimeTranslations(guardedObject.data());
+    }
+    pending.erase(std::remove_if(pending.begin(), pending.end(),
+        [object, &covers](const QPointer<QObject>& queued) {
+            return queued.isNull() || covers(object, queued.data());
+        }), pending.end());
+    pending.append(QPointer<QObject>(object));
+    if (m_state->runtimeDrainPending)
+    {
+        return;
+    }
+
+    m_state->runtimeDrainPending = true;
+    QTimer::singleShot(0, this, [this]() {
+        // Detach before applying: callbacks may create new independent work.
+        const QList<QPointer<QObject>> roots = std::move(m_state->pendingRuntimeRoots);
+        m_state->pendingRuntimeRoots.clear();
+        m_state->runtimeDrainPending = false;
+        for (const QPointer<QObject>& root : roots)
+        {
+            if (!root.isNull())
+            {
+                applyRuntimeTranslations(root.data());
+            }
+        }
     });
 }
 
@@ -2282,6 +2316,8 @@ void ks::i18n::LanguageManager::applyRuntimeTranslations(QObject* object)
     }
 
     QScopedValueRollback<bool> translationGuard(m_applyingRuntimeTranslations, true);
+    QHash<QAbstractItemModel*, QSet<QPersistentModelIndex>> translatedModelRoots;
+    QHash<QAbstractItemModel*, QSet<QPersistentModelIndex>> translatedHeaderRoots;
     std::function<void(QAbstractItemModel*, const QModelIndex&, int&)> translateModelItems;
     translateModelItems = [this, &translateModelItems](
                               QAbstractItemModel* model,
@@ -2352,7 +2388,7 @@ void ks::i18n::LanguageManager::applyRuntimeTranslations(QObject* object)
     };
 
     std::function<void(QObject*)> visitObject;
-    visitObject = [this, &translateModelItems, &visitObject](QObject* currentObject) {
+    visitObject = [this, &translateModelItems, &translatedModelRoots, &translatedHeaderRoots, &visitObject](QObject* currentObject) {
         if (currentObject == nullptr || currentObject->property("ks_i18n_preserve_data_text").toBool())
         {
             return;
@@ -2626,84 +2662,69 @@ void ks::i18n::LanguageManager::applyRuntimeTranslations(QObject* object)
             }
         }
 
-        if (QTableView* tableView = qobject_cast<QTableView*>(currentObject))
+        QAbstractItemView* itemView = qobject_cast<QTableView*>(currentObject);
+        if (itemView == nullptr)
         {
-            QAbstractItemModel* model = tableView->model();
-            if (model != nullptr)
-            {
-                const int columnCount = model->columnCount(tableView->rootIndex());
-                for (int section = 0; section < columnCount; ++section)
-                {
-                    const QString currentHeader = model->headerData(
-                        section,
-                        Qt::Horizontal,
-                        Qt::DisplayRole).toString();
-                    const ManagedTextResult result = resolveManagedText(
-                        *this,
-                        currentHeader,
-                        model->headerData(section, Qt::Horizontal, kRuntimeHeaderSourceRole),
-                        model->headerData(section, Qt::Horizontal, kRuntimeHeaderAppliedRole));
-                    if (result.clearMetadata)
-                    {
-                        model->setHeaderData(section, Qt::Horizontal, QVariant(), kRuntimeHeaderSourceRole);
-                        model->setHeaderData(section, Qt::Horizontal, QVariant(), kRuntimeHeaderAppliedRole);
-                        continue;
-                    }
-                    if (!result.updateMetadata)
-                    {
-                        continue;
-                    }
-                    if (result.setText
-                        && !model->setHeaderData(section, Qt::Horizontal, result.appliedText, Qt::DisplayRole))
-                    {
-                        continue;
-                    }
-                    model->setHeaderData(section, Qt::Horizontal, result.sourceText, kRuntimeHeaderSourceRole);
-                    model->setHeaderData(section, Qt::Horizontal, result.appliedText, kRuntimeHeaderAppliedRole);
-                }
-                int remainingIndexBudget = 50000;
-                if (!tableView->property("ks_i18n_preserve_model_data").toBool())
-                    translateModelItems(model, tableView->rootIndex(), remainingIndexBudget);
-            }
+            itemView = qobject_cast<QTreeView*>(currentObject);
         }
-        else if (QTreeView* treeView = qobject_cast<QTreeView*>(currentObject))
+        if (itemView != nullptr)
         {
-            QAbstractItemModel* model = treeView->model();
+            QAbstractItemModel* model = itemView->model();
+            const QPersistentModelIndex rootIndex(itemView->rootIndex());
             if (model != nullptr)
             {
-                const int columnCount = model->columnCount(treeView->rootIndex());
-                for (int section = 0; section < columnCount; ++section)
+                if (!translatedHeaderRoots[model].contains(rootIndex))
                 {
-                    const QString currentHeader = model->headerData(
-                        section,
-                        Qt::Horizontal,
-                        Qt::DisplayRole).toString();
-                    const ManagedTextResult result = resolveManagedText(
-                        *this,
-                        currentHeader,
-                        model->headerData(section, Qt::Horizontal, kRuntimeHeaderSourceRole),
-                        model->headerData(section, Qt::Horizontal, kRuntimeHeaderAppliedRole));
-                    if (result.clearMetadata)
+                    translatedHeaderRoots[model].insert(rootIndex);
+                    const int columnCount = model->columnCount(itemView->rootIndex());
+                    for (int section = 0; section < columnCount; ++section)
                     {
-                        model->setHeaderData(section, Qt::Horizontal, QVariant(), kRuntimeHeaderSourceRole);
-                        model->setHeaderData(section, Qt::Horizontal, QVariant(), kRuntimeHeaderAppliedRole);
-                        continue;
+                        const QString currentHeader = model->headerData(
+                            section,
+                            Qt::Horizontal,
+                            Qt::DisplayRole).toString();
+                        const ManagedTextResult result = resolveManagedText(
+                            *this,
+                            currentHeader,
+                            model->headerData(section, Qt::Horizontal, kRuntimeHeaderSourceRole),
+                            model->headerData(section, Qt::Horizontal, kRuntimeHeaderAppliedRole));
+                        if (result.clearMetadata)
+                        {
+                            model->setHeaderData(section, Qt::Horizontal, QVariant(), kRuntimeHeaderSourceRole);
+                            model->setHeaderData(section, Qt::Horizontal, QVariant(), kRuntimeHeaderAppliedRole);
+                            continue;
+                        }
+                        if (!result.updateMetadata)
+                        {
+                            continue;
+                        }
+                        if (result.setText
+                            && !model->setHeaderData(section, Qt::Horizontal, result.appliedText, Qt::DisplayRole))
+                        {
+                            continue;
+                        }
+                        model->setHeaderData(section, Qt::Horizontal, result.sourceText, kRuntimeHeaderSourceRole);
+                        model->setHeaderData(section, Qt::Horizontal, result.appliedText, kRuntimeHeaderAppliedRole);
                     }
-                    if (!result.updateMetadata)
-                    {
-                        continue;
-                    }
-                    if (result.setText
-                        && !model->setHeaderData(section, Qt::Horizontal, result.appliedText, Qt::DisplayRole))
-                    {
-                        continue;
-                    }
-                    model->setHeaderData(section, Qt::Horizontal, result.sourceText, kRuntimeHeaderSourceRole);
-                    model->setHeaderData(section, Qt::Horizontal, result.appliedText, kRuntimeHeaderAppliedRole);
                 }
-                int remainingIndexBudget = 50000;
-                if (!treeView->property("ks_i18n_preserve_model_data").toBool())
-                    translateModelItems(model, treeView->rootIndex(), remainingIndexBudget);
+                bool preserveModelData = itemView->property("ks_i18n_preserve_model_data").toBool();
+                if (itemView->property("KSWORD_TABLE_INTERACTION_FROZEN_PANE_AUXILIARY").toBool())
+                {
+                    // Frozen panes are children of their canonical table and
+                    // share its model. Never let a pane bypass its data policy.
+                    const auto* source = qobject_cast<QTableView*>(itemView->parentWidget());
+                    if (source != nullptr && source->model() == model)
+                    {
+                        preserveModelData = preserveModelData
+                            || source->property("ks_i18n_preserve_model_data").toBool();
+                    }
+                }
+                if (!preserveModelData && !translatedModelRoots[model].contains(rootIndex))
+                {
+                    translatedModelRoots[model].insert(rootIndex);
+                    int remainingIndexBudget = 50000;
+                    translateModelItems(model, itemView->rootIndex(), remainingIndexBudget);
+                }
             }
         }
 
