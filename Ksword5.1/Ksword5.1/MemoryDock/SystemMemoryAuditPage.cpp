@@ -1435,7 +1435,11 @@ void SystemMemoryAuditPage::runDdmaCrossCheck()
         }
     });
     promise->start();
-    if (!ksword::memory_backend::submitDdmaTransaction(
+    CrossCheckResult rejected;
+    bool accepted = false;
+    try
+    {
+        accepted = ksword::memory_backend::submitDdmaTransaction(
         [promise, session, generation, pageBase, transferBytes]() {
         CrossCheckResult result;
         // A queued request may become obsolete before it starts. Once started,
@@ -1462,10 +1466,22 @@ void SystemMemoryAuditPage::runDdmaCrossCheck()
         }
         promise->addResult(std::move(result));
         promise->finish();
-    }))
+    });
+    }
+    catch (const std::exception& error)
     {
-        CrossCheckResult rejected;
-        rejected.standard.failureText = QStringLiteral("DDMA transaction queue is full; wait for the current operation and retry.");
+        rejected.standard.failureText = QString::fromUtf8(error.what());
+    }
+    catch (...)
+    {
+        rejected.standard.failureText = QStringLiteral("DDMA transaction failed unexpectedly.");
+    }
+    if (!accepted)
+    {
+        if (rejected.standard.failureText.isEmpty())
+        {
+            rejected.standard.failureText = QStringLiteral("DDMA transaction queue is full; wait for the current operation and retry.");
+        }
         promise->addResult(std::move(rejected));
         promise->finish();
     }
