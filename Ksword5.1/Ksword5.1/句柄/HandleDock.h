@@ -10,6 +10,7 @@
 // ============================================================
 
 #include "../Framework.h"
+#include "../UI/PageNavigationTabCatalog.h"
 #include "./HandleFilterConfig.h"
 #include "HandleObjectTypeWorker.h"
 #include "../UI/AsyncOperation.h"
@@ -64,6 +65,9 @@ class HandleDock final : public QWidget
     Q_OBJECT
 
 public:
+    static ks::ui::PageNavigationCatalog navigationCatalog(const HandleDock* existing = nullptr);
+    QWidget* activateNavigationDescriptor(const QString& id);
+
     // 构造函数作用：
     // - 创建句柄页面全部控件与多 Tab 结构；
     // - 初始化筛选条件、右键菜单、异步刷新入口。
@@ -93,6 +97,8 @@ protected:
     void showEvent(QShowEvent* event) override;
 
 private:
+    ks::ui::PageNavigationTabCatalog m_navigationTabs;
+
     // HandleTableColumn 作用：
     // - 统一定义句柄列表列索引，杜绝魔法数字。
     enum class HandleTableColumn : int

@@ -60,6 +60,13 @@
 #include <Shellapi.h>
 #include <objbase.h>
 
+namespace {
+const ks::ui::PageNavigationTabDefinition kHandleDockNavigation[] = {
+    {"handle.table", "", "", "Handle Table", true},
+    {"handle.header", "", "", "Object Header", false},
+    {"handle.type", "", "", "Object Type", false}
+};
+}
 namespace
 {
     // buildBlueButtonStyle 作用：
@@ -638,7 +645,7 @@ void HandleDock::initializeHandleListTab()
     m_handleListLayout->addWidget(m_statusLabel);
     m_handleListLayout->addWidget(m_tableWidget, 1);
 
-    m_tabWidget->addTab(m_handleListPage, QIcon(":/Icon/process_list.svg"), QStringLiteral("Handle Table"));
+    m_navigationTabs.add(kHandleDockNavigation[0], m_tabWidget, m_handleListPage, QIcon(":/Icon/process_list.svg"));
 }
 
 void HandleDock::initializeObjectHeaderTab()
@@ -662,7 +669,7 @@ void HandleDock::initializeObjectHeaderTab()
     m_objectHeaderLayout->addWidget(
         ks::ui::CreateDetailFieldProjection(m_handleDetailFields, m_objectHeaderPage), 1);
 
-    m_tabWidget->addTab(m_objectHeaderPage, QIcon(":/Icon/process_critical.svg"), QStringLiteral("Object Header"));
+    m_navigationTabs.add(kHandleDockNavigation[1], m_tabWidget, m_objectHeaderPage, QIcon(":/Icon/process_critical.svg"));
     // Object Header 页只做只读证据展示，不承载关闭/修改类动作；页面职责挂到页签提示上，不再占用版面。
     m_tabWidget->setTabToolTip(
         m_tabWidget->indexOf(m_objectHeaderPage),
@@ -715,7 +722,7 @@ void HandleDock::initializeObjectTypeTab()
     m_objectTypeLayout->addWidget(
         ks::ui::CreateDetailFieldProjection(m_objectTypeDetailFields, m_objectTypePage), 2);
 
-    m_tabWidget->addTab(m_objectTypePage, QIcon(":/Icon/process_tree.svg"), QStringLiteral("Object Type"));
+    m_navigationTabs.add(kHandleDockNavigation[2], m_tabWidget, m_objectTypePage, QIcon(":/Icon/process_tree.svg"));
 }
 
 void HandleDock::initializeHandleTable()
@@ -1983,3 +1990,17 @@ HandleDock::HandleRefreshOptions HandleDock::collectHandleRefreshOptions() const
 
     return options;
 }
+
+ks::ui::PageNavigationCatalog HandleDock::navigationCatalog(const HandleDock* existing)
+{
+    ks::ui::PageNavigationCatalog schema;
+    for (const auto& definition : kHandleDockNavigation)
+        schema.append(ks::ui::PageNavigationTabDescriptor(definition));
+    return existing ? existing->m_navigationTabs.describe(std::move(schema)) : schema;
+}
+QWidget* HandleDock::activateNavigationDescriptor(const QString& id)
+{
+    return m_navigationTabs.activate(id, navigationCatalog(this));
+}
+namespace { const bool kHandleDockNavigationRegistered =
+    ks::ui::RegisterTypedPageNavigationCatalog<HandleDock>(QStringLiteral("handle")); }
