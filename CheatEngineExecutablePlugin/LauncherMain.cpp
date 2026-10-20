@@ -4,6 +4,8 @@
 #include <Windows.h>
 
 #include <algorithm>
+#include <atomic>
+#include <memory>
 #include <cerrno>
 #include <chrono>
 #include <cstdint>
@@ -21,6 +23,7 @@ namespace
     constexpr char kPluginId[] = "cheat-engine";
     constexpr UINT kInitializeTabMessage = WM_APP + 1U;
     constexpr UINT_PTR kLifecycleTimerId = 1U;
+    const UINT kAsyncResizeMessage = ::RegisterWindowMessageW(L"KSword.PluginTab.ResizeParentClient.v1");
 
     struct ParsedArguments
     {
@@ -41,6 +44,7 @@ namespace
 
     HWND gTabWindow = nullptr;
     HWND gLogView = nullptr;
+    HWND gHostParentWindow = nullptr;
     HANDLE gCheatEngineProcess = nullptr;
     DWORD gHostProcessId = 0U;
     int gTabExitCode = 0;
@@ -48,6 +52,19 @@ namespace
     std::streamoff gLogOffset = 0;
     std::string gPendingLogLine;
     std::string gLaunchFailureMessage;
+
+    struct TabLaunchTask {
+        std::atomic_bool canceled{false};
+        std::thread worker;
+        DWORD processId = 0;
+        HANDLE process = nullptr;
+        std::wstring logPath;
+        BridgeStatus status = BridgeStatus::launchFailed;
+        bool driverReady = false;
+        std::string failure;
+        ~TabLaunchTask() { if (process) ::CloseHandle(process); }
+    };
+    std::shared_ptr<TabLaunchTask> gTabLaunchTask; // Native owner thread only.
 
     std::string escapeJson(const std::string& value);
 
@@ -387,11 +404,12 @@ namespace
         return status;
     }
 
-    BridgeStatus waitForBridgeStatus(const std::wstring& statusPath)
+    BridgeStatus waitForBridgeStatus(const std::wstring& statusPath, const std::atomic_bool* canceled = nullptr)
     {
         constexpr std::size_t kAttemptCount = 200U;
         for (std::size_t attempt = 0U; attempt < kAttemptCount; ++attempt)
         {
+            if (canceled && canceled->load()) return BridgeStatus::timeout;
             const std::string status = readStatusFile(statusPath);
             if (status == "ready")
             {
@@ -411,7 +429,8 @@ namespace
         const DWORD targetProcessId,
         DWORD* const cheatEngineProcessIdOut,
         HANDLE* const cheatEngineProcessHandleOut = nullptr,
-        std::wstring* const logPathOut = nullptr)
+        std::wstring* const logPathOut = nullptr,
+        const std::atomic_bool* canceled = nullptr)
     {
         if (cheatEngineProcessIdOut != nullptr)
         {
@@ -518,7 +537,7 @@ namespace
         {
             *cheatEngineProcessHandleOut = processInformation.hProcess;
         }
-        const BridgeStatus status = waitForBridgeStatus(statusPath);
+        const BridgeStatus status = waitForBridgeStatus(statusPath, canceled);
         if (cheatEngineProcessHandleOut == nullptr)
         {
             ::CloseHandle(processInformation.hProcess);
@@ -704,6 +723,29 @@ namespace
         const WPARAM wParam,
         const LPARAM lParam)
     {
+        if (kAsyncResizeMessage != 0 && message == kAsyncResizeMessage)
+        {
+            // The host posts a size request; only this window's owner performs
+            // SetWindowPos. Read latest native client bounds rather than LPARAM
+            // dimensions, so coalescing and DPI changes retain full precision.
+            MSG redundant{};
+            while (::PeekMessageW(&redundant, window, kAsyncResizeMessage,
+                    kAsyncResizeMessage, PM_REMOVE)) {}
+            const HWND parent = ::GetParent(window);
+            DWORD parentPid = 0;
+            ::GetWindowThreadProcessId(parent, &parentPid);
+            if (parent != gHostParentWindow || parentPid != gHostProcessId
+                || (::GetWindowLongPtrW(window, GWL_STYLE) & WS_CHILD) == 0) return 0;
+            RECT bounds{}, current{};
+            if (::GetClientRect(parent, &bounds) && ::GetClientRect(window, &current))
+            {
+                const int width = (std::max)(1L, bounds.right - bounds.left);
+                const int height = (std::max)(1L, bounds.bottom - bounds.top);
+                if (current.right - current.left != width || current.bottom - current.top != height)
+                    ::SetWindowPos(window, nullptr, 0, 0, width, height, SWP_NOZORDER | SWP_NOACTIVATE);
+            }
+            return 0;
+        }
         LRESULT surfaceResult = 0;
         if (ksword::ce_log::message(window, message, wParam, lParam, surfaceResult))
         {
@@ -742,49 +784,48 @@ namespace
                 return 0;
             }
 
-            DWORD cheatEngineProcessId = 0U;
-            const BridgeStatus bridgeStatus = launchCheatEngine(
-                parentDirectory(currentExecutablePath()),
-                0U,
-                &cheatEngineProcessId,
-                &gCheatEngineProcess,
-                &gLogPath);
-            ksword::ce_log::setSession(gLogPath);
-            pollBridgeLog();
-            if (bridgeStatus == BridgeStatus::launchFailed)
-            {
-                failTab(
-                    window,
-                    "launch_failed",
-                    gLaunchFailureMessage.c_str());
-                return 0;
-            }
-            if (bridgeStatus != BridgeStatus::ready)
-            {
-                appendNativeLog(L"KSword 桥接尚未就绪；CE 已独立启动。");
-                emitJsonLine(
-                    "warning",
-                    "\"code\":\"bridge_not_ready\","
-                    "\"message\":\"KSword bridge did not report ready.\"");
-            }
-            appendNativeLog(
-                L"Cheat Engine PID " +
-                std::to_wstring(cheatEngineProcessId) +
-                L" 已在独立窗口运行。");
-            emitJsonLine(
-                "ce_started",
-                "\"cheat_engine_pid\":" +
-                    std::to_string(cheatEngineProcessId) +
-                    ",\"r0_ready\":" +
-                    (driverReady ? "true" : "false") +
-                    ",\"bridge_ready\":" +
-                    (bridgeStatus == BridgeStatus::ready ? "true" : "false"));
+            if (gTabLaunchTask) return 0;
+            auto task = std::make_shared<TabLaunchTask>();
+            task->driverReady = driverReady;
+            const std::wstring directory = parentDirectory(currentExecutablePath());
+            task->worker = std::thread([task, directory]() {
+                task->status = launchCheatEngine(directory, 0U, &task->processId,
+                    &task->process, &task->logPath, &task->canceled);
+                task->failure = gLaunchFailureMessage;
+            });
+            gTabLaunchTask = std::move(task);
+            // Host liveness and window dispatch continue during bridge wait.
             (void)::SetTimer(window, kLifecycleTimerId, 250U, nullptr);
             return 0;
         }
         case WM_TIMER:
             if (wParam == kLifecycleTimerId)
             {
+                if (gTabLaunchTask && ::WaitForSingleObject(
+                        gTabLaunchTask->worker.native_handle(), 0) == WAIT_OBJECT_0)
+                {
+                    const auto task = std::move(gTabLaunchTask);
+                    task->worker.join(); // Already signaled; no bridge/file wait here.
+                    if (task->status == BridgeStatus::launchFailed)
+                    {
+                        failTab(window, "launch_failed", task->failure.c_str());
+                        return 0;
+                    }
+                    gCheatEngineProcess = task->process;
+                    task->process = nullptr;
+                    gLogPath = task->logPath;
+                    ksword::ce_log::setSession(gLogPath);
+                    pollBridgeLog();
+                    if (task->status != BridgeStatus::ready)
+                    {
+                        appendNativeLog(L"KSword 桥接尚未就绪；CE 已独立启动。");
+                        emitJsonLine("warning", "\"code\":\"bridge_not_ready\",\"message\":\"KSword bridge did not report ready.\"");
+                    }
+                    appendNativeLog(L"Cheat Engine PID " + std::to_wstring(task->processId) + L" 已在独立窗口运行。");
+                    emitJsonLine("ce_started", "\"cheat_engine_pid\":" + std::to_string(task->processId)
+                        + ",\"r0_ready\":" + (task->driverReady ? "true" : "false")
+                        + ",\"bridge_ready\":" + (task->status == BridgeStatus::ready ? "true" : "false"));
+                }
                 pollBridgeLog();
                 ksword::ce_log::pollState();
                 HANDLE hostProcess = ::OpenProcess(
@@ -826,6 +867,7 @@ namespace
             }
             return 0;
         case WM_DESTROY:
+            if (gTabLaunchTask) gTabLaunchTask->canceled.store(true);
             (void)::KillTimer(window, kLifecycleTimerId);
             pollBridgeLog();
             closeCheatEngineHandle();
@@ -859,6 +901,7 @@ namespace
         }
 
         gHostProcessId = arguments.hostProcessId;
+        gHostParentWindow = arguments.parentWindow;
         gTabExitCode = 0;
         gTabWindow = ::CreateWindowExW(
             WS_EX_CONTROLPARENT,
@@ -880,7 +923,7 @@ namespace
             "\"hwnd\":\"" +
                 std::to_string(
                     reinterpret_cast<std::uintptr_t>(gTabWindow)) +
-                "\"");
+                "\",\"resize_async\":\"parent_client_v1\"");
         (void)::PostMessageW(
             gTabWindow, kInitializeTabMessage, 0U, 0);
 
@@ -889,6 +932,15 @@ namespace
         {
             ::TranslateMessage(&message);
             ::DispatchMessageW(&message);
+        }
+        // The log window is already destroyed. Finish cancellation observation
+        // before native process exit, retaining all stack/value dependencies;
+        // close only our process handle, never the independent CE/target.
+        if (gTabLaunchTask)
+        {
+            const auto task = std::move(gTabLaunchTask);
+            task->canceled.store(true);
+            task->worker.join();
         }
         return gTabExitCode;
     }

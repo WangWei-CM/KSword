@@ -1836,6 +1836,7 @@ namespace
         QByteArray m_stdoutBuffer;
         HWND m_pluginWindow = nullptr;
         bool m_ready = false;
+        bool m_asyncResize = false;
         bool m_failed = false;
         bool m_stopping = false;
         bool m_startScheduled = false;
@@ -1952,13 +1953,15 @@ namespace
         }
 
         m_pluginWindow = candidateWindow;
+        m_asyncResize = object.value(QStringLiteral("resize_async")).toString()
+            == QStringLiteral("parent_client_v1");
         m_ready = true;
         m_failed = false;
         m_retryButton->setVisible(false);
         m_statusLabel->setStyleSheet({});
         m_statusLabel->setText(QStringLiteral("Tab 插件已连接（外部进程 PID %1）。")
             .arg(owningProcessId));
-        ::ShowWindow(m_pluginWindow, SW_SHOW);
+        ::ShowWindowAsync(m_pluginWindow, SW_SHOW);
         resizePluginWindow();
         // 启动环境快照之后可能已换主题；握手完成时立即补当前色。
         schedulePluginThemeUpdate();
@@ -2016,6 +2019,18 @@ namespace
     {
         if (!::IsWindow(m_pluginWindow) || m_surface == nullptr)
         {
+            return;
+        }
+        DWORD ownerPid = 0;
+        ::GetWindowThreadProcessId(m_pluginWindow, &ownerPid);
+        const HWND expectedParent = reinterpret_cast<HWND>(m_surface->winId());
+        if (m_process == nullptr || ownerPid != static_cast<DWORD>(m_process->processId())
+            || ::GetParent(m_pluginWindow) != expectedParent
+            || (::GetWindowLongPtrW(m_pluginWindow, GWL_STYLE) & WS_CHILD) == 0) return;
+        if (m_asyncResize)
+        {
+            static const UINT resizeMessage = ::RegisterWindowMessageW(L"KSword.PluginTab.ResizeParentClient.v1");
+            if (resizeMessage != 0) ::PostMessageW(m_pluginWindow, resizeMessage, 0, 0);
             return;
         }
         const QSize size = m_surface->size();
