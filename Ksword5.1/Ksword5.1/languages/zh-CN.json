@@ -6953,6 +6953,8 @@
     "notification.copy.log_template": "%1\n%2\n%3\n文件：%4\n函数：%5\nGUID：%6"
   },
   "source_translations": {
+    "AsyncCleanupRegistry.h": "AsyncCleanupRegistry.h",
+    "shutdown gate closed": "退出门禁已关闭",
     " bytesDone=": " bytesDone=",
     "DDMA scratch restore failed: disk=": "DDMA 暂存区还原失败：磁盘=",
     "响应中的 Content-Length 无效或超出文件大小上限。": "响应中的 Content-Length 无效或超出文件大小上限。",
