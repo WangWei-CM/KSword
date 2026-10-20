@@ -432,8 +432,10 @@ bool WinAPISessionBackend::cleanup()
             || !ks::winapi_monitor::addSessionDirectoryReader(config.pid, &preparationError))
         {
             const std::lock_guard<std::mutex> lock(pendingMutex);
-            cleanupError = QStringLiteral("无法占用 PID=%1 的 Agent 会话（错误码 %2）；该进程可能已由 API 监控或剪贴板保护占用。")
-                .arg(config.pid).arg(leaseError ? leaseError : ::GetLastError());
+            cleanupError = preparationError.empty()
+                ? QStringLiteral("无法占用 PID=%1 的 Agent 会话（错误码 %2）；该进程可能已由 API 监控或剪贴板保护占用。")
+                    .arg(config.pid).arg(leaseError ? leaseError : ::GetLastError())
+                : QStringLiteral("无法准备会话目录：%1").arg(QString::fromStdWString(preparationError));
             // No config/marker or hook was accepted; this is a failed action,
             // not a resource that can keep shutdown pending indefinitely.
             lease.reset();
@@ -470,7 +472,8 @@ bool WinAPISessionBackend::cleanup()
         file.close();
         std::wstring aclError;
         if (!ks::winapi_monitor::grantSessionFileRead(path.toStdWString(), pid, &aclError)
-            || (!root && !ks::winapi_monitor::grantSessionFileRead(stopPath.toStdWString(), pid, &aclError)))
+            || (!root && QFile::exists(stopPath)
+                && !ks::winapi_monitor::grantSessionFileRead(stopPath.toStdWString(), pid, &aclError)))
         { error = QStringLiteral("无法授予目标进程读取停止标记的权限：%1").arg(QString::fromStdWString(aclError)); return false; }
         return true;
     };
