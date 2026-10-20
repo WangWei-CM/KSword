@@ -25,6 +25,7 @@
 #include <QVector>
 #include <QWidget>
 
+#include <array>
 #include <atomic>        // std::atomic_bool：存活主机扫描的并发状态控制。
 #include <condition_variable> // std::condition_variable：析构阶段等待扫描任务退出。
 #include <cstdint>       // std::uint32_t/std::uint64_t：PID、序号与长度字段。
@@ -1618,6 +1619,7 @@ private:
     static constexpr std::size_t kMaxNidsAlertCount = 2000; // NIDS 告警缓存上限。
     bool m_nidsProjectionNeedsRebuild = false;
     std::unordered_map<const ks::network::NidsAlert*, QPersistentModelIndex> m_nidsProjectedRows;
+    std::array<std::size_t, 4> m_nidsRetainedSeverityCounts{};
     std::deque<ks::network::NidsAlert> m_nidsAlertList; // NIDS 告警缓存，按时间顺序保存。
     std::uint64_t m_nidsAnalyzedPacketCount = 0; // 已送入 NIDS 的报文数量。
     std::uint64_t m_nidsTotalAlertCount = 0;     // 本轮累计告警数量。

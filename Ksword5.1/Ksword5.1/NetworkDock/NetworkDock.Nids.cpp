@@ -547,6 +547,9 @@ void NetworkDock::applyNidsAnalysisBatch(const std::shared_ptr<NidsAnalysisBatch
     for (const ks::network::NidsAlert& alertRecord : alertList)
     {
         m_nidsAlertList.push_back(alertRecord);
+        const int appendedSeverity = nidsSeverityIndex(alertRecord.severity);
+        if (appendedSeverity >= 0 && appendedSeverity < static_cast<int>(m_nidsRetainedSeverityCounts.size()))
+            ++m_nidsRetainedSeverityCounts[static_cast<std::size_t>(appendedSeverity)];
         ++m_nidsTotalAlertCount;
         while (m_nidsAlertList.size() > kMaxNidsAlertCount)
         {
@@ -570,6 +573,9 @@ void NetworkDock::applyNidsAnalysisBatch(const std::shared_ptr<NidsAnalysisBatch
                 }
                 m_nidsProjectedRows.erase(projected);
             }
+            const int removedSeverity = nidsSeverityIndex(m_nidsAlertList.front().severity);
+            if (removedSeverity >= 0 && removedSeverity < static_cast<int>(m_nidsRetainedSeverityCounts.size()))
+                --m_nidsRetainedSeverityCounts[static_cast<std::size_t>(removedSeverity)];
             m_nidsAlertList.pop_front();
         }
 
@@ -720,6 +726,7 @@ void NetworkDock::clearNidsAlerts()
     m_nidsProjectedRows.clear();
     m_nidsProjectionNeedsRebuild = false;
     m_nidsAlertList.clear();
+    m_nidsRetainedSeverityCounts.fill(0);
     m_nidsAnalyzedPacketCount = 0;
     m_nidsTotalAlertCount = 0;
     if (m_nidsAlertTable != nullptr)
@@ -740,30 +747,10 @@ void NetworkDock::updateNidsStatusLabel()
         return;
     }
 
-    std::size_t lowCount = 0;
-    std::size_t mediumCount = 0;
-    std::size_t highCount = 0;
-    std::size_t criticalCount = 0;
-    for (const ks::network::NidsAlert& alertRecord : m_nidsAlertList)
-    {
-        switch (alertRecord.severity)
-        {
-        case ks::network::NidsAlertSeverity::Low:
-            ++lowCount;
-            break;
-        case ks::network::NidsAlertSeverity::Medium:
-            ++mediumCount;
-            break;
-        case ks::network::NidsAlertSeverity::High:
-            ++highCount;
-            break;
-        case ks::network::NidsAlertSeverity::Critical:
-            ++criticalCount;
-            break;
-        default:
-            break;
-        }
-    }
+    const auto lowCount = m_nidsRetainedSeverityCounts[0];
+    const auto mediumCount = m_nidsRetainedSeverityCounts[1];
+    const auto highCount = m_nidsRetainedSeverityCounts[2];
+    const auto criticalCount = m_nidsRetainedSeverityCounts[3];
 
     const bool enabled = (m_nidsEnableCheck == nullptr || m_nidsEnableCheck->isChecked());
     m_nidsStatusLabel->setText(QStringLiteral("状态：%1 | 已分析 %2 包 | 告警 %3（低 %4 / 中 %5 / 高 %6 / 严重 %7）")
