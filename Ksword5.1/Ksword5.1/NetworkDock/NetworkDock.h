@@ -61,6 +61,8 @@ class MultiThreadDownloadSegmentBarWidget;
 class NetworkFirewallPage;
 class NetworkAuditPage;
 
+namespace ks::ui { class AsyncOperation; }
+
 namespace ks::network
 {
     struct HttpsProxyParsedEntry;
@@ -1423,6 +1425,10 @@ public:
 private:
 
     // ========================= Tab6：路由表 ====================
+    void applyRouteTableRead(const std::vector<RouteRecord>& records, DWORD status);
+    void applyArpTableRead(const std::vector<QStringList>& rows, bool success);
+    ks::ui::AsyncOperation* m_routeReadOperation = nullptr;
+    ks::ui::AsyncOperation* m_arpReadOperation = nullptr;
     QWidget* m_routeTablePage = nullptr;
     QVBoxLayout* m_routeTableLayout = nullptr;
     QHBoxLayout* m_routeTableControlLayout = nullptr;

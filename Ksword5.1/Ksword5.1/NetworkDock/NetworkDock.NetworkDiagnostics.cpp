@@ -11,6 +11,8 @@
 
 #include "../UI/CodeEditorWidget.h"
 #include <QDir>
+#include "../UI/AsyncOperation.h"
+#include "../UI/TableInteractionSupport.h"
 
 using namespace network_dock_detail;
 
@@ -513,30 +515,88 @@ void NetworkDock::refreshRouteTable()
     {
         return;
     }
-    PMIB_IPFORWARD_TABLE2 routeTable = nullptr;
-    const DWORD queryStatus = GetIpForwardTable2(AF_UNSPEC, &routeTable);
-    if (queryStatus != NO_ERROR || routeTable == nullptr)
+    if (m_routeReadOperation == nullptr)
+    {
+        m_routeReadOperation = new ks::ui::AsyncOperation(this);
+    }
+    struct Result
+    {
+        DWORD status = NO_ERROR;
+        std::vector<RouteRecord> records;
+    };
+    m_routeReadOperation->submit<int, Result>(0,
+        [](int, const ks::ui::AsyncOperationToken& token)
+        {
+            Result result;
+            PMIB_IPFORWARD_TABLE2 nativeTable = nullptr;
+            result.status = GetIpForwardTable2(AF_UNSPEC, &nativeTable);
+            const auto release = [](MIB_IPFORWARD_TABLE2* table)
+            {
+                if (table != nullptr) FreeMibTable(table);
+            };
+            const std::unique_ptr<MIB_IPFORWARD_TABLE2, decltype(release)> table(nativeTable, release);
+            if (result.status != NO_ERROR || table == nullptr)
+            {
+                if (result.status == NO_ERROR) result.status = ERROR_INVALID_DATA;
+                return result;
+            }
+            result.records.reserve(table->NumEntries);
+            for (ULONG index = 0; index < table->NumEntries && !token.isCanceled(); ++index)
+            {
+                RouteRecord record = routeRecordFromNativeRow(table->Table[index]);
+                if (record.addressFamily == AF_INET || record.addressFamily == AF_INET6)
+                {
+                    result.records.push_back(std::move(record));
+                }
+            }
+            return result;
+        },
+        [this](const Result& result, const std::uint64_t generation)
+        {
+            if (ks::ui::IsTableUiCommitBlockedByContextMenu({m_routeTable}))
+            {
+                const auto pending = std::make_shared<Result>(result);
+                if (ks::ui::DeferTableUiCommitIfContextMenuOpen(this,
+                    QStringLiteral("network-route-read"), {m_routeTable},
+                    [this, pending, generation]()
+                    {
+                        if (m_routeReadOperation->isCurrent(generation))
+                        {
+                            applyRouteTableRead(pending->records, pending->status);
+                        }
+                        m_routeReadOperation->completeDeferred(generation);
+                    }))
+                {
+                    return false;
+                }
+            }
+            applyRouteTableRead(result.records, result.status);
+            return true;
+        },
+        [this](std::exception_ptr)
+        {
+            applyRouteTableRead({}, ERROR_NOT_ENOUGH_MEMORY);
+        });
+}
+
+void NetworkDock::applyRouteTableRead(const std::vector<RouteRecord>& records, const DWORD status)
+{
+    if (status != NO_ERROR)
     {
         if (m_routeStatusLabel != nullptr)
         {
-            m_routeStatusLabel->setText(QStringLiteral("状态：读取路由表失败，错误码=%1").arg(queryStatus));
+            m_routeStatusLabel->setText(QStringLiteral("状态：读取路由表失败，错误码=%1").arg(status));
         }
         return;
     }
 
-    m_routeRecordCache.clear();
-    m_routeRecordCache.reserve(routeTable->NumEntries);
+    m_routeRecordCache = records;
+    const bool updatesEnabled = m_routeTable->updatesEnabled();
     m_routeTable->setUpdatesEnabled(false);
     m_routeTable->setRowCount(0);
-    for (ULONG index = 0; index < routeTable->NumEntries; ++index)
+    for (std::size_t cacheIndex = 0; cacheIndex < m_routeRecordCache.size(); ++cacheIndex)
     {
-        const RouteRecord record = routeRecordFromNativeRow(routeTable->Table[index]);
-        if (record.addressFamily != AF_INET && record.addressFamily != AF_INET6)
-        {
-            continue;
-        }
-        const int cacheIndex = static_cast<int>(m_routeRecordCache.size());
-        m_routeRecordCache.push_back(record);
+        const RouteRecord& record = m_routeRecordCache[cacheIndex];
         const int row = m_routeTable->rowCount();
         m_routeTable->insertRow(row);
         const QStringList fields{
@@ -553,12 +613,11 @@ void NetworkDock::refreshRouteTable()
         for (int column = 0; column < fields.size(); ++column)
         {
             QTableWidgetItem* item = new QTableWidgetItem(fields.at(column));
-            item->setData(Qt::UserRole, cacheIndex);
+            item->setData(Qt::UserRole, static_cast<int>(cacheIndex));
             m_routeTable->setItem(row, column, item);
         }
     }
-    m_routeTable->setUpdatesEnabled(true);
-    FreeMibTable(routeTable);
+    m_routeTable->setUpdatesEnabled(updatesEnabled);
     if (m_routeStatusLabel != nullptr)
     {
         m_routeStatusLabel->setText(QStringLiteral("状态：路由项 %1").arg(m_routeRecordCache.size()));
@@ -1069,62 +1128,95 @@ void NetworkDock::refreshArpCacheTable()
     {
         return;
     }
-
+    if (m_arpReadOperation == nullptr)
     {
-        kLogEvent event;
-        info << event
-            << "[NetworkDock] 开始刷新ARP缓存表。"
-            << eol;
+        m_arpReadOperation = new ks::ui::AsyncOperation(this);
     }
+    struct Result
+    {
+        bool success = false;
+        std::vector<QStringList> rows;
+    };
+    m_arpReadOperation->submit<int, Result>(0,
+        [](int, const ks::ui::AsyncOperationToken& token)
+        {
+            Result result;
+            ULONG tableSize = 0;
+            if (GetIpNetTable(nullptr, &tableSize, FALSE) != ERROR_INSUFFICIENT_BUFFER)
+            {
+                return result;
+            }
+            std::vector<std::uint8_t> buffer(tableSize, 0);
+            PMIB_IPNETTABLE table = reinterpret_cast<PMIB_IPNETTABLE>(buffer.data());
+            if (token.isCanceled() || GetIpNetTable(table, &tableSize, FALSE) != NO_ERROR)
+            {
+                return result;
+            }
+            result.rows.reserve(table->dwNumEntries);
+            for (DWORD index = 0; index < table->dwNumEntries && !token.isCanceled(); ++index)
+            {
+                const MIB_IPNETROW& row = table->table[index];
+                result.rows.push_back({
+                    toQString(ks::network::FormatIpv4HostOrder(ntohl(row.dwAddr))),
+                    toQString(ks::network::FormatHardwareAddress(
+                        reinterpret_cast<const std::uint8_t*>(row.bPhysAddr),
+                        static_cast<std::size_t>(row.dwPhysAddrLen))),
+                    toQString(ks::network::ArpEntryTypeToString(row.dwType)),
+                    QString::number(row.dwIndex)
+                });
+            }
+            result.success = true;
+            return result;
+        },
+        [this](const Result& result, const std::uint64_t generation)
+        {
+            if (ks::ui::IsTableUiCommitBlockedByContextMenu({m_arpTable}))
+            {
+                const auto pending = std::make_shared<Result>(result);
+                if (ks::ui::DeferTableUiCommitIfContextMenuOpen(this,
+                    QStringLiteral("network-arp-read"), {m_arpTable},
+                    [this, pending, generation]()
+                    {
+                        if (m_arpReadOperation->isCurrent(generation))
+                        {
+                            applyArpTableRead(pending->rows, pending->success);
+                        }
+                        m_arpReadOperation->completeDeferred(generation);
+                    }))
+                {
+                    return false;
+                }
+            }
+            applyArpTableRead(result.rows, result.success);
+            return true;
+        },
+        [this](std::exception_ptr)
+        {
+            applyArpTableRead({}, false);
+        });
+}
 
-    ULONG tableSize = 0;
-    if (GetIpNetTable(nullptr, &tableSize, FALSE) != ERROR_INSUFFICIENT_BUFFER)
+void NetworkDock::applyArpTableRead(const std::vector<QStringList>& rows, const bool success)
+{
+    if (!success)
     {
         m_arpStatusLabel->setText(QStringLiteral("状态：读取ARP缓存失败"));
-        kLogEvent event;
-        err << event
-            << "[NetworkDock] ARP缓存刷新失败：首次获取缓冲区大小失败。"
-            << eol;
         return;
     }
-
-    std::vector<std::uint8_t> buffer(tableSize, 0);
-    PMIB_IPNETTABLE netTable = reinterpret_cast<PMIB_IPNETTABLE>(buffer.data());
-    if (GetIpNetTable(netTable, &tableSize, FALSE) != NO_ERROR)
-    {
-        m_arpStatusLabel->setText(QStringLiteral("状态：读取ARP缓存失败"));
-        kLogEvent event;
-        err << event
-            << "[NetworkDock] ARP缓存刷新失败：GetIpNetTable读取失败。"
-            << eol;
-        return;
-    }
-
+    const bool updatesEnabled = m_arpTable->updatesEnabled();
+    m_arpTable->setUpdatesEnabled(false);
     m_arpTable->setRowCount(0);
-    for (DWORD index = 0; index < netTable->dwNumEntries; ++index)
+    for (const QStringList& fields : rows)
     {
-        const MIB_IPNETROW& row = netTable->table[index];
-        const QString ipText = toQString(ks::network::FormatIpv4HostOrder(ntohl(row.dwAddr)));
-        const QString macText = toQString(ks::network::FormatHardwareAddress(
-            reinterpret_cast<const std::uint8_t*>(row.bPhysAddr),
-            static_cast<std::size_t>(row.dwPhysAddrLen)));
-        const QString typeText = toQString(ks::network::ArpEntryTypeToString(row.dwType));
-
-        const int tableRow = m_arpTable->rowCount();
-        m_arpTable->insertRow(tableRow);
-        m_arpTable->setItem(tableRow, 0, new QTableWidgetItem(ipText));
-        m_arpTable->setItem(tableRow, 1, new QTableWidgetItem(macText));
-        m_arpTable->setItem(tableRow, 2, new QTableWidgetItem(typeText));
-        m_arpTable->setItem(tableRow, 3, new QTableWidgetItem(QString::number(row.dwIndex)));
+        const int row = m_arpTable->rowCount();
+        m_arpTable->insertRow(row);
+        for (int column = 0; column < fields.size(); ++column)
+        {
+            m_arpTable->setItem(row, column, new QTableWidgetItem(fields.at(column)));
+        }
     }
-
+    m_arpTable->setUpdatesEnabled(updatesEnabled);
     m_arpStatusLabel->setText(QString("状态：ARP缓存项 %1").arg(m_arpTable->rowCount()));
-
-    kLogEvent event;
-    info << event
-        << "[NetworkDock] ARP缓存刷新完成, rowCount="
-        << m_arpTable->rowCount()
-        << eol;
 }
 
 void NetworkDock::addArpCacheEntry()
