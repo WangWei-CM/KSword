@@ -6,6 +6,10 @@
 #include "../UI/MemoryWorkbench/WorkbenchTarget.h" // AcquireAnchorForPid：与工作台锚点同一取法读进程创建时间。
 
 #include <QCoreApplication>
+#include <QElapsedTimer>
+#include <QPersistentModelIndex>
+#include <QTableView>
+#include <QTreeView>
 #include <QImage>
 #include <QPixmap>
 #include <QRunnable>
@@ -144,12 +148,12 @@ namespace
 
     // pathIconWaiterTable 作用：
     // - 输入：无；
-    // - 处理：记录每个在途路径的回写等待者，同路径的重复请求只追加等待者，
+    // - 处理：记录每个在途路径的回写等待者，同路径按所属视图覆盖旧回写订阅，
     //   不重复向 Shell 发起查询（多个 MemoryDock 实例共存时同样成立）；
     // - 返回：等待表引用，只允许 UI 线程访问。
-    QHash<QString, QVector<IconApplyCallback>>& pathIconWaiterTable()
+    QHash<QString, QHash<QObject*, IconApplyCallback>>& pathIconWaiterTable()
     {
-        static QHash<QString, QVector<IconApplyCallback>> waiterTableByPath;
+        static QHash<QString, QHash<QObject*, IconApplyCallback>> waiterTableByPath;
         return waiterTableByPath;
     }
 
@@ -211,7 +215,7 @@ namespace
     // - 输入：绝对路径与图标落地后的 UI 线程回写动作；
     // - 处理：缓存未命中时提交线程池任务做 Shell 查询，同路径并发请求合并成一个任务；
     // - 返回：无，回写动作只会在 UI 线程被调用一次。
-    void queuePathIconExtraction(const QString& absolutePath, IconApplyCallback applyIconOnUiThread)
+    void queuePathIconExtraction(const QString& absolutePath, QObject* owner, IconApplyCallback applyIconOnUiThread)
     {
         const QString normalizedPath = absolutePath.trimmed();
         if (normalizedPath.isEmpty() || pathIconCache().contains(normalizedPath))
@@ -222,12 +226,12 @@ namespace
         auto waiterIt = pathIconWaiterTable().find(normalizedPath);
         if (waiterIt != pathIconWaiterTable().end())
         {
-            waiterIt.value().push_back(std::move(applyIconOnUiThread));
+            waiterIt.value().insert(owner, std::move(applyIconOnUiThread));
             return;
         }
         pathIconWaiterTable().insert(
             normalizedPath,
-            QVector<IconApplyCallback>{ std::move(applyIconOnUiThread) });
+            QHash<QObject*, IconApplyCallback>{{owner, std::move(applyIconOnUiThread)}});
 
         QRunnable* const extractionTask = QRunnable::create([normalizedPath]() {
             QImage iconImage = extractShellIconImageFromPath(normalizedPath);
@@ -252,7 +256,7 @@ namespace
                     }
                     pathIconCache().insert(normalizedPath, resolvedIcon);
 
-                    const QVector<IconApplyCallback> waiterList =
+                    const QHash<QObject*, IconApplyCallback> waiterList =
                         pathIconWaiterTable().take(normalizedPath);
                     for (const IconApplyCallback& waiterCallback : waiterList)
                     {
@@ -265,55 +269,114 @@ namespace
         QThreadPool::globalInstance()->start(extractionTask);
     }
 
-    // applyIconToProcessTableRows 作用：
-    // - 输入：进程表、图标对应的映像路径与已构造好的图标；
-    // - 处理：进程表允许排序，行号与缓存下标不再等价，只能按路径逐行反查回写；
-    // - 返回：无。
-    void applyIconToProcessTableRows(
-        QTableWidget* const processTable,
-        const QString& imagePath,
-        const QIcon& resolvedIcon)
-    {
-        if (processTable == nullptr)
-        {
-            return;
+    // Stable persistent indexes avoid a full view scan for every cold icon.
+    // One controller/subscription per view+path, regardless of filter rebuilds.
+    class PathIconProjection final : public QObject {
+    public:
+        explicit PathIconProjection(QAbstractItemView* view) : QObject(view), view(view) {
+            timer = new QTimer(this); timer->setSingleShot(true);
+            connect(timer, &QTimer::timeout, this, [this] { flush(); });
+            view->installEventFilter(this);
         }
-
-        for (int rowIndex = 0; rowIndex < processTable->rowCount(); ++rowIndex)
-        {
-            QTableWidgetItem* const processNameItem = processTable->item(rowIndex, 0);
-            if (processNameItem != nullptr &&
-                processNameItem->data(kIconPathItemRole).toString() == imagePath)
-            {
-                processNameItem->setIcon(resolvedIcon);
+        ~PathIconProjection() override { unsubscribe(); }
+        void reset(int column) {
+            unsubscribe(); ++generation; timer->stop(); this->column = column;
+            rows.clear(); requests.clear(); pending.clear();
+        }
+        void add(const QModelIndex& index, const QString& path) {
+            if (!path.isEmpty() && index.isValid()) { rows[path].push_back(QPersistentModelIndex(index)); }
+        }
+        void watch(const QString& path) {
+            if (path.isEmpty() || !rows.contains(path)) { return; }
+            requests.insert(path); schedule();
+        }
+    protected:
+        bool eventFilter(QObject*, QEvent* event) override {
+            if (event->type() == QEvent::Show) { schedule(); }
+            else if (event->type() == QEvent::Hide) { timer->stop(); }
+            return false;
+        }
+    private:
+        void unsubscribe() {
+            for (const auto& path : subscriptions) {
+                auto found = pathIconWaiterTable().find(path);
+                if (found != pathIconWaiterTable().end()) { found.value().remove(this); }
             }
+            subscriptions.clear();
         }
-    }
-
-    // applyIconToModuleTreeRows 作用：
-    // - 输入：模块树、路径列下标、图标对应的模块路径与已构造好的图标；
-    // - 处理：按路径反查所有匹配节点并回写图标，不重建整棵树；
-    // - 返回：无。
-    void applyIconToModuleTreeRows(
-        QTreeWidget* const moduleTree,
-        const int pathColumnIndex,
-        const QString& modulePath,
-        const QIcon& resolvedIcon)
-    {
-        if (moduleTree == nullptr)
-        {
-            return;
+        void schedule() {
+            if (view && view->isVisible() && (!requests.isEmpty() || !pending.isEmpty()) && !timer->isActive()) { timer->start(0); }
         }
-
-        for (int itemIndex = 0; itemIndex < moduleTree->topLevelItemCount(); ++itemIndex)
-        {
-            QTreeWidgetItem* const rowItem = moduleTree->topLevelItem(itemIndex);
-            if (rowItem != nullptr &&
-                rowItem->data(pathColumnIndex, kIconPathItemRole).toString() == modulePath)
-            {
-                rowItem->setIcon(pathColumnIndex, resolvedIcon);
+        void flush() {
+            if (!view || !view->isVisible()) { return; }
+            const QPointer<PathIconProjection> self(this);
+            const auto revision = generation;
+            int cells = 0;
+            QElapsedTimer budget; budget.start();
+            for (int count = 0; !requests.isEmpty() && count < 16 && budget.elapsed() < 5; ++count) {
+                const auto path = *requests.constBegin(); requests.remove(path);
+                if (pathIconCache().contains(path)) { pending.insert(path, 0); continue; }
+                subscriptions.insert(path);
+                queuePathIconExtraction(path, this, [guard = QPointer<PathIconProjection>(this), revision](const QString& path, const QIcon&) {
+                    if (!guard || guard->generation != revision) { return; }
+                    guard->subscriptions.remove(path); guard->pending.insert(path, 0); guard->schedule();
+                });
             }
+            const auto apply = [this, self, revision, &cells](const QModelIndex& index) {
+                if (!index.isValid()) { return true; }
+                const auto path = index.data(kIconPathItemRole).toString();
+                if (!pending.contains(path)) { return true; }
+                const auto cached = pathIconCache().constFind(path);
+                if (cached == pathIconCache().constEnd()) { return true; }
+                if (index.data(Qt::DecorationRole).value<QIcon>().cacheKey() != cached.value().cacheKey()) {
+                    ++cells;
+                    view->model()->setData(index, cached.value(), Qt::DecorationRole);
+                }
+                return self && self->generation == revision;
+            };
+            // Visible rows get their icons first; remaining exact path matches
+            // drain below under the same time/cell budget.
+            if (auto* table = qobject_cast<QTableView*>(view.data())) {
+                const int first = qMax(0, table->rowAt(0));
+                int last = table->rowAt(table->viewport()->height() - 1);
+                if (last < 0) { last = qMin(table->model()->rowCount() - 1, first + 128); }
+                for (int row = first; row <= last && cells < 256 && budget.elapsed() < 5; ++row) {
+                    if (!apply(table->model()->index(row, column))) { return; }
+                }
+            } else if (auto* tree = qobject_cast<QTreeView*>(view.data())) {
+                auto index = tree->indexAt(QPoint(1, 1));
+                if (!index.isValid()) { index = tree->model()->index(0, 0); }
+                for (int count = 0; index.isValid() && count < 128 && cells < 256 && budget.elapsed() < 5; ++count) {
+                    if (tree->visualRect(index).top() >= tree->viewport()->height()) { break; }
+                    if (!apply(index.siblingAtColumn(column))) { return; }
+                    index = tree->indexBelow(index);
+                }
+            }
+            for (int count = 0; !pending.isEmpty() && count < 256 && cells < 256 && budget.elapsed() < 5; ++count) {
+                auto current = pending.begin();
+                const auto found = rows.constFind(current.key());
+                if (found == rows.constEnd() || current.value() >= found.value().size()) { pending.erase(current); continue; }
+                const QPersistentModelIndex index = found.value()[current.value()++];
+                if (!apply(index)) { return; }
+            }
+            schedule();
         }
+        QPointer<QAbstractItemView> view;
+        QTimer* timer = nullptr;
+        QHash<QString, QVector<QPersistentModelIndex>> rows;
+        QSet<QString> requests, subscriptions;
+        QHash<QString, qsizetype> pending;
+        quint64 generation = 0;
+        int column = 0;
+    };
+
+    PathIconProjection* pathIconProjection(QAbstractItemView* view)
+    {
+        constexpr const char* property = "ksword_path_icon_projection";
+        if (auto* current = static_cast<PathIconProjection*>(view->property(property).value<void*>())) { return current; }
+        auto* current = new PathIconProjection(view);
+        view->setProperty(property, QVariant::fromValue(static_cast<void*>(current)));
+        return current;
     }
 
     // selectProcessRowByPid 作用：
@@ -867,6 +930,7 @@ void MemoryDock::refreshProcessList(const bool keepSelection)
                     // 先重建进程表。
                     QTableWidget* const processTable = commitDock->m_processTable;
                     processTable->setSortingEnabled(false);
+                    auto* const processIcons = pathIconProjection(processTable); processIcons->reset(0);
                     processTable->setRowCount(static_cast<int>(snapshotRows->size()));
                     for (int row = 0; row < static_cast<int>(commitDock->m_processCache.size()); ++row)
                     {
@@ -885,6 +949,7 @@ void MemoryDock::refreshProcessList(const bool keepSelection)
                             QVariant::fromValue<qulonglong>((*snapshotRows)[static_cast<std::size_t>(row)].creationTime100ns));
                         processNameItem->setIcon(lookupCachedPathIcon(imagePath));
                         processTable->setItem(row, 0, processNameItem);
+                        processIcons->add(processTable->model()->index(row, 0), imagePath);
 
                         // PID / 会话 / CPU / 工作集四列一律用 NumericSortTableItem，
                         // 显示带单位的文本、排序按裸数值（理由见该类的注释）。
@@ -916,29 +981,8 @@ void MemoryDock::refreshProcessList(const bool keepSelection)
                     // 悄悄变回全量——而用户并不会察觉自己看的已经不是过滤结果。
                     commitDock->applyProcessTableFilter();
 
-                    // 未命中缓存的映像路径统一提交后台提取，回调只改对应单元格图标，不重建整表。
-                    QSet<QString> queuedIconPaths;
-                    for (const ProcessSnapshotRow& snapshotRow : *snapshotRows)
-                    {
-                        const QString imagePath = snapshotRow.imagePath.trimmed();
-                        if (imagePath.isEmpty() || queuedIconPaths.contains(imagePath))
-                        {
-                            continue;
-                        }
-                        queuedIconPaths.insert(imagePath);
-                        queuePathIconExtraction(
-                            imagePath,
-                            [guardedSelf](const QString& resolvedPath, const QIcon& resolvedIcon) {
-                                if (guardedSelf == nullptr)
-                                {
-                                    return;
-                                }
-                                applyIconToProcessTableRows(
-                                    guardedSelf->m_processTable,
-                                    resolvedPath,
-                                    resolvedIcon);
-                            });
-                    }
+                    // Only the current projection subscribes; hidden rows wait for Show.
+                    for (const auto& row : *snapshotRows) { processIcons->watch(row.imagePath.trimmed()); }
 
                     // 再同步重建顶部下拉框。
                     commitDock->updateProcessComboFromCache();
@@ -1157,6 +1201,8 @@ void MemoryDock::rebuildModuleTableFromCache()
     // 批量更新期间关闭绘制和信号，减少重排开销并避免多余回调。
     m_moduleTable->setUpdatesEnabled(false);
     const QSignalBlocker tableBlocker(m_moduleTable);
+    auto* const moduleIcons = pathIconProjection(m_moduleTable);
+    moduleIcons->reset(toModuleTreeColumnIndex(ModuleTreeColumn::Path));
     m_moduleTable->clear();
 
     // 图标按路径缓存：未命中时只放占位图并记录来源路径，绝不在这里同步问 Shell。
@@ -1211,37 +1257,15 @@ void MemoryDock::rebuildModuleTableFromCache()
         }
 
         m_moduleTable->addTopLevelItem(rowItem);
+        moduleIcons->add(m_moduleTable->model()->index(m_moduleTable->topLevelItemCount() - 1, modulePathColumnIndex), moduleIconPath);
     }
 
     // 排序仍按路径列执行，和原先交互习惯保持一致。
     m_moduleTable->sortItems(modulePathColumnIndex, Qt::AscendingOrder);
     m_moduleTable->setUpdatesEnabled(true);
 
-    // 未命中缓存的模块路径统一提交线程池提取图标，回调只改对应节点，不重建整棵树。
-    const QPointer<MemoryDock> guardedSelf(this);
-    QSet<QString> queuedIconPaths;
-    for (const ModuleEntry* moduleEntryPtr : filteredModules)
-    {
-        const QString modulePath = moduleEntryPtr->fullPath.trimmed();
-        if (modulePath.isEmpty() || queuedIconPaths.contains(modulePath))
-        {
-            continue;
-        }
-        queuedIconPaths.insert(modulePath);
-        queuePathIconExtraction(
-            modulePath,
-            [guardedSelf, modulePathColumnIndex](const QString& resolvedPath, const QIcon& resolvedIcon) {
-                if (guardedSelf == nullptr)
-                {
-                    return;
-                }
-                applyIconToModuleTreeRows(
-                    guardedSelf->m_moduleTable,
-                    modulePathColumnIndex,
-                    resolvedPath,
-                    resolvedIcon);
-            });
-    }
+    // A view/path has one current subscription and one pending bounded update.
+    for (const auto* entry : filteredModules) { moduleIcons->watch(entry->fullPath.trimmed()); }
 
     // 重绘结束日志：用于确认过滤后可见数量。
     kLogEvent rebuildModuleTableEvent;
