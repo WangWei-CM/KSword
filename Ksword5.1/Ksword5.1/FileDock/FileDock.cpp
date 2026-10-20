@@ -5579,7 +5579,7 @@ namespace
             m_tabWidget->addTab(buildDeferredTab(QStringLiteral("metadata")), QStringLiteral("元数据编辑"));
             m_tabWidget->addTab(buildDeferredTab(QStringLiteral("reparse")), QStringLiteral("重解析点 / 符号链接"));
             m_tabWidget->addTab(buildDeferredTab(QStringLiteral("security")), QStringLiteral("安全与权限"));
-            m_tabWidget->addTab(buildHashTab(), QStringLiteral("哈希与完整性"));
+            m_tabWidget->addTab(buildDeferredTab(QStringLiteral("hash")), QStringLiteral("哈希与完整性"));
             m_tabWidget->addTab(buildDeferredTab(QStringLiteral("usage")), QStringLiteral("文件占用与解锁"));
             m_tabWidget->addTab(buildDeferredTab(QStringLiteral("fileobject")), QStringLiteral("FileObject / Section / ControlArea"));
             m_tabWidget->addTab(buildDeferredTab(QStringLiteral("storage")), QStringLiteral("Storage / MountMgr / FVE"));
@@ -5766,6 +5766,7 @@ namespace
                 m_hashCancelRequested->store(true);
             }
             if (m_savePreflightCancel != nullptr) m_savePreflightCancel->store(true);
+            if (m_generalReadCancel != nullptr) m_generalReadCancel->store(true);
             if (m_usageScanCancelRequested != nullptr)
             {
                 m_usageScanCancelRequested->store(true);
@@ -6493,11 +6494,21 @@ namespace
             return flagRows;
         }
 
-        void refreshGeneralTab()
+        struct GeneralFileSnapshot
         {
-            if (m_generalPropertyView == nullptr) return;
+            ks::ui::FieldDocument document;
+            QFileInfo info;
+            QString ntPath;
+        };
+
+        static GeneralFileSnapshot readGeneralFileSnapshot(const QString& path)
+        {
             using ks::ui::FieldDocument;
-            const QFileInfo info(m_filePath);
+            const QFileInfo info(path);
+            const QString ntPathText = buildDriverNtPath(info.absoluteFilePath());
+            const auto nativePath = QDir::toNativeSeparators(info.absoluteFilePath()).toStdWString();
+            const DWORD attributes = ::GetFileAttributesW(nativePath.c_str());
+            const DWORD attributeError = attributes == INVALID_FILE_ATTRIBUTES ? ::GetLastError() : ERROR_SUCCESS;
             FieldDocument doc;
             doc.section(QStringLiteral("基本信息"));
             doc.field(QStringLiteral("文件名"), info.fileName());
@@ -6510,12 +6521,58 @@ namespace
             doc.field(QStringLiteral("可执行"), info.isExecutable() ? QStringLiteral("是") : QStringLiteral("否"), true);
             doc.field(QStringLiteral("隐藏"), info.isHidden() ? QStringLiteral("是") : QStringLiteral("否"), true);
             doc.field(QStringLiteral("可写"), info.isWritable() ? QStringLiteral("是") : QStringLiteral("否"), true);
-            doc.field(QStringLiteral("重解析点"), isPathReparsePoint(info.absoluteFilePath())
+            doc.field(QStringLiteral("重解析点"), (attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0)
                 ? QStringLiteral("是（首屏只判断属性位，不追踪链接目标）") : QStringLiteral("否"), true);
             doc.section(QStringLiteral("路径"));
             doc.field(QStringLiteral("Win32 路径"), QDir::toNativeSeparators(info.absoluteFilePath()));
-            doc.field(QStringLiteral("NT 路径"), m_generalNtPathText.isEmpty()
-                ? QStringLiteral("<转换失败>") : m_generalNtPathText, m_generalNtPathText.isEmpty());
+            doc.field(QStringLiteral("NT 路径"), ntPathText.isEmpty()
+                ? QStringLiteral("<转换失败>") : ntPathText, ntPathText.isEmpty());
+            if (attributes == INVALID_FILE_ATTRIBUTES)
+            {
+                doc.field(QStringLiteral("状态"), QStringLiteral("不存在或不可访问"), true);
+                doc.field(QStringLiteral("Win32 错误码"), formatWin32ErrorText(attributeError));
+            }
+            return { std::move(doc), info, ntPathText };
+        }
+
+        void startGeneralFileSnapshotLoad()
+        {
+            if (m_generalPropertyView == nullptr) return;
+            m_generalR3Loaded = false;
+            m_generalR0Loaded = false;
+            ++m_generalR0LoadGeneration;
+            const quint64 generation = ++m_generalR3LoadGeneration;
+            const QString path = m_filePath;
+            refreshGeneralTab();
+            const QPointer<FileDetailDialog> guardThis(this);
+            QThreadPool::globalInstance()->start(QRunnable::create([guardThis, path, generation]()
+                {
+                    const auto snapshot = readGeneralFileSnapshot(path);
+                    QMetaObject::invokeMethod(qApp, [guardThis, path, generation, snapshot]()
+                        {
+                            if (guardThis == nullptr || guardThis->m_filePath != path ||
+                                guardThis->m_generalR3LoadGeneration != generation) return;
+                            guardThis->m_generalR3Document = snapshot.document;
+                            guardThis->m_generalNtPathText = snapshot.ntPath;
+                            guardThis->m_generalR3Loaded = true;
+                            guardThis->refreshGeneralTab();
+                            guardThis->startR0FileInfoLoad(snapshot.info, snapshot.ntPath);
+                        }, Qt::QueuedConnection);
+                }));
+        }
+
+        void refreshGeneralTab()
+        {
+            if (m_generalPropertyView == nullptr) return;
+            if (!m_generalR3Loaded)
+            {
+                ks::ui::FieldDocument loading;
+                loading.note(QStringLiteral("● 正在后台读取文件元数据..."));
+                loading.field(QStringLiteral("目标"), QDir::toNativeSeparators(m_filePath));
+                m_generalPropertyView->setDocument(loading);
+                return;
+            }
+            auto doc = m_generalR3Document;
             doc.field(QStringLiteral("查询来源"), !m_generalR0Loaded
                 ? QStringLiteral("R3 QFileInfo（R0 信息正在后台加载）")
                 : (m_generalR0Info.io.ok ? QStringLiteral("R3 QFileInfo + R0 KswordARK")
@@ -8842,20 +8899,47 @@ namespace
             return operation;
         }
 
-        using TransactionRows = QVector<QStringList>;
+        using FileDetailRows = QVector<QStringList>;
+
+        static std::shared_ptr<FileDetailRows> makeFileDetailRows()
+        {
+            // A canceled/closed display callback can be the last owner too.
+            // Keep destruction of a large uncommitted snapshot off the GUI thread.
+            return std::shared_ptr<FileDetailRows>(new FileDetailRows(), [](FileDetailRows* rows)
+                {
+                    QThreadPool::globalInstance()->start(QRunnable::create([rows]() { delete rows; }));
+                });
+        }
 
         // The transaction owns complete immutable display rows before GUI delivery.
         // A view asks only for visible cells; no per-operation QWidget items exist.
-        class TransactionResultModel final : public QAbstractTableModel
+        class FileDetailRowsModel final : public QAbstractTableModel
         {
         public:
-            TransactionResultModel(std::shared_ptr<const TransactionRows> rows, QObject* parent)
-                : QAbstractTableModel(parent), m_rows(std::move(rows))
+            FileDetailRowsModel(std::shared_ptr<const FileDetailRows> rows, QObject* parent,
+                QStringList headers = {}, QSet<int> translatedColumns = { 1, 2 })
+                : QAbstractTableModel(parent), m_rows(std::move(rows)),
+                  m_headers(headers.isEmpty() ? QStringList{ QStringLiteral("目标"), QStringLiteral("操作"),
+                    QStringLiteral("结果"), QStringLiteral("错误"), QStringLiteral("详情"),
+                    QStringLiteral("备份") } : std::move(headers)), m_translatedColumns(std::move(translatedColumns))
             {
                 if (parent != nullptr) parent->installEventFilter(this);
             }
 
-            ~TransactionResultModel() override
+            void setSnapshot(std::shared_ptr<const FileDetailRows> rows)
+            {
+                const QPointer<FileDetailRowsModel> lifetime(this);
+                beginResetModel();
+                if (lifetime == nullptr) return;
+                auto retired = std::move(m_rows);
+                m_rows = std::move(rows);
+                endResetModel();
+                if (retired != nullptr)
+                    QThreadPool::globalInstance()->start(QRunnable::create(
+                        [retired = std::move(retired)]() mutable { retired.reset(); }));
+            }
+
+            ~FileDetailRowsModel() override
             {
                 if (m_rows != nullptr)
                     QThreadPool::globalInstance()->start(QRunnable::create(
@@ -8869,7 +8953,7 @@ namespace
 
             int columnCount(const QModelIndex& parent = {}) const override
             {
-                return parent.isValid() ? 0 : 6;
+                return parent.isValid() ? 0 : static_cast<int>(m_headers.size());
             }
 
             QVariant data(const QModelIndex& index, const int role = Qt::DisplayRole) const override
@@ -8881,8 +8965,7 @@ namespace
                     return {};
                 }
                 const QString value = m_rows->at(index.row()).value(index.column());
-                return index.column() == 1 || index.column() == 2
-                    ? ks::i18n::displayText(value) : value;
+                return m_translatedColumns.contains(index.column()) ? ks::i18n::displayText(value) : value;
             }
 
             QVariant headerData(const int section, const Qt::Orientation orientation,
@@ -8891,10 +8974,7 @@ namespace
                 if (orientation == Qt::Horizontal && role == Qt::DisplayRole &&
                     section >= 0 && section < columnCount())
                 {
-                    static const QStringList titles{ QStringLiteral("目标"), QStringLiteral("操作"),
-                        QStringLiteral("结果"), QStringLiteral("错误"), QStringLiteral("详情"),
-                        QStringLiteral("备份") };
-                    return ks::i18n::displayText(titles.at(section));
+                    return ks::i18n::displayText(m_headers.at(section));
                 }
                 return QAbstractTableModel::headerData(section, orientation, role);
             }
@@ -8906,19 +8986,21 @@ namespace
                 {
                     emit headerDataChanged(Qt::Horizontal, 0, columnCount() - 1);
                     if (rowCount() > 0)
-                        emit dataChanged(index(0, 1), index(rowCount() - 1, 2), { Qt::DisplayRole, Qt::ToolTipRole });
+                        emit dataChanged(index(0, 0), index(rowCount() - 1, columnCount() - 1), { Qt::DisplayRole, Qt::ToolTipRole });
                 }
                 return QAbstractTableModel::eventFilter(watched, event);
             }
 
         private:
-            std::shared_ptr<const TransactionRows> m_rows;
+            std::shared_ptr<const FileDetailRows> m_rows;
+            QStringList m_headers;
+            QSet<int> m_translatedColumns;
         };
 
-        static std::shared_ptr<const TransactionRows> transactionDisplayRows(
+        static std::shared_ptr<const FileDetailRows> transactionDisplayRows(
             const ks::file::metadata::TransactionResult& result)
         {
-            auto rows = std::make_shared<TransactionRows>();
+            auto rows = makeFileDetailRows();
             qsizetype rowCount = 0;
             for (const auto& target : result.targets) rowCount += target.operations.size();
             rows->reserve(rowCount);
@@ -8979,45 +9061,8 @@ namespace
             }
         }
 
-        void showTransactionResults(const ks::file::metadata::TransactionResult& result,
-            std::shared_ptr<const TransactionRows> rows)
+        static void installValueTableCopyMenu(QTableView* table)
         {
-            QDialog* dialog = new QDialog(this);
-            dialog->setAttribute(Qt::WA_DeleteOnClose, true);
-            dialog->setWindowTitle(ks::i18n::sourceText(QStringLiteral("文件元数据保存结果")));
-            dialog->resize(1080, 560);
-            QVBoxLayout* layout = new QVBoxLayout(dialog);
-
-            QLabel* summaryLabel = new QLabel(result.ok
-                ? ks::i18n::sourceText(QStringLiteral("● 全部目标保存并回读完成。"))
-                : ks::i18n::sourceText(QStringLiteral(
-                    "● 部分目标保存失败。失败目标已尽可能回滚，请查看逐操作结果。")),
-                dialog);
-            summaryLabel->setWordWrap(true);
-            layout->addWidget(summaryLabel);
-
-            QTableView* table = new ks::ui::TableActionTableView(dialog);
-            // 保存结果是一次事务报告，仅保留紧凑复制/导出入口。
-            ks::ui::SetTableActionBarMode(table, ks::ui::TableActionBarMode::Compact);
-            auto* model = new TransactionResultModel(std::move(rows), table);
-            auto* proxy = new QSortFilterProxyModel(table);
-            proxy->setDynamicSortFilter(false);
-            proxy->setSourceModel(model);
-            table->setProperty("ks_i18n_preserve_model_data", true);
-            table->setModel(proxy);
-            table->setSelectionBehavior(QAbstractItemView::SelectRows);
-            table->setSelectionMode(QAbstractItemView::ExtendedSelection);
-            table->setEditTriggers(QAbstractItemView::NoEditTriggers);
-            table->setAlternatingRowColors(true);
-            ks::ui::SetTableColumnAutoFitEnabled(table, false);
-            if (table->horizontalHeader() != nullptr)
-            {
-                table->horizontalHeader()->setResizeContentsPrecision(64);
-                table->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
-                table->horizontalHeader()->setStretchLastSection(true);
-                table->horizontalHeader()->setSortIndicator(-1, Qt::AscendingOrder);
-            }
-            table->setSortingEnabled(true);
             table->setContextMenuPolicy(Qt::CustomContextMenu);
             connect(table, &QTableView::customContextMenuRequested, table,
                 [table](const QPoint& localPosition)
@@ -9042,6 +9087,48 @@ namespace
                     if (QClipboard* clipboard = QApplication::clipboard())
                         clipboard->setText(values.join(QLatin1Char('\t')));
                 });
+        }
+
+        void showTransactionResults(const ks::file::metadata::TransactionResult& result,
+            std::shared_ptr<const FileDetailRows> rows)
+        {
+            QDialog* dialog = new QDialog(this);
+            dialog->setAttribute(Qt::WA_DeleteOnClose, true);
+            dialog->setWindowTitle(ks::i18n::sourceText(QStringLiteral("文件元数据保存结果")));
+            dialog->resize(1080, 560);
+            QVBoxLayout* layout = new QVBoxLayout(dialog);
+
+            QLabel* summaryLabel = new QLabel(result.ok
+                ? ks::i18n::sourceText(QStringLiteral("● 全部目标保存并回读完成。"))
+                : ks::i18n::sourceText(QStringLiteral(
+                    "● 部分目标保存失败。失败目标已尽可能回滚，请查看逐操作结果。")),
+                dialog);
+            summaryLabel->setWordWrap(true);
+            layout->addWidget(summaryLabel);
+
+            QTableView* table = new ks::ui::TableActionTableView(dialog);
+            // 保存结果是一次事务报告，仅保留紧凑复制/导出入口。
+            ks::ui::SetTableActionBarMode(table, ks::ui::TableActionBarMode::Compact);
+            auto* model = new FileDetailRowsModel(std::move(rows), table);
+            auto* proxy = new QSortFilterProxyModel(table);
+            proxy->setDynamicSortFilter(false);
+            proxy->setSourceModel(model);
+            table->setProperty("ks_i18n_preserve_model_data", true);
+            table->setModel(proxy);
+            table->setSelectionBehavior(QAbstractItemView::SelectRows);
+            table->setSelectionMode(QAbstractItemView::ExtendedSelection);
+            table->setEditTriggers(QAbstractItemView::NoEditTriggers);
+            table->setAlternatingRowColors(true);
+            ks::ui::SetTableColumnAutoFitEnabled(table, false);
+            if (table->horizontalHeader() != nullptr)
+            {
+                table->horizontalHeader()->setResizeContentsPrecision(64);
+                table->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
+                table->horizontalHeader()->setStretchLastSection(true);
+                table->horizontalHeader()->setSortIndicator(-1, Qt::AscendingOrder);
+            }
+            table->setSortingEnabled(true);
+            installValueTableCopyMenu(table);
             layout->addWidget(table, 1);
             QDialogButtonBox* buttons = new QDialogButtonBox(QDialogButtonBox::Close, dialog);
             connect(buttons, &QDialogButtonBox::rejected, dialog, &QDialog::close);
@@ -9274,6 +9361,9 @@ namespace
                             guardThis->m_pendingPatches = updatedPending;
                             guardThis->m_filePaths = updatedPaths;
                             guardThis->m_filePath = updatedPaths.value(0);
+                            if (guardThis->m_batchMode)
+                                guardThis->startBatchGeneralFileSnapshotLoad(
+                                    guardThis->m_generalBatchTable, guardThis->m_generalBatchSummary);
                             guardThis->setTransactionBusy(false);
                             guardThis->showTransactionResults(result, rows);
                             guardThis->updatePendingSaveUi();
@@ -9293,11 +9383,7 @@ namespace
                                 guardThis->m_generalR0Loaded = false;
                                 if (!guardThis->m_batchMode)
                                 {
-                                    guardThis->refreshGeneralTab();
-                                    const QFileInfo refreshedInfo(guardThis->m_filePath);
-                                    guardThis->startR0FileInfoLoad(
-                                        refreshedInfo,
-                                        guardThis->m_generalNtPathText);
+                                    guardThis->startGeneralFileSnapshotLoad();
                                 }
                             }
                         },
@@ -9380,6 +9466,10 @@ namespace
                     {
                         realPage = buildReparseTab();
                     }
+                    else if (lazyKey == QStringLiteral("hash"))
+                    {
+                        realPage = buildHashTab();
+                    }
                     else if (lazyKey == QStringLiteral("usage"))
                     {
                         realPage = buildUsageTab();
@@ -9445,12 +9535,34 @@ namespace
         // 创建全宽对象摘要；文件位置与复制动作在切换任何详情页时仍可达。
         QWidget* buildIdentityHeader()
         {
-            QFileIconProvider iconProvider;
             const QString title = m_batchMode
                 ? ks::i18n::sourceText(QStringLiteral("批量文件属性 - %1 项")).arg(m_filePaths.size())
                 : QFileInfo(m_filePath).fileName();
             QWidget* header = ks::ui::CreateDetailSummaryHeader(this, title,
-                QDir::toNativeSeparators(m_filePath), iconProvider.icon(QFileInfo(m_filePath)));
+                QDir::toNativeSeparators(m_filePath), QIcon(QStringLiteral(":/Icon/process_details.svg")));
+            const QPointer<QLabel> imageGuard(qobject_cast<QLabel*>(header->layout()->itemAt(0)->widget()));
+            const QPointer<FileDetailDialog> guardThis(this);
+            const QString path = m_filePath;
+            QThreadPool::globalInstance()->start(QRunnable::create([guardThis, imageGuard, path]()
+                {
+                    const HRESULT comResult = ::CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+                    const QString nativePath = QDir::toNativeSeparators(path);
+                    SHFILEINFOW shellInfo{};
+                    QImage image;
+                    if (::SHGetFileInfoW(reinterpret_cast<const wchar_t*>(nativePath.utf16()), 0,
+                        &shellInfo, sizeof(shellInfo), SHGFI_ICON | SHGFI_LARGEICON) && shellInfo.hIcon)
+                    {
+                        image = QImage::fromHICON(shellInfo.hIcon);
+                        ::DestroyIcon(shellInfo.hIcon);
+                    }
+                    if (SUCCEEDED(comResult)) ::CoUninitialize();
+                    QMetaObject::invokeMethod(qApp, [guardThis, imageGuard, path, image]()
+                        {
+                            if (guardThis == nullptr || imageGuard == nullptr ||
+                                guardThis->m_filePath != path || image.isNull()) return;
+                            imageGuard->setPixmap(QIcon(QPixmap::fromImage(image)).pixmap(48, 48));
+                        }, Qt::QueuedConnection);
+                }));
             auto* actions = qobject_cast<QHBoxLayout*>(header->layout());
             auto* location = new QPushButton(ks::i18n::sourceText(QStringLiteral("打开所在位置")), header);
             auto* copyPath = new QPushButton(ks::i18n::sourceText(QStringLiteral("复制路径")), header);
@@ -9479,82 +9591,109 @@ namespace
             return header;
         }
 
+        void startBatchGeneralFileSnapshotLoad(QTableView* table, QLabel* summary)
+        {
+            if (table == nullptr || summary == nullptr || m_generalBatchRowsModel == nullptr) return;
+            if (m_generalReadCancel != nullptr) m_generalReadCancel->store(true);
+            summary->setText(ks::i18n::sourceText(QStringLiteral("● 正在后台读取文件元数据...")));
+            const QStringList paths = m_filePaths;
+            const auto cancel = std::make_shared<std::atomic_bool>(false);
+            m_generalReadCancel = cancel;
+            const QPointer<FileDetailDialog> guardThis(this);
+            const QPointer<QTableView> tableGuard(table);
+            const QPointer<QLabel> summaryGuard(summary);
+            const QPointer<FileDetailRowsModel> modelGuard(m_generalBatchRowsModel);
+            QThreadPool::globalInstance()->start(QRunnable::create([guardThis, tableGuard, summaryGuard, modelGuard, paths, cancel]()
+                {
+                    auto rows = makeFileDetailRows();
+                    rows->reserve(paths.size());
+                    quint64 totalSize = 0;
+                    int directoryCount = 0;
+                    int fileCount = 0;
+                    for (const QString& path : paths)
+                    {
+                        if (cancel->load()) return;
+                        const QFileInfo info(path);
+                        const bool exists = info.exists();
+                        if (exists && info.isDir()) ++directoryCount;
+                        if (exists && info.isFile())
+                        {
+                            ++fileCount;
+                            totalSize += static_cast<quint64>(std::max<qint64>(0, info.size()));
+                        }
+                        const auto nativePath = QDir::toNativeSeparators(path).toStdWString();
+                        const DWORD attributes = ::GetFileAttributesW(nativePath.c_str());
+                        rows->push_back(QStringList{ QDir::toNativeSeparators(path),
+                            info.isDir() ? QStringLiteral("目录") : (info.isFile() ? QStringLiteral("文件") : QStringLiteral("其它")),
+                            info.isFile() ? formatFileSizeText(static_cast<qulonglong>(std::max<qint64>(0, info.size()))) : QStringLiteral("-"),
+                            attributes == INVALID_FILE_ATTRIBUTES ? QStringLiteral("-") : fileAttributesToText(attributes),
+                            info.lastModified().isValid() ? info.lastModified().toString(QStringLiteral("yyyy-MM-dd HH:mm:ss")) : QStringLiteral("-"),
+                            exists ? QStringLiteral("可访问") : QStringLiteral("不存在或不可访问") });
+                    }
+                    QMetaObject::invokeMethod(qApp,
+                        [guardThis, tableGuard, summaryGuard, modelGuard, paths, cancel, rows, totalSize, directoryCount, fileCount]()
+                        {
+                            const auto commitSnapshot =
+                                [guardThis, tableGuard, summaryGuard, modelGuard, paths, cancel, rows, totalSize, directoryCount, fileCount]()
+                                {
+                                    if (guardThis == nullptr || tableGuard == nullptr || summaryGuard == nullptr || modelGuard == nullptr ||
+                                        cancel->load() || guardThis->m_filePaths != paths) return;
+                                    modelGuard->setSnapshot(rows);
+                                    if (guardThis == nullptr || tableGuard == nullptr || summaryGuard == nullptr || modelGuard == nullptr ||
+                                        cancel->load() || guardThis->m_filePaths != paths) return;
+                                    summaryGuard->setText(ks::i18n::sourceText(QStringLiteral(
+                                        "已选择 %1 项：文件 %2，目录 %3，文件总大小 %4。"))
+                                        .arg(paths.size()).arg(fileCount).arg(directoryCount).arg(formatFileSizeText(totalSize)));
+                                };
+                            if (guardThis == nullptr || tableGuard == nullptr || summaryGuard == nullptr || modelGuard == nullptr ||
+                                cancel->load() || guardThis->m_filePaths != paths) return;
+                            if (ks::ui::DeferTableUiCommitIfContextMenuOpen(
+                                guardThis.data(), QStringLiteral("file-detail-general-snapshot"),
+                                { tableGuard.data() }, commitSnapshot)) return;
+                            commitSnapshot();
+                        }, Qt::QueuedConnection);
+                }));
+        }
+
         QWidget* buildGeneralTab()
         {
             if (m_batchMode)
             {
                 QWidget* page = new QWidget(this);
                 QVBoxLayout* layout = new QVBoxLayout(page);
-                quint64 totalSize = 0U;
-                int fileCount = 0;
-                int directoryCount = 0;
-                QTableWidget* table = new ks::ui::VisibleTableWidget(page);
-                table->setColumnCount(6);
-                // 批量属性摘要固定于本批目标，不需要通用前后快照。
+                QTableView* table = new ks::ui::TableActionTableView(page);
                 ks::ui::SetTableActionBarMode(table, ks::ui::TableActionBarMode::Compact);
-                table->setHorizontalHeaderLabels(QStringList{
-                    QStringLiteral("路径"),
-                    QStringLiteral("类型"),
-                    QStringLiteral("大小"),
-                    QStringLiteral("属性"),
-                    QStringLiteral("最后修改"),
-                    QStringLiteral("状态") });
-                table->setRowCount(m_filePaths.size());
                 table->setSelectionBehavior(QAbstractItemView::SelectRows);
                 table->setSelectionMode(QAbstractItemView::ExtendedSelection);
                 table->setEditTriggers(QAbstractItemView::NoEditTriggers);
                 table->setAlternatingRowColors(true);
-                for (qsizetype row = 0; row < m_filePaths.size(); ++row)
-                {
-                    const QString path = m_filePaths.at(row);
-                    const QFileInfo info(path);
-                    const bool exists = info.exists();
-                    if (exists && info.isDir()) ++directoryCount;
-                    if (exists && info.isFile())
-                    {
-                        ++fileCount;
-                        totalSize += static_cast<quint64>(std::max<qint64>(0, info.size()));
-                    }
-                    const std::wstring nativePathText = QDir::toNativeSeparators(path).toStdWString();
-                    const DWORD attributes = ::GetFileAttributesW(nativePathText.c_str());
-                    table->setItem(static_cast<int>(row), 0,
-                        new QTableWidgetItem(QDir::toNativeSeparators(path)));
-                    table->setItem(static_cast<int>(row), 1,
-                        new QTableWidgetItem(info.isDir()
-                            ? QStringLiteral("目录")
-                            : (info.isFile() ? QStringLiteral("文件") : QStringLiteral("其它"))));
-                    table->setItem(static_cast<int>(row), 2,
-                        new QTableWidgetItem(info.isFile()
-                            ? formatFileSizeText(static_cast<qulonglong>(std::max<qint64>(0, info.size())))
-                            : QStringLiteral("-")));
-                    table->setItem(static_cast<int>(row), 3,
-                        new QTableWidgetItem(attributes == INVALID_FILE_ATTRIBUTES
-                            ? QStringLiteral("-")
-                            : fileAttributesToText(attributes)));
-                    table->setItem(static_cast<int>(row), 4,
-                        new QTableWidgetItem(info.lastModified().isValid()
-                            ? info.lastModified().toString(QStringLiteral("yyyy-MM-dd HH:mm:ss"))
-                            : QStringLiteral("-")));
-                    table->setItem(static_cast<int>(row), 5,
-                        new QTableWidgetItem(exists ? QStringLiteral("可访问") : QStringLiteral("不存在或不可访问")));
-                }
-                QLabel* summary = new QLabel(
-                    ks::i18n::sourceText(QStringLiteral(
-                        "已选择 %1 项：文件 %2，目录 %3，文件总大小 %4。"))
-                        .arg(m_filePaths.size())
-                        .arg(fileCount)
-                        .arg(directoryCount)
-                        .arg(formatFileSizeText(totalSize)),
-                    page);
+                table->setProperty("ks_i18n_preserve_model_data", true);
+                QLabel* summary = new QLabel(ks::i18n::sourceText(
+                    QStringLiteral("● 正在后台读取文件元数据...")), page);
                 summary->setTextInteractionFlags(Qt::TextSelectableByMouse);
                 layout->addWidget(summary);
-                installFileTableCopyMenu(table);
+                installValueTableCopyMenu(table);
+                ks::ui::SetTableColumnAutoFitEnabled(table, false);
                 if (table->horizontalHeader() != nullptr)
                 {
+                    table->horizontalHeader()->setResizeContentsPrecision(64);
                     table->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
                     table->horizontalHeader()->setStretchLastSection(true);
+                    table->horizontalHeader()->setSortIndicator(-1, Qt::AscendingOrder);
                 }
                 layout->addWidget(table, 1);
+                auto* model = new FileDetailRowsModel(std::make_shared<const FileDetailRows>(), table,
+                    { QStringLiteral("目标"), QStringLiteral("类型"), QStringLiteral("大小"),
+                      QStringLiteral("属性"), QStringLiteral("修改时间"), QStringLiteral("状态") }, {1, 2, 3, 5});
+                auto* proxy = new QSortFilterProxyModel(table);
+                proxy->setDynamicSortFilter(false);
+                proxy->setSourceModel(model);
+                table->setModel(proxy);
+                table->setSortingEnabled(true);
+                m_generalBatchTable = table;
+                m_generalBatchSummary = summary;
+                m_generalBatchRowsModel = model;
+                startBatchGeneralFileSnapshotLoad(table, summary);
                 return page;
             }
 
@@ -9562,13 +9701,9 @@ namespace
             QVBoxLayout* layout = new QVBoxLayout(page);
 
             m_generalPropertyView = new ks::ui::StructuredFieldView(page);
-            const QFileInfo info(m_filePath);
-            m_generalNtPathText = buildDriverNtPath(info.absoluteFilePath());
-            m_generalR0Loaded = false;
             m_generalR0Info = {};
-            refreshGeneralTab();
             layout->addWidget(m_generalPropertyView, 1);
-            startR0FileInfoLoad(info, m_generalNtPathText);
+            startGeneralFileSnapshotLoad();
             return page;
         }
 
@@ -11060,6 +11195,72 @@ namespace
             return page;
         }
 
+        class BatchHashRowsModel final : public QAbstractTableModel
+        {
+        public:
+            BatchHashRowsModel(QStringList paths, const QStringList& algorithms, QObject* parent)
+                : QAbstractTableModel(parent), m_paths(std::move(paths)),
+                  m_headers(QStringList{QStringLiteral("目标"), QStringLiteral("状态")} + algorithms + QStringList{QStringLiteral("错误")})
+            {
+                if (parent != nullptr) parent->installEventFilter(this);
+            }
+            ~BatchHashRowsModel() override { retireResults(); }
+
+            quint64 resetPaths(QStringList paths)
+            {
+                beginResetModel(); m_paths = std::move(paths); retireResults(); ++m_generation; endResetModel();
+                return m_generation;
+            }
+            quint64 generation() const { return m_generation; }
+            int rowCount(const QModelIndex& parent = {}) const override { return parent.isValid() ? 0 : static_cast<int>(m_paths.size()); }
+            int columnCount(const QModelIndex& parent = {}) const override { return parent.isValid() ? 0 : static_cast<int>(m_headers.size()); }
+            QVariant headerData(int section, Qt::Orientation orientation, int role = Qt::DisplayRole) const override
+            {
+                return orientation == Qt::Horizontal && role == Qt::DisplayRole && section >= 0 && section < columnCount()
+                    ? QVariant(ks::i18n::displayText(m_headers.at(section))) : QAbstractTableModel::headerData(section, orientation, role);
+            }
+            QVariant data(const QModelIndex& index, int role = Qt::DisplayRole) const override
+            {
+                if (!index.isValid() || index.row() < 0 || index.row() >= rowCount() || index.column() < 0 ||
+                    index.column() >= columnCount() || (role != Qt::DisplayRole && role != Qt::ToolTipRole)) return {};
+                if (index.column() == 0) return QDir::toNativeSeparators(m_paths.at(index.row()));
+                const auto found = m_results.constFind(index.row());
+                const QString value = found != m_results.cend() ? found.value().value(index.column() - 1)
+                    : (index.column() == 1 ? QStringLiteral("等待") : QString());
+                return index.column() == 1 ? ks::i18n::displayText(value) : value;
+            }
+            void setResult(qsizetype row, const QString& state, const QStringList& hashes, const QString& error)
+            {
+                if (row < 0 || row >= rowCount()) return;
+                QStringList values; values.reserve(columnCount() - 1); values.push_back(state);
+                for (int i = 0; i < columnCount() - 3; ++i) values.push_back(hashes.value(i));
+                values.push_back(error); m_results.insert(row, std::move(values));
+                emit dataChanged(index(static_cast<int>(row), 1), index(static_cast<int>(row), columnCount() - 1));
+            }
+        protected:
+            bool eventFilter(QObject* watched, QEvent* event) override
+            {
+                if (event != nullptr && event->type() == QEvent::LanguageChange)
+                {
+                    emit headerDataChanged(Qt::Horizontal, 0, columnCount() - 1);
+                    if (rowCount() > 0) emit dataChanged(index(0, 1), index(rowCount() - 1, 1));
+                }
+                return QAbstractTableModel::eventFilter(watched, event);
+            }
+
+        private:
+            void retireResults()
+            {
+                if (m_results.isEmpty()) return;
+                QThreadPool::globalInstance()->start(QRunnable::create(
+                    [retired = std::move(m_results)]() mutable { retired.clear(); }));
+            }
+            QStringList m_paths;
+            QStringList m_headers;
+            QHash<qsizetype, QStringList> m_results;
+            quint64 m_generation = 0;
+        };
+
         QWidget* buildHashTab()
         {
             if (m_batchMode)
@@ -11080,30 +11281,25 @@ namespace
                 progress->setRange(0, m_filePaths.size());
                 progress->setValue(0);
                 layout->addWidget(progress);
-                QTableWidget* table = new ks::ui::VisibleTableWidget(page);
-                const QStringList algorithms = commonHashNames();
+                QTableView* table = new ks::ui::TableActionTableView(page);
                 ks::ui::SetTableActionBarMode(table, ks::ui::TableActionBarMode::Compact);
-                table->setColumnCount(algorithms.size() + 3);
-                table->setHorizontalHeaderLabels(QStringList{
-                    QStringLiteral("目标"), QStringLiteral("状态") }
-                    + algorithms + QStringList{QStringLiteral("错误")});
-                table->setRowCount(m_filePaths.size());
+                auto* model = new BatchHashRowsModel(m_filePaths, commonHashNames(), table);
+                auto* proxy = new QSortFilterProxyModel(table);
+                proxy->setDynamicSortFilter(false);
+                proxy->setSourceModel(model);
+                table->setProperty("ks_i18n_preserve_model_data", true);
+                table->setModel(proxy);
                 table->setSelectionBehavior(QAbstractItemView::SelectRows);
                 table->setSelectionMode(QAbstractItemView::ExtendedSelection);
                 table->setEditTriggers(QAbstractItemView::NoEditTriggers);
                 table->setAlternatingRowColors(true);
-                for (qsizetype row = 0; row < m_filePaths.size(); ++row)
-                {
-                    table->setItem(static_cast<int>(row), 0,
-                        new QTableWidgetItem(QDir::toNativeSeparators(m_filePaths.at(row))));
-                    table->setItem(static_cast<int>(row), 1,
-                        new QTableWidgetItem(QStringLiteral("等待")));
-                    for (int column = 2; column < table->columnCount(); ++column)
-                        table->setItem(static_cast<int>(row), column, new QTableWidgetItem());
-                }
-                installFileTableCopyMenu(table);
+                installValueTableCopyMenu(table);
                 if (table->horizontalHeader() != nullptr)
+                {
                     table->horizontalHeader()->setStretchLastSection(true);
+                    table->horizontalHeader()->setSortIndicator(-1, Qt::AscendingOrder);
+                }
+                table->setSortingEnabled(true);
                 layout->addWidget(table, 1);
                 connect(cancelButton, &QPushButton::clicked, this, [this, cancelButton]()
                     {
@@ -11112,23 +11308,25 @@ namespace
                         cancelButton->setEnabled(false);
                     });
                 connect(startButton, &QPushButton::clicked, this,
-                    [this, table, progress, statusLabel, startButton, cancelButton]()
+                    [this, table, model, progress, statusLabel, startButton, cancelButton]()
                     {
                         m_hashCancelRequested = std::make_shared<std::atomic_bool>(false);
                         const auto cancelRequested = m_hashCancelRequested;
                         const QStringList paths = m_filePaths;
+                        const quint64 generation = model->resetPaths(paths);
                         startButton->setEnabled(false);
                         cancelButton->setEnabled(true);
                         progress->setValue(0);
                         statusLabel->setText(QStringLiteral("● 正在后台计算批量哈希..."));
-                        QPointer<QTableWidget> tableGuard(table);
+                        QPointer<QTableView> tableGuard(table);
+                        QPointer<BatchHashRowsModel> modelGuard(model);
                         QPointer<QProgressBar> progressGuard(progress);
                         QPointer<QLabel> statusGuard(statusLabel);
                         QPointer<QPushButton> startGuard(startButton);
                         QPointer<QPushButton> cancelGuard(cancelButton);
                         auto* task = QRunnable::create(
-                            [tableGuard, progressGuard, statusGuard, startGuard, cancelGuard,
-                             cancelRequested, paths]()
+                            [tableGuard, modelGuard, progressGuard, statusGuard, startGuard, cancelGuard,
+                             cancelRequested, paths, generation]()
                             {
                                 int completed = 0;
                                 for (qsizetype row = 0; row < paths.size(); ++row)
@@ -11178,23 +11376,18 @@ namespace
                                         }
                                     }
                                     ++completed;
-                                    if (tableGuard == nullptr) return;
-                                    QMetaObject::invokeMethod(tableGuard.data(),
-                                        [tableGuard, progressGuard, row, completed, stateText, hashValues, errorText]()
+                                    QMetaObject::invokeMethod(qApp,
+                                        [tableGuard, modelGuard, progressGuard, row, completed, stateText, hashValues, errorText, generation]()
                                         {
-                                            if (tableGuard == nullptr) return;
-                                            tableGuard->item(static_cast<int>(row), 1)->setText(stateText);
-                                            for (qsizetype index = 0; index < hashValues.size(); ++index)
-                                                tableGuard->item(static_cast<int>(row), static_cast<int>(index) + 2)->setText(hashValues.at(index));
-                                            tableGuard->item(static_cast<int>(row), tableGuard->columnCount() - 1)->setText(errorText);
+                                            if (tableGuard == nullptr || modelGuard == nullptr || modelGuard->generation() != generation) return;
+                                            modelGuard->setResult(row, stateText, hashValues, errorText);
                                             if (progressGuard != nullptr) progressGuard->setValue(completed);
                                         }, Qt::QueuedConnection);
                                 }
-                                if (statusGuard == nullptr) return;
-                                QMetaObject::invokeMethod(statusGuard.data(),
-                                    [statusGuard, startGuard, cancelGuard, cancelRequested, completed, paths]()
+                                QMetaObject::invokeMethod(qApp,
+                                    [statusGuard, modelGuard, startGuard, cancelGuard, cancelRequested, completed, paths, generation]()
                                     {
-                                        if (statusGuard == nullptr) return;
+                                        if (statusGuard == nullptr || modelGuard == nullptr || modelGuard->generation() != generation) return;
                                         statusGuard->setText(cancelRequested->load()
                                             ? QStringLiteral("● 批量哈希已取消，完成 %1 / %2。")
                                                 .arg(completed).arg(paths.size())
@@ -12668,6 +12861,13 @@ namespace
         QVector<QToolButton*> m_tabNavigationButtons; // 与 Tab 索引一一对应，供切页时同步选中态。
         ks::ui::StructuredFieldView* m_generalPropertyView = nullptr; // 直接呈现字段快照，不依赖文本编辑器。
         std::function<void()> m_signatureLanguageRefresh; // UI 快照重译不重新验证文件。
+        QTableView* m_generalBatchTable = nullptr;
+        QLabel* m_generalBatchSummary = nullptr;
+        FileDetailRowsModel* m_generalBatchRowsModel = nullptr;
+        ks::ui::FieldDocument m_generalR3Document; // R0/语言更新复用同一版R3快照，不重新stat。
+        bool m_generalR3Loaded = false;
+        quint64 m_generalR3LoadGeneration = 0;
+        std::shared_ptr<std::atomic_bool> m_generalReadCancel; // 关闭后不继续遍历批量常规目标。
         QString m_generalNtPathText; // 常规页复用的 NT 路径，避免切换语言时重复查询。
         bool m_generalR0Loaded = false; // R0 文件信息是否已完成后台读取。
         ksword::ark::FileInfoQueryResult m_generalR0Info{}; // 保留原始 R0 数据供双语重绘。
