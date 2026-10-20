@@ -14,6 +14,7 @@
 #include <QResizeEvent>
 #include <QScrollBar>
 #include <QSignalBlocker>
+#include <QShowEvent>
 #include <QSyntaxHighlighter>
 #include <QTextBlock>
 #include <QTextDocument>
@@ -110,6 +111,15 @@ namespace
         QTextCharFormat tag;
         QTextCharFormat attribute;
         QTextCharFormat directive;
+
+        bool operator==(const EditorColors& other) const
+        {
+            return base == other.base && gutter == other.gutter && gutterText == other.gutterText
+                && currentNumber == other.currentNumber && divider == other.divider
+                && currentLine == other.currentLine && bracket == other.bracket && bracketError == other.bracketError
+                && keyword == other.keyword && string == other.string && number == other.number
+                && comment == other.comment && tag == other.tag && attribute == other.attribute && directive == other.directive;
+        }
     };
 
     EditorColors colorsFor(const QPalette& palette)
@@ -192,8 +202,24 @@ class CodeSyntaxHighlighter final : public QSyntaxHighlighter
 {
 public:
     explicit CodeSyntaxHighlighter(QTextDocument* document) : QSyntaxHighlighter(document) {}
-    void setLanguage(Language language) { m_language = language; }
-    void setColors(const EditorColors& colors) { m_colors = colors; }
+    void setLanguage(Language language)
+    {
+        if (m_language == language) return;
+        m_language = language;
+        m_fullRefreshRequired = true;
+    }
+    void setColors(const EditorColors& colors)
+    {
+        if (m_colors == colors) return;
+        m_colors = colors;
+        m_fullRefreshRequired = true;
+    }
+    bool takeFullRefreshRequired()
+    {
+        const bool required = m_fullRefreshRequired;
+        m_fullRefreshRequired = false;
+        return required;
+    }
 
 protected:
     void highlightBlock(const QString& text) override
@@ -316,6 +342,7 @@ protected:
 private:
     Language m_language = Language::PlainText;
     EditorColors m_colors;
+    bool m_fullRefreshRequired = true;
 };
 
 class CodeLineNumberArea final : public QWidget
@@ -440,10 +467,15 @@ void CodeTextEdit::refreshThemeColors()
 {
     m_themeRefreshPending = false;
     if (!m_syntaxHighlighter) return;
+    auto* highlighter = static_cast<CodeSyntaxHighlighter*>(m_syntaxHighlighter);
+    highlighter->setColors(colorsFor(palette()));
+    // Retain the latest colors while hidden; the first Show applies pending
+    // formats synchronously before painting. Ordinary text edits still use
+    // QSyntaxHighlighter's incremental document notifications.
+    if (!isVisible() || !highlighter->takeFullRefreshRequired()) return;
     const bool modified = document()->isModified();
     const QSignalBlocker editorSignals(this);
     const QSignalBlocker documentSignals(document());
-    static_cast<CodeSyntaxHighlighter*>(m_syntaxHighlighter)->setColors(colorsFor(palette()));
     m_syntaxHighlighter->rehighlight();
     document()->setModified(modified);
     refreshExtraSelections();
@@ -547,6 +579,12 @@ bool CodeTextEdit::gotoLine(int oneBasedLine)
 void CodeTextEdit::setExternalExtraSelections(const QList<QTextEdit::ExtraSelection>& selections)
 {
     m_externalExtraSelections = selections; scheduleRefreshExtraSelections();
+}
+
+void CodeTextEdit::showEvent(QShowEvent* event)
+{
+    refreshThemeColors();
+    QPlainTextEdit::showEvent(event);
 }
 
 void CodeTextEdit::resizeEvent(QResizeEvent* event)

@@ -18,6 +18,7 @@ class CodeTextEditApplicationFontHub;
 class QPaintEvent;
 class QKeyEvent;
 class QResizeEvent;
+class QShowEvent;
 class QSyntaxHighlighter;
 class QTimer;
 class QWidget;
@@ -81,6 +82,8 @@ protected:
     // resizeEvent：
     // - 编辑区尺寸变化时同步行号区几何。
     void resizeEvent(QResizeEvent* event) override;
+    // Apply deferred syntax colors before the first paint of a restored page.
+    void showEvent(QShowEvent* event) override;
     void keyPressEvent(QKeyEvent* event) override;
 
 private:
