@@ -43,6 +43,7 @@
 #include <QPushButton>
 #include <QStyle>
 #include <QTabWidget>
+#include <QShowEvent>
 #include <QTableWidget>
 #include <QTextBrowser>
 #include <QThreadPool>
@@ -302,6 +303,11 @@ void MinidumpDock::buildUi()
         }
     }
 
+    connect(m_resultTabs, &QTabWidget::currentChanged, this,
+        [this](int) { renderCurrentResultPage(); });
+    connect(m_rawMemoryTabs, &QTabWidget::currentChanged, this,
+        [this](int) { renderCurrentRawMemoryPage(); });
+
     // 所有动作统一进入成员函数的校验流程。
     connect(m_browseButton, &QPushButton::clicked, this, [this]() { chooseFile(); });
     connect(m_systemDirButton, &QPushButton::clicked, this, [this]()
@@ -354,11 +360,14 @@ void MinidumpDock::retranslateUi()
         "把当前解析结果的全文报告保存为文本文件"));
     refreshStatus();
 
-    // 已有结果时按新语言重建所有页签文本。
-    if (m_lastResult)
-    {
-        renderResult(*m_lastResult);
-    }
+    // 表格按语言失效后仅投影当前页；规范字段视图自行重译，不重读内存。
+    retranslateResultPages();
+}
+
+void MinidumpDock::showEvent(QShowEvent* event)
+{
+    QWidget::showEvent(event);
+    renderCurrentResultPage();
 }
 
 void MinidumpDock::chooseFile()

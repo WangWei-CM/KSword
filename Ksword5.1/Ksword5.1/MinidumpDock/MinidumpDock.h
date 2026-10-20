@@ -18,6 +18,7 @@
 #include <QString>
 #include <QStringList>
 #include <QWidget>
+#include <QSet>
 
 #include <atomic>
 #include <cstdint>
@@ -25,6 +26,7 @@
 
 class CodeEditorWidget;
 class QEvent;
+class QShowEvent;
 class QLabel;
 class QLineEdit;
 class QPushButton;
@@ -59,6 +61,7 @@ protected:
     // changeEvent 作用：语言切换时重译固定控件并重绘已有解析结果。
     // 参数 event：Qt 事件；返回值：无。
     void changeEvent(QEvent* event) override;
+    void showEvent(QShowEvent* event) override;
 
 private:
     // 以下函数负责构建/重译界面、选择文件、启动异步解析与导出报告。
@@ -77,6 +80,11 @@ private:
     // renderResult 作用：把解析结果渲染为概览、异常、流、模块等页签。
     // 参数 result：解析结果；返回值：无。实现位于 MinidumpDock.Tables.cpp。
     void renderResult(const ks::minidump::DumpParseResult& result);
+    void projectResult(const ks::minidump::DumpParseResult& result, QWidget* targetPage);
+    void registerResultTab(QWidget* page, const QString& title);
+    void renderCurrentResultPage();
+    void renderCurrentRawMemoryPage();
+    void retranslateResultPages();
 
     // promptKswordRelatedCrash 作用：解析结果指向 KSword 自身组件时引导上报。
     // 参数 result：解析结果；返回值：无。
@@ -151,5 +159,9 @@ private:
     QStringList m_statusArguments; // m_statusArguments：依次替换状态文本中的占位符。
     std::atomic<std::uint64_t> m_parseGeneration{ 0 }; // m_parseGeneration：淘汰过期解析回调。
     std::shared_ptr<MinidumpAsyncState> m_asyncState; // m_asyncState：跨线程投递时保护 owner 生命周期。
+    QSet<QWidget*> m_projectedResultPages;
+    QSet<int> m_projectedRawMemoryBlocks;
+    bool m_buildingResultCatalog = false;
+    bool m_buildingRawMemoryCatalog = false;
     bool m_parseBusy = false;   // m_parseBusy：解析任务是否正在运行。
 };

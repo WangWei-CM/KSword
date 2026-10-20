@@ -37,6 +37,7 @@
 #include <QPointer>
 #include <QPushButton>
 #include <QTabWidget>
+#include <QSignalBlocker>
 #include <QTableWidget>
 #include <QTableWidgetItem>
 #include <QTextBrowser>
@@ -329,840 +330,1021 @@ QWidget* MinidumpDock::createStructuredTablePage(
     return page;
 }
 
+void MinidumpDock::registerResultTab(QWidget* page, const QString& title)
+{
+    const int index = m_resultTabs->indexOf(page);
+    if (index < 0) m_resultTabs->addTab(page, title);
+    else m_resultTabs->setTabText(index, title);
+}
+
 void MinidumpDock::renderResult(const ks::minidump::DumpParseResult& result)
 {
-    // 采集：整页结果重建（十余张表）作为一个操作边界，用于定位转储分析无响应。
     ks::ui::PerfScope renderPerf("perf_dump_render", QStringLiteral("render_result"));
+    const QSignalBlocker tabSignalsBlocker(m_resultTabs);
+    m_buildingResultCatalog = true;
     clearResultTabs();
+    m_memoryView->clearData();
+    m_projectedResultPages.clear();
+    m_projectedRawMemoryBlocks.clear();
+    projectResult(result, nullptr);
+    m_buildingResultCatalog = false;
+    renderCurrentResultPage();
+}
 
+void MinidumpDock::renderCurrentResultPage()
+{
+    if (m_buildingResultCatalog || !m_lastResult || !isVisible()) return;
+    QWidget* const page = m_resultTabs->currentWidget();
+    if (page == nullptr) return;
+    if (m_projectedResultPages.contains(page))
+    {
+        if (page == m_rawMemoryTabs) renderCurrentRawMemoryPage();
+        return;
+    }
+    m_projectedResultPages.insert(page);
+    projectResult(*m_lastResult, page);
+}
+
+void MinidumpDock::retranslateResultPages()
+{
+    if (!m_lastResult) return;
+    // These controls own canonical source data and their own LanguageChange behavior.
+    // Keep the user's current address, raw editor state and full report document.
+    QSet<QWidget*> persistentPages;
+    for (QWidget* const page : {static_cast<QWidget*>(m_rawMemoryTabs),
+            static_cast<QWidget*>(m_memoryView), static_cast<QWidget*>(m_reportEditor)})
+    {
+        if (m_projectedResultPages.contains(page)) persistentPages.insert(page);
+    }
+    m_projectedResultPages.swap(persistentPages);
+    const QSignalBlocker tabSignalsBlocker(m_resultTabs);
+    m_buildingResultCatalog = true;
+    projectResult(*m_lastResult, nullptr);
+    m_buildingResultCatalog = false;
+    for (int index = 0; index < m_rawMemoryTabs->count(); ++index)
+    {
+        const QString title = QStringLiteral("%1 %2")
+            .arg(translated("minidump.raw.block", "数据块")).arg(index + 1);
+        m_rawMemoryTabs->setTabText(index, title);
+        // The original metadata title was rendered in the active language. Refresh only
+        // this small document; retain the professional editor and its reading state.
+        for (auto* metadata : m_rawMemoryTabs->widget(index)
+                ->findChildren<ks::ui::StructuredFieldView*>(QString(), Qt::FindDirectChildrenOnly))
+        {
+            auto document = metadata->document();
+            document.title = title;
+            metadata->setDocument(document);
+        }
+    }
+    renderCurrentResultPage();
+}
+
+void MinidumpDock::renderCurrentRawMemoryPage()
+{
+    if (m_buildingResultCatalog || m_buildingRawMemoryCatalog || !m_lastResult ||
+        !isVisible() || m_resultTabs->currentWidget() != m_rawMemoryTabs) return;
+    const int current = m_rawMemoryTabs->currentIndex();
+    if (current < 0 || m_projectedRawMemoryBlocks.contains(current) ||
+        static_cast<std::size_t>(current) >= m_lastResult->byteBlocks.size()) return;
+    m_projectedRawMemoryBlocks.insert(current);
+    const auto& result = *m_lastResult;
+    const auto index = static_cast<std::size_t>(current);
+    QWidget* const page = m_rawMemoryTabs->widget(current);
+    const ks::minidump::DumpByteBlock& block = result.byteBlocks[index];
+    const std::uint64_t previewBytes = block.previewBytes.size();
+    const std::uint64_t omittedBytes = block.capturedBytes > previewBytes
+        ? block.capturedBytes - previewBytes : 0;
+    const QString blockTitle = QStringLiteral("%1 %2")
+        .arg(translated("minidump.raw.block", "数据块")).arg(index + 1);
+    ks::ui::FieldDocument metadataDocument;
+    metadataDocument.title = blockTitle;
+    metadataDocument.field(QStringLiteral("来源"), block.source, true);
+    metadataDocument.field(QStringLiteral("虚拟地址"), block.hasVirtualAddress ? hexText(block.address) : QStringLiteral("不适用"));
+    metadataDocument.field(QStringLiteral("文件偏移"), hexText(block.fileOffset));
+    metadataDocument.field(QStringLiteral("完整捕获大小（字节）"), QString::number(block.capturedBytes));
+    metadataDocument.field(QStringLiteral("预览大小（字节）"), QString::number(previewBytes));
+    auto* layout = new QVBoxLayout(page);
+    layout->setContentsMargins(0, 0, 0, 0);
+    auto* metadata = new ks::ui::StructuredFieldView(page);
+    metadata->setMaximumHeight(145);
+    metadata->setDocument(metadataDocument);
+    layout->addWidget(metadata);
+    if (block.hasVirtualAddress)
+    {
+        auto* editor = new ks::ui::SnapshotWorkbenchWidget(page);
+        editor->setEditable(false);
+        const QByteArray bytes(block.previewBytes.empty() ? nullptr
+            : reinterpret_cast<const char*>(block.previewBytes.data()),
+            static_cast<qsizetype>(previewBytes));
+        const auto architecture = result.pointerSize == 4
+            ? ks::ui::DisassemblyArchitecture::X86 : ks::ui::DisassemblyArchitecture::X64;
+        const auto anchor = result.faultingAddress >= block.address
+            && result.faultingAddress - block.address < previewBytes
+            ? result.faultingAddress : block.address;
+        editor->setSnapshot(bytes, block.address, architecture, anchor,
+            QStringLiteral("dump-block:%1:%2:%3:%4")
+                .arg(result.filePath).arg(result.fileSize)
+                .arg(result.fileLastModifiedUtcMs).arg(block.fileOffset));
+        layout->addWidget(editor, 1);
+    }
+    else
+    {
+        const QString rawText = ks::minidump::FormatDumpBytes(block.fileOffset,
+            block.previewBytes.empty() ? nullptr : block.previewBytes.data(),
+            previewBytes, omittedBytes);
+        auto* report = new CodeEditorWidget(page);
+        report->setReadOnly(true);
+        report->setRawText(rawText);
+        layout->addWidget(report, 1);
+    }
+}
+
+void MinidumpDock::projectResult(
+    const ks::minidump::DumpParseResult& result, QWidget* targetPage)
+{
+    const auto& analysis = result.analysis;
     // ===================== 诊断结论页（放在最前，是本页的主产出） =====================
-    const ks::minidump::DumpAnalysis& analysis = result.analysis;
-    // 只要有结论文本就展示本页。可信度为 None 的情形（例如不含异常记录的快照转储）
-    // 恰恰最需要把「这不是崩溃现场」讲清楚，藏起来只会让人白找崩溃点。
     if (result.success && !analysis.headline.isEmpty())
     {
-        // 结论页按"先说结论，再给证据，最后给动作"的顺序排版。
-        // 可信度用带底色的徽章而不是一行文字：它决定了这份结论该被多认真地对待，
-        // 必须一眼看到，不能和其它属性混在一起。
-        const QString accentHex = KswordTheme::AccentHex(KswordTheme::AccentRole::Blue);
-        const QString textHex = KswordTheme::TextPrimaryHex();
-        const QString mutedHex = KswordTheme::TextDisabledColorHex();
-        const QString borderHex = KswordTheme::BorderHex();
-        const QString surfaceAltHex = KswordTheme::SurfaceAltHex();
-
-        // confidenceColor：可信度越低越要显眼地降调，避免低可信结论被当成定论。
-        QColor confidenceColor = KswordTheme::TextDisabledColor();
-        switch (analysis.confidence)
+        if (targetPage == nullptr)
         {
-        case ks::minidump::AnalysisConfidence::High:
-            confidenceColor = KswordTheme::AccentColor(KswordTheme::AccentRole::Red);
-            break;
-        case ks::minidump::AnalysisConfidence::Medium:
-            confidenceColor = KswordTheme::AccentColor(KswordTheme::AccentRole::Orange);
-            break;
-        case ks::minidump::AnalysisConfidence::Low:
-            confidenceColor = KswordTheme::AccentColor(KswordTheme::AccentRole::Yellow);
-            break;
-        case ks::minidump::AnalysisConfidence::None:
-        default:
-            break;
+            registerResultTab(m_analysisView,
+            translated("minidump.tab.analysis", "诊断结论"));
         }
-        const QString confidenceHex = KswordTheme::ThemeColorName(confidenceColor);
-        // confidenceTextHex：徽章前景按徽章自己的底色反算，不能套 OnAccentHex()——
-        // 后者只对蓝色主强调色做过对比度校正，压在 Yellow（琥珀）和 None 的灰蓝上
-        // 白字只有 2:1，而这两档恰恰最需要用户看清"别把这个结论当定论"。
-        const QString confidenceTextHex = KswordTheme::ThemeColorName(
-            KswordTheme::EnsureTextContrast(
-                KswordTheme::TextPrimaryColor(),
-                confidenceColor));
-
-        // escape：结论文本里可能出现 <> &，必须转义后再拼进 HTML。
-        const auto escape = [](const QString& text) { return text.toHtmlEscaped(); };
-
-        QString html;
-        html.reserve(2048);
-        html += QStringLiteral("<div style='color:%1;'>").arg(textHex);
-
-        // 一句话结论：整页最大的字号，单独成块。
-        html += QStringLiteral(
-            "<div style='font-size:15pt; font-weight:600; line-height:150%%; margin:2px 0 10px 0;'>%1</div>")
-            .arg(escape(ks::i18n::sourceText(analysis.headline)));
-
-        // 徽章行：可信度 + 故障归类。
-        html += QStringLiteral("<div style='margin-bottom:14px;'>");
-        html += QStringLiteral(
-            "<span style='background:%1; color:%2; padding:3px 10px; "
-            "border-radius:4px; font-weight:600;'>%3 %4</span>")
-            .arg(confidenceHex)
-            .arg(confidenceTextHex)
-            .arg(translated("minidump.analysis.confidence", "可信度"))
-            .arg(escape(ks::i18n::sourceText(
-                ks::minidump::AnalysisConfidenceText(analysis.confidence))));
-        if (!analysis.category.isEmpty())
+        else if (targetPage == m_analysisView)
         {
-            html += QStringLiteral(
-                "&nbsp;&nbsp;<span style='background:%1; color:%2; padding:3px 10px; "
-                "border-radius:4px; border:1px solid %3;'>%4</span>")
-                .arg(surfaceAltHex)
-                .arg(textHex)
-                .arg(borderHex)
-                .arg(escape(ks::i18n::sourceText(analysis.category)));
-        }
-        html += QStringLiteral("</div>");
+            // 结论页按"先说结论，再给证据，最后给动作"的顺序排版。
+            // 可信度用带底色的徽章而不是一行文字：它决定了这份结论该被多认真地对待，
+            // 必须一眼看到，不能和其它属性混在一起。
+            const QString accentHex = KswordTheme::AccentHex(KswordTheme::AccentRole::Blue);
+            const QString textHex = KswordTheme::TextPrimaryHex();
+            const QString mutedHex = KswordTheme::TextDisabledColorHex();
+            const QString borderHex = KswordTheme::BorderHex();
+            const QString surfaceAltHex = KswordTheme::SurfaceAltHex();
 
-        // sectionHtml：统一渲染"小标题 + 条目列表"。
-        const auto sectionHtml =
-            [&escape, &accentHex, &textHex](const QString& title, const QStringList& items)
+            // confidenceColor：可信度越低越要显眼地降调，避免低可信结论被当成定论。
+            QColor confidenceColor = KswordTheme::TextDisabledColor();
+            switch (analysis.confidence)
             {
-                if (items.isEmpty())
-                {
-                    return QString();
-                }
-                QString block = QStringLiteral(
-                    "<div style='color:%1; font-weight:600; font-size:11pt; "
-                    "margin:0 0 6px 0;'>%2</div>")
-                    .arg(accentHex)
-                    .arg(escape(title));
-                block += QStringLiteral("<div style='margin:0 0 16px 0;'>");
-                for (const QString& item : items)
-                {
-                    // 用悬挂缩进的行而不是 <ul>：Qt 富文本对列表的边距控制很有限，
-                    // 长条目换行后会顶到项目符号下面，读起来更乱。
-                    block += QStringLiteral(
-                        "<div style='color:%1; line-height:160%%; margin-bottom:5px;'>"
-                        "<span style='color:%2;'>▸</span>&nbsp;%3</div>")
-                        .arg(textHex)
-                        .arg(accentHex)
-                        .arg(escape(item));
-                }
-                block += QStringLiteral("</div>");
-                return block;
-            };
-
-        QStringList localizedFindings;
-        for (const QString& finding : analysis.findings)
-        {
-            localizedFindings.append(ks::i18n::sourceText(finding));
-        }
-        QStringList localizedSuggestions;
-        for (const QString& suggestion : analysis.suggestions)
-        {
-            localizedSuggestions.append(ks::i18n::sourceText(suggestion));
-        }
-
-        // 崩溃点：整份报告里最该被记住的一个地址，单独成块并用等宽字体，
-        // 免得在证据条目里跟其它文字混成一片。
-        if (result.faultingAddress != 0)
-        {
-            // faultSymbol：优先用肇事候选里与崩溃地址同模块的那条，给出"模块+偏移"。
-            QString faultSymbol;
-            for (const ks::minidump::BlameEntry& blame : analysis.blame)
-            {
-                if (blame.address == result.faultingAddress && !blame.moduleName.isEmpty())
-                {
-                    faultSymbol = QStringLiteral("%1+0x%2")
-                        .arg(blame.moduleName)
-                        .arg(QString::number(blame.offset, 16).toUpper());
-                    break;
-                }
+            case ks::minidump::AnalysisConfidence::High:
+                confidenceColor = KswordTheme::AccentColor(KswordTheme::AccentRole::Red);
+                break;
+            case ks::minidump::AnalysisConfidence::Medium:
+                confidenceColor = KswordTheme::AccentColor(KswordTheme::AccentRole::Orange);
+                break;
+            case ks::minidump::AnalysisConfidence::Low:
+                confidenceColor = KswordTheme::AccentColor(KswordTheme::AccentRole::Yellow);
+                break;
+            case ks::minidump::AnalysisConfidence::None:
+            default:
+                break;
             }
+            const QString confidenceHex = KswordTheme::ThemeColorName(confidenceColor);
+            // confidenceTextHex：徽章前景按徽章自己的底色反算，不能套 OnAccentHex()——
+            // 后者只对蓝色主强调色做过对比度校正，压在 Yellow（琥珀）和 None 的灰蓝上
+            // 白字只有 2:1，而这两档恰恰最需要用户看清"别把这个结论当定论"。
+            const QString confidenceTextHex = KswordTheme::ThemeColorName(
+                KswordTheme::EnsureTextContrast(
+                    KswordTheme::TextPrimaryColor(),
+                    confidenceColor));
+
+            // escape：结论文本里可能出现 <> &，必须转义后再拼进 HTML。
+            const auto escape = [](const QString& text) { return text.toHtmlEscaped(); };
+
+            QString html;
+            html.reserve(2048);
+            html += QStringLiteral("<div style='color:%1;'>").arg(textHex);
+
+            // 一句话结论：整页最大的字号，单独成块。
             html += QStringLiteral(
-                "<div style='background:%1; border:1px solid %2; border-radius:6px; "
-                "padding:8px 12px; margin-bottom:16px;'>"
-                "<span style='color:%3;'>%4</span>&nbsp;&nbsp;"
-                "<span style='font-family:Consolas,monospace; font-size:11pt; color:%5;'>%6</span>")
-                .arg(surfaceAltHex)
-                .arg(borderHex)
-                .arg(mutedHex)
-                .arg(translated("minidump.analysis.fault_address", "崩溃点"))
-                .arg(textHex)
-                .arg(hexText(result.faultingAddress));
-            if (!faultSymbol.isEmpty())
+                "<div style='font-size:15pt; font-weight:600; line-height:150%%; margin:2px 0 10px 0;'>%1</div>")
+                .arg(escape(ks::i18n::sourceText(analysis.headline)));
+
+            // 徽章行：可信度 + 故障归类。
+            html += QStringLiteral("<div style='margin-bottom:14px;'>");
+            html += QStringLiteral(
+                "<span style='background:%1; color:%2; padding:3px 10px; "
+                "border-radius:4px; font-weight:600;'>%3 %4</span>")
+                .arg(confidenceHex)
+                .arg(confidenceTextHex)
+                .arg(translated("minidump.analysis.confidence", "可信度"))
+                .arg(escape(ks::i18n::sourceText(
+                    ks::minidump::AnalysisConfidenceText(analysis.confidence))));
+            if (!analysis.category.isEmpty())
             {
                 html += QStringLiteral(
-                    "&nbsp;&nbsp;<span style='color:%1; font-weight:600;'>%2</span>")
-                    .arg(accentHex)
-                    .arg(escape(faultSymbol));
+                    "&nbsp;&nbsp;<span style='background:%1; color:%2; padding:3px 10px; "
+                    "border-radius:4px; border:1px solid %3;'>%4</span>")
+                    .arg(surfaceAltHex)
+                    .arg(textHex)
+                    .arg(borderHex)
+                    .arg(escape(ks::i18n::sourceText(analysis.category)));
             }
             html += QStringLiteral("</div>");
-        }
 
-        // 肇事模块候选直接嵌进本页：它是结论的直接依据，让用户为了看第一嫌疑
-        // 再跳一个页签没有道理。权重画成条形，相对高低一眼可见。
-        if (!analysis.blame.empty())
-        {
-            html += QStringLiteral(
-                "<div style='color:%1; font-weight:600; font-size:11pt; margin:0 0 8px 0;'>%2</div>")
-                .arg(accentHex)
-                .arg(escape(translated("minidump.analysis.blame_title", "肇事模块候选")));
+            // sectionHtml：统一渲染"小标题 + 条目列表"。
+            const auto sectionHtml =
+                [&escape, &accentHex, &textHex](const QString& title, const QStringList& items)
+                {
+                    if (items.isEmpty())
+                    {
+                        return QString();
+                    }
+                    QString block = QStringLiteral(
+                        "<div style='color:%1; font-weight:600; font-size:11pt; "
+                        "margin:0 0 6px 0;'>%2</div>")
+                        .arg(accentHex)
+                        .arg(escape(title));
+                    block += QStringLiteral("<div style='margin:0 0 16px 0;'>");
+                    for (const QString& item : items)
+                    {
+                        // 用悬挂缩进的行而不是 <ul>：Qt 富文本对列表的边距控制很有限，
+                        // 长条目换行后会顶到项目符号下面，读起来更乱。
+                        block += QStringLiteral(
+                            "<div style='color:%1; line-height:160%%; margin-bottom:5px;'>"
+                            "<span style='color:%2;'>▸</span>&nbsp;%3</div>")
+                            .arg(textHex)
+                            .arg(accentHex)
+                            .arg(escape(item));
+                    }
+                    block += QStringLiteral("</div>");
+                    return block;
+                };
 
-            // maxWeight：条形长度的基准。权重全为 0 时退化为等长，避免除零。
-            int maxWeight = 1;
-            for (const ks::minidump::BlameEntry& blame : analysis.blame)
+            QStringList localizedFindings;
+            for (const QString& finding : analysis.findings)
             {
-                maxWeight = std::max(maxWeight, blame.weight);
+                localizedFindings.append(ks::i18n::sourceText(finding));
+            }
+            QStringList localizedSuggestions;
+            for (const QString& suggestion : analysis.suggestions)
+            {
+                localizedSuggestions.append(ks::i18n::sourceText(suggestion));
             }
 
-            // 只列前若干条：候选表尾部通常是权重极低的噪音，完整列表在专页里。
-            constexpr std::size_t kInlineBlameLimit = 5;
-            const std::size_t shownCount =
-                std::min(kInlineBlameLimit, analysis.blame.size());
-            html += QStringLiteral("<table cellspacing='0' cellpadding='0' width='100%'>");
-            for (std::size_t blameIndex = 0; blameIndex < shownCount; ++blameIndex)
+            // 崩溃点：整份报告里最该被记住的一个地址，单独成块并用等宽字体，
+            // 免得在证据条目里跟其它文字混成一片。
+            if (result.faultingAddress != 0)
             {
-                const ks::minidump::BlameEntry& blame = analysis.blame[blameIndex];
-                const int barPercent =
-                    std::clamp(blame.weight * 100 / maxWeight, 3, 100);
-                // 第一名用强调色，其余用中性色：排序本身已经表达了先后，
-                // 全部上色反而让"第一名"失去意义。
-                const QString barColor = (blameIndex == 0) ? confidenceHex : borderHex;
-                const QString nameText = blame.unloadedModule
-                    ? QStringLiteral("%1 [%2]")
-                        .arg(blame.moduleName, translated("minidump.blame.unloaded", "已卸载"))
-                    : blame.moduleName;
+                // faultSymbol：优先用肇事候选里与崩溃地址同模块的那条，给出"模块+偏移"。
+                QString faultSymbol;
+                for (const ks::minidump::BlameEntry& blame : analysis.blame)
+                {
+                    if (blame.address == result.faultingAddress && !blame.moduleName.isEmpty())
+                    {
+                        faultSymbol = QStringLiteral("%1+0x%2")
+                            .arg(blame.moduleName)
+                            .arg(QString::number(blame.offset, 16).toUpper());
+                        break;
+                    }
+                }
                 html += QStringLiteral(
-                    "<tr>"
-                    "<td width='34%%' style='padding:3px 8px 3px 0; color:%1;'>%2</td>"
-                    "<td width='50%%' style='padding:3px 0;'>"
-                    "<table cellspacing='0' cellpadding='0' width='100%%'><tr>"
-                    "<td width='%3%%' style='background:%4;'>&nbsp;</td>"
-                    "<td>&nbsp;</td></tr></table></td>"
-                    "<td width='16%%' style='padding:3px 0 3px 8px; color:%5;'>%6 %7</td>"
-                    "</tr>")
+                    "<div style='background:%1; border:1px solid %2; border-radius:6px; "
+                    "padding:8px 12px; margin-bottom:16px;'>"
+                    "<span style='color:%3;'>%4</span>&nbsp;&nbsp;"
+                    "<span style='font-family:Consolas,monospace; font-size:11pt; color:%5;'>%6</span>")
+                    .arg(surfaceAltHex)
+                    .arg(borderHex)
+                    .arg(mutedHex)
+                    .arg(translated("minidump.analysis.fault_address", "崩溃点"))
                     .arg(textHex)
-                    .arg(escape(nameText))
-                    .arg(barPercent)
-                    .arg(barColor)
-                    .arg(mutedHex)
-                    .arg(translated("minidump.column.weight", "证据权重"))
-                    .arg(blame.weight);
+                    .arg(hexText(result.faultingAddress));
+                if (!faultSymbol.isEmpty())
+                {
+                    html += QStringLiteral(
+                        "&nbsp;&nbsp;<span style='color:%1; font-weight:600;'>%2</span>")
+                        .arg(accentHex)
+                        .arg(escape(faultSymbol));
+                }
+                html += QStringLiteral("</div>");
             }
-            html += QStringLiteral("</table>");
-            if (analysis.blame.size() > shownCount)
+
+            // 肇事模块候选直接嵌进本页：它是结论的直接依据，让用户为了看第一嫌疑
+            // 再跳一个页签没有道理。权重画成条形，相对高低一眼可见。
+            if (!analysis.blame.empty())
             {
                 html += QStringLiteral(
-                    "<div style='color:%1; margin:4px 0 0 0;'>%2</div>")
-                    .arg(mutedHex)
-                    .arg(escape(translated(
-                        "minidump.analysis.blame_more",
-                        "更多候选与逐条证据见“肇事模块”页。")));
+                    "<div style='color:%1; font-weight:600; font-size:11pt; margin:0 0 8px 0;'>%2</div>")
+                    .arg(accentHex)
+                    .arg(escape(translated("minidump.analysis.blame_title", "肇事模块候选")));
+
+                // maxWeight：条形长度的基准。权重全为 0 时退化为等长，避免除零。
+                int maxWeight = 1;
+                for (const ks::minidump::BlameEntry& blame : analysis.blame)
+                {
+                    maxWeight = std::max(maxWeight, blame.weight);
+                }
+
+                // 只列前若干条：候选表尾部通常是权重极低的噪音，完整列表在专页里。
+                constexpr std::size_t kInlineBlameLimit = 5;
+                const std::size_t shownCount =
+                    std::min(kInlineBlameLimit, analysis.blame.size());
+                html += QStringLiteral("<table cellspacing='0' cellpadding='0' width='100%'>");
+                for (std::size_t blameIndex = 0; blameIndex < shownCount; ++blameIndex)
+                {
+                    const ks::minidump::BlameEntry& blame = analysis.blame[blameIndex];
+                    const int barPercent =
+                        std::clamp(blame.weight * 100 / maxWeight, 3, 100);
+                    // 第一名用强调色，其余用中性色：排序本身已经表达了先后，
+                    // 全部上色反而让"第一名"失去意义。
+                    const QString barColor = (blameIndex == 0) ? confidenceHex : borderHex;
+                    const QString nameText = blame.unloadedModule
+                        ? QStringLiteral("%1 [%2]")
+                            .arg(blame.moduleName, translated("minidump.blame.unloaded", "已卸载"))
+                        : blame.moduleName;
+                    html += QStringLiteral(
+                        "<tr>"
+                        "<td width='34%%' style='padding:3px 8px 3px 0; color:%1;'>%2</td>"
+                        "<td width='50%%' style='padding:3px 0;'>"
+                        "<table cellspacing='0' cellpadding='0' width='100%%'><tr>"
+                        "<td width='%3%%' style='background:%4;'>&nbsp;</td>"
+                        "<td>&nbsp;</td></tr></table></td>"
+                        "<td width='16%%' style='padding:3px 0 3px 8px; color:%5;'>%6 %7</td>"
+                        "</tr>")
+                        .arg(textHex)
+                        .arg(escape(nameText))
+                        .arg(barPercent)
+                        .arg(barColor)
+                        .arg(mutedHex)
+                        .arg(translated("minidump.column.weight", "证据权重"))
+                        .arg(blame.weight);
+                }
+                html += QStringLiteral("</table>");
+                if (analysis.blame.size() > shownCount)
+                {
+                    html += QStringLiteral(
+                        "<div style='color:%1; margin:4px 0 0 0;'>%2</div>")
+                        .arg(mutedHex)
+                        .arg(escape(translated(
+                            "minidump.analysis.blame_more",
+                            "更多候选与逐条证据见“肇事模块”页。")));
+                }
+                html += QStringLiteral("<div style='margin-bottom:16px;'></div>");
             }
-            html += QStringLiteral("<div style='margin-bottom:16px;'></div>");
+
+            html += sectionHtml(
+                translated("minidump.analysis.findings_title", "证据"),
+                localizedFindings);
+            html += sectionHtml(
+                translated("minidump.analysis.suggestions_title", "接下来怎么做"),
+                localizedSuggestions);
+
+            html += QStringLiteral("</div>");
+            m_analysisView->setHtml(html);
         }
-
-        html += sectionHtml(
-            translated("minidump.analysis.findings_title", "证据"),
-            localizedFindings);
-        html += sectionHtml(
-            translated("minidump.analysis.suggestions_title", "接下来怎么做"),
-            localizedSuggestions);
-
-        html += QStringLiteral("</div>");
-        m_analysisView->setHtml(html);
-        m_resultTabs->addTab(m_analysisView,
-            translated("minidump.tab.analysis", "诊断结论"));
     }
 
     // ===================== 肇事模块候选页 =====================
     if (!analysis.blame.empty())
     {
-        beginFill(m_blameTable);
-        m_blameTable->setColumnCount(6);
-        m_blameTable->setHorizontalHeaderLabels({
-            translated("minidump.column.suspect_module", "模块"),
-            translated("minidump.column.suspect_function", "函数"),
-            translated("minidump.column.hit_address", "命中地址"),
-            translated("minidump.column.module_offset", "模块内偏移"),
-            translated("minidump.column.weight", "证据权重"),
-            translated("minidump.column.evidence", "证据") });
-        m_blameTable->setRowCount(static_cast<int>(analysis.blame.size()));
-        int blameRow = 0;
-        for (const ks::minidump::BlameEntry& blame : analysis.blame)
+        if (targetPage == nullptr)
         {
-            // moduleText：已卸载模块单独标注，它是最强的单条证据。
-            const QString moduleText = blame.unloadedModule
-                ? QStringLiteral("%1 [%2]")
-                    .arg(blame.moduleName,
-                         translated("minidump.blame.unloaded", "已卸载"))
-                : blame.moduleName;
-            m_blameTable->setItem(blameRow, 0, makeItem(moduleText));
-            // 有符号时把函数名单列出来：归因到模块只能说明"哪个驱动"，
-            // 归因到函数才能直接落到代码上，这是本页最有价值的一列。
-            m_blameTable->setItem(blameRow, 1, makeItem(blame.functionText));
-            m_blameTable->setItem(blameRow, 2, makeItem(hexText(blame.address)));
-            m_blameTable->setItem(blameRow, 3, makeItem(hexText(blame.offset)));
-            m_blameTable->setItem(blameRow, 4, makeItem(QString::number(blame.weight)));
-            // evidence：多条证据合成一行，用分号分隔，避免行数爆炸。
-            QStringList localizedEvidence;
-            for (const QString& evidence : blame.evidence)
-            {
-                localizedEvidence.append(ks::i18n::sourceText(evidence));
-            }
-            m_blameTable->setItem(blameRow, 5,
-                makeItem(localizedEvidence.join(QStringLiteral("；"))));
-            ++blameRow;
-        }
-        endFill(m_blameTable);
-        m_resultTabs->addTab(m_blameTable,
+            registerResultTab(m_blameTable,
             translated("minidump.tab.blame", "肇事模块"));
+        }
+        else if (targetPage == m_blameTable)
+        {
+            beginFill(m_blameTable);
+            m_blameTable->setColumnCount(6);
+            m_blameTable->setHorizontalHeaderLabels({
+                translated("minidump.column.suspect_module", "模块"),
+                translated("minidump.column.suspect_function", "函数"),
+                translated("minidump.column.hit_address", "命中地址"),
+                translated("minidump.column.module_offset", "模块内偏移"),
+                translated("minidump.column.weight", "证据权重"),
+                translated("minidump.column.evidence", "证据") });
+            m_blameTable->setRowCount(static_cast<int>(analysis.blame.size()));
+            int blameRow = 0;
+            for (const ks::minidump::BlameEntry& blame : analysis.blame)
+            {
+                // moduleText：已卸载模块单独标注，它是最强的单条证据。
+                const QString moduleText = blame.unloadedModule
+                    ? QStringLiteral("%1 [%2]")
+                        .arg(blame.moduleName,
+                             translated("minidump.blame.unloaded", "已卸载"))
+                    : blame.moduleName;
+                m_blameTable->setItem(blameRow, 0, makeItem(moduleText));
+                // 有符号时把函数名单列出来：归因到模块只能说明"哪个驱动"，
+                // 归因到函数才能直接落到代码上，这是本页最有价值的一列。
+                m_blameTable->setItem(blameRow, 1, makeItem(blame.functionText));
+                m_blameTable->setItem(blameRow, 2, makeItem(hexText(blame.address)));
+                m_blameTable->setItem(blameRow, 3, makeItem(hexText(blame.offset)));
+                m_blameTable->setItem(blameRow, 4, makeItem(QString::number(blame.weight)));
+                // evidence：多条证据合成一行，用分号分隔，避免行数爆炸。
+                QStringList localizedEvidence;
+                for (const QString& evidence : blame.evidence)
+                {
+                    localizedEvidence.append(ks::i18n::sourceText(evidence));
+                }
+                m_blameTable->setItem(blameRow, 5,
+                    makeItem(localizedEvidence.join(QStringLiteral("；"))));
+                ++blameRow;
+            }
+            endFill(m_blameTable);
+        }
     }
 
     // ===================== 概览页（恒存在） =====================
-    beginFill(m_overviewTable);
-    m_overviewTable->setColumnCount(2);
-    m_overviewTable->setHorizontalHeaderLabels({
-        translated("minidump.column.property", "属性"),
-        translated("minidump.column.value", "值") });
-    // overviewRows：概览属性 + 解析告警合并展示，一次性设定行数。
-    const int overviewRowCount =
-        static_cast<int>(result.overview.size()) +
-        static_cast<int>(result.diagnostics.size()) +
-        (result.memoryRegionShown < result.memoryRegionTotal ? 1 : 0);
-    m_overviewTable->setRowCount(overviewRowCount);
-    int overviewRow = 0;
-    for (const ks::minidump::DumpProperty& property : result.overview)
+    if (true)
     {
-        m_overviewTable->setItem(overviewRow, 0,
-            makeItem(ks::i18n::sourceText(property.name)));
-        m_overviewTable->setItem(overviewRow, 1,
-            makeItem(ks::i18n::sourceText(property.value)));
-        ++overviewRow;
+        if (targetPage == nullptr)
+        {
+            registerResultTab(m_overviewTable, translated("minidump.tab.overview", "概览"));
+        }
+        else if (targetPage == m_overviewTable)
+        {
+        beginFill(m_overviewTable);
+        m_overviewTable->setColumnCount(2);
+        m_overviewTable->setHorizontalHeaderLabels({
+            translated("minidump.column.property", "属性"),
+            translated("minidump.column.value", "值") });
+        // overviewRows：概览属性 + 解析告警合并展示，一次性设定行数。
+        const int overviewRowCount =
+            static_cast<int>(result.overview.size()) +
+            static_cast<int>(result.diagnostics.size()) +
+            (result.memoryRegionShown < result.memoryRegionTotal ? 1 : 0);
+        m_overviewTable->setRowCount(overviewRowCount);
+        int overviewRow = 0;
+        for (const ks::minidump::DumpProperty& property : result.overview)
+        {
+            m_overviewTable->setItem(overviewRow, 0,
+                makeItem(ks::i18n::sourceText(property.name)));
+            m_overviewTable->setItem(overviewRow, 1,
+                makeItem(ks::i18n::sourceText(property.value)));
+            ++overviewRow;
+        }
+        // 内存截断说明与解析告警都作为“解析告警”属性行列出。
+        if (result.memoryRegionShown < result.memoryRegionTotal)
+        {
+            m_overviewTable->setItem(overviewRow, 0,
+                makeItem(translated("minidump.overview.warning", "解析告警")));
+            m_overviewTable->setItem(overviewRow, 1,
+                makeItem(translated(
+                    "minidump.overview.memory_truncated",
+                    "内存区域过多，仅展示前 %1 / %2 条。")
+                    .arg(result.memoryRegionShown)
+                    .arg(result.memoryRegionTotal)));
+            ++overviewRow;
+        }
+        for (const QString& diagnostic : result.diagnostics)
+        {
+            m_overviewTable->setItem(overviewRow, 0,
+                makeItem(translated("minidump.overview.warning", "解析告警")));
+            m_overviewTable->setItem(overviewRow, 1,
+                makeItem(ks::i18n::sourceText(diagnostic)));
+            ++overviewRow;
+        }
+        endFill(m_overviewTable);
+        }
     }
-    // 内存截断说明与解析告警都作为“解析告警”属性行列出。
-    if (result.memoryRegionShown < result.memoryRegionTotal)
-    {
-        m_overviewTable->setItem(overviewRow, 0,
-            makeItem(translated("minidump.overview.warning", "解析告警")));
-        m_overviewTable->setItem(overviewRow, 1,
-            makeItem(translated(
-                "minidump.overview.memory_truncated",
-                "内存区域过多，仅展示前 %1 / %2 条。")
-                .arg(result.memoryRegionShown)
-                .arg(result.memoryRegionTotal)));
-        ++overviewRow;
-    }
-    for (const QString& diagnostic : result.diagnostics)
-    {
-        m_overviewTable->setItem(overviewRow, 0,
-            makeItem(translated("minidump.overview.warning", "解析告警")));
-        m_overviewTable->setItem(overviewRow, 1,
-            makeItem(ks::i18n::sourceText(diagnostic)));
-        ++overviewRow;
-    }
-    endFill(m_overviewTable);
-    m_resultTabs->addTab(m_overviewTable, translated("minidump.tab.overview", "概览"));
 
     // ===================== 异常/停止码页 =====================
     if (!result.exceptionInfo.empty())
     {
-        beginFill(m_exceptionTable);
-        m_exceptionTable->setColumnCount(2);
-        m_exceptionTable->setHorizontalHeaderLabels({
-            translated("minidump.column.property", "属性"),
-            translated("minidump.column.value", "值") });
-        m_exceptionTable->setRowCount(static_cast<int>(result.exceptionInfo.size()));
-        int exceptionRow = 0;
-        for (const ks::minidump::DumpProperty& property : result.exceptionInfo)
+        if (targetPage == nullptr)
         {
-            m_exceptionTable->setItem(exceptionRow, 0,
-                makeItem(ks::i18n::sourceText(property.name)));
-            m_exceptionTable->setItem(exceptionRow, 1,
-                makeItem(ks::i18n::sourceText(property.value)));
-            ++exceptionRow;
-        }
-        endFill(m_exceptionTable);
-        // 多行“参数含义”允许换行展示。
-        m_exceptionTable->setWordWrap(true);
-        m_exceptionTable->resizeRowsToContents();
-        m_resultTabs->addTab(m_exceptionTable,
+            registerResultTab(m_exceptionTable,
             translated("minidump.tab.exception", "异常信息"));
+        }
+        else if (targetPage == m_exceptionTable)
+        {
+            beginFill(m_exceptionTable);
+            m_exceptionTable->setColumnCount(2);
+            m_exceptionTable->setHorizontalHeaderLabels({
+                translated("minidump.column.property", "属性"),
+                translated("minidump.column.value", "值") });
+            m_exceptionTable->setRowCount(static_cast<int>(result.exceptionInfo.size()));
+            int exceptionRow = 0;
+            for (const ks::minidump::DumpProperty& property : result.exceptionInfo)
+            {
+                m_exceptionTable->setItem(exceptionRow, 0,
+                    makeItem(ks::i18n::sourceText(property.name)));
+                m_exceptionTable->setItem(exceptionRow, 1,
+                    makeItem(ks::i18n::sourceText(property.value)));
+                ++exceptionRow;
+            }
+            endFill(m_exceptionTable);
+            // 多行“参数含义”允许换行展示。
+            m_exceptionTable->setWordWrap(true);
+            m_exceptionTable->resizeRowsToContents();
+        }
     }
 
     // ===================== 崩溃现场页 =====================
-    // TRIAGE 小型内核转储会保存当前 CPU、KTHREAD 与 EPROCESS 的局部快照。
-    // 它们与“线程”页的用户态 MINIDUMP_THREAD 不同，不能混在一起展示。
     if (!result.executionContext.empty())
     {
-        beginFill(m_executionContextTable);
-        m_executionContextTable->setColumnCount(2);
-        m_executionContextTable->setHorizontalHeaderLabels({
-            translated("minidump.column.property", "属性"),
-            translated("minidump.column.value", "值") });
-        m_executionContextTable->setRowCount(
-            static_cast<int>(result.executionContext.size()));
-        int contextRow = 0;
-        for (const ks::minidump::DumpProperty& property : result.executionContext)
+        if (targetPage == nullptr)
         {
-            m_executionContextTable->setItem(contextRow, 0,
-                makeItem(ks::i18n::sourceText(property.name)));
-            m_executionContextTable->setItem(contextRow, 1,
-                makeItem(ks::i18n::sourceText(property.value)));
-            ++contextRow;
-        }
-        endFill(m_executionContextTable);
-        m_resultTabs->addTab(m_executionContextTable,
+            registerResultTab(m_executionContextTable,
             translated("minidump.tab.execution_context", "崩溃现场"));
+        }
+        else if (targetPage == m_executionContextTable)
+        {
+            beginFill(m_executionContextTable);
+            m_executionContextTable->setColumnCount(2);
+            m_executionContextTable->setHorizontalHeaderLabels({
+                translated("minidump.column.property", "属性"),
+                translated("minidump.column.value", "值") });
+            m_executionContextTable->setRowCount(
+                static_cast<int>(result.executionContext.size()));
+            int contextRow = 0;
+            for (const ks::minidump::DumpProperty& property : result.executionContext)
+            {
+                m_executionContextTable->setItem(contextRow, 0,
+                    makeItem(ks::i18n::sourceText(property.name)));
+                m_executionContextTable->setItem(contextRow, 1,
+                    makeItem(ks::i18n::sourceText(property.value)));
+                ++contextRow;
+            }
+            endFill(m_executionContextTable);
+        }
     }
 
     // ===================== 调用栈页 =====================
     if (!result.stackFrames.empty())
     {
-        beginFill(m_stackTable);
-        m_stackTable->setColumnCount(7);
-        m_stackTable->setHorizontalHeaderLabels({
-            translated("minidump.column.thread_id", "线程 ID"),
-            translated("minidump.column.frame_index", "帧"),
-            translated("minidump.column.symbol", "符号"),
-            translated("minidump.column.source_location", "源码位置"),
-            translated("minidump.column.frame_address", "返回地址"),
-            translated("minidump.column.stack_address", "栈地址"),
-            translated("minidump.column.frame_source", "来源") });
-        m_stackTable->setRowCount(static_cast<int>(result.stackFrames.size()));
-        int stackRow = 0;
-        for (const ks::minidump::StackFrameEntry& frame : result.stackFrames)
+        if (targetPage == nullptr)
         {
-            m_stackTable->setItem(stackRow, 0,
-                makeItem(frame.threadId != 0
-                    ? QString::number(frame.threadId)
-                    : translated("minidump.stack.crash_thread", "崩溃线程")));
-            m_stackTable->setItem(stackRow, 1, makeItem(QString::number(frame.index)));
-            // 符号列优先给"模块!函数+偏移"，没有符号才退回"模块+偏移"。
-            // 合成一列而不是新开一列，是为了不把这张表撑到需要列组预设——
-            // 一旦分组，"来源"列可能被隐藏，那条误报提示就没地方说了。
-            const QString baseSymbol = frame.functionText.isEmpty()
-                ? frame.symbolText
-                : frame.functionText;
-            const QString symbolText = frame.unloadedModule
-                ? QStringLiteral("%1 [%2]")
-                    .arg(baseSymbol,
-                         translated("minidump.blame.unloaded", "已卸载"))
-                : baseSymbol;
-            m_stackTable->setItem(stackRow, 2, makeItem(symbolText));
-            // 源码位置只在映像与 PDB 都匹配时才有值，解析器已经把不可信的滤掉了。
-            m_stackTable->setItem(stackRow, 3, makeItem(frame.sourceText));
-            m_stackTable->setItem(stackRow, 4, makeItem(hexText(frame.address)));
-            m_stackTable->setItem(stackRow, 5,
-                makeItem(frame.stackAddress != 0 ? hexText(frame.stackAddress) : QString()));
-            // 来源必须如实标注：只有第 0 帧取自 CONTEXT，其余都是扫描猜测。
-            m_stackTable->setItem(stackRow, 6,
-                makeItem(frame.fromContext
-                    ? translated("minidump.stack.from_context", "上下文（可信）")
-                    : translated("minidump.stack.from_scan", "栈扫描（可能误报）")));
-            ++stackRow;
-        }
-        endFill(m_stackTable);
-        m_resultTabs->addTab(m_stackPage,
+            registerResultTab(m_stackPage,
             translated("minidump.tab.stack", "调用栈"));
+        }
+        else if (targetPage == m_stackPage)
+        {
+            beginFill(m_stackTable);
+            m_stackTable->setColumnCount(7);
+            m_stackTable->setHorizontalHeaderLabels({
+                translated("minidump.column.thread_id", "线程 ID"),
+                translated("minidump.column.frame_index", "帧"),
+                translated("minidump.column.symbol", "符号"),
+                translated("minidump.column.source_location", "源码位置"),
+                translated("minidump.column.frame_address", "返回地址"),
+                translated("minidump.column.stack_address", "栈地址"),
+                translated("minidump.column.frame_source", "来源") });
+            m_stackTable->setRowCount(static_cast<int>(result.stackFrames.size()));
+            int stackRow = 0;
+            for (const ks::minidump::StackFrameEntry& frame : result.stackFrames)
+            {
+                m_stackTable->setItem(stackRow, 0,
+                    makeItem(frame.threadId != 0
+                        ? QString::number(frame.threadId)
+                        : translated("minidump.stack.crash_thread", "崩溃线程")));
+                m_stackTable->setItem(stackRow, 1, makeItem(QString::number(frame.index)));
+                // 符号列优先给"模块!函数+偏移"，没有符号才退回"模块+偏移"。
+                // 合成一列而不是新开一列，是为了不把这张表撑到需要列组预设——
+                // 一旦分组，"来源"列可能被隐藏，那条误报提示就没地方说了。
+                const QString baseSymbol = frame.functionText.isEmpty()
+                    ? frame.symbolText
+                    : frame.functionText;
+                const QString symbolText = frame.unloadedModule
+                    ? QStringLiteral("%1 [%2]")
+                        .arg(baseSymbol,
+                             translated("minidump.blame.unloaded", "已卸载"))
+                    : baseSymbol;
+                m_stackTable->setItem(stackRow, 2, makeItem(symbolText));
+                // 源码位置只在映像与 PDB 都匹配时才有值，解析器已经把不可信的滤掉了。
+                m_stackTable->setItem(stackRow, 3, makeItem(frame.sourceText));
+                m_stackTable->setItem(stackRow, 4, makeItem(hexText(frame.address)));
+                m_stackTable->setItem(stackRow, 5,
+                    makeItem(frame.stackAddress != 0 ? hexText(frame.stackAddress) : QString()));
+                // 来源必须如实标注：只有第 0 帧取自 CONTEXT，其余都是扫描猜测。
+                m_stackTable->setItem(stackRow, 6,
+                    makeItem(frame.fromContext
+                        ? translated("minidump.stack.from_context", "上下文（可信）")
+                        : translated("minidump.stack.from_scan", "栈扫描（可能误报）")));
+                ++stackRow;
+            }
+            endFill(m_stackTable);
+        }
     }
 
     // ===================== 崩溃历史页 =====================
-    // 单看一个转储答不出两件事：这次到底是蓝屏还是"没有转储的硬挂死"，
-    // 以及崩溃当时跑的是哪一次构建的驱动。前者决定了还要不要去找转储文件，
-    // 后者决定了"修复到底生效没有"——两个判断都只能靠系统事件日志给答案。
     if (!result.crashHistory.empty())
     {
-        beginFill(m_crashHistoryTable);
-        m_crashHistoryTable->setColumnCount(4);
-        m_crashHistoryTable->setHorizontalHeaderLabels({
-            translated("minidump.column.event_time", "时间"),
-            translated("minidump.column.event_kind", "性质"),
-            translated("minidump.column.event_summary", "摘要"),
-            translated("minidump.column.detail", "说明") });
-        m_crashHistoryTable->setRowCount(
-            static_cast<int>(result.crashHistory.size()));
-        int historyRow = 0;
-        for (const ks::minidump::CrashHistoryEntry& entry : result.crashHistory)
+        if (targetPage == nullptr)
         {
-            m_crashHistoryTable->setItem(historyRow, 0,
-                makeItem(entry.time.toString(QStringLiteral("yyyy-MM-dd HH:mm:ss"))));
-            m_crashHistoryTable->setItem(historyRow, 1,
-                makeItem(ks::i18n::sourceText(entry.kindText)));
-            m_crashHistoryTable->setItem(historyRow, 2,
-                makeItem(ks::i18n::sourceText(entry.summary)));
-            m_crashHistoryTable->setItem(historyRow, 3,
-                makeItem(ks::i18n::sourceText(entry.detail)));
-            ++historyRow;
-        }
-        endFill(m_crashHistoryTable);
-        m_resultTabs->addTab(m_crashHistoryTable,
+            registerResultTab(m_crashHistoryTable,
             translated("minidump.tab.crash_history", "崩溃历史"));
+        }
+        else if (targetPage == m_crashHistoryTable)
+        {
+            beginFill(m_crashHistoryTable);
+            m_crashHistoryTable->setColumnCount(4);
+            m_crashHistoryTable->setHorizontalHeaderLabels({
+                translated("minidump.column.event_time", "时间"),
+                translated("minidump.column.event_kind", "性质"),
+                translated("minidump.column.event_summary", "摘要"),
+                translated("minidump.column.detail", "说明") });
+            m_crashHistoryTable->setRowCount(
+                static_cast<int>(result.crashHistory.size()));
+            int historyRow = 0;
+            for (const ks::minidump::CrashHistoryEntry& entry : result.crashHistory)
+            {
+                m_crashHistoryTable->setItem(historyRow, 0,
+                    makeItem(entry.time.toString(QStringLiteral("yyyy-MM-dd HH:mm:ss"))));
+                m_crashHistoryTable->setItem(historyRow, 1,
+                    makeItem(ks::i18n::sourceText(entry.kindText)));
+                m_crashHistoryTable->setItem(historyRow, 2,
+                    makeItem(ks::i18n::sourceText(entry.summary)));
+                m_crashHistoryTable->setItem(historyRow, 3,
+                    makeItem(ks::i18n::sourceText(entry.detail)));
+                ++historyRow;
+            }
+            endFill(m_crashHistoryTable);
+        }
     }
 
     // ===================== 池标记页 =====================
-    // 池损坏类停止码（0x13A / 0xC2 / 0x19…）里，"被损坏的那块内存归谁"
-    // 比调用栈更能指向肇事者：栈上出现的往往只是下一个来分配内存、
-    // 因而撞上坏链表的发现者，两次崩溃可以是两个毫不相干的模块。
     if (!result.poolTags.empty())
     {
-        beginFill(m_poolTagTable);
-        m_poolTagTable->setColumnCount(4);
-        m_poolTagTable->setHorizontalHeaderLabels({
-            translated("minidump.column.pool_tag", "池标记"),
-            translated("minidump.column.pool_tag_source", "来源"),
-            translated("minidump.column.pool_tag_owner", "映像中出现该标记的模块"),
-            translated("minidump.column.pool_tag_purpose", "已知用途") });
-        m_poolTagTable->setRowCount(static_cast<int>(result.poolTags.size()));
-        int poolRow = 0;
-        for (const ks::minidump::PoolTagCandidate& candidate : result.poolTags)
+        if (targetPage == nullptr)
         {
-            m_poolTagTable->setItem(poolRow, 0, makeItem(candidate.tagText));
-            m_poolTagTable->setItem(poolRow, 1,
-                makeItem(ks::i18n::sourceText(candidate.source)));
-            m_poolTagTable->setItem(poolRow, 2,
-                makeItem(candidate.ownerModules.join(QStringLiteral("、"))));
-            m_poolTagTable->setItem(poolRow, 3, makeItem(candidate.knownPurpose));
-            ++poolRow;
-        }
-        endFill(m_poolTagTable);
-        m_resultTabs->addTab(m_poolTagTable,
+            registerResultTab(m_poolTagTable,
             translated("minidump.tab.pool_tags", "池标记"));
+        }
+        else if (targetPage == m_poolTagTable)
+        {
+            beginFill(m_poolTagTable);
+            m_poolTagTable->setColumnCount(4);
+            m_poolTagTable->setHorizontalHeaderLabels({
+                translated("minidump.column.pool_tag", "池标记"),
+                translated("minidump.column.pool_tag_source", "来源"),
+                translated("minidump.column.pool_tag_owner", "映像中出现该标记的模块"),
+                translated("minidump.column.pool_tag_purpose", "已知用途") });
+            m_poolTagTable->setRowCount(static_cast<int>(result.poolTags.size()));
+            int poolRow = 0;
+            for (const ks::minidump::PoolTagCandidate& candidate : result.poolTags)
+            {
+                m_poolTagTable->setItem(poolRow, 0, makeItem(candidate.tagText));
+                m_poolTagTable->setItem(poolRow, 1,
+                    makeItem(ks::i18n::sourceText(candidate.source)));
+                m_poolTagTable->setItem(poolRow, 2,
+                    makeItem(candidate.ownerModules.join(QStringLiteral("、"))));
+                m_poolTagTable->setItem(poolRow, 3, makeItem(candidate.knownPurpose));
+                ++poolRow;
+            }
+            endFill(m_poolTagTable);
+        }
     }
 
     // ===================== 符号状态页 =====================
-    // 这一页的存在理由只有一条：让"函数名和行号到底可不可信"变成一个
-    // 用户看得见的结论。符号化最危险的失败方式不是报错，而是在映像已经
-    // 被重新编译过之后，安静地给出整体错位的行号。
     if (!result.symbolStatus.empty())
     {
-        beginFill(m_symbolTable);
-        m_symbolTable->setColumnCount(5);
-        m_symbolTable->setHorizontalHeaderLabels({
-            translated("minidump.column.module", "模块"),
-            translated("minidump.column.symbol_state", "符号状态"),
-            translated("minidump.column.image_path", "映像路径"),
-            translated("minidump.column.pdb_path", "PDB 路径"),
-            translated("minidump.column.detail", "说明") });
-        m_symbolTable->setRowCount(static_cast<int>(result.symbolStatus.size()));
-        int symbolRow = 0;
-        for (const ks::minidump::ModuleSymbolStatus& status : result.symbolStatus)
+        if (targetPage == nullptr)
         {
-            m_symbolTable->setItem(symbolRow, 0, makeItem(status.moduleName));
-            m_symbolTable->setItem(symbolRow, 1,
-                makeItem(ks::i18n::sourceText(
-                    ks::minidump::SymbolMatchStateText(status.state))));
-            m_symbolTable->setItem(symbolRow, 2, makeItem(status.imagePath));
-            m_symbolTable->setItem(symbolRow, 3, makeItem(status.pdbPath));
-            m_symbolTable->setItem(symbolRow, 4,
-                makeItem(ks::i18n::sourceText(status.detail)));
-            ++symbolRow;
-        }
-        endFill(m_symbolTable);
-        m_resultTabs->addTab(m_symbolTable,
+            registerResultTab(m_symbolTable,
             translated("minidump.tab.symbols", "符号"));
+        }
+        else if (targetPage == m_symbolTable)
+        {
+            beginFill(m_symbolTable);
+            m_symbolTable->setColumnCount(5);
+            m_symbolTable->setHorizontalHeaderLabels({
+                translated("minidump.column.module", "模块"),
+                translated("minidump.column.symbol_state", "符号状态"),
+                translated("minidump.column.image_path", "映像路径"),
+                translated("minidump.column.pdb_path", "PDB 路径"),
+                translated("minidump.column.detail", "说明") });
+            m_symbolTable->setRowCount(static_cast<int>(result.symbolStatus.size()));
+            int symbolRow = 0;
+            for (const ks::minidump::ModuleSymbolStatus& status : result.symbolStatus)
+            {
+                m_symbolTable->setItem(symbolRow, 0, makeItem(status.moduleName));
+                m_symbolTable->setItem(symbolRow, 1,
+                    makeItem(ks::i18n::sourceText(
+                        ks::minidump::SymbolMatchStateText(status.state))));
+                m_symbolTable->setItem(symbolRow, 2, makeItem(status.imagePath));
+                m_symbolTable->setItem(symbolRow, 3, makeItem(status.pdbPath));
+                m_symbolTable->setItem(symbolRow, 4,
+                    makeItem(ks::i18n::sourceText(status.detail)));
+                ++symbolRow;
+            }
+            endFill(m_symbolTable);
+        }
     }
 
     // ===================== 寄存器页 =====================
     if (!result.registers.empty())
     {
-        beginFill(m_registerTable);
-        m_registerTable->setColumnCount(3);
-        m_registerTable->setHorizontalHeaderLabels({
-            translated("minidump.column.register", "寄存器"),
-            translated("minidump.column.value", "值"),
-            translated("minidump.column.interpretation", "解读") });
-        m_registerTable->setRowCount(static_cast<int>(result.registers.size()));
-        int registerRow = 0;
-        for (const ks::minidump::RegisterEntry& registerEntry : result.registers)
+        if (targetPage == nullptr)
         {
-            m_registerTable->setItem(registerRow, 0, makeItem(registerEntry.name));
-            m_registerTable->setItem(registerRow, 1, makeItem(hexText(registerEntry.value)));
-            m_registerTable->setItem(registerRow, 2,
-                makeItem(ks::i18n::sourceText(registerEntry.note)));
-            ++registerRow;
-        }
-        endFill(m_registerTable);
-        m_resultTabs->addTab(m_registerTable,
+            registerResultTab(m_registerTable,
             translated("minidump.tab.registers", "寄存器"));
+        }
+        else if (targetPage == m_registerTable)
+        {
+            beginFill(m_registerTable);
+            m_registerTable->setColumnCount(3);
+            m_registerTable->setHorizontalHeaderLabels({
+                translated("minidump.column.register", "寄存器"),
+                translated("minidump.column.value", "值"),
+                translated("minidump.column.interpretation", "解读") });
+            m_registerTable->setRowCount(static_cast<int>(result.registers.size()));
+            int registerRow = 0;
+            for (const ks::minidump::RegisterEntry& registerEntry : result.registers)
+            {
+                m_registerTable->setItem(registerRow, 0, makeItem(registerEntry.name));
+                m_registerTable->setItem(registerRow, 1, makeItem(hexText(registerEntry.value)));
+                m_registerTable->setItem(registerRow, 2,
+                    makeItem(ks::i18n::sourceText(registerEntry.note)));
+                ++registerRow;
+            }
+            endFill(m_registerTable);
+        }
     }
 
     // ===================== 流目录/数据布局页 =====================
     if (!result.streams.empty())
     {
-        beginFill(m_streamTable);
-        m_streamTable->setColumnCount(5);
-        m_streamTable->setHorizontalHeaderLabels({
-            translated("minidump.column.stream_type", "类型编号"),
-            translated("minidump.column.stream_name", "类型名"),
-            translated("minidump.column.offset", "文件偏移"),
-            translated("minidump.column.size", "大小"),
-            translated("minidump.column.note", "说明") });
-        m_streamTable->setRowCount(static_cast<int>(result.streams.size()));
-        int streamRow = 0;
-        for (const ks::minidump::StreamEntry& stream : result.streams)
+        if (targetPage == nullptr)
         {
-            m_streamTable->setItem(streamRow, 0, makeItem(QString::number(stream.type)));
-            m_streamTable->setItem(streamRow, 1, makeItem(stream.typeName));
-            m_streamTable->setItem(streamRow, 2, makeItem(hexText(stream.rva)));
-            m_streamTable->setItem(streamRow, 3, makeItem(QString::number(stream.size)));
-            m_streamTable->setItem(streamRow, 4,
-                makeItem(ks::i18n::sourceText(stream.note)));
-            ++streamRow;
-        }
-        endFill(m_streamTable);
-        m_resultTabs->addTab(m_streamTable,
+            registerResultTab(m_streamTable,
             result.kind == ks::minidump::DumpKind::UserMinidump
                 ? translated("minidump.tab.streams", "流目录")
                 : translated("minidump.tab.layout", "数据布局"));
+        }
+        else if (targetPage == m_streamTable)
+        {
+            beginFill(m_streamTable);
+            m_streamTable->setColumnCount(5);
+            m_streamTable->setHorizontalHeaderLabels({
+                translated("minidump.column.stream_type", "类型编号"),
+                translated("minidump.column.stream_name", "类型名"),
+                translated("minidump.column.offset", "文件偏移"),
+                translated("minidump.column.size", "大小"),
+                translated("minidump.column.note", "说明") });
+            m_streamTable->setRowCount(static_cast<int>(result.streams.size()));
+            int streamRow = 0;
+            for (const ks::minidump::StreamEntry& stream : result.streams)
+            {
+                m_streamTable->setItem(streamRow, 0, makeItem(QString::number(stream.type)));
+                m_streamTable->setItem(streamRow, 1, makeItem(stream.typeName));
+                m_streamTable->setItem(streamRow, 2, makeItem(hexText(stream.rva)));
+                m_streamTable->setItem(streamRow, 3, makeItem(QString::number(stream.size)));
+                m_streamTable->setItem(streamRow, 4,
+                    makeItem(ks::i18n::sourceText(stream.note)));
+                ++streamRow;
+            }
+            endFill(m_streamTable);
+        }
     }
 
     // ===================== 模块/驱动页 =====================
     if (!result.modules.empty())
     {
-        beginFill(m_moduleTable);
-        m_moduleTable->setColumnCount(8);
-        m_moduleTable->setHorizontalHeaderLabels({
-            translated("minidump.column.module_name", "名称"),
-            translated("minidump.column.base", "基址"),
-            translated("minidump.column.size", "大小"),
-            translated("minidump.column.timestamp", "时间戳"),
-            translated("minidump.column.version", "版本"),
-            translated("minidump.column.pdb_file", "PDB 文件"),
-            translated("minidump.column.pdb_guid", "PDB GUID/Age"),
-            translated("minidump.column.checksum", "校验和") });
-        m_moduleTable->setRowCount(static_cast<int>(result.modules.size()));
-        int moduleRow = 0;
-        for (const ks::minidump::ModuleEntry& module : result.modules)
+        if (targetPage == nullptr)
         {
-            m_moduleTable->setItem(moduleRow, 0, makeItem(module.name));
-            m_moduleTable->setItem(moduleRow, 1, makeItem(hexText(module.base)));
-            m_moduleTable->setItem(moduleRow, 2, makeItem(hexText(module.size)));
-            m_moduleTable->setItem(moduleRow, 3, makeItem(module.timestampText));
-            m_moduleTable->setItem(moduleRow, 4, makeItem(module.version));
-            m_moduleTable->setItem(moduleRow, 5, makeItem(module.pdbName));
-            m_moduleTable->setItem(moduleRow, 6, makeItem(module.pdbGuidAge));
-            m_moduleTable->setItem(moduleRow, 7,
-                makeItem(module.checksum != 0 ? hexText(module.checksum) : QString()));
-            ++moduleRow;
-        }
-        endFill(m_moduleTable);
-        m_resultTabs->addTab(m_modulePage,
+            registerResultTab(m_modulePage,
             result.kind == ks::minidump::DumpKind::UserMinidump
                 ? translated("minidump.tab.modules", "模块")
                 : translated("minidump.tab.drivers", "驱动"));
+        }
+        else if (targetPage == m_modulePage)
+        {
+            beginFill(m_moduleTable);
+            m_moduleTable->setColumnCount(8);
+            m_moduleTable->setHorizontalHeaderLabels({
+                translated("minidump.column.module_name", "名称"),
+                translated("minidump.column.base", "基址"),
+                translated("minidump.column.size", "大小"),
+                translated("minidump.column.timestamp", "时间戳"),
+                translated("minidump.column.version", "版本"),
+                translated("minidump.column.pdb_file", "PDB 文件"),
+                translated("minidump.column.pdb_guid", "PDB GUID/Age"),
+                translated("minidump.column.checksum", "校验和") });
+            m_moduleTable->setRowCount(static_cast<int>(result.modules.size()));
+            int moduleRow = 0;
+            for (const ks::minidump::ModuleEntry& module : result.modules)
+            {
+                m_moduleTable->setItem(moduleRow, 0, makeItem(module.name));
+                m_moduleTable->setItem(moduleRow, 1, makeItem(hexText(module.base)));
+                m_moduleTable->setItem(moduleRow, 2, makeItem(hexText(module.size)));
+                m_moduleTable->setItem(moduleRow, 3, makeItem(module.timestampText));
+                m_moduleTable->setItem(moduleRow, 4, makeItem(module.version));
+                m_moduleTable->setItem(moduleRow, 5, makeItem(module.pdbName));
+                m_moduleTable->setItem(moduleRow, 6, makeItem(module.pdbGuidAge));
+                m_moduleTable->setItem(moduleRow, 7,
+                    makeItem(module.checksum != 0 ? hexText(module.checksum) : QString()));
+                ++moduleRow;
+            }
+            endFill(m_moduleTable);
+        }
     }
 
     // ===================== 线程页 =====================
     if (!result.threads.empty())
     {
-        beginFill(m_threadTable);
-        m_threadTable->setColumnCount(13);
-        m_threadTable->setHorizontalHeaderLabels({
-            translated("minidump.column.thread_id", "线程 ID"),
-            translated("minidump.column.thread_state", "状态"),
-            translated("minidump.column.thread_name", "名称"),
-            translated("minidump.column.instruction_pointer", "指令指针"),
-            translated("minidump.column.ip_module", "指令指针所属模块"),
-            translated("minidump.column.start_address", "起始地址"),
-            translated("minidump.column.start_module", "起始地址所属模块"),
-            translated("minidump.column.cpu_time", "CPU 时间(用户/内核)"),
-            translated("minidump.column.teb", "TEB"),
-            translated("minidump.column.stack_base", "栈基址"),
-            translated("minidump.column.stack_size", "栈大小"),
-            translated("minidump.column.suspend_count", "挂起计数"),
-            translated("minidump.column.priority", "优先级") });
-        m_threadTable->setRowCount(static_cast<int>(result.threads.size()));
-        int threadRow = 0;
-        for (const ks::minidump::ThreadEntry& thread : result.threads)
+        if (targetPage == nullptr)
         {
-            m_threadTable->setItem(threadRow, 0, makeItem(QString::number(thread.threadId)));
-            m_threadTable->setItem(threadRow, 1,
-                makeItem(thread.faulting
-                    ? translated("minidump.thread.faulting", "崩溃线程")
-                    : QString()));
-            m_threadTable->setItem(threadRow, 2, makeItem(thread.name));
-            m_threadTable->setItem(threadRow, 3,
-                makeItem(thread.instructionPointer != 0
-                    ? hexText(thread.instructionPointer)
-                    : QString()));
-            m_threadTable->setItem(threadRow, 4, makeItem(thread.ipSymbolText));
-            m_threadTable->setItem(threadRow, 5,
-                makeItem(thread.startAddress != 0 ? hexText(thread.startAddress) : QString()));
-            m_threadTable->setItem(threadRow, 6, makeItem(thread.startSymbolText));
-            m_threadTable->setItem(threadRow, 7, makeItem(thread.cpuTimeText));
-            m_threadTable->setItem(threadRow, 8, makeItem(hexText(thread.teb)));
-            m_threadTable->setItem(threadRow, 9, makeItem(hexText(thread.stackBase)));
-            m_threadTable->setItem(threadRow, 10, makeItem(QString::number(thread.stackSize)));
-            m_threadTable->setItem(threadRow, 11, makeItem(QString::number(thread.suspendCount)));
-            m_threadTable->setItem(threadRow, 12,
-                makeItem(QStringLiteral("%1 / %2")
-                    .arg(thread.priorityClass)
-                    .arg(thread.priority)));
-            ++threadRow;
+            registerResultTab(m_threadPage, translated("minidump.tab.threads", "线程"));
         }
-        endFill(m_threadTable);
-        m_resultTabs->addTab(m_threadPage, translated("minidump.tab.threads", "线程"));
+        else if (targetPage == m_threadPage)
+        {
+            beginFill(m_threadTable);
+            m_threadTable->setColumnCount(13);
+            m_threadTable->setHorizontalHeaderLabels({
+                translated("minidump.column.thread_id", "线程 ID"),
+                translated("minidump.column.thread_state", "状态"),
+                translated("minidump.column.thread_name", "名称"),
+                translated("minidump.column.instruction_pointer", "指令指针"),
+                translated("minidump.column.ip_module", "指令指针所属模块"),
+                translated("minidump.column.start_address", "起始地址"),
+                translated("minidump.column.start_module", "起始地址所属模块"),
+                translated("minidump.column.cpu_time", "CPU 时间(用户/内核)"),
+                translated("minidump.column.teb", "TEB"),
+                translated("minidump.column.stack_base", "栈基址"),
+                translated("minidump.column.stack_size", "栈大小"),
+                translated("minidump.column.suspend_count", "挂起计数"),
+                translated("minidump.column.priority", "优先级") });
+            m_threadTable->setRowCount(static_cast<int>(result.threads.size()));
+            int threadRow = 0;
+            for (const ks::minidump::ThreadEntry& thread : result.threads)
+            {
+                m_threadTable->setItem(threadRow, 0, makeItem(QString::number(thread.threadId)));
+                m_threadTable->setItem(threadRow, 1,
+                    makeItem(thread.faulting
+                        ? translated("minidump.thread.faulting", "崩溃线程")
+                        : QString()));
+                m_threadTable->setItem(threadRow, 2, makeItem(thread.name));
+                m_threadTable->setItem(threadRow, 3,
+                    makeItem(thread.instructionPointer != 0
+                        ? hexText(thread.instructionPointer)
+                        : QString()));
+                m_threadTable->setItem(threadRow, 4, makeItem(thread.ipSymbolText));
+                m_threadTable->setItem(threadRow, 5,
+                    makeItem(thread.startAddress != 0 ? hexText(thread.startAddress) : QString()));
+                m_threadTable->setItem(threadRow, 6, makeItem(thread.startSymbolText));
+                m_threadTable->setItem(threadRow, 7, makeItem(thread.cpuTimeText));
+                m_threadTable->setItem(threadRow, 8, makeItem(hexText(thread.teb)));
+                m_threadTable->setItem(threadRow, 9, makeItem(hexText(thread.stackBase)));
+                m_threadTable->setItem(threadRow, 10, makeItem(QString::number(thread.stackSize)));
+                m_threadTable->setItem(threadRow, 11, makeItem(QString::number(thread.suspendCount)));
+                m_threadTable->setItem(threadRow, 12,
+                    makeItem(QStringLiteral("%1 / %2")
+                        .arg(thread.priorityClass)
+                        .arg(thread.priority)));
+                ++threadRow;
+            }
+            endFill(m_threadTable);
+        }
     }
 
     // ===================== 内存区域页 =====================
     if (!result.memoryRegions.empty())
     {
-        beginFill(m_memoryTable);
-        m_memoryTable->setColumnCount(6);
-        m_memoryTable->setHorizontalHeaderLabels({
-            translated("minidump.column.base", "基址"),
-            translated("minidump.column.size", "大小"),
-            translated("minidump.column.mem_state", "状态"),
-            translated("minidump.column.mem_protect", "保护"),
-            translated("minidump.column.mem_type", "类型"),
-            translated("minidump.column.mem_source", "来源") });
-        m_memoryTable->setRowCount(static_cast<int>(result.memoryRegions.size()));
-        int memoryRow = 0;
-        for (const ks::minidump::MemoryRegionEntry& region : result.memoryRegions)
+        if (targetPage == nullptr)
         {
-            m_memoryTable->setItem(memoryRow, 0, makeItem(hexText(region.base)));
-            m_memoryTable->setItem(memoryRow, 1, makeItem(hexText(region.size)));
-            m_memoryTable->setItem(memoryRow, 2, makeItem(region.state));
-            m_memoryTable->setItem(memoryRow, 3, makeItem(region.protect));
-            m_memoryTable->setItem(memoryRow, 4, makeItem(region.type));
-            m_memoryTable->setItem(memoryRow, 5,
-                makeItem(ks::i18n::sourceText(region.source)));
-            ++memoryRow;
-        }
-        endFill(m_memoryTable);
-        m_resultTabs->addTab(m_memoryPage,
+            registerResultTab(m_memoryPage,
             translated("minidump.tab.memory", "内存区域"));
+        }
+        else if (targetPage == m_memoryPage)
+        {
+            beginFill(m_memoryTable);
+            m_memoryTable->setColumnCount(6);
+            m_memoryTable->setHorizontalHeaderLabels({
+                translated("minidump.column.base", "基址"),
+                translated("minidump.column.size", "大小"),
+                translated("minidump.column.mem_state", "状态"),
+                translated("minidump.column.mem_protect", "保护"),
+                translated("minidump.column.mem_type", "类型"),
+                translated("minidump.column.mem_source", "来源") });
+            m_memoryTable->setRowCount(static_cast<int>(result.memoryRegions.size()));
+            int memoryRow = 0;
+            for (const ks::minidump::MemoryRegionEntry& region : result.memoryRegions)
+            {
+                m_memoryTable->setItem(memoryRow, 0, makeItem(hexText(region.base)));
+                m_memoryTable->setItem(memoryRow, 1, makeItem(hexText(region.size)));
+                m_memoryTable->setItem(memoryRow, 2, makeItem(region.state));
+                m_memoryTable->setItem(memoryRow, 3, makeItem(region.protect));
+                m_memoryTable->setItem(memoryRow, 4, makeItem(region.type));
+                m_memoryTable->setItem(memoryRow, 5,
+                    makeItem(ks::i18n::sourceText(region.source)));
+                ++memoryRow;
+            }
+            endFill(m_memoryTable);
+        }
     }
 
     // ===================== 原始内存预览页 =====================
-    // 带虚拟地址的 TRIAGE 块复用只读内存多视图。辅助文件数据仍是文本预览，
-    // 不把文件偏移解释成虚拟地址，也不为未捕获字节提供读取或写回入口。
     if (!result.byteBlocks.empty())
     {
-        for (std::size_t index = 0; index < result.byteBlocks.size(); ++index)
+        if (targetPage == nullptr)
         {
-            const ks::minidump::DumpByteBlock& block = result.byteBlocks[index];
-            const std::uint64_t previewBytes = block.previewBytes.size();
-            const std::uint64_t omittedBytes = block.capturedBytes > previewBytes
-                ? block.capturedBytes - previewBytes : 0;
-            const QString blockTitle = QStringLiteral("%1 %2")
-                .arg(translated("minidump.raw.block", "数据块")).arg(index + 1);
-            ks::ui::FieldDocument metadataDocument;
-            metadataDocument.title = blockTitle;
-            metadataDocument.field(QStringLiteral("来源"), block.source, true);
-            metadataDocument.field(QStringLiteral("虚拟地址"), block.hasVirtualAddress ? hexText(block.address) : QStringLiteral("不适用"));
-            metadataDocument.field(QStringLiteral("文件偏移"), hexText(block.fileOffset));
-            metadataDocument.field(QStringLiteral("完整捕获大小（字节）"), QString::number(block.capturedBytes));
-            metadataDocument.field(QStringLiteral("预览大小（字节）"), QString::number(previewBytes));
-            auto* page = new QWidget(m_rawMemoryTabs);
-            auto* layout = new QVBoxLayout(page);
-            layout->setContentsMargins(0, 0, 0, 0);
-            auto* metadata = new ks::ui::StructuredFieldView(page);
-            metadata->setMaximumHeight(145);
-            metadata->setDocument(metadataDocument);
-            layout->addWidget(metadata);
-            if (block.hasVirtualAddress)
-            {
-                auto* editor = new ks::ui::SnapshotWorkbenchWidget(page);
-                editor->setEditable(false);
-                const QByteArray bytes(block.previewBytes.empty() ? nullptr
-                    : reinterpret_cast<const char*>(block.previewBytes.data()),
-                    static_cast<qsizetype>(previewBytes));
-                const auto architecture = result.pointerSize == 4
-                    ? ks::ui::DisassemblyArchitecture::X86 : ks::ui::DisassemblyArchitecture::X64;
-                const auto anchor = result.faultingAddress >= block.address
-                    && result.faultingAddress - block.address < previewBytes
-                    ? result.faultingAddress : block.address;
-                editor->setSnapshot(bytes, block.address, architecture, anchor,
-                    QStringLiteral("dump-block:%1:%2:%3:%4")
-                        .arg(result.filePath).arg(result.fileSize)
-                        .arg(result.fileLastModifiedUtcMs).arg(block.fileOffset));
-                layout->addWidget(editor, 1);
-            }
-            else
-            {
-                const QString rawText = ks::minidump::FormatDumpBytes(block.fileOffset,
-                    block.previewBytes.empty() ? nullptr : block.previewBytes.data(),
-                    previewBytes, omittedBytes);
-                auto* report = new CodeEditorWidget(page);
-                report->setReadOnly(true);
-                report->setRawText(rawText);
-                layout->addWidget(report, 1);
-            }
-            m_rawMemoryTabs->addTab(page, blockTitle);
-        }
-        m_resultTabs->addTab(m_rawMemoryTabs,
+            registerResultTab(m_rawMemoryTabs,
             translated("minidump.tab.raw_memory", "原始内存"));
+        }
+        else if (targetPage == m_rawMemoryTabs)
+        {
+            const QSignalBlocker rawSignals(m_rawMemoryTabs);
+            m_buildingRawMemoryCatalog = true;
+            for (std::size_t index = 0; index < result.byteBlocks.size(); ++index)
+            {
+                const QString title = QStringLiteral("%1 %2")
+                    .arg(translated("minidump.raw.block", "数据块")).arg(index + 1);
+                m_rawMemoryTabs->addTab(new QWidget(m_rawMemoryTabs), title);
+            }
+            m_buildingRawMemoryCatalog = false;
+            renderCurrentRawMemoryPage();
+        }
     }
 
     // ===================== 内存查看器页 =====================
-    // 预览页只保留少量 TRIAGE 块的前部字节；查看器则按解析期验证过的
-    // 地址映射重开 DMP，能翻页读取完整块，也同时覆盖 MDMP 内存流和线程栈。
     if (!result.capturedMemoryRanges.empty())
     {
-        m_memoryView->setDumpData(result);
-        m_resultTabs->addTab(m_memoryView,
+        if (targetPage == nullptr)
+        {
+            registerResultTab(m_memoryView,
             translated("minidump.tab.memory_view", "内存查看器"));
-    }
-    else
-    {
-        m_memoryView->clearData();
+        }
+        else if (targetPage == m_memoryView)
+        {
+            m_memoryView->setDumpData(result);
+        }
     }
 
     // ===================== 句柄页 =====================
     if (!result.handles.empty())
     {
-        beginFill(m_handleTable);
-        m_handleTable->setColumnCount(7);
-        m_handleTable->setHorizontalHeaderLabels({
-            translated("minidump.column.handle_value", "句柄值"),
-            translated("minidump.column.handle_type", "类型"),
-            translated("minidump.column.object_name", "对象名"),
-            translated("minidump.column.attributes", "属性"),
-            translated("minidump.column.granted_access", "访问掩码"),
-            translated("minidump.column.handle_count", "句柄计数"),
-            translated("minidump.column.pointer_count", "指针计数") });
-        m_handleTable->setRowCount(static_cast<int>(result.handles.size()));
-        int handleRow = 0;
-        for (const ks::minidump::HandleEntry& handle : result.handles)
+        if (targetPage == nullptr)
         {
-            m_handleTable->setItem(handleRow, 0, makeItem(hexText(handle.handleValue)));
-            m_handleTable->setItem(handleRow, 1, makeItem(handle.typeName));
-            m_handleTable->setItem(handleRow, 2, makeItem(handle.objectName));
-            m_handleTable->setItem(handleRow, 3, makeItem(hexText(handle.attributes)));
-            m_handleTable->setItem(handleRow, 4, makeItem(hexText(handle.grantedAccess)));
-            m_handleTable->setItem(handleRow, 5, makeItem(QString::number(handle.handleCount)));
-            m_handleTable->setItem(handleRow, 6, makeItem(QString::number(handle.pointerCount)));
-            ++handleRow;
+            registerResultTab(m_handlePage, translated("minidump.tab.handles", "句柄"));
         }
-        endFill(m_handleTable);
-        m_resultTabs->addTab(m_handlePage, translated("minidump.tab.handles", "句柄"));
+        else if (targetPage == m_handlePage)
+        {
+            beginFill(m_handleTable);
+            m_handleTable->setColumnCount(7);
+            m_handleTable->setHorizontalHeaderLabels({
+                translated("minidump.column.handle_value", "句柄值"),
+                translated("minidump.column.handle_type", "类型"),
+                translated("minidump.column.object_name", "对象名"),
+                translated("minidump.column.attributes", "属性"),
+                translated("minidump.column.granted_access", "访问掩码"),
+                translated("minidump.column.handle_count", "句柄计数"),
+                translated("minidump.column.pointer_count", "指针计数") });
+            m_handleTable->setRowCount(static_cast<int>(result.handles.size()));
+            int handleRow = 0;
+            for (const ks::minidump::HandleEntry& handle : result.handles)
+            {
+                m_handleTable->setItem(handleRow, 0, makeItem(hexText(handle.handleValue)));
+                m_handleTable->setItem(handleRow, 1, makeItem(handle.typeName));
+                m_handleTable->setItem(handleRow, 2, makeItem(handle.objectName));
+                m_handleTable->setItem(handleRow, 3, makeItem(hexText(handle.attributes)));
+                m_handleTable->setItem(handleRow, 4, makeItem(hexText(handle.grantedAccess)));
+                m_handleTable->setItem(handleRow, 5, makeItem(QString::number(handle.handleCount)));
+                m_handleTable->setItem(handleRow, 6, makeItem(QString::number(handle.pointerCount)));
+                ++handleRow;
+            }
+            endFill(m_handleTable);
+        }
     }
 
     // ===================== 已卸载模块页 =====================
     if (!result.unloadedModules.empty())
     {
-        beginFill(m_unloadedTable);
-        m_unloadedTable->setColumnCount(5);
-        m_unloadedTable->setHorizontalHeaderLabels({
-            translated("minidump.column.module_name", "名称"),
-            translated("minidump.column.base", "基址"),
-            translated("minidump.column.size", "大小"),
-            translated("minidump.column.timestamp", "时间戳"),
-            translated("minidump.column.checksum", "校验和") });
-        m_unloadedTable->setRowCount(static_cast<int>(result.unloadedModules.size()));
-        int unloadedRow = 0;
-        for (const ks::minidump::UnloadedModuleEntry& module : result.unloadedModules)
+        if (targetPage == nullptr)
         {
-            m_unloadedTable->setItem(unloadedRow, 0, makeItem(module.name));
-            m_unloadedTable->setItem(unloadedRow, 1, makeItem(hexText(module.base)));
-            m_unloadedTable->setItem(unloadedRow, 2, makeItem(hexText(module.size)));
-            m_unloadedTable->setItem(unloadedRow, 3, makeItem(module.timestampText));
-            m_unloadedTable->setItem(unloadedRow, 4,
-                makeItem(module.checksum != 0 ? hexText(module.checksum) : QString()));
-            ++unloadedRow;
-        }
-        endFill(m_unloadedTable);
-        m_resultTabs->addTab(m_unloadedTable,
+            registerResultTab(m_unloadedTable,
             translated("minidump.tab.unloaded", "已卸载模块"));
+        }
+        else if (targetPage == m_unloadedTable)
+        {
+            beginFill(m_unloadedTable);
+            m_unloadedTable->setColumnCount(5);
+            m_unloadedTable->setHorizontalHeaderLabels({
+                translated("minidump.column.module_name", "名称"),
+                translated("minidump.column.base", "基址"),
+                translated("minidump.column.size", "大小"),
+                translated("minidump.column.timestamp", "时间戳"),
+                translated("minidump.column.checksum", "校验和") });
+            m_unloadedTable->setRowCount(static_cast<int>(result.unloadedModules.size()));
+            int unloadedRow = 0;
+            for (const ks::minidump::UnloadedModuleEntry& module : result.unloadedModules)
+            {
+                m_unloadedTable->setItem(unloadedRow, 0, makeItem(module.name));
+                m_unloadedTable->setItem(unloadedRow, 1, makeItem(hexText(module.base)));
+                m_unloadedTable->setItem(unloadedRow, 2, makeItem(hexText(module.size)));
+                m_unloadedTable->setItem(unloadedRow, 3, makeItem(module.timestampText));
+                m_unloadedTable->setItem(unloadedRow, 4,
+                    makeItem(module.checksum != 0 ? hexText(module.checksum) : QString()));
+                ++unloadedRow;
+            }
+            endFill(m_unloadedTable);
+        }
     }
 
     // ===================== 全文报告页 =====================
     if (result.success)
     {
-        // 报告用中文规范文本生成，只读编辑器按当前语言即时渲染。
-        m_reportEditor->setDocument(buildReportText(result));
-        m_resultTabs->addTab(m_reportEditor, translated("minidump.tab.report", "报告"));
+        if (targetPage == nullptr)
+        {
+            registerResultTab(m_reportEditor, translated("minidump.tab.report", "报告"));
+        }
+        else if (targetPage == m_reportEditor)
+        {
+            // 报告用中文规范文本生成，只读编辑器按当前语言即时渲染。
+            m_reportEditor->setDocument(buildReportText(result));
+        }
     }
+
 }
 
 ks::ui::FieldDocument MinidumpDock::buildReportText(const ks::minidump::DumpParseResult& result) const
