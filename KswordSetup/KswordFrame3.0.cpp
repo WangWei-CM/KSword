@@ -39,6 +39,7 @@ int CenteredWindowY(int workY, int workHeight, int windowHeight) {
 void GuiInitMain(const std::vector<std::string>& args, Fl_Window* MainWindow);
 void GuiAfterShowMain(Fl_Window* MainWindow);
 int AsyncMain(const std::vector<std::string>& args);
+void GuiDrainAcceptedInstallBeforeExit();
 
 // main initializes the FLTK installer shell. Inputs are normal process
 // arguments; processing initializes COM, theme state, the centered right-side
@@ -55,6 +56,7 @@ int main(int argc, char** argv) {
     const HRESULT comInitResult = ::CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     const bool comInitialized = SUCCEEDED(comInitResult);
 
+    Fl::lock(); // Initialize FLTK wakeup support before any worker can publish.
     InitFlatThemeGlobal();
 
     int workX = 0;
@@ -94,6 +96,7 @@ int main(int argc, char** argv) {
     KApplyWindowIcon(window);
     GuiAfterShowMain(window);
     const int exitCode = Fl::run();
+    GuiDrainAcceptedInstallBeforeExit();
     if (comInitialized) {
         ::CoUninitialize();
     }
