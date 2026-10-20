@@ -969,7 +969,7 @@ private:
     std::vector<WmiProviderEntry> m_wmiProviders; // Provider 缓存。
     std::atomic_bool m_wmiSubscribeRunning{ false }; // 订阅运行状态。
     std::atomic_bool m_wmiSubscribePaused{ false };  // 订阅暂停状态。
-    std::atomic_bool m_wmiSubscribeStopFlag{ false }; // 订阅停止信号。
+    std::shared_ptr<std::atomic_bool> m_wmiSubscribeStopFlag = std::make_shared<std::atomic_bool>(false); // 订阅停止信号。
     std::unique_ptr<std::thread> m_wmiSubscribeThread; // WMI 后台订阅线程。
     int m_wmiProviderRefreshProgressPid = 0;          // WMI Provider 刷新进度 PID。
     int m_wmiSubscribeProgressPid = 0;                // WMI 订阅进度 PID。

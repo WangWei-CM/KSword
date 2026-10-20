@@ -1,4 +1,5 @@
 #include "MonitorEventFilterProjection.h"
+#include "../UI/AsyncCleanupRegistry.h"
 
 #include "../UI/FlatButtonTheme.h"
 #include "../UI/TableContextMenu.h"
@@ -9821,9 +9822,17 @@ void MonitorDock::startWmiSubscription()
             << eol;
     }
 
+    auto stopSignal = std::make_shared<std::atomic_bool>(false);
+    const std::weak_ptr<std::atomic_bool> weakStop(stopSignal);
+    auto cleanupLease = ks::ui::AsyncCleanupRegistry::global().acquire([weakStop]() {
+        if (const auto stop = weakStop.lock()) stop->store(true);
+    });
+    if (!cleanupLease) return; // Application exit has closed session admission.
+    m_wmiSubscribeStopFlag = std::move(stopSignal);
+
     m_wmiSubscribeRunning.store(true);
     m_wmiSubscribePaused.store(false);
-    m_wmiSubscribeStopFlag.store(false);
+    m_wmiSubscribeStopFlag->store(false);
 
     if (m_wmiSubscribeProgressPid == 0)
     {
@@ -9851,7 +9860,7 @@ void MonitorDock::startWmiSubscription()
     m_wmiProgressPosted.store(false);
 
     QPointer<MonitorDock> guardThis(this);
-    m_wmiSubscribeThread = std::make_unique<std::thread>([guardThis, classList, whereClause, generation, archive]() {
+    m_wmiSubscribeThread = std::make_unique<std::thread>([guardThis, classList, whereClause, generation, archive, cleanupLease]() {
         struct ArchiveSeal final
         {
             std::shared_ptr<ks::monitor::WmiEventArchive> archive;
@@ -9924,7 +9933,7 @@ void MonitorDock::startWmiSubscription()
         for (std::size_t classIndex = 0; classIndex < classList.size(); ++classIndex)
         {
             const QString className = classList[classIndex];
-            if (guardThis == nullptr || guardThis->m_wmiSubscribeStopFlag.load())
+            if (guardThis == nullptr || guardThis->m_wmiSubscribeStopFlag->load())
             {
                 break;
             }
@@ -10006,7 +10015,7 @@ void MonitorDock::startWmiSubscription()
         }, Qt::QueuedConnection);
 
         std::size_t eventCount = 0;
-        while (guardThis != nullptr && !guardThis->m_wmiSubscribeStopFlag.load())
+        while (guardThis != nullptr && !guardThis->m_wmiSubscribeStopFlag->load())
         {
             if (guardThis->m_wmiSubscribePaused.load())
             {
@@ -10017,7 +10026,7 @@ void MonitorDock::startWmiSubscription()
             bool hasEvent = false;
             for (ClassEnum& classEnum : enums)
             {
-                if (guardThis == nullptr || guardThis->m_wmiSubscribeStopFlag.load())
+                if (guardThis == nullptr || guardThis->m_wmiSubscribeStopFlag->load())
                 {
                     break;
                 }
@@ -10182,7 +10191,7 @@ void MonitorDock::stopWmiSubscriptionInternal(bool waitForThread)
             << eol;
     }
 
-    m_wmiSubscribeStopFlag.store(true);
+    m_wmiSubscribeStopFlag->store(true);
 
     if (m_wmiSubscribeStatusLabel != nullptr)
     {
@@ -10287,7 +10296,7 @@ void MonitorDock::enqueueWmiEventRow(
     if (!m_wmiEventArchive || !m_wmiEventArchive->append(snapshot, &archiveError))
     {
         { const std::lock_guard<std::mutex> lock(m_wmiPendingMutex); m_wmiArchiveError = archiveError; }
-        m_wmiSubscribeStopFlag.store(true);
+        m_wmiSubscribeStopFlag->store(true);
         return;
     }
     m_wmiArchivedRows.fetch_add(1);
