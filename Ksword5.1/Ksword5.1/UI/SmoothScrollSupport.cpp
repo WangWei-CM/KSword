@@ -113,23 +113,20 @@ namespace
 
         bool running() const { return m_running; }
         int target() const { return m_target; }
-        void stop()
+        void stop(const char* outcome = "canceled")
         {
 #if KSWORD_PERF_TRACE_ENABLED
             // 采集：动画结束或被新滚动打断时，记录总时长与驱动帧数。
             if (m_running && m_perfActive)
             {
-                ks::ui::RecordPerfSpanWithCount("perf_scroll_animation",
-                    m_bar.isNull() ? QString() : m_bar->objectName(),
-                    m_clock.isValid() ? m_clock.elapsed() : 0, m_perfFrames);
-                // 采集：单帧实际写入/刷新累计耗时；与总时长之差即 UI 线程被阻塞的等待时间。
-                ks::ui::RecordPerfSpanWithCount("perf_scroll_animation_work",
-                    m_bar.isNull() ? QString() : m_bar->objectName(),
-                    m_perfWorkMs, m_perfFrames);
+                // 只是动画墙钟生命周期；包含正常帧等待，不能减去同步 work 推导阻塞。
+                ks::ui::RecordPerfSpanNs("perf_scroll_animation_elapsed",
+                    (m_bar.isNull() ? QString() : m_bar->objectName()) +
+                        QLatin1Char('/') + QString::fromLatin1(outcome),
+                    m_clock.isValid() ? m_clock.nsecsElapsed() : 0, m_perfFrames);
             }
             m_perfActive = false;
             m_perfFrames = 0;
-            m_perfWorkMs = 0;
 #endif
             m_running = false;
             m_timer.stop();
@@ -140,7 +137,7 @@ namespace
 
         void start(int targetValue, int durationMs)
         {
-            stop();
+            stop("replaced");
             if (m_bar.isNull())
             {
                 return;
@@ -158,7 +155,6 @@ namespace
             // 采集：本段动画开始累计帧数，由 advance 推进。
             m_perfActive = true;
             m_perfFrames = 0;
-            m_perfWorkMs = 0;
 #endif
             for (QWidget* parent = m_bar->parentWidget(); parent; parent = parent->parentWidget())
             {
@@ -210,15 +206,15 @@ namespace
         void advance()
         {
 #if KSWORD_PERF_TRACE_ENABLED
+            // 同步驱动区间单独记录，包含最后一帧；不测异步 paint/合成/呈现。
+            ks::ui::PerfScope framePerf("perf_scroll_driver_sync_work",
+                m_bar.isNull() ? QString() : m_bar->objectName());
+            framePerf.setItemCount(0);
             if (m_perfActive)
-            {
-                ++m_perfFrames;           // 采集：每推进一帧累加，用于判断滚动是否由逐帧动画驱动。
-                m_perfFrameClock.start(); // 采集：开始计量本帧实际写入与刷新耗时。
-            }
+                ++m_perfFrames; // 推进尝试次数，不是呈现帧数或 FPS。
 #endif
             if (!m_running || m_bar.isNull() || !m_bar->isEnabled() || !m_bar->window()->isVisible())
             {
-                accumulateFrameWork();
                 stop();
                 return;
             }
@@ -231,7 +227,7 @@ namespace
             // 先停止计时，再发最后一帧信号，允许业务连接在信号内开始新滚动。
             if (progress >= 1.0)
             {
-                stop();
+                stop("completed");
             }
             else if (const int interval = m_frameSource ? watchdogInterval() : frameInterval();
                 m_timer.interval() != interval)
@@ -239,23 +235,18 @@ namespace
                 m_timer.setInterval(interval);
             }
             const QScopedValueRollback<bool> writingGuard(m_writing, true);
+#if KSWORD_PERF_TRACE_ENABLED
+            const int previousValue = m_bar->value();
+#endif
             m_bar->setValue(std::clamp(value, m_bar->minimum(), m_bar->maximum()));
             if (m_running && m_frameSource)
             {
                 // 整数像素缓动尾段可能连续两帧 value 相同，也必须维持下一次呈现回调。
                 m_frameSource->update();
             }
-            accumulateFrameWork();
-        }
-
-        // 采集：把本帧实际写入/刷新耗时累加到当前动画，供 stop 时区分帧数与单帧开销。
-        void accumulateFrameWork()
-        {
 #if KSWORD_PERF_TRACE_ENABLED
-            if (m_perfActive && m_perfFrameClock.isValid())
-            {
-                m_perfWorkMs += m_perfFrameClock.elapsed();
-            }
+            // count 为本次驱动是否实际改变整数滚动值；仍不等同物理呈现。
+            framePerf.setItemCount(!m_bar.isNull() && m_bar->value() != previousValue ? 1 : 0);
 #endif
         }
 
@@ -274,8 +265,6 @@ namespace
 #if KSWORD_PERF_TRACE_ENABLED
         bool m_perfActive = false;      // 采集：本段动画是否正在累计帧数。
         int m_perfFrames = 0;           // 采集：本段动画已推进的帧数。
-        qint64 m_perfWorkMs = 0;        // 采集：本段动画帧内写入/刷新累计耗时。
-        QElapsedTimer m_perfFrameClock; // 采集：单帧写入耗时计时。
 #endif
     };
 
