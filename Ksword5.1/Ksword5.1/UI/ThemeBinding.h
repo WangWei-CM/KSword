@@ -24,7 +24,7 @@ namespace ks::ui
     bool BindWidgetTheme(QWidget* widget, std::function<void()> refresh,
         ThemePalettePolicy palettePolicy = ThemePalettePolicy::FollowApplication);
 
-    // 仅在构造完成、最终父级建立后准备当前显示分支；不扫描模型或预加载隐藏 Tab/Popup。
+    // 仅在构造完成、最终父级建立后准备当前显示分支；从待刷新登记项验证宿主，不扫描整树。
     // 与原分片消费同一待刷新标记，已准备项不会在旧队列中重复执行。
     void PrepareWidgetThemeBindingsForShow(QWidget* scope);
 

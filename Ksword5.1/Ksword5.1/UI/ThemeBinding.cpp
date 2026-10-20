@@ -69,6 +69,7 @@ namespace
         void schedule(WidgetThemeBinding* binding);
         void scheduleAll();
         void applyPending(WidgetThemeBinding* binding); // 首帧入口消费同一登记项，不另建主题绑定。
+        void applyPendingForScope(QWidget* scope);
 
     protected:
         // 应用调色板更新只排队刷新；各控件的局部 palette 事件由自己的绑定观察。
@@ -88,6 +89,7 @@ namespace
         std::list<QPointer<WidgetThemeBinding>> m_bindings; // 稳定迭代器，登记/销毁无需扫描全部绑定。
         std::deque<QPointer<WidgetThemeBinding>> m_pending; // 常数时间取队首，保持登记顺序。
         QSet<WidgetThemeBinding*> m_pendingMembership; // 仅作常数时间去重；实际队列仍持弱引用。
+        QSet<WidgetThemeBinding*> m_dirtyBindings; // 实际未消费请求；FIFO可含已首帧消费的旧节点。
         bool m_scheduled = false; // 合并同一轮重复主题事件的调度门禁。
     };
 
@@ -136,6 +138,7 @@ namespace
         {
             return std::exchange(m_refreshPending, false);
         }
+        QWidget* widget() const { return m_widget.data(); }
 
         // apply 只在 GUI 线程调用；先复制函数，再执行可能销毁自身的样式更新。
         void apply()
@@ -233,6 +236,7 @@ namespace
         {
             m_bindings.erase(registration);
             m_pendingMembership.remove(binding); // 防止释放后同址新对象被旧待刷新地址误判为已排队。
+            m_dirtyBindings.remove(binding);
         });
         schedule(binding);
     }
@@ -244,6 +248,7 @@ namespace
             return;
         }
         binding->requestRefresh();
+        m_dirtyBindings.insert(binding);
         // weakBinding 为当前对象的弱引用；重复事件只保留一次待刷新记录。
         const QPointer<WidgetThemeBinding> weakBinding(binding);
         if (!m_pendingMembership.contains(binding))
@@ -271,7 +276,13 @@ namespace
     // 节点仍留在 FIFO 中去重；若之后到达新主题请求，该节点可消费新请求而不丢更新。
     void ThemeBindingRegistry::applyPending(WidgetThemeBinding* binding)
     {
-        if (binding != nullptr && binding->takePendingRefresh())
+        if (binding == nullptr)
+        {
+            return;
+        }
+        // 先移除，回调中的真实新请求可以重新登记而不被本轮吞掉。
+        m_dirtyBindings.remove(binding);
+        if (binding->takePendingRefresh())
         {
             binding->apply();
         }
@@ -331,24 +342,71 @@ namespace
         return nullptr;
     }
 
-    // 只收当前可显示分支和现成控件，不提前创建其它 Tab、独立窗口或 Popup。
-    void collectShownBranch(QWidget* widget, QVector<QPointer<QWidget>>& branch)
+    // 从待刷新控件向上验证宿主，不再扫描没有请求的整棵控件树。
+    int visibleDepthInScope(QWidget* widget, QWidget* scope)
     {
-        if (widget == nullptr)
+        int depth = 0;
+        while (widget != nullptr && widget != scope)
         {
-            return;
-        }
-        branch.append(widget);
-        const auto* stack = qobject_cast<QStackedWidget*>(widget); // 隐藏 Tab 不能进入首帧工作量。
-        for (QObject* object : widget->children())
-        {
-            auto* child = qobject_cast<QWidget*>(object); // 布局/模型 QObject 无需参与颜色准备。
-            if (child == nullptr || child->isWindow() || !child->isVisibleTo(widget)
-                || (stack != nullptr && child != stack->currentWidget()))
+            if (widget->isWindow())
             {
-                continue;
+                return -1;
             }
-            collectShownBranch(child, branch);
+            QWidget* parent = widget->parentWidget();
+            if (parent == nullptr || !widget->isVisibleTo(parent))
+            {
+                return -1;
+            }
+            if (auto* stack = qobject_cast<QStackedWidget*>(parent);
+                stack != nullptr && widget != stack->currentWidget())
+            {
+                return -1;
+            }
+            widget = parent;
+            ++depth;
+        }
+        return widget == scope ? depth : -1;
+    }
+
+    void ThemeBindingRegistry::applyPendingForScope(QWidget* scope)
+    {
+        if (m_dirtyBindings.isEmpty())
+        {
+            return; // 干净热切为O(1)，旧FIFO节点不让页面重新遍历。
+        }
+        struct Pending
+        {
+            QPointer<WidgetThemeBinding> binding;
+            int depth;
+        };
+        QVector<Pending> pending;
+        pending.reserve(m_dirtyBindings.size());
+        for (WidgetThemeBinding* binding : m_dirtyBindings)
+        {
+            const int depth = visibleDepthInScope(binding->widget(), scope);
+            if (depth >= 0)
+            {
+                pending.append({binding, depth});
+            }
+        }
+        std::stable_sort(pending.begin(), pending.end(), [](const Pending& left, const Pending& right)
+        {
+            return left.depth < right.depth; // 父样式先于子样式，沿用首帧准备顺序。
+        });
+        const QPointer<QWidget> owner(scope);
+        const QPointer<ThemeBindingRegistry> lifetime(this);
+        for (const Pending& request : pending)
+        {
+            if (owner == nullptr || lifetime == nullptr)
+            {
+                return;
+            }
+            // 前一个回调允许销毁、重挂、切页；此时不准备已经离开的分支。
+            if (request.binding != nullptr
+                && visibleDepthInScope(request.binding->widget(), owner.data()) >= 0)
+            {
+                lifetime->applyPending(request.binding.data());
+            }
         }
     }
 }
@@ -362,15 +420,7 @@ void ks::ui::PrepareWidgetThemeBindingsForShow(QWidget* scope)
     {
         return;
     }
-    QVector<QPointer<QWidget>> branch; // 回调可析构或重挂控件，收集后全部通过弱引用探活。
-    collectShownBranch(scope, branch);
-    for (const QPointer<QWidget>& widget : branch)
-    {
-        if (widget != nullptr && ownerRegistry != nullptr)
-        {
-            ownerRegistry->applyPending(bindingForWidget(widget.data()));
-        }
-    }
+    ownerRegistry->applyPendingForScope(scope);
 }
 
 ks::ui::ScopedWidgetThemePreparation::ScopedWidgetThemePreparation(QWidget* scope)
