@@ -540,7 +540,8 @@ namespace ksword::memory_dock
     {
         m_attachedPid = processId;
         m_attachedProcessName = processName;
-        ++m_channelTargetEpoch;requestHvmAvailability();
+        ++m_channelTargetEpoch;
+        if(m_channelQueryJob)requestHvmAvailability();
         updateRunButtonState();
     }
 
