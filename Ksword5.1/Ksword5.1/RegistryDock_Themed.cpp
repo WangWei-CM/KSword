@@ -1297,59 +1297,63 @@ void RegistryDock::createValue()
     if (m_applyingChanges || !preserveEditorDraft() || !guarded) return;
     const QString path = m_currentPath;
     const RegistryAccessContext context = accessContext();
-    QDialog dialog(this);
-    dialog.setWindowTitle(QStringLiteral("新建注册表值"));
-    ks::ui::StyleSecondaryWindow(&dialog);
-    auto* layout = new QVBoxLayout(&dialog);
+    const QPointer<QDialog> dialog = new QDialog(this);
+    dialog->setWindowTitle(QStringLiteral("新建注册表值"));
+    ks::ui::StyleSecondaryWindow(dialog.data());
+    auto* layout = new QVBoxLayout(dialog.data());
     ks::ui::StyleSecondaryContentLayout(layout);
-    auto* scroll = new QScrollArea(&dialog);
+    auto* scroll = new QScrollArea(dialog.data());
     scroll->setWidgetResizable(true);
     scroll->setFrameShape(QFrame::NoFrame);
     auto* editor = new RegistryValueEditorWidget;
     editor->setValue(path, QString(), REG_SZ, QByteArray(2, '\0'), true);
     scroll->setWidget(editor);
     layout->addWidget(scroll, 1);
-    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Save | QDialogButtonBox::Cancel, &dialog);
+    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Save | QDialogButtonBox::Cancel, dialog.data());
     buttons->button(QDialogButtonBox::Save)->setText(QStringLiteral("暂存新值"));
     ks::ui::StyleSecondaryButtonBox(buttons);
     ks::ui::StyleSecondaryFooter(buttons);
     layout->addWidget(buttons);
     RegistryValueDraft draft;
-    connect(buttons, &QDialogButtonBox::accepted, &dialog, [&]() {
+    connect(buttons, &QDialogButtonBox::accepted, dialog.data(), [&]() {
         QString error;
-        if (!editor->value(&draft, &error)) { QMessageBox::warning(&dialog, QStringLiteral("新建值"), error); return; }
-        dialog.accept();
+        if (!editor->value(&draft, &error)) { QMessageBox::warning(dialog.data(), QStringLiteral("新建值"), error); return; }
+        if (dialog) dialog->accept();
     });
-    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
-    ks::ui::applyResponsiveWindowGeometry(&dialog, this, QSize(820, 620), QSize(420, 320));
+    connect(buttons, &QDialogButtonBox::rejected, dialog.data(), &QDialog::reject);
+    ks::ui::applyResponsiveWindowGeometry(dialog.data(), this, QSize(820, 620), QSize(420, 320));
     // 模态返回后确认冻结目标未被切换。
-    if (dialog.exec() != QDialog::Accepted || !guarded) return;
+    const int outcome = dialog->exec();
+    if (dialog) delete dialog.data();
+    if (outcome != QDialog::Accepted || !guarded) return;
     if (m_currentPath.compare(path, Qt::CaseInsensitive) != 0 || m_viewBits != context.viewBits) return;
-    RegistryValueState original;
-    QString error;
-    if (!RegistryWorkbenchAccess::read(path, draft.name, context, &original, &error))
-    { QMessageBox::warning(this, QStringLiteral("新建值"), error); return; }
-    if (original.exists)
-    { QMessageBox::warning(this, QStringLiteral("新建值"), QStringLiteral("值已存在，请使用编辑入口。")); return; }
-    PendingValueChange change;
-    change.keyPath = path; change.name = draft.name;
-    change.afterType = draft.type; change.afterData = draft.data;
-    change.viewBits = context.viewBits; change.useR0 = context.useR0;
-    qsizetype existingIndex = -1;
-    qsizetype bytes = change.afterData.size();
-    for (qsizetype i = 0; i < m_pendingChanges.size(); ++i)
-    {
-        const auto& pending = m_pendingChanges.at(i);
-        if (pending.keyPath.compare(path, Qt::CaseInsensitive) == 0 && pending.name.compare(change.name, Qt::CaseInsensitive) == 0
-            && pending.viewBits == context.viewBits && pending.useR0 == context.useR0) existingIndex = i;
-        else bytes += pending.beforeData.size() + pending.afterData.size();
-    }
-    if ((existingIndex < 0 && m_pendingChanges.size() >= 1024) || bytes > 64 * 1024 * 1024)
-    { QMessageBox::warning(this, QStringLiteral("新建值"), QStringLiteral("暂存达到容量上限，请先应用或清空。")); return; }
-    if (existingIndex >= 0) m_pendingChanges[existingIndex] = change;
-    else m_pendingChanges.push_back(change);
-    updatePendingChanges();
-    m_rightTabWidget->setCurrentIndex(2);
+    readLegacyValue(path, draft.name, context, [this, path, context, draft](const RegistryValueState& original, const QString& error, const bool ok) {
+        if (m_currentPath.compare(path, Qt::CaseInsensitive) != 0 || m_viewBits != context.viewBits
+            || accessContextForPath(path).useR0 != context.useR0) return;
+        if (!ok)
+        { QMessageBox::warning(this, QStringLiteral("新建值"), error); return; }
+        if (original.exists)
+        { QMessageBox::warning(this, QStringLiteral("新建值"), QStringLiteral("值已存在，请使用编辑入口。")); return; }
+        PendingValueChange change;
+        change.keyPath = path; change.name = draft.name;
+        change.afterType = draft.type; change.afterData = draft.data;
+        change.viewBits = context.viewBits; change.useR0 = context.useR0;
+        qsizetype existingIndex = -1;
+        qsizetype bytes = change.afterData.size();
+        for (qsizetype i = 0; i < m_pendingChanges.size(); ++i)
+        {
+            const auto& pending = m_pendingChanges.at(i);
+            if (pending.keyPath.compare(path, Qt::CaseInsensitive) == 0 && pending.name.compare(change.name, Qt::CaseInsensitive) == 0
+                && pending.viewBits == context.viewBits && pending.useR0 == context.useR0) existingIndex = i;
+            else bytes += pending.beforeData.size() + pending.afterData.size();
+        }
+        if ((existingIndex < 0 && m_pendingChanges.size() >= 1024) || bytes > 64 * 1024 * 1024)
+        { QMessageBox::warning(this, QStringLiteral("新建值"), QStringLiteral("暂存达到容量上限，请先应用或清空。")); return; }
+        if (existingIndex >= 0) m_pendingChanges[existingIndex] = change;
+        else m_pendingChanges.push_back(change);
+        updatePendingChanges();
+        m_rightTabWidget->setCurrentIndex(2);
+    });
 }
 
 void RegistryDock::deleteSelectedObject()
@@ -1368,37 +1372,37 @@ void RegistryDock::deleteSearchResultValue(const QString& inputPath, const QStri
     const QString name = inputName;
     const RegistryAccessContext context = capturedContext ? *capturedContext : accessContextForPath(path);
     if (m_applyingChanges || !preserveEditorDraft() || !guarded) return;
-    RegistryValueState original;
-    QString error;
-    if (!RegistryWorkbenchAccess::read(path, name, context, &original, &error) || !original.exists || !original.complete)
-    { QMessageBox::warning(this, QStringLiteral("删除值"), error.isEmpty() ? QStringLiteral("原值不存在或数据不完整。") : error); return; }
-    PendingValueChange change;
-    change.keyPath = path; change.name = name; change.beforeExists = true;
-    change.beforeType = original.type; change.beforeData = original.data; change.deleteValue = true;
-    change.viewBits = context.viewBits; change.useR0 = context.useR0;
-    qsizetype existing = -1;
-    for (qsizetype i = 0; i < m_pendingChanges.size(); ++i)
-        if (m_pendingChanges.at(i).keyPath.compare(path, Qt::CaseInsensitive) == 0
-            && m_pendingChanges.at(i).name.compare(name, Qt::CaseInsensitive) == 0
-            && m_pendingChanges.at(i).viewBits == context.viewBits && m_pendingChanges.at(i).useR0 == context.useR0)
-        { existing = i; break; }
-    if (existing >= 0)
-    {
-        if (!m_pendingChanges.at(existing).beforeExists) { m_pendingChanges.removeAt(existing); updatePendingChanges(); return; }
-        change.beforeType = m_pendingChanges.at(existing).beforeType;
-        change.beforeData = m_pendingChanges.at(existing).beforeData;
-        m_pendingChanges[existing] = change;
-    }
-    else
-    {
-        qsizetype bytes = change.beforeData.size();
-        for (const auto& item : m_pendingChanges) bytes += item.beforeData.size() + item.afterData.size();
-        if (m_pendingChanges.size() >= 1024 || bytes > 64 * 1024 * 1024)
-        { QMessageBox::warning(this, QStringLiteral("删除值"), QStringLiteral("暂存达到容量上限，请先应用或清空。")); return; }
-        m_pendingChanges.push_back(change);
-    }
-    updatePendingChanges();
-    m_rightTabWidget->setCurrentIndex(2);
+    readLegacyValue(path, name, context, [this, path, name, context](const RegistryValueState& original, const QString& error, const bool ok) {
+        if (!ok || !original.exists || !original.complete)
+        { QMessageBox::warning(this, QStringLiteral("删除值"), error.isEmpty() ? QStringLiteral("原值不存在或数据不完整。") : error); return; }
+        PendingValueChange change;
+        change.keyPath = path; change.name = name; change.beforeExists = true;
+        change.beforeType = original.type; change.beforeData = original.data; change.deleteValue = true;
+        change.viewBits = context.viewBits; change.useR0 = context.useR0;
+        qsizetype existing = -1;
+        for (qsizetype i = 0; i < m_pendingChanges.size(); ++i)
+            if (m_pendingChanges.at(i).keyPath.compare(path, Qt::CaseInsensitive) == 0
+                && m_pendingChanges.at(i).name.compare(name, Qt::CaseInsensitive) == 0
+                && m_pendingChanges.at(i).viewBits == context.viewBits && m_pendingChanges.at(i).useR0 == context.useR0)
+            { existing = i; break; }
+        if (existing >= 0)
+        {
+            if (!m_pendingChanges.at(existing).beforeExists) { m_pendingChanges.removeAt(existing); updatePendingChanges(); return; }
+            change.beforeType = m_pendingChanges.at(existing).beforeType;
+            change.beforeData = m_pendingChanges.at(existing).beforeData;
+            m_pendingChanges[existing] = change;
+        }
+        else
+        {
+            qsizetype bytes = change.beforeData.size();
+            for (const auto& item : m_pendingChanges) bytes += item.beforeData.size() + item.afterData.size();
+            if (m_pendingChanges.size() >= 1024 || bytes > 64 * 1024 * 1024)
+            { QMessageBox::warning(this, QStringLiteral("删除值"), QStringLiteral("暂存达到容量上限，请先应用或清空。")); return; }
+            m_pendingChanges.push_back(change);
+        }
+        updatePendingChanges();
+        m_rightTabWidget->setCurrentIndex(2);
+    });
 }
 
 void RegistryDock::editSelectedValue()
@@ -1410,49 +1414,53 @@ void RegistryDock::editSelectedValue()
     const QString path = m_currentPath;
     const QString name = nameItem->data(Qt::UserRole).toString();
     const RegistryAccessContext context = accessContext();
-    RegistryValueState original;
-    QString error;
-    if (!RegistryWorkbenchAccess::read(path, name, context, &original, &error) || !original.exists || !original.complete)
-    { QMessageBox::warning(this, QStringLiteral("编辑值"), error.isEmpty() ? QStringLiteral("原始数据不完整，无法编辑。") : error); return; }
-    RegistryValueState shown = original;
-    for (const auto& change : m_pendingChanges)
-        if (change.keyPath.compare(path, Qt::CaseInsensitive) == 0 && change.name.compare(name, Qt::CaseInsensitive) == 0
-            && change.viewBits == context.viewBits && change.useR0 == context.useR0 && !change.deleteValue)
-        { shown.type = change.afterType; shown.data = change.afterData; break; }
-    QDialog dialog(this);
-    dialog.setWindowTitle(QStringLiteral("编辑注册表值"));
-    ks::ui::StyleSecondaryWindow(&dialog);
-    auto* layout = new QVBoxLayout(&dialog);
-    ks::ui::StyleSecondaryContentLayout(layout);
-    auto* scroll = new QScrollArea(&dialog);
-    scroll->setWidgetResizable(true);
-    scroll->setFrameShape(QFrame::NoFrame);
-    auto* editor = new RegistryValueEditorWidget;
-    editor->setValue(path, name, shown.type, shown.data);
-    scroll->setWidget(editor);
-    layout->addWidget(scroll, 1);
-    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Save | QDialogButtonBox::Cancel, &dialog);
-    buttons->button(QDialogButtonBox::Save)->setText(QStringLiteral("暂存修改"));
-    ks::ui::StyleSecondaryButtonBox(buttons);
-    ks::ui::StyleSecondaryFooter(buttons);
-    layout->addWidget(buttons);
-    RegistryValueDraft draft;
-    connect(buttons, &QDialogButtonBox::accepted, &dialog, [&]() {
-        QString validation;
-        if (!editor->value(&draft, &validation)) { QMessageBox::warning(&dialog, QStringLiteral("编辑值"), validation); return; }
-        dialog.accept();
+    readLegacyValue(path, name, context, [this, path, name, context, guarded](const RegistryValueState& original, const QString& error, const bool ok) {
+        if (m_currentPath.compare(path, Qt::CaseInsensitive) != 0 || m_viewBits != context.viewBits
+            || accessContextForPath(path).useR0 != context.useR0) return;
+        if (!ok || !original.exists || !original.complete)
+        { QMessageBox::warning(this, QStringLiteral("编辑值"), error.isEmpty() ? QStringLiteral("原始数据不完整，无法编辑。") : error); return; }
+        RegistryValueState shown = original;
+        for (const auto& change : m_pendingChanges)
+            if (change.keyPath.compare(path, Qt::CaseInsensitive) == 0 && change.name.compare(name, Qt::CaseInsensitive) == 0
+                && change.viewBits == context.viewBits && change.useR0 == context.useR0 && !change.deleteValue)
+            { shown.type = change.afterType; shown.data = change.afterData; break; }
+        const QPointer<QDialog> dialog = new QDialog(this);
+        dialog->setWindowTitle(QStringLiteral("编辑注册表值"));
+        ks::ui::StyleSecondaryWindow(dialog.data());
+        auto* layout = new QVBoxLayout(dialog.data());
+        ks::ui::StyleSecondaryContentLayout(layout);
+        auto* scroll = new QScrollArea(dialog.data());
+        scroll->setWidgetResizable(true);
+        scroll->setFrameShape(QFrame::NoFrame);
+        auto* editor = new RegistryValueEditorWidget;
+        editor->setValue(path, name, shown.type, shown.data);
+        scroll->setWidget(editor);
+        layout->addWidget(scroll, 1);
+        auto* buttons = new QDialogButtonBox(QDialogButtonBox::Save | QDialogButtonBox::Cancel, dialog.data());
+        buttons->button(QDialogButtonBox::Save)->setText(QStringLiteral("暂存修改"));
+        ks::ui::StyleSecondaryButtonBox(buttons);
+        ks::ui::StyleSecondaryFooter(buttons);
+        layout->addWidget(buttons);
+        RegistryValueDraft draft;
+        connect(buttons, &QDialogButtonBox::accepted, dialog.data(), [&]() {
+            QString validation;
+            if (!editor->value(&draft, &validation)) { QMessageBox::warning(dialog.data(), QStringLiteral("编辑值"), validation); return; }
+            if (dialog) dialog->accept();
+        });
+        connect(buttons, &QDialogButtonBox::rejected, dialog.data(), &QDialog::reject);
+        ks::ui::applyResponsiveWindowGeometry(dialog.data(), this, QSize(900, 680), QSize(420, 320));
+        // 换键不能把旧草稿安装到新来源。
+        const int outcome = dialog->exec();
+        if (dialog) delete dialog.data();
+        if (outcome != QDialog::Accepted || !guarded) return;
+        if (m_currentPath.compare(path, Qt::CaseInsensitive) != 0 || m_viewBits != context.viewBits) return;
+        m_editorPath = path; m_editorName = name; m_editorOriginalType = original.type; m_editorOriginalData = original.data;
+        m_editorViewBits = context.viewBits; m_editorUseR0 = context.useR0;
+        m_valueEditor->setValue(path, name, draft.type, draft.data);
+        m_editorReady = true;
+        m_valueEditor->show();
+        stageEditorValue();
     });
-    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
-    ks::ui::applyResponsiveWindowGeometry(&dialog, this, QSize(900, 680), QSize(420, 320));
-    // 换键不能把旧草稿安装到新来源。
-    if (dialog.exec() != QDialog::Accepted || !guarded) return;
-    if (m_currentPath.compare(path, Qt::CaseInsensitive) != 0 || m_viewBits != context.viewBits) return;
-    m_editorPath = path; m_editorName = name; m_editorOriginalType = original.type; m_editorOriginalData = original.data;
-    m_editorViewBits = context.viewBits; m_editorUseR0 = context.useR0;
-    m_valueEditor->setValue(path, name, draft.type, draft.data);
-    m_editorReady = true;
-    m_valueEditor->show();
-    stageEditorValue();
 }
 
 void RegistryDock::copyCurrentPathToClipboard()
@@ -1539,7 +1547,9 @@ void RegistryDock::readDefaultValueByR0()
 
 void RegistryDock::readRegistryValueByR0(const QString& valueName)
 {
-    if (m_viewBits != 0) return;
+    if (m_viewBits != 0 || m_applyingChanges) return;
+    const QString path = m_currentPath;
+    const quint64 sourceGeneration = m_valueLoadGeneration;
     // 作用：把当前 UI 路径转换为 \REGISTRY\...，然后通过 R0 只读 IOCTL 查询值。
     // 返回：无；结果通过对话框和状态栏展示。
     const QString kernelPath = buildKernelRegistryPath(m_currentPath);
@@ -1549,67 +1559,90 @@ void RegistryDock::readRegistryValueByR0(const QString& valueName)
         return;
     }
 
-    const ksword::ark::DriverClient driverClient;
-    const ksword::ark::RegistryReadResult readResult = driverClient.readRegistryValue(
-        kernelPath.toStdWString(),
-        valueName.toStdWString(),
-        KSWORD_ARK_REGISTRY_DATA_MAX_BYTES);
+    struct Request { QString kernelPath; QString valueName; };
+    struct Result { ksword::ark::RegistryReadResult read; QString statusText; };
+    auto& operation = legacyMutationOperation();
+    m_applyingChanges = true;
+    m_legacyMutationReceipt = false;
+    updatePendingChanges();
+    updateStatusBar(QStringLiteral("正在读取完整值…"));
+    operation.submit<Request, Result>({kernelPath, valueName}, [](const Request& request, const ks::ui::AsyncOperationToken&) {
+        const ksword::ark::DriverClient driverClient;
+        const ksword::ark::RegistryReadResult readResult = driverClient.readRegistryValue(
+            request.kernelPath.toStdWString(),
+            request.valueName.toStdWString(),
+            KSWORD_ARK_REGISTRY_DATA_MAX_BYTES);
 
-    QByteArray rawData;
-    if (!readResult.data.empty())
-    {
-        rawData = QByteArray(
-            reinterpret_cast<const char*>(readResult.data.data()),
-            static_cast<int>(readResult.data.size()));
-    }
+        QByteArray rawData;
+        if (!readResult.data.empty())
+        {
+            rawData = QByteArray(
+                reinterpret_cast<const char*>(readResult.data.data()),
+                static_cast<int>(readResult.data.size()));
+        }
 
-    const QString valueDisplayName = valueName.isEmpty()
-        ? QStringLiteral("(默认)")
-        : valueName;
-    const QString formattedData = readResult.data.empty()
-        ? QStringLiteral("<空>")
-        : formatValueData(static_cast<DWORD>(readResult.valueType), rawData);
-    const QString statusText = QStringLiteral(
-        "路径：%1\n"
-        "值名：%2\n"
-        "状态：%3\n"
-        "类型：%4\n"
-        "数据长度：%5 / 需要：%6\n"
-        "NTSTATUS：0x%7\n\n"
-        "数据：\n%8")
-        .arg(kernelPath)
-        .arg(valueDisplayName)
-        .arg(readResult.io.ok ? QString::number(readResult.status) : QStringLiteral("IOCTL失败"))
-        .arg(valueTypeToText(static_cast<DWORD>(readResult.valueType)))
-        .arg(readResult.dataBytes)
-        .arg(readResult.requiredBytes)
-        .arg(static_cast<qulonglong>(static_cast<std::uint32_t>(readResult.lastStatus)), 8, 16, QChar('0'))
-        .arg(formattedData);
+        const QString valueDisplayName = request.valueName.isEmpty()
+            ? QStringLiteral("(默认)")
+            : request.valueName;
+        const QString formattedData = readResult.data.empty()
+            ? QStringLiteral("<空>")
+            : formatValueData(static_cast<DWORD>(readResult.valueType), rawData);
+        const QString statusText = QStringLiteral(
+            "路径：%1\n"
+            "值名：%2\n"
+            "状态：%3\n"
+            "类型：%4\n"
+            "数据长度：%5 / 需要：%6\n"
+            "NTSTATUS：0x%7\n\n"
+            "数据：\n%8")
+            .arg(request.kernelPath)
+            .arg(valueDisplayName)
+            .arg(readResult.io.ok ? QString::number(readResult.status) : QStringLiteral("IOCTL失败"))
+            .arg(valueTypeToText(static_cast<DWORD>(readResult.valueType)))
+            .arg(readResult.dataBytes)
+            .arg(readResult.requiredBytes)
+            .arg(static_cast<qulonglong>(static_cast<std::uint32_t>(readResult.lastStatus)), 8, 16, QChar('0'))
+            .arg(formattedData);
 
-    kLogEvent event;
-    (readResult.io.ok && readResult.status == KSWORD_ARK_REGISTRY_READ_STATUS_SUCCESS ? info : warn)
-        << event
-        << "[RegistryDock] R0读取注册表完成, path="
-        << kernelPath.toStdString()
-        << ", valueName="
-        << valueName.toStdString()
-        << ", ok="
-        << (readResult.io.ok ? "true" : "false")
-        << ", status="
-        << readResult.status
-        << ", detail="
-        << registryIoMessageText(readResult.io.message).toStdString()
-        << eol;
+        return Result{readResult, statusText};
+    }, [this, path, kernelPath, valueName, sourceGeneration](const Result& result, std::uint64_t) {
+        m_legacyMutationReceipt = true;
+        QTimer::singleShot(0, this, [this, path, kernelPath, valueName, sourceGeneration, result] {
+            finishLegacyMutation();
+            if (m_currentPath != path || m_viewBits != 0 || m_valueLoadGeneration != sourceGeneration) return;
+            const auto& readResult = result.read;
+            const auto& statusText = result.statusText;
+            kLogEvent event;
+            (readResult.io.ok && readResult.status == KSWORD_ARK_REGISTRY_READ_STATUS_SUCCESS ? info : warn)
+                << event
+                << "[RegistryDock] R0读取注册表完成, path="
+                << kernelPath.toStdString()
+                << ", valueName="
+                << valueName.toStdString()
+                << ", ok="
+                << (readResult.io.ok ? "true" : "false")
+                << ", status="
+                << readResult.status
+                << ", detail="
+                << registryIoMessageText(readResult.io.message).toStdString()
+                << eol;
 
-    updateStatusBar(QStringLiteral("R0读取注册表：%1").arg(readResult.io.ok ? QStringLiteral("完成") : QStringLiteral("失败")));
-    if (readResult.io.ok && readResult.status == KSWORD_ARK_REGISTRY_READ_STATUS_SUCCESS)
-    {
-        QMessageBox::information(this, QStringLiteral("R0读取注册表"), statusText);
-    }
-    else
-    {
-        QMessageBox::warning(this, QStringLiteral("R0读取注册表"), statusText + QStringLiteral("\n\n详情：%1").arg(registryIoMessageText(readResult.io.message)));
-    }
+            updateStatusBar(QStringLiteral("R0读取注册表：%1").arg(readResult.io.ok ? QStringLiteral("完成") : QStringLiteral("失败")));
+            if (readResult.io.ok && readResult.status == KSWORD_ARK_REGISTRY_READ_STATUS_SUCCESS)
+            {
+                QMessageBox::information(this, QStringLiteral("R0读取注册表"), statusText);
+            }
+            else
+            {
+                QMessageBox::warning(this, QStringLiteral("R0读取注册表"), statusText + QStringLiteral("\n\n详情：%1").arg(registryIoMessageText(readResult.io.message)));
+            }
+        });
+        return true;
+    }, [this](std::exception_ptr) {
+        m_legacyMutationReceipt = true;
+        finishLegacyMutation();
+        updateStatusBar(QStringLiteral("注册表操作未取得完整回执；请刷新后核对。"));
+    });
 }
 
 void RegistryDock::stopSearch(bool waitForThread)

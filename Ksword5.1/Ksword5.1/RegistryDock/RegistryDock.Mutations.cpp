@@ -35,6 +35,34 @@ void RegistryDock::finishLegacyMutation()
     updateStatusBar(QStringLiteral("状态: 就绪"));
 }
 
+void RegistryDock::readLegacyValue(const QString& path, const QString& name, const RegistryAccessContext& context,
+    std::function<void(const RegistryValueState&, const QString&, bool)> continuation)
+{
+    struct Request { QString path; QString name; RegistryAccessContext context; };
+    struct Result { RegistryValueState value; QString error; bool ok = false; };
+    auto& operation = legacyMutationOperation();
+    m_applyingChanges = true;
+    m_legacyMutationReceipt = false;
+    updatePendingChanges();
+    updateStatusBar(QStringLiteral("正在读取完整值…"));
+    operation.submit<Request, Result>({path, name, context}, [](const Request& request, const ks::ui::AsyncOperationToken&) {
+        Result result;
+        result.ok = RegistryWorkbenchAccess::read(request.path, request.name, request.context, &result.value, &result.error);
+        return result;
+    }, [this, continuation = std::move(continuation)](const Result& result, std::uint64_t) {
+        m_legacyMutationReceipt = true;
+        QTimer::singleShot(0, this, [this, result, continuation] {
+            finishLegacyMutation();
+            continuation(result.value, result.error, result.ok);
+        });
+        return true;
+    }, [this](std::exception_ptr) {
+        m_legacyMutationReceipt = true;
+        finishLegacyMutation();
+        updateStatusBar(QStringLiteral("注册表操作未取得完整回执；请刷新后核对。"));
+    });
+}
+
 void RegistryDock::createSubKey()
 {
     const QPointer<RegistryDock> guarded(this);

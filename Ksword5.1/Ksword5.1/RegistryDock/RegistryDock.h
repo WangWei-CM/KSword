@@ -15,6 +15,7 @@
 #include <QVector>
 #include <QStringList>
 
+#include <functional>
 #include <atomic>      // std::atomic_bool：搜索线程运行状态控制。
 #include <deque>       // std::deque：搜索结果 FIFO 队列，避免头部消费搬移。
 #include <memory>      // std::unique_ptr：后台线程对象托管。
@@ -47,6 +48,7 @@ struct RegistryDocument;
 struct RegistryAccessContext;
 struct RegistryKeyListing;
 struct RegistryApplyResult;
+struct RegistryValueState;
 
 // ============================================================
 // RegistryDock
@@ -164,6 +166,8 @@ private:
     void showValueContextMenu(const QPoint& localPos);
     ks::ui::AsyncOperation& legacyMutationOperation();
     void finishLegacyMutation();
+    void readLegacyValue(const QString& path, const QString& name, const RegistryAccessContext& context,
+        std::function<void(const RegistryValueState&, const QString&, bool)> continuation);
     void createSubKey();
     void createValue();
     void renameSelectedObject();
