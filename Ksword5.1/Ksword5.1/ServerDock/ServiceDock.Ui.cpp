@@ -492,6 +492,7 @@ void ServiceDock::rebuildServiceTable()
     }
 
     applyServiceTableFilter();
+    syncToolbarStateWithSelection(false);
     updateDetailViewsFromSelection();
 }
 
