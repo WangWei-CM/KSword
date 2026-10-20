@@ -840,6 +840,7 @@
     <QtMoc Include="Framework\CustomTitleBar.h" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="WindowDock\WindowSnapshotSupport.h" />
     <ClInclude Include="MonitorDock\WmiEventArchive.h" />
     <ClInclude Include="..\..\shared\evidence\memory_workbench\MemoryWriteOperation.h" />
     <ClInclude Include="UI\BudgetedPlainTextTransfer.h" />
