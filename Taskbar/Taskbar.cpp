@@ -535,7 +535,7 @@ Taskbar::Taskbar(QScreen* targetScreen, TaskbarSharedState* sharedState,
     // 保持现有的频谱、时间、CPU 和网络刷新节奏；通知服务只增加自己的轻量 UI 状态信号。
     if (m_sharedState) {
         connect(m_sharedState, &TaskbarSharedState::spectrumDataReady, this,
-            &Taskbar::onSpectrumDataReady, Qt::QueuedConnection);
+            &Taskbar::onSpectrumDataReady);
     }
     timer = new QTimer(this);
     timer->setInterval(500);

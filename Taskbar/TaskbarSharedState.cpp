@@ -15,17 +15,17 @@ TaskbarSharedState::TaskbarSharedState(QObject* parent)
       m_uploadBytesPerSecond(0),
       m_downloadBytesPerSecond(0)
 {
-    // 频谱数据跨线程排队投递时需要注册元类型，避免音频采样线程直连 UI。
-    qRegisterMetaType<QVector<float>>("QVector<float>");
-
-    // 音频分析器只创建一次，多个 Taskbar 窗口共享同一份频谱数据广播。
-    connect(
-        m_analyzer.get(),
-        &AudioSpectrumAnalyzer::spectrumDataReady,
-        this,
-        &TaskbarSharedState::spectrumDataReady,
-        Qt::QueuedConnection
-    );
+    // 唯一GUI显示节拍读取最近快照，采集线程不按每个FFT投递消息。
+    m_spectrumPresentationTimer.setInterval(16);
+    m_spectrumPresentationTimer.setTimerType(Qt::PreciseTimer);
+    connect(&m_spectrumPresentationTimer, &QTimer::timeout, this, [this]()
+    {
+        QVector<float> spectrum;
+        if (m_analyzer && m_analyzer->readLatestSpectrum(m_presentedSpectrumRevision, spectrum))
+        {
+            emit spectrumDataReady(spectrum);
+        }
+    });
 }
 
 TaskbarSharedState::~TaskbarSharedState()
@@ -46,6 +46,7 @@ void TaskbarSharedState::start()
     if (m_analyzer && m_analyzer->initialize()) {
         m_analyzer->startCapture();
         m_audioCaptureStarted = true;
+        m_spectrumPresentationTimer.start();
     }
     else {
         qWarning() << "Taskbar shared audio analyzer failed to initialize.";
@@ -62,6 +63,7 @@ void TaskbarSharedState::stop()
         return;
     }
     m_started = false;
+    m_spectrumPresentationTimer.stop();
 
     stopCpuWorker();
     stopNetworkWorker();

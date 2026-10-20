@@ -6,6 +6,7 @@
 
 #include <QObject>
 #include <QVector>
+#include <QTimer>
 #include <atomic>
 #include <cstdint>
 #include <memory>
@@ -57,6 +58,8 @@ private:
 
     std::unique_ptr<AudioSpectrumAnalyzer> m_analyzer;// 全进程唯一音频频谱采样器。
     bool m_started;                                   // start/stop 幂等保护标记。
+    QTimer m_spectrumPresentationTimer;                 // GUI按显示节拍分发最新频谱。
+    quint64 m_presentedSpectrumRevision = 0;
     bool m_audioCaptureStarted;                       // 音频捕获是否已成功启动。
 
     mutable std::mutex m_cpuUsageMutex;               // CPU 利用率缓存互斥锁。
