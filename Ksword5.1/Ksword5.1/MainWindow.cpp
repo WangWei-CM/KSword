@@ -5898,7 +5898,8 @@ void MainWindow::finishCoordinatedShutdown()
             return;
         }
     }
-    QCoreApplication::quit();
+    // 全部退出许可与资源收尾已完成；quit()会再发Close，被finalizing守卫否决。
+    QCoreApplication::exit(0);
 
     kLogEvent closeFinishLog;
     info << closeFinishLog << "[MainWindow] 已提交退出请求 (exit code=0)。" << eol;

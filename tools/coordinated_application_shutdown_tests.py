@@ -15,8 +15,8 @@ def check(value,message):
     if not value:raise RuntimeError(message)
     checks+=1
 close=s[s.index('void MainWindow::closeEvent('):s.index('void MainWindow::beginCoordinatedShutdownWait(')]
-check(s.count('QCoreApplication::quit();')==1 and 'QCoreApplication::exit(' not in s and 'QApplication::quit(' not in s,'MainWindow has one final coordinated quit')
-check(s.index('QCoreApplication::quit();')>s.index('void MainWindow::finishCoordinatedShutdown('),'quit occurs only in final method')
+check(s.count('QCoreApplication::exit(0);')==1 and 'QCoreApplication::quit();' not in s and 'QApplication::quit(' not in s,'MainWindow has one approved final event-loop exit')
+check(s.index('QCoreApplication::exit(0);')>s.index('void MainWindow::finishCoordinatedShutdown('),'quit occurs only in final method')
 check(close.index('prepareWorkbenchQuit()')<close.index('AsyncCleanupRegistry::global().beginShutdown()')<close.index('prepareR0DriverServiceStop()')<close.index('executeR0ServiceStopOnWorker()'),'memory approval, session cleanup then R0 stop ordering')
 check('hide();' not in close and 'asyncShutdownStarted' not in close and 'QTimer::singleShot' not in close,'no hidden fixed-time exit fallback')
 check('queryR0DriverServiceRunning(' not in close,'exit status query moved to value worker')
@@ -29,7 +29,7 @@ check('ks::ui::RemoveCoordinatedApplicationQuit(this);' in s,'derived destructor
 priv=(source/rel/'Framework/PrivilegeElevationPrompt.h').read_text(encoding='utf-8-sig')
 check('RequestCoordinatedApplicationRestart(' in priv and 'QCoreApplication::quit();' not in priv,'shared elevation prompt defers its launch until cleanup ready')
 finish=s[s.index('void MainWindow::finishCoordinatedShutdown('):s.index('bool MainWindow::requestCoordinatedRestart(')]
-check(finish.index('AsyncCleanupRegistry::global().pending() == 0')<finish.index('m_shutdownRestart.launchWhenReady()')<finish.index('QCoreApplication::quit();'),'runtime successor launches only after cleanup and immediately before final quit')
+check(finish.index('AsyncCleanupRegistry::global().pending() == 0')<finish.index('m_shutdownRestart.launchWhenReady()')<finish.index('QCoreApplication::exit(0);'),'runtime successor launches only after cleanup and immediately before final quit')
 check('if (!launched)' in finish and 'cancelCoordinatedShutdown();' in finish,'failed successor launch retains original runtime instance')
 check(close.index('m_shutdownRestart.cancel();')<close.index('AsyncCleanupRegistry::global().beginShutdown()'),'earliest memory rejection clears restart intent before admission freeze')
 check('cancelCoordinatedShutdown(true);' in s,'late MemoryDock reapproval preserves accepted restart intent')
