@@ -3123,6 +3123,9 @@
     <ClInclude Include="UI\DetailDialogChrome.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="UI\DetailCardProjectionValues.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="UI\DetailPresentation.h">
       <Filter>Header Files</Filter>
     </ClInclude>

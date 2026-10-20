@@ -307,6 +307,7 @@ KSword 主程序位于 `Ksword5.1/Ksword5.1`（Qt 6.9.3 Widgets + Qt Advanced Do
 - 根QSS必须单一拥有：GlobalDialogTheme拥有普通QDialog；进程详情以 `ksword_detail_theme_owner` 声明业务拥有Chrome。框架不得追加又被业务changeEvent删除的相同块，StyleChange也不能触发文档重建。根样式/调色板及卡片标签只有实际变化才写入，禁止逐按钮手工重复polish。
 - 字号下限统一安装处补齐14px/10pt，保留更大字号及字体家族。`StyleSecondaryTabs` 与普通Tab同用PageTabMotion，静态下划线透明让动画唯一绘制，不另设持续全页刷新计时器。
 - 文档投影以documentRevision/语言/主题/搜索键合并通知；隐藏Tab只留dirty，Show首帧同步使用最新快照。规范字段相同的document-only快照不增代次、不发通知，纯搜索/主题不重新flatten；真实数值变化原位更新，值样式与行可见状态只在变化时写入。
+- 普通详情卡片仍以完整 StructuredFieldView 文档负责搜索、复制和导出；大分区在后台用冻结翻译快照准备纯值索引，界面只挂载视口字段，保留共享卡片、双列、说明及原 QLabel 选区。清空 QFormLayout 重排行时必须用 takeRow 移除行槽，不能仅 takeAt 留下空行；旧可视控件按预算退休，大值快照最终释放放在后台。复杂报告与专业布局不因这条普通卡片优化而改入口。
 - `StructuredFieldView` 本身直接作为Tab/Stack页时不能替换页对象：清掉旧布局后在source内部安装 `CreateDetailFieldProjection(source, source)`，保持原页索引/标题/currentWidget及业务指针。该模式不重挂或隐藏source，重复接入查其直接投影子节点，避免父子循环和重复宿主。
 
 ## UI 适配与性能补漏（2026-10-11）

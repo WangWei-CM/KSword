@@ -1029,6 +1029,7 @@
     <ClInclude Include="SettingsDock\SettingsDock.Layout.h" />
     <ClInclude Include="UI\DetailNavigationGroups.h" />
     <ClInclude Include="UI\DetailDialogChrome.h" />
+    <ClInclude Include="UI\DetailCardProjectionValues.h" />
     <ClInclude Include="UI\DetailPresentation.h" />
     <ClInclude Include="UI\SmoothScrollSupport.h" />
     <ClInclude Include="UI\TableColumnAutoFit.h" />
