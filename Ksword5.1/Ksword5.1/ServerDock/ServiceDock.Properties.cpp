@@ -758,7 +758,7 @@ void ServiceDock::populateRecoveryTab(const ServiceEntry& entry)
     refreshRecoveryTabUiState();
     m_recoveryStatusLabel->setText(queryOk ? QString() : errorText);
     m_recoveryFields->setEnabled(true);
-    m_recoveryApplyButton->setEnabled(entry.scmRecordPresent);
+    m_recoveryApplyButton->setEnabled(entry.scmRecordPresent && !m_configPendingReceipt);
     markDetailPageRendered(m_recoveryTabPage, entry.serviceNameText);
 }
 
@@ -859,7 +859,7 @@ void ServiceDock::updateDetailViewsFromSelection()
     refreshRecoveryTabUiState();
 
     const bool enableApplyButtons = hasSelection
-        && m_serviceList[static_cast<std::size_t>(selectedIndex)].scmRecordPresent;
+        && m_serviceList[static_cast<std::size_t>(selectedIndex)].scmRecordPresent && !m_configPendingReceipt;
     if (m_generalApplyButton != nullptr) { m_generalApplyButton->setEnabled(enableApplyButtons); }
     if (m_generalReloadButton != nullptr) { m_generalReloadButton->setEnabled(enableApplyButtons); }
     if (m_logonApplyButton != nullptr) { m_logonApplyButton->setEnabled(enableApplyButtons); }

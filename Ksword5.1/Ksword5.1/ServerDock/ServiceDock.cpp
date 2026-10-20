@@ -17,6 +17,8 @@ ServiceDock::ServiceDock(QWidget* parent)
     m_exportOperation->setStateChangedCallback([this]() { reconcileExportReceipt(); });
     m_detailOperation = std::make_unique<ks::ui::AsyncOperation>(this);
     m_detailOperation->setStateChangedCallback([this]() { reconcileDetailReceipt(); });
+    m_configOperation = std::make_unique<ks::ui::AsyncOperation>(this);
+    m_configOperation->setStateChangedCallback([this]() { reconcileConfigReceipt(); });
     initializeUi();
     initializeConnections();
     syncToolbarStateWithSelection();
@@ -27,6 +29,7 @@ ServiceDock::ServiceDock(QWidget* parent)
 
 ServiceDock::~ServiceDock()
 {
+    m_configOperation->close();
     m_detailOperation->close();
     m_exportOperation->close();
     m_refreshOperation->close();

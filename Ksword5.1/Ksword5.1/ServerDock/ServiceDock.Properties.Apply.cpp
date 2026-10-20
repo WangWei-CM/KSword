@@ -1,6 +1,9 @@
 #include "ServiceDock.Internal.h"
 
 #include <QSignalBlocker>
+#include "../UI/AsyncOperation.h"
+#include "../Internationalization/LanguageManager.h"
+#include "../Framework/PrivilegeElevationPrompt.h"
 
 using namespace service_dock_detail;
 
@@ -116,8 +119,10 @@ namespace
 bool ServiceDock::queryServiceFailureSettings(
     const QString& serviceNameText,
     ServiceRecoverySettings* settingsOut,
-    QString* errorTextOut)
+    QString* errorTextOut,
+    bool* completeOut)
 {
+    if (completeOut) *completeOut = false;
     if (settingsOut == nullptr || serviceNameText.trimmed().isEmpty())
     {
         if (errorTextOut != nullptr)
@@ -179,6 +184,7 @@ bool ServiceDock::queryServiceFailureSettings(
         }
     }
     settingsOut->failureActionsFlag = failureSettings.failureActionsOnNonCrash;
+    if (completeOut) *completeOut = failureSettings.hasFailureActions && failureSettings.hasFailureActionsFlag;
     return true;
 }
 
@@ -186,7 +192,7 @@ bool ServiceDock::queryServiceFailureSettings(
 bool ServiceDock::applyServiceFailureSettings(
     const QString& serviceNameText,
     const ServiceRecoverySettings& settings,
-    QString* errorTextOut) const
+    QString* errorTextOut)
 {
     if (serviceNameText.trimmed().isEmpty())
     {
@@ -240,6 +246,8 @@ bool ServiceDock::applyServiceFailureSettings(
 
 void ServiceDock::applyGeneralTabChanges()
 {
+    reconcileConfigReceipt();
+    if (m_configOperation->isInFlight()) return;
     const QString serviceNameText = selectedServiceName();
     const int serviceIndex = findServiceIndexByName(serviceNameText);
     if (serviceIndex < 0 || serviceIndex >= static_cast<int>(m_serviceList.size()))
@@ -247,6 +255,8 @@ void ServiceDock::applyGeneralTabChanges()
         return;
     }
 
+    const ServiceEntry selectedEntry = m_serviceList[static_cast<std::size_t>(serviceIndex)];
+    const auto detailRevision = m_detailRevision;
     const DWORD targetStartType = static_cast<DWORD>(m_generalStartTypeCombo->currentData().toULongLong());
     const bool targetDelayedAutoStart = m_generalDelayedAutoCheck->isChecked();
     const QString displayNameText = m_generalDisplayNameEdit->text().trimmed();
@@ -259,49 +269,41 @@ void ServiceDock::applyGeneralTabChanges()
     }
     if (targetStartType == SERVICE_DISABLED)
     {
+        const QPointer<ServiceDock> guarded(this);
         const QMessageBox::StandardButton confirmButton = QMessageBox::warning(
             this,
             QStringLiteral("高风险动作确认"),
             QStringLiteral("确认将服务“%1”设置为禁用吗？").arg(serviceNameText),
             QMessageBox::Yes | QMessageBox::No,
             QMessageBox::No);
-        if (confirmButton != QMessageBox::Yes)
+        if (!guarded || confirmButton != QMessageBox::Yes)
         {
             return;
         }
     }
 
-    ks::service::ServiceConfigUpdate update;
+    ConfigWriteRequest request;
+    request.entry = selectedEntry;
+    request.detailRevision = detailRevision;
+    request.entry.serviceNameText = serviceNameText;
+    request.kind = ConfigWriteKind::General;
+    request.payload = std::make_shared<ConfigWritePayload>();
+    auto& update = request.payload->update;
     update.changeStartType = true;
     update.startType = targetStartType;
     update.changeDisplayName = true;
     update.displayName = displayNameText.toStdWString();
-
-    std::string errorText;
-    if (!ks::service::ChangeServiceConfiguration(
-        serviceNameText.toStdWString(),
-        update,
-        &errorText))
-    {
-        QMessageBox::warning(
-            this,
-            QStringLiteral("服务管理"),
-            QStringLiteral("修改常规属性失败：\n%1").arg(QString::fromUtf8(errorText.c_str())));
-        return;
-    }
-
-    // Description and delayed-auto writes remain best-effort to preserve prior UI behavior.
-    (void)ks::service::SetServiceDescription(serviceNameText.toStdWString(), descriptionText.toStdWString());
-    (void)ks::service::SetDelayedAutoStart(
-        serviceNameText.toStdWString(),
-        targetStartType == SERVICE_AUTO_START && targetDelayedAutoStart);
-
-    refreshSelectedService();
+    request.description = descriptionText;
+    request.delayedAuto = targetStartType == SERVICE_AUTO_START && targetDelayedAutoStart;
+    request.failureText = ks::i18n::sourceText(QStringLiteral("修改常规属性失败：\n%1"));
+    submitConfigWrite(std::move(request));
 }
 
 
 void ServiceDock::applyLogonTabChanges()
 {
+    reconcileConfigReceipt();
+    if (m_configOperation->isInFlight()) return;
     const QString serviceNameText = selectedServiceName();
     const int serviceIndex = findServiceIndexByName(serviceNameText);
     if (serviceIndex < 0 || serviceIndex >= static_cast<int>(m_serviceList.size()))
@@ -331,7 +333,12 @@ void ServiceDock::applyLogonTabChanges()
         ? (baseServiceType | SERVICE_INTERACTIVE_PROCESS)
         : baseServiceType;
 
-    ks::service::ServiceConfigUpdate update;
+    ConfigWriteRequest request;
+    request.entry = selectedEntry;
+    request.detailRevision = m_detailRevision;
+    request.kind = ConfigWriteKind::Logon;
+    request.payload = std::make_shared<ConfigWritePayload>();
+    auto& update = request.payload->update;
     update.changeServiceType = true;
     update.serviceType = targetServiceType;
     update.changeAccount = true;
@@ -341,26 +348,19 @@ void ServiceDock::applyLogonTabChanges()
         update.changePassword = true;
         update.password = passwordText.toStdWString();
     }
-
-    std::string errorText;
-    if (!ks::service::ChangeServiceConfiguration(
-        serviceNameText.toStdWString(),
-        update,
-        &errorText))
+    request.failureText = ks::i18n::sourceText(QStringLiteral("修改登录属性失败：\n%1"));
+    if (submitConfigWrite(std::move(request)))
     {
-        QMessageBox::warning(
-            this,
-            QStringLiteral("服务管理"),
-            QStringLiteral("修改登录属性失败：\n%1").arg(QString::fromUtf8(errorText.c_str())));
-        return;
+        m_logonPasswordEdit->clear();
+        m_logonConfirmPasswordEdit->clear();
     }
-
-    refreshSelectedService();
 }
 
 
 void ServiceDock::applyRecoveryTabChanges()
 {
+    reconcileConfigReceipt();
+    if (m_configOperation->isInFlight()) return;
     const QString serviceNameText = selectedServiceName();
     if (serviceNameText.isEmpty())
     {
@@ -379,12 +379,205 @@ void ServiceDock::applyRecoveryTabChanges()
     settings.programArgumentsText = m_recoveryArgumentsEdit->text().trimmed();
     settings.appendFailureCount = m_recoveryAppendFailCountCheck->isChecked();
 
-    QString errorText;
-    if (!applyServiceFailureSettings(serviceNameText, settings, &errorText))
-    {
-        QMessageBox::warning(this, QStringLiteral("服务管理"), QStringLiteral("修改恢复属性失败：\n%1").arg(errorText));
-        return;
-    }
+    const int index = findServiceIndexByName(serviceNameText);
+    if (index < 0 || index >= static_cast<int>(m_serviceList.size())) return;
+    ConfigWriteRequest request;
+    request.entry = m_serviceList[static_cast<std::size_t>(index)];
+    request.detailRevision = m_detailRevision;
+    request.kind = ConfigWriteKind::Recovery;
+    request.recovery = settings;
+    request.failureText = ks::i18n::sourceText(QStringLiteral("修改恢复属性失败：\n%1"));
+    submitConfigWrite(std::move(request));
+}
 
-    refreshSelectedService();
+ServiceDock::ConfigWritePayload::~ConfigWritePayload()
+{
+    if (!update.password.empty()) SecureZeroMemory(update.password.data(), update.password.size() * sizeof(wchar_t));
+}
+
+ServiceDock::ConfigWriteResult ServiceDock::executeConfigWrite(const ConfigWriteRequest& input)
+{
+    ConfigWriteResult result;
+    const std::wstring serviceName = input.entry.serviceNameText.toStdWString();
+    try
+    {
+        if (input.kind == ConfigWriteKind::Recovery)
+        {
+            result.writeOk = applyServiceFailureSettings(input.entry.serviceNameText, input.recovery, &result.writeError);
+        }
+        else
+        {
+            std::string error;
+            const bool primaryOk = ks::service::ChangeServiceConfiguration(serviceName, input.payload->update, &error, &result.errorCode);
+            result.writeOk = primaryOk;
+            result.writeError = QString::fromUtf8(error.c_str());
+            if (primaryOk && input.kind == ConfigWriteKind::General)
+            {
+                error.clear();
+                if (!ks::service::SetServiceDescription(serviceName, input.description.toStdWString(), &error))
+                {
+                    result.descriptionError = QString::fromUtf8(error.c_str());
+                    result.writeOk = false;
+                }
+            }
+            if (primaryOk && (input.kind == ConfigWriteKind::General || input.kind == ConfigWriteKind::StartType))
+            {
+                error.clear();
+                if (!ks::service::SetDelayedAutoStart(serviceName, input.delayedAuto, &error, &result.delayedErrorCode))
+                {
+                    result.delayedError = QString::fromUtf8(error.c_str());
+                    result.writeOk = false;
+                }
+            }
+        }
+    }
+    catch (...)
+    {
+        result.writeOk = false;
+        result.writeError = QStringLiteral("服务配置写入异常，可能已部分生效。");
+    }
+    if (input.payload)
+    {
+        auto& password = input.payload->update.password;
+        if (!password.empty()) SecureZeroMemory(password.data(), password.size() * sizeof(wchar_t));
+        password.clear();
+    }
+    // Always read after the one accepted write sequence; optional fields retain their actual availability.
+    try
+    {
+        ks::service::ServiceRecord nativeReadback;
+        result.snapshotOk = querySingleServiceSnapshot(input.entry.serviceNameText,
+            input.entry.scmRecordPresent, input.entry.registryScanCompleted, &result.readback, &result.readbackError, &nativeReadback);
+        result.readbackOk = result.snapshotOk && nativeReadback.hasConfig;
+        if (input.kind == ConfigWriteKind::General)
+            result.readbackOk = result.readbackOk && nativeReadback.hasDescription && nativeReadback.config.hasDelayedAutoStart;
+        else if (input.kind == ConfigWriteKind::StartType)
+            result.readbackOk = result.readbackOk && nativeReadback.config.hasDelayedAutoStart;
+        if (result.snapshotOk && !result.readbackOk) result.readbackError = QStringLiteral("最终配置回读缺少所需字段。");
+    }
+    catch (...) { result.readbackError = QStringLiteral("最终配置回读发生异常。"); }
+    if (input.kind == ConfigWriteKind::Recovery)
+    {
+        try
+        {
+            bool complete = false;
+            result.recoveryReadbackOk = queryServiceFailureSettings(input.entry.serviceNameText, &result.recovery, &result.recoveryReadbackError, &complete) && complete;
+            if (!result.recoveryReadbackOk && result.recoveryReadbackError.isEmpty()) result.recoveryReadbackError = QStringLiteral("最终配置回读缺少所需字段。");
+        }
+        catch (...) { result.recoveryReadbackError = QStringLiteral("最终配置回读发生异常。"); }
+    }
+    return result;
+}
+
+void ServiceDock::updateConfigUiState()
+{
+    if (!m_generalTabPage) return;
+    const bool busy = m_configOperation->isInFlight();
+    m_generalTabPage->setEnabled(!busy);
+    m_logonTabPage->setEnabled(!busy);
+    m_recoveryTabPage->setEnabled(!busy);
+    syncToolbarStateWithSelection(true);
+    const int index = findServiceIndexByName(selectedServiceName());
+    const bool available = index >= 0 && index < static_cast<int>(m_serviceList.size()) && m_serviceList[static_cast<std::size_t>(index)].scmRecordPresent && !busy;
+    m_applyStartTypeButton->setEnabled(available && !isServiceStatePending(index >= 0 ? m_serviceList[static_cast<std::size_t>(index)].currentState : 0));
+    m_generalApplyButton->setEnabled(available);
+    m_logonApplyButton->setEnabled(available);
+    const auto& recovery = m_detailResults[static_cast<int>(DetailKind::Recovery)];
+    m_recoveryApplyButton->setEnabled(available && recovery && recovery->revision == m_detailRevision);
+}
+
+void ServiceDock::reconcileConfigReceipt()
+{
+    if (m_configPendingReceipt && !m_configOperation->isInFlight())
+    {
+        m_configPendingReceipt = false;
+        if (m_summaryLabel) m_summaryLabel->setText(ks::i18n::sourceText(QStringLiteral("服务配置未返回有效回执，请重载以核实当前配置；不会自动重试写入。")));
+    }
+    updateConfigUiState();
+}
+
+bool ServiceDock::submitConfigWrite(ConfigWriteRequest request)
+{
+    reconcileConfigReceipt();
+    if (m_configOperation->isInFlight()) return false;
+    const auto kind = request.kind;
+    const auto revision = request.detailRevision;
+    const QString serviceName = request.entry.serviceNameText;
+    const QString failureText = request.failureText;
+    const int progressPid = request.progressPid;
+    const QString finishedText = ks::i18n::sourceText(QStringLiteral("服务配置写入及回读已结束"));
+    m_configPendingReceipt = true;
+    const auto ticket = m_configOperation->submitTransaction<ConfigWriteRequest, ConfigWriteResult>(std::move(request),
+        [](const ConfigWriteRequest& input) { return executeConfigWrite(input); },
+        [this, kind, revision, serviceName, failureText, progressPid](const ConfigWriteResult& result, std::uint64_t) {
+            m_configPendingReceipt = false;
+            const QPointer<ServiceDock> guarded(this);
+            const bool sameSelection = serviceName.compare(selectedServiceName(), Qt::CaseInsensitive) == 0;
+            const bool applyOwnDetail = sameSelection && revision == m_detailRevision;
+            if (result.snapshotOk)
+            {
+                applyServiceUpdateToCache(result.readback);
+                rebuildServiceTable(!applyOwnDetail);
+                if (!guarded) return true;
+                if (kind == ConfigWriteKind::Recovery && result.recoveryReadbackOk && serviceName.compare(selectedServiceName(), Qt::CaseInsensitive) == 0 && applyOwnDetail)
+                {
+                    auto detail = std::make_shared<ServiceDetailResult>();
+                    detail->serviceName = serviceName;
+                    detail->revision = m_detailRevision;
+                    detail->kind = DetailKind::Recovery;
+                    detail->queryOk = true;
+                    detail->recovery = result.recovery;
+                    m_detailResults[static_cast<int>(DetailKind::Recovery)] = detail;
+                    applyCurrentDetail(*detail);
+                }
+            }
+            QStringList errors;
+            if (!result.writeError.isEmpty()) errors.append(ks::i18n::sourceText(result.writeError));
+            if (!result.descriptionError.isEmpty()) errors.append(ks::i18n::sourceText(QStringLiteral("描述写入失败：%1")).arg(result.descriptionError));
+            if (!result.delayedError.isEmpty()) errors.append(ks::i18n::sourceText(QStringLiteral("延迟启动写入失败：%1")).arg(result.delayedError));
+            if (!result.readbackOk) errors.append(ks::i18n::sourceText(QStringLiteral("最终配置回读失败：%1")).arg(ks::i18n::sourceText(result.readbackError)));
+            if (kind == ConfigWriteKind::Recovery && !result.recoveryReadbackOk) errors.append(ks::i18n::sourceText(QStringLiteral("恢复配置回读失败：%1")).arg(ks::i18n::sourceText(result.recoveryReadbackError)));
+            updateConfigUiState();
+            if (progressPid) kPro.finish(progressPid, errors.isEmpty() && result.writeOk ? kProgressState::Success : kProgressState::Failure, "配置写入及回读结束");
+            if (m_summaryLabel) m_summaryLabel->setText(errors.isEmpty() && result.writeOk
+                ? ks::i18n::sourceText(QStringLiteral("服务配置已写入并完成最终回读。"))
+                : ks::i18n::sourceText(QStringLiteral("服务配置写入或回读未完整成功，请核对当前配置。")));
+            if (kind == ConfigWriteKind::StartType && result.errorCode)
+            {
+                const bool prompted = ks::ui::promptForPrivilegeFailure(this, QStringLiteral("修改服务启动类型"), result.errorCode);
+                if (!guarded) return true;
+                if (prompted) return true;
+            }
+            if (kind == ConfigWriteKind::StartType && result.delayedErrorCode)
+            {
+                (void)ks::ui::promptForPrivilegeFailure(this, QStringLiteral("修改服务延迟启动"), result.delayedErrorCode);
+                if (!guarded) return true;
+            }
+            if (!errors.isEmpty() || !result.writeOk)
+            {
+                const QString message = result.writeOk
+                    ? ks::i18n::sourceText(QStringLiteral("服务配置已写入，但最终回读未完整成功：\n%1")).arg(errors.join(QLatin1Char('\n')))
+                    : failureText.arg(errors.join(QLatin1Char('\n')));
+                QMessageBox::warning(this, QStringLiteral("服务管理"), message);
+            }
+            return true;
+        },
+        [this, progressPid](std::exception_ptr) {
+            m_configPendingReceipt = false;
+            updateConfigUiState();
+            if (progressPid) kPro.finish(progressPid, kProgressState::Failure, "配置结果未知");
+            if (m_summaryLabel) m_summaryLabel->setText(ks::i18n::sourceText(QStringLiteral("服务配置未返回有效回执，请重载以核实当前配置；不会自动重试写入。")));
+        },
+        [progressPid, finishedText](ks::ui::AsyncOperationOutcome outcome) {
+            if (progressPid && outcome != ks::ui::AsyncOperationOutcome::Applied) kPro.set(progressPid, finishedText.toUtf8().constData(), 0, 100.0f);
+        });
+    if (!ticket)
+    {
+        m_configPendingReceipt = false;
+        updateConfigUiState();
+        if (m_summaryLabel) m_summaryLabel->setText(ks::i18n::sourceText(QStringLiteral("宿主正在关闭或已有配置事务，服务配置未提交。")));
+        return false;
+    }
+    if (m_summaryLabel) m_summaryLabel->setText(ks::i18n::sourceText(QStringLiteral("正在写入服务配置并准备最终回读...")));
+    return true;
 }

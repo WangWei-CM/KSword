@@ -605,6 +605,8 @@ bool ServiceDock::controlSelectedService(
 
 void ServiceDock::applySelectedStartType()
 {
+    reconcileConfigReceipt();
+    if (m_configOperation->isInFlight()) return;
     const QString serviceNameText = selectedServiceName();
     if (serviceNameText.isEmpty())
     {
@@ -617,7 +619,8 @@ void ServiceDock::applySelectedStartType()
         return;
     }
 
-    const ServiceEntry& selectedEntry = m_serviceList[static_cast<std::size_t>(selectedIndex)];
+    const ServiceEntry selectedEntry = m_serviceList[static_cast<std::size_t>(selectedIndex)];
+    const auto detailRevision = m_detailRevision;
     if (isServiceStatePending(selectedEntry.currentState))
     {
         QMessageBox::information(this, QStringLiteral("服务管理"), QStringLiteral("当前服务处于过渡态，请稍后再改启动类型。"));
@@ -630,13 +633,14 @@ void ServiceDock::applySelectedStartType()
 
     if (targetStartType == SERVICE_DISABLED)
     {
+        const QPointer<ServiceDock> guarded(this);
         const QMessageBox::StandardButton confirmButton = QMessageBox::warning(
             this,
             QStringLiteral("高风险动作确认"),
             QStringLiteral("确认将服务“%1”设置为禁用吗？").arg(serviceNameText),
             QMessageBox::Yes | QMessageBox::No,
             QMessageBox::No);
-        if (confirmButton != QMessageBox::Yes)
+        if (!guarded || confirmButton != QMessageBox::Yes)
         {
             return;
         }
@@ -653,64 +657,17 @@ void ServiceDock::applySelectedStartType()
     const int progressPid = kPro.add(this, "服务管理", "修改启动类型");
     kPro.set(progressPid, "写入启动类型", 0, 60.0f);
 
-    ks::service::ServiceConfigUpdate update;
-    update.changeStartType = true;
-    update.startType = targetStartType;
-
-    std::string errorText;
-    std::uint32_t errorCode = 0;
-    if (!ks::service::ChangeServiceConfiguration(
-        serviceNameText.toStdWString(),
-        update,
-        &errorText,
-        &errorCode))
-    {
-        // privilegePromptHandled：权限恢复提示已展示时不再弹出通用服务失败框。
-        const bool privilegePromptHandled = ks::ui::promptForPrivilegeFailure(
-            this,
-            QStringLiteral("修改服务启动类型"),
-            errorCode);
-        err << changeEvent
-            << "[ServiceDock] 修改启动类型失败, error="
-            << errorCode
-            << ", detail="
-            << errorText
-            << eol;
-        kPro.finish(progressPid, kProgressState::Failure, "执行失败");
-        if (!privilegePromptHandled)
-        {
-            QMessageBox::warning(
-                this,
-                QStringLiteral("服务管理"),
-                QStringLiteral("修改启动类型失败：\n%1").arg(QString::fromUtf8(errorText.c_str())));
-        }
-        return;
-    }
-
-    const bool delayedTarget = (targetStartType == SERVICE_AUTO_START && targetDelayedAutoStart);
-    std::string delayedErrorText;
-    std::uint32_t delayedErrorCode = 0;
-    if (!ks::service::SetDelayedAutoStart(
-        serviceNameText.toStdWString(),
-        delayedTarget,
-        &delayedErrorText,
-        &delayedErrorCode))
-    {
-        (void)ks::ui::promptForPrivilegeFailure(
-            this,
-            QStringLiteral("修改服务延迟启动"),
-            delayedErrorCode);
-        warn << changeEvent
-            << "[ServiceDock] 设置 DelayedAutoStart 失败，继续后续流程, error="
-            << delayedErrorCode
-            << ", detail="
-            << delayedErrorText
-            << eol;
-    }
-
-    kPro.set(progressPid, "刷新列表", 0, 90.0f);
-    requestAsyncRefresh(true);
-    kPro.finish(progressPid, kProgressState::Success, "修改完成");
+    ConfigWriteRequest request;
+    request.entry = selectedEntry;
+    request.detailRevision = detailRevision;
+    request.kind = ConfigWriteKind::StartType;
+    request.payload = std::make_shared<ConfigWritePayload>();
+    request.payload->update.changeStartType = true;
+    request.payload->update.startType = targetStartType;
+    request.delayedAuto = targetStartType == SERVICE_AUTO_START && targetDelayedAutoStart;
+    request.failureText = ks::i18n::sourceText(QStringLiteral("修改启动类型失败：\n%1"));
+    request.progressPid = progressPid;
+    submitConfigWrite(std::move(request));
 }
 
 

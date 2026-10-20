@@ -340,7 +340,7 @@ void ServiceDock::initializeConnections()
 
 }
 
-void ServiceDock::rebuildServiceTable()
+void ServiceDock::rebuildServiceTable(const bool preserveDetailEdits)
 {
     if (m_serviceTable == nullptr)
     {
@@ -350,7 +350,7 @@ void ServiceDock::rebuildServiceTable()
     if (!isVisible()) { m_serviceRowsDirty = true; return; }
     const QPointer<ServiceDock> guarded(this);
     if (ks::ui::DeferTableUiCommitIfContextMenuOpen(this, QStringLiteral("service-table-rebuild"), {m_serviceTable},
-        [guarded]() { if (guarded) guarded->rebuildServiceTable(); })) return;
+        [guarded, preserveDetailEdits]() { if (guarded) guarded->rebuildServiceTable(preserveDetailEdits); })) return;
     m_serviceRowsDirty = false;
     if (m_filterDebounceTimer) m_filterDebounceTimer->stop();
     const QSignalBlocker selectionBlocker(m_serviceTable);
@@ -492,8 +492,8 @@ void ServiceDock::rebuildServiceTable()
     }
 
     applyServiceTableFilter();
-    syncToolbarStateWithSelection(false);
-    updateDetailViewsFromSelection();
+    if (!preserveDetailEdits) syncToolbarStateWithSelection(false);
+    if (!preserveDetailEdits || previousSelectedServiceName.compare(selectedServiceName(), Qt::CaseInsensitive) != 0) updateDetailViewsFromSelection();
 }
 
 void ServiceDock::applyServiceTableFilter()
@@ -800,7 +800,7 @@ void ServiceDock::syncToolbarStateWithSelection(const bool preserveEdits)
             ? QStringLiteral("继续当前服务")
             : QStringLiteral("仅在服务已暂停时可继续"));
     }
-    m_applyStartTypeButton->setEnabled(scmRecordPresent && !pendingState);
+    m_applyStartTypeButton->setEnabled(scmRecordPresent && !pendingState && !m_configPendingReceipt);
     m_startTypeCombo->setEnabled(scmRecordPresent && !pendingState);
     if (m_generalStartButton != nullptr) { m_generalStartButton->setEnabled(m_startButton->isEnabled()); }
     if (m_generalStopButton != nullptr) { m_generalStopButton->setEnabled(m_stopButton->isEnabled()); }

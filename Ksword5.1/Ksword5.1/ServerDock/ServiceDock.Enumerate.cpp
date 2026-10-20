@@ -583,7 +583,8 @@ namespace service_dock_detail
         const bool sourceScmRecordPresent,
         const bool sourceRegistryScanCompleted,
         ServiceDock::ServiceEntry* entryOut,
-        QString* errorTextOut)
+        QString* errorTextOut,
+        ks::service::ServiceRecord* scmRecordOut)
     {
         if (entryOut == nullptr || serviceNameText.trimmed().isEmpty())
         {
@@ -649,6 +650,7 @@ namespace service_dock_detail
         updatedEntry.registryKeyPresent = registryQuerySucceeded;
         finalizeServiceSourceAndRisk(&updatedEntry);
 
+        if (scmRecordOut) *scmRecordOut = scmQuerySucceeded ? std::move(serviceRecord) : ks::service::ServiceRecord{};
         *entryOut = std::move(updatedEntry);
         return true;
     }

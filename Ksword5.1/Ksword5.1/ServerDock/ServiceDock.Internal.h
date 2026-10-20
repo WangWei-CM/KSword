@@ -150,5 +150,6 @@ namespace service_dock_detail
         bool sourceScmRecordPresent,
         bool sourceRegistryScanCompleted,
         ServiceDock::ServiceEntry* entryOut,
-        QString* errorTextOut);
+        QString* errorTextOut,
+        ks::service::ServiceRecord* scmRecordOut = nullptr);
 }

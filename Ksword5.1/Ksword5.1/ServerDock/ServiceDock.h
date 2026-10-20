@@ -14,6 +14,7 @@
 #include <QWidget>
 #include <QStringList>
 #include <QHash>
+#include "../ksword/service/service.h"
 
 #include <atomic>   // std::atomic_bool：后台刷新状态标记。
 #include <cstdint>  // std::uint32_t：PID 等数值字段。
@@ -168,6 +169,37 @@ private:
     void reconcileDetailReceipt();
     void setDetailUnavailable(DetailKind kind, const QString& text);
 
+    enum class ConfigWriteKind { General, Logon, Recovery, StartType };
+    struct ConfigWritePayload
+    {
+        ks::service::ServiceConfigUpdate update;
+        ~ConfigWritePayload();
+    };
+    struct ConfigWriteRequest
+    {
+        ServiceEntry entry;
+        ConfigWriteKind kind = ConfigWriteKind::General;
+        std::shared_ptr<ConfigWritePayload> payload;
+        ServiceRecoverySettings recovery;
+        QString description;
+        bool delayedAuto = false;
+        std::uint64_t detailRevision = 0;
+        QString failureText;
+        int progressPid = 0;
+    };
+    struct ConfigWriteResult
+    {
+        ServiceEntry readback;
+        ServiceRecoverySettings recovery;
+        QString writeError, descriptionError, delayedError, readbackError, recoveryReadbackError;
+        std::uint32_t errorCode = 0, delayedErrorCode = 0;
+        bool writeOk = false, snapshotOk = false, readbackOk = false, recoveryReadbackOk = false;
+    };
+    static ConfigWriteResult executeConfigWrite(const ConfigWriteRequest& request);
+    bool submitConfigWrite(ConfigWriteRequest request);
+    void reconcileConfigReceipt();
+    void updateConfigUiState();
+
     // ===================== 初始化 =====================
     void initializeUi();
     void initializeToolbar();
@@ -191,7 +223,7 @@ private:
     bool querySingleServiceByName(const QString& serviceNameText, ServiceEntry* entryOut, QString* errorTextOut) const;
 
     // ===================== 列表与详情 =====================
-    void rebuildServiceTable();
+    void rebuildServiceTable(bool preserveDetailEdits = false);
     void applyServiceTableFilter();
     bool entryMatchesCurrentFilter(const ServiceEntry& entry) const;
     bool serviceLessThan(const ServiceEntry& left, const ServiceEntry& right) const;
@@ -266,11 +298,12 @@ private:
     static bool queryServiceFailureSettings(
         const QString& serviceNameText,
         ServiceRecoverySettings* settingsOut,
-        QString* errorTextOut);
-    bool applyServiceFailureSettings(
+        QString* errorTextOut,
+        bool* completeOut = nullptr);
+    static bool applyServiceFailureSettings(
         const QString& serviceNameText,
         const ServiceRecoverySettings& settings,
-        QString* errorTextOut) const;
+        QString* errorTextOut);
 
 private:
     // ===================== 顶层布局 =====================
@@ -362,6 +395,8 @@ private:
     ks::ui::StructuredFieldView* m_dependencyEditor = nullptr;   // m_dependencyEditor：依存关系文本编辑器（只读）。
     ks::ui::StructuredFieldView* m_auditEditor = nullptr;        // m_auditEditor：审计文本编辑器（只读）。
 
+    std::unique_ptr<ks::ui::AsyncOperation> m_configOperation;
+    bool m_configPendingReceipt = false;
     QLabel* m_recoveryStatusLabel = nullptr;
     QWidget* m_recoveryFields = nullptr;
     std::unique_ptr<ks::ui::AsyncOperation> m_detailOperation;
