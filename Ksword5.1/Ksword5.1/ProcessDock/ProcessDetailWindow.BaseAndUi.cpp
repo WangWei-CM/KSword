@@ -2558,12 +2558,16 @@ void ProcessDetailWindow::initializeUi()
 
 void ProcessDetailWindow::ensureTabContentInitialized(QWidget* const tab)
 {
-    // 所有惰性详情页共用完成入口；早退也准备已存在的可见页，构造/隐藏阶段只持弱引用。
-    const ks::ui::ScopedWidgetThemePreparation prepareMountedTab(tab);
     if (tab == nullptr || m_initializedTabs.contains(tab))
     {
+        if (tab != nullptr && tab->isVisible())
+        {
+            ks::ui::PrepareWidgetThemeBindingsForShow(tab);
+        }
         return;
     }
+    // 首帧完成守卫只覆盖真正构造；已建页仍通过共享 dirty 快速入口准备。
+    const ks::ui::ScopedWidgetThemePreparation prepareMountedTab(tab);
 
     // 先标记，防止初始化中发生 tab 事件时递归重复创建控件树。
     m_initializedTabs.insert(tab);
@@ -2893,12 +2897,17 @@ void ProcessDetailWindow::ensureEmbeddedHandleView()
 
     QTimer::singleShot(kEmbeddedViewBuildFirstStageDelayMs, this, [this]() {
         // 挂载、范围裁剪与显式 Show 全部结束后才准备最终分支，不给默认页提前换肤。
-        const ks::ui::ScopedWidgetThemePreparation prepareMountedTab(m_embeddedHandleTab);
         if (m_embeddedHandleDock != nullptr || m_embeddedHandleLayout == nullptr)
         {
             clearEmbeddedViewBuildPending(m_embeddedHandleTab);
+            if (m_embeddedHandleTab != nullptr && m_embeddedHandleTab->isVisible())
+            {
+                ks::ui::PrepareWidgetThemeBindingsForShow(m_embeddedHandleTab);
+            }
             return;
         }
+
+        const ks::ui::ScopedWidgetThemePreparation prepareMountedTab(m_embeddedHandleTab);
 
         // 第一段：构造控件树并替换占位文本。
         m_embeddedHandleDock = new HandleDock(m_embeddedHandleTab);
@@ -2960,12 +2969,17 @@ void ProcessDetailWindow::ensureEmbeddedMemoryView()
     // 与构造函数里首刷延迟的既有写法保持一致，无需额外的存活判断。
     QTimer::singleShot(kEmbeddedViewBuildFirstStageDelayMs, this, [this]() {
         // 统一在本阶段退出时准备真实首屏；隐藏或已销毁宿主由共享弱引用守卫跳过。
-        const ks::ui::ScopedWidgetThemePreparation prepareMountedTab(m_embeddedMemoryTab);
         if (m_embeddedMemoryDock != nullptr || m_embeddedMemoryLayout == nullptr)
         {
             clearEmbeddedViewBuildPending(m_embeddedMemoryTab);
+            if (m_embeddedMemoryTab != nullptr && m_embeddedMemoryTab->isVisible())
+            {
+                ks::ui::PrepareWidgetThemeBindingsForShow(m_embeddedMemoryTab);
+            }
             return;
         }
+
+        const ks::ui::ScopedWidgetThemePreparation prepareMountedTab(m_embeddedMemoryTab);
 
         // 第一段：只做控件树构造与页面挂载，不触发目标进程附加。
         m_embeddedMemoryDock = new MemoryDock(m_embeddedMemoryTab);
@@ -3020,12 +3034,17 @@ void ProcessDetailWindow::ensureEmbeddedNetworkView()
 
     QTimer::singleShot(kEmbeddedViewBuildFirstStageDelayMs, this, [this]() {
         // 连接范围会切换内层 Tab，完成 Scope 与 Show 后再准备当前分支的首次颜色。
-        const ks::ui::ScopedWidgetThemePreparation prepareMountedTab(m_embeddedNetworkTab);
         if (m_embeddedNetworkDock != nullptr || m_embeddedNetworkLayout == nullptr)
         {
             clearEmbeddedViewBuildPending(m_embeddedNetworkTab);
+            if (m_embeddedNetworkTab != nullptr && m_embeddedNetworkTab->isVisible())
+            {
+                ks::ui::PrepareWidgetThemeBindingsForShow(m_embeddedNetworkTab);
+            }
             return;
         }
+
+        const ks::ui::ScopedWidgetThemePreparation prepareMountedTab(m_embeddedNetworkTab);
 
         // 第一段：构造控件树、裁剪页面范围并替换占位文本。
         m_embeddedNetworkDock = new NetworkDock(m_embeddedNetworkTab);
@@ -3095,12 +3114,17 @@ void ProcessDetailWindow::ensureEmbeddedWindowView()
 
     QTimer::singleShot(kEmbeddedViewBuildFirstStageDelayMs, this, [this]() {
         // 范围裁剪和挂载保持原流程，阶段结束仅对真实可见宿主消费待应用主题。
-        const ks::ui::ScopedWidgetThemePreparation prepareMountedTab(m_embeddedWindowTab);
         if (m_embeddedWindowDock != nullptr || m_embeddedWindowLayout == nullptr)
         {
             clearEmbeddedViewBuildPending(m_embeddedWindowTab);
+            if (m_embeddedWindowTab != nullptr && m_embeddedWindowTab->isVisible())
+            {
+                ks::ui::PrepareWidgetThemeBindingsForShow(m_embeddedWindowTab);
+            }
             return;
         }
+
+        const ks::ui::ScopedWidgetThemePreparation prepareMountedTab(m_embeddedWindowTab);
 
         // 第一段：构造控件树、裁剪页面范围并替换占位文本。
         m_embeddedWindowDock = new OtherDock(m_embeddedWindowTab);
