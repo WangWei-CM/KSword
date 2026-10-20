@@ -36,6 +36,7 @@ class QTimer;
 class QTreeWidget;
 class QTreeWidgetItem;
 class QVBoxLayout;
+namespace ks::ui { class AsyncOperation; }
 class RegistryOptimizationPage;
 class RegistryValueEditorWidget;
 class QComboBox;
@@ -161,6 +162,8 @@ private:
     // ===================== 右键菜单与编辑 =====================
     void showTreeContextMenu(const QPoint& localPos);
     void showValueContextMenu(const QPoint& localPos);
+    ks::ui::AsyncOperation& legacyMutationOperation();
+    void finishLegacyMutation();
     void createSubKey();
     void createValue();
     void renameSelectedObject();
@@ -329,6 +332,8 @@ private:
     quint64 m_valueLoadGeneration = 0;
     int m_viewBits = 0;
     bool m_applyingChanges = false;
+    std::unique_ptr<ks::ui::AsyncOperation> m_legacyMutationOperation;
+    bool m_legacyMutationReceipt = false;
     std::shared_ptr<std::atomic_bool> m_operationsClosed = std::make_shared<std::atomic_bool>(false);
     QVector<PendingValueChange> m_pendingChanges;
     QVector<PendingValueChange> m_lastChanges;

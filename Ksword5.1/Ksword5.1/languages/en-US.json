@@ -8,6 +8,7 @@
   "text_direction": "ltr",
   "fallback": "zh-CN",
   "translations": {
+    "registry.operation.no_receipt": "A complete registry result was not received; refresh to verify.",
     "hardware.power.status.query_dropped": "Status: The power query ended without a result. Refresh to try again.",
     "window.layer.events.sample": "Sampled at %1; associated event sequences %2–%3 (%4 relevant events), not per-event instantaneous state.",
     "window.layer.events.dropped": "Event ingress overflow: dropped %1 records (sequences %2–%3); raw event export retains this count.",
@@ -6973,6 +6974,7 @@
     "notification.copy.log_template": "%1\n%2\n%3\nFile: %4\nFunction: %5\nGUID: %6"
   },
   "source_translations": {
+    "注册表操作未取得完整回执；请刷新后核对。": "A complete registry result was not received; refresh to verify.",
     "状态：电源查询已结束但未收到结果，请刷新。": "Status: The power query ended without a result. Refresh to try again.",
     "%1 项（停止、失败或超出本次时间预算）": "%1 items (stopped, failed or outside this measurement budget)",
     "临时注册表已恢复；测量结果保留在详情中。": "Temporary registry state is restored; measurement results remain in details.",

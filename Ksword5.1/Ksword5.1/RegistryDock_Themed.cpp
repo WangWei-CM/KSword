@@ -1,5 +1,6 @@
 ﻿#include "RegistryDock/RegistryDock.h"
 #include "UI/TableContextMenu.h"
+#include "UI/AsyncOperation.h"
 #include "RegistryDock/RegistryValueEditorWidget.h"
 #include "RegistryDock/RegistryWorkbenchAccess.h"
 #include "RegistryDock/RegistryDocument.h"
@@ -426,6 +427,7 @@ RegistryDock::RegistryDock(QWidget* parent)
 
 RegistryDock::~RegistryDock()
 {
+    if (m_legacyMutationOperation) m_legacyMutationOperation->close();
     kLogEvent event;
     info << event << "[RegistryDock] 析构开始，准备停止搜索线程。" << eol;
 
