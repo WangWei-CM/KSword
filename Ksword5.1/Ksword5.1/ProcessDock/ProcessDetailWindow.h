@@ -303,7 +303,9 @@ private:
     // HotkeyInspectRefreshResult：进程热键异步刷新结果。
     struct HotkeyInspectRefreshResult
     {
-        std::vector<HotkeyInspectItem> rows; // 热键行数据。
+        std::uint32_t processId = 0;
+        std::uint64_t creationTime = 0, ticket = 0;
+        std::shared_ptr<const std::vector<HotkeyInspectItem>> rows; // 热键行数据。
         QString diagnosticText;              // 诊断文本。
         std::uint64_t elapsedMs = 0;         // 刷新耗时（毫秒）。
     };
@@ -326,8 +328,10 @@ private:
     // KeyboardInspectRefreshResult：键盘页异步刷新结果。
     struct KeyboardInspectRefreshResult
     {
-        std::vector<HotkeyInspectItem> hotkeyRows;     // 热键行数据。
-        std::vector<KeyboardHookInspectItem> hookRows; // 钩子行数据。
+        std::uint32_t processId = 0;
+        std::uint64_t creationTime = 0, ticket = 0;
+        std::shared_ptr<const std::vector<HotkeyInspectItem>> hotkeyRows;     // 热键行数据。
+        std::shared_ptr<const std::vector<KeyboardHookInspectItem>> hookRows; // 钩子行数据。
         QString diagnosticText;                        // 诊断文本。
         std::uint64_t elapsedMs = 0;                   // 刷新耗时（毫秒）。
     };
@@ -574,7 +578,7 @@ private:
     // 调用方式：热键页首刷或点击刷新按钮。
     // 参数：无。
     // 返回：无。
-    void requestAsyncHotkeyRefresh();
+    void requestAsyncHotkeyRefresh(bool refreshExisting = true);
     // applyHotkeyRefreshResult 作用：
     // - 在主线程回填热键检测结果；
     // - 重建表格并更新状态标签。
@@ -588,7 +592,7 @@ private:
     void editSelectedHotkey();
     void rebuildHotkeyTable();
     void updateHotkeyStatusLabel(const QString& statusText, bool refreshing);
-    void requestAsyncKeyboardRefresh();
+    void requestAsyncKeyboardRefresh(bool refreshHotkeys = true);
     void applyKeyboardRefreshResult(const KeyboardInspectRefreshResult& refreshResult);
     void rebuildKeyboardHotkeyTable();
     void rebuildKeyboardHookTable();
@@ -1027,26 +1031,27 @@ private:
     QPushButton* m_refreshHotkeyButton = nullptr; // 刷新热键按钮。
     QPushButton* m_editHotkeyButton = nullptr;    // 编辑当前支持来源的热键。
     QLabel* m_hotkeyStatusLabel = nullptr;       // 热键扫描状态。
-    QTableWidget* m_hotkeyTable = nullptr;       // 热键结果表。
+    ks::ui::ImmutableValueTable* m_hotkeyTable = nullptr;       // 热键结果表。
     bool m_hotkeyRefreshing = false;             // 热键扫描是否进行中。
     bool m_hotkeyInitialRefreshStarted = false;  // 热键页首次扫描是否已经按需启动。
     std::uint64_t m_hotkeyRefreshTicket = 0;     // 热键扫描序号。
     int m_hotkeyRefreshProgressPid = 0;          // 热键扫描 kPro 任务 PID。
-    std::vector<HotkeyInspectItem> m_hotkeyRows; // 热键结果缓存。
+    std::shared_ptr<const std::vector<HotkeyInspectItem>> m_hotkeyRows; // 热键结果缓存。
 
     // ======== 键盘页控件与状态 ========
     QVBoxLayout* m_keyboardLayout = nullptr;       // 键盘页总布局。
     QPushButton* m_refreshKeyboardButton = nullptr; // 刷新键盘按钮。
     QLabel* m_keyboardStatusLabel = nullptr;       // 键盘页扫描状态。
     QTabWidget* m_keyboardInnerTabWidget = nullptr; // 键盘页内部热键/钩子分栏。
-    QTableWidget* m_keyboardHotkeyTable = nullptr; // 键盘页热键表。
-    QTableWidget* m_keyboardHookTable = nullptr;   // 键盘钩子结果表。
+    ks::ui::ImmutableValueTable* m_keyboardHotkeyTable = nullptr; // 键盘页热键表。
+    ks::ui::ImmutableValueTable* m_keyboardHookTable = nullptr;   // 键盘钩子结果表。
+    bool m_keyboardRefreshPending = false;
     bool m_keyboardRefreshing = false;             // 键盘页扫描是否进行中。
     bool m_keyboardInitialRefreshStarted = false;  // 键盘页首次扫描是否已启动。
     std::uint64_t m_keyboardRefreshTicket = 0;     // 键盘页扫描序号。
     int m_keyboardRefreshProgressPid = 0;          // 键盘页扫描 kPro 任务 PID。
-    std::vector<HotkeyInspectItem> m_keyboardHotkeyRows; // 键盘页热键缓存。
-    std::vector<KeyboardHookInspectItem> m_keyboardHookRows; // 键盘页钩子缓存。
+    std::shared_ptr<const std::vector<HotkeyInspectItem>> m_keyboardHotkeyRows; // 键盘页热键缓存。
+    std::shared_ptr<const std::vector<KeyboardHookInspectItem>> m_keyboardHookRows; // 键盘页钩子缓存。
 
     // ======== 令牌页控件与状态 ========
     QVBoxLayout* m_tokenLayout = nullptr;          // 令牌页布局。

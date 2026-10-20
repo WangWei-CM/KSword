@@ -2,7 +2,7 @@
 #include "../UI/TableContextMenu.h"
 #include "ProcessHotkeyEnumerator.h"
 #include "../UI/TableInteractionSupport.h"
-#include "../UI/VisibleTableWidget.h"
+#include "../UI/ImmutableValueTable.h"
 #include "../UI/ToolbarMetrics.h"
 #include "../UI/PageControlStyle.h"
 
@@ -1406,14 +1406,22 @@ namespace
         return rows;
     }
 
-    QTableWidgetItem* createHotkeyCell(const QString& textValue)
+    template<class Row> std::shared_ptr<std::vector<Row>> makeRetiredHotkeyRows()
     {
-        auto* item = new QTableWidgetItem(textValue);
-        item->setFlags(item->flags() & ~Qt::ItemIsEditable);
-        return item;
+        return {new std::vector<Row>, [](std::vector<Row>* value) noexcept
+        {
+            try
+            {
+                auto retired = std::unique_ptr<std::vector<Row>>(value);
+                auto task = std::unique_ptr<QRunnable>(QRunnable::create([retired = std::move(retired)] {}));
+                QThreadPool::globalInstance()->start(task.get());
+                (void)task.release();
+            }
+            catch (...) { /* RAII releases on enqueue failure. */ }
+        }};
     }
 
-    void configureHotkeyTableGeometry(QTableWidget* tableWidget)
+    void configureHotkeyTableGeometry(ks::ui::ImmutableValueTable* tableWidget)
     {
         // 输入：
         // - tableWidget：进程热键页或键盘页中的热键/钩子结果表。
@@ -1451,7 +1459,7 @@ namespace
             .arg(trimmedText.left(kStatusTextLimit - 3));
     }
 
-    QString hotkeyTableCellText(QTableWidget* tableWidget, const int rowIndex, const int columnIndex)
+    QString hotkeyTableCellText(ks::ui::ImmutableValueTable* tableWidget, const int rowIndex, const int columnIndex)
     {
         // hotkeyTableCellText 作用：
         // - 输入：热键/钩子审计表格以及目标行列；
@@ -1462,11 +1470,10 @@ namespace
             return QString();
         }
 
-        const QTableWidgetItem* cellItem = tableWidget->item(rowIndex, columnIndex);
-        return cellItem != nullptr ? cellItem->text() : QString();
+        return tableWidget->cell(rowIndex, columnIndex).toString();
     }
 
-    void copyHotkeyTableCurrentRow(QTableWidget* tableWidget)
+    void copyHotkeyTableCurrentRow(ks::ui::ImmutableValueTable* tableWidget)
     {
         // copyHotkeyTableCurrentRow 作用：
         // - 输入：进程详情中的热键或键盘钩子表格；
@@ -1493,7 +1500,7 @@ namespace
     }
 
     quint32 hotkeyTableProcessId(
-        const QTableWidget* tableWidget,
+        const ks::ui::ImmutableValueTable* tableWidget,
         const int rowIndex,
         const int processIdColumn)
     {
@@ -1502,11 +1509,9 @@ namespace
             return 0U;
         }
 
-        const QTableWidgetItem* processIdItem = tableWidget->item(rowIndex, processIdColumn);
+        const QString processIdText = tableWidget->cell(rowIndex, processIdColumn).toString();
         bool ok = false;
-        const qulonglong processId = processIdItem != nullptr
-            ? processIdItem->text().trimmed().toULongLong(&ok)
-            : 0ULL;
+        const qulonglong processId = processIdText.trimmed().toULongLong(&ok);
         return ok && processId <= std::numeric_limits<quint32>::max()
             ? static_cast<quint32>(processId)
             : 0U;
@@ -1650,7 +1655,7 @@ namespace
         return true;
     }
 
-    void installHotkeyTableContextMenu(QTableWidget* tableWidget, const int processIdColumn)
+    void installHotkeyTableContextMenu(ks::ui::ImmutableValueTable* tableWidget, const int processIdColumn)
     {
         // installHotkeyTableContextMenu 作用：
         // - 输入：需要补齐右键复制能力的热键/钩子表格；
@@ -1664,14 +1669,14 @@ namespace
         tableWidget->setContextMenuPolicy(Qt::CustomContextMenu);
         QObject::connect(
             tableWidget,
-            &QTableWidget::customContextMenuRequested,
+            &QWidget::customContextMenuRequested,
             tableWidget,
             [tableWidget, processIdColumn](const QPoint& localPosition)
             {
                 const QModelIndex clickedIndex = tableWidget->indexAt(localPosition);
                 if (clickedIndex.isValid())
                 {
-                    tableWidget->setCurrentCell(clickedIndex.row(), clickedIndex.column());
+                    tableWidget->setCurrentIndex(clickedIndex);
                 }
 
                 QMenu contextMenu(tableWidget);
@@ -1883,11 +1888,7 @@ void ProcessDetailWindow::initializeHotkeyTab()
     ks::ui::NormalizeToolbarRow(topBarLayout);
     hotkeyGroupLayout->addLayout(topBarLayout);
 
-    m_hotkeyTable = new ks::ui::VisibleTableWidget(hotkeyGroup);
-    // 热键管理已提供编辑/删除动作，小清单只保留复制导出。
-    ks::ui::SetTableActionBarMode(m_hotkeyTable, ks::ui::TableActionBarMode::Compact);
-    m_hotkeyTable->setColumnCount(9);
-    m_hotkeyTable->setHorizontalHeaderLabels(QStringList{
+    m_hotkeyTable = new ks::ui::ImmutableValueTable(hotkeyGroup, QVector<ks::ui::ImmutableTableHeader>{
         QStringLiteral("对象"),
         QStringLiteral("热键ID"),
         QStringLiteral("热键"),
@@ -1898,6 +1899,9 @@ void ProcessDetailWindow::initializeHotkeyTab()
         QStringLiteral("VK/Mod"),
         QStringLiteral("详情")
     });
+    // 热键管理已提供编辑/删除动作，小清单只保留复制导出。
+    ks::ui::SetTableActionBarMode(m_hotkeyTable, ks::ui::TableActionBarMode::Compact);
+
     m_hotkeyTable->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_hotkeyTable->setSelectionMode(QAbstractItemView::SingleSelection);
     m_hotkeyTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
@@ -1920,19 +1924,14 @@ void ProcessDetailWindow::initializeHotkeyTab()
     connect(m_deleteHotkeyButton, &QPushButton::clicked, this, [this]() {
         deleteSelectedHotkey();
     });
-    connect(m_hotkeyTable, &QTableWidget::itemSelectionChanged, this, [this]() {
-        if (m_editHotkeyButton != nullptr)
-        {
-            m_editHotkeyButton->setEnabled(!m_hotkeyRefreshing && m_hotkeyTable->currentRow() >= 0);
-        }
-        if (m_deleteHotkeyButton != nullptr)
-        {
-            m_deleteHotkeyButton->setEnabled(!m_hotkeyRefreshing && m_hotkeyTable->currentRow() >= 0);
-        }
-    });
-    connect(m_hotkeyTable, &QTableWidget::cellDoubleClicked, this, [this](const int, const int) {
-        editSelectedHotkey();
-    });
+    m_hotkeyTable->currentRowChanged = [this]() {
+        const bool ready = !m_hotkeyRefreshing && !m_keyboardRefreshing &&
+            (!m_detailActionOperation || !m_detailActionOperation->isBusy()) && m_hotkeyTable->isEnabled() && !m_hotkeyTable->isPreparing() && m_hotkeyTable->currentRow() >= 0;
+        if (m_editHotkeyButton) m_editHotkeyButton->setEnabled(ready);
+        if (m_deleteHotkeyButton) m_deleteHotkeyButton->setEnabled(ready);
+    };
+    m_hotkeyTable->rowDoubleClicked = [this](int) { editSelectedHotkey(); };
+    rebuildHotkeyTable();
     hotkeyGroupLayout->addWidget(m_hotkeyTable, 1);
 
     m_hotkeyLayout->addWidget(hotkeyGroup, 1);
@@ -1948,7 +1947,7 @@ void ProcessDetailWindow::editSelectedHotkey()
     const QString titleText = hotkeyUiText(
         QStringLiteral("process.hotkey.edit.title"),
         QStringLiteral("编辑热键"));
-    if (m_hotkeyTable == nullptr || m_hotkeyTable->currentRow() < 0)
+    if (m_hotkeyTable == nullptr || !m_hotkeyTable->isEnabled() || m_hotkeyTable->isPreparing() || m_hotkeyTable->currentRow() < 0)
     {
         QMessageBox::information(
             this,
@@ -1959,12 +1958,10 @@ void ProcessDetailWindow::editSelectedHotkey()
         return;
     }
 
-    const QTableWidgetItem* rowIdentityItem = m_hotkeyTable->item(m_hotkeyTable->currentRow(), 0);
+    const QVariant rowIdentity = m_hotkeyTable->currentCell(0, kHotkeyRowIndexRole);
     bool rowIndexOk = false;
-    const qulonglong rowIndexValue = rowIdentityItem != nullptr
-        ? rowIdentityItem->data(kHotkeyRowIndexRole).toULongLong(&rowIndexOk)
-        : 0ULL;
-    if (!rowIndexOk || rowIndexValue >= m_hotkeyRows.size())
+    const qulonglong rowIndexValue = rowIdentity.toULongLong(&rowIndexOk);
+    if (!m_hotkeyRows || !rowIndexOk || rowIndexValue >= m_hotkeyRows->size())
     {
         QMessageBox::warning(
             this,
@@ -1975,7 +1972,7 @@ void ProcessDetailWindow::editSelectedHotkey()
         return;
     }
 
-    const HotkeyInspectItem row = m_hotkeyRows.at(static_cast<std::size_t>(rowIndexValue));
+    const HotkeyInspectItem row = m_hotkeyRows->at(static_cast<std::size_t>(rowIndexValue));
     const bool isR0Hotkey = row.sourceText == QStringLiteral("R0 RegisterHotKey");
     if (!isEditableHotkeySource(row.sourceText))
     {
@@ -2133,7 +2130,7 @@ void ProcessDetailWindow::deleteSelectedHotkey()
     const QString titleText = hotkeyUiText(
         QStringLiteral("process.hotkey.delete.title"),
         QStringLiteral("删除热键"));
-    if (m_hotkeyTable == nullptr || m_hotkeyTable->currentRow() < 0)
+    if (m_hotkeyTable == nullptr || !m_hotkeyTable->isEnabled() || m_hotkeyTable->isPreparing() || m_hotkeyTable->currentRow() < 0)
     {
         QMessageBox::information(
             this,
@@ -2144,12 +2141,10 @@ void ProcessDetailWindow::deleteSelectedHotkey()
         return;
     }
 
-    const QTableWidgetItem* rowIdentityItem = m_hotkeyTable->item(m_hotkeyTable->currentRow(), 0);
+    const QVariant rowIdentity = m_hotkeyTable->currentCell(0, kHotkeyRowIndexRole);
     bool rowIndexOk = false;
-    const qulonglong rowIndexValue = rowIdentityItem != nullptr
-        ? rowIdentityItem->data(kHotkeyRowIndexRole).toULongLong(&rowIndexOk)
-        : 0ULL;
-    if (!rowIndexOk || rowIndexValue >= m_hotkeyRows.size())
+    const qulonglong rowIndexValue = rowIdentity.toULongLong(&rowIndexOk);
+    if (!m_hotkeyRows || !rowIndexOk || rowIndexValue >= m_hotkeyRows->size())
     {
         QMessageBox::warning(
             this,
@@ -2160,7 +2155,7 @@ void ProcessDetailWindow::deleteSelectedHotkey()
         return;
     }
 
-    const HotkeyInspectItem row = m_hotkeyRows.at(static_cast<std::size_t>(rowIndexValue));
+    const HotkeyInspectItem row = m_hotkeyRows->at(static_cast<std::size_t>(rowIndexValue));
     const bool isR0Hotkey = row.sourceText == QStringLiteral("R0 RegisterHotKey");
     if (!isEditableHotkeySource(row.sourceText))
     {
@@ -2301,17 +2296,22 @@ void ProcessDetailWindow::updateHotkeyStatusLabel(const QString& statusText, con
     }
 }
 
-void ProcessDetailWindow::requestAsyncHotkeyRefresh()
+void ProcessDetailWindow::requestAsyncHotkeyRefresh(const bool refreshExisting)
 {
-    if (m_hotkeyRefreshing || m_baseRecord.pid == 0)
+    if (!refreshExisting && m_hotkeyRows)
+    { m_hotkeyInitialRefreshStarted = true; rebuildHotkeyTable(); return; }
+    if (m_hotkeyRefreshing || m_keyboardRefreshing || m_baseRecord.pid == 0)
     {
         return;
     }
 
     m_hotkeyInitialRefreshStarted = true;
     m_hotkeyRefreshing = true;
+    if (m_hotkeyTable) m_hotkeyTable->setEnabled(false);
+    if (m_keyboardHotkeyTable) m_keyboardHotkeyTable->setEnabled(false);
     const std::uint64_t ticketValue = ++m_hotkeyRefreshTicket;
     const std::uint32_t pidValue = m_baseRecord.pid;
+    const auto creationTime = m_baseRecord.creationTime100ns;
     const QString processNameText = QString::fromStdString(m_baseRecord.processName);
     const QString processImagePathText = QString::fromStdString(m_baseRecord.imagePath);
 
@@ -2337,9 +2337,11 @@ void ProcessDetailWindow::requestAsyncHotkeyRefresh()
 
     QPointer<ProcessDetailWindow> guardThis(this);
     auto* refreshTask = QRunnable::create(
-        [guardThis, ticketValue, pidValue, processNameText, processImagePathText]()
+        [guardThis, ticketValue, pidValue, creationTime, processNameText, processImagePathText]()
         {
             HotkeyInspectRefreshResult refreshResult{};
+            refreshResult.processId = pidValue; refreshResult.creationTime = creationTime; refreshResult.ticket = ticketValue;
+            auto rows = makeRetiredHotkeyRows<HotkeyInspectItem>();
             const auto beginTime = std::chrono::steady_clock::now();
 
             QString diagnosticText = QStringLiteral("R3窗口/菜单/资源/.lnk + R0 win32k热键表");
@@ -2349,7 +2351,7 @@ void ProcessDetailWindow::requestAsyncHotkeyRefresh()
                 processImagePathText,
                 diagnosticText);
 
-            refreshResult.rows.reserve(candidates.size());
+            rows->reserve(candidates.size());
             for (const HotkeyCandidate& candidate : candidates)
             {
                 HotkeyInspectItem row{};
@@ -2365,9 +2367,10 @@ void ProcessDetailWindow::requestAsyncHotkeyRefresh()
                 row.detailText = candidate.detailText;
                 row.hasR0MutationSnapshot = candidate.hasR0MutationSnapshot;
                 row.r0MutationSnapshot = candidate.r0MutationSnapshot;
-                refreshResult.rows.push_back(std::move(row));
+                rows->push_back(std::move(row));
             }
 
+            refreshResult.rows = std::move(rows);
             refreshResult.diagnosticText = diagnosticText;
             refreshResult.elapsedMs = static_cast<std::uint64_t>(
                 std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -2375,9 +2378,9 @@ void ProcessDetailWindow::requestAsyncHotkeyRefresh()
 
             QMetaObject::invokeMethod(
                 guardThis,
-                [guardThis, ticketValue, refreshResult]()
+                [guardThis, ticketValue, pidValue, creationTime, refreshResult]()
                 {
-                    if (guardThis == nullptr || guardThis->m_hotkeyRefreshTicket != ticketValue)
+                    if (guardThis == nullptr || guardThis->m_hotkeyRefreshTicket != ticketValue || guardThis->m_baseRecord.pid != pidValue || guardThis->m_baseRecord.creationTime100ns != creationTime)
                     {
                         return;
                     }
@@ -2392,6 +2395,7 @@ void ProcessDetailWindow::requestAsyncHotkeyRefresh()
 
 void ProcessDetailWindow::applyHotkeyRefreshResult(const HotkeyInspectRefreshResult& refreshResult)
 {
+    if (refreshResult.processId != m_baseRecord.pid || refreshResult.creationTime != m_baseRecord.creationTime100ns || refreshResult.ticket != m_hotkeyRefreshTicket) return;
     QPointer<ProcessDetailWindow> guardThis(this);
     if (ks::ui::DeferTableUiCommitIfContextMenuOpen(
             this,
@@ -2421,7 +2425,7 @@ void ProcessDetailWindow::applyHotkeyRefreshResult(const HotkeyInspectRefreshRes
 
     QString statusText = QStringLiteral("● 刷新完成 %1 ms | 热键:%2")
         .arg(refreshResult.elapsedMs)
-        .arg(static_cast<qulonglong>(refreshResult.rows.size()));
+        .arg(static_cast<qulonglong>(refreshResult.rows->size()));
     if (!refreshResult.diagnosticText.trimmed().isEmpty())
     {
         statusText += QStringLiteral(
@@ -2439,30 +2443,39 @@ void ProcessDetailWindow::applyHotkeyRefreshResult(const HotkeyInspectRefreshRes
         << "[ProcessDetailWindow] 进程热键扫描完成, pid="
         << m_baseRecord.pid
         << ", rows="
-        << refreshResult.rows.size()
+        << refreshResult.rows->size()
         << ", elapsedMs="
         << refreshResult.elapsedMs
         << ", diagnostic="
         << refreshResult.diagnosticText.toStdString()
         << eol;
+    if (m_keyboardRefreshPending)
+    {
+        m_keyboardRefreshPending = false;
+        requestAsyncKeyboardRefresh(false);
+    }
 }
 
 void ProcessDetailWindow::rebuildHotkeyTable()
 {
-    if (m_hotkeyTable == nullptr)
+    if (!m_hotkeyTable || !m_hotkeyRows) return;
+    const auto values = m_hotkeyRows;
+    m_hotkeyTable->setEnabled(false);
+    const QPointer<ProcessDetailWindow> alive(this);
+    m_hotkeyTable->sourceReady = [alive]
     {
-        return;
-    }
-
-    m_hotkeyTable->setSortingEnabled(false);
-    m_hotkeyTable->setRowCount(0);
-
-    for (std::size_t rowCacheIndex = 0; rowCacheIndex < m_hotkeyRows.size(); ++rowCacheIndex)
+        if (!alive) return;
+        alive->m_hotkeyTable->setEnabled(true);
+        if (alive->m_hotkeyTable && alive->m_hotkeyTable->currentRowChanged)
+            alive->m_hotkeyTable->currentRowChanged();
+    };
+    m_hotkeyTable->setSourceFactory([values](const ks::i18n::SourceTextSnapshot& translator)
     {
-        const HotkeyInspectItem& rowItem = m_hotkeyRows.at(rowCacheIndex);
-        const int row = m_hotkeyTable->rowCount();
-        m_hotkeyTable->insertRow(row);
-
+        QVector<ks::ui::ImmutableTableRow> rows;
+        rows.reserve(static_cast<qsizetype>(values->size()));
+        for (std::size_t index = 0; index < values->size(); ++index)
+        {
+            const auto& rowItem = values->at(index);
         const QString idText = rowItem.hotkeyId == 0U
             ? QStringLiteral("0")
             : QStringLiteral("0x%1").arg(rowItem.hotkeyId, 0, 16).toUpper();
@@ -2474,28 +2487,19 @@ void ProcessDetailWindow::rebuildHotkeyTable()
             .arg(rowItem.modifiers, 2, 16, QChar('0'))
             .toUpper();
 
-        m_hotkeyTable->setItem(row, 0, createHotkeyCell(rowItem.objectText));
-        m_hotkeyTable->setItem(row, 1, createHotkeyCell(idText));
-        m_hotkeyTable->setItem(row, 2, createHotkeyCell(rowItem.hotkeyText));
-        m_hotkeyTable->setItem(row, 3, createHotkeyCell(QString::number(rowItem.processId)));
-        m_hotkeyTable->setItem(row, 4, createHotkeyCell(threadText));
-        m_hotkeyTable->setItem(row, 5, createHotkeyCell(rowItem.processName));
-        m_hotkeyTable->setItem(row, 6, createHotkeyCell(rowItem.sourceText));
-        m_hotkeyTable->setItem(row, 7, createHotkeyCell(vkModText));
-        m_hotkeyTable->setItem(row, 8, createHotkeyCell(rowItem.detailText));
-
-        for (int column = 0; column < m_hotkeyTable->columnCount(); ++column)
-        {
-            QTableWidgetItem* cellItem = m_hotkeyTable->item(row, column);
-            if (cellItem != nullptr)
+            ks::ui::ImmutableTableRow row;
+            row.key = QString::number(rowItem.processId) + QLatin1Char(':') + rowItem.objectText + QLatin1Char(':') + QString::number(static_cast<qulonglong>(index));
+            row.cells = {rowItem.objectText, idText, rowItem.hotkeyText, QString::number(rowItem.processId), threadText, rowItem.processName, rowItem.sourceText, vkModText, rowItem.detailText};
+            row.columnRoles[0].insert(kHotkeyRowIndexRole, QVariant::fromValue(static_cast<qulonglong>(index)));
+            for (int column = 0; column < row.cells.size(); ++column)
             {
-                cellItem->setData(kHotkeyRowIndexRole, static_cast<qulonglong>(rowCacheIndex));
-                cellItem->setToolTip(cellItem->text());
+                row.cells[column] = translator.displayText(row.cells[column]);
+                row.columnRoles[column].insert(Qt::ToolTipRole, row.cells[column]);
             }
+            rows.push_back(std::move(row));
         }
-    }
-
-    m_hotkeyTable->setSortingEnabled(true);
+        return ks::ui::MakeImmutableTableSource(std::move(rows));
+    });
 }
 
 void ProcessDetailWindow::initializeKeyboardTab()
@@ -2547,10 +2551,7 @@ void ProcessDetailWindow::initializeKeyboardTab()
     hotkeyLayout->setContentsMargins(0, 0, 0, 0);
     hookLayout->setContentsMargins(0, 0, 0, 0);
 
-    m_keyboardHotkeyTable = new ks::ui::VisibleTableWidget(hotkeyPage);
-    ks::ui::SetTableActionBarMode(m_keyboardHotkeyTable, ks::ui::TableActionBarMode::Compact);
-    m_keyboardHotkeyTable->setColumnCount(9);
-    m_keyboardHotkeyTable->setHorizontalHeaderLabels(QStringList{
+    m_keyboardHotkeyTable = new ks::ui::ImmutableValueTable(hotkeyPage, QVector<ks::ui::ImmutableTableHeader>{
         QStringLiteral("对象"),
         QStringLiteral("热键ID"),
         QStringLiteral("热键"),
@@ -2561,6 +2562,8 @@ void ProcessDetailWindow::initializeKeyboardTab()
         QStringLiteral("VK/Mod"),
         QStringLiteral("详情")
     });
+    ks::ui::SetTableActionBarMode(m_keyboardHotkeyTable, ks::ui::TableActionBarMode::Compact);
+
     m_keyboardHotkeyTable->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_keyboardHotkeyTable->setSelectionMode(QAbstractItemView::SingleSelection);
     m_keyboardHotkeyTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
@@ -2579,11 +2582,7 @@ void ProcessDetailWindow::initializeKeyboardTab()
     installHotkeyTableContextMenu(m_keyboardHotkeyTable, 3);
     hotkeyLayout->addWidget(m_keyboardHotkeyTable, 1);
 
-    m_keyboardHookTable = new ks::ui::VisibleTableWidget(hookPage);
-    // Hook 链具有独立取证意义，保留完整快照功能。
-    ks::ui::SetTableActionBarMode(m_keyboardHookTable, ks::ui::TableActionBarMode::Full);
-    m_keyboardHookTable->setColumnCount(10);
-    m_keyboardHookTable->setHorizontalHeaderLabels(QStringList{
+    m_keyboardHookTable = new ks::ui::ImmutableValueTable(hookPage, QVector<ks::ui::ImmutableTableHeader>{
         QStringLiteral("对象"),
         QStringLiteral("类型"),
         QStringLiteral("范围"),
@@ -2595,6 +2594,9 @@ void ProcessDetailWindow::initializeKeyboardTab()
         QStringLiteral("Flags"),
         QStringLiteral("详情")
     });
+    // Hook 链具有独立取证意义，保留完整快照功能。
+    ks::ui::SetTableActionBarMode(m_keyboardHookTable, ks::ui::TableActionBarMode::Full);
+
     m_keyboardHookTable->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_keyboardHookTable->setSelectionMode(QAbstractItemView::SingleSelection);
     m_keyboardHookTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
@@ -2620,6 +2622,8 @@ void ProcessDetailWindow::initializeKeyboardTab()
     m_keyboardLayout->addWidget(keyboardGroup, 1);
 
     m_refreshKeyboardButton->setStyleSheet(buildBlueButtonStyle());
+    rebuildKeyboardHotkeyTable();
+    rebuildKeyboardHookTable();
 }
 
 void ProcessDetailWindow::updateKeyboardStatusLabel(const QString& statusText, const bool refreshing)
@@ -2645,8 +2649,10 @@ void ProcessDetailWindow::updateKeyboardStatusLabel(const QString& statusText, c
     }
 }
 
-void ProcessDetailWindow::requestAsyncKeyboardRefresh()
+void ProcessDetailWindow::requestAsyncKeyboardRefresh(const bool refreshHotkeys)
 {
+    if (m_hotkeyRefreshing) { m_keyboardRefreshPending = true; return; }
+    const auto previousHotkeys = !refreshHotkeys ? m_hotkeyRows : nullptr;
     if (m_keyboardRefreshing || m_baseRecord.pid == 0)
     {
         return;
@@ -2654,8 +2660,12 @@ void ProcessDetailWindow::requestAsyncKeyboardRefresh()
 
     m_keyboardInitialRefreshStarted = true;
     m_keyboardRefreshing = true;
+    if (m_hotkeyTable) m_hotkeyTable->setEnabled(false);
+    if (m_keyboardHotkeyTable) m_keyboardHotkeyTable->setEnabled(false);
+    if (m_keyboardHookTable) m_keyboardHookTable->setEnabled(false);
     const std::uint64_t ticketValue = ++m_keyboardRefreshTicket;
     const std::uint32_t pidValue = m_baseRecord.pid;
+    const auto creationTime = m_baseRecord.creationTime100ns;
     const QString processNameText = QString::fromStdString(m_baseRecord.processName);
     const QString processImagePathText = QString::fromStdString(m_baseRecord.imagePath);
 
@@ -2673,18 +2683,21 @@ void ProcessDetailWindow::requestAsyncKeyboardRefresh()
 
     QPointer<ProcessDetailWindow> guardThis(this);
     auto* refreshTask = QRunnable::create(
-        [guardThis, ticketValue, pidValue, processNameText, processImagePathText]()
+        [guardThis, ticketValue, pidValue, creationTime, processNameText, processImagePathText, previousHotkeys]()
         {
             KeyboardInspectRefreshResult refreshResult{};
+            refreshResult.processId = pidValue; refreshResult.creationTime = creationTime; refreshResult.ticket = ticketValue;
+            auto hotkeys = makeRetiredHotkeyRows<HotkeyInspectItem>();
+            auto hooks = makeRetiredHotkeyRows<KeyboardHookInspectItem>();
             const auto beginTime = std::chrono::steady_clock::now();
 
             QString diagnosticText = QStringLiteral("R3窗口/菜单/资源/.lnk + R0 win32k热键/钩子");
-            const std::vector<HotkeyCandidate> hotkeyCandidates = collectHotkeysForProcess(
+            const std::vector<HotkeyCandidate> hotkeyCandidates = previousHotkeys ? std::vector<HotkeyCandidate>{} : collectHotkeysForProcess(
                 pidValue,
                 processNameText,
                 processImagePathText,
                 diagnosticText);
-            refreshResult.hotkeyRows.reserve(hotkeyCandidates.size());
+            hotkeys->reserve(hotkeyCandidates.size());
             for (const HotkeyCandidate& candidate : hotkeyCandidates)
             {
                 HotkeyInspectItem row{};
@@ -2700,12 +2713,12 @@ void ProcessDetailWindow::requestAsyncKeyboardRefresh()
                 row.detailText = candidate.detailText;
                 row.hasR0MutationSnapshot = candidate.hasR0MutationSnapshot;
                 row.r0MutationSnapshot = candidate.r0MutationSnapshot;
-                refreshResult.hotkeyRows.push_back(std::move(row));
+                hotkeys->push_back(std::move(row));
             }
 
             const std::vector<KeyboardHookCandidate> hookCandidates =
                 collectDriverKeyboardHooks(pidValue, diagnosticText);
-            refreshResult.hookRows.reserve(hookCandidates.size());
+            hooks->reserve(hookCandidates.size());
             for (const KeyboardHookCandidate& candidate : hookCandidates)
             {
                 KeyboardHookInspectItem row{};
@@ -2719,9 +2732,11 @@ void ProcessDetailWindow::requestAsyncKeyboardRefresh()
                 row.sourceText = candidate.sourceText;
                 row.flagsText = candidate.flagsText;
                 row.detailText = candidate.detailText;
-                refreshResult.hookRows.push_back(std::move(row));
+                hooks->push_back(std::move(row));
             }
 
+            refreshResult.hotkeyRows = previousHotkeys ? previousHotkeys : std::move(hotkeys);
+            refreshResult.hookRows = std::move(hooks);
             refreshResult.diagnosticText = diagnosticText;
             refreshResult.elapsedMs = static_cast<std::uint64_t>(
                 std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -2729,9 +2744,9 @@ void ProcessDetailWindow::requestAsyncKeyboardRefresh()
 
             QMetaObject::invokeMethod(
                 guardThis,
-                [guardThis, ticketValue, refreshResult]()
+                [guardThis, ticketValue, pidValue, creationTime, refreshResult]()
                 {
-                    if (guardThis == nullptr || guardThis->m_keyboardRefreshTicket != ticketValue)
+                    if (guardThis == nullptr || guardThis->m_keyboardRefreshTicket != ticketValue || guardThis->m_baseRecord.pid != pidValue || guardThis->m_baseRecord.creationTime100ns != creationTime)
                     {
                         return;
                     }
@@ -2746,6 +2761,7 @@ void ProcessDetailWindow::requestAsyncKeyboardRefresh()
 
 void ProcessDetailWindow::applyKeyboardRefreshResult(const KeyboardInspectRefreshResult& refreshResult)
 {
+    if (refreshResult.processId != m_baseRecord.pid || refreshResult.creationTime != m_baseRecord.creationTime100ns || refreshResult.ticket != m_keyboardRefreshTicket) return;
     QPointer<ProcessDetailWindow> guardThis(this);
     if (ks::ui::DeferTableUiCommitIfContextMenuOpen(
             this,
@@ -2777,8 +2793,8 @@ void ProcessDetailWindow::applyKeyboardRefreshResult(const KeyboardInspectRefres
 
     QString statusText = QStringLiteral("● 刷新完成 %1 ms | 热键:%2 | 键盘钩子:%3")
         .arg(refreshResult.elapsedMs)
-        .arg(static_cast<qulonglong>(refreshResult.hotkeyRows.size()))
-        .arg(static_cast<qulonglong>(refreshResult.hookRows.size()));
+        .arg(static_cast<qulonglong>(refreshResult.hotkeyRows->size()))
+        .arg(static_cast<qulonglong>(refreshResult.hookRows->size()));
     if (!refreshResult.diagnosticText.trimmed().isEmpty())
     {
         statusText += QStringLiteral(
@@ -2800,9 +2816,9 @@ void ProcessDetailWindow::applyKeyboardRefreshResult(const KeyboardInspectRefres
         << "[ProcessDetailWindow] 键盘扫描完成, pid="
         << m_baseRecord.pid
         << ", hotkeys="
-        << refreshResult.hotkeyRows.size()
+        << refreshResult.hotkeyRows->size()
         << ", hooks="
-        << refreshResult.hookRows.size()
+        << refreshResult.hookRows->size()
         << ", elapsedMs="
         << refreshResult.elapsedMs
         << ", diagnostic="
@@ -2812,19 +2828,24 @@ void ProcessDetailWindow::applyKeyboardRefreshResult(const KeyboardInspectRefres
 
 void ProcessDetailWindow::rebuildKeyboardHotkeyTable()
 {
-    if (m_keyboardHotkeyTable == nullptr)
+    if (!m_keyboardHotkeyTable || !m_keyboardHotkeyRows) return;
+    const auto values = m_keyboardHotkeyRows;
+    m_keyboardHotkeyTable->setEnabled(false);
+    const QPointer<ProcessDetailWindow> alive(this);
+    m_keyboardHotkeyTable->sourceReady = [alive]
     {
-        return;
-    }
-
-    m_keyboardHotkeyTable->setSortingEnabled(false);
-    m_keyboardHotkeyTable->setRowCount(0);
-
-    for (const HotkeyInspectItem& rowItem : m_keyboardHotkeyRows)
+        if (!alive) return;
+        alive->m_keyboardHotkeyTable->setEnabled(true);
+        if (alive->m_hotkeyTable && alive->m_hotkeyTable->currentRowChanged)
+            alive->m_hotkeyTable->currentRowChanged();
+    };
+    m_keyboardHotkeyTable->setSourceFactory([values](const ks::i18n::SourceTextSnapshot& translator)
     {
-        const int row = m_keyboardHotkeyTable->rowCount();
-        m_keyboardHotkeyTable->insertRow(row);
-
+        QVector<ks::ui::ImmutableTableRow> rows;
+        rows.reserve(static_cast<qsizetype>(values->size()));
+        for (std::size_t index = 0; index < values->size(); ++index)
+        {
+            const auto& rowItem = values->at(index);
         const QString idText = rowItem.hotkeyId == 0U
             ? QStringLiteral("0")
             : QStringLiteral("0x%1").arg(rowItem.hotkeyId, 0, 16).toUpper();
@@ -2836,67 +2857,56 @@ void ProcessDetailWindow::rebuildKeyboardHotkeyTable()
             .arg(rowItem.modifiers, 2, 16, QChar('0'))
             .toUpper();
 
-        m_keyboardHotkeyTable->setItem(row, 0, createHotkeyCell(rowItem.objectText));
-        m_keyboardHotkeyTable->setItem(row, 1, createHotkeyCell(idText));
-        m_keyboardHotkeyTable->setItem(row, 2, createHotkeyCell(rowItem.hotkeyText));
-        m_keyboardHotkeyTable->setItem(row, 3, createHotkeyCell(QString::number(rowItem.processId)));
-        m_keyboardHotkeyTable->setItem(row, 4, createHotkeyCell(threadText));
-        m_keyboardHotkeyTable->setItem(row, 5, createHotkeyCell(rowItem.processName));
-        m_keyboardHotkeyTable->setItem(row, 6, createHotkeyCell(rowItem.sourceText));
-        m_keyboardHotkeyTable->setItem(row, 7, createHotkeyCell(vkModText));
-        m_keyboardHotkeyTable->setItem(row, 8, createHotkeyCell(rowItem.detailText));
-
-        for (int column = 0; column < m_keyboardHotkeyTable->columnCount(); ++column)
-        {
-            QTableWidgetItem* cellItem = m_keyboardHotkeyTable->item(row, column);
-            if (cellItem != nullptr)
+            ks::ui::ImmutableTableRow row;
+            row.key = QString::number(rowItem.processId) + QLatin1Char(':') + rowItem.objectText + QLatin1Char(':') + QString::number(static_cast<qulonglong>(index));
+            row.cells = {rowItem.objectText, idText, rowItem.hotkeyText, QString::number(rowItem.processId), threadText, rowItem.processName, rowItem.sourceText, vkModText, rowItem.detailText};
+            row.columnRoles[0].insert(kHotkeyRowIndexRole, QVariant::fromValue(static_cast<qulonglong>(index)));
+            for (int column = 0; column < row.cells.size(); ++column)
             {
-                cellItem->setToolTip(cellItem->text());
+                row.cells[column] = translator.displayText(row.cells[column]);
+                row.columnRoles[column].insert(Qt::ToolTipRole, row.cells[column]);
             }
+            rows.push_back(std::move(row));
         }
-    }
-
-    m_keyboardHotkeyTable->setSortingEnabled(true);
+        return ks::ui::MakeImmutableTableSource(std::move(rows));
+    });
 }
 
 void ProcessDetailWindow::rebuildKeyboardHookTable()
 {
-    if (m_keyboardHookTable == nullptr)
+    if (!m_keyboardHookTable || !m_keyboardHookRows) return;
+    const auto values = m_keyboardHookRows;
+    m_keyboardHookTable->setEnabled(false);
+    const QPointer<ProcessDetailWindow> alive(this);
+    m_keyboardHookTable->sourceReady = [alive]
     {
-        return;
-    }
-
-    m_keyboardHookTable->setSortingEnabled(false);
-    m_keyboardHookTable->setRowCount(0);
-
-    for (const KeyboardHookInspectItem& rowItem : m_keyboardHookRows)
+        if (!alive) return;
+        alive->m_keyboardHookTable->setEnabled(true);
+        if (alive->m_hotkeyTable && alive->m_hotkeyTable->currentRowChanged)
+            alive->m_hotkeyTable->currentRowChanged();
+    };
+    m_keyboardHookTable->setSourceFactory([values](const ks::i18n::SourceTextSnapshot& translator)
     {
-        const int row = m_keyboardHookTable->rowCount();
-        m_keyboardHookTable->insertRow(row);
+        QVector<ks::ui::ImmutableTableRow> rows;
+        rows.reserve(static_cast<qsizetype>(values->size()));
+        for (std::size_t index = 0; index < values->size(); ++index)
+        {
+            const auto& rowItem = values->at(index);
         const QString threadText = rowItem.threadId == 0U
             ? QStringLiteral("-")
             : QString::number(rowItem.threadId);
 
-        m_keyboardHookTable->setItem(row, 0, createHotkeyCell(rowItem.objectText));
-        m_keyboardHookTable->setItem(row, 1, createHotkeyCell(rowItem.typeText));
-        m_keyboardHookTable->setItem(row, 2, createHotkeyCell(rowItem.scopeText));
-        m_keyboardHookTable->setItem(row, 3, createHotkeyCell(QString::number(rowItem.processId)));
-        m_keyboardHookTable->setItem(row, 4, createHotkeyCell(threadText));
-        m_keyboardHookTable->setItem(row, 5, createHotkeyCell(rowItem.procedureText));
-        m_keyboardHookTable->setItem(row, 6, createHotkeyCell(rowItem.moduleText));
-        m_keyboardHookTable->setItem(row, 7, createHotkeyCell(rowItem.sourceText));
-        m_keyboardHookTable->setItem(row, 8, createHotkeyCell(rowItem.flagsText));
-        m_keyboardHookTable->setItem(row, 9, createHotkeyCell(rowItem.detailText));
-
-        for (int column = 0; column < m_keyboardHookTable->columnCount(); ++column)
-        {
-            QTableWidgetItem* cellItem = m_keyboardHookTable->item(row, column);
-            if (cellItem != nullptr)
+            ks::ui::ImmutableTableRow row;
+            row.key = QString::number(rowItem.processId) + QLatin1Char(':') + rowItem.objectText + QLatin1Char(':') + QString::number(static_cast<qulonglong>(index));
+            row.cells = {rowItem.objectText, rowItem.typeText, rowItem.scopeText, QString::number(rowItem.processId), threadText, rowItem.procedureText, rowItem.moduleText, rowItem.sourceText, rowItem.flagsText, rowItem.detailText};
+            row.columnRoles[0].insert(kHotkeyRowIndexRole, QVariant::fromValue(static_cast<qulonglong>(index)));
+            for (int column = 0; column < row.cells.size(); ++column)
             {
-                cellItem->setToolTip(cellItem->text());
+                row.cells[column] = translator.displayText(row.cells[column]);
+                row.columnRoles[column].insert(Qt::ToolTipRole, row.cells[column]);
             }
+            rows.push_back(std::move(row));
         }
-    }
-
-    m_keyboardHookTable->setSortingEnabled(true);
+        return ks::ui::MakeImmutableTableSource(std::move(rows));
+    });
 }

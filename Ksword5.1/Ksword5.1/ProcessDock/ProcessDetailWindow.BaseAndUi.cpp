@@ -2108,6 +2108,15 @@ void ProcessDetailWindow::updateBaseRecord(const ks::process::ProcessRecord& bas
         m_tokenInitialRefreshStarted = false;
         m_tokenSwitchInitialRefreshStarted = false;
         m_sectionInfoInitialRefreshStarted = false;
+        m_hotkeyRows.reset();
+        m_keyboardHotkeyRows.reset();
+        m_keyboardHookRows.reset();
+        m_hotkeyRefreshing = false;
+        m_keyboardRefreshing = false;
+        m_keyboardRefreshPending = false;
+        if (m_hotkeyTable) m_hotkeyTable->clearRows();
+        if (m_keyboardHotkeyTable) m_keyboardHotkeyTable->clearRows();
+        if (m_keyboardHookTable) m_keyboardHookTable->clearRows();
         m_hotkeyInitialRefreshStarted = false;
         m_keyboardInitialRefreshStarted = false;
         m_pebInitialRefreshStarted = false;
@@ -2898,7 +2907,7 @@ void ProcessDetailWindow::requestInitialRefreshForCurrentTab()
     {
         if (!m_hotkeyInitialRefreshStarted)
         {
-            requestAsyncHotkeyRefresh();
+            requestAsyncHotkeyRefresh(false);
         }
         return;
     }
@@ -2907,7 +2916,7 @@ void ProcessDetailWindow::requestInitialRefreshForCurrentTab()
     {
         if (!m_keyboardInitialRefreshStarted)
         {
-            requestAsyncKeyboardRefresh();
+            requestAsyncKeyboardRefresh(false);
         }
         return;
     }
