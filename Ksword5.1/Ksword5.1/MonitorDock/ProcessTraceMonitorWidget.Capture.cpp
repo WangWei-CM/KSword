@@ -583,7 +583,8 @@ void ProcessTraceMonitorWidget::enqueueEventFromRecord(CaptureState& state, cons
             state.m_pendingRows.pop_front();
             ++state.m_pendingDroppedRows;
         }
-        state.m_pendingRows.push_back(std::move(rowValue));
+        state.m_pendingRows.push_back(std::make_shared<const ks::monitor::ProcessTraceEventRecord>(
+            std::move(rowValue), ++state.m_eventSequence));
     }
 }
 

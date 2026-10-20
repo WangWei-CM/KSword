@@ -1183,6 +1183,7 @@
     <ClInclude Include="..\..\shared\ui\MetricChartBinding.h" />
     <ClInclude Include="MonitorDock\MonitorPanelWidget.h" />
     <ClInclude Include="MonitorDock\MonitorTextViewer.h" />
+    <ClInclude Include="MonitorDock\ProcessTraceEventArchive.h" />
     <ClInclude Include="MonitorDock\ProcessTraceMonitorWidget.h" />
     <ClInclude Include="MonitorDock\ProcessTraceTimelineWidget.h" />
     <ClInclude Include="MonitorDock\EventTimelineModel.h" />

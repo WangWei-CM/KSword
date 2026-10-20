@@ -3597,6 +3597,9 @@
     <ClInclude Include="MonitorDock\MonitorTextViewer.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="MonitorDock\ProcessTraceEventArchive.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="MonitorDock\ProcessTraceMonitorWidget.h">
       <Filter>Header Files</Filter>
     </ClInclude>

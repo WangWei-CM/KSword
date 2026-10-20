@@ -243,6 +243,9 @@ void ProcessTraceMonitorWidget::openEventDetailViewerForRow(const int row) const
 
 void ProcessTraceMonitorWidget::exportVisibleRowsToTsv()
 {
+    // MTAPI010 consumes canonical values. Until that consumer lands, reject
+    // every legacy exporter entry while the display mirror is hidden or stale.
+    if (eventProjectionPending() || (m_eventFilterProjection && m_eventFilterProjection->isPending())) return;
     if (m_eventTable == nullptr || m_eventTable->rowCount() == 0)
     {
         QMessageBox::information(this, QStringLiteral("导出结果"), QStringLiteral("当前没有可导出的事件。"));

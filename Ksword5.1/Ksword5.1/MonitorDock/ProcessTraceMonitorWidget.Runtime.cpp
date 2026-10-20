@@ -184,12 +184,7 @@ void ProcessTraceMonitorWidget::startMonitoring()
     m_captureCleanup = cleanup;
     m_captureCompletionApplied = false;
     m_appliedTargetVersion = 0;
-    if (m_eventTable)
-    {
-        m_eventTable->clearContents();
-        m_eventTable->setRowCount(0);
-    }
-    m_timelineEventPoints.clear();
+    clearCanonicalEvents();
     m_captureStartTime100ns = currentSystemTime100ns();
     m_captureStopTime100ns = 0;
     m_timelineSelectionStart100ns = m_captureStartTime100ns;

@@ -18,6 +18,7 @@
 #include <QDateTime>
 #include <QEvent>
 #include <QLabel>
+#include <QItemSelectionModel>
 #include <QList>
 #include <QPushButton>
 #include <QRegularExpression>
@@ -47,6 +48,7 @@ ProcessTraceMonitorWidget::ProcessTraceMonitorWidget(QWidget* parent)
 
     initializeUi();
     if (m_targetTable) m_targetTable->installEventFilter(this);
+    if (m_eventTable) m_eventTable->installEventFilter(this);
     if (m_availableTable) ks::ui::SetTableRowFilterBusinessOwnership(m_availableTable,
         ks::ui::TableRowFilterBusinessOwnership::ExclusiveSharedIdentity);
     initializeConnections();
@@ -356,7 +358,7 @@ void ProcessTraceMonitorWidget::updateActionState()
     }
     if (m_exportButton != nullptr)
     {
-        m_exportButton->setEnabled(m_eventTable != nullptr && m_eventTable->rowCount() > 0
+        m_exportButton->setEnabled(m_eventTable != nullptr && m_eventTable->rowCount() > 0 && !eventProjectionPending()
             && (!m_eventFilterProjection || !m_eventFilterProjection->isPending()));
     }
 }
@@ -374,7 +376,7 @@ void ProcessTraceMonitorWidget::updateStatusLabel()
         trackedCount = m_capture->m_trackedProcessMap.size();
     }
 
-    const int eventCount = (m_eventTable != nullptr) ? m_eventTable->rowCount() : 0;
+    const auto eventCount = m_eventArchive.size();
     const QString summaryText = QStringLiteral("目标=%1 | 进程树=%2 | 事件=%3")
         .arg(m_targetProcessList.size())
         .arg(static_cast<qulonglong>(trackedCount))
@@ -424,5 +426,19 @@ bool ProcessTraceMonitorWidget::eventFilter(QObject* watched, QEvent* event)
 {
     if (watched == m_targetTable && event->type() == QEvent::Show)
         QTimer::singleShot(0, this, [this]() { if (m_targetProjectionDirty) refreshTargetTable(); });
+    if (watched == m_eventTable && event->type() == QEvent::Hide)
+    {
+        m_restoreSelectedEvents.clear();
+        if (m_eventTable->selectionModel())
+            for (const auto& index : m_eventTable->selectionModel()->selectedRows())
+                if (auto record = eventRecordAt(index.row())) m_restoreSelectedEvents.push_back(std::move(record));
+        m_restoreCurrentEvent = eventRecordAt(m_eventTable->currentRow());
+        m_restoreTopEvent = eventRecordAt(m_eventTable->indexAt(QPoint(0,0)).row());
+        m_eventProjectionStale = true; m_eventProjectionQueue.clear(); m_expiredEventProjection.clear();
+        if (m_eventFilterProjection) m_eventFilterProjection->setSuspended(true);
+        updateActionState();
+    }
+    if (watched == m_eventTable && event->type() == QEvent::Show)
+        QTimer::singleShot(0, this, [this]() { flushPendingRows(); });
     return QWidget::eventFilter(watched, event);
 }

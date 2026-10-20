@@ -15,6 +15,8 @@
 #include "../UI/RetainedCleanupJob.h"
 #include "../UI/AsyncOperation.h"
 #include "../UI/StructuredFieldView.h"
+#include "ProcessTraceEventArchive.h"
+#include <QPersistentModelIndex>
 
 #include <QWidget>
 
@@ -190,21 +192,9 @@ public:
     // - relationText：根进程/子进程/属性关联等说明；
     // - detailDocument：属性与元信息的唯一结构化快照；
     // - activityIdText：ActivityId 文本。
-    struct CapturedEventRow
-    {
-        std::uint64_t time100ns = 0;
-        QString time100nsText;
-        QString typeText;
-        QString providerText;
-        int eventId = 0;
-        QString eventName;
-        QString pidText;
-        QString processText;
-        QString rootPidText;
-        QString relationText;
-        ks::ui::FieldDocument detailDocument;
-        QString activityIdText;
-    };
+    using CapturedEventRow = ks::monitor::ProcessTraceCapturedEventRow;
+    using EventExportSnapshot = ks::monitor::ProcessTraceEventExportSnapshot;
+    EventExportSnapshot freezeVisibleEventRowsForExport();
 
 private:
     struct CaptureState;
@@ -284,7 +274,12 @@ private:
     // - 返回：true 表示 applyEventFilter 需要叠加时间范围判断。
     bool isTimelineFilterActive() const;
     void flushPendingRows();
-    void appendEventRow(const CapturedEventRow& rowValue);
+    void acceptPendingEventRows();
+    void projectEventRows();
+    void materializeEventRow(const ks::monitor::ProcessTraceEventRef& record);
+    void clearCanonicalEvents();
+    ks::monitor::ProcessTraceEventRef eventRecordAt(int row) const;
+    bool eventProjectionPending() const;
     ks::ui::FieldDocument eventDocumentForRow(int row) const;
     void openEventDetailViewerForRow(int row) const;
     void showEventContextMenu(const QPoint& position);
@@ -343,9 +338,10 @@ private:
     {
         std::vector<ProviderEntry> m_activeProviderList;                // m_activeProviderList：本轮监控成功启用的 Provider。
         std::unordered_map<std::uint32_t, RuntimeTrackedProcess> m_trackedProcessMap; // m_trackedProcessMap：运行期目标进程树。
-        std::deque<CapturedEventRow> m_pendingRows;                     // m_pendingRows：后台待刷入 UI 的有界 FIFO 队列。
+        std::deque<ks::monitor::ProcessTraceEventRef> m_pendingRows;                     // m_pendingRows：后台待刷入 UI 的有界 FIFO 队列。
         std::mutex m_runtimeMutex;                                      // m_runtimeMutex：保护目标进程树与 Provider 列表。
         std::mutex m_pendingMutex;                                      // m_pendingMutex：保护待刷新事件队列。
+        std::uint64_t m_eventSequence = 0; // under m_pendingMutex
         std::size_t m_pendingDroppedRows = 0;                            // m_pendingDroppedRows：因积压保护丢弃的事件数。
         std::atomic_bool m_captureRunning{ false };                     // m_captureRunning：ETW 监听是否在运行。
         std::atomic_bool m_capturePaused{ false };                      // m_capturePaused：ETW 监听是否处于暂停态。
@@ -442,7 +438,15 @@ private:
     static constexpr std::size_t kUiFlushRowLimit = 160;            // 单个 GUI tick 最多写入的行数。
     static constexpr int kUiFlushBudgetMs = 4;                       // 单个 GUI tick 的渲染时间预算。
 
-    std::vector<ProcessTraceTimelineEventPoint> m_timelineEventPoints; // m_timelineEventPoints：时间轴绘制用轻量事件缓存。
+    using EventRef = ks::monitor::ProcessTraceEventRef;
+    struct ProjectedEvent { EventRef record; QPersistentModelIndex index; };
+    ks::monitor::ProcessTraceEventArchive m_eventArchive;
+    std::unordered_map<const ks::monitor::ProcessTraceEventRecord*, ProjectedEvent> m_projectedEvents;
+    std::deque<EventRef> m_eventProjectionQueue, m_expiredEventProjection;
+    std::vector<EventRef> m_restoreSelectedEvents;
+    EventRef m_restoreCurrentEvent, m_restoreTopEvent;
+    std::uint64_t m_eventSessionGeneration = 0, m_timelineArchiveRevision = 0;
+    bool m_eventProjectionStale = true, m_eventProjectionWasVisible = false, m_eventProjectionPumpScheduled = false;
     std::atomic_bool m_availableRefreshPending{ false };            // m_availableRefreshPending：可选进程刷新是否进行中。
     QTimer* m_uiUpdateTimer = nullptr;                              // m_uiUpdateTimer：事件表节流刷新定时器。
     QTimer* m_eventFilterDebounceTimer = nullptr;                   // m_eventFilterDebounceTimer：事件筛选节流定时器。
