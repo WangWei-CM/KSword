@@ -327,15 +327,16 @@ namespace ks::minidump
                 ParseThreadList(view, location, true, architecture, faultingThreadId,
                     modules, result, &scanInputs, &memory);
             }
+            const ThreadIdIndex threadIndex = BuildThreadIdIndex(result.threads);
             if (FindStream(view, header.StreamDirectoryRva, header.NumberOfStreams,
                     ThreadInfoListStream, &location))
             {
-                ParseThreadInfoList(view, location, result);
+                ParseThreadInfoList(view, location, result, threadIndex);
             }
             if (FindStream(view, header.StreamDirectoryRva, header.NumberOfStreams,
                     static_cast<std::uint32_t>(24) /* ThreadNamesStream */, &location))
             {
-                ParseThreadNames(view, location, result);
+                ParseThreadNames(view, location, result, threadIndex);
             }
             // 线程栈全部登记完毕，此时才能定型内存索引。
             memory.finalize(view);
