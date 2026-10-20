@@ -19,6 +19,8 @@
 #include <vector>      // std::vector：窗口快照容器。
 
 // Qt 前置声明：降低头文件编译耦合。
+namespace ks::ui { class AsyncOperation; }
+class QEvent;
 class QCheckBox;
 class CodeEditorWidget;
 class QComboBox;
@@ -110,6 +112,9 @@ public:
         bool inheritableHandle = false;     // 返回句柄是否允许子进程继承。
     };
 
+protected:
+    bool eventFilter(QObject* watched, QEvent* event) override;
+
 private:
     // ===================== UI 初始化 ======================
     void initializeUi();
@@ -122,6 +127,7 @@ private:
     bool passFilter(const WindowInfo& info) const;
     void updateStatusBar();
     void updatePreviewPanel(const WindowInfo* info);
+    void scheduleWindowSelectionUi();
     // refreshDesktopList：
     // - 作用：刷新“桌面管理”页中的窗口站/桌面清单；
     // - 调用：初始化界面后、点击刷新按钮后、切换成功后调用；
@@ -233,6 +239,16 @@ private:
     QLabel* m_visibleLabel = nullptr;             // 可见窗口数。
     QLabel* m_systemLabel = nullptr;              // 系统窗口数。
     QLabel* m_selectedLabel = nullptr;            // 当前选中项信息。
+
+    // 缩略图节拍独立于窗口清单采样；像素缩放只携值进入后台。
+    QTimer* m_previewTimer = nullptr;
+    ks::ui::AsyncOperation* m_previewScaleOperation = nullptr;
+    QString m_previewIdentity;
+    QByteArray m_previewSummaryKey;
+    QSize m_previewSize;
+    qreal m_previewDpr = 0;
+    bool m_previewCaptureDue = true;
+    bool m_selectionUiQueued = false;
 
     // 自动刷新定时器。
     QTimer* m_autoRefreshTimer = nullptr;         // 定时刷新控制。

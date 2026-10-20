@@ -2,6 +2,7 @@
 #include "../UI/TableContextMenu.h"
 #include "../UI/FlatButtonTheme.h"
 #include "../UI/ThemeBinding.h"
+#include "../UI/AsyncOperation.h"
 #include "OtherDock.h"
 #include "../UI/PageControlStyle.h"
 #include "../UI/PrimaryPageStyle.h"
@@ -44,6 +45,9 @@
 #include <QCursor>
 #include <QDateTime>
 #include <QDialog>
+#include <QDataStream>
+#include <QEvent>
+#include <QImage>
 #include <QFile>
 #include <QFileDialog>
 #include <QFileIconProvider>
@@ -3078,6 +3082,15 @@ OtherDock::OtherDock(QWidget* parent)
 
     initializeUi();
     initializeConnections();
+    m_previewScaleOperation = new ks::ui::AsyncOperation(this);
+    m_thumbnailLabel->installEventFilter(this);
+    m_previewTimer = new QTimer(this);
+    m_previewTimer->setInterval(1000);
+    connect(m_previewTimer, &QTimer::timeout, this, [this] {
+        m_previewCaptureDue = true;
+        scheduleWindowSelectionUi();
+    });
+    m_previewTimer->start();
     m_autoRefreshCheck->setChecked(true);
     applyViewMode();
     refreshWindowListAsync();
@@ -3085,6 +3098,7 @@ OtherDock::OtherDock(QWidget* parent)
 
 OtherDock::~OtherDock()
 {
+    if (m_previewScaleOperation) m_previewScaleOperation->close();
     if (m_autoRefreshTimer != nullptr)
     {
         m_autoRefreshTimer->stop();
@@ -3650,9 +3664,9 @@ void OtherDock::initializeConnections()
 
     // Preview follows the current selected leaf; the status counts the whole selection.
     connect(m_windowTree, &QTreeWidget::currentItemChanged, this,
-        [this](QTreeWidgetItem*, QTreeWidgetItem*) { updateWindowSelectionUi(); });
+        [this](QTreeWidgetItem*, QTreeWidgetItem*) { scheduleWindowSelectionUi(); });
     connect(m_windowTree, &QTreeWidget::itemSelectionChanged, this,
-        [this] { updateWindowSelectionUi(); });
+        [this] { scheduleWindowSelectionUi(); });
 
     // 截图按钮：把当前选中窗口抓图并保存到文件。
     connect(m_captureButton, &QPushButton::clicked, this, [this]() {
@@ -4304,23 +4318,99 @@ void OtherDock::updateStatusBar()
 
 void OtherDock::updatePreviewPanel(const WindowInfo* info)
 {
-    // 无选中项时清空预览，防止显示过期信息。
-    if (info == nullptr)
+    // 隐藏只延后预览投影，不影响窗口枚举及其新增/退出状态。
+    if (!m_previewWidget->isVisible() || !m_thumbnailLabel->isVisible())
     {
-        m_thumbnailLabel->setPixmap(QPixmap());
-        m_quickInfoText->setDocument(ks::ui::FieldDocument{}.note(QStringLiteral("请选择左侧窗口项查看预览。")));
-        kLogEvent event;
-        dbg << event
-            << "[OtherDock] 预览面板清空（无有效选中项）。"
-            << eol;
+        m_previewCaptureDue = true;
         return;
     }
-
-    // 抓取缩略图并更新右侧关键属性摘要。
-    const QPixmap previewPixmap = grabWindowPreviewPixmap(
-        info->hwndValue,
-        m_thumbnailLabel->size());
-    m_thumbnailLabel->setPixmap(previewPixmap);
+    const QString identity = info ? ks::window::windowIdentityKey(info->hwndValue,
+        info->processId, info->threadId, info->processCreationTime100ns) : QString();
+    if (!info)
+    {
+        if (!m_previewIdentity.isEmpty() || m_previewSummaryKey.isEmpty())
+        {
+            if (m_previewScaleOperation) m_previewScaleOperation->cancel();
+            m_thumbnailLabel->setPixmap(QPixmap());
+            m_quickInfoText->setDocument(ks::ui::FieldDocument{}.note(QStringLiteral("请选择左侧窗口项查看预览。")));
+        }
+        m_previewIdentity.clear();
+        m_previewSummaryKey = QByteArrayLiteral("empty");
+        m_previewCaptureDue = true;
+        return;
+    }
+    const bool targetChanged = identity != m_previewIdentity;
+    if (targetChanged)
+    {
+        m_previewIdentity = identity;
+        m_previewCaptureDue = true;
+        m_thumbnailLabel->setPixmap(QPixmap());
+    }
+    const QSize targetSize = m_thumbnailLabel->size();
+    const qreal dpr = m_thumbnailLabel->devicePixelRatioF();
+    if (targetSize != m_previewSize || dpr != m_previewDpr)
+        m_previewCaptureDue = true;
+    if (m_previewCaptureDue && m_previewScaleOperation &&
+        (targetChanged || !m_previewScaleOperation->isBusy()))
+    {
+        // QScreen/QPixmap remain on their GUI thread. Only owned QImage pixels
+        // and size/DPR values cross the worker boundary.
+        QPixmap source;
+        if (info->valid)
+            if (auto* screen = QGuiApplication::primaryScreen())
+                source = screen->grabWindow(static_cast<WId>(info->hwndValue));
+        m_previewCaptureDue = false;
+        m_previewSize = targetSize;
+        m_previewDpr = dpr;
+        if (source.isNull())
+        {
+            m_previewScaleOperation->cancel();
+            QPixmap fallback(targetSize);
+            fallback.fill(KswordTheme::SurfaceColor());
+            QPainter painter(&fallback);
+            painter.setPen(KswordTheme::TextSecondaryColor());
+            painter.drawRect(fallback.rect().adjusted(0, 0, -1, -1));
+            painter.drawText(fallback.rect(), Qt::AlignCenter,
+                ks::i18n::contextText(QStringLiteral("other.thumbnail.none"), QStringLiteral("无可用缩略图")));
+            painter.end();
+            m_thumbnailLabel->setPixmap(fallback);
+        }
+        else
+        {
+            struct ScaleRequest { QImage image; QSize size; qreal dpr; QString identity; };
+            struct ScaleResult { QImage image; QSize size; qreal dpr; QString identity; };
+            m_previewScaleOperation->submit<ScaleRequest, ScaleResult>(
+                {source.toImage(), targetSize, dpr, identity},
+                [](const ScaleRequest& value, const ks::ui::AsyncOperationToken&) {
+                    QImage scaled = value.image.scaled(value.size * value.dpr,
+                        Qt::KeepAspectRatio, Qt::SmoothTransformation);
+                    scaled.setDevicePixelRatio(value.dpr);
+                    return ScaleResult{std::move(scaled), value.size, value.dpr, value.identity};
+                },
+                [this](const ScaleResult& result, std::uint64_t) {
+                    const auto* current = m_windowTree->currentItem();
+                    if (!current || !current->isSelected() || ks::window::windowItemIdentity(current) != result.identity ||
+                        result.identity != m_previewIdentity || !m_thumbnailLabel->isVisible() ||
+                        result.size != m_thumbnailLabel->size() || result.dpr != m_thumbnailLabel->devicePixelRatioF())
+                    {
+                        m_previewCaptureDue = true;
+                        return true;
+                    }
+                    m_thumbnailLabel->setPixmap(QPixmap::fromImage(result.image));
+                    return true;
+                },
+                [this](std::exception_ptr) { m_previewCaptureDue = true; });
+        }
+    }
+    QByteArray summaryKey;
+    QDataStream summaryStream(&summaryKey, QIODevice::WriteOnly);
+    summaryStream << identity << info->titleText << info->classNameText << info->processNameText
+        << info->windowRect << info->visible << info->enabled << info->topMost << info->valid
+        << info->minimized << info->maximized << info->alphaValue << info->displayAffinityKnown
+        << info->displayAffinityValue << info->displayAffinityError
+        << KswordTheme::SurfaceColor().rgba() << ks::i18n::LanguageManager::instance().currentLanguageId();
+    if (summaryKey == m_previewSummaryKey) return;
+    m_previewSummaryKey = summaryKey;
 
     ks::ui::FieldDocument quickText;
     quickText.field(QStringLiteral("句柄"), QStringLiteral("%1").arg(hwndToText(info->hwndValue)));
@@ -4459,6 +4549,28 @@ std::vector<OtherDock::WindowInfo> OtherDock::selectedWindowSnapshots() const
             windows.push_back(*window);
     }
     return windows;
+}
+
+bool OtherDock::eventFilter(QObject* watched, QEvent* event)
+{
+    if (watched == m_thumbnailLabel &&
+        (event->type() == QEvent::Show || event->type() == QEvent::Resize ||
+         event->type() == QEvent::DevicePixelRatioChange || event->type() == QEvent::PaletteChange))
+    {
+        m_previewCaptureDue = true;
+        scheduleWindowSelectionUi();
+    }
+    return QWidget::eventFilter(watched, event);
+}
+
+void OtherDock::scheduleWindowSelectionUi()
+{
+    if (m_selectionUiQueued) return;
+    m_selectionUiQueued = true;
+    QTimer::singleShot(0, this, [this] {
+        m_selectionUiQueued = false;
+        updateWindowSelectionUi();
+    });
 }
 
 void OtherDock::updateWindowSelectionUi()
