@@ -5,6 +5,7 @@
 #include <functional>
 
 class QWidget;
+namespace ks::i18n { class SourceTextSnapshot; }
 
 namespace ks::privilege
 {
@@ -19,5 +20,5 @@ namespace ks::privilege
     // The account setter preserves other USER_INFO flags and verifies the resulting disabled bit.
     bool setLocalAccountEnabled(const QString& account, bool enabled, QString* error);
     // Canonical stable SID keys, JSON scalar values, and explicit partial-enumeration errors.
-    QJsonObject captureAccountPolicySnapshot();
+    QJsonObject captureAccountPolicySnapshot(const ks::i18n::SourceTextSnapshot* translator = nullptr);
 }

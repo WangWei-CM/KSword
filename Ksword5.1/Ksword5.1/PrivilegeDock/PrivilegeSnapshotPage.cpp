@@ -55,13 +55,13 @@ namespace ks::privilege
     {
         QString snapshotText(const QString& source) { return ks::i18n::sourceText(source); }
 
-        QJsonObject capture(DWORD pid, bool includeToken)
+        QJsonObject capture(DWORD pid, bool includeToken, const ks::i18n::SourceTextSnapshot& translator)
         {
             wchar_t computer[MAX_COMPUTERNAME_LENGTH + 1]{};
             DWORD length = MAX_COMPUTERNAME_LENGTH + 1;
             const bool knownComputer = GetComputerNameW(computer, &length) != FALSE;
             const DWORD computerError = knownComputer ? ERROR_SUCCESS : GetLastError();
-            QJsonObject policy = captureAccountPolicySnapshot();
+            QJsonObject policy = captureAccountPolicySnapshot(&translator);
             if (!knownComputer)
             {
                 QJsonArray errors = policy.value(QStringLiteral("errors")).toArray();
@@ -452,11 +452,12 @@ namespace ks::privilege
                 if (m_busy) return;
                 const DWORD pid = static_cast<DWORD>(m_pid->value());
                 const bool includeToken = m_includeToken->isChecked();
+                const auto translator = ks::i18n::LanguageManager::instance().sourceTextSnapshot();
                 const QPointer<SnapshotPage> alive(this);
                 m_status->setText(snapshotText(QStringLiteral("正在采集权限快照…")));
                 if (!alive) return;
-                startSnapshotOperation([pid, includeToken](QString* error) {
-                    return preparePermissionSnapshot(capture(pid, includeToken), error);
+                startSnapshotOperation([pid, includeToken, translator](QString* error) {
+                    return preparePermissionSnapshot(capture(pid, includeToken, translator), error);
                 }, baseline);
             }
 

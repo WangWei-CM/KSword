@@ -1264,8 +1264,12 @@ bool setLocalAccountEnabled(const QString& account, bool enabled, QString* error
     return true;
 }
 
-QJsonObject captureAccountPolicySnapshot()
+QJsonObject captureAccountPolicySnapshot(const ks::i18n::SourceTextSnapshot* translator)
 {
+    // The caller captures the value before dispatch. Preserve an existing nested
+    // worker context; a legacy no-context entry keeps source text without GUI access.
+    const ks::i18n::SourceTextSnapshot sourceOnly;
+    const WorkerTranslationScope scope(translator ? *translator : workerTranslation ? *workerTranslation : sourceOnly);
     QJsonArray entries, errors;
     const auto addError = [&errors](const QString& message) { if (!message.isEmpty()) errors.push_back(message); };
     const auto entry = [&entries](const QString& key, const QJsonValue& value)

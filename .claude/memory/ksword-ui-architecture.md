@@ -449,3 +449,10 @@ KSword 主程序位于 `Ksword5.1/Ksword5.1`（Qt 6.9.3 Widgets + Qt Advanced Do
 - `QTableWidget::setSortingEnabled(false)` 仅关闭持续排序，旧共享入口仍可安装一次性表头点击；迁移为普通 `QTableView`/只读源模型时不能据此删除该交互。当前 `ConfigureResultTableInteractions` 的旧分支仍向 `QTableWidget` 转型，普通 view 须在 `bindModel` 后显式使用共享 `InstallTableHeaderClickSorting(QTableView*)`。视图排序可用既有 `QSortFilterProxyModel`；字符串表沿旧 DisplayRole/case/locale 规则，dynamic sorting 关闭。
 - 消息规范 FIFO 与用户的一次性显示排序是不同职责。新采样依旧撤销旧手动排序；选区范围、当前单元格和滚动锚点必须在 proxy/source 间映射后按 sequence 身份恢复，不能把 view 行号交给源模型。右键复制读选中 view index 的 sibling，完整导出继续读取唯一规范归档。
 - 本批按用户要求仅静态落地，最后统一构建与实际 GUI 排序/采集/复制组合由 root 和用户分别验收，不以候选或历史 TU 声称已实机通过。
+
+## 不可变权限表格与后台翻译入口（2026-10-20）
+
+- `ImmutableValueTable` 刷新后会保留相同规范身份，此时不重复触发 `currentRowChanged`。账户的所属组、所选组的成员等关联详情须同时接入 `sourceReady`，否则主表刷新先清空详情后，恢复原选中身份不会再次查询，详情会一直留空。普通搜索/排序不改变内容代次，不借此重做业务查询。
+- 账户、组和成员以 SID 作为稳定身份，显示名称或启用标志变化不应改变选择键；同一 SID 的多条直接权限以权限名和 SID 组合区分。SID 不可用时才使用名称回退。
+- 权限 worker 在 GUI 调度边界捕获 `SourceTextSnapshot`，用值作用域查询精确 `contextText`，不能从后台转回 `LanguageManager` 单例。跨翻译单元的权限快照采集也显式传入该值；嵌套作用域退出时恢复外层上下文。只有没有上下文的兼容入口保留规范源文。
+- 本轮仅有既有纯值/假原生检查与最终静态核对；后续按用户要求统一构建一次，真实 GUI、账号/令牌业务、语言/主题和 DPI 由用户验收。
