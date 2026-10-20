@@ -15,6 +15,7 @@
 #include "../MonitorDock/ProcessTraceTimelineWidget.h"
 #include "../ksword/network/network_nids.h"
 
+#include <QCache>
 #include <QHash>
 #include <QIcon>
 #include <QPointer>
@@ -480,6 +481,11 @@ private:
     void scheduleNidsAnalysis();
     void launchNidsAnalysisBatch();
     void retireNidsAnalysisSession();
+    QIcon resolveNidsProcessIcon(const ks::network::NidsAlert& alert);
+    void registerNidsIconRow(const ks::network::NidsAlert& alert, int row);
+    void pruneNidsIconRows(const QString& path);
+    void scheduleNidsIconWork();
+    void launchNidsIconWork();
     void applyNidsAnalysisBatch(const std::shared_ptr<network_dock_detail::NidsAnalysisBatch>& batch);
 
     // appendNidsAlertRow：
@@ -1544,6 +1550,13 @@ private:
     ks::ui::AsyncOperation* m_nidsAnalysisOperation = nullptr;
     bool m_nidsAnalysisKickScheduled = false;
     bool m_nidsAnalysisFailed = false;
+    ks::ui::AsyncOperation* m_nidsIconOperation = nullptr;
+    bool m_nidsIconKickScheduled = false;
+    QStringList m_nidsIconActivePaths;
+    QCache<QString, QIcon> m_nidsIconCache{512}; // Disposable rendering only; canonical alert identity never capped here.
+    QSet<QString> m_nidsIconPendingPaths;
+    std::deque<QString> m_nidsIconQueue;
+    QHash<QString, QVector<QPersistentModelIndex>> m_nidsIconRows;
     QTimer* m_rateLimitRefreshTimer = nullptr; // 限速规则轮询刷新定时器。
     QTimer* m_packetFlushTimer = nullptr;      // 报文批量刷新定时器（UI 节流关键）。
     QTimer* m_r0TrafficRefreshTimer = nullptr; // R0 WFP 逐包增量查询轮询定时器。

@@ -16,11 +16,44 @@
 
 #include <QApplication>
 #include <QBrush>
+#include <QImage>
+#include <QPixmap>
+#include <objbase.h>
+#include <Shellapi.h>
 
 using namespace network_dock_detail;
 
 namespace
 {
+    struct NidsIconImage { QString path; QImage image; };
+    struct NidsIconComScope
+    {
+        bool initialized = SUCCEEDED(::CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED));
+        ~NidsIconComScope() { if (initialized) ::CoUninitialize(); }
+    };
+    struct NidsNativeIcon
+    {
+        HICON value = nullptr;
+        ~NidsNativeIcon() { if (value) ::DestroyIcon(value); }
+    };
+    QImage decodeNidsNativeIcon(HICON icon) { return QImage::fromHICON(icon); }
+    std::vector<NidsIconImage> loadNidsIconImages(const QStringList& paths, const ks::ui::AsyncOperationToken& token)
+    {
+        NidsIconComScope com;
+        std::vector<NidsIconImage> result;
+        result.reserve(static_cast<std::size_t>(paths.size()));
+        for (const auto& path : paths)
+        {
+            if (token.isCanceled()) break;
+            SHFILEINFOW info{};
+            const auto queried = ::SHGetFileInfoW(reinterpret_cast<const wchar_t*>(path.utf16()), 0, &info,
+                sizeof(info), SHGFI_ICON | SHGFI_SMALLICON);
+            NidsNativeIcon icon{info.hIcon};
+            result.push_back({path, queried != 0 && icon.value ? decodeNidsNativeIcon(icon.value) : QImage()});
+        }
+        return result;
+    }
+
     std::shared_ptr<NidsAnalysisSession> makeNidsAnalysisSession()
     {
         // The last GUI job may release a retired epoch after its worker. A custom
@@ -466,6 +499,7 @@ void NetworkDock::synchronizeVisibleNidsProjection()
     if (m_nidsPage == nullptr || !m_nidsPage->isVisible()) return;
     if (m_nidsProjectionNeedsRebuild) rebuildNidsAlertTable();
     updateNidsStatusLabel();
+    scheduleNidsIconWork();
 }
 
 void NetworkDock::processNidsPacket(const ks::network::PacketRecord& packetRecord)
@@ -573,6 +607,7 @@ void NetworkDock::applyNidsAnalysisBatch(const std::shared_ptr<NidsAnalysisBatch
                 }
                 m_nidsProjectedRows.erase(projected);
             }
+            pruneNidsIconRows(QString::fromUtf8(m_nidsAlertList.front().processImagePath.c_str()));
             const int removedSeverity = nidsSeverityIndex(m_nidsAlertList.front().severity);
             if (removedSeverity >= 0 && removedSeverity < static_cast<int>(m_nidsRetainedSeverityCounts.size()))
                 --m_nidsRetainedSeverityCounts[static_cast<std::size_t>(removedSeverity)];
@@ -644,8 +679,9 @@ void NetworkDock::appendNidsAlertRow(const ks::network::NidsAlert& alertRecord)
     m_nidsAlertTable->setItem(newRow, toNidsAlertColumn(NidsAlertTableColumn::Pid), createNidsCell(pidText));
 
     QTableWidgetItem* processNameItem = createNidsCell(processNameText);
-    processNameItem->setIcon(resolveProcessIconByPid(alertRecord.processId, alertRecord.processName));
+    processNameItem->setIcon(resolveNidsProcessIcon(alertRecord));
     m_nidsAlertTable->setItem(newRow, toNidsAlertColumn(NidsAlertTableColumn::ProcessName), processNameItem);
+    registerNidsIconRow(alertRecord, processNameItem->row());
 
     m_nidsAlertTable->setItem(newRow, toNidsAlertColumn(NidsAlertTableColumn::LocalEndpoint), createNidsCell(localEndpointText));
     m_nidsAlertTable->setItem(newRow, toNidsAlertColumn(NidsAlertTableColumn::RemoteEndpoint), createNidsCell(remoteEndpointText));
@@ -680,6 +716,7 @@ void NetworkDock::rebuildNidsAlertTable()
     }
 
     m_nidsAlertTable->setUpdatesEnabled(false);
+    m_nidsIconRows.clear();
     m_nidsProjectedRows.clear();
     m_nidsAlertTable->setRowCount(0);
     for (const ks::network::NidsAlert& alertRecord : m_nidsAlertList)
@@ -722,7 +759,13 @@ void NetworkDock::clearNidsAlerts()
     retireNidsAnalysisSession();
     m_nidsAnalysisSession = std::move(freshSession);
     m_nidsAnalysisFailed = false;
+    m_nidsIconActivePaths.clear();
+    m_nidsIconQueue.clear();
+    m_nidsIconPendingPaths.clear();
+    m_nidsIconCache.clear();
+    if (m_nidsIconOperation != nullptr) m_nidsIconOperation->cancel();
     if (m_nidsAnalysisOperation != nullptr) m_nidsAnalysisOperation->cancel();
+    m_nidsIconRows.clear();
     m_nidsProjectedRows.clear();
     m_nidsProjectionNeedsRebuild = false;
     m_nidsAlertList.clear();
@@ -776,4 +819,115 @@ bool NetworkDock::nidsAlertPassesFilter(const ks::network::NidsAlert& alertRecor
 
     const int minSeverity = m_nidsSeverityFilterCombo->currentData().toInt();
     return nidsSeverityIndex(alertRecord.severity) >= minSeverity;
+}
+
+QIcon NetworkDock::resolveNidsProcessIcon(const ks::network::NidsAlert& alert)
+{
+    const QString path = QString::fromUtf8(alert.processImagePath.c_str());
+    if (path.isEmpty()) return QIcon(QStringLiteral(":/Icon/process_main.svg"));
+    if (const auto* icon = m_nidsIconCache.object(path)) return *icon;
+    if (!m_nidsIconPendingPaths.contains(path))
+    {
+        m_nidsIconPendingPaths.insert(path);
+        m_nidsIconQueue.push_back(path);
+        scheduleNidsIconWork();
+    }
+    return QIcon(QStringLiteral(":/Icon/process_main.svg"));
+}
+
+void NetworkDock::registerNidsIconRow(const ks::network::NidsAlert& alert, int row)
+{
+    if (!m_nidsAlertTable || row < 0) return;
+    const QString path = QString::fromUtf8(alert.processImagePath.c_str());
+    if (!path.isEmpty()) m_nidsIconRows[path].push_back(QPersistentModelIndex(
+        m_nidsAlertTable->model()->index(row, toNidsAlertColumn(NidsAlertTableColumn::ProcessName))));
+}
+
+void NetworkDock::pruneNidsIconRows(const QString& path)
+{
+    auto found = m_nidsIconRows.find(path);
+    if (found == m_nidsIconRows.end()) return;
+    auto& rows = found.value();
+    rows.erase(std::remove_if(rows.begin(), rows.end(), [](const QPersistentModelIndex& index)
+    { return !index.isValid(); }), rows.end());
+    if (rows.empty()) m_nidsIconRows.erase(found);
+}
+
+void NetworkDock::scheduleNidsIconWork()
+{
+    if (m_nidsIconKickScheduled || m_nidsIconQueue.empty()) return;
+    m_nidsIconKickScheduled = true;
+    const QPointer<NetworkDock> guard(this);
+    QTimer::singleShot(0, this, [guard]()
+    {
+        if (!guard) return;
+        guard->m_nidsIconKickScheduled = false;
+        guard->launchNidsIconWork();
+    });
+}
+
+void NetworkDock::launchNidsIconWork()
+{
+    if (m_nidsPage == nullptr || !m_nidsPage->isVisible()) return;
+    if (m_nidsIconOperation == nullptr)
+    {
+        m_nidsIconOperation = new ks::ui::AsyncOperation(this);
+        const QPointer<NetworkDock> guard(this);
+        m_nidsIconOperation->setStateChangedCallback([guard]()
+        {
+            if (guard && !guard->m_nidsIconOperation->isBusy())
+            {
+                // A dropped result does not invoke apply/failure. Requeue only
+                // selected paths still pending; successful paths were removed.
+                for (const auto& path : guard->m_nidsIconActivePaths)
+                    if (guard->m_nidsIconPendingPaths.contains(path)) guard->m_nidsIconQueue.push_back(path);
+                guard->m_nidsIconActivePaths.clear();
+                guard->scheduleNidsIconWork();
+            }
+        });
+    }
+    if (m_nidsIconOperation->isBusy()) return;
+    QStringList paths;
+    while (!m_nidsIconQueue.empty() && paths.size() < 32)
+    {
+        const auto path = m_nidsIconQueue.front();
+        m_nidsIconQueue.pop_front();
+        pruneNidsIconRows(path);
+        if (!m_nidsIconRows.contains(path)) { m_nidsIconPendingPaths.remove(path); continue; }
+        paths.push_back(path);
+    }
+    if (paths.empty()) return;
+    m_nidsIconActivePaths = paths;
+    const QPointer<NetworkDock> guard(this);
+    m_nidsIconOperation->submit<QStringList, std::vector<NidsIconImage>>(
+        paths, loadNidsIconImages,
+        [guard, paths](const auto& images, std::uint64_t)
+        {
+            if (!guard) return true;
+            for (const auto& path : paths) guard->m_nidsIconPendingPaths.remove(path);
+            for (const auto& image : images)
+            {
+                if (!guard) return true;
+                guard->pruneNidsIconRows(image.path);
+                if (!guard->m_nidsIconRows.contains(image.path)) continue;
+                const QIcon icon = image.image.isNull() ? QIcon(QStringLiteral(":/Icon/process_main.svg"))
+                    : QIcon(QPixmap::fromImage(image.image)); // GUI only
+                guard->m_nidsIconCache.insert(image.path, new QIcon(icon));
+                if (guard->m_nidsPage == nullptr || !guard->m_nidsPage->isVisible())
+                { guard->m_nidsProjectionNeedsRebuild = true; continue; }
+                const auto rows = guard->m_nidsIconRows.value(image.path);
+                for (const auto& index : rows)
+                {
+                    if (!guard) return true;
+                    if (index.isValid() && guard->m_nidsAlertTable
+                        && index.model() == guard->m_nidsAlertTable->model())
+                        guard->m_nidsAlertTable->model()->setData(index, icon, Qt::DecorationRole);
+                }
+            }
+            return true;
+        },
+        [guard, paths](std::exception_ptr)
+        {
+            if (guard) for (const auto& path : paths) guard->m_nidsIconPendingPaths.remove(path);
+        });
 }
