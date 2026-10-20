@@ -13,6 +13,7 @@
 #include "../UI/FlowLayout.h"
 #include "../UI/VisibleTableWidget.h"
 #include "../UI/TableInteractionSupport.h"
+#include "../UI/TableRowFilterSupport.h"
 #include "../UI/PageControlStyle.h"
 #include "../UI/PrimaryPageStyle.h"
 #include "../UI/ToolbarMetrics.h"
@@ -298,6 +299,9 @@ void RegistryDock::initializeWorkbenchControls()
     m_mainSplitter->setSizes({240, 760, 340});
     m_keyTree->installEventFilter(this);
     m_valueTable->installEventFilter(this);
+    // This producer owns every business hide through the canonical identity layer.
+    ks::ui::SetTableRowFilterBusinessOwnership(m_valueTable,
+        ks::ui::TableRowFilterBusinessOwnership::ExclusiveSharedIdentity);
     m_keyTree->setProperty("ks_i18n_preserve_model_data", true);
     connect(details, &QPushButton::toggled, m_detailScroll, &QWidget::setVisible);
     connect(m_valueTable, &QTableWidget::currentItemChanged, this,
@@ -719,19 +723,26 @@ void RegistryDock::restoreLastChanges()
 
 void RegistryDock::filterCurrentValues()
 {
-    filterValueRows(0, m_valueTable->rowCount());
+    filterValueRows(0, m_valueTable->rowCount(), true);
 }
 
-void RegistryDock::filterValueRows(const int firstRow, const int endRow)
+void RegistryDock::filterValueRows(const int firstRow, const int endRow, const bool replaceFilter)
 {
     const QString query = m_filterEdit->text();
+    QSet<QPersistentModelIndex> excluded, included;
     for (int row = firstRow; row < endRow; ++row)
     {
         bool match = query.isEmpty();
         for (int column = 0; !match && column < m_valueTable->columnCount(); ++column)
             if (auto* item = m_valueTable->item(row, column)) match = item->text().contains(query, Qt::CaseInsensitive);
-        m_valueTable->setRowHidden(row, !match);
+        const QPersistentModelIndex identity = m_valueTable->model()->index(row, 0, m_valueTable->rootIndex());
+        if (!match) excluded.insert(identity);
+        else if (!replaceFilter) included.insert(identity);
     }
+    if (replaceFilter)
+        ks::ui::ApplyTableRowFilterIncrementally(m_valueTable, excluded);
+    else
+        ks::ui::ApplyTableRowFilterDelta(m_valueTable, excluded, included);
 }
 
 void RegistryDock::appendValueRows(const std::shared_ptr<const RegistryKeyListing>& listing,
@@ -783,7 +794,7 @@ void RegistryDock::appendValueRows(const std::shared_ptr<const RegistryKeyListin
         if (m_valueTable->item(row, 0)->data(Qt::UserRole).toString() == selectedName)
         { selectedRow = row; break; }
     if (selectedRow < 0)
-        for (int row = 0; row < count; ++row) if (!m_valueTable->isRowHidden(row)) { selectedRow = row; break; }
+        for (int row = 0; row < count; ++row) if (!ks::ui::IsTableRowExcludedByFilter(m_valueTable, row)) { selectedRow = row; break; }
     if (selectedRow >= 0)
     {
         QSignalBlocker blocked(m_valueTable);
