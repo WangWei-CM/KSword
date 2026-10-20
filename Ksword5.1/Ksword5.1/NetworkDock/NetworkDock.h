@@ -67,6 +67,7 @@ class NetworkAuditPage;
 namespace ks::ui { class AsyncUiDispatcher; }
 
 namespace ks::ui { class AsyncOperation; }
+namespace network_dock_detail { class NidsAnalysisSession; struct NidsAnalysisBatch; }
 
 namespace ks::network
 {
@@ -475,6 +476,10 @@ private:
     // - 参数 packetRecord：后台服务解析出的报文记录。
     // - 返回：无。
     void processNidsPacket(const ks::network::PacketRecord& packetRecord);
+    void scheduleNidsAnalysis();
+    void launchNidsAnalysisBatch();
+    void retireNidsAnalysisSession();
+    void applyNidsAnalysisBatch(const std::shared_ptr<network_dock_detail::NidsAnalysisBatch>& batch);
 
     // appendNidsAlertRow：
     // - 作用：把单条 NIDS 告警追加到表格末尾。
@@ -1534,7 +1539,10 @@ private:
 
     // ========================= 后台服务与缓存 ====================
     std::unique_ptr<ks::network::TrafficMonitorService> m_trafficService; // 抓包/限速后台服务对象。
-    ks::network::NidsEngine m_nidsEngine; // NIDS 规则引擎实例。
+    std::shared_ptr<network_dock_detail::NidsAnalysisSession> m_nidsAnalysisSession;
+    ks::ui::AsyncOperation* m_nidsAnalysisOperation = nullptr;
+    bool m_nidsAnalysisKickScheduled = false;
+    bool m_nidsAnalysisFailed = false;
     QTimer* m_rateLimitRefreshTimer = nullptr; // 限速规则轮询刷新定时器。
     QTimer* m_packetFlushTimer = nullptr;      // 报文批量刷新定时器（UI 节流关键）。
     QTimer* m_r0TrafficRefreshTimer = nullptr; // R0 WFP 逐包增量查询轮询定时器。

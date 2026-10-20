@@ -1093,6 +1093,7 @@
     <ClInclude Include="..\..\shared\evidence\PfnAccounting.h" />
     <ClInclude Include="..\..\shared\driver\KswordArkPfnIoctl.h" />
     <ClInclude Include="..\..\third_party\systeminformer_dyn\PfnNative.h" />
+    <ClInclude Include="NetworkDock\NetworkDock.NidsAnalysis.h" />
     <ClInclude Include="MemoryDock\SystemMemoryAuditPage.h" />
     <ClInclude Include="MemoryDock\MemoryAccessBackend.h" />
     <ClInclude Include="MemoryDock\WorkbenchIoPorts.h" />

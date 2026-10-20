@@ -2956,6 +2956,9 @@
     <QtMoc Include="句柄\HandleDock.h">
       <Filter>Header Files</Filter>
     </QtMoc>
+    <ClInclude Include="NetworkDock\NetworkDock.NidsAnalysis.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="句柄\HandleFilterConfig.h">
       <Filter>Header Files</Filter>
     </ClInclude>

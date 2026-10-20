@@ -1,3 +1,6 @@
+#include "NetworkDock.NidsAnalysis.h"
+#include "../UI/AsyncOperation.h"
+#include <QTimer>
 #include "NetworkDock.NavigationData.h"
 #include "NetworkDock.InternalCommon.h"
 #include "../UI/TableContextMenu.h"
@@ -18,6 +21,18 @@ using namespace network_dock_detail;
 
 namespace
 {
+    std::shared_ptr<NidsAnalysisSession> makeNidsAnalysisSession()
+    {
+        // The last GUI job may release a retired epoch after its worker. A custom
+        // value deleter keeps large engine/packet destruction off the GUI then too.
+        return std::shared_ptr<NidsAnalysisSession>(new NidsAnalysisSession, [](NidsAnalysisSession* retired) noexcept
+        {
+            std::unique_ptr<NidsAnalysisSession> value(retired);
+            try { QThreadPool::globalInstance()->start([value = std::move(value)]() mutable { value.reset(); }); }
+            catch (...) {} // The local/task unique owner still releases if scheduling fails or a queued task is dropped.
+        });
+    }
+
     // nidsSeverityText：把 NIDS 等级转为界面文本。
     QString nidsSeverityText(const ks::network::NidsAlertSeverity severity)
     {
@@ -184,7 +199,7 @@ namespace
                 alertRecord.processId,
                 &creationTimeBefore,
                 nullptr) ||
-            creationTimeBefore == 0U)
+            !NidsAnalysisSession::identityPredatesPacket(creationTimeBefore, alertRecord.timestampMs))
         {
             return;
         }
@@ -455,31 +470,82 @@ void NetworkDock::synchronizeVisibleNidsProjection()
 
 void NetworkDock::processNidsPacket(const ks::network::PacketRecord& packetRecord)
 {
-    if (m_nidsEnableCheck != nullptr && !m_nidsEnableCheck->isChecked())
-    {
-        return;
-    }
+    if (m_nidsEnableCheck != nullptr && !m_nidsEnableCheck->isChecked()) return;
+    if (!m_nidsAnalysisSession) m_nidsAnalysisSession = makeNidsAnalysisSession();
+    m_nidsAnalysisSession->enqueue(packetRecord); // Full FIFO values; never latest-only packet replacement.
+    scheduleNidsAnalysis();
+}
 
-    ++m_nidsAnalyzedPacketCount;
-
-    std::vector<ks::network::NidsAlert> alertList = m_nidsEngine.AnalyzePacket(packetRecord);
-    if (alertList.empty())
+void NetworkDock::scheduleNidsAnalysis()
+{
+    if (m_nidsAnalysisKickScheduled || m_nidsAnalysisFailed) return;
+    m_nidsAnalysisKickScheduled = true;
+    const QPointer<NetworkDock> guard(this);
+    QTimer::singleShot(0, this, [guard]()
     {
-        if ((m_nidsAnalyzedPacketCount % 256) == 0)
+        if (!guard) return;
+        guard->m_nidsAnalysisKickScheduled = false;
+        guard->launchNidsAnalysisBatch();
+    });
+}
+
+void NetworkDock::launchNidsAnalysisBatch()
+{
+    if (m_nidsAnalysisFailed || !m_nidsAnalysisSession || m_nidsAnalysisSession->pendingCount() == 0) return;
+    if (m_nidsAnalysisOperation == nullptr)
+    {
+        m_nidsAnalysisOperation = new ks::ui::AsyncOperation(this);
+        const QPointer<NetworkDock> guard(this);
+        m_nidsAnalysisOperation->setStateChangedCallback([guard]()
         {
-            updateNidsStatusLabel();
-        }
-        return;
+            if (guard && !guard->m_nidsAnalysisOperation->isBusy()) guard->scheduleNidsAnalysis();
+        });
     }
+    if (m_nidsAnalysisOperation->isBusy()) return;
+    const auto session = m_nidsAnalysisSession;
+    const QPointer<NetworkDock> guard(this);
+    // One actual worker owns the engine; only a later UI kick can submit again.
+    m_nidsAnalysisOperation->submit<std::shared_ptr<NidsAnalysisSession>, std::shared_ptr<NidsAnalysisBatch>>(
+        session,
+        [](const auto& state, const ks::ui::AsyncOperationToken& token) -> std::shared_ptr<NidsAnalysisBatch>
+        {
+            if (token.isCanceled()) return {};
+            return state->analyzeNextBatch(captureNidsProcessIdentity);
+        },
+        [guard, session](const auto& batch, std::uint64_t)
+        {
+            if (!guard || guard->m_nidsAnalysisSession != session || !batch) return true;
+            guard->m_nidsAnalysisFailed = batch->failed;
+            guard->applyNidsAnalysisBatch(batch);
+            if (guard && guard->m_nidsAnalysisSession == session) session->acknowledge(batch);
+            return true;
+        },
+        [guard, session](std::exception_ptr)
+        {
+            if (!guard || guard->m_nidsAnalysisSession != session) return;
+            // A failed launch/allocation never silently advances the accepted FIFO.
+            guard->m_nidsAnalysisFailed = true;
+            guard->updateNidsStatusLabel();
+        });
+}
 
+void NetworkDock::retireNidsAnalysisSession()
+{
+    m_nidsAnalysisSession.reset(); // Custom deleter schedules the last release off-thread.
+}
+
+void NetworkDock::applyNidsAnalysisBatch(const std::shared_ptr<NidsAnalysisBatch>& batch)
+{
+    m_nidsAnalyzedPacketCount += batch->analyzedPackets;
+    if (batch->alerts.empty()) { updateNidsStatusLabel(); return; }
+    const auto& alertList = batch->alerts;
     bool canProject = m_nidsPage != nullptr && m_nidsPage->isVisible()
         && m_nidsAlertTable != nullptr && !m_nidsProjectionNeedsRebuild
         && m_nidsProjectedRows.size() == static_cast<std::size_t>(m_nidsAlertTable->rowCount())
         && !ks::ui::IsTableUiCommitBlockedByContextMenu({m_nidsAlertTable});
     if (!canProject) m_nidsProjectionNeedsRebuild = true;
-    for (ks::network::NidsAlert& alertRecord : alertList)
+    for (const ks::network::NidsAlert& alertRecord : alertList)
     {
-        captureNidsProcessIdentity(alertRecord);
         m_nidsAlertList.push_back(alertRecord);
         ++m_nidsTotalAlertCount;
         while (m_nidsAlertList.size() > kMaxNidsAlertCount)
@@ -644,7 +710,13 @@ void NetworkDock::clearNidsAlerts()
         return;
     }
 
-    m_nidsEngine.Reset();
+    // A new epoch owns a fresh engine. Old workers only retain the retired value
+    // session; no GUI reset/destruction races their engine or accepted inputs.
+    auto freshSession = makeNidsAnalysisSession();
+    retireNidsAnalysisSession();
+    m_nidsAnalysisSession = std::move(freshSession);
+    m_nidsAnalysisFailed = false;
+    if (m_nidsAnalysisOperation != nullptr) m_nidsAnalysisOperation->cancel();
     m_nidsProjectedRows.clear();
     m_nidsProjectionNeedsRebuild = false;
     m_nidsAlertList.clear();
@@ -695,13 +767,17 @@ void NetworkDock::updateNidsStatusLabel()
 
     const bool enabled = (m_nidsEnableCheck == nullptr || m_nidsEnableCheck->isChecked());
     m_nidsStatusLabel->setText(QStringLiteral("状态：%1 | 已分析 %2 包 | 告警 %3（低 %4 / 中 %5 / 高 %6 / 严重 %7）")
-        .arg(enabled ? QStringLiteral("实时检测中") : QStringLiteral("已暂停"))
+        .arg(m_nidsAnalysisFailed ? QStringLiteral("检测失败，请清空后重试")
+             : (enabled ? QStringLiteral("实时检测中") : QStringLiteral("已暂停")))
         .arg(static_cast<qulonglong>(m_nidsAnalyzedPacketCount))
         .arg(static_cast<qulonglong>(m_nidsAlertList.size()))
         .arg(static_cast<qulonglong>(lowCount))
         .arg(static_cast<qulonglong>(mediumCount))
         .arg(static_cast<qulonglong>(highCount))
         .arg(static_cast<qulonglong>(criticalCount)));
+    const auto pending = m_nidsAnalysisSession ? m_nidsAnalysisSession->pendingPacketCount() : 0;
+    if (pending > 0) m_nidsStatusLabel->setText(m_nidsStatusLabel->text()
+        + QStringLiteral(" | 等待分析 %1 包").arg(static_cast<qulonglong>(pending)));
 }
 
 bool NetworkDock::nidsAlertPassesFilter(const ks::network::NidsAlert& alertRecord) const

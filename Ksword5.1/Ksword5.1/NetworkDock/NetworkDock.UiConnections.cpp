@@ -1,3 +1,4 @@
+#include "NetworkDock.NidsAnalysis.h"
 #include <QItemSelectionModel>
 #include "NetworkDock.InternalCommon.h"
 #include "../UI/TableContextMenu.h"
@@ -207,7 +208,8 @@ void NetworkDock::initializeConnections()
         {
             if (!checked)
             {
-                m_nidsEngine.Reset();
+                if (m_nidsAnalysisSession) m_nidsAnalysisSession->enqueueReset();
+                scheduleNidsAnalysis();
             }
             updateNidsStatusLabel();
         });

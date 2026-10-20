@@ -26257,6 +26257,8 @@
     "新增规则成功：ruleId=%1，类型=%2": "Rule added successfully: ruleId=%1, type=%2",
     "新增规则组": "Create new rule group",
     "新增规则组成功：groupId=%1": "New rule group created successfully: groupId=%1",
+    "检测失败，请清空后重试": "Detection failed; clear to retry",
+    " | 等待分析 %1 包": " | %1 packet(s) waiting for analysis",
     "新增静态 ARP 缓存项": "Add Static ARP Cache Entry",
     "新密码": "New Password",
     "新密码不能为空。": "Password cannot be empty.",

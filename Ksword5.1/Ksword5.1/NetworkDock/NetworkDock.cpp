@@ -148,6 +148,8 @@ NetworkDock::NetworkDock(QWidget* parent)
 
 NetworkDock::~NetworkDock()
 {
+    if (m_nidsAnalysisOperation != nullptr) m_nidsAnalysisOperation->close();
+    retireNidsAnalysisSession();
     // Detach the GUI consumer before any service teardown can deliver callbacks.
     if (m_httpsProxyService != nullptr)
     {
