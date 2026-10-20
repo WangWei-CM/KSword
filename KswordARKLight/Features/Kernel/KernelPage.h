@@ -108,6 +108,7 @@ private:
     void RebuildObjectNamespaceListFromCache(KernelFeatureId featureId);
     void ToggleObjectNamespaceListNode(int rowIndex);
     void RebuildObjectNamespaceTreeFromCurrentRows();
+    void SelectObjectNamespaceTree(KernelFeatureId featureId);
     void SelectObjectNamespaceTreeItem(LPARAM itemData);
     void SelectObjectNamespaceTreeRow(LPARAM rowIndex);
     void RebuildAtomTableFromCache();
@@ -279,6 +280,12 @@ private:
     HWND refreshButton_ = nullptr;
     HWND locateButton_ = nullptr;
     HWND copyDiagnosticButton_ = nullptr;
+    struct ObjectNamespaceTreeCache {
+        HWND hwnd = nullptr;
+        bool initialized = false;
+        std::vector<std::unique_ptr<KernelObjectNamespaceTreeNodeState>> nodes;
+    };
+    std::unordered_map<KernelFeatureId, ObjectNamespaceTreeCache> objectNamespaceTrees_;
     HWND objectNamespaceTree_ = nullptr;
     int objectNamespaceSelectedRow_ = -1;
     std::wstring objectNamespaceSelectedKind_;

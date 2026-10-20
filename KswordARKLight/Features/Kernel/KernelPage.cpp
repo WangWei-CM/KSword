@@ -4284,6 +4284,7 @@ void KernelPage::SelectCurrentFeature() {
     }
     verticalSplitterOffset_ = -1;
     verticalSplitterRect_ = {};
+    SelectObjectNamespaceTree(descriptor->id);
     ConfigureToolbarForDescriptor(*descriptor);
     if (!RestoreFeatureViewCache(descriptor->id)) {
         RenderDescriptor(*descriptor);
@@ -4464,7 +4465,7 @@ bool KernelPage::RestoreFeatureViewCache(const KernelFeatureId featureId) {
     RestoreReportListRows(summaryList_, cache.summaryRows);
     if (featureId == KernelFeatureId::ObjectNamespaceOverview || featureId == KernelFeatureId::ObjectDirectoryRecursive) {
         const bool treeMatchesPage = hasObjectNamespaceTreeFeatureId_ && objectNamespaceTreeFeatureId_ == featureId;
-        if (!objectNamespaceTree_ || TreeView_GetCount(objectNamespaceTree_) == 0 || !treeMatchesPage) {
+        if (!objectNamespaceTree_ || !treeMatchesPage) {
             RebuildObjectNamespaceTreeFromCurrentRows();
         }
     }
@@ -6545,6 +6546,38 @@ void KernelPage::RebuildObjectNamespaceListFromCache(const KernelFeatureId featu
     } else {
         ::SetWindowTextW(detailEdit_, EmptyDetailTextForFeature(featureId));
     }
+}
+
+void KernelPage::SelectObjectNamespaceTree(const KernelFeatureId featureId) {
+    // Each namespace view keeps its native nodes, payloads, expansion, selection
+    // and scroll position. Non-tree features must not clear a parked tree.
+    if (objectNamespaceTree_) {
+        auto& parked = objectNamespaceTrees_[objectNamespaceTreeFeatureId_];
+        parked.hwnd = objectNamespaceTree_;
+        parked.initialized = hasObjectNamespaceTreeFeatureId_;
+        parked.nodes = std::move(objectNamespaceTreeNodeStorage_);
+        ::ShowWindow(objectNamespaceTree_, SW_HIDE);
+    }
+    objectNamespaceTree_ = nullptr;
+    hasObjectNamespaceTreeFeatureId_ = false;
+    if (featureId != KernelFeatureId::ObjectNamespaceOverview &&
+        featureId != KernelFeatureId::ObjectDirectoryRecursive) {
+        return;
+    }
+    auto& retained = objectNamespaceTrees_[featureId];
+    if (!retained.hwnd) {
+        retained.hwnd = ::CreateWindowExW(WS_EX_CLIENTEDGE, WC_TREEVIEWW, L"",
+            WS_CHILD | WS_TABSTOP | TVS_HASBUTTONS | TVS_HASLINES | TVS_LINESATROOT | TVS_SHOWSELALWAYS,
+            0, 0, 0, 0, hwnd_, nullptr, ::GetModuleHandleW(nullptr), nullptr);
+        if (retained.hwnd) {
+            ::SendMessageW(retained.hwnd, WM_SETFONT,
+                reinterpret_cast<WPARAM>(Ksword::Ui::SystemUIFont()), FALSE);
+        }
+    }
+    objectNamespaceTree_ = retained.hwnd;
+    objectNamespaceTreeFeatureId_ = featureId;
+    hasObjectNamespaceTreeFeatureId_ = retained.initialized;
+    objectNamespaceTreeNodeStorage_ = std::move(retained.nodes);
 }
 
 void KernelPage::RebuildObjectNamespaceTreeFromCurrentRows() {
