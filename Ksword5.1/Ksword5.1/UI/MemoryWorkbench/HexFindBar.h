@@ -84,6 +84,8 @@ namespace ks::ui
 
         // SourceGetter：宿主提供的数据读取回调。
         using SourceGetter = std::function<SourceView()>;
+        // Optional highlighter-only range snapshot; full navigation search stays unchanged.
+        using RangeSourceGetter = std::function<SourceView(std::uint64_t first, std::uint64_t last)>;
 
         // SelectionGetter：宿主提供的选区读取回调；返回 false 表示没有选区，两个出参指向选区闭区间两端。
         using SelectionGetter = std::function<bool(std::uint64_t* firstOut, std::uint64_t* lastOut)>;
@@ -98,6 +100,7 @@ namespace ks::ui
 
         // setSourceGetter / setSelectionGetter：设置两个回调（见文件头第四节）。
         void setSourceGetter(SourceGetter getter);
+        void setRangeSourceGetter(RangeSourceGetter getter);
         void setSelectionGetter(SelectionGetter getter);
 
         // dataChanged：缓冲内容变了（换数据、编辑、静默改字节）。
@@ -205,7 +208,8 @@ namespace ks::ui
         HexViewMessageLabel* m_result = nullptr;        // 结果文字
 
         // ---- 宿主回调 ----
-        SourceGetter m_sourceGetter;                    // 数据读取回调
+        SourceGetter m_sourceGetter;
+        RangeSourceGetter m_rangeSourceGetter;                    // 数据读取回调
         SelectionGetter m_selectionGetter;              // 选区读取回调
 
         // ---- 搜索状态 ----

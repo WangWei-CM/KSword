@@ -510,6 +510,11 @@ namespace ks::ui
         emit searchCompleted(true);
     }
 
+    void HexFindBar::setRangeSourceGetter(RangeSourceGetter getter)
+    {
+        m_rangeSourceGetter = std::move(getter);
+    }
+
     // 重算可见高亮：只扫描可见范围；结果与当前相同不发信号。
     void HexFindBar::refreshHighlights()
     {
@@ -517,7 +522,11 @@ namespace ks::ui
         {
             return;
         }
-        const SourceView source = m_sourceGetter();
+        const auto look = m_activePattern.bytes.empty() ? 0ULL
+            : static_cast<std::uint64_t>(m_activePattern.bytes.size() - 1);
+        const auto first = m_visibleFirst - std::min(m_visibleFirst, look);
+        const auto last = look > UINT64_MAX - m_visibleLast ? UINT64_MAX : m_visibleLast + look;
+        const SourceView source = m_rangeSourceGetter ? m_rangeSourceGetter(first, last) : m_sourceGetter();
         const std::vector<AddressRange> hits = hexfind::HitsInRange(
             source.data, source.base, m_activePattern, m_visibleFirst, m_visibleLast, hexfind::kMaxVisibleHits, source.validMask);
         if (hits == m_highlights)
