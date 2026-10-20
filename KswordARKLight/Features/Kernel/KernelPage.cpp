@@ -91,6 +91,7 @@ constexpr UINT kMsgCallbackAnswerCompleted = WM_APP + 608;
 constexpr UINT kMsgR0EvidenceFilterCompleted = WM_APP + 609;
 constexpr UINT kMsgCallbackFileIoCompleted = WM_APP + 610;
 constexpr UINT kMsgKernelSortCompleted = WM_APP + 611;
+constexpr UINT kMsgCachedProjectionCompleted = WM_APP + 612;
 constexpr UINT_PTR kTimerR0EvidenceFilter = 51057;
 constexpr int kIdCallbackGlobalEnabled = 51047;
 constexpr int kIdCallbackFileMonitorFsctlOnly = 51048;
@@ -1483,6 +1484,12 @@ struct KernelObjectNamespaceTreeNodeState {
     std::wstring nodeDescription;
 };
 
+#include "KernelProjectionValues.inl"
+
+namespace {
+bool KernelUsesValueProjection(const KernelFeatureId featureId) { return IsKernelHookFeature(featureId); }
+}
+
 KernelPage::KernelPage() = default;
 KernelPage::~KernelPage() = default;
 
@@ -1552,6 +1559,7 @@ LRESULT KernelPage::HandleMessage(HWND hwnd, const UINT msg, const WPARAM wParam
     case WM_CREATE:
         queryTask_ = std::make_unique<Ksword::Ui::AsyncSnapshotTask<KernelQuerySnapshot>>(hwnd, kMsgKernelQueryCompleted);
         sortTask_ = std::make_unique<Ksword::Ui::AsyncSnapshotTask<KernelSortSnapshot>>(hwnd, kMsgKernelSortCompleted);
+        cachedProjectionTask_ = std::make_unique<Ksword::Ui::AsyncSnapshotTask<std::shared_ptr<KernelValueProjection>>>(hwnd,kMsgCachedProjectionCompleted);
         actionTask_ = std::make_unique<Ksword::Ui::AsyncSnapshotTask<KernelOperationResult>>(hwnd, kMsgKernelActionCompleted);
         callbackAnswerTask_ = std::make_unique<Ksword::Ui::AsyncSnapshotTask<KernelOperationResult>>(hwnd, kMsgCallbackAnswerCompleted);
         callbackFileIoTask_ = std::make_unique<Ksword::Ui::AsyncSnapshotTask<CallbackFileIoResult>>(hwnd, kMsgCallbackFileIoCompleted);
@@ -1564,6 +1572,15 @@ LRESULT KernelPage::HandleMessage(HWND hwnd, const UINT msg, const WPARAM wParam
     case WM_SIZE:
         Layout();
         return 0;
+    case kMsgCachedProjectionCompleted:
+        if(cachedProjectionTask_ && cachedProjectionTask_->consume(hwnd,wParam,lParam)) return 0;
+        break;
+    case WM_APP + 0x3D2:
+        if(const auto* descriptor=CurrentDescriptor();descriptor && KernelUsesValueProjection(descriptor->id)) RequestCachedValueProjection(descriptor->id);
+        break;
+    case WM_SHOWWINDOW:
+        if(wParam && deferredProjection_) ApplyCachedValueProjection(std::move(deferredProjection_));
+        break;
     case kMsgKernelSortCompleted:
         if (sortTask_ && sortTask_->consume(hwnd, wParam, lParam)) return 0;
         break;
@@ -1677,7 +1694,7 @@ LRESULT KernelPage::HandleMessage(HWND hwnd, const UINT msg, const WPARAM wParam
         if ((LOWORD(wParam) == kIdFilterEdit || LOWORD(wParam) == kIdModuleFilterEdit) && HIWORD(wParam) == EN_CHANGE) {
             if (suppressFilterChange_) return 0;
             if (const KernelFeatureDescriptor* descriptor = CurrentDescriptor();
-                descriptor != nullptr && IsR0EvidenceFeature(descriptor->id) && !currentRawColumns_.empty()) {
+                descriptor != nullptr && IsR0EvidenceFeature(descriptor->id) && (!currentRawColumns_.empty() || pendingProjectionSources_.contains(descriptor->id))) {
                 ScheduleCachedFilter(descriptor->id);
                 return 0;
             }
@@ -1710,7 +1727,7 @@ LRESULT KernelPage::HandleMessage(HWND hwnd, const UINT msg, const WPARAM wParam
                     descriptor->id == KernelFeatureId::KernelTimerDpc ||
                     descriptor->id == KernelFeatureId::IoctlRegistry ||
                     IsKernelHookFeature(descriptor->id)) &&
-                !currentRawColumns_.empty()) {
+                (!currentRawColumns_.empty() || pendingProjectionSources_.contains(descriptor->id))) {
                 ScheduleCachedFilter(descriptor->id);
             }
             return 0;
@@ -2423,7 +2440,7 @@ LRESULT KernelPage::HandleMessage(HWND hwnd, const UINT msg, const WPARAM wParam
                 const auto* item = reinterpret_cast<const NMLISTVIEW*>(lParam);
                 if ((item->uChanged & LVIF_STATE) != 0 &&
                     ((item->uNewState ^ item->uOldState) & LVIS_SELECTED) != 0) {
-                    UpdateSelectedRowDetail();
+                    if(!applyingCachedProjection_) UpdateSelectedRowDetail();
                 }
                 return 0;
             }
@@ -2461,6 +2478,8 @@ LRESULT KernelPage::HandleMessage(HWND hwnd, const UINT msg, const WPARAM wParam
         if (callbackEventReceiver_) {
             callbackEventReceiver_->Shutdown();
         }
+        if (cachedProjectionTask_) cachedProjectionTask_->cancel();
+        deferredProjection_.reset();
         if (sortTask_) sortTask_->cancel();
         if (queryTask_) {
             queryTask_->cancel();
@@ -4309,6 +4328,7 @@ void KernelPage::RefreshSelectedFeature() {
             KernelQuerySnapshot snapshot;
             snapshot.result = facade.QueryFeature(request);
             snapshot.projection = BuildKernelDynamicProjection(request.featureId, snapshot.result);
+            if(KernelUsesValueProjection(request.featureId)) snapshot.projection.rows.clear();
             return snapshot;
         },
         [this, featureId, requestId](std::uint64_t, std::optional<KernelQuerySnapshot>&& result, std::exception_ptr error) {
@@ -4340,6 +4360,8 @@ void KernelPage::SaveCurrentFeatureViewCache(const bool transferDataToCache) {
     }
     const KernelFeatureId cacheFeatureId = activeFeatureId_;
     KernelFeatureViewCache& cache = featureViewCache_[cacheFeatureId];
+    cache.projectionSource=currentProjectionSource_;
+    cache.projectionWidths=currentProjectionWidths_;
     if (transferDataToCache) {
         cache.columns = std::move(currentColumns_);
         cache.rows = std::move(currentRows_);
@@ -4393,6 +4415,7 @@ void KernelPage::InvalidateCurrentFeatureViewCache() {
     found->second.rowIndents.clear();
     found->second.rawColumns.clear();
     found->second.rawRows.reset();
+    found->second.projectionSource.reset();
     found->second.collapsedObjectPaths.clear();
     found->second.propertyRows.clear();
     found->second.summaryRows.clear();
@@ -4412,6 +4435,8 @@ bool KernelPage::RestoreFeatureViewCache(const KernelFeatureId featureId) {
     }
 
     KernelFeatureViewCache& cache = found->second;
+    currentProjectionSource_=cache.projectionSource;
+    currentProjectionWidths_=cache.projectionWidths;
     currentColumns_ = std::move(cache.columns);
     currentRows_ = std::move(cache.rows);
     currentRowIndents_ = std::move(cache.rowIndents);
@@ -4466,6 +4491,7 @@ bool KernelPage::RestoreFeatureViewCache(const KernelFeatureId featureId) {
         }
     }
     cache.hasData = false;
+    if(pendingProjectionSources_.contains(featureId) && KernelUsesValueProjection(featureId)) RequestCachedValueProjection(featureId);
     if (pendingCachedFilterFeatures_.contains(featureId)) ScheduleCachedFilter(featureId);
     if (const auto pending = pendingSorts_.find(featureId); pending != pendingSorts_.end()) {
         RequestResultSort(pending->second.first, pending->second.second);
@@ -4880,6 +4906,7 @@ void KernelPage::RefreshKernelCpuIntegrityFromDriverPage() {
             KernelQuerySnapshot snapshot;
             snapshot.result = facade.QueryFeature(request);
             snapshot.projection = BuildKernelDynamicProjection(activeFeatureId, snapshot.result);
+            if(KernelUsesValueProjection(activeFeatureId)) snapshot.projection.rows.clear();
             return snapshot;
         },
         [this, activeFeatureId, requestId](std::uint64_t, std::optional<KernelQuerySnapshot>&& result, std::exception_ptr error) {
@@ -5289,6 +5316,8 @@ void KernelPage::RenderDescriptor(const KernelFeatureDescriptor& descriptor) {
     ::SetWindowTextW(backendText_, L"");
     ::SetWindowTextW(statusText_, L"状态：等待刷新。");
 
+    currentProjectionSource_.reset();
+    currentProjectionWidths_.clear();
     currentColumns_.clear();
     currentRows_.clear();
     currentRawColumns_.clear();
@@ -5363,6 +5392,23 @@ void KernelPage::RenderResult(const KernelOperationResult& result, KernelDynamic
     Ksword::Ui::ScopedListViewRedrawLock propertyListLock(propertyList_);
     Ksword::Ui::ScopedListViewRedrawLock summaryListLock(summaryList_);
     Ksword::Ui::ScopedWindowRedrawLock objectTreeLock(objectNamespaceTree_);
+    KernelDynamicProjection fallbackProjection;
+    const auto* projectionDescriptor=CurrentDescriptor();
+    if(!prepared && projectionDescriptor && KernelUsesValueProjection(projectionDescriptor->id)) {
+        fallbackProjection=BuildKernelDynamicProjection(projectionDescriptor->id,result);
+        fallbackProjection.rows.clear();prepared=&fallbackProjection;
+    }
+    if(prepared) {
+        const auto* descriptor=CurrentDescriptor();
+        if(descriptor && KernelUsesValueProjection(descriptor->id)) {
+            auto source=std::make_shared<KernelProjectionSource>();
+            source->featureId=descriptor->id;source->serial=++projectionSourceSerial_;
+            source->columns=std::move(prepared->columns);source->rows=std::move(prepared->rawRows);
+            pendingProjectionSources_[descriptor->id]=std::move(source);
+            RequestCachedValueProjection(descriptor->id);
+            return;
+        }
+    }
     std::vector<std::wstring> orderedColumns;
     if (!prepared) AddDynamicResultColumns(result, orderedColumns);
     bool statusHandledBySpecializedRenderer = false;
@@ -5656,215 +5702,98 @@ void KernelPage::RebuildResultListFromCache() {
     }
 }
 
-void KernelPage::RebuildKernelHookListFromCache(const KernelFeatureId featureId) {
-    // RebuildKernelHookListFromCache mirrors the original SSDT/SSSDT/Inline
-    // Hook/IAT-EAT tables. Inputs are cached raw rows from KernelFacade plus
-    // local filter controls; processing projects only the original visible
-    // columns while preserving hidden protocol/detail cells for actions; output
-    // is the ListView, detail pane, and status text.
-    if (!resultList_ || !IsKernelHookFeature(featureId)) {
-        return;
+std::shared_ptr<const KernelProjectionSource> KernelPage::CachedProjectionSource(const KernelFeatureId featureId) {
+    if(const auto pending=pendingProjectionSources_.find(featureId);pending!=pendingProjectionSources_.end()) return pending->second;
+    if(currentProjectionSource_ && currentProjectionSource_->featureId==featureId &&
+        currentProjectionSource_->rows==currentRawRows_) return currentProjectionSource_;
+    auto source=std::make_shared<KernelProjectionSource>();
+    source->featureId=featureId;source->serial=++projectionSourceSerial_;
+    source->columns=!currentRawColumns_.empty()?currentRawColumns_:currentColumns_;
+    source->rows=currentRawRows_;
+    if(source->rows->empty()) source->fallbackDisplay=currentRows_;
+    currentProjectionSource_=source;
+    return source;
+}
+
+void KernelPage::RequestCachedValueProjection(const KernelFeatureId featureId) {
+    const auto* descriptor=CurrentDescriptor();
+    if(!descriptor || descriptor->id!=featureId || !cachedProjectionTask_) return;
+    auto input=std::make_shared<KernelProjectionInput>();
+    input->source=CachedProjectionSource(featureId);
+    input->descriptor=*descriptor;
+    input->filter=WindowText(filterEdit_);input->moduleFilter=WindowText(moduleFilterEdit_);
+    input->riskOnly=riskOnlyCheck_ && Button_GetCheck(riskOnlyCheck_)==BST_CHECKED;
+    const std::array<HWND,4> choices{deviceDriverDirectoryCombo_,deviceDriverTypeCombo_,baseNamedScopeCombo_,baseNamedTypeCombo_};
+    for(std::size_t index=0;index<choices.size();++index) {
+        input->choicePresent[index]=choices[index]!=nullptr;
+        if(!choices[index]) continue;
+        const auto selected=::SendMessageW(choices[index],CB_GETCURSEL,0,0);
+        if(selected<=0) continue;
+        const auto length=::SendMessageW(choices[index],CB_GETLBTEXTLEN,static_cast<WPARAM>(selected),0);
+        if(length<0) continue;
+        std::wstring text(static_cast<std::size_t>(length)+1,L'\0');
+        ::SendMessageW(choices[index],CB_GETLBTEXT,static_cast<WPARAM>(selected),reinterpret_cast<LPARAM>(text.data()));
+        text.resize(static_cast<std::size_t>(length));input->selectedChoices[index]=std::move(text);
     }
+    const auto requestId=++cachedProjectionRequestId_;
+    deferredProjection_.reset();
+    ::SetWindowTextW(statusText_,(L"状态：正在后台筛选 "+descriptor->title+L"…").c_str());
+    cachedProjectionTask_->request(
+        [input,requestId]{return KernelValueProjectionBuilder(input).build(requestId);},
+        [this](std::uint64_t,std::optional<std::shared_ptr<KernelValueProjection>>&& result,std::exception_ptr error){
+            if(error || !result || !*result) return;
+            ApplyCachedValueProjection(std::move(*result));
+        });
+}
 
-    const std::vector<std::wstring>& rawColumns = !currentRawColumns_.empty() ? currentRawColumns_ : currentColumns_;
-    const std::vector<std::vector<std::wstring>>& rawRows = !currentRawRows_->empty() ? *currentRawRows_ : currentRows_;
-    const std::wstring filterText = WindowText(filterEdit_);
-    const std::wstring moduleFilterText = WindowText(moduleFilterEdit_);
-    const auto rawValue = [&](const std::vector<std::wstring>& row, std::initializer_list<const wchar_t*> names) -> std::wstring {
-        return RowFieldByName(row, rawColumns, names);
-    };
-    const auto addColumnIfMissing = [](std::vector<std::wstring>& columns, const wchar_t* name) {
-        if (!HasColumn(columns, name)) {
-            columns.push_back(name);
-        }
-    };
-    const auto displayValue = [&](const std::vector<std::wstring>& row, const std::wstring& columnName) -> std::wstring {
-        std::vector<std::wstring> aliases = ColumnAliases(featureId, columnName);
-        if (aliases.empty()) {
-            aliases.push_back(columnName);
-        }
-        for (const std::wstring& alias : aliases) {
-            const std::wstring value = rawValue(row, { alias.c_str() });
-            if (!value.empty()) {
-                return value;
-            }
-        }
-        return {};
-    };
-    const auto isMeaningful = [&](const std::vector<std::wstring>& row) {
-        switch (featureId) {
-        case KernelFeatureId::Ssdt:
-        case KernelFeatureId::ShadowSsdt:
-            return HasNonEmptyField(row, rawColumns, { L"Index", L"Name", L"ServiceName", L"Zw", L"Stub", L"Service", L"ServiceAddress" });
-        case KernelFeatureId::InlineHook:
-            return HasNonEmptyField(row, rawColumns, { L"Module", L"Function", L"Address", L"Target", L"CurrentBytes", L"DiskBytes" });
-        case KernelFeatureId::IatEatHook:
-            return HasNonEmptyField(row, rawColumns, { L"ClassText", L"Class", L"Module", L"Import", L"Function", L"Thunk", L"Current", L"Expected" });
-        default:
-            return false;
-        }
-    };
-    const auto hiddenColumn = [&](const std::wstring& name) {
-        if (HasColumn(CanonicalColumnNames(featureId), name)) {
-            return false;
-        }
-        return true;
-    };
+void KernelPage::ApplyCachedValueProjection(std::shared_ptr<KernelValueProjection> projection) {
+    const auto* descriptor=CurrentDescriptor();
+    if(!projection || !projection->input || !descriptor) return;
+    const auto source=projection->input->source;
+    const auto pending=pendingProjectionSources_.find(descriptor->id);
+    const auto expected=pending!=pendingProjectionSources_.end()?pending->second:currentProjectionSource_;
+    if(!KernelProjectionMatches(descriptor->id,cachedProjectionRequestId_,expected,*projection)) return;
+    if(!::IsWindowVisible(hwnd_)) {deferredProjection_=std::move(projection);return;}
 
-    std::vector<std::wstring> displayColumns;
-    for (const std::wstring& column : CanonicalColumnNames(featureId)) {
-        addColumnIfMissing(displayColumns, column.c_str());
+    const int oldSelected=ListView_GetNextItem(resultList_,-1,LVNI_SELECTED);
+    const int oldTop=ListView_GetTopIndex(resultList_);
+    const auto oldRows=currentRows_.snapshot();
+    const auto restore=[&](const int old)->int {
+        if(old<0 || static_cast<std::size_t>(old)>=oldRows->size()) return -1;
+        const auto& value=*(*oldRows)[static_cast<std::size_t>(old)];
+        return KernelFindProjectedRow(value,*projection);
+    };
+    int selected=restore(oldSelected);int top=restore(oldTop);
+    if(selected<0 && projection->selectFirst && !projection->rows.empty()) selected=0;
+    if(top<0 && !projection->rows.empty()) top=(std::min)((std::max)(0,oldTop),static_cast<int>(projection->rows.size())-1);
+    const bool schemaChanged=currentColumns_!=projection->columns || currentProjectionWidths_!=projection->widths;
+    const bool newSource=currentProjectionSource_!=source;
+    currentProjectionSource_=source;currentRawColumns_=source->columns;currentRawRows_=source->rows;
+    currentColumns_=std::move(projection->columns);currentRows_=std::move(projection->rows);
+    currentRowIndents_=std::move(projection->indents);currentProjectionWidths_=std::move(projection->widths);
+    if(newSource){sortColumn_=-1;sortAscending_=true;pendingSorts_.erase(descriptor->id);}
+    if(pending!=pendingProjectionSources_.end() && pending->second==source) pendingProjectionSources_.erase(pending);
+    applyingCachedProjection_=true;
+    Ksword::Ui::ScopedListViewRedrawLock resultLock(resultList_);
+    if(schemaChanged) {
+        ClearResultGridOnly();
+        for(std::size_t index=0;index<currentColumns_.size();++index) AddResultTableColumn(static_cast<int>(index),currentColumns_[index],index<currentProjectionWidths_.size()?currentProjectionWidths_[index]:ColumnWidth(currentColumns_[index]));
     }
-    for (const std::wstring& column : rawColumns) {
-        addColumnIfMissing(displayColumns, column.c_str());
-    }
-    addColumnIfMissing(displayColumns, L"Detail");
-
-    std::vector<std::vector<std::wstring>> displayRows;
-    std::size_t totalRows = 0;
-    std::size_t unresolvedRows = 0;
-    std::size_t suspiciousRows = 0;
-    std::size_t cleanRows = 0;
-    std::size_t diskDiffRows = 0;
-    std::size_t reportedTotalRows = 0;
-    std::size_t reportedReturnedRows = 0;
-    for (const std::vector<std::wstring>& rawRow : rawRows) {
-        const std::uint64_t rawTotal = FirstNonZeroField(rawRow, rawColumns, { L"Total" });
-        const std::uint64_t rawReturned = FirstNonZeroField(rawRow, rawColumns, { L"Returned" });
-        if (rawTotal != 0) {
-            reportedTotalRows = static_cast<std::size_t>(rawTotal);
-        }
-        if (rawReturned != 0) {
-            reportedReturnedRows = static_cast<std::size_t>(rawReturned);
-        }
-        if (!isMeaningful(rawRow)) {
-            continue;
-        }
-        ++totalRows;
-
-        std::vector<std::wstring> cells(displayColumns.size());
-        for (std::size_t column = 0; column < displayColumns.size(); ++column) {
-            const std::wstring& name = displayColumns[column];
-            if (name == L"Detail") {
-                cells[column] = rawValue(rawRow, { L"Detail", L"FlagsText", L"DiskDiff", L"Status" });
-            } else {
-                cells[column] = displayValue(rawRow, name);
-            }
-        }
-
-        const std::wstring merged = MergeRowText(cells) + L" | " + rawValue(rawRow, { L"Detail" });
-        if (!filterText.empty() && !ContainsCaseInsensitive(merged, filterText)) {
-            continue;
-        }
-        if ((featureId == KernelFeatureId::InlineHook || featureId == KernelFeatureId::IatEatHook) && !moduleFilterText.empty()) {
-            const std::wstring moduleText =
-                RowFieldByName(cells, displayColumns, { L"模块", L"Module" }) + L" | " +
-                RowFieldByName(cells, displayColumns, { L"目标模块", L"TargetModule" }) + L" | " +
-                RowFieldByName(cells, displayColumns, { L"导入模块", L"Import", L"ImportModule" });
-            if (!ContainsCaseInsensitive(moduleText, moduleFilterText)) {
-                continue;
-            }
-        }
-
-        const std::wstring status = RowFieldByName(cells, displayColumns, { L"状态", L"Status" });
-        const std::wstring diff = RowFieldByName(cells, displayColumns, { L"差异状态", L"差异", L"DiskDiff" });
-        if (ContainsCaseInsensitive(status, L"未解析") ||
-            ContainsCaseInsensitive(status, L"unresolved") ||
-            RowFieldByName(cells, displayColumns, { L"索引", L"Index" }) == L"<未知>") {
-            ++unresolvedRows;
-        }
-        if (ContainsCaseInsensitive(status, L"Hook") ||
-            ContainsCaseInsensitive(status, L"可疑") ||
-            ContainsCaseInsensitive(status, L"异常") ||
-            ContainsCaseInsensitive(status, L"outside") ||
-            ContainsCaseInsensitive(diff, L"不同") ||
-            ContainsCaseInsensitive(diff, L"diff")) {
-            ++suspiciousRows;
-        } else if (!status.empty()) {
-            ++cleanRows;
-        }
-        if (ContainsCaseInsensitive(diff, L"不同") || ContainsCaseInsensitive(diff, L"diff")) {
-            ++diskDiffRows;
-        }
-        displayRows.push_back(std::move(cells));
-    }
-
-    currentColumns_ = std::move(displayColumns);
-    currentRows_ = std::move(displayRows);
-    ClearResultTable();
-    for (std::size_t index = 0; index < currentColumns_.size(); ++index) {
-        int width = hiddenColumn(currentColumns_[index]) ? 0 : ColumnWidth(currentColumns_[index]);
-        if (currentColumns_[index] == L"索引") {
-            width = 90;
-        } else if (currentColumns_[index] == L"服务名" || currentColumns_[index] == L"函数") {
-            width = 260;
-        } else if (currentColumns_[index] == L"Zw导出地址" ||
-            currentColumns_[index] == L"Stub地址" ||
-            currentColumns_[index] == L"表项地址" ||
-            currentColumns_[index] == L"服务例程" ||
-            currentColumns_[index] == L"函数地址" ||
-            currentColumns_[index] == L"目标地址" ||
-            currentColumns_[index] == L"Thunk/EAT项" ||
-            currentColumns_[index] == L"当前目标" ||
-            currentColumns_[index] == L"期望目标") {
-            width = 170;
-        } else if (currentColumns_[index] == L"模块" ||
-            currentColumns_[index] == L"导入模块" ||
-            currentColumns_[index] == L"目标模块") {
-            width = 190;
-        } else if (currentColumns_[index] == L"内存字节" ||
-            currentColumns_[index] == L"磁盘字节") {
-            width = 240;
-        } else if (currentColumns_[index] == L"差异状态" ||
-            currentColumns_[index] == L"状态") {
-            width = 180;
-        }
-        AddResultTableColumn(static_cast<int>(index), currentColumns_[index], width);
-    }
+    if(propertyList_) ListView_DeleteAllItems(propertyList_);
+    if(summaryList_){ListView_DeleteAllItems(summaryList_);for(const auto& row:projection->summary) ListViewInsertRow(summaryList_,row);}
     SyncResultListVirtualRows();
+    ListView_SetItemState(resultList_,-1,0,LVIS_SELECTED|LVIS_FOCUSED);
+    if(selected>=0) ListView_SetItemState(resultList_,selected,LVIS_SELECTED|LVIS_FOCUSED,LVIS_SELECTED|LVIS_FOCUSED);
+    if(top>=0){ListView_EnsureVisible(resultList_,top,FALSE);RECT item{};if(ListView_GetItemRect(resultList_,top,&item,LVIR_BOUNDS))ListView_Scroll(resultList_,0,(top-ListView_GetTopIndex(resultList_))*static_cast<int>(item.bottom-item.top));}
+    applyingCachedProjection_=false;
+    if(projection->hasStatus) ::SetWindowTextW(statusText_,projection->status.c_str());
+    if(selected>=0 && projection->selectionDetail) UpdateSelectedRowDetail();
+    else if(projection->hasDetail) ::SetWindowTextW(detailEdit_,projection->detail.c_str());
+    ConfigureVisibleLayout();InvalidateCurrentFeatureViewCache();
+}
 
-    std::wostringstream status;
-    switch (featureId) {
-    case KernelFeatureId::Ssdt:
-        status << L"状态：已刷新 " << totalRows << L" 项，显示 " << currentRows_.size()
-               << L" 项，未解析索引 " << unresolvedRows << L" 项";
-        break;
-    case KernelFeatureId::ShadowSsdt:
-        status << L"状态：已解析 "
-               << (reportedReturnedRows == 0 ? totalRows : reportedReturnedRows)
-               << L"/"
-               << (reportedTotalRows == 0 ? totalRows : reportedTotalRows)
-               << L" 项，显示 " << currentRows_.size()
-               << L" 项，未解析索引 " << unresolvedRows << L" 项";
-        break;
-    case KernelFeatureId::InlineHook:
-        status << L"状态：Inline Hook 扫描完成，显示 " << currentRows_.size()
-               << L" / " << totalRows << L" 项，可疑/差异 " << suspiciousRows
-               << L" 项，磁盘差异 " << diskDiffRows << L" 项";
-        break;
-    case KernelFeatureId::IatEatHook:
-        status << L"状态：IAT/EAT 扫描完成，显示 " << currentRows_.size()
-               << L" / " << totalRows << L" 项，可疑 " << suspiciousRows
-               << L" 项，干净 " << cleanRows << L" 项";
-        break;
-    default:
-        break;
-    }
-    if (!filterText.empty()) {
-        status << L"，过滤=" << filterText;
-    }
-    if (!moduleFilterText.empty() && (featureId == KernelFeatureId::InlineHook || featureId == KernelFeatureId::IatEatHook)) {
-        status << L"，模块过滤=" << moduleFilterText;
-    }
-    ::SetWindowTextW(statusText_, status.str().c_str());
-
-    if (!currentRows_.empty()) {
-        ListView_SetItemState(resultList_, 0, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
-        ListView_EnsureVisible(resultList_, 0, FALSE);
-        UpdateSelectedRowDetail();
-    } else {
-        ::SetWindowTextW(detailEdit_, EmptyDetailTextForFeature(featureId));
-    }
+void KernelPage::RebuildKernelHookListFromCache(const KernelFeatureId featureId) {
+    RequestCachedValueProjection(featureId);
 }
 
 void KernelPage::RebuildObjectNamespaceListFromCache(const KernelFeatureId featureId) {
@@ -8425,12 +8354,13 @@ void KernelPage::RebuildR0EvidenceListFromCache(const KernelFeatureId featureId)
 
 void KernelPage::ApplyCachedFilter(const KernelFeatureId featureId) {
     const auto* descriptor = CurrentDescriptor();
-    if (!descriptor || descriptor->id != featureId || currentRawColumns_.empty()) return;
+    if (!descriptor || descriptor->id != featureId || (currentRawColumns_.empty() && !pendingProjectionSources_.contains(featureId))) return;
     pendingCachedFilterFeatures_.erase(featureId);
     if (IsR0EvidenceFeature(featureId)) {
         RequestR0EvidenceRebuild(featureId);
         return;
     }
+    if(KernelUsesValueProjection(featureId)) { RequestCachedValueProjection(featureId); return; }
     currentColumns_ = currentRawColumns_;
     currentRows_ = *currentRawRows_;
     if (IsObjectNamespaceFeature(descriptor->id)) {

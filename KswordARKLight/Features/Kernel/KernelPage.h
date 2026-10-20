@@ -4,6 +4,7 @@
 #include "KernelCallbackEventReceiver.h"
 #include "KernelModel.h"
 #include "KernelDynamicProjection.h"
+#include "KernelProjectionValues.h"
 #include "../../Core/Win32Lean.h"
 #include "../../Ui/AsyncTask.h"
 
@@ -118,6 +119,9 @@ private:
     void RebuildDiagnosticDualTableFromCache(KernelFeatureId featureId);
     void RebuildCallbackEnumerationListFromCache();
     void RebuildKernelHookListFromCache(KernelFeatureId featureId);
+    void RequestCachedValueProjection(KernelFeatureId featureId);
+    void ApplyCachedValueProjection(std::shared_ptr<KernelValueProjection> projection);
+    std::shared_ptr<const KernelProjectionSource> CachedProjectionSource(KernelFeatureId featureId);
     void RebuildKernelMemoryScanListFromCache(KernelFeatureId featureId);
     void RebuildCrossViewListFromCache(KernelFeatureId featureId);
     void RebuildIntegrityEvidenceListFromCache(KernelFeatureId featureId);
@@ -389,6 +393,8 @@ private:
         std::wstring objectNamespaceSelectedKind;
         std::wstring objectNamespaceSelectedPath;
         std::wstring objectNamespaceSelectedDescription;
+        std::shared_ptr<const KernelProjectionSource> projectionSource;
+        std::vector<int> projectionWidths;
         int sortColumn = -1;
         bool sortAscending = true;
         int selectedRow = -1;
@@ -438,6 +444,13 @@ private:
     int contextColumn_ = -1;
     int sortColumn_ = -1;
     bool sortAscending_ = true;
+    std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<std::shared_ptr<KernelValueProjection>>> cachedProjectionTask_;
+    std::uint64_t cachedProjectionRequestId_ = 0, projectionSourceSerial_ = 0;
+    std::shared_ptr<const KernelProjectionSource> currentProjectionSource_;
+    std::unordered_map<KernelFeatureId,std::shared_ptr<const KernelProjectionSource>> pendingProjectionSources_;
+    std::shared_ptr<KernelValueProjection> deferredProjection_;
+    std::vector<int> currentProjectionWidths_;
+    bool applyingCachedProjection_ = false;
     std::uint64_t rowsRevision_ = 0;
     std::uint64_t sortRequestId_ = 0;
     std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<KernelSortSnapshot>> sortTask_;

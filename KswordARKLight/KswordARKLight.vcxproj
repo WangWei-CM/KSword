@@ -347,6 +347,8 @@
     <ClInclude Include="Features\Kernel\KernelObjectNamespaceFeature.h" />
     <ClInclude Include="Features\Kernel\KernelObjectTypeMatrixFeature.h" />
     <ClInclude Include="Features\Kernel\KernelDynamicProjection.h" />
+    <ClInclude Include="Features\Kernel\KernelProjectionValues.h" />
+    <ClInclude Include="Features\Kernel\KernelProjectionValues.inl" />
     <ClInclude Include="Features\Kernel\KernelPage.h" />
     <ClInclude Include="Features\Kernel\KernelPageLayout.h" />
     <ClInclude Include="Features\Kernel\KernelR0ExtendedFeature.h" />
