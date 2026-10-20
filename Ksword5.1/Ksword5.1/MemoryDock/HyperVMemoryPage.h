@@ -1,11 +1,16 @@
 #pragma once
 #include "HyperVMemoryEvidence.h"
 #include <QWidget>
+#include <array>
 class QLabel;
 class QPushButton;
 class QLineEdit;
 class QProgressBar;
-class QTableWidget;
+class QTableView;
+class QTimer;
+class QShowEvent;
+struct HyperPreparedData;
+struct HyperViewData;
 #include "../UI/StructuredFieldView.h"
 class QTabWidget;
 class MemoryAttributionChart;
@@ -20,6 +25,7 @@ public:
     void setPfnContext(const std::shared_ptr<ksword::pfn::Scan>& scan);
 protected:
     void changeEvent(QEvent*) override;
+    void showEvent(QShowEvent*) override;
 private:
     void poll();
     void retranslate();
@@ -27,6 +33,9 @@ private:
     void rebuildPartitions();
     void showPartition(int index);
     void exportEvidence();
+    void requestProjection(bool rebuild = false);
+    void pollProjection();
+    void bindCurrentProjection();
     QPushButton* m_collect = nullptr;
     QPushButton* m_cancel = nullptr;
     QPushButton* m_export = nullptr;
@@ -35,14 +44,27 @@ private:
     QProgressBar* m_progress = nullptr;
     MemoryAttributionChart* m_chart = nullptr;
     QTabWidget* m_tabs = nullptr;
-    QTableWidget* m_partitions = nullptr;
-    QTableWidget* m_host = nullptr;
-    QTableWidget* m_processes = nullptr;
-    QTableWidget* m_sources = nullptr;
+    QTableView* m_partitions = nullptr;
+    QTableView* m_host = nullptr;
+    QTableView* m_processes = nullptr;
+    QTableView* m_sources = nullptr;
     ks::ui::StructuredFieldView* m_detail = nullptr;
     ks::ui::StructuredFieldView* m_evidence = nullptr;
     ksword::hyperv::Context m_latestContext, m_jobContext, m_resultContext;
     std::shared_ptr<ksword::hyperv::Job> m_job;
+    struct ProjectionJob;
+    struct DetailJob;
+    std::shared_ptr<ProjectionJob> m_projectionJob;
+    std::shared_ptr<DetailJob> m_detailJob;
+    std::shared_ptr<const HyperPreparedData> m_prepared;
+    std::shared_ptr<const HyperViewData> m_readyView;
+    std::uint64_t m_projectionVersion = 0, m_publishedVersion = 0, m_localeVersion = 0;
+    std::array<std::uint64_t, 5> m_boundVersions{};
+    QTimer* m_projectionDebounce = nullptr;
+    bool m_rebuildProjection = true;
+    int m_requestedPartition = -1, m_shownPartition = -1;
+    std::uint64_t m_detailLocale = 0;
+    std::shared_ptr<const ksword::hyperv::Snapshot> m_detailSnapshot;
     struct ExportJob;
     std::shared_ptr<ExportJob> m_exportJob;
     std::shared_ptr<ksword::hyperv::Snapshot> m_snapshot, m_previous;

@@ -7036,6 +7036,8 @@
     "notification.copy.log_template": "%1\n%2\n%3\nFile: %4\nFunction: %5\nGUID: %6"
   },
   "source_translations": {
+    "Hyper-V table projection failed.": "Hyper-V table projection failed.",
+    "Updating Hyper-V memory tables...": "Updating Hyper-V memory tables...",
     "离线 Hive 未取得完整回执；请关闭工作副本后重新打开。": "A complete offline Hive result was not received; close the working copy and open it again.",
     "正在处理离线 Hive…": "Processing offline Hive…",
     "正在关闭离线 Hive；等待当前操作和资源清理完成。": "Closing offline Hive; waiting for the current operation and resource cleanup.",

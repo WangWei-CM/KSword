@@ -10,8 +10,19 @@
 #include "../Internationalization/LanguageManager.h"
 #include "../UI/AdaptivePageScroll.h"
 #include "../UI/VisibleTableWidget.h"
+#include "../UI/TableColumnAutoFit.h"
+#include "../UI/TableRowFilterSupport.h"
 #include "../UI/TableInteractionSupport.h"
 #include <QEvent>
+#include <QShowEvent>
+#include <QThreadPool>
+#include <QAbstractTableModel>
+#include <QTableView>
+#include <QItemSelectionModel>
+#include <QSignalBlocker>
+#include <map>
+#include <numeric>
+#include <array>
 #include <QFileDialog>
 #include <QHeaderView>
 #include <QHBoxLayout>
@@ -34,7 +45,17 @@
 
 namespace {
 using namespace ksword::hyperv;
-QString L(const char* text) { return ks::i18n::packedSourceText(QString::fromUtf8(text)); }
+
+thread_local const ks::i18n::SourceTextSnapshot* hyperText = nullptr;
+QString T(const QString& text) { return hyperText ? hyperText->packedSourceText(text) : ks::i18n::packedSourceText(text); }
+QString L(const char* text) { return T(QString::fromUtf8(text)); }
+struct HyperTextScope {
+    const ks::i18n::SourceTextSnapshot* prior;
+    explicit HyperTextScope(const ks::i18n::SourceTextSnapshot& text):prior(hyperText){hyperText=&text;}
+    ~HyperTextScope(){hyperText=prior;}
+};
+template<class Value>void retireHyperValue(Value value){if(value)QThreadPool::globalInstance()->start([value=std::move(value)]{});}
+
 QString bytes(Bytes amount)
 {
     if (!amount) { return L("Unavailable"); }
@@ -99,36 +120,6 @@ QString identity(const Partition& row)
     if (row.wmi) { sources << QStringLiteral("WMI"); }
     return sources.join(QStringLiteral(" + "));
 }
-QTableWidget* table(QWidget* parent)
-{
-    auto* view = new ks::ui::VisibleTableWidget(parent);
-    view->setEditTriggers(QAbstractItemView::NoEditTriggers);
-    view->setSelectionBehavior(QAbstractItemView::SelectRows);
-    view->setSelectionMode(QAbstractItemView::SingleSelection);
-    view->verticalHeader()->hide();
-    view->horizontalHeader()->setStretchLastSection(true);
-    view->setAlternatingRowColors(true);
-    return view;
-}
-void headers(QTableWidget* view, const QStringList& labels)
-{
-    view->setColumnCount(static_cast<int>(labels.size()));
-    view->setHorizontalHeaderLabels(labels);
-}
-void text(QTableWidget* view, int row, int column, const QString& value)
-{
-    auto* item = new QTableWidgetItem(value);
-    item->setToolTip(value);
-    view->setItem(row, column, item);
-}
-void amount(QTableWidget* view, int row, int column, Bytes value)
-{
-    if (!value) { text(view, row, column, L("Unavailable")); return; }
-    auto* item = new ks::ui::NumericTableItem(bytes(value), static_cast<qulonglong>(*value));
-    item->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
-    item->setToolTip(L("%1 bytes").arg(*value));
-    view->setItem(row, column, item);
-}
 Bytes hypervisorBytes(const Snapshot& snapshot)
 {
     for (const auto& sample : snapshot.counters) { if (sample.metric == Metric::HypervisorTotal && sample.bytes) { return sample.bytes; } }
@@ -152,9 +143,189 @@ QString vbsState(const Snapshot& snapshot)
 QString sourceName(const QString& source)
 {
     const auto prefix = QStringLiteral("HCS properties: ");
-    return source.startsWith(prefix) ? L("HCS memory properties: %1").arg(source.mid(prefix.size())) : ks::i18n::packedSourceText(source);
+    return source.startsWith(prefix) ? L("HCS memory properties: %1").arg(source.mid(prefix.size())) : T(source);
 }
 }
+
+
+struct HyperPreparedData {
+    struct Cell {QString text,tooltip;QVariant number;};
+    struct Row {std::vector<Cell> cells;int source=-1;};
+    std::shared_ptr<const Snapshot> snapshot,previous;
+    std::array<std::vector<Row>,4> tables;
+    std::vector<QString> search;
+    std::vector<MemoryAttributionChart::Segment> segments;
+    QString summary;
+    ks::ui::FieldDocument interpretation;
+};
+namespace {
+using HyperCell=HyperPreparedData::Cell;using HyperRow=HyperPreparedData::Row;
+HyperCell hyperCell(QString text,QString tip={}) {return {text,tip.isEmpty()?text:tip,{}};}
+HyperCell hyperAmount(Bytes value) {return value ? HyperCell{bytes(value),L("%1 bytes").arg(*value),QVariant::fromValue(static_cast<qulonglong>(*value))}:hyperCell(L("Unavailable"));}
+ks::ui::FieldDocument buildHyperInterpretation(const Snapshot& snapshot,const Context& context,QString* scopeComparison=nullptr) {
+    ks::ui::FieldDocument evidence;
+    evidence.note(QStringLiteral("VID allocation, HCS node memory, Dynamic Memory, process working sets and PFN Driver Locked can describe overlapping physical pages. Only VID instances are aggregated in this view; no amount is deducted from the PFN Unknown category."));
+    evidence.note(QStringLiteral("No counter instance or access denied means unavailable, not zero. Registered VM inventory alone can omit WSL and container utility VMs. A large VM allocation does not prove a leak or identify the guest process using it."));
+    evidence.field(QStringLiteral("Collection interval"), QStringLiteral("%1 to %2 (%3 ms). Providers are sampled sequentially, not atomically.").arg(QStringLiteral("%1").arg(snapshot.started)).arg(QStringLiteral("%1").arg(snapshot.finished)).arg(QStringLiteral("%1").arg(snapshot.elapsedMs)));
+    evidence.field(QStringLiteral("VID instance sum"), QStringLiteral("%1").arg(bytes(snapshot.observedVidBytes)));
+    evidence.field(QStringLiteral("provider _Total"), QStringLiteral("%1. _Total is a cross-check and is never added again.").arg(QStringLiteral("%1").arg(bytes(snapshot.vidTotalBytes))));
+    evidence.field(QStringLiteral("Hypervisor"), QStringLiteral("%1").arg(snapshot.hypervisorPresent ? snapshot.hypervisorVendor : L("Not detected")));
+    evidence.field(QStringLiteral("VBS status"), QStringLiteral("%1. VBS status does not supply a VTL1/Secure Kernel byte count.").arg(QStringLiteral("%1").arg(vbsState(snapshot))));
+    evidence.field(QStringLiteral("Host physical memory"), QStringLiteral("%1").arg(bytes(snapshot.total ? Bytes(snapshot.total) : Bytes{})));
+    evidence.field(QStringLiteral("available before / after"), QStringLiteral("%1 / %2").arg(QStringLiteral("%1").arg(bytes(snapshot.total ? Bytes(snapshot.available) : Bytes{}))).arg(QStringLiteral("%1").arg(bytes(snapshot.totalAfter ? Bytes(snapshot.availableAfter) : Bytes{}))));
+    evidence.field(QStringLiteral("installed RAM"), QStringLiteral("%1.").arg(QStringLiteral("%1").arg(bytes(snapshot.installed ? Bytes(snapshot.installed) : Bytes{}))));
+    evidence.field(QStringLiteral("Fast snapshot at"), QStringLiteral("Fast snapshot at %1: remainder %2. PFN snapshot at %3: Driver Locked %4").arg(QStringLiteral("%1").arg(context.snapshotTime)).arg(QStringLiteral("%1").arg(bytes(context.snapshotRemainder))).arg(QStringLiteral("%1").arg(context.pfnTime)).arg(QStringLiteral("%1").arg(bytes(context.pfnDriverLocked))));
+    evidence.field(QStringLiteral("Unknown"), QStringLiteral("Unknown %1").arg(QStringLiteral("%1").arg(bytes(context.pfnUnknown))));
+    evidence.field(QStringLiteral("unreadable / unscanned"), QStringLiteral("unreadable / unscanned %1. Context only").arg(QStringLiteral("%1").arg(bytes(context.pfnUnscanned))));
+    evidence.note(QStringLiteral("different sample times and scopes."));
+    evidence.note(QStringLiteral("Repeat collection after a workload changes to compare VID allocation for the same partition identity. KSword does not stop VMs, trim memory, or change virtualization settings."));
+    std::uint64_t wsl = 0, processWs = 0; bool haveWsl = false, haveProcess = false;
+    for (const auto& entry : snapshot.partitions) { if (entry.owner.compare(QStringLiteral("WSL"), Qt::CaseInsensitive) == 0 && entry.vidBytes && !entry.conflictingVid) { wsl += *entry.vidBytes; haveWsl = true; } }
+    for (const auto& entry : snapshot.processes) { if (entry.name.compare(QStringLiteral("vmmemWSL"), Qt::CaseInsensitive) == 0 && entry.workingSet) { processWs += *entry.workingSet; haveProcess = true; } }
+    if (haveWsl && haveProcess && !snapshot.vidConflict) {
+        const auto comparison = L("WSL-owned VID allocation: %1; vmmemWSL process working set: %2. The process view does not represent the entire VM allocation. This is a scope comparison, not a per-PID ownership join.").arg(bytes(wsl), bytes(processWs));
+        evidence.note(comparison);if(scopeComparison)*scopeComparison=comparison;
+    }
+    if (snapshot.observedVidBytes && snapshot.vidTotalBytes && snapshot.observedVidBytes != snapshot.vidTotalBytes) {
+        evidence.note(L("VID instances and _Total disagree. Inventory churn, missing instances or provider scope may explain the difference; the sample is not a complete partition census."));
+    }
+    return evidence;
+}
+ks::ui::FieldDocument buildHyperDetail(const Snapshot& snapshot,int index,const std::atomic_bool& cancel) {
+    const auto& row = snapshot.partitions[index];
+    ks::ui::FieldDocument lines;
+    lines.field(QStringLiteral("Partition"), QStringLiteral("%1").arg(label(row)));
+    lines.field(QStringLiteral("ID"), QStringLiteral("%1").arg(row.id));
+    lines.field(QStringLiteral("Runtime ID"), QStringLiteral("%1").arg(row.runtimeId));
+    lines.field(QStringLiteral("Owner"), QStringLiteral("%1").arg(row.owner));
+    lines.field(QStringLiteral("Identity evidence"), QStringLiteral("%1").arg(identity(row)));
+    if (row.hcs && !row.wmi && wmiComplete(snapshot)) { lines.note(QStringLiteral("This HCS compute system is absent from the ordinary Hyper-V WMI VM inventory.")); }
+    if (row.vidBytes && row.hcsNodeBytes && !row.conflictingVid) {
+        lines.note((*row.vidBytes == *row.hcsNodeBytes ? L("VID and HCS node memory agree: %1. Two observations of the same allocation; counted once.").arg(bytes(row.vidBytes))
+            : L("VID reports %1; HCS reports %2. Sampling time or provider scope differs; do not add them.").arg(bytes(row.vidBytes), bytes(row.hcsNodeBytes))));
+    }
+    if (!row.hostingSystemId.isEmpty()) { lines.field(QStringLiteral("Hosting compute system"), QStringLiteral("%1. Container memory may overlap its host VM.").arg(QStringLiteral("%1").arg(row.hostingSystemId))); }
+    lines.field(QStringLiteral("WMI capacity"), QStringLiteral("%1").arg(bytes(row.wmiCapacity)));
+    lines.field(QStringLiteral("HCS private working set"), QStringLiteral("%1").arg(bytes(row.hcsPrivateWs)));
+    lines.field(QStringLiteral("HCS commit"), QStringLiteral("%1.").arg(QStringLiteral("%1").arg(bytes(row.hcsCommit))));
+    for (const auto counterIndex : row.counterIndices) {
+        const auto& sample = snapshot.counters[counterIndex];
+        lines.section(QStringLiteral("Counter"));
+        lines.field(QStringLiteral("Metric"), metricLabel(sample.metric));
+        lines.field(QStringLiteral("Bytes"), bytes(sample.bytes));
+        lines.field(QStringLiteral("SampledAt"), sample.sampledAt);
+        lines.field(QStringLiteral("Path"), sample.path);
+    }
+    if (!row.memoryEvidence.isEmpty()) { lines.section(QStringLiteral("Memory evidence"));
+        const auto buildNode = [&cancel](const auto& self, const QString& name, const QJsonValue& value) -> ks::ui::FieldNode {
+            ks::ui::FieldNode node;
+            if(cancel.load(std::memory_order_relaxed))return node;
+            node.name = name;
+            if (value.isObject()) {
+                node.kind = ks::ui::FieldNode::Kind::Section;node.initiallyExpanded=false;
+                const auto object = value.toObject();
+                for (auto it = object.constBegin(); it != object.constEnd(); ++it) node.children.append(self(self, it.key(), it.value()));
+            } else if (value.isArray()) {
+                node.kind = ks::ui::FieldNode::Kind::Section;node.initiallyExpanded=false;
+                const auto array = value.toArray();
+                for (qsizetype i = 0; i < array.size(); ++i) node.children.append(self(self, QString::number(i), array[i]));
+            } else if (value.isBool()) node.value = value.toBool() ? QStringLiteral("true") : QStringLiteral("false");
+            else if (value.isDouble()) node.value = QString::number(value.toDouble(), 'g', 17);
+            else if (value.isString()) node.value = value.toString();
+            else node.value = QStringLiteral("null");
+            return node;
+        };
+        auto& section = lines.nodes.last();
+        for (auto it = row.memoryEvidence.constBegin(); it != row.memoryEvidence.constEnd(); ++it) section.children.append(buildNode(buildNode, it.key(), it.value())); }
+    return lines;
+}
+
+std::shared_ptr<const HyperPreparedData> buildHyperData(std::shared_ptr<const Snapshot> snapshot,
+    std::shared_ptr<const Snapshot> previous,const Context& context,const ks::i18n::SourceTextSnapshot& text,const std::atomic_bool& cancel) {
+    const HyperTextScope scope(text);auto data=std::make_shared<HyperPreparedData>();data->snapshot=std::move(snapshot);data->previous=std::move(previous);
+    const auto& snap=*data->snapshot;
+    std::map<std::pair<QString,QString>,const Partition*> prior;
+    if(data->previous)for(const auto& before:data->previous->partitions)if(before.vidBytes&&!before.conflictingVid)prior.emplace(std::make_pair(before.key,before.runtimeId.toCaseFolded()),&before);
+    std::map<std::uint32_t,QStringList> processOwners;
+    for(std::size_t i=0;i<snap.partitions.size();++i) {
+        if(cancel.load(std::memory_order_relaxed))return {};
+        const auto& entry=snap.partitions[i];const auto name=label(entry);
+        if(entry.wmi&&entry.workerPid)processOwners[entry.workerPid].push_back(name);
+        HyperRow row;row.source=static_cast<int>(i);row.cells={hyperCell(name),hyperCell(entry.owner.isEmpty()?L("Unavailable"):entry.owner),hyperCell(state(entry)),
+            hyperAmount(entry.conflictingVid?Bytes{}:entry.vidBytes),hyperAmount(entry.hcsNodeBytes),hyperCell(L("Unavailable")),hyperAmount(entry.dynamicBytes),hyperAmount(entry.guestVisibleBytes),hyperAmount(entry.depositedBytes),hyperCell(identity(entry))};
+        if(data->previous&&entry.vidBytes&&!entry.conflictingVid&&!snap.vidConflict&&!data->previous->vidConflict) {
+            const auto found=prior.find({entry.key,entry.runtimeId.toCaseFolded()});
+            if(found!=prior.end()&&*entry.vidBytes<=std::uint64_t((std::numeric_limits<qint64>::max)())&&*found->second->vidBytes<=std::uint64_t((std::numeric_limits<qint64>::max)())) {
+                const auto delta=static_cast<qint64>(*entry.vidBytes)-static_cast<qint64>(*found->second->vidBytes);
+                row.cells[5]={(delta<0?QStringLiteral("-"):QStringLiteral("+"))+bytes(std::uint64_t(delta<0?-delta:delta)),L("VID allocation change since %1; matching partition identity.").arg(data->previous->finished),QVariant::fromValue(delta)};
+            }
+        }
+        data->tables[0].push_back(std::move(row));data->search.push_back(name+QLatin1Char(' ')+entry.owner+QLatin1Char(' ')+entry.id+QLatin1Char(' ')+entry.runtimeId);
+        if(entry.vidBytes&&!entry.conflictingVid&&!snap.vidConflict)data->segments.push_back({name,*entry.vidBytes,static_cast<int>(i)});
+    }
+    for(std::size_t i=0;i<snap.counters.size();++i) {
+        if(cancel.load(std::memory_order_relaxed))return {};
+        const auto& sample=snap.counters[i];HyperRow row;row.source=static_cast<int>(i);
+        row.cells={hyperCell(metricLabel(sample.metric),sample.path+QLatin1Char('\n')+sample.explanation+QLatin1Char('\n')+sample.sampledAt),hyperCell(sample.instance),hyperAmount(sample.bytes),hyperCell(status(sample.status)),hyperCell(role(sample.metric))};data->tables[1].push_back(std::move(row));
+    }
+    for(std::size_t i=0;i<snap.processes.size();++i) {
+        if(cancel.load(std::memory_order_relaxed))return {};
+        const auto& process=snap.processes[i];const auto found=processOwners.find(process.pid);
+        const auto match=found!=processOwners.end()&&found->second.size()==1?L("WMI worker PID: %1 (sampled separately)").arg(found->second.front()):L("Separate process view; no proven per-PID physical ownership");
+        data->tables[2].push_back({{hyperCell(process.name),hyperCell(QString::number(process.pid)),hyperAmount(process.workingSet),hyperAmount(process.privateCommit),hyperCell(match)},static_cast<int>(i)});
+    }
+    for(std::size_t i=0;i<snap.sources.size();++i) {
+        if(cancel.load(std::memory_order_relaxed))return {};
+        const auto& source=snap.sources[i];data->tables[3].push_back({{hyperCell(sourceName(source.name)),hyperCell(source.complete?L("Complete"):L("Partial / unavailable")),hyperCell(QString::number(source.rows)),hyperCell(status(source.status))},static_cast<int>(i)});
+    }
+    const auto valid=std::count_if(snap.counters.begin(),snap.counters.end(),[](const Counter& sample){return sample.bytes.has_value();});
+    QStringList summary{L("Observed VM allocation: %1 | Owner unresolved: %2 | Hypervisor overhead counter: %3").arg(bytes(snap.observedVidBytes),bytes(snap.unresolvedVidBytes),bytes(hypervisorBytes(snap))),L("Sample: %1 | Counters available: %2 / %3. These views overlap and cannot be added to the PFN ledger.").arg(snap.finished).arg(valid).arg(snap.counters.size())};
+    if(snap.cancelled||snap.timedOut||snap.resourceFailure)summary<<L("Partial collection: cancelled, timed out, or resource-limited. Missing values are not zero.");
+    if(snap.vidConflict)summary<<L("VID identity conflict: aggregate and chart withheld to prevent double counting.");
+    QString scopeComparison;data->interpretation=buildHyperInterpretation(snap,context,&scopeComparison);
+    if(!scopeComparison.isEmpty())summary<<scopeComparison;
+    data->summary=summary.join(QLatin1Char('\n'));return data;
+}
+}
+struct HyperViewData {std::shared_ptr<const HyperPreparedData> source;std::vector<std::size_t> partitions;int selected=-1;};
+namespace {
+std::shared_ptr<const HyperViewData> filterHyperData(std::shared_ptr<const HyperPreparedData> source,const QString& filter,const QString& selected,int requested,const std::atomic_bool& cancel) {
+    auto view=std::make_shared<HyperViewData>();view->source=std::move(source);
+    for(std::size_t i=0;i<view->source->search.size();++i){if(cancel.load(std::memory_order_relaxed))return {};if(filter.isEmpty()||view->source->search[i].contains(filter,Qt::CaseInsensitive)) {
+        if(static_cast<int>(i)==requested||(requested<0&&view->source->snapshot->partitions[i].key==selected))view->selected=static_cast<int>(view->partitions.size());view->partitions.push_back(i);
+    }}
+    if(view->selected<0&&!view->partitions.empty())view->selected=0;return view;
+}
+}
+class HyperTableModel final:public QAbstractTableModel {
+public:
+    explicit HyperTableModel(QObject*parent):QAbstractTableModel(parent){}
+    std::shared_ptr<const HyperViewData> view;int table=0;QStringList titles;
+    int rowCount(const QModelIndex&parent={})const override{return parent.isValid()||!view?0:table==0?static_cast<int>(view->partitions.size()):static_cast<int>(view->source->tables[table].size());}
+    int columnCount(const QModelIndex&parent={})const override{return parent.isValid()?0:titles.size();}
+    const HyperRow* row(int index)const{if(!view||index<0||index>=rowCount())return nullptr;return &view->source->tables[table][table==0?view->partitions[index]:index];}
+    QVariant data(const QModelIndex&index,int role)const override {
+        const auto*r=row(index.row());if(!index.isValid()||!r||index.column()<0||index.column()>=static_cast<int>(r->cells.size()))return {};
+        const auto&cell=r->cells[index.column()];if(role==Qt::DisplayRole)return cell.text;if(role==Qt::ToolTipRole)return cell.tooltip;
+        if(role==Qt::UserRole||role==ks::ui::NumericSortRole)return cell.number;
+        if(role==Qt::TextAlignmentRole&&cell.number.isValid())return static_cast<int>(Qt::AlignRight|Qt::AlignVCenter);return {};
+    }
+    QVariant headerData(int section,Qt::Orientation orientation,int role)const override{return orientation==Qt::Horizontal&&(role==Qt::DisplayRole||role==Qt::ToolTipRole)?titles.value(section):QAbstractTableModel::headerData(section,orientation,role);}
+    void headers(const QStringList&replacement){titles=replacement;emit headerDataChanged(Qt::Horizontal,0,titles.size()-1);}
+    void replace(std::shared_ptr<const HyperViewData> replacement,int kind){beginResetModel();auto old=std::move(view);view=std::move(replacement);table=kind;endResetModel();retireHyperValue(std::move(old));}
+};
+namespace {
+QTableView* table(QWidget*parent){auto*view=new ks::ui::TableActionTableView(parent);view->setModel(new HyperTableModel(view));view->setProperty("ks_i18n_preserve_model_data",true);view->model()->setProperty("ks_i18n_preserve_model_data",true);ks::ui::SetTableColumnAutoFitEnabled(view,false);ks::ui::SetTableRowFilterBusinessOwnership(view,ks::ui::TableRowFilterBusinessOwnership::ExclusiveSharedIdentity);view->setEditTriggers(QAbstractItemView::NoEditTriggers);view->setSelectionBehavior(QAbstractItemView::SelectRows);view->setSelectionMode(QAbstractItemView::SingleSelection);view->verticalHeader()->hide();view->horizontalHeader()->setStretchLastSection(true);view->horizontalHeader()->setDefaultSectionSize(150);view->horizontalHeader()->setSectionResizeMode(QHeaderView::Interactive);view->setAlternatingRowColors(true);return view;}
+void headers(QTableView*view,const QStringList& labels){static_cast<HyperTableModel*>(view->model())->headers(labels);}
+}
+struct HyperVMemoryPage::ProjectionJob {
+    std::atomic_bool cancel{false},done{false};bool failed=false;std::uint64_t version=0;
+    std::shared_ptr<const Snapshot> snapshot;std::shared_ptr<const HyperViewData> view;
+};
+struct HyperVMemoryPage::DetailJob {
+    std::atomic_bool cancel{false},done{false};bool failed=false;std::uint64_t locale=0;int index=-1;
+    std::shared_ptr<const Snapshot> snapshot;ks::ui::FieldDocument document;
+};
 
 struct HyperVMemoryPage::ExportJob {
     std::atomic_bool done{false};
@@ -203,7 +374,7 @@ HyperVMemoryPage::HyperVMemoryPage(QWidget* parent) : QWidget(parent)
     m_tabs = new QTabWidget(this);
     ks::ui::StyleJoinedResultTabs(m_tabs, resultHeader);
     auto* split = new QSplitter(Qt::Vertical, m_tabs);
-    m_partitions = table(split); m_detail = new ks::ui::StructuredFieldView(split);
+    m_partitions = table(split); m_detail = new ks::ui::StructuredFieldView(split);m_detail->setValueModelProjection();
 
     split->addWidget(m_partitions); split->addWidget(m_detail); split->setStretchFactor(0, 3); split->setStretchFactor(1, 1);
     m_tabs->addTab(split, {});
@@ -215,7 +386,7 @@ HyperVMemoryPage::HyperVMemoryPage(QWidget* parent) : QWidget(parent)
     ks::ui::SetTableActionBarMode(m_processes, ks::ui::TableActionBarMode::Compact);
     ks::ui::SetTableActionBarMode(m_host, ks::ui::TableActionBarMode::None);
     ks::ui::SetTableActionBarMode(m_sources, ks::ui::TableActionBarMode::None);
-    m_evidence = new ks::ui::StructuredFieldView(m_tabs);
+    m_evidence = new ks::ui::StructuredFieldView(m_tabs);m_evidence->setValueModelProjection();
      m_tabs->addTab(m_evidence, {});
     resultLayout->addWidget(m_tabs, 1);
     connect(m_collect, &QPushButton::clicked, this, [this] { startCollection(); });
@@ -224,31 +395,35 @@ HyperVMemoryPage::HyperVMemoryPage(QWidget* parent) : QWidget(parent)
         if (m_exportJob) { int active = 0; m_exportJob->phase.compare_exchange_strong(active, 2); }
     });
     connect(m_export, &QPushButton::clicked, this, [this] { exportEvidence(); });
-    connect(m_filter, &QLineEdit::textChanged, this, [this] { rebuildPartitions(); });
-    connect(m_partitions, &QTableWidget::itemSelectionChanged, this, [this] {
-        const auto* item = m_partitions->item(m_partitions->currentRow(), 0);
-        if (item) { showPartition(item->data(Qt::UserRole).toInt()); }
+
+    m_projectionDebounce=new QTimer(this);m_projectionDebounce->setSingleShot(true);m_projectionDebounce->setInterval(120);
+    connect(m_projectionDebounce,&QTimer::timeout,this,[this]{pollProjection();});
+    connect(m_filter,&QLineEdit::textChanged,this,[this]{requestProjection();});
+    connect(m_tabs,&QTabWidget::currentChanged,this,[this]{bindCurrentProjection();pollProjection();});
+    connect(m_partitions->selectionModel(),&QItemSelectionModel::selectionChanged,this,[this]{
+        const auto*row=static_cast<HyperTableModel*>(m_partitions->model())->row(m_partitions->currentIndex().row());if(row)showPartition(row->source);
     });
-    m_chart->selected = [this](int key) {
-        m_filter->clear(); m_tabs->setCurrentIndex(0);
-        for (int row = 0; row < m_partitions->rowCount(); ++row) {
-            const auto* item = m_partitions->item(row, 0);
-            if (item && item->data(Qt::UserRole).toInt() == key) { m_partitions->setCurrentCell(row, 0); m_partitions->scrollToItem(item); break; }
-        }
-    };
+    m_chart->selected=[this](int key){m_requestedPartition=key;m_filter->clear();requestProjection();m_tabs->setCurrentIndex(0);};
+    m_partitions->setColumnWidth(0,270);m_partitions->setColumnWidth(9,300);m_host->setColumnWidth(4,450);
     auto* timer = new QTimer(this); timer->setInterval(150);
-    connect(timer, &QTimer::timeout, this, [this] { poll(); }); timer->start();
+    connect(timer, &QTimer::timeout, this, [this] { poll();pollProjection(); }); timer->start();
     retranslate(); rebuild();
 }
 HyperVMemoryPage::~HyperVMemoryPage()
 {
+    m_detail->setDocument({});m_evidence->setDocument({});
+    if(m_projectionJob)m_projectionJob->cancel.store(true);if(m_detailJob)m_detailJob->cancel.store(true);
+    for(auto*view:{m_partitions,m_host,m_processes,m_sources})retireHyperValue(std::move(static_cast<HyperTableModel*>(view->model())->view));
+    retireHyperValue(std::move(m_readyView));retireHyperValue(std::move(m_prepared));retireHyperValue(std::move(m_detailSnapshot));retireHyperValue(std::move(m_snapshot));retireHyperValue(std::move(m_previous));retireHyperValue(std::move(m_projectionJob));retireHyperValue(std::move(m_detailJob));
+
     if (m_job) { m_job->cancel.store(true); }
+    retireHyperValue(std::move(m_job));
     if (m_exportJob) { int active = 0; m_exportJob->phase.compare_exchange_strong(active, 2); }
 }
 void HyperVMemoryPage::changeEvent(QEvent* event)
 {
     QWidget::changeEvent(event);
-    if (event->type() == QEvent::LanguageChange && m_collect) { retranslate(); rebuild(); }
+    if (event->type() == QEvent::LanguageChange && m_collect) { ++m_localeVersion;retranslate();requestProjection(true); }
 }
 void HyperVMemoryPage::setSnapshotContext(const QString& time, std::uint64_t remainder)
 {
@@ -298,7 +473,7 @@ void HyperVMemoryPage::poll()
         { std::lock_guard<std::mutex> lock(m_job->mutex); result = m_job->result; }
         m_job.reset(); m_collect->setEnabled(true); m_cancel->setEnabled(false); m_progress->setRange(0, 1); m_progress->setValue(1);
         if (!result) { m_summary->setText(L("Hyper-V collection did not return a snapshot.")); m_export->setEnabled(bool(m_snapshot)); return; }
-        m_previous = m_snapshot; m_snapshot = std::move(result); m_resultContext = m_jobContext;
+        retireHyperValue(std::move(m_previous));m_previous = m_snapshot; m_snapshot = std::move(result); m_resultContext = m_jobContext;
         rebuild(); return;
     }
     constexpr const char* phases[]{"Starting Hyper-V evidence collection", "Reading host and partition counters", "Reading Hyper-V inventory and VBS state", "Reading HCS utility VM memory", "Reading host process memory"};
@@ -318,169 +493,84 @@ void HyperVMemoryPage::retranslate()
     headers(m_processes, {L("Process"), L("PID"), L("Working set"), L("Private commit"), L("Partition evidence")});
     headers(m_sources, {L("Source"), L("Coverage"), L("Rows"), L("Status")});
 }
-void HyperVMemoryPage::rebuildPartitions()
-{
-    m_partitions->setSortingEnabled(false); m_partitions->setRowCount(0); m_detail->setDocument({});
-    if (!m_snapshot) { return; }
-    const auto filter = m_filter->text().trimmed();
-    for (std::size_t index = 0; index < m_snapshot->partitions.size(); ++index) {
-        const auto& entry = m_snapshot->partitions[index];
-        const auto search = label(entry) + QLatin1Char(' ') + entry.owner + QLatin1Char(' ') + entry.id + QLatin1Char(' ') + entry.runtimeId;
-        if (!filter.isEmpty() && !search.contains(filter, Qt::CaseInsensitive)) { continue; }
-        const int row = m_partitions->rowCount(); m_partitions->insertRow(row);
-        text(m_partitions, row, 0, label(entry)); m_partitions->item(row, 0)->setData(Qt::UserRole, static_cast<int>(index));
-        text(m_partitions, row, 1, entry.owner.isEmpty() ? L("Unavailable") : entry.owner); text(m_partitions, row, 2, state(entry));
-        amount(m_partitions, row, 3, entry.conflictingVid ? Bytes{} : entry.vidBytes); amount(m_partitions, row, 4, entry.hcsNodeBytes);
-        text(m_partitions, row, 5, L("Unavailable"));
-        if (m_previous && entry.vidBytes && !entry.conflictingVid && !m_snapshot->vidConflict && !m_previous->vidConflict) {
-            for (const auto& before : m_previous->partitions) {
-                if (before.key != entry.key || before.runtimeId.compare(entry.runtimeId, Qt::CaseInsensitive) != 0 || !before.vidBytes || before.conflictingVid) { continue; }
-                if (*entry.vidBytes > static_cast<std::uint64_t>(std::numeric_limits<qint64>::max()) || *before.vidBytes > static_cast<std::uint64_t>(std::numeric_limits<qint64>::max())) { break; }
-                const auto delta = static_cast<qint64>(*entry.vidBytes) - static_cast<qint64>(*before.vidBytes);
-                auto* item = new ks::ui::NumericTableItem((delta < 0 ? QStringLiteral("-") : QStringLiteral("+")) + bytes(static_cast<std::uint64_t>(delta < 0 ? -delta : delta)), delta);
-                item->setToolTip(L("VID allocation change since %1; matching partition identity.").arg(m_previous->finished)); m_partitions->setItem(row, 5, item); break;
-            }
+
+void HyperVMemoryPage::rebuildPartitions(){requestProjection();}
+void HyperVMemoryPage::rebuild() {
+    m_cancel->setEnabled(bool(m_job)||(m_exportJob&&m_exportJob->phase.load()==0));m_collect->setEnabled(!m_job&&!m_exportJob);m_export->setEnabled(bool(m_snapshot)&&!m_job&&!m_exportJob);
+    if(!m_job&&!m_exportJob){m_progress->setRange(0,1);m_progress->setValue(m_snapshot?1:0);}
+    if(!m_snapshot){m_summary->setText(L("Find VM and utility-VM allocations that a process list cannot fully explain. Collect a sample to link partition counters to WSL, containers and registered VMs."));m_chart->setSegments({},L("Hyper-V partition allocations"));return;}
+    requestProjection(true);
+}
+void HyperVMemoryPage::requestProjection(bool rebuild) {
+    ++m_projectionVersion;m_rebuildProjection=m_rebuildProjection||rebuild;if(m_projectionJob)m_projectionJob->cancel.store(true);
+    if(m_detailJob)m_detailJob->cancel.store(true);m_projectionDebounce->start();
+    m_chart->setEnabled(false);if(m_snapshot&&!m_job&&!m_exportJob)m_summary->setText(L("Updating Hyper-V memory tables..."));
+    for(auto*view:{m_partitions,m_host,m_processes,m_sources})view->setEnabled(false);
+}
+void HyperVMemoryPage::pollProjection() {
+    if(m_projectionJob&&m_projectionJob->done.load(std::memory_order_acquire)) {
+        if(m_projectionJob->version!=m_projectionVersion||m_projectionJob->snapshot!=m_snapshot)retireHyperValue(std::move(m_projectionJob));
+        else if(isVisible()) {
+            auto job=std::move(m_projectionJob);m_publishedVersion=job->version;
+            if(job->view){auto oldView=std::move(m_readyView);m_readyView=job->view;retireHyperValue(std::move(oldView));auto old=std::move(m_prepared);m_prepared=job->view->source;m_rebuildProjection=false;m_summary->setText(m_prepared->summary);m_chart->setSegments(m_prepared->segments,L("VID partition allocations only; click a segment for ownership evidence."));m_chart->setEnabled(true);
+                const QPointer<HyperVMemoryPage>guard(this);bindCurrentProjection();if(!guard)return;retireHyperValue(std::move(old));}
+            else m_summary->setText(L("Hyper-V table projection failed."));retireHyperValue(std::move(job));
         }
-        amount(m_partitions, row, 6, entry.dynamicBytes); amount(m_partitions, row, 7, entry.guestVisibleBytes); amount(m_partitions, row, 8, entry.depositedBytes);
-        text(m_partitions, row, 9, identity(entry));
     }
-    m_partitions->resizeColumnsToContents();
-    m_partitions->setColumnWidth(0, std::min(360, m_partitions->columnWidth(0)));
-    if (m_partitions->rowCount()) { m_partitions->setCurrentCell(0, 0); showPartition(m_partitions->item(0, 0)->data(Qt::UserRole).toInt()); }
+    if(!m_projectionJob&&m_snapshot&&m_publishedVersion!=m_projectionVersion&&isVisible()&&!m_projectionDebounce->isActive()) {
+        auto job=std::make_shared<ProjectionJob>();job->version=m_projectionVersion;job->snapshot=m_snapshot;m_projectionJob=job;
+        const auto cached=m_rebuildProjection?std::shared_ptr<const HyperPreparedData>{}:m_prepared;const auto previous=m_previous;const auto context=m_resultContext;
+        const auto text=ks::i18n::LanguageManager::instance().sourceTextSnapshot();const auto filter=m_filter->text().trimmed();const auto requested=m_requestedPartition;
+        QString selected;const auto*row=static_cast<HyperTableModel*>(m_partitions->model())->row(m_partitions->currentIndex().row());
+        const auto*model=static_cast<HyperTableModel*>(m_partitions->model());
+        if(row&&model->view)selected=model->view->source->snapshot->partitions[row->source].key;
+        try{std::thread([job,cached,previous,context,text,filter,selected,requested]{try{auto prepared=cached?cached:buildHyperData(job->snapshot,previous,context,text,job->cancel);if(prepared&&!job->cancel.load())job->view=filterHyperData(std::move(prepared),filter,selected,requested,job->cancel);}catch(...){job->failed=true;}job->done.store(true,std::memory_order_release);}).detach();}catch(...){job->failed=true;job->done.store(true,std::memory_order_release);}
+    }
+    if(m_detailJob&&m_detailJob->done.load(std::memory_order_acquire)) {
+        if(m_detailJob->cancel.load()||m_detailJob->snapshot!=m_snapshot||m_detailJob->index!=m_shownPartition||m_detailJob->locale!=m_localeVersion)retireHyperValue(std::move(m_detailJob));
+        else if(isVisible()&&m_tabs->currentIndex()==0) {
+            auto job=std::move(m_detailJob);retireHyperValue(std::move(m_detailSnapshot));m_detailSnapshot=job->snapshot;m_detailLocale=job->locale;
+            if(!job->failed)m_detail->setDocument(job->document);else{ks::ui::FieldDocument failed;failed.note(L("Hyper-V table projection failed."));m_detail->setDocument(failed);}retireHyperValue(std::move(job));
+        }
+    }
+    if(m_shownPartition>=0&&!m_detailJob&&(m_detailSnapshot!=m_snapshot||m_detailLocale!=m_localeVersion)&&isVisible()&&m_tabs->currentIndex()==0)showPartition(m_shownPartition);
 }
-void HyperVMemoryPage::showPartition(int index)
-{
-    if (!m_snapshot || index < 0 || static_cast<std::size_t>(index) >= m_snapshot->partitions.size()) { return; }
-    const auto& row = m_snapshot->partitions[index];
-    ks::ui::FieldDocument lines;
-    lines.field(QStringLiteral("Partition"), QStringLiteral("%1").arg(label(row)));
-    lines.field(QStringLiteral("ID"), QStringLiteral("%1").arg(row.id));
-    lines.field(QStringLiteral("Runtime ID"), QStringLiteral("%1").arg(row.runtimeId));
-    lines.field(QStringLiteral("Owner"), QStringLiteral("%1").arg(row.owner));
-    lines.field(QStringLiteral("Identity evidence"), QStringLiteral("%1").arg(identity(row)));
-    if (row.hcs && !row.wmi && wmiComplete(*m_snapshot)) { lines.note(QStringLiteral("This HCS compute system is absent from the ordinary Hyper-V WMI VM inventory.")); }
-    if (row.vidBytes && row.hcsNodeBytes && !row.conflictingVid) {
-        lines.note((*row.vidBytes == *row.hcsNodeBytes ? L("VID and HCS node memory agree: %1. Two observations of the same allocation; counted once.").arg(bytes(row.vidBytes))
-            : L("VID reports %1; HCS reports %2. Sampling time or provider scope differs; do not add them.").arg(bytes(row.vidBytes), bytes(row.hcsNodeBytes))));
-    }
-    if (!row.hostingSystemId.isEmpty()) { lines.field(QStringLiteral("Hosting compute system"), QStringLiteral("%1. Container memory may overlap its host VM.").arg(QStringLiteral("%1").arg(row.hostingSystemId))); }
-    lines.field(QStringLiteral("WMI capacity"), QStringLiteral("%1").arg(bytes(row.wmiCapacity)));
-    lines.field(QStringLiteral("HCS private working set"), QStringLiteral("%1").arg(bytes(row.hcsPrivateWs)));
-    lines.field(QStringLiteral("HCS commit"), QStringLiteral("%1.").arg(QStringLiteral("%1").arg(bytes(row.hcsCommit))));
-    for (const auto counterIndex : row.counterIndices) {
-        const auto& sample = m_snapshot->counters[counterIndex];
-        lines.section(QStringLiteral("Counter"));
-        lines.field(QStringLiteral("Metric"), metricLabel(sample.metric));
-        lines.field(QStringLiteral("Bytes"), bytes(sample.bytes));
-        lines.field(QStringLiteral("SampledAt"), sample.sampledAt);
-        lines.field(QStringLiteral("Path"), sample.path);
-    }
-    if (!row.memoryEvidence.isEmpty()) { lines.section(QStringLiteral("Memory evidence"));
-        const auto buildNode = [](const auto& self, const QString& name, const QJsonValue& value) -> ks::ui::FieldNode {
-            ks::ui::FieldNode node;
-            node.name = name;
-            if (value.isObject()) {
-                node.kind = ks::ui::FieldNode::Kind::Section;
-                const auto object = value.toObject();
-                for (auto it = object.constBegin(); it != object.constEnd(); ++it) node.children.append(self(self, it.key(), it.value()));
-            } else if (value.isArray()) {
-                node.kind = ks::ui::FieldNode::Kind::Section;
-                const auto array = value.toArray();
-                for (qsizetype i = 0; i < array.size(); ++i) node.children.append(self(self, QString::number(i), array[i]));
-            } else if (value.isBool()) node.value = value.toBool() ? QStringLiteral("true") : QStringLiteral("false");
-            else if (value.isDouble()) node.value = QString::number(value.toDouble(), 'g', 17);
-            else if (value.isString()) node.value = value.toString();
-            else node.value = QStringLiteral("null");
-            return node;
-        };
-        auto& section = lines.nodes.last();
-        for (auto it = row.memoryEvidence.constBegin(); it != row.memoryEvidence.constEnd(); ++it) section.children.append(buildNode(buildNode, it.key(), it.value())); }
-    m_detail->setDocument(lines);
+void HyperVMemoryPage::bindCurrentProjection() {
+    if(!isVisible()||!m_prepared||m_publishedVersion!=m_projectionVersion)return;
+    const int kind=m_tabs->currentIndex();if(kind<0||kind>4||m_boundVersions[kind]==m_publishedVersion)return;
+    m_boundVersions[kind]=m_publishedVersion;
+    if(kind==4){m_evidence->setDocument(m_prepared->interpretation);return;}
+    QTableView*views[]={m_partitions,m_host,m_processes,m_sources};auto*view=views[kind];auto*model=static_cast<HyperTableModel*>(view->model());
+    // Each tab binds the same immutable filtered view; it is retained after the
+    // job is consumed, so a hidden tab needs no new preparation on return.
+    const auto preparedView=m_readyView;
+    const QPointer<HyperVMemoryPage>guard(this);QSignalBlocker blocked(view->selectionModel());model->replace(preparedView,kind);if(!guard){blocked.dismiss();return;}view->setEnabled(true);
+    if(kind==0){m_requestedPartition=-1;const auto selected=preparedView->selected;if(selected>=0){view->setCurrentIndex(model->index(selected,0));showPartition(model->row(selected)->source);}else{m_shownPartition=-1;retireHyperValue(std::move(m_detailSnapshot));m_detail->setDocument({});}}
 }
-void HyperVMemoryPage::rebuild()
-{
-    m_cancel->setEnabled(bool(m_job) || (m_exportJob && m_exportJob->phase.load() == 0)); m_collect->setEnabled(!m_job && !m_exportJob); m_export->setEnabled(bool(m_snapshot) && !m_job && !m_exportJob);
-    if (!m_job && !m_exportJob) { m_progress->setRange(0, 1); m_progress->setValue(m_snapshot ? 1 : 0); }
-    if (!m_snapshot) {
-        m_summary->setText(L("Find VM and utility-VM allocations that a process list cannot fully explain. Collect a sample to link partition counters to WSL, containers and registered VMs."));
-        m_chart->setSegments({}, L("Hyper-V partition allocations")); return;
+void HyperVMemoryPage::showPartition(int index) {
+    if(m_publishedVersion!=m_projectionVersion||!m_prepared||m_prepared->snapshot!=m_snapshot)return;
+    if(!m_snapshot||index<0||index>=static_cast<int>(m_snapshot->partitions.size()))return;
+    if(m_shownPartition!=index){m_shownPartition=index;retireHyperValue(std::move(m_detailSnapshot));if(m_detailJob)m_detailJob->cancel.store(true);}
+    if(!isVisible()||m_tabs->currentIndex()!=0||(m_detailSnapshot==m_snapshot&&m_detailLocale==m_localeVersion))return;
+    // Selection changes must not present the previous partition's document as
+    // the newly selected object while its canonical HCS fields are prepared.
+    if(!m_detailJob||m_detailJob->index!=index||m_detailJob->snapshot!=m_snapshot) {
+        ks::ui::FieldDocument pending;pending.note(L("Reading HCS utility VM memory"));
+        const QPointer<HyperVMemoryPage>guard(this);m_detail->setDocument(pending);if(!guard)return;
     }
-    const auto& snapshot = *m_snapshot;
-    std::vector<MemoryAttributionChart::Segment> segments;
-    for (std::size_t i = 0; i < snapshot.partitions.size(); ++i) {
-        const auto& entry = snapshot.partitions[i];
-        if (entry.vidBytes && !entry.conflictingVid && !snapshot.vidConflict) { segments.push_back({label(entry), *entry.vidBytes, static_cast<int>(i)}); }
-    }
-    m_chart->setSegments(std::move(segments), L("VID partition allocations only; click a segment for ownership evidence."));
-    const auto valid = std::count_if(snapshot.counters.begin(), snapshot.counters.end(), [](const Counter& sample) { return sample.bytes.has_value(); });
-    QStringList summary{L("Observed VM allocation: %1 | Owner unresolved: %2 | Hypervisor overhead counter: %3")
-        .arg(bytes(snapshot.observedVidBytes), bytes(snapshot.unresolvedVidBytes), bytes(hypervisorBytes(snapshot))),
-        L("Sample: %1 | Counters available: %2 / %3. These views overlap and cannot be added to the PFN ledger.").arg(snapshot.finished).arg(valid).arg(snapshot.counters.size())};
-    if (snapshot.cancelled || snapshot.timedOut || snapshot.resourceFailure) { summary << L("Partial collection: cancelled, timed out, or resource-limited. Missing values are not zero."); }
-    if (snapshot.vidConflict) { summary << L("VID identity conflict: aggregate and chart withheld to prevent double counting."); }
-    m_summary->setText(summary.join(QLatin1Char('\n')));
-    rebuildPartitions();
-    m_host->setSortingEnabled(false); m_host->setRowCount(static_cast<int>(snapshot.counters.size()));
-    for (int row = 0; row < m_host->rowCount(); ++row) {
-        const auto& sample = snapshot.counters[row];
-        text(m_host, row, 0, metricLabel(sample.metric)); text(m_host, row, 1, sample.instance); amount(m_host, row, 2, sample.bytes);
-        text(m_host, row, 3, status(sample.status)); text(m_host, row, 4, role(sample.metric));
-        m_host->item(row, 0)->setToolTip(sample.path + QLatin1Char('\n') + sample.explanation + QLatin1Char('\n') + sample.sampledAt);
-    }
-    m_host->resizeColumnsToContents(); m_host->setColumnWidth(4, 450);
-    m_processes->setSortingEnabled(false); m_processes->setRowCount(static_cast<int>(snapshot.processes.size()));
-    for (int row = 0; row < m_processes->rowCount(); ++row) {
-        const auto& process = snapshot.processes[row];
-        text(m_processes, row, 0, process.name); text(m_processes, row, 1, QString::number(process.pid));
-        amount(m_processes, row, 2, process.workingSet); amount(m_processes, row, 3, process.privateCommit);
-        QStringList matches;
-        for (const auto& partition : snapshot.partitions) { if (partition.wmi && partition.workerPid == process.pid && process.pid) { matches << label(partition); } }
-        text(m_processes, row, 4, matches.size() == 1 ? L("WMI worker PID: %1 (sampled separately)").arg(matches.front()) : L("Separate process view; no proven per-PID physical ownership"));
-    }
-    m_processes->resizeColumnsToContents();
-    m_sources->setSortingEnabled(false); m_sources->setRowCount(static_cast<int>(snapshot.sources.size()));
-    for (int row = 0; row < m_sources->rowCount(); ++row) {
-        const auto& source = snapshot.sources[row];
-        text(m_sources, row, 0, sourceName(source.name)); text(m_sources, row, 1, source.complete ? L("Complete") : L("Partial / unavailable"));
-        text(m_sources, row, 2, QString::number(source.rows)); text(m_sources, row, 3, status(source.status));
-    }
-    m_sources->resizeColumnsToContents();
-    ks::ui::FieldDocument evidence;
-    evidence.note(QStringLiteral("VID allocation, HCS node memory, Dynamic Memory, process working sets and PFN Driver Locked can describe overlapping physical pages. Only VID instances are aggregated in this view; no amount is deducted from the PFN Unknown category."));
-    evidence.note(QStringLiteral("No counter instance or access denied means unavailable, not zero. Registered VM inventory alone can omit WSL and container utility VMs. A large VM allocation does not prove a leak or identify the guest process using it."));
-    evidence.field(QStringLiteral("Collection interval"), QStringLiteral("%1 to %2 (%3 ms). Providers are sampled sequentially, not atomically.").arg(QStringLiteral("%1").arg(snapshot.started)).arg(QStringLiteral("%1").arg(snapshot.finished)).arg(QStringLiteral("%1").arg(snapshot.elapsedMs)));
-    evidence.field(QStringLiteral("VID instance sum"), QStringLiteral("%1").arg(bytes(snapshot.observedVidBytes)));
-    evidence.field(QStringLiteral("provider _Total"), QStringLiteral("%1. _Total is a cross-check and is never added again.").arg(QStringLiteral("%1").arg(bytes(snapshot.vidTotalBytes))));
-    evidence.field(QStringLiteral("Hypervisor"), QStringLiteral("%1").arg(snapshot.hypervisorPresent ? snapshot.hypervisorVendor : L("Not detected")));
-    evidence.field(QStringLiteral("VBS status"), QStringLiteral("%1. VBS status does not supply a VTL1/Secure Kernel byte count.").arg(QStringLiteral("%1").arg(vbsState(snapshot))));
-    evidence.field(QStringLiteral("Host physical memory"), QStringLiteral("%1").arg(bytes(snapshot.total ? Bytes(snapshot.total) : Bytes{})));
-    evidence.field(QStringLiteral("available before / after"), QStringLiteral("%1 / %2").arg(QStringLiteral("%1").arg(bytes(snapshot.total ? Bytes(snapshot.available) : Bytes{}))).arg(QStringLiteral("%1").arg(bytes(snapshot.totalAfter ? Bytes(snapshot.availableAfter) : Bytes{}))));
-    evidence.field(QStringLiteral("installed RAM"), QStringLiteral("%1.").arg(QStringLiteral("%1").arg(bytes(snapshot.installed ? Bytes(snapshot.installed) : Bytes{}))));
-    evidence.field(QStringLiteral("Fast snapshot at"), QStringLiteral("Fast snapshot at %1: remainder %2. PFN snapshot at %3: Driver Locked %4").arg(QStringLiteral("%1").arg(m_resultContext.snapshotTime)).arg(QStringLiteral("%1").arg(bytes(m_resultContext.snapshotRemainder))).arg(QStringLiteral("%1").arg(m_resultContext.pfnTime)).arg(QStringLiteral("%1").arg(bytes(m_resultContext.pfnDriverLocked))));
-    evidence.field(QStringLiteral("Unknown"), QStringLiteral("Unknown %1").arg(QStringLiteral("%1").arg(bytes(m_resultContext.pfnUnknown))));
-    evidence.field(QStringLiteral("unreadable / unscanned"), QStringLiteral("unreadable / unscanned %1. Context only").arg(QStringLiteral("%1").arg(bytes(m_resultContext.pfnUnscanned))));
-    evidence.note(QStringLiteral("different sample times and scopes."));
-    evidence.note(QStringLiteral("Repeat collection after a workload changes to compare VID allocation for the same partition identity. KSword does not stop VMs, trim memory, or change virtualization settings."));
-    std::uint64_t wsl = 0, processWs = 0; bool haveWsl = false, haveProcess = false;
-    for (const auto& entry : snapshot.partitions) { if (entry.owner.compare(QStringLiteral("WSL"), Qt::CaseInsensitive) == 0 && entry.vidBytes && !entry.conflictingVid) { wsl += *entry.vidBytes; haveWsl = true; } }
-    for (const auto& entry : snapshot.processes) { if (entry.name.compare(QStringLiteral("vmmemWSL"), Qt::CaseInsensitive) == 0 && entry.workingSet) { processWs += *entry.workingSet; haveProcess = true; } }
-    if (haveWsl && haveProcess && !snapshot.vidConflict) {
-        const auto comparison = L("WSL-owned VID allocation: %1; vmmemWSL process working set: %2. The process view does not represent the entire VM allocation. This is a scope comparison, not a per-PID ownership join.").arg(bytes(wsl), bytes(processWs));
-        evidence.note(comparison); m_summary->setText(m_summary->text() + QLatin1Char('\n') + comparison);
-    }
-    if (snapshot.observedVidBytes && snapshot.vidTotalBytes && snapshot.observedVidBytes != snapshot.vidTotalBytes) {
-        evidence.note(L("VID instances and _Total disagree. Inventory churn, missing instances or provider scope may explain the difference; the sample is not a complete partition census."));
-    }
-    m_evidence->setDocument(evidence);
-    if (m_job) { poll(); }
+    if(m_detailJob)return;
+    auto job=std::make_shared<DetailJob>();job->index=index;job->snapshot=m_snapshot;job->locale=m_localeVersion;m_detailJob=job;
+    const auto text=ks::i18n::LanguageManager::instance().sourceTextSnapshot();
+    try{std::thread([job,text]{try{const HyperTextScope scope(text);job->document=buildHyperDetail(*job->snapshot,job->index,job->cancel);}catch(...){job->failed=true;}job->done.store(true,std::memory_order_release);}).detach();}catch(...){job->failed=true;job->done.store(true,std::memory_order_release);}
 }
+void HyperVMemoryPage::showEvent(QShowEvent*event){QWidget::showEvent(event);bindCurrentProjection();pollProjection();}
 void HyperVMemoryPage::exportEvidence()
 {
     if (!m_snapshot || m_job || m_exportJob) { return; }
     // 保存对话框可处理嵌套事件；先冻结证据和身份，返回后再核验页面生命期。
     const std::shared_ptr<const Snapshot> snapshot = m_snapshot, previous = m_previous;
     const auto context = m_resultContext;
-    const auto interpretation = m_evidence->plainText();
+    const auto frozenText=ks::i18n::LanguageManager::instance().sourceTextSnapshot();
     const QPointer<HyperVMemoryPage> page(this);
     const auto path = QFileDialog::getSaveFileName(this, L("Export Hyper-V memory evidence"), QStringLiteral("hyperv-memory-evidence.json"), L("JSON files (*.json)"));
     if (!page || path.isEmpty() || m_job || m_exportJob) { return; }
@@ -494,9 +584,11 @@ void HyperVMemoryPage::exportEvidence()
     m_exportJob = job;
     m_collect->setEnabled(false); m_export->setEnabled(false); m_cancel->setEnabled(true);
     m_cancel->setText(L("Cancel")); m_summary->setText(L("Export evidence")); m_progress->setRange(0, 0);
-    try { std::thread([job, snapshot, previous, context, interpretation, workerFailure] {
+    try { std::thread([job, snapshot, previous, context, frozenText, workerFailure] {
         try {
             if (job->phase.load() != 2) {
+                const HyperTextScope scope(frozenText);
+                const auto interpretation=buildHyperInterpretation(*snapshot,context).toPlainText([frozenText](const QString& value){return frozenText.sourceText(value);});
                 auto object = toJson(*snapshot, context);
                 object.insert(QStringLiteral("interpretation"), interpretation);
                 if (previous) { object.insert(QStringLiteral("previous_sample"), toJson(*previous)); }
