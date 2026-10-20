@@ -28,6 +28,8 @@
 
 #include <QApplication>
 #include <QAbstractItemModel>
+#include <QAbstractTableModel>
+#include <QThreadPool>
 #include <QBuffer>
 #include <QByteArray>
 #include <QCheckBox>
@@ -4534,15 +4536,80 @@ namespace
         return node;
     }
 
+    class EtwEventTableModel final : public QAbstractTableModel
+    {
+    public:
+        using Row = MonitorDock::EtwCapturedEventRow;
+        explicit EtwEventTableModel(std::deque<Row>* rows, QObject* parent)
+            : QAbstractTableModel(parent), m_rows(rows) {}
+        int rowCount(const QModelIndex& parent = {}) const override
+        { return parent.isValid() ? 0 : static_cast<int>(m_rows->size()); }
+        int columnCount(const QModelIndex& parent = {}) const override { return parent.isValid() ? 0 : 7; }
+        static QString cellText(const Row& row, const int column)
+        {
+            switch (column) {
+            case 0: return row.timestampText;
+            case 1: return row.providerName;
+            case 2: return QString::number(row.eventId);
+            case 3: return row.eventName;
+            case 4: return row.pidTidText;
+            case 5: return row.detailSummary;
+            case 6: return row.activityId;
+            default: return {};
+            }
+        }
+        QVariant data(const QModelIndex& index, const int role = Qt::DisplayRole) const override
+        {
+            if (!index.isValid() || index.row() < 0 || index.row() >= rowCount()
+                || index.column() < 0 || index.column() >= 7) return {};
+            const Row& row = (*m_rows)[static_cast<std::size_t>(index.row())];
+            if (role == Qt::DisplayRole || role == Qt::ToolTipRole) return cellText(row, index.column());
+            if (role == Qt::UserRole && index.column() == 5) return QVariant::fromValue(row.detailObject);
+            return {};
+        }
+        QVariant headerData(const int section, const Qt::Orientation orientation,
+            const int role = Qt::DisplayRole) const override
+        {
+            if (orientation == Qt::Vertical) {
+                if (section < 0 || section >= rowCount()) return {};
+                if (role == Qt::TextAlignmentRole) return int(Qt::AlignRight | Qt::AlignVCenter);
+                const auto sequence = (*m_rows)[static_cast<std::size_t>(section)].archiveSequence;
+                if (role == Qt::DisplayRole) return QString::number(sequence ? sequence : static_cast<std::uint64_t>(section + 1));
+                return {};
+            }
+            if (role != Qt::DisplayRole || section < 0 || section >= m_headers.size()) return {};
+            return ks::i18n::sourceText(m_headers.at(section));
+        }
+        void setHeaders(QStringList headers) { m_headers = std::move(headers); }
+        void replace(std::deque<Row> rows)
+        {
+            auto retired = std::make_shared<std::deque<Row>>();
+            beginResetModel(); retired->swap(*m_rows); m_rows->swap(rows); endResetModel();
+            QThreadPool::globalInstance()->start([retired = std::move(retired)]() {});
+        }
+        void trimFront(const int count)
+        {
+            if (count <= 0) return;
+            beginRemoveRows({}, 0, count - 1);
+            auto retired = std::make_shared<std::deque<Row>>();
+            for (int i = 0; i < count; ++i) { retired->push_back(std::move(m_rows->front())); m_rows->pop_front(); }
+            endRemoveRows(); QThreadPool::globalInstance()->start([retired = std::move(retired)]() {});
+        }
+        void beginAppend(const int count) { beginInsertRows({}, rowCount(), rowCount() + count - 1); }
+        void endAppend() { endInsertRows(); }
+    private:
+        std::deque<Row>* m_rows;
+        QStringList m_headers;
+    };
+
     // buildEtwRowDetailText：
     // - 作用：把 ETW 事件表某一行格式化为可读详情文本；
     // - 调用：右键“查看返回详情”和双击事件行时复用。
-    monitor_text_viewer::MonitorDocument buildEtwRowDetailText(QTableWidget* eventTable, const int row)
+    monitor_text_viewer::MonitorDocument buildEtwRowDetailText(QTableView* eventTable, const int row)
     {
-        if (eventTable == nullptr || row < 0 || row >= eventTable->rowCount()) return {};
+        if (eventTable == nullptr || row < 0 || row >= eventTable->model()->rowCount()) return {};
         const auto itemTextAt = [eventTable, row](const int column) -> QString {
-            const QTableWidgetItem* item = eventTable->item(row, column);
-            return item ? item->text() : QString();
+            return eventTable->model()->index(row, column).data().toString();
         };
         ks::ui::FieldDocument document;
         document.section(QStringLiteral("事件"));
@@ -4552,9 +4619,7 @@ namespace
         document.field(QStringLiteral("事件名"), itemTextAt(3));
         document.field(QStringLiteral("PID / TID"), itemTextAt(4));
         document.field(QStringLiteral("ActivityId"), itemTextAt(6));
-        QJsonObject snapshot;
-        if (const QTableWidgetItem* detail = eventTable->item(row, 5))
-            snapshot = detail->data(Qt::UserRole).value<QJsonObject>();
+        const QJsonObject snapshot = eventTable->model()->index(row, 5).data(Qt::UserRole).value<QJsonObject>();
         document.nodes.push_back(monitorJsonNode(QStringLiteral("ETW"), snapshot));
         const QJsonValue raw = snapshot.value(QStringLiteral("rawFallback"));
         const QString rawPayload = raw.isString() ? raw.toString() : raw.toObject().value(QStringLiteral("hexDump")).toString();
@@ -6240,10 +6305,12 @@ void MonitorDock::initializeEtwTab()
     m_etwLayout->addWidget(m_etwTimelineWidget, 0);
 
     // 结果表。
-    m_etwEventTable = new ks::ui::VisibleTableWidget(m_etwPage);
+    m_etwEventTable = new ks::ui::TableActionTableView(m_etwPage);
+    auto* etwEventModel = new EtwEventTableModel(&m_etwCapturedRows, m_etwEventTable);
+    m_etwEventTable->setModel(etwEventModel);
+    m_etwEventTable->installEventFilter(this);
     ks::ui::SetTableActionBarMode(m_etwEventTable, ks::ui::TableActionBarMode::Full);
-    m_etwEventTable->setColumnCount(7);
-    m_etwEventTable->setHorizontalHeaderLabels(QStringList{
+    etwEventModel->setHeaders(QStringList{
         QStringLiteral("时间戳(100ns)"),
         QStringLiteral("Provider"),
         QStringLiteral("事件ID"),
@@ -7245,15 +7312,11 @@ void MonitorDock::initializeConnections()
         flushEtwPendingRows(!m_etwCaptureRunning.load());
     });
 
-    connect(m_etwEventTable, &QTableWidget::customContextMenuRequested, this, [this](const QPoint& pos) {
+    connect(m_etwEventTable, &QTableView::customContextMenuRequested, this, [this](const QPoint& pos) {
         showEtwEventContextMenu(pos);
     });
-    connect(m_etwEventTable, &QTableWidget::itemDoubleClicked, this, [this](QTableWidgetItem* itemPointer) {
-        if (itemPointer == nullptr)
-        {
-            return;
-        }
-        openEtwEventDetailViewerForRow(itemPointer->row());
+    connect(m_etwEventTable, &QTableView::doubleClicked, this, [this](const QModelIndex& index) {
+        if (index.isValid()) openEtwEventDetailViewerForRow(index.row());
     });
 }
 
@@ -8051,7 +8114,7 @@ void MonitorDock::updateEtwFilterStateLabel(const EtwFilterStage stage)
             && isEtwTimelineFilterActive())
         {
             int visibleCount = 0;
-            for (int row = 0; row < m_etwEventTable->rowCount(); ++row)
+            for (int row = 0; row < m_etwEventTable->model()->rowCount(); ++row)
             {
                 if (!m_etwEventTable->isRowHidden(row))
                 {
@@ -8061,7 +8124,7 @@ void MonitorDock::updateEtwFilterStateLabel(const EtwFilterStage stage)
             stateLabel->setText(QStringLiteral("%1 | 可见: %2 / %3 | 时间轴已筛选")
                 .arg(QStringLiteral("后置筛选当前无规则"))
                 .arg(visibleCount)
-                .arg(m_etwEventTable->rowCount()));
+                .arg(m_etwEventTable->model()->rowCount()));
             ks::ui::ApplyStatusRole(stateLabel, ks::ui::StatusRole::Info);
         }
         else
@@ -8086,14 +8149,14 @@ void MonitorDock::updateEtwFilterStateLabel(const EtwFilterStage stage)
     if (stage == EtwFilterStage::Post && !archiveAvailable && m_etwEventTable != nullptr)
     {
         int visibleCount = 0;
-        for (int row = 0; row < m_etwEventTable->rowCount(); ++row)
+        for (int row = 0; row < m_etwEventTable->model()->rowCount(); ++row)
         {
             if (!m_etwEventTable->isRowHidden(row))
             {
                 ++visibleCount;
             }
         }
-        summaryText += QStringLiteral(" | 可见: %1 / %2").arg(visibleCount).arg(m_etwEventTable->rowCount());
+        summaryText += QStringLiteral(" | 可见: %1 / %2").arg(visibleCount).arg(m_etwEventTable->model()->rowCount());
         if (isEtwTimelineFilterActive())
         {
             summaryText += QStringLiteral(" | 时间轴已筛选");
@@ -8112,7 +8175,7 @@ void MonitorDock::applyEtwPostFilterToTable(const int firstRow, const bool updat
     }
 
     const int rowCount = std::min(
-        m_etwEventTable->rowCount(),
+        m_etwEventTable->model()->rowCount(),
         static_cast<int>(m_etwCapturedRows.size()));
 
     const bool hasPostRules = m_etwPostSimpleFilterCompiled.hasAnyCondition()
@@ -8143,7 +8206,7 @@ void MonitorDock::applyEtwPostFilterToTable(const int firstRow, const bool updat
         }
         m_etwEventTable->setRowHidden(row, !visible);
     }
-    for (int row = std::max(rowCount, firstRowToApply); row < m_etwEventTable->rowCount(); ++row)
+    for (int row = std::max(rowCount, firstRowToApply); row < m_etwEventTable->model()->rowCount(); ++row)
     {
         m_etwEventTable->setRowHidden(row, false);
     }
@@ -11863,181 +11926,117 @@ void MonitorDock::rebuildEtwArchiveFilterAsync()
 }
 
 void MonitorDock::replaceEtwRowsWithSnapshot(
-    std::deque<EtwCapturedEventRow> rows,
-    const std::uint64_t totalMatchCount,
-    const std::uint64_t scannedRowCount,
-    const std::uint64_t scannedMaxSequence)
+    std::deque<EtwCapturedEventRow> rows, const std::uint64_t totalMatchCount,
+    const std::uint64_t scannedRowCount, const std::uint64_t scannedMaxSequence)
 {
-    if (m_etwEventTable == nullptr)
-    {
+    if (!m_etwEventTable) return;
+    auto projection = std::make_shared<EtwSnapshotProjection>();
+    projection->rows = std::move(rows);
+    projection->totalMatchCount = totalMatchCount;
+    projection->scannedRowCount = scannedRowCount;
+    projection->scannedMaxSequence = scannedMaxSequence;
+    projection->ticket = m_etwArchiveFilterTicket.load(std::memory_order_relaxed);
+    projection->generation = m_etwArchiveSessionGeneration.load(std::memory_order_relaxed);
+    auto retired = std::exchange(m_etwSnapshotProjection, std::move(projection));
+    if (retired) QThreadPool::globalInstance()->start([retired = std::move(retired)]() {});
+    scheduleEtwSnapshotProjection();
+}
+
+void MonitorDock::scheduleEtwSnapshotProjection()
+{
+    if (!m_etwSnapshotProjection || m_etwSnapshotWakeScheduled || !m_etwEventTable
+        || !m_etwEventTable->isVisible()) return;
+    m_etwSnapshotWakeScheduled = true;
+    QTimer::singleShot(16, this, [this]() {
+        m_etwSnapshotWakeScheduled = false;
+        continueEtwSnapshotProjection();
+    });
+}
+
+void MonitorDock::continueEtwSnapshotProjection()
+{
+    auto projection = m_etwSnapshotProjection;
+    if (!projection || !m_etwEventTable || !m_etwEventTable->isVisible()) return;
+    if (projection->ticket != m_etwArchiveFilterTicket.load(std::memory_order_relaxed)
+        || projection->generation != m_etwArchiveSessionGeneration.load(std::memory_order_relaxed)) {
+        m_etwSnapshotProjection.reset();
+        QThreadPool::globalInstance()->start([projection = std::move(projection)]() {});
         return;
     }
+    const QPointer<MonitorDock> guard(this);
+    if (ks::ui::DeferTableUiCommitIfContextMenuOpen(this, QStringLiteral("monitor-etw-snapshot-replace"),
+        { m_etwEventTable }, [guard]() { if (guard) guard->scheduleEtwSnapshotProjection(); })) return;
 
-    // 后台归档扫描会整表替换。使用共享快照避免“未延后”路径额外复制数千行，
-    // 并确保菜单打开时连 pending 队列裁剪也不会提前发生。
-    const QPointer<MonitorDock> guardThis(this);
-    const std::uint64_t filterTicketSnapshot =
-        m_etwArchiveFilterTicket.load(std::memory_order_relaxed);
-    const std::uint64_t sessionGenerationSnapshot =
-        m_etwArchiveSessionGeneration.load(std::memory_order_relaxed);
-    const auto deferredRows =
-        std::make_shared<std::deque<EtwCapturedEventRow>>(std::move(rows));
-    if (ks::ui::DeferTableUiCommitIfContextMenuOpen(
-        this,
-        QStringLiteral("monitor-etw-snapshot-replace"),
-        { m_etwEventTable },
-        [
-            guardThis,
-            deferredRows,
-            totalMatchCount,
-            scannedRowCount,
-            scannedMaxSequence,
-            filterTicketSnapshot,
-            sessionGenerationSnapshot]() mutable
-        {
-            if (!guardThis.isNull()
-                && guardThis->m_etwArchiveFilterTicket.load(std::memory_order_relaxed)
-                    == filterTicketSnapshot
-                && guardThis->m_etwArchiveSessionGeneration.load(std::memory_order_relaxed)
-                    == sessionGenerationSnapshot)
-            {
-                guardThis->replaceEtwRowsWithSnapshot(
-                    std::move(*deferredRows),
-                    totalMatchCount,
-                    scannedRowCount,
-                    scannedMaxSequence);
-            }
-        }))
-    {
-        return;
-    }
-    rows = std::move(*deferredRows);
-
+    QElapsedTimer elapsed; elapsed.start();
+    std::size_t processed = 0;
     constexpr std::size_t kMaximumVisibleRows = 6000;
-    for (const EtwCapturedEventRow& liveRow : m_etwCapturedRows)
-    {
-        if (liveRow.archiveSequence <= scannedMaxSequence)
-        {
-            continue;
+    // Live UI rows remain stable until the swap. Business capture/archive continues;
+    // the bounded live mirror queue is not drained during snapshot preparation.
+    while (projection->liveCursor < m_etwCapturedRows.size() && processed < 256 && elapsed.elapsed() < 4) {
+        const auto& live = m_etwCapturedRows[projection->liveCursor++]; ++processed;
+        if (live.archiveSequence <= projection->scannedMaxSequence) continue;
+        bool matches = etwFilterStageMatches(m_etwPostSimpleFilterCompiled, m_etwPostFilterCompiledGroupList, live);
+        if (matches && isEtwTimelineFilterActive()) {
+            const auto time = etwRawTimestampToTimelineTimestamp(live.timestampValue);
+            matches = time >= m_etwTimelineSelectionStart100ns && time <= m_etwTimelineSelectionEnd100ns;
         }
-
-        bool matches = etwFilterStageMatches(
-            m_etwPostSimpleFilterCompiled,
-            m_etwPostFilterCompiledGroupList,
-            liveRow);
-        if (matches && isEtwTimelineFilterActive())
-        {
-            const std::uint64_t timestamp100ns = etwRawTimestampToTimelineTimestamp(liveRow.timestampValue);
-            matches = timestamp100ns >= m_etwTimelineSelectionStart100ns
-                && timestamp100ns <= m_etwTimelineSelectionEnd100ns;
-        }
-        if (matches)
-        {
-            rows.push_back(liveRow);
-            if (rows.size() > kMaximumVisibleRows)
-            {
-                rows.pop_front();
+        if (matches) {
+            projection->rows.push_back(live);
+            if (projection->rows.size() > kMaximumVisibleRows) {
+                projection->retiredRows.push_back(std::move(projection->rows.front())); projection->rows.pop_front();
             }
         }
     }
-
+    while (projection->liveCursor == m_etwCapturedRows.size()
+        && projection->pointCursor < projection->rows.size() && processed < 256 && elapsed.elapsed() < 4) {
+        const auto& row = projection->rows[projection->pointCursor++]; ++processed;
+        projection->points.push_back(ks::ui::MakeEtwTimelinePoint(
+            etwRawTimestampToTimelineTimestamp(row.timestampValue),
+            etwProviderDisplayName(row.providerGuid, row.providerName, row.opcode),
+            row.eventName, etwTimelineTypeFromCapturedRow(row)));
+    }
+    if (projection->liveCursor < m_etwCapturedRows.size() || projection->pointCursor < projection->rows.size()) {
+        scheduleEtwSnapshotProjection(); return;
+    }
+    bool pendingPrefix = false;
     {
         std::lock_guard<std::mutex> lock(m_etwPendingMutex);
-        while (!m_etwPendingRows.empty()
-            && m_etwPendingRows.front().archiveSequence <= scannedMaxSequence)
-        {
-            m_etwPendingRows.pop_front();
+        while (!m_etwPendingRows.empty() && m_etwPendingRows.front().archiveSequence <= projection->scannedMaxSequence
+            && processed < 256 && elapsed.elapsed() < 4) {
+            projection->retiredRows.push_back(std::move(m_etwPendingRows.front())); m_etwPendingRows.pop_front(); ++processed;
         }
+        pendingPrefix = !m_etwPendingRows.empty() && m_etwPendingRows.front().archiveSequence <= projection->scannedMaxSequence;
     }
+    if (pendingPrefix) { scheduleEtwSnapshotProjection(); return; }
 
-    const bool hasPostRules = m_etwPostSimpleFilterCompiled.hasAnyCondition()
-        || !m_etwPostFilterCompiledGroupList.empty();
-    const bool timelineFilterActive = isEtwTimelineFilterActive();
-    if (hasPostRules || timelineFilterActive)
-    {
-        rows.erase(
-            std::remove_if(
-                rows.begin(),
-                rows.end(),
-                [this, timelineFilterActive](const EtwCapturedEventRow& rowData) {
-                    bool matches = etwFilterStageMatches(
-                        m_etwPostSimpleFilterCompiled,
-                        m_etwPostFilterCompiledGroupList,
-                        rowData);
-                    if (matches && timelineFilterActive)
-                    {
-                        const std::uint64_t timestamp100ns = etwRawTimestampToTimelineTimestamp(
-                            rowData.timestampValue);
-                        matches = timestamp100ns >= m_etwTimelineSelectionStart100ns
-                            && timestamp100ns <= m_etwTimelineSelectionEnd100ns;
-                    }
-                    return !matches;
-                }),
-            rows.end());
-    }
-
-    m_etwEventTable->setUpdatesEnabled(false);
-    m_etwEventTable->clearContents();
-    m_etwEventTable->setRowCount(static_cast<int>(rows.size()));
-    m_etwCapturedRows.clear();
-    m_etwTimelineEventPoints.clear();
-
-    int tableRow = 0;
-    for (EtwCapturedEventRow& rowData : rows)
-    {
-        m_etwCapturedRows.push_back(std::move(rowData));
-        const EtwCapturedEventRow& captured = m_etwCapturedRows.back();
-        QTableWidgetItem* sequenceItem = new QTableWidgetItem(QString::number(
-            static_cast<qulonglong>(captured.archiveSequence != 0
-                ? captured.archiveSequence
-                : static_cast<std::uint64_t>(tableRow + 1))));
-        sequenceItem->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
-        m_etwEventTable->setVerticalHeaderItem(tableRow, sequenceItem);
-        const QStringList rowTextList{
-            captured.timestampText,
-            captured.providerName,
-            QString::number(captured.eventId),
-            captured.eventName,
-            captured.pidTidText,
-            captured.detailSummary,
-            captured.activityId
-        };
-        for (int column = 0; column < rowTextList.size(); ++column)
-        {
-            QTableWidgetItem* item = new QTableWidgetItem(rowTextList.at(column));
-            item->setToolTip(rowTextList.at(column));
-            if (column == 5)
-            {
-                item->setData(Qt::UserRole, QVariant::fromValue(captured.detailObject));
-            }
-            m_etwEventTable->setItem(tableRow, column, item);
-        }
-
-        // 机器 Provider/事件名生成稳定身份，已转换的暂停会话时间完整传入。
-        ProcessTraceTimelineEventPoint timelinePoint = ks::ui::MakeEtwTimelinePoint(
-            etwRawTimestampToTimelineTimestamp(captured.timestampValue),
-            etwProviderDisplayName(captured.providerGuid, captured.providerName, captured.opcode),
-            captured.eventName, etwTimelineTypeFromCapturedRow(captured));
-        m_etwTimelineEventPoints.push_back(std::move(timelinePoint));
-        ++tableRow;
-    }
-
+    static_cast<EtwEventTableModel*>(m_etwEventTable->model())->replace(std::move(projection->rows));
+    m_etwTimelineEventPoints.swap(projection->points);
+    m_etwSnapshotProjection.reset();
     refreshEtwTimelineRange(!m_etwCaptureRunning.load());
     refreshEtwTimelinePoints();
-    m_etwEventTable->setUpdatesEnabled(true);
     m_etwEventTable->scrollToBottom();
-    m_etwEventTable->viewport()->update();
-
-    if (m_etwPostSimpleFilterUi.stateLabel != nullptr)
-    {
+    if (m_etwPostSimpleFilterUi.stateLabel) {
         m_etwPostSimpleFilterUi.stateLabel->setText(
             QStringLiteral("全量匹配: %1 | 当前显示最近: %2 | 已扫描: %3 | UI镜像跳过: %4（已归档）")
-                .arg(static_cast<qulonglong>(totalMatchCount))
-                .arg(m_etwEventTable->rowCount())
-                .arg(static_cast<qulonglong>(scannedRowCount))
+                .arg(static_cast<qulonglong>(projection->totalMatchCount))
+                .arg(m_etwEventTable->model()->rowCount())
+                .arg(static_cast<qulonglong>(projection->scannedRowCount))
                 .arg(static_cast<qulonglong>(m_etwUiSkippedRows.load(std::memory_order_relaxed))));
         ks::ui::ApplyStatusRole(m_etwPostSimpleFilterUi.stateLabel, ks::ui::StatusRole::Info);
     }
+    QThreadPool::globalInstance()->start([projection = std::move(projection)]() {});
+    flushEtwPendingRows(!m_etwCaptureRunning.load());
+}
+
+bool MonitorDock::eventFilter(QObject* watched, QEvent* event)
+{
+    if (watched == m_etwEventTable && event && event->type() == QEvent::Show) {
+        QTimer::singleShot(0, this, [this]() {
+            scheduleEtwSnapshotProjection();
+            flushEtwPendingRows(!m_etwCaptureRunning.load());
+        });
+    }
+    return QWidget::eventFilter(watched, event);
 }
 
 void WINAPI MonitorDock::etwEventRecordCallback(struct _EVENT_RECORD* eventRecordPtr)
@@ -12602,10 +12601,10 @@ void MonitorDock::startEtwCapture()
     // - 时间轴起点使用启动瞬间的 100ns 时间戳，后续右边界实时跟随。
     if (m_etwEventTable != nullptr)
     {
-        m_etwEventTable->clearContents();
-        m_etwEventTable->setRowCount(0);
+        static_cast<EtwEventTableModel*>(m_etwEventTable->model())->replace({});
     }
-    m_etwCapturedRows.clear();
+    if (auto retired = std::exchange(m_etwSnapshotProjection, {}))
+        QThreadPool::globalInstance()->start([retired = std::move(retired)]() {});
     m_etwTimelineEventPoints.clear();
     m_etwTimelinePauseIntervals.clear();
     m_etwCaptureStartTime100ns = currentSystemTime100ns();
@@ -13260,10 +13259,8 @@ void MonitorDock::updateEtwCaptureActionState()
 
 void MonitorDock::flushEtwPendingRows(const bool captureFinished)
 {
-    if (m_etwEventTable == nullptr)
-    {
-        return;
-    }
+    if (!m_etwEventTable || !m_etwEventTable->isVisible()) return;
+    if (m_etwSnapshotProjection) { scheduleEtwSnapshotProjection(); return; }
     if (!captureFinished && m_etwCapturePaused.load())
     {
         // 防止暂停前已经投递到事件循环的最后一次 timeout 继续排空队列。
@@ -13367,67 +13364,26 @@ void MonitorDock::flushEtwPendingRows(const bool captureFinished)
     m_etwEventTable->setUpdatesEnabled(false);
 
     // 先腾出固定结果窗口空间，再批量扩展行数，避免 insertRow/removeRow 循环触发大量模型和布局更新。
-    const int projectedRowCount = m_etwEventTable->rowCount() + static_cast<int>(rows.size());
+    const int projectedRowCount = m_etwEventTable->model()->rowCount() + static_cast<int>(rows.size());
     const int overflowCount = projectedRowCount > kTrimThresholdRows
         ? projectedRowCount - kMaxCapturedRows
         : 0;
     if (overflowCount > 0)
     {
-        if (!m_etwEventTable->model()->removeRows(0, overflowCount))
-        {
-            for (int rowIndex = 0; rowIndex < overflowCount; ++rowIndex)
-            {
-                m_etwEventTable->removeRow(0);
-            }
-        }
-        for (int rowIndex = 0; rowIndex < overflowCount && !m_etwCapturedRows.empty(); ++rowIndex)
-        {
-            m_etwCapturedRows.pop_front();
-        }
+        static_cast<EtwEventTableModel*>(m_etwEventTable->model())->trimFront(overflowCount);
         for (int rowIndex = 0; rowIndex < overflowCount && !m_etwTimelineEventPoints.empty(); ++rowIndex)
         {
             m_etwTimelineEventPoints.pop_front();
         }
     }
 
-    const int firstInsertedRow = m_etwEventTable->rowCount();
-    m_etwEventTable->setRowCount(firstInsertedRow + static_cast<int>(rows.size()));
+    auto* eventModel = static_cast<EtwEventTableModel*>(m_etwEventTable->model());
+    eventModel->beginAppend(static_cast<int>(rows.size()));
     for (std::size_t rowIndex = 0; rowIndex < rows.size(); ++rowIndex)
     {
         EtwCapturedEventRow& rowData = rows[rowIndex];
         m_etwCapturedRows.push_back(std::move(rowData));
         EtwCapturedEventRow& captured = m_etwCapturedRows.back();
-
-        const int row = firstInsertedRow + static_cast<int>(rowIndex);
-        QTableWidgetItem* sequenceItem = new QTableWidgetItem(QString::number(
-            static_cast<qulonglong>(captured.archiveSequence != 0
-                ? captured.archiveSequence
-                : static_cast<std::uint64_t>(row + 1))));
-        sequenceItem->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
-        m_etwEventTable->setVerticalHeaderItem(row, sequenceItem);
-
-        const QStringList rowTextList{
-            captured.timestampText,
-            captured.providerName,
-            QString::number(captured.eventId),
-            captured.eventName,
-            captured.pidTidText,
-            captured.detailSummary,
-            captured.activityId
-        };
-
-        for (int col = 0; col < rowTextList.size(); ++col)
-        {
-            const QString cellText = rowTextList.at(col);
-            QTableWidgetItem* item = new QTableWidgetItem(cellText);
-            item->setToolTip(cellText);
-            if (col == 5)
-            {
-                // Detail 列的 UserRole 保存完整 JSON，表格文本只显示摘要。
-                item->setData(Qt::UserRole, QVariant::fromValue(captured.detailObject));
-            }
-            m_etwEventTable->setItem(row, col, item);
-        }
 
         // 时间轴使用宿主转换后的有效运行时间，机器身份不借翻译后的类别词。
         ProcessTraceTimelineEventPoint pointValue = ks::ui::MakeEtwTimelinePoint(
@@ -13437,6 +13393,7 @@ void MonitorDock::flushEtwPendingRows(const bool captureFinished)
         m_etwTimelineEventPoints.push_back(std::move(pointValue));
     }
 
+    eventModel->endAppend();
     // m_etwCapturedRows 与 m_etwTimelineEventPoints 已在追加前同步批量裁剪，
     // 行号仍能一一对应，无需逐行 erase(begin())。
     if (refreshTimeline)
@@ -13645,10 +13602,9 @@ void MonitorDock::exportEtwRowsToTsv(const bool visibleOnly)
         QStringList header;
         if (m_etwEventTable != nullptr)
         {
-            for (int col = 0; col < m_etwEventTable->columnCount(); ++col)
+            for (int col = 0; col < m_etwEventTable->model()->columnCount(); ++col)
             {
-                QTableWidgetItem* item = m_etwEventTable->horizontalHeaderItem(col);
-                header << (item != nullptr ? item->text() : QString());
+                header << m_etwEventTable->model()->headerData(col, Qt::Horizontal).toString();
             }
         }
         if (header.isEmpty())
@@ -13901,7 +13857,7 @@ void MonitorDock::exportEtwRowsToTsv(const bool visibleOnly)
         return;
     }
 
-    if (m_etwEventTable == nullptr || m_etwEventTable->rowCount() == 0)
+    if (m_etwEventTable == nullptr || m_etwEventTable->model()->rowCount() == 0)
     {
         kLogEvent event;
         dbg << event
@@ -13912,7 +13868,7 @@ void MonitorDock::exportEtwRowsToTsv(const bool visibleOnly)
     }
 
     int exportableCount = 0;
-    for (int row = 0; row < m_etwEventTable->rowCount(); ++row)
+    for (int row = 0; row < m_etwEventTable->model()->rowCount(); ++row)
     {
         if (!visibleOnly || !m_etwEventTable->isRowHidden(row))
         {
@@ -13962,14 +13918,13 @@ void MonitorDock::exportEtwRowsToTsv(const bool visibleOnly)
     QTextStream out(&file);
 
     QStringList header;
-    for (int col = 0; col < m_etwEventTable->columnCount(); ++col)
+    for (int col = 0; col < m_etwEventTable->model()->columnCount(); ++col)
     {
-        QTableWidgetItem* item = m_etwEventTable->horizontalHeaderItem(col);
-        header << (item != nullptr ? item->text() : QString());
+        header << m_etwEventTable->model()->headerData(col, Qt::Horizontal).toString();
     }
     out << header.join('\t') << '\n';
 
-    for (int row = 0; row < m_etwEventTable->rowCount(); ++row)
+    for (int row = 0; row < m_etwEventTable->model()->rowCount(); ++row)
     {
         if (visibleOnly && m_etwEventTable->isRowHidden(row))
         {
@@ -13977,10 +13932,9 @@ void MonitorDock::exportEtwRowsToTsv(const bool visibleOnly)
         }
 
         QStringList values;
-        for (int col = 0; col < m_etwEventTable->columnCount(); ++col)
+        for (int col = 0; col < m_etwEventTable->model()->columnCount(); ++col)
         {
-            QTableWidgetItem* item = m_etwEventTable->item(row, col);
-            values << (item != nullptr ? item->text().replace('\t', ' ') : QString());
+            values << m_etwEventTable->model()->index(row, col).data().toString().replace('\t', ' ');
         }
         out << values.join('\t') << '\n';
     }
@@ -14010,11 +13964,7 @@ void MonitorDock::openEtwEventDetailViewerForRow(const int row) const
     QString eventNameText;
     if (m_etwEventTable != nullptr)
     {
-        QTableWidgetItem* eventNameItem = m_etwEventTable->item(row, 3);
-        if (eventNameItem != nullptr)
-        {
-            eventNameText = eventNameItem->text().trimmed();
-        }
+        eventNameText = m_etwEventTable->model()->index(row, 3).data().toString().trimmed();
     }
 
     monitor_text_viewer::showReadOnlyDocumentWindow(
@@ -14050,9 +14000,9 @@ void MonitorDock::showEtwEventContextMenu(const QPoint& position)
     menu.addSeparator();
     QAction* gotoProcessAction = menu.addAction(QIcon(":/Icon/process_details.svg"), QStringLiteral("转到进程详细信息"));
     std::uint32_t relatedPid = 0;
-    QTableWidgetItem* relatedPidItem = m_etwEventTable->item(row, 4);
-    gotoProcessAction->setEnabled(relatedPidItem != nullptr
-        && parsePid(relatedPidItem->text(), relatedPid) && relatedPid != 0);
+    const QModelIndex relatedPidItem = m_etwEventTable->model()->index(row, 4);
+    gotoProcessAction->setEnabled(relatedPidItem.isValid()
+        && parsePid(relatedPidItem.data().toString(), relatedPid) && relatedPid != 0);
     ks::online_scan::addVirusTotalSandboxMenu(
         &menu,
         this,
@@ -14060,11 +14010,10 @@ void MonitorDock::showEtwEventContextMenu(const QPoint& position)
             // 输入：ETW 事件表当前右键行。
             // 处理：从 PID/TID 列解析 PID，并查询该进程 EXE 路径。
             // 返回：VT 上传目标；解析失败时由统一 helper 显示错误。
-            QTableWidgetItem* pidItem = m_etwEventTable != nullptr
-                ? m_etwEventTable->item(row, 4)
-                : nullptr;
+            const QModelIndex pidItem = m_etwEventTable != nullptr
+                ? m_etwEventTable->model()->index(row, 4) : QModelIndex();
             std::uint32_t pidValue = 0;
-            if (pidItem == nullptr || !ks::online_scan::tryParsePidFromText(pidItem->text(), &pidValue)
+            if (!pidItem.isValid() || !ks::online_scan::tryParsePidFromText(pidItem.data().toString(), &pidValue)
                 || pidValue == 0)
             {
                 return {
@@ -14126,11 +14075,8 @@ void MonitorDock::showEtwEventContextMenu(const QPoint& position)
 
     if (action == copyCellAction)
     {
-        QTableWidgetItem* item = m_etwEventTable->item(row, col);
-        if (item != nullptr)
-        {
-            QApplication::clipboard()->setText(item->text());
-        }
+        const QModelIndex item = m_etwEventTable->model()->index(row, col);
+        if (item.isValid()) QApplication::clipboard()->setText(item.data().toString());
         kLogEvent event;
         dbg << event
             << "[MonitorDock] ETW事件右键操作：复制单元格, row="
@@ -14144,10 +14090,9 @@ void MonitorDock::showEtwEventContextMenu(const QPoint& position)
     if (action == copyRowAction)
     {
         QStringList values;
-        for (int i = 0; i < m_etwEventTable->columnCount(); ++i)
+        for (int i = 0; i < m_etwEventTable->model()->columnCount(); ++i)
         {
-            QTableWidgetItem* item = m_etwEventTable->item(row, i);
-            values << (item != nullptr ? item->text() : QString());
+            values << m_etwEventTable->model()->index(row, i).data().toString();
         }
         QApplication::clipboard()->setText(values.join('\t'));
         kLogEvent event;
@@ -14160,19 +14105,19 @@ void MonitorDock::showEtwEventContextMenu(const QPoint& position)
 
     if (action == gotoProcessAction)
     {
-        QTableWidgetItem* pidItem = m_etwEventTable->item(row, 4);
-        if (pidItem == nullptr)
+        const QModelIndex pidItem = m_etwEventTable->model()->index(row, 4);
+        if (!pidItem.isValid())
         {
             return;
         }
 
         std::uint32_t pid = 0;
-        if (!parsePid(pidItem->text(), pid))
+        if (!parsePid(pidItem.data().toString(), pid))
         {
             kLogEvent event;
             warn << event
                 << "[MonitorDock] ETW事件右键操作失败：PID解析失败, text="
-                << pidItem->text().toStdString()
+                << pidItem.data().toString().toStdString()
                 << eol;
             QMessageBox::information(this, QStringLiteral("ETW事件"), QStringLiteral("未解析到有效PID。"));
             return;

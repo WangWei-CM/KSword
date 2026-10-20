@@ -110,6 +110,7 @@ protected:
     // - 首次显示时再触发 WMI/ETW Provider 枚举；
     // - 避免主窗口启动阶段并发拉起多路后台发现任务。
     void showEvent(QShowEvent* event) override;
+    bool eventFilter(QObject* watched, QEvent* event) override;
 
 private:
     // WmiProviderEntry：
@@ -778,6 +779,19 @@ private:
         std::uint64_t totalMatchCount,
         std::uint64_t scannedRowCount,
         std::uint64_t scannedMaxSequence);
+    void scheduleEtwSnapshotProjection();
+    void continueEtwSnapshotProjection();
+    struct EtwSnapshotProjection
+    {
+        std::deque<EtwCapturedEventRow> rows;
+        std::deque<EtwCapturedEventRow> retiredRows;
+        std::deque<ProcessTraceTimelineEventPoint> points;
+        std::size_t liveCursor = 0, pointCursor = 0;
+        std::uint64_t totalMatchCount = 0, scannedRowCount = 0, scannedMaxSequence = 0;
+        std::uint64_t ticket = 0, generation = 0;
+    };
+    std::shared_ptr<EtwSnapshotProjection> m_etwSnapshotProjection;
+    bool m_etwSnapshotWakeScheduled = false;
     // updateEtwCollapseHeight：
     // - 作用：触发 ETW 独立折叠区重新计算几何尺寸；
     // - 说明：当前折叠区不再使用 QToolBox，因此不会强制保留一个展开页。
@@ -1050,7 +1064,7 @@ private:
     QWidget* m_etwPostFilterGroupHostWidget = nullptr; // 后置筛选规则组宿主。
     QVBoxLayout* m_etwPostFilterGroupHostLayout = nullptr; // 后置筛选规则组布局。
     ProcessTraceTimelineWidget* m_etwTimelineWidget = nullptr; // ETW 事件瀑布流时间轴。
-    QTableWidget* m_etwEventTable = nullptr;         // ETW 事件表。
+    QTableView* m_etwEventTable = nullptr;         // ETW 事件表。
     QTimer* m_etwUiUpdateTimer = nullptr;            // 高频 ETW 的 UI 批量刷新定时器。
     QTimer* m_etwArchiveFilterDebounceTimer = nullptr; // ETW 全量后置筛选防抖定时器。
 
