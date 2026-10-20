@@ -664,6 +664,8 @@ private:
     std::atomic_bool m_unlockerWorkerRunning{ false };
     mutable std::mutex m_unlockerWorkerMutex;
 
+    QStringList m_releasingOplockPaths; // UI-only path leases until background retirement completes.
+
     // Oplock 持有状态。
     std::vector<std::shared_ptr<FileOplockEntry>> m_activeOplocks;
     mutable std::mutex m_activeOplockMutex;
