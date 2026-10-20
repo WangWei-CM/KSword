@@ -526,25 +526,11 @@ KswRxpfPageFaultInstall(
         goto Exit;
     }
 
-    /* 预检：VBS/Hyper-V 会拦截 LIDT 并引发 #GP，而 #GP 的 SEH 派发
-       在任何 IRQL 下都触发 CFG 违规（0x139 Arg1=0xA），无法用 SEH 兜底。
-       改用 CPUID 检测：若 hypervisor 是 Microsoft Hyper-V，LIDT 被拦截。 */
-    {
-        int cpuInfo[4] = {0};
-
-        __cpuid(cpuInfo, 1);
-        if (cpuInfo[2] & (1 << 31)) {
-            /* hypervisor present — 检查是否 Microsoft Hyper-V */
-            __cpuid(cpuInfo, 0x40000000);
-            if (cpuInfo[1] == 0x7263694D &&   /* "Micr" */
-                cpuInfo[2] == 0x666F736F &&   /* "osof" */
-                cpuInfo[3] == 0x76482074) {   /* "t Hv" */
-                status = STATUS_NOT_SUPPORTED;
-                KswRxpfFreeShadowTables();
-                goto Exit;
-            }
-        }
-    }
+    /* 曾有 CPUID "Microsoft Hv" 预检直接拒绝 install，依据是 "VBS/Hyper-V
+       会拦截 LIDT 并引发 #GP + CFG 违规 (0x139 Arg1=0xA)"。但项目基本要求
+       是 HVCI 兼容——HVCI 开启时 VBS 必在，而 CPUID 一定报 "Microsoft Hv"，
+       该预检把所有目标环境都挡在门外，令 execute path 永远跑不通。
+       实证走到真实 LIDT 看 Hyper-V root partition 下 shadow IDT 是否真被拦。 */
 
     /* IPI 回调只执行 SIDT/LIDT 和定长行写入。 */
     (void)KeIpiGenericCall(KswRxpfInstallIpi, 0ULL);
