@@ -1,5 +1,6 @@
 #include "../UI/CodeEditorWidget.h"
 #include "DriverDock.Internal.h"
+#include "../UI/AsyncCleanupRegistry.h"
 
 #include <QEvent>
 #include <QTimer>
@@ -8,6 +9,7 @@
 
 #include <condition_variable>
 #include <functional>
+#include <stdexcept>
 
 // 说明：由原聚合式实现迁移为独立 .cpp，成员函数实现保持原样。
 using namespace ksword::driver_dock_internal;
@@ -103,6 +105,7 @@ struct DriverDock::DebugCaptureSession final : std::enable_shared_from_this<Debu
     std::atomic_bool finished{ false };
     std::mutex waitMutex;
     std::condition_variable waitChanged;
+    std::shared_ptr<ks::ui::AsyncCleanupRegistry::Lease> cleanupLease;
     bool stopRequired = false; // 仅工作线程读写。
 
     // 跨 DriverDock 销毁/重建也不能让新 START 与旧 STOP 竞争。
@@ -122,7 +125,13 @@ struct DriverDock::DebugCaptureSession final : std::enable_shared_from_this<Debu
 
     void start()
     {
-        // 调用方必须先持有会话，再安装 thread；这里不派发 GUI 事件。
+        // 退出冻结新工作前登记；弱回调只置停止标志，不等待驱动或形成引用环。
+        const std::weak_ptr<DebugCaptureSession> weakSession(shared_from_this());
+        cleanupLease = ks::ui::AsyncCleanupRegistry::global().acquire([weakSession]()
+            {
+                if (const auto session = weakSession.lock()) session->requestStop();
+            });
+        if (cleanupLease == nullptr) throw std::runtime_error("shutdown gate closed");
         worker = std::thread([session = shared_from_this()]() { session->run(); });
     }
 
@@ -198,7 +207,8 @@ struct DriverDock::DebugCaptureSession final : std::enable_shared_from_this<Debu
             }
             driverHandle.reset();
         }
-        // 只有 STOP 与句柄关闭之后才允许 GUI 接受下一次启动。
+        // 只有 STOP 与句柄关闭之后才允许最终退出/下一次启动。
+        cleanupLease.reset();
         finished.store(true);
         try { dispatcher->post(stateChanged); } catch (...) {}
     }

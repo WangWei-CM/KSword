@@ -61,6 +61,7 @@ FIXTURE = r'''
 #include <utility>
 #include <vector>
 #include "__DISPATCHER__"
+#include "__REGISTRY__"
 #include "__PROTOCOL__"
 
 using namespace std::chrono_literals;
@@ -522,9 +523,39 @@ void bufferCases()
     check(snapshot.records.size() == 1U && !snapshot.replace, "clear does not replay earlier source");
 }
 
+void testShutdownRegistry()
+{
+    auto& registry = ks::ui::AsyncCleanupRegistry::global();
+    check(registry.pending() == 0, "no earlier capture leases");
+    auto scenario = std::make_shared<Scenario>();
+    scenario->drain.blocked = true;
+    scenario->stop.blocked = true;
+    Harness capture(scenario);
+    capture.start();
+    scenario->drain.awaitEntry();
+    check(registry.pending() == 1, "accepted capture keeps process alive");
+    registry.beginShutdown();
+    check(capture.owner->stopRequested.load(), "shutdown invokes weak value stop callback");
+    auto rejected = std::make_shared<Scenario>();
+    Harness refused(rejected);
+    bool rejectedStart = false;
+    try { refused.start(); } catch (const std::runtime_error&) { rejectedStart = true; }
+    check(rejectedStart && rejected->opens.load() == 0, "shutdown gate rejects new capture before open");
+    scenario->drain.release();
+    scenario->stop.awaitEntry();
+    check(registry.pending() == 1 && scenario->handles.load() == 1,
+        "blocked STOP retains lease and handle");
+    scenario->stop.release();
+    awaitCompletion(capture);
+    check(registry.pending() == 0 && scenario->handles.load() == 0,
+        "lease released only after STOP and close");
+    registry.cancelShutdown();
+}
+
 int main(int argc, char** argv)
 {
     QCoreApplication application(argc, argv);
+    testShutdownRegistry();
     int heartbeats = 0;
     QTimer heartbeat;
     QObject::connect(&heartbeat, &QTimer::timeout, &application, [&]() { ++heartbeats; });
@@ -539,7 +570,7 @@ int main(int argc, char** argv)
     std::cout << "PASS production_session=extracted production_buffer=extracted dispatcher=production "
               << "blocked=START,drain,STOP owner_release=nonblocking callbacks_after_close=0 "
               << "STOP=once close_before_finished=yes gate=serialized,canceled_no_START "
-              << "idle_stop_races=256 fast_open_failures=64 exceptions=START,drain,STOP "
+              << "idle_stop_races=256 fast_open_failures=64 exceptions=START,drain,STOP shutdown_lease=STOP_close registry_reject=yes "
               << "QtCore_heartbeats=" << heartbeats << " GUI=none driver=mock\n";
 }
 '''
@@ -548,6 +579,7 @@ int main(int argc, char** argv)
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--source-root", type=Path, default=ROOT)
+    parser.add_argument("--cleanup-registry", type=Path)
     args = parser.parse_args()
     source_root = args.source_root.resolve()
     area = source_root / "Ksword5.1/Ksword5.1/DriverDock"
@@ -562,9 +594,10 @@ def main():
         assert "requestStop()" in function and "join(" not in function
     assert "[session = shared_from_this()]" in session
     assert "stopRequired = true" in session and "driverHandle.reset()" in session
+    registry = args.cleanup_registry.resolve() if args.cleanup_registry else locate(source_root, "Ksword5.1/Ksword5.1/UI/AsyncCleanupRegistry.h")
     dispatcher = locate(source_root, "Ksword5.1/Ksword5.1/UI/AsyncUiDispatcher.h")
     protocol = locate(source_root, "shared/driver/KswordArkDebugOutputIoctl.h")
-    fixture = FIXTURE.replace("__DISPATCHER__", dispatcher.as_posix()).replace("__PROTOCOL__", protocol.as_posix())
+    fixture = FIXTURE.replace("__REGISTRY__", registry.as_posix()).replace("__DISPATCHER__", dispatcher.as_posix()).replace("__PROTOCOL__", protocol.as_posix())
     fixture = fixture.replace("__RECORD__", block(header, "struct DebugOutputLineRecord"))
     fixture = fixture.replace("__SNAPSHOT__", block(header, "struct DebugOutputSnapshot"))
     fixture = fixture.replace("__BUFFER__", block(header, "class DebugOutputBuffer final"))
