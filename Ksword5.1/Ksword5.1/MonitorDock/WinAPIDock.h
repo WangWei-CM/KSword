@@ -226,6 +226,7 @@ private:
     QByteArray m_coverageDefinitionHash;
     std::uint64_t m_coverageFilterTicket = 0;
     bool m_coverageFilterRunning = false;
+    std::shared_ptr<std::atomic_bool> m_coverageFilterDeliveryDropped, m_coverageHashDeliveryDropped;
     bool m_coverageDebouncePending = false;
     bool m_coverageDebounceDue = false;
     bool m_coverageHashPending = false;

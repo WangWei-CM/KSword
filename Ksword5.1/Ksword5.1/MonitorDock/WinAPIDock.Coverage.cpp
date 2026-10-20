@@ -10,7 +10,10 @@
 #include <QTimer>
 #include <QApplication>
 #include <algorithm>
+#include <functional>
 #include <QComboBox>
+#include <QCollator>
+#include <QHeaderView>
 #include <QCryptographicHash>
 #include <QFile>
 #include <QLabel>
@@ -23,19 +26,38 @@ namespace
 {
     // The source packet snapshot remains canonical; search only replaces these row identities.
     std::vector<std::size_t> coverageMatchingRows(
-        const std::vector<WinAPIDock::CoverageDisplayRow>& rows, const QString& filter)
+        const std::vector<WinAPIDock::CoverageDisplayRow>& rows, const QString& filter,
+        int sortColumn, Qt::SortOrder sortOrder, const ks::i18n::SourceTextSnapshot& language)
     {
         std::vector<std::size_t> matching;
         matching.reserve(rows.size());
         for (std::size_t i = 0; i < rows.size(); ++i)
             if (filter.isEmpty() || rows[i].searchText.contains(filter, Qt::CaseInsensitive)) matching.push_back(i);
+        if (sortColumn >= 0 && sortColumn < 7)
+        {
+            std::vector<std::pair<std::size_t, QString>> keys;
+            keys.reserve(matching.size());
+            for (const auto row : matching) keys.emplace_back(row, language.displayText(rows[row].columns.value(sortColumn)));
+            const QCollator collator;
+            std::stable_sort(keys.begin(), keys.end(), [&](const auto& left, const auto& right) {
+                const int order = collator.compare(left.second, right.second);
+                return sortOrder == Qt::AscendingOrder ? order < 0 : order > 0;
+            });
+            matching.clear();
+            for (const auto& key : keys) matching.push_back(key.first);
+        }
         return matching;
     }
 
     class CoverageTableModel final : public QAbstractTableModel
     {
     public:
-        explicit CoverageTableModel(QObject* parent) : QAbstractTableModel(parent) {}
+        explicit CoverageTableModel(QObject* parent, std::function<void()> request)
+            : QAbstractTableModel(parent), m_request(std::move(request)) {}
+        void sort(int column, Qt::SortOrder order) override
+        { m_requestedSortColumn = column; m_requestedSortOrder = order; m_request(); }
+        int requestedSortColumn() const { return m_requestedSortColumn; }
+        Qt::SortOrder requestedSortOrder() const { return m_requestedSortOrder; }
         int rowCount(const QModelIndex& parent = {}) const override
         { return parent.isValid() || !m_indexes ? 0 : static_cast<int>(m_indexes->size()); }
         int columnCount(const QModelIndex& parent = {}) const override { return parent.isValid() ? 0 : 7; }
@@ -58,22 +80,41 @@ namespace
                 QStringLiteral("API"), QStringLiteral("覆盖状态"), QStringLiteral("入口地址"), QStringLiteral("原因")};
             return section >= 0 && section < headers.size() ? QVariant(ks::i18n::sourceText(headers[section])) : QVariant();
         }
-        bool matches(const std::shared_ptr<const std::vector<WinAPIDock::CoverageDisplayRow>>& rows, const QString& filter) const
-        { return m_rows == rows && m_filter == filter; }
+        bool matches(const std::shared_ptr<const std::vector<WinAPIDock::CoverageDisplayRow>>& rows, const QString& filter, int column, Qt::SortOrder order) const
+        { return m_rows == rows && m_filter == filter && m_appliedSortColumn == column && m_appliedSortOrder == order; }
         void replace(std::shared_ptr<const std::vector<WinAPIDock::CoverageDisplayRow>> rows,
-            std::shared_ptr<const std::vector<std::size_t>> indexes, QString filter = {})
+            std::shared_ptr<const std::vector<std::size_t>> indexes, QString filter = {},
+            int sortColumn = -1, Qt::SortOrder sortOrder = Qt::AscendingOrder)
         {
-            beginResetModel();
+            const bool sameRows = m_rows == rows && m_filter == filter && m_indexes && indexes;
+            if (sameRows) emit layoutAboutToBeChanged({}, QAbstractItemModel::VerticalSortHint);
+            else beginResetModel();
+            // Selection models create their persistent indexes in the signal.
+            const auto previousPersistent = sameRows ? persistentIndexList() : QModelIndexList{};
             auto previousRows = std::move(m_rows);
             auto previousIndexes = std::move(m_indexes);
             m_rows = std::move(rows); m_indexes = std::move(indexes); m_filter = std::move(filter);
-            endResetModel();
+            m_appliedSortColumn = sortColumn; m_appliedSortOrder = sortOrder;
+            if (sameRows) {
+                std::vector<int> destination(m_rows->size(), -1);
+                for (std::size_t row = 0; row < m_indexes->size(); ++row) destination[(*m_indexes)[row]] = static_cast<int>(row);
+                QModelIndexList nextPersistent; nextPersistent.reserve(previousPersistent.size());
+                for (const auto& index : previousPersistent) {
+                    const auto source = (*previousIndexes)[static_cast<std::size_t>(index.row())];
+                    nextPersistent.push_back(source < destination.size() && destination[source] >= 0 ? this->index(destination[source], index.column()) : QModelIndex{});
+                }
+                changePersistentIndexList(previousPersistent, nextPersistent);
+                emit layoutChanged({}, QAbstractItemModel::VerticalSortHint);
+            } else endResetModel();
             // Large immutable snapshots can become last-owned here; release their strings off GUI.
             QThreadPool::globalInstance()->start(QRunnable::create(
                 [previousRows = std::move(previousRows), previousIndexes = std::move(previousIndexes)]() {}));
         }
     private:
         QString m_filter;
+        std::function<void()> m_request;
+        int m_requestedSortColumn = -1, m_appliedSortColumn = -1;
+        Qt::SortOrder m_requestedSortOrder = Qt::AscendingOrder, m_appliedSortOrder = Qt::AscendingOrder;
         std::shared_ptr<const std::vector<WinAPIDock::CoverageDisplayRow>> m_rows;
         std::shared_ptr<const std::vector<std::size_t>> m_indexes;
     };
@@ -143,6 +184,14 @@ void WinAPISessionBackend::queueCoverageSnapshot(std::uint32_t pid, std::uint64_
 
 void WinAPIDock::flushCoverageUpdates()
 {
+    // A canceled GUI delivery only publishes a value flag. This existing tick
+    // reconciles it and recomputes the latest replaceable projection/hash.
+    if (m_coverageHashDeliveryDropped && m_coverageHashDeliveryDropped->exchange(false)) {
+        m_coverageHashPending = false; refreshCoverageDefinitionHash();
+    }
+    if (m_coverageFilterDeliveryDropped && m_coverageFilterDeliveryDropped->exchange(false)) {
+        m_coverageFilterRunning = false; m_coverageDirty = true; updateCoverageView();
+    }
     std::unordered_map<std::uint32_t, CoverageViewState> updates;
     {
         const std::lock_guard<std::mutex> lock(m_pendingMutex);
@@ -180,7 +229,7 @@ void WinAPIDock::flushCoverageUpdates()
 void WinAPIDock::initializeCoverageTable()
 {
     m_coverageDispatcher = std::make_shared<ks::ui::AsyncUiDispatcher>(this);
-    m_coverageModel = new CoverageTableModel(m_coverageTable);
+    m_coverageModel = new CoverageTableModel(m_coverageTable, [this]() { updateCoverageView(); });
     m_coverageTable->setModel(m_coverageModel);
     auto* watcher = new QFileSystemWatcher(this);
     const QString directory = QApplication::applicationDirPath() + QStringLiteral("/profiles");
@@ -200,10 +249,11 @@ void WinAPIDock::refreshCoverageDefinitionHash()
     m_coverageHashDirty = true;
     if (m_coverageHashPending || !m_coverageDispatcher) return;
     m_coverageHashPending = true;
+    const auto deliveryDropped = m_coverageHashDeliveryDropped = std::make_shared<std::atomic_bool>(false);
     m_coverageHashDirty = false;
     const QString path = QApplication::applicationDirPath() + QStringLiteral("/profiles/api_monitor_definitions.json");
     const auto dispatcher = m_coverageDispatcher;
-    QThreadPool::globalInstance()->start(QRunnable::create([this, dispatcher, path]() {
+    QThreadPool::globalInstance()->start(QRunnable::create([this, dispatcher, path, deliveryDropped]() {
         QFile file(path);
         QCryptographicHash hasher(QCryptographicHash::Sha256);
         const QByteArray hash = file.open(QIODevice::ReadOnly) && hasher.addData(&file)
@@ -222,7 +272,7 @@ void WinAPIDock::refreshCoverageDefinitionHash()
                 updateStatusLabel();
             }
             if (m_coverageHashDirty) refreshCoverageDefinitionHash();
-        });
+        }, [deliveryDropped]() { deliveryDropped->store(true); });
     }));
 }
 
@@ -267,27 +317,32 @@ void WinAPIDock::updateCoverageView()
     ks::ui::ApplyStatusRole(m_coverageStatusLabel, view.stale || mismatch ? ks::ui::StatusRole::Warning : ks::ui::StatusRole::Info);
     const auto rows = view.displayRows;
     const QString filter = m_coverageFilterEdit->text().trimmed();
-    if (static_cast<CoverageTableModel*>(m_coverageModel)->matches(rows, filter))
+    const auto model = static_cast<CoverageTableModel*>(m_coverageModel);
+    const int sortColumn = model->requestedSortColumn();
+    const auto sortOrder = model->requestedSortOrder();
+    const auto language = ks::i18n::LanguageManager::instance().sourceTextSnapshot();
+    if (model->matches(rows, filter, sortColumn, sortOrder))
     { m_coverageDirty = false; return; }
     const auto dispatcher = m_coverageDispatcher;
     // One timer samples the latest request; one worker scans it without touching the model.
     if (m_coverageFilterRunning) return;
     m_coverageFilterRunning = true;
-        QThreadPool::globalInstance()->start(QRunnable::create([this, ticket, rows, filter, dispatcher]() {
+    const auto deliveryDropped = m_coverageFilterDeliveryDropped = std::make_shared<std::atomic_bool>(false);
+        QThreadPool::globalInstance()->start(QRunnable::create([this, ticket, rows, filter, sortColumn, sortOrder, language, dispatcher, deliveryDropped]() {
             const auto matching = std::make_shared<const std::vector<std::size_t>>(
-                rows ? coverageMatchingRows(*rows, filter) : std::vector<std::size_t>());
-            dispatcher->post([this, ticket, rows, matching, filter]() {
+                rows ? coverageMatchingRows(*rows, filter, sortColumn, sortOrder, language) : std::vector<std::size_t>());
+            dispatcher->post([this, ticket, rows, matching, filter, sortColumn, sortOrder]() {
                 m_coverageFilterRunning = false;
                 if (ticket != m_coverageFilterTicket) { updateCoverageView(); return; }
                 if (!m_coverageTable->isVisible()) return;
-                auto commit = [this, ticket, rows, matching, filter]() {
+                auto commit = [this, ticket, rows, matching, filter, sortColumn, sortOrder]() {
                     if (ticket != m_coverageFilterTicket || !m_coverageTable->isVisible()) return;
-                    static_cast<CoverageTableModel*>(m_coverageModel)->replace(rows, matching, filter);
+                    static_cast<CoverageTableModel*>(m_coverageModel)->replace(rows, matching, filter, sortColumn, sortOrder);
                     m_coverageDirty = false;
                 };
                 if (!ks::ui::DeferTableUiCommitIfContextMenuOpen(this,
                     QStringLiteral("winapi-coverage-projection-apply"), {m_coverageTable}, commit)) commit();
-            });
+            }, [deliveryDropped]() { deliveryDropped->store(true); });
         }));
 }
 
