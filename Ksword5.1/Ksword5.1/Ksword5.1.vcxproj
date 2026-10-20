@@ -1013,6 +1013,9 @@
     <ClInclude Include="UI\PrimaryPageStyle.h" />
     <ClInclude Include="UI\ParameterWorkspace.h" />
     <ClInclude Include="UI\MainSurfaceStyle.h" />
+    <ClInclude Include="UI\PageNavigationCatalog.h" />
+    <ClInclude Include="UI\PageNavigationTabCatalog.h" />
+    <ClInclude Include="UI\ScopedObjectDiscoveryCursor.h" />
     <ClInclude Include="UI\PageNavigationBridge.h" />
     <ClInclude Include="UI\McpLocalBridge.h" />
     <ClInclude Include="UI\McpHexCanvasAdapter.h" />

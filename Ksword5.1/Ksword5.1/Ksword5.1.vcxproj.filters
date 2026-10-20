@@ -3072,6 +3072,15 @@
     <ClInclude Include="UI\MainSurfaceStyle.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="UI\PageNavigationCatalog.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="UI\PageNavigationTabCatalog.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="UI\ScopedObjectDiscoveryCursor.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="UI\PageNavigationBridge.h">
       <Filter>Header Files</Filter>
     </ClInclude>
