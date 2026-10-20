@@ -15,7 +15,7 @@ namespace ks::ui
     {
         m_pseudocodePage = new WorkbenchPseudocodeView(m_tabs);
         m_pseudocodePage->setBytesProvider(&m_bytesProvider);
-        m_tabs->addTab(m_pseudocodePage, MemoryNavigationTabTitle(MemoryNavigationGroup::Workbench, 4));
+        addNavigationTab(4, m_pseudocodePage);
         connect(m_pseudocodePage, &WorkbenchPseudocodeView::windowRequested, this,
             [this](quint64 address, quint64 length) { requestCapturedWindow(address, length); });
         connect(m_pseudocodePage, &WorkbenchPseudocodeView::requestHexLocate, this,

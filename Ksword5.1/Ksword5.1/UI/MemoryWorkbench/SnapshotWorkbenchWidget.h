@@ -5,6 +5,7 @@
 #include "../MemorySnapshotBytesProvider.h"
 #include "WorkbenchPseudocodeView.h"
 #include <QWidget>
+#include "../PageNavigationTabCatalog.h"
 #include <memory>
 #include <vector>
 
@@ -40,6 +41,9 @@ namespace ks::ui
     {
         Q_OBJECT
     public:
+        static PageNavigationCatalog navigationCatalog(const SnapshotWorkbenchWidget* existing = nullptr);
+        QWidget* activateNavigationDescriptor(const QString& id);
+
         // parent 只管理 Qt 生命周期；构造共享子页，不附加目标或读取真实字节。
         explicit SnapshotWorkbenchWidget(QWidget* parent = nullptr);
         // 解除子视图的 provider 后销毁宿主，取消尚未完成的解释请求。
@@ -129,6 +133,10 @@ namespace ks::ui
         void changeEvent(QEvent* event) override;
 
     private:
+        static PageNavigationTabDefinition navigationDefinition(int index);
+        void addNavigationTab(int index, QWidget* page);
+        PageNavigationTabCatalog m_navigationTabs;
+
         // 从当前缓存和锚点更新正式反汇编页，保留宿主的坐标解释。
         void rebuildDisassembly();
         // 更新正式文本/结构子页，只呈现完整有效的已捕获窗口。
