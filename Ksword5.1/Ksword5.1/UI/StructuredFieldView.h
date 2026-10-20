@@ -2,10 +2,13 @@
 
 #include <QHash>
 #include <QModelIndex>
+#include <QSet>
 #include <QString>
 #include <QVector>
 #include <QWidget>
 #include <functional>
+#include <atomic>
+#include <memory>
 
 class QComboBox;
 class QLabel;
@@ -13,10 +16,14 @@ class QLineEdit;
 class QShowEvent;
 class QToolButton;
 class QTreeWidget;
+class QTreeView;
 class QTreeWidgetItem;
 
 namespace ks::ui
 {
+    class FieldTreeModel;
+    class FieldTreeSelection;
+    struct FieldTreeProjection;
     // Values come from the actual metadata/PE/driver result. They are never
     // reconstructed by parsing a generated report or interpreted as HTML.
     struct FieldNode
@@ -86,6 +93,10 @@ namespace ks::ui
         enum class Presentation { Sections, Tree };
 
         explicit StructuredFieldView(QWidget* parent = nullptr);
+        ~StructuredFieldView() override;
+        // 普通只读字段页显式选择后台值投影和按需行模型；单向切换后 tree() 返回 nullptr。
+        // 专业工作台不调用此入口，保留原生 QTreeWidget 对象及同步访问契约。
+        void setValueModelProjection();
         // 详情卡片接入后仅保存规范文档与搜索/复制/导出入口，销毁旧树和格式选择器。
         // 单向切换，不影响未接入卡片的列表详情和专业工作台；此模式tree()返回nullptr。
         void setDocumentOnly();
@@ -125,6 +136,13 @@ namespace ks::ui
         // 回填仍存在的旧树；调用前已确认页面可见，投影接管后此入口直接退出。
         void flushDeferredTree();
         void rebuild();
+        void scheduleValueProjection();
+        void prepareValueRows();
+        void consumeValueRows(quint64 ticket);
+        void updateValueColumns();
+        void showValueCopyMenu(const QPoint& position);
+        bool valueRowSelected(const QString& key) const;
+        void flushValueSelection() const;
         void updateTranslations();
         void applyPresentation();
         void applySearch();
@@ -141,6 +159,29 @@ namespace ks::ui
         QToolButton* m_copy = nullptr;
         QToolButton* m_export = nullptr;
         QTreeWidget* m_tree = nullptr;
+        QTreeView* m_valueTree = nullptr;
+        FieldTreeModel* m_valueModel = nullptr;
+        QLabel* m_valueLoading = nullptr;
+        std::shared_ptr<std::atomic_bool> m_valueCancel;
+        quint64 m_valueTicket = 0;
+        QVector<QPersistentModelIndex> m_valueRows;
+        qsizetype m_valueRowCursor = 0;
+        int m_valueRootNext = 0;
+        int m_valueRootTotal = 0;
+        bool m_valuePrepared = false;
+        bool m_valueRowsPending = false;
+        bool m_valueApplying = false;
+        QHash<QString, bool> m_valueExpansion;
+        mutable std::shared_ptr<FieldTreeSelection> m_valueSelection;
+        mutable bool m_valueClearPending = false;
+        bool m_valueRestoreSelection = false;
+        QString m_valueSelected;
+        int m_valueColumn = 0;
+        int m_valueScroll = 0;
+        QString m_valueBeforeSearchSelected;
+        int m_valueBeforeSearchColumn = 0;
+        int m_valueBeforeSearchScroll = 0;
+        bool m_valueSearchActive = false;
         QHash<QString, bool> m_expansionBeforeSearch;
         bool m_searchActive = false;
         bool m_layoutPending = false;

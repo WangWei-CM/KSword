@@ -171,6 +171,7 @@
     <ClCompile Include="FileDock\FileMappedProcessWindow.cpp" />
     <ClCompile Include="FileDock\FilePropertyPeAnalyzer.cpp" />
     <ClCompile Include="HardwareDock\HardwareFieldDocuments.cpp" />
+    <ClCompile Include="UI\FieldTreeModel.cpp" />
     <ClCompile Include="UI\StructuredFieldView.cpp" />
     <ClCompile Include="UI\TablePresentation.cpp" />
     <ClCompile Include="FileDock\FilePropertyPeAnalyzer.Directories.cpp" />
@@ -1189,6 +1190,7 @@
     <QtMoc Include="SettingsDock\SettingsDock.h" />
     <QtMoc Include="UI\CodeEditorWidget.h" />
     <QtMoc Include="UI\StructuredFieldView.h" />
+    <ClInclude Include="UI\FieldTreeModel.h" />
     <ClInclude Include="UI\ComplexReportModel.h" />
     <ClInclude Include="UI\ComplexReportDelegate.h" />
     <ClInclude Include="UI\ComplexReportView.h" />
