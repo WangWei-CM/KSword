@@ -13,6 +13,7 @@
 #include <QFrame>
 #include <QGridLayout>
 #include <QHBoxLayout>
+#include <QHideEvent>
 #include <QLabel>
 #include <QListWidget>
 #include <QListWidgetItem>
@@ -72,15 +73,7 @@ namespace
         {
             setAttribute(Qt::WA_StyledBackground, true);
             setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
-            m_sampleAnimation = new QVariantAnimation(this);
-            m_sampleAnimation->setDuration(260);
-            m_sampleAnimation->setEasingCurve(QEasingCurve::OutCubic);
-            m_sampleAnimation->setStartValue(0.0);
-            m_sampleAnimation->setEndValue(1.0);
-            connect(m_sampleAnimation, &QVariantAnimation::valueChanged, this, [this](const QVariant& value) {
-                m_animationProgress = value.toDouble();
-                update();
-            });
+
         }
 
         void appendSample(const double usagePercent, const int historyLength)
@@ -96,9 +89,23 @@ namespace
             {
                 m_samples.pop_front();
             }
-            m_animationProgress = 0.0;
-            m_sampleAnimation->stop();
-            m_sampleAnimation->start();
+            // The panel owns the one interpolation clock for all cores.
+            m_animationProgress = 1.0;
+        }
+
+        double latestSample() const
+        {
+            return m_samples.isEmpty() ? 0.0 : m_samples.back();
+        }
+
+        void setAnimationProgress(const double progress, const bool present)
+        {
+            m_animationProgress = progress;
+            // Offscreen cells retain progress for later scrolling without paint requests.
+            if (present && isVisible() && !visibleRegion().isEmpty())
+            {
+                update();
+            }
         }
 
     protected:
@@ -191,7 +198,6 @@ namespace
         QVector<double> m_samples;
         int m_previousSampleCount = 0;
         bool m_historyWindowShifted = false;
-        QVariantAnimation* m_sampleAnimation = nullptr;
         double m_previousSample = 0.0;
         double m_animationProgress = 1.0;
     };
@@ -512,6 +518,13 @@ HudPerformancePanel::HudPerformancePanel(QWidget* parent)
 {
     appendTransparentBackgroundStyle(this);
     initializeUi();
+    m_coreSampleAnimation = new QVariantAnimation(this);
+    m_coreSampleAnimation->setDuration(260);
+    m_coreSampleAnimation->setEasingCurve(QEasingCurve::OutCubic);
+    m_coreSampleAnimation->setStartValue(0.0);
+    m_coreSampleAnimation->setEndValue(1.0);
+    connect(m_coreSampleAnimation, &QVariantAnimation::valueChanged, this,
+        [this](const QVariant& value) { refreshCorePresentation(value.toDouble(), false); });
     refreshCpuTopologyStaticInfo();
     refreshSystemVolumeInfo();
 
@@ -657,6 +670,7 @@ void HudPerformancePanel::applyChartColors(QChart* chart, const QColor& colorVal
 void HudPerformancePanel::showEvent(QShowEvent* showEventPointer)
 {
     QWidget::showEvent(showEventPointer);
+    refreshCorePresentation(1.0, true);
     QTimer::singleShot(0, this, [this]()
     {
         adjustChartHeights();
@@ -665,6 +679,43 @@ void HudPerformancePanel::showEvent(QShowEvent* showEventPointer)
     {
         adjustChartHeights();
     });
+}
+
+
+void HudPerformancePanel::hideEvent(QHideEvent* hideEventPointer)
+{
+    if (m_coreSampleAnimation != nullptr)
+    {
+        m_coreSampleAnimation->stop();
+    }
+    refreshCorePresentation(1.0, false);
+    QWidget::hideEvent(hideEventPointer);
+}
+
+void HudPerformancePanel::refreshCorePresentation(const double progress, const bool refreshLabels)
+{
+    const bool present = isVisible() && m_detailStack != nullptr
+        && m_detailStack->currentWidget() == m_cpuPage;
+    for (std::size_t index = 0; index < m_coreChartEntries.size(); ++index)
+    {
+        CoreChartEntry& entry = m_coreChartEntries[index];
+        auto* sparkline = dynamic_cast<CpuCoreSparklineWidget*>(entry.chartWidget);
+        if (sparkline == nullptr)
+        {
+            continue;
+        }
+        sparkline->setAnimationProgress(progress, present);
+        if (present && refreshLabels && entry.titleLabel != nullptr)
+        {
+            const QString title = QStringLiteral("CPU %1  %2%")
+                .arg(static_cast<int>(index), 2, 10, QLatin1Char('0'))
+                .arg(sparkline->latestSample(), 5, 'f', 1, QLatin1Char(' '));
+            if (entry.titleLabel->text() != title)
+            {
+                entry.titleLabel->setText(title);
+            }
+        }
+    }
 }
 
 void HudPerformancePanel::initializeUi()
@@ -1215,7 +1266,12 @@ void HudPerformancePanel::syncSidebarSelection(const int selectedRowIndex)
     }
 
     const int boundedIndex = qBound(0, selectedRowIndex, pageCount - 1);
+    if (m_coreSampleAnimation != nullptr)
+    {
+        m_coreSampleAnimation->stop();
+    }
     m_detailStack->setCurrentIndex(boundedIndex);
+    refreshCorePresentation(1.0, true);
 
     if (m_cpuNavCard != nullptr) m_cpuNavCard->setSelectedState(boundedIndex == 0);
     if (m_memoryNavCard != nullptr) m_memoryNavCard->setSelectedState(boundedIndex == 1);
@@ -2129,29 +2185,29 @@ void HudPerformancePanel::updateView(
         m_cpuModelLabel->setText(m_cpuModelText);
     }
 
-    const bool cpuPageVisible =
-        (m_detailStack != nullptr && m_detailStack->currentWidget() == m_cpuPage);
-    if (cpuPageVisible)
+    // Histories advance on every sample, including while another page/HUD is hidden.
+    if (m_coreSampleAnimation != nullptr)
     {
-        const int chartCount = std::min(
-            static_cast<int>(m_coreChartEntries.size()),
-            static_cast<int>(coreUsageList.size()));
-        for (int indexValue = 0; indexValue < chartCount; ++indexValue)
-        {
-            CoreChartEntry& chartEntry = m_coreChartEntries[static_cast<std::size_t>(indexValue)];
-            const double usageValue = coreUsageList[static_cast<std::size_t>(indexValue)];
-            if (chartEntry.titleLabel != nullptr)
-            {
-                const QString titleText = QStringLiteral("CPU %1  %2%")
-                    .arg(indexValue, 2, 10, QLatin1Char('0'))
-                    .arg(usageValue, 5, 'f', 1, QLatin1Char(' '));
-                if (chartEntry.titleLabel->text() != titleText)
-                {
-                    chartEntry.titleLabel->setText(titleText);
-                }
-            }
-            appendCoreSeriesPoint(chartEntry, usageValue);
-        }
+        m_coreSampleAnimation->stop();
+    }
+    const int chartCount = std::min(
+        static_cast<int>(m_coreChartEntries.size()),
+        static_cast<int>(coreUsageList.size()));
+    for (int indexValue = 0; indexValue < chartCount; ++indexValue)
+    {
+        CoreChartEntry& chartEntry = m_coreChartEntries[static_cast<std::size_t>(indexValue)];
+        appendCoreSeriesPoint(chartEntry, coreUsageList[static_cast<std::size_t>(indexValue)]);
+    }
+    const bool cpuPageVisible = isVisible() && m_detailStack != nullptr
+        && m_detailStack->currentWidget() == m_cpuPage;
+    BOOL animateClientArea = TRUE;
+    ::SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, &animateClientArea, 0);
+    const bool animateCores = cpuPageVisible && animateClientArea != FALSE
+        && m_coreSampleAnimation != nullptr && chartCount > 0;
+    refreshCorePresentation(animateCores ? 0.0 : 1.0, true);
+    if (animateCores)
+    {
+        m_coreSampleAnimation->start();
     }
 
     if (m_memorySummaryLabel != nullptr)

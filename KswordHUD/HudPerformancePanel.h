@@ -14,6 +14,7 @@ class QChartView;
 class QChart;
 class QGridLayout;
 class QHBoxLayout;
+class QHideEvent;
 class QLabel;
 class QLineSeries;
 class QListWidget;
@@ -23,6 +24,7 @@ class QShowEvent;
 class QStackedWidget;
 class QTimer;
 class QValueAxis;
+class QVariantAnimation;
 
 class HudPerformancePanel final : public QWidget
 {
@@ -37,6 +39,7 @@ public:
 protected:
     void resizeEvent(QResizeEvent* resizeEventPointer) override;
     void showEvent(QShowEvent* showEventPointer) override;
+    void hideEvent(QHideEvent* hideEventPointer) override;
 
 private:
     struct CoreChartEntry
@@ -125,6 +128,7 @@ private:
     void initializeCoreCharts();
     void syncSidebarSelection(int selectedRowIndex);
     void adjustChartHeights();
+    void refreshCorePresentation(double progress, bool refreshLabels);
 
     void initializePerformanceCounters();
     void refreshAllViews();
@@ -189,6 +193,7 @@ private:
     QListWidget* m_sidebarList = nullptr;
     QStackedWidget* m_detailStack = nullptr;
     QTimer* m_refreshTimer = nullptr;
+    QVariantAnimation* m_coreSampleAnimation = nullptr;
     QFutureWatcher<LiveSampleResult>* m_liveSampleWatcher = nullptr;
     QMutex m_liveSampleMutex;
     bool m_liveSampleInProgress = false;
