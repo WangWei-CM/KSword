@@ -404,6 +404,39 @@ namespace
 
 }
 
+struct RegistryDock::SubKeyLoadRecovery
+{
+    struct DroppedLoad { QString path; quint64 token = 0; };
+    std::mutex mutex;
+    std::deque<DroppedLoad> dropped;
+    std::size_t outstanding = 0;
+
+    void started()
+    {
+        std::lock_guard lock(mutex);
+        ++outstanding;
+    }
+    void finished(const QString& path, quint64 token, bool wasDropped)
+    {
+        std::lock_guard lock(mutex);
+        --outstanding;
+        if (wasDropped) dropped.push_back({path, token});
+    }
+    bool take(DroppedLoad* load, bool* idle)
+    {
+        std::lock_guard lock(mutex);
+        if (dropped.empty())
+        {
+            *idle = outstanding == 0;
+            return false;
+        }
+        *load = std::move(dropped.front());
+        dropped.pop_front();
+        *idle = outstanding == 0 && dropped.empty();
+        return true;
+    }
+};
+
 RegistryDock::RegistryDock(QWidget* parent)
     : QWidget(parent)
 {
@@ -413,6 +446,10 @@ RegistryDock::RegistryDock(QWidget* parent)
     }
 
     m_uiDispatcher = std::make_shared<ks::ui::AsyncUiDispatcher>(qApp);
+    m_subKeyLoadRecovery = std::make_shared<SubKeyLoadRecovery>();
+    m_subKeyRecoveryTimer = new QTimer(this);
+    m_subKeyRecoveryTimer->setInterval(100);
+    connect(m_subKeyRecoveryTimer, &QTimer::timeout, this, &RegistryDock::reconcileSubKeyLoads);
     initializeUi();
     initializeWorkbenchControls();
     initializeConnections();
@@ -1043,9 +1080,31 @@ void RegistryDock::selectTreeItemByPath(const QString& path)
     m_keyTree->scrollToItem(current);
 }
 
+void RegistryDock::reconcileSubKeyLoads()
+{
+    // Worker/drop cleanup carries values only; all tree changes stay on this timer's owner thread.
+    SubKeyLoadRecovery::DroppedLoad load;
+    bool idle = false;
+    for (int handled = 0; handled < 24; ++handled)
+    {
+        if (!m_subKeyLoadRecovery->take(&load, &idle)) break;
+        QTreeWidgetItem* target = resolveTreeItemByPath(m_keyTree, load.path);
+        if (target && target->data(0, kRoleLoadToken).toULongLong() == load.token)
+        {
+            qDeleteAll(target->takeChildren());
+            target->setData(0, kRoleLoadToken, static_cast<qulonglong>(0));
+            target->setData(0, kRoleLoaded, false);
+            target->setChildIndicatorPolicy(QTreeWidgetItem::ShowIndicator);
+            target->setToolTip(0, ks::i18n::sourceText(QStringLiteral("子键结果未应用；请折叠后重新展开以重试。")));
+        }
+    }
+    if (idle) m_subKeyRecoveryTimer->stop();
+}
+
 void RegistryDock::ensureTreeItemLoaded(QTreeWidgetItem* item)
 {
     if (item == nullptr || item->data(0, kRolePlaceholder).toBool()) return;
+    reconcileSubKeyLoads();
     if (item->data(0, kRoleLoaded).toBool()) return;
     // 已有一次后台枚举在途：不重复投递，等它落地即可。
     if (item->data(0, kRoleLoadToken).toULongLong() != 0) return;
@@ -1073,15 +1132,27 @@ void RegistryDock::ensureTreeItemLoaded(QTreeWidgetItem* item)
     const QPointer<RegistryDock> guardedSelf(this);
     const QPointer<QTreeWidget> guardedTree(m_keyTree);
     const auto dispatcher = m_uiDispatcher;
-    QThreadPool::globalInstance()->start(
-        [guardedSelf, guardedTree, dispatcher, requestToken, itemPath, context]()
+    const auto recovery = m_subKeyLoadRecovery;
+    const auto settled = std::make_shared<std::atomic_bool>(false);
+    recovery->started();
+    const auto finishQuery = [recovery, settled, requestToken, itemPath](bool wasDropped) {
+        if (!settled->exchange(true)) recovery->finished(itemPath, requestToken, wasDropped);
+    };
+    m_subKeyRecoveryTimer->start();
+    try
+    {
+        QThreadPool::globalInstance()->start(
+        [guardedSelf, guardedTree, dispatcher, requestToken, itemPath, context, finishQuery]()
         {
+            try
+            {
             RegistryKeyListing collected;
             QString error;
             const bool ok = RegistryWorkbenchAccess::enumerate(itemPath, context, &collected, &error, true);
             dispatcher->post(
-                [guardedSelf, guardedTree, requestToken, itemPath, collected, error, ok]()
+                [guardedSelf, guardedTree, requestToken, itemPath, collected, error, ok, finishQuery]()
                 {
+                    finishQuery(false);
                     if (guardedTree.isNull()) { return; }
 
                     // 用路径而不是裸指针重新定位：节点可能已在等待期间被销毁或重建。
@@ -1142,8 +1213,12 @@ void RegistryDock::ensureTreeItemLoaded(QTreeWidgetItem* item)
                         sharedSubKeyNames,
                         0,
                         onSubKeysApplied);
-                });
+                }, [finishQuery]() { finishQuery(true); });
+            }
+            catch (...) { finishQuery(true); }
         });
+    }
+    catch (...) { finishQuery(true); }
 }
 
 void RegistryDock::refreshCurrentKey(bool)

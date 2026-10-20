@@ -8,6 +8,8 @@
   "text_direction": "ltr",
   "fallback": "zh-CN",
   "translations": {
+    "registry.subkeys.delivery_retry": "Subkey results were not applied. Collapse and expand the key to retry.",
+    "子键结果未应用；请折叠后重新展开以重试。": "Subkey results were not applied. Collapse and expand the key to retry.",
     "driver.piddb.delete.exception": "A complete PiDDB result could not be obtained: %1.",
     "registry.value.pending_text": "Preparing the current text draft. Please wait…",
     "正在准备当前文本草稿，请稍候…": "Preparing the current text draft. Please wait…",
@@ -7013,6 +7015,7 @@
     "notification.copy.log_template": "%1\n%2\n%3\nFile: %4\nFunction: %5\nGUID: %6"
   },
   "source_translations": {
+    "子键结果未应用；请折叠后重新展开以重试。": "Subkey results were not applied. Collapse and expand the key to retry.",
     "PiDDB 操作未能取得完整回执：%1": "A complete PiDDB result could not be obtained: %1.",
     "正在准备当前文本草稿，请稍候…": "Preparing the current text draft. Please wait…",
     "正在读取原始字节，请稍候…": "Reading raw bytes. Please wait…",
