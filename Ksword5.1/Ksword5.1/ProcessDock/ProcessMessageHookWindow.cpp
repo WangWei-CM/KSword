@@ -26,8 +26,8 @@
 #include <QPushButton>
 #include "../UI/SegmentedControl.h"
 #include <QRunnable>
-#include <QTableWidget>
-#include <QTableWidgetItem>
+#include "../UI/ImmutableValueTable.h"
+
 #include <QThreadPool>
 #include <QVBoxLayout>
 
@@ -376,28 +376,28 @@ void ProcessMessageHookWindow::initializeUi()
         QStringLiteral("color:%1;").arg(KswordTheme::TextSecondaryHex()));
     rootLayout->addWidget(m_statusLabel, 0);
 
-    m_table = new QTableWidget(this);
-    // 消息 Hook 是该窗口的主结果，保留完整取证工具。
+    const QStringList headerSources{
+        QStringLiteral("目标 PID"),
+        QStringLiteral("目标 TID"),
+        QStringLiteral("Hook 类型"),
+        QStringLiteral("所有者 PID"),
+        QStringLiteral("所有者 TID"),
+        QStringLiteral("回调地址"),
+        QStringLiteral("模块"),
+        QStringLiteral("Flags"),
+        QStringLiteral("状态"),
+        QStringLiteral("Session"),
+        QStringLiteral("Hook 句柄"),
+        QStringLiteral("Hook 对象"),
+        QStringLiteral("模块基址"),
+        QStringLiteral("过程偏移"),
+        QStringLiteral("来源"),
+        QStringLiteral("NTSTATUS"),
+        QStringLiteral("诊断") };
+    QVector<ks::ui::ImmutableTableHeader> headers;
+    for (const auto& source : headerSources) headers.push_back(ks::ui::ImmutableTableHeader(source));
+    m_table = new ks::ui::ImmutableValueTable(this, std::move(headers));
     ks::ui::SetTableActionBarMode(m_table, ks::ui::TableActionBarMode::Full);
-    m_table->setColumnCount(columnIndex(Column::Count));
-    m_table->setHorizontalHeaderLabels(QStringList{
-        hookWindowText(QStringLiteral("目标 PID")),
-        hookWindowText(QStringLiteral("目标 TID")),
-        hookWindowText(QStringLiteral("Hook 类型")),
-        hookWindowText(QStringLiteral("所有者 PID")),
-        hookWindowText(QStringLiteral("所有者 TID")),
-        hookWindowText(QStringLiteral("回调地址")),
-        hookWindowText(QStringLiteral("模块")),
-        hookWindowText(QStringLiteral("Flags")),
-        hookWindowText(QStringLiteral("状态")),
-        hookWindowText(QStringLiteral("Session")),
-        hookWindowText(QStringLiteral("Hook 句柄")),
-        hookWindowText(QStringLiteral("Hook 对象")),
-        hookWindowText(QStringLiteral("模块基址")),
-        hookWindowText(QStringLiteral("过程偏移")),
-        hookWindowText(QStringLiteral("来源")),
-        hookWindowText(QStringLiteral("NTSTATUS")),
-        hookWindowText(QStringLiteral("诊断")) });
     m_table->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_table->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_table->setSelectionMode(QAbstractItemView::SingleSelection);
@@ -435,7 +435,7 @@ void ProcessMessageHookWindow::initializeConnections()
         {
             applyColumnPreset(QStringLiteral("B"));
         });
-    connect(m_table, &QTableWidget::customContextMenuRequested, this,
+    connect(m_table, &QTableView::customContextMenuRequested, this,
         [this](const QPoint& position)
         {
             showTableContextMenu(position);
@@ -486,11 +486,22 @@ void ProcessMessageHookWindow::requestRefresh()
         QStringLiteral("color:%1;font-weight:600;").arg(KswordTheme::PrimaryBlueHex));
 
     const ProcessMessageHookTarget target = m_target;
+    const auto translator = ks::i18n::LanguageManager::instance().sourceTextSnapshot();
     QPointer<ProcessMessageHookWindow> guardThis(this);
-    auto* task = QRunnable::create([guardThis, ticket, target, queryScope]()
+    auto* task = QRunnable::create([guardThis, ticket, target, queryScope, translator]()
         {
-            QueryResult queryResult;
-            queryResult.queryScope = queryScope;
+            auto queryResult = std::shared_ptr<QueryResult>(new QueryResult, [](QueryResult* obsolete) noexcept
+            {
+                try
+                {
+                    auto retired = std::unique_ptr<QueryResult>(obsolete);
+                    auto disposal = std::unique_ptr<QRunnable>(QRunnable::create([retired = std::move(retired)] {}));
+                    QThreadPool::globalInstance()->start(disposal.get());
+                    disposal.release();
+                }
+                catch (...) {}
+            });
+            queryResult->queryScope = queryScope;
             HANDLE rawIdentityHandle = nullptr;
             DWORD identityError = ERROR_INVALID_PARAMETER;
             if (target.processId != 0U && target.creationTime100ns != 0U)
@@ -527,9 +538,9 @@ void ProcessMessageHookWindow::requestRefresh()
             if (!identityReadable
                 || actualCreationTime100ns != target.creationTime100ns)
             {
-                queryResult.ioMessage = hookWindowText(QStringLiteral(
+                queryResult->ioMessage = translator.sourceText(QStringLiteral(
                     "进程身份已变化（PID 可能已被复用），已拒绝操作。"));
-                queryResult.detail = QStringLiteral(
+                queryResult->detail = QStringLiteral(
                     "expectedCreateTime100ns=%1; actualCreateTime100ns=%2; error=%3")
                     .arg(static_cast<qulonglong>(target.creationTime100ns))
                     .arg(static_cast<qulonglong>(actualCreationTime100ns))
@@ -546,25 +557,25 @@ void ProcessMessageHookWindow::requestRefresh()
                         0UL,
                         KSWORD_ARK_WIN32K_MESSAGE_HOOK_DEFAULT_MAX_ENTRIES);
 
-                queryResult.ioOk = driverResult.io.ok;
-                queryResult.unsupported = driverResult.unsupported;
-                queryResult.status = driverResult.status;
-                queryResult.totalCount = driverResult.totalCount;
-                queryResult.returnedCount = driverResult.returnedCount;
-                queryResult.discoveredChainCount = driverResult.discoveredChainCount;
-                queryResult.visitedNodeCount = driverResult.visitedNodeCount;
-                queryResult.readFailureCount = driverResult.readFailureCount;
-                queryResult.corruptLinkCount = driverResult.corruptLinkCount;
-                queryResult.duplicateCount = driverResult.duplicateCount;
-                queryResult.lastStatus = driverResult.lastStatus;
-                queryResult.ioMessage = QString::fromStdString(driverResult.io.message);
-                queryResult.detail = driverResult.detail.empty()
+                queryResult->ioOk = driverResult.io.ok;
+                queryResult->unsupported = driverResult.unsupported;
+                queryResult->status = driverResult.status;
+                queryResult->totalCount = driverResult.totalCount;
+                queryResult->returnedCount = driverResult.returnedCount;
+                queryResult->discoveredChainCount = driverResult.discoveredChainCount;
+                queryResult->visitedNodeCount = driverResult.visitedNodeCount;
+                queryResult->readFailureCount = driverResult.readFailureCount;
+                queryResult->corruptLinkCount = driverResult.corruptLinkCount;
+                queryResult->duplicateCount = driverResult.duplicateCount;
+                queryResult->lastStatus = driverResult.lastStatus;
+                queryResult->ioMessage = QString::fromStdString(driverResult.io.message);
+                queryResult->detail = driverResult.detail.empty()
                     ? QString()
                     : QString::fromWCharArray(
                         driverResult.detail.c_str(),
                         static_cast<qsizetype>(driverResult.detail.size()));
 
-                queryResult.rows.reserve(driverResult.entries.size());
+                queryResult->rows.reserve(driverResult.entries.size());
                 for (const KSWORD_ARK_WIN32K_HOOK_ENTRY& entry : driverResult.entries)
                 {
                     if (!entryMatchesProcessScope(entry, target, queryScope))
@@ -584,7 +595,7 @@ void ProcessMessageHookWindow::requestRefresh()
                         KSWORD_ARK_WIN32K_DETAIL_CHARS).trimmed();
                     if (!entryDetail.isEmpty()) diagnosticParts << entryDetail;
 
-                    queryResult.rows.push_back(QStringList{
+                    queryResult->rows.push_back(QStringList{
                         QString::number(entry.targetProcessId),
                         QString::number(entry.targetThreadId),
                         hookTypeText(entry.hookType),
@@ -603,7 +614,7 @@ void ProcessMessageHookWindow::requestRefresh()
                         formatNtStatus(entry.lastStatus),
                         diagnosticParts.join(QStringLiteral("; ")) });
                 }
-                queryResult.matchedCount = static_cast<std::uint32_t>(queryResult.rows.size());
+                queryResult->matchedCount = static_cast<std::uint32_t>(queryResult->rows.size());
             }
 
             if (guardThis == nullptr)
@@ -625,9 +636,36 @@ void ProcessMessageHookWindow::requestRefresh()
     QThreadPool::globalInstance()->start(task);
 }
 
-void ProcessMessageHookWindow::applyQueryResult(
+void ProcessMessageHookWindow::applyQueryResult(const std::uint64_t ticket,
+    const std::shared_ptr<const QueryResult>& result)
+{
+    if (ticket != m_refreshTicket) return;
+    if (result->queryScope != currentQueryScope())
+    {
+        m_refreshInProgress = false;
+        m_refreshPending = false;
+        QMetaObject::invokeMethod(this, [this] { requestRefresh(); }, Qt::QueuedConnection);
+        return;
+    }
+    const QPointer<ProcessMessageHookWindow> alive(this);
+    m_table->sourceReady = [alive, ticket, result]
+    {
+        if (alive && ticket == alive->m_refreshTicket && alive->m_refreshInProgress)
+            alive->finishQueryPresentation(ticket, result);
+    };
+    m_table->preparationFailed = [alive, ticket](const QString& error)
+    {
+        if (!alive || ticket != alive->m_refreshTicket) return;
+        alive->m_refreshInProgress = false;
+        alive->m_refreshButton->setEnabled(true);
+        alive->m_statusLabel->setText(error);
+    };
+    rebuildTable(result);
+}
+
+void ProcessMessageHookWindow::finishQueryPresentation(
     const std::uint64_t ticket,
-    const QueryResult& result)
+    const std::shared_ptr<const QueryResult>& result)
 {
     if (ticket < m_refreshTicket)
     {
@@ -637,7 +675,7 @@ void ProcessMessageHookWindow::applyQueryResult(
     m_refreshInProgress = false;
 
     // 范围切换发生在异步查询期间时，不让旧范围结果短暂覆盖新选择。
-    if (result.queryScope != currentQueryScope())
+    if (result->queryScope != currentQueryScope())
     {
         m_refreshPending = false;
         QMetaObject::invokeMethod(this, [this]()
@@ -648,29 +686,28 @@ void ProcessMessageHookWindow::applyQueryResult(
     }
 
     m_refreshButton->setEnabled(true);
-    rebuildTable(result);
     m_table->setEnabled(true);
 
-    const QString overallStatus = hookStatusText(result.status);
+    const QString overallStatus = hookStatusText(result->status);
     QString statusText;
-    const QString scopeText = queryScopeText(result.queryScope);
-    const bool statusOk = result.ioOk &&
-        result.status == KSWORD_ARK_WIN32K_STATUS_OK &&
-        result.readFailureCount == 0U &&
-        result.corruptLinkCount == 0U &&
-        result.returnedCount >= result.totalCount;
-    if (!result.ioOk)
+    const QString scopeText = queryScopeText(result->queryScope);
+    const bool statusOk = result->ioOk &&
+        result->status == KSWORD_ARK_WIN32K_STATUS_OK &&
+        result->readFailureCount == 0U &&
+        result->corruptLinkCount == 0U &&
+        result->returnedCount >= result->totalCount;
+    if (!result->ioOk)
     {
         statusText = hookWindowText(QStringLiteral("查询失败：%1"))
-            .arg(result.ioMessage.trimmed().isEmpty()
+            .arg(result->ioMessage.trimmed().isEmpty()
                 ? hookWindowText(QStringLiteral("驱动接口不可用或版本不匹配。"))
-                : result.ioMessage.trimmed());
+                : result->ioMessage.trimmed());
     }
-    else if (result.rows.empty())
+    else if (result->rows.empty())
     {
         statusText = hookWindowText(
             QStringLiteral("查询完成：驱动返回 %1 行，按“%2”复核后没有可显示的 Hook。总体状态：%3。"))
-            .arg(result.returnedCount)
+            .arg(result->returnedCount)
             .arg(scopeText)
             .arg(overallStatus);
     }
@@ -679,20 +716,20 @@ void ProcessMessageHookWindow::applyQueryResult(
         statusText = hookWindowText(
             QStringLiteral("查询完成：按“%1”显示 %2 条 Hook，驱动返回 %3/%4 行。总体状态：%5。"))
             .arg(scopeText)
-            .arg(result.matchedCount)
-            .arg(result.returnedCount)
-            .arg(result.totalCount)
+            .arg(result->matchedCount)
+            .arg(result->returnedCount)
+            .arg(result->totalCount)
             .arg(overallStatus);
     }
-    if (result.ioOk)
+    if (result->ioOk)
     {
         statusText += QLatin1Char(' ') + hookWindowText(QStringLiteral(
             "遍历：链 %1，节点 %2，读取失败 %3，损坏链接 %4，重复 %5。"))
-            .arg(result.discoveredChainCount)
-            .arg(result.visitedNodeCount)
-            .arg(result.readFailureCount)
-            .arg(result.corruptLinkCount)
-            .arg(result.duplicateCount);
+            .arg(result->discoveredChainCount)
+            .arg(result->visitedNodeCount)
+            .arg(result->readFailureCount)
+            .arg(result->corruptLinkCount)
+            .arg(result->duplicateCount);
     }
     m_statusLabel->setText(statusText);
     m_statusLabel->setStyleSheet(
@@ -710,63 +747,56 @@ void ProcessMessageHookWindow::applyQueryResult(
     }
 }
 
-void ProcessMessageHookWindow::rebuildTable(const QueryResult& result)
+void ProcessMessageHookWindow::rebuildTable(const std::shared_ptr<const QueryResult>& result)
 {
-    m_table->setSortingEnabled(false);
-    m_table->clearContents();
-
-    if (!result.rows.empty())
+    QStringList emptyCells;
+    if (result->rows.empty())
     {
-        m_table->setRowCount(static_cast<int>(result.rows.size()));
-        for (int row = 0; row < static_cast<int>(result.rows.size()); ++row)
-        {
-            const QStringList& cells = result.rows[static_cast<std::size_t>(row)];
-            for (int column = 0; column < columnIndex(Column::Count); ++column)
-            {
-                auto* item = new QTableWidgetItem(column < cells.size() ? cells[column] : QString());
-                item->setToolTip(item->text());
-                m_table->setItem(row, column, item);
-            }
-        }
-    }
-    else
-    {
-        m_table->setRowCount(1);
         QStringList detailParts;
-        detailParts << QStringLiteral("io=%1").arg(result.ioOk ? QStringLiteral("ok") : QStringLiteral("failed"));
-        detailParts << QStringLiteral("status=%1").arg(hookStatusText(result.status));
-        detailParts << QStringLiteral("returned=%1/%2").arg(result.returnedCount).arg(result.totalCount);
-        detailParts << QStringLiteral("scope=%1").arg(queryScopeText(result.queryScope));
-        detailParts << QStringLiteral("chains=%1").arg(result.discoveredChainCount);
-        detailParts << QStringLiteral("visited=%1").arg(result.visitedNodeCount);
-        detailParts << QStringLiteral("readFailures=%1").arg(result.readFailureCount);
-        detailParts << QStringLiteral("corruptLinks=%1").arg(result.corruptLinkCount);
-        detailParts << QStringLiteral("duplicates=%1").arg(result.duplicateCount);
-        detailParts << QStringLiteral("lastStatus=%1").arg(formatNtStatus(result.lastStatus));
-        if (!result.ioMessage.trimmed().isEmpty()) detailParts << result.ioMessage.trimmed();
-        if (!result.detail.trimmed().isEmpty()) detailParts << result.detail.trimmed();
+        detailParts << QStringLiteral("io=%1").arg(result->ioOk ? QStringLiteral("ok") : QStringLiteral("failed"));
+        detailParts << QStringLiteral("status=%1").arg(hookStatusText(result->status));
+        detailParts << QStringLiteral("returned=%1/%2").arg(result->returnedCount).arg(result->totalCount);
+        detailParts << QStringLiteral("scope=%1").arg(queryScopeText(result->queryScope));
+        detailParts << QStringLiteral("chains=%1").arg(result->discoveredChainCount);
+        detailParts << QStringLiteral("visited=%1").arg(result->visitedNodeCount);
+        detailParts << QStringLiteral("readFailures=%1").arg(result->readFailureCount);
+        detailParts << QStringLiteral("corruptLinks=%1").arg(result->corruptLinkCount);
+        detailParts << QStringLiteral("duplicates=%1").arg(result->duplicateCount);
+        detailParts << QStringLiteral("lastStatus=%1").arg(formatNtStatus(result->lastStatus));
+        if (!result->ioMessage.trimmed().isEmpty()) detailParts << result->ioMessage.trimmed();
+        if (!result->detail.trimmed().isEmpty()) detailParts << result->detail.trimmed();
 
-        for (int column = 0; column < columnIndex(Column::Count); ++column)
-        {
-            m_table->setItem(0, column, new QTableWidgetItem(QStringLiteral("-")));
-        }
-        m_table->item(0, columnIndex(Column::HookType))->setText(
-            hookWindowText(QStringLiteral("<无可显示的消息 Hook>")));
-        m_table->item(0, columnIndex(Column::Status))->setText(hookStatusText(result.status));
-        m_table->item(0, columnIndex(Column::LastStatus))->setText(formatNtStatus(result.lastStatus));
-        m_table->item(0, columnIndex(Column::Diagnostic))->setText(detailParts.join(QStringLiteral("; ")));
-        for (int column = 0; column < columnIndex(Column::Count); ++column)
-        {
-            m_table->item(0, column)->setToolTip(m_table->item(0, column)->text());
-        }
+        emptyCells.resize(columnIndex(Column::Count));
+        for (auto& cell : emptyCells) cell = QStringLiteral("-");
+        emptyCells[columnIndex(Column::HookType)] = hookWindowText(QStringLiteral("<无可显示的消息 Hook>"));
+        emptyCells[columnIndex(Column::Status)] = hookStatusText(result->status);
+        emptyCells[columnIndex(Column::LastStatus)] = formatNtStatus(result->lastStatus);
+        emptyCells[columnIndex(Column::Diagnostic)] = detailParts.join(QStringLiteral("; "));
     }
-
-    m_table->setSortingEnabled(true);
-    if (m_table->rowCount() > 0)
+    m_table->setSourceFactory([result, emptyCells](const ks::i18n::SourceTextSnapshot& translator)
     {
-        m_table->selectRow(0);
-    }
-    m_table->resizeRowsToContents();
+        QVector<ks::ui::ImmutableTableRow> rows;
+        rows.reserve(static_cast<qsizetype>(result->rows.empty() ? 1U : result->rows.size()));
+        if (result->rows.empty())
+        {
+            ks::ui::ImmutableTableRow row;
+            row.key = QStringLiteral("diagnostic");
+            row.cells = emptyCells;
+            for (auto& cell : row.cells) cell = translator.displayText(cell);
+            rows.push_back(std::move(row));
+        }
+        else for (std::size_t index = 0; index < result->rows.size(); ++index)
+        {
+            ks::ui::ImmutableTableRow row;
+            // Index belongs to this accepted immutable query, independent of column sorting.
+            row.key = QString::number(static_cast<qulonglong>(index));
+            row.cells = result->rows[index];
+            row.cells.resize(columnIndex(Column::Count));
+            for (auto& cell : row.cells) cell = translator.displayText(cell);
+            rows.push_back(std::move(row));
+        }
+        return ks::ui::MakeImmutableTableSource(std::move(rows));
+    });
 }
 
 void ProcessMessageHookWindow::applyColumnPreset(const QString& presetName)
@@ -829,8 +859,8 @@ void ProcessMessageHookWindow::showHeaderContextMenu(const QPoint& localPosition
 
     for (int column = 0; column < columnIndex(Column::Count); ++column)
     {
-        const QTableWidgetItem* headerItem = m_table->horizontalHeaderItem(column);
-        QAction* action = menu.addAction(headerItem != nullptr ? headerItem->text() : QString::number(column));
+        const QString header = m_table->model()->headerData(column, Qt::Horizontal).toString();
+        QAction* action = menu.addAction(header);
         action->setCheckable(true);
         action->setChecked(!m_table->isColumnHidden(column));
         action->setData(column);
@@ -873,7 +903,7 @@ void ProcessMessageHookWindow::showTableContextMenu(const QPoint& localPosition)
     const QModelIndex index = m_table->indexAt(localPosition);
     if (index.isValid())
     {
-        m_table->setCurrentCell(index.row(), index.column());
+        m_table->setCurrentIndex(index);
         m_table->selectRow(index.row());
     }
 
@@ -892,7 +922,7 @@ void ProcessMessageHookWindow::showTableContextMenu(const QPoint& localPosition)
     QAction* copyAllAction = menu.addAction(
         QIcon(QStringLiteral(":/Icon/process_copy_row.svg")),
         hookWindowText(QStringLiteral("复制全部行")));
-    copyCellAction->setEnabled(m_table->currentItem() != nullptr);
+    copyCellAction->setEnabled(m_table->currentIndex().isValid());
     copyRowAction->setEnabled(m_table->currentRow() >= 0);
     copyAllAction->setEnabled(m_table->rowCount() > 0);
 
@@ -904,9 +934,9 @@ void ProcessMessageHookWindow::showTableContextMenu(const QPoint& localPosition)
 
 void ProcessMessageHookWindow::copyCurrentCell() const
 {
-    if (m_table->currentItem() != nullptr)
+    if (m_table->currentIndex().isValid())
     {
-        QApplication::clipboard()->setText(m_table->currentItem()->text());
+        QApplication::clipboard()->setText(m_table->currentIndex().data().toString());
     }
 }
 
@@ -935,8 +965,7 @@ QString ProcessMessageHookWindow::tableRowText(const int row) const
     QStringList fields;
     for (int column = 0; column < columnIndex(Column::Count); ++column)
     {
-        const QTableWidgetItem* item = m_table->item(row, column);
-        fields << (item != nullptr ? item->text() : QString());
+        fields << m_table->cell(row, column).toString();
     }
     return fields.join(QLatin1Char('\t'));
 }
@@ -946,8 +975,7 @@ QString ProcessMessageHookWindow::tableHeaderText() const
     QStringList headers;
     for (int column = 0; column < columnIndex(Column::Count); ++column)
     {
-        const QTableWidgetItem* item = m_table->horizontalHeaderItem(column);
-        headers << (item != nullptr ? item->text() : QString());
+        headers << m_table->model()->headerData(column, Qt::Horizontal).toString();
     }
     return headers.join(QLatin1Char('\t'));
 }
