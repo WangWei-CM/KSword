@@ -1264,28 +1264,27 @@ KswRxpfRuntimeExecProof(
         goto Cleanup;
     }
 
-    /* Step 5: 调 mode=1 restore —— 这是**正确的**execute path 入口。
-     * KswRxpfRestoreExecutableProtection 内部：
-     *   - 对 Record->CurrentContent 算 SHA-512
-     *   - 取 [0x20,0x40) 作为参考摘要（放在 driver .data 节内，自映像范围）
-     *   - 调 MmChangeImageProtection(Mdl, refVA, refLen, operation=1)
-     *   - ntoskrnl 把 ref 透传给 VslValidateDynamicCodePages → VTL1 比对
-     *   - 匹配通过 → PTE 恢复 PAGE_EXECUTE_READ（**保留修改字节**）
-     *   - guest 下 VTL1 常返 STATUS_ACCESS_VIOLATION（memory 实证）
-     *   - root partition 下期望 STATUS_SUCCESS（memory `rxpf-mode1-realhardware-26h2-confirmed`）
-     * 不再走 shadow IDT emulator —— LIDT 被 Hyper-V 拦（host+guest 双实证 0x1E），
-     * mode=1 restore 成功时 CPU 可以直接 fetch 执行，不需要仿真。 */
+    /* Step 5: 恢复 PTE 到可执行 —— 对 ALLOCATED_TEST 走 MmProtectMdlSystemAddress 对称反向，
+     * **不走 VSL** —— driver 自己 allocate 的物理页，VTL1 没有它的 digest 需要验证。
+     * 对称于 ChangeToRwNx 对 ALLOCATED_TEST 分支：MmProtectMdlSystemAddress(mdl, PAGE_READWRITE)。
+     * 这里反向：MmProtectMdlSystemAddress(mdl, PAGE_EXECUTE_READ) → PTE 回 RX，保留写入字节。
+     * ALLOCATED_TEST 的 ChangeToRwNx 不设 ChangeProtectionApplied，所以
+     * KswRxpfRestoreExecutableProtection 对它是 no-op（image protection path 不适用）。
+     * EXTERNAL_IMAGE 和 SELF_IMAGE_TEST 需要走 mode=1 + VSL digest 验证（后续加）。 */
     executionCallTarget = (ULONGLONG)record->PageBase;
-    KswRxpfRestoreExecutableProtection(record);
-    restoreStatus = record->LastStatus;
+    restoreStatus = MmProtectMdlSystemAddress(record->Mdl, PAGE_EXECUTE_READ);
+    record->LastStatus = restoreStatus;
     if (!NT_SUCCESS(restoreStatus)) {
-        /* mode=1 restore 失败（guest 下 STATUS_ACCESS_VIOLATION）：
-         * PTE 没回 RX，call rcx 会 bugcheck 0xFC。进 Cleanup，不 call。
+        /* restore 失败：PTE 没回 RX，call rcx 会 bugcheck 0xFC。进 Cleanup。
          * verdict 保 SETUP_FAILED，调用方据 setupStatus+restoreStatus 定位。 */
         setupStatus = restoreStatus;
         status = restoreStatus;
         goto Cleanup;
     }
+    /* 显式更新 driver 内部名义值与 writable alias，Release 时才知该页已非可写。 */
+    record->CurrentProtection = PAGE_EXECUTE_READ;
+    record->WritableAliasProtection = 0UL;
+    record->WritableAlias = 0ULL;
 
     /* Step 6: mode=1 restore 成功 → PTE 回 RX 且字节保留 → CPU 可直接执行 payload。
      * 持 PageTable 排它锁 + IRQL = PASSIVE，直接 call rcx 跳入 payload。
