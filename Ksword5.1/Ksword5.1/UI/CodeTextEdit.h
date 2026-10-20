@@ -14,6 +14,7 @@
 #include <QPlainTextEdit>
 #include <QTextEdit>
 
+class CodeTextEditApplicationFontHub;
 class QPaintEvent;
 class QKeyEvent;
 class QResizeEvent;
@@ -76,8 +77,6 @@ public:
 protected:
     // changeEvent：排队重算语法色和选择区，不修改正文与编辑会话。
     void changeEvent(QEvent* event) override;
-    // 应用字体改变不会覆盖显式等宽字体，统一控制器保留宿主字号倍率并排队刷新。
-    bool eventFilter(QObject* source, QEvent* event) override;
 
     // resizeEvent：
     // - 编辑区尺寸变化时同步行号区几何。
@@ -85,6 +84,8 @@ protected:
     void keyPressEvent(QKeyEvent* event) override;
 
 private:
+    friend class CodeTextEditApplicationFontHub;
+
     // scheduleRefreshExtraSelections：
     // - 节流触发高亮刷新。
     void scheduleRefreshExtraSelections();

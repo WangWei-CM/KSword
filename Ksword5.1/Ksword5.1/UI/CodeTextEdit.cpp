@@ -141,6 +141,51 @@ namespace
     }
 }
 
+// One application observer serves every editor, including hidden documents.
+// Ordinary paint, wheel and input events no longer visit each editor instance.
+class CodeTextEditApplicationFontHub final : public QObject
+{
+public:
+    static void subscribe(CodeTextEdit* editor)
+    {
+        static QPointer<CodeTextEditApplicationFontHub> hub;
+        if (!hub) hub = new CodeTextEditApplicationFontHub(qApp);
+        hub->m_editors.append(editor);
+        QObject::connect(editor, &QObject::destroyed, hub.data(), [observer = hub.data(), editor] {
+            observer->m_editors.removeIf([editor](const QPointer<CodeTextEdit>& candidate) {
+                return !candidate || candidate.data() == editor;
+            });
+        });
+    }
+
+protected:
+    bool eventFilter(QObject* source, QEvent* event) override
+    {
+        if (source == qApp && event && (event->type() == QEvent::ApplicationFontChange
+            || event->type() == QEvent::FontChange))
+        {
+            const QFont application = QApplication::font();
+            if (application != m_lastFont)
+            {
+                m_lastFont = application;
+                const auto editors = m_editors;
+                for (const auto& editor : editors)
+                    if (editor) editor->scheduleApplicationFontRefresh();
+            }
+        }
+        return QObject::eventFilter(source, event);
+    }
+
+private:
+    explicit CodeTextEditApplicationFontHub(QObject* parent)
+        : QObject(parent), m_lastFont(QApplication::font())
+    {
+        qApp->installEventFilter(this);
+    }
+    QList<QPointer<CodeTextEdit>> m_editors;
+    QFont m_lastFont;
+};
+
 // A lexical painter, not a parser. Very long logical lines have bounded work;
 // unknown tails stay ordinary text and never supply guessed bracket matches.
 class CodeSyntaxHighlighter final : public QSyntaxHighlighter
@@ -324,7 +369,7 @@ CodeTextEdit::CodeTextEdit(QWidget* parent) : QPlainTextEdit(parent)
     refreshThemeColors();
     m_fontSizeScale = fontSizeScale(font(), m_applicationFont);
     m_fontTrackingReady = true;
-    qApp->installEventFilter(this);
+    CodeTextEditApplicationFontHub::subscribe(this);
     // No real content exists yet. Discard only decoration setup history here;
     // subsequent language/theme/compact changes never clear user undo history.
     document()->clearUndoRedoStacks();
@@ -532,14 +577,6 @@ void CodeTextEdit::changeEvent(QEvent* event)
             if (m_themeRefreshPending) refreshThemeColors();
         });
     }
-}
-
-bool CodeTextEdit::eventFilter(QObject* source, QEvent* event)
-{
-    if (source == qApp && event != nullptr &&
-        (event->type() == QEvent::ApplicationFontChange || event->type() == QEvent::FontChange))
-        scheduleApplicationFontRefresh();
-    return QPlainTextEdit::eventFilter(source, event);
 }
 
 void CodeTextEdit::scheduleApplicationFontRefresh()
