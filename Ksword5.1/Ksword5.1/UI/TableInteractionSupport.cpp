@@ -22,6 +22,7 @@
 #include <QContextMenuEvent>
 #include <QDateTime>
 #include <QEvent>
+#include <QDynamicPropertyChangeEvent>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFrame>
@@ -185,7 +186,7 @@ namespace
         {
             return false;
         }
-        return tableView->isRowHidden(row) && !ks::ui::isRowHiddenByFreeze(tableView, row);
+        return ks::ui::IsTableRowExcludedByFilter(tableView, row);
     }
 
     bool isColumnHiddenByFilter(const QTableView* tableView, const int column)
@@ -867,7 +868,11 @@ namespace
             // Frozen sections are already published by the controller after model
             // resets/inserts/removes. Observe that state without polling or repolishing.
             if (source == m_table && event != nullptr && event->type() == QEvent::DynamicPropertyChange)
-                updateFreezeButton();
+            {
+                if (static_cast<QDynamicPropertyChangeEvent*>(event)->propertyName()
+                    == ks::ui::TableRowFilterRevisionProperty) updateControls();
+                else updateFreezeButton();
+            }
             return QFrame::eventFilter(source, event);
         }
 
@@ -2354,7 +2359,7 @@ namespace
             QTableView* activeTable = activeTableView();
             const bool hasVisibleRows = activeTable != nullptr &&
                 activeTable->model() != nullptr &&
-                activeTable->model()->rowCount() > 0 &&
+                ks::ui::HasTableRowsPassingFilters(activeTable) &&
                 activeTable->model()->columnCount() > 0;
             const bool controlsAvailable =
                 !m_snapshotCaptureInProgress &&

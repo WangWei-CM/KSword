@@ -1,4 +1,5 @@
 #include "./TableContextMenu.h"
+#include "TableRowFilterSupport.h"
 
 #include "../Internationalization/LanguageManager.h"
 #include "../theme.h"
@@ -120,11 +121,13 @@ namespace ks::ui
             const QPersistentModelIndex guardedCell(clickedIndex); // 模型重置时自动失效。
             QAction* cellAction = addSharedAction(menu, ":/Icon/process_copy_cell.svg", "复制单元格");
             cellAction->setObjectName(QStringLiteral("ksword_table_copy_cell_action"));
-            cellAction->setEnabled(clickedIndex.isValid() && clickedIndex.model() == table->model());
+            cellAction->setEnabled(clickedIndex.isValid() && clickedIndex.model() == table->model()
+                && !IsTableRowExcludedByFilter(table, clickedIndex.row()));
             QObject::connect(cellAction, &QAction::triggered, menu, [guardedTable, guardedCell]()
             {
                 if (guardedTable.isNull() || !guardedCell.isValid()
-                    || guardedCell.model() != guardedTable->model())
+                    || guardedCell.model() != guardedTable->model()
+                    || IsTableRowExcludedByFilter(guardedTable.data(), guardedCell.row()))
                 {
                     return;
                 }

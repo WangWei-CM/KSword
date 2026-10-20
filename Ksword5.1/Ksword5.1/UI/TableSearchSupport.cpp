@@ -1,4 +1,6 @@
 #include "TableSearchSupport.h"
+#include "TableRowFilterSupport.h"
+#include "TableFreezeSupport.h"
 #include "./FlatButtonTheme.h"
 #include "ThemeBinding.h"
 
@@ -708,7 +710,7 @@ namespace
             for (int rowIndex = 0; rowIndex < rowCount; ++rowIndex)
             {
                 m_baselineHiddenRowList.push_back(
-                    m_tableView->isRowHidden(rowIndex));
+                    ks::ui::IsTableRowHiddenByLegacyFilter(m_tableView.data(), rowIndex));
             }
         }
 
@@ -721,15 +723,7 @@ namespace
                 return;
             }
 
-            const int restorableRowCount = std::min(
-                m_tableView->model()->rowCount(),
-                static_cast<int>(m_baselineHiddenRowList.size()));
-            for (int rowIndex = 0; rowIndex < restorableRowCount; ++rowIndex)
-            {
-                m_tableView->setRowHidden(
-                    rowIndex,
-                    m_baselineHiddenRowList.at(rowIndex));
-            }
+            ks::ui::ClearTableSearchRowFilter(m_tableView.data());
         }
 
         bool rowMatchesQuery(const int rowIndex) const
@@ -744,7 +738,8 @@ namespace
                  columnIndex < model->columnCount();
                  ++columnIndex)
             {
-                if (m_tableView->isColumnHidden(columnIndex))
+                if (m_tableView->isColumnHidden(columnIndex)
+                    && !ks::ui::isColumnHiddenByFreeze(m_tableView.data(), columnIndex))
                 {
                     continue;
                 }
@@ -777,8 +772,7 @@ namespace
             for (int rowIndex = 0; rowIndex < rowCount; ++rowIndex)
             {
                 const bool baselineHidden = m_baselineHiddenRowList.at(rowIndex);
-                m_tableView->setRowHidden(
-                    rowIndex,
+                ks::ui::SetTableSearchRowExcluded(m_tableView.data(), rowIndex,
                     baselineHidden || !rowMatchesQuery(rowIndex));
             }
         }
@@ -1084,25 +1078,39 @@ namespace ks::ui
              columnIndex < columnCount && resultList.size() < maxHitCount;
              ++columnIndex)
         {
-            if (tableView->isColumnHidden(columnIndex) || itemModel->rowCount() <= 0)
+            if ((tableView->isColumnHidden(columnIndex) && !isColumnHiddenByFreeze(tableView, columnIndex))
+                || itemModel->rowCount() <= 0)
             {
                 continue;
             }
 
-            const int remainingHitCount = maxHitCount - resultList.size();
-            const QModelIndex startIndex = itemModel->index(0, columnIndex);
-            const QModelIndexList matchedIndexList = itemModel->match(
-                startIndex,
-                Qt::DisplayRole,
-                normalizedQuery,
-                remainingHitCount,
-                Qt::MatchContains | Qt::MatchRecursive);
+            // Preserve Qt's default column/depth-first matching order while
+            // applying business exclusions before counting a hit. A rejected
+            // prefix must not consume the hit cap or allocate all model matches.
+            struct SearchFrame { QPersistentModelIndex parent; int row; int rows; };
+            QVector<SearchFrame> frames;
+            frames.push_back({{}, 0, itemModel->rowCount()});
+            QModelIndexList matchedIndexList;
+            const int remainingHits = maxHitCount - resultList.size();
+            while (!frames.isEmpty() && matchedIndexList.size() < remainingHits)
+            {
+                auto& frame = frames.last();
+                if (frame.row >= frame.rows) { frames.removeLast(); continue; }
+                const QModelIndex index = itemModel->index(frame.row++, columnIndex, frame.parent);
+                if (!index.isValid() || IsTableCellExcludedByBusinessFilter(tableView, index)) continue;
+                if (index.data(Qt::DisplayRole).toString().contains(normalizedQuery, Qt::CaseInsensitive))
+                    matchedIndexList.push_back(index);
+                const QModelIndex child = columnIndex == 0 ? index : index.siblingAtColumn(0);
+                if (itemModel->hasChildren(child))
+                    frames.push_back({QPersistentModelIndex(child), 0, itemModel->rowCount(child)});
+            }
             const QString columnName = itemModel
                 ->headerData(columnIndex, Qt::Horizontal, Qt::DisplayRole)
                 .toString()
                 .trimmed();
             for (const QModelIndex& matchedIndex : matchedIndexList)
             {
+                if (IsTableCellExcludedByBusinessFilter(tableView, matchedIndex)) continue;
                 const QString matchedText = matchedIndex.data(Qt::DisplayRole).toString().trimmed();
                 if (matchedText.isEmpty())
                 {
@@ -1141,6 +1149,8 @@ namespace ks::ui
         }
 
         const QModelIndex modelIndex = searchMatch.modelIndex;
+        if (modelIndex.model() != tableView->model()
+            || IsTableCellExcludedByBusinessFilter(tableView, modelIndex)) return;
         tableView->scrollTo(modelIndex, QAbstractItemView::PositionAtCenter);
         tableView->setCurrentIndex(modelIndex);
         if (tableView->selectionModel() != nullptr)

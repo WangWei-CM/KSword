@@ -1,0 +1,34 @@
+#pragma once
+
+#include <QPersistentModelIndex>
+#include <QSet>
+
+class QTableView;
+
+namespace ks::ui
+{
+    // Exclusions are first-column identities in the table's current model/root.
+    // Sorting preserves them; reset/replacement invalidates them. The source model,
+    // delegate and selection model stay unchanged. An empty set clears this layer.
+    enum class TableRowFilterBusinessOwnership { LegacyCompatible, ExclusiveSharedIdentity };
+    // Opt in only after every business row-hide writer for this table uses the
+    // canonical API. Default compatibility preserves direct setRowHidden writers.
+    void SetTableRowFilterBusinessOwnership(QTableView* table, TableRowFilterBusinessOwnership ownership);
+
+    void ApplyTableRowFilter(QTableView* tableView,
+        const QSet<QPersistentModelIndex>& excludedRows);
+    bool IsTableRowExcludedByFilter(const QTableView* tableView, int row);
+    bool HasTableRowsPassingFilters(const QTableView* tableView);
+    quint64 TableRowFilterIdentityRevision(const QTableView* tableView);
+
+    // Shared search/freeze adapters; a new search may search beyond its previous
+    // result filter, but must never reveal a row excluded by the business filter.
+    bool IsTableCellExcludedByBusinessFilter(const QTableView* tableView,
+        const QModelIndex& index);
+    bool IsTableRowHiddenByLegacyFilter(const QTableView* tableView, int row);
+    void SetTableSearchRowExcluded(QTableView* tableView, int row, bool excluded);
+    void ClearTableSearchRowFilter(QTableView* tableView);
+
+    inline constexpr char TableRowFilterRevisionProperty[] =
+        "ksword_table_row_filter_revision";
+}

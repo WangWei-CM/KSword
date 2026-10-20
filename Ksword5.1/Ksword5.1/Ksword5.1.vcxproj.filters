@@ -67,6 +67,12 @@
     <ClCompile Include="PrivilegeDock\PrivilegeTokenPages.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClInclude Include="UI\TableRowFilterSupport.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="UI\TableRowFilterIdentityState.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="..\..\shared\evidence\SerialTransactionQueue.h">
       <Filter>Header Files</Filter>
     </ClInclude>

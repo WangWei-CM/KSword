@@ -797,6 +797,7 @@ namespace ks::ui
         const HeaderCaptureState verticalState =
             captureHeaderState(verticalHeader.data(), rowsToVisit);
         const quint64 captureEpoch = sourceEpoch;
+        const quint64 filterRevision = TableRowFilterIdentityRevision(tableView);
 
         const auto sourceIdentityIsStable = [&]()
             {
@@ -804,6 +805,7 @@ namespace ks::ui
                     !tableGuard.isNull() &&
                     !modelGuard.isNull() &&
                     tableGuard->model() == modelGuard.data() &&
+                    TableRowFilterIdentityRevision(tableGuard.data()) == filterRevision &&
                     tableGuard->horizontalHeader() == horizontalHeader.data() &&
                     tableGuard->verticalHeader() == verticalHeader.data() &&
                     modelGuard->rowCount() == rowCount &&
@@ -892,6 +894,7 @@ namespace ks::ui
             // 同上：冻结行是用户钉住的证据行，不能因为源表隐藏就从快照里漏掉。
             if (sourceRow < 0 ||
                 sourceRow >= rowCount ||
+                IsTableRowExcludedByFilter(tableView, sourceRow) ||
                 (visualRow < verticalState.hiddenSections.size() &&
                     verticalState.hiddenSections.testBit(visualRow) &&
                     !isRowHiddenByFreeze(tableView, sourceRow)))

@@ -1,4 +1,6 @@
 #include "TableFreezeSupport.h"
+#include "TableRowFilterIdentityState.h"
+#include <QDynamicPropertyChangeEvent>
 
 #include "VisibleTableWidget.h"
 #include "TablePresentation.h"
@@ -36,6 +38,9 @@ namespace
      * 若不加区分，用户特意钉住的行列反而不会进导出结果。这里把冻结集发布到
      * 表格属性上，让取数侧只排除真正被筛掉的行列。
      */
+    constexpr char kFrozenRowIdentitiesProperty[] = "ksword_frozen_row_identities";
+    constexpr char kRowFilterStateName[] = "ksword_table_row_filter_state";
+
     constexpr char kFrozenHiddenRowsProperty[] =
         "KSWORD_TABLE_INTERACTION_FROZEN_HIDDEN_ROWS";
     constexpr char kFrozenHiddenColumnsProperty[] =
@@ -471,7 +476,8 @@ namespace ks::ui
             {
                 if (line.index.isValid())
                 {
-                    m_targetTable->setRowHidden(line.index.row(), false);
+                    m_targetTable->setRowHidden(line.index.row(),
+                        IsTableRowExcludedByFilter(m_targetTable.data(), line.index.row()));
                 }
             }
         }
@@ -500,6 +506,9 @@ namespace ks::ui
 
     bool TableFrozenPaneController::eventFilter(QObject* watchedObject, QEvent* eventObject)
     {
+        if (eventObject != nullptr && eventObject->type() == QEvent::DynamicPropertyChange
+            && static_cast<QDynamicPropertyChangeEvent*>(eventObject)->propertyName()
+                == TableRowFilterRevisionProperty) scheduleRefresh();
         if (eventObject != nullptr &&
             (eventObject->type() == QEvent::Resize ||
                 eventObject->type() == QEvent::Show ||
@@ -1024,7 +1033,8 @@ namespace ks::ui
         for (int row = 0; row < rowCount; ++row)
         {
             const auto heightIterator = frozenRowHeights.constFind(row);
-            const bool frozen = heightIterator != frozenRowHeights.cend();
+            const bool frozen = heightIterator != frozenRowHeights.cend()
+                && !IsTableRowExcludedByFilter(tableView, row);
             if (pane->isRowHidden(row) == frozen)
             {
                 pane->setRowHidden(row, !frozen);
@@ -1113,7 +1123,8 @@ namespace ks::ui
             const FrozenLine line = m_frozenRowLines.takeLast();
             if (line.index.isValid())
             {
-                tableView->setRowHidden(line.index.row(), false);
+                tableView->setRowHidden(line.index.row(),
+                    IsTableRowExcludedByFilter(tableView, line.index.row()));
             }
         }
 
@@ -1391,7 +1402,8 @@ namespace ks::ui
         int height = 0;
         for (const FrozenLine& line : m_frozenRowLines)
         {
-            if (line.index.isValid())
+            if (line.index.isValid()
+                && !IsTableRowExcludedByFilter(m_targetTable.data(), line.index.row()))
             {
                 height += line.extent;
             }
@@ -1455,6 +1467,11 @@ namespace ks::ui
             }
         }
 
+        QVariantList frozenIdentities;
+        for (const FrozenLine& line : m_frozenRowLines)
+            if (line.index.isValid()) frozenIdentities.push_back(QVariant::fromValue(line.index));
+        tableView->setProperty(kFrozenRowIdentitiesProperty, frozenIdentities);
+
         QVariantList frozenColumns;
         frozenColumns.reserve(m_frozenColumnLines.size());
         for (const FrozenLine& line : m_frozenColumnLines)
@@ -1501,11 +1518,128 @@ namespace ks::ui
 
     bool isRowHiddenByFreeze(const QTableView* tableView, const int row)
     {
-        return sectionListContains(tableView, kFrozenHiddenRowsProperty, row);
+        if (tableView == nullptr || tableView->model() == nullptr || row < 0) return false;
+        const auto id = QPersistentModelIndex(tableView->model()->index(row, 0, tableView->rootIndex()));
+        for (const auto& value : tableView->property(kFrozenRowIdentitiesProperty).toList())
+            if (value.value<QPersistentModelIndex>() == id && id.isValid()) return true;
+        return false;
     }
 
     bool isColumnHiddenByFreeze(const QTableView* tableView, const int column)
     {
         return sectionListContains(tableView, kFrozenHiddenColumnsProperty, column);
+    }
+
+    namespace
+    {
+        QTableView* filterSource(const QTableView* table)
+        {
+            if (table == nullptr) return nullptr;
+            if (table->property(kFrozenPaneAuxiliaryProperty).toBool())
+                return qobject_cast<QTableView*>(table->property(kFrozenPaneSourceProperty).value<QObject*>());
+            return const_cast<QTableView*>(table);
+        }
+        TableRowFilterIdentityState* rowFilterState(QTableView* table, bool create)
+        {
+            if (table == nullptr || table->model() == nullptr) return nullptr;
+            auto* state = dynamic_cast<TableRowFilterIdentityState*>(table->findChild<QObject*>(
+                QString::fromLatin1(kRowFilterStateName), Qt::FindDirectChildrenOnly));
+            if (state && !state->isBoundTo(table->model(), table->rootIndex()))
+            { delete state; state = nullptr; }
+            if (!state && create)
+            {
+                const QPointer<QTableView> guard(table);
+                state = new TableRowFilterIdentityState(table->model(), table->rootIndex(),
+                    [guard](int row) { return guard && qobject_cast<QTableView*>(guard.data()) && guard->isRowHidden(row); },
+                    [guard](int row) { return guard && isRowHiddenByFreeze(guard.data(), row); },
+                    [guard](int row, bool hidden) { if (guard && qobject_cast<QTableView*>(guard.data())) guard->setRowHidden(row, hidden); },
+                    [guard]() {
+                        if (guard) guard->setProperty(TableRowFilterRevisionProperty,
+                            guard->property(TableRowFilterRevisionProperty).toULongLong() + 1);
+                    }, [guard]() {
+                        QSet<int> rows;
+                        if (guard) for (const auto& value : guard->property(kFrozenRowIdentitiesProperty).toList())
+                        {
+                            const auto id = value.value<QPersistentModelIndex>();
+                            if (id.isValid()) rows.insert(id.row());
+                        }
+                        return rows;
+                    }, table, table->property("ksword_table_filter_exclusive_business").toBool());
+                state->setObjectName(QString::fromLatin1(kRowFilterStateName));
+                QObject::connect(table->verticalHeader(), &QHeaderView::sectionResized, state,
+                    [guard = QPointer<TableRowFilterIdentityState>(state)](int row, int oldSize, int newSize) {
+                        if (guard && (oldSize == 0 || newSize == 0)) guard->rowVisibilityChanged(row);
+                    });
+                state->setExclusiveBusinessOwnership(table->property("ksword_table_filter_exclusive_business").toBool());
+            }
+            return state;
+        }
+    }
+
+    void SetTableRowFilterBusinessOwnership(QTableView* table, TableRowFilterBusinessOwnership ownership)
+    {
+        const QPointer<QTableView> source = filterSource(table);
+        if (!source) return;
+        // Declare ownership while the table is empty to avoid initial baseline
+        // capture too. For an existing legacy table, capture before transferring
+        // ownership so its present exclusions survive the first submission.
+        const QPointer<TableRowFilterIdentityState> state = rowFilterState(source.data(),true);
+        if (!source) return;
+        const bool exclusive = ownership == TableRowFilterBusinessOwnership::ExclusiveSharedIdentity;
+        source->setProperty("ksword_table_filter_exclusive_business",exclusive);
+        if (state) state->setExclusiveBusinessOwnership(exclusive);
+    }
+
+    void ApplyTableRowFilter(QTableView* table, const QSet<QPersistentModelIndex>& excluded)
+    {
+        if (auto* state = rowFilterState(filterSource(table), true)) state->setBusiness(excluded);
+    }
+    bool IsTableRowExcludedByFilter(const QTableView* table, int row)
+    {
+        auto* source = filterSource(table);
+        if (!source || !source->model() || row < 0
+            || row >= source->model()->rowCount(source->rootIndex())) return true;
+        auto* state = rowFilterState(source, false);
+        return state && state->projectionPending() ? state->excludes(row)
+            : (state && state->excludes(row))
+                || (source->isRowHidden(row) && !isRowHiddenByFreeze(source, row));
+    }
+    bool IsTableCellExcludedByBusinessFilter(const QTableView* table, const QModelIndex& index)
+    {
+        auto* source = filterSource(table);
+        auto* state = rowFilterState(source, false);
+        return state && state->businessExcludes(index);
+    }
+    bool IsTableRowHiddenByLegacyFilter(const QTableView* table, int row)
+    {
+        auto* state = rowFilterState(filterSource(table), true);
+        return state && state->legacyExcludes(row);
+    }
+    void SetTableSearchRowExcluded(QTableView* table, int row, bool excluded)
+    {
+        if (auto* state = rowFilterState(filterSource(table), true)) state->setSearch(row, excluded);
+    }
+    void ClearTableSearchRowFilter(QTableView* table)
+    {
+        if (auto* state = rowFilterState(filterSource(table), false)) state->clearSearch();
+    }
+    quint64 TableRowFilterIdentityRevision(const QTableView* table)
+    {
+        auto* state = rowFilterState(filterSource(table), false);
+        return state ? state->revision() : 0;
+    }
+    bool HasTableRowsPassingFilters(const QTableView* table)
+    {
+        auto* source = filterSource(table);
+        if (!source || !source->model() || !source->verticalHeader()) return false;
+        const int rows = source->model()->rowCount(source->rootIndex());
+        if (rows <= 0) return false;
+        if (source->verticalHeader()->hiddenSectionCount() < rows) return true;
+        for (const auto& value : source->property(kFrozenRowIdentitiesProperty).toList())
+        {
+            const auto id = value.value<QPersistentModelIndex>();
+            if (id.isValid() && !IsTableRowExcludedByFilter(source, id.row())) return true;
+        }
+        return false;
     }
 }

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "TableRowFilterSupport.h"
+
 #include "./TableContextMenu.h"
 
 class QApplication;
