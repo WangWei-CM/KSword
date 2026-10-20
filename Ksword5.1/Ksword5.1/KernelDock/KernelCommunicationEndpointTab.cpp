@@ -32,6 +32,8 @@
 #include <QStringList>
 #include <QTableWidget>
 #include <QTableWidgetItem>
+#include <QTimer>
+#include <QScrollBar>
 #include <QVBoxLayout>
 
 #include <algorithm>
@@ -135,9 +137,14 @@ void KernelCommunicationEndpointTab::initializeConnections()
     connect(m_refreshButton, &QPushButton::clicked, this, [this]() {
         refreshAsync();
     });
-    connect(m_filterEdit, &QLineEdit::textChanged, this, [this]() {
-        rebuildTable();
+    m_filterTimer = new QTimer(this);
+    m_filterTimer->setSingleShot(true);
+    m_filterTimer->setInterval(120);
+    connect(m_filterTimer, &QTimer::timeout, this, [this]() { applyFilter(); });
+    connect(m_table->horizontalHeader(), &QHeaderView::sortIndicatorChanged, this, [this]() {
+        QTimer::singleShot(0, this, [this]() { applyFilter(); });
     });
+    connect(m_filterEdit, &QLineEdit::textChanged, this, [this]() { m_filterTimer->start(); });
     connect(m_table, &QTableWidget::customContextMenuRequested, this, [this](const QPoint& localPosition) {
         showContextMenu(localPosition);
     });
@@ -236,68 +243,118 @@ void KernelCommunicationEndpointTab::applyRefreshResult(
     m_refreshing.store(false);
     m_refreshButton->setEnabled(true);
     m_rows = std::move(rows);
+    m_snapshotSucceeded = success;
+    m_snapshotError = errorText;
+    m_filterTimer->stop();
+    m_filterActive = false;
+    m_unfilteredSourceIndex = std::numeric_limits<std::size_t>::max();
     rebuildTable();
-
-    if (!success)
-    {
-        m_statusLabel->setText(kernelText("kernel.communication_endpoint.status.failed", QStringLiteral("状态：刷新失败 - %1")).arg(errorText));
-        m_statusLabel->setStyleSheet(statusLabelStyle(KswordTheme::ErrorHex()));
-        insertDiagnosticRow(
-            kernelText("kernel.communication_endpoint.placeholder.refresh_failed", QStringLiteral("<刷新失败>")),
-            buildDiagnosticText(kernelText("kernel.communication_endpoint.diagnostic.refresh_failed", QStringLiteral("通信对象枚举失败：%1")).arg(errorText)));
-    }
 }
 
 void KernelCommunicationEndpointTab::rebuildTable()
 {
-    if (m_table == nullptr)
-    {
-        return;
-    }
-
+    if (m_table == nullptr) return;
+    m_diagnosticItems.fill(nullptr);
     m_table->setSortingEnabled(false);
     m_table->setRowCount(0);
-
-    std::size_t visibleCount = 0;
-    for (const KernelObjectDirectoryDeepEntry& entry : m_rows)
+    for (std::size_t sourceIndex = 0; sourceIndex < m_rows.size(); ++sourceIndex)
     {
-        if (!rowMatchesFilter(entry))
+        const auto& entry = m_rows[sourceIndex];
+        const int row = m_table->rowCount();
+        m_table->insertRow(row);
+        const QStringList fields{entry.directoryPath, entry.objectName, entry.objectType, entry.fullPath, entry.statusText};
+        for (int column = 0; column < fields.size(); ++column)
         {
-            continue;
+            auto* item = readOnlyItem(fields[column]);
+            item->setData(Qt::UserRole, static_cast<qulonglong>(sourceIndex));
+            m_table->setItem(row, column, item);
         }
-
-        const int rowIndex = m_table->rowCount();
-        m_table->insertRow(rowIndex);
-        m_table->setItem(rowIndex, static_cast<int>(CommunicationEndpointColumn::Source), readOnlyItem(entry.directoryPath));
-        m_table->setItem(rowIndex, static_cast<int>(CommunicationEndpointColumn::Name), readOnlyItem(entry.objectName));
-        m_table->setItem(rowIndex, static_cast<int>(CommunicationEndpointColumn::Type), readOnlyItem(entry.objectType));
-        m_table->setItem(rowIndex, static_cast<int>(CommunicationEndpointColumn::FullPath), readOnlyItem(entry.fullPath));
-        m_table->setItem(rowIndex, static_cast<int>(CommunicationEndpointColumn::Status), readOnlyItem(entry.statusText));
-        ++visibleCount;
     }
-
-    m_table->setSortingEnabled(true);
-    m_statusLabel->setText(kernelText("kernel.communication_endpoint.status.summary", QStringLiteral("状态：已加载 %1 项，显示 %2 项"))
-        .arg(static_cast<qulonglong>(m_rows.size()))
-        .arg(static_cast<qulonglong>(visibleCount)));
-    m_statusLabel->setStyleSheet(statusLabelStyle(KswordTheme::SuccessHex()));
-
-    if (visibleCount == 0U)
+    // Reuse a single diagnostic row; never overwrite accepted source records.
+    const int row = m_table->rowCount();
+    m_table->insertRow(row);
+    for (int column = 0; column < static_cast<int>(m_diagnosticItems.size()); ++column)
     {
-        // 通信端点空结果诊断：
-        // - 输入：源数据数量与当前筛选；
-        // - 处理：插入可复制诊断行，避免新页看起来没有实现；
-        // - 返回：无返回值，仅更新表格。
-        const QString reasonText = m_rows.empty()
-            ? kernelText("kernel.communication_endpoint.diagnostic.no_records", QStringLiteral("\\ 和 \\RPC Control 未返回可显示通信端点。"))
-            : kernelText("kernel.communication_endpoint.diagnostic.filter_empty", QStringLiteral("当前筛选条件没有命中通信端点。"));
-        insertDiagnosticRow(
-            m_rows.empty()
-                ? kernelText("kernel.communication_endpoint.placeholder.no_records", QStringLiteral("<无通信对象>"))
-                : kernelText("kernel.communication_endpoint.placeholder.filter_empty", QStringLiteral("<筛选无结果>")),
-            buildDiagnosticText(reasonText));
-        m_table->setCurrentCell(0, static_cast<int>(CommunicationEndpointColumn::Name));
+        auto* item = readOnlyItem(QString());
+        item->setData(Qt::UserRole, std::numeric_limits<qulonglong>::max());
+        m_diagnosticItems[column] = item;
+        m_table->setItem(row, column, item);
     }
+    m_table->setSortingEnabled(true);
+    applyFilter(false);
+}
+
+void KernelCommunicationEndpointTab::applyFilter(const bool allowDeferred)
+{
+    const QPointer<KernelCommunicationEndpointTab> guard(this);
+    if (allowDeferred && ks::ui::DeferTableUiCommitIfContextMenuOpen(this, QStringLiteral("kernel-communication-filter"),
+        {m_table}, [guard]() { if (guard) guard->applyFilter(); })) return;
+    const QString keyword = m_filterEdit->text().trimmed();
+    const bool active = !keyword.isEmpty();
+    if (active && !m_filterActive)
+    {
+        const auto* current = m_table->item(m_table->currentRow(), 0);
+        m_unfilteredSourceIndex = current != nullptr
+            ? static_cast<std::size_t>(current->data(Qt::UserRole).toULongLong())
+            : std::numeric_limits<std::size_t>::max();
+        m_unfilteredHorizontalScroll = m_table->horizontalScrollBar()->value();
+        m_unfilteredVerticalScroll = m_table->verticalScrollBar()->value();
+    }
+    std::size_t visibleCount = 0;
+    QTableWidgetItem* restoredItem = nullptr;
+    for (int row = 0; row < m_table->rowCount(); ++row)
+    {
+        const auto* item = m_table->item(row, 0);
+        const auto index = item != nullptr ? static_cast<std::size_t>(item->data(Qt::UserRole).toULongLong()) : m_rows.size();
+        const bool visible = index < m_rows.size() && rowMatchesFilter(m_rows[index], keyword);
+        if (visible) ++visibleCount;
+        if (!active && m_filterActive && index == m_unfilteredSourceIndex && index < m_rows.size()) restoredItem = m_table->item(row, 0);
+    }
+    if (!m_snapshotSucceeded)
+    {
+        m_statusLabel->setText(kernelText("kernel.communication_endpoint.status.failed", QStringLiteral("状态：刷新失败 - %1")).arg(m_snapshotError));
+        m_statusLabel->setStyleSheet(statusLabelStyle(KswordTheme::ErrorHex()));
+        insertDiagnosticRow(kernelText("kernel.communication_endpoint.placeholder.refresh_failed", QStringLiteral("<刷新失败>")),
+            buildDiagnosticText(kernelText("kernel.communication_endpoint.diagnostic.refresh_failed", QStringLiteral("通信对象枚举失败：%1")).arg(m_snapshotError)));
+    }
+    else
+    {
+        m_statusLabel->setText(kernelText("kernel.communication_endpoint.status.summary", QStringLiteral("状态：已加载 %1 项，显示 %2 项"))
+            .arg(static_cast<qulonglong>(m_rows.size())).arg(static_cast<qulonglong>(visibleCount)));
+        m_statusLabel->setStyleSheet(statusLabelStyle(KswordTheme::SuccessHex()));
+        if (visibleCount == 0U)
+        {
+            const QString reason = m_rows.empty()
+                ? kernelText("kernel.communication_endpoint.diagnostic.no_records", QStringLiteral("\\ 和 \\RPC Control 未返回可显示通信端点。"))
+                : kernelText("kernel.communication_endpoint.diagnostic.filter_empty", QStringLiteral("当前筛选条件没有命中通信端点。"));
+            insertDiagnosticRow(m_rows.empty()
+                ? kernelText("kernel.communication_endpoint.placeholder.no_records", QStringLiteral("<无通信对象>"))
+                : kernelText("kernel.communication_endpoint.placeholder.filter_empty", QStringLiteral("<筛选无结果>")), buildDiagnosticText(reason));
+        }
+    }
+    // Diagnostic text can move that item under the active sort; apply visibility
+    // and selection by source identity only after that sorting has completed.
+    const bool showDiagnostic = !m_snapshotSucceeded || visibleCount == 0U;
+    for (int row = 0; row < m_table->rowCount(); ++row)
+    {
+        const auto* item = m_table->item(row, 0);
+        const auto index = item != nullptr ? static_cast<std::size_t>(item->data(Qt::UserRole).toULongLong()) : m_rows.size();
+        const bool visible = index < m_rows.size() ? rowMatchesFilter(m_rows[index], keyword) : showDiagnostic;
+        m_table->setRowHidden(row, !visible);
+    }
+    if (restoredItem != nullptr) m_table->setCurrentCell(restoredItem->row(), static_cast<int>(CommunicationEndpointColumn::Name));
+    else if (m_table->currentRow() < 0 || m_table->isRowHidden(m_table->currentRow()))
+    {
+        for (int row = 0; row < m_table->rowCount(); ++row)
+            if (!m_table->isRowHidden(row)) { m_table->setCurrentCell(row, static_cast<int>(CommunicationEndpointColumn::Name)); break; }
+    }
+    if (!active && m_filterActive)
+    {
+        m_table->horizontalScrollBar()->setValue(m_unfilteredHorizontalScroll);
+        m_table->verticalScrollBar()->setValue(m_unfilteredVerticalScroll);
+        m_unfilteredSourceIndex = std::numeric_limits<std::size_t>::max();
+    }
+    m_filterActive = active;
 }
 
 void KernelCommunicationEndpointTab::showContextMenu(const QPoint& localPosition)
@@ -369,29 +426,19 @@ QString KernelCommunicationEndpointTab::buildDiagnosticText(const QString& reaso
 
 void KernelCommunicationEndpointTab::insertDiagnosticRow(const QString& titleText, const QString& detailText)
 {
-    // insertDiagnosticRow：
-    // - 输入：标题和诊断文本；
-    // - 处理：写入一行只读占位，保证右键复制可获得诊断；
-    // - 返回：无返回值。
-    if (m_table == nullptr)
-    {
-        return;
-    }
-
+    if (m_table == nullptr || m_diagnosticItems[0] == nullptr) return;
+    const bool sorting = m_table->isSortingEnabled();
     m_table->setSortingEnabled(false);
-    m_table->setRowCount(1);
-    m_table->setItem(0, static_cast<int>(CommunicationEndpointColumn::Source), readOnlyItem(kernelText("kernel.communication_endpoint.placeholder.diagnostic", QStringLiteral("<诊断>"))));
-    m_table->setItem(0, static_cast<int>(CommunicationEndpointColumn::Name), readOnlyItem(titleText));
-    m_table->setItem(0, static_cast<int>(CommunicationEndpointColumn::Type), readOnlyItem(QStringLiteral("Diagnostic")));
-    m_table->setItem(0, static_cast<int>(CommunicationEndpointColumn::FullPath), readOnlyItem(kernelText("kernel.communication_endpoint.placeholder.no_path", QStringLiteral("<无路径>"))));
-    m_table->setItem(0, static_cast<int>(CommunicationEndpointColumn::Status), readOnlyItem(detailText));
-    m_table->setSortingEnabled(true);
-    m_table->setCurrentCell(0, static_cast<int>(CommunicationEndpointColumn::Name));
+    const QStringList fields{
+        kernelText("kernel.communication_endpoint.placeholder.diagnostic", QStringLiteral("<诊断>")), titleText,
+        QStringLiteral("Diagnostic"), kernelText("kernel.communication_endpoint.placeholder.no_path", QStringLiteral("<无路径>")), detailText};
+    for (int column = 0; column < fields.size(); ++column) m_diagnosticItems[column]->setText(fields[column]);
+    m_table->setSortingEnabled(sorting);
+    m_table->setRowHidden(m_diagnosticItems[0]->row(), false);
 }
 
-bool KernelCommunicationEndpointTab::rowMatchesFilter(const KernelObjectDirectoryDeepEntry& entry) const
+bool KernelCommunicationEndpointTab::rowMatchesFilter(const KernelObjectDirectoryDeepEntry& entry, const QString& keyword) const
 {
-    const QString keyword = m_filterEdit != nullptr ? m_filterEdit->text().trimmed() : QString();
     if (keyword.isEmpty())
     {
         return true;
