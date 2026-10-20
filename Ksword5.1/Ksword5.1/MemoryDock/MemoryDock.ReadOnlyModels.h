@@ -2,6 +2,7 @@
 #include "../UI/VisibleTableWidget.h"
 #include "../Internationalization/LanguageManager.h"
 #include <QAbstractTableModel>
+#include <QAbstractListModel>
 #include <QTreeView>
 #include <QPointer>
 #include <QThreadPool>
@@ -24,12 +25,28 @@ template<class T> std::shared_ptr<T> ValueStorage(T value)
 {
     return std::shared_ptr<T>(new T(std::move(value)), [](T* previous) { RetireValue([previous] { delete previous; }); });
 }
+class CoreListModel final : public QAbstractListModel {
+public:
+    using Resolver = std::function<QVariant(int, int)>;
+    explicit CoreListModel(QObject* parent) : QAbstractListModel(parent) { setProperty("ks_i18n_preserve_model_data", true); }
+    void publish(int count, Resolver value) {
+        const QPointer<CoreListModel> alive(this);
+        beginResetModel(); if (!alive) { return; }
+        size = count; resolver = std::move(value); endResetModel();
+    }
+    int rowCount(const QModelIndex& parent = {}) const override { return parent.isValid() ? 0 : size; }
+    QVariant data(const QModelIndex& index, int role) const override {
+        return index.isValid() && index.column() == 0 && index.row() >= 0 && index.row() < size && resolver ? resolver(index.row(), role) : QVariant();
+    }
+private:
+    int size = 0; Resolver resolver;
+};
 inline constexpr int CoreIdentityRole = Qt::UserRole + 1903;
 inline constexpr int CoreSourceIndexRole = Qt::UserRole + 1904;
 class CoreReadOnlyModel final : public QAbstractTableModel {
 public:
     using Resolver = std::function<QVariant(std::size_t, int, int)>;
-    explicit CoreReadOnlyModel(QObject* parent) : QAbstractTableModel(parent) {}
+    explicit CoreReadOnlyModel(QObject* parent) : QAbstractTableModel(parent) { setProperty("ks_i18n_preserve_model_data", true); }
     std::function<void(int, Qt::SortOrder)> requestSort;
     std::uint64_t revision = 0;
     void setHeaders(QStringList value) {

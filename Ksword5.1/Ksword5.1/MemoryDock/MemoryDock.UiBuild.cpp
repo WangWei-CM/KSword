@@ -954,16 +954,16 @@ void MemoryDock::initializeProcessModuleTab()
     processLayout->addWidget(processToolbar);
     ks::ui::NormalizeToolbarRow(processTopBarLayout);
 
-    m_processTable = new ks::ui::VisibleTableWidget(processPanel);
+    m_processTable = new MemoryTableView(processPanel);
     // 这里是附加目标选择器，主进程页已有现场功能，不重复放快照栏。
     ks::ui::SetTableActionBarMode(m_processTable, ks::ui::TableActionBarMode::None);
-    m_processTable->setColumnCount(5);
     m_processTable->setHorizontalHeaderLabels(QStringList{ "进程名", "PID", "会话ID", "CPU(可选)", "工作集" });
     m_processTable->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_processTable->setSelectionMode(QAbstractItemView::SingleSelection);
     m_processTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_processTable->setContextMenuPolicy(Qt::CustomContextMenu);
     m_processTable->setSortingEnabled(true);
+    m_processTable->horizontalHeader()->setSortIndicator(0, Qt::AscendingOrder);
     m_processTable->setAlternatingRowColors(true);
     m_processTable->verticalHeader()->setVisible(false);
     m_processTable->verticalHeader()->setDefaultSectionSize(20);
@@ -977,11 +977,19 @@ void MemoryDock::initializeProcessModuleTab()
     m_processTable->setColumnHidden(3, true);
     m_processTable->setColumnHidden(4, false);
     m_processTable->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
-    m_processTable->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
-    m_processTable->horizontalHeader()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
-    m_processTable->horizontalHeader()->setSectionResizeMode(4, QHeaderView::ResizeToContents);
+    m_processTable->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Interactive);
+    m_processTable->horizontalHeader()->setSectionResizeMode(2, QHeaderView::Interactive);
+    m_processTable->horizontalHeader()->setSectionResizeMode(4, QHeaderView::Interactive);
     m_processTable->setShowGrid(true);
+    ks::ui::SetTableColumnAutoFitEnabled(m_processTable, false);
+    ks::ui::SetTableRowFilterBusinessOwnership(m_processTable, ks::ui::TableRowFilterBusinessOwnership::ExclusiveSharedIdentity);
     processLayout->addWidget(m_processTable, 1);
+    initializeCoreProjection(CoreKind::Processes);
+    m_processCombo->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+    m_processCombo->setMinimumContentsLength(16);
+    m_processComboModel = new ks::memory_detail::CoreListModel(m_processCombo);
+    m_processCombo->setProperty("ks_i18n_preserve_model_data", true);
+    m_processCombo->setModel(m_processComboModel);
 
     QWidget* modulePanel = new QWidget(splitter);
     QVBoxLayout* moduleLayout = new QVBoxLayout(modulePanel);

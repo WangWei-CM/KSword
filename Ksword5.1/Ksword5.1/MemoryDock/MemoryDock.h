@@ -182,6 +182,8 @@ private:
         // 就等于把"不知道"显示成"空闲"。
         double cpuPercent = 0.0;
         bool cpuPercentValid = false;
+        QString imagePath;
+        int exactNameCount = 0, foldedNameCount = 0;
         double workingSetMB = 0.0;      // 工作集内存（MB）。
     };
 
@@ -190,6 +192,7 @@ private:
     {
         std::uint64_t cpuTime100ns = 0;
         std::uint64_t sampleTime100ns = 0;
+        std::uint64_t creationTime100ns = 0;
     };
 
     // ModuleEntry：
@@ -486,7 +489,10 @@ private:
     // - 说明：该函数只做“缓存 -> UI”投影，不做 Win32 枚举。
     // - 返回：无。
     void rebuildModuleTableFromCache();
-    enum class CoreKind { Modules, Regions };
+    enum class CoreKind { Modules, Regions, Processes };
+    struct PreparedProcessSnapshot;
+    static void prepareProcessSnapshot(const std::shared_ptr<PreparedProcessSnapshot>& prepared);
+    void commitProcessSnapshot(const std::shared_ptr<PreparedProcessSnapshot>& prepared, std::uint64_t generation, std::uint32_t previousPid);
     struct CoreProjectionData;
     struct CoreProjectionJob;
     struct RegionRefreshJob;
@@ -891,8 +897,10 @@ private:
     // ========================================================
 
     QWidget* m_tabProcessModule = nullptr;    // Tab1 页面容器。
-    QTableWidget* m_processTable = nullptr;   // 进程列表表格。
-    QHash<std::uint32_t, ProcessCpuSample> m_previousCpuSamples; // 上一轮 CPU 采样，按 PID。
+    MemoryTableView* m_processTable = nullptr;   // 进程列表表格。
+    std::shared_ptr<const QHash<std::uint32_t, ProcessCpuSample>> m_previousCpuSamples = ks::memory_detail::ValueStorage<QHash<std::uint32_t, ProcessCpuSample>>();
+    std::shared_ptr<const QHash<std::uint32_t, int>> m_processRowsByPid = ks::memory_detail::ValueStorage<QHash<std::uint32_t, int>>();
+    ks::memory_detail::CoreListModel* m_processComboModel = nullptr; // 上一轮 CPU 采样，按 PID。
     QLineEdit* m_processFilterEdit = nullptr; // 进程名/PID 过滤输入框。
     QLabel* m_processCountLabel = nullptr;    // 进程表"显示 N / 共 M"计数。
     QLineEdit* m_moduleFilterEdit = nullptr;  // 模块名称过滤输入框。
@@ -1035,7 +1043,7 @@ private:
     bool m_canReadWriteMemory = false;        // 当前句柄是否可读写内存。
     std::atomic<std::uint64_t> m_processAttachmentGeneration{ 0 }; // 附加上下文代次（丢弃旧句柄任务结果）。
 
-    std::vector<ProcessEntry> m_processCache; // 进程缓存（Tab1/工具栏复用）。
+    std::shared_ptr<const std::vector<ProcessEntry>> m_processCache = ks::memory_detail::ValueStorage<std::vector<ProcessEntry>>(); // 进程缓存（Tab1/工具栏复用）。
     std::shared_ptr<const std::vector<ModuleEntry>> m_moduleCache = ks::memory_detail::ValueStorage<std::vector<ModuleEntry>>();   // 模块缓存（Tab1 使用）。
     std::atomic<bool> m_moduleRefreshInProgress{ false }; // 模块刷新是否进行中（异步任务状态）。
     std::atomic<std::uint64_t> m_moduleRefreshTicket{ 0 }; // 模块刷新票据（丢弃过期结果）。
@@ -1127,10 +1135,10 @@ private:
     // 它所属的进程去看（见 jumpToModuleBase）。0 表示缓存为空。
     QTimer* m_coreProjectionPoll = nullptr;
     QTimer* m_coreProjectionDebounce = nullptr;
-    std::array<bool, 2> m_coreInitialized{};
-    std::array<int, 2> m_coreSortColumns{0, 0};
-    std::array<Qt::SortOrder, 2> m_coreSortOrders{Qt::AscendingOrder, Qt::DescendingOrder};
-    std::array<std::shared_ptr<CoreProjectionData>, 2> m_corePublished, m_coreReady, m_coreFailed;
+    std::array<bool, 3> m_coreInitialized{};
+    std::array<int, 3> m_coreSortColumns{0, 0, 0};
+    std::array<Qt::SortOrder, 3> m_coreSortOrders{Qt::AscendingOrder, Qt::DescendingOrder, Qt::AscendingOrder};
+    std::array<std::shared_ptr<CoreProjectionData>, 3> m_corePublished, m_coreReady, m_coreFailed;
     std::shared_ptr<CoreProjectionJob> m_coreProjectionJob;
     std::shared_ptr<RegionRefreshJob> m_regionRefreshJob, m_regionRefreshPendingJob;
     std::shared_ptr<std::atomic_bool> m_coreProjectionLifetime = std::make_shared<std::atomic_bool>(false);

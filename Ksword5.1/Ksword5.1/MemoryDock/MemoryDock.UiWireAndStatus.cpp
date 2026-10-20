@@ -219,14 +219,7 @@ void MemoryDock::initializeConnections()
         // 只在同名 > 1 时触发：唯一进程没有可选的余地，这时抢走当前页面纯属打扰。
         const QString selectedName =
             m_processCombo->itemData(indexValue, Qt::UserRole + 1).toString();
-        int sameNameCount = 0;
-        for (const ProcessEntry& entry : m_processCache)
-        {
-            if (entry.processName.compare(selectedName, Qt::CaseInsensitive) == 0)
-            {
-                ++sameNameCount;
-            }
-        }
+        const int sameNameCount = m_processCombo->itemData(indexValue, Qt::UserRole + 2).toInt();
         if (sameNameCount > 1
             && m_processFilterEdit != nullptr
             && m_tabWidget != nullptr
@@ -238,18 +231,8 @@ void MemoryDock::initializeConnections()
 
             // 把下拉里选中的那一个在表里也选上并滚到可见处，两边保持一致；
             // 用户接着在同名的几行之间上下比较即可，双击任意一行就附加。
-            const QString pidText = QString::number(pid);
-            for (int row = 0; row < m_processTable->rowCount(); ++row)
-            {
-                const QTableWidgetItem* const pidItem = m_processTable->item(row, 1);
-                if (pidItem != nullptr && pidItem->text() == pidText)
-                {
-                    m_processTable->selectRow(row);
-                    m_processTable->scrollToItem(
-                        m_processTable->item(row, 0), QAbstractItemView::PositionAtCenter);
-                    break;
-                }
-            }
+            setProperty("kswordMemoryProcessFocusPendingPid", pid);
+            requestCoreProjection(CoreKind::Processes, true);
         }
         });
 
@@ -439,8 +422,9 @@ void MemoryDock::initializeProcessConnections()
     // Tab1：进程与模块
     // ========================================================
 
-    connect(m_processTable, &QTableWidget::cellClicked, this, [this](int row, int column) {
-        Q_UNUSED(column);
+    connect(m_processTable, &QTableView::clicked, this, [this](const QModelIndex& clicked) {
+        if (!coreProjectionIsCurrent(CoreKind::Processes)) { return; }
+        const int row = clicked.row();
         if (row < 0)
         {
             return;
@@ -448,15 +432,15 @@ void MemoryDock::initializeProcessConnections()
 
         // 注意：表格允许排序，row 可能不再对应 m_processCache 原始下标。
         // 因此这里改为“从单元格文本/数据反解 PID + 进程名”，保证绑定准确。
-        const QTableWidgetItem* pidItem = m_processTable->item(row, 1);
-        const QTableWidgetItem* nameItem = m_processTable->item(row, 0);
-        if (pidItem == nullptr || nameItem == nullptr)
+        const QModelIndex pidItem = m_processTable->model()->index(row, 1);
+        const QModelIndex nameItem = m_processTable->model()->index(row, 0);
+        if (!pidItem.isValid() || !nameItem.isValid())
         {
             return;
         }
 
         bool pidOk = false;
-        const std::uint32_t pid = pidItem->text().toUInt(&pidOk);
+        const std::uint32_t pid = pidItem.data(Qt::DisplayRole).toString().toUInt(&pidOk);
         if (!pidOk || pid == 0)
         {
             kLogEvent processClickParseFailEvent;
@@ -488,21 +472,22 @@ void MemoryDock::initializeProcessConnections()
         m_processComboChangeTimer->start();
         });
 
-    connect(m_processTable, &QTableWidget::cellDoubleClicked, this, [this](int row, int column) {
-        Q_UNUSED(column);
+    connect(m_processTable, &QTableView::doubleClicked, this, [this](const QModelIndex& clicked) {
+        if (!coreProjectionIsCurrent(CoreKind::Processes)) { return; }
+        const int row = clicked.row();
         if (row < 0)
         {
             return;
         }
         // 双击附加同样不能直接拿 row 索引缓存，需从当前表格行动态取值。
-        const QTableWidgetItem* pidItem = m_processTable->item(row, 1);
-        const QTableWidgetItem* nameItem = m_processTable->item(row, 0);
-        if (pidItem == nullptr || nameItem == nullptr)
+        const QModelIndex pidItem = m_processTable->model()->index(row, 1);
+        const QModelIndex nameItem = m_processTable->model()->index(row, 0);
+        if (!pidItem.isValid() || !nameItem.isValid())
         {
             return;
         }
         bool pidOk = false;
-        const std::uint32_t pid = pidItem->text().toUInt(&pidOk);
+        const std::uint32_t pid = pidItem.data(Qt::DisplayRole).toString().toUInt(&pidOk);
         if (!pidOk || pid == 0)
         {
             kLogEvent processDoubleClickParseFailEvent;
@@ -519,12 +504,12 @@ void MemoryDock::initializeProcessConnections()
             << ", pid="
             << pid
             << ", processName="
-            << nameItem->text().toStdString()
+            << nameItem.data(Qt::DisplayRole).toString().toStdString()
             << eol;
-        attachToProcess(pid, nameItem->text(), true);
+        attachToProcess(pid, nameItem.data(Qt::DisplayRole).toString(), true);
         });
 
-    connect(m_processTable, &QTableWidget::customContextMenuRequested, this, [this](const QPoint& localPosition) {
+    connect(m_processTable, &QTableView::customContextMenuRequested, this, [this](const QPoint& localPosition) {
         showProcessTableContextMenu(localPosition);
         });
 
