@@ -4667,12 +4667,16 @@ bool MonitorDock::event(QEvent* eventPointer)
 
 void MonitorDock::ensureDirectKernelCallTabInitialized()
 {
-    // 构造/挂载结束后才准备首帧主题，所有提前返回继续复用现有业务页面。
-    const ks::ui::ScopedWidgetThemePreparation themePreparation(m_directKernelCallHostPage);
     if (m_directKernelCallWidget != nullptr || m_directKernelCallHostPage == nullptr)
     {
+        if (m_directKernelCallHostPage != nullptr && m_directKernelCallHostPage->isVisible())
+        {
+            ks::ui::PrepareWidgetThemeBindingsForShow(m_directKernelCallHostPage);
+        }
         return;
     }
+    // 仅真实构造/挂载需要完成守卫；热切只消费已有 dirty。
+    const ks::ui::ScopedWidgetThemePreparation themePreparation(m_directKernelCallHostPage);
 
     QVBoxLayout* hostLayout = qobject_cast<QVBoxLayout*>(m_directKernelCallHostPage->layout());
     if (hostLayout == nullptr)
@@ -4700,12 +4704,16 @@ void MonitorDock::ensureDirectKernelCallTabInitialized()
 
 void MonitorDock::ensureKernelCallbackTabInitialized()
 {
-    // 统一出口准备当前可见宿主，不在控件半构造时执行主题回调。
-    const ks::ui::ScopedWidgetThemePreparation themePreparation(m_kernelCallbackHostPage);
     if (m_kernelCallbackWidget != nullptr || m_kernelCallbackHostPage == nullptr)
     {
+        if (m_kernelCallbackHostPage != nullptr && m_kernelCallbackHostPage->isVisible())
+        {
+            ks::ui::PrepareWidgetThemeBindingsForShow(m_kernelCallbackHostPage);
+        }
         return;
     }
+    // 仅真实构造/挂载需要完成守卫；热切只消费已有 dirty。
+    const ks::ui::ScopedWidgetThemePreparation themePreparation(m_kernelCallbackHostPage);
 
     QVBoxLayout* hostLayout = qobject_cast<QVBoxLayout*>(m_kernelCallbackHostPage->layout());
     if (hostLayout == nullptr)
@@ -4730,12 +4738,22 @@ void MonitorDock::ensureKernelCallbackTabInitialized()
 
 void MonitorDock::ensureWinApiTabInitialized()
 {
-    // WinAPI页面挂载和激活完成后准备主题，重显时同样消费已有绑定。
-    const ks::ui::ScopedWidgetThemePreparation themePreparation(m_winApiPage);
     if (m_winApiPage == nullptr)
     {
         return;
     }
+    if (m_winApiWidget != nullptr)
+    {
+        const QPointer<QWidget> page(m_winApiPage); // 激活回调允许关闭宿主。
+        m_winApiWidget->notifyPageActivated();
+        if (page != nullptr && page->isVisible())
+        {
+            ks::ui::PrepareWidgetThemeBindingsForShow(page.data());
+        }
+        return;
+    }
+    // 首次挂载和业务激活完成之后才准备真正可见分支。
+    const ks::ui::ScopedWidgetThemePreparation themePreparation(m_winApiPage);
 
     if (m_winApiWidget == nullptr)
     {
