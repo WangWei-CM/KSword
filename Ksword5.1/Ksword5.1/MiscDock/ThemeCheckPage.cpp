@@ -31,6 +31,13 @@
 #include <QTimer>
 #include <QVBoxLayout>
 
+namespace {
+const ks::ui::PageNavigationTabDefinition kThemeCheckPageNavigation[] = {
+    {"table", "", "", "表格", true},
+    {"text", "", "", "文本", false}
+};
+}
+
 namespace ks::misc
 {
     ThemeCheckPage::ThemeCheckPage(QWidget* parent) : QWidget(parent)
@@ -108,8 +115,8 @@ namespace ks::misc
         ks::ui::SetTableActionBarMode(table, ks::ui::TableActionBarMode::None);
         auto* text = new QPlainTextEdit(tabs);
         text->setPlainText(QStringLiteral("普通多行输入：背景、文字和选区应随主题一致变化。"));
-        tabs->addTab(table, QStringLiteral("表格"));
-        tabs->addTab(text, QStringLiteral("文本"));
+        m_navigationTabs.add(kThemeCheckPageNavigation[0], tabs, table);
+        m_navigationTabs.add(kThemeCheckPageNavigation[1], tabs, text);
         tabs->setMinimumHeight(180);
         // 结果侧独立分组验证标题在卡片内部；参数侧同类QGroupBox自动成为分区标题。
         auto* card = new QGroupBox(QStringLiteral("默认分组卡片"), workspace);
@@ -216,3 +223,17 @@ namespace ks::misc
             .arg(bound).arg(live).arg(sized).arg(mode));
     }
 }
+
+ks::ui::PageNavigationCatalog ks::misc::ThemeCheckPage::navigationCatalog(const ThemeCheckPage* existing)
+{
+    ks::ui::PageNavigationCatalog schema;
+    for (const auto& definition : kThemeCheckPageNavigation)
+        schema.append(ks::ui::PageNavigationTabDescriptor(definition));
+    return existing ? existing->m_navigationTabs.describe(std::move(schema)) : schema;
+}
+QWidget* ks::misc::ThemeCheckPage::activateNavigationDescriptor(const QString& id)
+{
+    return m_navigationTabs.activate(id, navigationCatalog(this));
+}
+namespace { const bool kThemeCheckPageNavigationRegistered =
+    ks::ui::RegisterTypedPageNavigationCatalog<ks::misc::ThemeCheckPage>(QStringLiteral("misc.theme_check")); }
