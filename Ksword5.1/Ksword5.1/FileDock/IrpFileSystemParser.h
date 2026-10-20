@@ -68,7 +68,8 @@ namespace ks::file
             QString& errorTextOut,
             bool* partialOut = nullptr,
             QString* sourceDetailOut = nullptr,
-            IrpScanDiagnostics* diagnosticsOut = nullptr);
+            IrpScanDiagnostics* diagnosticsOut = nullptr,
+            const DirectoryCancellationCallback& canceled = {});
 
         // layerDisplayText 作用：
         // - 把 KSWORD_ARK_FILE_IRP_LAYER_* 映射为界面可读文案。

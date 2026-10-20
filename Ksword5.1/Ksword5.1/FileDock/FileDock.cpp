@@ -4518,6 +4518,23 @@ namespace
         }
     }
 
+    template<class Value, class Enqueue>
+    std::shared_ptr<Value> makeBackgroundRetiredValue(Enqueue enqueue)
+    {
+        return std::shared_ptr<Value>(new Value,
+            [enqueue = std::move(enqueue)](Value* value) mutable {
+                enqueue([value]() { delete value; });
+            });
+    }
+
+    struct ManualDirectoryParsePayload
+    {
+        std::vector<ks::file::ManualDirectoryEntry> entries;
+        QStringList suspiciousNames;
+        QSet<QString> suspiciousNameSet;
+        QStringList retiredPanelNames;
+    };
+
     // 直接发布后台枚举快照，避免在 UI 上为 N 行创建 6N 个 QStandardItem。
     // 类型/图标/时间等展示内容只为视图请求的单元格生成。
     class ManualDirectoryModel final : public QAbstractTableModel
@@ -4853,12 +4870,14 @@ namespace
 
     // buildSuspiciousNameSet 作用：把疑似隐藏项名单折叠大小写后转成集合，
     // 避免在逐行回填时做 O(n) 线性查找。
-    QSet<QString> buildSuspiciousNameSet(const QStringList& names)
+    QSet<QString> buildSuspiciousNameSet(const QStringList& names,
+        const ks::file::DirectoryCancellationCallback& canceled = {})
     {
         QSet<QString> nameSet;
         nameSet.reserve(names.size() + 8);
         for (const QString& nameText : names)
         {
+            if (canceled && canceled()) break;
             nameSet.insert(nameText.toCaseFolded());
         }
         return nameSet;
@@ -14185,6 +14204,8 @@ FileDock::~FileDock()
     if (m_recoveryProjectionOperation) m_recoveryProjectionOperation->close();
     retireRecoverySnapshot(std::move(m_recoveryPendingSnapshot));
     if (m_fileAnalysisOperation != nullptr) m_fileAnalysisOperation->close();
+    if (m_leftPanel.manualParseCanceled) m_leftPanel.manualParseCanceled->store(true);
+    if (m_rightPanel.manualParseCanceled) m_rightPanel.manualParseCanceled->store(true);
     m_uiDispatcher->close();
     // 析构阶段先释放持有型 Oplock，再停止解锁器后台线程。
     releaseAllActiveOplocks(false);
@@ -15646,6 +15667,8 @@ void FileDock::applyPanelFilterAndSort(FilePanelWidgets& panel)
             (panel.manualLoadedPath.compare(panel.currentPath, Qt::CaseInsensitive) == 0);
         const bool samePathParsing =
             panel.manualParseInProgress
+            && panel.manualParseCanceled && !panel.manualParseCanceled->load()
+            && panel.manualParsingReadMode == panel.readModeCombo->currentIndex()
             && (panel.manualParsingPath.compare(panel.currentPath, Qt::CaseInsensitive) == 0);
         if (!loadedMatchesCurrentPath && !samePathParsing)
         {
@@ -15865,6 +15888,10 @@ void FileDock::applyReadModeToPanel(FilePanelWidgets& panel)
     }
     else
     {
+        if (panel.manualParseCanceled) panel.manualParseCanceled->store(true);
+        panel.manualParsePending = false;
+        panel.manualParsePendingShowWarning = false;
+        panel.manualParseResultPending = false;
         panel.fileView->setModel(panel.proxyModel);
         panel.compactFileView->setModel(panel.proxyModel);
         panel.compactFileView->setModelColumn(0);
@@ -15968,6 +15995,21 @@ void FileDock::requestAsyncManualReload(FilePanelWidgets& panel, const bool show
         && panel.manualRequestedFsType == requestedFsType
         && panel.manualRequestedReadMode == requestedReadMode)
     {
+        if (panel.manualParseResultPending)
+        {
+            if (panel.manualParseCanceled) panel.manualParseCanceled->store(true);
+            panel.manualParseResultPending = false;
+        }
+        return;
+    }
+
+    const bool sameRequest =
+        panel.manualParsingPath.compare(requestedPath, Qt::CaseInsensitive) == 0
+        && panel.manualParsingReadMode == requestedReadMode
+        && panel.manualParseCanceled && !panel.manualParseCanceled->load();
+    if (panel.manualParseResultPending && sameRequest)
+    {
+        panel.manualParsePendingShowWarning |= showWarningMessage;
         return;
     }
 
@@ -15983,7 +16025,8 @@ void FileDock::requestAsyncManualReload(FilePanelWidgets& panel, const bool show
     {
         const bool samePathRunning =
             (panel.manualParsingPath.compare(requestedPath, Qt::CaseInsensitive) == 0)
-            && (panel.manualParsingReadMode == requestedReadMode);
+            && (panel.manualParsingReadMode == requestedReadMode)
+            && panel.manualParseCanceled && !panel.manualParseCanceled->load();
         if (samePathRunning)
         {
             panel.manualParsePendingShowWarning =
@@ -15991,6 +16034,7 @@ void FileDock::requestAsyncManualReload(FilePanelWidgets& panel, const bool show
             return;
         }
 
+        if (panel.manualParseCanceled) panel.manualParseCanceled->store(true);
         panel.manualParsePending = true;
         panel.manualParsePendingShowWarning = panel.manualParsePendingShowWarning || showWarningMessage;
 
@@ -16008,6 +16052,10 @@ void FileDock::requestAsyncManualReload(FilePanelWidgets& panel, const bool show
         return;
     }
 
+    if (panel.manualParseCanceled) panel.manualParseCanceled->store(true);
+    panel.manualParseCanceled = std::make_shared<std::atomic_bool>(false);
+    const auto canceled = panel.manualParseCanceled;
+    panel.manualParseResultPending = false;
     panel.manualParseInProgress = true;
     panel.manualParsePending = false;
     panel.manualParsePendingShowWarning = false;
@@ -16033,7 +16081,7 @@ void FileDock::requestAsyncManualReload(FilePanelWidgets& panel, const bool show
     }
     if (panel.readModeCombo != nullptr)
     {
-        panel.readModeCombo->setEnabled(false);
+        panel.readModeCombo->setEnabled(true);
     }
 
     {
@@ -16052,21 +16100,25 @@ void FileDock::requestAsyncManualReload(FilePanelWidgets& panel, const bool show
 
     QPointer<FileDock> safeThis(this);
     const auto dispatcher = m_uiDispatcher;
-    std::thread([safeThis, dispatcher, leftPanelRequest, requestPath, requestedFsType, requestedReadMode, parseBackend, driverMode, backendText, panelNameText, showWarningMessage, requestSerial, progressPid]() {
+    std::thread([safeThis, dispatcher, leftPanelRequest, requestPath, requestedFsType, requestedReadMode, parseBackend, driverMode, backendText, panelNameText, showWarningMessage, requestSerial, progressPid, canceled]() {
         kPro.set(
             progressPid,
             (backendText + QStringLiteral("目录中")).toStdString(),
             0,
             35.0f);
 
-        std::vector<ks::file::ManualDirectoryEntry> parsedEntries;
+        const auto payload = makeBackgroundRetiredValue<ManualDirectoryParsePayload>(
+            [](auto dispose) {
+                QThreadPool::globalInstance()->start(QRunnable::create(std::move(dispose)));
+            });
+        auto& parsedEntries = payload->entries;
         ks::file::ManualFsType parsedFsType = ks::file::ManualFsType::Unknown;
         QString parseErrorText;
         // usedWinApiFallback：记录后台解析是否已退回到 Windows API，供 UI 正确显示状态。
         bool usedWinApiFallback = false;
         bool partialResult = false;
         QString sourceDetail;
-        QStringList suspiciousNames;
+        auto& suspiciousNames = payload->suspiciousNames;
         const bool parseOk = runManualParseBackend(
             parseBackend,
             requestPath,
@@ -16077,10 +16129,13 @@ void FileDock::requestAsyncManualReload(FilePanelWidgets& panel, const bool show
             usedWinApiFallback,
             partialResult,
             sourceDetail,
-            suspiciousNames);
+            suspiciousNames,
+            [canceled]() { return canceled->load(); });
 
         kPro.set(progressPid, parseOk ? "生成目录列表中" : "解析失败，整理错误信息", 0, 78.0f);
-        const QSet<QString> suspiciousNameSet = buildSuspiciousNameSet(suspiciousNames);
+        if (!canceled->load())
+            payload->suspiciousNameSet = buildSuspiciousNameSet(
+                suspiciousNames, [canceled]() { return canceled->load(); });
 
         dispatcher->post(
             [safeThis,
@@ -16096,14 +16151,13 @@ void FileDock::requestAsyncManualReload(FilePanelWidgets& panel, const bool show
              requestSerial,
              progressPid,
              parseOk,
-             parsedEntries = std::move(parsedEntries),
+             payload,
+             canceled,
              parsedFsType,
              parseErrorText,
              usedWinApiFallback,
              partialResult,
-             sourceDetail,
-              suspiciousNames,
-              suspiciousNameSet]() mutable {
+             sourceDetail]() mutable {
                 if (safeThis.isNull())
                 {
                     kPro.set(progressPid, "界面已关闭", 0, 100.0f);
@@ -16111,23 +16165,26 @@ void FileDock::requestAsyncManualReload(FilePanelWidgets& panel, const bool show
                 }
 
                 FilePanelWidgets& targetPanel = leftPanelRequest ? safeThis->m_leftPanel : safeThis->m_rightPanel;
-                if (targetPanel.manualParseRequestSerial != requestSerial ||
+                if (targetPanel.manualParseCanceled == canceled)
+                {
+                    targetPanel.manualParseInProgress = false;
+                    targetPanel.manualParseResultPending = true;
+                }
+                if (canceled->load() || targetPanel.manualParseCanceled != canceled ||
+                    targetPanel.manualParseRequestSerial != requestSerial ||
                     targetPanel.currentPath.compare(requestPath, Qt::CaseInsensitive) != 0 ||
                     targetPanel.readModeCombo->currentIndex() != requestedReadMode)
                 {
                     // 过期结果直接丢弃，避免“慢任务覆盖新路径数据”。
                     // 运行状态只有在这一批结果确实属于当前那次运行时才清：
                     // 路径不符说明面板已经在跑另一次解析，清了会让它误以为空闲。
-                    if (targetPanel.manualParsingPath.compare(requestPath, Qt::CaseInsensitive) == 0)
+                    if (targetPanel.manualParseCanceled == canceled)
                     {
                         targetPanel.manualParseInProgress = false;
+                        targetPanel.manualParseResultPending = false;
                         targetPanel.manualParsingPath.clear();
                     }
-                    // 下拉框的可用性与运行状态解绑，无条件恢复。
-                    // 它是在本次请求开始时被禁用的，只要这次请求走到了终点
-                    //（无论采纳还是丢弃）就必须放开；放在上面的条件分支里，
-                    // 一旦路径对不上就再也没有人把它打开，表现就是"选了某个
-                    // 读取方式之后下拉框彻底点不动"。
+                    // 读取方式保持可切换；取消只在后端安全边界生效。
                     if (targetPanel.readModeCombo != nullptr &&
                         !targetPanel.manualParseInProgress)
                     {
@@ -16162,9 +16219,8 @@ void FileDock::requestAsyncManualReload(FilePanelWidgets& panel, const bool show
                     return;
                 }
 
-                const auto parsedEntriesSnapshot =
-                    std::make_shared<std::vector<ks::file::ManualDirectoryEntry>>(
-                        std::move(parsedEntries));
+                const std::shared_ptr<const std::vector<ks::file::ManualDirectoryEntry>> parsedEntriesSnapshot(
+                    payload, &payload->entries);
                 const auto commitSnapshot =
                     [safeThis,
                      leftPanelRequest,
@@ -16180,13 +16236,13 @@ void FileDock::requestAsyncManualReload(FilePanelWidgets& panel, const bool show
                      progressPid,
                      parseOk,
                      parsedEntriesSnapshot,
+                     payload,
+                     canceled,
                      parsedFsType,
                      parseErrorText,
                      usedWinApiFallback,
                      partialResult,
-                     sourceDetail,
-                      suspiciousNames,
-                      suspiciousNameSet]()
+                     sourceDetail]()
                 {
                     if (safeThis.isNull())
                     {
@@ -16196,13 +16252,15 @@ void FileDock::requestAsyncManualReload(FilePanelWidgets& panel, const bool show
 
                     FilePanelWidgets& commitPanel =
                         leftPanelRequest ? safeThis->m_leftPanel : safeThis->m_rightPanel;
-                    if (commitPanel.manualParseRequestSerial != requestSerial ||
+                    if (canceled->load() || commitPanel.manualParseCanceled != canceled ||
+                        commitPanel.manualParseRequestSerial != requestSerial ||
                         commitPanel.currentPath.compare(requestPath, Qt::CaseInsensitive) != 0 ||
                         commitPanel.readModeCombo->currentIndex() != requestedReadMode)
                     {
-                        if (commitPanel.manualParseRequestSerial == requestSerial)
+                        if (commitPanel.manualParseCanceled == canceled)
                         {
                             commitPanel.manualParseInProgress = false;
+                            commitPanel.manualParseResultPending = false;
                             commitPanel.manualParsingPath.clear();
                             commitPanel.readModeCombo->setEnabled(true);
                             const bool pendingWarning = commitPanel.manualParsePendingShowWarning;
@@ -16214,13 +16272,17 @@ void FileDock::requestAsyncManualReload(FilePanelWidgets& panel, const bool show
                         return;
                     }
 
+                    const bool warnOnFailure = showWarningMessage || commitPanel.manualParsePendingShowWarning;
+                    commitPanel.manualParsePendingShowWarning = false;
                     commitPanel.manualParseInProgress = false;
+                    commitPanel.manualParseResultPending = false;
                     commitPanel.manualParsingPath.clear();
                     commitPanel.manualRequestedFsType = requestedFsType;
                     commitPanel.manualRequestedReadMode = requestedReadMode;
                     commitPanel.manualResultPartial = partialResult;
                     commitPanel.manualSourceDetail = sourceDetail;
-                    commitPanel.manualSuspiciousNames = suspiciousNames;
+                    payload->retiredPanelNames = std::move(commitPanel.manualSuspiciousNames);
+                    commitPanel.manualSuspiciousNames = payload->suspiciousNames;
                     if (commitPanel.readModeCombo != nullptr)
                     {
                         commitPanel.readModeCombo->setEnabled(true);
@@ -16249,7 +16311,7 @@ void FileDock::requestAsyncManualReload(FilePanelWidgets& panel, const bool show
                                 ? QStringLiteral("%1目录").arg(backendText)
                                 : QStringLiteral("读取原始文件系统数据"),
                                 parseErrorText);
-                        if (showWarningMessage && !privilegePromptHandled)
+                        if (warnOnFailure && !privilegePromptHandled)
                         {
                             QMessageBox::warning(
                                 safeThis.data(),
@@ -16274,7 +16336,7 @@ void FileDock::requestAsyncManualReload(FilePanelWidgets& panel, const bool show
                     else
                     {
                         static_cast<ManualDirectoryModel*>(commitPanel.manualModel)->setSnapshot(
-                            parsedEntriesSnapshot, suspiciousNameSet);
+                            parsedEntriesSnapshot, payload->suspiciousNameSet);
                         commitPanel.fileView->setRootIndex(QModelIndex());
                         commitPanel.compactFileView->setRootIndex(QModelIndex());
 
@@ -16285,10 +16347,10 @@ void FileDock::requestAsyncManualReload(FilePanelWidgets& panel, const bool show
                             {
                                 QString statusText =
                                     QStringLiteral("解析器: %1").arg(sourceDetail);
-                                if (!suspiciousNames.isEmpty())
+                                if (!payload->suspiciousNames.isEmpty())
                                 {
                                     statusText += QStringLiteral("；疑似隐藏项 %1 个")
-                                        .arg(suspiciousNames.size());
+                                        .arg(payload->suspiciousNames.size());
                                 }
                                 commitPanel.parserStatusLabel->setText(statusText);
                             }
@@ -16478,8 +16540,10 @@ bool FileDock::runManualParseBackend(
     bool& usedWinApiFallbackOut,
     bool& partialOut,
     QString& sourceDetailOut,
-    QStringList& suspiciousNamesOut)
+    QStringList& suspiciousNamesOut,
+    const ks::file::DirectoryCancellationCallback& canceled)
 {
+    if (canceled && canceled()) return false;
     usedWinApiFallbackOut = false;
     partialOut = false;
     sourceDetailOut.clear();
@@ -16494,7 +16558,8 @@ bool FileDock::runManualParseBackend(
             fsTypeOut,
             errorTextOut,
             &partialOut,
-            &sourceDetailOut);
+            &sourceDetailOut,
+            canceled);
 
     case ManualParseBackend::R0Irp:
     {
@@ -16506,7 +16571,8 @@ bool FileDock::runManualParseBackend(
             errorTextOut,
             &partialOut,
             &sourceDetailOut,
-            &diagnostics);
+            &diagnostics,
+            canceled);
         if (parseOk)
         {
             suspiciousNamesOut = diagnostics.bypassOnlyNames;
@@ -16522,7 +16588,8 @@ bool FileDock::runManualParseBackend(
             pathText,
             entriesOut,
             errorTextOut,
-            &diagnostics);
+            &diagnostics,
+            canceled);
         if (!parseOk)
         {
             return false;
@@ -16547,7 +16614,9 @@ bool FileDock::runManualParseBackend(
             fsTypeOut,
             errorTextOut,
             &usedWinApiFallbackOut,
-            requestedFsType);
+            requestedFsType,
+            false,
+            canceled);
     }
 }
 

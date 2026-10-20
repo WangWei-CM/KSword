@@ -21,6 +21,9 @@
 
 namespace ks::file
 {
+    // 目录任务以廉价、无副作用回调判断是否过期；空回调保留同步调用行为。
+    using DirectoryCancellationCallback = std::function<bool()>;
+
     // ManualFsType 作用：
     // - 表示解析器识别出的卷文件系统类型；
     // - Unknown 表示当前路径不支持手动解析。
@@ -124,6 +127,8 @@ namespace ks::file
         // - false 表示本次结果仍完全来自手动解析流程。
         // 返回值：
         // - 成功返回 true，失败返回 false。
+        // 入参 canceled：
+        // - 返回 true 时中止当前目录任务；调用方须丢弃本次未完成输出。
         // 入参 strictMftOnly：
         // - true 时禁用全部 Windows API / FSCTL 回退与补齐，结果必须完全来自
         //   原始 $MFT 字节；仅对 NTFS 有意义，其它文件系统忽略该参数。
@@ -134,7 +139,8 @@ namespace ks::file
             QString& errorTextOut,
             bool* usedWinApiFallbackOut = nullptr,
             ManualFsType requestedFsType = ManualFsType::Unknown,
-            bool strictMftOnly = false);
+            bool strictMftOnly = false,
+            const DirectoryCancellationCallback& canceled = {});
 
         // enumerateDirectoryByMft 作用：
         // - 只用原始 $MFT 解析目录，全程不经过文件系统驱动与 Windows API：
@@ -153,11 +159,13 @@ namespace ks::file
         // - 可选，接收与 Windows API 视图的差异统计。
         // 返回值：
         // - 成功返回 true，失败返回 false。
+        // 入参 canceled：返回 true 时中止目录扫描或对照，不发布部分诊断。
         static bool enumerateDirectoryByMft(
             const QString& pathText,
             std::vector<ManualDirectoryEntry>& entriesOut,
             QString& errorTextOut,
-            MftScanDiagnostics* diagnosticsOut = nullptr);
+            MftScanDiagnostics* diagnosticsOut = nullptr,
+            const DirectoryCancellationCallback& canceled = {});
 
         // enumerateNtfsDeletedFiles 作用：
         // - 扫描指定 NTFS 卷内“已删除”文件候选项。

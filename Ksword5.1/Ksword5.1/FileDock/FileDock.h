@@ -185,6 +185,8 @@ private:
         bool manualResultPartial = false;       // R0 分页/名称边界导致结果不完整时为 true。
         QString manualSourceDetail;             // 当前平铺模型的真实解析来源摘要。
         QStringList manualSuspiciousNames;      // 只有绕过路径可见的条目名（疑似被隐藏）。
+        std::shared_ptr<std::atomic_bool> manualParseCanceled; // Worker reads only this frozen cancellation token.
+        bool manualParseResultPending = false; // Parser lane is idle while a menu holds its immutable result.
         bool manualParseInProgress = false;    // 手动解析后台任务是否正在运行。
         bool manualParsePending = false;       // 手动解析是否有待执行请求。
         bool manualParsePendingShowWarning = false; // 待执行请求是否需要失败弹框。
@@ -368,7 +370,8 @@ private:
         bool& usedWinApiFallbackOut,
         bool& partialOut,
         QString& sourceDetailOut,
-        QStringList& suspiciousNamesOut);
+        QStringList& suspiciousNamesOut,
+        const ks::file::DirectoryCancellationCallback& canceled = {});
 
     // ======================= 文件操作 =========================
     // showPanelContextMenu：

@@ -120,15 +120,17 @@ namespace
     }
 
     // convertRows 作用：把协议行映射为 FileDock 平铺模型，并回报截断信息。
-    void convertRows(
+    bool convertRows(
         const std::vector<ksword::ark::DirectoryEntryRecord>& sourceRows,
         const QString& currentPath,
         std::vector<ks::file::ManualDirectoryEntry>& entriesOut,
-        bool& partialResult)
+        bool& partialResult,
+        const ks::file::DirectoryCancellationCallback& canceled)
     {
         entriesOut.reserve(sourceRows.size());
         for (const ksword::ark::DirectoryEntryRecord& source : sourceRows)
         {
+            if (canceled && canceled()) return false;
             const QString name = QString::fromStdWString(source.name);
             if (name.isEmpty())
             {
@@ -155,6 +157,7 @@ namespace
                 partialResult = true;
             }
         }
+        return !(canceled && canceled());
     }
 
     // sortEntries 作用：目录优先、名称不区分大小写升序，与其它解析器保持一致。
@@ -203,7 +206,8 @@ bool ks::file::IrpFileSystemParser::enumerateDirectory(
     QString& errorTextOut,
     bool* partialOut,
     QString* sourceDetailOut,
-    IrpScanDiagnostics* diagnosticsOut)
+    IrpScanDiagnostics* diagnosticsOut,
+    const DirectoryCancellationCallback& canceled)
 {
     entriesOut.clear();
     fsTypeOut = ManualFsType::Unknown;
@@ -221,6 +225,8 @@ bool ks::file::IrpFileSystemParser::enumerateDirectory(
         *diagnosticsOut = IrpScanDiagnostics{};
     }
 
+    if (canceled && canceled()) return false;
+
     const QString driverPath = buildDriverNtPath(pathText);
     if (driverPath.isEmpty())
     {
@@ -235,6 +241,8 @@ bool ks::file::IrpFileSystemParser::enumerateDirectory(
         client.enumerateDirectoryByIrp(
             driverPath.toStdWString(),
             KSWORD_ARK_FILE_IRP_LAYER_BASE_FS);
+    // Complete the current kernel call, then abandon stale comparisons and conversion.
+    if (canceled && canceled()) return false;
     if (!bypassResult.io.ok)
     {
         errorTextOut = bypassResult.unsupported
@@ -263,8 +271,10 @@ bool ks::file::IrpFileSystemParser::enumerateDirectory(
         bypassResult.queryStatus == KSWORD_ARK_DIRECTORY_ENUM_STATUS_PARTIAL;
     const QString currentPath =
         QDir::toNativeSeparators(QDir::cleanPath(pathText));
-    convertRows(bypassResult.entries, currentPath, entriesOut, partialResult);
+    if (!convertRows(bypassResult.entries, currentPath, entriesOut, partialResult, canceled)) return false;
+    if (canceled && canceled()) return false;
     sortEntries(entriesOut);
+    if (canceled && canceled()) return false;
 
     const bool layerBypassed =
         bypassResult.resolvedLayer != KSWORD_ARK_FILE_IRP_LAYER_RELATED;
@@ -282,12 +292,13 @@ bool ks::file::IrpFileSystemParser::enumerateDirectory(
          * 只有真正投递到更深的层，栈顶对照才有意义：R0 在目标层不可用时会回退到
          * 栈顶，此时两次请求同源，差集必然为空，把它当作"没有隐藏项"是错误结论。
          */
-        if (layerBypassed)
+        if (layerBypassed && !(canceled && canceled()))
         {
             const ksword::ark::FileIrpDirectoryResult topResult =
                 client.enumerateDirectoryByIrp(
                     driverPath.toStdWString(),
                     KSWORD_ARK_FILE_IRP_LAYER_RELATED);
+            if (canceled && canceled()) return false;
             const bool topSemanticOk = topResult.io.ok &&
                 (topResult.queryStatus == KSWORD_ARK_DIRECTORY_ENUM_STATUS_OK ||
                  topResult.queryStatus == KSWORD_ARK_DIRECTORY_ENUM_STATUS_PARTIAL);
@@ -295,7 +306,7 @@ bool ks::file::IrpFileSystemParser::enumerateDirectory(
             {
                 std::vector<ManualDirectoryEntry> topEntries;
                 bool topPartial = false;
-                convertRows(topResult.entries, currentPath, topEntries, topPartial);
+                if (!convertRows(topResult.entries, currentPath, topEntries, topPartial, canceled)) return false;
 
                 diagnosticsOut->comparisonAvailable = true;
                 diagnosticsOut->topLayerEntryCount =
@@ -307,17 +318,20 @@ bool ks::file::IrpFileSystemParser::enumerateDirectory(
                 bypassNameSet.reserve(static_cast<int>(entriesOut.size()) + 16);
                 for (const ManualDirectoryEntry& itemValue : entriesOut)
                 {
+                    if (canceled && canceled()) return false;
                     bypassNameSet.insert(itemValue.name.toCaseFolded());
                 }
                 QSet<QString> topNameSet;
                 topNameSet.reserve(static_cast<int>(topEntries.size()) + 16);
                 for (const ManualDirectoryEntry& itemValue : topEntries)
                 {
+                    if (canceled && canceled()) return false;
                     topNameSet.insert(itemValue.name.toCaseFolded());
                 }
 
                 for (const ManualDirectoryEntry& itemValue : entriesOut)
                 {
+                    if (canceled && canceled()) return false;
                     if (!topNameSet.contains(itemValue.name.toCaseFolded()))
                     {
                         diagnosticsOut->bypassOnlyNames.append(itemValue.name);
@@ -325,6 +339,7 @@ bool ks::file::IrpFileSystemParser::enumerateDirectory(
                 }
                 for (const ManualDirectoryEntry& itemValue : topEntries)
                 {
+                    if (canceled && canceled()) return false;
                     if (!bypassNameSet.contains(itemValue.name.toCaseFolded()))
                     {
                         diagnosticsOut->topLayerOnlyNames.append(itemValue.name);
@@ -334,6 +349,7 @@ bool ks::file::IrpFileSystemParser::enumerateDirectory(
         }
     }
 
+    if (canceled && canceled()) return false;
     if (partialOut != nullptr)
     {
         *partialOut = partialResult;
