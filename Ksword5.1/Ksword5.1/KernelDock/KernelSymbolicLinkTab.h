@@ -9,6 +9,8 @@
 // ============================================================
 
 #include "KernelSymbolicLinkWorker.h"
+#include "../UI/FlatTableModel.h"
+#include <QPersistentModelIndex>
 
 #include <QWidget>
 
@@ -17,8 +19,8 @@
 class QLabel;
 class QLineEdit;
 class QPushButton;
-class QTableWidget;
-class QTableWidgetItem;
+class QTableView;
+class QTimer;
 class QPoint;
 
 class KernelSymbolicLinkTab final : public QWidget
@@ -50,12 +52,19 @@ private:
         const QString& errorText,
         bool ok);
     void applyFilters();
-    void rebuildTable();
+    class LinkFilter;
+    struct TableRow
+    {
+        KernelSymbolicLinkEntry entry;
+        QString mergedText;
+        QString targetMergedText;
+    };
+    using Model = ks::ui::FlatTableModel<TableRow>;
+    const KernelSymbolicLinkEntry* entryAtVisibleRow(int row) const;
     void copyCurrentTarget() const;
     void copyCurrentRow() const;
     void showContextMenu(const QPoint& position);
 
-    static QTableWidgetItem* createReadOnlyItem(const QString& text);
     static QString rowToTsv(const KernelSymbolicLinkEntry& row);
 
 private:
@@ -64,9 +73,14 @@ private:
     QLineEdit* m_filterEdit = nullptr;
     QLineEdit* m_targetFilterEdit = nullptr;
     QLabel* m_statusLabel = nullptr;
-    QTableWidget* m_table = nullptr;
+    QTableView* m_table = nullptr;
+    Model* m_model = nullptr;
+    LinkFilter* m_proxy = nullptr;
+    QTimer* m_filterTimer = nullptr;
+    bool m_filterActive = false;
+    QPersistentModelIndex m_unfilteredSelection;
+    int m_unfilteredHorizontalScroll = 0;
+    int m_unfilteredVerticalScroll = 0;
 
-    std::vector<KernelSymbolicLinkEntry> m_allRows;
-    std::vector<KernelSymbolicLinkEntry> m_visibleRows;
     bool m_refreshing = false;
 };
