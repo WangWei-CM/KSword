@@ -802,6 +802,12 @@ void CallbackPromptManager::onEventArrivedOnUiThread(const KSWORD_ARK_CALLBACK_E
         return;
     }
 
+    if (isEventExpired(eventPacket))
+    {
+        recordExpiredEvent(eventPacket);
+        return;
+    }
+
     if (shouldAutoAllowByRegex(eventPacket))
     {
         const bool answerOk = sendAnswerToDriver(eventPacket.eventGuid, KSWORD_ARK_DECISION_ALLOW);
@@ -886,6 +892,22 @@ bool CallbackPromptManager::shouldAutoAllowByRegex(const KSWORD_ARK_CALLBACK_EVE
     return false;
 }
 
+bool CallbackPromptManager::isEventExpired(const KSWORD_ARK_CALLBACK_EVENT_PACKET& eventPacket) const
+{
+    return eventPacket.deadlineUtc100ns != 0ULL &&
+        eventPacket.deadlineUtc100ns <= currentUtc100ns();
+}
+
+void CallbackPromptManager::recordExpiredEvent(const KSWORD_ARK_CALLBACK_EVENT_PACKET& eventPacket)
+{
+    const quint32 defaultDecision = eventPacket.defaultDecision == KSWORD_ARK_DECISION_DENY
+        ? KSWORD_ARK_DECISION_DENY : KSWORD_ARK_DECISION_ALLOW;
+    appendManagerLog(
+        kernelText("kernel.callback.prompt.log.event_expired_before_display", QStringLiteral("事件 %1 已在显示前到期，由驱动采用默认决策“%2”；未显示或重复回传。"))
+        .arg(callbackGuidToString(eventPacket.eventGuid))
+        .arg(callbackDecisionToDisplayText(defaultDecision)));
+}
+
 void CallbackPromptManager::tryShowNextEvent()
 {
     if (!m_running.load())
@@ -918,6 +940,13 @@ void CallbackPromptManager::tryShowNextEvent()
         return;
     }
 
+    if (isEventExpired(nextEvent))
+    {
+        recordExpiredEvent(nextEvent);
+        QTimer::singleShot(0, this, [this]() { tryShowNextEvent(); });
+        return;
+    }
+
     m_currentEvent = nextEvent;
     m_hasCurrentEvent = true;
     m_remainingTimeoutMs = static_cast<qint64>(m_currentEvent.timeoutMs);
@@ -926,14 +955,24 @@ void CallbackPromptManager::tryShowNextEvent()
         m_remainingTimeoutMs = 5000;
     }
 
+    updatePopupContent(m_currentEvent);
     applyPopupTheme();
     movePopupToBottomRight();
+
+    if (isEventExpired(m_currentEvent))
+    {
+        const auto expiredEvent = m_currentEvent;
+        m_hasCurrentEvent = false;
+        m_remainingTimeoutMs = 0;
+        RtlZeroMemory(&m_currentEvent, sizeof(m_currentEvent));
+        recordExpiredEvent(expiredEvent);
+        QTimer::singleShot(0, this, [this]() { tryShowNextEvent(); });
+        return;
+    }
 
     m_popupDialog->show();
     m_popupDialog->raise();
     m_popupDialog->activateWindow();
-
-    updatePopupContent(m_currentEvent);
 
     if (m_countdownTimer != nullptr)
     {

@@ -74,6 +74,8 @@ private:
     void onEventArrivedOnUiThread(const KSWORD_ARK_CALLBACK_EVENT_PACKET& eventPacket);
     void enqueueEvent(const KSWORD_ARK_CALLBACK_EVENT_PACKET& eventPacket);
     bool shouldAutoAllowByRegex(const KSWORD_ARK_CALLBACK_EVENT_PACKET& eventPacket) const;
+    bool isEventExpired(const KSWORD_ARK_CALLBACK_EVENT_PACKET& eventPacket) const;
+    void recordExpiredEvent(const KSWORD_ARK_CALLBACK_EVENT_PACKET& eventPacket);
     void tryShowNextEvent();
     void updatePopupContent(const KSWORD_ARK_CALLBACK_EVENT_PACKET& eventPacket);
     void updateCountdownLabel();
