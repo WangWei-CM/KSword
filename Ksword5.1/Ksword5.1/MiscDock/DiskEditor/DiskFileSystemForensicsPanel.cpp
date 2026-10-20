@@ -941,6 +941,9 @@ namespace ks::misc
                         entry.fileSizeBytes));
                 QString readError;
                 std::uint64_t offset = 0U;
+                const auto readSession = DiskRawFileSystemBrowser::createReadSession(
+                    selection.diskIndex, selection.backend, selection.partitionOffset,
+                    selection.partitionLength, selection.logicalSectorSize, fileSystem, entry.fullPath);
                 while (offset < entry.fileSizeBytes)
                 {
                     const std::uint32_t length =
@@ -948,17 +951,7 @@ namespace ks::misc
                             std::min<std::uint64_t>(
                                 kReadChunkBytes,
                                 entry.fileSizeBytes - offset));
-                    RawFileReadResult chunk =
-                        DiskRawFileSystemBrowser::readFile(
-                            selection.diskIndex,
-                            selection.backend,
-                            selection.partitionOffset,
-                            selection.partitionLength,
-                            selection.logicalSectorSize,
-                            fileSystem,
-                            entry.fullPath,
-                            offset,
-                            length);
+                    RawFileReadResult chunk = readSession(offset, length);
                     if (!chunk.success
                         || chunk.bytes.size()
                             != static_cast<qsizetype>(length))

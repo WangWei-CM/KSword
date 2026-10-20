@@ -6,6 +6,8 @@
 #include <QString>
 
 #include <cstdint>
+#include <any>
+#include <memory>
 
 namespace ks::misc::rawfs
 {
@@ -23,6 +25,20 @@ namespace ks::misc::rawfs
             std::uint64_t partitionOffset,
             std::uint64_t partitionLength,
             std::uint32_t logicalSectorSize);
+
+        // A read session is confined to one filesystem/path and one serial worker.
+        // Mounted volumes borrow this stable reader; their typed state dies before the reader.
+        void enableFileSession() { m_fileSessionEnabled = true; }
+        template<class State> std::shared_ptr<State> fileSessionState() const
+        {
+            if (!m_fileSessionEnabled) return {};
+            if (const auto* state = std::any_cast<std::shared_ptr<State>>(&m_fileSessionState)) return *state;
+            return {};
+        }
+        template<class State> void setFileSessionState(std::shared_ptr<State> state) const
+        {
+            if (m_fileSessionEnabled) m_fileSessionState = std::move(state);
+        }
 
         bool read(
             std::uint64_t relativeOffset,
@@ -43,6 +59,8 @@ namespace ks::misc::rawfs
         std::uint64_t m_partitionOffset = 0;
         std::uint64_t m_partitionLength = 0;
         std::uint32_t m_logicalSectorSize = 512U;
+        bool m_fileSessionEnabled = false;
+        mutable std::any m_fileSessionState;
     };
 
     QString normalizePath(const QString& path);

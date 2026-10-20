@@ -1208,28 +1208,47 @@ namespace ks::misc::rawfs
         const std::uint64_t offset,
         const std::uint32_t length)
     {
-        RawFileReadResult result;
-        result.fileSystem = expectedKind;
-        result.fileSystemName =
-            DiskFileSystemForensics::fileSystemName(expectedKind);
-        result.filePath = path;
+        struct FileState
+        {
+            ExtVolume volume;
+            ExtInode data;
+            RawFileReadResult basis;
+            explicit FileState(const VolumeReader& reader) : volume(reader) {}
+        };
+        auto state = reader.fileSessionState<FileState>();
+        if (!state)
+        {
+            state = std::make_shared<FileState>(reader);
+            auto& volume = state->volume;
+            auto& inode = state->data;
 
-        ExtVolume volume(reader);
-        if (!volume.mount(result.errorText))
-        {
-            return result;
+            RawFileReadResult result;
+            result.fileSystem = expectedKind;
+            result.fileSystemName =
+                DiskFileSystemForensics::fileSystemName(expectedKind);
+            result.filePath = path;
+
+            if (!volume.mount(result.errorText))
+            {
+                return result;
+            }
+            QString canonicalPath;
+            if (!volume.resolvePath(
+                    path,
+                    inode,
+                    canonicalPath,
+                    result.errorText))
+            {
+                return result;
+            }
+            result.filePath = canonicalPath;
+            state->basis = result;
+            reader.setFileSessionState(state);
         }
-        ExtInode inode;
-        QString canonicalPath;
-        if (!volume.resolvePath(
-                path,
-                inode,
-                canonicalPath,
-                result.errorText))
-        {
-            return result;
-        }
-        result.filePath = canonicalPath;
+        RawFileReadResult result = state->basis;
+        result.requestedOffset = offset;
+        auto& volume = state->volume;
+        auto& inode = state->data;
         volume.readFile(inode, offset, length, result);
         return result;
     }

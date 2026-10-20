@@ -1442,26 +1442,45 @@ namespace ks::misc::rawfs
         const std::uint64_t offset,
         const std::uint32_t length)
     {
-        RawFileReadResult result =
-            makeFileResult(expectedKind, path, offset);
-        HfsVolume volume(reader, expectedKind);
-        if (!volume.mount(result.errorText))
+        struct FileState
         {
-            return result;
-        }
+            HfsVolume volume;
+            HfsCatalogRecord data;
+            RawFileReadResult basis;
+            explicit FileState(const VolumeReader& reader, ForensicFileSystemKind kind) : volume(reader, kind) {}
+        };
+        auto state = reader.fileSessionState<FileState>();
+        if (!state)
+        {
+            state = std::make_shared<FileState>(reader, expectedKind);
+            auto& volume = state->volume;
+            auto& record = state->data;
 
-        HfsCatalogRecord record;
-        QString canonicalPath;
-        if (!volume.resolvePath(
-                path,
-                record,
-                canonicalPath,
-                result.errorText))
-        {
-            return result;
+            RawFileReadResult result =
+                makeFileResult(expectedKind, path, offset);
+            if (!volume.mount(result.errorText))
+            {
+                return result;
+            }
+
+            QString canonicalPath;
+            if (!volume.resolvePath(
+                    path,
+                    record,
+                    canonicalPath,
+                    result.errorText))
+            {
+                return result;
+            }
+            result.filePath = canonicalPath;
+            result.fileSizeBytes = record.dataFork.logicalSize;
+            state->basis = result;
+            reader.setFileSessionState(state);
         }
-        result.filePath = canonicalPath;
-        result.fileSizeBytes = record.dataFork.logicalSize;
+        RawFileReadResult result = state->basis;
+        result.requestedOffset = offset;
+        auto& volume = state->volume;
+        auto& record = state->data;
         if (!volume.readFile(record, offset, length, result))
         {
             return result;

@@ -4110,41 +4110,58 @@ namespace ks::misc::rawfs
         const std::uint64_t offset,
         const std::uint32_t length)
     {
-        RawFileReadResult result;
-        result.fileSystem = expectedKind;
-        result.fileSystemName =
-            DiskFileSystemForensics::fileSystemName(expectedKind);
-        result.filePath = normalizePath(path);
+        struct FileState
+        {
+            FatGeometry geometry;
+            RawFileEntry entry;
+            RawFileReadResult basis;
+        };
+        auto state = reader.fileSessionState<FileState>();
+        if (!state)
+        {
+            state = std::make_shared<FileState>();
+            auto& geometry = state->geometry;
+            auto& entry = state->entry;
+
+            RawFileReadResult result;
+            result.fileSystem = expectedKind;
+            result.fileSystemName =
+                DiskFileSystemForensics::fileSystemName(expectedKind);
+            result.filePath = normalizePath(path);
+            result.requestedOffset = offset;
+            if (!loadFatGeometry(
+                    reader,
+                    expectedKind,
+                    geometry,
+                    result.errorText))
+            {
+                return result;
+            }
+            bool root = false;
+            if (!resolveFatPath(
+                    reader,
+                    geometry,
+                    result.filePath,
+                    entry,
+                    root,
+                    result.errorText))
+            {
+                return result;
+            }
+            if (root || entry.type == RawFileObjectType::Directory)
+            {
+                result.errorText = QStringLiteral(
+                    "FAT 目录不能作为普通文件读取。");
+                return result;
+            }
+            result.fileSizeBytes = entry.fileSizeBytes;
+            result.extents = entry.extents;
+            state->basis = result;
+            reader.setFileSessionState(state);
+        }
+        RawFileReadResult result = state->basis;
         result.requestedOffset = offset;
-        FatGeometry geometry;
-        if (!loadFatGeometry(
-                reader,
-                expectedKind,
-                geometry,
-                result.errorText))
-        {
-            return result;
-        }
-        RawFileEntry entry;
-        bool root = false;
-        if (!resolveFatPath(
-                reader,
-                geometry,
-                result.filePath,
-                entry,
-                root,
-                result.errorText))
-        {
-            return result;
-        }
-        if (root || entry.type == RawFileObjectType::Directory)
-        {
-            result.errorText = QStringLiteral(
-                "FAT 目录不能作为普通文件读取。");
-            return result;
-        }
-        result.fileSizeBytes = entry.fileSizeBytes;
-        result.extents = entry.extents;
+        const auto& entry = state->entry;
         if (!readMappedExtents(
                 reader,
                 entry.extents,
@@ -4234,36 +4251,53 @@ namespace ks::misc::rawfs
         const std::uint64_t offset,
         const std::uint32_t length)
     {
-        RawFileReadResult result;
-        result.fileSystem = ForensicFileSystemKind::ExFat;
-        result.fileSystemName = QStringLiteral("exFAT");
-        result.filePath = normalizePath(path);
+        struct FileState
+        {
+            ExFatGeometry geometry;
+            RawFileEntry entry;
+            RawFileReadResult basis;
+        };
+        auto state = reader.fileSessionState<FileState>();
+        if (!state)
+        {
+            state = std::make_shared<FileState>();
+            auto& geometry = state->geometry;
+            auto& entry = state->entry;
+
+            RawFileReadResult result;
+            result.fileSystem = ForensicFileSystemKind::ExFat;
+            result.fileSystemName = QStringLiteral("exFAT");
+            result.filePath = normalizePath(path);
+            result.requestedOffset = offset;
+            if (!loadExFatGeometry(reader, geometry, result.errorText))
+            {
+                return result;
+            }
+            bool root = false;
+            if (!resolveExFatPath(
+                    reader,
+                    geometry,
+                    result.filePath,
+                    entry,
+                    root,
+                    result.errorText))
+            {
+                return result;
+            }
+            if (root || entry.type == RawFileObjectType::Directory)
+            {
+                result.errorText = QStringLiteral(
+                    "exFAT 目录不能作为普通文件读取。");
+                return result;
+            }
+            result.fileSizeBytes = entry.fileSizeBytes;
+            result.extents = entry.extents;
+            state->basis = result;
+            reader.setFileSessionState(state);
+        }
+        RawFileReadResult result = state->basis;
         result.requestedOffset = offset;
-        ExFatGeometry geometry;
-        if (!loadExFatGeometry(reader, geometry, result.errorText))
-        {
-            return result;
-        }
-        RawFileEntry entry;
-        bool root = false;
-        if (!resolveExFatPath(
-                reader,
-                geometry,
-                result.filePath,
-                entry,
-                root,
-                result.errorText))
-        {
-            return result;
-        }
-        if (root || entry.type == RawFileObjectType::Directory)
-        {
-            result.errorText = QStringLiteral(
-                "exFAT 目录不能作为普通文件读取。");
-            return result;
-        }
-        result.fileSizeBytes = entry.fileSizeBytes;
-        result.extents = entry.extents;
+        const auto& entry = state->entry;
         if (!readMappedExtents(
                 reader,
                 entry.extents,
@@ -4422,60 +4456,79 @@ namespace ks::misc::rawfs
         const std::uint64_t offset,
         const std::uint32_t length)
     {
-        RawFileReadResult result;
-        result.fileSystem = ForensicFileSystemKind::Ntfs;
-        result.fileSystemName = QStringLiteral("NTFS");
-        result.filePath = normalizePath(path);
+        struct FileState
+        {
+            NtfsGeometry geometry;
+            NtfsDataStream stream;
+            RawFileReadResult basis;
+        };
+        auto state = reader.fileSessionState<FileState>();
+        if (!state)
+        {
+            state = std::make_shared<FileState>();
+            auto& geometry = state->geometry;
+
+            RawFileReadResult result;
+            result.fileSystem = ForensicFileSystemKind::Ntfs;
+            result.fileSystemName = QStringLiteral("NTFS");
+            result.filePath = normalizePath(path);
+            result.requestedOffset = offset;
+            if (!loadNtfsGeometry(reader, geometry, result.errorText))
+            {
+                return result;
+            }
+            NtfsRecord record;
+            QString streamName;
+            if (!resolveNtfsPath(
+                    reader,
+                    geometry,
+                    result.filePath,
+                    record,
+                    streamName,
+                    result.errorText))
+            {
+                return result;
+            }
+            if (record.hasAttributeList
+                && !record.attributeListResolved)
+            {
+                result.errorText =
+                    record.nonResidentAttributeList
+                    ? QStringLiteral(
+                        "目标 NTFS 对象使用非驻留 $ATTRIBUTE_LIST；"
+                        "其扩展记录或 VCN 证据未能完整验证，"
+                        "因此拒绝返回可能缺段的数据。")
+                    : QStringLiteral(
+                        "目标 NTFS 对象的 $ATTRIBUTE_LIST 未能完整验证；"
+                        "因此拒绝返回不完整的命名流或普通数据。");
+                return result;
+            }
+            if (record.directory && streamName.isEmpty())
+            {
+                result.errorText = QStringLiteral(
+                    "NTFS 目录不能作为未命名普通文件读取。");
+                return result;
+            }
+            const NtfsDataStream* stream =
+                selectNtfsStream(record, streamName);
+            if (stream == nullptr)
+            {
+                result.errorText = streamName.isEmpty()
+                    ? QStringLiteral(
+                        "NTFS 文件没有未命名 $DATA。")
+                    : QStringLiteral(
+                        "NTFS 命名流不存在：%1").arg(streamName);
+                return result;
+            }
+            result.fileSizeBytes = stream->realSize;
+            state->stream = *stream;
+            state->basis = result;
+            reader.setFileSessionState(state);
+        }
+        RawFileReadResult result = state->basis;
         result.requestedOffset = offset;
-        NtfsGeometry geometry;
-        if (!loadNtfsGeometry(reader, geometry, result.errorText))
-        {
-            return result;
-        }
-        NtfsRecord record;
-        QString streamName;
-        if (!resolveNtfsPath(
-                reader,
-                geometry,
-                result.filePath,
-                record,
-                streamName,
-                result.errorText))
-        {
-            return result;
-        }
-        if (record.hasAttributeList
-            && !record.attributeListResolved)
-        {
-            result.errorText =
-                record.nonResidentAttributeList
-                ? QStringLiteral(
-                    "目标 NTFS 对象使用非驻留 $ATTRIBUTE_LIST；"
-                    "其扩展记录或 VCN 证据未能完整验证，"
-                    "因此拒绝返回可能缺段的数据。")
-                : QStringLiteral(
-                    "目标 NTFS 对象的 $ATTRIBUTE_LIST 未能完整验证；"
-                    "因此拒绝返回不完整的命名流或普通数据。");
-            return result;
-        }
-        if (record.directory && streamName.isEmpty())
-        {
-            result.errorText = QStringLiteral(
-                "NTFS 目录不能作为未命名普通文件读取。");
-            return result;
-        }
-        const NtfsDataStream* stream =
-            selectNtfsStream(record, streamName);
-        if (stream == nullptr)
-        {
-            result.errorText = streamName.isEmpty()
-                ? QStringLiteral(
-                    "NTFS 文件没有未命名 $DATA。")
-                : QStringLiteral(
-                    "NTFS 命名流不存在：%1").arg(streamName);
-            return result;
-        }
-        result.fileSizeBytes = stream->realSize;
+        const auto& geometry = state->geometry;
+        const auto* stream = &state->stream;
         if (!readNtfsStream(
                 reader,
                 geometry,
