@@ -137,6 +137,7 @@ private:
     void applyPendingChanges();
     void restoreLastChanges();
     void filterCurrentValues();
+    void filterValueRows(int firstRow, int endRow);
     void appendValueRows(const std::shared_ptr<const RegistryKeyListing>& listing,
         int offset, quint64 generation, const QString& selectedName);
     void showNavigationMenu();

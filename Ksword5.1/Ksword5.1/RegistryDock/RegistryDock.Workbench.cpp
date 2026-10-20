@@ -686,8 +686,13 @@ void RegistryDock::restoreLastChanges()
 
 void RegistryDock::filterCurrentValues()
 {
+    filterValueRows(0, m_valueTable->rowCount());
+}
+
+void RegistryDock::filterValueRows(const int firstRow, const int endRow)
+{
     const QString query = m_filterEdit->text();
-    for (int row = 0; row < m_valueTable->rowCount(); ++row)
+    for (int row = firstRow; row < endRow; ++row)
     {
         bool match = query.isEmpty();
         for (int column = 0; !match && column < m_valueTable->columnCount(); ++column)
@@ -730,7 +735,7 @@ void RegistryDock::appendValueRows(const std::shared_ptr<const RegistryKeyListin
         }
         m_valueTable->setUpdatesEnabled(true);
     }
-    filterCurrentValues();
+    filterValueRows(offset, end);
     if (end < count)
     {
         QTimer::singleShot(0, this, [guarded, listing, end, generation, selectedName]() {
