@@ -60,6 +60,14 @@ namespace ks::ui
         };
         std::shared_ptr<AsyncUiDispatcher> deliveryDispatcher;
         QQueue<Delivery> deliveries;
+        struct DeliveryReceipt
+        {
+            quint64 generation = 0;
+            bool delivered = false;
+            std::atomic_bool completed{false}; // worker发布物理完成，GUI ACK丢弃不抹掉该事实。
+        };
+        std::shared_ptr<DeliveryReceipt> deliveryReceipt;
+        QTimer* deliveryPoller = nullptr; // 只在一个真实worker在途时运行，GUI读取值receipt。
         bool deliveryInFlight = false;
         bool collectWaitingForDelivery = false;
 
@@ -84,6 +92,7 @@ namespace ks::ui
         void finishDelivery(quint64 expected, bool delivered)
         {
             deliveryInFlight = false;
+            if (deliveryPoller) deliveryPoller->stop();
             if (expected == generation && !delivered)
             {
                 // 一次拒绝或超时即作废本代；不会继续等待其余目录包。
@@ -102,37 +111,47 @@ namespace ks::ui
             }
         }
 
+        void reconcileDelivery(const std::shared_ptr<DeliveryReceipt>& expected = {})
+        {
+            const auto receipt = deliveryReceipt;
+            if (!receipt || (expected && receipt != expected)
+                || !receipt->completed.load(std::memory_order_acquire)) return;
+            deliveryReceipt.reset();
+            finishDelivery(receipt->generation, receipt->delivered);
+        }
+
         void pumpDelivery()
         {
-            if (deliveryInFlight || deliveries.isEmpty())
-            {
-                return;
-            }
+            reconcileDelivery(); // 新请求也能回收已物理完成但丢失GUI ACK的旧槽。
+            if (deliveryInFlight || deliveries.isEmpty()) return;
             const Delivery delivery = deliveries.dequeue();
-            deliveryInFlight = true;
             const auto dispatcher = deliveryDispatcher;
             try
             {
-                auto* task = QRunnable::create([delivery, dispatcher, state = this]()
+                auto receipt = std::make_shared<DeliveryReceipt>();
+                receipt->generation = delivery.generation;
+                deliveryReceipt = receipt;
+                deliveryInFlight = true;
+                if (deliveryPoller) deliveryPoller->start();
+                auto task = std::unique_ptr<QRunnable>(QRunnable::create([delivery, dispatcher, receipt, state = this]()
                 {
                     bool delivered = false;
+                    try { delivered = sendDelivery(delivery); }
+                    catch (...) { /* 原生身份验证分配失败与传输失败共用终态。 */ }
+                    receipt->delivered = delivered;
+                    receipt->completed.store(true, std::memory_order_release);
                     try
                     {
-                        delivered = sendDelivery(delivery);
+                        dispatcher->post([state, receipt]() { state->reconcileDelivery(receipt); });
                     }
-                    catch (...)
-                    {
-                        // 路径身份验证分配失败与传输失败走同一终态，不能越出QRunnable。
-                    }
-                    dispatcher->post([state, expected = delivery.generation, delivered]()
-                    {
-                        state->finishDelivery(expected, delivered); // 仅在仍存活的GUI门禁内借用state。
-                    });
-                });
-                QThreadPool::globalInstance()->start(task, -1);
+                    catch (...) { /* receipt已发布；GUI定时/下次请求核对同一物理完成。 */ }
+                }));
+                QThreadPool::globalInstance()->start(task.get(), -1);
+                task.release(); // pool接受前异常仍由本地unique_ptr收尾。
             }
             catch (...)
             {
+                deliveryReceipt.reset();
                 finishDelivery(delivery.generation, false);
             }
         }
@@ -475,6 +494,9 @@ namespace ks::ui
     {
         m_state->owner = this;
         m_state->deliveryDispatcher = std::make_shared<AsyncUiDispatcher>(this);
+        m_state->deliveryPoller = new QTimer(this);
+        m_state->deliveryPoller->setInterval(50);
+        connect(m_state->deliveryPoller, &QTimer::timeout, this, [this]() { m_state->reconcileDelivery(); });
         m_state->host = host;
         m_state->list = std::move(list);
         m_state->prepare = std::move(prepare);
@@ -497,6 +519,7 @@ namespace ks::ui
 
     PageNavigationBridge::~PageNavigationBridge()
     {
+        m_state->deliveryPoller->stop();
         m_state->deliveryDispatcher->close(); // state与原生身份移除前先关闭worker回投门禁。
         m_state->deliveries.clear();
         if (::IsWindow(m_state->server))
