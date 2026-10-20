@@ -89,7 +89,18 @@ namespace
             case QEvent::FontChange:
             case QEvent::ApplicationFontChange:
             case QEvent::ScreenChangeInternal:
-                ++m_fontGeneration;
+                // A local font/screen event cannot change another control's metrics.
+                // The application broadcast invalidates all existing entries once; each
+                // control also compares its actual font/DPI/DPR before using its height.
+                if (object == qApp)
+                {
+                    for (auto& context : m_contexts) context.height = 0;
+                }
+                else if (const auto found = m_contexts.find(qobject_cast<QWidget*>(object));
+                    found != m_contexts.end())
+                {
+                    found->height = 0;
+                }
                 return;
             default:
                 return;
@@ -160,7 +171,6 @@ namespace
         {
             quint64 boundaryGeneration = 0;
             bool interior = false;
-            quint64 fontGeneration = 0;
             QFont font;
             int logicalDpiY = 0;
             qreal devicePixelRatio = 0;
@@ -203,21 +213,18 @@ namespace
             const QFont font = widget->font();
             const int dpi = widget->logicalDpiY();
             const qreal ratio = widget->devicePixelRatioF();
-            if (context.height == 0 || context.fontGeneration != m_fontGeneration
-                || context.font != font || context.logicalDpiY != dpi
+            if (context.height == 0 || context.font != font || context.logicalDpiY != dpi
                 || context.devicePixelRatio != ratio)
             {
                 context.font = font;
                 context.logicalDpiY = dpi;
                 context.devicePixelRatio = ratio;
-                context.fontGeneration = m_fontGeneration;
                 context.height = std::max(28, QFontMetrics(font).height() + 12);
             }
             return context.height;
         }
 
         quint64 m_boundaryGeneration = 1;
-        quint64 m_fontGeneration = 1;
         mutable QHash<const QWidget*, ControlContext> m_contexts;
     };
 
