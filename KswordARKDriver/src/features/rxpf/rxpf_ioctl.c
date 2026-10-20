@@ -35,7 +35,9 @@ typedef enum _KSW_RXPF_IOCTL_OPERATION
     /* Phase G：读 Record->Backup 的子段，供 R3 wizard 在 Unregister(SKIP) 后恢复原字节用 */
     KswRxpfIoctlQueryBackup,
     /* 原子提交：Register→Change→Write→Unregister 压缩到单次 IOCTL */
-    KswRxpfIoctlAtomicCommit
+    KswRxpfIoctlAtomicCommit,
+    /* 执行证明：Register→Change→Write(custom)→InstallIDT→ConcurrentExec 压缩到单次 IOCTL */
+    KswRxpfIoctlExecProof
 } KSW_RXPF_IOCTL_OPERATION;
 
 typedef union _KSW_RXPF_REQUEST_SNAPSHOT
@@ -49,6 +51,7 @@ typedef union _KSW_RXPF_REQUEST_SNAPSHOT
     KSWORD_ARK_RXPF_SET_HOOK_POINT_REQUEST SetHookPoint;
     KSWORD_ARK_RXPF_QUERY_BACKUP_REQUEST QueryBackup;
     KSWORD_ARK_RXPF_ATOMIC_COMMIT_REQUEST AtomicCommit;
+    KSWORD_ARK_RXPF_EXEC_PROOF_REQUEST ExecProof;
 } KSW_RXPF_REQUEST_SNAPSHOT;
 
 static BOOLEAN
@@ -64,7 +67,8 @@ KswRxpfIoctlIsMutation(
         Operation == KswRxpfIoctlUnregisterPage ||
         Operation == KswRxpfIoctlRunSelfTest ||
         Operation == KswRxpfIoctlSetHookPoint ||
-        Operation == KswRxpfIoctlAtomicCommit;
+        Operation == KswRxpfIoctlAtomicCommit ||
+        Operation == KswRxpfIoctlExecProof;
 }
 
 static NTSTATUS
@@ -124,6 +128,12 @@ KswRxpfIoctlEvaluateSafety(
             L"Atomic RXPF register+write+restore on an external image page";
         safetyContext.TargetTextChars = (USHORT)(RTL_NUMBER_OF(
             L"Atomic RXPF register+write+restore on an external image page") - 1U);
+        break;
+    case KswRxpfIoctlExecProof:
+        safetyContext.TargetText =
+            L"Atomic RXPF alloc+write+emulated execute of a custom payload on a driver-owned page";
+        safetyContext.TargetTextChars = (USHORT)(RTL_NUMBER_OF(
+            L"Atomic RXPF alloc+write+emulated execute of a custom payload on a driver-owned page") - 1U);
         break;
     default:
         safetyContext.TargetText =
@@ -281,6 +291,14 @@ KswRxpfIoctlDispatchFixed(
             &snapshot.AtomicCommit,
             (KSWORD_ARK_RXPF_PAGE_RESPONSE*)outputBuffer);
         break;
+    case KswRxpfIoctlExecProof:
+        /* 执行证明：Register(ALLOCATED_TEST)→Change→Write(custom)→InstallIDT→
+         * ConcurrentExec→Unregister 在单个 handler 内完成，shadow IDT emulator
+         * 服务每一次 payload 字节 fetch。 */
+        status = KswRxpfRuntimeExecProof(
+            &snapshot.ExecProof,
+            (KSWORD_ARK_RXPF_EXEC_PROOF_RESPONSE*)outputBuffer);
+        break;
     default:
         status = STATUS_INVALID_DEVICE_REQUEST;
         break;
@@ -404,6 +422,13 @@ KSW_RXPF_DEFINE_IOCTL_HANDLER(
     KswRxpfIoctlAtomicCommit,
     KSWORD_ARK_RXPF_ATOMIC_COMMIT_REQUEST,
     KSWORD_ARK_RXPF_PAGE_RESPONSE,
+    KSWORD_ARK_RXPF_FLAG_UI_CONFIRMED)
+
+KSW_RXPF_DEFINE_IOCTL_HANDLER(
+    KswordARKRxpfIoctlExecProof,
+    KswRxpfIoctlExecProof,
+    KSWORD_ARK_RXPF_EXEC_PROOF_REQUEST,
+    KSWORD_ARK_RXPF_EXEC_PROOF_RESPONSE,
     KSWORD_ARK_RXPF_FLAG_UI_CONFIRMED)
 
 #undef KSW_RXPF_DEFINE_IOCTL_HANDLER

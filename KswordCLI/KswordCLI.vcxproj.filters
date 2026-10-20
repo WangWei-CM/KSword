@@ -368,6 +368,7 @@
     <ClCompile Include="R3SystemIoctl.cpp" />
     <ClCompile Include="RawIoctlCommand.cpp" />
     <ClCompile Include="RxpfAtomicCommitCommand.cpp" />
+    <ClCompile Include="RxpfExecProofCommand.cpp" />
     <ClCompile Include="..\shared\usermode\backend\system\IoctlDecoder.cpp" />
     <ClInclude Include="..\shared\usermode\backend\system\IoctlDecoder.h" />
   </ItemGroup>

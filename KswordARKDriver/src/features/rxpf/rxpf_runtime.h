@@ -101,6 +101,17 @@ KswRxpfRuntimeAtomicCommit(
     _Out_ KSWORD_ARK_RXPF_PAGE_RESPONSE* Response
     );
 
+/*
+ * EXEC_PROOF：一次 IOCTL 内走完 Register(ALLOCATED_TEST)→Change(mode=2)→
+ * Write(custom payload)→PageFaultInstall→ConcurrentExecute→Unregister，
+ * 用 shadow IDT emulator 直接证明调用方 payload 被 CPU 取指并执行。
+ */
+NTSTATUS
+KswRxpfRuntimeExecProof(
+    _In_ const KSWORD_ARK_RXPF_EXEC_PROOF_REQUEST* Request,
+    _Out_ KSWORD_ARK_RXPF_EXEC_PROOF_RESPONSE* Response
+    );
+
 ULONGLONG
 KswRxpfInvokeTestPage(
     _In_ PVOID PageAddress

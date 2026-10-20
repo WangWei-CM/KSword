@@ -28,6 +28,15 @@
  * 命中错误 handler → BUFFER_TOO_SMALL（已实证）。
  */
 #define KSWORD_ARK_IOCTL_FUNCTION_RXPF_ATOMIC_COMMIT 0x925UL
+/*
+ * EXEC_PROOF：一次 IOCTL 走完 Register(ALLOCATED_TEST)→Change(mode=2)→
+ * Write(custom payload)→PageFaultInstall→ConcurrentExecute→Reset→Unregister，
+ * 用于 **直接** 证明 payload 被 CPU 取指并通过 shadow IDT #PF emulator 执行。
+ * 页面始终 NX，mode=1 restore 永不被尝试——走 ALLOCATED_TEST（driver 自有 PFN，
+ * 不受 VTL1 SHA-512 hash enforcement），所以不存在 "字节与 digest 不符导致 restore
+ * 被拒" 的问题。
+ */
+#define KSWORD_ARK_IOCTL_FUNCTION_RXPF_EXEC_PROOF 0x926UL
 
 #define IOCTL_KSWORD_ARK_RXPF_QUERY_SUPPORT \
     CTL_CODE(KSWORD_ARK_IOCTL_DEVICE_TYPE, KSWORD_ARK_IOCTL_FUNCTION_RXPF_QUERY_SUPPORT, METHOD_BUFFERED, FILE_WRITE_ACCESS)
@@ -55,6 +64,8 @@
     CTL_CODE(KSWORD_ARK_IOCTL_DEVICE_TYPE, KSWORD_ARK_IOCTL_FUNCTION_RXPF_QUERY_BACKUP, METHOD_BUFFERED, FILE_WRITE_ACCESS)
 #define IOCTL_KSWORD_ARK_RXPF_ATOMIC_COMMIT \
     CTL_CODE(KSWORD_ARK_IOCTL_DEVICE_TYPE, KSWORD_ARK_IOCTL_FUNCTION_RXPF_ATOMIC_COMMIT, METHOD_BUFFERED, FILE_WRITE_ACCESS)
+#define IOCTL_KSWORD_ARK_RXPF_EXEC_PROOF \
+    CTL_CODE(KSWORD_ARK_IOCTL_DEVICE_TYPE, KSWORD_ARK_IOCTL_FUNCTION_RXPF_EXEC_PROOF, METHOD_BUFFERED, FILE_WRITE_ACCESS)
 
 #define KSWORD_ARK_RXPF_CONFIRMATION_TOKEN 0x46505852UL
 #define KSWORD_ARK_RXPF_MAX_WRITE_BYTES 64UL
@@ -367,3 +378,53 @@ typedef struct _KSWORD_ARK_RXPF_ATOMIC_COMMIT_REQUEST
     unsigned long length;
     unsigned char bytes[KSWORD_ARK_RXPF_MAX_WRITE_BYTES];
 } KSWORD_ARK_RXPF_ATOMIC_COMMIT_REQUEST;
+
+/*
+ * EXEC_PROOF 请求：payload + 期望 RAX。
+ * targetKind 仅接受 KSWORD_ARK_RXPF_TARGET_ALLOCATED_TEST
+ * （SELF_IMAGE_TEST 的页在 driver .text 自身，被 PatchGuard 盯着，不适合反复改）。
+ * 调用方可以写任意字节序列，但如果想通过 verdict，必须保证 payload 走完后
+ * RAX == expectedReturnValue。典型 payload: 48 B8 <imm64> C3（12 字节
+ * mov rax, imm64; ret），expectedReturnValue == imm64。
+ */
+typedef struct _KSWORD_ARK_RXPF_EXEC_PROOF_REQUEST
+{
+    KSWORD_ARK_RXPF_REQUEST_HEADER header;
+    unsigned long targetKind;
+    unsigned long length;
+    unsigned long long expectedReturnValue;
+    unsigned char bytes[KSWORD_ARK_RXPF_MAX_WRITE_BYTES];
+} KSWORD_ARK_RXPF_EXEC_PROOF_REQUEST;
+
+/*
+ * EXEC_PROOF 响应：R0 走完 Register→Change→Write→Install→Execute 后汇报
+ * 所有 worker 的 RAX（取 worker 0 作为代表）、faults 计数、匹配 verdict。
+ * verdict:
+ *   0 = SUCCESS           — returnedValue == expectedReturnValue，且 fault 计数非零
+ *   1 = RETURN_MISMATCH   — concurrent test 跑完但 RAX 不符
+ *   2 = NO_FAULTS         — RAX 匹配但 fault 计数为 0（emulator 没工作，payload 可能被别的路径执行）
+ *   3 = EXEC_FAILED       — concurrent test 抛异常或 worker=0
+ *   4 = SETUP_FAILED      — register/change/write/install 任一步失败
+ */
+typedef struct _KSWORD_ARK_RXPF_EXEC_PROOF_RESPONSE
+{
+    unsigned long version;
+    unsigned long size;
+    unsigned long targetKind;
+    unsigned long length;
+    unsigned long workerCount;
+    unsigned long verdict;
+    unsigned long long recordId;
+    unsigned long long pageBase;
+    unsigned long long returnedValue;
+    unsigned long long expectedReturnValue;
+    unsigned long long faultsObserved;
+    long lastStatus;
+    long setupStatus;
+} KSWORD_ARK_RXPF_EXEC_PROOF_RESPONSE;
+
+#define KSWORD_ARK_RXPF_EXEC_PROOF_VERDICT_SUCCESS         0UL
+#define KSWORD_ARK_RXPF_EXEC_PROOF_VERDICT_RETURN_MISMATCH 1UL
+#define KSWORD_ARK_RXPF_EXEC_PROOF_VERDICT_NO_FAULTS       2UL
+#define KSWORD_ARK_RXPF_EXEC_PROOF_VERDICT_EXEC_FAILED     3UL
+#define KSWORD_ARK_RXPF_EXEC_PROOF_VERDICT_SETUP_FAILED    4UL

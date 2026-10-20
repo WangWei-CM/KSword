@@ -17,7 +17,7 @@
       "^CONTROL_STORAGE_CONTROLLER$",
       "^TRANSFER_STORAGE_CONTROLLER$",
       "^WRITE_",
-      "^RXPF_(REGISTER|UNREGISTER|CHANGE|WRITE|SET_EMULATION|RUN_SELF_TEST|ATOMIC_COMMIT)",
+      "^RXPF_(REGISTER|UNREGISTER|CHANGE|WRITE|SET_EMULATION|RUN_SELF_TEST|ATOMIC_COMMIT|EXEC_PROOF)",
       "^CONTROL_DRIVER_",
       "^CONTROL_(HVM|SYSTEM_TIME|CPU_POWER)$",
       "^SET_BUGCHECK_",
@@ -3185,6 +3185,11 @@
       "ioctl": "RXPF_ATOMIC_COMMIT",
       "reason": "no-cli-path",
       "detail": "原子提交（Register+Change+Write+Unregister）在单次 IOCTL 内完成 NX 翻转；KswordCLI 无对应子命令，无法在 harness 内触发。属于覆盖缺口，不是安全排除。"
+    },
+    {
+      "ioctl": "RXPF_EXEC_PROOF",
+      "reason": "no-cli-path",
+      "detail": "执行证明（Register ALLOCATED_TEST+Change+Write custom+InstallIDT+ConcurrentExec+Unregister）在单次 IOCTL 内走 shadow IDT emulator；KswordCLI 子命令 kernel rxpf-exec-proof 存在但 harness 未接入运行时测试，属于覆盖缺口。"
     },
     {
       "ioctl": "RXPF_QUERY_BACKUP",
