@@ -24,6 +24,7 @@
 
 class QPaintEvent;
 class QShowEvent;
+class QHideEvent;
 class QVariantAnimation;
 
 class KsPainterChartObject : public QObject
@@ -327,6 +328,10 @@ public:
     ~QChartView() override;
 
     QChart* chart() const;
+    // After a host restores hidden series/axes, present one consistent current
+    // model without replaying the hidden interval or an earlier queued update.
+    // Hidden views retain only dirty state and defer the snapshot until Show.
+    void presentLatestWithoutAnimation();
     QWidget* viewport();
     const QWidget* viewport() const;
 
@@ -341,12 +346,14 @@ public:
 protected:
     void paintEvent(QPaintEvent* event) override;
     void showEvent(QShowEvent* event) override;
+    void hideEvent(QHideEvent* event) override;
 
 private:
     using LinePointMap = QHash<const QLineSeries*, QList<QPointF>>;
     using BarValueMap = QHash<const QBarSet*, QVector<qreal>>;
     using AxisRangeMap = QHash<const QValueAxis*, QPair<qreal, qreal>>;
 
+    bool isPresentationVisible() const;
     void scheduleModelUpdate();
     void applyPendingModelUpdate();
     void startModelAnimation();
@@ -362,6 +369,8 @@ private:
     QChart* m_chart = nullptr;
     QVariantAnimation* m_animation = nullptr;
     bool m_updateScheduled = false;
+    bool m_modelDirty = true;
+    bool m_presentationExposed = false;
     bool m_antialiasingEnabled = true;
     qreal m_animationProgress = 1.0;
     QBrush m_viewBackgroundBrush = QBrush(Qt::NoBrush);
