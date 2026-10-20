@@ -7,6 +7,7 @@
 #include "../OnlineScan/SandboxUploadActions.h"
 #include "../UI/TableInteractionSupport.h"
 #include "../UI/AsyncUiDispatcher.h"
+#include "../UI/AsyncCleanupRegistry.h"
 #include "../UI/ThemeStatusRole.h"
 #include "../theme.h"
 
@@ -21,6 +22,7 @@
 #include <QApplication>
 #include <QAbstractItemView>
 #include <QImage>
+#include <objbase.h>
 #include <QPersistentModelIndex>
 #include <QPixmap>
 #include <QQueue>
@@ -208,13 +210,14 @@ namespace
 
     QImage extractProcessSelectorIcon(const QString& path)
     {
+        const HRESULT initialized = ::CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+        struct ComScope { HRESULT result; ~ComScope() { if (SUCCEEDED(result)) ::CoUninitialize(); } } com{initialized};
+        if (FAILED(initialized) && initialized != RPC_E_CHANGED_MODE) return {};
         SHFILEINFOW shellInfo{};
+        struct IconScope { SHFILEINFOW& value; ~IconScope() { if (value.hIcon) ::DestroyIcon(value.hIcon); } } icon{shellInfo};
         const auto result = ::SHGetFileInfoW(reinterpret_cast<const wchar_t*>(path.utf16()),
             0, &shellInfo, sizeof(shellInfo), SHGFI_ICON | SHGFI_LARGEICON);
-        if (result == 0 || shellInfo.hIcon == nullptr) return {};
-        const QImage image = QImage::fromHICON(shellInfo.hIcon);
-        ::DestroyIcon(shellInfo.hIcon);
-        return image;
+        return result == 0 || !shellInfo.hIcon ? QImage{} : QImage::fromHICON(shellInfo.hIcon);
     }
 
     // QObject owns only projection/cache state. Workers own values and a closeable dispatcher;
@@ -271,8 +274,16 @@ namespace
             return pool;
         }
 
+        struct Completion { QString key; QImage image; std::atomic_bool done{false}; };
         void refreshDemand()
         {
+            for (auto item = m_completions.begin(); item != m_completions.end(); ) {
+                if (!(*item)->done.load(std::memory_order_acquire)) { ++item; continue; }
+                const auto result = std::move(*item); item = m_completions.erase(item);
+                const QString evicted = m_state.complete(result->key);
+                if (!evicted.isEmpty()) m_icons.remove(evicted);
+                m_icons.insert(result->key, result->image.isNull() ? processPlaceholderIcon() : QIcon(QPixmap::fromImage(result->image)));
+            }
             QStringList paths;
             QHash<QString, QString> originalPaths;
             QVector<QPersistentModelIndex> indexes;
@@ -311,19 +322,22 @@ namespace
                 }
             }
             if (m_selectedIcon != nullptr && m_combo->currentIndex() >= 0)
-                m_selectedIcon->setPixmap(m_combo->itemIcon(m_combo->currentIndex()).pixmap(20, 20));            for (QString key = m_state.takeNext(); !key.isEmpty(); key = m_state.takeNext())
+                m_selectedIcon->setPixmap(m_combo->itemIcon(m_combo->currentIndex()).pixmap(20, 20));
+            for (QString key = m_state.takeNext(); !key.isEmpty(); key = m_state.takeNext())
             {
+                const auto cleanupLease = ks::ui::AsyncCleanupRegistry::global().acquire();
+                if (!cleanupLease) { m_state.inFlight.remove(key); break; }
                 const QString path = originalPaths.value(key);
                 const auto dispatcher = m_dispatcher;
-                extractionPool().start(QRunnable::create([this, dispatcher, key, path]() {
-                    QImage image;
-                    try { image = extractProcessSelectorIcon(path); } catch (...) {}
-                    dispatcher->post([this, key, image = std::move(image)]() {
-                        const QString evicted = m_state.complete(key);
-                        if (!evicted.isEmpty()) m_icons.remove(evicted);
-                        m_icons.insert(key, image.isNull() ? processPlaceholderIcon() : QIcon(QPixmap::fromImage(image)));
-                        schedule();
-                    });
+                const auto completion = std::make_shared<Completion>(); completion->key = key;
+                m_completions.push_back(completion);
+                extractionPool().start(QRunnable::create([this, dispatcher, path, completion, cleanupLease]() {
+                    (void)cleanupLease; // Accepted native work stays visible to final shutdown.
+                    try { completion->image = extractProcessSelectorIcon(path); } catch (...) {}
+                    completion->done.store(true, std::memory_order_release);
+                    // Physical completion survives a rejected/dropped wake. The
+                    // next existing show/scroll/selection refresh consumes it.
+                    dispatcher->post([this]() { schedule(); });
                 }));
             }
         }
@@ -332,6 +346,7 @@ namespace
         QPointer<QLabel> m_selectedIcon;
         QTimer m_timer;
         ProcessIconDemandState m_state;
+        std::vector<std::shared_ptr<Completion>> m_completions;
         QHash<QString, QIcon> m_icons;
         std::shared_ptr<ks::ui::AsyncUiDispatcher> m_dispatcher;
     };
