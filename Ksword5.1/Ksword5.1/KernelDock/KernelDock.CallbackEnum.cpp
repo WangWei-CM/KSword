@@ -4,6 +4,7 @@
 #include "../UI/ToolbarMetrics.h"
 #include "../UI/DetailDialogChrome.h"
 #include "../UI/ThemeBinding.h"
+#include "../UI/AsyncOperation.h"
 #include "../UI/TableInteractionSupport.h"
 
 #include <memory>
@@ -392,8 +393,45 @@ namespace
 
         ks::ui::StructuredFieldView* peEditor = new ks::ui::StructuredFieldView(&detailDialog);
 
-        peEditor->setDocument(file_dock_detail::buildPeAnalysisDocument(filePath));
+        peEditor->setDocument(ks::ui::FieldDocument{}.note(kernelText(
+            "kernel.callback.enum.file.pe.waiting", QStringLiteral("选择 PE 信息页后开始解析。"))));
         tabWidget->addTab(ks::ui::CreateDetailFieldProjection(peEditor, tabWidget), kernelText("kernel.callback.enum.file.tab.pe", QStringLiteral("PE信息")));
+
+        // Modal lifetime stays on this stack; the worker only owns path/data.
+        ks::ui::AsyncOperation peOperation(&detailDialog);
+        bool peRequested = false;
+        QObject::connect(tabWidget, &QTabWidget::currentChanged, &detailDialog,
+            [filePath, peEditor, &peOperation, &peRequested](const int index) {
+                if (index != 1 || peRequested)
+                {
+                    return;
+                }
+                peRequested = true;
+                peEditor->setDocument(ks::ui::FieldDocument{}.note(kernelText(
+                    "kernel.callback.enum.file.pe.loading", QStringLiteral("正在解析 PE 文件..."))));
+                const auto ticket = peOperation.submit<QString, ks::ui::FieldDocument>(filePath,
+                    [](const QString& path, const ks::ui::AsyncOperationToken& token) {
+                        if (token.isCanceled())
+                        {
+                            return ks::ui::FieldDocument{};
+                        }
+                        return file_dock_detail::buildPeAnalysisDocument(path);
+                    },
+                    [peEditor](const ks::ui::FieldDocument& document, std::uint64_t) {
+                        peEditor->setDocument(document);
+                        return true;
+                    },
+                    [peEditor](std::exception_ptr) {
+                        peEditor->setDocument(ks::ui::FieldDocument{}.note(kernelText(
+                            "kernel.callback.enum.file.pe.failed", QStringLiteral("PE 解析任务失败，请重新打开详情窗口重试。"))));
+                    });
+                if (ticket == 0)
+                {
+                    peRequested = false;
+                    peEditor->setDocument(ks::ui::FieldDocument{}.note(kernelText(
+                        "kernel.callback.enum.file.pe.failed", QStringLiteral("PE 解析任务失败，请重新打开详情窗口重试。"))));
+                }
+            });
 
         ks::ui::SetDetailTabGroups(tabWidget, {{ks::ui::DetailNavigationKind::General, {0}},
             {ks::ui::DetailNavigationKind::Content, {1}}});
@@ -405,6 +443,7 @@ namespace
         ks::ui::InstallDetailWindowFramework(&detailDialog);
         ks::ui::ApplyDetailDialogChrome(&detailDialog);
         detailDialog.exec();
+        peOperation.close();
     }
 
     bool callbackEnumOpenModuleInExplorer(const QString& filePath)
