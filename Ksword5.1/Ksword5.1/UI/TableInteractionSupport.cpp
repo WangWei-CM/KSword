@@ -2361,15 +2361,15 @@ namespace
                 activeTable->model() != nullptr &&
                 ks::ui::HasTableRowsPassingFilters(activeTable) &&
                 activeTable->model()->columnCount() > 0;
+            const bool projectionReady = !ks::ui::IsTableRowFilterProjectionPending(activeTable);
             const bool controlsAvailable =
-                !ks::ui::IsTableRowFilterProjectionPending(activeTable) &&
                 !m_snapshotCaptureInProgress &&
                 !m_comparisonInProgress &&
                 !m_pauseCaptureInProgress;
-            m_copyAllButton->setEnabled(controlsAvailable && hasVisibleRows);
-            m_exportButton->setEnabled(controlsAvailable && hasVisibleRows);
+            m_copyAllButton->setEnabled(controlsAvailable && projectionReady && hasVisibleRows);
+            m_exportButton->setEnabled(controlsAvailable && projectionReady && hasVisibleRows);
             m_freezePaneButton->setEnabled(
-                controlsAvailable &&
+                controlsAvailable && projectionReady &&
                 !m_inComparison &&
                 activeTable != nullptr &&
                 activeTable->model() != nullptr);
@@ -2398,7 +2398,7 @@ namespace
             m_addSnapshotButton->setText(localizedSourceText(
                 m_snapshotCaptureInProgress ? "正在采集…" : "增加快照"));
             m_addSnapshotButton->setEnabled(
-                controlsAvailable &&
+                controlsAvailable && projectionReady &&
                 !m_cleanupMode &&
                 !m_inComparison &&
                 !m_refreshPaused &&
