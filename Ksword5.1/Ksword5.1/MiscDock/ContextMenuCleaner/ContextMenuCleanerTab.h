@@ -16,6 +16,7 @@
 #include "ContextMenuTemporaryOverride.h"
 #include <functional>
 #include <QWidget>
+#include "../../UI/PageNavigationTabCatalog.h"
 
 #include <atomic>
 #include <memory>
@@ -50,6 +51,9 @@ namespace ks::misc
     class ContextMenuCleanerTab final : public QWidget
     {
     public:
+        static ks::ui::PageNavigationCatalog navigationCatalog(const ContextMenuCleanerTab* existing = nullptr);
+        QWidget* activateNavigationDescriptor(const QString& id);
+
         // 构造函数：
         // - 参数 parent：Qt 父控件，可为空；
         // - 处理逻辑：创建七类子 Tab，并立即执行一次注册表枚举；
@@ -447,6 +451,8 @@ namespace ks::misc
         bool m_shellPending = false;
         std::shared_ptr<ShellTransactionReceipt> m_shellReceipt;
         std::function<void(const ShellTransactionResult&)> m_shellCompletion;
+        ks::ui::PageNavigationTabCatalog m_navigationTabs;
+
         QVBoxLayout* m_rootLayout = nullptr;   // m_rootLayout：本页根布局。
         QTabWidget* m_areaTabWidget = nullptr; // m_areaTabWidget：七类 Shell 关联子 Tab 容器。
 

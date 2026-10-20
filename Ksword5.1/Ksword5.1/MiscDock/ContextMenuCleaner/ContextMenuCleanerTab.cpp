@@ -45,6 +45,18 @@
 
 #include <array>
 
+namespace {
+const ks::ui::PageNavigationTabDefinition kContextMenuNavigation[] = {
+    {"ie", "", "", "IE右键菜单", true},
+    {"desktop", "", "", "桌面右键菜单", false},
+    {"file", "", "", "文件右键菜单", false},
+    {"url", "", "", "URL 绑定", false},
+    {"open_with", "", "", "文件打开方式", false},
+    {"format", "", "", "格式右键菜单", false},
+    {"explorer", "", "", "资源管理器主页第三方程序", false}
+};
+}
+
 namespace ks::misc
 {
 
@@ -389,7 +401,8 @@ void ContextMenuCleanerTab::createAreaPage(const MenuArea area)
     areaWidgets->presentationTimer->setSingleShot(true);
     connect(areaWidgets->presentationTimer, &QTimer::timeout, this,
         [this, area]() { processAreaPresentation(area); });
-    m_areaTabWidget->addTab(areaWidgets->page, QIcon(areaIconPath(area)), areaTitle(area));
+    m_navigationTabs.add(kContextMenuNavigation[static_cast<int>(area)], m_areaTabWidget,
+        areaWidgets->page, QIcon(areaIconPath(area)));
 }
 
 QVector<ContextMenuCleanerTab::ContextMenuEntry> ContextMenuCleanerTab::enumerateAreaSnapshot(const MenuArea area)
@@ -921,24 +934,10 @@ const ContextMenuCleanerTab::AreaWidgets* ContextMenuCleanerTab::widgetsForArea(
 
 QString ContextMenuCleanerTab::areaTitle(const MenuArea area)
 {
-    switch (area)
-    {
-    case MenuArea::InternetExplorer:
-        return QStringLiteral("IE右键菜单");
-    case MenuArea::Desktop:
-        return QStringLiteral("桌面右键菜单");
-    case MenuArea::File:
-        return QStringLiteral("文件右键菜单");
-    case MenuArea::UrlBinding:
-        return QStringLiteral("URL 绑定");
-    case MenuArea::OpenWith:
-        return QStringLiteral("文件打开方式");
-    case MenuArea::FormatMenu:
-        return QStringLiteral("格式右键菜单");
-    case MenuArea::ExplorerHome:
-        return QStringLiteral("资源管理器主页第三方程序");
-    }
-    return QStringLiteral("文件右键菜单");
+    const int index = static_cast<int>(area);
+    const int safeIndex = index >= 0 && index < static_cast<int>(std::size(kContextMenuNavigation))
+        ? index : static_cast<int>(MenuArea::File);
+    return QString::fromUtf8(kContextMenuNavigation[safeIndex].sourceTitle);
 }
 
 QString ContextMenuCleanerTab::areaIconPath(const MenuArea area)
@@ -1184,3 +1183,17 @@ void ContextMenuCleanerTab::submitShellTransaction(
 }
 
 } // namespace ks::misc
+
+ks::ui::PageNavigationCatalog ks::misc::ContextMenuCleanerTab::navigationCatalog(const ContextMenuCleanerTab* existing)
+{
+    ks::ui::PageNavigationCatalog schema;
+    for (const auto& definition : kContextMenuNavigation)
+        schema.append(ks::ui::PageNavigationTabDescriptor(definition));
+    return existing ? existing->m_navigationTabs.describe(std::move(schema)) : schema;
+}
+QWidget* ks::misc::ContextMenuCleanerTab::activateNavigationDescriptor(const QString& id)
+{
+    return m_navigationTabs.activate(id, navigationCatalog(this));
+}
+namespace { const bool kContextMenuNavigationRegistered =
+    ks::ui::RegisterTypedPageNavigationCatalog<ks::misc::ContextMenuCleanerTab>(QStringLiteral("misc.context")); }
