@@ -23,6 +23,7 @@
 #include "../UI/FlatButtonTheme.h"
 #include "../UI/FlowLayout.h"
 #include "../UI/ParameterWorkspace.h"
+#include "../UI/ThemeBinding.h"
 #include "../UI/PrimaryPageStyle.h"
 #include "../UI/ToolbarMetrics.h"
 #include <QCheckBox>
@@ -534,20 +535,13 @@ namespace ks::window::dwmctl
     {
     public:
         // 构造函数：
-        // - 作用：锁定目标窗口、构建界面并做一次全量读取；
+        // - 作用：锁定目标窗口并登记稳定的惰性页壳；
         // - 传入 target：被检查的窗口句柄；传入 parent：Qt 父控件。
         explicit Page(HWND target, QWidget* parent = nullptr)
             : QWidget(parent)
             , m_target(target)
         {
-            buildUi();
-            // Hidden companion pages keep their stable shell without reading
-            // target attributes/timing before their first actual visit.
-            m_thumbnailTimer = new QTimer(this);
-            m_thumbnailTimer->setInterval(kThumbnailRefreshMs);
-            connect(m_thumbnailTimer, &QTimer::timeout, this, [this]() {
-                updateThumbnailPlacement();
-            });
+            // Stable tab shell only; controls and native reads start on Show.
         }
 
         // 析构函数：
@@ -562,11 +556,17 @@ namespace ks::window::dwmctl
         void showEvent(QShowEvent* event) override
         {
             QWidget::showEvent(event);
+            const QPointer<Page> self(this);
             if (!m_initialReadDone)
             {
                 m_initialReadDone = true;
+                const ks::ui::ScopedWidgetThemePreparation themePreparation(this);
+                initializePage();
+                if (!self) return;
                 readAllAttributes(false);
+                if (!self) return;
                 refreshDiagnostics();
+                if (!self) return;
             }
             if (m_thumbnailEnableCheck != nullptr && m_thumbnailEnableCheck->isChecked())
             {
@@ -598,11 +598,23 @@ namespace ks::window::dwmctl
         }
 
     private:
+        void initializePage()
+        {
+            buildUi();
+            // Hidden companion pages keep their stable shell without reading
+            // target attributes/timing before their first actual visit.
+            m_thumbnailTimer = new QTimer(this);
+            m_thumbnailTimer->setInterval(kThumbnailRefreshMs);
+            connect(m_thumbnailTimer, &QTimer::timeout, this, [this]() {
+                updateThumbnailPlacement();
+            });
+        }
+
         // ---------- 界面构建 ----------
 
         // buildUi：
         // - 作用：搭建“左侧属性控制 + 右侧实时预览与日志”的整体布局；
-        // - 调用：仅构造函数一次。
+        // - 调用：首次实际Show的initializePage一次。
         void buildUi()
         {
             QVBoxLayout* rootLayout = new QVBoxLayout(this);

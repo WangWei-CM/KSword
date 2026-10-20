@@ -46,6 +46,7 @@
 #include "../Internationalization/LanguageManager.h"
 #include "../UI/StructuredFieldView.h"
 #include "../UI/AsyncOperation.h"
+#include "../UI/ThemeBinding.h"
 
 #include <algorithm>
 #include <array>
@@ -1574,41 +1575,17 @@ namespace ks::window::layerdiag
     {
     public:
         explicit Page(HWND target, QWidget* parent = nullptr)
-            : QWidget(parent), m_readOperation(std::make_unique<ks::ui::AsyncOperation>(this)),
-              m_desktop(captureDesktopValue()), m_target(target)
+            : QWidget(parent), m_target(target)
         {
-            m_exportOperation = std::make_unique<ks::ui::CompleteExportOperation>(this);
-            m_exportOperation->setStateChangedCallback([this] {
-                const QPointer<Page> guard(this);
-                const bool busy = m_exportOperation->isBusy();
-                if (m_exportZButton != nullptr) m_exportZButton->setEnabled(!busy);
-                if (!guard) return;
-                if (m_snapshotExportButton != nullptr) m_snapshotExportButton->setEnabled(!busy);
-                if (guard && !busy && m_exportAfterRead && !m_reportBusy) {
-                    m_exportAfterRead = false;
-                    QTimer::singleShot(0, this, [this] { exportSnapshot(); });
-                }
-            });
-            m_eventOperation = std::make_unique<ks::ui::AsyncOperation>(this);
-            m_eventDispatcher = std::make_shared<ks::ui::AsyncUiDispatcher>(this);
-            m_eventMailbox = std::make_shared<EventMailbox>(m_eventDispatcher, this);
-            m_eventOperation->setStateChangedCallback([this] {
-                if (m_eventOperation->isBusy()) return;
-                bool post = false;
-                { QMutexLocker locker(&m_eventMailbox->mutex);
-                  if (!m_eventMailbox->closed && m_eventMailbox->wake == EventMailbox::Wake::Blocked) {
-                      m_eventMailbox->wake = EventMailbox::Wake::Queued; post = true;
-                  } }
-                if (post) postEventDrain(m_eventMailbox);
-            });
+            // Keep the original identity boundary while deferring all controls
+            // and desktop services until this stable shell is actually visited.
             m_initialTid = ::GetWindowThreadProcessId(m_target, &m_initialPid);
             m_initialClass = className(m_target);
-            buildUi();
-            // Hidden WindowDetailDialog tabs perform no desktop-wide query.
         }
 
         ~Page() override
         {
+            if (!m_initialRequested) return;
             m_exportOperation->close();
             m_eventDispatcher->close();
             m_eventOperation->close();
@@ -1706,9 +1683,14 @@ namespace ks::window::layerdiag
         void showEvent(QShowEvent* event) override
         {
             QWidget::showEvent(event);
+            const QPointer<Page> self(this);
             if (!m_initialRequested) {
                 m_initialRequested = true;
+                const ks::ui::ScopedWidgetThemePreparation themePreparation(this);
+                initializePage();
+                if (!self) return;
                 refresh(uiText("window.layer.status.initial_snapshot", "初始快照"));
+                if (!self) return;
             }
             projectVisibleDocuments();
         }
@@ -1725,6 +1707,38 @@ namespace ks::window::layerdiag
             MoveUiAccessBand,
             MoveDefaultBand
         };
+
+        void initializePage()
+        {
+            m_readOperation = std::make_unique<ks::ui::AsyncOperation>(this);
+            m_desktop = captureDesktopValue();
+            m_exportOperation = std::make_unique<ks::ui::CompleteExportOperation>(this);
+            m_exportOperation->setStateChangedCallback([this] {
+                const QPointer<Page> guard(this);
+                const bool busy = m_exportOperation->isBusy();
+                if (m_exportZButton != nullptr) m_exportZButton->setEnabled(!busy);
+                if (!guard) return;
+                if (m_snapshotExportButton != nullptr) m_snapshotExportButton->setEnabled(!busy);
+                if (guard && !busy && m_exportAfterRead && !m_reportBusy) {
+                    m_exportAfterRead = false;
+                    QTimer::singleShot(0, this, [this] { exportSnapshot(); });
+                }
+            });
+            m_eventOperation = std::make_unique<ks::ui::AsyncOperation>(this);
+            m_eventDispatcher = std::make_shared<ks::ui::AsyncUiDispatcher>(this);
+            m_eventMailbox = std::make_shared<EventMailbox>(m_eventDispatcher, this);
+            m_eventOperation->setStateChangedCallback([this] {
+                if (m_eventOperation->isBusy()) return;
+                bool post = false;
+                { QMutexLocker locker(&m_eventMailbox->mutex);
+                  if (!m_eventMailbox->closed && m_eventMailbox->wake == EventMailbox::Wake::Blocked) {
+                      m_eventMailbox->wake = EventMailbox::Wake::Queued; post = true;
+                  } }
+                if (post) postEventDrain(m_eventMailbox);
+            });
+            buildUi();
+            // Hidden WindowDetailDialog tabs perform no desktop-wide query.
+        }
 
         void buildUi()
         {
