@@ -29,6 +29,7 @@
 #include <QSplitter>
 #include <QThreadPool>
 #include <QVBoxLayout>
+#include <QVariant>
 
 #include <algorithm>
 #include <exception>
@@ -165,7 +166,7 @@ namespace
     // QtCore-only asynchronous jobs: the future owns the result. Destroying a page destroys its
     // watcher and disconnects the completion; workers never dereference or invoke a UI pointer.
     template<class Work, class Done>
-    void runRows(QWidget* page, Work work, Done done)
+    void runRows(QObject* page, Work work, Done done)
     {
         auto promise = std::make_shared<QPromise<RowsResult>>();
         promise->start();
@@ -186,6 +187,70 @@ namespace
             promise->addResult(result);
             promise->finish();
         }));
+    }
+
+    // 替换性只读查询每个语义通道至多一个在途、一个最新待执行意图。
+    // 变更预览与已接受写事务仍走 runRows，绝不覆盖或丢弃事务。
+    class LatestRowsLane final : public QObject
+    {
+    public:
+        explicit LatestRowsLane(QObject* parent) : QObject(parent) {}
+        void invalidate()
+        {
+            ++m_revision;
+            m_pending = {};
+        }
+        template<class Work, class Done>
+        void submit(Work work, Done done)
+        {
+            const auto revision = ++m_revision;
+            m_pending = [this, revision, work, done]()
+            {
+                runRows(this, work, [this, revision, done](const RowsResult& result)
+                {
+                    m_running = false;
+                    const QPointer<LatestRowsLane> guard(this);
+                    if (revision == m_revision) done(result);
+                    if (guard) startPending();
+                });
+            };
+            startPending();
+        }
+    private:
+        void startPending()
+        {
+            if (m_running || !m_pending) return;
+            m_running = true;
+            auto next = std::move(m_pending);
+            m_pending = {};
+            next();
+        }
+        bool m_running = false;
+        quint64 m_revision = 0;
+        std::function<void()> m_pending;
+    };
+
+    LatestRowsLane* rowsLane(QObject* page, const char* key)
+    {
+        const QByteArray property = QByteArrayLiteral("ksword_latest_rows_") + key;
+        auto* lane = static_cast<LatestRowsLane*>(page->property(property.constData()).value<QObject*>());
+        if (lane == nullptr)
+        {
+            lane = new LatestRowsLane(page);
+            page->setProperty(property.constData(), QVariant::fromValue(static_cast<QObject*>(lane)));
+        }
+        return lane;
+    }
+
+    template<class Work, class Done>
+    void runLatestRows(QObject* page, const char* key, Work work, Done done)
+    {
+        rowsLane(page, key)->submit(std::move(work), std::move(done));
+    }
+
+    void invalidateLatestRows(QObject* page, const char* key)
+    {
+        rowsLane(page, key)->invalidate();
     }
 
     QString machineName()
@@ -662,8 +727,9 @@ namespace
         {
             const quint64 generation = ++m_userGeneration;
             ++m_groupGeneration;
+            invalidateLatestRows(this, "account_groups");
             m_groups->setRowCount(0);
-            runRows(this, []() { return enumerateUsers(); }, [this, generation](const RowsResult& result)
+            runLatestRows(this, "users", []() { return enumerateUsers(); }, [this, generation](const RowsResult& result)
             {
                 if (generation != m_userGeneration) return;
                 fillTable(m_table, result.rows, true); filterTable(m_table, m_search->text()); showResult(m_status, result);
@@ -674,9 +740,10 @@ namespace
             const quint64 generation = ++m_groupGeneration;
             const int row = m_table->currentRow();
             m_groups->setRowCount(0);
-            if (row < 0 || m_table->isRowHidden(row)) return;
+            if (row < 0 || m_table->isRowHidden(row))
+            { invalidateLatestRows(this, "account_groups"); return; }
             const QString account = m_table->item(row, 0)->text();
-            runRows(this, [account]() { return accountGroups(account); }, [this, generation](const RowsResult& result)
+            runLatestRows(this, "account_groups", [account]() { return accountGroups(account); }, [this, generation](const RowsResult& result)
             {
                 if (generation != m_groupGeneration) return;
                 fillTable(m_groups, membershipRows(result.rows)); showResult(m_status, result);
@@ -698,6 +765,8 @@ namespace
                     .arg(account, sid, before, after), QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes) return;
             if (!pageGuard) return;
             ++m_userGeneration; ++m_groupGeneration;
+            invalidateLatestRows(this, "users");
+            invalidateLatestRows(this, "account_groups");
             setEnabled(false);
             runRows(this, [account, sid, enabled]()
             {
@@ -799,8 +868,9 @@ namespace
         {
             const quint64 generation = ++m_groupsGeneration;
             ++m_membersGeneration;
+            invalidateLatestRows(this, "members");
             m_members->setRowCount(0);
-            runRows(this, []() { return enumerateGroups(); }, [this, generation](const RowsResult& result)
+            runLatestRows(this, "groups", []() { return enumerateGroups(); }, [this, generation](const RowsResult& result)
             {
                 if (generation != m_groupsGeneration) return;
                 fillTable(m_groups, result.rows); filterTable(m_groups, m_search->text()); showResult(m_status, result);
@@ -811,9 +881,10 @@ namespace
             const quint64 generation = ++m_membersGeneration;
             m_members->setRowCount(0);
             const int row = m_groups->currentRow();
-            if (row < 0 || m_groups->isRowHidden(row)) return;
+            if (row < 0 || m_groups->isRowHidden(row))
+            { invalidateLatestRows(this, "members"); return; }
             const QString group = m_groups->item(row, 0)->text();
-            runRows(this, [group]() { return enumerateMembers(group); }, [this, generation](const RowsResult& result)
+            runLatestRows(this, "members", [group]() { return enumerateMembers(group); }, [this, generation](const RowsResult& result)
             {
                 if (generation != m_membersGeneration) return;
                 fillTable(m_members, result.rows); filterTable(m_members, m_search->text()); showResult(m_status, result);
@@ -824,7 +895,7 @@ namespace
             const quint64 generation = ++m_lookupGeneration;
             const QString account = m_account->text().trimmed();
             m_memberships->setRowCount(0);
-            runRows(this, [account]() { return accountGroups(account); }, [this, generation](const RowsResult& result)
+            runLatestRows(this, "account_groups", [account]() { return accountGroups(account); }, [this, generation](const RowsResult& result)
             {
                 if (generation != m_lookupGeneration) return;
                 fillTable(m_memberships, membershipRows(result.rows)); showResult(m_status, result);
@@ -847,6 +918,8 @@ namespace
             if (member.isEmpty()) return;
             // Resolve and show a concrete SID before approval; never resolve names on the UI thread.
             ++m_membersGeneration; ++m_groupsGeneration;
+            invalidateLatestRows(this, "members");
+            invalidateLatestRows(this, "groups");
             setEnabled(false);
             runRows(this, [member]()
             {
@@ -985,15 +1058,15 @@ namespace
         {
             const QString account = m_account->text().trimmed(); const quint64 generation = ++m_rightsGeneration;
             m_rights->setRowCount(0);
-            runRows(this, [account]() { return queryRights(account); }, [this, generation](const RowsResult& result)
+            runLatestRows(this, "rights", [account]() { return queryRights(account); }, [this, generation](const RowsResult& result)
             { if (generation != m_rightsGeneration) return; fillTable(m_rights, result.rows); filterTable(m_rights, m_search->text()); showResult(m_status, result); });
         }
         void refreshAccounts()
         {
             const QString right = m_right->currentText().trimmed(); const quint64 generation = ++m_accountsGeneration;
             m_accounts->setRowCount(0);
-            if (right.isEmpty()) return;
-            runRows(this, [right]() { return assignedAccounts(right); }, [this, generation](const RowsResult& result)
+            if (right.isEmpty()) { invalidateLatestRows(this, "assigned_accounts"); return; }
+            runLatestRows(this, "assigned_accounts", [right]() { return assignedAccounts(right); }, [this, generation](const RowsResult& result)
             { if (generation != m_accountsGeneration) return; fillTable(m_accounts, result.rows); filterTable(m_accounts, m_search->text()); showResult(m_status, result); });
         }
         void changeRight(bool add)
@@ -1004,6 +1077,8 @@ namespace
                 m_status->setText(privilegeText("privilege.workbench.rights.invalid_right", QStringLiteral("请选择目录中的有效权限名称。"))); return;
             }
             ++m_rightsGeneration; ++m_accountsGeneration;
+            invalidateLatestRows(this, "rights");
+            invalidateLatestRows(this, "assigned_accounts");
             setEnabled(false);
             runRows(this, [account, right]()
             {
