@@ -52,7 +52,7 @@ namespace ks::ui
             {
                 if (!claimed.load() && onCanceled)
                 {
-                    onCanceled();
+                    try { onCanceled(); } catch (...) {} // 不能越过Qt丢队列/析构边界。
                 }
             }
 

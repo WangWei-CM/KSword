@@ -43,7 +43,7 @@ namespace ks::ui
         // 返回请求代次；只用于值身份或测试，不读取页面成员。
         std::uint64_t generation() const;
         // 结束后台步骤，排队交给控制器；拒绝或丢队列会统一收尾。
-        void deliver(std::any result, std::exception_ptr failure = {}) const;
+        void deliver(std::any result, std::exception_ptr failure = {}) const noexcept;
 
     private:
         friend class AsyncOperation;

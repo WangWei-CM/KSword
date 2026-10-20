@@ -428,6 +428,8 @@ KSword 主程序位于 `Ksword5.1/Ksword5.1`（Qt 6.9.3 Widgets + Qt Advanced Do
 
 - `AsyncOperation` CAS赢家将cleanup闭包移到局部，调用后在归还事务lease前销毁闭包，连同只由capture强持的最后值owner。不能只调用cleanup后把闭包留在request/丢投递残余Job里，否则pending先归零、原生资源后析构；成功、失败、throw、drop、close保持同一次收尾。
 
+- `AsyncOperationToken::deliver`的投递构造异常走同一`DeliveryDropped`物理收尾，不得把已完成副作用误报worker失败后再deliver。取消functor析构与异常fallback复用shared.active已有的受锁身份移除结果，防止双重状态通知；GUI恢复只尽力投递一次，恢复自身失败不递归。通用dispatcher的值取消回调异常不得穿出Qt functor析构。
+
 - `AsyncOperation::submit` 保留一个实际 worker 与一个最新 pending；尾部 `Cleanup={}, int workerPriority=0` 直接传 Qt 线程池排队优先级，不是 OS 线程优先级，也不抢占已运行调用。
 - 写操作/导出等已接受副作用使用独立 `submitTransaction` 控制器：worker 仅接值请求、不接取消令牌，busy 返回0与 `BusyRejected`；接受后先入线程池再通知状态，close/cancel/新查询不能吞事务。apply/failure 仍只留 UI 控制器，关页后不回投；值 cleanup 必须等 worker 完成且只执行一次。构造/排队异常属于“没有未完 worker”，必须先标记完成，再允许 failure 回调同步 close/delete。
 - `AsyncCleanupRegistry` 的 lease 只持值，不保活 QObject。事务由共享控制器自动登记；常驻会话在线程启动前登记弱 session 的 stop 回调，只置停止标志/唤醒，不在 UI join。STOP、归档/句柄等实际资源收尾后才归还；同一 session 不能通过 lease 回调强持自身形成环。

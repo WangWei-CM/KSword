@@ -52,8 +52,9 @@ namespace ks::ui
         std::shared_ptr<AsyncOperationRequestState> pending; // 最新合并待执行请求。
 
         // 接收器队列丢失时，当前请求与无法启动的 pending 均统一释放。
-        void drop(const std::shared_ptr<AsyncOperationRequestState>& request)
+        bool drop(const std::shared_ptr<AsyncOperationRequestState>& request)
         {
+            bool removedActive = false;
             std::shared_ptr<AsyncOperationRequestState> abandonedPending; // 锁外收尾。
             auto outcome = AsyncOperationOutcome::DeliveryDropped;
             {
@@ -65,6 +66,7 @@ namespace ks::ui
                 if (active == request)
                 {
                     active.reset();
+                    removedActive = true;
                     abandonedPending = std::move(pending);
                     ++generation;
                 }
@@ -76,6 +78,7 @@ namespace ks::ui
                 abandonedPending->canceled.store(true);
                 abandonedPending->settle(AsyncOperationOutcome::DeliveryDropped);
             }
+            return removedActive; // 已有身份转换同时去重丢弃后的状态通知。
         }
     };
 
@@ -99,7 +102,7 @@ namespace ks::ui
     }
 
     // 即使投递成功，Qt 稍后丢弃该 functor 时也会走同一状态收尾。
-    void AsyncOperationToken::deliver(std::any result, std::exception_ptr failure) const
+    void AsyncOperationToken::deliver(std::any result, std::exception_ptr failure) const noexcept
     {
         if (!m_request || !m_dispatcher)
         {
@@ -110,20 +113,30 @@ namespace ks::ui
         request->workerFinished.store(true);
         const auto dispatcher = m_dispatcher;
         AsyncOperation* const receiver = m_receiver; // 仅在排队回调中使用。
-        m_dispatcher->post([receiver, request, result = std::move(result), failure]()
+        const auto dropped = [shared, request, dispatcher, receiver]() noexcept
         {
-            receiver->complete(request, result, failure);
-        }, [shared, request, dispatcher, receiver]()
-        {
-            shared->drop(request);
-            // 丢弃结果不允许永久留下页面busy。仅经同一生命周期门禁回UI恢复，
-            // 恢复通知自身被丢弃时不递归重排；close之后也不会借用receiver。
+            bool removedActive = false;
+            try { removedActive = shared->drop(request); } catch (...) {}
+            if (!removedActive) return;
+            // 仅经同一生命周期门禁恢复UI；通知自身失败/被丢弃不递归重排。
             try { dispatcher->post([receiver]()
             {
                 receiver->reconcileDroppedJobs();
                 receiver->notifyStateChanged();
             }); } catch (...) {}
-        });
+        };
+        try
+        {
+            m_dispatcher->post([receiver, request, result = std::move(result), failure]()
+            {
+                receiver->complete(request, result, failure);
+            }, dropped);
+        }
+        catch (...)
+        {
+            // 业务worker已结束；投递分配失败不是业务失败，也不得逃出Qt runnable。
+            dropped();
+        }
     }
 
     AsyncOperation::AsyncOperation(QObject* owner)

@@ -20,8 +20,18 @@ for name in ('AsyncOperation.h', 'AsyncOperation.cpp', 'AsyncUiDispatcher.h', 'A
         src = a.dependency_source_root.resolve() / ui / name
     if not src.exists() and a.secondary_dependency_source_root:
         src = a.secondary_dependency_source_root.resolve() / ui / name
-    actual=src if src.exists() else root / ui / name;data=actual.read_bytes();(out/name).write_bytes(data)
+    actual=src if src.exists() else root / ui / name;data=actual.read_bytes()
     proof['production_inputs'][name]={'path':str(actual),'sha256':hashlib.sha256(data).hexdigest()}
+    if name=='AsyncUiDispatcher.h':
+        # Deterministic exception pauses only in a copied production header; preserve every production branch.
+        header=data.decode('utf-8').replace('\r\n','\n')
+        assert header.count('const auto pending = std::make_shared<PendingCallback>(')==1
+        assert header.count('// pending 先于 lock 构造')==1
+        header=header.replace('#pragma once','#pragma once\nvoid AsyncDispatchTestThrow(int);',1)
+        header=header.replace('const auto pending = std::make_shared<PendingCallback>(', 'AsyncDispatchTestThrow(0);\n            const auto pending = std::make_shared<PendingCallback>(',1)
+        header=header.replace('// pending 先于 lock 构造','AsyncDispatchTestThrow(1);\n            // pending 先于 lock 构造',1)
+        data=header.encode('utf-8')
+    (out/name).write_bytes(data)
 fixture = r'''
 #include "AsyncOperation.h"
 #include "AsyncCleanupRegistry.h"
@@ -35,6 +45,8 @@ fixture = r'''
 #include <stdexcept>
 #include <thread>
 #include <vector>
+static std::atomic_int dispatchThrowPhase=-1,dispatchThrowsLeft=0;
+void AsyncDispatchTestThrow(int phase){if(dispatchThrowPhase!=phase)return;auto remaining=dispatchThrowsLeft.load();while(remaining>0){if(dispatchThrowsLeft.compare_exchange_weak(remaining,remaining-1))throw std::bad_alloc();}}
 static int checks=0;
 static void check(bool value,const char* message){if(!value)throw std::runtime_error(message);++checks;}
 template<class Predicate>void pump(Predicate predicate){QElapsedTimer t;t.start();while(!predicate()&&t.elapsed()<5000){QCoreApplication::processEvents();std::this_thread::yield();}check(predicate(),"completion timeout");}
@@ -142,6 +154,16 @@ static void cleanupCaptureOrderTests(){
   check(stats->called==1&&stats->calledPending==1,"cleanup call occurs once with transaction lease retained");check(stats->destroyed==1&&weak.expired()&&stats->destructorPending==1,"cleanup capture final owner is destroyed before shutdown lease returns");check(registry.pending()==0,"lease returns only after cleanup capture destruction");check(applied==((mode==0||mode==4)?1:0)&&failed==(mode==1?1:0),"capture release preserves actual apply failure dropped and closed result semantics");op.close();check(stats->called==1&&stats->destroyed==1,"later close never repeats cleanup or final value destructor");
  }
 }
+static void deliveryConstructionFailureTests(){
+ using Op=ks::ui::AsyncOperation;using Outcome=ks::ui::AsyncOperationOutcome;auto& registry=ks::ui::AsyncCleanupRegistry::global();auto* pool=QThreadPool::globalInstance();
+ for(int phase=0;phase<2;++phase)for(int throws=1;throws<3;++throws){
+  registry.cancelShutdown();check(registry.pending()==0,"delivery exception case starts without stale lease");Op op(nullptr);std::atomic_int work=0,applied=0,failures=0,cleaned=0;std::atomic<Outcome> outcome=Outcome::Applied;int states=0;op.setStateChangedCallback([&]{++states;});dispatchThrowPhase=phase;dispatchThrowsLeft=throws;
+  check(op.submitTransaction<int,int>(1,[&](int value){++work;return value;},[&](int,std::uint64_t){++applied;return true;},[&](std::exception_ptr){++failures;},[&](Outcome value){outcome=value;++cleaned;})!=0,"transaction accepted before result dispatch construction exception");pool->waitForDone();dispatchThrowPhase=-1;dispatchThrowsLeft=0;QCoreApplication::processEvents();
+  check(work==1&&applied==0&&failures==0&&cleaned==1&&outcome==Outcome::DeliveryDropped,"successful business with failed dispatch is one dropped receipt, never a worker failure or duplicate side effect");check(!op.isInFlight()&&!op.isBusy()&&registry.pending()==0,"dispatch exception independently clears physical state and final transaction lease");check(states==(throws==1?2:1),"dispatch construction and pending destruction share one best-effort GUI recovery; failed recovery never recurses");
+  check(op.submitTransaction<int,int>(2,[](int value){return value;},[&](int,std::uint64_t){++applied;return true;},[&](std::exception_ptr){++failures;})!=0,"controller accepts later user action after delivery failure");pump([&]{return !op.isInFlight();});check(work==1&&applied==1&&failures==0&&cleaned==1,"later action preserves its own result and old cleanup is not repeated");op.close();
+ }
+ ks::ui::AsyncUiDispatcher closed(nullptr);bool called=false;check(!closed.post([]{},[&]{called=true;throw std::runtime_error("fake value cancellation throws");})&&called,"throwing canceled value callback cannot escape queued functor destruction");
+}
 int main(int argc,char** argv){QCoreApplication app(argc,argv);try{
  auto* pool=QThreadPool::globalInstance();const int threads=pool->maxThreadCount();pool->setMaxThreadCount(1);
  QSemaphore entered,release;pool->start(QRunnable::create([&]{entered.release();release.acquire();}));check(entered.tryAcquire(1,5000),"pool blocker entered");
@@ -156,7 +178,7 @@ int main(int argc,char** argv){QCoreApplication app(argc,argv);try{
  check(order.empty(),"tasks queue behind actual pool worker");release.release();
  pump([&]{return !low.isInFlight()&&!normal.isInFlight()&&!high.isInFlight();});
  check(order==std::vector<int>({1,0,-1}),"real pool executes high/default/low");check(applied==3&&cleaned==2&&errors==0,"legacy and priority callbacks settle normally");
- pool->waitForDone();transactionTests();launchFailureTests();shutdownTests();droppedStateTests();cleanupCaptureOrderTests();pool->setMaxThreadCount(threads);
+ pool->waitForDone();transactionTests();launchFailureTests();shutdownTests();droppedStateTests();cleanupCaptureOrderTests();deliveryConstructionFailureTests();pool->setMaxThreadCount(threads);
  std::cout<<"ASYNC_CORE_CHECKS="<<checks<<"\nPOOL_ORDER=high,default,low\nGUI_WIDGETS_CREATED=0\nBUSINESS_IO_CALLS=0\n";return 0;
  }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}
 '''
