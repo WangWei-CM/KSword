@@ -1367,6 +1367,7 @@
     <ClInclude Include="ProcessDock\Process_Tool.h" />
     <ClInclude Include="ProcessDock\ProcessHotkeyEnumerator.h" />
     <ClInclude Include="UI\UI.css\UI_css.h" />
+    <ClInclude Include="MonitorDock\WinAPIEventArchive.h" />
     <ClInclude Include="MonitorDock\WinAPISessionBackend.h" />
     <ClInclude Include="MonitorDock\WinAPIDock.h" />
     <ClInclude Include="MonitorDock\WinApiMonitorProtocol.h" />

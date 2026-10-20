@@ -21,6 +21,17 @@ struct WinAPIEventRow
     std::uint32_t sourcePid = 0;
     bool resultKnown = true, internalEvent = false;
 };
+inline QStringList WinAPIEventFields(const WinAPIEventRow& row)
+{
+    return {row.time100nsText, row.categoryText, row.apiText, row.resultText, row.pidTidText, row.detailText};
+}
+struct WinAPIEventRecord
+{
+    WinAPIEventRow value;
+    QString searchText;
+    std::uint64_t generation = 0, sequence = 0;
+};
+using WinAPIEventRef = std::shared_ptr<const WinAPIEventRecord>;
 struct WinAPICoverageDisplayRow { QStringList columns; QString searchText; };
 struct WinAPICoverageViewState
 {
@@ -69,7 +80,8 @@ struct WinAPISessionBackend final : std::enable_shared_from_this<WinAPISessionBa
     std::vector<std::shared_ptr<Reader>> readers;
     std::vector<ks::winapi_monitor::InjectionParticipant> participants;
     std::mutex pendingMutex;
-    std::deque<EventRow> pendingRows;
+    std::deque<WinAPIEventRef> pendingRows;
+    std::uint64_t nextEventSequence = 0;
     std::unordered_map<std::uint32_t, CoverageViewState> pendingCoverage;
     std::unordered_map<std::uint32_t, std::uint64_t> agentDroppedRows;
     std::size_t pendingDroppedRows = 0;

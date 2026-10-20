@@ -15,6 +15,8 @@
 
 #include "../UI/AsyncUiDispatcher.h"
 #include "WinAPISessionBackend.h"
+#include "WinAPIEventArchive.h"
+#include <QPersistentModelIndex>
 #include "../UI/AsyncOperation.h"
 #include "UI/RetainedCleanupJob.h"
 #include <QByteArray>
@@ -31,6 +33,8 @@
 #include <thread>   // std::thread：进程刷新与命名管道读取线程。
 #include <unordered_map>
 #include <vector>   // std::vector：进程快照与待刷新事件缓存。
+
+namespace ks::monitor { class EventFilterProjection; }
 
 class QCheckBox;
 class QComboBox;
@@ -104,6 +108,8 @@ public:
 
     using EventRow = WinAPIEventRow;
     using CoverageDisplayRow = WinAPICoverageDisplayRow;
+    using EventExportSnapshot = WinAPIEventExportSnapshot;
+    EventExportSnapshot freezeVisibleEventRowsForExport();
 
 protected:
     // changeEvent 将主题重着色排队，不启动监控或改变任何会话状态。
@@ -143,7 +149,13 @@ private:
     void resetCoverageView();
     void markCoverageStale();
     void flushPendingRows();
-    void appendEventRow(const EventRow& rowValue);
+    void initializeEventProjection();
+    void acceptPendingEventRows();
+    void applyEventState(const EventRow& rowValue);
+    void materializeEventRow(const WinAPIEventRef& record);
+    void projectEventRows();
+    void clearCanonicalEvents();
+    WinAPIEventRef eventRecordAt(int row) const;
 
     void applyEventFilter();
     void clearEventFilter();
@@ -239,7 +251,15 @@ private:
     static constexpr int kUiFlushBudgetMs = 4;                // 单个 GUI tick 的渲染时间预算。
     static constexpr std::uint32_t kPipeReconnectLimit = 3;  // 旧会话切换时读端可容忍的瞬时断线次数，避免新 Agent 建管道前 UI 放弃读取。
 
-    std::deque<EventRow> m_pendingRows;                    // m_pendingRows：后台线程待刷入的有界 FIFO 事件队列。
+    std::deque<WinAPIEventRef> m_pendingRows;                    // m_pendingRows：后台线程待刷入的有界 FIFO 事件队列。
+    WinAPIEventArchive m_eventArchive;
+    struct ProjectedEvent { WinAPIEventRef record; QPersistentModelIndex index; };
+    std::unordered_map<const WinAPIEventRecord*, ProjectedEvent> m_projectedEvents;
+    std::deque<WinAPIEventRef> m_eventProjectionQueue;
+    std::deque<WinAPIEventRef> m_expiredEventProjection;
+    WinAPIEventRef m_restoreSelectedEvent, m_restoreTopEvent;
+    bool m_eventProjectionStale = true, m_eventProjectionWasVisible = false, m_eventProjectionPumpScheduled = false;
+    ks::monitor::EventFilterProjection* m_eventFilterProjection = nullptr;
     std::mutex m_pendingMutex;                             // m_pendingMutex：保护待刷入事件队列。
     std::unordered_map<std::uint32_t, std::uint64_t> m_agentDroppedRows;
     std::size_t m_evictedRows = 0;

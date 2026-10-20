@@ -1,4 +1,5 @@
 #include "WinAPIDock.h"
+#include "MonitorEventFilterProjection.h"
 #include "../UI/ThemeStatusRole.h"
 #include "../UI/ThemeItemForeground.h"
 
@@ -38,6 +39,7 @@ WinAPIDock::WinAPIDock(QWidget* parent)
 
     m_sessionOperation = new ks::ui::AsyncOperation(this);
     initializeUi();
+    initializeEventProjection();
     initializeConnections();
     updateActionState();
     updateStatusLabel();
@@ -63,6 +65,7 @@ void WinAPIDock::changeEvent(QEvent* event)
 
 WinAPIDock::~WinAPIDock()
 {
+    if (m_eventFilterProjection) m_eventFilterProjection->close();
     if (m_sessionOperation) m_sessionOperation->close();
     if (m_coverageDispatcher) m_coverageDispatcher->close();
     ++m_coverageFilterTicket;
@@ -231,7 +234,7 @@ void WinAPIDock::updateActionState()
     for (QCheckBox* check : {m_hookFileCheck, m_hookRegistryCheck, m_hookNetworkCheck,
             m_hookProcessCheck, m_hookLoaderCheck, m_hookClipboardCheck, m_autoInjectChildCheck})
         if (check) check->setEnabled(!running);
-    const bool hasEvents = m_eventTable != nullptr && m_eventTable->rowCount() > 0;
+    const bool hasEvents = m_eventArchive.size() > 0;
 
     if (m_processRefreshButton != nullptr)
     {
@@ -343,7 +346,12 @@ void WinAPIDock::updateActionState()
     }
     if (m_exportButton != nullptr)
     {
-        m_exportButton->setEnabled(hasEvents);
+        // MTAPI010 replaces the legacy widget exporter with the canonical value
+        // snapshot. Until then a lagging/hidden mirror must not export stale rows.
+        const bool projectionReady = m_eventTable && m_eventTable->isVisible()
+            && !m_eventProjectionStale && m_eventProjectionQueue.empty() && m_expiredEventProjection.empty()
+            && (!m_eventFilterProjection || !m_eventFilterProjection->isPending());
+        m_exportButton->setEnabled(hasEvents && projectionReady);
     }
     if (m_clearEventButton != nullptr)
     {
@@ -358,7 +366,7 @@ void WinAPIDock::updateStatusLabel()
         return;
     }
 
-    const int eventCount = m_eventTable != nullptr ? m_eventTable->rowCount() : 0;
+    const int eventCount = static_cast<int>(m_eventArchive.size());
     const QString pidText = m_currentSessionPid == 0
         ? QStringLiteral("-")
         : QString::number(m_currentSessionPid);

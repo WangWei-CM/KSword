@@ -2,6 +2,7 @@
 #include "../UI/TableContextMenu.h"
 #include "../UI/DetailDialogChrome.h"
 #include "WinAPIDock.h"
+#include "MonitorEventFilterProjection.h"
 #include "../UI/CodeEditorWidget.h"
 #include "../Framework/PrivilegeElevationPrompt.h"
 #include "../OnlineScan/SandboxUploadActions.h"
@@ -54,6 +55,7 @@
 #include <QSet>
 #include <QSignalBlocker>
 #include <QTableWidget>
+#include <QTabWidget>
 #include <QTableWidgetItem>
 #include <QTextStream>
 #include <QStringConverter>
@@ -625,9 +627,7 @@ void WinAPIDock::initializeConnections()
         connect(m_clearEventButton, &QPushButton::clicked, this, [this]() {
             if (m_eventTable != nullptr && !m_pipeRunning.load())
             {
-                m_eventTable->clearContents();
-                m_eventTable->setRowCount(0);
-        m_visibleEventCount = 0;
+                pollSessionBackend(); acceptPendingEventRows(); clearCanonicalEvents();
                 applyEventFilter();
                 updateActionState();
                 updateStatusLabel();
@@ -654,6 +654,12 @@ void WinAPIDock::initializeConnections()
         });
         connect(m_eventTable, &QTableWidget::cellDoubleClicked, this, [this](const int row, const int) {
             showEventDetailDialog(row);
+        });
+    }
+    if (m_resultTabs)
+    {
+        connect(m_resultTabs, &QTabWidget::currentChanged, this, [this](int) {
+            QTimer::singleShot(0, this, [this]() { flushPendingRows(); });
         });
     }
     if (m_uiFlushTimer != nullptr)
@@ -1272,8 +1278,15 @@ void WinAPIDock::appendInternalEvent(const QString& categoryText, const QString&
     rowValue.pidTidText = m_currentSessionPid == 0 ? QStringLiteral("-") : QStringLiteral("%1 / -").arg(m_currentSessionPid);
     rowValue.detailText = detailText;
     rowValue.internalEvent = true;
-    appendEventRow(rowValue);
-    applyEventFilter();
+    if (m_sessionBackend) m_sessionBackend->enqueue(std::move(rowValue));
+    else
+    {
+        auto record = std::make_shared<WinAPIEventRecord>();
+        record->searchText = WinAPIEventFields(rowValue).join(QStringLiteral(" | "));
+        record->value = std::move(rowValue);
+        if (m_eventArchive.append(std::move(record))) ++m_evictedRows;
+        m_eventProjectionStale = true;
+    }
     updateActionState();
     updateStatusLabel();
 }
@@ -1356,8 +1369,7 @@ void WinAPIDock::startMonitoring()
     m_currentSessionPid = pid; m_currentSessionId = backend->config.sessionId;
     m_sessionGeneration.store(backend->config.generation);
     m_startupReported = false; m_stopReported = false; m_stopping = false; m_reportedCleanupAttempt = 0;
-    if (m_eventTable)
-    { m_eventTable->clearContents(); m_eventTable->setRowCount(0); m_visibleEventCount = 0; }
+    clearCanonicalEvents();
     {
         const std::lock_guard<std::mutex> lock(m_pendingMutex);
         m_pendingRows.clear(); m_pendingDroppedRows = 0; m_agentDroppedRows.clear(); m_evictedRows = 0;
@@ -1434,30 +1446,32 @@ void WinAPIDock::terminateHooksForSelectedProcess()
     updateActionState(); updateStatusLabel();
 }
 
+void WinAPIDock::initializeEventProjection()
+{
+    m_eventFilterProjection = new ks::monitor::EventFilterProjection(m_eventTable,
+        [this](int row) {
+            const auto item = m_eventTable->item(row, EventColumnTime100ns);
+            return ks::monitor::EventFilterRow{{item ? item->data(Qt::UserRole).toString() : QString()}, {}, 0};
+        },
+        [this](int visible, int total, bool pending) {
+            m_visibleEventCount = visible;
+            if (m_eventFilterStatusLabel)
+            {
+                m_eventFilterStatusLabel->setText(QStringLiteral("筛选结果：%1 / %2").arg(visible).arg(total));
+                ks::ui::ApplyStatusRole(m_eventFilterStatusLabel, pending ? ks::ui::StatusRole::Warning
+                    : visible > 0 ? ks::ui::StatusRole::Success : ks::ui::StatusRole::Idle);
+            }
+        });
+    applyEventFilter();
+}
+
 void WinAPIDock::applyEventFilter()
 {
-    if (m_eventTable == nullptr) return;
-    const QString keyword = m_eventFilterEdit != nullptr ? m_eventFilterEdit->text().trimmed() : QString();
-    if (keyword != m_eventFilterKeyword)
-    {
-        m_eventFilterKeyword = keyword;
-        m_visibleEventCount = 0;
-        for (int row = 0; row < m_eventTable->rowCount(); ++row)
-        {
-            const auto* item = m_eventTable->item(row, EventColumnTime100ns);
-            const bool visible = keyword.isEmpty()
-                || (item && item->data(Qt::UserRole).toString().contains(keyword, Qt::CaseInsensitive));
-            m_eventTable->setRowHidden(row, !visible);
-            if (visible) ++m_visibleEventCount;
-        }
-    }
-    if (m_eventFilterStatusLabel != nullptr)
-    {
-        m_eventFilterStatusLabel->setText(QStringLiteral("筛选结果：%1 / %2")
-            .arg(m_visibleEventCount).arg(m_eventTable->rowCount()));
-        ks::ui::ApplyStatusRole(m_eventFilterStatusLabel,
-            m_visibleEventCount > 0 ? ks::ui::StatusRole::Success : ks::ui::StatusRole::Idle);
-    }
+    m_eventFilterKeyword = m_eventFilterEdit ? m_eventFilterEdit->text().trimmed() : QString();
+    if (!m_eventFilterProjection || !m_eventTable || !m_eventTable->isVisible()) return;
+    ks::monitor::EventFilterSpec spec;
+    spec.patterns = {m_eventFilterKeyword}; spec.fieldIndexes = {0};
+    m_eventFilterProjection->setFilter(std::move(spec));
 }
 
 void WinAPIDock::clearEventFilter()
@@ -1471,6 +1485,9 @@ void WinAPIDock::clearEventFilter()
 
 void WinAPIDock::exportVisibleRowsToTsv()
 {
+    // MTAPI010 consumes canonical values. Until that consumer lands, reject
+    // every legacy exporter entry while the display mirror is hidden or stale.
+    if (!m_eventTable || !m_eventTable->isVisible() || m_eventProjectionStale || !m_eventProjectionQueue.empty() || !m_expiredEventProjection.empty() || (m_eventFilterProjection && m_eventFilterProjection->isPending())) return;
     if (m_eventTable == nullptr || m_eventTable->rowCount() == 0)
     {
         QMessageBox::information(this, QStringLiteral("导出 WinAPI 事件"), QStringLiteral("当前没有可导出的事件。"));

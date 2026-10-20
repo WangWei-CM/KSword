@@ -3594,6 +3594,9 @@
     <ClInclude Include="MonitorDock\EventTimelineModel.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="MonitorDock\WinAPIEventArchive.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="MonitorDock\WinAPISessionBackend.h">
       <Filter>Header Files</Filter>
     </ClInclude>
