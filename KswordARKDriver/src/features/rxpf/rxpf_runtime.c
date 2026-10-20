@@ -1160,22 +1160,22 @@ KswRxpfRuntimeExecProof(
     PKSW_RXPF_PAGE_RECORD record = NULL;
     /* 最终 NTSTATUS；setup 阶段任一步失败即 goto 进 cleanup。 */
     NTSTATUS status = STATUS_SUCCESS;
-    /* 跟踪我们是否在本调用里启用了 emulation（避免双重 decrement）。 */
-    BOOLEAN enabledHere = FALSE;
-    /* 若本调用是最后一个关闭 emulation 的，退出前要 restore IDT。 */
-    BOOLEAN restoreIdt = FALSE;
-    /* ConcurrentExecute 之前的 fault 计数，用于计算本次观测到的 fault 数。 */
-    ULONGLONG faultsBefore = 0ULL;
-    /* ConcurrentExecute 之后的 fault 计数。 */
-    ULONGLONG faultsAfter = 0ULL;
-    /* worker 0 的返回 RAX（代表值；所有 worker 应该一致）。 */
+    /* RestoreExecutableProtection (mode=1) 之前抓页基址供 call rcx 用；
+     * Release 前 record 还活着，但 Release 后 MDL 可能被 free，所以要早取。 */
+    ULONGLONG executionCallTarget = 0ULL;
+    /* mode=1 restore 的 NTSTATUS 快照（从 record->LastStatus 读）。
+     * guest 下常见 STATUS_ACCESS_VIOLATION；root partition 下期望 STATUS_SUCCESS。 */
+    NTSTATUS restoreStatus = STATUS_SUCCESS;
+    /* 单 worker 的返回 RAX。 */
     ULONGLONG returnedValue = 0ULL;
-    /* 本次参与 concurrent execute 的 worker 数（= active CPU 数）。 */
+    /* 本次只有一个 worker（当前线程 inline call），用于响应兼容字段。 */
     ULONG workerCount = 0UL;
-    /* 本次 verdict：0=success, 1=mismatch, 2=no-faults, 3=exec-failed, 4=setup-failed。 */
+    /* 本次 verdict。 */
     ULONG verdict = KSWORD_ARK_RXPF_EXEC_PROOF_VERDICT_SETUP_FAILED;
     /* setup 阶段的 NTSTATUS 快照（独立于最终 status，便于调用方区分哪一步失败）。 */
     NTSTATUS setupStatus = STATUS_SUCCESS;
+    /* call rcx 的 SEH 捕获码，0 表示无异常。 */
+    NTSTATUS executionException = STATUS_SUCCESS;
 
     /* 基本参数校验：Request/Response 非空。 */
     if (Request == NULL || Response == NULL) {
@@ -1264,74 +1264,66 @@ KswRxpfRuntimeExecProof(
         goto Cleanup;
     }
 
-    /* Step 5: 安装 shadow IDT，让 #PF 走到我们的 handler → emulator。 */
-    status = KswRxpfPageFaultInstall();
-    setupStatus = status;
-    if (!NT_SUCCESS(status)) {
-        /* IDT install 失败：进 Cleanup（Change 和 Write 已完成，走正常 release）。 */
+    /* Step 5: 调 mode=1 restore —— 这是**正确的**execute path 入口。
+     * KswRxpfRestoreExecutableProtection 内部：
+     *   - 对 Record->CurrentContent 算 SHA-512
+     *   - 取 [0x20,0x40) 作为参考摘要（放在 driver .data 节内，自映像范围）
+     *   - 调 MmChangeImageProtection(Mdl, refVA, refLen, operation=1)
+     *   - ntoskrnl 把 ref 透传给 VslValidateDynamicCodePages → VTL1 比对
+     *   - 匹配通过 → PTE 恢复 PAGE_EXECUTE_READ（**保留修改字节**）
+     *   - guest 下 VTL1 常返 STATUS_ACCESS_VIOLATION（memory 实证）
+     *   - root partition 下期望 STATUS_SUCCESS（memory `rxpf-mode1-realhardware-26h2-confirmed`）
+     * 不再走 shadow IDT emulator —— LIDT 被 Hyper-V 拦（host+guest 双实证 0x1E），
+     * mode=1 restore 成功时 CPU 可以直接 fetch 执行，不需要仿真。 */
+    executionCallTarget = (ULONGLONG)record->PageBase;
+    KswRxpfRestoreExecutableProtection(record);
+    restoreStatus = record->LastStatus;
+    if (!NT_SUCCESS(restoreStatus)) {
+        /* mode=1 restore 失败（guest 下 STATUS_ACCESS_VIOLATION）：
+         * PTE 没回 RX，call rcx 会 bugcheck 0xFC。进 Cleanup，不 call。
+         * verdict 保 SETUP_FAILED，调用方据 setupStatus+restoreStatus 定位。 */
+        setupStatus = restoreStatus;
+        status = restoreStatus;
         goto Cleanup;
     }
 
-    /* Step 6: 启用本 record 的 emulation；EnabledCount++，顺带触发 shadow IDT 生效。 */
-    InterlockedExchange(&record->EmulationEnabled, 1);
-    InterlockedIncrement(&g_KswRxpfRuntime.PageTable.EnabledCount);
-    enabledHere = TRUE;
-    /* 内存屏障：确保 EmulationEnabled 的写入对所有 CPU 可见后再触发 execute。 */
-    KeMemoryBarrier();
-    /* 记录执行前的 fault 计数，用于差分出本次实验引发的 fault 数量。 */
-    faultsBefore = (ULONGLONG)InterlockedCompareExchange64(
-        &record->FaultCount,
-        0,
-        0);
-
-    /* Step 7: 在每个 active CPU 上同步 call rcx 进 payload，收集 RAX。 */
-    status = KswRxpfRunConcurrentExecutionTest(
-        (PVOID)(ULONG_PTR)record->PageBase,
-        Request->expectedReturnValue,
-        &returnedValue,
-        &workerCount);
-    /* 执行后再读 fault 计数，差值即为本次 payload 字节 fetch 产生的 #PF 数。 */
-    faultsAfter = (ULONGLONG)InterlockedCompareExchange64(
-        &record->FaultCount,
-        0,
-        0);
-
-    /* Step 8: 关闭 emulation；若 EnabledCount 归零，退出前需要 restore IDT。 */
-    if (enabledHere) {
-        InterlockedExchange(&record->EmulationEnabled, 0);
-        restoreIdt = InterlockedDecrement(
-            &g_KswRxpfRuntime.PageTable.EnabledCount) == 0;
-        KeMemoryBarrier();
+    /* Step 6: mode=1 restore 成功 → PTE 回 RX 且字节保留 → CPU 可直接执行 payload。
+     * 持 PageTable 排它锁 + IRQL = PASSIVE，直接 call rcx 跳入 payload。
+     * payload 典型 48 B8 <imm64> C3，ret 后栈不受污染。
+     * __try/__except 捕获可能的 #UD/#PF/CET —— HVCI 下 CET IBT 也可能拦非 endbr64 入口。 */
+    workerCount = 1UL;
+    __try {
+        returnedValue = KswRxpfInvokeTestPage(
+            (PVOID)(ULONG_PTR)executionCallTarget);
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        executionException = GetExceptionCode();
+        returnedValue = 0ULL;
     }
 
-    /* 汇总判定——四种 verdict 对应四种可区分的事实。 */
-    if (!NT_SUCCESS(status) || workerCount == 0UL) {
-        /* ConcurrentExecute 本身失败或 worker=0：无法判断执行是否发生。 */
+    /* 汇总判定。 */
+    if (executionException != STATUS_SUCCESS) {
+        /* SEH 捕获了异常：CPU 走到 payload 但出错。 */
         verdict = KSWORD_ARK_RXPF_EXEC_PROOF_VERDICT_EXEC_FAILED;
+        status = executionException;
     } else if (returnedValue != Request->expectedReturnValue) {
-        /* 执行到了但返回值不符：payload 可能有 bug、或 emulator 没按预期跑完。 */
+        /* 跑完了但 RAX 不符：payload 字节可能被 revert、或 VTL1 silently 替换。 */
         verdict = KSWORD_ARK_RXPF_EXEC_PROOF_VERDICT_RETURN_MISMATCH;
-        if (NT_SUCCESS(status)) {
-            status = STATUS_DATA_ERROR;
-        }
-    } else if (faultsAfter - faultsBefore == 0ULL) {
-        /* RAX 对了但 fault 为 0：emulator 没工作，这说明 payload 不是通过 #PF 路径执行的。 */
-        verdict = KSWORD_ARK_RXPF_EXEC_PROOF_VERDICT_NO_FAULTS;
-        if (NT_SUCCESS(status)) {
-            status = STATUS_DATA_ERROR;
-        }
+        status = STATUS_DATA_ERROR;
     } else {
-        /* 执行成功：RAX 匹配、fault 计数非零、worker >= 1。 */
+        /* RAX 匹配：CPU 原生执行了我们写入的字节。直接证据。 */
         verdict = KSWORD_ARK_RXPF_EXEC_PROOF_VERDICT_SUCCESS;
+        status = STATUS_SUCCESS;
     }
 
 Cleanup:
-    /* 开始清理 record：先 BeginRemove 标记槽位、再 Release 执行 mode=1 兜底、最后 Clear 释放槽。 */
+    /* 开始清理 record：先 BeginRemove 标记槽位、再 Release 回收 MDL、最后 Clear 释放槽。 */
     KswRxpfPageTableBeginRemoveLocked(
         &g_KswRxpfRuntime.PageTable,
         record);
     KswRxpfPageTableReleaseExclusive(&g_KswRxpfRuntime.PageTable);
-    /* ReleaseRecord 会 unmap writable alias、释放 MDL（OwnsMdlPages=TRUE） */
+    /* ReleaseRecord 会 unmap writable alias、释放 MDL（OwnsMdlPages=TRUE）。
+     * 若上面已 call RestoreExecutableProtection，Release 内部不会重复 restore（ChangeProtectionApplied=FALSE）。 */
     KswRxpfPageTableAcquireExclusive(&g_KswRxpfRuntime.PageTable);
     KswRxpfImageProtectionReleaseRecord(record);
     /* ClearRemovedLocked 彻底释放 PageTable 的 slot。 */
@@ -1341,21 +1333,11 @@ Cleanup:
     InterlockedIncrement(&g_KswRxpfRuntime.Generation);
     KswRxpfPageTableReleaseExclusive(&g_KswRxpfRuntime.PageTable);
 
-    /* 若本调用是最后一个关闭 emulation 的，退出前把 IDT 还原回原厂。 */
-    if (restoreIdt) {
-        NTSTATUS restoreStatus = KswRxpfPageFaultRestore();
-
-        /* IDT 还原失败并不覆盖 execution 层的成功/失败判定，但会取代空成功 status。 */
-        if (NT_SUCCESS(status) && !NT_SUCCESS(restoreStatus)) {
-            status = restoreStatus;
-        }
-    }
-
 Complete:
-    /* 填响应：worker、RAX、faults、verdict、lastStatus、setupStatus。 */
+    /* 填响应：worker、RAX、verdict、lastStatus、setupStatus。faultsObserved 永远 0（这个 path 不走 emulator）。 */
     Response->workerCount = workerCount;
     Response->returnedValue = returnedValue;
-    Response->faultsObserved = faultsAfter - faultsBefore;
+    Response->faultsObserved = 0ULL;
     Response->verdict = verdict;
     Response->lastStatus = status;
     Response->setupStatus = setupStatus;

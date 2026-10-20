@@ -1392,7 +1392,7 @@ KswRxpfPrepareReferenceDigest(
 
 /* MmChangeImageProtection 通过签名扫描解析——不在 CFG 位图中。 */
 __declspec(guard(nocf))
-static VOID
+VOID
 KswRxpfRestoreExecutableProtection(
     _Inout_ PKSW_RXPF_PAGE_RECORD Record
     )
