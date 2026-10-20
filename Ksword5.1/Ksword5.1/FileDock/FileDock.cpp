@@ -8840,7 +8840,145 @@ namespace
             return operation;
         }
 
-        void showTransactionResults(const ks::file::metadata::TransactionResult& result)
+        using TransactionRows = QVector<QStringList>;
+
+        // The transaction owns complete immutable display rows before GUI delivery.
+        // A view asks only for visible cells; no per-operation QWidget items exist.
+        class TransactionResultModel final : public QAbstractTableModel
+        {
+        public:
+            TransactionResultModel(std::shared_ptr<const TransactionRows> rows, QObject* parent)
+                : QAbstractTableModel(parent), m_rows(std::move(rows))
+            {
+                if (parent != nullptr) parent->installEventFilter(this);
+            }
+
+            ~TransactionResultModel() override
+            {
+                if (m_rows != nullptr)
+                    QThreadPool::globalInstance()->start(QRunnable::create(
+                        [retired = std::move(m_rows)]() mutable { retired.reset(); }));
+            }
+
+            int rowCount(const QModelIndex& parent = {}) const override
+            {
+                return parent.isValid() || m_rows == nullptr ? 0 : static_cast<int>(m_rows->size());
+            }
+
+            int columnCount(const QModelIndex& parent = {}) const override
+            {
+                return parent.isValid() ? 0 : 6;
+            }
+
+            QVariant data(const QModelIndex& index, const int role = Qt::DisplayRole) const override
+            {
+                if (!index.isValid() || index.row() < 0 || index.row() >= rowCount() ||
+                    index.column() < 0 || index.column() >= columnCount() ||
+                    (role != Qt::DisplayRole && role != Qt::ToolTipRole))
+                {
+                    return {};
+                }
+                const QString value = m_rows->at(index.row()).value(index.column());
+                return index.column() == 1 || index.column() == 2
+                    ? ks::i18n::displayText(value) : value;
+            }
+
+            QVariant headerData(const int section, const Qt::Orientation orientation,
+                const int role = Qt::DisplayRole) const override
+            {
+                if (orientation == Qt::Horizontal && role == Qt::DisplayRole &&
+                    section >= 0 && section < columnCount())
+                {
+                    static const QStringList titles{ QStringLiteral("目标"), QStringLiteral("操作"),
+                        QStringLiteral("结果"), QStringLiteral("错误"), QStringLiteral("详情"),
+                        QStringLiteral("备份") };
+                    return ks::i18n::displayText(titles.at(section));
+                }
+                return QAbstractTableModel::headerData(section, orientation, role);
+            }
+
+        protected:
+            bool eventFilter(QObject* watched, QEvent* event) override
+            {
+                if (event != nullptr && event->type() == QEvent::LanguageChange)
+                {
+                    emit headerDataChanged(Qt::Horizontal, 0, columnCount() - 1);
+                    if (rowCount() > 0)
+                        emit dataChanged(index(0, 1), index(rowCount() - 1, 2), { Qt::DisplayRole, Qt::ToolTipRole });
+                }
+                return QAbstractTableModel::eventFilter(watched, event);
+            }
+
+        private:
+            std::shared_ptr<const TransactionRows> m_rows;
+        };
+
+        static std::shared_ptr<const TransactionRows> transactionDisplayRows(
+            const ks::file::metadata::TransactionResult& result)
+        {
+            auto rows = std::make_shared<TransactionRows>();
+            qsizetype rowCount = 0;
+            for (const auto& target : result.targets) rowCount += target.operations.size();
+            rows->reserve(rowCount);
+            for (const ks::file::metadata::TargetResult& target : result.targets)
+            {
+                const QString path = QDir::toNativeSeparators(target.originalPath);
+                const QString backup = QDir::toNativeSeparators(target.backupPath);
+                for (const ks::file::metadata::OperationResult& operation : target.operations)
+                {
+                    rows->push_back(QStringList{ path, transactionOperationText(operation.operation),
+                        operation.ok
+                            ? (operation.verified ? QStringLiteral("成功并验证") : QStringLiteral("成功，未验证"))
+                            : QStringLiteral("失败"),
+                        operation.ok ? QStringLiteral("0") : QStringLiteral("%1 · %2")
+                            .arg(operation.win32Error).arg(formatWin32ErrorText(operation.win32Error)),
+                        operation.detail, backup });
+                }
+            }
+            return rows;
+        }
+
+        static QString transactionTargetKey(const QString& path)
+        {
+            return QDir::cleanPath(path).toCaseFolded();
+        }
+
+        // Match against the original target catalog, never against a path already
+        // renamed by another result. Failed targets retain their exact pending patch.
+        static void reconcileTransactionResults(
+            const ks::file::metadata::TransactionResult& result,
+            QList<ks::file::metadata::TargetPatch>& pendingPatches, QStringList& paths)
+        {
+            QHash<QString, qsizetype> resultByTarget;
+            resultByTarget.reserve(result.targets.size());
+            for (qsizetype index = 0; index < result.targets.size(); ++index)
+            {
+                const QString key = transactionTargetKey(result.targets.at(index).originalPath);
+                if (!resultByTarget.contains(key)) resultByTarget.insert(key, index);
+            }
+            QHash<QString, QString> finalPathByTarget;
+            finalPathByTarget.reserve(pendingPatches.size());
+            for (ks::file::metadata::TargetPatch& pendingPatch : pendingPatches)
+            {
+                const QString key = transactionTargetKey(pendingPatch.originalPath);
+                const auto found = resultByTarget.constFind(key);
+                if (found == resultByTarget.cend()) continue;
+                const auto& target = result.targets.at(found.value());
+                if (!target.ok) continue;
+                finalPathByTarget.insert(key, target.finalPath);
+                pendingPatch = {};
+                pendingPatch.originalPath = target.finalPath;
+                pendingPatch.snapshot = target.finalSnapshot;
+            }
+            for (QString& path : paths)
+            {
+                const auto found = finalPathByTarget.constFind(transactionTargetKey(path));
+                if (found != finalPathByTarget.cend()) path = found.value();
+            }
+        }
+
+        void showTransactionResults(const ks::file::metadata::TransactionResult& result,
+            std::shared_ptr<const TransactionRows> rows)
         {
             QDialog* dialog = new QDialog(this);
             dialog->setAttribute(Qt::WA_DeleteOnClose, true);
@@ -8856,53 +8994,52 @@ namespace
             summaryLabel->setWordWrap(true);
             layout->addWidget(summaryLabel);
 
-            QTableWidget* table = new ks::ui::VisibleTableWidget(dialog);
+            QTableView* table = new ks::ui::TableActionTableView(dialog);
             // 保存结果是一次事务报告，仅保留紧凑复制/导出入口。
             ks::ui::SetTableActionBarMode(table, ks::ui::TableActionBarMode::Compact);
-            table->setColumnCount(6);
-            table->setHorizontalHeaderLabels(QStringList{
-                QStringLiteral("目标"),
-                QStringLiteral("操作"),
-                QStringLiteral("结果"),
-                QStringLiteral("错误"),
-                QStringLiteral("详情"),
-                QStringLiteral("备份") });
+            auto* model = new TransactionResultModel(std::move(rows), table);
+            auto* proxy = new QSortFilterProxyModel(table);
+            proxy->setDynamicSortFilter(false);
+            proxy->setSourceModel(model);
+            table->setProperty("ks_i18n_preserve_model_data", true);
+            table->setModel(proxy);
             table->setSelectionBehavior(QAbstractItemView::SelectRows);
             table->setSelectionMode(QAbstractItemView::ExtendedSelection);
             table->setEditTriggers(QAbstractItemView::NoEditTriggers);
             table->setAlternatingRowColors(true);
-            int rowCount = 0;
-            for (const ks::file::metadata::TargetResult& target : result.targets)
-            {
-                rowCount += target.operations.size();
-            }
-            table->setRowCount(rowCount);
-            int row = 0;
-            for (const ks::file::metadata::TargetResult& target : result.targets)
-            {
-                for (const ks::file::metadata::OperationResult& operation : target.operations)
-                {
-                    table->setItem(row, 0, new QTableWidgetItem(QDir::toNativeSeparators(target.originalPath)));
-                    table->setItem(row, 1, new QTableWidgetItem(transactionOperationText(operation.operation)));
-                    table->setItem(row, 2, new QTableWidgetItem(operation.ok
-                        ? (operation.verified ? QStringLiteral("成功并验证") : QStringLiteral("成功，未验证"))
-                        : QStringLiteral("失败")));
-                    table->setItem(row, 3, new QTableWidgetItem(operation.ok
-                        ? QStringLiteral("0")
-                        : QStringLiteral("%1 · %2")
-                            .arg(operation.win32Error)
-                            .arg(formatWin32ErrorText(operation.win32Error))));
-                    table->setItem(row, 4, new QTableWidgetItem(operation.detail));
-                    table->setItem(row, 5, new QTableWidgetItem(QDir::toNativeSeparators(target.backupPath)));
-                    ++row;
-                }
-            }
-            installFileTableCopyMenu(table);
+            ks::ui::SetTableColumnAutoFitEnabled(table, false);
             if (table->horizontalHeader() != nullptr)
             {
+                table->horizontalHeader()->setResizeContentsPrecision(64);
                 table->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
                 table->horizontalHeader()->setStretchLastSection(true);
+                table->horizontalHeader()->setSortIndicator(-1, Qt::AscendingOrder);
             }
+            table->setSortingEnabled(true);
+            table->setContextMenuPolicy(Qt::CustomContextMenu);
+            connect(table, &QTableView::customContextMenuRequested, table,
+                [table](const QPoint& localPosition)
+                {
+                    const QModelIndex clicked = table->indexAt(localPosition);
+                    if (clicked.isValid()) table->setCurrentIndex(clicked);
+                    const QPersistentModelIndex selected(table->currentIndex());
+                    const QPointer<QTableView> tableGuard(table);
+                    QMenu menu;
+                    menu.setPalette(table->palette());
+                    menu.setStyleSheet(buildContextMenuStyle());
+                    connect(table, &QObject::destroyed, &menu, &QMenu::close);
+                    QAction* copy = menu.addAction(QIcon(QStringLiteral(":/Icon/process_copy_row.svg")),
+                        QStringLiteral("复制当前行"));
+                    ks::ui::SetTableContextActionRole(copy, ks::ui::TableContextActionRole::CopyRows);
+                    copy->setEnabled(selected.isValid());
+                    if (menu.exec(table->viewport()->mapToGlobal(localPosition)) != copy ||
+                        tableGuard == nullptr || !selected.isValid()) return;
+                    QStringList values;
+                    for (int column = 0; column < table->model()->columnCount(); ++column)
+                        values.push_back(selected.sibling(selected.row(), column).data().toString());
+                    if (QClipboard* clipboard = QApplication::clipboard())
+                        clipboard->setText(values.join(QLatin1Char('\t')));
+                });
             layout->addWidget(table, 1);
             QDialogButtonBox* buttons = new QDialogButtonBox(QDialogButtonBox::Close, dialog);
             connect(buttons, &QDialogButtonBox::rejected, dialog, &QDialog::close);
@@ -9045,49 +9182,28 @@ namespace
             options.createBackup = m_backupBeforeSaveCheck != nullptr &&
                 m_backupBeforeSaveCheck->isChecked();
             QPointer<FileDetailDialog> guardThis(this);
-            auto* task = QRunnable::create([guardThis, patches, options]()
+            const auto pendingPatches = m_pendingPatches;
+            const auto originalPaths = m_filePaths;
+            auto* task = QRunnable::create([guardThis, patches, options, pendingPatches, originalPaths]()
                 {
                     const ks::file::metadata::TransactionResult result =
                         ks::file::metadata::executeTransaction(patches, options);
-                    if (guardThis == nullptr) return;
+                    auto updatedPending = pendingPatches;
+                    auto updatedPaths = originalPaths;
+                    reconcileTransactionResults(result, updatedPending, updatedPaths);
+                    const auto rows = transactionDisplayRows(result);
+                    // Accepted transactions finish independently of the page. Only
+                    // the queued GUI callback may dereference the dialog guard.
                     QMetaObject::invokeMethod(
-                        guardThis.data(),
-                        [guardThis, result]()
+                        qApp,
+                        [guardThis, result, updatedPending, updatedPaths, rows]()
                         {
                             if (guardThis == nullptr) return;
-                            QStringList updatedPaths = guardThis->m_filePaths;
-                            for (ks::file::metadata::TargetPatch& pendingPatch : guardThis->m_pendingPatches)
-                            {
-                                const auto resultIterator = std::find_if(
-                                    result.targets.cbegin(),
-                                    result.targets.cend(),
-                                    [&pendingPatch](const ks::file::metadata::TargetResult& target)
-                                    {
-                                        return QDir::cleanPath(target.originalPath).compare(
-                                            QDir::cleanPath(pendingPatch.originalPath),
-                                            Qt::CaseInsensitive) == 0;
-                                    });
-                                if (resultIterator == result.targets.cend() || !resultIterator->ok)
-                                {
-                                    continue;
-                                }
-                                for (QString& path : updatedPaths)
-                                {
-                                    if (QDir::cleanPath(path).compare(
-                                        QDir::cleanPath(pendingPatch.originalPath),
-                                        Qt::CaseInsensitive) == 0)
-                                    {
-                                        path = resultIterator->finalPath;
-                                    }
-                                }
-                                pendingPatch = {};
-                                pendingPatch.originalPath = resultIterator->finalPath;
-                                pendingPatch.snapshot = resultIterator->finalSnapshot;
-                            }
+                            guardThis->m_pendingPatches = updatedPending;
                             guardThis->m_filePaths = updatedPaths;
                             guardThis->m_filePath = updatedPaths.value(0);
                             guardThis->setTransactionBusy(false);
-                            guardThis->showTransactionResults(result);
+                            guardThis->showTransactionResults(result, rows);
                             guardThis->updatePendingSaveUi();
                             if (result.ok)
                             {
