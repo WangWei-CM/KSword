@@ -36,7 +36,7 @@ def main():
     assert "append(std::move(outputLines))" in worker
     assert "QMetaObject::invokeMethod" not in worker
     append = block(session, "    void append(std::vector<DebugOutputLineRecord> records)")
-    assert "if (buffer->append(std::move(records))) dispatcher->post(projectionWake);" in append
+    assert "gateway->post(projectionWake, [source,gateway,wake=projectionWake]" in append
     assert "ACTION_STOP" in block(session, "    void run() noexcept")
     for token in ("nextSequence = drainResult.nextSequence", "lostBeforeFirst", "droppedCount", "TEXT_TRUNCATED"):
         assert token in worker, token
@@ -49,6 +49,7 @@ def main():
 #include <string>
 #include <thread>
 #include <vector>
+#include <utility>
 struct DebugOutputLineRecord { int value = 0; std::uint64_t sequence = 0; };
 struct DebugOutputSnapshot {
     std::vector<DebugOutputLineRecord> records;
@@ -84,6 +85,11 @@ int main() {
     auto translated = buffer.snapshot(fresh.lastSequence, true, false);
     if (!translated.replace || translated.records.size() != 1) return 12;
     buffer.clear();
+    buffer.deliveryDropped(true);
+    if (!buffer.takeDroppedDelivery() || buffer.takeDroppedDelivery()) return 16;
+    if (!buffer.append({{10503, 0}})) return 17;
+    buffer.deliveryDropped(false); // State cancellation must not steal a current projection wake.
+    if (!buffer.takeDroppedDelivery() || buffer.append({{10504, 0}})) return 18;
     // Concurrent acceptance/snapshot keeps sequence monotonic and every accepted event in its
     // original most-recent-2000 retention window; no GUI widget or real driver is involved.
     const auto base = buffer.snapshot(0, false, true).lastSequence;

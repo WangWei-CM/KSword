@@ -10,6 +10,7 @@
 #include <condition_variable>
 #include <functional>
 #include <stdexcept>
+#include <utility>
 
 // 说明：由原聚合式实现迁移为独立 .cpp，成员函数实现保持原样。
 using namespace ksword::driver_dock_internal;
@@ -33,6 +34,19 @@ void DriverDock::DebugOutputBuffer::setVisible(bool visible)
 {
     std::lock_guard<std::mutex> lock(m_mutex);
     m_visible = visible;
+}
+
+void DriverDock::DebugOutputBuffer::deliveryDropped(bool projectionWake)
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+    if (projectionWake) m_wakePending = false;
+    m_deliveryDropped = true;
+}
+
+bool DriverDock::DebugOutputBuffer::takeDroppedDelivery()
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+    return std::exchange(m_deliveryDropped, false);
 }
 
 DriverDock::DebugOutputSnapshot DriverDock::DebugOutputBuffer::snapshot(
@@ -63,14 +77,23 @@ std::uint64_t DriverDock::DebugOutputBuffer::clear()
 
 void DriverDock::scheduleDebugOutputFlush()
 {
-    QTimer::singleShot(50, this, [this]() { flushDebugOutputLines(); });
+    if (m_debugOutputFlushScheduled) return;
+    m_debugOutputFlushScheduled = true;
+    QTimer::singleShot(50, this, [this]() { m_debugOutputFlushScheduled = false; flushDebugOutputLines(); });
 }
 
 void DriverDock::enqueueDebugOutputLines(std::vector<DebugOutputLineRecord> records)
 {
     if (!m_debugOutputBuffer->append(std::move(records))) return;
-    // 与会话共用同一回投门禁，队列里仍然只有一次可见投影唤醒。
-    m_debugCaptureDispatcher->post([this]() { scheduleDebugOutputFlush(); });
+    // 与会话共用门禁合并正常唤醒；取消时只补投一次恢复，不递归重试。
+    const auto source = m_debugOutputBuffer;
+    const auto gateway = m_debugCaptureDispatcher;
+    const auto wake = [this]() { scheduleDebugOutputFlush(); };
+    try { gateway->post(wake, [source,gateway,wake]() {
+        source->deliveryDropped(true);
+        try { gateway->post(wake); } catch (...) {} // One recovery post without recursive cancellation.
+    }); }
+    catch (...) { source->deliveryDropped(true); try { gateway->post(wake); } catch (...) {} }
 }
 
 bool DriverDock::eventFilter(QObject* watched, QEvent* event)
@@ -82,6 +105,7 @@ bool DriverDock::eventFilter(QObject* watched, QEvent* event)
             m_debugOutputBuffer->setVisible(true);
             // 首次绘制前补齐隐藏期数据；保留已排队唤醒，避免重复投递。
             flushDebugOutputLines(false);
+            reconcileDebugOutputDelivery();
         }
         else if (event->type() == QEvent::Hide)
         {
@@ -145,7 +169,25 @@ struct DriverDock::DebugCaptureSession final : std::enable_shared_from_this<Debu
 
     void append(std::vector<DebugOutputLineRecord> records)
     {
-        if (buffer->append(std::move(records))) dispatcher->post(projectionWake);
+        if (!buffer->append(std::move(records))) return;
+        const auto source = buffer;
+        const auto gateway = dispatcher;
+        try { gateway->post(projectionWake, [source,gateway,wake=projectionWake]() {
+            source->deliveryDropped(true);
+            try { gateway->post(wake); } catch (...) {}
+        }); }
+        catch (...) { source->deliveryDropped(true); try { gateway->post(projectionWake); } catch (...) {} }
+    }
+
+    void postStateChanged() noexcept
+    {
+        const auto source = buffer;
+        const auto gateway = dispatcher;
+        try { gateway->post(stateChanged, [source,gateway,wake=stateChanged]() {
+            source->deliveryDropped(false);
+            try { gateway->post(wake); } catch (...) {}
+        }); }
+        catch (...) { source->deliveryDropped(false); try { gateway->post(stateChanged); } catch (...) {} }
     }
 
     void appendLocalizedDebugOutputLine(const QString& sourceText)
@@ -176,7 +218,7 @@ struct DriverDock::DebugCaptureSession final : std::enable_shared_from_this<Debu
                 catch (...) {}
             }
             requestStop();
-            try { dispatcher->post(stateChanged); } catch (...) {}
+            postStateChanged();
             if (stopRequired)
             {
                 // 不因宿主销毁或 drain 出错省略 STOP；只由本会话执行一次。
@@ -202,7 +244,7 @@ struct DriverDock::DebugCaptureSession final : std::enable_shared_from_this<Debu
         // 只有 STOP 与句柄关闭之后才允许最终退出/下一次启动。
         cleanupLease.reset();
         finished.store(true);
-        try { dispatcher->post(stateChanged); } catch (...) {}
+        postStateChanged();
     }
 
     void capture()
@@ -288,8 +330,17 @@ struct DriverDock::DebugCaptureSession final : std::enable_shared_from_this<Debu
     }
 };
 
+void DriverDock::reconcileDebugOutputDelivery()
+{
+    if (!m_debugOutputBuffer->takeDroppedDelivery()) return;
+    if (m_debugCaptureSession && m_debugCaptureSession->finished.load()) m_debugCaptureSession.reset();
+    updateDebugCaptureButtonState();
+    flushDebugOutputLines(false); // Does not steal a newer accepted wake that arrived after cancellation.
+}
+
 void DriverDock::startDebugOutputCapture()
 {
+    reconcileDebugOutputDelivery();
     if (m_debugCaptureSession != nullptr)
     {
         appendLocalizedDebugOutputLine(QStringLiteral("捕获线程已在运行。"));
@@ -323,6 +374,7 @@ void DriverDock::startDebugOutputCapture()
 
 void DriverDock::stopDebugOutputCapture()
 {
+    reconcileDebugOutputDelivery();
     if (m_debugCaptureSession != nullptr) m_debugCaptureSession->requestStop();
     updateDebugCaptureButtonState();
 }
@@ -408,12 +460,14 @@ void DriverDock::flushDebugOutputLines(bool clearWake)
 
 void DriverDock::refreshDebugOutputLines()
 {
+    reconcileDebugOutputDelivery();
     m_debugOutputTranslationDirty = true;
     flushDebugOutputLines(false);
 }
 
 void DriverDock::clearDebugOutputLines()
 {
+    reconcileDebugOutputDelivery();
     m_debugOutputRenderedSequence = m_debugOutputBuffer->clear();
     m_debugOutputTranslationDirty = false;
     if (m_debugOutputEdit != nullptr) m_debugOutputEdit->clear();

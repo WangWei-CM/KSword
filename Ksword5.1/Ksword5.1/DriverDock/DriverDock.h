@@ -201,6 +201,8 @@ private:
     public:
         bool append(std::vector<DebugOutputLineRecord> records);
         void setVisible(bool visible);
+        void deliveryDropped(bool projectionWake);
+        bool takeDroppedDelivery();
         DebugOutputSnapshot snapshot(std::uint64_t afterSequence, bool force, bool clearWake);
         std::uint64_t clear();
 
@@ -210,6 +212,7 @@ private:
         std::uint64_t m_nextSequence = 1;
         bool m_visible = false;
         bool m_wakePending = false;
+        bool m_deliveryDropped = false;
     };
 
 private:
@@ -584,6 +587,7 @@ private:
     void refreshDebugOutputLines();
     void enqueueDebugOutputLines(std::vector<DebugOutputLineRecord> records);
     void flushDebugOutputLines(bool clearWake = true);
+    void reconcileDebugOutputDelivery();
 
     // clearDebugOutputLines：同步清空界面与用于重翻译的记录。
     void clearDebugOutputLines();
@@ -697,6 +701,7 @@ private:
     std::shared_ptr<DebugOutputBuffer> m_debugOutputBuffer = std::make_shared<DebugOutputBuffer>();
     std::uint64_t m_debugOutputRenderedSequence = 0;
     bool m_debugOutputTranslationDirty = false;
+    bool m_debugOutputFlushScheduled = false; // GUI-only: recovery and normal wakes share the existing 50ms timer.
 
     // ========================= 页签4：对象信息 =========================
     QWidget* m_objectInfoPage = nullptr;              // 对象信息页容器。

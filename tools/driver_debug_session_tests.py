@@ -268,6 +268,13 @@ __SNAPSHOT__;
 __BUFFER__;
 __BUFFER_METHODS__
 __SESSION__;
+class RecoveryHost final : public QObject {public:
+ std::shared_ptr<DebugOutputBuffer> m_debugOutputBuffer;std::shared_ptr<DebugCaptureSession> m_debugCaptureSession;int states=0,flushes=0;bool m_debugOutputFlushScheduled=false;DebugOutputSnapshot projected;
+ void updateDebugCaptureButtonState(){++states;}void flushDebugOutputLines(bool clearWake=true){++flushes;projected=m_debugOutputBuffer->snapshot(0,false,clearWake);}void reconcileDebugOutputDelivery();void scheduleDebugOutputFlush();
+};
+__RECONCILE__
+__SCHEDULE__
+
 
 struct CallbackProbe final
 {
@@ -523,6 +530,26 @@ void bufferCases()
     check(snapshot.records.size() == 1U && !snapshot.replace, "clear does not replay earlier source");
 }
 
+void droppedDeliveryCases()
+{
+    auto scenario=std::make_shared<Scenario>();Harness capture(scenario);RecoveryHost host;host.m_debugOutputBuffer=capture.buffer;host.m_debugCaptureSession=capture.owner;
+    DebugOutputLineRecord record;record.sourceText=QStringLiteral("accepted-before-lost-post");capture.owner->append({record});
+    QCoreApplication::removePostedEvents(capture.receiver.get(),QEvent::MetaCall);
+    check(capture.probe->projections==0,"dropped post was not projected");
+    QCoreApplication::sendPostedEvents(capture.receiver.get());check(capture.probe->projections==1,"one recovery delivered without any later append");
+    host.reconcileDebugOutputDelivery();
+    check(host.flushes==1&&host.states==1&&host.projected.records.size()==1U&&host.projected.records[0].sourceText==record.sourceText,"actual GUI reconcile consumes lost wake with no later append");
+    host.reconcileDebugOutputDelivery();check(host.flushes==1,"reconcile is constant no-op without dropped delivery");
+    capture.owner->append({record});QCoreApplication::sendPostedEvents(capture.receiver.get());check(capture.probe->projections==2,"new append schedules after lost wake");
+    capture.buffer->snapshot(0,false,true);
+    capture.owner->postStateChanged();QCoreApplication::removePostedEvents(capture.receiver.get(),QEvent::MetaCall);QCoreApplication::removePostedEvents(capture.receiver.get(),QEvent::MetaCall);capture.owner->finished.store(true);host.reconcileDebugOutputDelivery();
+    check(!host.m_debugCaptureSession&&host.states==2,"actual state reconcile releases finished session after lost final notification");
+    const int prior=host.flushes;host.scheduleDebugOutputFlush();host.scheduleDebugOutputFlush();
+    until([&]{return host.flushes==prior+1;},"normal and recovery wakes coalesce one existing timer");check(!host.m_debugOutputFlushScheduled,"timer ownership returns after flush");
+    capture.dispatcher->close();capture.owner->append({record});check(capture.buffer->takeDroppedDelivery(),"refused projection records only value recovery");
+    check(capture.buffer->append({record}),"refused projection cannot strand wake ownership");
+}
+
 void testShutdownRegistry()
 {
     auto& registry = ks::ui::AsyncCleanupRegistry::global();
@@ -562,6 +589,7 @@ int main(int argc, char** argv)
     heartbeat.start(1);
     bufferCases();
     dispatcherCases();
+    droppedDeliveryCases();
     for (int phase = 0; phase < 3; ++phase) blockedCase(phase, heartbeats);
     failureCases();
     gateCases(heartbeats);
@@ -602,6 +630,10 @@ def main():
     fixture = fixture.replace("__SNAPSHOT__", block(header, "struct DebugOutputSnapshot"))
     fixture = fixture.replace("__BUFFER__", block(header, "class DebugOutputBuffer final"))
     fixture = fixture.replace("__BUFFER_METHODS__", methods).replace("__SESSION__", session)
+    fixture = fixture.replace("__RECONCILE__",block(source,"void DriverDock::reconcileDebugOutputDelivery()").replace("DriverDock::","RecoveryHost::"))
+    fixture = fixture.replace("__SCHEDULE__",block(source,"void DriverDock::scheduleDebugOutputFlush()").replace("DriverDock::","RecoveryHost::"))
+    assert "gateway->post(wake);" in session
+    assert "reconcileDebugOutputDelivery();" in block(source,"void DriverDock::stopDebugOutputCapture()")
 
     candidates = [Path("C:/Program Files (x86)/Microsoft Visual Studio/2022/BuildTools/VC/Tools/MSVC/14.44.35207"),
                   Path("D:/Software/VS/VC/Tools/MSVC/14.44.35207")]
