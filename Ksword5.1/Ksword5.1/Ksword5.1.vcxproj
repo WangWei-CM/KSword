@@ -1046,6 +1046,7 @@
     <ClInclude Include="UI\ResultTableHost.h" />
     <ClInclude Include="DriverDock\DriverDock.ServiceAction.h" />
     <ClInclude Include="UI\UiCommitCoordinator.h" />
+    <ClInclude Include="UI\TableSearchFilterSnapshot.h" />
     <ClInclude Include="UI\TableSearchSupport.h" />
     <ClInclude Include="UI\TextSearchReplaceSupport.h" />
     <ClInclude Include="UI\TableSnapshotCompare.h" />

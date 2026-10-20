@@ -3177,6 +3177,9 @@
     <ClInclude Include="UI\UiCommitCoordinator.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="UI\TableSearchFilterSnapshot.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="UI\TableSearchSupport.h">
       <Filter>Header Files</Filter>
     </ClInclude>

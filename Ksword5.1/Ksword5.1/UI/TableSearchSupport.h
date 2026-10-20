@@ -10,6 +10,8 @@
 // 5) 提供表格名称解析、模型匹配与结果定位，供顶部搜索复用。
 // ============================================================
 
+#include "TableSearchFilterSnapshot.h"
+
 #include <QPersistentModelIndex>
 #include <QPointer>
 #include <QString>
@@ -53,6 +55,11 @@ namespace ks::ui
     // ClearTableSearchResultFilter：撤销通用过滤并恢复启用前的行隐藏状态。
     void ClearTableSearchResultFilter(QTableView* tableView);
 
+
+    // GUI-thread capture of current search-only visibility semantics. O(columns),
+    // with no row/cell reads or hidden-table materialization. Business filters
+    // remain the producer's own immutable predicate; freeze alone excludes none.
+    TableSearchResultFilterSpec CaptureTableSearchResultFilterSpec(const QTableView* tableView);
 
     // ResolveTableSearchDisplayName：从显式属性、分组标题、页签和对象名解析表格名。
     QString ResolveTableSearchDisplayName(const QTableView* tableView);

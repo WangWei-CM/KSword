@@ -451,6 +451,19 @@ namespace
                 && !hasDedicatedSearchControl(m_tableView.data());
         }
 
+        ks::ui::TableSearchResultFilterSpec resultFilterSpec() const
+        {
+            ks::ui::TableSearchResultFilterSpec spec;
+            if (!m_resultFilterActive || m_tableView.isNull() || m_tableView->model() == nullptr) return spec;
+            spec.active = true;
+            spec.query = m_resultFilterQuery;
+            const int count = m_tableView->model()->columnCount(m_tableView->rootIndex());
+            for (int column = 0; column < count; ++column)
+                if (!m_tableView->isColumnHidden(column)
+                    || ks::ui::isColumnHiddenByFreeze(m_tableView.data(), column)) spec.columns.push_back(column);
+            return spec;
+        }
+
         bool applyResultFilter(const QString& queryText)
         {
             const QString normalizedQuery = queryText.trimmed();
@@ -837,12 +850,10 @@ namespace
         bool rowMatchesQuery(const int row) const
         {
             if (m_filterModel.isNull()) return false;
-            for (int column : m_searchColumns)
-            {
-                if (m_filterModel->index(row, column, m_filterRoot).data(Qt::DisplayRole)
-                    .toString().contains(m_resultFilterQuery, Qt::CaseInsensitive)) return true;
-            }
-            return false;
+            return ks::ui::MatchTableSearchResultFilterCells(m_resultFilterQuery, m_searchColumns,
+                [this, row](int column) {
+                    return m_filterModel->index(row, column, m_filterRoot).data(Qt::DisplayRole).toString();
+                });
         }
 
         void applyRowVisibility(const int row)
@@ -1124,6 +1135,13 @@ namespace ks::ui
         }
     }
 
+
+    TableSearchResultFilterSpec CaptureTableSearchResultFilterSpec(const QTableView* tableView)
+    {
+        if (auto* searchSupport = searchSupportForTable(const_cast<QTableView*>(tableView)))
+            return searchSupport->resultFilterSpec();
+        return {};
+    }
 
     QString ResolveTableSearchDisplayName(const QTableView* tableView)
     {
