@@ -8,6 +8,7 @@
   "text_direction": "ltr",
   "fallback": "en-US",
   "translations": {
+    "misc.shell.refreshing": "正在刷新注册表快照…",
     "misc.cks.detail.task_failed": "后台任务未返回有效回执，请刷新状态。",
     "misc.cks.file.hashing": "正在计算 SHA-256…",
     "monitor.wmi.archive_failed": "● 归档失败: %1",

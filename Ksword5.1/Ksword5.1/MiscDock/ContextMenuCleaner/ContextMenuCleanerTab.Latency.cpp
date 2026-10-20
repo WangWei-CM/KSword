@@ -14,6 +14,7 @@
 // ============================================================
 
 #include "ContextMenuCleanerTab.h"
+#include "../../UI/AsyncOperation.h"
 
 #include "ContextMenuCleanerTab.Internal.h"
 
@@ -374,6 +375,7 @@ void ContextMenuCleanerTab::startLatencyMeasurement()
     }
 
     const MenuArea area = currentArea();
+    if (widgetsForArea(area)->tableBuilding) return;
     ks::window::MenuProbeContext probeContext = ks::window::MenuProbeContext::DesktopBackground;
     if (!latencyContextForArea(area == MenuArea::Desktop, &probeContext))
     {
@@ -418,6 +420,21 @@ void ContextMenuCleanerTab::startLatencyMeasurement()
         return;
     }
 
+    const std::array<MenuArea, 7> queryAreas{MenuArea::InternetExplorer, MenuArea::Desktop,
+        MenuArea::File, MenuArea::UrlBinding, MenuArea::OpenWith, MenuArea::FormatMenu,
+        MenuArea::ExplorerHome};
+    for (const MenuArea queryArea : queryAreas)
+    {
+        AreaWidgets* widgets = widgetsForArea(queryArea);
+        if (widgets->queryOperation != nullptr && widgets->queryOperation->isInFlight())
+        {
+            widgets->queryPending = false;
+            widgets->refreshDeferred = true;
+            ++widgets->refreshGeneration;
+            widgets->queryOperation->cancel();
+        }
+        widgets->pendingSnapshot.reset();
+    }
     m_latencyCancelRequested.store(false);
     m_latencyRunning.store(true);
     setLatencyUiRunning(true);
@@ -925,6 +942,7 @@ void ContextMenuCleanerTab::setLatencyUiRunning(const bool running)
             widgets->restoreButton->setEnabled(!running);
         }
     }
+    if (!running) flushDeferredAreaRefreshes();
 }
 
 }  // namespace ks::misc

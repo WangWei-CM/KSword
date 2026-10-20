@@ -253,7 +253,7 @@ bool ContextMenuCleanerTab::isProtectedUrlBindingEntry(const ContextMenuEntry& e
 // - 枚举 Classes 中带 URL Protocol 值的协议注册；
 // - 额外枚举当前用户 UrlAssociations\UserChoice，允许单独清除默认绑定；
 // - 系统/Packaged COM/DelegateExecute 协议只读，第三方机器级协议保留高风险删除能力。
-QVector<ContextMenuCleanerTab::ContextMenuEntry> ContextMenuCleanerTab::enumerateUrlBindingEntries() const
+QVector<ContextMenuCleanerTab::ContextMenuEntry> ContextMenuCleanerTab::enumerateUrlBindingEntries()
 {
     QVector<ContextMenuEntry> entries;
     for (const ClassRootDefinition& root : classRoots())
@@ -375,7 +375,7 @@ QVector<ContextMenuCleanerTab::ContextMenuEntry> ContextMenuCleanerTab::enumerat
 // - 枚举 Explorer\FileExts 记录的用户历史候选；
 // - 枚举 Classes 扩展名下 OpenWithProgids/OpenWithList 的已注册候选；
 // - 每一行绑定到精确值或应用子键，删除不会触碰扩展名默认 ProgID/UserChoice。
-QVector<ContextMenuCleanerTab::ContextMenuEntry> ContextMenuCleanerTab::enumerateOpenWithEntries() const
+QVector<ContextMenuCleanerTab::ContextMenuEntry> ContextMenuCleanerTab::enumerateOpenWithEntries()
 {
     QVector<ContextMenuEntry> entries;
     QSet<QString> seenTargets;
