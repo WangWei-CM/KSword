@@ -103,7 +103,8 @@ namespace
 // ============================================================
 
 void ProcessDetailWindow::submitDetailAction(const QString& title, const kLogEvent& actionEvent,
-    std::function<DetailActionResult()> action, const bool refreshModules)
+    std::function<DetailActionResult()> action, const bool refreshModules,
+    std::function<void(const DetailActionResult&)> completed)
 {
     if (!m_detailActionOperation)
     {
@@ -118,6 +119,15 @@ void ProcessDetailWindow::submitDetailAction(const QString& title, const kLogEve
                 if (button) button->setEnabled(!busy);
                 if (!alive) return;
             }
+            if (m_refreshHotkeyButton) m_refreshHotkeyButton->setEnabled(!busy && !m_hotkeyRefreshing && !m_keyboardRefreshing);
+            if (!alive) return;
+            if (m_refreshKeyboardButton) m_refreshKeyboardButton->setEnabled(!busy && !m_hotkeyRefreshing && !m_keyboardRefreshing);
+            if (!alive) return;
+            const bool canEdit = !busy && !m_hotkeyRefreshing && !m_keyboardRefreshing && m_hotkeyTable &&
+                m_hotkeyTable->isEnabled() && !m_hotkeyTable->isPreparing() && m_hotkeyTable->currentRow() >= 0;
+            if (m_editHotkeyButton) m_editHotkeyButton->setEnabled(canEdit);
+            if (!alive) return;
+            if (m_deleteHotkeyButton) m_deleteHotkeyButton->setEnabled(canEdit);
         });
     }
     if (m_detailActionOperation->isBusy()) return;
@@ -137,11 +147,12 @@ void ProcessDetailWindow::submitDetailAction(const QString& title, const kLogEve
                 << ", action=" << titleValue << ", ok=" << result.ok << ", detail=" << result.detail << eol;
             return result;
         },
-        [this, title, actionEvent, pid, creationTime, refreshModules](const DetailActionResult& result, std::uint64_t)
+        [this, title, actionEvent, pid, creationTime, refreshModules, completed = std::move(completed)](const DetailActionResult& result, std::uint64_t)
         {
             if (pid != m_baseRecord.pid || creationTime != m_baseRecord.creationTime100ns) return true;
             const QPointer<ProcessDetailWindow> alive(this);
             showActionResultMessage(title, result.ok, result.detail, actionEvent);
+            if (alive && completed) completed(result);
             if (alive && refreshModules && result.ok) requestAsyncModuleRefresh(true);
             return true;
         },

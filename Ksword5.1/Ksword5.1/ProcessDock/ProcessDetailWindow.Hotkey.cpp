@@ -104,7 +104,8 @@ namespace
     }
 
     QString keyboardMutationFailureText(
-        const ksword::ark::KeyboardHotkeyMutationResult& result)
+        const ksword::ark::KeyboardHotkeyMutationResult& result,
+        const ks::i18n::SourceTextSnapshot& translator)
     {
         if (!result.io.ok)
         {
@@ -113,25 +114,25 @@ namespace
         switch (result.response.status)
         {
         case KSWORD_ARK_KEYBOARD_MUTATION_STATUS_INVALID_REQUEST:
-            return hotkeyUiText(QStringLiteral("process.hotkey.r0.invalid_request"), QStringLiteral("驱动拒绝了无效的热键变更请求。"));
+            return translator.contextText(QStringLiteral("process.hotkey.r0.invalid_request"), QStringLiteral("驱动拒绝了无效的热键变更请求。"));
         case KSWORD_ARK_KEYBOARD_MUTATION_STATUS_CONFIRMATION_REQUIRED:
-            return hotkeyUiText(QStringLiteral("process.hotkey.r0.confirmation_required"), QStringLiteral("驱动要求重新确认此高风险操作。"));
+            return translator.contextText(QStringLiteral("process.hotkey.r0.confirmation_required"), QStringLiteral("驱动要求重新确认此高风险操作。"));
         case KSWORD_ARK_KEYBOARD_MUTATION_STATUS_UNSUPPORTED_BUILD:
-            return hotkeyUiText(QStringLiteral("process.hotkey.r0.unsupported_build"), QStringLiteral("当前 win32kfull.sys 身份或内部布局与已验证版本不一致，驱动已安全拒绝。"));
+            return translator.contextText(QStringLiteral("process.hotkey.r0.unsupported_build"), QStringLiteral("当前 win32kfull.sys 身份或内部布局与已验证版本不一致，驱动已安全拒绝。"));
         case KSWORD_ARK_KEYBOARD_MUTATION_STATUS_CALLER_CONTEXT_REQUIRED:
-            return hotkeyUiText(QStringLiteral("process.hotkey.r0.caller_context"), QStringLiteral("必须从当前交互式桌面的 GUI 线程执行此操作。"));
+            return translator.contextText(QStringLiteral("process.hotkey.r0.caller_context"), QStringLiteral("必须从当前交互式桌面的 GUI 线程执行此操作。"));
         case KSWORD_ARK_KEYBOARD_MUTATION_STATUS_STALE_SNAPSHOT:
-            return hotkeyUiText(QStringLiteral("process.hotkey.r0.stale_snapshot"), QStringLiteral("热键对象或链表已变化，请刷新后重试。"));
+            return translator.contextText(QStringLiteral("process.hotkey.r0.stale_snapshot"), QStringLiteral("热键对象或链表已变化，请刷新后重试。"));
         case KSWORD_ARK_KEYBOARD_MUTATION_STATUS_UNSAFE_TARGET:
-            return hotkeyUiText(QStringLiteral("process.hotkey.r0.unsafe_target"), QStringLiteral("目标不是可安全修改的普通独立热键项。"));
+            return translator.contextText(QStringLiteral("process.hotkey.r0.unsafe_target"), QStringLiteral("目标不是可安全修改的普通独立热键项。"));
         case KSWORD_ARK_KEYBOARD_MUTATION_STATUS_CONFLICT:
-            return hotkeyUiText(QStringLiteral("process.hotkey.r0.conflict"), QStringLiteral("目标组合已由另一个 RegisterHotKey 项占用。"));
+            return translator.contextText(QStringLiteral("process.hotkey.r0.conflict"), QStringLiteral("目标组合已由另一个 RegisterHotKey 项占用。"));
         case KSWORD_ARK_KEYBOARD_MUTATION_STATUS_OPERATION_FAILED:
-            return hotkeyUiText(QStringLiteral("process.hotkey.r0.operation_failed"), QStringLiteral("驱动写后验证失败；若已开始写入，已尝试回滚。"));
+            return translator.contextText(QStringLiteral("process.hotkey.r0.operation_failed"), QStringLiteral("驱动写后验证失败；若已开始写入，已尝试回滚。"));
         case KSWORD_ARK_KEYBOARD_MUTATION_STATUS_SAFETY_DENIED:
-            return hotkeyUiText(QStringLiteral("process.hotkey.r0.safety_denied"), QStringLiteral("统一安全策略未允许内核修改操作。"));
+            return translator.contextText(QStringLiteral("process.hotkey.r0.safety_denied"), QStringLiteral("统一安全策略未允许内核修改操作。"));
         default:
-            return hotkeyUiText(QStringLiteral("process.hotkey.r0.unknown_failure"), QStringLiteral("驱动返回未知变更状态：%1。"))
+            return translator.contextText(QStringLiteral("process.hotkey.r0.unknown_failure"), QStringLiteral("驱动返回未知变更状态：%1。"))
                 .arg(result.response.status);
         }
     }
@@ -1944,6 +1945,7 @@ void ProcessDetailWindow::initializeHotkeyTab()
 
 void ProcessDetailWindow::editSelectedHotkey()
 {
+    if (m_detailActionOperation && m_detailActionOperation->isBusy()) return;
     const QString titleText = hotkeyUiText(
         QStringLiteral("process.hotkey.edit.title"),
         QStringLiteral("编辑热键"));
@@ -2063,70 +2065,53 @@ void ProcessDetailWindow::editSelectedHotkey()
             return;
         }
 
-        const ksword::ark::KeyboardHotkeyMutationResult mutationResult =
-            ksword::ark::DriverClient().mutateKeyboardHotkey(
-                row.r0MutationSnapshot,
-                KSWORD_ARK_KEYBOARD_MUTATION_OPERATION_EDIT,
-                modifiers,
-                virtualKey);
-        if (!mutationResult.io.ok ||
-            mutationResult.response.status != KSWORD_ARK_KEYBOARD_MUTATION_STATUS_OK ||
-            (mutationResult.response.responseFlags &
-                KSWORD_ARK_KEYBOARD_MUTATION_RESPONSE_OTHER_BYTES_SAME) == 0UL)
-        {
-            QMessageBox::critical(
-                this,
-                titleText,
-                hotkeyUiText(QStringLiteral("process.hotkey.edit.failed"), QStringLiteral("热键修改失败：%1"))
-                    .arg(keyboardMutationFailureText(mutationResult)));
-            return;
-        }
-        QMessageBox::information(
-            this,
-            titleText,
-            hotkeyUiText(QStringLiteral("process.hotkey.edit.success"), QStringLiteral("热键已修改为 %1。"))
-                .arg(hotkeyTextFromParts(modifiers, virtualKey)));
-        requestAsyncHotkeyRefresh();
-        return;
     }
-
-    QString errorText;
-    bool conflictDetected = false;
-    const bool updateSucceeded = row.sourceText == QStringLiteral("窗口热键")
-        ? setWindowActivationHotkey(row.objectText, row.processId, modifiers, virtualKey, errorText, conflictDetected)
-        : setShellShortcutHotkey(row.objectText, modifiers, virtualKey, errorText);
-    if (!updateSucceeded)
-    {
-        QMessageBox::critical(
-            this,
-            titleText,
-            hotkeyUiText(
-                QStringLiteral("process.hotkey.edit.failed"),
-                QStringLiteral("热键修改失败：%1")).arg(errorText));
-        return;
-    }
-
+    const auto translator = ks::i18n::LanguageManager::instance().sourceTextSnapshot();
     const QString resultText = editedText.isEmpty()
-        ? hotkeyUiText(
-            QStringLiteral("process.hotkey.edit.cleared"),
-            QStringLiteral("热键已清除。"))
-        : hotkeyUiText(
-            QStringLiteral("process.hotkey.edit.success"),
-            QStringLiteral("热键已修改为 %1。")).arg(hotkeyTextFromParts(modifiers, virtualKey));
-    QMessageBox::information(
-        this,
-        titleText,
-        conflictDetected
-            ? resultText + QStringLiteral("\n") + hotkeyUiText(
-                QStringLiteral("process.hotkey.edit.window_conflict"),
-                QStringLiteral("提示：系统报告另一个窗口使用了相同热键。"))
-            : resultText);
-    requestAsyncHotkeyRefresh();
+        ? hotkeyUiText(QStringLiteral("process.hotkey.edit.cleared"), QStringLiteral("热键已清除。"))
+        : hotkeyUiText(QStringLiteral("process.hotkey.edit.success"), QStringLiteral("热键已修改为 %1。"))
+            .arg(hotkeyTextFromParts(modifiers, virtualKey));
+    const kLogEvent actionEvent;
+    submitDetailAction(titleText, actionEvent, [row, modifiers, virtualKey, isR0Hotkey, translator]
+    {
+        DetailActionResult result;
+        if (isR0Hotkey)
+        {
+            // Create the worker's USER message queue on its inherited interactive desktop.
+            MSG message{};
+            (void)::PeekMessageW(&message, nullptr, 0, 0, PM_NOREMOVE);
+            const auto native = ksword::ark::DriverClient().mutateKeyboardHotkey(row.r0MutationSnapshot,
+                KSWORD_ARK_KEYBOARD_MUTATION_OPERATION_EDIT, modifiers, virtualKey);
+            result.ok = native.io.ok && native.response.status == KSWORD_ARK_KEYBOARD_MUTATION_STATUS_OK &&
+                (native.response.responseFlags & KSWORD_ARK_KEYBOARD_MUTATION_RESPONSE_OTHER_BYTES_SAME) != 0UL;
+            if (!result.ok) result.detail = keyboardMutationFailureText(native, translator).toStdString();
+        }
+        else
+        {
+            QString error;
+            result.ok = row.sourceText == QStringLiteral("窗口热键")
+                ? setWindowActivationHotkey(row.objectText, row.processId, modifiers, virtualKey, error, result.conflict)
+                : setShellShortcutHotkey(row.objectText, modifiers, virtualKey, error);
+            result.detail = error.toStdString();
+        }
+        return result;
+    }, false, [this, titleText, resultText](const DetailActionResult& result)
+    {
+        const QPointer<ProcessDetailWindow> alive(this);
+        if (!result.ok)
+            QMessageBox::critical(this, titleText, hotkeyUiText(QStringLiteral("process.hotkey.edit.failed"),
+                QStringLiteral("热键修改失败：%1")).arg(QString::fromStdString(result.detail)));
+        else
+            QMessageBox::information(this, titleText, result.conflict ? resultText + QLatin1Char('\n') +
+                hotkeyUiText(QStringLiteral("process.hotkey.edit.window_conflict"), QStringLiteral("提示：系统报告另一个窗口使用了相同热键。")) : resultText);
+        if (alive && result.ok) QTimer::singleShot(0, alive, [alive] { if (alive) alive->requestAsyncHotkeyRefresh(); });
+    });
 }
 
 
 void ProcessDetailWindow::deleteSelectedHotkey()
 {
+    if (m_detailActionOperation && m_detailActionOperation->isBusy()) return;
     const QString titleText = hotkeyUiText(
         QStringLiteral("process.hotkey.delete.title"),
         QStringLiteral("删除热键"));
@@ -2205,50 +2190,42 @@ void ProcessDetailWindow::deleteSelectedHotkey()
         return;
     }
 
-    QString errorText;
-    if (isR0Hotkey)
+    const auto translator = ks::i18n::LanguageManager::instance().sourceTextSnapshot();
+    const kLogEvent actionEvent;
+    submitDetailAction(titleText, actionEvent, [row, isR0Hotkey, translator]
     {
-        const ksword::ark::KeyboardHotkeyMutationResult mutationResult =
-            ksword::ark::DriverClient().mutateKeyboardHotkey(
-                row.r0MutationSnapshot,
+        DetailActionResult result;
+        if (isR0Hotkey)
+        {
+            MSG message{};
+            (void)::PeekMessageW(&message, nullptr, 0, 0, PM_NOREMOVE);
+            const auto native = ksword::ark::DriverClient().mutateKeyboardHotkey(row.r0MutationSnapshot,
                 KSWORD_ARK_KEYBOARD_MUTATION_OPERATION_DELETE);
-        if (!mutationResult.io.ok ||
-            mutationResult.response.status != KSWORD_ARK_KEYBOARD_MUTATION_STATUS_OK ||
-            (mutationResult.response.responseFlags &
-                KSWORD_ARK_KEYBOARD_MUTATION_RESPONSE_CHANGED) == 0UL)
-        {
-            errorText = keyboardMutationFailureText(mutationResult);
+            result.ok = native.io.ok && native.response.status == KSWORD_ARK_KEYBOARD_MUTATION_STATUS_OK &&
+                (native.response.responseFlags & KSWORD_ARK_KEYBOARD_MUTATION_RESPONSE_CHANGED) != 0UL;
+            if (!result.ok) result.detail = keyboardMutationFailureText(native, translator).toStdString();
         }
-    }
-    else
-    {
-        bool conflictDetected = false;
-        const bool deleted = row.sourceText == QStringLiteral("窗口热键")
-            ? setWindowActivationHotkey(row.objectText, row.processId, 0U, 0U, errorText, conflictDetected)
-            : setShellShortcutHotkey(row.objectText, 0U, 0U, errorText);
-        if (!deleted && errorText.isEmpty())
+        else
         {
-            errorText = hotkeyUiText(
-                QStringLiteral("process.hotkey.delete.operation_failed"),
-                QStringLiteral("公开接口未能清除该热键。"));
+            QString error;
+            result.ok = row.sourceText == QStringLiteral("窗口热键")
+                ? setWindowActivationHotkey(row.objectText, row.processId, 0U, 0U, error, result.conflict)
+                : setShellShortcutHotkey(row.objectText, 0U, 0U, error);
+            if (!result.ok && error.isEmpty()) error = translator.contextText(
+                QStringLiteral("process.hotkey.delete.operation_failed"), QStringLiteral("公开接口未能清除该热键。"));
+            result.detail = error.toStdString();
         }
-    }
-
-    if (!errorText.isEmpty())
+        return result;
+    }, false, [this, titleText](const DetailActionResult& result)
     {
-        QMessageBox::critical(
-            this,
-            titleText,
-            hotkeyUiText(
-                QStringLiteral("process.hotkey.delete.failed"),
-                QStringLiteral("热键删除失败：%1")).arg(errorText));
-        return;
-    }
-    QMessageBox::information(
-        this,
-        titleText,
-        hotkeyUiText(QStringLiteral("process.hotkey.delete.success"), QStringLiteral("热键已删除。")));
-    requestAsyncHotkeyRefresh();
+        const QPointer<ProcessDetailWindow> alive(this);
+        if (!result.ok)
+            QMessageBox::critical(this, titleText, hotkeyUiText(QStringLiteral("process.hotkey.delete.failed"),
+                QStringLiteral("热键删除失败：%1")).arg(QString::fromStdString(result.detail)));
+        else QMessageBox::information(this, titleText,
+            hotkeyUiText(QStringLiteral("process.hotkey.delete.success"), QStringLiteral("热键已删除。")));
+        if (alive && result.ok) QTimer::singleShot(0, alive, [alive] { if (alive) alive->requestAsyncHotkeyRefresh(); });
+    });
 }
 void ProcessDetailWindow::showHotkeyTabAndRefresh()
 {
@@ -2298,6 +2275,7 @@ void ProcessDetailWindow::updateHotkeyStatusLabel(const QString& statusText, con
 
 void ProcessDetailWindow::requestAsyncHotkeyRefresh(const bool refreshExisting)
 {
+    if (m_detailActionOperation && m_detailActionOperation->isBusy()) return;
     if (!refreshExisting && m_hotkeyRows)
     { m_hotkeyInitialRefreshStarted = true; rebuildHotkeyTable(); return; }
     if (m_hotkeyRefreshing || m_keyboardRefreshing || m_baseRecord.pid == 0)
@@ -2651,6 +2629,7 @@ void ProcessDetailWindow::updateKeyboardStatusLabel(const QString& statusText, c
 
 void ProcessDetailWindow::requestAsyncKeyboardRefresh(const bool refreshHotkeys)
 {
+    if (m_detailActionOperation && m_detailActionOperation->isBusy()) return;
     if (m_hotkeyRefreshing) { m_keyboardRefreshPending = true; return; }
     const auto previousHotkeys = !refreshHotkeys ? m_hotkeyRows : nullptr;
     if (m_keyboardRefreshing || m_baseRecord.pid == 0)

@@ -668,9 +668,10 @@ private:
     void terminateCurrentModuleThread();
 
     // ======== 操作页动作 ========
-    struct DetailActionResult { bool ok = false; std::string detail; };
+    struct DetailActionResult { bool ok = false; std::string detail; bool conflict = false; };
     void submitDetailAction(const QString& title, const kLogEvent& actionEvent,
-        std::function<DetailActionResult()> action, bool refreshModules = false);
+        std::function<DetailActionResult()> action, bool refreshModules = false,
+        std::function<void(const DetailActionResult&)> completed = {});
     void executeSingleTerminateMethodAction(std::size_t methodIndex);
     // executeTerminateProcessComboAction：校验当前实例后执行有界共享方法链并复核退出。
     void executeTerminateProcessComboAction();
