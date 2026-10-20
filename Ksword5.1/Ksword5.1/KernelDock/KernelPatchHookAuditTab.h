@@ -5,6 +5,7 @@
 // ObjectType 方法指针和驱动完整性审计合并在一张表中按风险等级展示。
 
 #include <QWidget>
+#include <QPersistentModelIndex>
 #include "KernelServiceAuditUi.h"
 
 #include <atomic>
@@ -18,6 +19,7 @@ class QLineEdit;
 class QPushButton;
 class QShowEvent;
 class QTableWidget;
+class QTimer;
 
 // KernelPatchHookAuditTab — 统一内核修改审计页。
 //
@@ -67,6 +69,7 @@ private:
 
     // populateTable：按当前过滤条件将 m_allEntries 填入表格。
     void populateTable();
+    void applyFilter(bool allowDeferred = true);
 
     // --- 各子扫描函数（static，不访问成员，可在后台线程安全调用）---
 
@@ -118,6 +121,13 @@ private:
     QPushButton* m_scanButton = nullptr;        // m_scanButton：开始审计。
     QPushButton* m_cancelButton = nullptr;      // m_cancelButton：取消审计。
     QTableWidget* m_resultTable = nullptr;      // m_resultTable：统一结果表。
+
+    QTimer* m_filterTimer = nullptr;
+    QPersistentModelIndex m_unfilteredSelection;
+    int m_unfilteredHorizontalScroll = 0;
+    int m_unfilteredVerticalScroll = 0;
+    bool m_filterActive = false;
+    bool m_columnsSized = false;
 
     // --- 数据 ---
     std::vector<AuditEntry> m_allEntries;       // m_allEntries：全量审计结果。

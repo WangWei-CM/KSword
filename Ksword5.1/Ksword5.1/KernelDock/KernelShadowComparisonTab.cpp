@@ -10,6 +10,8 @@
 #include "../UI/PrimaryPageStyle.h"
 #include "../UI/ToolbarMetrics.h"
 #include "../UI/VisibleTableWidget.h"
+#include "../UI/TableRowFilterSupport.h"
+#include "../UI/TableInteractionSupport.h"
 #include "../UI/ThemeBinding.h"
 #include "../UI/TablePresentation.h"
 #include "../theme.h"
@@ -27,6 +29,8 @@
 #include <QPushButton>
 #include <QShowEvent>
 #include <QTableWidget>
+#include <QTimer>
+#include <QScrollBar>
 #include <QTableWidgetItem>
 #include <QVBoxLayout>
 
@@ -246,6 +250,11 @@ void KernelShadowComparisonTab::initializeUi()
         }
     });
 
+    m_filterTimer = new QTimer(this);
+    m_filterTimer->setSingleShot(true);
+    m_filterTimer->setInterval(120);
+    connect(m_filterTimer, &QTimer::timeout, this, [this]() { applyFilter(); });
+
     // --- 信号连接 ---
     connect(m_scanButton, &QPushButton::clicked,
             this, [this]() { startComparison(); });
@@ -253,9 +262,9 @@ void KernelShadowComparisonTab::initializeUi()
             this, [this]() { cancelComparison(); });
     // 过滤器变更时重新填表。
     connect(m_suspiciousOnlyCheck, &QCheckBox::toggled,
-            this, [this](bool) { populateTable(); });
+            this, [this](bool) { applyFilter(); });
     connect(m_filterEdit, &QLineEdit::textChanged,
-            this, [this](const QString&) { populateTable(); });
+            this, [this](const QString&) { m_filterTimer->start(); });
 }
 
 // ----------------------------------------------------------------
@@ -273,6 +282,10 @@ void KernelShadowComparisonTab::startComparison()
     m_scanButton->setEnabled(false);
     m_cancelButton->setEnabled(true);
     m_entries.clear();
+    m_filterTimer->stop();
+    ks::ui::ApplyTableRowFilter(m_resultTable, {});
+    m_filterActive = false;
+    m_unfilteredSelection = QPersistentModelIndex();
     m_resultTable->setRowCount(0);
     m_summaryLabel->clear();
     m_summaryLabel->setToolTip(QString());
@@ -424,27 +437,19 @@ void KernelShadowComparisonTab::cancelComparison()
 
 void KernelShadowComparisonTab::populateTable()
 {
+    const QPointer<KernelShadowComparisonTab> guard(this);
+    if (ks::ui::DeferTableUiCommitIfContextMenuOpen(this, QStringLiteral("shadow-audit-snapshot"),
+        {m_resultTable}, [guard]() { if (guard) guard->populateTable(); })) return;
+    m_filterTimer->stop();
+    m_filterActive = false;
+    m_unfilteredSelection = QPersistentModelIndex();
+    ks::ui::ApplyTableRowFilter(m_resultTable, {});
+    const bool sorting = m_resultTable->isSortingEnabled();
+    m_resultTable->setSortingEnabled(false);
     m_resultTable->setRowCount(0);
-
-    const bool suspiciousOnly = m_suspiciousOnlyCheck->isChecked();
-    const QString textFilter = m_filterEdit->text().trimmed();
-
     int row = 0;
     for (const auto& entry : m_entries)
     {
-        // 只看可疑——跳过正常条目。
-        if (suspiciousOnly && entry.ownership == audit::Ownership::Expected)
-        {
-            continue;
-        }
-        // 文本过滤——匹配函数名或模块名。
-        if (!textFilter.isEmpty()
-            && !entry.serviceName.contains(textFilter, Qt::CaseInsensitive)
-            && !entry.moduleName.contains(textFilter, Qt::CaseInsensitive))
-        {
-            continue;
-        }
-
         // 插入行。
         m_resultTable->insertRow(row);
         m_resultTable->setItem(row, ColIndex,
@@ -471,9 +476,67 @@ void KernelShadowComparisonTab::populateTable()
             statusItem->setForeground(KswordTheme::ErrorColor());
         }
         m_resultTable->setItem(row, ColStatus, statusItem);
+        m_resultTable->item(row, 0)->setData(Qt::UserRole, static_cast<qulonglong>(row));
         ++row;
     }
+    m_resultTable->setSortingEnabled(sorting);
+    if (!m_columnsSized && !m_entries.empty())
+    {
+        m_resultTable->resizeColumnsToContents();
+        m_resultTable->horizontalHeader()->setSectionResizeMode(QHeaderView::Interactive);
+        m_columnsSized = true;
+    }
+    applyFilter(false);
 }
+
+void KernelShadowComparisonTab::applyFilter(const bool allowDeferred)
+{
+    const QPointer<KernelShadowComparisonTab> guard(this);
+    if (allowDeferred && ks::ui::DeferTableUiCommitIfContextMenuOpen(this, QStringLiteral("shadow-audit-filter"),
+        {m_resultTable}, [guard]() { if (guard) guard->applyFilter(); })) return;
+    const bool suspiciousOnly = m_suspiciousOnlyCheck->isChecked();
+    const QString textFilter = m_filterEdit->text().trimmed();
+    const bool active = suspiciousOnly || !textFilter.isEmpty();
+    if (active && !m_filterActive)
+    {
+        m_unfilteredSelection = m_resultTable->currentIndex();
+        m_unfilteredHorizontalScroll = m_resultTable->horizontalScrollBar()->value();
+        m_unfilteredVerticalScroll = m_resultTable->verticalScrollBar()->value();
+    }
+    QSet<QPersistentModelIndex> excluded;
+    int firstVisible = -1;
+    for (int row = 0; row < m_resultTable->rowCount(); ++row)
+    {
+        const auto* item = m_resultTable->item(row, 0);
+        const auto sourceIndex = item != nullptr ? static_cast<std::size_t>(item->data(Qt::UserRole).toULongLong()) : m_entries.size();
+        bool visible = false;
+        if (sourceIndex < m_entries.size())
+        {
+            const auto& entry = m_entries[sourceIndex];
+            visible = (!suspiciousOnly || entry.ownership != audit::Ownership::Expected)
+                && (textFilter.isEmpty() || entry.serviceName.contains(textFilter, Qt::CaseInsensitive)
+                    || entry.moduleName.contains(textFilter, Qt::CaseInsensitive));
+        }
+        if (!visible) excluded.insert(m_resultTable->model()->index(row, 0));
+        else if (firstVisible < 0) firstVisible = row;
+    }
+    ks::ui::ApplyTableRowFilter(m_resultTable, excluded);
+    if (!active && m_filterActive && m_unfilteredSelection.isValid())
+        m_resultTable->setCurrentCell(m_unfilteredSelection.row(), m_unfilteredSelection.column());
+    else if (m_resultTable->currentRow() < 0 || ks::ui::IsTableRowExcludedByFilter(m_resultTable, m_resultTable->currentRow()))
+    {
+        if (firstVisible >= 0) m_resultTable->selectRow(firstVisible);
+        else { m_resultTable->setCurrentItem(nullptr); m_resultTable->clearSelection(); }
+    }
+    if (!active && m_filterActive)
+    {
+        m_resultTable->horizontalScrollBar()->setValue(m_unfilteredHorizontalScroll);
+        m_resultTable->verticalScrollBar()->setValue(m_unfilteredVerticalScroll);
+        m_unfilteredSelection = QPersistentModelIndex();
+    }
+    m_filterActive = active;
+}
+
 
 // ----------------------------------------------------------------
 // hex64：格式化 64 位值为 "0x" 前缀十六进制。
