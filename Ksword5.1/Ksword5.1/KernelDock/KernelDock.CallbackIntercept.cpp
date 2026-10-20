@@ -5,6 +5,7 @@
 #include "../UI/ToolbarMetrics.h"
 #include "../UI/ParameterWorkspace.h"
 #include "../UI/CodeTextEdit.h"
+#include "../UI/AsyncOperation.h"
 #include "../UI/CodeEditorWidget.h"
 #include "../UI/SecondaryPageLayout.h"
 #include "../UI/UI_All.h"
@@ -1737,6 +1738,7 @@ public:
         : QObject(parent)
         , m_hostPage(hostPage)
     {
+        m_runtimeQuery = new ks::ui::AsyncOperation(this);
         initializeUi();
         initializeConnections();
 
@@ -1764,7 +1766,7 @@ public:
         }
     }
 
-    ~CallbackInterceptController() override = default;
+    ~CallbackInterceptController() override { if (m_runtimeQuery != nullptr) m_runtimeQuery->close(); }
 
 private:
     void initializeUi()
@@ -5799,9 +5801,44 @@ private:
 
     void reloadRuntimeState()
     {
-        KSWORD_ARK_CALLBACK_RUNTIME_STATE runtimeState{};
-        QString errorText;
-        if (!queryRuntimeState(&runtimeState, &errorText))
+        m_reloadStateButton->setEnabled(false);
+        m_statusLabel->setText(kernelText("kernel.callback.intercept.status.waiting_refresh", QStringLiteral("状态：等待刷新")));
+        const auto ticket = m_runtimeQuery->submit<int, ksword::ark::CallbackRuntimeResult>(0,
+            [](int, const ks::ui::AsyncOperationToken&) {
+                const ksword::ark::DriverClient client;
+                return client.queryCallbackRuntimeState();
+            },
+            [this](const ksword::ark::CallbackRuntimeResult& result, std::uint64_t) {
+                m_reloadStateButton->setEnabled(true);
+                const QString error = result.io.ok ? QString()
+                    : kernelText("kernel.callback.intercept.runtime.query_failed", QStringLiteral("获取驱动状态失败，error=%1，detail=%2"))
+                        .arg(result.io.win32Error).arg(callbackRuleIoMessageText(QString::fromStdString(result.io.message)));
+                applyRuntimeState(result.state, error);
+                return true;
+            },
+            [this](std::exception_ptr) { runtimeReadFailed(); });
+        if (ticket == 0) runtimeReadFailed();
+    }
+
+    void runtimeReadFailed()
+    {
+        m_reloadStateButton->setEnabled(true);
+        applyRuntimeState({}, kernelText("kernel.driver_editor.status.background_failed", QStringLiteral("状态：后台查询失败，请刷新后重试。")));
+    }
+
+    void reloadRuntimeStateSynchronously()
+    {
+        m_runtimeQuery->cancel();
+        m_reloadStateButton->setEnabled(true);
+        KSWORD_ARK_CALLBACK_RUNTIME_STATE state{};
+        QString error;
+        queryRuntimeState(&state, &error);
+        applyRuntimeState(state, error);
+    }
+
+    void applyRuntimeState(const KSWORD_ARK_CALLBACK_RUNTIME_STATE& runtimeState, const QString& errorText)
+    {
+        if (!errorText.isEmpty())
         {
             RtlZeroMemory(&m_runtimeState, sizeof(m_runtimeState));
             appendAppLog(kernelText("kernel.callback.intercept.runtime.reload_failed", QStringLiteral("重新加载驱动状态失败：%1")).arg(errorText));
@@ -5991,7 +6028,7 @@ private:
             .arg(blobBytes.size()));
 
         ensureMinifilterRuntimeStarted(configDocument, driverClient);
-        reloadRuntimeState();
+        reloadRuntimeStateSynchronously();
         const bool hasAskUserRule = std::any_of(
             configDocument.rules.cbegin(),
             configDocument.rules.cend(),
@@ -6186,6 +6223,7 @@ private:
     QCheckBox* m_globalEnabledCheck = nullptr;
     QPushButton* m_applyButton = nullptr;
     QPushButton* m_reloadStateButton = nullptr;
+    ks::ui::AsyncOperation* m_runtimeQuery = nullptr;
     QPushButton* m_importButton = nullptr;
     QPushButton* m_exportButton = nullptr;
     QLabel* m_statusLabel = nullptr;
