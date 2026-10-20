@@ -9,6 +9,7 @@
 // ============================================================
 
 #include "../Framework.h"
+#include "../UI/PageNavigationTabCatalog.h"
 
 #include <QWidget>
 
@@ -29,6 +30,9 @@ class PrivilegeDock final : public QWidget
     Q_OBJECT
 
 public:
+    static ks::ui::PageNavigationCatalog navigationCatalog(const PrivilegeDock* existing = nullptr);
+    QWidget* activateNavigationDescriptor(const QString& id);
+
     // 构造函数：
     // - parent：Qt 父控件；
     // - 作用：初始化账号与权限页面并触发首轮数据加载。
@@ -42,6 +46,8 @@ protected:
     void changeEvent(QEvent* event) override;
 
 private:
+    ks::ui::PageNavigationTabCatalog m_navigationTabs;
+
     // LocalUserEntry：
     // - 作用：缓存本地用户表格展示字段；
     // - name 用于后续重置密码操作。
