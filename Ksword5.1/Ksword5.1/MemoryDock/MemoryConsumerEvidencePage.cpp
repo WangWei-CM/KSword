@@ -35,6 +35,8 @@
 #include <QUuid>
 #include <QVBoxLayout>
 #include <atomic>
+#include <deque>
+#include "../UI/AsyncCleanupRegistry.h"
 #include <mutex>
 #include <thread>
 
@@ -63,6 +65,197 @@ QStringList traceArguments(ksword::pool_trace::Action action, const QString& ins
     return result;
 }
 }
+struct TraceExitState {
+    std::atomic_bool stop{false}, cleanupDone{false};
+    QJsonObject result;
+    std::shared_ptr<ks::ui::AsyncCleanupRegistry::Lease> lease;
+};
+
+// The writer owns immutable snapshots and survives page destruction. Every
+// requested revision is serialized in order, including terminal/risk states.
+class TraceMetadataWriter final : public std::enable_shared_from_this<TraceMetadataWriter> {
+public:
+    struct Request { QString path; QJsonObject object; std::function<void(QJsonObject&)> prepare; std::shared_ptr<ks::ui::AsyncCleanupRegistry::Lease> lease; std::function<void(QJsonObject, bool)> finished; };
+    bool enqueue(QString path, QJsonObject object, std::function<void(QJsonObject&)> prepare = {}, std::shared_ptr<ks::ui::AsyncCleanupRegistry::Lease> lease = {}, std::function<void(QJsonObject, bool)> finished = {}) {
+        std::lock_guard<std::mutex> lock(mutex);
+        try { queue.push_back({std::move(path), std::move(object), std::move(prepare), std::move(lease), std::move(finished)}); }
+        catch (...) { return false; }
+        if (running) { return true; }
+        running = true;
+        try { std::thread([self = shared_from_this()] { self->drain(); }).detach(); }
+        catch (...) { running = false; queue.clear(); return false; }
+        return true;
+    }
+    bool takeFailure() {
+        std::lock_guard<std::mutex> lock(mutex);
+        const bool value = failed; failed = false; return value;
+    }
+private:
+    void drain() {
+        for (;;) {
+            Request request;
+            {
+                std::lock_guard<std::mutex> lock(mutex);
+                if (queue.empty()) { running = false; return; }
+                request = std::move(queue.front()); queue.pop_front();
+            }
+            bool saved = false;
+            try {
+                if (request.prepare) { request.prepare(request.object); }
+                const auto bytes = QJsonDocument(request.object).toJson(QJsonDocument::Indented);
+                QSaveFile file(request.path);
+                saved = file.open(QIODevice::WriteOnly) && file.write(bytes) == bytes.size() && file.commit();
+            } catch (...) {}
+            if (!saved) { std::lock_guard<std::mutex> lock(mutex); failed = true; }
+            if (request.finished) { try { request.finished(std::move(request.object), saved); } catch (...) {} }
+        }
+    }
+    std::mutex mutex;
+    std::deque<Request> queue;
+    bool running = false, failed = false;
+};
+
+namespace {
+// Page closure transfers the existing command and the UUID cleanup chain to
+// this independent QObject. No waitForFinished or detached-success inference.
+class TraceShutdownController final : public QObject {
+public:
+    TraceShutdownController(QProcess* process, std::shared_ptr<TraceMetadataWriter> writer,
+        QJsonObject evidence, QString metadataPath, std::uint64_t revision, QString wpr,
+        QString instance, QString output, ksword::pool_trace::Action action,
+        bool existed, qint64 previousSize, qint64 previousModified, std::shared_ptr<TraceExitState> exitState)
+        : writer(std::move(writer)), exitState(std::move(exitState)), evidence(std::move(evidence)), metadataPath(std::move(metadataPath)),
+          revision(revision), wpr(std::move(wpr)), instance(std::move(instance)), output(std::move(output)),
+          action(action), outputExisted(existed), previousSize(previousSize), previousModified(previousModified) {
+        timer = new QTimer(this); timer->setSingleShot(true);
+        connect(timer, &QTimer::timeout, this, [this] {
+            timedOut = true;
+            if (command && command->state() != QProcess::NotRunning) { command->kill(); }
+            else finish(-1, QProcess::CrashExit);
+        });
+        if (process) {
+            process->setParent(this);
+            connect(process, &QProcess::started, this, [process] { process->kill(); });
+            const auto settled = [this, process] {
+                if (oldSettled) { return; }
+                oldSettled = true;
+                this->evidence.insert(QStringLiteral("shutdownInterruptedCommandStdout"), QString::fromLocal8Bit(process->readAllStandardOutput()).right(65536));
+                this->evidence.insert(QStringLiteral("shutdownInterruptedCommandStderr"), QString::fromLocal8Bit(process->readAllStandardError()).right(65536));
+                process->deleteLater();
+                startCleanup();
+            };
+            connect(process, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this, [settled](int, QProcess::ExitStatus) { settled(); });
+            connect(process, &QProcess::errorOccurred, this, [settled](QProcess::ProcessError error) { if (error == QProcess::FailedToStart) { settled(); } });
+            const QPointer<QProcess> old(process);
+            QTimer::singleShot(0, this, [old, settled] {
+                if (!old) { return; }
+                if (old->state() == QProcess::NotRunning) { settled(); }
+                else { old->kill(); }
+            });
+        } else QTimer::singleShot(0, this, [this] { startCleanup(); });
+    }
+private:
+    void persist(bool verifySaved = false, bool terminal = false) {
+        evidence.insert(QStringLiteral("metadataRevision"), QString::number(++revision));
+        const auto finished = terminal ? std::function<void(QJsonObject, bool)>(
+            [weak = std::weak_ptr<TraceExitState>(exitState)](QJsonObject actual, bool savedMetadata) {
+                if (const auto state = weak.lock()) {
+                    actual.insert(QStringLiteral("metadataSaved"), savedMetadata);
+                    state->result = std::move(actual); state->cleanupDone.store(true);
+                }
+            }) : std::function<void(QJsonObject, bool)>();
+        const auto prepare = verifySaved ? std::function<void(QJsonObject&)>(
+            [path = output, existed = outputExisted, size = previousSize, modified = previousModified](QJsonObject& metadata) {
+                const QFileInfo file(path);
+                metadata.insert(QStringLiteral("saved"), ksword::pool_trace::verifiedNewOutput(file.isFile(), static_cast<std::uint64_t>(qMax<qint64>(0, file.size())),
+                    file.lastModified().toMSecsSinceEpoch(), existed, static_cast<std::uint64_t>(qMax<qint64>(0, size)), modified));
+            }) : std::function<void(QJsonObject&)>();
+        if (!writer->enqueue(metadataPath, evidence, prepare, exitState ? exitState->lease : nullptr, finished) && finished) {
+            finished(evidence, false);
+        }
+    }
+    void complete() { deleteLater(); }
+    void startCleanup() {
+        using namespace ksword::pool_trace;
+        if (action == Action::None) {
+            evidence.insert(QStringLiteral("shutdownCleanupStarted"), false);
+            evidence.insert(QStringLiteral("shutdownCleanupResultKnown"), true);
+            evidence.insert(QStringLiteral("shutdownCleanupConfirmed"), true);
+            evidence.insert(QStringLiteral("mayOwnSession"), false);
+            evidence.insert(QStringLiteral("stoppedKnown"), true);
+            persist(false, true); complete(); return;
+        }
+        const auto arguments = traceArguments(action, instance, output);
+        if (wpr.isEmpty() || arguments.isEmpty()) {
+            evidence.insert(QStringLiteral("shutdownCleanupStarted"), false);
+            evidence.insert(QStringLiteral("shutdownCleanupResultKnown"), false);
+            persist(); QTimer::singleShot(5000, this, [this] { startCleanup(); }); return;
+        }
+        command = new QProcess(this); active = true; timedOut = false; commandOutput.clear();
+        command->setCreateProcessArgumentsModifier([](QProcess::CreateProcessArguments* args) { args->flags |= CREATE_NO_WINDOW; });
+        command->setProgram(wpr); command->setArguments(arguments);
+        const auto readOutput = [this] {
+            commandOutput += QString::fromLocal8Bit(command->readAllStandardOutput());
+            commandOutput += QString::fromLocal8Bit(command->readAllStandardError());
+            if (commandOutput.size() > 65536) { commandOutput = commandOutput.right(65536); }
+        };
+        connect(command, &QProcess::readyReadStandardOutput, this, readOutput);
+        connect(command, &QProcess::readyReadStandardError, this, readOutput);
+        connect(command, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this,
+            [this](int code, QProcess::ExitStatus exit) { finish(code, exit); });
+        connect(command, &QProcess::errorOccurred, this, [this](QProcess::ProcessError error) {
+            if (error == QProcess::FailedToStart) { finish(-1, QProcess::CrashExit); }
+        });
+        evidence.insert(QStringLiteral("shutdownCleanupStarted"), true);
+        evidence.insert(QStringLiteral("shutdownCleanupResultKnown"), false);
+        persist();
+        timer->start(commandTimeoutMs(action == Action::Stop ? Command::Stop : Command::Cancel));
+        command->start();
+    }
+    void finish(int code, QProcess::ExitStatus exit) {
+        using namespace ksword::pool_trace;
+        if (!active) { return; }
+        active = false; timer->stop();
+        commandOutput += QString::fromLocal8Bit(command->readAllStandardOutput());
+        commandOutput += QString::fromLocal8Bit(command->readAllStandardError());
+        commandOutput = commandOutput.right(65536);
+        const bool released = !timedOut && exit == QProcess::NormalExit && (code == 0 || noSessionExit(static_cast<std::uint32_t>(code)));
+        auto attempts = evidence.value(QStringLiteral("shutdownCleanupAttempts")).toArray();
+        attempts.append(QJsonObject{{QStringLiteral("action"), static_cast<int>(action)}, {QStringLiteral("exitCode"), code},
+            {QStringLiteral("normalExit"), exit == QProcess::NormalExit}, {QStringLiteral("timedOut"), timedOut},
+            {QStringLiteral("output"), commandOutput}, {QStringLiteral("released"), released}});
+        evidence.insert(QStringLiteral("shutdownCleanupAttempts"), attempts);
+        evidence.insert(QStringLiteral("shutdownCleanupResultKnown"), released);
+        evidence.insert(QStringLiteral("shutdownCleanupConfirmed"), released);
+        evidence.insert(QStringLiteral("mayOwnSession"), !released);
+        evidence.insert(QStringLiteral("stoppedKnown"), released);
+        if (released) { evidence.insert(QStringLiteral("recordingState"), static_cast<int>(Session::Idle)); }
+        if (action == Action::Stop) { evidence.insert(QStringLiteral("saved"), false); }
+        persist(action == Action::Stop && released && code == 0, released);
+        command->deleteLater(); command = nullptr;
+        if (!released && action == Action::Stop) { action = Action::Cancel; startCleanup(); }
+        else if (released) complete();
+        else QTimer::singleShot(5000, this, [this] { startCleanup(); });
+    }
+    std::shared_ptr<TraceMetadataWriter> writer;
+    std::shared_ptr<TraceExitState> exitState;
+    QJsonObject evidence;
+    QString metadataPath, wpr, instance, output, commandOutput;
+    std::uint64_t revision;
+    ksword::pool_trace::Action action;
+    bool outputExisted, active = false, timedOut = false, oldSettled = false;
+    qint64 previousSize, previousModified;
+    QProcess* command = nullptr;
+    QTimer* timer = nullptr;
+};
+}
+
+struct MemoryConsumerEvidencePage::TraceReservation {
+    std::atomic_bool done{false};
+    bool reserved = false, queued = false;
+    bool outputExisted = false;
+    qint64 previousSize = -1, previousModified = 0;
+};
 struct MemoryConsumerEvidencePage::GpuJob {
     std::atomic_bool cancel{false}, done{false};
     bool failed = false;
@@ -70,6 +263,7 @@ struct MemoryConsumerEvidencePage::GpuJob {
 };
 MemoryConsumerEvidencePage::MemoryConsumerEvidencePage(QWidget* parent) : QWidget(parent)
 {
+    m_metadataWriter = std::make_shared<TraceMetadataWriter>();
     auto* layout = new QVBoxLayout(this);
     // 采集动作和提示共同作为结果头；专业池分析页与日志编辑器保留自己的内部布局。
     auto* resultGroup = new QWidget(this);
@@ -129,6 +323,23 @@ MemoryConsumerEvidencePage::MemoryConsumerEvidencePage(QWidget* parent) : QWidge
     m_captureTimer = new QTimer(this); m_captureTimer->setSingleShot(true);
     connect(m_captureTimer, &QTimer::timeout, this, [this] { stopTrace(); });
     m_commandTimer = new QTimer(this); m_commandTimer->setSingleShot(true);
+    initializeTraceProcess();
+    connect(m_commandTimer, &QTimer::timeout, this, [this] {
+        if (m_shuttingDown || m_capture.pending == ksword::pool_trace::Command::None) { return; }
+        m_commandTimedOut = true;
+        appendCommandOutput(L("WPR command timed out; the instance state must be checked or cleaned up."));
+        if (m_process->state() == QProcess::NotRunning) { traceFinished(-1, false); }
+        else { m_process->kill(); }
+    });
+    connect(m_gpuButton, &QPushButton::clicked, this, [this] { startGpu(); });
+    connect(m_traceStart, &QPushButton::clicked, this, [this] { startTrace(); });
+    connect(m_traceStop, &QPushButton::clicked, this, [this] { stopTrace(); });
+    auto* poll = new QTimer(this); poll->setInterval(150);
+    connect(poll, &QTimer::timeout, this, [this] { pollGpu(); }); poll->start();
+    retranslate(); m_traceStop->setEnabled(false);
+}
+void MemoryConsumerEvidencePage::initializeTraceProcess()
+{
     m_process = new QProcess(this);
     m_process->setCreateProcessArgumentsModifier([](QProcess::CreateProcessArguments* args) { args->flags |= CREATE_NO_WINDOW; });
     connect(m_process, &QProcess::readyReadStandardOutput, this, [this] {
@@ -145,41 +356,36 @@ MemoryConsumerEvidencePage::MemoryConsumerEvidencePage(QWidget* parent) : QWidge
             QTimer::singleShot(0, this, [this] { traceFinished(-1, false); });
         }
     });
-    connect(m_commandTimer, &QTimer::timeout, this, [this] {
-        if (m_shuttingDown || m_capture.pending == ksword::pool_trace::Command::None) { return; }
-        m_commandTimedOut = true;
-        appendCommandOutput(L("WPR command timed out; the instance state must be checked or cleaned up."));
-        if (m_process->state() == QProcess::NotRunning) { traceFinished(-1, false); }
-        else { m_process->kill(); }
-    });
-    connect(m_gpuButton, &QPushButton::clicked, this, [this] { startGpu(); });
-    connect(m_traceStart, &QPushButton::clicked, this, [this] { startTrace(); });
-    connect(m_traceStop, &QPushButton::clicked, this, [this] { stopTrace(); });
-    auto* poll = new QTimer(this); poll->setInterval(150);
-    connect(poll, &QTimer::timeout, this, [this] { pollGpu(); }); poll->start();
-    retranslate(); m_traceStop->setEnabled(false);
 }
 MemoryConsumerEvidencePage::~MemoryConsumerEvidencePage()
 {
+    if (m_gpuJob) { m_gpuJob->cancel.store(true); }
+    retireTrace();
+}
+void MemoryConsumerEvidencePage::retireTrace()
+{
+    if (m_shuttingDown) { return; }
     m_shuttingDown = true;
     m_captureTimer->stop(); m_commandTimer->stop();
     const auto cleanupAction = m_capture.shutdown();
-    if (m_gpuJob) { m_gpuJob->cancel.store(true); }
-    // waitForFinished can deliver finished synchronously. No command chain may
-    // execute against a page while its destructor is running.
     m_process->disconnect(this);
-    if (m_process->state() != QProcess::NotRunning) { m_process->kill(); m_process->waitForFinished(1000); }
-    // Release only the UUID-named instance created by this page. Never run a
-    // global WPR cancel, trim working sets, or alter tracing registry settings.
-    if (cleanupAction != ksword::pool_trace::Action::None && !m_wpr.isEmpty()) {
-        QProcess cleanup;
-        cleanup.setCreateProcessArgumentsModifier([](QProcess::CreateProcessArguments* args) { args->flags |= CREATE_NO_WINDOW; });
-        cleanup.setProgram(m_wpr);
-        cleanup.setArguments(traceArguments(cleanupAction, m_instance, m_output));
-        m_traceEvidence.insert(QStringLiteral("shutdownCleanupStarted"), cleanup.startDetached());
+    if (!m_metadataOutput.isEmpty() && !m_traceReservation && m_traceExit) {
         m_traceEvidence.insert(QStringLiteral("shutdownCleanupResultKnown"), false);
+        m_traceEvidence.insert(QStringLiteral("shutdownInterruptedCommandOutput"), m_commandOutput);
+        m_traceEvidence.insert(QStringLiteral("shutdownInterruptedCommandOutputTruncated"), m_commandOutputTruncated);
         persistTrace();
+        // One accepted lease follows the UUID chain and every final metadata revision.
+        new TraceShutdownController(m_process, m_metadataWriter, m_traceEvidence, m_metadataOutput,
+            m_metadataRevision, m_wpr, m_instance, m_output, cleanupAction,
+            m_outputExisted, m_previousOutputSize, m_previousOutputModified, m_traceExit);
+        m_process = nullptr;
+    } else if (m_process->state() != QProcess::NotRunning) {
+        m_process->setParent(nullptr);
+        connect(m_process, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), m_process, &QObject::deleteLater);
+        m_process->kill(); m_process = nullptr;
     }
+    // A live page retains value state to recover after a cancelled application exit.
+    updateTraceControls();
 }
 void MemoryConsumerEvidencePage::changeEvent(QEvent* event)
 {
@@ -214,6 +420,39 @@ void MemoryConsumerEvidencePage::startGpu()
 }
 void MemoryConsumerEvidencePage::pollGpu()
 {
+    if (m_traceExit && m_traceExit->stop.load()) { retireTrace(); }
+    if (m_shuttingDown && m_traceReservation && m_traceReservation->done.load()) {
+        m_traceReservation.reset();
+        if (m_traceExit) { m_traceExit->result = m_traceEvidence; m_traceExit->cleanupDone.store(true); }
+    }
+    if (m_shuttingDown && m_traceExit && m_traceExit->cleanupDone.load()) {
+        // Cleanup has its actual result. A cancelled exit can reuse this page.
+        m_traceEvidence = m_traceExit->result;
+        m_metadataRevision = qMax(m_metadataRevision, m_traceEvidence.value(QStringLiteral("metadataRevision")).toString().toULongLong());
+        if (m_process) { m_process->deleteLater(); }
+        initializeTraceProcess();
+        m_capture = {};
+        m_capture.saved = m_traceEvidence.value(QStringLiteral("saved")).toBool();
+        m_shuttingDown = false;
+        m_traceExit.reset(); // FIFO requests still retain the accepted lease until their commits finish.
+        updateTraceControls();
+    }
+    if (m_metadataWriter->takeFailure()) {
+        m_traceLog->appendRawText(L("Trace metadata could not be saved; the recording state is not inferred from a missing file."));
+    }
+    if (!m_shuttingDown && m_traceReservation && m_traceReservation->done.load()) {
+        const auto reservation = std::move(m_traceReservation);
+        if (!reservation->reserved || !reservation->queued) {
+            m_metadataOutput.clear();
+            m_traceExit.reset();
+            m_traceLog->appendRawText(L("Trace metadata could not be saved; the recording state is not inferred from a missing file."));
+            updateTraceControls();
+        } else {
+            m_outputExisted = reservation->outputExisted; m_previousOutputSize = reservation->previousSize;
+            m_previousOutputModified = reservation->previousModified;
+            runTrace({QStringLiteral("-help"), QStringLiteral("advanced")}, ksword::pool_trace::Command::Help);
+        }
+    }
     if (!m_gpuJob || !m_gpuJob->done.load()) { return; }
     m_gpuResult = std::move(m_gpuJob); m_gpuButton->setEnabled(true); rebuildGpu();
 }
@@ -246,10 +485,15 @@ void MemoryConsumerEvidencePage::rebuildGpu()
 void MemoryConsumerEvidencePage::startTrace()
 {
     using namespace ksword::pool_trace;
-    if (!m_capture.canStart()) { return; }
+    if (m_shuttingDown || !m_capture.canStart() || m_traceReservation) { return; }
     const QPointer<MemoryConsumerEvidencePage> guardedPage(this);
     const QString output = QFileDialog::getSaveFileName(this, L("Save pool allocation trace"), QStringLiteral("pool-allocation.etl"), L("ETL files (*.etl)"));
-    if (!guardedPage || output.isEmpty() || !m_capture.canStart()) { return; }
+    if (!guardedPage || output.isEmpty() || !m_capture.canStart() || m_traceReservation) { return; }
+    const auto exitState = std::make_shared<TraceExitState>();
+    exitState->lease = ks::ui::AsyncCleanupRegistry::global().acquire([weak = std::weak_ptr<TraceExitState>(exitState)] {
+        if (const auto state = weak.lock()) { state->stop.store(true); }
+    });
+    if (!exitState->lease) { return; }
     m_output = output;
     wchar_t system[MAX_PATH]{}; const UINT size = GetSystemDirectoryW(system, MAX_PATH);
     if (!size || size >= MAX_PATH) { m_traceLog->appendRawText(L("Windows Performance Recorder is unavailable.")); return; }
@@ -265,19 +509,11 @@ void MemoryConsumerEvidencePage::startTrace()
     }
     profile.close();
     m_profileSpec = profilePath + QStringLiteral("!KSwordPool");
+    m_traceExit = exitState;
     m_capture = {};
     m_instance = QStringLiteral("KSwordMemory_") + QUuid::createUuid().toString(QUuid::Id128);
     m_metadataOutput = m_output + QStringLiteral(".metadata-") + m_instance + QStringLiteral(".json");
-    QFile reservation(m_metadataOutput);
-    if (!reservation.open(QIODevice::WriteOnly | QIODevice::NewOnly)) {
-        m_metadataOutput.clear();
-        m_traceLog->appendRawText(L("Trace metadata could not be saved; the recording state is not inferred from a missing file."));
-        return;
-    }
-    reservation.close();
-    const QFileInfo previous(m_output);
-    m_outputExisted = previous.exists(); m_previousOutputSize = previous.size();
-    m_previousOutputModified = previous.lastModified().toMSecsSinceEpoch();
+
     m_captureDuration = m_duration->value();
     m_traceEvidence = {};
     m_traceEvidence.insert(QStringLiteral("schema"), QStringLiteral("ksword.pool.trace"));
@@ -293,7 +529,30 @@ void MemoryConsumerEvidencePage::startTrace()
     m_traceEvidence.insert(QStringLiteral("preCaptureAllocationsCovered"), false);
     m_traceEvidence.insert(QStringLiteral("physicalPfnLinkageKnown"), false);
     m_traceEvidence.insert(QStringLiteral("captureIntervalExact"), false);
-    runTrace({QStringLiteral("-help"), QStringLiteral("advanced")}, Command::Help);
+    m_traceEvidence.insert(QStringLiteral("metadataRevision"), QString::number(++m_metadataRevision));
+    m_traceEvidence.insert(QStringLiteral("recordingState"), static_cast<int>(m_capture.session));
+    m_traceEvidence.insert(QStringLiteral("pendingCommand"), static_cast<int>(m_capture.pending));
+    m_traceEvidence.insert(QStringLiteral("mayOwnSession"), m_capture.mayOwnSession);
+    m_traceEvidence.insert(QStringLiteral("stoppedKnown"), m_capture.stoppedKnown);
+    m_traceEvidence.insert(QStringLiteral("saved"), m_capture.saved);
+    const auto reservation = std::make_shared<TraceReservation>();
+    m_traceReservation = reservation;
+    const auto path = m_metadataOutput;
+    const auto metadata = m_traceEvidence;
+    const auto writer = m_metadataWriter;
+    const auto outputPath = m_output;
+    updateTraceControls();
+    try { std::thread([reservation, path, metadata, writer, outputPath, exitState] {
+        try {
+            const QFileInfo previous(outputPath);
+            reservation->outputExisted = previous.exists(); reservation->previousSize = previous.size();
+            reservation->previousModified = previous.lastModified().toMSecsSinceEpoch();
+            QFile file(path);
+            reservation->reserved = file.open(QIODevice::WriteOnly | QIODevice::NewOnly);
+            if (reservation->reserved) { file.close(); reservation->queued = writer->enqueue(path, metadata, {}, exitState->lease); }
+        } catch (...) {}
+        reservation->done.store(true);
+    }).detach(); } catch (...) { reservation->done.store(true); }
 }
 void MemoryConsumerEvidencePage::appendCommandOutput(const QString& output)
 {
@@ -302,10 +561,10 @@ void MemoryConsumerEvidencePage::appendCommandOutput(const QString& output)
 }
 void MemoryConsumerEvidencePage::updateTraceControls()
 {
-    m_traceStart->setEnabled(m_capture.canStart());
+    m_traceStart->setEnabled(m_capture.canStart() && !m_traceReservation);
     m_traceStop->setEnabled(m_capture.canFinish());
     m_traceStop->setText(m_capture.mayOwnSession && !m_capture.recording() ? L("Retry instance cleanup") : L("Save allocation trace"));
-    m_duration->setEnabled(m_capture.canStart());
+    m_duration->setEnabled(m_capture.canStart() && !m_traceReservation);
 }
 void MemoryConsumerEvidencePage::runTrace(const QStringList& arguments, ksword::pool_trace::Command action)
 {
@@ -398,6 +657,7 @@ void MemoryConsumerEvidencePage::traceFinished(int exitCode, bool normal)
     if (action == Command::Cancel && m_capture.mayOwnSession) { m_traceLog->appendRawText(L("Instance cleanup is unverified. Retry instance cleanup to release only this recording.")); }
     updateTraceControls();
     persistTrace();
+    if (!m_capture.mayOwnSession && m_capture.pending == Command::None) { m_traceExit.reset(); }
     if (action == Command::Stop && m_capture.saved) {
         m_detailTabs->setCurrentWidget(m_poolAnalysis);
         m_poolAnalysis->analyzeFile(m_output);
@@ -411,9 +671,8 @@ void MemoryConsumerEvidencePage::persistTrace()
     m_traceEvidence.insert(QStringLiteral("mayOwnSession"), m_capture.mayOwnSession);
     m_traceEvidence.insert(QStringLiteral("stoppedKnown"), m_capture.stoppedKnown);
     m_traceEvidence.insert(QStringLiteral("saved"), m_capture.saved);
-    QSaveFile file(m_metadataOutput);
-    const auto metadataBytes = QJsonDocument(m_traceEvidence).toJson(QJsonDocument::Indented);
-    if (!file.open(QIODevice::WriteOnly) || file.write(metadataBytes) != metadataBytes.size() || !file.commit()) {
+    m_traceEvidence.insert(QStringLiteral("metadataRevision"), QString::number(++m_metadataRevision));
+    if (!m_metadataWriter->enqueue(m_metadataOutput, m_traceEvidence, {}, m_traceExit ? m_traceExit->lease : nullptr)) {
         m_traceLog->appendRawText(L("Trace metadata could not be saved; the recording state is not inferred from a missing file."));
     }
 }
