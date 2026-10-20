@@ -14,6 +14,10 @@
 #include "../../Framework/PrivilegeElevationPrompt.h"
 #include "../../UI/TableInteractionSupport.h"
 #include "../../UI/VisibleTableWidget.h"
+#include "../../UI/FlatTableModel.h"
+#include <QSortFilterProxyModel>
+#include <QAbstractProxyModel>
+#include "../../UI/TablePresentation.h"
 
 // ============================================================
 // DiskEditorTab.cpp
@@ -158,7 +162,7 @@ namespace
     // - 返回 0x0000... 文本。
     using ks::misc::diskeditor_detail::HexOffsetText;
 
-    void installDiskEditorTableCopyMenu(QTableWidget* table)
+    void installDiskEditorTableCopyMenu(QTableView* table)
     {
         // installDiskEditorTableCopyMenu：
         // - 输入：磁盘编辑器中的分区/结构/搜索结果表；
@@ -170,12 +174,12 @@ namespace
         }
 
         table->setContextMenuPolicy(Qt::CustomContextMenu);
-        QObject::connect(table, &QTableWidget::customContextMenuRequested, table, [table](const QPoint& localPosition)
+        QObject::connect(table, &QTableView::customContextMenuRequested, table, [table](const QPoint& localPosition)
         {
             const QModelIndex clickedIndex = table->indexAt(localPosition);
             if (clickedIndex.isValid())
             {
-                table->setCurrentCell(clickedIndex.row(), clickedIndex.column());
+                table->setCurrentIndex(clickedIndex);
             }
 
             QMenu contextMenu(table);
@@ -185,25 +189,24 @@ namespace
                 QStringLiteral("复制当前行"));
             // 声明业务菜单已提供此能力，避免共享表格菜单追加重复项。
             ks::ui::SetTableContextActionRole(copyRowAction, ks::ui::TableContextActionRole::CopyRows);
-            copyRowAction->setEnabled(table->currentRow() >= 0);
+            copyRowAction->setEnabled(table->currentIndex().isValid());
             if (contextMenu.exec(table->viewport()->mapToGlobal(localPosition)) != copyRowAction)
             {
                 return;
             }
 
             QClipboard* clipboardObject = QGuiApplication::clipboard();
-            const int rowIndex = table->currentRow();
-            if (clipboardObject == nullptr || rowIndex < 0 || rowIndex >= table->rowCount())
+            const int rowIndex = table->currentIndex().row();
+            if (clipboardObject == nullptr || rowIndex < 0 || rowIndex >= table->model()->rowCount())
             {
                 return;
             }
 
             QStringList rowFields;
-            rowFields.reserve(table->columnCount());
-            for (int columnIndex = 0; columnIndex < table->columnCount(); ++columnIndex)
+            rowFields.reserve(table->model()->columnCount());
+            for (int columnIndex = 0; columnIndex < table->model()->columnCount(); ++columnIndex)
             {
-                const QTableWidgetItem* item = table->item(rowIndex, columnIndex);
-                rowFields.push_back(item != nullptr ? item->text() : QString());
+                rowFields.push_back(table->model()->index(rowIndex, columnIndex).data().toString());
             }
             clipboardObject->setText(rowFields.join(QLatin1Char('\t')));
         });
@@ -744,11 +747,37 @@ namespace ks::misc
         ks::ui::StyleParameterSection(actionGroup);
         workspace->parameters()->addWidget(actionGroup);
 
-        m_searchResultTable = createReadOnlyTable(toolPage, {
-            QStringLiteral("#"),
-            QStringLiteral("命中偏移"),
-            QStringLiteral("预览 HEX")
-            });
+        m_searchResultTable = new ks::ui::TableActionTableView(toolPage);
+        using SearchModel = ks::ui::FlatTableModel<DiskSearchDisplayRow>;
+        m_searchResultModel = new SearchModel({
+            {QStringLiteral("#")}, {QStringLiteral("命中偏移")}, {QStringLiteral("预览 HEX")}},
+            [](const DiskSearchDisplayRow& row, const int column, const int role) -> QVariant
+            {
+                if (column == kSearchColumnOffset && role == Qt::UserRole)
+                    return QVariant::fromValue<qulonglong>(row.hit.offsetBytes);
+                if (role != Qt::DisplayRole) return {};
+                switch (column)
+                {
+                case kSearchColumnIndex: return QString::number(row.ordinal);
+                case kSearchColumnOffset: return HexOffsetText(row.hit.offsetBytes);
+                case kSearchColumnPreview: return bytesToPreviewText(row.hit.preview);
+                default: return {};
+                }
+            }, m_searchResultTable);
+        auto* searchProxy = new QSortFilterProxyModel(m_searchResultTable);
+        searchProxy->setSourceModel(m_searchResultModel);
+        m_searchResultTable->setModel(searchProxy);
+        m_searchResultTable->setSelectionBehavior(QAbstractItemView::SelectRows);
+        m_searchResultTable->setSelectionMode(QAbstractItemView::SingleSelection);
+        m_searchResultTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+        m_searchResultTable->setAlternatingRowColors(true);
+        m_searchResultTable->verticalHeader()->setVisible(false);
+        m_searchResultTable->horizontalHeader()->setStretchLastSection(true);
+        m_searchResultTable->horizontalHeader()->setSectionResizeMode(QHeaderView::Interactive);
+        m_searchResultTable->setSortingEnabled(true);
+        m_searchResultTable->sortByColumn(-1, Qt::AscendingOrder);
+        ks::ui::ApplyTablePresentation(m_searchResultTable);
+        installDiskEditorTableCopyMenu(m_searchResultTable);
         // 字节搜索命中结果保留复制导出，收拢无关现场快照。
         ks::ui::SetTableActionBarMode(m_searchResultTable, ks::ui::TableActionBarMode::Compact);
         workspace->results()->addWidget(m_searchResultTable, 1);
@@ -910,19 +939,22 @@ namespace ks::misc
             readCurrentRangeAsync(QStringLiteral("卷映射跳转读取"));
         });
 
-        connect(m_searchResultTable, &QTableWidget::cellDoubleClicked, this,
-            [this](const int row, const int column)
-        {
-            Q_UNUSED(column);
-            QTableWidgetItem* item = m_searchResultTable->item(row, kSearchColumnOffset);
-            if (item == nullptr)
+        connect(m_searchResultTable, &QTableView::doubleClicked, this,
+            [this](const QModelIndex& index)
             {
-                return;
-            }
-            const std::uint64_t offset = item->data(Qt::UserRole).toULongLong();
-            m_offsetEdit->setText(HexOffsetText(offset));
-            readCurrentRangeAsync(QStringLiteral("搜索结果跳转读取"));
-        });
+                QModelIndex source = index;
+                while (source.isValid() && source.model() != m_searchResultModel)
+                {
+                    const auto* proxy = qobject_cast<const QAbstractProxyModel*>(source.model());
+                    if (proxy == nullptr) return;
+                    source = proxy->mapToSource(source);
+                }
+                const DiskSearchDisplayRow* hit = source.isValid()
+                    && source.model() == m_searchResultModel ? m_searchResultModel->rowAt(source.row()) : nullptr;
+                if (hit == nullptr) return;
+                m_offsetEdit->setText(HexOffsetText(hit->hit.offsetBytes));
+                readCurrentRangeAsync(QStringLiteral("搜索结果跳转读取"));
+            });
 
         connect(m_toolUseSelectionButton, &QPushButton::clicked, this, [this]()
         {
@@ -1602,7 +1634,7 @@ namespace ks::misc
         const int maxResults = m_maxResultSpin->value();
         m_busy = true;
         setControlsEnabledForBusy(true);
-        m_searchResultTable->setRowCount(0);
+        m_searchResultModel->clearRows();
         m_statusLabel->setText(QStringLiteral("状态：正在搜索磁盘范围..."));
         appendLog(QStringLiteral("开始搜索：offset=%1 length=%2 pattern=%3")
             .arg(HexOffsetText(offset))
@@ -2003,17 +2035,13 @@ namespace ks::misc
 
         if (taskName == QStringLiteral("搜索") && m_searchResultTable != nullptr)
         {
-            m_searchResultTable->setRowCount(static_cast<int>(result.searchResults.size()));
-            for (int row = 0; row < static_cast<int>(result.searchResults.size()); ++row)
+            std::vector<DiskSearchDisplayRow> rows;
+            rows.reserve(result.searchResults.size());
+            for (std::size_t index = 0; index < result.searchResults.size(); ++index)
             {
-                const DiskSearchResult& hit = result.searchResults[static_cast<std::size_t>(row)];
-                QTableWidgetItem* offsetItem = makeReadOnlyItem(HexOffsetText(hit.offsetBytes));
-                offsetItem->setData(Qt::UserRole, static_cast<qulonglong>(hit.offsetBytes));
-                m_searchResultTable->setItem(row, kSearchColumnIndex, makeReadOnlyItem(QString::number(row + 1)));
-                m_searchResultTable->setItem(row, kSearchColumnOffset, offsetItem);
-                m_searchResultTable->setItem(row, kSearchColumnPreview, makeReadOnlyItem(bytesToPreviewText(hit.preview)));
+                rows.push_back({index + 1, std::move(result.searchResults[index])});
             }
-            m_searchResultTable->resizeColumnsToContents();
+            m_searchResultModel->setRows(std::move(rows));
         }
 
         if (taskName == QStringLiteral("导入") && result.success)

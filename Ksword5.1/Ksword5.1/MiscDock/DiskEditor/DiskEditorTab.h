@@ -32,16 +32,23 @@ class QSpinBox;
 class QSplitter;
 class QTabWidget;
 class QTableWidget;
+class QTableView;
 class QVBoxLayout;
 namespace ks::ui
 {
     class HexView;
+    template<typename RowT> class FlatTableModel;
     class AsyncOperation;
 }
 
 namespace ks::misc
 {
     class DiskMapWidget;
+    struct DiskSearchDisplayRow
+    {
+        std::size_t ordinal = 0;
+        DiskSearchResult hit;
+    };
 
     // DiskEditorTab 说明：
     // - 输入：用户选择的物理磁盘、偏移和读取长度；
@@ -307,7 +314,8 @@ namespace ks::misc
         QTableWidget* m_structureTable = nullptr;    // m_structureTable：MBR/GPT/启动扇区解析表。
         QTableWidget* m_volumeTable = nullptr;       // m_volumeTable：卷与盘符映射表。
         QTableWidget* m_healthTable = nullptr;       // m_healthTable：设备能力/健康表。
-        QTableWidget* m_searchResultTable = nullptr; // m_searchResultTable：扇区搜索结果表。
+        QTableView* m_searchResultTable = nullptr;
+        ks::ui::FlatTableModel<DiskSearchDisplayRow>* m_searchResultModel = nullptr; // m_searchResultTable：扇区搜索结果表。
         QPushButton* m_analyzeButton = nullptr;      // m_analyzeButton：刷新结构解析按钮。
         QPushButton* m_toolUseSelectionButton = nullptr; // m_toolUseSelectionButton：使用当前读取范围按钮。
         QPushButton* m_toolUsePartitionButton = nullptr; // m_toolUsePartitionButton：使用当前分区范围按钮。
