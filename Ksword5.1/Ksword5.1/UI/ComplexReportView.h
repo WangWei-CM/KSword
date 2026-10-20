@@ -39,6 +39,7 @@ namespace ks::ui
         void changeEvent(QEvent* event) override;
         void showEvent(QShowEvent* event) override;
     private:
+        void reconcilePreparation();
         void prepareDocument();
         void scheduleSearch(bool debounce);
         void prepareSearch();
@@ -93,6 +94,9 @@ namespace ks::ui
         quint64 m_readingGeneration = 0;
         bool m_restoreAfterSearch = false;
         bool m_searchPending = false;
+        // Cancellation receipts contain values only; old requests retain their own flag.
+        std::shared_ptr<std::atomic_bool> m_prepareDeliveryLost;
+        std::shared_ptr<std::atomic_bool> m_searchDeliveryLost;
         bool m_preparing = false;
         bool m_projectionDirty = false;
         bool m_initialized = false; // 首份目录到达时选择默认范围和类型。

@@ -282,8 +282,13 @@ namespace ks::ui
     void ComplexReportView::restoreReading(const QSet<QString>& paths, const QString& selected,
         int column, int scroll, bool collapse)
     {
-        auto restore = std::shared_ptr<ReadingRestore>(new ReadingRestore, [](ReadingRestore* retired)
-        { QThreadPool::globalInstance()->start([retired]() { delete retired; }); });
+        auto restore = std::shared_ptr<ReadingRestore>(new ReadingRestore, [](ReadingRestore* retired) noexcept {
+            auto owned = std::unique_ptr<ReadingRestore>(retired);
+            try {
+                auto task = std::unique_ptr<QRunnable>(QRunnable::create([owned = std::move(owned)] {}));
+                QThreadPool::globalInstance()->start(task.get()); task.release();
+            } catch (...) {}
+        });
         if (collapse) restore->collapse = m_expandedPaths;
         restore->expand = paths;
         restore->collapsePosition = restore->collapse.cbegin();
@@ -371,7 +376,11 @@ namespace ks::ui
 
     void ComplexReportView::showEvent(QShowEvent* event)
     {
+        const QPointer<ComplexReportView> alive(this);
         QWidget::showEvent(event);
+        if (!alive) return;
+        reconcilePreparation();
+        if (!alive) return;
         if (m_projectionDirty) prepareDocument();
         else if (m_searchPending) scheduleSearch(false);
         else if (m_readingRestore) continueReadingRestore(m_readingGeneration);
@@ -393,6 +402,31 @@ namespace ks::ui
         if (isVisible()) prepareDocument();
     }
 
+    void ComplexReportView::reconcilePreparation()
+    {
+        const bool documentLost = m_prepareDeliveryLost && m_prepareDeliveryLost->load();
+        const bool searchLost = m_searchDeliveryLost && m_searchDeliveryLost->load();
+        if (!documentLost && !searchLost) return;
+        m_prepareDeliveryLost.reset();
+        m_searchDeliveryLost.reset();
+        ++*m_prepareGeneration;
+        ++*m_filterGeneration;
+        ++m_readingGeneration;
+        ++m_expansionGeneration;
+        auto candidate = std::move(m_candidate);
+        auto restore = std::move(m_readingRestore);
+        m_preparing = false;
+        m_searchPending = false;
+        m_projectionDirty = true; // Retry the same complete canonical input on Show or the next operation.
+        try { QThreadPool::globalInstance()->start([candidate = std::move(candidate), restore = std::move(restore)] {}); }
+        catch (...) {} // Allocation/queue failure retains scope ownership and cannot strand the UI.
+        const QPointer<ComplexReportView> alive(this);
+        updatePresentation();
+        if (!alive) return;
+        m_count->setText(text(QStringLiteral("后台任务发生异常。")));
+        if (m_empty->isVisible()) m_empty->setText(text(QStringLiteral("后台任务发生异常。")));
+    }
+
     void ComplexReportView::prepareDocument()
     {
         const QPointer<ComplexReportView> safe(this);
@@ -406,16 +440,28 @@ namespace ks::ui
         const auto previous = m_model->snapshot();
         const FieldDocument document = m_requestedDocument;
         const auto dispatcher = m_dispatcher;
-        QThreadPool::globalInstance()->start([generation, ticket, translator, previous, document, safe, dispatcher]()
+        const auto lost = std::make_shared<std::atomic_bool>(false);
+        m_prepareDeliveryLost = lost;
+        m_searchDeliveryLost.reset();
+        const auto onCanceled = [lost, dispatcher, safe, generation, ticket] {
+            lost->store(true);
+            // A single best-effort UI receipt; if it is also dropped, Show/next operation reconciles.
+            try { dispatcher->post([safe, generation, ticket] {
+                if (safe && generation->load() == ticket) safe->reconcilePreparation();
+            }); } catch (...) {}
+        };
+        try { QThreadPool::globalInstance()->start([generation, ticket, translator, previous, document, safe, dispatcher, onCanceled]()
         {
+            try {
             const auto cancelled = [generation, ticket]() { return generation->load() != ticket; };
             auto prepared = ComplexReportModel::prepareDocument(document,
                 [translator](const QString& source) { return translator.sourceText(source); }, previous, cancelled);
-            if (!prepared.next || cancelled()) return;
+            if (!prepared.next || cancelled()) { if (!cancelled()) onCanceled(); return; }
             dispatcher->post([safe, generation, ticket, prepared = std::move(prepared)]() mutable
             {
                 if (safe && generation->load() == ticket)
                 {
+                    safe->m_prepareDeliveryLost.reset();
                     safe->m_candidate = std::make_shared<ComplexReportModel::PreparedDocument>(std::move(prepared));
                     if (safe->isVisible()) safe->scheduleSearch(false);
                     else
@@ -428,12 +474,18 @@ namespace ks::ui
                 // The previous large state and request closures are retired outside the GUI thread,
                 // including stale results delivered after a newer request or window destruction.
                 QThreadPool::globalInstance()->start([retired = std::move(prepared)]() {});
-            });
-        });
+            }, onCanceled);
+            } catch (...) { onCanceled(); }
+        }); } catch (...) { lost->store(true); reconcilePreparation(); }
     }
 
     void ComplexReportView::scheduleSearch(bool debounce)
     {
+        const QPointer<ComplexReportView> requestOwner(this);
+        reconcilePreparation();
+        if (!requestOwner) return;
+        if (m_projectionDirty) { if (isVisible()) prepareDocument(); return; }
+        m_searchDeliveryLost.reset();
         const quint64 ticket = ++*m_filterGeneration;
         ++m_expansionGeneration;
         if (m_readingRestore && !m_preparing)
@@ -457,7 +509,10 @@ namespace ks::ui
 
     void ComplexReportView::prepareSearch()
     {
-        if (!isVisible()) return;
+        const QPointer<ComplexReportView> requestOwner(this);
+        reconcilePreparation();
+        if (!requestOwner || !isVisible()) return;
+        if (m_projectionDirty) { prepareDocument(); return; }
         const auto candidate = m_candidate;
         const auto source = candidate ? candidate->next : m_model->snapshot();
         const auto generation = m_filterGeneration;
@@ -472,15 +527,31 @@ namespace ks::ui
         const bool diagnostics = m_scopePath == kDiagnostics;
         const QPointer<ComplexReportView> safe(this);
         const auto dispatcher = m_dispatcher;
-        QThreadPool::globalInstance()->start([source, candidate, generation, ticket, documentGeneration,
-            documentTicket, query, scope, diagnostics, expandedState, safe, dispatcher]()
+        const auto lost = std::make_shared<std::atomic_bool>(false);
+        m_searchDeliveryLost = lost;
+        const auto onCanceled = [lost, dispatcher, safe, generation, ticket, documentGeneration, documentTicket] {
+            lost->store(true);
+            try { dispatcher->post([safe, generation, ticket, documentGeneration, documentTicket] {
+                if (safe && generation->load() == ticket && documentGeneration->load() == documentTicket)
+                    safe->reconcilePreparation();
+            }); } catch (...) {}
+        };
+        try { QThreadPool::globalInstance()->start([source, candidate, generation, ticket, documentGeneration,
+            documentTicket, query, scope, diagnostics, expandedState, safe, dispatcher, onCanceled]()
         {
+            try {
             const auto cancelled = [generation, ticket, documentGeneration, documentTicket]()
             { return generation->load() != ticket || documentGeneration->load() != documentTicket; };
             auto prepared = ComplexReportModel::prepareFilter(source, query, scope, diagnostics, cancelled);
-            if (!prepared || cancelled()) return;
+            if (!prepared || cancelled()) { if (!cancelled()) onCanceled(); return; }
             auto independentExpansion = std::shared_ptr<QSet<QString>>(new QSet<QString>(expandedState),
-                [](QSet<QString>* retired) { QThreadPool::globalInstance()->start([retired]() { delete retired; }); });
+                [](QSet<QString>* retired) noexcept {
+            auto owned = std::unique_ptr<QSet<QString>>(retired);
+            try {
+                auto task = std::unique_ptr<QRunnable>(QRunnable::create([owned = std::move(owned)] {}));
+                QThreadPool::globalInstance()->start(task.get()); task.release();
+            } catch (...) {}
+        });
             independentExpansion->detach();
             if (cancelled()) return;
             dispatcher->post([safe, prepared = std::move(prepared), candidate,
@@ -493,6 +564,7 @@ namespace ks::ui
                         && safe->m_candidate == expectedCandidate;
                 };
                 if (!current()) return;
+                safe->m_searchDeliveryLost.reset();
                 if (!safe->isVisible())
                 {
                     safe->m_projectionDirty = false;
@@ -562,8 +634,9 @@ namespace ks::ui
                 if (!current()) return;
                 safe->setProperty("ksword_report_update_us", elapsed.nsecsElapsed() / 1000);
                 QThreadPool::globalInstance()->start([retired = independentExpansion]() {});
-            });
-        });
+            }, onCanceled);
+            } catch (...) { onCanceled(); }
+        }); } catch (...) { lost->store(true); reconcilePreparation(); }
     }
 
     // 顶层目录由生产者标记，诊断合为一个入口；默认范围直接承接当前业务对象。
