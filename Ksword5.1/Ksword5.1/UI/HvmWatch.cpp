@@ -11,6 +11,7 @@
 
 #include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QHash>
 #include <QDateTime>
 #include <QLibrary>
@@ -273,6 +274,7 @@ namespace ksword::hvm
         struct ExportTable
         {
             bool valid = false;
+            quint32 imageSize = 0;
             QVector<QPair<quint32, QString>> entries;
         };
 
@@ -326,6 +328,7 @@ namespace ksword::hvm
             {
                 return table;
             }
+            table.imageSize = nt.OptionalHeader.SizeOfImage;
             const IMAGE_DATA_DIRECTORY& directory =
                 nt.OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
             if (directory.VirtualAddress == 0 || directory.Size == 0)
@@ -432,19 +435,30 @@ namespace ksword::hvm
          *
          * 监视表每刷新一次就会对每一条命中做一次归因，而内核映像动辄几 MB；
          * 不缓存的话一次刷新要重读、重解析同一份 ntoskrnl 十几遍。模块的磁盘
-         * 映像在一次会话内不会变，缓存是安全的。
+         * 映像缓存按路径、磁盘大小/修改时间及已加载映像大小重新校验。
          */
-        const ExportTable& cachedExportTable(const QString& ntPath)
+        ExportTable cachedExportTable(const QString& ntPath, const quint64 loadedImageSize)
         {
-            static QHash<QString, ExportTable> cache;
+            struct Cached { qint64 size = -1; QDateTime modified; quint64 imageSize = 0; ExportTable table; };
+            static QHash<QString, Cached> cache;
             static QMutex mutex;
-            QMutexLocker locker(&mutex);
-            auto found = cache.find(ntPath);
-            if (found == cache.end())
+            const QFileInfo file(toWin32Path(ntPath)); // Caller is the attribution worker.
+            const qint64 size = file.size();
+            const QDateTime modified = file.lastModified();
             {
-                found = cache.insert(ntPath, loadExportTable(ntPath));
+                QMutexLocker locker(&mutex);
+                const auto found = cache.constFind(ntPath);
+                if (found != cache.constEnd() && found->size == size
+                    && found->modified == modified && found->imageSize == loadedImageSize)
+                    return found->table;
             }
-            return found.value();
+            ExportTable table = loadExportTable(ntPath); // No cache lock over disk/PE work.
+            if (table.imageSize != loadedImageSize) table.valid = false;
+            {
+                QMutexLocker locker(&mutex);
+                cache.insert(ntPath, Cached{size, modified, loadedImageSize, table});
+            }
+            return table; // Value copy keeps readers valid across QHash growth.
         }
 
         /* 写权限关闭时统一拒绝，且不发起任何 IOCTL。 */
@@ -597,9 +611,21 @@ namespace ksword::hvm
         return toWatchResult(result, actionName);
     }
 
-    HvmWatchAttribution attributeKernelAddress(const unsigned long long address)
+    QVector<HvmWatchAttribution> attributeKernelAddresses(const QVector<quint64>& addresses)
     {
-        HvmWatchAttribution attribution;
+        QVector<HvmWatchAttribution> results;
+        results.reserve(addresses.size());
+        if (addresses.isEmpty()) return results;
+        if (std::none_of(addresses.cbegin(), addresses.cend(), [](quint64 address) { return address != 0; }))
+            return QVector<HvmWatchAttribution>(addresses.size());
+        const auto failedBatch = [&]() {
+            for (const quint64 address : addresses) {
+                HvmWatchAttribution value;
+                value.kind = address ? HvmWatchAttributionKind::Failed : HvmWatchAttributionKind::Unavailable;
+                results.append(value);
+            }
+            return results;
+        };
         static const auto query =
             reinterpret_cast<NtQuerySystemInformationFunction>(
                 QLibrary::resolve(
@@ -614,16 +640,10 @@ namespace ksword::hvm
          * 结论。混成一个 resolved=false，界面就会把一次查询失败渲染成一句
          * 肯定句——而那句话本身正是用户会据以继续排查的可疑读数。
          */
-        if (address == 0)
-        {
-            attribution.kind = HvmWatchAttributionKind::Unavailable;
-            return attribution;
-        }
         if (query == nullptr)
         {
             // 连 NtQuerySystemInformation 都解析不到，模块表一行都没读过。
-            attribution.kind = HvmWatchAttributionKind::Failed;
-            return attribution;
+            return failedBatch();
         }
         unsigned long needed = 0UL;
         // 先问长度。模块表会变，所以多要一截余量再重试一次，而不是循环到成功
@@ -631,8 +651,7 @@ namespace ksword::hvm
         (void)query(kSystemModuleInformationClass, nullptr, 0UL, &needed);
         if (needed == 0UL)
         {
-            attribution.kind = HvmWatchAttributionKind::Failed;
-            return attribution;
+            return failedBatch();
         }
         std::vector<unsigned char> buffer;
         for (int attempt = 0; attempt < 2; ++attempt)
@@ -651,87 +670,97 @@ namespace ksword::hvm
             if (attempt == 1)
             {
                 // 两次都失败，模块表没拿到；不能据此说这个地址不属于任何模块。
-                attribution.kind = HvmWatchAttributionKind::Failed;
-                return attribution;
+                return failedBatch();
             }
             needed = written != 0UL ? written : needed * 2U;
         }
-        /*
-         * 到这里模块表已经在手上，所以默认态从 Failed 变成 NotFound：
-         * 下面那个循环走完还没匹配上，才是真的"不在任何已加载模块里"。
-         */
-        attribution.kind = HvmWatchAttributionKind::NotFound;
-        const auto* const list =
-            reinterpret_cast<const SystemModuleList*>(buffer.data());
-        const unsigned long count = list->count;
-        const size_t capacity =
-            (buffer.size() - sizeof(unsigned long)) / sizeof(SystemModuleRow);
-        const unsigned long bounded = count <= capacity
-            ? count
-            : static_cast<unsigned long>(capacity);
-        for (unsigned long index = 0; index < bounded; ++index)
+        for (const quint64 address : addresses)
         {
-            const SystemModuleRow& row = list->rows[index];
-            const auto base =
-                reinterpret_cast<unsigned long long>(row.imageBase);
-            if (row.imageSize == 0UL ||
-                address < base ||
-                address >= base + row.imageSize)
-            {
-                continue;
-            }
-            attribution.kind = HvmWatchAttributionKind::Resolved;
-            attribution.resolved = true;
-            attribution.moduleBase = base;
-            attribution.moduleSize = row.imageSize;
-            attribution.relativeAddress = address - base;
-            // fullPathName 是 ANSI 的 NT 路径，末尾保证有零；fileNameOffset
-            // 指向其中的文件名部分。
-            const auto* const path =
-                reinterpret_cast<const char*>(row.fullPathName);
-            const size_t limit = sizeof(row.fullPathName);
-            size_t length = 0;
-            while (length < limit && path[length] != '\0')
-            {
-                ++length;
-            }
-            attribution.modulePath = QString::fromLatin1(
-                path, static_cast<int>(length));
-            attribution.moduleName = row.fileNameOffset < length
-                ? QString::fromLatin1(
-                    path + row.fileNameOffset,
-                    static_cast<int>(length - row.fileNameOffset))
-                : attribution.modulePath;
+            HvmWatchAttribution attribution;
+            if (!address) { results.append(attribution); continue; }
             /*
-             * 再往下一层：找这个 RVA 前面最近的导出符号。
-             *
-             * 找不到就留空，调用方只显示 `module.sys+0xRVA` —— 一个错误的函数名
-             * 比没有名字更难纠正，因为它会让人去读一段根本不相干的代码。
+             * 到这里模块表已经在手上，所以默认态从 Failed 变成 NotFound：
+             * 下面那个循环走完还没匹配上，才是真的"不在任何已加载模块里"。
              */
+            attribution.kind = HvmWatchAttributionKind::NotFound;
+            const auto* const list =
+                reinterpret_cast<const SystemModuleList*>(buffer.data());
+            const unsigned long count = list->count;
+            const size_t capacity =
+                (buffer.size() - offsetof(SystemModuleList, rows)) / sizeof(SystemModuleRow);
+            const unsigned long bounded = count <= capacity
+                ? count
+                : static_cast<unsigned long>(capacity);
+            for (unsigned long index = 0; index < bounded; ++index)
             {
-                const ExportTable& table = cachedExportTable(attribution.modulePath);
-                if (table.valid &&
-                    attribution.relativeAddress <= 0xFFFFFFFFULL)
+                const SystemModuleRow& row = list->rows[index];
+                const auto base =
+                    reinterpret_cast<unsigned long long>(row.imageBase);
+                if (row.imageSize == 0UL ||
+                    address < base ||
+                    address - base >= row.imageSize)
                 {
-                    const quint32 rva =
-                        static_cast<quint32>(attribution.relativeAddress);
-                    // 第一个 > rva 的位置，它前面那个就是最近的前驱。
-                    const auto upper = std::upper_bound(
-                        table.entries.cbegin(), table.entries.cend(), rva,
-                        [](const quint32 value, const QPair<quint32, QString>& entry) {
-                            return value < entry.first;
-                        });
-                    if (upper != table.entries.cbegin())
+                    continue;
+                }
+                attribution.kind = HvmWatchAttributionKind::Resolved;
+                attribution.resolved = true;
+                attribution.moduleBase = base;
+                attribution.moduleSize = row.imageSize;
+                attribution.relativeAddress = address - base;
+                // fullPathName 是 ANSI 的 NT 路径，末尾保证有零；fileNameOffset
+                // 指向其中的文件名部分。
+                const auto* const path =
+                    reinterpret_cast<const char*>(row.fullPathName);
+                const size_t limit = sizeof(row.fullPathName);
+                size_t length = 0;
+                while (length < limit && path[length] != '\0')
+                {
+                    ++length;
+                }
+                attribution.modulePath = QString::fromLatin1(
+                    path, static_cast<int>(length));
+                attribution.moduleName = row.fileNameOffset < length
+                    ? QString::fromLatin1(
+                        path + row.fileNameOffset,
+                        static_cast<int>(length - row.fileNameOffset))
+                    : attribution.modulePath;
+                /*
+                 * 再往下一层：找这个 RVA 前面最近的导出符号。
+                 *
+                 * 找不到就留空，调用方只显示 `module.sys+0xRVA` —— 一个错误的函数名
+                 * 比没有名字更难纠正，因为它会让人去读一段根本不相干的代码。
+                 */
+                {
+                    const ExportTable table = cachedExportTable(attribution.modulePath, attribution.moduleSize);
+                    if (table.valid &&
+                        attribution.relativeAddress <= 0xFFFFFFFFULL)
                     {
-                        const auto& entry = *(upper - 1);
-                        attribution.symbolName = entry.second;
-                        attribution.symbolOffset = rva - entry.first;
+                        const quint32 rva =
+                            static_cast<quint32>(attribution.relativeAddress);
+                        // 第一个 > rva 的位置，它前面那个就是最近的前驱。
+                        const auto upper = std::upper_bound(
+                            table.entries.cbegin(), table.entries.cend(), rva,
+                            [](const quint32 value, const QPair<quint32, QString>& entry) {
+                                return value < entry.first;
+                            });
+                        if (upper != table.entries.cbegin())
+                        {
+                            const auto& entry = *(upper - 1);
+                            attribution.symbolName = entry.second;
+                            attribution.symbolOffset = rva - entry.first;
+                        }
                     }
                 }
+                break;
             }
-            break;
+            results.append(std::move(attribution));
         }
-        return attribution;
+        return results;
+    }
+
+    HvmWatchAttribution attributeKernelAddress(const unsigned long long address)
+    {
+        return attributeKernelAddresses(QVector<quint64>{address}).value(0);
     }
 
     QString toWin32ModulePath(const QString& ntPath)

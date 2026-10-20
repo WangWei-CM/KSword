@@ -16,6 +16,7 @@
 
 #include "KernelDisassemblyDialog.h"
 #include "HvmControl.h"
+#include "AsyncCleanupRegistry.h"
 #include "HvmWatchEventDialog.h"
 #include "../Internationalization/LanguageManager.h"
 
@@ -23,6 +24,7 @@
 #include <QByteArray>
 #include <QClipboard>
 #include <QDateTime>
+#include <QDir>
 #include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
@@ -90,35 +92,7 @@ void HvmWatchPanel::openWriterDisassembly()
  */
 void HvmWatchPanel::openWriterMemory()
 {
-    ksword::hvm::HvmWatchEntry entry;
-    if (!selectedWatch(&entry) || entry.lastHitRip == 0ULL)
-    {
-        return;
-    }
-    const ksword::hvm::HvmMemoryResult result =
-        ksword::hvm::readVirtual(0, entry.lastHitRip, 256U);
-    if (!result.ok)
-    {
-        m_statusLabel->setText(
-            text(QStringLiteral("读不到写入者所在的内存：%1"))
-                .arg(result.message));
-        return;
-    }
-    ks::ui::FieldDocument document;
-    // 抬头必须写清读的是写入者而不是目标，否则两段转储在详情框里长得一样。
-    document.note(text(QStringLiteral("写入者所在内存（命中 RIP %1 起 %2 字节；这是命中之后的采样）"))
-        .arg(hex64(entry.lastHitRip))
-        .arg(result.data.size()));
-
-    for (int offset = 0; offset < result.data.size(); offset += 16)
-    {
-        const QByteArray chunk = result.data.mid(offset, 16);
-        document.field(hex64(entry.lastHitRip + static_cast<unsigned long long>(offset)),
-            QString::fromLatin1(chunk.toHex(' ')));
-    }
-    m_detail->setDocument(document);
-    m_statusLabel->setText(text(QStringLiteral(
-        "已读出写入者所在的内存。这读的是发起访问的那段代码，不是被监视的目标。")));
+    readEvidenceMemory(true);
 }
 
 /*
@@ -148,74 +122,58 @@ void HvmWatchPanel::openWriterPage()
 
 void HvmWatchPanel::openTargetMemory()
 {
-    ksword::hvm::HvmWatchEntry entry;
-    if (!selectedWatch(&entry) || entry.physicalPage == 0ULL)
-    {
-        return;
-    }
-    /*
-     * 优先按虚拟地址读，读不到**真的**退回物理页再读一次。
-     *
-     * 两者不等价：虚拟地址读的是"这个 VA 现在指向的东西"，物理页读的是"被监视
-     * 的那一页"。重映射、解提交、换出之后这两个是不同的页，而用户要看的几乎
-     * 总是后者——被监视的那一页一直都在，readPhysical 也一直读得到。
-     *
-     * 之前这段只写了这条回退的注释，代码却是一次三元选择：虚拟读失败就直接
-     * 报"读不到目标内存"返回，从不改用已知的物理页。于是恰好在最需要看一眼
-     * 当前内容的场景（VA 已经不指向那一页了）里，一个字都读不出来。
-     */
-    const bool preferVirtual =
-        entry.addressKind == KSWORD_ARK_HVM_WATCH_ADDRESS_VIRTUAL &&
-        entry.requestedAddress != 0ULL;
-    unsigned long long address = preferVirtual
-        ? entry.requestedAddress
-        : entry.physicalPage;
-    bool byVirtual = preferVirtual;
-    ksword::hvm::HvmMemoryResult result = preferVirtual
-        ? ksword::hvm::readVirtual(0, address, 256U)
-        : ksword::hvm::readPhysical(address, 256U);
-    // 虚拟读失败时的退路；记下第一条失败原因，读数里要把两段都摆出来。
-    QString virtualFailure;
-    if (!result.ok && preferVirtual)
-    {
-        virtualFailure = result.message;
-        byVirtual = false;
-        address = entry.physicalPage;
-        result = ksword::hvm::readPhysical(address, 256U);
-    }
-    if (!result.ok)
-    {
-        m_statusLabel->setText(virtualFailure.isEmpty()
-            ? text(QStringLiteral("读不到目标内存：%1")).arg(result.message)
-            : text(QStringLiteral("读不到目标内存：按虚拟地址失败（%1），退回被监视的物理页也失败（%2）。"))
-                .arg(virtualFailure)
-                .arg(result.message));
-        return;
-    }
-    ks::ui::FieldDocument document;
-    document.section(QStringLiteral("目标内存（命中之后的采样，不是命中那一刻的值）"));
-    document.note((byVirtual
-        ? text(QStringLiteral("  按虚拟地址 %1 读 %2 字节"))
-            .arg(hex64(address)).arg(result.data.size())
-        : text(QStringLiteral("  按被监视的物理页 %1 读 %2 字节"))
-            .arg(hex64(address)).arg(result.data.size())));
-    if (!virtualFailure.isEmpty())
-    {
-        // 说清楚读的是哪一个，否则用户会以为看到的是那个虚拟地址上的内容。
-        document.field(QStringLiteral(""), QStringLiteral("按虚拟地址 %1 读不到（%2），上面这段是被监视的那一页，不是该虚拟地址当前指向的内容。")
-            .arg(hex64(entry.requestedAddress))
-            .arg(virtualFailure));
-    }
+    readEvidenceMemory(false);
+}
 
-    for (int offset = 0; offset < result.data.size(); offset += 16)
-    {
-        const QByteArray chunk = result.data.mid(offset, 16);
-        document.field(hex64(address + static_cast<unsigned long long>(offset)),
-            QString::fromLatin1(chunk.toHex(' ')));
-    }
-    m_detail->setDocument(document);
-    m_statusLabel->setText(text(QStringLiteral(
-        "已读出目标内存。这是命中之后的采样：EPT violation 发生在写指令退休之前，所以这里看到的可能已经包含那次写入，也可能还包含之后的更多次修改。")));
+void HvmWatchPanel::readEvidenceMemory(const bool writer)
+{
+    ksword::hvm::HvmWatchEntry entry;
+    if (!selectedWatch(&entry) || (writer ? !entry.lastHitRip : !entry.physicalPage)) return;
+    if (m_busy) return;
+    setBusy(true);
+    const quint64 ticket = ++m_evidenceRequest;
+    QPointer<HvmWatchPanel> self(this);
+    std::thread([self, entry, writer, ticket]() {
+        const bool preferVirtual = writer || (entry.addressKind == KSWORD_ARK_HVM_WATCH_ADDRESS_VIRTUAL && entry.requestedAddress);
+        bool byVirtual = preferVirtual;
+        quint64 address = writer ? entry.lastHitRip : (preferVirtual ? entry.requestedAddress : entry.physicalPage);
+        auto result = preferVirtual ? ksword::hvm::readVirtual(0, address, 256U) : ksword::hvm::readPhysical(address, 256U);
+        QString virtualFailure;
+        if (!writer && !result.ok && preferVirtual) {
+            virtualFailure = result.message;
+            byVirtual = false;
+            address = entry.physicalPage;
+            result = ksword::hvm::readPhysical(address, 256U);
+        }
+        ks::ui::FieldDocument document;
+        if (result.ok) {
+            if (writer) document.note(text(QStringLiteral("写入者所在内存（命中 RIP %1 起 %2 字节；这是命中之后的采样）")).arg(hex64(entry.lastHitRip)).arg(result.data.size()));
+            else {
+                document.section(QStringLiteral("目标内存（命中之后的采样，不是命中那一刻的值）"));
+                document.note((byVirtual ? text(QStringLiteral("  按虚拟地址 %1 读 %2 字节")) : text(QStringLiteral("  按被监视的物理页 %1 读 %2 字节"))).arg(hex64(address)).arg(result.data.size()));
+                if (!virtualFailure.isEmpty()) document.field(QStringLiteral(""), QStringLiteral("按虚拟地址 %1 读不到（%2），上面这段是被监视的那一页，不是该虚拟地址当前指向的内容。")
+                    .arg(hex64(entry.requestedAddress)).arg(virtualFailure));
+            }
+            for (int offset = 0; offset < result.data.size(); offset += 16)
+                document.field(hex64(address + static_cast<quint64>(offset)), QString::fromLatin1(result.data.mid(offset, 16).toHex(' ')));
+        }
+        if (!self) return;
+        QMetaObject::invokeMethod(self, [self, entry, ticket, writer, result, virtualFailure, document]() {
+            if (!self) return;
+            self->setBusy(false);
+            if (self->m_evidenceRequest != ticket || !self->selectedIdentityMatches(entry)) return;
+            if (!result.ok) {
+                self->m_statusLabel->setText(writer ? text(QStringLiteral("读不到写入者所在的内存：%1")).arg(result.message)
+                    : virtualFailure.isEmpty() ? text(QStringLiteral("读不到目标内存：%1")).arg(result.message)
+                    : text(QStringLiteral("读不到目标内存：按虚拟地址失败（%1），退回被监视的物理页也失败（%2）。")).arg(virtualFailure).arg(result.message));
+                return;
+            }
+            self->m_detail->setDocument(document);
+            self->m_statusLabel->setText(writer
+                ? text(QStringLiteral("已读出写入者所在的内存。这读的是发起访问的那段代码，不是被监视的目标。"))
+                : text(QStringLiteral("已读出目标内存。这是命中之后的采样：EPT violation 发生在写指令退休之前，所以这里看到的可能已经包含那次写入，也可能还包含之后的更多次修改。")));
+        }, Qt::QueuedConnection);
+    }).detach();
 }
 
 void HvmWatchPanel::openWriterModule()
@@ -225,41 +183,32 @@ void HvmWatchPanel::openWriterModule()
     {
         return;
     }
-    const ksword::hvm::HvmWatchAttribution attribution =
-        ksword::hvm::attributeKernelAddress(entry.lastHitRip);
-    // 失败与"确实不在模块里"要分开说：前者是这次没问出来，后者才是结论。
-    if (attribution.kind == ksword::hvm::HvmWatchAttributionKind::Failed)
-    {
-        m_statusLabel->setText(text(QStringLiteral(
-            "读不到系统模块表，这次归因没跑起来，所以答不出这个 RIP 属于哪个模块——这不等于它不属于任何模块。")));
-        return;
-    }
-    if (!attribution.resolved || attribution.modulePath.isEmpty())
-    {
-        m_statusLabel->setText(text(QStringLiteral(
-            "这个 RIP 不落在任何已加载内核模块里，没有模块文件可打开。")));
-        return;
-    }
-    /*
-     * 内核回报的是 \SystemRoot\ 这类 NT 路径，资源管理器不认。
-     *
-     * 转换失败时不要退回"就用原串试试"：资源管理器会拿一个不存在的路径开一个
-     * 默认目录，看起来像成功了，而用户会以为自己正在看那个模块所在的目录。
-     */
-    const QString win32Path = ksword::hvm::toWin32ModulePath(attribution.modulePath);
-    if (win32Path.isEmpty() || !QFileInfo::exists(win32Path))
-    {
-        m_statusLabel->setText(
-            text(QStringLiteral("模块文件 %1 在磁盘上找不到。"))
-                .arg(attribution.modulePath));
-        return;
-    }
-    QProcess::startDetached(
-        QStringLiteral("explorer.exe"),
-        QStringList() << QStringLiteral("/select,")
-                      << QDir::toNativeSeparators(win32Path));
-    m_statusLabel->setText(
-        text(QStringLiteral("已在资源管理器里定位 %1。")).arg(win32Path));
+    const auto* prepared = evidenceFor(entry);
+    if (!prepared) return;
+    const auto attribution = prepared->attribution;
+    if (m_busy) return;
+    setBusy(true);
+    const quint64 ticket = ++m_evidenceRequest;
+    QPointer<HvmWatchPanel> self(this);
+    std::thread([self, entry, attribution, ticket]() {
+        const QString path = ksword::hvm::toWin32ModulePath(attribution.modulePath);
+        const bool exists = !path.isEmpty() && QFileInfo::exists(path);
+        if (!self) return;
+        QMetaObject::invokeMethod(self, [self, entry, attribution, path, exists, ticket]() {
+            if (!self) return;
+            self->setBusy(false);
+            if (self->m_evidenceRequest != ticket || !self->selectedIdentityMatches(entry)) return;
+            if (attribution.kind == ksword::hvm::HvmWatchAttributionKind::Failed) {
+                self->m_statusLabel->setText(text(QStringLiteral("读不到系统模块表，这次归因没跑起来，所以答不出这个 RIP 属于哪个模块——这不等于它不属于任何模块。"))); return;
+            }
+            if (!attribution.resolved || attribution.modulePath.isEmpty()) {
+                self->m_statusLabel->setText(text(QStringLiteral("这个 RIP 不落在任何已加载内核模块里，没有模块文件可打开。"))); return;
+            }
+            if (!exists) { self->m_statusLabel->setText(text(QStringLiteral("模块文件 %1 在磁盘上找不到。")).arg(attribution.modulePath)); return; }
+            QProcess::startDetached(QStringLiteral("explorer.exe"), QStringList() << QStringLiteral("/select,") << QDir::toNativeSeparators(path));
+            self->m_statusLabel->setText(text(QStringLiteral("已在资源管理器里定位 %1。")).arg(path));
+        }, Qt::QueuedConnection);
+    }).detach();
 }
 
 void HvmWatchPanel::resolveHitProcess()
@@ -289,6 +238,9 @@ void HvmWatchPanel::resolveHitProcess()
                     return;
                 }
                 safeThis->m_processAttribution.insert(cr3, attribution);
+                ++safeThis->m_processAttributionRevision;
+                for (auto& value : safeThis->m_evidence)
+                    value.document = buildDetailDocument(value, safeThis->m_processAttribution, safeThis->m_residentActive);
                 safeThis->setBusy(false);
                 safeThis->m_statusLabel->setText(
                     ksword::hvm::describeProcessAttribution(attribution));
@@ -341,34 +293,43 @@ void HvmWatchPanel::exportEvidence()
         }
         // 复用详情框那一份格式：屏幕上看到的和导出的必须是同一份东西，
         // 另拼一份会让两者随时间漂开。
-        showDetail(stored.value<ksword::hvm::HvmWatchEntry>());
+        const auto* prepared = evidenceFor(stored.value<ksword::hvm::HvmWatchEntry>());
+        if (!prepared) continue;
         blocks << QStringLiteral("================================");
-        blocks << m_detail->plainText();
+        blocks << prepared->document.toPlainText(true);
         blocks << QString();
     }
-    QFile file(path);
-    if (!file.open(QIODevice::WriteOnly | QIODevice::Text))
-    {
-        m_statusLabel->setText(
-            text(QStringLiteral("导出失败：无法写入 %1。")).arg(path));
-        return;
-    }
-    // 显式 UTF-8：这份文件里全是中文标签，跟着系统区域走会在别人机器上变成乱码。
-    QTextStream stream(&file);
-    stream.setEncoding(QStringConverter::Utf8);
-    stream << blocks.join(QLatin1Char('\n'));
-    file.close();
-    m_statusLabel->setText(
-        text(QStringLiteral("已导出 %1 条监视的完整证据到 %2。"))
-            .arg(m_table->rowCount())
-            .arg(path));
-    // 导出会把详情框停在最后一条上；把选中那一条重新画回去，免得屏幕上
-    // 显示的与选中行对不上。
-    ksword::hvm::HvmWatchEntry selected;
-    if (selectedWatch(&selected))
-    {
-        showDetail(selected);
-    }
+    // Freeze the canonical full text before an accepted file write. Selection
+    // and window lifetime do not cancel a write the user already requested.
+    const QString contents = blocks.join(QLatin1Char('\n'));
+    const int count = m_table->rowCount();
+    if (m_busy) return;
+    auto lease = ks::ui::AsyncCleanupRegistry::global().acquire();
+    if (!lease) return; // Coordinated exit no longer admits file transactions.
+    setBusy(true);
+    QPointer<HvmWatchPanel> self(this);
+    std::thread([self, path, contents, count, lease]() mutable {
+        QFile file(path);
+        bool ok = file.open(QIODevice::WriteOnly | QIODevice::Text);
+        if (ok) {
+            QTextStream stream(&file);
+            stream.setEncoding(QStringConverter::Utf8);
+            stream << contents;
+            stream.flush();
+            ok = stream.status() == QTextStream::Ok && file.error() == QFile::NoError;
+            file.close();
+            ok = ok && file.error() == QFile::NoError;
+        }
+        lease.reset(); // Return the exit lease only after the file is closed.
+        if (!self) return;
+        QMetaObject::invokeMethod(self, [self, path, count, ok]() {
+            if (!self) return;
+            self->setBusy(false);
+            self->m_statusLabel->setText(ok
+                ? text(QStringLiteral("已导出 %1 条监视的完整证据到 %2。")).arg(count).arg(path)
+                : text(QStringLiteral("导出失败：无法写入 %1。")).arg(path));
+        }, Qt::QueuedConnection);
+    }).detach();
 }
 
 void HvmWatchPanel::copyEvidence()
@@ -380,8 +341,9 @@ void HvmWatchPanel::copyEvidence()
     }
     // 直接复制详情框的原文：屏幕上看到的和粘贴出去的必须是同一份东西，
     // 另拼一份格式会让两者随时间漂开。
-    showDetail(entry);
-    QApplication::clipboard()->setText(m_detail->plainText());
+    const auto* prepared = evidenceFor(entry);
+    if (!prepared) return;
+    QApplication::clipboard()->setText(prepared->document.toPlainText(true));
     m_statusLabel->setText(
         text(QStringLiteral("已把这条监视的完整证据复制到剪贴板。")));
 }
