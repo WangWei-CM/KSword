@@ -428,6 +428,9 @@
     <ClCompile Include="UI\FieldTreeModel.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="UI\StructuredFieldView.State.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="UI\StructuredFieldView.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>

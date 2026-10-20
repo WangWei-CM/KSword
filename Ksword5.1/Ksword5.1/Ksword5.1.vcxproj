@@ -177,6 +177,7 @@
     <ClCompile Include="FileDock\FilePropertyPeAnalyzer.cpp" />
     <ClCompile Include="HardwareDock\HardwareFieldDocuments.cpp" />
     <ClCompile Include="UI\FieldTreeModel.cpp" />
+    <ClCompile Include="UI\StructuredFieldView.State.cpp" />
     <ClCompile Include="UI\StructuredFieldView.cpp" />
     <ClCompile Include="UI\TablePresentation.cpp" />
     <ClCompile Include="FileDock\FilePropertyPeAnalyzer.Directories.cpp" />

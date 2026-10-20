@@ -597,6 +597,12 @@ namespace ks::ui
             m_valueRowCursor = 0;
             m_valuePrepared = true;
             m_valueTree->verticalScrollBar()->setValue(m_valueScroll);
+            if (!alive || ticket != m_valueTicket) return;
+            if (m_valueRestoreHorizontalScroll)
+            {
+                m_valueRestoreHorizontalScroll = false;
+                m_valueTree->horizontalScrollBar()->setValue(m_valueHorizontalScroll);
+            }
         }
     }
 

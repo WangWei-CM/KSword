@@ -24,6 +24,7 @@ namespace ks::ui
     class FieldTreeModel;
     class FieldTreeSelection;
     struct FieldTreeProjection;
+    struct StructuredFieldViewState;
     // Values come from the actual metadata/PE/driver result. They are never
     // reconstructed by parsing a generated report or interpreted as HTML.
     struct FieldNode
@@ -114,6 +115,13 @@ namespace ks::ui
         FieldCopySnapshot captureCopy(const QModelIndex& clicked) const;
         void setSearchText(const QString& text);
         QString searchText() const;
+        // Opaque value-model reading state for a bounded widget pool. Captures
+        // compact canonical selection, not a scan of all tree rows. The same
+        // implicitly shared document must be installed before restoring it.
+        std::shared_ptr<const StructuredFieldViewState> captureViewState() const;
+        // Null/foreign-document state clears prior pool occupant reading state.
+        // Legacy/professional QTreeWidget projections remain unsupported.
+        bool restoreViewState(const std::shared_ptr<const StructuredFieldViewState>& state);
         void setPresentation(Presentation presentation);
         Presentation presentation() const { return m_presentation; }
         QTreeWidget* tree() const { return m_tree; }
@@ -178,6 +186,8 @@ namespace ks::ui
         QString m_valueSelected;
         int m_valueColumn = 0;
         int m_valueScroll = 0;
+        int m_valueHorizontalScroll = 0;
+        bool m_valueRestoreHorizontalScroll = false;
         QString m_valueBeforeSearchSelected;
         int m_valueBeforeSearchColumn = 0;
         int m_valueBeforeSearchScroll = 0;
