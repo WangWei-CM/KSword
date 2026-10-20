@@ -37,6 +37,9 @@ class QTableWidget;
 class QTextBrowser;
 class DumpMemoryView;
 struct MinidumpAsyncState;
+struct MinidumpExportRequest;
+struct MinidumpExportResult;
+namespace ks::ui { class AsyncOperation; }
 struct MinidumpTableProjectionState;
 
 namespace ks::minidump
@@ -115,7 +118,8 @@ private:
 
     // buildReportText 作用：把解析结果拼成全文报告（中文规范文本）。
     // 参数 result：解析结果；返回值：报告文本。实现位于 MinidumpDock.Tables.cpp。
-    ks::ui::FieldDocument buildReportText(const ks::minidump::DumpParseResult& result) const;
+    static ks::ui::FieldDocument buildReportText(const ks::minidump::DumpParseResult& result);
+    static MinidumpExportResult exportReportSnapshot(const MinidumpExportRequest& request);
 
     // 以下辅助函数统一处理本地化与状态栏。
     QString translated(const char* key, const char* fallback) const;
@@ -178,5 +182,6 @@ private:
     QStringList m_projectionPreviousStatusArguments;
     bool m_buildingResultCatalog = false;
     bool m_buildingRawMemoryCatalog = false;
+    std::unique_ptr<ks::ui::AsyncOperation> m_exportOperation;
     bool m_parseBusy = false;   // m_parseBusy：解析任务是否正在运行。
 };

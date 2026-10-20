@@ -1473,7 +1473,7 @@ void MinidumpDock::projectResult(
 
 }
 
-ks::ui::FieldDocument MinidumpDock::buildReportText(const ks::minidump::DumpParseResult& result) const
+ks::ui::FieldDocument MinidumpDock::buildReportText(const ks::minidump::DumpParseResult& result)
 {
     ks::ui::FieldDocument document;
     document.title = QStringLiteral("KSword 转储解析报告");

@@ -12,6 +12,7 @@
 #include "MinidumpDock.h"
 #include "../UI/PageControlStyle.h"
 #include "../UI/PerfTrace.h"
+#include "../UI/AsyncOperation.h"
 #include "../UI/ToolbarMetrics.h"
 #include "../UI/VisibleTableWidget.h"
 
@@ -31,6 +32,8 @@
 #include <QDir>
 #include <QEvent>
 #include <QFile>
+#include <QSaveFile>
+#include <QPointer>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QHBoxLayout>
@@ -57,6 +60,20 @@
 // MinidumpAsyncState 作用：把 worker 的回投目标放在共享互斥状态中。
 // 析构前先清空 owner；worker 只有在同一把锁保护下才能提交 queued 调用，
 // 从而消除应用退出阶段的接收者竞态。
+struct MinidumpExportRequest
+{
+    std::shared_ptr<const ks::minidump::DumpParseResult> result;
+    QString savePath;
+    std::function<QString(const QString&)> translate;
+};
+
+struct MinidumpExportResult
+{
+    QString savePath;
+    QString errorText;
+    bool ok = false;
+};
+
 struct MinidumpAsyncState
 {
     std::mutex mutex;               // mutex：保护 owner 的读写。
@@ -66,6 +83,37 @@ struct MinidumpAsyncState
 
 namespace
 {
+    // All encoding and file work is worker-owned. The writer adapter also permits
+    // pure-value short-write/failure tests without touching a real filesystem.
+    template<class Writer>
+    bool writeExportBytes(Writer& file, const QByteArray& bytes, QString& errorText)
+    {
+        if (!file.open(QIODevice::WriteOnly))
+        {
+            errorText = file.errorString();
+            return false;
+        }
+        qint64 offset = 0;
+        while (offset < bytes.size())
+        {
+            const qint64 written = file.write(bytes.constData() + offset, bytes.size() - offset);
+            if (written <= 0 || written > bytes.size() - offset)
+            {
+                errorText = file.errorString();
+                file.cancelWriting();
+                return false;
+            }
+            offset += written;
+        }
+        if (!file.commit())
+        {
+            errorText = file.errorString();
+            return false;
+        }
+        return true;
+    }
+
+
     // dumpInputStyle / dumpButtonStyle 作用：
     // - 给本页的输入框与按钮套上与其它 Dock 一致的主题外观；
     // - 颜色一律取自 KswordTheme 的动态 token（展开为 palette(...) 字面量），
@@ -129,6 +177,7 @@ MinidumpDock::MinidumpDock(QWidget* parent)
 
 MinidumpDock::~MinidumpDock()
 {
+    if (m_exportOperation != nullptr) m_exportOperation->close();
     // 加锁清空 owner：此后 worker 即使完成也不会再向本控件投递结果。
     std::lock_guard<std::mutex> lock(m_asyncState->mutex);
     m_asyncState->owner = nullptr;
@@ -548,7 +597,8 @@ void MinidumpDock::finishParse(
     setBusy(false);
     m_lastResult = std::move(result);
     renderResult(*m_lastResult);
-    m_exportButton->setEnabled(m_lastResult->success);
+    m_exportButton->setEnabled(m_lastResult->success &&
+        (m_exportOperation == nullptr || !m_exportOperation->isBusy()));
 
     {
         // 解析结束日志：记录结果类别与成败，方便回溯。
@@ -696,43 +746,91 @@ void MinidumpDock::promptKswordRelatedCrash(const ks::minidump::DumpParseResult&
     }
 }
 
+MinidumpExportResult MinidumpDock::exportReportSnapshot(const MinidumpExportRequest& request)
+{
+    MinidumpExportResult result;
+    result.savePath = request.savePath;
+    const auto document = buildReportText(*request.result);
+    const QByteArray bytes = document.toPlainText(request.translate).toUtf8();
+    QSaveFile file(request.savePath);
+    result.ok = writeExportBytes(file, bytes, result.errorText);
+    return result;
+}
+
 void MinidumpDock::exportReport()
 {
-    if (!m_lastResult || !m_lastResult->success)
-    {
-        return;
-    }
-    // suggestedName：默认与转储同名的 .txt 报告文件。
-    const QFileInfo dumpInfo(m_lastResult->filePath);
+    if (!m_lastResult || !m_lastResult->success ||
+        (m_exportOperation != nullptr && m_exportOperation->isBusy())) return;
+    // Bind the accepted export to the originally chosen result, even across a modal dialog.
+    const auto snapshot = m_lastResult;
+    const QFileInfo dumpInfo(snapshot->filePath);
     const QString suggestedName = dumpInfo.completeBaseName() + QStringLiteral("_report.txt");
-    const QString savePath = QFileDialog::getSaveFileName(
-        this,
+    const QPointer<MinidumpDock> guardThis(this);
+    const QString savePath = QFileDialog::getSaveFileName(this,
         translated("minidump.dialog.export_report", "导出解析报告"),
         QDir::toNativeSeparators(dumpInfo.absolutePath() + QStringLiteral("/") + suggestedName),
         translated("minidump.dialog.report_filter", "文本文件 (*.txt);;所有文件 (*.*)"));
-    if (savePath.isEmpty())
+    if (guardThis == nullptr || savePath.isEmpty()) return;
+    if (m_exportOperation == nullptr)
     {
-        return;
+        m_exportOperation = std::make_unique<ks::ui::AsyncOperation>(this);
+        m_exportOperation->setStateChangedCallback([this]()
+            {
+                m_exportButton->setEnabled(!m_parseBusy && m_lastResult && m_lastResult->success &&
+                    !m_exportOperation->isBusy());
+            });
     }
-    QFile reportFile(savePath);
-    if (!reportFile.open(QIODevice::WriteOnly | QIODevice::Truncate))
+    const auto translator = ks::i18n::LanguageManager::instance().sourceTextSnapshot();
+    MinidumpExportRequest request;
+    request.result = snapshot;
+    request.savePath = savePath;
+    request.translate = [translator](const QString& source) { return translator.sourceText(source); };
+    const auto ticket = m_exportOperation->submitTransaction<MinidumpExportRequest, MinidumpExportResult>(
+        std::move(request),
+        [](const MinidumpExportRequest& value) { return exportReportSnapshot(value); },
+        [this, snapshot](const MinidumpExportResult& result, std::uint64_t)
+        {
+            if (!result.ok)
+            {
+                QMessageBox::warning(this,
+                    translated("minidump.dialog.export_failed.title", "导出失败"),
+                    translated("minidump.dialog.export_failed.body", "无法写入目标文件：%1")
+                        .arg(QDir::toNativeSeparators(result.savePath) + QLatin1Char('\n') + result.errorText));
+            }
+            else if (!m_parseBusy && m_lastResult == snapshot)
+            {
+                setStatus("minidump.status.exported", "报告已导出：%1",
+                    {QDir::toNativeSeparators(result.savePath)});
+            }
+            else
+            {
+                // Do not replace the state of a newer parse with an older export completion.
+                QMessageBox::information(this,
+                    translated("minidump.action.export", "导出报告"),
+                    translated("minidump.status.exported", "报告已导出：%1")
+                        .arg(QDir::toNativeSeparators(result.savePath)));
+            }
+            return true;
+        },
+        [this, savePath](std::exception_ptr failure)
+        {
+            QString detail = QString::number(ERROR_UNHANDLED_EXCEPTION);
+            try { if (failure) std::rethrow_exception(failure); }
+            catch (const std::exception& error) { detail = QString::fromUtf8(error.what()); }
+            catch (...) {}
+            QMessageBox::warning(this,
+                translated("minidump.dialog.export_failed.title", "导出失败"),
+                translated("minidump.dialog.export_failed.body", "无法写入目标文件：%1")
+                    .arg(QDir::toNativeSeparators(savePath) + QLatin1Char('\n') + detail));
+        });
+    if (ticket == 0)
     {
-        QMessageBox::warning(
-            this,
+        QMessageBox::warning(this,
             translated("minidump.dialog.export_failed.title", "导出失败"),
             translated("minidump.dialog.export_failed.body", "无法写入目标文件：%1")
-                .arg(reportFile.errorString()));
-        return;
+                .arg(QDir::toNativeSeparators(savePath) + QLatin1Char('\n') +
+                    QString::number(ERROR_OPERATION_ABORTED)));
     }
-    // 报告按当前界面语言渲染后写出 UTF-8 文本。
-    const QString localizedReport =
-        buildReportText(*m_lastResult).toPlainText(true);
-    reportFile.write(localizedReport.toUtf8());
-    reportFile.close();
-    setStatus(
-        "minidump.status.exported",
-        "报告已导出：%1",
-        QStringList{ QDir::toNativeSeparators(savePath) });
 }
 
 void MinidumpDock::setStatus(
@@ -769,5 +867,6 @@ void MinidumpDock::setBusy(const bool busy)
     m_parseButton->setEnabled(!busy);
     m_browseButton->setEnabled(!busy);
     m_systemDirButton->setEnabled(!busy);
-    m_exportButton->setEnabled(!busy && m_lastResult && m_lastResult->success);
+    m_exportButton->setEnabled(!busy && m_lastResult && m_lastResult->success &&
+        (m_exportOperation == nullptr || !m_exportOperation->isBusy()));
 }
