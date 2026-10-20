@@ -67,6 +67,9 @@
     <ClCompile Include="PrivilegeDock\PrivilegeTokenPages.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClInclude Include="UI\BudgetedPlainTextTransfer.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="UI\ModelTextSearchCursor.h">
       <Filter>Header Files</Filter>
     </ClInclude>
