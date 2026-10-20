@@ -1,4 +1,5 @@
 #include "GlobalUiSearch.h"
+#include "./ScopedObjectDiscoveryCursor.h"
 
 #include "TableSearchSupport.h"
 #include "TableRowFilterSupport.h"
@@ -710,6 +711,7 @@ namespace ks::ui
             QElapsedTimer budget;
             budget.start();
             int widgets = 0;
+            int discoveryOperations = 64;
             while (m_hits.size() < kMaxHitsPerDock)
             {
                 if (m_tableScan)
@@ -730,9 +732,13 @@ namespace ks::ui
                     m_tableScan.reset(); m_activeTable.clear();
                     if (budget.elapsed() >= 4) return false;
                 }
-                if (m_nextWidget >= m_candidates.size()) return true;
+                if (m_restart) return false;
                 if (++widgets > 64 || budget.elapsed() >= 4) return false;
-                QWidget* candidate = m_candidates.at(m_nextWidget++).data();
+                QPointer<QObject> discovered;
+                const auto result = m_discovery.next(discovered, discoveryOperations);
+                if (result == ScopedObjectDiscoveryResult::Yield) return false;
+                if (result == ScopedObjectDiscoveryResult::Complete) return true;
+                QWidget* candidate = qobject_cast<QWidget*>(discovered.data());
                 if (!candidate || candidate->isWindow()) continue;
                 if (m_visibleOnly && !candidate->isVisibleTo(m_content.data())) continue;
 
@@ -772,32 +778,47 @@ namespace ks::ui
                     }
                 }
             }
-            return true;
+            return !m_restart;
         }
 
+    protected:
+        bool eventFilter(QObject* watched, QEvent* event) override
+        {
+            if (event && (event->type() == QEvent::ChildAdded || event->type() == QEvent::ChildRemoved))
+            {
+                // 被替换/移走的旧子树不再使当前内容失效，仅沿此次事件的父链确认归属。
+                for (QObject* ancestor = watched; ancestor != nullptr; ancestor = ancestor->parent())
+                    if (ancestor == m_content) { m_restart = true; break; }
+            }
+            return false;
+        }
     private:
         void rebuild()
         {
-            m_restart = false; m_nextWidget = 0;
-            m_hits.clear(); m_dedup.clear(); m_candidates.clear();
+            m_restart = false;
+            m_hits.clear(); m_dedup.clear(); m_discovery.reset();
             m_tableScan.reset(); m_activeTable.clear(); m_finishedScans.clear();
             for (const auto& connection : m_navigationConnections) QObject::disconnect(connection);
             m_navigationConnections.clear();
             if (!m_dock || !m_content) return;
             m_title = normalizeUiText(m_dock->windowTitle());
-            auto candidates = m_content->findChildren<QWidget*>();
-            candidates.prepend(m_content.data());
-            for (QWidget* candidate : candidates)
-            {
-                m_candidates.push_back(candidate);
-                if (!m_visibleOnly) continue;
-                if (auto* tabs = qobject_cast<QTabWidget*>(candidate))
-                    m_navigationConnections.push_back(connect(tabs, &QTabWidget::currentChanged, this,
-                        [this]() { m_restart = true; }));
-                else if (auto* stack = qobject_cast<QStackedWidget*>(candidate))
-                    m_navigationConnections.push_back(connect(stack, &QStackedWidget::currentChanged, this,
-                        [this]() { m_restart = true; }));
-            }
+            m_discovery.reset(m_content.data(), [this](QObject* object) {
+                auto* candidate = qobject_cast<QWidget*>(object);
+                // 保留旧findChildren范围：只在advance跳过独立window本节点，
+                // 同一明确contentroot归属树内的后代仍按旧可见/可揭示条件匹配。
+                // 只在当前搜索游标的明确内容root内短暂监听结构变更；销毁游标自动解除。
+                object->installEventFilter(this);
+                if (m_visibleOnly)
+                {
+                    if (auto* tabs = qobject_cast<QTabWidget*>(candidate))
+                        m_navigationConnections.push_back(connect(tabs, &QTabWidget::currentChanged, this,
+                            [this]() { m_restart = true; }));
+                    else if (auto* stack = qobject_cast<QStackedWidget*>(candidate))
+                        m_navigationConnections.push_back(connect(stack, &QStackedWidget::currentChanged, this,
+                            [this]() { m_restart = true; }));
+                }
+                return true;
+            });
         }
         void appendHit(QWidget* target, const QString& raw)
         {
@@ -837,8 +858,7 @@ namespace ks::ui
         QPointer<QWidget> m_content;
         QString m_query, m_title;
         bool m_visibleOnly = false, m_restart = false;
-        QVector<QPointer<QWidget>> m_candidates;
-        qsizetype m_nextWidget = 0;
+        ScopedObjectDiscoveryCursor m_discovery;
         QSet<QString> m_dedup;
         QVector<UiSearchHit> m_hits;
         QVector<QMetaObject::Connection> m_navigationConnections;
