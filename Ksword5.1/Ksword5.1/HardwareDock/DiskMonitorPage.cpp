@@ -1362,7 +1362,9 @@ void DiskMonitorPage::refreshNow()
     m_processSamplingThread.reset();
 
     if (m_refreshButton != nullptr) m_refreshButton->setEnabled(false);
-    m_processSamplingThread = std::make_unique<std::thread>([this]()
+    const auto storageBackend = m_storagePanel != nullptr
+        ? m_storagePanel->samplingBackend() : nullptr;
+    m_processSamplingThread = std::make_unique<std::thread>([this, storageBackend]()
     {
         std::vector<ProcessDiskSample> sampleList = collectProcessDiskSamples();
         if (m_processSamplingStopRequested.load(
@@ -1371,8 +1373,8 @@ void DiskMonitorPage::refreshNow()
             return;
         }
         DiskMonitorStorageBatch storageSampleBatch =
-            m_storagePanel != nullptr
-            ? m_storagePanel->collectSamples(
+            storageBackend != nullptr
+            ? storageBackend->collectSamples(
                 &m_processSamplingStopRequested)
             : DiskMonitorStorageBatch{};
         if (m_processSamplingStopRequested.load(
