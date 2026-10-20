@@ -1,5 +1,6 @@
 ﻿#include "../Internationalization/LanguageManager.h"
 #include "RegistryDock.h"
+#include "../UI/AsyncOperation.h"
 #include "../UI/ToolbarMetrics.h"
 #include "RegistryDocument.h"
 #include "RegistryDocumentApply.h"
@@ -27,6 +28,7 @@
 #include <QStandardPaths>
 #include <QTableWidget>
 #include <QThreadPool>
+#include <QTimer>
 #include <QUrl>
 #include <QUuid>
 #include <QVBoxLayout>
@@ -56,14 +58,14 @@ namespace
 
 void RegistryDock::backupCurrentKey()
 {
+    const QPointer<RegistryDock> guarded(this);
     const QString path = m_currentPath;
     const int view = m_viewBits;
     const QString output = QFileDialog::getSaveFileName(this,
         QStringLiteral("备份完整子树（Win32）"),
         QStringLiteral("registry_backup_%1.ksreg").arg(QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd_HHmmss"))),
         QStringLiteral("注册表原始备份 (*.ksreg)"));
-    if (output.isEmpty()) return;
-    const QPointer<RegistryDock> guarded(this);
+    if (output.isEmpty() || !guarded) return;
     const auto dispatcher = m_uiDispatcher;
     const auto closed = m_operationsClosed;
     updateStatusBar(QStringLiteral("正在完整备份：%1").arg(documentViewLabel(view)));
@@ -83,13 +85,13 @@ void RegistryDock::backupCurrentKey()
 
 void RegistryDock::exportCurrentKeyAsync()
 {
+    const QPointer<RegistryDock> guarded(this);
     const QString path = m_currentPath;
     const int view = m_viewBits;
     const QString output = QFileDialog::getSaveFileName(this, QStringLiteral("导出完整 .reg（Win32）"),
         QStringLiteral("registry_%1.reg").arg(QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd_HHmmss"))),
         QStringLiteral("REG 文件 (*.reg)"));
-    if (output.isEmpty()) return;
-    const QPointer<RegistryDock> guarded(this);
+    if (output.isEmpty() || !guarded) return;
     const auto dispatcher = m_uiDispatcher;
     const auto closed = m_operationsClosed;
     updateStatusBar(QStringLiteral("正在完整导出：%1").arg(documentViewLabel(view)));
@@ -109,12 +111,12 @@ void RegistryDock::exportCurrentKeyAsync()
 
 void RegistryDock::importRegFileAsync()
 {
+    const QPointer<RegistryDock> guarded(this);
     if (m_applyingChanges || !preserveEditorDraft()) return;
     const RegistryAccessContext context = accessContext(); // 文件选择前冻结真实通道和视图。
     const QString input = QFileDialog::getOpenFileName(this, QStringLiteral("导入并预览 .reg"), QString(), QStringLiteral("REG 文件 (*.reg)"));
-    if (input.isEmpty()) return;
+    if (input.isEmpty() || !guarded) return;
     const int view = context.viewBits;
-    const QPointer<RegistryDock> guarded(this);
     const auto dispatcher = m_uiDispatcher;
     QThreadPool::globalInstance()->start([guarded, dispatcher, input, view, context]() {
         RegistryDocument document;
@@ -131,12 +133,12 @@ void RegistryDock::importRegFileAsync()
 
 void RegistryDock::restoreBackup()
 {
+    const QPointer<RegistryDock> guarded(this);
     if (m_applyingChanges || !preserveEditorDraft()) return;
     const RegistryAccessContext context = accessContext(); // 恢复入口不能在文件选择后隐式换源。
     const QString input = QFileDialog::getOpenFileName(this, QStringLiteral("恢复原始备份（合并）"), QString(),
         QStringLiteral("注册表原始备份 (*.ksreg *.json)"));
-    if (input.isEmpty()) return;
-    const QPointer<RegistryDock> guarded(this);
+    if (input.isEmpty() || !guarded) return;
     const auto dispatcher = m_uiDispatcher;
     QThreadPool::globalInstance()->start([guarded, dispatcher, input, context]() {
         RegistryDocument document;
@@ -154,20 +156,25 @@ void RegistryDock::restoreBackup()
 void RegistryDock::previewRegistryDocument(const RegistryDocument& document, const QString& title, const bool useR0)
 {
     if (m_applyingChanges || !preserveEditorDraft()) return;
+    auto& operation = applyOperation();
     m_applyingChanges = true;
+    m_applyReceipt = false;
     m_valueEditor->setEnabled(false);
     m_viewCombo->setEnabled(false);
     m_applyChangesButton->setEnabled(false);
     const QPointer<RegistryDock> guarded(this);
-    const auto dispatcher = m_uiDispatcher;
-    const auto closed = m_operationsClosed;
     updateStatusBar(QStringLiteral("正在读取修改前的完整状态…"));
-    QThreadPool::globalInstance()->start([guarded, dispatcher, closed, document, title, useR0]() {
-        auto plan = std::make_shared<RegistryApplyPlan>();
-        QString error;
-        const bool ok = RegistryDocumentApplyService::prepareAccess(document, useR0, *plan, error);
-        if (closed->load()) return;
-        dispatcher->post([guarded, dispatcher, plan, title, error, ok]() {
+    struct Request { RegistryDocument document; bool useR0 = false; };
+    struct Result { std::shared_ptr<RegistryApplyPlan> plan; QString error; bool ok = false; };
+    operation.submit<Request, Result>({document, useR0}, [](const Request& request, const ks::ui::AsyncOperationToken&) {
+        Result result;
+        result.plan = std::make_shared<RegistryApplyPlan>();
+        result.ok = RegistryDocumentApplyService::prepareAccess(request.document, request.useR0, *result.plan, result.error);
+        return result;
+    }, [guarded, title](const Result& prepared, std::uint64_t) {
+        if (!guarded) return true;
+        guarded->m_applyReceipt = true;
+        QTimer::singleShot(0, guarded.data(), [guarded, plan = prepared.plan, error = prepared.error, ok = prepared.ok, title] {
             if (!guarded) return;
             if (!ok)
             {
@@ -178,17 +185,17 @@ void RegistryDock::previewRegistryDocument(const RegistryDocument& document, con
                 QMessageBox::warning(guarded, title, ks::i18n::packedSourceText(error));
                 return;
             }
-            QDialog dialog(guarded);
-            dialog.setWindowTitle(title);
-            ks::ui::StyleSecondaryWindow(&dialog);
-            auto* layout = new QVBoxLayout(&dialog);
+            const QPointer<QDialog> dialog = new QDialog(guarded);
+            dialog->setWindowTitle(title);
+            ks::ui::StyleSecondaryWindow(dialog.data());
+            auto* layout = new QVBoxLayout(dialog.data());
             ks::ui::StyleSecondaryContentLayout(layout);
             auto* source = new QLabel(QStringLiteral("%1 · %2 项操作。恢复采用合并方式，保留备份外新增数据；ACL 仅作备份元数据。")
-                .arg(documentViewLabel(plan->viewBits, plan->useR0)).arg(plan->operations.size()), &dialog);
+                .arg(documentViewLabel(plan->viewBits, plan->useR0)).arg(plan->operations.size()), dialog.data());
             source->setWordWrap(true);
             source->setTextFormat(Qt::PlainText);
             layout->addWidget(source);
-            auto* table = new ks::ui::VisibleTableWidget(&dialog);
+            auto* table = new ks::ui::VisibleTableWidget(dialog.data());
             table->setColumnCount(6);
             table->setHorizontalHeaderLabels({QStringLiteral("操作"), QStringLiteral("键路径"), QStringLiteral("值名"),
                 QStringLiteral("原值 / 原子树"), QStringLiteral("新值"), QStringLiteral("结果")});
@@ -227,9 +234,9 @@ void RegistryDock::previewRegistryDocument(const RegistryDocument& document, con
                 }
             };
             auto* paging = new QHBoxLayout;
-            auto* previous = new QPushButton(QStringLiteral("上一页"), &dialog);
-            auto* next = new QPushButton(QStringLiteral("下一页"), &dialog);
-            auto* pageLabel = new QLabel(&dialog);
+            auto* previous = new QPushButton(QStringLiteral("上一页"), dialog.data());
+            auto* next = new QPushButton(QStringLiteral("下一页"), dialog.data());
+            auto* pageLabel = new QLabel(dialog.data());
             paging->addWidget(previous); paging->addWidget(pageLabel); paging->addWidget(next); paging->addStretch();
             ks::ui::NormalizeToolbarRow(paging);
             layout->addLayout(paging);
@@ -239,17 +246,17 @@ void RegistryDock::previewRegistryDocument(const RegistryDocument& document, con
                 previous->setEnabled(*page > 0); next->setEnabled(*page + 1 < pages);
                 pageLabel->setText(QStringLiteral("%1 / %2").arg(*page + 1).arg(pages)); render();
             };
-            QObject::connect(previous, &QPushButton::clicked, &dialog, [page, updatePage]() { --*page; updatePage(); });
-            QObject::connect(next, &QPushButton::clicked, &dialog, [page, updatePage]() { ++*page; updatePage(); });
+            QObject::connect(previous, &QPushButton::clicked, dialog.data(), [page, updatePage]() { --*page; updatePage(); });
+            QObject::connect(next, &QPushButton::clicked, dialog.data(), [page, updatePage]() { ++*page; updatePage(); });
             const QString backupDirectory = QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation)
                 + QStringLiteral("/registry-backups");
             const QString backupPath = backupDirectory + QStringLiteral("/before-%1-%2.ksreg")
                 .arg(QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd-HHmmss")), QUuid::createUuid().toString(QUuid::WithoutBraces));
-            auto* backupLabel = new QLabel(QStringLiteral("应用前将保存原状态备份：%1").arg(backupPath), &dialog);
+            auto* backupLabel = new QLabel(QStringLiteral("应用前将保存原状态备份：%1").arg(backupPath), dialog.data());
             backupLabel->setWordWrap(true);
             backupLabel->setTextFormat(Qt::PlainText);
             layout->addWidget(backupLabel);
-            auto* buttons = new QDialogButtonBox(QDialogButtonBox::Apply | QDialogButtonBox::Close, &dialog);
+            auto* buttons = new QDialogButtonBox(QDialogButtonBox::Apply | QDialogButtonBox::Close, dialog.data());
             auto* apply = buttons->button(QDialogButtonBox::Apply);
             apply->setText(QStringLiteral("应用并验证"));
             apply->setEnabled(!plan->operations.isEmpty());
@@ -261,26 +268,37 @@ void RegistryDock::previewRegistryDocument(const RegistryDocument& document, con
             auto completed = std::make_shared<bool>(false);
             guarded->m_documentCancel = std::make_shared<std::atomic_bool>(false);
             const auto cancel = guarded->m_documentCancel;
-            const QPointer<QDialog> guardedDialog(&dialog);
-            QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog, [cancel, &dialog]() { cancel->store(true); dialog.reject(); });
-            QObject::connect(&dialog, &QDialog::rejected, &dialog, [cancel]() { cancel->store(true); });
-            QObject::connect(apply, &QPushButton::clicked, &dialog,
-                [guarded, dispatcher, plan, result, started, completed, cancel, guardedDialog, apply, backupDirectory, backupPath, render, backupLabel]() {
+            const QPointer<QDialog> guardedDialog(dialog.data());
+            QObject::connect(buttons, &QDialogButtonBox::rejected, dialog.data(), [cancel, dialog]() { cancel->store(true); if (dialog) dialog->reject(); });
+            QObject::connect(dialog.data(), &QDialog::rejected, dialog.data(), [cancel]() { cancel->store(true); });
+            QObject::connect(apply, &QPushButton::clicked, dialog.data(),
+                [guarded, plan, result, started, completed, cancel, guardedDialog, apply, backupDirectory, backupPath, render, backupLabel]() {
                     if (*started) return;
                     *started = true;
                     apply->setEnabled(false);
-                    QThreadPool::globalInstance()->start([guarded, dispatcher, plan, result, completed, cancel,
-                        guardedDialog, backupDirectory, backupPath, render, backupLabel]() {
+                    struct Request
+                    {
+                        std::shared_ptr<const RegistryApplyPlan> plan;
+                        std::shared_ptr<std::atomic_bool> cancel;
+                        QString backupDirectory;
+                        QString backupPath;
+                    };
+                    guarded->m_applyReceipt = false;
+                    const auto ticket = guarded->applyOperation().submitTransaction<Request, std::shared_ptr<RegistryApplyResult>>(
+                        {plan, cancel, backupDirectory, backupPath}, [](const Request& request) {
                         auto workerResult = std::make_shared<RegistryApplyResult>();
-                        workerResult->viewBits = plan->viewBits; // 备份失败也保留计划的准确来源。
-                        workerResult->useR0 = plan->useR0;
+                        workerResult->viewBits = request.plan->viewBits; // 备份失败也保留计划的准确来源。
+                        workerResult->useR0 = request.plan->useR0;
                         QString failure;
-                        bool saved = !cancel->load() && QDir().mkpath(backupDirectory)
-                            && RegistryDocumentApplyService::saveOriginalBackup(*plan, backupPath, failure);
-                        if (saved) RegistryDocumentApplyService::applyAccess(*plan, *workerResult, cancel.get());
+                        bool saved = !request.cancel->load() && QDir().mkpath(request.backupDirectory)
+                            && RegistryDocumentApplyService::saveOriginalBackup(*request.plan, request.backupPath, failure);
+                        if (saved) RegistryDocumentApplyService::applyAccess(*request.plan, *workerResult, request.cancel.get());
                         else workerResult->error = failure.isEmpty() ? QStringLiteral("备份未保存，未应用任何操作。") : failure;
-                        dispatcher->post([guarded, guardedDialog, workerResult, result, completed, backupPath, render, backupLabel]() {
-                            if (!guarded) return;
+                        return workerResult;
+                    }, [guarded, guardedDialog, result, completed, backupPath, render, backupLabel](
+                        const std::shared_ptr<RegistryApplyResult>& workerResult, std::uint64_t) {
+                            if (!guarded) return true;
+                            guarded->m_applyReceipt = true;
                             *result = std::move(*workerResult);
                             *completed = true;
                             guarded->m_applyingChanges = false;
@@ -323,12 +341,23 @@ void RegistryDock::previewRegistryDocument(const RegistryDocument& document, con
                                     : QStringLiteral("未全部完成：%1\n修改前备份：%2").arg(result->error, backupPath));
                                 render();
                             }
-                        });
+                            return true;
+                    }, [guarded, guardedDialog, completed, backupLabel](std::exception_ptr) {
+                        *completed = true;
+                        if (guarded) { guarded->m_applyReceipt = true; guarded->finishApplyWithoutReceipt(); }
+                        if (guardedDialog) backupLabel->setText(ks::i18n::sourceText(QStringLiteral("注册表操作未取得完整回执；请刷新后核对。")));
                     });
+                    if (!ticket)
+                    {
+                        *completed = true;
+                        guarded->finishApplyWithoutReceipt();
+                        if (guardedDialog) backupLabel->setText(ks::i18n::sourceText(QStringLiteral("注册表操作未取得完整回执；请刷新后核对。")));
+                    }
                 });
             updatePage();
-            ks::ui::applyResponsiveWindowGeometry(&dialog, guarded, QSize(1100, 720), QSize(480, 360));
-            dialog.exec();
+            ks::ui::applyResponsiveWindowGeometry(dialog.data(), guarded, QSize(1100, 720), QSize(480, 360));
+            dialog->exec();
+            if (dialog) delete dialog.data();
             if (!guarded) return;
             if (!*started || *completed)
             {
@@ -338,7 +367,8 @@ void RegistryDock::previewRegistryDocument(const RegistryDocument& document, con
                 guarded->updatePendingChanges();
             }
         });
-    });
+        return true;
+    }, [this](std::exception_ptr) { m_applyReceipt = true; finishApplyWithoutReceipt(); });
 }
 
 void RegistryDock::showKeyPermissions()

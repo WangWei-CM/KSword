@@ -464,6 +464,7 @@ RegistryDock::RegistryDock(QWidget* parent)
 
 RegistryDock::~RegistryDock()
 {
+    if (m_applyOperation) m_applyOperation->close();
     if (m_legacyMutationOperation) m_legacyMutationOperation->close();
     kLogEvent event;
     info << event << "[RegistryDock] 析构开始，准备停止搜索线程。" << eol;

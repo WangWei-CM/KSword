@@ -109,6 +109,17 @@ private:
         QString result;
     };
 
+    struct PendingApplyResult
+    {
+        QVector<PendingValueChange> applied;
+        QVector<PendingValueChange> recoverable;
+        QVector<PendingValueChange> remaining;
+    };
+    static PendingApplyResult applyPendingValueBatch(const QVector<PendingValueChange>& changes,
+        const std::shared_ptr<std::atomic_bool>& closed);
+    ks::ui::AsyncOperation& applyOperation();
+    void finishApplyWithoutReceipt();
+
     // PendingSearchRow：
     // - 作用：后台搜索线程产生的待刷入 UI 行数据。
     struct PendingSearchRow
@@ -341,6 +352,8 @@ private:
     int m_viewBits = 0;
     bool m_applyingChanges = false;
     std::unique_ptr<ks::ui::AsyncOperation> m_legacyMutationOperation;
+    std::unique_ptr<ks::ui::AsyncOperation> m_applyOperation;
+    bool m_applyReceipt = false;
     bool m_legacyMutationReceipt = false;
     std::shared_ptr<std::atomic_bool> m_operationsClosed = std::make_shared<std::atomic_bool>(false);
     QVector<PendingValueChange> m_pendingChanges;

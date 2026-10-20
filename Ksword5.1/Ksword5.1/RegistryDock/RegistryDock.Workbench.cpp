@@ -4,6 +4,7 @@
 #include <QResizeEvent>
 #include <QStyle>
 #include "RegistryDock.h"
+#include "../UI/AsyncOperation.h"
 #include "RegistryValueEditorWidget.h"
 #include "RegistryWorkbenchAccess.h"
 #include "RegistryDocument.h"
@@ -568,65 +569,93 @@ void RegistryDock::updatePendingChanges()
     m_applyChangesButton->setEnabled(!m_pendingChanges.isEmpty() && !m_applyingChanges);
 }
 
+ks::ui::AsyncOperation& RegistryDock::applyOperation()
+{
+    if (!m_applyOperation)
+    {
+        m_applyOperation = std::make_unique<ks::ui::AsyncOperation>(this);
+        m_applyOperation->setStateChangedCallback([this] {
+            if (m_applyingChanges && !m_applyOperation->isBusy() && !m_applyReceipt) finishApplyWithoutReceipt();
+        });
+    }
+    return *m_applyOperation;
+}
+
+void RegistryDock::finishApplyWithoutReceipt()
+{
+    m_applyingChanges = false;
+    m_valueEditor->setEnabled(true);
+    m_viewCombo->setEnabled(true);
+    m_editorReady = false;
+    m_valueEditor->hide();
+    updatePendingChanges();
+    updateStatusBar(QStringLiteral("注册表操作未取得完整回执；请刷新后核对。"));
+}
+
+RegistryDock::PendingApplyResult RegistryDock::applyPendingValueBatch(const QVector<PendingValueChange>& changes,
+    const std::shared_ptr<std::atomic_bool>& closed)
+{
+    PendingApplyResult output;
+    for (qsizetype index = 0; index < changes.size(); ++index)
+    {
+        auto change = changes.at(index); // 每项草稿保留各自的原始目标、视图和通道。
+        if (closed->load())
+        {
+            for (; index < changes.size(); ++index) output.remaining.push_back(changes.at(index));
+            break; // 取消不丢弃还没执行的草稿。
+        }
+        const RegistryAccessContext context{change.viewBits, change.useR0};
+        const RegistryApplyValueState before{change.beforeExists, change.beforeType, change.beforeData};
+        const RegistryApplyValueState after{!change.deleteValue, change.afterType, change.afterData};
+        RegistryApplyResult result; // 共用状态机检查原值、处理取消并记录真实回读。
+        const bool ok = RegistryValueTransactions::apply(change.keyPath, change.name,
+            before, after, context, result, closed.get());
+        if (ok)
+        {
+            change.result = QStringLiteral("已应用并回读验证");
+            output.applied.push_back(change);
+            output.recoverable.push_back(change);
+        }
+        else
+        {
+            change.result = result.error.isEmpty()
+                ? QStringLiteral("回读不一致，请重新读取后核对") : result.error;
+            // 只有成功且实际回读过的回执才能用于自动恢复，失败的未知写入保留诊断。
+            output.remaining.push_back(change);
+        }
+    }
+    return output;
+}
+
 void RegistryDock::applyPendingChanges()
 {
     if (m_applyingChanges || !preserveEditorDraft() || m_pendingChanges.isEmpty()) return;
-    const auto changes = m_pendingChanges;
+    auto& operation = applyOperation();
     m_applyingChanges = true;
+    m_applyReceipt = false;
     m_valueEditor->setEnabled(false);
     m_viewCombo->setEnabled(false);
     m_applyChangesButton->setEnabled(false);
-    const QPointer<RegistryDock> guarded(this);
-    const auto dispatcher = m_uiDispatcher;
-    const auto closed = m_operationsClosed;
-    QThreadPool::globalInstance()->start([guarded, dispatcher, closed, changes]() mutable {
-        QVector<PendingValueChange> applied;
-        QVector<PendingValueChange> recoverable;
-        QVector<PendingValueChange> remaining;
-        for (qsizetype index = 0; index < changes.size(); ++index)
-        {
-            auto change = changes.at(index); // 每项草稿保留各自的原始目标、视图和通道。
-            if (closed->load())
-            {
-                for (; index < changes.size(); ++index) remaining.push_back(changes.at(index));
-                break; // 取消不丢弃还没执行的草稿。
-            }
-            const RegistryAccessContext context{change.viewBits, change.useR0};
-            const RegistryApplyValueState before{change.beforeExists, change.beforeType, change.beforeData};
-            const RegistryApplyValueState after{!change.deleteValue, change.afterType, change.afterData};
-            RegistryApplyResult result; // 共用状态机检查原值、处理取消并记录真实回读。
-            const bool ok = RegistryValueTransactions::apply(change.keyPath, change.name,
-                before, after, context, result, closed.get());
-            if (ok)
-            {
-                change.result = QStringLiteral("已应用并回读验证");
-                applied.push_back(change);
-                recoverable.push_back(change);
-            }
-            else
-            {
-                change.result = result.error.isEmpty()
-                    ? QStringLiteral("回读不一致，请重新读取后核对") : result.error;
-                // 只有成功且实际回读过的回执才能用于自动恢复，失败的未知写入保留诊断。
-                remaining.push_back(change);
-            }
-        }
-        dispatcher->post([guarded, applied, remaining, recoverable]() {
-            if (!guarded) return;
-            guarded->m_applyingChanges = false;
-            guarded->m_valueEditor->setEnabled(true);
-            guarded->m_viewCombo->setEnabled(true);
-            guarded->m_pendingChanges = remaining;
-            guarded->m_lastChanges = recoverable;
-            guarded->m_lastDocumentResult.reset();
-            guarded->m_editorReady = false;
-            guarded->m_valueEditor->hide();
-            guarded->updatePendingChanges();
-            guarded->refreshValueTable();
-            guarded->updateStatusBar(QStringLiteral("提交完成：成功 %1 项，未完成 %2 项。")
-                .arg(applied.size()).arg(remaining.size()));
-        });
-    });
+    struct Request { QVector<PendingValueChange> changes; std::shared_ptr<std::atomic_bool> closed; };
+    const auto ticket = operation.submitTransaction<Request, PendingApplyResult>({m_pendingChanges, m_operationsClosed},
+        [](const Request& request) { return applyPendingValueBatch(request.changes, request.closed); },
+        [this](const PendingApplyResult& result, std::uint64_t) {
+            m_applyReceipt = true;
+            m_applyingChanges = false;
+            m_valueEditor->setEnabled(true);
+            m_viewCombo->setEnabled(true);
+            m_pendingChanges = result.remaining;
+            m_lastChanges = result.recoverable;
+            m_lastDocumentResult.reset();
+            m_editorReady = false;
+            m_valueEditor->hide();
+            updatePendingChanges();
+            refreshValueTable();
+            updateStatusBar(QStringLiteral("提交完成：成功 %1 项，未完成 %2 项。")
+                .arg(result.applied.size()).arg(result.remaining.size()));
+            return true;
+        }, [this](std::exception_ptr) { m_applyReceipt = true; finishApplyWithoutReceipt(); });
+    if (!ticket) finishApplyWithoutReceipt();
 }
 
 void RegistryDock::restoreLastChanges()
@@ -645,26 +674,30 @@ void RegistryDock::restoreLastChanges()
         m_documentCancel = std::make_shared<std::atomic_bool>(false);
         const auto cancel = m_documentCancel;
         const auto previous = m_lastDocumentResult;
-        const QPointer<RegistryDock> guarded(this);
-        const auto dispatcher = m_uiDispatcher;
-        QThreadPool::globalInstance()->start([guarded, dispatcher, cancel, previous]() {
-            auto result = std::make_shared<RegistryApplyResult>();
-            RegistryDocumentApplyService::undoAccess(*previous, *result, cancel.get());
-            dispatcher->post([guarded, result]() {
-                if (!guarded) return;
-                guarded->m_applyingChanges = false;
-                guarded->m_viewCombo->setEnabled(true);
-                guarded->m_valueEditor->setEnabled(true);
-                guarded->m_editorReady = false;
-                guarded->m_valueEditor->hide();
-                guarded->m_lastChanges.clear();
-                guarded->m_lastDocumentResult = result->completed ? nullptr : result;
-                guarded->updatePendingChanges();
-                guarded->refreshCurrentKey(true);
-                guarded->updateStatusBar(result->completed ? QStringLiteral("上次提交已恢复并回读验证。")
+        auto& operation = applyOperation();
+        m_applyReceipt = false;
+        struct Request { std::shared_ptr<RegistryApplyResult> previous; std::shared_ptr<std::atomic_bool> cancel; };
+        const auto ticket = operation.submitTransaction<Request, std::shared_ptr<RegistryApplyResult>>({previous, cancel},
+            [](const Request& request) {
+                auto result = std::make_shared<RegistryApplyResult>();
+                RegistryDocumentApplyService::undoAccess(*request.previous, *result, request.cancel.get());
+                return result;
+            }, [this](const std::shared_ptr<RegistryApplyResult>& result, std::uint64_t) {
+                m_applyReceipt = true;
+                m_applyingChanges = false;
+                m_viewCombo->setEnabled(true);
+                m_valueEditor->setEnabled(true);
+                m_editorReady = false;
+                m_valueEditor->hide();
+                m_lastChanges.clear();
+                m_lastDocumentResult = result->completed ? nullptr : result;
+                updatePendingChanges();
+                refreshCurrentKey(true);
+                updateStatusBar(result->completed ? QStringLiteral("上次提交已恢复并回读验证。")
                     : QStringLiteral("恢复未全部完成：%1").arg(result->error));
-            });
-        });
+                return true;
+            }, [this](std::exception_ptr) { m_applyReceipt = true; finishApplyWithoutReceipt(); });
+        if (!ticket) finishApplyWithoutReceipt();
         return;
     }
     if (m_lastChanges.isEmpty()) return;
