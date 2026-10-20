@@ -1,6 +1,11 @@
 #include "TableHeaderSortingSupport.h"
 
 #include <QAbstractItemModel>
+#include <QEvent>
+#include <QTimer>
+#include <QTableView>
+#include <QVector>
+#include <utility>
 #include <QHeaderView>
 #include <QList>
 #include <QModelIndex>
@@ -28,7 +33,7 @@ namespace
     // - 原生 sortingEnabled 为 true 时由调用方跳过本函数，避免隐藏 Qt 自己的箭头。
     // 传入 tableWidget：目标表格；hideIndicator：是否隐藏排序指示器；传出：无。
     void clearManualSortState(
-        QTableWidget* tableWidget,
+        QTableView* tableWidget,
         const bool hideIndicator)
     {
         if (tableWidget == nullptr)
@@ -73,7 +78,7 @@ namespace
     // - 最近列与顺序由表格动态属性读取，不依赖 QHeaderView 未显示时的默认值。
     // 传入 tableWidget：目标表格；logicalColumn：本次点击列；返回本次排序方向。
     Qt::SortOrder nextSortOrder(
-        const QTableWidget* tableWidget,
+        const QTableView* tableWidget,
         const int logicalColumn)
     {
         const bool manualSortActive =
@@ -128,6 +133,210 @@ namespace
             headerView->setSortIndicatorShown(true);
         }
     }
+    constexpr char kViewSortingStateProperty[] = "KSWORD_TABLE_VIEW_HEADER_SORT_STATE";
+
+    // The view owns this binding. Model replacement is checked at the exact view,
+    // at header clicks, and before every old-model callback; no control-tree scan.
+    class TableViewHeaderSorting final : public QObject
+    {
+    public:
+        explicit TableViewHeaderSorting(QTableView* view)
+            : QObject(view), m_view(view)
+        {
+            view->setProperty(kViewSortingStateProperty, QVariant::fromValue(static_cast<QObject*>(this)));
+            view->installEventFilter(this);
+            if (view->viewport() != nullptr) view->viewport()->installEventFilter(this);
+            synchronize();
+        }
+        ~TableViewHeaderSorting() override
+        {
+            if (!m_view.isNull() && m_view->property(kViewSortingStateProperty).value<QObject*>() == this)
+                m_view->setProperty(kViewSortingStateProperty, QVariant());
+        }
+
+        void synchronize()
+        {
+            if (m_view.isNull()) return;
+            auto* const header = m_view->horizontalHeader();
+            if (m_header != header)
+            {
+                QObject::disconnect(m_headerConnection);
+                m_header = header;
+                if (header != nullptr)
+                {
+                    header->setSectionsClickable(true);
+                    m_headerConnection = QObject::connect(header, &QHeaderView::sectionClicked, this,
+                        [this, header](int column) { clicked(header, column); });
+                }
+            }
+            auto* const model = m_view->model();
+            if (m_model == model) return;
+            for (const auto& connection : m_modelConnections) QObject::disconnect(connection);
+            m_modelConnections.clear();
+            ++m_epoch;
+            m_model = model;
+            m_resetInFlight = false;
+            m_restoreSourceOrder = false;
+            m_flushScheduled = false;
+            m_pendingClicks.clear();
+            if (!m_view->isSortingEnabled()) clearManualSortState(m_view, true);
+            if (model == nullptr) return;
+
+            m_modelConnections.push_back(QObject::connect(model, &QAbstractItemModel::modelAboutToBeReset, this,
+                [this, model]() {
+                    if (!isCurrentModel(model)) return;
+                    m_resetInFlight = true;
+                    m_restoreSourceOrder = true;
+                    m_pendingClicks.clear();
+                    if (!m_view->isSortingEnabled()) clearManualSortState(m_view, true);
+                }));
+            m_modelConnections.push_back(QObject::connect(model, &QAbstractItemModel::modelReset, this,
+                [this, model]() {
+                    if (!isCurrentModel(model)) return;
+                    m_resetInFlight = false;
+                    if (!m_view->isSortingEnabled()) clearManualSortState(m_view, true);
+                    scheduleFlush();
+                }));
+            const auto changed = [this, model]() {
+                if (isCurrentModel(model) && !m_view->isSortingEnabled()) clearManualSortState(m_view, true);
+            };
+            m_modelConnections.push_back(QObject::connect(model, &QAbstractItemModel::rowsInserted, this,
+                [changed](const QModelIndex&, int, int) { changed(); }));
+            m_modelConnections.push_back(QObject::connect(model, &QAbstractItemModel::rowsRemoved, this,
+                [changed](const QModelIndex&, int, int) { changed(); }));
+            m_modelConnections.push_back(QObject::connect(model, &QAbstractItemModel::columnsInserted, this,
+                [changed](const QModelIndex&, int, int) { changed(); }));
+            m_modelConnections.push_back(QObject::connect(model, &QAbstractItemModel::columnsRemoved, this,
+                [changed](const QModelIndex&, int, int) { changed(); }));
+            m_modelConnections.push_back(QObject::connect(model, &QAbstractItemModel::dataChanged, this,
+                [changed](const QModelIndex&, const QModelIndex&, const QList<int>&) { changed(); }));
+            m_modelConnections.push_back(QObject::connect(model, &QObject::destroyed, this,
+                [this]() { synchronize(); }));
+        }
+
+    protected:
+        bool eventFilter(QObject*, QEvent* event) override
+        {
+            switch (event->type())
+            {
+            case QEvent::Show:
+            case QEvent::Polish:
+            case QEvent::LayoutRequest:
+            case QEvent::UpdateRequest:
+            case QEvent::Paint:
+            case QEvent::ChildAdded:
+            case QEvent::ChildRemoved:
+                synchronize();
+                break;
+            default:
+                break;
+            }
+            return false;
+        }
+
+    private:
+        bool isCurrentModel(QAbstractItemModel* expected)
+        {
+            if (m_view.isNull()) return false;
+            if (m_view->model() != m_model) synchronize();
+            return !m_view.isNull() && m_model == expected && m_view->model() == expected;
+        }
+        void clicked(QHeaderView* expectedHeader, int column)
+        {
+            synchronize();
+            if (m_view.isNull() || m_model.isNull() || m_header != expectedHeader ||
+                m_view->property(kHeaderSortingDisabledProperty).toBool() ||
+                column < 0 || column >= m_model->columnCount()) return;
+            if (m_view->isSortingEnabled())
+            {
+                m_view->setProperty(kManualSortActiveProperty, false);
+                return;
+            }
+            if (m_resetInFlight || m_restoreSourceOrder || m_flushScheduled)
+            {
+                m_pendingClicks.push_back(column);
+                if (!m_resetInFlight) scheduleFlush();
+                return;
+            }
+            sortNow(column);
+        }
+        void sortNow(int column)
+        {
+            if (m_view.isNull() || m_model.isNull() || m_view->model() != m_model ||
+                m_view->property(kHeaderSortingDisabledProperty).toBool() ||
+                column < 0 || column >= m_model->columnCount()) return;
+            if (m_view->isSortingEnabled())
+            {
+                m_view->setProperty(kManualSortActiveProperty, false);
+                return;
+            }
+            const auto order = nextSortOrder(m_view, column);
+            m_view->setProperty(kManualSortActiveProperty, true);
+            m_view->setProperty(kManualSortColumnProperty, column);
+            m_view->setProperty(kManualSortOrderProperty, static_cast<int>(order));
+            const QPointer<TableViewHeaderSorting> guard(this);
+            const auto epoch = m_epoch;
+            m_model->sort(column, order);
+            if (guard.isNull()) return;
+            if (m_view.isNull() || m_epoch != epoch || m_view->model() != m_model ||
+                m_resetInFlight || m_restoreSourceOrder) return;
+            if (!m_header.isNull())
+            {
+                const QPointer<QHeaderView> header(m_header);
+                const QPointer<QAbstractItemModel> model(m_model);
+                header->setSortIndicator(column, order);
+                // sortIndicatorChanged is synchronous. A listener may close the
+                // owner, replace its header/model, or reset the snapshot.
+                if (guard.isNull()) return;
+                if (m_view.isNull() || header.isNull() || model.isNull() ||
+                    m_epoch != epoch || m_view->model() != model ||
+                    m_view->horizontalHeader() != header || m_header != header ||
+                    m_resetInFlight || m_restoreSourceOrder) return;
+                header->setSortIndicatorShown(true);
+            }
+        }
+        void scheduleFlush()
+        {
+            if (m_flushScheduled) return;
+            m_flushScheduled = true;
+            const auto epoch = m_epoch;
+            QTimer::singleShot(0, this, [this, epoch]() {
+                if (m_epoch != epoch) return;
+                m_flushScheduled = false;
+                synchronize();
+                if (m_epoch != epoch || m_view.isNull() || m_model.isNull() || m_resetInFlight) return;
+                if (std::exchange(m_restoreSourceOrder, false) && !m_view->isSortingEnabled())
+                {
+                    // A proxy may emit modelReset from inside its source-reset stack.
+                    // Deferring sort(-1) keeps layout changes outside begin/endResetModel.
+                    const QPointer<TableViewHeaderSorting> guard(this);
+                    m_model->sort(-1, Qt::AscendingOrder);
+                    if (guard.isNull()) return;
+                    if (m_epoch != epoch || m_view.isNull() || m_view->model() != m_model ||
+                        m_resetInFlight || m_restoreSourceOrder) return;
+                }
+                auto clicks = std::exchange(m_pendingClicks, {});
+                const QPointer<TableViewHeaderSorting> guard(this);
+                for (const int column : clicks)
+                {
+                    sortNow(column);
+                    if (guard.isNull()) return;
+                    if (m_epoch != epoch || m_resetInFlight || m_restoreSourceOrder) return;
+                }
+            });
+        }
+
+        QPointer<QTableView> m_view;
+        QPointer<QHeaderView> m_header;
+        QPointer<QAbstractItemModel> m_model;
+        QMetaObject::Connection m_headerConnection;
+        QList<QMetaObject::Connection> m_modelConnections;
+        QVector<int> m_pendingClicks;
+        quint64 m_epoch = 0;
+        bool m_resetInFlight = false;
+        bool m_restoreSourceOrder = false;
+        bool m_flushScheduled = false;
+    };
 }
 
 namespace ks::ui
@@ -211,5 +420,31 @@ namespace ks::ui
         {
             clearManualSortState(tableWidget, true);
         }
+    }
+
+    void InstallTableHeaderClickSorting(QTableView* tableView)
+    {
+        if (tableView == nullptr) return;
+        if (auto* widget = qobject_cast<QTableWidget*>(tableView))
+        {
+            InstallTableHeaderClickSorting(widget);
+            return;
+        }
+        auto* state = dynamic_cast<TableViewHeaderSorting*>(
+            tableView->property(kViewSortingStateProperty).value<QObject*>());
+        if (state != nullptr) state->synchronize();
+        else new TableViewHeaderSorting(tableView);
+    }
+
+    void SetTableHeaderClickSortingEnabled(QTableView* tableView, const bool enabled)
+    {
+        if (tableView == nullptr) return;
+        if (auto* widget = qobject_cast<QTableWidget*>(tableView))
+        {
+            SetTableHeaderClickSortingEnabled(widget, enabled);
+            return;
+        }
+        tableView->setProperty(kHeaderSortingDisabledProperty, !enabled);
+        if (!enabled && !tableView->isSortingEnabled()) clearManualSortState(tableView, true);
     }
 }
