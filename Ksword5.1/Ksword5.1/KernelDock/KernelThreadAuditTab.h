@@ -8,10 +8,12 @@
 #include <QWidget>
 
 #include <cstdint>
+#include <memory>
 #include <vector>
 
 #include "../UI/StructuredFieldView.h"
 class QEvent;
+class QShowEvent;
 class QLabel;
 class QLineEdit;
 class QPushButton;
@@ -84,6 +86,7 @@ public:
 
 protected:
     void changeEvent(QEvent* event) override;
+    void showEvent(QShowEvent* event) override;
 
 private:
     enum class Column
@@ -223,5 +226,8 @@ private:
     ks::ui::StructuredFieldView* m_detailEditor = nullptr;
     std::vector<ThreadRow> m_rows;
     bool m_refreshRunning = false;
+    bool m_initialRefreshStarted = false;
+    bool m_showRefreshQueued = false;
+    std::shared_ptr<Snapshot> m_pendingSnapshot;
     std::uint64_t m_refreshTicket = 0;
 };

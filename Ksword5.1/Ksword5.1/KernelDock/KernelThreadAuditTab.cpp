@@ -27,6 +27,7 @@
 #include <QPushButton>
 #include "../UI/SegmentedControl.h"
 #include <QSplitter>
+#include <QShowEvent>
 #include <QTableWidget>
 #include <QTableWidgetItem>
 #include <QThreadPool>
@@ -130,9 +131,32 @@ KernelThreadAuditTab::KernelThreadAuditTab(const Mode mode, QWidget* parent)
     initializeUi();
     applyTranslatedText();
 
-    // 首次刷新延后到事件循环，避免 Dock 构造阶段同步查询系统信息。
+}
+
+void KernelThreadAuditTab::showEvent(QShowEvent* event)
+{
+    QWidget::showEvent(event);
+    if (m_showRefreshQueued)
+    {
+        return;
+    }
+    m_showRefreshQueued = true;
     QTimer::singleShot(0, this, [this]() {
-        requestRefresh();
+        m_showRefreshQueued = false;
+        // A sibling tab or ADS host can hide again before this queued turn.
+        if (!isVisible())
+        {
+            return;
+        }
+        if (m_pendingSnapshot)
+        {
+            const auto snapshot = std::move(m_pendingSnapshot);
+            applySnapshot(*snapshot);
+        }
+        if (!m_initialRefreshStarted)
+        {
+            requestRefresh();
+        }
     });
 }
 
@@ -292,6 +316,8 @@ void KernelThreadAuditTab::requestRefresh()
         return;
     }
 
+    m_initialRefreshStarted = true;
+    m_pendingSnapshot.reset();
     m_refreshRunning = true;
     const std::uint64_t refreshTicket = ++m_refreshTicket;
     m_refreshButton->setEnabled(false);
@@ -317,6 +343,14 @@ void KernelThreadAuditTab::requestRefresh()
 
 void KernelThreadAuditTab::applySnapshot(const Snapshot& snapshot)
 {
+    if (!isVisible())
+    {
+        // Retain all evidence; only the replaceable table projection waits.
+        m_pendingSnapshot = std::make_shared<Snapshot>(snapshot);
+        m_refreshRunning = false;
+        m_refreshButton->setEnabled(true);
+        return;
+    }
     const QPointer<KernelThreadAuditTab> safeThis(this);
     if (ks::ui::DeferTableUiCommitIfContextMenuOpen(
         this,
