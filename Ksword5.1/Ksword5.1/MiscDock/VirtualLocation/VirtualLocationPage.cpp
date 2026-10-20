@@ -1,4 +1,6 @@
 #include "VirtualLocationPage.h"
+#include "../../UI/AsyncOperation.h"
+#include <tuple>
 #include "../../UI/PrimaryPageStyle.h"
 #include "../../UI/ParameterWorkspace.h"
 #include "../../UI/ToolbarMetrics.h"
@@ -136,10 +138,34 @@ namespace ks::misc
     VirtualLocationPage::VirtualLocationPage(QWidget* parent)
         : QWidget(parent)
     {
+        m_statusOperation = new ks::ui::AsyncOperation(this);
+        m_mutationOperation = new ks::ui::AsyncOperation(this);
         initializeUi();
         initializeConnections();
+        m_statusOperation->setStateChangedCallback([this]() {
+            if (m_statusPending && !m_statusOperation->isInFlight())
+            {
+                m_statusPending = false;
+                setBusy(false);
+                showAsyncFailure();
+            }
+        });
+        m_mutationOperation->setStateChangedCallback([this]() {
+            if (m_mutationPending && !m_mutationOperation->isInFlight())
+            {
+                m_mutationPending = false;
+                setBusy(false);
+                showAsyncFailure();
+            }
+        });
         updateConversionPreview();
         updateButtons();
+    }
+
+    VirtualLocationPage::~VirtualLocationPage()
+    {
+        m_statusOperation->close();
+        m_mutationOperation->close();
     }
 
     void VirtualLocationPage::showEvent(QShowEvent* event)
@@ -603,18 +629,43 @@ namespace ks::misc
         }
     }
 
+    void VirtualLocationPage::showAsyncFailure()
+    {
+        setResultText(ks::i18n::text(QStringLiteral("misc.async.receipt_missing"),
+            QStringLiteral("后台任务未返回有效回执，请刷新状态。")), true);
+    }
+
     void VirtualLocationPage::refreshStatus()
     {
-        if (m_busy) {
-            return;
-        }
+        if (m_busy) return;
+        m_statusPending = true;
         setBusy(true);
+        using Snapshot = std::pair<virtual_location::ServiceSnapshot, virtual_location::DefaultLocationSnapshot>;
+        m_statusOperation->submit<int, Snapshot>(0,
+            [](const int&, const ks::ui::AsyncOperationToken& token) {
+                Snapshot snapshot;
+                if (token.isCanceled()) return snapshot;
+                snapshot.first = virtual_location::readServiceSnapshot();
+                if (!token.isCanceled()) snapshot.second = virtual_location::readDefaultLocation();
+                return snapshot;
+            },
+            [this](const Snapshot& snapshot, std::uint64_t) {
+                m_statusPending = false;
+                setBusy(false);
+                applyStatusSnapshot(snapshot.first, snapshot.second);
+                return true;
+            },
+            [this](std::exception_ptr) {
+                m_statusPending = false;
+                setBusy(false);
+                showAsyncFailure();
+            });
+    }
 
-        const virtual_location::ServiceSnapshot serviceSnapshot =
-            virtual_location::readServiceSnapshot();
-        const virtual_location::DefaultLocationSnapshot locationSnapshot =
-            virtual_location::readDefaultLocation();
-
+    void VirtualLocationPage::applyStatusSnapshot(
+        const virtual_location::ServiceSnapshot& serviceSnapshot,
+        const virtual_location::DefaultLocationSnapshot& locationSnapshot)
+    {
         m_serviceLabel->setText(
             QStringLiteral("位置服务：%1；系统位置开关：%2；桌面应用位置：%3")
                 .arg(serviceSnapshot.serviceStateText)
@@ -674,7 +725,7 @@ namespace ks::misc
 
         m_rawValueView->setDocument(defaultLocationDocument(locationSnapshot));
 
-        setBusy(false);
+        updateButtons();
     }
 
     void VirtualLocationPage::applyVirtualLocation()
@@ -687,41 +738,37 @@ namespace ks::misc
         const GeoCoordinate wgsCoordinate = virtual_location::convertCoordinate(
             inputCoordinate(), currentCoordinateSystem(), CoordinateSystem::Wgs84);
 
-        setBusy(true);
-        const virtual_location::OperationResult writeResult =
-            virtual_location::applyDefaultLocation(wgsCoordinate);
-        setBusy(false);
-
-        if (!writeResult.ok) {
-            setResultText(
-                QStringLiteral("应用失败：%1").arg(writeResult.detailText),
-                true);
+        runMutation([wgsCoordinate]() {
+            const auto result = virtual_location::applyDefaultLocation(wgsCoordinate);
             kLogEvent applyEvent;
-            err << applyEvent << "[VirtualLocationPage] 写入系统默认位置失败。" << eol;
-            refreshStatus();
-            return;
-        }
+            if (!result.ok) err << applyEvent << "[VirtualLocationPage] 写入系统默认位置失败。" << eol;
+            else info << applyEvent << "[VirtualLocationPage] 系统默认位置已更新。" << eol;
+            return result;
+        },
+            [this, wgsCoordinate](const virtual_location::OperationResult& writeResult,
+                const virtual_location::DefaultLocationSnapshot& verifySnapshot) {
+                if (!writeResult.ok) {
+                    setResultText(
+                        QStringLiteral("应用失败：%1").arg(writeResult.detailText),
+                        true);
+                    return;
+                }
 
-        // 立刻回读一次：注册表值类型或路径万一跟预期不符，这里就能当场暴露。
-        const virtual_location::DefaultLocationSnapshot verifySnapshot =
-            virtual_location::readDefaultLocation();
-        const bool verified = verifySnapshot.present &&
-            qAbs(verifySnapshot.coordinate.latitude - wgsCoordinate.latitude) < 1e-5 &&
-            qAbs(verifySnapshot.coordinate.longitude - wgsCoordinate.longitude) < 1e-5;
+                const bool verified = verifySnapshot.present &&
+                    qAbs(verifySnapshot.coordinate.latitude - wgsCoordinate.latitude) < 1e-5 &&
+                    qAbs(verifySnapshot.coordinate.longitude - wgsCoordinate.longitude) < 1e-5;
 
-        setResultText(
-            verified
-                ? QStringLiteral("已写入并回读校验通过：WGS-84 %1（%2）。要让已经在跑的程序拿到新位置，"
-                                 "通常还需要重启位置服务或重启该程序。")
-                      .arg(formatCoordinate(wgsCoordinate))
-                      .arg(backendText(writeResult.backend))
-                : QStringLiteral("已写入（%1），但回读校验没通过，请检查下方原始值清单。")
-                      .arg(backendText(writeResult.backend)),
-            !verified);
+                setResultText(
+                    verified
+                        ? QStringLiteral("已写入并回读校验通过：WGS-84 %1（%2）。要让已经在跑的程序拿到新位置，"
+                                         "通常还需要重启位置服务或重启该程序。")
+                              .arg(formatCoordinate(wgsCoordinate))
+                              .arg(backendText(writeResult.backend))
+                        : QStringLiteral("已写入（%1），但回读校验没通过，请检查下方原始值清单。")
+                              .arg(backendText(writeResult.backend)),
+                    !verified);
 
-        kLogEvent applyEvent;
-        info << applyEvent << "[VirtualLocationPage] 系统默认位置已更新。" << eol;
-        refreshStatus();
+            });
     }
 
     void VirtualLocationPage::clearVirtualLocation()
@@ -729,17 +776,15 @@ namespace ks::misc
         if (m_busy) {
             return;
         }
-        setBusy(true);
-        const virtual_location::OperationResult clearResult =
-            virtual_location::clearDefaultLocation();
-        setBusy(false);
-
-        setResultText(
-            clearResult.ok
-                ? QStringLiteral("已清除系统默认位置（%1）。").arg(backendText(clearResult.backend))
-                : QStringLiteral("清除失败：%1").arg(clearResult.detailText),
-            !clearResult.ok);
-        refreshStatus();
+        runMutation([]() { return virtual_location::clearDefaultLocation(); },
+            [this](const virtual_location::OperationResult& clearResult,
+                const virtual_location::DefaultLocationSnapshot&) {
+                setResultText(
+                    clearResult.ok
+                        ? QStringLiteral("已清除系统默认位置（%1）。").arg(backendText(clearResult.backend))
+                        : QStringLiteral("清除失败：%1").arg(clearResult.detailText),
+                    !clearResult.ok);
+            });
     }
 
     void VirtualLocationPage::toggleProviderPolicy(const bool disabled)
@@ -768,29 +813,27 @@ namespace ks::misc
             return;
         }
 
-        setBusy(true);
-        const virtual_location::OperationResult policyResult =
-            virtual_location::setLocationProviderDisabled(disabled);
-        setBusy(false);
+        runMutation([disabled]() { return virtual_location::setLocationProviderDisabled(disabled); },
+            [this, disabled](const virtual_location::OperationResult& policyResult,
+                const virtual_location::DefaultLocationSnapshot&) {
+                if (!policyResult.ok) {
+                    setResultText(
+                        QStringLiteral("组策略修改失败：%1").arg(policyResult.detailText),
+                        true);
+                    const QSignalBlocker blocker(m_forceProviderCheck);
+                    m_forceProviderCheck->setChecked(m_providerDisabled);
+                    return;
+                }
 
-        if (!policyResult.ok) {
-            setResultText(
-                QStringLiteral("组策略修改失败：%1").arg(policyResult.detailText),
-                true);
-            const QSignalBlocker blocker(m_forceProviderCheck);
-            m_forceProviderCheck->setChecked(m_providerDisabled);
-            return;
-        }
-
-        m_providerDisabled = disabled;
-        setResultText(
-            disabled
-                ? QStringLiteral("已禁用 Windows 位置提供程序（%1）。策略要在位置服务下次启动后才完全生效。")
-                      .arg(backendText(policyResult.backend))
-                : QStringLiteral("已恢复 Windows 位置提供程序（%1）。")
-                      .arg(backendText(policyResult.backend)),
-            false);
-        refreshStatus();
+                m_providerDisabled = disabled;
+                setResultText(
+                    disabled
+                        ? QStringLiteral("已禁用 Windows 位置提供程序（%1）。策略要在位置服务下次启动后才完全生效。")
+                              .arg(backendText(policyResult.backend))
+                        : QStringLiteral("已恢复 Windows 位置提供程序（%1）。")
+                              .arg(backendText(policyResult.backend)),
+                    false);
+            });
     }
 
     void VirtualLocationPage::restartLocationService()
@@ -798,17 +841,58 @@ namespace ks::misc
         if (m_busy) {
             return;
         }
-        setBusy(true);
-        const virtual_location::OperationResult restartResult =
-            virtual_location::restartLocationService();
-        setBusy(false);
+        runMutation([]() { return virtual_location::restartLocationService(); },
+            [this](const virtual_location::OperationResult& restartResult,
+                const virtual_location::DefaultLocationSnapshot&) {
+                setResultText(
+                    restartResult.ok
+                        ? QStringLiteral("位置服务已停止，下一次有程序请求定位时会自动重新启动并读取新的默认位置。")
+                        : QStringLiteral("重启位置服务失败：%1").arg(restartResult.detailText),
+                    !restartResult.ok);
+            });
+    }
 
-        setResultText(
-            restartResult.ok
-                ? QStringLiteral("位置服务已停止，下一次有程序请求定位时会自动重新启动并读取新的默认位置。")
-                : QStringLiteral("重启位置服务失败：%1").arg(restartResult.detailText),
-            !restartResult.ok);
-        refreshStatus();
+    void VirtualLocationPage::runMutation(
+        std::function<virtual_location::OperationResult()> operation,
+        std::function<void(const virtual_location::OperationResult&,
+            const virtual_location::DefaultLocationSnapshot&)> applyReceipt)
+    {
+        if (m_busy) return;
+        m_statusOperation->cancel();
+        m_mutationPending = true;
+        setBusy(true);
+        using Operation = std::function<virtual_location::OperationResult()>;
+        using Receipt = std::tuple<virtual_location::OperationResult,
+            virtual_location::ServiceSnapshot, virtual_location::DefaultLocationSnapshot>;
+        const auto accepted = m_mutationOperation->submitTransaction<Operation, Receipt>(std::move(operation),
+            [](const Operation& execute) {
+                const auto result = execute();
+                const auto service = virtual_location::readServiceSnapshot();
+                const auto location = virtual_location::readDefaultLocation();
+                return Receipt{result, service, location};
+            },
+            [this, applyReceipt = std::move(applyReceipt)](const Receipt& receipt, std::uint64_t) {
+                m_mutationPending = false;
+                const QPointer<VirtualLocationPage> alive(this);
+                applyReceipt(std::get<0>(receipt), std::get<2>(receipt));
+                if (alive)
+                {
+                    alive->applyStatusSnapshot(std::get<1>(receipt), std::get<2>(receipt));
+                    alive->setBusy(false);
+                }
+                return true;
+            },
+            [this](std::exception_ptr) {
+                m_mutationPending = false;
+                setBusy(false);
+                showAsyncFailure();
+            });
+        if (accepted == 0)
+        {
+            m_mutationPending = false;
+            setBusy(false);
+            showAsyncFailure();
+        }
     }
 
     void VirtualLocationPage::requestLiveFix(const bool fillInputs)
