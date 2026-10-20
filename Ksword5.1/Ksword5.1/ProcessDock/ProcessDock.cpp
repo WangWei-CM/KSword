@@ -118,6 +118,7 @@
 #include <QToolTip>
 #include <QStringList>
 #include <QTreeWidget>
+#include <QTreeView>
 #include <QVBoxLayout>
 #include <QToolButton>
 #include <QWidgetAction>
@@ -5028,7 +5029,7 @@ namespace
     class ThreadRowThemeDelegate final : public QStyledItemDelegate
     {
     public:
-        explicit ThreadRowThemeDelegate(QTreeWidget* table)
+        explicit ThreadRowThemeDelegate(QTreeView* table)
             : QStyledItemDelegate(table)
         {
         }

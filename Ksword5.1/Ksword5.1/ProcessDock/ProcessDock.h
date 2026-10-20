@@ -61,6 +61,7 @@ class QTableWidget;
 class QTableView;
 class QTabWidget;
 class QTimer;
+class QTreeView;
 class QTreeWidget;
 class QTreeWidgetItem;
 class QVBoxLayout;
@@ -583,6 +584,7 @@ private:
     void initializeConnections();
     void initializeThreadPageConnections();
     void activateThreadPage();
+    void cancelThreadProjection();
     void shutdownThreadPage();
     // initializeCrossViewConnections 作用：
     // - 连接 Cross-View 刷新、过滤和表格选择事件；
@@ -1038,7 +1040,7 @@ private:
     const ks::process::SystemThreadRecord* selectedThreadRecord() const;
     void bindContextActionToIndex(const QModelIndex& clickedIndex);
     void clearContextActionBinding();
-    void bindThreadContextActionToItem(QTreeWidgetItem* clickedItem);
+    void bindThreadContextActionToIndex(const QModelIndex& clickedIndex);
     void clearThreadContextActionBinding();
     bool threadRecordMatchesSearch(const ks::process::SystemThreadRecord& threadRecord) const;
     bool threadRecordMatchesScope(const ks::process::SystemThreadRecord& threadRecord) const;
@@ -1242,7 +1244,7 @@ private:
     QPushButton* m_threadColumnPresetBButton = nullptr; // B：地址/诊断列。
     QComboBox* m_threadScopeCombo = nullptr; // 全部 / System / ActiveExWorker 分类筛选。
     QLineEdit* m_threadSearchLineEdit = nullptr; // 线程页搜索框（按 TID/PID/名称过滤）。
-    QTreeWidget* m_threadTable = nullptr;     // 线程列表表格（支持右键动作）。
+    QTreeView* m_threadTable = nullptr;     // 线程列表表格（支持右键动作）。
     ThreadColumnLayout m_threadColumnLayout = ThreadColumnLayout::PresetA; // 当前高亮预设，默认 A。
     bool m_threadApplyingColumnLayout = false; // 程序应用预设时屏蔽 header 手动变化信号。
 
@@ -1362,7 +1364,7 @@ private:
     std::string m_trackedSelectedIdentityKey; // 当前选中进程 identityKey；表格刷新重建后用于恢复高亮。
     std::vector<std::string> m_trackedSelectedIdentityKeys; // 多选进程 identityKey 集合；Ctrl 复选后用于刷新恢复。
     int m_trackedSelectedColumn = 0;          // 当前选中列索引；恢复 currentItem 时尽量保持用户焦点列。
-    std::vector<ks::process::SystemThreadRecord> m_threadRecordList; // 线程页最近一次刷新结果缓存。
+    std::shared_ptr<const std::vector<ks::process::SystemThreadRecord>> m_threadRecordList; // 线程页最近一次刷新结果缓存。
     std::unordered_map<std::string, ks::process::ThreadCounterSample> m_threadCounterSampleByIdentity; // 线程 CPU 差分基准。
     std::string m_threadDiagnosticText;       // 线程页最近一次刷新诊断文本。
     std::unordered_set<std::uint32_t> m_hiddenProcessPidSet; // 本会话已通过 R0 标记隐藏的 PID 集合。
@@ -1388,6 +1390,10 @@ private:
     bool m_threadSnapshotReady = false; // 成功收到一轮完整查询（含空结果）。
     bool m_threadProjectionDirty = false; // 隐藏/合并更新延后投影。
     QObject* m_threadPageVisibilityFilter = nullptr; // 派生析构前移除Show/Hide观察。
+    std::uint64_t m_threadProjectionTicket = 0; // 丢弃过期投影。
+    std::shared_ptr<std::atomic<bool>> m_threadProjectionCancel; // 纯索引排序取消。
+    bool m_threadProjectionInProgress = false; // 隐藏时取消未完成投影。
+    std::uint64_t m_threadContextActionCreateTime = 0; // 显示快照线程稳定身份。
     bool m_threadRefreshInProgress = false;      // 线程页是否存在进行中的后台刷新任务。
     std::uint64_t m_threadRefreshTicket = 0;     // 线程页刷新序号（用于丢弃过期结果）。
     bool m_initialRefreshScheduled = false;      // 首次显示时是否已安排首轮刷新。
