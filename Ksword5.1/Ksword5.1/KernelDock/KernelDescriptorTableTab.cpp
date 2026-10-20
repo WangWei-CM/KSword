@@ -10,6 +10,7 @@
 // IDT/GDT 表项、它指向的代码、以及这张表所在页的 PTE，三条监视共用统一入口。
 #include "../UI/HvmWatchDialog.h"
 #include "../UI/TableInteractionSupport.h"
+#include "../UI/TableRowFilterSupport.h"
 #include "../UI/VisibleTableWidget.h"
 #include "../theme.h"
 
@@ -31,6 +32,8 @@
 #include <QShowEvent>
 #include <QSplitter>
 #include <QTableWidget>
+#include <QTimer>
+#include <QScrollBar>
 #include <QTableWidgetItem>
 #include "../UI/StructuredFieldView.h"
 #include <QVBoxLayout>
@@ -230,7 +233,11 @@ void KernelDescriptorTableTab::initializeUi()
     {
         connect(m_restoreIdtButton, &QPushButton::clicked, this, [this]() { restoreSelectedIdtBaseline(); });
     }
-    connect(m_filterEdit, &QLineEdit::textChanged, this, [this](const QString&) { rebuildTable(); });
+    m_filterTimer = new QTimer(this);
+    m_filterTimer->setSingleShot(true);
+    m_filterTimer->setInterval(120);
+    connect(m_filterTimer, &QTimer::timeout, this, [this]() { applyFilter(); });
+    connect(m_filterEdit, &QLineEdit::textChanged, this, [this](const QString&) { m_filterTimer->start(); });
     connect(m_table, &QTableWidget::currentCellChanged, this, [this](int, int, int, int) {
         showCurrentDetail();
         if (m_restoreIdtButton == nullptr)
@@ -527,7 +534,8 @@ void KernelDescriptorTableTab::applyResult(
 
 bool KernelDescriptorTableTab::rowMatchesFilter(
     const ksword::ark::DriverIntegrityEvidenceEntry& row,
-    const std::size_t sourceIndex) const
+    const std::size_t sourceIndex,
+    const QString& keyword) const
 {
     // expectedClass 把实例固定为单一表类型，即使旧驱动意外返回混合证据也不会串页。
     const std::uint32_t expectedClass = m_tableKind == KernelDescriptorTableKind::Idt
@@ -540,7 +548,6 @@ bool KernelDescriptorTableTab::rowMatchesFilter(
     {
         return false;
     }
-    const QString keyword = m_filterEdit->text().trimmed();
     if (keyword.isEmpty())
     {
         return true;
@@ -556,26 +563,37 @@ bool KernelDescriptorTableTab::rowMatchesFilter(
 
 void KernelDescriptorTableTab::rebuildTable()
 {
+    m_filterTimer->stop();
+    m_filterActive = false;
+    m_unfilteredSelection = QPersistentModelIndex();
+    ks::ui::ApplyTableRowFilter(m_table, {});
+    const bool sorting = m_table->isSortingEnabled();
+    m_table->setSortingEnabled(false);
     m_table->setRowCount(0);
     for (std::size_t sourceIndex = 0U; sourceIndex < m_rows.size(); ++sourceIndex)
     {
         const ksword::ark::DriverIntegrityEvidenceEntry& row = m_rows[sourceIndex];
-        if (!rowMatchesFilter(row, sourceIndex))
+        if (!rowMatchesFilter(row, sourceIndex, QString()))
         {
             continue;
         }
         const int tableRow = m_table->rowCount();
         m_table->insertRow(tableRow);
+        QStringList searchableFields;
         for (int column = 0; column < ColumnCount; ++column)
         {
-            QTableWidgetItem* item = readOnlyItem(
-                columnText(row, column, sourceIndex));
+            const QString text = columnText(row, column, sourceIndex);
+            searchableFields.push_back(text);
+            QTableWidgetItem* item = readOnlyItem(text);
             if (column == ColumnTable)
             {
                 item->setData(Qt::UserRole, static_cast<qulonglong>(sourceIndex));
             }
             m_table->setItem(tableRow, column, item);
         }
+
+        searchableFields.push_back(QString::fromStdWString(row.detail));
+        m_table->item(tableRow, ColumnTable)->setData(Qt::UserRole + 1, searchableFields.join(QLatin1Char(' ')));
 
         // 整行高亮由该行的 riskFlags 决定：带 HIDDEN_HOOK 的行整行标红并在 tooltip 里解释成因；
         // 单元格自己的前景色（完整性正常、可信映像基线一致/偏离）在整行高亮之后再叠加，不被它覆盖。
@@ -593,8 +611,14 @@ void KernelDescriptorTableTab::rebuildTable()
                     : KswordTheme::ErrorColor());
         }
     }
-    m_table->resizeColumnsToContents();
-    showCurrentDetail();
+    m_table->setSortingEnabled(sorting);
+    if (!m_columnsSized && m_table->rowCount() > 0)
+    {
+        m_table->resizeColumnsToContents();
+        m_table->horizontalHeader()->setSectionResizeMode(QHeaderView::Interactive);
+        m_columnsSized = true;
+    }
+    applyFilter(false);
 }
 
 QString KernelDescriptorTableTab::tableName(const ksword::ark::DriverIntegrityEvidenceEntry& row)
@@ -805,6 +829,46 @@ ks::ui::FieldDocument KernelDescriptorTableTab::detailText(
     return lines;
 }
 
+void KernelDescriptorTableTab::applyFilter(const bool allowDeferred)
+{
+    const QPointer<KernelDescriptorTableTab> guard(this);
+    if (allowDeferred && ks::ui::DeferTableUiCommitIfContextMenuOpen(this, QStringLiteral("kernel-descriptor-filter"),
+        {m_table}, [guard]() { if (guard) guard->applyFilter(); })) return;
+    const QString filterText = m_filterEdit->text().trimmed();
+    const bool active = !filterText.isEmpty();
+    if (active && !m_filterActive)
+    {
+        m_unfilteredSelection = m_table->currentIndex();
+        m_unfilteredHorizontalScroll = m_table->horizontalScrollBar()->value();
+        m_unfilteredVerticalScroll = m_table->verticalScrollBar()->value();
+    }
+    QSet<QPersistentModelIndex> excluded;
+    int firstVisible = -1;
+    for (int row = 0; row < m_table->rowCount(); ++row)
+    {
+        const auto* item = m_table->item(row, 0);
+        const bool visible = item != nullptr && (!active || item->data(Qt::UserRole + 1).toString().contains(filterText, Qt::CaseInsensitive));
+        if (!visible) excluded.insert(m_table->model()->index(row, 0));
+        else if (firstVisible < 0) firstVisible = row;
+    }
+    ks::ui::ApplyTableRowFilter(m_table, excluded);
+    if (!active && m_filterActive && m_unfilteredSelection.isValid())
+        m_table->setCurrentCell(m_unfilteredSelection.row(), m_unfilteredSelection.column());
+    else if (m_table->currentRow() < 0 || ks::ui::IsTableRowExcludedByFilter(m_table, m_table->currentRow()))
+    {
+        if (firstVisible >= 0) m_table->selectRow(firstVisible);
+        else { m_table->setCurrentItem(nullptr); m_table->clearSelection(); }
+    }
+    if (!active && m_filterActive)
+    {
+        m_table->horizontalScrollBar()->setValue(m_unfilteredHorizontalScroll);
+        m_table->verticalScrollBar()->setValue(m_unfilteredVerticalScroll);
+        m_unfilteredSelection = QPersistentModelIndex();
+    }
+    m_filterActive = active;
+    showCurrentDetail();
+}
+
 void KernelDescriptorTableTab::showCurrentDetail()
 {
     if (m_table->currentRow() < 0)
@@ -982,7 +1046,7 @@ void KernelDescriptorTableTab::showCopyMenu(const QPoint& position)
         QStringLiteral("指令视图…"));
     copyCell->setEnabled(index.isValid());
     copyRow->setEnabled(row >= 0);
-    copyAll->setEnabled(m_table->rowCount() > 0);
+    copyAll->setEnabled(ks::ui::HasTableRowsPassingFilters(m_table));
     std::size_t sourceIndex = m_rows.size();
     if (row >= 0)
     {
@@ -1044,12 +1108,7 @@ void KernelDescriptorTableTab::showCopyMenu(const QPoint& position)
     }
     else if (selected == copyAll)
     {
-        QStringList lines;
-        for (int tableRow = 0; tableRow < m_table->rowCount(); ++tableRow)
-        {
-            lines << rowClipboardText(m_table, tableRow, tableRow == 0);
-        }
-        QApplication::clipboard()->setText(lines.join(QLatin1Char('\n')));
+        QApplication::clipboard()->setText(filteredClipboardText(m_table));
     }
     else if (selected == instructionView
         && canOpenInstructionView)
@@ -1270,4 +1329,16 @@ KernelDescriptorTableTab::buildWatchPlan(const std::size_t sourceIndex) const
             .arg(row.descriptorTableBase, 0, 16);
     }
     return plan;
+}
+
+QString KernelDescriptorTableTab::filteredClipboardText(QTableWidget* table)
+{
+    if (table == nullptr) return {};
+    QStringList lines;
+    for (int row = 0; row < table->rowCount(); ++row)
+    {
+        if (ks::ui::IsTableRowExcludedByFilter(table, row)) continue;
+        lines << rowClipboardText(table, row, lines.isEmpty());
+    }
+    return lines.join(QLatin1Char('\n'));
 }
