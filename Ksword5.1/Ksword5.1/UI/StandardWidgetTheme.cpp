@@ -14,6 +14,8 @@
 #include <QApplication>
 #include <QComboBox>
 #include <QEvent>
+#include <QDynamicPropertyChangeEvent>
+#include <QHash>
 #include <QFontMetrics>
 #include <QLineEdit>
 #include <QGroupBox>
@@ -37,10 +39,12 @@
 namespace
 {
     // 不把组合框内部编辑器、表格单元格编辑器和专业视口当作独立表单控件。
-    bool isControlInterior(const QWidget* widget)
+    bool isControlInterior(const QWidget* widget, bool* stable = nullptr)
     {
+        if (stable) *stable = true;
         for (const QWidget* current = widget; current; current = current->parentWidget())
         {
+            if (stable && !current->testAttribute(Qt::WA_WState_Polished)) *stable = false;
             if (current->property(ks::ui::StandardThemeExemptProperty).toBool()
                 || current->property("ksword_detail_keep_layout").toBool())
             {
@@ -63,62 +67,158 @@ namespace
     public:
         explicit StandardControlStyle(QStyle* base) : QProxyStyle(base) {}
 
+        // 复用现有应用事件过滤器，只在真实边界/对象树变化时失效；无递归扫描。
+        void observeContextEvent(QObject* object, QEvent* event)
+        {
+            switch (event->type())
+            {
+            case QEvent::DynamicPropertyChange:
+            {
+                const auto* change = static_cast<QDynamicPropertyChangeEvent*>(event);
+                if (change->propertyName() != ks::ui::StandardThemeExemptProperty
+                    && change->propertyName() != "ksword_detail_keep_layout") return;
+                break;
+            }
+            case QEvent::ParentAboutToChange:
+            case QEvent::ParentChange:
+            case QEvent::Polish:
+            case QEvent::ChildAdded:
+            case QEvent::ChildRemoved:
+            case QEvent::WinIdChange:
+                break;
+            case QEvent::FontChange:
+            case QEvent::ApplicationFontChange:
+            case QEvent::ScreenChangeInternal:
+                ++m_fontGeneration;
+                return;
+            default:
+                return;
+            }
+            if (!qobject_cast<QWidget*>(object)) return;
+            if (++m_boundaryGeneration == 0)
+            {
+                // 代次溢出也不复用旧身份；不删除条目，保留唯一的销毁连接。
+                ++m_boundaryGeneration;
+                for (auto& context : m_contexts) context.boundaryGeneration = 0;
+            }
+        }
+
         int pixelMetric(PixelMetric metric, const QStyleOption* option,
             const QWidget* widget) const override
         {
-            if (!widget || !isControlInterior(widget))
+            int standard;
+            switch (metric)
             {
-                switch (metric)
-                {
-                case PM_LayoutHorizontalSpacing:
-                case PM_LayoutVerticalSpacing:
-                    return 8;
-                case PM_LayoutLeftMargin:
-                case PM_LayoutTopMargin:
-                case PM_LayoutRightMargin:
-                case PM_LayoutBottomMargin:
-                    return 6;
-                default:
-                    break;
-                }
+            case PM_LayoutHorizontalSpacing:
+            case PM_LayoutVerticalSpacing:
+                standard = 8;
+                break;
+            case PM_LayoutLeftMargin:
+            case PM_LayoutTopMargin:
+            case PM_LayoutRightMargin:
+            case PM_LayoutBottomMargin:
+                standard = 6;
+                break;
+            default:
+                // 绝大多数绘制度量没有共享覆盖，无须查询控件/祖先身份。
+                return QProxyStyle::pixelMetric(metric, option, widget);
             }
-            return QProxyStyle::pixelMetric(metric, option, widget);
+            return !widget || !controlInterior(widget) ? standard
+                : QProxyStyle::pixelMetric(metric, option, widget);
         }
 
         QSize sizeFromContents(ContentsType type, const QStyleOption* option,
             const QSize& contents, const QWidget* widget) const override
         {
             QSize result = QProxyStyle::sizeFromContents(type, option, contents, widget);
-            if (!widget || isControlInterior(widget)
-                || widget->minimumHeight() == widget->maximumHeight())
-            {
-                return result;
-            }
-            const int height = std::max(28, QFontMetrics(widget->font()).height() + 12);
-            if (widget->maximumHeight() < height)
-            {
-                return result; // 标题栏/编辑器等明确紧凑尺寸优先，不用全局min-height撑大它们。
-            }
             switch (type)
             {
             case CT_LineEdit:
             case CT_SpinBox:
             case CT_ComboBox:
             case CT_PushButton:
-                result.setHeight(std::max(result.height(), height));
                 break;
             case CT_ToolButton:
                 if (const auto* tool = qobject_cast<const QToolButton*>(widget);
-                    tool && !tool->autoRaise())
-                {
-                    result.setHeight(std::max(result.height(), height));
-                }
+                    !tool || tool->autoRaise()) return result;
                 break;
             default:
-                break;
+                return result; // 非表单内容既不走边界链，也不测量字体。
             }
-            return result;
+            if (!widget || widget->minimumHeight() == widget->maximumHeight()
+                || controlInterior(widget)) return result;
+            const int height = controlHeight(widget);
+            if (widget->maximumHeight() >= height)
+            {
+                result.setHeight(std::max(result.height(), height));
+            }
+            return result; // 明确紧凑的最大/固定尺寸仍优先。
         }
+
+    private:
+        struct ControlContext
+        {
+            quint64 boundaryGeneration = 0;
+            bool interior = false;
+            quint64 fontGeneration = 0;
+            QFont font;
+            int logicalDpiY = 0;
+            qreal devicePixelRatio = 0;
+            int height = 0;
+        };
+
+        ControlContext& contextFor(const QWidget* widget) const
+        {
+            auto found = m_contexts.find(widget);
+            if (found == m_contexts.end())
+            {
+                found = m_contexts.insert(widget, ControlContext{});
+                connect(widget, &QObject::destroyed, this, [this, widget]()
+                {
+                    m_contexts.remove(widget); // 避免地址复用及已关闭页面占用缓存。
+                });
+            }
+            return found.value();
+        }
+
+        bool controlInterior(const QWidget* widget) const
+        {
+            // 构造阶段动态类型尚未稳定，不保存组合框/SpinBox/视口的中间身份。
+            if (!widget->testAttribute(Qt::WA_WState_Polished)) return isControlInterior(widget);
+            auto& context = contextFor(widget);
+            if (context.boundaryGeneration != m_boundaryGeneration)
+            {
+                bool stable = false;
+                context.interior = isControlInterior(widget, &stable);
+                context.boundaryGeneration = stable ? m_boundaryGeneration : 0;
+            }
+            return context.interior;
+        }
+
+        int controlHeight(const QWidget* widget) const
+        {
+            if (!widget->testAttribute(Qt::WA_WState_Polished))
+                return std::max(28, QFontMetrics(widget->font()).height() + 12);
+            auto& context = contextFor(widget);
+            const QFont font = widget->font();
+            const int dpi = widget->logicalDpiY();
+            const qreal ratio = widget->devicePixelRatioF();
+            if (context.height == 0 || context.fontGeneration != m_fontGeneration
+                || context.font != font || context.logicalDpiY != dpi
+                || context.devicePixelRatio != ratio)
+            {
+                context.font = font;
+                context.logicalDpiY = dpi;
+                context.devicePixelRatio = ratio;
+                context.fontGeneration = m_fontGeneration;
+                context.height = std::max(28, QFontMetrics(font).height() + 12);
+            }
+            return context.height;
+        }
+
+        quint64 m_boundaryGeneration = 1;
+        quint64 m_fontGeneration = 1;
+        mutable QHash<const QWidget*, ControlContext> m_contexts;
     };
 
     // 标准容器只拥有自己的底板；剔除完整已登记块之后仍有QSS即视为业务自有外观。
@@ -297,13 +397,16 @@ namespace
     class DefaultControlBindings final : public QObject
     {
     public:
-        explicit DefaultControlBindings(QApplication* app) : QObject(app) {}
+        explicit DefaultControlBindings(QApplication* app, StandardControlStyle* style)
+            : QObject(app), m_style(style) {}
 
     protected:
         bool eventFilter(QObject* object, QEvent* event) override
         {
-            if (!event || (event->type() != QEvent::Polish && event->type() != QEvent::Show
-                && event->type() != QEvent::FontChange))
+            if (!event) return false;
+            if (m_style) m_style->observeContextEvent(object, event);
+            if (event->type() != QEvent::Polish && event->type() != QEvent::Show
+                && event->type() != QEvent::FontChange)
             {
                 return false;
             }
@@ -407,6 +510,7 @@ namespace
         }
 
     private:
+        QPointer<StandardControlStyle> m_style; // style被外部替换时自动失效。
         bool m_enrolling = false; // GUI线程内的重入保护，不持有控件或业务对象。
     };
 }
@@ -416,9 +520,10 @@ void ks::ui::InstallStandardWidgetTheme(QApplication* application)
     if (!application || application->property("ksword_standard_widget_theme_installed").toBool()) return;
     application->setProperty("ksword_standard_widget_theme_installed", true);
     // 固定跨平台基础绘制，不再让遗漏局部QSS的新控件退回Windows原始立体外观。
+    StandardControlStyle* standard = nullptr;
     if (QStyle* base = QStyleFactory::create(QString::fromLatin1("fusion")))
     {
-        auto* standard = new StandardControlStyle(base);
+        standard = new StandardControlStyle(base);
         standard->setObjectName(QStringLiteral("fusion")); // 保留依赖QStyleFactory重建基础style的兼容路径。
         application->setStyle(standard);
     }
@@ -440,5 +545,5 @@ void ks::ui::InstallStandardWidgetTheme(QApplication* application)
     application->setPalette(colors);
     // 首个业务窗口创建前已有基线；外观设置刷新仍由原标记替换链统一接管。
     application->setStyleSheet(application->styleSheet() + BuildGlobalBaseControlStyleBlock());
-    application->installEventFilter(new DefaultControlBindings(application));
+    application->installEventFilter(new DefaultControlBindings(application, standard));
 }
