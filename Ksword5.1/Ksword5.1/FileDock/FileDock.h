@@ -164,6 +164,7 @@ private:
 
         std::vector<QString> history;          // 路径历史列表。
         int historyIndex = -1;                 // 当前历史索引。
+        std::uint64_t navigationGeneration = 0; // Successful/attempted navigation identity for mutation refresh.
         QString currentPath;                   // 当前目录路径。
         QString pendingSelectionPath;          // 返回上级后待恢复选中的子目录路径。
         QString manualLoadedPath;              // 手动解析模型当前已加载目录路径。
@@ -441,7 +442,8 @@ private:
     void setSelectedFileIntegrityLevel(
         FilePanelWidgets& panel,
         unsigned long integrityRid,
-        const QString& levelDisplayText);
+        const QString& levelDisplayText,
+        const std::vector<QString>& menuPaths);
 
     // unlockSelectedItemsByDriver：
     // - 作用：扫描选中路径占用进程，列出候选进程并按用户选择用 R3/R0 结束；
@@ -531,6 +533,10 @@ private:
     // - 说明：当前第一版只接受文件，目录会被跳过，失败原因在窗口状态栏展示。
     // - 参数 scanPaths：待扫描文件路径集合。
     void openMappedProcessScanWindow(const std::vector<QString>& scanPaths);
+
+    void submitFileMutation(FilePanelWidgets& panel, std::vector<QString> paths,
+        const QString& destination, unsigned long integrityRid, const QString& displayText,
+        int kind, const QString& directory, std::uint64_t directoryGeneration);
 
     // ======================= 工具函数 =========================
     // currentIndexPath：
@@ -656,6 +662,7 @@ private:
     FilePanelWidgets m_rightPanel;             // 右侧面板状态。
     bool m_transferInProgress = false;         // 跨面板复制/移动后台任务是否运行。
 
+    ks::ui::AsyncOperation* m_fileMutationOperation = nullptr; // Approved write lane; reject overlap.
     ks::ui::AsyncOperation* m_fileAnalysisOperation = nullptr; // 单个值化分析任务，析构先关闭。
 
     // 文件解锁器后台线程状态。

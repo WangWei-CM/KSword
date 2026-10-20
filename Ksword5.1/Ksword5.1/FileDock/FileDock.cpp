@@ -12807,6 +12807,114 @@ namespace
         }).detach();
     }
 
+    struct FileMutationRequest
+    {
+        int kind = 0; // 0 file, 1 directory, 2 rename, 3 integrity.
+        std::vector<QString> paths;
+        QString destination;
+        QString panelName;
+        DWORD integrityRid = 0;
+        std::shared_ptr<FileAnalysisProgress> progress;
+        int progressPid = 0;
+    };
+
+    struct FileMutationResult
+    {
+        std::size_t successCount = 0;
+        std::size_t failureCount = 0;
+        DWORD privilegeError = ERROR_SUCCESS;
+        QString failures;
+        bool canceled = false;
+    };
+
+    template<class Apply, class Canceled, class Progress>
+    FileMutationResult runFileMutationBatch(const std::vector<QString>& paths,
+        Apply apply, Canceled canceled, Progress progress)
+    {
+        FileMutationResult result;
+        QStringList failures;
+        for (std::size_t index = 0; index < paths.size(); ++index)
+        {
+            if (canceled()) { result.canceled = true; break; }
+            QString detail;
+            const DWORD code = apply(paths[index], detail);
+            if (code == ERROR_SUCCESS) ++result.successCount;
+            else
+            {
+                ++result.failureCount;
+                failures.push_back(QStringLiteral("%1 | code=%2 | %3")
+                    .arg(QDir::toNativeSeparators(paths[index])).arg(code).arg(detail));
+                if (result.privilegeError == ERROR_SUCCESS && ks::ui::isPrivilegeRequiredError(code))
+                    result.privilegeError = code;
+            }
+            // Cancellation is checked only before the next transaction, never
+            // while an already-entered mutation still owns its completion work.
+            progress(index + 1, paths.size());
+        }
+        result.failures = failures.join(QLatin1Char('\n'));
+        return result;
+    }
+
+    FileMutationResult runFileMutation(const FileMutationRequest& request)
+    {
+        QElapsedTimer progressTimer;
+        progressTimer.start();
+        FileMutationResult result = runFileMutationBatch(request.paths,
+            [&request](const QString& path, QString& detail) -> DWORD
+            {
+                DWORD code = ERROR_SUCCESS;
+                if (request.kind == 3)
+                    code = setFileIntegrityLevelByR0ThenR3(path, request.integrityRid, &detail);
+                else if (request.kind == 2)
+                {
+                    const QFileInfo old(path);
+                    const bool ok = old.isDir()
+                        ? QDir(old.absolutePath()).rename(old.fileName(), request.destination)
+                        : QFile::rename(path, request.destination);
+                    if (!ok) code = ERROR_GEN_FAILURE;
+                }
+                else if (request.kind == 1)
+                {
+                    if (!QDir().mkpath(request.destination)) code = ERROR_GEN_FAILURE;
+                }
+                else
+                {
+                    QFile file(request.destination);
+                    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate))
+                    { code = ERROR_GEN_FAILURE; detail = file.errorString(); }
+                    file.close();
+                }
+                kLogEvent event;
+                if (code == ERROR_SUCCESS)
+                    info << event << "[FileDock] file mutation completed, kind=" << request.kind
+                        << ", panel=" << request.panelName.toStdString() << ", path=" << path.toStdString()
+                        << ", destination=" << request.destination.toStdString() << ", rid=" << request.integrityRid
+                        << ", detail=" << detail.toStdString() << eol;
+                else
+                    warn << event << "[FileDock] file mutation failed, kind=" << request.kind
+                        << ", path=" << path.toStdString() << ", code=" << code << ", detail=" << detail.toStdString() << eol;
+                return code;
+            },
+            [&request]() { return request.progress->cancel.load(); },
+            [&request, &progressTimer](std::size_t completed, std::size_t total)
+            {
+                const int percent = static_cast<int>(95.0 * completed / total);
+                request.progress->percent.store(percent);
+                if (completed == total || progressTimer.elapsed() >= 100)
+                {
+                    progressTimer.restart();
+                    kPro.set(request.progressPid, "处理中", 0, static_cast<float>(std::max(2, percent)));
+                }
+            });
+        // Accepted writes finish independently of the page. Only an explicit
+        // progress-dialog cancel stops the next transaction boundary.
+        kPro.finish(request.progressPid,
+            result.canceled ? kProgressState::Canceled
+                : (result.failureCount == 0 ? kProgressState::Success : kProgressState::Failure),
+            result.canceled ? "用户取消" : (result.failureCount == 0 ? "完成" : "失败"));
+        return result;
+    }
+
     // kRecoveryVolumeProbeGenerationProperty 作用：
     // - 用途：记录“这是第几次卷探测请求”，以动态属性挂在恢复页的卷下拉框上；
     // - 入参：无（作为 QObject::property/setProperty 的键使用）；
@@ -13209,6 +13317,7 @@ FileDock::FileDock(QWidget* parent)
 
 FileDock::~FileDock()
 {
+    if (m_fileMutationOperation != nullptr) m_fileMutationOperation->close();
     if (m_fileAnalysisOperation != nullptr) m_fileAnalysisOperation->close();
     m_uiDispatcher->close();
     // 析构阶段先释放持有型 Oplock，再停止解锁器后台线程。
@@ -14033,6 +14142,7 @@ void FileDock::navigateToPath(FilePanelWidgets& panel, const QString& pathText, 
         normalizedPath += QDir::separator();
     }
 
+    ++panel.navigationGeneration;
     QDir targetDir(normalizedPath);
     if (!targetDir.exists())
     {
@@ -16815,7 +16925,11 @@ void FileDock::showPanelContextMenu(FilePanelWidgets& panel, const QPoint& local
     locateLinkTargetAction->setEnabled(!firstLinkTarget.isEmpty());
     copyAction->setEnabled(hasSelection);
     cutAction->setEnabled(hasSelection);
-    renameAction->setEnabled(isSingleSelection);
+    const bool mutationBusy = m_fileMutationOperation && m_fileMutationOperation->isInFlight();
+    renameAction->setEnabled(isSingleSelection && !mutationBusy);
+    newFileAction->setEnabled(!mutationBusy);
+    newFolderAction->setEnabled(!mutationBusy);
+    fileIntegritySubMenu->setEnabled(hasSelection && !mutationBusy);
     deleteAction->setEnabled(hasSelection);
     deleteModeMenu->setEnabled(hasSelection);
     permanentDeleteAction->setEnabled(hasSelection);
@@ -16916,7 +17030,7 @@ void FileDock::showPanelContextMenu(FilePanelWidgets& panel, const QPoint& local
         setSelectedFileIntegrityLevel(
             panel,
             integrityRid,
-            fileIntegrityNameFromRid(integrityRid));
+            fileIntegrityNameFromRid(integrityRid), menuPaths);
         return;
     }
     if (selectedAction == openAction)
@@ -17701,151 +17815,118 @@ void FileDock::transferSelectedItemsToOppositePanel(FilePanelWidgets& sourcePane
         });
 }
 
-void FileDock::createNewFileOrFolder(FilePanelWidgets& panel, bool createFolder)
+void FileDock::createNewFileOrFolder(FilePanelWidgets& panel, const bool createFolder)
 {
-    {
-        kLogEvent event;
-        info << event
-            << "[FileDock] 新建请求, panel="
-            << panel.panelNameText.toStdString()
-            << ", type="
-            << (createFolder ? "folder" : "file")
-            << ", currentPath="
-            << QDir::toNativeSeparators(panel.currentPath).toStdString()
-            << eol;
-    }
-
+    if (m_fileMutationOperation && m_fileMutationOperation->isInFlight()) return;
+    const QString directory = panel.currentPath;
+    const auto directoryGeneration = panel.navigationGeneration;
     bool ok = false;
-    const QString inputName = QInputDialog::getText(
-        this,
+    const QString inputName = QInputDialog::getText(this,
         createFolder ? QStringLiteral("新建文件夹") : QStringLiteral("新建文件"),
-        QStringLiteral("请输入名称："),
-        QLineEdit::Normal,
-        createFolder ? QStringLiteral("新建文件夹") : QStringLiteral("新建文件.txt"),
-        &ok);
-    if (!ok)
-    {
-        return;
-    }
-
-    const QString trimmedName = inputName.trimmed();
-    if (trimmedName.isEmpty())
-    {
-        return;
-    }
-
-    const QString targetPath = QDir(panel.currentPath).filePath(trimmedName);
-    bool createOk = false;
-    if (createFolder)
-    {
-        QDir dir;
-        createOk = dir.mkpath(targetPath);
-    }
-    else
-    {
-        QFile file(targetPath);
-        createOk = file.open(QIODevice::WriteOnly | QIODevice::Truncate);
-        file.close();
-    }
-
-    if (!createOk)
-    {
-        kLogEvent event;
-        err << event
-            << "[FileDock] 新建失败, panel="
-            << panel.panelNameText.toStdString()
-            << ", targetPath="
-            << QDir::toNativeSeparators(targetPath).toStdString()
-            << eol;
-        return;
-    }
-
-    refreshPanel(panel);
-
-    kLogEvent event;
-    info << event
-        << "[FileDock] 新建成功, panel="
-        << panel.panelNameText.toStdString()
-        << ", targetPath="
-        << QDir::toNativeSeparators(targetPath).toStdString()
-        << eol;
+        QStringLiteral("请输入名称："), QLineEdit::Normal,
+        createFolder ? QStringLiteral("新建文件夹") : QStringLiteral("新建文件.txt"), &ok);
+    if (!ok || inputName.trimmed().isEmpty()) return;
+    const QString targetPath = QDir(directory).filePath(inputName.trimmed());
+    submitFileMutation(panel, { targetPath }, targetPath, 0,
+        createFolder ? QStringLiteral("新建文件夹") : QStringLiteral("新建文件"),
+        createFolder ? 1 : 0, directory, directoryGeneration);
 }
 
 void FileDock::renameSelectedItem(FilePanelWidgets& panel)
 {
+    if (m_fileMutationOperation && m_fileMutationOperation->isInFlight()) return;
     const QString path = currentIndexPath(panel);
-    if (path.isEmpty())
-    {
-        return;
-    }
-
-    {
-        kLogEvent event;
-        info << event
-            << "[FileDock] 重命名请求, panel="
-            << panel.panelNameText.toStdString()
-            << ", oldPath="
-            << QDir::toNativeSeparators(path).toStdString()
-            << eol;
-    }
-
-    QFileInfo oldInfo(path);
+    if (path.isEmpty()) return;
+    const QString directory = panel.currentPath;
+    const auto directoryGeneration = panel.navigationGeneration;
+    const QFileInfo old(path); // fileName/absolutePath below are lexical only.
     bool ok = false;
-    const QString newName = QInputDialog::getText(
-        this,
-        QStringLiteral("重命名"),
-        QStringLiteral("新名称："),
-        QLineEdit::Normal,
-        oldInfo.fileName(),
-        &ok);
-    if (!ok)
-    {
-        return;
-    }
+    const QString inputName = QInputDialog::getText(this, QStringLiteral("重命名"),
+        QStringLiteral("新名称："), QLineEdit::Normal, old.fileName(), &ok);
+    const QString name = inputName.trimmed();
+    if (!ok || name.isEmpty() || name == old.fileName()) return;
+    const QString destination = QDir(old.absolutePath()).filePath(name);
+    submitFileMutation(panel, { path }, destination, 0, QStringLiteral("重命名"), 2,
+        directory, directoryGeneration);
+}
 
-    const QString trimmedName = newName.trimmed();
-    if (trimmedName.isEmpty() || trimmedName == oldInfo.fileName())
+void FileDock::submitFileMutation(FilePanelWidgets& panel, std::vector<QString> paths,
+    const QString& destination, const unsigned long integrityRid, const QString& displayText,
+    const int kind, const QString& directory, const std::uint64_t directoryGeneration)
+{
+    if (!m_fileMutationOperation) m_fileMutationOperation = new ks::ui::AsyncOperation(this);
+    if (m_fileMutationOperation->isInFlight()) return; // Never supersede an approved write.
+    const bool left = &panel == &m_leftPanel;
+    const auto progress = std::make_shared<FileAnalysisProgress>();
+    const QString title = ks::i18n::displayText(kind == 3 ? QStringLiteral("设置文件完整性") : displayText);
+    const int progressPid = kPro.add(this, "文件", title.toStdString());
+    auto* dialog = new QProgressDialog(title, ks::i18n::displayText(QStringLiteral("取消")), 0, 100, this);
+    dialog->setWindowTitle(title);
+    dialog->setWindowModality(Qt::NonModal);
+    dialog->setAutoClose(false); dialog->setAutoReset(false); dialog->setMinimumDuration(0); dialog->setValue(0);
+    auto* timer = new QTimer(dialog); timer->setInterval(100);
+    connect(timer, &QTimer::timeout, dialog, [dialog, progress]()
+    { const int value = progress->percent.load(); if (!progress->cancel.load() && dialog->value() != value) dialog->setValue(value); });
+    connect(dialog, &QProgressDialog::canceled, dialog, [progress]() { progress->cancel.store(true); });
+    const QPointer<QProgressDialog> guard(dialog);
+    const std::uint64_t acceptedTicket = m_fileMutationOperation->submitTransaction<FileMutationRequest, FileMutationResult>(
+        { kind, std::move(paths), destination, panel.panelNameText, static_cast<DWORD>(integrityRid), progress, progressPid },
+        runFileMutation,
+        [this, guard, left, kind, displayText, directory, directoryGeneration, progressPid](const FileMutationResult& result, std::uint64_t)
+        {
+            if (guard) guard->deleteLater();
+            FilePanelWidgets& target = left ? m_leftPanel : m_rightPanel;
+            const QPointer<FileDock> refreshOwner(this);
+            const auto refresh = [refreshOwner, left, directory, directoryGeneration]()
+            {
+                if (!refreshOwner) return;
+                FilePanelWidgets& current = left ? refreshOwner->m_leftPanel : refreshOwner->m_rightPanel;
+                if (current.navigationGeneration == directoryGeneration && pathEqualsCaseInsensitive(current.currentPath, directory))
+                    refreshOwner->refreshPanel(current);
+            };
+            if (target.navigationGeneration == directoryGeneration && pathEqualsCaseInsensitive(target.currentPath, directory))
+            {
+                // refreshPanel resets/replaces the source model before navigation;
+                // defer that whole operation while either original view owns a menu.
+                if (!ks::ui::DeferItemViewUiCommitIfContextMenuOpen(this,
+                    left ? QStringLiteral("file-mutation-refresh-left") : QStringLiteral("file-mutation-refresh-right"),
+                    { target.fileView, target.compactFileView }, refresh)) refresh();
+            }
+            if (!refreshOwner) return true;
+            kPro.set(progressPid, result.canceled ? "用户取消" : "完成", 0, 100.0f);
+            if (kind != 3) return true; // Preserve create/rename's existing log-only completion.
+            const QString summary = (result.canceled ? ks::i18n::displayText(QStringLiteral("已取消")) + QLatin1Char('\n') : QString())
+                + QStringLiteral("文件完整性设置完成：成功 %1，失败 %2，目标=%3。")
+                    .arg(result.successCount).arg(result.failureCount).arg(displayText);
+            const QPointer<FileDock> self(this);
+            const bool privilegeHandled = result.privilegeError != ERROR_SUCCESS && ks::ui::promptForPrivilegeFailure(
+                this, QStringLiteral("设置文件完整性级别"), result.privilegeError);
+            if (!self) return true;
+            if (result.failureCount != 0 && !privilegeHandled)
+                QMessageBox::warning(this, QStringLiteral("设置文件完整性"), summary + QStringLiteral("\n\n失败明细：\n") + result.failures);
+            else if (result.failureCount == 0)
+                QMessageBox::information(this, QStringLiteral("设置文件完整性"), summary);
+            return true;
+        },
+        [guard, progressPid](std::exception_ptr)
+        {
+            if (guard) guard->deleteLater();
+            kPro.set(progressPid, "失败", 0, 100.0f);
+            kLogEvent event; warn << event << "[FileDock] file mutation worker failed" << eol;
+        },
+        [progressPid](const ks::ui::AsyncOperationOutcome outcome)
+        {
+            // Value-only fallback for rejection, failed launch or lost UI delivery.
+            // A worker's real terminal result is never overwritten by this cleanup.
+            if (outcome != ks::ui::AsyncOperationOutcome::Applied)
+                kPro.finish(progressPid, kProgressState::Failure, "失败");
+        });
+    if (acceptedTicket == 0)
     {
-        return;
+        if (guard) guard->deleteLater();
+        return; // Shutdown admission rejected: no write was accepted or entered.
     }
-
-    const QString newPath = oldInfo.dir().filePath(trimmedName);
-    bool renameOk = false;
-    if (oldInfo.isDir())
-    {
-        QDir parentDir = oldInfo.dir();
-        renameOk = parentDir.rename(oldInfo.fileName(), trimmedName);
-    }
-    else
-    {
-        renameOk = QFile::rename(path, newPath);
-    }
-
-    if (!renameOk)
-    {
-        kLogEvent event;
-        err << event
-            << "[FileDock] 重命名失败, panel="
-            << panel.panelNameText.toStdString()
-            << ", oldPath="
-            << QDir::toNativeSeparators(path).toStdString()
-            << ", newPath="
-            << QDir::toNativeSeparators(newPath).toStdString()
-            << eol;
-        return;
-    }
-
-    refreshPanel(panel);
-
-    kLogEvent event;
-    info << event
-        << "[FileDock] 重命名成功, panel="
-        << panel.panelNameText.toStdString()
-        << ", oldPath="
-        << QDir::toNativeSeparators(path).toStdString()
-        << ", newPath="
-        << QDir::toNativeSeparators(newPath).toStdString()
-        << eol;
+    if (guard) { timer->start(); guard->show(); }
 }
 
 void FileDock::deleteSelectedItem(FilePanelWidgets& panel)
@@ -19592,129 +19673,21 @@ void FileDock::takeOwnershipSelectedItems(FilePanelWidgets& panel)
     }).detach();
 }
 
-void FileDock::setSelectedFileIntegrityLevel(
-    FilePanelWidgets& panel,
-    const unsigned long integrityRid,
-    const QString& levelDisplayText)
+void FileDock::setSelectedFileIntegrityLevel(FilePanelWidgets& panel,
+    const unsigned long integrityRid, const QString& levelDisplayText, const std::vector<QString>& menuPaths)
 {
-    // 输入：当前面板选中项、目标完整性 RID 和显示文本。
-    // 处理：逐个先调用 R0 内核 API 写入 LABEL_SECURITY_INFORMATION，驱动不可用/旧驱动时回退 R3，并汇总失败项。
-    // 返回：无返回值；成功/失败通过日志、进度条和消息框反馈。
-    const std::vector<QString> paths = selectedPaths(panel);
-    if (paths.empty())
-    {
-        kLogEvent emptyEvent;
-        warn << emptyEvent
-            << "[FileDock] 设置文件完整性被忽略：未选中路径, panel="
-            << panel.panelNameText.toStdString()
-            << eol;
-        return;
-    }
-
-    const QMessageBox::StandardButton userChoice = QMessageBox::question(
-        this,
+    if (m_fileMutationOperation && m_fileMutationOperation->isInFlight()) return;
+    const std::vector<QString> paths = menuPaths;
+    if (paths.empty()) return;
+    const QString directory = panel.currentPath;
+    const auto directoryGeneration = panel.navigationGeneration;
+    const QMessageBox::StandardButton userChoice = QMessageBox::question(this,
         QStringLiteral("设置文件完整性"),
         QStringLiteral("将对选中的 %1 项写入文件 Mandatory Label：%2。\n"
             "该操作会影响低/中/高完整性进程对对象的写入权限，可能需要管理员权限。是否继续？")
-            .arg(paths.size())
-            .arg(levelDisplayText),
-        QMessageBox::Yes | QMessageBox::No,
-        QMessageBox::No);
-    if (userChoice != QMessageBox::Yes)
-    {
-        return;
-    }
-
-    const DWORD targetIntegrityRid = static_cast<DWORD>(integrityRid);
-    const int progressPid = kPro.add(this, "文件", "设置文件完整性");
-    kPro.set(progressPid, "准备执行", 0, 5.0f);
-
-    QStringList failureDetails;
-    std::size_t successCount = 0U;
-    // privilegePromptHandled：多个目标失败时最多展示一次权限恢复提示，并抑制最终重复弹窗。
-    bool privilegePromptHandled = false;
-    for (std::size_t index = 0; index < paths.size(); ++index)
-    {
-        const QString& targetPath = paths[index];
-        QString detailText;
-        const DWORD result = setFileIntegrityLevelByR0ThenR3(
-            targetPath,
-            targetIntegrityRid,
-            &detailText);
-        if (result == ERROR_SUCCESS)
-        {
-            successCount += 1U;
-            kLogEvent itemEvent;
-            info << itemEvent
-                << "[FileDock] 设置文件完整性成功, panel="
-                << panel.panelNameText.toStdString()
-                << ", path="
-                << QDir::toNativeSeparators(targetPath).toStdString()
-                << ", rid=0x"
-                << QString::number(targetIntegrityRid, 16).toStdString()
-                << ", detail="
-                << detailText.toStdString()
-                << eol;
-        }
-        else
-        {
-            if (!privilegePromptHandled)
-            {
-                privilegePromptHandled = ks::ui::promptForPrivilegeFailure(
-                    this,
-                    QStringLiteral("设置文件完整性级别"),
-                    result);
-            }
-            failureDetails.push_back(QStringLiteral("%1 | code=%2 | %3")
-                .arg(QDir::toNativeSeparators(targetPath))
-                .arg(result)
-                .arg(detailText));
-        }
-
-        const float progress = 5.0f + (static_cast<float>(index + 1) / static_cast<float>(paths.size())) * 90.0f;
-        kPro.set(progressPid, "处理中", 0, progress);
-    }
-
-    refreshPanel(panel);
-    kPro.set(progressPid, "完成", 0, 100.0f);
-
-    const QString summaryText = QStringLiteral("文件完整性设置完成：成功 %1，失败 %2，目标=%3。")
-        .arg(successCount)
-        .arg(failureDetails.size())
-        .arg(levelDisplayText);
-    if (!failureDetails.isEmpty())
-    {
-        kLogEvent failEvent;
-        warn << failEvent
-            << "[FileDock] 设置文件完整性部分失败, panel="
-            << panel.panelNameText.toStdString()
-            << ", successCount="
-            << successCount
-            << ", failCount="
-            << failureDetails.size()
-            << ", detailPreview=\n"
-            << buildLogPreviewText(failureDetails).toStdString()
-            << eol;
-        if (!privilegePromptHandled)
-        {
-            QMessageBox::warning(
-                this,
-                QStringLiteral("设置文件完整性"),
-                summaryText + QStringLiteral("\n\n失败明细：\n") + failureDetails.join('\n'));
-        }
-        return;
-    }
-
-    kLogEvent finishEvent;
-    info << finishEvent
-        << "[FileDock] 设置文件完整性完成, panel="
-        << panel.panelNameText.toStdString()
-        << ", successCount="
-        << successCount
-        << ", target="
-        << levelDisplayText.toStdString()
-        << eol;
-    QMessageBox::information(this, QStringLiteral("设置文件完整性"), summaryText);
+            .arg(paths.size()).arg(levelDisplayText), QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+    if (userChoice != QMessageBox::Yes) return;
+    submitFileMutation(panel, paths, {}, integrityRid, levelDisplayText, 3, directory, directoryGeneration);
 }
 
 void FileDock::showColumnManagerDialog(FilePanelWidgets& panel)
