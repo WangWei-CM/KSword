@@ -6,6 +6,7 @@ p = argparse.ArgumentParser(description=__doc__)
 p.add_argument('--repository-root', type=Path, default=Path(__file__).resolve().parents[1])
 p.add_argument('--source-root', type=Path)
 p.add_argument('--dependency-source-root', type=Path)
+p.add_argument('--secondary-dependency-source-root', type=Path)
 p.add_argument('--output-dir', type=Path, required=True)
 a = p.parse_args()
 root = a.repository_root.resolve()
@@ -17,6 +18,8 @@ for name in ('AsyncOperation.h', 'AsyncOperation.cpp', 'AsyncUiDispatcher.h', 'A
     src = source / ui / name
     if not src.exists() and a.dependency_source_root:
         src = a.dependency_source_root.resolve() / ui / name
+    if not src.exists() and a.secondary_dependency_source_root:
+        src = a.secondary_dependency_source_root.resolve() / ui / name
     (out / name).write_bytes((src if src.exists() else root / ui / name).read_bytes())
 fixture = r'''
 #include "AsyncOperation.h"
@@ -95,6 +98,23 @@ static void shutdownTests(){
  check(rejected.submitTransaction<int,int>(2,[](int v){return v;},[](int,std::uint64_t){return true;},[](std::exception_ptr){},[&](Outcome state){if(state==Outcome::BusyRejected)++rejectedCleanup;})==0&&rejectedCleanup==1,"shutdown rejects new transaction without running it");op.close();check(global.pending()==1&&cleaned==0,"close cannot release unfinished transaction exit lease");release.release();pump([&]{return global.pending()==0;});check(cleaned==1&&cleanupSawLease,"lease returned only after final cleanup");global.cancelShutdown();
  std::vector<std::thread> threads;std::atomic_int accepted=0;for(int i=0;i<4;++i)threads.emplace_back([&]{for(int n=0;n<1000;++n){auto lease=registry.acquire();if(lease)++accepted;}});for(auto& thread:threads)thread.join();check(accepted==4000&&registry.pending()==0,"concurrent value lease churn drains exactly");
 }
+static void droppedStateTests(){
+ using Op=ks::ui::AsyncOperation;
+ auto* pool=QThreadPool::globalInstance();
+ {
+  auto op=std::make_unique<Op>(nullptr);int states=0,applied=0;bool idle=false;
+  op->setStateChangedCallback([&]{++states;idle=!op->isInFlight();});
+  op->submitTransaction<int,int>(1,[](int value){return value;},[&](int,std::uint64_t){++applied;return true;},[](std::exception_ptr){});pool->waitForDone();
+  QCoreApplication::removePostedEvents(op.get(),QEvent::MetaCall);check(states==1&&applied==0,"drop does not synchronously call GUI state from cleanup thread");pump([&]{return states==2;});check(idle&&!op->isInFlight(),"drop notifies GUI idle without business timer");
+ }
+ {
+  auto op=std::make_unique<Op>(nullptr);int states=0;op->setStateChangedCallback([&]{++states;});op->submitTransaction<int,int>(1,[](int v){return v;},[](int,std::uint64_t){return true;},[](std::exception_ptr){});pool->waitForDone();QCoreApplication::removePostedEvents(op.get(),QEvent::MetaCall);op.reset();QCoreApplication::processEvents();check(states==1,"queued drop recovery cannot touch destroyed owner");
+ }
+ {
+  Op op(nullptr);int idle=0;op.setStateChangedCallback([&]{if(!op.isInFlight())++idle;});op.submitTransaction<int,int>(1,[](int v){return v;},[](int,std::uint64_t){return true;},[](std::exception_ptr){});pool->waitForDone();QCoreApplication::removePostedEvents(&op,QEvent::MetaCall);
+  QSemaphore entered,release;op.submitTransaction<int,int>(2,[&](int v){entered.release();release.acquire();return v;},[](int,std::uint64_t){return true;},[](std::exception_ptr){});check(entered.tryAcquire(1,5000),"new transaction accepted after dropped delivery");QCoreApplication::processEvents();check(idle==0&&op.isInFlight(),"old recovery notification respects new physical request");release.release();pump([&]{return !op.isInFlight();});check(idle==1,"new request owns its one idle completion");
+ }
+}
 struct ThrowCopyRequest {
  std::shared_ptr<std::atomic_int> copies;
  explicit ThrowCopyRequest(std::shared_ptr<std::atomic_int> value):copies(std::move(value)){}
@@ -123,7 +143,7 @@ int main(int argc,char** argv){QCoreApplication app(argc,argv);try{
  check(order.empty(),"tasks queue behind actual pool worker");release.release();
  pump([&]{return !low.isInFlight()&&!normal.isInFlight()&&!high.isInFlight();});
  check(order==std::vector<int>({1,0,-1}),"real pool executes high/default/low");check(applied==3&&cleaned==2&&errors==0,"legacy and priority callbacks settle normally");
- pool->waitForDone();transactionTests();launchFailureTests();shutdownTests();pool->setMaxThreadCount(threads);
+ pool->waitForDone();transactionTests();launchFailureTests();shutdownTests();droppedStateTests();pool->setMaxThreadCount(threads);
  std::cout<<"ASYNC_CORE_CHECKS="<<checks<<"\nPOOL_ORDER=high,default,low\nGUI_WIDGETS_CREATED=0\nBUSINESS_IO_CALLS=0\n";return 0;
  }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}
 '''

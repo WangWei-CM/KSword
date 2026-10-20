@@ -105,13 +105,21 @@ namespace ks::ui
         const auto shared = m_shared; // 共享的非 UI 请求状态。
         const auto request = m_request; // 本次请求身份。
         request->workerFinished.store(true);
+        const auto dispatcher = m_dispatcher;
         AsyncOperation* const receiver = m_receiver; // 仅在排队回调中使用。
         m_dispatcher->post([receiver, request, result = std::move(result), failure]()
         {
             receiver->complete(request, result, failure);
-        }, [shared, request]()
+        }, [shared, request, dispatcher, receiver]()
         {
             shared->drop(request);
+            // 丢弃结果不允许永久留下页面busy。仅经同一生命周期门禁回UI恢复，
+            // 恢复通知自身被丢弃时不递归重排；close之后也不会借用receiver。
+            try { dispatcher->post([receiver]()
+            {
+                receiver->reconcileDroppedJobs();
+                receiver->notifyStateChanged();
+            }); } catch (...) {}
         });
     }
 
