@@ -671,6 +671,7 @@ void HudPerformancePanel::showEvent(QShowEvent* showEventPointer)
 {
     QWidget::showEvent(showEventPointer);
     refreshCorePresentation(1.0, true);
+    refreshVisiblePresentation(true);
     QTimer::singleShot(0, this, [this]()
     {
         adjustChartHeights();
@@ -1272,6 +1273,7 @@ void HudPerformancePanel::syncSidebarSelection(const int selectedRowIndex)
     }
     m_detailStack->setCurrentIndex(boundedIndex);
     refreshCorePresentation(1.0, true);
+    refreshVisiblePresentation(true);
 
     if (m_cpuNavCard != nullptr) m_cpuNavCard->setSelectedState(boundedIndex == 0);
     if (m_memoryNavCard != nullptr) m_memoryNavCard->setSelectedState(boundedIndex == 1);
@@ -1584,6 +1586,18 @@ HudPerformancePanel::LiveSampleResult HudPerformancePanel::collectLiveSampleResu
 
 void HudPerformancePanel::applyLiveSampleResult(const LiveSampleResult& liveSampleResult)
 {
+    m_latestLiveSample = liveSampleResult;
+    m_hasLiveSample = true;
+    double currentMhzSum = 0.0;
+    for (const CpuPowerSnapshot& power : liveSampleResult.powerInfoList)
+    {
+        if (power.currentMhz > 0)
+        {
+            currentMhzSum += static_cast<double>(power.currentMhz);
+        }
+    }
+    m_lastCpuSpeedGhz = liveSampleResult.powerInfoList.empty() ? 0.0
+        : currentMhzSum / static_cast<double>(liveSampleResult.powerInfoList.size()) / 1000.0;
     {
         QMutexLocker locker(&m_liveSampleMutex);
         m_primaryNetworkAdapterName = liveSampleResult.primaryNetworkAdapterName;
@@ -1618,17 +1632,7 @@ void HudPerformancePanel::applyLiveSampleResult(const LiveSampleResult& liveSamp
         liveSampleResult.networkRxBytesPerSec,
         liveSampleResult.networkTxBytesPerSec,
         liveSampleResult.gpuUsagePercent);
-    updateTaskManagerDetailLabels(
-        liveSampleResult.coreUsageList,
-        liveSampleResult.powerInfoList,
-        liveSampleResult.memoryUsagePercent,
-        liveSampleResult.diskReadBytesPerSec,
-        liveSampleResult.diskWriteBytesPerSec,
-        liveSampleResult.networkRxBytesPerSec,
-        liveSampleResult.networkTxBytesPerSec,
-        liveSampleResult.gpuUsagePercent,
-        &liveSampleResult.systemPerfSnapshot,
-        liveSampleResult.systemPerfOk);
+    refreshVisiblePresentation();
 
     if ((m_sampleCounter % 60) == 1)
     {
@@ -2172,19 +2176,6 @@ void HudPerformancePanel::updateView(
         averageCpuUsage /= static_cast<double>(coreUsageList.size());
     }
 
-    if (m_cpuSummaryLabel != nullptr)
-    {
-        m_cpuSummaryLabel->setText(
-            QStringLiteral("CPU total: %1%    Memory: %2%    Logical processors: %3")
-            .arg(averageCpuUsage, 0, 'f', 1)
-            .arg(memoryUsagePercent, 0, 'f', 1)
-            .arg(coreUsageList.size()));
-    }
-    if (m_cpuModelLabel != nullptr && !m_cpuModelText.isEmpty())
-    {
-        m_cpuModelLabel->setText(m_cpuModelText);
-    }
-
     // Histories advance on every sample, including while another page/HUD is hidden.
     if (m_coreSampleAnimation != nullptr)
     {
@@ -2210,119 +2201,24 @@ void HudPerformancePanel::updateView(
         m_coreSampleAnimation->start();
     }
 
-    if (m_memorySummaryLabel != nullptr)
+    appendGeneralSeriesPoint(m_memoryLineSeries, m_memoryAxisX, m_memoryAxisY, memoryUsagePercent);
+    appendGeneralSeriesPoint(m_diskReadLineSeries, m_diskAxisX, m_diskAxisY, diskReadBytesPerSec);
+    appendGeneralSeriesPoint(m_diskWriteLineSeries, m_diskAxisX, m_diskAxisY, diskWriteBytesPerSec);
+    appendGeneralSeriesPoint(m_networkRxLineSeries, m_networkAxisX, m_networkAxisY, networkRxBytesPerSec);
+    appendGeneralSeriesPoint(m_networkTxLineSeries, m_networkAxisX, m_networkAxisY, networkTxBytesPerSec);
+    for (GpuEngineChartEntry& entry : m_gpuEngineCharts)
     {
-        m_memorySummaryLabel->setText(
-            QStringLiteral("Current memory load: %1%").arg(memoryUsagePercent, 0, 'f', 1));
+        double usage = 0.0;
+        if (entry.engineKeyText == QStringLiteral("3d")) usage = m_gpuUsage3DPercent;
+        else if (entry.engineKeyText == QStringLiteral("copy")) usage = m_gpuUsageCopyPercent;
+        else if (entry.engineKeyText == QStringLiteral("video_encode")) usage = m_gpuUsageVideoEncodePercent;
+        else if (entry.engineKeyText == QStringLiteral("video_decode")) usage = m_gpuUsageVideoDecodePercent;
+        appendGeneralSeriesPoint(entry.lineSeries, entry.axisX, entry.axisY, usage);
     }
-    appendGeneralSeriesPoint(
-        m_memoryLineSeries,
-        m_memoryAxisX,
-        m_memoryAxisY,
-        memoryUsagePercent,
-        0.0);
-
-    if (m_diskSummaryLabel != nullptr)
-    {
-        m_diskSummaryLabel->setText(
-            QStringLiteral("Read: %1    Write: %2")
-            .arg(formatRateText(diskReadBytesPerSec))
-            .arg(formatRateText(diskWriteBytesPerSec)));
-    }
-    appendGeneralSeriesPoint(m_diskReadLineSeries, m_diskAxisX, m_diskAxisY, diskReadBytesPerSec, 0.0);
-    appendGeneralSeriesPoint(m_diskWriteLineSeries, m_diskAxisX, m_diskAxisY, diskWriteBytesPerSec, 0.0);
-    const auto diskRange = ks::ui::MetricChartBinding::SharedRange({ m_diskReadLineSeries, m_diskWriteLineSeries },
-        ks::ui::MetricXMode::StableId, { 0.0, 1.0, 1.15, {} });
-    if (m_diskAxisY != nullptr)
-    {
-        m_diskAxisY->setRange(diskRange.minimumY, diskRange.maximumY);
-    }
-
-    if (m_networkSummaryLabel != nullptr)
-    {
-        m_networkSummaryLabel->setText(
-            QStringLiteral("Receive: %1    Send: %2")
-            .arg(formatRateText(networkRxBytesPerSec))
-            .arg(formatRateText(networkTxBytesPerSec)));
-    }
-    appendGeneralSeriesPoint(m_networkRxLineSeries, m_networkAxisX, m_networkAxisY, networkRxBytesPerSec, 0.0);
-    appendGeneralSeriesPoint(m_networkTxLineSeries, m_networkAxisX, m_networkAxisY, networkTxBytesPerSec, 0.0);
-    const auto networkRange = ks::ui::MetricChartBinding::SharedRange({ m_networkRxLineSeries, m_networkTxLineSeries },
-        ks::ui::MetricXMode::StableId, { 0.0, 1.0, 1.15, {} });
-    if (m_networkAxisY != nullptr)
-    {
-        m_networkAxisY->setRange(networkRange.minimumY, networkRange.maximumY);
-    }
-
-    if (m_gpuSummaryLabel != nullptr)
-    {
-        m_gpuSummaryLabel->setText(
-            QStringLiteral("GPU: %1%    3D: %2%    Copy: %3%")
-            .arg(gpuUsagePercent, 0, 'f', 1)
-            .arg(m_gpuUsage3DPercent, 0, 'f', 1)
-            .arg(m_gpuUsageCopyPercent, 0, 'f', 1));
-    }
-
-    for (GpuEngineChartEntry& chartEntry : m_gpuEngineCharts)
-    {
-        double usagePercent = 0.0;
-        if (chartEntry.engineKeyText == QStringLiteral("3d"))
-        {
-            usagePercent = m_gpuUsage3DPercent;
-        }
-        else if (chartEntry.engineKeyText == QStringLiteral("copy"))
-        {
-            usagePercent = m_gpuUsageCopyPercent;
-        }
-        else if (chartEntry.engineKeyText == QStringLiteral("video_encode"))
-        {
-            usagePercent = m_gpuUsageVideoEncodePercent;
-        }
-        else if (chartEntry.engineKeyText == QStringLiteral("video_decode"))
-        {
-            usagePercent = m_gpuUsageVideoDecodePercent;
-        }
-
-        appendGeneralSeriesPoint(
-            chartEntry.lineSeries,
-            chartEntry.axisX,
-            chartEntry.axisY,
-            usagePercent,
-            0.0);
-        if (chartEntry.titleLabel != nullptr)
-        {
-            chartEntry.titleLabel->setText(
-                QStringLiteral("%1  %2%")
-                .arg(chartEntry.displayNameText)
-                .arg(usagePercent, 0, 'f', 1));
-        }
-    }
-
-    appendGeneralSeriesPoint(
-        m_gpuDedicatedMemoryLineSeries,
-        m_gpuDedicatedMemoryAxisX,
-        m_gpuDedicatedMemoryAxisY,
-        m_gpuDedicatedUsedGiB,
-        0.0);
-    appendGeneralSeriesPoint(
-        m_gpuSharedMemoryLineSeries,
-        m_gpuSharedMemoryAxisX,
-        m_gpuSharedMemoryAxisY,
-        m_gpuSharedUsedGiB,
-        0.0);
-    if (m_gpuDedicatedMemoryAxisY != nullptr)
-    {
-        const double dedicatedUpperGiB = std::max(
-            0.5,
-            (m_gpuDedicatedBudgetGiB > 0.0 ? m_gpuDedicatedBudgetGiB : m_gpuDedicatedMemoryGiB));
-        m_gpuDedicatedMemoryAxisY->setRange(0.0, dedicatedUpperGiB);
-    }
-    if (m_gpuSharedMemoryAxisY != nullptr)
-    {
-        const double sharedUpperGiB = std::max(0.5, m_gpuSharedBudgetGiB);
-        m_gpuSharedMemoryAxisY->setRange(0.0, sharedUpperGiB);
-    }
-
+    appendGeneralSeriesPoint(m_gpuDedicatedMemoryLineSeries, m_gpuDedicatedMemoryAxisX,
+        m_gpuDedicatedMemoryAxisY, m_gpuDedicatedUsedGiB);
+    appendGeneralSeriesPoint(m_gpuSharedMemoryLineSeries, m_gpuSharedMemoryAxisX,
+        m_gpuSharedMemoryAxisY, m_gpuSharedUsedGiB);
     updateSidebarCards(
         averageCpuUsage,
         memoryUsagePercent,
@@ -2333,6 +2229,114 @@ void HudPerformancePanel::updateView(
         networkRxBytesPerSec,
         networkTxBytesPerSec,
         gpuUsagePercent);
+}
+
+
+void HudPerformancePanel::projectGeneralSeries(QLineSeries* lineSeries, QValueAxis* axisX, QValueAxis* axisY)
+{
+    if (lineSeries == nullptr || axisX == nullptr || axisY == nullptr)
+    {
+        return;
+    }
+    auto* binding = ks::ui::MetricChartBinding::ForSeries(lineSeries, m_historyLength);
+    binding->refreshSeries();
+    ks::ui::MetricAxisPolicy policy{ 0.0, 1.0, 1.15, {} };
+    if (lineSeries == m_memoryLineSeries) policy.fixedMaximumY = 100.0;
+    const auto range = binding->range(policy);
+    axisX->setRange(range.minimumX, range.maximumX);
+    axisY->setRange(range.minimumY, range.maximumY);
+}
+
+void HudPerformancePanel::refreshVisiblePresentation(const bool snapToLatest)
+{
+    if (!isVisible() || m_detailStack == nullptr || !m_hasLiveSample)
+    {
+        return;
+    }
+    // A presentation refresh never appends history or invents a sample timestamp.
+    const LiveSampleResult& sample = m_latestLiveSample;
+    QWidget* const page = m_detailStack->currentWidget();
+    if (page == m_cpuPage)
+    {
+        double averageCpuUsage = 0.0;
+        for (const double value : sample.coreUsageList) averageCpuUsage += value;
+        if (!sample.coreUsageList.empty()) averageCpuUsage /= static_cast<double>(sample.coreUsageList.size());
+        if (m_cpuSummaryLabel != nullptr)
+        {
+            m_cpuSummaryLabel->setText(
+                QStringLiteral("CPU total: %1%    Memory: %2%    Logical processors: %3")
+                .arg(averageCpuUsage, 0, 'f', 1).arg(sample.memoryUsagePercent, 0, 'f', 1)
+                .arg(sample.coreUsageList.size()));
+        }
+        if (m_cpuModelLabel != nullptr && !m_cpuModelText.isEmpty()) m_cpuModelLabel->setText(m_cpuModelText);
+    }
+    else if (page == m_memoryPage)
+    {
+        if (m_memorySummaryLabel != nullptr)
+            m_memorySummaryLabel->setText(QStringLiteral("Current memory load: %1%").arg(sample.memoryUsagePercent, 0, 'f', 1));
+        projectGeneralSeries(m_memoryLineSeries, m_memoryAxisX, m_memoryAxisY);
+    }
+    else if (page == m_diskPage)
+    {
+        if (m_diskSummaryLabel != nullptr)
+            m_diskSummaryLabel->setText(QStringLiteral("Read: %1    Write: %2")
+                .arg(formatRateText(sample.diskReadBytesPerSec)).arg(formatRateText(sample.diskWriteBytesPerSec)));
+        projectGeneralSeries(m_diskReadLineSeries, m_diskAxisX, m_diskAxisY);
+        projectGeneralSeries(m_diskWriteLineSeries, m_diskAxisX, m_diskAxisY);
+        const auto range = ks::ui::MetricChartBinding::SharedRange({ m_diskReadLineSeries, m_diskWriteLineSeries },
+            ks::ui::MetricXMode::StableId, { 0.0, 1.0, 1.15, {} });
+        if (m_diskAxisY != nullptr) m_diskAxisY->setRange(range.minimumY, range.maximumY);
+    }
+    else if (page == m_networkPage)
+    {
+        if (m_networkSummaryLabel != nullptr)
+            m_networkSummaryLabel->setText(QStringLiteral("Receive: %1    Send: %2")
+                .arg(formatRateText(sample.networkRxBytesPerSec)).arg(formatRateText(sample.networkTxBytesPerSec)));
+        projectGeneralSeries(m_networkRxLineSeries, m_networkAxisX, m_networkAxisY);
+        projectGeneralSeries(m_networkTxLineSeries, m_networkAxisX, m_networkAxisY);
+        const auto range = ks::ui::MetricChartBinding::SharedRange({ m_networkRxLineSeries, m_networkTxLineSeries },
+            ks::ui::MetricXMode::StableId, { 0.0, 1.0, 1.15, {} });
+        if (m_networkAxisY != nullptr) m_networkAxisY->setRange(range.minimumY, range.maximumY);
+    }
+    else if (page == m_gpuPage)
+    {
+        if (m_gpuSummaryLabel != nullptr)
+            m_gpuSummaryLabel->setText(QStringLiteral("GPU: %1%    3D: %2%    Copy: %3%")
+                .arg(sample.gpuUsagePercent, 0, 'f', 1).arg(sample.gpuUsage3DPercent, 0, 'f', 1).arg(sample.gpuUsageCopyPercent, 0, 'f', 1));
+        for (GpuEngineChartEntry& entry : m_gpuEngineCharts)
+        {
+            projectGeneralSeries(entry.lineSeries, entry.axisX, entry.axisY);
+            double usage = 0.0;
+            if (entry.engineKeyText == QStringLiteral("3d")) usage = sample.gpuUsage3DPercent;
+            else if (entry.engineKeyText == QStringLiteral("copy")) usage = sample.gpuUsageCopyPercent;
+            else if (entry.engineKeyText == QStringLiteral("video_encode")) usage = sample.gpuUsageVideoEncodePercent;
+            else if (entry.engineKeyText == QStringLiteral("video_decode")) usage = sample.gpuUsageVideoDecodePercent;
+            if (entry.titleLabel != nullptr)
+                entry.titleLabel->setText(QStringLiteral("%1  %2%").arg(entry.displayNameText).arg(usage, 0, 'f', 1));
+        }
+        projectGeneralSeries(m_gpuDedicatedMemoryLineSeries, m_gpuDedicatedMemoryAxisX, m_gpuDedicatedMemoryAxisY);
+        projectGeneralSeries(m_gpuSharedMemoryLineSeries, m_gpuSharedMemoryAxisX, m_gpuSharedMemoryAxisY);
+        if (m_gpuDedicatedMemoryAxisY != nullptr)
+            m_gpuDedicatedMemoryAxisY->setRange(0.0, std::max(0.5, sample.gpuDedicatedBudgetGiB > 0.0 ? sample.gpuDedicatedBudgetGiB : m_gpuDedicatedMemoryGiB));
+        if (m_gpuSharedMemoryAxisY != nullptr)
+            m_gpuSharedMemoryAxisY->setRange(0.0, std::max(0.5, sample.gpuSharedBudgetGiB));
+    }
+    updateTaskManagerDetailLabels(sample);
+    if (snapToLatest)
+    {
+        const auto present = [](QChartView* view) {
+            if (view != nullptr) view->presentLatestWithoutAnimation();
+        };
+        if (page == m_memoryPage) present(m_memoryChartView);
+        else if (page == m_diskPage) present(m_diskChartView);
+        else if (page == m_networkPage) present(m_networkChartView);
+        else if (page == m_gpuPage)
+        {
+            for (const GpuEngineChartEntry& entry : m_gpuEngineCharts) present(entry.chartView);
+            present(m_gpuDedicatedMemoryChartView);
+            present(m_gpuSharedMemoryChartView);
+        }
+    }
 }
 
 void HudPerformancePanel::updateSidebarCards(
@@ -2413,19 +2417,18 @@ void HudPerformancePanel::updateSidebarCards(
     }
 }
 
-void HudPerformancePanel::updateTaskManagerDetailLabels(
-    const std::vector<double>& coreUsageList,
-    const std::vector<CpuPowerSnapshot>& powerInfoList,
-    const double memoryUsagePercent,
-    const double diskReadBytesPerSec,
-    const double diskWriteBytesPerSec,
-    const double networkRxBytesPerSec,
-    const double networkTxBytesPerSec,
-    const double gpuUsagePercent,
-    const SystemPerformanceSnapshot* const systemPerfSnapshotPointer,
-    const bool systemPerfOk)
+void HudPerformancePanel::updateTaskManagerDetailLabels(const LiveSampleResult& sample)
 {
-    Q_UNUSED(memoryUsagePercent);
+    const auto& coreUsageList = sample.coreUsageList;
+    const auto& powerInfoList = sample.powerInfoList;
+    const double diskReadBytesPerSec = sample.diskReadBytesPerSec;
+    const double diskWriteBytesPerSec = sample.diskWriteBytesPerSec;
+    const double networkRxBytesPerSec = sample.networkRxBytesPerSec;
+    const double networkTxBytesPerSec = sample.networkTxBytesPerSec;
+    const double gpuUsagePercent = sample.gpuUsagePercent;
+    const SystemPerformanceSnapshot* const systemPerfSnapshotPointer = &sample.systemPerfSnapshot;
+    const bool systemPerfOk = sample.systemPerfOk;
+    QWidget* const page = m_detailStack->currentWidget();
 
     double averageCpuUsage = 0.0;
     if (!coreUsageList.empty())
@@ -2462,7 +2465,7 @@ void HudPerformancePanel::updateTaskManagerDetailLabels(
 
     const std::uint64_t uptimeSeconds = static_cast<std::uint64_t>(::GetTickCount64() / 1000ULL);
 
-    if (m_cpuPrimaryDetailLabel != nullptr)
+    if (page == m_cpuPage && m_cpuPrimaryDetailLabel != nullptr)
     {
         m_cpuPrimaryDetailLabel->setText(
             QStringLiteral(
@@ -2480,7 +2483,7 @@ void HudPerformancePanel::updateTaskManagerDetailLabels(
             .arg(formatDurationText(uptimeSeconds)));
     }
 
-    if (m_cpuSecondaryDetailLabel != nullptr)
+    if (page == m_cpuPage && m_cpuSecondaryDetailLabel != nullptr)
     {
         m_cpuSecondaryDetailLabel->setText(
             QStringLiteral(
@@ -2500,60 +2503,61 @@ void HudPerformancePanel::updateTaskManagerDetailLabels(
             .arg(m_cpuL3CacheBytes > 0 ? bytesToReadableText(static_cast<double>(m_cpuL3CacheBytes)) : QStringLiteral("N/A")));
     }
 
-    MEMORYSTATUSEX memoryStatus{};
-    memoryStatus.dwLength = sizeof(memoryStatus);
-    const bool memoryStatusOk = (::GlobalMemoryStatusEx(&memoryStatus) == TRUE);
-    if (memoryStatusOk)
+    if (page == m_memoryPage)
     {
-        const double totalGiB = static_cast<double>(memoryStatus.ullTotalPhys) / kOneGiBInBytes;
-        const double availableGiB = static_cast<double>(memoryStatus.ullAvailPhys) / kOneGiBInBytes;
-        const double usedGiB = totalGiB - availableGiB;
-        if (m_memoryCapacityLabel != nullptr)
+        const bool memoryStatusOk = sample.memoryOk;
+        if (memoryStatusOk)
         {
-            m_memoryCapacityLabel->setText(QStringLiteral("%1 GB").arg(totalGiB, 0, 'f', 1));
+            const double totalGiB = static_cast<double>(sample.totalPhysBytes) / kOneGiBInBytes;
+            const double availableGiB = static_cast<double>(sample.availPhysBytes) / kOneGiBInBytes;
+            const double usedGiB = totalGiB - availableGiB;
+            if (m_memoryCapacityLabel != nullptr)
+            {
+                m_memoryCapacityLabel->setText(QStringLiteral("%1 GB").arg(totalGiB, 0, 'f', 1));
+            }
+            if (m_memoryPrimaryDetailLabel != nullptr)
+            {
+                m_memoryPrimaryDetailLabel->setText(
+                    QStringLiteral(
+                        "In use: %1 GB\n"
+                        "Available: %2 GB\n"
+                        "Committed: %3 / %4\n"
+                        "Cached: %5\n"
+                        "Paged pool: %6\n"
+                        "Non-paged pool: %7")
+                    .arg(usedGiB, 0, 'f', 1)
+                    .arg(availableGiB, 0, 'f', 1)
+                    .arg(systemPerfOk && systemPerfSnapshotPointer != nullptr ? bytesToReadableText(static_cast<double>(systemPerfSnapshotPointer->commitTotalBytes)) : QStringLiteral("N/A"))
+                    .arg(systemPerfOk && systemPerfSnapshotPointer != nullptr ? bytesToReadableText(static_cast<double>(systemPerfSnapshotPointer->commitLimitBytes)) : QStringLiteral("N/A"))
+                    .arg(systemPerfOk && systemPerfSnapshotPointer != nullptr ? bytesToReadableText(static_cast<double>(systemPerfSnapshotPointer->cachedBytes)) : QStringLiteral("N/A"))
+                    .arg(systemPerfOk && systemPerfSnapshotPointer != nullptr ? bytesToReadableText(static_cast<double>(systemPerfSnapshotPointer->pagedPoolBytes)) : QStringLiteral("N/A"))
+                    .arg(systemPerfOk && systemPerfSnapshotPointer != nullptr ? bytesToReadableText(static_cast<double>(systemPerfSnapshotPointer->nonPagedPoolBytes)) : QStringLiteral("N/A")));
+            }
         }
-        if (m_memoryPrimaryDetailLabel != nullptr)
+
+        if (m_memorySecondaryDetailLabel != nullptr)
         {
-            m_memoryPrimaryDetailLabel->setText(
+            ULONGLONG installedMemoryKb = 0;
+            ::GetPhysicallyInstalledSystemMemory(&installedMemoryKb);
+            const double installedBytes = static_cast<double>(installedMemoryKb) * 1024.0;
+            const double reservedBytes = memoryStatusOk
+                ? std::max(0.0, installedBytes - static_cast<double>(sample.totalPhysBytes))
+                : 0.0;
+            m_memorySecondaryDetailLabel->setText(
                 QStringLiteral(
-                    "In use: %1 GB\n"
-                    "Available: %2 GB\n"
-                    "Committed: %3 / %4\n"
-                    "Cached: %5\n"
-                    "Paged pool: %6\n"
-                    "Non-paged pool: %7")
-                .arg(usedGiB, 0, 'f', 1)
-                .arg(availableGiB, 0, 'f', 1)
-                .arg(systemPerfOk && systemPerfSnapshotPointer != nullptr ? bytesToReadableText(static_cast<double>(systemPerfSnapshotPointer->commitTotalBytes)) : QStringLiteral("N/A"))
-                .arg(systemPerfOk && systemPerfSnapshotPointer != nullptr ? bytesToReadableText(static_cast<double>(systemPerfSnapshotPointer->commitLimitBytes)) : QStringLiteral("N/A"))
-                .arg(systemPerfOk && systemPerfSnapshotPointer != nullptr ? bytesToReadableText(static_cast<double>(systemPerfSnapshotPointer->cachedBytes)) : QStringLiteral("N/A"))
-                .arg(systemPerfOk && systemPerfSnapshotPointer != nullptr ? bytesToReadableText(static_cast<double>(systemPerfSnapshotPointer->pagedPoolBytes)) : QStringLiteral("N/A"))
-                .arg(systemPerfOk && systemPerfSnapshotPointer != nullptr ? bytesToReadableText(static_cast<double>(systemPerfSnapshotPointer->nonPagedPoolBytes)) : QStringLiteral("N/A")));
+                    "Speed: %1 MHz\n"
+                    "Slots used: %2/%3\n"
+                    "Form factor: %4\n"
+                    "Hardware reserved: %5")
+                .arg(m_memorySpeedMhz > 0 ? QString::number(m_memorySpeedMhz) : QStringLiteral("N/A"))
+                .arg(m_memorySlotUsed > 0 ? QString::number(m_memorySlotUsed) : QStringLiteral("N/A"))
+                .arg(m_memorySlotTotal > 0 ? QString::number(m_memorySlotTotal) : QStringLiteral("N/A"))
+                .arg(m_memoryFormFactorText.isEmpty() ? QStringLiteral("N/A") : m_memoryFormFactorText)
+                .arg(bytesToReadableText(reservedBytes)));
         }
     }
 
-    if (m_memorySecondaryDetailLabel != nullptr)
-    {
-        ULONGLONG installedMemoryKb = 0;
-        ::GetPhysicallyInstalledSystemMemory(&installedMemoryKb);
-        const double installedBytes = static_cast<double>(installedMemoryKb) * 1024.0;
-        const double reservedBytes = memoryStatusOk
-            ? std::max(0.0, installedBytes - static_cast<double>(memoryStatus.ullTotalPhys))
-            : 0.0;
-        m_memorySecondaryDetailLabel->setText(
-            QStringLiteral(
-                "Speed: %1 MHz\n"
-                "Slots used: %2/%3\n"
-                "Form factor: %4\n"
-                "Hardware reserved: %5")
-            .arg(m_memorySpeedMhz > 0 ? QString::number(m_memorySpeedMhz) : QStringLiteral("N/A"))
-            .arg(m_memorySlotUsed > 0 ? QString::number(m_memorySlotUsed) : QStringLiteral("N/A"))
-            .arg(m_memorySlotTotal > 0 ? QString::number(m_memorySlotTotal) : QStringLiteral("N/A"))
-            .arg(m_memoryFormFactorText.isEmpty() ? QStringLiteral("N/A") : m_memoryFormFactorText)
-            .arg(bytesToReadableText(reservedBytes)));
-    }
-
-    if (m_diskDetailLabel != nullptr)
+    if (page == m_diskPage && m_diskDetailLabel != nullptr)
     {
         const double diskTotalRate = std::max(0.0, diskReadBytesPerSec) + std::max(0.0, diskWriteBytesPerSec);
         const double diskApproxPercent = qBound(
@@ -2571,21 +2575,21 @@ void HudPerformancePanel::updateTaskManagerDetailLabels(
             .arg(diskApproxPercent, 0, 'f', 1)
             .arg(formatRateText(diskReadBytesPerSec))
             .arg(formatRateText(diskWriteBytesPerSec))
-            .arg(m_systemVolumeText.isEmpty() ? QStringLiteral("N/A") : m_systemVolumeText)
-            .arg(m_systemVolumeTotalBytes > 0
-                ? bytesToReadableText(static_cast<double>(m_systemVolumeTotalBytes))
+            .arg(sample.systemVolumeText.isEmpty() ? QStringLiteral("N/A") : sample.systemVolumeText)
+            .arg(sample.systemVolumeTotalBytes > 0
+                ? bytesToReadableText(static_cast<double>(sample.systemVolumeTotalBytes))
                 : QStringLiteral("N/A"))
-            .arg(m_systemVolumeFreeBytes > 0
-                ? bytesToReadableText(static_cast<double>(m_systemVolumeFreeBytes))
+            .arg(sample.systemVolumeFreeBytes > 0
+                ? bytesToReadableText(static_cast<double>(sample.systemVolumeFreeBytes))
                 : QStringLiteral("N/A")));
     }
 
-    if (m_networkDetailLabel != nullptr)
+    if (page == m_networkPage && m_networkDetailLabel != nullptr)
     {
-        const QString adapterText = m_primaryNetworkAdapterName.isEmpty()
+        const QString adapterText = sample.primaryNetworkAdapterName.isEmpty()
             ? QStringLiteral("N/A")
-            : m_primaryNetworkAdapterName;
-        const double linkMbps = static_cast<double>(m_primaryNetworkLinkBitsPerSecond) / (1000.0 * 1000.0);
+            : sample.primaryNetworkAdapterName;
+        const double linkMbps = static_cast<double>(sample.primaryNetworkLinkBitsPerSecond) / (1000.0 * 1000.0);
         m_networkDetailLabel->setText(
             QStringLiteral(
                 "Adapter: %1\n"
@@ -2598,27 +2602,27 @@ void HudPerformancePanel::updateTaskManagerDetailLabels(
             .arg(linkMbps > 0.0 ? QString::number(linkMbps, 'f', 1) : QStringLiteral("N/A")));
     }
 
-    if (m_gpuAdapterTitleLabel != nullptr)
+    if (page == m_gpuPage && m_gpuAdapterTitleLabel != nullptr)
     {
         m_gpuAdapterTitleLabel->setText(
             m_gpuAdapterNameText.isEmpty() ? QStringLiteral("N/A") : m_gpuAdapterNameText);
     }
-    if (m_gpuDedicatedMemoryChartView != nullptr && m_gpuDedicatedMemoryChartView->chart() != nullptr)
+    if (page == m_gpuPage && m_gpuDedicatedMemoryChartView != nullptr && m_gpuDedicatedMemoryChartView->chart() != nullptr)
     {
         m_gpuDedicatedMemoryChartView->chart()->setTitle(
             QStringLiteral("Dedicated GPU memory  %1 / %2 GiB")
-            .arg(m_gpuDedicatedUsedGiB, 0, 'f', 2)
-            .arg(m_gpuDedicatedBudgetGiB > 0.0 ? m_gpuDedicatedBudgetGiB : m_gpuDedicatedMemoryGiB, 0, 'f', 2));
+            .arg(sample.gpuDedicatedUsedGiB, 0, 'f', 2)
+            .arg(sample.gpuDedicatedBudgetGiB > 0.0 ? sample.gpuDedicatedBudgetGiB : m_gpuDedicatedMemoryGiB, 0, 'f', 2));
     }
-    if (m_gpuSharedMemoryChartView != nullptr && m_gpuSharedMemoryChartView->chart() != nullptr)
+    if (page == m_gpuPage && m_gpuSharedMemoryChartView != nullptr && m_gpuSharedMemoryChartView->chart() != nullptr)
     {
         m_gpuSharedMemoryChartView->chart()->setTitle(
             QStringLiteral("Shared GPU memory  %1 / %2 GiB")
-            .arg(m_gpuSharedUsedGiB, 0, 'f', 2)
-            .arg(m_gpuSharedBudgetGiB, 0, 'f', 2));
+            .arg(sample.gpuSharedUsedGiB, 0, 'f', 2)
+            .arg(sample.gpuSharedBudgetGiB, 0, 'f', 2));
     }
 
-    if (m_gpuDetailLabel != nullptr)
+    if (page == m_gpuPage && m_gpuDetailLabel != nullptr)
     {
         m_gpuDetailLabel->setText(
             QStringLiteral(
@@ -2630,14 +2634,14 @@ void HudPerformancePanel::updateTaskManagerDetailLabels(
                 "Driver date: %11\n"
                 "PNP: %12")
             .arg(gpuUsagePercent, 0, 'f', 1)
-            .arg(m_gpuUsage3DPercent, 0, 'f', 1)
-            .arg(m_gpuUsageCopyPercent, 0, 'f', 1)
-            .arg(m_gpuUsageVideoEncodePercent, 0, 'f', 1)
-            .arg(m_gpuUsageVideoDecodePercent, 0, 'f', 1)
-            .arg(m_gpuDedicatedUsedGiB, 0, 'f', 2)
-            .arg((m_gpuDedicatedBudgetGiB > 0.0 ? m_gpuDedicatedBudgetGiB : m_gpuDedicatedMemoryGiB), 0, 'f', 2)
-            .arg(m_gpuSharedUsedGiB, 0, 'f', 2)
-            .arg(m_gpuSharedBudgetGiB, 0, 'f', 2)
+            .arg(sample.gpuUsage3DPercent, 0, 'f', 1)
+            .arg(sample.gpuUsageCopyPercent, 0, 'f', 1)
+            .arg(sample.gpuUsageVideoEncodePercent, 0, 'f', 1)
+            .arg(sample.gpuUsageVideoDecodePercent, 0, 'f', 1)
+            .arg(sample.gpuDedicatedUsedGiB, 0, 'f', 2)
+            .arg((sample.gpuDedicatedBudgetGiB > 0.0 ? sample.gpuDedicatedBudgetGiB : m_gpuDedicatedMemoryGiB), 0, 'f', 2)
+            .arg(sample.gpuSharedUsedGiB, 0, 'f', 2)
+            .arg(sample.gpuSharedBudgetGiB, 0, 'f', 2)
             .arg(m_gpuDriverVersionText.isEmpty() ? QStringLiteral("N/A") : m_gpuDriverVersionText)
             .arg(m_gpuDriverDateText.isEmpty() ? QStringLiteral("N/A") : m_gpuDriverDateText)
             .arg(m_gpuPnpDeviceIdText.isEmpty() ? QStringLiteral("N/A") : m_gpuPnpDeviceIdText));
@@ -2688,15 +2692,8 @@ void HudPerformancePanel::appendGeneralSeriesPoint(QLineSeries* lineSeries, QVal
         }
     }
     auto* binding = ks::ui::MetricChartBinding::ForSeries(lineSeries, m_historyLength);
-    binding->append({ static_cast<std::uint64_t>(m_sampleCounter), m_metricSampleTimeMs, sampleValue, valid });
-    ks::ui::MetricAxisPolicy policy{ minAxisYValue, 1.0, 1.15, {} };
-    if (lineSeries == m_memoryLineSeries)
-    {
-        policy.fixedMaximumY = 100.0;
-    }
-    const auto range = binding->range(policy);
-    axisX->setRange(range.minimumX, range.maximumX);
-    axisY->setRange(range.minimumY, range.maximumY);
+    binding->append({ static_cast<std::uint64_t>(m_sampleCounter), m_metricSampleTimeMs, sampleValue, valid }, false);
+    Q_UNUSED(minAxisYValue);
 }
 
 QString HudPerformancePanel::formatRateText(const double bytesPerSecondValue) const
@@ -2745,6 +2742,7 @@ void HudPerformancePanel::requestAsyncStaticInfoRefresh()
                 safeThis->m_gpuPnpDeviceIdText = gpuSummary.pnpDeviceIdText;
                 safeThis->m_gpuDedicatedMemoryGiB = gpuSummary.dedicatedMemoryGiB;
                 safeThis->m_staticInfoRefreshing.store(false);
+                safeThis->refreshVisiblePresentation();
             },
             Qt::QueuedConnection);
 
