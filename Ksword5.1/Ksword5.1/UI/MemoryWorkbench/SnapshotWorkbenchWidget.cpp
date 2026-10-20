@@ -161,7 +161,11 @@ namespace ks::ui
             m_tabs->setCurrentIndex(0);
             jumpToAddress(address);
         });
-        connect(m_hex, &HexView::byteEdited, this, [this]() { refreshFromHexEditor(); });
+        connect(m_hex, &HexView::bytesEdited, this,
+            [this](quint64 address, quint64 length, bool complete) {
+                if (complete) refreshEditedRange(address, length);
+                else refreshFromHexEditor();
+            });
         connect(m_hex, &HexView::caretMoved, this, [this](std::uint64_t address) {
             if (!m_syncing)
             {
@@ -384,6 +388,7 @@ namespace ks::ui
         m_observed = bytes;
         m_base = base;
         m_original = bytes;
+        m_changeSummary = {};
         m_disassembly->reset();
         if (!alive || previousRevision != m_snapshotRevision) return;
         m_text->reset();
@@ -444,6 +449,7 @@ namespace ks::ui
         ++m_snapshotRevision;
         ++m_comparisonRevision;
         m_original = m_observed = data();
+        m_changeSummary = {};
         m_history.reset();
         if (m_previousRead.size() == m_original.size())
         {
@@ -465,6 +471,7 @@ namespace ks::ui
         ++m_snapshotRevision;
         m_history.reset();
         m_observed = m_original;
+        m_changeSummary = {};
         ++m_comparisonRevision;
         m_hex->setBuffer(m_base, m_original);
         jumpToAddress(address);
@@ -481,6 +488,7 @@ namespace ks::ui
         if (!alive || revision != m_snapshotRevision) return;
         m_original.clear();
         m_observed.clear();
+        m_changeSummary = {};
         m_previousRead.clear();
         m_recentChanges.clear();
         m_sourceIdentity.clear();
@@ -498,15 +506,60 @@ namespace ks::ui
     }
     void SnapshotWorkbenchWidget::refreshFromHexEditor()
     {
+        refreshFromHexEditorImpl(0, static_cast<std::size_t>(data().size()), false);
+    }
+
+    void SnapshotWorkbenchWidget::refreshEditedRange(std::uint64_t address, std::uint64_t length)
+    {
+        const auto size = static_cast<std::uint64_t>(data().size());
+        if (address < m_base || address - m_base > size || length > size - (address - m_base)
+            || m_observed.size() != data().size() || m_original.size() != data().size())
+        {
+            refreshFromHexEditor();
+            return;
+        }
+        refreshFromHexEditorImpl(static_cast<std::size_t>(address - m_base),
+            static_cast<std::size_t>(length), true);
+    }
+
+    void SnapshotWorkbenchWidget::recountChanges(const QByteArray& bytes)
+    {
+        m_changeSummary = {};
+        if (bytes.size() != m_original.size()) return;
+        const auto* baseline = reinterpret_cast<const std::uint8_t*>(m_original.constData());
+        const auto result = detail::MemoryEditHistory::updateDifferenceSummary({}, baseline, baseline,
+            reinterpret_cast<const std::uint8_t*>(bytes.constData()), static_cast<std::size_t>(bytes.size()),
+            0, static_cast<std::size_t>(bytes.size()));
+        if (result) m_changeSummary = *result;
+    }
+
+    void SnapshotWorkbenchWidget::refreshFromHexEditorImpl(std::size_t offset, std::size_t count, bool knownRange)
+    {
         const auto bytes = data();
-        if (bytes != m_observed)
+        const auto* before = reinterpret_cast<const std::uint8_t*>(m_observed.constData());
+        const auto* after = reinterpret_cast<const std::uint8_t*>(bytes.constData());
+        const bool changed = knownRange ? !std::equal(before + offset, before + offset + count, after + offset)
+            : bytes != m_observed;
+        if (changed)
         {
             // Snapshot sizes are invariant for staged editing. External owners
             // must use setSnapshot to load a different range.
             if (bytes.size() == m_observed.size())
-                m_history.record(reinterpret_cast<const std::uint8_t*>(m_observed.constData()),
-                    reinterpret_cast<const std::uint8_t*>(bytes.constData()), static_cast<std::size_t>(bytes.size()));
-            else m_history.reset();
+            {
+                m_history.recordRange(before, after, static_cast<std::size_t>(bytes.size()), offset, count);
+                const auto summary = bytes.size() == m_original.size()
+                    ? detail::MemoryEditHistory::updateDifferenceSummary(m_changeSummary,
+                        reinterpret_cast<const std::uint8_t*>(m_original.constData()), before, after,
+                        static_cast<std::size_t>(bytes.size()), offset, count)
+                    : std::nullopt;
+                if (summary) m_changeSummary = *summary;
+                else recountChanges(bytes);
+            }
+            else
+            {
+                m_history.reset();
+                recountChanges(bytes);
+            }
             m_observed = bytes;
             ++m_comparisonRevision;
             ++m_snapshotRevision;
@@ -562,6 +615,7 @@ namespace ks::ui
         const auto address = selectedAddress();
         m_disassembly->invalidateEditContext();
         const QByteArray restored(reinterpret_cast<const char*>(result->data()), static_cast<qsizetype>(result->size()));
+        recountChanges(restored);
         m_observed = restored;
         ++m_comparisonRevision;
         ++m_snapshotRevision;
@@ -599,7 +653,7 @@ namespace ks::ui
             ? (loaded ? trText(QStringLiteral("已加载 %1 字节（只读）。")).arg(m_hex->bufferSize())
                 : trText(QStringLiteral("加载文件范围后可查看十六进制、反汇编和文本。")))
             : loaded
-            ? trText(QStringLiteral("%1 字节 | %2 处差异待应用")).arg(m_hex->bufferSize()).arg(diffBlocks().size())
+            ? trText(QStringLiteral("%1 字节 | %2 处差异待应用")).arg(m_hex->bufferSize()).arg(m_changeSummary.runs)
             : trText(QStringLiteral("读取内存后可查看指令和编辑缓存。")));
     }
     std::uint64_t SnapshotWorkbenchWidget::selectedAddress() const

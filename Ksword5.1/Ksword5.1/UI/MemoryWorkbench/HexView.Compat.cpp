@@ -12,6 +12,7 @@
 #include "HexCanvasFormat.h"
 #include "HexViewFormat.h"
 
+#include <QPointer>
 #include <algorithm>
 #include <cstring>
 #include <limits>
@@ -208,8 +209,14 @@ namespace ks::ui
         }
 
         // 先换成员再通知画布：画布装新空间时会立即向提供者要页，那时基线必须已经就绪。
+        ++m_bufferGeneration;
         m_baseAddress = baseAddress;
         m_buffer = content;
+        if (m_editNotificationDepth)
+        {
+            m_batchDirty = true;
+            m_batchRangeComplete = false;
+        }
         m_baseline = content;
         m_hasReference = false;
         installBaseline();
@@ -323,9 +330,18 @@ namespace ks::ui
             m_canvas->refresh();
         }
 
+        // Quiet rollback inside a legacy slot is part of the same final batch.
+        if (m_editNotificationDepth) noteEditedRange(absoluteAddress, absoluteAddress);
         // 缓冲内容变了：查找状态作废。
         m_findBar->dataChanged();
         return true;
+    }
+
+    void HexView::noteEditedRange(std::uint64_t first, std::uint64_t last)
+    {
+        if (!m_batchDirty) { m_batchFirst = first; m_batchLast = last; }
+        else { m_batchFirst = (std::min)(m_batchFirst, first); m_batchLast = (std::max)(m_batchLast, last); }
+        m_batchDirty = true;
     }
 
     // 把叠加层里 [address, address+length) 的"叠加后取值"同步进缓冲，并对每个真正变化的字节发 byteEdited。
@@ -384,10 +400,29 @@ namespace ks::ui
         {
             destination[change.address - address] = static_cast<char>(change.newValue);
         }
+        const QPointer<HexView> alive(this);
+        const auto generation = m_bufferGeneration;
+        ++m_editNotificationDepth;
+        noteEditedRange(changes.front().address, changes.back().address);
         m_findBar->dataChanged();
+        if (!alive) return;
         for (const Change& change : changes)
         {
+            if (generation != m_bufferGeneration) break;
             emit byteEdited(change.address, change.oldValue, change.newValue);
+            if (!alive) return;
+            if (generation != m_bufferGeneration) break; // Never publish old byte identities after replacement.
+        }
+        --m_editNotificationDepth;
+        if (!m_editNotificationDepth && m_batchDirty)
+        {
+            const bool complete = m_batchRangeComplete;
+            const auto first = complete ? m_batchFirst : m_baseAddress;
+            const auto changedLength = complete ? m_batchLast - m_batchFirst + 1
+                : static_cast<std::uint64_t>(m_buffer.size());
+            m_batchDirty = false;
+            m_batchRangeComplete = true;
+            emit bytesEdited(first, changedLength, complete);
         }
     }
 

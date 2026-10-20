@@ -292,6 +292,11 @@ namespace ks::ui
         // byteEdited：用户编辑使缓冲里的字节真的变了。
         void byteEdited(quint64 absoluteAddress, quint8 oldValue, quint8 newValue);
 
+        // One final notification per edit transaction, after legacy byteEdited slots.
+        // Reentrant edits and quiet rollback addresses are merged. A replacement
+        // buffer makes rangeComplete false and requires a full host synchronization.
+        void bytesEdited(quint64 absoluteAddress, quint64 length, bool rangeComplete);
+
         // caretMoved：插入点（绝对地址）变化。
         void caretMoved(quint64 absoluteAddress);
 
@@ -334,6 +339,7 @@ namespace ks::ui
         void installBaseline(const QByteArray& previousRead = QByteArray());
         bool applyDiffPatches();
         void syncBufferFromOverlay(std::uint64_t address, std::uint64_t length);
+        void noteEditedRange(std::uint64_t first, std::uint64_t last);
         void onEditStaged(quint64 address, quint64 length);
         void onEditDiscarded(quint64 address, quint64 length);
         void onDataReplaced();
@@ -381,6 +387,14 @@ namespace ks::ui
         QMenu* m_groupMenu = nullptr;                               // 分组菜单
         QMenu* m_exportMenu = nullptr;                              // 导出菜单
         QShortcut* m_escapeShortcut = nullptr;                      // Esc 快捷键（仅有条打开时启用）
+
+        // Nested legacy signal handlers can edit or replace the buffer synchronously.
+        std::uint64_t m_bufferGeneration = 0;
+        unsigned m_editNotificationDepth = 0;
+        bool m_batchDirty = false;
+        bool m_batchRangeComplete = true;
+        std::uint64_t m_batchFirst = 0;
+        std::uint64_t m_batchLast = 0;
 
         // ---- 状态 ----
         bool m_inspectorShown = false;                              // 解释器面板是否显示
