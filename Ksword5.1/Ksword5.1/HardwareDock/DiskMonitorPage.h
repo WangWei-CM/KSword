@@ -76,6 +76,7 @@ private:
     struct ProcessDiskSample
     {
         std::uint32_t pid = 0;                 // pid：进程 ID。
+        std::uint64_t identityCreateTime100ns = 0; // 已有采样句柄读回的进程身份。
         QString processName;                   // processName：进程名。
         QString processImagePath;              // processImagePath：进程路径，权限不足时可为空。
         std::uint32_t threadCount = 0;          // threadCount：进程线程数。
@@ -192,6 +193,9 @@ private:
     void pruneStaleSelection(const std::vector<ProcessDiskSample>& sampleList);
     void updateProcessTable(const std::vector<ProcessDiskSample>& sampleList);
     void updateActivityTable();
+    void applyPresentationFilters();
+    void refreshCheckStates();
+    void pruneProcessIcons();
     void updateSummaryLabels(const std::vector<ProcessDiskSample>& sampleList);
     // 仅在可见且允许提交时更新两张活动表，合并隐藏期间多轮 UI 重建。
     void refreshProcessPresentation();
@@ -249,6 +253,8 @@ private:
     QTableWidget* m_processTable = nullptr;        // m_processTable：进程级磁盘速率表。
     QTableWidget* m_activityTable = nullptr;       // m_activityTable：全部或按勾选 PID 过滤的磁盘活动表。
     DiskMonitorStoragePanel* m_storagePanel = nullptr; // m_storagePanel：固定卷容量与性能区。
+    QTimer* m_filterTimer = nullptr;
+    int m_visibleActivityCount = 0;
     QTimer* m_refreshTimer = nullptr;              // m_refreshTimer：周期刷新定时器。
     bool m_initialSamplingStarted = false;         // m_initialSamplingStarted：是否已经启动 ETW 与首轮采样。
     bool m_processPresentationDirty = false;       // 最新采样已入缓存，但活动表尚未显示该轮内容。
@@ -257,6 +263,10 @@ private:
     std::unordered_set<std::uint32_t> m_selectedPidSet; // m_selectedPidSet：用户勾选 PID 集。
     std::vector<ProcessDiskSample> m_lastSampleList;    // m_lastSampleList：最近一次采样结果。
     std::vector<FileActivitySample> m_lastFileActivityList; // m_lastFileActivityList：最近活动窗口内的唯一 PID+路径状态行。
+    std::vector<ProcessDiskSample> m_presentedProcessSamples;
+    std::vector<FileActivitySample> m_presentedActivitySamples;
+    bool m_processRowsPresented = false;
+    bool m_activityRowsPresented = false;
     QHash<QString, QIcon> m_processIconByPath;      // 映像路径到 16px shell 图标的 UI 缓存。
     bool m_updatingProcessTable = false;                // m_updatingProcessTable：防止程序刷新触发递归勾选同步。
 

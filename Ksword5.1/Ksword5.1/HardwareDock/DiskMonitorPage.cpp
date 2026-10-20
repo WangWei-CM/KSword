@@ -8,6 +8,9 @@
 #include "../Framework/PrivilegeElevationPrompt.h"
 #include "../UI/TableInteractionSupport.h"
 #include "../UI/VisibleTableWidget.h"
+#include "../UI/TableRowFilterSupport.h"
+#include <QItemSelectionModel>
+#include <functional>
 
 // ============================================================
 // DiskMonitorPage.cpp
@@ -201,6 +204,146 @@ namespace
             }
             clipboardObject->setText(rowFields.join(QLatin1Char('\t')));
         });
+    }
+
+
+    constexpr int kDiskIdentityRole = Qt::UserRole + 81;
+    constexpr int kDiskSearchRole = Qt::UserRole + 82;
+    constexpr int kDiskActiveRole = Qt::UserRole + 83;
+    constexpr int kDiskIconPathRole = Qt::UserRole + 84;
+    constexpr int kDiskRankRole = Qt::UserRole + 85;
+    constexpr int kDiskPidRole = Qt::UserRole + 86;
+    constexpr int kDiskEmptyRole = Qt::UserRole + 87;
+
+    struct DiskMonitorCell
+    {
+        QString text;
+        QVariant number;
+    };
+    struct DiskMonitorRow
+    {
+        QString identity;
+        QString search;
+        QVector<DiskMonitorCell> cells;
+        QString imagePath;
+        quint32 pid = 0;
+        int iconColumn = -1;
+        bool active = false;
+        bool emptyState = false;
+        bool checked = false;
+        bool checkable = false;
+    };
+    class DiskMonitorItem final : public QTableWidgetItem
+    {
+    public:
+        explicit DiskMonitorItem(const QString& text) : QTableWidgetItem(text) {}
+        bool operator<(const QTableWidgetItem& other) const override
+        {
+            if (tableWidget() != nullptr && tableWidget()->property("ksword_disk_canonical_sort").toBool())
+                return data(kDiskRankRole).toInt() < other.data(kDiskRankRole).toInt();
+            if (data(Qt::UserRole).isValid() && other.data(Qt::UserRole).isValid())
+                return data(Qt::UserRole).toDouble() < other.data(Qt::UserRole).toDouble();
+            return QTableWidgetItem::operator<(other);
+        }
+    };
+    // Rows keep their model slots. Qt removal/layout notifications retire or move
+    // persistent identities; cells are never taken out and reinstalled.
+    void syncDiskMonitorRows(QTableWidget* table, const QVector<DiskMonitorRow>& rows,
+        const std::function<QIcon(const QString&)>& iconForPath)
+    {
+        const QSignalBlocker blocker(table);
+        const QSignalBlocker selectionBlocker(table->selectionModel());
+        const QPersistentModelIndex previousCurrent(table->selectionModel()->currentIndex());
+        const bool hadCurrent = previousCurrent.isValid();
+        const bool sorting = table->isSortingEnabled();
+        const int sortColumn = table->horizontalHeader()->sortIndicatorSection();
+        const Qt::SortOrder sortOrder = table->horizontalHeader()->sortIndicatorOrder();
+        QSet<QString> wanted;
+        for (const auto& row : rows) wanted.insert(row.identity);
+        QHash<QString,int> byKey;
+        bool structureChanged = table->rowCount() != rows.size();
+        for (int i = 0; i < table->rowCount(); ++i)
+        {
+            auto* first = table->item(i,0);
+            const QString key = first != nullptr ? first->data(kDiskIdentityRole).toString() : QString();
+            byKey.insert(key,i);
+            structureChanged = structureChanged || !wanted.contains(key);
+        }
+        bool sortChanged = structureChanged;
+        for (const auto& row : rows)
+        {
+            const int i = byKey.value(row.identity,-1);
+            if (i < 0) { sortChanged = true; continue; }
+            if (sortColumn < 0 || sortColumn >= row.cells.size()) continue;
+            auto* cell = table->item(i,sortColumn);
+            const auto& value = row.cells.at(sortColumn);
+            if (cell == nullptr || cell->text() != value.text || cell->data(Qt::UserRole) != value.number
+                || (sortColumn == 0 && row.checkable && cell->checkState() != (row.checked ? Qt::Checked : Qt::Unchecked)))
+                sortChanged = true;
+        }
+        if (sorting && sortChanged) table->setSortingEnabled(false);
+        for (int i = table->rowCount()-1; i >= 0; --i)
+            if (!wanted.contains(table->item(i,0)->data(kDiskIdentityRole).toString())) table->removeRow(i);
+        byKey.clear();
+        for (int i = 0; i < table->rowCount(); ++i)
+            byKey.insert(table->item(i,0)->data(kDiskIdentityRole).toString(),i);
+        for (int rank = 0; rank < rows.size(); ++rank)
+        {
+            const auto& row = rows.at(rank);
+            int i = byKey.value(row.identity,-1);
+            if (i < 0) { i = table->rowCount(); table->insertRow(i); byKey.insert(row.identity,i); }
+            for (int column = 0; column < table->columnCount(); ++column)
+            {
+                const auto& value = row.cells.at(column);
+                auto* cell = table->item(i,column);
+                if (cell == nullptr)
+                {
+                    cell = new DiskMonitorItem(value.text);
+                    cell->setFlags(cell->flags() & ~Qt::ItemIsEditable);
+                    table->setItem(i,column,cell);
+                }
+                else if (cell->text() != value.text) cell->setText(value.text);
+                if (cell->toolTip() != value.text) cell->setToolTip(value.text);
+                if (cell->data(Qt::UserRole) != value.number) cell->setData(Qt::UserRole,value.number);
+                const Qt::Alignment alignment = value.number.isValid()
+                    ? Qt::AlignRight | Qt::AlignVCenter : Qt::AlignLeft | Qt::AlignVCenter;
+                if (cell->textAlignment() != alignment) cell->setTextAlignment(alignment);
+                if (column == row.iconColumn && (!cell->data(kDiskIconPathRole).isValid()
+                    || cell->data(kDiskIconPathRole).toString() != row.imagePath))
+                {
+                    cell->setIcon(iconForPath(row.imagePath));
+                    cell->setData(kDiskIconPathRole,row.imagePath);
+                }
+                if (column != 0) continue;
+                const auto setRole = [cell](int role,const QVariant& v) { if (cell->data(role) != v) cell->setData(role,v); };
+                setRole(kDiskIdentityRole,row.identity); setRole(kDiskSearchRole,row.search);
+                setRole(kDiskRankRole,rank); setRole(kDiskPidRole,row.pid);
+                setRole(kDiskActiveRole,row.active); setRole(kDiskEmptyRole,row.emptyState);
+                if (row.checkable)
+                {
+                    const auto flags = cell->flags() | Qt::ItemIsUserCheckable;
+                    if (cell->flags() != flags) cell->setFlags(flags);
+                    const auto checked = row.checked ? Qt::Checked : Qt::Unchecked;
+                    if (cell->checkState() != checked) cell->setCheckState(checked);
+                }
+            }
+        }
+        if (sorting && sortChanged) table->setSortingEnabled(true);
+        else if (!sorting)
+        {
+            bool inSourceOrder = true;
+            for (int i = 0; i < table->rowCount(); ++i)
+                inSourceOrder = inSourceOrder && table->item(i,0)->data(kDiskRankRole).toInt() == i;
+            if (!inSourceOrder)
+            {
+                table->setProperty("ksword_disk_canonical_sort",true);
+                table->sortItems(0,Qt::AscendingOrder);
+                table->setProperty("ksword_disk_canonical_sort",false);
+                const QSignalBlocker headerBlocker(table->horizontalHeader());
+                table->horizontalHeader()->setSortIndicator(sortColumn,sortOrder);
+            }
+        }
+        if (hadCurrent && !previousCurrent.isValid()) table->selectionModel()->clearCurrentIndex();
     }
 
     // ProcessColumn：
@@ -1212,30 +1355,22 @@ void DiskMonitorPage::initializeConnections()
         });
     }
 
+    m_filterTimer = new QTimer(this);
+    m_filterTimer->setSingleShot(true);
+    m_filterTimer->setInterval(80);
+    connect(m_filterTimer, &QTimer::timeout, this, &DiskMonitorPage::applyPresentationFilters);
     if (m_filterEdit != nullptr)
-    {
-        connect(m_filterEdit, &QLineEdit::textChanged, this, [this]()
-        {
-            updateProcessTable(m_lastSampleList);
-            updateActivityTable();
-        });
-    }
-
+        connect(m_filterEdit, &QLineEdit::textChanged, this, [this]() { m_filterTimer->start(); });
     if (m_onlyActiveCheckBox != nullptr)
-    {
-        connect(m_onlyActiveCheckBox, &QCheckBox::toggled, this, [this]()
-        {
-            updateProcessTable(m_lastSampleList);
-        });
-    }
+        connect(m_onlyActiveCheckBox, &QCheckBox::toggled, this, &DiskMonitorPage::applyPresentationFilters);
 
     if (m_clearSelectionButton != nullptr)
     {
         connect(m_clearSelectionButton, &QPushButton::clicked, this, [this]()
         {
             m_selectedPidSet.clear();
-            updateProcessTable(m_lastSampleList);
-            updateActivityTable();
+            refreshCheckStates();
+            applyPresentationFilters();
             updateSummaryLabels(m_lastSampleList);
         });
     }
@@ -1251,8 +1386,8 @@ void DiskMonitorPage::initializeConnections()
                     m_selectedPidSet.insert(sample.pid);
                 }
             }
-            updateProcessTable(m_lastSampleList);
-            updateActivityTable();
+            refreshCheckStates();
+            applyPresentationFilters();
             updateSummaryLabels(m_lastSampleList);
         });
     }
@@ -1270,7 +1405,7 @@ void DiskMonitorPage::initializeConnections()
                 return;
             }
             syncSelectionFromTable();
-            updateActivityTable();
+            applyPresentationFilters();
             updateSummaryLabels(m_lastSampleList);
         });
     }
@@ -1285,6 +1420,8 @@ void DiskMonitorPage::configureTableWidget(QTableWidget* tableWidget, const int 
     }
 
     // 表格统一按监控面板风格配置，避免用户误编辑采样结果。
+    ks::ui::SetTableRowFilterBusinessOwnership(tableWidget,
+        ks::ui::TableRowFilterBusinessOwnership::ExclusiveSharedIdentity);
     tableWidget->setAlternatingRowColors(true);
     tableWidget->setSelectionBehavior(QAbstractItemView::SelectRows);
     tableWidget->setSelectionMode(QAbstractItemView::SingleSelection);
@@ -1455,6 +1592,7 @@ void DiskMonitorPage::applyProcessDiskSamples(
     pruneStaleSelection(sampleList);
     m_lastSampleList = std::move(sampleList);
     m_lastFileActivityList = std::move(fileSamples);
+    pruneProcessIcons();
 
     // 保持 ETW 消费和速率基线连续，只把不可见表格的 item/排序工作延后。
     m_processPresentationDirty = true;
@@ -1553,6 +1691,7 @@ std::vector<DiskMonitorPage::ProcessDiskSample> DiskMonitorPage::collectProcessD
             sample.processImagePath = queryProcessPath(processHandle.get());
             sample.ioPriorityText = queryProcessIoPriorityText(processHandle.get());
             const std::uint64_t createTime100ns = queryProcessCreateTime(processHandle.get());
+            sample.identityCreateTime100ns = createTime100ns;
 
             IO_COUNTERS ioCounters{};
             if (::GetProcessIoCounters(processHandle.get(), &ioCounters) != FALSE)
@@ -1881,8 +2020,13 @@ std::vector<DiskMonitorPage::FileActivitySample> DiskMonitorPage::consumeFileAct
 void DiskMonitorPage::pruneStaleSelection(const std::vector<ProcessDiskSample>& sampleList)
 {
     std::unordered_set<std::uint32_t> alivePidSet;
-    for (const ProcessDiskSample& sample : sampleList)
+    QHash<quint32,quint64> previous;
+    for (const auto& sample : m_lastSampleList) previous.insert(sample.pid,sample.identityCreateTime100ns);
+    for (const auto& sample : sampleList)
     {
+        const auto old = previous.value(sample.pid,0);
+        if (old != 0 && sample.identityCreateTime100ns != 0 && old != sample.identityCreateTime100ns)
+            m_selectedPidSet.erase(sample.pid);
         alivePidSet.insert(sample.pid);
     }
 
@@ -1901,224 +2045,169 @@ void DiskMonitorPage::pruneStaleSelection(const std::vector<ProcessDiskSample>& 
 
 void DiskMonitorPage::updateProcessTable(const std::vector<ProcessDiskSample>& sampleList)
 {
-    if (m_processTable == nullptr)
+    if (m_processTable == nullptr) return;
+    const auto same = [](const ProcessDiskSample& a,const ProcessDiskSample& b) {
+        return a.pid==b.pid && a.identityCreateTime100ns==b.identityCreateTime100ns
+            && a.processName==b.processName && a.processImagePath==b.processImagePath
+            && a.readBytesPerSec==b.readBytesPerSec && a.writeBytesPerSec==b.writeBytesPerSec
+            && a.totalBytesPerSec==b.totalBytesPerSec && a.responseTimeMs==b.responseTimeMs
+            && a.readOpsPerSec==b.readOpsPerSec && a.writeOpsPerSec==b.writeOpsPerSec;
+    };
+    if (m_processRowsPresented && sampleList.size()==m_presentedProcessSamples.size()
+        && std::equal(sampleList.begin(),sampleList.end(),m_presentedProcessSamples.begin(),same)) return;
+    QVector<DiskMonitorRow> rows;
+    rows.reserve(static_cast<qsizetype>(sampleList.size()));
+    for (const auto& sample : sampleList)
     {
-        return;
+        DiskMonitorRow row;
+        row.identity = QString::number(sample.pid) + QLatin1Char(':') + QString::number(sample.identityCreateTime100ns);
+        if (sample.identityCreateTime100ns == 0)
+            row.identity += QLatin1Char(':') + sample.processName + QLatin1Char(':') + sample.processImagePath.toLower();
+        row.pid = sample.pid; row.search = processSearchText(sample);
+        row.active = sample.totalBytesPerSec > kActiveBytesPerSecondThreshold;
+        row.iconColumn = ProcessColumnName; row.imagePath = sample.processImagePath;
+        row.checkable = true; row.checked = m_selectedPidSet.count(sample.pid) != 0;
+        row.cells = {{QString(),static_cast<qulonglong>(sample.pid)}, {QString::number(sample.pid),double(sample.pid)},
+            {sample.processName,{}}, {formatBytesPerSecond(sample.readBytesPerSec),sample.readBytesPerSec},
+            {formatBytesPerSecond(sample.writeBytesPerSec),sample.writeBytesPerSec},
+            {formatBytesPerSecond(sample.totalBytesPerSec),sample.totalBytesPerSec},
+            {formatMilliseconds(sample.responseTimeMs),sample.responseTimeMs},
+            {formatOpsPerSecond(sample.readOpsPerSec),sample.readOpsPerSec},
+            {formatOpsPerSecond(sample.writeOpsPerSec),sample.writeOpsPerSec},
+            {sample.processImagePath.isEmpty() ? QStringLiteral("<权限不足或系统进程>") : sample.processImagePath,{}}};
+        rows.push_back(std::move(row));
     }
-
-    QSignalBlocker tableSignalBlocker(m_processTable);
     m_updatingProcessTable = true;
-    const bool updatesEnabled = m_processTable->updatesEnabled();
-    m_processTable->setUpdatesEnabled(false);
-    m_processTable->setSortingEnabled(false);
-    m_processTable->clearContents();
-    std::vector<const ProcessDiskSample*> visibleSampleList;
-    visibleSampleList.reserve(sampleList.size());
-    for (const ProcessDiskSample& sample : sampleList)
-    {
-        if (sampleMatchesFilter(sample)) visibleSampleList.push_back(&sample);
-    }
-    m_processTable->setRowCount(static_cast<int>(visibleSampleList.size()));
-
-    for (int rowIndex = 0; rowIndex < static_cast<int>(visibleSampleList.size()); ++rowIndex)
-    {
-        const ProcessDiskSample& sample = *visibleSampleList[static_cast<std::size_t>(rowIndex)];
-
-        QTableWidgetItem* checkItem = createReadOnlyItem(QString());
-        checkItem->setFlags((checkItem->flags() | Qt::ItemIsUserCheckable) & ~Qt::ItemIsEditable);
-        checkItem->setData(Qt::UserRole, static_cast<qulonglong>(sample.pid));
-        applyProcessRowCheckState(checkItem, sample.pid);
-        setTableItemText(m_processTable, rowIndex, ProcessColumnChecked, checkItem);
-
-        setTableItemText(
-            m_processTable,
-            rowIndex,
-            ProcessColumnPid,
-            createNumericItem(QString::number(sample.pid), static_cast<double>(sample.pid)));
-        QTableWidgetItem* processNameItem =
-            createReadOnlyItem(sample.processName);
-        processNameItem->setIcon(
-            processIconForPath(sample.processImagePath));
-        setTableItemText(
-            m_processTable,
-            rowIndex,
-            ProcessColumnName,
-            processNameItem);
-        setTableItemText(
-            m_processTable,
-            rowIndex,
-            ProcessColumnReadRate,
-            createNumericItem(formatBytesPerSecond(sample.readBytesPerSec), sample.readBytesPerSec));
-        setTableItemText(
-            m_processTable,
-            rowIndex,
-            ProcessColumnWriteRate,
-            createNumericItem(formatBytesPerSecond(sample.writeBytesPerSec), sample.writeBytesPerSec));
-        setTableItemText(
-            m_processTable,
-            rowIndex,
-            ProcessColumnTotalRate,
-            createNumericItem(formatBytesPerSecond(sample.totalBytesPerSec), sample.totalBytesPerSec));
-        setTableItemText(
-            m_processTable,
-            rowIndex,
-            ProcessColumnResponse,
-            createNumericItem(formatMilliseconds(sample.responseTimeMs), sample.responseTimeMs));
-        setTableItemText(
-            m_processTable,
-            rowIndex,
-            ProcessColumnReadOps,
-            createNumericItem(formatOpsPerSecond(sample.readOpsPerSec), sample.readOpsPerSec));
-        setTableItemText(
-            m_processTable,
-            rowIndex,
-            ProcessColumnWriteOps,
-            createNumericItem(formatOpsPerSecond(sample.writeOpsPerSec), sample.writeOpsPerSec));
-        setTableItemText(
-            m_processTable,
-            rowIndex,
-            ProcessColumnPath,
-            createReadOnlyItem(sample.processImagePath.isEmpty()
-                ? QStringLiteral("<权限不足或系统进程>")
-                : sample.processImagePath));
-
-    }
-
-    m_processTable->setSortingEnabled(true);
+    syncDiskMonitorRows(m_processTable,rows,[this](const QString& path) { return processIconForPath(path); });
     m_updatingProcessTable = false;
-    m_processTable->setUpdatesEnabled(updatesEnabled);
-    if (updatesEnabled) m_processTable->viewport()->update();
+    m_presentedProcessSamples = sampleList; m_processRowsPresented = true;
 }
 
 void DiskMonitorPage::updateActivityTable()
 {
-    if (m_activityTable == nullptr)
+    if (m_activityTable == nullptr) return;
+    const auto same = [](const FileActivitySample& a,const FileActivitySample& b) {
+        return a.pid==b.pid && a.processName==b.processName && a.processImagePath==b.processImagePath
+            && a.filePath==b.filePath && a.readBytesPerSec==b.readBytesPerSec
+            && a.writeBytesPerSec==b.writeBytesPerSec && a.ioPriorityText==b.ioPriorityText
+            && a.responseTimeMs==b.responseTimeMs && a.responseAvailable==b.responseAvailable;
+    };
+    if (m_activityRowsPresented && m_lastFileActivityList.size()==m_presentedActivitySamples.size()
+        && std::equal(m_lastFileActivityList.begin(),m_lastFileActivityList.end(),m_presentedActivitySamples.begin(),same))
+    { applyPresentationFilters(); pruneProcessIcons(); return; }
+    QVector<DiskMonitorRow> rows;
+    rows.reserve(static_cast<qsizetype>(m_lastFileActivityList.size())+1);
+    for (const auto& sample : m_lastFileActivityList)
     {
-        return;
+        DiskMonitorRow row;
+        // Same PID/path identity as the producer's retained activity state.
+        row.identity = fileActivityIdentityKey(sample.pid,sample.filePath);
+        row.pid = sample.pid;
+        row.search = QStringLiteral("%1 %2 %3 %4").arg(sample.pid).arg(sample.processName)
+            .arg(sample.processImagePath).arg(sample.filePath).toLower();
+        row.iconColumn = ActivityColumnProcess; row.imagePath = sample.processImagePath;
+        const double total = sample.readBytesPerSec + sample.writeBytesPerSec;
+        row.cells = {{QString::number(sample.pid),double(sample.pid)}, {sample.processName,{}}, {sample.filePath,{}},
+            {formatBytesPerSecond(sample.readBytesPerSec),sample.readBytesPerSec},
+            {formatBytesPerSecond(sample.writeBytesPerSec),sample.writeBytesPerSec},
+            {formatBytesPerSecond(total),total},
+            {sample.ioPriorityText.isEmpty() ? QStringLiteral("未知") : sample.ioPriorityText,{}},
+            {sample.responseAvailable ? formatMilliseconds(sample.responseTimeMs) : QStringLiteral("N/A"),
+                sample.responseAvailable ? sample.responseTimeMs : 0.0}};
+        rows.push_back(std::move(row));
     }
-
-    const bool updatesEnabled = m_activityTable->updatesEnabled();
-    m_activityTable->setUpdatesEnabled(false);
-    // filterBySelectedPid：至少勾选一个进程时才启用 PID 过滤；
-    // 空选择与资源监视器一致，表示展示最近捕获到的全部文件活动。
+    DiskMonitorRow empty;
+    empty.identity = QStringLiteral("disk-monitor-empty"); empty.emptyState = true;
     const bool filterBySelectedPid = !m_selectedPidSet.empty();
-    std::vector<FileActivitySample> selectedFileActivityList;
-    selectedFileActivityList.reserve(m_lastFileActivityList.size());
-    for (const FileActivitySample& fileActivity : m_lastFileActivityList)
-    {
-        if ((!filterBySelectedPid ||
-                m_selectedPidSet.find(fileActivity.pid) != m_selectedPidSet.end()) &&
-            activityMatchesFilter(fileActivity))
-        {
-            selectedFileActivityList.push_back(fileActivity);
-        }
-    }
-
-    if (!selectedFileActivityList.empty())
-    {
-        std::sort(
-            selectedFileActivityList.begin(),
-            selectedFileActivityList.end(),
-            [](const FileActivitySample& left, const FileActivitySample& right)
-            {
-                const double leftTotal = left.readBytesPerSec + left.writeBytesPerSec;
-                const double rightTotal = right.readBytesPerSec + right.writeBytesPerSec;
-                if (!qFuzzyCompare(leftTotal + 1.0, rightTotal + 1.0))
-                {
-                    return leftTotal > rightTotal;
-                }
-                if (left.pid != right.pid)
-                {
-                    return left.pid < right.pid;
-                }
-                return left.filePath < right.filePath;
-            });
-
-        m_activityTable->setSortingEnabled(false);
-        m_activityTable->clearContents();
-        m_activityTable->setRowCount(static_cast<int>(selectedFileActivityList.size()));
-
-        for (int rowIndex = 0; rowIndex < static_cast<int>(selectedFileActivityList.size()); ++rowIndex)
-        {
-            const FileActivitySample& sample = selectedFileActivityList[static_cast<std::size_t>(rowIndex)];
-            const double totalBytesPerSec = sample.readBytesPerSec + sample.writeBytesPerSec;
-            const QString responseText = sample.responseAvailable
-                ? formatMilliseconds(sample.responseTimeMs)
-                : QStringLiteral("N/A");
-
-            setTableItemText(
-                m_activityTable,
-                rowIndex,
-                ActivityColumnPid,
-                createNumericItem(QString::number(sample.pid), static_cast<double>(sample.pid)));
-            QTableWidgetItem* processNameItem =
-                createReadOnlyItem(sample.processName);
-            processNameItem->setIcon(
-                processIconForPath(sample.processImagePath));
-            setTableItemText(
-                m_activityTable,
-                rowIndex,
-                ActivityColumnProcess,
-                processNameItem);
-            setTableItemText(m_activityTable, rowIndex, ActivityColumnFile, createReadOnlyItem(sample.filePath));
-            setTableItemText(
-                m_activityTable,
-                rowIndex,
-                ActivityColumnReadRate,
-                createNumericItem(formatBytesPerSecond(sample.readBytesPerSec), sample.readBytesPerSec));
-            setTableItemText(
-                m_activityTable,
-                rowIndex,
-                ActivityColumnWriteRate,
-                createNumericItem(formatBytesPerSecond(sample.writeBytesPerSec), sample.writeBytesPerSec));
-            setTableItemText(
-                m_activityTable,
-                rowIndex,
-                ActivityColumnTotalRate,
-                createNumericItem(formatBytesPerSecond(totalBytesPerSec), totalBytesPerSec));
-            setTableItemText(
-                m_activityTable,
-                rowIndex,
-                ActivityColumnIoPriority,
-                createReadOnlyItem(sample.ioPriorityText.isEmpty() ? QStringLiteral("未知") : sample.ioPriorityText));
-            setTableItemText(
-                m_activityTable,
-                rowIndex,
-                ActivityColumnResponse,
-                createNumericItem(responseText, sample.responseAvailable ? sample.responseTimeMs : 0.0));
-        }
-
-        m_activityTable->setSortingEnabled(true);
-        m_activityTable->setUpdatesEnabled(updatesEnabled);
-        if (updatesEnabled) m_activityTable->viewport()->update();
-        return;
-    }
-
-    // 文件级 ETW 没有抓到活动时，不再用 exe 路径伪装成文件活动。
-    // 这样用户能明确区分“最近几秒没有文件级事件”和“只采集到进程总量”。
-    m_activityTable->setSortingEnabled(false);
-    m_activityTable->clearContents();
-    m_activityTable->setRowCount(1);
-    // stateText：区分“全部活动”与“勾选 PID”两种视角，
-    // 避免空选择时仍提示用户必须勾选进程。
     const QString stateText = m_samplingState->m_fileActivityEtwRunning.load()
-        ? (filterBySelectedPid
-            ? QStringLiteral("<最近 5 秒未捕获到所选 PID 的文件级 Read/Write 事件>")
+        ? (filterBySelectedPid ? QStringLiteral("<最近 5 秒未捕获到所选 PID 的文件级 Read/Write 事件>")
             : QStringLiteral("<最近 5 秒未捕获到文件级 Read/Write 事件>"))
-        : (filterBySelectedPid
-            ? QStringLiteral("<文件级 ETW 未运行；请用管理员权限启动以捕获 PID 对应文件活动>")
+        : (filterBySelectedPid ? QStringLiteral("<文件级 ETW 未运行；请用管理员权限启动以捕获 PID 对应文件活动>")
             : QStringLiteral("<文件级 ETW 未运行；请用管理员权限启动以捕获文件活动>"));
-    setTableItemText(m_activityTable, 0, ActivityColumnPid, createReadOnlyItem(QStringLiteral("-")));
-    setTableItemText(m_activityTable, 0, ActivityColumnProcess, createReadOnlyItem(QStringLiteral("-")));
-    setTableItemText(m_activityTable, 0, ActivityColumnFile, createReadOnlyItem(stateText));
-    setTableItemText(m_activityTable, 0, ActivityColumnReadRate, createNumericItem(QStringLiteral("0 B/s"), 0.0));
-    setTableItemText(m_activityTable, 0, ActivityColumnWriteRate, createNumericItem(QStringLiteral("0 B/s"), 0.0));
-    setTableItemText(m_activityTable, 0, ActivityColumnTotalRate, createNumericItem(QStringLiteral("0 B/s"), 0.0));
-    setTableItemText(m_activityTable, 0, ActivityColumnIoPriority, createReadOnlyItem(QStringLiteral("未知")));
-    setTableItemText(m_activityTable, 0, ActivityColumnResponse, createNumericItem(QStringLiteral("N/A"), 0.0));
-    m_activityTable->setSortingEnabled(true);
-    m_activityTable->setUpdatesEnabled(updatesEnabled);
-    if (updatesEnabled) m_activityTable->viewport()->update();
+    empty.cells = {{QStringLiteral("-"),{}},{QStringLiteral("-"),{}},{stateText,{}},
+        {QStringLiteral("0 B/s"),0.0},{QStringLiteral("0 B/s"),0.0},{QStringLiteral("0 B/s"),0.0},
+        {QStringLiteral("未知"),{}},{QStringLiteral("N/A"),0.0}};
+    rows.push_back(std::move(empty));
+    syncDiskMonitorRows(m_activityTable,rows,[this](const QString& path) { return processIconForPath(path); });
+    m_presentedActivitySamples = m_lastFileActivityList; m_activityRowsPresented = true;
+    applyPresentationFilters();
+    pruneProcessIcons();
+}
+
+void DiskMonitorPage::refreshCheckStates()
+{
+    if (m_processTable == nullptr) return;
+    const QSignalBlocker blocker(m_processTable);
+    for (int i=0; i<m_processTable->rowCount(); ++i)
+    {
+        auto* cell = m_processTable->item(i,0);
+        const auto state = m_selectedPidSet.count(cell->data(kDiskPidRole).toUInt()) ? Qt::Checked : Qt::Unchecked;
+        if (cell->checkState() != state) cell->setCheckState(state);
+    }
+}
+
+void DiskMonitorPage::applyPresentationFilters()
+{
+    if (m_filterTimer != nullptr) m_filterTimer->stop();
+    const QPointer<DiskMonitorPage> guard(this);
+    if (ks::ui::DeferTableUiCommitIfContextMenuOpen(this,
+        QStringLiteral("disk-monitor-filter"),{m_processTable,m_activityTable},
+        [guard]() { if (guard) guard->applyPresentationFilters(); })) return;
+    const QString filter = m_filterEdit != nullptr ? m_filterEdit->text().trimmed().toLower() : QString();
+    if (m_processTable != nullptr)
+    {
+        QSet<QPersistentModelIndex> excluded;
+        for (int i=0; i<m_processTable->rowCount(); ++i)
+        {
+            const auto* first = m_processTable->item(i,0);
+            if ((!filter.isEmpty() && !first->data(kDiskSearchRole).toString().contains(filter))
+                || (m_onlyActiveCheckBox != nullptr && m_onlyActiveCheckBox->isChecked() && !first->data(kDiskActiveRole).toBool()))
+                excluded.insert(QPersistentModelIndex(m_processTable->model()->index(i,0)));
+        }
+        ks::ui::ApplyTableRowFilter(m_processTable,excluded);
+    }
+    m_visibleActivityCount = 0;
+    if (m_activityTable != nullptr)
+    {
+        const bool filterBySelectedPid = !m_selectedPidSet.empty();
+        QSet<QPersistentModelIndex> excluded;
+        int emptyIndex = -1;
+        for (int i=0; i<m_activityTable->rowCount(); ++i)
+        {
+            const auto* first = m_activityTable->item(i,0);
+            if (first->data(kDiskEmptyRole).toBool()) { emptyIndex=i; continue; }
+            const bool accepted = (!filterBySelectedPid || m_selectedPidSet.count(first->data(kDiskPidRole).toUInt()) != 0)
+                && (filter.isEmpty() || first->data(kDiskSearchRole).toString().contains(filter));
+            if (!accepted) excluded.insert(QPersistentModelIndex(m_activityTable->model()->index(i,0)));
+            else ++m_visibleActivityCount;
+        }
+        if (emptyIndex >= 0)
+        {
+            if (m_visibleActivityCount != 0)
+                excluded.insert(QPersistentModelIndex(m_activityTable->model()->index(emptyIndex,0)));
+            const QString stateText = m_samplingState->m_fileActivityEtwRunning.load()
+                ? (filterBySelectedPid ? QStringLiteral("<最近 5 秒未捕获到所选 PID 的文件级 Read/Write 事件>")
+                    : QStringLiteral("<最近 5 秒未捕获到文件级 Read/Write 事件>"))
+                : (filterBySelectedPid ? QStringLiteral("<文件级 ETW 未运行；请用管理员权限启动以捕获 PID 对应文件活动>")
+                    : QStringLiteral("<文件级 ETW 未运行；请用管理员权限启动以捕获文件活动>"));
+            auto* cell = m_activityTable->item(emptyIndex,ActivityColumnFile);
+            if (cell->text() != stateText) { cell->setText(stateText); cell->setToolTip(stateText); }
+        }
+        ks::ui::ApplyTableRowFilter(m_activityTable,excluded);
+    }
+    updateSummaryLabels(m_lastSampleList);
+}
+
+void DiskMonitorPage::pruneProcessIcons()
+{
+    QSet<QString> live;
+    const auto add = [&live](const QString& path) {
+        live.insert(path.trimmed().isEmpty() ? QStringLiteral("<default-process-icon>") : path.trimmed().toLower());
+    };
+    for (const auto& sample : m_lastSampleList) add(sample.processImagePath);
+    for (const auto& sample : m_lastFileActivityList) add(sample.processImagePath);
+    for (auto i=m_processIconByPath.begin(); i!=m_processIconByPath.end();)
+        if (!live.contains(i.key())) i=m_processIconByPath.erase(i); else ++i;
 }
 
 void DiskMonitorPage::updateSummaryLabels(const std::vector<ProcessDiskSample>& sampleList)
@@ -2161,7 +2250,7 @@ void DiskMonitorPage::updateSummaryLabels(const std::vector<ProcessDiskSample>& 
     if (m_activitySectionButton != nullptr)
     {
         const int activityRowCount = m_activityTable != nullptr
-            ? m_activityTable->rowCount()
+            ? std::max(1,m_visibleActivityCount)
             : 0;
         m_activitySectionButton->setText(
             QStringLiteral("磁盘活动    当前行: %1    勾选进程: %2")
