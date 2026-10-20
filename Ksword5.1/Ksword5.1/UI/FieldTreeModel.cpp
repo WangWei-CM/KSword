@@ -50,8 +50,6 @@ namespace ks::ui
                 result->keys.insert(entry.key, id);
                 const QString key = entry.key;
                 result->entries.append(std::move(entry));
-                if (parentId < 0) result->roots.append(id);
-                else result->entries[parentId].children.append(id);
                 append(node.children, id, key, matches);
                 if (matches || !result->entries.at(id).accepted.isEmpty())
                 {
@@ -75,7 +73,7 @@ namespace ks::ui
                 const auto& before = previous->entries.at(id);
                 const auto& after = result->entries.at(id);
                 if (before.key != after.key || before.parent != after.parent || before.kind != after.kind
-                    || before.children != after.children || before.accepted != after.accepted)
+                    || before.accepted != after.accepted)
                 { result->sameStructure = false; break; }
                 if (after.row >= 0 && (before.name != after.name || before.value != after.value
                     || before.text != after.text || before.initiallyExpanded != after.initiallyExpanded))

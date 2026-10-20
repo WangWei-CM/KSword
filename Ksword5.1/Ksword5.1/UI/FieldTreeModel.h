@@ -25,14 +25,12 @@ namespace ks::ui
             int row = 0;
             FieldNode::Kind kind = FieldNode::Kind::Field;
             QString key, name, value, text;
-            QVector<int> children;
             QVector<int> accepted;
             bool initiallyExpanded = false;
         };
         struct Change { int parent = -1, first = 0, last = 0; };
         FieldDocument document;
         QVector<Entry> entries;
-        QVector<int> roots;
         QVector<int> acceptedRoots;
         QHash<QString, int> keys;
         QString query;
