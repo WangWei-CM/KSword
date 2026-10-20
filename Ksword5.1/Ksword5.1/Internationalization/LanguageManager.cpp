@@ -1293,6 +1293,143 @@ namespace
     }
 }
 
+namespace
+{
+    // One source/template resolver serves live queries and frozen worker values.
+    // Pack ownership and captured-value translation are supplied by each caller;
+    // parsing, specificity, fallback and placeholder behavior stay identical.
+    template <typename AcquirePack, typename TranslateCapturedSource>
+    QString resolveSourceTextValue(
+        const QString& languageId,
+        const QString& sourceText,
+        QStringList* visitedLanguageIds,
+        const bool preserveHistoricalChineseSource,
+        const AcquirePack& acquirePack,
+        const TranslateCapturedSource& translateCapturedSource)
+    {
+        if (visitedLanguageIds == nullptr || languageId.trimmed().isEmpty() || sourceText.isEmpty())
+        {
+            return sourceText;
+        }
+
+        const QString normalizedLanguageId = languageId.trimmed().toLower();
+        if (visitedLanguageIds->contains(normalizedLanguageId))
+        {
+            return sourceText;
+        }
+        visitedLanguageIds->append(normalizedLanguageId);
+
+        if (preserveHistoricalChineseSource
+            && isHistoricalChineseLanguage(normalizedLanguageId))
+        {
+            return sourceText;
+        }
+
+        const auto pack = acquirePack(normalizedLanguageId);
+        if (!pack.found || !pack.data)
+        {
+            return sourceText;
+        }
+
+        if (const StringEntry* entry = pack.data->find(pack.data->sourceTranslations, sourceText))
+        {
+            return pack.data->valueOf(*entry).toString();
+        }
+
+        if (containsHanCharacters(sourceText))
+        {
+            // Both lists contain the original specificity-order indices. Merge
+            // them rather than iterating one bucket before prefixless templates.
+            const auto bucket = pack.data->templatesByPrefix.constFind(sourceText.front().unicode());
+            const std::vector<quint32> emptyIndices;
+            const std::vector<quint32>& prefixIndices = bucket == pack.data->templatesByPrefix.cend()
+                ? emptyIndices : bucket.value();
+            const std::vector<quint32>& generalIndices = pack.data->templatesWithoutPrefix;
+            std::size_t prefixPosition = 0;
+            std::size_t generalPosition = 0;
+            while (prefixPosition < prefixIndices.size() || generalPosition < generalIndices.size())
+            {
+                const bool takePrefix = generalPosition == generalIndices.size()
+                    || (prefixPosition < prefixIndices.size()
+                        && prefixIndices[prefixPosition] < generalIndices[generalPosition]);
+                const quint32 referenceIndex = takePrefix
+                    ? prefixIndices[prefixPosition++] : generalIndices[generalPosition++];
+                const TemplateRef& reference = pack.data->sourceTemplates[referenceIndex];
+                const StringEntry& entry = pack.data->sourceTranslations[reference.entryIndex];
+                const QStringView patternText = pack.data->keyOf(entry);
+                if (reference.prefixLength > 0
+                    && !sourceText.startsWith(patternText.first(reference.prefixLength)))
+                {
+                    continue;
+                }
+                if (reference.suffixLength > 0
+                    && !sourceText.endsWith(patternText.last(reference.suffixLength)))
+                {
+                    continue;
+                }
+
+                const ParsedTemplate& parsedPattern = reference.parsed;
+                std::vector<QStringView> captures(parsedPattern.placeholders.size());
+                if (!matchTemplate(sourceText, parsedPattern, captures))
+                {
+                    continue;
+                }
+
+                const QStringView translatedPattern = pack.data->valueOf(entry);
+                QString translatedText;
+                qsizetype previousEnd = 0;
+                qsizetype placeholderStart = 0;
+                qsizetype placeholderLength = 0;
+                while (findPlaceholder(translatedPattern, previousEnd, &placeholderStart, &placeholderLength))
+                {
+                    translatedText += translatedPattern.sliced(
+                        previousEnd,
+                        placeholderStart - previousEnd);
+                    const QStringView placeholder = translatedPattern.sliced(
+                        placeholderStart,
+                        placeholderLength);
+                    // 同一占位符在源串里多次出现时取第一次的捕获，与旧实现的登记顺序一致。
+                    const auto placeholderIterator = std::find(
+                        parsedPattern.placeholders.cbegin(),
+                        parsedPattern.placeholders.cend(),
+                        placeholder);
+                    if (placeholderIterator == parsedPattern.placeholders.cend())
+                    {
+                        translatedText.clear();
+                        break;
+                    }
+                    // Placeholder values can themselves be stable UI phrases (for
+                    // example a translated status template receiving "安全模式").
+                    // Resolve each captured value independently so an English outer
+                    // template cannot retain a nested Chinese enum/status string.
+                    const std::size_t captureIndex = static_cast<std::size_t>(
+                        placeholderIterator - parsedPattern.placeholders.cbegin());
+                    translatedText += translateCapturedSource(
+                        captures[captureIndex].toString());
+                    previousEnd = placeholderStart + placeholderLength;
+                }
+                if (!translatedText.isNull())
+                {
+                    translatedText += translatedPattern.sliced(previousEnd);
+                    return translatedText;
+                }
+            }
+        }
+
+        if (!pack.fallbackLanguageId.isEmpty())
+        {
+            return resolveSourceTextValue(
+                pack.fallbackLanguageId,
+                sourceText,
+                visitedLanguageIds,
+                preserveHistoricalChineseSource,
+                acquirePack,
+                translateCapturedSource);
+        }
+        return sourceText;
+    }
+}
+
 // State 说明：
 // - packs 只在启动时登记清单；data 为空表示该语言尚未被使用，不占翻译表内存；
 // - mutex 保护清单与按需加载，查询线程拿到的是 shared_ptr 快照，加载后不再变更。
@@ -1329,6 +1466,55 @@ struct ks::i18n::LanguageManager::PackRef
     QString loadError;
     std::shared_ptr<const LoadedPack> data;
 };
+
+struct ks::i18n::SourceTextSnapshot::Data
+{
+    struct FrozenPack
+    {
+        bool found = false;
+        QString languageId;
+        QString fallbackLanguageId;
+        std::shared_ptr<const LoadedPack> data;
+    };
+
+    QString languageId;
+    std::vector<FrozenPack> packs;
+
+    QString translate(const QString& sourceText, const bool preserveHistoricalChineseSource) const
+    {
+        QStringList visitedLanguageIds;
+        return resolveSourceTextValue(
+            languageId, sourceText, &visitedLanguageIds, preserveHistoricalChineseSource,
+            [this](const QString& id) {
+                const auto found = std::find_if(packs.cbegin(), packs.cend(),
+                    [&id](const FrozenPack& pack) { return pack.languageId == id; });
+                return found == packs.cend() ? FrozenPack{} : *found;
+            },
+            // Captures use normal source semantics even for packed queries,
+            // matching LanguageManager::resolveSourceText's nested behavior.
+            [this](const QString& value) { return translate(value, true); });
+    }
+};
+
+ks::i18n::SourceTextSnapshot::SourceTextSnapshot(std::shared_ptr<const Data> data)
+    : m_data(std::move(data))
+{
+}
+
+QString ks::i18n::SourceTextSnapshot::languageId() const
+{
+    return m_data ? m_data->languageId : QString();
+}
+
+QString ks::i18n::SourceTextSnapshot::sourceText(const QString& sourceText) const
+{
+    return m_data ? m_data->translate(sourceText, true) : sourceText;
+}
+
+QString ks::i18n::SourceTextSnapshot::packedSourceText(const QString& sourceText) const
+{
+    return m_data ? m_data->translate(sourceText, false) : sourceText;
+}
 
 ks::i18n::LanguageManager::LanguageManager()
     : m_state(std::make_unique<State>())
@@ -1656,6 +1842,36 @@ QString ks::i18n::LanguageManager::cachedSourceText(
         }
     }
     return result;
+}
+
+ks::i18n::SourceTextSnapshot ks::i18n::LanguageManager::sourceTextSnapshot() const
+{
+    auto frozen = std::make_shared<SourceTextSnapshot::Data>();
+    {
+        QMutexLocker cacheLocker(&m_state->sourceCacheMutex);
+        frozen->languageId = m_state->sourceLanguageId;
+    }
+    QStringList visitedLanguageIds;
+    QString languageId = frozen->languageId;
+    while (!languageId.trimmed().isEmpty())
+    {
+        const QString normalizedLanguageId = languageId.trimmed().toLower();
+        if (visitedLanguageIds.contains(normalizedLanguageId))
+        {
+            break;
+        }
+        visitedLanguageIds.append(normalizedLanguageId);
+        // Load the fallback chain here, before dispatch. No worker query can
+        // perform a lazy pack read or consult the manager's later state.
+        const PackRef pack = acquirePack(normalizedLanguageId);
+        frozen->packs.push_back({pack.found, normalizedLanguageId, pack.fallbackLanguageId, pack.data});
+        if (!pack.found || !pack.data)
+        {
+            break;
+        }
+        languageId = pack.fallbackLanguageId;
+    }
+    return SourceTextSnapshot(std::move(frozen));
 }
 
 QString ks::i18n::LanguageManager::sourceForRenderedText(const QString& renderedText) const
@@ -2073,124 +2289,10 @@ QString ks::i18n::LanguageManager::resolveSourceText(
     QStringList* visitedLanguageIds,
     const bool preserveHistoricalChineseSource) const
 {
-    if (visitedLanguageIds == nullptr || languageId.trimmed().isEmpty() || sourceText.isEmpty())
-    {
-        return sourceText;
-    }
-
-    const QString normalizedLanguageId = languageId.trimmed().toLower();
-    if (visitedLanguageIds->contains(normalizedLanguageId))
-    {
-        return sourceText;
-    }
-    visitedLanguageIds->append(normalizedLanguageId);
-
-    if (preserveHistoricalChineseSource
-        && isHistoricalChineseLanguage(normalizedLanguageId))
-    {
-        return sourceText;
-    }
-
-    const PackRef pack = acquirePack(normalizedLanguageId);
-    if (!pack.found || !pack.data)
-    {
-        return sourceText;
-    }
-
-    if (const StringEntry* entry = pack.data->find(pack.data->sourceTranslations, sourceText))
-    {
-        return pack.data->valueOf(*entry).toString();
-    }
-
-    if (containsHanCharacters(sourceText))
-    {
-        // Both lists contain the original specificity-order indices. Merge
-        // them rather than iterating one bucket before prefixless templates.
-        const auto bucket = pack.data->templatesByPrefix.constFind(sourceText.front().unicode());
-        const std::vector<quint32> emptyIndices;
-        const std::vector<quint32>& prefixIndices = bucket == pack.data->templatesByPrefix.cend()
-            ? emptyIndices : bucket.value();
-        const std::vector<quint32>& generalIndices = pack.data->templatesWithoutPrefix;
-        std::size_t prefixPosition = 0;
-        std::size_t generalPosition = 0;
-        while (prefixPosition < prefixIndices.size() || generalPosition < generalIndices.size())
-        {
-            const bool takePrefix = generalPosition == generalIndices.size()
-                || (prefixPosition < prefixIndices.size()
-                    && prefixIndices[prefixPosition] < generalIndices[generalPosition]);
-            const quint32 referenceIndex = takePrefix
-                ? prefixIndices[prefixPosition++] : generalIndices[generalPosition++];
-            const TemplateRef& reference = pack.data->sourceTemplates[referenceIndex];
-            const StringEntry& entry = pack.data->sourceTranslations[reference.entryIndex];
-            const QStringView patternText = pack.data->keyOf(entry);
-            if (reference.prefixLength > 0
-                && !sourceText.startsWith(patternText.first(reference.prefixLength)))
-            {
-                continue;
-            }
-            if (reference.suffixLength > 0
-                && !sourceText.endsWith(patternText.last(reference.suffixLength)))
-            {
-                continue;
-            }
-
-            const ParsedTemplate& parsedPattern = reference.parsed;
-            std::vector<QStringView> captures(parsedPattern.placeholders.size());
-            if (!matchTemplate(sourceText, parsedPattern, captures))
-            {
-                continue;
-            }
-
-            const QStringView translatedPattern = pack.data->valueOf(entry);
-            QString translatedText;
-            qsizetype previousEnd = 0;
-            qsizetype placeholderStart = 0;
-            qsizetype placeholderLength = 0;
-            while (findPlaceholder(translatedPattern, previousEnd, &placeholderStart, &placeholderLength))
-            {
-                translatedText += translatedPattern.sliced(
-                    previousEnd,
-                    placeholderStart - previousEnd);
-                const QStringView placeholder = translatedPattern.sliced(
-                    placeholderStart,
-                    placeholderLength);
-                // 同一占位符在源串里多次出现时取第一次的捕获，与旧实现的登记顺序一致。
-                const auto placeholderIterator = std::find(
-                    parsedPattern.placeholders.cbegin(),
-                    parsedPattern.placeholders.cend(),
-                    placeholder);
-                if (placeholderIterator == parsedPattern.placeholders.cend())
-                {
-                    translatedText.clear();
-                    break;
-                }
-                // Placeholder values can themselves be stable UI phrases (for
-                // example a translated status template receiving "安全模式").
-                // Resolve each captured value independently so an English outer
-                // template cannot retain a nested Chinese enum/status string.
-                const std::size_t captureIndex = static_cast<std::size_t>(
-                    placeholderIterator - parsedPattern.placeholders.cbegin());
-                translatedText += this->sourceText(
-                    captures[captureIndex].toString());
-                previousEnd = placeholderStart + placeholderLength;
-            }
-            if (!translatedText.isNull())
-            {
-                translatedText += translatedPattern.sliced(previousEnd);
-                return translatedText;
-            }
-        }
-    }
-
-    if (!pack.fallbackLanguageId.isEmpty())
-    {
-        return resolveSourceText(
-            pack.fallbackLanguageId,
-            sourceText,
-            visitedLanguageIds,
-            preserveHistoricalChineseSource);
-    }
-    return sourceText;
+    return resolveSourceTextValue(
+        languageId, sourceText, visitedLanguageIds, preserveHistoricalChineseSource,
+        [this](const QString& id) { return acquirePack(id); },
+        [this](const QString& value) { return this->sourceText(value); });
 }
 
 void ks::i18n::LanguageManager::ensureApplicationEventFilter()

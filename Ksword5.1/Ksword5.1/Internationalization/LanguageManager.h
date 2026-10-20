@@ -27,6 +27,25 @@ namespace ks::i18n
         bool rightToLeft = false;
     };
 
+    // Immutable translation value captured on the LanguageManager owner thread.
+    // Copies retain the active pack and complete fallback chain. Querying a copy
+    // from a worker never reads a QObject, singleton or mutable language state.
+    // Default construction supplies the same pass-through behavior as no packs.
+    class SourceTextSnapshot final
+    {
+    public:
+        SourceTextSnapshot() = default;
+        QString languageId() const;
+        QString sourceText(const QString& sourceText) const;
+        QString packedSourceText(const QString& sourceText) const;
+
+    private:
+        struct Data;
+        explicit SourceTextSnapshot(std::shared_ptr<const Data> data);
+        std::shared_ptr<const Data> m_data;
+        friend class LanguageManager;
+    };
+
     class LanguageManager final : public QObject
     {
     public:
@@ -43,6 +62,9 @@ namespace ks::i18n
         // 强制查询当前语言包的 source_translations；用于以英文作为规范源文本的独立页面。
         // 与 sourceText() 不同，中文模式下也会查包，而不是直接返回调用点文本。
         QString packedSourceText(const QString& sourceText) const;
+        // Capture before dispatching background serialization; the returned
+        // value stays valid after subsequent language activations or reloads.
+        SourceTextSnapshot sourceTextSnapshot() const;
         QString sourceForRenderedText(const QString& renderedText) const;
         QString displayText(const QString& renderedOrSourceText) const;
 
