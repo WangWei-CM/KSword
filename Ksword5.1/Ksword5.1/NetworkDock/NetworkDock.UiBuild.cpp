@@ -14,6 +14,7 @@
 
 #include <QFrame>
 #include <QScrollArea>
+#include <QSignalBlocker>
 
 using namespace network_dock_detail;
 void NetworkDock::initializeUi()
@@ -33,6 +34,11 @@ void NetworkDock::initializeUi()
     m_sideTabWidget->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     m_rootLayout->addWidget(m_sideTabWidget, 1);
 
+    if (m_constructScope == ConstructScope::ProcessConnections)
+    {
+        initializeNetworkAuditTab();
+        return;
+    }
     initializeTrafficMonitorTab();
     initializeNidsTab();
     // The process rate-limit page is intentionally not exposed in the UI.
@@ -508,6 +514,15 @@ void NetworkDock::initializeNetworkAuditTab()
     m_networkAuditPage = new NetworkAuditPage(this);
     m_networkAuditPage->setTrackProcessHandler([this](const std::uint32_t processId)
     {
+        // The explicit action retains the old hidden monitor-filter behavior;
+        // it does not force every embedded audit host to build that page.
+        if (m_constructScope == ConstructScope::ProcessConnections && m_trafficMonitorPage == nullptr)
+        {
+            const QSignalBlocker blockTabs(m_sideTabWidget);
+            initializeTrafficMonitorTab();
+            m_sideTabWidget->setTabVisible(m_sideTabWidget->indexOf(m_trafficMonitorPage), false);
+            loadMonitorFilterConfigFromDefaultPath();
+        }
         addOrTrackProcessPid(processId);
 
         kLogEvent trackEvent;
@@ -540,6 +555,14 @@ void NetworkDock::initializeNetworkAuditTab()
     m_networkAuditPage->setUdpEndpointBlockRuleHandler(
         [this](const std::uint32_t processId, const QString& localEndpointText)
     {
+        // Rule prefill remains available on explicit request, using the same
+        // existing firewall page/controller rather than a second implementation.
+        if (m_constructScope == ConstructScope::ProcessConnections && m_firewallPage == nullptr)
+        {
+            const QSignalBlocker blockTabs(m_sideTabWidget);
+            initializeFirewallTab();
+            m_sideTabWidget->setTabVisible(m_sideTabWidget->indexOf(m_firewallPage), false);
+        }
         if (m_firewallPage != nullptr)
         {
             m_firewallPage->addUdpEndpointBlockRuleFromEvidence(localEndpointText, processId);

@@ -3,6 +3,7 @@
 #include "../UI/AsyncUiDispatcher.h"
 #include "NetworkDock.InternalCommon.h"
 #include "HttpsProxyService.h"
+#include "NetworkAuditPage.h"
 #include "../ArkDriverClient/ArkDriverClient.h"
 
 #include <QMessageBox>
@@ -16,9 +17,16 @@
 // 3) 在不改变功能前提下替换旧的 .inc 聚合结构。
 // ============================================================
 
-NetworkDock::NetworkDock(QWidget* parent)
-    : QWidget(parent)
+NetworkDock::NetworkDock(QWidget* parent, const ConstructScope scope)
+    : QWidget(parent), m_constructScope(scope)
 {
+    if (m_constructScope == ConstructScope::ProcessConnections)
+    {
+        initializeUi();
+        setProcessDetailConnectionScope();
+        return;
+    }
+
     // 在任何网络页初始化和新代理应用之前，先恢复上次崩溃/强杀遗留的代理事务。
     bool recoveredPreviousProxy = false;
     QString recoveryErrorText;
@@ -148,6 +156,9 @@ NetworkDock::NetworkDock(QWidget* parent)
 
 NetworkDock::~NetworkDock()
 {
+    // A scoped audit host never owned capture/proxy/download services. In
+    // particular its teardown must not disable the global driver's capture.
+    if (m_constructScope == ConstructScope::ProcessConnections) return;
     if (m_nidsIconOperation != nullptr) m_nidsIconOperation->close();
     if (m_nidsAnalysisOperation != nullptr) m_nidsAnalysisOperation->close();
     retireNidsAnalysisSession();
@@ -226,6 +237,11 @@ NetworkDock::~NetworkDock()
 void NetworkDock::showEvent(QShowEvent* event)
 {
     QWidget::showEvent(event);
+    if (m_constructScope == ConstructScope::ProcessConnections)
+    {
+        if (m_networkAuditPage != nullptr) m_networkAuditPage->requestInitialRefresh();
+        return;
+    }
     initializeVisibleDiagnosticPage();
     synchronizeVisiblePacketProjection();
     synchronizeVisibleNidsProjection();

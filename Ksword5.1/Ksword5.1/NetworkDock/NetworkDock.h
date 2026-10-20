@@ -92,7 +92,8 @@ public:
     // 构造函数：
     // - 作用：初始化 UI、绑定后台服务回调、连接交互信号。
     // - 参数 parent：Qt 父控件，可为空。
-    explicit NetworkDock(QWidget* parent = nullptr);
+    enum class ConstructScope { Full, ProcessConnections };
+    explicit NetworkDock(QWidget* parent = nullptr, ConstructScope scope = ConstructScope::Full);
 
     // 析构函数：
     // - 作用：停止后台抓包线程，避免窗口释放后仍有异步回调。
@@ -1545,6 +1546,7 @@ private:
     CodeEditorWidget* m_hostsFileEditor = nullptr;  // hosts文件编辑器（全屏复用项目文本编辑组件）。
 
     // ========================= 后台服务与缓存 ====================
+    const ConstructScope m_constructScope;
     std::unique_ptr<ks::network::TrafficMonitorService> m_trafficService; // 抓包/限速后台服务对象。
     std::shared_ptr<network_dock_detail::NidsAnalysisSession> m_nidsAnalysisSession;
     ks::ui::AsyncOperation* m_nidsAnalysisOperation = nullptr;
