@@ -84,12 +84,18 @@ void MemoryDock::prepareNavigationPages()
 
     // 目录/搜索请求是显式导航需求：准备真实工作台与调试页，确保嵌套 Tab 的控件
     // 进入统一索引；不切换当前页、不枚举进程，首次展示仍由各页自己的 showEvent 负责。
+    // Compatibility discovery fallback: materialize all registered pages without selecting them.
+    // The static catalog provider introduced separately bypasses this path for search.
+    const QPointer<MemoryDock> owner(this);
+    QStringList ids; for (const auto& state : m_lazyPages) { ids.append(state.id); }
+    for (const auto& id : ids) { ensureLazyPage(id); if (!owner) { return; } }
     ensureWorkbenchView();
+    if (!owner) { return; }
     if (m_memoryDebugPage != nullptr)
     {
         m_memoryDebugPage->prepareForNavigation();
     }
-    m_navigationPagesPrepared = true;
+    if (owner) { m_navigationPagesPrepared = true; }
 }
 
 // ensureWorkbenchView：幂等地创建视图并完成全部接线。

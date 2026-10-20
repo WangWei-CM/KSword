@@ -679,6 +679,7 @@ void MemoryDock::resetScanState()
     m_lastSearchValueType = SearchValueType::Byte;
     rebuildSearchResultTable();
 
+    if (!m_searchResultTable) { return; }
     // 恢复按钮状态，并把进度条与状态文本还原到“就绪”。
     m_scanProgressBar->setValue(0);
     m_scanStatusLabel->setText("已重置，等待首次扫描。");
@@ -694,7 +695,7 @@ void MemoryDock::cancelCurrentScan()
     if (m_scanInProgress.load())
     {
         m_scanCancelRequested.store(true);
-        m_scanStatusLabel->setText("正在请求取消扫描...");
+        if (m_scanStatusLabel) { m_scanStatusLabel->setText("正在请求取消扫描..."); }
         kLogEvent cancelScanEvent;
         warn << cancelScanEvent
             << "[MemoryDock] cancelCurrentScan: 已设置取消标志。"
@@ -718,6 +719,7 @@ void MemoryDock::cancelAndWaitForMemoryScanTasks()
 
 void MemoryDock::rebuildSearchResultTable()
 {
+    if (!m_searchResultTable) { return; }
     // 重建结果表入口日志：记录结果规模与显示类型。
     kLogEvent rebuildResultEvent;
     dbg << rebuildResultEvent

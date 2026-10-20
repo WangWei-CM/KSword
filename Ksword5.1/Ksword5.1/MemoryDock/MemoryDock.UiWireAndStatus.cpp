@@ -95,6 +95,9 @@ void MemoryDock::initializeConnections()
         // 刷新动作按当前页签的"页面控件"路由（而不是数字下标），减少无关页面刷新开销；
         // 这样日后在页签中间插入新页，刷新钮也不会错位到相邻的页面。
         // currentPage：当前选中页签对应的页面控件；没有任何页签时为空指针。
+        const QPointer<MemoryDock> owner(this);
+        ensureCurrentLazyPage();
+        if (!owner) { return; }
         QWidget* currentPage = m_tabWidget->currentWidget();
         // tabIndex：当前页签下标，只用于下面的日志，不参与路由判断。
         const int tabIndex = m_tabWidget->currentIndex();
@@ -178,6 +181,9 @@ void MemoryDock::initializeConnections()
         });
 
     connect(m_tabWidget, &QTabWidget::currentChanged, this, [this](int) {
+        const QPointer<MemoryDock> owner(this);
+        ensureCurrentLazyPage();
+        if (!owner) { return; }
         if (m_tabWidget->currentWidget() == m_systemMemoryAuditPlaceholder)
         {
             ensureSystemMemoryAuditPage();
@@ -402,10 +408,10 @@ void MemoryDock::initializeConnections()
         {
             m_scanThreadCount = static_cast<std::uint32_t>(threadSpin->value());
             m_scanChunkSizeKB = static_cast<std::uint32_t>(chunkSpin->value());
-            m_scanStatusLabel->setText(
+            if (m_scanStatusLabel) { m_scanStatusLabel->setText(
                 QString("设置已更新：线程=%1, 块=%2KB")
                 .arg(m_scanThreadCount)
-                .arg(m_scanChunkSizeKB));
+                .arg(m_scanChunkSizeKB)); }
 
             kLogEvent settingsApplyEvent;
             info << settingsApplyEvent
@@ -424,6 +430,12 @@ void MemoryDock::initializeConnections()
         }
         });
 
+    initializeProcessConnections();
+    m_pageConnectionsReady = true;
+}
+
+void MemoryDock::initializeProcessConnections()
+{
     // ========================================================
     // Tab1：进程与模块
     // ========================================================
@@ -654,6 +666,11 @@ void MemoryDock::initializeConnections()
         }
         });
 
+
+}
+
+void MemoryDock::initializeRegionConnections()
+{
     // ========================================================
     // Tab2：内存区域
     // ========================================================
@@ -914,6 +931,7 @@ void MemoryDock::initializeConnections()
                         << ", end="
                         << formatAddress(regionEnd).toStdString()
                         << eol;
+                    if (!ensureLazyPage(QStringLiteral("search"))) { return; }
                     m_searchRangeCombo->setCurrentIndex(1);
                     m_searchRangeStartEdit->setText(formatAddress(regionBase));
                     m_searchRangeEndEdit->setText(formatAddress(regionEnd));
@@ -923,6 +941,11 @@ void MemoryDock::initializeConnections()
         }
         });
 
+
+}
+
+void MemoryDock::initializeSearchConnections()
+{
     // ========================================================
     // Tab3：搜索
     // ========================================================
@@ -1167,6 +1190,11 @@ void MemoryDock::initializeConnections()
         }
         });
 
+
+}
+
+void MemoryDock::initializeKernelExecutableConnections()
+{
     // ========================================================
     // Tab7：内核可执行页扫描
     // ========================================================
@@ -1193,6 +1221,11 @@ void MemoryDock::initializeConnections()
         showKernelExecutableMemoryDetailByCurrentRow();
         });
 
+
+}
+
+void MemoryDock::initializeKernelEvidenceConnections()
+{
     // ========================================================
     // Tab8：内核内存证据
     // ========================================================
@@ -1227,6 +1260,11 @@ void MemoryDock::initializeConnections()
         showKernelMemoryEvidenceDetailByCurrentRow();
         });
 
+
+}
+
+void MemoryDock::initializePteConnections()
+{
     // ========================================================
     // Tab9：PTE / VA 翻译
     // ========================================================
@@ -1258,6 +1296,11 @@ void MemoryDock::initializeConnections()
         showProcessPteTranslateDetailByCurrentRow();
         });
 
+
+}
+
+void MemoryDock::initializeProcessEvidenceConnections()
+{
     // ========================================================
     // Tab10：进程内存证据
     // ========================================================
@@ -1304,6 +1347,7 @@ void MemoryDock::initializeConnections()
         showProcessMemoryEvidenceDetailByCurrentRow();
         });
 }
+
 
 void MemoryDock::initializeStatusBar()
 {

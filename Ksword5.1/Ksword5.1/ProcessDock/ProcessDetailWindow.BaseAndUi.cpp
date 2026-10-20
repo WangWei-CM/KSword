@@ -2982,7 +2982,7 @@ void ProcessDetailWindow::ensureEmbeddedMemoryView()
         const ks::ui::ScopedWidgetThemePreparation prepareMountedTab(m_embeddedMemoryTab);
 
         // 第一段：只做控件树构造与页面挂载，不触发目标进程附加。
-        m_embeddedMemoryDock = new MemoryDock(m_embeddedMemoryTab);
+        m_embeddedMemoryDock = new MemoryDock(m_embeddedMemoryTab, MemoryDock::PageScope::ProcessDetail);
         m_embeddedMemoryDock->hide();
         attachEmbeddedDockToTabLayout(
             m_embeddedMemoryLayout,

@@ -89,7 +89,8 @@ public:
     // 构造函数：
     // - 作用：初始化全部 UI、连接信号槽、加载初始进程列表。
     // - 参数 parent：Qt 父控件指针，可为空。
-    explicit MemoryDock(QWidget* parent = nullptr);
+    enum class PageScope { Main, ProcessDetail };
+    explicit MemoryDock(QWidget* parent = nullptr, PageScope scope = PageScope::Main);
 
     // 析构函数：
     // - 作用：在控件销毁前释放进程句柄、停止定时器与后台扫描状态。
@@ -309,6 +310,22 @@ private:
     // - 作用：初始化全部 MemoryDock Tab 页。
     // - 返回：无。
     void initializeTabs();
+    struct PageFactory;
+    static const std::vector<PageFactory>& pageFactories();
+    struct LazyPage { QString id; QWidget* widget = nullptr; bool ready = false, constructing = false; };
+    std::vector<LazyPage> m_lazyPages;
+    bool m_pageConnectionsReady = false;
+    QWidget* ensureLazyPage(const QString& id);
+    void ensureCurrentLazyPage();
+    void initializeProcessConnections();
+    void initializeRegionConnections();
+    void initializeSearchConnections();
+    void initializeKernelExecutableConnections();
+    void initializeKernelEvidenceConnections();
+    void initializePteConnections();
+    void initializeProcessEvidenceConnections();
+    void initializeHvciBypassTab();
+    void initializeRxpfTab();
 
     // initializeProcessModuleTab：
     // - 作用：构建 Tab1（进程与模块）界面。

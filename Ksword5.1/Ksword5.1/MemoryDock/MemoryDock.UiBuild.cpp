@@ -2,6 +2,7 @@
 #include "../UI/AsyncOperation.h"
 #include "SystemMemoryAuditPage.h"
 #include "DdmaPage.h"
+#include "MemoryDebugPage.h"
 #include "../MiscDock/HvciBypass/HvciBypassPage.h"
 #include "../MiscDock/HvciBypass/RxpfPage.h"
 #include "../UI/AdaptivePageScroll.h" // ks::ui::EnablePageInnerScroll / IsolateMinimumSize：页内滚动壳与最小尺寸隔离。
@@ -99,8 +100,8 @@ namespace
 
 }
 
-MemoryDock::MemoryDock(QWidget* parent)
-    : QWidget(parent)
+MemoryDock::MemoryDock(QWidget* parent, const PageScope scope)
+    : QWidget(parent), m_workbenchEmbedded(scope == PageScope::ProcessDetail)
 {
     // 记录构造起点日志：用于追踪内存页控件的生命周期。
     kLogEvent constructStartEvent;
@@ -111,6 +112,7 @@ MemoryDock::MemoryDock(QWidget* parent)
     // 构造阶段按固定顺序执行，确保 UI 控件先创建再绑定信号。
     initializeUi();
     initializeConnections();
+    if (m_workbenchEmbedded) { setProcessDetailMemoryScope(); }
     initializeWorkbenchLivenessTimer();
     refreshProcessList(false);
     updateStatusBarText();
@@ -335,6 +337,35 @@ void MemoryDock::initializeToolbar()
     m_rootLayout->addWidget(toolbarContainer);
 }
 
+struct MemoryDock::PageFactory {
+    const char *id, *languageKey, *title, *icon;
+    bool processDetail, eager;
+    std::function<void(MemoryDock&)> build;
+    std::function<QWidget*(MemoryDock&)> page;
+    std::function<void(MemoryDock&, QWidget*)> assignShell;
+    void (MemoryDock::*wire)() = nullptr;
+};
+const std::vector<MemoryDock::PageFactory>& MemoryDock::pageFactories()
+{
+    static const std::vector<PageFactory> factories{
+        {"process_module", "memory.tab.process_module", "进程与模块", ":/Icon/process_list.svg", true, true, [](MemoryDock& d) { d.initializeProcessModuleTab(); }, [](MemoryDock& d) -> QWidget* { return d.m_tabProcessModule; }, [](MemoryDock& d, QWidget* p) { d.m_tabProcessModule = p; }, &MemoryDock::initializeProcessConnections},
+        {"regions", "memory.tab.regions", "内存区域", ":/Icon/disk_storage.svg", true, false, [](MemoryDock& d) { d.initializeMemoryRegionTab(); }, [](MemoryDock& d) -> QWidget* { return d.m_tabRegions; }, [](MemoryDock& d, QWidget* p) { d.m_tabRegions = p; }, &MemoryDock::initializeRegionConnections},
+        {"search", "memory.tab.search", "内存搜索", ":/Icon/codeeditor_find.svg", true, false, [](MemoryDock& d) { d.initializeMemorySearchTab(); }, [](MemoryDock& d) -> QWidget* { return d.m_tabSearch; }, [](MemoryDock& d, QWidget* p) { d.m_tabSearch = p; }, &MemoryDock::initializeSearchConnections},
+        {"workbench", "memory.tab.workbench", "内存工作台", ":/Icon/memwb_tab_hex.svg", true, true, [](MemoryDock& d) { d.initializeWorkbenchTab(); }, [](MemoryDock& d) -> QWidget* { return d.m_tabWorkbench; }, [](MemoryDock& d, QWidget* p) { d.m_tabWorkbench = p; }, nullptr},
+        {"memory_debug", "memory.tab.debug", "内存调试", ":/Icon/memwb_tab_disasm.svg", false, false, [](MemoryDock& d) { d.initializeMemoryDebugTab(); }, [](MemoryDock& d) -> QWidget* { return d.m_memoryDebugPage; }, {}, nullptr},
+        {"kernel_executable", "memory.tab.kernel_executable", "内核可执行页", ":/Icon/log_track.svg", false, false, [](MemoryDock& d) { d.initializeKernelExecutableMemoryScanTab(); }, [](MemoryDock& d) -> QWidget* { return d.m_tabKernelExecutableMemory; }, [](MemoryDock& d, QWidget* p) { d.m_tabKernelExecutableMemory = p; }, &MemoryDock::initializeKernelExecutableConnections},
+        {"kernel_evidence", "memory.tab.kernel_memory_evidence", "内核内存证据", ":/Icon/file_find.svg", false, false, [](MemoryDock& d) { d.initializeKernelMemoryEvidenceTab(); }, [](MemoryDock& d) -> QWidget* { return d.m_tabKernelMemoryEvidence; }, [](MemoryDock& d, QWidget* p) { d.m_tabKernelMemoryEvidence = p; }, &MemoryDock::initializeKernelEvidenceConnections},
+        {"process_pte", "memory.tab.pte_translate", "PTE / VA 翻译", ":/Icon/process_tree.svg", false, false, [](MemoryDock& d) { d.initializeProcessPteTranslateTab(); }, [](MemoryDock& d) -> QWidget* { return d.m_tabProcessPteTranslate; }, [](MemoryDock& d, QWidget* p) { d.m_tabProcessPteTranslate = p; }, &MemoryDock::initializePteConnections},
+        {"process_evidence", "memory.tab.process_memory_evidence", "进程内存证据", ":/Icon/process_performance.svg", false, false, [](MemoryDock& d) { d.initializeProcessMemoryEvidenceTab(); }, [](MemoryDock& d) -> QWidget* { return d.m_tabProcessMemoryEvidence; }, [](MemoryDock& d, QWidget* p) { d.m_tabProcessMemoryEvidence = p; }, &MemoryDock::initializeProcessEvidenceConnections},
+        {"system_audit", "memory.tab.system_memory_audit", "系统内存审计", ":/Icon/disk_analyze.svg", false, false, [](MemoryDock& d) { d.initializeSystemMemoryAuditTab(); d.ensureSystemMemoryAuditPage(); }, [](MemoryDock& d) -> QWidget* { return d.m_systemMemoryAuditPage; }, {}, nullptr},
+        {"tamper_detection", "memory.tab.tamper_detection", "篡改检测", ":/Icon/process_critical.svg", false, false, [](MemoryDock& d) { d.initializeTamperDetectionTab(); }, [](MemoryDock& d) -> QWidget* { return d.m_tamperDetectionPage; }, {}, nullptr},
+        {"ddma", "memory.tab.ddma", "DDMA", ":/Icon/disk_storage.svg", false, false, [](MemoryDock& d) { d.initializeDdmaTab(); }, [](MemoryDock& d) -> QWidget* { return d.m_ddmaPage; }, {}, nullptr},
+        {"hvci_bypass", "memory.tab.hvci_bypass", "HVCI 绕过", ":/Icon/process_priority.svg", false, false, [](MemoryDock& d) { d.initializeHvciBypassTab(); }, [](MemoryDock& d) -> QWidget* { return d.m_hvciBypassPage; }, {}, nullptr},
+        {"rxpf", "memory.tab.rxpf", "RXPF 模拟", ":/Icon/development/terminal_line.svg", false, false, [](MemoryDock& d) { d.initializeRxpfTab(); }, [](MemoryDock& d) -> QWidget* { return d.m_rxpfPage; }, {}, nullptr},
+    };
+    return factories;
+}
+
 void MemoryDock::initializeTabs()
 {
     // 记录 Tab 初始化日志：便于排查某个页面未创建的问题。
@@ -363,101 +394,101 @@ void MemoryDock::initializeTabs()
     resultLayout->addWidget(m_tabWidget, 1);
     m_rootLayout->addWidget(resultGroup, 1);
 
-    // 采集：MemoryDock 首开构造拆到每个内部页，区分“哪一页构造慢”和外层挂载/主题开销。
-    const auto initializeMeasuredTab = [this](const char* tabKey, auto initializer)
-    {
-        ks::ui::PerfScope tabPerf("perf_memory_tab_construct", QString::fromUtf8(tabKey));
-        (this->*initializer)();
-    };
-    initializeMeasuredTab("process_module", &MemoryDock::initializeProcessModuleTab);
-    initializeMeasuredTab("regions", &MemoryDock::initializeMemoryRegionTab);
-    initializeMeasuredTab("search", &MemoryDock::initializeMemorySearchTab);
-    initializeMeasuredTab("kernel_executable", &MemoryDock::initializeKernelExecutableMemoryScanTab);
-    initializeMeasuredTab("kernel_evidence", &MemoryDock::initializeKernelMemoryEvidenceTab);
-    initializeMeasuredTab("process_pte", &MemoryDock::initializeProcessPteTranslateTab);
-    initializeMeasuredTab("process_evidence", &MemoryDock::initializeProcessMemoryEvidenceTab);
-    initializeMeasuredTab("system_audit", &MemoryDock::initializeSystemMemoryAuditTab);
-    initializeMeasuredTab("tamper_detection", &MemoryDock::initializeTamperDetectionTab);
-    initializeMeasuredTab("ddma", &MemoryDock::initializeDdmaTab);
-
-    // 原有 10 个页签的图标集中在这里设置：分散到各构建函数里会漏，也不好统一调整语义。
-    // 下标顺序与上面的构建顺序严格一一对应。
-    const char* const tabIconAliases[] = {
-        ":/Icon/process_list.svg",        // 进程与模块
-        ":/Icon/disk_storage.svg",        // 内存区域
-        ":/Icon/codeeditor_find.svg",     // 内存搜索
-        ":/Icon/log_track.svg",           // 内核可执行页
-        ":/Icon/file_find.svg",           // 内核内存证据
-        ":/Icon/process_tree.svg",        // PTE / VA 翻译
-        ":/Icon/process_performance.svg", // 进程内存证据
-        ":/Icon/disk_analyze.svg",        // 系统内存审计
-        ":/Icon/process_critical.svg",    // 篡改检测
-        ":/Icon/disk_storage.svg"         // DDMA
-    };
-    const int iconCount = static_cast<int>(sizeof(tabIconAliases) / sizeof(tabIconAliases[0]));
-    for (int tabIndex = 0; tabIndex < m_tabWidget->count() && tabIndex < iconCount; ++tabIndex)
-    {
-        m_tabWidget->setTabIcon(tabIndex, QIcon(QString::fromLatin1(tabIconAliases[tabIndex])));
+    // The same ordered factory list owns main/embedded registration and first visits.
+    const QSignalBlocker blocker(m_tabWidget);
+    for (const auto& factory : pageFactories()) {
+        if (m_workbenchEmbedded && !factory.processDetail) { continue; }
+        LazyPage state; state.id = QString::fromLatin1(factory.id);
+        if (factory.eager) {
+            factory.build(*this); state.widget = factory.page(*this); state.ready = true;
+        } else {
+            state.widget = new QWidget(m_tabWidget);
+            state.widget->setProperty("ksword_memory_lazy_page", state.id);
+            m_tabWidget->addTab(state.widget, QString::fromUtf8(factory.title));
+            if (factory.assignShell) { factory.assignShell(*this, state.widget); }
+        }
+        const int index = m_tabWidget->indexOf(state.widget);
+        m_tabWidget->setTabIcon(index, QIcon(QString::fromLatin1(factory.icon)));
+        ks::i18n::LanguageManager::instance().bindTab(m_tabWidget, state.widget,
+            QString::fromLatin1(factory.languageKey), QString::fromUtf8(factory.title));
+        m_lazyPages.push_back(std::move(state));
     }
+}
 
-    // 内存工作台页签必须在图标循环之后插入：上面的图标按下标对应原有页签顺序，
-    // 先插会让后面所有页签的图标整体错位。它自己的图标与语言键在 initializeWorkbenchTab 里设置。
-    initializeMeasuredTab("workbench", &MemoryDock::initializeWorkbenchTab);
-    // 新独立页面也在旧图标循环之后插入，避免改变旧页面的下标图标映射。
-    initializeMeasuredTab("memory_debug", &MemoryDock::initializeMemoryDebugTab);
-
-    // HVCI 绕过实验页：standalone 页面，自管理 showEvent 首刷，不跟随 Dock 附加。
-    {
-        ks::ui::PerfScope tabPerf("perf_memory_tab_construct", QStringLiteral("hvci_bypass"));
-        m_hvciBypassPage = new ks::misc::HvciBypassPage(m_tabWidget);
+void MemoryDock::ensureCurrentLazyPage()
+{
+    if (!m_tabWidget) { return; }
+    const auto current = m_tabWidget->currentWidget();
+    for (const auto& state : m_lazyPages) {
+        if (state.widget == current) { const auto id = state.id; ensureLazyPage(id); return; }
     }
+}
+
+QWidget* MemoryDock::ensureLazyPage(const QString& id)
+{
+    const QPointer<MemoryDock> owner(this);
+    const QPointer<QTabWidget> tabs(m_tabWidget);
+    if (!tabs) { return nullptr; }
+    auto state = std::find_if(m_lazyPages.begin(), m_lazyPages.end(), [&](const auto& page) { return page.id == id; });
+    if (state == m_lazyPages.end() || state->constructing) { return nullptr; }
+    int index = tabs->indexOf(state->widget);
+    if (index < 0 || !tabs->isEnabled() || !state->widget->isEnabled() || !tabs->isTabVisible(index) || !tabs->isTabEnabled(index)) { return nullptr; }
+    if (state->ready) { return state->widget; }
+    const auto factory = std::find_if(pageFactories().begin(), pageFactories().end(), [&](const auto& item) { return id == QLatin1String(item.id); });
+    if (factory == pageFactories().end()) { return nullptr; }
+    state->constructing = true;
+    const QPointer<QWidget> shell(state->widget), previous(tabs->currentWidget());
+    const bool selected = previous == shell;
+    QPointer<QWidget> page;
+    {
+        const ks::ui::ScopedWidgetThemePreparation preparation(tabs);
+        struct Signals {
+            QPointer<QTabWidget> tabs; bool previous;
+            ~Signals() { if (tabs) { tabs->blockSignals(previous); } }
+        } blocker{tabs, tabs->blockSignals(true)};
+        ks::ui::PerfScope performance("perf_memory_tab_construct", id);
+        factory->build(*owner);
+        if (!owner || !tabs || !shell) { return nullptr; }
+        page = factory->page(*owner);
+        if (!page) { state->constructing = false; return nullptr; }
+        const int builtIndex = tabs->indexOf(page);
+        if (builtIndex >= 0) { tabs->removeTab(builtIndex); }
+        index = tabs->indexOf(shell);
+        if (index < 0) { state->constructing = false; return nullptr; }
+        const QString text = tabs->tabText(index);
+        const QIcon icon = tabs->tabIcon(index);
+        tabs->removeTab(index); tabs->insertTab(index, page, icon, text);
+        ks::i18n::LanguageManager::instance().bindTab(tabs, page,
+            QString::fromLatin1(factory->languageKey), QString::fromUtf8(factory->title));
+        if (!owner || !tabs || !page) { return nullptr; }
+        state->widget = page; state->ready = true; state->constructing = false;
+        if (owner->m_pageConnectionsReady && factory->wire) { (owner.data()->*factory->wire)(); }
+        if (!owner || !tabs || !page) { return nullptr; }
+        if (id == QLatin1String("regions")) { owner->applyRegionFilterAndRebuildTable(); }
+        if (!owner || !tabs || !page) { return nullptr; }
+        if (id == QLatin1String("search")) { owner->rebuildSearchResultTable(); if (owner) { owner->refreshBackendSelectors(); } }
+        if (!owner || !tabs || !page) { return nullptr; }
+        if (selected || !previous) { tabs->setCurrentWidget(page); }
+        else { tabs->setCurrentWidget(previous); }
+        if (shell) { shell->deleteLater(); }
+    }
+    // The final theme preparation can synchronously close or reselect its host.
+    if (!owner || !tabs || !page || owner->m_tabWidget != tabs) { return nullptr; }
+    index = tabs->indexOf(page);
+    if (index < 0 || !tabs->isEnabled() || !page->isEnabled() || !tabs->isTabVisible(index) || !tabs->isTabEnabled(index) ||
+        (selected && tabs->currentWidget() != page)) { return nullptr; }
+    return page.data();
+}
+
+void MemoryDock::initializeHvciBypassTab()
+{
+    m_hvciBypassPage = new ks::misc::HvciBypassPage(m_tabWidget);
     m_tabWidget->addTab(m_hvciBypassPage, QStringLiteral("HVCI 绕过"));
-    m_tabWidget->setTabIcon(
-        m_tabWidget->indexOf(m_hvciBypassPage),
-        QIcon(QStringLiteral(":/Icon/process_priority.svg")));
-    ks::i18n::LanguageManager::instance().bindTab(
-        m_tabWidget, m_hvciBypassPage,
-        QStringLiteral("memory.tab.hvci_bypass"), QStringLiteral("HVCI 绕过"));
-
-    // RXPF 页错误模拟页：standalone 页面，自管理 showEvent 首刷。
-    {
-        ks::ui::PerfScope tabPerf("perf_memory_tab_construct", QStringLiteral("rxpf"));
-        m_rxpfPage = new ks::misc::RxpfPage(m_tabWidget);
-    }
+}
+void MemoryDock::initializeRxpfTab()
+{
+    m_rxpfPage = new ks::misc::RxpfPage(m_tabWidget);
     m_tabWidget->addTab(m_rxpfPage, QStringLiteral("RXPF 模拟"));
-    m_tabWidget->setTabIcon(
-        m_tabWidget->indexOf(m_rxpfPage),
-        QIcon(QStringLiteral(":/Icon/development/terminal_line.svg")));
-    ks::i18n::LanguageManager::instance().bindTab(
-        m_tabWidget, m_rxpfPage,
-        QStringLiteral("memory.tab.rxpf"), QStringLiteral("RXPF 模拟"));
-
-    // 后加的四个证据页原本漏了语义键绑定，这里补齐，让它们也能跟随语言切换。
-    ks::i18n::LanguageManager& languageManager = ks::i18n::LanguageManager::instance();
-    if (m_tabKernelExecutableMemory != nullptr)
-    {
-        languageManager.bindTab(
-            m_tabWidget, m_tabKernelExecutableMemory,
-            QStringLiteral("memory.tab.kernel_executable"), QStringLiteral("内核可执行页"));
-    }
-    if (m_tabKernelMemoryEvidence != nullptr)
-    {
-        languageManager.bindTab(
-            m_tabWidget, m_tabKernelMemoryEvidence,
-            QStringLiteral("memory.tab.kernel_memory_evidence"), QStringLiteral("内核内存证据"));
-    }
-    if (m_tabProcessPteTranslate != nullptr)
-    {
-        languageManager.bindTab(
-            m_tabWidget, m_tabProcessPteTranslate,
-            QStringLiteral("memory.tab.pte_translate"), QStringLiteral("PTE / VA 翻译"));
-    }
-    if (m_tabProcessMemoryEvidence != nullptr)
-    {
-        languageManager.bindTab(
-            m_tabWidget, m_tabProcessMemoryEvidence,
-            QStringLiteral("memory.tab.process_memory_evidence"), QStringLiteral("进程内存证据"));
-    }
 }
 
 void MemoryDock::initializeSystemMemoryAuditTab()
@@ -574,18 +605,9 @@ void MemoryDock::initializeDdmaTab()
 
 void MemoryDock::focusDdmaPage()
 {
-    if (m_tabWidget == nullptr || m_ddmaPage == nullptr)
-    {
-        return;
-    }
-    // 进程详情内嵌模式下这个页是被隐藏的；隐藏的 Tab 用 setCurrentWidget 切不过去，
-    // 所以先确认它可见再切，避免出现"点了没反应"。
-    const int tabIndex = m_tabWidget->indexOf(m_ddmaPage);
-    if (tabIndex < 0 || !m_tabWidget->isTabVisible(tabIndex))
-    {
-        return;
-    }
-    m_tabWidget->setCurrentWidget(m_ddmaPage);
+    const QPointer<MemoryDock> owner(this);
+    const QPointer<QWidget> page(ensureLazyPage(QStringLiteral("ddma")));
+    if (owner && page && owner->m_tabWidget) { owner->m_tabWidget->setCurrentWidget(page); }
 }
 
 QWidget* MemoryDock::createBackendSelector(

@@ -1765,8 +1765,8 @@ void MemoryDock::detachProcess()
             QStringLiteral("color:%1; font-weight:600;")
                 .arg(KswordTheme::TextSecondaryColor().name(QColor::HexRgb)));
     }
-    m_regionTable->setRowCount(0);
-    m_searchResultTable->setRowCount(0);
+    if (m_regionTable) { m_regionTable->setRowCount(0); }
+    if (m_searchResultTable) { m_searchResultTable->setRowCount(0); }
     if (m_processPteTranslateTable != nullptr)
     {
         m_processPteTranslateTable->setRowCount(0);
@@ -2415,7 +2415,7 @@ void MemoryDock::refreshMemoryRegionList(const bool forceRequery)
     if (m_attachedProcessHandle == nullptr)
     {
         m_regionCache.clear();
-        m_regionTable->setRowCount(0);
+        if (m_regionTable) { m_regionTable->setRowCount(0); }
         return;
     }
 
@@ -2633,6 +2633,7 @@ bool MemoryDock::enumerateMemoryRegionsByVirtualQuery(
 
 void MemoryDock::applyRegionFilterAndRebuildTable()
 {
+    if (!m_regionTable) { return; } // Enumeration/cache lifetime is independent of an unopened projection.
     // 过滤入口日志：记录当前缓存规模与过滤开关状态。
     kLogEvent regionFilterStartEvent;
     dbg << regionFilterStartEvent
