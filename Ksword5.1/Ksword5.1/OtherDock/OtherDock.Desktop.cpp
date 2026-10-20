@@ -1,6 +1,7 @@
 #include "OtherDock.h"
 #include "../theme.h"
 #include "../UI/TableInteractionSupport.h"
+#include "../UI/TableHeaderSortingSupport.h"
 #include "../UI/AsyncOperation.h"
 #include "../UI/ResultTableHost.h"
 #include "../Internationalization/LanguageManager.h"
@@ -1149,6 +1150,9 @@ void OtherDock::initializeDesktopTableModel()
         QStringLiteral("堆(KB)"), QStringLiteral("备注")};
     m_desktopSourceModel = source;
     auto* proxy = new QSortFilterProxyModel(m_desktopTable);
+    proxy->setSortRole(Qt::DisplayRole);
+    proxy->setSortCaseSensitivity(Qt::CaseSensitive);
+    proxy->setSortLocaleAware(true);
     proxy->setDynamicSortFilter(false);
     proxy->setSourceModel(source);
     m_desktopDisplayModel = proxy;
@@ -1161,6 +1165,7 @@ void OtherDock::initializeDesktopTableModel()
          {6, QStringLiteral("switchable")}, {7, QStringLiteral("session")}, {8, QStringLiteral("owner")},
          {9, QStringLiteral("sid")}, {10, QStringLiteral("sid_detail")}, {11, QStringLiteral("heap")},
          {12, QStringLiteral("remark")}}, capabilities);
+    ks::ui::InstallTableHeaderClickSorting(m_desktopTable);
     m_desktopTable->horizontalHeader()->setResizeContentsPrecision(100);
 }
 
