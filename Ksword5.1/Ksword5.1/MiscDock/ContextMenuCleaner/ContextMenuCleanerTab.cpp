@@ -5,6 +5,7 @@
 #include "../../UI/ToolbarMetrics.h"
 #include "../../Framework/PrivilegeElevationPrompt.h"
 #include "../../UI/VisibleTableWidget.h"
+#include "../../UI/TableInteractionSupport.h"
 #include "../../UI/StructuredFieldView.h"
 #include "../../UI/DetailLayoutRegistry.h"
 
@@ -28,6 +29,8 @@
 #include <QTableWidget>
 #include <QTableWidgetItem>
 #include <QTabWidget>
+#include <QTimer>
+#include <QSignalBlocker>
 #include <QVBoxLayout>
 #include <QStringList>
 
@@ -311,8 +314,13 @@ void ContextMenuCleanerTab::createAreaPage(const MenuArea area)
     connect(areaWidgets->copyButton, &QPushButton::clicked, this, [this, area]() {
         copySelectedEntries(area);
     });
-    connect(areaWidgets->filterEdit, &QLineEdit::textChanged, this, [this, area](const QString&) {
-        rebuildAreaTable(area);
+    areaWidgets->filterTimer = new QTimer(areaWidgets->page);
+    areaWidgets->filterTimer->setSingleShot(true);
+    areaWidgets->filterTimer->setInterval(80);
+    connect(areaWidgets->filterEdit, &QLineEdit::textChanged, areaWidgets->filterTimer,
+        qOverload<>(&QTimer::start));
+    connect(areaWidgets->filterTimer, &QTimer::timeout, this, [this, area]() {
+        applyAreaFilter(area);
     });
     connect(areaWidgets->table, &QTableWidget::customContextMenuRequested, this, [this, area](const QPoint& localPosition) {
         showAreaContextMenu(area, localPosition);
@@ -357,79 +365,96 @@ void ContextMenuCleanerTab::rebuildAreaTable(const MenuArea area)
     {
         return;
     }
-
-    const QString filterText = areaWidgets->filterEdit != nullptr
-        ? areaWidgets->filterEdit->text().trimmed().toLower()
-        : QString();
-
-    // 重建数据前先让详情宿主收起行内详情：合成的行内控件引用的是即将失效的源行。
+    if (areaWidgets->filterTimer != nullptr)
+    {
+        areaWidgets->filterTimer->stop();
+    }
+    areaWidgets->searchTexts.clear();
+    areaWidgets->searchTexts.reserve(areaWidgets->entries.size());
     ks::ui::DetailLayoutRegistry::prepareDataRebuild(areaWidgets->detailEditor);
-
     areaWidgets->table->setSortingEnabled(false);
     areaWidgets->table->setRowCount(0);
 
-    int visibleCount = 0;
     for (int entryIndex = 0; entryIndex < areaWidgets->entries.size(); ++entryIndex)
     {
         const ContextMenuEntry& entry = areaWidgets->entries.at(entryIndex);
-        const QString searchableText = QStringList{
-            entry.itemName,
-            entry.displayName,
-            entry.entryKind,
-            entry.sourceGroup,
-            entry.commandOrHandler,
-            registryTargetPathText(
-                entry.rootLabel,
-                entry.subKeyPath,
-                entry.deleteKind == DeleteKind::RegistryValue,
-                entry.valueName),
-            entry.statusText,
-            entry.details.toPlainText(),
-            entry.clsidText }.join('\n').toLower();
-        if (!filterText.isEmpty() && !searchableText.contains(filterText))
-        {
-            continue;
-        }
-
-        const int row = visibleCount++;
+        const QString detailText = entry.details.toPlainText();
+        const QString registryPathText = registryTargetPathText(
+            entry.rootLabel, entry.subKeyPath,
+            entry.deleteKind == DeleteKind::RegistryValue, entry.valueName);
+        areaWidgets->searchTexts.push_back(QStringList{
+            entry.itemName, entry.displayName, entry.entryKind, entry.sourceGroup,
+            entry.commandOrHandler, registryPathText, entry.statusText,
+            detailText, entry.clsidText }.join('\n').toLower());
+        const int row = entryIndex;
         areaWidgets->table->insertRow(row);
-
         const auto makeItem = [entryIndex](const QString& text) -> QTableWidgetItem*
         {
-            QTableWidgetItem* item = new QTableWidgetItem(text);
+            auto* item = new QTableWidgetItem(text);
             item->setData(Qt::UserRole, entryIndex);
             item->setToolTip(text);
             return item;
         };
-
         areaWidgets->table->setItem(row, kColumnName, makeItem(entry.itemName));
         areaWidgets->table->setItem(row, kColumnDisplayName, makeItem(entry.displayName));
         areaWidgets->table->setItem(row, kColumnKind, makeItem(entry.entryKind));
         areaWidgets->table->setItem(row, kColumnSource, makeItem(entry.sourceGroup));
         areaWidgets->table->setItem(row, kColumnCommandOrHandler, makeItem(entry.commandOrHandler));
-        areaWidgets->table->setItem(
-            row,
-            kColumnRegistryPath,
-            makeItem(registryTargetPathText(
-                entry.rootLabel,
-                entry.subKeyPath,
-                entry.deleteKind == DeleteKind::RegistryValue,
-                entry.valueName)));
+        areaWidgets->table->setItem(row, kColumnRegistryPath, makeItem(registryPathText));
         areaWidgets->table->setItem(row, kColumnStatus, makeItem(entry.statusText));
-        areaWidgets->table->setItem(row, kColumnDetail, makeItem(entry.details.toPlainText()));
+        areaWidgets->table->setItem(row, kColumnDetail, makeItem(detailText));
     }
-
     areaWidgets->table->setSortingEnabled(true);
+    applyAreaFilter(area);
+    updateAreaDetail(area);
+}
+
+void ContextMenuCleanerTab::applyAreaFilter(const MenuArea area)
+{
+    AreaWidgets* areaWidgets = widgetsForArea(area);
+    if (areaWidgets == nullptr || areaWidgets->table == nullptr)
+    {
+        return;
+    }
+    const QString filterText = areaWidgets->filterEdit != nullptr
+        ? areaWidgets->filterEdit->text().trimmed().toLower() : QString();
+    const QSignalBlocker tableSignals(areaWidgets->table);
+    int visibleCount = 0;
+    QSet<QPersistentModelIndex> excludedRows;
+    for (int row = 0; row < areaWidgets->table->rowCount(); ++row)
+    {
+        QTableWidgetItem* anchor = areaWidgets->table->item(row, kColumnName);
+        if (anchor == nullptr || !anchor->data(Qt::UserRole).isValid())
+        {
+            continue;
+        }
+        const int index = anchor->data(Qt::UserRole).toInt();
+        const bool visible = index >= 0 && index < areaWidgets->searchTexts.size()
+            && (filterText.isEmpty() || areaWidgets->searchTexts.at(index).contains(filterText));
+        if (visible)
+        {
+            ++visibleCount;
+        }
+        else
+        {
+            excludedRows.insert(QPersistentModelIndex(areaWidgets->table->model()->index(row, 0)));
+            areaWidgets->table->selectionModel()->select(
+                areaWidgets->table->model()->index(row, 0),
+                QItemSelectionModel::Deselect | QItemSelectionModel::Rows);
+        }
+    }
+    ks::ui::ApplyTableRowFilter(areaWidgets->table, excludedRows);
     if (areaWidgets->statusLabel != nullptr)
     {
         areaWidgets->statusLabel->setText(QStringLiteral("%1：共枚举 %2 项，当前显示 %3 项。")
-            .arg(areaTitle(area))
-            .arg(areaWidgets->entries.size())
-            .arg(visibleCount));
+            .arg(areaTitle(area)).arg(areaWidgets->entries.size()).arg(visibleCount));
     }
-
-    // 重建后选中行已失效：重新同步一次详情文本（无选中行则回到引导占位）。
-    updateAreaDetail(area);
+    const int currentRow = areaWidgets->table->currentRow();
+    if (currentRow >= 0 && ks::ui::IsTableRowExcludedByFilter(areaWidgets->table, currentRow))
+    {
+        areaWidgets->table->setCurrentCell(-1, -1);
+        updateAreaDetail(area);
+    }
 }
 
 void ContextMenuCleanerTab::showAreaContextMenu(const MenuArea area, const QPoint& localPosition)
@@ -706,6 +731,10 @@ QVector<int> ContextMenuCleanerTab::selectedEntryIndexes(const MenuArea area) co
     const QModelIndexList selectedRows = areaWidgets->table->selectionModel()->selectedRows();
     for (const QModelIndex& modelIndex : selectedRows)
     {
+        if (ks::ui::IsTableRowExcludedByFilter(areaWidgets->table, modelIndex.row()))
+        {
+            continue;
+        }
         const QTableWidgetItem* item = areaWidgets->table->item(modelIndex.row(), kColumnName);
         if (item == nullptr)
         {

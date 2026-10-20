@@ -27,6 +27,7 @@ class QPoint;
 class QPushButton;
 class QTableWidget;
 class QTabWidget;
+class QTimer;
 class QVBoxLayout;
 #include "../../UI/StructuredFieldView.h"
 
@@ -98,6 +99,8 @@ namespace ks::misc
             QPushButton* deleteButton = nullptr;  // deleteButton：删除选中项按钮。
             QPushButton* restoreButton = nullptr; // restoreButton：恢复 URL 绑定页上一次删除前的注册表备份。
             QPushButton* copyButton = nullptr;    // copyButton：复制选中注册表路径按钮。
+            QTimer* filterTimer = nullptr;           // Coalesce rapid typing without rebuilding source rows.
+            QVector<QString> searchTexts;             // Immutable full-field search projection for this snapshot.
             QLineEdit* filterEdit = nullptr;      // filterEdit：当前分类关键词筛选框。
             QTableWidget* table = nullptr;        // table：右键菜单项列表。
             ks::ui::StructuredFieldView* detailEditor = nullptr; // detailEditor：本分类的只读详情编辑器，交由详情布局系统托管。
@@ -130,6 +133,7 @@ namespace ks::misc
         // - 处理：按当前筛选文本把缓存 entries 渲染到表格；
         // - 返回：无。
         void rebuildAreaTable(MenuArea area);
+        void applyAreaFilter(MenuArea area);
 
         // showAreaContextMenu：
         // - 输入 area：目标分区；localPosition：表格视口内右键坐标；
