@@ -764,7 +764,13 @@ namespace ksword::ark
             KSWORD_ARK_DRIVER_OBJECT_NAME_CHARS,
             driverName);
 
-        std::vector<std::uint8_t> responseBuffer(2U * 1024U * 1024U, 0U);
+        // With no device rows requested the existing protocol returns only its fixed header.
+        // Keep the full original device capacity for all callers requesting device traversal.
+        constexpr std::size_t fixedResponseSize = sizeof(KSWORD_ARK_QUERY_DRIVER_OBJECT_RESPONSE)
+            - sizeof(KSWORD_ARK_DRIVER_DEVICE_ENTRY);
+        const std::size_t responseCapacity = (flags & KSWORD_ARK_DRIVER_OBJECT_QUERY_FLAG_INCLUDE_DEVICES) != 0UL
+            ? 2U * 1024U * 1024U : fixedResponseSize;
+        std::vector<std::uint8_t> responseBuffer(responseCapacity, 0U);
         queryResult.io = deviceIoControl(
             IOCTL_KSWORD_ARK_QUERY_DRIVER_OBJECT,
             &request,
