@@ -1,3 +1,4 @@
+#include "../UI/MemoryPageNavigationSchema.h"
 #include "HyperVMemoryPage.h"
 #include "../UI/ToolbarMetrics.h"
 #include "../UI/PrimaryPageStyle.h"
@@ -310,8 +311,8 @@ void HyperVMemoryPage::retranslate()
     m_collect->setText(L("Collect Hyper-V evidence")); m_cancel->setText(m_exportJob ? L("Cancel") : L("Cancel collection")); m_export->setText(L("Export evidence"));
     m_filter->setPlaceholderText(L("Filter partition, owner, GUID, or runtime ID"));
     m_collect->setToolTip(L("Read VID, Hyper-V WMI, HCS, VBS and host process evidence. Repeat to compare allocations over time."));
-    m_tabs->setTabText(0, L("Partitions and utility VMs")); m_tabs->setTabText(1, L("Host memory evidence"));
-    m_tabs->setTabText(2, L("Visible host processes")); m_tabs->setTabText(3, L("Provider coverage")); m_tabs->setTabText(4, L("Interpretation and snapshot context"));
+    m_tabs->setTabText(0, ks::ui::MemoryNavigationTabTitle(ks::ui::MemoryNavigationGroup::HyperV, 0)); m_tabs->setTabText(1, ks::ui::MemoryNavigationTabTitle(ks::ui::MemoryNavigationGroup::HyperV, 1));
+    m_tabs->setTabText(2, ks::ui::MemoryNavigationTabTitle(ks::ui::MemoryNavigationGroup::HyperV, 2)); m_tabs->setTabText(3, ks::ui::MemoryNavigationTabTitle(ks::ui::MemoryNavigationGroup::HyperV, 3)); m_tabs->setTabText(4, ks::ui::MemoryNavigationTabTitle(ks::ui::MemoryNavigationGroup::HyperV, 4));
     headers(m_partitions, {L("Partition / VM"), L("Owner"), L("State"), L("VID physical"), L("HCS node memory"), L("VID delta"), L("Dynamic physical"), L("Guest-visible capacity"), L("Deposited pages"), L("Identity evidence")});
     headers(m_host, {L("Metric"), L("Instance"), L("Bytes"), L("Status"), L("Accounting role")});
     headers(m_processes, {L("Process"), L("PID"), L("Working set"), L("Private commit"), L("Partition evidence")});

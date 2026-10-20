@@ -1,3 +1,4 @@
+#include "../MemoryPageNavigationSchema.h"
 #include "SnapshotWorkbenchWidget.h"
 #include "../PageControlStyle.h"
 #include "../ToolbarMetrics.h"
@@ -107,7 +108,7 @@ namespace ks::ui
         m_hex = new HexView(m_tabs);
         m_hex->setBytesPerRow(16);
         m_hex->setStatusBarVisible(false);
-        m_tabs->addTab(m_hex, trText(QStringLiteral("十六进制")));
+        m_tabs->addTab(m_hex, MemoryNavigationTabTitle(MemoryNavigationGroup::Workbench, 0));
         auto* codePage = new QWidget(m_tabs);
         auto* codeLayout = new QVBoxLayout(codePage);
         codeLayout->setContentsMargins(0, 0, 0, 0);
@@ -127,15 +128,15 @@ namespace ks::ui
         m_disassembly = new WorkbenchDisasmView(codePage);
         m_disassembly->setObjectName(QStringLiteral("memory_instruction_canvas"));
         codeLayout->addWidget(m_disassembly, 1);
-        m_tabs->addTab(codePage, trText(QStringLiteral("反汇编")));
+        m_tabs->addTab(codePage, MemoryNavigationTabTitle(MemoryNavigationGroup::Workbench, 1));
         m_text = new WorkbenchTextView(m_tabs);
         m_text->setObjectName(QStringLiteral("memory_text_canvas"));
         m_text->setBytesProvider(&m_bytesProvider);
-        m_tabs->addTab(m_text, trText(QStringLiteral("文本")));
+        m_tabs->addTab(m_text, MemoryNavigationTabTitle(MemoryNavigationGroup::Workbench, 2));
         // 比较页复用正式虚拟模型，不再维护旧的分页 QTableWidget 副本。
         m_comparison = new WorkbenchCompareView(m_tabs);
         m_comparison->setBytesProvider(&m_bytesProvider);
-        m_tabs->addTab(m_comparison, trText(QStringLiteral("对比")));
+        m_tabs->addTab(m_comparison, MemoryNavigationTabTitle(MemoryNavigationGroup::Workbench, 3));
         layout->addWidget(m_tabs, 1);
         initializePseudocodeView();
 

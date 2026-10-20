@@ -15,6 +15,7 @@
 #include "MemoryAccessBackend.h" // 访问后端枚举与 DDMA 会话：按值出现在成员与返回类型里。
 #include "TamperDetectionPage.h" // ksword::memory_dock::TamperDetectionPage：按值出现在成员指针与模块同步调用里。
 
+#include "../UI/PageNavigationCatalog.h"
 #include <QVector>     // QVector：保存反汇编解码结果行。
 #include <QWidget>
 
@@ -141,6 +142,8 @@ public:
     bool openAddressInWorkbench(std::uint64_t address, bool kernelAddress = false);
     // prepareNavigationPages：按需准备工作台与内存调试页的真实控件树，供全局导航索引。
     void prepareNavigationPages();
+    static ks::ui::PageNavigationCatalog navigationCatalog(const MemoryDock* existing = nullptr);
+    QWidget* activateNavigationDescriptor(const QString& id);
     std::function<void(const QString&)> openPoolModuleDetails;
 
 protected:

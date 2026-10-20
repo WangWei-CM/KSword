@@ -28,6 +28,7 @@
 //   heightForWidth 相关两处是为了让"遵守该协议"的宿主在会话条换行时拿到正确高度。
 // ============================================================
 
+#include "../MemoryPageNavigationSchema.h"
 #include "MemoryWorkbenchView.h"
 #include "../ToolbarMetrics.h"
 #include "MemoryWorkbenchView.Internal.h"
@@ -168,12 +169,7 @@ namespace ks::ui
         // 自己用 QPainter 画文字（自绘控件），运行期整树扫描够不到它的私有
         // QStringList 成员，必须在源头就翻译好（AGENTS.md i18n 规则）。
         subTabSegmented_ = new HexViewSegmented(
-            QStringList{
-                ks::i18n::sourceText(QStringLiteral("十六进制")),
-                ks::i18n::sourceText(QStringLiteral("反汇编")),
-                ks::i18n::sourceText(QStringLiteral("文本")),
-                ks::i18n::sourceText(QStringLiteral("对比")),
-                ks::i18n::sourceText(QStringLiteral("C 伪代码"))},
+            MemoryNavigationTabTitles(MemoryNavigationGroup::Workbench),
             this);
 
         // 子页签那一行：左边分段钮，右边"视图"菜单钮（行宽/分组/字号，只在十六进制子页显示，

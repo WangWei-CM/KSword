@@ -1,3 +1,4 @@
+#include "../UI/MemoryPageNavigationSchema.h"
 #include "MemoryConsumerEvidencePage.h"
 #include "../UI/ToolbarMetrics.h"
 #include "../UI/PrimaryPageStyle.h"
@@ -396,9 +397,9 @@ void MemoryConsumerEvidencePage::retranslate()
 {
     m_gpuButton->setText(L("Collect GPU consumer evidence"));
     m_traceStart->setText(L("Capture pool allocation history"));
-    m_detailTabs->setTabText(0, L("GPU consumers"));
-    m_detailTabs->setTabText(1, L("Pool allocation analysis"));
-    m_detailTabs->setTabText(2, L("Recorder output"));
+    m_detailTabs->setTabText(0, ks::ui::MemoryNavigationTabTitle(ks::ui::MemoryNavigationGroup::Consumer, 0));
+    m_detailTabs->setTabText(1, ks::ui::MemoryNavigationTabTitle(ks::ui::MemoryNavigationGroup::Consumer, 1));
+    m_detailTabs->setTabText(2, ks::ui::MemoryNavigationTabTitle(ks::ui::MemoryNavigationGroup::Consumer, 2));
     m_duration->setSuffix(L(" s"));
     m_note->setText(L("GPU counters are a separate, fallible consumer view. Process sharing is not summed into physical RAM; dedicated metrics can include UMA. Pool tracing requests 32 MiB of circular buffers; actual ETW overhead and event loss remain separate evidence. Only the chosen interval is observed; older allocations and overwritten events are unavailable."));
     if (!m_gpuResult) { m_gpuStatus->setText(L("GPU consumer evidence has not been collected.")); }

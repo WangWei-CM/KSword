@@ -3,6 +3,9 @@
 #include "SystemMemoryAuditPage.h"
 #include "DdmaPage.h"
 #include "MemoryDebugPage.h"
+#include "../UI/MemoryPageNavigationSchema.h"
+#include "../UI/MemoryWorkbench/MemoryWorkbenchView.h"
+#include <QStackedWidget>
 #include "../MiscDock/HvciBypass/HvciBypassPage.h"
 #include "../MiscDock/HvciBypass/RxpfPage.h"
 #include "../UI/AdaptivePageScroll.h" // ks::ui::EnablePageInnerScroll / IsolateMinimumSize：页内滚动壳与最小尺寸隔离。
@@ -344,6 +347,7 @@ struct MemoryDock::PageFactory {
     std::function<QWidget*(MemoryDock&)> page;
     std::function<void(MemoryDock&, QWidget*)> assignShell;
     void (MemoryDock::*wire)() = nullptr;
+    ks::ui::MemoryNavigationGroup children = ks::ui::MemoryNavigationGroup::None;
 };
 const std::vector<MemoryDock::PageFactory>& MemoryDock::pageFactories()
 {
@@ -351,19 +355,171 @@ const std::vector<MemoryDock::PageFactory>& MemoryDock::pageFactories()
         {"process_module", "memory.tab.process_module", "进程与模块", ":/Icon/process_list.svg", true, true, [](MemoryDock& d) { d.initializeProcessModuleTab(); }, [](MemoryDock& d) -> QWidget* { return d.m_tabProcessModule; }, [](MemoryDock& d, QWidget* p) { d.m_tabProcessModule = p; }, &MemoryDock::initializeProcessConnections},
         {"regions", "memory.tab.regions", "内存区域", ":/Icon/disk_storage.svg", true, false, [](MemoryDock& d) { d.initializeMemoryRegionTab(); }, [](MemoryDock& d) -> QWidget* { return d.m_tabRegions; }, [](MemoryDock& d, QWidget* p) { d.m_tabRegions = p; }, &MemoryDock::initializeRegionConnections},
         {"search", "memory.tab.search", "内存搜索", ":/Icon/codeeditor_find.svg", true, false, [](MemoryDock& d) { d.initializeMemorySearchTab(); }, [](MemoryDock& d) -> QWidget* { return d.m_tabSearch; }, [](MemoryDock& d, QWidget* p) { d.m_tabSearch = p; }, &MemoryDock::initializeSearchConnections},
-        {"workbench", "memory.tab.workbench", "内存工作台", ":/Icon/memwb_tab_hex.svg", true, true, [](MemoryDock& d) { d.initializeWorkbenchTab(); }, [](MemoryDock& d) -> QWidget* { return d.m_tabWorkbench; }, [](MemoryDock& d, QWidget* p) { d.m_tabWorkbench = p; }, nullptr},
-        {"memory_debug", "memory.tab.debug", "内存调试", ":/Icon/memwb_tab_disasm.svg", false, false, [](MemoryDock& d) { d.initializeMemoryDebugTab(); }, [](MemoryDock& d) -> QWidget* { return d.m_memoryDebugPage; }, {}, nullptr},
+        {"workbench", "memory.tab.workbench", "内存工作台", ":/Icon/memwb_tab_hex.svg", true, true, [](MemoryDock& d) { d.initializeWorkbenchTab(); }, [](MemoryDock& d) -> QWidget* { return d.m_tabWorkbench; }, [](MemoryDock& d, QWidget* p) { d.m_tabWorkbench = p; }, nullptr, ks::ui::MemoryNavigationGroup::Workbench},
+        {"memory_debug", "memory.tab.debug", "内存调试", ":/Icon/memwb_tab_disasm.svg", false, false, [](MemoryDock& d) { d.initializeMemoryDebugTab(); }, [](MemoryDock& d) -> QWidget* { return d.m_memoryDebugPage; }, {}, nullptr, ks::ui::MemoryNavigationGroup::Workbench},
         {"kernel_executable", "memory.tab.kernel_executable", "内核可执行页", ":/Icon/log_track.svg", false, false, [](MemoryDock& d) { d.initializeKernelExecutableMemoryScanTab(); }, [](MemoryDock& d) -> QWidget* { return d.m_tabKernelExecutableMemory; }, [](MemoryDock& d, QWidget* p) { d.m_tabKernelExecutableMemory = p; }, &MemoryDock::initializeKernelExecutableConnections},
         {"kernel_evidence", "memory.tab.kernel_memory_evidence", "内核内存证据", ":/Icon/file_find.svg", false, false, [](MemoryDock& d) { d.initializeKernelMemoryEvidenceTab(); }, [](MemoryDock& d) -> QWidget* { return d.m_tabKernelMemoryEvidence; }, [](MemoryDock& d, QWidget* p) { d.m_tabKernelMemoryEvidence = p; }, &MemoryDock::initializeKernelEvidenceConnections},
         {"process_pte", "memory.tab.pte_translate", "PTE / VA 翻译", ":/Icon/process_tree.svg", false, false, [](MemoryDock& d) { d.initializeProcessPteTranslateTab(); }, [](MemoryDock& d) -> QWidget* { return d.m_tabProcessPteTranslate; }, [](MemoryDock& d, QWidget* p) { d.m_tabProcessPteTranslate = p; }, &MemoryDock::initializePteConnections},
         {"process_evidence", "memory.tab.process_memory_evidence", "进程内存证据", ":/Icon/process_performance.svg", false, false, [](MemoryDock& d) { d.initializeProcessMemoryEvidenceTab(); }, [](MemoryDock& d) -> QWidget* { return d.m_tabProcessMemoryEvidence; }, [](MemoryDock& d, QWidget* p) { d.m_tabProcessMemoryEvidence = p; }, &MemoryDock::initializeProcessEvidenceConnections},
-        {"system_audit", "memory.tab.system_memory_audit", "系统内存审计", ":/Icon/disk_analyze.svg", false, false, [](MemoryDock& d) { d.initializeSystemMemoryAuditTab(); d.ensureSystemMemoryAuditPage(); }, [](MemoryDock& d) -> QWidget* { return d.m_systemMemoryAuditPage; }, {}, nullptr},
+        {"system_audit", "memory.tab.system_memory_audit", "系统内存审计", ":/Icon/disk_analyze.svg", false, false, [](MemoryDock& d) { d.initializeSystemMemoryAuditTab(); d.ensureSystemMemoryAuditPage(); }, [](MemoryDock& d) -> QWidget* { return d.m_systemMemoryAuditPage; }, {}, nullptr, ks::ui::MemoryNavigationGroup::Audit},
         {"tamper_detection", "memory.tab.tamper_detection", "篡改检测", ":/Icon/process_critical.svg", false, false, [](MemoryDock& d) { d.initializeTamperDetectionTab(); }, [](MemoryDock& d) -> QWidget* { return d.m_tamperDetectionPage; }, {}, nullptr},
-        {"ddma", "memory.tab.ddma", "DDMA", ":/Icon/disk_storage.svg", false, false, [](MemoryDock& d) { d.initializeDdmaTab(); }, [](MemoryDock& d) -> QWidget* { return d.m_ddmaPage; }, {}, nullptr},
+        {"ddma", "memory.tab.ddma", "DDMA", ":/Icon/disk_storage.svg", false, false, [](MemoryDock& d) { d.initializeDdmaTab(); }, [](MemoryDock& d) -> QWidget* { return d.m_ddmaPage; }, {}, nullptr, ks::ui::MemoryNavigationGroup::Workbench},
         {"hvci_bypass", "memory.tab.hvci_bypass", "HVCI 绕过", ":/Icon/process_priority.svg", false, false, [](MemoryDock& d) { d.initializeHvciBypassTab(); }, [](MemoryDock& d) -> QWidget* { return d.m_hvciBypassPage; }, {}, nullptr},
         {"rxpf", "memory.tab.rxpf", "RXPF 模拟", ":/Icon/development/terminal_line.svg", false, false, [](MemoryDock& d) { d.initializeRxpfTab(); }, [](MemoryDock& d) -> QWidget* { return d.m_rxpfPage; }, {}, nullptr},
     };
     return factories;
+}
+
+namespace {
+struct MemoryNavigationContainer {
+    QPointer<QTabWidget> tabs;
+    QPointer<QStackedWidget> stack;
+    int count() const { return tabs ? tabs->count() : stack ? stack->count() : 0; }
+    QWidget* widget(int index) const { return tabs ? tabs->widget(index) : stack ? stack->widget(index) : nullptr; }
+    bool visible(int index) const { return tabs ? tabs->isTabVisible(index) : true; }
+    bool enabled(int index) const { return widget(index) && widget(index)->isEnabled() &&
+        (tabs ? tabs->isEnabled() && tabs->isTabEnabled(index) : stack && stack->isEnabled()); }
+    int currentIndex() const { return tabs ? tabs->currentIndex() : stack ? stack->currentIndex() : -1; }
+    QString title(int index) const {
+        if (tabs) { return tabs->tabText(index); }
+        const auto titles = stack ? stack->property("ksword_navigation_page_titles").toStringList() : QStringList();
+        return index >= 0 && index < titles.size() ? titles[index] : QString();
+    }
+    void select(int index) const { if (tabs) { tabs->setCurrentIndex(index); } else if (stack) { stack->setCurrentIndex(index); } }
+};
+bool isMemoryNavigationContainer(QWidget* widget)
+{
+    return qobject_cast<QTabWidget*>(widget) || (qobject_cast<QStackedWidget*>(widget) &&
+        widget->property("ksword_navigation_page_titles").isValid());
+}
+MemoryNavigationContainer memoryNavigationContainer(QWidget* root)
+{
+    MemoryNavigationContainer result;
+    if (!root) { return result; }
+    for (QWidget* child : root->findChildren<QWidget*>()) {
+        if (!isMemoryNavigationContainer(child)) { continue; }
+        bool nested = false;
+        for (QWidget* parent = child->parentWidget(); parent && parent != root; parent = parent->parentWidget()) {
+            if (isMemoryNavigationContainer(parent)) { nested = true; break; }
+        }
+        if (nested) { continue; }
+        // Ambiguous groups fail navigation instead of selecting a different nested editor.
+        if (result.tabs || result.stack) { return {}; }
+        result.tabs = qobject_cast<QTabWidget*>(child); result.stack = qobject_cast<QStackedWidget*>(child);
+    }
+    return result;
+}
+void appendMemoryNavigationChildren(ks::ui::PageNavigationCatalog& catalog, const QString& parent,
+    const ks::ui::MemoryNavigationGroup group, QWidget* root)
+{
+    const auto& tabs = ks::ui::MemoryNavigationTabs(group);
+    if (tabs.empty()) { return; }
+    const auto container = memoryNavigationContainer(root);
+    for (int index = 0; index < static_cast<int>(tabs.size()); ++index) {
+        const auto& spec = tabs[static_cast<std::size_t>(index)];
+        ks::ui::PageNavigationDescriptor page;
+        page.id = parent + QLatin1Char('.') + QString::fromLatin1(spec.id); page.parentId = parent;
+        page.title = ks::ui::MemoryNavigationTabTitle(group, index); page.searchTexts = {QString::fromUtf8(spec.source)};
+        QWidget* actual = nullptr;
+        if (index < container.count()) {
+            actual = container.widget(index); page.title = container.title(index);
+            page.visible = container.visible(index); page.enabled = container.enabled(index); page.current = container.currentIndex() == index;
+        } else { page.current = index == 0; }
+        catalog.append(page);
+        appendMemoryNavigationChildren(catalog, page.id, spec.children, actual);
+    }
+}
+}
+
+ks::ui::PageNavigationCatalog MemoryDock::navigationCatalog(const MemoryDock* existing)
+{
+    ks::ui::PageNavigationCatalog catalog;
+    for (const auto& factory : pageFactories()) {
+        if (existing && existing->m_workbenchEmbedded && !factory.processDetail) { continue; }
+        ks::ui::PageNavigationDescriptor page;
+        page.id = QString::fromLatin1(factory.id);
+        page.title = ks::i18n::text(QString::fromLatin1(factory.languageKey), QString::fromUtf8(factory.title));
+        page.searchTexts = {QString::fromUtf8(factory.title)};
+        QWidget* actual = nullptr;
+        if (existing && existing->m_tabWidget) {
+            const auto state = std::find_if(existing->m_lazyPages.begin(), existing->m_lazyPages.end(), [&](const auto& entry) { return entry.id == page.id; });
+            if (state == existing->m_lazyPages.end()) { continue; }
+            const int index = existing->m_tabWidget->indexOf(state->widget);
+            if (index < 0) { continue; }
+            page.title = existing->m_tabWidget->tabText(index);
+            page.visible = existing->m_tabWidget->isTabVisible(index); page.enabled = existing->m_tabWidget->isEnabled() &&
+                state->widget->isEnabled() && existing->m_tabWidget->isTabEnabled(index);
+            page.current = existing->m_tabWidget->currentWidget() == state->widget;
+            if (state->ready) { actual = state->widget; }
+        } else { page.current = page.id == QLatin1String("process_module"); }
+        catalog.append(page);
+        appendMemoryNavigationChildren(catalog, page.id, factory.children, actual);
+    }
+    return catalog;
+}
+
+QWidget* MemoryDock::activateNavigationDescriptor(const QString& id)
+{
+    const QPointer<MemoryDock> owner(this);
+    const auto resolved = ks::ui::ResolvePageNavigationCatalog(navigationCatalog(this), QString());
+    if (!resolved) { return nullptr; }
+    const auto desired = std::find_if(resolved->cbegin(), resolved->cend(), [&](const auto& page) { return page.page.id == id; });
+    if (desired == resolved->cend() || !desired->page.visible || !desired->page.enabled) { return nullptr; }
+    const auto path = id.split(QLatin1Char('.'));
+    const auto factory = std::find_if(pageFactories().cbegin(), pageFactories().cend(), [&](const auto& item) { return path.front() == QLatin1String(item.id); });
+    if (factory == pageFactories().cend()) { return nullptr; }
+    const auto initialGroup = factory->children;
+    QPointer<QWidget> root = ensureLazyPage(path.front());
+    if (!owner || !root) { return nullptr; }
+    const QPointer<QTabWidget> topTabs(owner->m_tabWidget);
+    const QPointer<QWidget> topRoot(root);
+    struct Route { MemoryNavigationContainer container; QPointer<QWidget> page; int index; };
+    std::vector<Route> route;
+    const auto valid = [&] {
+        if (!owner || !topTabs || !topRoot || owner->m_tabWidget != topTabs || !topTabs->isEnabled() || !topRoot->isEnabled()) { return false; }
+        const int topIndex = topTabs->indexOf(topRoot);
+        if (topIndex < 0 || !topTabs->isTabVisible(topIndex) || !topTabs->isTabEnabled(topIndex) || topTabs->currentWidget() != topRoot) { return false; }
+        for (const auto& step : route) {
+            if (!step.page || step.index >= step.container.count() || step.container.widget(step.index) != step.page ||
+                !step.container.visible(step.index) || !step.container.enabled(step.index) || step.container.currentIndex() != step.index) { return false; }
+        }
+        return true;
+    };
+    {
+        const ks::ui::ScopedWidgetThemePreparation preparation(topRoot);
+        if (!owner || !topTabs || !topRoot) { return nullptr; }
+        topTabs->setCurrentWidget(topRoot);
+        if (!valid()) { return nullptr; }
+        if (initialGroup == ks::ui::MemoryNavigationGroup::Workbench) {
+            if (path.front() == QLatin1String("workbench")) { owner->ensureWorkbenchView(); }
+            if (!valid()) { return nullptr; }
+            if (path.front() == QLatin1String("memory_debug") && owner->m_memoryDebugPage) { owner->m_memoryDebugPage->prepareForNavigation(); }
+            if (!valid()) { return nullptr; }
+        }
+        auto group = initialGroup;
+        for (qsizetype depth = 1; depth < path.size(); ++depth) {
+            const auto& tabs = ks::ui::MemoryNavigationTabs(group);
+            const auto child = std::find_if(tabs.cbegin(), tabs.cend(), [&](const auto& tab) { return path[depth] == QLatin1String(tab.id); });
+            if (child == tabs.cend()) { return nullptr; }
+            const int index = static_cast<int>(std::distance(tabs.cbegin(), child));
+            const auto container = memoryNavigationContainer(root);
+            if (index >= container.count() || !container.visible(index) || !container.enabled(index)) { return nullptr; }
+            const QPointer<QWidget> childRoot(container.widget(index));
+            route.push_back({container, childRoot, index});
+            container.select(index);
+            if (!valid() || !childRoot) { return nullptr; }
+            root = childRoot; group = child->children;
+            ks::ui::PrepareWidgetThemeBindingsForShow(root);
+            if (!valid() || !root) { return nullptr; }
+        }
+    } // Theme-scope destruction may synchronously retire or reselect the route.
+    if (!valid() || !root) { return nullptr; }
+    ks::ui::PrepareWidgetThemeBindingsForShow(root);
+    return valid() && root ? root.data() : nullptr;
+}
+
+namespace {
+const bool kMemoryNavigationRegistered = ks::ui::RegisterTypedPageNavigationCatalog<MemoryDock>(QStringLiteral("memory"));
 }
 
 void MemoryDock::initializeTabs()

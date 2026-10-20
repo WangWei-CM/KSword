@@ -1,3 +1,4 @@
+#include "../UI/MemoryPageNavigationSchema.h"
 #include "../UI/StructuredFieldView.h"
 #include "SystemMemoryAuditPage.h"
 #include "../UI/CodeEditorWidget.h"
@@ -962,19 +963,19 @@ void SystemMemoryAuditPage::initializeUi()
     });
     bigPoolLayout->addWidget(m_bigPoolTable);
 
-    m_detailTabs->addTab(overviewPage, localized("Physical distribution"));
-    m_detailTabs->addTab(userResidencyPage, localized("User-mode residency"));
-    m_detailTabs->addTab(processPage, localized("Kernel process snapshot"));
-    m_detailTabs->addTab(poolPage, localized("Pool tags"));
-    m_detailTabs->addTab(bigPoolPage, localized("Big Pool allocations"));
+    m_detailTabs->addTab(overviewPage, ks::ui::MemoryNavigationTabTitle(ks::ui::MemoryNavigationGroup::Audit, 0));
+    m_detailTabs->addTab(userResidencyPage, ks::ui::MemoryNavigationTabTitle(ks::ui::MemoryNavigationGroup::Audit, 1));
+    m_detailTabs->addTab(processPage, ks::ui::MemoryNavigationTabTitle(ks::ui::MemoryNavigationGroup::Audit, 2));
+    m_detailTabs->addTab(poolPage, ks::ui::MemoryNavigationTabTitle(ks::ui::MemoryNavigationGroup::Audit, 3));
+    m_detailTabs->addTab(bigPoolPage, ks::ui::MemoryNavigationTabTitle(ks::ui::MemoryNavigationGroup::Audit, 4));
     m_pfnPage = new PhysicalPageAttributionPage(m_detailTabs);
     m_pfnPage->openModuleDetails = [this](const QString& path) {
         const auto handler = openModuleDetails;
         if (handler) { handler(path); }
     };
-    m_detailTabs->addTab(m_pfnPage, localized("Physical page attribution"));
+    m_detailTabs->addTab(m_pfnPage, ks::ui::MemoryNavigationTabTitle(ks::ui::MemoryNavigationGroup::Audit, 5));
     m_hyperVPage = new HyperVMemoryPage(m_detailTabs);
-    m_detailTabs->addTab(m_hyperVPage, localized("Hyper-V / host memory"));
+    m_detailTabs->addTab(m_hyperVPage, ks::ui::MemoryNavigationTabTitle(ks::ui::MemoryNavigationGroup::Audit, 6));
     m_pfnPage->snapshotReady = [this](const std::shared_ptr<ksword::pfn::Scan>& scan) {
         m_hyperVPage->setPfnContext(scan);
         applyPfnOverview(scan);
@@ -1528,13 +1529,13 @@ void SystemMemoryAuditPage::retranslateUi()
         localized("Pool type"), localized("Delta"), localized("Source"), localized("Description")
     });
 
-    m_detailTabs->setTabText(0, localized("Physical distribution"));
-    m_detailTabs->setTabText(1, localized("User-mode residency"));
-    m_detailTabs->setTabText(2, localized("Kernel process snapshot"));
-    m_detailTabs->setTabText(3, localized("Pool tags"));
-    m_detailTabs->setTabText(4, localized("Big Pool allocations"));
-    m_detailTabs->setTabText(5, localized("Physical page attribution"));
-    m_detailTabs->setTabText(6, localized("Hyper-V / host memory"));
+    m_detailTabs->setTabText(0, ks::ui::MemoryNavigationTabTitle(ks::ui::MemoryNavigationGroup::Audit, 0));
+    m_detailTabs->setTabText(1, ks::ui::MemoryNavigationTabTitle(ks::ui::MemoryNavigationGroup::Audit, 1));
+    m_detailTabs->setTabText(2, ks::ui::MemoryNavigationTabTitle(ks::ui::MemoryNavigationGroup::Audit, 2));
+    m_detailTabs->setTabText(3, ks::ui::MemoryNavigationTabTitle(ks::ui::MemoryNavigationGroup::Audit, 3));
+    m_detailTabs->setTabText(4, ks::ui::MemoryNavigationTabTitle(ks::ui::MemoryNavigationGroup::Audit, 4));
+    m_detailTabs->setTabText(5, ks::ui::MemoryNavigationTabTitle(ks::ui::MemoryNavigationGroup::Audit, 5));
+    m_detailTabs->setTabText(6, ks::ui::MemoryNavigationTabTitle(ks::ui::MemoryNavigationGroup::Audit, 6));
 
     // 摘要卡片的上行小标题是局部控件，按 objectName 回查后逐格重译。
     for (const SummaryTileTitle& titleEntry : kSummaryTileTitles)

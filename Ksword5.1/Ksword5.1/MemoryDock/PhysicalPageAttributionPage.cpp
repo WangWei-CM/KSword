@@ -1,3 +1,4 @@
+#include "../UI/MemoryPageNavigationSchema.h"
 #include "PhysicalPageAttributionPage.h"
 #include "../UI/ToolbarMetrics.h"
 #include "../UI/PrimaryPageStyle.h"
@@ -399,14 +400,14 @@ void PhysicalPageAttributionPage::retranslate()
     m_filter->setPlaceholderText(L("Filter backing identity, process or PID"));
     m_pfn->setPlaceholderText(L("PFN number, decimal or 0x hexadecimal (not a byte address)"));
     m_inspectButton->setText(L("Inspect PFN"));
-    m_tabs->setTabText(0, L("Usage by page state"));
-    m_tabs->setTabText(1, L("Largest backing identities"));
-    m_tabs->setTabText(2, L("PFN and mappings"));
-    m_tabs->setTabText(3, L("Coverage and evidence"));
-    m_tabs->setTabText(4, L("Consumer coverage"));
-    m_tabs->setTabText(5, L("Objects and observed consumers"));
-    m_tabs->setTabText(6, L("Page-table, stack and pool consumers"));
-    m_tabs->setTabText(7, L("GPU and allocation history"));
+    m_tabs->setTabText(0, ks::ui::MemoryNavigationTabTitle(ks::ui::MemoryNavigationGroup::Pfn, 0));
+    m_tabs->setTabText(1, ks::ui::MemoryNavigationTabTitle(ks::ui::MemoryNavigationGroup::Pfn, 1));
+    m_tabs->setTabText(2, ks::ui::MemoryNavigationTabTitle(ks::ui::MemoryNavigationGroup::Pfn, 2));
+    m_tabs->setTabText(3, ks::ui::MemoryNavigationTabTitle(ks::ui::MemoryNavigationGroup::Pfn, 3));
+    m_tabs->setTabText(4, ks::ui::MemoryNavigationTabTitle(ks::ui::MemoryNavigationGroup::Pfn, 4));
+    m_tabs->setTabText(5, ks::ui::MemoryNavigationTabTitle(ks::ui::MemoryNavigationGroup::Pfn, 5));
+    m_tabs->setTabText(6, ks::ui::MemoryNavigationTabTitle(ks::ui::MemoryNavigationGroup::Pfn, 6));
+    m_tabs->setTabText(7, ks::ui::MemoryNavigationTabTitle(ks::ui::MemoryNavigationGroup::Pfn, 7));
     headers(m_ownerCoverage, {L("Primary classification"), L("Observed bytes"), L("Consumer resolved"), L("Consumer unresolved"), L("Not applicable"), L("Object key observed")});
     headers(m_objects, {L("Process"), L("PID"), L("Allocation base"), L("Backing file"), L("Backing proof"), L("Object evidence"), L("Status")});
     headers(m_pageConsumers, {L("Consumer kind"), L("PFN"), L("PID"), L("TID"), L("Virtual address witness"), L("Allocation / object evidence"), L("Validation boundary")});
