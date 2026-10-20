@@ -18,6 +18,7 @@
 // CrashHistoryEntry 在这里：解析结果要顺带带上系统事件日志的崩溃时间线。
 // CrashHistory.h 只依赖 Qt 与标准库，不会形成循环依赖。
 #include "CrashHistory.h"
+#include "DumpCancellation.h"
 
 #include <cstdint>
 #include <cstring>
@@ -320,6 +321,7 @@ namespace ks::minidump
         // 传入 offset 文件偏移与 bytes 长度；返回是否安全可读（自动防加法溢出）。
         bool contains(const std::uint64_t offset, const std::uint64_t bytes) const
         {
+            CheckDumpCancellation();
             if (data == nullptr || offset > size || bytes > size)
             {
                 return false;

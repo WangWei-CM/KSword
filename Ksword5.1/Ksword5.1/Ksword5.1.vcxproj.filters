@@ -2785,6 +2785,9 @@
     <ClInclude Include="..\..\shared\evidence\memory_workbench\MemoryDiffOverlay.h">
       <Filter>Header Files\MemoryWorkbench\Shared</Filter>
     </ClInclude>
+    <ClInclude Include="MinidumpDock\DumpCancellation.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="..\..\shared\evidence\memory_workbench\MemoryTargetSession.h">
       <Filter>Header Files\MemoryWorkbench\Shared</Filter>
     </ClInclude>

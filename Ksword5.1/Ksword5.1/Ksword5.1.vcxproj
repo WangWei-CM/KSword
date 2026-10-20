@@ -931,6 +931,7 @@
     <ClInclude Include="KernelDock\KernelThreadAuditTab.h" />
     <ClInclude Include="ksword\ksword.h" />
     <ClInclude Include="ksword\file\file.h" />
+    <ClInclude Include="MinidumpDock\DumpCancellation.h" />
     <ClInclude Include="ksword\file\file_handle_tools.h" />
     <ClInclude Include="ksword\file\file_handle_query_worker.h" />
     <ClInclude Include="ksword\file\file_metadata_transaction.h" />

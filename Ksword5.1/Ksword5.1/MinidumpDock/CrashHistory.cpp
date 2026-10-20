@@ -5,6 +5,7 @@
 #include <QXmlStreamReader>
 
 #include <algorithm>
+#include <array>
 #include <vector>
 
 #include <windows.h>
@@ -19,6 +20,33 @@ namespace ks::minidump
         // kMaxEvents：单次查询最多取多少条。崩溃是低频事件，这个上限足够，
         // 同时挡住日志异常膨胀时把界面塞满。
         constexpr int kMaxEvents = 200;
+        constexpr DWORD kEventWaitMs = 100;
+
+        struct ScopedEventHandle
+        {
+            EVT_HANDLE value = nullptr;
+            ~ScopedEventHandle() { if (value != nullptr) { ::EvtClose(value); } }
+        };
+
+        struct ScopedEventBatch
+        {
+            std::array<EVT_HANDLE, 16> values{};
+            ~ScopedEventBatch()
+            {
+                for (EVT_HANDLE value : values)
+                {
+                    if (value != nullptr) { ::EvtClose(value); }
+                }
+            }
+        };
+
+        void SetQueryError(QString* errorOut, const DWORD error)
+        {
+            if (errorOut != nullptr && errorOut->isEmpty())
+            {
+                *errorOut = QStringLiteral("查询系统事件日志失败，错误码 %1。").arg(error);
+            }
+        }
 
         // EventFields：一条事件里我们关心的内容。
         struct EventFields
@@ -38,6 +66,7 @@ namespace ks::minidump
 
             while (!reader.atEnd())
             {
+                CheckDumpCancellation();
                 reader.readNext();
                 if (reader.isStartElement())
                 {
@@ -91,40 +120,51 @@ namespace ks::minidump
         std::vector<EventFields> QueryEvents(const QString& query, QString* const errorOut)
         {
             std::vector<EventFields> events; // events：解析结果。
+            CheckDumpCancellation();
 
             const std::wstring queryBuffer = query.toStdWString();
             // EvtQueryReverseDirection：从最新往回读，配合 kMaxEvents 才能拿到最近的记录。
-            const EVT_HANDLE handle = ::EvtQuery(
+            const ScopedEventHandle handle{ ::EvtQuery(
                 nullptr,
                 L"System",
                 queryBuffer.c_str(),
-                EvtQueryChannelPath | EvtQueryReverseDirection);
-            if (handle == nullptr)
+                EvtQueryChannelPath | EvtQueryReverseDirection) };
+            if (handle.value == nullptr)
             {
-                if (errorOut != nullptr && errorOut->isEmpty())
-                {
-                    *errorOut = QStringLiteral("查询系统事件日志失败，错误码 %1。")
-                                    .arg(::GetLastError());
-                }
+                SetQueryError(errorOut, ::GetLastError());
                 return events;
             }
+            CheckDumpCancellation();
 
             std::vector<wchar_t> buffer(4096); // buffer：EvtRender 的输出缓冲，按需扩容。
             while (static_cast<int>(events.size()) < kMaxEvents)
             {
-                EVT_HANDLE batch[16] = {};
+                CheckDumpCancellation();
+                ScopedEventBatch batch;
                 DWORD returned = 0;
-                if (::EvtNext(handle, 16, batch, INFINITE, 0, &returned) == FALSE)
+                if (::EvtNext(handle.value, 16, batch.values.data(), kEventWaitMs, 0, &returned) == FALSE)
                 {
+                    const DWORD error = ::GetLastError();
+                    CheckDumpCancellation();
+                    if (error == ERROR_TIMEOUT)
+                    {
+                        continue;
+                    }
+                    if (error != ERROR_NO_MORE_ITEMS)
+                    {
+                        SetQueryError(errorOut, error);
+                    }
                     break;
                 }
+                CheckDumpCancellation();
                 for (DWORD index = 0; index < returned; ++index)
                 {
+                    CheckDumpCancellation();
                     DWORD used = 0;
                     DWORD properties = 0;
                     BOOL rendered = ::EvtRender(
                         nullptr,
-                        batch[index],
+                        batch.values[index],
                         EvtRenderEventXml,
                         static_cast<DWORD>(buffer.size() * sizeof(wchar_t)),
                         buffer.data(),
@@ -133,16 +173,18 @@ namespace ks::minidump
                     if (rendered == FALSE &&
                         ::GetLastError() == ERROR_INSUFFICIENT_BUFFER)
                     {
+                        CheckDumpCancellation();
                         buffer.resize((used / sizeof(wchar_t)) + 1);
                         rendered = ::EvtRender(
                             nullptr,
-                            batch[index],
+                            batch.values[index],
                             EvtRenderEventXml,
                             static_cast<DWORD>(buffer.size() * sizeof(wchar_t)),
                             buffer.data(),
                             &used,
                             &properties);
                     }
+                    CheckDumpCancellation();
                     if (rendered != FALSE)
                     {
                         EventFields fields =
@@ -152,14 +194,14 @@ namespace ks::minidump
                             events.push_back(std::move(fields));
                         }
                     }
-                    ::EvtClose(batch[index]);
+                    CheckDumpCancellation();
                 }
                 if (returned == 0)
                 {
                     break;
                 }
             }
-            ::EvtClose(handle);
+            CheckDumpCancellation();
             return events;
         }
 
@@ -198,8 +240,10 @@ namespace ks::minidump
     std::vector<CrashHistoryEntry> CollectCrashHistory(
         const int maxDays,
         const QString& filterNameFilter,
-        QString* const errorOut)
+        QString* const errorOut, const DumpCancellationToken& cancellation)
     {
+        const ScopedDumpCancellation cancellationScope(cancellation);
+        CheckDumpCancellation();
         std::vector<CrashHistoryEntry> entries; // entries：时间线记录。
         if (errorOut != nullptr)
         {

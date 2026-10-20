@@ -24,6 +24,8 @@
 // - 事件日志被清空或滚动覆盖后就查不到，时间窗口越长越可能不完整。
 // ============================================================
 
+#include "DumpCancellation.h"
+
 #include <QDateTime>
 #include <QString>
 #include <QStringList>
@@ -61,7 +63,7 @@ namespace ks::minidump
     std::vector<CrashHistoryEntry> CollectCrashHistory(
         int maxDays,
         const QString& filterNameFilter,
-        QString* errorOut);
+        QString* errorOut, const DumpCancellationToken& cancellation = {});
 
     // CrashEventKindText 作用：把记录性质转成中文短语。
     // 传入 kind；返回可直接进表格的文本。

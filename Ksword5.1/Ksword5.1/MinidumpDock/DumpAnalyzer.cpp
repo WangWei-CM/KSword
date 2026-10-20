@@ -280,6 +280,7 @@ namespace ks::minidump
 
     void BuildAnalysis(const ModuleIndex& modules, DumpParseResult& result)
     {
+        CheckDumpCancellation();
         DumpAnalysis analysis{};
         BlameAccumulator accumulator;
         // strongEvidenceModules：拿到过“崩溃指令级证据”的模块名（小写）。
@@ -312,6 +313,7 @@ namespace ks::minidump
             result.kind == DumpKind::UserMinidump ? result.faultingThreadId : 0u;
         for (const StackFrameEntry& frame : result.stackFrames)
         {
+            CheckDumpCancellation();
             if (frame.moduleName.isEmpty() || frame.threadId != blameThreadId)
             {
                 continue;

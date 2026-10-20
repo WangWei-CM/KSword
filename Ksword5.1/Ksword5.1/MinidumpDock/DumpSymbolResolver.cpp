@@ -60,6 +60,7 @@ namespace ks::minidump
         {
             ImageIdentity identity; // identity：待返回的身份字段。
 
+            CheckDumpCancellation();
             QFile file(path);
             if (!file.open(QIODevice::ReadOnly))
             {
@@ -68,6 +69,7 @@ namespace ks::minidump
 
             // header：PE 头部区域。0x400 字节足以覆盖 DOS 头 + NT 头 + 可选头。
             const QByteArray header = file.read(0x400);
+            CheckDumpCancellation();
             const auto* const bytes = reinterpret_cast<const unsigned char*>(header.constData());
             const int available = static_cast<int>(header.size());
             if (available < 0x40 || bytes[0] != 'M' || bytes[1] != 'Z')
@@ -179,6 +181,7 @@ namespace ks::minidump
             }
             for (const QString& directory : searchDirs)
             {
+                CheckDumpCancellation();
                 const QString candidate =
                     QDir(directory).absoluteFilePath(baseName);
                 if (QFileInfo::exists(candidate))
@@ -230,7 +233,6 @@ namespace ks::minidump
         {
             ::SymCleanup(static_cast<HANDLE>(m_handle));
             m_initialized = false;
-            g_dbgHelpMutex.unlock();
         }
     }
 
@@ -243,12 +245,13 @@ namespace ks::minidump
             return true;
         }
 
-        g_dbgHelpMutex.lock();
+        m_dbgHelpLock = LockDumpMutex(g_dbgHelpMutex);
         m_handle = FakeProcessHandle();
 
         // 不设 SYMOPT_DEFERRED_LOADS：延迟加载会让“符号是否真的加载成功”变得
         // 不可知，而本模块的全部价值就在于给出一个确定的匹配结论。
         ::SymSetOptions(SYMOPT_UNDNAME | SYMOPT_LOAD_LINES | SYMOPT_NO_PROMPTS);
+        CheckDumpCancellation();
 
         // 第三参数 fInvadeProcess 传 FALSE：离线符号化不枚举本进程模块。
         const std::wstring pathBuffer = searchPath.toStdWString();
@@ -257,11 +260,12 @@ namespace ks::minidump
                 pathBuffer.empty() ? nullptr : pathBuffer.c_str(),
                 FALSE) == FALSE)
         {
-            g_dbgHelpMutex.unlock();
+            m_dbgHelpLock.unlock();
             m_handle = nullptr;
             return false;
         }
         m_initialized = true;
+        CheckDumpCancellation();
 
         const QStringList searchDirs = SplitSearchPath(searchPath);
         m_status.reserve(modules.size());
@@ -269,6 +273,7 @@ namespace ks::minidump
 
         for (const ModuleEntry& module : modules)
         {
+            CheckDumpCancellation();
             ModuleSymbolStatus status; // status：本模块的结论。
             status.moduleName = BaseModuleName(module.name);
             if (module.base == 0 || module.size == 0)
@@ -340,6 +345,7 @@ namespace ks::minidump
                 continue;
             }
 
+            CheckDumpCancellation();
             const std::wstring imageBuffer = imagePath.toStdWString();
             const std::wstring nameBuffer = status.moduleName.toStdWString();
             const DWORD64 loadedBase = ::SymLoadModuleExW(
@@ -351,6 +357,7 @@ namespace ks::minidump
                 static_cast<DWORD>(module.size),
                 nullptr,
                 0);
+            CheckDumpCancellation();
             if (loadedBase == 0)
             {
                 status.state = SymbolMatchState::NoSymbols;
@@ -396,6 +403,7 @@ namespace ks::minidump
 
     ResolvedSymbol SymbolResolver::resolve(const std::uint64_t address) const
     {
+        CheckDumpCancellation();
         ResolvedSymbol resolved; // resolved：待返回的结果。
         if (!m_initialized || address == 0)
         {
@@ -435,6 +443,7 @@ namespace ks::minidump
         {
             return resolved;
         }
+        CheckDumpCancellation();
         resolved.valid = true;
         resolved.functionName = QString::fromWCharArray(symbolInfo->Name);
         resolved.displacement = static_cast<std::uint64_t>(displacement);
@@ -451,6 +460,7 @@ namespace ks::minidump
             resolved.sourceFile = QString::fromWCharArray(line.FileName);
             resolved.sourceLine = static_cast<std::uint32_t>(line.LineNumber);
         }
+        CheckDumpCancellation();
         return resolved;
     }
 
@@ -517,8 +527,12 @@ namespace ks::minidump
         }
     }
 
-    void ApplySymbols(const QString& searchPath, DumpParseResult& result)
+    void ApplySymbols(
+        const QString& searchPath, DumpParseResult& result,
+        const DumpCancellationToken& cancellation)
     {
+        const ScopedDumpCancellation cancellationScope(cancellation);
+        CheckDumpCancellation();
         // effectivePath：调用方没给就用默认本地路径。
         const QString effectivePath =
             searchPath.trimmed().isEmpty()
@@ -535,6 +549,7 @@ namespace ks::minidump
         QSet<QString> wanted; // wanted：需要符号的模块名集合（小写便于比对）。
         for (const StackFrameEntry& frame : result.stackFrames)
         {
+            CheckDumpCancellation();
             if (!frame.moduleName.isEmpty())
             {
                 wanted.insert(frame.moduleName.toLower());
@@ -542,6 +557,7 @@ namespace ks::minidump
         }
         for (const BlameEntry& blame : result.analysis.blame)
         {
+            CheckDumpCancellation();
             if (!blame.moduleName.isEmpty())
             {
                 wanted.insert(blame.moduleName.toLower());
@@ -556,6 +572,7 @@ namespace ks::minidump
         selected.reserve(wanted.size());
         for (const ModuleEntry& module : result.modules)
         {
+            CheckDumpCancellation();
             if (wanted.contains(BaseModuleName(module.name).toLower()))
             {
                 selected.push_back(module);
@@ -577,12 +594,14 @@ namespace ks::minidump
 
         for (StackFrameEntry& frame : result.stackFrames)
         {
+            CheckDumpCancellation();
             const ResolvedSymbol symbol = resolver.resolve(frame.address);
             frame.functionText = symbol.functionText();
             frame.sourceText = symbol.sourceText();
         }
         for (BlameEntry& blame : result.analysis.blame)
         {
+            CheckDumpCancellation();
             const ResolvedSymbol symbol = resolver.resolve(blame.address);
             blame.functionText = symbol.functionText();
         }
@@ -592,6 +611,7 @@ namespace ks::minidump
         QStringList mismatched; // mismatched：映像不匹配的模块名。
         for (const ModuleSymbolStatus& status : result.symbolStatus)
         {
+            CheckDumpCancellation();
             if (status.state == SymbolMatchState::ImageMismatch)
             {
                 mismatched.append(status.moduleName);

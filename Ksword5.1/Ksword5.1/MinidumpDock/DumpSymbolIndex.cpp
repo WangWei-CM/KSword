@@ -145,6 +145,7 @@ namespace ks::minidump
 
         for (const ModuleEntry& module : modules)
         {
+            CheckDumpCancellation();
             // 大小为 0 的模块无法形成区间，跳过以免产生零宽命中。
             if (module.base == 0 || module.size == 0)
             {
@@ -159,6 +160,7 @@ namespace ks::minidump
         }
         for (const UnloadedModuleEntry& module : unloaded)
         {
+            CheckDumpCancellation();
             // 内核已卸载驱动表直接给出结束地址；用户态流只有大小。
             const std::uint64_t end = module.endAddress != 0
                 ? module.endAddress

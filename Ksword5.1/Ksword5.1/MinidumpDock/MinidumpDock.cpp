@@ -61,6 +61,7 @@ struct MinidumpAsyncState
 {
     std::mutex mutex;               // mutex：保护 owner 的读写。
     MinidumpDock* owner = nullptr;  // owner：结果回投的目标控件；析构后为空。
+    ks::minidump::DumpCancellationToken cancellation; // One explicit parse request.
 };
 
 namespace
@@ -131,6 +132,10 @@ MinidumpDock::~MinidumpDock()
     // 加锁清空 owner：此后 worker 即使完成也不会再向本控件投递结果。
     std::lock_guard<std::mutex> lock(m_asyncState->mutex);
     m_asyncState->owner = nullptr;
+    if (m_asyncState->cancellation)
+    {
+        m_asyncState->cancellation->store(true, std::memory_order_relaxed);
+    }
 }
 
 void MinidumpDock::changeEvent(QEvent* event)
@@ -434,10 +439,19 @@ void MinidumpDock::beginParse()
     // generation：只有最新一代结果可以回写，避免旧解析覆盖新目标。
     const std::uint64_t generation = ++m_parseGeneration;
     const std::shared_ptr<MinidumpAsyncState> asyncState = m_asyncState;
+    const auto cancellation = std::make_shared<std::atomic_bool>(false);
+    {
+        std::lock_guard<std::mutex> lock(asyncState->mutex);
+        if (asyncState->cancellation)
+        {
+            asyncState->cancellation->store(true, std::memory_order_relaxed);
+        }
+        asyncState->cancellation = cancellation;
+    }
     // symbolPath：在 UI 线程取值后按值带进 worker，worker 内不得触碰控件。
     const QString symbolPath = m_symbolPathEdit->text().trimmed();
     QThreadPool::globalInstance()->start(
-        [asyncState, generation, path, symbolPath]()
+        [asyncState, generation, path, symbolPath, cancellation]()
         {
             // result：worker 中完成的解析产物；自包含，与文件映射无关联。
             // 解析的输入是不可信文件，畸形样本可能让某个列表申请超大内存。
@@ -446,22 +460,37 @@ void MinidumpDock::beginParse()
             std::shared_ptr<ks::minidump::DumpParseResult> result;
             try
             {
+                const ks::minidump::ScopedDumpCancellation cancellationScope(cancellation);
+                ks::minidump::CheckDumpCancellation();
                 result = std::make_shared<ks::minidump::DumpParseResult>(
-                    ks::minidump::ParseDumpFile(path));
+                    ks::minidump::ParseDumpFile(path, cancellation));
+                ks::minidump::CheckDumpCancellation();
                 // 符号化放在解析之后、回主线程之前：DbgHelp 加载 PDB 可能耗时到
                 // 秒级，绝不能放在 UI 线程上。失败不影响已有结论，因此不改 success。
                 if (result->success)
                 {
-                    ks::minidump::ApplySymbols(symbolPath, *result);
+                    ks::minidump::ApplySymbols(symbolPath, *result, cancellation);
+                    ks::minidump::CheckDumpCancellation();
                     // 池标记归属同样可能读大量磁盘（要在模块映像里搜标记字节），
                     // 一并留在 worker 里做。
-                    ks::minidump::ApplyPoolTagAttribution(*result);
+                    ks::minidump::ApplyPoolTagAttribution(*result, cancellation);
+                    ks::minidump::CheckDumpCancellation();
                     // 崩溃时间线：单看一个转储答不出"这次是蓝屏还是没转储的硬挂死"，
                     // 也答不出"崩溃当时跑的是哪一次构建的驱动"。筛选器名过滤成
                     // Ksword，是因为本项目最需要对账的就是自己那个驱动的映像时间戳。
+                    QString historyError;
                     result->crashHistory = ks::minidump::CollectCrashHistory(
-                        30, QStringLiteral("Ksword"), nullptr);
+                        30, QStringLiteral("Ksword"), &historyError, cancellation);
+                    ks::minidump::CheckDumpCancellation();
+                    if (!historyError.isEmpty())
+                    {
+                        result->diagnostics.append(historyError);
+                    }
                 }
+            }
+            catch (const ks::minidump::DumpWorkCancelled&)
+            {
+                return; // Unwind the mapping/session/handles; no partial UI result.
             }
             catch (const std::exception& error)
             {
@@ -480,13 +509,13 @@ void MinidumpDock::beginParse()
             }
             std::lock_guard<std::mutex> lock(asyncState->mutex);
             MinidumpDock* receiver = asyncState->owner;
-            if (receiver == nullptr)
+            if (receiver == nullptr || cancellation->load(std::memory_order_relaxed))
             {
                 return;
             }
             QMetaObject::invokeMethod(
                 receiver,
-                [asyncState, generation, result = std::move(result)]()
+                [asyncState, generation, cancellation, result = std::move(result)]()
                 {
                     // owner 复核：queued 回调真正执行时控件可能已析构。
                     MinidumpDock* owner = nullptr;
@@ -494,7 +523,8 @@ void MinidumpDock::beginParse()
                         std::lock_guard<std::mutex> stateLock(asyncState->mutex);
                         owner = asyncState->owner;
                     }
-                    if (owner != nullptr)
+                    if (owner != nullptr &&
+                        !cancellation->load(std::memory_order_relaxed))
                     {
                         owner->finishParse(generation, result);
                     }

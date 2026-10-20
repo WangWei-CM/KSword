@@ -65,6 +65,7 @@ namespace ks::minidump
                 };
                 for (const QString& path : candidates)
                 {
+                    CheckDumpCancellation();
                     QFile file(path);
                     if (!file.open(QIODevice::ReadOnly | QIODevice::Text))
                     {
@@ -72,6 +73,7 @@ namespace ks::minidump
                     }
                     while (!file.atEnd())
                     {
+                        CheckDumpCancellation();
                         // pooltag.txt 的行格式为： Tag  - Binary - Description
                         const QString line = QString::fromLatin1(file.readLine()).trimmed();
                         if (line.isEmpty() || line.startsWith(QLatin1Char('/')))
@@ -161,6 +163,7 @@ namespace ks::minidump
 
             for (const ModuleEntry& module : modules)
             {
+                CheckDumpCancellation();
                 if (scanned >= kMaxScanModules)
                 {
                     break;
@@ -182,10 +185,25 @@ namespace ks::minidump
                     continue;
                 }
                 ++scanned;
-                const QByteArray content = file.readAll();
-                if (content.contains(tagBytes))
+                // Preserve matches straddling chunk boundaries, while allowing
+                // cancellation between reads instead of one 64 MiB readAll().
+                QByteArray overlap;
+                while (!file.atEnd())
                 {
-                    owners.append(BaseModuleName(module.name));
+                    CheckDumpCancellation();
+                    QByteArray content = file.read(64 * 1024);
+                    CheckDumpCancellation();
+                    if (content.isEmpty())
+                    {
+                        break;
+                    }
+                    content.prepend(overlap);
+                    if (content.contains(tagBytes))
+                    {
+                        owners.append(BaseModuleName(module.name));
+                        break;
+                    }
+                    overlap = content.right(tagBytes.size() - 1);
                 }
             }
             owners.removeDuplicates();
@@ -229,8 +247,11 @@ namespace ks::minidump
         return text;
     }
 
-    void ApplyPoolTagAttribution(DumpParseResult& result)
+    void ApplyPoolTagAttribution(
+        DumpParseResult& result, const DumpCancellationToken& cancellation)
     {
+        const ScopedDumpCancellation cancellationScope(cancellation);
+        CheckDumpCancellation();
         // candidates：按“原始值 → 来源描述”收集，同一个标记可能出现在多处。
         std::vector<PoolTagCandidate> candidates;
         QSet<std::uint32_t> seenValues; // seenValues：同一个值只登记一次。
@@ -299,6 +320,7 @@ namespace ks::minidump
         const QHash<QString, QString>& known = LoadKnownPoolTags();
         for (PoolTagCandidate& candidate : candidates)
         {
+            CheckDumpCancellation();
             const auto hit = known.constFind(candidate.tagText.trimmed());
             if (hit != known.constEnd())
             {
