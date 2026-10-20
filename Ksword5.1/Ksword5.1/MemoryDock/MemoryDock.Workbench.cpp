@@ -97,12 +97,16 @@ void MemoryDock::prepareNavigationPages()
 // 再创建视图、注入服务、加载设置，最后连接信号并回放"创建之前已经发生的附加"。
 void MemoryDock::ensureWorkbenchView()
 {
-    const ks::ui::ScopedWidgetThemePreparation themePreparation(m_tabWorkbench); // 服务与接线完成后补可见主题。
-    // 已创建或容器页不存在时直接返回。
+    // 已创建分支只消费真实待刷新主题；普通往返不再登记构造首帧守卫。
     if (m_workbenchView != nullptr || m_tabWorkbench == nullptr)
     {
+        if (m_tabWorkbench != nullptr && m_tabWorkbench->isVisible())
+        {
+            ks::ui::PrepareWidgetThemeBindingsForShow(m_tabWorkbench);
+        }
         return;
     }
+    const ks::ui::ScopedWidgetThemePreparation themePreparation(m_tabWorkbench); // 服务与接线完成后补可见主题。
 
     // 1) 共享对象配置（幂等；被拒绝时它自己写 err 日志，不抛异常）。
     ks::ui::workbench_dock::ConfigureShared();
