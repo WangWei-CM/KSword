@@ -1169,6 +1169,9 @@
     <ClInclude Include="Ui\ExportUtil.h">
       <Filter>Ui</Filter>
     </ClInclude>
+    <ClInclude Include="Ui\BackgroundWork.h">
+      <Filter>Ui</Filter>
+    </ClInclude>
     <ClInclude Include="Ui\AsyncTask.h">
       <Filter>Ui</Filter>
     </ClInclude>

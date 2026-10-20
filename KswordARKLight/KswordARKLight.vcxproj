@@ -448,6 +448,7 @@
     <ClInclude Include="Ui\EvidenceSession.h" />
     <ClInclude Include="Ui\EvidenceSessionView.h" />
     <ClInclude Include="Ui\ExportUtil.h" />
+    <ClInclude Include="Ui\BackgroundWork.h" />
     <ClInclude Include="Ui\AsyncTask.h" />
     <ClInclude Include="Ui\FilterBar.h" />
     <ClInclude Include="Ui\IconUtil.h" />

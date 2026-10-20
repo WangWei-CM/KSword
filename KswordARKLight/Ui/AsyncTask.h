@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../Core/Win32Lean.h"
+#include "BackgroundWork.h"
 
 #include <atomic>
 #include <cstdint>
@@ -13,6 +14,11 @@
 #include <utility>
 
 namespace Ksword::Ui {
+
+// Same-thread shell-to-owned-page lifecycle protocol; no pointer payloads.
+inline constexpr UINT kBeginNativeRetirementMessage = WM_APP + 0x3D0;
+inline constexpr UINT kPollNativeRetirementMessage = WM_APP + 0x3D1;
+inline constexpr UINT kCancelNativeRetirementMessage = WM_APP + 0x3D2;
 
 namespace detail {
 // Shared by every Result specialization: recycled HWNDs can receive another
@@ -57,6 +63,11 @@ public:
             return;
         }
 
+        // Include existing refresh/action callers in the same close admission
+        // and drain accounting. Only replaceable requests may be coalesced.
+        const auto lease = TryAcceptBackgroundWork();
+        if (!lease) return;
+        work = [lease, operation = std::move(work)]() mutable { return operation(); };
         Work startWork;
         std::uint64_t generation = 0;
         bool startNow = false;
@@ -110,7 +121,7 @@ public:
             completion = std::move(state->completion);
 
             deliverCurrent = completion->generation == state->latestGeneration;
-            deliver = state->deliver;
+            deliver = state->pending ? state->deliver : std::move(state->deliver);
             if (state->running && state->runningGeneration == completion->generation) {
                 state->running = false;
                 if (state->pending && state->alive.load(std::memory_order_acquire)) {
@@ -185,7 +196,7 @@ private:
     };
 
     static void startWorker(const std::shared_ptr<State>& state, Work work, const std::uint64_t generation) {
-        std::thread([state, work = std::move(work), generation]() mutable {
+        auto operation = [state, work = std::move(work), generation]() mutable {
             auto completion = std::make_unique<Completion>();
             completion->generation = generation;
             try {
@@ -194,22 +205,43 @@ private:
                 completion->error = std::current_exception();
             }
 
-            {
-                std::scoped_lock lock(state->mutex);
-                if (state->alive.load(std::memory_order_acquire) && state->owner) {
-                    state->completion = std::move(completion);
-                    // Serialize publishing with cancel() so a retiring worker
-                    // cannot post to a window after cancellation returns.
-                    if (::PostMessageW(state->owner, state->completionMessage,
-                        static_cast<WPARAM>(state->identity), static_cast<LPARAM>(generation))) {
-                        return;
-                    }
-                    state->completion.reset();
-                }
-            }
+            // Work may own an accepted-transaction lease or controller. Do not
+            // retain it until another request or window destruction.
+            work = {};
+            publish(state, generation, std::move(completion));
+        };
+        try {
+            std::thread(std::move(operation)).detach();
+        } catch (...) {
+            auto completion = std::make_unique<Completion>();
+            completion->generation = generation;
+            completion->error = std::current_exception();
+            publish(state, generation, std::move(completion));
+        }
+    }
 
-            finishWithoutDelivery(state, generation);
-        }).detach();
+    static void publish(const std::shared_ptr<State>& state, const std::uint64_t generation,
+        std::unique_ptr<Completion> completion) {
+        Work releasedWork;
+        {
+            std::scoped_lock lock(state->mutex);
+            if (generation == state->latestGeneration && !state->pending) {
+                releasedWork = std::move(state->work);
+            }
+        }
+        releasedWork = {};
+        {
+            std::scoped_lock lock(state->mutex);
+            if (state->alive.load(std::memory_order_acquire) && state->owner) {
+                state->completion = std::move(completion);
+                // Serialize publishing with cancel so a retiring worker cannot
+                // post to a recycled owner after cancellation has returned.
+                if (::PostMessageW(state->owner, state->completionMessage,
+                    static_cast<WPARAM>(state->identity), static_cast<LPARAM>(generation))) return;
+                state->completion.reset();
+            }
+        }
+        finishWithoutDelivery(state, generation);
     }
 
     static void finishWithoutDelivery(const std::shared_ptr<State>& state, const std::uint64_t generation) {
