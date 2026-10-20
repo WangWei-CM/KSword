@@ -45,15 +45,18 @@ RtlPcToFileHeader(
 #define KSW_RXPF_22621_CHECKSUM      0x00B8C0BFUL
 #define KSW_RXPF_22621_MM_CHANGE_RVA 0x00736CF0UL
 
-/* Build 26300.9457 (Windows 11 24H2 + 1 refresh) profile — 本机 VM 实测。 */
-/* PE 元数据由 tools/pdb_offset_generator 读取 C:\WINDOWS\System32\ntoskrnl.exe 得到。 */
+/* Build 26300.9711 (Windows 11 24H2 + cumulative) profile — 本机 VM 实测。 */
+/* PE 元数据由 scratchpad/extract_nt_meta.py 读取 C:\WINDOWS\System32\ntoskrnl.exe 得到。 */
 /* MmChangeImageProtection RVA 由 memory_ioctl.c:change-image-protection */
 /*   的 resolvedFunctionVa 字段减去 ntoskrnl base 实测确认，与 PE 符号一致。 */
+/* 注：9457 → 9711 是 Windows Update 自动升级的结果；MmChangeImageProtection */
+/*   的 64 字节 prologue 在两个 UBR 完全相同，只是 PDB GUID / TimeDateStamp */
+/*   / CheckSum / RVA 变了。宏保留 KSW_RXPF_26300_* 命名表示同一 26300 family。 */
 #define KSW_RXPF_26300_NT_BUILD      26300UL
-#define KSW_RXPF_26300_TIMESTAMP     0xFDA9ED74UL
+#define KSW_RXPF_26300_TIMESTAMP     0xAFF6531FUL
 #define KSW_RXPF_26300_IMAGE_SIZE    0x01450000UL
-#define KSW_RXPF_26300_CHECKSUM      0x00C817D5UL
-#define KSW_RXPF_26300_MM_CHANGE_RVA 0x00A5DDB0UL
+#define KSW_RXPF_26300_CHECKSUM      0x00C8AD9CUL
+#define KSW_RXPF_26300_MM_CHANGE_RVA 0x00A565F0UL
 
 #define KSW_RXPF_RSDS_SIGNATURE 0x53445352UL
 
@@ -143,13 +146,13 @@ static const GUID g_KswRxpfPdbGuid22621 = {
     { 0x1CU, 0xB3U, 0x36U, 0x6BU, 0x64U, 0xBEU, 0x62U, 0xF9U }
 };
 
-/* Build 26300.9457 PDB: ntkrnlmp.pdb {C29EBFB0-6B78-B3C0-20DC-A66D99713F9E} age 1. */
-/* 该 GUID 从 VM 本机 ntoskrnl.exe (10.0.26300.9457) 的 CodeView RSDS 直接读得。 */
+/* Build 26300.9711 PDB: ntkrnlmp.pdb {B661C6FE-7299-1D16-0FE3-7C48B8BC5470} age 1. */
+/* 该 GUID 从 VM 本机 ntoskrnl.exe (10.0.26300.9711) 的 CodeView RSDS 直接读得。 */
 static const GUID g_KswRxpfPdbGuid26300 = {
-    0xC29EBFB0UL,
-    0x6B78U,
-    0xB3C0U,
-    { 0x20U, 0xDCU, 0xA6U, 0x6DU, 0x99U, 0x71U, 0x3FU, 0x9EU }
+    0xB661C6FEUL,
+    0x7299U,
+    0x1D16U,
+    { 0x0FU, 0xE3U, 0x7CU, 0x48U, 0xB8U, 0xBCU, 0x54U, 0x70U }
 };
 
 static const UCHAR g_KswRxpfMmChangeSignature[64] = {
@@ -186,9 +189,11 @@ static const UCHAR g_KswRxpfMmChangeSignature22621[64] = {
     0x8BU, 0xC3U, 0x48U, 0x89U, 0x44U, 0x24U, 0x28U, 0x48U
 };
 
-/* Build 26300.9457 MmChangeImageProtection prologue (64 bytes at RVA 0x00A5DDB0). */
+/* Build 26300.9711 MmChangeImageProtection prologue (64 bytes at RVA 0x00A565F0). */
 /* 和 26220 几乎逐字节一致，仅 offset 0x36-0x37 处的 JA (0F 87) 相对偏移不同 */
 /* (26220: 0x41 0x02；26300: 0x2D 0x02)——函数内部条件跳转目标随 build 偏移。 */
+/* 9457 → 9711 升级后，这 64 字节 prologue 完全未变（函数内部布局没动）， */
+/*   只是 RVA 从 0xA5DDB0 偏移到 0xA565F0 (函数在 .text 段里被挪了 0x7C0 字节)。 */
 /* 直接读 VM 的 ntoskrnl.exe 文件内容抓到；mask 复用全 0xFF 策略。 */
 static const UCHAR g_KswRxpfMmChangeSignature26300[64] = {
     0x48U, 0x8BU, 0xC4U, 0x48U, 0x89U, 0x58U, 0x08U, 0x48U,
