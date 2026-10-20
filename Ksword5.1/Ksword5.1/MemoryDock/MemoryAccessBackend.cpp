@@ -2,6 +2,7 @@
 
 #include "../ArkDriverClient/ArkDriverClient.h"
 #include "../ksword/log/log.h"
+#include "../UI/AsyncCleanupRegistry.h"
 // 切片长度与门禁顺序都取共用纯函数，和 R0 用的是同一份实现，也是单元测试
 // 覆盖的那一份。
 #include "../../../shared/driver/KswordArkDdmaPlan.h"
@@ -355,15 +356,28 @@ namespace ksword::memory_backend
 
     bool submitDdmaTransaction(std::function<void()> transaction)
     {
+        // Register before queue admission: coordinated exit freezes new work
+        // and waits for every accepted transaction before stopping R0.
+        auto cleanupLease = ks::ui::AsyncCleanupRegistry::global().acquire();
+        if (!cleanupLease) return false;
         // Construct the gate first so it outlives queue shutdown and draining.
         auto* const gate = &ddmaTransactionMutex();
         (void)captureDdmaSession(); // Session state must also outlive queue draining.
         (void)mutableDdmaScratchFailures();
         (void)scratchReceiptMutex();
         static ksword::evidence::SerialTransactionQueue queue(32);
-        return queue.trySubmit([gate, transaction = std::move(transaction)]() {
+        return queue.trySubmit([gate, cleanupLease = std::move(cleanupLease),
+            transaction = std::move(transaction)]() mutable {
+            // Move ownership into this invocation. Unlock the gate and destroy
+            // the task's captured resources before returning the cleanup lease,
+            // including when the transaction throws. Retaining a completed
+            // callable cannot keep exit waiting or release its lease twice.
+            auto acceptedCleanup = std::move(cleanupLease);
+            (void)acceptedCleanup;
+            auto work = std::move(transaction);
+            transaction = nullptr;
             std::lock_guard<std::recursive_mutex> transactionLock(*gate);
-            transaction();
+            work();
         });
     }
 
