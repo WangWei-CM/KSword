@@ -5765,6 +5765,7 @@ namespace
             {
                 m_hashCancelRequested->store(true);
             }
+            if (m_savePreflightCancel != nullptr) m_savePreflightCancel->store(true);
             if (m_usageScanCancelRequested != nullptr)
             {
                 m_usageScanCancelRequested->store(true);
@@ -5778,7 +5779,7 @@ namespace
             {
                 return;
             }
-            if (m_transactionBusy)
+            if (m_transactionBusy && m_savePreflightCancel == nullptr)
             {
                 QMessageBox::information(
                     this,
@@ -5788,6 +5789,7 @@ namespace
                 event->ignore();
                 return;
             }
+            if (m_savePreflightCancel != nullptr) m_savePreflightCancel->store(true);
             if (pendingTargetCount() > 0)
             {
                 const QMessageBox::StandardButton choice = QMessageBox::question(
@@ -9073,21 +9075,89 @@ namespace
                 return;
             }
 
-            bool requiresBackup = false;
+            const auto cancel = std::make_shared<std::atomic_bool>(false);
+            m_savePreflightCancel = cancel;
+            const quint64 generation = ++m_savePreflightGeneration;
+            setTransactionBusy(true);
+            auto* progress = new QDialog(this);
+            progress->setAttribute(Qt::WA_DeleteOnClose, true);
+            progress->setWindowTitle(ks::i18n::sourceText(QStringLiteral("数字签名")));
+            progress->setWindowModality(Qt::NonModal);
+            auto* progressLayout = new QVBoxLayout(progress);
+            auto* progressText = new QLabel(ks::i18n::text(
+                QStringLiteral("driver.signature.pending.detail"),
+                QStringLiteral("数字签名信任链等待后台验证。")), progress);
+            progressText->setWordWrap(true);
+            progressLayout->addWidget(progressText);
+            auto* buttons = new QDialogButtonBox(QDialogButtonBox::Cancel, progress);
+            progressLayout->addWidget(buttons);
+            connect(buttons, &QDialogButtonBox::rejected, progress, &QDialog::reject);
+            connect(progress, &QDialog::finished, this, [this, cancel](int)
+                {
+                    if (m_savePreflightCancel != cancel) return;
+                    cancel->store(true);
+                    ++m_savePreflightGeneration;
+                    m_savePreflightCancel.reset();
+                    setTransactionBusy(false);
+                });
+            const QPointer<FileDetailDialog> guardThis(this);
+            const QPointer<QDialog> progressGuard(progress);
+            progress->show();
+            QThreadPool::globalInstance()->start(QRunnable::create(
+                [guardThis, progressGuard, patches, cancel, generation]()
+                {
+                    const auto preflight = inspectSaveSignatures(patches, cancel,
+                        [](const QString& path) { return ks::file::metadata::inspectSignature(path); });
+                    QMetaObject::invokeMethod(qApp,
+                        [guardThis, progressGuard, patches, cancel, generation, preflight]() mutable
+                        {
+                            if (guardThis == nullptr ||
+                                guardThis->m_savePreflightGeneration != generation ||
+                                guardThis->m_savePreflightCancel != cancel) return;
+                            guardThis->m_savePreflightCancel.reset();
+                            if (progressGuard != nullptr) progressGuard->close();
+                            if (guardThis == nullptr) return;
+                            guardThis->setTransactionBusy(false);
+                            if (guardThis != nullptr && !cancel->load() && !preflight.cancelled)
+                                guardThis->continueSaveAfterSignaturePreflight(
+                                    std::move(patches), preflight.signedTargetWillChange,
+                                    preflight.hasCatalogSignature);
+                        }, Qt::QueuedConnection);
+                }));
+        }
+
+        struct SaveSignaturePreflight
+        {
             bool signedTargetWillChange = false;
             bool hasCatalogSignature = false;
-            for (const ks::file::metadata::TargetPatch& patch : patches)
+            bool cancelled = false;
+        };
+
+        static SaveSignaturePreflight inspectSaveSignatures(
+            const QList<ks::file::metadata::TargetPatch>& patches,
+            const std::shared_ptr<std::atomic_bool>& cancel,
+            const std::function<ks::file::metadata::SignatureInspection(const QString&)>& inspect)
+        {
+            SaveSignaturePreflight result;
+            for (const auto& patch : patches)
             {
-                requiresBackup = requiresBackup || patch.highRisk();
-                if (!patch.snapshot.directory)
-                {
-                    const ks::file::metadata::SignatureInspection signature =
-                        ks::file::metadata::inspectSignature(patch.originalPath);
-                    signedTargetWillChange = signedTargetWillChange ||
-                        signature.embedded || signature.catalog;
-                    hasCatalogSignature = hasCatalogSignature || signature.catalog;
-                }
+                if (cancel->load()) { result.cancelled = true; return result; }
+                if (patch.snapshot.directory) continue;
+                const auto signature = inspect(patch.originalPath);
+                if (cancel->load()) { result.cancelled = true; return result; }
+                result.signedTargetWillChange = result.signedTargetWillChange || signature.embedded || signature.catalog;
+                result.hasCatalogSignature = result.hasCatalogSignature || signature.catalog;
             }
+            return result;
+        }
+
+        void continueSaveAfterSignaturePreflight(
+            QList<ks::file::metadata::TargetPatch> patches,
+            const bool signedTargetWillChange, const bool hasCatalogSignature)
+        {
+            const QPointer<FileDetailDialog> lifetime(this);
+            bool requiresBackup = std::any_of(patches.cbegin(), patches.cend(),
+                [](const auto& patch) { return patch.highRisk(); });
             if (requiresBackup &&
                 (m_backupBeforeSaveCheck == nullptr || !m_backupBeforeSaveCheck->isChecked()))
             {
@@ -9101,32 +9171,34 @@ namespace
 
             if (signedTargetWillChange)
             {
-                QMessageBox signaturePrompt(this);
-                signaturePrompt.setIcon(QMessageBox::Warning);
-                signaturePrompt.setWindowTitle(
+                QPointer<QMessageBox> signaturePrompt = new QMessageBox(this);
+                signaturePrompt->setIcon(QMessageBox::Warning);
+                signaturePrompt->setWindowTitle(
                     ks::i18n::sourceText(QStringLiteral("已签名文件将被修改")));
-                signaturePrompt.setText(
+                signaturePrompt->setText(
                     ks::i18n::sourceText(QStringLiteral(
                         "修改已签名文件后，Authenticode 验证可能失效。请选择签名数据处理方式。")) +
                     (hasCatalogSignature
                         ? QLatin1Char('\n') + ks::i18n::sourceText(QStringLiteral(
                             "检测到 Catalog 签名。Catalog 只能显示失效状态，无法从文件本身删除。"))
                         : QString()));
-                QPushButton* removeButton = signaturePrompt.addButton(
+                QPushButton* removeButton = signaturePrompt->addButton(
                     ks::i18n::sourceText(QStringLiteral("清除嵌入式签名并继续")),
                     QMessageBox::AcceptRole);
-                QPushButton* preserveButton = signaturePrompt.addButton(
+                QPushButton* preserveButton = signaturePrompt->addButton(
                     ks::i18n::sourceText(QStringLiteral("保留签名数据并继续")),
                     QMessageBox::DestructiveRole);
-                QPushButton* cancelButton = signaturePrompt.addButton(
+                QPushButton* cancelButton = signaturePrompt->addButton(
                     QMessageBox::Cancel);
-                signaturePrompt.setDefaultButton(cancelButton);
-                signaturePrompt.exec();
-                if (signaturePrompt.clickedButton() == cancelButton)
+                signaturePrompt->setDefaultButton(cancelButton);
+                signaturePrompt->exec();
+                if (lifetime == nullptr || signaturePrompt == nullptr) return;
+                signaturePrompt->deleteLater();
+                if (signaturePrompt->clickedButton() == cancelButton)
                 {
                     return;
                 }
-                if (signaturePrompt.clickedButton() == removeButton)
+                if (signaturePrompt->clickedButton() == removeButton)
                 {
                     for (ks::file::metadata::TargetPatch& patch : patches)
                     {
@@ -9137,7 +9209,7 @@ namespace
                         }
                     }
                 }
-                else if (signaturePrompt.clickedButton() != preserveButton)
+                else if (signaturePrompt->clickedButton() != preserveButton)
                 {
                     return;
                 }
@@ -9167,7 +9239,7 @@ namespace
                     .arg(pendingOperationCount()),
                 QMessageBox::Yes | QMessageBox::No,
                 QMessageBox::No);
-            if (confirmation != QMessageBox::Yes)
+            if (lifetime == nullptr || confirmation != QMessageBox::Yes)
             {
                 return;
             }
@@ -12619,6 +12691,8 @@ namespace
         QPushButton* m_discardPendingButton = nullptr; // 放弃全部未写入补丁。
         QPushButton* m_saveAllButton = nullptr; // 唯一会触发文件写入的入口。
         bool m_transactionBusy = false; // 保存事务运行期间锁定编辑和重复提交。
+        std::shared_ptr<std::atomic_bool> m_savePreflightCancel; // 只读签名预检可以取消，不中断已确认的写事务。
+        quint64 m_savePreflightGeneration = 0; // 取消/重试后旧签名计划不能进入确认或写入。
         std::shared_ptr<std::atomic_bool> m_hashCancelRequested; // 哈希计算取消标记，后台线程共享。
         std::shared_ptr<std::atomic_bool> m_usageScanCancelRequested; // 文件占用扫描取消标记，关闭属性窗时置位。
         QProgressBar* m_usageScanProgressBar = nullptr; // 属性页文件占用扫描的阶段进度条。
