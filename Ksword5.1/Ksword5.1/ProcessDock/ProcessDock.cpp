@@ -1521,6 +1521,7 @@ class ProcessActivityChartWidget final : public QWidget
 public:
     struct SnapshotMetrics
     {
+        bool ready = false;
         std::array<double, 5> values{};
         std::array<double, 5> denominators{100.0, 1.0, 1.0, 1.0, 100.0};
     };
@@ -1528,8 +1529,8 @@ public:
     SnapshotMetrics snapshotMetrics(const int sampleIndex, const std::vector<std::string>& selectionKeys)
     {
         const std::unordered_set<std::string> keys(selectionKeys.begin(), selectionKeys.end());
-        prepareAggregateCache(selectionKeys, keys);
         SnapshotMetrics result{};
+        if (!prepareAggregateCache(selectionKeys, keys)) return result;
         if (m_ownerDock != nullptr && !m_ownerDock->m_activitySamples.empty() && !m_rawSamples.empty())
         {
             const auto& samples = m_ownerDock->m_activitySamples;
@@ -1537,6 +1538,7 @@ public:
                 static_cast<int>(samples.size()) - 1))].sequence;
             result.values = m_rawSamples.at(sequence).values;
             result.denominators = metricDenominators();
+            result.ready = true;
         }
         return result;
     }
@@ -1689,7 +1691,15 @@ protected:
         const std::unordered_set<std::string> selectionKeySet(
             selectionKeys.cbegin(),
             selectionKeys.cend());
-        updateSeriesCache(enabledMetrics, selectionKeys, selectionKeySet);
+        if (!updateSeriesCache(enabledMetrics, selectionKeys, selectionKeySet))
+        {
+            drawGrid(painter, plotRect, borderColor, textColor);
+            painter.setPen(textColor);
+            painter.drawText(plotRect, Qt::AlignCenter,
+                processContextText("process.activity.preparing", QStringLiteral("正在准备活动历史数据...")));
+            drawFocusLine(painter, plotRect);
+            return;
+        }
 
         drawGrid(painter, plotRect, borderColor, textColor);
         drawLines(painter, plotRect);
@@ -1951,14 +1961,54 @@ private:
         }
     }
 
-    // 原始值只为新样本追加一次；选区改变才失效该选区的聚合缓存。
-    void prepareAggregateCache(const std::vector<std::string>& selectionKeys,
+    void scheduleAggregatePublication()
+    {
+        if (m_aggregatePublicationQueued) return;
+        m_aggregatePublicationQueued = true;
+        QTimer::singleShot(0, this, [this]() {
+            m_aggregatePublicationQueued = false;
+            if (!isVisible() || m_ownerDock == nullptr)
+            {
+                m_aggregateWasPending = true;
+                return;
+            }
+            const auto keys = m_ownerDock->currentProcessActivitySelectionKeys();
+            const std::unordered_set<std::string> keySet(keys.begin(), keys.end());
+            if (!prepareAggregateCache(keys, keySet)) return;
+            m_seriesDirty = true;
+            update();
+            m_ownerDock->previewProcessActivitySnapshotForIndex(m_focusedSampleIndex);
+            if (m_hoverActive && QToolTip::isVisible())
+            {
+                showSnapshotToolTipAtPosition(m_hoverPosition, mapToGlobal(m_hoverPosition));
+            }
+        });
+    }
+
+    void scheduleAggregateContinuation()
+    {
+        if (m_aggregateWorkQueued || !isVisible()) return;
+        m_aggregateWorkQueued = true;
+        QTimer::singleShot(0, this, [this]() {
+            m_aggregateWorkQueued = false;
+            if (!isVisible() || m_ownerDock == nullptr) return;
+            // 始终消费当前选择，旧回调不能把用户新选区重新切回旧选区。
+            const auto keys = m_ownerDock->currentProcessActivitySelectionKeys();
+            const std::unordered_set<std::string> keySet(keys.begin(), keys.end());
+            if (prepareAggregateCache(keys, keySet)) update();
+        });
+    }
+
+    // 初次选区/隐藏后补齐按4ms软预算推进，连单个样本内的进程聚合也可让出。
+    // 规范历史与采集不暂停；未完成的选区不以旧选区曲线冒充新结果。
+    bool prepareAggregateCache(const std::vector<std::string>& selectionKeys,
         const std::unordered_set<std::string>& selectionKeySet)
     {
         if (m_ownerDock == nullptr || m_ownerDock->m_activitySamples.empty())
         {
             m_rawSamples.clear();
-            return;
+            m_pendingPointActive = false;
+            return true;
         }
         const auto& samples = m_ownerDock->m_activitySamples;
         auto canonicalKeys = selectionKeys;
@@ -1972,6 +2022,8 @@ private:
         if (replace)
         {
             m_rawSamples.clear();
+            m_cachedSeries.clear();
+            m_pendingPointActive = false;
         }
         m_rawRecordingTick = m_ownerDock->m_activityRecordingStartTick100ns;
         m_rawSelectionKeys = std::move(canonicalKeys);
@@ -1983,36 +2035,64 @@ private:
                     return sequence < sample.sequence;
                 });
         }
+        QElapsedTimer budget;
+        budget.start();
         for (auto sample = first; sample != samples.end(); ++sample)
         {
-            ks::ui::activity::SeriesCache::Point point{};
-            point.sequence = sample->sequence;
-            point.timeMs = static_cast<double>(sample->elapsedMs);
+            if (!m_pendingPointActive || m_pendingPoint.sequence != sample->sequence)
+            {
+                m_pendingPoint = {};
+                m_pendingPoint.sequence = sample->sequence;
+                m_pendingPoint.timeMs = static_cast<double>(sample->elapsedMs);
+                m_pendingProcessIndex = 0;
+                m_pendingPointActive = true;
+            }
             if (selectionKeySet.empty())
             {
-                point.values = {sample->totalCpuPercent, sample->totalMemoryMB, sample->totalDiskMBps,
+                m_pendingPoint.values = {sample->totalCpuPercent, sample->totalMemoryMB, sample->totalDiskMBps,
                     sample->totalNetKBps, sample->totalGpuPercent};
             }
             else
             {
-                // 一次身份匹配同时累计五项，避免每项指标重新扫描所有历史进程。
-                for (const auto& process : sample->processes)
+                for (; m_pendingProcessIndex < sample->processes.size(); ++m_pendingProcessIndex)
                 {
-                    if (selectionKeySet.find(process.identityKey) == selectionKeySet.end()) continue;
-                    point.values[0] += process.cpuPercent;
-                    point.values[1] += process.workingSetMB;
-                    point.values[2] += process.diskMBps;
-                    point.values[3] += process.netKBps;
-                    point.values[4] += process.gpuPercent;
+                    const auto& process = sample->processes[m_pendingProcessIndex];
+                    if (selectionKeySet.find(process.identityKey) != selectionKeySet.end())
+                    {
+                        m_pendingPoint.values[0] += process.cpuPercent;
+                        m_pendingPoint.values[1] += process.workingSetMB;
+                        m_pendingPoint.values[2] += process.diskMBps;
+                        m_pendingPoint.values[3] += process.netKBps;
+                        m_pendingPoint.values[4] += process.gpuPercent;
+                    }
+                    if ((m_pendingProcessIndex & 63U) == 63U && budget.elapsed() >= 4)
+                    {
+                        ++m_pendingProcessIndex;
+                        m_aggregateWasPending = true;
+                        scheduleAggregateContinuation();
+                        return false;
+                    }
                 }
             }
-            const bool appended = m_rawSamples.append(point);
+            const bool appended = m_rawSamples.append(m_pendingPoint);
             Q_ASSERT(appended);
             (void)appended;
+            m_pendingPointActive = false;
+            if (std::next(sample) != samples.end() && budget.elapsed() >= 4)
+            {
+                m_aggregateWasPending = true;
+                scheduleAggregateContinuation();
+                return false;
+            }
         }
-        // 保留一个原边缘点维持跨视口曲线；完整历史仍由 owner 持有。
         const auto firstSequence = samples.front().sequence;
         m_rawSamples.trimBefore(firstSequence > 0U ? firstSequence - 1U : 0U);
+        if (m_aggregateWasPending)
+        {
+            m_aggregateWasPending = false;
+            scheduleAggregatePublication();
+        }
+        return true;
     }
 
     std::array<double, 5> metricDenominators() const
@@ -2031,15 +2111,19 @@ private:
     }
 
     // 数据代次、轴或物理像素列变化才重新准备投影；paint 不扫描全部历史。
-    void updateSeriesCache(const std::vector<ProcessDock::ProcessActivityMetric>& metrics,
+    bool updateSeriesCache(const std::vector<ProcessDock::ProcessActivityMetric>& metrics,
         const std::vector<std::string>& selectionKeys,
         const std::unordered_set<std::string>& selectionKeySet)
     {
-        prepareAggregateCache(selectionKeys, selectionKeySet);
+        if (!prepareAggregateCache(selectionKeys, selectionKeySet))
+        {
+            m_seriesDirty = true;
+            return false;
+        }
         if (m_rawSamples.empty())
         {
             m_cachedSeries.clear();
-            return;
+            return true;
         }
         const auto denominators = metricDenominators();
         const double endTime = windowEndMs();
@@ -2050,7 +2134,7 @@ private:
             metrics == m_cachedMetrics && denominators == m_projectionDenominators &&
             m_projectionStartMs == startTime && m_projectionEndMs == endTime && m_projectionColumns == columns)
         {
-            return;
+            return true;
         }
         std::vector<CachedSeries> seriesList;
         seriesList.reserve(metrics.size());
@@ -2077,6 +2161,7 @@ private:
         m_projectionEndMs = endTime;
         m_projectionColumns = columns;
         m_seriesDirty = false;
+        return true;
     }
 
     // sampleIndexAtX：
@@ -2270,7 +2355,8 @@ private:
             return;
         }
         const auto sequence = m_ownerDock->m_activitySamples[static_cast<std::size_t>(sampleIndex)].sequence;
-        if (m_rawSamples.empty()) return;
+        if (m_rawSamples.empty() || sequence < m_rawSamples.front().sequence ||
+            sequence > m_rawSamples.back().sequence) return;
         const double sampleTime = m_rawSamples.at(sequence).timeMs;
         const auto denominators = metricDenominators();
         const double endTime = windowEndMs();
@@ -2358,6 +2444,12 @@ private:
     std::uint64_t m_hoveredSequence = 0; // 合并同一采样的 tooltip 更新。
     bool m_seriesDirty = true; // 新样本触发重建，逐帧移动只使用缓存。
     ks::ui::activity::SeriesCache m_rawSamples;
+    ks::ui::activity::SeriesCache::Point m_pendingPoint{};
+    std::size_t m_pendingProcessIndex = 0;
+    bool m_pendingPointActive = false;
+    bool m_aggregateWorkQueued = false;
+    bool m_aggregatePublicationQueued = false;
+    bool m_aggregateWasPending = false;
     std::uint64_t m_rawRecordingTick = 0;
     std::vector<std::string> m_rawSelectionKeys;
     std::uint64_t m_projectionRevision = 0;
@@ -9950,6 +10042,7 @@ QString ProcessDock::buildProcessActivitySnapshotText(const int sampleIndex) con
     }
     else
     {
+        cachedMetrics.ready = true;
         cachedMetrics.values = {processActivitySampleMetricValue(sample, ProcessActivityMetric::Cpu, selectionKeys),
             processActivitySampleMetricValue(sample, ProcessActivityMetric::Memory, selectionKeys),
             processActivitySampleMetricValue(sample, ProcessActivityMetric::Disk, selectionKeys),
@@ -9962,6 +10055,10 @@ QString ProcessDock::buildProcessActivitySnapshotText(const int sampleIndex) con
             cachedMetrics.denominators[3] = std::max(cachedMetrics.denominators[3],
                 processActivitySampleMetricValue(historySample, ProcessActivityMetric::Network, selectionKeys));
         }
+    }
+    if (!cachedMetrics.ready)
+    {
+        return processContextText("process.activity.preparing", QStringLiteral("正在准备活动历史数据..."));
     }
     const double cpuValue = cachedMetrics.values[0];
     const double memoryValue = cachedMetrics.values[1];

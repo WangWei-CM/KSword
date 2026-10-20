@@ -28,7 +28,7 @@ def main():
     output.mkdir(parents=True, exist_ok=True)
     source = source_path.read_text(encoding="utf-8-sig")
     methods = "\n".join(method(source, signature) for signature in (
-        "void prepareAggregateCache(", "std::array<double, 5> metricDenominators() const", "void updateSeriesCache("))
+        "bool prepareAggregateCache(", "std::array<double, 5> metricDenominators() const", "bool updateSeriesCache("))
     header = args.header or root / "Ksword5.1/Ksword5.1/ProcessDock/ProcessActivitySeriesCache.h"
     fixture = Path(__file__).with_suffix(".cpp").read_text(encoding="utf-8").replace("__METHODS__", methods).replace("__HEADER__", header.resolve().as_posix())
     cpp = output / "fixture.cpp"

@@ -9,14 +9,15 @@
 #include <unordered_set>
 #include <vector>
 #define Q_ASSERT(value) assert(value)
+struct QElapsedTimer { inline static int checksBeforeYield=100000000; int checks=0; void start() {} int elapsed() { return ++checks >= checksBeforeYield ? 4 : 0; } };
 struct ProcessDock {
  enum class ProcessActivityMetric { Cpu,Memory,Disk,Network,Gpu };
  struct ProcessPoint { std::string identityKey; double cpuPercent=1,workingSetMB=2,diskMBps=3,netKBps=4,gpuPercent=5; };
  struct Processes {
   inline static unsigned reads=0;
   std::vector<ProcessPoint> rows{{"A"},{"B"}};
-  auto begin() const { ++reads; return rows.begin(); }
-  auto end() const { return rows.end(); }
+  std::size_t size() const { return rows.size(); }
+  const ProcessPoint& operator[](std::size_t index) const { if(index==0) ++reads; return rows[index]; }
  };
  struct ProcessActivitySample {
   std::uint64_t sequence=0, elapsedMs=0;
@@ -33,6 +34,14 @@ struct Fixture {
  struct Rect { double width() const { return 800; } };
  ProcessDock* m_ownerDock;
  ks::ui::activity::SeriesCache m_rawSamples;
+ ks::ui::activity::SeriesCache::Point m_pendingPoint{};
+ std::size_t m_pendingProcessIndex=0;
+ bool m_pendingPointActive=false;
+ bool m_aggregateWasPending=false;
+ unsigned published=0;
+ void scheduleAggregatePublication() { ++published; }
+ unsigned scheduled=0;
+ void scheduleAggregateContinuation() { ++scheduled; }
  std::uint64_t m_rawRecordingTick=0,m_projectionRevision=0;
  std::vector<std::string> m_rawSelectionKeys;
  double m_projectionStartMs=0,m_projectionEndMs=0;
@@ -82,5 +91,30 @@ int main() {
  assert(f.m_rawSamples.size()==1 && f.m_rawSamples.front().sequence==0);
  assert(ProcessDock::Processes::reads==10002);
  assert(f.m_rawSamples.at(0).values[0]==2);
- std::cout<<"PASS: production aggregate/update methods: one-new-sample scan, metric reuse, unordered selection, trim and session reset\n";
+ // A single very large sample yields inside its process list, with no lost/duplicate aggregation.
+ ProcessDock large;
+ ProcessDock::ProcessActivitySample many; many.processes.rows.assign(10000, {"A"});
+ large.m_activitySamples.push_back(std::move(many));
+ Fixture split{&large};
+ QElapsedTimer::checksBeforeYield=2;
+ unsigned chunks=0;
+ while(!split.prepareAggregateCache({"A"},{"A"})) { ++chunks; assert(chunks<1000); }
+ assert(chunks>10 && split.scheduled==chunks && split.published==1);
+ assert(split.m_rawSamples.at(0).values[0]==10000);
+ assert(split.m_rawSamples.at(0).values[4]==50000);
+ // Replace an incomplete selection before its continuation, then evict its source sample.
+ split.m_rawSamples.clear(); split.m_pendingPointActive=false;
+ assert(!split.prepareAggregateCache({"A"},{"A"}));
+ assert(!split.prepareAggregateCache({"B"},{"B"}));
+ while(!split.prepareAggregateCache({"B"},{"B"})) {}
+ assert(split.m_rawSamples.at(0).values[0]==0);
+ split.m_rawSamples.clear();split.m_pendingPointActive=false;
+ assert(!split.prepareAggregateCache({"A"},{"A"}));
+ large.m_activitySamples.clear();
+ ProcessDock::ProcessActivitySample replacement;replacement.sequence=10;replacement.elapsedMs=1000;
+ large.m_activitySamples.push_back(replacement);
+ while(!split.prepareAggregateCache({"A"},{"A"})) {}
+ assert(split.m_rawSamples.size()==1 && split.m_rawSamples.front().sequence==10);
+ assert(split.m_rawSamples.at(10).values[0]==1);
+ std::cout<<"PASS: production aggregate/update methods and budgeted per-sample cursor, source eviction and selection replacement\n";
 }
