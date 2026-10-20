@@ -10,6 +10,7 @@
 #include "UI/PageControlStyle.h"
 #include "UI/ToolbarMetrics.h"
 #include "UI/SecondaryPageLayout.h"
+#include "UI/AsyncCleanupRegistry.h"
 
 #include "theme.h"
 #include "Internationalization/LanguageManager.h"
@@ -68,6 +69,8 @@
 #include <QWidget>
 
 #include <functional>
+#include <atomic>
+#include <memory>
 
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -84,6 +87,56 @@ namespace
     constexpr int kMaxVisualizationRows = 10000;
     constexpr int kMaxBufferedStdoutBytes = 1024 * 1024;
     constexpr char kMarketplaceCatalogUrl[] = "https://raw.githubusercontent.com/KSwordDEV/Plugins/main/catalog.json";
+
+    // QProcess stays on its event thread, independently of the page. Shutdown
+    // only sets a value flag; the event loop owns terminate/kill and observes the
+    // real NotRunning receipt before returning the accepted cleanup lease.
+    struct PluginProcessStop
+    {
+        std::atomic_bool requested{false};
+        std::shared_ptr<ks::ui::AsyncCleanupRegistry::Lease> lease;
+        bool orphaned = false;
+        bool terminated = false;
+        bool killed = false;
+        int elapsed = 0;
+    };
+    std::shared_ptr<PluginProcessStop> ownPluginProcess(QProcess* process, int graceMs)
+    {
+        auto stop = std::make_shared<PluginProcessStop>();
+        const std::weak_ptr<PluginProcessStop> weak = stop;
+        stop->lease = ks::ui::AsyncCleanupRegistry::global().acquire([weak] {
+            if (const auto value = weak.lock()) value->requested.store(true);
+        });
+        if (!stop->lease) return {};
+        process->setParent(QCoreApplication::instance());
+        auto* timer = new QTimer(process);
+        timer->setInterval(50);
+        QObject::connect(timer, &QTimer::timeout, process, [process, stop, graceMs] {
+            if (!stop->requested.load() || process->state() == QProcess::NotRunning) return;
+            if (!stop->terminated) { stop->terminated = true; process->terminate(); }
+            else if (!stop->killed && (stop->elapsed += 50) >= graceMs)
+            { stop->killed = true; process->kill(); }
+            // A failed kill is not a termination acknowledgement. Keep lease.
+        });
+        const auto finished = [process, stop, timer] {
+            if (process->state() != QProcess::NotRunning) return;
+            timer->stop();
+            stop->lease.reset();
+            if (stop->orphaned) process->deleteLater();
+        };
+        QObject::connect(process, qOverload<int, QProcess::ExitStatus>(&QProcess::finished), process,
+            [finished](int, QProcess::ExitStatus) { finished(); });
+        QObject::connect(process, &QProcess::errorOccurred, process,
+            [finished](QProcess::ProcessError error) { if (error == QProcess::FailedToStart) finished(); });
+        timer->start();
+        return stop;
+    }
+    void retirePluginProcess(QProcess* process, const std::shared_ptr<PluginProcessStop>& stop)
+    {
+        if (!process) return;
+        if (stop) { stop->orphaned = true; stop->requested.store(true); }
+        if (process->state() == QProcess::NotRunning) process->deleteLater();
+    }
 
     struct VisualizationValueStyle
     {
@@ -1298,7 +1351,7 @@ namespace
             m_process->setProcessEnvironment(environment);
 
             connect(m_closeButton, &QPushButton::clicked, this, [this]() {
-                if (m_process->state() == QProcess::NotRunning) close();
+                if (!m_process || m_process->state() == QProcess::NotRunning) close();
                 else cancelRun();
             });
             connect(m_process, &QProcess::started, this, [this]() {
@@ -1368,8 +1421,12 @@ namespace
 
         void start()
         {
+            m_processStop = ownPluginProcess(m_process, 2000);
+            if (!m_processStop) { m_finished = true; setStatus(QStringLiteral("启动失败"), QStringLiteral("danger")); return; }
             m_process->start();
         }
+
+        ~PluginRunDialog() override { retirePluginProcess(m_process, m_processStop); }
 
     protected:
         void closeEvent(QCloseEvent* event) override
@@ -1580,7 +1637,8 @@ namespace
         }
 
         PluginDescriptor m_descriptor;
-        QProcess* m_process = nullptr;
+        QPointer<QProcess> m_process;
+        std::shared_ptr<PluginProcessStop> m_processStop;
         QProgressBar* m_progress = nullptr;
         QTabWidget* m_tabs = nullptr;
         QTableWidget* m_resultTable = nullptr;
@@ -1674,19 +1732,15 @@ namespace
         ~PluginTabPage() override
         {
             m_stopping = true;
-            if (::IsWindow(m_pluginWindow))
+            DWORD windowPid = 0;
+            if (::IsWindow(m_pluginWindow)) ::GetWindowThreadProcessId(m_pluginWindow, &windowPid);
+            if (m_process && windowPid == static_cast<DWORD>(m_process->processId())
+                && ::GetParent(m_pluginWindow) == reinterpret_cast<HWND>(m_surface->winId()))
             {
                 ::PostMessageW(m_pluginWindow, WM_CLOSE, 0, 0);
             }
-            if (m_process != nullptr && m_process->state() != QProcess::NotRunning)
-            {
-                m_process->terminate();
-                if (!m_process->waitForFinished(1200))
-                {
-                    m_process->kill();
-                    m_process->waitForFinished(800);
-                }
-            }
+            m_pluginWindow = nullptr;
+            retirePluginProcess(m_process, m_processStop);
         }
 
     protected:
@@ -1810,6 +1864,9 @@ namespace
                     m_diagnostics->appendPlainText(exitText);
                     if (!m_failed) fail(exitText, false);
                 });
+            m_processStop = ownPluginProcess(m_process, 1200);
+            if (!m_processStop)
+            { fail(QStringLiteral("Tab 插件启动失败：%1").arg(QString::number(ERROR_OPERATION_ABORTED)), false); return; }
             m_process->start();
 
             QPointer<PluginTabPage> guard(this);
@@ -1828,7 +1885,8 @@ namespace
         void fail(const QString& message, bool stopProcess);
 
         PluginDescriptor m_descriptor;
-        QProcess* m_process = nullptr;
+        QPointer<QProcess> m_process;
+        std::shared_ptr<PluginProcessStop> m_processStop;
         QWidget* m_surface = nullptr;
         QLabel* m_statusLabel = nullptr;
         QPushButton* m_diagnosticsButton = nullptr;
