@@ -6954,6 +6954,12 @@
     "notification.copy.log_template": "%1\n%2\n%3\nFile: %4\nFunction: %5\nGUID: %6"
   },
   "source_translations": {
+    "DDMA operation is running; accepted transactions finish and retain recovery records after this window closes.": "DDMA operation is running; accepted transactions finish and retain recovery records after this window closes.",
+    "DDMA write receipt: %1 bytes, partial=%2, scratchDirty=%3, lostUpdateWindow=%4.": "DDMA write receipt: %1 bytes, partial=%2, scratchDirty=%3, lostUpdateWindow=%4.",
+    "Sharing check incomplete (%1 driver queries, %2 ms); sharing remains unknown for %3.": "Sharing check incomplete (%1 driver queries, %2 ms); sharing remains unknown for %3.",
+    "Target bytes changed or could not be read completely; no write was issued. Backups are retained.": "Target bytes changed or could not be read completely; no write was issued. Backups are retained.",
+    "Target page mapping changed or is unavailable; no further write was issued. Backups are retained.": "Target page mapping changed or is unavailable; no further write was issued. Backups are retained.",
+    "Target process identity is unavailable or changed; no further write was issued. Backups are retained.": "Target process identity is unavailable or changed; no further write was issued. Backups are retained.",
     "正在查询 HVM 私有页表窗口。": "Querying the HVM private page-table window.",
     "查询 HVM 私有页表窗口失败。": "Failed to query the HVM private page-table window.",
     "Pool table projection failed.": "Pool table projection failed.",

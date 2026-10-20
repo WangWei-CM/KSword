@@ -34,6 +34,7 @@
 
 #include <cstdint>
 #include <vector>
+#include <memory>
 
 class QCheckBox;
 class QComboBox;
@@ -44,9 +45,16 @@ class QPushButton;
 
 namespace ksword::memory_dock
 {
-    // DmaOpRecord：一次已经落地的写入，留着才能还原。
+    struct DmaOperationLedger;
+
+    // DmaOpRecord：一次可能已改变物理页的写入，失败/partial 也必须保留还原依据。
     struct DmaOpRecord
     {
+        std::uint64_t recordId = 0;
+        std::uint32_t processId = 0;
+        std::uint64_t creationTime100ns = 0;
+        ksword::memory_backend::DdmaSessionSnapshot session;
+        // The actual patch VA, including the cave offset, is frozen for restore.
         std::uint64_t virtualAddress = 0;
         std::uint64_t physicalAddress = 0;
         std::size_t offsetInPage = 0;
@@ -63,7 +71,8 @@ namespace ksword::memory_dock
         explicit DmaProcessOpPage(QWidget* parent = nullptr);
         ~DmaProcessOpPage() override;
 
-        void setAttachedProcess(std::uint32_t processId, const QString& processName);
+        void setAttachedProcess(std::uint32_t processId, const QString& processName,
+            std::uint64_t expectedCreationTime100ns = 0);
         void refreshChannelAvailability();
 
     private:
@@ -71,29 +80,22 @@ namespace ksword::memory_dock
         void wireSignals();
         void updateActionState();
 
-        // performWrite：三步都在这里完成，不拆开给调用方——拆开就会出现
-        // "写了但没校验"或"没备份就写了"的调用序列。
+        // GUI 只冻结参数；进程级 FIFO 持有完整的备份/写入/最终回读事务。
+        // 接受后不因 QWidget 关闭而取消，备份归进程级账本所有。
         void performWrite(bool injectPayload);
         void restoreLastWrite();
-        void appendLog(const QString& line);
 
-        // evaluateSharing：跨进程比物理地址，判断目标页是不是共享的。
-        // 这是本页后果最重的一条检查：DMA 写的是物理页，而写时复制靠缺页异常
-        // 实现、DMA 不触发缺页，所以写一张共享映像页会打到每一个映射它的进程。
-        Ksword::Evidence::DmaTargetSharing evaluateSharing(
-            std::uint64_t pageVirtualAddress,
-            std::uint64_t pagePhysical,
-            QString& evidenceOut);
-
-        bool resolveTargetPage(
-            std::uint64_t& virtualAddressOut,
-            std::uint64_t& pagePhysicalOut,
-            std::vector<std::uint8_t>& pageBytesOut,
-            QString& errorOut);
+        void synchronizeLedger();
+        void followPendingOperation();
 
         std::uint32_t m_attachedPid = 0;
+        std::uint64_t m_expectedCreationTime100ns = 0;
+        std::uint64_t m_targetGeneration = 0;
+        std::uint64_t m_watchedOperation = 0;
+        qsizetype m_projectedLogLines = 0;
         QString m_attachedProcessName;
-        std::vector<DmaOpRecord> m_records;
+        // Process-owned ledger outlives this QWidget and every queued callback.
+        std::shared_ptr<DmaOperationLedger> m_ledger;
 
         QLabel* m_targetLabel = nullptr;
         QLineEdit* m_addressEdit = nullptr;

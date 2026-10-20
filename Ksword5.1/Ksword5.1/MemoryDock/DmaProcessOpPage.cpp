@@ -6,9 +6,12 @@
 
 #include "../ArkDriverClient/ArkDriverClient.h"
 #include "../theme.h"
+#include "../Internationalization/LanguageManager.h"
 #include "../../../shared/evidence/NumericTextParse.h"
 
 #include <QCheckBox>
+#include <QFutureWatcher>
+#include <QPromise>
 #include <QGridLayout>
 #include <QFormLayout>
 #include <QGroupBox>
@@ -20,6 +23,9 @@
 #include <QVBoxLayout>
 
 #include <algorithm>
+#include <chrono>
+#include <mutex>
+#include <utility>
 
 using namespace Ksword::Evidence;
 
@@ -96,6 +102,651 @@ namespace ksword::memory_dock
                 }
             }
             return true;
+        }
+    }
+
+    enum class DmaOperationTone { Normal, Success, Warning, Error };
+
+    // Recovery belongs to the process, not the requesting QWidget.
+    struct DmaOperationLedger
+    {
+        std::mutex mutex;
+        std::uint32_t processId = 0;
+        std::uint64_t creationTime100ns = 0;
+        std::uint64_t sequence = 0;
+        bool pending = false;
+        QFuture<void> future;
+        std::vector<DmaOpRecord> records;
+        QStringList log;
+        QString status;
+        DmaOperationTone tone = DmaOperationTone::Normal;
+    };
+
+    namespace
+    {
+        struct OperationRequest
+        {
+            std::uint32_t processId = 0;
+            std::uint64_t creationTime100ns = 0;
+            std::uint64_t virtualAddress = 0;
+            ksword::memory_backend::DdmaSessionSnapshot session;
+            std::vector<std::uint8_t> payload;
+            bool injectPayload = false;
+            bool forceApproved = false;
+            bool unknownSharingApproved = false;
+            bool restore = false;
+            DmaOpRecord restoreRecord;
+        };
+
+        struct LedgerProjection
+        {
+            QStringList log;
+            QString status;
+            DmaOperationTone tone = DmaOperationTone::Normal;
+            bool pending = false;
+            bool hasRecords = false;
+        };
+
+        std::shared_ptr<DmaOperationLedger> ledgerFor(
+            const std::uint32_t processId, const std::uint64_t creationTime100ns)
+        {
+            static std::mutex registryMutex;
+            static std::vector<std::shared_ptr<DmaOperationLedger>> ledgers;
+            const std::lock_guard<std::mutex> registryLock(registryMutex);
+            for (auto it = ledgers.rbegin(); it != ledgers.rend(); ++it)
+            {
+                const std::lock_guard<std::mutex> ledgerLock((*it)->mutex);
+                if ((*it)->processId == processId
+                    && (*it)->creationTime100ns == creationTime100ns) return *it;
+            }
+            auto ledger = std::make_shared<DmaOperationLedger>();
+            ledger->processId = processId;
+            ledger->creationTime100ns = creationTime100ns;
+            ledgers.push_back(ledger);
+            return ledger;
+        }
+
+        LedgerProjection projectLedger(const std::shared_ptr<DmaOperationLedger>& ledger)
+        {
+            LedgerProjection projection;
+            if (!ledger) return projection;
+            const std::lock_guard<std::mutex> lock(ledger->mutex);
+            projection.log = ledger->log;
+            projection.status = ledger->status;
+            projection.tone = ledger->tone;
+            projection.pending = ledger->pending;
+            projection.hasRecords = !ledger->records.empty();
+            return projection;
+        }
+
+        void logLine(const std::shared_ptr<DmaOperationLedger>& ledger, const QString& line)
+        {
+            const std::lock_guard<std::mutex> lock(ledger->mutex);
+            ledger->log.append(line);
+        }
+
+        void setStatus(const std::shared_ptr<DmaOperationLedger>& ledger,
+            const QString& status, const DmaOperationTone tone)
+        {
+            const std::lock_guard<std::mutex> lock(ledger->mutex);
+            ledger->status = status;
+            ledger->tone = tone;
+        }
+
+        // This lease stays on the queue thread through final readback. R0-only
+        // targets require an actual selection-time R0 creation time at every check.
+        struct TargetLease
+        {
+            std::uint32_t processId = 0;
+            std::uint64_t creationTime100ns = 0;
+            HANDLE handle = nullptr;
+            ~TargetLease() { if (handle != nullptr) CloseHandle(handle); }
+            TargetLease() = default;
+            TargetLease(const TargetLease&) = delete;
+            TargetLease& operator=(const TargetLease&) = delete;
+
+            static std::uint64_t nativeCreationTime(HANDLE process)
+            {
+                FILETIME created{}, exited{}, kernel{}, user{};
+                if (!GetProcessTimes(process, &created, &exited, &kernel, &user)) return 0;
+                return (static_cast<std::uint64_t>(created.dwHighDateTime) << 32)
+                    | static_cast<std::uint64_t>(created.dwLowDateTime);
+            }
+
+            bool matches() const
+            {
+                if (creationTime100ns == 0) return false;
+                if (handle != nullptr)
+                    return WaitForSingleObject(handle, 0) == WAIT_TIMEOUT
+                        && nativeCreationTime(handle) == creationTime100ns;
+                const ksword::ark::DriverClient client;
+                const auto result = client.enumerateProcesses(0UL);
+                if (!result.io.ok) return false;
+                for (const auto& entry : result.entries)
+                    if (entry.processId == processId)
+                        return !(entry.flags & KSWORD_ARK_PROCESS_FLAG_TERMINATING_OR_EXITED)
+                            && entry.creationTime100ns != 0
+                            && entry.creationTime100ns == creationTime100ns;
+                return false;
+            }
+
+            bool open(const OperationRequest& request)
+            {
+                processId = request.processId;
+                creationTime100ns = request.creationTime100ns;
+                if (creationTime100ns == 0) return false;
+                handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE,
+                    FALSE, processId);
+                if (handle != nullptr)
+                {
+                    const auto actual = nativeCreationTime(handle);
+                    return actual != 0 && actual == creationTime100ns && matches();
+                }
+                return matches();
+            }
+        };
+
+        QString identityFailure()
+        {
+            return QStringLiteral("Target process identity is unavailable or changed; no further write was issued. Backups are retained.");
+        }
+
+        bool sessionCurrent(const OperationRequest& request, QString& error)
+        {
+            if (request.session.generation != ksword::memory_backend::ddmaSessionGeneration())
+            {
+                error = QStringLiteral("DDMA session changed; read a new snapshot before retrying.");
+                return false;
+            }
+            return ksword::memory_backend::isDdmaUsable(request.session.session, &error);
+        }
+
+        bool sameMapping(const OperationRequest& request, const TargetLease& target,
+            const std::uint64_t pagePhysical, QString& error)
+        {
+            if (!sessionCurrent(request, error)) return false;
+            if (!target.matches()) { error = identityFailure(); return false; }
+            const ksword::ark::DriverClient client;
+            const auto translated = client.translateVirtualAddress(request.processId,
+                request.virtualAddress & ~(kPageBytes - 1ULL), 0UL);
+            if (!translated.io.ok || !translated.resolved
+                || translated.physicalAddress != pagePhysical)
+            {
+                error = QStringLiteral("Target page mapping changed or is unavailable; no further write was issued. Backups are retained.");
+                return false;
+            }
+            if (!target.matches()) { error = identityFailure(); return false; }
+            return sessionCurrent(request, error);
+        }
+
+        bool resolveTargetPage(const OperationRequest& request, TargetLease& target,
+            std::uint64_t& pagePhysical, std::vector<std::uint8_t>& pageBytes, QString& error)
+        {
+            if (!sessionCurrent(request, error)) return false;
+            if (!target.open(request)) { error = identityFailure(); return false; }
+            const ksword::ark::DriverClient client;
+            const auto translated = client.translateVirtualAddress(request.processId,
+                request.virtualAddress & ~(kPageBytes - 1ULL), 0UL);
+            if (!translated.io.ok || !translated.resolved)
+            {
+                error = translated.io.ok ? QStringLiteral("该页翻译不出物理地址，可能未驻留。")
+                    : QStringLiteral("地址翻译失败：%1").arg(QString::fromStdString(translated.io.message));
+                return false;
+            }
+            pagePhysical = translated.physicalAddress;
+            if (!sessionCurrent(request, error)) return false;
+            const auto read = ksword::memory_backend::readPhysical(
+                ksword::memory_backend::MemoryAccessBackend::Ddma,
+                request.session.session, pagePhysical, kPageBytes);
+            if (read.scratchDirty)
+            {
+                error = QStringLiteral("DDMA scratch sectors could not be restored; further DDMA operations are unsafe.");
+                return false;
+            }
+            if (!read.ok || read.partial)
+            {
+                error = QStringLiteral("读取目标页失败：%1").arg(read.failureText);
+                return false;
+            }
+            if (static_cast<std::uint64_t>(read.data.size()) != kPageBytes)
+            {
+                error = QStringLiteral("只读到 %1 / %2 字节，无法据此计划写入。")
+                    .arg(read.data.size()).arg(kPageBytes);
+                return false;
+            }
+            pageBytes.assign(reinterpret_cast<const std::uint8_t*>(read.data.constData()),
+                reinterpret_cast<const std::uint8_t*>(read.data.constData()) + read.data.size());
+            return sameMapping(request, target, pagePhysical, error);
+        }
+
+        DmaTargetSharing evaluateSharing(const OperationRequest& request,
+            const std::uint64_t pagePhysical, QString& evidence)
+        {
+            using Clock = std::chrono::steady_clock;
+            const auto started = Clock::now();
+            const auto deadline = started + std::chrono::milliseconds(750);
+            constexpr std::size_t maxDriverQueries = 64;
+            std::size_t driverQueries = 0;
+            const auto budgetAvailable = [&]() {
+                return driverQueries < maxDriverQueries && Clock::now() < deadline;
+            };
+            const ksword::ark::DriverClient client;
+            const auto pageVirtualAddress = request.virtualAddress & ~(kPageBytes - 1ULL);
+            ++driverQueries;
+            const auto self = client.queryVirtualMemory(request.processId, pageVirtualAddress,
+                KSWORD_ARK_MEMORY_QUERY_FLAG_INCLUDE_MAPPED_FILE_NAME);
+            if (!self.io.ok || !(self.fieldFlags & KSWORD_ARK_MEMORY_FIELD_BASIC_PRESENT)
+                || self.state != MEM_COMMIT)
+            {
+                evidence = QStringLiteral("查询目标区域失败：%1")
+                    .arg(QString::fromStdString(self.io.message));
+                return DmaTargetSharing::SharingUnknown;
+            }
+            if (self.type == MEM_PRIVATE)
+            {
+                evidence = QStringLiteral("区域类型 MEM_PRIVATE，不由节对象支撑。");
+                return DmaTargetSharing::PrivateConfirmed;
+            }
+            const QString backingFile = QString::fromStdWString(self.mappedFileName);
+            if (budgetAvailable())
+            {
+                ++driverQueries;
+                const auto processes = client.enumerateProcesses(0UL);
+                if (processes.io.ok)
+                {
+                    for (const auto& entry : processes.entries)
+                    {
+                        const auto otherPid = static_cast<std::uint32_t>(entry.processId);
+                        if (otherPid == request.processId || otherPid == 0 || otherPid == 4) continue;
+                        if (!budgetAvailable()) break;
+                        ++driverQueries; // Includes failed queries and different backing files.
+                        const auto other = client.queryVirtualMemory(otherPid, pageVirtualAddress,
+                            KSWORD_ARK_MEMORY_QUERY_FLAG_INCLUDE_MAPPED_FILE_NAME);
+                        if (!other.io.ok || !(other.fieldFlags & KSWORD_ARK_MEMORY_FIELD_BASIC_PRESENT)
+                            || other.state != MEM_COMMIT || backingFile.isEmpty()
+                            || QString::fromStdWString(other.mappedFileName).compare(
+                                backingFile, Qt::CaseInsensitive) != 0) continue;
+                        if (!budgetAvailable()) break;
+                        ++driverQueries;
+                        const auto otherPa = client.translateVirtualAddress(otherPid, pageVirtualAddress, 0UL);
+                        if (!otherPa.io.ok || !otherPa.resolved) continue;
+                        if (otherPa.physicalAddress == pagePhysical)
+                        {
+                            evidence = QStringLiteral("PID %1 的同一虚拟地址落在同一张物理页 %2 上，支撑文件 %3。")
+                                .arg(otherPid).arg(hex64(pagePhysical)).arg(backingFile);
+                            return DmaTargetSharing::SharedConfirmed;
+                        }
+                        // A differing COW page proves nothing about later candidates.
+                    }
+                }
+            }
+            evidence = QStringLiteral("Sharing check incomplete (%1 driver queries, %2 ms); sharing remains unknown for %3.")
+                .arg(driverQueries)
+                .arg(std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - started).count())
+                .arg(backingFile.isEmpty() ? QStringLiteral("未知") : backingFile);
+            return DmaTargetSharing::SharingUnknown;
+        }
+
+        std::vector<std::uint8_t> outcomeBytes(const ksword::memory_backend::AccessOutcome& outcome)
+        {
+            if (!outcome.ok || outcome.partial) return {};
+            return std::vector<std::uint8_t>(
+                reinterpret_cast<const std::uint8_t*>(outcome.data.constData()),
+                reinterpret_cast<const std::uint8_t*>(outcome.data.constData()) + outcome.data.size());
+        }
+
+        ksword::memory_backend::AccessOutcome finalReadback(const OperationRequest& request,
+            const std::uint64_t address, const std::size_t size)
+        {
+            // Completion is unconditional after mutation may have begun. Closing
+            // the page or changing its selection never cancels this step.
+            try
+            {
+                return ksword::memory_backend::readPhysical(
+                    ksword::memory_backend::MemoryAccessBackend::Ddma,
+                    request.session.session, address, static_cast<std::uint64_t>(size));
+            }
+            catch (...)
+            {
+                ksword::memory_backend::AccessOutcome failed;
+                failed.failureText = QStringLiteral("DDMA transaction failed unexpectedly.");
+                return failed;
+            }
+        }
+
+        ksword::memory_backend::AccessOutcome writeOnce(const OperationRequest& request,
+            const std::uint64_t address, const std::vector<std::uint8_t>& bytes)
+        {
+            try
+            {
+                return ksword::memory_backend::writePhysical(
+                    ksword::memory_backend::MemoryAccessBackend::Ddma,
+                    request.session.session, address,
+                    QByteArray(reinterpret_cast<const char*>(bytes.data()), static_cast<qsizetype>(bytes.size())),
+                    request.forceApproved);
+            }
+            catch (...)
+            {
+                ksword::memory_backend::AccessOutcome failed;
+                failed.failureText = QStringLiteral("DDMA transaction failed unexpectedly.");
+                return failed;
+            }
+        }
+
+        void logReceipt(const std::shared_ptr<DmaOperationLedger>& ledger,
+            const ksword::memory_backend::AccessOutcome& outcome)
+        {
+            logLine(ledger, QStringLiteral("DDMA write receipt: %1 bytes, partial=%2, scratchDirty=%3, lostUpdateWindow=%4.")
+                .arg(outcome.bytesDone).arg(outcome.partial).arg(outcome.scratchDirty).arg(outcome.lostUpdateWindow));
+            if (outcome.scratchDirty)
+                logLine(ledger, QStringLiteral("   严重告警：暂存扇区未能还原，磁盘上留下了脏扇区。"));
+        }
+
+        QString verificationDetail(const DmaWriteVerification& verification)
+        {
+            return verification.readbackTooShort
+                ? QStringLiteral("读回只有 %1 字节").arg(verification.comparedBytes)
+                : QStringLiteral("第 %1 字节期望 %2、实际 %3").arg(verification.firstMismatchOffset)
+                    .arg(QStringLiteral("%1").arg(verification.expectedByte, 2, 16, QChar('0')).toUpper())
+                    .arg(QStringLiteral("%1").arg(verification.actualByte, 2, 16, QChar('0')).toUpper());
+        }
+
+        void logVerification(const std::shared_ptr<DmaOperationLedger>& ledger,
+            const DmaWriteVerification& verification)
+        {
+            logLine(ledger, verification.matched
+                ? QStringLiteral("   读回校验通过（%1 字节一致）。").arg(verification.comparedBytes)
+                : QStringLiteral("   读回校验失败：%1").arg(verificationDetail(verification)));
+        }
+
+        void runWrite(const OperationRequest& request, const std::shared_ptr<DmaOperationLedger>& ledger)
+        {
+            TargetLease target;
+            std::uint64_t pagePhysical = 0;
+            std::vector<std::uint8_t> pageBytes;
+            QString error;
+            if (!resolveTargetPage(request, target, pagePhysical, pageBytes, error))
+            {
+                setStatus(ledger, error, DmaOperationTone::Warning);
+                return;
+            }
+            QString evidence;
+            const auto sharing = evaluateSharing(request, pagePhysical, evidence);
+            logLine(ledger, QStringLiteral("── 共享性检查：%1").arg(QString::fromUtf8(DmaTargetSharingName(sharing))));
+            logLine(ledger, QStringLiteral("   依据：%1").arg(evidence));
+            if (sharing == DmaTargetSharing::SharedConfirmed)
+            {
+                setStatus(ledger, QStringLiteral("已拒绝：目标页确认被其它进程共享。%1 DMA 不触发写时复制，写入会波及每一个映射这张页的进程。请改用 R-1 注入（它把载荷放在影子页里，作用域限定在单个进程），或选一张进程私有的页。")
+                    .arg(evidence), DmaOperationTone::Error);
+                return;
+            }
+            if (sharing == DmaTargetSharing::SharingUnknown && !request.unknownSharingApproved)
+            {
+                setStatus(ledger, QStringLiteral("已拒绝：无法确认目标页是否被其它进程共享。%1 没找到第二个映射它的进程不等于没有。要继续，请勾选下面那一项并自行承担波及其它进程的可能。")
+                    .arg(evidence), DmaOperationTone::Warning);
+                return;
+            }
+            const auto plan = request.injectPayload
+                ? PlanPayloadIntoCave(pageBytes, request.payload, kDmaOpMinCaveBytes)
+                : PlanBytesAtOffset(pageBytes, static_cast<std::size_t>(request.virtualAddress & (kPageBytes - 1ULL)), UndefinedInstructionBytes());
+            const QString description = request.injectPayload
+                ? QStringLiteral("注入载荷 %1 字节").arg(request.payload.size()) : QStringLiteral("写 UD2");
+            if (plan.status != DmaOpPlanStatus::Ok)
+            {
+                setStatus(ledger, QStringLiteral("计划被拒绝：%1").arg(QString::fromUtf8(DmaOpPlanStatusName(plan.status))),
+                    DmaOperationTone::Warning);
+                return;
+            }
+            const auto writeAddress = pagePhysical + static_cast<std::uint64_t>(plan.offsetInPage);
+            if (!sameMapping(request, target, pagePhysical, error))
+            {
+                setStatus(ledger, error, DmaOperationTone::Warning);
+                return;
+            }
+            const auto before = ksword::memory_backend::readPhysical(
+                ksword::memory_backend::MemoryAccessBackend::Ddma, request.session.session,
+                writeAddress, static_cast<std::uint64_t>(plan.originalBytes.size()));
+            if (before.scratchDirty)
+            {
+                setStatus(ledger, QStringLiteral("DDMA scratch sectors could not be restored; further DDMA operations are unsafe."), DmaOperationTone::Error);
+                return;
+            }
+            if (!before.ok || !VerifyWriteReadback(plan.originalBytes, outcomeBytes(before)).matched)
+            {
+                setStatus(ledger, QStringLiteral("Target bytes changed or could not be read completely; no write was issued. Backups are retained."), DmaOperationTone::Warning);
+                return;
+            }
+            if (!sameMapping(request, target, pagePhysical, error))
+            {
+                setStatus(ledger, error, DmaOperationTone::Warning);
+                return;
+            }
+            logLine(ledger, QStringLiteral("── %1").arg(description));
+            logLine(ledger, QStringLiteral("   目标 VA %1，页物理 %2，页内偏移 0x%3")
+                .arg(hex64(request.virtualAddress)).arg(hex64(pagePhysical))
+                .arg(QString::number(plan.offsetInPage, 16).toUpper()));
+            logLine(ledger, QStringLiteral("   备份（原始字节）：%1").arg(hexDump(plan.originalBytes, 32U)));
+            logLine(ledger, QStringLiteral("   将写入：%1").arg(hexDump(plan.bytesToWrite, 32U)));
+            DmaOpRecord record;
+            record.processId = request.processId;
+            record.creationTime100ns = target.creationTime100ns;
+            record.session = request.session;
+            record.virtualAddress = (request.virtualAddress & ~(kPageBytes - 1ULL)) + plan.offsetInPage;
+            record.physicalAddress = writeAddress;
+            record.offsetInPage = plan.offsetInPage;
+            record.writtenBytes = plan.bytesToWrite;
+            record.originalBytes = plan.originalBytes;
+            record.description = description;
+            {
+                const std::lock_guard<std::mutex> lock(ledger->mutex);
+                // Allocate/save before mutation. Failed/partial transport receipts
+                // must never erase the only recovery bytes.
+                record.recordId = ledger->sequence;
+                ledger->records.push_back(record);
+            }
+            const auto written = writeOnce(request, writeAddress, plan.bytesToWrite);
+            const bool completeWrite = written.ok && !written.partial
+                && written.bytesDone == static_cast<std::uint64_t>(plan.bytesToWrite.size());
+            const QString writeFailure = written.failureText.isEmpty()
+                ? QStringLiteral("DDMA transaction returned incomplete data.") : written.failureText;
+            // Read back before formatting/logging after a possible physical write.
+            const auto readback = finalReadback(request, writeAddress, plan.bytesToWrite.size());
+            const auto verification = VerifyWriteReadback(plan.bytesToWrite, outcomeBytes(readback));
+            const bool contextValid = sameMapping(request, target, pagePhysical, error);
+            logReceipt(ledger, written);
+            logVerification(ledger, verification);
+            if (readback.scratchDirty)
+                logLine(ledger, QStringLiteral("DDMA scratch sectors could not be restored; further DDMA operations are unsafe."));
+            if (!completeWrite) logLine(ledger, QStringLiteral("   写入失败：%1").arg(writeFailure));
+            {
+                const std::lock_guard<std::mutex> lock(ledger->mutex);
+                for (auto& saved : ledger->records)
+                    if (saved.recordId == record.recordId)
+                        saved.verified = completeWrite && verification.matched && contextValid && !written.scratchDirty && !readback.scratchDirty;
+            }
+            if (written.scratchDirty || readback.scratchDirty)
+            {
+                setStatus(ledger, QStringLiteral("DDMA scratch sectors could not be restored; further DDMA operations are unsafe."), DmaOperationTone::Error);
+            }
+            else if (!contextValid)
+            {
+                logLine(ledger, error);
+                setStatus(ledger, error, DmaOperationTone::Error);
+            }
+            else if (!completeWrite)
+                setStatus(ledger, QStringLiteral("写入失败：%1").arg(writeFailure), DmaOperationTone::Error);
+            else if (verification.matched)
+            {
+                setStatus(ledger, QStringLiteral("%1 完成并通过读回校验。注意：DMA 没有触发点，载荷要等目标自己执行到；真页已被修改，记得用“还原上一次写入”。")
+                    .arg(description), written.scratchDirty ? DmaOperationTone::Error : DmaOperationTone::Success);
+            }
+            else
+            {
+                const QString detail = verificationDetail(verification);
+                setStatus(ledger, QStringLiteral("%1 的写入命令被接受，但读回校验失败（%2）。目标页当前状态不确定，备份已记录，建议立刻还原。")
+                    .arg(description).arg(detail), DmaOperationTone::Error);
+            }
+        }
+
+        void runRestore(const OperationRequest& request, const std::shared_ptr<DmaOperationLedger>& ledger)
+        {
+            const auto& record = request.restoreRecord;
+            TargetLease target;
+            QString error;
+            const auto pagePhysical = record.physicalAddress - record.offsetInPage;
+            if (!target.open(request))
+            {
+                setStatus(ledger, identityFailure(), DmaOperationTone::Error);
+                return;
+            }
+            if (record.session.session.diskIndex != request.session.session.diskIndex
+                || record.session.session.deviceName != request.session.session.deviceName)
+            {
+                setStatus(ledger, QStringLiteral("DDMA session changed; read a new snapshot before retrying."), DmaOperationTone::Warning);
+                return;
+            }
+            if (!sameMapping(request, target, pagePhysical, error))
+            {
+                setStatus(ledger, error, DmaOperationTone::Error);
+                return;
+            }
+            const auto current = ksword::memory_backend::readPhysical(
+                ksword::memory_backend::MemoryAccessBackend::Ddma, request.session.session,
+                record.physicalAddress, static_cast<std::uint64_t>(record.originalBytes.size()));
+            const auto bytes = outcomeBytes(current);
+            bool expected = bytes.size() == record.originalBytes.size();
+            for (std::size_t i = 0; expected && i < bytes.size(); ++i)
+                expected = bytes[i] == record.originalBytes[i] || bytes[i] == record.writtenBytes[i];
+            if (current.scratchDirty)
+            {
+                setStatus(ledger, QStringLiteral("DDMA scratch sectors could not be restored; further DDMA operations are unsafe."), DmaOperationTone::Error);
+                return;
+            }
+            if (!current.ok || !expected)
+            {
+                setStatus(ledger, QStringLiteral("Target bytes changed or could not be read completely; no write was issued. Backups are retained."), DmaOperationTone::Warning);
+                return;
+            }
+            if (!sameMapping(request, target, pagePhysical, error))
+            {
+                setStatus(ledger, error, DmaOperationTone::Error);
+                return;
+            }
+            logLine(ledger, QStringLiteral("── 还原 %1").arg(record.description));
+            const auto written = writeOnce(request, record.physicalAddress, record.originalBytes);
+            const bool completeWrite = written.ok && !written.partial
+                && written.bytesDone == static_cast<std::uint64_t>(record.originalBytes.size());
+            const QString writeFailure = written.failureText.isEmpty()
+                ? QStringLiteral("DDMA transaction returned incomplete data.") : written.failureText;
+            const auto readback = finalReadback(request, record.physicalAddress, record.originalBytes.size());
+            const auto verification = VerifyWriteReadback(record.originalBytes, outcomeBytes(readback));
+            const bool contextValid = sameMapping(request, target, pagePhysical, error);
+            logReceipt(ledger, written);
+            logVerification(ledger, verification);
+            if (readback.scratchDirty)
+                logLine(ledger, QStringLiteral("DDMA scratch sectors could not be restored; further DDMA operations are unsafe."));
+            if (written.scratchDirty || readback.scratchDirty)
+            {
+                setStatus(ledger, QStringLiteral("DDMA scratch sectors could not be restored; further DDMA operations are unsafe."), DmaOperationTone::Error);
+                return;
+            }
+            if (!contextValid)
+            {
+                logLine(ledger, error);
+                setStatus(ledger, error, DmaOperationTone::Error);
+                return;
+            }
+            if (!completeWrite)
+            {
+                logLine(ledger, QStringLiteral("   还原失败：%1").arg(writeFailure));
+                setStatus(ledger, QStringLiteral("还原失败：%1。备份仍然保留在日志里。")
+                    .arg(writeFailure), DmaOperationTone::Error);
+                return;
+            }
+            if (!verification.matched)
+            {
+                logLine(ledger, QStringLiteral("   还原后的读回校验失败，目标页仍处于未知状态。"));
+                setStatus(ledger, QStringLiteral("还原命令被接受，但读回校验失败。目标页仍处于未知状态，备份保留在日志里。"), DmaOperationTone::Error);
+                return;
+            }
+            {
+                const std::lock_guard<std::mutex> lock(ledger->mutex);
+                // Remove only the exact authorized top record.
+                if (!ledger->records.empty() && ledger->records.back().recordId == record.recordId)
+                    ledger->records.pop_back();
+            }
+            logLine(ledger, QStringLiteral("   还原完成并通过读回校验。"));
+            setStatus(ledger, QStringLiteral("已还原并通过读回校验。"),
+                written.scratchDirty ? DmaOperationTone::Error : DmaOperationTone::Success);
+        }
+
+        bool queueOperation(OperationRequest request, const std::shared_ptr<DmaOperationLedger>& ledger)
+        {
+            auto promise = std::make_shared<QPromise<void>>();
+            promise->start();
+            {
+                const std::lock_guard<std::mutex> lock(ledger->mutex);
+                if (ledger->pending) return false;
+                if (request.restore)
+                {
+                    if (ledger->records.empty()) return false;
+                    request.restoreRecord = ledger->records.back();
+                    request.processId = request.restoreRecord.processId;
+                    request.creationTime100ns = request.restoreRecord.creationTime100ns;
+                    request.virtualAddress = request.restoreRecord.virtualAddress;
+                }
+                ledger->pending = true;
+                ++ledger->sequence;
+                ledger->future = promise->future();
+                ledger->status = QStringLiteral("DDMA operation is running; accepted transactions finish and retain recovery records after this window closes.");
+                ledger->tone = DmaOperationTone::Normal;
+            }
+            bool accepted = false;
+            try
+            {
+                accepted = ksword::memory_backend::submitDdmaTransaction(
+                [request = std::move(request), ledger, promise]() {
+                    struct Completion
+                    {
+                        std::shared_ptr<DmaOperationLedger> ledger;
+                        std::shared_ptr<QPromise<void>> promise;
+                        ~Completion()
+                        {
+                            { const std::lock_guard<std::mutex> lock(ledger->mutex); ledger->pending = false; }
+                            promise->finish();
+                        }
+                    } completion{ledger, promise};
+                    try
+                    {
+                        if (request.restore) runRestore(request, ledger);
+                        else runWrite(request, ledger);
+                    }
+                    catch (...)
+                    {
+                        setStatus(ledger, QStringLiteral("DDMA transaction failed unexpectedly."), DmaOperationTone::Error);
+                    }
+                    QString finalStatus;
+                    { const std::lock_guard<std::mutex> lock(ledger->mutex); finalStatus = ledger->status; }
+                    logLine(ledger, finalStatus);
+                });
+            }
+            catch (...)
+            {
+                setStatus(ledger, QStringLiteral("DDMA transaction failed unexpectedly."), DmaOperationTone::Error);
+                { const std::lock_guard<std::mutex> lock(ledger->mutex); ledger->pending = false; }
+                promise->finish();
+                return false;
+            }
+            if (!accepted)
+            {
+                setStatus(ledger, QStringLiteral("DDMA transaction queue is full; wait for the current operation and retry."), DmaOperationTone::Warning);
+                {
+                    const std::lock_guard<std::mutex> lock(ledger->mutex);
+                    ledger->pending = false;
+                }
+                promise->finish();
+            }
+            return accepted;
         }
     }
 
@@ -209,430 +860,138 @@ namespace ksword::memory_dock
             [this](const QString&) { updateActionState(); });
     }
 
-    void DmaProcessOpPage::setAttachedProcess(
-        const std::uint32_t processId, const QString& processName)
+    void DmaProcessOpPage::setAttachedProcess(const std::uint32_t processId,
+        const QString& processName, const std::uint64_t expectedCreationTime100ns)
     {
+        ++m_targetGeneration;
         m_attachedPid = processId;
         m_attachedProcessName = processName;
-        m_targetLabel->setText(processId == 0U
-            ? QStringLiteral("未附加进程。")
+        m_expectedCreationTime100ns = expectedCreationTime100ns;
+        m_ledger = processId == 0 ? nullptr : ledgerFor(processId, expectedCreationTime100ns);
+        m_watchedOperation = 0;
+        m_projectedLogLines = 0;
+        m_logText->clear();
+        m_targetLabel->setText(processId == 0U ? QStringLiteral("未附加进程。")
             : QStringLiteral("目标：%1 [PID:%2]").arg(processName).arg(processId));
-        updateActionState();
+        synchronizeLedger();
+        followPendingOperation();
     }
 
     void DmaProcessOpPage::refreshChannelAvailability()
     {
         QString reason;
-        const bool usable = ksword::memory_backend::isDdmaUsable(
-            ksword::memory_backend::currentDdmaSession(), &reason);
-        if (usable)
-        {
-            m_channelHintLabel->setText(QStringLiteral("DDMA 通道就绪。"));
-            m_channelHintLabel->setStyleSheet(
-                QStringLiteral("color:%1;").arg(KswordTheme::SuccessHex()));
-        }
-        else
-        {
-            m_channelHintLabel->setText(
-                QStringLiteral("DDMA 暂不可用：%1。本页的每一步都要经这条通道。").arg(reason));
-            m_channelHintLabel->setStyleSheet(
-                QStringLiteral("color:%1;").arg(KswordTheme::WarningHex()));
-        }
-        updateActionState();
+        const auto session = ksword::memory_backend::captureDdmaSession();
+        const bool usable = ksword::memory_backend::isDdmaUsable(session.session, &reason);
+        m_channelHintLabel->setText(usable ? QStringLiteral("DDMA 通道就绪。")
+            : QStringLiteral("DDMA 暂不可用：%1。本页的每一步都要经这条通道。").arg(reason));
+        m_channelHintLabel->setStyleSheet(QStringLiteral("color:%1;")
+            .arg(usable ? KswordTheme::SuccessHex() : KswordTheme::WarningHex()));
+        synchronizeLedger();
+        followPendingOperation();
     }
 
     void DmaProcessOpPage::updateActionState()
     {
         QString reason;
-        const bool channelReady = ksword::memory_backend::isDdmaUsable(
-            ksword::memory_backend::currentDdmaSession(), &reason);
-        const bool ready = channelReady
-            && m_attachedPid != 0U
+        const auto session = ksword::memory_backend::captureDdmaSession();
+        const bool channelReady = ksword::memory_backend::isDdmaUsable(session.session, &reason);
+        const auto projection = projectLedger(m_ledger);
+        const bool ready = channelReady && !projection.pending && m_attachedPid != 0
             && !m_addressEdit->text().trimmed().isEmpty()
-            && m_forceCheck->isChecked()
-            && m_acknowledgeCheck->isChecked();
+            && m_forceCheck->isChecked() && m_acknowledgeCheck->isChecked();
         m_injectButton->setEnabled(ready);
         m_ud2Button->setEnabled(ready);
-        m_restoreButton->setEnabled(channelReady && !m_records.empty());
+        m_restoreButton->setEnabled(channelReady && !projection.pending && projection.hasRecords);
+        m_addressEdit->setEnabled(!projection.pending);
+        m_payloadEdit->setEnabled(!projection.pending);
+        m_forceCheck->setEnabled(!projection.pending);
+        m_acknowledgeCheck->setEnabled(!projection.pending);
+        m_unknownSharingCheck->setEnabled(!projection.pending);
     }
 
-    void DmaProcessOpPage::appendLog(const QString& line)
+    void DmaProcessOpPage::synchronizeLedger()
     {
-        m_logText->appendPlainText(line);
+        const auto projection = projectLedger(m_ledger);
+        for (; m_projectedLogLines < projection.log.size(); ++m_projectedLogLines)
+            m_logText->appendPlainText(ks::i18n::sourceText(projection.log.at(m_projectedLogLines)));
+        m_statusLabel->setText(projection.status.isEmpty() ? QStringLiteral("尚未执行。")
+            : ks::i18n::sourceText(projection.status));
+        switch (projection.tone)
+        {
+        case DmaOperationTone::Success:
+            m_statusLabel->setStyleSheet(QStringLiteral("color:%1;").arg(KswordTheme::SuccessHex())); break;
+        case DmaOperationTone::Warning:
+            m_statusLabel->setStyleSheet(QStringLiteral("color:%1;").arg(KswordTheme::WarningHex())); break;
+        case DmaOperationTone::Error:
+            m_statusLabel->setStyleSheet(QStringLiteral("color:%1; font-weight:600;").arg(KswordTheme::ErrorHex())); break;
+        case DmaOperationTone::Normal: m_statusLabel->setStyleSheet(QString()); break;
+        }
+        updateActionState();
     }
 
-    bool DmaProcessOpPage::resolveTargetPage(
-        std::uint64_t& virtualAddressOut,
-        std::uint64_t& pagePhysicalOut,
-        std::vector<std::uint8_t>& pageBytesOut,
-        QString& errorOut)
+    void DmaProcessOpPage::followPendingOperation()
     {
-        const auto parsed = ksword::evidence::ParseNumericText(
-            m_addressEdit->text().trimmed().toStdString(),
-            ksword::evidence::NumericTextDefaultRadix::Hexadecimal);
-        if (!parsed.ok)
+        if (!m_ledger) return;
+        QFuture<void> future;
         {
-            errorOut = QStringLiteral("目标地址解析失败。无前缀按十六进制解释。");
-            return false;
+            const std::lock_guard<std::mutex> lock(m_ledger->mutex);
+            if (m_ledger->sequence == 0 || m_watchedOperation == m_ledger->sequence) return;
+            m_watchedOperation = m_ledger->sequence;
+            future = m_ledger->future;
         }
-        virtualAddressOut = parsed.value;
-
-        // 按页基址翻译并整页读：计划层要整页内容才能找空隙和备份，而翻译只能
-        // 按页做。这里用页基址而不是原地址，避免同一页被翻译两次。
-        const std::uint64_t pageBase = virtualAddressOut & ~(kPageBytes - 1ULL);
-        const ksword::ark::DriverClient client;
-        const ksword::ark::VirtualAddressTranslateResult translation =
-            client.translateVirtualAddress(m_attachedPid, pageBase, 0UL);
-        if (!translation.io.ok || !translation.resolved)
-        {
-            errorOut = translation.io.ok
-                ? QStringLiteral("该页翻译不出物理地址，可能未驻留。")
-                : QStringLiteral("地址翻译失败：%1")
-                      .arg(QString::fromStdString(translation.io.message));
-            return false;
-        }
-        pagePhysicalOut = translation.physicalAddress;
-
-        const ksword::memory_backend::AccessOutcome readOutcome =
-            ksword::memory_backend::readPhysical(
-                ksword::memory_backend::MemoryAccessBackend::Ddma,
-                ksword::memory_backend::currentDdmaSession(),
-                pagePhysicalOut,
-                kPageBytes);
-        if (!readOutcome.ok)
-        {
-            errorOut = QStringLiteral("读取目标页失败：%1").arg(readOutcome.failureText);
-            return false;
-        }
-        if (static_cast<std::uint64_t>(readOutcome.data.size()) != kPageBytes)
-        {
-            // 少读一截就没法备份完整的一页，而计划层要整页。这里拒绝而不是
-            // 拿短的去算——短的算出来的偏移会指向别处。
-            errorOut = QStringLiteral("只读到 %1 / %2 字节，无法据此计划写入。")
-                .arg(readOutcome.data.size()).arg(kPageBytes);
-            return false;
-        }
-        pageBytesOut.assign(
-            reinterpret_cast<const std::uint8_t*>(readOutcome.data.constData()),
-            reinterpret_cast<const std::uint8_t*>(readOutcome.data.constData())
-                + readOutcome.data.size());
-        return true;
-    }
-
-    Ksword::Evidence::DmaTargetSharing DmaProcessOpPage::evaluateSharing(
-        const std::uint64_t pageVirtualAddress,
-        const std::uint64_t pagePhysical,
-        QString& evidenceOut)
-    {
-        const ksword::ark::DriverClient client;
-        const ksword::ark::VirtualMemoryQueryResult self =
-            client.queryVirtualMemory(m_attachedPid, pageVirtualAddress,
-                KSWORD_ARK_MEMORY_QUERY_FLAG_INCLUDE_MAPPED_FILE_NAME);
-        if (!self.io.ok)
-        {
-            // 问不出区域类型时不能默认私有。查询失败与"确认私有"是两件事。
-            evidenceOut = QStringLiteral("查询目标区域失败：%1")
-                .arg(QString::fromStdString(self.io.message));
-            return Ksword::Evidence::EvaluateTargetSharing(false, false, false);
-        }
-
-        const bool isPrivate = (self.type == MEM_PRIVATE);
-        if (isPrivate)
-        {
-            evidenceOut = QStringLiteral("区域类型 MEM_PRIVATE，不由节对象支撑。");
-            return Ksword::Evidence::EvaluateTargetSharing(true, false, false);
-        }
-
-        const QString backingFile = QString::fromStdWString(self.mappedFileName);
-        // 跨进程比物理地址：在另一个映射同一文件的进程里翻译同一个虚拟地址，
-        // 拿到的物理地址相同就是同一张页。这是唯一一个真读数——区域类型只是推测，
-        // 一页 MEM_IMAGE 可能早就因写时复制变成了私有副本。
-        const ksword::ark::ProcessEnumResult processes = client.enumerateProcesses(0UL);
-        int examined = 0;
-        if (processes.io.ok)
-        {
-            for (const auto& entry : processes.entries)
-            {
-                const std::uint32_t otherPid = static_cast<std::uint32_t>(entry.processId);
-                if (otherPid == m_attachedPid || otherPid == 0U || otherPid == 4U)
-                {
-                    continue;
-                }
-                if (examined >= 64)
-                {
-                    break;
-                }
-                const ksword::ark::VirtualMemoryQueryResult other =
-                    client.queryVirtualMemory(otherPid, pageVirtualAddress,
-                        KSWORD_ARK_MEMORY_QUERY_FLAG_INCLUDE_MAPPED_FILE_NAME);
-                if (!other.io.ok || other.state != MEM_COMMIT)
-                {
-                    continue;
-                }
-                if (QString::fromStdWString(other.mappedFileName) != backingFile)
-                {
-                    continue;
-                }
-                ++examined;
-                const ksword::ark::VirtualAddressTranslateResult otherPa =
-                    client.translateVirtualAddress(otherPid, pageVirtualAddress, 0UL);
-                if (!otherPa.io.ok || !otherPa.resolved)
-                {
-                    continue;
-                }
-                if (otherPa.physicalAddress == pagePhysical)
-                {
-                    evidenceOut = QStringLiteral(
-                        "PID %1 的同一虚拟地址落在同一张物理页 %2 上，支撑文件 %3。")
-                        .arg(otherPid).arg(hex64(pagePhysical)).arg(backingFile);
-                    return Ksword::Evidence::EvaluateTargetSharing(false, true, true);
-                }
-                // 物理地址不同说明写时复制已经发生，这个进程拿的是自己的副本。
-                evidenceOut = QStringLiteral(
-                    "PID %1 映射同一文件但物理页不同（%2 vs %3），写时复制已经发生。")
-                    .arg(otherPid).arg(hex64(otherPa.physicalAddress)).arg(hex64(pagePhysical));
-                return Ksword::Evidence::EvaluateTargetSharing(false, true, false);
-            }
-        }
-
-        evidenceOut = QStringLiteral(
-            "区域类型不是 MEM_PRIVATE（支撑文件 %1），但在检查过的进程里没找到第二个映射它的，无法比对物理页。")
-            .arg(backingFile.isEmpty() ? QStringLiteral("未知") : backingFile);
-        return Ksword::Evidence::EvaluateTargetSharing(false, false, false);
+        const auto ledger = m_ledger;
+        const auto generation = m_targetGeneration;
+        auto* watcher = new QFutureWatcher<void>(this);
+        connect(watcher, &QFutureWatcher<void>::finished, this, [this, watcher, ledger, generation]() {
+            watcher->deleteLater();
+            if (generation == m_targetGeneration && ledger == m_ledger) synchronizeLedger();
+        });
+        watcher->setFuture(future);
     }
 
     void DmaProcessOpPage::performWrite(const bool injectPayload)
     {
-        std::uint64_t virtualAddress = 0ULL;
-        std::uint64_t pagePhysical = 0ULL;
-        std::vector<std::uint8_t> pageBytes;
+        if (!m_ledger || projectLedger(m_ledger).pending) return;
+        OperationRequest request;
+        request.processId = m_attachedPid;
+        request.creationTime100ns = m_expectedCreationTime100ns;
+        request.session = ksword::memory_backend::captureDdmaSession();
+        request.injectPayload = injectPayload;
+        request.forceApproved = m_forceCheck->isChecked();
+        request.unknownSharingApproved = m_unknownSharingCheck->isChecked();
+        if (!request.forceApproved || !m_acknowledgeCheck->isChecked() || request.processId == 0) return;
+        if (request.creationTime100ns == 0)
+        {
+            setStatus(m_ledger, identityFailure(), DmaOperationTone::Warning);
+            synchronizeLedger();
+            return;
+        }
+        const auto parsed = ksword::evidence::ParseNumericText(m_addressEdit->text().trimmed().toStdString(),
+            ksword::evidence::NumericTextDefaultRadix::Hexadecimal);
         QString error;
-        if (!resolveTargetPage(virtualAddress, pagePhysical, pageBytes, error))
+        if (!parsed.ok) error = QStringLiteral("目标地址解析失败。无前缀按十六进制解释。");
+        else if (injectPayload) parseHexPayload(m_payloadEdit->text(), request.payload, error);
+        if (!error.isEmpty())
         {
-            m_statusLabel->setText(error);
-            m_statusLabel->setStyleSheet(
-                QStringLiteral("color:%1;").arg(KswordTheme::WarningHex()));
+            m_statusLabel->setText(ks::i18n::sourceText(error));
+            m_statusLabel->setStyleSheet(QStringLiteral("color:%1;").arg(KswordTheme::WarningHex()));
             return;
         }
-
-        // 共享性检查排在计划之前：一张共享页上算出来的计划再正确也不该执行。
-        QString sharingEvidence;
-        const DmaTargetSharing sharing = evaluateSharing(
-            virtualAddress & ~(kPageBytes - 1ULL), pagePhysical, sharingEvidence);
-        appendLog(QStringLiteral("── 共享性检查：%1")
-            .arg(QString::fromUtf8(DmaTargetSharingName(sharing))));
-        appendLog(QStringLiteral("   依据：%1").arg(sharingEvidence));
-
-        if (sharing == DmaTargetSharing::SharedConfirmed)
-        {
-            // **没有开关能解锁这一条。** DMA 写的是物理页，而写时复制靠缺页异常
-            // 实现、DMA 不触发缺页；往一张已经确认被共享的映像页写字节，会打到
-            // 每一个映射它的进程。往 ntdll 的代码页写一条 UD2 等于让全机器的进程
-            // 在跑到那里时一起崩。这不是一个用户勾一下就该承担的后果。
-            m_statusLabel->setText(QStringLiteral(
-                "已拒绝：目标页确认被其它进程共享。%1 DMA 不触发写时复制，写入会波及每一个映射这张页的进程。请改用 R-1 注入（它把载荷放在影子页里，作用域限定在单个进程），或选一张进程私有的页。")
-                .arg(sharingEvidence));
-            m_statusLabel->setStyleSheet(
-                QStringLiteral("color:%1; font-weight:600;").arg(KswordTheme::ErrorHex()));
-            return;
-        }
-        if (sharing == DmaTargetSharing::SharingUnknown
-            && !m_unknownSharingCheck->isChecked())
-        {
-            m_statusLabel->setText(QStringLiteral(
-                "已拒绝：无法确认目标页是否被其它进程共享。%1 没找到第二个映射它的进程不等于没有。要继续，请勾选下面那一项并自行承担波及其它进程的可能。")
-                .arg(sharingEvidence));
-            m_statusLabel->setStyleSheet(
-                QStringLiteral("color:%1; font-weight:600;").arg(KswordTheme::WarningHex()));
-            return;
-        }
-
-        DmaWritePlan plan;
-        QString description;
-        if (injectPayload)
-        {
-            std::vector<std::uint8_t> payload;
-            QString payloadError;
-            if (!parseHexPayload(m_payloadEdit->text(), payload, payloadError))
-            {
-                m_statusLabel->setText(payloadError);
-                m_statusLabel->setStyleSheet(
-                    QStringLiteral("color:%1;").arg(KswordTheme::WarningHex()));
-                return;
-            }
-            plan = PlanPayloadIntoCave(pageBytes, payload, kDmaOpMinCaveBytes);
-            description = QStringLiteral("注入载荷 %1 字节").arg(payload.size());
-        }
-        else
-        {
-            const std::size_t offsetInPage =
-                static_cast<std::size_t>(virtualAddress & (kPageBytes - 1ULL));
-            plan = PlanBytesAtOffset(pageBytes, offsetInPage, UndefinedInstructionBytes());
-            description = QStringLiteral("写 UD2");
-        }
-
-        if (plan.status != DmaOpPlanStatus::Ok)
-        {
-            m_statusLabel->setText(QStringLiteral("计划被拒绝：%1")
-                .arg(QString::fromUtf8(DmaOpPlanStatusName(plan.status))));
-            m_statusLabel->setStyleSheet(
-                QStringLiteral("color:%1;").arg(KswordTheme::WarningHex()));
-            return;
-        }
-
-        const std::uint64_t writePhysicalAddress =
-            pagePhysical + static_cast<std::uint64_t>(plan.offsetInPage);
-        appendLog(QStringLiteral("── %1").arg(description));
-        appendLog(QStringLiteral("   目标 VA %1，页物理 %2，页内偏移 0x%3")
-            .arg(hex64(virtualAddress)).arg(hex64(pagePhysical))
-            .arg(QString::number(plan.offsetInPage, 16).toUpper()));
-        appendLog(QStringLiteral("   备份（原始字节）：%1").arg(hexDump(plan.originalBytes, 32U)));
-        appendLog(QStringLiteral("   将写入：%1").arg(hexDump(plan.bytesToWrite, 32U)));
-
-        const QByteArray payloadBytes(
-            reinterpret_cast<const char*>(plan.bytesToWrite.data()),
-            static_cast<qsizetype>(plan.bytesToWrite.size()));
-        const ksword::memory_backend::AccessOutcome writeOutcome =
-            ksword::memory_backend::writePhysical(
-                ksword::memory_backend::MemoryAccessBackend::Ddma,
-                ksword::memory_backend::currentDdmaSession(),
-                writePhysicalAddress,
-                payloadBytes,
-                m_forceCheck->isChecked());
-        if (!writeOutcome.ok)
-        {
-            appendLog(QStringLiteral("   写入失败：%1").arg(writeOutcome.failureText));
-            m_statusLabel->setText(QStringLiteral("写入失败：%1").arg(writeOutcome.failureText));
-            m_statusLabel->setStyleSheet(
-                QStringLiteral("color:%1;").arg(KswordTheme::ErrorHex()));
-            return;
-        }
-        if (writeOutcome.scratchDirty)
-        {
-            appendLog(QStringLiteral(
-                "   严重告警：暂存扇区未能还原，磁盘上留下了脏扇区。"));
-        }
-
-        // 读回校验。这一步不是可选的诊断：DDMA 写入没有任何自证，一次静默没落地
-        // 的写入与一次成功的写入在界面上完全同形。
-        const ksword::memory_backend::AccessOutcome verifyOutcome =
-            ksword::memory_backend::readPhysical(
-                ksword::memory_backend::MemoryAccessBackend::Ddma,
-                ksword::memory_backend::currentDdmaSession(),
-                writePhysicalAddress,
-                static_cast<std::uint64_t>(plan.bytesToWrite.size()));
-        std::vector<std::uint8_t> readback;
-        if (verifyOutcome.ok)
-        {
-            readback.assign(
-                reinterpret_cast<const std::uint8_t*>(verifyOutcome.data.constData()),
-                reinterpret_cast<const std::uint8_t*>(verifyOutcome.data.constData())
-                    + verifyOutcome.data.size());
-        }
-        const DmaWriteVerification verification =
-            VerifyWriteReadback(plan.bytesToWrite, readback);
-
-        DmaOpRecord record;
-        record.virtualAddress = virtualAddress;
-        record.physicalAddress = writePhysicalAddress;
-        record.offsetInPage = plan.offsetInPage;
-        record.writtenBytes = plan.bytesToWrite;
-        record.originalBytes = plan.originalBytes;
-        record.description = description;
-        record.verified = verification.matched;
-        m_records.push_back(record);
-
-        if (verification.matched)
-        {
-            appendLog(QStringLiteral("   读回校验通过（%1 字节一致）。")
-                .arg(verification.comparedBytes));
-            m_statusLabel->setText(QStringLiteral(
-                "%1 完成并通过读回校验。注意：DMA 没有触发点，载荷要等目标自己执行到；真页已被修改，记得用“还原上一次写入”。")
-                .arg(description));
-            m_statusLabel->setStyleSheet(
-                QStringLiteral("color:%1;").arg(KswordTheme::SuccessHex()));
-        }
-        else
-        {
-            const QString detail = verification.readbackTooShort
-                ? QStringLiteral("读回只有 %1 字节").arg(verification.comparedBytes)
-                : QStringLiteral("第 %1 字节期望 %2、实际 %3")
-                      .arg(verification.firstMismatchOffset)
-                      .arg(QStringLiteral("%1").arg(verification.expectedByte, 2, 16, QChar('0')).toUpper())
-                      .arg(QStringLiteral("%1").arg(verification.actualByte, 2, 16, QChar('0')).toUpper());
-            appendLog(QStringLiteral("   读回校验失败：%1").arg(detail));
-            // 校验失败时**不能**说"写入成功"。驱动接受了命令，但物理页现在是什么
-            // 状态并不确定——可能没落地，也可能落了一半。备份仍然留着。
-            m_statusLabel->setText(QStringLiteral(
-                "%1 的写入命令被接受，但读回校验失败（%2）。目标页当前状态不确定，备份已记录，建议立刻还原。")
-                .arg(description).arg(detail));
-            m_statusLabel->setStyleSheet(
-                QStringLiteral("color:%1; font-weight:600;").arg(KswordTheme::ErrorHex()));
-        }
-        updateActionState();
+        request.virtualAddress = parsed.value;
+        queueOperation(std::move(request), m_ledger);
+        synchronizeLedger();
+        followPendingOperation();
     }
 
     void DmaProcessOpPage::restoreLastWrite()
     {
-        if (m_records.empty())
-        {
-            return;
-        }
-        const DmaOpRecord record = m_records.back();
-        const QByteArray original(
-            reinterpret_cast<const char*>(record.originalBytes.data()),
-            static_cast<qsizetype>(record.originalBytes.size()));
-
-        appendLog(QStringLiteral("── 还原 %1").arg(record.description));
-        const ksword::memory_backend::AccessOutcome writeOutcome =
-            ksword::memory_backend::writePhysical(
-                ksword::memory_backend::MemoryAccessBackend::Ddma,
-                ksword::memory_backend::currentDdmaSession(),
-                record.physicalAddress,
-                original,
-                true);
-        if (!writeOutcome.ok)
-        {
-            appendLog(QStringLiteral("   还原失败：%1").arg(writeOutcome.failureText));
-            m_statusLabel->setText(QStringLiteral("还原失败：%1。备份仍然保留在日志里。")
-                .arg(writeOutcome.failureText));
-            m_statusLabel->setStyleSheet(
-                QStringLiteral("color:%1; font-weight:600;").arg(KswordTheme::ErrorHex()));
-            return;
-        }
-
-        const ksword::memory_backend::AccessOutcome verifyOutcome =
-            ksword::memory_backend::readPhysical(
-                ksword::memory_backend::MemoryAccessBackend::Ddma,
-                ksword::memory_backend::currentDdmaSession(),
-                record.physicalAddress,
-                static_cast<std::uint64_t>(record.originalBytes.size()));
-        std::vector<std::uint8_t> readback;
-        if (verifyOutcome.ok)
-        {
-            readback.assign(
-                reinterpret_cast<const std::uint8_t*>(verifyOutcome.data.constData()),
-                reinterpret_cast<const std::uint8_t*>(verifyOutcome.data.constData())
-                    + verifyOutcome.data.size());
-        }
-        const DmaWriteVerification verification =
-            VerifyWriteReadback(record.originalBytes, readback);
-        if (!verification.matched)
-        {
-            appendLog(QStringLiteral("   还原后的读回校验失败，目标页仍处于未知状态。"));
-            m_statusLabel->setText(QStringLiteral(
-                "还原命令被接受，但读回校验失败。目标页仍处于未知状态，备份保留在日志里。"));
-            m_statusLabel->setStyleSheet(
-                QStringLiteral("color:%1; font-weight:600;").arg(KswordTheme::ErrorHex()));
-            return;
-        }
-
-        // 只有校验通过才把记录摘掉：校验没过就摘，等于把还原的唯一依据丢了。
-        m_records.pop_back();
-        appendLog(QStringLiteral("   还原完成并通过读回校验。"));
-        m_statusLabel->setText(QStringLiteral("已还原并通过读回校验。"));
-        m_statusLabel->setStyleSheet(
-            QStringLiteral("color:%1;").arg(KswordTheme::SuccessHex()));
-        updateActionState();
+        if (!m_ledger || projectLedger(m_ledger).pending) return;
+        OperationRequest request;
+        request.session = ksword::memory_backend::captureDdmaSession();
+        request.restore = true;
+        request.forceApproved = true;
+        queueOperation(std::move(request), m_ledger);
+        synchronizeLedger();
+        followPendingOperation();
     }
 }
