@@ -119,7 +119,7 @@ namespace ks::registry::offline
         Snapshot snapshot;
         CleanupReceipt cleanupReceipt;
     };
-    enum class Action { Open, Keys, Values, ReadValue, CreateValue, UpdateValue, DeleteValue, CreateKey, DeleteKey, SaveCopy };
+    enum class Action { Open, Keys, Values, ReadValue, ProbeWrite, CreateValue, UpdateValue, DeleteValue, CreateKey, DeleteKey, SaveCopy };
     enum class Outcome { Ok, NativeError, InvalidSource, CopyFailed, LoadFailed, InvalidTarget, FlushFailed,
         CloseFailed, SaveFailed, Conflict, AlreadyExists, NotEmpty, InvalidName, Stale };
     struct Request
@@ -218,7 +218,8 @@ namespace ks::registry::offline
         if (!state.hive) return fail(Outcome::NativeError, ERROR_INVALID_HANDLE);
         Key key;
         REGSAM access = KEY_READ;
-        if (request.action == Action::CreateValue || request.action == Action::UpdateValue || request.action == Action::DeleteValue) access |= KEY_SET_VALUE;
+        if (request.action == Action::CreateValue || request.action == Action::UpdateValue || request.action == Action::DeleteValue
+            || request.action == Action::ReadValue || request.action == Action::ProbeWrite) access |= KEY_SET_VALUE;
         if (request.action == Action::CreateKey) access |= KEY_WRITE;
         if (request.action == Action::DeleteKey) access |= DELETE;
         result.status = openKey(state.hive, request.path, access, &key);
@@ -278,6 +279,7 @@ namespace ks::registry::offline
             result.more = true;
             return finish();
         }
+        if (request.action == Action::ProbeWrite) return finish();
         if (request.action == Action::ReadValue)
         {
             result.value.name = request.name;
@@ -346,9 +348,10 @@ namespace ks::registry::offline
     inline bool cleanup(State& state, const bool discard)
     {
         std::lock_guard<std::mutex> serialized(state.io);
+        { std::lock_guard<std::mutex> lock(state.receiptMutex); if (state.cleanupReceipt.complete) return true; }
         CleanupReceipt receipt;
         const auto publish = [&]() { std::lock_guard<std::mutex> lock(state.receiptMutex); state.cleanupReceipt = receipt; };
-        receipt.status = state.hive && state.snapshot.dirty ? RegFlushKey(state.hive) : ERROR_SUCCESS;
+        receipt.status = state.hive && state.snapshot.dirty && !discard ? RegFlushKey(state.hive) : ERROR_SUCCESS;
         if (receipt.status != ERROR_SUCCESS) { publish(); return false; }
         receipt.status = state.hive ? RegCloseKey(state.hive) : ERROR_SUCCESS;
         if (receipt.status != ERROR_SUCCESS) { publish(); return false; }

@@ -8,6 +8,11 @@
   "text_direction": "ltr",
   "fallback": "zh-CN",
   "translations": {
+    "registry.offline.no_receipt": "A complete offline Hive result was not received; close the working copy and open it again.",
+    "registry.offline.processing": "Processing offline Hive…",
+    "registry.offline.closing": "Closing offline Hive; waiting for the current operation and resource cleanup.",
+    "registry.offline.cleanup_failed": "Offline Hive cleanup failed: %1. Close again or retry from the exit prompt.",
+    "registry.offline.recovery_copy": "The unsaved Hive working copy has been retained: %1",
     "registry.subkeys.delivery_retry": "Subkey results were not applied. Collapse and expand the key to retry.",
     "子键结果未应用；请折叠后重新展开以重试。": "Subkey results were not applied. Collapse and expand the key to retry.",
     "driver.piddb.delete.exception": "A complete PiDDB result could not be obtained: %1.",
@@ -7015,6 +7020,11 @@
     "notification.copy.log_template": "%1\n%2\n%3\nFile: %4\nFunction: %5\nGUID: %6"
   },
   "source_translations": {
+    "离线 Hive 未取得完整回执；请关闭工作副本后重新打开。": "A complete offline Hive result was not received; close the working copy and open it again.",
+    "正在处理离线 Hive…": "Processing offline Hive…",
+    "正在关闭离线 Hive；等待当前操作和资源清理完成。": "Closing offline Hive; waiting for the current operation and resource cleanup.",
+    "离线 Hive 清理失败：%1；再次关闭或在退出提示中重试。": "Offline Hive cleanup failed: %1. Close again or retry from the exit prompt.",
+    "未另存的 Hive 工作副本已保留：%1": "The unsaved Hive working copy has been retained: %1",
     "子键结果未应用；请折叠后重新展开以重试。": "Subkey results were not applied. Collapse and expand the key to retry.",
     "PiDDB 操作未能取得完整回执：%1": "A complete PiDDB result could not be obtained: %1.",
     "正在准备当前文本草稿，请稍候…": "Preparing the current text draft. Please wait…",

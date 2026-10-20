@@ -8,6 +8,11 @@
   "text_direction": "ltr",
   "fallback": "en-US",
   "translations": {
+    "registry.offline.no_receipt": "离线 Hive 未取得完整回执；请关闭工作副本后重新打开。",
+    "registry.offline.processing": "正在处理离线 Hive…",
+    "registry.offline.closing": "正在关闭离线 Hive；等待当前操作和资源清理完成。",
+    "registry.offline.cleanup_failed": "离线 Hive 清理失败：%1；再次关闭或在退出提示中重试。",
+    "registry.offline.recovery_copy": "未另存的 Hive 工作副本已保留：%1",
     "registry.subkeys.delivery_retry": "子键结果未应用；请折叠后重新展开以重试。",
     "子键结果未应用；请折叠后重新展开以重试。": "子键结果未应用；请折叠后重新展开以重试。",
     "driver.piddb.delete.exception": "PiDDB 操作未能取得完整回执：%1",
@@ -7015,6 +7020,11 @@
     "notification.copy.log_template": "%1\n%2\n%3\n文件：%4\n函数：%5\nGUID：%6"
   },
   "source_translations": {
+    "离线 Hive 未取得完整回执；请关闭工作副本后重新打开。": "离线 Hive 未取得完整回执；请关闭工作副本后重新打开。",
+    "正在处理离线 Hive…": "正在处理离线 Hive…",
+    "正在关闭离线 Hive；等待当前操作和资源清理完成。": "正在关闭离线 Hive；等待当前操作和资源清理完成。",
+    "离线 Hive 清理失败：%1；再次关闭或在退出提示中重试。": "离线 Hive 清理失败：%1；再次关闭或在退出提示中重试。",
+    "未另存的 Hive 工作副本已保留：%1": "未另存的 Hive 工作副本已保留：%1",
     "子键结果未应用；请折叠后重新展开以重试。": "子键结果未应用；请折叠后重新展开以重试。",
     "PiDDB 操作未能取得完整回执：%1": "PiDDB 操作未能取得完整回执：%1",
     "正在准备当前文本草稿，请稍候…": "正在准备当前文本草稿，请稍候…",
