@@ -47,6 +47,7 @@ public:
     void refreshNow();
 
 protected:
+    void changeEvent(QEvent* event) override;
     // 隐藏时不重建表格，重新显示前读取日志管理器保存的最新完整历史。
     void showEvent(QShowEvent* event) override;
 

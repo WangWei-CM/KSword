@@ -16,6 +16,7 @@
 #include <limits>
 #include <utility>
 
+#include <QEvent>
 #include <QAction>
 #include <QAbstractItemView>
 #include <QAbstractItemModel>
@@ -434,7 +435,26 @@ void LogDockWidget::initializeUi()
         },
         this,
         LogTableModel::FlagsResolver(),
-        logRowKey);
+        logRowKey,
+        [](const kEvent& before, const kEvent& after)
+        {
+            std::vector<LogTableModel::ColumnChange> changes;
+            const auto changed = [&](int column, QList<int> roles)
+                { changes.push_back({column, column, std::move(roles)}); };
+            if (before.timestamp != after.timestamp) changed(TimeColumn, {Qt::DisplayRole});
+            if (before.content != after.content) changed(ContentColumn, {Qt::DisplayRole, Qt::ToolTipRole});
+            if (before.fileLocation != after.fileLocation) changed(FileColumn, {Qt::DisplayRole, Qt::ToolTipRole});
+            if (before.functionName != after.functionName) changed(FunctionColumn, {Qt::DisplayRole, Qt::ToolTipRole});
+            if (before.level != after.level)
+            {
+                changed(LevelColumn, {Qt::DecorationRole, Qt::ToolTipRole});
+                const auto colorClass = [](kLogLevel level)
+                    { return level == kLogLevel::Fatal ? 2 : level == kLogLevel::Error ? 1 : 0; };
+                if (colorClass(before.level) != colorClass(after.level))
+                    changes.push_back({0, TotalColumns - 1, {Qt::BackgroundRole, Qt::ForegroundRole}});
+            }
+            return changes;
+        });
 
     m_logTable = new ks::ui::TableActionTableView(this);
     m_logTable->setModel(m_logModel);
@@ -1214,4 +1234,26 @@ void LogDockWidget::clearAllLogsWithDoubleConfirm()
     m_isTracking = false;
     m_trackingGuid = GUID{};
     refreshTableFromManager(true);
+}
+
+void LogDockWidget::changeEvent(QEvent* event)
+{
+    const QPointer<LogDockWidget> alive(this);
+    QWidget::changeEvent(event);
+    if (!alive || !event || !m_logModel) return;
+    const bool language = event->type() == QEvent::LanguageChange;
+    const bool color = event->type() == QEvent::PaletteChange || event->type() == QEvent::ApplicationPaletteChange;
+    const bool font = event->type() == QEvent::FontChange || event->type() == QEvent::ApplicationFontChange;
+    if (!language && !color && !font) return;
+    const QPointer<QAbstractItemModel> model(m_logModel);
+    const int columns = model->columnCount();
+    if (language && columns > 0) emit model->headerDataChanged(Qt::Horizontal, 0, columns - 1);
+    if (!alive || !model || m_logModel != model.data()) return;
+    QList<int> roles;
+    if (language) roles << Qt::DisplayRole << Qt::ToolTipRole;
+    if (color) roles << Qt::BackgroundRole << Qt::ForegroundRole << Qt::DecorationRole;
+    if (font) roles << Qt::FontRole << Qt::SizeHintRole;
+    const int rows = model->rowCount();
+    if (rows > 0 && columns > 0)
+        emit model->dataChanged(model->index(0, 0), model->index(rows - 1, columns - 1), roles);
 }
