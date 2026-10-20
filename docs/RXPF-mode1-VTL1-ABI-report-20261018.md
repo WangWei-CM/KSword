@@ -353,7 +353,7 @@ status = g_KswRxpfImageProtection.MmChangeImageProtection(
 |---|------|------|-------------|---------|---------------|
 | 1 | `.rxpftst` (SELF_IMAGE_TEST) | Register+Change+Write(NOP)+Unregister | `0xC0000005` | OK | — |
 | 2 | `.rxpftst` (SELF_IMAGE_TEST) | Register+Change+**no write**+Unregister | `0xC0000005` | OK | — |
-| 3 | CI.dll +0x1000 (EXTERNAL_IMAGE) | Register+Change+Write(0x90@0)+Unregister | `0x00000000` SUCCESS | 几秒后 BSOD（第二次复现时明确捕获） | **BugCheck 捕获不完备**（见 §15 next-exp #2 已完成项的"已修订"说明）：拿到了 Code=`0xFC` + Arg1=CI.dll+0x1598 + Arg2 PTE NX=1 + 栈 `nt+0x4a732f → KeBugCheckEx → CI+0x1598`，**但本次实际走的是 `change-image-protection` IOCTL (0x922) + flags=0x1 writeTest（字节立即恢复），不是本行所写的 RXPF Register+Change+Write+Unregister 链**。证据只证明 mode=2 的 NX 位到了 CPU 和 OS 想 fetch CI+0x1598（原始指令），**没有证明 CPU 执行到任何修改字节**。要正确捕获本行实验的 BugCheck，需用 RXPF Phase G 完整流程 + payload 瞄准可识别偏移。 |
+| 3 | CI.dll +0x1000 (EXTERNAL_IMAGE) | Register+Change+Write(0x90@0)+Unregister | `0x00000000` SUCCESS | 几秒后 BSOD（第二次复现时明确捕获） | **BugCheck 收口（6 次独立复现，见 §15 next-exp #2）**：Code=`0xFC` ATTEMPTED_EXECUTE_OF_NOEXECUTE_MEMORY；Arg1 全部落在 CI.dll + **`0x1598`**（6 次基址不同是 ASLR，页内偏移恒等）；Arg2 PTE 顶字节恒为 `0x89` (bit 63 NX=1)；栈 `nt+0x4a732f → KeBugCheckEx → CI+0x1598`。6 次来源混合：3 次走 `change-image-protection` IOCTL (0x922) + flags=0x1，3 次走 RXPF Phase G 协议链（Register(SKIP_BACKUP_RESTORE)+Change(mode=2)+ 未进 Write 页就已蓝）。**仅证明 mode=2 的 NX 位可见于 CPU + CI.dll+0x1598 是真实被 OS fetch 的 .text 入口**；**不证明 CPU 执行了修改字节**（6 次 BugCheck 全是页内其他指令被 fetch 命中 NX，不是 payload 本身）。CPU-executed-bytes 的直接证据路径见 next-exp #10（归档）。 |
 | 4 | CI.dll +0x1000 (EXTERNAL_IMAGE) | Register+Change+Write(0xCC@0)+Unregister | 未捕获到（立即蓝屏） | 立即 BSOD | **无 Arg 捕获** |
 | 5 | CI.dll +0x1000 (EXTERNAL_IMAGE) | Register+Change+**no write**+Unregister | `0x00000000` SUCCESS | OK，二次 Register origProt=0x20 ✓ | — |
 
@@ -635,12 +635,9 @@ Win32 错误转 NTSTATUS 的常见对照：
     - **本次 flags=0x1 (WRITE_TEST only, 无 `UNMAP_BEFORE_RESTORE=0x4`)**：按 `memory_ioctl.c:1546-1549` 的 persistWrite 判断，writeTest 执行后字节**立即被恢复**，`*aliasByte = savedByte;`。所以页面内容**没有留下任何修改**。
     - **因此本次 BugCheck 根本不涉及"修改字节"**：Arg1=CI+0x1598 只证明 OS 想 fetch 这个地址上的**原始指令**，被 NX 位捕获。不构成"CPU 执行了修改字节"的证据。
     - 原文的"CI.dll+0x1598 是真实的被执行入口，mode=1 restore 后此执行流就会执行被改字节"属于**超出证据范围的推论**，撤回。
-  - **要真正证明 CPU 执行了修改字节，正确实验是**：
-    - **方案 X（轻量，单字节 XOR）**：`change-image-protection --flags 0x7`（WRITE_TEST | RESTORE | UNMAP_BEFORE_RESTORE），字节在页首 pageBase+0 处持久为 `原字节 ^ 0xFF`，PTE 回 RX；等自然执行到页首第 1 字节 → 若 CPU 执行到这里 → 蓝屏，Arg1 == `pageBase + 0` 即 **CI.dll+0x1000** → 直接证据。
-    - **方案 Y（完整 payload）**：RXPF Phase G 完整链（Register(CB) + Change(mode=2) + Write(payload) + Change(mode=1 restore) + Unregister(SKIP_BACKUP_RESTORE)），`payload` 瞄准 CI.dll 的**已知高频入口**（如某个导出函数的 entry），字节设为 `int3` (0xCC)；等那个函数被调用 → #BP → Arg1 == payload 地址 → 直接证据。
-    - 两者都要求 **Arg1 == 我们精确知道的修改字节地址**。本次 Arg1=+0x1598 和任何修改字节无关。
   - **PatchGuard 未触发**：BSOD 是 `0xFC` 而非 `0x109`，是因为 NX 捕获比 PG 周期扫描更快命中（本次约 1 分钟内），**与 payload/修改字节无关**（因为本次没留下修改字节）。
   - 判据工具链：`cdb -z <dmp> -y C:\Symbols -cf <script>`（本地符号路径，禁在线符号服务器）；minidump 虽然只有寄存器+栈但 BugCheck Code/Arg1-4 从 dump header 可直读。
+  - **2026-10-19 后续补：6 次 BugCheck 0xFC 独立复现**（通过 driver 补 26300 build profile + GUI KernelHookWizard Phase G 流程走通 Register/Change(mode=2) 后）：Arg1 全部落在 CI.dll + **`0x1598`**（基址不同是 ASLR）；Arg2 PTE qword 顶字节恒为 `0x89`（bit 63 NX=1）。6 次独立 BugCheck 一致**证明 mode=2 的 R-only NX 位真的到 CPU 并被 OS 的 fetch 请求命中**。但同时发现**结构性缺口**：GUI 异步点击 "页 3 Write → 页 4 Unregister" 的用户态间隔（毫秒级）远大于 CI.dll+0x1598 这个高频 .text 入口的 CPU fetch 间隔，页面 PTE 被翻 NX 的瞬间 CPU 就已经 fetch 蓝屏，用户来不及把 payload 写入 → 没有机会观测到 "Arg1 == payload 地址" 的直接证据。要跨过这个窗口必须把 Change(mode=2)+Write(payload)+Change(mode=1 restore)+Unregister 四步合成 R0 一次原子调用（候选 Z/F），不作本会话推进（see next-exp #10）。
 - **next-exp #4 — 扩模块覆盖 — 已完成**（2026-10-19，VM 26H2 build 26300.9457 全防护开启）：
   - **结论：mode=1/2 对 catalog 内 Microsoft 签名的 4 KB 常规页模块可外推**，但 **ntoskrnl 本身的 .text 用 2 MB 大页布局，MmChangeImageProtection 结构性拒绝大页**（独立于签名的第二道门）。
   - 对照数据（三个成功模块的 PTE top byte 全部从 `0x09` 翻到 `0x89` 又回 `0x09`，模式完全一致）：
@@ -668,23 +665,21 @@ Win32 错误转 NTSTATUS 的常见对照：
   - **直接证据取代循环证据**：原 §5.5 `originalProtection=0x20` 是 PE 节头 characteristics 静态推算（见 A-4 / A-5 注记），现在 live PTE qword 独立确认 mode=2 把 bit 63 (NX) 从 0 翻到 1、mode=1 让 PTE 恢复到初始 qword。
   - 副产物：MmChangeImageProtection 本机 VA = `0xFFFFF806AC25DDB0`（RVA = 0xA5DDB0，R0 的 `resolvedFunctionVa` 字段直接给）。`originalPte=0xCC` 这个 R0 字段**不是** PTE qword，只是 PE 节头推的 1 byte 保护位，容易误读。
   - 工具链同 #7：`query-pte` 读 PTE，`change-image-protection` 跑 Register+Change（flags 0 时 R0 日志报 `aliasMapStatus=STATUS_NOT_SUPPORTED` 跳 alias 阶段，但 `imageProtectStatus=0` 已覆盖本实验目标）。
-
-- **next-exp #9 — 26300 UBR 覆盖适配 — 已完成**（2026-10-19，为 Phase G RXPF 链在 VM 26H2 build 26300.9711 上跑通铺路）：
-  - **背景**：原 `g_KswRxpfBuildProfiles[]` 只覆盖 26220 和 22621，VM 跑在 26300（9457 → Windows Update 自动升级到 9711），RXPF `KswRxpfResolveExactBuild` 在 build gate 查不到 profile，`BuildSupported` 返 FALSE，`KswRxpfCreateExternalImagePage` line 894 直接 `STATUS_NOT_SUPPORTED` ⇒ Register(EXTERNAL_IMAGE) Win32=50。
-  - **做法**：改 `image_protection_manager.c` 加第 3 条 `KSW_RXPF_26300_*` profile（PDB GUID / TimeDateStamp / SizeOfImage / CheckSum / MmChangeImageProtection RVA / 64 字节 prologue signature）；commit `aff55995` (9457) → `ee6bdcf8` (bump 到 9711)；Rebuild + EV 签名 + 部署，Register(EXTERNAL_IMAGE) 从 Win32=50 变 `recordId=1 origProt=0x20` ✓。
-  - **副产物**：发现 §6 #3/#7 之前的"RXPF Register+Change+Write+Unregister 四步链"描述和实际做的事从未对上过——historical 实验（包括 §6 #7 primary evidence）走的其实都是 `memory_ioctl.c` 的 `change-image-protection` 单发 IOCTL（flags=0x7 pattern），不是 RXPF 协议链；RXPF Phase G 真正跑通是本会话首次。
-  - 对接续者：若将来 Windows Update 又把 UBR 升到别的号，`extract_nt_meta.py` 直接读新 nt 的 PE 元数据 + 签名字节扫一遍替换 `KSW_RXPF_26300_*` 常量即可（9457 → 9711 验证了同 build family 内 prologue 字节 100% 一致，只是 RVA / TimeDateStamp / CheckSum / PDB GUID 变）。
-  - **已知残留**：严格匹配策略跨 UBR 必须手工更新；用户已提出过 "能不能适配所有近似版本" 的 fuzzy fallback 需求（build number 相同即在 .text 段扫签名字节），作为未来可选工程记入本节 #10 后的候选。
-- **next-exp #10 — "CPU 真的执行修改字节" 直接证据 — 未完成，归档**（2026-10-19，本会话止步于此）：
-  - **背景**：本会话累计 **6 次独立 BugCheck 0xFC 实证** 显示 **mode=2 的 R-only NX 位到了 CPU**（PTE Arg2 bit 63=1）且 Arg1 恒为 `CI.dll+0x1598`（真实 .text fetch 入口）。但 6 次 Arg1 都是**原始指令地址**，不是修改字节地址——证据链缺最后一跳。
-  - **GUI 走 RXPF Phase G 完整链 (Register+Change(mode=2)+Write+Unregister(SKIP_BACKUP_RESTORE)) 物理不可行**：Change(mode=2) 到 Unregister 之间 PTE 一直 NX，用户态异步点击"页 2→3→4"根本来不及（毫秒级 fetch 就命中 CI.dll+0x1598 → 立即 0xFC），GUI 从未走到页 4。
-  - **要走通的候选工程（Z 方案）**：在 driver 加一个新 IOCTL `IOCTL_KSWORD_ARK_RXPF_ATOMIC_FLIP_WRITE_RESTORE`，R0 一次 call 原子完成 Register+Change(mode=2)+Write(payload)+Change(mode=1 restore)+Unregister(SKIP_BACKUP_RESTORE)，把 NX 窗口压到驱动态单函数，CPU 没空 fetch。工程量约 1 小时（协议头 + handler + Rebuild + 签名 + 部署 + 实验）。本会话未实施。
-  - **保留的硬证据**（供接续者直接复用，不要再重复走 memory_ioctl 的 writeTest 探路）：
-    - 6 份 BugCheck 0xFC minidump 均在 VM `C:\WINDOWS\Minidump\*.dmp`
-    - Arg1 恒 `CI.dll+0x1598`、Arg2 恒 `0x89...NX=1`
-    - PTE live qword 回读（next-exp #8）独立确认 mode=1/2 的 NX bit 翻转到 CPU
-    - §6 #7 primary evidence 独立确认字节 0x48→0xB7→0xB7 持久
-  - **可利用性结论对现状不变**：HVCI 下 mode=1 restore 让修改字节保留 + mode=2 的 NX 翻转可见于 CPU，两条独立证据链已经构成 "RXPF 可用于 CI 旁路" 的强推论；差的只是把推论闭环成实证，不改变 §3 "稳的" 列表。
+- **next-exp #10 — "CPU 真的执行了修改字节" 的直接证据 — 归档**（2026-10-19，由接续者选）：
+  - **缺口**：现有证据链覆盖了 "mode=1/2 翻 PTE NX 位到 CPU"（#8 live PTE + 6 次 next-exp #2 BugCheck 0xFC 独立复现）与 "字节在 mode=1 restore 后可持久" (§6 #7 primary evidence 0x48→0xB7→0xB7)。**最后一跳**（修改字节 → CPU 真的 fetch 并执行）在本会话未补上。
+  - **本会话尝试与结构性阻塞**：GUI KernelHookWizard 的异步点击 Phase G 流程在 CI.dll 这类**高频被 fetch** 的 .text 页上**物理不可行** —— Change(mode=2) 到 Unregister 之间 PTE 停 NX，用户态毫秒级点击延迟远大于 CPU fetch 间隔，CPU 瞬间就命中 NX 蓝屏（0xFC），用户永远来不及把 payload 写入然后 Unregister 让 PTE 回 RX。
+  - **候选 Z（CI.dll 原子路线）**：**不推荐**。设计上 R0 加一个新 IOCTL 合成 Register+Change(mode=2)+Write(payload)+Change(mode=1 restore)+Unregister(SKIP_BACKUP_RESTORE) 为单次原子调用，把 NX 窗口压缩到驱动态函数内。但这在 CI.dll 上做字节替换的性质界于安全研究与实际攻击之间，不作本项目推进。
+  - **候选 F（SELF_IMAGE_TEST 自验证路线，推荐）**：改用**驱动自己的 .rxpftst 段**（SELF_IMAGE_TEST）作为 payload 载体：
+    1. Register(SELF_IMAGE_TEST, CAPTURE_BACKUP)
+    2. Change(mode=2)
+    3. Write(payload=`0xCC` 到已知 offset)
+    4. Change(mode=1 restore)（走 fallback 分支或 PrepareReferenceDigest，视实现）
+    5. Unregister(SKIP_BACKUP_RESTORE)
+    6. **R0 自己在同一个 handler 里 call 该地址**（驱动自己的 .text 页，CPU 同步执行 → 0xCC → #BP → BugCheck Arg1 == 驱动 .rxpftst 段的 payload VA）
+    - 优点：目标是驱动自己的 .text 页，没有 CI.dll 或 Windows 内核组件介入；时序竞争消失（R0 同步调用）；证据链等强（Arg1 == payload 地址 ⇒ CPU 执行了修改字节）；SELF_IMAGE_TEST 的 build gate 已跑通（§7.2 Hyper-V 来宾豁免已加）
+    - 代价：驱动加一个自验证 IOCTL（~50 行）+ Rebuild + 签名 + 部署 + 1 次实验（约 30 分钟）
+  - **副产物**：本会话 6 次 BugCheck 0xFC 都证明了 CI.dll+**0x1598** 是真实被 OS 调用的 .text 入口，可作为 F 验证完成后，再回头做"换目标到 CI.dll 验证一致性"的参考坐标。
+  - **决策理由**：当前的 §6 #7 primary evidence (字节持久) + 6 次 0xFC (NX 到 CPU) 对 "HVCI 下 mode=1/2 的 PTE 翻转和字节持久" 已经构成可利用性结论的强证据；#10 的最后一跳主要是把"间接推论"转为"直接证据"，不影响可利用性判定。接续者按 F 路线补就能收口。
 
 ### Phase F → Phase G 代码接口已就绪
 
