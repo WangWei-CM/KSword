@@ -17,6 +17,7 @@
 #include <QHash>
 #include <QIcon>
 #include <QPointer>
+#include <QPersistentModelIndex>
 #include <QSet>
 #include <QStringList>
 #include <QThreadPool>
@@ -339,6 +340,7 @@ private:
     void initializeVisibleDiagnosticPage();
     bool isPacketProjectionVisible() const;
     void synchronizeVisiblePacketProjection();
+    void synchronizeVisibleNidsProjection();
     void loadHostsFileEditor();
 
     // initializeTrafficMonitorTab：
@@ -1591,6 +1593,8 @@ private:
     std::uint64_t m_droppedPacketCount = 0; // 队列满时丢弃计数（用于状态提示）。
 
     static constexpr std::size_t kMaxNidsAlertCount = 2000; // NIDS 告警缓存上限。
+    bool m_nidsProjectionNeedsRebuild = false;
+    std::unordered_map<const ks::network::NidsAlert*, QPersistentModelIndex> m_nidsProjectedRows;
     std::deque<ks::network::NidsAlert> m_nidsAlertList; // NIDS 告警缓存，按时间顺序保存。
     std::uint64_t m_nidsAnalyzedPacketCount = 0; // 已送入 NIDS 的报文数量。
     std::uint64_t m_nidsTotalAlertCount = 0;     // 本轮累计告警数量。

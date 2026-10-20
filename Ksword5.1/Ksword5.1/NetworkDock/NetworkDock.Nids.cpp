@@ -338,10 +338,20 @@ void NetworkDock::initializeNidsTab()
             QIcon(QStringLiteral(":/Icon/process_details.svg")),
             QStringLiteral("转到进程详细信息"));
         openProcessDetailAction->setEnabled(hasProcessId);
+        std::optional<ks::network::NidsAlert> blockRuleEvidence;
+        if (hasRelatedPacket)
+        {
+            const auto evidence = std::find_if(m_nidsAlertList.cbegin(), m_nidsAlertList.cend(),
+                [relatedPacketSequenceId](const ks::network::NidsAlert& record)
+                {
+                    return record.sequenceId == relatedPacketSequenceId;
+                });
+            if (evidence != m_nidsAlertList.cend()) blockRuleEvidence = *evidence;
+        }
         QAction* addBlockRuleAction = menu.addAction(
             QIcon(QStringLiteral(":/Icon/process_terminate.svg")),
             QStringLiteral("预填阻断规则"));
-        addBlockRuleAction->setEnabled(hasRelatedPacket && m_firewallPage != nullptr);
+        addBlockRuleAction->setEnabled(blockRuleEvidence.has_value() && m_firewallPage != nullptr);
         menu.addSeparator();
         QAction* uploadVirusTotalAction = ks::online_scan::addVirusTotalSandboxMenu(
             &menu,
@@ -385,25 +395,19 @@ void NetworkDock::initializeNidsTab()
         }
         else if (selectedAction == addBlockRuleAction)
         {
-            const auto alertIt = std::find_if(
-                m_nidsAlertList.cbegin(),
-                m_nidsAlertList.cend(),
-                [relatedPacketSequenceId](const ks::network::NidsAlert& alertRecord)
-                {
-                    return alertRecord.sequenceId == relatedPacketSequenceId;
-                });
-            if (alertIt != m_nidsAlertList.cend() && m_firewallPage != nullptr)
+            if (blockRuleEvidence.has_value() && m_firewallPage != nullptr)
             {
+                const auto& evidence = *blockRuleEvidence;
                 m_firewallPage->addBlockRuleFromEvidence(
-                    QString::fromUtf8(alertIt->remoteAddress.c_str()),
-                    QString::number(alertIt->remotePort),
-                    toQString(ks::network::PacketProtocolToString(alertIt->protocol)),
-                    alertIt->direction == ks::network::PacketDirection::Inbound
+                    QString::fromUtf8(evidence.remoteAddress.c_str()),
+                    QString::number(evidence.remotePort),
+                    toQString(ks::network::PacketProtocolToString(evidence.protocol)),
+                    evidence.direction == ks::network::PacketDirection::Inbound
                         ? QStringLiteral("Inbound") : QStringLiteral("Outbound"),
                     QStringLiteral("NIDS"),
-                    alertIt->processId,
-                    alertIt->processCreationTime100ns,
-                    QString::fromUtf8(alertIt->processImagePath.c_str()));
+                    evidence.processId,
+                    evidence.processCreationTime100ns,
+                    QString::fromUtf8(evidence.processImagePath.c_str()));
             }
         }
         else if (selectedAction == copyCellAction)
@@ -441,6 +445,13 @@ void NetworkDock::initializeNidsTab()
     info << initNidsEvent << "[NetworkDock] NIDS 页初始化完成。" << eol;
 }
 
+void NetworkDock::synchronizeVisibleNidsProjection()
+{
+    if (m_nidsPage == nullptr || !m_nidsPage->isVisible()) return;
+    if (m_nidsProjectionNeedsRebuild) rebuildNidsAlertTable();
+    updateNidsStatusLabel();
+}
+
 void NetworkDock::processNidsPacket(const ks::network::PacketRecord& packetRecord)
 {
     if (m_nidsEnableCheck != nullptr && !m_nidsEnableCheck->isChecked())
@@ -460,7 +471,11 @@ void NetworkDock::processNidsPacket(const ks::network::PacketRecord& packetRecor
         return;
     }
 
-    bool trimmed = false;
+    bool canProject = m_nidsPage != nullptr && m_nidsPage->isVisible()
+        && m_nidsAlertTable != nullptr && !m_nidsProjectionNeedsRebuild
+        && m_nidsProjectedRows.size() == static_cast<std::size_t>(m_nidsAlertTable->rowCount())
+        && !ks::ui::IsTableUiCommitBlockedByContextMenu({m_nidsAlertTable});
+    if (!canProject) m_nidsProjectionNeedsRebuild = true;
     for (ks::network::NidsAlert& alertRecord : alertList)
     {
         captureNidsProcessIdentity(alertRecord);
@@ -468,13 +483,32 @@ void NetworkDock::processNidsPacket(const ks::network::PacketRecord& packetRecor
         ++m_nidsTotalAlertCount;
         while (m_nidsAlertList.size() > kMaxNidsAlertCount)
         {
+            const auto projected = m_nidsProjectedRows.find(&m_nidsAlertList.front());
+            if (projected != m_nidsProjectedRows.end())
+            {
+                // The persistent source index follows one-shot sorting and is
+                // invalidated safely if an external reset removed the row.
+                if (canProject)
+                {
+                    if (projected->second.isValid()
+                        && projected->second.model() == m_nidsAlertTable->model())
+                    {
+                        m_nidsAlertTable->removeRow(projected->second.row());
+                    }
+                    else
+                    {
+                        canProject = false;
+                        m_nidsProjectionNeedsRebuild = true;
+                    }
+                }
+                m_nidsProjectedRows.erase(projected);
+            }
             m_nidsAlertList.pop_front();
-            trimmed = true;
         }
 
-        if (!trimmed && nidsAlertPassesFilter(alertRecord))
+        if (canProject && nidsAlertPassesFilter(m_nidsAlertList.back()))
         {
-            appendNidsAlertRow(alertRecord);
+            appendNidsAlertRow(m_nidsAlertList.back());
         }
 
         kLogEvent nidsAlertEvent;
@@ -487,11 +521,11 @@ void NetworkDock::processNidsPacket(const ks::network::PacketRecord& packetRecor
             << eol;
     }
 
-    if (trimmed)
+    if (m_nidsProjectionNeedsRebuild && m_nidsPage != nullptr && m_nidsPage->isVisible())
     {
         rebuildNidsAlertTable();
     }
-    else if (m_nidsAlertTable != nullptr && m_nidsAlertTable->rowCount() > 0)
+    else if (canProject && m_nidsAlertTable != nullptr && m_nidsAlertTable->rowCount() > 0)
     {
         m_nidsAlertTable->scrollToBottom();
     }
@@ -543,10 +577,14 @@ void NetworkDock::appendNidsAlertRow(const ks::network::NidsAlert& alertRecord)
     m_nidsAlertTable->setItem(newRow, toNidsAlertColumn(NidsAlertTableColumn::LocalEndpoint), createNidsCell(localEndpointText));
     m_nidsAlertTable->setItem(newRow, toNidsAlertColumn(NidsAlertTableColumn::RemoteEndpoint), createNidsCell(remoteEndpointText));
     m_nidsAlertTable->setItem(newRow, toNidsAlertColumn(NidsAlertTableColumn::Detail), createNidsCell(detailText));
+    m_nidsProjectedRows[&alertRecord] = QPersistentModelIndex(
+        m_nidsAlertTable->model()->index(timeItem->row(), toNidsAlertColumn(NidsAlertTableColumn::Time)));
 }
 
 void NetworkDock::rebuildNidsAlertTable()
 {
+    m_nidsProjectionNeedsRebuild = true;
+    if (m_nidsPage == nullptr || !m_nidsPage->isVisible()) return;
     if (m_nidsAlertTable == nullptr)
     {
         return;
@@ -569,6 +607,7 @@ void NetworkDock::rebuildNidsAlertTable()
     }
 
     m_nidsAlertTable->setUpdatesEnabled(false);
+    m_nidsProjectedRows.clear();
     m_nidsAlertTable->setRowCount(0);
     for (const ks::network::NidsAlert& alertRecord : m_nidsAlertList)
     {
@@ -578,6 +617,7 @@ void NetworkDock::rebuildNidsAlertTable()
         }
         appendNidsAlertRow(alertRecord);
     }
+    m_nidsProjectionNeedsRebuild = false;
     m_nidsAlertTable->setUpdatesEnabled(true);
     if (m_nidsAlertTable->rowCount() > 0)
     {
@@ -604,6 +644,8 @@ void NetworkDock::clearNidsAlerts()
     }
 
     m_nidsEngine.Reset();
+    m_nidsProjectedRows.clear();
+    m_nidsProjectionNeedsRebuild = false;
     m_nidsAlertList.clear();
     m_nidsAnalyzedPacketCount = 0;
     m_nidsTotalAlertCount = 0;
@@ -619,6 +661,7 @@ void NetworkDock::clearNidsAlerts()
 
 void NetworkDock::updateNidsStatusLabel()
 {
+    if (m_nidsPage != nullptr && !m_nidsPage->isVisible()) return;
     if (m_nidsStatusLabel == nullptr)
     {
         return;
