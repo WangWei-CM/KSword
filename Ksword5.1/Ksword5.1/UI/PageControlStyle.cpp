@@ -8,6 +8,7 @@
 
 #include <QBoxLayout>
 #include <QEvent>
+#include <QHash>
 #include <QPainter>
 #include <QPainterPath>
 #include <QStackedWidget>
@@ -494,8 +495,7 @@ namespace
             }
             connect(tabs, &QTabWidget::currentChanged, this, [this]()
             {
-                m_layoutDirty = true;
-                if (canPreparePage()) prepareNow(); // Qt已显示目标页，再处理当前页的明确外层布局。
+                if (canPreparePage()) prepareNow(); // 首次页或真实dirty才整理结构，热切只同步现存外壳。
                 else schedule();
             });
             schedule();
@@ -505,29 +505,39 @@ namespace
         bool eventFilter(QObject* watched, QEvent* event) override
         {
             const QPointer<QObject> source(watched); // 同步样式/布局可能销毁当前宿主。
-            // 惰性创建、改字号、移动宿主与标签溢出都会改变栏几何，合并到下一轮布局。
+            if (m_preparing) return source.isNull(); // 本次pane/边距准备引起的通知由末尾同步统一消费。
+            QWidget* contentPage = m_contentPages.value(qobject_cast<QWidget*>(watched)).data();
+            const bool hiddenContent = contentPage && (!m_tabs || contentPage != m_tabs->currentWidget());
+            // 只观察已访问页及其明确外层宿主；隐藏页结构失效保留，几何通知不安排后台工作。
             switch (event->type())
             {
             case QEvent::Resize:
             case QEvent::Move:
+                if (!hiddenContent) schedule();
+                break;
             case QEvent::FontChange:
-                schedule();
+            case QEvent::ApplicationFontChange:
+                invalidateLayout(watched);
+                if (!hiddenContent) schedule();
                 break;
             case QEvent::LayoutRequest:
-                if (!m_preparing && canPreparePage() && needsLayoutPreparation()) prepareNow();
+                if (hiddenContent) break;
+                if (canPreparePage() && needsLayoutPreparation()) prepareNow();
                 else schedule();
                 break;
             case QEvent::Show:
+                if (hiddenContent) break;
                 m_surfaceDirty = true;
-                if (!m_preparing && canPreparePage()
+                if (canPreparePage()
                     && (watched == m_tabs || watched == m_tabs->currentWidget()
                         || watched == m_observedSurface))
                 {
-                    prepareNow(); // 当前页已完成Show/原生布局，首绘前建立留白和现有角片。
+                    prepareNow(); // dirty当前页在首绘前准备；已处理热页只更新角片与栏底面。
                 }
                 else schedule();
                 break;
             case QEvent::Paint:
+                if (hiddenContent) break;
                 if (m_geometryDirty)
                 {
                     if (!m_layoutDirty)
@@ -538,15 +548,24 @@ namespace
                     synchronizeSurfaces(); // Paint绝不写业务layout或QSS。
                 }
                 break;
+            case QEvent::DynamicPropertyChange:
+                if (!isLayoutProperty(static_cast<QDynamicPropertyChangeEvent*>(event)->propertyName()))
+                {
+                    break; // 测量pending、业务状态及本组件自己的QSS缓存不使布局失效。
+                }
+                [[fallthrough]];
             case QEvent::StyleChange:
             case QEvent::PaletteChange:
             case QEvent::ApplicationPaletteChange:
             case QEvent::ParentChange:
-            case QEvent::DynamicPropertyChange:
             case QEvent::ChildAdded:
-                m_surfaceDirty = true; // 几何同步与主题底色失效分开，避免每个Move都重画。
-                m_layoutDirty = true;
-                schedule();
+            case QEvent::ChildRemoved:
+                invalidateLayout(watched);
+                if (!hiddenContent)
+                {
+                    m_surfaceDirty = true;
+                    schedule();
+                }
                 break;
             case QEvent::Hide:
                 if (watched == m_tabs && m_surface)
@@ -571,6 +590,42 @@ namespace
         }
 
     private:
+        struct PreparedPage
+        {
+            QPointer<QWidget> owner;
+            QPointer<QLayout> layout;
+            QPointer<QWidget> pageParent;
+            QPointer<QWidget> ownerParent;
+            QLayout::SizeConstraint constraint = QLayout::SetDefaultConstraint;
+            quint64 revision = 0;
+            bool dirty = true;
+        };
+
+        static bool isLayoutProperty(const QByteArray& name)
+        {
+            return name == "ksword_secondary_tabs" || name == "ksword_page_tabs_child"
+                || name == "ksword_joined_result_tabs" || name == "ksword_standard_tabs_gap"
+                || name == "ksword_page_tabs_content_inset" || name == "ksword_square_page_frame"
+                || name == "ksword_workspace_content_frame" || name == "ksword_primary_content_panel"
+                || name == "ksword_parameter_surface" || name == "ksword_page_frame_host"
+                || name == "ksword_main_surface_hierarchy";
+        }
+
+        void invalidateLayout(QObject* source)
+        {
+            QWidget* page = m_contentPages.value(qobject_cast<QWidget*>(source)).data();
+            if (page)
+            {
+                const auto prepared = m_preparedPages.find(page);
+                if (prepared != m_preparedPages.end()) prepared->dirty = true;
+            }
+            else
+            {
+                ++m_layoutRevision; // 标签容器/栏的主题、字体或挂载归属改变，所有缓存页需重新消费。
+                m_layoutDirty = true;
+            }
+        }
+
         // 几何/Show/Hide/ZOrderChange可同步换页；旧页快照不能继续覆盖新页的外角。
         bool retainCurrentPage(const QPointer<QWidget>& page)
         {
@@ -600,8 +655,14 @@ namespace
             QWidget* page = m_tabs->currentWidget();
             QWidget* owner = pageLayoutOwner(page);
             QLayout* layout = owner ? owner->layout() : nullptr;
-            return m_layoutDirty || m_preparedPage != page || m_preparedOwner != owner
+            const auto prepared = m_preparedPages.constFind(page);
+            return m_layoutDirty || prepared == m_preparedPages.cend() || prepared->dirty
+                || prepared->revision != m_layoutRevision || prepared->owner != owner
+                || prepared->layout != layout || prepared->pageParent != page->parentWidget()
+                || prepared->ownerParent != (owner ? owner->parentWidget() : nullptr)
+                || (layout && prepared->constraint != layout->sizeConstraint())
                 || m_preparedInset != pageFrameInset(m_tabs)
+                || m_preparedDelegation != (delegatedPageTabs(m_tabs) != nullptr)
                 || (layout && ownsPageMargin(owner)
                     && layout->contentsMargins() != QMargins());
         }
@@ -627,7 +688,7 @@ namespace
             if (m_preparing) return;
             ++m_scheduleGeneration; // 同步消费后，旧回调不能清理后来的新pending。
             m_pending = false;
-            m_layoutDirty = true; // Show必须按挂载后的真实父归属补齐pane，普通Resize不重做此阶段。
+            // Show本身不使结构失效；真实结构/主题请求和宿主签名决定是否同步准备。
             synchronize();
         }
 
@@ -652,26 +713,29 @@ namespace
         // 观察当前页及其明确滚动内容；惰性页面建好布局后再消除重复的外围间距。
         void observeContent(QWidget* page, QWidget* surface)
         {
-            if (m_observedPage == page && m_observedSurface == surface)
-            {
-                return; // Resize/LayoutRequest不会改变归属，不重复移动同一个事件过滤器。
-            }
-            for (QWidget* previous : {m_observedPage.data(), m_observedSurface.data()})
-            {
-                if (previous && previous != page && previous != surface)
-                {
-                    previous->removeEventFilter(this);
-                }
-            }
             m_observedPage = page;
             m_observedSurface = surface;
-            if (page)
+            for (QWidget* widget : {page, surface})
             {
-                page->installEventFilter(this);
-            }
-            if (surface && surface != page)
-            {
-                surface->installEventFilter(this);
+                if (!widget) continue;
+                if (!m_contentPages.contains(widget))
+                {
+                    widget->installEventFilter(this);
+                    connect(widget, &QObject::destroyed, this, [this, widget]()
+                    {
+                        m_preparedPages.remove(widget);
+                        for (auto entry = m_contentPages.begin(); entry != m_contentPages.end();)
+                        {
+                            if (entry.key() == widget || !entry.value())
+                            {
+                                if (entry.key() != widget) entry.key()->removeEventFilter(this);
+                                entry = m_contentPages.erase(entry);
+                            }
+                            else ++entry;
+                        }
+                    });
+                }
+                m_contentPages.insert(widget, page);
             }
         }
 
@@ -705,11 +769,24 @@ namespace
                     schedule(); // 真正换页/换惰性内容后，不能把旧归属标成新页面已准备。
                     return;
                 }
-                m_preparedPage = page;
-                m_preparedOwner = owner;
+                PreparedPage prepared;
+                prepared.owner = owner;
+                prepared.layout = owner ? owner->layout() : nullptr;
+                prepared.pageParent = page->parentWidget();
+                prepared.ownerParent = owner ? owner->parentWidget() : nullptr;
+                prepared.constraint = owner && owner->layout()
+                    ? owner->layout()->sizeConstraint() : QLayout::SetDefaultConstraint;
+                prepared.revision = m_layoutRevision;
+                prepared.dirty = false;
+                m_preparedPages.insert(page, prepared);
                 m_preparedInset = pageFrameInset(m_tabs);
+                m_preparedDelegation = delegatedPageTabs(m_tabs) != nullptr;
                 m_layoutDirty = false;
                 m_preparing = false;
+            }
+            else if (visiblePage)
+            {
+                observeContent(m_tabs->currentWidget(), pageLayoutOwner(m_tabs->currentWidget()));
             }
             synchronizeSurfaces();
         }
@@ -821,9 +898,11 @@ namespace
         bool m_geometryDirty = true; // Paint仅处理现有overlay的几何。
         bool m_layoutDirty = true; // 真正布局/主题工作不被Paint兜底错误消费。
         bool m_preparing = false; // 自身pane/layout事件不回投新的同步或排队任务。
-        QPointer<QWidget> m_preparedPage; // 当前页身份变化才需要首显布局准备。
-        QPointer<QWidget> m_preparedOwner; // 惰性宿主更换真实内容后再准备其最外层布局。
-        int m_preparedInset = -1; // 嵌套Tab外留白变化也在安全布局点处理。
+        QHash<QWidget*, PreparedPage> m_preparedPages; // 每个已访问页保存外层布局契约，A→B→A不重做准备。
+        QHash<QWidget*, QPointer<QWidget>> m_contentPages; // 明确页/滚动宿主到页的身份映射，不扫描控件树。
+        quint64 m_layoutRevision = 0; // 共享主题、字体和Tab挂载失效代次。
+        int m_preparedInset = -1; // pane属于整个Tab，切到不同留白关系仍须更新一次。
+        bool m_preparedDelegation = false; // 纯子Tab转交与普通页的pane接缝不同。
         quint64 m_scheduleGeneration = 0; // 同步已消费的旧回调自动失效。
     };
 }
