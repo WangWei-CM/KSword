@@ -4,6 +4,7 @@
 #include "../UI/ToolbarMetrics.h"
 #include "KernelDock.h"
 #include "../UI/TableInteractionSupport.h"
+#include "../UI/TableRowFilterSupport.h"
 #include "../UI/VisibleTableWidget.h"
 
 // ============================================================
@@ -335,18 +336,20 @@ void KernelCommunicationEndpointTab::applyFilter(const bool allowDeferred)
     // Diagnostic text can move that item under the active sort; apply visibility
     // and selection by source identity only after that sorting has completed.
     const bool showDiagnostic = !m_snapshotSucceeded || visibleCount == 0U;
+    QSet<QPersistentModelIndex> excluded;
     for (int row = 0; row < m_table->rowCount(); ++row)
     {
         const auto* item = m_table->item(row, 0);
         const auto index = item != nullptr ? static_cast<std::size_t>(item->data(Qt::UserRole).toULongLong()) : m_rows.size();
         const bool visible = index < m_rows.size() ? rowMatchesFilter(m_rows[index], keyword) : showDiagnostic;
-        m_table->setRowHidden(row, !visible);
+        if (!visible) excluded.insert(m_table->model()->index(row, 0));
     }
+    ks::ui::ApplyTableRowFilter(m_table, excluded);
     if (restoredItem != nullptr) m_table->setCurrentCell(restoredItem->row(), static_cast<int>(CommunicationEndpointColumn::Name));
-    else if (m_table->currentRow() < 0 || m_table->isRowHidden(m_table->currentRow()))
+    else if (m_table->currentRow() < 0 || ks::ui::IsTableRowExcludedByFilter(m_table, m_table->currentRow()))
     {
         for (int row = 0; row < m_table->rowCount(); ++row)
-            if (!m_table->isRowHidden(row)) { m_table->setCurrentCell(row, static_cast<int>(CommunicationEndpointColumn::Name)); break; }
+            if (!ks::ui::IsTableRowExcludedByFilter(m_table, row)) { m_table->setCurrentCell(row, static_cast<int>(CommunicationEndpointColumn::Name)); break; }
     }
     if (!active && m_filterActive)
     {
@@ -434,7 +437,6 @@ void KernelCommunicationEndpointTab::insertDiagnosticRow(const QString& titleTex
         QStringLiteral("Diagnostic"), kernelText("kernel.communication_endpoint.placeholder.no_path", QStringLiteral("<无路径>")), detailText};
     for (int column = 0; column < fields.size(); ++column) m_diagnosticItems[column]->setText(fields[column]);
     m_table->setSortingEnabled(sorting);
-    m_table->setRowHidden(m_diagnosticItems[0]->row(), false);
 }
 
 bool KernelCommunicationEndpointTab::rowMatchesFilter(const KernelObjectDirectoryDeepEntry& entry, const QString& keyword) const

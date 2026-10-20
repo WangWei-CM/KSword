@@ -8,6 +8,7 @@
 #include "KernelDriverImageEditorDialog.h"
 #include "KernelDock.h"
 #include "../UI/TableInteractionSupport.h"
+#include "../UI/TableRowFilterSupport.h"
 #include "../UI/VisibleTableWidget.h"
 
 // ============================================================
@@ -512,13 +513,14 @@ void KernelDeviceDriverObjectsTab::rebuildVisibleRows(const bool allowDeferred)
     }
     m_visibleIndexes.clear();
     m_visibleIndexes.reserve(m_allRows.size());
+    QSet<QPersistentModelIndex> excluded;
     int firstVisible = -1;
     int restoredRow = -1;
     for (int row = 0; row < m_tableWidget->rowCount(); ++row)
     {
         const auto sourceIndex = sourceIndexForTableRow(row);
         const bool visible = sourceIndex < m_allRows.size() && matchesCurrentFilters(m_allRows[sourceIndex], directory, type, keyword);
-        m_tableWidget->setRowHidden(row, !visible);
+        if (!visible) excluded.insert(m_tableWidget->model()->index(row, 0));
         if (visible)
         {
             m_visibleIndexes.push_back(sourceIndex);
@@ -528,8 +530,9 @@ void KernelDeviceDriverObjectsTab::rebuildVisibleRows(const bool allowDeferred)
     }
     // Business TSV has always used canonical snapshot order, independent of header sorting.
     std::sort(m_visibleIndexes.begin(), m_visibleIndexes.end());
+    ks::ui::ApplyTableRowFilter(m_tableWidget, excluded);
     if (restoredRow >= 0) m_tableWidget->selectRow(restoredRow);
-    else if (m_tableWidget->currentRow() >= 0 && m_tableWidget->isRowHidden(m_tableWidget->currentRow()))
+    else if (m_tableWidget->currentRow() >= 0 && ks::ui::IsTableRowExcludedByFilter(m_tableWidget, m_tableWidget->currentRow()))
     {
         if (firstVisible >= 0) m_tableWidget->selectRow(firstVisible);
         else { m_tableWidget->setCurrentItem(nullptr); m_tableWidget->clearSelection(); }

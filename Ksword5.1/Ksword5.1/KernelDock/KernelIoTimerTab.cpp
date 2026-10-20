@@ -10,6 +10,7 @@
 #include "../UI/StructuredFieldView.h"
 #include "../UI/DetailLayoutRegistry.h"
 #include "../UI/TableInteractionSupport.h"
+#include "../UI/TableRowFilterSupport.h"
 #include "../theme.h"
 
 #include <QAbstractItemView>
@@ -496,19 +497,21 @@ void KernelIoTimerTab::applyFilter(const bool allowDeferred)
         m_unfilteredHorizontalScroll = m_table->horizontalScrollBar()->value();
         m_unfilteredVerticalScroll = m_table->verticalScrollBar()->value();
     }
+    QSet<QPersistentModelIndex> excluded;
     int firstVisible = -1;
     int restoredRow = -1;
     for (int row = 0; row < m_table->rowCount(); ++row)
     {
         const auto* item = m_table->item(row, 0);
         const bool visible = item != nullptr && (!active || item->data(Qt::UserRole + 1).toString().contains(filter, Qt::CaseInsensitive));
-        m_table->setRowHidden(row, !visible);
+        if (!visible) excluded.insert(m_table->model()->index(row, 0));
         if (visible && firstVisible < 0) firstVisible = row;
         if (!active && m_filterActive && item != nullptr
             && static_cast<std::size_t>(item->data(Qt::UserRole).toULongLong()) == m_unfilteredSourceIndex) restoredRow = row;
     }
+    ks::ui::ApplyTableRowFilter(m_table, excluded);
     if (restoredRow >= 0) m_table->selectRow(restoredRow);
-    else if (m_table->currentRow() < 0 || m_table->isRowHidden(m_table->currentRow()))
+    else if (m_table->currentRow() < 0 || ks::ui::IsTableRowExcludedByFilter(m_table, m_table->currentRow()))
     {
         if (firstVisible >= 0) m_table->selectRow(firstVisible);
         else
