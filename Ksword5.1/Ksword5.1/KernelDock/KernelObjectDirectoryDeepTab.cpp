@@ -6,6 +6,7 @@
 #include "../UI/FlatButtonTheme.h"
 #include "KernelDock.h"
 #include "../UI/TableInteractionSupport.h"
+#include "../UI/TablePresentation.h"
 
 #include <memory>
 
@@ -38,8 +39,11 @@
 #include <QSpinBox>
 #include <QSplitter>
 #include <QStringList>
-#include <QTreeWidget>
-#include <QTreeWidgetItem>
+#include <QTreeView>
+#include <QAbstractItemModel>
+#include <QHash>
+#include <QPersistentModelIndex>
+#include <QItemSelectionModel>
 #include <QVBoxLayout>
 
 #include <algorithm>
@@ -128,116 +132,176 @@ namespace
         return QStringLiteral("color:%1;font-weight:600;").arg(colorHex);
     }
 
-    QTreeWidgetItem* ensurePathItem(
-        QTreeWidget* treeWidget,
-        QMap<QString, QTreeWidgetItem*>& itemByPath,
-        const QString& objectPath)
-    {
-        // 输入：树控件、路径到节点的缓存、要确保存在的对象路径。
-        // 处理：递归确保父节点存在，再创建当前路径节点。
-        // 返回：对应路径的树节点；treeWidget 为空时返回 nullptr。
-        if (treeWidget == nullptr)
-        {
-            return nullptr;
-        }
-
-        const QString normalizedPath = normalizeObjectPathForUi(objectPath);
-        QTreeWidgetItem* existingItem = itemByPath.value(normalizedPath, nullptr);
-        if (existingItem != nullptr)
-        {
-            return existingItem;
-        }
-
-        QTreeWidgetItem* newItem = nullptr;
-        if (normalizedPath == QStringLiteral("\\"))
-        {
-            newItem = new QTreeWidgetItem(treeWidget);
-            newItem->setText(static_cast<int>(DirectoryDeepColumn::Name), QStringLiteral("\\"));
-            newItem->setText(static_cast<int>(DirectoryDeepColumn::Type), QStringLiteral("Directory"));
-            newItem->setText(static_cast<int>(DirectoryDeepColumn::FullPath), QStringLiteral("\\"));
-            newItem->setText(static_cast<int>(DirectoryDeepColumn::Depth), QStringLiteral("0"));
-            newItem->setText(static_cast<int>(DirectoryDeepColumn::Status), kernelText("kernel.object_directory.tree.root_status", QStringLiteral("根目录")));
-        }
-        else
-        {
-            QTreeWidgetItem* parentItem = ensurePathItem(
-                treeWidget,
-                itemByPath,
-                parentPathFromObjectPathForUi(normalizedPath));
-            newItem = new QTreeWidgetItem(parentItem != nullptr ? parentItem : treeWidget->invisibleRootItem());
-            newItem->setText(static_cast<int>(DirectoryDeepColumn::Name), leafNameFromObjectPathForUi(normalizedPath));
-            newItem->setText(static_cast<int>(DirectoryDeepColumn::Type), QStringLiteral("Directory"));
-            newItem->setText(static_cast<int>(DirectoryDeepColumn::FullPath), normalizedPath);
-            newItem->setText(static_cast<int>(DirectoryDeepColumn::Depth), QStringLiteral("-"));
-            newItem->setText(static_cast<int>(DirectoryDeepColumn::Status), kernelText("kernel.object_directory.tree.parent_placeholder", QStringLiteral("父目录占位")));
-        }
-        newItem->setData(0, SourceIndexRole, InvalidSourceIndex);
-        itemByPath.insert(normalizedPath, newItem);
-        return newItem;
-    }
-
-    QString treeItemAsTsv(const QTreeWidget* treeWidget, const QTreeWidgetItem* treeItem)
+    QString treeItemAsTsv(const QTreeView* treeWidget, const QModelIndex& treeItem)
     {
         // 输入：目录递归结果树和当前节点。
         // 处理：按当前列顺序读取文本，使用 Tab 分隔，便于复制到表格工具。
         // 返回：TSV 文本；输入为空时返回空字符串。
-        if (treeWidget == nullptr || treeItem == nullptr)
+        if (treeWidget == nullptr || !treeItem.isValid())
         {
             return QString();
         }
 
         QStringList fieldList;
-        fieldList.reserve(treeWidget->columnCount());
-        for (int columnIndex = 0; columnIndex < treeWidget->columnCount(); ++columnIndex)
+        fieldList.reserve(treeWidget->model()->columnCount());
+        for (int columnIndex = 0; columnIndex < treeWidget->model()->columnCount(); ++columnIndex)
         {
-            const QString cellText = treeItem->text(columnIndex).trimmed();
+            const QString cellText = treeItem.siblingAtColumn(columnIndex).data().toString().trimmed();
             fieldList.push_back(cellText.isEmpty() ? kernelText("kernel.object_directory.placeholder.empty", QStringLiteral("<空>")) : cellText);
         }
         return fieldList.join('\t');
     }
 
-    void showTreeCopyRowMenu(QTreeWidget* treeWidget, const QPoint& localPosition)
+    void showTreeCopyRowMenu(QTreeView* treeWidget, const QPoint& localPosition)
     {
-        // 输入：结果树和右键位置。
-        // 处理：同步点击节点为当前节点，显示显式样式菜单并复制当前行。
-        // 返回：无；无节点或剪贴板不可用时静默返回。
-        if (treeWidget == nullptr)
-        {
-            return;
-        }
-
-        QTreeWidgetItem* clickedItem = treeWidget->itemAt(localPosition);
-        if (clickedItem != nullptr)
-        {
-            const int clickedColumn = treeWidget->columnAt(localPosition.x());
-            treeWidget->setCurrentItem(clickedItem, clickedColumn >= 0 ? clickedColumn : 0);
-        }
-
-        QTreeWidgetItem* currentItem = treeWidget->currentItem();
+        if (treeWidget == nullptr) return;
+        const QModelIndex hit = treeWidget->indexAt(localPosition);
+        if (hit.isValid()) treeWidget->setCurrentIndex(hit);
+        const QPersistentModelIndex currentItem(treeWidget->currentIndex());
+        const QPointer<QTreeView> guard(treeWidget);
         QMenu contextMenu(treeWidget);
         contextMenu.setStyleSheet(KswordTheme::ContextMenuStyle());
-
         QAction* copyRowAction = contextMenu.addAction(
             QIcon(QStringLiteral(":/Icon/process_copy_row.svg")),
             kernelText("kernel.object_directory.menu.copy_row", QStringLiteral("复制当前行")));
-        // 声明业务菜单已提供此能力，避免共享表格菜单追加重复项。
         ks::ui::SetTableContextActionRole(copyRowAction, ks::ui::TableContextActionRole::CopyRows);
-        copyRowAction->setEnabled(currentItem != nullptr);
-
+        copyRowAction->setEnabled(currentItem.isValid());
         const QAction* selectedAction = contextMenu.exec(treeWidget->viewport()->mapToGlobal(localPosition));
-        if (selectedAction != copyRowAction || currentItem == nullptr)
-        {
-            return;
-        }
-
+        if (guard.isNull() || selectedAction != copyRowAction || !currentItem.isValid()
+            || currentItem.model() != guard->model()) return;
         QClipboard* clipboard = QApplication::clipboard();
-        const QString rowText = treeItemAsTsv(treeWidget, currentItem);
-        if (clipboard != nullptr && !rowText.isEmpty())
+        const QString rowText = treeItemAsTsv(guard, currentItem);
+        if (clipboard != nullptr && !rowText.isEmpty()) clipboard->setText(rowText);
+    }
+
+}
+
+struct KernelObjectDirectoryDeepTab::TreeSnapshot
+{
+    struct Node { QString path; int parent = -1; int row = 0; qulonglong source = InvalidSourceIndex; std::vector<int> children; };
+    std::vector<KernelObjectDirectoryDeepEntry> rows;
+    std::vector<Node> nodes;
+    std::vector<int> roots;
+};
+
+std::shared_ptr<const KernelObjectDirectoryDeepTab::TreeSnapshot>
+KernelObjectDirectoryDeepTab::prepareTreeSnapshot(std::vector<KernelObjectDirectoryDeepEntry> rows)
+{
+    auto snapshot = std::make_shared<TreeSnapshot>();
+    snapshot->rows = std::move(rows);
+    QMap<QString, int> byPath;
+    const auto append = [&](const QString& path, int parent) {
+        const int id = static_cast<int>(snapshot->nodes.size());
+        auto& siblings = parent < 0 ? snapshot->roots : snapshot->nodes[parent].children;
+        const int row = static_cast<int>(siblings.size());
+        siblings.push_back(id);
+        snapshot->nodes.push_back({path, parent, row, InvalidSourceIndex, {}});
+        byPath.insert(path, id);
+        return id;
+    };
+    std::function<int(const QString&)> ensurePath = [&](const QString& rawPath) {
+        const QString path = normalizeObjectPathForUi(rawPath);
+        const auto found = byPath.constFind(path);
+        if (found != byPath.cend()) return found.value();
+        const int parent = path == QStringLiteral("\\") ? -1 : ensurePath(parentPathFromObjectPathForUi(path));
+        return append(path, parent);
+    };
+    for (std::size_t index = 0; index < snapshot->rows.size(); ++index)
+    {
+        const auto& entry = snapshot->rows[index];
+        const int parent = ensurePath(entry.directoryPath);
+        const QString path = normalizeObjectPathForUi(entry.fullPath);
+        int id = byPath.value(path, -1);
+        if (id < 0 || snapshot->nodes[id].source != InvalidSourceIndex) id = append(path, parent);
+        snapshot->nodes[id].source = static_cast<qulonglong>(index);
+    }
+    return snapshot;
+}
+
+class KernelObjectDirectoryDeepTab::DirectoryModel final : public QAbstractItemModel
+{
+public:
+    explicit DirectoryModel(QStringList headers, QObject* parent) : QAbstractItemModel(parent), m_headers(std::move(headers)) {}
+    void setSnapshot(std::shared_ptr<const TreeSnapshot> snapshot)
+    { beginResetModel(); m_snapshot = std::move(snapshot); endResetModel(); }
+    int rowCount(const QModelIndex& parent = {}) const override
+    {
+        if (!m_snapshot || (parent.isValid() && parent.column() != 0)) return 0;
+        const auto* value = node(parent);
+        return static_cast<int>(value != nullptr ? value->children.size() : m_snapshot->roots.size());
+    }
+    int columnCount(const QModelIndex& = {}) const override { return static_cast<int>(DirectoryDeepColumn::Count); }
+    QModelIndex index(int row, int column, const QModelIndex& parent = {}) const override
+    {
+        if (!m_snapshot || row < 0 || column < 0 || column >= columnCount() || (parent.isValid() && parent.column() != 0)) return {};
+        const auto* value = node(parent);
+        const auto& siblings = value != nullptr ? value->children : m_snapshot->roots;
+        if (row >= static_cast<int>(siblings.size())) return {};
+        return createIndex(row, column, static_cast<quintptr>(siblings[row] + 1));
+    }
+    QModelIndex parent(const QModelIndex& index) const override
+    {
+        const auto* value = node(index);
+        if (value == nullptr || value->parent < 0) return {};
+        const auto& parent = m_snapshot->nodes[value->parent];
+        return createIndex(parent.row, 0, static_cast<quintptr>(value->parent + 1));
+    }
+    QVariant headerData(int section, Qt::Orientation orientation, int role = Qt::DisplayRole) const override
+    {
+        if (orientation != Qt::Horizontal || section < 0 || section >= m_headers.size()) return {};
+        return role == Qt::DisplayRole ? QVariant(m_headers[section]) : m_headerRoles.value(section).value(role);
+    }
+    bool setHeaderData(int section, Qt::Orientation orientation, const QVariant& value, int role) override
+    {
+        if (orientation != Qt::Horizontal || section < 0 || section >= m_headers.size()) return false;
+        if (role == Qt::DisplayRole || role == Qt::EditRole) m_headers[section] = value.toString();
+        else m_headerRoles[section][role] = value;
+        emit headerDataChanged(orientation, section, section);
+        return true;
+    }
+    QVariant data(const QModelIndex& index, int role = Qt::DisplayRole) const override
+    {
+        const auto* value = node(index);
+        if (value == nullptr) return {};
+        if (role == SourceIndexRole && index.column() == 0) return QVariant::fromValue(value->source);
+        if (role != Qt::DisplayRole && role != Qt::ToolTipRole) return {};
+        if (value->source != InvalidSourceIndex && value->source < m_snapshot->rows.size())
         {
-            clipboard->setText(rowText);
+            const auto& row = m_snapshot->rows[static_cast<std::size_t>(value->source)];
+            switch (static_cast<DirectoryDeepColumn>(index.column()))
+            {
+            case DirectoryDeepColumn::Name: return row.objectName;
+            case DirectoryDeepColumn::Type: return row.objectType;
+            case DirectoryDeepColumn::FullPath: return row.fullPath;
+            case DirectoryDeepColumn::Depth: return QString::number(row.depth);
+            case DirectoryDeepColumn::Status: return row.statusText;
+            default: return {};
+            }
+        }
+        const bool root = value->path == QStringLiteral("\\");
+        switch (static_cast<DirectoryDeepColumn>(index.column()))
+        {
+        case DirectoryDeepColumn::Name: return root ? QStringLiteral("\\") : leafNameFromObjectPathForUi(value->path);
+        case DirectoryDeepColumn::Type: return QStringLiteral("Directory");
+        case DirectoryDeepColumn::FullPath: return value->path;
+        case DirectoryDeepColumn::Depth: return root ? QStringLiteral("0") : QStringLiteral("-");
+        case DirectoryDeepColumn::Status: return root
+            ? kernelText("kernel.object_directory.tree.root_status", QStringLiteral("根目录"))
+            : kernelText("kernel.object_directory.tree.parent_placeholder", QStringLiteral("父目录占位"));
+        default: return {};
         }
     }
-}
+private:
+    const TreeSnapshot::Node* node(const QModelIndex& index) const
+    {
+        if (!m_snapshot || !index.isValid() || index.model() != this || index.internalId() == 0) return nullptr;
+        const auto id = index.internalId() - 1;
+        return id < m_snapshot->nodes.size() ? &m_snapshot->nodes[id] : nullptr;
+    }
+    std::shared_ptr<const TreeSnapshot> m_snapshot;
+    QStringList m_headers;
+    QHash<int, QHash<int, QVariant>> m_headerRoles;
+};
 
 KernelObjectDirectoryDeepTab::KernelObjectDirectoryDeepTab(QWidget* parent)
     : QWidget(parent)
@@ -289,16 +353,18 @@ void KernelObjectDirectoryDeepTab::initializeUi()
     auto* splitter = new QSplitter(Qt::Vertical, this);
     rootLayout->addWidget(splitter, 1);
 
-    m_resultTree = new QTreeWidget(splitter);
-    m_resultTree->setColumnCount(static_cast<int>(DirectoryDeepColumn::Count));
-    m_resultTree->setHeaderLabels(QStringList{
+    m_resultTree = new QTreeView(splitter);
+    m_model = new DirectoryModel(QStringList{
         kernelText("kernel.object_directory.header.name", QStringLiteral("名称")),
         kernelText("kernel.object_directory.header.type", QStringLiteral("类型")),
         kernelText("kernel.object_directory.header.full_path", QStringLiteral("完整路径")),
         kernelText("kernel.object_directory.header.depth", QStringLiteral("深度")),
-        kernelText("kernel.object_directory.header.status", QStringLiteral("状态"))
-        });
+        kernelText("kernel.object_directory.header.status", QStringLiteral("状态"))}, m_resultTree);
+    m_resultTree->setModel(m_model);
+    ks::ui::ApplyTablePresentation(m_resultTree);
     m_resultTree->setAlternatingRowColors(true);
+    m_resultTree->setUniformRowHeights(true);
+    m_resultTree->header()->setResizeContentsPrecision(100);
     m_resultTree->setSelectionMode(QAbstractItemView::SingleSelection);
     m_resultTree->setRootIsDecorated(true);
     m_resultTree->setContextMenuPolicy(Qt::CustomContextMenu);
@@ -323,10 +389,10 @@ void KernelObjectDirectoryDeepTab::initializeUi()
     connect(m_rootPathEdit, &QLineEdit::returnPressed, this, [this]() {
         startRefresh();
     });
-    connect(m_resultTree, &QTreeWidget::currentItemChanged, this, [this](QTreeWidgetItem*, QTreeWidgetItem*) {
+    connect(m_resultTree->selectionModel(), &QItemSelectionModel::currentChanged, this, [this](const QModelIndex&, const QModelIndex&) {
         showCurrentItemDetail();
     });
-    connect(m_resultTree, &QTreeWidget::customContextMenuRequested, this, [this](const QPoint& localPosition) {
+    connect(m_resultTree, &QTreeView::customContextMenuRequested, this, [this](const QPoint& localPosition) {
         showTreeCopyRowMenu(m_resultTree, localPosition);
     });
 }
@@ -387,7 +453,7 @@ void KernelObjectDirectoryDeepTab::startRefresh()
     if (m_resultTree != nullptr)
     {
         ks::ui::DetailLayoutRegistry::prepareDataRebuild(m_detailEditor);
-        m_resultTree->clear();
+        m_model->setSnapshot({});
     }
     if (m_detailEditor != nullptr)
     {
@@ -399,10 +465,11 @@ void KernelObjectDirectoryDeepTab::startRefresh()
         KernelObjectDirectoryDeepResult result =
             runKernelObjectDirectoryDeepSnapshotTask(options);
 
-        QMetaObject::invokeMethod(guardThis, [guardThis, result = std::move(result)]() mutable {
+        auto treeSnapshot = result.success ? prepareTreeSnapshot(std::move(result.rows)) : nullptr;
+        QMetaObject::invokeMethod(guardThis, [guardThis, result = std::move(result), treeSnapshot = std::move(treeSnapshot)]() mutable {
             const auto deferredResult =
                 std::make_shared<KernelObjectDirectoryDeepResult>(std::move(result));
-            auto commitResult = [guardThis, deferredResult]() mutable
+            auto commitResult = [guardThis, deferredResult, treeSnapshot]() mutable
             {
             KernelObjectDirectoryDeepResult& result = *deferredResult;
             if (guardThis == nullptr)
@@ -415,7 +482,7 @@ void KernelObjectDirectoryDeepTab::startRefresh()
 
             if (!result.success)
             {
-                guardThis->m_rows.clear();
+                guardThis->m_treeSnapshot.reset();
                 if (guardThis->m_statusLabel != nullptr)
                 {
                     guardThis->m_statusLabel->setText(kernelText("kernel.object_directory.status.failed", QStringLiteral("状态：刷新失败")));
@@ -428,11 +495,11 @@ void KernelObjectDirectoryDeepTab::startRefresh()
                 return;
             }
 
-            guardThis->m_rows = std::move(result.rows);
+            guardThis->m_treeSnapshot = treeSnapshot;
             guardThis->rebuildTree();
 
             QString statusText = kernelText("kernel.object_directory.status.summary", QStringLiteral("状态：已枚举 %1 项，目录 %2 个，失败目录 %3 个"))
-                .arg(guardThis->m_rows.size())
+                .arg(guardThis->m_treeSnapshot->rows.size())
                 .arg(result.visitedDirectoryCount)
                 .arg(result.failedDirectoryCount);
             if (result.depthLimitReached)
@@ -454,10 +521,10 @@ void KernelObjectDirectoryDeepTab::startRefresh()
                 guardThis->m_statusLabel->setStyleSheet(
                     statusLabelStyle(result.failedDirectoryCount == 0 ? KswordTheme::SuccessHex() : KswordTheme::WarningHex()));
             }
-            if (guardThis->m_resultTree != nullptr && guardThis->m_resultTree->topLevelItemCount() > 0)
+            if (guardThis->m_resultTree != nullptr && guardThis->m_model->rowCount() > 0)
             {
                 guardThis->m_resultTree->expandToDepth(1);
-                guardThis->m_resultTree->setCurrentItem(guardThis->m_resultTree->topLevelItem(0), 0);
+                guardThis->m_resultTree->setCurrentIndex(guardThis->m_model->index(0, 0));
             }
             else if (guardThis->m_detailEditor != nullptr)
             {
@@ -484,37 +551,9 @@ void KernelObjectDirectoryDeepTab::startRefresh()
 
 void KernelObjectDirectoryDeepTab::rebuildTree()
 {
-    if (m_resultTree == nullptr)
-    {
-        return;
-    }
-
+    if (m_resultTree == nullptr) return;
     ks::ui::DetailLayoutRegistry::prepareDataRebuild(m_detailEditor);
-
-    m_resultTree->setUpdatesEnabled(false);
-    m_resultTree->clear();
-
-    QMap<QString, QTreeWidgetItem*> itemByPath;
-    for (std::size_t rowIndex = 0; rowIndex < m_rows.size(); ++rowIndex)
-    {
-        const KernelObjectDirectoryDeepEntry& entry = m_rows[rowIndex];
-        QTreeWidgetItem* parentItem = ensurePathItem(m_resultTree, itemByPath, entry.directoryPath);
-        QTreeWidgetItem* item = itemByPath.value(normalizeObjectPathForUi(entry.fullPath), nullptr);
-        if (item == nullptr || item->data(0, SourceIndexRole).toULongLong() != InvalidSourceIndex)
-        {
-            item = new QTreeWidgetItem(parentItem != nullptr ? parentItem : m_resultTree->invisibleRootItem());
-            itemByPath.insert(normalizeObjectPathForUi(entry.fullPath), item);
-        }
-
-        item->setText(static_cast<int>(DirectoryDeepColumn::Name), entry.objectName);
-        item->setText(static_cast<int>(DirectoryDeepColumn::Type), entry.objectType);
-        item->setText(static_cast<int>(DirectoryDeepColumn::FullPath), entry.fullPath);
-        item->setText(static_cast<int>(DirectoryDeepColumn::Depth), QString::number(entry.depth));
-        item->setText(static_cast<int>(DirectoryDeepColumn::Status), entry.statusText);
-        item->setData(0, SourceIndexRole, static_cast<qulonglong>(rowIndex));
-    }
-
-    m_resultTree->setUpdatesEnabled(true);
+    m_model->setSnapshot(m_treeSnapshot);
 }
 
 void KernelObjectDirectoryDeepTab::showCurrentItemDetail()
@@ -524,27 +563,27 @@ void KernelObjectDirectoryDeepTab::showCurrentItemDetail()
         return;
     }
 
-    QTreeWidgetItem* currentItem = m_resultTree->currentItem();
-    if (currentItem == nullptr)
+    const QModelIndex currentItem = m_resultTree->currentIndex();
+    if (!currentItem.isValid())
     {
         m_detailEditor->setDocument(ks::ui::FieldDocument{}.note(kernelText("kernel.object_directory.detail.select_hint", QStringLiteral("请选择目录递归结果节点。"))));
         return;
     }
 
     bool convertOk = false;
-    const qulonglong sourceIndex = currentItem->data(0, SourceIndexRole).toULongLong(&convertOk);
-    if (!convertOk || sourceIndex == InvalidSourceIndex || sourceIndex >= m_rows.size())
+    const qulonglong sourceIndex = currentItem.siblingAtColumn(0).data(SourceIndexRole).toULongLong(&convertOk);
+    if (!convertOk || sourceIndex == InvalidSourceIndex || !m_treeSnapshot || sourceIndex >= m_treeSnapshot->rows.size())
     {
         ks::ui::FieldDocument detailText;
-        detailText.field(QStringLiteral("节点名称"), QStringLiteral("%1").arg(currentItem->text(static_cast<int>(DirectoryDeepColumn::Name))));
-        detailText.field(QStringLiteral("节点类型"), QStringLiteral("%1").arg(currentItem->text(static_cast<int>(DirectoryDeepColumn::Type))));
-        detailText.field(QStringLiteral("完整路径"), QStringLiteral("%1").arg(currentItem->text(static_cast<int>(DirectoryDeepColumn::FullPath))));
+        detailText.field(QStringLiteral("节点名称"), QStringLiteral("%1").arg(currentItem.siblingAtColumn(static_cast<int>(DirectoryDeepColumn::Name)).data().toString()));
+        detailText.field(QStringLiteral("节点类型"), QStringLiteral("%1").arg(currentItem.siblingAtColumn(static_cast<int>(DirectoryDeepColumn::Type)).data().toString()));
+        detailText.field(QStringLiteral("完整路径"), QStringLiteral("%1").arg(currentItem.siblingAtColumn(static_cast<int>(DirectoryDeepColumn::FullPath)).data().toString()));
         detailText.field(QStringLiteral("说明"), QStringLiteral("该节点为 UI 父目录占位，未直接绑定 Worker 返回记录。"), true);
         m_detailEditor->setDocument(detailText);
         return;
     }
 
-    m_detailEditor->setDocument(formatEntryDetail(m_rows[static_cast<std::size_t>(sourceIndex)]));
+    m_detailEditor->setDocument(formatEntryDetail(m_treeSnapshot->rows[static_cast<std::size_t>(sourceIndex)]));
 }
 
 ks::ui::FieldDocument KernelObjectDirectoryDeepTab::formatEntryDetail(const KernelObjectDirectoryDeepEntry& entry)
