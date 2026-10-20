@@ -1082,6 +1082,9 @@ void NetworkDock::onHttpsProxyParsedEntryArrived(const ks::network::HttpsProxyPa
 
     if (m_httpsParsedTable->rowCount() >= kMaxHttpsParsedEntries)
     {
+        if (!m_httpsParsedTable->isRowHidden(0)) --m_httpsParsedVisibleCount;
+        const QTableWidgetItem* oldestEvent = m_httpsParsedTable->item(0, HttpsParsedColumnEvent);
+        if (oldestEvent != nullptr) adjustHttpsParsedEventCount(oldestEvent->text(), -1);
         m_httpsParsedTable->removeRow(0);
         if (!m_httpsParsedEntryCache.empty())
         {
@@ -1110,11 +1113,49 @@ void NetworkDock::onHttpsProxyParsedEntryArrived(const ks::network::HttpsProxyPa
     m_httpsParsedTable->setItem(rowIndex, HttpsParsedColumnUpload, createPacketCell(parsedEntry.uploadBytes > 0 ? QString::number(parsedEntry.uploadBytes) : QString()));
     m_httpsParsedTable->setItem(rowIndex, HttpsParsedColumnDownload, createPacketCell(parsedEntry.downloadBytes > 0 ? QString::number(parsedEntry.downloadBytes) : QString()));
     m_httpsParsedTable->setItem(rowIndex, HttpsParsedColumnDetail, createPacketCell(parsedEntry.detailText));
-    applyHttpsParsedTableFilter();
+    adjustHttpsParsedEventCount(parsedEntry.eventTypeText, 1);
+    const QString keyword = m_httpsParsedFilterEdit != nullptr
+        ? m_httpsParsedFilterEdit->text().trimmed() : QString();
+    const QString eventType = m_httpsParsedEventFilterCombo != nullptr
+        ? m_httpsParsedEventFilterCombo->currentText() : QStringLiteral("全部事件");
+    if (applyHttpsParsedFilterToRow(rowIndex, keyword, eventType)) ++m_httpsParsedVisibleCount;
+    updateHttpsParsedSummary();
     if (m_httpsAutoScrollCheck != nullptr && m_httpsAutoScrollCheck->isChecked() && !m_httpsParsedTable->isRowHidden(rowIndex))
     {
         m_httpsParsedTable->scrollToBottom();
     }
+}
+
+bool NetworkDock::applyHttpsParsedFilterToRow(
+    const int rowIndex, const QString& keywordText, const QString& eventTypeText)
+{
+    bool keywordMatched = keywordText.isEmpty();
+    if (!keywordMatched)
+    {
+        for (int columnIndex = 0; columnIndex < HttpsParsedColumnCount; ++columnIndex)
+        {
+            const QTableWidgetItem* cellItem = m_httpsParsedTable->item(rowIndex, columnIndex);
+            if (cellItem != nullptr && cellItem->text().contains(keywordText, Qt::CaseInsensitive))
+            {
+                keywordMatched = true;
+                break;
+            }
+        }
+    }
+    const bool filterByEventType = !eventTypeText.isEmpty() && eventTypeText != QStringLiteral("全部事件");
+    const QTableWidgetItem* eventItem = m_httpsParsedTable->item(rowIndex, HttpsParsedColumnEvent);
+    const bool eventMatched = !filterByEventType
+        || (eventItem != nullptr && eventItem->text().compare(eventTypeText, Qt::CaseInsensitive) == 0);
+    const bool visible = keywordMatched && eventMatched;
+    m_httpsParsedTable->setRowHidden(rowIndex, !visible);
+    return visible;
+}
+
+void NetworkDock::adjustHttpsParsedEventCount(const QString& eventType, const int delta)
+{
+    if (eventType == QStringLiteral("REQUEST")) m_httpsParsedRequestCount += delta;
+    else if (eventType == QStringLiteral("RESPONSE")) m_httpsParsedResponseCount += delta;
+    else if (eventType == QStringLiteral("ERROR")) m_httpsParsedErrorCount += delta;
 }
 
 void NetworkDock::applyHttpsParsedTableFilter()
@@ -1123,37 +1164,15 @@ void NetworkDock::applyHttpsParsedTableFilter()
     {
         return;
     }
-
-    const QString keywordText = m_httpsParsedFilterEdit != nullptr
-        ? m_httpsParsedFilterEdit->text().trimmed()
-        : QString();
-    const QString eventTypeText = m_httpsParsedEventFilterCombo != nullptr
-        ? m_httpsParsedEventFilterCombo->currentText()
-        : QStringLiteral("全部事件");
-    const bool filterByEventType = !eventTypeText.isEmpty() && eventTypeText != QStringLiteral("全部事件");
-
-    for (int rowIndex = 0; rowIndex < m_httpsParsedTable->rowCount(); ++rowIndex)
+    const QString keyword = m_httpsParsedFilterEdit != nullptr
+        ? m_httpsParsedFilterEdit->text().trimmed() : QString();
+    const QString eventType = m_httpsParsedEventFilterCombo != nullptr
+        ? m_httpsParsedEventFilterCombo->currentText() : QStringLiteral("全部事件");
+    m_httpsParsedVisibleCount = 0;
+    for (int row = 0; row < m_httpsParsedTable->rowCount(); ++row)
     {
-        bool keywordMatched = keywordText.isEmpty();
-        if (!keywordMatched)
-        {
-            for (int columnIndex = 0; columnIndex < HttpsParsedColumnCount; ++columnIndex)
-            {
-                const QTableWidgetItem* cellItem = m_httpsParsedTable->item(rowIndex, columnIndex);
-                if (cellItem != nullptr && cellItem->text().contains(keywordText, Qt::CaseInsensitive))
-                {
-                    keywordMatched = true;
-                    break;
-                }
-            }
-        }
-
-        const QTableWidgetItem* eventItem = m_httpsParsedTable->item(rowIndex, HttpsParsedColumnEvent);
-        const bool eventMatched = !filterByEventType
-            || (eventItem != nullptr && eventItem->text().compare(eventTypeText, Qt::CaseInsensitive) == 0);
-        m_httpsParsedTable->setRowHidden(rowIndex, !keywordMatched || !eventMatched);
+        if (applyHttpsParsedFilterToRow(row, keyword, eventType)) ++m_httpsParsedVisibleCount;
     }
-
     updateHttpsParsedSummary();
 }
 
@@ -1165,6 +1184,10 @@ void NetworkDock::clearHttpsParsedEntries()
     }
 
     m_httpsParsedEntryCache.clear();
+    m_httpsParsedVisibleCount = 0;
+    m_httpsParsedRequestCount = 0;
+    m_httpsParsedResponseCount = 0;
+    m_httpsParsedErrorCount = 0;
     m_httpsParsedTable->setRowCount(0);
     updateHttpsParsedSummary();
     appendHttpsProxyLogLine(QStringLiteral("HTTPS 解析结果和详情缓存已清空。"));
@@ -1243,44 +1266,12 @@ void NetworkDock::updateHttpsParsedSummary()
     {
         return;
     }
-
-    int visibleCount = 0;
-    int requestCount = 0;
-    int responseCount = 0;
-    int errorCount = 0;
-    for (int rowIndex = 0; rowIndex < m_httpsParsedTable->rowCount(); ++rowIndex)
-    {
-        if (!m_httpsParsedTable->isRowHidden(rowIndex))
-        {
-            ++visibleCount;
-        }
-
-        const QTableWidgetItem* eventItem = m_httpsParsedTable->item(rowIndex, HttpsParsedColumnEvent);
-        if (eventItem == nullptr)
-        {
-            continue;
-        }
-        const QString eventText = eventItem->text();
-        if (eventText == QStringLiteral("REQUEST"))
-        {
-            ++requestCount;
-        }
-        else if (eventText == QStringLiteral("RESPONSE"))
-        {
-            ++responseCount;
-        }
-        else if (eventText == QStringLiteral("ERROR"))
-        {
-            ++errorCount;
-        }
-    }
-
     m_httpsParsedSummaryLabel->setText(QStringLiteral("显示 %1 / %2，请求 %3，响应 %4，错误 %5")
-        .arg(visibleCount)
+        .arg(m_httpsParsedVisibleCount)
         .arg(m_httpsParsedTable->rowCount())
-        .arg(requestCount)
-        .arg(responseCount)
-        .arg(errorCount));
+        .arg(m_httpsParsedRequestCount)
+        .arg(m_httpsParsedResponseCount)
+        .arg(m_httpsParsedErrorCount));
 }
 
 void NetworkDock::openHttpsParsedDetailByRow(const int row)

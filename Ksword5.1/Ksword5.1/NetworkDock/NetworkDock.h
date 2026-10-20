@@ -1174,6 +1174,8 @@ private:
     // - 作用：按关键字与事件类型过滤 HTTPS 解析表，仅影响显示结果。
     // - 返回：无。
     void applyHttpsParsedTableFilter();
+    bool applyHttpsParsedFilterToRow(int row, const QString& keyword, const QString& eventType);
+    void adjustHttpsParsedEventCount(const QString& eventType, int delta);
 
     // clearHttpsParsedEntries：
     // - 作用：清空 HTTPS 解析表及对应详情缓存。
@@ -1502,6 +1504,10 @@ private:
     QLabel* m_httpsParsedSummaryLabel = nullptr;    // HTTPS解析表统计标签。
     QTableWidget* m_httpsParsedTable = nullptr;     // HTTPS解析结果表格。
     QPlainTextEdit* m_httpsProxyLogOutput = nullptr;// HTTPS代理日志输出框。
+    int m_httpsParsedVisibleCount = 0;
+    int m_httpsParsedRequestCount = 0;
+    int m_httpsParsedResponseCount = 0;
+    int m_httpsParsedErrorCount = 0;
     std::vector<ks::network::HttpsProxyParsedEntry> m_httpsParsedEntryCache; // HTTPS解析结果缓存，行号与表格一一对应。
 
     // ========================= Tab10：hosts文件编辑 ====================
