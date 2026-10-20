@@ -27,6 +27,7 @@
 // 析构先关闭详情投递门禁，再让派生成员和子控件开始销毁。
 HandleDock::~HandleDock()
 {
+    if (m_exportOperation) m_exportOperation->close();
     if (m_handleDetailOperation)
     {
         m_handleDetailOperation->close();

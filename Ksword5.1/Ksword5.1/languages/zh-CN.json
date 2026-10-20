@@ -8,6 +8,9 @@
   "text_direction": "ltr",
   "fallback": "en-US",
   "translations": {
+    "handle.export.receipt_missing": "导出未返回有效回执，请检查目标文件后再重试。",
+    "handle.export.not_submitted": "本次导出请求未提交，请稍后重试。",
+    "本次导出请求未提交，请稍后重试。": "本次导出请求未提交，请稍后重试。",
     "registry.offline.no_receipt": "离线 Hive 未取得完整回执；请关闭工作副本后重新打开。",
     "registry.offline.processing": "正在处理离线 Hive…",
     "registry.offline.closing": "正在关闭离线 Hive；等待当前操作和资源清理完成。",
@@ -7036,6 +7039,7 @@
     "notification.copy.log_template": "%1\n%2\n%3\n文件：%4\n函数：%5\nGUID：%6"
   },
   "source_translations": {
+    "本次导出请求未提交，请稍后重试。": "本次导出请求未提交，请稍后重试。",
     "unknown exception": "unknown exception",
     "[FileDock] file analysis failed, filePath=": "[FileDock] file analysis failed, filePath=",
     "[FileDock] file mutation completed, kind=": "[FileDock] file mutation completed, kind=",

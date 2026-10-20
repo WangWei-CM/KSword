@@ -403,7 +403,9 @@ private:
         const QVector<ks::handle::HandleFilterRule>& existingRules);
     void importFilterConfiguration();
     void exportFilterConfiguration() const;
-    void exportRuleResults(const QString& ruleId = QString()) const;
+    void exportRuleResults(const QString& ruleId = QString());
+    void reconcileExportReceipt();
+    void settleExportReceipt(const QString& message, bool success = false);
     void returnToSavedFilters();
     QString buildRuleConditionSummary(const ks::handle::HandleFilterRule& rule) const;
 
@@ -713,6 +715,9 @@ private:
     bool m_objectTypeRefreshInProgress = false;  // m_objectTypeRefreshInProgress：对象类型刷新互斥标记。
     bool m_objectTypeRefreshPending = false;     // m_objectTypeRefreshPending：对象类型刷新待执行请求标记。
     bool m_handleDetailRefreshInProgress = false; // m_handleDetailRefreshInProgress：句柄详情刷新互斥标记。
+    std::unique_ptr<ks::ui::AsyncOperation> m_exportOperation;
+    bool m_exportPendingReceipt = false;
+    QString m_exportReceiptPath;
     std::unique_ptr<ks::ui::AsyncOperation> m_handleDetailOperation; // 详情请求合并与一次收尾控制器。
     bool m_handleRenderDeferredUntilTypeMap = false; // m_handleRenderDeferredUntilTypeMap：句柄枚举已完成但表格渲染正等待对象类型映射。
     bool m_initialRefreshDone = false;           // m_initialRefreshDone：首轮刷新是否已完成。

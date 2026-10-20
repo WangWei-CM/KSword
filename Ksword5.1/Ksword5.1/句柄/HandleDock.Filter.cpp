@@ -33,6 +33,7 @@
 #include <QMenu>
 #include <QMessageBox>
 #include <QPushButton>
+#include <QPointer>
 #include <QSaveFile>
 #include <QSet>
 #include <QSettings>
@@ -1126,39 +1127,60 @@ void HandleDock::exportFilterConfiguration() const
         ks::i18n::sourceText(QStringLiteral("筛选配置已导出。")));
 }
 
-void HandleDock::exportRuleResults(const QString& ruleId) const
+void HandleDock::settleExportReceipt(const QString& message, const bool success)
 {
-    const QString filePath = QFileDialog::getSaveFileName(
-        const_cast<HandleDock*>(this),
-        ks::i18n::sourceText(QStringLiteral("导出句柄筛选结果")),
-        ks::i18n::sourceText(QStringLiteral("句柄筛选结果.tsv")),
-        ks::i18n::sourceText(QStringLiteral("TSV 文件 (*.tsv);;所有文件 (*)")));
-    if (filePath.isEmpty())
-    {
-        return;
-    }
+    m_exportPendingReceipt = false;
+    m_exportReceiptPath.clear();
+    if (m_exportResultsButton) m_exportResultsButton->setEnabled(!m_exportOperation->isInFlight());
+    const QString title = ks::i18n::sourceText(QStringLiteral("导出句柄筛选结果"));
+    if (success) QMessageBox::information(this, title, message);
+    else QMessageBox::warning(this, title, message);
+}
 
-    QSaveFile targetFile(filePath);
-    if (!targetFile.open(QIODevice::WriteOnly))
+void HandleDock::reconcileExportReceipt()
+{
+    if (m_exportResultsButton) m_exportResultsButton->setEnabled(!m_exportOperation->isInFlight());
+    if (m_exportPendingReceipt && !m_exportOperation->isInFlight())
+        settleExportReceipt(ks::i18n::sourceText(QStringLiteral("导出未返回有效回执，请检查目标文件后再重试。"))
+            + QLatin1Char('\n') + m_exportReceiptPath);
+}
+
+void HandleDock::exportRuleResults(const QString& ruleId)
+{
+    if (!m_exportOperation)
     {
-        QMessageBox::warning(
-            const_cast<HandleDock*>(this),
-            ks::i18n::sourceText(QStringLiteral("导出句柄筛选结果")),
-            ks::i18n::sourceText(QStringLiteral("结果文件写入失败：%1"))
-                .arg(targetFile.errorString()));
+        m_exportOperation = std::make_unique<ks::ui::AsyncOperation>(this);
+        m_exportOperation->setStateChangedCallback([this]() { reconcileExportReceipt(); });
+    }
+    const QPointer<HandleDock> guarded(this);
+    reconcileExportReceipt();
+    if (!guarded || m_exportOperation->isInFlight()) return;
+    const QString filePath = QFileDialog::getSaveFileName(this,
+        ks::i18n::sourceText(QStringLiteral("导出句柄筛选结果")), ks::i18n::sourceText(QStringLiteral("句柄筛选结果.tsv")),
+        ks::i18n::sourceText(QStringLiteral("TSV 文件 (*.tsv);;所有文件 (*)")));
+    if (!guarded || filePath.isEmpty()) return;
+    reconcileExportReceipt();
+    if (!guarded) return;
+    if (m_exportOperation->isInFlight())
+    {
+        QMessageBox::warning(this, ks::i18n::sourceText(QStringLiteral("导出句柄筛选结果")),
+            ks::i18n::sourceText(QStringLiteral("本次导出请求未提交，请稍后重试。")));
         return;
     }
-    if (targetFile.write("\xEF\xBB\xBF", 3) != 3)
-    {
-        QMessageBox::warning(
-            const_cast<HandleDock*>(this),
-            ks::i18n::sourceText(QStringLiteral("导出句柄筛选结果")),
-            ks::i18n::sourceText(QStringLiteral("结果文件写入失败：%1"))
-                .arg(targetFile.errorString()));
-        targetFile.cancelWriting();
-        return;
-    }
-    const QStringList headerList{
+    struct Group { QString name; std::vector<std::size_t> indices; };
+    struct Request {
+        QString path; QStringList headers;
+        std::vector<HandleRow> rows;
+        std::vector<Group> groups;
+        ks::i18n::SourceTextSnapshot language;
+    } request;
+    request.path = filePath;
+    request.rows = m_allRows; // Complete value freeze; shared snapshot preparation is a later step.
+    request.language = ks::i18n::LanguageManager::instance().sourceTextSnapshot();
+    for (const auto& state : m_ruleMatchStates)
+        if (state.enabled && (ruleId.isEmpty() || state.ruleId == ruleId))
+            request.groups.push_back({state.ruleName, state.rowIndices});
+    request.headers = {
         ks::i18n::sourceText(QStringLiteral("规则名")),
         ks::i18n::sourceText(QStringLiteral("PID")),
         ks::i18n::sourceText(QStringLiteral("进程名")),
@@ -1174,80 +1196,65 @@ void HandleDock::exportRuleResults(const QString& ruleId) const
         ks::i18n::sourceText(QStringLiteral("解码状态")),
         ks::i18n::sourceText(QStringLiteral("差异"))
     };
-    const QByteArray headerBytes = (headerList.join('\t') + '\n').toUtf8();
-    if (targetFile.write(headerBytes) != headerBytes.size())
-    {
-        QMessageBox::warning(
-            const_cast<HandleDock*>(this),
-            ks::i18n::sourceText(QStringLiteral("导出句柄筛选结果")),
-            ks::i18n::sourceText(QStringLiteral("结果文件写入失败：%1"))
-                .arg(targetFile.errorString()));
-        targetFile.cancelWriting();
-        return;
-    }
-
-    std::size_t exportedRowCount = 0;
-    for (const HandleRuleMatchState& state : m_ruleMatchStates)
-    {
-        if (!state.enabled || (!ruleId.isEmpty() && state.ruleId != ruleId))
-        {
-            continue;
-        }
-        for (const std::size_t sourceRowIndex : state.rowIndices)
-        {
-            if (sourceRowIndex >= m_allRows.size())
+    struct Result { bool committed = false; bool commitAttempted = false; QString error; std::size_t count = 0; };
+    m_exportPendingReceipt = true;
+    m_exportReceiptPath = filePath;
+    const auto ticket = m_exportOperation->submitTransaction<Request, Result>(std::move(request),
+        [](const Request& input) {
+            Result result;
+            QSaveFile targetFile(input.path);
+            if (!targetFile.open(QIODevice::WriteOnly)) { result.error = targetFile.errorString(); return result; }
+            if (targetFile.write("\xEF\xBB\xBF", 3) != 3) { result.error = targetFile.errorString(); targetFile.cancelWriting(); return result; }
+            const QByteArray headerBytes = (input.headers.join('\t') + '\n').toUtf8();
+            if (targetFile.write(headerBytes) != headerBytes.size()) { result.error = targetFile.errorString(); targetFile.cancelWriting(); return result; }
+            for (const auto& group : input.groups)
             {
-                continue;
+                for (const auto sourceRowIndex : group.indices)
+                {
+                    if (sourceRowIndex >= input.rows.size()) continue;
+                    const HandleRow& row = input.rows[sourceRowIndex];
+                    QStringList fieldList{
+                        group.name,
+                        QString::number(row.processId),
+                        row.processName,
+                        formatHex(row.handleValue, 0),
+                        input.language.displayText(formatTypeIndexDisplayText(row.typeIndex, row.typeName)),
+                        input.language.displayText(formatObjectNameDisplayText(row)),
+                        formatHex(row.objectAddress, 0),
+                        formatHex(row.grantedAccess, 8),
+                        input.language.displayText(formatHandleAttributes(row.attributes)),
+                        input.language.displayText(formatOptionalObjectCount(row.handleCount, row.basicInfoAvailable)),
+                        input.language.displayText(formatOptionalObjectCount(row.pointerCount, row.basicInfoAvailable)),
+                        input.language.displayText(formatHandleSourceText(row.sourceMode)),
+                        input.language.displayText(formatHandleDecodeStatusText(row.decodeStatus)),
+                        input.language.displayText(formatHandleDiffStatusText(row.diffStatus))
+                    };
+                    for (QString& field : fieldList)
+                    {
+                        field = sanitizeTsvField(field);
+                    }
+                    const QByteArray lineBytes = (fieldList.join('\t') + '\n').toUtf8();
+                    if (targetFile.write(lineBytes) != lineBytes.size()) { result.error = targetFile.errorString(); targetFile.cancelWriting(); return result; }
+                    ++result.count;
+                }
             }
-            const HandleRow& row = m_allRows[sourceRowIndex];
-            QStringList fieldList{
-                state.ruleName,
-                QString::number(row.processId),
-                row.processName,
-                formatHex(row.handleValue, 0),
-                ks::i18n::displayText(formatTypeIndexDisplayText(row.typeIndex, row.typeName)),
-                ks::i18n::displayText(formatObjectNameDisplayText(row)),
-                formatHex(row.objectAddress, 0),
-                formatHex(row.grantedAccess, 8),
-                ks::i18n::displayText(formatHandleAttributes(row.attributes)),
-                ks::i18n::displayText(formatOptionalObjectCount(row.handleCount, row.basicInfoAvailable)),
-                ks::i18n::displayText(formatOptionalObjectCount(row.pointerCount, row.basicInfoAvailable)),
-                ks::i18n::displayText(formatHandleSourceText(row.sourceMode)),
-                ks::i18n::displayText(formatHandleDecodeStatusText(row.decodeStatus)),
-                ks::i18n::displayText(formatHandleDiffStatusText(row.diffStatus))
-            };
-            for (QString& field : fieldList)
-            {
-                field = sanitizeTsvField(field);
-            }
-            const QByteArray lineBytes = (fieldList.join('\t') + '\n').toUtf8();
-            if (targetFile.write(lineBytes) != lineBytes.size())
-            {
-                QMessageBox::warning(
-                    const_cast<HandleDock*>(this),
-                    ks::i18n::sourceText(QStringLiteral("导出句柄筛选结果")),
-                    ks::i18n::sourceText(QStringLiteral("结果文件写入失败：%1"))
-                        .arg(targetFile.errorString()));
-                targetFile.cancelWriting();
-                return;
-            }
-            ++exportedRowCount;
-        }
-    }
-    if (!targetFile.commit())
-    {
-        QMessageBox::warning(
-            const_cast<HandleDock*>(this),
-            ks::i18n::sourceText(QStringLiteral("导出句柄筛选结果")),
-            ks::i18n::sourceText(QStringLiteral("结果文件提交失败：%1"))
-                .arg(targetFile.errorString()));
-        return;
-    }
-    QMessageBox::information(
-        const_cast<HandleDock*>(this),
-        ks::i18n::sourceText(QStringLiteral("导出句柄筛选结果")),
-        ks::i18n::sourceText(QStringLiteral("已导出 %1 条命中结果。"))
-            .arg(exportedRowCount));
+            result.commitAttempted = true;
+            result.committed = targetFile.commit();
+            if (!result.committed) result.error = targetFile.errorString();
+            return result;
+        },
+        [this](const Result& result, std::uint64_t) {
+            if (result.committed)
+                settleExportReceipt(ks::i18n::sourceText(QStringLiteral("已导出 %1 条命中结果。")).arg(result.count), true);
+            else
+                settleExportReceipt(ks::i18n::sourceText(result.commitAttempted ? QStringLiteral("结果文件提交失败：%1") : QStringLiteral("结果文件写入失败：%1")).arg(result.error));
+            return true;
+        },
+        [this, filePath](std::exception_ptr) {
+            settleExportReceipt(ks::i18n::sourceText(QStringLiteral("导出未返回有效回执，请检查目标文件后再重试。")) + QLatin1Char('\n') + filePath);
+        });
+    if (!ticket && guarded && m_exportPendingReceipt)
+        settleExportReceipt(ks::i18n::sourceText(QStringLiteral("本次导出请求未提交，请稍后重试。")));
 }
 
 void HandleDock::returnToSavedFilters()
@@ -1465,6 +1472,7 @@ void HandleDock::showHandleTableContextMenu(const QPoint& localPosition)
                 ? QStringLiteral("停用规则")
                 : QStringLiteral("启用规则"));
         exportRuleAction = menu.addAction(QStringLiteral("导出该规则结果"));
+        exportRuleAction->setEnabled(!m_exportOperation || !m_exportOperation->isInFlight());
     }
     else if (itemKind == ks::handle::HandleTreeItemKind::HandleRow)
     {
