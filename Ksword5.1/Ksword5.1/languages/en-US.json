@@ -8,6 +8,11 @@
   "text_direction": "ltr",
   "fallback": "zh-CN",
   "translations": {
+    "privilege.legacy.status.loading": "Status: refreshing in the background…",
+    "privilege.legacy.status.operation": "Status: running the account operation…",
+    "privilege.legacy.status.partial": "Status: %1 contains failed or partial reads, %2 entries",
+    "privilege.legacy.error.identity_changed": "The target account identity changed. The password was not reset. Select the account and confirm again.",
+    "privilege.legacy.readback_failed": "The operation returned a receipt, but the final state could not be read. Refresh to verify it.",
     "service.refresh.delivery_missing": "Status: Service refresh returned no valid result. The previous list is retained. Retry.",
     "状态：服务刷新未返回有效结果，保留上次列表，请重试。": "Status: Service refresh returned no valid result. The previous list is retained. Retry.",
     "service.refresh.shutdown_rejected": "Status: The host is closing. Service refresh was not submitted.",
