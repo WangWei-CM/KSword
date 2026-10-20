@@ -4,7 +4,6 @@
 #include "../UI/ToolbarMetrics.h"
 #include "../UI/ParameterWorkspace.h"
 #include "../Internationalization/LanguageManager.h"
-#include "../UI/VisibleTableWidget.h"
 #include "../UI/ImmutableValueTable.h"
 #include "../UI/ThemeStatusRole.h"
 #include "../ksword/process/process_run_as.h"
@@ -36,7 +35,6 @@
 #include <QShowEvent>
 #include <QSplitter>
 #include <QStandardItemModel>
-#include <QTableWidgetItem>
 #include <QTimer>
 #include <QThreadPool>
 #include <QVBoxLayout>
@@ -521,59 +519,10 @@ namespace
         }));
     }
 
-    using Rows = QList<QStringList>;
-
-    ks::ui::VisibleTableWidget* table(QWidget* owner, const QStringList& headers)
-    {
-        auto* result = new ks::ui::VisibleTableWidget(owner);
-        result->setColumnCount(static_cast<int>(headers.size()));
-        result->setHorizontalHeaderLabels(headers);
-        result->setEditTriggers(QAbstractItemView::NoEditTriggers);
-        result->setSelectionBehavior(QAbstractItemView::SelectRows);
-        result->setSelectionMode(QAbstractItemView::SingleSelection);
-        result->setWordWrap(false);
-        result->horizontalHeader()->setSectionResizeMode(QHeaderView::Interactive);
-        result->horizontalHeader()->setStretchLastSection(true);
-        result->verticalHeader()->hide();
-        ks::ui::SetTableActionBarMode(result, ks::ui::TableActionBarMode::Compact);
-        return result;
-    }
-
-    void fill(QTableWidget* target, const Rows& rows, const QList<QVariant>& identities = {}, std::function<void()> done = {})
-    {
-        const quint64 generation = target->property("privilege_fill_generation").toULongLong() + 1;
-        target->setProperty("privilege_fill_generation", generation);
-        target->setEnabled(false);
-        target->setRowCount(0);
-        target->setRowCount(static_cast<int>(rows.size()));
-        auto position = std::make_shared<int>(0);
-        auto step = std::make_shared<std::function<void()>>();
-        const std::weak_ptr<std::function<void()>> weakStep = step;
-        *step = [target, rows, identities, position, generation, weakStep, done]()
-        {
-            if (target->property("privilege_fill_generation").toULongLong() != generation) return;
-            const int end = std::min(*position + 32, static_cast<int>(rows.size()));
-            for (; *position < end; ++*position)
-            {
-                const int row = *position;
-                for (int column = 0; column < target->columnCount(); ++column)
-                {
-                    auto* item = new QTableWidgetItem(rows[row].value(column));
-                    if (row < identities.size()) item->setData(Qt::UserRole, identities[row]);
-                    target->setItem(row, column, item);
-                }
-            }
-            if (*position == rows.size()) { target->setEnabled(true); if (done) done(); return; }
-            if (auto continuation = weakStep.lock())
-                QTimer::singleShot(0, target, [continuation]() { (*continuation)(); });
-        };
-        QTimer::singleShot(0, target, [step]() { (*step)(); });
-    }
-
     QString errorText(const QJsonObject& snapshot)
     {
         QStringList errors;
-        for (const QJsonValue& value : snapshot.value(QStringLiteral("errors")).toArray()) errors.append(ks::i18n::sourceText(value.toString()));
+        for (const QJsonValue& value : snapshot.value(QStringLiteral("errors")).toArray()) errors.append(tokenTranslation ? valueSourceText(value.toString()) : ks::i18n::sourceText(value.toString()));
         return errors.join(QChar('\n'));
     }
 
@@ -676,14 +625,6 @@ namespace
     void copySid(ValueTable* source, int column)
     {
         const QString sid = source->currentCell(column, Qt::UserRole).toString();
-        if (sid.startsWith(QStringLiteral("S-"))) QApplication::clipboard()->setText(sid);
-    }
-
-    void copySid(QTableWidget* source, int column)
-    {
-        const int row = source->currentRow();
-        if (row < 0 || !source->item(row, column)) return;
-        const QString sid = source->item(row, column)->data(Qt::UserRole).toString();
         if (sid.startsWith(QStringLiteral("S-"))) QApplication::clipboard()->setText(sid);
     }
 
@@ -928,17 +869,17 @@ namespace
     {
         switch (type)
         {
-        case 2: return text("privilege.workbench.sessions.type_interactive", QStringLiteral("交互式"));
-        case 3: return text("privilege.workbench.sessions.type_network", QStringLiteral("网络"));
-        case 4: return text("privilege.workbench.sessions.type_batch", QStringLiteral("批处理"));
-        case 5: return text("privilege.workbench.sessions.type_service", QStringLiteral("服务"));
-        case 7: return text("privilege.workbench.sessions.type_unlock", QStringLiteral("解锁"));
-        case 8: return text("privilege.workbench.sessions.type_network_cleartext", QStringLiteral("网络明文"));
-        case 9: return text("privilege.workbench.sessions.type_new_credentials", QStringLiteral("新凭据"));
-        case 10: return text("privilege.workbench.sessions.type_remote", QStringLiteral("远程交互（RDP）"));
-        case 11: return text("privilege.workbench.sessions.type_cached", QStringLiteral("缓存交互"));
-        case 12: return text("privilege.workbench.sessions.type_cached_remote", QStringLiteral("缓存远程交互"));
-        case 13: return text("privilege.workbench.sessions.type_cached_unlock", QStringLiteral("缓存解锁"));
+        case 2: return workerText("privilege.workbench.sessions.type_interactive", QStringLiteral("交互式"));
+        case 3: return workerText("privilege.workbench.sessions.type_network", QStringLiteral("网络"));
+        case 4: return workerText("privilege.workbench.sessions.type_batch", QStringLiteral("批处理"));
+        case 5: return workerText("privilege.workbench.sessions.type_service", QStringLiteral("服务"));
+        case 7: return workerText("privilege.workbench.sessions.type_unlock", QStringLiteral("解锁"));
+        case 8: return workerText("privilege.workbench.sessions.type_network_cleartext", QStringLiteral("网络明文"));
+        case 9: return workerText("privilege.workbench.sessions.type_new_credentials", QStringLiteral("新凭据"));
+        case 10: return workerText("privilege.workbench.sessions.type_remote", QStringLiteral("远程交互（RDP）"));
+        case 11: return workerText("privilege.workbench.sessions.type_cached", QStringLiteral("缓存交互"));
+        case 12: return workerText("privilege.workbench.sessions.type_cached_remote", QStringLiteral("缓存远程交互"));
+        case 13: return workerText("privilege.workbench.sessions.type_cached_unlock", QStringLiteral("缓存解锁"));
         default: return QString::number(type);
         }
     }
@@ -951,6 +892,105 @@ namespace
         return okay && value >= unixEpoch100ns
             ? QDateTime::fromMSecsSinceEpoch((value - unixEpoch100ns) / 10000).toLocalTime().toString(Qt::ISODate)
             : QString();
+    }
+
+    struct SessionData
+    {
+        QJsonObject snapshot;
+        QMap<QString, QJsonObject> sessions;
+        QMap<QString, int> counts;
+        QString summary;
+        int unreadable = 0, unmatched = 0;
+        bool warning = false;
+    };
+    using SessionsValue = std::shared_ptr<const SessionData>;
+    struct SessionSummary { QString text; bool warning = false; };
+    SessionSummary prepareSessionSummary(const SessionData& data)
+    {
+        SessionSummary result;
+        result.text = workerText("privilege.workbench.sessions.summary", QStringLiteral("登录会话 %1；进程 %2；令牌不可读 %3；LSA 未枚举的登录 LUID %4。"))
+            .arg(data.sessions.size()).arg(data.snapshot.value(QStringLiteral("processes")).toArray().size()).arg(data.unreadable).arg(data.unmatched);
+        const QString errors = errorText(data.snapshot);
+        if (!errors.isEmpty()) result.text += QChar('\n') + errors;
+        result.warning = !errors.isEmpty() || data.unreadable != 0 || data.unmatched != 0;
+        return result;
+    }
+    SessionsValue prepareSessions(QJsonObject snapshot)
+    {
+        auto data = std::make_shared<SessionData>();
+        data->snapshot = std::move(snapshot);
+        for (const auto& value : data->snapshot.value(QStringLiteral("sessions")).toArray())
+        {
+            const auto record = value.toObject();
+            data->sessions.insert(record.value(QStringLiteral("luid")).toString(), record);
+        }
+        int& unreadable = data->unreadable; int& unmatched = data->unmatched;
+        for (const auto& value : data->snapshot.value(QStringLiteral("processes")).toArray())
+        {
+            const auto record = value.toObject();
+            const auto authentication = record.value(QStringLiteral("authentication_id")).toString();
+            if (!record.value(QStringLiteral("error")).toString().isEmpty()) ++unreadable;
+            else if (!data->sessions.contains(authentication)) ++unmatched;
+            if (!authentication.isEmpty()) ++data->counts[authentication];
+        }
+        const auto summary = prepareSessionSummary(*data);
+        data->summary = summary.text; data->warning = summary.warning;
+        return data;
+    }
+    ks::ui::ImmutableTableSource sessionSource(const SessionsValue& data, const QString& account,
+        const ks::i18n::SourceTextSnapshot& translator)
+    {
+        const TokenTranslationScope scope(translator);
+        QVector<ks::ui::ImmutableTableRow> rows;
+        for (const auto& value : data->snapshot.value(QStringLiteral("sessions")).toArray())
+        {
+            const auto record = value.toObject();
+            if (!account.isEmpty() && record.value(QStringLiteral("sid")).toString().compare(account, Qt::CaseInsensitive) != 0
+                && record.value(QStringLiteral("account")).toString().compare(account, Qt::CaseInsensitive) != 0) continue;
+            const QString error = valueSourceText(record.value(QStringLiteral("error")).toString());
+            const QString luid = record.value(QStringLiteral("luid")).toString();
+            ks::ui::ImmutableTableRow row;
+            row.key = luid;
+            row.cells = {record.value(QStringLiteral("account")).toString(), luid,
+                error.isEmpty() ? logonType(static_cast<DWORD>(record.value(QStringLiteral("type")).toDouble())) : unavailableText(),
+                error.isEmpty() ? QString::number(record.value(QStringLiteral("wts_session_id")).toInt()) : unavailableText(),
+                fileTimeText(record.value(QStringLiteral("logonTime100ns")).toString()),
+                record.value(QStringLiteral("package")).toString(), record.value(QStringLiteral("sid")).toString(),
+                QString::number(data->counts.value(luid)),
+                error.isEmpty() ? workerText("privilege.workbench.sessions.read", QStringLiteral("已读取")) : error};
+            row.searchText = row.cells.join(QChar(' '));
+            row.roles.insert(Qt::UserRole, record); row.rolesInAllColumns = true;
+            rows.push_back(std::move(row));
+        }
+        return ks::ui::MakeImmutableTableSource(std::move(rows));
+    }
+    ks::ui::ImmutableTableSource processSource(const SessionsValue& data, const QString& selected,
+        const ks::i18n::SourceTextSnapshot& translator)
+    {
+        const TokenTranslationScope scope(translator);
+        QVector<ks::ui::ImmutableTableRow> rows;
+        for (const auto& value : data->snapshot.value(QStringLiteral("processes")).toArray())
+        {
+            const auto record = value.toObject();
+            const auto auth = record.value(QStringLiteral("authentication_id")).toString();
+            if (!selected.isEmpty() && auth != selected) continue;
+            const auto error = valueSourceText(record.value(QStringLiteral("error")).toString());
+            const auto state = !error.isEmpty() ? error : data->sessions.contains(auth)
+                ? workerText("privilege.workbench.sessions.linked", QStringLiteral("已按登录 LUID 关联"))
+                : workerText("privilege.workbench.sessions.unmatched", QStringLiteral("LSA 未枚举此登录 LUID"));
+            ks::ui::ImmutableTableRow row;
+            row.key = record.value(QStringLiteral("pid")).toVariant().toString() + QChar('@')
+                + record.value(QStringLiteral("creationTime100ns")).toString();
+            row.cells = {QString::number(record.value(QStringLiteral("pid")).toInt()),
+                record.value(QStringLiteral("name")).toString(), data->sessions.value(auth).value(QStringLiteral("account")).toString(),
+                auth.isEmpty() ? unavailableText() : auth,
+                fileTimeText(record.value(QStringLiteral("creationTime100ns")).toString()),
+                record.value(QStringLiteral("imagePath")).toString(), state};
+            row.searchText = row.cells.join(QChar(' '));
+            row.roles.insert(Qt::UserRole, record); row.rolesInAllColumns = true;
+            rows.push_back(std::move(row));
+        }
+        return ks::ui::MakeImmutableTableSource(std::move(rows));
     }
 
     class SessionsPage final : public QWidget
@@ -974,14 +1014,14 @@ namespace
             auto* note = new QLabel(text("privilege.workbench.sessions.note", QStringLiteral("进程按令牌 AuthenticationId 关联登录 LUID。终端会话编号仅用于显示；无法读取令牌的进程单独标明。选中登录会话筛选进程，双击进程打开详情。")), this);
             note->setWordWrap(true); layout->addWidget(note);
             auto* split = new QSplitter(Qt::Vertical, this);
-            m_sessions = table(split, { text("privilege.workbench.sessions.account", QStringLiteral("账号")),
-                text("privilege.workbench.sessions.luid", QStringLiteral("登录 LUID")),
-                text("privilege.workbench.sessions.type", QStringLiteral("登录类型")),
-                text("privilege.workbench.sessions.terminal_id", QStringLiteral("终端会话编号")),
-                text("privilege.workbench.sessions.time", QStringLiteral("登录时间")),
-                text("privilege.workbench.sessions.package", QStringLiteral("认证包")),
-                QStringLiteral("SID"), text("privilege.workbench.sessions.process_count", QStringLiteral("关联进程数")),
-                text("privilege.workbench.sessions.state", QStringLiteral("查询状态")) });
+            m_sessions = valueTable(split, { TableHeader(QStringLiteral("privilege.workbench.sessions.account"), QStringLiteral("账号")),
+                TableHeader(QStringLiteral("privilege.workbench.sessions.luid"), QStringLiteral("登录 LUID")),
+                TableHeader(QStringLiteral("privilege.workbench.sessions.type"), QStringLiteral("登录类型")),
+                TableHeader(QStringLiteral("privilege.workbench.sessions.terminal_id"), QStringLiteral("终端会话编号")),
+                TableHeader(QStringLiteral("privilege.workbench.sessions.time"), QStringLiteral("登录时间")),
+                TableHeader(QStringLiteral("privilege.workbench.sessions.package"), QStringLiteral("认证包")),
+                QStringLiteral("SID"), TableHeader(QStringLiteral("privilege.workbench.sessions.process_count"), QStringLiteral("关联进程数")),
+                TableHeader(QStringLiteral("privilege.workbench.sessions.state"), QStringLiteral("查询状态")) });
             m_sessions->setObjectName(QStringLiteral("privilege_logon_sessions_table"));
             ks::ui::SetTableActionBarMode(m_sessions, ks::ui::TableActionBarMode::Full);
             auto* processPanel = new QWidget(split);
@@ -998,12 +1038,12 @@ namespace
             processBar->addWidget(m_selectedLabel); processBar->addWidget(m_processSearch, 1); processBar->addWidget(m_open);
             ks::ui::NormalizeToolbarRow(processBar);
             processLayout->addLayout(processBar);
-            m_processes = table(processPanel, { QStringLiteral("PID"), text("privilege.workbench.sessions.process", QStringLiteral("进程")),
-                text("privilege.workbench.sessions.account", QStringLiteral("账号")),
-                text("privilege.workbench.sessions.auth_id", QStringLiteral("令牌 AuthenticationId")),
-                text("privilege.workbench.sessions.creation", QStringLiteral("进程创建时间")),
-                text("privilege.workbench.sessions.path", QStringLiteral("映像路径")),
-                text("privilege.workbench.sessions.state", QStringLiteral("查询状态")) });
+            m_processes = valueTable(processPanel, { QStringLiteral("PID"), TableHeader(QStringLiteral("privilege.workbench.sessions.process"), QStringLiteral("进程")),
+                TableHeader(QStringLiteral("privilege.workbench.sessions.account"), QStringLiteral("账号")),
+                TableHeader(QStringLiteral("privilege.workbench.sessions.auth_id"), QStringLiteral("令牌 AuthenticationId")),
+                TableHeader(QStringLiteral("privilege.workbench.sessions.creation"), QStringLiteral("进程创建时间")),
+                TableHeader(QStringLiteral("privilege.workbench.sessions.path"), QStringLiteral("映像路径")),
+                TableHeader(QStringLiteral("privilege.workbench.sessions.state"), QStringLiteral("查询状态")) });
             m_processes->setObjectName(QStringLiteral("privilege_logon_processes_table"));
             // 会话关联进程是嵌入式结果，与上方会话主表区分。
             ks::ui::SetTableActionBarMode(m_processes, ks::ui::TableActionBarMode::Compact);
@@ -1016,36 +1056,63 @@ namespace
             layout->addWidget(m_status);
             connect(m_refresh, &QPushButton::clicked, this, [this]() { refresh(); });
             connect(m_search, &QLineEdit::textChanged, this, [this]() { renderSessions(); });
-            connect(m_processSearch, &QLineEdit::textChanged, this, [this]() { renderProcesses(); });
-            connect(all, &QPushButton::clicked, this, [this]() { m_selected.clear(); m_sessions->clearSelection(); renderProcesses(); });
+            connect(m_processSearch, &QLineEdit::textChanged, this, [this]() { m_processes->setQuery(m_processSearch->text().trimmed()); });
+            connect(all, &QPushButton::clicked, this, [this]() {
+                const QPointer<QWidget> alive(this);
+                m_selected.clear(); m_sessions->selectKey({});
+                if (alive) renderProcesses();
+            });
             connect(sidCopy, &QPushButton::clicked, this, [this]()
             {
-                const auto* item = m_sessions->item(m_sessions->currentRow(), 0);
-                if (!item) return;
-                const QString sid = item->data(Qt::UserRole).toJsonObject().value(QStringLiteral("sid")).toString();
+                const QString sid = m_sessions->currentCell(0, Qt::UserRole).toJsonObject().value(QStringLiteral("sid")).toString();
                 if (!sid.isEmpty()) QApplication::clipboard()->setText(sid);
             });
-            connect(m_sessions, &QTableWidget::itemSelectionChanged, this, [this]()
+            m_sessions->currentRowChanged = [this]()
             {
-                const auto* item = m_sessions->item(m_sessions->currentRow(), 0);
-                if (!item) return;
-                m_selected = item->data(Qt::UserRole).toJsonObject().value(QStringLiteral("luid")).toString();
+                if (m_sessions->currentRow() < 0) return;
+                const QString selected = m_sessions->currentCell(0, Qt::UserRole).toJsonObject().value(QStringLiteral("luid")).toString();
+                if (m_selected == selected) return;
+                m_selected = selected;
                 renderProcesses();
-            });
+            };
+            m_sessions->sourceReady = [this]()
+            {
+                const QString requested = m_pendingAccount;
+                if (requested.isEmpty()) return;
+                if (m_sessions->rowCount() > 0) m_sessions->selectRow(0);
+                else if (m_hasSnapshot)
+                {
+                    const QPointer<QWidget> alive(this);
+                    m_selected = QStringLiteral("account_filter_no_match"); renderProcesses();
+                    if (!alive) return;
+                    m_status->setText(text("privilege.workbench.sessions.no_account_match", QStringLiteral("没有可读取且与此账号 SID 完全匹配的登录会话：%1")).arg(requested));
+                    if (!alive) return;
+                    ks::ui::ApplyStatusRole(m_status, ks::ui::StatusRole::Warning);
+                }
+            };
             connect(m_open, &QPushButton::clicked, this, [this]() { openSelected(); });
-            connect(m_processes, &QTableWidget::cellDoubleClicked, this, [this](int, int) { openSelected(); });
+            m_processes->rowDoubleClicked = [this](int) { openSelected(); };
         }
 
         void focusAccount(const QString& accountOrSid)
         {
+            const QPointer<QWidget> alive(this);
             m_pendingAccount = accountOrSid.trimmed();
             m_selected = m_pendingAccount.isEmpty() ? QString() : QStringLiteral("account_filter_no_match");
             m_search->setText(m_pendingAccount);
-            renderSessions(); renderProcesses();
+            if (!alive) return;
+            renderSessions(true); if (!alive) return;
+            renderProcesses(); if (!alive) return;
             m_search->setFocus();
         }
 
     protected:
+        void changeEvent(QEvent* event) override
+        {
+            const QPointer<QWidget> alive(this);
+            QWidget::changeEvent(event);
+            if (alive && event->type() == QEvent::LanguageChange) refreshSummary();
+        }
         void showEvent(QShowEvent* event) override
         {
             QWidget::showEvent(event);
@@ -1056,112 +1123,74 @@ namespace
         void refresh()
         {
             if (m_busy) return;
+            const QPointer<QWidget> requestOwner(this);
             m_busy = true; m_refresh->setEnabled(false);
+            if (!requestOwner) return;
             m_status->setText(text("privilege.workbench.sessions.loading", QStringLiteral("正在查询 LSA 登录会话和进程令牌...")));
+            if (!requestOwner) return;
             ks::ui::ApplyStatusRole(m_status, ks::ui::StatusRole::Info);
-            async(this, []() { return sessionsSnapshot(); }, [this](const QJsonObject& result)
+            if (!requestOwner) return;
+            async(this, []() { return prepareSessions(sessionsSnapshot()); }, [this](const SessionsValue& result)
             {
-                m_snapshot = result;
+                const QPointer<QWidget> alive(this);
+                retireTokenValue(std::move(m_data)); m_data = result;
+                ++m_dataRevision;
                 m_hasSnapshot = true;
-                m_sessionMap.clear(); m_counts.clear();
-                for (const auto& value : result.value(QStringLiteral("sessions")).toArray())
-                {
-                    const auto record = value.toObject();
-                    m_sessionMap.insert(record.value(QStringLiteral("luid")).toString(), record);
-                }
-                int unreadable = 0, unmatched = 0;
-                for (const auto& value : result.value(QStringLiteral("processes")).toArray())
-                {
-                    const auto record = value.toObject();
-                    const QString authentication = record.value(QStringLiteral("authentication_id")).toString();
-                    if (!record.value(QStringLiteral("error")).toString().isEmpty()) ++unreadable;
-                    else if (!m_sessionMap.contains(authentication)) ++unmatched;
-                    if (!authentication.isEmpty()) ++m_counts[authentication];
-                }
-                if (!m_selected.isEmpty() && !m_sessionMap.contains(m_selected))
+                if (!m_selected.isEmpty() && !m_data->sessions.contains(m_selected))
                     m_selected = m_pendingAccount.isEmpty() ? QString() : QStringLiteral("account_filter_no_match");
-                renderSessions(); renderProcesses();
+                renderSessions(true); if (!alive) return;
+                renderProcesses(); if (!alive) return;
                 m_busy = false; m_refresh->setEnabled(true);
-                QString summary = text("privilege.workbench.sessions.summary", QStringLiteral("登录会话 %1；进程 %2；令牌不可读 %3；LSA 未枚举的登录 LUID %4。"))
-                    .arg(m_sessionMap.size()).arg(result.value(QStringLiteral("processes")).toArray().size()).arg(unreadable).arg(unmatched);
-                const QString errors = errorText(result);
-                if (!errors.isEmpty()) summary += QChar('\n') + errors;
-                m_status->setText(summary);
-                ks::ui::ApplyStatusRole(m_status, errors.isEmpty() && unreadable == 0 && unmatched == 0
-                    ? ks::ui::StatusRole::Success : ks::ui::StatusRole::Warning);
+                if (!alive) return;
+                m_status->setText(m_data->summary);
+                if (!alive) return;
+                ks::ui::ApplyStatusRole(m_status, m_data->warning ? ks::ui::StatusRole::Warning : ks::ui::StatusRole::Success);
+                if (alive) refreshSummary();
             });
         }
 
-        void renderSessions()
+        void refreshSummary()
         {
-            Rows rows;
-            QList<QVariant> identities;
-            const QString requested = m_pendingAccount;
-            if (!requested.isEmpty() && m_search->text().trimmed() != requested)
+            if (!m_hasSnapshot) return;
+            const auto previous = m_data;
+            const quint64 dataRevision = m_dataRevision;
+            const quint64 revision = ++m_summaryRevision;
+            async(this, [previous] { return prepareSessionSummary(*previous); },
+                [this, dataRevision, revision](const SessionSummary& translated) {
+                    if (revision != m_summaryRevision || dataRevision != m_dataRevision || m_busy
+                        || m_selected == QStringLiteral("account_filter_no_match")) return;
+                    const QPointer<QWidget> alive(this);
+                    m_status->setText(translated.text);
+                    if (!alive) return;
+                    ks::ui::ApplyStatusRole(m_status, translated.warning ? ks::ui::StatusRole::Warning : ks::ui::StatusRole::Success);
+                });
+        }
+
+        void renderSessions(bool rebuild = false)
+        {
+            const QPointer<QWidget> alive(this);
+            if (!m_pendingAccount.isEmpty() && m_search->text().trimmed() != m_pendingAccount)
             {
-                m_pendingAccount.clear();
-                if (m_selected == QStringLiteral("account_filter_no_match")) { m_selected.clear(); renderProcesses(); }
+                m_pendingAccount.clear(); rebuild = true;
+                if (m_selected == QStringLiteral("account_filter_no_match")) { m_selected.clear(); renderProcesses(); if (!alive) return; }
             }
-            int selectedRow = -1;
-            for (const auto& value : m_snapshot.value(QStringLiteral("sessions")).toArray())
+            if (rebuild)
             {
-                const auto record = value.toObject();
-                const QString error = ks::i18n::sourceText(record.value(QStringLiteral("error")).toString());
-                const QString luid = record.value(QStringLiteral("luid")).toString();
-                const QStringList row{record.value(QStringLiteral("account")).toString(), luid,
-                    error.isEmpty() ? logonType(static_cast<DWORD>(record.value(QStringLiteral("type")).toDouble())) : unavailableText(),
-                    error.isEmpty() ? QString::number(record.value(QStringLiteral("wts_session_id")).toInt()) : unavailableText(),
-                    fileTimeText(record.value(QStringLiteral("logonTime100ns")).toString()),
-                    record.value(QStringLiteral("package")).toString(), record.value(QStringLiteral("sid")).toString(),
-                    QString::number(m_counts.value(luid)),
-                    error.isEmpty() ? text("privilege.workbench.sessions.read", QStringLiteral("已读取")) : error};
-                if (!m_search->text().trimmed().isEmpty()
-                    && !row.join(QChar(' ')).contains(m_search->text().trimmed(), Qt::CaseInsensitive)) continue;
-                if (!m_pendingAccount.isEmpty())
-                {
-                    const bool exact = record.value(QStringLiteral("sid")).toString().compare(m_pendingAccount, Qt::CaseInsensitive) == 0
-                        || record.value(QStringLiteral("account")).toString().compare(m_pendingAccount, Qt::CaseInsensitive) == 0;
-                    if (!exact) continue;
-                    if (selectedRow < 0) selectedRow = static_cast<int>(rows.size());
-                }
-                rows.append(row); identities.append(record);
+                const auto data = m_data; const auto account = m_pendingAccount;
+                m_sessions->setSourceFactory([data, account](const auto& translator) { return sessionSource(data, account, translator); });
+                if (!alive) return;
             }
-            fill(m_sessions, rows, identities, [this, selectedRow, requested]()
-            {
-                if (requested.isEmpty() || requested != m_pendingAccount) return;
-                if (selectedRow >= 0) m_sessions->setCurrentCell(selectedRow, 0);
-                else if (m_hasSnapshot)
-                {
-                    m_selected = QStringLiteral("account_filter_no_match"); renderProcesses();
-                    m_status->setText(text("privilege.workbench.sessions.no_account_match", QStringLiteral("没有可读取且与此账号 SID 完全匹配的登录会话：%1")).arg(requested));
-                    ks::ui::ApplyStatusRole(m_status, ks::ui::StatusRole::Warning);
-                }
-            });
+            m_sessions->setQuery(m_search->text().trimmed());
         }
 
         void renderProcesses()
         {
-            Rows rows;
-            QList<QVariant> identities;
-            for (const auto& value : m_snapshot.value(QStringLiteral("processes")).toArray())
-            {
-                const auto record = value.toObject();
-                const QString auth = record.value(QStringLiteral("authentication_id")).toString();
-                if (!m_selected.isEmpty() && auth != m_selected) continue;
-                const QString error = ks::i18n::sourceText(record.value(QStringLiteral("error")).toString());
-                const QString state = !error.isEmpty() ? error : m_sessionMap.contains(auth)
-                    ? text("privilege.workbench.sessions.linked", QStringLiteral("已按登录 LUID 关联"))
-                    : text("privilege.workbench.sessions.unmatched", QStringLiteral("LSA 未枚举此登录 LUID"));
-                const QStringList row{QString::number(record.value(QStringLiteral("pid")).toInt()),
-                    record.value(QStringLiteral("name")).toString(), m_sessionMap.value(auth).value(QStringLiteral("account")).toString(),
-                    auth.isEmpty() ? unavailableText() : auth,
-                    fileTimeText(record.value(QStringLiteral("creationTime100ns")).toString()),
-                    record.value(QStringLiteral("imagePath")).toString(), state};
-                if (!m_processSearch->text().trimmed().isEmpty()
-                    && !row.join(QChar(' ')).contains(m_processSearch->text().trimmed(), Qt::CaseInsensitive)) continue;
-                rows.append(row); identities.append(record);
-            }
-            fill(m_processes, rows, identities);
+            const QPointer<QWidget> alive(this);
+            const auto data = m_data; const auto selected = m_selected;
+            m_processes->setSourceFactory([data, selected](const auto& translator) { return processSource(data, selected, translator); });
+            if (!alive) return;
+            m_processes->setQuery(m_processSearch->text().trimmed());
+            if (!alive) return;
             m_selectedLabel->setText(m_selected == QStringLiteral("account_filter_no_match")
                 ? text("privilege.workbench.sessions.account_filter", QStringLiteral("账号筛选：%1")).arg(m_pendingAccount)
                 : m_selected.isEmpty() ? text("privilege.workbench.sessions.all", QStringLiteral("所有进程（含不可读项）"))
@@ -1170,17 +1199,16 @@ namespace
 
         void openSelected()
         {
-            const auto* item = m_processes->item(m_processes->currentRow(), 0);
-            if (item) openProcessDetail(this, item->data(Qt::UserRole).toJsonObject(), m_status, m_openProcess);
+            if (m_processes->currentRow() >= 0)
+                openProcessDetail(this, m_processes->currentCell(0, Qt::UserRole).toJsonObject(), m_status, m_openProcess);
         }
 
         QPushButton *m_refresh = nullptr, *m_open = nullptr;
         QLineEdit *m_search = nullptr, *m_processSearch = nullptr;
-        QTableWidget *m_sessions = nullptr, *m_processes = nullptr;
+        ValueTable *m_sessions = nullptr, *m_processes = nullptr;
         QLabel *m_status = nullptr, *m_selectedLabel = nullptr;
-        QJsonObject m_snapshot;
-        QMap<QString, QJsonObject> m_sessionMap;
-        QMap<QString, int> m_counts;
+        SessionsValue m_data = std::make_shared<const SessionData>();
+        quint64 m_summaryRevision = 0, m_dataRevision = 0;
         QString m_selected, m_pendingAccount;
         std::function<void(DWORD, quint64)> m_openProcess;
         bool m_loaded = false, m_busy = false, m_hasSnapshot = false;
