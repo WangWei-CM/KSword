@@ -279,6 +279,7 @@ void MinidumpDock::buildUi()
     ks::ui::StylePageTabs(m_rawMemoryTabs);
     m_memoryView = new DumpMemoryView(m_resultTabs);
     m_reportEditor = new ks::ui::StructuredFieldView(m_resultTabs);
+    m_reportEditor->setHiddenProjectionDeferred();
 
 
     // 预创建的页全部以 m_resultTabs 为父，但此刻一个都还没 addTab。
