@@ -6,6 +6,7 @@
 #include "RegistryValueCodec.h"
 #include "RegistryValueEditorWidget.h"
 #include "../UI/CodeEditorWidget.h"
+#include "../UI/AsyncOperation.h"
 #include "../Internationalization/LanguageManager.h"
 #include "../UI/ThemeStatusRole.h"
 #include "../UI/UI_All.h"
@@ -25,6 +26,7 @@
 #include <QLineEdit>
 #include <QMessageBox>
 #include <QPushButton>
+#include <QPointer>
 #include <QSaveFile>
 #include <QSplitter>
 #include <QStringList>
@@ -136,6 +138,145 @@ namespace
 
     LSTATUS linkTraversalStatus(HKEY key);
 
+
+    // Permission workers retain only this immutable target and raw security values.
+    struct PermissionTarget
+    {
+        QString path;
+        REGSAM view = 0;
+    };
+
+    LSTATUS openPermissionKey(const PermissionTarget& target, REGSAM access, Key* key)
+    {
+        HKEY root = nullptr;
+        QString subkey;
+        if (!parsePath(target.path, &root, &subkey)) return ERROR_INVALID_PARAMETER;
+        Key current;
+        LSTATUS status = RegOpenKeyExW(root, L"", REG_OPTION_OPEN_LINK,
+            KEY_QUERY_VALUE | target.view | (subkey.isEmpty() ? access : 0), &current.value);
+        if (status != ERROR_SUCCESS) return status;
+        const QStringList parts = subkey.isEmpty() ? QStringList() : subkey.split(QLatin1Char('\\'), Qt::KeepEmptyParts);
+        for (qsizetype i = 0; i < parts.size(); ++i)
+        {
+            if (parts[i].isEmpty()) return ERROR_INVALID_PARAMETER;
+            status = linkTraversalStatus(current.value);
+            if (status != ERROR_SUCCESS) return status;
+            Key next;
+            const REGSAM requested = KEY_QUERY_VALUE | target.view | (i + 1 == parts.size() ? access : 0);
+            status = RegOpenKeyExW(current.value, wide(parts[i]), REG_OPTION_OPEN_LINK, requested, &next.value);
+            if (status != ERROR_SUCCESS) return status;
+            current = std::move(next);
+        }
+        status = linkTraversalStatus(current.value);
+        if (status != ERROR_SUCCESS) return status;
+        *key = std::move(current);
+        return ERROR_SUCCESS;
+    }
+
+    struct PermissionSnapshot
+    {
+        QByteArray baseline;
+        QString owner;
+        QString group;
+        QString dacl;
+        LSTATUS status = ERROR_SUCCESS;
+        LSTATUS writeStatus = ERROR_ACCESS_DENIED;
+    };
+
+    PermissionSnapshot permissionSnapshot(HKEY key)
+    {
+        PermissionSnapshot result;
+        result.status = readSecurity(key, &result.baseline);
+        if (result.status == ERROR_SUCCESS)
+        {
+            auto* descriptor = reinterpret_cast<PSECURITY_DESCRIPTOR>(result.baseline.data());
+            result.owner = sddl(descriptor, OWNER_SECURITY_INFORMATION);
+            result.group = sddl(descriptor, GROUP_SECURITY_INFORMATION);
+            result.dacl = sddl(descriptor, DACL_SECURITY_INFORMATION);
+        }
+        return result;
+    }
+
+    PermissionSnapshot readPermissionSnapshot(const PermissionTarget& target)
+    {
+        Key key;
+        PermissionSnapshot result;
+        result.status = openPermissionKey(target, READ_CONTROL, &key);
+        if (result.status != ERROR_SUCCESS) return result;
+        result = permissionSnapshot(key.value);
+        if (result.status != ERROR_SUCCESS) return result;
+        Key writable;
+        result.writeStatus = openPermissionKey(target, READ_CONTROL | WRITE_DAC, &writable);
+        return result;
+    }
+
+    struct PermissionApplyRequest
+    {
+        PermissionTarget target;
+        QByteArray baseline;
+        QString original;
+        QString input;
+    };
+
+    struct PermissionApplyResult
+    {
+        enum class Kind { Nul, InvalidSddl, DaclOnly, Unchanged, Access, Conflict, ReadBack, Applied };
+        Kind kind = Kind::Access;
+        LSTATUS status = ERROR_SUCCESS;
+        bool submitted = false;
+        QString requested;
+        PermissionSnapshot actual;
+    };
+
+    PermissionApplyResult applyPermissionRequest(const PermissionApplyRequest& request)
+    {
+        PermissionApplyResult result;
+        if (request.input.contains(QChar(0))) { result.kind = PermissionApplyResult::Kind::Nul; return result; }
+        PSECURITY_DESCRIPTOR descriptor = nullptr;
+        if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(wide(request.input), SDDL_REVISION_1, &descriptor, nullptr))
+        {
+            result.kind = PermissionApplyResult::Kind::InvalidSddl;
+            result.status = GetLastError();
+            return result;
+        }
+        struct LocalDescriptor { PSECURITY_DESCRIPTOR value; ~LocalDescriptor() { LocalFree(value); } } release{descriptor};
+        BOOL present = FALSE, defaulted = FALSE, saclPresent = FALSE;
+        PACL acl = nullptr, sacl = nullptr;
+        PSID owner = nullptr, group = nullptr;
+        const bool daclOnly = GetSecurityDescriptorDacl(descriptor, &present, &acl, &defaulted)
+            && GetSecurityDescriptorSacl(descriptor, &saclPresent, &sacl, &defaulted)
+            && GetSecurityDescriptorOwner(descriptor, &owner, &defaulted)
+            && GetSecurityDescriptorGroup(descriptor, &group, &defaulted)
+            && present && !saclPresent && !owner && !group;
+        if (!daclOnly) { result.kind = PermissionApplyResult::Kind::DaclOnly; return result; }
+        result.requested = sddl(descriptor, DACL_SECURITY_INFORMATION);
+        if (result.requested == request.original) { result.kind = PermissionApplyResult::Kind::Unchanged; return result; }
+        Key key;
+        result.status = openPermissionKey(request.target, READ_CONTROL | WRITE_DAC, &key);
+        QByteArray current;
+        if (result.status == ERROR_SUCCESS) result.status = readSecurity(key.value, &current);
+        if (result.status != ERROR_SUCCESS) return result;
+        if (current != request.baseline) { result.kind = PermissionApplyResult::Kind::Conflict; return result; }
+        SECURITY_DESCRIPTOR_CONTROL control = 0;
+        DWORD revision = 0;
+        if (!GetSecurityDescriptorControl(descriptor, &control, &revision))
+        {
+            result.status = GetLastError();
+            return result;
+        }
+        const SECURITY_INFORMATION parts = DACL_SECURITY_INFORMATION | ((control & SE_DACL_PROTECTED)
+            ? PROTECTED_DACL_SECURITY_INFORMATION : UNPROTECTED_DACL_SECURITY_INFORMATION);
+        result.status = RegSetKeySecurity(key.value, parts, descriptor);
+        if (result.status != ERROR_SUCCESS) return result;
+        result.submitted = true;
+        result.actual = permissionSnapshot(key.value);
+        result.status = result.actual.status;
+        if (result.status != ERROR_SUCCESS) { result.kind = PermissionApplyResult::Kind::ReadBack; return result; }
+        result.actual.writeStatus = ERROR_SUCCESS;
+        result.kind = PermissionApplyResult::Kind::Applied;
+        return result;
+    }
+
     class PermissionsDialog final : public QDialog
     {
     public:
@@ -193,151 +334,131 @@ namespace
             m_status->setWordWrap(true);
             layout->addWidget(m_status);
             auto* buttons = new QDialogButtonBox(QDialogButtonBox::Close, this);
-            auto* refresh = buttons->addButton(trText(QStringLiteral("重新读取")), QDialogButtonBox::ActionRole);
+            m_refresh = buttons->addButton(trText(QStringLiteral("重新读取")), QDialogButtonBox::ActionRole);
             m_apply = buttons->addButton(trText(QStringLiteral("应用 DACL")), QDialogButtonBox::ActionRole);
-            ks::ui::NormalizeToolbarControl(refresh);
+            ks::ui::NormalizeToolbarControl(m_refresh);
             ks::ui::NormalizeToolbarControl(m_apply);
             ks::ui::NormalizeToolbarControl(buttons->button(QDialogButtonBox::Close));
             connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
-            connect(refresh, &QPushButton::clicked, this, [this] { reload(); });
+            connect(m_refresh, &QPushButton::clicked, this, [this] { reload(); });
             connect(m_apply, &QPushButton::clicked, this, [this] { apply(); });
             rootLayout->addWidget(buttons);
             ks::ui::applyResponsiveWindowGeometry(this, parent, QSize(880, 680), QSize(460, 380));
             ks::ui::ApplyDetailDialogChrome(this);
+            m_operation = std::make_unique<ks::ui::AsyncOperation>(this);
+            m_operation->setStateChangedCallback([this] {
+                if (m_busy && !m_operation->isBusy())
+                {
+                    m_baseline.clear();
+                    m_writable = false;
+                    setBusy(false);
+                    setStatus(m_status, trText(QStringLiteral("权限操作未取得完整回执；请重新读取。")), ks::ui::StatusRole::Warning);
+                }
+            });
             reload();
         }
+        ~PermissionsDialog() override { m_operation->close(); }
 
     private:
-        LSTATUS open(REGSAM access, Key* key)
+
+        void setBusy(const bool busy)
         {
-            HKEY root = nullptr;
-            QString subkey;
-            if (!parsePath(m_path, &root, &subkey)) return ERROR_INVALID_PARAMETER;
-            Key current;
-            LSTATUS status = RegOpenKeyExW(root, L"", REG_OPTION_OPEN_LINK,
-                KEY_QUERY_VALUE | m_view | (subkey.isEmpty() ? access : 0), &current.value);
-            if (status != ERROR_SUCCESS) return status;
-            const QStringList parts = subkey.isEmpty() ? QStringList() : subkey.split(QLatin1Char('\\'), Qt::KeepEmptyParts);
-            for (qsizetype i = 0; i < parts.size(); ++i)
-            {
-                if (parts[i].isEmpty()) return ERROR_INVALID_PARAMETER;
-                status = linkTraversalStatus(current.value);
-                if (status != ERROR_SUCCESS) return status;
-                Key next;
-                const REGSAM requested = KEY_QUERY_VALUE | m_view | (i + 1 == parts.size() ? access : 0);
-                status = RegOpenKeyExW(current.value, wide(parts[i]), REG_OPTION_OPEN_LINK, requested, &next.value);
-                if (status != ERROR_SUCCESS) return status;
-                current = std::move(next);
-            }
-            status = linkTraversalStatus(current.value);
-            if (status != ERROR_SUCCESS) return status;
-            *key = std::move(current);
-            return ERROR_SUCCESS;
+            m_busy = busy;
+            m_refresh->setEnabled(!busy);
+            m_apply->setEnabled(!busy && m_writable && !m_baseline.isEmpty());
+            m_edit->setReadOnly(busy || !m_writable);
+        }
+        void installSnapshot(const PermissionSnapshot& snapshot)
+        {
+            m_baseline = snapshot.baseline;
+            m_owner->setText(snapshot.owner);
+            m_group->setText(snapshot.group);
+            m_original->setRawText(snapshot.dacl);
+            m_edit->setRawText(snapshot.dacl);
+            m_writable = snapshot.writeStatus == ERROR_SUCCESS && !snapshot.dacl.isEmpty();
         }
         void reload()
         {
-            Key key;
-            LSTATUS status = open(READ_CONTROL, &key);
-            if (status == ERROR_SUCCESS) status = readSecurity(key.value, &m_baseline);
-            if (status != ERROR_SUCCESS)
-            {
-                m_baseline.clear();
-                m_apply->setEnabled(false);
-                m_edit->setReadOnly(true);
-                setStatus(m_status, winError(status), ks::ui::StatusRole::Error);
-                return;
-            }
-            auto* descriptor = reinterpret_cast<PSECURITY_DESCRIPTOR>(m_baseline.data());
-            m_owner->setText(sddl(descriptor, OWNER_SECURITY_INFORMATION));
-            m_group->setText(sddl(descriptor, GROUP_SECURITY_INFORMATION));
-            const QString original = sddl(descriptor, DACL_SECURITY_INFORMATION);
-            m_original->setRawText(original);
-            m_edit->setRawText(original);
-            Key writable;
-            const LSTATUS writeStatus = open(READ_CONTROL | WRITE_DAC, &writable);
-            m_apply->setEnabled(writeStatus == ERROR_SUCCESS && !original.isEmpty());
-            m_edit->setReadOnly(writeStatus != ERROR_SUCCESS);
-            setStatus(m_status, writeStatus == ERROR_SUCCESS
-                ? trText(QStringLiteral("具备 WRITE_DAC；应用前重新读取原值，完成后回读 DACL。权限修改不支持草稿撤销。"))
-                : trText(QStringLiteral("仅可读取权限；WRITE_DAC 不可用：%1")).arg(winError(writeStatus)),
-                writeStatus == ERROR_SUCCESS ? ks::ui::StatusRole::Info : ks::ui::StatusRole::Warning);
+            if (m_operation->isBusy()) return;
+            setBusy(true);
+            setStatus(m_status, trText(QStringLiteral("正在读取权限…")), ks::ui::StatusRole::Info);
+            m_operation->submit<PermissionTarget, PermissionSnapshot>({m_path, m_view},
+                [](const PermissionTarget& target, const ks::ui::AsyncOperationToken&) { return readPermissionSnapshot(target); },
+                [this](const PermissionSnapshot& snapshot, std::uint64_t) {
+                    if (snapshot.status != ERROR_SUCCESS)
+                    {
+                        m_baseline.clear();
+                        m_writable = false;
+                        m_owner->clear();
+                        m_group->clear();
+                        m_original->setRawText({});
+                        setStatus(m_status, winError(snapshot.status), ks::ui::StatusRole::Error);
+                    }
+                    else
+                    {
+                        installSnapshot(snapshot);
+                        setStatus(m_status, m_writable
+                            ? trText(QStringLiteral("具备 WRITE_DAC；应用前重新读取原值，完成后回读 DACL。权限修改不支持草稿撤销。"))
+                            : trText(QStringLiteral("仅可读取权限；WRITE_DAC 不可用：%1")).arg(winError(snapshot.writeStatus)),
+                            m_writable ? ks::ui::StatusRole::Info : ks::ui::StatusRole::Warning);
+                    }
+                    setBusy(false);
+                    return true;
+                }, [this](std::exception_ptr) {
+                    m_baseline.clear();
+                    m_writable = false;
+                    setBusy(false);
+                    setStatus(m_status, winError(ERROR_UNHANDLED_EXCEPTION), ks::ui::StatusRole::Error);
+                });
         }
         void apply()
         {
-            const QString input = m_edit->text().trimmed();
-            PSECURITY_DESCRIPTOR descriptor = nullptr;
-            if (input.contains(QChar(0)))
+            if (m_operation->isBusy() || !m_writable || m_baseline.isEmpty()) return;
+            const PermissionApplyRequest request{{m_path, m_view}, m_baseline, m_original->text(), m_edit->text().trimmed()};
+            setBusy(true);
+            setStatus(m_status, trText(QStringLiteral("正在应用 DACL…")), ks::ui::StatusRole::Info);
+            const auto accepted = m_operation->submitTransaction<PermissionApplyRequest, PermissionApplyResult>(request,
+                [](const PermissionApplyRequest& value) { return applyPermissionRequest(value); },
+                [this](const PermissionApplyResult& result, std::uint64_t) {
+                    using Kind = PermissionApplyResult::Kind;
+                    QString message;
+                    auto role = ks::ui::StatusRole::Error;
+                    switch (result.kind)
+                    {
+                    case Kind::Nul: message = trText(QStringLiteral("DACL SDDL 不能包含 NUL。")); break;
+                    case Kind::InvalidSddl: message = trText(QStringLiteral("DACL SDDL 无效：%1")).arg(winError(result.status)); break;
+                    case Kind::DaclOnly: message = trText(QStringLiteral("只能提交 DACL；不能包含 Owner、Group 或 SACL。")); break;
+                    case Kind::Unchanged: message = trText(QStringLiteral("DACL 与原值一致。")); role = ks::ui::StatusRole::Info; break;
+                    case Kind::Conflict: message = trText(QStringLiteral("权限已被其他操作修改；请重新读取后再编辑。")); break;
+                    case Kind::ReadBack:
+                        m_baseline.clear();
+                        m_writable = false;
+                        message = trText(QStringLiteral("DACL 已提交，但回读失败：%1")).arg(winError(result.status));
+                        role = ks::ui::StatusRole::Warning;
+                        break;
+                    case Kind::Applied:
+                        installSnapshot(result.actual);
+                        message = result.actual.dacl == result.requested ? trText(QStringLiteral("DACL 已应用并回读一致。"))
+                            : trText(QStringLiteral("DACL 已提交，但回读内容与请求不同；已显示实际结果。"));
+                        role = result.actual.dacl == result.requested ? ks::ui::StatusRole::Success : ks::ui::StatusRole::Warning;
+                        break;
+                    case Kind::Access: message = winError(result.status); break;
+                    }
+                    setBusy(false);
+                    setStatus(m_status, message, role);
+                    return true;
+                }, [this](std::exception_ptr) {
+                    // A worker exception is not proof that an accepted write did not commit.
+                    m_baseline.clear();
+                    m_writable = false;
+                    setBusy(false);
+                    setStatus(m_status, trText(QStringLiteral("权限操作未取得完整回执；请重新读取。")), ks::ui::StatusRole::Warning);
+                });
+            if (!accepted)
             {
-                setStatus(m_status, trText(QStringLiteral("DACL SDDL 不能包含 NUL。")), ks::ui::StatusRole::Error);
-                return;
+                setBusy(false);
+                setStatus(m_status, winError(ERROR_OPERATION_ABORTED), ks::ui::StatusRole::Warning);
             }
-            if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(wide(input), SDDL_REVISION_1, &descriptor, nullptr))
-            {
-                setStatus(m_status, trText(QStringLiteral("DACL SDDL 无效：%1")).arg(winError(GetLastError())), ks::ui::StatusRole::Error);
-                return;
-            }
-            struct LocalDescriptor { PSECURITY_DESCRIPTOR value; ~LocalDescriptor() { LocalFree(value); } } release{descriptor};
-            BOOL present = FALSE, defaulted = FALSE, saclPresent = FALSE;
-            PACL acl = nullptr, sacl = nullptr;
-            PSID owner = nullptr, group = nullptr;
-            const bool daclOnly = GetSecurityDescriptorDacl(descriptor, &present, &acl, &defaulted)
-                && GetSecurityDescriptorSacl(descriptor, &saclPresent, &sacl, &defaulted)
-                && GetSecurityDescriptorOwner(descriptor, &owner, &defaulted)
-                && GetSecurityDescriptorGroup(descriptor, &group, &defaulted)
-                && present && !saclPresent && !owner && !group;
-            if (!daclOnly)
-            {
-                setStatus(m_status, trText(QStringLiteral("只能提交 DACL；不能包含 Owner、Group 或 SACL。")), ks::ui::StatusRole::Error);
-                return;
-            }
-            const QString requested = sddl(descriptor, DACL_SECURITY_INFORMATION);
-            if (requested == m_original->text())
-            {
-                setStatus(m_status, trText(QStringLiteral("DACL 与原值一致。")), ks::ui::StatusRole::Info);
-                return;
-            }
-            Key key;
-            LSTATUS status = open(READ_CONTROL | WRITE_DAC, &key);
-            QByteArray current;
-            if (status == ERROR_SUCCESS) status = readSecurity(key.value, &current);
-            if (status != ERROR_SUCCESS || current != m_baseline)
-            {
-                setStatus(m_status, status != ERROR_SUCCESS ? winError(status)
-                    : trText(QStringLiteral("权限已被其他操作修改；请重新读取后再编辑。")), ks::ui::StatusRole::Error);
-                return;
-            }
-            SECURITY_DESCRIPTOR_CONTROL control = 0;
-            DWORD revision = 0;
-            if (!GetSecurityDescriptorControl(descriptor, &control, &revision))
-            {
-                setStatus(m_status, winError(GetLastError()), ks::ui::StatusRole::Error);
-                return;
-            }
-            const SECURITY_INFORMATION parts = DACL_SECURITY_INFORMATION | ((control & SE_DACL_PROTECTED)
-                ? PROTECTED_DACL_SECURITY_INFORMATION : UNPROTECTED_DACL_SECURITY_INFORMATION);
-            status = RegSetKeySecurity(key.value, parts, descriptor);
-            if (status != ERROR_SUCCESS)
-            {
-                setStatus(m_status, winError(status), ks::ui::StatusRole::Error);
-                return;
-            }
-            QByteArray observed;
-            status = readSecurity(key.value, &observed);
-            if (status != ERROR_SUCCESS)
-            {
-                m_apply->setEnabled(false);
-                setStatus(m_status, trText(QStringLiteral("DACL 已提交，但回读失败：%1")).arg(winError(status)), ks::ui::StatusRole::Warning);
-                return;
-            }
-            m_baseline = observed;
-            m_owner->setText(sddl(reinterpret_cast<PSECURITY_DESCRIPTOR>(observed.data()), OWNER_SECURITY_INFORMATION));
-            m_group->setText(sddl(reinterpret_cast<PSECURITY_DESCRIPTOR>(observed.data()), GROUP_SECURITY_INFORMATION));
-            const QString actual = sddl(reinterpret_cast<PSECURITY_DESCRIPTOR>(observed.data()), DACL_SECURITY_INFORMATION);
-            m_original->setRawText(actual);
-            m_edit->setRawText(actual);
-            setStatus(m_status, actual == requested ? trText(QStringLiteral("DACL 已应用并回读一致。"))
-                : trText(QStringLiteral("DACL 已提交，但回读内容与请求不同；已显示实际结果。")),
-                actual == requested ? ks::ui::StatusRole::Success : ks::ui::StatusRole::Warning);
         }
         QString m_path;
         REGSAM m_view = 0;
@@ -348,6 +469,10 @@ namespace
         CodeEditorWidget* m_edit = nullptr;     // 用户待提交 DACL，受 WRITE_DAC 控制。
         QLabel* m_status = nullptr;
         QPushButton* m_apply = nullptr;
+        QPushButton* m_refresh = nullptr;
+        bool m_writable = false;
+        bool m_busy = false;
+        std::unique_ptr<ks::ui::AsyncOperation> m_operation;
     };
 
     LSTATUS linkTraversalStatus(HKEY key)
@@ -956,8 +1081,9 @@ namespace
 
 void ShowRegistryKeyPermissions(QWidget* parent, const QString& path, int viewBits)
 {
-    PermissionsDialog dialog(parent, path, viewBits);
-    dialog.exec();
+    const QPointer<PermissionsDialog> dialog = new PermissionsDialog(parent, path, viewBits);
+    dialog->exec();
+    if (dialog) delete dialog.data();
 }
 
 void ShowRegistryOfflineHive(QWidget* parent)
