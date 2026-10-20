@@ -1529,9 +1529,19 @@ void KernelDock::openKnowledgeRoute(const QString& routeId)
 
 void KernelDock::ensureTabInitialized(const int tabIndex)
 {
-    const ks::ui::ScopedWidgetThemePreparation themePreparation(m_tabWidget); // 全部分支挂载完再准备首帧。
+    QWidget* const tabPage = m_tabWidget != nullptr ? m_tabWidget->widget(tabIndex) : nullptr;
+    if (tabPage == nullptr)
+    {
+        return;
+    }
+    // 已建页只消费真实主题请求，构造守卫由实际初始化分支持有。
+    if (tabPage->isVisible())
+    {
+        ks::ui::PrepareWidgetThemeBindingsForShow(tabPage);
+    }
     if (tabIndex == m_objectNamespaceTabIndex && !m_objectNamespaceTabInitialized)
     {
+        const ks::ui::ScopedWidgetThemePreparation themePreparation(tabPage);
         showTabInitializingProgress(tabIndex, kernelText("kernel.main.tab.object_namespace.title", QStringLiteral("对象命名空间")));
         initializeObjectNamespaceTab();
         m_objectNamespaceTabInitialized = true;
@@ -1542,6 +1552,7 @@ void KernelDock::ensureTabInitialized(const int tabIndex)
 
     if (tabIndex == m_atomTabIndex && !m_atomTabInitialized)
     {
+        const ks::ui::ScopedWidgetThemePreparation themePreparation(tabPage);
         showTabInitializingProgress(tabIndex, kernelText("kernel.main.progress.global_atom", QStringLiteral("全局原子表")));
         initializeAtomTableTab();
         m_atomTabInitialized = true;
@@ -1557,6 +1568,7 @@ void KernelDock::ensureTabInitialized(const int tabIndex)
             : -1;
         if (innerTabIndex == m_ntQueryTabIndex && !m_ntQueryTabInitialized)
         {
+            const ks::ui::ScopedWidgetThemePreparation themePreparation(tabPage);
             showTabInitializingProgress(
                 tabIndex,
                 kernelText("kernel.main.tab.nt_query.progress", QStringLiteral("历史 NtQuery")));
@@ -1584,6 +1596,7 @@ void KernelDock::ensureTabInitialized(const int tabIndex)
             : -1;
         if (innerTabIndex == m_inlineHookTabIndex && !m_inlineHookTabInitialized)
         {
+            const ks::ui::ScopedWidgetThemePreparation themePreparation(tabPage);
             showTabInitializingProgress(tabIndex, QStringLiteral("Inline Hook"));
             initializeInlineHookTab();
             m_inlineHookTabInitialized = true;
@@ -1592,6 +1605,7 @@ void KernelDock::ensureTabInitialized(const int tabIndex)
         }
         else if (innerTabIndex == m_iatEatHookTabIndex && !m_iatEatHookTabInitialized)
         {
+            const ks::ui::ScopedWidgetThemePreparation themePreparation(tabPage);
             showTabInitializingProgress(tabIndex, QStringLiteral("IAT/EAT"));
             initializeIatEatHookTab();
             m_iatEatHookTabInitialized = true;
@@ -1600,6 +1614,7 @@ void KernelDock::ensureTabInitialized(const int tabIndex)
         }
         else if (innerTabIndex == m_callbackEnumTabIndex && !m_callbackEnumTabInitialized)
         {
+            const ks::ui::ScopedWidgetThemePreparation themePreparation(tabPage);
             showTabInitializingProgress(
                 tabIndex,
                 kernelText("kernel.main.tab.callback_enum.title", QStringLiteral("回调遍历")));
@@ -1610,6 +1625,7 @@ void KernelDock::ensureTabInitialized(const int tabIndex)
         }
         else if (innerTabIndex == m_callbackTabIndex && !m_callbackTabInitialized)
         {
+            const ks::ui::ScopedWidgetThemePreparation themePreparation(tabPage);
             showTabInitializingProgress(
                 tabIndex,
                 kernelText("kernel.main.tab.callback.title", QStringLiteral("驱动回调")));
@@ -1622,6 +1638,7 @@ void KernelDock::ensureTabInitialized(const int tabIndex)
 
     if (tabIndex == m_timerDpcTabIndex && !m_timerDpcTabInitialized)
     {
+        const ks::ui::ScopedWidgetThemePreparation themePreparation(tabPage);
         showTabInitializingProgress(tabIndex, kernelText("kernel.main.tab.timer_dpc.title", QStringLiteral("定时器/DPC")));
         initializeTimerDpcTab();
         m_timerDpcTabInitialized = true;
@@ -1632,6 +1649,7 @@ void KernelDock::ensureTabInitialized(const int tabIndex)
 
     if (tabIndex == m_crossViewTabIndex && !m_crossViewTabInitialized)
     {
+        const ks::ui::ScopedWidgetThemePreparation themePreparation(tabPage);
         showTabInitializingProgress(tabIndex, kernelText("kernel.main.tab.cid.title", QStringLiteral("CID表")));
         initializeCrossViewTab();
         m_crossViewTabInitialized = true;
@@ -1641,6 +1659,7 @@ void KernelDock::ensureTabInitialized(const int tabIndex)
 
     if (tabIndex == m_ipcTabIndex && !m_ipcTabInitialized)
     {
+        const ks::ui::ScopedWidgetThemePreparation themePreparation(tabPage);
         showTabInitializingProgress(tabIndex, QStringLiteral("IPC"));
         initializeIpcTab();
         m_ipcTabInitialized = true;
@@ -1652,9 +1671,19 @@ void KernelDock::ensureTabInitialized(const int tabIndex)
 
 void KernelDock::ensureIoManagementTabInitialized(const int innerTabIndex)
 {
-    const ks::ui::ScopedWidgetThemePreparation themePreparation(m_ioManagementInnerTabWidget);
+    QWidget* const tabPage = m_ioManagementInnerTabWidget != nullptr
+        ? m_ioManagementInnerTabWidget->widget(innerTabIndex) : nullptr;
+    if (tabPage == nullptr)
+    {
+        return;
+    }
+    if (tabPage->isVisible())
+    {
+        ks::ui::PrepareWidgetThemeBindingsForShow(tabPage);
+    }
     if (innerTabIndex == m_ioSsdtTabIndex && !m_ssdtTabInitialized)
     {
+        const ks::ui::ScopedWidgetThemePreparation themePreparation(tabPage);
         showTabInitializingProgress(m_ioManagementTabIndex, QStringLiteral("SSDT"));
         initializeSsdtTab();
         m_ssdtTabInitialized = true;
@@ -1665,6 +1694,7 @@ void KernelDock::ensureIoManagementTabInitialized(const int innerTabIndex)
 
     if (innerTabIndex == m_ioShadowSsdtTabIndex && !m_shadowSsdtTabInitialized)
     {
+        const ks::ui::ScopedWidgetThemePreparation themePreparation(tabPage);
         showTabInitializingProgress(m_ioManagementTabIndex, QStringLiteral("ShadowSSDT"));
         initializeShadowSsdtTab();
         m_shadowSsdtTabInitialized = true;
